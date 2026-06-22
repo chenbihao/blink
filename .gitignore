@@ -1,0 +1,42 @@
+# Rust
+/target/
+Cargo.lock
+
+# Tauri
+src-tauri/target/
+
+# Node
+node_modules/
+package-lock.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# AI IDE
+.copilot/
+.cursor/
+.claude/
+.codex/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Build
+*.msi
+*.nsis
+*.exe
+*.dll
+
+# Local config
+*.local
+.env
+.env.local
+
+# Debug
+*.log
+*.pdb

@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Blink Settings</title>
+    <link rel="stylesheet" href="settings.css" />
+  </head>
+  <body>
+    <div class="container">
+      <!-- 侧边 Tab 导航 -->
+      <nav class="sidebar">
+        <div class="logo">Blink</div>
+        <button class="tab active" data-tab="general">通用</button>
+        <button class="tab" data-tab="hotkey">快捷键</button>
+        <button class="tab" data-tab="storage">存储</button>
+        <button class="tab" data-tab="debug">调试</button>
+        <button class="tab" data-tab="about">关于</button>
+      </nav>
+
+      <!-- Tab 内容 -->
+      <main class="content">
+        <!-- 通用 -->
+        <div id="general" class="panel active">
+          <h2>通用</h2>
+          <div class="setting-row">
+            <label>开机自启</label>
+            <input type="checkbox" id="auto-start" disabled />
+            <span class="hint">后续版本支持</span>
+          </div>
+          <div class="setting-row">
+            <label>语言</label>
+            <select id="language" disabled>
+              <option value="zh" selected>中文</option>
+              <option value="en">English</option>
+            </select>
+            <span class="hint">后续版本支持 i18n</span>
+          </div>
+        </div>
+
+        <!-- 快捷键 -->
+        <div id="hotkey" class="panel">
+          <h2>快捷键</h2>
+          <div class="setting-row">
+            <label>唤起快捷键</label>
+            <span class="value">右 Alt（单击）</span>
+          </div>
+          <div class="setting-row">
+            <label>tap 阈值</label>
+            <input type="range" id="tap-threshold" min="150" max="500" value="300" step="50" />
+            <span id="tap-threshold-value">300ms</span>
+          </div>
+          <div class="setting-row">
+            <label>看门狗 grace period</label>
+            <input type="range" id="grace-ms" min="200" max="1000" value="500" step="50" />
+            <span id="grace-ms-value">500ms</span>
+          </div>
+        </div>
+
+        <!-- 存储 -->
+        <div id="storage" class="panel">
+          <h2>存储</h2>
+          <div class="setting-row">
+            <label>历史记录</label>
+            <span id="history-count" class="value">加载中…</span>
+          </div>
+          <div class="setting-row">
+            <label>数据库路径</label>
+            <span id="db-path" class="value">-</span>
+          </div>
+          <div class="setting-row">
+            <button id="clear-history" class="btn-danger">清空历史记录</button>
+          </div>
+        </div>
+
+        <!-- 调试（Phase 4） -->
+        <div id="debug" class="panel">
+          <h2>调试</h2>
+          <div class="debug-grid">
+            <div class="debug-card">
+              <div class="debug-label">唤起延迟</div>
+              <div id="debug-invoke" class="debug-value">-</div>
+            </div>
+            <div class="debug-card">
+              <div class="debug-label">show 耗时</div>
+              <div id="debug-show" class="debug-value">-</div>
+            </div>
+            <div class="debug-card">
+              <div class="debug-label">focus 耗时</div>
+              <div id="debug-focus" class="debug-value">-</div>
+            </div>
+            <div class="debug-card">
+              <div class="debug-label">成功率</div>
+              <div id="debug-rate" class="debug-value">-</div>
+            </div>
+          </div>
+          <div class="setting-row">
+            <label>事件日志</label>
+            <textarea id="debug-log" readonly rows="10"></textarea>
+          </div>
+          <div class="setting-row">
+            <button id="clear-log" class="btn">清空日志</button>
+          </div>
+        </div>
+
+        <!-- 关于 -->
+        <div id="about" class="panel">
+          <h2>关于</h2>
+          <div class="setting-row">
+            <label>版本</label>
+            <span class="value">0.1.0 MVP</span>
+          </div>
+          <div class="setting-row">
+            <label>技术栈</label>
+            <span class="value">Rust 2024 + Tauri 2 + WebView2</span>
+          </div>
+          <div class="setting-row">
+            <label>许可</label>
+            <span class="value">MIT</span>
+          </div>
+        </div>
+      </main>
+    </div>
+    <script src="settings.js"></script>
+  </body>
+</html>

@@ -1,0 +1,126 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+}
+
+body {
+  font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  color: #cdd6f4;
+  user-select: none;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: #1e1e2e;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+
+/* ── 拖动区域 ─────────────────────────────────────────────────────────────── */
+
+#titlebar {
+  height: 4px;
+  cursor: grab;
+  flex-shrink: 0;
+}
+
+#titlebar:active {
+  cursor: grabbing;
+}
+
+/* ── 输入框 ─────────────────────────────────────────────────────────────────── */
+
+#query {
+  width: 100%;
+  padding: 16px 20px;
+  font-size: 18px;
+  background: transparent;
+  color: #cdd6f4;
+  border: none;
+  outline: none;
+  user-select: text;
+  caret-color: #89b4fa;
+  line-height: 1.4;
+}
+
+#query::placeholder {
+  color: #585b70;
+  font-weight: 300;
+}
+
+/* ── 结果列表 ───────────────────────────────────────────────────────────────── */
+
+#results {
+  list-style: none;
+  overflow-y: auto;
+  max-height: 0;
+  transition: max-height 0.15s ease-out;
+  scrollbar-width: thin;
+  scrollbar-color: #45475a transparent;
+}
+
+#results.has-items {
+  border-top: 1px solid #313244;
+  max-height: 320px;
+}
+
+#results::-webkit-scrollbar {
+  width: 6px;
+}
+
+#results::-webkit-scrollbar-thumb {
+  background: #45475a;
+  border-radius: 3px;
+}
+
+#results li {
+  padding: 10px 20px;
+  cursor: default;
+  font-size: 14px;
+  transition: background 0.08s ease;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.4;
+}
+
+#results li:first-child {
+  padding-top: 12px;
+}
+
+#results li:last-child {
+  padding-bottom: 12px;
+}
+
+#results li.active,
+#results li:hover {
+  background: #313244;
+}
+
+#results li.active {
+  background: #45475a;
+}
+
+#results li.calc-result {
+  color: #a6e3a1;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 15px;
+  font-weight: 500;
+}
+
+/* ── 调试面板（隐藏） ─────────────────────────────────────────────────────── */
+
+#debug {
+  display: none;
+}
