@@ -7,7 +7,7 @@ use tauri::Manager;
 /// 前端 ESC 调用：隐藏窗口。
 #[tauri::command]
 pub fn hide_window(app: tauri::AppHandle) {
-    crate::window_ctl::hide(&app, "ESC");
+    crate::window::hide(&app, "ESC");
 }
 
 /// 前端输入时调用：先尝试实时计算，失败再模糊搜索开始菜单（融合历史权重）。
@@ -43,7 +43,7 @@ pub async fn launch_app(app: tauri::AppHandle, lnk_path: String) -> Result<(), S
     let pool = app.state::<sqlx::SqlitePool>();
     crate::history::record_launch(&pool, &lnk_path).await;
     crate::search::launch(&lnk_path)?;
-    crate::window_ctl::hide(&app, "launch");
+    crate::window::hide(&app, "launch");
     Ok(())
 }
 
@@ -75,4 +75,105 @@ pub async fn resize_window(app: tauri::AppHandle, width: f64, height: f64) -> Re
         win.set_size(size).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+// ── 配置相关命令 ────────────────────────────────────────────────────────────────
+
+/// 获取完整配置。
+#[tauri::command]
+pub async fn get_config(app: tauri::AppHandle) -> crate::config::AppConfig {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::config::get_config(&pool).await
+}
+
+/// 更新快捷键配置。
+#[tauri::command]
+pub async fn update_hotkey(
+    app: tauri::AppHandle,
+    modifiers: Vec<String>,
+    key: String,
+    display: String,
+) -> Result<(), String> {
+    eprintln!("[cmd:update_hotkey] called key={}", key);
+    let pool = app.state::<sqlx::SqlitePool>();
+    let hotkey = crate::config::HotkeyConfig {
+        modifiers,
+        key,
+        display,
+    };
+    // 保存到数据库
+    crate::config::update_hotkey(&pool, hotkey.clone()).await?;
+    // 同时更新运行时热键配置
+    crate::hotkey::update_config(hotkey);
+    eprintln!("[cmd:update_hotkey] → Ok");
+    Ok(())
+}
+
+/// 更新 tap 阈值。
+#[tauri::command]
+pub async fn update_tap_threshold(app: tauri::AppHandle, threshold: u64) -> Result<(), String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::config::update_tap_threshold(&pool, threshold).await?;
+    // 同时更新运行时热键配置
+    crate::hotkey::update_tap_threshold(threshold);
+    Ok(())
+}
+
+/// 更新 grace period。
+#[tauri::command]
+pub async fn update_grace_period(app: tauri::AppHandle, period: u64) -> Result<(), String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::config::update_grace_period(&pool, period).await?;
+    // 同时更新运行时窗口配置
+    crate::window::update_grace_period(period);
+    Ok(())
+}
+
+/// 更新开机自启设置。
+#[tauri::command]
+pub async fn update_auto_start(app: tauri::AppHandle, auto_start: bool) -> Result<(), String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::config::update_auto_start(&pool, auto_start).await
+}
+
+/// 更新语言设置。
+#[tauri::command]
+pub async fn update_language(app: tauri::AppHandle, language: String) -> Result<(), String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::config::update_language(&pool, language).await
+}
+
+/// 恢复默认配置。
+#[tauri::command]
+pub async fn reset_config(app: tauri::AppHandle) -> Result<(), String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    let config = crate::config::AppConfig::default();
+    crate::config::save_config(&pool, &config).await
+}
+
+/// 录制快捷键（阻塞，直到用户按下组合键或超时）。
+#[tauri::command]
+pub async fn record_hotkey() -> Result<serde_json::Value, String> {
+    // 在阻塞线程中等待录制（事件由 ll_proc 喂入 recorder 状态机）
+    let result = tokio::task::spawn_blocking(|| {
+        crate::hotkey::record_hotkey_blocking()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    match result {
+        Some(record) => {
+            let val = serde_json::json!({
+                "modifiers": record.modifiers,
+                "key": record.key,
+                "display": record.display,
+            });
+            eprintln!("[cmd:record_hotkey] → Ok display={}", record.display);
+            Ok(val)
+        }
+        None => {
+            eprintln!("[cmd:record_hotkey] → Err (None)");
+            Err("录制超时或取消".to_string())
+        }
+    }
 }

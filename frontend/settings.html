@@ -25,16 +25,16 @@
           <h2>通用</h2>
           <div class="setting-row">
             <label>开机自启</label>
-            <input type="checkbox" id="auto-start" disabled />
-            <span class="hint">后续版本支持</span>
+            <input type="checkbox" id="auto-start" />
+            <span class="hint">配置已保存，功能待实现</span>
           </div>
           <div class="setting-row">
             <label>语言</label>
-            <select id="language" disabled>
+            <select id="language">
               <option value="zh" selected>中文</option>
               <option value="en">English</option>
             </select>
-            <span class="hint">后续版本支持 i18n</span>
+            <span class="hint">配置已保存，i18n 待实现</span>
           </div>
         </div>
 
@@ -43,7 +43,10 @@
           <h2>快捷键</h2>
           <div class="setting-row">
             <label>唤起快捷键</label>
-            <span class="value">右 Alt（单击）</span>
+            <div class="hotkey-input-wrapper">
+              <button id="hotkey-record" class="hotkey-btn" title="点击后按下快捷键">RightAlt</button>
+              <button id="hotkey-reset" class="btn-small" title="恢复默认">恢复默认</button>
+            </div>
           </div>
           <div class="setting-row">
             <label>tap 阈值</label>

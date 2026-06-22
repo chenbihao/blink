@@ -2,10 +2,11 @@
 
 mod calc;
 mod commands;
+mod config;
 mod history;
 mod hotkey;
 mod search;
-mod window_ctl;
+mod window;
 
 use tauri::{
     menu::{Menu, MenuItem},
@@ -16,12 +17,21 @@ use tauri::{
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            window_ctl::invoke(app);
+            window::invoke(app);
         }))
         .setup(|app| {
             // 初始化历史记录 SQLite
             let pool = tauri::async_runtime::block_on(history::init_db())
                 .expect("failed to init history db");
+
+            // 初始化配置
+            tauri::async_runtime::block_on(config::init_config(&pool))
+                .expect("failed to init config");
+
+            // 读取热键配置
+            let app_config = tauri::async_runtime::block_on(config::get_config(&pool));
+            let hotkey_config = app_config.hotkey.clone();
+
             app.manage(pool);
 
             // 主窗口启动即隐藏；注册焦点事件
@@ -29,7 +39,7 @@ fn main() {
                 let _ = w.hide();
                 w.on_window_event(move |event| {
                     if let WindowEvent::Focused(focused) = event {
-                        window_ctl::on_focused(*focused);
+                        window::on_focused(*focused);
                     }
                 });
             }
@@ -50,15 +60,15 @@ fn main() {
                 .build(app)?;
 
             // 失焦隐藏看门狗
-            window_ctl::start_watchdog(app.handle().clone());
+            window::start_watchdog(app.handle().clone());
 
-            // 右 Alt tap → 唤起窗口
+            // 启动热键监听（使用配置的快捷键）
             let app_handle = app.handle().clone();
-            let mut hotkey_rx = hotkey::start();
+            let mut hotkey_rx = hotkey::start(hotkey_config, app_config.tap_threshold);
             tauri::async_runtime::spawn(async move {
                 while let Some(ev) = hotkey_rx.recv().await {
                     match ev {
-                        hotkey::HotkeyEvent::Tap(_) => window_ctl::invoke(&app_handle),
+                        hotkey::HotkeyEvent::Tap(_) => window::invoke(&app_handle),
                     }
                 }
             });
@@ -71,7 +81,15 @@ fn main() {
             commands::launch_app,
             commands::get_storage_info,
             commands::clear_history,
-            commands::resize_window
+            commands::resize_window,
+            commands::get_config,
+            commands::update_hotkey,
+            commands::update_tap_threshold,
+            commands::update_grace_period,
+            commands::update_auto_start,
+            commands::update_language,
+            commands::reset_config,
+            commands::record_hotkey
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

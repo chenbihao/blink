@@ -201,3 +201,64 @@ h2 {
   font-family: ui-monospace, Consolas, monospace;
   color: #a6e3a1;
 }
+
+/* ── 快捷键输入 ─────────────────────────────────────────────────────────────── */
+
+.hotkey-input-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.hotkey-btn {
+  background: #313244;
+  color: #cdd6f4;
+  border: 1px solid #45475a;
+  border-radius: 6px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-family: ui-monospace, Consolas, monospace;
+  cursor: pointer;
+  transition: all 0.15s;
+  min-width: 160px;
+  text-align: center;
+}
+
+.hotkey-btn:hover {
+  background: #45475a;
+  border-color: #585b70;
+}
+
+.hotkey-btn.recording {
+  background: #45273a;
+  border-color: #f38ba8;
+  color: #f38ba8;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.hotkey-btn:disabled,
+.btn-small:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+.btn-small {
+  background: #313244;
+  color: #a6adc8;
+  border: 1px solid #45475a;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.btn-small:hover {
+  background: #45475a;
+  color: #cdd6f4;
+}

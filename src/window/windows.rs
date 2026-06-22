@@ -1,10 +1,4 @@
-//! 悬浮窗口显隐与焦点控制。
-//!
-//! 失焦检测采用「常驻看门狗轮询前台窗口」而非纯事件驱动：
-//! - 不依赖 WM_ACTIVATE(deactivate)，能覆盖 IDEA 终端子进程等不发失焦通知的窗口；
-//! - invoke 后 500ms grace period 覆盖焦点抖动（show → 获焦 → 立即丢焦 的常见时序）。
-//!
-//! 状态机：Hidden(隐藏) → Showing(已 show，等获焦) → Visible(已获焦，看门狗生效)。
+//! Windows 平台特定的窗口控制实现：Win32 API。
 
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::OnceLock;
@@ -21,12 +15,13 @@ use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GetForegroundWindow, 
 const ST_HIDDEN: u8 = 0;
 const ST_VISIBLE: u8 = 1;
 
-/// invoke 后看门狗不触发隐藏的 grace period（覆盖焦点抖动）。
-const GRACE_MS: u64 = 500;
+/// 默认 grace period。
+const DEFAULT_GRACE_MS: u64 = 500;
 
 static STATE: AtomicU8 = AtomicU8::new(ST_HIDDEN);
 static START: OnceLock<Instant> = OnceLock::new();
 static INVOKE_AT: AtomicU64 = AtomicU64::new(0);
+static GRACE_MS: AtomicU64 = AtomicU64::new(DEFAULT_GRACE_MS);
 
 /// 程序启动以来的毫秒数（单调时钟，用于 grace period 计算）。
 fn elapsed_ms() -> u64 {
@@ -51,9 +46,10 @@ pub fn invoke(app: &AppHandle) {
     // 立即进入 VISIBLE：set_focus() 不保证立即生效（Windows 反偷焦保护），
     // 如果卡在 SHOWING 态等 on_focused(true)，用户点其他窗口时不会触发隐藏。
     let now = elapsed_ms();
+    let grace_ms = GRACE_MS.load(Ordering::SeqCst);
     INVOKE_AT.store(now, Ordering::SeqCst);
     STATE.store(ST_VISIBLE, Ordering::SeqCst);
-    eprintln!("[ctl {}] invoke: state → VISIBLE, show + set_focus (watchdog grace {GRACE_MS}ms)", now_str());
+    eprintln!("[ctl {}] invoke: state → VISIBLE, show + set_focus (watchdog grace {grace_ms}ms)", now_str());
     let _ = win.show();
     let _ = win.set_focus();
     let _ = app.emit("blink://shown", ());
@@ -89,8 +85,9 @@ pub fn start_watchdog(app: AppHandle) {
             if STATE.load(Ordering::SeqCst) != ST_VISIBLE {
                 continue;
             }
+            let grace_ms = GRACE_MS.load(Ordering::SeqCst);
             let since_invoke = elapsed_ms() - INVOKE_AT.load(Ordering::SeqCst);
-            if since_invoke < GRACE_MS {
+            if since_invoke < grace_ms {
                 continue;
             }
             let fg = unsafe { GetForegroundWindow() };
@@ -100,6 +97,11 @@ pub fn start_watchdog(app: AppHandle) {
             }
         }
     });
+}
+
+/// 更新 grace period（线程安全）。
+pub fn update_grace_period(period: u64) {
+    GRACE_MS.store(period, Ordering::SeqCst);
 }
 
 /// 前台窗口是否为我们的主窗口（拿不到窗口/句柄时保守返回 true，避免误隐藏）。

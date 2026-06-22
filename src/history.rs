@@ -30,6 +30,17 @@ pub async fn init_db() -> Result<SqlitePool, String> {
     .await
     .map_err(|e| e.to_string())?;
 
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS config (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at INTEGER NOT NULL DEFAULT 0
+        )",
+    )
+    .execute(&pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
     Ok(pool)
 }
 
@@ -67,6 +78,41 @@ pub async fn count(pool: &SqlitePool) -> i64 {
 /// 清空历史记录。
 pub async fn clear(pool: &SqlitePool) {
     let _ = sqlx::query("DELETE FROM history").execute(pool).await;
+}
+
+// ── 配置相关函数 ────────────────────────────────────────────────────────────────
+
+/// 获取配置值。
+pub async fn get_config(pool: &SqlitePool, key: &str) -> Option<String> {
+    let row: (String,) = sqlx::query_as("SELECT value FROM config WHERE key = ?1")
+        .bind(key)
+        .fetch_optional(pool)
+        .await
+        .ok()??;
+    Some(row.0)
+}
+
+/// 设置配置值（存在则更新，不存在则插入）。
+pub async fn set_config(pool: &SqlitePool, key: &str, value: &str) {
+    let now = chrono::Utc::now().timestamp();
+    let _ = sqlx::query(
+        "INSERT INTO config (key, value, updated_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at = ?3",
+    )
+    .bind(key)
+    .bind(value)
+    .bind(now)
+    .execute(pool)
+    .await;
+}
+
+/// 获取所有配置。
+pub async fn get_all_config(pool: &SqlitePool) -> HashMap<String, String> {
+    let rows: Vec<(String, String)> = sqlx::query_as("SELECT key, value FROM config")
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+    rows.into_iter().collect()
 }
 
 /// SQLite 文件路径字符串（供前端显示）。
