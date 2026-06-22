@@ -71,6 +71,12 @@ function applyConfigToUI(config) {
   if (language && config.language) {
     language.value = config.language;
   }
+
+  // 日志级别
+  const logLevel = document.getElementById("log-level");
+  if (logLevel && config.log_level) {
+    logLevel.value = config.log_level;
+  }
 }
 
 // ── 快捷键录制（使用后端 rdev）─────────────────────────────────────────────────
@@ -218,29 +224,45 @@ if (languageSelect) {
   });
 }
 
-// ── 调试面板 ─────────────────────────────────────────────────────────────────
+// ── 日志 ─────────────────────────────────────────────────────────────────────
 
-const debugLog = document.getElementById("debug-log");
-let logLines = [];
+const logLevelSelect = document.getElementById("log-level");
+if (logLevelSelect) {
+  logLevelSelect.addEventListener("change", async (e) => {
+    try {
+      await invoke("update_log_level", { level: e.target.value });
+      if (currentConfig) currentConfig.log_level = e.target.value;
+    } catch (err) {
+      console.error("update_log_level failed:", err);
+    }
+  });
+}
 
-TAU?.event?.listen("blink://debug", (e) => {
-  const d = e.payload || {};
-  document.getElementById("debug-invoke").textContent = d.invoke_ms != null ? `${d.invoke_ms}ms` : "-";
-  document.getElementById("debug-show").textContent = d.show_ms != null ? `${d.show_ms}ms` : "-";
-  document.getElementById("debug-focus").textContent = d.focus_ms != null ? `${d.focus_ms}ms` : "-";
-  document.getElementById("debug-rate").textContent = d.success_rate ?? "-";
-
-  const ts = new Date().toLocaleTimeString("zh-CN", { hour12: false });
-  logLines.push(`[${ts}] invoke=${d.invoke_ms ?? "-"}ms show=${d.show_ms ?? "-"}ms focus=${d.focus_ms ?? "-"}ms`);
-  if (logLines.length > 200) logLines.shift();
-  debugLog.value = logLines.join("\n");
-  debugLog.scrollTop = debugLog.scrollHeight;
+document.getElementById("open-log-file")?.addEventListener("click", async () => {
+  try {
+    await invoke("open_log_file");
+  } catch (e) {
+    console.error("open_log_file failed:", e);
+  }
 });
 
-document.getElementById("clear-log")?.addEventListener("click", () => {
-  logLines = [];
-  debugLog.value = "";
+document.getElementById("open-log-dir")?.addEventListener("click", async () => {
+  try {
+    await invoke("open_log_dir");
+  } catch (e) {
+    console.error("open_log_dir failed:", e);
+  }
 });
+
+async function loadLogInfo() {
+  try {
+    const info = await invoke("get_log_info");
+    const el = document.getElementById("log-file-path");
+    if (el) el.textContent = info.current_file || "-";
+  } catch (e) {
+    console.error("loadLogInfo failed:", e);
+  }
+}
 
 // ── 存储面板 ─────────────────────────────────────────────────────────────────
 
@@ -265,3 +287,4 @@ document.getElementById("clear-history")?.addEventListener("click", async () => 
 
 loadConfig();
 loadStorageInfo();
+loadLogInfo();

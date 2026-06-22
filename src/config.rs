@@ -29,6 +29,11 @@ impl Default for HotkeyConfig {
     }
 }
 
+/// 日志级别默认值（旧配置无此字段时用 serde default 补，不丢其他配置）。
+fn default_log_level() -> String {
+    "error".to_string()
+}
+
 /// 应用配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -42,6 +47,9 @@ pub struct AppConfig {
     pub auto_start: bool,
     /// 语言（zh/en）
     pub language: String,
+    /// 日志级别（error/info/debug）
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
 }
 
 impl Default for AppConfig {
@@ -52,6 +60,7 @@ impl Default for AppConfig {
             grace_period: 500,
             auto_start: false,
             language: "zh".to_string(),
+            log_level: "error".to_string(),
         }
     }
 }
@@ -116,6 +125,13 @@ pub async fn update_auto_start(pool: &SqlitePool, auto_start: bool) -> Result<()
 pub async fn update_language(pool: &SqlitePool, language: String) -> Result<(), String> {
     let mut config = get_config(pool).await;
     config.language = language;
+    save_config(pool, &config).await
+}
+
+/// 更新日志级别。
+pub async fn update_log_level(pool: &SqlitePool, level: String) -> Result<(), String> {
+    let mut config = get_config(pool).await;
+    config.log_level = level;
     save_config(pool, &config).await
 }
 

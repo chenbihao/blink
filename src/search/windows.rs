@@ -53,3 +53,18 @@ fn scan_dir(dir: &PathBuf, entries: &mut Vec<AppEntry>) {
 pub fn launch(lnk_path: &str) -> Result<(), String> {
     open::that(lnk_path).map_err(|e| e.to_string())
 }
+
+/// 开始菜单两个根目录(用户 / 系统)的修改时间，用于缓存失效检测。
+pub fn roots_modified() -> Vec<Option<std::time::SystemTime>> {
+    let mut roots = Vec::new();
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        roots.push(PathBuf::from(appdata).join("Microsoft/Windows/Start Menu/Programs"));
+    }
+    if let Ok(program_data) = std::env::var("ProgramData") {
+        roots.push(PathBuf::from(program_data).join("Microsoft/Windows/Start Menu/Programs"));
+    }
+    roots
+        .into_iter()
+        .map(|p| std::fs::metadata(&p).ok().and_then(|m| m.modified().ok()))
+        .collect()
+}

@@ -92,15 +92,15 @@ pub fn record_hotkey_blocking() -> Option<RecordResult> {
     // 阻塞等待结果(超时 10s,与前端文案「10秒超时」一致)。
     let result = match rx.recv_timeout(Duration::from_secs(10)) {
         Ok(RecordOutcome::Recorded(r)) => {
-            eprintln!("[recorder:blocking] recv Recorded key={}", r.key);
+            tracing::debug!("recorder: recv Recorded key={}", r.key);
             Some(r)
         }
         Ok(RecordOutcome::Cancelled) => {
-            eprintln!("[recorder:blocking] recv Cancelled");
+            tracing::debug!("recorder: recv Cancelled");
             None
         }
         Err(e) => {
-            eprintln!("[recorder:blocking] recv Err {:?}", e);
+            tracing::warn!("recorder: recv Err {:?}", e);
             None
         }
     };
@@ -209,15 +209,12 @@ pub fn drop_modifier(name: &str) {
 
 /// 完成录制:发送结果并复位 `recording` 标志。
 fn finish(state: &'static RecorderState, outcome: RecordOutcome) {
-    let mut sent = false;
     if let Ok(mut slot) = state.sender.lock() {
         if let Some(tx) = slot.take() {
             let _ = tx.send(outcome);
-            sent = true;
         }
     }
     state.recording.store(false, Ordering::Release);
-    eprintln!("[recorder:finish] sent={}", sent);
 }
 
 /// 检查是否为单独的修饰键快捷键(如右 Alt、右 Ctrl、右 Shift、Win)。

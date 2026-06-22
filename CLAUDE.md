@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Blink 是一个 Windows 全局快捷入口，不是启动器，是「Universal Action Layer（统一操作层）」。终极目标是感知用户上下文、主动推荐动作，让任何操作比原来的路径更快。
 
-当前处于 **0.1 MVP** 阶段，专注验证基础交互的可靠性，而非功能数量。
+当前处于 **0.2** 阶段：0.1 MVP（基础交互 + 搜索 + 配置）已完成，0.2 进行核心服务化 + 多路搜索 + 插件系统的架构演进。**架构设计文档见 `production/0.2-core-plugin-design.md`（改核心前必读）。**
 
 ## Core Principle（最重要）
 
@@ -23,22 +23,22 @@ Blink 是一个 Windows 全局快捷入口，不是启动器，是「Universal A
 | 常驻内存 | < 300MB（Tauri + WebView2 基线约 80-150MB） |
 | 输入焦点成功率 | > 99.9% |
 
-## MVP Priority Levels
+## Version Status
 
-| 级别 | 验证目标 | 当前状态 |
+| 版本 | 内容 | 状态 |
 |---|---|---|
-| **P0** | 基础交互可靠性（热键、窗口、焦点、IME） | ✅ 已完成 |
-| **P1** | 搜索能力（应用搜索、计算、历史权重） | ✅ 已完成 |
-| **P2** | 插件系统（独立进程 + stdin/stdout JSON） | ⬜ 待开发 |
-| **P3** | AI 能力（规则 → 本地模型 → 云模型逐级降级） | ⬜ 待开发 |
-| **P4** | 语音（VAD + STT） | ⬜ 待开发 |
+| **0.1** | P0 基础交互（热键/窗口/焦点/IME）+ P1 搜索（应用/计算/历史权重）+ 配置系统/设置页/热键录制 | ✅ |
+| **0.2.0** | 0.1 收尾：搜索缓存、开机自启、tracing 日志、窗口定位读实际尺寸、文档同步 | ✅ |
+| **0.2.1** | Service 骨架（现有模块重构进 Service 框架，功能零变化） | ⬜ |
+| **0.2.2** | SearchService + SearchEngine trait + 渐进式多路搜索（sync/async 双 lane） | ⬜ |
+| **0.3+** | 插件系统 / 意图引擎（见设计文档 §8） | ⬜ |
 
 ## Build & Run
 
 ```bash
-# 环境要求：Rust 1.75+ (edition 2024)、MSVC Build Tools、WebView2 Runtime
+# 环境要求：Rust（edition 2024）、MSVC Build Tools、WebView2 Runtime
 
-# 开发运行（debug 模式，控制台有 eprintln 日志）
+# 开发运行（debug 模式，控制台 tracing 日志，默认 DEBUG 级）
 cargo run
 
 # 打包
@@ -54,41 +54,54 @@ cargo tauri build
 
 ### Rust 后端 (`src/`)
 
+平台相关模块已拆分为 `mod.rs`（平台接口 + 通用逻辑）+ `windows.rs`（Windows 实现），为多平台预留（trait 抽象见各模块 TODO「方案 B」）。
+
 | 文件 | 职责 |
 |---|---|
-| `main.rs` | Tauri 初始化、托盘菜单、启动热键监听和看门狗 |
-| `commands.rs` | Tauri command 层 — 前端 `invoke()` 的入口，轻量编排，不含业务实现 |
-| `hotkey.rs` | 全局右 Alt 热键，`WH_KEYBOARD_LL` 低级键盘钩子 + tap/hold 状态机 |
-| `window_ctl.rs` | 窗口显隐控制 + 常驻看门狗轮询前台窗口实现失焦检测 |
-| `search.rs` | 扫描开始菜单 `.lnk` 文件 + `nucleo` fuzzy 匹配 + `pinyin` 拼音首字母 |
-| `calc.rs` | `evalexpr` 实时计算，预处理整数转浮点避免截断 |
-| `history.rs` | SQLite (`sqlx`) 存储启动历史，频率加权影响搜索排序 |
+| `main.rs` | Tauri 初始化、托盘菜单、tracing subscriber、启动热键/看门狗/搜索缓存/自启同步 |
+| `commands.rs` | Tauri command 层 — 前端 `invoke()` 入口，轻量编排 |
+| `config.rs` | 配置管理：`AppConfig`（快捷键/tap阈值/grace/自启/语言）SQLite 持久化 |
+| `hotkey/` | 全局热键：`mod.rs`(tap/hold 状态机) + `windows.rs`(WH_KEYBOARD_LL) + `recorder.rs`(快捷键录制状态机) |
+| `window/` | 窗口控制：`mod.rs`(接口) + `windows.rs`(显隐/看门狗失焦/显示器定位) |
+| `search/` | 应用搜索：`mod.rs`(AppEntry/fuzzy/拼音首字母) + `windows.rs`(扫描开始菜单 .lnk) + `cache.rs`(结果缓存) |
+| `calc.rs` | `evalexpr` 实时计算，整数转浮点避免截断 |
+| `history.rs` | SQLite 历史记录（频率加权）+ `config` 表 KV 读写 |
 
 ### 前端 (`frontend/`)
 
 纯静态文件，无构建步骤。`tauri.conf.json` 的 `frontendDist` 直接指向此目录。
 
-- `index.html` / `main.js` / `style.css` — 主搜索窗口
-- `settings.html` / `settings.js` / `settings.css` — 设置窗口（托盘菜单打开）
+- `index.html` / `main.js` / `style.css` — 主搜索窗口（弹性大小、键盘导航）
+- `settings.html` / `settings.js` / `settings.css` — 设置窗口（5 Tab：通用/快捷键/存储/调试/关于）
 
-前端通过 `window.__TAURI__.core.invoke()` 调用 Rust commands，通过 `TAU.event.listen()` 监听后端事件（`blink://shown`、`blink://hidden`、`blink://debug`）。
+前端通过 `window.__TAURI__.core.invoke()` 调用 Rust commands，通过 `TAU.event.listen()` 监听后端事件（`blink://shown`、`blink://hidden`；`blink://results` 为渐进式增量预留）。
 
 ### 关键设计决策
 
-**热键不吞键**：`hotkey.rs` 的 hook 回调全程 `CallNextHookEx` 放行，右 Alt 仍可作系统修饰键（组合键）。tap/hold 判定靠按压时长（≤300ms = tap）+ 期间是否出现其他键。这是架构级约束——做得差的产品在 keydown 就 `return 1` 吞掉右 Alt，导致右 Alt 无法再作系统修饰键。
+**热键不吞键**：`hotkey/` 的 hook 回调全程 `CallNextHookEx` 放行，右 Alt 仍可作系统修饰键。tap/hold 靠按压时长（≤tap_threshold）+ 期间是否出现其他键。架构级约束——做得差的产品在 keydown 就吞掉右 Alt。快捷键可配置（设置页录制）。
 
-**看门狗失焦检测**：`window_ctl.rs` 不依赖 `WM_ACTIVATE(deactivate)`，而是每 150ms 轮询 `GetForegroundWindow()`。invoke 后有 500ms grace period 覆盖焦点抖动。状态机：Hidden → Showing → Visible。选看门狗是因为某些窗口（如 IDEA 终端子进程）不发失焦通知。
+**看门狗失焦检测**：`window/` 不依赖 `WM_ACTIVATE(deactivate)`，每 150ms 轮询 `GetForegroundWindow()`。invoke 后有 grace period 覆盖焦点抖动。选看门狗是因为某些窗口（如 IDEA 终端子进程）不发失焦通知。
 
-**搜索双路匹配**：`search.rs` 同时对原始名和拼音首字母做 nucleo fuzzy 匹配，取最高分。历史 hit_count 通过 `ln(hit+1)*100` 加权。
+**搜索双路匹配**：`search/mod.rs` 同时对原始名和拼音首字母做 nucleo fuzzy，取最高分；历史 `ln(hit+1)*100` 加权。
 
-**窗口定位**：唤起时定位到前台应用所在显示器的正中央（物理像素计算，考虑 DPI 缩放）。
+**搜索缓存**：`search/cache.rs` 启动后台预扫开始菜单到内存，输入时命中缓存（不再每次重扫）；所有文件 IO 在 `spawn_blocking`；mtime 增量失效 + 定时强制刷新兜底深层变化。
+
+**配置系统**：`config.rs` 的 `AppConfig` 存 SQLite `config` 表；设置页改快捷键（含录制）/tap阈值/grace/自启/语言，运行时热更新。
+
+**开机自启**：`tauri-plugin-autostart`（注册表 Run 项），`update_auto_start` 写注册表 + 启动时按配置同步确保一致。
+
+**统一日志**：`tracing` 替代散落的 eprintln；debug 构建 DEBUG / release INFO；带模块 target。
+
+**窗口定位**：唤起时读窗口实际物理尺寸（`outer_size`），定位到前台应用所在显示器正中央。
 
 ## Tauri Commands（前端 invoke 入口）
 
-- `search_apps(query)` — 先尝试计算，失败则 fuzzy 搜索
+- `search_apps(query)` — 先计算，失败则 fuzzy 搜索（命中缓存）
 - `launch_app(lnk_path)` — 打开 lnk 并记录历史
 - `hide_window()` — 隐藏主窗口
 - `resize_window(width, height)` — 弹性窗口调整
+- `get_config()` / `update_hotkey` / `update_tap_threshold` / `update_grace_period` / `update_auto_start` / `update_language` / `reset_config` — 配置读写
+- `record_hotkey()` — 阻塞录制快捷键（spawn_blocking）
 - `get_storage_info()` / `clear_history()` — 设置页存储管理
 
 ## Adding a New Tauri Command
@@ -99,14 +112,26 @@ cargo tauri build
 
 ## Data Storage
 
-SQLite 数据库路径：`%APPDATA%\blink\blink.db`，单表 `history(lnk_path, hit_count, last_used_at)`。
+SQLite `%APPDATA%\blink\blink.db`：
+- `history(lnk_path, hit_count, last_used_at)` — 启动历史，频率加权
+- `config(key, value, updated_at)` — 配置 KV（`app_config` 键存 AppConfig JSON）
 
-## Roadmap Context
+## Design Docs
 
-后续演进方向（了解即可，不要提前实现）：
+- `production/Windows Universal Launcher MVP.md` — 产品/架构总纲（P0-P4、§12 待决策项、§13 已确认方案）
+- `production/0.2-core-plugin-design.md` — **0.2 核心+插件架构设计**（Service/SearchEngine/Plugin/Intent，渐进式搜索，stdio 协议，子版本分期）
+- `production/Todo-0.1mvp.md` — 0.1 实现总结与后期待办
 
-- **搜索引擎拆分**：当前每次调用都重新扫描开始菜单，后续拆分为独立引擎（开始菜单/文件/意图识别），每个引擎独立缓存/增量更新
-- **插件系统**：独立进程 + stdin/stdout JSON 协议，manifest 声明 triggers/permissions/capabilities
-- **AI 路由**：规则优先 → 本地小模型（可选重型插件）→ 云模型逐级降级，不要默认把所有输入发给 AI
-- **Context 层**：感知前台应用/选中文本/剪贴板等环境信息，用于意图识别和主动建议
-- **配置持久化**：TOML 配置文件（`%APPDATA%\blink\config.toml`）+ SQLite 业务数据 + Windows Credential Manager 敏感凭证
+## Roadmap Context（了解即可，不要提前实现）
+
+- **搜索引擎拆分**：✅ 缓存已完成（0.2.0）；引擎 trait + 多路融合排序见设计文档 §2（0.2.2）
+- **渐进式搜索**：sync/async 双 lane 首结果优先，见设计文档 §2.3（0.2.2）
+- **插件系统**：独立进程 + stdin/stdout JSON + manifest，见设计文档 §3（0.3+）
+- **意图引擎**：规则（keyword 独占路由）→ 向量 → AI，见设计文档 §4（0.3+）
+- **Context 层**：感知前台应用/选中文本/剪贴板，见 MVP.md §13.7
+- **配置持久化**：当前 SQLite config 表；后续可迁 TOML（MVP.md §13.5）
+
+## Work Conventions（用户约定）
+
+- **可选行为优先配置化**：默认值用户可能想改的，做成配置项 + 给合理默认；纯内部参数不暴露。详见 `production/0.2-core-plugin-design.md` §6。
+- **自用阶段**：权限模型暂不实现（插件 permissions 不解析），产品化时再补。

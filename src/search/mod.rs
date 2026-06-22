@@ -39,7 +39,11 @@ pub struct AppEntry {
 mod windows;
 
 #[cfg(target_os = "windows")]
-pub use windows::{scan_start_menu, launch};
+pub use windows::{scan_start_menu, launch, roots_modified};
+
+// 搜索结果缓存(引擎内部数据,为阶段三 StartMenuEngine 铺路,见 0.2 设计 §2.4)
+mod cache;
+pub use cache::{init, get_entries};
 
 // 通用逻辑
 

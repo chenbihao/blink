@@ -4,13 +4,16 @@ use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use chrono::Local;
 use tokio::time::sleep;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GetForegroundWindow, GA_ROOT};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CallWindowProcW, GetAncestor, GetForegroundWindow, SetWindowLongPtrW, GA_ROOT, GWLP_WNDPROC,
+    WNDPROC,
+};
 
 const ST_HIDDEN: u8 = 0;
 const ST_VISIBLE: u8 = 1;
@@ -26,11 +29,6 @@ static GRACE_MS: AtomicU64 = AtomicU64::new(DEFAULT_GRACE_MS);
 /// 程序启动以来的毫秒数（单调时钟，用于 grace period 计算）。
 fn elapsed_ms() -> u64 {
     START.get_or_init(Instant::now).elapsed().as_millis() as u64
-}
-
-/// 实时时分秒毫秒（用于日志）。
-fn now_str() -> String {
-    Local::now().format("%H:%M:%S%.3f").to_string()
 }
 
 /// 唤起：定位到前台应用所在显示器中上部 → show → set_focus → 通知前端聚焦输入框。
@@ -49,7 +47,7 @@ pub fn invoke(app: &AppHandle) {
     let grace_ms = GRACE_MS.load(Ordering::SeqCst);
     INVOKE_AT.store(now, Ordering::SeqCst);
     STATE.store(ST_VISIBLE, Ordering::SeqCst);
-    eprintln!("[ctl {}] invoke: state → VISIBLE, show + set_focus (watchdog grace {grace_ms}ms)", now_str());
+    tracing::debug!(grace_ms, "invoke: state → VISIBLE, show + set_focus");
     let _ = win.show();
     let _ = win.set_focus();
     let _ = app.emit("blink://shown", ());
@@ -59,7 +57,7 @@ pub fn invoke(app: &AppHandle) {
 pub fn hide(app: &AppHandle, reason: &str) {
     if let Some(win) = app.get_webview_window("main") {
         STATE.store(ST_HIDDEN, Ordering::SeqCst);
-        eprintln!("[ctl {}] hide: state → HIDDEN ({reason})", now_str());
+        tracing::debug!(reason, "hide: state → HIDDEN");
         let _ = win.hide();
         let _ = app.emit("blink://hidden", ());
     }
@@ -69,10 +67,10 @@ pub fn hide(app: &AppHandle, reason: &str) {
 /// 失焦不在此时处理，交给看门狗轮询前台窗口。
 pub fn on_focused(focused: bool) {
     let st = STATE.load(Ordering::SeqCst);
-    eprintln!("[ctl {}] on_focused({focused}): state={st}", now_str());
+    tracing::debug!(focused, st, "on_focused");
     if focused {
         STATE.store(ST_VISIBLE, Ordering::SeqCst);
-        eprintln!("[ctl {}] on_focused: state → VISIBLE, watchdog armed", now_str());
+        tracing::debug!("on_focused: state → VISIBLE, watchdog armed");
     }
 }
 
@@ -92,7 +90,7 @@ pub fn start_watchdog(app: AppHandle) {
             }
             let fg = unsafe { GetForegroundWindow() };
             if !is_self_foreground(&app, fg) {
-                eprintln!("[ctl {}] watchdog: hide! fg=0x{:x}, since_invoke={since_invoke}ms", now_str(), fg.0 as isize);
+                tracing::info!(since_invoke, "watchdog: hide! fg=0x{:x}", fg.0 as isize);
                 hide(&app, "watchdog");
             }
         }
@@ -102,6 +100,44 @@ pub fn start_watchdog(app: AppHandle) {
 /// 更新 grace period（线程安全）。
 pub fn update_grace_period(period: u64) {
     GRACE_MS.store(period, Ordering::SeqCst);
+}
+
+/// 主窗口当前是否处于可见态（供快捷键 toggle 判断）。
+pub fn is_visible() -> bool {
+    STATE.load(Ordering::SeqCst) == ST_VISIBLE
+}
+
+const WM_SYSCOMMAND: u32 = 0x0112;
+const SC_KEYMENU: usize = 0xF100;
+
+/// 原始窗口过程（替换后存回，转交原逻辑用）。
+static ORIGINAL_WNDPROC: OnceLock<isize> = OnceLock::new();
+
+/// 拦截 Alt+Space 系统菜单（替换窗口过程，吞掉 SC_KEYMENU）。主窗口虽无边框仍响应
+/// Alt+Space 弹出移动/最大化菜单，前端 preventDefault 与去 WS_SYSMENU 都无效，
+/// 只能在窗口过程层拦截 WM_SYSCOMMAND。仅作用于主窗口。
+pub fn install_sysmenu_blocker(hwnd: HWND) {
+    unsafe {
+        let original = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, sysmenu_block_proc as *const () as usize as isize);
+        let _ = ORIGINAL_WNDPROC.set(original);
+    }
+}
+
+unsafe extern "system" fn sysmenu_block_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if msg == WM_SYSCOMMAND && (wparam.0 as usize & 0xFFF0) == SC_KEYMENU {
+        return LRESULT(0);
+    }
+    let original = ORIGINAL_WNDPROC.get().copied().unwrap_or(0);
+    // edition 2024：unsafe fn 内的 unsafe 操作需显式 unsafe block
+    unsafe {
+        let proc: WNDPROC = std::mem::transmute::<isize, WNDPROC>(original);
+        CallWindowProcW(proc, hwnd, msg, wparam, lparam)
+    }
 }
 
 /// 前台窗口是否为我们的主窗口（拿不到窗口/句柄时保守返回 true，避免误隐藏）。
@@ -120,11 +156,10 @@ fn is_self_foreground(app: &AppHandle, fg: windows::Win32::Foundation::HWND) -> 
 
 /// 计算窗口在前台应用所在显示器的位置：中上部居中（物理像素）。
 fn launcher_position(win: &WebviewWindow) -> Option<PhysicalPosition<i32>> {
-    // 逻辑尺寸须与 tauri.conf.json 一致；按 scale 转物理像素定位
-    let (lw, lh): (f64, f64) = (700.0, 60.0);
-    let scale = win.scale_factor().unwrap_or(1.0);
-    let w = (lw * scale) as i32;
-    let h = (lh * scale) as i32;
+    // 读窗口实际物理尺寸定位（与弹性 resize 同步，不再硬编码 700×60）
+    let size = win.outer_size().ok()?;
+    let w = size.width as i32;
+    let h = size.height as i32;
 
     unsafe {
         let fg = GetForegroundWindow();

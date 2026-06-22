@@ -25,4 +25,4 @@
 mod windows;
 
 #[cfg(target_os = "windows")]
-pub use windows::{invoke, hide, start_watchdog, on_focused, update_grace_period};
+pub use windows::{invoke, hide, start_watchdog, on_focused, update_grace_period, is_visible, install_sysmenu_blocker};

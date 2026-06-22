@@ -127,6 +127,24 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
+// 屏蔽修饰键(Alt/Meta)/功能键的系统默认行为
+// 防 Alt 激活宿主窗口系统菜单导致 WebView2 消息泵冻结（与 settings.js 录制同理）
+// 不阻止字母数字/方向键/Enter；Alt+数字选候选为后续功能，监听不受 preventDefault 影响
+document.addEventListener(
+  "keydown",
+  (e) => {
+    if (
+      e.key === "Alt" ||
+      e.key === "Meta" ||
+      /^F\d{1,2}$/.test(e.key) ||
+      (e.altKey && (e.key === " " || e.code === "Space"))
+    ) {
+      e.preventDefault();
+    }
+  },
+  true
+);
+
 // ── 调试面板（暂保留占位） ───────────────────────────────────────────────────
 
 (async () => {

@@ -26,7 +26,7 @@
           <div class="setting-row">
             <label>开机自启</label>
             <input type="checkbox" id="auto-start" />
-            <span class="hint">配置已保存，功能待实现</span>
+            <span class="hint">开机自动启动</span>
           </div>
           <div class="setting-row">
             <label>语言</label>
@@ -76,9 +76,32 @@
           </div>
         </div>
 
-        <!-- 调试（Phase 4） -->
+        <!-- 调试 -->
         <div id="debug" class="panel">
           <h2>调试</h2>
+
+          <div class="setting-row">
+            <label>日志级别</label>
+            <select id="log-level">
+              <option value="error" selected>error（仅错误）</option>
+              <option value="info">info</option>
+              <option value="debug">debug（详细）</option>
+            </select>
+            <span class="hint">切换立即生效，写入日志文件</span>
+          </div>
+
+          <div class="setting-row log-path-row">
+            <label>日志文件</label>
+            <span id="log-file-path" class="value">-</span>
+          </div>
+
+          <div class="setting-row">
+            <label>操作</label>
+            <button id="open-log-file" class="btn">打开日志</button>
+            <button id="open-log-dir" class="btn">打开文件夹</button>
+          </div>
+
+          <h3>性能统计 <span class="hint">（搁置，待实现）</span></h3>
           <div class="debug-grid">
             <div class="debug-card">
               <div class="debug-label">唤起延迟</div>
@@ -96,13 +119,6 @@
               <div class="debug-label">成功率</div>
               <div id="debug-rate" class="debug-value">-</div>
             </div>
-          </div>
-          <div class="setting-row">
-            <label>事件日志</label>
-            <textarea id="debug-log" readonly rows="10"></textarea>
-          </div>
-          <div class="setting-row">
-            <button id="clear-log" class="btn">清空日志</button>
           </div>
         </div>
 

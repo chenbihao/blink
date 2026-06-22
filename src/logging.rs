@@ -1,0 +1,109 @@
+//! 日志系统：文件轮转 + 控制台 + 动态级别（reload）。
+//!
+//! - 文件：%APPDATA%\blink\logs\，每日轮转，保留 7 天（启动时清理旧文件）。
+//! - 控制台：始终输出 stderr（release 无控制台时无害丢弃；debug 可见）。
+//! - 级别：EnvFilter + reload，默认 error，update_level 运行时切换（设置页触发）。
+
+use std::path::PathBuf;
+use std::sync::OnceLock;
+use std::time::{Duration, SystemTime};
+
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::filter::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+
+/// 日志保留天数
+const RETAIN_DAYS: u64 = 7;
+
+/// 非阻塞 writer 的 guard（必须保活到程序结束，否则可能丢末尾日志）
+static GUARD: OnceLock<WorkerGuard> = OnceLock::new();
+/// 动态级别切换（闭包包装 reload handle，避免暴露泛型类型）
+static RELOAD: OnceLock<Box<dyn Fn(&str) + Send + Sync>> = OnceLock::new();
+
+/// 初始化日志系统。level: error/info/debug。
+pub fn init(level: &str) {
+    let dir = log_dir();
+    std::fs::create_dir_all(&dir).ok();
+
+    // 每日轮转文件 appender（文件名 blink.YYYY-MM-DD.log，.log 后缀方便软件打开）
+    let file_appender = tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("blink")
+        .filename_suffix("log")
+        .build(&dir)
+        .expect("failed to build log appender");
+    let (writer, guard) = tracing_appender::non_blocking(file_appender);
+    let _ = GUARD.set(guard);
+
+    // 动态级别 filter（reload 可运行时改）
+    let filter = EnvFilter::new(parse_level(level));
+    let (filter_layer, handle) = tracing_subscriber::reload::Layer::new(filter);
+    let _ = RELOAD.set(Box::new(move |lvl: &str| {
+        let _ = handle.reload(EnvFilter::new(parse_level(lvl)));
+    }));
+
+    tracing_subscriber::registry()
+        .with(filter_layer)
+        // 文件：关闭 ANSI 颜色码（否则文件里是乱码方块）
+        .with(tracing_subscriber::fmt::layer().with_writer(writer).with_ansi(false))
+        // 控制台：保留 ANSI 彩色（release 无控制台时 stderr 丢弃，无害）
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .init();
+
+    clean_old_logs(&dir);
+}
+
+/// 运行时切换日志级别（设置页触发，立即生效）。
+pub fn update_level(level: &str) {
+    if let Some(f) = RELOAD.get() {
+        f(level);
+    }
+}
+
+/// 日志目录：%APPDATA%\blink\logs
+pub fn log_dir() -> PathBuf {
+    let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(appdata).join("blink").join("logs")
+}
+
+/// 当天日志文件路径（tracing-appender daily 格式：blink.log.YYYY-MM-DD）。
+pub fn current_log_file() -> PathBuf {
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    log_dir().join(format!("blink.{today}.log"))
+}
+
+/// 级别字符串归一化为 EnvFilter 指令（非法值降级 error）。
+fn parse_level(level: &str) -> String {
+    // 第三方库（sqlx/tauri）压到 warn，避免 query/asset 等 debug 噪音淹没 blink 自身日志
+    match level {
+        "debug" => "debug,sqlx=warn,tauri=warn",
+        "info" => "info,sqlx=warn,tauri=warn",
+        _ => "error",
+    }
+    .to_string()
+}
+
+/// 清理超过保留天数的旧日志（按文件 mtime，启动时执行）。
+fn clean_old_logs(dir: &PathBuf) {
+    let cutoff = SystemTime::now() - Duration::from_secs(60 * 60 * 24 * RETAIN_DAYS);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let is_log = entry
+            .file_name()
+            .to_str()
+            .map_or(false, |n| n.starts_with("blink.") && n.ends_with(".log"));
+        if !is_log {
+            continue;
+        }
+        if let Ok(meta) = entry.metadata() {
+            if let Ok(modified) = meta.modified() {
+                if modified < cutoff {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+}

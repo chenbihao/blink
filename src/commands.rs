@@ -27,7 +27,7 @@ pub async fn search_apps(query: String, app: tauri::AppHandle) -> Vec<crate::sea
         }];
     }
     // 走搜索（融合历史权重）
-    let entries = crate::search::scan_start_menu();
+    let entries = crate::search::get_entries().await;
     let pool = app.state::<sqlx::SqlitePool>();
     let history = crate::history::get_weights(&pool).await;
     crate::search::fuzzy_search(&query, &entries, &history, 10)
@@ -94,7 +94,6 @@ pub async fn update_hotkey(
     key: String,
     display: String,
 ) -> Result<(), String> {
-    eprintln!("[cmd:update_hotkey] called key={}", key);
     let pool = app.state::<sqlx::SqlitePool>();
     let hotkey = crate::config::HotkeyConfig {
         modifiers,
@@ -105,7 +104,7 @@ pub async fn update_hotkey(
     crate::config::update_hotkey(&pool, hotkey.clone()).await?;
     // 同时更新运行时热键配置
     crate::hotkey::update_config(hotkey);
-    eprintln!("[cmd:update_hotkey] → Ok");
+    tracing::debug!("update_hotkey: → Ok");
     Ok(())
 }
 
@@ -129,11 +128,19 @@ pub async fn update_grace_period(app: tauri::AppHandle, period: u64) -> Result<(
     Ok(())
 }
 
-/// 更新开机自启设置。
+/// 更新开机自启设置：存配置 + 真正注册/注销系统开机自启（注册表 Run 项）。
 #[tauri::command]
 pub async fn update_auto_start(app: tauri::AppHandle, auto_start: bool) -> Result<(), String> {
     let pool = app.state::<sqlx::SqlitePool>();
-    crate::config::update_auto_start(&pool, auto_start).await
+    crate::config::update_auto_start(&pool, auto_start).await?;
+    use tauri_plugin_autostart::ManagerExt;
+    let manager = app.autolaunch();
+    if auto_start {
+        manager.enable().map_err(|e| e.to_string())?;
+    } else {
+        manager.disable().map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// 更新语言设置。
@@ -141,6 +148,51 @@ pub async fn update_auto_start(app: tauri::AppHandle, auto_start: bool) -> Resul
 pub async fn update_language(app: tauri::AppHandle, language: String) -> Result<(), String> {
     let pool = app.state::<sqlx::SqlitePool>();
     crate::config::update_language(&pool, language).await
+}
+
+/// 更新日志级别（存配置 + 运行时 reload，立即生效）。
+#[tauri::command]
+pub async fn update_log_level(app: tauri::AppHandle, level: String) -> Result<(), String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::config::update_log_level(&pool, level.clone()).await?;
+    crate::logging::update_level(&level);
+    Ok(())
+}
+
+/// 打开当天日志文件（资源管理器中定位；文件不存在则打开文件夹）。
+#[tauri::command]
+pub fn open_log_file() -> Result<(), String> {
+    let path = crate::logging::current_log_file();
+    let arg = if path.exists() {
+        format!("/select,{}", path.display())
+    } else {
+        // 当天尚无日志（如 error 级未产生），直接打开文件夹
+        crate::logging::log_dir().display().to_string()
+    };
+    std::process::Command::new("explorer.exe")
+        .arg(arg)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 打开日志文件夹。
+#[tauri::command]
+pub fn open_log_dir() -> Result<(), String> {
+    std::process::Command::new("explorer.exe")
+        .arg(crate::logging::log_dir())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 获取日志路径信息（供设置页显示）。
+#[tauri::command]
+pub fn get_log_info() -> serde_json::Value {
+    serde_json::json!({
+        "dir": crate::logging::log_dir().to_string_lossy(),
+        "current_file": crate::logging::current_log_file().to_string_lossy(),
+    })
 }
 
 /// 恢复默认配置。
@@ -168,11 +220,11 @@ pub async fn record_hotkey() -> Result<serde_json::Value, String> {
                 "key": record.key,
                 "display": record.display,
             });
-            eprintln!("[cmd:record_hotkey] → Ok display={}", record.display);
+            tracing::debug!("record_hotkey: → Ok display={}", record.display);
             Ok(val)
         }
         None => {
-            eprintln!("[cmd:record_hotkey] → Err (None)");
+            tracing::warn!("record_hotkey: → Err (None)");
             Err("录制超时或取消".to_string())
         }
     }
