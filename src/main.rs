@@ -27,6 +27,38 @@ fn main() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        // 自定义协议：http://blink-icon.localhost/<url-encoded-path>（Windows）—— 按需懒加载应用图标 PNG。
+        // 前端 <img src> 直接引用，图标提取移出搜索热路径（见 search/icon.rs）。
+        .register_asynchronous_uri_scheme_protocol("blink-icon", |_ctx, request, responder| {
+            // path 段形如 "/C%3A%5C..."，去掉前导 '/' 后做 percent-decode 还原真实路径。
+            let raw = request.uri().path().trim_start_matches('/').to_string();
+            let path = percent_decode(&raw);
+            tracing::debug!(%path, "blink-icon: 收到图标请求");
+            tauri::async_runtime::spawn(async move {
+                let path_for_log = path.clone();
+                let icon = tauri::async_runtime::spawn_blocking(move || {
+                    search::icon::get_icon_png(&path)
+                })
+                .await
+                .ok()
+                .flatten();
+                let response = match icon {
+                    Some(bytes) => tauri::http::Response::builder()
+                        .status(200)
+                        .header("Content-Type", "image/png")
+                        .body(bytes)
+                        .unwrap(),
+                    None => {
+                        tracing::debug!(path = %path_for_log, "blink-icon: 未取到图标，返回 404");
+                        tauri::http::Response::builder()
+                            .status(404)
+                            .body(Vec::new())
+                            .unwrap()
+                    }
+                };
+                responder.respond(response);
+            });
+        })
         .setup(|app| {
             // 初始化历史记录 SQLite
             let pool = tauri::async_runtime::block_on(history::init_db())
@@ -149,4 +181,26 @@ fn open_settings(app: &tauri::AppHandle) {
         .min_inner_size(760.0, 520.0)
         .center()
         .build();
+}
+
+/// 最小 percent-decode：还原前端 `encodeURIComponent` 编码的图标路径。
+/// 仅处理 `%XX`，非法序列原样保留。
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }

@@ -53,6 +53,23 @@
 
 - 前端调试面板接入实时数据（invoke/show/focus 耗时 + 成功率）
 - 1000 次焦点统计脚本
+- **图标缓存无界增长**（`search/icon.rs` `ICON_CACHE`）：只增不减的 HashMap，每图标几 KB；
+  几百应用约几 MB，当前无害但违反「缓存」语义。后续可加 LRU 上限或随搜索缓存刷新一起清理。
+- ~~搜索响应延迟~~：已实测定位——后端 `search_apps` 仅 ~1ms（283 条，get_entries/weights/fuzzy 全亚毫秒），
+  瓶颈是前端 150ms 防抖，已下调至 40ms。clone entries 仅 0.09ms，无需 Arc 化。
+  剩余可选项：图标按可见项加载（当前一次性请求 top-10）。
+
+### 代码质量 / 待清理（review 9bab7fb 记录）
+
+- **热键 `ll_proc` 结构重构**：单函数 ~160 行塞满状态机逻辑，每加特殊处理都要重过整个机；
+  0.2.1 Service 化时拆成 `State::on_modifier_down/up`、`on_key_down/up`，并为纯逻辑
+  （`is_hotkey_match`、合成事件判定）补单测——热键是 P0 核心却零测试。
+- **热键双补丁可精简**：`merge_physical_modifiers`（GetAsyncKeyState 物理补全，桌面场景）与
+  合成事件时序过滤（IDEA 场景）对同一问题用两套机制，时序过滤可能已覆盖前者；补测试后评估精简。
+- `percent_decode`（`main.rs`）补单测（纯逻辑：非法 % / 短 % / UTF-8 / 路径编码边界）。
+- `calc.rs::ints_to_float` 不支持前导点小数 `.5+1`（转成 `.5.0` 失败）；罕见，待定是否支持。
+- `statusbar.js` 直接 getElementById，未走 `dom.js` 集中引用（一致性）。
+- `icon.rs` 图标提取无 in-flight 去重，并发首次请求同一图标会重复进 Shell/GDI（功能正确，启动尖峰时可优化）。
 
 ### 多显示器与 DPI
 
@@ -68,6 +85,12 @@
 
 ### 更多功能
 
+- 结果列表底部**提示/状态栏层**：✅ 已做动作提示（Enter 打开/复制，由 action.kind 驱动）+ 翻页提示
+  （PgUp/PgDn）。后续增强：随上下文联动的智能提示、更新提示、多动作（Cmd+K 次动作菜单）。
+- `action` 字段 0.2.2 并入 `SearchItem::action`（带 payload 的 `SearchAction`，见 0.2 设计 §2.1），
+  扩展 Plugin/Ai 等 kind。
+- 结果项描述副行**真实 exe 路径**：当前副行显示 lnk 路径，后续用 COM `IShellLinkW` 解析
+  lnk 指向的真实 exe 路径（懒解析，不进扫描热路径）。
 - 文件搜索（常用目录、最近文件）
 - 插件系统（P2）：独立进程 + stdin/stdout JSON
 - AI 能力（P3）：规则 → 本地模型（可选插件）→ 云模型

@@ -15,6 +15,7 @@ strip = true
 chrono = "0.4.45"
 evalexpr = "13.1.0"
 nucleo = "0.5.0"
+png = "0.17"
 open = "5.3.5"
 pinyin = "0.11.0"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -27,7 +28,17 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1.52.3", features = ["sync", "time"] }
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_Graphics_Gdi"] }
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_Storage_FileSystem",
+    "Win32_System",
+] }
 
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }

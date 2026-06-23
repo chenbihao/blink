@@ -7,12 +7,15 @@
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
-    <div id="app">
-      <div id="titlebar" data-tauri-drag-region></div>
-      <input id="query" type="text" placeholder="输入应用名、计算…" autocomplete="off" spellcheck="false" />
+    <!-- #app 整张卡片：四周留白区可拖动（deep = 子树任意留白处都可拖；
+         input 等可点击元素由 Tauri drag.js 自动排除，无需额外属性） -->
+    <div id="app" data-tauri-drag-region="deep">
+      <div id="search-bar">
+        <input id="query" type="text" placeholder="输入应用名、计算…" autocomplete="off" spellcheck="false" />
+      </div>
       <ul id="results"></ul>
-      <div id="debug">等待唤起…</div>
+      <div id="statusbar"></div>
     </div>
-    <script src="main.js"></script>
+    <script type="module" src="js/main.js"></script>
   </body>
 </html>

@@ -24,13 +24,18 @@ pub async fn search_apps(query: String, app: tauri::AppHandle) -> Vec<crate::sea
             pinyin_name: String::new(),
             lnk_path: String::new(),
             is_calc: true,
+            description: Some("按 Enter 复制结果".into()),
+            action: crate::search::Action {
+                kind: crate::search::ActionKind::Copy,
+                hint: None,
+            },
         }];
     }
-    // 走搜索（融合历史权重）
+    // 走搜索（融合历史权重）。实测纯内存路径 ~1ms（283 条），远低于 20ms 目标。
     let entries = crate::search::get_entries().await;
     let pool = app.state::<sqlx::SqlitePool>();
     let history = crate::history::get_weights(&pool).await;
-    crate::search::fuzzy_search(&query, &entries, &history, 10)
+    crate::search::fuzzy_search(&query, &entries, &history, 50)
 }
 
 /// 前端回车/点击时调用：启动选中的应用（打开 lnk）并记录历史。

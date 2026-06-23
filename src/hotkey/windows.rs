@@ -14,6 +14,11 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use super::{HotkeyEvent, get_current_config, get_tap_threshold, send_event};
 
+/// 修饰键 down→up 间隔小于此值即判为系统合成的瞬时事件对（人类松手不可能这么快）。
+/// 用于过滤 IDEA 等程序在组合键触发后注入的虚假 Alt down+up（中和菜单激活），
+/// 否则会让 pressed_modifiers 丢失 Alt，导致「按住 Alt 连按主键」第二次起匹配失败。
+const SYNTHETIC_EVENT_THRESHOLD: Duration = Duration::from_millis(30);
+
 /// hook 线程私有状态。
 struct State {
     /// 主键按下时刻（用于 tap/hold 判定）。
@@ -28,6 +33,8 @@ struct State {
     pressed_key: Option<String>,
     /// 主键按下时的修饰键快照（用于组合键匹配，即使修饰键先松开也能触发）。
     modifiers_snapshot: Vec<String>,
+    /// 每个修饰键最近一次 DOWN 的时刻（用于识别系统合成的瞬时 down-up 对）。
+    last_mod_down: std::collections::HashMap<String, Instant>,
 }
 
 thread_local! {
@@ -38,6 +45,7 @@ thread_local! {
         pressed_keys: Vec::new(),
         pressed_key: None,
         modifiers_snapshot: Vec::new(),
+        last_mod_down: std::collections::HashMap::new(),
     });
 }
 
@@ -214,6 +222,32 @@ fn normalize_modifier(vk: u32) -> Option<String> {
     None
 }
 
+/// 用真实物理按键状态补全修饰键快照。
+///
+/// 解决：Windows 对带 Alt 的 WM_SYSKEYDOWN 会补发「虚假 Alt UP」，使事件累积的
+/// pressed_modifiers 丢失 Alt。GetAsyncKeyState 高位为 1 表示该键**当前物理按下**，
+/// 不受虚假 UP 影响。把物理按着却不在快照里的修饰键补回（左右区分，与配置键名一致）。
+fn merge_physical_modifiers(snapshot: &mut Vec<String>) {
+    // (虚拟键, 键名) —— 左右分开查，对齐 normalize_modifier 的命名
+    const KEYS: &[(VIRTUAL_KEY, &str)] = &[
+        (VK_LMENU, "lalt"),
+        (VK_RMENU, "ralt"),
+        (VK_LCONTROL, "lctrl"),
+        (VK_RCONTROL, "rctrl"),
+        (VK_LSHIFT, "lshift"),
+        (VK_RSHIFT, "rshift"),
+        (VK_LWIN, "meta"),
+        (VK_RWIN, "meta"),
+    ];
+    for (vk, name) in KEYS {
+        // 高位置 1 = 物理按下
+        let pressed = unsafe { GetAsyncKeyState(vk.0 as i32) } as u16 & 0x8000 != 0;
+        if pressed && !snapshot.iter().any(|m| m == name) {
+            snapshot.push(name.to_string());
+        }
+    }
+}
+
 /// 低级键盘钩子回调：tap/hold 状态机。全程放行，绝不吞键。
 unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     const HC_ACTION: i32 = 0;
@@ -255,6 +289,8 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
                         if !s.pressed_modifiers.contains(m) {
                             s.pressed_modifiers.push(m.clone());
                         }
+                        // 记录本次 DOWN 时刻，供 UP 时识别系统合成的瞬时 down-up 对
+                        s.last_mod_down.insert(m.clone(), Instant::now());
                     }
                     // 记录按下的具体键（用于 AltGr 模拟检测）
                     if let Some(ref sk) = specific_key {
@@ -298,9 +334,24 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
                         }
                     }
 
-                    // 移除修饰键
+                    // 移除修饰键。
+                    // 例外：配置为组合键时，识别并忽略系统合成的「瞬时 down-up 对」——
+                    // IDEA 等把 Alt 当菜单助记键的程序，会在组合键触发后注入一对间隔极短的
+                    // Alt down+up（中和菜单激活），使 pressed_modifiers 丢失 Alt，导致「按住 Alt
+                    // 连按主键」第二次起匹配失败。人类松开不可能这么快，故据此判为合成、跳过移除。
+                    // 仅组合键启用（单独修饰键快捷键 config.modifiers 为空，不受影响，避免误伤其快速 tap）。
                     if let Some(m) = &modifier {
-                        s.pressed_modifiers.retain(|x| x != m);
+                        let synthetic = !config.modifiers.is_empty()
+                            && s
+                                .last_mod_down
+                                .get(m)
+                                .map_or(false, |t| t.elapsed() < SYNTHETIC_EVENT_THRESHOLD);
+                        if synthetic {
+                            tracing::trace!(modifier = %m, "hotkey: 忽略系统合成的瞬时 Alt UP（保留按下态）");
+                        } else {
+                            s.pressed_modifiers.retain(|x| x != m);
+                            s.last_mod_down.remove(m); // 真实松开：清理记录，避免陈旧时刻误判
+                        }
                     }
                     if let Some(sk) = &specific_key {
                         s.pressed_keys.retain(|x| x != sk);
@@ -321,6 +372,11 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
                         // 记录主键和修饰键快照
                         s.pressed_key = Some(k.clone());
                         s.modifiers_snapshot = s.pressed_modifiers.clone();
+                        // 物理状态补全：Windows 在带 Alt 的 WM_SYSKEYDOWN 触发后会补发
+                        // 一个「虚假的 Alt UP」（结束系统菜单激活），导致 pressed_modifiers
+                        // 丢失 Alt。但用户物理上仍按着——用 GetAsyncKeyState 查真实物理状态，
+                        // 把按着却不在快照里的修饰键补回，否则按住 Alt 连按主键时第二次起匹配失败。
+                        merge_physical_modifiers(&mut s.modifiers_snapshot);
                         s.down_since = Some(Instant::now());
                         s.aborted = false;
                     }

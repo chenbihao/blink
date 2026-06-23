@@ -17,33 +17,32 @@ body {
   user-select: none;
 }
 
+/* ── 卡片容器 ─────────────────────────────────────────────────────────────────
+   #app 四周 padding 即「呼吸空间」+ 拖动手柄（data-tauri-drag-region="deep"）。
+   高度由内容撑开，JS 测真实高度回传 resize_window，不再硬编码。 */
 #app {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  /* 高度由内容自然撑开（不固定 100vh，否则测不出内容真实高度）；
+     JS 测 #app.offsetHeight 回传 resize_window，窗口刚好包住卡片。 */
+  width: 100%;
+  padding: 12px;
   background: #1e1e2e;
   border-radius: 12px;
   overflow: hidden;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.05);
+  cursor: default;
 }
 
-/* ── 拖动区域 ─────────────────────────────────────────────────────────────── */
-
-#titlebar {
-  height: 4px;
-  cursor: grab;
+/* ── 输入区 ───────────────────────────────────────────────────────────────────
+   #search-bar 是输入框的容器；输入框透明融入卡片。 */
+#search-bar {
   flex-shrink: 0;
 }
 
-#titlebar:active {
-  cursor: grabbing;
-}
-
-/* ── 输入框 ─────────────────────────────────────────────────────────────────── */
-
 #query {
   width: 100%;
-  padding: 16px 20px;
+  padding: 8px 10px;
   font-size: 18px;
   background: transparent;
   color: #cdd6f4;
@@ -63,29 +62,21 @@ body {
 
 #results {
   list-style: none;
-  overflow-y: auto;
-  max-height: 0;
-  transition: max-height 0.15s ease-out;
-  scrollbar-width: thin;
-  scrollbar-color: #45475a transparent;
+  /* 分页模型：每页最多 9 条，列表不滚动、不截断，由内容自然撑开高度，
+     window-size.js 测 #app 真实高度精确贴合（彻底摆脱 max-height 像素估算）。 */
 }
 
+/* 有结果：与输入区之间一条淡分隔线。无结果时该容器为空、高度为 0，不显示边框。 */
 #results.has-items {
+  margin-top: 10px;
+  padding-top: 10px;
   border-top: 1px solid #313244;
-  max-height: 320px;
-}
-
-#results::-webkit-scrollbar {
-  width: 6px;
-}
-
-#results::-webkit-scrollbar-thumb {
-  background: #45475a;
-  border-radius: 3px;
 }
 
 #results li {
-  padding: 10px 20px;
+  /* 左内边距与输入框文字对齐（输入框 padding-left 10px） */
+  padding: 9px 10px;
+  border-radius: 8px;
   cursor: default;
   font-size: 14px;
   transition: background 0.08s ease;
@@ -93,14 +84,61 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   line-height: 1.4;
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
-#results li:first-child {
-  padding-top: 12px;
+#results li .app-icon {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
 }
 
-#results li:last-child {
-  padding-bottom: 12px;
+/* 正文：名称 + 描述副行，纵向排列，占满中间剩余宽度 */
+#results li .item-body {
+  flex: 1;
+  min-width: 0; /* 关键：允许子元素 text-overflow 生效 */
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+#results li .item-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#results li .item-desc {
+  font-size: 12px;
+  color: #6c7086;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* calc 结果的描述用同色系但稍暗，不抢主行绿色 */
+#results li.calc-result .item-desc {
+  color: #6c7086;
+}
+
+/* Alt 数字角标：默认隐藏，按住 Alt（body.alt-active）时显示 */
+#results li .item-badge {
+  flex-shrink: 0;
+  display: none;
+  min-width: 18px;
+  padding: 1px 5px;
+  font-size: 11px;
+  font-family: ui-monospace, Consolas, monospace;
+  color: #cdd6f4;
+  background: #45475a;
+  border-radius: 4px;
+  text-align: center;
+}
+
+body.alt-active #results li .item-badge {
+  display: inline-block;
 }
 
 #results li.active,
@@ -119,8 +157,24 @@ body {
   font-weight: 500;
 }
 
-/* ── 调试面板（隐藏） ─────────────────────────────────────────────────────── */
-
-#debug {
+/* ── 底部提示栏 ───────────────────────────────────────────────────────────────
+   无结果时 .visible 移除 → display:none，不占窗口高度。 */
+#statusbar {
   display: none;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid #313244;
+  font-size: 11px;
+  color: #6c7086;
 }
+
+#statusbar.visible {
+  display: flex;
+}
+
+#statusbar .hint-right {
+  font-family: ui-monospace, Consolas, monospace;
+}
+

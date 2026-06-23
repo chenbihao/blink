@@ -10,8 +10,19 @@ use std::time::{Duration, SystemTime};
 
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::filter::EnvFilter;
+use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::fmt::time::FormatTime;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+
+/// 日志时间戳用本地时区格式化（tracing 默认 UTC，与用户观感不符）。
+struct LocalTimer;
+
+impl FormatTime for LocalTimer {
+    fn format_time(&self, w: &mut Writer<'_>) -> std::fmt::Result {
+        write!(w, "{}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"))
+    }
+}
 
 /// 日志保留天数
 const RETAIN_DAYS: u64 = 7;
@@ -45,10 +56,19 @@ pub fn init(level: &str) {
 
     tracing_subscriber::registry()
         .with(filter_layer)
-        // 文件：关闭 ANSI 颜色码（否则文件里是乱码方块）
-        .with(tracing_subscriber::fmt::layer().with_writer(writer).with_ansi(false))
-        // 控制台：保留 ANSI 彩色（release 无控制台时 stderr 丢弃，无害）
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        // 文件：本地时区时间戳；关闭 ANSI 颜色码（否则文件里是乱码方块）
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_timer(LocalTimer)
+                .with_writer(writer)
+                .with_ansi(false),
+        )
+        // 控制台：本地时区时间戳；保留 ANSI 彩色（release 无控制台时 stderr 丢弃，无害）
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_timer(LocalTimer)
+                .with_writer(std::io::stderr),
+        )
         .init();
 
     clean_old_logs(&dir);

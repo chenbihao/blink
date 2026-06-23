@@ -38,11 +38,17 @@ fn scan_dir(dir: &PathBuf, entries: &mut Vec<AppEntry>) {
                 .to_string();
             if !name.is_empty() {
                 let pinyin_name = super::to_pinyin_initials(&name);
+                let lnk_path = path.to_string_lossy().to_string();
                 entries.push(AppEntry {
                     name,
                     pinyin_name,
-                    lnk_path: path.to_string_lossy().to_string(),
+                    description: Some(lnk_path.clone()), // 副行显示路径
+                    lnk_path,
                     is_calc: false,
+                    action: super::Action {
+                        kind: super::ActionKind::Open,
+                        hint: None,
+                    },
                 });
             }
         }

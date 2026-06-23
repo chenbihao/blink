@@ -20,6 +20,28 @@
 
 use serde::Serialize;
 
+/// 结果项可执行的动作类型（决定 Enter 行为 + 提示栏文案）。
+/// 与 is_calc（产生方式/样式标识）正交：计算结果 is_calc=true 且 action.kind=Copy。
+/// 0.2.2 迁 SearchItem 时并入带 payload 的 SearchAction（见 0.2 设计 §2.1）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ActionKind {
+    /// 打开应用/快捷方式/文件
+    Open,
+    /// 复制到剪贴板
+    Copy,
+    // 未来：Plugin / Ai
+}
+
+/// 结果项的动作描述。
+#[derive(Debug, Clone, Serialize)]
+pub struct Action {
+    pub kind: ActionKind,
+    /// 可选自定义动作名（插件用，如「安装」），覆盖默认文案；None 用 kind 默认文案。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
 /// 应用条目。
 #[derive(Debug, Clone, Serialize)]
 pub struct AppEntry {
@@ -32,6 +54,12 @@ pub struct AppEntry {
     /// 是否为计算结果（前端可据此显示特殊样式）
     #[serde(default)]
     pub is_calc: bool,
+    /// 描述副行（应用/快捷方式 → 路径；计算 → 提示文案；未来插件自定义）。
+    /// 由结果生产者（scan_dir/calc/未来 SearchEngine）填充，前端浅色小字展示。
+    #[serde(default)]
+    pub description: Option<String>,
+    /// 可执行动作（决定 Enter 行为 + 提示栏文案）。与 description 正交。
+    pub action: Action,
 }
 
 // 平台特定实现
@@ -40,6 +68,9 @@ mod windows;
 
 #[cfg(target_os = "windows")]
 pub use windows::{scan_start_menu, launch, roots_modified};
+
+#[cfg(target_os = "windows")]
+pub mod icon;
 
 // 搜索结果缓存(引擎内部数据,为阶段三 StartMenuEngine 铺路,见 0.2 设计 §2.4)
 mod cache;

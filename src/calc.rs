@@ -40,6 +40,7 @@ fn format_result(val: evalexpr::Value) -> String {
 }
 
 /// 整数转浮点：把纯整数字面量加 ".0"，避免整数除法截断（"2/3" → "2.0/3.0"）。
+/// 已是小数的数值（含小数点）整体保留，不再追加 ".0"（否则 "3.14" 会被破坏成 "3.14.0"）。
 fn ints_to_float(s: &str) -> String {
     let mut result = String::new();
     let mut chars = s.chars().peekable();
@@ -50,13 +51,73 @@ fn ints_to_float(s: &str) -> String {
             while chars.peek().map_or(false, |c| c.is_ascii_digit()) {
                 num.push(chars.next().unwrap());
             }
-            result.push_str(&num);
-            if chars.peek() != Some(&'.') {
-                result.push_str(".0");
+            if chars.peek() == Some(&'.') {
+                // 已是小数：连同小数点和小数部分一起消费，不补 ".0"
+                num.push(chars.next().unwrap()); // '.'
+                while chars.peek().map_or(false, |c| c.is_ascii_digit()) {
+                    num.push(chars.next().unwrap());
+                }
+            } else {
+                // 纯整数：补 ".0" 避免整数除法截断
+                num.push_str(".0");
             }
+            result.push_str(&num);
         } else {
             result.push(c);
         }
     }
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ints_to_float_handles_decimals() {
+        // 纯整数补 .0
+        assert_eq!(ints_to_float("1+1"), "1.0+1.0");
+        assert_eq!(ints_to_float("2/3"), "2.0/3.0");
+        // 已是小数的不被破坏（回归 "3.14" → "3.14.0" 的 bug）
+        assert_eq!(ints_to_float("3.14*2"), "3.14*2.0");
+        assert_eq!(ints_to_float("1.5+1"), "1.5+1.0");
+        assert_eq!(ints_to_float("10.5"), "10.5");
+        // 函数名保留，函数参数里的整数仍转浮点
+        assert_eq!(ints_to_float("sqrt(9)"), "sqrt(9.0)");
+    }
+
+    #[test]
+    fn eval_integer_arithmetic() {
+        assert_eq!(try_eval("1+1").as_deref(), Some("2"));
+        assert_eq!(try_eval("2*3").as_deref(), Some("6"));
+        // 整数除法不截断
+        assert_eq!(try_eval("2/3").as_deref(), Some("0.666667"));
+    }
+
+    #[test]
+    fn eval_decimal_arithmetic() {
+        // bug 回归测试：含小数的输入此前全部返回 None
+        assert_eq!(try_eval("3.14*2").as_deref(), Some("6.28"));
+        assert_eq!(try_eval("1.5+1").as_deref(), Some("2.5"));
+        assert_eq!(try_eval("0.1+0.2").as_deref(), Some("0.3"));
+    }
+
+    #[test]
+    fn eval_rejects_non_expressions() {
+        // 纯数字不算计算
+        assert_eq!(try_eval("123"), None);
+        // 空输入
+        assert_eq!(try_eval(""), None);
+        assert_eq!(try_eval("   "), None);
+        // 纯文本
+        assert_eq!(try_eval("hello"), None);
+    }
+
+    #[test]
+    fn eval_integer_result_no_decimal_point() {
+        // 整数结果不带小数点
+        assert_eq!(try_eval("4/2").as_deref(), Some("2"));
+        assert_eq!(try_eval("2.0*3").as_deref(), Some("6"));
+    }
+}
+
