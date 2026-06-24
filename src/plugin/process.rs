@@ -55,7 +55,9 @@ type PendingMap = Arc<Mutex<HashMap<String, oneshot::Sender<PluginResponse>>>>;
 
 /// 已拉起的插件进程。
 struct PluginProcess {
-    child: Child,
+    /// `Mutex<Child>` 使存活检测可 `&self`(try_wait 需 `&mut`),从而 query 能在
+    /// process 锁外并发执行——多个 in-flight query 各持一份 `Arc<PluginProcess>`。
+    child: Mutex<Child>,
     stdin: Mutex<ChildStdin>,
     pending: PendingMap,
     /// 单调递增的请求 id 计数。
@@ -132,7 +134,7 @@ impl PluginProcess {
         }
 
         Ok(PluginProcess {
-            child,
+            child: Mutex::new(child),
             stdin: Mutex::new(stdin),
             pending,
             next_id: std::sync::atomic::AtomicU64::new(1),
@@ -140,8 +142,8 @@ impl PluginProcess {
     }
 
     /// 是否仍存活(尝试非阻塞回收退出码)。
-    fn is_alive(&mut self) -> bool {
-        !matches!(self.child.try_wait(), Ok(Some(_)))
+    async fn is_alive(&self) -> bool {
+        !matches!(self.child.lock().await.try_wait(), Ok(Some(_)))
     }
 
     /// 发送 query 并等待 response(带超时)。
@@ -173,9 +175,26 @@ impl PluginProcess {
             Ok(Err(_)) => Err(PluginError::ProcessClosed), // sender 被 drop(reader 退出)
             Err(_) => {
                 self.pending.lock().await.remove(&req_id);
+                // best-effort 通知插件取消(限时,插件 stdin 堵塞则放弃)。
+                self.send_cancel(&req_id).await;
                 Err(PluginError::Timeout)
             }
         }
+    }
+
+    /// 发送 cancel 通知(best-effort):让支持取消的插件停止那次 query。
+    /// 插件可忽略;整体限时 200ms——插件若不读 stdin(stdin 管道堵塞)则放弃,
+    /// 避免独占 stdin 锁把单次超时拖垮成「插件永久不可用」。
+    async fn send_cancel(&self, req_id: &str) {
+        let req = PluginRequest::Cancel { id: req_id.to_string() };
+        let Ok(line) = serde_json::to_string(&req) else { return; };
+        let write = async {
+            let mut stdin = self.stdin.lock().await;
+            stdin.write_all((line + "\n").as_bytes()).await?;
+            stdin.flush().await?;
+            Ok::<(), std::io::Error>(())
+        };
+        let _ = tokio::time::timeout(Duration::from_millis(200), write).await;
     }
 }
 
@@ -184,7 +203,7 @@ pub struct PluginHandle {
     manifest: Arc<PluginManifest>,
     /// manifest 所在目录(解析 exec 相对路径用)。
     dir: PathBuf,
-    process: Mutex<Option<PluginProcess>>,
+    process: Mutex<Option<Arc<PluginProcess>>>,
 }
 
 impl PluginHandle {
@@ -206,28 +225,39 @@ impl PluginHandle {
 
     /// 查询插件:懒启动(或复用)进程 → 发 query → 收 items。
     /// 进程已死则重启一次。
+    ///
+    /// 并发:process 锁只覆盖「确保进程存在」(spawn 判定),拿到 Arc 后立即释放,
+    /// query 在锁外 await——同插件的多次 query 可并发 in-flight(stdin/pending 各自
+    /// 互斥、按 id 路由,天然安全)。`manifest.concurrency` 信号量(§3.7 B3)留后续。
     pub async fn query(&self, query: &str) -> Result<Vec<PluginItem>, PluginError> {
         let timeout_ms = self.manifest.timeout_ms();
-        let mut guard = self.process.lock().await;
 
-        // 进程不存在或已死 → (重新)拉起
-        let need_spawn = match guard.as_mut() {
-            None => true,
-            Some(p) => !p.is_alive(),
+        // 短暂持锁:确保进程存在,clone Arc 后释放。
+        let proc = {
+            let mut guard = self.process.lock().await;
+            let need_spawn = match guard.as_ref() {
+                None => true,
+                Some(p) => !p.is_alive().await,
+            };
+            if need_spawn {
+                let exec = self.manifest.exec_path(&self.dir);
+                tracing::info!(plugin = %self.manifest.id, exec = %exec.display(), "拉起插件进程");
+                let proc = PluginProcess::spawn(&exec, &self.dir, &self.manifest.id)?;
+                *guard = Some(Arc::new(proc));
+            }
+            Arc::clone(guard.as_ref().unwrap())
         };
-        if need_spawn {
-            let exec = self.manifest.exec_path(&self.dir);
-            tracing::info!(plugin = %self.manifest.id, exec = %exec.display(), "拉起插件进程");
-            let proc = PluginProcess::spawn(&exec, &self.dir, &self.manifest.id)?;
-            *guard = Some(proc);
-        }
 
-        let proc = guard.as_ref().unwrap();
         let result = proc.query(query, timeout_ms).await;
 
-        // 进程关闭类错误:清理句柄,下次重启
+        // 进程关闭类错误:清理句柄,下次重启。
+        // 守护竞态:并发 query 可能在 A 失败期间已重建新进程——只清「我这个已死的」,
+        // 用 Arc::ptr_eq 判定身份,勿误清他人的新进程。
         if matches!(result, Err(PluginError::ProcessClosed)) {
-            *guard = None;
+            let mut guard = self.process.lock().await;
+            if guard.as_ref().map(|p| Arc::ptr_eq(p, &proc)).unwrap_or(false) {
+                *guard = None;
+            }
         }
         result
     }

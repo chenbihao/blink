@@ -40,6 +40,10 @@ pub struct Action {
     /// 可选自定义动作名（插件用，如「安装」），覆盖默认文案；None 用 kind 默认文案。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    /// 动作 payload:Copy 携带待复制文本;Open 的路径仍在 `AppEntry.lnk_path`
+    /// (lnk_path 是 history 主键,不复用)。前端按 kind + payload 执行。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
 }
 
 /// 应用条目。
@@ -194,6 +198,7 @@ mod tests {
             action: Action {
                 kind: ActionKind::Open,
                 hint: None,
+                payload: None,
             },
         }
     }

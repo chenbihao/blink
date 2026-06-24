@@ -159,7 +159,6 @@ fn is_self_foreground(_app: &AppHandle, fg: windows::Win32::Foundation::HWND) ->
         return true; // 拿不到 PID:保守不隐藏
     }
     let self_pid = unsafe { GetCurrentProcessId() };
-    tracing::debug!(fg_pid, self_pid, fg = format!("0x{:x}", fg.0 as isize), "watchdog: 前台判定");
     fg_pid == self_pid
 }
 

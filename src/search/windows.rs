@@ -48,6 +48,7 @@ fn scan_dir(dir: &PathBuf, entries: &mut Vec<AppEntry>) {
                     action: super::Action {
                         kind: super::ActionKind::Open,
                         hint: None,
+                        payload: None,
                     },
                 });
             }

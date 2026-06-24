@@ -162,6 +162,7 @@ mod tests {
             action: Action {
                 kind: ActionKind::Open,
                 hint: None,
+                payload: None,
             },
         }
     }

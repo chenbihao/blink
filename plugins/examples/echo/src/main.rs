@@ -48,8 +48,8 @@ struct PluginItem {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum PluginAction {
-    #[allow(dead_code)]
     Copy { text: String },
+    #[allow(dead_code)]
     Open { path: String },
 }
 
@@ -85,7 +85,7 @@ fn main() {
     }
 }
 
-/// 回显:把 query 原样作为一条结果。空 path = 纯展示项(Enter 无动作)。
+/// 回显:把 query 原样作为一条 Copy 结果(Enter 复制 "echo: <query>")。
 fn handle_query(id: String, query: String) -> PluginResponse {
     eprintln!("echo: handling query {query:?}");
     PluginResponse {
@@ -94,7 +94,7 @@ fn handle_query(id: String, query: String) -> PluginResponse {
             title: format!("echo: {query}"),
             subtitle: Some("Blink Rust 示例插件".to_string()),
             score: 0.8,
-            action: PluginAction::Open { path: String::new() },
+            action: PluginAction::Copy { text: format!("echo: {query}") },
         }],
     }
 }

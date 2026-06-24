@@ -1,7 +1,7 @@
 //! 插件协议(JSONL,见 production/0.2-core-plugin-design.md §3.2)。
 //!
-//! newline-delimited JSON,每行一个完整 JSON。本切片只实现 `query`→`response`(单行);
-//! `cancel` / 流式(stream/delta/done)/ attachments 先定义、不实现。
+//! newline-delimited JSON,每行一个完整 JSON。本切片实现 `query`→`response`(单行)与
+//! core→插件单向 `cancel`(查询超时发送,插件可忽略);流式(stream/delta/done)/ attachments 暂不实现。
 //!
 //! bin crate 无 lib target,示例插件目前各持一份本 struct 的副本(后续抽 SDK crate)。
 
@@ -18,8 +18,7 @@ pub enum PluginRequest {
         #[serde(default)]
         context: PluginQueryContext,
     },
-    /// 取消(本切片定义不实现)。
-    #[allow(dead_code)]
+    /// 取消(core→插件,best-effort:查询超时发送,插件可忽略)。
     Cancel { id: String },
 }
 
@@ -116,5 +115,13 @@ mod tests {
         let json2 = r#"{"id":"y","items":[{"title":"t","action":{"type":"open","path":""}}]}"#;
         let resp2: PluginResponse = serde_json::from_str(json2).unwrap();
         assert_eq!(resp2.items[0].score, 0.5); // default
+    }
+
+    #[test]
+    fn cancel_request_serializes_with_type_tag() {
+        let req = PluginRequest::Cancel { id: "req_x".into() };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"type\":\"cancel\""));
+        assert!(json.contains("\"id\":\"req_x\""));
     }
 }

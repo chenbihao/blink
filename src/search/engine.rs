@@ -22,18 +22,14 @@ pub enum Lane {
 }
 
 /// 引擎产出项的动作(后端内部模型,含 payload)。
-/// 区别于前端契约 `Action`(只有 kind/hint)——转换见 [`SearchItem::into_app_entry`]。
+/// 与前端契约 `Action`(同样带 payload)一一对应——转换见 [`SearchItem::into_app_entry`]。
 #[derive(Debug, Clone)]
 pub enum SearchAction {
-    /// 打开路径(应用/快捷方式/文件)。空 path = 纯展示项(前端 Enter 无动作)。
+    /// 打开路径(应用/快捷方式/文件/URL)。空 path = 纯展示项(前端 Enter 无动作)。
     Open { path: String },
-    /// 复制文本到剪贴板(计算结果等)。
-    /// `text` 为结构化 payload;0.2.2 前端复制实际从 title 去 "= " 前缀取值
-    /// (见 `into_app_entry`),text 留给 0.3 插件 Copy 动作直接消费。
-    Copy {
-        #[allow(dead_code)]
-        text: String,
-    },
+    /// 复制文本到剪贴板(计算结果 / 插件 Copy)。
+    /// `text` 为结构化 payload,经 `into_app_entry` 透传到前端 `Action.payload`。
+    Copy { text: String },
 }
 
 /// 引擎召回的单个结果项(内部融合模型)。
@@ -58,9 +54,9 @@ impl SearchItem {
     /// 转成前端契约 `AppEntry` 形状。
     ///
     /// - `Open` → `lnk_path=path`,`action.kind=Open`;空 path 即纯展示项。
-    /// - `Copy` → `is_calc=true`(前端据此走复制样式 + `calcValue`),`action.kind=Copy`。
-    ///   注:前端 `actions.js` 复制依赖从 `name`(去 "= " 前缀)取值,故 Copy 项的
-    ///   title 须形如 `= <text>`(CalcEngine 已如此产出)。
+    /// - `Copy` → `is_calc=true`,`action.kind=Copy` 且 `action.payload=Some(text)`。
+    ///   前端 `actions.js` 复制优先取 `payload`(= text);无 payload 才回退 `calcValue`
+    ///   (从 name 去 "= " 前缀;CalcEngine 的 title 形如 `= <text>` 故二者一致)。
     pub fn into_app_entry(self) -> AppEntry {
         match self.action {
             SearchAction::Open { path } => AppEntry {
@@ -72,17 +68,21 @@ impl SearchItem {
                 action: Action {
                     kind: ActionKind::Open,
                     hint: None,
+                    payload: None,
                 },
             },
-            SearchAction::Copy { .. } => AppEntry {
+            SearchAction::Copy { text } => AppEntry {
                 name: self.title,
                 pinyin_name: String::new(),
                 description: self.subtitle,
                 lnk_path: String::new(),
-                is_calc: true,
+                // is_calc 仅标记计算结果(驱动前端 calc 样式 + calcValue);插件 Copy
+                // 不该套计算样式,故按来源判定(CalcEngine 的 source == "calc")。
+                is_calc: self.source == "calc",
                 action: Action {
                     kind: ActionKind::Copy,
                     hint: None,
+                    payload: Some(text),
                 },
             },
         }
@@ -129,6 +129,7 @@ mod tests {
         assert_eq!(e.lnk_path, "C:\\a.lnk");
         assert!(!e.is_calc);
         assert!(matches!(e.action.kind, ActionKind::Open));
+        assert!(e.action.payload.is_none());
         assert_eq!(e.description.as_deref(), Some("C:\\a.lnk"));
     }
 
@@ -143,9 +144,11 @@ mod tests {
             source: "calc".into(),
         };
         let e = item.into_app_entry();
-        assert_eq!(e.name, "= 2"); // 前端从 name 去 "= " 前缀取 calcValue
+        assert_eq!(e.name, "= 2");
         assert!(e.lnk_path.is_empty());
         assert!(e.is_calc);
         assert!(matches!(e.action.kind, ActionKind::Copy));
+        // text 透传到 payload(前端复制优先取 payload)
+        assert_eq!(e.action.payload.as_deref(), Some("2"));
     }
 }

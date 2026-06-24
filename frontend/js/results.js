@@ -245,6 +245,7 @@ function createItem(app, i) {
   if (app.action) {
     li.dataset.actionKind = app.action.kind;
     if (app.action.hint) li.dataset.actionHint = app.action.hint;
+    if (app.action.payload != null) li.dataset.actionPayload = app.action.payload;
   }
   if (app.is_calc) {
     li.classList.add("calc-result");
@@ -298,6 +299,7 @@ function itemData(li) {
   return {
     lnkPath: li.dataset.lnkPath,
     calcValue: li.dataset.calcValue,
+    payload: li.dataset.actionPayload,
     action: {
       kind: li.dataset.actionKind,
       hint: li.dataset.actionHint,

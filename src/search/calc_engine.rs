@@ -1,7 +1,7 @@
 //! CalcEngine:实时计算引擎(sync lane)。包 [`crate::calc::try_eval`]。
 //!
-//! 命中(输入为合法算术表达式)产出单条 `Copy` 项,title 形如 `= 2`——
-//! 前端 `actions.js` 复制时从 title 去 "= " 前缀取值(契约见 [`super::engine`])。
+//! 命中(输入为合法算术表达式)产出单条 `Copy` 项,title 形如 `= 2`、text = 结果值。
+//! 前端 `actions.js` 复制优先取 `action.payload`(= text);契约见 [`super::engine`]。
 
 use crate::calc;
 

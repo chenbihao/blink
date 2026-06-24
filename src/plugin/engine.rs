@@ -8,6 +8,8 @@
 
 use std::sync::Arc;
 
+use tokio::task::JoinSet;
+
 use crate::search::engine::{Lane, QueryContext, SearchAction, SearchEngine, SearchItem};
 use crate::search::to_pinyin_initials;
 
@@ -46,17 +48,29 @@ impl SearchEngine for PluginEngine {
         if matches.is_empty() {
             return Vec::new();
         }
-        let mut items = Vec::new();
+        // 多插件并发查询:每个命中插件独立 spawn,各自内部有 timeout 兜底。
+        // 结果顺序无关——融合层(fuse_items)会按 score 重排。
+        let mut set: JoinSet<Vec<SearchItem>> = JoinSet::new();
         for m in matches {
-            match m.plugin.query(&m.arg).await {
-                Ok(plugin_items) => {
-                    for it in plugin_items {
-                        items.push(to_search_item(m.plugin.id(), it));
+            let plugin = Arc::clone(m.plugin);
+            let arg = m.arg;
+            set.spawn(async move {
+                match plugin.query(&arg).await {
+                    Ok(items) => items
+                        .into_iter()
+                        .map(|it| to_search_item(plugin.id(), it))
+                        .collect(),
+                    Err(e) => {
+                        tracing::warn!(plugin = %plugin.id(), error = %e, "插件查询失败");
+                        Vec::new()
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(plugin = %m.plugin.id(), error = %e, "插件查询失败");
-                }
+            });
+        }
+        let mut items = Vec::new();
+        while let Some(res) = set.join_next().await {
+            if let Ok(part) = res {
+                items.extend(part);
             }
         }
         items
@@ -142,5 +156,13 @@ mod tests {
     fn pinyin_initials_keyword() {
         // 中文 keyword "天气" 首拼 "tq" 命中
         assert_eq!(match_keyword("tq 北京", "天气"), Some("北京".to_string()));
+    }
+
+    #[test]
+    fn chinese_keyword_exact_and_case_normalized() {
+        // 中文 keyword 精确命中(原文相等,字节安全)
+        assert_eq!(match_keyword("天气", "天气"), Some(String::new()));
+        // 首拼大写归一化后精确命中
+        assert_eq!(match_keyword("TQ", "天气"), Some(String::new()));
     }
 }

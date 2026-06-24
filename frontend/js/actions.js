@@ -8,23 +8,26 @@ import { launchApp, hideWindow } from "./api.js";
 
 /**
  * 激活一个结果项。
- * @param {{lnkPath?: string, calcValue?: string, action?: {kind: string}}} data
+ * @param {{lnkPath?: string, calcValue?: string, payload?: string, action?: {kind: string}}} data
  */
 export async function activateItem(data) {
   if (!data) return;
   const kind = data.action?.kind;
 
   if (kind === "copy") {
-    // 复制结果到剪贴板；成功才隐藏。失败不隐藏，避免用户误以为已复制。
-    if (data.calcValue) {
+    // 复制结果到剪贴板；成功才隐藏。失败/空文本不隐藏，避免用户误以为已复制。
+    // 插件 Copy 走 action.payload；计算结果无 payload 时回退 calcValue。
+    const text = data.payload ?? data.calcValue;
+    if (text) {
       try {
-        await navigator.clipboard.writeText(data.calcValue);
+        await navigator.clipboard.writeText(text);
       } catch (e) {
         console.error("clipboard write failed:", e);
         return; // 保留窗口，让用户察觉并重试
       }
+      hideWindow();
     }
-    hideWindow();
+    // 无文本(空串/缺省):不复制也不隐藏,让用户察觉该结果无可复制内容
     return;
   }
 
