@@ -49,8 +49,9 @@ pub struct SearchItem {
     pub score: f32,
     /// 动作(含 payload)。
     pub action: SearchAction,
-    /// 产出该项的引擎 id(tie-break + 调试)。
-    pub source: &'static str,
+    /// 产出该项的引擎/插件 id(tie-break + 调试)。引擎 id 多为静态,但插件 id 是
+    /// 运行时字符串,故用 String。
+    pub source: String,
 }
 
 impl SearchItem {
@@ -121,7 +122,7 @@ mod tests {
             action: SearchAction::Open {
                 path: "C:\\a.lnk".into(),
             },
-            source: "start_menu",
+            source: "start_menu".into(),
         };
         let e = item.into_app_entry();
         assert_eq!(e.name, "App");
@@ -139,7 +140,7 @@ mod tests {
             subtitle: Some("按 Enter 复制结果".into()),
             score: 1.0,
             action: SearchAction::Copy { text: "2".into() },
-            source: "calc",
+            source: "calc".into(),
         };
         let e = item.into_app_entry();
         assert_eq!(e.name, "= 2"); // 前端从 name 去 "= " 前缀取 calcValue

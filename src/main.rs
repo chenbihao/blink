@@ -6,6 +6,7 @@ mod config;
 mod history;
 mod hotkey;
 mod logging;
+mod plugin;
 mod search;
 mod service;
 mod window;
@@ -124,7 +125,7 @@ fn main() {
             let search_service = std::sync::Arc::new(search::SearchService::new(
                 app.handle().clone(),
                 pool.clone(),
-                search::build_engines(),
+                search::build_engines(app.handle()),
             ));
             app.manage(search_service.clone());
 

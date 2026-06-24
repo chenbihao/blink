@@ -27,7 +27,7 @@ impl SearchEngine for CalcEngine {
                 subtitle: Some("按 Enter 复制结果".into()),
                 score: 1.0, // 计算命中置信度最高,排首位
                 action: SearchAction::Copy { text: result },
-                source: "calc",
+                source: "calc".into(),
             }],
             None => Vec::new(),
         }

@@ -144,7 +144,7 @@ fn fuse_items(items: Vec<SearchItem>, limit: usize) -> Vec<SearchItem> {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| source_rank(a.source).cmp(&source_rank(b.source)))
+            .then_with(|| source_rank(&a.source).cmp(&source_rank(&b.source)))
     });
     deduped.truncate(limit);
     deduped
@@ -164,14 +164,14 @@ mod tests {
     use super::*;
     use crate::search::engine::SearchAction;
 
-    fn item(id: &str, score: f32, source: &'static str) -> SearchItem {
+    fn item(id: &str, score: f32, source: &str) -> SearchItem {
         SearchItem {
             id: id.into(),
             title: id.into(),
             subtitle: None,
             score,
             action: SearchAction::Open { path: id.into() },
-            source,
+            source: source.into(),
         }
     }
 

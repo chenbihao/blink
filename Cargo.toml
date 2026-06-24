@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "Blink — Windows Universal Launcher"
 
+[workspace]
+members = ["plugins/examples/echo"]
+
 [profile.release]
 codegen-units = 1
 lto = true
@@ -28,7 +31,7 @@ tauri-plugin-autostart = "2.4"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tokio = { version = "1.52.3", features = ["sync", "time"] }
+tokio = { version = "1.52.3", features = ["sync", "time", "process", "io-util"] }
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
@@ -39,6 +42,7 @@ windows = { version = "0.62.2", features = [
     "Win32_System_Ole",
     "Win32_Storage_FileSystem",
     "Win32_System",
+    "Win32_System_Threading",
 ] }
 
 [build-dependencies]

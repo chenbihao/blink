@@ -47,7 +47,7 @@ impl SearchEngine for MockSlowEngine {
             subtitle: Some("MockSlowEngine — 验证渐进式增量".into()),
             score: 0.5,
             action: SearchAction::Open { path: String::new() }, // 空 path = 纯展示
-            source: "mock_slow",
+            source: "mock_slow".into(),
         }]
     }
 }

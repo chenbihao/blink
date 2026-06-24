@@ -20,7 +20,7 @@ export function init() {
     const payload = event.payload;
     if (!payload || payload.seq !== seq) return;
     if (!queryEl.value.trim()) return;
-    results.merge(payload.items);
+    results.merge(payload.items, payload.seq);
   });
 }
 
@@ -44,7 +44,7 @@ function onInput() {
       const apps = await searchApps(q, mySeq);
       // 丢弃过期响应：用户已输入新 query 或已复位
       if (mySeq !== seq) return;
-      results.render(apps);
+      results.render(apps, mySeq);
     } catch (e) {
       console.error("search_apps failed:", e);
     }

@@ -89,13 +89,19 @@ use start_menu_engine::StartMenuEngine;
 mod service;
 pub use service::SearchService;
 
-/// 构造引擎列表(sync: calc + start_menu)。
-/// async lane 的 mock 慢引擎仅在 debug + 环境变量 BLINK_MOCK_SLOW_ENGINE=1 时追加。
-pub fn build_engines() -> Vec<std::sync::Arc<dyn SearchEngine>> {
+/// 构造引擎列表(sync: calc + start_menu;async: plugin + 可选 mock)。
+/// 需要 `&AppHandle` 以扫描 builtin 插件目录。
+pub fn build_engines(app: &tauri::AppHandle) -> Vec<std::sync::Arc<dyn SearchEngine>> {
     let mut engines: Vec<std::sync::Arc<dyn SearchEngine>> = vec![
         std::sync::Arc::new(CalcEngine),
         std::sync::Arc::new(StartMenuEngine::new()),
     ];
+    // 插件引擎(async lane):聚合所有 builtin 插件。
+    let plugins = crate::plugin::load_builtin_plugins(app);
+    if !plugins.is_empty() {
+        tracing::info!(count = plugins.len(), "PluginEngine 已接入 async lane");
+        engines.push(std::sync::Arc::new(crate::plugin::PluginEngine::new(plugins)));
+    }
     if MockSlowEngine::enabled() {
         tracing::info!("MockSlowEngine 已启用(BLINK_MOCK_SLOW_ENGINE=1)");
         engines.push(std::sync::Arc::new(MockSlowEngine));

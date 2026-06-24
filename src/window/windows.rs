@@ -10,9 +10,10 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
+use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallWindowProcW, GetAncestor, GetForegroundWindow, SetWindowLongPtrW, GA_ROOT, GWLP_WNDPROC,
-    WNDPROC,
+    CallWindowProcW, GetForegroundWindow, GetWindowThreadProcessId, SetWindowLongPtrW,
+    GWLP_WNDPROC, WNDPROC,
 };
 
 const ST_HIDDEN: u8 = 0;
@@ -89,6 +90,11 @@ pub fn start_watchdog(app: AppHandle) {
                 continue;
             }
             let fg = unsafe { GetForegroundWindow() };
+            // fg == NULL:焦点真空(系统正在切换前台窗口的瞬态,如刚拉起子进程时)。
+            // 这不代表用户切到了别的窗口,据此隐藏会误伤——跳过本轮,等下次轮询。
+            if fg.0.is_null() {
+                continue;
+            }
             if !is_self_foreground(&app, fg) {
                 tracing::info!(since_invoke, "watchdog: hide! fg=0x{:x}", fg.0 as isize);
                 hide(&app, "watchdog");
@@ -141,17 +147,20 @@ unsafe extern "system" fn sysmenu_block_proc(
 }
 
 /// 前台窗口是否为我们的主窗口（拿不到窗口/句柄时保守返回 true，避免误隐藏）。
-fn is_self_foreground(app: &AppHandle, fg: windows::Win32::Foundation::HWND) -> bool {
-    let Some(win) = app.get_webview_window("main") else {
-        return true;
-    };
-    let Ok(hwnd) = win.hwnd() else {
-        return true;
-    };
-    // win.hwnd() 返回 WebView2 控件 HWND（内层子窗口），GetForegroundWindow() 返回
-    // 外层 Tauri 窗口 HWND。用 GetAncestor(GA_ROOT) 向上追溯到顶级窗口再比较。
-    let self_hwnd = unsafe { GetAncestor(windows::Win32::Foundation::HWND(hwnd.0 as _), GA_ROOT) };
-    fg.0 as isize == self_hwnd.0 as isize
+/// 前台窗口是否属于本应用(按进程 ID 判定)。
+///
+/// 不再死比单个主窗口 HWND——那样会把「同属本进程的其它窗口」(debug 下 cargo run 的
+/// 控制台、子进程交互产生的瞬时窗口等)误判为「别人」而隐藏。只要前台窗口的进程 ==
+/// 本进程,就算焦点仍在自己,不隐藏。
+fn is_self_foreground(_app: &AppHandle, fg: windows::Win32::Foundation::HWND) -> bool {
+    let mut fg_pid: u32 = 0;
+    unsafe { GetWindowThreadProcessId(fg, Some(&mut fg_pid)) };
+    if fg_pid == 0 {
+        return true; // 拿不到 PID:保守不隐藏
+    }
+    let self_pid = unsafe { GetCurrentProcessId() };
+    tracing::debug!(fg_pid, self_pid, fg = format!("0x{:x}", fg.0 as isize), "watchdog: 前台判定");
+    fg_pid == self_pid
 }
 
 /// 计算窗口在前台应用所在显示器的位置：中上部居中（物理像素）。

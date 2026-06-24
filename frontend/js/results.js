@@ -15,33 +15,54 @@ const PAGE_SIZE = 9;
 
 /** 后端返回的全部结果（数据，非 DOM）。 */
 let allItems = [];
+/** 当前结果所属的请求 seq；render / merge 据此协调（同一 seq 合并，新 seq 重置）。 */
+let currentSeq = -1;
 /** 当前页号（0-based）。 */
 let page = 0;
 /** 当前页内的相对选中索引（0 .. 本页条数-1）。 */
 let selected = 0;
 
-/** 渲染结果数组（AppEntry[]）：重置到第一页。 */
-export function render(apps) {
-  allItems = apps;
-  page = 0;
-  selected = 0;
-  renderPage();
+/**
+ * 渲染 sync lane 首批结果（AppEntry[]）。
+ * @param seq 该结果所属请求序号。
+ *
+ * 与 merge 共用 seq 协调：sync 首批(render)与 async 增量(merge)是两条独立异步流，
+ * 对同一 seq 可能任意顺序到达。新 seq → 重置为该批；同一 seq → 并入（避免后到的
+ * render 用空结果冲掉已 merge 的插件结果，反之亦然）。
+ */
+export function render(apps, seq) {
+  const didReset = ensureSeq(seq);
+  appendNew(apps, didReset);
 }
 
 /**
- * 合并 async lane 增量结果（blink://results）：append 去重，不全局重排，不打断当前选中。
+ * 合并 async lane 增量结果（blink://results）：append 去重，不全局重排，不打断选中。
+ * @param seq 该增量所属请求序号。
  *
- * 渐进式设计（0.2 §2.3）：sync 首批已渲染，慢引擎结果到达后追加到列表末尾。
- * 用去重键避免与首批重复；合并后按当前选中项的 key 恢复选中位置（通常 append 不影响
- * 选中，恢复逻辑为防御性）。无新项则不重渲染，避免无谓抖动。
+ * 渐进式设计（0.2 §2.3）：慢引擎结果到达后追加。若增量先于 render 到达（插件比
+ * sync lane 快，进程预热后常见），以它为新基底，render 随后并入。
  */
-export function merge(items) {
-  if (!items || !items.length || !allItems.length) return;
+export function merge(items, seq) {
+  const didReset = ensureSeq(seq);
+  appendNew(items, didReset);
+}
 
+/** 切到新 seq 时重置结果集；返回是否发生了重置。 */
+function ensureSeq(seq) {
+  if (seq === currentSeq) return false;
+  currentSeq = seq;
+  allItems = [];
+  page = 0;
+  selected = 0;
+  return true;
+}
+
+/** 去重 append 新项；有新增或刚重置则重渲染（保持当前选中项身份）。 */
+function appendNew(items, didReset) {
   const activeKey = activeItemKey();
   const seen = new Set(allItems.map(itemKey));
   let changed = false;
-  for (const item of items) {
+  for (const item of items || []) {
     const key = itemKey(item);
     if (!seen.has(key)) {
       allItems.push(item);
@@ -49,8 +70,7 @@ export function merge(items) {
       changed = true;
     }
   }
-  if (!changed) return;
-
+  if (!changed && !didReset) return; // 无变化且非新批：不抖动
   restoreSelection(activeKey);
   renderPage();
 }
@@ -58,7 +78,9 @@ export function merge(items) {
 /** 清空列表与状态。 */
 export function clear() {
   allItems = [];
+  currentSeq = -1;
   pageLis = [];
+  liCache = new Map();
   page = 0;
   selected = 0;
   resultsEl.innerHTML = "";
@@ -159,6 +181,9 @@ function pageItems() {
   return pageLis;
 }
 
+/** key → 已构建的 <li> 节点缓存,跨 renderPage 复用,避免图标等 DOM 重建导致的白闪。 */
+let liCache = new Map();
+
 function hasNextPage() {
   return (page + 1) * PAGE_SIZE < allItems.length;
 }
@@ -168,20 +193,48 @@ function pageLength(p) {
   return Math.min(PAGE_SIZE, allItems.length - p * PAGE_SIZE);
 }
 
-/** 渲染当前页：切片 → 重建 DOM → 更新高亮、提示栏、窗口高度。 */
+/**
+ * 渲染当前页：按 key 复用已有 <li>（不重建未变项的 DOM，图标 img 不重新加载 → 不白闪），
+ * 仅新建缺失项、更新页内 badge 编号，并按本页 key 集合重排/裁剪缓存。
+ */
 function renderPage() {
   const start = page * PAGE_SIZE;
   const slice = allItems.slice(start, start + PAGE_SIZE);
 
-  resultsEl.innerHTML = "";
-  pageLis = slice.map((app, i) => createItem(app, i));
-  pageLis.forEach((li) => resultsEl.appendChild(li));
+  const nextCache = new Map();
+  const lis = slice.map((app, i) => {
+    const key = itemKey(app);
+    let li = liCache.get(key);
+    if (!li) {
+      li = createItem(app, i);
+    } else {
+      updateBadge(li, i); // 复用节点：页内位置可能变,刷新 Alt 角标编号
+    }
+    nextCache.set(key, li);
+    return li;
+  });
+
+  // 用本页节点重排 DOM:replaceChildren 对已存在的子节点是移动而非重建(不触发 img
+  // 重载),不在本页的旧节点被自动移除。
+  resultsEl.replaceChildren(...lis);
+  pageLis = lis;
+  liCache = nextCache;
 
   resultsEl.classList.toggle("has-items", slice.length > 0);
   // selected 防越界（末页不足一页时）
   if (selected > slice.length - 1) selected = Math.max(slice.length - 1, 0);
   updateSelection();
   syncWindowSize();
+}
+
+/** 刷新某 <li> 的 Alt 数字角标编号（复用节点、页内位置变化时调用）。 */
+function updateBadge(li, i) {
+  const badge = li.querySelector(".item-badge");
+  if (badge && i < 9) {
+    badge.textContent = String(i + 1);
+  } else if (badge) {
+    badge.remove();
+  }
 }
 
 /** @param i 页内索引（0-based）——Alt 角标编号与之对齐，每页从 1 开始。 */

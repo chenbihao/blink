@@ -141,7 +141,7 @@ fn normalize_to_items(scored: Vec<(u32, AppEntry)>) -> Vec<SearchItem> {
                 subtitle: e.description,
                 score,
                 action: SearchAction::Open { path: e.lnk_path },
-                source: "start_menu",
+                source: "start_menu".into(),
             }
         })
         .collect()
