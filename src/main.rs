@@ -7,6 +7,7 @@ mod history;
 mod hotkey;
 mod logging;
 mod search;
+mod service;
 mod window;
 
 use tauri::{
@@ -68,17 +69,14 @@ fn main() {
             tauri::async_runtime::block_on(config::init_config(&pool))
                 .expect("failed to init config");
 
-            // 读取热键配置
+            // 读取应用配置(快照)
             let app_config = tauri::async_runtime::block_on(config::get_config(&pool));
-            let hotkey_config = app_config.hotkey.clone();
 
             // 日志级别 reload 到配置值（init 时为默认 error）
             logging::update_level(&app_config.log_level);
 
-            app.manage(pool);
-
-            // 搜索缓存：后台预扫开始菜单 + 定时增量刷新（避免每次输入重扫）
-            search::init();
+            // pool 交给 Tauri 管理(command 层用 app.state 取);AppContext 再留一份 clone
+            app.manage(pool.clone());
 
             // 同步开机自启（确保注册表 Run 项与配置一致，覆盖用户在 app 外改动的情况）
             {
@@ -121,26 +119,32 @@ fn main() {
                 })
                 .build(app)?;
 
-            // 失焦隐藏看门狗
-            window::start_watchdog(app.handle().clone());
+            // 构造 SearchService(多路引擎)。command 层经 app.state 取用,故单独 manage;
+            // 引擎后台任务(开始菜单预扫等)由 SearchLifecycle 在下面 services 启动时触发。
+            let search_service = std::sync::Arc::new(search::SearchService::new(
+                app.handle().clone(),
+                pool.clone(),
+                search::build_engines(),
+            ));
+            app.manage(search_service.clone());
 
-            // 启动热键监听（使用配置的快捷键）
-            let app_handle = app.handle().clone();
-            let mut hotkey_rx = hotkey::start(hotkey_config, app_config.tap_threshold);
-            tauri::async_runtime::spawn(async move {
-                while let Some(ev) = hotkey_rx.recv().await {
-                    match ev {
-                        hotkey::HotkeyEvent::Tap(_) => {
-                            // toggle：已可见则隐藏（仅快捷键；单实例重复运行仍走 invoke 总是显示）
-                            if window::is_visible() {
-                                window::hide(&app_handle, "toggle");
-                            } else {
-                                window::invoke(&app_handle);
-                            }
-                        }
-                    }
+            // 后台服务编排:按依赖拓扑顺序启动(搜索预扫 / 看门狗 / 热键监听等)。
+            // pool 与 config 就绪后才构建 AppContext —— 前置初始化(DB/配置/日志/托盘/窗口)
+            // 仍留在 setup 中,它们是构建 ctx 的前提。
+            let ctx = service::AppContext {
+                app: app.handle().clone(),
+                pool,
+                config: app_config,
+            };
+            let services = service::all_services(search_service);
+            for svc in &services {
+                if let Err(e) = tauri::async_runtime::block_on(svc.start(&ctx)) {
+                    tracing::error!(service = svc.name(), error = %e, "service start failed");
                 }
-            });
+            }
+            // 持有服务列表,保证其生命周期与 app 一致。
+            // 0.2.1 各服务随进程退出即可,不接退出钩子;stop / 逆序清理留到 0.3 插件进程。
+            app.manage(services);
 
             Ok(())
         })

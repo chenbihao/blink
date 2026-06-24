@@ -3,9 +3,9 @@
 
 import { invoke } from "./tauri.js";
 
-/** 搜索应用（含计算结果），返回 AppEntry 数组。 */
-export function searchApps(query) {
-  return invoke("search_apps", { query });
+/** 搜索应用（含计算结果），返回 AppEntry 数组。seq 为请求序号（后端 async 增量回带，前端校验）。 */
+export function searchApps(query, seq) {
+  return invoke("search_apps", { query, seq });
 }
 
 /** 启动应用（打开 lnk）。 */

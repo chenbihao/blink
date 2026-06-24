@@ -72,9 +72,36 @@ pub use windows::{scan_start_menu, launch, roots_modified};
 #[cfg(target_os = "windows")]
 pub mod icon;
 
-// 搜索结果缓存(引擎内部数据,为阶段三 StartMenuEngine 铺路,见 0.2 设计 §2.4)
-mod cache;
-pub use cache::{init, get_entries};
+// 多路搜索引擎抽象(0.2.2,见 0.2 设计 §2)
+pub(crate) mod engine;
+#[allow(unused_imports)] // Lane/QueryContext 等供引擎与 service 内部用
+pub use engine::{Lane, QueryContext, SearchAction, SearchEngine, SearchItem};
+
+// 具体引擎
+mod calc_engine;
+mod mock_slow_engine;
+mod start_menu_engine;
+use calc_engine::CalcEngine;
+use mock_slow_engine::MockSlowEngine;
+use start_menu_engine::StartMenuEngine;
+
+// 多路搜索服务:路由 + 融合 + 渐进式调度
+mod service;
+pub use service::SearchService;
+
+/// 构造引擎列表(sync: calc + start_menu)。
+/// async lane 的 mock 慢引擎仅在 debug + 环境变量 BLINK_MOCK_SLOW_ENGINE=1 时追加。
+pub fn build_engines() -> Vec<std::sync::Arc<dyn SearchEngine>> {
+    let mut engines: Vec<std::sync::Arc<dyn SearchEngine>> = vec![
+        std::sync::Arc::new(CalcEngine),
+        std::sync::Arc::new(StartMenuEngine::new()),
+    ];
+    if MockSlowEngine::enabled() {
+        tracing::info!("MockSlowEngine 已启用(BLINK_MOCK_SLOW_ENGINE=1)");
+        engines.push(std::sync::Arc::new(MockSlowEngine));
+    }
+    engines
+}
 
 // 通用逻辑
 
@@ -98,15 +125,19 @@ pub fn to_pinyin_initials(s: &str) -> String {
         .collect()
 }
 
-/// nucleo fuzzy 搜索，同时匹配原始名和拼音首字母，取最高分，融合历史权重，返回 top-N。
-pub fn fuzzy_search(
+/// fuzzy 打分核心：返回 `(加权后分数, 条目)`，按分降序、取 top-N。
+///
+/// 分数 = nucleo（原名/拼音取最高）+ 历史加权 `ln(hit+1)*100`。raw 分数供引擎做
+/// top-relative 归一化（见 0.2 设计 §2.3）。空 query 返回前 limit 条（分数置 0）。
+/// 由 `StartMenuEngine` 调用(SearchService 接管搜索后,这是唯一打分入口)。
+pub fn fuzzy_score_entries(
     query: &str,
     entries: &[AppEntry],
     history: &HashMap<String, i64>,
     limit: usize,
-) -> Vec<AppEntry> {
+) -> Vec<(u32, AppEntry)> {
     if query.is_empty() {
-        return entries.iter().take(limit).cloned().collect();
+        return entries.iter().take(limit).map(|e| (0, e.clone())).collect();
     }
     let mut matcher = Matcher::new(Config::DEFAULT);
     let pattern = Pattern::new(query, CaseMatching::Smart, Normalization::Smart, AtomKind::Fuzzy);
@@ -139,6 +170,59 @@ pub fn fuzzy_search(
     scored
         .into_iter()
         .take(limit)
-        .map(|(_, e)| e.clone())
+        .map(|(s, e)| (s, e.clone()))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(name: &str, lnk: &str) -> AppEntry {
+        AppEntry {
+            name: name.into(),
+            pinyin_name: to_pinyin_initials(name),
+            lnk_path: lnk.into(),
+            is_calc: false,
+            description: Some(lnk.into()),
+            action: Action {
+                kind: ActionKind::Open,
+                hint: None,
+            },
+        }
+    }
+
+    #[test]
+    fn pinyin_initials_basic() {
+        assert_eq!(to_pinyin_initials("微信"), "wx");
+        assert_eq!(to_pinyin_initials("WeChat"), "wechat");
+    }
+
+    #[test]
+    fn empty_query_returns_prefix_with_zero_score() {
+        let entries = vec![entry("Alpha", "a"), entry("Beta", "b"), entry("Gamma", "c")];
+        let h = HashMap::new();
+        let r = fuzzy_score_entries("", &entries, &h, 2);
+        assert_eq!(r.len(), 2);
+        assert!(r.iter().all(|(s, _)| *s == 0));
+        assert_eq!(r[0].1.name, "Alpha");
+    }
+
+    #[test]
+    fn matches_by_pinyin_initials() {
+        let entries = vec![entry("微信", "wechat.lnk"), entry("Word", "word.lnk")];
+        let h = HashMap::new();
+        let r = fuzzy_score_entries("wx", &entries, &h, 10);
+        assert!(r.iter().any(|(_, e)| e.name == "微信"));
+    }
+
+    #[test]
+    fn history_weight_boosts_score() {
+        let entries = vec![entry("Code", "code.lnk")];
+        let mut h = HashMap::new();
+        let base = fuzzy_score_entries("code", &entries, &h, 1)[0].0;
+        h.insert("code.lnk".to_string(), 100);
+        let boosted = fuzzy_score_entries("code", &entries, &h, 1)[0].0;
+        assert!(boosted > base, "history hits should raise score");
+    }
 }

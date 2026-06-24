@@ -10,32 +10,18 @@ pub fn hide_window(app: tauri::AppHandle) {
     crate::window::hide(&app, "ESC");
 }
 
-/// 前端输入时调用：先尝试实时计算，失败再模糊搜索开始菜单（融合历史权重）。
+/// 前端输入时调用:经 SearchService 多路召回(sync lane 同步返回首批)。
 ///
-// TODO: 搜索缓存 — 每次调用都重新扫描开始菜单，频繁输入时可能卡顿。
-//   后续拆分为独立搜索引擎：开始菜单搜索、快捷方式搜索、文件搜索、意图识别等，
-//   每个引擎独立缓存/增量更新，commands 层只做路由和结果合并。
+/// calc / 应用搜索 / 历史融合等逻辑已下沉到各 SearchEngine + SearchService(见 0.2 设计 §2)。
+/// `seq` 为前端递增请求序号,async 增量结果(blink://results)回带同一 seq 供前端校验。
 #[tauri::command]
-pub async fn search_apps(query: String, app: tauri::AppHandle) -> Vec<crate::search::AppEntry> {
-    // 优先尝试实时计算（如 "1+1" → "2"）
-    if let Some(result) = crate::calc::try_eval(&query) {
-        return vec![crate::search::AppEntry {
-            name: format!("= {result}"),
-            pinyin_name: String::new(),
-            lnk_path: String::new(),
-            is_calc: true,
-            description: Some("按 Enter 复制结果".into()),
-            action: crate::search::Action {
-                kind: crate::search::ActionKind::Copy,
-                hint: None,
-            },
-        }];
-    }
-    // 走搜索（融合历史权重）。实测纯内存路径 ~1ms（283 条），远低于 20ms 目标。
-    let entries = crate::search::get_entries().await;
-    let pool = app.state::<sqlx::SqlitePool>();
-    let history = crate::history::get_weights(&pool).await;
-    crate::search::fuzzy_search(&query, &entries, &history, 50)
+pub async fn search_apps(
+    query: String,
+    seq: u64,
+    app: tauri::AppHandle,
+) -> Vec<crate::search::AppEntry> {
+    let service = app.state::<std::sync::Arc<crate::search::SearchService>>();
+    service.search(&query, seq).await
 }
 
 /// 前端回车/点击时调用：启动选中的应用（打开 lnk）并记录历史。

@@ -49,8 +49,8 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 |---|---|---|
 | **0.1** | P0 基础交互（热键/窗口/焦点/IME）+ P1 搜索（应用/计算/历史权重）+ 配置系统/设置页/热键录制 | ✅ |
 | **0.2.0** | 0.1 收尾：搜索缓存、开机自启、tracing 日志、窗口定位、应用图标 | ✅ |
-| **0.2.1** | Service 骨架（现有模块重构进 Service 框架，功能零变化） | ⬜ |
-| **0.2.2** | SearchService + SearchEngine trait + 渐进式多路搜索（sync/async 双 lane） | ⬜ |
+| **0.2.1** | Service 骨架（现有模块重构进 Service 框架，功能零变化） | ✅ |
+| **0.2.2** | SearchService + SearchEngine trait + 渐进式多路搜索（sync/async 双 lane） | ✅ |
 | **0.3+** | 插件系统（独立进程 + stdio JSON + manifest）/ 意图引擎（规则→向量→AI）/ Context 层 | ⬜ |
 
 **改核心前必读 `production/0.2-core-plugin-design.md`**（Service/SearchEngine/Plugin/Intent 架构设计）。

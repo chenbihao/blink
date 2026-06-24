@@ -28,6 +28,33 @@ export function render(apps) {
   renderPage();
 }
 
+/**
+ * 合并 async lane 增量结果（blink://results）：append 去重，不全局重排，不打断当前选中。
+ *
+ * 渐进式设计（0.2 §2.3）：sync 首批已渲染，慢引擎结果到达后追加到列表末尾。
+ * 用去重键避免与首批重复；合并后按当前选中项的 key 恢复选中位置（通常 append 不影响
+ * 选中，恢复逻辑为防御性）。无新项则不重渲染，避免无谓抖动。
+ */
+export function merge(items) {
+  if (!items || !items.length || !allItems.length) return;
+
+  const activeKey = activeItemKey();
+  const seen = new Set(allItems.map(itemKey));
+  let changed = false;
+  for (const item of items) {
+    const key = itemKey(item);
+    if (!seen.has(key)) {
+      allItems.push(item);
+      seen.add(key);
+      changed = true;
+    }
+  }
+  if (!changed) return;
+
+  restoreSelection(activeKey);
+  renderPage();
+}
+
 /** 清空列表与状态。 */
 export function clear() {
   allItems = [];
@@ -101,6 +128,28 @@ export function hasItems() {
 }
 
 // ── 内部 ──────────────────────────────────────────────────────────────────────
+
+/** 去重键：应用按路径（小写），计算结果按名，其余按 kind+名+描述。 */
+function itemKey(item) {
+  if (item.lnk_path) return "open:" + item.lnk_path.toLowerCase();
+  if (item.is_calc) return "calc:" + item.name;
+  return (item.action?.kind || "x") + ":" + item.name + ":" + (item.description || "");
+}
+
+/** 当前选中项（数据，从 allItems 全局索引取）的去重键；无则 null。 */
+function activeItemKey() {
+  const item = allItems[page * PAGE_SIZE + selected];
+  return item ? itemKey(item) : null;
+}
+
+/** merge 后按 key 恢复选中位置（找不到则保持原 page/selected，renderPage 内会夹紧）。 */
+function restoreSelection(key) {
+  if (!key) return;
+  const idx = allItems.findIndex((x) => itemKey(x) === key);
+  if (idx < 0) return;
+  page = Math.floor(idx / PAGE_SIZE);
+  selected = idx % PAGE_SIZE;
+}
 
 /** 当前页的 DOM 列表（renderPage 时构建并缓存）。 */
 let pageLis = [];
