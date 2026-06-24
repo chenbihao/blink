@@ -1,10 +1,14 @@
 //! Windows 平台特定的热键实现：WH_KEYBOARD_LL 低级键盘钩子。
 //!
-//! 状态机设计：
-//! - 修饰键按下：记录到 pressed_modifiers
-//! - 非修饰键按下：记录为主键，快照当前修饰键
-//! - 主键松开：检查匹配并触发
-//! - 修饰键松开：如果是单独修饰键快捷键，检查匹配并触发
+//! 触发判定（tap/hold 状态机）设计：
+//! - **不维护按键累积镜像**。Windows 已维护权威的键物理态(GetAsyncKeyState),应用层
+//!   再累积一份(靠 down/up 事件 push/remove)会被系统注入的合成事件(AltGr 假 Ctrl、
+//!   Alt+Space 额外 Alt、IDEA 瞬时 Alt down/up、WebView2 吞 Alt up)打乱且无法自愈。
+//! - 改为:只在**主键 down/up 边界**现查修饰键物理态。状态机仅 3 个字段,不依赖任何
+//!   需要 down/up 配对的累积量。
+//! - 主键 down 且修饰键满足 → armed;armed 后任何异键 down → aborted(判 hold);
+//!   主键 up 时若未 aborted、时长达标 → 触发 Tap(修饰键只在 arm 时现查,keyup 不复查,
+//!   避免快速松手时修饰键略早释放导致漏触发)。
 
 use std::time::{Duration, Instant};
 
@@ -14,40 +18,37 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use super::{HotkeyEvent, get_current_config, get_tap_threshold, send_event};
 
-/// 修饰键 down→up 间隔小于此值即判为系统合成的瞬时事件对（人类松手不可能这么快）。
-/// 用于过滤 IDEA 等程序在组合键触发后注入的虚假 Alt down+up（中和菜单激活），
-/// 否则会让 pressed_modifiers 丢失 Alt，导致「按住 Alt 连按主键」第二次起匹配失败。
-const SYNTHETIC_EVENT_THRESHOLD: Duration = Duration::from_millis(30);
+// ── 修饰键物理态 bitmask ────────────────────────────────────────────────────────
+// 8 个具体修饰键各占一位。用于「现查物理态 → 与配置精确匹配」,替代旧的累积镜像。
+const MOD_LCTRL: u16 = 1 << 0;
+const MOD_RCTRL: u16 = 1 << 1;
+const MOD_LSHIFT: u16 = 1 << 2;
+const MOD_RSHIFT: u16 = 1 << 3;
+const MOD_LALT: u16 = 1 << 4;
+const MOD_RALT: u16 = 1 << 5;
+const MOD_LMETA: u16 = 1 << 6;
+const MOD_RMETA: u16 = 1 << 7;
 
-/// hook 线程私有状态。
+/// hook 线程私有状态(触发判定)。仅 3 个字段,生命周期都限于一次主键 down→up。
 struct State {
-    /// 主键按下时刻（用于 tap/hold 判定）。
+    /// 主键首次 down 时刻(tap/hold 时长判定)。
     down_since: Option<Instant>,
-    /// 按下期间是否出现过其他键（出现 → 判 hold，不唤起）。
+    /// 当前 armed 的目标主键。Some = 主键按下待判定。**非按键镜像**——只记「当前在等
+    /// 哪个主键松开」,一次 down→up 即清。用 String 而非 bool 以稳健处理 autorepeat、
+    /// keyup 配对与运行时配置切换。
+    armed_key: Option<String>,
+    /// armed 后是否出现过其他键 down(出现 → 判 hold,不触发)。
     aborted: bool,
-    /// 当前按下的修饰键集合（左右区分，如 "lalt", "rctrl"）。
-    pressed_modifiers: Vec<String>,
-    /// 当前按下的具体键名集合（用于检测 AltGr 模拟产生的 Ctrl）。
-    pressed_keys: Vec<String>,
-    /// 当前按下的主键。
-    pressed_key: Option<String>,
-    /// 主键按下时的修饰键快照（用于组合键匹配，即使修饰键先松开也能触发）。
-    modifiers_snapshot: Vec<String>,
-    /// 每个修饰键最近一次 DOWN 的时刻（用于识别系统合成的瞬时 down-up 对）。
-    last_mod_down: std::collections::HashMap<String, Instant>,
 }
 
 thread_local! {
     static STATE: std::cell::RefCell<State> = std::cell::RefCell::new(State {
         down_since: None,
+        armed_key: None,
         aborted: false,
-        pressed_modifiers: Vec::new(),
-        pressed_keys: Vec::new(),
-        pressed_key: None,
-        modifiers_snapshot: Vec::new(),
-        last_mod_down: std::collections::HashMap::new(),
     });
 }
+
 
 /// 启动 Windows 钩子线程。
 pub fn start_hook_thread() {
@@ -73,54 +74,97 @@ fn hook_thread_main() {
     }
 }
 
-/// 修饰键归一化（具体键名 → 通用名，用于兼容匹配）。
-fn normalize_modifier_generic(name: &str) -> &str {
+/// 配置修饰键名 → 可接受的物理位集合。通用名(`alt`)= 左右任一;具体名(`lalt`)= 单侧。
+/// 未知名返回 None(→ 不匹配,避免损坏配置宽松放过)。纯函数,可单测。
+fn mask_for_config_modifier(name: &str) -> Option<u16> {
     match name {
-        "lctrl" | "rctrl" => "ctrl",
-        "lshift" | "rshift" => "shift",
-        "lalt" | "ralt" => "alt",
-        _ => name,
+        "ctrl" => Some(MOD_LCTRL | MOD_RCTRL),
+        "lctrl" => Some(MOD_LCTRL),
+        "rctrl" => Some(MOD_RCTRL),
+        "shift" => Some(MOD_LSHIFT | MOD_RSHIFT),
+        "lshift" => Some(MOD_LSHIFT),
+        "rshift" => Some(MOD_RSHIFT),
+        "alt" => Some(MOD_LALT | MOD_RALT),
+        "lalt" => Some(MOD_LALT),
+        "ralt" => Some(MOD_RALT),
+        "meta" => Some(MOD_LMETA | MOD_RMETA),
+        _ => None,
     }
 }
 
-/// 检查是否匹配配置的快捷键。
+/// 取 mask 中最低位(优先消耗的物理位)。
+fn first_set_bit(mask: u16) -> u16 {
+    mask & mask.wrapping_neg()
+}
+
+/// 当前物理修饰键集合是否**精确**满足配置要求。纯函数,可单测。
 ///
-/// 匹配规则：
-/// - 单独修饰键快捷键（如 "ralt"）：主键直接比较
-/// - 组合键：配置中的修饰键必须全部被按下
-///   - 具体键名（如 "ralt"）精确匹配
-///   - 通用键名（如 "alt"）匹配左右任意一侧（兼容旧配置）
-fn is_hotkey_match(config: &crate::config::HotkeyConfig, modifiers: &[String], key: &str) -> bool {
-    // 单独修饰键快捷键（如右 Alt、右 Ctrl、右 Shift）
-    if config.modifiers.is_empty() && super::recorder::is_standalone_modifier_key(&config.key) {
-        return key == config.key;
-    }
-
-    // 组合键匹配
-    if modifiers.len() != config.modifiers.len() {
-        return false;
-    }
-
-    for config_mod in &config.modifiers {
-        // 先尝试精确匹配（如 "ralt" == "ralt"）
-        if modifiers.contains(config_mod) {
-            continue;
-        }
-        // 归一化匹配：将两侧都归一化后比较
-        // - 配置 "ralt" + 按下 "lalt" → "alt" == "alt" → 匹配（不应发生，但安全兜底）
-        // - 配置 "alt" + 按下 "lalt" → "alt" == "alt" → 匹配（兼容旧配置）
-        // - 配置 "ralt" + 按下 "rctrl" → "alt" != "ctrl" → 不匹配 ✓
-        let config_generic = normalize_modifier_generic(config_mod);
-        let matched = modifiers
-            .iter()
-            .any(|m| normalize_modifier_generic(m) == config_generic);
-        if !matched {
+/// 「消耗」模型:每个配置修饰键吃掉一个当前按下的物理位(通用名吃任一侧),最后要求
+/// 无剩余位 —— 即「配置要求的都按下,且没有多余修饰键」。这保证 `Ctrl+Alt+空格`
+/// 不会误触发 `Alt+空格`(remaining 非空 → false)。
+fn modifiers_mask_satisfies_config(config_modifiers: &[String], pressed_mask: u16) -> bool {
+    let mut remaining = pressed_mask;
+    for config_mod in config_modifiers {
+        let Some(allowed) = mask_for_config_modifier(config_mod) else {
+            return false;
+        };
+        let matched = remaining & allowed;
+        if matched == 0 {
             return false;
         }
+        remaining &= !first_set_bit(matched); // 精确消耗一个物理位
     }
-
-    key == config.key
+    remaining == 0
 }
+
+/// AltGr 修正:很多键盘布局下右 Alt(AltGr)按下会伴随系统合成的左 Ctrl,
+/// `GetAsyncKeyState(VK_LCONTROL)` 也显示按下。若不修正,用户用 AltGr 输入字符时
+/// 会误触发含 Ctrl 的组合键。故 RAlt+LCtrl 同时按下时,把 LCtrl 视为合成、从 mask 去掉。
+/// 代价:真实 `LCtrl+RAlt+key` 无法触发 `Ctrl+RAlt+key`(极少见,与旧 recorder 取舍一致)。
+/// 纯函数,可单测。
+fn apply_altgr_correction(mask: u16) -> u16 {
+    if mask & MOD_RALT != 0 && mask & MOD_LCTRL != 0 {
+        mask & !MOD_LCTRL
+    } else {
+        mask
+    }
+}
+
+/// 是否「单独修饰键」配置(modifiers 空 + key 是单修饰键,如右 Alt 单击)。纯函数,可单测。
+fn is_standalone_config(config: &crate::config::HotkeyConfig) -> bool {
+    config.modifiers.is_empty() && super::recorder::is_standalone_modifier_key(&config.key)
+}
+
+/// 查某虚拟键当前物理是否按下(GetAsyncKeyState 高位)。封装以便将来切换实现。
+fn key_down(vk: VIRTUAL_KEY) -> bool {
+    unsafe { GetAsyncKeyState(vk.0 as i32) as u16 & 0x8000 != 0 }
+}
+
+/// 采样当前 8 个修饰键的物理态为 bitmask。
+fn current_modifier_mask() -> u16 {
+    let mut mask = 0u16;
+    if key_down(VK_LCONTROL) { mask |= MOD_LCTRL; }
+    if key_down(VK_RCONTROL) { mask |= MOD_RCTRL; }
+    if key_down(VK_LSHIFT) { mask |= MOD_LSHIFT; }
+    if key_down(VK_RSHIFT) { mask |= MOD_RSHIFT; }
+    if key_down(VK_LMENU) { mask |= MOD_LALT; }
+    if key_down(VK_RMENU) { mask |= MOD_RALT; }
+    if key_down(VK_LWIN) { mask |= MOD_LMETA; }
+    if key_down(VK_RWIN) { mask |= MOD_RMETA; }
+    mask
+}
+
+/// 当前修饰键物理态是否满足配置(在主键 down/up 边界调用)。
+/// standalone 配置无需额外修饰键(主键本身即修饰键),直接 true。
+fn modifiers_satisfied(config: &crate::config::HotkeyConfig) -> bool {
+    if is_standalone_config(config) {
+        return true;
+    }
+    let mask = apply_altgr_correction(current_modifier_mask());
+    modifiers_mask_satisfies_config(&config.modifiers, mask)
+}
+
+
 
 /// 将虚拟键码转换为配置中的键名。
 fn vk_to_key(vk: u32) -> Option<String> {
@@ -196,58 +240,6 @@ fn is_modifier_key(vk: u32) -> bool {
         || vk == VK_RWIN.0 as u32
 }
 
-/// 获取修饰键的具体名称（区分左右）。
-fn normalize_modifier(vk: u32) -> Option<String> {
-    if vk == VK_LCONTROL.0 as u32 || vk == VK_CONTROL.0 as u32 {
-        return Some("lctrl".to_string());
-    }
-    if vk == VK_RCONTROL.0 as u32 {
-        return Some("rctrl".to_string());
-    }
-    if vk == VK_LSHIFT.0 as u32 || vk == VK_SHIFT.0 as u32 {
-        return Some("lshift".to_string());
-    }
-    if vk == VK_RSHIFT.0 as u32 {
-        return Some("rshift".to_string());
-    }
-    if vk == VK_LMENU.0 as u32 || vk == VK_MENU.0 as u32 {
-        return Some("lalt".to_string());
-    }
-    if vk == VK_RMENU.0 as u32 {
-        return Some("ralt".to_string());
-    }
-    if vk == VK_LWIN.0 as u32 || vk == VK_RWIN.0 as u32 {
-        return Some("meta".to_string());
-    }
-    None
-}
-
-/// 用真实物理按键状态补全修饰键快照。
-///
-/// 解决：Windows 对带 Alt 的 WM_SYSKEYDOWN 会补发「虚假 Alt UP」，使事件累积的
-/// pressed_modifiers 丢失 Alt。GetAsyncKeyState 高位为 1 表示该键**当前物理按下**，
-/// 不受虚假 UP 影响。把物理按着却不在快照里的修饰键补回（左右区分，与配置键名一致）。
-fn merge_physical_modifiers(snapshot: &mut Vec<String>) {
-    // (虚拟键, 键名) —— 左右分开查，对齐 normalize_modifier 的命名
-    const KEYS: &[(VIRTUAL_KEY, &str)] = &[
-        (VK_LMENU, "lalt"),
-        (VK_RMENU, "ralt"),
-        (VK_LCONTROL, "lctrl"),
-        (VK_RCONTROL, "rctrl"),
-        (VK_LSHIFT, "lshift"),
-        (VK_RSHIFT, "rshift"),
-        (VK_LWIN, "meta"),
-        (VK_RWIN, "meta"),
-    ];
-    for (vk, name) in KEYS {
-        // 高位置 1 = 物理按下
-        let pressed = unsafe { GetAsyncKeyState(vk.0 as i32) } as u16 & 0x8000 != 0;
-        if pressed && !snapshot.iter().any(|m| m == name) {
-            snapshot.push(name.to_string());
-        }
-    }
-}
-
 /// 低级键盘钩子回调：tap/hold 状态机。全程放行，绝不吞键。
 unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     const HC_ACTION: i32 = 0;
@@ -277,141 +269,55 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
 
         STATE.with(|cell| {
             let mut s = cell.borrow_mut();
+            let key = vk_to_key(vk);
 
-            if is_modifier_key(vk) {
-                // ── 修饰键处理 ──
-                let modifier = normalize_modifier(vk);
-                let specific_key = vk_to_key(vk);
-
-                if is_down {
-                    // 记录修饰键
-                    if let Some(m) = &modifier {
-                        if !s.pressed_modifiers.contains(m) {
-                            s.pressed_modifiers.push(m.clone());
-                        }
-                        // 记录本次 DOWN 时刻，供 UP 时识别系统合成的瞬时 down-up 对
-                        s.last_mod_down.insert(m.clone(), Instant::now());
-                    }
-                    // 记录按下的具体键（用于 AltGr 模拟检测）
-                    if let Some(ref sk) = specific_key {
-                        if !s.pressed_keys.contains(sk) {
-                            s.pressed_keys.push(sk.clone());
-                        }
-                    }
-
-                    // AltGr 模拟处理：VK_RMENU 按下时，如果 "lctrl" 在 pressed_modifiers
-                    // 中但不是真实按下的键（pressed_keys 中没有 "lctrl"），说明是系统
-                    // 模拟的 Ctrl+Alt，需要移除模拟的 "lctrl"。
-                    // 注：如果用户真的先按了 Ctrl 再按 RightAlt，Ctrl 也会被移除（极少数场景）。
-                    if vk == VK_RMENU.0 as u32 {
-                        if !s.pressed_keys.contains(&"lctrl".to_string()) {
-                            s.pressed_modifiers.retain(|x| x != "lctrl");
-                        }
-                    }
-
-                    // 检查是否是配置的单独修饰键快捷键
-                    if let Some(ref sk) = specific_key {
-                        if config.modifiers.is_empty() && *sk == config.key {
-                            s.pressed_key = Some(sk.clone());
-                            s.down_since = Some(Instant::now());
-                        }
-                    }
-                } else if is_up {
-                    // 检查单独修饰键快捷键
-                    if let Some(ref key) = s.pressed_key {
-                        if super::recorder::is_standalone_modifier_key(key) {
-                            if !s.aborted {
-                                if let Some(since) = s.down_since.take() {
-                                    if since.elapsed() <= Duration::from_millis(tap_threshold) {
-                                        send_event(HotkeyEvent::Tap(Instant::now()));
-                                    }
-                                }
-                            }
-                            // 重置状态
-                            s.pressed_key = None;
-                            s.down_since = None;
-                            s.aborted = false;
-                        }
-                    }
-
-                    // 移除修饰键。
-                    // 例外：配置为组合键时，识别并忽略系统合成的「瞬时 down-up 对」——
-                    // IDEA 等把 Alt 当菜单助记键的程序，会在组合键触发后注入一对间隔极短的
-                    // Alt down+up（中和菜单激活），使 pressed_modifiers 丢失 Alt，导致「按住 Alt
-                    // 连按主键」第二次起匹配失败。人类松开不可能这么快，故据此判为合成、跳过移除。
-                    // 仅组合键启用（单独修饰键快捷键 config.modifiers 为空，不受影响，避免误伤其快速 tap）。
-                    if let Some(m) = &modifier {
-                        let synthetic = !config.modifiers.is_empty()
-                            && s
-                                .last_mod_down
-                                .get(m)
-                                .map_or(false, |t| t.elapsed() < SYNTHETIC_EVENT_THRESHOLD);
-                        if synthetic {
-                            tracing::trace!(modifier = %m, "hotkey: 忽略系统合成的瞬时 Alt UP（保留按下态）");
-                        } else {
-                            s.pressed_modifiers.retain(|x| x != m);
-                            s.last_mod_down.remove(m); // 真实松开：清理记录，避免陈旧时刻误判
-                        }
-                    }
-                    if let Some(sk) = &specific_key {
-                        s.pressed_keys.retain(|x| x != sk);
-                    }
-
-                    // 如果所有修饰键都松开，重置状态
-                    if s.pressed_modifiers.is_empty() && s.pressed_key.is_none() {
-                        s.down_since = None;
-                        s.aborted = false;
-                    }
-                }
-            } else {
-                // ── 非修饰键处理 ──
-                let key = vk_to_key(vk);
-
-                if is_down {
-                    if let Some(k) = key {
-                        // 记录主键和修饰键快照
-                        s.pressed_key = Some(k.clone());
-                        s.modifiers_snapshot = s.pressed_modifiers.clone();
-                        // 物理状态补全：Windows 在带 Alt 的 WM_SYSKEYDOWN 触发后会补发
-                        // 一个「虚假的 Alt UP」（结束系统菜单激活），导致 pressed_modifiers
-                        // 丢失 Alt。但用户物理上仍按着——用 GetAsyncKeyState 查真实物理状态，
-                        // 把按着却不在快照里的修饰键补回，否则按住 Alt 连按主键时第二次起匹配失败。
-                        merge_physical_modifiers(&mut s.modifiers_snapshot);
-                        s.down_since = Some(Instant::now());
-                        s.aborted = false;
-                    }
-                } else if is_up {
-                    // 检查组合键匹配
-                    if let Some(ref key) = s.pressed_key {
-                        if !s.aborted {
-                            if is_hotkey_match(&config, &s.modifiers_snapshot, key) {
-                                if let Some(since) = s.down_since.take() {
-                                    if since.elapsed() <= Duration::from_millis(tap_threshold) {
-                                        send_event(HotkeyEvent::Tap(Instant::now()));
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // 重置状态
-                    s.pressed_key = None;
-                    s.down_since = None;
-                    s.aborted = false;
-                    s.modifiers_snapshot.clear();
-                }
-            }
-
-            // ── aborted 检测 ──
-            // 如果在主键按下期间按下其他非修饰键，标记为 aborted
-            if is_down && !is_modifier_key(vk) {
-                if s.pressed_key.is_some() && s.down_since.is_some() {
-                    let key = vk_to_key(vk).unwrap_or_default();
-                    // 如果按下的键不是配置的主键，标记为 aborted
-                    if key != config.key {
+            if is_down {
+                let Some(key) = key else {
+                    // 未映射键 down:armed 期间出现 → 判 hold(用户按了别的键)。
+                    if s.armed_key.is_some() {
                         s.aborted = true;
                     }
+                    return;
+                };
+
+                if let Some(armed) = s.armed_key.as_deref() {
+                    if key == armed {
+                        // 同一主键重复 down = autorepeat,忽略(不重置 down_since)。
+                        return;
+                    }
+                    // armed 后按了别的键 → hold。
+                    s.aborted = true;
+                    return;
                 }
+
+                // 未 armed:仅当「是配置主键 且 修饰键此刻满足」才 arm。
+                if key == config.key && modifiers_satisfied(&config) {
+                    s.armed_key = Some(key);
+                    s.down_since = Some(Instant::now());
+                    s.aborted = false;
+                }
+            } else if is_up {
+                let Some(key) = key else { return };
+                // 只有 armed 的那个主键松开才判定。
+                if s.armed_key.as_deref() != Some(key.as_str()) {
+                    return;
+                }
+                let since = s.down_since.take();
+                let aborted = s.aborted;
+                s.armed_key = None;
+                s.aborted = false;
+
+                if aborted {
+                    return;
+                }
+                let Some(since) = since else { return };
+                if since.elapsed() > Duration::from_millis(tap_threshold) {
+                    return; // hold,非 tap
+                }
+                // 触发。无需在此复查修饰键:arm 时已现查物理态精确匹配(根治了残留误触发),
+                // 按下期间任何异键 down 都会 aborted。keyup 时若再查修饰键物理态,会因「快速
+                // 按组合键时 Alt 略早于主键松开」导致漏触发,故不复查。
+                send_event(HotkeyEvent::Tap(Instant::now()));
             }
         });
     }
@@ -447,5 +353,89 @@ fn feed_recorder(vk: u32, wparam: WPARAM) {
         // 非修饰键:按下即完成录制;松开不关心。
         let Some(name) = vk_to_key(vk) else { return };
         super::recorder::feed(super::recorder::RecordInput::KeyDown(name));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::HotkeyConfig;
+
+    fn cfg(modifiers: &[&str], key: &str) -> HotkeyConfig {
+        HotkeyConfig {
+            modifiers: modifiers.iter().map(|s| s.to_string()).collect(),
+            key: key.to_string(),
+            display: String::new(),
+        }
+    }
+
+    #[test]
+    fn mask_for_config_modifier_names() {
+        assert_eq!(mask_for_config_modifier("ctrl"), Some(MOD_LCTRL | MOD_RCTRL));
+        assert_eq!(mask_for_config_modifier("lctrl"), Some(MOD_LCTRL));
+        assert_eq!(mask_for_config_modifier("rctrl"), Some(MOD_RCTRL));
+        assert_eq!(mask_for_config_modifier("alt"), Some(MOD_LALT | MOD_RALT));
+        assert_eq!(mask_for_config_modifier("lalt"), Some(MOD_LALT));
+        assert_eq!(mask_for_config_modifier("ralt"), Some(MOD_RALT));
+        assert_eq!(mask_for_config_modifier("meta"), Some(MOD_LMETA | MOD_RMETA));
+        assert_eq!(mask_for_config_modifier("cmd"), None); // 未知名
+    }
+
+    #[test]
+    fn exact_specific_modifier() {
+        assert!(modifiers_mask_satisfies_config(&["lalt".into()], MOD_LALT));
+        assert!(!modifiers_mask_satisfies_config(&["lalt".into()], MOD_RALT)); // 右非左
+        assert!(!modifiers_mask_satisfies_config(&["lalt".into()], MOD_LALT | MOD_LCTRL)); // 多余 ctrl
+    }
+
+    #[test]
+    fn generic_modifier_either_side() {
+        assert!(modifiers_mask_satisfies_config(&["alt".into()], MOD_LALT));
+        assert!(modifiers_mask_satisfies_config(&["alt".into()], MOD_RALT));
+        // 通用名也不允许两侧同时(多余)
+        assert!(!modifiers_mask_satisfies_config(&["alt".into()], MOD_LALT | MOD_RALT));
+    }
+
+    #[test]
+    fn multi_modifier_combo() {
+        assert!(modifiers_mask_satisfies_config(
+            &["alt".into(), "ctrl".into()],
+            MOD_LALT | MOD_LCTRL
+        ));
+        assert!(!modifiers_mask_satisfies_config(&["alt".into(), "ctrl".into()], MOD_LALT)); // 缺 ctrl
+    }
+
+    #[test]
+    fn ctrl_alt_space_must_not_match_alt_space() {
+        // 核心安全断言:配置 Alt+空格,物理按下 Ctrl+Alt → 不匹配(remaining 含 ctrl)
+        let alt_only = ["alt".to_string()];
+        assert!(!modifiers_mask_satisfies_config(&alt_only, MOD_LALT | MOD_LCTRL));
+    }
+
+    #[test]
+    fn empty_modifiers_requires_no_modifier() {
+        assert!(modifiers_mask_satisfies_config(&[], 0));
+        assert!(!modifiers_mask_satisfies_config(&[], MOD_LALT)); // 按了多余的
+    }
+
+    #[test]
+    fn altgr_correction_strips_synthetic_lctrl() {
+        assert_eq!(apply_altgr_correction(MOD_RALT | MOD_LCTRL), MOD_RALT);
+        assert_eq!(
+            apply_altgr_correction(MOD_RALT | MOD_LCTRL | MOD_LSHIFT),
+            MOD_RALT | MOD_LSHIFT
+        );
+        // 非 AltGr 场景不动
+        assert_eq!(apply_altgr_correction(MOD_LALT | MOD_LCTRL), MOD_LALT | MOD_LCTRL);
+        assert_eq!(apply_altgr_correction(MOD_RALT), MOD_RALT);
+        assert_eq!(apply_altgr_correction(MOD_LCTRL), MOD_LCTRL);
+    }
+
+    #[test]
+    fn standalone_config_detection() {
+        assert!(is_standalone_config(&cfg(&[], "ralt")));
+        assert!(is_standalone_config(&cfg(&[], "meta")));
+        assert!(!is_standalone_config(&cfg(&[], " "))); // 空格不是修饰键
+        assert!(!is_standalone_config(&cfg(&["alt"], " "))); // 组合键
     }
 }
