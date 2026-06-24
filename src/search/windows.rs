@@ -45,6 +45,8 @@ fn scan_dir(dir: &PathBuf, entries: &mut Vec<AppEntry>) {
                     description: Some(lnk_path.clone()), // 副行显示路径
                     lnk_path,
                     is_calc: false,
+                    score: 0.0,
+                    is_placeholder: false,
                     action: super::Action {
                         kind: super::ActionKind::Open,
                         hint: None,

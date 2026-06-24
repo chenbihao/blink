@@ -3,12 +3,15 @@
 mod calc;
 mod commands;
 mod config;
+mod context;
 mod history;
 mod hotkey;
+mod intent;
 mod logging;
 mod plugin;
 mod search;
 mod service;
+mod text;
 mod window;
 
 use tauri::{
@@ -35,7 +38,7 @@ fn main() {
             // path 段形如 "/C%3A%5C..."，去掉前导 '/' 后做 percent-decode 还原真实路径。
             let raw = request.uri().path().trim_start_matches('/').to_string();
             let path = percent_decode(&raw);
-            tracing::debug!(%path, "blink-icon: 收到图标请求");
+            // tracing::debug!(%path, "blink-icon: 收到图标请求");
             tauri::async_runtime::spawn(async move {
                 let path_for_log = path.clone();
                 let icon = tauri::async_runtime::spawn_blocking(move || {
@@ -120,12 +123,61 @@ fn main() {
                 })
                 .build(app)?;
 
-            // 构造 SearchService(多路引擎)。command 层经 app.state 取用,故单独 manage;
-            // 引擎后台任务(开始菜单预扫等)由 SearchLifecycle 在下面 services 启动时触发。
+            // 加载 builtin 插件
+            let plugins = plugin::load_builtin_plugins(app.handle());
+            let plugin_engine = if plugins.is_empty() {
+                None
+            } else {
+                tracing::info!(count = plugins.len(), "PluginEngine 已构造");
+                Some(std::sync::Arc::new(plugin::PluginEngine::new(plugins.clone())))
+            };
+
+            // 构造意图路由 RuleRouter,从插件 manifest 注入规则。
+            let router = std::sync::Arc::new(intent::RuleRouter::new(app_config.surface_takeover_enabled));
+            for plugin in &plugins {
+                for trigger in &plugin.manifest().triggers {
+                    match trigger {
+                        plugin::PluginTrigger::Keyword { keyword, exclusive } => {
+                            // 向后兼容:旧 exclusive=true→Auto(无参 priority / 带参 takeover),
+                            // false→Inline(始终混排)。
+                            let surface = if *exclusive {
+                                intent::Surface::Auto
+                            } else {
+                                intent::Surface::Inline
+                            };
+                            router.add_keyword_rule(
+                                plugin.id().to_string(),
+                                keyword.clone(),
+                                surface,
+                                intent::SurfaceView::List,
+                            );
+                        }
+                        plugin::PluginTrigger::Regex { pattern, exclusive } => {
+                            let surface = if *exclusive {
+                                intent::Surface::Auto
+                            } else {
+                                intent::Surface::Inline
+                            };
+                            if let Err(e) = router.add_regex_rule(
+                                plugin.id().to_string(),
+                                pattern,
+                                surface,
+                                intent::SurfaceView::List,
+                            ) {
+                                tracing::warn!(plugin = %plugin.id(), error = %e, "regex trigger 注入失败,跳过");
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 构造 SearchService(多路引擎 + 意图路由)。command 层经 app.state 取用。
             let search_service = std::sync::Arc::new(search::SearchService::new(
                 app.handle().clone(),
                 pool.clone(),
-                search::build_engines(app.handle()),
+                search::build_engines(),
+                plugin_engine,
+                router,
             ));
             app.manage(search_service.clone());
 

@@ -14,8 +14,9 @@ use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 
 pub use engine::PluginEngine;
-pub use manifest::PluginManifest;
+pub use manifest::{PluginManifest, PluginTrigger};
 pub use process::PluginHandle;
+pub use protocol::PluginQueryContext;
 
 /// builtin 插件根目录。
 /// - debug:仓库内 `plugins/builtin`(开发期直接用 target 下编译出的插件 exe)。

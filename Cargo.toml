@@ -5,7 +5,7 @@ edition = "2024"
 description = "Blink — Windows Universal Launcher"
 
 [workspace]
-members = ["plugins/examples/echo"]
+members = ["plugins/examples/echo", "plugins/examples/ip"]
 
 [profile.release]
 codegen-units = 1
@@ -22,6 +22,7 @@ nucleo = "0.5.0"
 png = "0.17"
 open = "5.3.5"
 pinyin = "0.11.0"
+regex = "1.11"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 sqlx = { version = "0.9.0", features = ["sqlite", "runtime-tokio"] }
@@ -43,6 +44,10 @@ windows = { version = "0.62.2", features = [
     "Win32_Storage_FileSystem",
     "Win32_System",
     "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Shutdown",
 ] }
 
 [build-dependencies]

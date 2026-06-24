@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "id": "builtin.ip",
+  "name": "IP",
+  "version": "0.1.0",
+  "builtin": true,
+  "runtime": {
+    "type": "process",
+    "protocol": "jsonl",
+    "exec": "../../../target/debug/blink-plugin-ip.exe",
+    "timeout_ms": 2000,
+    "concurrency": 1
+  },
+  "triggers": [
+    { "type": "keyword", "keyword": "ip", "exclusive": true }
+  ],
+  "capabilities": ["query"]
+}

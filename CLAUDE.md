@@ -51,7 +51,7 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 | **0.2.0** | 0.1 收尾：搜索缓存、开机自启、tracing 日志、窗口定位、应用图标 | ✅ |
 | **0.2.1** | Service 骨架（现有模块重构进 Service 框架，功能零变化） | ✅ |
 | **0.2.2** | SearchService + SearchEngine trait + 渐进式多路搜索（sync/async 双 lane） | ✅ |
-| **0.3+** | 插件系统（独立进程 + stdio JSON + manifest）/ 意图引擎（规则→向量→AI）/ Context 层 | ⬜ |
+| **0.3+** | 插件系统（独立进程 + stdio JSON + manifest）/ 意图引擎（规则→向量→AI）/ Context 层 | 🔨 插件骨架完成，意图引擎待做 |
 
 **改核心前必读 `production/0.2-core-plugin-design.md`**（Service/SearchEngine/Plugin/Intent 架构设计）。
 Roadmap 内容了解即可，**不要提前实现**。
@@ -78,10 +78,12 @@ Roadmap 内容了解即可，**不要提前实现**。
 | `commands.rs` | Tauri command 层 — 前端 `invoke()` 入口，轻量编排 |
 | `config.rs` | `AppConfig`（快捷键/tap阈值/grace/自启/语言/日志级别）SQLite 持久化 + 运行时热更新 |
 | `logging.rs` | tracing：文件每日轮转（保留 7 天）+ 控制台 + 动态级别 reload |
-| `hotkey/` | 全局热键：`mod.rs`(tap/hold 状态机) + `windows.rs`(WH_KEYBOARD_LL) + `recorder.rs`(录制状态机) |
-| `window/` | 窗口控制：显隐、看门狗失焦轮询、显示器定位（读实际物理尺寸定位前台显示器正中） |
-| `search/` | `mod.rs`(AppEntry/fuzzy/拼音) + `windows.rs`(扫描开始菜单 .lnk) + `cache.rs`(结果缓存) + `icon.rs`(图标提取) |
+| `hotkey/` | 全局热键：`mod.rs`(运行时配置/事件) + `windows.rs`(WH_KEYBOARD_LL；**触发判定=物理态查询**，见下) + `recorder.rs`(录制状态机，独立路径) |
+| `window/` | 窗口控制：显隐、看门狗失焦轮询（按进程 PID 判定，非死比 HWND）、显示器定位 |
+| `search/` | `mod.rs`(AppEntry/fuzzy/拼音) + `engine.rs`(SearchEngine trait/SearchItem) + `service.rs`(SearchService：sync/async 双 lane + 融合) + `*_engine.rs`(Calc/StartMenu/MockSlow 引擎) + `windows.rs`(扫描 .lnk) + `icon.rs`(图标提取) |
+| `plugin/` | 插件系统骨架（0.3）：`manifest.rs`(JSON manifest 解析) + `protocol.rs`(JSONL 协议) + `process.rs`(tokio 子进程管理) + `engine.rs`(PluginEngine 接 async lane) |
 | `calc.rs` | `evalexpr` 实时计算，整数转浮点避免截断 |
+| `service.rs` | Service 骨架（0.2.1）：`Service` trait + `AppContext` + 各服务生命周期统一编排 |
 | `history.rs` | SQLite 历史记录（频率加权）+ `config` 表 KV 读写 |
 
 ### 前端 (`frontend/`)
@@ -90,12 +92,15 @@ Roadmap 内容了解即可，**不要提前实现**。
 - `settings.html` / `settings.js` / `settings.css` — 设置窗口（5 Tab：通用/快捷键/存储/调试/关于）
 
 前端用 `window.__TAURI__.core.invoke()` 调 Rust commands，用 `TAU.event.listen()` 监听后端事件
-（`blink://shown`、`blink://hidden`；`blink://results` 为渐进式增量预留）。
+（`blink://shown`、`blink://hidden`、`blink://results`——async lane 慢引擎/插件增量，前端 `results.merge` 按 seq 协调）。
 
 ### 关键子系统实现要点
 
-- **搜索缓存**（`search/cache.rs`）：启动后台预扫开始菜单到内存，输入时命中缓存。所有文件 IO 在 `spawn_blocking`；根目录 mtime 增量失效 + 定时强制刷新兜底深层变化。
+- **搜索缓存**（`search/start_menu_engine.rs`）：启动后台预扫开始菜单到内存，输入时命中缓存。所有文件 IO 在 `spawn_blocking`；根目录 mtime 增量失效 + 定时强制刷新兜底深层变化。缓存归 StartMenuEngine 字段（设计 §2.4，从旧 `cache.rs` 迁入，数据结构零返工）。
 - **图标协议**（`search/icon.rs` + `main.rs`）：自定义协议 `blink-icon`，前端 `<img src="http://blink-icon.localhost/<encodeURIComponent(lnk_path)>">`（**Windows 下 scheme 映射为 `http://<scheme>.localhost/`**，非 `scheme://localhost/`）。后端用 `IShellItemImageFactory::GetImage` 取图标 → `GetDIBits` 取 BGRA → 转 RGBA → `png` crate 编码 PNG。COM 每次调用 `CoInitializeEx`（RAII guard 配对）。Shell 名称解析 API 要求**规范全反斜杠路径**，调用前把 `/` 归一化为 `\`（不改扫描路径本身，见 §5）。进程内缓存 PNG 字节，`None` 缓存「提过但无图标」避免反复重试。
+- **热键触发判定**（`hotkey/windows.rs`）：**不自维护按键累积镜像**（被系统合成事件打乱且无法自愈，曾导致 Alt+空格 残留误触发）。改为只在主键 down/up 边界用 `GetAsyncKeyState` 现查修饰键物理态；状态机仅 `down_since/armed_key/aborted` 三字段。修饰键精确 bitmask 匹配（不允许多余键，`Ctrl+Alt+空格` 不误触发 `Alt+空格`）。**改核心前读 `production/0.3-plugin-skeleton.md` 二章**。
+- **看门狗失焦**（`window/windows.rs`）：按**进程 PID** 判定前台是否属自己（非死比单个 HWND）；`fg==NULL`（焦点真空，子进程拉起等瞬态）跳过本轮不隐藏。
+- **配置/自启/日志**：配置存 SQLite `config` 表（`app_config` 键存 JSON）；开机自启用 `tauri-plugin-autostart`（注册表 Run 项），启动时按配置同步。
 - **配置/自启/日志**：配置存 SQLite `config` 表（`app_config` 键存 JSON）；开机自启用 `tauri-plugin-autostart`（注册表 Run 项），启动时按配置同步。
 
 ### Tauri Commands（前端 invoke 入口）
@@ -119,6 +124,7 @@ SQLite `%APPDATA%\blink\blink.db`：
 - **改完先自审**：每次完成改动后自己先 review（diff / 编译 / 副作用）再报告。
 - **平台抽象预留**：平台相关逻辑走 `mod.rs` 接口 + `windows.rs` 实现的拆分，方便后续多平台。
 - **自用阶段**：插件 permissions 权限模型暂不实现，产品化时再补。
+- **0.x 阶段不发布，不做过度工程**：不到 1.0 版本不会对外发布，manifest 升级、向后兼容、权限强制、第三方插件目录等「产品化基础设施」在 1.0 前不做。优先验证功能链路，不提前造无用抽象。
 
 ## 8. TDD 开发与测试（务实 TDD）
 
@@ -133,5 +139,6 @@ bin crate，无 lib target，跑测试用 `cargo test --bin blink`。
 
 设计文档（`production/`）：
 - `Windows Universal Launcher MVP.md` — 产品/架构总纲（P0-P4、§12 待决策、§13 已确认方案）
-- `0.2-core-plugin-design.md` — **0.2 核心+插件架构设计**（改核心前必读）
-- `Todo-0.1mvp.md` — 0.1 实现总结与后期待办
+- `0.2-core-plugin-design.md` — **0.2 核心+插件架构设计**（Service/SearchEngine/Plugin/Intent，改核心前必读）
+- `0.1-base.md` — 0.1 MVP 实现总结与后期待办
+- `0.3-plugin-skeleton.md` — **0.3 插件骨架 + 热键物理态重构**总结与后期待办（含已知问题、下一步方向）

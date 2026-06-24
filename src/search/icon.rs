@@ -168,7 +168,7 @@ fn extract_icon_png(path: &str, size: i32) -> Option<Vec<u8>> {
 
         match encode_rgba_to_png(&buf, width as u32, height as u32) {
             Some(png) => {
-                tracing::debug!(%path, width, height, bytes = png.len(), "图标提取成功");
+                // tracing::debug!(%path, width, height, bytes = png.len(), "图标提取成功");
                 Some(png)
             }
             None => {

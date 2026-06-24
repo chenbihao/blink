@@ -9,6 +9,8 @@
 
 use std::collections::HashMap;
 
+use crate::context::ContextSnapshot;
+
 use super::{Action, ActionKind, AppEntry};
 
 /// 引擎延迟通道:sync 进首批(同步返回),async 走增量(emit 推送)。
@@ -65,6 +67,8 @@ impl SearchItem {
                 description: self.subtitle,
                 lnk_path: path,
                 is_calc: false,
+                score: self.score,
+                is_placeholder: false,
                 action: Action {
                     kind: ActionKind::Open,
                     hint: None,
@@ -79,6 +83,8 @@ impl SearchItem {
                 // is_calc 仅标记计算结果(驱动前端 calc 样式 + calcValue);插件 Copy
                 // 不该套计算样式,故按来源判定(CalcEngine 的 source == "calc")。
                 is_calc: self.source == "calc",
+                score: self.score,
+                is_placeholder: false,
                 action: Action {
                     kind: ActionKind::Copy,
                     hint: None,
@@ -93,6 +99,8 @@ impl SearchItem {
 pub struct QueryContext<'a> {
     /// lnk_path → 历史命中次数(频率加权用)。
     pub history: &'a HashMap<String, i64>,
+    /// 唤起时的上下文快照（前台应用、剪贴板等）。
+    pub snapshot: &'a ContextSnapshot,
 }
 
 /// 搜索引擎:一路召回源。

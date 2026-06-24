@@ -32,8 +32,23 @@ fn elapsed_ms() -> u64 {
     START.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
-/// 唤起：定位到前台应用所在显示器中上部 → show → set_focus → 通知前端聚焦输入框。
+/// 唤起：采集上下文快照 → 定位 → show → set_focus → 通知前端。
+///
+/// **采集时机很重要**：必须在 show() 之前调用，否则拿到的前台是 Blink 自己。
 pub fn invoke(app: &AppHandle) {
+    // 1. 先采集上下文快照（show 之前！）
+    let snapshot = crate::context::collect();
+    tracing::debug!(
+        foreground_app = ?snapshot.foreground_app.as_ref().map(|f| &f.process_name),
+        window_title = ?snapshot.foreground_app.as_ref().map(|f| &f.window_title),
+        "invoke: captured context"
+    );
+
+    // 2. 更新 SearchService 中的快照
+    if let Some(search_service) = app.try_state::<std::sync::Arc<crate::search::SearchService>>() {
+        search_service.update_snapshot(snapshot);
+    }
+
     let Some(win) = app.get_webview_window("main") else {
         return;
     };
@@ -182,4 +197,31 @@ fn launcher_position(win: &WebviewWindow) -> Option<PhysicalPosition<i32>> {
         }
     }
     None
+}
+
+/// resize 后若窗口底部超出显示器工作区，向上移动使其完整可见。
+pub fn clamp_to_work_area(win: &WebviewWindow) {
+    let Ok(pos) = win.outer_position() else { return };
+    let Ok(size) = win.outer_size() else { return };
+    let Ok(hwnd_raw) = win.hwnd() else { return };
+    let hwnd = HWND(hwnd_raw.0 as _);
+
+    unsafe {
+        let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if !GetMonitorInfoW(hmon, &mut mi).as_bool() {
+            return;
+        }
+        let work = mi.rcWork; // 工作区(排除任务栏)
+        let bottom = pos.y + size.height as i32;
+        if bottom > work.bottom {
+            let new_y = (work.bottom - size.height as i32).max(work.top);
+            let _ = win.set_position(PhysicalPosition::new(pos.x, new_y));
+            tracing::debug!(
+                old_y = pos.y, new_y, work_bottom = work.bottom, height = size.height,
+                "窗口超出屏幕底部,上移"
+            );
+        }
+    }
 }

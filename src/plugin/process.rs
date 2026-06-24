@@ -147,7 +147,12 @@ impl PluginProcess {
     }
 
     /// 发送 query 并等待 response(带超时)。
-    async fn query(&self, query: &str, timeout_ms: u64) -> Result<Vec<PluginItem>, PluginError> {
+    async fn query(
+        &self,
+        query: &str,
+        context: &super::protocol::PluginQueryContext,
+        timeout_ms: u64,
+    ) -> Result<Vec<PluginItem>, PluginError> {
         let seq = self
             .next_id
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -155,7 +160,11 @@ impl PluginProcess {
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(req_id.clone(), tx);
 
-        let req = PluginRequest::query(req_id.clone(), query);
+        let req = PluginRequest::Query {
+            id: req_id.clone(),
+            query: query.to_string(),
+            context: context.clone(),
+        };
         let line = serde_json::to_string(&req).map_err(|e| PluginError::Io(e.to_string()))? + "\n";
         {
             let mut stdin = self.stdin.lock().await;
@@ -223,13 +232,17 @@ impl PluginHandle {
         &self.manifest
     }
 
-    /// 查询插件:懒启动(或复用)进程 → 发 query → 收 items。
+    /// 查询插件:懒启动(或复用)进程 → 发 query(带上下文) → 收 items。
     /// 进程已死则重启一次。
     ///
     /// 并发:process 锁只覆盖「确保进程存在」(spawn 判定),拿到 Arc 后立即释放,
     /// query 在锁外 await——同插件的多次 query 可并发 in-flight(stdin/pending 各自
     /// 互斥、按 id 路由,天然安全)。`manifest.concurrency` 信号量(§3.7 B3)留后续。
-    pub async fn query(&self, query: &str) -> Result<Vec<PluginItem>, PluginError> {
+    pub async fn query(
+        &self,
+        query: &str,
+        context: &super::protocol::PluginQueryContext,
+    ) -> Result<Vec<PluginItem>, PluginError> {
         let timeout_ms = self.manifest.timeout_ms();
 
         // 短暂持锁:确保进程存在,clone Arc 后释放。
@@ -248,7 +261,7 @@ impl PluginHandle {
             Arc::clone(guard.as_ref().unwrap())
         };
 
-        let result = proc.query(query, timeout_ms).await;
+        let result = proc.query(query, context, timeout_ms).await;
 
         // 进程关闭类错误:清理句柄,下次重启。
         // 守护竞态:并发 query 可能在 A 失败期间已重建新进程——只清「我这个已死的」,

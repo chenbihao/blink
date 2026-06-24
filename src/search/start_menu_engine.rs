@@ -158,6 +158,8 @@ mod tests {
             pinyin_name: String::new(),
             lnk_path: lnk.into(),
             is_calc: false,
+            score: 0.0,
+            is_placeholder: false,
             description: Some(lnk.into()),
             action: Action {
                 kind: ActionKind::Open,

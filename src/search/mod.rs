@@ -62,6 +62,13 @@ pub struct AppEntry {
     /// 由结果生产者（scan_dir/calc/未来 SearchEngine）填充，前端浅色小字展示。
     #[serde(default)]
     pub description: Option<String>,
+    /// 排序分数(归一化 0.0..=1.0),前端 merge 时重排用。后端 fuse 时已排序,此字段供
+    /// 前端在增量到达后与既有结果重新排序(0.4 priority 置顶)。
+    #[serde(default)]
+    pub score: f32,
+    /// 占位项标记(takeover 时先同步返回,真实结果到达后前端自动移除)。
+    #[serde(default)]
+    pub is_placeholder: bool,
     /// 可执行动作（决定 Enter 行为 + 提示栏文案）。与 description 正交。
     pub action: Action,
 }
@@ -82,9 +89,11 @@ pub(crate) mod engine;
 pub use engine::{Lane, QueryContext, SearchAction, SearchEngine, SearchItem};
 
 // 具体引擎
+mod builtin_engine;
 mod calc_engine;
 mod mock_slow_engine;
 mod start_menu_engine;
+use builtin_engine::BuiltinEngine;
 use calc_engine::CalcEngine;
 use mock_slow_engine::MockSlowEngine;
 use start_menu_engine::StartMenuEngine;
@@ -93,19 +102,14 @@ use start_menu_engine::StartMenuEngine;
 mod service;
 pub use service::SearchService;
 
-/// 构造引擎列表(sync: calc + start_menu;async: plugin + 可选 mock)。
-/// 需要 `&AppHandle` 以扫描 builtin 插件目录。
-pub fn build_engines(app: &tauri::AppHandle) -> Vec<std::sync::Arc<dyn SearchEngine>> {
+/// 构造引擎列表(sync: builtin + calc + start_menu;async: 可选 mock)。
+/// PluginEngine 0.4 退化为执行器,不再作为 dyn SearchEngine,由 SearchService 直接持有。
+pub fn build_engines() -> Vec<std::sync::Arc<dyn SearchEngine>> {
     let mut engines: Vec<std::sync::Arc<dyn SearchEngine>> = vec![
+        std::sync::Arc::new(BuiltinEngine),
         std::sync::Arc::new(CalcEngine),
         std::sync::Arc::new(StartMenuEngine::new()),
     ];
-    // 插件引擎(async lane):聚合所有 builtin 插件。
-    let plugins = crate::plugin::load_builtin_plugins(app);
-    if !plugins.is_empty() {
-        tracing::info!(count = plugins.len(), "PluginEngine 已接入 async lane");
-        engines.push(std::sync::Arc::new(crate::plugin::PluginEngine::new(plugins)));
-    }
     if MockSlowEngine::enabled() {
         tracing::info!("MockSlowEngine 已启用(BLINK_MOCK_SLOW_ENGINE=1)");
         engines.push(std::sync::Arc::new(MockSlowEngine));
@@ -119,21 +123,9 @@ use std::collections::HashMap;
 
 use nucleo::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo::{Config, Matcher, Utf32Str};
-use pinyin::ToPinyin;
 
-/// 提取拼音首字母（"微信" → "wx"，"WeChat" → "wechat"）。
-pub fn to_pinyin_initials(s: &str) -> String {
-    s.chars()
-        .filter_map(|c| {
-            if c.is_ascii_alphanumeric() {
-                Some(c.to_ascii_lowercase())
-            } else {
-                c.to_pinyin()
-                    .and_then(|p| p.first_letter().to_ascii_lowercase().chars().next())
-            }
-        })
-        .collect()
-}
+// 文本归一化原语抽至 `crate::text`(0.4 §4.4),应用搜索与意图共用。
+pub use crate::text::pinyin_initials as to_pinyin_initials;
 
 /// fuzzy 打分核心：返回 `(加权后分数, 条目)`，按分降序、取 top-N。
 ///
@@ -194,6 +186,8 @@ mod tests {
             pinyin_name: to_pinyin_initials(name),
             lnk_path: lnk.into(),
             is_calc: false,
+            score: 0.0,
+            is_placeholder: false,
             description: Some(lnk.into()),
             action: Action {
                 kind: ActionKind::Open,

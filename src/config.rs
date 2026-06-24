@@ -34,6 +34,10 @@ fn default_log_level() -> String {
     "error".to_string()
 }
 
+fn default_surface_takeover_enabled() -> bool {
+    true
+}
+
 /// 应用配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -50,6 +54,9 @@ pub struct AppConfig {
     /// 日志级别（error/info/debug）
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    /// 是否允许插件 takeover(接管返回区);false 时所有 takeover 降级 priority。
+    #[serde(default = "default_surface_takeover_enabled")]
+    pub surface_takeover_enabled: bool,
 }
 
 impl Default for AppConfig {
@@ -61,6 +68,7 @@ impl Default for AppConfig {
             auto_start: false,
             language: "zh".to_string(),
             log_level: "error".to_string(),
+            surface_takeover_enabled: true,
         }
     }
 }

@@ -41,7 +41,8 @@ mod tests {
 
     fn run(q: &str) -> Vec<SearchItem> {
         let h = HashMap::new();
-        let ctx = QueryContext { history: &h };
+        let snapshot = crate::context::ContextSnapshot::default();
+        let ctx = QueryContext { history: &h, snapshot: &snapshot };
         // 引擎 search 是 async,但 CalcEngine 内部纯同步,用 block_on 跑测试
         tauri::async_runtime::block_on(CalcEngine.search(q, &ctx))
     }

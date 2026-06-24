@@ -20,21 +20,125 @@ pub async fn search_apps(
     seq: u64,
     app: tauri::AppHandle,
 ) -> Vec<crate::search::AppEntry> {
+    tracing::debug!(%query, seq, "search_apps: 收到搜索请求");
     let service = app.state::<std::sync::Arc<crate::search::SearchService>>();
-    service.search(&query, seq).await
+    let results = service.search(&query, seq).await;
+    tracing::debug!(count = results.len(), %query, "search_apps: 返回结果");
+    for (i, item) in results.iter().enumerate() {
+        tracing::debug!(
+            index = i,
+            name = %item.name,
+            lnk_path = %item.lnk_path,
+            "搜索结果项"
+        );
+    }
+    results
 }
 
-/// 前端回车/点击时调用：启动选中的应用（打开 lnk）并记录历史。
+/// 前端回车/点击时调用：启动选中的应用或执行内置动作。
 /// 计算结果无 lnk_path，忽略。
 #[tauri::command]
 pub async fn launch_app(app: tauri::AppHandle, lnk_path: String) -> Result<(), String> {
     if lnk_path.is_empty() {
         return Ok(());
     }
+
+    tracing::debug!(%lnk_path, "launch_app: 准备打开");
+
+    // 检查是否为内置动作
+    if let Some(action) = parse_builtin_action(&lnk_path) {
+        execute_builtin_action(&app, action).await?;
+        // 内置动作不记录历史
+        crate::window::hide(&app, "launch");
+        return Ok(());
+    }
+
+    // 普通应用启动
     let pool = app.state::<sqlx::SqlitePool>();
     crate::history::record_launch(&pool, &lnk_path).await;
     crate::search::launch(&lnk_path)?;
     crate::window::hide(&app, "launch");
+    Ok(())
+}
+
+/// 解析内置动作标识。
+fn parse_builtin_action(path: &str) -> Option<BuiltinActionKind> {
+    match path {
+        "__BLINK_ACTION_OPEN_SETTINGS__" => Some(BuiltinActionKind::OpenSettings),
+        "__BLINK_ACTION_LOCK__" => Some(BuiltinActionKind::LockWorkstation),
+        "__BLINK_ACTION_SHUTDOWN__" => Some(BuiltinActionKind::Shutdown),
+        "__BLINK_ACTION_RESTART__" => Some(BuiltinActionKind::Restart),
+        "__BLINK_ACTION_SLEEP__" => Some(BuiltinActionKind::Sleep),
+        "__BLINK_ACTION_CLEAR_HISTORY__" => Some(BuiltinActionKind::ClearHistory),
+        _ => None,
+    }
+}
+
+/// 内置动作类型。
+#[derive(Debug, Clone, Copy)]
+enum BuiltinActionKind {
+    OpenSettings,
+    LockWorkstation,
+    Shutdown,
+    Restart,
+    Sleep,
+    ClearHistory,
+}
+
+/// 执行内置动作。
+async fn execute_builtin_action(app: &tauri::AppHandle, action: BuiltinActionKind) -> Result<(), String> {
+    match action {
+        BuiltinActionKind::OpenSettings => {
+            // 打开设置窗口（如果已存在则显示，否则创建）
+            if let Some(win) = app.get_webview_window("settings") {
+                let _ = win.show();
+                let _ = win.set_focus();
+            } else {
+                tracing::warn!("设置窗口未找到，请检查 main.rs 初始化");
+            }
+        }
+        BuiltinActionKind::LockWorkstation => {
+            // Windows API：锁定工作站
+            #[cfg(target_os = "windows")]
+            unsafe {
+                use windows::Win32::System::Shutdown::LockWorkStation;
+                let _ = LockWorkStation();
+            }
+        }
+        BuiltinActionKind::Shutdown => {
+            // 调用 shutdown.exe 关机（/s = shutdown，/t 0 = 立即）
+            #[cfg(target_os = "windows")]
+            {
+                let _ = std::process::Command::new("shutdown.exe")
+                    .args(["/s", "/t", "0"])
+                    .spawn();
+            }
+        }
+        BuiltinActionKind::Restart => {
+            // 重启
+            #[cfg(target_os = "windows")]
+            {
+                let _ = std::process::Command::new("shutdown.exe")
+                    .args(["/r", "/t", "0"])
+                    .spawn();
+            }
+        }
+        BuiltinActionKind::Sleep => {
+            // 睡眠：调用 rundll32.exe powrprof.dll,SetSuspendState 0,1,0
+            #[cfg(target_os = "windows")]
+            {
+                let _ = std::process::Command::new("rundll32.exe")
+                    .args(["powrprof.dll,SetSuspendState", "0,1,0"])
+                    .spawn();
+            }
+        }
+        BuiltinActionKind::ClearHistory => {
+            // 清空搜索历史
+            let pool = app.state::<sqlx::SqlitePool>();
+            crate::history::clear(&pool).await;
+            tracing::info!("搜索历史已清空");
+        }
+    }
     Ok(())
 }
 
@@ -59,11 +163,13 @@ pub async fn clear_history(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 /// 调整主窗口大小（前端调用，用于弹性窗口）。
+/// 设置大小后若窗口底部超出显示器工作区，自动上移使其完整可见。
 #[tauri::command]
 pub async fn resize_window(app: tauri::AppHandle, width: f64, height: f64) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("main") {
         let size = tauri::LogicalSize::new(width, height);
         win.set_size(size).map_err(|e| e.to_string())?;
+        crate::window::clamp_to_work_area(&win);
     }
     Ok(())
 }

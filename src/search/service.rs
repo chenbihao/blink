@@ -1,21 +1,24 @@
 //! SearchService:多路搜索的路由 + 融合 + 渐进式调度(见 0.2 设计 §2.3 / §2.5)。
 //!
-//! - 持有引擎(按 lane 分两组),**不持有任何缓存**(缓存归引擎,§2.4)。
-//! - `search(query, seq)`:sync lane 引擎顺序召回 → 融合排序 → 转 `AppEntry` 同步返回首批;
-//!   同时 spawn async lane → 完成后 `emit("blink://results",{seq,items})` 增量推送(步骤7)。
-//! - 取消:持 `latest_seq`,async emit 前校验,过期则丢弃(步骤7;真正 cancel 传播在 0.3)。
+//! 0.4 改造:search() 开头调用 `IntentRouter::route()` 决定呈现策略(Takeover/Mixed)。
+//! - Takeover:跳过本地引擎,只查命中插件,独占返回区。
+//! - Mixed:本地引擎(sync lane)照常召回;命中插件按 surface(Priority/Inline)参与排序。
 //!
 //! 由 `commands::search_apps` 经 `app.state::<Arc<SearchService>>()` 调用。
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use serde::Serialize;
 use sqlx::SqlitePool;
 use tauri::{AppHandle, Emitter};
 
+use crate::context::ContextSnapshot;
+use crate::intent::{Candidate, IntentRouter, Route, Surface};
+use crate::plugin::PluginEngine;
+
 use super::engine::{Lane, QueryContext, SearchEngine, SearchItem};
-use super::AppEntry;
+use super::{Action, ActionKind, AppEntry};
 
 /// 融合后返回前端的结果上限。
 const RESULT_LIMIT: usize = 50;
@@ -32,13 +35,23 @@ pub struct SearchService {
     pool: SqlitePool,
     sync_engines: Vec<Arc<dyn SearchEngine>>,
     async_engines: Vec<Arc<dyn SearchEngine>>,
+    plugin_engine: Option<Arc<PluginEngine>>,
+    router: Arc<dyn IntentRouter>,
     /// 最近一次 query 的 seq,用于丢弃过期 async 增量(emit 前校验)。
     latest_seq: Arc<AtomicU64>,
+    /// 唤起时的上下文快照（前台应用、剪贴板等）。
+    /// invoke 时更新，search 时读取。RwLock 读可并行，写极少（仅唤起时）。
+    snapshot: Arc<RwLock<ContextSnapshot>>,
 }
 
 impl SearchService {
-    /// 用给定引擎构造。引擎按 `lane()` 分组。
-    pub fn new(app: AppHandle, pool: SqlitePool, engines: Vec<Arc<dyn SearchEngine>>) -> Self {
+    pub fn new(
+        app: AppHandle,
+        pool: SqlitePool,
+        engines: Vec<Arc<dyn SearchEngine>>,
+        plugin_engine: Option<Arc<PluginEngine>>,
+        router: Arc<dyn IntentRouter>,
+    ) -> Self {
         let mut sync_engines = Vec::new();
         let mut async_engines = Vec::new();
         for e in engines {
@@ -52,8 +65,17 @@ impl SearchService {
             pool,
             sync_engines,
             async_engines,
+            plugin_engine,
+            router,
             latest_seq: Arc::new(AtomicU64::new(0)),
+            snapshot: Arc::new(RwLock::new(ContextSnapshot::default())),
         }
+    }
+
+    /// 更新上下文快照（window::invoke 时调用）。
+    pub fn update_snapshot(&self, snapshot: ContextSnapshot) {
+        let mut guard = self.snapshot.write().unwrap();
+        *guard = snapshot;
     }
 
     /// 启动所有引擎的后台任务(如 StartMenuEngine 预扫)。
@@ -63,8 +85,7 @@ impl SearchService {
         }
     }
 
-    /// 搜索:返回 sync lane 融合后的首批结果(`AppEntry` 形状)同步返回;
-    /// 同时 spawn async lane,完成后 emit("blink://results", {seq, items}) 增量推送。
+    /// 搜索:先路由 → 按 Takeover/Mixed 分支执行 → 返回首批结果 + spawn 增量。
     pub async fn search(&self, query: &str, seq: u64) -> Vec<AppEntry> {
         self.latest_seq.store(seq, Ordering::SeqCst);
 
@@ -74,60 +95,136 @@ impl SearchService {
         }
 
         let history = crate::history::get_weights(&self.pool).await;
-        let ctx = QueryContext { history: &history };
+        // 读取上下文快照（读锁，可并行）
+        let snapshot = self.snapshot.read().unwrap().clone();
+        let search_ctx = QueryContext { history: &history, snapshot: &snapshot };
+        let intent_ctx = crate::intent::QueryContext { history: &history, snapshot: &snapshot };
+        let route = self.router.route(q, &intent_ctx).await;
 
-        let mut items = Vec::new();
-        for engine in &self.sync_engines {
-            items.extend(engine.search(q, &ctx).await);
+        match route {
+            Route::Takeover { plugin_id, arg, .. } => {
+                // 独占:跳过本地引擎,只查该插件。
+                // 先同步返回占位项,避免窗口空白;真实结果走 async 增量到达后前端自动移除占位。
+                self.spawn_takeover(plugin_id.clone(), arg.clone(), seq);
+                vec![placeholder_entry(&plugin_id)]
+            }
+            Route::Mixed { candidates } => {
+                // sync lane 照常召回 → 首批。
+                let mut items = Vec::new();
+                for engine in &self.sync_engines {
+                    items.extend(engine.search(q, &search_ctx).await);
+                }
+
+                // 分离 priority / inline 候选,准备 async lane。
+                let (priority, inline): (Vec<Candidate>, Vec<Candidate>) = candidates
+                    .into_iter()
+                    .partition(|c| matches!(c.surface, Surface::Priority));
+
+                let plugin_ids: Vec<(String, String)> = priority
+                    .iter()
+                    .chain(inline.iter())
+                    .map(|c| (c.plugin_id.clone(), c.arg.clone()))
+                    .collect();
+
+                if !plugin_ids.is_empty() || !self.async_engines.is_empty() {
+                    self.spawn_mixed_lane(
+                        q.to_string(),
+                        plugin_ids,
+                        priority,
+                        seq,
+                    );
+                }
+
+                fuse_items(items, RESULT_LIMIT)
+                    .into_iter()
+                    .map(SearchItem::into_app_entry)
+                    .collect()
+            }
         }
-
-        // async lane:不阻塞首批,完成后 emit 增量(0.2.2 仅 mock 填充;真插件在 0.3)。
-        self.spawn_async_lane(q.to_string(), seq);
-
-        fuse_items(items, RESULT_LIMIT)
-            .into_iter()
-            .map(SearchItem::into_app_entry)
-            .collect()
     }
 
-    /// spawn async lane 任务:跑慢引擎 → 融合 → seq 校验 → emit 增量。
-    /// seq 校验双保险:后端 `latest_seq`(query 被新 query 取代则丢弃)+ 前端 seq 比对。
-    fn spawn_async_lane(&self, query: String, seq: u64) {
-        if self.async_engines.is_empty() {
+    /// Takeover 分支:查询单插件 → emit 增量。
+    fn spawn_takeover(&self, plugin_id: String, arg: String, seq: u64) {
+        let Some(plugin_engine) = self.plugin_engine.clone() else {
             return;
-        }
-        let engines = self.async_engines.clone();
+        };
         let app = self.app.clone();
-        let pool = self.pool.clone();
         let latest_seq = Arc::clone(&self.latest_seq);
+        let snapshot = Arc::clone(&self.snapshot);
         tauri::async_runtime::spawn(async move {
-            let history = crate::history::get_weights(&pool).await;
-            let ctx = QueryContext { history: &history };
-            let mut items = Vec::new();
-            for engine in &engines {
-                let found = engine.search(&query, &ctx).await;
-                tracing::trace!(engine = engine.id(), count = found.len(), "async lane 引擎返回");
-                items.extend(found);
-            }
-            // 过期丢弃:用户已发起更新的 query
+            let snapshot = snapshot.read().unwrap().clone();
+            let ctx = crate::plugin::PluginQueryContext::from_snapshot(&snapshot);
+            let items = plugin_engine
+                .query_subset(&[(plugin_id.clone(), arg)], &ctx)
+                .await;
             if seq != latest_seq.load(Ordering::SeqCst) {
                 return;
             }
             if items.is_empty() {
                 return;
             }
-            let entries: Vec<AppEntry> = fuse_items(items, RESULT_LIMIT)
-                .into_iter()
-                .map(SearchItem::into_app_entry)
-                .collect();
-            if let Err(e) = app.emit("blink://results", ResultsPayload { seq, items: entries }) {
-                tracing::debug!(error = %e, "emit blink://results failed");
+            emit_results(&app, seq, items);
+        });
+    }
+
+    /// Mixed 分支 async lane:查插件(给定候选) + 其他 async 引擎 → 融合 → emit 增量。
+    fn spawn_mixed_lane(
+        &self,
+        query: String,
+        plugin_ids: Vec<(String, String)>,
+        priority_candidates: Vec<Candidate>,
+        seq: u64,
+    ) {
+        let plugin_engine = self.plugin_engine.clone();
+        let async_engines = self.async_engines.clone();
+        let app = self.app.clone();
+        let pool = self.pool.clone();
+        let latest_seq = Arc::clone(&self.latest_seq);
+        let snapshot = Arc::clone(&self.snapshot);
+        tauri::async_runtime::spawn(async move {
+            let history = crate::history::get_weights(&pool).await;
+            let snapshot = snapshot.read().unwrap().clone();
+            let ctx = QueryContext { history: &history, snapshot: &snapshot };
+            let mut items = Vec::new();
+
+            // 插件查询
+            if let Some(ref pe) = plugin_engine {
+                if !plugin_ids.is_empty() {
+                    let plugin_ctx = crate::plugin::PluginQueryContext::from_snapshot(&snapshot);
+                    let mut plugin_items = pe.query_subset(&plugin_ids, &plugin_ctx).await;
+                    // priority 候选 score 抬高,确保置顶(高于本地结果最高分)。
+                    let priority_set: std::collections::HashSet<String> = priority_candidates
+                        .into_iter()
+                        .map(|c| c.plugin_id)
+                        .collect();
+                    for item in &mut plugin_items {
+                        if priority_set.contains(&item.source) {
+                            item.score = item.score.max(0.0) + 1.5;
+                        }
+                    }
+                    items.extend(plugin_items);
+                }
             }
+
+            // 其他 async 引擎(如 MockSlowEngine)
+            for engine in &async_engines {
+                let found = engine.search(&query, &ctx).await;
+                tracing::trace!(engine = engine.id(), count = found.len(), "async lane 引擎返回");
+                items.extend(found);
+            }
+
+            if seq != latest_seq.load(Ordering::SeqCst) {
+                return;
+            }
+            if items.is_empty() {
+                return;
+            }
+            emit_results(&app, seq, items);
         });
     }
 }
 
-/// 融合多引擎结果:去重(按 id)+ 排序 + 截断。纯函数,便于单测(设计 §7 B6)。
+/// 融合多引擎结果:去重(按 id)+ 排序 + 截断。纯函数,便于单测。
 ///
 /// 排序:score 降序 → source tie-break(calc > start_menu > 其他)。去重保留先出现的
 /// (引擎按注册顺序召回,calc 在前)。
@@ -156,6 +253,35 @@ fn source_rank(source: &str) -> u8 {
         "calc" => 0,
         "start_menu" => 1,
         _ => 2,
+    }
+}
+
+/// emit 增量结果到前端。
+fn emit_results(app: &AppHandle, seq: u64, items: Vec<SearchItem>) {
+    let entries: Vec<AppEntry> = fuse_items(items, RESULT_LIMIT)
+        .into_iter()
+        .map(SearchItem::into_app_entry)
+        .collect();
+    if let Err(e) = app.emit("blink://results", ResultsPayload { seq, items: entries }) {
+        tracing::debug!(error = %e, "emit blink://results failed");
+    }
+}
+
+/// takeover 占位项:同步返回,避免窗口空白等待 async 结果。
+fn placeholder_entry(plugin_id: &str) -> AppEntry {
+    AppEntry {
+        name: "正在查询…".into(),
+        pinyin_name: String::new(),
+        lnk_path: String::new(),
+        is_calc: false,
+        score: 0.0,
+        is_placeholder: true,
+        description: Some(format!("插件 {plugin_id}")),
+        action: Action {
+            kind: ActionKind::Open,
+            hint: None,
+            payload: None,
+        },
     }
 }
 
@@ -193,7 +319,6 @@ mod tests {
 
     #[test]
     fn calc_wins_tie_break_on_equal_score() {
-        // 同分时 calc 排在 start_menu 前
         let items = vec![item("app", 1.0, "start_menu"), item("calc:1+1", 1.0, "calc")];
         let r = fuse_items(items, 10);
         assert_eq!(r[0].source, "calc");

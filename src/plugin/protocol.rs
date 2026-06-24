@@ -33,11 +33,39 @@ impl PluginRequest {
     }
 }
 
-/// 查询上下文(随请求传给插件;本切片仅 lang 占位)。
+/// 查询上下文(随请求传给插件;包含环境上下文供插件决策)。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginQueryContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lang: Option<String>,
+    /// 前台应用进程名（如 "code.exe"）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground_app: Option<String>,
+    /// 前台窗口标题
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_title: Option<String>,
+    /// 剪贴板文本（截断 200 字符）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clipboard_text: Option<String>,
+}
+
+impl PluginQueryContext {
+    /// 从 ContextSnapshot 转换为插件协议格式。
+    pub fn from_snapshot(snapshot: &crate::context::ContextSnapshot) -> Self {
+        let (foreground_app, window_title) = match &snapshot.foreground_app {
+            Some(app) => (
+                Some(app.process_name.clone()),
+                Some(app.window_title.clone()),
+            ),
+            None => (None, None),
+        };
+        PluginQueryContext {
+            lang: None, // 后续加配置项预留
+            foreground_app,
+            window_title,
+            clipboard_text: snapshot.clipboard_text.clone(),
+        }
+    }
 }
 
 /// 插件 → core 响应(一行 = 一个完整 JSON)。

@@ -57,9 +57,12 @@ function ensureSeq(seq) {
   return true;
 }
 
-/** 去重 append 新项；有新增或刚重置则重渲染（保持当前选中项身份）。 */
+/** 去重 append 新项；有新增或刚重置则重渲染。
+ * 增量到达后按 score 降序重排，确保 priority 项置顶(0.4)。
+ * 光标行为:sort 后**不** restoreSelection——保持页内索引不变。
+ * 这样 priority 新项置顶后，selected=0 自动指向新项；用户已移动的光标留在原地。
+ */
 function appendNew(items, didReset) {
-  const activeKey = activeItemKey();
   const seen = new Set(allItems.map(itemKey));
   let changed = false;
   for (const item of items || []) {
@@ -71,7 +74,12 @@ function appendNew(items, didReset) {
     }
   }
   if (!changed && !didReset) return; // 无变化且非新批：不抖动
-  restoreSelection(activeKey);
+  // 真实结果到达后,清掉 takeover 占位项(takeover 占位 is_placeholder=true)。
+  if (changed) {
+    allItems = allItems.filter((x) => !x.is_placeholder);
+  }
+  // 按 score 降序重排:priority 项(score > 1.0)置顶,calc(1.0)次之,应用(<=1.0)垫后。
+  allItems.sort((a, b) => (b.score || 0) - (a.score || 0));
   renderPage();
 }
 
