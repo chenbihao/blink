@@ -33,6 +33,12 @@ enum ActionKind {
     Sleep,
     /// 清空搜索历史
     ClearHistory,
+    /// 退出 Blink
+    ExitBlink,
+    /// 打开日志文件
+    OpenLogs,
+    /// 打开数据目录
+    OpenDataDir,
 }
 
 /// 内置动作注册表。
@@ -81,6 +87,27 @@ const ACTIONS: &[BuiltinAction] = &[
         keywords: &["清空历史", "clear history", "qkls", "清除历史"],
         kind: ActionKind::ClearHistory,
     },
+    BuiltinAction {
+        id: "exit_blink",
+        title: "退出 Blink",
+        subtitle: "Exit Blink Launcher",
+        keywords: &["退出", "exit", "quit", "tc", "关闭", "结束"],
+        kind: ActionKind::ExitBlink,
+    },
+    BuiltinAction {
+        id: "open_logs",
+        title: "打开日志文件",
+        subtitle: "Open Blink Log File",
+        keywords: &["日志", "log", "日志文件", "rz"],
+        kind: ActionKind::OpenLogs,
+    },
+    BuiltinAction {
+        id: "open_data_dir",
+        title: "打开数据目录",
+        subtitle: "Open Blink Data Folder",
+        keywords: &["目录", "文件夹", "数据", "ml"],
+        kind: ActionKind::OpenDataDir,
+    },
 ];
 
 /// 内置动作引擎。
@@ -112,23 +139,22 @@ impl SearchEngine for BuiltinEngine {
             // 标题精确匹配（最高优先级）
             if action.title.to_lowercase().contains(&q) {
                 matched = true;
-                score = 1.0;
+                score = 2.0; // 比普通应用高，确保排前面
             }
 
-            // 关键词匹配（包含首字母）
+            // 关键词精确匹配（如 "sz" == "sz"）
             if !matched {
                 for kw in action.keywords {
                     let kw_lower = kw.to_lowercase();
-                    // 精确匹配关键词
                     if kw_lower == q {
                         matched = true;
-                        score = 0.9;
+                        score = 1.5; // 精确首字母匹配，权重很高
                         break;
                     }
                     // 前缀匹配（如 "设" 匹配 "设置"）
                     if kw_lower.starts_with(&q) {
                         matched = true;
-                        score = 0.7;
+                        score = 1.2; // 前缀匹配也高于普通应用
                         break;
                     }
                 }
@@ -165,6 +191,15 @@ fn action_to_search_item(action: &BuiltinAction, score: f32) -> SearchItem {
         },
         ActionKind::ClearHistory => SearchAction::Open {
             path: "__BLINK_ACTION_CLEAR_HISTORY__".to_string(),
+        },
+        ActionKind::ExitBlink => SearchAction::Open {
+            path: "__BLINK_ACTION_EXIT__".to_string(),
+        },
+        ActionKind::OpenLogs => SearchAction::Open {
+            path: "__BLINK_ACTION_OPEN_LOGS__".to_string(),
+        },
+        ActionKind::OpenDataDir => SearchAction::Open {
+            path: "__BLINK_ACTION_OPEN_DATA_DIR__".to_string(),
         },
     };
 

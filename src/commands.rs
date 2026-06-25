@@ -4,10 +4,19 @@
 
 use tauri::Manager;
 
-/// 前端 ESC 调用：隐藏窗口。
+/// 主窗口 ESC 调用：隐藏主窗口。
 #[tauri::command]
 pub fn hide_window(app: tauri::AppHandle) {
     crate::window::hide(&app, "ESC");
+}
+
+/// 隐藏设置窗口（供设置页的 ESC 调用）。
+#[tauri::command]
+pub fn hide_settings_window(app: tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("settings") {
+        let _ = win.hide();
+        tracing::debug!("hide_settings_window: 隐藏设置窗口");
+    }
 }
 
 /// 前端输入时调用:经 SearchService 多路召回(sync lane 同步返回首批)。
@@ -43,15 +52,18 @@ pub async fn launch_app(app: tauri::AppHandle, lnk_path: String) -> Result<(), S
         return Ok(());
     }
 
-    tracing::debug!(%lnk_path, "launch_app: 准备打开");
+    tracing::debug!(%lnk_path, "launch_app: 收到打开请求");
 
     // 检查是否为内置动作
     if let Some(action) = parse_builtin_action(&lnk_path) {
+        tracing::debug!(?action, "launch_app: 识别为内置动作");
         execute_builtin_action(&app, action).await?;
-        // 内置动作不记录历史
-        crate::window::hide(&app, "launch");
+        // 所有内置动作都隐藏主窗口，设置窗口单独显示
+        crate::window::hide(&app, "builtin action");
         return Ok(());
     }
+
+    tracing::debug!(%lnk_path, "launch_app: 普通应用启动");
 
     // 普通应用启动
     let pool = app.state::<sqlx::SqlitePool>();
@@ -70,6 +82,9 @@ fn parse_builtin_action(path: &str) -> Option<BuiltinActionKind> {
         "__BLINK_ACTION_RESTART__" => Some(BuiltinActionKind::Restart),
         "__BLINK_ACTION_SLEEP__" => Some(BuiltinActionKind::Sleep),
         "__BLINK_ACTION_CLEAR_HISTORY__" => Some(BuiltinActionKind::ClearHistory),
+        "__BLINK_ACTION_EXIT__" => Some(BuiltinActionKind::ExitBlink),
+        "__BLINK_ACTION_OPEN_LOGS__" => Some(BuiltinActionKind::OpenLogs),
+        "__BLINK_ACTION_OPEN_DATA_DIR__" => Some(BuiltinActionKind::OpenDataDir),
         _ => None,
     }
 }
@@ -83,18 +98,34 @@ enum BuiltinActionKind {
     Restart,
     Sleep,
     ClearHistory,
+    ExitBlink,
+    OpenLogs,
+    OpenDataDir,
 }
 
 /// 执行内置动作。
 async fn execute_builtin_action(app: &tauri::AppHandle, action: BuiltinActionKind) -> Result<(), String> {
     match action {
         BuiltinActionKind::OpenSettings => {
-            // 打开设置窗口（如果已存在则显示，否则创建）
-            if let Some(win) = app.get_webview_window("settings") {
-                let _ = win.show();
-                let _ = win.set_focus();
+            // 打开设置窗口（已存在则聚焦，否则创建）
+            tracing::debug!("执行内置动作：打开设置");
+            if let Some(w) = app.get_webview_window("settings") {
+                let _ = w.show();
+                let _ = w.set_focus();
             } else {
-                tracing::warn!("设置窗口未找到，请检查 main.rs 初始化");
+                use tauri::WebviewWindowBuilder;
+                use tauri::WebviewUrl;
+                tracing::debug!("设置窗口不存在，创建新窗口");
+                let _ = WebviewWindowBuilder::new(
+                    app,
+                    "settings",
+                    WebviewUrl::App("settings.html".into()),
+                )
+                .title("Blink Settings")
+                .inner_size(960.0, 680.0)
+                .min_inner_size(760.0, 520.0)
+                .center()
+                .build();
             }
         }
         BuiltinActionKind::LockWorkstation => {
@@ -137,6 +168,41 @@ async fn execute_builtin_action(app: &tauri::AppHandle, action: BuiltinActionKin
             let pool = app.state::<sqlx::SqlitePool>();
             crate::history::clear(&pool).await;
             tracing::info!("搜索历史已清空");
+        }
+        BuiltinActionKind::ExitBlink => {
+            // 退出 Blink
+            app.exit(0);
+        }
+        BuiltinActionKind::OpenLogs => {
+            // 打开日志文件
+            tracing::debug!("执行内置动作：打开日志文件");
+            let log_path = crate::logging::current_log_file();
+            let log_dir = crate::logging::log_dir();
+            tracing::debug!(log_path = %log_path.display(), log_dir = %log_dir.display(), "日志路径");
+
+            if log_path.exists() {
+                tracing::debug!(path = %log_path.display(), "日志文件存在，打开");
+                if let Err(e) = open::that(&log_path) {
+                    tracing::error!(error = %e, "打开日志文件失败，尝试打开目录");
+                    let _ = open::that(&log_dir);
+                }
+            } else {
+                tracing::debug!("日志文件不存在，打开目录");
+                let _ = open::that(&log_dir);
+            }
+        }
+        BuiltinActionKind::OpenDataDir => {
+            // 打开数据目录（APPDATA/Blink）
+            tracing::debug!("执行内置动作：打开数据目录");
+            if let Ok(appdata) = std::env::var("APPDATA") {
+                let dir = std::path::PathBuf::from(appdata).join("Blink");
+                tracing::debug!(dir = %dir.display(), "数据目录路径");
+                if let Err(e) = open::that(&dir) {
+                    tracing::error!(error = %e, dir = %dir.display(), "打开数据目录失败");
+                }
+            } else {
+                tracing::error!("APPDATA 环境变量未找到");
+            }
         }
     }
     Ok(())

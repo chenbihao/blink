@@ -1,4 +1,4 @@
-//! Blink 示例插件:echo —— 回显输入,验证 stdio JSONL 协议(见 §3.2)。
+//! Blink 示例插件:echo —— 回显输入 + 显示上下文快照,验证 Context 链路。
 //!
 //! 任何能读 stdin / 写 stdout 的程序都是插件。本插件用 Rust 写、阻塞式 stdio:
 //! 每行读一个 JSON 请求,处理后写一行 JSON 响应。stderr 用于日志(core 汇入 tracing)。
@@ -14,6 +14,19 @@ use std::io::{self, BufRead, Write};
 
 use serde::{Deserialize, Serialize};
 
+/// 查询上下文快照（从 core 传来，字段为 Option，值缺失则为 None）
+#[derive(Debug, Deserialize, Default)]
+struct PluginQueryContext {
+    #[serde(default)]
+    pub lang: Option<String>,
+    #[serde(default)]
+    pub foreground_app: Option<String>,
+    #[serde(default)]
+    pub window_title: Option<String>,
+    #[serde(default)]
+    pub clipboard_text: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum PluginRequest {
@@ -21,8 +34,7 @@ enum PluginRequest {
         id: String,
         query: String,
         #[serde(default)]
-        #[allow(dead_code)]
-        context: serde_json::Value,
+        context: PluginQueryContext,
     },
     Cancel {
         #[allow(dead_code)]
@@ -70,8 +82,8 @@ fn main() {
             }
         };
         match req {
-            PluginRequest::Query { id, query, .. } => {
-                let resp = handle_query(id, query);
+            PluginRequest::Query { id, query, context } => {
+                let resp = handle_query(id, query, context);
                 let json = serde_json::to_string(&resp).unwrap();
                 if writeln!(stdout, "{json}").is_err() {
                     break; // stdout 关闭(core 退出),结束
@@ -85,16 +97,45 @@ fn main() {
     }
 }
 
-/// 回显:把 query 原样作为一条 Copy 结果(Enter 复制 "echo: <query>")。
-fn handle_query(id: String, query: String) -> PluginResponse {
-    eprintln!("echo: handling query {query:?}");
-    PluginResponse {
-        id,
-        items: vec![PluginItem {
-            title: format!("echo: {query}"),
-            subtitle: Some("Blink Rust 示例插件".to_string()),
-            score: 0.8,
-            action: PluginAction::Copy { text: format!("echo: {query}") },
-        }],
+/// 回显 query + 显示 Context 快照（验证链路通了）。
+fn handle_query(id: String, query: String, ctx: PluginQueryContext) -> PluginResponse {
+    eprintln!("echo: query={query:?}, foreground_app={:?}, clipboard={:?}",
+              ctx.foreground_app, ctx.clipboard_text);
+
+    let mut items = Vec::new();
+
+    // 1. 主结果：回显
+    items.push(PluginItem {
+        title: format!("echo: {query}"),
+        subtitle: Some("Blink Rust 示例插件".to_string()),
+        score: 1.0,
+        action: PluginAction::Copy { text: format!("echo: {query}") },
+    });
+
+    // 2. 前台应用信息
+    if let Some(app) = &ctx.foreground_app {
+        items.push(PluginItem {
+            title: format!("前台应用: {app}"),
+            subtitle: ctx.window_title.clone(),
+            score: 0.9,
+            action: PluginAction::Copy { text: app.clone() },
+        });
     }
+
+    // 3. 剪贴板内容
+    if let Some(clip) = &ctx.clipboard_text {
+        let clip_short = if clip.len() > 50 {
+            format!("{}...", &clip[..50])
+        } else {
+            clip.clone()
+        };
+        items.push(PluginItem {
+            title: format!("剪贴板: {clip_short}"),
+            subtitle: Some(format!("共 {} 字符", clip.len())),
+            score: 0.85,
+            action: PluginAction::Copy { text: clip.clone() },
+        });
+    }
+
+    PluginResponse { id, items }
 }

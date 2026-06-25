@@ -203,6 +203,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::hide_window,
+            commands::hide_settings_window,
             commands::search_apps,
             commands::launch_app,
             commands::get_storage_info,

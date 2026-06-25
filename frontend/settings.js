@@ -13,6 +13,18 @@ document.addEventListener(
   true
 );
 
+// ESC 键隐藏设置窗口
+document.addEventListener("keydown", async (e) => {
+  if (e.key === "Escape") {
+    try {
+      // 设置窗口调用专门的隐藏命令（不影响主窗口）
+      await invoke("hide_settings_window");
+    } catch (err) {
+      console.error("hide_settings_window failed:", err);
+    }
+  }
+});
+
 // ── Tab 切换 ─────────────────────────────────────────────────────────────────
 
 document.querySelectorAll(".tab").forEach((btn) => {

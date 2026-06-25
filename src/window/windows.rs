@@ -70,6 +70,7 @@ pub fn invoke(app: &AppHandle) {
 }
 
 /// 隐藏：ESC / 看门狗 / 单实例重复启动。
+/// 只隐藏主窗口，设置窗口保持显示（按自己的 ESC 关闭）。
 pub fn hide(app: &AppHandle, reason: &str) {
     if let Some(win) = app.get_webview_window("main") {
         STATE.store(ST_HIDDEN, Ordering::SeqCst);
