@@ -100,7 +100,7 @@ fn handle_query(id: String, settings: &Option<serde_json::Value>) -> PluginRespo
             items.push(PluginItem {
                 title: format!("本地 IPv6: {ip}"),
                 subtitle: Some("按 Enter 复制".to_string()),
-                score: 1.0,
+                score: 0.8,
                 action: PluginAction::Copy { text: ip },
             });
         }
@@ -111,7 +111,7 @@ fn handle_query(id: String, settings: &Option<serde_json::Value>) -> PluginRespo
         items.push(PluginItem {
             title: format!("本地 IP: {ip}"),
             subtitle: Some("按 Enter 复制".to_string()),
-            score: 0.95,
+            score: 1.0,
             action: PluginAction::Copy { text: ip },
         });
     }

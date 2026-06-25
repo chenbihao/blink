@@ -15,5 +15,25 @@
   "triggers": [
     { "type": "keyword", "keyword": "ip", "exclusive": true }
   ],
-  "capabilities": ["query"]
+  "capabilities": ["query"],
+  "settings_schema": [
+    {
+      "key": "use_ipv6",
+      "type": "boolean",
+      "title": "查询 IPv6 地址",
+      "description": "额外显示本机 IPv6 出口地址（需 IPv6 环境）",
+      "default": false
+    },
+    {
+      "key": "geo_provider",
+      "type": "enum",
+      "title": "定位服务",
+      "description": "公网 IP 地理位置查询；选「不查询」则只显示 IP",
+      "default": "ip-api.com",
+      "options": [
+        { "value": "ip-api.com", "label": "ip-api.com（推荐）" },
+        { "value": "none", "label": "不查询定位" }
+      ]
+    }
+  ]
 }

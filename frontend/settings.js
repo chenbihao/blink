@@ -158,43 +158,90 @@ async function loadPlugins() {
   }
 }
 
-// 渲染单个插件卡片
+// 渲染单个插件卡片（0.5.1：头部总开关 + 配置区分组；boolean 用 checkbox 区别于总开关）
 function renderPluginCard(plugin) {
   const icon = PLUGIN_ICONS[plugin.id] || "🔌";
   const triggers = plugin.triggers && plugin.triggers.length > 0
     ? `触发: ${plugin.triggers.join(" / ")}`
     : "无触发关键词";
   const desc = plugin.description || "暂无描述";
-  // settings 渲染为 JSON 文本（无配置/空对象显示为空）
-  const settingsJson = plugin.settings && Object.keys(plugin.settings).length > 0
-    ? JSON.stringify(plugin.settings, null, 2)
-    : "";
   const enabled = plugin.enabled !== false;
-  // id 含点号(builtin.ip),属性选择器值用引号包裹即可,无需转义
+  const schema = plugin.settings_schema || [];
+  const settings = plugin.settings || {};
+  const hasFields = schema.length > 0;
+
+  const fieldsHtml = hasFields
+    ? schema.map((f) => renderSettingField(f, settings[f.key])).join("")
+    : "";
+
+  // 配置区:有字段时分组(标题+字段+保存);否则提示无可配置项
+  const configSection = hasFields
+    ? `<div class="plugin-config-section">
+         <div class="plugin-section-title">配置</div>
+         ${fieldsHtml}
+         <div class="plugin-save-row">
+           <button class="btn-small plugin-save">保存配置</button>
+           <span class="plugin-save-msg"></span>
+         </div>
+       </div>`
+    : '<div class="plugin-no-config">（该插件无可配置项）</div>';
+
   return `
-    <div class="extension-card" data-plugin-id="${plugin.id}">
+    <div class="extension-card ${enabled ? "" : "is-disabled"}" data-plugin-id="${plugin.id}">
       <div class="extension-header">
         <div class="extension-icon">${icon}</div>
         <div class="extension-info">
-          <h3>${plugin.name || plugin.id} <span class="hint">v${plugin.version || "1.0.0"}</span></h3>
-          <p class="extension-desc">${triggers}</p>
+          <h3>${escapeHtml(plugin.name || plugin.id)}<span class="version-badge">v${escapeHtml(plugin.version || "1.0.0")}</span></h3>
+          <p class="extension-desc">${escapeHtml(triggers)}</p>
         </div>
-        <label class="switch" title="启用/禁用">
-          <input type="checkbox" class="plugin-enabled" ${enabled ? "checked" : ""} />
-          <span class="slider"></span>
-        </label>
+        <div class="plugin-master-toggle">
+          <span class="toggle-label">${enabled ? "已启用" : "已禁用"}</span>
+          <label class="switch" title="启用/禁用插件">
+            <input type="checkbox" class="plugin-enabled" ${enabled ? "checked" : ""} />
+            <span class="slider"></span>
+          </label>
+        </div>
       </div>
       <div class="extension-body">
-        <div style="color: #6c7086; font-size: 13px; padding: 4px 0 8px;">${desc}</div>
-        <div class="setting-row" style="align-items: flex-start;">
-          <label>配置 (JSON)</label>
-          <div style="flex: 1; min-width: 0;">
-            <textarea class="plugin-settings" spellcheck="false" placeholder='例如 {"use_ipv6": true}' style="width: 100%; min-height: 80px; font-family: monospace; font-size: 12px; background: #1e1e2e; color: #cdd6f4; border: 1px solid #45475a; border-radius: 6px; padding: 8px; resize: vertical; box-sizing: border-box;">${settingsJson}</textarea>
-            <div class="plugin-save-msg" style="font-size: 12px; margin-top: 4px; min-height: 16px;"></div>
-          </div>
-          <button class="btn-small plugin-save">保存配置</button>
-        </div>
+        <div class="plugin-desc-line">${escapeHtml(desc)}</div>
+        ${configSection}
       </div>
+    </div>
+  `;
+}
+
+// 渲染单个配置项控件（boolean→checkbox 方框, enum→下拉, number/string→输入框）
+function renderSettingField(field, value) {
+  const val = value !== undefined ? value : field.default;
+  let control;
+  switch (field.type) {
+    case "boolean":
+      // 配置项用小号 switch(区别于卡片头部的标准 switch)
+      control = `<label class="switch switch-sm"><input type="checkbox" class="plugin-field" data-key="${field.key}" ${val === true ? "checked" : ""} /><span class="slider"></span></label>`;
+      break;
+    case "enum": {
+      const opts = (field.options || [])
+        .map((o) => `<option value="${escapeAttr(o.value)}" ${String(val) === String(o.value) ? "selected" : ""}>${escapeHtml(o.label)}</option>`)
+        .join("");
+      control = `<select class="plugin-field" data-key="${field.key}">${opts}</select>`;
+      break;
+    }
+    case "number":
+      control = `<input type="number" class="plugin-field" data-key="${field.key}" value="${escapeAttr(val ?? "")}" ${field.min != null ? `min="${field.min}"` : ""} ${field.max != null ? `max="${field.max}"` : ""} />`;
+      break;
+    case "string":
+    default:
+      control = `<input type="text" class="plugin-field" data-key="${field.key}" value="${escapeAttr(val ?? "")}" />`;
+      break;
+  }
+  const desc = field.description ? `<div class="field-desc">${escapeHtml(field.description)}</div>` : "";
+  return `
+    <div class="plugin-field-row">
+      <div class="field-head">
+        <span class="field-title">${escapeHtml(field.title)}</span>
+        ${control}
+      </div>
+      ${desc}
     </div>
   `;
 }
@@ -204,51 +251,59 @@ function bindPluginCardEvents(plugin) {
   const card = document.querySelector(`.extension-card[data-plugin-id="${plugin.id}"]`);
   if (!card) return;
   const id = plugin.id;
+  const schema = plugin.settings_schema || [];
 
-  card.querySelector(".plugin-enabled")?.addEventListener("change", async (e) => {
-    const settings = readSettingsJson(card);
-    if (settings === null) {
-      flash(card, "JSON 格式错误,无法保存", true);
-      e.target.checked = !e.target.checked; // 回滚
-      return;
-    }
-    try {
-      await invoke("update_plugin_config", { pluginId: id, enabled: e.target.checked, settings });
-      flash(card, e.target.checked ? "已启用" : "已禁用");
-    } catch (err) {
-      console.error("update_plugin_config (enabled) failed:", err);
-      flash(card, "保存失败", true);
-      e.target.checked = !e.target.checked; // 回滚
-    }
-  });
-
-  card.querySelector(".plugin-save")?.addEventListener("click", async () => {
-    const settings = readSettingsJson(card);
-    if (settings === null) {
-      flash(card, "JSON 格式错误", true);
-      return;
-    }
-    const enabled = card.querySelector(".plugin-enabled").checked;
+  const save = async (enabledOverride) => {
+    const settings = collectSettings(card, schema);
+    const enabled = enabledOverride !== undefined ? enabledOverride : card.querySelector(".plugin-enabled").checked;
     try {
       await invoke("update_plugin_config", { pluginId: id, enabled, settings });
-      flash(card, "已保存");
+      return true;
     } catch (err) {
       console.error("update_plugin_config failed:", err);
       flash(card, "保存失败: " + err, true);
+      return false;
     }
+  };
+
+  card.querySelector(".plugin-enabled")?.addEventListener("change", async (e) => {
+    const ok = await save(e.target.checked);
+    if (ok) flash(card, e.target.checked ? "已启用" : "已禁用");
+    else e.target.checked = !e.target.checked; // 回滚
+  });
+
+  card.querySelector(".plugin-save")?.addEventListener("click", async () => {
+    const ok = await save();
+    if (ok) flash(card, "已保存");
   });
 }
 
-// 读取卡片里的 settings JSON;解析失败返回 null,空文本返回 {}。
-function readSettingsJson(card) {
-  const raw = (card.querySelector(".plugin-settings")?.value || "").trim();
-  if (!raw) return {};
-  try {
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? parsed : null;
-  } catch {
-    return null;
+// 从卡片控件收集 settings 对象（按 schema type 转换类型）
+function collectSettings(card, schema) {
+  const settings = {};
+  for (const f of schema) {
+    const el = card.querySelector(`.plugin-field[data-key="${f.key}"]`);
+    if (!el) continue;
+    switch (f.type) {
+      case "boolean":
+        settings[f.key] = el.checked;
+        break;
+      case "number":
+        settings[f.key] = el.value === "" ? 0 : Number(el.value);
+        break;
+      default: // string / enum
+        settings[f.key] = el.value;
+    }
   }
+  return settings;
+}
+
+// HTML 转义（防 settings/title 注入 HTML）
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function escapeAttr(s) {
+  return escapeHtml(s);
 }
 
 // 卡片内显示一行反馈（2s 后清除）

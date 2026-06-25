@@ -321,6 +321,9 @@ h2 {
 }
 
 .extension-info h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 15px;
   font-weight: 600;
   color: #cdd6f4;
@@ -331,6 +334,16 @@ h2 {
   font-size: 12px;
   color: #6c7086;
   margin: 0;
+}
+
+.version-badge {
+  font-size: 11px;
+  font-weight: 400;
+  color: #6c7086;
+  background: #313244;
+  padding: 2px 8px;
+  border-radius: 10px;
+  line-height: 1.4;
 }
 
 .extension-body {
@@ -429,4 +442,131 @@ input:checked + .slider:before {
   padding: 6px 10px;
   font-size: 13px;
   font-family: ui-monospace, Consolas, monospace;
+}
+
+/* ── 插件配置卡片（schema 驱动表单）────────────────────────────────────── */
+
+/* 禁用态:整卡半透明 + 配置区不可点 */
+.extension-card.is-disabled {
+  opacity: 0.55;
+}
+.extension-card.is-disabled .plugin-config-section {
+  pointer-events: none;
+}
+
+/* 头部总开关(switch 拨动 + 文字标签) */
+.plugin-master-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.plugin-master-toggle .toggle-label {
+  font-size: 12px;
+  color: #6c7086;
+}
+
+/* 插件描述行 */
+.plugin-desc-line {
+  color: #a6adc8;
+  font-size: 13px;
+  padding: 4px 0 12px;
+  line-height: 1.5;
+}
+
+/* 配置区分组容器(独立浅背景,与描述分层) */
+.plugin-config-section {
+  background: #11111b;
+  border: 1px solid #313244;
+  border-radius: 8px;
+  padding: 0 14px;
+}
+
+.plugin-section-title {
+  font-size: 11px;
+  color: #585b70;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  padding: 12px 0 4px;
+}
+
+.plugin-no-config {
+  color: #6c7086;
+  font-size: 13px;
+  padding: 8px 0;
+}
+
+/* 单个配置项 */
+.plugin-field-row {
+  padding: 10px 0;
+  border-top: 1px solid #313244;
+}
+.plugin-field-row:first-of-type {
+  border-top: none;
+}
+.plugin-field-row .field-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.plugin-field-row .field-title {
+  width: 130px;
+  flex-shrink: 0;
+  font-size: 13px;
+  color: #cdd6f4;
+}
+.plugin-field-row .field-desc {
+  font-size: 12px;
+  color: #6c7086;
+  margin-top: 4px;
+  line-height: 1.5;
+}
+
+/* 配置输入控件(统一宽度) */
+.plugin-field-row select,
+.plugin-field-row input[type="text"],
+.plugin-field-row input[type="number"] {
+  width: 220px;
+  flex-shrink: 0;
+  background: #313244;
+  color: #cdd6f4;
+  border: 1px solid #45475a;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+.plugin-field-row select {
+  cursor: pointer;
+}
+.plugin-field-row select:hover,
+.plugin-field-row input:hover {
+  border-color: #585b70;
+}
+
+/* 配置项 boolean:小号 switch(区别于头部总开关的标准 switch 44x24) */
+.switch-sm {
+  width: 32px;
+  height: 18px;
+}
+.switch-sm .slider:before {
+  height: 12px;
+  width: 12px;
+}
+.switch-sm input:checked + .slider:before {
+  transform: translateX(14px);
+}
+
+/* 保存行(嵌在配置区内) */
+.plugin-save-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0 12px;
+  margin-top: 4px;
+  border-top: 1px solid #313244;
+}
+.plugin-save-msg {
+  font-size: 12px;
+  min-height: 16px;
 }

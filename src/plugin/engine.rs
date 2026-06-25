@@ -51,6 +51,32 @@ impl PluginEngine {
                     })
                     .collect();
 
+                // settings_schema → resolve 后的 JSON(title/description/label 已转字符串)
+                let schema: Vec<serde_json::Value> = manifest
+                    .settings_schema
+                    .iter()
+                    .map(|f| {
+                        serde_json::json!({
+                            "key": f.key,
+                            "type": match f.kind {
+                                super::manifest::SettingType::Boolean => "boolean",
+                                super::manifest::SettingType::String => "string",
+                                super::manifest::SettingType::Number => "number",
+                                super::manifest::SettingType::Enum => "enum",
+                            },
+                            "title": f.title.resolve(),
+                            "description": f.description.as_ref().map(|d| d.resolve()),
+                            "default": f.default.clone(),
+                            "min": f.min,
+                            "max": f.max,
+                            "options": f.options.iter().map(|o| serde_json::json!({
+                                "value": o.value.clone(),
+                                "label": o.label.resolve(),
+                            })).collect::<Vec<_>>(),
+                        })
+                    })
+                    .collect();
+
                 serde_json::json!({
                     "id": manifest.id,
                     "name": manifest.name,
@@ -59,6 +85,7 @@ impl PluginEngine {
                     "triggers": triggers,
                     "enabled": self.is_enabled(&manifest.id),
                     "settings": self.get_settings(&manifest.id),
+                    "settings_schema": schema,
                 })
             })
             .collect()
@@ -129,7 +156,11 @@ impl PluginEngine {
                     configs.insert(id.to_string(), cfg);
                 }
                 None => {
-                    let default = crate::config::PluginConfig::default();
+                    // 默认 settings 从 manifest.settings_schema 生成(无 schema 则 null)
+                    let default = crate::config::PluginConfig {
+                        enabled: true,
+                        settings: plugin.manifest().default_settings(),
+                    };
                     match crate::config::set_plugin_config(&self.pool, id, &default).await {
                         Ok(()) => tracing::info!(plugin = %id, "初始化插件配置(默认)"),
                         Err(e) => tracing::warn!(plugin = %id, error = %e, "写默认插件配置失败"),

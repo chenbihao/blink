@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// core 当前支持的 manifest schema_version 上限(§3.7 B4:超出范围拒绝加载)。
 pub const SUPPORTED_SCHEMA_VERSION: u32 = 1;
@@ -30,6 +30,9 @@ pub struct PluginManifest {
     pub triggers: Vec<PluginTrigger>,
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// 配置项元数据声明(驱动设置页 UI 渲染)。缺失则该插件用裸 JSON 编辑(降级)。
+    #[serde(default)]
+    pub settings_schema: Vec<SettingField>,
 }
 
 /// 进程拉起参数。
@@ -73,6 +76,87 @@ fn default_exclusive() -> bool {
     true
 }
 
+// ── 配置 schema(0.5.1,驱动设置页 UI)──────────────────────────────────────────
+
+/// 可本地化文本:既接受纯字符串,也接受多语言对象(serde untagged)。
+/// 当前 resolve 返回字符串本身(Plain)或 zh/首个(Localized);未来 i18n 按 locale 取,
+/// Rust 类型与前端均无需改动(只升级 manifest 数据形态)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum LocalizableText {
+    Plain(String),
+    Localized(std::collections::HashMap<String, String>),
+}
+
+impl LocalizableText {
+    /// 解析为当前展示文本(当前无 locale 概念,Localized 取 zh 回退首个)。
+    pub fn resolve(&self) -> String {
+        match self {
+            LocalizableText::Plain(s) => s.clone(),
+            LocalizableText::Localized(map) => map
+                .get("zh")
+                .or_else(|| map.values().next())
+                .cloned()
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// 配置项值类型(决定前端渲染成什么控件)。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SettingType {
+    Boolean,
+    String,
+    Number,
+    Enum,
+}
+
+impl SettingType {
+    /// 类型缺省默认值(schema 未给 default 时用)。
+    pub fn default_value(&self) -> serde_json::Value {
+        match self {
+            SettingType::Boolean => serde_json::Value::Bool(false),
+            SettingType::String => serde_json::Value::String(String::new()),
+            SettingType::Number => serde_json::json!(0),
+            SettingType::Enum => serde_json::Value::Null,
+        }
+    }
+}
+
+/// enum 选项。
+#[derive(Debug, Clone, Deserialize)]
+pub struct SettingOption {
+    pub value: serde_json::Value,
+    pub label: LocalizableText,
+}
+
+/// 单个配置项的元数据声明。
+#[derive(Debug, Clone, Deserialize)]
+pub struct SettingField {
+    /// 配置键(对应 settings JSON 字段名)。
+    pub key: String,
+    /// 值类型。
+    #[serde(rename = "type")]
+    pub kind: SettingType,
+    /// 展示标题。
+    pub title: LocalizableText,
+    /// 描述(可选)。
+    #[serde(default)]
+    pub description: Option<LocalizableText>,
+    /// 默认值(缺失按类型推断)。
+    #[serde(default)]
+    pub default: Option<serde_json::Value>,
+    /// enum 可选项。
+    #[serde(default)]
+    pub options: Vec<SettingOption>,
+    /// number 范围约束(UI 用,可选)。
+    #[serde(default)]
+    pub min: Option<f64>,
+    #[serde(default)]
+    pub max: Option<f64>,
+}
+
 impl PluginManifest {
     /// 从 manifest.json 路径解析。
     pub fn from_path(path: &Path) -> Result<Self, String> {
@@ -106,6 +190,22 @@ impl PluginManifest {
     /// 查询超时(毫秒),缺省 3000。
     pub fn timeout_ms(&self) -> u64 {
         self.runtime.timeout_ms.unwrap_or(3000)
+    }
+
+    /// 从 settings_schema 生成默认 settings JSON {key: default}。无 schema 返回 null。
+    pub fn default_settings(&self) -> serde_json::Value {
+        if self.settings_schema.is_empty() {
+            return serde_json::Value::Null;
+        }
+        let mut map = serde_json::Map::new();
+        for field in &self.settings_schema {
+            let val = field
+                .default
+                .clone()
+                .unwrap_or_else(|| field.kind.default_value());
+            map.insert(field.key.clone(), val);
+        }
+        serde_json::Value::Object(map)
     }
 }
 
@@ -149,5 +249,36 @@ mod tests {
         let json = r#"{"schema_version":1,"id":"x","name":"X","version":"0","runtime":{"exec":"x.exe"}}"#;
         let m: PluginManifest = serde_json::from_str(json).unwrap();
         assert_eq!(m.timeout_ms(), 3000);
+    }
+
+    #[test]
+    fn settings_schema_parses_plain_and_localized() {
+        let json = r#"{
+            "schema_version": 1, "id": "x", "name": "X", "version": "0",
+            "runtime": {"exec": "x.exe"},
+            "settings_schema": [
+                {"key":"use_ipv6","type":"boolean","title":"查询 IPv6","default":false},
+                {"key":"geo","type":"enum","title":{"zh":"定位","en":"Geo"},"default":"ip-api.com",
+                 "options":[{"value":"ip-api.com","label":"推荐"},{"value":"none","label":"关闭"}]}
+            ]
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.settings_schema.len(), 2);
+        // Plain title
+        assert_eq!(m.settings_schema[0].title.resolve(), "查询 IPv6");
+        // Localized title → 取 zh
+        assert_eq!(m.settings_schema[1].title.resolve(), "定位");
+        // 默认 settings 由 schema 生成
+        let defaults = m.default_settings();
+        assert_eq!(defaults["use_ipv6"], false);
+        assert_eq!(defaults["geo"], "ip-api.com");
+    }
+
+    #[test]
+    fn no_schema_defaults_null() {
+        let json = r#"{"schema_version":1,"id":"x","name":"X","version":"0","runtime":{"exec":"x.exe"}}"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(m.settings_schema.is_empty());
+        assert!(m.default_settings().is_null());
     }
 }
