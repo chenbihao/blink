@@ -25,14 +25,17 @@ pub struct PluginEngine {
     /// plugin_id → 配置。启动时 `init_configs` 从 DB 加载;`update_config` 时更新。
     configs: Arc<RwLock<HashMap<String, crate::config::PluginConfig>>>,
     pool: SqlitePool,
+    /// 全局代理(HTTP,HTTPS),进程启动时 env 注入;插件 ure/reqwest 原生读取。
+    global_proxy: Option<(String, String)>,
 }
 
 impl PluginEngine {
-    pub fn new(plugins: Vec<Arc<PluginHandle>>, pool: SqlitePool) -> Self {
+    pub fn new(plugins: Vec<Arc<PluginHandle>>, pool: SqlitePool, global_proxy: Option<(String, String)>) -> Self {
         PluginEngine {
             plugins,
             configs: Arc::new(RwLock::new(HashMap::new())),
             pool,
+            global_proxy,
         }
     }
 
@@ -193,6 +196,28 @@ impl PluginEngine {
             .get(id)
             .map(|c| c.enabled)
             .unwrap_or(true)
+    }
+
+    /// 获取插件的显示名称(manifest.name),回退为 plugin_id。
+    /// 用于占位符等 UI 展示场景。
+    pub fn get_display_name(&self, id: &str) -> String {
+        self.find_plugin(id)
+            .map(|p| p.manifest().name.clone())
+            .unwrap_or_else(|| id.to_string())
+    }
+
+    /// 更新全局代理配置 + 重置所有插件进程(保存后调用)。
+    /// 下次 query 自动用新 env 重启，用户零感知热更新。
+    pub async fn update_global_proxy(&self, proxy: Option<(String, String)>) {
+        // 先更新每个 PluginHandle 的 proxy 字段(新进程 spawn 时会用它)
+        for plugin in &self.plugins {
+            plugin.update_proxy(proxy.clone());
+        }
+        // 杀掉已启动的旧进程(下次 query 自动用新 proxy 重启)
+        for plugin in &self.plugins {
+            plugin.reset_process().await;
+        }
+        tracing::info!("全局代理配置已更新，所有插件进程已重置");
     }
 
     /// 取插件 settings(None = 无配置或 settings 为 null)。

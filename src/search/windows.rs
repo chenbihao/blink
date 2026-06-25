@@ -47,6 +47,7 @@ fn scan_dir(dir: &PathBuf, entries: &mut Vec<AppEntry>) {
                     is_calc: false,
                     score: 0.0,
                     is_placeholder: false,
+                    source: "start_menu".to_string(),
                     action: super::Action {
                         kind: super::ActionKind::Open,
                         hint: None,

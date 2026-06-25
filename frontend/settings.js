@@ -131,7 +131,79 @@ const PLUGIN_ICONS = {
   "builtin.weather": "🌤️",
 };
 
-// 加载并渲染插件列表（0.5.1：含 enabled 开关 + settings JSON 编辑）
+// 加载并渲染网络配置（全局代理，0.5.1：独立 Tab，本体/插件共用）
+async function loadNetworkConfig() {
+  const container = document.getElementById("network-container");
+  if (!container) return;
+
+  let proxyConfig = { http: "", https: "" };
+  try {
+    const cfg = await invoke("get_engine_config", { engineId: "_global_proxy" });
+    if (cfg) {
+      proxyConfig = {
+        http: cfg.http || "",
+        https: cfg.https || "",
+      };
+    }
+  } catch (e) {
+    console.error("load proxy config failed:", e);
+  }
+
+  container.innerHTML = `
+    <div class="extension-card">
+      <div class="extension-header">
+        <div class="extension-icon">🌐</div>
+        <div class="extension-info">
+          <h3>全局网络代理</h3>
+          <p class="extension-desc">本体、网络插件共用，修改后需重启 Blink 生效</p>
+        </div>
+      </div>
+      <div class="extension-body">
+        <div class="plugin-config-section" style="padding-top: 0;">
+          <div class="plugin-field-row">
+            <div class="field-head">
+              <span class="field-title">HTTP 代理</span>
+              <input type="text" class="plugin-field" data-key="http_proxy" value="${escapeHtml(proxyConfig.http)}" placeholder="http://127.0.0.1:7890" />
+            </div>
+          </div>
+          <div class="plugin-field-row">
+            <div class="field-head">
+              <span class="field-title">HTTPS 代理</span>
+              <input type="text" class="plugin-field" data-key="https_proxy" value="${escapeHtml(proxyConfig.https)}" placeholder="http://127.0.0.1:7890" />
+            </div>
+          </div>
+          <div class="plugin-save-row">
+            <button class="btn-small network-proxy-save">保存配置</button>
+            <span class="plugin-save-msg"></span>
+          </div>
+        </div>
+      </div>
+    </div>`;
+
+  // 绑定保存事件
+  const btn = document.querySelector(".network-proxy-save");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    const http = document.querySelector('.plugin-field[data-key="http_proxy"]')?.value || "";
+    const https = document.querySelector('.plugin-field[data-key="https_proxy"]')?.value || "";
+    const msg = btn.parentElement.querySelector(".plugin-save-msg");
+    try {
+      await invoke("update_global_proxy", { http, https });
+      if (msg) {
+        msg.textContent = "已保存，下次查询自动生效";
+        msg.style.color = "#a6e3a1";
+      }
+    } catch (e) {
+      console.error("save proxy failed:", e);
+      if (msg) {
+        msg.textContent = "保存失败";
+        msg.style.color = "#f38ba8";
+      }
+    }
+  });
+}
+
+// 加载并渲染插件列表（0.5.1：只含插件配置，网络已拆到独立 Tab）
 async function loadPlugins() {
   const container = document.getElementById("plugins-container");
   if (!container) return;
@@ -152,7 +224,7 @@ async function loadPlugins() {
 
   container.innerHTML = plugins.map(renderPluginCard).join("");
 
-  // 渲染后绑定每个卡片事件（用 data-plugin-id 定位）
+  // 绑定每个插件卡片事件（用 data-plugin-id 定位）
   for (const plugin of plugins) {
     bindPluginCardEvents(plugin);
   }
@@ -576,3 +648,4 @@ document.getElementById("save-file-search")?.addEventListener("click", async () 
 loadConfig();
 loadStorageInfo();
 loadLogInfo();
+loadNetworkConfig();

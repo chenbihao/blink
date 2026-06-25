@@ -69,6 +69,7 @@ impl SearchItem {
                 is_calc: false,
                 score: self.score,
                 is_placeholder: false,
+                source: self.source.clone(),
                 action: Action {
                     kind: ActionKind::Open,
                     hint: None,
@@ -85,6 +86,7 @@ impl SearchItem {
                 is_calc: self.source == "calc",
                 score: self.score,
                 is_placeholder: false,
+                source: self.source.clone(),
                 action: Action {
                     kind: ActionKind::Copy,
                     hint: None,

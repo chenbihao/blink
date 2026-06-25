@@ -69,6 +69,12 @@ pub struct AppEntry {
     /// 占位项标记(takeover 时先同步返回,真实结果到达后前端自动移除)。
     #[serde(default)]
     pub is_placeholder: bool,
+    /// 来源(引擎 id / plugin id),前端增量 merge 时用：
+    /// - 引擎结果："start_menu"、"file"、"calc"
+    /// - 插件结果：plugin_id（如 "builtin.weather"）
+    /// - 插件占位：同 plugin_id（与插件结果匹配实现自动替换）
+    #[serde(default)]
+    pub source: String,
     /// 可执行动作（决定 Enter 行为 + 提示栏文案）。与 description 正交。
     pub action: Action,
 }

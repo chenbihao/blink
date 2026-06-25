@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "id": "builtin.weather",
+  "name": "天气",
+  "version": "0.1.0",
+  "description": "查询城市天气（open-meteo，免费无 key）",
+  "builtin": true,
+  "runtime": {
+    "type": "process",
+    "protocol": "jsonl",
+    "exec": "../../../target/debug/blink-plugin-weather.exe",
+    "timeout_ms": 5000,
+    "concurrency": 1
+  },
+  "triggers": [
+    { "type": "keyword", "keyword": "天气", "exclusive": true }
+  ],
+  "capabilities": ["query"],
+  "settings_schema": [
+    {
+      "key": "default_city",
+      "type": "string",
+      "title": "默认城市",
+      "description": "无参数时查询的城市（如「北京」）",
+      "default": ""
+    },
+    {
+      "key": "temperature_unit",
+      "type": "enum",
+      "title": "温度单位",
+      "default": "celsius",
+      "options": [
+        { "value": "celsius", "label": "摄氏度 (°C)" },
+        { "value": "fahrenheit", "label": "华氏度 (°F)" }
+      ]
+    }
+  ]
+}

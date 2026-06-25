@@ -74,9 +74,19 @@ function appendNew(items, didReset) {
     }
   }
   if (!changed && !didReset) return; // 无变化且非新批：不抖动
-  // 真实结果到达后,清掉 takeover 占位项(takeover 占位 is_placeholder=true)。
-  if (changed) {
-    allItems = allItems.filter((x) => !x.is_placeholder);
+  // 增量结果到达时,只清掉对应插件的占位项(真实结果已到)。
+  // 其他插件的占位保留(还在查询中)。引擎(File/StartMenu)结果不清占位。
+  // 插件占位的 source 就是 plugin_id（如 "builtin.weather"），直接匹配即可。
+  if (changed && !didReset) {
+    const pluginsReturned = new Set(
+      (items || [])
+        .map((x) => x.source)
+        .filter((s) => s && !["file", "start_menu", "calc"].includes(s))
+    );
+    allItems = allItems.filter((x) => {
+      if (!x.is_placeholder) return true;
+      return !pluginsReturned.has(x.source);
+    });
   }
   // 按 score 降序重排:priority 项(score > 1.0)置顶,calc(1.0)次之,应用(<=1.0)垫后。
   allItems.sort((a, b) => (b.score || 0) - (a.score || 0));
@@ -159,10 +169,11 @@ export function hasItems() {
 
 // ── 内部 ──────────────────────────────────────────────────────────────────────
 
-/** 去重键：应用按路径（小写），计算结果按名，其余按 kind+名+描述。 */
+/** 去重键：应用按路径（小写），计算结果按名，占位按名，其余按 kind+名+描述。 */
 function itemKey(item) {
   if (item.lnk_path) return "open:" + item.lnk_path.toLowerCase();
   if (item.is_calc) return "calc:" + item.name;
+  if (item.is_placeholder) return "placeholder:" + item.name;
   return (item.action?.kind || "x") + ":" + item.name + ":" + (item.description || "");
 }
 
@@ -259,6 +270,14 @@ function createItem(app, i) {
     li.classList.add("calc-result");
     // 计算结果原始值（去显示用的 "= " 前缀），激活时复制
     li.dataset.calcValue = app.name.replace(/^=\s*/, "");
+  }
+
+  // 插件命中占位：加载动画+灰字
+  if (app.is_placeholder) {
+    li.classList.add("is-loading");
+    const spinner = document.createElement("span");
+    spinner.className = "loading-spinner";
+    li.appendChild(spinner);
   }
 
   // 图标：自定义协议按需懒加载（calc 无 lnk_path 不显示）。

@@ -95,6 +95,25 @@ body {
   flex-shrink: 0;
 }
 
+/* 插件查询中占位动画 - 明确用户命令已被识别 */
+#results li.is-loading {
+  color: #6c7086;
+  opacity: 0.9;
+}
+#results li .loading-spinner {
+  width: 16px;
+  height: 16px;
+  margin-right: 12px;
+  border: 2px solid #45475a;
+  border-top-color: #89b4fa;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
 /* 正文：名称 + 描述副行，纵向排列，占满中间剩余宽度 */
 #results li .item-body {
   flex: 1;

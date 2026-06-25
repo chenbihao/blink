@@ -124,12 +124,20 @@ fn main() {
                 .build(app)?;
 
             // 加载 builtin 插件
-            let plugins = plugin::load_builtin_plugins(app.handle());
+            // 全局代理配置(engine:_global_proxy → {http,https})，进程启动时 env 注入，ureq/reqwest 原生读取
+            let global_proxy = tauri::async_runtime::block_on(crate::config::get_engine_config(&pool, "_global_proxy"));
+            let proxy = global_proxy.and_then(|v| {
+                let http = v.get("http").and_then(|s| s.as_str()).map(|s| s.to_string());
+                let https = v.get("https").and_then(|s| s.as_str()).map(|s| s.to_string());
+                if http.is_some() || https.is_some() { Some((http.unwrap_or_default(), https.unwrap_or_default())) }
+                else { None }
+            });
+            let plugins = plugin::load_builtin_plugins(app.handle(), proxy.clone());
             let plugin_engine = if plugins.is_empty() {
                 None
             } else {
                 tracing::info!(count = plugins.len(), "PluginEngine 已构造");
-                let engine = std::sync::Arc::new(plugin::PluginEngine::new(plugins.clone(), pool.clone()));
+                let engine = std::sync::Arc::new(plugin::PluginEngine::new(plugins.clone(), pool.clone(), proxy));
                 // 加载/初始化每个插件配置(不存在则写默认 {enabled, settings:null})。
                 tauri::async_runtime::block_on(engine.init_configs());
                 Some(engine)
@@ -247,7 +255,8 @@ fn main() {
             commands::get_engine_config,
             commands::update_engine_config,
             commands::get_plugins,
-            commands::update_plugin_config
+            commands::update_plugin_config,
+            commands::update_global_proxy
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

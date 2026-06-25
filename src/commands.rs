@@ -407,6 +407,33 @@ pub async fn get_plugins(app: tauri::AppHandle) -> Vec<serde_json::Value> {
     }
 }
 
+/// 更新全局网络代理配置（保存 DB + 更新内存 + 杀掉旧进程，下次查询自动用新）。
+#[tauri::command]
+pub async fn update_global_proxy(
+    app: tauri::AppHandle,
+    http: String,
+    https: String,
+) -> Result<(), String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    let engine = app.state::<Option<std::sync::Arc<crate::plugin::PluginEngine>>>();
+
+    // 存 DB
+    let config = serde_json::json!({ "http": http, "https": https });
+    crate::config::set_engine_config(&pool, "_global_proxy", &config).await?;
+
+    // 更新内存 + 杀进程
+    if let Some(e) = engine.as_ref() {
+        let proxy = if http.is_empty() && https.is_empty() {
+            None
+        } else {
+            Some((http, https))
+        };
+        e.update_global_proxy(proxy).await;
+    }
+
+    Ok(())
+}
+
 /// 更新插件配置（enabled + settings）：写 DB + 更新 PluginEngine 内存（0.5.1）。
 #[tauri::command]
 pub async fn update_plugin_config(

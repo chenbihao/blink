@@ -100,13 +100,21 @@ impl SearchService {
         let search_ctx = QueryContext { history: &history, snapshot: &snapshot };
         let intent_ctx = crate::intent::QueryContext { history: &history, snapshot: &snapshot };
         let route = self.router.route(q, &intent_ctx).await;
+        // 过滤禁用插件的路由命中(0.5.1 补全):禁用插件不参与路由,避免 takeover 空白。
+        let route = self.filter_disabled(route);
+
+        // 获取插件显示名称的闭包
+        let display_name = |id: &str| match &self.plugin_engine {
+            Some(pe) => pe.get_display_name(id),
+            None => id.strip_prefix("builtin.").unwrap_or(id).to_string(),
+        };
 
         match route {
             Route::Takeover { plugin_id, arg, .. } => {
                 // 独占:跳过本地引擎,只查该插件。
-                // 先同步返回占位项,避免窗口空白;真实结果走 async 增量到达后前端自动移除占位。
+                // 先同步返回占位项(带明确的"正在查询"反馈),避免窗口空白,让用户知道命令已被识别。
                 self.spawn_takeover(plugin_id.clone(), arg.clone(), seq);
-                vec![placeholder_entry(&plugin_id)]
+                vec![placeholder_entry(&plugin_id, &display_name(&plugin_id))]
             }
             Route::Mixed { candidates } => {
                 // sync lane 照常召回 → 首批。
@@ -126,6 +134,21 @@ impl SearchService {
                     .map(|c| (c.plugin_id.clone(), c.arg.clone()))
                     .collect();
 
+                // 命中的插件：同步返回占位项（加载中反馈），避免窗口空白
+                // Priority 插件占位给高 score 置顶，Inline 插件占位给低 score 放后面
+                let priority_set: std::collections::HashSet<String> = priority
+                    .iter()
+                    .map(|c| c.plugin_id.clone())
+                    .collect();
+                let placeholders: Vec<AppEntry> = plugin_ids
+                    .iter()
+                    .map(|(id, _)| {
+                        let mut entry = placeholder_entry(id, &display_name(id));
+                        entry.score = if priority_set.contains(id) { 2.0 } else { -1.0 };
+                        entry
+                    })
+                    .collect();
+
                 if !plugin_ids.is_empty() || !self.async_engines.is_empty() {
                     self.spawn_mixed_lane(
                         q.to_string(),
@@ -135,11 +158,40 @@ impl SearchService {
                     );
                 }
 
-                fuse_items(items, RESULT_LIMIT)
+                // 占位项放最后,不抢占 sync lane 结果的首位
+                let mut all_items: Vec<AppEntry> = fuse_items(items, RESULT_LIMIT)
                     .into_iter()
                     .map(SearchItem::into_app_entry)
-                    .collect()
+                    .collect();
+                all_items.extend(placeholders);
+                all_items
             }
+        }
+    }
+
+    /// 过滤禁用插件的路由命中(0.5.1):禁用插件不参与路由。
+    /// - Takeover 命中禁用插件 → 降级空 Mixed(走 Generic 应用搜索),避免窗口空白。
+    /// - Mixed 候选 → 剔除禁用插件。
+    /// 比「RuleRouter 加 remove API」简洁:路由表保持静态,过滤在结果层(无需重新注入)。
+    fn filter_disabled(&self, route: Route) -> Route {
+        let Some(pe) = &self.plugin_engine else {
+            return route;
+        };
+        match route {
+            Route::Takeover { ref plugin_id, .. } => {
+                if pe.is_enabled(plugin_id) {
+                    route
+                } else {
+                    tracing::debug!(plugin = %plugin_id, "禁用插件命中 takeover,降级 Generic");
+                    Route::Mixed { candidates: vec![] }
+                }
+            }
+            Route::Mixed { candidates } => Route::Mixed {
+                candidates: candidates
+                    .into_iter()
+                    .filter(|c| pe.is_enabled(&c.plugin_id))
+                    .collect(),
+            },
         }
     }
 
@@ -167,7 +219,8 @@ impl SearchService {
         });
     }
 
-    /// Mixed 分支 async lane:查插件(给定候选) + 其他 async 引擎 → 融合 → emit 增量。
+    /// Mixed 分支 async lane:每个引擎/插件单独 spawn,谁先回来就先 emit 增量。
+    /// 关键修复:慢插件(如天气)不会阻塞快引擎(如 Everything)。
     fn spawn_mixed_lane(
         &self,
         query: String,
@@ -181,45 +234,57 @@ impl SearchService {
         let pool = self.pool.clone();
         let latest_seq = Arc::clone(&self.latest_seq);
         let snapshot = Arc::clone(&self.snapshot);
+
         tauri::async_runtime::spawn(async move {
             let history = crate::history::get_weights(&pool).await;
             let snapshot = snapshot.read().unwrap().clone();
-            let ctx = QueryContext { history: &history, snapshot: &snapshot };
-            let mut items = Vec::new();
 
-            // 插件查询
+            // priority 插件的 id 集合(查询完成后 score 抬高)
+            let priority_set: std::collections::HashSet<String> = priority_candidates
+                .into_iter()
+                .map(|c| c.plugin_id)
+                .collect();
+
+            // ── 1. 插件查询任务（独立 spawn）
             if let Some(ref pe) = plugin_engine {
                 if !plugin_ids.is_empty() {
                     let plugin_ctx = crate::plugin::PluginQueryContext::from_snapshot(&snapshot);
-                    let mut plugin_items = pe.query_subset(&plugin_ids, &plugin_ctx).await;
-                    // priority 候选 score 抬高,确保置顶(高于本地结果最高分)。
-                    let priority_set: std::collections::HashSet<String> = priority_candidates
-                        .into_iter()
-                        .map(|c| c.plugin_id)
-                        .collect();
-                    for item in &mut plugin_items {
-                        if priority_set.contains(&item.source) {
-                            item.score = item.score.max(0.0) + 1.5;
+                    let pe = pe.clone();
+                    let plugin_ids = plugin_ids.clone();
+                    let app = app.clone();
+                    let latest_seq = latest_seq.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let mut items = pe.query_subset(&plugin_ids, &plugin_ctx).await;
+                        // priority 候选 score 抬高,确保置顶
+                        for item in &mut items {
+                            if priority_set.contains(&item.source) {
+                                item.score = item.score.max(0.0) + 1.5;
+                            }
                         }
-                    }
-                    items.extend(plugin_items);
+                        if seq == latest_seq.load(Ordering::SeqCst) && !items.is_empty() {
+                            tracing::trace!(count = items.len(), "插件查询返回");
+                            emit_results(&app, seq, items);
+                        }
+                    });
                 }
             }
 
-            // 其他 async 引擎(如 MockSlowEngine)
-            for engine in &async_engines {
-                let found = engine.search(&query, &ctx).await;
-                tracing::trace!(engine = engine.id(), count = found.len(), "async lane 引擎返回");
-                items.extend(found);
+            // ── 2. 每个 async 引擎独立 spawn(关键修复:不互相阻塞)
+            for engine in async_engines {
+                let q = query.clone();
+                let app = app.clone();
+                let latest_seq = latest_seq.clone();
+                let history = history.clone();  // history 是 Arc<HashMap> 内部 move clone
+                let snapshot = snapshot.clone();
+                tauri::async_runtime::spawn(async move {
+                    let ctx = QueryContext { history: &history, snapshot: &snapshot };
+                    let items = engine.search(&q, &ctx).await;
+                    if seq == latest_seq.load(Ordering::SeqCst) && !items.is_empty() {
+                        tracing::trace!(engine = engine.id(), count = items.len(), "async lane 引擎返回");
+                        emit_results(&app, seq, items);
+                    }
+                });
             }
-
-            if seq != latest_seq.load(Ordering::SeqCst) {
-                return;
-            }
-            if items.is_empty() {
-                return;
-            }
-            emit_results(&app, seq, items);
         });
     }
 }
@@ -269,16 +334,19 @@ fn emit_results(app: &AppHandle, seq: u64, items: Vec<SearchItem>) {
     }
 }
 
-/// takeover 占位项:同步返回,避免窗口空白等待 async 结果。
-fn placeholder_entry(plugin_id: &str) -> AppEntry {
+/// 插件占位项:同步返回,避免窗口空白等待 async 结果。
+/// - plugin_id: 插件 id（如 "builtin.weather"），存 source 字段，与插件结果匹配实现自动替换
+/// - display_name: 插件中文名称(manifest.name)
+fn placeholder_entry(plugin_id: &str, display_name: &str) -> AppEntry {
     AppEntry {
-        name: "正在查询…".into(),
+        name: format!("{} 查询中…", display_name),
         pinyin_name: String::new(),
         lnk_path: String::new(),
         is_calc: false,
         score: 0.0,
         is_placeholder: true,
-        description: Some(format!("插件 {plugin_id}")),
+        source: plugin_id.to_string(),
+        description: Some("请稍候".into()),
         action: Action {
             kind: ActionKind::Open,
             hint: None,

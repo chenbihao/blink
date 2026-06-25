@@ -65,8 +65,8 @@ struct PluginProcess {
 }
 
 impl PluginProcess {
-    /// 拉起进程,挂上 stdout/stderr reader。
-    fn spawn(exec_path: &PathBuf, work_dir: &PathBuf, plugin_id: &str) -> Result<Self, PluginError> {
+    /// 拉起进程,挂上 stdout/stderr reader。proxy=(http,https),None=不注入。
+    fn spawn(exec_path: &PathBuf, work_dir: &PathBuf, plugin_id: &str, proxy: Option<(String, String)>) -> Result<Self, PluginError> {
         let mut cmd = tokio::process::Command::new(exec_path);
         cmd.current_dir(work_dir)
             .stdin(Stdio::piped())
@@ -75,6 +75,15 @@ impl PluginProcess {
             .kill_on_drop(true);
         #[cfg(windows)]
         cmd.creation_flags(CREATE_NO_WINDOW);
+        // 注入全局代理 env（ureq/reqwest 原生读取，插件零代码）
+        if let Some((http, https)) = proxy {
+            if !http.is_empty() {
+                cmd.env("HTTP_PROXY", http);
+            }
+            if !https.is_empty() {
+                cmd.env("HTTPS_PROXY", https);
+            }
+        }
 
         let mut child = cmd.spawn().map_err(|e| PluginError::Spawn(e.to_string()))?;
 
@@ -215,14 +224,17 @@ pub struct PluginHandle {
     /// manifest 所在目录(解析 exec 相对路径用)。
     dir: PathBuf,
     process: Mutex<Option<Arc<PluginProcess>>>,
+    /// 全局代理配置(进程启动时 env 注入),ureq/reqwest 原生读取。运行时可更新。
+    proxy: std::sync::Mutex<Option<(String, String)>>,
 }
 
 impl PluginHandle {
-    pub fn new(manifest: Arc<PluginManifest>, dir: PathBuf) -> Self {
+    pub fn new(manifest: Arc<PluginManifest>, dir: PathBuf, proxy: Option<(String, String)>) -> Self {
         PluginHandle {
             manifest,
             dir,
             process: Mutex::new(None),
+            proxy: std::sync::Mutex::new(proxy),
         }
     }
 
@@ -232,6 +244,21 @@ impl PluginHandle {
 
     pub fn manifest(&self) -> &PluginManifest {
         &self.manifest
+    }
+
+    /// 更新代理配置(保存全局代理后调用)。下次 query spawn 时会用新值。
+    pub fn update_proxy(&self, proxy: Option<(String, String)>) {
+        // 注意:只能更新到内存字段，已启动的进程 env 无法修改，必须杀掉重启
+        *self.proxy.lock().unwrap() = proxy;
+    }
+
+    /// 重置插件进程(保存全局代理后调用)。下次 query 自动用新 env 重启。
+    pub async fn reset_process(&self) {
+        let mut guard = self.process.lock().await;
+        if guard.is_some() {
+            tracing::debug!(plugin = %self.manifest.id, "重置插件进程");
+            *guard = None;
+        }
     }
 
     /// 查询插件:懒启动(或复用)进程 → 发 query(带上下文) → 收 items。
@@ -258,7 +285,8 @@ impl PluginHandle {
             if need_spawn {
                 let exec = self.manifest.exec_path(&self.dir);
                 tracing::info!(plugin = %self.manifest.id, exec = %exec.display(), "拉起插件进程");
-                let proc = PluginProcess::spawn(&exec, &self.dir, &self.manifest.id)?;
+                let proxy = self.proxy.lock().unwrap().clone();
+                let proc = PluginProcess::spawn(&exec, &self.dir, &self.manifest.id, proxy)?;
                 *guard = Some(Arc::new(proc));
             }
             Arc::clone(guard.as_ref().unwrap())
