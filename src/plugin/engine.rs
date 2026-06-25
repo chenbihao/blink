@@ -116,6 +116,13 @@ impl PluginEngine {
                 tracing::debug!(plugin_id = %id, "query_subset: 插件未找到");
                 continue;
             };
+            // min_arg_length 快速失败:参数太短不发进程请求(如天气需要至少 2 个中文字符)
+            // 用 chars().count() 而非 len()——中文等宽字符每个算 1 而非 3 字节
+            let min_len = plugin.manifest().runtime.min_arg_length.unwrap_or(0);
+            if min_len > 0 && arg.chars().count() < min_len {
+                tracing::debug!(plugin_id = %id, arg_len = %arg.chars().count(), min_len, "query_subset: 参数过短,快速失败");
+                continue;
+            }
             let plugin_id = id.clone();
             let arg = arg.clone();
             let context = context.clone();

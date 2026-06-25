@@ -51,6 +51,10 @@ pub struct PluginRuntime {
     #[serde(default)]
     #[allow(dead_code)] // 并发池 §3.7 B3 后续做
     pub concurrency: Option<u32>,
+    /// 最短参数长度(字符数,0=不限)。小于该长度的查询直接返回空(不发进程请求)。
+    /// 用于天气/翻译等需要完整输入才有意义的插件,避免 IME 中间态/短词浪费网络。
+    #[serde(default)]
+    pub min_arg_length: Option<usize>,
 }
 
 /// 触发器。本切片只实现 keyword(精确/前缀);regex 先定义不实现。
