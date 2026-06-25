@@ -97,6 +97,7 @@ pub fn current_log_file() -> PathBuf {
 fn parse_level(level: &str) -> String {
     // 第三方库（sqlx/tauri）压到 warn，避免 query/asset 等 debug 噪音淹没 blink 自身日志
     match level {
+        "trace" => "trace,sqlx=warn,tauri=warn,hyper=warn,reqwest=warn",
         "debug" => "debug,sqlx=warn,tauri=warn",
         "info" => "info,sqlx=warn,tauri=warn",
         _ => "error",

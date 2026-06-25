@@ -22,6 +22,33 @@ impl PluginEngine {
         PluginEngine { plugins }
     }
 
+    /// 获取所有插件的 manifest 信息（设置页用）。
+    pub fn list_plugins(&self) -> Vec<serde_json::Value> {
+        self.plugins
+            .iter()
+            .map(|p| {
+                let manifest = p.manifest();
+                let triggers: Vec<String> = manifest
+                    .triggers
+                    .iter()
+                    .map(|t| match t {
+                        super::PluginTrigger::Keyword { keyword, .. } => keyword.clone(),
+                        super::PluginTrigger::Regex { pattern, .. } => format!("regex: {pattern}"),
+                    })
+                    .collect();
+
+                serde_json::json!({
+                    "id": manifest.id,
+                    "name": manifest.name,
+                    "version": manifest.version,
+                    "description": manifest.description,
+                    "triggers": triggers,
+                    "enabled": true,
+                })
+            })
+            .collect()
+    }
+
     /// 按给定候选列表查询插件。每个候选 = (plugin_id, arg)。
     /// 多插件并发,各自内部有 timeout 兜底。结果顺序无关——融合层按 score 重排。
     pub async fn query_subset(

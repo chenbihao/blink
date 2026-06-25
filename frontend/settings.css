@@ -291,3 +291,142 @@ h2 {
   background: #45475a;
   color: #cdd6f4;
 }
+
+/* ── 扩展卡片 ─────────────────────────────────────────────────────────────── */
+
+.extension-card {
+  background: #181825;
+  border: 1px solid #313244;
+  border-radius: 10px;
+  margin-bottom: 16px;
+  overflow: hidden;
+}
+
+.extension-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  background: #1e1e2e;
+  border-bottom: 1px solid #313244;
+}
+
+.extension-icon {
+  font-size: 24px;
+  flex-shrink: 0;
+}
+
+.extension-info {
+  flex: 1;
+}
+
+.extension-info h3 {
+  font-size: 15px;
+  font-weight: 600;
+  color: #cdd6f4;
+  margin-bottom: 2px;
+}
+
+.extension-desc {
+  font-size: 12px;
+  color: #6c7086;
+  margin: 0;
+}
+
+.extension-body {
+  padding: 8px 16px;
+}
+
+.extension-body .setting-row:last-child {
+  border-bottom: none;
+}
+
+/* ── 开关组件 ─────────────────────────────────────────────────────────────── */
+
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 24px;
+}
+
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: #45475a;
+  transition: 0.2s;
+  border-radius: 24px;
+}
+
+.slider:before {
+  position: absolute;
+  content: "";
+  height: 18px;
+  width: 18px;
+  left: 3px;
+  bottom: 3px;
+  background-color: #181825;
+  transition: 0.2s;
+  border-radius: 50%;
+}
+
+input:checked + .slider {
+  background-color: #89b4fa;
+}
+
+input:checked + .slider:before {
+  transform: translateX(20px);
+  background-color: #1e1e2e;
+}
+
+/* ── 状态标签 ─────────────────────────────────────────────────────────────── */
+
+.status-badge {
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.status-unknown {
+  background: #45475a;
+  color: #a6adc8;
+}
+
+.status-available {
+  background: #2a3f4e;
+  color: #a6e3a1;
+}
+
+.status-unavailable {
+  background: #45273a;
+  color: #f38ba8;
+}
+
+.status-enabled {
+  background: #2a3f4e;
+  color: #a6e3a1;
+}
+
+/* ── 小输入框 ────────────────────────────────────────────────────────────── */
+
+.input-small {
+  width: 80px;
+  background: #313244;
+  color: #cdd6f4;
+  border: 1px solid #45475a;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 13px;
+  font-family: ui-monospace, Consolas, monospace;
+}

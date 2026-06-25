@@ -171,15 +171,24 @@ fn main() {
                 }
             }
 
+            // 构造 FileEngine 配置（从 app_config 读取）
+            let file_config = config::FileSearchConfig {
+                enabled: app_config.file_search.enabled,
+                everything_port: app_config.file_search.everything_port,
+                local_scan_depth: app_config.file_search.local_scan_depth,
+            };
+
             // 构造 SearchService(多路引擎 + 意图路由)。command 层经 app.state 取用。
             let search_service = std::sync::Arc::new(search::SearchService::new(
                 app.handle().clone(),
                 pool.clone(),
-                search::build_engines(),
-                plugin_engine,
+                search::build_engines(Some(file_config)),
+                plugin_engine.clone(),
                 router,
             ));
             app.manage(search_service.clone());
+            // PluginEngine 单独注册供设置页 API 用
+            app.manage(plugin_engine);
 
             // 后台服务编排:按依赖拓扑顺序启动(搜索预扫 / 看门狗 / 热键监听等)。
             // pool 与 config 就绪后才构建 AppContext —— 前置初始化(DB/配置/日志/托盘/窗口)
@@ -220,7 +229,12 @@ fn main() {
             commands::update_log_level,
             commands::open_log_file,
             commands::open_log_dir,
-            commands::get_log_info
+            commands::get_log_info,
+            commands::update_file_search,
+            commands::probe_everything,
+            commands::get_engine_config,
+            commands::update_engine_config,
+            commands::get_plugins
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

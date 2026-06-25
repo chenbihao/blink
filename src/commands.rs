@@ -366,6 +366,74 @@ pub async fn reset_config(app: tauri::AppHandle) -> Result<(), String> {
     crate::config::save_config(&pool, &config).await
 }
 
+/// 更新文件搜索配置。
+#[tauri::command]
+pub async fn update_file_search(
+    app: tauri::AppHandle,
+    enabled: bool,
+    everything_port: u16,
+    local_scan_depth: u32,
+) -> Result<(), String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    let file_search = crate::config::FileSearchConfig {
+        enabled,
+        everything_port,
+        local_scan_depth,
+    };
+    crate::config::update_file_search(&pool, file_search).await
+}
+
+/// 探测 Everything HTTP Server 状态。
+#[tauri::command]
+pub async fn probe_everything(port: u16) -> bool {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .unwrap_or_default();
+    let url = format!("http://localhost:{port}/?search=__blink_probe__&json=1&count=1");
+    match client.get(&url).send().await {
+        Ok(resp) => resp.status().is_success(),
+        Err(_) => false,
+    }
+}
+
+/// 获取所有已加载插件的信息（设置页用）。
+#[tauri::command]
+pub async fn get_plugins(app: tauri::AppHandle) -> Vec<serde_json::Value> {
+    let engine = app.state::<Option<std::sync::Arc<crate::plugin::PluginEngine>>>();
+    match engine.as_ref() {
+        Some(e) => e.list_plugins(),
+        None => Vec::new(),
+    }
+}
+
+/// 获取引擎配置（通用 API）。
+#[tauri::command]
+pub async fn get_engine_config(
+    app: tauri::AppHandle,
+    engine_id: String,
+) -> Result<serde_json::Value, String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    Ok(crate::config::get_engine_config(&pool, &engine_id)
+        .await
+        .unwrap_or_else(|| serde_json::json!({})))
+}
+
+/// 更新引擎配置（通用 API）。
+#[tauri::command]
+pub async fn update_engine_config(
+    app: tauri::AppHandle,
+    engine_id: String,
+    config: serde_json::Value,
+) -> Result<(), String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::config::set_engine_config(&pool, &engine_id, &config).await?;
+
+    // 通知引擎配置更新（FileEngine 需要重新探测端口等）
+    tracing::debug!(engine_id, "引擎配置已更新");
+    Ok(())
+}
+
 /// 录制快捷键（阻塞，直到用户按下组合键或超时）。
 #[tauri::command]
 pub async fn record_hotkey() -> Result<serde_json::Value, String> {

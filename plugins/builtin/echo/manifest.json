@@ -3,6 +3,7 @@
   "id": "builtin.echo",
   "name": "Echo",
   "version": "0.1.0",
+  "description": "调试用插件，回显输入内容，验证上下文快照链路",
   "builtin": true,
   "runtime": {
     "type": "process",

@@ -3,6 +3,7 @@
   "id": "builtin.ip",
   "name": "IP",
   "version": "0.1.0",
+  "description": "显示本机 IP / 公网 IP / 地理位置信息",
   "builtin": true,
   "runtime": {
     "type": "process",

@@ -89,6 +89,93 @@ function applyConfigToUI(config) {
   if (logLevel && config.log_level) {
     logLevel.value = config.log_level;
   }
+
+  // 应用配置加载完成后，再加载引擎配置
+  loadEngineConfig();
+}
+
+// 加载引擎配置（文件搜索等内置引擎）
+async function loadEngineConfig() {
+  try {
+    const fileSearch = await invoke("get_engine_config", { engineId: "file_search" });
+    const enabled = fileSearch.enabled !== false;
+    const port = fileSearch.everything_port || 80;
+    const depth = fileSearch.local_scan_depth || 3;
+
+    const enabledEl = document.getElementById("file-search-enabled");
+    const portEl = document.getElementById("everything-port");
+    const depthEl = document.getElementById("local-scan-depth");
+
+    if (enabledEl) enabledEl.checked = enabled;
+    if (portEl) portEl.value = port;
+    if (depthEl) depthEl.value = depth;
+
+    // 页面加载后自动探测一次
+    setTimeout(probeEverythingStatus, 500);
+  } catch (e) {
+    console.error("loadEngineConfig failed:", e);
+    // 降级使用默认值
+    document.getElementById("everything-port").value = 80;
+  }
+
+  // 加载插件列表
+  loadPlugins();
+}
+
+// 插件图标映射（按 id 匹配）
+const PLUGIN_ICONS = {
+  "ip": "🌐",
+  "echo": "🔊",
+  "ai": "🤖",
+  "translate": "📝",
+  "weather": "🌤️",
+};
+
+// 加载并渲染插件列表
+async function loadPlugins() {
+  const container = document.getElementById("plugins-container");
+  if (!container) return;
+
+  try {
+    const plugins = await invoke("get_plugins");
+
+    if (plugins.length === 0) {
+      container.innerHTML = '<p style="color: #6c7086; padding: 20px;">暂无已加载插件</p>';
+      return;
+    }
+
+    let html = "";
+    for (const plugin of plugins) {
+      const icon = PLUGIN_ICONS[plugin.id] || "🔌";
+      const triggers = plugin.triggers && plugin.triggers.length > 0
+        ? `触发: ${plugin.triggers.join(" / ")}`
+        : "无触发关键词";
+      const desc = plugin.description || "暂无描述";
+
+      html += `
+        <div class="extension-card">
+          <div class="extension-header">
+            <div class="extension-icon">${icon}</div>
+            <div class="extension-info">
+              <h3>${plugin.name || plugin.id}</h3>
+              <p class="extension-desc">${triggers}</p>
+            </div>
+            <span class="status-badge status-enabled">v${plugin.version || "1.0.0"}</span>
+          </div>
+          <div class="extension-body">
+            <div style="color: #6c7086; font-size: 13px; padding: 4px 0;">
+              描述：${desc}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    container.innerHTML = html;
+  } catch (e) {
+    console.error("loadPlugins failed:", e);
+    container.innerHTML = '<p style="color: #f38ba8; padding: 20px;">加载插件列表失败</p>';
+  }
 }
 
 // ── 快捷键录制（使用后端 rdev）─────────────────────────────────────────────────
@@ -292,6 +379,57 @@ document.getElementById("clear-history")?.addEventListener("click", async () => 
   if (confirm("确定清空所有历史记录？")) {
     await invoke("clear_history");
     loadStorageInfo();
+  }
+});
+
+// ── 扩展 Tab：文件搜索 ──────────────────────────────────────────────────────
+
+async function probeEverythingStatus() {
+  const statusEl = document.getElementById("everything-status");
+  const portInput = document.getElementById("everything-port");
+  const port = parseInt(portInput?.value || "80", 10);
+
+  statusEl.textContent = "探测中…";
+  statusEl.className = "status-badge status-unknown";
+
+  try {
+    const available = await invoke("probe_everything", { port });
+    if (available) {
+      statusEl.textContent = "可用 ✓";
+      statusEl.className = "status-badge status-available";
+    } else {
+      statusEl.textContent = "不可用 ✗";
+      statusEl.className = "status-badge status-unavailable";
+    }
+  } catch (e) {
+    statusEl.textContent = "探测失败";
+    statusEl.className = "status-badge status-unavailable";
+    console.error("probe_everything failed:", e);
+  }
+}
+
+
+document.getElementById("probe-everything")?.addEventListener("click", probeEverythingStatus);
+
+document.getElementById("save-file-search")?.addEventListener("click", async () => {
+  const enabled = document.getElementById("file-search-enabled").checked;
+  const port = parseInt(document.getElementById("everything-port").value, 10);
+  // 本地扫描深度配置暂隐藏，使用默认值 3
+  const depthEl = document.getElementById("local-scan-depth");
+  const depth = depthEl ? parseInt(depthEl.value, 10) : 3;
+
+  try {
+    await invoke("update_file_search", {
+      enabled,
+      everythingPort: port,
+      localScanDepth: depth,
+    });
+    alert("文件搜索配置已保存");
+    // 重新探测
+    probeEverythingStatus();
+  } catch (e) {
+    console.error("update_file_search failed:", e);
+    alert("保存失败: " + e);
   }
 });
 

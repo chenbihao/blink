@@ -251,8 +251,10 @@ fn fuse_items(items: Vec<SearchItem>, limit: usize) -> Vec<SearchItem> {
 fn source_rank(source: &str) -> u8 {
     match source {
         "calc" => 0,
-        "start_menu" => 1,
-        _ => 2,
+        "builtin" => 1,
+        "start_menu" => 2,
+        "file" => 3,
+        _ => 4,
     }
 }
 

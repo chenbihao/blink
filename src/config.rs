@@ -38,6 +38,70 @@ fn default_surface_takeover_enabled() -> bool {
     true
 }
 
+// ── AppConfig 新增字段默认值（0.5） ────────────────────────────────────────────────
+
+fn default_theme() -> String {
+    "auto".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_false() -> bool {
+    false
+}
+
+fn default_30() -> u32 {
+    30
+}
+
+fn default_20() -> u32 {
+    20
+}
+
+fn default_5() -> u32 {
+    5
+}
+
+// ── 文件搜索配置 ──────────────────────────────────────────────────────────────────
+
+fn default_file_search_enabled() -> bool {
+    true
+}
+
+fn default_file_search_everything_port() -> u16 {
+    80
+}
+
+fn default_file_search_depth() -> u32 {
+    3
+}
+
+/// 文件搜索配置。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileSearchConfig {
+    /// 是否启用文件搜索
+    #[serde(default = "default_file_search_enabled")]
+    pub enabled: bool,
+    /// Everything HTTP Server 端口
+    #[serde(default = "default_file_search_everything_port")]
+    pub everything_port: u16,
+    /// 本地扫描深度
+    #[serde(default = "default_file_search_depth")]
+    pub local_scan_depth: u32,
+}
+
+impl Default for FileSearchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            everything_port: 80,
+            local_scan_depth: 3,
+        }
+    }
+}
+
 /// 应用配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -51,12 +115,34 @@ pub struct AppConfig {
     pub auto_start: bool,
     /// 语言（zh/en）
     pub language: String,
-    /// 日志级别（error/info/debug）
+    /// 日志级别（error/info/debug/trace）
     #[serde(default = "default_log_level")]
     pub log_level: String,
     /// 是否允许插件 takeover(接管返回区);false 时所有 takeover 降级 priority。
     #[serde(default = "default_surface_takeover_enabled")]
     pub surface_takeover_enabled: bool,
+    /// 主题（auto/light/dark）
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    /// 是否记录搜索历史
+    #[serde(default = "default_true")]
+    pub search_history_enabled: bool,
+    /// 搜索历史保留天数
+    #[serde(default = "default_30")]
+    pub search_history_days: u32,
+    /// 最多显示结果数
+    #[serde(default = "default_20")]
+    pub max_results: u32,
+    /// 是否启用主动建议（空 query 历史 top-N）
+    #[serde(default = "default_false")]
+    pub proactive_enabled: bool,
+    /// 空 query 显示历史常用数
+    #[serde(default = "default_5")]
+    pub empty_query_topn: u32,
+    /// ⚠️ 兼容层：旧版本 file_search 配置（0.5 已迁移到 engine:file_search，0.6 移除）
+    #[serde(default)]
+    #[deprecated = "已迁移到 engine:file_search，使用 get_file_search_config() 读取"]
+    pub file_search: FileSearchConfig,
 }
 
 impl Default for AppConfig {
@@ -69,6 +155,13 @@ impl Default for AppConfig {
             language: "zh".to_string(),
             log_level: "error".to_string(),
             surface_takeover_enabled: true,
+            theme: default_theme(),
+            search_history_enabled: default_true(),
+            search_history_days: default_30(),
+            max_results: default_20(),
+            proactive_enabled: default_false(),
+            empty_query_topn: default_5(),
+            file_search: FileSearchConfig::default(),
         }
     }
 }
@@ -141,6 +234,50 @@ pub async fn update_log_level(pool: &SqlitePool, level: String) -> Result<(), St
     let mut config = get_config(pool).await;
     config.log_level = level;
     save_config(pool, &config).await
+}
+
+/// 获取引擎配置（通用 API）。
+pub async fn get_engine_config(pool: &SqlitePool, engine_id: &str) -> Option<serde_json::Value> {
+    let key = format!("engine:{}", engine_id);
+    crate::history::get_config(pool, &key).await.and_then(|json| {
+        serde_json::from_str(&json).ok()
+    })
+}
+
+/// 更新引擎配置（通用 API）。
+pub async fn set_engine_config(pool: &SqlitePool, engine_id: &str, config: &serde_json::Value) -> Result<(), String> {
+    let key = format!("engine:{}", engine_id);
+    let json = serde_json::to_string(config).map_err(|e| e.to_string())?;
+    crate::history::set_config(pool, &key, &json).await;
+    Ok(())
+}
+
+/// ⚠️ 兼容层：获取文件搜索配置（优先读 engine:file_search，降级读旧 app_config.file_search）。
+pub async fn get_file_search_config(pool: &SqlitePool) -> FileSearchConfig {
+    // 1. 优先读新 key
+    if let Some(cfg) = get_engine_config(pool, "file_search").await {
+        if let Ok(fs_cfg) = serde_json::from_value(cfg) {
+            return fs_cfg;
+        }
+    }
+    // 2. 降级读旧 app_config.file_search
+    let app_config = get_config(pool).await;
+    app_config.file_search
+}
+
+/// 更新文件搜索配置（写入 engine:file_search，保留旧 app_config.file_search 兼容）。
+pub async fn update_file_search(pool: &SqlitePool, file_search: FileSearchConfig) -> Result<(), String> {
+    // 写入新 key（主配置）
+    let engine_json = serde_json::to_value(file_search.clone()).map_err(|e| e.to_string())?;
+    set_engine_config(pool, "file_search", &engine_json).await?;
+
+    // 兼容：同时更新旧字段（确保 0.4 版本回退也能用）
+    let mut config = get_config(pool).await;
+    config.file_search = file_search;
+    save_config(pool, &config).await?;
+
+    tracing::debug!("文件搜索配置已更新");
+    Ok(())
 }
 
 // ── TODO: 方案 B - Trait 抽象（后续重构）────────────────────────────────────────

@@ -20,6 +20,9 @@ pub struct PluginManifest {
     #[allow(dead_code)]
     pub version: String,
     #[serde(default)]
+    #[allow(dead_code)] // 设置页展示用
+    pub description: String,
+    #[serde(default)]
     #[allow(dead_code)] // builtin 信任来源标记,本切片只加载 builtin
     pub builtin: bool,
     pub runtime: PluginRuntime,

@@ -32,7 +32,7 @@ pub(super) fn collect_foreground_app() -> Option<ForegroundAppInfo> {
     unsafe {
         let hwnd = GetForegroundWindow();
         if hwnd.0.is_null() {
-            tracing::debug!("GetForegroundWindow 返回 NULL");
+            tracing::trace!("GetForegroundWindow 返回 NULL");
             return None;
         }
 
@@ -52,7 +52,7 @@ pub(super) fn collect_foreground_app() -> Option<ForegroundAppInfo> {
         let mut pid: u32 = 0;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
         if pid == 0 {
-            tracing::debug!("GetWindowThreadProcessId 返回 pid=0");
+            tracing::trace!("GetWindowThreadProcessId 返回 pid=0");
             return Some(ForegroundAppInfo {
                 process_name: String::new(),
                 window_title,
@@ -63,13 +63,13 @@ pub(super) fn collect_foreground_app() -> Option<ForegroundAppInfo> {
         // 是 Blink 自己？（理论上不会，因为采集在 show 之前，但防御性检查）
         let self_pid = GetCurrentProcessId();
         if pid == self_pid {
-            tracing::debug!("前台是 Blink 自己，跳过");
+            tracing::trace!("前台是 Blink 自己，跳过");
             return None;
         }
 
         // 打开进程（PROCESS_QUERY_LIMITED_INFORMATION = 无需提升权限）
         let Ok(hprocess) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
-            tracing::debug!(pid, "OpenProcess 失败");
+            tracing::trace!(pid, "OpenProcess 失败");
             return Some(ForegroundAppInfo {
                 process_name: String::new(),
                 window_title,
@@ -93,7 +93,7 @@ pub(super) fn collect_foreground_app() -> Option<ForegroundAppInfo> {
                 .into_owned();
             Some(path)
         } else {
-            tracing::debug!(pid, "QueryFullProcessImageNameW 失败");
+            tracing::trace!(pid, "QueryFullProcessImageNameW 失败");
             None
         };
 
@@ -121,13 +121,13 @@ pub(super) fn collect_clipboard_text() -> Option<String> {
     unsafe {
         // 打开剪贴板（NULL 表示与当前任务关联）
         if OpenClipboard(Some(HWND(std::ptr::null_mut()))).is_err() {
-            tracing::debug!("OpenClipboard 失败（被其他应用锁定）");
+            tracing::trace!("OpenClipboard 失败（被其他应用锁定）");
             return None;
         }
 
         // 获取 Unicode 文本
         let Ok(hdata) = GetClipboardData(CF_UNICODETEXT) else {
-            tracing::debug!("剪贴板不含 Unicode 文本");
+            tracing::trace!("剪贴板不含 Unicode 文本");
             let _ = windows::Win32::System::DataExchange::CloseClipboard();
             return None;
         };
@@ -139,7 +139,7 @@ pub(super) fn collect_clipboard_text() -> Option<String> {
         // 锁定内存获取指针
         let data_ptr = GlobalLock(windows::Win32::Foundation::HGLOBAL(hdata.0));
         if data_ptr.is_null() {
-            tracing::debug!("GlobalLock 失败");
+            tracing::trace!("GlobalLock 失败");
             let _ = windows::Win32::System::DataExchange::CloseClipboard();
             return None;
         }

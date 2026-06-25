@@ -91,10 +91,12 @@ pub use engine::{Lane, QueryContext, SearchAction, SearchEngine, SearchItem};
 // 具体引擎
 mod builtin_engine;
 mod calc_engine;
+pub mod file_engine;
 mod mock_slow_engine;
 mod start_menu_engine;
 use builtin_engine::BuiltinEngine;
 use calc_engine::CalcEngine;
+use file_engine::FileEngine;
 use mock_slow_engine::MockSlowEngine;
 use start_menu_engine::StartMenuEngine;
 
@@ -104,11 +106,17 @@ pub use service::SearchService;
 
 /// 构造引擎列表(sync: builtin + calc + start_menu;async: 可选 mock)。
 /// PluginEngine 0.4 退化为执行器,不再作为 dyn SearchEngine,由 SearchService 直接持有。
-pub fn build_engines() -> Vec<std::sync::Arc<dyn SearchEngine>> {
+pub fn build_engines(file_config: Option<crate::config::FileSearchConfig>) -> Vec<std::sync::Arc<dyn SearchEngine>> {
+    let file_engine = match file_config {
+        Some(cfg) => std::sync::Arc::new(FileEngine::with_config(cfg)),
+        None => std::sync::Arc::new(FileEngine::new()),
+    };
+
     let mut engines: Vec<std::sync::Arc<dyn SearchEngine>> = vec![
         std::sync::Arc::new(BuiltinEngine),
         std::sync::Arc::new(CalcEngine),
         std::sync::Arc::new(StartMenuEngine::new()),
+        file_engine,
     ];
     if MockSlowEngine::enabled() {
         tracing::info!("MockSlowEngine 已启用(BLINK_MOCK_SLOW_ENGINE=1)");
