@@ -1,4 +1,4 @@
-//! 插件 manifest(JSON,见 production/0.2-core-plugin-design.md §3.3)。
+//! 插件 manifest(JSON,见 production-design/phases/0.2-core-plugin-design.md §3.3)。
 //!
 //! 本切片解析必要字段;permissions/resources/icon 等未列字段由 serde 默认忽略
 //! (不建字段)。permissions 自用阶段完全不解析(§3.6)。

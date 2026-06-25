@@ -1,4 +1,4 @@
-//! 插件协议(JSONL,见 production/0.2-core-plugin-design.md §3.2)。
+//! 插件协议(JSONL,见 production-design/phases/0.2-core-plugin-design.md §3.2)。
 //!
 //! newline-delimited JSON,每行一个完整 JSON。本切片实现 `query`→`response`(单行)与
 //! core→插件单向 `cancel`(查询超时发送,插件可忽略);流式(stream/delta/done)/ attachments 暂不实现。

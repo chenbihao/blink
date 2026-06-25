@@ -1,4 +1,4 @@
-//! 插件系统(0.3,见 production/0.2-core-plugin-design.md §3)。
+//! 插件系统(0.3,见 production-design/phases/0.2-core-plugin-design.md §3)。
 //!
 //! 本切片:builtin 插件加载(扫描 manifest)+ 进程拉起(JSONL stdio)+ PluginEngine
 //! 接 async lane。第三方插件目录(%APPDATA%\blink\plugins)、permissions、热重载等后续。

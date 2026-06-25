@@ -53,7 +53,7 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 | **0.2.2** | SearchService + SearchEngine trait + 渐进式多路搜索（sync/async 双 lane） | ✅ |
 | **0.3+** | 插件系统（独立进程 + stdio JSON + manifest）/ 意图引擎（规则→向量→AI）/ Context 层 | 🔨 插件骨架完成，意图引擎待做 |
 
-**改核心前必读 `production/0.2-core-plugin-design.md`**（Service/SearchEngine/Plugin/Intent 架构设计）。
+**改核心前必读 `production-design/phases/0.2-core-plugin-design.md`**（Service/SearchEngine/Plugin/Intent 架构设计）。
 Roadmap 内容了解即可，**不要提前实现**。
 
 ## 5. 业务相关决策
@@ -98,7 +98,7 @@ Roadmap 内容了解即可，**不要提前实现**。
 
 - **搜索缓存**（`search/start_menu_engine.rs`）：启动后台预扫开始菜单到内存，输入时命中缓存。所有文件 IO 在 `spawn_blocking`；根目录 mtime 增量失效 + 定时强制刷新兜底深层变化。缓存归 StartMenuEngine 字段（设计 §2.4，从旧 `cache.rs` 迁入，数据结构零返工）。
 - **图标协议**（`search/icon.rs` + `main.rs`）：自定义协议 `blink-icon`，前端 `<img src="http://blink-icon.localhost/<encodeURIComponent(lnk_path)>">`（**Windows 下 scheme 映射为 `http://<scheme>.localhost/`**，非 `scheme://localhost/`）。后端用 `IShellItemImageFactory::GetImage` 取图标 → `GetDIBits` 取 BGRA → 转 RGBA → `png` crate 编码 PNG。COM 每次调用 `CoInitializeEx`（RAII guard 配对）。Shell 名称解析 API 要求**规范全反斜杠路径**，调用前把 `/` 归一化为 `\`（不改扫描路径本身，见 §5）。进程内缓存 PNG 字节，`None` 缓存「提过但无图标」避免反复重试。
-- **热键触发判定**（`hotkey/windows.rs`）：**不自维护按键累积镜像**（被系统合成事件打乱且无法自愈，曾导致 Alt+空格 残留误触发）。改为只在主键 down/up 边界用 `GetAsyncKeyState` 现查修饰键物理态；状态机仅 `down_since/armed_key/aborted` 三字段。修饰键精确 bitmask 匹配（不允许多余键，`Ctrl+Alt+空格` 不误触发 `Alt+空格`）。**改核心前读 `production/0.3-plugin-skeleton.md` 二章**。
+- **热键触发判定**（`hotkey/windows.rs`）：**不自维护按键累积镜像**（被系统合成事件打乱且无法自愈，曾导致 Alt+空格 残留误触发）。改为只在主键 down/up 边界用 `GetAsyncKeyState` 现查修饰键物理态；状态机仅 `down_since/armed_key/aborted` 三字段。修饰键精确 bitmask 匹配（不允许多余键，`Ctrl+Alt+空格` 不误触发 `Alt+空格`）。**改核心前读 `production-design/phases/0.3-plugin-skeleton.md` 二章**。
 - **看门狗失焦**（`window/windows.rs`）：按**进程 PID** 判定前台是否属自己（非死比单个 HWND）；`fg==NULL`（焦点真空，子进程拉起等瞬态）跳过本轮不隐藏。
 - **配置/自启/日志**：配置存 SQLite `config` 表（`app_config` 键存 JSON）；开机自启用 `tauri-plugin-autostart`（注册表 Run 项），启动时按配置同步。
 - **配置/自启/日志**：配置存 SQLite `config` 表（`app_config` 键存 JSON）；开机自启用 `tauri-plugin-autostart`（注册表 Run 项），启动时按配置同步。
@@ -119,7 +119,7 @@ SQLite `%APPDATA%\blink\blink.db`：
 
 ## 7. 编码风格与约定
 
-- **可选行为优先配置化**：默认值用户可能想改的，做成配置项 + 合理默认；纯内部参数不暴露。详见 `production/0.2-core-plugin-design.md` §6。
+- **可选行为优先配置化**：默认值用户可能想改的，做成配置项 + 合理默认；纯内部参数不暴露。详见 `production-design/phases/0.2-core-plugin-design.md` §6。
 - **统一日志分级规范**：一律用 `tracing`（带模块 target），禁止散落 `println!/eprintln!`。级别严格区分如下：
   - **error（1）**：真正异常，功能受影响 —— 数据库失败、关键操作失败、配置加载失败
   - **warn（2）**：潜在问题，不影响运行 —— 多次重试、配置异常但用默认值兼容
@@ -147,8 +147,10 @@ bin crate，无 lib target，跑测试用 `cargo test --bin blink`。
 
 ## 9. 其他相关内容
 
-设计文档（`production/`）：
-- `Windows Universal Launcher MVP.md` — 产品/架构总纲（P0-P4、§12 待决策、§13 已确认方案）
-- `0.2-core-plugin-design.md` — **0.2 核心+插件架构设计**（Service/SearchEngine/Plugin/Intent，改核心前必读）
-- `0.1-base.md` — 0.1 MVP 实现总结与后期待办
-- `0.3-plugin-skeleton.md` — **0.3 插件骨架 + 热键物理态重构**总结与后期待办（含已知问题、下一步方向）
+设计文档（`production-design/`，**改核心前先读 [production-design/README.md](production-design/README.md) 了解目录导航与运作规则**）：
+- `00-overview.md` — 产品/架构总纲（原 MVP.md；P0-P4、§12 待决策、§13 已确认方案）
+- `product-interaction.md` / `product-platform.md` / `product-context-future.md` / `product-principles.md` — 产品设计四卷（原 product-design.md 按域拆分：交互/插件意图AI/Context隐私/取舍规范时间线）
+- `phases/0.2-core-plugin-design.md` — **0.2 核心+插件架构设计**（Service/SearchEngine/Plugin/Intent，改核心前必读）
+- `phases/0.1-base.md` — 0.1 MVP 实现总结与后期待办
+- `phases/0.3-plugin-skeleton.md` — **0.3 插件骨架 + 热键物理态重构**总结与后期待办（含已知问题、下一步方向）
+- `phases/0.4-intent-router.md` / `phases/0.5-config-search-extension.md` — 0.4 意图路由 / 0.5 配置+文件搜索（进行中）
