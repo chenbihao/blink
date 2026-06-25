@@ -397,7 +397,7 @@ pub async fn probe_everything(port: u16) -> bool {
     }
 }
 
-/// 获取所有已加载插件的信息（设置页用）。
+/// 获取所有已加载插件的信息（设置页用）。已含 enabled + settings（0.5.1）。
 #[tauri::command]
 pub async fn get_plugins(app: tauri::AppHandle) -> Vec<serde_json::Value> {
     let engine = app.state::<Option<std::sync::Arc<crate::plugin::PluginEngine>>>();
@@ -405,6 +405,22 @@ pub async fn get_plugins(app: tauri::AppHandle) -> Vec<serde_json::Value> {
         Some(e) => e.list_plugins(),
         None => Vec::new(),
     }
+}
+
+/// 更新插件配置（enabled + settings）：写 DB + 更新 PluginEngine 内存（0.5.1）。
+#[tauri::command]
+pub async fn update_plugin_config(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    enabled: bool,
+    settings: serde_json::Value,
+) -> Result<(), String> {
+    let engine = app.state::<Option<std::sync::Arc<crate::plugin::PluginEngine>>>();
+    let Some(e) = engine.as_ref() else {
+        return Err("插件引擎未初始化".into());
+    };
+    let config = crate::config::PluginConfig { enabled, settings };
+    e.update_config(&plugin_id, config).await
 }
 
 /// 获取引擎配置（通用 API）。

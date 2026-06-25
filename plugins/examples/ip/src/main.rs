@@ -19,6 +19,9 @@ enum PluginRequest {
         id: String,
         #[allow(dead_code)]
         query: String,
+        /// 插件配置 settings(0.5.1 透传)。本插件消费 use_ipv6 / geo_provider。
+        #[serde(default)]
+        settings: Option<serde_json::Value>,
     },
     Cancel {
         #[allow(dead_code)]
@@ -64,8 +67,8 @@ fn main() {
             }
         };
         match req {
-            PluginRequest::Query { id, .. } => {
-                let resp = handle_query(id);
+            PluginRequest::Query { id, settings, .. } => {
+                let resp = handle_query(id, &settings);
                 let json = serde_json::to_string(&resp).unwrap();
                 if writeln!(stdout, "{json}").is_err() {
                     break;
@@ -77,22 +80,49 @@ fn main() {
     }
 }
 
-fn handle_query(id: String) -> PluginResponse {
+fn handle_query(id: String, settings: &Option<serde_json::Value>) -> PluginResponse {
+    let use_ipv6 = settings
+        .as_ref()
+        .and_then(|s| s.get("use_ipv6"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let geo_provider = settings
+        .as_ref()
+        .and_then(|s| s.get("geo_provider"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("ip-api.com");
+
     let mut items = Vec::new();
 
-    // 本机出口 IP
+    // IPv6 本机出口 IP(仅 use_ipv6=true 时查;失败静默,多数环境无 v6)
+    if use_ipv6 {
+        if let Some(ip) = get_local_ip_v6() {
+            items.push(PluginItem {
+                title: format!("本地 IPv6: {ip}"),
+                subtitle: Some("按 Enter 复制".to_string()),
+                score: 1.0,
+                action: PluginAction::Copy { text: ip },
+            });
+        }
+    }
+
+    // 本机出口 IP(IPv4)
     if let Some(ip) = get_local_ip() {
         items.push(PluginItem {
             title: format!("本地 IP: {ip}"),
             subtitle: Some("按 Enter 复制".to_string()),
-            score: 1.0,
+            score: 0.95,
             action: PluginAction::Copy { text: ip },
         });
     }
 
     // 公网 IP + 定位(网络查询,失败静默)
     match fetch_public_ip_info() {
-        Some((ip, loc)) => {
+        Some((ip, mut loc)) => {
+            // geo_provider 非 ip-api.com 时,本插件未实现其他定位服务,不显示定位。
+            if geo_provider != "ip-api.com" {
+                loc.clear();
+            }
             let subtitle = if !loc.is_empty() {
                 Some(format!("{} | 按 Enter 复制", loc))
             } else {
@@ -113,10 +143,19 @@ fn handle_query(id: String) -> PluginResponse {
     PluginResponse { id, items }
 }
 
-/// 获取本机默认路由 IP:UDP connect 到公网地址,local_addr 即出口 IP。
+/// 获取本机默认路由 IP（IPv4）:UDP connect 到公网地址,local_addr 即出口 IP。
 fn get_local_ip() -> Option<String> {
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
     socket.connect("8.8.8.8:80").ok()?;
+    let addr = socket.local_addr().ok()?;
+    Some(addr.ip().to_string())
+}
+
+/// 获取本机默认路由 IP（IPv6）:UDP connect 到 Google 公网 DNS v6 地址。
+/// 无 IPv6 环境时返回 None（静默）。
+fn get_local_ip_v6() -> Option<String> {
+    let socket = UdpSocket::bind("[::]:0").ok()?;
+    socket.connect("[2001:4860:4860::8888]:80").ok()?;
     let addr = socket.local_addr().ok()?;
     Some(addr.ip().to_string())
 }

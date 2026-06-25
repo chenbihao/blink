@@ -129,12 +129,24 @@ fn main() {
                 None
             } else {
                 tracing::info!(count = plugins.len(), "PluginEngine 已构造");
-                Some(std::sync::Arc::new(plugin::PluginEngine::new(plugins.clone())))
+                let engine = std::sync::Arc::new(plugin::PluginEngine::new(plugins.clone(), pool.clone()));
+                // 加载/初始化每个插件配置(不存在则写默认 {enabled, settings:null})。
+                tauri::async_runtime::block_on(engine.init_configs());
+                Some(engine)
             };
 
             // 构造意图路由 RuleRouter,从插件 manifest 注入规则。
             let router = std::sync::Arc::new(intent::RuleRouter::new(app_config.surface_takeover_enabled));
             for plugin in &plugins {
+                // 跳过启动时已禁用的插件(不注入其 keyword 规则,输其触发词走 Generic)。
+                // 注:运行时禁用的插件规则已注入,Takeover 命中后由 query_subset 跳过查询;
+                //    该路径 Takeover 空白为已知限制(需 RuleRouter remove API,见 0.5 §3.1 / 0.2 §3.7 B5)。
+                if let Some(ref pe) = plugin_engine {
+                    if !pe.is_enabled(plugin.id()) {
+                        tracing::debug!(plugin = %plugin.id(), "插件已禁用,跳过规则注入");
+                        continue;
+                    }
+                }
                 for trigger in &plugin.manifest().triggers {
                     match trigger {
                         plugin::PluginTrigger::Keyword { keyword, exclusive } => {
@@ -234,7 +246,8 @@ fn main() {
             commands::probe_everything,
             commands::get_engine_config,
             commands::update_engine_config,
-            commands::get_plugins
+            commands::get_plugins,
+            commands::update_plugin_config
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

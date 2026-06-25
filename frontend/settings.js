@@ -122,60 +122,143 @@ async function loadEngineConfig() {
   loadPlugins();
 }
 
-// 插件图标映射（按 id 匹配）
+// 插件图标映射（按 manifest.id 匹配）
 const PLUGIN_ICONS = {
-  "ip": "🌐",
-  "echo": "🔊",
-  "ai": "🤖",
-  "translate": "📝",
-  "weather": "🌤️",
+  "builtin.ip": "🌐",
+  "builtin.echo": "🔊",
+  "builtin.ai": "🤖",
+  "builtin.translate": "📝",
+  "builtin.weather": "🌤️",
 };
 
-// 加载并渲染插件列表
+// 加载并渲染插件列表（0.5.1：含 enabled 开关 + settings JSON 编辑）
 async function loadPlugins() {
   const container = document.getElementById("plugins-container");
   if (!container) return;
 
+  let plugins;
   try {
-    const plugins = await invoke("get_plugins");
-
-    if (plugins.length === 0) {
-      container.innerHTML = '<p style="color: #6c7086; padding: 20px;">暂无已加载插件</p>';
-      return;
-    }
-
-    let html = "";
-    for (const plugin of plugins) {
-      const icon = PLUGIN_ICONS[plugin.id] || "🔌";
-      const triggers = plugin.triggers && plugin.triggers.length > 0
-        ? `触发: ${plugin.triggers.join(" / ")}`
-        : "无触发关键词";
-      const desc = plugin.description || "暂无描述";
-
-      html += `
-        <div class="extension-card">
-          <div class="extension-header">
-            <div class="extension-icon">${icon}</div>
-            <div class="extension-info">
-              <h3>${plugin.name || plugin.id}</h3>
-              <p class="extension-desc">${triggers}</p>
-            </div>
-            <span class="status-badge status-enabled">v${plugin.version || "1.0.0"}</span>
-          </div>
-          <div class="extension-body">
-            <div style="color: #6c7086; font-size: 13px; padding: 4px 0;">
-              描述：${desc}
-            </div>
-          </div>
-        </div>
-      `;
-    }
-
-    container.innerHTML = html;
+    plugins = await invoke("get_plugins");
   } catch (e) {
     console.error("loadPlugins failed:", e);
     container.innerHTML = '<p style="color: #f38ba8; padding: 20px;">加载插件列表失败</p>';
+    return;
   }
+
+  if (plugins.length === 0) {
+    container.innerHTML = '<p style="color: #6c7086; padding: 20px;">暂无已加载插件</p>';
+    return;
+  }
+
+  container.innerHTML = plugins.map(renderPluginCard).join("");
+
+  // 渲染后绑定每个卡片事件（用 data-plugin-id 定位）
+  for (const plugin of plugins) {
+    bindPluginCardEvents(plugin);
+  }
+}
+
+// 渲染单个插件卡片
+function renderPluginCard(plugin) {
+  const icon = PLUGIN_ICONS[plugin.id] || "🔌";
+  const triggers = plugin.triggers && plugin.triggers.length > 0
+    ? `触发: ${plugin.triggers.join(" / ")}`
+    : "无触发关键词";
+  const desc = plugin.description || "暂无描述";
+  // settings 渲染为 JSON 文本（无配置/空对象显示为空）
+  const settingsJson = plugin.settings && Object.keys(plugin.settings).length > 0
+    ? JSON.stringify(plugin.settings, null, 2)
+    : "";
+  const enabled = plugin.enabled !== false;
+  // id 含点号(builtin.ip),属性选择器值用引号包裹即可,无需转义
+  return `
+    <div class="extension-card" data-plugin-id="${plugin.id}">
+      <div class="extension-header">
+        <div class="extension-icon">${icon}</div>
+        <div class="extension-info">
+          <h3>${plugin.name || plugin.id} <span class="hint">v${plugin.version || "1.0.0"}</span></h3>
+          <p class="extension-desc">${triggers}</p>
+        </div>
+        <label class="switch" title="启用/禁用">
+          <input type="checkbox" class="plugin-enabled" ${enabled ? "checked" : ""} />
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="extension-body">
+        <div style="color: #6c7086; font-size: 13px; padding: 4px 0 8px;">${desc}</div>
+        <div class="setting-row" style="align-items: flex-start;">
+          <label>配置 (JSON)</label>
+          <div style="flex: 1; min-width: 0;">
+            <textarea class="plugin-settings" spellcheck="false" placeholder='例如 {"use_ipv6": true}' style="width: 100%; min-height: 80px; font-family: monospace; font-size: 12px; background: #1e1e2e; color: #cdd6f4; border: 1px solid #45475a; border-radius: 6px; padding: 8px; resize: vertical; box-sizing: border-box;">${settingsJson}</textarea>
+            <div class="plugin-save-msg" style="font-size: 12px; margin-top: 4px; min-height: 16px;"></div>
+          </div>
+          <button class="btn-small plugin-save">保存配置</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// 绑定单个插件卡片的事件（enabled 开关 + 保存 settings）
+function bindPluginCardEvents(plugin) {
+  const card = document.querySelector(`.extension-card[data-plugin-id="${plugin.id}"]`);
+  if (!card) return;
+  const id = plugin.id;
+
+  card.querySelector(".plugin-enabled")?.addEventListener("change", async (e) => {
+    const settings = readSettingsJson(card);
+    if (settings === null) {
+      flash(card, "JSON 格式错误,无法保存", true);
+      e.target.checked = !e.target.checked; // 回滚
+      return;
+    }
+    try {
+      await invoke("update_plugin_config", { pluginId: id, enabled: e.target.checked, settings });
+      flash(card, e.target.checked ? "已启用" : "已禁用");
+    } catch (err) {
+      console.error("update_plugin_config (enabled) failed:", err);
+      flash(card, "保存失败", true);
+      e.target.checked = !e.target.checked; // 回滚
+    }
+  });
+
+  card.querySelector(".plugin-save")?.addEventListener("click", async () => {
+    const settings = readSettingsJson(card);
+    if (settings === null) {
+      flash(card, "JSON 格式错误", true);
+      return;
+    }
+    const enabled = card.querySelector(".plugin-enabled").checked;
+    try {
+      await invoke("update_plugin_config", { pluginId: id, enabled, settings });
+      flash(card, "已保存");
+    } catch (err) {
+      console.error("update_plugin_config failed:", err);
+      flash(card, "保存失败: " + err, true);
+    }
+  });
+}
+
+// 读取卡片里的 settings JSON;解析失败返回 null,空文本返回 {}。
+function readSettingsJson(card) {
+  const raw = (card.querySelector(".plugin-settings")?.value || "").trim();
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+// 卡片内显示一行反馈（2s 后清除）
+function flash(card, msg, isError) {
+  const el = card.querySelector(".plugin-save-msg");
+  if (!el) return;
+  el.textContent = msg;
+  el.style.color = isError ? "#f38ba8" : "#a6e3a1";
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.textContent = ""; }, 2000);
 }
 
 // ── 快捷键录制（使用后端 rdev）─────────────────────────────────────────────────

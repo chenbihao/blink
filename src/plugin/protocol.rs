@@ -17,6 +17,10 @@ pub enum PluginRequest {
         query: String,
         #[serde(default)]
         context: PluginQueryContext,
+        /// 该插件的 PluginConfig.settings（0.5.1 透传,见 0.5 设计 §2.4「settings 透传协议」）。
+        /// 采用 query 内联:每次查询携带,天然热更新。老插件忽略此字段;无配置时为 None。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        settings: Option<serde_json::Value>,
     },
     /// 取消(core→插件,best-effort:查询超时发送,插件可忽略)。
     Cancel { id: String },
@@ -29,6 +33,7 @@ impl PluginRequest {
             id: id.into(),
             query: query.into(),
             context: PluginQueryContext::default(),
+            settings: None,
         }
     }
 }
@@ -151,5 +156,30 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"type\":\"cancel\""));
         assert!(json.contains("\"id\":\"req_x\""));
+    }
+
+    #[test]
+    fn query_with_settings_serializes_field() {
+        let settings = serde_json::json!({"use_ipv6": true});
+        let req = PluginRequest::Query {
+            id: "r1".into(),
+            query: "ip".into(),
+            context: PluginQueryContext::default(),
+            settings: Some(settings),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"settings\""));
+        assert!(json.contains("\"use_ipv6\""));
+    }
+
+    #[test]
+    fn legacy_request_without_settings_parses() {
+        // 老插件/老 core 发的请求无 settings 字段 → serde default 补 None,向后兼容。
+        let json = r#"{"type":"query","id":"r1","query":"ip","context":{}}"#;
+        let req: PluginRequest = serde_json::from_str(json).unwrap();
+        match req {
+            PluginRequest::Query { settings, .. } => assert!(settings.is_none()),
+            _ => panic!("应是 Query"),
+        }
     }
 }

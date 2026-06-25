@@ -151,6 +151,7 @@ impl PluginProcess {
         &self,
         query: &str,
         context: &super::protocol::PluginQueryContext,
+        settings: Option<&serde_json::Value>,
         timeout_ms: u64,
     ) -> Result<Vec<PluginItem>, PluginError> {
         let seq = self
@@ -164,6 +165,7 @@ impl PluginProcess {
             id: req_id.clone(),
             query: query.to_string(),
             context: context.clone(),
+            settings: settings.cloned(),
         };
         let line = serde_json::to_string(&req).map_err(|e| PluginError::Io(e.to_string()))? + "\n";
         {
@@ -242,6 +244,7 @@ impl PluginHandle {
         &self,
         query: &str,
         context: &super::protocol::PluginQueryContext,
+        settings: Option<&serde_json::Value>,
     ) -> Result<Vec<PluginItem>, PluginError> {
         let timeout_ms = self.manifest.timeout_ms();
 
@@ -261,7 +264,7 @@ impl PluginHandle {
             Arc::clone(guard.as_ref().unwrap())
         };
 
-        let result = proc.query(query, context, timeout_ms).await;
+        let result = proc.query(query, context, settings, timeout_ms).await;
 
         // 进程关闭类错误:清理句柄,下次重启。
         // 守护竞态:并发 query 可能在 A 失败期间已重建新进程——只清「我这个已死的」,

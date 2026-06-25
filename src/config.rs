@@ -280,6 +280,66 @@ pub async fn update_file_search(pool: &SqlitePool, file_search: FileSearchConfig
     Ok(())
 }
 
+// ── 插件配置（0.5.1，见 0.5 设计 §2.4）───────────────────────────────────────────
+//
+// PluginConfig 只管 enabled + settings。trigger/surface 不在此——继续由 manifest
+// 单一来源驱动 RuleRouter（详见 0.5 §2.4 评审修订说明）。
+
+fn default_null() -> serde_json::Value {
+    serde_json::Value::Null
+}
+
+/// 插件独立配置。settings 是 free-form JSON（manifest 声明 schema,core 只存不解释）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginConfig {
+    pub enabled: bool,
+    #[serde(default = "default_null")]
+    pub settings: serde_json::Value,
+}
+
+impl Default for PluginConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            settings: serde_json::Value::Null,
+        }
+    }
+}
+
+/// 获取单个插件配置（key=`plugin:{id}`）。不存在返回 None。
+pub async fn get_plugin_config(pool: &SqlitePool, plugin_id: &str) -> Option<PluginConfig> {
+    let key = format!("plugin:{plugin_id}");
+    crate::history::get_config(pool, &key)
+        .await
+        .and_then(|json| serde_json::from_str(&json).ok())
+}
+
+/// 设置插件配置（upsert,写 `plugin:{id}`）。
+pub async fn set_plugin_config(
+    pool: &SqlitePool,
+    plugin_id: &str,
+    config: &PluginConfig,
+) -> Result<(), String> {
+    let key = format!("plugin:{plugin_id}");
+    let json = serde_json::to_string(config).map_err(|e| e.to_string())?;
+    crate::history::set_config(pool, &key, &json).await;
+    tracing::debug!(plugin_id, enabled = config.enabled, "插件配置已更新");
+    Ok(())
+}
+
+/// 获取所有插件配置（key 前缀 `plugin:`）。返回 (plugin_id, config) 列表。
+pub async fn get_all_plugin_config(pool: &SqlitePool) -> Vec<(String, PluginConfig)> {
+    crate::history::get_all_config(pool)
+        .await
+        .into_iter()
+        .filter_map(|(k, v)| {
+            let id = k.strip_prefix("plugin:")?;
+            let cfg = serde_json::from_str(&v).ok()?;
+            Some((id.to_string(), cfg))
+        })
+        .collect()
+}
+
 // ── TODO: 方案 B - Trait 抽象（后续重构）────────────────────────────────────────
 //
 // 当需要支持多平台时，可以将配置管理抽象为 trait：
