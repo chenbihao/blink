@@ -60,6 +60,9 @@ impl SearchItem {
     ///   前端 `actions.js` 复制优先取 `payload`(= text);无 payload 才回退 `calcValue`
     ///   (从 name 去 "= " 前缀;CalcEngine 的 title 形如 `= <text>` 故二者一致)。
     pub fn into_app_entry(self) -> AppEntry {
+        // 把 source 优先级 baked 进分数，确保前端 merge 时不会交叉排序
+        let score = super::scorer::bake_source_boost(self.score, &self.source);
+
         match self.action {
             SearchAction::Open { path } => AppEntry {
                 name: self.title,
@@ -67,7 +70,7 @@ impl SearchItem {
                 description: self.subtitle,
                 lnk_path: path,
                 is_calc: false,
-                score: self.score,
+                score,
                 is_placeholder: false,
                 source: self.source.clone(),
                 action: Action {
@@ -84,7 +87,7 @@ impl SearchItem {
                 // is_calc 仅标记计算结果(驱动前端 calc 样式 + calcValue);插件 Copy
                 // 不该套计算样式,故按来源判定(CalcEngine 的 source == "calc")。
                 is_calc: self.source == "calc",
-                score: self.score,
+                score,
                 is_placeholder: false,
                 source: self.source.clone(),
                 action: Action {

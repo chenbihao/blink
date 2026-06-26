@@ -4,6 +4,7 @@
 //! 包含：设置、锁屏、关机/重启/睡眠、清空历史等系统操作。
 
 use super::engine::{QueryContext, SearchAction, SearchEngine, SearchItem};
+use super::scorer::{apply_history, BuiltinMatch};
 
 /// 内置动作定义。
 struct BuiltinAction {
@@ -124,7 +125,7 @@ impl SearchEngine for BuiltinEngine {
     }
 
     /// 搜索内置动作：query 匹配关键词 → 返回结果。
-    async fn search(&self, query: &str, _ctx: &QueryContext<'_>) -> Vec<SearchItem> {
+    async fn search(&self, query: &str, ctx: &QueryContext<'_>) -> Vec<SearchItem> {
         let q = query.trim().to_lowercase();
         if q.is_empty() {
             return Vec::new();
@@ -132,41 +133,39 @@ impl SearchEngine for BuiltinEngine {
 
         let mut items = Vec::new();
         for action in ACTIONS {
-            // 1. 精确匹配 title 或 keyword
-            let mut matched = false;
-            let mut score = 0.0f32;
-
-            // 标题精确匹配（最高优先级）
-            if action.title.to_lowercase().contains(&q) {
-                matched = true;
-                score = 2.0; // 比普通应用高，确保排前面
-            }
-
-            // 关键词精确匹配（如 "sz" == "sz"）
-            if !matched {
-                for kw in action.keywords {
-                    let kw_lower = kw.to_lowercase();
-                    if kw_lower == q {
-                        matched = true;
-                        score = 1.5; // 精确首字母匹配，权重很高
-                        break;
-                    }
-                    // 前缀匹配（如 "设" 匹配 "设置"）
-                    if kw_lower.starts_with(&q) {
-                        matched = true;
-                        score = 1.2; // 前缀匹配也高于普通应用
-                        break;
-                    }
-                }
-            }
-
-            if matched {
+            let match_kind = match_query(&q, action);
+            if let Some(kind) = match_kind {
+                let base_score = kind.score();
+                // 历史加权：内置动作也按使用频率排序
+                let item_id = format!("builtin:{}", action.id);
+                let score = apply_history(base_score, &item_id, ctx.history);
                 items.push(action_to_search_item(action, score));
             }
         }
 
         items
     }
+}
+
+/// 匹配查询，返回匹配类型（决定基础分数）。
+fn match_query(q: &str, action: &BuiltinAction) -> Option<BuiltinMatch> {
+    // 标题包含查询词（最高优先级）
+    if action.title.to_lowercase().contains(q) {
+        return Some(BuiltinMatch::TitleContains);
+    }
+
+    // 关键词匹配
+    for kw in action.keywords {
+        let kw_lower = kw.to_lowercase();
+        if kw_lower == q {
+            return Some(BuiltinMatch::KeywordExact);
+        }
+        if kw_lower.starts_with(q) {
+            return Some(BuiltinMatch::KeywordPrefix);
+        }
+    }
+
+    None
 }
 
 /// BuiltinAction → SearchItem 转换。

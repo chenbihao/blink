@@ -340,6 +340,66 @@ pub async fn get_all_plugin_config(pool: &SqlitePool) -> Vec<(String, PluginConf
         .collect()
 }
 
+// ── Context 层配置（0.5.2，见 0.5 设计 §2.5）───────────────────────────────────
+
+/// Context 层配置：控制唤起时的环境采集行为。
+/// - enabled: 总开关，关闭后完全不采集
+/// - clipboard_enabled: 是否采集剪贴板文本
+/// - sensitive_apps: 敏感应用进程名黑名单（如密码管理器），前台为这些应用时不采集（隐私保护）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub clipboard_enabled: bool,
+    #[serde(default)]
+    pub sensitive_apps: Vec<String>,
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            clipboard_enabled: true,
+            sensitive_apps: Vec::new(),
+        }
+    }
+}
+
+impl ContextConfig {
+    /// 判断进程名是否在敏感应用黑名单（大小写不敏感）。
+    pub fn is_sensitive(&self, process_name: &str) -> bool {
+        let name = process_name.to_ascii_lowercase();
+        self.sensitive_apps
+            .iter()
+            .any(|s| s.trim().eq_ignore_ascii_case(&name))
+    }
+}
+
+/// 获取 Context 配置（key=`context:config`）。不存在或解析失败返回默认。
+pub async fn get_context_config(pool: &SqlitePool) -> ContextConfig {
+    crate::history::get_config(pool, "context:config")
+        .await
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default()
+}
+
+/// 设置 Context 配置（upsert,写 `context:config`）。
+pub async fn set_context_config(
+    pool: &SqlitePool,
+    config: &ContextConfig,
+) -> Result<(), String> {
+    let json = serde_json::to_string(config).map_err(|e| e.to_string())?;
+    crate::history::set_config(pool, "context:config", &json).await;
+    tracing::debug!(
+        enabled = config.enabled,
+        clipboard = config.clipboard_enabled,
+        sensitive_count = config.sensitive_apps.len(),
+        "Context 配置已更新"
+    );
+    Ok(())
+}
+
 // ── TODO: 方案 B - Trait 抽象（后续重构）────────────────────────────────────────
 //
 // 当需要支持多平台时，可以将配置管理抽象为 trait：

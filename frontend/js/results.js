@@ -58,7 +58,8 @@ function ensureSeq(seq) {
 }
 
 /** 去重 append 新项；有新增或刚重置则重渲染。
- * 增量到达后按 score 降序重排，确保 priority 项置顶(0.4)。
+ * 后端 fuse_items 已按 score 降序 + source tie-break 排好序,
+ * 此处只按 score 降序重排（source 优先级已 bake 进 score）。
  * 光标行为:sort 后**不** restoreSelection——保持页内索引不变。
  * 这样 priority 新项置顶后，selected=0 自动指向新项；用户已移动的光标留在原地。
  */
@@ -88,7 +89,8 @@ function appendNew(items, didReset) {
       return !pluginsReturned.has(x.source);
     });
   }
-  // 按 score 降序重排:priority 项(score > 1.0)置顶,calc(1.0)次之,应用(<=1.0)垫后。
+  // 按 score 降序排序。source 优先级已由后端 bake_source_boost 处理,
+  // 不需要前端重复 sourceRank 逻辑。
   allItems.sort((a, b) => (b.score || 0) - (a.score || 0));
   renderPage();
 }
@@ -260,6 +262,7 @@ function updateBadge(li, i) {
 function createItem(app, i) {
   const li = document.createElement("li");
   li.dataset.lnkPath = app.lnk_path;
+  li.dataset.source = app.source || "";
   // 动作信息存入 dataset，激活与提示栏共用（action 由后端提供）
   if (app.action) {
     li.dataset.actionKind = app.action.kind;
@@ -317,7 +320,10 @@ function createItem(app, i) {
     li.appendChild(badge);
   }
 
-  li.addEventListener("click", () => activateItem(itemData(li)));
+  // 用 mousedown 代替 click：避免拖动区域检测拦截了第一次点击（"需要双击" bug）
+  li.addEventListener("mousedown", (e) => {
+    if (e.button === 0) activateItem(itemData(li)); // 只响应左键
+  });
   return li;
 }
 

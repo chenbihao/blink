@@ -3,7 +3,9 @@
 import * as search from "./search.js";
 import * as keyboard from "./keyboard.js";
 import * as lifecycle from "./lifecycle.js";
+import * as contextmenu from "./contextmenu.js";
 
 search.init();
 keyboard.init();
 lifecycle.init();
+contextmenu.init();

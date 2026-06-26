@@ -3,12 +3,23 @@
 import { hideWindow } from "./api.js";
 import { activateItem } from "./actions.js";
 import * as results from "./results.js";
+import { resultsEl } from "./dom.js";
 
-/** 绑定全部键盘监听。 */
+/** 绑定全部键盘监听 + 滚轮翻页。 */
 export function init() {
   document.addEventListener("keydown", onNavigation);
   document.addEventListener("keydown", onEscape);
   document.addEventListener("keydown", onBlockModifiers, true);
+  // 滚轮翻页：向上滚 = PageUp，向下滚 = PageDown（整页翻，用鼠标就不用手移到方向键了）
+  resultsEl.addEventListener("wheel", (e) => {
+    e.preventDefault(); // 阻止默认滚动（列表本来就不滚动）
+    if (!results.hasItems()) return;
+    if (e.deltaY < 0) {
+      results.pageUp(); // 向上滚 → 上一页（等价于 PageUp）
+    } else {
+      results.pageDown(); // 向下滚 → 下一页（等价于 PageDown）
+    }
+  });
   initAltBadges();
 }
 

@@ -37,7 +37,12 @@ fn elapsed_ms() -> u64 {
 /// **采集时机很重要**：必须在 show() 之前调用，否则拿到的前台是 Blink 自己。
 pub fn invoke(app: &AppHandle) {
     // 1. 先采集上下文快照（show 之前！）
-    let snapshot = crate::context::collect();
+    //    读内存 ContextConfig（零 IO，热键回调不能 await），按配置过滤采集
+    let context_cfg = app
+        .try_state::<std::sync::Arc<std::sync::RwLock<crate::config::ContextConfig>>>()
+        .map(|c| c.read().unwrap().clone())
+        .unwrap_or_default();
+    let snapshot = crate::context::collect(&context_cfg);
     tracing::debug!(
         foreground_app = ?snapshot.foreground_app.as_ref().map(|f| &f.process_name),
         window_title = ?snapshot.foreground_app.as_ref().map(|f| &f.window_title),
@@ -70,13 +75,17 @@ pub fn invoke(app: &AppHandle) {
 }
 
 /// 隐藏：ESC / 看门狗 / 单实例重复启动。
-/// 只隐藏主窗口，设置窗口保持显示（按自己的 ESC 关闭）。
+/// 同时关闭右键菜单独立窗口（如果存在）。
 pub fn hide(app: &AppHandle, reason: &str) {
     if let Some(win) = app.get_webview_window("main") {
         STATE.store(ST_HIDDEN, Ordering::SeqCst);
         tracing::debug!(reason, "hide: state → HIDDEN");
         let _ = win.hide();
         let _ = app.emit("blink://hidden", ());
+    }
+    // 主窗口隐藏时联动关闭右键菜单（突破边界的独立窗口）
+    if let Some(menu_win) = app.get_webview_window("context-menu") {
+        let _ = menu_win.close();
     }
 }
 

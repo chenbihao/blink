@@ -18,6 +18,7 @@ use crate::intent::{Candidate, IntentRouter, Route, Surface};
 use crate::plugin::PluginEngine;
 
 use super::engine::{Lane, QueryContext, SearchEngine, SearchItem};
+use super::scorer::{boost_priority, placeholder_score, source_rank};
 use super::{Action, ActionKind, AppEntry};
 
 /// 融合后返回前端的结果上限。
@@ -100,8 +101,8 @@ impl SearchService {
         let search_ctx = QueryContext { history: &history, snapshot: &snapshot };
         let intent_ctx = crate::intent::QueryContext { history: &history, snapshot: &snapshot };
         let route = self.router.route(q, &intent_ctx).await;
-        // 过滤禁用插件的路由命中(0.5.1 补全):禁用插件不参与路由,避免 takeover 空白。
-        let route = self.filter_disabled(route);
+        // 过滤不符合前置条件的路由(禁用插件 + 参数过短),避免占位符死态。
+        let route = self.filter_route(route);
 
         // 获取插件显示名称的闭包
         let display_name = |id: &str| match &self.plugin_engine {
@@ -144,7 +145,7 @@ impl SearchService {
                     .iter()
                     .map(|(id, _)| {
                         let mut entry = placeholder_entry(id, &display_name(id));
-                        entry.score = if priority_set.contains(id) { 2.0 } else { -1.0 };
+                        entry.score = placeholder_score(priority_set.contains(id));
                         entry
                     })
                     .collect();
@@ -169,27 +170,39 @@ impl SearchService {
         }
     }
 
-    /// 过滤禁用插件的路由命中(0.5.1):禁用插件不参与路由。
-    /// - Takeover 命中禁用插件 → 降级空 Mixed(走 Generic 应用搜索),避免窗口空白。
-    /// - Mixed 候选 → 剔除禁用插件。
-    /// 比「RuleRouter 加 remove API」简洁:路由表保持静态,过滤在结果层(无需重新注入)。
-    fn filter_disabled(&self, route: Route) -> Route {
+    /// 过滤不满足前置条件的路由命中(0.5.1):禁用插件 + 参数过短。
+    /// - Takeover 命中禁用/短参 → 降级空 Mixed(走 Generic 应用搜索),避免窗口空白。
+    /// - Mixed 候选 → 剔除禁用/短参插件。
+    /// 比「RuleRouter 加 API」简洁:路由表保持静态,过滤在结果层(无需重新注入)。
+    fn filter_route(&self, route: Route) -> Route {
         let Some(pe) = &self.plugin_engine else {
             return route;
         };
         match route {
-            Route::Takeover { ref plugin_id, .. } => {
-                if pe.is_enabled(plugin_id) {
-                    route
-                } else {
+            Route::Takeover { ref plugin_id, ref arg, .. } => {
+                // 检查禁用
+                if !pe.is_enabled(plugin_id) {
                     tracing::debug!(plugin = %plugin_id, "禁用插件命中 takeover,降级 Generic");
-                    Route::Mixed { candidates: vec![] }
+                    return Route::Mixed { candidates: vec![] };
                 }
+                // 检查 min_arg_length:参数太短也降级(避免占位符永远不被替换的死态)
+                let min_len = pe.get_min_arg_length(plugin_id);
+                let arg_len = arg.chars().count();
+                if min_len > 0 && arg_len < min_len {
+                    tracing::debug!(plugin = %plugin_id, %arg_len, min_len, "参数过短命中 takeover,降级 Generic");
+                    return Route::Mixed { candidates: vec![] };
+                }
+                route
             }
             Route::Mixed { candidates } => Route::Mixed {
                 candidates: candidates
                     .into_iter()
                     .filter(|c| pe.is_enabled(&c.plugin_id))
+                    .filter(|c| {
+                        let min_len = pe.get_min_arg_length(&c.plugin_id);
+                        let arg_len = c.arg.chars().count();
+                        min_len == 0 || arg_len >= min_len
+                    })
                     .collect(),
             },
         }
@@ -258,7 +271,7 @@ impl SearchService {
                         // priority 候选 score 抬高,确保置顶
                         for item in &mut items {
                             if priority_set.contains(&item.source) {
-                                item.score = item.score.max(0.0) + 1.5;
+                                item.score = boost_priority(item.score);
                             }
                         }
                         if seq == latest_seq.load(Ordering::SeqCst) && !items.is_empty() {
@@ -312,16 +325,7 @@ fn fuse_items(items: Vec<SearchItem>, limit: usize) -> Vec<SearchItem> {
     deduped
 }
 
-/// source 优先级(小=靠前):calc 最高,start_menu 次之,其余(插件/mock)垫后。
-fn source_rank(source: &str) -> u8 {
-    match source {
-        "calc" => 0,
-        "builtin" => 1,
-        "start_menu" => 2,
-        "file" => 3,
-        _ => 4,
-    }
-}
+// source_rank / bake_source_boost 已统一移到 scorer.rs
 
 /// emit 增量结果到前端。
 fn emit_results(app: &AppHandle, seq: u64, items: Vec<SearchItem>) {
@@ -329,6 +333,15 @@ fn emit_results(app: &AppHandle, seq: u64, items: Vec<SearchItem>) {
         .into_iter()
         .map(SearchItem::into_app_entry)
         .collect();
+    for (i, item) in entries.iter().enumerate() {
+        tracing::debug!(
+            index = i,
+            name = %item.name,
+            score = %item.score,
+            source = %item.source,
+            "增量结果项"
+        );
+    }
     if let Err(e) = app.emit("blink://results", ResultsPayload { seq, items: entries }) {
         tracing::debug!(error = %e, "emit blink://results failed");
     }

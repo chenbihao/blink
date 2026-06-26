@@ -25,7 +25,7 @@ impl SearchEngine for CalcEngine {
                 id: format!("calc:{}", query.trim()),
                 title: format!("= {result}"),
                 subtitle: Some("按 Enter 复制结果".into()),
-                score: 1.0, // 计算命中置信度最高,排首位
+                score: super::scorer::calc_score(),
                 action: SearchAction::Copy { text: result },
                 source: "calc".into(),
             }],

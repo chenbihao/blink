@@ -2,8 +2,8 @@
 //!
 //! 三层回退架构（按速度/覆盖率排序）：
 //! 1. Everything HTTP API - 最快，全盘索引，需用户安装 Everything 并开启 HTTP Server
-//! 2. Windows Search COM API - 系统内置，暂未实现（占位）
-//! 3. 本地目录预扫 - 兜底，仅覆盖常用目录（Desktop/Documents/Downloads）
+//! 2. 本地目录预扫 - 兜底，仅覆盖常用目录（Desktop/Documents/Downloads）
+//! 3. Windows Search COM API - 系统内置，暂未实现（占位）
 //!
 //! 失败静默降级，不报错、不阻塞其他引擎。
 
@@ -139,7 +139,7 @@ impl FileEngine {
             }
         };
 
-        tracing::trace!("Everything 原始响应(前500字符): {}", &text.chars().take(500).collect::<String>());
+        // tracing::trace!("Everything 原始响应(前500字符): {}", &text.chars().take(500).collect::<String>());
 
         let json: serde_json::Value = match serde_json::from_str(&text) {
             Ok(j) => j,
@@ -189,8 +189,7 @@ impl FileEngine {
                 result["type"].as_str().unwrap_or("file").to_string()
             };
 
-            // 分数：按排名衰减（0.95 → 0.1）
-            let score = (0.95f32).powi(i as i32).max(0.1);
+            let score = super::scorer::file_search_score(i);
 
             items.push(SearchItem {
                 id: full_path.clone(),
@@ -203,6 +202,14 @@ impl FileEngine {
         }
 
         tracing::debug!("Everything 返回 {} 个结果，query={}", items.len(), query);
+        for (i, item) in items.iter().enumerate() {
+            tracing::debug!(
+                index = i,
+                name = %item.title,
+                score = %item.score,
+                "文件搜索结果项"
+            );
+        }
         items
     }
 }

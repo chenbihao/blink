@@ -8,10 +8,12 @@
 //! 失效:定时检查根目录 mtime,变化才全量重扫;每 N 次强制刷新兜底深层目录变化
 //! (Windows 目录 mtime 只反映直接子项增删)。
 
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 
 use super::engine::{Lane, QueryContext, SearchAction, SearchEngine, SearchItem};
+use super::scorer::normalize_top_relative;
 use super::AppEntry;
 
 /// 搜索结果上限(融合前每引擎各自截断)。
@@ -120,21 +122,27 @@ impl SearchEngine for StartMenuEngine {
             return Vec::new();
         }
         let entries = self.get_entries().await;
-        let scored = super::fuzzy_score_entries(query, &entries, ctx.history, ENGINE_LIMIT);
-        normalize_to_items(scored)
+        let scored = super::fuzzy_score_entries(query, &entries, ENGINE_LIMIT);
+        normalize_to_items(scored, ctx.history)
     }
 }
 
 /// 把 `(raw_score, AppEntry)` 列表 top-relative 归一化为 `SearchItem`。
 ///
-/// `score = raw / max_raw`(max=0 时全置 0)。归一化只在单次 query 内有意义,
-/// 用于和其他引擎(calc=1.0)在融合层可比。纯函数,便于单测。
-fn normalize_to_items(scored: Vec<(u32, AppEntry)>) -> Vec<SearchItem> {
-    let max = scored.iter().map(|(s, _)| *s).max().unwrap_or(0);
-    scored
+/// 流程：raw 分 → top-relative 归一化到 [0,1] → 统一历史加权。
+/// 历史加权使用 `scorer::history_boost`，与 Builtin/Calc/File/Plugin 共用同一公式。
+fn normalize_to_items(scored: Vec<(u32, AppEntry)>, history: &HashMap<String, i64>) -> Vec<SearchItem> {
+    // 先转成 f32 元组，用统一归一化函数处理
+    let mut normalized: Vec<(AppEntry, f32)> = scored
         .into_iter()
-        .map(|(raw, e)| {
-            let score = if max > 0 { raw as f32 / max as f32 } else { 0.0 };
+        .map(|(raw, e)| (e, raw as f32))
+        .collect();
+    normalize_top_relative(&mut normalized);
+
+    normalized
+        .into_iter()
+        .map(|(e, base_score)| {
+            let score = super::scorer::apply_history(base_score, &e.lnk_path, history);
             SearchItem {
                 id: e.lnk_path.clone(),
                 title: e.name,
@@ -160,6 +168,7 @@ mod tests {
             is_calc: false,
             score: 0.0,
             is_placeholder: false,
+            source: String::new(),
             description: Some(lnk.into()),
             action: Action {
                 kind: ActionKind::Open,
@@ -172,7 +181,8 @@ mod tests {
     #[test]
     fn top_relative_normalization() {
         let scored = vec![(200u32, entry("A", "a")), (100u32, entry("B", "b"))];
-        let items = normalize_to_items(scored);
+        let history = HashMap::new();
+        let items = normalize_to_items(scored, &history);
         assert_eq!(items[0].score, 1.0); // 最高分归一为 1.0
         assert_eq!(items[1].score, 0.5);
         assert!(matches!(&items[0].action, SearchAction::Open { path } if path == "a"));
@@ -181,7 +191,20 @@ mod tests {
     #[test]
     fn zero_max_yields_zero_scores() {
         let scored = vec![(0u32, entry("A", "a"))];
-        let items = normalize_to_items(scored);
+        let history = HashMap::new();
+        let items = normalize_to_items(scored, &history);
         assert_eq!(items[0].score, 0.0);
+    }
+
+    #[test]
+    fn history_boost_applied_after_normalization() {
+        let scored = vec![(200u32, entry("A", "a")), (100u32, entry("B", "b"))];
+        let mut history = HashMap::new();
+        history.insert("b".to_string(), 10); // B 有 10 次历史
+        let items = normalize_to_items(scored, &history);
+        // A: 1.0 + 0 (无历史) = 1.0
+        assert!((items[0].score - 1.0).abs() < 1e-6);
+        // B: 0.5 + ln(11)*0.3 ≈ 0.5 + 0.719 = 1.219
+        assert!(items[1].score > items[0].score, "history should boost B above A");
     }
 }

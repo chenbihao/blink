@@ -112,6 +112,102 @@ pub(super) fn collect_foreground_app() -> Option<ForegroundAppInfo> {
     }
 }
 
+/// 列出当前有可见窗口的运行中进程（进程名去重、按名排序）。
+/// 供设置页「敏感应用」选择器：用户从实际运行的程序里挑，避免手输错进程名。
+pub(super) fn list_window_processes() -> Vec<super::RunningProcess> {
+    use std::collections::BTreeSet;
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::LPARAM;
+    use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, IsWindowVisible};
+
+    // EnumWindows 回调：收集 (进程名, 窗口标题)。
+    // edition 2024：unsafe fn 体内默认非 unsafe 上下文，需显式 unsafe {} 块。
+    unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        unsafe {
+            let out = &mut *(lparam.0 as *mut Vec<(String, String)>);
+            // 只收可见窗口
+            if !IsWindowVisible(hwnd).as_bool() {
+                return BOOL(1);
+            }
+            // 过滤无标题窗口（后台/托盘等）
+            let title_len = GetWindowTextLengthW(hwnd);
+            if title_len == 0 {
+                return BOOL(1);
+            }
+            let mut title_buf = vec![0u16; (title_len + 1) as usize];
+            let n = GetWindowTextW(hwnd, &mut title_buf);
+            if n == 0 {
+                return BOOL(1);
+            }
+            let window_title = OsString::from_wide(&title_buf[..n as usize])
+                .to_string_lossy()
+                .into_owned();
+            // PID
+            let mut pid: u32 = 0;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid == 0 || pid == GetCurrentProcessId() {
+                return BOOL(1);
+            }
+            // 进程名
+            let Some(name) = process_name_of(pid) else {
+                return BOOL(1);
+            };
+            if !name.is_empty() {
+                out.push((name, window_title));
+            }
+            BOOL(1)
+        }
+    }
+
+    unsafe {
+        let mut all: Vec<(String, String)> = Vec::new();
+        let _ = EnumWindows(Some(enum_proc), LPARAM(&mut all as *mut _ as isize));
+        // 进程名去重（同名多窗口只留首个标题），按进程名（小写）排序
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut result: Vec<super::RunningProcess> = Vec::new();
+        for (name, title) in all {
+            if seen.insert(name.clone()) {
+                result.push(super::RunningProcess {
+                    process_name: name,
+                    window_title: title,
+                });
+            }
+        }
+        result.sort_by(|a, b| {
+            a.process_name
+                .to_ascii_lowercase()
+                .cmp(&b.process_name.to_ascii_lowercase())
+        });
+        result
+    }
+}
+
+/// 由 PID 取进程名（OpenProcess + QueryFullProcessImageNameW + 取文件名）。None 表示拿不到。
+unsafe fn process_name_of(pid: u32) -> Option<String> {
+    unsafe {
+        let Ok(hprocess) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return None;
+        };
+        let mut path_buf = vec![0u16; MAX_PATH as usize];
+        let mut path_len = path_buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            HANDLE(hprocess.0),
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(path_buf.as_mut_ptr()),
+            &mut path_len,
+        );
+        if ok.is_err() {
+            return None;
+        }
+        let path = OsString::from_wide(&path_buf[..path_len as usize])
+            .to_string_lossy()
+            .into_owned();
+        Path::new(&path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+    }
+}
+
 /// 采集剪贴板文本（只读，不修改剪贴板内容）。
 ///
 /// 使用 Windows 原生剪贴板 API：OpenClipboard → GetClipboardData →

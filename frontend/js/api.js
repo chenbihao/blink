@@ -3,6 +3,8 @@
 
 import { invoke } from "./tauri.js";
 
+export { invoke };
+
 /** 搜索应用（含计算结果），返回 AppEntry 数组。seq 为请求序号（后端 async 增量回带，前端校验）。 */
 export function searchApps(query, seq) {
   return invoke("search_apps", { query, seq });
@@ -21,4 +23,14 @@ export function hideWindow() {
 /** 调整主窗口大小（弹性窗口）。 */
 export function resizeWindow(width, height) {
   return invoke("resize_window", { width, height });
+}
+
+/** 打开文件/快捷方式所在文件夹（explorer 定位选中）。 */
+export function openContainingFolder(path) {
+  return invoke("open_containing_folder", { path });
+}
+
+/** 重置某项的历史记录权重（右键菜单用）。 */
+export function resetItemHistory(lnkPath) {
+  return invoke("reset_item_history", { lnkPath });
 }

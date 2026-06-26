@@ -203,6 +203,228 @@ async function loadNetworkConfig() {
   });
 }
 
+// 加载并渲染上下文配置（0.5.2：环境感知采集控制 + 敏感应用列表化选择器 + 自动保存）
+async function loadContextConfig() {
+  const container = document.getElementById("context-container");
+  if (!container) return;
+
+  let cfg = { enabled: true, clipboard_enabled: true, sensitive_apps: [] };
+  try {
+    const data = await invoke("get_context_config");
+    if (data) cfg = data;
+  } catch (e) {
+    console.error("load context config failed:", e);
+  }
+
+  // ── 渲染卡片 ──
+  container.innerHTML = `
+    <div class="extension-card">
+      <div class="extension-header">
+        <div class="extension-icon">🌍</div>
+        <div class="extension-info">
+          <h3>环境感知</h3>
+          <p class="extension-desc">唤起时自动采集前台应用、剪贴板等上下文，用于搜索增强</p>
+        </div>
+        <label class="switch">
+          <input type="checkbox" class="context-enabled" ${cfg.enabled ? "checked" : ""} />
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="extension-body">
+        <div class="plugin-config-section" style="padding-top: 0;">
+          <div class="plugin-field-row">
+            <div class="field-head">
+              <span class="field-title">采集剪贴板文本</span>
+              <label class="switch"><input type="checkbox" class="context-clipboard" ${cfg.clipboard_enabled ? "checked" : ""} /><span class="slider"></span></label>
+            </div>
+          </div>
+          <div class="plugin-field-row">
+            <div class="field-head">
+              <span class="field-title">敏感应用（前台时不采集上下文）</span>
+              <span class="hint">如密码管理器、银行软件等，保护隐私</span>
+            </div>
+            <div class="context-sensitive-list"></div>
+            <button class="btn-small context-add-btn" style="margin-top:8px;">＋ 添加应用</button>
+          </div>
+          <div class="context-save-msg"></div>
+        </div>
+      </div>
+    </div>`;
+
+  // 本地状态
+  let sensitiveApps = [...(cfg.sensitive_apps || [])];
+
+  // ── 渲染敏感应用列表（chip 样式 + × 移除）──
+  function renderSensitiveList() {
+    const listEl = container.querySelector(".context-sensitive-list");
+    if (!listEl) return;
+    if (sensitiveApps.length === 0) {
+      listEl.innerHTML = `<div class="context-empty-hint">暂无敏感应用</div>`;
+      return;
+    }
+    listEl.innerHTML = sensitiveApps
+      .map(
+        (name, i) =>
+          `<span class="context-chip" data-idx="${i}">
+            ${escapeHtml(name)}
+            <span class="context-chip-remove" data-idx="${i}" title="移除">×</span>
+          </span>`
+      )
+      .join("");
+    // 绑定移除
+    listEl.querySelectorAll(".context-chip-remove").forEach((el) => {
+      el.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const idx = parseInt(el.dataset.idx, 10);
+        sensitiveApps.splice(idx, 1);
+        renderSensitiveList();
+        await save();
+      });
+    });
+  }
+  renderSensitiveList();
+
+  // ── 自动保存 ──
+  async function save() {
+    const enabled = container.querySelector(".context-enabled").checked;
+    const clipboard_enabled = container.querySelector(".context-clipboard").checked;
+    const msg = container.querySelector(".context-save-msg");
+    try {
+      await invoke("update_context_config", {
+        config: { enabled, clipboard_enabled, sensitive_apps: [...sensitiveApps] },
+      });
+      if (msg) {
+        msg.textContent = "✓ 已自动保存";
+        msg.style.color = "#a6e3a1";
+        setTimeout(() => { if (msg) msg.textContent = ""; }, 2000);
+      }
+    } catch (e) {
+      console.error("save context config failed:", e);
+      if (msg) {
+        msg.textContent = "保存失败";
+        msg.style.color = "#f38ba8";
+      }
+    }
+  }
+
+  // 总开关 + 剪贴板开关 → change 自动保存
+  container.querySelector(".context-enabled")?.addEventListener("change", save);
+  container.querySelector(".context-clipboard")?.addEventListener("change", save);
+
+  // ── 添加应用弹窗 ──
+  container.querySelector(".context-add-btn")?.addEventListener("click", async () => {
+    await showAddProcessModal(container, sensitiveApps, async (added) => {
+      sensitiveApps.push(...added);
+      // 去重
+      sensitiveApps = [...new Set(sensitiveApps)];
+      renderSensitiveList();
+      await save();
+    });
+  });
+}
+
+/** 弹窗：从运行中的进程里选择敏感应用 */
+async function showAddProcessModal(container, existing, onAdd) {
+  // 加载运行中进程
+  let processes = [];
+  try {
+    processes = await invoke("list_running_processes");
+  } catch (e) {
+    console.error("list_running_processes failed:", e);
+  }
+
+  // 构建弹窗
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="modal">
+      <div class="modal-header">
+        <h3>添加敏感应用</h3>
+        <button class="modal-close">×</button>
+      </div>
+      <input type="text" class="modal-search" placeholder="搜索进程名…" />
+      <div class="modal-list"></div>
+      <div class="modal-footer">
+        <span class="modal-hint">选择后自动添加并保存</span>
+        <button class="btn-small modal-done">完成</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  const modal = overlay.querySelector(".modal");
+  const searchInput = overlay.querySelector(".modal-search");
+  const listEl = overlay.querySelector(".modal-list");
+  const selected = new Set();
+  const existingSet = new Set(existing.map((s) => s.toLowerCase()));
+
+  function renderList(filter = "") {
+    const flt = filter.toLowerCase();
+    const filtered = processes.filter(
+      (p) =>
+        p.process_name.toLowerCase().includes(flt) ||
+        p.window_title.toLowerCase().includes(flt)
+    );
+    if (filtered.length === 0) {
+      listEl.innerHTML = `<div class="modal-empty">没有匹配的进程</div>`;
+      return;
+    }
+    listEl.innerHTML = filtered
+      .map((p) => {
+        const isExisting = existingSet.has(p.process_name.toLowerCase());
+        const isSelected = selected.has(p.process_name);
+        const disabled = isExisting ? "disabled" : "";
+        const checked = isSelected ? "checked" : "";
+        const label = isExisting ? "已添加" : "";
+        return `<label class="modal-item ${isExisting ? "modal-item-existing" : ""}" data-name="${escapeHtml(p.process_name)}">
+          <input type="checkbox" ${checked} ${disabled} />
+          <span class="modal-item-name">${escapeHtml(p.process_name)}</span>
+          <span class="modal-item-title">${escapeHtml(p.window_title)}</span>
+          ${label ? `<span class="modal-item-label">${label}</span>` : ""}
+        </label>`;
+      })
+      .join("");
+
+    // 绑定 checkbox
+    listEl.querySelectorAll("input[type=checkbox]").forEach((cb) => {
+      cb.addEventListener("change", () => {
+        const name = cb.closest(".modal-item").dataset.name;
+        if (cb.checked) selected.add(name);
+        else selected.delete(name);
+      });
+    });
+  }
+  renderList();
+
+  // 搜索过滤
+  searchInput.addEventListener("input", () => renderList(searchInput.value));
+  searchInput.focus();
+
+  // 关闭
+  function close() {
+    overlay.remove();
+  }
+  overlay.querySelector(".modal-close").addEventListener("click", close);
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) close();
+  });
+  document.addEventListener(
+    "keydown",
+    function esc(e) {
+      if (e.key === "Escape") {
+        close();
+        document.removeEventListener("keydown", esc);
+      }
+    },
+    { once: true }
+  );
+
+  // 完成 → 回调
+  overlay.querySelector(".modal-done").addEventListener("click", () => {
+    if (selected.size > 0) onAdd([...selected]);
+    close();
+  });
+}
+
 // 加载并渲染插件列表（0.5.1：只含插件配置，网络已拆到独立 Tab）
 async function loadPlugins() {
   const container = document.getElementById("plugins-container");
@@ -649,3 +871,4 @@ loadConfig();
 loadStorageInfo();
 loadLogInfo();
 loadNetworkConfig();
+loadContextConfig();

@@ -11,6 +11,7 @@ use sqlx::SqlitePool;
 use tokio::task::JoinSet;
 
 use crate::search::engine::{SearchAction, SearchItem};
+use crate::search::scorer::clamp_plugin_score;
 
 use super::process::PluginHandle;
 use super::protocol::{PluginAction, PluginItem, PluginQueryContext};
@@ -213,6 +214,14 @@ impl PluginEngine {
             .unwrap_or_else(|| id.to_string())
     }
 
+    /// 获取插件的最短参数长度(字符数)，用于快速失败过滤。
+    /// 无配置则返回 0 (不限长度)。
+    pub fn get_min_arg_length(&self, id: &str) -> usize {
+        self.find_plugin(id)
+            .and_then(|p| p.manifest().runtime.min_arg_length)
+            .unwrap_or(0)
+    }
+
     /// 更新全局代理配置 + 重置所有插件进程(保存后调用)。
     /// 下次 query 自动用新 env 重启，用户零感知热更新。
     pub async fn update_global_proxy(&self, proxy: Option<(String, String)>) {
@@ -248,7 +257,7 @@ fn to_search_item(plugin_id: &str, item: PluginItem) -> SearchItem {
         id: format!("plugin:{plugin_id}:{}", item.title),
         title: item.title,
         subtitle: item.subtitle,
-        score: item.score.clamp(0.0, 1.0),
+        score: clamp_plugin_score(item.score),
         action,
         source: plugin_id.to_string(),
     }

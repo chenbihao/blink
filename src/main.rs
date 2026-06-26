@@ -138,6 +138,8 @@ fn main() {
             } else {
                 tracing::info!(count = plugins.len(), "PluginEngine 已构造");
                 let engine = std::sync::Arc::new(plugin::PluginEngine::new(plugins.clone(), pool.clone(), proxy));
+                // 0.4→0.5 自动迁移（首次运行时执行一次，后续 marker 跳过）
+                tauri::async_runtime::block_on(crate::history::migrate_0_4_to_0_5(&pool, &plugins));
                 // 加载/初始化每个插件配置(不存在则写默认 {enabled, settings:null})。
                 tauri::async_runtime::block_on(engine.init_configs());
                 Some(engine)
@@ -207,6 +209,9 @@ fn main() {
                 router,
             ));
             app.manage(search_service.clone());
+            // 注入 ContextConfig 内存缓存：invoke 热键回调零 IO 读它（热更新见 update_context_config）
+            let context_config = tauri::async_runtime::block_on(config::get_context_config(&pool));
+            app.manage(std::sync::Arc::new(std::sync::RwLock::new(context_config)));
             // PluginEngine 单独注册供设置页 API 用
             app.manage(plugin_engine);
 
@@ -256,7 +261,15 @@ fn main() {
             commands::update_engine_config,
             commands::get_plugins,
             commands::update_plugin_config,
-            commands::update_global_proxy
+            commands::update_global_proxy,
+            commands::get_context_config,
+            commands::update_context_config,
+            commands::open_containing_folder,
+            commands::reset_item_history,
+            commands::list_running_processes,
+            commands::show_context_menu,
+            commands::hide_context_menu,
+            commands::context_menu_action
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

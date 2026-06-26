@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
@@ -44,6 +45,61 @@ pub async fn init_db() -> Result<SqlitePool, String> {
     Ok(pool)
 }
 
+/// 0.4→0.5 自动迁移：
+/// 1. `app_config.file_search` → `engine:file_search`（如果不存在）
+/// 2. 为每个插件初始化默认配置（`plugin:{id}` 不存在则写入默认）
+/// 3. 迁移完成后写 marker，下次不再执行
+pub async fn migrate_0_4_to_0_5(
+    pool: &SqlitePool,
+    plugins: &[Arc<crate::plugin::PluginHandle>],
+) {
+    const MARKER_KEY: &str = "migration_0_5_done";
+
+    // 检查是否已迁移过
+    if get_config(pool, MARKER_KEY).await.is_some() {
+        return;
+    }
+    tracing::info!("开始执行 0.4→0.5 配置迁移");
+
+    // ── 1. 迁移 file_search ──
+    if get_config(pool, "engine:file_search").await.is_none() {
+        if let Some(app_config_json) = get_config(pool, "app_config").await {
+            if let Ok(app_config) = serde_json::from_str::<crate::config::AppConfig>(&app_config_json) {
+                match serde_json::to_string(&app_config.file_search) {
+                    Ok(file_search_json) => {
+                        set_config(pool, "engine:file_search", &file_search_json).await;
+                        tracing::info!("迁移 file_search 到 engine:file_search");
+                    }
+                    Err(e) => tracing::warn!(error = %e, "file_search 迁移失败"),
+                }
+            }
+        }
+    }
+
+    // ── 2. 初始化插件默认配置 ──
+    for plugin in plugins {
+        let plugin_id = plugin.id();
+        let key = format!("plugin:{plugin_id}");
+        if get_config(pool, &key).await.is_none() {
+            let default_config = crate::config::PluginConfig {
+                enabled: true,
+                settings: plugin.manifest().default_settings(),
+            };
+            match serde_json::to_string(&default_config) {
+                Ok(json) => {
+                    set_config(pool, &key, &json).await;
+                    tracing::info!(plugin = %plugin_id, "初始化插件默认配置");
+                }
+                Err(e) => tracing::warn!(plugin = %plugin_id, error = %e, "插件配置初始化失败"),
+            }
+        }
+    }
+
+    // 标记迁移完成
+    set_config(pool, MARKER_KEY, "1").await;
+    tracing::info!("0.4→0.5 配置迁移完成");
+}
+
 /// 记录一次执行：存在则 hit_count+1，不存在则插入。
 pub async fn record_launch(pool: &SqlitePool, lnk_path: &str) {
     let now = chrono::Utc::now().timestamp();
@@ -78,6 +134,15 @@ pub async fn count(pool: &SqlitePool) -> i64 {
 /// 清空历史记录。
 pub async fn clear(pool: &SqlitePool) {
     let _ = sqlx::query("DELETE FROM history").execute(pool).await;
+}
+
+/// 重置某项的历史权重（删除该行，权重归零，不影响其他项）。
+/// 用于右键菜单「重置该项记录」（0.5.3）。
+pub async fn reset_weight(pool: &SqlitePool, lnk_path: &str) {
+    let _ = sqlx::query("DELETE FROM history WHERE lnk_path = ?1")
+        .bind(lnk_path)
+        .execute(pool)
+        .await;
 }
 
 // ── 配置相关函数 ────────────────────────────────────────────────────────────────

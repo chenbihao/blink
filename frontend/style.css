@@ -23,8 +23,8 @@ body {
 #app {
   display: flex;
   flex-direction: column;
-  /* 高度由内容自然撑开（不固定 100vh，否则测不出内容真实高度）；
-     JS 测 #app.offsetHeight 回传 resize_window，窗口刚好包住卡片。 */
+  /* 0.5.3+ 右键菜单是独立窗口，不再需要 min-height: 100vh 覆盖背景；
+     移除后清空查询时窗口才能正确收缩回输入框高度。 */
   width: 100%;
   padding: 12px;
   background: #1e1e2e;
@@ -38,6 +38,8 @@ body {
    #search-bar 是输入框的容器；输入框透明融入卡片。 */
 #search-bar {
   flex-shrink: 0;
+  /* 排除拖动区域：输入区不能拖，否则第一次点击触发拖动检测而不是输入 */
+  -webkit-app-region: no-drag;
 }
 
 #query {
@@ -51,6 +53,8 @@ body {
   user-select: text;
   caret-color: #89b4fa;
   line-height: 1.4;
+  /* 排除拖动区域：输入框不能拖，否则第一次点击触发拖动检测而不是输入 */
+  -webkit-app-region: no-drag;
 }
 
 #query::placeholder {
@@ -64,6 +68,8 @@ body {
   list-style: none;
   /* 分页模型：每页最多 9 条，列表不滚动、不截断，由内容自然撑开高度，
      window-size.js 测 #app 真实高度精确贴合（彻底摆脱 max-height 像素估算）。 */
+  /* 整个列表排除拖动区域，包括所有子元素，避免第一次点击被拖动检测吞掉 */
+  -webkit-app-region: no-drag;
 }
 
 /* 有结果：与输入区之间一条淡分隔线。无结果时该容器为空、高度为 0，不显示边框。 */
@@ -77,7 +83,7 @@ body {
   /* 左内边距与输入框文字对齐（输入框 padding-left 10px） */
   padding: 9px 10px;
   border-radius: 8px;
-  cursor: default;
+  cursor: pointer; /* 指针手型，明确可点击 */
   font-size: 14px;
   transition: background 0.08s ease;
   white-space: nowrap;
@@ -87,6 +93,8 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
+  /* 排除拖动区域：结果项不能拖，否则第一次点击触发拖动检测而不是 click */
+  -webkit-app-region: no-drag;
 }
 
 #results li .app-icon {
@@ -175,6 +183,9 @@ body.alt-active #results li .item-badge {
   font-size: 15px;
   font-weight: 500;
 }
+
+/* 右键菜单已迁移到独立窗口实现（contextmenu-popup.html），
+   不再需要 DOM 内联样式。 */
 
 /* ── 底部提示栏 ───────────────────────────────────────────────────────────────
    无结果时 .visible 移除 → display:none，不占窗口高度。 */

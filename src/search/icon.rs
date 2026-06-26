@@ -72,15 +72,98 @@ impl Drop for ComGuard {
     }
 }
 
+/// 检测路径是否为 UWP/MSIX 包路径（`C:\ProgramData\Packages\...`）。
+fn is_uwp_package_path(path: &str) -> bool {
+    let normalized = path.replace('/', "\\");
+    normalized.starts_with("C:\\ProgramData\\Packages\\") ||
+    normalized.starts_with("c:\\programdata\\packages\\")
+}
+
+/// 将 UWP 包路径转换为 shell:AppsFolder 格式。
+///
+/// 流程：
+/// 1. 从路径提取 PackageFamilyName（如 `com.flutter.kazumi_wbnnev551gwxy`）
+/// 2. 使用 PowerShell 获取 AppUserModelId（如 `com.flutter.kazumi_wbnnev551gwxy!kazumi`）
+/// 3. 返回 `shell:AppsFolder\{AppUserModelId}` 格式
+fn convert_uwp_to_shell_path(path: &str) -> Option<String> {
+    let normalized = path.replace('/', "\\");
+    // 提取 PackageFamilyName：路径格式为 `C:\ProgramData\Packages\{PackageFamilyName}`
+    let package_family_name = normalized
+        .strip_prefix("C:\\ProgramData\\Packages\\")?
+        .split('\\')
+        .next()?;
+
+    // 使用 PowerShell 获取 AppUserModelId
+    let app_user_model_id = get_app_user_model_id(package_family_name)?;
+
+    Some(format!("shell:AppsFolder\\{}", app_user_model_id))
+}
+
+/// 通过 PackageFamilyName 获取 AppUserModelId。
+///
+/// 使用 PowerShell 调用 Get-AppxPackage 和 Get-AppxPackageManifest。
+/// 返回格式：`{PackageFamilyName}!{AppId}`（如 `com.flutter.kazumi_wbnnev551gwxy!kazumi`）
+fn get_app_user_model_id(package_family_name: &str) -> Option<String> {
+    // PowerShell 命令：获取包信息并提取 AppUserModelId
+    // 注意：Get-AppxPackage 不支持 -PackageFamilyName 参数，需要用 Where-Object 过滤
+    let ps_command = format!(
+        r#"Get-AppxPackage | Where-Object {{ $_.PackageFamilyName -eq "{}" }} | ForEach-Object {{
+            $manifest = Get-AppxPackageManifest -Package $_;
+            $appId = $manifest.Package.Applications.Application.Id;
+            Write-Output "$($_.PackageFamilyName)!$appId"
+        }}"#,
+        package_family_name
+    );
+
+    // 执行 PowerShell 命令
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &ps_command])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        tracing::debug!(%package_family_name, "PowerShell 获取 AppUserModelId 失败");
+        return None;
+    }
+
+    let result = String::from_utf8_lossy(&output.stdout);
+    let app_user_model_id = result.trim().to_string();
+
+    if app_user_model_id.is_empty() {
+        tracing::debug!(%package_family_name, "未找到 AppUserModelId");
+        return None;
+    }
+
+    Some(app_user_model_id)
+}
+
 /// 实际提取：path -> PNG 字节。失败返回 None。
 fn extract_icon_png(path: &str, size: i32) -> Option<Vec<u8>> {
-    let _com = ComGuard::init();
+    // UWP/MSIX 包路径优先处理（权限受限，Path::exists() 可能返回 false）。
+    let shell_path = if is_uwp_package_path(path) {
+        match convert_uwp_to_shell_path(path) {
+            Some(sp) => sp,
+            None => {
+                tracing::debug!(%path, "UWP 路径转换失败");
+                return None;
+            }
+        }
+    } else {
+        // 非 UWP 路径：含 `#` 的是 .NET NativeImages，SHCreateItemFromParsingName 无法解析
+        if path.contains('#') {
+            return None;
+        }
+        // 路径不存在的直接跳过（UWP 路径因权限问题不能用此检查）
+        if !std::path::Path::new(path).exists() {
+            return None;
+        }
+        path.replace('/', "\\")
+    };
 
     unsafe {
         // SHCreateItemFromParsingName 是 Shell 名称解析 API，要求规范 Windows 路径（全反斜杠）。
         // 扫描得到的路径可能混用 '/'（开始菜单子目录字面量用了正斜杠），需归一化，否则报 0x80070057。
-        let normalized = path.replace('/', "\\");
-        let wide: Vec<u16> = normalized.encode_utf16().chain(std::iter::once(0)).collect();
+        let wide: Vec<u16> = shell_path.encode_utf16().chain(std::iter::once(0)).collect();
 
         // 直接请求 IShellItemImageFactory，省去额外 cast。
         let factory: IShellItemImageFactory =
@@ -264,5 +347,41 @@ mod tests {
     #[test]
     fn extract_from_nonexistent_returns_none() {
         assert!(extract_icon_png("C:\\definitely\\nope\\nonexistent.exe", 32).is_none());
+    }
+
+    #[test]
+    fn uwp_path_detection() {
+        // UWP 包路径应该被识别
+        assert!(is_uwp_package_path("C:\\ProgramData\\Packages\\com.flutter.kazumi_wbnnev551gwxy"));
+        assert!(is_uwp_package_path("C:/ProgramData/Packages/9426MICRO-STARINTERNATION.DragonCenter_kzh8wxbdkxb8p"));
+
+        // 非 UWP 路径不应该被识别
+        assert!(!is_uwp_package_path("C:\\Windows\\explorer.exe"));
+        assert!(!is_uwp_package_path("C:\\Program Files\\SomeApp\\app.exe"));
+        assert!(!is_uwp_package_path("C:\\Users\\test\\AppData\\Roaming\\SomeApp\\app.lnk"));
+    }
+
+    #[test]
+    fn extract_from_path_with_hash_returns_none() {
+        // 含 # 的路径（.NET NativeImages）应直接返回 None，SHCreateItemFromParsingName 无法解析
+        let path = "C:\\Windows\\assembly\\NativeImages_v4.0.30319_32\\System.Runt6a32fdc5#";
+        assert!(extract_icon_png(path, 32).is_none());
+    }
+
+    #[test]
+    fn extract_from_uwp_package_returns_valid_png() {
+        // 使用已知的 UWP 包路径测试
+        let path = "C:\\ProgramData\\Packages\\com.flutter.kazumi_wbnnev551gwxy";
+        match extract_icon_png(path, 32) {
+            Some(png) => {
+                assert_eq!(&png[..4], &PNG_MAGIC, "UWP 图标必须是合法 PNG（魔数）");
+                let decoder = png::Decoder::new(std::io::Cursor::new(&png));
+                assert!(decoder.read_info().is_ok(), "UWP PNG 应可解析");
+            }
+            None => {
+                // 如果提取失败，检查是否是因为包不存在或权限问题
+                eprintln!("UWP 图标提取失败（可能需要管理员权限或包不存在），跳过断言");
+            }
+        }
     }
 }

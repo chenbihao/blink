@@ -2,7 +2,7 @@
 //!
 //! 命令保持轻量——编排逻辑，不含业务实现。
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 /// 主窗口 ESC 调用：隐藏主窗口。
 #[tauri::command]
@@ -37,6 +37,8 @@ pub async fn search_apps(
         tracing::debug!(
             index = i,
             name = %item.name,
+            score = %item.score,
+            source = %item.source,
             lnk_path = %item.lnk_path,
             "搜索结果项"
         );
@@ -477,6 +479,70 @@ pub async fn update_engine_config(
     Ok(())
 }
 
+/// 获取 Context 层配置（设置页用）。优先读内存 state（最新），兜底读 DB。
+#[tauri::command]
+pub async fn get_context_config(
+    app: tauri::AppHandle,
+) -> Result<crate::config::ContextConfig, String> {
+    if let Some(mem) =
+        app.try_state::<std::sync::Arc<std::sync::RwLock<crate::config::ContextConfig>>>()
+    {
+        return Ok(mem.read().unwrap().clone());
+    }
+    let pool = app.state::<sqlx::SqlitePool>();
+    Ok(crate::config::get_context_config(&pool).await)
+}
+
+/// 更新 Context 层配置：写 DB + 更新内存 state（热生效，下次唤起即生效）。
+#[tauri::command]
+pub async fn update_context_config(
+    app: tauri::AppHandle,
+    config: crate::config::ContextConfig,
+) -> Result<(), String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::config::set_context_config(&pool, &config).await?;
+    if let Some(mem) =
+        app.try_state::<std::sync::Arc<std::sync::RwLock<crate::config::ContextConfig>>>()
+    {
+        *mem.write().unwrap() = config;
+        tracing::debug!("Context 内存配置已热更新");
+    }
+    Ok(())
+}
+
+/// 打开文件/快捷方式所在文件夹（explorer /select 定位选中）。
+/// §5 约束：lnk_path 不归一化，透传原路径字符串。
+#[tauri::command]
+pub async fn open_containing_folder(path: String) -> Result<(), String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("路径为空".into());
+    }
+    std::process::Command::new("explorer")
+        .arg(format!("/select,{path}"))
+        .spawn()
+        .map_err(|e| format!("打开文件夹失败: {e}"))?;
+    Ok(())
+}
+
+/// 重置某项的历史记录权重（右键菜单「重置该项记录」，0.5.3）。
+#[tauri::command]
+pub async fn reset_item_history(app: tauri::AppHandle, lnk_path: String) -> Result<(), String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::history::reset_weight(&pool, &lnk_path).await;
+    tracing::debug!(path = %lnk_path, "已重置该项历史权重");
+    Ok(())
+}
+
+/// 列出当前有可见窗口的运行中进程（设置页「敏感应用」选择器用）。
+/// spawn_blocking 隔离 Win32 枚举，避免阻塞 async runtime。
+#[tauri::command]
+pub async fn list_running_processes() -> Vec<crate::context::RunningProcess> {
+    tokio::task::spawn_blocking(crate::context::list_running_processes)
+        .await
+        .unwrap_or_default()
+}
+
 /// 录制快捷键（阻塞，直到用户按下组合键或超时）。
 #[tauri::command]
 pub async fn record_hotkey() -> Result<serde_json::Value, String> {
@@ -502,4 +568,72 @@ pub async fn record_hotkey() -> Result<serde_json::Value, String> {
             Err("录制超时或取消".to_string())
         }
     }
+}
+
+// ── 右键菜单独立窗口（0.5.3+） ───────────────────────────────────────────────
+
+/// 显示右键菜单独立窗口（突破主窗口边界裁剪）。
+/// x, y 是**屏幕坐标**（clientX + 窗口位置偏移）。
+/// items 是菜单数据 JSON 字符串（因为跨窗口传复杂类型麻烦，走 URL 编码）。
+#[tauri::command]
+pub async fn show_context_menu(
+    app: tauri::AppHandle,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    items: String,
+) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    // 先关闭已存在的菜单窗口（确保同一时间只有一个）
+    if let Some(existing) = app.get_webview_window("context-menu") {
+        let _ = existing.close();
+    }
+
+    // 窗口定位：先显示在鼠标位置；popup 页面加载后自己 resize 到精确尺寸
+    let encoded_items = urlencoding::encode(&items).to_string();
+    tracing::debug!(x, y, width, height, url = %format!("contextmenu-popup.html?items={encoded_items}"), "创建右键菜单窗口");
+    let win = WebviewWindowBuilder::new(
+        &app,
+        "context-menu",
+        WebviewUrl::App(format!("contextmenu-popup.html?items={encoded_items}").into()),
+    )
+    .title("")
+    .inner_size(width, height)
+    .position(x, y)
+    .decorations(false)
+    .transparent(false) // 不透明窗口渲染更快，用背景色匹配即可
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .visible(true)
+    .focused(false) // 不要抢焦点，避免触发主窗口看门狗
+    .resizable(false)
+    .build()
+    .map_err(|e| format!("创建右键菜单窗口失败: {e}"))?;
+
+    tracing::trace!(x, y, width, height, items_len = items.len(), "右键菜单窗口已创建");
+    Ok(())
+}
+
+/// 隐藏右键菜单窗口。
+#[tauri::command]
+pub async fn hide_context_menu(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("context-menu") {
+        let _ = win.close();
+        tracing::debug!("hide_context_menu: 已关闭右键菜单窗口");
+    }
+    Ok(())
+}
+
+/// Popup 窗口菜单项被点击 → 通知主窗口执行动作。
+/// action_id 是菜单项的唯一标识（JSON 数组索引）。
+#[tauri::command]
+pub async fn context_menu_action(app: tauri::AppHandle, action_id: u32) -> Result<(), String> {
+    // 发送事件给主窗口
+    app.emit("blink://context-menu-action", action_id)
+        .map_err(|e| e.to_string())?;
+    // 点击后自动关闭菜单
+    hide_context_menu(app).await?;
+    Ok(())
 }

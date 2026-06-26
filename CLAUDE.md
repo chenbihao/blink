@@ -62,7 +62,7 @@ Roadmap 内容了解即可，**不要提前实现**。
 
 - **热键不吞键**：hook 回调全程 `CallNextHookEx` 放行，右 Alt 仍可作系统修饰键。tap/hold 靠按压时长（≤tap_threshold）+ 期间是否出现其他键区分。**架构级约束**——做得差的产品在 keydown 就吞掉右 Alt。
 - **看门狗失焦检测**：不依赖 `WM_ACTIVATE`，每 150ms 轮询 `GetForegroundWindow()`。因为某些窗口（如 IDEA 终端子进程）不发失焦通知。invoke 后有 grace period 覆盖焦点抖动。
-- **搜索双路匹配**：同时对原始名和拼音首字母做 nucleo fuzzy 取最高分；历史 `ln(hit+1)*100` 加权。
+- **搜索双路匹配**：同时对原始名和拼音首字母做 nucleo fuzzy 取最高分；历史 `ln(hit+1)*0.3` 加权（上限 0.8，由 `scorer.rs` 统一管理）。
 - **图标懒加载**：图标提取**不进搜索热路径**，由自定义协议 `blink-icon` 按需提供（见 §6）。
 - **lnk_path 是 history 主键**：扫描产生的路径字符串不可随意归一化/改写，否则历史权重 key 失配。
 

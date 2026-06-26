@@ -94,6 +94,11 @@ pub(crate) mod engine;
 #[allow(unused_imports)] // Lane/QueryContext 等供引擎与 service 内部用
 pub use engine::{Lane, QueryContext, SearchAction, SearchEngine, SearchItem};
 
+// 统一打分/加权模块（0.6 第一阶段重构）
+pub(crate) mod scorer;
+#[allow(unused_imports)]
+pub use scorer::{apply_history, boost_priority, BuiltinMatch, clamp_plugin_score, history_boost, normalize_top_relative, placeholder_score};
+
 // 具体引擎
 mod builtin_engine;
 mod calc_engine;
@@ -133,30 +138,30 @@ pub fn build_engines(file_config: Option<crate::config::FileSearchConfig>) -> Ve
 
 // 通用逻辑
 
-use std::collections::HashMap;
-
 use nucleo::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo::{Config, Matcher, Utf32Str};
 
 // 文本归一化原语抽至 `crate::text`(0.4 §4.4),应用搜索与意图共用。
 pub use crate::text::pinyin_initials as to_pinyin_initials;
 
-/// fuzzy 打分核心：返回 `(加权后分数, 条目)`，按分降序、取 top-N。
+/// fuzzy 打分核心：返回 `(nucleo raw 分, 条目)`，按分降序、取 top-N。
 ///
-/// 分数 = nucleo（原名/拼音取最高）+ 历史加权 `ln(hit+1)*100`。raw 分数供引擎做
-/// top-relative 归一化（见 0.2 设计 §2.3）。空 query 返回前 limit 条（分数置 0）。
+/// 只负责 nucleo fuzzy 匹配，**不含历史加权**——历史统一在归一化后由
+/// `scorer::apply_history` 处理（与 Builtin/Calc/File/Plugin 共用同一公式）。
+/// raw 分数供引擎做 top-relative 归一化。空 query 返回前 limit 条（分数置 0）。
 /// 由 `StartMenuEngine` 调用(SearchService 接管搜索后,这是唯一打分入口)。
 pub fn fuzzy_score_entries(
     query: &str,
     entries: &[AppEntry],
-    history: &HashMap<String, i64>,
     limit: usize,
 ) -> Vec<(u32, AppEntry)> {
     if query.is_empty() {
         return entries.iter().take(limit).map(|e| (0, e.clone())).collect();
     }
+    // 查询转小写：确保大写 "WX" 能匹配小写 "wx" 的拼音首字母
+    let query_lower = query.to_ascii_lowercase();
     let mut matcher = Matcher::new(Config::DEFAULT);
-    let pattern = Pattern::new(query, CaseMatching::Smart, Normalization::Smart, AtomKind::Fuzzy);
+    let pattern = Pattern::new(&query_lower, CaseMatching::Smart, Normalization::Smart, AtomKind::Fuzzy);
     let mut buf = Vec::new();
     let mut scored: Vec<(u32, &AppEntry)> = entries
         .iter()
@@ -175,11 +180,7 @@ pub fn fuzzy_score_entries(
                 (None, Some(b)) => Some(b),
                 (None, None) => None,
             };
-            best.map(|s| {
-                let hit = history.get(&e.lnk_path).copied().unwrap_or(0) as f64;
-                let bonus = (hit + 1.0).ln() * 100.0;
-                (s + bonus as u32, e)
-            })
+            best.map(|s| (s, e))
         })
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0));
@@ -202,6 +203,7 @@ mod tests {
             is_calc: false,
             score: 0.0,
             is_placeholder: false,
+            source: String::new(),
             description: Some(lnk.into()),
             action: Action {
                 kind: ActionKind::Open,
@@ -220,8 +222,7 @@ mod tests {
     #[test]
     fn empty_query_returns_prefix_with_zero_score() {
         let entries = vec![entry("Alpha", "a"), entry("Beta", "b"), entry("Gamma", "c")];
-        let h = HashMap::new();
-        let r = fuzzy_score_entries("", &entries, &h, 2);
+        let r = fuzzy_score_entries("", &entries, 2);
         assert_eq!(r.len(), 2);
         assert!(r.iter().all(|(s, _)| *s == 0));
         assert_eq!(r[0].1.name, "Alpha");
@@ -230,18 +231,24 @@ mod tests {
     #[test]
     fn matches_by_pinyin_initials() {
         let entries = vec![entry("微信", "wechat.lnk"), entry("Word", "word.lnk")];
-        let h = HashMap::new();
-        let r = fuzzy_score_entries("wx", &entries, &h, 10);
+        let r = fuzzy_score_entries("wx", &entries, 10);
         assert!(r.iter().any(|(_, e)| e.name == "微信"));
     }
 
     #[test]
-    fn history_weight_boosts_score() {
-        let entries = vec![entry("Code", "code.lnk")];
-        let mut h = HashMap::new();
-        let base = fuzzy_score_entries("code", &entries, &h, 1)[0].0;
-        h.insert("code.lnk".to_string(), 100);
-        let boosted = fuzzy_score_entries("code", &entries, &h, 1)[0].0;
-        assert!(boosted > base, "history hits should raise score");
+    fn pinyin_initials_case_insensitive() {
+        let entries = vec![entry("微信", "wechat.lnk")];
+        // 小写匹配
+        let r_lower = fuzzy_score_entries("wx", &entries, 10);
+        assert!(!r_lower.is_empty());
+        // 大写匹配
+        let r_upper = fuzzy_score_entries("WX", &entries, 10);
+        assert!(!r_upper.is_empty());
+        // 混合大小写也匹配
+        let r_mixed = fuzzy_score_entries("Wx", &entries, 10);
+        assert!(!r_mixed.is_empty());
+        // 分数应该相同
+        assert_eq!(r_lower[0].0, r_upper[0].0);
+        assert_eq!(r_lower[0].0, r_mixed[0].0);
     }
 }
