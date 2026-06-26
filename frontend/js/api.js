@@ -30,7 +30,17 @@ export function openContainingFolder(path) {
   return invoke("open_containing_folder", { path });
 }
 
+/** 解析 .lnk 快捷方式目标，用 explorer /select 定位到目标文件。 */
+export function openLnkTarget(lnkPath) {
+  return invoke("open_lnk_target", { lnkPath });
+}
+
 /** 重置某项的历史记录权重（右键菜单用）。 */
 export function resetItemHistory(lnkPath) {
   return invoke("reset_item_history", { lnkPath });
+}
+
+/** 将文本写入系统剪贴板（后端 Windows API，独立窗口中也可靠）。 */
+export function copyToClipboard(text) {
+  return invoke("copy_to_clipboard", { text });
 }

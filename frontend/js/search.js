@@ -41,6 +41,11 @@ export function reset() {
   isComposing = false;
 }
 
+/** 用当前输入重新触发一次搜索（右键菜单重置记录后刷新结果用）。 */
+export function retrigger() {
+  onInput();
+}
+
 function onInput() {
   clearTimeout(timer);
   const q = queryEl.value.trim();

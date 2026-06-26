@@ -78,6 +78,10 @@ fn default_file_search_depth() -> u32 {
     3
 }
 
+fn default_file_search_max_results() -> u32 {
+    20
+}
+
 /// 文件搜索配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileSearchConfig {
@@ -90,6 +94,9 @@ pub struct FileSearchConfig {
     /// 本地扫描深度
     #[serde(default = "default_file_search_depth")]
     pub local_scan_depth: u32,
+    /// 每次检索最大结果数
+    #[serde(default = "default_file_search_max_results")]
+    pub max_results: u32,
 }
 
 impl Default for FileSearchConfig {
@@ -98,6 +105,7 @@ impl Default for FileSearchConfig {
             enabled: true,
             everything_port: 80,
             local_scan_depth: 3,
+            max_results: 20,
         }
     }
 }

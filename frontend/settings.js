@@ -101,14 +101,17 @@ async function loadEngineConfig() {
     const enabled = fileSearch.enabled !== false;
     const port = fileSearch.everything_port || 80;
     const depth = fileSearch.local_scan_depth || 3;
+    const maxResults = fileSearch.max_results || 20;
 
     const enabledEl = document.getElementById("file-search-enabled");
     const portEl = document.getElementById("everything-port");
     const depthEl = document.getElementById("local-scan-depth");
+    const maxResultsEl = document.getElementById("everything-max-results");
 
     if (enabledEl) enabledEl.checked = enabled;
     if (portEl) portEl.value = port;
     if (depthEl) depthEl.value = depth;
+    if (maxResultsEl) maxResultsEl.value = maxResults;
 
     // 页面加载后自动探测一次
     setTimeout(probeEverythingStatus, 500);
@@ -140,65 +143,37 @@ async function loadNetworkConfig() {
   try {
     const cfg = await invoke("get_engine_config", { engineId: "_global_proxy" });
     if (cfg) {
-      proxyConfig = {
-        http: cfg.http || "",
-        https: cfg.https || "",
-      };
+      proxyConfig = { http: cfg.http || "", https: cfg.https || "" };
     }
   } catch (e) {
     console.error("load proxy config failed:", e);
   }
 
-  container.innerHTML = `
-    <div class="extension-card">
-      <div class="extension-header">
-        <div class="extension-icon">🌐</div>
-        <div class="extension-info">
-          <h3>全局网络代理</h3>
-          <p class="extension-desc">本体、网络插件共用，修改后需重启 Blink 生效</p>
-        </div>
-      </div>
-      <div class="extension-body">
-        <div class="plugin-config-section" style="padding-top: 0;">
-          <div class="plugin-field-row">
-            <div class="field-head">
-              <span class="field-title">HTTP 代理</span>
-              <input type="text" class="plugin-field" data-key="http_proxy" value="${escapeHtml(proxyConfig.http)}" placeholder="http://127.0.0.1:7890" />
-            </div>
-          </div>
-          <div class="plugin-field-row">
-            <div class="field-head">
-              <span class="field-title">HTTPS 代理</span>
-              <input type="text" class="plugin-field" data-key="https_proxy" value="${escapeHtml(proxyConfig.https)}" placeholder="http://127.0.0.1:7890" />
-            </div>
-          </div>
-          <div class="plugin-save-row">
-            <button class="btn-small network-proxy-save">保存配置</button>
-            <span class="plugin-save-msg"></span>
-          </div>
-        </div>
-      </div>
-    </div>`;
+  const PROXY_SCHEMA = [
+    textField("http_proxy", "HTTP 代理", { placeholder: "http://127.0.0.1:7890" }),
+    textField("https_proxy", "HTTPS 代理", { placeholder: "http://127.0.0.1:7890" }),
+  ];
+
+  container.innerHTML = renderExtensionCard({
+    icon: "🌐",
+    title: "全局网络代理",
+    desc: "本体、网络插件共用，修改后需重启 Blink 生效",
+    body: renderConfigSection("代理配置", PROXY_SCHEMA, proxyConfig, { saveLabel: "保存配置" }),
+  });
 
   // 绑定保存事件
-  const btn = document.querySelector(".network-proxy-save");
+  const btn = container.querySelector(".plugin-save");
+  const msg = container.querySelector(".plugin-save-msg");
   if (!btn) return;
   btn.addEventListener("click", async () => {
-    const http = document.querySelector('.plugin-field[data-key="http_proxy"]')?.value || "";
-    const https = document.querySelector('.plugin-field[data-key="https_proxy"]')?.value || "";
-    const msg = btn.parentElement.querySelector(".plugin-save-msg");
+    const http = container.querySelector('.plugin-field[data-key="http_proxy"]')?.value || "";
+    const https = container.querySelector('.plugin-field[data-key="https_proxy"]')?.value || "";
     try {
       await invoke("update_global_proxy", { http, https });
-      if (msg) {
-        msg.textContent = "已保存，下次查询自动生效";
-        msg.style.color = "#a6e3a1";
-      }
+      if (msg) { msg.textContent = "已保存，下次查询自动生效"; msg.style.color = "#a6e3a1"; }
     } catch (e) {
       console.error("save proxy failed:", e);
-      if (msg) {
-        msg.textContent = "保存失败";
-        msg.style.color = "#f38ba8";
-      }
+      if (msg) { msg.textContent = "保存失败"; msg.style.color = "#f38ba8"; }
     }
   });
 }
@@ -217,39 +192,27 @@ async function loadContextConfig() {
   }
 
   // ── 渲染卡片 ──
-  container.innerHTML = `
-    <div class="extension-card">
-      <div class="extension-header">
-        <div class="extension-icon">🌍</div>
-        <div class="extension-info">
-          <h3>环境感知</h3>
-          <p class="extension-desc">唤起时自动采集前台应用、剪贴板等上下文，用于搜索增强</p>
-        </div>
-        <label class="switch">
-          <input type="checkbox" class="context-enabled" ${cfg.enabled ? "checked" : ""} />
-          <span class="slider"></span>
-        </label>
-      </div>
-      <div class="extension-body">
-        <div class="plugin-config-section" style="padding-top: 0;">
-          <div class="plugin-field-row">
-            <div class="field-head">
-              <span class="field-title">采集剪贴板文本</span>
-              <label class="switch"><input type="checkbox" class="context-clipboard" ${cfg.clipboard_enabled ? "checked" : ""} /><span class="slider"></span></label>
-            </div>
+  const CLIPBOARD_FIELD = booleanField("clipboard_enabled", "采集剪贴板文本");
+  const enableSwitch = `<label class="switch"><input type="checkbox" class="context-enabled" ${cfg.enabled ? "checked" : ""} /><span class="slider"></span></label>`;
+
+  container.innerHTML = renderExtensionCard({
+    icon: "🌍",
+    title: "环境感知",
+    desc: "唤起时自动采集前台应用、剪贴板等上下文，用于搜索增强",
+    headerRight: enableSwitch,
+    body: `<div class="plugin-config-section" style="padding-top: 0;">
+        ${renderSettingField(CLIPBOARD_FIELD, cfg.clipboard_enabled)}
+        <div class="plugin-field-row">
+          <div class="field-head">
+            <span class="field-title">敏感应用（前台时不采集上下文）</span>
+            <span class="hint">如密码管理器、银行软件等，保护隐私</span>
           </div>
-          <div class="plugin-field-row">
-            <div class="field-head">
-              <span class="field-title">敏感应用（前台时不采集上下文）</span>
-              <span class="hint">如密码管理器、银行软件等，保护隐私</span>
-            </div>
-            <div class="context-sensitive-list"></div>
-            <button class="btn-small context-add-btn" style="margin-top:8px;">＋ 添加应用</button>
-          </div>
-          <div class="context-save-msg"></div>
+          <div class="context-sensitive-list"></div>
+          <button class="btn-small context-add-btn" style="margin-top:8px;">＋ 添加应用</button>
         </div>
-      </div>
-    </div>`;
+        <div class="context-save-msg"></div>
+      </div>`,
+  });
 
   // 本地状态
   let sensitiveApps = [...(cfg.sensitive_apps || [])];
@@ -287,7 +250,7 @@ async function loadContextConfig() {
   // ── 自动保存 ──
   async function save() {
     const enabled = container.querySelector(".context-enabled").checked;
-    const clipboard_enabled = container.querySelector(".context-clipboard").checked;
+    const clipboard_enabled = container.querySelector('.plugin-field[data-key="clipboard_enabled"]')?.checked ?? true;
     const msg = container.querySelector(".context-save-msg");
     try {
       await invoke("update_context_config", {
@@ -309,7 +272,7 @@ async function loadContextConfig() {
 
   // 总开关 + 剪贴板开关 → change 自动保存
   container.querySelector(".context-enabled")?.addEventListener("change", save);
-  container.querySelector(".context-clipboard")?.addEventListener("change", save);
+  container.querySelector('.plugin-field[data-key="clipboard_enabled"]')?.addEventListener("change", save);
 
   // ── 添加应用弹窗 ──
   container.querySelector(".context-add-btn")?.addEventListener("click", async () => {
@@ -464,44 +427,27 @@ function renderPluginCard(plugin) {
   const settings = plugin.settings || {};
   const hasFields = schema.length > 0;
 
-  const fieldsHtml = hasFields
-    ? schema.map((f) => renderSettingField(f, settings[f.key])).join("")
-    : "";
-
-  // 配置区:有字段时分组(标题+字段+保存);否则提示无可配置项
   const configSection = hasFields
-    ? `<div class="plugin-config-section">
-         <div class="plugin-section-title">配置</div>
-         ${fieldsHtml}
-         <div class="plugin-save-row">
-           <button class="btn-small plugin-save">保存配置</button>
-           <span class="plugin-save-msg"></span>
-         </div>
-       </div>`
+    ? renderConfigSection("配置", schema, settings, { saveLabel: "保存配置" })
     : '<div class="plugin-no-config">（该插件无可配置项）</div>';
 
-  return `
-    <div class="extension-card ${enabled ? "" : "is-disabled"}" data-plugin-id="${plugin.id}">
-      <div class="extension-header">
-        <div class="extension-icon">${icon}</div>
-        <div class="extension-info">
-          <h3>${escapeHtml(plugin.name || plugin.id)}<span class="version-badge">v${escapeHtml(plugin.version || "1.0.0")}</span></h3>
-          <p class="extension-desc">${escapeHtml(triggers)}</p>
-        </div>
-        <div class="plugin-master-toggle">
-          <span class="toggle-label">${enabled ? "已启用" : "已禁用"}</span>
-          <label class="switch" title="启用/禁用插件">
-            <input type="checkbox" class="plugin-enabled" ${enabled ? "checked" : ""} />
-            <span class="slider"></span>
-          </label>
-        </div>
-      </div>
-      <div class="extension-body">
-        <div class="plugin-desc-line">${escapeHtml(desc)}</div>
-        ${configSection}
-      </div>
-    </div>
-  `;
+  const headerRight = `<div class="plugin-master-toggle">
+      <span class="toggle-label">${enabled ? "已启用" : "已禁用"}</span>
+      <label class="switch" title="启用/禁用插件">
+        <input type="checkbox" class="plugin-enabled" ${enabled ? "checked" : ""} />
+        <span class="slider"></span>
+      </label>
+    </div>`;
+
+  return renderExtensionCard({
+    icon,
+    title: `${escapeHtml(plugin.name || plugin.id)}<span class="version-badge">v${escapeHtml(plugin.version || "1.0.0")}</span>`,
+    desc: escapeHtml(triggers),
+    headerRight,
+    attrs: `data-plugin-id="${plugin.id}"`,
+    classes: enabled ? "" : "is-disabled",
+    body: `<div class="plugin-desc-line">${escapeHtml(desc)}</div>${configSection}`,
+  });
 }
 
 // 渲染单个配置项控件（boolean→checkbox 方框, enum→下拉, number/string→输入框）
@@ -538,6 +484,70 @@ function renderSettingField(field, value) {
       ${desc}
     </div>
   `;
+}
+
+// ── 配置区公用渲染函数 ──────────────────────────────────────────────────────
+
+/** 快捷构建文本字段 schema */
+function textField(key, title, opts = {}) {
+  return { type: "string", key, title, ...opts };
+}
+
+/** 快捷构建布尔字段 schema */
+function booleanField(key, title, opts = {}) {
+  return { type: "boolean", key, title, ...opts };
+}
+
+/**
+ * 渲染配置区（section 容器 + 标题 + 字段列表 + 可选保存行）
+ * @param {string} title - 分组标题
+ * @param {Array} schema - 字段 schema 数组（每项需 type/key/title，可选 description/default/options/min/max）
+ * @param {Object} values - 当前值 { key: value }
+ * @param {Object} [opts]
+ * @param {string} [opts.saveLabel] - 保存按钮文字，省略则不渲染保存行
+ * @returns {string} HTML
+ */
+function renderConfigSection(title, schema, values, opts = {}) {
+  const fieldsHtml = schema.map((f) => renderSettingField(f, values[f.key])).join("");
+  const saveRow = opts.saveLabel
+    ? `<div class="plugin-save-row">
+         <button class="btn-small plugin-save">${escapeHtml(opts.saveLabel)}</button>
+         <span class="plugin-save-msg"></span>
+       </div>`
+    : "";
+  return `<div class="plugin-config-section">
+     <div class="plugin-section-title">${escapeHtml(title)}</div>
+     ${fieldsHtml}
+     ${saveRow}
+   </div>`;
+}
+
+/**
+ * 渲染扩展卡片壳（icon + title + desc + 可选 headerRight + body）
+ * @param {Object} card
+ * @param {string} card.icon - emoji 图标
+ * @param {string} card.title - 标题
+ * @param {string} card.desc - 描述
+ * @param {string} [card.headerRight] - 头部右侧 HTML（如 switch），默认空
+ * @param {string} [card.attrs] - 卡片根元素额外属性（如 data-plugin-id），默认空
+ * @param {string} [card.classes] - 卡片根元素额外 class，默认空
+ * @param {string} card.body - body 区 HTML
+ * @returns {string} HTML
+ */
+function renderExtensionCard({ icon, title, desc, headerRight = "", attrs = "", classes = "", body }) {
+  return `<div class="extension-card ${classes}" ${attrs}>
+      <div class="extension-header">
+        <div class="extension-icon">${icon}</div>
+        <div class="extension-info">
+          <h3>${title}</h3>
+          <p class="extension-desc">${desc}</p>
+        </div>
+        ${headerRight}
+      </div>
+      <div class="extension-body">
+        ${body}
+      </div>
+    </div>`;
 }
 
 // 绑定单个插件卡片的事件（enabled 开关 + 保存 settings）
@@ -849,12 +859,14 @@ document.getElementById("save-file-search")?.addEventListener("click", async () 
   // 本地扫描深度配置暂隐藏，使用默认值 3
   const depthEl = document.getElementById("local-scan-depth");
   const depth = depthEl ? parseInt(depthEl.value, 10) : 3;
+  const maxResults = parseInt(document.getElementById("everything-max-results").value, 10) || 20;
 
   try {
     await invoke("update_file_search", {
       enabled,
       everythingPort: port,
       localScanDepth: depth,
+      maxResults,
     });
     alert("文件搜索配置已保存");
     // 重新探测

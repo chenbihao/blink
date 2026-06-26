@@ -375,12 +375,14 @@ pub async fn update_file_search(
     enabled: bool,
     everything_port: u16,
     local_scan_depth: u32,
+    max_results: u32,
 ) -> Result<(), String> {
     let pool = app.state::<sqlx::SqlitePool>();
     let file_search = crate::config::FileSearchConfig {
         enabled,
         everything_port,
         local_scan_depth,
+        max_results,
     };
     crate::config::update_file_search(&pool, file_search).await
 }
@@ -512,17 +514,160 @@ pub async fn update_context_config(
 
 /// 打开文件/快捷方式所在文件夹（explorer /select 定位选中）。
 /// §5 约束：lnk_path 不归一化，透传原路径字符串。
+/// 但 explorer /select 对正斜杠路径解析异常（会打开"文档"等默认位置），需归一化为反斜杠。
 #[tauri::command]
 pub async fn open_containing_folder(path: String) -> Result<(), String> {
     let path = path.trim();
     if path.is_empty() {
         return Err("路径为空".into());
     }
-    std::process::Command::new("explorer")
-        .arg(format!("/select,{path}"))
-        .spawn()
-        .map_err(|e| format!("打开文件夹失败: {e}"))?;
+    // explorer /select 不认正斜杠，统一为反斜杠
+    let normalized = path.replace('/', "\\");
+    tracing::info!(original = %path, normalized = %normalized, "open_containing_folder");
+
+    // 用 ShellExecuteW 直接调 explorer——绕过 std::process::Command 的参数拼接，
+    // 避免 CreateProcessW 对含空格/特殊字符路径的转义问题。
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::{PCWSTR, w};
+
+    let arg = format!("/select,{normalized}");
+    let arg_wide: Vec<u16> = arg.encode_utf16().chain(std::iter::once(0)).collect();
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            w!("explorer"),
+            PCWSTR(arg_wide.as_ptr()),
+            None,
+            SW_SHOWNORMAL,
+        )
+    };
+    // ShellExecuteW 返回值 > 32 表示成功
+    if result.0 as i32 <= 32 {
+        return Err(format!("ShellExecuteW 失败，返回值: {}", result.0 as i32));
+    }
     Ok(())
+}
+
+/// 解析 .lnk 快捷方式目标，用 explorer /select 定位到目标文件。
+/// 非文件路径的快捷方式（URL、UWP 等）会返回错误。
+#[tauri::command]
+pub async fn open_lnk_target(lnk_path: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+        use windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW;
+        use windows::Win32::UI::Shell::{IShellLinkW, ShellExecuteW};
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        use windows::core::{Interface, GUID, PCWSTR, w};
+
+        // CLSID_ShellLink（00021401-0000-0000-C000-000000000046）
+        const CLSID_SHELLLINK: GUID = GUID::from_u128(0x00021401_0000_0000_C000_000000000046);
+
+        // COM 初始化（与 icon.rs 同模式：APARTMENTTHREADED，已初始化则跳过）
+        let com_hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        let should_uninit = com_hr.is_ok();
+        struct ComUninit(bool);
+        impl Drop for ComUninit {
+            fn drop(&mut self) { if self.0 { unsafe { CoUninitialize() }; } }
+        }
+        let _com = ComUninit(should_uninit);
+
+        unsafe {
+            // 创建 ShellLink COM 对象
+            let link: IShellLinkW = CoCreateInstance(
+                &CLSID_SHELLLINK,
+                None,
+                CLSCTX_INPROC_SERVER,
+            ).map_err(|e| format!("创建 ShellLink 失败: {e}"))?;
+
+            // 加载 .lnk 文件
+            let persist: IPersistFile = link.cast()
+                .map_err(|e| format!("获取 IPersistFile 失败: {e}"))?;
+            let lnk_wide: Vec<u16> = lnk_path.encode_utf16().chain(std::iter::once(0)).collect();
+            persist.Load(PCWSTR(lnk_wide.as_ptr()), windows::Win32::System::Com::STGM_READ)
+                .map_err(|e| format!("加载 .lnk 失败: {e}"))?;
+
+            // 解析目标路径
+            let mut buf = [0u16; 1024];
+            let mut find_data: WIN32_FIND_DATAW = std::mem::zeroed();
+            link.GetPath(&mut buf, &mut find_data as *mut _, 0)
+                .map_err(|e| format!("获取目标路径失败: {e}"))?;
+
+            let target = PCWSTR(buf.as_ptr()).to_string()
+                .map_err(|e| format!("路径转换失败: {e}"))?;
+            let target = target.trim();
+
+            if target.is_empty() {
+                return Err("快捷方式未指向文件路径（可能是 URL 或 UWP 应用）".into());
+            }
+
+            // 用 explorer /select 定位到目标文件
+            let normalized = target.replace('/', "\\");
+            let arg = format!("/select,{normalized}");
+            let arg_wide: Vec<u16> = arg.encode_utf16().chain(std::iter::once(0)).collect();
+            let result = ShellExecuteW(
+                None,
+                w!("open"),
+                w!("explorer"),
+                PCWSTR(arg_wide.as_ptr()),
+                None,
+                SW_SHOWNORMAL,
+            );
+            if result.0 as i32 <= 32 {
+                return Err(format!("ShellExecuteW 失败，返回值: {}", result.0 as i32));
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking 失败: {e}"))?
+}
+
+/// 将文本写入系统剪贴板（Windows API）。
+/// 右键菜单独立 Popup 窗口中 navigator.clipboard 不可靠，改走后端。
+#[tauri::command]
+pub async fn copy_to_clipboard(text: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+        use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+
+        // RAII guard: 确保 CloseClipboard 在所有路径上被调用
+        struct ClipboardGuard;
+        impl Drop for ClipboardGuard {
+            fn drop(&mut self) { unsafe { let _ = CloseClipboard(); } }
+        }
+
+        unsafe {
+            if OpenClipboard(Some(HWND(std::ptr::null_mut()))).is_err() {
+                return Err("打开剪贴板失败".into());
+            }
+            let _guard = ClipboardGuard;
+
+            let _ = EmptyClipboard();
+
+            // 分配全局内存（+1 for null terminator）
+            let wchars: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+            let byte_size = wchars.len() * 2;
+            let hmem = GlobalAlloc(GMEM_MOVEABLE, byte_size)
+                .map_err(|e| format!("GlobalAlloc 失败: {e}"))?;
+            let ptr = GlobalLock(hmem) as *mut u16;
+            if ptr.is_null() {
+                return Err("GlobalLock 失败".into());
+            }
+            std::ptr::copy_nonoverlapping(wchars.as_ptr(), ptr, wchars.len());
+            let _ = GlobalUnlock(hmem);
+
+            // CF_UNICODETEXT = 13; SetClipboardData 要求 HANDLE 而非 HGLOBAL
+            if SetClipboardData(13, Some(std::mem::transmute(hmem))).is_err() {
+                return Err("SetClipboardData 失败".into());
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking 失败: {e}"))?
 }
 
 /// 重置某项的历史记录权重（右键菜单「重置该项记录」，0.5.3）。

@@ -9,13 +9,13 @@ pub fn scan_start_menu() -> Vec<AppEntry> {
     let mut entries = Vec::new();
     if let Ok(appdata) = std::env::var("APPDATA") {
         scan_dir(
-            &PathBuf::from(appdata).join("Microsoft/Windows/Start Menu/Programs"),
+            &PathBuf::from(appdata).join("Microsoft\\Windows\\Start Menu\\Programs"),
             &mut entries,
         );
     }
     if let Ok(program_data) = std::env::var("ProgramData") {
         scan_dir(
-            &PathBuf::from(program_data).join("Microsoft/Windows/Start Menu/Programs"),
+            &PathBuf::from(program_data).join("Microsoft\\Windows\\Start Menu\\Programs"),
             &mut entries,
         );
     }
@@ -68,10 +68,10 @@ pub fn launch(lnk_path: &str) -> Result<(), String> {
 pub fn roots_modified() -> Vec<Option<std::time::SystemTime>> {
     let mut roots = Vec::new();
     if let Ok(appdata) = std::env::var("APPDATA") {
-        roots.push(PathBuf::from(appdata).join("Microsoft/Windows/Start Menu/Programs"));
+        roots.push(PathBuf::from(appdata).join("Microsoft\\Windows\\Start Menu\\Programs"));
     }
     if let Ok(program_data) = std::env::var("ProgramData") {
-        roots.push(PathBuf::from(program_data).join("Microsoft/Windows/Start Menu/Programs"));
+        roots.push(PathBuf::from(program_data).join("Microsoft\\Windows\\Start Menu\\Programs"));
     }
     roots
         .into_iter()

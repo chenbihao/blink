@@ -511,7 +511,7 @@ input:checked + .slider:before {
   gap: 16px;
 }
 .plugin-field-row .field-title {
-  width: 130px;
+  width: 220px;
   flex-shrink: 0;
   font-size: 13px;
   color: #cdd6f4;

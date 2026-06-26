@@ -89,7 +89,7 @@ impl FileEngine {
     }
 
     /// 搜索 Everything HTTP API。
-    async fn search_everything(&self, port: u16, query: &str) -> Vec<SearchItem> {
+    async fn search_everything(&self, port: u16, query: &str, max_results: u32) -> Vec<SearchItem> {
         // 先探测（首次搜索时）
         {
             let mut status = self.everything_status.write().await;
@@ -116,7 +116,7 @@ impl FileEngine {
         // - size=1: 包含文件大小
         // - date_modified=1: 包含修改时间
         let url = format!(
-            "http://localhost:{port}/?search={}&json=1&count=20&path_column=1&size=1&date_modified=1",
+            "http://localhost:{port}/?search={}&json=1&count={max_results}&path_column=1&size=1&date_modified=1",
             urlencoding::encode(query)
         );
 
@@ -264,8 +264,8 @@ impl SearchEngine for FileEngine {
             return Vec::new();
         }
 
-        tracing::debug!("FileEngine: 搜索 Everything，query={q}, port={}", cfg.everything_port);
-        let results = self.search_everything(cfg.everything_port, q).await;
+        tracing::debug!("FileEngine: 搜索 Everything，query={q}, port={}, max_results={}", cfg.everything_port, cfg.max_results);
+        let results = self.search_everything(cfg.everything_port, q, cfg.max_results).await;
         tracing::debug!("FileEngine: 返回 {} 个结果", results.len());
         results
     }

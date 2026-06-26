@@ -198,6 +198,7 @@ fn main() {
                 enabled: app_config.file_search.enabled,
                 everything_port: app_config.file_search.everything_port,
                 local_scan_depth: app_config.file_search.local_scan_depth,
+                max_results: app_config.file_search.max_results,
             };
 
             // 构造 SearchService(多路引擎 + 意图路由)。command 层经 app.state 取用。
@@ -265,6 +266,8 @@ fn main() {
             commands::get_context_config,
             commands::update_context_config,
             commands::open_containing_folder,
+            commands::open_lnk_target,
+            commands::copy_to_clipboard,
             commands::reset_item_history,
             commands::list_running_processes,
             commands::show_context_menu,

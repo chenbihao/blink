@@ -5,7 +5,8 @@
 
 import { queryEl, resultsEl } from "./dom.js";
 import { activateItem } from "./actions.js";
-import { openContainingFolder, resetItemHistory, launchApp, invoke } from "./api.js";
+import { openContainingFolder, openLnkTarget, resetItemHistory, launchApp, copyToClipboard, invoke } from "./api.js";
+import { retrigger } from "./search.js";
 
 /** 当前菜单数据（用于 Popup 点击时回调执行）。 */
 let currentItems = [];
@@ -168,11 +169,20 @@ function itemMenu(li) {
 
   if (isRealPath && (source === "file" || source === "start_menu")) {
     const fileName = lnkPath.split(/[\\/]/).pop() || lnkPath;
+    const baseName = fileName.replace(/\.[^.]*$/, "");
+    const dirPath = lnkPath.replace(/[\\/][^\\/]*$/, "");
+    const isLnk = lnkPath.toLowerCase().endsWith(".lnk");
     items.push({ label: "打开所在文件夹", run: () => { openContainingFolder(lnkPath).catch((e) => console.error(e)); } });
-    items.push({ label: "复制路径", run: () => copyText(lnkPath) });
-    items.push({ label: "复制文件名", run: () => copyText(fileName) });
+    if (isLnk) {
+      items.push({ label: "打开快捷方式目标", run: () => { openLnkTarget(lnkPath).catch((e) => console.error(e)); } });
+    }
     items.push({ separator: true });
-    items.push({ label: "重置该项记录", run: () => { resetItemHistory(lnkPath).catch((e) => console.error(e)); }, danger: true });
+    items.push({ label: "复制路径", run: () => copyText(dirPath) });
+    items.push({ label: "复制完整路径", run: () => copyText(lnkPath) });
+    items.push({ label: "复制文件名", run: () => copyText(baseName) });
+    items.push({ label: "复制完整文件名", run: () => copyText(fileName) });
+    items.push({ separator: true });
+    items.push({ label: "重置该项记录", run: () => { resetItemHistory(lnkPath).then(() => retrigger()).catch((e) => console.error(e)); }, danger: true });
   }
 
   const isResultLike =
@@ -192,7 +202,7 @@ function itemMenu(li) {
 
 async function copyText(text) {
   try {
-    await navigator.clipboard.writeText(text);
+    await copyToClipboard(text);
   } catch (e) {
     console.error("clipboard write failed:", e);
   }
