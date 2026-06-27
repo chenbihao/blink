@@ -26,6 +26,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// 查询错误。
 #[derive(Debug)]
+#[allow(dead_code)] // 错误处理骨架，0.3+ 完整实现
 pub enum PluginError {
     /// 进程拉起失败。
     Spawn(String),

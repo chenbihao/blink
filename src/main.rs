@@ -213,20 +213,14 @@ fn main() {
                 }
             }
 
-            // 构造 FileEngine 配置（从 app_config 读取）
-            let file_config = config::FileSearchConfig {
-                enabled: app_config.file_search.enabled,
-                everything_port: app_config.file_search.everything_port,
-                local_scan_depth: app_config.file_search.local_scan_depth,
-                max_results: app_config.file_search.max_results,
-                ..Default::default()
-            };
+            // 构造 FileEngine 配置（优先读 engine:file_search，降级读旧 app_config.file_search）
+            let file_config = tauri::async_runtime::block_on(config::get_file_search_config(&pool));
 
             // 构造 SearchService(多路引擎 + 意图路由)。command 层经 app.state 取用。
             let search_service = std::sync::Arc::new(search::SearchService::new(
                 app.handle().clone(),
                 pool.clone(),
-                search::build_engines(Some(file_config)),
+                search::build_engines(Some(file_config.clone()), file_config.local_scan_depth),
                 plugin_engine.clone(),
                 router,
             ));
@@ -324,7 +318,8 @@ fn main() {
             commands::get_perf_percentiles,
             commands::get_perf_slow_queries,
             commands::get_perf_recent,
-            commands::export_perf_report
+            commands::export_perf_report,
+            commands::open_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

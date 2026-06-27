@@ -199,6 +199,7 @@ pub struct AppConfig {
 
 impl Default for AppConfig {
     fn default() -> Self {
+        #[allow(deprecated)]
         Self {
             hotkey: HotkeyConfig::default(),
             tap_threshold: 300,
@@ -369,6 +370,7 @@ pub async fn get_file_search_config(pool: &SqlitePool) -> FileSearchConfig {
     }
     // 2. 降级读旧 app_config.file_search
     let app_config = get_config(pool).await;
+    #[allow(deprecated)]
     app_config.file_search
 }
 
@@ -380,7 +382,10 @@ pub async fn update_file_search(pool: &SqlitePool, file_search: FileSearchConfig
 
     // 兼容：同时更新旧字段（确保 0.4 版本回退也能用）
     let mut config = get_config(pool).await;
-    config.file_search = file_search;
+    #[allow(deprecated)]
+    {
+        config.file_search = file_search;
+    }
     save_config(pool, &config).await?;
 
     tracing::debug!("文件搜索配置已更新");
@@ -435,6 +440,7 @@ pub async fn set_plugin_config(
 }
 
 /// 获取所有插件配置（key 前缀 `plugin:`）。返回 (plugin_id, config) 列表。
+#[allow(dead_code)] // 插件系统骨架，0.3+ 启用
 pub async fn get_all_plugin_config(pool: &SqlitePool) -> Vec<(String, PluginConfig)> {
     crate::history::get_all_config(pool)
         .await

@@ -10,13 +10,19 @@ JSONL stdio 协议：
   - 有道智云 (youdao)
   - 百度翻译 (baidu)
   - DeepL (deepl)
+  - 阿里机器翻译 (ali)
+  - 腾讯云机器翻译 (tencent)
 """
 
+import base64
+import datetime
 import hashlib
+import hmac
 import json
 import random
 import sys
 import time
+import uuid
 import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
@@ -164,10 +170,179 @@ def _deepl_translate(text: str, target_lang: str, api_key: str) -> Optional[str]
         return None
 
 
+# ── 阿里机器翻译 ──────────────────────────────────────────────────────────────
+
+def _ali_translate(text: str, target_lang: str, access_key_id: str, access_key_secret: str) -> Optional[str]:
+    """阿里机器翻译 API (HMAC-SHA1 签名)"""
+    if not access_key_id or not access_key_secret:
+        return None
+
+    url = "https://mt.aliyuncs.com/"
+
+    # 语言代码映射
+    lang_map = {"zh": "zh", "en": "en", "ja": "ja", "ko": "ko"}
+    src_lang = "auto"
+    tgt_lang = lang_map.get(target_lang, "zh")
+
+    # 公共参数
+    params = {
+        "Format": "JSON",
+        "Version": "2018-10-12",
+        "AccessKeyId": access_key_id,
+        "SignatureMethod": "HMAC-SHA1",
+        "Timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "SignatureVersion": "1.0",
+        "SignatureNonce": str(uuid.uuid4()),
+        "Action": "TranslateGeneral",
+        "SourceLanguage": src_lang,
+        "TargetLanguage": tgt_lang,
+        "SourceText": text,
+        "FormatType": "text",
+        "Scene": "general",
+    }
+
+    try:
+        # 1. 按字母排序并 URL 编码
+        sorted_params = sorted(params.items())
+        canonicalized = "&".join(
+            [f"{urllib.parse.quote(k, safe='')}={urllib.parse.quote(str(v), safe='')}"
+             for k, v in sorted_params]
+        )
+
+        # 2. 构造签名字符串
+        string_to_sign = f"POST&%2F&{urllib.parse.quote(canonicalized, safe='')}"
+
+        # 3. 计算签名 (HMAC-SHA1)
+        signing_key = access_key_secret + "&"
+        signature = base64.b64encode(
+            hmac.new(signing_key.encode(), string_to_sign.encode(), hashlib.sha1).digest()
+        ).decode()
+
+        params["Signature"] = signature
+
+        # 4. 发送请求
+        data = urllib.parse.urlencode(params).encode('utf-8')
+        req = urllib.request.Request(url, data=data, method='POST')
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            result = json.loads(resp.read())
+
+        print(f"[translate] ali response: {json.dumps(result, ensure_ascii=False)}", file=sys.stderr, flush=True)
+
+        if "Data" in result and "Translated" in result["Data"]:
+            return result["Data"]["Translated"]
+        # 打印详细错误信息
+        if "Code" in result:
+            print(f"[translate] ali error code: {result.get('Code')}, message: {result.get('Message', 'N/A')}, request_id: {result.get('RequestId', 'N/A')}", file=sys.stderr, flush=True)
+        elif "Message" in result:
+            print(f"[translate] ali error: {result['Message']}", file=sys.stderr, flush=True)
+        return None
+    except urllib.error.HTTPError as e:
+        body = e.read().decode('utf-8', errors='replace') if e.fp else ''
+        print(f"[translate] ali HTTP error: {e.code} {e.reason}, body: {body[:500]}", file=sys.stderr, flush=True)
+        return None
+    except Exception as e:
+        print(f"[translate] ali failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        return None
+
+
+# ── 腾讯云机器翻译 ────────────────────────────────────────────────────────────
+
+def _tencent_translate(text: str, target_lang: str, secret_id: str, secret_key: str) -> Optional[str]:
+    """腾讯云机器翻译 API (TC3-HMAC-SHA256 签名)"""
+    if not secret_id or not secret_key:
+        return None
+
+    service = "tmt"
+    host = "tmt.tencentcloudapi.com"
+    endpoint = "https://tmt.tencentcloudapi.com"
+    action = "TextTranslate"
+    version = "2018-03-21"
+    region = "ap-guangzhou"
+
+    # 语言代码映射
+    lang_map = {"zh": "zh", "en": "en", "ja": "ja", "ko": "ko"}
+    src_lang = "auto"
+    tgt_lang = lang_map.get(target_lang, "zh")
+
+    # 请求体
+    payload = json.dumps({
+        "SourceText": text,
+        "Source": src_lang,
+        "Target": tgt_lang,
+        "ProjectId": 0
+    })
+
+    try:
+        timestamp = int(time.time())
+        date = datetime.datetime.utcfromtimestamp(timestamp).strftime('%Y-%m-%d')
+
+        # Step 1: 规范请求
+        http_request_method = "POST"
+        canonical_uri = "/"
+        canonical_querystring = ""
+        content_type = "application/json; charset=utf-8"
+        canonical_headers = f"content-type:{content_type}\nhost:{host}\nx-tc-action:{action.lower()}\n"
+        signed_headers = "content-type;host;x-tc-action"
+        hashed_payload = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        canonical_request = (f"{http_request_method}\n{canonical_uri}\n{canonical_querystring}\n"
+                            f"{canonical_headers}\n{signed_headers}\n{hashed_payload}")
+
+        # Step 2: 拼接待签名字符串
+        algorithm = "TC3-HMAC-SHA256"
+        credential_scope = f"{date}/{service}/tc3_request"
+        hashed_canonical_request = hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()
+        string_to_sign = f"{algorithm}\n{timestamp}\n{credential_scope}\n{hashed_canonical_request}"
+
+        # Step 3: 计算签名
+        secret_date = hmac.new(("TC3" + secret_key).encode("utf-8"), date.encode("utf-8"), hashlib.sha256).digest()
+        secret_service = hmac.new(secret_date, service.encode("utf-8"), hashlib.sha256).digest()
+        secret_signing = hmac.new(secret_service, "tc3_request".encode("utf-8"), hashlib.sha256).digest()
+        signature = hmac.new(secret_signing, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+
+        # Step 4: 拼接 Authorization
+        authorization = f"{algorithm} Credential={secret_id}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}"
+
+        # Step 5: 发送请求
+        headers = {
+            "Authorization": authorization,
+            "Content-Type": content_type,
+            "Host": host,
+            "X-TC-Action": action,
+            "X-TC-Timestamp": str(timestamp),
+            "X-TC-Version": version,
+            "X-TC-Region": region,
+        }
+
+        req = urllib.request.Request(endpoint, data=payload.encode('utf-8'), headers=headers, method='POST')
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            result = json.loads(resp.read())
+
+        if "Response" in result and "TargetText" in result["Response"]:
+            return result["Response"]["TargetText"]
+        if "Error" in result.get("Response", {}):
+            print(f"[translate] tencent error: {result['Response']['Error']}", file=sys.stderr, flush=True)
+        return None
+    except Exception as e:
+        print(f"[translate] tencent failed: {e}", file=sys.stderr, flush=True)
+        return None
+
+
 # ── 翻译调度 ──────────────────────────────────────────────────────────────────
+
+# 引擎显示名称
+ENGINE_NAMES = {
+    "youdao": "有道智云",
+    "baidu": "百度翻译",
+    "deepl": "DeepL",
+    "ali": "阿里翻译",
+    "tencent": "腾讯翻译",
+}
 
 def _translate(text: str, target_lang: str, engine: str, settings: Dict[str, Any]) -> Optional[str]:
     """调度翻译引擎"""
+    engine_name = ENGINE_NAMES.get(engine, engine)
+    print(f"[translate] 使用引擎: {engine_name} ({engine}), 目标语言: {target_lang}", file=sys.stderr, flush=True)
+
     if engine == "youdao":
         return _youdao_translate(
             text, target_lang,
@@ -185,6 +360,18 @@ def _translate(text: str, target_lang: str, engine: str, settings: Dict[str, Any
             text, target_lang,
             settings.get("deepl_api_key", "")
         )
+    elif engine == "ali":
+        return _ali_translate(
+            text, target_lang,
+            settings.get("ali_access_key_id", ""),
+            settings.get("ali_access_key_secret", "")
+        )
+    elif engine == "tencent":
+        return _tencent_translate(
+            text, target_lang,
+            settings.get("tencent_secret_id", ""),
+            settings.get("tencent_secret_key", "")
+        )
     return None
 
 
@@ -195,11 +382,19 @@ def _try_translate(text: str, target_lang: str, engine: str, settings: Dict[str,
     if result:
         return result
 
-    # 失败时尝试其他引擎（按优先级）
-    fallback_order = ["youdao", "baidu", "deepl"]
+    # 从配置读取降级顺序，默认按优先级
+    default_order = "youdao,baidu,ali,tencent,deepl"
+    fallback_str = settings.get("fallback_order", default_order)
+    # 解析并过滤有效引擎
+    valid_engines = set(ENGINE_NAMES.keys())
+    fallback_order = [e.strip() for e in fallback_str.split(",") if e.strip() in valid_engines]
+
+    # 失败时按配置顺序尝试其他引擎
     for fallback in fallback_order:
         if fallback == engine:
             continue
+        fallback_name = ENGINE_NAMES.get(fallback, fallback)
+        print(f"[translate] 主引擎失败，降级到: {fallback_name} ({fallback})", file=sys.stderr, flush=True)
         result = _translate(text, target_lang, fallback, settings)
         if result:
             return result
@@ -211,11 +406,12 @@ def _try_translate(text: str, target_lang: str, engine: str, settings: Dict[str,
 
 def handle_query(query_id: str, query: str, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """处理翻译查询"""
-    print(f"[translate] 收到查询: id={query_id}, query={query!r}", file=sys.stderr, flush=True)
-
     settings = settings or {}
     engine = settings.get("default_engine", "youdao")
     target_lang = settings.get("target_lang", "zh")
+    engine_name = ENGINE_NAMES.get(engine, engine)
+
+    print(f"[translate] 收到查询: id={query_id}, query={query!r}, 引擎={engine_name}, 目标语言={target_lang}", file=sys.stderr, flush=True)
 
     text = query.strip()
 

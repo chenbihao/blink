@@ -820,7 +820,7 @@ pub async fn show_context_menu(
     };
     let url = format!("contextmenu-popup.html?items={encoded_items}&theme={theme}");
     tracing::debug!(x, y, width, height, %url, "创建右键菜单窗口");
-    let win = WebviewWindowBuilder::new(
+    let _win = WebviewWindowBuilder::new(
         &app,
         "context-menu",
         WebviewUrl::App(url.into()),
@@ -986,5 +986,42 @@ pub async fn update_interpreter_config(
     // TODO: Phase 0.6 后续实现持久化到 SQLite config 表
     // 目前只做展示，不做持久化
     tracing::warn!("update_interpreter_config 暂未实现持久化");
+    Ok(())
+}
+
+/// 在外部浏览器打开 URL。
+#[tauri::command]
+pub async fn open_url(url: String) -> Result<(), String> {
+    tracing::debug!(%url, "open_url");
+
+    // 使用 Windows ShellExecuteW 打开默认浏览器
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        use windows::core::{PCWSTR, w};
+
+        let url_wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+        let result = unsafe {
+            ShellExecuteW(
+                None,
+                w!("open"),
+                PCWSTR(url_wide.as_ptr()),
+                None,
+                None,
+                SW_SHOWNORMAL,
+            )
+        };
+        if result.0 as i32 <= 32 {
+            return Err(format!("打开 URL 失败，返回值: {}", result.0 as i32));
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // 非 Windows 平台使用 open crate（后续可添加）
+        return Err("当前平台暂不支持打开 URL".to_string());
+    }
+
     Ok(())
 }

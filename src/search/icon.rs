@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use once_cell::sync::OnceCell;
 use windows::core::PCWSTR;
@@ -34,9 +34,16 @@ const MEMORY_CACHE_CAPACITY: usize = 200;
 /// 全局 pool 单例——用于 SQLite 持久化。
 static POOL: OnceCell<SqlitePool> = OnceCell::new();
 
-/// 内存 LRU 缓存：lnk_path -> PNG 字节。
+/// 缓存条目（含最后访问时间，用于 LRU 淘汰）。
+#[derive(Clone)]
+struct CacheEntry {
+    data: Option<Vec<u8>>,
+    last_access: Instant,
+}
+
+/// 内存 LRU 缓存：lnk_path -> (PNG 字节, 最后访问时间)。
 /// 值为 `None` 表示「提取过但无图标/失败」，避免对失效项反复重试。
-static ICON_CACHE: Mutex<Option<HashMap<String, Option<Vec<u8>>>>> = Mutex::new(None);
+static ICON_CACHE: Mutex<Option<HashMap<String, CacheEntry>>> = Mutex::new(None);
 
 /// 初始化图标缓存：建表 + 注册全局 pool。
 pub async fn init(pool: &SqlitePool) -> Result<(), String> {
@@ -174,11 +181,13 @@ fn save_to_db(path: &str, png: &[u8]) {
 pub fn get_icon_png(path: &str) -> Option<Vec<u8>> {
     // Layer 1: 内存 LRU 缓存
     {
-        if let Ok(cache) = ICON_CACHE.lock() {
-            if let Some(map) = cache.as_ref() {
-                if let Some(cached) = map.get(path) {
+        if let Ok(mut cache) = ICON_CACHE.lock() {
+            if let Some(map) = cache.as_mut() {
+                if let Some(entry) = map.get_mut(path) {
+                    // 更新访问时间
+                    entry.last_access = Instant::now();
                     crate::perf::record(crate::perf::MetricCategory::IconExtract, "hit", 0.0, None);
-                    return cached.clone();
+                    return entry.data.clone();
                 }
             }
         }
@@ -190,7 +199,10 @@ pub fn get_icon_png(path: &str) -> Option<Vec<u8>> {
         // 写入内存缓存
         if let Ok(mut cache) = ICON_CACHE.lock() {
             let map = cache.get_or_insert_with(HashMap::new);
-            map.insert(path.to_string(), Some(blob.clone()));
+            map.insert(path.to_string(), CacheEntry {
+                data: Some(blob.clone()),
+                last_access: Instant::now(),
+            });
         }
         return Some(blob);
     }
@@ -214,13 +226,19 @@ pub fn get_icon_png(path: &str) -> Option<Vec<u8>> {
 
     if let Ok(mut cache) = ICON_CACHE.lock() {
         let map = cache.get_or_insert_with(HashMap::new);
-        // LRU 淘汰：超过容量时删除最旧的
+        // LRU 淘汰：超过容量时删除最久未访问的
         if map.len() >= MEMORY_CACHE_CAPACITY {
-            if let Some(oldest_key) = map.keys().next().cloned() {
+            if let Some(oldest_key) = map.iter()
+                .min_by_key(|(_, entry)| entry.last_access)
+                .map(|(k, _)| k.clone())
+            {
                 map.remove(&oldest_key);
             }
         }
-        map.insert(path.to_string(), result.clone());
+        map.insert(path.to_string(), CacheEntry {
+            data: result.clone(),
+            last_access: Instant::now(),
+        });
     }
 
     result
@@ -351,6 +369,9 @@ fn get_app_user_model_id(package_family_name: &str) -> Option<String> {
 
 /// 实际提取：path -> PNG 字节。失败返回 None。
 fn extract_icon_png(path: &str, size: i32) -> Option<Vec<u8>> {
+    // COM 初始化 RAII guard：确保线程 COM 已初始化
+    let _com_guard = ComGuard::init();
+
     // UWP/MSIX 包路径优先处理（权限受限，Path::exists() 可能返回 false）。
     let shell_path = if is_uwp_package_path(path) {
         match convert_uwp_to_shell_path(path) {

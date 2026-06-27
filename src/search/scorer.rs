@@ -57,6 +57,7 @@ const HISTORY_DECAY_LAMBDA: f64 = std::f64::consts::LN_2 / HISTORY_HALF_LIFE_DAY
 ///
 /// 设计值 1.2：内置动作默认比普通应用优先级高，
 /// 但 0.8 分的精确匹配应用（如名字完全一样）仍能反超它。
+#[allow(dead_code)] // 设计常量，当前实现使用硬编码值
 const BUILTIN_BASE_WEIGHT: f32 = 1.2;
 
 /// Priority 插件的置顶加成。

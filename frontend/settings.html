@@ -100,7 +100,7 @@
               <div class="extension-icon">📁</div>
               <div class="extension-info">
                 <h3 data-i18n="engine.file_search.title">文件搜索</h3>
-                <p class="extension-desc" data-i18n="engine.file_search.desc">Everything 极速全盘文件搜索</p>
+                <p class="extension-desc" data-i18n="engine.file_search.desc">开始菜单本地索引 + Everything 极速全盘搜索</p>
               </div>
               <label class="switch">
                 <input type="checkbox" id="file-search-enabled" checked />
@@ -109,39 +109,49 @@
             </div>
 
             <div class="extension-body">
+              <!-- 本地搜索（开始菜单） -->
               <div class="plugin-config-section">
-                <div class="plugin-section-title">Everything</div>
+                <div class="plugin-section-title" data-i18n="engine.local.title">本地搜索（开始菜单）</div>
 
                 <div class="setting-row">
-                  <label data-i18n="engine.everything.status.label">Everything 状态</label>
-                  <span id="everything-status" class="status-badge status-unknown">探测中…</span>
-                  <button id="probe-everything" class="btn-small" data-i18n="engine.probe">重新探测</button>
-                </div>
-
-                <div class="setting-row">
-                  <label data-i18n="engine.everything.port.label">HTTP 端口</label>
-                  <input type="number" id="everything-port" min="1" max="65535" value="80" class="input-small" />
-                  <span class="hint" data-i18n="engine.everything.port.hint">Everything 选项 → HTTP 服务器</span>
-                </div>
-
-                <div class="setting-row">
-                  <label data-i18n="engine.everything.max_results.label">最大结果数</label>
-                  <input type="number" id="everything-max-results" min="1" max="100" value="20" class="input-small" />
-                  <span class="hint" data-i18n="engine.everything.max_results.hint">每次检索返回的文件数量上限</span>
-                </div>
-
-                <!-- 本地扫描深度（待实现，暂隐藏）
-                <div class="setting-row">
-                  <label>本地扫描深度</label>
+                  <label data-i18n="engine.local.scan_depth.label">扫描深度</label>
                   <input type="number" id="local-scan-depth" min="1" max="10" value="3" class="input-small" />
-                  <span class="hint">常用目录索引深度</span>
+                  <span class="hint" data-i18n="engine.local.scan_depth.hint">索引深度，越大越全但越慢</span>
                 </div>
-                -->
 
-                <div class="plugin-save-row">
-                  <button id="save-file-search" class="btn-small" data-i18n="engine.save">保存配置</button>
-                  <span id="file-search-save-msg" class="plugin-save-msg"></span>
+                <div class="setting-row">
+                  <label data-i18n="engine.local.status.label">缓存状态</label>
+                  <span id="local-cache-status" class="status-badge status-unknown">-</span>
                 </div>
+              </div>
+
+              <!-- Everything -->
+              <details class="plugin-config-section">
+                <summary class="plugin-section-title">Everything <span class="engine-toggle-hint">（可选，需安装）</span></summary>
+                <div class="plugin-config-body">
+                  <div class="setting-row">
+                    <label data-i18n="engine.everything.status.label">状态</label>
+                    <span id="everything-status" class="status-badge status-unknown">探测中…</span>
+                    <button id="probe-everything" class="btn-small" data-i18n="engine.probe">重新探测</button>
+                  </div>
+
+                  <div class="setting-row">
+                    <label data-i18n="engine.everything.port.label">HTTP 端口</label>
+                    <input type="number" id="everything-port" min="1" max="65535" value="80" class="input-small" />
+                    <span class="hint" data-i18n="engine.everything.port.hint">Everything 选项 → HTTP 服务器</span>
+                  </div>
+
+                  <div class="setting-row">
+                    <label data-i18n="engine.everything.max_results.label">最大结果数</label>
+                    <input type="number" id="everything-max-results" min="1" max="100" value="20" class="input-small" />
+                    <span class="hint" data-i18n="engine.everything.max_results.hint">每次检索返回的文件数量上限</span>
+                  </div>
+                </div>
+              </details>
+
+              <div class="plugin-save-row">
+                <button id="save-file-search" class="btn-small" data-i18n="engine.save">保存配置</button>
+                <span id="file-search-save-msg" class="plugin-save-msg"></span>
               </div>
             </div>
           </div>

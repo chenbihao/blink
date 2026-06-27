@@ -2,8 +2,8 @@
   "schema_version": 1,
   "id": "builtin.translate",
   "name": "翻译",
-  "version": "0.1.0",
-  "description": "多引擎文本翻译：有道智云/百度翻译/DeepL",
+  "version": "0.2.0",
+  "description": "多引擎文本翻译：有道智云/百度翻译/DeepL/阿里翻译/腾讯翻译",
   "builtin": true,
   "runtime": {
     "type": "python",
@@ -11,6 +11,7 @@
     "exec": "./main.py",
     "timeout_ms": 10000,
     "min_arg_length": 0,
+    "debounce_ms": 500,
     "concurrency": 1
   },
   "triggers": [
@@ -21,47 +22,116 @@
   "settings_schema": [
     {
       "key": "default_engine",
-      "type": "select",
+      "type": "enum",
       "title": "默认翻译引擎",
-      "options": ["youdao", "baidu", "deepl"],
+      "options": [
+        { "value": "youdao", "label": "有道智云" },
+        { "value": "baidu", "label": "百度翻译" },
+        { "value": "deepl", "label": "DeepL" },
+        { "value": "ali", "label": "阿里翻译" },
+        { "value": "tencent", "label": "腾讯翻译" }
+      ],
       "default": "youdao"
     },
     {
+      "key": "fallback_order",
+      "type": "sortable_list",
+      "title": "降级顺序",
+      "description": "主引擎失败时按此顺序尝试，拖动调整顺序",
+      "options": [
+        { "value": "youdao", "label": "有道智云" },
+        { "value": "baidu", "label": "百度翻译" },
+        { "value": "ali", "label": "阿里翻译" },
+        { "value": "tencent", "label": "腾讯翻译" },
+        { "value": "deepl", "label": "DeepL" }
+      ],
+      "default": ["youdao", "baidu", "ali", "tencent", "deepl"]
+    },
+    {
       "key": "target_lang",
-      "type": "select",
+      "type": "enum",
       "title": "目标语言",
-      "options": ["auto", "zh", "en", "ja", "ko"],
+      "options": [
+        { "value": "auto", "label": "自动检测" },
+        { "value": "zh", "label": "中文" },
+        { "value": "en", "label": "英文" },
+        { "value": "ja", "label": "日文" },
+        { "value": "ko", "label": "韩文" }
+      ],
       "default": "zh"
     },
     {
       "key": "youdao_app_key",
       "type": "string",
-      "title": "有道智云 APP Key",
-      "description": "申请地址: https://ai.youdao.com/"
+      "title": "应用ID (appKey)",
+      "group": {
+        "title": "有道智云",
+        "description": "申请地址: https://ai.youdao.com/"
+      }
     },
     {
       "key": "youdao_app_secret",
       "type": "string",
-      "title": "有道智云 APP Secret",
+      "title": "应用密钥 (appSecret)",
+      "group": "有道智云",
       "secret": true
     },
     {
       "key": "baidu_app_id",
       "type": "string",
-      "title": "百度翻译 APP ID",
-      "description": "申请地址: https://fanyi-api.baidu.com/"
+      "title": "APP ID",
+      "group": {
+        "title": "百度翻译",
+        "description": "申请地址: https://fanyi-api.baidu.com/"
+      }
     },
     {
       "key": "baidu_app_key",
       "type": "string",
-      "title": "百度翻译 APP Key",
+      "title": "密钥 (APP Key)",
+      "group": "百度翻译",
       "secret": true
     },
     {
       "key": "deepl_api_key",
       "type": "string",
       "title": "DeepL API Key",
-      "description": "申请地址: https://www.deepl.com/pro-api",
+      "group": {
+        "title": "DeepL",
+        "description": "申请地址: https://www.deepl.com/pro-api"
+      },
+      "secret": true
+    },
+    {
+      "key": "ali_access_key_id",
+      "type": "string",
+      "title": "AccessKey ID",
+      "group": {
+        "title": "阿里机器翻译",
+        "description": "申请地址: https://www.aliyun.com/product/ai/base_alimt"
+      }
+    },
+    {
+      "key": "ali_access_key_secret",
+      "type": "string",
+      "title": "AccessKey Secret",
+      "group": "阿里机器翻译",
+      "secret": true
+    },
+    {
+      "key": "tencent_secret_id",
+      "type": "string",
+      "title": "SecretId",
+      "group": {
+        "title": "腾讯云机器翻译",
+        "description": "申请地址: https://cloud.tencent.com/product/tmt"
+      }
+    },
+    {
+      "key": "tencent_secret_key",
+      "type": "string",
+      "title": "SecretKey",
+      "group": "腾讯云机器翻译",
       "secret": true
     }
   ]

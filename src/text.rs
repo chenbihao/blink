@@ -23,6 +23,7 @@ use pinyin::ToPinyin;
 /// assert_eq!(s.truncate_chars(5), "这是一段很...");  // 安全截断 + 省略号
 /// assert_eq!(s.take_chars(5), "这是一段很");         // 只截断，不加省略号
 /// ```
+#[allow(dead_code)] // 工具 trait，测试验证正确性，未来可能使用
 pub trait StringTruncateExt {
     /// 安全截断到最多 `max_chars` 个字符，超出部分用 `...` 表示。
     ///

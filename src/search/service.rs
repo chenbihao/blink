@@ -234,11 +234,20 @@ impl SearchService {
         let Some(plugin_engine) = self.plugin_engine.clone() else {
             return;
         };
+        let debounce_ms = plugin_engine.get_debounce_ms(&plugin_id);
         let app = self.app.clone();
         let latest_seq = Arc::clone(&self.latest_seq);
         let snapshot = Arc::clone(&self.snapshot);
         let max_results = Arc::clone(&self.max_results);
         tauri::async_runtime::spawn(async move {
+            // 防抖:等待连续输入停止后再查询
+            if debounce_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(debounce_ms)).await;
+                if seq != latest_seq.load(Ordering::SeqCst) {
+                    tracing::trace!(plugin = %plugin_id, debounce_ms, "takeover 防抖:seq 已过期,跳过");
+                    return;
+                }
+            }
             let snapshot = snapshot.read().unwrap().clone();
             let ctx = crate::plugin::PluginQueryContext::from_snapshot(&snapshot);
             let items = plugin_engine
@@ -281,7 +290,7 @@ impl SearchService {
                 .map(|c| c.plugin_id)
                 .collect();
 
-            // ── 1. 插件查询任务（独立 spawn）
+            // ── 1. 插件查询任务（独立 spawn，支持 per-plugin 防抖）
             if let Some(ref pe) = plugin_engine {
                 if !plugin_ids.is_empty() {
                     let plugin_ctx = crate::plugin::PluginQueryContext::from_snapshot(&snapshot);
@@ -289,7 +298,21 @@ impl SearchService {
                     let plugin_ids = plugin_ids.clone();
                     let app = app.clone();
                     let latest_seq = latest_seq.clone();
+                    // 取所有命中插件中最大的 debounce_ms（同一批查询共享一个 task）
+                    let max_debounce = plugin_ids
+                        .iter()
+                        .map(|(id, _)| pe.get_debounce_ms(id))
+                        .max()
+                        .unwrap_or(0);
                     tauri::async_runtime::spawn(async move {
+                        // 防抖:等待连续输入停止后再查询,避免每次按键都触发网络请求
+                        if max_debounce > 0 {
+                            tokio::time::sleep(std::time::Duration::from_millis(max_debounce)).await;
+                            if seq != latest_seq.load(Ordering::SeqCst) {
+                                tracing::trace!(debounce_ms = max_debounce, "插件防抖:seq 已过期,跳过");
+                                return;
+                            }
+                        }
                         let mut items = pe.query_subset(&plugin_ids, &plugin_ctx).await;
                         // priority 候选 score 抬高,确保置顶
                         for item in &mut items {

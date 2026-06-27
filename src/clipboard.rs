@@ -6,7 +6,23 @@
 //! - SQLite 持久化存储，可配置保留天数
 //! - 敏感应用黑名单（密码管理器等）
 //!
-//! TODO: 实时监听 `AddClipboardFormatListener`（需要窗口消息循环）
+//! ⚠️ 当前状态：基础存储和查询功能已实现，但缺少实时监听功能。
+//! 用户需要手动触发记录（如通过命令），无法自动捕获剪贴板变化。
+//!
+//! TODO（0.8+）：实现实时监听 `AddClipboardFormatListener`：
+//! 1. 创建隐藏窗口（用于接收 Windows 消息）
+//! 2. 调用 `AddClipboardFormatListener` 注册监听
+//! 3. 处理 `WM_CLIPBOARDUPDATE` 消息
+//! 4. 在消息处理中读取剪贴板内容，检查黑名单，保存到数据库
+//! 5. 需要与主线程消息循环集成（可能需要 `tauri::async_runtime::spawn_blocking`）
+//!
+//! 参考实现思路：
+//! ```rust
+//! // 在某个合适的时机（如应用启动后）
+//! let hwnd = create_hidden_window()?;
+//! unsafe { AddClipboardFormatListener(hwnd)?; }
+//! // 在窗口过程中处理 WM_CLIPBOARDUPDATE
+//! ```
 
 use sqlx::SqlitePool;
 

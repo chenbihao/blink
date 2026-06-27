@@ -22,6 +22,7 @@ use crate::config::ContextConfig;
 #[derive(Debug, Clone)]
 pub struct ContextSnapshot {
     /// 采集时间（用于调试日志）
+    #[allow(dead_code)] // 调试用，未来可能用于性能统计
     pub captured_at: Instant,
     /// 前台应用信息（唤起时的前台，不是 Blink 自身）
     pub foreground_app: Option<ForegroundAppInfo>,
@@ -47,6 +48,7 @@ pub struct ForegroundAppInfo {
     /// 窗口标题（如 "main.rs - blink"）
     pub window_title: String,
     /// 完整 exe 路径（需要权限时可能为 None）
+    #[allow(dead_code)] // 0.3+ 意图引擎可能用到
     pub exe_path: Option<String>,
 }
 

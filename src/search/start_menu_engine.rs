@@ -52,10 +52,12 @@ struct CacheState {
 
 pub struct StartMenuEngine {
     cache: Arc<RwLock<CacheState>>,
+    /// 扫描深度（从配置读取）。
+    scan_depth: u32,
 }
 
 impl StartMenuEngine {
-    pub fn new() -> Self {
+    pub fn new(scan_depth: u32) -> Self {
         StartMenuEngine {
             cache: Arc::new(RwLock::new(CacheState {
                 entries: Vec::new(),
@@ -64,16 +66,18 @@ impl StartMenuEngine {
                 incremental_count: 0,
                 last_full_refresh: None,
             })),
+            scan_depth,
         }
     }
 
     /// 启动后台:立即预扫一次 + 定时增量刷新。不阻塞调用方。
     fn start_background(&self) {
         let cache = Arc::clone(&self.cache);
+        let depth = self.scan_depth;
         tauri::async_runtime::spawn(async move {
             // 立即预扫(后台，全量)
             let c = Arc::clone(&cache);
-            let _ = tokio::task::spawn_blocking(move || full_scan_into_cache(&c)).await;
+            let _ = tokio::task::spawn_blocking(move || full_scan_into_cache(&c, depth)).await;
 
             loop {
                 tokio::time::sleep(CHECK_INTERVAL).await;
@@ -92,11 +96,11 @@ impl StartMenuEngine {
 
                 if need_full {
                     let c = Arc::clone(&cache);
-                    let _ = tokio::task::spawn_blocking(move || full_scan_into_cache(&c)).await;
+                    let _ = tokio::task::spawn_blocking(move || full_scan_into_cache(&c, depth)).await;
                 } else if roots_changed_since_last(&cache) {
                     // mtime 变化 → 增量扫描
                     let c = Arc::clone(&cache);
-                    let _ = tokio::task::spawn_blocking(move || incremental_scan(&c)).await;
+                    let _ = tokio::task::spawn_blocking(move || incremental_scan(&c, depth)).await;
                 }
             }
         });
@@ -112,15 +116,16 @@ impl StartMenuEngine {
             }
         }
         let c = Arc::clone(&self.cache);
-        let _ = tokio::task::spawn_blocking(move || full_scan_into_cache(&c)).await;
+        let depth = self.scan_depth;
+        let _ = tokio::task::spawn_blocking(move || full_scan_into_cache(&c, depth)).await;
         self.cache.read().unwrap().entries.clone()
     }
 }
 
 /// 全量扫描开始菜单并更新缓存。必须在 spawn_blocking 中调用。
-fn full_scan_into_cache(cache: &RwLock<CacheState>) {
+fn full_scan_into_cache(cache: &RwLock<CacheState>, scan_depth: u32) {
     let start = Instant::now();
-    let entries = super::scan_start_menu();
+    let entries = super::scan_start_menu(scan_depth);
     let mtimes = super::roots_modified();
     let elapsed = start.elapsed();
 
@@ -138,7 +143,7 @@ fn full_scan_into_cache(cache: &RwLock<CacheState>) {
 }
 
 /// 增量扫描：对比缓存中的文件，仅增删变化项。必须在 spawn_blocking 中调用。
-fn incremental_scan(cache: &RwLock<CacheState>) {
+fn incremental_scan(cache: &RwLock<CacheState>, max_depth: u32) {
     let start = Instant::now();
 
     // 读取当前缓存的文件路径集合
@@ -148,7 +153,7 @@ fn incremental_scan(cache: &RwLock<CacheState>) {
     };
 
     // 扫描当前目录，收集所有 .lnk 文件的 (path, mtime)
-    let current_files = scan_current_files();
+    let current_files = scan_current_files(max_depth);
 
     // 找出新增和变化的文件
     let mut new_entries = Vec::new();
@@ -202,8 +207,8 @@ fn incremental_scan(cache: &RwLock<CacheState>) {
     );
 }
 
-/// 扫描当前开始菜单目录，返回所有 .lnk 文件的 (path, mtime)。
-fn scan_current_files() -> HashMap<String, SystemTime> {
+/// 扫描当前开始菜单目录，返回所有 .lnk 文件的 (path, mtime)。递归扫描子目录。
+fn scan_current_files(max_depth: u32) -> HashMap<String, SystemTime> {
     let mut files = HashMap::new();
     let roots = super::start_menu_roots();
 
@@ -211,21 +216,32 @@ fn scan_current_files() -> HashMap<String, SystemTime> {
         if !root.exists() {
             continue;
         }
-        if let Ok(entries) = std::fs::read_dir(&root) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().map_or(false, |ext| ext == "lnk") {
-                    if let Ok(meta) = std::fs::metadata(&path) {
-                        if let Ok(mtime) = meta.modified() {
-                            files.insert(path.to_string_lossy().to_string(), mtime);
-                        }
-                    }
+        scan_dir_recursive(&root, &mut files, max_depth, 0);
+    }
+
+    files
+}
+
+/// 递归扫描目录，收集 .lnk 文件的 (path, mtime)。
+fn scan_dir_recursive(dir: &std::path::Path, files: &mut HashMap<String, SystemTime>, max_depth: u32, current_depth: u32) {
+    if current_depth >= max_depth {
+        return;
+    }
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            scan_dir_recursive(&path, files, max_depth, current_depth + 1);
+        } else if path.extension().map_or(false, |ext| ext == "lnk") {
+            if let Ok(meta) = std::fs::metadata(&path) {
+                if let Ok(mtime) = meta.modified() {
+                    files.insert(path.to_string_lossy().to_string(), mtime);
                 }
             }
         }
     }
-
-    files
 }
 
 /// 根目录 mtime 是否与上次扫描记录不同。

@@ -123,7 +123,7 @@ pub use service::SearchService;
 
 /// 构造引擎列表(sync: builtin + calc + start_menu;async: 可选 mock)。
 /// PluginEngine 0.4 退化为执行器,不再作为 dyn SearchEngine,由 SearchService 直接持有。
-pub fn build_engines(file_config: Option<crate::config::FileSearchConfig>) -> Vec<std::sync::Arc<dyn SearchEngine>> {
+pub fn build_engines(file_config: Option<crate::config::FileSearchConfig>, scan_depth: u32) -> Vec<std::sync::Arc<dyn SearchEngine>> {
     let file_engine = match file_config {
         Some(cfg) => std::sync::Arc::new(FileEngine::with_config(cfg)),
         None => std::sync::Arc::new(FileEngine::new()),
@@ -132,7 +132,7 @@ pub fn build_engines(file_config: Option<crate::config::FileSearchConfig>) -> Ve
     let mut engines: Vec<std::sync::Arc<dyn SearchEngine>> = vec![
         std::sync::Arc::new(BuiltinEngine),
         std::sync::Arc::new(CalcEngine),
-        std::sync::Arc::new(StartMenuEngine::new()),
+        std::sync::Arc::new(StartMenuEngine::new(scan_depth)),
         file_engine,
     ];
     if MockSlowEngine::enabled() {

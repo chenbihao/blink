@@ -105,18 +105,21 @@ pub fn record(category: MetricCategory, name: &str, value_ms: f64, metadata: Opt
     let now = chrono::Utc::now().timestamp();
     let pool = pool.clone();
 
-    tokio::spawn(async move {
-        let _ = sqlx::query(
-            "INSERT INTO performance_metrics (category, name, value_ms, metadata, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-        )
-        .bind(&category)
-        .bind(&name)
-        .bind(value_ms)
-        .bind(&metadata)
-        .bind(now)
-        .execute(&pool)
-        .await;
-    });
+    // setup 阶段可能还没有 Tokio runtime，静默丢弃而非 panic
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            let _ = sqlx::query(
+                "INSERT INTO performance_metrics (category, name, value_ms, metadata, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .bind(&category)
+            .bind(&name)
+            .bind(value_ms)
+            .bind(&metadata)
+            .bind(now)
+            .execute(&pool)
+            .await;
+        });
+    }
 }
 
 /// 计时器 RAII guard：drop 时自动记录耗时。

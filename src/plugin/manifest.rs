@@ -75,6 +75,11 @@ pub struct PluginRuntime {
     /// 用于天气/翻译等需要完整输入才有意义的插件,避免 IME 中间态/短词浪费网络。
     #[serde(default)]
     pub min_arg_length: Option<usize>,
+    /// 防抖间隔(毫秒,0=不防抖)。连续输入停止该时间后才触发插件查询。
+    /// 网络类插件(翻译/天气)建议 300-800ms,避免每次按键都发 HTTP 请求。
+    /// 本地插件保持 0(默认),每键触发即时反馈。
+    #[serde(default)]
+    pub debounce_ms: Option<u64>,
 }
 
 /// 触发器。本切片只实现 keyword(精确/前缀);regex 先定义不实现。
@@ -134,6 +139,11 @@ pub enum SettingType {
     String,
     Number,
     Enum,
+    /// select 是 enum 的别名(翻译等插件使用)。
+    Select,
+    /// 可拖动排序列表(存储为 JSON 数组)。
+    #[serde(rename = "sortable_list")]
+    SortableList,
 }
 
 impl SettingType {
@@ -143,7 +153,8 @@ impl SettingType {
             SettingType::Boolean => serde_json::Value::Bool(false),
             SettingType::String => serde_json::Value::String(String::new()),
             SettingType::Number => serde_json::json!(0),
-            SettingType::Enum => serde_json::Value::Null,
+            SettingType::Enum | SettingType::Select => serde_json::Value::Null,
+            SettingType::SortableList => serde_json::json!([]),
         }
     }
 }
@@ -171,14 +182,143 @@ pub struct SettingField {
     /// 默认值(缺失按类型推断)。
     #[serde(default)]
     pub default: Option<serde_json::Value>,
-    /// enum 可选项。
-    #[serde(default)]
+    /// enum/select 可选项。兼容两种格式:
+    /// - 对象数组: `[{"value":"x","label":"X"}]`
+    /// - 扁平字符串数组: `["x","y","z"]`（value=label=字符串本身）
+    #[serde(default, deserialize_with = "deserialize_options")]
     pub options: Vec<SettingOption>,
     /// number 范围约束(UI 用,可选)。
     #[serde(default)]
     pub min: Option<f64>,
     #[serde(default)]
     pub max: Option<f64>,
+    /// 分组(可选)。支持两种格式:
+    /// - 字符串: `"group": "有道智云"`
+    /// - 对象: `"group": { "title": "有道智云", "description": "..." }`
+    #[serde(default, deserialize_with = "deserialize_group")]
+    pub group: Option<GroupConfig>,
+}
+
+/// 配置项分组。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupConfig {
+    /// 分组标题。
+    pub title: String,
+    /// 分组描述(可选,如申请地址)。
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// 反序列化 group：兼容字符串 `"group": "xxx"` 和对象 `"group": { "title": "xxx", "description": "..." }`。
+fn deserialize_group<'de, D>(deserializer: D) -> Result<Option<GroupConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct GroupVisitor;
+
+    impl<'de> de::Visitor<'de> for GroupVisitor {
+        type Value = Option<GroupConfig>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("group 字符串或对象")
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            deserializer.deserialize_any(GroupVisitor)
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(Some(GroupConfig {
+                title: value.to_string(),
+                description: None,
+            }))
+        }
+
+        fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
+        where
+            M: de::MapAccess<'de>,
+        {
+            let map: serde_json::Map<String, serde_json::Value> =
+                de::Deserialize::deserialize(de::value::MapAccessDeserializer::new(map))?;
+            let title = map
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let description = map
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            Ok(Some(GroupConfig { title, description }))
+        }
+    }
+
+    deserializer.deserialize_option(GroupVisitor)
+}
+
+/// 反序列化 options：兼容 `["a","b"]` 和 `[{"value":"a","label":"A"}]`。
+fn deserialize_options<'de, D>(deserializer: D) -> Result<Vec<SettingOption>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct OptionsVisitor;
+
+    impl<'de> de::Visitor<'de> for OptionsVisitor {
+        type Value = Vec<SettingOption>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("option 对象数组或字符串数组")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: de::SeqAccess<'de>,
+        {
+            let mut options = Vec::new();
+            while let Some(val) = seq.next_element::<serde_json::Value>()? {
+                match val {
+                    // 扁平字符串 → SettingOption { value=字符串, label=Plain(字符串) }
+                    serde_json::Value::String(s) => {
+                        options.push(SettingOption {
+                            value: serde_json::Value::String(s.clone()),
+                            label: LocalizableText::Plain(s),
+                        });
+                    }
+                    // 对象 → 直接反序列化为 SettingOption
+                    serde_json::Value::Object(_) => {
+                        let opt: SettingOption = serde_json::from_value(val)
+                            .map_err(de::Error::custom)?;
+                        options.push(opt);
+                    }
+                    other => {
+                        return Err(de::Error::custom(format!(
+                            "options 元素类型不支持: {other}"
+                        )));
+                    }
+                }
+            }
+            Ok(options)
+        }
+    }
+
+    deserializer.deserialize_seq(OptionsVisitor)
 }
 
 impl PluginManifest {
@@ -336,5 +476,28 @@ mod tests {
         let m: PluginManifest = serde_json::from_str(json).unwrap();
         assert!(m.settings_schema.is_empty());
         assert!(m.default_settings().is_null());
+    }
+
+    #[test]
+    fn select_type_with_flat_options() {
+        // 模拟 translate 插件的 manifest 格式
+        let json = r#"{
+            "schema_version": 1, "id": "builtin.translate", "name": "翻译", "version": "0.1.0",
+            "runtime": {"type": "python", "exec": "./main.py"},
+            "settings_schema": [
+                {"key":"default_engine","type":"select","title":"默认翻译引擎",
+                 "options":["youdao","baidu","deepl"],"default":"youdao"},
+                {"key":"target_lang","type":"select","title":"目标语言",
+                 "options":["auto","zh","en","ja","ko"],"default":"zh"}
+            ]
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.settings_schema.len(), 2);
+        assert_eq!(m.settings_schema[0].options.len(), 3);
+        assert_eq!(m.settings_schema[0].options[0].value, "youdao");
+        assert_eq!(m.settings_schema[0].options[0].label.resolve(), "youdao");
+        let defaults = m.default_settings();
+        assert_eq!(defaults["default_engine"], "youdao");
+        assert_eq!(defaults["target_lang"], "zh");
     }
 }

@@ -27,6 +27,7 @@ pub struct PluginEngine {
     configs: Arc<RwLock<HashMap<String, crate::config::PluginConfig>>>,
     pool: SqlitePool,
     /// 全局代理(HTTP,HTTPS),进程启动时 env 注入;插件 ure/reqwest 原生读取。
+    #[allow(dead_code)] // 保留用于未来插件代理配置
     global_proxy: Option<(String, String)>,
 }
 
@@ -60,13 +61,15 @@ impl PluginEngine {
                     .settings_schema
                     .iter()
                     .map(|f| {
-                        serde_json::json!({
+                        let mut field = serde_json::json!({
                             "key": f.key,
                             "type": match f.kind {
                                 super::manifest::SettingType::Boolean => "boolean",
                                 super::manifest::SettingType::String => "string",
                                 super::manifest::SettingType::Number => "number",
-                                super::manifest::SettingType::Enum => "enum",
+                                super::manifest::SettingType::Enum
+                                | super::manifest::SettingType::Select => "enum",
+                                super::manifest::SettingType::SortableList => "sortable_list",
                             },
                             "title": f.title.resolve(),
                             "description": f.description.as_ref().map(|d| d.resolve()),
@@ -77,7 +80,16 @@ impl PluginEngine {
                                 "value": o.value.clone(),
                                 "label": o.label.resolve(),
                             })).collect::<Vec<_>>(),
-                        })
+                        });
+                        // 添加 group 信息（支持对象格式，包含 title 和可选 description）
+                        if let Some(ref group) = f.group {
+                            field["group"] = if let Some(ref desc) = group.description {
+                                serde_json::json!({ "title": group.title, "description": desc })
+                            } else {
+                                serde_json::json!(group.title)
+                            };
+                        }
+                        field
                     })
                     .collect();
 
@@ -220,6 +232,13 @@ impl PluginEngine {
     pub fn get_min_arg_length(&self, id: &str) -> usize {
         self.find_plugin(id)
             .and_then(|p| p.manifest().runtime.min_arg_length)
+            .unwrap_or(0)
+    }
+
+    /// 获取插件的防抖间隔(毫秒)。0 或未配置 = 不防抖(每键触发)。
+    pub fn get_debounce_ms(&self, id: &str) -> u64 {
+        self.find_plugin(id)
+            .and_then(|p| p.manifest().runtime.debounce_ms)
             .unwrap_or(0)
     }
 

@@ -28,6 +28,7 @@ pub enum PluginRequest {
 
 impl PluginRequest {
     /// 构造一条 query 请求。
+    #[allow(dead_code)] // 便利函数，未来可能直接使用
     pub fn query(id: impl Into<String>, query: impl Into<String>) -> Self {
         PluginRequest::Query {
             id: id.into(),

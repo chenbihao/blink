@@ -65,7 +65,9 @@ pub async fn migrate_0_4_to_0_5(
     if get_config(pool, "engine:file_search").await.is_none() {
         if let Some(app_config_json) = get_config(pool, "app_config").await {
             if let Ok(app_config) = serde_json::from_str::<crate::config::AppConfig>(&app_config_json) {
-                match serde_json::to_string(&app_config.file_search) {
+                #[allow(deprecated)] // 迁移代码需要访问旧字段
+                let file_search = &app_config.file_search;
+                match serde_json::to_string(file_search) {
                     Ok(file_search_json) => {
                         set_config(pool, "engine:file_search", &file_search_json).await;
                         tracing::info!("迁移 file_search 到 engine:file_search");

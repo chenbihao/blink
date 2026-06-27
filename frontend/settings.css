@@ -500,13 +500,108 @@ input:checked + .slider:before {
   padding: 0 14px;
 }
 
+/* 可折叠配置区 */
+details.plugin-config-section {
+  padding: 0;
+  margin: 8px 0 0;
+}
+details.plugin-config-section:first-child {
+  margin-top: 0;
+}
+details.plugin-config-section > summary.plugin-section-title {
+  cursor: pointer;
+  padding: 10px 14px;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
+}
+details.plugin-config-section > summary.plugin-section-title::-webkit-details-marker {
+  display: none;
+}
+details.plugin-config-section > summary.plugin-section-title::before {
+  content: "▶";
+  font-size: 9px;
+  color: var(--text-dim);
+  transition: transform 0.2s ease;
+  flex-shrink: 0;
+}
+details.plugin-config-section[open] > summary.plugin-section-title::before {
+  transform: rotate(90deg);
+}
+details.plugin-config-section .plugin-config-body {
+  padding: 0 14px 12px;
+}
+
 .plugin-section-title {
   font-size: 11px;
   color: var(--text-faint);
   font-weight: 600;
   letter-spacing: 0.5px;
   text-transform: uppercase;
-  padding: 12px 0 4px;
+  padding: 10px 0 4px;
+}
+
+.engine-toggle-hint {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--text-dim);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* 配置分组（插件内部按 API 分组） */
+details.plugin-group {
+  margin: 8px 0 0;
+  border: 1px solid var(--surface);
+  border-radius: 6px;
+  overflow: hidden;
+}
+details.plugin-group summary.plugin-group-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  padding: 8px 12px;
+  background: var(--surface);
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
+}
+details.plugin-group summary.plugin-group-title::-webkit-details-marker {
+  display: none;
+}
+details.plugin-group summary.plugin-group-title::before {
+  content: "▶";
+  font-size: 9px;
+  color: var(--text-faint);
+  transition: transform 0.2s ease;
+  flex-shrink: 0;
+}
+details.plugin-group[open] summary.plugin-group-title::before {
+  transform: rotate(90deg);
+}
+/* 分组描述（浅色链接样式） */
+.plugin-group-desc {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-faint);
+  margin-left: 4px;
+}
+.plugin-group-desc a {
+  color: var(--text-faint);
+  text-decoration: none;
+  transition: color 0.15s;
+}
+.plugin-group-desc a:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+details.plugin-group .plugin-group-body {
+  padding: 4px 12px 8px;
 }
 
 .plugin-no-config {
@@ -575,6 +670,52 @@ input:checked + .slider:before {
   transform: translateX(14px);
 }
 
+/* 可拖动排序列表 */
+.sortable-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 220px;
+  flex-shrink: 0;
+}
+.sortable-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--surface);
+  border: 1px solid var(--surface-2);
+  border-radius: 6px;
+  cursor: grab;
+  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
+  user-select: none;
+}
+.sortable-item:hover {
+  border-color: var(--text-faint);
+}
+.sortable-item:active {
+  cursor: grabbing;
+}
+.sortable-item.dragging {
+  opacity: 0.5;
+  background: var(--accent-bg);
+  border-color: var(--accent);
+}
+.sortable-item.drag-over {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-bg);
+}
+.sortable-handle {
+  color: var(--text-faint);
+  font-size: 14px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.sortable-label {
+  font-size: 13px;
+  color: var(--text);
+}
+
 /* 保存行(嵌在配置区内) */
 .plugin-save-row {
   display: flex;
@@ -587,6 +728,25 @@ input:checked + .slider:before {
 .plugin-save-msg {
   font-size: 12px;
   min-height: 16px;
+}
+
+/* 待保存提示（字段 label 右侧红色标记） */
+.unsaved-badge {
+  display: inline-block;
+  font-size: 11px;
+  color: var(--red);
+  background: var(--red-bg);
+  border: 1px solid var(--red-border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  margin-left: 8px;
+  white-space: nowrap;
+  animation: unsaved-fade-in 0.2s ease;
+}
+
+@keyframes unsaved-fade-in {
+  from { opacity: 0; transform: translateY(-2px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
 /* ── 敏感应用 chip 列表 ─────────────────────────────────────────────────── */

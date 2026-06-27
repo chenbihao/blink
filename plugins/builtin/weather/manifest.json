@@ -3,7 +3,7 @@
   "id": "builtin.weather",
   "name": "天气",
   "version": "0.1.0",
-  "description": "查询城市天气（open-meteo，免费无 key）",
+  "description": "查询城市天气（open-meteo，免费无需 key）",
   "builtin": true,
   "runtime": {
     "type": "process",
@@ -11,6 +11,7 @@
     "exec": "./bin/blink-plugin-weather.exe",
     "timeout_ms": 5000,
     "min_arg_length": 2,
+    "debounce_ms": 500,
     "concurrency": 1
   },
   "triggers": [

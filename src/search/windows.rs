@@ -5,31 +5,39 @@ use std::path::PathBuf;
 use super::AppEntry;
 
 /// 扫描用户 + 系统开始菜单，收集所有 .lnk 条目。
-pub fn scan_start_menu() -> Vec<AppEntry> {
+/// `max_depth` 控制递归深度（1=只扫根目录，2=扫一层子目录…）。
+pub fn scan_start_menu(max_depth: u32) -> Vec<AppEntry> {
     let mut entries = Vec::new();
     if let Ok(appdata) = std::env::var("APPDATA") {
         scan_dir(
             &PathBuf::from(appdata).join("Microsoft\\Windows\\Start Menu\\Programs"),
             &mut entries,
+            max_depth,
+            0,
         );
     }
     if let Ok(program_data) = std::env::var("ProgramData") {
         scan_dir(
             &PathBuf::from(program_data).join("Microsoft\\Windows\\Start Menu\\Programs"),
             &mut entries,
+            max_depth,
+            0,
         );
     }
     entries
 }
 
-fn scan_dir(dir: &PathBuf, entries: &mut Vec<AppEntry>) {
+fn scan_dir(dir: &PathBuf, entries: &mut Vec<AppEntry>, max_depth: u32, current_depth: u32) {
+    if current_depth >= max_depth {
+        return;
+    }
     let Ok(read_dir) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in read_dir.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            scan_dir(&path, entries);
+            scan_dir(&path, entries, max_depth, current_depth + 1);
         } else if path.extension().map_or(false, |ext| ext == "lnk") {
             let name = path
                 .file_stem()

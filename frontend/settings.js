@@ -206,6 +206,7 @@ async function loadNetworkConfig() {
     try {
       await invoke("update_global_proxy", { http, https });
       if (msg) { msg.textContent = t("network.saved_msg"); msg.style.color = "#a6e3a1"; }
+      clearUnsaved(container);
     } catch (e) {
       console.error("save proxy failed:", e);
       if (msg) { msg.textContent = t("network.save_failed"); msg.style.color = "#f38ba8"; }
@@ -448,6 +449,9 @@ async function loadPlugins() {
   for (const plugin of plugins) {
     bindPluginCardEvents(plugin);
   }
+
+  // 初始化可拖动排序列表
+  initSortableLists();
 }
 
 // 渲染单个插件卡片（0.5.1：头部总开关 + 配置区分组；boolean 用 checkbox 区别于总开关）
@@ -463,7 +467,7 @@ function renderPluginCard(plugin) {
   const hasFields = schema.length > 0;
 
   const configSection = hasFields
-    ? renderConfigSection(t("plugin.section"), schema, settings, { saveLabel: t("plugin.save") })
+    ? renderConfigSection(t("plugin.section"), schema, settings, { saveLabel: t("plugin.save"), collapsible: true, collapsed: true })
     : `<div class="plugin-no-config">${t("plugin.no_config")}</div>`;
 
   const headerRight = `<div class="plugin-master-toggle">
@@ -485,7 +489,7 @@ function renderPluginCard(plugin) {
   });
 }
 
-// 渲染单个配置项控件（boolean→checkbox 方框, enum→下拉, number/string→输入框）
+// 渲染单个配置项控件（boolean→checkbox 方框, enum→下拉, number/string→输入框, sortable_list→可拖动列表）
 function renderSettingField(field, value) {
   const val = value !== undefined ? value : field.default;
   let control;
@@ -499,6 +503,14 @@ function renderSettingField(field, value) {
         .map((o) => `<option value="${escapeAttr(o.value)}" ${String(val) === String(o.value) ? "selected" : ""}>${escapeHtml(o.label)}</option>`)
         .join("");
       control = `<select class="plugin-field" data-key="${field.key}">${opts}</select>`;
+      break;
+    }
+    case "sortable_list": {
+      // 可拖动排序列表
+      const items = Array.isArray(val) ? val : (field.default || []);
+      const optionsMap = {};
+      (field.options || []).forEach(o => { optionsMap[o.value] = o.label; });
+      control = renderSortableList(field.key, items, optionsMap);
       break;
     }
     case "number":
@@ -521,6 +533,194 @@ function renderSettingField(field, value) {
   `;
 }
 
+// 渲染可拖动排序列表
+function renderSortableList(key, items, optionsMap) {
+  const listId = `sortable-${key}`;
+  const itemsHtml = items.map((val, idx) => {
+    const label = optionsMap[val] || val;
+    return `<div class="sortable-item" data-value="${escapeAttr(val)}" draggable="true">
+      <span class="sortable-handle">⠿</span>
+      <span class="sortable-label">${escapeHtml(label)}</span>
+    </div>`;
+  }).join("");
+
+  // 隐藏 input 存储值（初始就创建，方便 collectSettings 读取）
+  const hiddenValue = JSON.stringify(items);
+
+  return `<div class="sortable-list" id="${listId}" data-key="${key}">
+    ${itemsHtml}
+  </div>
+  <input type="hidden" class="sortable-value plugin-field" data-key="${key}" value="${escapeAttr(hiddenValue)}" />`;
+}
+
+// 初始化可拖动列表事件（事件委托，同时支持 HTML5 drag 和鼠标 fallback）
+function initSortableLists() {
+  if (initSortableLists._bound) return;
+  initSortableLists._bound = true;
+
+  // ── HTML5 Drag API ──
+  let _dragItem = null;
+
+  document.addEventListener("dragstart", (e) => {
+    const item = e.target.closest(".sortable-item");
+    if (!item) return;
+    _dragItem = item;
+    item.classList.add("dragging");
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", item.dataset.value);
+  });
+
+  document.addEventListener("dragend", (e) => {
+    const item = e.target.closest(".sortable-item");
+    if (!item) return;
+    item.classList.remove("dragging");
+    document.querySelectorAll(".sortable-item.drag-over").forEach(i => i.classList.remove("drag-over"));
+    const list = item.closest(".sortable-list");
+    if (list) updateSortableValue(list);
+    _dragItem = null;
+  });
+
+  document.addEventListener("dragover", (e) => {
+    const item = e.target.closest(".sortable-item");
+    if (!item || !_dragItem || item === _dragItem) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    item.classList.add("drag-over");
+  });
+
+  document.addEventListener("dragleave", (e) => {
+    const item = e.target.closest(".sortable-item");
+    if (item) item.classList.remove("drag-over");
+  });
+
+  document.addEventListener("drop", (e) => {
+    const item = e.target.closest(".sortable-item");
+    if (!item || !_dragItem || item === _dragItem) return;
+    e.preventDefault();
+    item.classList.remove("drag-over");
+    const list = item.closest(".sortable-list");
+    if (!list) return;
+    const allItems = [...list.querySelectorAll(".sortable-item")];
+    const dragIdx = allItems.indexOf(_dragItem);
+    const dropIdx = allItems.indexOf(item);
+    if (dragIdx < dropIdx) item.after(_dragItem);
+    else item.before(_dragItem);
+  });
+
+  // ── 鼠标 fallback（WebView2 drag API 有时不触发）──
+  let _mouseDrag = null;
+  let _mouseClone = null;
+  let _mouseStartY = 0;
+
+  document.addEventListener("mousedown", (e) => {
+    const handle = e.target.closest(".sortable-handle");
+    if (!handle) return;
+    const item = handle.closest(".sortable-item");
+    if (!item) return;
+    e.preventDefault();
+
+    _mouseDrag = item;
+    _mouseStartY = e.clientY;
+    item.classList.add("dragging");
+
+    // 创建拖拽预览
+    _mouseClone = item.cloneNode(true);
+    _mouseClone.style.position = "fixed";
+    _mouseClone.style.pointerEvents = "none";
+    _mouseClone.style.zIndex = "99999";
+    _mouseClone.style.width = item.offsetWidth + "px";
+    _mouseClone.style.opacity = "0.8";
+    _mouseClone.style.boxShadow = "0 4px 12px rgba(0,0,0,0.3)";
+    const rect = item.getBoundingClientRect();
+    _mouseClone.style.left = rect.left + "px";
+    _mouseClone.style.top = rect.top + "px";
+    document.body.appendChild(_mouseClone);
+  });
+
+  document.addEventListener("mousemove", (e) => {
+    if (!_mouseDrag || !_mouseClone) return;
+    e.preventDefault();
+    const rect = _mouseDrag.getBoundingClientRect();
+    _mouseClone.style.top = (rect.top + (e.clientY - _mouseStartY)) + "px";
+
+    // 查找鼠标下方的 sortable-item
+    const list = _mouseDrag.closest(".sortable-list");
+    if (!list) return;
+    const items = [...list.querySelectorAll(".sortable-item")];
+    items.forEach(i => i.classList.remove("drag-over"));
+    for (const item of items) {
+      if (item === _mouseDrag) continue;
+      const r = item.getBoundingClientRect();
+      if (e.clientY >= r.top && e.clientY <= r.bottom) {
+        item.classList.add("drag-over");
+        break;
+      }
+    }
+  });
+
+  document.addEventListener("mouseup", (e) => {
+    if (!_mouseDrag) return;
+    const list = _mouseDrag.closest(".sortable-list");
+
+    // 找到 drop 目标并插入
+    if (list) {
+      const items = [...list.querySelectorAll(".sortable-item")];
+      for (const item of items) {
+        if (item === _mouseDrag) continue;
+        const r = item.getBoundingClientRect();
+        if (e.clientY >= r.top && e.clientY <= r.bottom) {
+          const allItems = [...list.querySelectorAll(".sortable-item")];
+          const dragIdx = allItems.indexOf(_mouseDrag);
+          const dropIdx = allItems.indexOf(item);
+          if (dragIdx < dropIdx) item.after(_mouseDrag);
+          else item.before(_mouseDrag);
+          break;
+        }
+      }
+      items.forEach(i => i.classList.remove("drag-over"));
+      updateSortableValue(list);
+    }
+
+    _mouseDrag.classList.remove("dragging");
+    if (_mouseClone) { _mouseClone.remove(); _mouseClone = null; }
+    _mouseDrag = null;
+  });
+}
+
+// 更新可拖动列表的值到隐藏 input
+function updateSortableValue(list) {
+  const key = list.dataset.key;
+  const values = [...list.querySelectorAll(".sortable-item")].map(i => i.dataset.value);
+  // 查找或创建隐藏 input 存储值
+  let input = list.parentElement.querySelector(`input.sortable-value[data-key="${key}"]`);
+  if (!input) {
+    input = document.createElement("input");
+    input.type = "hidden";
+    input.className = "sortable-value plugin-field";
+    input.dataset.key = key;
+    list.parentElement.appendChild(input);
+  }
+  input.value = JSON.stringify(values);
+}
+
+// 收集 sortable_list 的值
+function collectSortableValue(card, key) {
+  const input = card.querySelector(`input.sortable-value[data-key="${key}"]`);
+  if (input) {
+    try {
+      return JSON.parse(input.value);
+    } catch (e) {
+      console.error("Failed to parse sortable value:", e);
+    }
+  }
+  // fallback: 从 DOM 顺序收集
+  const list = card.querySelector(`.sortable-list[data-key="${key}"]`);
+  if (list) {
+    return [...list.querySelectorAll(".sortable-item")].map(i => i.dataset.value);
+  }
+  return [];
+}
+
 // ── 配置区公用渲染函数 ──────────────────────────────────────────────────────
 
 /** 快捷构建文本字段 schema */
@@ -540,19 +740,73 @@ function booleanField(key, title, opts = {}) {
  * @param {Object} values - 当前值 { key: value }
  * @param {Object} [opts]
  * @param {string} [opts.saveLabel] - 保存按钮文字，省略则不渲染保存行
+ * @param {boolean} [opts.collapsible] - 是否可折叠（默认 false）
+ * @param {boolean} [opts.collapsed] - 初始是否收起（默认 true，仅 collapsible=true 时生效）
  * @returns {string} HTML
  */
 function renderConfigSection(title, schema, values, opts = {}) {
-  const fieldsHtml = schema.map((f) => renderSettingField(f, values[f.key])).join("");
+  // 按 group 分组（支持字符串或对象格式）
+  const groups = {}; // key -> { title, description, fields }
+  const ungrouped = [];
+  for (const f of schema) {
+    if (f.group) {
+      // group 支持字符串或对象 { title, description }
+      const groupKey = typeof f.group === "string" ? f.group : f.group.title;
+      if (!groups[groupKey]) {
+        groups[groupKey] = {
+          title: groupKey,
+          description: typeof f.group === "object" ? f.group.description : "",
+          fields: [],
+        };
+      }
+      groups[groupKey].fields.push(f);
+    } else {
+      ungrouped.push(f);
+    }
+  }
+
+  // 渲染无分组字段
+  const ungroupedHtml = ungrouped.map((f) => renderSettingField(f, values[f.key])).join("");
+
+  // 渲染各分组（每个分组可独立折叠）
+  const groupedHtml = Object.entries(groups).map(([key, group]) => {
+    const fieldsHtml = group.fields.map((f) => renderSettingField(f, values[f.key])).join("");
+    const descHtml = group.description
+      ? `<span class="plugin-group-desc">${linkify(group.description)}</span>`
+      : "";
+    return `<details class="plugin-group" open>
+      <summary class="plugin-group-title">
+        <span>${escapeHtml(group.title)}</span>
+        ${descHtml}
+      </summary>
+      <div class="plugin-group-body">${fieldsHtml}</div>
+    </details>`;
+  }).join("");
+
   const saveRow = opts.saveLabel
     ? `<div class="plugin-save-row">
          <button class="btn-small plugin-save">${escapeHtml(opts.saveLabel)}</button>
          <span class="plugin-save-msg"></span>
        </div>`
     : "";
+
+  // 整个配置区可折叠
+  if (opts.collapsible) {
+    const collapsed = opts.collapsed !== false; // 默认收起
+    return `<details class="plugin-config-section" ${collapsed ? "" : "open"}>
+       <summary class="plugin-section-title">${escapeHtml(title)}</summary>
+       <div class="plugin-config-body">
+         ${ungroupedHtml}
+         ${groupedHtml}
+         ${saveRow}
+       </div>
+     </details>`;
+  }
+
   return `<div class="plugin-config-section">
      <div class="plugin-section-title">${escapeHtml(title)}</div>
-     ${fieldsHtml}
+     ${ungroupedHtml}
+     ${groupedHtml}
      ${saveRow}
    </div>`;
 }
@@ -613,7 +867,10 @@ function bindPluginCardEvents(plugin) {
 
   card.querySelector(".plugin-save")?.addEventListener("click", async () => {
     const ok = await save();
-    if (ok) flash(card, t("plugin.saved_msg"));
+    if (ok) {
+      clearUnsaved(card);
+      flash(card, t("plugin.saved_msg"));
+    }
   });
 }
 
@@ -621,6 +878,11 @@ function bindPluginCardEvents(plugin) {
 function collectSettings(card, schema) {
   const settings = {};
   for (const f of schema) {
+    if (f.type === "sortable_list") {
+      // sortable_list 从隐藏 input 或 DOM 顺序收集
+      settings[f.key] = collectSortableValue(card, f.key);
+      continue;
+    }
     const el = card.querySelector(`.plugin-field[data-key="${f.key}"]`);
     if (!el) continue;
     switch (f.type) {
@@ -645,6 +907,26 @@ function escapeAttr(s) {
   return escapeHtml(s);
 }
 
+// 把文本中的 URL 转换成可点击链接（使用 Tauri invoke 在外部浏览器打开）
+function linkify(text) {
+  const escaped = escapeHtml(text);
+  return escaped.replace(
+    /(https?:\/\/[^\s<>"']+)/g,
+    '<a href="#" class="external-link" onclick="openExternalUrl(\'$1\'); return false;">$1</a>'
+  );
+}
+
+// 在外部浏览器打开 URL
+async function openExternalUrl(url) {
+  try {
+    await invoke("open_url", { url });
+  } catch (e) {
+    console.error("openExternalUrl failed:", e);
+    // fallback
+    window.open(url, "_blank");
+  }
+}
+
 // 卡片内显示一行反馈（2s 后清除）
 function flash(card, msg, isError) {
   const el = card.querySelector(".plugin-save-msg");
@@ -654,6 +936,70 @@ function flash(card, msg, isError) {
   clearTimeout(el._t);
   el._t = setTimeout(() => { el.textContent = ""; }, 2000);
 }
+
+// ── 待保存提示 ─────────────────────────────────────────────────────────────────
+
+const UNSAVED_TEXT = "待保存";
+
+/** 标记字段为"待保存"（在 field-title 内部末尾追加红色 badge） */
+function markUnsaved(fieldEl) {
+  const head = fieldEl.closest(".field-head");
+  if (!head) return;
+  const title = head.querySelector(".field-title");
+  if (!title) return;
+  // 已有就跳过
+  if (title.querySelector(".unsaved-badge")) return;
+  const badge = document.createElement("span");
+  badge.className = "unsaved-badge";
+  badge.textContent = UNSAVED_TEXT;
+  title.appendChild(badge);
+}
+
+/** 清除卡片内所有待保存 badge */
+function clearUnsaved(container) {
+  container.querySelectorAll(".unsaved-badge").forEach((el) => el.remove());
+}
+
+// 事件委托：plugin-field 变化时标记待保存（input 实时，change 最终）
+document.addEventListener("input", (e) => {
+  const el = e.target.closest(".plugin-field");
+  if (el && el.type !== "checkbox") markUnsaved(el);
+});
+document.addEventListener("change", (e) => {
+  const el = e.target.closest(".plugin-field");
+  if (el) markUnsaved(el);
+});
+
+// 文件搜索引擎的输入框（不是 plugin-field，单独处理）
+document.addEventListener("input", (e) => {
+  const id = e.target.id;
+  if (["everything-port", "everything-max-results", "local-scan-depth"].includes(id)) {
+    const row = e.target.closest(".setting-row");
+    if (row) {
+      const label = row.querySelector("label");
+      if (label && !label.querySelector(".unsaved-badge")) {
+        const badge = document.createElement("span");
+        badge.className = "unsaved-badge";
+        badge.textContent = UNSAVED_TEXT;
+        label.appendChild(badge);
+      }
+    }
+  }
+});
+
+// 文件搜索总开关（在卡片头部，单独处理）
+document.getElementById("file-search-enabled")?.addEventListener("change", () => {
+  const card = document.getElementById("save-file-search")?.closest(".extension-card");
+  if (!card) return;
+  // 在扩展描述后显示 badge（如果还没有）
+  const desc = card.querySelector(".extension-desc");
+  if (desc && !desc.nextElementSibling?.classList?.contains("unsaved-badge")) {
+    const badge = document.createElement("span");
+    badge.className = "unsaved-badge";
+    badge.textContent = UNSAVED_TEXT;
+    desc.after(badge);
+  }
+});
 
 // ── 快捷键录制（使用后端 rdev）─────────────────────────────────────────────────
 
@@ -1003,6 +1349,9 @@ document.getElementById("save-file-search")?.addEventListener("click", async () 
       msgEl.style.color = "#a6e3a1";
       setTimeout(() => { msgEl.textContent = ""; }, 2000);
     }
+    // 清除待保存提示
+    const fileSearchCard = document.getElementById("save-file-search")?.closest(".extension-card");
+    if (fileSearchCard) clearUnsaved(fileSearchCard);
     // 重新探测
     probeEverythingStatus();
   } catch (e) {
