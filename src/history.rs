@@ -145,6 +145,31 @@ pub async fn reset_weight(pool: &SqlitePool, lnk_path: &str) {
         .await;
 }
 
+/// 清理过期历史：删除 last_used_at 早于 `now - days*86400` 的记录。
+/// `days=0` 视为永久保留（直接返回）。启动时按 search_history_days 调用。
+pub async fn cleanup_old(pool: &SqlitePool, days: u32) {
+    if days == 0 {
+        return;
+    }
+    let now = chrono::Utc::now().timestamp();
+    let cutoff = now - (days as i64 * 86400);
+    match sqlx::query("DELETE FROM history WHERE last_used_at < ?1")
+        .bind(cutoff)
+        .execute(pool)
+        .await
+    {
+        Ok(r) => {
+            let rows = r.rows_affected();
+            if rows > 0 {
+                tracing::info!(rows, cutoff, days, "清理过期搜索历史");
+            } else {
+                tracing::debug!(days, "无过期历史需清理");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "清理过期历史失败"),
+    }
+}
+
 // ── 配置相关函数 ────────────────────────────────────────────────────────────────
 
 /// 获取配置值。

@@ -9,9 +9,34 @@ import { resultsEl } from "./dom.js";
 import { syncWindowSize } from "./window-size.js";
 import { activateItem } from "./actions.js";
 import * as statusbar from "./statusbar.js";
+import { invoke } from "./tauri.js";
 
 /** 每页条数（对齐 Alt+1~9：每页都能用数字键选中）。 */
 const PAGE_SIZE = 9;
+
+/** 融合后最大显示条数（AppConfig.max_results）。
+ *  后端单次 emit 已截断，但前端 merge 多次增量会累积，故此处对 allItems 再做最终上限。
+ *  启动读一次 + lifecycle shown 时 refreshMaxResults 刷新（设置页改动下次唤起生效）。 */
+let maxResults = 50;
+
+(async function loadMaxResults() {
+  try {
+    const cfg = await invoke("get_config");
+    if (cfg && cfg.max_results) maxResults = cfg.max_results;
+  } catch (e) {
+    /* 读失败保持默认 20 */
+  }
+})();
+
+/** 重新读取 max_results（lifecycle shown 时调用）。 */
+export async function refreshMaxResults() {
+  try {
+    const cfg = await invoke("get_config");
+    if (cfg && cfg.max_results) maxResults = cfg.max_results;
+  } catch (e) {
+    /* 保持原值 */
+  }
+}
 
 /** 后端返回的全部结果（数据，非 DOM）。 */
 let allItems = [];
@@ -66,7 +91,14 @@ function ensureSeq(seq) {
 function appendNew(items, didReset) {
   const seen = new Set(allItems.map(itemKey));
   let changed = false;
-  for (const item of items || []) {
+
+  // 检测空结果标记(后端 Takeover 空结果发送的特殊项)
+  const emptyResultMarker = (items || []).find(x => x.source === "empty_result");
+  const hasEmptyResult = !!emptyResultMarker;
+  // 过滤掉空结果标记项,不加入结果列表
+  const realItems = (items || []).filter(x => x.source !== "empty_result");
+
+  for (const item of realItems) {
     const key = itemKey(item);
     if (!seen.has(key)) {
       allItems.push(item);
@@ -74,16 +106,18 @@ function appendNew(items, didReset) {
       changed = true;
     }
   }
-  if (!changed && !didReset) return; // 无变化且非新批：不抖动
+  if (!changed && !didReset && !hasEmptyResult) return; // 无变化且非新批：不抖动
   // 增量结果到达时,只清掉对应插件的占位项(真实结果已到)。
   // 其他插件的占位保留(还在查询中)。引擎(File/StartMenu)结果不清占位。
   // 插件占位的 source 就是 plugin_id（如 "builtin.weather"），直接匹配即可。
-  if (changed && !didReset) {
+  if ((changed || hasEmptyResult) && !didReset) {
+    // 收集所有返回的插件来源（包括错误信息和空结果标记）
     const pluginsReturned = new Set(
-      (items || [])
+      [...realItems, ...(hasEmptyResult ? [emptyResultMarker] : [])]
         .map((x) => x.source)
         .filter((s) => s && !["file", "start_menu", "calc"].includes(s))
     );
+    // 清除对应插件的占位符
     allItems = allItems.filter((x) => {
       if (!x.is_placeholder) return true;
       return !pluginsReturned.has(x.source);
@@ -92,6 +126,10 @@ function appendNew(items, didReset) {
   // 按 score 降序排序。source 优先级已由后端 bake_source_boost 处理,
   // 不需要前端重复 sourceRank 逻辑。
   allItems.sort((a, b) => (b.score || 0) - (a.score || 0));
+  // 最终上限：多次增量累积后截断到 max_results（高 score 在前，保留 top-N）
+  if (allItems.length > maxResults) {
+    allItems.length = maxResults;
+  }
   renderPage();
 }
 
@@ -275,6 +313,12 @@ function createItem(app, i) {
     li.dataset.calcValue = app.name.replace(/^=\s*/, "");
   }
 
+  // 插件错误信息：橙色警告样式，不可点击
+  if (app.is_error) {
+    li.classList.add("error-item");
+    li.dataset.isError = "true";
+  }
+
   // 插件命中占位：加载动画+灰字
   if (app.is_placeholder) {
     li.classList.add("is-loading");
@@ -333,6 +377,7 @@ function itemData(li) {
     lnkPath: li.dataset.lnkPath,
     calcValue: li.dataset.calcValue,
     payload: li.dataset.actionPayload,
+    isError: li.dataset.isError === "true",
     action: {
       kind: li.dataset.actionKind,
       hint: li.dataset.actionHint,

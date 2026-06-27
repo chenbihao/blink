@@ -2,7 +2,7 @@
 
 本文件为 Claude Code 在本仓库工作时提供指引。**指令优先级高于默认行为，必须严格遵循。**
 
-更新时间 20260624
+更新时间 20260627
 
 ## 1. 项目概览
 
@@ -89,7 +89,8 @@ Roadmap 内容了解即可，**不要提前实现**。
 ### 前端 (`frontend/`)
 
 - `index.html` / `main.js` / `style.css` — 主搜索窗口（弹性大小、键盘导航）
-- `settings.html` / `settings.js` / `settings.css` — 设置窗口（5 Tab：通用/快捷键/存储/调试/关于）
+- `settings.html` / `settings.js` / `settings.css` — 设置窗口（9 Tab：通用/快捷键/引擎/插件/网络/上下文/存储/调试/关于）
+- `theme.css` / `js/theme.js` — 主题系统（0.5.4）：CSS 变量（dark=Mocha/light=Latte）+ auto 跟随系统，三窗口共享
 
 前端用 `window.__TAURI__.core.invoke()` 调 Rust commands，用 `TAU.event.listen()` 监听后端事件
 （`blink://shown`、`blink://hidden`、`blink://results`——async lane 慢引擎/插件增量，前端 `results.merge` 按 seq 协调）。
@@ -106,7 +107,7 @@ Roadmap 内容了解即可，**不要提前实现**。
 ### Tauri Commands（前端 invoke 入口）
 
 `search_apps` / `launch_app` / `hide_window` / `resize_window` /
-`get_config`、`update_hotkey`、`update_tap_threshold`、`update_grace_period`、`update_auto_start`、`update_language`、`update_log_level`、`reset_config` /
+`get_config`、`update_general_config`、`update_hotkey`、`update_tap_threshold`、`update_grace_period`、`update_auto_start`、`update_language`、`update_log_level`、`reset_config` /
 `record_hotkey` / `get_storage_info`、`clear_history` / `open_log_file`、`open_log_dir`、`get_log_info`
 
 **新增 command 流程**：① `commands.rs` 加 `#[tauri::command]` 函数 → ② `main.rs` `invoke_handler!` 注册 → ③ 前端 `invoke("name", { args })`。

@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Blink Settings</title>
+    <link rel="stylesheet" href="theme.css" />
     <link rel="stylesheet" href="settings.css" />
   </head>
   <body>
@@ -11,54 +12,79 @@
       <!-- 侧边 Tab 导航 -->
       <nav class="sidebar">
         <div class="logo">Blink</div>
-        <button class="tab active" data-tab="general">通用</button>
-        <button class="tab" data-tab="hotkey">快捷键</button>
-        <button class="tab" data-tab="engines">引擎</button>
-        <button class="tab" data-tab="plugins">插件</button>
-        <button class="tab" data-tab="network">网络</button>
-        <button class="tab" data-tab="context">上下文</button>
-        <button class="tab" data-tab="storage">存储</button>
-        <button class="tab" data-tab="debug">调试</button>
-        <button class="tab" data-tab="about">关于</button>
+        <button class="tab active" data-tab="general" data-i18n="tab.general">通用</button>
+        <button class="tab" data-tab="hotkey" data-i18n="tab.hotkey">快捷键</button>
+        <button class="tab" data-tab="engines" data-i18n="tab.engines">引擎</button>
+        <button class="tab" data-tab="plugins" data-i18n="tab.plugins">插件</button>
+        <button class="tab" data-tab="network" data-i18n="tab.network">网络</button>
+        <button class="tab" data-tab="context" data-i18n="tab.context">上下文</button>
+        <button class="tab" data-tab="storage" data-i18n="tab.storage">存储</button>
+        <button class="tab" data-tab="debug" data-i18n="tab.debug">调试</button>
+        <button class="tab" data-tab="about" data-i18n="tab.about">关于</button>
       </nav>
 
       <!-- Tab 内容 -->
       <main class="content">
         <!-- 通用 -->
         <div id="general" class="panel active">
-          <h2>通用</h2>
+          <h2 data-i18n="panel.general">通用</h2>
           <div class="setting-row">
-            <label>开机自启</label>
+            <label data-i18n="general.auto_start.label">开机自启</label>
             <input type="checkbox" id="auto-start" />
-            <span class="hint">开机自动启动</span>
+            <span class="hint" data-i18n="general.auto_start.hint">开机自动启动</span>
           </div>
           <div class="setting-row">
-            <label>语言</label>
+            <label data-i18n="general.language.label">语言</label>
             <select id="language">
+              <!-- 语言名用各自语言显示，不参与 i18n -->
               <option value="zh" selected>中文</option>
               <option value="en">English</option>
             </select>
-            <span class="hint">配置已保存，i18n 待实现</span>
+            <span class="hint" data-i18n="general.language.hint">界面语言，切换后立即生效</span>
+          </div>
+          <div class="setting-row">
+            <label data-i18n="general.theme.label">主题</label>
+            <select id="theme">
+              <option value="auto" data-i18n="general.theme.auto">跟随系统</option>
+              <option value="light" data-i18n="general.theme.light">浅色</option>
+              <option value="dark" data-i18n="general.theme.dark">深色</option>
+            </select>
+            <span class="hint" data-i18n="general.theme.hint">立即生效</span>
+          </div>
+          <div class="setting-row">
+            <label data-i18n="general.history_enabled.label">记录搜索历史</label>
+            <input type="checkbox" id="search-history-enabled" />
+            <span class="hint" data-i18n="general.history_enabled.hint">关闭后不再记录频率权重</span>
+          </div>
+          <div class="setting-row">
+            <label data-i18n="general.history_days.label">历史保留天数</label>
+            <input type="number" id="search-history-days" min="0" max="365" class="input-small" />
+            <span class="hint" data-i18n="general.history_days.hint">0 = 永久保留</span>
+          </div>
+          <div class="setting-row">
+            <label data-i18n="general.max_results.label">最大结果数</label>
+            <input type="number" id="max-results" min="1" max="100" class="input-small" />
+            <span class="hint" data-i18n="general.max_results.hint">搜索融合后返回上限</span>
           </div>
         </div>
 
         <!-- 快捷键 -->
         <div id="hotkey" class="panel">
-          <h2>快捷键</h2>
+          <h2 data-i18n="panel.hotkey">快捷键</h2>
           <div class="setting-row">
-            <label>唤起快捷键</label>
+            <label data-i18n="hotkey.label">唤起快捷键</label>
             <div class="hotkey-input-wrapper">
-              <button id="hotkey-record" class="hotkey-btn" title="点击后按下快捷键">RightAlt</button>
-              <button id="hotkey-reset" class="btn-small" title="恢复默认">恢复默认</button>
+              <button id="hotkey-record" class="hotkey-btn" data-i18n-title="hotkey.record.title" title="点击后按下快捷键">RightAlt</button>
+              <button id="hotkey-reset" class="btn-small" data-i18n="hotkey.reset" data-i18n-title="hotkey.reset.title" title="恢复默认">恢复默认</button>
             </div>
           </div>
           <div class="setting-row">
-            <label>tap 阈值</label>
+            <label data-i18n="hotkey.tap.label">tap 阈值</label>
             <input type="range" id="tap-threshold" min="150" max="500" value="300" step="50" />
             <span id="tap-threshold-value">300ms</span>
           </div>
           <div class="setting-row">
-            <label>看门狗 grace period</label>
+            <label data-i18n="hotkey.grace.label">看门狗 grace period</label>
             <input type="range" id="grace-ms" min="200" max="1000" value="500" step="50" />
             <span id="grace-ms-value">500ms</span>
           </div>
@@ -66,15 +92,15 @@
 
         <!-- 引擎 -->
         <div id="engines" class="panel">
-          <h2>内置引擎</h2>
+          <h2 data-i18n="panel.engines">内置引擎</h2>
 
           <!-- 文件搜索（内置引擎） -->
           <div class="extension-card">
             <div class="extension-header">
               <div class="extension-icon">📁</div>
               <div class="extension-info">
-                <h3>文件搜索</h3>
-                <p class="extension-desc">Everything 极速全盘文件搜索</p>
+                <h3 data-i18n="engine.file_search.title">文件搜索</h3>
+                <p class="extension-desc" data-i18n="engine.file_search.desc">Everything 极速全盘文件搜索</p>
               </div>
               <label class="switch">
                 <input type="checkbox" id="file-search-enabled" checked />
@@ -84,21 +110,21 @@
 
             <div class="extension-body">
               <div class="setting-row">
-                <label>Everything 状态</label>
+                <label data-i18n="engine.everything.status.label">Everything 状态</label>
                 <span id="everything-status" class="status-badge status-unknown">探测中…</span>
-                <button id="probe-everything" class="btn-small">重新探测</button>
+                <button id="probe-everything" class="btn-small" data-i18n="engine.probe">重新探测</button>
               </div>
 
               <div class="setting-row">
-                <label>HTTP 端口</label>
+                <label data-i18n="engine.everything.port.label">HTTP 端口</label>
                 <input type="number" id="everything-port" min="1" max="65535" value="80" class="input-small" />
-                <span class="hint">Everything 选项 → HTTP 服务器</span>
+                <span class="hint" data-i18n="engine.everything.port.hint">Everything 选项 → HTTP 服务器</span>
               </div>
 
               <div class="setting-row">
-                <label>最大结果数</label>
+                <label data-i18n="engine.everything.max_results.label">最大结果数</label>
                 <input type="number" id="everything-max-results" min="1" max="100" value="20" class="input-small" />
-                <span class="hint">每次检索返回的文件数量上限</span>
+                <span class="hint" data-i18n="engine.everything.max_results.hint">每次检索返回的文件数量上限</span>
               </div>
 
               <!-- 本地扫描深度（待实现，暂隐藏）
@@ -111,7 +137,7 @@
 
               <div class="setting-row">
                 <label></label>
-                <button id="save-file-search" class="btn">保存配置</button>
+                <button id="save-file-search" class="btn" data-i18n="engine.save">保存配置</button>
               </div>
             </div>
           </div>
@@ -119,7 +145,7 @@
 
         <!-- 插件 -->
         <div id="plugins" class="panel">
-          <h2>插件管理</h2>
+          <h2 data-i18n="panel.plugins">插件管理</h2>
           <div id="plugins-container">
             <!-- 插件卡片由 JS 动态渲染 -->
           </div>
@@ -127,7 +153,7 @@
 
         <!-- 网络 -->
         <div id="network" class="panel">
-          <h2>网络配置</h2>
+          <h2 data-i18n="panel.network">网络配置</h2>
           <div id="network-container">
             <!-- 网络配置由 JS 动态渲染 -->
           </div>
@@ -135,7 +161,7 @@
 
         <!-- 上下文 -->
         <div id="context" class="panel">
-          <h2>环境感知</h2>
+          <h2 data-i18n="panel.context">环境感知</h2>
           <div id="context-container">
             <!-- 由 JS 动态渲染 -->
           </div>
@@ -143,62 +169,62 @@
 
         <!-- 存储 -->
         <div id="storage" class="panel">
-          <h2>存储</h2>
+          <h2 data-i18n="panel.storage">存储</h2>
           <div class="setting-row">
-            <label>历史记录</label>
+            <label data-i18n="storage.history.label">历史记录</label>
             <span id="history-count" class="value">加载中…</span>
           </div>
           <div class="setting-row">
-            <label>数据库路径</label>
+            <label data-i18n="storage.db_path.label">数据库路径</label>
             <span id="db-path" class="value">-</span>
           </div>
           <div class="setting-row">
-            <button id="clear-history" class="btn-danger">清空历史记录</button>
+            <button id="clear-history" class="btn-danger" data-i18n="storage.clear">清空历史记录</button>
           </div>
         </div>
 
         <!-- 调试 -->
         <div id="debug" class="panel">
-          <h2>调试</h2>
+          <h2 data-i18n="panel.debug">调试</h2>
 
           <div class="setting-row">
-            <label>日志级别</label>
+            <label data-i18n="log.level.label">日志级别</label>
             <select id="log-level">
-              <option value="error" selected>error（仅错误）</option>
-              <option value="info">info</option>
-              <option value="debug">debug（详细）</option>
-              <option value="trace">trace（最详细）</option>
+              <option value="error" selected data-i18n="log.level.error">error（仅错误）</option>
+              <option value="info" data-i18n="log.level.info">info</option>
+              <option value="debug" data-i18n="log.level.debug">debug（详细）</option>
+              <option value="trace" data-i18n="log.level.trace">trace（最详细）</option>
             </select>
-            <span class="hint">切换立即生效，写入日志文件</span>
+            <span class="hint" data-i18n="log.level.hint">切换立即生效，写入日志文件</span>
           </div>
 
           <div class="setting-row log-path-row">
-            <label>日志文件</label>
+            <label data-i18n="log.file.label">日志文件</label>
             <span id="log-file-path" class="value">-</span>
           </div>
 
           <div class="setting-row">
-            <label>操作</label>
-            <button id="open-log-file" class="btn">打开日志</button>
-            <button id="open-log-dir" class="btn">打开文件夹</button>
+            <label data-i18n="log.action.label">操作</label>
+            <button id="open-log-file" class="btn" data-i18n="log.open_file">打开日志</button>
+            <button id="open-log-dir" class="btn" data-i18n="log.open_dir">打开文件夹</button>
           </div>
 
-          <h3>性能统计 <span class="hint">（搁置，待实现）</span></h3>
+          <h3><span data-i18n="debug.perf.title">性能统计</span> <span class="hint" data-i18n="debug.perf.hint">（搁置，待实现）</span></h3>
           <div class="debug-grid">
             <div class="debug-card">
-              <div class="debug-label">唤起延迟</div>
+              <div class="debug-label" data-i18n="debug.perf.invoke">唤起延迟</div>
               <div id="debug-invoke" class="debug-value">-</div>
             </div>
             <div class="debug-card">
-              <div class="debug-label">show 耗时</div>
+              <div class="debug-label" data-i18n="debug.perf.show">show 耗时</div>
               <div id="debug-show" class="debug-value">-</div>
             </div>
             <div class="debug-card">
-              <div class="debug-label">focus 耗时</div>
+              <div class="debug-label" data-i18n="debug.perf.focus">focus 耗时</div>
               <div id="debug-focus" class="debug-value">-</div>
             </div>
             <div class="debug-card">
-              <div class="debug-label">成功率</div>
+              <div class="debug-label" data-i18n="debug.perf.rate">成功率</div>
               <div id="debug-rate" class="debug-value">-</div>
             </div>
           </div>
@@ -206,22 +232,22 @@
 
         <!-- 关于 -->
         <div id="about" class="panel">
-          <h2>关于</h2>
+          <h2 data-i18n="panel.about">关于</h2>
           <div class="setting-row">
-            <label>版本</label>
+            <label data-i18n="about.version.label">版本</label>
             <span class="value">0.1.0 MVP</span>
           </div>
           <div class="setting-row">
-            <label>技术栈</label>
+            <label data-i18n="about.stack.label">技术栈</label>
             <span class="value">Rust 2024 + Tauri 2 + WebView2</span>
           </div>
           <div class="setting-row">
-            <label>许可</label>
+            <label data-i18n="about.license.label">许可</label>
             <span class="value">MIT</span>
           </div>
         </div>
       </main>
     </div>
-    <script src="settings.js"></script>
+    <script type="module" src="settings.js"></script>
   </body>
 </html>

@@ -69,6 +69,9 @@ pub struct AppEntry {
     /// 占位项标记(takeover 时先同步返回,真实结果到达后前端自动移除)。
     #[serde(default)]
     pub is_placeholder: bool,
+    /// 错误信息标记(插件返回错误时显示提示，不可选中执行)。
+    #[serde(default)]
+    pub is_error: bool,
     /// 来源(引擎 id / plugin id),前端增量 merge 时用：
     /// - 引擎结果："start_menu"、"file"、"calc"
     /// - 插件结果：plugin_id（如 "builtin.weather"）
@@ -203,6 +206,7 @@ mod tests {
             is_calc: false,
             score: 0.0,
             is_placeholder: false,
+            is_error: false,
             source: String::new(),
             description: Some(lnk.into()),
             action: Action {

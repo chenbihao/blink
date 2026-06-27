@@ -29,6 +29,14 @@ enum PluginRequest {
 struct PluginResponse {
     id: String,
     items: Vec<PluginItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<PluginError>,
+}
+
+#[derive(Debug, Serialize)]
+struct PluginError {
+    code: String,
+    message: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -77,6 +85,8 @@ fn main() {
 }
 
 fn handle_query(id: String, query: &str, settings: &Option<serde_json::Value>) -> PluginResponse {
+    eprintln!("[weather] 收到查询: id={id}, query={query:?}");
+
     let default_city = settings
         .as_ref()
         .and_then(|s| s.get("default_city"))
@@ -93,19 +103,40 @@ fn handle_query(id: String, query: &str, settings: &Option<serde_json::Value>) -
     let city = query.trim();
     let city = if city.is_empty() { default_city.trim() } else { city };
 
+    if city.is_empty() {
+        eprintln!("[weather] 无城市参数且未设置默认城市");
+        return PluginResponse {
+            id,
+            items: vec![],
+            error: Some(PluginError {
+                code: "no_city".into(),
+                message: "请输入城市名，如「天气 北京」\n或在设置中配置默认城市".into(),
+            }),
+        };
+    }
+
+    eprintln!("[weather] 开始查询: city={city}, fahrenheit={use_fahrenheit}");
     let mut items = Vec::new();
-    if !city.is_empty() {
-        match fetch_weather(city, use_fahrenheit) {
-            Some((title, subtitle)) => items.push(PluginItem {
+    let mut error = None;
+    match fetch_weather(city, use_fahrenheit) {
+        Some((title, subtitle)) => {
+            eprintln!("[weather] 查询成功: {title}");
+            items.push(PluginItem {
                 title: title.clone(),
                 subtitle: Some(subtitle),
                 score: 1.0,
                 action: PluginAction::Copy { text: title },
-            }),
-            None => eprintln!("weather: 查询失败(城市 '{city}' 未找到或无网络)"),
+            })
+        }
+        None => {
+            eprintln!("[weather] 查询失败(城市 '{city}' 未找到或无网络)");
+            error = Some(PluginError {
+                code: "fetch_failed".into(),
+                message: format!("查询「{city}」失败，请检查城市名或网络"),
+            });
         }
     }
-    PluginResponse { id, items }
+    PluginResponse { id, items, error }
 }
 
 /// 查询天气,返回 (title, subtitle)。失败返回 None(静默降级)。
@@ -115,28 +146,42 @@ fn fetch_weather(city: &str, fahrenheit: bool) -> Option<(String, String)> {
     let geo_url = format!(
         "https://geocoding-api.open-meteo.com/v1/search?name={encoded}&count=1&language=zh&format=json"
     );
+    eprintln!("[weather] geocoding 请求: {geo_url}");
     let geo_body = ureq::get(&geo_url)
         .call()
+        .map_err(|e| eprintln!("[weather] geocoding 请求失败: {e}"))
         .ok()?
         .into_body()
         .read_to_string()
+        .map_err(|e| eprintln!("[weather] geocoding 读取失败: {e}"))
         .ok()?;
-    let geo: GeoResponse = serde_json::from_str(&geo_body).ok()?;
+    eprintln!("[weather] geocoding 响应: {} bytes", geo_body.len());
+    let geo: GeoResponse = serde_json::from_str(&geo_body)
+        .map_err(|e| eprintln!("[weather] geocoding 解析失败: {e}"))
+        .ok()?;
     let loc = geo.results.into_iter().next()?;
+    eprintln!("[weather] 解析到城市: {} ({}, {})", loc.name, loc.latitude, loc.longitude);
 
     // 2. weather:坐标 → 当前天气
     let weather_url = format!(
         "https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}&current=temperature_2m,weather_code,wind_speed_10m&timezone=auto",
         loc.latitude, loc.longitude
     );
+    eprintln!("[weather] weather 请求: {weather_url}");
     let w_body = ureq::get(&weather_url)
         .call()
+        .map_err(|e| eprintln!("[weather] weather 请求失败: {e}"))
         .ok()?
         .into_body()
         .read_to_string()
+        .map_err(|e| eprintln!("[weather] weather 读取失败: {e}"))
         .ok()?;
-    let w: WeatherResponse = serde_json::from_str(&w_body).ok()?;
+    eprintln!("[weather] weather 响应: {} bytes", w_body.len());
+    let w: WeatherResponse = serde_json::from_str(&w_body)
+        .map_err(|e| eprintln!("[weather] weather 解析失败: {e}"))
+        .ok()?;
     let cur = w.current;
+    eprintln!("[weather] 当前天气: temp={}, code={}, wind={}", cur.temperature_2m, cur.weather_code, cur.wind_speed_10m);
 
     let temp_str = if fahrenheit {
         format!("{:.0}°F", cur.temperature_2m * 9.0 / 5.0 + 32.0)

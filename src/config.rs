@@ -22,9 +22,9 @@ pub struct HotkeyConfig {
 impl Default for HotkeyConfig {
     fn default() -> Self {
         Self {
-            modifiers: vec![],
-            key: "ralt".to_string(),
-            display: "RightAlt".to_string(),
+            modifiers: vec!["alt".to_string()],
+            key: " ".to_string(),
+            display: "Alt+Space".to_string(),
         }
     }
 }
@@ -56,8 +56,8 @@ fn default_30() -> u32 {
     30
 }
 
-fn default_20() -> u32 {
-    20
+fn default_50() -> u32 {
+    50
 }
 
 fn default_5() -> u32 {
@@ -139,7 +139,7 @@ pub struct AppConfig {
     #[serde(default = "default_30")]
     pub search_history_days: u32,
     /// 最多显示结果数
-    #[serde(default = "default_20")]
+    #[serde(default = "default_50")]
     pub max_results: u32,
     /// 是否启用主动建议（空 query 历史 top-N）
     #[serde(default = "default_false")]
@@ -166,7 +166,7 @@ impl Default for AppConfig {
             theme: default_theme(),
             search_history_enabled: default_true(),
             search_history_days: default_30(),
-            max_results: default_20(),
+            max_results: default_50(),
             proactive_enabled: default_false(),
             empty_query_topn: default_5(),
             file_search: FileSearchConfig::default(),
@@ -174,15 +174,57 @@ impl Default for AppConfig {
     }
 }
 
+/// 通用配置（0.5）：用户可调的外观与行为项。
+/// 聚合更新（`update_general_config`）避免单字段命令爆炸。
+/// `proactive_enabled` / `empty_query_topn` 属 P3 主动建议，暂不纳入（字段仍保留在 AppConfig）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeneralConfig {
+    /// 主题：auto / light / dark
+    pub theme: String,
+    /// 是否记录搜索历史
+    pub search_history_enabled: bool,
+    /// 搜索历史保留天数（0 = 永久保留）
+    pub search_history_days: u32,
+    /// 融合后返回前端的最大结果数
+    pub max_results: u32,
+}
+
+impl From<&AppConfig> for GeneralConfig {
+    fn from(c: &AppConfig) -> Self {
+        Self {
+            theme: c.theme.clone(),
+            search_history_enabled: c.search_history_enabled,
+            search_history_days: c.search_history_days,
+            max_results: c.max_results,
+        }
+    }
+}
+
 // ── 配置操作函数 ────────────────────────────────────────────────────────────────
 
-/// 初始化配置：如果配置不存在，写入默认值。
+/// 初始化配置：如果配置不存在，写入默认值（首次运行）。
+/// 语言默认值按系统语言推断（中文系→zh，其余→en）；仅首次生效，用户在设置页
+/// 改过后以此为准。
 pub async fn init_config(pool: &SqlitePool) -> Result<(), String> {
     let existing = crate::history::get_all_config(pool).await;
     if existing.is_empty() {
-        let config = AppConfig::default();
+        let mut config = AppConfig::default();
+        config.language = crate::locale::detect_system_language();
+        tracing::info!(language = %config.language, "首次运行，按系统语言设置默认语言");
         save_config(pool, &config).await?;
     }
+
+    // 一次性迁移：修正旧版默认值 key:"space" → key:" "（空格字符，匹配 vk_to_key）。
+    // 仅当热键 display 含 "Space" 且 key 是错误的 "space" 时修正。
+    {
+        let mut config = get_config(pool).await;
+        if config.hotkey.key == "space" && config.hotkey.display.contains("Space") {
+            config.hotkey.key = " ".to_string();
+            save_config(pool, &config).await?;
+            tracing::info!("迁移：修正热键 key 'space' → ' '");
+        }
+    }
+
     Ok(())
 }
 
@@ -241,6 +283,18 @@ pub async fn update_language(pool: &SqlitePool, language: String) -> Result<(), 
 pub async fn update_log_level(pool: &SqlitePool, level: String) -> Result<(), String> {
     let mut config = get_config(pool).await;
     config.log_level = level;
+    save_config(pool, &config).await
+}
+
+/// 更新通用配置（主题 / 搜索历史 / 结果数）。仅持久化；
+/// max_results 的运行时热更新由命令层通知 SearchService（热路径零 IO），
+/// theme 由各窗口启动/shown 时读 config 生效（设置页本身即时预览）。
+pub async fn update_general_config(pool: &SqlitePool, general: &GeneralConfig) -> Result<(), String> {
+    let mut config = get_config(pool).await;
+    config.theme = general.theme.clone();
+    config.search_history_enabled = general.search_history_enabled;
+    config.search_history_days = general.search_history_days;
+    config.max_results = general.max_results;
     save_config(pool, &config).await
 }
 

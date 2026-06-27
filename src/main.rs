@@ -7,6 +7,7 @@ mod context;
 mod history;
 mod hotkey;
 mod intent;
+mod locale;
 mod logging;
 mod plugin;
 mod search;
@@ -210,6 +211,19 @@ fn main() {
                 router,
             ));
             app.manage(search_service.clone());
+            // 初始化 SearchService 的 max_results 内存值（来自 AppConfig，搜索热路径零 IO）
+            search_service.update_max_results(app_config.max_results as usize);
+            // 启动清理过期搜索历史（后台 spawn，不阻塞启动；enabled=false 或 days=0 跳过）
+            {
+                let cleanup_pool = pool.clone();
+                let days = app_config.search_history_days;
+                let enabled = app_config.search_history_enabled;
+                tauri::async_runtime::spawn(async move {
+                    if enabled {
+                        crate::history::cleanup_old(&cleanup_pool, days).await;
+                    }
+                });
+            }
             // 注入 ContextConfig 内存缓存：invoke 热键回调零 IO 读它（热更新见 update_context_config）
             let context_config = tauri::async_runtime::block_on(config::get_context_config(&pool));
             app.manage(std::sync::Arc::new(std::sync::RwLock::new(context_config)));
@@ -248,6 +262,7 @@ fn main() {
             commands::update_hotkey,
             commands::update_tap_threshold,
             commands::update_grace_period,
+            commands::update_general_config,
             commands::update_auto_start,
             commands::update_language,
             commands::reset_config,

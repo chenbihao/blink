@@ -2,6 +2,7 @@
 //! 无结果时整条隐藏（不占窗口高度）。未来可承载智能提示/更新提示。
 
 import { actionHint } from "./hints.js";
+import { t } from "./i18n.js";
 
 const el = document.getElementById("statusbar");
 
@@ -21,7 +22,7 @@ export function update(active, paging) {
   // 多于一屏才显示翻页提示
   const right =
     paging.pageCount > 1
-      ? `PgUp/PgDn 翻页 · ${paging.page}/${paging.pageCount}`
+      ? t("statusbar.paging", { page: paging.page, pageCount: paging.pageCount })
       : "";
 
   el.innerHTML = "";

@@ -6,7 +6,7 @@
 //!
 //! 由 `commands::search_apps` 经 `app.state::<Arc<SearchService>>()` 调用。
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use serde::Serialize;
@@ -20,9 +20,6 @@ use crate::plugin::PluginEngine;
 use super::engine::{Lane, QueryContext, SearchEngine, SearchItem};
 use super::scorer::{boost_priority, placeholder_score, source_rank};
 use super::{Action, ActionKind, AppEntry};
-
-/// 融合后返回前端的结果上限。
-const RESULT_LIMIT: usize = 50;
 
 /// async lane 增量结果的事件 payload(emit "blink://results")。
 #[derive(Serialize, Clone)]
@@ -43,6 +40,8 @@ pub struct SearchService {
     /// 唤起时的上下文快照（前台应用、剪贴板等）。
     /// invoke 时更新，search 时读取。RwLock 读可并行，写极少（仅唤起时）。
     snapshot: Arc<RwLock<ContextSnapshot>>,
+    /// 融合后返回前端的最大结果数（AppConfig.max_results 热更新，搜索热路径零 IO）。
+    max_results: Arc<AtomicUsize>,
 }
 
 impl SearchService {
@@ -70,6 +69,7 @@ impl SearchService {
             router,
             latest_seq: Arc::new(AtomicU64::new(0)),
             snapshot: Arc::new(RwLock::new(ContextSnapshot::default())),
+            max_results: Arc::new(AtomicUsize::new(50)),
         }
     }
 
@@ -77,6 +77,14 @@ impl SearchService {
     pub fn update_snapshot(&self, snapshot: ContextSnapshot) {
         let mut guard = self.snapshot.write().unwrap();
         *guard = snapshot;
+    }
+
+    /// 更新最大结果数（update_general_config 时调用）。热更新，搜索热路径零 IO。
+    pub fn update_max_results(&self, n: usize) {
+        // 下限保护：0 视为默认 20，避免结果全空
+        let clamped = if n == 0 { 50 } else { n };
+        self.max_results.store(clamped, Ordering::SeqCst);
+        tracing::debug!(max_results = clamped, "SearchService max_results 已热更新");
     }
 
     /// 启动所有引擎的后台任务(如 StartMenuEngine 预扫)。
@@ -160,7 +168,8 @@ impl SearchService {
                 }
 
                 // 占位项放最后,不抢占 sync lane 结果的首位
-                let mut all_items: Vec<AppEntry> = fuse_items(items, RESULT_LIMIT)
+                let limit = self.max_results.load(Ordering::SeqCst);
+                let mut all_items: Vec<AppEntry> = fuse_items(items, limit)
                     .into_iter()
                     .map(SearchItem::into_app_entry)
                     .collect();
@@ -185,10 +194,11 @@ impl SearchService {
                     tracing::debug!(plugin = %plugin_id, "禁用插件命中 takeover,降级 Generic");
                     return Route::Mixed { candidates: vec![] };
                 }
-                // 检查 min_arg_length:参数太短也降级(避免占位符永远不被替换的死态)
+                // 检查 min_arg_length:仅对带参前缀命中生效(参数太短降级,避免占位符死态)。
+                // Exact 命中(arg 为空)跳过检查——无参触发使用插件默认配置(如天气用默认城市)。
                 let min_len = pe.get_min_arg_length(plugin_id);
                 let arg_len = arg.chars().count();
-                if min_len > 0 && arg_len < min_len {
+                if min_len > 0 && !arg.is_empty() && arg_len < min_len {
                     tracing::debug!(plugin = %plugin_id, %arg_len, min_len, "参数过短命中 takeover,降级 Generic");
                     return Route::Mixed { candidates: vec![] };
                 }
@@ -199,7 +209,11 @@ impl SearchService {
                     .into_iter()
                     .filter(|c| pe.is_enabled(&c.plugin_id))
                     .filter(|c| {
+                        // Exact 命中(arg 为空)跳过 min_arg_length 检查
                         let min_len = pe.get_min_arg_length(&c.plugin_id);
+                        if c.arg.is_empty() {
+                            return true; // 无参触发，用默认配置
+                        }
                         let arg_len = c.arg.chars().count();
                         min_len == 0 || arg_len >= min_len
                     })
@@ -209,6 +223,7 @@ impl SearchService {
     }
 
     /// Takeover 分支:查询单插件 → emit 增量。
+    /// 即使插件返回空结果也要 emit(空 items 通知前端清除占位符,避免永远转圈)。
     fn spawn_takeover(&self, plugin_id: String, arg: String, seq: u64) {
         let Some(plugin_engine) = self.plugin_engine.clone() else {
             return;
@@ -216,6 +231,7 @@ impl SearchService {
         let app = self.app.clone();
         let latest_seq = Arc::clone(&self.latest_seq);
         let snapshot = Arc::clone(&self.snapshot);
+        let max_results = Arc::clone(&self.max_results);
         tauri::async_runtime::spawn(async move {
             let snapshot = snapshot.read().unwrap().clone();
             let ctx = crate::plugin::PluginQueryContext::from_snapshot(&snapshot);
@@ -225,10 +241,9 @@ impl SearchService {
             if seq != latest_seq.load(Ordering::SeqCst) {
                 return;
             }
-            if items.is_empty() {
-                return;
-            }
-            emit_results(&app, seq, items);
+            // Takeover:即使空结果也要 emit,让前端清除占位符
+            let limit = max_results.load(Ordering::SeqCst);
+            emit_results(&app, seq, items, limit, Some(&plugin_id));
         });
     }
 
@@ -247,10 +262,12 @@ impl SearchService {
         let pool = self.pool.clone();
         let latest_seq = Arc::clone(&self.latest_seq);
         let snapshot = Arc::clone(&self.snapshot);
+        let max_results = Arc::clone(&self.max_results);
 
         tauri::async_runtime::spawn(async move {
             let history = crate::history::get_weights(&pool).await;
             let snapshot = snapshot.read().unwrap().clone();
+            let limit = max_results.load(Ordering::SeqCst);
 
             // priority 插件的 id 集合(查询完成后 score 抬高)
             let priority_set: std::collections::HashSet<String> = priority_candidates
@@ -274,9 +291,12 @@ impl SearchService {
                                 item.score = boost_priority(item.score);
                             }
                         }
-                        if seq == latest_seq.load(Ordering::SeqCst) && !items.is_empty() {
+                        if seq == latest_seq.load(Ordering::SeqCst) {
+                            // 即使空结果也要 emit,让前端清除占位符
                             tracing::trace!(count = items.len(), "插件查询返回");
-                            emit_results(&app, seq, items);
+                            // 插件查询：空结果时用第一个 plugin_id 作为来源
+                            let empty_source = plugin_ids.first().map(|(id, _)| id.as_str());
+                            emit_results(&app, seq, items, limit, empty_source);
                         }
                     });
                 }
@@ -294,7 +314,7 @@ impl SearchService {
                     let items = engine.search(&q, &ctx).await;
                     if seq == latest_seq.load(Ordering::SeqCst) && !items.is_empty() {
                         tracing::trace!(engine = engine.id(), count = items.len(), "async lane 引擎返回");
-                        emit_results(&app, seq, items);
+                        emit_results(&app, seq, items, limit, None);
                     }
                 });
             }
@@ -328,19 +348,50 @@ fn fuse_items(items: Vec<SearchItem>, limit: usize) -> Vec<SearchItem> {
 // source_rank / bake_source_boost 已统一移到 scorer.rs
 
 /// emit 增量结果到前端。
-fn emit_results(app: &AppHandle, seq: u64, items: Vec<SearchItem>) {
-    let entries: Vec<AppEntry> = fuse_items(items, RESULT_LIMIT)
-        .into_iter()
-        .map(SearchItem::into_app_entry)
-        .collect();
+/// 即使 items 为空也会 emit（空结果需要通知前端清除占位符）。
+/// empty_source: 空结果时携带的来源 plugin_id，用于前端只清除对应占位符。
+fn emit_results(app: &AppHandle, seq: u64, items: Vec<SearchItem>, limit: usize, empty_source: Option<&str>) {
+    let entries: Vec<AppEntry> = if items.is_empty() {
+        // 空结果:发送一个标记项让前端知道该插件已返回(清除占位符)
+        // 用特殊 score=-2 标记,前端 merge 后会被排序到最后但保留来源信息
+        let source = empty_source.unwrap_or("empty_result");
+        tracing::debug!(source = %source, "emit 空结果标记");
+        vec![AppEntry {
+            name: String::new(),
+            pinyin_name: String::new(),
+            lnk_path: String::new(),
+            is_calc: false,
+            score: -2.0,
+            is_placeholder: true, // 保留占位标记,前端用它清除占位符
+            is_error: false,
+            source: source.into(),
+            description: None,
+            action: Action {
+                kind: ActionKind::Open,
+                hint: None,
+                payload: None,
+            },
+        }]
+    } else {
+        fuse_items(items, limit)
+            .into_iter()
+            .map(SearchItem::into_app_entry)
+            .collect()
+    };
     for (i, item) in entries.iter().enumerate() {
-        tracing::debug!(
-            index = i,
-            name = %item.name,
-            score = %item.score,
-            source = %item.source,
-            "增量结果项"
-        );
+        if item.is_error {
+            tracing::debug!(index = i, source = %item.source, "增量结果: 插件错误信息");
+        } else if item.name.is_empty() {
+            tracing::debug!("增量结果: 空结果标记(清除占位符)");
+        } else {
+            tracing::debug!(
+                index = i,
+                name = %item.name,
+                score = %item.score,
+                source = %item.source,
+                "增量结果项"
+            );
+        }
     }
     if let Err(e) = app.emit("blink://results", ResultsPayload { seq, items: entries }) {
         tracing::debug!(error = %e, "emit blink://results failed");
@@ -358,6 +409,7 @@ fn placeholder_entry(plugin_id: &str, display_name: &str) -> AppEntry {
         is_calc: false,
         score: 0.0,
         is_placeholder: true,
+        is_error: false,
         source: plugin_id.to_string(),
         description: Some("请稍候".into()),
         action: Action {

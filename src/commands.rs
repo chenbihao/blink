@@ -69,7 +69,11 @@ pub async fn launch_app(app: tauri::AppHandle, lnk_path: String) -> Result<(), S
 
     // 普通应用启动
     let pool = app.state::<sqlx::SqlitePool>();
-    crate::history::record_launch(&pool, &lnk_path).await;
+    // search_history_enabled=false 时跳过记录（隐私/偏好）；该项频率加权随之失效
+    let config = crate::config::get_config(&pool).await;
+    if config.search_history_enabled {
+        crate::history::record_launch(&pool, &lnk_path).await;
+    }
     crate::search::launch(&lnk_path)?;
     crate::window::hide(&app, "launch");
     Ok(())
@@ -321,6 +325,39 @@ pub async fn update_log_level(app: tauri::AppHandle, level: String) -> Result<()
     let pool = app.state::<sqlx::SqlitePool>();
     crate::config::update_log_level(&pool, level.clone()).await?;
     crate::logging::update_level(&level);
+    Ok(())
+}
+
+/// 更新通用配置（主题 / 搜索历史 / 结果数）。
+/// 存配置 + max_results 热更新到 SearchService 内存（搜索热路径零 IO）。
+/// theme 不需后端推送：设置页本身即时预览，主窗口/右键菜单下次读取时生效。
+#[tauri::command]
+pub async fn update_general_config(
+    app: tauri::AppHandle,
+    theme: String,
+    search_history_enabled: bool,
+    search_history_days: u32,
+    max_results: u32,
+) -> Result<(), String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    let general = crate::config::GeneralConfig {
+        theme,
+        search_history_enabled,
+        search_history_days,
+        max_results,
+    };
+    crate::config::update_general_config(&pool, &general).await?;
+    // max_results 热更新到 SearchService 内存（若已注册）
+    if let Some(ss) = app.try_state::<std::sync::Arc<crate::search::SearchService>>() {
+        ss.update_max_results(max_results as usize);
+    }
+    tracing::info!(
+        theme = %general.theme,
+        search_history_enabled,
+        search_history_days,
+        max_results,
+        "通用配置已更新"
+    );
     Ok(())
 }
 
@@ -738,11 +775,17 @@ pub async fn show_context_menu(
 
     // 窗口定位：先显示在鼠标位置；popup 页面加载后自己 resize 到精确尺寸
     let encoded_items = urlencoding::encode(&items).to_string();
-    tracing::debug!(x, y, width, height, url = %format!("contextmenu-popup.html?items={encoded_items}"), "创建右键菜单窗口");
+    // 透传主题原值（auto/light/dark），popup 用 matchMedia 自行 resolve，保持同步渲染零延迟
+    let theme = {
+        let pool = app.state::<sqlx::SqlitePool>();
+        crate::config::get_config(&pool).await.theme
+    };
+    let url = format!("contextmenu-popup.html?items={encoded_items}&theme={theme}");
+    tracing::debug!(x, y, width, height, %url, "创建右键菜单窗口");
     let win = WebviewWindowBuilder::new(
         &app,
         "context-menu",
-        WebviewUrl::App(format!("contextmenu-popup.html?items={encoded_items}").into()),
+        WebviewUrl::App(url.into()),
     )
     .title("")
     .inner_size(width, height)

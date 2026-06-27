@@ -7,6 +7,7 @@ import { queryEl, resultsEl } from "./dom.js";
 import { activateItem } from "./actions.js";
 import { openContainingFolder, openLnkTarget, resetItemHistory, launchApp, copyToClipboard, invoke } from "./api.js";
 import { retrigger } from "./search.js";
+import { t } from "./i18n.js";
 
 /** 当前菜单数据（用于 Popup 点击时回调执行）。 */
 let currentItems = [];
@@ -143,19 +144,19 @@ function inputMenu() {
     }, 10);
   };
   return [
-    { label: "剪切", run: exec("cut") },
-    { label: "复制", run: exec("copy") },
-    { label: "粘贴", run: paste },
+    { label: t("menu.cut"), run: exec("cut") },
+    { label: t("menu.copy"), run: exec("copy") },
+    { label: t("menu.paste"), run: paste },
     { separator: true },
-    { label: "全选", run: exec("selectAll") },
+    { label: t("menu.selectAll"), run: exec("selectAll") },
   ];
 }
 
 function blankMenu() {
   return [
-    { label: "打开设置", run: () => launchApp("__BLINK_ACTION_OPEN_SETTINGS__") },
+    { label: t("menu.openSettings"), run: () => launchApp("__BLINK_ACTION_OPEN_SETTINGS__") },
     { separator: true },
-    { label: "退出 Blink", run: () => launchApp("__BLINK_ACTION_EXIT__"), danger: true },
+    { label: t("menu.exit"), run: () => launchApp("__BLINK_ACTION_EXIT__"), danger: true },
   ];
 }
 
@@ -165,24 +166,24 @@ function itemMenu(li) {
   const isRealPath = lnkPath && !lnkPath.startsWith("__BLINK_ACTION_");
   const items = [];
 
-  items.push({ label: "打开", run: () => activateItem(readData(li)) });
+  items.push({ label: t("menu.open"), run: () => activateItem(readData(li)) });
 
   if (isRealPath && (source === "file" || source === "start_menu")) {
     const fileName = lnkPath.split(/[\\/]/).pop() || lnkPath;
     const baseName = fileName.replace(/\.[^.]*$/, "");
     const dirPath = lnkPath.replace(/[\\/][^\\/]*$/, "");
     const isLnk = lnkPath.toLowerCase().endsWith(".lnk");
-    items.push({ label: "打开所在文件夹", run: () => { openContainingFolder(lnkPath).catch((e) => console.error(e)); } });
+    items.push({ label: t("menu.openFolder"), run: () => { openContainingFolder(lnkPath).catch((e) => console.error(e)); } });
     if (isLnk) {
-      items.push({ label: "打开快捷方式目标", run: () => { openLnkTarget(lnkPath).catch((e) => console.error(e)); } });
+      items.push({ label: t("menu.openLnkTarget"), run: () => { openLnkTarget(lnkPath).catch((e) => console.error(e)); } });
     }
     items.push({ separator: true });
-    items.push({ label: "复制路径", run: () => copyText(dirPath) });
-    items.push({ label: "复制完整路径", run: () => copyText(lnkPath) });
-    items.push({ label: "复制文件名", run: () => copyText(baseName) });
-    items.push({ label: "复制完整文件名", run: () => copyText(fileName) });
+    items.push({ label: t("menu.copyPath"), run: () => copyText(dirPath) });
+    items.push({ label: t("menu.copyFullPath"), run: () => copyText(lnkPath) });
+    items.push({ label: t("menu.copyName"), run: () => copyText(baseName) });
+    items.push({ label: t("menu.copyFullName"), run: () => copyText(fileName) });
     items.push({ separator: true });
-    items.push({ label: "重置该项记录", run: () => { resetItemHistory(lnkPath).then(() => retrigger()).catch((e) => console.error(e)); }, danger: true });
+    items.push({ label: t("menu.resetHistory"), run: () => { resetItemHistory(lnkPath).then(() => retrigger()).catch((e) => console.error(e)); }, danger: true });
   }
 
   const isResultLike =
@@ -193,7 +194,7 @@ function itemMenu(li) {
       li.dataset.calcValue ||
       li.querySelector(".item-name")?.textContent;
     if (result) {
-      items.push({ label: "复制结果", run: () => copyText(result) });
+      items.push({ label: t("menu.copyResult"), run: () => copyText(result) });
     }
   }
 

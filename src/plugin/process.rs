@@ -18,7 +18,7 @@ use tokio::process::{Child, ChildStdin};
 use tokio::sync::{oneshot, Mutex};
 
 use super::manifest::PluginManifest;
-use super::protocol::{PluginItem, PluginRequest, PluginResponse};
+use super::protocol::{PluginAction, PluginItem, PluginRequest, PluginResponse};
 
 /// Windows CreateProcess 标志:不创建控制台窗口。
 #[cfg(windows)]
@@ -187,8 +187,15 @@ impl PluginProcess {
 
         match tokio::time::timeout(Duration::from_millis(timeout_ms), rx).await {
             Ok(Ok(resp)) => {
+                // 插件返回 error 时，转成特殊的 PluginItem 让前端显示错误信息
                 if let Some(err) = resp.error {
-                    return Err(PluginError::PluginReturned(err.message));
+                    tracing::debug!(id = %req_id, error = %err.message, "插件返回错误信息");
+                    return Ok(vec![PluginItem {
+                        title: err.message,
+                        subtitle: None,
+                        score: -1.0, // 负分，排序到最后
+                        action: PluginAction::Open { path: String::new() }, // 空路径=纯展示
+                    }]);
                 }
                 Ok(resp.items)
             }

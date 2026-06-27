@@ -9,12 +9,13 @@
     "type": "process",
     "protocol": "jsonl",
     "exec": "../../../target/debug/blink-plugin-weather.exe",
-    "timeout_ms": 2500,
+    "timeout_ms": 5000,
     "min_arg_length": 2,
     "concurrency": 1
   },
   "triggers": [
-    { "type": "keyword", "keyword": "天气", "exclusive": true }
+    { "type": "keyword", "keyword": "天气", "exclusive": true },
+    { "type": "keyword", "keyword": "weather", "exclusive": true }
   ],
   "capabilities": ["query"],
   "settings_schema": [

@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Blink</title>
+    <link rel="stylesheet" href="theme.css" />
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
@@ -11,7 +12,7 @@
          不用 deep 模式，避免第一次点击被拖动检测吞掉导致"需要双击" -->
     <div id="app" data-tauri-drag-region>
       <div id="search-bar">
-        <input id="query" type="text" placeholder="输入应用名、计算…" autocomplete="off" spellcheck="false" />
+        <input id="query" type="text" data-i18n-ph="search.placeholder" placeholder="输入应用名、计算…" autocomplete="off" spellcheck="false" />
       </div>
       <ul id="results"></ul>
       <div id="statusbar"></div>

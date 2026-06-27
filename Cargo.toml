@@ -50,6 +50,7 @@ windows = { version = "0.62.2", features = [
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_Shutdown",
+    "Win32_Globalization",
 ] }
 
 [build-dependencies]

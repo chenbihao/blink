@@ -1,0 +1,50 @@
+/* ── 主题变量（0.5 完整主题切换）──────────────────────────────────────────────
+   语义化 CSS 变量：所有窗口（主窗口 / 设置页 / 右键菜单）共享。
+   dark = Catppuccin Mocha（默认 :root）
+   light = Catppuccin Latte（[data-theme="light"] 覆盖）
+   由 js/theme.js 根据 AppConfig.theme（auto/light/dark）设置 data-theme。
+   dark 是默认态：不设 data-theme 即回落 :root。auto 额外监听 prefers-color-scheme。 */
+
+:root {
+  --bg: #1e1e2e;
+  --bg-sidebar: #181825;
+  --bg-deep: #11111b;
+  --surface: #313244;
+  --surface-2: #45475a;
+  --text: #cdd6f4;
+  --text-sub: #a6adc8;
+  --text-dim: #6c7086;
+  --text-faint: #585b70;
+  --accent: #89b4fa;
+  --green: #a6e3a1;
+  --red: #f38ba8;
+  --red-bg: #45273a;
+  --red-border: #6c3a5a;
+  --green-bg: #2a3f4e;
+  --shadow: rgba(0, 0, 0, 0.6);
+  --shadow-strong: rgba(0, 0, 0, 0.6);
+  --border-glow: rgba(255, 255, 255, 0.05);
+  --danger-hover-bg: rgba(243, 139, 168, 0.12);
+}
+
+[data-theme="light"] {
+  --bg: #eff1f5;
+  --bg-sidebar: #e6e9ef;
+  --bg-deep: #dce0e8;
+  --surface: #ccd0da;
+  --surface-2: #bcc0cc;
+  --text: #4c4f69;
+  --text-sub: #5c5f77;
+  --text-dim: #6c6f85;
+  --text-faint: #7c7f93;
+  --accent: #1e66f5;
+  --green: #40a02b;
+  --red: #d20f39;
+  --red-bg: #e6d2da;
+  --red-border: #d2b3c2;
+  --green-bg: #d2e3d8;
+  --shadow: rgba(0, 0, 0, 0.18);
+  --shadow-strong: rgba(0, 0, 0, 0.35);
+  --border-glow: rgba(0, 0, 0, 0.06);
+  --danger-hover-bg: rgba(210, 15, 57, 0.1);
+}

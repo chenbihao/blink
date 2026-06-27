@@ -13,7 +13,7 @@ body {
 
 body {
   font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
-  color: #cdd6f4;
+  color: var(--text);
   user-select: none;
 }
 
@@ -27,10 +27,10 @@ body {
      移除后清空查询时窗口才能正确收缩回输入框高度。 */
   width: 100%;
   padding: 12px;
-  background: #1e1e2e;
+  background: var(--bg);
   border-radius: 12px;
   overflow: hidden;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.05);
+  box-shadow: 0 8px 32px var(--shadow), 0 0 0 1px var(--border-glow);
   cursor: default;
 }
 
@@ -47,18 +47,18 @@ body {
   padding: 8px 10px;
   font-size: 18px;
   background: transparent;
-  color: #cdd6f4;
+  color: var(--text);
   border: none;
   outline: none;
   user-select: text;
-  caret-color: #89b4fa;
+  caret-color: var(--accent);
   line-height: 1.4;
   /* 排除拖动区域：输入框不能拖，否则第一次点击触发拖动检测而不是输入 */
   -webkit-app-region: no-drag;
 }
 
 #query::placeholder {
-  color: #585b70;
+  color: var(--text-faint);
   font-weight: 300;
 }
 
@@ -76,7 +76,7 @@ body {
 #results.has-items {
   margin-top: 10px;
   padding-top: 10px;
-  border-top: 1px solid #313244;
+  border-top: 1px solid var(--surface);
 }
 
 #results li {
@@ -105,15 +105,15 @@ body {
 
 /* 插件查询中占位动画 - 明确用户命令已被识别 */
 #results li.is-loading {
-  color: #6c7086;
+  color: var(--text-dim);
   opacity: 0.9;
 }
 #results li .loading-spinner {
   width: 16px;
   height: 16px;
   margin-right: 12px;
-  border: 2px solid #45475a;
-  border-top-color: #89b4fa;
+  border: 2px solid var(--surface-2);
+  border-top-color: var(--accent);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
   flex-shrink: 0;
@@ -139,7 +139,7 @@ body {
 
 #results li .item-desc {
   font-size: 12px;
-  color: #6c7086;
+  color: var(--text-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -147,7 +147,7 @@ body {
 
 /* calc 结果的描述用同色系但稍暗，不抢主行绿色 */
 #results li.calc-result .item-desc {
-  color: #6c7086;
+  color: var(--text-dim);
 }
 
 /* Alt 数字角标：默认隐藏，按住 Alt（body.alt-active）时显示 */
@@ -158,8 +158,8 @@ body {
   padding: 1px 5px;
   font-size: 11px;
   font-family: ui-monospace, Consolas, monospace;
-  color: #cdd6f4;
-  background: #45475a;
+  color: var(--text);
+  background: var(--surface-2);
   border-radius: 4px;
   text-align: center;
 }
@@ -170,18 +170,32 @@ body.alt-active #results li .item-badge {
 
 #results li.active,
 #results li:hover {
-  background: #313244;
+  background: var(--surface);
 }
 
 #results li.active {
-  background: #45475a;
+  background: var(--surface-2);
 }
 
 #results li.calc-result {
-  color: #a6e3a1;
+  color: var(--green);
   font-family: ui-monospace, Consolas, monospace;
   font-size: 15px;
   font-weight: 500;
+}
+
+/* 插件错误信息：橙色警告样式，不可点击 */
+#results li.error-item {
+  color: var(--yellow, #e5c07b);
+  font-size: 13px;
+  cursor: default; /* 不可点击 */
+  opacity: 0.9;
+}
+
+#results li.error-item .item-desc {
+  color: var(--text-dim);
+  font-size: 12px;
+  white-space: normal; /* 允许换行显示长错误信息 */
 }
 
 /* 右键菜单已迁移到独立窗口实现（contextmenu-popup.html），
@@ -195,9 +209,9 @@ body.alt-active #results li .item-badge {
   align-items: center;
   margin-top: 10px;
   padding-top: 8px;
-  border-top: 1px solid #313244;
+  border-top: 1px solid var(--surface);
   font-size: 11px;
-  color: #6c7086;
+  color: var(--text-dim);
 }
 
 #statusbar.visible {
@@ -207,4 +221,3 @@ body.alt-active #results li .item-badge {
 #statusbar .hint-right {
   font-family: ui-monospace, Consolas, monospace;
 }
-

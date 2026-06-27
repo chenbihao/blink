@@ -1,5 +1,6 @@
-const TAU = window.__TAURI__;
-const invoke = TAU?.core?.invoke ?? TAU?.invoke;
+import { invoke } from "./js/tauri.js";
+import { applyTheme } from "./js/theme.js";
+import { t, applyI18n, setLang } from "./js/i18n.js";
 
 // WebView2 下按 Alt 会激活宿主窗口的系统菜单、进入菜单模态，webview 消息泵随之
 // 暂停——后端返回的 invoke 响应会堆在队列里无法分发，表现就是「录制时按钮卡住、
@@ -24,6 +25,9 @@ document.addEventListener("keydown", async (e) => {
     }
   }
 });
+
+// ── 主题：复用主窗口 js/theme.js（设置页改 module 后 import，消除原内联重复）──
+// 注意：theme.js 的 applyTheme 在 auto 模式会挂系统主题监听，比原内联版更完整。
 
 // ── Tab 切换 ─────────────────────────────────────────────────────────────────
 
@@ -61,7 +65,7 @@ function applyConfigToUI(config) {
   const tapValue = document.getElementById("tap-threshold-value");
   if (tapSlider && config.tap_threshold) {
     tapSlider.value = config.tap_threshold;
-    tapValue.textContent = `${config.tap_threshold}ms`;
+    tapValue.textContent = t("hotkey.unit.ms", { value: config.tap_threshold });
   }
 
   // grace period
@@ -69,7 +73,7 @@ function applyConfigToUI(config) {
   const graceValue = document.getElementById("grace-ms-value");
   if (graceSlider && config.grace_period) {
     graceSlider.value = config.grace_period;
-    graceValue.textContent = `${config.grace_period}ms`;
+    graceValue.textContent = t("hotkey.unit.ms", { value: config.grace_period });
   }
 
   // 开机自启
@@ -84,11 +88,42 @@ function applyConfigToUI(config) {
     language.value = config.language;
   }
 
+  // 应用界面语言（静态文本；动态区在各自 load 函数里用 t() 渲染）
+  setLang(config.language || "zh");
+  applyI18n();
+
   // 日志级别
   const logLevel = document.getElementById("log-level");
   if (logLevel && config.log_level) {
     logLevel.value = config.log_level;
   }
+
+  // 主题
+  const themeSel = document.getElementById("theme");
+  if (themeSel && config.theme) {
+    themeSel.value = config.theme;
+  }
+
+  // 搜索历史开关
+  const shEnabled = document.getElementById("search-history-enabled");
+  if (shEnabled && config.search_history_enabled !== undefined) {
+    shEnabled.checked = config.search_history_enabled;
+  }
+
+  // 历史保留天数
+  const shDays = document.getElementById("search-history-days");
+  if (shDays && config.search_history_days !== undefined) {
+    shDays.value = config.search_history_days;
+  }
+
+  // 最大结果数
+  const maxResultsEl = document.getElementById("max-results");
+  if (maxResultsEl && config.max_results !== undefined) {
+    maxResultsEl.value = config.max_results;
+  }
+
+  // 应用主题（设置页本身即时正确显示）
+  applyTheme(config.theme || "auto");
 
   // 应用配置加载完成后，再加载引擎配置
   loadEngineConfig();
@@ -150,15 +185,15 @@ async function loadNetworkConfig() {
   }
 
   const PROXY_SCHEMA = [
-    textField("http_proxy", "HTTP 代理", { placeholder: "http://127.0.0.1:7890" }),
-    textField("https_proxy", "HTTPS 代理", { placeholder: "http://127.0.0.1:7890" }),
+    textField("http_proxy", t("network.http.label"), { placeholder: t("network.http.ph") }),
+    textField("https_proxy", t("network.https.label"), { placeholder: t("network.https.ph") }),
   ];
 
   container.innerHTML = renderExtensionCard({
     icon: "🌐",
-    title: "全局网络代理",
-    desc: "本体、网络插件共用，修改后需重启 Blink 生效",
-    body: renderConfigSection("代理配置", PROXY_SCHEMA, proxyConfig, { saveLabel: "保存配置" }),
+    title: t("network.title"),
+    desc: t("network.desc"),
+    body: renderConfigSection(t("network.section"), PROXY_SCHEMA, proxyConfig, { saveLabel: t("network.save") }),
   });
 
   // 绑定保存事件
@@ -170,10 +205,10 @@ async function loadNetworkConfig() {
     const https = container.querySelector('.plugin-field[data-key="https_proxy"]')?.value || "";
     try {
       await invoke("update_global_proxy", { http, https });
-      if (msg) { msg.textContent = "已保存，下次查询自动生效"; msg.style.color = "#a6e3a1"; }
+      if (msg) { msg.textContent = t("network.saved_msg"); msg.style.color = "#a6e3a1"; }
     } catch (e) {
       console.error("save proxy failed:", e);
-      if (msg) { msg.textContent = "保存失败"; msg.style.color = "#f38ba8"; }
+      if (msg) { msg.textContent = t("network.save_failed"); msg.style.color = "#f38ba8"; }
     }
   });
 }
@@ -192,23 +227,23 @@ async function loadContextConfig() {
   }
 
   // ── 渲染卡片 ──
-  const CLIPBOARD_FIELD = booleanField("clipboard_enabled", "采集剪贴板文本");
+  const CLIPBOARD_FIELD = booleanField("clipboard_enabled", t("context.clipboard"));
   const enableSwitch = `<label class="switch"><input type="checkbox" class="context-enabled" ${cfg.enabled ? "checked" : ""} /><span class="slider"></span></label>`;
 
   container.innerHTML = renderExtensionCard({
     icon: "🌍",
-    title: "环境感知",
-    desc: "唤起时自动采集前台应用、剪贴板等上下文，用于搜索增强",
+    title: t("context.title"),
+    desc: t("context.desc"),
     headerRight: enableSwitch,
     body: `<div class="plugin-config-section" style="padding-top: 0;">
         ${renderSettingField(CLIPBOARD_FIELD, cfg.clipboard_enabled)}
         <div class="plugin-field-row">
           <div class="field-head">
-            <span class="field-title">敏感应用（前台时不采集上下文）</span>
-            <span class="hint">如密码管理器、银行软件等，保护隐私</span>
+            <span class="field-title">${t("context.sensitive.title")}</span>
+            <span class="hint">${t("context.sensitive.hint")}</span>
           </div>
           <div class="context-sensitive-list"></div>
-          <button class="btn-small context-add-btn" style="margin-top:8px;">＋ 添加应用</button>
+          <button class="btn-small context-add-btn" style="margin-top:8px;">${t("context.add_app")}</button>
         </div>
         <div class="context-save-msg"></div>
       </div>`,
@@ -222,7 +257,7 @@ async function loadContextConfig() {
     const listEl = container.querySelector(".context-sensitive-list");
     if (!listEl) return;
     if (sensitiveApps.length === 0) {
-      listEl.innerHTML = `<div class="context-empty-hint">暂无敏感应用</div>`;
+      listEl.innerHTML = `<div class="context-empty-hint">${t("context.empty")}</div>`;
       return;
     }
     listEl.innerHTML = sensitiveApps
@@ -230,7 +265,7 @@ async function loadContextConfig() {
         (name, i) =>
           `<span class="context-chip" data-idx="${i}">
             ${escapeHtml(name)}
-            <span class="context-chip-remove" data-idx="${i}" title="移除">×</span>
+            <span class="context-chip-remove" data-idx="${i}" title="${t("context.remove.title")}">×</span>
           </span>`
       )
       .join("");
@@ -257,14 +292,14 @@ async function loadContextConfig() {
         config: { enabled, clipboard_enabled, sensitive_apps: [...sensitiveApps] },
       });
       if (msg) {
-        msg.textContent = "✓ 已自动保存";
+        msg.textContent = t("context.auto_saved");
         msg.style.color = "#a6e3a1";
         setTimeout(() => { if (msg) msg.textContent = ""; }, 2000);
       }
     } catch (e) {
       console.error("save context config failed:", e);
       if (msg) {
-        msg.textContent = "保存失败";
+        msg.textContent = t("context.save_failed");
         msg.style.color = "#f38ba8";
       }
     }
@@ -302,14 +337,14 @@ async function showAddProcessModal(container, existing, onAdd) {
   overlay.innerHTML = `
     <div class="modal">
       <div class="modal-header">
-        <h3>添加敏感应用</h3>
+        <h3>${t("context.modal.title")}</h3>
         <button class="modal-close">×</button>
       </div>
-      <input type="text" class="modal-search" placeholder="搜索进程名…" />
+      <input type="text" class="modal-search" placeholder="${t("context.modal.search_ph")}" />
       <div class="modal-list"></div>
       <div class="modal-footer">
-        <span class="modal-hint">选择后自动添加并保存</span>
-        <button class="btn-small modal-done">完成</button>
+        <span class="modal-hint">${t("context.modal.hint")}</span>
+        <button class="btn-small modal-done">${t("context.modal.done")}</button>
       </div>
     </div>`;
   document.body.appendChild(overlay);
@@ -328,7 +363,7 @@ async function showAddProcessModal(container, existing, onAdd) {
         p.window_title.toLowerCase().includes(flt)
     );
     if (filtered.length === 0) {
-      listEl.innerHTML = `<div class="modal-empty">没有匹配的进程</div>`;
+      listEl.innerHTML = `<div class="modal-empty">${t("context.modal.empty")}</div>`;
       return;
     }
     listEl.innerHTML = filtered
@@ -337,7 +372,7 @@ async function showAddProcessModal(container, existing, onAdd) {
         const isSelected = selected.has(p.process_name);
         const disabled = isExisting ? "disabled" : "";
         const checked = isSelected ? "checked" : "";
-        const label = isExisting ? "已添加" : "";
+        const label = isExisting ? t("context.modal.added") : "";
         return `<label class="modal-item ${isExisting ? "modal-item-existing" : ""}" data-name="${escapeHtml(p.process_name)}">
           <input type="checkbox" ${checked} ${disabled} />
           <span class="modal-item-name">${escapeHtml(p.process_name)}</span>
@@ -398,12 +433,12 @@ async function loadPlugins() {
     plugins = await invoke("get_plugins");
   } catch (e) {
     console.error("loadPlugins failed:", e);
-    container.innerHTML = '<p style="color: #f38ba8; padding: 20px;">加载插件列表失败</p>';
+    container.innerHTML = `<p style="color: #f38ba8; padding: 20px;">${t("plugin.load_failed")}</p>`;
     return;
   }
 
   if (plugins.length === 0) {
-    container.innerHTML = '<p style="color: #6c7086; padding: 20px;">暂无已加载插件</p>';
+    container.innerHTML = `<p style="color: #6c7086; padding: 20px;">${t("plugin.empty")}</p>`;
     return;
   }
 
@@ -419,21 +454,21 @@ async function loadPlugins() {
 function renderPluginCard(plugin) {
   const icon = PLUGIN_ICONS[plugin.id] || "🔌";
   const triggers = plugin.triggers && plugin.triggers.length > 0
-    ? `触发: ${plugin.triggers.join(" / ")}`
-    : "无触发关键词";
-  const desc = plugin.description || "暂无描述";
+    ? t("plugin.trigger", { kw: plugin.triggers.join(" / ") })
+    : t("plugin.no_trigger");
+  const desc = plugin.description || t("plugin.desc_default");
   const enabled = plugin.enabled !== false;
   const schema = plugin.settings_schema || [];
   const settings = plugin.settings || {};
   const hasFields = schema.length > 0;
 
   const configSection = hasFields
-    ? renderConfigSection("配置", schema, settings, { saveLabel: "保存配置" })
-    : '<div class="plugin-no-config">（该插件无可配置项）</div>';
+    ? renderConfigSection(t("plugin.section"), schema, settings, { saveLabel: t("plugin.save") })
+    : `<div class="plugin-no-config">${t("plugin.no_config")}</div>`;
 
   const headerRight = `<div class="plugin-master-toggle">
-      <span class="toggle-label">${enabled ? "已启用" : "已禁用"}</span>
-      <label class="switch" title="启用/禁用插件">
+      <span class="toggle-label">${enabled ? t("plugin.enabled") : t("plugin.disabled")}</span>
+      <label class="switch" title="${t("plugin.toggle.title")}">
         <input type="checkbox" class="plugin-enabled" ${enabled ? "checked" : ""} />
         <span class="slider"></span>
       </label>
@@ -565,20 +600,20 @@ function bindPluginCardEvents(plugin) {
       return true;
     } catch (err) {
       console.error("update_plugin_config failed:", err);
-      flash(card, "保存失败: " + err, true);
+      flash(card, t("common.save_failed_msg", { err }), true);
       return false;
     }
   };
 
   card.querySelector(".plugin-enabled")?.addEventListener("change", async (e) => {
     const ok = await save(e.target.checked);
-    if (ok) flash(card, e.target.checked ? "已启用" : "已禁用");
+    if (ok) flash(card, e.target.checked ? t("plugin.enabled") : t("plugin.disabled"));
     else e.target.checked = !e.target.checked; // 回滚
   });
 
   card.querySelector(".plugin-save")?.addEventListener("click", async () => {
     const ok = await save();
-    if (ok) flash(card, "已保存");
+    if (ok) flash(card, t("plugin.saved_msg"));
   });
 }
 
@@ -650,7 +685,7 @@ async function startRecording() {
   hotkeyRecordBtn.disabled = true;
   hotkeyResetBtn.disabled = true;
   hotkeyRecordBtn.classList.add("recording");
-  hotkeyRecordBtn.textContent = "请按下快捷键...（10秒超时）";
+  hotkeyRecordBtn.textContent = t("hotkey.recording");
 
   // 录制期间吞掉所有键盘事件的默认行为：Alt / Alt+Space / F10 等会激活宿主窗口
   // 系统菜单、冻结 WebView2 消息泵（导致按钮卡住、需点鼠标才恢复）。录制由后端
@@ -704,7 +739,7 @@ const tapValue = document.getElementById("tap-threshold-value");
 
 if (tapSlider) {
   tapSlider.addEventListener("input", (e) => {
-    tapValue.textContent = `${e.target.value}ms`;
+    tapValue.textContent = t("hotkey.unit.ms", { value: e.target.value });
   });
 
   tapSlider.addEventListener("change", async (e) => {
@@ -723,7 +758,7 @@ const graceValue = document.getElementById("grace-ms-value");
 
 if (graceSlider) {
   graceSlider.addEventListener("input", (e) => {
-    graceValue.textContent = `${e.target.value}ms`;
+    graceValue.textContent = t("hotkey.unit.ms", { value: e.target.value });
   });
 
   graceSlider.addEventListener("change", async (e) => {
@@ -756,11 +791,88 @@ const languageSelect = document.getElementById("language");
 
 if (languageSelect) {
   languageSelect.addEventListener("change", async (e) => {
+    const lang = e.target.value;
     try {
-      await invoke("update_language", { language: e.target.value });
-      if (currentConfig) currentConfig.language = e.target.value;
+      await invoke("update_language", { language: lang });
+      if (currentConfig) currentConfig.language = lang;
+      // 即时切换整页语言：静态文本 + 动态渲染区 + 计量/徽章
+      setLang(lang);
+      applyI18n();
+      loadNetworkConfig();
+      loadContextConfig();
+      loadPlugins();
+      loadStorageInfo();
+      refreshEverythingBadgeText();
     } catch (err) {
       console.error("update_language failed:", err);
+    }
+  });
+}
+
+// ── 通用配置（主题 / 搜索历史 / 结果数，聚合 update_general_config）──────────
+
+// 读取当前通用字段（合并 DOM 现值），保证聚合更新不丢字段
+function readGeneral() {
+  const val = (id, fb) => (document.getElementById(id)?.value ?? fb);
+  const checked = (id, fb) => (document.getElementById(id)?.checked ?? fb);
+  return {
+    theme: val("theme", "auto"),
+    searchHistoryEnabled: checked("search-history-enabled", true),
+    searchHistoryDays: parseInt(val("search-history-days", "30"), 10) || 0,
+    maxResults: parseInt(val("max-results", "50"), 10) || 50,
+  };
+}
+
+const themeSelect = document.getElementById("theme");
+if (themeSelect) {
+  themeSelect.addEventListener("change", async (e) => {
+    const mode = e.target.value;
+    applyTheme(mode); // 即时预览
+    try {
+      const g = readGeneral();
+      await invoke("update_general_config", g);
+      if (currentConfig) currentConfig.theme = mode;
+    } catch (err) {
+      console.error("update_general_config (theme) failed:", err);
+    }
+  });
+}
+
+const shEnabledCheckbox = document.getElementById("search-history-enabled");
+if (shEnabledCheckbox) {
+  shEnabledCheckbox.addEventListener("change", async (e) => {
+    try {
+      const g = readGeneral();
+      await invoke("update_general_config", g);
+      if (currentConfig) currentConfig.search_history_enabled = e.target.checked;
+    } catch (err) {
+      console.error("update_general_config (history enabled) failed:", err);
+    }
+  });
+}
+
+const shDaysInput = document.getElementById("search-history-days");
+if (shDaysInput) {
+  shDaysInput.addEventListener("change", async () => {
+    try {
+      const g = readGeneral();
+      await invoke("update_general_config", g);
+      if (currentConfig) currentConfig.search_history_days = g.searchHistoryDays;
+    } catch (err) {
+      console.error("update_general_config (history days) failed:", err);
+    }
+  });
+}
+
+const maxResultsInput = document.getElementById("max-results");
+if (maxResultsInput) {
+  maxResultsInput.addEventListener("change", async () => {
+    try {
+      const g = readGeneral();
+      await invoke("update_general_config", g);
+      if (currentConfig) currentConfig.max_results = g.maxResults;
+    } catch (err) {
+      console.error("update_general_config (max results) failed:", err);
     }
   });
 }
@@ -810,7 +922,7 @@ async function loadLogInfo() {
 async function loadStorageInfo() {
   try {
     const info = await invoke("get_storage_info");
-    document.getElementById("history-count").textContent = `${info.history_count} 条记录`;
+    document.getElementById("history-count").textContent = t("storage.history_count", { count: info.history_count });
     document.getElementById("db-path").textContent = info.db_path;
   } catch (e) {
     console.error("loadStorageInfo failed:", e);
@@ -818,7 +930,7 @@ async function loadStorageInfo() {
 }
 
 document.getElementById("clear-history")?.addEventListener("click", async () => {
-  if (confirm("确定清空所有历史记录？")) {
+  if (confirm(t("storage.clear.confirm"))) {
     await invoke("clear_history");
     loadStorageInfo();
   }
@@ -831,23 +943,39 @@ async function probeEverythingStatus() {
   const portInput = document.getElementById("everything-port");
   const port = parseInt(portInput?.value || "80", 10);
 
-  statusEl.textContent = "探测中…";
+  statusEl.textContent = t("engine.status.probing");
   statusEl.className = "status-badge status-unknown";
+  statusEl.dataset.badgeState = "probing";
 
   try {
     const available = await invoke("probe_everything", { port });
     if (available) {
-      statusEl.textContent = "可用 ✓";
+      statusEl.textContent = t("engine.status.available");
       statusEl.className = "status-badge status-available";
+      statusEl.dataset.badgeState = "available";
     } else {
-      statusEl.textContent = "不可用 ✗";
+      statusEl.textContent = t("engine.status.unavailable");
       statusEl.className = "status-badge status-unavailable";
+      statusEl.dataset.badgeState = "unavailable";
     }
   } catch (e) {
-    statusEl.textContent = "探测失败";
+    statusEl.textContent = t("engine.status.failed");
     statusEl.className = "status-badge status-unavailable";
+    statusEl.dataset.badgeState = "failed";
     console.error("probe_everything failed:", e);
   }
+}
+
+// 语言切换时按当前探测状态重写徽章文本（不重新发起探测请求）
+function refreshEverythingBadgeText() {
+  const statusEl = document.getElementById("everything-status");
+  if (!statusEl) return;
+  const key =
+    statusEl.dataset.badgeState === "available" ? "engine.status.available" :
+    statusEl.dataset.badgeState === "unavailable" ? "engine.status.unavailable" :
+    statusEl.dataset.badgeState === "failed" ? "engine.status.failed" :
+    "engine.status.probing";
+  statusEl.textContent = t(key);
 }
 
 
@@ -868,12 +996,12 @@ document.getElementById("save-file-search")?.addEventListener("click", async () 
       localScanDepth: depth,
       maxResults,
     });
-    alert("文件搜索配置已保存");
+    alert(t("toast.file_search_saved"));
     // 重新探测
     probeEverythingStatus();
   } catch (e) {
     console.error("update_file_search failed:", e);
-    alert("保存失败: " + e);
+    alert(t("common.save_failed_msg", { err: e }));
   }
 });
 

@@ -168,6 +168,7 @@ mod tests {
             is_calc: false,
             score: 0.0,
             is_placeholder: false,
+            is_error: false,
             source: String::new(),
             description: Some(lnk.into()),
             action: Action {

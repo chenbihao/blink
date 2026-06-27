@@ -7,8 +7,8 @@
 html,
 body {
   height: 100%;
-  background: #1e1e2e;
-  color: #cdd6f4;
+  background: var(--bg);
+  color: var(--text);
   font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
   font-size: 14px;
   overflow: hidden;
@@ -23,7 +23,7 @@ body {
 
 .sidebar {
   width: 180px;
-  background: #181825;
+  background: var(--bg-sidebar);
   padding: 16px 0;
   display: flex;
   flex-direction: column;
@@ -35,7 +35,7 @@ body {
   padding: 8px 20px 16px;
   font-size: 18px;
   font-weight: 700;
-  color: #89b4fa;
+  color: var(--accent);
   letter-spacing: 0.5px;
 }
 
@@ -45,7 +45,7 @@ body {
   padding: 10px 20px;
   background: none;
   border: none;
-  color: #a6adc8;
+  color: var(--text-sub);
   font-size: 14px;
   text-align: left;
   cursor: pointer;
@@ -53,13 +53,13 @@ body {
 }
 
 .tab:hover {
-  background: #313244;
-  color: #cdd6f4;
+  background: var(--surface);
+  color: var(--text);
 }
 
 .tab.active {
-  background: #313244;
-  color: #89b4fa;
+  background: var(--surface);
+  color: var(--accent);
 }
 
 /* ── 内容区 ───────────────────────────────────────────────────────────────── */
@@ -69,7 +69,7 @@ body {
   overflow-y: auto;
   padding: 24px 32px;
   scrollbar-width: thin;
-  scrollbar-color: #45475a transparent;
+  scrollbar-color: var(--surface-2) transparent;
 }
 
 .panel {
@@ -84,7 +84,7 @@ h2 {
   font-size: 20px;
   font-weight: 600;
   margin-bottom: 20px;
-  color: #cdd6f4;
+  color: var(--text);
 }
 
 /* ── 设置行 ───────────────────────────────────────────────────────────────── */
@@ -94,35 +94,35 @@ h2 {
   align-items: center;
   gap: 12px;
   padding: 12px 0;
-  border-bottom: 1px solid #313244;
+  border-bottom: 1px solid var(--surface);
 }
 
 .setting-row label {
   width: 140px;
   flex-shrink: 0;
-  color: #a6adc8;
+  color: var(--text-sub);
   font-size: 13px;
 }
 
 .setting-row .value {
-  color: #cdd6f4;
+  color: var(--text);
   font-family: ui-monospace, Consolas, monospace;
 }
 
 .setting-row .hint {
-  color: #585b70;
+  color: var(--text-faint);
   font-size: 12px;
 }
 
 .setting-row input[type="range"] {
   width: 200px;
-  accent-color: #89b4fa;
+  accent-color: var(--accent);
 }
 
 .setting-row select {
-  background: #313244;
-  color: #cdd6f4;
-  border: 1px solid #45475a;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--surface-2);
   border-radius: 6px;
   padding: 6px 10px;
   font-size: 13px;
@@ -130,9 +130,9 @@ h2 {
 
 .setting-row textarea {
   width: 100%;
-  background: #181825;
-  color: #cdd6f4;
-  border: 1px solid #313244;
+  background: var(--bg-sidebar);
+  color: var(--text);
+  border: 1px solid var(--surface);
   border-radius: 6px;
   padding: 10px;
   font-family: ui-monospace, Consolas, monospace;
@@ -143,9 +143,9 @@ h2 {
 /* ── 按钮 ─────────────────────────────────────────────────────────────────── */
 
 .btn {
-  background: #313244;
-  color: #cdd6f4;
-  border: 1px solid #45475a;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--surface-2);
   border-radius: 6px;
   padding: 8px 16px;
   font-size: 13px;
@@ -154,13 +154,13 @@ h2 {
 }
 
 .btn:hover {
-  background: #45475a;
+  background: var(--surface-2);
 }
 
 .btn-danger {
-  background: #45273a;
-  color: #f38ba8;
-  border: 1px solid #6c3a5a;
+  background: var(--red-bg);
+  color: var(--red);
+  border: 1px solid var(--red-border);
   border-radius: 6px;
   padding: 8px 16px;
   font-size: 13px;
@@ -169,7 +169,7 @@ h2 {
 }
 
 .btn-danger:hover {
-  background: #6c3a5a;
+  background: var(--red-border);
 }
 
 /* ── 调试面板 ─────────────────────────────────────────────────────────────── */
@@ -182,8 +182,8 @@ h2 {
 }
 
 .debug-card {
-  background: #181825;
-  border: 1px solid #313244;
+  background: var(--bg-sidebar);
+  border: 1px solid var(--surface);
   border-radius: 8px;
   padding: 16px;
   text-align: center;
@@ -191,7 +191,7 @@ h2 {
 
 .debug-label {
   font-size: 12px;
-  color: #a6adc8;
+  color: var(--text-sub);
   margin-bottom: 8px;
 }
 
@@ -199,7 +199,7 @@ h2 {
   font-size: 24px;
   font-weight: 600;
   font-family: ui-monospace, Consolas, monospace;
-  color: #a6e3a1;
+  color: var(--green);
 }
 
 /* ── 调试 Tab：日志区 ─────────────────────────────────────────────────────── */
@@ -207,16 +207,16 @@ h2 {
 #debug h3 {
   font-size: 15px;
   font-weight: 600;
-  color: #cdd6f4;
+  color: var(--text);
   margin: 24px 0 4px;
   padding-top: 20px;
-  border-top: 1px solid #313244;
+  border-top: 1px solid var(--surface);
 }
 
 #debug h3 .hint {
   font-weight: 400;
   font-size: 12px;
-  color: #585b70;
+  color: var(--text-faint);
 }
 
 #debug .log-path-row {
@@ -227,7 +227,7 @@ h2 {
   flex: 1;
   word-break: break-all;
   font-size: 12px;
-  color: #a6adc8;
+  color: var(--text-sub);
   line-height: 1.6;
 }
 
@@ -240,9 +240,9 @@ h2 {
 }
 
 .hotkey-btn {
-  background: #313244;
-  color: #cdd6f4;
-  border: 1px solid #45475a;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--surface-2);
   border-radius: 6px;
   padding: 8px 16px;
   font-size: 13px;
@@ -254,14 +254,14 @@ h2 {
 }
 
 .hotkey-btn:hover {
-  background: #45475a;
-  border-color: #585b70;
+  background: var(--surface-2);
+  border-color: var(--text-faint);
 }
 
 .hotkey-btn.recording {
-  background: #45273a;
-  border-color: #f38ba8;
-  color: #f38ba8;
+  background: var(--red-bg);
+  border-color: var(--red);
+  color: var(--red);
   animation: pulse 1.5s ease-in-out infinite;
 }
 
@@ -277,9 +277,9 @@ h2 {
 }
 
 .btn-small {
-  background: #313244;
-  color: #a6adc8;
-  border: 1px solid #45475a;
+  background: var(--surface);
+  color: var(--text-sub);
+  border: 1px solid var(--surface-2);
   border-radius: 6px;
   padding: 6px 12px;
   font-size: 12px;
@@ -288,15 +288,15 @@ h2 {
 }
 
 .btn-small:hover {
-  background: #45475a;
-  color: #cdd6f4;
+  background: var(--surface-2);
+  color: var(--text);
 }
 
 /* ── 扩展卡片 ─────────────────────────────────────────────────────────────── */
 
 .extension-card {
-  background: #181825;
-  border: 1px solid #313244;
+  background: var(--bg-sidebar);
+  border: 1px solid var(--surface);
   border-radius: 10px;
   margin-bottom: 16px;
   overflow: hidden;
@@ -307,8 +307,8 @@ h2 {
   align-items: center;
   gap: 12px;
   padding: 14px 16px;
-  background: #1e1e2e;
-  border-bottom: 1px solid #313244;
+  background: var(--bg);
+  border-bottom: 1px solid var(--surface);
 }
 
 .extension-icon {
@@ -326,21 +326,21 @@ h2 {
   gap: 8px;
   font-size: 15px;
   font-weight: 600;
-  color: #cdd6f4;
+  color: var(--text);
   margin-bottom: 2px;
 }
 
 .extension-desc {
   font-size: 12px;
-  color: #6c7086;
+  color: var(--text-dim);
   margin: 0;
 }
 
 .version-badge {
   font-size: 11px;
   font-weight: 400;
-  color: #6c7086;
-  background: #313244;
+  color: var(--text-dim);
+  background: var(--surface);
   padding: 2px 8px;
   border-radius: 10px;
   line-height: 1.4;
@@ -376,7 +376,7 @@ h2 {
   left: 0;
   right: 0;
   bottom: 0;
-  background-color: #45475a;
+  background-color: var(--surface-2);
   transition: 0.2s;
   border-radius: 24px;
 }
@@ -388,18 +388,18 @@ h2 {
   width: 18px;
   left: 3px;
   bottom: 3px;
-  background-color: #181825;
+  background-color: var(--bg-sidebar);
   transition: 0.2s;
   border-radius: 50%;
 }
 
 input:checked + .slider {
-  background-color: #89b4fa;
+  background-color: var(--accent);
 }
 
 input:checked + .slider:before {
   transform: translateX(20px);
-  background-color: #1e1e2e;
+  background-color: var(--bg);
 }
 
 /* ── 状态标签 ─────────────────────────────────────────────────────────────── */
@@ -412,32 +412,32 @@ input:checked + .slider:before {
 }
 
 .status-unknown {
-  background: #45475a;
-  color: #a6adc8;
+  background: var(--surface-2);
+  color: var(--text-sub);
 }
 
 .status-available {
-  background: #2a3f4e;
-  color: #a6e3a1;
+  background: var(--green-bg);
+  color: var(--green);
 }
 
 .status-unavailable {
-  background: #45273a;
-  color: #f38ba8;
+  background: var(--red-bg);
+  color: var(--red);
 }
 
 .status-enabled {
-  background: #2a3f4e;
-  color: #a6e3a1;
+  background: var(--green-bg);
+  color: var(--green);
 }
 
 /* ── 小输入框 ────────────────────────────────────────────────────────────── */
 
 .input-small {
   width: 80px;
-  background: #313244;
-  color: #cdd6f4;
-  border: 1px solid #45475a;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--surface-2);
   border-radius: 6px;
   padding: 6px 10px;
   font-size: 13px;
@@ -463,12 +463,12 @@ input:checked + .slider:before {
 }
 .plugin-master-toggle .toggle-label {
   font-size: 12px;
-  color: #6c7086;
+  color: var(--text-dim);
 }
 
 /* 插件描述行 */
 .plugin-desc-line {
-  color: #a6adc8;
+  color: var(--text-sub);
   font-size: 13px;
   padding: 4px 0 12px;
   line-height: 1.5;
@@ -476,15 +476,15 @@ input:checked + .slider:before {
 
 /* 配置区分组容器(独立浅背景,与描述分层) */
 .plugin-config-section {
-  background: #11111b;
-  border: 1px solid #313244;
+  background: var(--bg-deep);
+  border: 1px solid var(--surface);
   border-radius: 8px;
   padding: 0 14px;
 }
 
 .plugin-section-title {
   font-size: 11px;
-  color: #585b70;
+  color: var(--text-faint);
   font-weight: 600;
   letter-spacing: 0.5px;
   text-transform: uppercase;
@@ -492,7 +492,7 @@ input:checked + .slider:before {
 }
 
 .plugin-no-config {
-  color: #6c7086;
+  color: var(--text-dim);
   font-size: 13px;
   padding: 8px 0;
 }
@@ -500,7 +500,7 @@ input:checked + .slider:before {
 /* 单个配置项 */
 .plugin-field-row {
   padding: 10px 0;
-  border-top: 1px solid #313244;
+  border-top: 1px solid var(--surface);
 }
 .plugin-field-row:first-of-type {
   border-top: none;
@@ -514,11 +514,11 @@ input:checked + .slider:before {
   width: 220px;
   flex-shrink: 0;
   font-size: 13px;
-  color: #cdd6f4;
+  color: var(--text);
 }
 .plugin-field-row .field-desc {
   font-size: 12px;
-  color: #6c7086;
+  color: var(--text-dim);
   margin-top: 4px;
   line-height: 1.5;
 }
@@ -529,9 +529,9 @@ input:checked + .slider:before {
 .plugin-field-row input[type="number"] {
   width: 220px;
   flex-shrink: 0;
-  background: #313244;
-  color: #cdd6f4;
-  border: 1px solid #45475a;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--surface-2);
   border-radius: 6px;
   padding: 6px 10px;
   font-size: 13px;
@@ -541,7 +541,7 @@ input:checked + .slider:before {
 }
 .plugin-field-row select:hover,
 .plugin-field-row input:hover {
-  border-color: #585b70;
+  border-color: var(--text-faint);
 }
 
 /* 配置项 boolean:小号 switch(区别于头部总开关的标准 switch 44x24) */
@@ -564,7 +564,7 @@ input:checked + .slider:before {
   gap: 12px;
   padding: 10px 0 12px;
   margin-top: 4px;
-  border-top: 1px solid #313244;
+  border-top: 1px solid var(--surface);
 }
 .plugin-save-msg {
   font-size: 12px;
@@ -583,26 +583,26 @@ input:checked + .slider:before {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  background: #313244;
-  border: 1px solid #45475a;
+  background: var(--surface);
+  border: 1px solid var(--surface-2);
   border-radius: 6px;
   padding: 4px 10px;
   font-size: 12px;
-  color: #cdd6f4;
+  color: var(--text);
   font-family: ui-monospace, Consolas, monospace;
 }
 .context-chip-remove {
   cursor: pointer;
-  color: #6c7086;
+  color: var(--text-dim);
   font-size: 14px;
   line-height: 1;
   transition: color 0.15s;
 }
 .context-chip-remove:hover {
-  color: #f38ba8;
+  color: var(--red);
 }
 .context-empty-hint {
-  color: #585b70;
+  color: var(--text-faint);
   font-size: 12px;
   padding: 4px 0;
 }
@@ -617,68 +617,68 @@ input:checked + .slider:before {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--shadow-strong);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 10000;
 }
 .modal {
-  background: #1e1e2e;
-  border: 1px solid #45475a;
+  background: var(--bg);
+  border: 1px solid var(--surface-2);
   border-radius: 12px;
   width: 480px;
   max-height: 70vh;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+  box-shadow: 0 12px 40px var(--shadow);
 }
 .modal-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 14px 16px;
-  border-bottom: 1px solid #313244;
+  border-bottom: 1px solid var(--surface);
 }
 .modal-header h3 {
   font-size: 15px;
   font-weight: 600;
-  color: #cdd6f4;
+  color: var(--text);
 }
 .modal-close {
   background: none;
   border: none;
-  color: #6c7086;
+  color: var(--text-dim);
   font-size: 20px;
   cursor: pointer;
   padding: 0 4px;
   transition: color 0.15s;
 }
 .modal-close:hover {
-  color: #f38ba8;
+  color: var(--red);
 }
 .modal-search {
   margin: 12px 16px 0;
-  background: #313244;
-  color: #cdd6f4;
-  border: 1px solid #45475a;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--surface-2);
   border-radius: 6px;
   padding: 8px 12px;
   font-size: 13px;
   outline: none;
 }
 .modal-search:focus {
-  border-color: #89b4fa;
+  border-color: var(--accent);
 }
 .modal-search::placeholder {
-  color: #585b70;
+  color: var(--text-faint);
 }
 .modal-list {
   flex: 1;
   overflow-y: auto;
   padding: 8px 16px;
   scrollbar-width: thin;
-  scrollbar-color: #45475a transparent;
+  scrollbar-color: var(--surface-2) transparent;
 }
 .modal-item {
   display: flex;
@@ -690,22 +690,22 @@ input:checked + .slider:before {
   transition: background 0.1s;
 }
 .modal-item:hover {
-  background: #313244;
+  background: var(--surface);
 }
 .modal-item input[type="checkbox"] {
-  accent-color: #89b4fa;
+  accent-color: var(--accent);
   flex-shrink: 0;
 }
 .modal-item-name {
   font-family: ui-monospace, Consolas, monospace;
   font-size: 13px;
-  color: #cdd6f4;
+  color: var(--text);
   min-width: 140px;
   flex-shrink: 0;
 }
 .modal-item-title {
   font-size: 12px;
-  color: #6c7086;
+  color: var(--text-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -714,8 +714,8 @@ input:checked + .slider:before {
 }
 .modal-item-label {
   font-size: 11px;
-  color: #585b70;
-  background: #181825;
+  color: var(--text-faint);
+  background: var(--bg-sidebar);
   padding: 2px 8px;
   border-radius: 4px;
   flex-shrink: 0;
@@ -728,7 +728,7 @@ input:checked + .slider:before {
   background: transparent;
 }
 .modal-empty {
-  color: #585b70;
+  color: var(--text-faint);
   font-size: 13px;
   text-align: center;
   padding: 24px 0;
@@ -738,9 +738,9 @@ input:checked + .slider:before {
   align-items: center;
   justify-content: space-between;
   padding: 12px 16px;
-  border-top: 1px solid #313244;
+  border-top: 1px solid var(--surface);
 }
 .modal-hint {
   font-size: 12px;
-  color: #585b70;
+  color: var(--text-faint);
 }

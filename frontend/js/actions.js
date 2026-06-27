@@ -8,10 +8,12 @@ import { launchApp, hideWindow } from "./api.js";
 
 /**
  * 激活一个结果项。
- * @param {{lnkPath?: string, calcValue?: string, payload?: string, action?: {kind: string}}} data
+ * @param {{lnkPath?: string, calcValue?: string, payload?: string, action?: {kind: string}, isError?: boolean}} data
  */
 export async function activateItem(data) {
   if (!data) return;
+  // 错误信息项不可执行
+  if (data.isError) return;
   const kind = data.action?.kind;
 
   if (kind === "copy") {

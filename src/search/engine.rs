@@ -60,8 +60,13 @@ impl SearchItem {
     ///   前端 `actions.js` 复制优先取 `payload`(= text);无 payload 才回退 `calcValue`
     ///   (从 name 去 "= " 前缀;CalcEngine 的 title 形如 `= <text>` 故二者一致)。
     pub fn into_app_entry(self) -> AppEntry {
-        // 把 source 优先级 baked 进分数，确保前端 merge 时不会交叉排序
-        let score = super::scorer::bake_source_boost(self.score, &self.source);
+        // 负分 = 插件错误信息，不 bake source boost（保留负分排到最后）
+        let is_error = self.score < 0.0;
+        let score = if is_error {
+            self.score
+        } else {
+            super::scorer::bake_source_boost(self.score, &self.source)
+        };
 
         match self.action {
             SearchAction::Open { path } => AppEntry {
@@ -72,6 +77,7 @@ impl SearchItem {
                 is_calc: false,
                 score,
                 is_placeholder: false,
+                is_error,
                 source: self.source.clone(),
                 action: Action {
                     kind: ActionKind::Open,
@@ -89,6 +95,7 @@ impl SearchItem {
                 is_calc: self.source == "calc",
                 score,
                 is_placeholder: false,
+                is_error,
                 source: self.source.clone(),
                 action: Action {
                     kind: ActionKind::Copy,

@@ -117,11 +117,12 @@ impl PluginEngine {
                 tracing::debug!(plugin_id = %id, "query_subset: 插件未找到");
                 continue;
             };
-            // min_arg_length 快速失败:参数太短不发进程请求(如天气需要至少 2 个中文字符)
+            // min_arg_length 快速失败:仅对非空参数生效(空参数=无参触发,用插件默认配置)。
             // 用 chars().count() 而非 len()——中文等宽字符每个算 1 而非 3 字节
             let min_len = plugin.manifest().runtime.min_arg_length.unwrap_or(0);
-            if min_len > 0 && arg.chars().count() < min_len {
-                tracing::debug!(plugin_id = %id, arg_len = %arg.chars().count(), min_len, "query_subset: 参数过短,快速失败");
+            let arg_len = arg.chars().count();
+            if min_len > 0 && arg_len > 0 && arg_len < min_len {
+                tracing::debug!(plugin_id = %id, arg_len, min_len, "query_subset: 参数过短,快速失败");
                 continue;
             }
             let plugin_id = id.clone();
@@ -248,16 +249,23 @@ impl PluginEngine {
 }
 
 /// 插件结果项 → 内部 SearchItem。
+/// 特殊处理：score < 0 表示插件返回的错误信息，保留原 score 让排序到最后。
 fn to_search_item(plugin_id: &str, item: PluginItem) -> SearchItem {
     let action = match item.action {
         PluginAction::Copy { text } => SearchAction::Copy { text },
         PluginAction::Open { path } => SearchAction::Open { path },
     };
+    // 负分 = 插件错误信息，不 clamp（保留负分排到最后）
+    let score = if item.score < 0.0 {
+        item.score
+    } else {
+        clamp_plugin_score(item.score)
+    };
     SearchItem {
         id: format!("plugin:{plugin_id}:{}", item.title),
         title: item.title,
         subtitle: item.subtitle,
-        score: clamp_plugin_score(item.score),
+        score,
         action,
         source: plugin_id.to_string(),
     }
