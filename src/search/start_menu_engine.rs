@@ -5,12 +5,16 @@
 //! search 时对缓存做 fuzzy 打分 + top-relative 归一化(§2.3)。
 //!
 //! 所有文件 IO(scan_start_menu)都在 `spawn_blocking` 里跑,绝不阻塞 async runtime。
-//! 失效:定时检查根目录 mtime,变化才全量重扫;每 N 次强制刷新兜底深层目录变化
-//! (Windows 目录 mtime 只反映直接子项增删)。
+//!
+//! 0.7.5 增量更新策略：
+//! - 根目录 mtime 无变化 → 直接用缓存
+//! - 根目录 mtime 有变化 → 增量扫描（遍历目录对比缓存，仅增删变化项）
+//! - 连续 10 次增量后 → 强制执行一次全量扫描兜底
+//! - 每 2 小时 → 后台静默全量刷新
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use super::engine::{Lane, QueryContext, SearchAction, SearchEngine, SearchItem};
 use super::scorer::normalize_top_relative;
@@ -20,14 +24,30 @@ use super::AppEntry;
 const ENGINE_LIMIT: usize = 50;
 /// 定时检查间隔。
 const CHECK_INTERVAL: Duration = Duration::from_secs(300); // 5 分钟
-/// 每 N 次检查强制全量刷新一次(兜底深层目录变化)。
-const FORCE_REFRESH_EVERY: u32 = 6; // ≈ 半小时
+/// 连续增量次数后强制全量刷新。
+const FORCE_FULL_AFTER_INCREMENTAL: u32 = 10;
+/// 全量刷新间隔（2 小时）。
+const FULL_REFRESH_INTERVAL: Duration = Duration::from_secs(7200);
 
-/// 缓存内容(应用索引 + 根目录 mtime 快照)。
+/// 缓存条目（含文件元数据，用于增量对比）。
+#[derive(Debug, Clone)]
+struct CachedAppEntry {
+    entry: AppEntry,
+    path: String,
+    mtime: SystemTime,
+}
+
+/// 缓存内容(应用索引 + 根目录 mtime 快照 + 增量状态)。
 struct CacheState {
     entries: Vec<AppEntry>,
+    /// 带元数据的缓存条目（用于增量对比）。
+    cached_entries: Vec<CachedAppEntry>,
     /// 上次扫描时记录的根目录 mtime(用户开始菜单 / 系统开始菜单)。
     root_mtimes: Vec<Option<SystemTime>>,
+    /// 已连续增量次数。
+    incremental_count: u32,
+    /// 上次全量刷新时间。
+    last_full_refresh: Option<Instant>,
 }
 
 pub struct StartMenuEngine {
@@ -39,7 +59,10 @@ impl StartMenuEngine {
         StartMenuEngine {
             cache: Arc::new(RwLock::new(CacheState {
                 entries: Vec::new(),
+                cached_entries: Vec::new(),
                 root_mtimes: Vec::new(),
+                incremental_count: 0,
+                last_full_refresh: None,
             })),
         }
     }
@@ -48,19 +71,32 @@ impl StartMenuEngine {
     fn start_background(&self) {
         let cache = Arc::clone(&self.cache);
         tauri::async_runtime::spawn(async move {
-            // 立即预扫(后台)
+            // 立即预扫(后台，全量)
             let c = Arc::clone(&cache);
-            let _ = tokio::task::spawn_blocking(move || scan_into_cache(&c)).await;
+            let _ = tokio::task::spawn_blocking(move || full_scan_into_cache(&c)).await;
 
-            let mut check_count: u32 = 0;
             loop {
                 tokio::time::sleep(CHECK_INTERVAL).await;
-                check_count = check_count.wrapping_add(1);
-                // 兜底:每 FORCE_REFRESH_EVERY 次强制全量;否则仅 mtime 变化才扫描
-                let force = check_count % FORCE_REFRESH_EVERY == 0;
-                if force || roots_changed_since_last(&cache) {
+
+                // 检查是否需要全量刷新
+                let need_full = {
+                    let guard = cache.read().unwrap();
+                    // 连续增量次数达到阈值
+                    let incremental_exceeded = guard.incremental_count >= FORCE_FULL_AFTER_INCREMENTAL;
+                    // 距离上次全量刷新超过 2 小时
+                    let time_for_full = guard.last_full_refresh
+                        .map(|t| t.elapsed() >= FULL_REFRESH_INTERVAL)
+                        .unwrap_or(true);
+                    incremental_exceeded || time_for_full
+                };
+
+                if need_full {
                     let c = Arc::clone(&cache);
-                    let _ = tokio::task::spawn_blocking(move || scan_into_cache(&c)).await;
+                    let _ = tokio::task::spawn_blocking(move || full_scan_into_cache(&c)).await;
+                } else if roots_changed_since_last(&cache) {
+                    // mtime 变化 → 增量扫描
+                    let c = Arc::clone(&cache);
+                    let _ = tokio::task::spawn_blocking(move || incremental_scan(&c)).await;
                 }
             }
         });
@@ -76,18 +112,120 @@ impl StartMenuEngine {
             }
         }
         let c = Arc::clone(&self.cache);
-        let _ = tokio::task::spawn_blocking(move || scan_into_cache(&c)).await;
+        let _ = tokio::task::spawn_blocking(move || full_scan_into_cache(&c)).await;
         self.cache.read().unwrap().entries.clone()
     }
 }
 
-/// 阻塞扫描开始菜单并更新缓存。必须在 spawn_blocking 中调用。
-fn scan_into_cache(cache: &RwLock<CacheState>) {
+/// 全量扫描开始菜单并更新缓存。必须在 spawn_blocking 中调用。
+fn full_scan_into_cache(cache: &RwLock<CacheState>) {
+    let start = Instant::now();
     let entries = super::scan_start_menu();
     let mtimes = super::roots_modified();
+    let elapsed = start.elapsed();
+
     let mut guard = cache.write().unwrap();
-    guard.entries = entries;
+    guard.entries = entries.clone();
     guard.root_mtimes = mtimes;
+    guard.incremental_count = 0;
+    guard.last_full_refresh = Some(Instant::now());
+
+    tracing::debug!(
+        count = entries.len(),
+        elapsed_ms = elapsed.as_millis(),
+        "开始菜单全量扫描完成"
+    );
+}
+
+/// 增量扫描：对比缓存中的文件，仅增删变化项。必须在 spawn_blocking 中调用。
+fn incremental_scan(cache: &RwLock<CacheState>) {
+    let start = Instant::now();
+
+    // 读取当前缓存的文件路径集合
+    let cached_paths: HashMap<String, SystemTime> = {
+        let guard = cache.read().unwrap();
+        guard.cached_entries.iter().map(|e| (e.path.clone(), e.mtime)).collect()
+    };
+
+    // 扫描当前目录，收集所有 .lnk 文件的 (path, mtime)
+    let current_files = scan_current_files();
+
+    // 找出新增和变化的文件
+    let mut new_entries = Vec::new();
+    for (path, mtime) in &current_files {
+        if let Some(cached_mtime) = cached_paths.get(path) {
+            // 文件存在且 mtime 未变化，保留
+            if cached_mtime == mtime {
+                continue;
+            }
+        }
+        // 新增或变化的文件，需要解析
+        if let Some(entry) = super::parse_lnk_entry(path) {
+            new_entries.push(CachedAppEntry {
+                entry,
+                path: path.clone(),
+                mtime: *mtime,
+            });
+        }
+    }
+
+    // 找出删除的文件
+    let current_paths: std::collections::HashSet<String> = current_files.keys().cloned().collect();
+    let removed_count = cached_paths.keys().filter(|p| !current_paths.contains(*p)).count();
+
+    // 更新缓存
+    {
+        let mut guard = cache.write().unwrap();
+
+        // 保留未变化的条目
+        let mut updated_cached: Vec<CachedAppEntry> = guard.cached_entries.iter()
+            .filter(|e| current_paths.contains(&e.path) && cached_paths.get(&e.path) == Some(&e.mtime))
+            .cloned()
+            .collect();
+
+        // 添加新条目
+        updated_cached.extend(new_entries);
+
+        // 更新 entries 列表
+        guard.entries = updated_cached.iter().map(|e| e.entry.clone()).collect();
+        guard.cached_entries = updated_cached;
+        guard.root_mtimes = super::roots_modified();
+        guard.incremental_count += 1;
+    }
+
+    let elapsed = start.elapsed();
+    tracing::debug!(
+        added = current_files.len() - cached_paths.len() + removed_count,
+        removed = removed_count,
+        elapsed_ms = elapsed.as_millis(),
+        "开始菜单增量扫描完成"
+    );
+}
+
+/// 扫描当前开始菜单目录，返回所有 .lnk 文件的 (path, mtime)。
+fn scan_current_files() -> HashMap<String, SystemTime> {
+    let mut files = HashMap::new();
+    let roots = super::start_menu_roots();
+
+    for root in roots {
+        if !root.exists() {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |ext| ext == "lnk") {
+                    if let Ok(meta) = std::fs::metadata(&path) {
+                        if let Ok(mtime) = meta.modified() {
+                            files.insert(path.to_string_lossy().to_string(), mtime);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    files
 }
 
 /// 根目录 mtime 是否与上次扫描记录不同。
@@ -131,7 +269,7 @@ impl SearchEngine for StartMenuEngine {
 ///
 /// 流程：raw 分 → top-relative 归一化到 [0,1] → 统一历史加权。
 /// 历史加权使用 `scorer::history_boost`，与 Builtin/Calc/File/Plugin 共用同一公式。
-fn normalize_to_items(scored: Vec<(u32, AppEntry)>, history: &HashMap<String, i64>) -> Vec<SearchItem> {
+fn normalize_to_items(scored: Vec<(u32, AppEntry)>, history: &HashMap<String, (i64, i64)>) -> Vec<SearchItem> {
     // 先转成 f32 元组，用统一归一化函数处理
     let mut normalized: Vec<(AppEntry, f32)> = scored
         .into_iter()
@@ -142,8 +280,8 @@ fn normalize_to_items(scored: Vec<(u32, AppEntry)>, history: &HashMap<String, i6
     normalized
         .into_iter()
         .map(|(e, base_score)| {
-            let hit_count = history.get(&e.lnk_path).copied().unwrap_or(0);
-            let hist_boost = super::scorer::history_boost(hit_count);
+            let (hit_count, last_used_at) = history.get(&e.lnk_path).copied().unwrap_or((0, 0));
+            let hist_boost = super::scorer::history_boost(hit_count, last_used_at);
             let score = base_score + hist_boost;
             let detail = format!("fuzzy={:.2} hist=+{:.2}", base_score, hist_boost);
             SearchItem {
@@ -204,9 +342,10 @@ mod tests {
 
     #[test]
     fn history_boost_applied_after_normalization() {
+        let now = chrono::Utc::now().timestamp();
         let scored = vec![(200u32, entry("A", "a")), (100u32, entry("B", "b"))];
         let mut history = HashMap::new();
-        history.insert("b".to_string(), 10); // B 有 10 次历史
+        history.insert("b".to_string(), (10, now)); // B 有 10 次历史，最近使用
         let items = normalize_to_items(scored, &history);
         // A: 1.0 + 0 (无历史) = 1.0
         assert!((items[0].score - 1.0).abs() < 1e-6);

@@ -121,12 +121,15 @@ impl Service for HotkeyService {
         tauri::async_runtime::spawn(async move {
             while let Some(ev) = rx.recv().await {
                 match ev {
-                    crate::hotkey::HotkeyEvent::Tap(_) => {
+                    crate::hotkey::HotkeyEvent::Tap(trigger_time) => {
                         // toggle:已可见则隐藏(仅快捷键;单实例重复运行仍走 invoke 总是显示)
                         if crate::window::is_visible() {
                             crate::window::hide(&app, "toggle");
                         } else {
+                            let elapsed = trigger_time.elapsed().as_secs_f64() * 1000.0;
                             crate::window::invoke(&app);
+                            // 记录热键唤起耗时（按键 → 窗口 invoke）
+                            crate::perf::record(crate::perf::MetricCategory::Hotkey, "key_to_show", elapsed, None);
                         }
                     }
                 }

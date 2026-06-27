@@ -123,8 +123,8 @@ impl SearchItem {
 
 /// 单次查询的共享上下文。0.2.2 仅含历史权重;后续可加意图/语言等。
 pub struct QueryContext<'a> {
-    /// lnk_path → 历史命中次数(频率加权用)。
-    pub history: &'a HashMap<String, i64>,
+    /// lnk_path → (hit_count, last_used_at) 历史权重（0.7.5 含时间衰减）。
+    pub history: &'a HashMap<String, (i64, i64)>,
     /// 唤起时的上下文快照（前台应用、剪贴板等）。
     pub snapshot: &'a ContextSnapshot,
 }

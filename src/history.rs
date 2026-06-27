@@ -113,13 +113,16 @@ pub async fn record_launch(pool: &SqlitePool, lnk_path: &str) {
     .await;
 }
 
-/// 获取所有历史权重：lnk_path → hit_count。
-pub async fn get_weights(pool: &SqlitePool) -> HashMap<String, i64> {
-    let rows: Vec<(String, i64)> = sqlx::query_as("SELECT lnk_path, hit_count FROM history")
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
-    rows.into_iter().collect()
+/// 获取所有历史权重：lnk_path → (hit_count, last_used_at)。
+///
+/// 0.7.5: 返回 last_used_at 用于时间衰减计算。
+pub async fn get_weights(pool: &SqlitePool) -> HashMap<String, (i64, i64)> {
+    let rows: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT lnk_path, hit_count, last_used_at FROM history")
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+    rows.into_iter().map(|(path, hit, last)| (path, (hit, last))).collect()
 }
 
 /// 获取历史记录总条数。

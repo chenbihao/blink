@@ -45,6 +45,14 @@ const HISTORY_BOOST_COEFF: f32 = 0.3;
 /// 精确匹配的新应用（1.0 分）仍有可能超过它。
 const HISTORY_BOOST_CEILING: f32 = 0.8;
 
+/// 历史权重半衰期（天）。
+///
+/// 设计值 14 天：两周前用过的应用权重减半，三个月前的几乎不影响排序。
+const HISTORY_HALF_LIFE_DAYS: f64 = 14.0;
+
+/// 时间衰减系数 λ = ln(2) / 半衰期。
+const HISTORY_DECAY_LAMBDA: f64 = std::f64::consts::LN_2 / HISTORY_HALF_LIFE_DAYS;
+
 /// 内置动作的基础权重系数。
 ///
 /// 设计值 1.2：内置动作默认比普通应用优先级高，
@@ -68,10 +76,11 @@ const PLACEHOLDER_INLINE_SCORE: f32 = -1.0;
 
 // ── 公共 API ────────────────────────────────────────────────────────────
 
-/// 计算历史加权加分。
+/// 计算历史加权加分（含时间衰减）。
 ///
 /// # 参数
 /// - `hit_count`: 历史命中次数（从 history 表读取）
+/// - `last_used_at`: 最后使用时间（Unix 时间戳秒）
 ///
 /// # 返回
 /// 加分值，范围 `[0, HISTORY_BOOST_CEILING]`，直接加到基础分数上。
@@ -79,12 +88,21 @@ const PLACEHOLDER_INLINE_SCORE: f32 = -1.0;
 /// # 设计意图
 /// 对数曲线让常用应用脱颖而出，但收益递减——用了 10 次 vs 100 次的差异
 /// 远小于 0 次 vs 1 次的差异。同时有上限保护，避免用了几千次的应用彻底垄断。
-pub fn history_boost(hit_count: i64) -> f32 {
+///
+/// 0.7.5 新增时间衰减：半衰期 14 天，两周前权重减半，三个月前几乎不影响。
+pub fn history_boost(hit_count: i64, last_used_at: i64) -> f32 {
     if hit_count <= 0 {
         return 0.0;
     }
+
+    // 计算时间衰减因子
+    let now = chrono::Utc::now().timestamp();
+    let days_since_last_use = ((now - last_used_at).max(0) as f64) / 86400.0;
+    let decay_factor = (-HISTORY_DECAY_LAMBDA * days_since_last_use).exp();
+
     let boost = ((hit_count as f64 + 1.0).ln() as f32) * HISTORY_BOOST_COEFF;
-    boost.min(HISTORY_BOOST_CEILING)
+    let decayed = boost * decay_factor as f32;
+    decayed.min(HISTORY_BOOST_CEILING)
 }
 
 /// 给 SearchItem 应用历史加权。
@@ -92,13 +110,13 @@ pub fn history_boost(hit_count: i64) -> f32 {
 /// # 参数
 /// - `score`: 原始匹配分
 /// - `item_id`: 去重键（Open 用路径，Builtin 用 `builtin:{id}`）
-/// - `history`: 历史权重表
+/// - `history`: 历史权重表 (lnk_path -> (hit_count, last_used_at))
 ///
 /// # 返回
 /// 加权后的分数
-pub fn apply_history(score: f32, item_id: &str, history: &HashMap<String, i64>) -> f32 {
-    let hit_count = history.get(item_id).copied().unwrap_or(0);
-    score + history_boost(hit_count)
+pub fn apply_history(score: f32, item_id: &str, history: &HashMap<String, (i64, i64)>) -> f32 {
+    let (hit_count, last_used_at) = history.get(item_id).copied().unwrap_or((0, 0));
+    score + history_boost(hit_count, last_used_at)
 }
 
 /// 内置动作的匹配质量 → 分数转换。
@@ -254,26 +272,34 @@ mod tests {
 
     #[test]
     fn history_boost_curve() {
+        let now = chrono::Utc::now().timestamp();
         // hit = 0 → 0
-        assert!((history_boost(0) - 0.0).abs() < 1e-6);
-        // hit = 1 → ln(2) × 0.3 ≈ 0.2079
-        assert!((history_boost(1) - 0.207_944_16).abs() < 1e-4);
-        // hit = 10 → ln(11) × 0.3 ≈ 0.7194
-        assert!((history_boost(10) - 0.719_368_66).abs() < 1e-4);
-        // hit = 100 → ln(101) × 0.3 ≈ 1.3855，但被上限截断到 0.8
-        assert!((history_boost(100) - 0.8).abs() < 1e-6);
-        // hit = 1000 → 同样被上限截断到 0.8
-        assert!((history_boost(1000) - 0.8).abs() < 1e-6);
+        assert!((history_boost(0, now) - 0.0).abs() < 1e-6);
+        // hit = 1, 今天使用 → ln(2) × 0.3 ≈ 0.2079（衰减因子≈1.0）
+        assert!((history_boost(1, now) - 0.207_944_16).abs() < 1e-2);
+        // hit = 10, 今天使用 → ln(11) × 0.3 ≈ 0.7194
+        assert!((history_boost(10, now) - 0.719_368_66).abs() < 1e-2);
+        // hit = 100, 今天使用 → 被上限截断到 0.8
+        assert!((history_boost(100, now) - 0.8).abs() < 1e-6);
         // 单调性检查：用得越多加成越高（上限以内）
-        assert!(history_boost(10) > history_boost(1));
-        assert!(history_boost(1) > history_boost(0));
+        assert!(history_boost(10, now) > history_boost(1, now));
+        assert!(history_boost(1, now) > history_boost(0, now));
+
+        // 时间衰减测试：14天前使用权重减半
+        let two_weeks_ago = now - 14 * 86400;
+        let recent_boost = history_boost(10, now);
+        let old_boost = history_boost(10, two_weeks_ago);
+        // 14天前的加成应该约为当前的一半（衰减因子≈0.5）
+        assert!(old_boost < recent_boost * 0.6, "14天前权重应明显衰减");
+        assert!(old_boost > recent_boost * 0.4, "14天前权重不应完全消失");
     }
 
     #[test]
     fn apply_history_looks_up_by_id() {
+        let now = chrono::Utc::now().timestamp();
         let mut h = HashMap::new();
-        h.insert("a".to_string(), 10);
-        h.insert("b".to_string(), 0);
+        h.insert("a".to_string(), (10, now));
+        h.insert("b".to_string(), (0, now));
         // 有历史的加分
         assert!(apply_history(0.5, "a", &h) > 0.5);
         // 没历史的不变

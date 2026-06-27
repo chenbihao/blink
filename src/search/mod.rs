@@ -90,7 +90,7 @@ pub struct AppEntry {
 mod windows;
 
 #[cfg(target_os = "windows")]
-pub use windows::{scan_start_menu, launch, roots_modified};
+pub use windows::{scan_start_menu, launch, roots_modified, start_menu_roots, parse_lnk_entry};
 
 #[cfg(target_os = "windows")]
 pub mod icon;

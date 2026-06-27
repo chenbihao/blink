@@ -96,6 +96,7 @@ impl SearchService {
 
     /// 搜索:先路由 → 按 Takeover/Mixed 分支执行 → 返回首批结果 + spawn 增量。
     pub async fn search(&self, query: &str, seq: u64) -> Vec<AppEntry> {
+        let search_start = std::time::Instant::now();
         self.latest_seq.store(seq, Ordering::SeqCst);
 
         let q = query.trim();
@@ -174,6 +175,11 @@ impl SearchService {
                     .map(SearchItem::into_app_entry)
                     .collect();
                 all_items.extend(placeholders);
+
+                // 记录搜索耗时（sync lane 返回首结果）
+                let elapsed = search_start.elapsed().as_secs_f64() * 1000.0;
+                crate::perf::record(crate::perf::MetricCategory::SearchEngine, "total", elapsed, None);
+
                 all_items
             }
         }

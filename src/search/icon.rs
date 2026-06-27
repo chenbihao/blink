@@ -5,10 +5,14 @@
 //!
 //! 由自定义协议（Windows 下 `http://blink-icon.localhost/<path>`）按需懒加载调用
 //! （见 main.rs），不进搜索扫描热路径。
+//!
+//! 0.7.4: 两层缓存架构 — 内存 LRU(200) + SQLite BLOB 持久化。
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::SystemTime;
 
+use once_cell::sync::OnceCell;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::SIZE;
 use windows::Win32::Graphics::Gdi::{
@@ -19,34 +23,242 @@ use windows::Win32::UI::Shell::{
     IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
 };
 
+use sqlx::SqlitePool;
+
 /// 默认提取尺寸（物理像素）。32 足够列表项显示，高 DPI 下 GetImage 会按需给更大位图。
 const ICON_SIZE: i32 = 32;
 
-/// 图标缓存：lnk_path -> PNG 字节。
+/// 内存 LRU 缓存容量。
+const MEMORY_CACHE_CAPACITY: usize = 200;
+
+/// 全局 pool 单例——用于 SQLite 持久化。
+static POOL: OnceCell<SqlitePool> = OnceCell::new();
+
+/// 内存 LRU 缓存：lnk_path -> PNG 字节。
 /// 值为 `None` 表示「提取过但无图标/失败」，避免对失效项反复重试。
 static ICON_CACHE: Mutex<Option<HashMap<String, Option<Vec<u8>>>>> = Mutex::new(None);
 
-/// 获取图标 PNG 字节（带缓存）。供协议 handler 调用，可能阻塞（Shell 调用），应在 blocking 线程跑。
+/// 初始化图标缓存：建表 + 注册全局 pool。
+pub async fn init(pool: &SqlitePool) -> Result<(), String> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS icon_cache (
+            path_hash TEXT PRIMARY KEY,
+            png_blob BLOB NOT NULL,
+            file_mtime INTEGER NOT NULL,
+            icon_size INTEGER NOT NULL,
+            accessed_at INTEGER NOT NULL,
+            created_at INTEGER NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_icon_accessed ON icon_cache(accessed_at)")
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let _ = POOL.set(pool.clone());
+
+    // 后台清理过期数据
+    let cleanup_pool = pool.clone();
+    tokio::spawn(async move {
+        cleanup_old(&cleanup_pool).await;
+    });
+
+    tracing::debug!("icon_cache 表已初始化");
+    Ok(())
+}
+
+/// 计算路径的 SHA256 哈希（用于 SQLite key，避免长路径问题）。
+fn path_hash(path: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// 获取文件 mtime（秒级时间戳）。
+fn file_mtime(path: &str) -> i64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// 从 SQLite 读取缓存的图标。
+fn load_from_db(path: &str) -> Option<Option<Vec<u8>>> {
+    let pool = POOL.get()?;
+    let hash = path_hash(path);
+    let mtime = file_mtime(path);
+
+    // 使用 block_on 因为我们可能在同步上下文中调用
+    let result = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async {
+            sqlx::query_as::<_, (Vec<u8>, i64)>(
+                "SELECT png_blob, file_mtime FROM icon_cache WHERE path_hash = ?1",
+            )
+            .bind(&hash)
+            .fetch_optional(pool)
+            .await
+        })
+    });
+
+    match result {
+        Ok(Some((blob, cached_mtime))) => {
+            // mtime 变化 → 缓存失效
+            if cached_mtime != mtime {
+                tracing::trace!(path, "图标缓存失效(mtime 变化)");
+                // 删除旧缓存
+                let pool = pool.clone();
+                let hash = hash.clone();
+                tokio::spawn(async move {
+                    let _ = sqlx::query("DELETE FROM icon_cache WHERE path_hash = ?1")
+                        .bind(&hash)
+                        .execute(&pool)
+                        .await;
+                });
+                return None;
+            }
+            // 更新 accessed_at
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                let now = chrono::Utc::now().timestamp();
+                let _ = sqlx::query("UPDATE icon_cache SET accessed_at = ?1 WHERE path_hash = ?2")
+                    .bind(now)
+                    .bind(&hash)
+                    .execute(&pool)
+                    .await;
+            });
+            Some(Some(blob))
+        }
+        Ok(None) => None,
+        Err(e) => {
+            tracing::debug!(error = %e, "读取图标缓存失败");
+            None
+        }
+    }
+}
+
+/// 保存图标到 SQLite。
+fn save_to_db(path: &str, png: &[u8]) {
+    let Some(pool) = POOL.get() else {
+        return;
+    };
+    let hash = path_hash(path);
+    let mtime = file_mtime(path);
+    let now = chrono::Utc::now().timestamp();
+    let pool = pool.clone();
+    let png = png.to_vec();
+
+    tokio::spawn(async move {
+        let _ = sqlx::query(
+            "INSERT OR REPLACE INTO icon_cache (path_hash, png_blob, file_mtime, icon_size, accessed_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .bind(&hash)
+        .bind(&png)
+        .bind(mtime)
+        .bind(ICON_SIZE)
+        .bind(now)
+        .bind(now)
+        .execute(&pool)
+        .await;
+    });
+}
+
+/// 获取图标 PNG 字节（带两层缓存）。供协议 handler 调用，可能阻塞（Shell 调用），应在 blocking 线程跑。
 pub fn get_icon_png(path: &str) -> Option<Vec<u8>> {
-    // 查缓存
+    // Layer 1: 内存 LRU 缓存
     {
         if let Ok(cache) = ICON_CACHE.lock() {
             if let Some(map) = cache.as_ref() {
                 if let Some(cached) = map.get(path) {
+                    crate::perf::record(crate::perf::MetricCategory::IconExtract, "hit", 0.0, None);
                     return cached.clone();
                 }
             }
         }
     }
 
+    // Layer 2: SQLite 持久化缓存
+    if let Some(Some(blob)) = load_from_db(path) {
+        crate::perf::record(crate::perf::MetricCategory::IconExtract, "hit_db", 0.0, None);
+        // 写入内存缓存
+        if let Ok(mut cache) = ICON_CACHE.lock() {
+            let map = cache.get_or_insert_with(HashMap::new);
+            map.insert(path.to_string(), Some(blob.clone()));
+        }
+        return Some(blob);
+    }
+
+    // 缓存未命中：提取图标
+    let start = std::time::Instant::now();
     let result = extract_icon_png(path, ICON_SIZE);
+    let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+
+    crate::perf::record(
+        crate::perf::MetricCategory::IconExtract,
+        if result.is_some() { "miss" } else { "fail" },
+        elapsed,
+        Some(path),
+    );
+
+    // 写入两层缓存
+    if let Some(ref png) = result {
+        save_to_db(path, png);
+    }
 
     if let Ok(mut cache) = ICON_CACHE.lock() {
         let map = cache.get_or_insert_with(HashMap::new);
+        // LRU 淘汰：超过容量时删除最旧的
+        if map.len() >= MEMORY_CACHE_CAPACITY {
+            if let Some(oldest_key) = map.keys().next().cloned() {
+                map.remove(&oldest_key);
+            }
+        }
         map.insert(path.to_string(), result.clone());
     }
 
     result
+}
+
+/// 清理超过 30 天未访问的图标缓存。
+async fn cleanup_old(pool: &SqlitePool) {
+    let cutoff = chrono::Utc::now().timestamp() - 30 * 86400;
+    match sqlx::query("DELETE FROM icon_cache WHERE accessed_at < ?1")
+        .bind(cutoff)
+        .execute(pool)
+        .await
+    {
+        Ok(r) => {
+            let rows = r.rows_affected();
+            if rows > 0 {
+                tracing::info!(rows, "清理过期图标缓存");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "清理过期图标缓存失败"),
+    }
+
+    // 超量清理：保留最新的 2000 条
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM icon_cache")
+        .fetch_one(pool)
+        .await
+        .unwrap_or((0,));
+
+    if count.0 > 2000 {
+        let excess = count.0 - 2000;
+        let _ = sqlx::query(
+            "DELETE FROM icon_cache WHERE path_hash IN (SELECT path_hash FROM icon_cache ORDER BY accessed_at ASC LIMIT ?1)",
+        )
+        .bind(excess)
+        .execute(pool)
+        .await;
+        tracing::info!(deleted = excess, "清理超量图标缓存");
+    }
 }
 
 /// COM 初始化 RAII guard：仅在本次确实初始化成功时负责 `CoUninitialize`。

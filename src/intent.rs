@@ -66,8 +66,8 @@ pub enum Route {
 
 /// 单次查询的共享上下文。0.4 仅 history + snapshot;P3 VectorRouter/AIRouter 扩展时用上。
 pub struct QueryContext<'a> {
-    /// 历史权重（lnk_path → 命中次数）。
-    pub history: &'a std::collections::HashMap<String, i64>,
+    /// 历史权重（lnk_path → (hit_count, last_used_at)）。0.7.5 含时间衰减。
+    pub history: &'a std::collections::HashMap<String, (i64, i64)>,
     /// 唤起时的上下文快照（前台应用、剪贴板等）。
     pub snapshot: &'a ContextSnapshot,
 }

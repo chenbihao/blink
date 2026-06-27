@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod calc;
+mod clipboard;
 mod commands;
 mod config;
 mod context;
@@ -9,6 +10,7 @@ mod hotkey;
 mod intent;
 mod locale;
 mod logging;
+mod perf;
 mod plugin;
 mod search;
 mod service;
@@ -67,11 +69,27 @@ fn main() {
             });
         })
         .setup(|app| {
+            // 启动总耗时计时器
+            let _startup_total = perf::Timer::new(perf::MetricCategory::Startup, "total");
+
             // 初始化历史记录 SQLite
             let pool = tauri::async_runtime::block_on(history::init_db())
                 .expect("failed to init history db");
 
+            // 初始化性能统计（0.7.0）
+            tauri::async_runtime::block_on(perf::init(&pool))
+                .expect("failed to init perf metrics");
+
+            // 初始化剪贴板历史表（0.7.3）
+            tauri::async_runtime::block_on(clipboard::init_db(&pool))
+                .expect("failed to init clipboard db");
+
+            // 初始化图标缓存持久化（0.7.4）
+            tauri::async_runtime::block_on(search::icon::init(&pool))
+                .expect("failed to init icon cache");
+
             // 初始化配置
+            let _config_timer = perf::Timer::new(perf::MetricCategory::Startup, "config_load");
             tauri::async_runtime::block_on(config::init_config(&pool))
                 .expect("failed to init config");
 
@@ -201,6 +219,7 @@ fn main() {
                 everything_port: app_config.file_search.everything_port,
                 local_scan_depth: app_config.file_search.local_scan_depth,
                 max_results: app_config.file_search.max_results,
+                ..Default::default()
             };
 
             // 构造 SearchService(多路引擎 + 意图路由)。command 层经 app.state 取用。
@@ -240,9 +259,12 @@ fn main() {
                 config: app_config,
             };
             let services = service::all_services(search_service);
-            for svc in &services {
-                if let Err(e) = tauri::async_runtime::block_on(svc.start(&ctx)) {
-                    tracing::error!(service = svc.name(), error = %e, "service start failed");
+            {
+                let _svc_timer = perf::Timer::new(perf::MetricCategory::Startup, "services_init");
+                for svc in &services {
+                    if let Err(e) = tauri::async_runtime::block_on(svc.start(&ctx)) {
+                        tracing::error!(service = svc.name(), error = %e, "service start failed");
+                    }
                 }
             }
             // 持有服务列表,保证其生命周期与 app 一致。
@@ -291,7 +313,18 @@ fn main() {
             commands::context_menu_action,
             commands::probe_interpreters,
             commands::update_interpreter_config,
-            commands::open_file_dialog
+            commands::open_file_dialog,
+            commands::get_clipboard_history,
+            commands::search_clipboard_history,
+            commands::record_clipboard_hit,
+            commands::delete_clipboard_item,
+            commands::clear_clipboard_history,
+            commands::get_clipboard_stats,
+            commands::get_perf_overview,
+            commands::get_perf_percentiles,
+            commands::get_perf_slow_queries,
+            commands::get_perf_recent,
+            commands::export_perf_report
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

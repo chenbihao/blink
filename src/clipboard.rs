@@ -1,0 +1,310 @@
+//! 剪贴板历史（0.7.3）：SQLite 持久化，模糊搜索。
+//!
+//! 设计（见 production-design/phases/0.7-plugin-ecosystem-local-search.md §三）：
+//! - 默认关闭，用户手动启用后才生效
+//! - 去重（相同内容 10 秒内不重复记录）
+//! - SQLite 持久化存储，可配置保留天数
+//! - 敏感应用黑名单（密码管理器等）
+//!
+//! TODO: 实时监听 `AddClipboardFormatListener`（需要窗口消息循环）
+
+use sqlx::SqlitePool;
+
+/// 剪贴板条目。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ClipboardItem {
+    pub id: String,
+    pub text: String,
+    pub preview: String,
+    pub created_at: i64,
+    pub source_app: Option<String>,
+    pub hit_count: u32,
+}
+
+/// 剪贴板配置。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ClipboardConfig {
+    /// 是否启用剪贴板历史
+    #[serde(default)]
+    pub enabled: bool,
+    /// 最大保留条数
+    #[serde(default = "default_max_items")]
+    pub max_items: u32,
+    /// 保留天数（0=永久）
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u32,
+    /// 是否允许搜索剪贴板内容
+    #[serde(default = "default_true")]
+    pub search_enabled: bool,
+    /// 敏感窗口标题黑名单
+    #[serde(default = "default_blacklist")]
+    pub blacklist_keywords: Vec<String>,
+}
+
+fn default_max_items() -> u32 { 500 }
+fn default_retention_days() -> u32 { 7 }
+fn default_true() -> bool { true }
+fn default_blacklist() -> Vec<String> {
+    vec![
+        "密码".to_string(),
+        "Password".to_string(),
+        "Bitwarden".to_string(),
+        "1Password".to_string(),
+        "KeePass".to_string(),
+    ]
+}
+
+impl Default for ClipboardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_items: 500,
+            retention_days: 7,
+            search_enabled: true,
+            blacklist_keywords: default_blacklist(),
+        }
+    }
+}
+
+/// 初始化剪贴板历史表。
+pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS clipboard_history (
+            id TEXT PRIMARY KEY,
+            text TEXT NOT NULL,
+            preview TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            source_app TEXT,
+            hit_count INTEGER NOT NULL DEFAULT 0
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_clip_created ON clipboard_history(created_at)")
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    tracing::debug!("clipboard_history 表已初始化");
+    Ok(())
+}
+
+/// 保存剪贴板条目到数据库。
+#[allow(dead_code)] // 预留给剪贴板监听器
+pub async fn save_item(pool: &SqlitePool, item: &ClipboardItem) -> Result<(), String> {
+    sqlx::query(
+        "INSERT OR REPLACE INTO clipboard_history (id, text, preview, created_at, source_app, hit_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )
+    .bind(&item.id)
+    .bind(&item.text)
+    .bind(&item.preview)
+    .bind(item.created_at)
+    .bind(&item.source_app)
+    .bind(item.hit_count)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 查询最近的剪贴板条目。
+pub async fn query_recent(pool: &SqlitePool, limit: i64) -> Vec<ClipboardItem> {
+    sqlx::query_as::<_, (String, String, String, i64, Option<String>, u32)>(
+        "SELECT id, text, preview, created_at, source_app, hit_count FROM clipboard_history ORDER BY created_at DESC LIMIT ?1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(id, text, preview, created_at, source_app, hit_count)| ClipboardItem {
+        id,
+        text,
+        preview,
+        created_at,
+        source_app,
+        hit_count,
+    })
+    .collect()
+}
+
+/// 模糊搜索剪贴板内容。
+pub async fn search(pool: &SqlitePool, query: &str, limit: i64) -> Vec<ClipboardItem> {
+    let items = query_recent(pool, 200).await;
+
+    // 使用 nucleo 模糊匹配
+    use nucleo::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
+    use nucleo::{Config, Matcher, Utf32Str};
+
+    let query_lower = query.to_ascii_lowercase();
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let pattern = Pattern::new(&query_lower, CaseMatching::Smart, Normalization::Smart, AtomKind::Fuzzy);
+    let mut buf = Vec::new();
+
+    let mut scored: Vec<(u32, ClipboardItem)> = items
+        .into_iter()
+        .filter_map(|item| {
+            let haystack = Utf32Str::new(&item.preview, &mut buf);
+            let score = pattern.score(haystack, &mut matcher)?;
+            Some((score, item))
+        })
+        .collect();
+
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored
+        .into_iter()
+        .take(limit as usize)
+        .map(|(_, item)| item)
+        .collect()
+}
+
+/// 记录剪贴板命中（用户选择粘贴某条历史）。
+pub async fn record_hit(pool: &SqlitePool, id: &str) {
+    let _ = sqlx::query("UPDATE clipboard_history SET hit_count = hit_count + 1 WHERE id = ?1")
+        .bind(id)
+        .execute(pool)
+        .await;
+}
+
+/// 删除指定条目。
+pub async fn delete_item(pool: &SqlitePool, id: &str) {
+    let _ = sqlx::query("DELETE FROM clipboard_history WHERE id = ?1")
+        .bind(id)
+        .execute(pool)
+        .await;
+}
+
+/// 清空所有剪贴板历史。
+pub async fn clear_all(pool: &SqlitePool) {
+    let _ = sqlx::query("DELETE FROM clipboard_history")
+        .execute(pool)
+        .await;
+}
+
+/// 清理过期条目。
+#[allow(dead_code)] // 预留给启动时清理
+pub async fn cleanup_old(pool: &SqlitePool, days: u32) {
+    if days == 0 {
+        return;
+    }
+    let cutoff = chrono::Utc::now().timestamp() - (days as i64 * 86400);
+    let result = sqlx::query("DELETE FROM clipboard_history WHERE created_at < ?1")
+        .bind(cutoff)
+        .execute(pool)
+        .await;
+    match result {
+        Ok(r) => {
+            let rows = r.rows_affected();
+            if rows > 0 {
+                tracing::info!(rows, "清理过期剪贴板历史");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "清理过期剪贴板历史失败"),
+    }
+}
+
+/// 超量清理：保留最新的 max_items 条。
+#[allow(dead_code)] // 预留给启动时清理
+pub async fn cleanup_excess(pool: &SqlitePool, max_items: u32) {
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM clipboard_history")
+        .fetch_one(pool)
+        .await
+        .unwrap_or((0,));
+
+    if count.0 > max_items as i64 {
+        let excess = count.0 - max_items as i64;
+        let _ = sqlx::query(
+            "DELETE FROM clipboard_history WHERE id IN (SELECT id FROM clipboard_history ORDER BY created_at ASC LIMIT ?1)",
+        )
+        .bind(excess)
+        .execute(pool)
+        .await;
+        tracing::info!(deleted = excess, "清理超量剪贴板历史");
+    }
+}
+
+/// 检查窗口标题是否在黑名单中。
+#[allow(dead_code)] // 预留给剪贴板监听器
+pub fn is_blacklisted(title: &str, blacklist: &[String]) -> bool {
+    let title_lower = title.to_ascii_lowercase();
+    blacklist.iter().any(|keyword| {
+        title_lower.contains(&keyword.to_ascii_lowercase())
+    })
+}
+
+/// 生成预览文本（截断前 80 字符）。
+#[allow(dead_code)] // 预留给剪贴板监听器
+pub fn make_preview(text: &str) -> String {
+    if text.chars().count() <= 80 {
+        text.to_string()
+    } else {
+        let preview: String = text.chars().take(80).collect();
+        format!("{}...", preview)
+    }
+}
+
+/// 生成唯一 ID。
+#[allow(dead_code)] // 预留给剪贴板监听器
+pub fn generate_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("clip_{}", timestamp)
+}
+
+/// 获取剪贴板统计信息。
+pub async fn get_stats(pool: &SqlitePool) -> serde_json::Value {
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM clipboard_history")
+        .fetch_one(pool)
+        .await
+        .unwrap_or((0,));
+
+    let oldest: (Option<i64>,) = sqlx::query_as("SELECT MIN(created_at) FROM clipboard_history")
+        .fetch_one(pool)
+        .await
+        .unwrap_or((None,));
+
+    serde_json::json!({
+        "count": count.0,
+        "oldest_at": oldest.0,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn make_preview_truncates_long_text() {
+        let text = "a".repeat(100);
+        let preview = make_preview(&text);
+        assert_eq!(preview.len(), 83); // 80 + "..."
+        assert!(preview.ends_with("..."));
+    }
+
+    #[test]
+    fn make_preview_keeps_short_text() {
+        let text = "hello";
+        let preview = make_preview(text);
+        assert_eq!(preview, "hello");
+    }
+
+    #[test]
+    fn is_blacklisted_matches_keywords() {
+        let blacklist = vec!["密码".to_string(), "Password".to_string()];
+        assert!(is_blacklisted("输入密码", &blacklist));
+        assert!(is_blacklisted("Enter Password", &blacklist));
+        assert!(!is_blacklisted("普通窗口", &blacklist));
+    }
+
+    #[test]
+    fn is_blacklisted_case_insensitive() {
+        let blacklist = vec!["password".to_string()];
+        assert!(is_blacklisted("PASSWORD", &blacklist));
+        assert!(is_blacklisted("Password", &blacklist));
+    }
+}

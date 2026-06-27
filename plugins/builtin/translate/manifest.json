@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "id": "builtin.translate",
+  "name": "翻译",
+  "version": "0.1.0",
+  "description": "多引擎文本翻译：有道智云/百度翻译/DeepL",
+  "builtin": true,
+  "runtime": {
+    "type": "python",
+    "protocol": "jsonl",
+    "exec": "./main.py",
+    "timeout_ms": 10000,
+    "min_arg_length": 0,
+    "concurrency": 1
+  },
+  "triggers": [
+    { "type": "keyword", "keyword": "fy", "exclusive": true },
+    { "type": "keyword", "keyword": "翻译", "exclusive": true }
+  ],
+  "capabilities": ["query"],
+  "settings_schema": [
+    {
+      "key": "default_engine",
+      "type": "select",
+      "title": "默认翻译引擎",
+      "options": ["youdao", "baidu", "deepl"],
+      "default": "youdao"
+    },
+    {
+      "key": "target_lang",
+      "type": "select",
+      "title": "目标语言",
+      "options": ["auto", "zh", "en", "ja", "ko"],
+      "default": "zh"
+    },
+    {
+      "key": "youdao_app_key",
+      "type": "string",
+      "title": "有道智云 APP Key",
+      "description": "申请地址: https://ai.youdao.com/"
+    },
+    {
+      "key": "youdao_app_secret",
+      "type": "string",
+      "title": "有道智云 APP Secret",
+      "secret": true
+    },
+    {
+      "key": "baidu_app_id",
+      "type": "string",
+      "title": "百度翻译 APP ID",
+      "description": "申请地址: https://fanyi-api.baidu.com/"
+    },
+    {
+      "key": "baidu_app_key",
+      "type": "string",
+      "title": "百度翻译 APP Key",
+      "secret": true
+    },
+    {
+      "key": "deepl_api_key",
+      "type": "string",
+      "title": "DeepL API Key",
+      "description": "申请地址: https://www.deepl.com/pro-api",
+      "secret": true
+    }
+  ]
+}

@@ -450,11 +450,14 @@ pub async fn update_file_search(
     max_results: u32,
 ) -> Result<(), String> {
     let pool = app.state::<sqlx::SqlitePool>();
+    // 保留已有的 fallback 配置，只更新基础字段
+    let existing = crate::config::get_file_search_config(&pool).await;
     let file_search = crate::config::FileSearchConfig {
         enabled,
         everything_port,
         local_scan_depth,
         max_results,
+        ..existing
     };
     crate::config::update_file_search(&pool, file_search).await
 }
@@ -868,6 +871,110 @@ pub async fn context_menu_action(app: tauri::AppHandle, action_id: u32) -> Resul
 pub async fn probe_interpreters() -> crate::plugin::InterpretersStatus {
     tracing::debug!("探测脚本解释器状态");
     crate::plugin::probe_interpreters()
+}
+
+// ─── 剪贴板历史（Phase 0.7.3）──────────────────────────────────────────────────
+
+/// 获取最近的剪贴板历史。
+#[tauri::command]
+pub async fn get_clipboard_history(
+    app: tauri::AppHandle,
+    limit: Option<i64>,
+) -> Vec<crate::clipboard::ClipboardItem> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::clipboard::query_recent(&pool, limit.unwrap_or(20)).await
+}
+
+/// 搜索剪贴板历史。
+#[tauri::command]
+pub async fn search_clipboard_history(
+    app: tauri::AppHandle,
+    query: String,
+    limit: Option<i64>,
+) -> Vec<crate::clipboard::ClipboardItem> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::clipboard::search(&pool, &query, limit.unwrap_or(20)).await
+}
+
+/// 记录剪贴板命中（用户选择粘贴某条历史）。
+#[tauri::command]
+pub async fn record_clipboard_hit(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::clipboard::record_hit(&pool, &id).await;
+    Ok(())
+}
+
+/// 删除指定剪贴板条目。
+#[tauri::command]
+pub async fn delete_clipboard_item(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::clipboard::delete_item(&pool, &id).await;
+    Ok(())
+}
+
+/// 清空所有剪贴板历史。
+#[tauri::command]
+pub async fn clear_clipboard_history(app: tauri::AppHandle) -> Result<(), String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::clipboard::clear_all(&pool).await;
+    Ok(())
+}
+
+/// 获取剪贴板统计信息。
+#[tauri::command]
+pub async fn get_clipboard_stats(app: tauri::AppHandle) -> serde_json::Value {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::clipboard::get_stats(&pool).await
+}
+
+// ─── 性能统计（Phase 0.7.0）──────────────────────────────────────────────────
+
+/// 获取性能统计概览（设置页 → 调试 Tab）。
+#[tauri::command]
+pub async fn get_perf_overview(app: tauri::AppHandle) -> serde_json::Value {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::perf::get_overview(&pool).await
+}
+
+/// 查询指定指标的 P50/P90/P99。
+#[tauri::command]
+pub async fn get_perf_percentiles(
+    app: tauri::AppHandle,
+    category: String,
+    name: String,
+    limit: Option<i64>,
+) -> serde_json::Value {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::perf::query_percentiles(&pool, &category, &name, limit.unwrap_or(100)).await
+}
+
+/// 查询慢查询日志。
+#[tauri::command]
+pub async fn get_perf_slow_queries(
+    app: tauri::AppHandle,
+    category: String,
+    threshold_ms: f64,
+    limit: Option<i64>,
+) -> Vec<crate::perf::PerformanceMetric> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::perf::query_slow(&pool, &category, threshold_ms, limit.unwrap_or(20)).await
+}
+
+/// 查询最近 N 条性能指标。
+#[tauri::command]
+pub async fn get_perf_recent(
+    app: tauri::AppHandle,
+    limit: Option<i64>,
+) -> Vec<crate::perf::PerformanceMetric> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::perf::query_recent(&pool, limit.unwrap_or(100)).await
+}
+
+/// 导出性能报告（JSON 格式）。
+#[tauri::command]
+pub async fn export_perf_report(app: tauri::AppHandle) -> serde_json::Value {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::perf::export_report(&pool).await
 }
 
 /// 更新解释器自定义路径（暂未实现持久化，Phase 0.6 第一版只做探测展示）。

@@ -20,6 +20,7 @@ string_slice = "deny"  # 禁止直接按字节切片字符串（会导致中文 
 [dependencies]
 async-trait = "0.1"
 chrono = "0.4.45"
+dirs-next = "2.0"
 evalexpr = "13.1.0"
 nucleo = "0.5.0"
 png = "0.17"
@@ -37,8 +38,10 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1.52.3", features = ["sync", "time", "process", "io-util"] }
+once_cell = "1.21"
 reqwest = { version = "0.12", features = ["json"] }
 urlencoding = "2.1"
+walkdir = "2.5"
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",

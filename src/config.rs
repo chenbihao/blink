@@ -82,6 +82,27 @@ fn default_file_search_max_results() -> u32 {
     20
 }
 
+fn default_fallback_dirs() -> Vec<String> {
+    vec![
+        "Desktop".to_string(),
+        "Documents".to_string(),
+        "Downloads".to_string(),
+        "StartMenu".to_string(),
+    ]
+}
+
+fn default_fallback_depth() -> u32 {
+    3
+}
+
+fn default_fallback_cache_ttl() -> u64 {
+    300
+}
+
+fn default_fallback_max_results() -> u32 {
+    50
+}
+
 /// 文件搜索配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileSearchConfig {
@@ -97,6 +118,21 @@ pub struct FileSearchConfig {
     /// 每次检索最大结果数
     #[serde(default = "default_file_search_max_results")]
     pub max_results: u32,
+    /// 是否启用本地目录 Fallback（Everything 不可用时）
+    #[serde(default = "default_true")]
+    pub fallback_enabled: bool,
+    /// Fallback 遍历的目录列表
+    #[serde(default = "default_fallback_dirs")]
+    pub fallback_dirs: Vec<String>,
+    /// Fallback 最大遍历深度
+    #[serde(default = "default_fallback_depth")]
+    pub fallback_max_depth: u32,
+    /// Fallback 缓存有效期（秒）
+    #[serde(default = "default_fallback_cache_ttl")]
+    pub fallback_cache_ttl_sec: u64,
+    /// Fallback 最多返回数
+    #[serde(default = "default_fallback_max_results")]
+    pub fallback_max_results: u32,
 }
 
 impl Default for FileSearchConfig {
@@ -106,6 +142,11 @@ impl Default for FileSearchConfig {
             everything_port: 80,
             local_scan_depth: 3,
             max_results: 20,
+            fallback_enabled: true,
+            fallback_dirs: default_fallback_dirs(),
+            fallback_max_depth: 3,
+            fallback_cache_ttl_sec: 300,
+            fallback_max_results: 50,
         }
     }
 }
@@ -147,6 +188,9 @@ pub struct AppConfig {
     /// 空 query 显示历史常用数
     #[serde(default = "default_5")]
     pub empty_query_topn: u32,
+    /// 剪贴板历史配置
+    #[serde(default)]
+    pub clipboard: crate::clipboard::ClipboardConfig,
     /// ⚠️ 兼容层：旧版本 file_search 配置（0.5 已迁移到 engine:file_search，0.6 移除）
     #[serde(default)]
     #[deprecated = "已迁移到 engine:file_search，使用 get_file_search_config() 读取"]
@@ -169,6 +213,7 @@ impl Default for AppConfig {
             max_results: default_50(),
             proactive_enabled: default_false(),
             empty_query_topn: default_5(),
+            clipboard: crate::clipboard::ClipboardConfig::default(),
             file_search: FileSearchConfig::default(),
         }
     }
