@@ -124,14 +124,16 @@ fn handle_query(id: String, query: String, ctx: PluginQueryContext) -> PluginRes
 
     // 3. 剪贴板内容
     if let Some(clip) = &ctx.clipboard_text {
-        let clip_short = if clip.len() > 50 {
-            format!("{}...", &clip[..50])
+        // 按字符数截断（非字节数），避免 UTF-8 字符边界 panic
+        let max_chars = 30;
+        let clip_short = if clip.chars().count() > max_chars {
+            format!("{}...", clip.chars().take(max_chars).collect::<String>())
         } else {
             clip.clone()
         };
         items.push(PluginItem {
             title: format!("剪贴板: {clip_short}"),
-            subtitle: Some(format!("共 {} 字符", clip.len())),
+            subtitle: Some(format!("共 {} 字符", clip.chars().count())),
             score: 0.85,
             action: PluginAction::Copy { text: clip.clone() },
         });

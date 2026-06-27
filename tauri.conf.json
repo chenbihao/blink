@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "identifier": "com.blink.launcher",
   "build": {
+    "beforeBuildCommand": "powershell -ExecutionPolicy Bypass -File scripts/copy-plugins.ps1",
     "frontendDist": "frontend"
   },
   "app": {
@@ -33,6 +34,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.ico", "icons/icon.png"]
+    "icon": ["icons/icon.ico", "icons/icon.png"],
+    "resources": ["plugins/builtin/**/*"]
   }
 }

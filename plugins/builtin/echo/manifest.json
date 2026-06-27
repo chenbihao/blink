@@ -8,7 +8,7 @@
   "runtime": {
     "type": "process",
     "protocol": "jsonl",
-    "exec": "../../../target/debug/blink-plugin-echo.exe",
+    "exec": "./bin/blink-plugin-echo.exe",
     "timeout_ms": 2000,
     "concurrency": 1
   },

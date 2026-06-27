@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "id": "builtin.echo-node",
+  "name": "回显 (Node.js)",
+  "version": "0.1.0",
+  "description": "Node.js 版回显插件，演示脚本插件能力",
+  "builtin": true,
+  "runtime": {
+    "type": "node",
+    "protocol": "jsonl",
+    "exec": "./main.js",
+    "timeout_ms": 5000,
+    "min_arg_length": 1,
+    "concurrency": 1
+  },
+  "triggers": [
+    { "type": "keyword", "keyword": "echonode", "exclusive": true }
+  ],
+  "capabilities": ["query"]
+}

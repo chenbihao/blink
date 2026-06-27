@@ -431,17 +431,35 @@ input:checked + .slider:before {
   color: var(--green);
 }
 
-/* ── 小输入框 ────────────────────────────────────────────────────────────── */
+/* ── 输入框通用样式 ────────────────────────────────────────────────────────────── */
 
-.input-small {
-  width: 80px;
+.input-small,
+.input-wide {
   background: var(--surface);
   color: var(--text);
   border: 1px solid var(--surface-2);
   border-radius: 6px;
-  padding: 6px 10px;
+  padding: 8px 12px;
   font-size: 13px;
   font-family: ui-monospace, Consolas, monospace;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.input-small:focus,
+.input-wide:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
+
+.input-small {
+  width: 80px;
+}
+
+.input-wide {
+  flex: 1;
+  min-width: 200px;
+  max-width: 500px;
 }
 
 /* ── 插件配置卡片（schema 驱动表单）────────────────────────────────────── */

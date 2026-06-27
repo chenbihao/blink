@@ -28,6 +28,7 @@ impl SearchEngine for CalcEngine {
                 score: super::scorer::calc_score(),
                 action: SearchAction::Copy { text: result },
                 source: "calc".into(),
+                score_detail: Some("calc=1.0".into()),
             }],
             None => Vec::new(),
         }

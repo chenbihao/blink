@@ -15,7 +15,7 @@ use tauri::{AppHandle, Manager};
 
 pub use engine::PluginEngine;
 pub use manifest::{PluginManifest, PluginTrigger};
-pub use process::PluginHandle;
+pub use process::{InterpretersStatus, PluginHandle, probe_interpreters};
 pub use protocol::PluginQueryContext;
 
 /// builtin 插件根目录。

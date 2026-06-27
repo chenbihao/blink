@@ -109,35 +109,98 @@
             </div>
 
             <div class="extension-body">
-              <div class="setting-row">
-                <label data-i18n="engine.everything.status.label">Everything 状态</label>
-                <span id="everything-status" class="status-badge status-unknown">探测中…</span>
-                <button id="probe-everything" class="btn-small" data-i18n="engine.probe">重新探测</button>
+              <div class="plugin-config-section">
+                <div class="plugin-section-title">Everything</div>
+
+                <div class="setting-row">
+                  <label data-i18n="engine.everything.status.label">Everything 状态</label>
+                  <span id="everything-status" class="status-badge status-unknown">探测中…</span>
+                  <button id="probe-everything" class="btn-small" data-i18n="engine.probe">重新探测</button>
+                </div>
+
+                <div class="setting-row">
+                  <label data-i18n="engine.everything.port.label">HTTP 端口</label>
+                  <input type="number" id="everything-port" min="1" max="65535" value="80" class="input-small" />
+                  <span class="hint" data-i18n="engine.everything.port.hint">Everything 选项 → HTTP 服务器</span>
+                </div>
+
+                <div class="setting-row">
+                  <label data-i18n="engine.everything.max_results.label">最大结果数</label>
+                  <input type="number" id="everything-max-results" min="1" max="100" value="20" class="input-small" />
+                  <span class="hint" data-i18n="engine.everything.max_results.hint">每次检索返回的文件数量上限</span>
+                </div>
+
+                <!-- 本地扫描深度（待实现，暂隐藏）
+                <div class="setting-row">
+                  <label>本地扫描深度</label>
+                  <input type="number" id="local-scan-depth" min="1" max="10" value="3" class="input-small" />
+                  <span class="hint">常用目录索引深度</span>
+                </div>
+                -->
+
+                <div class="plugin-save-row">
+                  <button id="save-file-search" class="btn-small" data-i18n="engine.save">保存配置</button>
+                  <span id="file-search-save-msg" class="plugin-save-msg"></span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 脚本解释器（Phase 0.6 新增） -->
+          <div class="extension-card">
+            <div class="extension-header">
+              <div class="extension-icon">🐍</div>
+              <div class="extension-info">
+                <h3 data-i18n="engine.interpreter.title">脚本解释器</h3>
+                <p class="extension-desc" data-i18n="engine.interpreter.desc">Python / Node.js 脚本插件运行环境</p>
+              </div>
+            </div>
+
+            <div class="extension-body">
+              <!-- Python 解释器 -->
+              <div class="plugin-config-section">
+                <div class="plugin-section-title">Python</div>
+
+                <div class="setting-row">
+                  <label data-i18n="engine.python.status">当前状态</label>
+                  <span id="python-status" class="status-badge status-unknown">探测中…</span>
+                  <span id="python-version" class="version-badge" style="display:none"></span>
+                  <button id="python-probe" class="btn-small" data-i18n="engine.probe">重新探测</button>
+                </div>
+
+                <div class="setting-row">
+                  <label data-i18n="engine.python.path">Python 路径</label>
+                  <input type="text" id="python-path" class="input-wide" placeholder="自动探测或手动输入..." readonly />
+                  <button id="python-browse" class="btn-small" data-i18n="engine.browse">浏览</button>
+                </div>
+
+                <div class="setting-row">
+                  <label></label>
+                  <span class="hint" data-i18n="engine.python.hint">用于运行 .py 脚本插件，需要 Python 3.8+</span>
+                </div>
               </div>
 
-              <div class="setting-row">
-                <label data-i18n="engine.everything.port.label">HTTP 端口</label>
-                <input type="number" id="everything-port" min="1" max="65535" value="80" class="input-small" />
-                <span class="hint" data-i18n="engine.everything.port.hint">Everything 选项 → HTTP 服务器</span>
-              </div>
+              <!-- Node.js 解释器 -->
+              <div class="plugin-config-section">
+                <div class="plugin-section-title">Node.js</div>
 
-              <div class="setting-row">
-                <label data-i18n="engine.everything.max_results.label">最大结果数</label>
-                <input type="number" id="everything-max-results" min="1" max="100" value="20" class="input-small" />
-                <span class="hint" data-i18n="engine.everything.max_results.hint">每次检索返回的文件数量上限</span>
-              </div>
+                <div class="setting-row">
+                  <label data-i18n="engine.node.status">当前状态</label>
+                  <span id="node-status" class="status-badge status-unknown">探测中…</span>
+                  <span id="node-version" class="version-badge" style="display:none"></span>
+                  <button id="node-probe" class="btn-small" data-i18n="engine.probe">重新探测</button>
+                </div>
 
-              <!-- 本地扫描深度（待实现，暂隐藏）
-              <div class="setting-row">
-                <label>本地扫描深度</label>
-                <input type="number" id="local-scan-depth" min="1" max="10" value="3" class="input-small" />
-                <span class="hint">常用目录索引深度</span>
-              </div>
-              -->
+                <div class="setting-row">
+                  <label data-i18n="engine.node.path">Node 路径</label>
+                  <input type="text" id="node-path" class="input-wide" placeholder="自动探测或手动输入..." readonly />
+                  <button id="node-browse" class="btn-small" data-i18n="engine.browse">浏览</button>
+                </div>
 
-              <div class="setting-row">
-                <label></label>
-                <button id="save-file-search" class="btn" data-i18n="engine.save">保存配置</button>
+                <div class="setting-row">
+                  <label></label>
+                  <span class="hint" data-i18n="engine.node.hint">用于运行 .js 脚本插件，需要 Node.js 16+</span>
+                </div>
               </div>
             </div>
           </div>

@@ -54,6 +54,7 @@ fn scan_dir(dir: &PathBuf, entries: &mut Vec<AppEntry>) {
                         hint: None,
                         payload: None,
                     },
+                    score_detail: None,
                 });
             }
         }

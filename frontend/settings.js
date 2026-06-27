@@ -996,7 +996,13 @@ document.getElementById("save-file-search")?.addEventListener("click", async () 
       localScanDepth: depth,
       maxResults,
     });
-    alert(t("toast.file_search_saved"));
+    // 跟插件保存一致的 flash 提示样式
+    const msgEl = document.getElementById("file-search-save-msg");
+    if (msgEl) {
+      msgEl.textContent = t("plugin.saved_msg");
+      msgEl.style.color = "#a6e3a1";
+      setTimeout(() => { msgEl.textContent = ""; }, 2000);
+    }
     // 重新探测
     probeEverythingStatus();
   } catch (e) {
@@ -1012,3 +1018,116 @@ loadStorageInfo();
 loadLogInfo();
 loadNetworkConfig();
 loadContextConfig();
+
+// ── 脚本解释器探测（Phase 0.6） ─────────────────────────────────────────────
+
+function updateInterpreterUI(type, status) {
+  const statusEl = document.getElementById(`${type}-status`);
+  const versionEl = document.getElementById(`${type}-version`);
+  const pathEl = document.getElementById(`${type}-path`);
+  const browseBtn = document.getElementById(`${type}-browse`);
+
+  if (!statusEl) return;
+
+  if (status.found) {
+    if (status.version_ok) {
+      statusEl.textContent = t("engine.status.available");
+      statusEl.className = "status-badge status-available";
+    } else {
+      statusEl.textContent = t("engine.status.version_low");
+      statusEl.className = "status-badge status-warning";
+    }
+    versionEl.textContent = status.version || "";
+    versionEl.style.display = status.version ? "inline" : "none";
+    pathEl.value = status.path || "";
+  } else {
+    statusEl.textContent = t("engine.status.not_found");
+    statusEl.className = "status-badge status-unavailable";
+    versionEl.style.display = "none";
+    pathEl.value = status.error || t("engine.status.not_found");
+  }
+
+}
+
+// 打开文件选择器选择解释器路径
+async function browseInterpreter(kind) {
+  try {
+    const selected = await invoke("open_file_dialog", {
+      title: `选择 ${kind} 可执行文件`,
+      filters: [
+        {
+          name: "可执行文件",
+          extensions: ["exe"]
+        }
+      ]
+    });
+    if (selected) {
+      const pathEl = document.getElementById(`${kind}-path`);
+      if (pathEl) pathEl.value = selected;
+      // TODO: 验证选中的文件版本
+    }
+  } catch (e) {
+    console.error("browseInterpreter failed:", e);
+  }
+}
+
+// 探测单个解释器（跟文件搜索对齐，一次只探测一种）
+async function probeSingleInterpreter(type) {
+  const statusEl = document.getElementById(`${type}-status`);
+  if (!statusEl) return;
+
+  // 显示探测中状态（只更新对应解释器）
+  statusEl.textContent = t("engine.status.probing");
+  statusEl.className = "status-badge status-unknown";
+
+  try {
+    const status = await invoke("probe_interpreters");
+    updateInterpreterUI(type, status[type]);
+  } catch (e) {
+    console.error(`probeInterpreter ${type} failed:`, e);
+    statusEl.textContent = t("engine.status.failed");
+    statusEl.className = "status-badge status-unavailable";
+  }
+}
+
+// 探测全部解释器（只在首次启动两个都为空时自动调用）
+async function probeAllInterpreters() {
+  const pythonPath = document.getElementById("python-path")?.value;
+  const nodePath = document.getElementById("node-path")?.value;
+
+  // 已有值就不自动探测了（避免覆盖用户手动配置）
+  if (pythonPath && nodePath) return;
+
+  // 显示探测中状态
+  ["python", "node"].forEach((type) => {
+    const statusEl = document.getElementById(`${type}-status`);
+    if (statusEl) {
+      statusEl.textContent = t("engine.status.probing");
+      statusEl.className = "status-badge status-unknown";
+    }
+  });
+
+  try {
+    const status = await invoke("probe_interpreters");
+    updateInterpreterUI("python", status.python);
+    updateInterpreterUI("node", status.node);
+  } catch (e) {
+    console.error("probeInterpreters failed:", e);
+  }
+}
+
+// 绑定事件
+document.getElementById("python-probe")?.addEventListener("click", () => probeSingleInterpreter("python"));
+document.getElementById("node-probe")?.addEventListener("click", () => probeSingleInterpreter("node"));
+document.getElementById("python-browse")?.addEventListener("click", () => browseInterpreter("python"));
+document.getElementById("node-browse")?.addEventListener("click", () => browseInterpreter("node"));
+
+// 首次启动：两个路径都为空时才自动探测全部
+// 避免用户手动选择后又被覆盖
+setTimeout(() => {
+  const pythonPath = document.getElementById("python-path")?.value;
+  const nodePath = document.getElementById("node-path")?.value;
+  if (!pythonPath && !nodePath) {
+    probeAllInterpreters();
+  }
+}, 100);

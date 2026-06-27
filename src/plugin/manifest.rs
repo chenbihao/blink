@@ -35,14 +35,34 @@ pub struct PluginManifest {
     pub settings_schema: Vec<SettingField>,
 }
 
+/// 插件运行时类型。
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimeType {
+    /// 原生可执行文件（直接 spawn）
+    Process,
+    /// Python 脚本（python xxx.py）
+    Python,
+    /// Node.js 脚本（node xxx.js）
+    Node,
+    /// PowerShell 脚本（powershell -File xxx.ps1）
+    Powershell,
+}
+
+impl Default for RuntimeType {
+    fn default() -> Self {
+        RuntimeType::Process
+    }
+}
+
 /// 进程拉起参数。
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginRuntime {
     /// 可执行路径(相对 manifest 所在目录,或绝对路径)。
     pub exec: String,
+    /// 运行时类型，默认 Process
     #[serde(default)]
-    #[allow(dead_code)] // process/jsonl 本切片唯一形态,先解析不分支
-    pub r#type: Option<String>,
+    pub r#type: RuntimeType,
     #[serde(default)]
     #[allow(dead_code)]
     pub protocol: Option<String>,
@@ -182,12 +202,44 @@ impl PluginManifest {
     }
 
     /// 解析 exec 为绝对路径(相对路径基于 manifest 所在目录,不依赖 cwd)。
+    ///
+    /// 对于 Rust 内置插件（type=Process, exec 以 ./bin/ 开头），Dev 模式下直接指向 target/debug/，
+    /// 避免创建 Junction 符号链接导致 IDE 索引爆炸。Release 模式下保持相对路径不变。
     pub fn exec_path(&self, manifest_dir: &Path) -> PathBuf {
-        let exec = PathBuf::from(&self.runtime.exec);
-        if exec.is_absolute() {
-            exec
+        let exec = &self.runtime.exec;
+
+        // Rust 内置插件特殊处理：exec 以 ./bin/ 开头 且 是 Process 类型
+        // Dev 模式下直接指向 target/debug/{exe_name}，无需 Junction
+        #[cfg(debug_assertions)]
+        if matches!(self.runtime.r#type, RuntimeType::Process) && exec.starts_with("./bin/") {
+            // 提取 exe 文件名："./bin/blink-plugin-echo.exe" -> "blink-plugin-echo.exe"
+            let exe_name = exec.trim_start_matches("./bin/");
+            // CARGO_MANIFEST_DIR 是 Blink 根目录
+            if let Ok(root) = std::env::var("CARGO_MANIFEST_DIR") {
+                let target_path = PathBuf::from(root).join("target/debug").join(exe_name);
+                if target_path.exists() {
+                    return target_path;
+                }
+            }
+            // fallback: manifest 上溯三级到项目根 -> target/debug
+            let fallback = manifest_dir
+                .parent()
+                .and_then(|p| p.parent())
+                .and_then(|p| p.parent())
+                .map(|root| root.join("target/debug").join(exe_name));
+            if let Some(path) = fallback {
+                if path.exists() {
+                    return path;
+                }
+            }
+        }
+
+        // 普通情况：相对路径基于 manifest 所在目录
+        let exec_path = PathBuf::from(exec);
+        if exec_path.is_absolute() {
+            exec_path
         } else {
-            manifest_dir.join(exec)
+            manifest_dir.join(exec_path)
         }
     }
 

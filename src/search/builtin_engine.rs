@@ -209,6 +209,7 @@ fn action_to_search_item(action: &BuiltinAction, score: f32) -> SearchItem {
         score,
         action: action_kind,
         source: "builtin".to_string(),
+        score_detail: Some(format!("builtin={:.1}", score)),
     }
 }
 

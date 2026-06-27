@@ -92,8 +92,8 @@ function appendNew(items, didReset) {
   const seen = new Set(allItems.map(itemKey));
   let changed = false;
 
-  // 检测空结果标记(后端 Takeover 空结果发送的特殊项)
-  const emptyResultMarker = (items || []).find(x => x.source === "empty_result");
+  // 检测空结果标记(后端发送的特殊项,score=-2 是约定的空标记)
+  const emptyResultMarker = (items || []).find(x => x.score === -2);
   const hasEmptyResult = !!emptyResultMarker;
   // 过滤掉空结果标记项,不加入结果列表
   const realItems = (items || []).filter(x => x.source !== "empty_result");

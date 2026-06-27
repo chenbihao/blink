@@ -8,7 +8,7 @@
   "runtime": {
     "type": "process",
     "protocol": "jsonl",
-    "exec": "../../../target/debug/blink-plugin-weather.exe",
+    "exec": "./bin/blink-plugin-weather.exe",
     "timeout_ms": 5000,
     "min_arg_length": 2,
     "concurrency": 1

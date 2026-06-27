@@ -3,6 +3,36 @@
 //! 命令保持轻量——编排逻辑，不含业务实现。
 
 use tauri::{Emitter, Manager};
+use tauri_plugin_dialog::DialogExt;
+
+/// 打开文件选择对话框，返回选中的文件路径（取消时返回 null）。
+#[tauri::command]
+pub async fn open_file_dialog(
+    app: tauri::AppHandle,
+    title: String,
+    filters: Vec<serde_json::Value>,
+) -> Option<String> {
+    // 构造过滤器
+    let mut dialog = app.dialog().file();
+    if !title.is_empty() {
+        dialog = dialog.set_title(title);
+    }
+    // 转换过滤器格式（简化处理，只取第一个扩展名）
+    for filter in filters {
+        if let Some(name) = filter.get("name").and_then(|v| v.as_str()) {
+            if let Some(exts) = filter.get("extensions").and_then(|v| v.as_array()) {
+                let extensions: Vec<&str> = exts.iter().filter_map(|e| e.as_str()).collect();
+                if !extensions.is_empty() {
+                    dialog = dialog.add_filter(name, &extensions);
+                }
+            }
+        }
+    }
+    dialog.blocking_pick_file().and_then(|p| match p {
+        tauri_plugin_dialog::FilePath::Path(path) => path.to_str().map(|s| s.to_string()),
+        tauri_plugin_dialog::FilePath::Url(url) => Some(url.to_string()),
+    })
+}
 
 /// 主窗口 ESC 调用：隐藏主窗口。
 #[tauri::command]
@@ -34,11 +64,16 @@ pub async fn search_apps(
     let results = service.search(&query, seq).await;
     tracing::debug!(count = results.len(), %query, "search_apps: 返回结果");
     for (i, item) in results.iter().enumerate() {
+        let detail = item.score_detail.as_deref().unwrap_or("");
         tracing::debug!(
             index = i,
-            name = %item.name,
-            score = %item.score,
+            score = if detail.is_empty() {
+                format!("{:.4}", item.score)
+            } else {
+                format!("{:.4} ({})", item.score, detail)
+            },
             source = %item.source,
+            name = %item.name,
             lnk_path = %item.lnk_path,
             "搜索结果项"
         );
@@ -823,5 +858,26 @@ pub async fn context_menu_action(app: tauri::AppHandle, action_id: u32) -> Resul
         .map_err(|e| e.to_string())?;
     // 点击后自动关闭菜单
     hide_context_menu(app).await?;
+    Ok(())
+}
+
+// ─── 脚本解释器配置（Phase 0.6） ───────────────────────────────────────────
+
+/// 探测系统中可用的脚本解释器状态。
+#[tauri::command]
+pub async fn probe_interpreters() -> crate::plugin::InterpretersStatus {
+    tracing::debug!("探测脚本解释器状态");
+    crate::plugin::probe_interpreters()
+}
+
+/// 更新解释器自定义路径（暂未实现持久化，Phase 0.6 第一版只做探测展示）。
+#[tauri::command]
+pub async fn update_interpreter_config(
+    _python_path: Option<String>,
+    _node_path: Option<String>,
+) -> Result<(), String> {
+    // TODO: Phase 0.6 后续实现持久化到 SQLite config 表
+    // 目前只做展示，不做持久化
+    tracing::warn!("update_interpreter_config 暂未实现持久化");
     Ok(())
 }

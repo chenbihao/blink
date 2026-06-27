@@ -8,7 +8,7 @@
   "runtime": {
     "type": "process",
     "protocol": "jsonl",
-    "exec": "../../../target/debug/blink-plugin-ip.exe",
+    "exec": "./bin/blink-plugin-ip.exe",
     "timeout_ms": 2000,
     "concurrency": 1
   },

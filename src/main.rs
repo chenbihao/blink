@@ -33,6 +33,7 @@ fn main() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_dialog::init())
         // 自定义协议：http://blink-icon.localhost/<url-encoded-path>（Windows）—— 按需懒加载应用图标 PNG。
         // 前端 <img src> 直接引用，图标提取移出搜索热路径（见 search/icon.rs）。
         .register_asynchronous_uri_scheme_protocol("blink-icon", |_ctx, request, responder| {
@@ -287,7 +288,10 @@ fn main() {
             commands::list_running_processes,
             commands::show_context_menu,
             commands::hide_context_menu,
-            commands::context_menu_action
+            commands::context_menu_action,
+            commands::probe_interpreters,
+            commands::update_interpreter_config,
+            commands::open_file_dialog
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

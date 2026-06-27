@@ -78,6 +78,20 @@ const DICT = {
     "engine.status.available": "可用 ✓",
     "engine.status.unavailable": "不可用 ✗",
     "engine.status.failed": "探测失败",
+    "engine.status.version_low": "版本过低",
+    "engine.status.not_found": "未找到",
+
+    // ── 引擎 Tab：脚本解释器（Phase 0.6） ──
+    "engine.interpreter.title": "脚本解释器",
+    "engine.interpreter.desc": "Python / Node.js 脚本插件运行环境",
+    "engine.python.status": "当前状态",
+    "engine.python.path": "Python 路径",
+    "engine.python.hint": "用于运行 .py 脚本插件，需要 Python 3.8+",
+    "engine.node.status": "当前状态",
+    "engine.node.path": "Node 路径",
+    "engine.node.hint": "用于运行 .js 脚本插件，需要 Node.js 16+",
+    "engine.browse": "浏览",
+    "engine.probe_all": "重新探测全部",
 
     // ── 调试 Tab：日志 ──
     "log.level.label": "日志级别",
@@ -252,6 +266,20 @@ const DICT = {
     "engine.status.available": "Available ✓",
     "engine.status.unavailable": "Unavailable ✗",
     "engine.status.failed": "Probe failed",
+    "engine.status.version_low": "Version too low",
+    "engine.status.not_found": "Not found",
+
+    // ── Engines tab: interpreters (Phase 0.6) ──
+    "engine.interpreter.title": "Script Interpreters",
+    "engine.interpreter.desc": "Python / Node.js runtime for script plugins",
+    "engine.python.status": "Status",
+    "engine.python.path": "Python path",
+    "engine.python.hint": "For .py script plugins, requires Python 3.8+",
+    "engine.node.status": "Status",
+    "engine.node.path": "Node path",
+    "engine.node.hint": "For .js script plugins, requires Node.js 16+",
+    "engine.browse": "Browse",
+    "engine.probe_all": "Re-probe all",
 
     // ── Debug tab: logging ──
     "log.level.label": "Log level",

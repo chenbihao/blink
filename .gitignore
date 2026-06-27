@@ -40,3 +40,10 @@ desktop.ini
 # Debug
 *.log
 *.pdb
+
+# Plugins
+# Python 脚本插件缓存
+plugins/builtin/*/__pycache__/
+plugins/builtin/*/*.pyc
+plugins/builtin/*/*.pyo
+plugins/builtin/*/*.pyd

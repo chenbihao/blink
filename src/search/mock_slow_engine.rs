@@ -48,6 +48,7 @@ impl SearchEngine for MockSlowEngine {
             score: 0.5,
             action: SearchAction::Open { path: String::new() }, // 空 path = 纯展示
             source: "mock_slow".into(),
+            score_detail: Some("mock=0.5".into()),
         }]
     }
 }

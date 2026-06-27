@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "Blink 示例插件:echo(回显输入,验证 stdio JSONL 协议)"
 
+[lints]
+workspace = true  # 继承 workspace 级别的 lint（如禁止 UTF-8 字节切片）
+
 [[bin]]
 name = "blink-plugin-echo"
 path = "src/main.rs"

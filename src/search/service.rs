@@ -371,6 +371,7 @@ fn emit_results(app: &AppHandle, seq: u64, items: Vec<SearchItem>, limit: usize,
                 hint: None,
                 payload: None,
             },
+            score_detail: None,
         }]
     } else {
         fuse_items(items, limit)
@@ -380,15 +381,20 @@ fn emit_results(app: &AppHandle, seq: u64, items: Vec<SearchItem>, limit: usize,
     };
     for (i, item) in entries.iter().enumerate() {
         if item.is_error {
-            tracing::debug!(index = i, source = %item.source, "增量结果: 插件错误信息");
+            tracing::debug!(index = i, score = %format!("{:.4}", item.score), source = %item.source, "增量结果: 插件错误信息");
         } else if item.name.is_empty() {
             tracing::debug!("增量结果: 空结果标记(清除占位符)");
         } else {
+            let detail = item.score_detail.as_deref().unwrap_or("");
             tracing::debug!(
                 index = i,
-                name = %item.name,
-                score = %item.score,
+                score = if detail.is_empty() {
+                    format!("{:.4}", item.score)
+                } else {
+                    format!("{:.4} ({})", item.score, detail)
+                },
                 source = %item.source,
+                name = %item.name,
                 "增量结果项"
             );
         }
@@ -417,6 +423,7 @@ fn placeholder_entry(plugin_id: &str, display_name: &str) -> AppEntry {
             hint: None,
             payload: None,
         },
+        score_detail: None,
     }
 }
 
@@ -433,6 +440,7 @@ mod tests {
             score,
             action: SearchAction::Open { path: id.into() },
             source: source.into(),
+            score_detail: None,
         }
     }
 

@@ -198,15 +198,21 @@ impl FileEngine {
                 score,
                 action: SearchAction::Open { path: full_path },
                 source: "file".into(),
+                score_detail: Some(format!("file_rank={}", i)),
             });
         }
 
         tracing::debug!("Everything 返回 {} 个结果，query={}", items.len(), query);
         for (i, item) in items.iter().enumerate() {
+            let detail = item.score_detail.as_deref().unwrap_or("");
             tracing::debug!(
                 index = i,
+                score = if detail.is_empty() {
+                    format!("{:.4}", item.score)
+                } else {
+                    format!("{:.4} ({})", item.score, detail)
+                },
                 name = %item.title,
-                score = %item.score,
                 "文件搜索结果项"
             );
         }

@@ -80,6 +80,9 @@ pub struct AppEntry {
     pub source: String,
     /// 可执行动作（决定 Enter 行为 + 提示栏文案）。与 description 正交。
     pub action: Action,
+    /// 分数构成详情（可选，debug 日志用，前端不显示）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score_detail: Option<String>,
 }
 
 // 平台特定实现
@@ -214,6 +217,7 @@ mod tests {
                 hint: None,
                 payload: None,
             },
+            score_detail: None,
         }
     }
 

@@ -142,7 +142,10 @@ fn normalize_to_items(scored: Vec<(u32, AppEntry)>, history: &HashMap<String, i6
     normalized
         .into_iter()
         .map(|(e, base_score)| {
-            let score = super::scorer::apply_history(base_score, &e.lnk_path, history);
+            let hit_count = history.get(&e.lnk_path).copied().unwrap_or(0);
+            let hist_boost = super::scorer::history_boost(hit_count);
+            let score = base_score + hist_boost;
+            let detail = format!("fuzzy={:.2} hist=+{:.2}", base_score, hist_boost);
             SearchItem {
                 id: e.lnk_path.clone(),
                 title: e.name,
@@ -150,6 +153,7 @@ fn normalize_to_items(scored: Vec<(u32, AppEntry)>, history: &HashMap<String, i6
                 score,
                 action: SearchAction::Open { path: e.lnk_path },
                 source: "start_menu".into(),
+                score_detail: Some(detail),
             }
         })
         .collect()
@@ -176,6 +180,7 @@ mod tests {
                 hint: None,
                 payload: None,
             },
+            score_detail: None,
         }
     }
 

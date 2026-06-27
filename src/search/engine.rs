@@ -50,6 +50,9 @@ pub struct SearchItem {
     /// 产出该项的引擎/插件 id(tie-break + 调试)。引擎 id 多为静态,但插件 id 是
     /// 运行时字符串,故用 String。
     pub source: String,
+    /// 分数构成详情（可选，用于 debug 日志可观测）。
+    /// 格式如 "fuzzy=0.8 hist=+0.2 src=+0.4"，方便调参时理解排序原因。
+    pub score_detail: Option<String>,
 }
 
 impl SearchItem {
@@ -68,6 +71,15 @@ impl SearchItem {
             super::scorer::bake_source_boost(self.score, &self.source)
         };
 
+        // 追加 source boost 信息到 score_detail
+        let score_detail = self.score_detail.map(|mut d| {
+            if !is_error {
+                let src_boost = score - self.score;
+                d.push_str(&format!(" src=+{:.2}", src_boost));
+            }
+            d
+        });
+
         match self.action {
             SearchAction::Open { path } => AppEntry {
                 name: self.title,
@@ -84,6 +96,7 @@ impl SearchItem {
                     hint: None,
                     payload: None,
                 },
+                score_detail,
             },
             SearchAction::Copy { text } => AppEntry {
                 name: self.title,
@@ -102,6 +115,7 @@ impl SearchItem {
                     hint: None,
                     payload: Some(text),
                 },
+                score_detail,
             },
         }
     }
@@ -143,6 +157,7 @@ mod tests {
                 path: "C:\\a.lnk".into(),
             },
             source: "start_menu".into(),
+            score_detail: Some("fuzzy=0.8".into()),
         };
         let e = item.into_app_entry();
         assert_eq!(e.name, "App");
@@ -162,6 +177,7 @@ mod tests {
             score: 1.0,
             action: SearchAction::Copy { text: "2".into() },
             source: "calc".into(),
+            score_detail: Some("calc=1.0".into()),
         };
         let e = item.into_app_entry();
         assert_eq!(e.name, "= 2");
