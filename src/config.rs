@@ -60,29 +60,67 @@ fn default_50() -> u32 {
     50
 }
 
+fn default_3() -> u32 {
+    3
+}
+
 fn default_5() -> u32 {
     5
 }
 
-// ── 文件搜索配置 ──────────────────────────────────────────────────────────────────
+// ── 搜索引擎配置（三层独立控制）────────────────────────────────────────────────
+
+/// 应用搜索配置（StartMenuEngine）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartMenuConfig {
+    /// 是否启用应用搜索
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 开始菜单扫描深度
+    #[serde(default = "default_3")]
+    pub scan_depth: u32,
+}
+
+impl Default for StartMenuConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            scan_depth: 3,
+        }
+    }
+}
+
+/// 计算器配置（CalcEngine）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CalcConfig {
+    /// 是否启用计算器
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for CalcConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
 
 fn default_file_search_enabled() -> bool {
     true
+}
+
+fn default_data_source() -> String {
+    "auto".to_string()
 }
 
 fn default_file_search_everything_port() -> u16 {
     80
 }
 
-fn default_file_search_depth() -> u32 {
-    3
-}
-
 fn default_file_search_max_results() -> u32 {
     20
 }
 
-fn default_fallback_dirs() -> Vec<String> {
+fn default_local_dirs() -> Vec<String> {
     vec![
         "Desktop".to_string(),
         "Documents".to_string(),
@@ -91,62 +129,63 @@ fn default_fallback_dirs() -> Vec<String> {
     ]
 }
 
-fn default_fallback_depth() -> u32 {
+fn default_local_max_depth() -> u32 {
     3
 }
 
-fn default_fallback_cache_ttl() -> u64 {
+fn default_local_cache_ttl() -> u64 {
     300
 }
 
-fn default_fallback_max_results() -> u32 {
+fn default_local_max_results() -> u32 {
     50
 }
 
-/// 文件搜索配置。
+/// 文件搜索配置（FileEngine）。
+///
+/// 数据源模式 `data_source`：
+/// - `"auto"`（默认）：优先 Everything，不可用时降级本地扫描
+/// - `"everything"`：只用 Everything HTTP，不可用则无文件结果
+/// - `"local"`：只用本地目录扫描，不尝试 Everything
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileSearchConfig {
-    /// 是否启用文件搜索
+    /// 是否启用文件搜索（总开关）
     #[serde(default = "default_file_search_enabled")]
     pub enabled: bool,
+    /// 数据源模式：auto / everything / local
+    #[serde(default = "default_data_source")]
+    pub data_source: String,
     /// Everything HTTP Server 端口
     #[serde(default = "default_file_search_everything_port")]
     pub everything_port: u16,
-    /// 本地扫描深度
-    #[serde(default = "default_file_search_depth")]
-    pub local_scan_depth: u32,
-    /// 每次检索最大结果数
+    /// 每次检索最大结果数（Everything）
     #[serde(default = "default_file_search_max_results")]
     pub max_results: u32,
-    /// 是否启用本地目录 Fallback（Everything 不可用时）
-    #[serde(default = "default_true")]
-    pub fallback_enabled: bool,
-    /// Fallback 遍历的目录列表
-    #[serde(default = "default_fallback_dirs")]
-    pub fallback_dirs: Vec<String>,
-    /// Fallback 最大遍历深度
-    #[serde(default = "default_fallback_depth")]
-    pub fallback_max_depth: u32,
-    /// Fallback 缓存有效期（秒）
-    #[serde(default = "default_fallback_cache_ttl")]
-    pub fallback_cache_ttl_sec: u64,
-    /// Fallback 最多返回数
-    #[serde(default = "default_fallback_max_results")]
-    pub fallback_max_results: u32,
+    /// 本地扫描目录列表
+    #[serde(default = "default_local_dirs")]
+    pub local_dirs: Vec<String>,
+    /// 本地扫描最大深度
+    #[serde(default = "default_local_max_depth")]
+    pub local_max_depth: u32,
+    /// 本地缓存有效期（秒）
+    #[serde(default = "default_local_cache_ttl")]
+    pub local_cache_ttl_sec: u64,
+    /// 本地搜索最多返回数
+    #[serde(default = "default_local_max_results")]
+    pub local_max_results: u32,
 }
 
 impl Default for FileSearchConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            data_source: "auto".to_string(),
             everything_port: 80,
-            local_scan_depth: 3,
             max_results: 20,
-            fallback_enabled: true,
-            fallback_dirs: default_fallback_dirs(),
-            fallback_max_depth: 3,
-            fallback_cache_ttl_sec: 300,
-            fallback_max_results: 50,
+            local_dirs: default_local_dirs(),
+            local_max_depth: 3,
+            local_cache_ttl_sec: 300,
+            local_max_results: 50,
         }
     }
 }
@@ -191,15 +230,10 @@ pub struct AppConfig {
     /// 剪贴板历史配置
     #[serde(default)]
     pub clipboard: crate::clipboard::ClipboardConfig,
-    /// ⚠️ 兼容层：旧版本 file_search 配置（0.5 已迁移到 engine:file_search，0.6 移除）
-    #[serde(default)]
-    #[deprecated = "已迁移到 engine:file_search，使用 get_file_search_config() 读取"]
-    pub file_search: FileSearchConfig,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
-        #[allow(deprecated)]
         Self {
             hotkey: HotkeyConfig::default(),
             tap_threshold: 300,
@@ -215,7 +249,6 @@ impl Default for AppConfig {
             proactive_enabled: default_false(),
             empty_query_topn: default_5(),
             clipboard: crate::clipboard::ClipboardConfig::default(),
-            file_search: FileSearchConfig::default(),
         }
     }
 }
@@ -360,35 +393,55 @@ pub async fn set_engine_config(pool: &SqlitePool, engine_id: &str, config: &serd
     Ok(())
 }
 
-/// ⚠️ 兼容层：获取文件搜索配置（优先读 engine:file_search，降级读旧 app_config.file_search）。
+/// 获取文件搜索配置（key=`engine:file_search`）。不存在返回默认。
 pub async fn get_file_search_config(pool: &SqlitePool) -> FileSearchConfig {
-    // 1. 优先读新 key
-    if let Some(cfg) = get_engine_config(pool, "file_search").await {
-        if let Ok(fs_cfg) = serde_json::from_value(cfg) {
-            return fs_cfg;
-        }
-    }
-    // 2. 降级读旧 app_config.file_search
-    let app_config = get_config(pool).await;
-    #[allow(deprecated)]
-    app_config.file_search
+    get_engine_config(pool, "file_search")
+        .await
+        .and_then(|cfg| serde_json::from_value(cfg).ok())
+        .unwrap_or_default()
 }
 
-/// 更新文件搜索配置（写入 engine:file_search，保留旧 app_config.file_search 兼容）。
+/// 更新文件搜索配置（写入 engine:file_search）。
 pub async fn update_file_search(pool: &SqlitePool, file_search: FileSearchConfig) -> Result<(), String> {
-    // 写入新 key（主配置）
-    let engine_json = serde_json::to_value(file_search.clone()).map_err(|e| e.to_string())?;
+    let engine_json = serde_json::to_value(file_search).map_err(|e| e.to_string())?;
     set_engine_config(pool, "file_search", &engine_json).await?;
-
-    // 兼容：同时更新旧字段（确保 0.4 版本回退也能用）
-    let mut config = get_config(pool).await;
-    #[allow(deprecated)]
-    {
-        config.file_search = file_search;
-    }
-    save_config(pool, &config).await?;
-
     tracing::debug!("文件搜索配置已更新");
+    Ok(())
+}
+
+// ── 应用搜索配置（0.8，engine:start_menu）──────────────────────────────────────
+
+/// 获取应用搜索配置（key=`engine:start_menu`）。不存在返回默认。
+pub async fn get_start_menu_config(pool: &SqlitePool) -> StartMenuConfig {
+    get_engine_config(pool, "start_menu")
+        .await
+        .and_then(|cfg| serde_json::from_value(cfg).ok())
+        .unwrap_or_default()
+}
+
+/// 更新应用搜索配置。
+pub async fn update_start_menu_config(pool: &SqlitePool, config: &StartMenuConfig) -> Result<(), String> {
+    let json = serde_json::to_value(config).map_err(|e| e.to_string())?;
+    set_engine_config(pool, "start_menu", &json).await?;
+    tracing::debug!(enabled = config.enabled, scan_depth = config.scan_depth, "应用搜索配置已更新");
+    Ok(())
+}
+
+// ── 计算器配置（0.8，engine:calc）──────────────────────────────────────────────
+
+/// 获取计算器配置（key=`engine:calc`）。不存在返回默认。
+pub async fn get_calc_config(pool: &SqlitePool) -> CalcConfig {
+    get_engine_config(pool, "calc")
+        .await
+        .and_then(|cfg| serde_json::from_value(cfg).ok())
+        .unwrap_or_default()
+}
+
+/// 更新计算器配置。
+pub async fn update_calc_config(pool: &SqlitePool, config: &CalcConfig) -> Result<(), String> {
+    let json = serde_json::to_value(config).map_err(|e| e.to_string())?;
+    set_engine_config(pool, "calc", &json).await?;
+    tracing::debug!(enabled = config.enabled, "计算器配置已更新");
     Ok(())
 }
 

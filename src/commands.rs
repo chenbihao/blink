@@ -445,21 +445,76 @@ pub async fn reset_config(app: tauri::AppHandle) -> Result<(), String> {
 pub async fn update_file_search(
     app: tauri::AppHandle,
     enabled: bool,
+    data_source: String,
     everything_port: u16,
-    local_scan_depth: u32,
     max_results: u32,
 ) -> Result<(), String> {
     let pool = app.state::<sqlx::SqlitePool>();
-    // 保留已有的 fallback 配置，只更新基础字段
+    // 保留已有的本地扫描配置，只更新基础字段
     let existing = crate::config::get_file_search_config(&pool).await;
     let file_search = crate::config::FileSearchConfig {
         enabled,
+        data_source,
         everything_port,
-        local_scan_depth,
         max_results,
         ..existing
     };
-    crate::config::update_file_search(&pool, file_search).await
+    crate::config::update_file_search(&pool, file_search.clone()).await?;
+
+    // 热更新 SearchService 中的引擎配置
+    if let Some(ss) = app.try_state::<std::sync::Arc<crate::search::SearchService>>() {
+        ss.update_engine_config("file", crate::search::EngineConfigUpdate::File(file_search));
+    }
+    Ok(())
+}
+
+/// 获取应用搜索配置。
+#[tauri::command]
+pub async fn get_start_menu_config(app: tauri::AppHandle) -> crate::config::StartMenuConfig {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::config::get_start_menu_config(&pool).await
+}
+
+/// 更新应用搜索配置。
+#[tauri::command]
+pub async fn update_start_menu_config(
+    app: tauri::AppHandle,
+    enabled: bool,
+    scan_depth: u32,
+) -> Result<(), String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    let config = crate::config::StartMenuConfig { enabled, scan_depth };
+    crate::config::update_start_menu_config(&pool, &config).await?;
+
+    // 热更新 SearchService 中的引擎配置
+    if let Some(ss) = app.try_state::<std::sync::Arc<crate::search::SearchService>>() {
+        ss.update_engine_config("start_menu", crate::search::EngineConfigUpdate::StartMenu(config));
+    }
+    Ok(())
+}
+
+/// 获取计算器配置。
+#[tauri::command]
+pub async fn get_calc_config(app: tauri::AppHandle) -> crate::config::CalcConfig {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::config::get_calc_config(&pool).await
+}
+
+/// 更新计算器配置。
+#[tauri::command]
+pub async fn update_calc_config(
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    let config = crate::config::CalcConfig { enabled };
+    crate::config::update_calc_config(&pool, &config).await?;
+
+    // 热更新 SearchService 中的引擎配置
+    if let Some(ss) = app.try_state::<std::sync::Arc<crate::search::SearchService>>() {
+        ss.update_engine_config("calc", crate::search::EngineConfigUpdate::Calc(config));
+    }
+    Ok(())
 }
 
 /// 探测 Everything HTTP Server 状态。

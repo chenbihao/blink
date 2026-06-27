@@ -213,14 +213,28 @@ fn main() {
                 }
             }
 
-            // 构造 FileEngine 配置（优先读 engine:file_search，降级读旧 app_config.file_search）
+            // 构造三层搜索引擎配置（应用搜索 / 文件搜索 / 计算器）
+            let start_menu_config = tauri::async_runtime::block_on(config::get_start_menu_config(&pool));
             let file_config = tauri::async_runtime::block_on(config::get_file_search_config(&pool));
+            let calc_config = tauri::async_runtime::block_on(config::get_calc_config(&pool));
+            tracing::info!(
+                app_search = start_menu_config.enabled,
+                file_search = file_config.enabled,
+                data_source = %file_config.data_source,
+                calc = calc_config.enabled,
+                "搜索引擎配置"
+            );
 
             // 构造 SearchService(多路引擎 + 意图路由)。command 层经 app.state 取用。
+            let engine_configs = search::EngineConfigs {
+                start_menu: start_menu_config,
+                file: file_config,
+                calc: calc_config,
+            };
             let search_service = std::sync::Arc::new(search::SearchService::new(
                 app.handle().clone(),
                 pool.clone(),
-                search::build_engines(Some(file_config.clone()), file_config.local_scan_depth),
+                search::build_engines(engine_configs),
                 plugin_engine.clone(),
                 router,
             ));
@@ -289,6 +303,10 @@ fn main() {
             commands::open_log_dir,
             commands::get_log_info,
             commands::update_file_search,
+            commands::get_start_menu_config,
+            commands::update_start_menu_config,
+            commands::get_calc_config,
+            commands::update_calc_config,
             commands::probe_everything,
             commands::get_engine_config,
             commands::update_engine_config,

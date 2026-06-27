@@ -132,7 +132,7 @@ pub struct QueryContext<'a> {
 
 /// 搜索引擎:一路召回源。
 #[async_trait::async_trait]
-pub trait SearchEngine: Send + Sync {
+pub trait SearchEngine: Send + Sync + std::any::Any {
     /// 引擎 id(融合 tie-break / 日志 / 调试)。
     fn id(&self) -> &'static str;
     /// 所属通道(sync 进首批 / async 走增量)。
@@ -141,6 +141,8 @@ pub trait SearchEngine: Send + Sync {
     fn start(&self) {}
     /// 召回:返回归一化分数的结果项(空 query 行为由引擎自定)。
     async fn search(&self, query: &str, ctx: &QueryContext<'_>) -> Vec<SearchItem>;
+    /// 支持 downcast 到具体类型（用于配置更新）。
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 #[cfg(test)]

@@ -16,6 +16,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::config::StartMenuConfig;
+
 use super::engine::{Lane, QueryContext, SearchAction, SearchEngine, SearchItem};
 use super::scorer::normalize_top_relative;
 use super::AppEntry;
@@ -52,12 +54,12 @@ struct CacheState {
 
 pub struct StartMenuEngine {
     cache: Arc<RwLock<CacheState>>,
-    /// 扫描深度（从配置读取）。
-    scan_depth: u32,
+    /// 配置（运行时可更新）。
+    config: Arc<RwLock<StartMenuConfig>>,
 }
 
 impl StartMenuEngine {
-    pub fn new(scan_depth: u32) -> Self {
+    pub fn with_config(config: StartMenuConfig) -> Self {
         StartMenuEngine {
             cache: Arc::new(RwLock::new(CacheState {
                 entries: Vec::new(),
@@ -66,21 +68,37 @@ impl StartMenuEngine {
                 incremental_count: 0,
                 last_full_refresh: None,
             })),
-            scan_depth,
+            config: Arc::new(RwLock::new(config)),
         }
+    }
+
+    /// 更新配置（供 SearchService 调用）。
+    pub fn update_config(&self, config: StartMenuConfig) {
+        let mut cfg = self.config.write().unwrap();
+        *cfg = config;
     }
 
     /// 启动后台:立即预扫一次 + 定时增量刷新。不阻塞调用方。
     fn start_background(&self) {
         let cache = Arc::clone(&self.cache);
-        let depth = self.scan_depth;
+        let config = Arc::clone(&self.config);
         tauri::async_runtime::spawn(async move {
             // 立即预扫(后台，全量)
+            let depth = config.read().unwrap().scan_depth;
             let c = Arc::clone(&cache);
             let _ = tokio::task::spawn_blocking(move || full_scan_into_cache(&c, depth)).await;
 
             loop {
                 tokio::time::sleep(CHECK_INTERVAL).await;
+
+                // 检查配置是否启用
+                {
+                    let cfg = config.read().unwrap();
+                    if !cfg.enabled {
+                        tracing::trace!("StartMenuEngine: 已禁用，跳过定时刷新");
+                        continue;
+                    }
+                }
 
                 // 检查是否需要全量刷新
                 let need_full = {
@@ -94,6 +112,7 @@ impl StartMenuEngine {
                     incremental_exceeded || time_for_full
                 };
 
+                let depth = config.read().unwrap().scan_depth;
                 if need_full {
                     let c = Arc::clone(&cache);
                     let _ = tokio::task::spawn_blocking(move || full_scan_into_cache(&c, depth)).await;
@@ -115,8 +134,8 @@ impl StartMenuEngine {
                 return guard.entries.clone();
             }
         }
+        let depth = self.config.read().unwrap().scan_depth;
         let c = Arc::clone(&self.cache);
-        let depth = self.scan_depth;
         let _ = tokio::task::spawn_blocking(move || full_scan_into_cache(&c, depth)).await;
         self.cache.read().unwrap().entries.clone()
     }
@@ -267,11 +286,24 @@ impl SearchEngine for StartMenuEngine {
         Lane::Sync
     }
 
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn start(&self) {
         self.start_background();
     }
 
     async fn search(&self, query: &str, ctx: &QueryContext<'_>) -> Vec<SearchItem> {
+        // 检查是否启用
+        {
+            let cfg = self.config.read().unwrap();
+            if !cfg.enabled {
+                tracing::trace!("StartMenuEngine: 已禁用，跳过");
+                return Vec::new();
+            }
+        }
+
         if query.is_empty() {
             return Vec::new();
         }

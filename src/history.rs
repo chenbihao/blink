@@ -46,7 +46,7 @@ pub async fn init_db() -> Result<SqlitePool, String> {
 }
 
 /// 0.4→0.5 自动迁移：
-/// 1. `app_config.file_search` → `engine:file_search`（如果不存在）
+/// 1. ~~`app_config.file_search` → `engine:file_search`~~（已移除，未发版不需要）
 /// 2. 为每个插件初始化默认配置（`plugin:{id}` 不存在则写入默认）
 /// 3. 迁移完成后写 marker，下次不再执行
 pub async fn migrate_0_4_to_0_5(
@@ -61,24 +61,7 @@ pub async fn migrate_0_4_to_0_5(
     }
     tracing::info!("开始执行 0.4→0.5 配置迁移");
 
-    // ── 1. 迁移 file_search ──
-    if get_config(pool, "engine:file_search").await.is_none() {
-        if let Some(app_config_json) = get_config(pool, "app_config").await {
-            if let Ok(app_config) = serde_json::from_str::<crate::config::AppConfig>(&app_config_json) {
-                #[allow(deprecated)] // 迁移代码需要访问旧字段
-                let file_search = &app_config.file_search;
-                match serde_json::to_string(file_search) {
-                    Ok(file_search_json) => {
-                        set_config(pool, "engine:file_search", &file_search_json).await;
-                        tracing::info!("迁移 file_search 到 engine:file_search");
-                    }
-                    Err(e) => tracing::warn!(error = %e, "file_search 迁移失败"),
-                }
-            }
-        }
-    }
-
-    // ── 2. 初始化插件默认配置 ──
+    // ── 1. 初始化插件默认配置 ──
     for plugin in plugins {
         let plugin_id = plugin.id();
         let key = format!("plugin:{plugin_id}");

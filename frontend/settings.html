@@ -92,15 +92,45 @@
 
         <!-- 引擎 -->
         <div id="engines" class="panel">
-          <h2 data-i18n="panel.engines">内置引擎</h2>
+          <h2 data-i18n="panel.engines">搜索引擎</h2>
 
-          <!-- 文件搜索（内置引擎） -->
+          <!-- 应用搜索（StartMenu） -->
+          <div class="extension-card">
+            <div class="extension-header">
+              <div class="extension-icon">🔍</div>
+              <div class="extension-info">
+                <h3 data-i18n="engine.start_menu.title">应用搜索</h3>
+                <p class="extension-desc" data-i18n="engine.start_menu.desc">搜索开始菜单、桌面快捷方式等已安装应用</p>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="start-menu-enabled" checked />
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="extension-body">
+              <div class="plugin-config-section">
+                <div class="plugin-section-title" data-i18n="engine.start_menu.config">配置</div>
+                <div class="setting-row">
+                  <label data-i18n="engine.start_menu.scan_depth.label">扫描深度</label>
+                  <input type="number" id="start-menu-scan-depth" min="1" max="10" value="3" class="input-small" />
+                  <span class="hint" data-i18n="engine.start_menu.scan_depth.hint">索引深度，越大越全但越慢</span>
+                </div>
+              </div>
+              <div class="plugin-save-row">
+                <button id="save-start-menu" class="btn-small" data-i18n="engine.save">保存配置</button>
+                <span id="start-menu-save-msg" class="plugin-save-msg"></span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 文件搜索（FileEngine） -->
           <div class="extension-card">
             <div class="extension-header">
               <div class="extension-icon">📁</div>
               <div class="extension-info">
                 <h3 data-i18n="engine.file_search.title">文件搜索</h3>
-                <p class="extension-desc" data-i18n="engine.file_search.desc">开始菜单本地索引 + Everything 极速全盘搜索</p>
+                <p class="extension-desc" data-i18n="engine.file_search.desc">搜索本地文件，支持 Everything 极速索引</p>
               </div>
               <label class="switch">
                 <input type="checkbox" id="file-search-enabled" checked />
@@ -109,50 +139,59 @@
             </div>
 
             <div class="extension-body">
-              <!-- 本地搜索（开始菜单） -->
+              <!-- 数据源选择 -->
               <div class="plugin-config-section">
-                <div class="plugin-section-title" data-i18n="engine.local.title">本地搜索（开始菜单）</div>
-
+                <div class="plugin-section-title" data-i18n="engine.file_search.data_source">数据源</div>
                 <div class="setting-row">
-                  <label data-i18n="engine.local.scan_depth.label">扫描深度</label>
-                  <input type="number" id="local-scan-depth" min="1" max="10" value="3" class="input-small" />
-                  <span class="hint" data-i18n="engine.local.scan_depth.hint">索引深度，越大越全但越慢</span>
-                </div>
-
-                <div class="setting-row">
-                  <label data-i18n="engine.local.status.label">缓存状态</label>
-                  <span id="local-cache-status" class="status-badge status-unknown">-</span>
+                  <label data-i18n="engine.file_search.data_source.label">搜索模式</label>
+                  <select id="file-search-data-source">
+                    <option value="auto" data-i18n="engine.file_search.data_source.auto">自动（优先 Everything，降级本地）</option>
+                    <option value="everything" data-i18n="engine.file_search.data_source.everything">仅 Everything</option>
+                    <option value="local" data-i18n="engine.file_search.data_source.local">仅本地扫描</option>
+                  </select>
+                  <span class="hint" data-i18n="engine.file_search.data_source.hint">选择文件搜索的数据来源</span>
                 </div>
               </div>
 
-              <!-- Everything -->
-              <details class="plugin-config-section">
-                <summary class="plugin-section-title">Everything <span class="engine-toggle-hint">（可选，需安装）</span></summary>
-                <div class="plugin-config-body">
-                  <div class="setting-row">
-                    <label data-i18n="engine.everything.status.label">状态</label>
-                    <span id="everything-status" class="status-badge status-unknown">探测中…</span>
-                    <button id="probe-everything" class="btn-small" data-i18n="engine.probe">重新探测</button>
-                  </div>
-
-                  <div class="setting-row">
-                    <label data-i18n="engine.everything.port.label">HTTP 端口</label>
-                    <input type="number" id="everything-port" min="1" max="65535" value="80" class="input-small" />
-                    <span class="hint" data-i18n="engine.everything.port.hint">Everything 选项 → HTTP 服务器</span>
-                  </div>
-
-                  <div class="setting-row">
-                    <label data-i18n="engine.everything.max_results.label">最大结果数</label>
-                    <input type="number" id="everything-max-results" min="1" max="100" value="20" class="input-small" />
-                    <span class="hint" data-i18n="engine.everything.max_results.hint">每次检索返回的文件数量上限</span>
-                  </div>
+              <!-- Everything 配置（非 local 模式时显示） -->
+              <div id="everything-config" class="plugin-config-section">
+                <div class="plugin-section-title">Everything <span class="engine-toggle-hint" data-i18n="engine.everything.hint">（可选，需安装）</span></div>
+                <div class="setting-row">
+                  <label data-i18n="engine.everything.status.label">状态</label>
+                  <span id="everything-status" class="status-badge status-unknown">探测中…</span>
+                  <button id="probe-everything" class="btn-small" data-i18n="engine.probe">重新探测</button>
                 </div>
-              </details>
+                <div class="setting-row">
+                  <label data-i18n="engine.everything.port.label">HTTP 端口</label>
+                  <input type="number" id="everything-port" min="1" max="65535" value="80" class="input-small" />
+                  <span class="hint" data-i18n="engine.everything.port.hint">Everything 选项 → HTTP 服务器</span>
+                </div>
+                <div class="setting-row">
+                  <label data-i18n="engine.everything.max_results.label">最大结果数</label>
+                  <input type="number" id="everything-max-results" min="1" max="100" value="20" class="input-small" />
+                  <span class="hint" data-i18n="engine.everything.max_results.hint">每次检索返回的文件数量上限</span>
+                </div>
+              </div>
 
               <div class="plugin-save-row">
                 <button id="save-file-search" class="btn-small" data-i18n="engine.save">保存配置</button>
                 <span id="file-search-save-msg" class="plugin-save-msg"></span>
               </div>
+            </div>
+          </div>
+
+          <!-- 计算器（CalcEngine） -->
+          <div class="extension-card">
+            <div class="extension-header">
+              <div class="extension-icon">🧮</div>
+              <div class="extension-info">
+                <h3 data-i18n="engine.calc.title">计算器</h3>
+                <p class="extension-desc" data-i18n="engine.calc.desc">输入数学表达式直接计算结果</p>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="calc-enabled" checked />
+                <span class="slider"></span>
+              </label>
             </div>
           </div>
 

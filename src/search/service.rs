@@ -28,6 +28,13 @@ struct ResultsPayload {
     items: Vec<AppEntry>,
 }
 
+/// 引擎配置更新枚举（用于运行时热更新）。
+pub enum EngineConfigUpdate {
+    StartMenu(crate::config::StartMenuConfig),
+    Calc(crate::config::CalcConfig),
+    File(crate::config::FileSearchConfig),
+}
+
 pub struct SearchService {
     app: AppHandle,
     pool: SqlitePool,
@@ -92,6 +99,39 @@ impl SearchService {
         for e in self.sync_engines.iter().chain(self.async_engines.iter()) {
             e.start();
         }
+    }
+
+    /// 更新指定引擎的配置（运行时热更新）。
+    /// 支持的 engine_id: "start_menu", "calc", "file"
+    pub fn update_engine_config(&self, engine_id: &str, config: EngineConfigUpdate) {
+        let engines = self.sync_engines.iter().chain(self.async_engines.iter());
+        for engine in engines {
+            if engine.id() == engine_id {
+                match config {
+                    EngineConfigUpdate::StartMenu(cfg) => {
+                        if let Some(sm) = engine.as_any().downcast_ref::<super::start_menu_engine::StartMenuEngine>() {
+                            sm.update_config(cfg);
+                            tracing::debug!(engine = engine_id, "StartMenuEngine 配置已热更新");
+                        }
+                    }
+                    EngineConfigUpdate::Calc(cfg) => {
+                        if let Some(calc) = engine.as_any().downcast_ref::<super::calc_engine::CalcEngine>() {
+                            calc.update_config(cfg);
+                            tracing::debug!(engine = engine_id, "CalcEngine 配置已热更新");
+                        }
+                    }
+                    EngineConfigUpdate::File(cfg) => {
+                        if let Some(file) = engine.as_any().downcast_ref::<super::file_engine::FileEngine>() {
+                            // FileEngine 的 update_config 是 async，这里用 block_on
+                            tauri::async_runtime::block_on(file.update_config(cfg));
+                            tracing::debug!(engine = engine_id, "FileEngine 配置已热更新");
+                        }
+                    }
+                }
+                return;
+            }
+        }
+        tracing::warn!(engine = engine_id, "未找到引擎，无法更新配置");
     }
 
     /// 搜索:先路由 → 按 Takeover/Mixed 分支执行 → 返回首批结果 + spawn 增量。

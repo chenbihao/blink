@@ -452,35 +452,23 @@ def handle_query(query_id: str, query: str, settings: Optional[Dict[str, Any]] =
     items = [
         {
             "title": f"📝 {result}",
-            "subtitle": f"原文: {text[:50]}{'...' if len(text) > 50 else ''} | 目标: {target_display}",
+            "subtitle": f"按 Enter 复制译文 | 原文: {text[:50]}{'...' if len(text) > 50 else ''}",
             "score": 1.0,
             "action": {
                 "type": "copy",
                 "text": result
             }
+        },
+        {
+            "title": f"📄 {text[:60]}{'...' if len(text) > 60 else ''}",
+            "subtitle": "按 Enter 复制原文",
+            "score": 0.8,
+            "action": {
+                "type": "copy",
+                "text": text
+            }
         }
     ]
-
-    # 添加快捷动作
-    items.append({
-        "title": "📋 复制译文",
-        "subtitle": "将翻译结果复制到剪贴板",
-        "score": 0.9,
-        "action": {
-            "type": "copy",
-            "text": result
-        }
-    })
-
-    items.append({
-        "title": "📋 复制原文",
-        "subtitle": "将原文复制到剪贴板",
-        "score": 0.8,
-        "action": {
-            "type": "copy",
-            "text": text
-        }
-    })
 
     return {"id": query_id, "items": items}
 

@@ -129,35 +129,68 @@ function applyConfigToUI(config) {
   loadEngineConfig();
 }
 
-// 加载引擎配置（文件搜索等内置引擎）
+// 加载引擎配置（应用搜索 / 文件搜索 / 计算器）
 async function loadEngineConfig() {
+  // 加载应用搜索配置
+  try {
+    const startMenu = await invoke("get_start_menu_config");
+    const enabledEl = document.getElementById("start-menu-enabled");
+    const depthEl = document.getElementById("start-menu-scan-depth");
+    if (enabledEl) enabledEl.checked = startMenu.enabled !== false;
+    if (depthEl) depthEl.value = startMenu.scan_depth || 3;
+  } catch (e) {
+    console.error("loadStartMenuConfig failed:", e);
+  }
+
+  // 加载文件搜索配置
   try {
     const fileSearch = await invoke("get_engine_config", { engineId: "file_search" });
     const enabled = fileSearch.enabled !== false;
+    const dataSource = fileSearch.data_source || "auto";
     const port = fileSearch.everything_port || 80;
-    const depth = fileSearch.local_scan_depth || 3;
     const maxResults = fileSearch.max_results || 20;
 
     const enabledEl = document.getElementById("file-search-enabled");
+    const dataSourceEl = document.getElementById("file-search-data-source");
     const portEl = document.getElementById("everything-port");
-    const depthEl = document.getElementById("local-scan-depth");
     const maxResultsEl = document.getElementById("everything-max-results");
 
     if (enabledEl) enabledEl.checked = enabled;
+    if (dataSourceEl) dataSourceEl.value = dataSource;
     if (portEl) portEl.value = port;
-    if (depthEl) depthEl.value = depth;
     if (maxResultsEl) maxResultsEl.value = maxResults;
 
-    // 页面加载后自动探测一次
-    setTimeout(probeEverythingStatus, 500);
+    // 根据数据源显示/隐藏 Everything 配置
+    updateEverythingConfigVisibility(dataSource);
+
+    // 页面加载后自动探测一次（非 local 模式）
+    if (dataSource !== "local") {
+      setTimeout(probeEverythingStatus, 500);
+    }
   } catch (e) {
-    console.error("loadEngineConfig failed:", e);
-    // 降级使用默认值
+    console.error("loadFileSearchConfig failed:", e);
     document.getElementById("everything-port").value = 80;
+  }
+
+  // 加载计算器配置
+  try {
+    const calc = await invoke("get_calc_config");
+    const enabledEl = document.getElementById("calc-enabled");
+    if (enabledEl) enabledEl.checked = calc.enabled !== false;
+  } catch (e) {
+    console.error("loadCalcConfig failed:", e);
   }
 
   // 加载插件列表
   loadPlugins();
+}
+
+// 根据数据源模式显示/隐藏 Everything 配置
+function updateEverythingConfigVisibility(dataSource) {
+  const everythingConfig = document.getElementById("everything-config");
+  if (everythingConfig) {
+    everythingConfig.style.display = dataSource === "local" ? "none" : "";
+  }
 }
 
 // 插件图标映射（按 manifest.id 匹配）
@@ -973,7 +1006,7 @@ document.addEventListener("change", (e) => {
 // 文件搜索引擎的输入框（不是 plugin-field，单独处理）
 document.addEventListener("input", (e) => {
   const id = e.target.id;
-  if (["everything-port", "everything-max-results", "local-scan-depth"].includes(id)) {
+  if (["everything-port", "everything-max-results", "start-menu-scan-depth"].includes(id)) {
     const row = e.target.closest(".setting-row");
     if (row) {
       const label = row.querySelector("label");
@@ -984,6 +1017,33 @@ document.addEventListener("input", (e) => {
         label.appendChild(badge);
       }
     }
+  }
+});
+
+// 数据源选择变化时标记未保存
+document.getElementById("file-search-data-source")?.addEventListener("change", (e) => {
+  const row = e.target.closest(".setting-row");
+  if (row) {
+    const label = row.querySelector("label");
+    if (label && !label.querySelector(".unsaved-badge")) {
+      const badge = document.createElement("span");
+      badge.className = "unsaved-badge";
+      badge.textContent = UNSAVED_TEXT;
+      label.appendChild(badge);
+    }
+  }
+});
+
+// 应用搜索开关变化时标记未保存
+document.getElementById("start-menu-enabled")?.addEventListener("change", () => {
+  const card = document.getElementById("save-start-menu")?.closest(".extension-card");
+  if (!card) return;
+  const desc = card.querySelector(".extension-desc");
+  if (desc && !desc.nextElementSibling?.classList?.contains("unsaved-badge")) {
+    const badge = document.createElement("span");
+    badge.className = "unsaved-badge";
+    badge.textContent = UNSAVED_TEXT;
+    desc.after(badge);
   }
 });
 
@@ -1282,7 +1342,43 @@ document.getElementById("clear-history")?.addEventListener("click", async () => 
   }
 });
 
-// ── 扩展 Tab：文件搜索 ──────────────────────────────────────────────────────
+// ── 扩展 Tab：搜索引擎配置 ──────────────────────────────────────────────────
+
+// 应用搜索配置保存
+document.getElementById("save-start-menu")?.addEventListener("click", async () => {
+  const enabled = document.getElementById("start-menu-enabled").checked;
+  const scanDepth = parseInt(document.getElementById("start-menu-scan-depth").value, 10) || 3;
+
+  try {
+    await invoke("update_start_menu_config", { enabled, scanDepth });
+    const msgEl = document.getElementById("start-menu-save-msg");
+    if (msgEl) {
+      msgEl.textContent = t("plugin.saved_msg");
+      msgEl.style.color = "#a6e3a1";
+      setTimeout(() => { msgEl.textContent = ""; }, 2000);
+    }
+    const card = document.getElementById("save-start-menu")?.closest(".extension-card");
+    if (card) clearUnsaved(card);
+  } catch (e) {
+    console.error("update_start_menu_config failed:", e);
+    alert(t("common.save_failed_msg", { err: e }));
+  }
+});
+
+// 计算器配置保存（开关变化即时保存）
+document.getElementById("calc-enabled")?.addEventListener("change", async (e) => {
+  try {
+    await invoke("update_calc_config", { enabled: e.target.checked });
+  } catch (err) {
+    console.error("update_calc_config failed:", err);
+    e.target.checked = !e.target.checked; // 回滚
+  }
+});
+
+// 数据源选择变化时显示/隐藏 Everything 配置
+document.getElementById("file-search-data-source")?.addEventListener("change", (e) => {
+  updateEverythingConfigVisibility(e.target.value);
+});
 
 async function probeEverythingStatus() {
   const statusEl = document.getElementById("everything-status");
@@ -1329,17 +1425,15 @@ document.getElementById("probe-everything")?.addEventListener("click", probeEver
 
 document.getElementById("save-file-search")?.addEventListener("click", async () => {
   const enabled = document.getElementById("file-search-enabled").checked;
+  const dataSource = document.getElementById("file-search-data-source").value;
   const port = parseInt(document.getElementById("everything-port").value, 10);
-  // 本地扫描深度配置暂隐藏，使用默认值 3
-  const depthEl = document.getElementById("local-scan-depth");
-  const depth = depthEl ? parseInt(depthEl.value, 10) : 3;
   const maxResults = parseInt(document.getElementById("everything-max-results").value, 10) || 20;
 
   try {
     await invoke("update_file_search", {
       enabled,
+      dataSource,
       everythingPort: port,
-      localScanDepth: depth,
       maxResults,
     });
     // 跟插件保存一致的 flash 提示样式
@@ -1352,8 +1446,10 @@ document.getElementById("save-file-search")?.addEventListener("click", async () 
     // 清除待保存提示
     const fileSearchCard = document.getElementById("save-file-search")?.closest(".extension-card");
     if (fileSearchCard) clearUnsaved(fileSearchCard);
-    // 重新探测
-    probeEverythingStatus();
+    // 重新探测（非 local 模式）
+    if (dataSource !== "local") {
+      probeEverythingStatus();
+    }
   } catch (e) {
     console.error("update_file_search failed:", e);
     alert(t("common.save_failed_msg", { err: e }));

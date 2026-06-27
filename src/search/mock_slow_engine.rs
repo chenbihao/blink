@@ -36,6 +36,10 @@ impl SearchEngine for MockSlowEngine {
         Lane::Async
     }
 
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     async fn search(&self, query: &str, _ctx: &QueryContext<'_>) -> Vec<SearchItem> {
         if query.is_empty() {
             return Vec::new();

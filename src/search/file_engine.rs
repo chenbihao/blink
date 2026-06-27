@@ -104,7 +104,7 @@ impl FileEngine {
 
     /// 带配置创建。
     pub fn with_config(config: FileSearchConfig) -> Self {
-        let cache_ttl = config.fallback_cache_ttl_sec;
+        let cache_ttl = config.local_cache_ttl_sec;
         Self {
             config: Arc::new(RwLock::new(config)),
             everything_status: Arc::new(RwLock::new(EverythingStatus::Unknown)),
@@ -330,6 +330,29 @@ impl FileEngine {
         items
     }
 
+    /// 仅本地目录搜索（触发后台扫描 + 从缓存搜索）。
+    async fn search_local_only(&self, cfg: &FileSearchConfig, query: &str) -> Vec<SearchItem> {
+        // 触发后台扫描（如果缓存无效）
+        let dirs = cfg.local_dirs.clone();
+        let depth = cfg.local_max_depth;
+        let cache = self.fallback_cache.clone();
+
+        tokio::spawn(async move {
+            let need_scan = {
+                let c = cache.lock().unwrap();
+                !c.is_valid() && !c.is_scanning()
+            };
+            if need_scan {
+                Self::scan_fallback_dirs_static(&cache, &dirs, depth).await;
+            }
+        });
+
+        // 从缓存搜索
+        let results = self.search_fallback(query, cfg.local_max_results);
+        tracing::debug!("FileEngine: 本地搜索 query={query}, 返回 {} 个结果", results.len());
+        results
+    }
+
     /// 静态方法：扫描本地目录填充缓存（供 spawn 调用）。
     async fn scan_fallback_dirs_static(
         cache: &Arc<Mutex<FallbackCache>>,
@@ -449,14 +472,27 @@ impl SearchEngine for FileEngine {
         Lane::Async
     }
 
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn start(&self) {
-        // 后台异步探测 Everything 状态
+        // 后台异步探测 Everything 状态（仅在需要时）
         let status = self.everything_status.clone();
         let client = self.client.clone();
         let config = self.config.clone();
 
         tokio::spawn(async move {
             let cfg = config.read().await;
+
+            // 如果数据源是 "local"，不需要探测 Everything
+            if cfg.data_source == "local" {
+                tracing::info!("FileEngine: 数据源为本地，跳过 Everything 探测");
+                let mut s = status.write().await;
+                *s = EverythingStatus::Unavailable;
+                return;
+            }
+
             let port = cfg.everything_port;
             let url = format!("http://localhost:{port}/?search=__blink_probe__&json=1&count=1");
             let available = match client.get(&url).send().await {
@@ -488,37 +524,25 @@ impl SearchEngine for FileEngine {
             return Vec::new();
         }
 
+        let data_source = cfg.data_source.as_str();
+
+        // 模式 "local"：只用本地目录扫描
+        if data_source == "local" {
+            tracing::debug!("FileEngine: 本地模式，query={q}");
+            return self.search_local_only(&cfg, q).await;
+        }
+
+        // 模式 "everything" 或 "auto"：先尝试 Everything
         tracing::debug!("FileEngine: 搜索 Everything，query={q}, port={}, max_results={}", cfg.everything_port, cfg.max_results);
         let results = self.search_everything(cfg.everything_port, q, cfg.max_results).await;
 
-        // Everything 不可用且 Fallback 启用时，尝试本地目录搜索
-        if results.is_empty() {
+        // 模式 "auto"：Everything 不可用时降级本地
+        if results.is_empty() && data_source == "auto" {
             let status = self.everything_status.read().await;
-            if *status == EverythingStatus::Unavailable && cfg.fallback_enabled {
-                tracing::debug!("FileEngine: Everything 不可用，启动 Fallback 搜索");
+            if *status == EverythingStatus::Unavailable {
+                tracing::debug!("FileEngine: Everything 不可用，降级本地搜索");
                 drop(status);
-
-                // 触发后台扫描（如果缓存无效）
-                let dirs = cfg.fallback_dirs.clone();
-                let depth = cfg.fallback_max_depth;
-                let cache = self.fallback_cache.clone();
-
-                // spawn 扫描（非阻塞）
-                tokio::spawn(async move {
-                    let need_scan = {
-                        let c = cache.lock().unwrap();
-                        !c.is_valid() && !c.is_scanning()
-                    };
-                    if need_scan {
-                        Self::scan_fallback_dirs_static(&cache, &dirs, depth).await;
-                    }
-                });
-
-                // 从缓存搜索（如果有效）
-                let fallback_results = self.search_fallback(q, cfg.fallback_max_results);
-                if !fallback_results.is_empty() {
-                    return fallback_results;
-                }
+                return self.search_local_only(&cfg, q).await;
             }
         }
 

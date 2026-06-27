@@ -124,6 +124,10 @@ impl SearchEngine for BuiltinEngine {
         super::engine::Lane::Sync
     }
 
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     /// 搜索内置动作：query 匹配关键词 → 返回结果。
     async fn search(&self, query: &str, ctx: &QueryContext<'_>) -> Vec<SearchItem> {
         let q = query.trim().to_lowercase();

@@ -119,22 +119,32 @@ use start_menu_engine::StartMenuEngine;
 
 // 多路搜索服务:路由 + 融合 + 渐进式调度
 mod service;
-pub use service::SearchService;
+pub use service::{SearchService, EngineConfigUpdate};
 
-/// 构造引擎列表(sync: builtin + calc + start_menu;async: 可选 mock)。
+/// 引擎配置集合（三层独立控制）。
+pub struct EngineConfigs {
+    pub start_menu: crate::config::StartMenuConfig,
+    pub file: crate::config::FileSearchConfig,
+    pub calc: crate::config::CalcConfig,
+}
+
+/// 构造引擎列表(sync: builtin + calc + start_menu;async: file)。
 /// PluginEngine 0.4 退化为执行器,不再作为 dyn SearchEngine,由 SearchService 直接持有。
-pub fn build_engines(file_config: Option<crate::config::FileSearchConfig>, scan_depth: u32) -> Vec<std::sync::Arc<dyn SearchEngine>> {
-    let file_engine = match file_config {
-        Some(cfg) => std::sync::Arc::new(FileEngine::with_config(cfg)),
-        None => std::sync::Arc::new(FileEngine::new()),
-    };
-
+pub fn build_engines(configs: EngineConfigs) -> Vec<std::sync::Arc<dyn SearchEngine>> {
     let mut engines: Vec<std::sync::Arc<dyn SearchEngine>> = vec![
+        // BuiltinEngine（始终启用，本体功能）
         std::sync::Arc::new(BuiltinEngine),
-        std::sync::Arc::new(CalcEngine),
-        std::sync::Arc::new(StartMenuEngine::new(scan_depth)),
-        file_engine,
+        // CalcEngine（可配置）
+        std::sync::Arc::new(CalcEngine::with_config(configs.calc)),
+        // StartMenuEngine（可配置）
+        std::sync::Arc::new(StartMenuEngine::with_config(configs.start_menu)),
     ];
+
+    // FileEngine（可配置，总开关关闭时不加载）
+    if configs.file.enabled {
+        engines.push(std::sync::Arc::new(FileEngine::with_config(configs.file)));
+    }
+
     if MockSlowEngine::enabled() {
         tracing::info!("MockSlowEngine 已启用(BLINK_MOCK_SLOW_ENGINE=1)");
         engines.push(std::sync::Arc::new(MockSlowEngine));
