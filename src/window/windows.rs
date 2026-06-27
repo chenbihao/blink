@@ -7,13 +7,16 @@ use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE};
+use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallWindowProcW, GetForegroundWindow, GetWindowThreadProcessId, SetWindowLongPtrW,
-    GWLP_WNDPROC, WNDPROC,
+    CallWindowProcW, GetForegroundWindow, GetWindowLongPtrW, GetWindowThreadProcessId,
+    SetWindowLongPtrW, SetWindowPos, GWLP_WNDPROC, GWL_STYLE, HWND_TOP, SET_WINDOW_POS_FLAGS,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, WNDPROC, WS_CAPTION, WS_THICKFRAME,
 };
 
 const ST_HIDDEN: u8 = 0;
@@ -61,9 +64,6 @@ pub fn invoke(app: &AppHandle) {
     if let Some(pos) = launcher_position(&win) {
         let _ = win.set_position(pos);
     }
-    // 记录 invoke 时间戳（看门狗 grace period 用）
-    // 立即进入 VISIBLE：set_focus() 不保证立即生效（Windows 反偷焦保护），
-    // 如果卡在 SHOWING 态等 on_focused(true)，用户点其他窗口时不会触发隐藏。
     let now = elapsed_ms();
     let grace_ms = GRACE_MS.load(Ordering::SeqCst);
     INVOKE_AT.store(now, Ordering::SeqCst);
@@ -97,6 +97,54 @@ pub fn on_focused(focused: bool) {
     if focused {
         STATE.store(ST_VISIBLE, Ordering::SeqCst);
         tracing::debug!("on_focused: state → VISIBLE, watchdog armed");
+    }
+}
+
+/// 启用系统级圆角（Windows 11+）。Win10 不支持此 API，静默忽略。
+///
+/// DWMWCP_ROUND = 2，让系统 DWM 绘制圆角，与 CSS border-radius 同步，
+/// 避免窗口四角露出不透明背景。
+pub fn enable_rounded_corners(hwnd: HWND) {
+    // DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2
+    let pref: u32 = 2; // DWMWCP_ROUND
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &pref as *const u32 as *const _,
+            std::mem::size_of::<u32>() as u32,
+        );
+    }
+}
+
+/// 彻底移除窗口边框和标题栏（DWM 在 transparent + decorations:false 时仍会画）。
+///
+/// 双重手段：① 去掉 WS_CAPTION + WS_THICKFRAME 窗口样式；
+/// ② DwmExtendFrameIntoClientArea 设负 margin 把 DWM 帧完全推出可视区域。
+pub fn strip_window_border(hwnd: HWND) {
+    unsafe {
+        // 1. 去掉窗口样式中的标题栏和可拖拽边框
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        let new_style = style & !(WS_CAPTION.0 as isize) & !(WS_THICKFRAME.0 as isize);
+        SetWindowLongPtrW(hwnd, GWL_STYLE, new_style);
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOP),
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE | SET_WINDOW_POS_FLAGS(0x0003),
+        );
+
+        // 2. 负 margin 把 DWM 帧完全推出可视区域
+        let margins = MARGINS {
+            cxLeftWidth: -1,
+            cxRightWidth: -1,
+            cyTopHeight: -1,
+            cyBottomHeight: -1,
+        };
+        let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
     }
 }
 
@@ -233,5 +281,33 @@ pub fn clamp_to_work_area(win: &WebviewWindow) {
                 "窗口超出屏幕底部,上移"
             );
         }
+    }
+}
+
+/// 打开设置窗口：已存在则聚焦，否则创建（无边框 + 透明 + 圆角）。
+///
+/// 统一入口：主窗口搜索结果和托盘菜单都走这里，避免重复代码漏配置。
+pub fn open_settings(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("settings") {
+        let _ = w.show();
+        let _ = w.set_focus();
+        return;
+    }
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+    let win = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
+        .title("Blink Settings")
+        .inner_size(960.0, 680.0)
+        .min_inner_size(760.0, 520.0)
+        .center()
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
+        .background_color(tauri::window::Color(0, 0, 0, 0))
+        .build()
+        .expect("创建设置窗口失败");
+    if let Ok(hwnd) = win.hwnd() {
+        let hwnd = windows::Win32::Foundation::HWND(hwnd.0 as _);
+        strip_window_border(hwnd);
+        enable_rounded_corners(hwnd);
     }
 }

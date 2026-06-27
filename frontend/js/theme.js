@@ -11,27 +11,31 @@ import { invoke } from "./tauri.js";
 let mediaQuery = null;
 let mediaListener = null;
 
-/** 解析 auto/light/dark → 实际应渲染 'light' | 'dark'。 */
+/**
+ * 解析 mode → 实际 data-theme 值。
+ * auto 跟随系统（light 媒体查询命中 → "light"，否则 → "dark"）。
+ * 其他值（light / dark / gruvbox / …）原样透传。
+ */
 function resolve(mode) {
-  if (mode === "light") return "light";
-  if (mode === "dark") return "dark";
-  // auto：跟随系统（light 媒体查询命中 → light）
-  return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  if (mode === "auto") {
+    return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  }
+  return mode;
 }
 
-/** 把解析后的主题写到 <html>。dark 移除 data-theme（回落 :root），light 设 data-theme="light"。 */
+/** 把解析后的主题写到 <html>。dark 移除 data-theme（回落 :root），其余设 data-theme。 */
 function paint(resolved) {
   const root = document.documentElement;
-  if (resolved === "light") {
-    root.setAttribute("data-theme", "light");
-  } else {
+  if (resolved === "dark") {
     root.removeAttribute("data-theme");
+  } else {
+    root.setAttribute("data-theme", resolved);
   }
 }
 
 /**
  * 应用主题模式。
- * @param {string} mode - auto / light / dark
+ * @param {string} mode - auto / light / dark / gruvbox / ...
  */
 export function applyTheme(mode) {
   paint(resolve(mode));

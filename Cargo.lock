@@ -311,6 +311,7 @@ dependencies = [
  "urlencoding",
  "walkdir",
  "windows 0.62.2",
+ "winreg 0.55.0",
 ]
 
 [[package]]

@@ -148,26 +148,10 @@ enum BuiltinActionKind {
 async fn execute_builtin_action(app: &tauri::AppHandle, action: BuiltinActionKind) -> Result<(), String> {
     match action {
         BuiltinActionKind::OpenSettings => {
-            // 打开设置窗口（已存在则聚焦，否则创建）
+            // 打开设置窗口（已存在则聚焦，否则创建），同时隐藏主窗口
             tracing::debug!("执行内置动作：打开设置");
-            if let Some(w) = app.get_webview_window("settings") {
-                let _ = w.show();
-                let _ = w.set_focus();
-            } else {
-                use tauri::WebviewWindowBuilder;
-                use tauri::WebviewUrl;
-                tracing::debug!("设置窗口不存在，创建新窗口");
-                let _ = WebviewWindowBuilder::new(
-                    app,
-                    "settings",
-                    WebviewUrl::App("settings.html".into()),
-                )
-                .title("Blink Settings")
-                .inner_size(960.0, 680.0)
-                .min_inner_size(760.0, 520.0)
-                .center()
-                .build();
-            }
+            crate::window::hide(&app, "open_settings");
+            crate::window::open_settings(&app);
         }
         BuiltinActionKind::LockWorkstation => {
             // Windows API：锁定工作站
@@ -868,10 +852,22 @@ pub async fn show_context_menu(
 
     // 窗口定位：先显示在鼠标位置；popup 页面加载后自己 resize 到精确尺寸
     let encoded_items = urlencoding::encode(&items).to_string();
-    // 透传主题原值（auto/light/dark），popup 用 matchMedia 自行 resolve，保持同步渲染零延迟
+    // 主题 resolve 在后端完成：auto → dark（WebView2 matchMedia 不可靠），
+    // 其他值（light/dark/gruvbox/…）原样透传。popup 只管设 data-theme，不含 resolve 逻辑。
     let theme = {
         let pool = app.state::<sqlx::SqlitePool>();
-        crate::config::get_config(&pool).await.theme
+        let raw = crate::config::get_config(&pool).await.theme;
+        if raw == "auto" {
+            // Windows: 检查注册表 AppsUseLightTheme（0=dark, 1=light）
+            let is_light = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+                .open_subkey("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize")
+                .and_then(|k| k.get_value::<u32, _>("AppsUseLightTheme"))
+                .map(|v| v == 1)
+                .unwrap_or(false);
+            if is_light { "light".to_string() } else { "dark".to_string() }
+        } else {
+            raw
+        }
     };
     let url = format!("contextmenu-popup.html?items={encoded_items}&theme={theme}");
     tracing::debug!(x, y, width, height, %url, "创建右键菜单窗口");
@@ -1030,6 +1026,13 @@ pub async fn get_perf_recent(
 pub async fn export_perf_report(app: tauri::AppHandle) -> serde_json::Value {
     let pool = app.state::<sqlx::SqlitePool>();
     crate::perf::export_report(&pool).await
+}
+
+/// 清除全部性能指标数据。
+#[tauri::command]
+pub async fn clear_perf_data(app: tauri::AppHandle) -> Result<u64, String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::perf::clear_all(&pool).await
 }
 
 /// 更新解释器自定义路径（暂未实现持久化，Phase 0.6 第一版只做探测展示）。

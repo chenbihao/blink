@@ -30,7 +30,10 @@
           <h2 data-i18n="panel.general">通用</h2>
           <div class="setting-row">
             <label data-i18n="general.auto_start.label">开机自启</label>
-            <input type="checkbox" id="auto-start" />
+            <label class="checkbox">
+              <input type="checkbox" id="auto-start" />
+              <span class="checkmark"></span>
+            </label>
             <span class="hint" data-i18n="general.auto_start.hint">开机自动启动</span>
           </div>
           <div class="setting-row">
@@ -48,22 +51,38 @@
               <option value="auto" data-i18n="general.theme.auto">跟随系统</option>
               <option value="light" data-i18n="general.theme.light">浅色</option>
               <option value="dark" data-i18n="general.theme.dark">深色</option>
+              <option value="gruvbox" data-i18n="general.theme.gruvbox">Gruvbox Dark</option>
             </select>
             <span class="hint" data-i18n="general.theme.hint">立即生效</span>
           </div>
           <div class="setting-row">
             <label data-i18n="general.history_enabled.label">记录搜索历史</label>
-            <input type="checkbox" id="search-history-enabled" />
+            <label class="checkbox">
+              <input type="checkbox" id="search-history-enabled" />
+              <span class="checkmark"></span>
+            </label>
             <span class="hint" data-i18n="general.history_enabled.hint">关闭后不再记录频率权重</span>
           </div>
           <div class="setting-row">
             <label data-i18n="general.history_days.label">历史保留天数</label>
-            <input type="number" id="search-history-days" min="0" max="365" class="input-small" />
+            <div class="number-input-wrapper">
+              <input type="number" id="search-history-days" min="0" max="365" value="180" />
+              <div class="number-spinner">
+                <button type="button" class="spinner-up" aria-label="增加">＋</button>
+                <button type="button" class="spinner-down" aria-label="减少">－</button>
+              </div>
+            </div>
             <span class="hint" data-i18n="general.history_days.hint">0 = 永久保留</span>
           </div>
           <div class="setting-row">
             <label data-i18n="general.max_results.label">最大结果数</label>
-            <input type="number" id="max-results" min="1" max="100" class="input-small" />
+            <div class="number-input-wrapper">
+              <input type="number" id="max-results" min="1" max="100" value="50" />
+              <div class="number-spinner">
+                <button type="button" class="spinner-up" aria-label="增加">＋</button>
+                <button type="button" class="spinner-down" aria-label="减少">－</button>
+              </div>
+            </div>
             <span class="hint" data-i18n="general.max_results.hint">搜索融合后返回上限</span>
           </div>
         </div>
@@ -113,7 +132,13 @@
                 <div class="plugin-section-title" data-i18n="engine.start_menu.config">配置</div>
                 <div class="setting-row">
                   <label data-i18n="engine.start_menu.scan_depth.label">扫描深度</label>
-                  <input type="number" id="start-menu-scan-depth" min="1" max="10" value="3" class="input-small" />
+                  <div class="number-input-wrapper">
+                    <input type="number" id="start-menu-scan-depth" min="1" max="10" value="3" />
+                    <div class="number-spinner">
+                      <button type="button" class="spinner-up" aria-label="增加">▲</button>
+                      <button type="button" class="spinner-down" aria-label="减少">▼</button>
+                    </div>
+                  </div>
                   <span class="hint" data-i18n="engine.start_menu.scan_depth.hint">索引深度，越大越全但越慢</span>
                 </div>
               </div>
@@ -163,12 +188,24 @@
                 </div>
                 <div class="setting-row">
                   <label data-i18n="engine.everything.port.label">HTTP 端口</label>
-                  <input type="number" id="everything-port" min="1" max="65535" value="80" class="input-small" />
+                  <div class="number-input-wrapper">
+                    <input type="number" id="everything-port" min="1" max="65535" value="80" />
+                    <div class="number-spinner">
+                      <button type="button" class="spinner-up" aria-label="增加">▲</button>
+                      <button type="button" class="spinner-down" aria-label="减少">▼</button>
+                    </div>
+                  </div>
                   <span class="hint" data-i18n="engine.everything.port.hint">Everything 选项 → HTTP 服务器</span>
                 </div>
                 <div class="setting-row">
                   <label data-i18n="engine.everything.max_results.label">最大结果数</label>
-                  <input type="number" id="everything-max-results" min="1" max="100" value="20" class="input-small" />
+                  <div class="number-input-wrapper">
+                    <input type="number" id="everything-max-results" min="1" max="100" value="20" />
+                    <div class="number-spinner">
+                      <button type="button" class="spinner-up" aria-label="增加">▲</button>
+                      <button type="button" class="spinner-down" aria-label="减少">▼</button>
+                    </div>
+                  </div>
                   <span class="hint" data-i18n="engine.everything.max_results.hint">每次检索返回的文件数量上限</span>
                 </div>
               </div>
@@ -321,23 +358,42 @@
             <button id="open-log-dir" class="btn" data-i18n="log.open_dir">打开文件夹</button>
           </div>
 
-          <h3><span data-i18n="debug.perf.title">性能统计</span> <span class="hint" data-i18n="debug.perf.hint">（搁置，待实现）</span></h3>
-          <div class="debug-grid">
-            <div class="debug-card">
-              <div class="debug-label" data-i18n="debug.perf.invoke">唤起延迟</div>
-              <div id="debug-invoke" class="debug-value">-</div>
+          <!-- 性能统计区 -->
+          <div class="perf-section">
+            <h3 class="perf-section-title" data-i18n="debug.perf.title">性能统计</h3>
+
+            <div class="debug-toolbar">
+              <span class="debug-toolbar-hint" data-i18n="debug.perf.hint">最近 100 次采样</span>
+              <div class="debug-actions">
+                <button id="perf-refresh" class="btn-small" data-i18n="debug.perf.refresh">刷新</button>
+                <button id="perf-export" class="btn-small" data-i18n="debug.perf.export">导出报告</button>
+                <button id="perf-clear" class="btn-small btn-danger" data-i18n="debug.perf.clear">清除记录</button>
+              </div>
             </div>
-            <div class="debug-card">
-              <div class="debug-label" data-i18n="debug.perf.show">show 耗时</div>
-              <div id="debug-show" class="debug-value">-</div>
+
+            <div class="debug-grid">
+              <div class="debug-card">
+                <div class="debug-label" data-i18n="debug.perf.startup.total">启动耗时</div>
+                <div id="perf-startup-total" class="debug-value">-</div>
+              </div>
+              <div class="debug-card">
+                <div class="debug-label" data-i18n="debug.perf.hotkey.key_to_show">热键唤起</div>
+                <div id="perf-hotkey-show" class="debug-value">-</div>
+              </div>
+              <div class="debug-card">
+                <div class="debug-label" data-i18n="debug.perf.search.total">搜索耗时</div>
+                <div id="perf-search-total" class="debug-value">-</div>
+              </div>
+              <div class="debug-card">
+                <div class="debug-label" data-i18n="debug.perf.stats.count">采样数</div>
+                <div id="perf-total-count" class="debug-value">-</div>
+              </div>
             </div>
-            <div class="debug-card">
-              <div class="debug-label" data-i18n="debug.perf.focus">focus 耗时</div>
-              <div id="debug-focus" class="debug-value">-</div>
-            </div>
-            <div class="debug-card">
-              <div class="debug-label" data-i18n="debug.perf.rate">成功率</div>
-              <div id="debug-rate" class="debug-value">-</div>
+
+            <!-- 慢查询日志 -->
+            <h4 class="perf-subsection-title" data-i18n="debug.perf.slow.title">慢查询日志</h4>
+            <div id="perf-slow-container">
+              <div id="perf-slow-list" class="perf-slow-list"></div>
             </div>
           </div>
         </div>

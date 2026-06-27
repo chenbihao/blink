@@ -45,6 +45,7 @@ const DICT = {
     "general.theme.auto": "跟随系统",
     "general.theme.light": "浅色",
     "general.theme.dark": "深色",
+    "general.theme.gruvbox": "Gruvbox Dark",
     "general.theme.hint": "立即生效",
     "general.history_enabled.label": "记录搜索历史",
     "general.history_enabled.hint": "关闭后不再记录频率权重",
@@ -125,11 +126,39 @@ const DICT = {
 
     // ── 调试 Tab：性能统计 ──
     "debug.perf.title": "性能统计",
-    "debug.perf.hint": "（搁置，待实现）",
-    "debug.perf.invoke": "唤起延迟",
-    "debug.perf.show": "show 耗时",
-    "debug.perf.focus": "focus 耗时",
-    "debug.perf.rate": "成功率",
+    "debug.perf.hint": "（最近 100 次采样）",
+    "debug.perf.loading": "加载中…",
+    "debug.perf.no_data": "暂无数据",
+    "debug.perf.refresh": "刷新",
+    "debug.perf.export": "导出报告",
+    "debug.perf.exported": "已导出",
+    "debug.perf.clear": "清除记录",
+    "debug.perf.clear.confirm": "确定清除所有性能统计记录？",
+    "debug.perf.cleared": "已清除",
+    // 启动耗时
+    "debug.perf.startup.title": "启动耗时",
+    "debug.perf.startup.total": "总启动时间",
+    // 热键唤起
+    "debug.perf.hotkey.title": "热键唤起",
+    "debug.perf.hotkey.key_to_show": "按键到显示",
+    // 搜索引擎
+    "debug.perf.search.title": "搜索引擎",
+    "debug.perf.search.total": "总搜索耗时",
+    // 慢查询
+    "debug.perf.slow.title": "慢查询日志",
+    "debug.perf.slow.hotkey": "慢热键 (>100ms)",
+    "debug.perf.slow.search": "慢搜索 (>200ms)",
+    "debug.perf.slow.empty": "无慢查询记录",
+    // 统计卡片
+    "debug.perf.stats.count": "采样数",
+    "debug.perf.stats.p50": "P50",
+    "debug.perf.stats.p90": "P90",
+    "debug.perf.stats.p99": "P99",
+    "debug.perf.stats.min": "最小",
+    "debug.perf.stats.max": "最大",
+    "debug.perf.stats.avg": "平均",
+    // 单位
+    "debug.perf.unit.ms": "ms",
 
     // ── 存储 Tab ──
     "storage.history.label": "历史记录",
@@ -251,6 +280,7 @@ const DICT = {
     "general.theme.auto": "System",
     "general.theme.light": "Light",
     "general.theme.dark": "Dark",
+    "general.theme.gruvbox": "Gruvbox Dark",
     "general.theme.hint": "Applies immediately",
     "general.history_enabled.label": "Record search history",
     "general.history_enabled.hint": "Disables frequency weighting when off",
@@ -330,12 +360,40 @@ const DICT = {
     "log.open_dir": "Open folder",
 
     // ── Debug tab: performance ──
-    "debug.perf.title": "Performance stats",
-    "debug.perf.hint": "(deferred)",
-    "debug.perf.invoke": "Summon latency",
-    "debug.perf.show": "show time",
-    "debug.perf.focus": "focus time",
-    "debug.perf.rate": "Success rate",
+    "debug.perf.title": "Performance Stats",
+    "debug.perf.hint": "(last 100 samples)",
+    "debug.perf.loading": "Loading…",
+    "debug.perf.no_data": "No data yet",
+    "debug.perf.refresh": "Refresh",
+    "debug.perf.export": "Export Report",
+    "debug.perf.exported": "Exported",
+    "debug.perf.clear": "Clear Data",
+    "debug.perf.clear.confirm": "Clear all performance metrics?",
+    "debug.perf.cleared": "Cleared",
+    // Startup
+    "debug.perf.startup.title": "Startup Time",
+    "debug.perf.startup.total": "Total Startup",
+    // Hotkey
+    "debug.perf.hotkey.title": "Hotkey Latency",
+    "debug.perf.hotkey.key_to_show": "Key to Show",
+    // Search
+    "debug.perf.search.title": "Search Engine",
+    "debug.perf.search.total": "Total Search",
+    // Slow queries
+    "debug.perf.slow.title": "Slow Query Log",
+    "debug.perf.slow.hotkey": "Slow Hotkey (>100ms)",
+    "debug.perf.slow.search": "Slow Search (>200ms)",
+    "debug.perf.slow.empty": "No slow queries",
+    // Stats cards
+    "debug.perf.stats.count": "Samples",
+    "debug.perf.stats.p50": "P50",
+    "debug.perf.stats.p90": "P90",
+    "debug.perf.stats.p99": "P99",
+    "debug.perf.stats.min": "Min",
+    "debug.perf.stats.max": "Max",
+    "debug.perf.stats.avg": "Avg",
+    // Units
+    "debug.perf.unit.ms": "ms",
 
     // ── Storage tab ──
     "storage.history.label": "History",

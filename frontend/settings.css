@@ -7,7 +7,7 @@
 html,
 body {
   height: 100%;
-  background: var(--bg);
+  background: transparent;
   color: var(--text);
   font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
   font-size: 14px;
@@ -17,6 +17,10 @@ body {
 .container {
   display: flex;
   height: 100vh;
+  background: var(--bg);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 8px 32px var(--shadow), 0 0 0 1px var(--border-glow);
 }
 
 /* ── 侧边栏 ───────────────────────────────────────────────────────────────── */
@@ -29,6 +33,7 @@ body {
   flex-direction: column;
   gap: 4px;
   flex-shrink: 0;
+  -webkit-app-region: drag;
 }
 
 .logo {
@@ -48,6 +53,7 @@ body {
   color: var(--text-sub);
   font-size: 14px;
   text-align: left;
+  -webkit-app-region: no-drag;
   cursor: pointer;
   transition: background 0.1s, color 0.1s;
 }
@@ -70,6 +76,7 @@ body {
   padding: 24px 32px;
   scrollbar-width: thin;
   scrollbar-color: var(--surface-2) transparent;
+  -webkit-app-region: no-drag;
 }
 
 .panel {
@@ -85,6 +92,14 @@ h2 {
   font-weight: 600;
   margin-bottom: 20px;
   color: var(--text);
+  -webkit-app-region: drag;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.panel-icon {
+  font-size: 18px;
 }
 
 /* ── 设置行 ───────────────────────────────────────────────────────────────── */
@@ -124,8 +139,14 @@ h2 {
   color: var(--text);
   border: 1px solid var(--surface-2);
   border-radius: 6px;
-  padding: 6px 10px;
+  padding: 6px 24px 6px 10px;
   font-size: 13px;
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%236c7086'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  cursor: pointer;
 }
 
 .setting-row textarea {
@@ -176,9 +197,9 @@ h2 {
 
 .debug-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 12px;
-  margin-bottom: 20px;
+  margin-bottom: 16px;
 }
 
 .debug-card {
@@ -202,21 +223,136 @@ h2 {
   color: var(--green);
 }
 
-/* ── 调试 Tab：日志区 ─────────────────────────────────────────────────────── */
+.debug-value.no-data {
+  font-size: 14px;
+  color: var(--text-faint);
+  font-weight: 400;
+}
 
-#debug h3 {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--text);
-  margin: 24px 0 4px;
-  padding-top: 20px;
+.debug-value.error {
+  color: var(--red);
+}
+
+/* ── 性能统计 ─────────────────────────────────────────────────────────────── */
+
+/* 性能统计区（与日志配置区的分隔） */
+#debug .perf-section {
+  margin-top: 24px;
+  padding-top: 24px;
   border-top: 1px solid var(--surface);
 }
 
-#debug h3 .hint {
-  font-weight: 400;
+/* 主标题 h3（"性能统计"） */
+#debug .perf-section .perf-section-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 12px;
+}
+
+/* 子标题 h4（"慢查询日志"） */
+.perf-subsection-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  margin-top: 20px;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--surface);
+}
+
+.perf-slow-list {
+  margin-bottom: 12px;
+}
+
+.perf-slow-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-sub);
+  margin-bottom: 6px;
+}
+
+.perf-slow-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 8px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--surface);
+}
+
+.perf-slow-item:last-child {
+  border-bottom: none;
+}
+
+.perf-slow-cat {
+  font-size: 10px;
+  color: var(--text-faint);
+  background: var(--surface);
+  border-radius: 4px;
+  padding: 1px 6px;
+  min-width: 50px;
+  text-align: center;
+}
+
+.perf-slow-name {
+  flex: 1;
+  color: var(--text);
+  font-family: ui-monospace, Consolas, monospace;
+}
+
+.perf-slow-time {
+  color: var(--red);
+  font-weight: 600;
+  font-family: ui-monospace, Consolas, monospace;
+  min-width: 60px;
+  text-align: right;
+}
+
+.perf-slow-meta {
+  color: var(--text-faint);
+  font-size: 11px;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.perf-slow-empty {
   font-size: 12px;
   color: var(--text-faint);
+  padding: 8px;
+}
+
+/* ── 调试 Tab：日志区 ─────────────────────────────────────────────────────── */
+
+/* 日志设置区底部分割线：后面跟性能统计区时去掉，由 .perf-section 自带 border-top 分隔 */
+#debug .setting-row:has(+ .perf-section) {
+  border-bottom: none;
+}
+
+/* 工具栏：提示信息 + 操作按钮 */
+#debug .debug-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  padding: 8px 0;
+}
+
+#debug .debug-toolbar-hint {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+/* 操作按钮组 */
+#debug .debug-actions {
+  display: flex;
+  gap: 8px;
+}
+
+#debug .debug-actions .btn-small {
+  flex-shrink: 0;
 }
 
 #debug .log-path-row {
@@ -402,6 +538,67 @@ input:checked + .slider:before {
   background-color: var(--bg);
 }
 
+/* ── 自定义 Checkbox ─────────────────────────────────────────────────────────── */
+
+.checkbox {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  user-select: none;
+  gap: 8px;
+}
+
+.checkbox input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.checkbox .checkmark {
+  position: relative;
+  width: 20px;
+  height: 20px;
+  background: var(--surface);
+  border: 2px solid var(--surface-2);
+  border-radius: 4px;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.checkbox:hover .checkmark {
+  border-color: var(--accent);
+  background: var(--surface-2);
+}
+
+.checkbox input:checked + .checkmark {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.checkbox input:checked + .checkmark:after {
+  content: "";
+  position: absolute;
+  display: block;
+  left: 50%;
+  top: 50%;
+  width: 6px;
+  height: 11px;
+  border: solid var(--bg);
+  border-width: 0 2.5px 2.5px 0;
+  transform: translate(-50%, -60%) rotate(45deg);
+}
+
+.checkbox input:focus + .checkmark {
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
+
+.checkbox .label-text {
+  font-size: 14px;
+  color: var(--text);
+}
+
 /* ── 状态标签 ─────────────────────────────────────────────────────────────── */
 
 .status-badge {
@@ -460,6 +657,88 @@ input:checked + .slider:before {
   flex: 1;
   min-width: 200px;
   max-width: 500px;
+}
+
+/* 数字输入框：隐藏原生 spinner，使用自定义样式 */
+input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* 数字输入框包装器 */
+.number-input-wrapper {
+  display: inline-flex;
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--surface-2);
+  border-radius: 6px;
+  overflow: hidden;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.number-input-wrapper:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
+
+.number-input-wrapper input[type="number"] {
+  width: 60px;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  padding: 8px 4px;
+  font-size: 13px;
+  font-family: ui-monospace, Consolas, monospace;
+  text-align: center;
+  outline: none;
+}
+
+.number-input-wrapper input[type="number"]::-webkit-inner-spin-button,
+.number-input-wrapper input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.number-spinner {
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--surface-2);
+}
+
+.number-spinner button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 17px;
+  background: var(--surface);
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+  padding: 0;
+  line-height: 1;
+  font-size: 11px;
+}
+
+.number-spinner button:hover {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+.number-spinner button:active {
+  background: var(--accent);
+  color: var(--bg);
+  opacity: 0.8;
+}
+
+.number-spinner button:first-child {
+  border-bottom: 1px solid var(--surface-2);
 }
 
 /* ── 插件配置卡片（schema 驱动表单）────────────────────────────────────── */
@@ -561,7 +840,7 @@ details.plugin-group {
 details.plugin-group summary.plugin-group-title {
   font-size: 12px;
   font-weight: 600;
-  color: var(--text-dim);
+  color: var(--text-sub);
   padding: 8px 12px;
   background: var(--surface);
   cursor: pointer;
@@ -588,11 +867,11 @@ details.plugin-group[open] summary.plugin-group-title::before {
 .plugin-group-desc {
   font-size: 11px;
   font-weight: 400;
-  color: var(--text-faint);
+  color: var(--text-sub);
   margin-left: 4px;
 }
 .plugin-group-desc a {
-  color: var(--text-faint);
+  color: var(--text-sub);
   text-decoration: none;
   transition: color 0.15s;
 }
@@ -638,8 +917,7 @@ details.plugin-group .plugin-group-body {
 
 /* 配置输入控件(统一宽度) */
 .plugin-field-row select,
-.plugin-field-row input[type="text"],
-.plugin-field-row input[type="number"] {
+.plugin-field-row input[type="text"] {
   width: 220px;
   flex-shrink: 0;
   background: var(--surface);
@@ -649,7 +927,22 @@ details.plugin-group .plugin-group-body {
   padding: 6px 10px;
   font-size: 13px;
 }
+
+/* 插件配置中的数字输入框（已包装在 number-input-wrapper 内） */
+.plugin-field-row .number-input-wrapper {
+  flex-shrink: 0;
+}
+.plugin-field-row .number-input-wrapper input[type="number"] {
+  width: 72px;
+  padding: 6px 4px;
+}
 .plugin-field-row select {
+  padding-right: 24px;
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%236c7086'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
   cursor: pointer;
 }
 .plugin-field-row select:hover,
@@ -870,8 +1163,7 @@ details.plugin-group .plugin-group-body {
 .modal-item:hover {
   background: var(--surface);
 }
-.modal-item input[type="checkbox"] {
-  accent-color: var(--accent);
+.modal-item .checkbox {
   flex-shrink: 0;
 }
 .modal-item-name {

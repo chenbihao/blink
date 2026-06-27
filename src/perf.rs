@@ -279,6 +279,17 @@ async fn cleanup_old(pool: &SqlitePool) {
     }
 }
 
+/// 清除全部性能指标数据。
+pub async fn clear_all(pool: &SqlitePool) -> Result<u64, String> {
+    let r = sqlx::query("DELETE FROM performance_metrics")
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let rows = r.rows_affected();
+    tracing::info!(rows, "清除全部性能指标");
+    Ok(rows)
+}
+
 /// 获取性能统计概览（供前端调试 Tab 展示）。
 pub async fn get_overview(pool: &SqlitePool) -> serde_json::Value {
     // 启动耗时

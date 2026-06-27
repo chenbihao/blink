@@ -20,7 +20,7 @@ mod window;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+    Manager, WindowEvent,
 };
 
 fn main() {
@@ -116,10 +116,12 @@ fn main() {
             // 主窗口启动即隐藏；注册焦点事件
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.hide();
-                // 拦截 Alt+Space 系统菜单（防左上角弹移动/最大化菜单）
+                // 拦截 Alt+Space 系统菜单 + 启用系统级圆角（Win11+ DWM）
                 if let Ok(hwnd) = w.hwnd() {
                     // hwnd 来自 Tauri(windows 0.61)，转成本项目依赖的 windows 0.62 HWND
-                    window::install_sysmenu_blocker(windows::Win32::Foundation::HWND(hwnd.0 as _));
+                    let hwnd = windows::Win32::Foundation::HWND(hwnd.0 as _);
+                    window::install_sysmenu_blocker(hwnd);
+                    window::enable_rounded_corners(hwnd);
                 }
                 w.on_window_event(move |event| {
                     if let WindowEvent::Focused(focused) = event {
@@ -337,25 +339,16 @@ fn main() {
             commands::get_perf_slow_queries,
             commands::get_perf_recent,
             commands::export_perf_report,
+            commands::clear_perf_data,
             commands::open_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
 
-/// 打开设置窗口：已存在则聚焦，否则创建。
+/// 打开设置窗口（委托给 window 模块统一实现）。
 fn open_settings(app: &tauri::AppHandle) {
-    if let Some(w) = app.get_webview_window("settings") {
-        let _ = w.show();
-        let _ = w.set_focus();
-        return;
-    }
-    let _ = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
-        .title("Blink Settings")
-        .inner_size(960.0, 680.0)
-        .min_inner_size(760.0, 520.0)
-        .center()
-        .build();
+    window::open_settings(app);
 }
 
 /// 最小 percent-decode：还原前端 `encodeURIComponent` 编码的图标路径。

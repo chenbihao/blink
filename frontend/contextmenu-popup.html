@@ -24,9 +24,8 @@
       min-width: 170px;
       padding: 6px;
       background: var(--bg);
-      border: 1px solid var(--surface-2);
       border-radius: 8px;
-      box-shadow: 0 8px 32px var(--shadow);
+      box-shadow: 0 8px 32px var(--shadow), 0 0 0 1px var(--border-glow);
       font-size: 13px;
       user-select: none;
       color: var(--text);
@@ -70,16 +69,12 @@
     // 注意：URLSearchParams.get() 已自动做 URL 解码，不要再 decodeURIComponent！
     const params = new URLSearchParams(window.location.search);
 
-    // 应用主题（URL 参数透传 AppConfig.theme；auto 由 matchMedia resolve）
-    // 同步执行，在菜单渲染前完成，避免主题闪烁
-    (function applyTheme(mode) {
-      let resolved = mode;
-      if (mode === "auto") {
-        resolved = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
-      }
-      if (resolved === "light") document.documentElement.setAttribute("data-theme", "light");
-      else document.documentElement.removeAttribute("data-theme");
-    })(params.get("theme") || "auto");
+    // 应用主题（后端已 resolve auto → light/dark，此处只设属性，不含 resolve 逻辑）
+    // 新增主题只需在 theme.css 加选择器，此文件无需改动。
+    (function applyTheme(theme) {
+      if (theme === "dark") document.documentElement.removeAttribute("data-theme");
+      else document.documentElement.setAttribute("data-theme", theme);
+    })(params.get("theme") || "dark");
 
     const itemsRaw = params.get('items');
     let items = [];

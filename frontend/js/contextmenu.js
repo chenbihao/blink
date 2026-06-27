@@ -25,15 +25,11 @@ export function init() {
     const target = e.target;
 
     let items = [];
-    if (isInside(queryEl, target)) {
-      items = inputMenu();
+    const li = closestLi(target);
+    if (li) {
+      items = itemMenu(li);
     } else {
-      const li = closestLi(target);
-      if (li) {
-        items = itemMenu(li);
-      } else {
-        items = blankMenu();
-      }
+      items = unifiedMenu();
     }
 
     if (!items.length) return;
@@ -67,10 +63,6 @@ export function init() {
       }
     });
   });
-}
-
-function isInside(el, target) {
-  return !!el && !!el.contains && el.contains(target);
 }
 
 function closestLi(target) {
@@ -108,12 +100,9 @@ function close() {
 
 // ── 各区域菜单构建 ──────────────────────────────────────────────────────────
 
-function inputMenu() {
-  // 0.5.3+ 右键菜单是独立窗口，点击菜单项时主窗口输入框已失焦
-  // 必须先 focus 输入框再执行命令，否则 execCommand/clipboard API 都不生效
+function unifiedMenu() {
   const exec = (cmd) => async () => {
     queryEl?.focus();
-    // 给 focus 一点时间生效（Tauri 窗口切换有延迟）
     setTimeout(() => {
       try {
         document.execCommand(cmd);
@@ -143,22 +132,23 @@ function inputMenu() {
       }
     }, 10);
   };
-  return [
-    { label: t("menu.cut"), run: exec("cut") },
-    { label: t("menu.copy"), run: exec("copy") },
-    { label: t("menu.paste"), run: paste },
-    { separator: true },
-    { label: t("menu.selectAll"), run: exec("selectAll") },
-  ];
+
+  const hasSelection = queryEl && queryEl.selectionStart !== queryEl.selectionEnd;
+  const items = [];
+  if (hasSelection) {
+    items.push({ label: t("menu.cut"), run: exec("cut") });
+    items.push({ label: t("menu.copy"), run: exec("copy") });
+  }
+  items.push({ label: t("menu.paste"), run: paste });
+  items.push({ separator: true });
+  items.push({ label: t("menu.selectAll"), run: exec("selectAll") });
+  items.push({ separator: true });
+  items.push({ label: t("menu.openSettings"), run: () => launchApp("__BLINK_ACTION_OPEN_SETTINGS__") });
+  items.push({ label: t("menu.exit"), run: () => launchApp("__BLINK_ACTION_EXIT__"), danger: true });
+  return items;
 }
 
-function blankMenu() {
-  return [
-    { label: t("menu.openSettings"), run: () => launchApp("__BLINK_ACTION_OPEN_SETTINGS__") },
-    { separator: true },
-    { label: t("menu.exit"), run: () => launchApp("__BLINK_ACTION_EXIT__"), danger: true },
-  ];
-}
+// ── 结果项菜单 ──────────────────────────────────────────────────────────────
 
 function itemMenu(li) {
   const source = li.dataset.source || "";

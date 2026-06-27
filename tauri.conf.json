@@ -19,11 +19,13 @@
         "minHeight": 60,
         "resizable": false,
         "decorations": false,
+        "transparent": true,
         "visible": false,
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "center": true,
-        "shadow": true,
+        "shadow": false,
+        "backgroundColor": "#00000000",
         "url": "index.html"
       }
     ],

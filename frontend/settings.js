@@ -408,7 +408,10 @@ async function showAddProcessModal(container, existing, onAdd) {
         const checked = isSelected ? "checked" : "";
         const label = isExisting ? t("context.modal.added") : "";
         return `<label class="modal-item ${isExisting ? "modal-item-existing" : ""}" data-name="${escapeHtml(p.process_name)}">
-          <input type="checkbox" ${checked} ${disabled} />
+          <label class="checkbox">
+            <input type="checkbox" ${checked} ${disabled} />
+            <span class="checkmark"></span>
+          </label>
           <span class="modal-item-name">${escapeHtml(p.process_name)}</span>
           <span class="modal-item-title">${escapeHtml(p.window_title)}</span>
           ${label ? `<span class="modal-item-label">${label}</span>` : ""}
@@ -547,7 +550,7 @@ function renderSettingField(field, value) {
       break;
     }
     case "number":
-      control = `<input type="number" class="plugin-field" data-key="${field.key}" value="${escapeAttr(val ?? "")}" ${field.min != null ? `min="${field.min}"` : ""} ${field.max != null ? `max="${field.max}"` : ""} />`;
+      control = `<div class="number-input-wrapper"><input type="number" class="plugin-field" data-key="${field.key}" value="${escapeAttr(val ?? "")}" ${field.min != null ? `min="${field.min}"` : ""} ${field.max != null ? `max="${field.max}"` : ""} /><div class="number-spinner"><button type="button" class="spinner-up" aria-label="增加">＋</button><button type="button" class="spinner-down" aria-label="减少">－</button></div></div>`;
       break;
     case "string":
     default:
@@ -1242,6 +1245,26 @@ if (themeSelect) {
       console.error("update_general_config (theme) failed:", err);
     }
   });
+
+  // 滚轮切换主题：鼠标悬停时滚轮可快速预览主题
+  themeSelect.addEventListener("wheel", (e) => {
+    e.preventDefault(); // 阻止页面滚动
+    const options = themeSelect.options;
+    const currentIndex = themeSelect.selectedIndex;
+    let newIndex;
+
+    if (e.deltaY > 0) {
+      // 向下滚动：下一个主题
+      newIndex = (currentIndex + 1) % options.length;
+    } else {
+      // 向上滚动：上一个主题
+      newIndex = (currentIndex - 1 + options.length) % options.length;
+    }
+
+    themeSelect.selectedIndex = newIndex;
+    // 触发 change 事件以应用主题
+    themeSelect.dispatchEvent(new Event("change"));
+  });
 }
 
 const shEnabledCheckbox = document.getElementById("search-history-enabled");
@@ -1463,6 +1486,149 @@ loadStorageInfo();
 loadLogInfo();
 loadNetworkConfig();
 loadContextConfig();
+loadPerfStats();
+
+// ── 性能统计（调试 Tab）──────────────────────────────────────────────────────
+
+// 加载性能统计数据
+async function loadPerfStats() {
+  try {
+    const overview = await invoke("get_perf_overview");
+    renderPerfStats(overview);
+  } catch (e) {
+    console.error("loadPerfStats failed:", e);
+    showPerfError();
+  }
+}
+
+// 渲染性能统计
+function renderPerfStats(overview) {
+  renderPercentileCard("perf-startup-total", overview.startup);
+  renderPercentileCard("perf-hotkey-show", overview.hotkey);
+  renderPercentileCard("perf-search-total", overview.search);
+
+  // 采样数：取三项中最大的 count
+  const countEl = document.getElementById("perf-total-count");
+  if (countEl) {
+    const counts = [overview.startup, overview.hotkey, overview.search]
+      .filter(d => d && d.count > 0)
+      .map(d => d.count);
+    countEl.textContent = counts.length > 0 ? Math.max(...counts) : t("debug.perf.no_data");
+    countEl.className = counts.length > 0 ? "debug-value" : "debug-value no-data";
+  }
+
+  // 慢查询日志（合并 hotkey + search）
+  renderSlowQueries([...(overview.slow_hotkey || []), ...(overview.slow_search || [])]);
+}
+
+// 渲染单个百分位数卡片
+function renderPercentileCard(elementId, data) {
+  const el = document.getElementById(elementId);
+  if (!el) return;
+
+  if (!data || data.count === 0) {
+    el.textContent = t("debug.perf.no_data");
+    el.className = "debug-value no-data";
+    return;
+  }
+
+  // 显示 P50 作为主值，P90/P99 作为提示
+  const p50 = data.p50 || "-";
+  el.textContent = `${p50} ${t("debug.perf.unit.ms")}`;
+  el.className = "debug-value";
+  el.title = [
+    `${t("debug.perf.stats.count")}: ${data.count}`,
+    `${t("debug.perf.stats.p50")}: ${data.p50} ms`,
+    `${t("debug.perf.stats.p90")}: ${data.p90} ms`,
+    `${t("debug.perf.stats.p99")}: ${data.p99} ms`,
+    `${t("debug.perf.stats.min")}: ${data.min} ms`,
+    `${t("debug.perf.stats.max")}: ${data.max} ms`,
+    `${t("debug.perf.stats.avg")}: ${data.avg} ms`,
+  ].join("\n");
+}
+
+// 渲染慢查询日志（合并列表）
+function renderSlowQueries(slowItems) {
+  const el = document.getElementById("perf-slow-list");
+  if (!el) return;
+
+  if (!slowItems || slowItems.length === 0) {
+    el.innerHTML = `<div class="perf-slow-empty">${t("debug.perf.slow.empty")}</div>`;
+    return;
+  }
+
+  // 按耗时降序
+  slowItems.sort((a, b) => b.value_ms - a.value_ms);
+
+  el.innerHTML = slowItems.map(m => `
+    <div class="perf-slow-item">
+      <span class="perf-slow-cat">${escapeHtml(m.category)}</span>
+      <span class="perf-slow-name">${escapeHtml(m.name)}</span>
+      <span class="perf-slow-time">${m.value_ms.toFixed(1)} ms</span>
+      <span class="perf-slow-meta">${escapeHtml(m.metadata || "")}</span>
+    </div>
+  `).join("");
+}
+
+// 显示性能统计错误状态
+function showPerfError() {
+  ["perf-startup-total", "perf-hotkey-show", "perf-search-total", "perf-total-count"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.textContent = "-";
+      el.className = "debug-value error";
+    }
+  });
+}
+
+// 刷新按钮
+document.getElementById("perf-refresh")?.addEventListener("click", () => {
+  loadPerfStats();
+});
+
+// 导出报告按钮
+document.getElementById("perf-export")?.addEventListener("click", async () => {
+  try {
+    const report = await invoke("export_perf_report");
+    // 创建下载
+    const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `blink-perf-report-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    // 显示提示
+    const btn = document.getElementById("perf-export");
+    if (btn) {
+      const original = btn.textContent;
+      btn.textContent = t("debug.perf.exported");
+      setTimeout(() => { btn.textContent = original; }, 2000);
+    }
+  } catch (e) {
+    console.error("export_perf_report failed:", e);
+  }
+});
+
+// 清除记录按钮
+document.getElementById("perf-clear")?.addEventListener("click", async () => {
+  if (!confirm(t("debug.perf.clear.confirm"))) return;
+  try {
+    await invoke("clear_perf_data");
+    loadPerfStats();
+    const btn = document.getElementById("perf-clear");
+    if (btn) {
+      const original = btn.textContent;
+      btn.textContent = t("debug.perf.cleared");
+      setTimeout(() => { btn.textContent = original; }, 2000);
+    }
+  } catch (e) {
+    console.error("clear_perf_data failed:", e);
+  }
+});
 
 // ── 脚本解释器探测（Phase 0.6） ─────────────────────────────────────────────
 
@@ -1576,3 +1742,29 @@ setTimeout(() => {
     probeAllInterpreters();
   }
 }, 100);
+
+// ── 数字输入框增减按钮（事件委托，支持动态生成的插件数字输入）──────────────
+
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest(".number-spinner button");
+  if (!btn) return;
+
+  const wrapper = btn.closest(".number-input-wrapper");
+  const input = wrapper?.querySelector("input[type='number']");
+  if (!input) return;
+
+  const min = parseInt(input.min, 10) || 0;
+  const max = parseInt(input.max, 10) || Infinity;
+  const step = parseInt(input.step, 10) || 1;
+  let value = parseInt(input.value, 10) || 0;
+
+  if (btn.classList.contains("spinner-up")) {
+    value = Math.min(value + step, max);
+  } else {
+    value = Math.max(value - step, min);
+  }
+
+  input.value = value;
+  // 触发 change 事件，让绑定的事件处理函数生效
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+});
