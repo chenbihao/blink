@@ -8,6 +8,13 @@ Blink 插件打包脚本 - Tauri beforeBuildCommand
 
 $ErrorActionPreference = "Stop"
 
+# CI 下插件已由 workflow 的独立 step 预编译完成，beforeBuildCommand 再次触发本脚本时
+# 直接短路退出，避免重复编译。本地 cargo tauri build 不会设置此变量，照常编译。
+if ($env:BLINK_SKIP_PLUGIN_BUILD -eq "1") {
+    Write-Host "⏭️ BLINK_SKIP_PLUGIN_BUILD=1，跳过插件编译（已由 CI 预编译步骤完成）" -ForegroundColor DarkGray
+    exit 0
+}
+
 $RootDir = Split-Path $PSScriptRoot -Parent
 $TargetRelease = Join-Path $RootDir "target/release"
 $BuiltinDir = Join-Path $RootDir "plugins/builtin"

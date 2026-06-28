@@ -4,7 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Context Menu</title>
-  <link rel="stylesheet" href="theme.css" />
+  <link rel="stylesheet" href="css/theme.css" />
+  <link rel="stylesheet" href="css/themes-nvchad.css" />
+  <link rel="stylesheet" href="css/themes-genshin.css" />
   <style>
     * {
       box-sizing: border-box;
@@ -61,54 +63,65 @@
   <div id="menu" class="context-menu"></div>
 
   <script>
-    // 同步渲染，避免任何异步延迟
     const TAU = window.__TAURI__;
     const invoke = TAU?.core?.invoke ?? TAU?.invoke;
+    const listen = TAU?.event?.listen;
 
-    // 从 URL 参数解析菜单数据
-    // 注意：URLSearchParams.get() 已自动做 URL 解码，不要再 decodeURIComponent！
-    const params = new URLSearchParams(window.location.search);
-
-    // 应用主题（后端已 resolve auto → light/dark，此处只设属性，不含 resolve 逻辑）
-    // 新增主题只需在 theme.css 加选择器，此文件无需改动。
-    (function applyTheme(theme) {
+    /** 应用主题（后端已 resolve auto → light/dark，此处只设属性）。 */
+    function applyTheme(theme) {
       if (theme === "dark") document.documentElement.removeAttribute("data-theme");
       else document.documentElement.setAttribute("data-theme", theme);
-    })(params.get("theme") || "dark");
-
-    const itemsRaw = params.get('items');
-    let items = [];
-    try {
-      items = JSON.parse(itemsRaw || '[]');
-    } catch (e) {
-      console.error('右键菜单 JSON 解析失败:', e, itemsRaw);
     }
 
-    let isClickingItem = false; // 菜单项 mousedown → click 期间置为 true，阻止 blur 关闭
+    /** 渲染菜单项（复用窗口时可反复调用）。 */
+    function renderMenu(items) {
+      const menuEl = document.getElementById('menu');
+      menuEl.innerHTML = '';
+      const fragment = document.createDocumentFragment();
+      items.forEach((item, index) => {
+        if (item.separator) {
+          const sep = document.createElement('div');
+          sep.className = 'context-menu-sep';
+          fragment.appendChild(sep);
+          return;
+        }
+        const row = document.createElement('div');
+        row.className = 'context-menu-item' + (item.danger ? ' danger' : '');
+        row.textContent = item.label;
+        row.addEventListener('mousedown', () => { isClickingItem = true; });
+        row.addEventListener('click', () => {
+          if (invoke) invoke('context_menu_action', { actionId: index });
+          isClickingItem = false;
+        });
+        fragment.appendChild(row);
+      });
+      menuEl.appendChild(fragment);
+    }
 
-    // 渲染菜单（同步执行，DOM 立即完成）
-    const menuEl = document.getElementById('menu');
-    const fragment = document.createDocumentFragment();
-    items.forEach((item, index) => {
-      if (item.separator) {
-        const sep = document.createElement('div');
-        sep.className = 'context-menu-sep';
-        fragment.appendChild(sep);
-        return;
-      }
-      const row = document.createElement('div');
-      row.className = 'context-menu-item' + (item.danger ? ' danger' : '');
-      row.textContent = item.label;
-      row.addEventListener('mousedown', (e) => {
-        isClickingItem = true; // 标记正在点击菜单项，blur 时不立即关闭
+    let isClickingItem = false;
+
+    // ── 初始渲染（从 URL 参数，首次创建窗口时）──
+    const params = new URLSearchParams(window.location.search);
+    applyTheme(params.get("theme") || "dark");
+    try {
+      const initialItems = JSON.parse(params.get('items') || '[]');
+      renderMenu(initialItems);
+    } catch (e) {
+      console.error('右键菜单 JSON 解析失败:', e);
+    }
+
+    // ── 复用窗口：后端 hide → emit 新数据 → show，此处监听并重新渲染 ──
+    if (listen) {
+      listen("blink://context-menu-data", (event) => {
+        const { items, theme } = event.payload;
+        if (theme) applyTheme(theme);
+        try {
+          renderMenu(JSON.parse(items || '[]'));
+        } catch (e) {
+          console.error('context-menu-data JSON 解析失败:', e, items);
+        }
       });
-      row.addEventListener('click', (e) => {
-        if (invoke) invoke('context_menu_action', { actionId: index });
-        isClickingItem = false;
-      });
-      fragment.appendChild(row);
-    });
-    menuEl.appendChild(fragment);
+    }
 
     // ESC 关闭
     document.addEventListener('keydown', (e) => {
@@ -118,10 +131,7 @@
     // 失焦关闭：点击菜单项时不立即关闭（等 click 事件执行）
     window.addEventListener('blur', () => {
       if (isClickingItem) {
-        // 正在点击菜单项，延迟关闭确保 action 先执行
-        setTimeout(() => {
-          if (invoke) invoke('hide_context_menu');
-        }, 100);
+        setTimeout(() => { if (invoke) invoke('hide_context_menu'); }, 100);
       } else {
         if (invoke) invoke('hide_context_menu');
       }

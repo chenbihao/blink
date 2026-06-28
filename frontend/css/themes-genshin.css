@@ -1,0 +1,256 @@
+/* ── 原神主题 ────────────────────────────────────────────────────────────────
+   来自原神角色配色方案，每个角色 5-6 色。
+   surface 从 bg 混合派生保持中性，accent 为角色标志色。 */
+
+[data-theme="genshin-kokomi"] {
+  --bg: #2e2c69;
+  --bg-sidebar: #28265c;
+  --bg-deep: #232251;
+  --surface: #56507f;
+  --surface-2: #746b90;
+  --text: #f7e2db;
+  --text-sub: #d8a398;
+  --text-dim: #c3adb6;
+  --text-faint: #7a617e;
+  --accent: #8e8dc8;
+  --accent-bg: rgba(142, 141, 200, 0.15);
+  --green: #a6e3a1;
+  --red: #f38ba8;
+  --red-bg: #482932;
+  --red-border: #794554;
+  --green-bg: #314430;
+  --shadow: rgba(0, 0, 0, 0.6);
+  --shadow-strong: rgba(0, 0, 0, 0.6);
+  --border-glow: rgba(255, 255, 255, 0.05);
+  --danger-hover-bg: rgba(243, 139, 168, 0.12);
+}
+
+[data-theme="genshin-fischl"] {
+  --bg: #453667;
+  --bg-sidebar: #3c2f5a;
+  --bg-deep: #352a50;
+  --surface: #675777;
+  --surface-2: #817084;
+  --text: #f3dcbb;
+  --text-sub: #dcba97;
+  --text-dim: #e7dfde;
+  --text-faint: #ac9ba3;
+  --accent: #b7b3ed;
+  --accent-bg: rgba(183, 179, 237, 0.15);
+  --green: #a6e3a1;
+  --red: #f38ba8;
+  --red-bg: #482932;
+  --red-border: #794554;
+  --green-bg: #314430;
+  --shadow: rgba(0, 0, 0, 0.6);
+  --shadow-strong: rgba(0, 0, 0, 0.6);
+  --border-glow: rgba(255, 255, 255, 0.05);
+  --danger-hover-bg: rgba(243, 139, 168, 0.12);
+}
+
+[data-theme="genshin-nilou"] {
+  --bg: #14365f;
+  --bg-sidebar: #112f53;
+  --bg-deep: #0f2a4a;
+  --surface: #415b7b;
+  --surface-2: #637790;
+  --text: #f8f2ec;
+  --text-sub: #bfd9e5;
+  --text-dim: #839fb6;
+  --text-faint: #607f9b;
+  --accent: #d64f38;
+  --accent-bg: rgba(214, 79, 56, 0.15);
+  --green: #a6e3a1;
+  --red: #f38ba8;
+  --red-bg: #482932;
+  --red-border: #794554;
+  --green-bg: #314430;
+  --shadow: rgba(0, 0, 0, 0.6);
+  --shadow-strong: rgba(0, 0, 0, 0.6);
+  --border-glow: rgba(255, 255, 255, 0.05);
+  --danger-hover-bg: rgba(243, 139, 168, 0.12);
+}
+
+[data-theme="genshin-ganyu"] {
+  --bg: #33395b;
+  --bg-sidebar: #2c3250;
+  --bg-deep: #272c46;
+  --surface: #595c76;
+  --surface-2: #75768a;
+  --text: #f2e8e3;
+  --text-sub: #c4d8f2;
+  --text-dim: #c8d0de;
+  --text-faint: #74809e;
+  --accent: #c4d8f2;
+  --accent-bg: rgba(196, 216, 242, 0.15);
+  --green: #a6e3a1;
+  --red: #f38ba8;
+  --red-bg: #482932;
+  --red-border: #794554;
+  --green-bg: #314430;
+  --shadow: rgba(0, 0, 0, 0.6);
+  --shadow-strong: rgba(0, 0, 0, 0.6);
+  --border-glow: rgba(255, 255, 255, 0.05);
+  --danger-hover-bg: rgba(243, 139, 168, 0.12);
+}
+
+[data-theme="genshin-hutao"] {
+  --bg: #3a1b19;
+  --bg-sidebar: #331716;
+  --bg-deep: #2d1513;
+  --surface: #604541;
+  --surface-2: #7d655f;
+  --text: #fcf0e1;
+  --text-sub: #c7a085;
+  --text-dim: #95715f;
+  --text-faint: #795649;
+  --accent: #c94737;
+  --accent-bg: rgba(201, 71, 55, 0.15);
+  --green: #a6e3a1;
+  --red: #f38ba8;
+  --red-bg: #482932;
+  --red-border: #794554;
+  --green-bg: #314430;
+  --shadow: rgba(0, 0, 0, 0.6);
+  --shadow-strong: rgba(0, 0, 0, 0.6);
+  --border-glow: rgba(255, 255, 255, 0.05);
+  --danger-hover-bg: rgba(243, 139, 168, 0.12);
+}
+
+[data-theme="genshin-diona"] {
+  --bg: #393a53;
+  --bg-sidebar: #323349;
+  --bg-deep: #2c2d40;
+  --surface: #5d566a;
+  --surface-2: #786c7b;
+  --text: #edcac6;
+  --text-sub: #b69480;
+  --text-dim: #dad3d2;
+  --text-faint: #a29498;
+  --accent: #dd9e5b;
+  --accent-bg: rgba(221, 158, 91, 0.15);
+  --green: #a6e3a1;
+  --red: #f38ba8;
+  --red-bg: #482932;
+  --red-border: #794554;
+  --green-bg: #314430;
+  --shadow: rgba(0, 0, 0, 0.6);
+  --shadow-strong: rgba(0, 0, 0, 0.6);
+  --border-glow: rgba(255, 255, 255, 0.05);
+  --danger-hover-bg: rgba(243, 139, 168, 0.12);
+}
+
+[data-theme="genshin-nahida"] {
+  --bg: #2e2f23;
+  --bg-sidebar: #28291e;
+  --bg-deep: #23241b;
+  --surface: #535349;
+  --surface-2: #6e6d66;
+  --text: #e7e3e4;
+  --text-sub: #d2bfa5;
+  --text-dim: #988c77;
+  --text-faint: #776f5d;
+  --accent: #b9c78d;
+  --accent-bg: rgba(185, 199, 141, 0.15);
+  --green: #a6e3a1;
+  --red: #f38ba8;
+  --red-bg: #482932;
+  --red-border: #794554;
+  --green-bg: #314430;
+  --shadow: rgba(0, 0, 0, 0.6);
+  --shadow-strong: rgba(0, 0, 0, 0.6);
+  --border-glow: rgba(255, 255, 255, 0.05);
+  --danger-hover-bg: rgba(243, 139, 168, 0.12);
+}
+
+[data-theme="genshin-ayaka"] {
+  --bg: #822d4a;
+  --bg-sidebar: #722741;
+  --bg-deep: #652339;
+  --surface: #98536a;
+  --surface-2: #a87082;
+  --text: #f1efec;
+  --text-sub: #bccae0;
+  --text-dim: #f7f6f8;
+  --text-faint: #c7b0be;
+  --accent: #ae6b81;
+  --accent-bg: rgba(174, 107, 129, 0.15);
+  --green: #a6e3a1;
+  --red: #f38ba8;
+  --red-bg: #482932;
+  --red-border: #794554;
+  --green-bg: #314430;
+  --shadow: rgba(0, 0, 0, 0.6);
+  --shadow-strong: rgba(0, 0, 0, 0.6);
+  --border-glow: rgba(255, 255, 255, 0.05);
+  --danger-hover-bg: rgba(243, 139, 168, 0.12);
+}
+
+[data-theme="genshin-klee"] {
+  --bg: #4d1e17;
+  --bg-sidebar: #431a14;
+  --bg-deep: #3c1711;
+  --surface: #6e453a;
+  --surface-2: #886254;
+  --text: #f6e1c6;
+  --text-sub: #d89f8a;
+  --text-dim: #b88c80;
+  --text-faint: #8b584a;
+  --accent: #b43a24;
+  --accent-bg: rgba(180, 58, 36, 0.15);
+  --green: #a6e3a1;
+  --red: #f38ba8;
+  --red-bg: #482932;
+  --red-border: #794554;
+  --green-bg: #314430;
+  --shadow: rgba(0, 0, 0, 0.6);
+  --shadow-strong: rgba(0, 0, 0, 0.6);
+  --border-glow: rgba(255, 255, 255, 0.05);
+  --danger-hover-bg: rgba(243, 139, 168, 0.12);
+}
+
+[data-theme="genshin-sigewinne"] {
+  --bg: #5184b2;
+  --bg-sidebar: #47749c;
+  --bg-deep: #3f668a;
+  --surface: #719ac0;
+  --surface-2: #89abcb;
+  --text: #f2f5fa;
+  --text-sub: #aad4f8;
+  --text-dim: #f2f7fb;
+  --text-faint: #f3f7fb;
+  --accent: #d55276;
+  --accent-bg: rgba(213, 82, 118, 0.15);
+  --green: #a6e3a1;
+  --red: #f38ba8;
+  --red-bg: #482932;
+  --red-border: #794554;
+  --green-bg: #314430;
+  --shadow: rgba(0, 0, 0, 0.6);
+  --shadow-strong: rgba(0, 0, 0, 0.6);
+  --border-glow: rgba(255, 255, 255, 0.05);
+  --danger-hover-bg: rgba(243, 139, 168, 0.12);
+}
+
+[data-theme="genshin-sucrose"] {
+  --bg: #1b2a50;
+  --bg-sidebar: #172446;
+  --bg-deep: #15203e;
+  --surface: #425169;
+  --surface-2: #5f6e7c;
+  --text: #deeecf;
+  --text-sub: #7ba28c;
+  --text-dim: #7b9d9c;
+  --text-faint: #46606b;
+  --accent: #7ba28c;
+  --accent-bg: rgba(123, 162, 140, 0.15);
+  --green: #a6e3a1;
+  --red: #f38ba8;
+  --red-bg: #482932;
+  --red-border: #794554;
+  --green-bg: #314430;
+  --shadow: rgba(0, 0, 0, 0.6);
+  --shadow-strong: rgba(0, 0, 0, 0.6);
+  --border-glow: rgba(255, 255, 255, 0.05);
+  --danger-hover-bg: rgba(243, 139, 168, 0.12);
+}

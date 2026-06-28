@@ -30,4 +30,11 @@ export function init() {
     results.clear();
     clearAlt();
   });
+
+  // 配置变更即时响应（设置页切换主题/语言等，无需关闭再打开主窗口）
+  listen("blink://config-changed", () => {
+    applyThemeFromConfig();
+    applyI18nFromConfig();
+    results.refreshMaxResults();
+  });
 }

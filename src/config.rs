@@ -79,6 +79,9 @@ pub struct StartMenuConfig {
     /// 开始菜单扫描深度
     #[serde(default = "default_3")]
     pub scan_depth: u32,
+    /// 是否包含 UWP/MSIX 应用（通过 shell:AppsFolder 枚举）
+    #[serde(default = "default_true")]
+    pub include_uwp: bool,
 }
 
 impl Default for StartMenuConfig {
@@ -86,6 +89,7 @@ impl Default for StartMenuConfig {
         Self {
             enabled: true,
             scan_depth: 3,
+            include_uwp: true,
         }
     }
 }

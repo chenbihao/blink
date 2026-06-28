@@ -331,11 +331,13 @@ pub async fn update_auto_start(app: tauri::AppHandle, auto_start: bool) -> Resul
     Ok(())
 }
 
-/// 更新语言设置。
+/// 更新语言设置。广播 `blink://config-changed` 事件。
 #[tauri::command]
 pub async fn update_language(app: tauri::AppHandle, language: String) -> Result<(), String> {
     let pool = app.state::<sqlx::SqlitePool>();
-    crate::config::update_language(&pool, language).await
+    crate::config::update_language(&pool, language).await?;
+    let _ = app.emit("blink://config-changed", ());
+    Ok(())
 }
 
 /// 更新日志级别（存配置 + 运行时 reload，立即生效）。
@@ -349,7 +351,7 @@ pub async fn update_log_level(app: tauri::AppHandle, level: String) -> Result<()
 
 /// 更新通用配置（主题 / 搜索历史 / 结果数）。
 /// 存配置 + max_results 热更新到 SearchService 内存（搜索热路径零 IO）。
-/// theme 不需后端推送：设置页本身即时预览，主窗口/右键菜单下次读取时生效。
+/// 广播 `blink://config-changed` 事件，主窗口/右键菜单即时响应主题等变更。
 #[tauri::command]
 pub async fn update_general_config(
     app: tauri::AppHandle,
@@ -377,6 +379,8 @@ pub async fn update_general_config(
         max_results,
         "通用配置已更新"
     );
+    // 广播配置变更事件，主窗口/右键菜单即时响应
+    let _ = app.emit("blink://config-changed", ());
     Ok(())
 }
 
@@ -465,9 +469,10 @@ pub async fn update_start_menu_config(
     app: tauri::AppHandle,
     enabled: bool,
     scan_depth: u32,
+    include_uwp: bool,
 ) -> Result<(), String> {
     let pool = app.state::<sqlx::SqlitePool>();
-    let config = crate::config::StartMenuConfig { enabled, scan_depth };
+    let config = crate::config::StartMenuConfig { enabled, scan_depth, include_uwp };
     crate::config::update_start_menu_config(&pool, &config).await?;
 
     // 热更新 SearchService 中的引擎配置
@@ -832,8 +837,7 @@ pub async fn record_hotkey() -> Result<serde_json::Value, String> {
 // ── 右键菜单独立窗口（0.5.3+） ───────────────────────────────────────────────
 
 /// 显示右键菜单独立窗口（突破主窗口边界裁剪）。
-/// x, y 是**屏幕坐标**（clientX + 窗口位置偏移）。
-/// items 是菜单数据 JSON 字符串（因为跨窗口传复杂类型麻烦，走 URL 编码）。
+/// 复用已有窗口：首次创建，后续 hide → 更新数据 → show，避免重复创建 WebView2 的开销。
 #[tauri::command]
 pub async fn show_context_menu(
     app: tauri::AppHandle,
@@ -845,20 +849,11 @@ pub async fn show_context_menu(
 ) -> Result<(), String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
 
-    // 先关闭已存在的菜单窗口（确保同一时间只有一个）
-    if let Some(existing) = app.get_webview_window("context-menu") {
-        let _ = existing.close();
-    }
-
-    // 窗口定位：先显示在鼠标位置；popup 页面加载后自己 resize 到精确尺寸
-    let encoded_items = urlencoding::encode(&items).to_string();
-    // 主题 resolve 在后端完成：auto → dark（WebView2 matchMedia 不可靠），
-    // 其他值（light/dark/gruvbox/…）原样透传。popup 只管设 data-theme，不含 resolve 逻辑。
+    // 主题 resolve（auto → dark/light）
     let theme = {
         let pool = app.state::<sqlx::SqlitePool>();
         let raw = crate::config::get_config(&pool).await.theme;
         if raw == "auto" {
-            // Windows: 检查注册表 AppsUseLightTheme（0=dark, 1=light）
             let is_light = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
                 .open_subkey("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize")
                 .and_then(|k| k.get_value::<u32, _>("AppsUseLightTheme"))
@@ -869,8 +864,29 @@ pub async fn show_context_menu(
             raw
         }
     };
+
+    // 复用已有窗口：hide → emit 新数据 → resize → reposition → show → force_topmost
+    if let Some(win) = app.get_webview_window("context-menu") {
+        let _ = win.hide();
+        let _ = app.emit("blink://context-menu-data", serde_json::json!({
+            "items": &items,
+            "theme": &theme,
+        }));
+        let _ = win.set_size(tauri::PhysicalSize::new(width as u32, height as u32));
+        let _ = win.set_position(tauri::PhysicalPosition::new(x as i32, y as i32));
+        let _ = win.show();
+        // Win32 直接设 TOPMOST，比 Tauri 的 set_always_on_top 更可靠
+        if let Ok(hwnd) = win.hwnd() {
+            crate::window::force_topmost(windows::Win32::Foundation::HWND(hwnd.0 as _));
+        }
+        tracing::trace!(x, y, width, height, items_len = items.len(), "右键菜单窗口复用");
+        return Ok(());
+    }
+
+    // 首次创建：通过 URL 参数传递初始数据
+    let encoded_items = urlencoding::encode(&items).to_string();
     let url = format!("contextmenu-popup.html?items={encoded_items}&theme={theme}");
-    tracing::debug!(x, y, width, height, %url, "创建右键菜单窗口");
+    tracing::debug!(x, y, width, height, "创建右键菜单窗口");
     let _win = WebviewWindowBuilder::new(
         &app,
         "context-menu",
@@ -880,25 +896,30 @@ pub async fn show_context_menu(
     .inner_size(width, height)
     .position(x, y)
     .decorations(false)
-    .transparent(false) // 不透明窗口渲染更快，用背景色匹配即可
+    .transparent(false)
     .always_on_top(true)
     .skip_taskbar(true)
     .visible(true)
-    .focused(false) // 不要抢焦点，避免触发主窗口看门狗
+    .focused(false)
     .resizable(false)
     .build()
     .map_err(|e| format!("创建右键菜单窗口失败: {e}"))?;
+
+    // 首次创建也走 Win32 强制置顶（与复用路径一致）
+    if let Ok(hwnd) = _win.hwnd() {
+        crate::window::force_topmost(windows::Win32::Foundation::HWND(hwnd.0 as _));
+    }
 
     tracing::trace!(x, y, width, height, items_len = items.len(), "右键菜单窗口已创建");
     Ok(())
 }
 
-/// 隐藏右键菜单窗口。
+/// 隐藏右键菜单窗口（hide 而非 close，保留窗口供下次复用）。
 #[tauri::command]
 pub async fn hide_context_menu(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("context-menu") {
-        let _ = win.close();
-        tracing::debug!("hide_context_menu: 已关闭右键菜单窗口");
+        let _ = win.hide();
+        tracing::trace!("hide_context_menu: 已隐藏右键菜单窗口");
     }
     Ok(())
 }

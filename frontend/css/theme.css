@@ -3,8 +3,9 @@
    dark       = Catppuccin Mocha（默认 :root）
    light      = Catppuccin Latte（[data-theme="light"] 覆盖）
    gruvbox    = Gruvbox Dark  （[data-theme="gruvbox"] 覆盖）
-   由 js/theme.js 根据 AppConfig.theme（auto/light/dark/gruvbox）设置 data-theme。
-   dark 是默认态：不设 data-theme 即回落 :root。auto 额外监听 prefers-color-scheme。 */
+   由 js/theme.js 根据 AppConfig.theme（auto/light/dark/gruvbox/…）设置 data-theme。
+   dark 是默认态：不设 data-theme 即回落 :root。auto 额外监听 prefers-color-scheme。
+   NvChad 系列见 themes-nvchad.css，原神系列见 themes-genshin.css。 */
 
 :root {
   --bg: #1e1e2e;

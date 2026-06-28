@@ -136,8 +136,10 @@ async function loadEngineConfig() {
     const startMenu = await invoke("get_start_menu_config");
     const enabledEl = document.getElementById("start-menu-enabled");
     const depthEl = document.getElementById("start-menu-scan-depth");
+    const includeUwpEl = document.getElementById("start-menu-include-uwp");
     if (enabledEl) enabledEl.checked = startMenu.enabled !== false;
     if (depthEl) depthEl.value = startMenu.scan_depth || 3;
+    if (includeUwpEl) includeUwpEl.checked = startMenu.include_uwp !== false;
   } catch (e) {
     console.error("loadStartMenuConfig failed:", e);
   }
@@ -1254,13 +1256,14 @@ if (themeSelect) {
     let newIndex;
 
     if (e.deltaY > 0) {
-      // 向下滚动：下一个主题
-      newIndex = (currentIndex + 1) % options.length;
+      // 向下滚动：下一个主题（到末尾停止）
+      newIndex = Math.min(currentIndex + 1, options.length - 1);
     } else {
-      // 向上滚动：上一个主题
-      newIndex = (currentIndex - 1 + options.length) % options.length;
+      // 向上滚动：上一个主题（到开头停止）
+      newIndex = Math.max(currentIndex - 1, 0);
     }
 
+    if (newIndex === currentIndex) return; // 已到边界，不触发 change
     themeSelect.selectedIndex = newIndex;
     // 触发 change 事件以应用主题
     themeSelect.dispatchEvent(new Event("change"));
@@ -1371,9 +1374,10 @@ document.getElementById("clear-history")?.addEventListener("click", async () => 
 document.getElementById("save-start-menu")?.addEventListener("click", async () => {
   const enabled = document.getElementById("start-menu-enabled").checked;
   const scanDepth = parseInt(document.getElementById("start-menu-scan-depth").value, 10) || 3;
+  const includeUwp = document.getElementById("start-menu-include-uwp")?.checked ?? true;
 
   try {
-    await invoke("update_start_menu_config", { enabled, scanDepth });
+    await invoke("update_start_menu_config", { enabled, scanDepth, includeUwp });
     const msgEl = document.getElementById("start-menu-save-msg");
     if (msgEl) {
       msgEl.textContent = t("plugin.saved_msg");

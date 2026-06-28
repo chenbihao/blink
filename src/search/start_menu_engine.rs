@@ -84,9 +84,12 @@ impl StartMenuEngine {
         let config = Arc::clone(&self.config);
         tauri::async_runtime::spawn(async move {
             // 立即预扫(后台，全量)
-            let depth = config.read().unwrap().scan_depth;
+            let (depth, include_uwp) = {
+                let cfg = config.read().unwrap();
+                (cfg.scan_depth, cfg.include_uwp)
+            };
             let c = Arc::clone(&cache);
-            let _ = tokio::task::spawn_blocking(move || full_scan_into_cache(&c, depth)).await;
+            let _ = tokio::task::spawn_blocking(move || full_scan_into_cache(&c, depth, include_uwp)).await;
 
             loop {
                 tokio::time::sleep(CHECK_INTERVAL).await;
@@ -112,14 +115,17 @@ impl StartMenuEngine {
                     incremental_exceeded || time_for_full
                 };
 
-                let depth = config.read().unwrap().scan_depth;
+                let (depth, include_uwp) = {
+                    let cfg = config.read().unwrap();
+                    (cfg.scan_depth, cfg.include_uwp)
+                };
                 if need_full {
                     let c = Arc::clone(&cache);
-                    let _ = tokio::task::spawn_blocking(move || full_scan_into_cache(&c, depth)).await;
+                    let _ = tokio::task::spawn_blocking(move || full_scan_into_cache(&c, depth, include_uwp)).await;
                 } else if roots_changed_since_last(&cache) {
-                    // mtime 变化 → 增量扫描
+                    // mtime 变化 → 增量扫描（.lnk 部分增量，UWP 部分全量重建）
                     let c = Arc::clone(&cache);
-                    let _ = tokio::task::spawn_blocking(move || incremental_scan(&c, depth)).await;
+                    let _ = tokio::task::spawn_blocking(move || incremental_scan(&c, depth, include_uwp)).await;
                 }
             }
         });
@@ -134,17 +140,34 @@ impl StartMenuEngine {
                 return guard.entries.clone();
             }
         }
-        let depth = self.config.read().unwrap().scan_depth;
+        let (depth, include_uwp) = {
+            let cfg = self.config.read().unwrap();
+            (cfg.scan_depth, cfg.include_uwp)
+        };
         let c = Arc::clone(&self.cache);
-        let _ = tokio::task::spawn_blocking(move || full_scan_into_cache(&c, depth)).await;
+        let _ = tokio::task::spawn_blocking(move || full_scan_into_cache(&c, depth, include_uwp)).await;
         self.cache.read().unwrap().entries.clone()
     }
 }
 
 /// 全量扫描开始菜单并更新缓存。必须在 spawn_blocking 中调用。
-fn full_scan_into_cache(cache: &RwLock<CacheState>, scan_depth: u32) {
+fn full_scan_into_cache(cache: &RwLock<CacheState>, scan_depth: u32, include_uwp: bool) {
     let start = Instant::now();
-    let entries = super::scan_start_menu(scan_depth);
+    let mut entries = super::scan_start_menu(scan_depth);
+
+    // 合并 UWP/MSIX 应用
+    if include_uwp {
+        let uwp_entries = super::scan_apps_folder();
+        let existing_names: std::collections::HashSet<String> =
+            entries.iter().map(|e| e.name.to_lowercase()).collect();
+        for entry in uwp_entries {
+            // 去重：同名应用保留 .lnk 版本（路径更具体，右键菜单功能更完整）
+            if !existing_names.contains(&entry.name.to_lowercase()) {
+                entries.push(entry);
+            }
+        }
+    }
+
     let mtimes = super::roots_modified();
     let elapsed = start.elapsed();
 
@@ -162,7 +185,7 @@ fn full_scan_into_cache(cache: &RwLock<CacheState>, scan_depth: u32) {
 }
 
 /// 增量扫描：对比缓存中的文件，仅增删变化项。必须在 spawn_blocking 中调用。
-fn incremental_scan(cache: &RwLock<CacheState>, max_depth: u32) {
+fn incremental_scan(cache: &RwLock<CacheState>, max_depth: u32, include_uwp: bool) {
     let start = Instant::now();
 
     // 读取当前缓存的文件路径集合
@@ -201,7 +224,7 @@ fn incremental_scan(cache: &RwLock<CacheState>, max_depth: u32) {
     {
         let mut guard = cache.write().unwrap();
 
-        // 保留未变化的条目
+        // 保留未变化的 .lnk 条目
         let mut updated_cached: Vec<CachedAppEntry> = guard.cached_entries.iter()
             .filter(|e| current_paths.contains(&e.path) && cached_paths.get(&e.path) == Some(&e.mtime))
             .cloned()
@@ -210,8 +233,22 @@ fn incremental_scan(cache: &RwLock<CacheState>, max_depth: u32) {
         // 添加新条目
         updated_cached.extend(new_entries);
 
-        // 更新 entries 列表
-        guard.entries = updated_cached.iter().map(|e| e.entry.clone()).collect();
+        // 从 .lnk 结果构建 entries 列表
+        let mut entries: Vec<AppEntry> = updated_cached.iter().map(|e| e.entry.clone()).collect();
+
+        // UWP 应用：每次增量时全量重建（无 mtime 可比对，数量少速度快）
+        if include_uwp {
+            let uwp_entries = super::scan_apps_folder();
+            let existing_names: std::collections::HashSet<String> =
+                entries.iter().map(|e| e.name.to_lowercase()).collect();
+            for entry in uwp_entries {
+                if !existing_names.contains(&entry.name.to_lowercase()) {
+                    entries.push(entry);
+                }
+            }
+        }
+
+        guard.entries = entries;
         guard.cached_entries = updated_cached;
         guard.root_mtimes = super::roots_modified();
         guard.incremental_count += 1;

@@ -159,19 +159,28 @@ function itemMenu(li) {
   items.push({ label: t("menu.open"), run: () => activateItem(readData(li)) });
 
   if (isRealPath && (source === "file" || source === "start_menu")) {
+    const isShellPath = lnkPath.toLowerCase().startsWith("shell:");
     const fileName = lnkPath.split(/[\\/]/).pop() || lnkPath;
     const baseName = fileName.replace(/\.[^.]*$/, "");
     const dirPath = lnkPath.replace(/[\\/][^\\/]*$/, "");
     const isLnk = lnkPath.toLowerCase().endsWith(".lnk");
-    items.push({ label: t("menu.openFolder"), run: () => { openContainingFolder(lnkPath).catch((e) => console.error(e)); } });
-    if (isLnk) {
-      items.push({ label: t("menu.openLnkTarget"), run: () => { openLnkTarget(lnkPath).catch((e) => console.error(e)); } });
+
+    if (isShellPath) {
+      // UWP/MSIX 应用：无文件路径，隐藏文件相关菜单项
+      items.push({ separator: true });
+      items.push({ label: t("menu.copyId"), run: () => copyText(lnkPath) });
+    } else {
+      // 传统桌面应用：完整菜单
+      items.push({ label: t("menu.openFolder"), run: () => { openContainingFolder(lnkPath).catch((e) => console.error(e)); } });
+      if (isLnk) {
+        items.push({ label: t("menu.openLnkTarget"), run: () => { openLnkTarget(lnkPath).catch((e) => console.error(e)); } });
+      }
+      items.push({ separator: true });
+      items.push({ label: t("menu.copyPath"), run: () => copyText(dirPath) });
+      items.push({ label: t("menu.copyFullPath"), run: () => copyText(lnkPath) });
+      items.push({ label: t("menu.copyName"), run: () => copyText(baseName) });
+      items.push({ label: t("menu.copyFullName"), run: () => copyText(fileName) });
     }
-    items.push({ separator: true });
-    items.push({ label: t("menu.copyPath"), run: () => copyText(dirPath) });
-    items.push({ label: t("menu.copyFullPath"), run: () => copyText(lnkPath) });
-    items.push({ label: t("menu.copyName"), run: () => copyText(baseName) });
-    items.push({ label: t("menu.copyFullName"), run: () => copyText(fileName) });
     items.push({ separator: true });
     items.push({ label: t("menu.resetHistory"), run: () => { resetItemHistory(lnkPath).then(() => retrigger()).catch((e) => console.error(e)); }, danger: true });
   }

@@ -4,8 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Blink Settings</title>
-    <link rel="stylesheet" href="theme.css" />
-    <link rel="stylesheet" href="settings.css" />
+    <link rel="stylesheet" href="css/theme.css" />
+    <link rel="stylesheet" href="css/themes-nvchad.css" />
+    <link rel="stylesheet" href="css/themes-genshin.css" />
+    <link rel="stylesheet" href="css/settings.css" />
   </head>
   <body>
     <div class="container">
@@ -49,9 +51,107 @@
             <label data-i18n="general.theme.label">主题</label>
             <select id="theme">
               <option value="auto" data-i18n="general.theme.auto">跟随系统</option>
-              <option value="light" data-i18n="general.theme.light">浅色</option>
-              <option value="dark" data-i18n="general.theme.dark">深色</option>
-              <option value="gruvbox" data-i18n="general.theme.gruvbox">Gruvbox Dark</option>
+              <optgroup label="Blink">
+                <option value="light" data-i18n="general.theme.light">浅色</option>
+                <option value="dark" data-i18n="general.theme.dark">深色</option>
+                <option value="gruvbox" data-i18n="general.theme.gruvbox">Gruvbox Dark</option>
+              </optgroup>
+              <optgroup label="Nord">
+                <option value="nord-snow-storm" data-i18n="general.theme.nord-snow-storm">Snow Storm</option>
+                <option value="nord-polar-night" data-i18n="general.theme.nord-polar-night">Polar Night</option>
+                <option value="nord-frost" data-i18n="general.theme.nord-frost">Frost</option>
+                <option value="nord-aurora" data-i18n="general.theme.nord-aurora">Aurora</option>
+              </optgroup>
+              <optgroup label="NvChad Dark">
+                <option value="nvchad-aquarium" data-i18n="general.theme.nvchad-aquarium">NvChad Aquarium</option>
+                <option value="nvchad-ashes" data-i18n="general.theme.nvchad-ashes">NvChad Ashes</option>
+                <option value="nvchad-bearded-arc" data-i18n="general.theme.nvchad-bearded-arc">NvChad Bearded Arc</option>
+                <option value="nvchad-catppuccin" data-i18n="general.theme.nvchad-catppuccin">NvChad Catppuccin</option>
+                <option value="nvchad-chadracula-evondev" data-i18n="general.theme.nvchad-chadracula-evondev">NvChad Chadracula Evondev</option>
+                <option value="nvchad-chadracula" data-i18n="general.theme.nvchad-chadracula">NvChad Chadracula</option>
+                <option value="nvchad-chadtain" data-i18n="general.theme.nvchad-chadtain">NvChad Chadtain</option>
+                <option value="nvchad-chocolate" data-i18n="general.theme.nvchad-chocolate">NvChad Chocolate</option>
+                <option value="nvchad-dark_horizon" data-i18n="general.theme.nvchad-dark_horizon">NvChad Dark Horizon</option>
+                <option value="nvchad-decay" data-i18n="general.theme.nvchad-decay">NvChad Decay</option>
+                <option value="nvchad-doomchad" data-i18n="general.theme.nvchad-doomchad">NvChad Doomchad</option>
+                <option value="nvchad-everblush" data-i18n="general.theme.nvchad-everblush">NvChad Everblush</option>
+                <option value="nvchad-everforest" data-i18n="general.theme.nvchad-everforest">NvChad Everforest</option>
+                <option value="nvchad-falcon" data-i18n="general.theme.nvchad-falcon">NvChad Falcon</option>
+                <option value="nvchad-flexoki" data-i18n="general.theme.nvchad-flexoki">NvChad Flexoki</option>
+                <option value="nvchad-gatekeeper" data-i18n="general.theme.nvchad-gatekeeper">NvChad Gatekeeper</option>
+                <option value="nvchad-github_dark" data-i18n="general.theme.nvchad-github_dark">NvChad Github Dark</option>
+                <option value="nvchad-gruvbox" data-i18n="general.theme.nvchad-gruvbox">NvChad Gruvbox</option>
+                <option value="nvchad-gruvchad" data-i18n="general.theme.nvchad-gruvchad">NvChad Gruvchad</option>
+                <option value="nvchad-jabuti" data-i18n="general.theme.nvchad-jabuti">NvChad Jabuti</option>
+                <option value="nvchad-jellybeans" data-i18n="general.theme.nvchad-jellybeans">NvChad Jellybeans</option>
+                <option value="nvchad-kanagawa" data-i18n="general.theme.nvchad-kanagawa">NvChad Kanagawa</option>
+                <option value="nvchad-material-darker" data-i18n="general.theme.nvchad-material-darker">NvChad Material Darker</option>
+                <option value="nvchad-melange" data-i18n="general.theme.nvchad-melange">NvChad Melange</option>
+                <option value="nvchad-mito-laser" data-i18n="general.theme.nvchad-mito-laser">NvChad Mito Laser</option>
+                <option value="nvchad-monekai" data-i18n="general.theme.nvchad-monekai">NvChad Monekai</option>
+                <option value="nvchad-monochrome" data-i18n="general.theme.nvchad-monochrome">NvChad Monochrome</option>
+                <option value="nvchad-mountain" data-i18n="general.theme.nvchad-mountain">NvChad Mountain</option>
+                <option value="nvchad-nightfox" data-i18n="general.theme.nvchad-nightfox">NvChad Nightfox</option>
+                <option value="nvchad-nightlamp" data-i18n="general.theme.nvchad-nightlamp">NvChad Nightlamp</option>
+                <option value="nvchad-nightowl" data-i18n="general.theme.nvchad-nightowl">NvChad Nightowl</option>
+                <option value="nvchad-nord" data-i18n="general.theme.nvchad-nord">NvChad Nord</option>
+                <option value="nvchad-oceanic-next" data-i18n="general.theme.nvchad-oceanic-next">NvChad Oceanic Next</option>
+                <option value="nvchad-onedark" data-i18n="general.theme.nvchad-onedark">NvChad Onedark</option>
+                <option value="nvchad-onenord" data-i18n="general.theme.nvchad-onenord">NvChad Onenord</option>
+                <option value="nvchad-oxocarbon" data-i18n="general.theme.nvchad-oxocarbon">NvChad Oxocarbon</option>
+                <option value="nvchad-palenight" data-i18n="general.theme.nvchad-palenight">NvChad Palenight</option>
+                <option value="nvchad-pastelDark" data-i18n="general.theme.nvchad-pastelDark">NvChad Pasteldark</option>
+                <option value="nvchad-pastelbeans" data-i18n="general.theme.nvchad-pastelbeans">NvChad Pastelbeans</option>
+                <option value="nvchad-penumbra_dark" data-i18n="general.theme.nvchad-penumbra_dark">NvChad Penumbra Dark</option>
+                <option value="nvchad-poimandres" data-i18n="general.theme.nvchad-poimandres">NvChad Poimandres</option>
+                <option value="nvchad-radium" data-i18n="general.theme.nvchad-radium">NvChad Radium</option>
+                <option value="nvchad-rosepine" data-i18n="general.theme.nvchad-rosepine">NvChad Rosepine</option>
+                <option value="nvchad-rxyhn" data-i18n="general.theme.nvchad-rxyhn">NvChad Rxyhn</option>
+                <option value="nvchad-solarized_dark" data-i18n="general.theme.nvchad-solarized_dark">NvChad Solarized Dark</option>
+                <option value="nvchad-solarized_osaka" data-i18n="general.theme.nvchad-solarized_osaka">NvChad Solarized Osaka</option>
+                <option value="nvchad-sweetpastel" data-i18n="general.theme.nvchad-sweetpastel">NvChad Sweetpastel</option>
+                <option value="nvchad-tokyodark" data-i18n="general.theme.nvchad-tokyodark">NvChad Tokyodark</option>
+                <option value="nvchad-tokyonight" data-i18n="general.theme.nvchad-tokyonight">NvChad Tokyonight</option>
+                <option value="nvchad-tomorrow_night" data-i18n="general.theme.nvchad-tomorrow_night">NvChad Tomorrow Night</option>
+                <option value="nvchad-tundra" data-i18n="general.theme.nvchad-tundra">NvChad Tundra</option>
+                <option value="nvchad-vscode_dark" data-i18n="general.theme.nvchad-vscode_dark">NvChad Vscode Dark</option>
+                <option value="nvchad-wombat" data-i18n="general.theme.nvchad-wombat">NvChad Wombat</option>
+                <option value="nvchad-yoru" data-i18n="general.theme.nvchad-yoru">NvChad Yoru</option>
+              </optgroup>
+              <optgroup label="NvChad Light">
+                <option value="nvchad-ayu_light" data-i18n="general.theme.nvchad-ayu_light">NvChad Ayu Light</option>
+                <option value="nvchad-blossom_light" data-i18n="general.theme.nvchad-blossom_light">NvChad Blossom Light</option>
+                <option value="nvchad-everforest_light" data-i18n="general.theme.nvchad-everforest_light">NvChad Everforest Light</option>
+                <option value="nvchad-flex-light" data-i18n="general.theme.nvchad-flex-light">NvChad Flex Light</option>
+                <option value="nvchad-flexoki-light" data-i18n="general.theme.nvchad-flexoki-light">NvChad Flexoki Light</option>
+                <option value="nvchad-github_light" data-i18n="general.theme.nvchad-github_light">NvChad Github Light</option>
+                <option value="nvchad-gruvbox_light" data-i18n="general.theme.nvchad-gruvbox_light">NvChad Gruvbox Light</option>
+                <option value="nvchad-material-lighter" data-i18n="general.theme.nvchad-material-lighter">NvChad Material Lighter</option>
+                <option value="nvchad-nano-light" data-i18n="general.theme.nvchad-nano-light">NvChad Nano Light</option>
+                <option value="nvchad-oceanic-light" data-i18n="general.theme.nvchad-oceanic-light">NvChad Oceanic Light</option>
+                <option value="nvchad-one_light" data-i18n="general.theme.nvchad-one_light">NvChad One Light</option>
+                <option value="nvchad-onenord_light" data-i18n="general.theme.nvchad-onenord_light">NvChad Onenord Light</option>
+                <option value="nvchad-penumbra_light" data-i18n="general.theme.nvchad-penumbra_light">NvChad Penumbra Light</option>
+                <option value="nvchad-rosepine-dawn" data-i18n="general.theme.nvchad-rosepine-dawn">NvChad Rosepine Dawn</option>
+              </optgroup>
+              <optgroup label="Genshin">
+                <option value="genshin-kokomi" data-i18n="general.theme.genshin-kokomi">心海</option>
+                <option value="genshin-fischl" data-i18n="general.theme.genshin-fischl">菲谢尔</option>
+                <option value="genshin-nilou" data-i18n="general.theme.genshin-nilou">妮露</option>
+                <option value="genshin-ganyu" data-i18n="general.theme.genshin-ganyu">甘雨</option>
+                <option value="genshin-hutao" data-i18n="general.theme.genshin-hutao">胡桃</option>
+                <option value="genshin-diona" data-i18n="general.theme.genshin-diona">迪奥娜</option>
+                <option value="genshin-nahida" data-i18n="general.theme.genshin-nahida">纳西妲</option>
+                <option value="genshin-ayaka" data-i18n="general.theme.genshin-ayaka">神里绫华</option>
+                <option value="genshin-klee" data-i18n="general.theme.genshin-klee">可莉</option>
+                <option value="genshin-sigewinne" data-i18n="general.theme.genshin-sigewinne">希格雯</option>
+                <option value="genshin-sucrose" data-i18n="general.theme.genshin-sucrose">砂糖</option>
+              </optgroup>
+              <optgroup label="Custom">
+                <option value="suzume-journey" data-i18n="general.theme.suzume-journey">铃芽之旅</option>
+                <option value="jay-november" data-i18n="general.theme.jay-november">十一月的萧邦</option>
+                <option value="jay-ye-huimei" data-i18n="general.theme.jay-ye-huimei">叶惠美</option>
+              </optgroup>
             </select>
             <span class="hint" data-i18n="general.theme.hint">立即生效</span>
           </div>
@@ -140,6 +240,13 @@
                     </div>
                   </div>
                   <span class="hint" data-i18n="engine.start_menu.scan_depth.hint">索引深度，越大越全但越慢</span>
+                </div>
+                <div class="setting-row">
+                  <label>
+                    <input type="checkbox" id="start-menu-include-uwp" checked />
+                    <span data-i18n="engine.start_menu.include_uwp.label">包含 UWP/MSIX 应用</span>
+                  </label>
+                  <span class="hint" data-i18n="engine.start_menu.include_uwp.hint">搜索 Microsoft Store 安装的打包应用（如 Kazumi）</span>
                 </div>
               </div>
               <div class="plugin-save-row">

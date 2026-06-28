@@ -1,0 +1,76 @@
+name: Release
+
+permissions:
+  contents: write
+
+# 两种触发方式：
+#   1. 推送 v* tag → 自动构建并创建草稿 Release
+#   2. Actions 页手动 Run workflow → 传入已存在的 tag（如 v0.2.0）重新构建
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要构建/发布的已存在 tag（如 v0.2.0）'
+        required: true
+        type: string
+
+jobs:
+  publish:
+    name: Build & Release
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # 手动触发时 checkout 指定 tag；tag push 时默认即该 tag
+          ref: ${{ inputs.tag || github.ref_name }}
+
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: '.'  # workspace root（根目录 Cargo.toml 即 workspace）
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2"
+
+      # ── 编译 Rust 插件（独立 step，日志清晰、命中 rust-cache）──────────────
+      # echo/ip/weather 编译为 release exe 并拷贝到 plugins/builtin/<id>/bin/。
+      # 这些 *.exe 不入 git，必须现场生成；tauri 打包时作为 resources 随 MSI/NSIS。
+      - name: 编译 Rust 插件（echo/ip/weather）
+        shell: pwsh
+        run: |
+          ./scripts/copy-plugins.ps1
+          # 置此变量后，tauri build 的 beforeBuildCommand 再次调用同一 ps1 时会短路跳过，
+          # 避免重复编译（本地 cargo tauri build 不设此变量，照常编译）。
+          'BLINK_SKIP_PLUGIN_BUILD=1' | Add-Content -Path $env:GITHUB_ENV
+
+      - name: Build and release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ inputs.tag || github.ref_name }}
+          releaseName: 'Blink ${{ inputs.tag || github.ref_name }}'
+          releaseBody: |
+            ## Blink ${{ inputs.tag || github.ref_name }}
+
+            ### 下载
+            - **MSI 安装包**（`.msi`）：推荐，标准 Windows 安装程序
+            - **NSIS 安装包**（`-setup.exe`）：轻量安装程序
+
+            > 首次运行未签名，Windows SmartScreen 可能拦截，点击「更多信息 → 仍要运行」即可。
+
+            ### 更新日志
+            见下方自动生成的 Release Notes。
+          releaseDraft: true
+          prerelease: false
+          generateReleaseNotes: true
+          updaterJsonPreferNsis: true
+          tauriScript: cargo tauri

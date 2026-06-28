@@ -1,8 +1,9 @@
 //! 主题系统（0.5 完整主题切换）。
-//! 根据 AppConfig.theme（auto/light/dark）应用 data-theme 到 <html>。
-//! - dark 是默认态：不设 data-theme，回落 theme.css 的 :root（Mocha）。
+//! 根据 AppConfig.theme（auto/light/dark/gruvbox/aquarium/…）应用 data-theme 到 <html>。
+//! - dark 是默认态：不设 data-theme，回落 css/theme.css 的 :root（Mocha）。
 //! - light 设 [data-theme="light"]（Latte）。
 //! - auto 跟随系统：监听 prefers-color-scheme，系统切换时实时生效。
+//! - NvChad 系列主题定义在 nvchad-themes.css，新增主题只需在那边加选择器。
 //!
 //! 主窗口 / 设置页在入口调用 initTheme()；设置页切换主题时调用 applyTheme(mode) 即时预览。
 

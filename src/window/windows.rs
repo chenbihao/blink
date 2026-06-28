@@ -16,7 +16,8 @@ use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, GetForegroundWindow, GetWindowLongPtrW, GetWindowThreadProcessId,
     SetWindowLongPtrW, SetWindowPos, GWLP_WNDPROC, GWL_STYLE, HWND_TOP, SET_WINDOW_POS_FLAGS,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, WNDPROC, WS_CAPTION, WS_THICKFRAME,
+    SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, WNDPROC,
+    WS_CAPTION, WS_THICKFRAME,
 };
 
 const ST_HIDDEN: u8 = 0;
@@ -75,7 +76,7 @@ pub fn invoke(app: &AppHandle) {
 }
 
 /// 隐藏：ESC / 看门狗 / 单实例重复启动。
-/// 同时关闭右键菜单独立窗口（如果存在）。
+/// 同时隐藏右键菜单窗口（保留窗口供下次复用）。
 pub fn hide(app: &AppHandle, reason: &str) {
     if let Some(win) = app.get_webview_window("main") {
         STATE.store(ST_HIDDEN, Ordering::SeqCst);
@@ -83,9 +84,9 @@ pub fn hide(app: &AppHandle, reason: &str) {
         let _ = win.hide();
         let _ = app.emit("blink://hidden", ());
     }
-    // 主窗口隐藏时联动关闭右键菜单（突破边界的独立窗口）
+    // 主窗口隐藏时联动隐藏右键菜单（保留窗口供下次复用）
     if let Some(menu_win) = app.get_webview_window("context-menu") {
-        let _ = menu_win.close();
+        let _ = menu_win.hide();
     }
 }
 
@@ -113,6 +114,22 @@ pub fn enable_rounded_corners(hwnd: HWND) {
             DWMWA_WINDOW_CORNER_PREFERENCE,
             &pref as *const u32 as *const _,
             std::mem::size_of::<u32>() as u32,
+        );
+    }
+}
+
+/// 强制窗口置顶（HWND_TOPMOST）。Tauri 的 `show()` / `set_always_on_top()` 在
+/// WebView2 窗口上不一定可靠恢复 z-order，直接走 Win32 更稳妥。
+pub fn force_topmost(hwnd: HWND) {
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND(-1isize as *mut _)), // HWND_TOPMOST
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
     }
 }

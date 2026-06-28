@@ -372,8 +372,12 @@ fn extract_icon_png(path: &str, size: i32) -> Option<Vec<u8>> {
     // COM 初始化 RAII guard：确保线程 COM 已初始化
     let _com_guard = ComGuard::init();
 
-    // UWP/MSIX 包路径优先处理（权限受限，Path::exists() 可能返回 false）。
-    let shell_path = if is_uwp_package_path(path) {
+    // shell:AppsFolder 路径（UWP/MSIX 应用，由 scan_apps_folder 生成）
+    let shell_path = if path.starts_with("shell:AppsFolder\\") || path.starts_with("shell:AppsFolder/") {
+        // 已经是 shell 路径，直接使用（归一化为反斜杠）
+        path.replace('/', "\\")
+    } else if is_uwp_package_path(path) {
+        // UWP/MSIX 包路径（权限受限，Path::exists() 可能返回 false）
         match convert_uwp_to_shell_path(path) {
             Some(sp) => sp,
             None => {
