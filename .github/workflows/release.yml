@@ -48,14 +48,25 @@ jobs:
         # beforeBuildCommand 已移除：cwd 由 xtask 锚定，本地 `cargo xtask release` 与 CI 同源。
         run: cargo xtask plugins
 
-      - name: Build and release
-        uses: tauri-apps/tauri-action@v0  # v0 是 moving major tag（当前 v0.6.2），@v1 上游尚未发布
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # ── 仅构建，不使用 tauri-action 的上传（已知有问题）───────────────────────
+      - name: Build Tauri app
+        run: cargo tauri build
+
+      # ── 验证产物 ────────────────────────────────────────────────────────────
+      - name: 列出构建产物
+        run: |
+          echo "=== 查找 MSI ==="
+          dir target\release\bundle\msi\*.msi 2>$null || echo "未找到 MSI"
+          echo "=== 查找 NSIS ==="
+          dir target\release\bundle\nsis\*.exe 2>$null || echo "未找到 EXE"
+
+      # ── 创建/更新 Release 并上传产物（使用官方 action，更可靠）────────────────
+      - name: Create Release and Upload Assets
+        uses: softprops/action-gh-release@v2
         with:
-          tagName: ${{ inputs.tag || github.ref_name }}
-          releaseName: 'Blink ${{ inputs.tag || github.ref_name }}'
-          releaseBody: |
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: 'Blink ${{ inputs.tag || github.ref_name }}'
+          body: |
             ## Blink ${{ inputs.tag || github.ref_name }}
 
             ### 下载
@@ -66,19 +77,11 @@ jobs:
 
             ### 更新日志
             见下方自动生成的 Release Notes。
-          releaseDraft: true
+          draft: true
           prerelease: false
-          generateReleaseNotes: true
-          updaterJsonPreferNsis: true
-          tauriScript: cargo tauri
-          # 修复：明确指定 tauri action 版本和额外的上传重试
-          retryAttempts: 3
-
-      # ── 手动验证产物（调试用）───────────────────────────────────────────────
-      - name: 列出构建产物
-        if: always()
-        run: |
-          echo "=== 查找 MSI ==="
-          dir target\release\bundle\msi\*.msi 2>$null || echo "未找到 MSI"
-          echo "=== 查找 NSIS ==="
-          dir target\release\bundle\nsis\*.exe 2>$null || echo "未找到 EXE"
+          generate_release_notes: true
+          files: |
+            target/release/bundle/msi/*.msi
+            target/release/bundle/nsis/*.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
