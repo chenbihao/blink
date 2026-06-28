@@ -1400,6 +1400,8 @@ if (languageSelect) {
       loadPlugins();
       loadStorageInfo();
       refreshEverythingBadgeText();
+      refreshInterpreterBadgeText("python");
+      refreshInterpreterBadgeText("node");
     } catch (err) {
       console.error("update_language failed:", err);
     }
@@ -1647,6 +1649,19 @@ function refreshEverythingBadgeText() {
   statusEl.textContent = t(key);
 }
 
+// 语言切换时按当前探测状态重写脚本解释器徽章文本（不重新发起探测请求）
+function refreshInterpreterBadgeText(type) {
+  const statusEl = document.getElementById(`${type}-status`);
+  if (!statusEl) return;
+  const key =
+    statusEl.dataset.badgeState === "available" ? "engine.status.available" :
+    statusEl.dataset.badgeState === "version_low" ? "engine.status.version_low" :
+    statusEl.dataset.badgeState === "not_found" ? "engine.status.not_found" :
+    statusEl.dataset.badgeState === "failed" ? "engine.status.failed" :
+    "engine.status.probing";
+  statusEl.textContent = t(key);
+}
+
 
 document.getElementById("probe-everything")?.addEventListener("click", probeEverythingStatus);
 
@@ -1858,9 +1873,11 @@ function updateInterpreterUI(type, status) {
     if (status.version_ok) {
       statusEl.textContent = t("engine.status.available");
       statusEl.className = "status-badge status-available";
+      statusEl.dataset.badgeState = "available";
     } else {
       statusEl.textContent = t("engine.status.version_low");
       statusEl.className = "status-badge status-warning";
+      statusEl.dataset.badgeState = "version_low";
     }
     versionEl.textContent = status.version || "";
     versionEl.style.display = status.version ? "inline" : "none";
@@ -1868,6 +1885,7 @@ function updateInterpreterUI(type, status) {
   } else {
     statusEl.textContent = t("engine.status.not_found");
     statusEl.className = "status-badge status-unavailable";
+    statusEl.dataset.badgeState = "not_found";
     versionEl.style.display = "none";
     pathEl.value = status.error || t("engine.status.not_found");
   }
@@ -1904,6 +1922,7 @@ async function probeSingleInterpreter(type) {
   // 显示探测中状态（只更新对应解释器）
   statusEl.textContent = t("engine.status.probing");
   statusEl.className = "status-badge status-unknown";
+  statusEl.dataset.badgeState = "probing";
 
   try {
     const status = await invoke("probe_interpreters");
@@ -1912,6 +1931,7 @@ async function probeSingleInterpreter(type) {
     console.error(`probeInterpreter ${type} failed:`, e);
     statusEl.textContent = t("engine.status.failed");
     statusEl.className = "status-badge status-unavailable";
+    statusEl.dataset.badgeState = "failed";
   }
 }
 
@@ -1929,6 +1949,7 @@ async function probeAllInterpreters() {
     if (statusEl) {
       statusEl.textContent = t("engine.status.probing");
       statusEl.className = "status-badge status-unknown";
+      statusEl.dataset.badgeState = "probing";
     }
   });
 

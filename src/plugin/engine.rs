@@ -42,7 +42,7 @@ impl PluginEngine {
     }
 
     /// 获取所有插件的 manifest 信息（设置页用）。
-    pub fn list_plugins(&self) -> Vec<serde_json::Value> {
+    pub fn list_plugins(&self, lang: &str) -> Vec<serde_json::Value> {
         self.plugins
             .iter()
             .map(|p| {
@@ -71,14 +71,14 @@ impl PluginEngine {
                                 | super::manifest::SettingType::Select => "enum",
                                 super::manifest::SettingType::SortableList => "sortable_list",
                             },
-                            "title": f.title.resolve(),
-                            "description": f.description.as_ref().map(|d| d.resolve()),
+                            "title": f.title.resolve(lang),
+                            "description": f.description.as_ref().map(|d| d.resolve(lang)),
                             "default": f.default.clone(),
                             "min": f.min,
                             "max": f.max,
                             "options": f.options.iter().map(|o| serde_json::json!({
                                 "value": o.value.clone(),
-                                "label": o.label.resolve(),
+                                "label": o.label.resolve(lang),
                             })).collect::<Vec<_>>(),
                         });
                         // 添加 group 信息（支持对象格式，包含 title 和可选 description）
@@ -107,9 +107,9 @@ impl PluginEngine {
 
                 serde_json::json!({
                     "id": manifest.id,
-                    "name": manifest.name,
+                    "name": manifest.name.resolve(lang),
                     "version": manifest.version,
-                    "description": manifest.description,
+                    "description": manifest.description.resolve(lang),
                     "triggers": triggers,
                     "custom_triggers": custom_triggers,
                     "disabled_default_triggers": config.disabled_default_triggers,
@@ -255,11 +255,13 @@ impl PluginEngine {
             .map(|p| p.manifest().clone())
     }
 
-    /// 获取插件的显示名称(manifest.name),回退为 plugin_id。
-    /// 用于占位符等 UI 展示场景。
+    /// 获取插件的显示名称,回退为 plugin_id。
+    /// 用于**结果占位项**拼接(service.rs placeholder),属结果文案层——
+    /// 该层尚未接 locale(context.lang 待阶段二),故固定取 name 的 zh 回退值,不随语言切换。
+    /// 设置页展示走 list_plugins → resolve(lang) 本地化,与此独立。
     pub fn get_display_name(&self, id: &str) -> String {
         self.find_plugin(id)
-            .map(|p| p.manifest().name.clone())
+            .map(|p| p.manifest().name.resolve("zh"))
             .unwrap_or_else(|| id.to_string())
     }
 

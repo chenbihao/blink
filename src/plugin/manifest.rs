@@ -15,13 +15,13 @@ pub const SUPPORTED_SCHEMA_VERSION: u32 = 1;
 pub struct PluginManifest {
     pub schema_version: u32,
     pub id: String,
-    #[allow(dead_code)] // 设置页展示用,本切片仅日志
-    pub name: String,
+    #[allow(dead_code)] // 设置页展示用(list_plugins 走 resolve)
+    pub name: LocalizableText,
     #[allow(dead_code)]
     pub version: String,
     #[serde(default)]
-    #[allow(dead_code)] // 设置页展示用
-    pub description: String,
+    #[allow(dead_code)] // 设置页展示用(list_plugins 走 resolve)
+    pub description: LocalizableText,
     #[serde(default)]
     #[allow(dead_code)] // builtin 信任来源标记,本切片只加载 builtin
     pub builtin: bool,
@@ -108,8 +108,8 @@ fn default_exclusive() -> bool {
 // ── 配置 schema(0.5.1,驱动设置页 UI)──────────────────────────────────────────
 
 /// 可本地化文本:既接受纯字符串,也接受多语言对象(serde untagged)。
-/// 当前 resolve 返回字符串本身(Plain)或 zh/首个(Localized);未来 i18n 按 locale 取,
-/// Rust 类型与前端均无需改动(只升级 manifest 数据形态)。
+/// resolve(lang) 按传入语言取值(回退 zh → 首个);lang 由调用方从 AppConfig.language 传入,
+/// Rust 类型与前端均无需随 manifest 数据形态变化而改动。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum LocalizableText {
@@ -117,13 +117,21 @@ pub enum LocalizableText {
     Localized(std::collections::HashMap<String, String>),
 }
 
+/// 缺省值 Plain(""):manifest 的 description 有 #[serde(default)],缺省时填空串。
+impl Default for LocalizableText {
+    fn default() -> Self {
+        LocalizableText::Plain(String::new())
+    }
+}
+
 impl LocalizableText {
-    /// 解析为当前展示文本(当前无 locale 概念,Localized 取 zh 回退首个)。
-    pub fn resolve(&self) -> String {
+    /// 解析为当前展示文本:Localized 按 lang 取,回退 zh,再回退首个;Plain 原样返回。
+    pub fn resolve(&self, lang: &str) -> String {
         match self {
             LocalizableText::Plain(s) => s.clone(),
             LocalizableText::Localized(map) => map
-                .get("zh")
+                .get(lang)
+                .or_else(|| map.get("zh"))
                 .or_else(|| map.values().next())
                 .cloned()
                 .unwrap_or_default(),
@@ -461,9 +469,11 @@ mod tests {
         let m: PluginManifest = serde_json::from_str(json).unwrap();
         assert_eq!(m.settings_schema.len(), 2);
         // Plain title
-        assert_eq!(m.settings_schema[0].title.resolve(), "查询 IPv6");
-        // Localized title → 取 zh
-        assert_eq!(m.settings_schema[1].title.resolve(), "定位");
+        assert_eq!(m.settings_schema[0].title.resolve("zh"), "查询 IPv6");
+        // Localized title → 按 lang 取,zh 回退首个
+        assert_eq!(m.settings_schema[1].title.resolve("zh"), "定位");
+        // 传 en → 取 en 值(验证 i18n 按 locale 取值已接通)
+        assert_eq!(m.settings_schema[1].title.resolve("en"), "Geo");
         // 默认 settings 由 schema 生成
         let defaults = m.default_settings();
         assert_eq!(defaults["use_ipv6"], false);
@@ -495,7 +505,7 @@ mod tests {
         assert_eq!(m.settings_schema.len(), 2);
         assert_eq!(m.settings_schema[0].options.len(), 3);
         assert_eq!(m.settings_schema[0].options[0].value, "youdao");
-        assert_eq!(m.settings_schema[0].options[0].label.resolve(), "youdao");
+        assert_eq!(m.settings_schema[0].options[0].label.resolve("zh"), "youdao");
         let defaults = m.default_settings();
         assert_eq!(defaults["default_engine"], "youdao");
         assert_eq!(defaults["target_lang"], "zh");

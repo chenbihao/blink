@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "id": "builtin.translate",
-  "name": "翻译",
+  "name": { "zh": "翻译", "en": "Translate" },
   "version": "0.2.0",
-  "description": "多引擎文本翻译：腾讯翻译/阿里翻译/百度翻译/有道智云/DeepL",
+  "description": { "zh": "多引擎文本翻译：腾讯翻译/阿里翻译/百度翻译/有道智云/DeepL", "en": "Multi-engine translation: Tencent / Alibaba / Baidu / Youdao / DeepL" },
   "builtin": true,
   "runtime": {
     "type": "python",
@@ -23,12 +23,12 @@
     {
       "key": "default_engine",
       "type": "enum",
-      "title": "默认翻译引擎",
+      "title": { "zh": "默认翻译引擎", "en": "Default engine" },
       "options": [
-        { "value": "tencent", "label": "腾讯翻译" },
-        { "value": "ali", "label": "阿里翻译" },
-        { "value": "baidu", "label": "百度翻译" },
-        { "value": "youdao", "label": "有道智云" },
+        { "value": "tencent", "label": { "zh": "腾讯翻译", "en": "Tencent" } },
+        { "value": "ali", "label": { "zh": "阿里翻译", "en": "Alibaba" } },
+        { "value": "baidu", "label": { "zh": "百度翻译", "en": "Baidu" } },
+        { "value": "youdao", "label": { "zh": "有道智云", "en": "Youdao" } },
         { "value": "deepl", "label": "DeepL" }
       ],
       "default": "tencent"
@@ -36,13 +36,13 @@
     {
       "key": "fallback_order",
       "type": "sortable_list",
-      "title": "降级顺序",
-      "description": "主引擎失败时按此顺序尝试，拖动调整顺序",
+      "title": { "zh": "降级顺序", "en": "Fallback order" },
+      "description": { "zh": "主引擎失败时按此顺序尝试，拖动调整顺序", "en": "Tried in this order when the main engine fails; drag to reorder" },
       "options": [
-        { "value": "tencent", "label": "腾讯翻译" },
-        { "value": "ali", "label": "阿里翻译" },
-        { "value": "baidu", "label": "百度翻译" },
-        { "value": "youdao", "label": "有道智云" },
+        { "value": "tencent", "label": { "zh": "腾讯翻译", "en": "Tencent" } },
+        { "value": "ali", "label": { "zh": "阿里翻译", "en": "Alibaba" } },
+        { "value": "baidu", "label": { "zh": "百度翻译", "en": "Baidu" } },
+        { "value": "youdao", "label": { "zh": "有道智云", "en": "Youdao" } },
         { "value": "deepl", "label": "DeepL" }
       ],
       "default": ["tencent", "ali", "baidu", "youdao", "deepl"]
@@ -50,13 +50,13 @@
     {
       "key": "target_lang",
       "type": "enum",
-      "title": "目标语言",
+      "title": { "zh": "目标语言", "en": "Target language" },
       "options": [
-        { "value": "auto", "label": "自动检测" },
-        { "value": "zh", "label": "中文" },
-        { "value": "en", "label": "英文" },
-        { "value": "ja", "label": "日文" },
-        { "value": "ko", "label": "韩文" }
+        { "value": "auto", "label": { "zh": "自动检测", "en": "Auto-detect" } },
+        { "value": "zh", "label": { "zh": "中文", "en": "Chinese" } },
+        { "value": "en", "label": { "zh": "英文", "en": "English" } },
+        { "value": "ja", "label": { "zh": "日文", "en": "Japanese" } },
+        { "value": "ko", "label": { "zh": "韩文", "en": "Korean" } }
       ],
       "default": "zh"
     },

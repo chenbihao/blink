@@ -16,9 +16,10 @@
 </p>
 
 <p align="center">
-  <!-- 🎯 请替换为实际录屏 GIF -->
-  <img src="docs/blink-demo.gif" width="680" alt="Blink 演示"/>
+  <img src="docs/blink-rust.png" width="680" alt="Blink Demo"/>
 </p>
+
+[查看演示动图](docs/blink.gif)
 
 ---
 

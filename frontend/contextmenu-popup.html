@@ -98,6 +98,12 @@
       menuEl.appendChild(fragment);
     }
 
+    /** 后端复用窗口时通过 eval 直接调用此入口（emit 在隐藏态会被 WebView2 丢弃）。 */
+    window.__renderContextMenu = function (itemsArray, theme) {
+      if (theme) applyTheme(theme);
+      renderMenu(itemsArray);
+    };
+
     let isClickingItem = false;
 
     // ── 初始渲染（从 URL 参数，首次创建窗口时）──

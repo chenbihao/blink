@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "id": "builtin.weather",
-  "name": "天气",
+  "name": { "zh": "天气", "en": "Weather" },
   "version": "0.1.0",
-  "description": "查询城市天气（open-meteo，免费无需 key）",
+  "description": { "zh": "查询城市天气（open-meteo，免费无需 key）", "en": "City weather (open-meteo, free, no key needed)" },
   "builtin": true,
   "runtime": {
     "type": "process",
@@ -23,18 +23,18 @@
     {
       "key": "default_city",
       "type": "string",
-      "title": "默认城市",
-      "description": "无参数时查询的城市（如「北京」）",
+      "title": { "zh": "默认城市", "en": "Default city" },
+      "description": { "zh": "无参数时查询的城市（如「北京」）", "en": "City queried with no argument (e.g. 'Beijing')" },
       "default": ""
     },
     {
       "key": "temperature_unit",
       "type": "enum",
-      "title": "温度单位",
+      "title": { "zh": "温度单位", "en": "Temperature unit" },
       "default": "celsius",
       "options": [
-        { "value": "celsius", "label": "摄氏度 (°C)" },
-        { "value": "fahrenheit", "label": "华氏度 (°F)" }
+        { "value": "celsius", "label": { "zh": "摄氏度 (°C)", "en": "Celsius (°C)" } },
+        { "value": "fahrenheit", "label": { "zh": "华氏度 (°F)", "en": "Fahrenheit (°F)" } }
       ]
     }
   ]

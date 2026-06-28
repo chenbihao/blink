@@ -528,7 +528,12 @@ pub async fn probe_everything(port: u16) -> bool {
 pub async fn get_plugins(app: tauri::AppHandle) -> Vec<serde_json::Value> {
     let engine = app.state::<Option<std::sync::Arc<crate::plugin::PluginEngine>>>();
     match engine.as_ref() {
-        Some(e) => e.list_plugins(),
+        Some(e) => {
+            // 读当前语言,供 manifest 配置文案按 locale 取值(设置页中英双语)
+            let pool = app.state::<sqlx::SqlitePool>();
+            let lang = crate::config::get_config(&pool).await.language;
+            e.list_plugins(&lang)
+        }
         None => Vec::new(),
     }
 }
@@ -963,16 +968,21 @@ pub async fn show_context_menu(
         }
     };
 
-    // 复用已有窗口：hide → emit 新数据 → resize → reposition → show → force_topmost
+    // 复用已有窗口：resize → reposition → show → eval 渲染新数据 → force_topmost
+    // ⚠️ 不能在隐藏态用 emit 传数据：WebView2 在 IsVisible=false 时会丢弃事件
+    // （曾导致「窗口尺寸已撑开、内容却没更新」）。改用 eval（走 ExecuteScript 注入
+    // 脚本到 webview 队列，show 之后必执行），比事件系统更可靠地更新菜单内容。
     if let Some(win) = app.get_webview_window("context-menu") {
-        let _ = win.hide();
-        let _ = app.emit("blink://context-menu-data", serde_json::json!({
-            "items": &items,
-            "theme": &theme,
-        }));
         let _ = win.set_size(tauri::PhysicalSize::new(width as u32, height as u32));
         let _ = win.set_position(tauri::PhysicalPosition::new(x as i32, y as i32));
         let _ = win.show();
+        let theme_js = serde_json::to_string(&theme).unwrap_or_else(|_| "\"dark\"".to_string());
+        let js = format!(
+            "window.__renderContextMenu && window.__renderContextMenu({items}, {theme})",
+            items = items,
+            theme = theme_js,
+        );
+        let _ = win.eval(&js);
         // Win32 直接设 TOPMOST，比 Tauri 的 set_always_on_top 更可靠
         if let Ok(hwnd) = win.hwnd() {
             crate::window::force_topmost(windows::Win32::Foundation::HWND(hwnd.0 as _));
