@@ -72,6 +72,19 @@ pub fn pinyin_initials(s: &str) -> String {
         .collect()
 }
 
+/// 提取完整拼音（"微信" → "weixin"，"WeChat" → "wechat"）。
+pub fn pinyin_full(s: &str) -> String {
+    let mut result = String::new();
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            result.push(c.to_ascii_lowercase());
+        } else if let Some(p) = c.to_pinyin() {
+            result.push_str(&p.plain().to_ascii_lowercase());
+        }
+    }
+    result
+}
+
 /// keyword / query 的归一化候选:[原文小写, 拼音首字母],过滤空串。
 ///
 /// 应用搜索与意图 keyword 匹配共用此原语——各自匹配策略不同,但归一化一致。
@@ -97,6 +110,16 @@ mod tests {
     fn pinyin_initials_basic() {
         assert_eq!(pinyin_initials("微信"), "wx");
         assert_eq!(pinyin_initials("WeChat"), "wechat");
+    }
+
+    #[test]
+    fn pinyin_full_basic() {
+        assert_eq!(pinyin_full("微信"), "weixin");
+        assert_eq!(pinyin_full("天气"), "tianqi");
+        assert_eq!(pinyin_full("WeChat"), "wechat");
+        // 中英混合
+        assert_eq!(pinyin_full("VS Code"), "vscode");
+        assert_eq!(pinyin_full("微信PC"), "weixinpc");
     }
 
     #[test]

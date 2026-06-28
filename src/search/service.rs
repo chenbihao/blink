@@ -427,6 +427,7 @@ fn emit_results(app: &AppHandle, seq: u64, items: Vec<SearchItem>, limit: usize,
         vec![AppEntry {
             name: String::new(),
             pinyin_name: String::new(),
+            pinyin_full: String::new(),
             lnk_path: String::new(),
             is_calc: false,
             score: -2.0,
@@ -479,6 +480,7 @@ fn placeholder_entry(plugin_id: &str, display_name: &str) -> AppEntry {
     AppEntry {
         name: format!("{} 查询中…", display_name),
         pinyin_name: String::new(),
+        pinyin_full: String::new(),
         lnk_path: String::new(),
         is_calc: false,
         score: 0.0,

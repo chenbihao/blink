@@ -103,10 +103,12 @@ pub fn scan_apps_folder() -> Vec<AppEntry> {
 
                 let lnk_path = format!("shell:AppsFolder\\{}", app_user_model_id);
                 let pinyin_name = super::to_pinyin_initials(&display_name);
+                let pinyin_full = super::to_pinyin_full(&display_name);
 
                 entries.push(AppEntry {
                     name: display_name,
                     pinyin_name,
+                    pinyin_full,
                     description: Some(lnk_path.clone()),
                     lnk_path,
                     is_calc: false,
@@ -178,10 +180,12 @@ fn scan_dir(dir: &PathBuf, entries: &mut Vec<AppEntry>, max_depth: u32, current_
                 .to_string();
             if !name.is_empty() {
                 let pinyin_name = super::to_pinyin_initials(&name);
+                let pinyin_full = super::to_pinyin_full(&name);
                 let lnk_path = path.to_string_lossy().to_string();
                 entries.push(AppEntry {
                     name,
                     pinyin_name,
+                    pinyin_full,
                     description: Some(lnk_path.clone()), // 副行显示路径
                     lnk_path,
                     is_calc: false,
@@ -241,9 +245,11 @@ pub fn parse_lnk_entry(lnk_path: &str) -> Option<AppEntry> {
     }
 
     let pinyin_name = super::to_pinyin_initials(&name);
+    let pinyin_full = super::to_pinyin_full(&name);
     Some(AppEntry {
         name,
         pinyin_name,
+        pinyin_full,
         description: Some(lnk_path.to_string()),
         lnk_path: lnk_path.to_string(),
         is_calc: false,

@@ -53,6 +53,8 @@ pub struct AppEntry {
     pub name: String,
     /// 拼音首字母（如 "微信" → "wx"），用于拼音首字母匹配
     pub pinyin_name: String,
+    /// 完整拼音（如 "微信" → "weixin"），用于全拼匹配
+    pub pinyin_full: String,
     /// lnk 文件完整路径
     pub lnk_path: String,
     /// 是否为计算结果（前端可据此显示特殊样式）
@@ -156,7 +158,7 @@ use nucleo::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo::{Config, Matcher, Utf32Str};
 
 // 文本归一化原语抽至 `crate::text`(0.4 §4.4),应用搜索与意图共用。
-pub use crate::text::pinyin_initials as to_pinyin_initials;
+pub use crate::text::{pinyin_full as to_pinyin_full, pinyin_initials as to_pinyin_initials};
 
 /// fuzzy 打分核心：返回 `(nucleo raw 分, 条目)`，按分降序、取 top-N。
 ///
@@ -188,11 +190,19 @@ pub fn fuzzy_score_entries(
                 let haystack = Utf32Str::new(&e.pinyin_name, &mut buf);
                 pattern.score(haystack, &mut matcher)
             };
-            let best = match (score_name, score_pinyin) {
-                (Some(a), Some(b)) => Some(a.max(b)),
-                (Some(a), None) => Some(a),
-                (None, Some(b)) => Some(b),
-                (None, None) => None,
+            let score_pinyin_full = {
+                let haystack = Utf32Str::new(&e.pinyin_full, &mut buf);
+                pattern.score(haystack, &mut matcher)
+            };
+            let best = match (score_name, score_pinyin, score_pinyin_full) {
+                (Some(a), Some(b), Some(c)) => Some(a.max(b).max(c)),
+                (Some(a), Some(b), None) => Some(a.max(b)),
+                (Some(a), None, Some(c)) => Some(a.max(c)),
+                (None, Some(b), Some(c)) => Some(b.max(c)),
+                (Some(a), None, None) => Some(a),
+                (None, Some(b), None) => Some(b),
+                (None, None, Some(c)) => Some(c),
+                (None, None, None) => None,
             };
             best.map(|s| (s, e))
         })
@@ -213,6 +223,7 @@ mod tests {
         AppEntry {
             name: name.into(),
             pinyin_name: to_pinyin_initials(name),
+            pinyin_full: to_pinyin_full(name),
             lnk_path: lnk.into(),
             is_calc: false,
             score: 0.0,
@@ -266,5 +277,21 @@ mod tests {
         // 分数应该相同
         assert_eq!(r_lower[0].0, r_upper[0].0);
         assert_eq!(r_lower[0].0, r_mixed[0].0);
+    }
+
+    #[test]
+    fn matches_by_pinyin_full() {
+        let entries = vec![entry("微信", "wechat.lnk"), entry("Word", "word.lnk")];
+        // 全拼搜索：wei 应该匹配微信
+        let r = fuzzy_score_entries("wei", &entries, 10);
+        assert!(r.iter().any(|(_, e)| e.name == "微信"), "全拼 wei 应匹配微信");
+
+        // 完整全拼：weixin 应该匹配微信
+        let r = fuzzy_score_entries("weixin", &entries, 10);
+        assert!(r.iter().any(|(_, e)| e.name == "微信"), "全拼 weixin 应匹配微信");
+
+        // 全拼前缀模糊：weix 应该匹配微信
+        let r = fuzzy_score_entries("weix", &entries, 10);
+        assert!(r.iter().any(|(_, e)| e.name == "微信"), "全拼 weix 应匹配微信");
     }
 }

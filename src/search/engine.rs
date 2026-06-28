@@ -86,6 +86,7 @@ impl SearchItem {
             SearchAction::None => AppEntry {
                 name: self.title,
                 pinyin_name: String::new(),
+                pinyin_full: String::new(),
                 description: self.subtitle,
                 lnk_path: String::new(), // 空 path = 前端 Open 时无操作
                 is_calc: false,
@@ -103,6 +104,7 @@ impl SearchItem {
             SearchAction::Open { path } => AppEntry {
                 name: self.title,
                 pinyin_name: String::new(),
+                pinyin_full: String::new(),
                 description: self.subtitle,
                 lnk_path: path,
                 is_calc: false,
@@ -120,6 +122,7 @@ impl SearchItem {
             SearchAction::Copy { text } => AppEntry {
                 name: self.title,
                 pinyin_name: String::new(),
+                pinyin_full: String::new(),
                 description: self.subtitle,
                 lnk_path: String::new(),
                 // is_calc 仅标记计算结果(驱动前端 calc 样式 + calcValue);插件 Copy

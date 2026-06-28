@@ -391,6 +391,7 @@ mod tests {
         AppEntry {
             name: name.into(),
             pinyin_name: String::new(),
+            pinyin_full: String::new(),
             lnk_path: lnk.into(),
             is_calc: false,
             score: 0.0,
