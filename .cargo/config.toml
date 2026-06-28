@@ -1,0 +1,6 @@
+[alias]
+# 统一构建入口：cargo xtask <plugins|release>
+# => cargo run --package xtask -- <task>
+# 本地与 CI 同源：cwd 由 xtask 用 CARGO_MANIFEST_DIR 锚定 workspace 根，
+# 不再依赖 Tauri beforeBuildCommand 的不可控 cwd。
+xtask = "run --package xtask --"

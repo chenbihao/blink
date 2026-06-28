@@ -4,7 +4,6 @@
   "version": "0.1.0",
   "identifier": "com.blink.launcher",
   "build": {
-    "beforeBuildCommand": "powershell -ExecutionPolicy Bypass -File scripts/copy-plugins.ps1",
     "frontendDist": "frontend"
   },
   "app": {

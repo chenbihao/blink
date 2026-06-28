@@ -39,7 +39,7 @@ Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而�
 
 ```bash
 cargo run                # 开发（debug，控制台 tracing，默认 error 级；设置页可调 info/debug）
-cargo tauri build        # 打包（需先 cargo install tauri-cli）
+cargo xtask release      # 打包（= 编译插件 + cargo tauri build；需先 cargo install tauri-cli）
 cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 ```
 

@@ -5,7 +5,7 @@ edition = "2024"
 description = "Blink — Windows Universal Launcher"
 
 [workspace]
-members = ["plugins/examples/echo", "plugins/examples/ip", "plugins/examples/weather"]
+members = ["plugins/examples/echo", "plugins/examples/ip", "plugins/examples/weather", "xtask"]
 
 [profile.release]
 codegen-units = 1
