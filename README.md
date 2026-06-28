@@ -1,8 +1,3 @@
-<p align="center">
-  <!-- 🎯 请替换为项目 logo -->
-  <img src="icons/logo.png" width="100" alt="Blink Logo"/>
-</p>
-
 <h1 align="center">Blink</h1>
 
 <p align="center">

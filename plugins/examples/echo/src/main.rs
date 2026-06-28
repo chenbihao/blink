@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 /// 查询上下文快照（从 core 传来，字段为 Option，值缺失则为 None）
 #[derive(Debug, Deserialize, Default)]
 struct PluginQueryContext {
+    #[allow(dead_code)]  // context 协议字段,echo 不消费(其余字段已在用),保留以体现完整快照
     #[serde(default)]
     pub lang: Option<String>,
     #[serde(default)]

@@ -30,7 +30,10 @@ Write-Host "🔨 编译 Rust 插件（Release 模式）..." -ForegroundColor Yel
 $RustPlugins = @("echo", "ip", "weather")
 foreach ($id in $RustPlugins) {
     Write-Host "  编译: blink-plugin-$id"
-    $process = Start-Process -FilePath "cargo" -ArgumentList "build", "--release", "--bin", "blink-plugin-$id" -NoNewWindow -Wait -PassThru
+    # 用 -p 显式选 workspace 成员包（而非 --bin <name>）：根目录 Cargo.toml 既是
+    # workspace 又是 default-run 包 blink，新版 cargo 的 --bin 仅在 default-run 包内解析，
+    # 会报 “no bin target named ... in default-run packages”。-p 跨 cargo 版本稳定可靠。
+    $process = Start-Process -FilePath "cargo" -ArgumentList "build", "--release", "-p", "blink-plugin-$id" -NoNewWindow -Wait -PassThru
     if ($process.ExitCode -ne 0) {
         throw "插件 $id 编译失败，ExitCode: $($process.ExitCode)"
     }
