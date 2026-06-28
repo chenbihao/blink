@@ -21,6 +21,8 @@ body {
   border-radius: 12px;
   overflow: hidden;
   box-shadow: 0 8px 32px var(--shadow), 0 0 0 1px var(--border-glow);
+  /* 整个容器默认可拖动，交互元素单独排除 */
+  -webkit-app-region: drag;
 }
 
 /* ── 侧边栏 ───────────────────────────────────────────────────────────────── */
@@ -33,7 +35,6 @@ body {
   flex-direction: column;
   gap: 4px;
   flex-shrink: 0;
-  -webkit-app-region: drag;
 }
 
 .logo {
@@ -76,7 +77,6 @@ body {
   padding: 24px 32px;
   scrollbar-width: thin;
   scrollbar-color: var(--surface-2) transparent;
-  -webkit-app-region: no-drag;
 }
 
 .panel {
@@ -92,7 +92,6 @@ h2 {
   font-weight: 600;
   margin-bottom: 20px;
   color: var(--text);
-  -webkit-app-region: drag;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1210,6 +1209,22 @@ details.plugin-group .plugin-group-body {
   padding: 12px 16px;
   border-top: 1px solid var(--surface);
 }
+/* ── 拖动排除：所有交互元素 ──────────────────────────────────────────────────── */
+
+button,
+input,
+select,
+textarea,
+.checkbox,
+.slider,
+.hotkey-input-wrapper,
+.number-input-wrapper,
+.btn,
+.btn-small,
+.btn-danger {
+  -webkit-app-region: no-drag;
+}
+
 .modal-hint {
   font-size: 12px;
   color: var(--text-faint);

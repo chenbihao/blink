@@ -69,8 +69,8 @@ fn main() {
             });
         })
         .setup(|app| {
-            // 启动总耗时计时器
-            let _startup_total = perf::Timer::new(perf::MetricCategory::Startup, "total");
+            // 启动总耗时（setup 结束时手动记录，因为 setup 在同步上下文，没有 runtime 句柄）
+            let startup_start = std::time::Instant::now();
 
             // 初始化历史记录 SQLite
             let pool = tauri::async_runtime::block_on(history::init_db())
@@ -89,9 +89,18 @@ fn main() {
                 .expect("failed to init icon cache");
 
             // 初始化配置
-            let _config_timer = perf::Timer::new(perf::MetricCategory::Startup, "config_load");
+            let config_start = std::time::Instant::now();
             tauri::async_runtime::block_on(config::init_config(&pool))
                 .expect("failed to init config");
+            // 记录配置加载耗时（setup 在同步上下文，需用 block_on）
+            let config_elapsed = config_start.elapsed().as_secs_f64() * 1000.0;
+            tauri::async_runtime::block_on(perf::record_blocking(
+                &pool,
+                perf::MetricCategory::Startup,
+                "config_load",
+                config_elapsed,
+                None,
+            ));
 
             // 读取应用配置(快照)
             let app_config = tauri::async_runtime::block_on(config::get_config(&pool));
@@ -265,18 +274,36 @@ fn main() {
             // 仍留在 setup 中,它们是构建 ctx 的前提。
             let ctx = service::AppContext {
                 app: app.handle().clone(),
-                pool,
+                pool: pool.clone(),
                 config: app_config,
             };
             let services = service::all_services(search_service);
-            {
-                let _svc_timer = perf::Timer::new(perf::MetricCategory::Startup, "services_init");
-                for svc in &services {
-                    if let Err(e) = tauri::async_runtime::block_on(svc.start(&ctx)) {
-                        tracing::error!(service = svc.name(), error = %e, "service start failed");
-                    }
+            let svc_start = std::time::Instant::now();
+            for svc in &services {
+                if let Err(e) = tauri::async_runtime::block_on(svc.start(&ctx)) {
+                    tracing::error!(service = svc.name(), error = %e, "service start failed");
                 }
             }
+            // 记录服务初始化耗时
+            let svc_elapsed = svc_start.elapsed().as_secs_f64() * 1000.0;
+            tauri::async_runtime::block_on(perf::record_blocking(
+                &pool,
+                perf::MetricCategory::Startup,
+                "services_init",
+                svc_elapsed,
+                None,
+            ));
+            // 记录启动总耗时（setup 在同步上下文，需用 block_on）
+            // 注意：必须在 app.manage(pool) 之前记录，否则 pool 已被 move
+            let startup_total_ms = startup_start.elapsed().as_secs_f64() * 1000.0;
+            tauri::async_runtime::block_on(perf::record_blocking(
+                &pool,
+                perf::MetricCategory::Startup,
+                "total",
+                startup_total_ms,
+                None,
+            ));
+
             // 持有服务列表,保证其生命周期与 app 一致。
             // 0.2.1 各服务随进程退出即可,不接退出钩子;stop / 逆序清理留到 0.3 插件进程。
             app.manage(services);

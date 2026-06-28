@@ -1451,10 +1451,24 @@ function refreshEverythingBadgeText() {
 document.getElementById("probe-everything")?.addEventListener("click", probeEverythingStatus);
 
 document.getElementById("save-file-search")?.addEventListener("click", async () => {
+  console.log("保存文件搜索配置 - 开始");
   const enabled = document.getElementById("file-search-enabled").checked;
   const dataSource = document.getElementById("file-search-data-source").value;
   const port = parseInt(document.getElementById("everything-port").value, 10);
   const maxResults = parseInt(document.getElementById("everything-max-results").value, 10) || 20;
+
+  // 端口范围校验（u16 最大值 65535）
+  if (port < 1 || port > 65535) {
+    const msgEl = document.getElementById("file-search-save-msg");
+    if (msgEl) {
+      msgEl.textContent = "端口号必须在 1-65535 之间";
+      msgEl.style.color = "#f38ba8";
+      setTimeout(() => { msgEl.textContent = ""; }, 3000);
+    }
+    return;
+  }
+
+  console.log("保存文件搜索配置 - 参数:", { enabled, dataSource, everythingPort: port, maxResults });
 
   try {
     await invoke("update_file_search", {
@@ -1463,6 +1477,7 @@ document.getElementById("save-file-search")?.addEventListener("click", async () 
       everythingPort: port,
       maxResults,
     });
+    console.log("保存文件搜索配置 - 成功");
     // 跟插件保存一致的 flash 提示样式
     const msgEl = document.getElementById("file-search-save-msg");
     if (msgEl) {

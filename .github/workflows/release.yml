@@ -71,3 +71,14 @@ jobs:
           generateReleaseNotes: true
           updaterJsonPreferNsis: true
           tauriScript: cargo tauri
+          # 修复：明确指定 tauri action 版本和额外的上传重试
+          retryAttempts: 3
+
+      # ── 手动验证产物（调试用）───────────────────────────────────────────────
+      - name: 列出构建产物
+        if: always()
+        run: |
+          echo "=== 查找 MSI ==="
+          dir target\release\bundle\msi\*.msi 2>$null || echo "未找到 MSI"
+          echo "=== 查找 NSIS ==="
+          dir target\release\bundle\nsis\*.exe 2>$null || echo "未找到 EXE"

@@ -103,7 +103,7 @@ impl SearchService {
 
     /// 更新指定引擎的配置（运行时热更新）。
     /// 支持的 engine_id: "start_menu", "calc", "file"
-    pub fn update_engine_config(&self, engine_id: &str, config: EngineConfigUpdate) {
+    pub async fn update_engine_config(&self, engine_id: &str, config: EngineConfigUpdate) {
         let engines = self.sync_engines.iter().chain(self.async_engines.iter());
         for engine in engines {
             if engine.id() == engine_id {
@@ -122,8 +122,7 @@ impl SearchService {
                     }
                     EngineConfigUpdate::File(cfg) => {
                         if let Some(file) = engine.as_any().downcast_ref::<super::file_engine::FileEngine>() {
-                            // FileEngine 的 update_config 是 async，这里用 block_on
-                            tauri::async_runtime::block_on(file.update_config(cfg));
+                            file.update_config(cfg).await;
                             tracing::debug!(engine = engine_id, "FileEngine 配置已热更新");
                         }
                     }

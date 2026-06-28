@@ -451,7 +451,7 @@ pub async fn update_file_search(
 
     // 热更新 SearchService 中的引擎配置
     if let Some(ss) = app.try_state::<std::sync::Arc<crate::search::SearchService>>() {
-        ss.update_engine_config("file", crate::search::EngineConfigUpdate::File(file_search));
+        ss.update_engine_config("file", crate::search::EngineConfigUpdate::File(file_search)).await;
     }
     Ok(())
 }
@@ -477,7 +477,7 @@ pub async fn update_start_menu_config(
 
     // 热更新 SearchService 中的引擎配置
     if let Some(ss) = app.try_state::<std::sync::Arc<crate::search::SearchService>>() {
-        ss.update_engine_config("start_menu", crate::search::EngineConfigUpdate::StartMenu(config));
+        ss.update_engine_config("start_menu", crate::search::EngineConfigUpdate::StartMenu(config)).await;
     }
     Ok(())
 }
@@ -501,7 +501,7 @@ pub async fn update_calc_config(
 
     // 热更新 SearchService 中的引擎配置
     if let Some(ss) = app.try_state::<std::sync::Arc<crate::search::SearchService>>() {
-        ss.update_engine_config("calc", crate::search::EngineConfigUpdate::Calc(config));
+        ss.update_engine_config("calc", crate::search::EngineConfigUpdate::Calc(config)).await;
     }
     Ok(())
 }

@@ -140,10 +140,8 @@ pub fn build_engines(configs: EngineConfigs) -> Vec<std::sync::Arc<dyn SearchEng
         std::sync::Arc::new(StartMenuEngine::with_config(configs.start_menu)),
     ];
 
-    // FileEngine（可配置，总开关关闭时不加载）
-    if configs.file.enabled {
-        engines.push(std::sync::Arc::new(FileEngine::with_config(configs.file)));
-    }
+    // FileEngine（可配置，始终创建以支持热更新；search 内部检查 enabled）
+    engines.push(std::sync::Arc::new(FileEngine::with_config(configs.file)));
 
     if MockSlowEngine::enabled() {
         tracing::info!("MockSlowEngine 已启用(BLINK_MOCK_SLOW_ENGINE=1)");

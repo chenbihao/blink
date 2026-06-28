@@ -18,7 +18,7 @@ use tokio::process::{Child, ChildStdin};
 use tokio::sync::{oneshot, Mutex};
 
 use super::manifest::{PluginManifest, RuntimeType};
-use super::protocol::{PluginAction, PluginItem, PluginRequest, PluginResponse};
+use super::protocol::{PluginAction, PluginItem, PluginRequest, PluginResponse, PluginUpstreamMessage};
 
 /// Windows CreateProcess 标志:不创建控制台窗口。
 #[cfg(windows)]
@@ -62,7 +62,7 @@ struct PluginProcess {
     /// `Mutex<Child>` 使存活检测可 `&self`(try_wait 需 `&mut`),从而 query 能在
     /// process 锁外并发执行——多个 in-flight query 各持一份 `Arc<PluginProcess>`。
     child: Mutex<Child>,
-    stdin: Mutex<ChildStdin>,
+    stdin: Arc<Mutex<ChildStdin>>,
     pending: PendingMap,
     /// 单调递增的请求 id 计数。
     next_id: std::sync::atomic::AtomicU64,
@@ -223,10 +223,12 @@ impl PluginProcess {
         let stderr = child.stderr.take().ok_or(PluginError::ProcessClosed)?;
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        let stdin = Arc::new(Mutex::new(stdin));
 
-        // stdout reader:按 id 路由 response 到对应 pending oneshot。
+        // stdout reader:区分普通查询响应与插件发起的 HTTP 请求。
         {
             let pending = Arc::clone(&pending);
+            let stdin = Arc::clone(&stdin);
             let id = plugin_id.to_string();
             tauri::async_runtime::spawn(async move {
                 let mut lines = BufReader::new(stdout).lines();
@@ -236,16 +238,50 @@ impl PluginProcess {
                             if line.trim().is_empty() {
                                 continue;
                             }
-                            match serde_json::from_str::<PluginResponse>(&line) {
-                                Ok(resp) => {
+                            // 先尝试新协议格式（PluginUpstreamMessage enum）
+                            match serde_json::from_str::<PluginUpstreamMessage>(&line) {
+                                Ok(PluginUpstreamMessage::Response(resp)) => {
                                     if let Some(tx) = pending.lock().await.remove(&resp.id) {
                                         let _ = tx.send(resp);
                                     } else {
                                         tracing::debug!(plugin = %id, id = %resp.id, "孤儿响应(无 pending)");
                                     }
                                 }
-                                Err(e) => {
-                                    tracing::warn!(plugin = %id, error = %e, %line, "无效 stdout JSONL");
+                                Ok(PluginUpstreamMessage::HttpRequest(req)) => {
+                                    // 插件发起 HTTP 请求 → core 代为执行
+                                    tracing::debug!(plugin = %id, url = %req.url, "插件发起 HTTP 请求");
+                                    let stdin = Arc::clone(&stdin);
+                                    tauri::async_runtime::spawn(async move {
+                                        let (status, body, error) =
+                                            execute_http_request(&req.method, &req.url, req.body.as_deref(), req.timeout_ms).await;
+                                        // 构造 http_response 消息写回插件
+                                        let resp = PluginRequest::HttpResponse {
+                                            id: req.id,
+                                            status,
+                                            body,
+                                            error,
+                                        };
+                                        if let Ok(line) = serde_json::to_string(&resp) {
+                                            let mut stdin = stdin.lock().await;
+                                            let _ = stdin.write_all((line + "\n").as_bytes()).await;
+                                            let _ = stdin.flush().await;
+                                        }
+                                    });
+                                }
+                                Err(_) => {
+                                    // 向后兼容：尝试旧格式（直接 PluginResponse struct）
+                                    match serde_json::from_str::<PluginResponse>(&line) {
+                                        Ok(resp) => {
+                                            if let Some(tx) = pending.lock().await.remove(&resp.id) {
+                                                let _ = tx.send(resp);
+                                            } else {
+                                                tracing::debug!(plugin = %id, id = %resp.id, "孤儿响应(无 pending)");
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(plugin = %id, error = %e, %line, "无效 stdout JSONL");
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -275,7 +311,7 @@ impl PluginProcess {
 
         Ok(PluginProcess {
             child: Mutex::new(child),
-            stdin: Mutex::new(stdin),
+            stdin,
             pending,
             next_id: std::sync::atomic::AtomicU64::new(1),
         })
@@ -557,3 +593,51 @@ pub fn probe_interpreters() -> InterpretersStatus {
 
     InterpretersStatus { python, node }
 }
+
+/// 执行 HTTP 请求（插件代理请求用）。使用 reqwest 并遵循全局代理配置。
+/// 返回 (status_code, body, error)。
+async fn execute_http_request(
+    method: &str,
+    url: &str,
+    body: Option<&str>,
+    timeout_ms: u64,
+) -> (u16, Option<String>, Option<String>) {
+    use reqwest::Client;
+
+    let client = match Client::builder()
+        .timeout(std::time::Duration::from_millis(timeout_ms))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return (0, None, Some(format!("创建 HTTP 客户端失败：{e}"))),
+    };
+
+    let method = match method.to_uppercase().as_str() {
+        "GET" => reqwest::Method::GET,
+        "POST" => reqwest::Method::POST,
+        "PUT" => reqwest::Method::PUT,
+        "DELETE" => reqwest::Method::DELETE,
+        "PATCH" => reqwest::Method::PATCH,
+        "HEAD" => reqwest::Method::HEAD,
+        "OPTIONS" => reqwest::Method::OPTIONS,
+        m => return (0, None, Some(format!("不支持的 HTTP 方法：{m}"))),
+    };
+
+    let mut req = client.request(method, url);
+    if let Some(b) = body {
+        req = req.body(b.to_string());
+        req = req.header("Content-Type", "application/json");
+    }
+
+    match req.send().await {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            match resp.text().await {
+                Ok(text) => (status, Some(text), None),
+                Err(e) => (status, None, Some(format!("读取响应失败：{e}"))),
+            }
+        }
+        Err(e) => (0, None, Some(e.to_string())),
+    }
+}
+

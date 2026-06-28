@@ -117,7 +117,6 @@ impl FileEngine {
     }
 
     /// 更新配置（供 SearchService 调用）。
-    #[allow(dead_code)] // 预留接口，未来动态更新配置
     pub async fn update_config(&self, config: FileSearchConfig) {
         let mut cfg = self.config.write().await;
         *cfg = config;

@@ -105,7 +105,8 @@ pub fn record(category: MetricCategory, name: &str, value_ms: f64, metadata: Opt
     let now = chrono::Utc::now().timestamp();
     let pool = pool.clone();
 
-    // setup 阶段可能还没有 Tokio runtime，静默丢弃而非 panic
+    // setup 阶段可能还没有 Tokio runtime 句柄，静默丢弃而非 panic
+    // 注意：setup 阶段的启动时间需要显式用 record_blocking() 记录
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         handle.spawn(async move {
             let _ = sqlx::query(
@@ -120,6 +121,31 @@ pub fn record(category: MetricCategory, name: &str, value_ms: f64, metadata: Opt
             .await;
         });
     }
+}
+
+/// 同步记录一条性能指标（setup 阶段专用，此时没有 Tokio runtime 句柄）。
+/// 需要传入 pool 并在 block_on 中调用。
+pub async fn record_blocking(
+    pool: &sqlx::SqlitePool,
+    category: MetricCategory,
+    name: &str,
+    value_ms: f64,
+    metadata: Option<&str>,
+) {
+    let category = category.to_string();
+    let metadata = metadata.map(|s| s.to_string());
+    let now = chrono::Utc::now().timestamp();
+
+    let _ = sqlx::query(
+        "INSERT INTO performance_metrics (category, name, value_ms, metadata, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+    )
+    .bind(&category)
+    .bind(name)
+    .bind(value_ms)
+    .bind(&metadata)
+    .bind(now)
+    .execute(pool)
+    .await;
 }
 
 /// 计时器 RAII guard：drop 时自动记录耗时。

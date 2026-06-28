@@ -7,11 +7,12 @@
 
 use serde::{Deserialize, Serialize};
 
-/// core → 插件请求。`type` 标签区分 query/cancel。
+/// core → 插件请求。`type` 标签区分 query/cancel/http_response。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[serde(tag = "type")]
 pub enum PluginRequest {
     /// 查询。
+    #[serde(rename = "query")]
     Query {
         id: String,
         query: String,
@@ -23,7 +24,18 @@ pub enum PluginRequest {
         settings: Option<serde_json::Value>,
     },
     /// 取消(core→插件,best-effort:查询超时发送,插件可忽略)。
+    #[serde(rename = "cancel")]
     Cancel { id: String },
+    /// HTTP 响应(core→插件):插件之前发起的 http_request 的结果。
+    #[serde(rename = "http_response")]
+    HttpResponse {
+        id: String,
+        status: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
 }
 
 impl PluginRequest {
@@ -74,6 +86,19 @@ impl PluginQueryContext {
     }
 }
 
+/// 插件 → core 的上行消息(一行 = 一个完整 JSON)。
+/// 包含普通查询响应和插件发起的 HTTP 请求。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PluginUpstreamMessage {
+    /// 查询结果响应(插件→core)。
+    #[serde(rename = "response")]
+    Response(PluginResponse),
+    /// HTTP 请求(插件→core):请求 core 代为发起 HTTP 请求。
+    #[serde(rename = "http_request")]
+    HttpRequest(HttpRequest),
+}
+
 /// 插件 → core 响应(一行 = 一个完整 JSON)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginResponse {
@@ -82,6 +107,22 @@ pub struct PluginResponse {
     pub items: Vec<PluginItem>,
     #[serde(default)]
     pub error: Option<PluginErrorPayload>,
+}
+
+/// 插件发起的 HTTP 请求(通过 core 代理)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpRequest {
+    pub id: String,
+    pub method: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(default = "default_http_timeout")]
+    pub timeout_ms: u64,
+}
+
+fn default_http_timeout() -> u64 {
+    10000
 }
 
 /// 插件返回的错误。
@@ -182,5 +223,54 @@ mod tests {
             PluginRequest::Query { settings, .. } => assert!(settings.is_none()),
             _ => panic!("应是 Query"),
         }
+    }
+
+    #[test]
+    fn wrapped_response_serializes_with_type_tag() {
+        // 新协议：PluginUpstreamMessage::Response 包装响应
+        let resp = PluginResponse {
+            id: "req_1".into(),
+            items: vec![PluginItem {
+                title: "本机 IP".into(),
+                subtitle: None,
+                score: 0.9,
+                action: PluginAction::Copy { text: "192.168.1.5".into() },
+            }],
+            error: None,
+        };
+        let wrapped = PluginUpstreamMessage::Response(resp);
+        let json = serde_json::to_string(&wrapped).unwrap();
+        assert!(json.contains("\"type\":\"response\""));
+        assert!(json.contains("\"id\":\"req_1\""));
+    }
+
+    #[test]
+    fn http_request_serializes_with_type_tag() {
+        let req = HttpRequest {
+            id: "http_1".into(),
+            method: "GET".into(),
+            url: "https://api.example.com".into(),
+            body: None,
+            timeout_ms: 10000,
+        };
+        let wrapped = PluginUpstreamMessage::HttpRequest(req);
+        let json = serde_json::to_string(&wrapped).unwrap();
+        assert!(json.contains("\"type\":\"http_request\""));
+        assert!(json.contains("\"method\":\"GET\""));
+        assert!(json.contains("\"url\":\"https://api.example.com\""));
+    }
+
+    #[test]
+    fn http_response_serializes_with_type_tag() {
+        let resp = PluginRequest::HttpResponse {
+            id: "http_1".into(),
+            status: 200,
+            body: Some("ok".into()),
+            error: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"type\":\"http_response\""));
+        assert!(json.contains("\"status\":200"));
+        assert!(json.contains("\"body\":\"ok\""));
     }
 }
