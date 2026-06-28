@@ -72,10 +72,22 @@ impl StartMenuEngine {
         }
     }
 
-    /// 更新配置（供 SearchService 调用）。
+    /// 更新配置（供 SearchService 调用），并立即触发重新扫描。
     pub fn update_config(&self, config: StartMenuConfig) {
         let mut cfg = self.config.write().unwrap();
         *cfg = config;
+        drop(cfg); // 释放锁，避免死锁
+
+        // 配置变更后立即触发全量扫描（后台异步，不阻塞）
+        let cache = Arc::clone(&self.cache);
+        let config = Arc::clone(&self.config);
+        tauri::async_runtime::spawn(async move {
+            let (depth, include_uwp) = {
+                let cfg = config.read().unwrap();
+                (cfg.scan_depth, cfg.include_uwp)
+            };
+            let _ = tokio::task::spawn_blocking(move || full_scan_into_cache(&cache, depth, include_uwp)).await;
+        });
     }
 
     /// 启动后台:立即预扫一次 + 定时增量刷新。不阻塞调用方。

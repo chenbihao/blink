@@ -15,9 +15,9 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, GetForegroundWindow, GetWindowLongPtrW, GetWindowThreadProcessId,
-    SetWindowLongPtrW, SetWindowPos, GWLP_WNDPROC, GWL_STYLE, HWND_TOP, SET_WINDOW_POS_FLAGS,
-    SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, WNDPROC,
-    WS_CAPTION, WS_THICKFRAME,
+    IsIconic, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_WNDPROC, GWL_STYLE, HWND_TOP,
+    SET_WINDOW_POS_FLAGS, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOACTIVATE, SWP_NOSIZE,
+    SWP_NOZORDER, SW_RESTORE, WNDPROC, WS_CAPTION, WS_THICKFRAME,
 };
 
 const ST_HIDDEN: u8 = 0;
@@ -306,6 +306,15 @@ pub fn clamp_to_work_area(win: &WebviewWindow) {
 /// 统一入口：主窗口搜索结果和托盘菜单都走这里，避免重复代码漏配置。
 pub fn open_settings(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("settings") {
+        // 如果窗口已最小化，先恢复
+        if let Ok(hwnd) = w.hwnd() {
+            let hwnd = HWND(hwnd.0 as _);
+            unsafe {
+                if IsIconic(hwnd).as_bool() {
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                }
+            }
+        }
         let _ = w.show();
         let _ = w.set_focus();
         return;

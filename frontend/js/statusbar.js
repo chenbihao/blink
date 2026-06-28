@@ -18,7 +18,8 @@ export function update(active, paging) {
     return;
   }
 
-  const left = actionHint(active.action);
+  // 左侧：通用导航提示 + 当前项动作提示
+  const left = `${t("hint.navigate")} · ${t("hint.alt_number")} · ${actionHint(active.action)}`;
   // 多于一屏才显示翻页提示
   const right =
     paging.pageCount > 1

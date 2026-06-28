@@ -12,27 +12,33 @@ import * as statusbar from "./statusbar.js";
 import { invoke } from "./tauri.js";
 
 /** 每页条数（对齐 Alt+1~9：每页都能用数字键选中）。 */
-const PAGE_SIZE = 9;
+let PAGE_SIZE = 9;
 
 /** 融合后最大显示条数（AppConfig.max_results）。
  *  后端单次 emit 已截断，但前端 merge 多次增量会累积，故此处对 allItems 再做最终上限。
  *  启动读一次 + lifecycle shown 时 refreshMaxResults 刷新（设置页改动下次唤起生效）。 */
 let maxResults = 50;
 
-(async function loadMaxResults() {
+(async function loadConfig() {
   try {
     const cfg = await invoke("get_config");
-    if (cfg && cfg.max_results) maxResults = cfg.max_results;
+    if (cfg) {
+      if (cfg.max_results) maxResults = cfg.max_results;
+      if (cfg.page_size) PAGE_SIZE = cfg.page_size;
+    }
   } catch (e) {
-    /* 读失败保持默认 20 */
+    /* 读失败保持默认 */
   }
 })();
 
-/** 重新读取 max_results（lifecycle shown 时调用）。 */
+/** 重新读取配置（lifecycle shown 时调用）。 */
 export async function refreshMaxResults() {
   try {
     const cfg = await invoke("get_config");
-    if (cfg && cfg.max_results) maxResults = cfg.max_results;
+    if (cfg) {
+      if (cfg.max_results) maxResults = cfg.max_results;
+      if (cfg.page_size) PAGE_SIZE = cfg.page_size;
+    }
   } catch (e) {
     /* 保持原值 */
   }

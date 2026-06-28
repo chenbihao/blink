@@ -31,7 +31,7 @@
         <div id="general" class="panel active">
           <h2 data-i18n="panel.general">通用</h2>
           <div class="setting-row">
-            <label data-i18n="general.auto_start.label">开机自启</label>
+            <label class="setting-label" data-i18n="general.auto_start.label">开机自启</label>
             <label class="checkbox">
               <input type="checkbox" id="auto-start" />
               <span class="checkmark"></span>
@@ -39,7 +39,7 @@
             <span class="hint" data-i18n="general.auto_start.hint">开机自动启动</span>
           </div>
           <div class="setting-row">
-            <label data-i18n="general.language.label">语言</label>
+            <label class="setting-label" data-i18n="general.language.label">语言</label>
             <select id="language">
               <!-- 语言名用各自语言显示，不参与 i18n -->
               <option value="zh" selected>中文</option>
@@ -48,91 +48,91 @@
             <span class="hint" data-i18n="general.language.hint">界面语言，切换后立即生效</span>
           </div>
           <div class="setting-row">
-            <label data-i18n="general.theme.label">主题</label>
+            <label class="setting-label" data-i18n="general.theme.label">主题</label>
             <select id="theme">
               <option value="auto" data-i18n="general.theme.auto">跟随系统</option>
               <optgroup label="Blink">
                 <option value="light" data-i18n="general.theme.light">浅色</option>
                 <option value="dark" data-i18n="general.theme.dark">深色</option>
-                <option value="gruvbox" data-i18n="general.theme.gruvbox">Gruvbox Dark</option>
+                <option value="gruvbox">Gruvbox Dark</option>
               </optgroup>
               <optgroup label="Nord">
-                <option value="nord-snow-storm" data-i18n="general.theme.nord-snow-storm">Snow Storm</option>
-                <option value="nord-polar-night" data-i18n="general.theme.nord-polar-night">Polar Night</option>
-                <option value="nord-frost" data-i18n="general.theme.nord-frost">Frost</option>
-                <option value="nord-aurora" data-i18n="general.theme.nord-aurora">Aurora</option>
+                <option value="nord-snow-storm">Snow Storm</option>
+                <option value="nord-polar-night">Polar Night</option>
+                <option value="nord-frost">Frost</option>
+                <option value="nord-aurora">Aurora</option>
               </optgroup>
               <optgroup label="NvChad Dark">
-                <option value="nvchad-aquarium" data-i18n="general.theme.nvchad-aquarium">NvChad Aquarium</option>
-                <option value="nvchad-ashes" data-i18n="general.theme.nvchad-ashes">NvChad Ashes</option>
-                <option value="nvchad-bearded-arc" data-i18n="general.theme.nvchad-bearded-arc">NvChad Bearded Arc</option>
-                <option value="nvchad-catppuccin" data-i18n="general.theme.nvchad-catppuccin">NvChad Catppuccin</option>
-                <option value="nvchad-chadracula-evondev" data-i18n="general.theme.nvchad-chadracula-evondev">NvChad Chadracula Evondev</option>
-                <option value="nvchad-chadracula" data-i18n="general.theme.nvchad-chadracula">NvChad Chadracula</option>
-                <option value="nvchad-chadtain" data-i18n="general.theme.nvchad-chadtain">NvChad Chadtain</option>
-                <option value="nvchad-chocolate" data-i18n="general.theme.nvchad-chocolate">NvChad Chocolate</option>
-                <option value="nvchad-dark_horizon" data-i18n="general.theme.nvchad-dark_horizon">NvChad Dark Horizon</option>
-                <option value="nvchad-decay" data-i18n="general.theme.nvchad-decay">NvChad Decay</option>
-                <option value="nvchad-doomchad" data-i18n="general.theme.nvchad-doomchad">NvChad Doomchad</option>
-                <option value="nvchad-everblush" data-i18n="general.theme.nvchad-everblush">NvChad Everblush</option>
-                <option value="nvchad-everforest" data-i18n="general.theme.nvchad-everforest">NvChad Everforest</option>
-                <option value="nvchad-falcon" data-i18n="general.theme.nvchad-falcon">NvChad Falcon</option>
-                <option value="nvchad-flexoki" data-i18n="general.theme.nvchad-flexoki">NvChad Flexoki</option>
-                <option value="nvchad-gatekeeper" data-i18n="general.theme.nvchad-gatekeeper">NvChad Gatekeeper</option>
-                <option value="nvchad-github_dark" data-i18n="general.theme.nvchad-github_dark">NvChad Github Dark</option>
-                <option value="nvchad-gruvbox" data-i18n="general.theme.nvchad-gruvbox">NvChad Gruvbox</option>
-                <option value="nvchad-gruvchad" data-i18n="general.theme.nvchad-gruvchad">NvChad Gruvchad</option>
-                <option value="nvchad-jabuti" data-i18n="general.theme.nvchad-jabuti">NvChad Jabuti</option>
-                <option value="nvchad-jellybeans" data-i18n="general.theme.nvchad-jellybeans">NvChad Jellybeans</option>
-                <option value="nvchad-kanagawa" data-i18n="general.theme.nvchad-kanagawa">NvChad Kanagawa</option>
-                <option value="nvchad-material-darker" data-i18n="general.theme.nvchad-material-darker">NvChad Material Darker</option>
-                <option value="nvchad-melange" data-i18n="general.theme.nvchad-melange">NvChad Melange</option>
-                <option value="nvchad-mito-laser" data-i18n="general.theme.nvchad-mito-laser">NvChad Mito Laser</option>
-                <option value="nvchad-monekai" data-i18n="general.theme.nvchad-monekai">NvChad Monekai</option>
-                <option value="nvchad-monochrome" data-i18n="general.theme.nvchad-monochrome">NvChad Monochrome</option>
-                <option value="nvchad-mountain" data-i18n="general.theme.nvchad-mountain">NvChad Mountain</option>
-                <option value="nvchad-nightfox" data-i18n="general.theme.nvchad-nightfox">NvChad Nightfox</option>
-                <option value="nvchad-nightlamp" data-i18n="general.theme.nvchad-nightlamp">NvChad Nightlamp</option>
-                <option value="nvchad-nightowl" data-i18n="general.theme.nvchad-nightowl">NvChad Nightowl</option>
-                <option value="nvchad-nord" data-i18n="general.theme.nvchad-nord">NvChad Nord</option>
-                <option value="nvchad-oceanic-next" data-i18n="general.theme.nvchad-oceanic-next">NvChad Oceanic Next</option>
-                <option value="nvchad-onedark" data-i18n="general.theme.nvchad-onedark">NvChad Onedark</option>
-                <option value="nvchad-onenord" data-i18n="general.theme.nvchad-onenord">NvChad Onenord</option>
-                <option value="nvchad-oxocarbon" data-i18n="general.theme.nvchad-oxocarbon">NvChad Oxocarbon</option>
-                <option value="nvchad-palenight" data-i18n="general.theme.nvchad-palenight">NvChad Palenight</option>
-                <option value="nvchad-pastelDark" data-i18n="general.theme.nvchad-pastelDark">NvChad Pasteldark</option>
-                <option value="nvchad-pastelbeans" data-i18n="general.theme.nvchad-pastelbeans">NvChad Pastelbeans</option>
-                <option value="nvchad-penumbra_dark" data-i18n="general.theme.nvchad-penumbra_dark">NvChad Penumbra Dark</option>
-                <option value="nvchad-poimandres" data-i18n="general.theme.nvchad-poimandres">NvChad Poimandres</option>
-                <option value="nvchad-radium" data-i18n="general.theme.nvchad-radium">NvChad Radium</option>
-                <option value="nvchad-rosepine" data-i18n="general.theme.nvchad-rosepine">NvChad Rosepine</option>
-                <option value="nvchad-rxyhn" data-i18n="general.theme.nvchad-rxyhn">NvChad Rxyhn</option>
-                <option value="nvchad-solarized_dark" data-i18n="general.theme.nvchad-solarized_dark">NvChad Solarized Dark</option>
-                <option value="nvchad-solarized_osaka" data-i18n="general.theme.nvchad-solarized_osaka">NvChad Solarized Osaka</option>
-                <option value="nvchad-sweetpastel" data-i18n="general.theme.nvchad-sweetpastel">NvChad Sweetpastel</option>
-                <option value="nvchad-tokyodark" data-i18n="general.theme.nvchad-tokyodark">NvChad Tokyodark</option>
-                <option value="nvchad-tokyonight" data-i18n="general.theme.nvchad-tokyonight">NvChad Tokyonight</option>
-                <option value="nvchad-tomorrow_night" data-i18n="general.theme.nvchad-tomorrow_night">NvChad Tomorrow Night</option>
-                <option value="nvchad-tundra" data-i18n="general.theme.nvchad-tundra">NvChad Tundra</option>
-                <option value="nvchad-vscode_dark" data-i18n="general.theme.nvchad-vscode_dark">NvChad Vscode Dark</option>
-                <option value="nvchad-wombat" data-i18n="general.theme.nvchad-wombat">NvChad Wombat</option>
-                <option value="nvchad-yoru" data-i18n="general.theme.nvchad-yoru">NvChad Yoru</option>
+                <option value="nvchad-aquarium">NvChad Aquarium</option>
+                <option value="nvchad-ashes">NvChad Ashes</option>
+                <option value="nvchad-bearded-arc">NvChad Bearded Arc</option>
+                <option value="nvchad-catppuccin">NvChad Catppuccin</option>
+                <option value="nvchad-chadracula-evondev">NvChad Chadracula Evondev</option>
+                <option value="nvchad-chadracula">NvChad Chadracula</option>
+                <option value="nvchad-chadtain">NvChad Chadtain</option>
+                <option value="nvchad-chocolate">NvChad Chocolate</option>
+                <option value="nvchad-dark_horizon">NvChad Dark Horizon</option>
+                <option value="nvchad-decay">NvChad Decay</option>
+                <option value="nvchad-doomchad">NvChad Doomchad</option>
+                <option value="nvchad-everblush">NvChad Everblush</option>
+                <option value="nvchad-everforest">NvChad Everforest</option>
+                <option value="nvchad-falcon">NvChad Falcon</option>
+                <option value="nvchad-flexoki">NvChad Flexoki</option>
+                <option value="nvchad-gatekeeper">NvChad Gatekeeper</option>
+                <option value="nvchad-github_dark">NvChad Github Dark</option>
+                <option value="nvchad-gruvbox">NvChad Gruvbox</option>
+                <option value="nvchad-gruvchad">NvChad Gruvchad</option>
+                <option value="nvchad-jabuti">NvChad Jabuti</option>
+                <option value="nvchad-jellybeans">NvChad Jellybeans</option>
+                <option value="nvchad-kanagawa">NvChad Kanagawa</option>
+                <option value="nvchad-material-darker">NvChad Material Darker</option>
+                <option value="nvchad-melange">NvChad Melange</option>
+                <option value="nvchad-mito-laser">NvChad Mito Laser</option>
+                <option value="nvchad-monekai">NvChad Monekai</option>
+                <option value="nvchad-monochrome">NvChad Monochrome</option>
+                <option value="nvchad-mountain">NvChad Mountain</option>
+                <option value="nvchad-nightfox">NvChad Nightfox</option>
+                <option value="nvchad-nightlamp">NvChad Nightlamp</option>
+                <option value="nvchad-nightowl">NvChad Nightowl</option>
+                <option value="nvchad-nord">NvChad Nord</option>
+                <option value="nvchad-oceanic-next">NvChad Oceanic Next</option>
+                <option value="nvchad-onedark">NvChad Onedark</option>
+                <option value="nvchad-onenord">NvChad Onenord</option>
+                <option value="nvchad-oxocarbon">NvChad Oxocarbon</option>
+                <option value="nvchad-palenight">NvChad Palenight</option>
+                <option value="nvchad-pastelDark">NvChad Pasteldark</option>
+                <option value="nvchad-pastelbeans">NvChad Pastelbeans</option>
+                <option value="nvchad-penumbra_dark">NvChad Penumbra Dark</option>
+                <option value="nvchad-poimandres">NvChad Poimandres</option>
+                <option value="nvchad-radium">NvChad Radium</option>
+                <option value="nvchad-rosepine">NvChad Rosepine</option>
+                <option value="nvchad-rxyhn">NvChad Rxyhn</option>
+                <option value="nvchad-solarized_dark">NvChad Solarized Dark</option>
+                <option value="nvchad-solarized_osaka">NvChad Solarized Osaka</option>
+                <option value="nvchad-sweetpastel">NvChad Sweetpastel</option>
+                <option value="nvchad-tokyodark">NvChad Tokyodark</option>
+                <option value="nvchad-tokyonight">NvChad Tokyonight</option>
+                <option value="nvchad-tomorrow_night">NvChad Tomorrow Night</option>
+                <option value="nvchad-tundra">NvChad Tundra</option>
+                <option value="nvchad-vscode_dark">NvChad Vscode Dark</option>
+                <option value="nvchad-wombat">NvChad Wombat</option>
+                <option value="nvchad-yoru">NvChad Yoru</option>
               </optgroup>
               <optgroup label="NvChad Light">
-                <option value="nvchad-ayu_light" data-i18n="general.theme.nvchad-ayu_light">NvChad Ayu Light</option>
-                <option value="nvchad-blossom_light" data-i18n="general.theme.nvchad-blossom_light">NvChad Blossom Light</option>
-                <option value="nvchad-everforest_light" data-i18n="general.theme.nvchad-everforest_light">NvChad Everforest Light</option>
-                <option value="nvchad-flex-light" data-i18n="general.theme.nvchad-flex-light">NvChad Flex Light</option>
-                <option value="nvchad-flexoki-light" data-i18n="general.theme.nvchad-flexoki-light">NvChad Flexoki Light</option>
-                <option value="nvchad-github_light" data-i18n="general.theme.nvchad-github_light">NvChad Github Light</option>
-                <option value="nvchad-gruvbox_light" data-i18n="general.theme.nvchad-gruvbox_light">NvChad Gruvbox Light</option>
-                <option value="nvchad-material-lighter" data-i18n="general.theme.nvchad-material-lighter">NvChad Material Lighter</option>
-                <option value="nvchad-nano-light" data-i18n="general.theme.nvchad-nano-light">NvChad Nano Light</option>
-                <option value="nvchad-oceanic-light" data-i18n="general.theme.nvchad-oceanic-light">NvChad Oceanic Light</option>
-                <option value="nvchad-one_light" data-i18n="general.theme.nvchad-one_light">NvChad One Light</option>
-                <option value="nvchad-onenord_light" data-i18n="general.theme.nvchad-onenord_light">NvChad Onenord Light</option>
-                <option value="nvchad-penumbra_light" data-i18n="general.theme.nvchad-penumbra_light">NvChad Penumbra Light</option>
-                <option value="nvchad-rosepine-dawn" data-i18n="general.theme.nvchad-rosepine-dawn">NvChad Rosepine Dawn</option>
+                <option value="nvchad-ayu_light">NvChad Ayu Light</option>
+                <option value="nvchad-blossom_light">NvChad Blossom Light</option>
+                <option value="nvchad-everforest_light">NvChad Everforest Light</option>
+                <option value="nvchad-flex-light">NvChad Flex Light</option>
+                <option value="nvchad-flexoki-light">NvChad Flexoki Light</option>
+                <option value="nvchad-github_light">NvChad Github Light</option>
+                <option value="nvchad-gruvbox_light">NvChad Gruvbox Light</option>
+                <option value="nvchad-material-lighter">NvChad Material Lighter</option>
+                <option value="nvchad-nano-light">NvChad Nano Light</option>
+                <option value="nvchad-oceanic-light">NvChad Oceanic Light</option>
+                <option value="nvchad-one_light">NvChad One Light</option>
+                <option value="nvchad-onenord_light">NvChad Onenord Light</option>
+                <option value="nvchad-penumbra_light">NvChad Penumbra Light</option>
+                <option value="nvchad-rosepine-dawn">NvChad Rosepine Dawn</option>
               </optgroup>
               <optgroup label="Genshin">
                 <option value="genshin-kokomi" data-i18n="general.theme.genshin-kokomi">心海</option>
@@ -149,14 +149,14 @@
               </optgroup>
               <optgroup label="Custom">
                 <option value="suzume-journey" data-i18n="general.theme.suzume-journey">铃芽之旅</option>
-                <option value="jay-november" data-i18n="general.theme.jay-november">十一月的萧邦</option>
-                <option value="jay-ye-huimei" data-i18n="general.theme.jay-ye-huimei">叶惠美</option>
+                <option value="jay-november" data-i18n="general.theme.jay-november">Jay 十一月的萧邦</option>
+                <option value="jay-ye-huimei" data-i18n="general.theme.jay-ye-huimei">Jay 叶惠美</option>
               </optgroup>
             </select>
             <span class="hint" data-i18n="general.theme.hint">立即生效</span>
           </div>
           <div class="setting-row">
-            <label data-i18n="general.history_enabled.label">记录搜索历史</label>
+            <label class="setting-label" data-i18n="general.history_enabled.label">记录搜索历史</label>
             <label class="checkbox">
               <input type="checkbox" id="search-history-enabled" />
               <span class="checkmark"></span>
@@ -164,26 +164,37 @@
             <span class="hint" data-i18n="general.history_enabled.hint">关闭后不再记录频率权重</span>
           </div>
           <div class="setting-row">
-            <label data-i18n="general.history_days.label">历史保留天数</label>
+            <label class="setting-label" data-i18n="general.history_days.label">历史保留天数</label>
             <div class="number-input-wrapper">
               <input type="number" id="search-history-days" min="0" max="365" value="180" />
               <div class="number-spinner">
-                <button type="button" class="spinner-up" aria-label="增加">＋</button>
-                <button type="button" class="spinner-down" aria-label="减少">－</button>
+                <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">＋</button>
+                <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">－</button>
               </div>
             </div>
             <span class="hint" data-i18n="general.history_days.hint">0 = 永久保留</span>
           </div>
           <div class="setting-row">
-            <label data-i18n="general.max_results.label">最大结果数</label>
+            <label class="setting-label" data-i18n="general.max_results.label">最大结果数</label>
             <div class="number-input-wrapper">
               <input type="number" id="max-results" min="1" max="100" value="50" />
               <div class="number-spinner">
-                <button type="button" class="spinner-up" aria-label="增加">＋</button>
-                <button type="button" class="spinner-down" aria-label="减少">－</button>
+                <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">＋</button>
+                <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">－</button>
               </div>
             </div>
             <span class="hint" data-i18n="general.max_results.hint">搜索融合后返回上限</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label" data-i18n="general.page_size.label">每页条数</label>
+            <div class="number-input-wrapper">
+              <input type="number" id="page-size" min="1" max="20" value="9" />
+              <div class="number-spinner">
+                <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">＋</button>
+                <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">－</button>
+              </div>
+            </div>
+            <span class="hint" data-i18n="general.page_size.hint">每屏最多显示多少条结果</span>
           </div>
         </div>
 
@@ -191,19 +202,19 @@
         <div id="hotkey" class="panel">
           <h2 data-i18n="panel.hotkey">快捷键</h2>
           <div class="setting-row">
-            <label data-i18n="hotkey.label">唤起快捷键</label>
+            <label class="setting-label" data-i18n="hotkey.label">唤起快捷键</label>
             <div class="hotkey-input-wrapper">
               <button id="hotkey-record" class="hotkey-btn" data-i18n-title="hotkey.record.title" title="点击后按下快捷键">RightAlt</button>
               <button id="hotkey-reset" class="btn-small" data-i18n="hotkey.reset" data-i18n-title="hotkey.reset.title" title="恢复默认">恢复默认</button>
             </div>
           </div>
           <div class="setting-row">
-            <label data-i18n="hotkey.tap.label">tap 阈值</label>
+            <label class="setting-label" data-i18n="hotkey.tap.label">tap 阈值</label>
             <input type="range" id="tap-threshold" min="150" max="500" value="300" step="50" />
             <span id="tap-threshold-value">300ms</span>
           </div>
           <div class="setting-row">
-            <label data-i18n="hotkey.grace.label">看门狗 grace period</label>
+            <label class="setting-label" data-i18n="hotkey.grace.label">看门狗 grace period</label>
             <input type="range" id="grace-ms" min="200" max="1000" value="500" step="50" />
             <span id="grace-ms-value">500ms</span>
           </div>
@@ -231,20 +242,21 @@
               <div class="plugin-config-section">
                 <div class="plugin-section-title" data-i18n="engine.start_menu.config">配置</div>
                 <div class="setting-row">
-                  <label data-i18n="engine.start_menu.scan_depth.label">扫描深度</label>
+                  <label class="setting-label" data-i18n="engine.start_menu.scan_depth.label">扫描深度</label>
                   <div class="number-input-wrapper">
                     <input type="number" id="start-menu-scan-depth" min="1" max="10" value="3" />
                     <div class="number-spinner">
-                      <button type="button" class="spinner-up" aria-label="增加">▲</button>
-                      <button type="button" class="spinner-down" aria-label="减少">▼</button>
+                      <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">▲</button>
+                      <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">▼</button>
                     </div>
                   </div>
                   <span class="hint" data-i18n="engine.start_menu.scan_depth.hint">索引深度，越大越全但越慢</span>
                 </div>
                 <div class="setting-row">
-                  <label>
+                  <label class="setting-label" data-i18n="engine.start_menu.include_uwp.label">包含 UWP/MSIX 应用</label>
+                  <label class="checkbox">
                     <input type="checkbox" id="start-menu-include-uwp" checked />
-                    <span data-i18n="engine.start_menu.include_uwp.label">包含 UWP/MSIX 应用</span>
+                    <span class="checkmark"></span>
                   </label>
                   <span class="hint" data-i18n="engine.start_menu.include_uwp.hint">搜索 Microsoft Store 安装的打包应用</span>
                 </div>
@@ -275,7 +287,7 @@
               <div class="plugin-config-section">
                 <div class="plugin-section-title" data-i18n="engine.file_search.data_source">数据源</div>
                 <div class="setting-row">
-                  <label data-i18n="engine.file_search.data_source.label">搜索模式</label>
+                  <label class="setting-label" data-i18n="engine.file_search.data_source.label">搜索模式</label>
                   <select id="file-search-data-source">
                     <option value="auto" data-i18n="engine.file_search.data_source.auto">自动（优先 Everything，降级本地）</option>
                     <option value="everything" data-i18n="engine.file_search.data_source.everything">仅 Everything</option>
@@ -289,28 +301,28 @@
               <div id="everything-config" class="plugin-config-section">
                 <div class="plugin-section-title">Everything <span class="engine-toggle-hint" data-i18n="engine.everything.hint">（可选，需安装）</span></div>
                 <div class="setting-row">
-                  <label data-i18n="engine.everything.status.label">状态</label>
+                  <label class="setting-label" data-i18n="engine.everything.status.label">状态</label>
                   <span id="everything-status" class="status-badge status-unknown">探测中…</span>
                   <button id="probe-everything" class="btn-small" data-i18n="engine.probe">重新探测</button>
                 </div>
                 <div class="setting-row">
-                  <label data-i18n="engine.everything.port.label">HTTP 端口</label>
+                  <label class="setting-label" data-i18n="engine.everything.port.label">HTTP 端口</label>
                   <div class="number-input-wrapper">
                     <input type="number" id="everything-port" min="1" max="65535" value="80" />
                     <div class="number-spinner">
-                      <button type="button" class="spinner-up" aria-label="增加">▲</button>
-                      <button type="button" class="spinner-down" aria-label="减少">▼</button>
+                      <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">▲</button>
+                      <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">▼</button>
                     </div>
                   </div>
                   <span class="hint" data-i18n="engine.everything.port.hint">Everything 选项 → HTTP 服务器</span>
                 </div>
                 <div class="setting-row">
-                  <label data-i18n="engine.everything.max_results.label">最大结果数</label>
+                  <label class="setting-label" data-i18n="engine.everything.max_results.label">最大结果数</label>
                   <div class="number-input-wrapper">
                     <input type="number" id="everything-max-results" min="1" max="100" value="20" />
                     <div class="number-spinner">
-                      <button type="button" class="spinner-up" aria-label="增加">▲</button>
-                      <button type="button" class="spinner-down" aria-label="减少">▼</button>
+                      <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">▲</button>
+                      <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">▼</button>
                     </div>
                   </div>
                   <span class="hint" data-i18n="engine.everything.max_results.hint">每次检索返回的文件数量上限</span>
@@ -352,18 +364,18 @@
             <div class="extension-body">
               <!-- Python 解释器 -->
               <div class="plugin-config-section">
-                <div class="plugin-section-title">Python</div>
+                <div class="plugin-section-title" data-i18n="engine.python.title">Python</div>
 
                 <div class="setting-row">
-                  <label data-i18n="engine.python.status">当前状态</label>
+                  <label class="setting-label" data-i18n="engine.python.status">当前状态</label>
                   <span id="python-status" class="status-badge status-unknown">探测中…</span>
                   <span id="python-version" class="version-badge" style="display:none"></span>
                   <button id="python-probe" class="btn-small" data-i18n="engine.probe">重新探测</button>
                 </div>
 
                 <div class="setting-row">
-                  <label data-i18n="engine.python.path">Python 路径</label>
-                  <input type="text" id="python-path" class="input-wide" placeholder="自动探测或手动输入..." readonly />
+                  <label class="setting-label" data-i18n="engine.python.path">Python 路径</label>
+                  <input type="text" id="python-path" class="input-wide" data-i18n-ph="engine.python.path.ph" placeholder="自动探测或手动输入..." readonly />
                   <button id="python-browse" class="btn-small" data-i18n="engine.browse">浏览</button>
                 </div>
 
@@ -375,18 +387,18 @@
 
               <!-- Node.js 解释器 -->
               <div class="plugin-config-section">
-                <div class="plugin-section-title">Node.js</div>
+                <div class="plugin-section-title" data-i18n="engine.node.title">Node.js</div>
 
                 <div class="setting-row">
-                  <label data-i18n="engine.node.status">当前状态</label>
+                  <label class="setting-label" data-i18n="engine.node.status">当前状态</label>
                   <span id="node-status" class="status-badge status-unknown">探测中…</span>
                   <span id="node-version" class="version-badge" style="display:none"></span>
                   <button id="node-probe" class="btn-small" data-i18n="engine.probe">重新探测</button>
                 </div>
 
                 <div class="setting-row">
-                  <label data-i18n="engine.node.path">Node 路径</label>
-                  <input type="text" id="node-path" class="input-wide" placeholder="自动探测或手动输入..." readonly />
+                  <label class="setting-label" data-i18n="engine.node.path">Node 路径</label>
+                  <input type="text" id="node-path" class="input-wide" data-i18n-ph="engine.node.path.ph" placeholder="自动探测或手动输入..." readonly />
                   <button id="node-browse" class="btn-small" data-i18n="engine.browse">浏览</button>
                 </div>
 
@@ -427,11 +439,11 @@
         <div id="storage" class="panel">
           <h2 data-i18n="panel.storage">存储</h2>
           <div class="setting-row">
-            <label data-i18n="storage.history.label">历史记录</label>
+            <label class="setting-label" data-i18n="storage.history.label">历史记录</label>
             <span id="history-count" class="value">加载中…</span>
           </div>
           <div class="setting-row">
-            <label data-i18n="storage.db_path.label">数据库路径</label>
+            <label class="setting-label" data-i18n="storage.db_path.label">数据库路径</label>
             <span id="db-path" class="value">-</span>
           </div>
           <div class="setting-row">
@@ -444,7 +456,7 @@
           <h2 data-i18n="panel.debug">调试</h2>
 
           <div class="setting-row">
-            <label data-i18n="log.level.label">日志级别</label>
+            <label class="setting-label" data-i18n="log.level.label">日志级别</label>
             <select id="log-level">
               <option value="error" selected data-i18n="log.level.error">error（仅错误）</option>
               <option value="info" data-i18n="log.level.info">info</option>
@@ -460,7 +472,7 @@
           </div>
 
           <div class="setting-row">
-            <label data-i18n="log.action.label">操作</label>
+            <label class="setting-label" data-i18n="log.action.label">操作</label>
             <button id="open-log-file" class="btn" data-i18n="log.open_file">打开日志</button>
             <button id="open-log-dir" class="btn" data-i18n="log.open_dir">打开文件夹</button>
           </div>
@@ -509,15 +521,15 @@
         <div id="about" class="panel">
           <h2 data-i18n="panel.about">关于</h2>
           <div class="setting-row">
-            <label data-i18n="about.version.label">版本</label>
+            <label class="setting-label" data-i18n="about.version.label">版本</label>
             <span class="value">0.1.0 MVP</span>
           </div>
           <div class="setting-row">
-            <label data-i18n="about.stack.label">技术栈</label>
+            <label class="setting-label" data-i18n="about.stack.label">技术栈</label>
             <span class="value">Rust 2024 + Tauri 2 + WebView2</span>
           </div>
           <div class="setting-row">
-            <label data-i18n="about.license.label">许可</label>
+            <label class="setting-label" data-i18n="about.license.label">许可</label>
             <span class="value">MIT</span>
           </div>
         </div>

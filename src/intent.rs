@@ -135,6 +135,55 @@ impl RuleRouter {
         });
     }
 
+    /// 删除某个插件的所有规则（热更新时用）。
+    pub fn remove_plugin_rules(&self, plugin_id: &str) {
+        let mut rules = self.rules.write().unwrap();
+        rules.retain(|r| r.plugin_id != plugin_id);
+    }
+
+    /// 重新加载某个插件的触发规则（热更新）。
+    pub fn reload_plugin_triggers(
+        &self,
+        plugin_id: &str,
+        triggers: &[crate::plugin::PluginTrigger],
+    ) {
+        // 先删旧规则
+        self.remove_plugin_rules(plugin_id);
+
+        // 再加新规则
+        for trigger in triggers {
+            match trigger {
+                crate::plugin::PluginTrigger::Keyword { keyword, exclusive } => {
+                    let surface = if *exclusive {
+                        Surface::Auto
+                    } else {
+                        Surface::Inline
+                    };
+                    self.add_keyword_rule(
+                        plugin_id.to_string(),
+                        keyword.clone(),
+                        surface,
+                        SurfaceView::List,
+                    );
+                }
+                crate::plugin::PluginTrigger::Regex { pattern, exclusive } => {
+                    let surface = if *exclusive {
+                        Surface::Auto
+                    } else {
+                        Surface::Inline
+                    };
+                    let _ = self.add_regex_rule(
+                        plugin_id.to_string(),
+                        pattern,
+                        surface,
+                        SurfaceView::List,
+                    );
+                }
+            }
+        }
+        tracing::debug!(plugin_id, count = triggers.len(), "插件触发规则已重载");
+    }
+
     /// 从 manifest 注入 regex 规则。pattern 编译失败时返回 Err(描述),调用方可 warn! 跳过。
     pub fn add_regex_rule(
         &self,

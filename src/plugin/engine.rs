@@ -93,12 +93,26 @@ impl PluginEngine {
                     })
                     .collect();
 
+                let config = self.get_config(&manifest.id).unwrap_or_default();
+                let custom_triggers: Vec<serde_json::Value> = config
+                    .custom_triggers
+                    .iter()
+                    .map(|t| {
+                        serde_json::json!({
+                            "keyword": t.keyword,
+                            "enabled": t.enabled,
+                        })
+                    })
+                    .collect();
+
                 serde_json::json!({
                     "id": manifest.id,
                     "name": manifest.name,
                     "version": manifest.version,
                     "description": manifest.description,
                     "triggers": triggers,
+                    "custom_triggers": custom_triggers,
+                    "disabled_default_triggers": config.disabled_default_triggers,
                     "enabled": self.is_enabled(&manifest.id),
                     "settings": self.get_settings(&manifest.id),
                     "settings_schema": schema,
@@ -181,10 +195,8 @@ impl PluginEngine {
                 }
                 None => {
                     // 默认 settings 从 manifest.settings_schema 生成(无 schema 则 null)
-                    let default = crate::config::PluginConfig {
-                        enabled: true,
-                        settings: plugin.manifest().default_settings(),
-                    };
+                    let mut default = crate::config::PluginConfig::default();
+                    default.settings = plugin.manifest().default_settings();
                     match crate::config::set_plugin_config(&self.pool, id, &default).await {
                         Ok(()) => tracing::info!(plugin = %id, "初始化插件配置(默认)"),
                         Err(e) => tracing::warn!(plugin = %id, error = %e, "写默认插件配置失败"),
@@ -200,12 +212,23 @@ impl PluginEngine {
         &self,
         plugin_id: &str,
         config: crate::config::PluginConfig,
+        router: Option<&crate::intent::RuleRouter>,
     ) -> Result<(), String> {
         crate::config::set_plugin_config(&self.pool, plugin_id, &config).await?;
         self.configs
             .write()
             .unwrap()
-            .insert(plugin_id.to_string(), config);
+            .insert(plugin_id.to_string(), config.clone());
+
+        // 如果传入了 router，热更新触发规则
+        if let Some(r) = router {
+            if let Some(manifest) = self.get_manifest(plugin_id) {
+                let effective_triggers = config.effective_triggers(&manifest.triggers);
+                r.reload_plugin_triggers(plugin_id, &effective_triggers);
+                tracing::info!(plugin = %plugin_id, "插件配置更新,触发规则已热重载");
+            }
+        }
+
         Ok(())
     }
 
@@ -217,6 +240,19 @@ impl PluginEngine {
             .get(id)
             .map(|c| c.enabled)
             .unwrap_or(true)
+    }
+
+    /// 获取插件完整配置（含自定义 triggers）。
+    pub fn get_config(&self, id: &str) -> Option<crate::config::PluginConfig> {
+        self.configs.read().unwrap().get(id).cloned()
+    }
+
+    /// 获取插件的 manifest。
+    pub fn get_manifest(&self, id: &str) -> Option<super::PluginManifest> {
+        self.plugins
+            .iter()
+            .find(|p| p.id() == id)
+            .map(|p| p.manifest().clone())
     }
 
     /// 获取插件的显示名称(manifest.name),回退为 plugin_id。

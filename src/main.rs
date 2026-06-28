@@ -164,6 +164,9 @@ fn main() {
                 else { None }
             });
             let plugins = plugin::load_builtin_plugins(app.handle(), proxy.clone());
+            // 构造意图路由 RuleRouter,从插件 manifest 注入规则(合并用户自定义 triggers)。
+            let router = std::sync::Arc::new(intent::RuleRouter::new(app_config.surface_takeover_enabled));
+
             let plugin_engine = if plugins.is_empty() {
                 None
             } else {
@@ -173,56 +176,21 @@ fn main() {
                 tauri::async_runtime::block_on(crate::history::migrate_0_4_to_0_5(&pool, &plugins));
                 // 加载/初始化每个插件配置(不存在则写默认 {enabled, settings:null})。
                 tauri::async_runtime::block_on(engine.init_configs());
-                Some(engine)
-            };
 
-            // 构造意图路由 RuleRouter,从插件 manifest 注入规则。
-            let router = std::sync::Arc::new(intent::RuleRouter::new(app_config.surface_takeover_enabled));
-            for plugin in &plugins {
-                // 跳过启动时已禁用的插件(不注入其 keyword 规则,输其触发词走 Generic)。
-                // 注:运行时禁用的插件规则已注入,Takeover 命中后由 query_subset 跳过查询;
-                //    该路径 Takeover 空白为已知限制(需 RuleRouter remove API,见 0.5 §3.1 / 0.2 §3.7 B5)。
-                if let Some(ref pe) = plugin_engine {
-                    if !pe.is_enabled(plugin.id()) {
+                // 注入规则到 RuleRouter（合并 manifest triggers + 用户自定义 triggers）
+                for plugin in &plugins {
+                    if !engine.is_enabled(plugin.id()) {
                         tracing::debug!(plugin = %plugin.id(), "插件已禁用,跳过规则注入");
                         continue;
                     }
+                    // 读取配置（含自定义 triggers）
+                    let config = engine.get_config(plugin.id()).unwrap_or_default();
+                    let effective_triggers = config.effective_triggers(&plugin.manifest().triggers);
+                    router.reload_plugin_triggers(plugin.id(), &effective_triggers);
                 }
-                for trigger in &plugin.manifest().triggers {
-                    match trigger {
-                        plugin::PluginTrigger::Keyword { keyword, exclusive } => {
-                            // 向后兼容:旧 exclusive=true→Auto(无参 priority / 带参 takeover),
-                            // false→Inline(始终混排)。
-                            let surface = if *exclusive {
-                                intent::Surface::Auto
-                            } else {
-                                intent::Surface::Inline
-                            };
-                            router.add_keyword_rule(
-                                plugin.id().to_string(),
-                                keyword.clone(),
-                                surface,
-                                intent::SurfaceView::List,
-                            );
-                        }
-                        plugin::PluginTrigger::Regex { pattern, exclusive } => {
-                            let surface = if *exclusive {
-                                intent::Surface::Auto
-                            } else {
-                                intent::Surface::Inline
-                            };
-                            if let Err(e) = router.add_regex_rule(
-                                plugin.id().to_string(),
-                                pattern,
-                                surface,
-                                intent::SurfaceView::List,
-                            ) {
-                                tracing::warn!(plugin = %plugin.id(), error = %e, "regex trigger 注入失败,跳过");
-                            }
-                        }
-                    }
-                }
-            }
+
+                Some(engine)
+            };
 
             // 构造三层搜索引擎配置（应用搜索 / 文件搜索 / 计算器）
             let start_menu_config = tauri::async_runtime::block_on(config::get_start_menu_config(&pool));
@@ -247,7 +215,7 @@ fn main() {
                 pool.clone(),
                 search::build_engines(engine_configs),
                 plugin_engine.clone(),
-                router,
+                router.clone(),
             ));
             app.manage(search_service.clone());
             // 初始化 SearchService 的 max_results 内存值（来自 AppConfig，搜索热路径零 IO）
@@ -266,6 +234,8 @@ fn main() {
             // 注入 ContextConfig 内存缓存：invoke 热键回调零 IO 读它（热更新见 update_context_config）
             let context_config = tauri::async_runtime::block_on(config::get_context_config(&pool));
             app.manage(std::sync::Arc::new(std::sync::RwLock::new(context_config)));
+            // RuleRouter 单独注册供设置页 API 用（triggers 热更新）
+            app.manage(router.clone());
             // PluginEngine 单独注册供设置页 API 用
             app.manage(plugin_engine);
 
@@ -367,7 +337,10 @@ fn main() {
             commands::get_perf_recent,
             commands::export_perf_report,
             commands::clear_perf_data,
-            commands::open_url
+            commands::open_url,
+            commands::toggle_default_trigger,
+            commands::add_custom_trigger,
+            commands::delete_custom_trigger
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

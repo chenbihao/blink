@@ -122,6 +122,12 @@ function applyConfigToUI(config) {
     maxResultsEl.value = config.max_results;
   }
 
+  // 每页显示条数
+  const pageSizeEl = document.getElementById("page-size");
+  if (pageSizeEl && config.page_size !== undefined) {
+    pageSizeEl.value = config.page_size;
+  }
+
   // 应用主题（设置页本身即时正确显示）
   applyTheme(config.theme || "auto");
 
@@ -492,17 +498,17 @@ async function loadPlugins() {
   initSortableLists();
 }
 
-// 渲染单个插件卡片（0.5.1：头部总开关 + 配置区分组；boolean 用 checkbox 区别于总开关）
+// 渲染单个插件卡片（0.5.1：头部总开关 + 触发词标签嵌入描述行 + 配置区分组）
 function renderPluginCard(plugin) {
   const icon = PLUGIN_ICONS[plugin.id] || "🔌";
-  const triggers = plugin.triggers && plugin.triggers.length > 0
-    ? t("plugin.trigger", { kw: plugin.triggers.join(" / ") })
-    : t("plugin.no_trigger");
   const desc = plugin.description || t("plugin.desc_default");
   const enabled = plugin.enabled !== false;
   const schema = plugin.settings_schema || [];
   const settings = plugin.settings || {};
   const hasFields = schema.length > 0;
+
+  // 触发关键字标签（直接嵌入头部描述栏）
+  const triggersTags = renderTriggersTags(plugin);
 
   const configSection = hasFields
     ? renderConfigSection(t("plugin.section"), schema, settings, { saveLabel: t("plugin.save"), collapsible: true, collapsed: true })
@@ -518,13 +524,59 @@ function renderPluginCard(plugin) {
 
   return renderExtensionCard({
     icon,
-    title: `${escapeHtml(plugin.name || plugin.id)}<span class="version-badge">v${escapeHtml(plugin.version || "1.0.0")}</span>`,
-    desc: escapeHtml(triggers),
+    title: `${escapeHtml(plugin.name || plugin.id)}<span class="version-badge">v${escapeHtml(plugin.version || "1.0.0")}</span>${triggersTags}`,
+    desc: `<div class="plugin-desc-text">${escapeHtml(desc)}</div>`,
     headerRight,
     attrs: `data-plugin-id="${plugin.id}"`,
     classes: enabled ? "" : "is-disabled",
-    body: `<div class="plugin-desc-line">${escapeHtml(desc)}</div>${configSection}`,
+    body: configSection,
   });
+}
+
+// 渲染触发关键字标签行（嵌入描述栏，极简设计）
+function renderTriggersTags(plugin) {
+  const defaultTriggers = plugin.triggers || [];
+  const customTriggers = plugin.custom_triggers || [];
+  const disabledDefaults = plugin.disabled_default_triggers || [];
+  const hasTriggers = defaultTriggers.length > 0 || customTriggers.length > 0;
+
+  if (!hasTriggers) {
+    // 没有触发词的情况：只显示添加按钮
+    return `<span class="plugin-triggers-row">
+      <span class="trigger-label">${t("plugin.trigger_label")}</span>
+      <button class="trigger-add-inline-btn" title="${t("plugin.trigger_add")}">
+        ${t("plugin.trigger_add_label")}
+      </button>
+      <input type="text" class="trigger-add-inline-input" style="display:none;" placeholder="${t("plugin.trigger_placeholder")}" />
+    </span>`;
+  }
+
+  const triggersHtml = [
+    // 标签前缀
+    `<span class="trigger-label">${t("plugin.trigger_label")}</span>`,
+    // 默认触发词标签
+    ...defaultTriggers.map(kw => {
+      const isDisabled = disabledDefaults.includes(kw);
+      return `<span class="trigger-tag ${isDisabled ? "trigger-tag-disabled" : ""}" data-keyword="${escapeAttr(kw)}" data-type="default">
+        <span class="trigger-tag-text">${escapeHtml(kw)}</span>
+        <button class="trigger-tag-btn" title="${isDisabled ? t("plugin.trigger_restore") : t("plugin.trigger_disable")}" data-keyword="${escapeAttr(kw)}">
+          ${isDisabled ? "↻" : "×"}
+        </button>
+      </span>`;
+    }),
+    // 自定义触发词标签
+    ...customTriggers.map((trigger, i) => `<span class="trigger-tag trigger-tag-custom ${trigger.enabled ? "" : "trigger-tag-disabled"}" data-keyword="${escapeAttr(trigger.keyword)}" data-idx="${i}">
+      <span class="trigger-tag-text">${escapeHtml(trigger.keyword)}</span>
+      <button class="trigger-tag-btn trigger-tag-btn-delete" title="${t("plugin.trigger_delete")}" data-keyword="${escapeAttr(trigger.keyword)}" data-idx="${i}">
+        ×
+      </button>
+    </span>`),
+    // 添加按钮（小号）
+    `<button class="trigger-add-tag-btn" title="${t("plugin.trigger_add")}">+</button>
+    <input type="text" class="trigger-add-inline-input" style="display:none;" placeholder="${t("plugin.trigger_placeholder")}" />`
+  ].join("");
+
+  return `<span class="plugin-triggers-row">${triggersHtml}</span>`;
 }
 
 // 渲染单个配置项控件（boolean→checkbox 方框, enum→下拉, number/string→输入框, sortable_list→可拖动列表）
@@ -552,7 +604,7 @@ function renderSettingField(field, value) {
       break;
     }
     case "number":
-      control = `<div class="number-input-wrapper"><input type="number" class="plugin-field" data-key="${field.key}" value="${escapeAttr(val ?? "")}" ${field.min != null ? `min="${field.min}"` : ""} ${field.max != null ? `max="${field.max}"` : ""} /><div class="number-spinner"><button type="button" class="spinner-up" aria-label="增加">＋</button><button type="button" class="spinner-down" aria-label="减少">－</button></div></div>`;
+      control = `<div class="number-input-wrapper"><input type="number" class="plugin-field" data-key="${field.key}" value="${escapeAttr(val ?? "")}" ${field.min != null ? `min="${field.min}"` : ""} ${field.max != null ? `max="${field.max}"` : ""} /><div class="number-spinner"><button type="button" class="spinner-up" aria-label="${t("spinner.increase")}">＋</button><button type="button" class="spinner-down" aria-label="${t("spinner.decrease")}">－</button></div></div>`;
       break;
     case "string":
     default:
@@ -877,7 +929,7 @@ function renderExtensionCard({ icon, title, desc, headerRight = "", attrs = "", 
     </div>`;
 }
 
-// 绑定单个插件卡片的事件（enabled 开关 + 保存 settings）
+// 绑定单个插件卡片的事件（enabled 开关 + 保存 settings + triggers 配置）
 function bindPluginCardEvents(plugin) {
   const card = document.querySelector(`.extension-card[data-plugin-id="${plugin.id}"]`);
   if (!card) return;
@@ -908,6 +960,141 @@ function bindPluginCardEvents(plugin) {
     if (ok) {
       clearUnsaved(card);
       flash(card, t("plugin.saved_msg"));
+    }
+  });
+
+  // ==== 触发关键字相关事件（极简标签设计） ====
+
+  // 默认触发词的 ban/恢复按钮
+  card.querySelectorAll(".trigger-tag-btn:not(.trigger-tag-btn-delete)").forEach(btn => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const keyword = btn.dataset.keyword;
+      const tag = btn.closest(".trigger-tag");
+      if (!tag || !keyword) return; // 防御性检查
+      const isDisabled = tag.classList.contains("trigger-tag-disabled");
+
+      // 加载态反馈
+      const originalContent = btn.innerHTML;
+      btn.innerHTML = "⋯";
+      btn.disabled = true;
+
+      try {
+        await invoke("toggle_default_trigger", {
+          pluginId: id,
+          keyword,
+          disabled: !isDisabled,
+        });
+        // 更新 UI
+        tag.classList.toggle("trigger-tag-disabled", !isDisabled);
+        btn.innerHTML = !isDisabled ? "↻" : "×";
+        btn.title = !isDisabled ? t("plugin.trigger_restore") : t("plugin.trigger_disable");
+      } catch (err) {
+        console.error("toggle_default_trigger failed:", err);
+        btn.innerHTML = originalContent;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
+
+  // 自定义触发词的删除按钮
+  card.querySelectorAll(".trigger-tag-btn-delete").forEach(btn => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const tag = btn.closest(".trigger-tag");
+      const keyword = btn.dataset.keyword;
+      if (!tag || !keyword) return;
+
+      try {
+        await invoke("delete_custom_trigger", { pluginId: id, keyword });
+        tag.remove();
+      } catch (err) {
+        console.error("delete_custom_trigger failed:", err);
+      }
+    });
+  });
+
+  // 内联添加触发词（点击 + 按钮显示输入框）
+  const addBtnInline = card.querySelector(".trigger-add-tag-btn");
+  const addBtnText = card.querySelector(".trigger-add-inline-btn");
+  const addInputInline = card.querySelector(".trigger-add-inline-input");
+  const triggersRow = card.querySelector(".plugin-triggers-row");
+
+  // 处理两种添加按钮：标签型 + 文本型
+  [addBtnInline, addBtnText].filter(Boolean).forEach(btn => {
+    btn.addEventListener("click", () => {
+      if (addInputInline) {
+        addInputInline.style.display = "inline-block";
+        addInputInline.focus();
+        btn.style.display = "none";
+      }
+    });
+  });
+
+  // 回车添加
+  addInputInline?.addEventListener("keydown", async (e) => {
+    if (e.key !== "Enter") return;
+    const kw = (e.target.value || "").trim();
+    if (!kw) return;
+
+    try {
+      await invoke("add_custom_trigger", { pluginId: id, keyword: kw });
+
+      // 插入新标签
+      const newTag = document.createElement("span");
+      newTag.className = "trigger-tag trigger-tag-custom";
+      newTag.innerHTML = `
+        <span class="trigger-tag-text">${escapeHtml(kw)}</span>
+        <button class="trigger-tag-btn trigger-tag-btn-delete" title="${t("plugin.trigger_delete")}" data-keyword="${escapeAttr(kw)}">
+          ×
+        </button>
+      `;
+
+      // 插入到添加按钮前面
+      const addBtn = triggersRow?.querySelector(".trigger-add-tag-btn, .trigger-add-inline-btn");
+      if (addBtn && triggersRow) {
+        triggersRow.insertBefore(newTag, addBtn);
+      } else if (triggersRow) {
+        triggersRow.appendChild(newTag);
+      }
+
+      // 绑定删除事件
+      newTag.querySelector(".trigger-tag-btn-delete")?.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        try {
+          await invoke("delete_custom_trigger", { pluginId: id, keyword: kw });
+          newTag.remove();
+        } catch (err) {
+          console.error("delete_custom_trigger failed:", err);
+        }
+      });
+
+      // 重置输入框
+      e.target.value = "";
+      e.target.style.display = "none";
+      if (addBtnInline) addBtnInline.style.display = "inline-flex";
+      if (addBtnText) addBtnText.style.display = "inline-block";
+    } catch (err) {
+      console.error("add_custom_trigger failed:", err);
+    }
+  });
+
+  // 点击其他地方/ESC 取消添加
+  addInputInline?.addEventListener("blur", (e) => {
+    setTimeout(() => {
+      if (!e.target.value.trim()) {
+        e.target.style.display = "none";
+        if (addBtnInline) addBtnInline.style.display = "inline-flex";
+        if (addBtnText) addBtnText.style.display = "inline-block";
+      }
+    }, 200);
+  });
+
+  addInputInline?.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.target.value = "";
+      e.target.blur();
     }
   });
 }
@@ -977,7 +1164,6 @@ function flash(card, msg, isError) {
 
 // ── 待保存提示 ─────────────────────────────────────────────────────────────────
 
-const UNSAVED_TEXT = "待保存";
 
 /** 标记字段为"待保存"（在 field-title 内部末尾追加红色 badge） */
 function markUnsaved(fieldEl) {
@@ -989,7 +1175,7 @@ function markUnsaved(fieldEl) {
   if (title.querySelector(".unsaved-badge")) return;
   const badge = document.createElement("span");
   badge.className = "unsaved-badge";
-  badge.textContent = UNSAVED_TEXT;
+  badge.textContent = t("plugin.unsaved");
   title.appendChild(badge);
 }
 
@@ -1018,7 +1204,7 @@ document.addEventListener("input", (e) => {
       if (label && !label.querySelector(".unsaved-badge")) {
         const badge = document.createElement("span");
         badge.className = "unsaved-badge";
-        badge.textContent = UNSAVED_TEXT;
+        badge.textContent = t("plugin.unsaved");
         label.appendChild(badge);
       }
     }
@@ -1033,7 +1219,7 @@ document.getElementById("file-search-data-source")?.addEventListener("change", (
     if (label && !label.querySelector(".unsaved-badge")) {
       const badge = document.createElement("span");
       badge.className = "unsaved-badge";
-      badge.textContent = UNSAVED_TEXT;
+      badge.textContent = t("plugin.unsaved");
       label.appendChild(badge);
     }
   }
@@ -1047,7 +1233,7 @@ document.getElementById("start-menu-enabled")?.addEventListener("change", () => 
   if (desc && !desc.nextElementSibling?.classList?.contains("unsaved-badge")) {
     const badge = document.createElement("span");
     badge.className = "unsaved-badge";
-    badge.textContent = UNSAVED_TEXT;
+    badge.textContent = t("plugin.unsaved");
     desc.after(badge);
   }
 });
@@ -1061,7 +1247,7 @@ document.getElementById("file-search-enabled")?.addEventListener("change", () =>
   if (desc && !desc.nextElementSibling?.classList?.contains("unsaved-badge")) {
     const badge = document.createElement("span");
     badge.className = "unsaved-badge";
-    badge.textContent = UNSAVED_TEXT;
+    badge.textContent = t("plugin.unsaved");
     desc.after(badge);
   }
 });
@@ -1231,6 +1417,7 @@ function readGeneral() {
     searchHistoryEnabled: checked("search-history-enabled", true),
     searchHistoryDays: parseInt(val("search-history-days", "30"), 10) || 0,
     maxResults: parseInt(val("max-results", "50"), 10) || 50,
+    pageSize: parseInt(val("page-size", "9"), 10) || 9,
   };
 }
 
@@ -1305,6 +1492,19 @@ if (maxResultsInput) {
       if (currentConfig) currentConfig.max_results = g.maxResults;
     } catch (err) {
       console.error("update_general_config (max results) failed:", err);
+    }
+  });
+}
+
+const pageSizeInput = document.getElementById("page-size");
+if (pageSizeInput) {
+  pageSizeInput.addEventListener("change", async () => {
+    try {
+      const g = readGeneral();
+      await invoke("update_general_config", g);
+      if (currentConfig) currentConfig.page_size = g.pageSize;
+    } catch (err) {
+      console.error("update_general_config (page size) failed:", err);
     }
   });
 }
@@ -1461,7 +1661,7 @@ document.getElementById("save-file-search")?.addEventListener("click", async () 
   if (port < 1 || port > 65535) {
     const msgEl = document.getElementById("file-search-save-msg");
     if (msgEl) {
-      msgEl.textContent = "端口号必须在 1-65535 之间";
+      msgEl.textContent = t("error.port_range");
       msgEl.style.color = "#f38ba8";
       setTimeout(() => { msgEl.textContent = ""; }, 3000);
     }
@@ -1608,25 +1808,20 @@ document.getElementById("perf-refresh")?.addEventListener("click", () => {
 // 导出报告按钮
 document.getElementById("perf-export")?.addEventListener("click", async () => {
   try {
-    const report = await invoke("export_perf_report");
-    // 创建下载
-    const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `blink-perf-report-${new Date().toISOString().slice(0, 10)}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    const path = await invoke("export_perf_report");
+    if (!path) {
+      return; // 用户取消了
+    }
 
-    // 显示提示
+    // 显示提示（带保存路径）
     const btn = document.getElementById("perf-export");
     if (btn) {
       const original = btn.textContent;
       btn.textContent = t("debug.perf.exported");
       setTimeout(() => { btn.textContent = original; }, 2000);
     }
+
+    console.log("性能报告已保存到:", path);
   } catch (e) {
     console.error("export_perf_report failed:", e);
   }
@@ -1683,10 +1878,10 @@ function updateInterpreterUI(type, status) {
 async function browseInterpreter(kind) {
   try {
     const selected = await invoke("open_file_dialog", {
-      title: `选择 ${kind} 可执行文件`,
+      title: t(`file_dialog.${kind}_title`),
       filters: [
         {
-          name: "可执行文件",
+          name: t("file_dialog.exe_filter"),
           extensions: ["exe"]
         }
       ]

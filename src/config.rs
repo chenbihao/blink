@@ -60,6 +60,10 @@ fn default_50() -> u32 {
     50
 }
 
+fn default_page_size() -> u32 {
+    9
+}
+
 fn default_3() -> u32 {
     3
 }
@@ -225,6 +229,9 @@ pub struct AppConfig {
     /// 最多显示结果数
     #[serde(default = "default_50")]
     pub max_results: u32,
+    /// 每页显示结果数
+    #[serde(default = "default_page_size")]
+    pub page_size: u32,
     /// 是否启用主动建议（空 query 历史 top-N）
     #[serde(default = "default_false")]
     pub proactive_enabled: bool,
@@ -250,6 +257,7 @@ impl Default for AppConfig {
             search_history_enabled: default_true(),
             search_history_days: default_30(),
             max_results: default_50(),
+            page_size: default_page_size(),
             proactive_enabled: default_false(),
             empty_query_topn: default_5(),
             clipboard: crate::clipboard::ClipboardConfig::default(),
@@ -270,6 +278,8 @@ pub struct GeneralConfig {
     pub search_history_days: u32,
     /// 融合后返回前端的最大结果数
     pub max_results: u32,
+    /// 每页显示结果数
+    pub page_size: u32,
 }
 
 impl From<&AppConfig> for GeneralConfig {
@@ -279,6 +289,7 @@ impl From<&AppConfig> for GeneralConfig {
             search_history_enabled: c.search_history_enabled,
             search_history_days: c.search_history_days,
             max_results: c.max_results,
+            page_size: c.page_size,
         }
     }
 }
@@ -378,6 +389,7 @@ pub async fn update_general_config(pool: &SqlitePool, general: &GeneralConfig) -
     config.search_history_enabled = general.search_history_enabled;
     config.search_history_days = general.search_history_days;
     config.max_results = general.max_results;
+    config.page_size = general.page_size;
     save_config(pool, &config).await
 }
 
@@ -458,12 +470,64 @@ fn default_null() -> serde_json::Value {
     serde_json::Value::Null
 }
 
+/// 用户自定义触发关键字。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomTrigger {
+    /// 触发关键字
+    pub keyword: String,
+    /// 是否启用
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 呈现模式覆盖：auto/inline/priority/takeover（None 用默认）
+    #[serde(default)]
+    pub surface: Option<String>,
+}
+
 /// 插件独立配置。settings 是 free-form JSON（manifest 声明 schema,core 只存不解释）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "CompatPluginConfig")]
 pub struct PluginConfig {
     pub enabled: bool,
     #[serde(default = "default_null")]
     pub settings: serde_json::Value,
+    /// 已禁用的默认触发词列表（用户 ban 掉的）
+    #[serde(default)]
+    pub disabled_default_triggers: Vec<String>,
+    /// 用户自定义触发关键字
+    #[serde(default)]
+    pub custom_triggers: Vec<CustomTrigger>,
+}
+
+/// 兼容旧配置格式（用于数据迁移：disable_default_triggers: bool → disabled_default_triggers: Vec<String>）
+#[derive(Debug, Deserialize)]
+struct CompatPluginConfig {
+    pub enabled: bool,
+    #[serde(default = "default_null")]
+    pub settings: serde_json::Value,
+    // 旧格式：bool（是否禁用所有默认触发词）
+    #[serde(default)]
+    pub disable_default_triggers: Option<bool>,
+    // 新格式：Vec<String>（被 ban 的具体触发词列表）
+    #[serde(default)]
+    pub disabled_default_triggers: Option<Vec<String>>,
+    #[serde(default)]
+    pub custom_triggers: Vec<CustomTrigger>,
+}
+
+impl From<CompatPluginConfig> for PluginConfig {
+    fn from(compat: CompatPluginConfig) -> Self {
+        // 优先用新格式；如果是旧格式且为 true，则暂时用空列表（下次保存时自动迁移）
+        let disabled_default_triggers = compat
+            .disabled_default_triggers
+            .unwrap_or_default();
+
+        Self {
+            enabled: compat.enabled,
+            settings: compat.settings,
+            disabled_default_triggers,
+            custom_triggers: compat.custom_triggers,
+        }
+    }
 }
 
 impl Default for PluginConfig {
@@ -471,6 +535,8 @@ impl Default for PluginConfig {
         Self {
             enabled: true,
             settings: serde_json::Value::Null,
+            disabled_default_triggers: Vec::new(),
+            custom_triggers: Vec::new(),
         }
     }
 }
@@ -508,6 +574,43 @@ pub async fn get_all_plugin_config(pool: &SqlitePool) -> Vec<(String, PluginConf
             Some((id.to_string(), cfg))
         })
         .collect()
+}
+
+impl PluginConfig {
+    /// 合并 manifest triggers 和自定义 triggers，返回最终生效列表。
+    pub fn effective_triggers(
+        &self,
+        manifest_triggers: &[crate::plugin::PluginTrigger],
+    ) -> Vec<crate::plugin::PluginTrigger> {
+        let mut result = Vec::new();
+
+        // 1. 加默认 triggers（排除被 ban 的）
+        for trigger in manifest_triggers {
+            match trigger {
+                crate::plugin::PluginTrigger::Keyword { keyword, .. } => {
+                    if self.disabled_default_triggers.contains(keyword) {
+                        continue;
+                    }
+                    result.push(trigger.clone());
+                }
+                crate::plugin::PluginTrigger::Regex { .. } => {
+                    result.push(trigger.clone());
+                }
+            }
+        }
+
+        // 2. 加自定义 triggers
+        for ct in &self.custom_triggers {
+            if ct.enabled {
+                result.push(crate::plugin::PluginTrigger::Keyword {
+                    keyword: ct.keyword.clone(),
+                    exclusive: true,
+                });
+            }
+        }
+
+        result
+    }
 }
 
 // ── Context 层配置（0.5.2，见 0.5 设计 §2.5）───────────────────────────────────

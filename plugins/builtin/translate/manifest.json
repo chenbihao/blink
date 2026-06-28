@@ -15,8 +15,8 @@
     "concurrency": 1
   },
   "triggers": [
-    { "type": "keyword", "keyword": "fy", "exclusive": true },
-    { "type": "keyword", "keyword": "翻译", "exclusive": true }
+    { "type": "keyword", "keyword": "翻译", "exclusive": true },
+    { "type": "keyword", "keyword": "translate", "exclusive": true }
   ],
   "capabilities": ["query"],
   "settings_schema": [

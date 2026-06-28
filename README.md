@@ -61,8 +61,19 @@ Download the latest installer from [Releases](../../releases).
 3. Type an app name (Pinyin initials supported, e.g. `wx` for 微信)
 4. Type a math expression (e.g. `1+1`, `100*0.25`)
 5. Type a trigger word for plugins (e.g. `fy hello` → translate)
-6. **↑↓** to navigate, **Enter** to launch / copy
+6. **↑↓** to navigate, **Enter** or **Alt + number** for quick to launch / copy
 7. **Esc** or click outside → hide
+
+### Keyboard Shortcuts
+
+| Action | Description |
+|---|---|
+| `Alt + Space` | Summon / hide Blink |
+| `↑` `↓` | Navigate search results |
+| `Alt + 1~9` | Quick launch result by position |
+| `Enter` | Launch selected item / copy result |
+| `PgUp` `PgDn` | Page up/down |
+| `Esc` | Hide Blink |
 
 ---
 

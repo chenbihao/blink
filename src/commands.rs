@@ -359,6 +359,7 @@ pub async fn update_general_config(
     search_history_enabled: bool,
     search_history_days: u32,
     max_results: u32,
+    page_size: u32,
 ) -> Result<(), String> {
     let pool = app.state::<sqlx::SqlitePool>();
     let general = crate::config::GeneralConfig {
@@ -366,6 +367,7 @@ pub async fn update_general_config(
         search_history_enabled,
         search_history_days,
         max_results,
+        page_size,
     };
     crate::config::update_general_config(&pool, &general).await?;
     // max_results 热更新到 SearchService 内存（若已注册）
@@ -377,6 +379,7 @@ pub async fn update_general_config(
         search_history_enabled,
         search_history_days,
         max_results,
+        page_size,
         "通用配置已更新"
     );
     // 广播配置变更事件，主窗口/右键菜单即时响应
@@ -569,8 +572,103 @@ pub async fn update_plugin_config(
     let Some(e) = engine.as_ref() else {
         return Err("插件引擎未初始化".into());
     };
-    let config = crate::config::PluginConfig { enabled, settings };
-    e.update_config(&plugin_id, config).await
+    // 读取现有配置（保留 disable_default_triggers 和 custom_triggers）
+    let mut config = e.get_config(&plugin_id).unwrap_or_default();
+    config.enabled = enabled;
+    config.settings = settings;
+    let router = app.state::<std::sync::Arc<crate::intent::RuleRouter>>();
+    e.update_config(&plugin_id, config, Some(&router)).await
+}
+
+/// 禁用/恢复某个默认触发词。
+#[tauri::command]
+pub async fn toggle_default_trigger(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    keyword: String,
+    disabled: bool,
+) -> Result<(), String> {
+    let engine = app.state::<Option<std::sync::Arc<crate::plugin::PluginEngine>>>();
+    let Some(e) = engine.as_ref() else {
+        return Err("插件引擎未初始化".into());
+    };
+    let router = app.state::<std::sync::Arc<crate::intent::RuleRouter>>();
+
+    // 读取现有配置
+    let mut config = e.get_config(&plugin_id).unwrap_or_default();
+
+    if disabled {
+        // 加入禁用列表
+        if !config.disabled_default_triggers.contains(&keyword) {
+            config.disabled_default_triggers.push(keyword.clone());
+        }
+    } else {
+        // 从禁用列表移除
+        config.disabled_default_triggers.retain(|k| k != &keyword);
+    }
+
+    e.update_config(&plugin_id, config, Some(&router)).await?;
+    tracing::info!(plugin_id, keyword, disabled, "默认触发词状态已更新");
+    Ok(())
+}
+
+/// 添加一个自定义触发词。
+#[tauri::command]
+pub async fn add_custom_trigger(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    keyword: String,
+) -> Result<(), String> {
+    let engine = app.state::<Option<std::sync::Arc<crate::plugin::PluginEngine>>>();
+    let Some(e) = engine.as_ref() else {
+        return Err("插件引擎未初始化".into());
+    };
+    let router = app.state::<std::sync::Arc<crate::intent::RuleRouter>>();
+
+    let mut config = e.get_config(&plugin_id).unwrap_or_default();
+
+    // 检查是否已存在（不区分大小写，简单重复检查）
+    let keyword_lower = keyword.to_lowercase();
+    if config.custom_triggers.iter().any(|t| t.keyword.to_lowercase() == keyword_lower) {
+        return Err(format!("触发词 '{keyword}' 已存在"));
+    }
+
+    // 添加新触发词
+    config.custom_triggers.push(crate::config::CustomTrigger {
+        keyword: keyword.clone(),
+        enabled: true,
+        surface: None,
+    });
+
+    e.update_config(&plugin_id, config, Some(&router)).await?;
+    tracing::info!(plugin_id, keyword, "自定义触发词已添加");
+    Ok(())
+}
+
+/// 删除一个自定义触发词。
+#[tauri::command]
+pub async fn delete_custom_trigger(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    keyword: String,
+) -> Result<(), String> {
+    let engine = app.state::<Option<std::sync::Arc<crate::plugin::PluginEngine>>>();
+    let Some(e) = engine.as_ref() else {
+        return Err("插件引擎未初始化".into());
+    };
+    let router = app.state::<std::sync::Arc<crate::intent::RuleRouter>>();
+
+    let mut config = e.get_config(&plugin_id).unwrap_or_default();
+    let before_len = config.custom_triggers.len();
+    config.custom_triggers.retain(|t| t.keyword != keyword);
+
+    if config.custom_triggers.len() == before_len {
+        return Err(format!("触发词 '{keyword}' 不存在"));
+    }
+
+    e.update_config(&plugin_id, config, Some(&router)).await?;
+    tracing::info!(plugin_id, keyword, "自定义触发词已删除");
+    Ok(())
 }
 
 /// 获取引擎配置（通用 API）。
@@ -1043,10 +1141,42 @@ pub async fn get_perf_recent(
 }
 
 /// 导出性能报告（JSON 格式）。
+/// 弹出保存文件对话框，用户选择路径后写入文件，返回保存的路径（取消时返回 null）。
 #[tauri::command]
-pub async fn export_perf_report(app: tauri::AppHandle) -> serde_json::Value {
+pub async fn export_perf_report(app: tauri::AppHandle) -> Result<Option<String>, String> {
     let pool = app.state::<sqlx::SqlitePool>();
-    crate::perf::export_report(&pool).await
+    let report = crate::perf::export_report(&pool).await;
+
+    // 弹出保存文件对话框
+    let default_name = format!(
+        "blink-perf-report-{}.json",
+        chrono::Local::now().format("%Y-%m-%d")
+    );
+
+    let file_path = app
+        .dialog()
+        .file()
+        .set_title("导出性能报告")
+        .add_filter("JSON 文件", &["json"])
+        .set_file_name(&default_name)
+        .blocking_save_file()
+        .and_then(|p| match p {
+            tauri_plugin_dialog::FilePath::Path(path) => path.to_str().map(|s| s.to_string()),
+            tauri_plugin_dialog::FilePath::Url(url) => Some(url.to_string()),
+        });
+
+    let Some(path) = file_path else {
+        return Ok(None); // 用户取消了
+    };
+
+    // 写入文件
+    let json_str = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
+    tokio::fs::write(&path, json_str)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    tracing::info!(path = %path, "性能报告已导出");
+    Ok(Some(path))
 }
 
 /// 清除全部性能指标数据。
