@@ -12,8 +12,32 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// 随 MSI 打包的 Rust 插件 id（源码在 plugins/examples/<id>/，包名 blink-plugin-<id>）。
-const RUST_PLUGINS: &[&str] = &["echo", "ip", "weather"];
+/// 自动发现所有 Rust 插件（扫描 plugins/examples/ 目录）。
+fn discover_rust_plugins() -> Vec<String> {
+    let root = workspace_root();
+    let examples_dir = root.join("plugins").join("examples");
+
+    let mut plugins = Vec::new();
+    match std::fs::read_dir(&examples_dir) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    // 检查是否有 Cargo.toml（是 Rust 插件）
+                    if path.join("Cargo.toml").exists() {
+                        if let Some(id) = path.file_name().and_then(|n| n.to_str()) {
+                            plugins.push(id.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => panic!("扫描 plugins/examples/ 失败: {e}"),
+    }
+
+    plugins.sort(); // 保证顺序稳定
+    plugins
+}
 
 /// workspace 根：CARGO_MANIFEST_DIR 编译期确定为 xtask 包目录，上溯一级即根。
 fn workspace_root() -> PathBuf {
@@ -41,8 +65,11 @@ fn build_plugins() {
     let target_release = root.join("target").join("release");
     let builtin_dir = root.join("plugins").join("builtin");
 
+    let rust_plugins = discover_rust_plugins();
+    println!("🔨 发现 {} 个 Rust 插件: {:?}", rust_plugins.len(), rust_plugins);
     println!("🔨 编译 Rust 插件（release）...");
-    for id in RUST_PLUGINS {
+
+    for id in &rust_plugins {
         let pkg = format!("blink-plugin-{id}");
         print!("  编译 {pkg} ... ");
         // -p 显式选 workspace 成员包（跨 cargo 版本稳定，详见原 copy-plugins.ps1 注释）

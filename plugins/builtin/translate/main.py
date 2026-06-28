@@ -383,11 +383,15 @@ def _try_translate(text: str, target_lang: str, engine: str, settings: Dict[str,
         return result
 
     # 从配置读取降级顺序，默认按优先级
-    default_order = "youdao,baidu,ali,tencent,deepl"
-    fallback_str = settings.get("fallback_order", default_order)
-    # 解析并过滤有效引擎
+    fallback_value = settings.get("fallback_order", ["tencent", "ali", "baidu", "youdao", "deepl"])
+    # 兼容字符串和列表两种格式
+    if isinstance(fallback_value, str):
+        fallback_order = [e.strip() for e in fallback_value.split(",")]
+    else:
+        fallback_order = list(fallback_value)  # 列表格式
+    # 过滤有效引擎
     valid_engines = set(ENGINE_NAMES.keys())
-    fallback_order = [e.strip() for e in fallback_str.split(",") if e.strip() in valid_engines]
+    fallback_order = [e for e in fallback_order if e in valid_engines]
 
     # 失败时按配置顺序尝试其他引擎
     for fallback in fallback_order:
@@ -482,6 +486,7 @@ def main():
         if not line:
             continue
 
+        query_id = ""
         try:
             req = json.loads(line)
             req_type = req.get("type")
@@ -500,6 +505,17 @@ def main():
             print(f"[translate] JSON parse error: {e}", file=sys.stderr, flush=True)
         except Exception as e:
             print(f"[translate] Unexpected error: {e}", file=sys.stderr, flush=True)
+            # 异常时仍向 stdout 返回错误响应，避免前端等到超时
+            if query_id:
+                resp = {
+                    "id": query_id,
+                    "items": [],
+                    "error": {
+                        "code": "INTERNAL_ERROR",
+                        "message": f"插件内部错误：{e}"
+                    }
+                }
+                print(json.dumps(resp, ensure_ascii=False), flush=True)
 
 
 if __name__ == "__main__":

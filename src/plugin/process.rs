@@ -372,7 +372,7 @@ impl PluginProcess {
                         title: err.message,
                         subtitle: None,
                         score: -1.0, // 负分，排序到最后
-                        action: PluginAction::Open { path: String::new() }, // 空路径=纯展示
+                        action: PluginAction::None, // 纯展示，无操作
                     }]);
                 }
                 Ok(resp.items)

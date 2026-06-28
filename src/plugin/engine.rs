@@ -271,6 +271,7 @@ impl PluginEngine {
 /// 特殊处理：score < 0 表示插件返回的错误信息，保留原 score 让排序到最后。
 fn to_search_item(plugin_id: &str, item: PluginItem) -> SearchItem {
     let action = match item.action {
+        PluginAction::None => SearchAction::None,
         PluginAction::Copy { text } => SearchAction::Copy { text },
         PluginAction::Open { path } => SearchAction::Open { path },
     };

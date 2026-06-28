@@ -27,7 +27,9 @@ pub enum Lane {
 /// 与前端契约 `Action`(同样带 payload)一一对应——转换见 [`SearchItem::into_app_entry`]。
 #[derive(Debug, Clone)]
 pub enum SearchAction {
-    /// 打开路径(应用/快捷方式/文件/URL)。空 path = 纯展示项(前端 Enter 无动作)。
+    /// 纯展示项，无操作。
+    None,
+    /// 打开路径(应用/快捷方式/文件/URL)。
     Open { path: String },
     /// 复制文本到剪贴板(计算结果 / 插件 Copy)。
     /// `text` 为结构化 payload,经 `into_app_entry` 透传到前端 `Action.payload`。
@@ -81,6 +83,23 @@ impl SearchItem {
         });
 
         match self.action {
+            SearchAction::None => AppEntry {
+                name: self.title,
+                pinyin_name: String::new(),
+                description: self.subtitle,
+                lnk_path: String::new(), // 空 path = 前端 Open 时无操作
+                is_calc: false,
+                score,
+                is_placeholder: false,
+                is_error,
+                source: self.source.clone(),
+                action: Action {
+                    kind: ActionKind::Open,
+                    hint: None,
+                    payload: None,
+                },
+                score_detail,
+            },
             SearchAction::Open { path } => AppEntry {
                 name: self.title,
                 pinyin_name: String::new(),

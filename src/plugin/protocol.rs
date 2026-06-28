@@ -151,9 +151,11 @@ fn default_score() -> f32 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum PluginAction {
+    /// 纯展示项，无操作。
+    None,
     /// 复制文本到剪贴板。
     Copy { text: String },
-    /// 打开路径(应用/文件/URL)。空 path = 纯展示项。
+    /// 打开路径(应用/文件/URL)。
     Open { path: String },
 }
 
@@ -190,6 +192,10 @@ mod tests {
         let json2 = r#"{"id":"y","items":[{"title":"t","action":{"type":"open","path":""}}]}"#;
         let resp2: PluginResponse = serde_json::from_str(json2).unwrap();
         assert_eq!(resp2.items[0].score, 0.5); // default
+
+        let json3 = r#"{"id":"z","items":[{"title":"hint","action":{"type":"none"}}]}"#;
+        let resp3: PluginResponse = serde_json::from_str(json3).unwrap();
+        assert!(matches!(resp3.items[0].action, PluginAction::None));
     }
 
     #[test]

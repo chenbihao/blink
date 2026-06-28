@@ -50,7 +50,7 @@ impl SearchEngine for MockSlowEngine {
             title: format!("[mock] 异步结果: {query}"),
             subtitle: Some("MockSlowEngine — 验证渐进式增量".into()),
             score: 0.5,
-            action: SearchAction::Open { path: String::new() }, // 空 path = 纯展示
+            action: SearchAction::None, // 纯展示，无操作
             source: "mock_slow".into(),
             score_detail: Some("mock=0.5".into()),
         }]
