@@ -28,7 +28,7 @@ git push origin v0.2.0
 | 构建环境 | `windows-latest` |
 | Rust 工具链 | stable（`dtolnay/rust-toolchain`）+ `swatinem/rust-cache` 缓存 |
 | 插件编译 | 独立 step 调 `scripts/copy-plugins.ps1`，编译 echo/ip/weather 三个 Rust 插件到 `plugins/builtin/<id>/bin/`（这些 `*.exe` 不入 git，必须现场生成） |
-| 打包工具 | `tauri-apps/tauri-action@v1`（`cargo tauri build`） |
+| 打包工具 | `tauri-apps/tauri-action@v0`（moving major tag，当前 v0.6.2；`cargo tauri build`） |
 | 构建产物 | MSI 安装包 + NSIS 安装包（`tauri.conf.json` 的 `bundle.targets: "all"`） |
 | 发布状态 | Draft（需手动编辑后发布） |
 
