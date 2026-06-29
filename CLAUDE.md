@@ -172,7 +172,7 @@ bin crate，无 lib target，跑测试用 `cargo test --bin blink`。
 
 ## 9. 其他相关内容
 
-设计文档（`production-design/`，**改核心前先读 [production-design/README.md](production-design/README.md) 了解目录导航与运作规则**）：
+设计文档（`production-design/`，**改核心前先读 [production-design/README.md](docs/production-design/README.md) 了解目录导航与运作规则**）：
 - `00-overview.md` — 产品/架构总纲（原 MVP.md；P0-P4、§12 待决策、§13 已确认方案）
 - `product-interaction.md` / `product-platform.md` / `product-context-future.md` / `product-principles.md` — 产品设计四卷（原 product-design.md 按域拆分：交互/插件意图AI/Context隐私/取舍规范时间线）
 - `phases/0.1-base.md` — 0.1 MVP 实现总结与后期待办

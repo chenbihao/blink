@@ -1,21 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod calc;
-mod clipboard;
-mod commands;
-mod config;
-mod context;
-mod history;
-mod hotkey;
-mod intent;
-mod locale;
-mod logging;
-mod perf;
-mod plugin;
-mod search;
-mod service;
-mod text;
-mod window;
+mod app;
+mod domain;
+mod infra;
 
 use tauri::{
     menu::{Menu, MenuItem},
@@ -25,11 +12,11 @@ use tauri::{
 
 fn main() {
     // 初始化日志（尽早，默认 error；setup 读配置后 reload 到用户级别）
-    logging::init("error");
+    infra::utils::logging::init("error");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            window::invoke(app);
+            infra::platform::window::invoke(app);
         }))
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -46,7 +33,7 @@ fn main() {
             tauri::async_runtime::spawn(async move {
                 let path_for_log = path.clone();
                 let icon = tauri::async_runtime::spawn_blocking(move || {
-                    search::icon::get_icon_png(&path)
+                    crate::domain::search::icon::get_icon_png(&path)
                 })
                 .await
                 .ok()
@@ -73,40 +60,40 @@ fn main() {
             let startup_start = std::time::Instant::now();
 
             // 初始化历史记录 SQLite
-            let pool = tauri::async_runtime::block_on(history::init_db())
+            let pool = tauri::async_runtime::block_on(infra::data::history::init_db())
                 .expect("failed to init history db");
 
             // 初始化性能统计（0.7.0）
-            tauri::async_runtime::block_on(perf::init(&pool))
+            tauri::async_runtime::block_on(infra::utils::perf::init(&pool))
                 .expect("failed to init perf metrics");
 
             // 初始化剪贴板历史表（0.7.3）
-            tauri::async_runtime::block_on(clipboard::init_db(&pool))
+            tauri::async_runtime::block_on(infra::data::clipboard::init_db(&pool))
                 .expect("failed to init clipboard db");
 
             // 初始化图标缓存持久化（0.7.4）
-            tauri::async_runtime::block_on(search::icon::init(&pool))
+            tauri::async_runtime::block_on(domain::search::icon::init(&pool))
                 .expect("failed to init icon cache");
 
             // 初始化配置
             let config_start = std::time::Instant::now();
-            tauri::async_runtime::block_on(config::init_config(&pool))
+            tauri::async_runtime::block_on(app::config::init_config(&pool))
                 .expect("failed to init config");
             // 记录配置加载耗时（setup 在同步上下文，需用 block_on）
             let config_elapsed = config_start.elapsed().as_secs_f64() * 1000.0;
-            tauri::async_runtime::block_on(perf::record_blocking(
+            tauri::async_runtime::block_on(infra::utils::perf::record_blocking(
                 &pool,
-                perf::MetricCategory::Startup,
+                infra::utils::perf::MetricCategory::Startup,
                 "config_load",
                 config_elapsed,
                 None,
             ));
 
             // 读取应用配置(快照)
-            let app_config = tauri::async_runtime::block_on(config::get_config(&pool));
+            let app_config = tauri::async_runtime::block_on(app::config::get_config(&pool));
 
             // 日志级别 reload 到配置值（init 时为默认 error）
-            logging::update_level(&app_config.log_level);
+            infra::utils::logging::update_level(&app_config.log_level);
 
             // pool 交给 Tauri 管理(command 层用 app.state 取);AppContext 再留一份 clone
             app.manage(pool.clone());
@@ -129,12 +116,12 @@ fn main() {
                 if let Ok(hwnd) = w.hwnd() {
                     // hwnd 来自 Tauri(windows 0.61)，转成本项目依赖的 windows 0.62 HWND
                     let hwnd = windows::Win32::Foundation::HWND(hwnd.0 as _);
-                    window::install_sysmenu_blocker(hwnd);
-                    window::enable_rounded_corners(hwnd);
+                    infra::platform::window::install_sysmenu_blocker(hwnd);
+                    infra::platform::window::enable_rounded_corners(hwnd);
                 }
                 w.on_window_event(move |event| {
                     if let WindowEvent::Focused(focused) = event {
-                        window::on_focused(*focused);
+                        infra::platform::window::on_focused(*focused);
                     }
                 });
             }
@@ -156,24 +143,24 @@ fn main() {
 
             // 加载 builtin 插件
             // 全局代理配置(engine:_global_proxy → {http,https})，进程启动时 env 注入，ureq/reqwest 原生读取
-            let global_proxy = tauri::async_runtime::block_on(crate::config::get_engine_config(&pool, "_global_proxy"));
+            let global_proxy = tauri::async_runtime::block_on(app::config::get_engine_config(&pool, "_global_proxy"));
             let proxy = global_proxy.and_then(|v| {
                 let http = v.get("http").and_then(|s| s.as_str()).map(|s| s.to_string());
                 let https = v.get("https").and_then(|s| s.as_str()).map(|s| s.to_string());
                 if http.is_some() || https.is_some() { Some((http.unwrap_or_default(), https.unwrap_or_default())) }
                 else { None }
             });
-            let plugins = plugin::load_builtin_plugins(app.handle(), proxy.clone());
+            let plugins = domain::plugin::load_builtin_plugins(app.handle(), proxy.clone());
             // 构造意图路由 RuleRouter,从插件 manifest 注入规则(合并用户自定义 triggers)。
-            let router = std::sync::Arc::new(intent::RuleRouter::new(app_config.surface_takeover_enabled));
+            let router = std::sync::Arc::new(domain::intent::RuleRouter::new(app_config.surface_takeover_enabled));
 
             let plugin_engine = if plugins.is_empty() {
                 None
             } else {
                 tracing::info!(count = plugins.len(), "PluginEngine 已构造");
-                let engine = std::sync::Arc::new(plugin::PluginEngine::new(plugins.clone(), pool.clone(), proxy));
+                let engine = std::sync::Arc::new(domain::plugin::PluginEngine::new(plugins.clone(), pool.clone(), proxy));
                 // 0.4→0.5 自动迁移（首次运行时执行一次，后续 marker 跳过）
-                tauri::async_runtime::block_on(crate::history::migrate_0_4_to_0_5(&pool, &plugins));
+                tauri::async_runtime::block_on(infra::data::history::migrate_0_4_to_0_5(&pool, &plugins));
                 // 加载/初始化每个插件配置(不存在则写默认 {enabled, settings:null})。
                 tauri::async_runtime::block_on(engine.init_configs());
 
@@ -193,9 +180,9 @@ fn main() {
             };
 
             // 构造三层搜索引擎配置（应用搜索 / 文件搜索 / 计算器）
-            let start_menu_config = tauri::async_runtime::block_on(config::get_start_menu_config(&pool));
-            let file_config = tauri::async_runtime::block_on(config::get_file_search_config(&pool));
-            let calc_config = tauri::async_runtime::block_on(config::get_calc_config(&pool));
+            let start_menu_config = tauri::async_runtime::block_on(app::config::get_start_menu_config(&pool));
+            let file_config = tauri::async_runtime::block_on(app::config::get_file_search_config(&pool));
+            let calc_config = tauri::async_runtime::block_on(app::config::get_calc_config(&pool));
             tracing::info!(
                 app_search = start_menu_config.enabled,
                 file_search = file_config.enabled,
@@ -205,15 +192,15 @@ fn main() {
             );
 
             // 构造 SearchService(多路引擎 + 意图路由)。command 层经 app.state 取用。
-            let engine_configs = search::EngineConfigs {
+            let engine_configs = domain::search::EngineConfigs {
                 start_menu: start_menu_config,
                 file: file_config,
                 calc: calc_config,
             };
-            let search_service = std::sync::Arc::new(search::SearchService::new(
+            let search_service = std::sync::Arc::new(domain::search::SearchService::new(
                 app.handle().clone(),
                 pool.clone(),
-                search::build_engines(engine_configs),
+                domain::search::build_engines(engine_configs),
                 plugin_engine.clone(),
                 router.clone(),
             ));
@@ -227,12 +214,12 @@ fn main() {
                 let enabled = app_config.search_history_enabled;
                 tauri::async_runtime::spawn(async move {
                     if enabled {
-                        crate::history::cleanup_old(&cleanup_pool, days).await;
+                        infra::data::history::cleanup_old(&cleanup_pool, days).await;
                     }
                 });
             }
             // 注入 ContextConfig 内存缓存：invoke 热键回调零 IO 读它（热更新见 update_context_config）
-            let context_config = tauri::async_runtime::block_on(config::get_context_config(&pool));
+            let context_config = tauri::async_runtime::block_on(app::config::get_context_config(&pool));
             app.manage(std::sync::Arc::new(std::sync::RwLock::new(context_config)));
             // RuleRouter 单独注册供设置页 API 用（triggers 热更新）
             app.manage(router.clone());
@@ -242,12 +229,12 @@ fn main() {
             // 后台服务编排:按依赖拓扑顺序启动(搜索预扫 / 看门狗 / 热键监听等)。
             // pool 与 config 就绪后才构建 AppContext —— 前置初始化(DB/配置/日志/托盘/窗口)
             // 仍留在 setup 中,它们是构建 ctx 的前提。
-            let ctx = service::AppContext {
+            let ctx = app::service::AppContext {
                 app: app.handle().clone(),
                 pool: pool.clone(),
                 config: app_config,
             };
-            let services = service::all_services(search_service);
+            let services = app::service::all_services(search_service);
             let svc_start = std::time::Instant::now();
             for svc in &services {
                 if let Err(e) = tauri::async_runtime::block_on(svc.start(&ctx)) {
@@ -256,9 +243,9 @@ fn main() {
             }
             // 记录服务初始化耗时
             let svc_elapsed = svc_start.elapsed().as_secs_f64() * 1000.0;
-            tauri::async_runtime::block_on(perf::record_blocking(
+            tauri::async_runtime::block_on(infra::utils::perf::record_blocking(
                 &pool,
-                perf::MetricCategory::Startup,
+                infra::utils::perf::MetricCategory::Startup,
                 "services_init",
                 svc_elapsed,
                 None,
@@ -266,9 +253,9 @@ fn main() {
             // 记录启动总耗时（setup 在同步上下文，需用 block_on）
             // 注意：必须在 app.manage(pool) 之前记录，否则 pool 已被 move
             let startup_total_ms = startup_start.elapsed().as_secs_f64() * 1000.0;
-            tauri::async_runtime::block_on(perf::record_blocking(
+            tauri::async_runtime::block_on(infra::utils::perf::record_blocking(
                 &pool,
-                perf::MetricCategory::Startup,
+                infra::utils::perf::MetricCategory::Startup,
                 "total",
                 startup_total_ms,
                 None,
@@ -281,66 +268,66 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            commands::hide_window,
-            commands::hide_settings_window,
-            commands::search_apps,
-            commands::launch_app,
-            commands::get_storage_info,
-            commands::clear_history,
-            commands::resize_window,
-            commands::get_config,
-            commands::update_hotkey,
-            commands::update_tap_threshold,
-            commands::update_grace_period,
-            commands::update_general_config,
-            commands::update_auto_start,
-            commands::update_language,
-            commands::reset_config,
-            commands::record_hotkey,
-            commands::update_log_level,
-            commands::open_log_file,
-            commands::open_log_dir,
-            commands::get_log_info,
-            commands::update_file_search,
-            commands::get_start_menu_config,
-            commands::update_start_menu_config,
-            commands::get_calc_config,
-            commands::update_calc_config,
-            commands::probe_everything,
-            commands::get_engine_config,
-            commands::update_engine_config,
-            commands::get_plugins,
-            commands::update_plugin_config,
-            commands::update_global_proxy,
-            commands::get_context_config,
-            commands::update_context_config,
-            commands::open_containing_folder,
-            commands::open_lnk_target,
-            commands::copy_to_clipboard,
-            commands::reset_item_history,
-            commands::list_running_processes,
-            commands::show_context_menu,
-            commands::hide_context_menu,
-            commands::context_menu_action,
-            commands::probe_interpreters,
-            commands::update_interpreter_config,
-            commands::open_file_dialog,
-            commands::get_clipboard_history,
-            commands::search_clipboard_history,
-            commands::record_clipboard_hit,
-            commands::delete_clipboard_item,
-            commands::clear_clipboard_history,
-            commands::get_clipboard_stats,
-            commands::get_perf_overview,
-            commands::get_perf_percentiles,
-            commands::get_perf_slow_queries,
-            commands::get_perf_recent,
-            commands::export_perf_report,
-            commands::clear_perf_data,
-            commands::open_url,
-            commands::toggle_default_trigger,
-            commands::add_custom_trigger,
-            commands::delete_custom_trigger
+            app::commands::hide_window,
+            app::commands::hide_settings_window,
+            app::commands::search_apps,
+            app::commands::launch_app,
+            app::commands::get_storage_info,
+            app::commands::clear_history,
+            app::commands::resize_window,
+            app::commands::get_config,
+            app::commands::update_hotkey,
+            app::commands::update_tap_threshold,
+            app::commands::update_grace_period,
+            app::commands::update_general_config,
+            app::commands::update_auto_start,
+            app::commands::update_language,
+            app::commands::reset_config,
+            app::commands::record_hotkey,
+            app::commands::update_log_level,
+            app::commands::open_log_file,
+            app::commands::open_log_dir,
+            app::commands::get_log_info,
+            app::commands::update_file_search,
+            app::commands::get_start_menu_config,
+            app::commands::update_start_menu_config,
+            app::commands::get_calc_config,
+            app::commands::update_calc_config,
+            app::commands::probe_everything,
+            app::commands::get_engine_config,
+            app::commands::update_engine_config,
+            app::commands::get_plugins,
+            app::commands::update_plugin_config,
+            app::commands::update_global_proxy,
+            app::commands::get_context_config,
+            app::commands::update_context_config,
+            app::commands::open_containing_folder,
+            app::commands::open_lnk_target,
+            app::commands::copy_to_clipboard,
+            app::commands::reset_item_history,
+            app::commands::list_running_processes,
+            app::commands::show_context_menu,
+            app::commands::hide_context_menu,
+            app::commands::context_menu_action,
+            app::commands::probe_interpreters,
+            app::commands::update_interpreter_config,
+            app::commands::open_file_dialog,
+            app::commands::get_clipboard_history,
+            app::commands::search_clipboard_history,
+            app::commands::record_clipboard_hit,
+            app::commands::delete_clipboard_item,
+            app::commands::clear_clipboard_history,
+            app::commands::get_clipboard_stats,
+            app::commands::get_perf_overview,
+            app::commands::get_perf_percentiles,
+            app::commands::get_perf_slow_queries,
+            app::commands::get_perf_recent,
+            app::commands::export_perf_report,
+            app::commands::clear_perf_data,
+            app::commands::open_url,
+            app::commands::toggle_default_trigger,
+            app::commands::add_custom_trigger,
+            app::commands::delete_custom_trigger
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -348,7 +335,7 @@ fn main() {
 
 /// 打开设置窗口（委托给 window 模块统一实现）。
 fn open_settings(app: &tauri::AppHandle) {
-    window::open_settings(app);
+    infra::platform::window::open_settings(app);
 }
 
 /// 最小 percent-decode：还原前端 `encodeURIComponent` 编码的图标路径。
