@@ -501,6 +501,57 @@ h2:active {
   border-bottom: none;
 }
 
+/* ── 内置动作面板（0.8.0 §1.3）──────────────────────────────────────────── */
+
+.builtin-action-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 4px;
+  border-bottom: 1px solid var(--border-color, #313244);
+}
+
+.builtin-action-row:last-child {
+  border-bottom: none;
+}
+
+.builtin-action-icon {
+  flex: 0 0 auto;
+  font-size: 20px;
+  width: 32px;
+  text-align: center;
+  opacity: 0.9;
+}
+
+.builtin-action-info {
+  flex: 1 1 auto;
+  min-width: 0; /* 允许子元素 truncate */
+}
+
+.builtin-action-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-color, #cdd6f4);
+}
+
+.builtin-action-subtitle {
+  font-size: 12px;
+  color: var(--text-muted, #a6adc8);
+  margin-top: 2px;
+}
+
+.builtin-action-meta {
+  font-size: 11px;
+  color: var(--text-dim, #6c7086);
+  margin-top: 4px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.builtin-action-meta span:not(:last-child)::after {
+  content: none; /* 分隔符 · 已在 join 时给了，避免重复 */
+}
+
 /* ── 开关组件 ─────────────────────────────────────────────────────────────── */
 
 .switch {

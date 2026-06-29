@@ -23,6 +23,7 @@ use serde::Serialize;
 /// 结果项可执行的动作类型（决定 Enter 行为 + 提示栏文案）。
 /// 与 is_calc（产生方式/样式标识）正交：计算结果 is_calc=true 且 action.kind=Copy。
 /// 0.2.2 迁 SearchItem 时并入带 payload 的 SearchAction（见 0.2 设计 §2.1）。
+/// 0.8.0 §1.3 加 `Run`：内置动作 id 分派，替代原 `__BLINK_ACTION_XXX__` 魔法串。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ActionKind {
@@ -30,6 +31,9 @@ pub enum ActionKind {
     Open,
     /// 复制到剪贴板
     Copy,
+    /// 运行注册好的内置动作（by id），参数走 `Action.run_arg`。
+    /// 前端识别 `kind === "run"` → `invoke("run_builtin_action", { id, arg })`。
+    Run,
     // 未来：Plugin / Ai
 }
 
@@ -44,6 +48,29 @@ pub struct Action {
     /// (lnk_path 是 history 主键,不复用)。前端按 kind + payload 执行。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<String>,
+    /// `Run` 动作的 id（内置动作注册表 key，如 `"open_settings"`）。
+    /// 仅 `kind == Run` 时有意义；其他 kind 恒为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// `Run` 动作的参数（0.8.0 §1.3 参数化 Action 用）。
+    /// 用 `serde_json::Value` 而非 `String`：未来扩到结构化参数（选区文本+目标语言）
+    /// 无需再改契约；当前只填 `Value::String(...)` 或 `null`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_arg: Option<serde_json::Value>,
+}
+
+impl Default for Action {
+    /// 默认 = `Open` 动作、无 hint/payload/run_*。搭配 `..Default::default()` 让新增
+    /// 字段时无需修改所有构造点（0.8.0 §1.3 加 run_id/run_arg 时如此）。
+    fn default() -> Self {
+        Self {
+            kind: ActionKind::Open,
+            hint: None,
+            payload: None,
+            run_id: None,
+            run_arg: None,
+        }
+    }
 }
 
 /// 应用条目。
@@ -115,6 +142,9 @@ pub mod file_engine;
 mod mock_slow_engine;
 mod start_menu_engine;
 use builtin_engine::BuiltinEngine;
+// BuiltinActionKind 由 commands::run_builtin_action 分派用；
+// BuiltinActionInfo + list_builtin_actions 由 commands::list_builtin_actions 用（设置页）。
+pub use builtin_engine::{list_builtin_actions, BuiltinActionInfo, BuiltinActionKind};
 use calc_engine::CalcEngine;
 use file_engine::FileEngine;
 use mock_slow_engine::MockSlowEngine;
@@ -232,11 +262,7 @@ mod tests {
             is_error: false,
             source: String::new(),
             description: Some(lnk.into()),
-            action: Action {
-                kind: ActionKind::Open,
-                hint: None,
-                payload: None,
-            },
+            action: Action::default(),
             score_detail: None,
         }
     }

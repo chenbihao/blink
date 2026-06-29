@@ -44,7 +44,8 @@ Blink isn't just a launcher — it's a **Universal Action Layer**. Here's what w
 
 - 🎤 **Voice Input** — VAD + speech-to-text, speak instead of type
 - 🤖 **AI Intent** — Describe what you want in natural language, Blink figures out the action
-- 🧠 **Context Awareness** — Blink knows what app you're in, what text you selected, and suggests the right actions before you type
+- 🧠 **Context Awareness** — Blink knows what app you're in, what text you selected, and suggests the right actions
+  before you type
 - ⚡ **Proactive Suggestions** — Zero input needed, the right action at the right time
 
 ---
@@ -67,14 +68,14 @@ Download the latest installer from [Releases](../../releases).
 
 ### Keyboard Shortcuts
 
-| Action | Description |
-|---|---|
-| `Alt + Space` | Summon / hide Blink |
-| `↑` `↓` | Navigate search results |
-| `Alt + 1~9` | Quick launch result by position |
-| `Enter` | Launch selected item / copy result |
-| `PgUp` `PgDn` | Page up/down |
-| `Esc` | Hide Blink |
+| Action        | Description                        |
+|---------------|------------------------------------|
+| `Alt + Space` | Summon / hide Blink                |
+| `↑` `↓`       | Navigate search results            |
+| `Alt + 1~9`   | Quick launch result by position    |
+| `Enter`       | Launch selected item / copy result |
+| `PgUp` `PgDn` | Page up/down                       |
+| `Esc`         | Hide Blink                         |
 
 ---
 
@@ -119,7 +120,8 @@ cargo test --bin blink
 ## Special Thanks
 
 - [Wox](https://github.com/Wox-launcher/Wox) — The launcher that started it all on Windows
-- [Alfred](https://www.alfredapp.com/) — Proved that a global input box can be the first entry for human-computer interaction
+- [Alfred](https://www.alfredapp.com/) — Proved that a global input box can be the first entry for human-computer
+  interaction
 - [Raycast](https://www.raycast.com/) — Modern launcher experience, gold standard for plugin ecosystems
 - [uTools](https://u.tools/) — Reference for localized experience on Chinese desktops
 - [Flow Launcher](https://www.flowlauncher.com/) — Community-driven open-source launcher on Windows

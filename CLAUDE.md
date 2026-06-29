@@ -17,8 +17,9 @@ Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而�
 
 **最新特性（0.8）**：
 - ✅ UIA 划词文本感知（鼠标选中文本自动抓取）
+- ✅ 内置动作抽象升级：`SearchAction::RunAction` + Context 感知（剪贴板 URL/文件路径触发"打开链接/打开路径/资源管理器定位"）+ 设置页 disable 面板 + 拼音全拼匹配
 - 📋 Chord 模式：按住 Alt + 二次快捷键直接触发动作（截图/划词/剪贴板）
-- 🔜 Context 感知路由 + AI Provider 抽象
+- 🔜 AI Provider 抽象 + 云端插件（OpenAI 兼容）
 
 ---
 
@@ -84,7 +85,7 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 | `window/` | 窗口控制：显隐、看门狗失焦轮询、显示器定位 |
 | `search/` | 同步/异步双 lane 搜索 + 引擎抽象 + 开始菜单/文件/计算/内置/插件引擎 + 图标提取 |
 | `plugin/` | 插件系统：manifest 解析 + JSONL 协议 + tokio 子进程（Process/Python/Node/Powershell） |
-| `context/` | Context 层：环境感知、敏感应用黑名单 |
+| `context/` | Context 层：环境感知、敏感应用黑名单（采集实现在 `infra/platform/context/`；纯逻辑判定 `is_url` / `is_file_path` 在 `domain/context/probe.rs`）|
 | `selection/` | **0.8 新增**：UIA 划词监听 + 文本抓取 + 缓存 |
 | `intent.rs` | 意图引擎 RuleRouter：关键字→动作路由 |
 | `clipboard.rs` | 剪贴板历史：监听/存储/搜索/管理 |

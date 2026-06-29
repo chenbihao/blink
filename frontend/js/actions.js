@@ -1,14 +1,14 @@
-//! 结果项激活动作：根据 action.kind 决定行为（打开应用 / 复制结果）。
+//! 结果项激活动作：根据 action.kind 决定行为（打开应用 / 复制结果 / 运行内置动作）。
 //!
 //! 抽成独立模块，因为「激活」是 click 和键盘 Enter/Alt+数字的共同终点，
 //! 且未来动作类型会增多（插件动作、文件打开等）——集中在此便于扩展。
 //! 行为由后端提供的 action.kind 驱动，与提示栏（hints.js）同源，语义一致。
 
-import { launchApp, hideWindow } from "./api.js";
+import { launchApp, runBuiltinAction, hideWindow } from "./api.js";
 
 /**
  * 激活一个结果项。
- * @param {{lnkPath?: string, calcValue?: string, payload?: string, action?: {kind: string}, isError?: boolean}} data
+ * @param {{lnkPath?: string, calcValue?: string, payload?: string, action?: {kind: string, runId?: string, runArg?: any}, isError?: boolean}} data
  */
 export async function activateItem(data) {
   if (!data) return;
@@ -30,6 +30,22 @@ export async function activateItem(data) {
       hideWindow();
     }
     // 无文本(空串/缺省):不复制也不隐藏,让用户察觉该结果无可复制内容
+    return;
+  }
+
+  if (kind === "run") {
+    // 内置动作（0.8.0 §1.3）：id 分派，后端 run_builtin_action 内部自动隐藏窗口
+    // （OpenSettings 会先显设置窗、再隐主窗；无需前端调 hideWindow）。
+    const id = data.action.runId;
+    if (!id) {
+      console.error("run action missing id");
+      return;
+    }
+    try {
+      await runBuiltinAction(id, data.action.runArg ?? null);
+    } catch (e) {
+      console.error("run_builtin_action failed:", e);
+    }
     return;
   }
 

@@ -19,7 +19,7 @@ use crate::domain::plugin::PluginEngine;
 
 use super::engine::{Lane, QueryContext, SearchEngine, SearchItem};
 use super::scorer::{boost_priority, placeholder_score, source_rank};
-use super::{Action, ActionKind, AppEntry};
+use super::{Action, AppEntry};
 
 /// async lane 增量结果的事件 payload(emit "blink://results")。
 #[derive(Serialize, Clone)]
@@ -49,6 +49,10 @@ pub struct SearchService {
     snapshot: Arc<RwLock<ContextSnapshot>>,
     /// 融合后返回前端的最大结果数（AppConfig.max_results 热更新，搜索热路径零 IO）。
     max_results: Arc<AtomicUsize>,
+    /// 用户禁用的内置动作 id 列表（0.8.0 §1.3）。
+    /// BuiltinEngine 通过 QueryContext 只读，设置页保存时经 `update_disabled_builtin_actions`
+    /// 热更新。读多写少，用 RwLock；每次 search 短时 read 不阻塞。
+    disabled_builtin_actions: Arc<RwLock<Vec<String>>>,
 }
 
 impl SearchService {
@@ -77,6 +81,7 @@ impl SearchService {
             latest_seq: Arc::new(AtomicU64::new(0)),
             snapshot: Arc::new(RwLock::new(ContextSnapshot::default())),
             max_results: Arc::new(AtomicUsize::new(50)),
+            disabled_builtin_actions: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -101,6 +106,16 @@ impl SearchService {
         let clamped = if n == 0 { 50 } else { n };
         self.max_results.store(clamped, Ordering::SeqCst);
         tracing::debug!(max_results = clamped, "SearchService max_results 已热更新");
+    }
+
+    /// 更新禁用的内置动作列表（0.8.0 §1.3）。
+    ///
+    /// 启动时从 `AppConfig.disabled_builtin_actions` 初始化一次；设置页勾选/取消 disable
+    /// 后调用触发 SearchService 热更新——下一次 search 立即生效，无需重启。
+    pub fn update_disabled_builtin_actions(&self, disabled: Vec<String>) {
+        let mut guard = self.disabled_builtin_actions.write().unwrap();
+        *guard = disabled;
+        tracing::debug!(count = guard.len(), "内置动作 disable 列表已热更新");
     }
 
     /// 启动所有引擎的后台任务(如 StartMenuEngine 预扫)。
@@ -143,19 +158,46 @@ impl SearchService {
     }
 
     /// 搜索:先路由 → 按 Takeover/Mixed 分支执行 → 返回首批结果 + spawn 增量。
+    ///
+    /// 空 query 场景（0.8.0 §1.3）：跳过 intent 路由 + 插件；仅让 sync lane 内置引擎
+    /// 走 Context-only 分支（例如"打开链接"依剪贴板 URL 出现）。其他引擎不参与。
     pub async fn search(&self, query: &str, seq: u64) -> Vec<AppEntry> {
         let search_start = std::time::Instant::now();
         self.latest_seq.store(seq, Ordering::SeqCst);
 
         let q = query.trim();
-        if q.is_empty() {
-            return Vec::new();
-        }
-
         let history = crate::infra::data::history::get_weights(&self.pool).await;
         // 读取上下文快照（读锁，可并行）
         let snapshot = self.snapshot.read().unwrap().clone();
-        let search_ctx = QueryContext { history: &history, snapshot: &snapshot };
+        // 读取 disable 列表（读锁，可并行）
+        let disabled = self.disabled_builtin_actions.read().unwrap().clone();
+        let search_ctx = QueryContext {
+            history: &history,
+            snapshot: &snapshot,
+            disabled_builtin_actions: &disabled,
+        };
+
+        // 空 query：只让 sync lane 走 Context-only 分支（0.8.0 §1.3）
+        if q.is_empty() {
+            let mut items = Vec::new();
+            for engine in &self.sync_engines {
+                items.extend(engine.search(q, &search_ctx).await);
+            }
+            let limit = self.max_results.load(Ordering::SeqCst);
+            let all_items: Vec<AppEntry> = fuse_items(items, limit)
+                .into_iter()
+                .map(SearchItem::into_app_entry)
+                .collect();
+            let elapsed = search_start.elapsed().as_secs_f64() * 1000.0;
+            crate::infra::utils::perf::record(
+                crate::infra::utils::perf::MetricCategory::SearchEngine,
+                "total",
+                elapsed,
+                None,
+            );
+            return all_items;
+        }
+
         let intent_ctx = crate::domain::intent::QueryContext { history: &history, snapshot: &snapshot };
         let route = self.router.route(q, &intent_ctx).await;
         // 过滤不符合前置条件的路由(禁用插件 + 参数过短),避免占位符死态。
@@ -387,7 +429,13 @@ impl SearchService {
                 let history = history.clone();  // history 是 Arc<HashMap> 内部 move clone
                 let snapshot = snapshot.clone();
                 tauri::async_runtime::spawn(async move {
-                    let ctx = QueryContext { history: &history, snapshot: &snapshot };
+                    // async lane 引擎（file/mock）不消费 disabled_builtin_actions；
+                    // 该字段仅 BuiltinEngine（sync lane）读，此处传空 slice 满足契约。
+                    let ctx = QueryContext {
+                        history: &history,
+                        snapshot: &snapshot,
+                        disabled_builtin_actions: &[],
+                    };
                     let items = engine.search(&q, &ctx).await;
                     if seq == latest_seq.load(Ordering::SeqCst) && !items.is_empty() {
                         tracing::trace!(engine = engine.id(), count = items.len(), "async lane 引擎返回");
@@ -444,11 +492,7 @@ fn emit_results(app: &AppHandle, seq: u64, items: Vec<SearchItem>, limit: usize,
             is_error: false,
             source: source.into(),
             description: None,
-            action: Action {
-                kind: ActionKind::Open,
-                hint: None,
-                payload: None,
-            },
+            action: Action::default(),
             score_detail: None,
         }]
     } else {
@@ -497,11 +541,7 @@ fn placeholder_entry(plugin_id: &str, display_name: &str) -> AppEntry {
         is_error: false,
         source: plugin_id.to_string(),
         description: Some("请稍候".into()),
-        action: Action {
-            kind: ActionKind::Open,
-            hint: None,
-            payload: None,
-        },
+        action: Action::default(),
         score_detail: None,
     }
 }

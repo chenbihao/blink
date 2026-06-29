@@ -22,6 +22,9 @@ export function init() {
     applyI18nFromConfig();
     // 刷新最大结果数（设置页可能改了 max_results）
     results.refreshMaxResults();
+    // 0.8.0 §1.3 空 query Context-only：唤起瞬间拉一批 Context 建议动作
+    // （剪贴板是 URL → "打开链接"；是文件路径 → "打开路径" / "资源管理器定位"）
+    search.fetchContextSuggestions();
   });
 
   listen("blink://hidden", () => {

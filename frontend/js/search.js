@@ -46,6 +46,27 @@ export function retrigger() {
   onInput();
 }
 
+/**
+ * 拉取空 query 的 Context 建议动作（0.8.0 §1.3）。
+ *
+ * 空 query 场景：`onInput` 一律短路不发请求，而 shown 事件后我们**需要**主动查后端
+ * 拿一批依 Context（剪贴板/选区）命中的内置动作。此函数专给 lifecycle 调，绕过 onInput
+ * 的空 query 短路，仍走完整的 seq/竞态防护路径。
+ */
+export async function fetchContextSuggestions() {
+  const mySeq = ++seq;
+  try {
+    const apps = await searchApps("", mySeq);
+    // 竞态防护：用户已开始输入或已再次隐藏 → 丢弃
+    if (mySeq !== seq) return;
+    // 只有仍是空 query 时才渲染，避免和用户输入的结果打架
+    if (queryEl.value.trim()) return;
+    results.render(apps, mySeq);
+  } catch (e) {
+    console.error("fetchContextSuggestions failed:", e);
+  }
+}
+
 function onInput() {
   clearTimeout(timer);
   const q = queryEl.value.trim();

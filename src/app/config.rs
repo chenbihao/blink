@@ -241,6 +241,11 @@ pub struct AppConfig {
     /// 剪贴板历史配置
     #[serde(default)]
     pub clipboard: crate::infra::data::clipboard::ClipboardConfig,
+    /// 用户禁用的内置动作 id 列表（0.8.0 §1.3）。
+    /// 存 action id（如 `"shutdown"`），BuiltinEngine 召回时跳过。
+    /// 默认空——所有动作默认启用；用户在设置页勾选后追加。
+    #[serde(default)]
+    pub disabled_builtin_actions: Vec<String>,
 }
 
 impl Default for AppConfig {
@@ -261,6 +266,7 @@ impl Default for AppConfig {
             proactive_enabled: default_false(),
             empty_query_topn: default_5(),
             clipboard: crate::infra::data::clipboard::ClipboardConfig::default(),
+            disabled_builtin_actions: Vec::new(),
         }
     }
 }
@@ -377,6 +383,29 @@ pub async fn update_language(pool: &SqlitePool, language: String) -> Result<(), 
 pub async fn update_log_level(pool: &SqlitePool, level: String) -> Result<(), String> {
     let mut config = get_config(pool).await;
     config.log_level = level;
+    save_config(pool, &config).await
+}
+
+// ── 内置动作 disable 列表（0.8.0 §1.3）──────────────────────────────────────────
+
+/// 获取当前 disable 的内置动作 id 列表（快照读）。
+///
+/// 设置页初始化时读一次（`list_builtin_actions` command），启动时读一次注入到
+/// SearchService 内存快照。
+pub async fn get_disabled_builtin_actions(pool: &SqlitePool) -> Vec<String> {
+    get_config(pool).await.disabled_builtin_actions
+}
+
+/// 更新 disable 列表（设置页勾选后调用）。**幂等**：内部去重排序。
+pub async fn update_disabled_builtin_actions(
+    pool: &SqlitePool,
+    disabled: Vec<String>,
+) -> Result<(), String> {
+    let mut normalized = disabled;
+    normalized.sort();
+    normalized.dedup();
+    let mut config = get_config(pool).await;
+    config.disabled_builtin_actions = normalized;
     save_config(pool, &config).await
 }
 

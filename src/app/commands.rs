@@ -81,28 +81,18 @@ pub async fn search_apps(
     results
 }
 
-/// 前端回车/点击时调用：启动选中的应用或执行内置动作。
-/// 计算结果无 lnk_path，忽略。
+/// 前端回车/点击时调用：启动选中的应用（普通 lnk 路径）。
+///
+/// 0.8.0 §1.3 起，内置动作走 `run_builtin_action`（前端 `Action.kind == "run"` 时分派），
+/// 此命令只处理真正的文件/应用路径。计算结果无 lnk_path，忽略。
 #[tauri::command]
 pub async fn launch_app(app: tauri::AppHandle, lnk_path: String) -> Result<(), String> {
     if lnk_path.is_empty() {
         return Ok(());
     }
 
-    tracing::debug!(%lnk_path, "launch_app: 收到打开请求");
-
-    // 检查是否为内置动作
-    if let Some(action) = parse_builtin_action(&lnk_path) {
-        tracing::debug!(?action, "launch_app: 识别为内置动作");
-        execute_builtin_action(&app, action).await?;
-        // 所有内置动作都隐藏主窗口，设置窗口单独显示
-        crate::infra::platform::window::hide(&app, "builtin action");
-        return Ok(());
-    }
-
     tracing::debug!(%lnk_path, "launch_app: 普通应用启动");
 
-    // 普通应用启动
     let pool = app.state::<sqlx::SqlitePool>();
     // search_history_enabled=false 时跳过记录（隐私/偏好）；该项频率加权随之失效
     let config = crate::app::config::get_config(&pool).await;
@@ -115,37 +105,33 @@ pub async fn launch_app(app: tauri::AppHandle, lnk_path: String) -> Result<(), S
 }
 
 /// 解析内置动作标识。
-fn parse_builtin_action(path: &str) -> Option<BuiltinActionKind> {
-    match path {
-        "__BLINK_ACTION_OPEN_SETTINGS__" => Some(BuiltinActionKind::OpenSettings),
-        "__BLINK_ACTION_LOCK__" => Some(BuiltinActionKind::LockWorkstation),
-        "__BLINK_ACTION_SHUTDOWN__" => Some(BuiltinActionKind::Shutdown),
-        "__BLINK_ACTION_RESTART__" => Some(BuiltinActionKind::Restart),
-        "__BLINK_ACTION_SLEEP__" => Some(BuiltinActionKind::Sleep),
-        "__BLINK_ACTION_CLEAR_HISTORY__" => Some(BuiltinActionKind::ClearHistory),
-        "__BLINK_ACTION_EXIT__" => Some(BuiltinActionKind::ExitBlink),
-        "__BLINK_ACTION_OPEN_LOGS__" => Some(BuiltinActionKind::OpenLogs),
-        "__BLINK_ACTION_OPEN_DATA_DIR__" => Some(BuiltinActionKind::OpenDataDir),
-        _ => None,
-    }
-}
+///
+/// 已废弃：0.8.0 §1.3 前后端全部走 `SearchAction::RunAction` + `run_builtin_action`
+/// 命令，`__BLINK_ACTION_XXX__` 魔法串完全移除。
 
-/// 内置动作类型。
-#[derive(Debug, Clone, Copy)]
-enum BuiltinActionKind {
-    OpenSettings,
-    LockWorkstation,
-    Shutdown,
-    Restart,
-    Sleep,
-    ClearHistory,
-    ExitBlink,
-    OpenLogs,
-    OpenDataDir,
-}
+// 引入统一 enum（0.8.0 §1.3 归位到 builtin_engine.rs）
+use crate::domain::search::BuiltinActionKind;
 
 /// 执行内置动作。
-async fn execute_builtin_action(app: &tauri::AppHandle, action: BuiltinActionKind) -> Result<(), String> {
+///
+/// `arg` 由 `run_builtin_action` 从前端 `Action.run_arg` 透传下来（0.8.0 §1.3）：
+/// - 无参动作（现有 9 个 + 未来无参新增）忽略 `arg`
+/// - 参数化动作（OpenUrl / OpenPath / RevealInExplorer）从 `arg` 里取字符串（clipboard 内容）
+async fn execute_builtin_action(
+    app: &tauri::AppHandle,
+    action: BuiltinActionKind,
+    arg: Option<serde_json::Value>,
+) -> Result<(), String> {
+    /// 从 `arg` 抽出非空字符串——参数化动作专用。
+    fn arg_as_str(arg: &Option<serde_json::Value>, kind: &str) -> Result<String, String> {
+        arg.as_ref()
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| format!("{kind}: 缺少字符串参数"))
+    }
+
     match action {
         BuiltinActionKind::OpenSettings => {
             // 打开设置窗口（已存在则聚焦，否则创建），同时隐藏主窗口
@@ -229,7 +215,96 @@ async fn execute_builtin_action(app: &tauri::AppHandle, action: BuiltinActionKin
                 tracing::error!("APPDATA 环境变量未找到");
             }
         }
+        // ── 0.8.0 §1.3 参数化动作 ─────────────────────────────────────────
+        BuiltinActionKind::OpenUrl => {
+            // 用系统默认程序打开 URL。open crate 会调 ShellExecuteW（HTTP/HTTPS → 浏览器）
+            let url = arg_as_str(&arg, "open_url")?;
+            tracing::debug!(%url, "执行内置动作：打开链接");
+            if let Err(e) = open::that(&url) {
+                tracing::error!(error = %e, %url, "打开链接失败");
+                return Err(format!("打开链接失败: {e}"));
+            }
+        }
+        BuiltinActionKind::OpenPath => {
+            // 用系统默认程序打开文件/目录
+            let path = arg_as_str(&arg, "open_path")?;
+            tracing::debug!(%path, "执行内置动作：打开路径");
+            if let Err(e) = open::that(&path) {
+                tracing::error!(error = %e, %path, "打开路径失败");
+                return Err(format!("打开路径失败: {e}"));
+            }
+        }
+        BuiltinActionKind::RevealInExplorer => {
+            // explorer /select,<path> —— 打开父目录并选中该文件/目录
+            let path = arg_as_str(&arg, "reveal_in_explorer")?;
+            tracing::debug!(%path, "执行内置动作：在资源管理器中显示");
+            #[cfg(target_os = "windows")]
+            {
+                // 注意：explorer.exe 参数间用逗号，不是空格；且要拆成两个独立 arg 传给 Command
+                //   Command::new("explorer.exe").args(["/select,", path]) 才是正确用法
+                //   （不是 .arg(format!("/select,{path}"))，那样 explorer 会把逗号后当整体路径）
+                let status = std::process::Command::new("explorer.exe")
+                    .args(["/select,", &path])
+                    .spawn();
+                if let Err(e) = status {
+                    tracing::error!(error = %e, %path, "调用 explorer.exe 失败");
+                    return Err(format!("调用 explorer.exe 失败: {e}"));
+                }
+            }
+        }
     }
+    Ok(())
+}
+
+/// 运行内置动作（0.8.0 §1.3）。
+///
+/// 前端命中 `Action.kind == "run"` 时调用：`invoke("run_builtin_action", { id, arg })`。
+/// 替代 0.7 的 `__BLINK_ACTION_XXX__` 魔法串路径——`id` 从注册表反查 `BuiltinActionKind`
+/// 后走同一套执行分支，`arg` 透传给参数化动作（OpenUrl / OpenPath / RevealInExplorer）。
+///
+/// 未知 id → 返回 `Err`；前端会打印到控制台，不弹窗（用户误传的可能性 = 0，都是我们自己
+/// 注册的动作）。
+#[tauri::command]
+pub async fn run_builtin_action(
+    app: tauri::AppHandle,
+    id: String,
+    arg: Option<serde_json::Value>,
+) -> Result<(), String> {
+    tracing::debug!(%id, ?arg, "run_builtin_action: 收到请求");
+    let Some(kind) = BuiltinActionKind::from_action_id(&id) else {
+        let msg = format!("未知内置动作 id: {id}");
+        tracing::warn!(%id, "run_builtin_action: 未知 id");
+        return Err(msg);
+    };
+    execute_builtin_action(&app, kind, arg).await?;
+    // 所有内置动作都隐藏主窗口；设置窗口在 OpenSettings 分支里已单独显示。
+    crate::infra::platform::window::hide(&app, "run_builtin_action");
+    Ok(())
+}
+
+/// 列出所有内置动作元数据 + 当前 enabled 状态（0.8.0 §1.3 设置页面板）。
+#[tauri::command]
+pub async fn list_builtin_actions(
+    app: tauri::AppHandle,
+) -> Vec<crate::domain::search::BuiltinActionInfo> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    let disabled = crate::app::config::get_disabled_builtin_actions(&pool).await;
+    crate::domain::search::list_builtin_actions(&disabled)
+}
+
+/// 更新禁用的内置动作列表（0.8.0 §1.3 设置页面板）。
+///
+/// 写 SQLite 后**同时**触发 SearchService 热更新——下次搜索立即生效，无需重启。
+#[tauri::command]
+pub async fn set_disabled_builtin_actions(
+    app: tauri::AppHandle,
+    disabled: Vec<String>,
+) -> Result<(), String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::app::config::update_disabled_builtin_actions(&pool, disabled.clone()).await?;
+    // 热更新内存快照（搜索热路径读的是此值，非 SQLite）
+    let search_service = app.state::<std::sync::Arc<crate::domain::search::SearchService>>();
+    search_service.update_disabled_builtin_actions(disabled);
     Ok(())
 }
 
@@ -1034,13 +1109,24 @@ pub async fn hide_context_menu(app: tauri::AppHandle) -> Result<(), String> {
 
 /// Popup 窗口菜单项被点击 → 通知主窗口执行动作。
 /// action_id 是菜单项的唯一标识（JSON 数组索引）。
+///
+/// **顺序很重要**：先隐藏 Popup + 主窗口获焦，再 emit 事件。
+/// 否则前端收到事件时 Popup 仍是前台窗口，`document.hasFocus() === false`，
+/// `navigator.clipboard.readText()` 会被 Chromium 以「document 未获焦」为由拒绝，
+/// `execCommand("paste")` 同样失效——症状就是「点粘贴，输入框仍空」（右键在
+/// 主窗口边框时尤其容易复现，此时主窗口本就不是前台）。
 #[tauri::command]
 pub async fn context_menu_action(app: tauri::AppHandle, action_id: u32) -> Result<(), String> {
-    // 发送事件给主窗口
+    // 1. 先隐藏 Popup 窗口，让主窗口有机会重回前台
+    hide_context_menu(app.clone()).await?;
+    // 2. 显式把主窗口置为前台并聚焦，保证 clipboard/execCommand 可用
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.show();
+        let _ = main.set_focus();
+    }
+    // 3. 最后再通知前端执行动作
     app.emit("blink://context-menu-action", action_id)
         .map_err(|e| e.to_string())?;
-    // 点击后自动关闭菜单
-    hide_context_menu(app).await?;
     Ok(())
 }
 

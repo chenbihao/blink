@@ -312,6 +312,21 @@ function createItem(app, i) {
     li.dataset.actionKind = app.action.kind;
     if (app.action.hint) li.dataset.actionHint = app.action.hint;
     if (app.action.payload != null) li.dataset.actionPayload = app.action.payload;
+    // 0.8.0 §1.3 内置动作：run_id / run_arg 走 Run kind
+    if (app.action.run_id) li.dataset.actionRunId = app.action.run_id;
+    if (app.action.run_arg != null) {
+      // arg 可能是任意 JSON——存字符串化后的形式，激活时 parse 回去
+      li.dataset.actionRunArg = JSON.stringify(app.action.run_arg);
+    }
+  }
+  // 0.8.0 §1.3 智能感知：内置动作 + Run + 携带 Context 参数 → 加 .context-aware
+  //   CSS 挂左侧强调条 + badge 显示"来自剪贴板 · <预览>"
+  const isContextAware =
+    app.source === "builtin" &&
+    app.action?.kind === "run" &&
+    app.action?.run_arg != null;
+  if (isContextAware) {
+    li.classList.add("context-aware");
   }
   if (app.is_calc) {
     li.classList.add("calc-result");
@@ -356,8 +371,19 @@ function createItem(app, i) {
   if (app.description) {
     const desc = document.createElement("span");
     desc.className = "item-desc";
-    desc.textContent = app.description;
-    desc.title = app.description; // 过长省略时悬浮看全
+    // 智能感知候选（0.8.0 §1.3）：副行改成参数预览
+    //   原 subtitle "用默认浏览器打开剪贴板中的 URL" 在用户复制了 URL 时反而冗余；
+    //   直接展示会执行的目标（URL/路径）+ 左侧强调条 + monospace 字体，视觉更清晰。
+    if (isContextAware && typeof app.action?.run_arg === "string") {
+      const raw = app.action.run_arg;
+      const preview = raw.replace(/\s+/g, " ").trim();
+      desc.textContent = preview.length > 80 ? preview.slice(0, 80) + "…" : preview;
+      desc.title = preview; // 悬浮看完整值
+      desc.classList.add("item-desc-arg");
+    } else {
+      desc.textContent = app.description;
+      desc.title = app.description; // 过长省略时悬浮看全
+    }
     body.appendChild(desc);
   }
   li.appendChild(body);
@@ -379,6 +405,15 @@ function createItem(app, i) {
 
 /** 从 <li> 读出激活/提示所需数据。 */
 function itemData(li) {
+  const runArgRaw = li.dataset.actionRunArg;
+  let runArg = null;
+  if (runArgRaw != null) {
+    try {
+      runArg = JSON.parse(runArgRaw);
+    } catch (e) {
+      console.error("actionRunArg parse failed:", e, runArgRaw);
+    }
+  }
   return {
     lnkPath: li.dataset.lnkPath,
     calcValue: li.dataset.calcValue,
@@ -387,6 +422,8 @@ function itemData(li) {
     action: {
       kind: li.dataset.actionKind,
       hint: li.dataset.actionHint,
+      runId: li.dataset.actionRunId,
+      runArg,
     },
   };
 }

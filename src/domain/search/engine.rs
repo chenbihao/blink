@@ -34,6 +34,13 @@ pub enum SearchAction {
     /// 复制文本到剪贴板(计算结果 / 插件 Copy)。
     /// `text` 为结构化 payload,经 `into_app_entry` 透传到前端 `Action.payload`。
     Copy { text: String },
+    /// 运行内置动作（0.8.0 §1.3）：`id` 为动作注册表 key，`arg` 为参数（可选）。
+    /// 前端命中 `Action.kind == Run` → `invoke("run_builtin_action", { id, arg })`。
+    /// 取代原 `SearchAction::Open{path: "__BLINK_ACTION_XXX__"}` 魔法串。
+    RunAction {
+        id: String,
+        arg: Option<serde_json::Value>,
+    },
 }
 
 /// 引擎召回的单个结果项(内部融合模型)。
@@ -94,11 +101,7 @@ impl SearchItem {
                 is_placeholder: false,
                 is_error,
                 source: self.source.clone(),
-                action: Action {
-                    kind: ActionKind::Open,
-                    hint: None,
-                    payload: None,
-                },
+                action: Action::default(),
                 score_detail,
             },
             SearchAction::Open { path } => AppEntry {
@@ -112,11 +115,7 @@ impl SearchItem {
                 is_placeholder: false,
                 is_error,
                 source: self.source.clone(),
-                action: Action {
-                    kind: ActionKind::Open,
-                    hint: None,
-                    payload: None,
-                },
+                action: Action::default(),
                 score_detail,
             },
             SearchAction::Copy { text } => AppEntry {
@@ -134,8 +133,27 @@ impl SearchItem {
                 source: self.source.clone(),
                 action: Action {
                     kind: ActionKind::Copy,
-                    hint: None,
                     payload: Some(text),
+                    ..Action::default()
+                },
+                score_detail,
+            },
+            SearchAction::RunAction { id, arg } => AppEntry {
+                name: self.title,
+                pinyin_name: String::new(),
+                pinyin_full: String::new(),
+                description: self.subtitle,
+                lnk_path: String::new(), // Run 不使用 lnk_path
+                is_calc: false,
+                score,
+                is_placeholder: false,
+                is_error,
+                source: self.source.clone(),
+                action: Action {
+                    kind: ActionKind::Run,
+                    run_id: Some(id),
+                    run_arg: arg,
+                    ..Action::default()
                 },
                 score_detail,
             },
@@ -150,6 +168,9 @@ pub struct QueryContext<'a> {
     pub history: &'a HashMap<String, (i64, i64)>,
     /// 唤起时的上下文快照（前台应用、剪贴板等）。
     pub snapshot: &'a ContextSnapshot,
+    /// 用户禁用的内置动作 id（0.8.0 §1.3）。`BuiltinEngine` 召回时跳过。
+    /// 其他引擎不消费此字段；用 `&[String]` 而非 `&HashSet` 是因为动作总数 <20 线性查找足够。
+    pub disabled_builtin_actions: &'a [String],
 }
 
 /// 搜索引擎:一路召回源。

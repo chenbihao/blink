@@ -5,7 +5,7 @@
 
 import { queryEl, resultsEl } from "./dom.js";
 import { activateItem } from "./actions.js";
-import { openContainingFolder, openLnkTarget, resetItemHistory, launchApp, copyToClipboard, invoke } from "./api.js";
+import { openContainingFolder, openLnkTarget, resetItemHistory, runBuiltinAction, copyToClipboard, invoke } from "./api.js";
 import { retrigger } from "./search.js";
 import { t } from "./i18n.js";
 
@@ -143,8 +143,8 @@ function unifiedMenu() {
   items.push({ separator: true });
   items.push({ label: t("menu.selectAll"), run: exec("selectAll") });
   items.push({ separator: true });
-  items.push({ label: t("menu.openSettings"), run: () => launchApp("__BLINK_ACTION_OPEN_SETTINGS__") });
-  items.push({ label: t("menu.exit"), run: () => launchApp("__BLINK_ACTION_EXIT__"), danger: true });
+  items.push({ label: t("menu.openSettings"), run: () => runBuiltinAction("open_settings") });
+  items.push({ label: t("menu.exit"), run: () => runBuiltinAction("exit_blink"), danger: true });
   return items;
 }
 
@@ -153,7 +153,8 @@ function unifiedMenu() {
 function itemMenu(li) {
   const source = li.dataset.source || "";
   const lnkPath = li.dataset.lnkPath || "";
-  const isRealPath = lnkPath && !lnkPath.startsWith("__BLINK_ACTION_");
+  // 内置动作（kind=run）不是真实文件路径，隐藏"打开文件夹/复制路径"等文件相关菜单
+  const isRealPath = lnkPath && li.dataset.actionKind !== "run";
   const items = [];
 
   items.push({ label: t("menu.open"), run: () => activateItem(readData(li)) });
@@ -209,6 +210,15 @@ async function copyText(text) {
 }
 
 function readData(li) {
+  const runArgRaw = li.dataset.actionRunArg;
+  let runArg = null;
+  if (runArgRaw != null) {
+    try {
+      runArg = JSON.parse(runArgRaw);
+    } catch (e) {
+      console.error("actionRunArg parse failed:", e, runArgRaw);
+    }
+  }
   return {
     lnkPath: li.dataset.lnkPath,
     calcValue: li.dataset.calcValue,
@@ -216,6 +226,8 @@ function readData(li) {
     action: {
       kind: li.dataset.actionKind,
       hint: li.dataset.actionHint,
+      runId: li.dataset.actionRunId,
+      runArg,
     },
   };
 }

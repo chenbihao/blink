@@ -189,8 +189,117 @@ async function loadEngineConfig() {
     console.error("loadCalcConfig failed:", e);
   }
 
+  // 加载内置动作列表（0.8.0 §1.3）
+  loadBuiltinActions();
+
   // 加载插件列表
   loadPlugins();
+}
+
+// ── 内置动作面板（0.8.0 §1.3）─────────────────────────────────────────────────
+
+/** 按 id 映射的图标（emoji）。后端不下发图标，前端集中管理。 */
+const BUILTIN_ACTION_ICONS = {
+  open_settings: "⚙️",
+  lock: "🔒",
+  shutdown: "⏻",
+  restart: "🔁",
+  sleep: "🌙",
+  clear_history: "🧹",
+  exit_blink: "🚪",
+  open_logs: "📄",
+  open_data_dir: "🗂️",
+  // 0.8.0 §1.3 参数化动作
+  open_url: "🔗",
+  open_path: "📁",
+  reveal_in_explorer: "🔍",
+};
+
+/** 拉取动作列表并渲染。 */
+async function loadBuiltinActions() {
+  const list = document.getElementById("builtin-actions-list");
+  if (!list) return;
+  try {
+    const actions = await invoke("list_builtin_actions");
+    if (!Array.isArray(actions) || actions.length === 0) {
+      list.innerHTML = `<p class="hint" style="padding: 12px 0;">${t("engine.builtin_actions.empty")}</p>`;
+      return;
+    }
+    list.innerHTML = actions.map(renderBuiltinActionRow).join("");
+    // 事件委托只绑定一次（loadBuiltinActions 可能被多次调用，如失败回滚）
+    if (!list.dataset.eventsBound) {
+      bindBuiltinActionEvents(list);
+      list.dataset.eventsBound = "1";
+    }
+  } catch (e) {
+    console.error("loadBuiltinActions failed:", e);
+    list.innerHTML = `<p class="hint" style="padding: 12px 0; color: #f38ba8;">${escapeHtml(String(e))}</p>`;
+  }
+}
+
+/** 单个动作行：图标 + 标题/副标题/触发方式/参数来源 + disable 开关。 */
+function renderBuiltinActionRow(a) {
+  const icon = BUILTIN_ACTION_ICONS[a.id] || "•";
+  const keywords = (a.keywords || []).join(" / ");
+  // 参数来源与触发方式合成副行第二段（都是元信息，视觉密度小）
+  // trigger_desc 为空 = 纯 keyword 触发，前面 keywords 一行已表达清楚，无需重复
+  const meta = [
+    `<span>${t("engine.builtin_actions.keywords_label")}: ${escapeHtml(keywords)}</span>`,
+    a.trigger_desc ? `<span>${escapeHtml(a.trigger_desc)}</span>` : "",
+    a.param_desc
+      ? `<span>${t("engine.builtin_actions.param_label")}: ${escapeHtml(a.param_desc)}</span>`
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return `<div class="builtin-action-row" data-action-id="${escapeAttr(a.id)}">
+    <div class="builtin-action-icon">${icon}</div>
+    <div class="builtin-action-info">
+      <div class="builtin-action-title">${escapeHtml(a.title)}</div>
+      <div class="builtin-action-subtitle">${escapeHtml(a.subtitle)}</div>
+      <div class="builtin-action-meta">${meta}</div>
+    </div>
+    <label class="switch">
+      <input type="checkbox" class="builtin-action-toggle" ${a.enabled ? "checked" : ""} />
+      <span class="slider"></span>
+    </label>
+  </div>`;
+}
+
+/** 事件委托：任一开关变化 → 收集所有 disable id → 一次性写回后端。 */
+function bindBuiltinActionEvents(list) {
+  list.addEventListener("change", async (e) => {
+    if (!e.target.classList.contains("builtin-action-toggle")) return;
+    const disabled = [];
+    list.querySelectorAll(".builtin-action-row").forEach((row) => {
+      const toggle = row.querySelector(".builtin-action-toggle");
+      if (toggle && !toggle.checked) disabled.push(row.dataset.actionId);
+    });
+    const msg = document.getElementById("builtin-actions-save-msg");
+    if (msg) {
+      msg.textContent = t("engine.builtin_actions.saving");
+      msg.className = "plugin-save-msg";
+    }
+    try {
+      await invoke("set_disabled_builtin_actions", { disabled });
+      if (msg) {
+        msg.textContent = t("engine.builtin_actions.saved");
+        // 2 秒后自动清除
+        setTimeout(() => {
+          if (msg.textContent === t("engine.builtin_actions.saved")) msg.textContent = "";
+        }, 2000);
+      }
+    } catch (err) {
+      console.error("set_disabled_builtin_actions failed:", err);
+      if (msg) {
+        msg.textContent = `${t("engine.builtin_actions.save_failed")}: ${err}`;
+        msg.className = "plugin-save-msg error";
+      }
+      // 回滚 UI 状态：重新加载列表
+      loadBuiltinActions();
+    }
+  });
 }
 
 // 根据数据源模式显示/隐藏 Everything 配置

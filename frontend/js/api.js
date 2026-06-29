@@ -15,6 +15,11 @@ export function launchApp(lnkPath) {
   return invoke("launch_app", { lnkPath });
 }
 
+/** 运行内置动作（0.8.0 §1.3）——id 为动作注册表 key，arg 为可选参数。 */
+export function runBuiltinAction(id, arg) {
+  return invoke("run_builtin_action", { id, arg: arg ?? null });
+}
+
 /** 隐藏主窗口。 */
 export function hideWindow() {
   return invoke("hide_window");

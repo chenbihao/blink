@@ -207,6 +207,8 @@ fn main() {
             app.manage(search_service.clone());
             // 初始化 SearchService 的 max_results 内存值（来自 AppConfig，搜索热路径零 IO）
             search_service.update_max_results(app_config.max_results as usize);
+            // 初始化内置动作 disable 列表（0.8.0 §1.3）
+            search_service.update_disabled_builtin_actions(app_config.disabled_builtin_actions.clone());
             // 启动清理过期搜索历史（后台 spawn，不阻塞启动；enabled=false 或 days=0 跳过）
             {
                 let cleanup_pool = pool.clone();
@@ -272,6 +274,9 @@ fn main() {
             app::commands::hide_settings_window,
             app::commands::search_apps,
             app::commands::launch_app,
+            app::commands::run_builtin_action,
+            app::commands::list_builtin_actions,
+            app::commands::set_disabled_builtin_actions,
             app::commands::get_storage_info,
             app::commands::clear_history,
             app::commands::resize_window,

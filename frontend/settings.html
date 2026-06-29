@@ -409,6 +409,23 @@
               </div>
             </div>
           </div>
+
+          <!-- 内置动作（BuiltinEngine，0.8.0 §1.3） -->
+          <div class="extension-card">
+            <div class="extension-header">
+              <div class="extension-icon">⚡</div>
+              <div class="extension-info">
+                <h3 data-i18n="engine.builtin_actions.title">内置动作</h3>
+                <p class="extension-desc" data-i18n="engine.builtin_actions.desc">锁屏、关机、打开设置等系统操作，以及依剪贴板/选区上下文出现的智能动作</p>
+              </div>
+              <span id="builtin-actions-save-msg" class="plugin-save-msg"></span>
+            </div>
+            <div class="extension-body">
+              <div id="builtin-actions-list" class="plugin-config-section">
+                <!-- 内容由 renderBuiltinActions() 动态渲染 -->
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- 插件 -->
