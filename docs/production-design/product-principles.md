@@ -5,7 +5,7 @@
 > 本卷原属 `product-design.md`(产品宪法),0.5 拆分为四卷;**保留原 § 节号**以维持交叉引用稳定(本卷 = 原 §10-12)。
 > 配套卷:`product-interaction.md`(交互/搜索)、`product-platform.md`(插件/意图/AI)、`product-context-future.md`(Context/隐私)。
 > 技术实现见 `phases/`;`00-overview.md` = 原 MVP.md(总纲)。
-> 更新时间 2026-06-25
+> 更新时间 2026-06-29
 
 ---
 
@@ -46,13 +46,20 @@
 
 ## 12. 演进时间线
 
+### 命名体系说明
+- **0.1 ~ 0.8**：正式迭代版本号（按序发布）
+- **P3 / P4**：原 MVP 文档的远期规划代号，现对应 **0.8.x 及以后**
+
 | 阶段 | 产品决策 |
 |---|---|
 | **0.1 MVP** | 定位 Universal Action Layer;右 Alt tap 唤起;P0 基础交互可靠性优先 |
 | **0.2** | 渐进式搜索(sync/async 双 lane);配置化优先;空 query 历史常用(雏形) |
-| **0.3** | 插件=召回源(不独占);动作透传前端;keyword 匹配留给路由层 |
-| **0.4** | **呈现权 surface 模型**(inline/priority/takeover);触发与呈现正交;view 为 AI 对话留口子 |
-| **0.5** | 配置分层架构 + FileEngine 文件搜索 + 扩展 Tab;右键上下文菜单;下拉项自适应高度 |
-| **P3** | VectorRouter 语义分类;AI 对话(view: chat);Context 层增强 route |
-| **P4** | 语音输入(VAD+STT);长按唤起录音 |
+| **0.3** | 插件=召回源(不独占);动作透传前端;keyword 匹配留给路由层;热键物理态重构 |
+| **0.4** | **呈现权 surface 模型**(inline/priority/takeover);触发与呈现正交;view 为 AI 对话留口子;RuleRouter 关键词规则路由 |
+| **0.5** | 配置分层 KV 架构 + FileEngine(Everything) + 扩展 Tab;右键上下文菜单;主题系统(Catppuccin);下拉项自适应高度 |
+| **0.6** | 插件 Release 打包路径;Python/Node.js/Powershell 脚本插件支持;统一错误处理四层兜底 |
+| **0.7** | 本地搜索 Fallback(walkdir);翻译插件;剪贴板历史(默认关闭);性能统计框架;图标缓存持久化;历史权重时间衰减 |
+| **0.8** | **UIA 划词监听**(选中文本自动抓取);**Chord 模式**(按住 Alt + 二次快捷键触发动作);Context 感知路由;AI Provider 抽象;VectorRouter 语义匹配;AI Chat 对话界面 |
+| **P3(→ 0.8.x)** | VectorRouter 语义分类;AI 对话(view: chat);Context 层增强 route |
+| **P4(→ 0.9+)** | 语音输入(VAD+STT);长按唤起录音 |
 | **更远** | Proactive 主动建议;自定义 view;egui 迁移评估 |

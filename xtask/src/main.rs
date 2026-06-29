@@ -1,13 +1,16 @@
 //! xtask — Blink 构建编排工具
 //!
 //! 用法：
-//!   cargo xtask plugins   编译 Rust 插件并拷贝到 plugins/builtin/<id>/bin/
-//!   cargo xtask release   编译插件 + cargo tauri build（本地一键打包）
+//!   cargo xtask plugins   编译 Rust 插件（仅编译到 target/release，不复制到 bin）
+//!   cargo xtask release   编译插件 + 复制到 bin + cargo tauri build（本地一键打包）
 //!
 //! 设计动机：原方案把插件编译挂在 Tauri 的 beforeBuildCommand 钩子（其 cwd
 //! 不可控）并用相对路径定位 ps1，在 CI 的 tauri-action 上下文里找不到脚本。
 //! xtask 用 env!("CARGO_MANIFEST_DIR") 在编译期锚定 workspace 根，cwd 完全
 //! 由代码掌控，本地与 CI 共用同一入口，不再依赖任何外部 cwd 假设。
+//!
+//! 重要：只有 release 打包才复制到 plugins/builtin/<id>/bin/
+//!      开发期 bin 目录不存在，避免 Tauri resources 递归扫描爆炸。
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -59,8 +62,9 @@ fn run(cmd: &str, args: &[&str], cwd: impl AsRef<Path>) {
     }
 }
 
-/// 编译所有 Rust 插件（release）并拷贝到 plugins/builtin/<id>/bin/。
-fn build_plugins() {
+/// 编译所有 Rust 插件（release）。
+/// copy_to_bin = true 时才拷贝到 plugins/builtin/<id>/bin/（仅 release 打包时需要）。
+fn build_plugins(copy_to_bin: bool) {
     let root = workspace_root();
     let target_release = root.join("target").join("release");
     let builtin_dir = root.join("plugins").join("builtin");
@@ -74,17 +78,24 @@ fn build_plugins() {
         print!("  编译 {pkg} ... ");
         // -p 显式选 workspace 成员包（跨 cargo 版本稳定，详见原 copy-plugins.ps1 注释）
         run("cargo", &["build", "--release", "-p", pkg.as_str()], &root);
+        println!("✓ -> target/release/{pkg}.exe");
 
-        let dest_dir = builtin_dir.join(id).join("bin");
-        std::fs::create_dir_all(&dest_dir)
-            .unwrap_or_else(|e| panic!("创建 {} 失败: {e}", dest_dir.display()));
-        let dest = dest_dir.join(format!("{pkg}.exe"));
-        std::fs::copy(target_release.join(format!("{pkg}.exe")), &dest)
-            .unwrap_or_else(|e| panic!("拷贝 {pkg}.exe 失败: {e}"));
-        println!("✓ -> {}", dest.display());
+        if copy_to_bin {
+            let dest_dir = builtin_dir.join(id).join("bin");
+            std::fs::create_dir_all(&dest_dir)
+                .unwrap_or_else(|e| panic!("创建 {} 失败: {e}", dest_dir.display()));
+            let dest = dest_dir.join(format!("{pkg}.exe"));
+            std::fs::copy(target_release.join(format!("{pkg}.exe")), &dest)
+                .unwrap_or_else(|e| panic!("拷贝 {pkg}.exe 失败: {e}"));
+            println!("     拷贝 -> {}", dest.display());
+        }
     }
     println!("🐍 脚本插件无需编译（Python/Node.js 源码已在 builtin 下）");
-    println!("✅ 插件打包完成");
+    if copy_to_bin {
+        println!("✅ 插件编译 + 拷贝到 bin 完成");
+    } else {
+        println!("✅ 插件编译完成（开发期无需拷贝到 bin）");
+    }
 }
 
 fn main() {
@@ -93,9 +104,9 @@ fn main() {
         .unwrap_or_else(|| panic!("用法: cargo xtask <plugins|release>"));
 
     match task.as_str() {
-        "plugins" => build_plugins(),
+        "plugins" => build_plugins(false), // 开发期：仅编译，不复制到 bin
         "release" => {
-            build_plugins();
+            build_plugins(true); // 打包期：编译 + 复制到 bin
             let root = workspace_root();
             println!("📦 cargo tauri build ...");
             run("cargo", &["tauri", "build"], &root);

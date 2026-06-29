@@ -42,6 +42,8 @@ desktop.ini
 *.pdb
 
 # Plugins
+# Rust 插件构建输出（release 打包时临时生成，开发期不存在）
+plugins/builtin/*/bin/
 # Python 脚本插件缓存
 plugins/builtin/*/__pycache__/
 plugins/builtin/*/*.pyc
