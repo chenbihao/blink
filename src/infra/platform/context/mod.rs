@@ -28,6 +28,8 @@ pub struct ContextSnapshot {
     pub foreground_app: Option<ForegroundAppInfo>,
     /// 剪贴板文本（截断 200 字符，Phase 2）
     pub clipboard_text: Option<String>,
+    /// 鼠标选区文本（0.8.0 §1.1：唤起瞬间 UIA 抓取，后台异步写回）。
+    pub selected_text: Option<String>,
 }
 
 impl Default for ContextSnapshot {
@@ -36,6 +38,7 @@ impl Default for ContextSnapshot {
             captured_at: Instant::now(),
             foreground_app: None,
             clipboard_text: None,
+            selected_text: None,
         }
     }
 }
@@ -50,6 +53,10 @@ pub struct ForegroundAppInfo {
     /// 完整 exe 路径（需要权限时可能为 None）
     #[allow(dead_code)] // 0.3+ 意图引擎可能用到
     pub exe_path: Option<String>,
+    /// 前台窗口句柄原始值（Windows HWND 的 isize 表示），0=无效。
+    /// 仅用于 0.8.0 §1.1 后台 UIA 选区抓取；不跨平台持久化。
+    #[allow(dead_code)] // 选区感知路由接入前暂未被读
+    pub hwnd: isize,
 }
 
 /// 运行中的进程（用于设置页「敏感应用」选择器：从实际运行的程序里挑）。
@@ -104,6 +111,8 @@ pub fn collect(cfg: &ContextConfig) -> ContextSnapshot {
         captured_at: Instant::now(),
         foreground_app,
         clipboard_text,
+        // selected_text 由后台 UIA 抓取异步写回（window::invoke spawn_blocking），此处先 None。
+        selected_text: None,
     }
 }
 

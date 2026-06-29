@@ -89,7 +89,7 @@ Blink 不只是一个启动器——它是 **Universal Action Layer（统一操�
 
 ```bash
 # 开发模式（debug，控制台日志）
-cargo run
+cargo tauri dev
 
 # 打包发布
 cargo install tauri-cli

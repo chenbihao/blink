@@ -226,7 +226,7 @@ mod tests {
     fn search_settings() {
         let engine = BuiltinEngine;
         let history = HashMap::new();
-        let snapshot = crate::context::ContextSnapshot::default();
+        let snapshot = crate::infra::platform::context::ContextSnapshot::default();
         let ctx = QueryContext {
             history: &history,
             snapshot: &snapshot,
@@ -242,7 +242,7 @@ mod tests {
     fn search_lock() {
         let engine = BuiltinEngine;
         let history = HashMap::new();
-        let snapshot = crate::context::ContextSnapshot::default();
+        let snapshot = crate::infra::platform::context::ContextSnapshot::default();
         let ctx = QueryContext {
             history: &history,
             snapshot: &snapshot,
@@ -257,7 +257,7 @@ mod tests {
     fn search_pinyin_initial() {
         let engine = BuiltinEngine;
         let history = HashMap::new();
-        let snapshot = crate::context::ContextSnapshot::default();
+        let snapshot = crate::infra::platform::context::ContextSnapshot::default();
         let ctx = QueryContext {
             history: &history,
             snapshot: &snapshot,
@@ -273,7 +273,7 @@ mod tests {
     fn search_no_match() {
         let engine = BuiltinEngine;
         let history = HashMap::new();
-        let snapshot = crate::context::ContextSnapshot::default();
+        let snapshot = crate::infra::platform::context::ContextSnapshot::default();
         let ctx = QueryContext {
             history: &history,
             snapshot: &snapshot,
@@ -287,7 +287,7 @@ mod tests {
     fn search_empty_query() {
         let engine = BuiltinEngine;
         let history = HashMap::new();
-        let snapshot = crate::context::ContextSnapshot::default();
+        let snapshot = crate::infra::platform::context::ContextSnapshot::default();
         let ctx = QueryContext {
             history: &history,
             snapshot: &snapshot,

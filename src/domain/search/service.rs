@@ -86,6 +86,15 @@ impl SearchService {
         *guard = snapshot;
     }
 
+    /// 写回选中文本（后台 UIA 抓取完成后调用，0.8.0 §1.1）。
+    ///
+    /// 与 update_snapshot 分离：选区抓取是异步的（spawn_blocking），晚于快照写入，
+    /// 抓到后单独回填 selected_text，避免覆盖整份快照丢掉同时刻采的剪贴板/前台信息。
+    pub fn update_selected_text(&self, text: Option<String>) {
+        let mut guard = self.snapshot.write().unwrap();
+        guard.selected_text = text;
+    }
+
     /// 更新最大结果数（update_general_config 时调用）。热更新，搜索热路径零 IO。
     pub fn update_max_results(&self, n: usize) {
         // 下限保护：0 视为默认 20，避免结果全空
@@ -500,7 +509,7 @@ fn placeholder_entry(plugin_id: &str, display_name: &str) -> AppEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::search::engine::SearchAction;
+    use crate::domain::search::engine::SearchAction;
 
     fn item(id: &str, score: f32, source: &str) -> SearchItem {
         SearchItem {

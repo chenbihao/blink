@@ -35,6 +35,8 @@ pub(super) fn collect_foreground_app() -> Option<ForegroundAppInfo> {
             tracing::trace!("GetForegroundWindow 返回 NULL");
             return None;
         }
+        // 留住句柄原始值（0.8.0 §1.1：供后台 UIA 选区抓取用），HWND 的裸指针转 isize。
+        let hwnd_raw = hwnd.0 as isize;
 
         // 拿窗口标题（先拿长度，再拿内容）
         let title_len = GetWindowTextLengthW(hwnd);
@@ -57,6 +59,7 @@ pub(super) fn collect_foreground_app() -> Option<ForegroundAppInfo> {
                 process_name: String::new(),
                 window_title,
                 exe_path: None,
+                hwnd: hwnd_raw,
             });
         }
 
@@ -74,6 +77,7 @@ pub(super) fn collect_foreground_app() -> Option<ForegroundAppInfo> {
                 process_name: String::new(),
                 window_title,
                 exe_path: None,
+                hwnd: hwnd_raw,
             });
         };
 
@@ -108,6 +112,7 @@ pub(super) fn collect_foreground_app() -> Option<ForegroundAppInfo> {
             process_name,
             window_title,
             exe_path,
+            hwnd: hwnd_raw,
         })
     }
 }

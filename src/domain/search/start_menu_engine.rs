@@ -397,7 +397,7 @@ fn normalize_to_items(scored: Vec<(u32, AppEntry)>, history: &HashMap<String, (i
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::search::{Action, ActionKind};
+    use crate::domain::search::{Action, ActionKind};
 
     fn entry(name: &str, lnk: &str) -> AppEntry {
         AppEntry {

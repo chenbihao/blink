@@ -56,6 +56,11 @@ pub fn invoke(app: &AppHandle) {
     // 2. 更新 SearchService 中的快照
     if let Some(search_service) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
         search_service.update_snapshot(snapshot);
+        // 选区来自划词监听缓存（鼠标划词黄金时机抓取），单独回填，不覆盖整份快照。
+        // 不再在 show 后抓取——那会让 Electron 应用失焦退化选区（0.8.0 §1.1 实测）。
+        if let Some(sel) = crate::infra::platform::selection::get_last_selection() {
+            search_service.update_selected_text(Some(sel));
+        }
     }
 
     let Some(win) = app.get_webview_window("main") else {

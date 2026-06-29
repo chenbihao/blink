@@ -90,7 +90,7 @@ Download the latest installer from [Releases](../../releases).
 
 ```bash
 # Dev mode (debug, console logging)
-cargo run
+cargo tauri dev
 
 # Release build
 cargo install tauri-cli

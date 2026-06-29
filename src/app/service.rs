@@ -139,6 +139,27 @@ impl Service for HotkeyService {
     }
 }
 
+/// 选区感知服务(0.8.0 §1.1)：启动划词监听(全局鼠标钩子 → 黄金时机 UIA 抓取 → 缓存)。
+/// 唤起时由 window::invoke 读取缓存,绕开 Electron 应用失焦退化选区的问题。
+pub struct SelectionService;
+
+#[async_trait::async_trait]
+impl Service for SelectionService {
+    fn name(&self) -> &'static str {
+        "selection"
+    }
+    async fn start(&self, _ctx: &AppContext) -> Result<(), String> {
+        // selected_text 目前无消费者（§1.2 RuleRouter 路由接入待做），先停用选区监听，
+        // 避免常驻第二条低级鼠标钩子 + 无谓的划词 UIA 抓取开销。路由接好后改 true 启用。
+        // 用 const 开关而非注释：注释会让整条监听链变成 dead code（14 个 warning）。
+        const ENABLE_SELECTION_LISTENER: bool = false;
+        if ENABLE_SELECTION_LISTENER {
+            crate::infra::platform::selection::start_listener();
+        }
+        Ok(())
+    }
+}
+
 /// 按依赖拓扑顺序构造服务列表(Config → History → 其余)。
 ///
 /// `search` 为已构造的 SearchService(main.rs 持有并 manage),此处包成生命周期 wrapper
@@ -150,5 +171,6 @@ pub fn all_services(search: std::sync::Arc<crate::domain::search::SearchService>
         Box::new(SearchLifecycle { service: search }),
         Box::new(WindowService),
         Box::new(HotkeyService),
+        Box::new(SelectionService),
     ]
 }
