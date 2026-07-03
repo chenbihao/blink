@@ -6,25 +6,33 @@ use std::time::{Duration, Instant};
 
 use tokio::time::sleep;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE};
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
 };
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallWindowProcW, GetForegroundWindow, GetWindowLongPtrW, GetWindowThreadProcessId,
-    IsIconic, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_WNDPROC, GWL_STYLE, HWND_TOP,
-    SET_WINDOW_POS_FLAGS, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOACTIVATE, SWP_NOSIZE,
-    SWP_NOZORDER, SW_RESTORE, WNDPROC, WS_CAPTION, WS_THICKFRAME,
+    CallWindowProcW, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW,
+    GetWindowThreadProcessId, IsIconic, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    GWLP_WNDPROC, GWL_STYLE, HWND_TOP, SET_WINDOW_POS_FLAGS, SWP_FRAMECHANGED, SWP_NOMOVE,
+    SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_RESTORE, WNDPROC, WS_CAPTION, WS_THICKFRAME,
 };
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 
 const ST_HIDDEN: u8 = 0;
 const ST_VISIBLE: u8 = 1;
 
 /// 默认 grace period。
 const DEFAULT_GRACE_MS: u64 = 500;
+
+/// 唤起时的基准逻辑尺寸——用来在跨 DPI 屏定位时算出目标屏上的物理尺寸。
+/// 与前端 `syncWindowSize()` 首帧一致（宽 700 / 高 65 含 CSS padding），
+/// 避免"定位算 60、前端 resize 到 65"导致的 5px 视觉抖动。
+const BASE_W_LOGICAL: f64 = 700.0;
+const BASE_H_LOGICAL: f64 = 65.0;
 
 static STATE: AtomicU8 = AtomicU8::new(ST_HIDDEN);
 static START: OnceLock<Instant> = OnceLock::new();
@@ -66,6 +74,12 @@ pub fn invoke(app: &AppHandle) {
     let Some(win) = app.get_webview_window("main") else {
         return;
     };
+
+    // 复位到基准尺寸（逻辑像素）——`launcher_position` 内部按目标屏 DPI 算
+    // 物理尺寸做居中；跨 DPI 屏时 winit 在 set_position 后会响应 WM_DPICHANGED
+    // 自动 rescale 尺寸，与我们算出的位置对齐。前端 syncWindowSize 首帧
+    // 会立即再 resize 到真实内容高度，此步骤零可见成本。
+    let _ = win.set_size(tauri::LogicalSize::new(BASE_W_LOGICAL, BASE_H_LOGICAL));
 
     if let Some(pos) = launcher_position(&win) {
         let _ = win.set_position(pos);
@@ -257,22 +271,54 @@ fn is_self_foreground(_app: &AppHandle, fg: windows::Win32::Foundation::HWND) ->
     fg_pid == self_pid
 }
 
-/// 计算窗口在前台应用所在显示器的位置：中上部居中（物理像素）。
-fn launcher_position(win: &WebviewWindow) -> Option<PhysicalPosition<i32>> {
-    // 读窗口实际物理尺寸定位（与弹性 resize 同步，不再硬编码 700×60）
-    let size = win.outer_size().ok()?;
-    let w = size.width as i32;
-    let h = size.height as i32;
-
+/// 计算窗口在鼠标所在显示器上的位置：工作区中心居中（物理像素）。
+///
+/// 跟随鼠标所在屏（业界主流：Alfred / PowerToys Run 都这么做）——
+/// 用户按热键前手在哪、窗口就在哪，无需感知"前台窗口在哪块屏"。
+/// 天然规避 `GetForegroundWindow` 返回 NULL（切桌面 / 前台切换瞬态）时
+/// `MonitorFromWindow(NULL, …)` 会误落到主屏的问题。
+///
+/// 用 `rcWork`（工作区，排除任务栏）而非 `rcMonitor`，与
+/// `clamp_to_work_area` 行为一致：任务栏放屏顶部/侧边时也不会视觉偏移。
+///
+/// **跨 DPI 屏关键**：物理尺寸 **不能读 `outer_size()`**——它反映的是
+/// 「窗口当前所在屏」的 DPI 换算结果，而我们要去的可能是另一块 DPI 不同的屏。
+/// 一旦 `set_position` 把窗口移过去，Windows 发 `WM_DPICHANGED` 让 winit
+/// 按目标屏 DPI **rescale 尺寸但不动位置**，就会视觉偏移。
+/// 正确做法：`GetDpiForMonitor(目标屏) × 基准逻辑尺寸` 直接算目标屏物理尺寸，
+/// 位置随之对齐——首次跨屏也一步到位。
+fn launcher_position(_win: &WebviewWindow) -> Option<PhysicalPosition<i32>> {
     unsafe {
-        let fg = GetForegroundWindow();
-        let hmon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+        let mut pt = POINT { x: 0, y: 0 };
+        let hmon = if GetCursorPos(&mut pt).is_ok() {
+            MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST)
+        } else {
+            // 极端 fallback：拿不到光标就落主屏
+            MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY)
+        };
+
         let mut mi: MONITORINFO = std::mem::zeroed();
         mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
         if GetMonitorInfoW(hmon, &mut mi).as_bool() {
-            let rc = mi.rcMonitor;
+            let rc = mi.rcWork; // 工作区（排除任务栏），与 clamp_to_work_area 一致
+
+            // 目标屏 DPI（EFFECTIVE）→ scale。取不到时按 96 DPI（100%）兜底。
+            let mut dpi_x: u32 = 96;
+            let mut dpi_y: u32 = 96;
+            let _ = GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
+            let scale = (dpi_x.max(96) as f64) / 96.0;
+            let w = (BASE_W_LOGICAL * scale).round() as i32;
+            let h = (BASE_H_LOGICAL * scale).round() as i32;
+
             let cx = rc.left + (rc.right - rc.left) / 2;
-            let cy = rc.top + (rc.bottom - rc.top) / 2; // 屏幕正中
+            let cy = rc.top + (rc.bottom - rc.top) / 2;
+            tracing::debug!(
+                cursor_x = pt.x, cursor_y = pt.y,
+                mon_left = rc.left, mon_top = rc.top,
+                mon_right = rc.right, mon_bottom = rc.bottom,
+                dpi_x, w, h,
+                "launcher_position: located on monitor under cursor"
+            );
             return Some(PhysicalPosition::new(cx - w / 2, cy - h / 2));
         }
     }

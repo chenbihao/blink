@@ -133,6 +133,17 @@ h2:active {
   font-family: ui-monospace, Consolas, monospace;
 }
 
+/* 设置项中的超链（如"关于-仓库"）跟随主题强调色，避免浏览器默认蓝紫色 */
+.setting-row .value a,
+.setting-row .value a:visited {
+  color: var(--accent);
+  text-decoration: none;
+  transition: color 0.15s;
+}
+.setting-row .value a:hover {
+  text-decoration: underline;
+}
+
 .setting-row .hint {
   color: var(--text-faint);
   font-size: 12px;

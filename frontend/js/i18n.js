@@ -215,6 +215,7 @@ const DICT = {
     "about.version.label": "版本",
     "about.stack.label": "技术栈",
     "about.license.label": "许可",
+    "about.repository.label": "仓库",
 
     // ── 网络 Tab（动态渲染）──
     "network.title": "全局网络代理",
@@ -507,6 +508,7 @@ const DICT = {
     "about.version.label": "Version",
     "about.stack.label": "Tech stack",
     "about.license.label": "License",
+    "about.repository.label": "Repository",
 
     // ── Network tab (dynamic) ──
     "network.title": "Global Network Proxy",

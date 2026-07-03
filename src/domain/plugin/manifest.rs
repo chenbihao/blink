@@ -384,11 +384,16 @@ impl PluginManifest {
 
         // 普通情况：相对路径基于 manifest 所在目录
         let exec_path = PathBuf::from(exec);
-        if exec_path.is_absolute() {
+        let joined = if exec_path.is_absolute() {
             exec_path
         } else {
             manifest_dir.join(exec_path)
-        }
+        };
+        // Windows verbatim 前缀 `\\?\` 需要剥掉：Tauri 在 release 下 `resource_dir()`
+        // 返回的路径以 `\\?\` 开头，join 后一路带着这个前缀传给 `CreateProcessW`，
+        // Windows 会以 ERROR_PATH_NOT_FOUND (os error 3) 拒绝拉起进程。
+        // dev 模式路径不带前缀，此函数对普通路径是幂等的。
+        strip_windows_verbatim_prefix(&joined)
     }
 
     /// 查询超时(毫秒),缺省 3000。
@@ -411,6 +416,30 @@ impl PluginManifest {
         }
         serde_json::Value::Object(map)
     }
+}
+
+/// 剥掉 Windows verbatim/extended-length 前缀 `\\?\`。
+///
+/// 背景：Tauri release 下 `resource_dir()` 返回的路径带 `\\?\` 前缀（如
+/// `\\?\D:\DevTools\Blink\...`），join 后仍保留。`CreateProcessW` 不接受此前缀
+/// 作为 `lpApplicationName`，会返回 ERROR_PATH_NOT_FOUND (os error 3)。
+///
+/// UNC 形式的 `\\?\UNC\server\share\...` 转成 `\\server\share\...`。
+/// 非 Windows 或普通路径原样返回（幂等）。
+fn strip_windows_verbatim_prefix(p: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        // 用字符串处理更稳：PathBuf 组件 API 在遇到 `\\?\` 时行为随版本变化。
+        if let Some(s) = p.to_str() {
+            if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+                return PathBuf::from(format!(r"\\{rest}"));
+            }
+            if let Some(rest) = s.strip_prefix(r"\\?\") {
+                return PathBuf::from(rest);
+            }
+        }
+    }
+    p.to_path_buf()
 }
 
 #[cfg(test)]
@@ -509,5 +538,42 @@ mod tests {
         let defaults = m.default_settings();
         assert_eq!(defaults["default_engine"], "youdao");
         assert_eq!(defaults["target_lang"], "zh");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn exec_path_strips_verbatim_prefix() {
+        // 模拟 release 下 Tauri resource_dir 带 \\?\ 前缀的场景。
+        // exec 用 .exe 后缀而不是 ./bin/... 是为了避开 debug 特化分支(会尝试
+        // 从 target/debug 取,与本测试无关);走通用相对路径 + join(manifest_dir) 分支。
+        let json = r#"{"schema_version":1,"id":"x","name":"X","version":"0",
+            "runtime":{"type":"process","exec":"blink-plugin-x.exe"}}"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        let dir = PathBuf::from(r"\\?\D:\DevTools\Blink\plugins\builtin\x");
+        let got = m.exec_path(&dir);
+        assert!(
+            !got.to_string_lossy().starts_with(r"\\?\"),
+            "exec_path 结果不应带 \\\\?\\ 前缀，实际={}", got.display(),
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn strip_verbatim_prefix_variants() {
+        // 普通路径:不变
+        assert_eq!(
+            strip_windows_verbatim_prefix(Path::new(r"D:\a\b")),
+            PathBuf::from(r"D:\a\b"),
+        );
+        // Verbatim 磁盘路径:去前缀
+        assert_eq!(
+            strip_windows_verbatim_prefix(Path::new(r"\\?\D:\a\b")),
+            PathBuf::from(r"D:\a\b"),
+        );
+        // Verbatim UNC:转成普通 UNC
+        assert_eq!(
+            strip_windows_verbatim_prefix(Path::new(r"\\?\UNC\server\share\a")),
+            PathBuf::from(r"\\server\share\a"),
+        );
     }
 }

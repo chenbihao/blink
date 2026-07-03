@@ -11,6 +11,17 @@ use tauri::{
 };
 
 fn main() {
+    // 开启 Per-Monitor V2 DPI 感知：混合 DPI（例如主屏 100% + 副屏 150%）跨屏时
+    // 由系统按目标显示器的 scale 自动重算尺寸，避免文字虚化 / 位置漂移。
+    // 必须在任何窗口创建前调用；调用失败静默忽略（Win10 早期版本走 System DPI 也可用）。
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::UI::HiDpi::{
+            SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        };
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+
     // 初始化日志（尽早，默认 error；setup 读配置后 reload 到用户级别）
     infra::utils::logging::init("error");
 
@@ -279,6 +290,7 @@ fn main() {
             app::commands::set_disabled_builtin_actions,
             app::commands::get_storage_info,
             app::commands::clear_history,
+            app::commands::get_app_info,
             app::commands::resize_window,
             app::commands::get_config,
             app::commands::update_hotkey,

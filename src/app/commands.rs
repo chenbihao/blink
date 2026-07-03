@@ -320,6 +320,20 @@ pub async fn get_storage_info(app: tauri::AppHandle) -> serde_json::Value {
     })
 }
 
+/// 设置页-关于：应用元信息（版本/名称/描述/仓库）。
+/// 版本从 Cargo.toml 编译期注入（`CARGO_PKG_*`），tauri.conf.json 版本单独在 bundle 层使用。
+/// 保持这两处同步：升版本时改 Cargo.toml + tauri.conf.json 两个地方。
+#[tauri::command]
+pub fn get_app_info() -> serde_json::Value {
+    serde_json::json!({
+        "name": env!("CARGO_PKG_NAME"),
+        "version": env!("CARGO_PKG_VERSION"),
+        "description": env!("CARGO_PKG_DESCRIPTION"),
+        "license": env!("CARGO_PKG_LICENSE"),
+        "repository": env!("CARGO_PKG_REPOSITORY"),
+    })
+}
+
 /// 设置页-存储：清空历史记录。
 #[tauri::command]
 pub async fn clear_history(app: tauri::AppHandle) -> Result<(), String> {

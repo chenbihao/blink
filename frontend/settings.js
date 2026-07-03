@@ -1830,6 +1830,35 @@ loadLogInfo();
 loadNetworkConfig();
 loadContextConfig();
 loadPerfStats();
+loadAboutInfo();
+
+// 关于面板：应用元信息从后端 Cargo.toml 编译期注入的字段读取
+async function loadAboutInfo() {
+  try {
+    const info = await invoke("get_app_info");
+    const versionEl = document.getElementById("about-version");
+    if (versionEl) versionEl.textContent = info.version || "—";
+    const licenseEl = document.getElementById("about-license");
+    if (licenseEl) licenseEl.textContent = info.license || "—";
+    const repoEl = document.getElementById("about-repository");
+    if (repoEl) {
+      const url = info.repository || "";
+      if (url) {
+        repoEl.textContent = url;
+        repoEl.href = url;
+        repoEl.addEventListener("click", (e) => {
+          e.preventDefault();
+          openExternalUrl(url);
+        });
+      } else {
+        repoEl.textContent = "—";
+        repoEl.removeAttribute("href");
+      }
+    }
+  } catch (e) {
+    console.error("loadAboutInfo failed:", e);
+  }
+}
 
 // ── 性能统计（调试 Tab）──────────────────────────────────────────────────────
 

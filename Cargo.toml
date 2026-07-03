@@ -1,8 +1,10 @@
 [package]
 name = "blink"
-version = "0.1.0"
+version = "0.8.0"
 edition = "2024"
-description = "Blink — Windows Universal Launcher"
+description = "Blink — Windows Universal Action Layer"
+license = "MIT"
+repository = "https://github.com/chenbihao/blink"
 
 [workspace]
 members = ["plugins/examples/echo", "plugins/examples/ip", "plugins/examples/weather", "xtask"]
@@ -66,6 +68,7 @@ windows = { version = "0.62.2", features = [
     "Win32_Graphics_Dwm",
     "Win32_UI_Controls",
     "Win32_UI_Accessibility",
+    "Win32_UI_HiDpi",
 ] }
 
 [build-dependencies]
