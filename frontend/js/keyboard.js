@@ -1,12 +1,16 @@
 //! 键盘交互：结果导航、激活、ESC 隐藏、修饰键默认行为屏蔽。
+//! 0.8.1：Tab / ArrowRight 拦截接受 ghost text 补全（视配置 autosuggest_tab_key）。
 
 import { hideWindow } from "./api.js";
 import { activateItem } from "./actions.js";
 import * as results from "./results.js";
+import * as ghost from "./ghost.js";
+import * as autosuggestConfig from "./autosuggest-config.js";
 import { resultsEl } from "./dom.js";
 
 /** 绑定全部键盘监听 + 滚轮翻页。 */
 export function init() {
+  document.addEventListener("keydown", onAutosuggestAccept, true); // 捕获阶段，优先其他 handler
   document.addEventListener("keydown", onNavigation);
   document.addEventListener("keydown", onEscape);
   document.addEventListener("keydown", onBlockModifiers, true);
@@ -21,6 +25,26 @@ export function init() {
     }
   });
   initAltBadges();
+}
+
+// ── Autosuggestion Tab 接受（0.8.1）────────────────────────────────────────
+
+/**
+ * Tab / ArrowRight（视配置）+ 有活跃 ghost → 接受补全。
+ * 捕获阶段拦截，抢在 onNavigation 之前——ArrowRight 场景下必须先处理，
+ * 否则会被 results 的方向键导航吞掉（虽然当前 ArrowRight 无导航语义，仍为将来预留）。
+ */
+function onAutosuggestAccept(e) {
+  // IME 组字期间放行——部分中日韩输入法用 Tab 切候选词，不能被 ghost 吞掉。
+  // `isComposing` 是现代 DOM 标准，`keyCode === 229` 是老浏览器兜底。
+  if (e.isComposing || e.keyCode === 229) return;
+  const tabKey = autosuggestConfig.getTabKey();
+  if (e.key !== tabKey) return;
+  if (!ghost.hasHint()) return;
+  if (ghost.acceptCurrent()) {
+    e.preventDefault();
+    e.stopPropagation();
+  }
 }
 
 // ── 导航 / 激活 ───────────────────────────────────────────────────────────────
@@ -55,6 +79,7 @@ function onNavigation(e) {
 function onEscape(e) {
   if (e.key === "Escape") {
     e.preventDefault();
+    ghost.clear();
     hideWindow();
   }
 }

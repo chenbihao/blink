@@ -88,7 +88,7 @@ pub fn invoke(app: &AppHandle) {
     let grace_ms = GRACE_MS.load(Ordering::SeqCst);
     INVOKE_AT.store(now, Ordering::SeqCst);
     STATE.store(ST_VISIBLE, Ordering::SeqCst);
-    tracing::debug!(grace_ms, "invoke: state → VISIBLE, show + set_focus");
+    tracing::trace!(grace_ms, "invoke: state → VISIBLE, show + set_focus");
     let _ = win.show();
     let _ = win.set_focus();
     let _ = app.emit("blink://shown", ());
@@ -113,10 +113,10 @@ pub fn hide(app: &AppHandle, reason: &str) {
 /// 失焦不在此时处理，交给看门狗轮询前台窗口。
 pub fn on_focused(focused: bool) {
     let st = STATE.load(Ordering::SeqCst);
-    tracing::debug!(focused, st, "on_focused");
+    tracing::trace!(focused, st, "on_focused");
     if focused {
         STATE.store(ST_VISIBLE, Ordering::SeqCst);
-        tracing::debug!("on_focused: state → VISIBLE, watchdog armed");
+        tracing::trace!("on_focused: state → VISIBLE, watchdog armed");
     }
 }
 
@@ -312,7 +312,7 @@ fn launcher_position(_win: &WebviewWindow) -> Option<PhysicalPosition<i32>> {
 
             let cx = rc.left + (rc.right - rc.left) / 2;
             let cy = rc.top + (rc.bottom - rc.top) / 2;
-            tracing::debug!(
+            tracing::trace!(
                 cursor_x = pt.x, cursor_y = pt.y,
                 mon_left = rc.left, mon_top = rc.top,
                 mon_right = rc.right, mon_bottom = rc.bottom,

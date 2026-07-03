@@ -53,19 +53,27 @@ pub fn hide_settings_window(app: tauri::AppHandle) {
 ///
 /// calc / 应用搜索 / 历史融合等逻辑已下沉到各 SearchEngine + SearchService(见 0.2 设计 §2)。
 /// `seq` 为前端递增请求序号,async 增量结果(blink://results)回带同一 seq 供前端校验。
+///
+/// 0.8.1 §2.5：返回契约改为 `SearchResponse { entries, completionHint }`——
+/// 首拼命中/fuzzy 部分拼音时同步带回 ghost text 提示。
 #[tauri::command]
 pub async fn search_apps(
     query: String,
     seq: u64,
     app: tauri::AppHandle,
-) -> Vec<crate::domain::search::AppEntry> {
+) -> crate::domain::search::SearchResponse {
     tracing::debug!(%query, seq, "search_apps: 收到搜索请求");
     let service = app.state::<std::sync::Arc<crate::domain::search::SearchService>>();
     let results = service.search(&query, seq).await;
-    tracing::debug!(count = results.len(), %query, "search_apps: 返回结果");
-    for (i, item) in results.iter().enumerate() {
+    tracing::debug!(
+        count = results.entries.len(),
+        has_hint = results.completion_hint.is_some(),
+        %query,
+        "search_apps: 返回结果"
+    );
+    for (i, item) in results.entries.iter().enumerate() {
         let detail = item.score_detail.as_deref().unwrap_or("");
-        tracing::debug!(
+        tracing::trace!(
             index = i,
             score = if detail.is_empty() {
                 format!("{:.4}", item.score)
@@ -77,6 +85,9 @@ pub async fn search_apps(
             lnk_path = %item.lnk_path,
             "搜索结果项"
         );
+    }
+    if let Some(hint) = &results.completion_hint {
+        tracing::debug!(display = %hint.display, replacement = %hint.replacement, "ghost hint");
     }
     results
 }
@@ -308,6 +319,26 @@ pub async fn set_disabled_builtin_actions(
     Ok(())
 }
 
+/// 更新 Autosuggestion 配置（0.8.1 §2.8）。
+///
+/// 写 SQLite + 触发 SearchService 热更新。tab_key 只影响前端键位监听——
+/// 前端设置页保存后可自行更新 window 单例，无需回听后端事件（简单直接）。
+#[tauri::command]
+pub async fn update_autosuggest_config(
+    app: tauri::AppHandle,
+    enabled: bool,
+    min_score: f64,
+    tab_key: String,
+) -> Result<(), String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::app::config::update_autosuggest_config(&pool, enabled, min_score, tab_key).await?;
+    if let Some(ss) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
+        ss.update_autosuggest_config(enabled, min_score);
+    }
+    tracing::debug!(enabled, min_score, "autosuggest 配置已更新");
+    Ok(())
+}
+
 /// 设置页-存储：获取历史记录统计信息。
 #[tauri::command]
 pub async fn get_storage_info(app: tauri::AppHandle) -> serde_json::Value {
@@ -424,7 +455,12 @@ pub async fn update_auto_start(app: tauri::AppHandle, auto_start: bool) -> Resul
 #[tauri::command]
 pub async fn update_language(app: tauri::AppHandle, language: String) -> Result<(), String> {
     let pool = app.state::<sqlx::SqlitePool>();
-    crate::app::config::update_language(&pool, language).await?;
+    crate::app::config::update_language(&pool, language.clone()).await?;
+    // 热更新 SearchService 的 language 快照（0.8.1）— 立即影响 empty_arg_hint 等
+    // LocalizableText 的展示语言，无需重启。
+    if let Some(service) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
+        service.update_language(language);
+    }
     let _ = app.emit("blink://config-changed", ());
     Ok(())
 }

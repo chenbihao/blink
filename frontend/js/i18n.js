@@ -70,6 +70,13 @@ const DICT = {
     "general.max_results.hint": "搜索融合后返回上限",
     "general.page_size.label": "每页条数",
     "general.page_size.hint": "每屏最多显示多少条结果",
+    "general.autosuggest.title": "输入补全",
+    "general.autosuggest.enabled.label": "启用 Ghost Text 补全",
+    "general.autosuggest.enabled.hint": "首拼命中时在输入框显示灰色补全提示，按 Tab 接受",
+    "general.autosuggest.min_score.label": "模糊阈值",
+    "general.autosuggest.min_score.hint": "部分拼音触发 Ghost Text 的最低相似度（0.5~0.95）",
+    "general.autosuggest.tab_key.label": "接受补全键",
+    "general.autosuggest.tab_key.hint": "按此键把输入替换为规范形式并触发搜索",
 
     // ── 快捷键 Tab ──
     "hotkey.label": "唤起快捷键",
@@ -77,7 +84,11 @@ const DICT = {
     "hotkey.reset": "恢复默认",
     "hotkey.reset.title": "恢复默认",
     "hotkey.tap.label": "tap 阈值",
+    "hotkey.tap.title": "短按到抬起的最长时长，超过则判定为长按（Hold），不触发唤起",
+    "hotkey.tap.hint": "按下到抬起若超过此时长，视为长按（保留系统修饰键功能），不触发 Blink。",
     "hotkey.grace.label": "看门狗 grace period",
+    "hotkey.grace.title": "窗口刚显示后的失焦保护期，避免焦点还没切过来就被误判为失焦而隐藏",
+    "hotkey.grace.hint": "窗口显示后此段时间内不检测失焦，避免焦点切换尚未完成时被误判隐藏。",
     "hotkey.recording": "请按下快捷键...（10秒超时）",
     "hotkey.unit.ms": "{value}ms",
 
@@ -293,13 +304,19 @@ const DICT = {
     "menu.copyResult": "复制结果",
 
     // ── 主窗口：提示栏 ──
+    // 键位用 {{key:X}} 占位符，由 statusbar 走 renderHint 替换成 <kbd> DOM；
+    // 未走 renderHint 的调用点（若有）会看到字面 `{{key:X}}`，保证不会被静默截断。
     "hint.open": "打开",
     "hint.copy": "复制结果",
     "hint.fallback": "执行",
-    "hint.enter": "Enter {label}",
-    "hint.navigate": "↑↓ 选择",
-    "hint.alt_number": "Alt+数字 快捷触发",
-    "statusbar.paging": "PgUp/PgDn 翻页 · {page}/{pageCount}",
+    "hint.enter": "{{key:Enter}} {label}",
+    "hint.navigate": "{{key:ArrowUp}}{{key:ArrowDown}} 选择",
+    "hint.alt_number": "{{key:Alt}}+数字 快捷触发",
+    "statusbar.paging": "{{key:PageUp}}{{key:PageDown}} 翻页 · {page}/{pageCount}",
+    // 0.8.1 Autosuggestion：statusbar 里的键帽提示（{target} 是补全目标 keyword）
+    // 占位符 {key} 由 statusbar 传入具体键帽 Element（Tab 或 ArrowRight，视用户配置）
+    "statusbar.autosuggest_accept": "按 {key} 接受补全 → {target}",
+    "statusbar.autosuggest_enter": "按 {key} 进入参数模式",
 
     // ── 主窗口：搜索框 ──
     "search.placeholder": "输入应用名、计算…",
@@ -363,6 +380,13 @@ const DICT = {
     "general.max_results.hint": "Cap after fusion",
     "general.page_size.label": "Items per page",
     "general.page_size.hint": "Max items displayed per screen",
+    "general.autosuggest.title": "Input completion",
+    "general.autosuggest.enabled.label": "Enable ghost text completion",
+    "general.autosuggest.enabled.hint": "Show gray inline suggestion on pinyin-initials hits; press Tab to accept",
+    "general.autosuggest.min_score.label": "Fuzzy threshold",
+    "general.autosuggest.min_score.hint": "Minimum similarity for partial-pinyin ghost text (0.5~0.95)",
+    "general.autosuggest.tab_key.label": "Accept key",
+    "general.autosuggest.tab_key.hint": "Replace input with the canonical form and re-run search",
 
     // ── Hotkey tab ──
     "hotkey.label": "Summon hotkey",
@@ -370,7 +394,11 @@ const DICT = {
     "hotkey.reset": "Reset to default",
     "hotkey.reset.title": "Reset to default",
     "hotkey.tap.label": "Tap threshold",
+    "hotkey.tap.title": "Max press-to-release duration before it's treated as a hold (system modifier) instead of a tap",
+    "hotkey.tap.hint": "If the key stays down longer than this, it's treated as a hold (preserving system modifier behavior) and Blink is NOT invoked.",
     "hotkey.grace.label": "Watchdog grace period",
+    "hotkey.grace.title": "Focus-loss protection window after the window is shown — prevents hiding before focus transfer completes",
+    "hotkey.grace.hint": "Focus-loss detection is suppressed for this duration after the window appears, so it isn't hidden before focus finishes transferring.",
     "hotkey.recording": "Press a shortcut... (10s timeout)",
     "hotkey.unit.ms": "{value}ms",
 
@@ -589,10 +617,14 @@ const DICT = {
     "hint.open": "Open",
     "hint.copy": "Copy result",
     "hint.fallback": "Run",
-    "hint.enter": "Enter {label}",
-    "hint.navigate": "↑↓ Select",
-    "hint.alt_number": "Alt+number quick launch",
-    "statusbar.paging": "PgUp/PgDn page · {page}/{pageCount}",
+    "hint.enter": "{{key:Enter}} {label}",
+    "hint.navigate": "{{key:ArrowUp}}{{key:ArrowDown}} Select",
+    "hint.alt_number": "{{key:Alt}}+number quick launch",
+    "statusbar.paging": "{{key:PageUp}}{{key:PageDown}} page · {page}/{pageCount}",
+    // 0.8.1 Autosuggestion（{target} = completion target keyword;
+    // {key} = kbd Element for user-configured accept key, injected by statusbar）
+    "statusbar.autosuggest_accept": "Press {key} to accept → {target}",
+    "statusbar.autosuggest_enter": "Press {key} to enter parameters",
 
     // ── Main window: search box ──
     "search.placeholder": "Type app name, calculate…",

@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="css/theme.css" />
     <link rel="stylesheet" href="css/themes-nvchad.css" />
     <link rel="stylesheet" href="css/themes-genshin.css" />
+    <link rel="stylesheet" href="css/kbd.css" />
     <link rel="stylesheet" href="css/settings.css" />
   </head>
   <body>
@@ -196,6 +197,36 @@
             </div>
             <span class="hint" data-i18n="general.page_size.hint">每屏最多显示多少条结果</span>
           </div>
+
+          <!-- 输入补全（Ghost Text，0.8.1 §2.8）─────────────────────── -->
+          <h3 style="margin-top: 16px" data-i18n="general.autosuggest.title">输入补全</h3>
+          <div class="setting-row">
+            <label class="setting-label" data-i18n="general.autosuggest.enabled.label">启用 Ghost Text 补全</label>
+            <label class="switch">
+              <input type="checkbox" id="autosuggest-enabled" />
+              <span class="slider"></span>
+            </label>
+            <span class="hint" data-i18n="general.autosuggest.enabled.hint">首拼命中时在输入框显示灰色补全提示，按 Tab 接受</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label" data-i18n="general.autosuggest.min_score.label">模糊阈值</label>
+            <div class="number-input-wrapper">
+              <input type="number" id="autosuggest-min-score" min="0.5" max="0.95" step="0.05" value="0.70" />
+              <div class="number-spinner">
+                <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">＋</button>
+                <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">－</button>
+              </div>
+            </div>
+            <span class="hint" data-i18n="general.autosuggest.min_score.hint">部分拼音触发 Ghost Text 的最低相似度（0.5~0.95）</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label" data-i18n="general.autosuggest.tab_key.label">接受补全键</label>
+            <select id="autosuggest-tab-key">
+              <option value="Tab">Tab</option>
+              <option value="ArrowRight">→ (右箭头)</option>
+            </select>
+            <span class="hint" data-i18n="general.autosuggest.tab_key.hint">按此键把输入替换为规范形式并触发搜索</span>
+          </div>
         </div>
 
         <!-- 快捷键 -->
@@ -209,14 +240,16 @@
             </div>
           </div>
           <div class="setting-row">
-            <label class="setting-label" data-i18n="hotkey.tap.label">tap 阈值</label>
+            <label class="setting-label" data-i18n="hotkey.tap.label" data-i18n-title="hotkey.tap.title" title="短按到抬起的最长时长，超过则判定为长按（Hold），不触发唤起">tap 阈值</label>
             <input type="range" id="tap-threshold" min="150" max="500" value="300" step="50" />
             <span id="tap-threshold-value">300ms</span>
+            <div class="hint-line" data-i18n="hotkey.tap.hint">按下到抬起若超过此时长，视为长按（保留系统修饰键功能），不触发 Blink。</div>
           </div>
           <div class="setting-row">
-            <label class="setting-label" data-i18n="hotkey.grace.label">看门狗 grace period</label>
+            <label class="setting-label" data-i18n="hotkey.grace.label" data-i18n-title="hotkey.grace.title" title="窗口刚显示后的失焦保护期，避免焦点还没切过来就被误判为失焦而隐藏">看门狗 grace period</label>
             <input type="range" id="grace-ms" min="200" max="1000" value="500" step="50" />
             <span id="grace-ms-value">500ms</span>
+            <div class="hint-line" data-i18n="hotkey.grace.hint">窗口显示后此段时间内不检测失焦，避免焦点切换尚未完成时被误判隐藏。</div>
           </div>
         </div>
 

@@ -220,6 +220,13 @@ fn main() {
             search_service.update_max_results(app_config.max_results as usize);
             // 初始化内置动作 disable 列表（0.8.0 §1.3）
             search_service.update_disabled_builtin_actions(app_config.disabled_builtin_actions.clone());
+            // 初始化 Autosuggestion 配置（0.8.1 §2.5）
+            search_service.update_autosuggest_config(
+                app_config.autosuggest_enabled,
+                app_config.autosuggest_min_score,
+            );
+            // 初始化界面语言快照（0.8.1）— 供 empty_arg_hint 等 LocalizableText 解析用
+            search_service.update_language(app_config.language.clone());
             // 启动清理过期搜索历史（后台 spawn，不阻塞启动；enabled=false 或 days=0 跳过）
             {
                 let cleanup_pool = pool.clone();
@@ -344,7 +351,8 @@ fn main() {
             app::commands::open_url,
             app::commands::toggle_default_trigger,
             app::commands::add_custom_trigger,
-            app::commands::delete_custom_trigger
+            app::commands::delete_custom_trigger,
+            app::commands::update_autosuggest_config
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

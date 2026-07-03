@@ -89,6 +89,10 @@ pub fn pinyin_full(s: &str) -> String {
 ///
 /// 应用搜索与意图 keyword 匹配共用此原语——各自匹配策略不同,但归一化一致。
 /// 例:`"天气"` → `["天气", "tq"]`;`"WeChat"` → `["wechat", "wechat"]`(去重后只剩一个)。
+///
+/// 0.8.1 起意图侧不再消费此函数（改用 pinyin_initials/pinyin_full 独立展开三候选），
+/// 保留供应用搜索侧未来使用。
+#[allow(dead_code)]
 pub fn normalize_candidates(s: &str) -> Vec<String> {
     let lower = s.to_ascii_lowercase();
     let pinyin = pinyin_initials(s);

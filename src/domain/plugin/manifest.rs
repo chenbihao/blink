@@ -80,6 +80,17 @@ pub struct PluginRuntime {
     /// 本地插件保持 0(默认),每键触发即时反馈。
     #[serde(default)]
     pub debounce_ms: Option<u64>,
+    /// 空参数引导文案（0.8.1）。语义："我需要用户输入才能工作，空参数时请显示这条静态提示"。
+    ///
+    /// 与 `min_arg_length` 正交：
+    /// - `min_arg_length` 管的是"带参但太短"——降级到 Generic 搜索，插件让位。
+    /// - `empty_arg_hint` 管的是"完全没参数"——插件明确表达"我要参数"，框架合成
+    ///   静态占位 item 直接展示，**根本不发起进程/子任务调用**。
+    ///
+    /// 典型受益：翻译/搜索/查词类。天气/IP 这类"空参数有意义"的插件保持不填此字段。
+    /// 前端渲染无差异——就是一条普通 PluginItem，`action=none` 不可执行。
+    #[serde(default)]
+    pub empty_arg_hint: Option<LocalizableText>,
 }
 
 /// 触发器。本切片只实现 keyword(精确/前缀);regex 先定义不实现。

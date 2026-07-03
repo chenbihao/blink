@@ -261,7 +261,7 @@ impl FileEngine {
         tracing::debug!("Everything 返回 {} 个结果，query={}", items.len(), query);
         for (i, item) in items.iter().enumerate() {
             let detail = item.score_detail.as_deref().unwrap_or("");
-            tracing::debug!(
+            tracing::trace!(
                 index = i,
                 score = if detail.is_empty() {
                     format!("{:.4}", item.score)

@@ -13,12 +13,12 @@
 Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而是 **Universal Action Layer（统一操作层）**。
 终极目标：感知用户上下文、主动推荐动作，让任何操作都比原来的路径更快。
 
-当前处于 **0.8 感知与操作层进行中**：0.1~0.7 全部完成；0.8.0 已落地（UIA 划词 + 内置动作抽象），0.8.1~0.8.3 规划中；AI 相关能力（Provider / Chat / Embedding）全部移至 0.9。
+当前处于 **0.8 感知与操作层进行中**：0.1~0.7 全部完成；0.8.0 + 0.8.1 已落地（UIA 划词、内置动作、Ghost Text 输入补全），0.8.2~0.8.3 规划中；AI 相关能力（Provider / Chat / Embedding）全部移至 0.9。
 
 **最新特性（0.8）**：
 - ✅ **0.8.0** UIA 划词文本感知（鼠标选中文本自动抓取）
 - ✅ **0.8.0** 内置动作抽象升级：`SearchAction::RunAction` + Context 感知（剪贴板 URL/文件路径触发"打开链接/打开路径/资源管理器定位"）+ 设置页 disable 面板 + 拼音全拼匹配
-- 📋 **0.8.1** Autosuggestion / Ghost Text：首拼命中降级 Priority + 灰色行内补全 + Tab 显式升级
+- ✅ **0.8.1** Autosuggestion / Ghost Text：首拼命中降级 Priority + 灰色行内补全 + Tab 显式升级；suggest fuzzy 覆盖中文原文与 pinyin_full 双候选；插件 manifest 支持 `empty_arg_hint`（空 arg 命中直接展示静态提示，跳过进程/IPC 调用）
 - 📋 **0.8.2** 翻译插件 Context 感知路由：选中/剪贴板非目标语言 → 翻译置顶
 - 📋 **0.8.3** Chord 模式底层能力：按住 Alt 状态机 + Context 抓取 + 动作注册机制 + 提示 UI
 - 🔜 **0.9** AI Provider 抽象 + 云端插件 + Chat View + VectorRouter

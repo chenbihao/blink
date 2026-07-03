@@ -72,6 +72,16 @@ fn default_5() -> u32 {
     5
 }
 
+// ── Autosuggestion 默认值（0.8.1 §2.8）────────────────────────────────────────
+
+fn default_autosuggest_min_score() -> f64 {
+    0.7
+}
+
+fn default_autosuggest_tab_key() -> String {
+    "Tab".to_string()
+}
+
 // ── 搜索引擎配置（三层独立控制）────────────────────────────────────────────────
 
 /// 应用搜索配置（StartMenuEngine）。
@@ -246,6 +256,17 @@ pub struct AppConfig {
     /// 默认空——所有动作默认启用；用户在设置页勾选后追加。
     #[serde(default)]
     pub disabled_builtin_actions: Vec<String>,
+    /// 是否启用 Autosuggestion / Ghost Text（0.8.1 §2.8）。默认 true。
+    /// 关闭后 `SearchService::search` 恒返回 `completion_hint: None`。
+    #[serde(default = "default_true")]
+    pub autosuggest_enabled: bool,
+    /// Autosuggest fuzzy 阈值（0.8.1 §2.8），归一化到 [0,1]。默认 0.7。
+    #[serde(default = "default_autosuggest_min_score")]
+    pub autosuggest_min_score: f64,
+    /// Autosuggest 接受补全的键位（0.8.1 §2.8）。默认 "Tab"。
+    /// 前端消费；后端仅持久化 + 广播回前端。可选值当前仅 `"Tab"` / `"ArrowRight"`。
+    #[serde(default = "default_autosuggest_tab_key")]
+    pub autosuggest_tab_key: String,
 }
 
 impl Default for AppConfig {
@@ -267,6 +288,9 @@ impl Default for AppConfig {
             empty_query_topn: default_5(),
             clipboard: crate::infra::data::clipboard::ClipboardConfig::default(),
             disabled_builtin_actions: Vec::new(),
+            autosuggest_enabled: true,
+            autosuggest_min_score: 0.7,
+            autosuggest_tab_key: "Tab".to_string(),
         }
     }
 }
@@ -406,6 +430,27 @@ pub async fn update_disabled_builtin_actions(
     normalized.dedup();
     let mut config = get_config(pool).await;
     config.disabled_builtin_actions = normalized;
+    save_config(pool, &config).await
+}
+
+// ── Autosuggestion 配置（0.8.1 §2.8）──────────────────────────────────────────
+
+/// 更新 Autosuggestion 配置（设置页调用）。
+///
+/// 命令层调完后应同步调用 `SearchService::update_autosuggest_config` 让搜索热路径
+/// 即时生效。tab_key 只影响前端键位监听，无热更新副作用。
+pub async fn update_autosuggest_config(
+    pool: &SqlitePool,
+    enabled: bool,
+    min_score: f64,
+    tab_key: String,
+) -> Result<(), String> {
+    // 阈值夹到 [0, 1]，避免设置页误传导致命中永不触发
+    let min_score = min_score.clamp(0.0, 1.0);
+    let mut config = get_config(pool).await;
+    config.autosuggest_enabled = enabled;
+    config.autosuggest_min_score = min_score;
+    config.autosuggest_tab_key = tab_key;
     save_config(pool, &config).await
 }
 

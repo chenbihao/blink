@@ -12,7 +12,11 @@
     "timeout_ms": 10000,
     "min_arg_length": 0,
     "debounce_ms": 500,
-    "concurrency": 1
+    "concurrency": 1,
+    "empty_arg_hint": {
+      "zh": "输入文本开始翻译",
+      "en": "Type text to translate"
+    }
   },
   "triggers": [
     { "type": "keyword", "keyword": "翻译", "exclusive": true },

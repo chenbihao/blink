@@ -419,19 +419,10 @@ def handle_query(query_id: str, query: str, settings: Optional[Dict[str, Any]] =
 
     text = query.strip()
 
-    # 无参数时返回提示
+    # 空参数已由框架层 empty_arg_hint 拦截（不会走到这里）；如果因兼容性/降级仍走到，
+    # 返回空 items 让框架清占位即可，避免与 manifest 里的 hint 文案重复。
     if not text:
-        return {
-            "id": query_id,
-            "items": [
-                {
-                    "title": "输入文本开始翻译",
-                    "subtitle": f"当前引擎: {engine}，目标语言: {target_lang}",
-                    "score": 1.0,
-                    "action": {"type": "none"}
-                }
-            ]
-        }
+        return {"id": query_id, "items": []}
 
     # 自动交换语言
     target_lang = _auto_swap_lang(text, target_lang)

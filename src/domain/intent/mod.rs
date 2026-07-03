@@ -7,7 +7,10 @@
 use std::sync::RwLock;
 
 use crate::infra::platform::context::ContextSnapshot;
-use crate::infra::utils::text::normalize_candidates;
+use crate::infra::utils::text::{pinyin_full, pinyin_initials};
+
+pub mod suggest;
+pub use suggest::CompletionHint;
 
 // ── 呈现模式 ──────────────────────────────────────────────
 
@@ -46,6 +49,10 @@ pub struct Candidate {
     pub arg: String,
     /// 实际 surface(Inline 或 Priority;Takeover 不走 Mixed)。
     pub surface: Surface,
+    /// 命中派生形式（首拼）时的规范拼音提示；供 ghost text 未来展示（0.8.1）。
+    /// 命中原文/pinyin_full 恒 None。
+    #[allow(dead_code)] // 前端 v1 不直接消费；预留字段避免后续再改契约
+    pub hint: Option<String>,
 }
 
 /// `route()` 返回的调度类型——SearchService 据此决定召回策略与 UI 呈现。
@@ -57,6 +64,9 @@ pub enum Route {
         arg: String,
         #[allow(dead_code)] // 0.4 仅 List;P3 扩展 Chat/Custom 时消费
         view: SurfaceView,
+        /// 同 Candidate.hint；Takeover 走 keyword 强信号时恒 None（首拼不升级 Takeover）。
+        #[allow(dead_code)]
+        hint: Option<String>,
     },
     /// 混排:本地引擎照常召回;命中插件按各自 surface 参与排序。
     Mixed { candidates: Vec<Candidate> },
@@ -76,6 +86,11 @@ pub struct QueryContext<'a> {
 #[async_trait::async_trait]
 pub trait IntentRouter: Send + Sync {
     async fn route(&self, query: &str, ctx: &QueryContext<'_>) -> Route;
+
+    /// 算 ghost text 补全（0.8.1 §2.4）。默认实现返回 None（非 RuleRouter 实现无需支持）。
+    fn suggest_completion(&self, _query: &str, _min_score: f64) -> Option<CompletionHint> {
+        None
+    }
 }
 
 // ── RuleRouter ────────────────────────────────────────────
@@ -99,10 +114,28 @@ enum RuleKind {
     Regex(regex::Regex),
 }
 
-/// 单次命中类型。
+/// 单次命中类型（0.8.1 §2.3 三态 + Initials 二分）。
+///
+/// - `Exact` / `Prefix`：命中"原文形式"——汉字明码 / 英文 keyword / pinyin_full。
+/// - `InitialsExact` / `InitialsPrefix`：命中"首拼派生形式"（如 `fy` → `翻译`）。
+///   弱信号，`resolve_surface(Auto)` 下**不独占**——Exact→Priority，Prefix→Inline。
+///   ghost text 侧走独立 suggest 通道。
+///
+/// 拆分成 4 变体（而不是 `Initials { arg, ... }` 靠 `arg.is_empty()` 分支）：
+/// - `resolve_surface` 里两分支纯类型驱动，无需读 `arg` 字段
+/// - 编译期就区分"无参首拼" vs "带参首拼"，新加分支时不容易漏
+///
+/// `hint` 字段用于未来 UI 教学（"更规范的形式"）。命中原文时 None；命中派生形式时
+/// 承载 `pinyin_full(keyword)`（如 `fy` 命中 `翻译` → hint = `"fanyi"`）。
 enum MatchType {
-    Exact,           // 精确命中(无参)
-    Prefix(String),  // 前缀带参(余下文本)
+    /// 精确命中(无参)——命中原文形式
+    Exact { hint: Option<String> },
+    /// 前缀带参(余下文本)——命中原文形式
+    Prefix { arg: String, hint: Option<String> },
+    /// 首拼精确命中(无参)——弱信号
+    InitialsExact { hint: String },
+    /// 首拼前缀带参——弱信号
+    InitialsPrefix { arg: String, hint: String },
 }
 
 impl RuleRouter {
@@ -202,6 +235,20 @@ impl RuleRouter {
         });
         Ok(())
     }
+
+    /// 收集所有 keyword 规则的 `(原文, pinyin_full)` 二元组，供 ghost text 计算（0.8.1）。
+    /// regex 跳过（无"完整形式"概念）。同一 keyword 多次注册（不同插件同 keyword）会重复；
+    /// `compute_hint` 内部按分数取最高，无副作用。
+    fn collect_suggest_keywords(&self) -> Vec<(String, String)> {
+        let rules = self.rules.read().unwrap();
+        rules
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RuleKind::Keyword(kw) => Some((kw.clone(), pinyin_full(kw))),
+                RuleKind::Regex(_) => None,
+            })
+            .collect()
+    }
 }
 
 #[async_trait::async_trait]
@@ -213,34 +260,26 @@ impl IntentRouter for RuleRouter {
 
         let mut hits: Vec<Hit> = Vec::new();
         for rule in rules.iter() {
-            let (matched, arg) = match &rule.kind {
-                RuleKind::Keyword(kw) => match match_keyword(q, kw) {
-                    Some(MatchType::Exact) => (true, String::new()),
-                    Some(MatchType::Prefix(a)) => (true, a),
-                    None => (false, String::new()),
-                },
+            let mt_opt: Option<MatchType> = match &rule.kind {
+                RuleKind::Keyword(kw) => match_keyword(q, kw),
                 RuleKind::Regex(re) => {
                     // regex 命中:无"参数"概念,但 auto 对 regex 视为强信号 → takeover。
-                    // 传空 arg + Prefix 让 resolve_surface(Auto) 取 Takeover。
+                    // 归入 Prefix{arg: ""} 让 resolve_surface(Auto) 取 Takeover。
                     if re.is_match(q) {
-                        (true, String::new())
+                        Some(MatchType::Prefix { arg: String::new(), hint: None })
                     } else {
-                        (false, String::new())
+                        None
                     }
                 }
             };
-            if matched {
-                let mt = match &rule.kind {
-                    // regex 无"参数"概念,但 auto 对 regex 视为强信号 → takeover。
-                    // 故 regex 命中统一按 Prefix 处理(空参也 takeover)。
-                    RuleKind::Regex(_) => MatchType::Prefix(arg.clone()),
-                    RuleKind::Keyword(_) => {
-                        if arg.is_empty() {
-                            MatchType::Exact
-                        } else {
-                            MatchType::Prefix(arg.clone())
-                        }
-                    }
+            if let Some(mt) = mt_opt {
+                let arg = match &mt {
+                    MatchType::Exact { .. } | MatchType::InitialsExact { .. } => String::new(),
+                    MatchType::Prefix { arg, .. } | MatchType::InitialsPrefix { arg, .. } => arg.clone(),
+                };
+                let hint: Option<String> = match &mt {
+                    MatchType::Exact { hint } | MatchType::Prefix { hint, .. } => hint.clone(),
+                    MatchType::InitialsExact { hint } | MatchType::InitialsPrefix { hint, .. } => Some(hint.clone()),
                 };
                 let actual = resolve_surface(rule.surface, &mt, takeover_enabled);
                 hits.push(Hit {
@@ -248,6 +287,7 @@ impl IntentRouter for RuleRouter {
                     arg,
                     surface: actual,
                     view: rule.view,
+                    hint,
                 });
             }
         }
@@ -258,6 +298,7 @@ impl IntentRouter for RuleRouter {
                 plugin_id: t.plugin_id.clone(),
                 arg: t.arg.clone(),
                 view: t.view,
+                hint: t.hint.clone(),
             };
         }
 
@@ -269,9 +310,15 @@ impl IntentRouter for RuleRouter {
                     plugin_id: h.plugin_id,
                     arg: h.arg,
                     surface: h.surface,
+                    hint: h.hint,
                 })
                 .collect(),
         }
+    }
+
+    fn suggest_completion(&self, query: &str, min_score: f64) -> Option<CompletionHint> {
+        let keywords = self.collect_suggest_keywords();
+        suggest::compute_hint(&keywords, query, min_score)
     }
 }
 
@@ -282,14 +329,23 @@ struct Hit {
     arg: String,
     surface: Surface,
     view: SurfaceView,
+    hint: Option<String>,
 }
 
 /// 由 (声明 surface, 命中类型, 全局开关) 解出实际 surface。
+///
+/// 0.8.1 §2.3 三态（Initials 拆二分后纯类型驱动，无需读 arg 字段）：
+/// - `Auto` + `Exact` → Priority
+/// - `Auto` + `Prefix`（命中原文形式）→ Takeover
+/// - `Auto` + `InitialsExact`（首拼派生无参）→ Priority（弱信号不独占）
+/// - `Auto` + `InitialsPrefix`（首拼派生带参）→ Inline
 fn resolve_surface(declared: Surface, mt: &MatchType, takeover_enabled: bool) -> Surface {
     let actual = match declared {
         Surface::Auto => match mt {
-            MatchType::Exact => Surface::Priority,
-            MatchType::Prefix(_) => Surface::Takeover,
+            MatchType::Exact { .. } => Surface::Priority,
+            MatchType::Prefix { .. } => Surface::Takeover,
+            MatchType::InitialsExact { .. } => Surface::Priority,
+            MatchType::InitialsPrefix { .. } => Surface::Inline,
         },
         Surface::Inline => Surface::Inline,
         Surface::Priority => Surface::Priority,
@@ -302,24 +358,60 @@ fn resolve_surface(declared: Surface, mt: &MatchType, takeover_enabled: bool) ->
     }
 }
 
-/// keyword 匹配(§4.2):精确或前缀带参。
-/// query 与 keyword 都过 `normalize_candidates`(小写 + 拼音首字母),使中文 keyword 支持首拼输入。
+/// keyword 匹配(§4.2)：0.8.1 §2.3 三态。
 ///
-/// TODO(0.8.1 Autosuggestion): 首拼命中当前与汉字明码等价升级 Takeover,是**弱信号误升级**。
-/// 计划改为:
-/// - 三态 MatchType: `Exact` / `Prefix` / `PinyinPrefix { arg, hint }`
-/// - `resolve_surface(Auto, PinyinPrefix)` → Priority(不 Takeover)
-/// - 前端渲染 ghost text 补全提示(如 `fy hello` → `→ 翻译 hello`),Tab 显式升级
-/// 参见 docs/production-design/phases/0.8-context-interaction.md §二
+/// 意图侧展开 3 个候选形式（与应用搜索的 `normalize_candidates` 契约独立）：
+/// - `原文小写`（如 `翻译` / `translate`）→ Exact / Prefix，强信号。
+/// - `pinyin_full`（如 `fanyi`）→ Exact / Prefix，强信号（完整拼音≈原文）。
+/// - `pinyin_initials`（如 `fy`）→ Initials，**弱信号**，`resolve_surface(Auto)` 下不独占。
+///
+/// 3 者可能重合（纯 ASCII keyword 三者相等）→ 只走一次 Exact/Prefix，行为不变。
 fn match_keyword(query: &str, keyword: &str) -> Option<MatchType> {
     let q_lower = query.to_ascii_lowercase();
-    for kw in normalize_candidates(keyword) {
-        if q_lower == kw {
-            return Some(MatchType::Exact);
+    let orig_lower = keyword.to_ascii_lowercase();
+    let full = pinyin_full(keyword);
+    let initials = pinyin_initials(keyword);
+
+    // 派生形式的 hint：完整拼音（供 UI 教学"更规范形式"）。
+    // 若原文本身即完整拼音（纯 ASCII），hint fallback 到原文。
+    let derived_hint: String = if !full.is_empty() {
+        full.clone()
+    } else {
+        orig_lower.clone()
+    };
+
+    // 候选按"强度"排序：原文 > pinyin_full > pinyin_initials。
+    // (candidate_lower, is_strong_signal)
+    let mut candidates: Vec<(String, bool)> = Vec::with_capacity(3);
+    if !orig_lower.is_empty() {
+        candidates.push((orig_lower.clone(), true));
+    }
+    if !full.is_empty() && full != orig_lower {
+        candidates.push((full, true));
+    }
+    if !initials.is_empty()
+        && initials != orig_lower
+        && !candidates.iter().any(|(c, _)| c == &initials)
+    {
+        candidates.push((initials, false));
+    }
+
+    for (kw, is_strong) in &candidates {
+        if q_lower == *kw {
+            return Some(if *is_strong {
+                MatchType::Exact { hint: None }
+            } else {
+                MatchType::InitialsExact { hint: derived_hint }
+            });
         }
         let prefix = format!("{kw} ");
         if q_lower.starts_with(&prefix) {
-            return Some(MatchType::Prefix(query[prefix.len()..].trim().to_string()));
+            let arg = query[prefix.len()..].trim().to_string();
+            return Some(if *is_strong {
+                MatchType::Prefix { arg, hint: None }
+            } else {
+                MatchType::InitialsPrefix { arg, hint: derived_hint }
+            });
         }
     }
     None
@@ -421,9 +513,9 @@ mod tests {
     }
 
     #[test]
-    fn pinyin_initials_keyword() {
+    fn pinyin_initials_keyword_downgrades_to_inline() {
+        // 0.8.1 §2.3 核心行为变更：首拼带参从 Takeover 降级 Inline（弱信号不独占）。
         let r = RuleRouter::new(true);
-        // 中文 keyword "天气" 支持首拼 "tq"
         r.add_keyword_rule(
             "builtin.weather".into(),
             "天气".into(),
@@ -431,9 +523,90 @@ mod tests {
             SurfaceView::List,
         );
         let route = run_route(&r, "tq 北京");
-        assert!(
-            matches!(route, Route::Takeover { plugin_id, arg, .. } if plugin_id == "builtin.weather" && arg == "北京")
+        // 首拼带参 → Inline，而不是 Takeover
+        assert!(matches!(
+            route,
+            Route::Mixed { candidates } if candidates.len() == 1
+                && candidates[0].plugin_id == "builtin.weather"
+                && candidates[0].arg == "北京"
+                && matches!(candidates[0].surface, Surface::Inline)
+                && candidates[0].hint.as_deref() == Some("tianqi")
+        ));
+    }
+
+    #[test]
+    fn pinyin_initials_keyword_no_arg_is_priority() {
+        // 首拼无参 → Priority（不独占其他候选），带 hint。
+        let r = RuleRouter::new(true);
+        r.add_keyword_rule(
+            "builtin.weather".into(),
+            "天气".into(),
+            Surface::Auto,
+            SurfaceView::List,
         );
+        let route = run_route(&r, "tq");
+        assert!(matches!(
+            route,
+            Route::Mixed { candidates } if candidates.len() == 1
+                && candidates[0].plugin_id == "builtin.weather"
+                && candidates[0].arg.is_empty()
+                && matches!(candidates[0].surface, Surface::Priority)
+                && candidates[0].hint.as_deref() == Some("tianqi")
+        ));
+    }
+
+    #[test]
+    fn pinyin_full_keyword_is_takeover() {
+        // 完整拼音 == 原文的等价强信号（0.8.1 §2.2）
+        // 用户输入 "fanyi hello" 应该像输入 "翻译 hello" 一样直接 Takeover。
+        let r = RuleRouter::new(true);
+        r.add_keyword_rule(
+            "builtin.translate".into(),
+            "翻译".into(),
+            Surface::Auto,
+            SurfaceView::List,
+        );
+        let route = run_route(&r, "fanyi hello");
+        assert!(matches!(
+            route,
+            Route::Takeover { plugin_id, arg, .. } if plugin_id == "builtin.translate" && arg == "hello"
+        ));
+    }
+
+    #[test]
+    fn pinyin_full_keyword_exact_is_priority() {
+        // 完整拼音无参 → Priority（等价原文精确命中）
+        let r = RuleRouter::new(true);
+        r.add_keyword_rule(
+            "builtin.translate".into(),
+            "翻译".into(),
+            Surface::Auto,
+            SurfaceView::List,
+        );
+        let route = run_route(&r, "fanyi");
+        assert!(matches!(
+            route,
+            Route::Mixed { candidates } if candidates.len() == 1
+                && candidates[0].plugin_id == "builtin.translate"
+                && matches!(candidates[0].surface, Surface::Priority)
+        ));
+    }
+
+    #[test]
+    fn latin_keyword_prefix_is_takeover() {
+        // 纯 ASCII keyword（三候选合一）→ Prefix Takeover，行为不变
+        let r = RuleRouter::new(true);
+        r.add_keyword_rule(
+            "builtin.translate".into(),
+            "translate".into(),
+            Surface::Auto,
+            SurfaceView::List,
+        );
+        let route = run_route(&r, "translate hello");
+        assert!(matches!(
+            route,
+            Route::Takeover { plugin_id, arg, .. } if plugin_id == "builtin.translate" && arg == "hello"
+        ));
     }
 
     #[test]
@@ -500,5 +673,33 @@ mod tests {
         assert!(
             matches!(route, Route::Mixed { candidates } if candidates.len() == 1 && candidates[0].plugin_id == "builtin.hex" && matches!(candidates[0].surface, Surface::Priority))
         );
+    }
+
+    #[test]
+    fn suggest_completion_via_router() {
+        // suggest_completion 出口贯通：keyword 表收集 + compute_hint 联动
+        let r = RuleRouter::new(true);
+        r.add_keyword_rule(
+            "builtin.translate".into(),
+            "翻译".into(),
+            Surface::Auto,
+            SurfaceView::List,
+        );
+        // 首拼 "fy" 应能命中 fanyi
+        let hint = r.suggest_completion("fy hello", 0.7).expect("should have hint");
+        assert_eq!(hint.display, "fanyi");
+        assert_eq!(hint.replacement, "fanyi hello");
+
+        // 已完整 + 带参 → None（已进 Takeover）
+        assert_eq!(r.suggest_completion("fanyi hello", 0.7), None);
+        assert_eq!(r.suggest_completion("翻译 hello", 0.7), None);
+
+        // 已完整 + 无尾内容 → display="" 的 Tab-only hint（0.8.1 优化：提示可 Tab 进参数模式）
+        let tab_only = r.suggest_completion("fanyi", 0.7).expect("tab-only hint");
+        assert_eq!(tab_only.display, "");
+        assert_eq!(tab_only.replacement, "fanyi ");
+
+        // 无匹配 → None
+        assert_eq!(r.suggest_completion("chrome", 0.7), None);
     }
 }

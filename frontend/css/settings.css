@@ -116,9 +116,20 @@ h2:active {
 .setting-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
   padding: 12px 0;
   border-bottom: 1px solid var(--surface);
+}
+
+/* 独占一行的说明文字，与输入框缩进对齐（label 140px + gap 12px = 152px） */
+.setting-row .hint-line {
+  flex-basis: 100%;
+  padding-left: 152px;
+  margin-top: 4px;
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .setting-label {
@@ -395,30 +406,53 @@ h2:active {
   gap: 8px;
 }
 
+/* 快捷键按钮：非录制态是"键帽容器"（透明背景不与内部 kbd 冲突），
+   录制态和 hover 用色彩变化提示交互态。内部 .kbd 键帽的立体感由通用 .kbd 样式提供。 */
 .hotkey-btn {
-  background: var(--surface);
+  background: transparent;
   color: var(--text);
-  border: 1px solid var(--surface-2);
+  border: 1px dashed var(--surface-2);
   border-radius: 6px;
-  padding: 8px 16px;
+  padding: 6px 12px;
   font-size: 13px;
-  font-family: ui-monospace, Consolas, monospace;
   cursor: pointer;
   transition: all 0.15s;
   min-width: 160px;
   text-align: center;
+  /* 键帽 + 组合分隔符水平排布 */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
 }
 
 .hotkey-btn:hover {
-  background: var(--surface-2);
+  background: var(--surface);
   border-color: var(--text-faint);
+  border-style: solid;
 }
 
+/* 录制中：切回纯文字（"请按下快捷键..."），加脉动强调 */
 .hotkey-btn.recording {
   background: var(--red-bg);
   border-color: var(--red);
+  border-style: solid;
   color: var(--red);
+  font-family: ui-monospace, Consolas, monospace;
   animation: pulse 1.5s ease-in-out infinite;
+}
+
+/* 快捷键按钮里的键帽稍大一些，跟设置页 13px 字号协调 */
+.hotkey-btn .kbd {
+  font-size: 12px;
+  padding: 0.2em 0.5em;
+}
+
+/* 组合键连接符"+"：介于两个 kbd 之间的小加号，居中且柔和 */
+.hotkey-btn .kbd-plus {
+  color: var(--text-faint);
+  font-size: 12px;
+  user-select: none;
 }
 
 .hotkey-btn:disabled,

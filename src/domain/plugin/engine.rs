@@ -280,6 +280,14 @@ impl PluginEngine {
             .unwrap_or(0)
     }
 
+    /// 空参数引导文案（0.8.1）。manifest 未配置则返回 None。
+    /// `lang` 由 SearchService 传入（AppConfig.language 快照）；`resolve` 内部按
+    /// lang → zh → 首个 的顺序回退，永不 panic。
+    pub fn get_empty_arg_hint(&self, id: &str, lang: &str) -> Option<String> {
+        self.find_plugin(id)
+            .and_then(|p| p.manifest().runtime.empty_arg_hint.as_ref().map(|h| h.resolve(lang)))
+    }
+
     /// 更新全局代理配置 + 重置所有插件进程(保存后调用)。
     /// 下次 query 自动用新 env 重启，用户零感知热更新。
     pub async fn update_global_proxy(&self, proxy: Option<(String, String)>) {

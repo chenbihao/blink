@@ -1,6 +1,7 @@
 import { invoke } from "./js/tauri.js";
 import { applyTheme } from "./js/theme.js";
 import { t, applyI18n, setLang } from "./js/i18n.js";
+import { renderKey } from "./js/kbd.js";
 
 // WebView2 下按 Alt 会激活宿主窗口的系统菜单、进入菜单模态，webview 消息泵随之
 // 暂停——后端返回的 invoke 响应会堆在队列里无法分发，表现就是「录制时按钮卡住、
@@ -44,6 +45,28 @@ document.querySelectorAll(".tab").forEach((btn) => {
 
 let currentConfig = null;
 
+/**
+ * 把 hotkey display 字符串（如 "RightAlt" / "Ctrl+Shift+Space"）渲染成按钮内的键帽 DOM。
+ * 用于快捷键录制按钮：非录制态显示 <kbd> 键帽 + "+" 连接符；录制态由调用点直接
+ * `textContent = t("hotkey.recording")` 覆写为纯文字。
+ *
+ * @param {HTMLElement} btn 目标按钮
+ * @param {string} display 后端返回的 hotkey.display（"+"分隔）
+ */
+function renderHotkeyInto(btn, display) {
+  btn.replaceChildren();
+  const parts = String(display || "").split("+").filter(Boolean);
+  parts.forEach((p, i) => {
+    if (i > 0) {
+      const plus = document.createElement("span");
+      plus.className = "kbd-plus";
+      plus.textContent = "+";
+      btn.appendChild(plus);
+    }
+    btn.appendChild(renderKey(p));
+  });
+}
+
 async function loadConfig() {
   try {
     currentConfig = await invoke("get_config");
@@ -57,7 +80,7 @@ function applyConfigToUI(config) {
   // 快捷键显示
   const hotkeyBtn = document.getElementById("hotkey-record");
   if (hotkeyBtn && config.hotkey) {
-    hotkeyBtn.textContent = config.hotkey.display || "RightAlt";
+    renderHotkeyInto(hotkeyBtn, config.hotkey.display || "RightAlt");
   }
 
   // tap 阈值
@@ -126,6 +149,18 @@ function applyConfigToUI(config) {
   const pageSizeEl = document.getElementById("page-size");
   if (pageSizeEl && config.page_size !== undefined) {
     pageSizeEl.value = config.page_size;
+  }
+
+  // Autosuggestion（0.8.1 §2.8）
+  const autoEnabledEl = document.getElementById("autosuggest-enabled");
+  if (autoEnabledEl) autoEnabledEl.checked = config.autosuggest_enabled !== false;
+  const autoScoreEl = document.getElementById("autosuggest-min-score");
+  if (autoScoreEl && typeof config.autosuggest_min_score === "number") {
+    autoScoreEl.value = config.autosuggest_min_score.toFixed(2);
+  }
+  const autoTabKeyEl = document.getElementById("autosuggest-tab-key");
+  if (autoTabKeyEl && typeof config.autosuggest_tab_key === "string") {
+    autoTabKeyEl.value = config.autosuggest_tab_key;
   }
 
   // 应用主题（设置页本身即时正确显示）
@@ -1382,7 +1417,7 @@ if (hotkeyResetBtn) {
       key: defaultHotkey.key,
       display: defaultHotkey.display,
     });
-    hotkeyRecordBtn.textContent = "RightAlt";
+    renderHotkeyInto(hotkeyRecordBtn, "RightAlt");
     if (currentConfig) currentConfig.hotkey = defaultHotkey;
   });
 }
@@ -1391,6 +1426,7 @@ async function startRecording() {
   hotkeyRecordBtn.disabled = true;
   hotkeyResetBtn.disabled = true;
   hotkeyRecordBtn.classList.add("recording");
+  // 录制态：直接纯文字覆写（.recording class 会切成 mono 字体 + 脉动色）
   hotkeyRecordBtn.textContent = t("hotkey.recording");
 
   // 录制期间吞掉所有键盘事件的默认行为：Alt / Alt+Space / F10 等会激活宿主窗口
@@ -1411,8 +1447,8 @@ async function startRecording() {
       display: result.display,
     });
 
-    // 更新显示
-    hotkeyRecordBtn.textContent = result.display;
+    // 更新显示（键帽 DOM）
+    renderHotkeyInto(hotkeyRecordBtn, result.display);
 
     // 更新本地配置缓存
     if (currentConfig) {
@@ -1424,12 +1460,8 @@ async function startRecording() {
     }
   } catch (e) {
     console.error("[startRecording] failed:", e);
-    // 恢复原显示
-    if (currentConfig?.hotkey?.display) {
-      hotkeyRecordBtn.textContent = currentConfig.hotkey.display;
-    } else {
-      hotkeyRecordBtn.textContent = "RightAlt";
-    }
+    // 恢复原显示（键帽 DOM）
+    renderHotkeyInto(hotkeyRecordBtn, currentConfig?.hotkey?.display || "RightAlt");
   } finally {
     document.removeEventListener("keydown", suppress, true);
     hotkeyRecordBtn.classList.remove("recording");
@@ -1619,6 +1651,32 @@ if (pageSizeInput) {
     }
   });
 }
+
+// ── Autosuggestion（0.8.1 §2.8）─────────────────────────────────────────────
+
+async function saveAutosuggest() {
+  const enabled = document.getElementById("autosuggest-enabled")?.checked !== false;
+  const scoreRaw = document.getElementById("autosuggest-min-score")?.value ?? "0.7";
+  const minScore = Math.min(0.95, Math.max(0.5, parseFloat(scoreRaw) || 0.7));
+  const tabKey = document.getElementById("autosuggest-tab-key")?.value || "Tab";
+  try {
+    await invoke("update_autosuggest_config", { enabled, minScore, tabKey });
+    if (currentConfig) {
+      currentConfig.autosuggest_enabled = enabled;
+      currentConfig.autosuggest_min_score = minScore;
+      currentConfig.autosuggest_tab_key = tabKey;
+    }
+  } catch (err) {
+    console.error("update_autosuggest_config failed:", err);
+  }
+}
+
+const autosuggestEnabledEl = document.getElementById("autosuggest-enabled");
+if (autosuggestEnabledEl) autosuggestEnabledEl.addEventListener("change", saveAutosuggest);
+const autosuggestMinScoreEl = document.getElementById("autosuggest-min-score");
+if (autosuggestMinScoreEl) autosuggestMinScoreEl.addEventListener("change", saveAutosuggest);
+const autosuggestTabKeyEl = document.getElementById("autosuggest-tab-key");
+if (autosuggestTabKeyEl) autosuggestTabKeyEl.addEventListener("change", saveAutosuggest);
 
 // ── 日志 ─────────────────────────────────────────────────────────────────────
 

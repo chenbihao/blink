@@ -14,12 +14,29 @@ use sqlx::SqlitePool;
 use tauri::{AppHandle, Emitter};
 
 use crate::infra::platform::context::ContextSnapshot;
-use crate::domain::intent::{Candidate, IntentRouter, Route, Surface};
+use crate::domain::intent::{Candidate, CompletionHint, IntentRouter, Route, Surface};
 use crate::domain::plugin::PluginEngine;
 
 use super::engine::{Lane, QueryContext, SearchEngine, SearchItem};
 use super::scorer::{boost_priority, placeholder_score, source_rank};
 use super::{Action, AppEntry};
+
+/// 同步搜索返回契约（0.8.1 §2.5）——`SearchService::search` / `search_apps` command 出口。
+///
+/// 在 `Vec<AppEntry>` 之外挂 `completion_hint` 独立通道：
+/// - 首拼命中（`fy` → `fanyi`）或 fuzzy 部分拼音（`fan hello` → `fanyi hello`）时给出。
+/// - 用户按 Tab 后前端把输入替换为 `hint.replacement`，触发下一轮搜索走完整 Takeover。
+/// - `blink://results` 增量事件不带 hint（同步首次返回已给过）。
+///
+/// **契约说明**：这是内部 API（前后端锁版本，同版本编译）。`entries` 必填；rename 会导致
+/// 前端 crash。序列化为 camelCase：`completion_hint` → `completionHint`（前端 `resp.completionHint`）。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchResponse {
+    pub entries: Vec<AppEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_hint: Option<CompletionHint>,
+}
 
 /// async lane 增量结果的事件 payload(emit "blink://results")。
 #[derive(Serialize, Clone)]
@@ -53,6 +70,25 @@ pub struct SearchService {
     /// BuiltinEngine 通过 QueryContext 只读，设置页保存时经 `update_disabled_builtin_actions`
     /// 热更新。读多写少，用 RwLock；每次 search 短时 read 不阻塞。
     disabled_builtin_actions: Arc<RwLock<Vec<String>>>,
+    /// Autosuggestion 配置快照（0.8.1 §2.5）。热更新走 `update_autosuggest_config`。
+    /// - `enabled`: 关闭时 `search()` 恒返回 `completion_hint: None`（快速短路，不算 fuzzy）。
+    /// - `min_score`: `RuleRouter::suggest_completion` 阈值（默认 0.7）。
+    autosuggest: Arc<RwLock<AutosuggestState>>,
+    /// 界面语言快照（0.8.1）。用于把 `empty_arg_hint` / 未来其他 `LocalizableText`
+    /// 解析成当前语言字符串。热更新走 `update_language`，与 AppConfig.language 同步。
+    language: Arc<RwLock<String>>,
+}
+
+#[derive(Clone, Copy)]
+struct AutosuggestState {
+    enabled: bool,
+    min_score: f64,
+}
+
+impl Default for AutosuggestState {
+    fn default() -> Self {
+        Self { enabled: true, min_score: 0.7 }
+    }
 }
 
 impl SearchService {
@@ -82,6 +118,8 @@ impl SearchService {
             snapshot: Arc::new(RwLock::new(ContextSnapshot::default())),
             max_results: Arc::new(AtomicUsize::new(50)),
             disabled_builtin_actions: Arc::new(RwLock::new(Vec::new())),
+            autosuggest: Arc::new(RwLock::new(AutosuggestState::default())),
+            language: Arc::new(RwLock::new("zh".to_string())),
         }
     }
 
@@ -116,6 +154,23 @@ impl SearchService {
         let mut guard = self.disabled_builtin_actions.write().unwrap();
         *guard = disabled;
         tracing::debug!(count = guard.len(), "内置动作 disable 列表已热更新");
+    }
+
+    /// 更新 Autosuggestion 配置（0.8.1 §2.5）。
+    /// 启动时读一次 AppConfig 注入；设置页开关/滑块调整时命令层调此方法。
+    pub fn update_autosuggest_config(&self, enabled: bool, min_score: f64) {
+        let mut guard = self.autosuggest.write().unwrap();
+        *guard = AutosuggestState { enabled, min_score };
+        tracing::debug!(enabled, min_score, "Autosuggest 配置已热更新");
+    }
+
+    /// 更新界面语言快照（0.8.1）。启动时读一次 AppConfig.language 注入；
+    /// 设置页切换语言时命令层调此方法。用于把插件 manifest 里的 `empty_arg_hint`
+    /// 等 `LocalizableText` 解析成当前语言。
+    pub fn update_language(&self, language: String) {
+        let mut guard = self.language.write().unwrap();
+        *guard = language;
+        tracing::debug!(language = %*guard, "SearchService 界面语言已热更新");
     }
 
     /// 启动所有引擎的后台任务(如 StartMenuEngine 预扫)。
@@ -161,7 +216,18 @@ impl SearchService {
     ///
     /// 空 query 场景（0.8.0 §1.3）：跳过 intent 路由 + 插件；仅让 sync lane 内置引擎
     /// 走 Context-only 分支（例如"打开链接"依剪贴板 URL 出现）。其他引擎不参与。
-    pub async fn search(&self, query: &str, seq: u64) -> Vec<AppEntry> {
+    ///
+    /// 0.8.1 §2.5：返回类型改为 `SearchResponse { entries, completion_hint }`——
+    /// 非空 query 时同步算 ghost text（`RuleRouter::suggest_completion`），首次返回带一次；
+    /// 增量 emit 事件不带 hint（前端已渲染）。
+    ///
+    /// **`query` 与 `q` 的语义分工**（本函数内多分支使用，务必区分）：
+    /// - `q = query.trim()`：给 route / 引擎 / 空 query 判定 / 早退分支用——搜索匹配语义上
+    ///   `"foo "` 与 `"foo"` 等价。
+    /// - `query`（未 trim 的原文）：**只**传给 `suggest_completion`——尾空格是"参数等待中"
+    ///   的语义信号（`fanyi ` 已进 Takeover 参数模式，不再需要 ghost；`fanyi` 未按空格，
+    ///   给一个空 display 的 hint 让前端渲染 `<kbd>Tab</kbd>` 按钮）。
+    pub async fn search(&self, query: &str, seq: u64) -> SearchResponse {
         let search_start = std::time::Instant::now();
         self.latest_seq.store(seq, Ordering::SeqCst);
 
@@ -195,7 +261,8 @@ impl SearchService {
                 elapsed,
                 None,
             );
-            return all_items;
+            // 空 query 恒无 ghost hint（设计 §2.4）——避免刚 shown 满屏灰字
+            return SearchResponse { entries: all_items, completion_hint: None };
         }
 
         let intent_ctx = crate::domain::intent::QueryContext { history: &history, snapshot: &snapshot };
@@ -203,18 +270,50 @@ impl SearchService {
         // 过滤不符合前置条件的路由(禁用插件 + 参数过短),避免占位符死态。
         let route = self.filter_route(route);
 
+        // Autosuggestion（0.8.1 §2.5）：enabled 关闭时直接 None 短路。
+        // 非空 query 情况下无论 route 结果如何都算一次——ghost text 独立于召回。
+        let completion_hint = {
+            let cfg = *self.autosuggest.read().unwrap();
+            if cfg.enabled {
+                // query 用未 trim 的原文（保尾空格）；上层 `q` 已被 trim。
+                self.router.suggest_completion(query, cfg.min_score)
+            } else {
+                None
+            }
+        };
+
         // 获取插件显示名称的闭包
         let display_name = |id: &str| match &self.plugin_engine {
             Some(pe) => pe.get_display_name(id),
             None => id.strip_prefix("builtin.").unwrap_or(id).to_string(),
         };
 
-        match route {
+        // 空参数引导文案闭包（0.8.1）：manifest 配置了 `empty_arg_hint` 且 arg 空时，
+        // 框架合成一条静态 hint entry 直接展示，**不发起插件查询**。
+        // 用于翻译/搜索类"必须要参数才有意义"的插件，替代插件内部硬编码的
+        // "请输入文本" 逻辑（省一次 IPC + 支持 i18n + Tab 补全时也命中）。
+        let lang_snapshot = self.language.read().unwrap().clone();
+        let empty_arg_hint = |id: &str, arg: &str| -> Option<String> {
+            if !arg.is_empty() {
+                return None;
+            }
+            self.plugin_engine
+                .as_ref()
+                .and_then(|pe| pe.get_empty_arg_hint(id, &lang_snapshot))
+        };
+
+        let entries = match route {
             Route::Takeover { plugin_id, arg, .. } => {
-                // 独占:跳过本地引擎,只查该插件。
-                // 先同步返回占位项(带明确的"正在查询"反馈),避免窗口空白,让用户知道命令已被识别。
-                self.spawn_takeover(plugin_id.clone(), arg.clone(), seq);
-                vec![placeholder_entry(&plugin_id, &display_name(&plugin_id))]
+                // 空参数 + 有 empty_arg_hint → 直接合成静态 entry，不 spawn 查询。
+                if let Some(hint_text) = empty_arg_hint(&plugin_id, &arg) {
+                    tracing::debug!(plugin = %plugin_id, "empty_arg_hint 命中 Takeover，跳过插件查询");
+                    vec![empty_arg_hint_entry(&plugin_id, &display_name(&plugin_id), hint_text)]
+                } else {
+                    // 独占:跳过本地引擎,只查该插件。
+                    // 先同步返回占位项(带明确的"正在查询"反馈),避免窗口空白,让用户知道命令已被识别。
+                    self.spawn_takeover(plugin_id.clone(), arg.clone(), seq);
+                    vec![placeholder_entry(&plugin_id, &display_name(&plugin_id))]
+                }
             }
             Route::Mixed { candidates } => {
                 // sync lane 照常召回 → 首批。
@@ -222,6 +321,26 @@ impl SearchService {
                 for engine in &self.sync_engines {
                     items.extend(engine.search(q, &search_ctx).await);
                 }
+
+                // 拆两批：真正要走 async lane 的候选 vs 空参数直接合成 hint 的候选。
+                // 后者不占 placeholder（有内容直接给），也不进 plugin_ids（不需要 spawn）。
+                let mut hint_entries: Vec<AppEntry> = Vec::new();
+                let candidates: Vec<Candidate> = candidates
+                    .into_iter()
+                    .filter_map(|c| match empty_arg_hint(&c.plugin_id, &c.arg) {
+                        Some(hint_text) => {
+                            tracing::debug!(plugin = %c.plugin_id, surface = ?c.surface, "empty_arg_hint 命中 Mixed 候选，跳过插件查询");
+                            let mut entry = empty_arg_hint_entry(&c.plugin_id, &display_name(&c.plugin_id), hint_text);
+                            // hint score 按 candidate surface 决定置顶还是普通位置：
+                            // Priority → 置顶分（同 placeholder 逻辑，让 hint 显示在首位）
+                            // Inline → 普通位置
+                            entry.score = placeholder_score(matches!(c.surface, Surface::Priority));
+                            hint_entries.push(entry);
+                            None
+                        }
+                        None => Some(c),
+                    })
+                    .collect();
 
                 // 分离 priority / inline 候选,准备 async lane。
                 let (priority, inline): (Vec<Candidate>, Vec<Candidate>) = candidates
@@ -264,6 +383,10 @@ impl SearchService {
                     .into_iter()
                     .map(SearchItem::into_app_entry)
                     .collect();
+                // 排序契约：`hint_entries` 与 `placeholders` 都用 `placeholder_score(true/false)` 打分——
+                // Priority 项拿到置顶分（同 placeholder 逻辑）。这里 extend 到尾部**依赖前端按 score
+                // 降序重排**（见 `frontend/js/results.js` 的 `allItems.sort` 处），后端不再排。
+                all_items.extend(hint_entries);
                 all_items.extend(placeholders);
 
                 // 记录搜索耗时（sync lane 返回首结果）
@@ -272,13 +395,21 @@ impl SearchService {
 
                 all_items
             }
-        }
+        };
+
+        SearchResponse { entries, completion_hint }
     }
 
     /// 过滤不满足前置条件的路由命中(0.5.1):禁用插件 + 参数过短。
     /// - Takeover 命中禁用/短参 → 降级空 Mixed(走 Generic 应用搜索),避免窗口空白。
     /// - Mixed 候选 → 剔除禁用/短参插件。
     /// 比「RuleRouter 加 API」简洁:路由表保持静态,过滤在结果层(无需重新注入)。
+    ///
+    /// **空参 Takeover 的 policy**（0.8.1 复审）：`arg == ""` 时**不做**过滤，让路由继续走
+    /// 到 spawn——插件收到空 arg 查询自己决定语义（如天气插件返回默认城市、翻译插件历史等）。
+    /// 若插件本身"空参无意义"（如翻译需要文本、搜索需要关键词），应在 manifest 里配
+    /// `empty_arg_hint`——`SearchService::search` 会在 spawn 之前拦下并合成静态引导 entry
+    /// （节省一次 IPC + 支持 i18n）。这两条路径共同承担"空参场景"，此 filter 不介入。
     fn filter_route(&self, route: Route) -> Route {
         let Some(pe) = &self.plugin_engine else {
             return route;
@@ -508,7 +639,7 @@ fn emit_results(app: &AppHandle, seq: u64, items: Vec<SearchItem>, limit: usize,
             tracing::debug!("增量结果: 空结果标记(清除占位符)");
         } else {
             let detail = item.score_detail.as_deref().unwrap_or("");
-            tracing::debug!(
+            tracing::trace!(
                 index = i,
                 score = if detail.is_empty() {
                     format!("{:.4}", item.score)
@@ -541,6 +672,31 @@ fn placeholder_entry(plugin_id: &str, display_name: &str) -> AppEntry {
         is_error: false,
         source: plugin_id.to_string(),
         description: Some("请稍候".into()),
+        action: Action::default(),
+        score_detail: None,
+    }
+}
+
+/// 空参数引导项（0.8.1）：manifest 声明了 `empty_arg_hint` 且用户 arg 为空时，
+/// 框架合成的静态展示项。相比 placeholder：
+/// - `is_placeholder = false`（不是"查询中"，不会被 async 增量替换）
+/// - `action = Action::default()` 前端点击/回车无操作（`lnk_path` 空 = 无路径可开）
+/// - `name` 即引导文案（"输入文本开始翻译"），`description` 承载插件显示名
+///
+/// 前端 `results.js` 现有渲染分支 (`Action.kind=Open` + `lnk_path` 空 → 纯展示) 天然支持，
+/// 无需前端改动。
+fn empty_arg_hint_entry(plugin_id: &str, display_name: &str, hint: String) -> AppEntry {
+    AppEntry {
+        name: hint,
+        pinyin_name: String::new(),
+        pinyin_full: String::new(),
+        lnk_path: String::new(),
+        is_calc: false,
+        score: 0.0,
+        is_placeholder: false,
+        is_error: false,
+        source: plugin_id.to_string(),
+        description: Some(display_name.to_string()),
         action: Action::default(),
         score_detail: None,
     }

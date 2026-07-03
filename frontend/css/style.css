@@ -62,6 +62,41 @@ body {
   font-weight: 300;
 }
 
+/* ── Ghost overlay（0.8.1 §2.6）─────────────────────────────────────────────
+   .input-wrap 定位容器；#ghost-overlay 与 <input> 绝对定位重叠，同 padding/font/line-height。
+   .ghost-typed 与用户输入等宽但透明（占位对齐），.ghost-suggest 灰色显示补全提示。
+   pointer-events:none 让键盘/鼠标事件全部落到 <input>。 */
+.input-wrap {
+  position: relative;
+  width: 100%;
+}
+
+#ghost-overlay {
+  position: absolute;
+  inset: 0;
+  padding: 8px 10px; /* 与 #query 完全一致 */
+  font-size: 18px;
+  line-height: 1.4;
+  pointer-events: none;
+  white-space: pre; /* 保留用户输入里的空格对齐 */
+  overflow: hidden;
+  font-family: inherit;
+}
+
+#ghost-overlay .ghost-typed {
+  color: transparent; /* 只占位，实际字符由下层 <input> 显示 */
+}
+
+#ghost-overlay .ghost-suggest {
+  /* 纯"影子"提示——只有 fuzzy 补全场景（display 非空）才会有文字。
+     键帽 chip 不放这里，走 statusbar（视觉分层：passive suggestion vs active hint）。 */
+  color: var(--text-faint);
+  opacity: 0.65;
+}
+
+/* 键帽通用样式（.kbd / .kbd-group）已抽到 css/kbd.css——设置页也复用。
+   本文件下方 #statusbar .kbd 等 scoped 覆盖依然生效（层叠优先级 statusbar > 通用）。 */
+
 /* ── 结果列表 ───────────────────────────────────────────────────────────────── */
 
 #results {
@@ -243,4 +278,14 @@ body.alt-active #results li .item-badge {
 
 #statusbar .hint-right {
   font-family: ui-monospace, Consolas, monospace;
+}
+
+/* statusbar 里的键帽稍收紧字距，跟 11px 文字视觉对齐；
+   相邻键帽之间用 margin-left 表达"连续按键"，键帽外侧文本用 margin-right 隔开一空格。 */
+#statusbar .kbd {
+  font-size: 0.95em;
+  margin-right: 0.2em; /* 键帽后跟文字：Enter 打开 */
+}
+#statusbar .kbd + .kbd {
+  margin-left: -0.1em; /* 键帽紧邻键帽：↑↓ 视觉靠近，无额外间距 */
 }
