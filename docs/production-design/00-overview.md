@@ -2,8 +2,8 @@
 
 > **定位**: Universal Action Layer（统一操作层）—— 感知用户上下文、主动推荐动作,让任何操作都比原来的路径更快。
 >
-> **状态**: 0.7 已完成,0.8 进行中
-> **更新时间**: 2026-06-29
+> **状态**: 0.7 已完成,0.8 进行中（0.8.0 完成，0.8.1~0.8.3 规划中），0.9 AI 层规划中
+> **更新时间**: 2026-07-03
 
 ---
 
@@ -57,7 +57,8 @@
 | **0.5** | [phases/0.5-config-search-extension.md](./phases/0.5-config-search-extension.md) | 配置架构统一 KV + Everything 文件搜索 + 右键菜单 + 主题系统 | ✅ 完成 |
 | **0.6** | [phases/0.6-plugin-packaging-scripting.md](./phases/0.6-plugin-packaging-scripting.md) | 插件打包路径 + Python/Node.js 脚本支持 + 统一错误处理 | ✅ 完成 |
 | **0.7** | [phases/0.7-plugin-ecosystem-local-search.md](./phases/0.7-plugin-ecosystem-local-search.md) | 插件生态(翻译/剪贴板历史)+ 本地搜索 Fallback + 性能统计 | ✅ 完成 |
-| **0.8** | [phases/0.8-ai-intent-router.md](./phases/0.8-ai-intent-router.md) | UIA 划词监听 + **Chord 模式** + Context 感知路由 + AI Provider 抽象 | 🚧 进行中 |
+| **0.8** | [phases/0.8-context-interaction.md](./phases/0.8-context-interaction.md) | 感知与操作层 —— UIA 划词 + 内置动作抽象 + Autosuggestion + 翻译 Context 路由 + Chord 底层 | 🚧 进行中 |
+| **0.9** | [phases/0.9-ai-layer.md](./phases/0.9-ai-layer.md) | 智能层 —— AI Provider Trait + 云端插件 + Chat View + VectorRouter | 📋 规划中 |
 
 ### 2.3 其他参考
 
@@ -73,11 +74,14 @@
 | 版本 | 核心特性 | 状态 |
 |---|---|---|
 | 0.1 ~ 0.7 | 基础交互 → 插件生态 → 剪贴板历史 → 性能统计 | ✅ 全部完成 |
-| **0.8.0** | UIA 划词文本感知 + Context 感知路由 | ✅ 优先做 |
-| **0.8.1** | **Chord 模式:按住 Alt + 二次快捷键触发动作** | 📋 规划中 |
-| 0.8.2 | 最小 AI Provider Trait + 云端 AI 插件(OpenAI 兼容) | 后置 |
-| 0.8.3 | AI Chat View 对话界面 + `ai xxx` 触发 | 后置 |
-| 0.8.4 | VectorRouter 语义匹配(embedding 可选云端/本地) | 后置 |
+| **0.8.0** | UIA 划词文本感知 + Context 感知路由（内置动作侧）+ 内置动作抽象升级 | ✅ 完成 |
+| **0.8.1** | Autosuggestion / Ghost Text 输入补全（首拼降级） | 📋 进行中 |
+| **0.8.2** | 翻译插件 Context 感知路由 + `is_non_target_lang` 判定 | 📋 规划中 |
+| **0.8.3** | **Chord 模式底层能力**：状态机 + 注册机制 + Context 抓取 + 提示 UI | 📋 规划中 |
+| 0.9.0 | 最小 AI Provider Trait + 注册机制 | 后置 |
+| 0.9.1 | 云端 AI 插件（OpenAI 兼容）+ 密钥安全存储 | 后置 |
+| 0.9.2 | AI Chat View 对话界面 + `ai xxx` 触发 | 后置 |
+| 0.9.3 | VectorRouter 语义匹配（embedding 可选云端/本地） | 后置 |
 
 ---
 
@@ -90,5 +94,6 @@
 | 热键为什么是右 Alt tap? Chord 模式怎么工作? | [product-interaction.md §2](./product-interaction.md) |
 | 插件系统怎么设计的?意图路由怎么实现? | [product-platform.md](./product-platform.md) |
 | 选中文本/剪贴板感知怎么做?隐私如何保证? | [product-context-future.md](./product-context-future.md) |
-| 0.8 阶段在做什么?Chord 模式技术实现路径? | [phases/0.8-ai-intent-router.md](./phases/0.8-ai-intent-router.md) |
+| 0.8 感知与操作层在做什么? | [phases/0.8-context-interaction.md](./phases/0.8-context-interaction.md) |
+| 0.9 AI 层准备怎么落? | [phases/0.9-ai-layer.md](./phases/0.9-ai-layer.md) |
 | 开发规范、模块拆分、Tauri Commands | [CLAUDE.md](../../CLAUDE.md) |

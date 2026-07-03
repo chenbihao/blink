@@ -304,6 +304,13 @@ fn resolve_surface(declared: Surface, mt: &MatchType, takeover_enabled: bool) ->
 
 /// keyword 匹配(§4.2):精确或前缀带参。
 /// query 与 keyword 都过 `normalize_candidates`(小写 + 拼音首字母),使中文 keyword 支持首拼输入。
+///
+/// TODO(0.8.1 Autosuggestion): 首拼命中当前与汉字明码等价升级 Takeover,是**弱信号误升级**。
+/// 计划改为:
+/// - 三态 MatchType: `Exact` / `Prefix` / `PinyinPrefix { arg, hint }`
+/// - `resolve_surface(Auto, PinyinPrefix)` → Priority(不 Takeover)
+/// - 前端渲染 ghost text 补全提示(如 `fy hello` → `→ 翻译 hello`),Tab 显式升级
+/// 参见 docs/production-design/phases/0.8-context-interaction.md §二
 fn match_keyword(query: &str, keyword: &str) -> Option<MatchType> {
     let q_lower = query.to_ascii_lowercase();
     for kw in normalize_candidates(keyword) {

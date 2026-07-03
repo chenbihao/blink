@@ -63,7 +63,7 @@
 
 **下一步(0.8+)**:Context 感知路由 — 选中英文→翻译插件置顶，选中路径→打开目录动作置顶
 
-来源:0.8-ai-intent-router.md §1.1
+来源:0.8-context-interaction.md §1.1
 
 ---
 

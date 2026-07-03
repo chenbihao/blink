@@ -33,7 +33,8 @@ production-design/
     ├── 0.5-config-search-extension.md  ← 配置架构 + 文件搜索 + 扩展系统
     ├── 0.6-plugin-packaging-scripting.md ← 插件打包 + Python/Node.js脚本支持
     ├── 0.7-plugin-ecosystem-local-search.md ← 插件生态 + 本地搜索Fallback + 性能统计
-    └── 0.8-ai-intent-router.md         ← 🚧 进行中:UIA划词 + Chord模式 + AI能力基础
+    ├── 0.8-context-interaction.md      ← 🚧 感知与操作层:UIA划词+Autosuggestion+翻译Ctx+Chord底层
+    └── 0.9-ai-layer.md                 ← 📋 智能层:AI Provider+云端插件+Chat View+VectorRouter
 ```
 
 ---
