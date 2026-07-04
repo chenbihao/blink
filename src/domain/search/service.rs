@@ -7,14 +7,14 @@
 //! 由 `commands::search_apps` 经 `app.state::<Arc<SearchService>>()` 调用。
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use serde::Serialize;
 use sqlx::SqlitePool;
 use tauri::{AppHandle, Emitter};
 
 use crate::infra::platform::context::ContextSnapshot;
-use crate::domain::intent::{Candidate, IntentRouter, Route, Suggestion, Surface};
+use crate::domain::intent::{Candidate, IntentRouter, RankingHint, Route, Suggestion, Surface};
 use crate::domain::plugin::PluginEngine;
 
 use super::engine::{Lane, QueryContext, SearchEngine, SearchItem};
@@ -83,6 +83,10 @@ pub struct SearchService {
     /// 界面语言快照（0.8.1）。用于把 `empty_arg_hint` / 未来其他 `LocalizableText`
     /// 解析成当前语言字符串。热更新走 `update_language`，与 AppConfig.language 同步。
     language: Arc<RwLock<String>>,
+    /// 上一轮 best_suggestion 产出的 RankingHint 快照（0.8.4 §5.3.1 Surface Booster）。
+    /// route() 下一轮读此值做 surface boost——跨轮反馈滞后一轮,0.8.4 同步阶段可接受
+    /// （0.9 AI 异步化后失效,见 0.8 文档 §5.6）。
+    last_ranking_hint: Arc<Mutex<Option<RankingHint>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -126,6 +130,7 @@ impl SearchService {
             disabled_builtin_actions: Arc::new(RwLock::new(Vec::new())),
             autosuggest: Arc::new(RwLock::new(AutosuggestState::default())),
             language: Arc::new(RwLock::new("zh".to_string())),
+            last_ranking_hint: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -269,13 +274,12 @@ impl SearchService {
             disabled_builtin_actions: &disabled,
         };
 
-        // 空 query 也要走 router.route() —— 让 Context 规则（0.8.2 §3.4）参与召回。
-        // 老逻辑（0.8.0/0.8.1）此处短路，导致翻译 Context 触发在空 query 场景永远不生效。
-        // 0.8.3 §4.13 P0-3：空 query 时 route() 内部已改为「Context 不产独立 candidate」——
-        // 只保留 kw+ctx merge_hits 加分（非空 query 才会生效）。空 query 场景的翻译 Ghost
-        // 走 best_suggestion 单独通道。
-        let intent_ctx = crate::domain::intent::QueryContext { history: &history, snapshot: &snapshot };
-        let route = self.router.route(q, &intent_ctx).await;
+        // 空 query 也要走 router.route()（决定 Takeover/Mixed 调度,空 query 走 Mixed）。
+        // 0.8.4 §5.3.1：route 断 Awareness 依赖,不再收 snapshot;Context 命中只走
+        // best_suggestion 产 Ghost + Tab 采纳（Suggestion 域）。Surface Booster 通过
+        // last_ranking_hint 单向反馈（只影响排序,不代参/召回）。
+        let ranking_hint = self.last_ranking_hint.lock().unwrap().clone();
+        let route = self.router.route(q, &history, ranking_hint.as_ref()).await;
         // 过滤不符合前置条件的路由(禁用插件 + 参数过短),避免占位符死态。
         let route = self.filter_route(route);
 
@@ -289,7 +293,12 @@ impl SearchService {
             let cfg = *self.autosuggest.read().unwrap();
             if cfg.enabled {
                 // query 用未 trim 的原文（保尾空格）；上层 `q` 已被 trim。
-                self.router.best_suggestion(query, &snapshot, cfg.min_score)
+                let sug = self.router.best_suggestion(query, &snapshot, cfg.min_score);
+                // 0.8.4 §5.3.1：缓存 RankingHint 喂给下一轮 route（Surface Booster 跨轮反馈）
+                *self.last_ranking_hint.lock().unwrap() = sug
+                    .as_ref()
+                    .and_then(|s| s.ranking_hint.clone());
+                sug
             } else {
                 None
             }
@@ -306,8 +315,9 @@ impl SearchService {
         // 用于翻译/搜索类"必须要参数才有意义"的插件，替代插件内部硬编码的
         // "请输入文本" 逻辑（省一次 IPC + 支持 i18n + Tab 补全时也命中）。
         let lang_snapshot = self.language.read().unwrap().clone();
-        let empty_arg_hint = |id: &str, arg: &str| -> Option<String> {
-            if !arg.is_empty() {
+        let empty_arg_hint = |id: &str, arg: &crate::domain::intent::ExecArg| -> Option<String> {
+            // ExecArg::None = 无参(0.8.4 §5.3.2);UserExplicit 恒非空串(match_keyword 空串→None)
+            if !arg.is_none() {
                 return None;
             }
             self.plugin_engine
@@ -324,7 +334,7 @@ impl SearchService {
                 } else {
                     // 独占:跳过本地引擎,只查该插件。
                     // 先同步返回占位项(带明确的"正在查询"反馈),避免窗口空白,让用户知道命令已被识别。
-                    self.spawn_takeover(plugin_id.clone(), arg.clone(), seq);
+                    self.spawn_takeover(plugin_id.clone(), arg.to_plugin_string(), seq);
                     vec![placeholder_entry(&plugin_id, &display_name(&plugin_id))]
                 }
             }
@@ -363,7 +373,7 @@ impl SearchService {
                 let plugin_ids: Vec<(String, String)> = priority
                     .iter()
                     .chain(inline.iter())
-                    .map(|c| (c.plugin_id.clone(), c.arg.clone()))
+                    .map(|c| (c.plugin_id.clone(), c.arg.to_plugin_string()))
                     .collect();
 
                 // 命中的插件：同步返回占位项（加载中反馈），避免窗口空白
@@ -439,10 +449,10 @@ impl SearchService {
                     return Route::Mixed { candidates: vec![] };
                 }
                 // 检查 min_arg_length:仅对带参前缀命中生效(参数太短降级,避免占位符死态)。
-                // Exact 命中(arg 为空)跳过检查——无参触发使用插件默认配置(如天气用默认城市)。
+                // Exact 命中(arg 为 None)跳过检查——无参触发使用插件默认配置(如天气用默认城市)。
                 let min_len = pe.get_min_arg_length(plugin_id);
-                let arg_len = arg.chars().count();
-                if min_len > 0 && !arg.is_empty() && arg_len < min_len {
+                let arg_len = arg.char_len();
+                if min_len > 0 && arg.is_explicit() && arg_len < min_len {
                     tracing::debug!(plugin = %plugin_id, %arg_len, min_len, "参数过短命中 takeover,降级 Generic");
                     return Route::Mixed { candidates: vec![] };
                 }
@@ -453,12 +463,12 @@ impl SearchService {
                     .into_iter()
                     .filter(|c| pe.is_enabled(&c.plugin_id))
                     .filter(|c| {
-                        // Exact 命中(arg 为空)跳过 min_arg_length 检查
+                        // Exact 命中(arg 为 None)跳过 min_arg_length 检查
                         let min_len = pe.get_min_arg_length(&c.plugin_id);
-                        if c.arg.is_empty() {
+                        if c.arg.is_none() {
                             return true; // 无参触发，用默认配置
                         }
-                        let arg_len = c.arg.chars().count();
+                        let arg_len = c.arg.char_len();
                         min_len == 0 || arg_len >= min_len
                     })
                     .collect(),

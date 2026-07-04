@@ -95,14 +95,42 @@ takeover 不绑定 item 列表,协议留 `view` 字段:
 
 ## 5. 意图引擎的产品设计
 
-### 5.1 三级路由模型(0.2 定稿)
+### 5.0 四域架构（0.8.4 起，产品设计基座）
+
+意图不是"用户想干什么"的语义分类,是**四个正交域协作产生的呈现权 + 执行权**：
+
+```
+┌────────────────────────────────────────────────────────────┐
+│  Awareness (环境感知) —— 抓 snapshot,纯数据不做判断         │
+│                        ↓  唯一读它的层                       │
+│  Suggestion (建议生产) —— Signal → Ghost 建议,待用户采纳    │
+│                        ↓  ★ 信任边界:Tab/点击/打字才穿过    │
+│  Routing    (路由决策) —— Query → Route,对 Awareness 无知   │
+│                        ↓  只有用户显式选择才穿过             │
+│  Execution  (执行)     —— UserExplicit 参数才真执行         │
+└────────────────────────────────────────────────────────────┘
+```
+
+**三条铁则**（由架构强制,不靠 review 或注释）：
+
+1. **呈现权 ≠ 执行权**：Routing 只出候选,Execution 需第二次交互
+2. **参数注入必须显式**：`ExecArg::UserExplicit(String)` 类型墙,其他路径编译不过
+3. **弱信号 pull 不 push**：Routing 无法读 Awareness,Context 只能通过 Suggestion 域影响
+
+**违反流向的代码不应存在** —— 类型层拒绝 + 域接口收敛 + 单测按域拆分。
+
+来源：`phases/0.8-context-interaction.md` §五
+
+### 5.1 三级路由模型（0.2 定稿）
 
 ```
 用户输入 → RuleRouter(规则) → 命中 → 目标引擎子集
          → 未命中 → VectorRouter(zvec) → 未命中 → AIRouter(云) → 全未命中 → Generic(全引擎召回)
 ```
 
-0.4 只实现 `RuleRouter`(keyword/regex),P3 才接入 VectorRouter/AIRouter。trait 先定全,避免返工。来源:0.2 §4.1
+**这条链路完全属于 Routing 域**（§5.0）。三级路由器都接受 `(query, history, ranking_hint)`,都不看 Awareness。VectorRouter / AIRouter 是内部策略升级,不改变域边界。
+
+0.4 只实现 `RuleRouter`(keyword/regex),0.9 才接入 VectorRouter/AIRouter。trait 先定全,避免返工。来源:0.2 §4.1
 
 ### 5.2 意图分类推迟到 P3
 
@@ -119,6 +147,30 @@ takeover 不绑定 item 列表,协议留 `view` 字段:
 - query 和 keyword 过同一归一化(小写 + 拼音首字母双候选)
 
 来源:0.2 §4.2, 0.3 §一
+
+### 5.4 Suggestion 域 —— AI 意图判定器的天然位子
+
+Suggestion 域是唯一能读 Awareness 的层,也是**未来 AI 意图判定器的落脚点**：
+
+- 0.8.1 KeywordCompletion（首拼 fy → fanyi）—— Suggestion 域现有 producer
+- 0.8.3 ContextGhost（选中英文 → 翻译建议）—— Suggestion 域现有 producer
+- 0.9 AIIntent（帮我打开手边链接 → open_url 建议）—— Suggestion 域新增 producer
+
+三者走同一个 `best_suggestion` 多源竞争入口,产 `Suggestion { display, replacement, confidence, source }`。
+
+**关键性质**：AI 永远只产 Suggestion,**永远不产 Route.arg** —— 类型系统禁止,守死"AI 有幻觉不能直接触发副作用"的产品原则。用户 Tab 是最后一道人类审核。
+
+来源：`phases/0.8-context-interaction.md` §五.5.6
+
+### 5.5 Surface Booster —— Context 影响首屏排序的合法路径
+
+用户打"翻译" + 剪贴板恰好英文 → 翻译插件被顶到首屏第一。这是**便利性**,但 0.8.4 前是**通过 Routing 偷读 Awareness 实现**的（违反域边界）。
+
+0.8.4 起改走 `RankingHint`：Suggestion 产 Suggestion 时同时产 `RankingHint { boost_plugin_id }`,SearchService 下一轮 route() 把 hint 作为**排序梯标**传入。
+
+- Suggestion 域读 Awareness → 产出 hint
+- Routing 域接受 hint 作排序输入 → 不读 Awareness
+- 便利性保留,域边界不破
 
 ---
 

@@ -52,14 +52,182 @@ impl Default for SurfaceView {
     }
 }
 
+// ── 执行参数 / 排序梯标（0.8.4 §5.3.1 / §5.3.2 四域架构）─────────
+
+/// 执行参数类型墙（0.8.4 §5.3.2）。
+///
+/// **后端内部类型，不直接序列化给前端**——`SearchAction::RunAction.arg` 对外仍保持
+/// `Option<serde_json::Value>` 契约；产出 RunAction 时由 [`ExecArg::to_run_action_arg`] 转换，
+/// 外部 JSON 零变化，域类型不跨边界。
+///
+/// 设计目的：把「参数必须来自用户显式交互」这条产品原则编码进类型系统——
+/// Routing/Suggestion 域写不出「把 snapshot 抽来的值塞进执行参数」的代码，构造
+/// `UserExplicit` 必须显式，新加入口在 review 时一目了然。真实价值是**防回归**
+/// （禁止未来重新引入隐式代参），不是修现存 bug（0.8.3 收尾已修行为）。
+///
+/// ⚠️ **信任边界（诚实标注）**：这是「后端内部墙」而非「端到端信任链」——
+/// `run_builtin_action` 命令入口对前端 arg 会**无条件包装**成 `UserExplicit`
+/// （自我认证，非不可伪造）。本地受信 WebView 够用，但 0.9 接 AI Provider 时
+/// **勿**误以为能防「AI 构造的恶意 invoke」——它只防后端域越界，不防受信入口外的构造。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecArg {
+    /// 用户显式给的参数——**唯一合法的执行参数来源**。
+    ///
+    /// 产生入口（0.8.4 审计点，见 `exec_arg_construction_sites_audited` 回归测试）：
+    /// - `match_keyword` 的 `Prefix { arg }` / `InitialsPrefix { arg }` 部分（用户打字）
+    /// - Ghost 采纳后 query 被 replacement 替换，再走一遍 match_keyword
+    /// - 内置动作候选产出时从 snapshot 抽（展示即抽参 + 整链路透传；见 §5.3.4）
+    UserExplicit(String),
+
+    /// 无参——走 empty_arg_hint 或插件内部决策。显式的「无参数」语义，优于 `Option::None` 空值。
+    None,
+}
+
+impl ExecArg {
+    /// 取用户显式参数；`None` 返回 `None`。
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            ExecArg::UserExplicit(s) => Some(s.as_str()),
+            ExecArg::None => None,
+        }
+    }
+
+    /// 是否无参。
+    pub fn is_none(&self) -> bool {
+        matches!(self, ExecArg::None)
+    }
+
+    /// 是否用户显式给参。
+    pub fn is_explicit(&self) -> bool {
+        matches!(self, ExecArg::UserExplicit(_))
+    }
+
+    /// 转成 `SearchAction::RunAction.arg` 的外部契约格式（0.8.4 §5.3.2）。
+    ///
+    /// `UserExplicit(s)` → `Some(Value::String(s))`，`None` → `None`。
+    /// 前端契约层零变化。
+    pub fn to_run_action_arg(&self) -> Option<serde_json::Value> {
+        match self {
+            ExecArg::UserExplicit(s) => Some(serde_json::Value::String(s.clone())),
+            ExecArg::None => None,
+        }
+    }
+
+    /// 字符数（filter_route 参数过短判定按字符数）。`None` → 0。
+    pub fn char_len(&self) -> usize {
+        match self {
+            ExecArg::UserExplicit(s) => s.chars().count(),
+            ExecArg::None => 0,
+        }
+    }
+
+    /// 转成插件查询参数字符串（`UserExplicit(s)` → `s`，`None` → 空串）。
+    ///
+    /// SearchService 把 Candidate/Takeover 的 ExecArg 传给插件 spawn 时用。
+    pub fn to_plugin_string(&self) -> String {
+        match self {
+            ExecArg::UserExplicit(s) => s.clone(),
+            ExecArg::None => String::new(),
+        }
+    }
+}
+
+impl Default for ExecArg {
+    fn default() -> Self {
+        ExecArg::None
+    }
+}
+
+impl From<&str> for ExecArg {
+    /// 空串 → None（无参语义）；非空 → UserExplicit。主要供测试构造 Hit 用。
+    fn from(s: &str) -> Self {
+        if s.is_empty() {
+            ExecArg::None
+        } else {
+            ExecArg::UserExplicit(s.to_string())
+        }
+    }
+}
+
+impl From<String> for ExecArg {
+    fn from(s: String) -> Self {
+        if s.is_empty() {
+            ExecArg::None
+        } else {
+            ExecArg::UserExplicit(s)
+        }
+    }
+}
+
+/// Suggestion 域向 Routing 域的单向排序反馈（0.8.4 §5.3.1 Surface Booster）。
+///
+/// Suggestion 产 Ghost 时同时产出此 hint，SearchService 下一轮 `route()` 把它作为
+/// **排序梯标**传入——只影响同 plugin 候选的 surface 排序，不影响 arg、不影响候选集，
+/// 不让 Awareness 跨过信任边界直接干扰 Routing。
+///
+/// ⚠️ 跨轮反馈滞后一轮；0.9 AI 异步化后此机制失效（见 0.8 文档 §5.6），届时改增量重排。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RankingHint {
+    /// 被推升的插件 id（同 plugin 的 keyword 命中 surface 升级）。
+    pub boost_plugin_id: String,
+}
+
+#[cfg(test)]
+mod exec_arg_tests {
+    use super::*;
+
+    #[test]
+    fn none_is_not_explicit() {
+        let a = ExecArg::None;
+        assert!(a.is_none());
+        assert!(!a.is_explicit());
+        assert_eq!(a.as_str(), None);
+        assert_eq!(a.to_run_action_arg(), None);
+        assert_eq!(a.char_len(), 0);
+    }
+
+    #[test]
+    fn user_explicit_roundtrip() {
+        let a = ExecArg::UserExplicit("hello".to_string());
+        assert!(!a.is_none());
+        assert!(a.is_explicit());
+        assert_eq!(a.as_str(), Some("hello"));
+        // 对外契约：UserExplicit(s) → Some(Value::String(s))（0.8.4 §5.3.2）
+        assert_eq!(
+            a.to_run_action_arg(),
+            Some(serde_json::Value::String("hello".to_string()))
+        );
+        assert_eq!(a.char_len(), 5);
+    }
+
+    #[test]
+    fn char_len_counts_chars_not_bytes() {
+        // 「北京」= 2 chars / 6 bytes；filter_route 参数过短判定按字符数
+        let a = ExecArg::UserExplicit("北京".to_string());
+        assert_eq!(a.char_len(), 2);
+    }
+
+    #[test]
+    fn default_is_none() {
+        // 显式「无参数」语义，而非空字符串空值
+        assert_eq!(ExecArg::default(), ExecArg::None);
+    }
+
+    #[test]
+    fn ranking_hint_carries_plugin_id() {
+        let h = RankingHint { boost_plugin_id: "builtin.translate".to_string() };
+        assert_eq!(h.boost_plugin_id, "builtin.translate");
+    }
+}
+
 // ── 路由结果 ──────────────────────────────────────────────
 
 /// Mixed 分支的单个候选(命中但未 takeover 的插件)。
 #[derive(Debug, Clone)]
 pub struct Candidate {
     pub plugin_id: String,
-    /// 传给插件的参数(精确命中→空串;前缀命中→余下文本)。
-    pub arg: String,
+    /// 传给插件的参数(0.8.4 §5.3.2 ExecArg 类型墙：精确命中→None;前缀命中→UserExplicit(余下文本))。
+    pub arg: ExecArg,
     /// 实际 surface(Inline 或 Priority;Takeover 不走 Mixed)。
     pub surface: Surface,
     /// 命中派生形式（首拼）时的规范拼音提示；供 ghost text 未来展示（0.8.1）。
@@ -74,7 +242,7 @@ pub enum Route {
     /// 接管:该插件独占返回区。
     Takeover {
         plugin_id: String,
-        arg: String,
+        arg: ExecArg,
         #[allow(dead_code)] // 0.4 仅 List;P3 扩展 Chat/Custom 时消费
         view: SurfaceView,
         /// 同 Candidate.hint；Takeover 走 keyword 强信号时恒 None（首拼不升级 Takeover）。
@@ -98,7 +266,18 @@ pub struct QueryContext<'a> {
 
 #[async_trait::async_trait]
 pub trait IntentRouter: Send + Sync {
-    async fn route(&self, query: &str, ctx: &QueryContext<'_>) -> Route;
+    /// 路由决策（0.8.4 §5.3.1：断 Awareness 依赖,route 对 snapshot 完全无知）。
+    ///
+    /// - `history`:lnk_path → (hit_count, last_used_at),频率加权用（0.8.4 阶段 route
+    ///   内部未消费,为 0.9 VectorRouter/AIRouter 预留稳定签名）
+    /// - `ranking_hint`:Suggestion 域上一轮产的 Surface Booster——只影响同 plugin 命中
+    ///   的 surface 排序,不影响 arg、不影响候选集
+    async fn route(
+        &self,
+        query: &str,
+        history: &std::collections::HashMap<String, (i64, i64)>,
+        ranking_hint: Option<&RankingHint>,
+    ) -> Route;
 
     /// 算 ghost text 补全（0.8.1 §2.4）。默认实现返回 None（非 RuleRouter 实现无需支持）。
     fn suggest_completion(&self, _query: &str, _min_score: f64) -> Option<CompletionHint> {
@@ -402,7 +581,12 @@ impl RuleRouter {
 
 #[async_trait::async_trait]
 impl IntentRouter for RuleRouter {
-    async fn route(&self, query: &str, ctx: &QueryContext<'_>) -> Route {
+    async fn route(
+        &self,
+        query: &str,
+        _history: &std::collections::HashMap<String, (i64, i64)>,
+        ranking_hint: Option<&RankingHint>,
+    ) -> Route {
         let q = query.trim();
         let takeover_enabled = *self.takeover_enabled.read().unwrap();
 
@@ -425,8 +609,14 @@ impl IntentRouter for RuleRouter {
                 };
                 if let Some(mt) = mt_opt {
                     let arg = match &mt {
-                        MatchType::Exact { .. } | MatchType::InitialsExact { .. } => String::new(),
-                        MatchType::Prefix { arg, .. } | MatchType::InitialsPrefix { arg, .. } => arg.clone(),
+                        MatchType::Exact { .. } | MatchType::InitialsExact { .. } => ExecArg::None,
+                        MatchType::Prefix { arg, .. } | MatchType::InitialsPrefix { arg, .. } => {
+                            if arg.is_empty() {
+                                ExecArg::None
+                            } else {
+                                ExecArg::UserExplicit(arg.clone())
+                            }
+                        }
                     };
                     let hint: Option<String> = match &mt {
                         MatchType::Exact { hint } | MatchType::Prefix { hint, .. } => hint.clone(),
@@ -447,20 +637,12 @@ impl IntentRouter for RuleRouter {
             }
         }
 
-        // ── 2. Context 匹配（0.8.2 §3.4，不受 query 影响）──────
-        //    0.8.3 §4.13 P0-3：空 query 时 Context 不产独立 candidate（改由 best_suggestion
-        //    产 Ghost + Tab 采纳）；非空 query 时保留 kw+ctx 同 plugin 的 merge_hits 加分。
-        //    单独命中（context 命中但 kw 未命中）的 context_hit 在非空 query 时视为「用户
-        //    已表 keyword 意图」直接丢弃——避免复制英文 + 输入 chrome 时翻译还抢首屏。
-        let context_hits = if q.is_empty() {
-            Vec::new()
-        } else {
-            self.match_context_hits(ctx.snapshot)
-        };
-
-        // ── 3. 合并（keyword + context 同 plugin 取 max surface / kw 优先 arg）──
-        //     非空 query：merge 只保留双源命中；单独 context 命中被丢弃。
-        let hits = merge_hits_keyword_only(hits, context_hits);
+        // ── 2. Surface Booster（0.8.4 §5.3.1）──────────────────
+        //    route 对 Awareness 完全无知——Context 命中已不进 route（只在 best_suggestion
+        //    产 Ghost + Tab 采纳）。Suggestion 域通过 RankingHint 单向反馈:上一轮 Context
+        //    命中的 plugin,这一轮若被 keyword 命中,surface 升到 Priority（顶前排名）。
+        //    hint 只影响排序,不代参、不召回新候选。
+        let hits = merge_hits_with_hint(hits, ranking_hint);
 
         // ── 4. 仲裁 ─────────────────────────────────────────
         if let Some(t) = hits.iter().find(|h| h.surface == Surface::Takeover) {
@@ -496,34 +678,17 @@ impl IntentRouter for RuleRouter {
         snapshot: &ContextSnapshot,
         min_score: f64,
     ) -> Option<Suggestion> {
-        // 空/非空 query 走不同源；0.8.3 阶段互斥（0.9 AI 接入后走同一竞争）。
+        // 0.8.4 §5.3.3：空/非空 query 都可能产 Context Ghost。
+        // - 空 query：Context 主战场
+        // - 非空 query：先 Keyword 补全（首拼/拼音/汉字）；**无命中时 fallback Context Ghost**
+        //   （如打 chrome + 剪贴板 URL → 产「打开链接」Ghost,不抢首屏、需 Tab 采纳）。
+        //   多源真正 confidence 竞争留 0.9 AI（届时 Keyword/Context/AI 同路径竞争）。
         let trimmed = query.trim();
         if trimmed.is_empty() {
-            // Context 分支：多命中取 confidence 最高的（0.8.3 收尾：origin 从 Hit 直取）
-            let hits = self.match_context_hits(snapshot);
-            let best_ctx = hits.into_iter().max_by(|a, b| {
-                let ca = a.when.map(|w| context_confidence(&w, a.origin)).unwrap_or(0.0);
-                let cb = b.when.map(|w| context_confidence(&w, b.origin)).unwrap_or(0.0);
-                ca.partial_cmp(&cb).unwrap_or(std::cmp::Ordering::Equal)
-            })?;
-
-            let when = best_ctx.when.as_ref()?;
-            let confidence = context_confidence(when, best_ctx.origin);
-            // 0.8.3 收尾：origin 从 Hit 直接映射为 SuggestionOrigin,不再事后推断
-            let origin = best_ctx.origin.map(SuggestionOrigin::from);
-            let (display, replacement) = self.build_context_suggestion_text(&best_ctx);
-            Some(Suggestion {
-                display,
-                replacement,
-                source: SuggestionSource::Context,
-                confidence,
-                prefix_len: 0,
-                origin,
-            })
-        } else {
-            // Keyword 分支：走 compute_hint_scored 拿 fuzzy 分（§4.13 P0-2）
-            let keywords = self.collect_suggest_keywords();
-            let (hint, score) = suggest::compute_hint_scored(&keywords, query, min_score)?;
+            self.context_suggestion(snapshot)
+        } else if let Some((hint, score)) =
+            suggest::compute_hint_scored(&self.collect_suggest_keywords(), query, min_score)
+        {
             Some(Suggestion {
                 display: hint.display,
                 replacement: hint.replacement,
@@ -531,7 +696,11 @@ impl IntentRouter for RuleRouter {
                 confidence: score.min(1.0), // f64::INFINITY exact 命中 → 1.0
                 prefix_len: hint.prefix_len,
                 origin: None, // Keyword 无外部来源
+                ranking_hint: None, // Keyword 不推 boost（Routing 域已命中 keyword）
             })
+        } else {
+            // Keyword 无命中 → fallback Context Ghost（0.8.4 §5.3.3）
+            self.context_suggestion(snapshot)
         }
     }
 
@@ -546,6 +715,35 @@ impl IntentRouter for RuleRouter {
 }
 
 impl RuleRouter {
+    /// 从 Context 命中产出 top-1 Suggestion（0.8.4 §5.3.3：空 query 主战场 + 非空 query fallback）。
+    ///
+    /// 多 Context 命中取 confidence 最高；产出的 Suggestion 携带 RankingHint（Surface Booster
+    /// 单向反馈）。无命中返回 None。
+    fn context_suggestion(&self, snapshot: &ContextSnapshot) -> Option<Suggestion> {
+        let hits = self.match_context_hits(snapshot);
+        let best_ctx = hits.into_iter().max_by(|a, b| {
+            let ca = a.when.map(|w| context_confidence(&w, a.origin)).unwrap_or(0.0);
+            let cb = b.when.map(|w| context_confidence(&w, b.origin)).unwrap_or(0.0);
+            ca.partial_cmp(&cb).unwrap_or(std::cmp::Ordering::Equal)
+        })?;
+
+        let when = best_ctx.when.as_ref()?;
+        let confidence = context_confidence(when, best_ctx.origin);
+        let origin = best_ctx.origin.map(SuggestionOrigin::from);
+        let (display, replacement) = self.build_context_suggestion_text(&best_ctx, snapshot);
+        Some(Suggestion {
+            display,
+            replacement,
+            source: SuggestionSource::Context,
+            confidence,
+            prefix_len: 0,
+            origin,
+            ranking_hint: Some(RankingHint {
+                boost_plugin_id: best_ctx.plugin_id.clone(),
+            }),
+        })
+    }
+
     /// 扫描 Context 规则表，返回命中的 Hit 列表（0.8.2 §3.4 / 0.8.3 §4.13 P1 共享判定）。
     ///
     /// **共享入口**：`route()` 与 `best_suggestion()` 都调此函数，保命中判定一致，
@@ -621,12 +819,18 @@ impl RuleRouter {
                 "context 规则命中",
             );
 
-            // 5. 抽 arg + origin：（0.8.3 收尾 · awareness）
-            //    - `TextIsNonTargetLang`：走 source.extract 拿 AwarenessView,arg + origin 一起
+            // 5. 抽展示文本 + origin（0.8.3 收尾 · awareness；0.8.4 §5.3.2 类型墙）
+            //    展示文本（仅 TextIsNonTargetLang 有,如待翻译内容）用于:
+            //    (a) 门禁判定（抽不到 → 不召回）
+            //    (b) best_suggestion 的 build_context_suggestion_text 构建 Ghost 文本
+            //    但**不进 Hit.arg** —— Hit.arg 是执行参数(ExecArg),context hit 恒 None
+            //    (context 不代执行参)。展示文本属 Suggestion 域(唯一能读 Awareness 的层),
+            //    由 build_context_suggestion_text 从 snapshot 直接取。origin 仍从数据侧带来。
+            //
+            //    - `TextIsNonTargetLang`：走 source.extract 拿 AwarenessView,text + origin 一起
             //    - `ClipboardIsUrl` / `ClipboardIsFilePath`：trigger 语义锁定 Clipboard 来源
             //    - `SelectionNonEmpty`：trigger 语义锁定 Selection 来源
-            //    origin 从数据侧带来,不再事后推断（删掉 infer_origin）
-            let (arg, origin) = match &rule.when {
+            let (display_text, origin) = match &rule.when {
                 ContextTrigger::TextIsNonTargetLang { source } => {
                     match source.extract(snapshot) {
                         Some(view) => (truncate_arg(view.text), Some(view.source)),
@@ -641,16 +845,16 @@ impl RuleRouter {
                 }
             };
 
-            // 6. 门禁：TextIsNonTargetLang 抽不到 arg → 不召回
-            //    （arg="" 场景是 event-only 触发，不受此闸约束）
-            if matches!(rule.when, ContextTrigger::TextIsNonTargetLang { .. }) && arg.is_empty() {
-                tracing::trace!(plugin = %rule.plugin_id, "context 命中但 arg 空,跳过召回");
+            // 6. 门禁：TextIsNonTargetLang 抽不到展示文本 → 不召回
+            //    （其他 when 是 event-only 触发，不受此闸约束）
+            if matches!(rule.when, ContextTrigger::TextIsNonTargetLang { .. }) && display_text.is_empty() {
+                tracing::trace!(plugin = %rule.plugin_id, "context 命中但展示文本空,跳过召回");
                 continue;
             }
 
             tracing::trace!(
                 plugin = %rule.plugin_id,
-                arg_len = arg.chars().count(),
+                text_len = display_text.chars().count(),
                 surface = ?rule.surface,
                 origin = ?origin,
                 "context 规则产出 Hit",
@@ -658,7 +862,7 @@ impl RuleRouter {
 
             out.push(Hit {
                 plugin_id: rule.plugin_id.clone(),
-                arg,
+                arg: ExecArg::None, // context hit 不代执行参(0.8.4 §5.3.2);展示文本由 Suggestion 域从 snapshot 取
                 surface: rule.surface,
                 view: SurfaceView::List,
                 hint: None,
@@ -691,14 +895,28 @@ impl RuleRouter {
     /// **无 keyword trigger 的 target**（未来纯 Context 触发的动作）：display + replacement
     /// 都会 fallback 到 id 末段；此时 Tab 采纳 → keyword 表不命中 → 降级模糊搜索。这条
     /// 死态是设计边界（本方法不管），需要在注册 Context binding 的地方 warn。
-    fn build_context_suggestion_text(&self, hit: &Hit) -> (String, String) {
+    fn build_context_suggestion_text(
+        &self,
+        hit: &Hit,
+        snapshot: &ContextSnapshot,
+    ) -> (String, String) {
+        // 展示文本（0.8.4 §5.3.2）：从 snapshot 按 hit.when 直接取,不读 hit.arg ——
+        // hit.arg 是执行参数(ExecArg),context hit 恒 None;展示文本属 Suggestion 域
+        // (唯一能读 Awareness 的层)。仅 TextIsNonTargetLang 携带展示文本。
+        let arg_text: String = match &hit.when {
+            Some(ContextTrigger::TextIsNonTargetLang { source }) => {
+                source.extract(snapshot).map(|v| truncate_arg(v.text)).unwrap_or_default()
+            }
+            _ => String::new(),
+        };
+
         // display 截 40 字符便于 ghost 单行展示
         const DISPLAY_MAX: usize = 40;
-        let display_arg: String = if hit.arg.chars().count() > DISPLAY_MAX {
-            let truncated: String = hit.arg.chars().take(DISPLAY_MAX).collect();
+        let display_arg: String = if arg_text.chars().count() > DISPLAY_MAX {
+            let truncated: String = arg_text.chars().take(DISPLAY_MAX).collect();
             format!("{truncated}…")
         } else {
-            hit.arg.clone()
+            arg_text.clone()
         };
 
         let app_lang = self.app_language.read().unwrap().clone();
@@ -725,10 +943,10 @@ impl RuleRouter {
         let keyword = self
             .preferred_keyword(&hit.plugin_id, &app_lang)
             .unwrap_or_else(|| short_target_name(&hit.plugin_id));
-        let replacement = if hit.arg.is_empty() {
+        let replacement = if arg_text.is_empty() {
             format!("{keyword} ")
         } else {
-            format!("{keyword} {}", hit.arg)
+            format!("{keyword} {}", arg_text)
         };
 
         (display, replacement)
@@ -846,7 +1064,7 @@ enum HitSource {
 
 struct Hit {
     plugin_id: String,
-    arg: String,
+    arg: ExecArg,
     surface: Surface,
     view: SurfaceView,
     hint: Option<String>,
@@ -862,57 +1080,23 @@ struct Hit {
     origin: Option<AwarenessSource>,
 }
 
-/// 合并 keyword + context 两路命中（0.8.2 §3.4.4）。
+/// 0.8.4 §5.3.1 Surface Booster：keyword 命中 + RankingHint boost 同 plugin → surface 升级。
 ///
-/// 规则：
-/// - 同 plugin_id 两路都命中：
-///   - surface = max(kw.surface, ctx.surface) —— Takeover > Priority > Inline
-///   - arg     = kw.arg（非空则用）否则 ctx.arg —— keyword 显式意图优先
-///   - hint    = kw.hint —— 保留强信号 hint（ctx.hint 恒 None）
-///   - view    = kw.view
-/// - 只 keyword 命中：原样保留
-/// - 只 context 命中：原样保留（surface 已在 add_context_rule 收窄为 Priority）
+/// 取代 0.8.3 的 `merge_hits_keyword_only`（基于 ctx_hits）:
+/// - route() 断 Awareness 后不再有 ctx_hits,Suggestion 域通过 RankingHint 单向反馈
+/// - hint.boost_plugin_id 命中的 kw hit → surface 升到 Priority（顶前排名）
+/// - 不动 arg（参数由用户显式给,不隐式代填）、不召回新候选（只影响排序）
 ///
-/// **arg 截断**：`truncate_arg` 在 `match_context_hits` 内做；`merge_hits` 只组合。
-#[allow(dead_code)] // 0.8.3 §4.13 P0-3：route() 走 merge_hits_keyword_only；此函数保留供后续/单测
-fn merge_hits(kw_hits: Vec<Hit>, ctx_hits: Vec<Hit>) -> Vec<Hit> {
-    let mut out: Vec<Hit> = kw_hits;
-
-    for ctx_hit in ctx_hits {
-        // 查看 out 里是否已有同 plugin 的 keyword hit
-        if let Some(existing) = out.iter_mut().find(|h| h.plugin_id == ctx_hit.plugin_id) {
-            // 双路命中同 plugin
-            existing.surface = surface_max(existing.surface, ctx_hit.surface);
-            if existing.arg.is_empty() {
-                existing.arg = ctx_hit.arg;
-            }
-            // hint 保留 kw 的；source 标记双源以便后续（未来需要）
-            existing.source = HitSource::Keyword; // kw 强信号胜出
-        } else {
-            out.push(ctx_hit);
+/// 无 hint 或 hint 未命中任何 kw hit 时,等价 keyword-only 原样返回。
+fn merge_hits_with_hint(kw_hits: Vec<Hit>, hint: Option<&RankingHint>) -> Vec<Hit> {
+    let Some(h) = hint else { return kw_hits };
+    let mut out = kw_hits;
+    for hit in out.iter_mut() {
+        if hit.plugin_id == h.boost_plugin_id {
+            // Suggestion 域上一轮 Context 命中此 plugin → 这一轮 kw 命中升到 Priority
+            hit.surface = surface_max(hit.surface, Surface::Priority);
+            hit.source = HitSource::Keyword;
         }
-    }
-    out
-}
-
-/// 0.8.3 §4.13 P0-3 变体：只保留 keyword 命中 + 双源命中的加分结果；丢弃 solo context 命中。
-///
-/// 与 `merge_hits` 的差别：**单独 context 命中（无 keyword 同 plugin）被丢弃**——非空 query
-/// 已表明用户 keyword 意图,solo context 命中抢首屏太激进（0.8.2 push 模式的历史包袱）。
-/// 空 query 场景 route() 已提前把 ctx_hits 传空,此函数等价 keyword-only。
-fn merge_hits_keyword_only(kw_hits: Vec<Hit>, ctx_hits: Vec<Hit>) -> Vec<Hit> {
-    let mut out: Vec<Hit> = kw_hits;
-
-    for ctx_hit in ctx_hits {
-        if let Some(existing) = out.iter_mut().find(|h| h.plugin_id == ctx_hit.plugin_id) {
-            // 双路命中同 plugin：走加分逻辑
-            existing.surface = surface_max(existing.surface, ctx_hit.surface);
-            if existing.arg.is_empty() {
-                existing.arg = ctx_hit.arg;
-            }
-            existing.source = HitSource::Keyword;
-        }
-        // else：solo context 命中丢弃（0.8.3 §4.13 P0-3）
     }
     out
 }
@@ -1076,9 +1260,8 @@ mod tests {
 
     fn run_route(r: &RuleRouter, q: &str) -> Route {
         let h = std::collections::HashMap::new();
-        let snapshot = crate::infra::platform::context::ContextSnapshot::default();
-        let ctx = QueryContext { history: &h, snapshot: &snapshot };
-        tauri::async_runtime::block_on(r.route(q, &ctx))
+        // 0.8.4 §5.3.1：route 断 Awareness 依赖,不再传 snapshot；hint=None
+        tauri::async_runtime::block_on(r.route(q, &h, None))
     }
 
     #[test]
@@ -1095,7 +1278,7 @@ mod tests {
         let r = router_with_rules(true);
         let route = run_route(&r, "echo hello");
         assert!(
-            matches!(route, Route::Takeover { plugin_id, arg, .. } if plugin_id == "builtin.echo" && arg == "hello")
+            matches!(route, Route::Takeover { plugin_id, arg, .. } if plugin_id == "builtin.echo" && arg == ExecArg::UserExplicit("hello".to_string()))
         );
     }
 
@@ -1153,7 +1336,7 @@ mod tests {
             route,
             Route::Mixed { candidates } if candidates.len() == 1
                 && candidates[0].plugin_id == "builtin.weather"
-                && candidates[0].arg == "北京"
+                && candidates[0].arg == ExecArg::UserExplicit("北京".to_string())
                 && matches!(candidates[0].surface, Surface::Inline)
                 && candidates[0].hint.as_deref() == Some("tianqi")
         ));
@@ -1174,7 +1357,7 @@ mod tests {
             route,
             Route::Mixed { candidates } if candidates.len() == 1
                 && candidates[0].plugin_id == "builtin.weather"
-                && candidates[0].arg.is_empty()
+                && candidates[0].arg.is_none()
                 && matches!(candidates[0].surface, Surface::Priority)
                 && candidates[0].hint.as_deref() == Some("tianqi")
         ));
@@ -1194,7 +1377,7 @@ mod tests {
         let route = run_route(&r, "fanyi hello");
         assert!(matches!(
             route,
-            Route::Takeover { plugin_id, arg, .. } if plugin_id == "builtin.translate" && arg == "hello"
+            Route::Takeover { plugin_id, arg, .. } if plugin_id == "builtin.translate" && arg == ExecArg::UserExplicit("hello".to_string())
         ));
     }
 
@@ -1230,7 +1413,7 @@ mod tests {
         let route = run_route(&r, "translate hello");
         assert!(matches!(
             route,
-            Route::Takeover { plugin_id, arg, .. } if plugin_id == "builtin.translate" && arg == "hello"
+            Route::Takeover { plugin_id, arg, .. } if plugin_id == "builtin.translate" && arg == ExecArg::UserExplicit("hello".to_string())
         ));
     }
 
@@ -1358,10 +1541,13 @@ mod tests {
         }
     }
 
-    fn run_route_with_snapshot(r: &RuleRouter, q: &str, snapshot: ContextSnapshot) -> Route {
+    fn run_route_with_snapshot(r: &RuleRouter, q: &str, _snapshot: ContextSnapshot) -> Route {
         let h = std::collections::HashMap::new();
-        let ctx = QueryContext { history: &h, snapshot: &snapshot };
-        tauri::async_runtime::block_on(r.route(q, &ctx))
+        // 0.8.4 §5.3.1：route 断 Awareness 依赖,snapshot 不再被读；hint=None。
+        // 函数签名保留(收 snapshot)以最小化调用点改动,但 snapshot 被忽略——
+        // 这些测试验的是 kw 行为(route 基于 kw resolve surface),不依赖 context 进 route。
+        // Surface Booster(hint boost)由 Task 7 单独加 run_route_with_hint 测试。
+        tauri::async_runtime::block_on(r.route(q, &h, None))
     }
 
     /// 0.8.3 §4.4：空 query 场景验 best_suggestion（Context 走 Ghost 不产 candidate）。
@@ -1539,7 +1725,7 @@ mod tests {
         assert!(matches!(
             route,
             Route::Takeover { plugin_id, arg, .. }
-                if plugin_id == "builtin.translate" && arg == "hello"
+                if plugin_id == "builtin.translate" && arg == ExecArg::UserExplicit("hello".to_string())
         ));
     }
 
@@ -1640,63 +1826,6 @@ mod tests {
     }
 
     #[test]
-    fn merge_hits_surface_max_and_arg_priority() {
-        // 单元测：keyword hit (Priority, arg="foo") + context hit (Priority, arg="bar")
-        //         → 合并后 surface=Priority，arg="foo"（kw 优先）
-        let kw = vec![Hit {
-            plugin_id: "p".into(),
-            arg: "foo".into(),
-            surface: Surface::Priority,
-            view: SurfaceView::List,
-            hint: None,
-            source: HitSource::Keyword,
-            when: None,
-            origin: None,
-        }];
-        let ctx = vec![Hit {
-            plugin_id: "p".into(),
-            arg: "bar".into(),
-            surface: Surface::Priority,
-            view: SurfaceView::List,
-            hint: None,
-            source: HitSource::Context,
-            when: Some(ContextTrigger::SelectionNonEmpty),
-            origin: Some(AwarenessSource::Selection),
-        }];
-        let merged = merge_hits(kw, ctx);
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].arg, "foo");
-        assert!(matches!(merged[0].surface, Surface::Priority));
-    }
-
-    #[test]
-    fn merge_hits_kw_arg_empty_takes_ctx_arg() {
-        // keyword 命中但 arg="" + context 命中同 plugin arg="bar" → 合并 arg="bar"
-        let kw = vec![Hit {
-            plugin_id: "p".into(),
-            arg: "".into(),
-            surface: Surface::Priority,
-            view: SurfaceView::List,
-            hint: None,
-            source: HitSource::Keyword,
-            when: None,
-            origin: None,
-        }];
-        let ctx = vec![Hit {
-            plugin_id: "p".into(),
-            arg: "bar".into(),
-            surface: Surface::Priority,
-            view: SurfaceView::List,
-            hint: None,
-            source: HitSource::Context,
-            when: Some(ContextTrigger::SelectionNonEmpty),
-            origin: Some(AwarenessSource::Selection),
-        }];
-        let merged = merge_hits(kw, ctx);
-        assert_eq!(merged[0].arg, "bar");
-    }
-
-    #[test]
     fn truncate_arg_short_unchanged() {
         assert_eq!(truncate_arg("hello"), "hello");
         assert_eq!(truncate_arg(""), "");
@@ -1750,15 +1879,16 @@ mod tests {
     }
 
     #[test]
-    fn suggestion_context_only_on_empty_query() {
-        // Context 分支：仅在空 query 触发（非空 query 不产 Context Suggestion）
+    fn suggestion_context_fallback_on_non_empty_query() {
+        // 0.8.4 §5.3.3：非空 query 无 Keyword 命中时 fallback 产 Context Ghost
         let r = translate_router_with_target("zh");
         let snap = snap_selection("hello world foo");
         // 空 query → Context Suggestion
         let sug = r.best_suggestion("", &snap, 0.7).expect("expected context");
         assert_eq!(sug.source, SuggestionSource::Context);
-        // 非空 query（无 keyword 命中）→ 没有 keyword 分支的候选,Context 也不产 → None
-        assert!(r.best_suggestion("chrome", &snap, 0.7).is_none());
+        // 非空 query（无 keyword 命中）+ 选中英文 → fallback Context Ghost（不抢首屏,Tab 采纳）
+        let sug = r.best_suggestion("chrome", &snap, 0.7).expect("expected context fallback");
+        assert_eq!(sug.source, SuggestionSource::Context);
     }
 
     #[test]
@@ -2036,7 +2166,7 @@ mod tests {
         match route {
             Route::Takeover { plugin_id, arg, .. } => {
                 assert_eq!(plugin_id, "builtin.translate");
-                assert_eq!(arg, "hello world foo");
+                assert_eq!(arg, ExecArg::UserExplicit("hello world foo".to_string()));
             }
             Route::Mixed { candidates } if !candidates.is_empty() => {
                 // 未升 Takeover 也算过——至少 candidate 命中就说明闭环没断
@@ -2057,12 +2187,117 @@ mod tests {
     }
 
     #[test]
-    fn suggestion_non_empty_query_does_not_produce_context() {
-        // 非空 query（未命中任何 keyword）+ 选中英文 → best_suggestion 应返回 None
-        // （0.8.3 决策：keyword/context 因空/非空互斥）
+    fn suggestion_non_empty_query_fallback_context() {
+        // 0.8.4 §5.3.3：非空 query（未命中 keyword）+ 选中英文 → fallback Context Ghost
+        // （翻转 0.8.3「空/非空互斥」决策——Suggestion 域覆盖非空 query,Awareness 不干扰 Routing）
         let r = translate_router_with_target("zh");
         let snap = snap_selection("hello world foo");
-        assert!(r.best_suggestion("chrome", &snap, 0.7).is_none());
+        let sug = r.best_suggestion("chrome", &snap, 0.7).expect("expected context fallback");
+        assert_eq!(sug.source, SuggestionSource::Context);
+    }
+
+    // ── 0.8.3 收尾 · 参数不隐式注入回归 ──────────────────────────
+    // 用户报告的 bug：输入 `fy` 未打参数,应用竟然调剪贴板内容作参数发起翻译。
+    // 根因：merge_hits_keyword_only 里 `existing.arg = ctx_hit.arg` 隐式代参。
+    // 修复：删掉这行,Context 只加 surface,不代参。
+
+    #[test]
+    fn merge_hits_does_not_inject_ctx_arg_when_kw_arg_empty() {
+        // 首拼 `fy` 命中「翻译」keyword（arg=""）,剪贴板有英文 context 命中 → merge
+        // 后 arg 仍应为空,不应被 ctx.arg 代填。
+        let r = RuleRouter::new(true);
+        r.add_keyword_rule("builtin.translate".into(), "翻译".into(), Surface::Auto, SurfaceView::List);
+        r.add_context_rule(
+            "builtin.translate".into(),
+            ContextTrigger::TextIsNonTargetLang {
+                source: crate::domain::context::trigger::TextSource::SelectionThenClipboard,
+            },
+            crate::domain::plugin::ManifestSurfaceHint::Priority,
+        );
+        r.set_setting_resolver(std::sync::Arc::new(
+            MockResolver::new().with("builtin.translate", "target_lang", "zh"),
+        ));
+        let snap = snap_clipboard("hello world foo bar");
+        let route = run_route_with_snapshot(&r, "fy", snap);
+        // 首拼弱信号 + 无参 → Priority（不 Takeover）,arg 保持空
+        if let Route::Mixed { candidates } = route {
+            let translate = candidates.iter().find(|c| c.plugin_id == "builtin.translate")
+                .expect("翻译插件应出现在候选");
+            assert!(translate.arg.is_none(), "参数不应被剪贴板隐式注入,应保持空");
+        } else {
+            panic!("expected Mixed route, got Takeover (Context 不该升 Takeover)");
+        }
+    }
+
+    #[test]
+    fn merge_hits_context_surface_boost_still_works() {
+        // Context 加 surface 的功能保留 —— 用户打 `翻译`（无参 Priority）+ 剪贴板英文,
+        // Context 命中同 plugin 应把 Priority 保住（surface_max 不会降级）,
+        // 但 arg 仍应保持空（用户没给参数）。
+        let r = RuleRouter::new(true);
+        r.add_keyword_rule("builtin.translate".into(), "翻译".into(), Surface::Auto, SurfaceView::List);
+        r.add_context_rule(
+            "builtin.translate".into(),
+            ContextTrigger::TextIsNonTargetLang {
+                source: crate::domain::context::trigger::TextSource::SelectionThenClipboard,
+            },
+            crate::domain::plugin::ManifestSurfaceHint::Priority,
+        );
+        r.set_setting_resolver(std::sync::Arc::new(
+            MockResolver::new().with("builtin.translate", "target_lang", "zh"),
+        ));
+        let snap = snap_clipboard("hello world foo bar");
+        let route = run_route_with_snapshot(&r, "翻译", snap);
+        if let Route::Mixed { candidates } = route {
+            let translate = candidates.iter().find(|c| c.plugin_id == "builtin.translate")
+                .expect("翻译插件应出现");
+            // 双源命中 → Priority 保住
+            assert!(matches!(translate.surface, Surface::Priority));
+            // arg 仍应为空（用户没输参数,Context 不代填）
+            assert!(translate.arg.is_none());
+        } else {
+            panic!("expected Mixed");
+        }
+    }
+
+    // ── 0.8.4 §5.3.1 Surface Booster（RankingHint）──────────────────
+
+    #[test]
+    fn ranking_hint_boosts_surface_without_touching_arg() {
+        // 0.8.4 §5.4 边界回归：RankingHint 只升 surface（排序）,不动 arg、不召回新候选。
+        // 构造首拼带参 kw hit（InitialsPrefix → Inline）,验 hint 把它 boost 到 Priority,
+        // 同时 arg 保持用户显式输入不变。
+        let r = RuleRouter::new(true);
+        r.add_keyword_rule(
+            "builtin.weather".into(),
+            "天气".into(),
+            Surface::Auto,
+            SurfaceView::List,
+        );
+        let h = std::collections::HashMap::new();
+
+        // 无 hint：tq 北京 → InitialsPrefix（首拼带参,弱信号）→ Inline,arg=北京
+        let candidates = match tauri::async_runtime::block_on(r.route("tq 北京", &h, None)) {
+            Route::Mixed { candidates } => candidates,
+            other => panic!("无 hint 应 Mixed,got {:?}", other),
+        };
+        assert_eq!(candidates.len(), 1, "无 hint 单 candidate");
+        assert!(matches!(candidates[0].surface, Surface::Inline), "无 hint 应 Inline");
+        assert_eq!(candidates[0].arg, ExecArg::UserExplicit("北京".to_string()));
+
+        // 有 hint boost weather：surface 升 Priority,arg 不变（不被 hint 动）,候选集不变
+        let hint = RankingHint { boost_plugin_id: "builtin.weather".into() };
+        let candidates = match tauri::async_runtime::block_on(r.route("tq 北京", &h, Some(&hint))) {
+            Route::Mixed { candidates } => candidates,
+            other => panic!("有 hint 应 Mixed,got {:?}", other),
+        };
+        assert_eq!(candidates.len(), 1, "hint 不召回新 candidate");
+        assert!(matches!(candidates[0].surface, Surface::Priority), "hint 应 boost 到 Priority");
+        assert_eq!(
+            candidates[0].arg,
+            ExecArg::UserExplicit("北京".to_string()),
+            "arg 不被 hint 动（参数注入必须显式）"
+        );
     }
 
     // ── 0.8.3 §4.9 origin 单测 ────────────────────────────────────

@@ -63,6 +63,13 @@ pub struct PluginQueryContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_title: Option<String>,
     /// 剪贴板文本（截断 200 字符）
+    ///
+    /// ⚠️ **deprecated（0.8.4 §5.3.5）**：这是允许插件违反四域的历史妥协
+    /// （插件直接读 Awareness）。1.0 前彻底移除——插件想要环境信息须走 Suggestion + 参数。
+    #[deprecated(
+        since = "0.8.4",
+        note = "插件直接读 Awareness 违反四域;0.9 前移除,改走 Suggestion + 参数"
+    )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clipboard_text: Option<String>,
 }
@@ -77,6 +84,7 @@ impl PluginQueryContext {
             ),
             None => (None, None),
         };
+        #[allow(deprecated)] // 0.8.4 §5.3.5:clipboard_text 已 deprecated,历史兼容至 1.0 前移除
         PluginQueryContext {
             lang: None, // 后续加配置项预留
             foreground_app,

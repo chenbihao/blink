@@ -17,6 +17,7 @@
 
 use serde::Serialize;
 
+use super::RankingHint;
 use crate::infra::platform::context::AwarenessSource;
 
 /// 建议来源。前端可按此分样式（Context 弱区分——更浅灰度或不同 icon）。
@@ -91,4 +92,9 @@ pub struct Suggestion {
     /// Keyword 类恒 None；序列化时 `#[skip_serializing_if]` 省略字段减少前端 undefined 判定。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<SuggestionOrigin>,
+    /// 0.8.4 §5.3.1 Surface Booster：Suggestion 域向 Routing 域的单向排序反馈。
+    /// Context 类 Suggestion 携带(命中的 plugin_id)；Keyword 类恒 None。
+    /// **不序列化给前端**（后端内部反馈通道,`skip_serializing`）。
+    #[serde(skip_serializing)]
+    pub ranking_hint: Option<RankingHint>,
 }
