@@ -514,6 +514,63 @@ async function loadContextConfig() {
   });
 }
 
+/**
+ * 加载并渲染 Context 触发规则列表（0.8.3 §4.6）。
+ *
+ * 从后端 `list_context_bindings` 命令拉所有已注册 binding + enabled 状态,
+ * 每条一个 setting-row + 开关。取消勾选后经 `set_disabled_context_bindings` 写回。
+ */
+async function loadContextBindings() {
+  const container = document.getElementById("context-bindings-container");
+  if (!container) return;
+
+  let bindings = [];
+  try {
+    bindings = await invoke("list_context_bindings");
+  } catch (e) {
+    console.error("list_context_bindings failed:", e);
+  }
+
+  if (!Array.isArray(bindings) || bindings.length === 0) {
+    container.innerHTML = `<div class="context-empty-hint">${t("context.bindings.empty")}</div>`;
+    return;
+  }
+
+  // 每条 binding 一个 setting-row（复用现有样式）
+  container.innerHTML = bindings
+    .map((b) => {
+      const triggerI18nKey = `context.trigger.${b.trigger_key}`;
+      const triggerLabel = t(triggerI18nKey) || b.trigger_key;
+      const arrowLabel = `${triggerLabel} → ${escapeHtml(b.target_label || b.target_id)}`;
+      return `<div class="setting-row" data-binding-key="${escapeHtml(b.key)}">
+        <label class="setting-label">${arrowLabel}</label>
+        <label class="switch">
+          <input type="checkbox" class="context-binding-toggle" data-key="${escapeHtml(b.key)}" ${b.enabled ? "checked" : ""} />
+          <span class="slider"></span>
+        </label>
+      </div>`;
+    })
+    .join("");
+
+  // 计算并保存 disabled 列表
+  async function save() {
+    const disabled = Array.from(
+      container.querySelectorAll(".context-binding-toggle"),
+    )
+      .filter((el) => !el.checked)
+      .map((el) => el.dataset.key);
+    try {
+      await invoke("set_disabled_context_bindings", { disabled });
+    } catch (e) {
+      console.error("set_disabled_context_bindings failed:", e);
+    }
+  }
+
+  container.querySelectorAll(".context-binding-toggle").forEach((el) => {
+    el.addEventListener("change", save);
+  });
+}
+
 /** 弹窗：从运行中的进程里选择敏感应用 */
 async function showAddProcessModal(container, existing, onAdd) {
   // 加载运行中进程
@@ -1550,6 +1607,7 @@ if (languageSelect) {
       applyI18n();
       loadNetworkConfig();
       loadContextConfig();
+      loadContextBindings();
       loadPlugins();
       loadStorageInfo();
       refreshEverythingBadgeText();
@@ -1899,6 +1957,7 @@ loadStorageInfo();
 loadLogInfo();
 loadNetworkConfig();
 loadContextConfig();
+loadContextBindings();
 loadPerfStats();
 loadAboutInfo();
 

@@ -70,6 +70,23 @@ pub fn compute_hint(
     query: &str,
     min_score: f64,
 ) -> Option<CompletionHint> {
+    compute_hint_scored(keywords, query, min_score).map(|(h, _)| h)
+}
+
+/// 带 fuzzy 分数的孪生 API（0.8.3 §4.13 P0-2）。
+///
+/// **动机**：`CompletionHint` 公开字段不含 score（避免序列化冗余给前端），
+/// 但 `best_suggestion` 内部竞争需要 `Suggestion.confidence`——直接从这里取。
+///
+/// 返回 `(hint, score)`：
+/// - `is_exact` 命中 → `score = 1.0`（精确等值天然满信心，压过任何 fuzzy）
+/// - `fuzzy` 命中 → 归一化后的原始 fuzzy 分（`[min_score, 1.0]`）
+/// - 其他 → None
+pub fn compute_hint_scored(
+    keywords: &[(String, String)],
+    query: &str,
+    min_score: f64,
+) -> Option<(CompletionHint, f64)> {
     // 空 query 不出 hint（避免 shown 事件后满屏"→ fanyi"）
     let trimmed = query.trim_start();
     if trimmed.is_empty() {
@@ -144,7 +161,7 @@ pub fn compute_hint(
         }
     }
 
-    let (_, target, is_exact) = best?;
+    let (raw_score, target, is_exact) = best?;
 
     // 精确等值 + 已带尾空格/参数 → 已进 Takeover，不出 hint。
     if is_exact && has_trailing {
@@ -154,11 +171,14 @@ pub fn compute_hint(
     // 精确等值 + 无尾内容 → Tab-only hint（display=""）。
     // replacement 用 keyword_part（保留用户原样的大小写/中文，仅追加空格）。
     if is_exact {
-        return Some(CompletionHint {
-            replacement: format!("{keyword_part} "),
-            display: String::new(),
-            prefix_len: query.len(),
-        });
+        return Some((
+            CompletionHint {
+                replacement: format!("{keyword_part} "),
+                display: String::new(),
+                prefix_len: query.len(),
+            },
+            1.0,
+        ));
     }
 
     // 常规 fuzzy hint：replacement 跟着命中的 target 走。
@@ -168,11 +188,14 @@ pub fn compute_hint(
         format!("{target} {arg_part}")
     };
 
-    Some(CompletionHint {
-        replacement,
-        display: target,
-        prefix_len: query.len(),
-    })
+    Some((
+        CompletionHint {
+            replacement,
+            display: target,
+            prefix_len: query.len(),
+        },
+        raw_score,
+    ))
 }
 
 /// 按空白拆分首段：`"fy hello world"` → `("fy", "hello world")`。

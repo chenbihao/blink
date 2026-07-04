@@ -5,7 +5,7 @@
 > 本卷原属 `product-design.md`(产品宪法),0.5 拆分为四卷;**保留原 § 节号**以维持交叉引用稳定(本卷 = 原 §1-3 + §9)。
 > 配套卷:`product-platform.md`(插件/意图/AI)、`product-context-future.md`(Context/隐私)、`product-principles.md`(取舍/规范/时间线)。
 > 技术实现见 `phases/`;`00-overview.md` = 原 MVP.md(总纲)。
-> 更新时间 2026-06-25
+> 更新时间 2026-07-04
 
 ---
 
@@ -20,6 +20,8 @@ Blink 不是「启动器(launcher)」,而是**Universal Action Layer**——感�
 | 原则 | 含义 | 来源 |
 |---|---|---|
 | **任何操作都比原来快** | 唤起 → 输入 → 执行,全程<1秒,比鼠标/菜单快 | MVP §1.1 |
+| **最小操作路径(更快 · 更丝滑 · 更智能)** | 每个新功能加入前先答"这条路径变短了吗"——**优先更快 → 再更丝滑 → 最后更智能**;弱意图信号 pull 不 push,永远保留 escape hatch | [product-principles §13](./product-principles.md#13-最小操作路径横切设计准则) |
+| **可辨识度优先** | UI 是功能面不是装饰面;中文不用斜体,主题走对比度过 AA 底线,弱信号不撑布局 | [product-principles §14](./product-principles.md#14-可辨识度与视觉一致性横切设计准则) |
 | **P0 至上** | 如果用户按快捷键后不能立即输入,其他所有功能都没有意义 | MVP §11 |
 | **MVP 验证基础交互,而非功能数量** | 0.1 只验证「右 Alt → 窗口 → Focus → 输入 → ESC 隐藏」这条链路;AI/Agent/工作流不做 | MVP §11 |
 | **配置化优先** | 可选行为(默认值用户可能想改的)做成配置项 + 合理默认,纯内部参数不暴露 | 0.2 §6 / CLAUDE.md §7 |

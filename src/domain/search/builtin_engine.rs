@@ -647,10 +647,7 @@ mod tests {
 
     /// 构造带 clipboard 的快照。
     fn snapshot_with_clipboard(text: &str) -> ContextSnapshot {
-        ContextSnapshot {
-            clipboard_text: Some(text.to_string()),
-            ..ContextSnapshot::default()
-        }
+        ContextSnapshot::with_clipboard(text)
     }
 
     #[test]

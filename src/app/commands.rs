@@ -54,8 +54,8 @@ pub fn hide_settings_window(app: tauri::AppHandle) {
 /// calc / 应用搜索 / 历史融合等逻辑已下沉到各 SearchEngine + SearchService(见 0.2 设计 §2)。
 /// `seq` 为前端递增请求序号,async 增量结果(blink://results)回带同一 seq 供前端校验。
 ///
-/// 0.8.1 §2.5：返回契约改为 `SearchResponse { entries, completionHint }`——
-/// 首拼命中/fuzzy 部分拼音时同步带回 ghost text 提示。
+/// 0.8.3 §4.3：返回契约 `SearchResponse { entries, suggestion }`——
+/// Keyword（0.8.1 输入补全）与 Context（0.8.3 环境感知）Ghost 走同一字段。
 #[tauri::command]
 pub async fn search_apps(
     query: String,
@@ -67,7 +67,7 @@ pub async fn search_apps(
     let results = service.search(&query, seq).await;
     tracing::debug!(
         count = results.entries.len(),
-        has_hint = results.completion_hint.is_some(),
+        has_suggestion = results.suggestion.is_some(),
         %query,
         "search_apps: 返回结果"
     );
@@ -86,8 +86,14 @@ pub async fn search_apps(
             "搜索结果项"
         );
     }
-    if let Some(hint) = &results.completion_hint {
-        tracing::debug!(display = %hint.display, replacement = %hint.replacement, "ghost hint");
+    if let Some(sug) = &results.suggestion {
+        tracing::debug!(
+            display = %sug.display,
+            replacement = %sug.replacement,
+            source = ?sug.source,
+            confidence = sug.confidence,
+            "suggestion"
+        );
     }
     results
 }
@@ -336,6 +342,65 @@ pub async fn update_autosuggest_config(
         ss.update_autosuggest_config(enabled, min_score);
     }
     tracing::debug!(enabled, min_score, "autosuggest 配置已更新");
+    Ok(())
+}
+
+/// 列出所有已注册的 context binding + 当前 enabled 状态（0.8.3 §4.6 设置页面板）。
+///
+/// 每条 binding 描述：`{ key, target_id, trigger_key, target_label, trigger_label, enabled }`。
+/// - `key`：`{target_id}::{trigger_key}`，作 disable 列表存储项
+/// - `target_label`：从 PluginManifest.name 本地化（缺失时降级 target_id）
+/// - `trigger_label`：显示名（如「文本非目标语言 → 翻译」），i18n key（前端翻）
+/// - `enabled`：用户配置的启用状态
+#[tauri::command]
+pub async fn list_context_bindings(app: tauri::AppHandle) -> Vec<serde_json::Value> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    let config = crate::app::config::get_config(&pool).await;
+    let disabled: std::collections::HashSet<String> =
+        config.disabled_context_bindings.iter().cloned().collect();
+    let lang = config.language.clone();
+
+    // 从 PluginEngine 拉所有插件的 manifest.triggers 里的 Context 变体
+    let Some(pe) = app.try_state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>() else {
+        return Vec::new();
+    };
+    let mut bindings = Vec::new();
+    for manifest in pe.list_manifests() {
+        for trigger in &manifest.triggers {
+            if let crate::domain::plugin::PluginTrigger::Context { when, .. } = trigger {
+                let ctx_when: crate::domain::context::trigger::ContextTrigger = (*when).into();
+                let trigger_key = crate::domain::intent::trigger_key(&ctx_when);
+                let key = crate::domain::intent::binding_key(&manifest.id, trigger_key);
+                let target_label = manifest.name.resolve(&lang);
+                let enabled = !disabled.contains(&key);
+                bindings.push(serde_json::json!({
+                    "key": key,
+                    "target_id": manifest.id,
+                    "trigger_key": trigger_key,
+                    "target_label": target_label,
+                    "trigger_label": trigger_key, // 前端按 key 翻译（i18n）
+                    "enabled": enabled,
+                }));
+            }
+        }
+    }
+    bindings
+}
+
+/// 更新 context binding disable 列表（0.8.3 §4.6 设置页面板）。
+///
+/// 写 SQLite + 触发 SearchService（→ RuleRouter）热更新——下次搜索立即生效。
+#[tauri::command]
+pub async fn set_disabled_context_bindings(
+    app: tauri::AppHandle,
+    disabled: Vec<String>,
+) -> Result<(), String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::app::config::update_disabled_context_bindings(&pool, disabled.clone()).await?;
+    if let Some(ss) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
+        ss.update_disabled_context_bindings(disabled);
+    }
+    tracing::debug!("context binding 禁用列表已更新");
     Ok(())
 }
 

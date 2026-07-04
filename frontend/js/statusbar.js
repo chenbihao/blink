@@ -68,6 +68,21 @@ function buildLeft(active, hasHint) {
     } else {
       left.appendChild(renderHint(t("statusbar.autosuggest_enter"), params));
     }
+    // 0.8.3 §4.9：Context Suggestion 追加 origin 提示（· 来自划词 / · 来自剪贴板）,
+    // Keyword 无 origin → currentOrigin() 返回 null,不追加。
+    const origin = ghost.currentOrigin();
+    if (origin) {
+      const originKey = `suggestion.origin.${origin}`;
+      const originText = t(originKey);
+      // 降级保护：t() 未命中会返回 key 本身,不显示"suggestion.origin.selection"这种字面串
+      if (originText && originText !== originKey) {
+        left.appendChild(document.createTextNode(" · "));
+        const originEl = document.createElement("span");
+        originEl.className = "hint-origin";
+        originEl.textContent = originText;
+        left.appendChild(originEl);
+      }
+    }
     return left;
   }
 

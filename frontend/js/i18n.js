@@ -21,7 +21,7 @@ const DICT = {
     "tab.engines": "引擎",
     "tab.plugins": "插件",
     "tab.network": "网络",
-    "tab.context": "上下文",
+    "tab.context": "上下文智能感知",
     "tab.storage": "存储",
     "tab.debug": "调试",
     "tab.about": "关于",
@@ -31,7 +31,7 @@ const DICT = {
     "panel.hotkey": "快捷键",
     "panel.plugins": "插件管理",
     "panel.network": "网络配置",
-    "panel.context": "环境感知",
+    "panel.context": "上下文智能感知",
     "panel.storage": "存储",
     "panel.debug": "调试",
     "panel.about": "关于",
@@ -243,6 +243,15 @@ const DICT = {
     // ── 上下文 Tab（动态渲染）──
     "context.title": "环境感知",
     "context.desc": "唤起时自动采集前台应用、剪贴板等上下文，用于搜索增强",
+    "context.autosuggest.title": "输入补全",
+    "context.bindings.title": "Context 触发规则",
+    "context.bindings.hint": "环境自动触发的建议（选中英文→翻译、剪贴板 URL→打开链接 等）；关闭后 Ghost 不再出现",
+    "context.bindings.empty": "暂无已注册的 Context 触发规则",
+    "context.privacy.title": "采集与敏感应用",
+    "context.trigger.text_is_non_target_lang": "文本非目标语言",
+    "context.trigger.clipboard_is_url": "剪贴板是 URL",
+    "context.trigger.clipboard_is_file_path": "剪贴板是文件路径",
+    "context.trigger.selection_non_empty": "选区非空",
     "context.clipboard": "采集剪贴板文本",
     "context.selection": "划词感知（选中文本抓取）",
     "context.selection.hint": "鼠标划选文本后自动抓取，唤起 Blink 时作为上下文使用。局限：仅 Windows；依赖应用支持 UIA TextPattern，浏览器（Chrome/Edge/Firefox）、Office、VS Code、原生 Win32 支持较好，部分 Electron 应用（如新版 QQ/微信/Discord）、终端、游戏可能抓不到；无选区时可先复制文本，Blink 会自动读剪贴板。",
@@ -319,6 +328,9 @@ const DICT = {
     // 占位符 {key} 由 statusbar 传入具体键帽 Element（Tab 或 ArrowRight，视用户配置）
     "statusbar.autosuggest_accept": "按 {key} 接受补全 → {target}",
     "statusbar.autosuggest_enter": "按 {key} 进入参数模式",
+    // 0.8.3 §4.9：Context Suggestion 来源提示,追加在 accept 文案之后（· 分隔）
+    "suggestion.origin.selection": "来自划词",
+    "suggestion.origin.clipboard": "来自剪贴板",
 
     // ── 主窗口：搜索框 ──
     "search.placeholder": "输入应用名、计算…",
@@ -335,7 +347,7 @@ const DICT = {
     "tab.engines": "Engines",
     "tab.plugins": "Plugins",
     "tab.network": "Network",
-    "tab.context": "Context",
+    "tab.context": "Context Awareness",
     "tab.storage": "Storage",
     "tab.debug": "Debug",
     "tab.about": "About",
@@ -555,6 +567,15 @@ const DICT = {
     // ── Context tab (dynamic) ──
     "context.title": "Context Awareness",
     "context.desc": "Auto-capture foreground app, clipboard, etc. on summon for search boost",
+    "context.autosuggest.title": "Input Autosuggestion",
+    "context.bindings.title": "Context Triggers",
+    "context.bindings.hint": "Suggestions triggered by environment (select English→translate, clipboard URL→open link, etc.); disabling hides the Ghost",
+    "context.bindings.empty": "No registered Context triggers",
+    "context.privacy.title": "Capture & Sensitive Apps",
+    "context.trigger.text_is_non_target_lang": "Text is non-target language",
+    "context.trigger.clipboard_is_url": "Clipboard is URL",
+    "context.trigger.clipboard_is_file_path": "Clipboard is file path",
+    "context.trigger.selection_non_empty": "Selection non-empty",
     "context.clipboard": "Capture clipboard text",
     "context.selection": "Selection awareness (grab highlighted text)",
     "context.selection.hint": "Auto-captures text you highlight with the mouse and passes it as context when you summon Blink. Limitations: Windows only; requires apps to support UIA TextPattern — browsers (Chrome/Edge/Firefox), Office, VS Code and native Win32 work well; some Electron apps (newer QQ/WeChat/Discord), terminals and games may fail. If no selection is grabbed, just copy the text — Blink will read your clipboard.",
@@ -629,6 +650,9 @@ const DICT = {
     // {key} = kbd Element for user-configured accept key, injected by statusbar）
     "statusbar.autosuggest_accept": "Press {key} to accept → {target}",
     "statusbar.autosuggest_enter": "Press {key} to enter parameters",
+    // 0.8.3 §4.9: Context Suggestion origin hint, appended after accept text (· separator)
+    "suggestion.origin.selection": "from selection",
+    "suggestion.origin.clipboard": "from clipboard",
 
     // ── Main window: search box ──
     "search.placeholder": "Type app name, calculate…",

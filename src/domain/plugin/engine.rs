@@ -184,7 +184,9 @@ impl PluginEngine {
 
     // ── 配置管理(0.5.1)──────────────────────────────────────────────────────
 
-    /// 启动时从 DB 加载所有插件配置;不存在则写默认 {enabled:true, settings:null}。
+    /// 启动时从 DB 加载所有插件配置;不存在则写默认。
+    /// 默认 `enabled` 走 `manifest.default_enabled`（缺省 true，翻译等"需配置才能用"的
+    /// 插件声明为 false）；默认 `settings` 走 `manifest.default_settings()`（无 schema 则 null）。
     /// main.rs 在构造后、注入 SearchService 前 `block_on` 调用。
     pub async fn init_configs(&self) {
         let mut configs = self.configs.write().unwrap();
@@ -195,11 +197,20 @@ impl PluginEngine {
                     configs.insert(id.to_string(), cfg);
                 }
                 None => {
-                    // 默认 settings 从 manifest.settings_schema 生成(无 schema 则 null)
+                    // 首装：从 manifest 生成默认配置。
+                    // - settings 走 settings_schema
+                    // - enabled 走 manifest.default_enabled（缺省 true；需配置密钥
+                    //   才能用的插件如翻译声明为 false，避免装完就撞到无法工作的入口）
+                    let manifest = plugin.manifest();
                     let mut default = crate::app::config::PluginConfig::default();
-                    default.settings = plugin.manifest().default_settings();
+                    default.settings = manifest.default_settings();
+                    default.enabled = manifest.default_enabled;
                     match crate::app::config::set_plugin_config(&self.pool, id, &default).await {
-                        Ok(()) => tracing::info!(plugin = %id, "初始化插件配置(默认)"),
+                        Ok(()) => tracing::info!(
+                            plugin = %id,
+                            enabled = default.enabled,
+                            "初始化插件配置(默认)",
+                        ),
                         Err(e) => tracing::warn!(plugin = %id, error = %e, "写默认插件配置失败"),
                     }
                     configs.insert(id.to_string(), default);
@@ -254,6 +265,16 @@ impl PluginEngine {
             .iter()
             .find(|p| p.id() == id)
             .map(|p| p.manifest().clone())
+    }
+
+    /// 列出所有已加载插件的 manifest（0.8.3 §4.6 设置页 context binding 面板用）。
+    ///
+    /// 用于设置页遍历 `manifest.triggers` 收集所有 `PluginTrigger::Context`。
+    pub fn list_manifests(&self) -> Vec<super::PluginManifest> {
+        self.plugins
+            .iter()
+            .map(|p| p.manifest().clone())
+            .collect()
     }
 
     /// 获取插件的显示名称,回退为 plugin_id。
@@ -314,7 +335,9 @@ impl PluginEngine {
     }
 }
 
-/// `PluginSettingResolver` 实现（0.8.2 §3.4.1）——把 settings 字段字符串读出来给 `RuleRouter` 用。
+/// `PluginSettingResolver` 实现（0.8.2 §3.4.1 + 0.8.3 §4.13 扩展）——把 settings 字段
+/// 字符串读出来给 `RuleRouter` 用；0.8.3 起同时暴露 `is_enabled` 供 Context Suggestion
+/// 产出前查启用态（禁用联动决策）。
 ///
 /// 读取路径：`configs[id].settings[key]`，只接受 `Value::String`。禁用插件（`enabled=false`）
 /// 仍返回 setting——`RuleRouter` 到时按需自行过滤；此层职责仅"读值"。
@@ -324,6 +347,20 @@ impl super::PluginSettingResolver for PluginEngine {
             .get(key)?
             .as_str()
             .map(|s| s.to_string())
+    }
+
+    /// 委托到自身 `is_enabled`（0.8.3 §4.13 P1「运行时查启用态」）。
+    fn is_enabled(&self, plugin_id: &str) -> bool {
+        PluginEngine::is_enabled(self, plugin_id)
+    }
+
+    /// 读 manifest.name.resolve(lang) 作 Ghost display（0.8.3 §4.13 P0 修订）。
+    /// 未加载的插件返回 None,调用方 fallback 到 id 末段。
+    fn get_display_name(&self, plugin_id: &str, lang: &str) -> Option<String> {
+        self.plugins
+            .iter()
+            .find(|p| p.manifest().id == plugin_id)
+            .map(|p| p.manifest().name.resolve(lang))
     }
 }
 

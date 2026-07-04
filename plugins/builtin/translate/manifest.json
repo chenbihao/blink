@@ -5,6 +5,7 @@
   "version": "0.2.0",
   "description": { "zh": "多引擎文本翻译：腾讯翻译/阿里翻译/百度翻译/有道智云/DeepL", "en": "Multi-engine translation: Tencent / Alibaba / Baidu / Youdao / DeepL" },
   "builtin": true,
+  "default_enabled": false,
   "runtime": {
     "type": "python",
     "protocol": "jsonl",

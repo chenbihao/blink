@@ -267,6 +267,12 @@ pub struct AppConfig {
     /// 前端消费；后端仅持久化 + 广播回前端。可选值当前仅 `"Tab"` / `"ArrowRight"`。
     #[serde(default = "default_autosuggest_tab_key")]
     pub autosuggest_tab_key: String,
+    /// 用户禁用的 context binding key 列表（0.8.3 §4.6）。
+    /// key 格式 `{target_id}::{trigger_key}`（如 `"builtin.translate::text_is_non_target_lang"`）。
+    /// 存 binding key 字符串，`RuleRouter::match_context_hits` 命中即跳过。
+    /// 默认空——所有 binding 默认启用；用户在「上下文智能感知」面板取消后追加。
+    #[serde(default)]
+    pub disabled_context_bindings: Vec<String>,
 }
 
 impl Default for AppConfig {
@@ -291,6 +297,7 @@ impl Default for AppConfig {
             autosuggest_enabled: true,
             autosuggest_min_score: 0.7,
             autosuggest_tab_key: "Tab".to_string(),
+            disabled_context_bindings: Vec::new(),
         }
     }
 }
@@ -451,6 +458,31 @@ pub async fn update_autosuggest_config(
     config.autosuggest_enabled = enabled;
     config.autosuggest_min_score = min_score;
     config.autosuggest_tab_key = tab_key;
+    save_config(pool, &config).await
+}
+
+// ── Context binding disable 列表（0.8.3 §4.6）──────────────────────────────────
+
+/// 获取当前 disable 的 context binding key 列表（快照读）。
+///
+/// 设置页初始化时读一次，启动时读一次注入到 SearchService → RuleRouter 内存快照。
+pub async fn get_disabled_context_bindings(pool: &SqlitePool) -> Vec<String> {
+    get_config(pool).await.disabled_context_bindings
+}
+
+/// 更新 context binding disable 列表（设置页勾选后调用）。**幂等**：内部去重排序。
+///
+/// 命令层调完后应同步调用 `SearchService::update_disabled_context_bindings` 让搜索
+/// 热路径立即生效。
+pub async fn update_disabled_context_bindings(
+    pool: &SqlitePool,
+    disabled: Vec<String>,
+) -> Result<(), String> {
+    let mut normalized = disabled;
+    normalized.sort();
+    normalized.dedup();
+    let mut config = get_config(pool).await;
+    config.disabled_context_bindings = normalized;
     save_config(pool, &config).await
 }
 

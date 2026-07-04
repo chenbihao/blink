@@ -14,28 +14,34 @@ use sqlx::SqlitePool;
 use tauri::{AppHandle, Emitter};
 
 use crate::infra::platform::context::ContextSnapshot;
-use crate::domain::intent::{Candidate, CompletionHint, IntentRouter, Route, Surface};
+use crate::domain::intent::{Candidate, IntentRouter, Route, Suggestion, Surface};
 use crate::domain::plugin::PluginEngine;
 
 use super::engine::{Lane, QueryContext, SearchEngine, SearchItem};
 use super::scorer::{boost_priority, placeholder_score, source_rank};
 use super::{Action, AppEntry};
 
-/// 同步搜索返回契约（0.8.1 §2.5）——`SearchService::search` / `search_apps` command 出口。
+/// 同步搜索返回契约（0.8.3 §4.3）——`SearchService::search` / `search_apps` command 出口。
 ///
-/// 在 `Vec<AppEntry>` 之外挂 `completion_hint` 独立通道：
-/// - 首拼命中（`fy` → `fanyi`）或 fuzzy 部分拼音（`fan hello` → `fanyi hello`）时给出。
-/// - 用户按 Tab 后前端把输入替换为 `hint.replacement`，触发下一轮搜索走完整 Takeover。
-/// - `blink://results` 增量事件不带 hint（同步首次返回已给过）。
+/// 在 `Vec<AppEntry>` 之外挂 `suggestion` 独立通道（0.8.3 起替代 0.8.1 的 `completion_hint`）：
+/// - Keyword 类：首拼命中（`fy` → `fanyi`）或 fuzzy 部分拼音（`fan hello` → `fanyi hello`）
+/// - Context 类：空 query + 选中英文 → 翻译 Ghost（Tab 采纳）
+///
+/// 用户按 Tab 后前端把输入替换为 `suggestion.replacement`，触发下一轮搜索。
+/// `blink://results` 增量事件不带 suggestion（同步首次返回已给过）。
 ///
 /// **契约说明**：这是内部 API（前后端锁版本，同版本编译）。`entries` 必填；rename 会导致
-/// 前端 crash。序列化为 camelCase：`completion_hint` → `completionHint`（前端 `resp.completionHint`）。
+/// 前端 crash。序列化为 camelCase：`suggestion` 直接 `suggestion`，`SuggestionSource` 序列化为
+/// camelCase 字符串（`keyword` / `context`）。
+///
+/// **兼容说明**：0.8.1 的 `completion_hint` 字段已删除；0.8.2 的 `fetchContextSuggestions` 前端通道
+/// 也已废弃（见 §4.13 P0-1）——空 query 现在也走 search 接口拿 suggestion。
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchResponse {
     pub entries: Vec<AppEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub completion_hint: Option<CompletionHint>,
+    pub suggestion: Option<Suggestion>,
 }
 
 /// async lane 增量结果的事件 payload(emit "blink://results")。
@@ -132,10 +138,14 @@ impl SearchService {
     /// 写回选中文本（后台 UIA 抓取完成后调用，0.8.0 §1.1）。
     ///
     /// 与 update_snapshot 分离：选区抓取是异步的（spawn_blocking），晚于快照写入，
-    /// 抓到后单独回填 selected_text，避免覆盖整份快照丢掉同时刻采的剪贴板/前台信息。
+    /// 抓到后单独回填选区文本，避免覆盖整份快照丢掉同时刻采的剪贴板/前台信息。
+    ///
+    /// 0.8.3 收尾：走 `AwarenessSnapshot::upsert_text` —— 找到 Selection 项就替换,
+    /// 否则 append；None 时删除同 source 项。
     pub fn update_selected_text(&self, text: Option<String>) {
+        use crate::infra::platform::context::AwarenessSource;
         let mut guard = self.snapshot.write().unwrap();
-        guard.selected_text = text;
+        guard.upsert_text(AwarenessSource::Selection, text);
     }
 
     /// 更新最大结果数（update_general_config 时调用）。热更新，搜索热路径零 IO。
@@ -162,6 +172,16 @@ impl SearchService {
         let mut guard = self.autosuggest.write().unwrap();
         *guard = AutosuggestState { enabled, min_score };
         tracing::debug!(enabled, min_score, "Autosuggest 配置已热更新");
+    }
+
+    /// 更新 context binding 禁用列表（0.8.3 §4.6）。
+    ///
+    /// 启动时读一次 `AppConfig.disabled_context_bindings` 注入；设置页勾选/取消后经
+    /// 命令层调此方法。转发至 `RuleRouter::apply_context_disable_list`——`RuleRouter` 内部
+    /// 用 `HashSet` 存 key，`match_context_hits` 命中即跳过。
+    pub fn update_disabled_context_bindings(&self, keys: Vec<String>) {
+        self.router.apply_context_disable_list(keys);
+        tracing::debug!("SearchService context binding 禁用列表已转发至 router");
     }
 
     /// 更新界面语言快照（0.8.1）。启动时读一次 AppConfig.language 注入；
@@ -251,22 +271,25 @@ impl SearchService {
 
         // 空 query 也要走 router.route() —— 让 Context 规则（0.8.2 §3.4）参与召回。
         // 老逻辑（0.8.0/0.8.1）此处短路，导致翻译 Context 触发在空 query 场景永远不生效。
-        // route() 里 keyword/regex 天然不命中空 query（`starts_with("kw ")` 不满足），
-        // 只有 Context 规则会产出 candidates，与 BuiltinEngine 的 Context-only 分支并存。
+        // 0.8.3 §4.13 P0-3：空 query 时 route() 内部已改为「Context 不产独立 candidate」——
+        // 只保留 kw+ctx merge_hits 加分（非空 query 才会生效）。空 query 场景的翻译 Ghost
+        // 走 best_suggestion 单独通道。
         let intent_ctx = crate::domain::intent::QueryContext { history: &history, snapshot: &snapshot };
         let route = self.router.route(q, &intent_ctx).await;
         // 过滤不符合前置条件的路由(禁用插件 + 参数过短),避免占位符死态。
         let route = self.filter_route(route);
 
-        // Autosuggestion（0.8.1 §2.5）：enabled 关闭时直接 None 短路。
-        // 空 query 恒无 ghost hint（设计 §2.4，避免刚 shown 满屏灰字）。
-        let completion_hint = if q.is_empty() {
-            None
-        } else {
+        // Suggestion（0.8.3 §4.4）：统一走 best_suggestion 主入口，空/非空 query 各自路径由
+        // router 内部分派（空→Context / 非空→Keyword）。enabled 关闭时短路 None。
+        //
+        // **P0 修订项**：0.8.1 老 `completion_hint` 字段已废；`best_suggestion` 内部
+        // 直接从 fuzzy 打分层拿 confidence（`compute_hint_scored`），不再走 `CompletionHint.score`
+        // 那条不存在的公开字段（§4.13 P0-2）。
+        let suggestion = {
             let cfg = *self.autosuggest.read().unwrap();
             if cfg.enabled {
                 // query 用未 trim 的原文（保尾空格）；上层 `q` 已被 trim。
-                self.router.suggest_completion(query, cfg.min_score)
+                self.router.best_suggestion(query, &snapshot, cfg.min_score)
             } else {
                 None
             }
@@ -387,7 +410,7 @@ impl SearchService {
             }
         };
 
-        SearchResponse { entries, completion_hint }
+        SearchResponse { entries, suggestion }
     }
 
     /// 过滤不满足前置条件的路由命中(0.5.1):禁用插件 + 参数过短。

@@ -8,7 +8,7 @@
 //! / `needs_translation`）仍在 `probe.rs`，本模块只做「触发条件 → snapshot 命中判定」
 //! 的组织工作。
 
-use crate::infra::platform::context::ContextSnapshot;
+use crate::infra::platform::context::{AwarenessSnapshot, AwarenessSource, AwarenessView};
 
 use super::probe;
 
@@ -21,7 +21,7 @@ use super::probe;
 ///
 /// 未加 `ClipboardIsCode` / `ForegroundIs` 等——按 [[configurable-by-default]] 精神，
 /// 有真实消费者再加，避免「永远返回 false 的诱饵」。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextTrigger {
     /// 剪贴板文本是 URL（http/https/file/ftp）
     ClipboardIsUrl,
@@ -47,23 +47,19 @@ pub enum TextSource {
 }
 
 impl TextSource {
-    /// 按当前策略从 snapshot 抽取文本。空/None 返回 None。
-    pub fn extract<'a>(&self, snapshot: &'a ContextSnapshot) -> Option<&'a str> {
+    /// 按当前策略从 snapshot 抽取带 source 标签的文本视图（0.8.3 收尾 · awareness）。
+    ///
+    /// **关键契约**：返回 `AwarenessView` 而不是 `&str` —— 调用方拿到 `(source, text)`
+    /// 一起,避免 intent 层事后推断 origin。
+    ///
+    /// 空/None（trim 后无内容）返回 None。`SelectionThenClipboard` 优先选区,失败
+    /// 回退剪贴板 —— 通过 `AwarenessSnapshot::find_text` 的单一入口保证 trim 判定
+    /// 与后续任何消费方一致。
+    pub fn extract<'a>(&self, snapshot: &'a AwarenessSnapshot) -> Option<AwarenessView<'a>> {
         match self {
-            TextSource::SelectionThenClipboard => {
-                let sel = snapshot
-                    .selected_text
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty());
-                sel.or_else(|| {
-                    snapshot
-                        .clipboard_text
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                })
-            }
+            TextSource::SelectionThenClipboard => snapshot
+                .find_text(AwarenessSource::Selection)
+                .or_else(|| snapshot.find_text(AwarenessSource::Clipboard)),
         }
     }
 }
@@ -83,15 +79,17 @@ pub enum ParamSource {
 impl ParamSource {
     /// 按 source 从 snapshot 抽取字符串参数（trim 后空视为 None）。
     /// 内置动作的 OpenUrl/OpenPath/RevealInExplorer 用此。
-    pub fn extract(&self, snapshot: &ContextSnapshot) -> Option<serde_json::Value> {
-        let raw = match self {
+    ///
+    /// 0.8.3 收尾：改走 `AwarenessSnapshot::find_text` 统一 trim 判定。
+    pub fn extract(&self, snapshot: &AwarenessSnapshot) -> Option<serde_json::Value> {
+        let source = match self {
             ParamSource::None => return None,
-            ParamSource::Clipboard => snapshot.clipboard_text.as_deref(),
-            ParamSource::Selection => snapshot.selected_text.as_deref(),
+            ParamSource::Clipboard => AwarenessSource::Clipboard,
+            ParamSource::Selection => AwarenessSource::Selection,
         };
-        raw.map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| serde_json::Value::String(s.to_string()))
+        snapshot
+            .find_text(source)
+            .map(|v| serde_json::Value::String(v.text.to_string()))
     }
 }
 
@@ -118,31 +116,29 @@ impl From<crate::domain::plugin::ManifestContextWhen> for ContextTrigger {
 /// `TextIsNonTargetLang` 需要 target 语言参数，由调用方（`RuleRouter` /
 /// `BuiltinEngine`）在调用前解析好；本函数只做「已解析 target → 命中吗」。
 /// target 为 `None` 时不命中；`"auto"` 由 `probe::needs_translation` 内部兜底 false。
+///
+/// 0.8.3 收尾：字段访问全部改走 `AwarenessSnapshot::find_text`,与 origin 传导同源。
 pub fn is_hit(
     trigger: &ContextTrigger,
-    snapshot: &ContextSnapshot,
+    snapshot: &AwarenessSnapshot,
     target: Option<&str>,
 ) -> bool {
     match trigger {
         ContextTrigger::ClipboardIsUrl => snapshot
-            .clipboard_text
-            .as_deref()
-            .map(probe::is_url)
+            .find_text(AwarenessSource::Clipboard)
+            .map(|v| probe::is_url(v.text))
             .unwrap_or(false),
         ContextTrigger::ClipboardIsFilePath => snapshot
-            .clipboard_text
-            .as_deref()
-            .map(probe::is_file_path)
+            .find_text(AwarenessSource::Clipboard)
+            .map(|v| probe::is_file_path(v.text))
             .unwrap_or(false),
         ContextTrigger::SelectionNonEmpty => snapshot
-            .selected_text
-            .as_deref()
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or(false),
+            .find_text(AwarenessSource::Selection)
+            .is_some(),
         ContextTrigger::TextIsNonTargetLang { source } => {
-            let Some(text) = source.extract(snapshot) else { return false };
+            let Some(view) = source.extract(snapshot) else { return false };
             let Some(target) = target else { return false };
-            probe::needs_translation(text, target)
+            probe::needs_translation(view.text, target)
         }
     }
 }
@@ -152,7 +148,7 @@ pub fn is_hit(
 /// **参数**：`target` 仅供 `TextIsNonTargetLang` 使用；其他 trigger 忽略。
 pub fn any_hit(
     triggers: &[ContextTrigger],
-    snapshot: &ContextSnapshot,
+    snapshot: &AwarenessSnapshot,
     target: Option<&str>,
 ) -> bool {
     if triggers.is_empty() {
@@ -165,51 +161,48 @@ pub fn any_hit(
 mod tests {
     use super::*;
 
-    fn snap_with_clipboard(text: &str) -> ContextSnapshot {
-        ContextSnapshot {
-            clipboard_text: Some(text.to_string()),
-            ..ContextSnapshot::default()
-        }
-    }
+    // 0.8.3 收尾：snap 构造走 AwarenessSnapshot::with_selection / with_clipboard helper。
+    // 老的 `snap_with_clipboard` / `snap_with_selection` 函数删除,同名 helper 语义等价但
+    // 内部走 upsert_text —— 保证测试也在验共享判定入口。
 
-    fn snap_with_selection(text: &str) -> ContextSnapshot {
-        ContextSnapshot {
-            selected_text: Some(text.to_string()),
-            ..ContextSnapshot::default()
-        }
+    fn snap_with_both(sel: &str, clip: &str) -> AwarenessSnapshot {
+        let mut s = AwarenessSnapshot::default();
+        s.upsert_text(AwarenessSource::Selection, Some(sel.to_string()));
+        s.upsert_text(AwarenessSource::Clipboard, Some(clip.to_string()));
+        s
     }
 
     #[test]
     fn any_hit_empty_slice_is_false() {
-        let s = ContextSnapshot::default();
+        let s = AwarenessSnapshot::default();
         assert!(!any_hit(&[], &s, None));
     }
 
     #[test]
     fn clipboard_is_url_hit() {
-        let s = snap_with_clipboard("https://example.com");
+        let s = AwarenessSnapshot::with_clipboard("https://example.com");
         assert!(is_hit(&ContextTrigger::ClipboardIsUrl, &s, None));
         assert!(!is_hit(&ContextTrigger::ClipboardIsFilePath, &s, None));
     }
 
     #[test]
     fn clipboard_is_file_path_hit() {
-        let s = snap_with_clipboard(r"C:\Users\a\file.txt");
+        let s = AwarenessSnapshot::with_clipboard(r"C:\Users\a\file.txt");
         assert!(is_hit(&ContextTrigger::ClipboardIsFilePath, &s, None));
         assert!(!is_hit(&ContextTrigger::ClipboardIsUrl, &s, None));
     }
 
     #[test]
     fn selection_non_empty_hit_after_trim() {
-        let s = snap_with_selection("   hello   ");
+        let s = AwarenessSnapshot::with_selection("   hello   ");
         assert!(is_hit(&ContextTrigger::SelectionNonEmpty, &s, None));
-        let s2 = snap_with_selection("    ");
+        let s2 = AwarenessSnapshot::with_selection("    ");
         assert!(!is_hit(&ContextTrigger::SelectionNonEmpty, &s2, None));
     }
 
     #[test]
     fn any_hit_or_semantics() {
-        let s = snap_with_clipboard("https://example.com");
+        let s = AwarenessSnapshot::with_clipboard("https://example.com");
         assert!(any_hit(
             &[
                 ContextTrigger::SelectionNonEmpty,
@@ -223,33 +216,30 @@ mod tests {
 
     #[test]
     fn text_source_extract_prefers_selection() {
-        let s = ContextSnapshot {
-            selected_text: Some("SEL".to_string()),
-            clipboard_text: Some("CLIP".to_string()),
-            ..ContextSnapshot::default()
-        };
-        assert_eq!(TextSource::SelectionThenClipboard.extract(&s), Some("SEL"));
+        let s = snap_with_both("SEL", "CLIP");
+        let view = TextSource::SelectionThenClipboard.extract(&s).unwrap();
+        assert_eq!(view.text, "SEL");
+        assert_eq!(view.source, AwarenessSource::Selection);
     }
 
     #[test]
     fn text_source_fallback_to_clipboard() {
-        let s = ContextSnapshot {
-            selected_text: Some("   ".to_string()),
-            clipboard_text: Some("CLIP".to_string()),
-            ..ContextSnapshot::default()
-        };
-        assert_eq!(TextSource::SelectionThenClipboard.extract(&s), Some("CLIP"));
+        let s = snap_with_both("   ", "CLIP");
+        let view = TextSource::SelectionThenClipboard.extract(&s).unwrap();
+        assert_eq!(view.text, "CLIP");
+        // 关键回归：origin 从数据侧带来,不用推断
+        assert_eq!(view.source, AwarenessSource::Clipboard);
     }
 
     #[test]
     fn text_source_none_when_both_empty() {
-        let s = ContextSnapshot::default();
-        assert_eq!(TextSource::SelectionThenClipboard.extract(&s), None);
+        let s = AwarenessSnapshot::default();
+        assert!(TextSource::SelectionThenClipboard.extract(&s).is_none());
     }
 
     #[test]
     fn text_is_non_target_lang_hit() {
-        let s = snap_with_selection("this is a longer english sentence");
+        let s = AwarenessSnapshot::with_selection("this is a longer english sentence");
         let trigger = ContextTrigger::TextIsNonTargetLang {
             source: TextSource::SelectionThenClipboard,
         };
@@ -261,11 +251,7 @@ mod tests {
 
     #[test]
     fn text_is_non_target_lang_from_clipboard_fallback() {
-        let s = ContextSnapshot {
-            selected_text: None,
-            clipboard_text: Some("hello world foo bar".to_string()),
-            ..ContextSnapshot::default()
-        };
+        let s = AwarenessSnapshot::with_clipboard("hello world foo bar");
         let trigger = ContextTrigger::TextIsNonTargetLang {
             source: TextSource::SelectionThenClipboard,
         };
@@ -274,7 +260,7 @@ mod tests {
 
     #[test]
     fn text_is_non_target_lang_url_guard_via_probe() {
-        let s = snap_with_clipboard("https://github.com/anthropics/foo");
+        let s = AwarenessSnapshot::with_clipboard("https://github.com/anthropics/foo");
         let trigger = ContextTrigger::TextIsNonTargetLang {
             source: TextSource::SelectionThenClipboard,
         };
@@ -283,13 +269,13 @@ mod tests {
 
     #[test]
     fn param_source_extract_none() {
-        let s = snap_with_clipboard("hello");
+        let s = AwarenessSnapshot::with_clipboard("hello");
         assert_eq!(ParamSource::None.extract(&s), None);
     }
 
     #[test]
     fn param_source_extract_clipboard() {
-        let s = snap_with_clipboard("  hello  ");
+        let s = AwarenessSnapshot::with_clipboard("  hello  ");
         assert_eq!(
             ParamSource::Clipboard.extract(&s),
             Some(serde_json::Value::String("hello".to_string())),
@@ -298,7 +284,7 @@ mod tests {
 
     #[test]
     fn param_source_extract_selection() {
-        let s = snap_with_selection("  world  ");
+        let s = AwarenessSnapshot::with_selection("  world  ");
         assert_eq!(
             ParamSource::Selection.extract(&s),
             Some(serde_json::Value::String("world".to_string())),

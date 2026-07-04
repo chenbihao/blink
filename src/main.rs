@@ -230,6 +230,10 @@ fn main() {
                 app_config.autosuggest_enabled,
                 app_config.autosuggest_min_score,
             );
+            // 初始化 context binding 禁用列表（0.8.3 §4.6）
+            search_service.update_disabled_context_bindings(
+                app_config.disabled_context_bindings.clone(),
+            );
             // 初始化界面语言快照（0.8.1）— 供 empty_arg_hint 等 LocalizableText 解析用
             search_service.update_language(app_config.language.clone());
             // 启动清理过期搜索历史（后台 spawn，不阻塞启动；enabled=false 或 days=0 跳过）
@@ -300,6 +304,8 @@ fn main() {
             app::commands::run_builtin_action,
             app::commands::list_builtin_actions,
             app::commands::set_disabled_builtin_actions,
+            app::commands::list_context_bindings,
+            app::commands::set_disabled_context_bindings,
             app::commands::get_storage_info,
             app::commands::clear_history,
             app::commands::get_app_info,

@@ -1,5 +1,7 @@
 //! 搜索输入：防抖 + IME 感知 + 调后端 + 交给 results 渲染。
-//! 0.8.1：解 SearchResponse { entries, completionHint } 并联动 ghost overlay。
+//! 0.8.3：解 SearchResponse { entries, suggestion } 并联动 ghost overlay。
+//! 空 query 也走 search 接口（0.8.2 的 fetchContextSuggestions 已废弃）——
+//! Context Suggestion 走 Ghost + Tab 采纳,不再抢首屏。
 
 import { queryEl } from "./dom.js";
 import { searchApps } from "./api.js";
@@ -34,7 +36,7 @@ export function init() {
     const payload = event.payload;
     if (!payload || payload.seq !== seq) return;
     results.merge(payload.items, payload.seq);
-    // 增量事件不带 hint（同步首次返回已给过），此处不动 ghost。
+    // 增量事件不带 suggestion（同步首次返回已给过），此处不动 ghost。
   });
 }
 
@@ -52,11 +54,14 @@ export function retrigger() {
 }
 
 /**
- * 拉取空 query 的 Context 建议动作（0.8.0 §1.3）。
+ * shown 事件后拉一次空 query 结果（0.8.3 §4.13 P0-1）。
  *
- * 空 query 场景：`onInput` 一律短路不发请求，而 shown 事件后我们**需要**主动查后端
- * 拿一批依 Context（剪贴板/选区）命中的内置动作。此函数专给 lifecycle 调，绕过 onInput
- * 的空 query 短路，仍走完整的 seq/竞态防护路径。
+ * 0.8.2 → 0.8.3 变化：原 `fetchContextSuggestions` 拉的是 Context 召回的 AppEntry
+ * （翻译 Priority 置顶等），0.8.3 §4.13 P0-3 已把 Context 从 route() 里挪走——
+ * 空 query 不再产 candidate。这个函数保留是为了：唤起瞬间**发一次空 query 到后端**
+ * 拿 `response.suggestion`（Context Suggestion 走这条路径出 Ghost）。
+ *
+ * 相较 `onInput` 的空 query 分支：绕过 40ms 防抖，让 shown 到 Ghost 出现无感延迟。
  */
 export async function fetchContextSuggestions() {
   const mySeq = ++seq;
@@ -64,11 +69,12 @@ export async function fetchContextSuggestions() {
     const resp = await searchApps("", mySeq);
     // 竞态防护：用户已开始输入或已再次隐藏 → 丢弃
     if (mySeq !== seq) return;
-    // 只有仍是空 query 时才渲染，避免和用户输入的结果打架
+    // 只有仍是空 query 时才应用结果，避免和用户输入的结果打架
     if (queryEl.value.trim()) return;
+    // entries 通常为空（Context 已不产 candidate），但仍走 render 走清理路径
     results.render(resp.entries || [], mySeq);
-    // 空 query 恒无 hint（后端保证），但保险起见清一次
-    ghost.clear();
+    // Ghost：空 query 场景后端产 Context Suggestion,此处消费
+    ghost.update("", resp.suggestion);
   } catch (e) {
     console.error("fetchContextSuggestions failed:", e);
   }
@@ -78,9 +84,13 @@ function onInput() {
   clearTimeout(timer);
   const q = queryEl.value.trim();
   if (!q) {
-    seq++; // 作废在途请求，避免旧响应回填空输入态
+    // 空 query：作废在途请求 + 清结果，Ghost 交给 lifecycle 的 fetchContextSuggestions
+    // 兜底（shown 时已调过）。若用户从"输入 → 全部退格清空"到这一步,
+    // 单独跑一次 fetchContextSuggestions 保证 Ghost 与状态同步。
+    seq++;
     results.clear();
     ghost.clear();
+    fetchContextSuggestions();
     return;
   }
   // IME 组字中：不触发搜索，等 compositionend 再发
@@ -88,13 +98,13 @@ function onInput() {
   const mySeq = ++seq;
   timer = setTimeout(async () => {
     try {
-      // 用 raw value（保留末尾空格）给后端算 hint —— "fanyi " 与 "fanyi" 语义不同
+      // 用 raw value（保留末尾空格）给后端算 suggestion —— "fanyi " 与 "fanyi" 语义不同
       const rawQuery = queryEl.value;
       const resp = await searchApps(rawQuery, mySeq);
       // 丢弃过期响应：用户已输入新 query 或已复位
       if (mySeq !== seq) return;
       results.render(resp.entries || [], mySeq);
-      ghost.update(rawQuery, resp.completionHint);
+      ghost.update(rawQuery, resp.suggestion);
     } catch (e) {
       console.error("search_apps failed:", e);
     }

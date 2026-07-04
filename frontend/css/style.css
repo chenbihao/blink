@@ -91,7 +91,20 @@ body {
   /* 纯"影子"提示——只有 fuzzy 补全场景（display 非空）才会有文字。
      键帽 chip 不放这里，走 statusbar（视觉分层：passive suggestion vs active hint）。 */
   color: var(--text-faint);
-  opacity: 0.65;
+  opacity: 0.85;
+}
+
+/* Context 类 Suggestion（0.8.3 §4.9 弱区分）：只降透明度,不用斜体——
+   中文斜体在小字号下辨识度差,弱化改由更低 opacity + 微调字号承担。 */
+#ghost-overlay .ghost-suggest.ghost-context {
+  opacity: 0.85;
+}
+
+/* Ghost 有内容时隐藏输入框自身 placeholder（0.8.3）:
+   空 query + Context Ghost 场景下,placeholder「输入应用名、计算…」会与 Ghost 文字
+   重叠。ghost.js 在 update 时给 <input> 加 data-ghost-active 属性,由此规则接管。 */
+#query[data-ghost-active]::placeholder {
+  color: transparent;
 }
 
 /* 键帽通用样式（.kbd / .kbd-group）已抽到 css/kbd.css——设置页也复用。
@@ -288,4 +301,10 @@ body.alt-active #results li .item-badge {
 }
 #statusbar .kbd + .kbd {
   margin-left: -0.1em; /* 键帽紧邻键帽：↑↓ 视觉靠近，无额外间距 */
+}
+
+/* 0.8.3 §4.9：Context Suggestion 来源提示（"· 来自划词"）弱化——比常规 hint 更浅,
+   让用户扫一眼就知道是元信息不是核心提示。中文不用斜体（辨识度差）。 */
+#statusbar .hint-origin {
+  opacity: 0.55;
 }

@@ -81,7 +81,11 @@ impl PluginQueryContext {
             lang: None, // 后续加配置项预留
             foreground_app,
             window_title,
-            clipboard_text: snapshot.clipboard_text.clone(),
+            // 0.8.3 收尾：走 AwarenessSnapshot::find_text 抽剪贴板文本,PluginQueryContext
+            // 外部契约不变（仍是 clipboard_text 字段名）。
+            clipboard_text: snapshot
+                .find_text(crate::infra::platform::context::AwarenessSource::Clipboard)
+                .map(|v| v.text.to_string()),
         }
     }
 }

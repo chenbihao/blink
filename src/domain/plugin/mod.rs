@@ -18,15 +18,16 @@ pub use manifest::{ManifestContextWhen, ManifestSurfaceHint, PluginManifest, Plu
 pub use process::{InterpretersStatus, PluginHandle, probe_interpreters};
 pub use protocol::PluginQueryContext;
 
-/// 插件配置读取抽象（0.8.2 §3.4.1）。
+/// 插件配置读取抽象（0.8.2 §3.4.1 + 0.8.3 §4.13 扩展）。
 ///
 /// `RuleRouter` 需要在解析 `ContextTrigger::TextIsNonTargetLang` 时读翻译插件的
 /// `target_lang` 字段。为避免 `domain/intent` → `domain/plugin` 的正向依赖导致
 /// 循环（`plugin::engine` 已经依赖 `intent::Route`），走 trait 反转：
 /// 生产者 `PluginEngine` 实现 trait，消费者 `RuleRouter` 只知道 `Arc<dyn PluginSettingResolver>`。
 ///
-/// 只暴露 `get_string`——0.8.2 只需要读 `target_lang` 字符串。未来加 `get_bool` /
-/// `get_number` 时再扩。
+/// 0.8.3 §4.13 P1 决策「禁用联动运行时查启用态」：加 `is_enabled` 让 `RuleRouter::best_suggestion`
+/// 在产 Context Suggestion 前检查插件启用态,未启用则跳过 binding。默认实现返回 true（保持
+/// 0.8.2 单测的兼容——mock resolver 不需要重写）。
 pub trait PluginSettingResolver: Send + Sync {
     /// 读插件某个 settings 字段（字符串）。
     ///
@@ -36,6 +37,21 @@ pub trait PluginSettingResolver: Send + Sync {
     /// - `key` 不存在
     /// - 该字段值不是字符串
     fn get_string(&self, plugin_id: &str, key: &str) -> Option<String>;
+
+    /// 插件是否启用（0.8.3 §4.13 P1）。默认 true——单测里的 mock 无需重写；
+    /// 生产环境 `PluginEngine` 实现委托到自身 `is_enabled`。
+    fn is_enabled(&self, _plugin_id: &str) -> bool {
+        true
+    }
+
+    /// 读插件本地化显示名（0.8.3 §4.13 P0 修订）——`build_context_suggestion_text`
+    /// 用来生成 Ghost display 文本（`翻译 "hello..."` 而不是 `translate "hello..."`）。
+    ///
+    /// 生产环境 `PluginEngine` 实现走 `manifest.name.resolve(lang)`；默认返回 None
+    /// 让调用方 fallback 到 id 末段（单测 mock resolver 无需重写）。
+    fn get_display_name(&self, _plugin_id: &str, _lang: &str) -> Option<String> {
+        None
+    }
 }
 
 /// builtin 插件根目录。

@@ -25,6 +25,15 @@ pub struct PluginManifest {
     #[serde(default)]
     #[allow(dead_code)] // builtin 信任来源标记,本切片只加载 builtin
     pub builtin: bool,
+    /// 首次装机是否默认启用（缺省 true，保持向后兼容）。
+    ///
+    /// 用于"需配置才能用"的插件（如翻译需 API 密钥）——首装写默认 `PluginConfig`
+    /// 时以此值覆盖 `enabled`，避免用户装完就撞到无法工作的插件。
+    ///
+    /// 只影响首次装机路径（`init_configs` 里 DB 无该插件记录时）。老用户 DB 已
+    /// 存在的 `plugin:{id}` 记录不会被本字段回退——用户之前的开关状态保留。
+    #[serde(default = "default_true")]
+    pub default_enabled: bool,
     pub runtime: PluginRuntime,
     #[serde(default, deserialize_with = "deserialize_triggers_lenient")]
     pub triggers: Vec<PluginTrigger>,
@@ -153,6 +162,10 @@ impl Default for ManifestSurfaceHint {
 }
 
 fn default_exclusive() -> bool {
+    true
+}
+
+fn default_true() -> bool {
     true
 }
 
@@ -680,6 +693,29 @@ mod tests {
                 surface: ManifestSurfaceHint::Priority, // default
             }
         ));
+    }
+
+    #[test]
+    fn default_enabled_defaults_to_true() {
+        // 缺省不写 default_enabled 字段 → true（保持向后兼容，旧 manifest 首装即启用）
+        let json = r#"{
+            "schema_version": 1, "id": "x", "name": "X", "version": "0",
+            "runtime": {"exec": "x.exe"}
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(m.default_enabled);
+    }
+
+    #[test]
+    fn default_enabled_explicit_false() {
+        // 显式声明 false → 首装默认关（需配置才能用的插件用这个）
+        let json = r#"{
+            "schema_version": 1, "id": "x", "name": "X", "version": "0",
+            "default_enabled": false,
+            "runtime": {"exec": "x.exe"}
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(!m.default_enabled);
     }
 
     #[test]

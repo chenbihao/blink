@@ -22,8 +22,10 @@ export function init() {
     applyI18nFromConfig();
     // 刷新最大结果数（设置页可能改了 max_results）
     results.refreshMaxResults();
-    // 0.8.0 §1.3 空 query Context-only：唤起瞬间拉一批 Context 建议动作
-    // （剪贴板是 URL → "打开链接"；是文件路径 → "打开路径" / "资源管理器定位"）
+    // 0.8.3 §4.13 P0-1：唤起瞬间发一次空 query,拉后端产的 Context Suggestion（Ghost）。
+    // 0.8.2 此调用是拉 Context 召回条目（AppEntry）;0.8.3 契约变更后 Context 不产
+    // candidate,该调用现在的作用是拿 `response.suggestion` 走 Ghost 通道——函数名保留,
+    // 内部实现在 search.js 已重写。
     search.fetchContextSuggestions();
   });
 
