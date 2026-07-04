@@ -345,6 +345,70 @@ pub async fn update_autosuggest_config(
     Ok(())
 }
 
+/// 触发 Chord 动作（0.8.5 §六）。前端 Alt+字母 → invoke 此 command。
+///
+/// key 为字母（不区分大小写）。未注册 → Err（前端 log，不弹窗）。
+/// stub 阶段动作只 log；#10/#11/#12 替换为真实实现。
+#[tauri::command]
+pub async fn trigger_chord(app: tauri::AppHandle, key: String) -> Result<(), String> {
+    tracing::debug!(%key, "trigger_chord");
+    let Some(registry) = app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>() else {
+        return Err("chord registry 未就绪".into());
+    };
+    let surface = registry.trigger(&key, &app).await?;
+    // surface=MiniBall → 显示 chord-ball 悬浮窗（划词指示，不抢焦点）
+    if surface == crate::domain::chord::ChordSurface::MiniBall {
+        // 隐藏主窗（球作划词指示，主窗不打扰）+ 显示悬浮球
+        crate::infra::platform::window::hide(&app, "chord");
+        crate::infra::platform::window::show_chord_ball(&app)?;
+    } else if surface == crate::domain::chord::ChordSurface::Panel {
+        // Alt+C 剪贴板：主窗 show + emit 触发面板
+        crate::infra::platform::window::invoke(&app);
+        let _ = app.emit("blink://chord-panel", "clipboard");
+    }
+    Ok(())
+}
+
+/// 隐藏 chord-ball 悬浮窗（悬浮球内点击/ESC 调）。
+#[tauri::command]
+pub fn hide_chord_ball(app: tauri::AppHandle) {
+    crate::infra::platform::window::hide_chord_ball(&app);
+}
+
+/// 确认划词（0.8.5 §6.5）：读 selection 缓存 → emit 到主窗 → 主窗 show + 球 hide。
+/// 主窗前端 listen `blink://chord-translate` 填搜索框「翻译 {text}」触发翻译插件。
+#[tauri::command]
+pub async fn confirm_chord_selection(app: tauri::AppHandle) -> Result<(), String> {
+    let text = crate::infra::platform::selection::get_last_selection();
+    crate::infra::platform::window::hide_chord_ball(&app);
+    crate::infra::platform::window::invoke(&app);
+    if let Some(t) = text {
+        let _ = app.emit("blink://chord-translate", t);
+    }
+    Ok(())
+}
+
+/// 列出所有已注册的 Chord 动作元数据（0.8.5 §六 增强菜单渲染用）。
+///
+/// 每条：`{ id, key, label, surface }`。已 disabled 的跳过。
+#[tauri::command]
+pub async fn list_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Value> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
+    let Some(registry) = app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>() else {
+        return Vec::new();
+    };
+    registry.list(&disabled)
+}
+
+/// 当前 Alt 键是否物理按下（0.8.5 §6.1）。前端轮询驱动 alt-active 状态——
+/// WebView2 不转发 Alt 键自身的 keydown 到 JS，前端监听不可靠，改轮询物理态。
+#[tauri::command]
+pub fn is_alt_down() -> bool {
+    crate::infra::platform::hotkey::is_alt_down()
+}
+
+
 /// 列出所有已注册的 context binding + 当前 enabled 状态（0.8.3 §4.6 设置页面板）。
 ///
 /// 每条 binding 描述：`{ key, target_id, trigger_key, target_label, trigger_label, enabled }`。

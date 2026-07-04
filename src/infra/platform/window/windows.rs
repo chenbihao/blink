@@ -355,6 +355,56 @@ pub fn clamp_to_work_area(win: &WebviewWindow) {
 /// 打开设置窗口：已存在则聚焦，否则创建（无边框 + 透明 + 圆角）。
 ///
 /// 统一入口：主窗口搜索结果和托盘菜单都走这里，避免重复代码漏配置。
+/// 显示 chord-ball 悬浮窗（0.8.5 §6.5 划词指示）。
+/// 独立 webview 窗口，不抢焦点（WS_EX_NOACTIVATE），看门狗按 PID 判定天然豁免
+/// （看门狗只 hide 主窗 "main"，不碰 "chord-ball"）。
+pub fn show_chord_ball(app: &AppHandle) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+    const LABEL: &str = "chord-ball";
+    // 球出现在鼠标附近（划词选区在鼠标处）
+    let (mx, my) = unsafe {
+        let mut pt = POINT { x: 0, y: 0 };
+        let _ = GetCursorPos(&mut pt);
+        (pt.x, pt.y)
+    };
+    if let Some(win) = app.get_webview_window(LABEL) {
+        let _ = win.set_position(PhysicalPosition::new(mx + 16, my + 16));
+        let _ = win.show();
+        return Ok(());
+    }
+    let win = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("chord-ball.html".into()))
+        .title("")
+        .inner_size(48.0, 48.0)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .shadow(false)
+        .focused(false)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let _ = win.set_position(PhysicalPosition::new(mx + 16, my + 16));
+    if let Ok(hwnd) = win.hwnd() {
+        apply_no_activate(HWND(hwnd.0 as _));
+    }
+    Ok(())
+}
+
+/// 给窗口加 WS_EX_NOACTIVATE——点击不激活，用户能回原应用选文本（划词必需）。
+fn apply_no_activate(hwnd: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{GWL_EXSTYLE, WS_EX_NOACTIVATE};
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE.0 as isize);
+    }
+}
+
+pub fn hide_chord_ball(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("chord-ball") {
+        let _ = win.hide();
+    }
+}
+
 pub fn open_settings(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("settings") {
         // 如果窗口已最小化，先恢复

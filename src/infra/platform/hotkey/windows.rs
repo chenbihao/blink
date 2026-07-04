@@ -140,6 +140,13 @@ fn key_down(vk: VIRTUAL_KEY) -> bool {
     unsafe { GetAsyncKeyState(vk.0 as i32) as u16 & 0x8000 != 0 }
 }
 
+/// 当前 Alt（任一侧）是否物理按下。供前端轮询——WebView2 不转发 Alt 键自身的
+/// keydown 到 JS（系统键被 Windows 用于菜单激活），前端 keydown 监听不可靠，
+/// 故 0.8.5 增强菜单的 alt-active 状态改由前端轮询此接口驱动（§6.1）。
+pub fn is_alt_down() -> bool {
+    key_down(VK_LMENU) || key_down(VK_RMENU)
+}
+
 /// 采样当前 8 个修饰键的物理态为 bitmask。
 fn current_modifier_mask() -> u16 {
     let mut mask = 0u16;

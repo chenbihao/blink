@@ -49,3 +49,38 @@ export function resetItemHistory(lnkPath) {
 export function copyToClipboard(text) {
   return invoke("copy_to_clipboard", { text });
 }
+
+/** 触发 Chord 动作（0.8.5 §六）——key 为字母（a/q/c），后端按 key 分派到 ChordRegistry。 */
+export function triggerChord(key) {
+  return invoke("trigger_chord", { key });
+}
+
+/** 列出已注册的 Chord 动作（0.8.5 §六 增强菜单渲染用）。每条：{ id, key, label, surface }。 */
+export function listChordActions() {
+  return invoke("list_chord_actions");
+}
+
+/** 当前 Alt 键是否按下（0.8.5 §6.1 前端轮询驱动 alt-active，WebView2 不转发 Alt keydown）。 */
+export function isAltDown() {
+  return invoke("is_alt_down");
+}
+
+/** 隐藏 chord-ball 悬浮窗（悬浮球内点击/ESC 调）。 */
+export function hideChordBall() {
+  return invoke("hide_chord_ball");
+}
+
+/** 确认划词：读选区缓存 + 主窗显示翻译结果 + 隐藏球。 */
+export function confirmChordSelection() {
+  return invoke("confirm_chord_selection");
+}
+
+/** 拉取剪贴板历史（Alt+C 面板渲染用）。 */
+export function getClipboardHistory(limit) {
+  return invoke("get_clipboard_history", { limit: limit ?? 20 });
+}
+
+/** 记录剪贴板项命中（点选后调用，频率加权）。 */
+export function recordClipboardHit(id) {
+  return invoke("record_clipboard_hit", { id });
+}

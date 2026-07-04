@@ -9,6 +9,7 @@
     <link rel="stylesheet" href="css/themes-genshin.css" />
     <link rel="stylesheet" href="css/kbd.css" />
     <link rel="stylesheet" href="css/style.css" />
+    <link rel="stylesheet" href="css/chord.css" />
   </head>
   <body>
     <!-- #app 整张卡片：只有容器本身可拖动，可点击元素（input/结果项）明确排除。
@@ -22,7 +23,9 @@
           <input id="query" type="text" data-i18n-ph="search.placeholder" placeholder="输入应用名、计算…" autocomplete="off" spellcheck="false" />
         </div>
       </div>
+      <div id="chord-menu" aria-hidden="true"></div>
       <ul id="results"></ul>
+      <div id="clipboard-panel" aria-hidden="true"></div>
       <div id="statusbar"></div>
     </div>
     <script type="module" src="js/main.js"></script>

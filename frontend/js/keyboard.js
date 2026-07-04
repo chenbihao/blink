@@ -1,15 +1,18 @@
 //! 键盘交互：结果导航、激活、ESC 隐藏、修饰键默认行为屏蔽。
 //! 0.8.1：Tab / ArrowRight 拦截接受 ghost text 补全（视配置 autosuggest_tab_key）。
 
-import { hideWindow } from "./api.js";
+import { hideWindow, triggerChord, isAltDown } from "./api.js";
+import { syncWindowSize } from "./window-size.js";
 import { activateItem } from "./actions.js";
 import * as results from "./results.js";
 import * as ghost from "./ghost.js";
 import * as autosuggestConfig from "./autosuggest-config.js";
-import { resultsEl } from "./dom.js";
+import { queryEl, resultsEl } from "./dom.js";
 
 /** 绑定全部键盘监听 + 滚轮翻页。 */
 export function init() {
+  // 0.8.5 Chord：Alt+字母触发（捕获阶段，最优先；独立于 onNavigation，不依赖 hasItems）
+  document.addEventListener("keydown", onChordTrigger, true);
   document.addEventListener("keydown", onAutosuggestAccept, true); // 捕获阶段，优先其他 handler
   document.addEventListener("keydown", onNavigation);
   document.addEventListener("keydown", onEscape);
@@ -24,7 +27,7 @@ export function init() {
       results.pageDown(); // 向下滚 → 下一页（等价于 PageDown）
     }
   });
-  initAltBadges();
+  // alt-active 状态由轮询驱动（startAltPoll/stopAltPoll），lifecycle shown/hidden 控制
 }
 
 // ── Autosuggestion Tab 接受（0.8.1）────────────────────────────────────────
@@ -99,11 +102,39 @@ function onBlockModifiers(e) {
   }
 }
 
+// ── Chord 触发（0.8.5）：Alt+字母 → trigger_chord ──────────────────────────────
+// 现状 onNavigation 的 altKey 分支只覆盖 Alt+1~9（选候选，且依赖 hasItems）。
+// Chord 触发不依赖搜索结果，故独立 handler + 捕获阶段优先，空 query 也能触发。
+// 时序自洽（§6.2）：Alt+Q 的 Q 是 hook 状态机的「异键」→ aborted → Alt keyup 判 hold
+// → 不发 Tap → 不 toggle hide；前端 preventDefault 保 Q 不进输入框。
+// stub 阶段 console.log + 临时 placeholder visual；#7 trigger_chord command 落地后改 invoke。
+// Chord 键集暂硬编码，#8 增强菜单从 list_chord_actions 拉。
+
+const CHORD_KEYS = new Set(["a", "q", "c"]);
+
+// 触发后端 trigger_chord（Alt+Q 划词会在后端显示 chord-ball 悬浮窗）。
+function fireChord(key) {
+  console.log(`[chord] Alt+${key.toUpperCase()} triggered`);
+  triggerChord(key).catch((e) => console.warn("[chord] trigger_chord 失败", e));
+}
+
+function onChordTrigger(e) {
+  if (!e.altKey) return;
+  if (e.isComposing || e.keyCode === 229) return; // IME 组字放行
+  const key = e.key.toLowerCase();
+  if (!CHORD_KEYS.has(key)) return;
+  e.preventDefault(); // 不进输入框
+  e.stopPropagation();
+  fireChord(key);
+}
+
 // ── 按住 Alt 显示数字角标 ─────────────────────────────────────────────────────
 // body.alt-active 由 CSS 控制角标显隐。需多重兜底清除，避免 Alt+Tab 切走后状态残留。
 
 function setAlt(on) {
   document.body.classList.toggle("alt-active", on);
+  // 0.8.5：alt-active 切换改变增强菜单显示，重算窗口尺寸（菜单撑开/收起跟随）
+  syncWindowSize();
 }
 
 /** 清除 Alt 角标态（供生命周期 shown/hidden 兜底调用）。 */
@@ -111,13 +142,35 @@ export function clearAlt() {
   setAlt(false);
 }
 
-function initAltBadges() {
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Alt") setAlt(true);
-  });
-  document.addEventListener("keyup", (e) => {
-    if (e.key === "Alt") setAlt(false);
-  });
-  // 失焦/隐藏兜底：按住 Alt 时窗口失焦（如 Alt+Tab）收不到 keyup，强制清除
-  window.addEventListener("blur", () => setAlt(false));
+// alt-active 轮询（0.8.5 §6.1）：WebView2 不转发 Alt 键自身的 keydown 到 JS
+// （系统键被 Windows 用于菜单激活），keydown 监听不可靠。改由 lifecycle shown 启动
+// 轮询、hidden 停止，每 100ms 查物理态，状态变化才 setAlt（避免无谓 resize）。
+let altPollTimer = null;
+let altLast = false;
+
+export function startAltPoll() {
+  stopAltPoll();
+  const tick = async () => {
+    let down = false;
+    try {
+      down = await isAltDown();
+    } catch (e) {
+      console.warn("[alt] is_alt_down 失败", e);
+    }
+    if (down !== altLast) {
+      altLast = down;
+      setAlt(down);
+    }
+  };
+  tick();
+  altPollTimer = window.setInterval(tick, 100);
+}
+
+export function stopAltPoll() {
+  if (altPollTimer) window.clearInterval(altPollTimer);
+  altPollTimer = null;
+  if (altLast) {
+    altLast = false;
+    setAlt(false);
+  }
 }

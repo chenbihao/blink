@@ -7,6 +7,7 @@ import * as contextmenu from "./contextmenu.js";
 import * as ghost from "./ghost.js";
 import * as statusbar from "./statusbar.js";
 import * as autosuggestConfig from "./autosuggest-config.js";
+import * as chord from "./chord.js";
 import { applyThemeFromConfig } from "./theme.js";
 import { applyI18nFromConfig } from "./i18n.js";
 
@@ -22,3 +23,4 @@ search.init();
 keyboard.init();
 lifecycle.init();
 contextmenu.init();
+chord.init();

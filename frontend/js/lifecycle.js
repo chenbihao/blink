@@ -4,7 +4,8 @@ import { listen } from "./tauri.js";
 import { queryEl } from "./dom.js";
 import * as results from "./results.js";
 import * as search from "./search.js";
-import { clearAlt } from "./keyboard.js";
+import * as chord from "./chord.js";
+import { clearAlt, startAltPoll, stopAltPoll } from "./keyboard.js";
 import { applyThemeFromConfig } from "./theme.js";
 import { applyI18nFromConfig } from "./i18n.js";
 
@@ -27,13 +28,17 @@ export function init() {
     // candidate,该调用现在的作用是拿 `response.suggestion` 走 Ghost 通道——函数名保留,
     // 内部实现在 search.js 已重写。
     search.fetchContextSuggestions();
+    chord.refresh(); // 0.8.5：拉 Chord 动作列表渲染增强菜单
+    startAltPoll(); // 0.8.5：轮询 Alt 物理态驱动 alt-active（WebView2 不转发 Alt keydown）
   });
 
   listen("blink://hidden", () => {
+    stopAltPoll(); // 0.8.5：停 Alt 轮询
     queryEl.value = "";
     search.reset();
     results.clear();
     clearAlt();
+    chord.closeClipboardPanel(); // 0.8.5：关闭剪贴板面板
   });
 
   // 配置变更即时响应（设置页切换主题/语言等，无需关闭再打开主窗口）
@@ -41,5 +46,16 @@ export function init() {
     applyThemeFromConfig();
     applyI18nFromConfig();
     results.refreshMaxResults();
+  });
+
+  // 0.8.5：Chord 划词确认 → 填搜索框「翻译 {text}」触发翻译插件
+  listen("blink://chord-translate", (event) => {
+    queryEl.value = `翻译 ${event.payload}`;
+    queryEl.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+
+  // 0.8.5：Chord 剪贴板面板触发（Alt+C）
+  listen("blink://chord-panel", (event) => {
+    if (event.payload === "clipboard") chord.showClipboardPanel();
   });
 }

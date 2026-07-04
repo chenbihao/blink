@@ -165,6 +165,26 @@ impl Service for SelectionService {
 
 /// 按依赖拓扑顺序构造服务列表(Config → History → 其余)。
 ///
+/// 剪贴板历史监听服务（0.8.5）：启动 AddClipboardFormatListener 监听写入。
+/// 监听器自包含（infra/platform/clipboard），不耦合 domain/commands——只依赖 data 层存。
+pub struct ClipboardService;
+
+#[async_trait::async_trait]
+impl Service for ClipboardService {
+    fn name(&self) -> &'static str {
+        "clipboard"
+    }
+    async fn start(&self, ctx: &AppContext) -> Result<(), String> {
+        let mut cfg = ctx.config.clipboard.clone();
+        // 0.8.5：剪贴板历史默认启用。0.7 default false 已持久化到老用户 db，但 0.7 无配置 UI
+        // 让用户主动关（false 是默认值不是用户选择）。这里内存覆盖启用，不写 db。
+        // #13 配置面板做后改回尊重 cfg.enabled + 提供 toggle。
+        cfg.enabled = true;
+        crate::infra::platform::clipboard::start_listener(ctx.pool.clone(), cfg);
+        Ok(())
+    }
+}
+
 /// `search` 为已构造的 SearchService(main.rs 持有并 manage),此处包成生命周期 wrapper
 /// 统一启动其引擎后台任务。
 pub fn all_services(search: std::sync::Arc<crate::domain::search::SearchService>) -> Vec<Box<dyn Service>> {
@@ -175,5 +195,6 @@ pub fn all_services(search: std::sync::Arc<crate::domain::search::SearchService>
         Box::new(WindowService),
         Box::new(HotkeyService),
         Box::new(SelectionService),
+        Box::new(ClipboardService),
     ]
 }

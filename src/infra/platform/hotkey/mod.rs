@@ -55,7 +55,7 @@ static RUNTIME: OnceLock<HotkeyRuntime> = OnceLock::new();
 mod windows;
 
 #[cfg(target_os = "windows")]
-pub use windows::start_hook_thread;
+pub use windows::{start_hook_thread, is_alt_down};
 
 // 快捷键录制
 mod recorder;

@@ -1,0 +1,74 @@
+/* ── Chord 增强菜单（0.8.5 §6.1）──────────────────────────────────────────
+   主窗可见 + 按住 Alt（body.alt-active）时，搜索框下方下拉显示可用 Chord 动作。
+   显示由 body.alt-active 控制（keyboard.js 切 class）；
+   窗口尺寸跟随由 keyboard.js setAlt 调 syncWindowSize。
+   :empty 守卫——数据未加载时不显示空框。 */
+
+#chord-menu {
+  display: none;
+  padding: 4px 8px 6px;
+  border-bottom: 1px solid var(--surface);
+}
+
+body.alt-active #chord-menu:not(:empty) {
+  display: block;
+}
+
+.chord-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  color: var(--text);
+}
+
+.chord-item .chord-label {
+  flex: 1;
+  font-size: 0.95em;
+}
+
+.chord-item .kbd-group {
+  flex-shrink: 0;
+}
+
+/* ── 剪贴板面板（0.8.5 §6.5 Alt+C Panel surface）────────────────── */
+
+#clipboard-panel {
+  display: none;
+}
+
+body.mode-clipboard #search-bar,
+body.mode-clipboard #results,
+body.mode-clipboard #chord-menu {
+  display: none !important;
+}
+
+body.mode-clipboard #clipboard-panel {
+  display: block;
+  padding: 4px 0;
+}
+
+.clip-item {
+  padding: 9px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.clip-item:hover {
+  background: var(--surface);
+}
+
+.clip-preview {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 0.95em;
+}
+
+.clip-empty {
+  padding: 24px;
+  color: var(--text-dim);
+  text-align: center;
+}

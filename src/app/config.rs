@@ -273,6 +273,15 @@ pub struct AppConfig {
     /// 默认空——所有 binding 默认启用；用户在「上下文智能感知」面板取消后追加。
     #[serde(default)]
     pub disabled_context_bindings: Vec<String>,
+    /// Chord 模式总开关（0.8.5 §6.6）。默认 true。关闭后前端不响应 Alt+字母触发。
+    #[serde(default = "default_true")]
+    pub chord_enabled: bool,
+    /// Chord 增强菜单可见性（0.8.5 §6.6）。默认 true。alt-active 时下拉增强菜单。
+    #[serde(default = "default_true")]
+    pub chord_hint_visible: bool,
+    /// 用户禁用的 Chord 动作 id 列表（0.8.5 §6.6）。存 action id，触发/列表时跳过。
+    #[serde(default)]
+    pub disabled_chord_actions: Vec<String>,
 }
 
 impl Default for AppConfig {
@@ -298,6 +307,9 @@ impl Default for AppConfig {
             autosuggest_min_score: 0.7,
             autosuggest_tab_key: "Tab".to_string(),
             disabled_context_bindings: Vec::new(),
+            chord_enabled: true,
+            chord_hint_visible: true,
+            disabled_chord_actions: Vec::new(),
         }
     }
 }
@@ -483,6 +495,26 @@ pub async fn update_disabled_context_bindings(
     normalized.dedup();
     let mut config = get_config(pool).await;
     config.disabled_context_bindings = normalized;
+    save_config(pool, &config).await
+}
+
+// ── Chord 配置（0.8.5 §6.6）──────────────────────────────────────────
+
+/// 获取当前 disable 的 Chord 动作 id 列表（快照读）。
+pub async fn get_disabled_chord_actions(pool: &SqlitePool) -> Vec<String> {
+    get_config(pool).await.disabled_chord_actions
+}
+
+/// 更新 disable 列表（设置页勾选后调用）。**幂等**：内部去重排序。
+pub async fn update_disabled_chord_actions(
+    pool: &SqlitePool,
+    disabled: Vec<String>,
+) -> Result<(), String> {
+    let mut normalized = disabled;
+    normalized.sort();
+    normalized.dedup();
+    let mut config = get_config(pool).await;
+    config.disabled_chord_actions = normalized;
     save_config(pool, &config).await
 }
 

@@ -73,7 +73,7 @@ fn default_blacklist() -> Vec<String> {
 impl Default for ClipboardConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             max_items: 500,
             retention_days: 7,
             search_enabled: true,

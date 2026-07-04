@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Blink Chord</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+      }
+      #ball {
+        width: 48px;
+        height: 48px;
+        margin: 0;
+        border-radius: 50%;
+        background: #4a9eff;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+        color: white;
+        font-size: 9px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        -webkit-app-region: drag; /* 球可拖动定位 */
+        user-select: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="ball">划词翻译</div>
+    <script type="module">
+      import { confirmChordSelection } from "./js/api.js";
+      // 点球 → 读选区缓存 + 主窗显示翻译结果 + 球 hide
+      document.getElementById("ball").addEventListener("click", () => {
+        confirmChordSelection();
+      });
+    </script>
+  </body>
+</html>

@@ -290,6 +290,10 @@ fn main() {
                 None,
             ));
 
+            // 0.8.5 Chord：构建 registry（注册 stub 动作）+ 注册 app state（command 层 try_state 取）
+            let chord_registry = std::sync::Arc::new(crate::domain::chord::build_default_registry());
+            app.manage(chord_registry);
+
             // 持有服务列表,保证其生命周期与 app 一致。
             // 0.2.1 各服务随进程退出即可,不接退出钩子;stop / 逆序清理留到 0.3 插件进程。
             app.manage(services);
@@ -306,6 +310,11 @@ fn main() {
             app::commands::set_disabled_builtin_actions,
             app::commands::list_context_bindings,
             app::commands::set_disabled_context_bindings,
+            app::commands::trigger_chord,
+            app::commands::list_chord_actions,
+            app::commands::is_alt_down,
+            app::commands::hide_chord_ball,
+            app::commands::confirm_chord_selection,
             app::commands::get_storage_info,
             app::commands::clear_history,
             app::commands::get_app_info,
