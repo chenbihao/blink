@@ -20,7 +20,8 @@
   },
   "triggers": [
     { "type": "keyword", "keyword": "翻译", "exclusive": true },
-    { "type": "keyword", "keyword": "translate", "exclusive": true }
+    { "type": "keyword", "keyword": "translate", "exclusive": true },
+    { "type": "context", "when": "text_is_non_target_lang", "surface": "priority" }
   ],
   "capabilities": ["query"],
   "settings_schema": [

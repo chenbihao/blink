@@ -27,6 +27,17 @@ use windows::Win32::UI::Accessibility::{
     TreeScope_Subtree, UIA_IsTextPatternAvailablePropertyId, UIA_TextPatternId,
 };
 
+// 用于 hwnd → 进程名 的 Win32 调用（隐私门控：见 listener.rs on_selection）
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
+use std::path::Path;
+use windows::Win32::Foundation::{HANDLE, MAX_PATH};
+use windows::Win32::System::Threading::{
+    OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    PROCESS_NAME_WIN32,
+};
+use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+
 /// COM 初始化 RAII guard（MTA），与 icon.rs 的 ComGuard 同款范式。
 struct ComGuard {
     should_uninit: bool,
@@ -168,4 +179,45 @@ pub(crate) fn get_selected_text(hwnd_raw: isize) -> Option<String> {
 
     tracing::debug!(candidates = total, "选区抓取：所有候选均无非空选区");
     None
+}
+
+/// 由 HWND 查前台窗口所属进程名（如 "Bitwarden.exe"）。抓不到返回 None。
+/// 用于划词感知的隐私门控：`on_selection` 调它决定是否跳过抓取。
+///
+/// 独立于 `infra::platform::context` 的同名 helper——避免 selection 反向依赖 context 平台层。
+/// TODO(0.9 awareness 重构)：把这类 Win32 helper 统一挪进 `infra::platform::awareness::foreground`
+/// 供各通道复用。
+pub(crate) fn process_name_of_window(hwnd_raw: isize) -> Option<String> {
+    if hwnd_raw == 0 {
+        return None;
+    }
+    unsafe {
+        let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == 0 {
+            return None;
+        }
+        let Ok(hprocess) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return None;
+        };
+        let mut path_buf = vec![0u16; MAX_PATH as usize];
+        let mut path_len = path_buf.len() as u32;
+        if QueryFullProcessImageNameW(
+            HANDLE(hprocess.0),
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(path_buf.as_mut_ptr()),
+            &mut path_len,
+        )
+        .is_err()
+        {
+            return None;
+        }
+        let path = OsString::from_wide(&path_buf[..path_len as usize])
+            .to_string_lossy()
+            .into_owned();
+        Path::new(&path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+    }
 }

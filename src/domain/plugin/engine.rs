@@ -53,6 +53,7 @@ impl PluginEngine {
                     .map(|t| match t {
                         super::PluginTrigger::Keyword { keyword, .. } => keyword.clone(),
                         super::PluginTrigger::Regex { pattern, .. } => format!("regex: {pattern}"),
+                        super::PluginTrigger::Context { when, .. } => format!("context: {when:?}"),
                     })
                     .collect();
 
@@ -310,6 +311,19 @@ impl PluginEngine {
             .get(id)
             .map(|c| c.settings.clone())
             .filter(|s| !s.is_null())
+    }
+}
+
+/// `PluginSettingResolver` 实现（0.8.2 §3.4.1）——把 settings 字段字符串读出来给 `RuleRouter` 用。
+///
+/// 读取路径：`configs[id].settings[key]`，只接受 `Value::String`。禁用插件（`enabled=false`）
+/// 仍返回 setting——`RuleRouter` 到时按需自行过滤；此层职责仅"读值"。
+impl super::PluginSettingResolver for PluginEngine {
+    fn get_string(&self, plugin_id: &str, key: &str) -> Option<String> {
+        self.get_settings(plugin_id)?
+            .get(key)?
+            .as_str()
+            .map(|s| s.to_string())
     }
 }
 

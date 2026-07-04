@@ -14,9 +14,29 @@ use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 
 pub use engine::PluginEngine;
-pub use manifest::{PluginManifest, PluginTrigger};
+pub use manifest::{ManifestContextWhen, ManifestSurfaceHint, PluginManifest, PluginTrigger};
 pub use process::{InterpretersStatus, PluginHandle, probe_interpreters};
 pub use protocol::PluginQueryContext;
+
+/// 插件配置读取抽象（0.8.2 §3.4.1）。
+///
+/// `RuleRouter` 需要在解析 `ContextTrigger::TextIsNonTargetLang` 时读翻译插件的
+/// `target_lang` 字段。为避免 `domain/intent` → `domain/plugin` 的正向依赖导致
+/// 循环（`plugin::engine` 已经依赖 `intent::Route`），走 trait 反转：
+/// 生产者 `PluginEngine` 实现 trait，消费者 `RuleRouter` 只知道 `Arc<dyn PluginSettingResolver>`。
+///
+/// 只暴露 `get_string`——0.8.2 只需要读 `target_lang` 字符串。未来加 `get_bool` /
+/// `get_number` 时再扩。
+pub trait PluginSettingResolver: Send + Sync {
+    /// 读插件某个 settings 字段（字符串）。
+    ///
+    /// 返回 `None` 的场景：
+    /// - 插件未加载 / 未启用
+    /// - `settings` 为 null
+    /// - `key` 不存在
+    /// - 该字段值不是字符串
+    fn get_string(&self, plugin_id: &str, key: &str) -> Option<String>;
+}
 
 /// builtin 插件根目录。
 /// - debug:仓库内 `plugins/builtin`(开发期直接用 target 下编译出的插件 exe)。

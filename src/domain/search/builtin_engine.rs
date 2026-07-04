@@ -3,19 +3,20 @@
 //! 内置动作不经过插件进程，直接在 core 内执行，响应速度最快。
 //! 包含：设置、锁屏、关机/重启/睡眠、清空历史等系统操作。
 //!
-//! 数据模型（0.8.0 §1.3 扩容）：
+//! 数据模型（0.8.0 §1.3 扩容 / 0.8.2 §3.2.1 上移 enum）：
 //! - `BuiltinAction`：静态注册表条目，除原有 id/title/subtitle/keywords/kind 外，扩
-//!   三字段 `context` / `param_source` / `default_enabled`。当前 9 个动作全部默认值
-//!   （不参与 Context 路由、无参、默认启用），行为与 0.7 相同；0.8.0 后续步骤会新增
-//!   3 个参数化动作（OpenUrl / OpenPath / RevealInExplorer）+ 双路匹配 + disable。
+//!   三字段 `context` / `param_source` / `default_enabled`。
 //! - `BuiltinActionKind`：**分派 tag**，唯一定义在这里。命令层 `commands::run_builtin_action`
 //!   收到前端 action id 后 `match id.as_str()` 分派到对应 kind 的执行分支。
 //!   与前端契约 `crate::domain::search::ActionKind`（Open/Copy/RunAction）撞名故加前缀。
+//! - `ContextTrigger` / `ParamSource`：0.8.2 §3.2.1 起统一从 `domain::context::trigger`
+//!   引用，与插件路由（`intent::RuleRouter`）共用同一 enum。
 
 use serde::Serialize;
 
 use super::engine::{QueryContext, SearchAction, SearchEngine, SearchItem};
 use super::scorer::{apply_history, BuiltinMatch};
+use crate::domain::context::trigger::{self as ctx_trigger, ContextTrigger, ParamSource};
 
 /// 内置动作定义。
 struct BuiltinAction {
@@ -39,33 +40,6 @@ struct BuiltinAction {
     /// `AppConfig.disabled_builtin_actions: Vec<String>`。
     #[allow(dead_code)] // Task 3+ 引入 disable 逻辑后被读
     default_enabled: bool,
-}
-
-/// Context 触发条件（0.8.0 §1.3）。
-///
-/// 只声明 0.8.0 有消费者的变体——`ClipboardIsCode` / `ForegroundIs` 等延后到有真实需求时再加，
-/// 避免"永远返回 false 的诱饵"。
-#[allow(dead_code)] // Task 7 双路匹配引入后被读
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ContextTrigger {
-    /// 剪贴板文本是 URL（http/https/file/ftp）
-    ClipboardIsUrl,
-    /// 剪贴板文本是 Windows 文件路径（绝对路径 / UNC）
-    ClipboardIsFilePath,
-    /// 选区文本非空
-    SelectionNonEmpty,
-}
-
-/// 参数来源（0.8.0 §1.3）。
-///
-/// 0.8.0 只支持 Clipboard / Selection 两种；`QueryRest`（`echo hello` 里的 hello）无消费者延后。
-/// 长句参数走 0.8.3 AI function calling，不做本地 NER。
-#[allow(dead_code)] // Task 7/8 引入参数化 Action 后被读
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ParamSource {
-    None,
-    Clipboard,
-    Selection,
 }
 
 /// 内置动作类型（分派 tag）。
@@ -285,7 +259,7 @@ impl SearchEngine for BuiltinEngine {
             //     否则会出现"复制'缺' + 输入'打开链接'"这种 keyword 蒙混、参数不合法
             //     的僵尸候选，回车执行时报"找不到文件'缺'"。
             //     无 context 声明的 Action（现有 9 个无参动作）不受此闸门约束。
-            let ctx_hit = context_matches(action.context, ctx.snapshot);
+            let ctx_hit = ctx_trigger::any_hit(action.context, ctx.snapshot, None);
             if !action.context.is_empty() && !ctx_hit {
                 continue;
             }
@@ -293,7 +267,7 @@ impl SearchEngine for BuiltinEngine {
             // 2b. 参数抽取 + 参数校验：Action 声明需要参数但抽不到值 → 不召回
             //     （能走到这里的参数化 Action 已通过 Context 门禁，参数一般存在；
             //     此处兜底防守，避免 snapshot 结构变化时静默出错）。
-            let arg = extract_arg(action.param_source, ctx.snapshot);
+            let arg = action.param_source.extract(ctx.snapshot);
             if action.param_source != ParamSource::None && arg.is_none() {
                 continue;
             }
@@ -329,60 +303,6 @@ impl SearchEngine for BuiltinEngine {
             items.push(action_to_search_item(action, score, arg, detail));
         }
         items
-    }
-}
-
-/// Context 触发条件命中判定：任一 trigger 命中即通过（OR 语义）。
-///
-/// 空 slice = 不参与 Context 路由 → 恒 false，让搜索路径完全靠 keyword。
-fn context_matches(triggers: &[ContextTrigger], snapshot: &crate::infra::platform::context::ContextSnapshot) -> bool {
-    if triggers.is_empty() {
-        return false;
-    }
-    triggers.iter().any(|t| match t {
-        ContextTrigger::ClipboardIsUrl => snapshot
-            .clipboard_text
-            .as_deref()
-            .map(crate::domain::context::probe::is_url)
-            .unwrap_or(false),
-        ContextTrigger::ClipboardIsFilePath => snapshot
-            .clipboard_text
-            .as_deref()
-            .map(crate::domain::context::probe::is_file_path)
-            .unwrap_or(false),
-        ContextTrigger::SelectionNonEmpty => snapshot
-            .selected_text
-            .as_deref()
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or(false),
-    })
-}
-
-/// 按 `ParamSource` 从快照抽取参数值。
-///
-/// Task 8 引入的参数化 Action（OpenUrl/OpenPath/RevealInExplorer）通过此函数拿到
-/// 实参；当前 9 个动作 param_source=None 恒返回 None。
-///
-/// 抽到的字符串包成 `serde_json::Value::String`，随 `SearchAction::RunAction.arg`
-/// 一路传到前端 dataset，激活时回传给 `run_builtin_action` 命令。
-fn extract_arg(
-    source: ParamSource,
-    snapshot: &crate::infra::platform::context::ContextSnapshot,
-) -> Option<serde_json::Value> {
-    match source {
-        ParamSource::None => None,
-        ParamSource::Clipboard => snapshot
-            .clipboard_text
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| serde_json::Value::String(s.to_string())),
-        ParamSource::Selection => snapshot
-            .selected_text
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| serde_json::Value::String(s.to_string())),
     }
 }
 
@@ -550,6 +470,7 @@ fn describe_trigger(t: &ContextTrigger) -> &'static str {
         ContextTrigger::ClipboardIsUrl => "剪贴板是 URL",
         ContextTrigger::ClipboardIsFilePath => "剪贴板是文件路径",
         ContextTrigger::SelectionNonEmpty => "选中了文本",
+        ContextTrigger::TextIsNonTargetLang { .. } => "文本值得翻译",
     }
 }
 

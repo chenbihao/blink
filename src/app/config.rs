@@ -670,6 +670,11 @@ impl PluginConfig {
                 crate::domain::plugin::PluginTrigger::Regex { .. } => {
                     result.push(trigger.clone());
                 }
+                crate::domain::plugin::PluginTrigger::Context { .. } => {
+                    // Context 触发不参与 disabled_default_triggers 过滤（用户想禁用整个 Context
+                    // 触发应该走「插件 disable」，而不是关键词黑名单）。原样透传。
+                    result.push(trigger.clone());
+                }
             }
         }
 
@@ -692,6 +697,7 @@ impl PluginConfig {
 /// Context 层配置：控制唤起时的环境采集行为。
 /// - enabled: 总开关，关闭后完全不采集
 /// - clipboard_enabled: 是否采集剪贴板文本
+/// - selection_enabled: 是否启用划词感知（鼠标划选文本 → UIA 抓取 → 缓存，供 invoke 时读取）
 /// - sensitive_apps: 敏感应用进程名黑名单（如密码管理器），前台为这些应用时不采集（隐私保护）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextConfig {
@@ -699,6 +705,8 @@ pub struct ContextConfig {
     pub enabled: bool,
     #[serde(default = "default_true")]
     pub clipboard_enabled: bool,
+    #[serde(default = "default_true")]
+    pub selection_enabled: bool,
     #[serde(default)]
     pub sensitive_apps: Vec<String>,
 }
@@ -708,6 +716,7 @@ impl Default for ContextConfig {
         Self {
             enabled: true,
             clipboard_enabled: true,
+            selection_enabled: true,
             sensitive_apps: Vec::new(),
         }
     }
@@ -741,6 +750,7 @@ pub async fn set_context_config(
     tracing::debug!(
         enabled = config.enabled,
         clipboard = config.clipboard_enabled,
+        selection = config.selection_enabled,
         sensitive_count = config.sensitive_apps.len(),
         "Context 配置已更新"
     );

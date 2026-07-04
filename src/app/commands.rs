@@ -850,6 +850,11 @@ pub async fn update_context_config(
 ) -> Result<(), String> {
     let pool = app.state::<sqlx::SqlitePool>();
     crate::app::config::set_context_config(&pool, &config).await?;
+    // 划词监听热切换：从关→开时装钩子(幂等)，从开→关时让回调短路 + 清缓存。
+    crate::infra::platform::selection::set_active(config.selection_enabled);
+    // 敏感应用黑名单同步：划词维护一份影子列表，让钩子回调能在抓取前门控（隐私）。
+    // 见 selection::SENSITIVE_APPS 的 TODO——0.9 awareness 重构会收敛。
+    crate::infra::platform::selection::set_sensitive_apps(config.sensitive_apps.clone());
     if let Some(mem) =
         app.try_state::<std::sync::Arc<std::sync::RwLock<crate::app::config::ContextConfig>>>()
     {

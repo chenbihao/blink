@@ -175,6 +175,11 @@ fn main() {
                 // 加载/初始化每个插件配置(不存在则写默认 {enabled, settings:null})。
                 tauri::async_runtime::block_on(engine.init_configs());
 
+                // 0.8.2 §3.4：把 PluginEngine 作为 PluginSettingResolver 后置注入 RuleRouter,
+                // 让 Context 触发能读插件 target_lang(如翻译)。同步 app_language 快照。
+                router.set_setting_resolver(engine.clone() as std::sync::Arc<dyn domain::plugin::PluginSettingResolver>);
+                router.set_app_language(app_config.language.clone());
+
                 // 注入规则到 RuleRouter（合并 manifest triggers + 用户自定义 triggers）
                 for plugin in &plugins {
                     if !engine.is_enabled(plugin.id()) {

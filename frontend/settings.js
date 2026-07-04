@@ -404,7 +404,7 @@ async function loadContextConfig() {
   const container = document.getElementById("context-container");
   if (!container) return;
 
-  let cfg = { enabled: true, clipboard_enabled: true, sensitive_apps: [] };
+  let cfg = { enabled: true, clipboard_enabled: true, selection_enabled: true, sensitive_apps: [] };
   try {
     const data = await invoke("get_context_config");
     if (data) cfg = data;
@@ -414,6 +414,9 @@ async function loadContextConfig() {
 
   // ── 渲染卡片 ──
   const CLIPBOARD_FIELD = booleanField("clipboard_enabled", t("context.clipboard"));
+  const SELECTION_FIELD = booleanField("selection_enabled", t("context.selection"), {
+    description: t("context.selection.hint"),
+  });
   const enableSwitch = `<label class="switch"><input type="checkbox" class="context-enabled" ${cfg.enabled ? "checked" : ""} /><span class="slider"></span></label>`;
 
   container.innerHTML = renderExtensionCard({
@@ -421,8 +424,10 @@ async function loadContextConfig() {
     title: t("context.title"),
     desc: t("context.desc"),
     headerRight: enableSwitch,
+    attrs: "data-autosave",
     body: `<div class="plugin-config-section" style="padding-top: 0;">
         ${renderSettingField(CLIPBOARD_FIELD, cfg.clipboard_enabled)}
+        ${renderSettingField(SELECTION_FIELD, cfg.selection_enabled)}
         <div class="plugin-field-row">
           <div class="field-head">
             <span class="field-title">${t("context.sensitive.title")}</span>
@@ -472,10 +477,11 @@ async function loadContextConfig() {
   async function save() {
     const enabled = container.querySelector(".context-enabled").checked;
     const clipboard_enabled = container.querySelector('.plugin-field[data-key="clipboard_enabled"]')?.checked ?? true;
+    const selection_enabled = container.querySelector('.plugin-field[data-key="selection_enabled"]')?.checked ?? true;
     const msg = container.querySelector(".context-save-msg");
     try {
       await invoke("update_context_config", {
-        config: { enabled, clipboard_enabled, sensitive_apps: [...sensitiveApps] },
+        config: { enabled, clipboard_enabled, selection_enabled, sensitive_apps: [...sensitiveApps] },
       });
       if (msg) {
         msg.textContent = t("context.auto_saved");
@@ -491,9 +497,10 @@ async function loadContextConfig() {
     }
   }
 
-  // 总开关 + 剪贴板开关 → change 自动保存
+  // 总开关 + 剪贴板开关 + 划词开关 → change 自动保存
   container.querySelector(".context-enabled")?.addEventListener("change", save);
   container.querySelector('.plugin-field[data-key="clipboard_enabled"]')?.addEventListener("change", save);
+  container.querySelector('.plugin-field[data-key="selection_enabled"]')?.addEventListener("change", save);
 
   // ── 添加应用弹窗 ──
   container.querySelector(".context-add-btn")?.addEventListener("click", async () => {
@@ -1329,13 +1336,18 @@ function clearUnsaved(container) {
 }
 
 // 事件委托：plugin-field 变化时标记待保存（input 实时，change 最终）
+// 例外：容器带 [data-autosave] 的自动保存卡片跳过——它们 change 即 save，无需 badge。
 document.addEventListener("input", (e) => {
   const el = e.target.closest(".plugin-field");
-  if (el && el.type !== "checkbox") markUnsaved(el);
+  if (!el || el.type === "checkbox") return;
+  if (el.closest("[data-autosave]")) return;
+  markUnsaved(el);
 });
 document.addEventListener("change", (e) => {
   const el = e.target.closest(".plugin-field");
-  if (el) markUnsaved(el);
+  if (!el) return;
+  if (el.closest("[data-autosave]")) return;
+  markUnsaved(el);
 });
 
 // 文件搜索引擎的输入框（不是 plugin-field，单独处理）

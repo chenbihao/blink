@@ -167,10 +167,16 @@ impl SearchService {
     /// 更新界面语言快照（0.8.1）。启动时读一次 AppConfig.language 注入；
     /// 设置页切换语言时命令层调此方法。用于把插件 manifest 里的 `empty_arg_hint`
     /// 等 `LocalizableText` 解析成当前语言。
+    ///
+    /// 0.8.2 §3.4：同时转发到 `IntentRouter::set_app_language`——`RuleRouter` 用来
+    /// 支持 `TextIsNonTargetLang` 中 `target_lang="auto"` 的回退。
     pub fn update_language(&self, language: String) {
-        let mut guard = self.language.write().unwrap();
-        *guard = language;
-        tracing::debug!(language = %*guard, "SearchService 界面语言已热更新");
+        {
+            let mut guard = self.language.write().unwrap();
+            *guard = language.clone();
+        }
+        self.router.set_app_language(language);
+        tracing::debug!("SearchService 界面语言已热更新");
     }
 
     /// 启动所有引擎的后台任务(如 StartMenuEngine 预扫)。
@@ -243,36 +249,20 @@ impl SearchService {
             disabled_builtin_actions: &disabled,
         };
 
-        // 空 query：只让 sync lane 走 Context-only 分支（0.8.0 §1.3）
-        if q.is_empty() {
-            let mut items = Vec::new();
-            for engine in &self.sync_engines {
-                items.extend(engine.search(q, &search_ctx).await);
-            }
-            let limit = self.max_results.load(Ordering::SeqCst);
-            let all_items: Vec<AppEntry> = fuse_items(items, limit)
-                .into_iter()
-                .map(SearchItem::into_app_entry)
-                .collect();
-            let elapsed = search_start.elapsed().as_secs_f64() * 1000.0;
-            crate::infra::utils::perf::record(
-                crate::infra::utils::perf::MetricCategory::SearchEngine,
-                "total",
-                elapsed,
-                None,
-            );
-            // 空 query 恒无 ghost hint（设计 §2.4）——避免刚 shown 满屏灰字
-            return SearchResponse { entries: all_items, completion_hint: None };
-        }
-
+        // 空 query 也要走 router.route() —— 让 Context 规则（0.8.2 §3.4）参与召回。
+        // 老逻辑（0.8.0/0.8.1）此处短路，导致翻译 Context 触发在空 query 场景永远不生效。
+        // route() 里 keyword/regex 天然不命中空 query（`starts_with("kw ")` 不满足），
+        // 只有 Context 规则会产出 candidates，与 BuiltinEngine 的 Context-only 分支并存。
         let intent_ctx = crate::domain::intent::QueryContext { history: &history, snapshot: &snapshot };
         let route = self.router.route(q, &intent_ctx).await;
         // 过滤不符合前置条件的路由(禁用插件 + 参数过短),避免占位符死态。
         let route = self.filter_route(route);
 
         // Autosuggestion（0.8.1 §2.5）：enabled 关闭时直接 None 短路。
-        // 非空 query 情况下无论 route 结果如何都算一次——ghost text 独立于召回。
-        let completion_hint = {
+        // 空 query 恒无 ghost hint（设计 §2.4，避免刚 shown 满屏灰字）。
+        let completion_hint = if q.is_empty() {
+            None
+        } else {
             let cfg = *self.autosuggest.read().unwrap();
             if cfg.enabled {
                 // query 用未 trim 的原文（保尾空格）；上层 `q` 已被 trim。
@@ -410,6 +400,10 @@ impl SearchService {
     /// 若插件本身"空参无意义"（如翻译需要文本、搜索需要关键词），应在 manifest 里配
     /// `empty_arg_hint`——`SearchService::search` 会在 spawn 之前拦下并合成静态引导 entry
     /// （节省一次 IPC + 支持 i18n）。这两条路径共同承担"空参场景"，此 filter 不介入。
+    ///
+    /// **0.8.2 §3.4 Context 命中同样生效**：`Candidate` 里不区分 keyword/context 来源,
+    /// filter 只看 `plugin_id` + `arg`——禁用插件 / min_arg_length 过滤链自动覆盖
+    /// Context 命中的候选,无需额外分支。
     fn filter_route(&self, route: Route) -> Route {
         let Some(pe) = &self.plugin_engine else {
             return route;

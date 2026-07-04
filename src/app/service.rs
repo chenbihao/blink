@@ -148,12 +148,15 @@ impl Service for SelectionService {
     fn name(&self) -> &'static str {
         "selection"
     }
-    async fn start(&self, _ctx: &AppContext) -> Result<(), String> {
-        // selected_text 目前无消费者（§1.2 RuleRouter 路由接入待做），先停用选区监听，
-        // 避免常驻第二条低级鼠标钩子 + 无谓的划词 UIA 抓取开销。路由接好后改 true 启用。
-        // 用 const 开关而非注释：注释会让整条监听链变成 dead code（14 个 warning）。
-        const ENABLE_SELECTION_LISTENER: bool = false;
-        if ENABLE_SELECTION_LISTENER {
+    async fn start(&self, ctx: &AppContext) -> Result<(), String> {
+        // 依 ContextConfig.selection_enabled 决定是否启用划词监听。
+        // 用户可在设置-上下文-环境感知里热切换（见 commands::update_context_config）。
+        // 局限：钩子一旦装上，关闭态只是让回调短路（不再抓取），不会真正卸钩子
+        //      —— 低级鼠标钩子跨线程卸载不安全，且实测再启用比反复装卸更稳。
+        let cfg = crate::app::config::get_context_config(&ctx.pool).await;
+        // 敏感应用黑名单：灌初始值，让钩子回调启动即门控。热更新走 commands::update_context_config。
+        crate::infra::platform::selection::set_sensitive_apps(cfg.sensitive_apps.clone());
+        if cfg.selection_enabled {
             crate::infra::platform::selection::start_listener();
         }
         Ok(())

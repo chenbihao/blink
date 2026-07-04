@@ -48,7 +48,9 @@ fn hook_thread_main() {
 /// 低级鼠标钩子回调：选词检测。全程放行（CallNextHookEx），绝不吞鼠标事件。
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     const HC_ACTION: i32 = 0;
-    if code == HC_ACTION {
+    // 关闭态直接放行（不做选词判定，也不清 down/up 状态——反正下次开启前状态天然作废）。
+    // 一次原子读，微秒级开销，不影响钩子链 300ms 超时。
+    if code == HC_ACTION && super::is_active() {
         let ms = unsafe { &*(lparam.0 as usize as *const MSLLHOOKSTRUCT) };
         let msg = wparam.0 as u32;
         if msg == WM_LBUTTONDOWN {
@@ -113,6 +115,14 @@ fn on_selection() {
     let fg = unsafe { GetForegroundWindow() };
     let fg_raw = fg.0 as isize;
     if fg_raw == 0 {
+        return;
+    }
+    // 隐私门控：前台是敏感应用（如密码管理器）时直接跳过抓取，源头拦截，缓存永远不落敏感文本。
+    // 与 context::collect 的敏感应用检查语义一致（共用 ContextConfig.sensitive_apps）。
+    if let Some(proc_name) = super::windows::process_name_of_window(fg_raw)
+        && super::is_process_sensitive(&proc_name)
+    {
+        tracing::debug!(app = %proc_name, "划词感知：前台为敏感应用，跳过抓取");
         return;
     }
     std::thread::spawn(move || match super::get_selected_text(fg_raw) {

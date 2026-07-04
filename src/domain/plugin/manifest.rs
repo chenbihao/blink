@@ -26,7 +26,7 @@ pub struct PluginManifest {
     #[allow(dead_code)] // builtin 信任来源标记,本切片只加载 builtin
     pub builtin: bool,
     pub runtime: PluginRuntime,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_triggers_lenient")]
     pub triggers: Vec<PluginTrigger>,
     #[serde(default)]
     pub capabilities: Vec<String>,
@@ -93,7 +93,11 @@ pub struct PluginRuntime {
     pub empty_arg_hint: Option<LocalizableText>,
 }
 
-/// 触发器。本切片只实现 keyword(精确/前缀);regex 先定义不实现。
+/// 触发器。0.8.2 §3.2.3 加 `Context` 变体。
+///
+/// **serde 容错**：`triggers: Vec<PluginTrigger>` 字段用自定义反序列化——单条 trigger
+/// 解析失败（未知 tag / 未知 when 值 / surface 越界等）仅 `warn!` 后跳过该条，其他
+/// trigger 保留。避免 0.x 阶段新增 tag 时旧版 blink 加载新 manifest 直接崩掉整个插件。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum PluginTrigger {
@@ -110,10 +114,80 @@ pub enum PluginTrigger {
         #[serde(default = "default_exclusive")]
         exclusive: bool,
     },
+    /// Context 触发（0.8.2 §3.2.3）。**弱意图信号，永不 Takeover**——
+    /// manifest 侧 `surface` 只允许 `Priority`；填 `Inline` 时 `RuleRouter` warn+降级。
+    Context {
+        when: ManifestContextWhen,
+        #[serde(default)]
+        surface: ManifestSurfaceHint,
+    },
+}
+
+/// manifest 侧 Context 触发条件（0.8.2 §3.2.3）。
+///
+/// 字符串形态：`snake_case`。对应 `domain::context::trigger::ContextTrigger`
+/// （由 `RuleRouter` 完成映射；本模块只做 manifest 解析）。
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ManifestContextWhen {
+    ClipboardIsUrl,
+    ClipboardIsFilePath,
+    SelectionNonEmpty,
+    /// 翻译插件专用：文本（selection 优先，缺则 clipboard）值得翻译。
+    TextIsNonTargetLang,
+}
+
+/// manifest 侧 surface 声明。0.8.2 只允许 `Priority`；`Inline` 保留 enum 但
+/// `RuleRouter` 收到时 warn+降级。0.8.3 Chord / "搜索选区"插件真需要 Inline 时放开。
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ManifestSurfaceHint {
+    Priority,
+    Inline,
+}
+
+impl Default for ManifestSurfaceHint {
+    fn default() -> Self {
+        ManifestSurfaceHint::Priority
+    }
 }
 
 fn default_exclusive() -> bool {
     true
+}
+
+/// 容错反序列化 triggers（0.8.2 §3.2.3）。
+///
+/// 逐条尝试解析：`serde_json::from_value::<PluginTrigger>(...)` 失败 → warn 后跳过，
+/// 保留其余 trigger。避免 0.x 阶段新增 `type` / `when` 值时旧版 blink 直接崩掉整个 manifest。
+fn deserialize_triggers_lenient<'de, D>(deserializer: D) -> Result<Vec<PluginTrigger>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // 先当 raw Vec<Value>，再逐条尝试转 PluginTrigger
+    let raw: Vec<serde_json::Value> = Vec::deserialize(deserializer)?;
+    let mut out = Vec::with_capacity(raw.len());
+    for (idx, item) in raw.into_iter().enumerate() {
+        // 抽 type 字段做日志锚点，避免 %item 把整段 JSON(可能几 K)塞进日志
+        let raw_type = item
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("<missing>")
+            .to_string();
+        match serde_json::from_value::<PluginTrigger>(item) {
+            Ok(t) => out.push(t),
+            Err(e) => {
+                tracing::warn!(
+                    index = idx,
+                    raw_type = %raw_type,
+                    error = %e,
+                    "triggers[{}] 解析失败，跳过该条（未知 type/when/surface 或字段缺失）",
+                    idx,
+                );
+            }
+        }
+    }
+    Ok(out)
 }
 
 // ── 配置 schema(0.5.1,驱动设置页 UI)──────────────────────────────────────────
@@ -566,6 +640,80 @@ mod tests {
             !got.to_string_lossy().starts_with(r"\\?\"),
             "exec_path 结果不应带 \\\\?\\ 前缀，实际={}", got.display(),
         );
+    }
+
+    #[test]
+    fn context_trigger_parses() {
+        let json = r#"{
+            "schema_version": 1, "id": "translate", "name": "T", "version": "0",
+            "runtime": {"exec": "x.exe"},
+            "triggers": [
+                {"type": "keyword", "keyword": "翻译"},
+                {"type": "context", "when": "text_is_non_target_lang", "surface": "priority"}
+            ]
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.triggers.len(), 2);
+        assert!(matches!(
+            m.triggers[1],
+            PluginTrigger::Context {
+                when: ManifestContextWhen::TextIsNonTargetLang,
+                surface: ManifestSurfaceHint::Priority,
+            }
+        ));
+    }
+
+    #[test]
+    fn context_trigger_surface_defaults_to_priority() {
+        let json = r#"{
+            "schema_version": 1, "id": "x", "name": "X", "version": "0",
+            "runtime": {"exec": "x.exe"},
+            "triggers": [
+                {"type": "context", "when": "clipboard_is_url"}
+            ]
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            m.triggers[0],
+            PluginTrigger::Context {
+                when: ManifestContextWhen::ClipboardIsUrl,
+                surface: ManifestSurfaceHint::Priority, // default
+            }
+        ));
+    }
+
+    #[test]
+    fn triggers_lenient_skips_bad_entry() {
+        // 一条未知 type 的 trigger 混在中间：只跳过它，keyword 保留
+        let json = r#"{
+            "schema_version": 1, "id": "x", "name": "X", "version": "0",
+            "runtime": {"exec": "x.exe"},
+            "triggers": [
+                {"type": "keyword", "keyword": "a"},
+                {"type": "future_unknown_type", "foo": "bar"},
+                {"type": "keyword", "keyword": "b"}
+            ]
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.triggers.len(), 2);
+        assert!(matches!(&m.triggers[0], PluginTrigger::Keyword { keyword, .. } if keyword == "a"));
+        assert!(matches!(&m.triggers[1], PluginTrigger::Keyword { keyword, .. } if keyword == "b"));
+    }
+
+    #[test]
+    fn triggers_lenient_skips_bad_when_value() {
+        // context trigger 的 when 是未知值 → 跳过该条,其他保留
+        let json = r#"{
+            "schema_version": 1, "id": "x", "name": "X", "version": "0",
+            "runtime": {"exec": "x.exe"},
+            "triggers": [
+                {"type": "keyword", "keyword": "ok"},
+                {"type": "context", "when": "some_future_condition"}
+            ]
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.triggers.len(), 1);
+        assert!(matches!(&m.triggers[0], PluginTrigger::Keyword { keyword, .. } if keyword == "ok"));
     }
 
     #[cfg(windows)]

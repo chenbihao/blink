@@ -7,6 +7,7 @@
 //!
 //! 缓存独立于 SearchService（避免 infra→domain 反向依赖），由 `window::invoke` 合并进 snapshot。
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{OnceLock, RwLock};
 use std::time::Instant;
 
@@ -64,19 +65,125 @@ pub fn get_last_selection() -> Option<String> {
 }
 
 // ── 划词监听（鼠标钩子） ──────────────────────────────────────
+//
+// 低级鼠标钩子 WH_MOUSE_LL 一旦安装，从其他线程 UnhookWindowsHookEx 会失败/竞态，
+// 且钩子线程持有的 tls 状态也难以干净重置。因此策略是：
+// - 钩子安装保持幂等（进程内只装一次，OnceLock 守卫）
+// - 「关闭划词感知」不卸钩子，而是让回调发现开关为 false 时直接跳过选词判定与抓取
+//   （代价：钩子链上一次极轻的 WPARAM/CoWord 分派，微秒级；比反复装卸钩子安全）
 
-/// 启动划词监听（main 启动时调用一次）。
+static LISTENER_STARTED: OnceLock<()> = OnceLock::new();
+static LISTENER_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// 敏感应用黑名单（前台是这些应用时不抓取选区）。
+///
+/// 隐私门控：`on_selection` 拿到前台 HWND 后先查进程名，命中则直接跳过——
+/// 抓取都不做，缓存永远干净。与 `ContextConfig::sensitive_apps` 同步（`set_active` 之外
+/// 的另一路 hot swap，见 `commands::update_context_config`）。
+///
+/// TODO(0.9 awareness 重构)：目前是"划词自己维护一份影子列表"——sensitive 应该是
+/// awareness 层的横切策略，所有通道（selection/clipboard/foreground）共用一份。见 memory。
+static SENSITIVE_APPS: OnceLock<RwLock<Vec<String>>> = OnceLock::new();
+
+fn sensitive_apps() -> &'static RwLock<Vec<String>> {
+    SENSITIVE_APPS.get_or_init(|| RwLock::new(Vec::new()))
+}
+
+/// 划词感知当前是否启用。回调线程读它决定是否处理选词。
+pub(crate) fn is_active() -> bool {
+    LISTENER_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// 查询进程名是否命中敏感应用黑名单（大小写不敏感、前后空白）。
+/// 回调线程用它决定是否跳过抓取。
+pub(crate) fn is_process_sensitive(process_name: &str) -> bool {
+    let name = process_name.trim();
+    if name.is_empty() {
+        return false;
+    }
+    let list = sensitive_apps().read().unwrap();
+    list.iter().any(|s| s.trim().eq_ignore_ascii_case(name))
+}
+
+/// 热更新敏感应用列表。`update_context_config` 保存后调它同步。
+pub fn set_sensitive_apps(apps: Vec<String>) {
+    let mut g = sensitive_apps().write().unwrap();
+    *g = apps;
+    tracing::debug!(count = g.len(), "划词感知：敏感应用列表已同步");
+}
+
+/// 启动划词监听（幂等）。首次调用装钩子；之后调用只翻转激活位。
+/// 主线程 setup 阶段调用。运行期热切换（用户在设置里 toggle）走 `set_active`。
 #[cfg(target_os = "windows")]
 pub fn start_listener() {
-    self::listener::start();
+    LISTENER_ACTIVE.store(true, Ordering::Relaxed);
+    LISTENER_STARTED.get_or_init(|| {
+        self::listener::start();
+    });
+    tracing::debug!("划词监听已启用");
 }
 
 #[cfg(not(target_os = "windows"))]
 #[allow(dead_code)]
-pub fn start_listener() {}
+pub fn start_listener() {
+    LISTENER_ACTIVE.store(true, Ordering::Relaxed);
+}
+
+/// 热更新激活状态：`true` 允许钩子回调抓取；`false` 直接跳过（钩子仍在链上但不做事）。
+/// 首次 true 时若钩子未装则装上（配合 `start_listener` 幂等）。
+pub fn set_active(active: bool) {
+    let prev = LISTENER_ACTIVE.swap(active, Ordering::Relaxed);
+    if prev == active {
+        return;
+    }
+    if active {
+        #[cfg(target_os = "windows")]
+        LISTENER_STARTED.get_or_init(|| {
+            self::listener::start();
+        });
+        tracing::debug!("划词感知：已启用（钩子活跃）");
+    } else {
+        // 关闭时清一次缓存，避免残留选区在下次开启前被 invoke 读到
+        if let Some(lock) = CACHE.get() {
+            let mut g = lock.write().unwrap();
+            g.text = None;
+            g.at = None;
+        }
+        tracing::debug!("划词感知：已关闭（钩子链保留，回调跳过）");
+    }
+}
 
 #[cfg(target_os = "windows")]
 mod listener;
 
 #[cfg(target_os = "windows")]
 mod windows;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 单测合并：SENSITIVE_APPS 是静态全局，cargo 默认多线程跑会互相污染。
+    // 用一个 test 串行覆盖所有 case，比引入 serial_test 依赖轻。
+    #[test]
+    fn sensitive_apps_matching() {
+        // 大小写不敏感、trim
+        set_sensitive_apps(vec!["Bitwarden.exe".into(), "  1Password.exe  ".into()]);
+        assert!(is_process_sensitive("bitwarden.exe"));
+        assert!(is_process_sensitive("BITWARDEN.EXE"));
+        assert!(is_process_sensitive("1password.exe"));
+        assert!(is_process_sensitive("  Bitwarden.exe  "));
+
+        // 空进程名不命中（防误伤）
+        assert!(!is_process_sensitive(""));
+        assert!(!is_process_sensitive("   "));
+
+        // 非黑名单不命中；部分匹配不算命中（必须完整进程名等价）
+        assert!(!is_process_sensitive("chrome.exe"));
+        assert!(!is_process_sensitive("Bitwarden"));
+
+        // 清空列表 → 一切不命中
+        set_sensitive_apps(vec![]);
+        assert!(!is_process_sensitive("Bitwarden.exe"));
+    }
+}

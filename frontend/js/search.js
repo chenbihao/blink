@@ -27,11 +27,12 @@ export function init() {
     isComposing = false;
     onInput(); // 组字结束后立即触发一次完整输入搜索
   });
-  // async lane 慢引擎完成后推送增量；校验 seq（防过期）+ 非空 query（防 reset 后回填）。
+  // async lane 慢引擎完成后推送增量；校验 seq（防过期）。
+  // 0.8.2：不再拦"空 query"——Context 触发（选区/剪贴板感知）会在空 query 下产生
+  // 合法的插件增量结果（如翻译）。原护栏靠 seq/reset 已足够防隐藏后回填。
   listen("blink://results", (event) => {
     const payload = event.payload;
     if (!payload || payload.seq !== seq) return;
-    if (!queryEl.value.trim()) return;
     results.merge(payload.items, payload.seq);
     // 增量事件不带 hint（同步首次返回已给过），此处不动 ghost。
   });
