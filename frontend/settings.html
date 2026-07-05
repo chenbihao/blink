@@ -21,6 +21,7 @@
         <button class="tab" data-tab="plugins" data-i18n="tab.plugins">插件</button>
         <button class="tab" data-tab="network" data-i18n="tab.network">网络</button>
         <button class="tab" data-tab="context" data-i18n="tab.context">上下文智能感知</button>
+        <button class="tab" data-tab="chord" data-i18n="tab.chord">Chord 交互</button>
         <button class="tab" data-tab="storage" data-i18n="tab.storage">存储</button>
         <button class="tab" data-tab="debug" data-i18n="tab.debug">调试</button>
         <button class="tab" data-tab="about" data-i18n="tab.about">关于</button>
@@ -496,6 +497,53 @@
           <h3 style="margin-top: 20px" data-i18n="context.privacy.title">采集与敏感应用</h3>
           <div id="context-container">
             <!-- 由 JS 动态渲染 -->
+          </div>
+        </div>
+
+        <!-- Chord 交互（0.8.5 §6.6）─────────────────────────────── -->
+        <div id="chord" class="panel">
+          <h2 data-i18n="panel.chord">Chord 交互</h2>
+          <div class="setting-row" style="display: block;">
+            <span class="hint" data-i18n="chord.hint">主窗可见且未开始输入时，按住 Alt 可触发快捷动作（区域截图 / 智能划词 / 剪贴板历史）</span>
+          </div>
+
+          <!-- 总开关 -->
+          <h3 style="margin-top: 20px" data-i18n="chord.general.title">总控</h3>
+          <div class="setting-row">
+            <label class="setting-label" data-i18n="chord.enabled.label">启用 Chord</label>
+            <label class="switch">
+              <input type="checkbox" id="chord-enabled" />
+              <span class="slider"></span>
+            </label>
+            <span class="hint" data-i18n="chord.enabled.hint">关闭后 Alt+字母 不再触发 Chord 动作</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label" data-i18n="chord.hint_visible.label">显示提示条</label>
+            <label class="switch">
+              <input type="checkbox" id="chord-hint-visible" />
+              <span class="slider"></span>
+            </label>
+            <span class="hint" data-i18n="chord.hint_visible.hint">按住 Alt 时是否在输入框内浮现单行动作提示</span>
+          </div>
+
+          <!-- 逐条动作开关 -->
+          <h3 style="margin-top: 20px" data-i18n="chord.actions.title">动作列表</h3>
+          <div class="setting-row" style="display: block;">
+            <span class="hint" data-i18n="chord.actions.hint">取消勾选后该 Chord 不再列在提示条，Alt+字母 也不再触发</span>
+          </div>
+          <div id="chord-actions-container">
+            <!-- 由 JS 动态渲染 -->
+          </div>
+
+          <!-- 剪贴板监听 -->
+          <h3 style="margin-top: 20px" data-i18n="chord.clipboard.title">剪贴板历史</h3>
+          <div class="setting-row">
+            <label class="setting-label" data-i18n="chord.clipboard.enabled.label">监听剪贴板写入</label>
+            <label class="switch">
+              <input type="checkbox" id="clipboard-enabled" />
+              <span class="slider"></span>
+            </label>
+            <span class="hint" data-i18n="chord.clipboard.enabled.hint">开启后自动记录复制内容，输入"剪贴板"或 Alt+C 召回历史（改动需重启生效）</span>
           </div>
         </div>
 

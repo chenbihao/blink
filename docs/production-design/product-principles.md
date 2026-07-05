@@ -164,8 +164,42 @@
 - [ ] 弱化文本用的是 `opacity` 还是新调的低饱和度灰?后者 → ❌
 - [ ] 新元素在 dark/light 双主题都测过对比度?未测 → ❌
 - [ ] 新元素出现/消失时布局有无跳变?有跳变 → 改成行内叠加或固定位置
+- [ ] 涉及键位提示时,走的是 `kbd.js::renderKey/renderCombo` 还是自己拼字符串?后者 → ❌(违反 §14.7)
 
 ### 14.6 与其他原则的关系
 
 - **vs §13 最小操作路径**:§13 管**能不能更快**,§14 管**看不清就没意义**——两者叠加。Ghost 采纳能不能更快?能。前提是 Ghost 本身**看得清但不打扰**,这是 §14 的活。
 - **vs 主题系统**(phases/0.5 §四):主题系统提供 palette,§14 定义**如何用 palette**。palette 是弹药,§14 是射击原则。
+
+### 14.7 键盘提示样式统一(强制规则)
+
+**准则**:任何呈现键位的地方,视觉与生成路径全项目一致——只有一套 `<kbd>` 组件、一套组合键约定、一套分隔符语义。
+
+**为什么强制**:0.8.5 §6.4 Chord 提示第一版直接 innerHTML 拼字符串,用 macOS 的 `⌥` 符号连接键位——与项目已有 statusbar / 设置页快捷键的 filled pill 键帽完全脱节。用户当场察觉"这块 UI 语言不对"。键盘提示是 launcher 类工具的高频视觉元素,一旦风格分裂,产品显得**是几个不同的人做的**——违背 §14 的"辨识度即品牌"。
+
+**具体约束**:
+
+| 场景 | 生成路径 | 反面案例 |
+|---|---|---|
+| 单键(如 `Enter`/`Tab`) | `<kbd class="kbd">Enter</kbd>` 或 `renderKey("Enter")` | 直接写 `[Enter]` 或 `<Enter>` 文本 |
+| 组合键(如 `Alt+A`/`Ctrl+K`) | `renderCombo("Alt+A")` → 自动嵌 `.kbd-plus` `+` 连接符 | `<kbd>Alt</kbd><kbd>A</kbd>` 无连接符(会被读成两个独立键) |
+| 平台差异符号(`⌘`/`⌥`) | **不用**——Blink 是 Windows 定位,坚持 `Alt`/`Ctrl` 文本 | `⌥A` / `⌘K` 之类的 macOS 符号 |
+| i18n 文案里插键位 | 用 `{{key:Tab}}` 模板占位符,`renderHint` 替换 | 硬编码字符串再事后 innerHTML 拼装 |
+
+**分隔符语义**:
+
+- 键与键**之间**(同一组合)——`+` 连接符(`kbd-plus`)、贴附间距(`kbd-group gap: 0.15em`)
+- 提示之间(不同操作/不同 Chord)——竖线 `│` 加大 margin(`chord-sep margin: 0.7em`)
+- `·` 圆点保留给"参数分隔"类语义(如 statusbar 里 `翻页 · 3/5`),不用于组合键分组
+
+**唯一真源**:
+
+- 键帽样式:`frontend/css/kbd.css` 里 `.kbd` / `.kbd-group` / `.kbd-plus`
+- 生成工具:`frontend/js/kbd.js` 里 `renderKey` / `renderCombo` / `renderHint`
+- 修改任何键位视觉都改这三个文件,**不允许**在业务模块(chord.js/statusbar.js/hints.js/settings.js)里再造轮子
+
+**落地路径**:新 UI 要显示键位时:
+1. 静态文案 → i18n 文件写 `{{key:X}}` 模板 → `renderHint` 渲染
+2. 动态列表(Chord/命令面板/自定义快捷键) → 遍历时 `renderCombo(comboString)`
+3. 命中提示(如 tooltip 上"按 `Ctrl+K` 唤起") → 同 1
+

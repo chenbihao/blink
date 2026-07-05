@@ -38,7 +38,6 @@ export function init() {
     search.reset();
     results.clear();
     clearAlt();
-    chord.closeClipboardPanel(); // 0.8.5：关闭剪贴板面板
   });
 
   // 配置变更即时响应（设置页切换主题/语言等，无需关闭再打开主窗口）
@@ -46,6 +45,7 @@ export function init() {
     applyThemeFromConfig();
     applyI18nFromConfig();
     results.refreshMaxResults();
+    chord.refresh(); // 0.8.5.1 §6.6：Chord 开关/可见性改动即时生效
   });
 
   // 0.8.5：Chord 划词确认 → 填搜索框「翻译 {text}」触发翻译插件
@@ -54,8 +54,10 @@ export function init() {
     queryEl.dispatchEvent(new Event("input", { bubbles: true }));
   });
 
-  // 0.8.5：Chord 剪贴板面板触发（Alt+C）
-  listen("blink://chord-panel", (event) => {
-    if (event.payload === "clipboard") chord.showClipboardPanel();
+  // 0.8.5 §6.4：Chord Alt+C 剪贴板改走 fill-query——后端 ClipboardHistoryAction
+  // execute 里 window::invoke + emit "剪贴板 " → 前端填搜索框 + 触发 ClipboardEngine 召回。
+  listen("blink://chord-fill-query", (event) => {
+    queryEl.value = String(event.payload ?? "");
+    queryEl.dispatchEvent(new Event("input", { bubbles: true }));
   });
 }

@@ -22,6 +22,7 @@ const DICT = {
     "tab.plugins": "插件",
     "tab.network": "网络",
     "tab.context": "上下文智能感知",
+    "tab.chord": "Chord 交互",
     "tab.storage": "存储",
     "tab.debug": "调试",
     "tab.about": "关于",
@@ -32,6 +33,7 @@ const DICT = {
     "panel.plugins": "插件管理",
     "panel.network": "网络配置",
     "panel.context": "上下文智能感知",
+    "panel.chord": "Chord 交互",
     "panel.storage": "存储",
     "panel.debug": "调试",
     "panel.about": "关于",
@@ -255,6 +257,19 @@ const DICT = {
     "context.clipboard": "采集剪贴板文本",
     "context.selection": "划词感知（选中文本抓取）",
     "context.selection.hint": "鼠标划选文本后自动抓取，唤起 Blink 时作为上下文使用。局限：仅 Windows；依赖应用支持 UIA TextPattern，浏览器（Chrome/Edge/Firefox）、Office、VS Code、原生 Win32 支持较好，部分 Electron 应用（如新版 QQ/微信/Discord）、终端、游戏可能抓不到；无选区时可先复制文本，Blink 会自动读剪贴板。",
+
+    // ── Chord 交互面板（0.8.5.1 §6.6）──
+    "chord.hint": "主窗可见且未开始输入时，按住 Alt 可触发快捷动作（区域截图 / 智能划词 / 剪贴板历史）",
+    "chord.general.title": "总控",
+    "chord.enabled.label": "启用 Chord",
+    "chord.enabled.hint": "关闭后 Alt+字母 不再触发 Chord 动作",
+    "chord.hint_visible.label": "显示提示条",
+    "chord.hint_visible.hint": "按住 Alt 时是否在输入框内浮现单行动作提示",
+    "chord.actions.title": "动作列表",
+    "chord.actions.hint": "取消勾选后该 Chord 不再列在提示条，Alt+字母 也不再触发",
+    "chord.clipboard.title": "剪贴板历史",
+    "chord.clipboard.enabled.label": "监听剪贴板写入",
+    "chord.clipboard.enabled.hint": "开启后自动记录复制内容，输入\"剪贴板\"或 Alt+C 召回历史（改动需重启生效）",
     "context.sensitive.title": "敏感应用（前台时不采集上下文）",
     "context.sensitive.hint": "如密码管理器、银行软件等，保护隐私",
     "context.add_app": "＋ 添加应用",
@@ -333,7 +348,7 @@ const DICT = {
     "suggestion.origin.clipboard": "来自剪贴板",
 
     // ── 主窗口：搜索框 ──
-    "search.placeholder": "输入应用名、计算…",
+    // 0.8.5 §6.4：placeholder 移除,改由 Chord 提示（Alt 按下时 `.ghost-chord`）承担引导。
 
     // ── Toast / 通用 ──
     "toast.file_search_saved": "文件搜索配置已保存",
@@ -348,6 +363,7 @@ const DICT = {
     "tab.plugins": "Plugins",
     "tab.network": "Network",
     "tab.context": "Context Awareness",
+    "tab.chord": "Chord",
     "tab.storage": "Storage",
     "tab.debug": "Debug",
     "tab.about": "About",
@@ -358,6 +374,7 @@ const DICT = {
     "panel.plugins": "Plugin Manager",
     "panel.network": "Network Settings",
     "panel.context": "Context Awareness",
+    "panel.chord": "Chord",
     "panel.storage": "Storage",
     "panel.debug": "Debug",
     "panel.about": "About",
@@ -579,6 +596,19 @@ const DICT = {
     "context.clipboard": "Capture clipboard text",
     "context.selection": "Selection awareness (grab highlighted text)",
     "context.selection.hint": "Auto-captures text you highlight with the mouse and passes it as context when you summon Blink. Limitations: Windows only; requires apps to support UIA TextPattern — browsers (Chrome/Edge/Firefox), Office, VS Code and native Win32 work well; some Electron apps (newer QQ/WeChat/Discord), terminals and games may fail. If no selection is grabbed, just copy the text — Blink will read your clipboard.",
+
+    // ── Chord panel (0.8.5.1 §6.6) ──
+    "chord.hint": "When the main window is visible and no input has started, hold Alt to trigger quick actions (Screenshot / Smart Selection / Clipboard).",
+    "chord.general.title": "General",
+    "chord.enabled.label": "Enable Chord",
+    "chord.enabled.hint": "When off, Alt+letter no longer triggers Chord actions",
+    "chord.hint_visible.label": "Show hint bar",
+    "chord.hint_visible.hint": "Whether the single-line action hint appears in the input box while Alt is held",
+    "chord.actions.title": "Actions",
+    "chord.actions.hint": "Unchecked actions no longer appear in the hint bar; Alt+letter is also inert",
+    "chord.clipboard.title": "Clipboard History",
+    "chord.clipboard.enabled.label": "Listen for clipboard writes",
+    "chord.clipboard.enabled.hint": "When on, copied content is automatically recorded; type \"clip\" or press Alt+C to recall (restart required after toggling)",
     "context.sensitive.title": "Sensitive apps (no capture when in foreground)",
     "context.sensitive.hint": "e.g. password managers, banking apps; protects privacy",
     "context.add_app": "+ Add app",
@@ -655,7 +685,7 @@ const DICT = {
     "suggestion.origin.clipboard": "from clipboard",
 
     // ── Main window: search box ──
-    "search.placeholder": "Type app name, calculate…",
+    // 0.8.5 §6.4: placeholder removed, chord hint (`.ghost-chord` on Alt) takes over.
 
     // ── Toast / common ──
     "toast.file_search_saved": "File search settings saved",

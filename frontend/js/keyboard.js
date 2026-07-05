@@ -2,10 +2,10 @@
 //! 0.8.1：Tab / ArrowRight 拦截接受 ghost text 补全（视配置 autosuggest_tab_key）。
 
 import { hideWindow, triggerChord, isAltDown } from "./api.js";
-import { syncWindowSize } from "./window-size.js";
 import { activateItem } from "./actions.js";
 import * as results from "./results.js";
 import * as ghost from "./ghost.js";
+import * as chord from "./chord.js";
 import * as autosuggestConfig from "./autosuggest-config.js";
 import { queryEl, resultsEl } from "./dom.js";
 
@@ -104,11 +104,14 @@ function onBlockModifiers(e) {
 
 // ── Chord 触发（0.8.5）：Alt+字母 → trigger_chord ──────────────────────────────
 // 现状 onNavigation 的 altKey 分支只覆盖 Alt+1~9（选候选，且依赖 hasItems）。
-// Chord 触发不依赖搜索结果，故独立 handler + 捕获阶段优先，空 query 也能触发。
+// Chord 触发不依赖搜索结果，故独立 handler + 捕获阶段优先。
 // 时序自洽（§6.2）：Alt+Q 的 Q 是 hook 状态机的「异键」→ aborted → Alt keyup 判 hold
 // → 不发 Tap → 不 toggle hide；前端 preventDefault 保 Q 不进输入框。
-// stub 阶段 console.log + 临时 placeholder visual；#7 trigger_chord command 落地后改 invoke。
-// Chord 键集暂硬编码，#8 增强菜单从 list_chord_actions 拉。
+//
+// **门禁**（§6.4 修正）：Chord 只在「用户还没开始交互」时触发——
+//   query 为空 **且** 结果列表为空。任一非空说明用户已在打字/浏览结果，
+//   此时 Alt+字母应正常进搜索框，别被 Chord 吞掉。
+//   典型场景：用户输入"剪贴板"后按 Alt+C 想输入 C——不该触发 Chord，字母正常入框。
 
 const CHORD_KEYS = new Set(["a", "q", "c"]);
 
@@ -123,18 +126,40 @@ function onChordTrigger(e) {
   if (e.isComposing || e.keyCode === 229) return; // IME 组字放行
   const key = e.key.toLowerCase();
   if (!CHORD_KEYS.has(key)) return;
+  // 门禁：query 空 + 结果为空才触发（用户还没开始交互）。
+  // trim 是防"只有空格"也被判非空。同 setAlt 里的可见性门禁一致——
+  // 触发与显示门禁共用同一条件，避免"菜单不该显示但按 Alt+C 生效"或反之。
+  if (!chordEligible()) return;
   e.preventDefault(); // 不进输入框
   e.stopPropagation();
   fireChord(key);
+}
+
+/** Chord 触发/显示的统一门禁条件。
+ *  三重与门:
+ *  - Chord 总开关未关(chord_enabled,读自 chord.js 快照)
+ *  - query 空
+ *  - 结果列表空
+ */
+function chordEligible() {
+  return (
+    chord.isEnabled() &&
+    queryEl.value.trim() === "" &&
+    !results.hasItems()
+  );
 }
 
 // ── 按住 Alt 显示数字角标 ─────────────────────────────────────────────────────
 // body.alt-active 由 CSS 控制角标显隐。需多重兜底清除，避免 Alt+Tab 切走后状态残留。
 
 function setAlt(on) {
+  // 0.8.5 §6.4：菜单可见性与触发资格同源——只有 chordEligible() 满足才允许展示。
+  // 用户输入后按 Alt 不该弹出菜单遮 Ghost / results（触发路径也会被 onChordTrigger 门禁挡住，
+  // 双闸保一致）。alt-active 仍标记物理 Alt 态供其他 UI（如 results 上的 Alt+1~9 角标）用。
+  const showChord = on && chordEligible();
   document.body.classList.toggle("alt-active", on);
-  // 0.8.5：alt-active 切换改变增强菜单显示，重算窗口尺寸（菜单撑开/收起跟随）
-  syncWindowSize();
+  document.body.classList.toggle("chord-visible", showChord);
+  // Chord 提示走 ghost overlay 的 absolute 层,不占布局,无需 resize。
 }
 
 /** 清除 Alt 角标态（供生命周期 shown/hidden 兜底调用）。 */

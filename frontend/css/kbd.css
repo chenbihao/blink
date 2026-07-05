@@ -1,14 +1,16 @@
-/* ── 键帽（<kbd class="kbd">）通用样式（0.8.1）──────────────────────────────
+/* ── 键帽（<kbd class="kbd">）通用样式（0.8.1 / 0.8.5 §6.4 组合键分隔）───────
    扁平 filled pill 风格，对齐结果条 Alt 角标（.item-badge）。
    曾经用过边框 + inset shadow 的拟物立体键帽，实际在 0.9em 小字号下边框和
    shadow 都会显脏、抢视觉——现代命令面板（Raycast/Linear/GitHub/Notion）
    一致都走 flat filled pill。
    用法：
      <kbd class="kbd">Tab</kbd>
-     <span class="kbd-group"><kbd class="kbd">Ctrl</kbd><kbd class="kbd">K</kbd></span>
-   主窗口 statusbar / 设置页快捷键 / 0.8.3 Chord 提示 UI 复用同一套。
+     组合键请用 kbd.js::renderCombo，会自动生成含 `+` 连接符的完整结构：
+     <span class="kbd-group"><kbd class="kbd">Ctrl</kbd><span class="kbd-plus">+</span><kbd class="kbd">K</kbd></span>
+   主窗口 statusbar / 设置页快捷键 / Chord 提示 UI 复用同一套。
    尺寸随父级 font-size（em 单位），line-height 不撑高父行——适合内联。
-   本文件被 index.html + settings.html 同时引用。 */
+   本文件被 index.html + settings.html 同时引用。
+   设计准则：docs/production-design/product-principles.md §14.7 键盘提示样式统一。 */
 
 .kbd {
   display: inline-block;
@@ -26,10 +28,21 @@
   white-space: nowrap;
 }
 
-/* 组合键：<span class="kbd-group"><kbd>Ctrl</kbd><kbd>K</kbd></span>
-   相邻 kbd 之间留小间距，容器 inline-flex 保内容不换行。 */
+/* 组合键：<span class="kbd-group"><kbd>Ctrl</kbd><span class="kbd-plus">+</span><kbd>K</kbd></span>
+   `+` 连接符（kbd.js::renderCombo 自动插入）明确"这几个键是一组"，避免 `Alt A`
+   被误读成两个独立操作。gap 收紧到近贴附，让组合视觉更聚合——见
+   docs/production-design/design-language.md §"键盘提示"。 */
 .kbd-group {
   display: inline-flex;
   align-items: center;
-  gap: 0.3em;
+  gap: 0.15em;
+}
+
+.kbd-plus {
+  color: var(--text-faint);
+  opacity: 0.7;
+  font-size: 0.85em;
+  font-weight: 400;
+  /* 与键帽垂直居中对齐 */
+  line-height: 1;
 }

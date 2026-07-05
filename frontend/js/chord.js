@@ -1,19 +1,65 @@
-//! Chord 增强（0.8.5）：
-//! - 增强菜单（§6.1）：主窗可见 + 按住 Alt（body.alt-active）时下拉 Chord 动作提示。
-//! - 剪贴板面板（§6.5 Alt+C）：主窗切面板形态显示历史。
+//! Chord 提示（0.8.5 §6.1 / §6.4 视觉重构）：
+//! 按住 Alt + 用户未开始交互（chordEligible: query 空 + 结果空）时，
+//! 在 ghost overlay 里以影子形式提示可用 Alt+字母 动作。
+//!
+//! **视觉分工**（与 ghost 模块的分层）：
+//! - `.ghost-suggest`（ghost.js 管）：keyword/context 补全 → 强意图信号，优先展示
+//! - `.ghost-chord`（本模块管）：待命入口列表 → 弱信号，仅在 suggest 空 + chord-visible 时显示
+//! CSS `:has()` 保证同时命中时 chord 让位 suggest——不重叠、不撑布局。
+//!
+//! **渲染**：走 `kbd.js::renderCombo` 工具生成键帽（与 statusbar / 设置页同源），
+//! 组合键内嵌 `+` 让"Alt+A 是一组"的心智清晰；不同 chord 之间用竖线加大间距的分隔符。
+//! 详见 product-principles §14.7 键盘提示样式统一。
+//!
+//! **开关**（0.8.5.1 §6.6）：
+//! - `chord_enabled=false` → refresh 直接清空 actions,不 render;keyboard.js 的
+//!   `chordEligible` 通过 `isEnabled()` 读同一 flag,保触发链一致
+//! - `chord_hint_visible=false` → refresh 清空 ghost-chord DOM,但 actions 仍在（用户
+//!   仍可 Alt+字母 触发,只是不显示提示）
+//!
 //! 悬浮球形态（Alt+Q 划词）是独立 webview（chord-ball.html），不在此模块。
 
-import {
-  listChordActions,
-  getClipboardHistory,
-  recordClipboardHit,
-  copyToClipboard,
-} from "./api.js";
+import { invoke } from "./tauri.js";
+import { listChordActions } from "./api.js";
+import { renderCombo } from "./kbd.js";
 
 let chordActions = [];
+let ghostChordEl = null;
 
-/** 拉取 Chord 动作列表并渲染（shown 时调一次）。 */
+// 配置快照（lifecycle shown 或 config-changed 时刷新）
+let chordEnabled = true;
+let hintVisible = true;
+
+/** 初始化：绑定 overlay DOM。main.js 启动时调一次。 */
+export function init() {
+  ghostChordEl = document.querySelector("#ghost-overlay .ghost-chord");
+}
+
+/** 是否启用 Chord（keyboard.js chordEligible 读此值,统一门禁）。 */
+export function isEnabled() {
+  return chordEnabled;
+}
+
+/** 拉取 Chord 动作列表并渲染（shown / config-changed 时调）。 */
 export async function refresh() {
+  // 先刷新配置快照
+  try {
+    const cfg = await invoke("get_config");
+    if (cfg) {
+      chordEnabled = cfg.chord_enabled !== false;
+      hintVisible = cfg.chord_hint_visible !== false;
+    }
+  } catch (e) {
+    /* 保持默认 true */
+  }
+
+  if (!chordEnabled) {
+    // 总开关关 → 清空,不 render
+    chordActions = [];
+    if (ghostChordEl) ghostChordEl.replaceChildren();
+    return;
+  }
+
   try {
     chordActions = await listChordActions();
   } catch (e) {
@@ -24,74 +70,30 @@ export async function refresh() {
 }
 
 function render() {
-  const menu = document.getElementById("chord-menu");
-  if (!menu) return;
-  if (!chordActions.length) {
-    menu.innerHTML = "";
-    return;
-  }
-  menu.innerHTML = chordActions
-    .map(
-      (a) =>
-        `<div class="chord-item" data-key="${a.key}">` +
-        `<span class="kbd-group"><kbd>Alt</kbd><kbd>${a.key.toUpperCase()}</kbd></span>` +
-        `<span class="chord-label">${escapeHtml(a.label)}</span>` +
-        `</div>`
-    )
-    .join("");
-}
+  if (!ghostChordEl) return;
+  ghostChordEl.replaceChildren();
+  // hint_visible=false 时不 render 提示条（触发仍生效）
+  if (!hintVisible) return;
+  if (!chordActions.length) return;
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
-  );
-}
+  // 前导两个非断行空格避免紧贴用户光标位（overlay whitespace: pre 保留）
+  ghostChordEl.appendChild(document.createTextNode("  "));
 
-// ── 剪贴板面板（Alt+C，§6.5 Panel surface）──────────────────────────
-
-/** 显示剪贴板历史面板（拉历史 + 渲染 + 切 mode-clipboard）。 */
-export async function showClipboardPanel() {
-  let items = [];
-  try {
-    items = await getClipboardHistory(20);
-  } catch (e) {
-    console.warn("[chord] get_clipboard_history 失败", e);
-  }
-  const panel = document.getElementById("clipboard-panel");
-  if (!panel) return;
-  panel.innerHTML = items.length
-    ? items
-        .map((it) => {
-          const id = escapeHtml(it.id);
-          const text = escapeHtml(it.text);
-          const preview = escapeHtml(it.preview || it.text);
-          return (
-            `<div class="clip-item" data-id="${id}" data-text="${text}">` +
-            `<div class="clip-preview">${preview}</div>` +
-            `</div>`
-          );
-        })
-        .join("")
-    : `<div class="clip-empty">无剪贴板历史</div>`;
-  document.body.classList.add("mode-clipboard");
-  panel.querySelectorAll(".clip-item").forEach((el) => {
-    el.addEventListener("click", async () => {
-      const t = el.getAttribute("data-text");
-      const id = el.getAttribute("data-id");
-      try { await copyToClipboard(t); } catch (e) { /* ignore */ }
-      try { await recordClipboardHit(id); } catch (e) { /* ignore */ }
-      closeClipboardPanel();
-    });
+  chordActions.forEach((a, i) => {
+    if (i > 0) {
+      const sep = document.createElement("span");
+      sep.className = "chord-sep";
+      sep.textContent = "│"; // 竖线,比 · 视觉更强,能区分不同 chord 分组
+      ghostChordEl.appendChild(sep);
+    }
+    const item = document.createElement("span");
+    item.className = "chord-item";
+    // renderCombo 走项目通用键帽,组合键内 kbd 用 `+` 连接（见 kbd.css 变更）
+    item.appendChild(renderCombo(`Alt+${a.key.toUpperCase()}`));
+    const label = document.createElement("span");
+    label.className = "chord-label";
+    label.textContent = a.label;
+    item.appendChild(label);
+    ghostChordEl.appendChild(item);
   });
-}
-
-/** 关闭剪贴板面板（回搜索形态）。 */
-export function closeClipboardPanel() {
-  document.body.classList.remove("mode-clipboard");
-  const panel = document.getElementById("clipboard-panel");
-  if (panel) panel.innerHTML = "";
-}
-
-export function init() {
-  // 菜单数据 lifecycle shown 拉；面板由 chord-panel 事件触发。
 }

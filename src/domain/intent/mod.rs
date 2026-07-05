@@ -249,6 +249,21 @@ pub enum Route {
         #[allow(dead_code)]
         hint: Option<String>,
     },
+    /// 本体 engine 独占（0.8.5 §6.4 修正）：keyword 命中某内置 engine（如 ClipboardEngine
+    /// 的"剪贴板"），该 engine 独占返回区。与 Takeover 语义等价，区别在**执行分派**：
+    /// - `Takeover.plugin_id` → SearchService `spawn_takeover` 走 JSONL IPC 查插件进程
+    /// - `EngineTakeover.engine_id` → SearchService 直接调对应 sync engine
+    ///
+    /// **为什么单独一个变体**：0.8.5 §6.4 让本体内置数据（剪贴板历史）也能独占返回，
+    /// 但绕 subprocess 一圈无意义。用 enum 变体而非 `plugin_id: "engine:xxx"` 前缀约定
+    /// 是类型墙原则（0.8.4 §5.3.2 ExecArg 精神一致）——把"这是本体不是插件"编译期钉死。
+    /// 0.9 若统一 Action trait，此变体与 Takeover 可再收敛。
+    EngineTakeover {
+        /// 本体 engine 的 id（对应 `SearchEngine::id()`）。
+        engine_id: String,
+        /// 传给 engine 的参数（无参 → None，带参 → UserExplicit）。
+        arg: ExecArg,
+    },
     /// 混排:本地引擎照常召回;命中插件按各自 surface 参与排序。
     Mixed { candidates: Vec<Candidate> },
 }
@@ -325,6 +340,17 @@ pub struct RuleRouter {
     takeover_enabled: RwLock<bool>,
     /// Context 规则表（0.8.2 §3.4）。与 keyword/regex 表并存,不受 query 影响。
     context_rules: RwLock<Vec<ContextRule>>,
+    /// 本体 engine keyword 规则表（0.8.5 §6.4）。
+    ///
+    /// **为什么与 plugin `rules` 表分开**：engine 触发路径与 plugin 完全不同——
+    /// - engine 命中恒走 Takeover 语义（本体数据的 keyword 信号天然强，如 "剪贴板"
+    ///   不会误命中；不需要 surface / Priority / Inline 概念）
+    /// - engine id 是编译期常量（对应 `SearchEngine::id()` 返回的 `&'static str`），
+    ///   不像插件 id 是运行时字符串（manifest 加载）
+    /// - 无 Context / Regex 触发场景（0.8.5 只有 keyword）
+    ///
+    /// 表由 `build_default_registry` 在 `main.rs` 启动时一次性注入，运行时不变更。
+    engine_rules: RwLock<Vec<EngineRule>>,
     /// 插件 setting 读取器（`target_lang` 等），后置注入。
     /// None → Context 规则中 `TextIsNonTargetLang` 直接不命中（保守）。
     settings: RwLock<Option<Arc<dyn PluginSettingResolver>>>,
@@ -361,6 +387,17 @@ struct ContextRule {
     surface: Surface,
 }
 
+/// 本体 engine keyword 规则（0.8.5 §6.4）。
+///
+/// 命中即产 `Route::EngineTakeover`——engine 独占返回区。
+/// `keywords` 支持多触发词（如剪贴板用 `["剪贴板", "clip", "jtb", "jiantieban"]`），
+/// 匹配走"原文相等或 kw+空格前缀"（跟插件 keyword 同套 `match_keyword` 逻辑，
+/// 但只取 Exact/Prefix 强信号，首拼弱信号在 engine 场景意义不大）。
+struct EngineRule {
+    engine_id: String,
+    keywords: Vec<String>,
+}
+
 /// 单次命中类型（0.8.1 §2.3 三态 + Initials 二分）。
 ///
 /// - `Exact` / `Prefix`：命中"原文形式"——汉字明码 / 英文 keyword / pinyin_full。
@@ -391,6 +428,7 @@ impl RuleRouter {
             rules: RwLock::new(Vec::new()),
             takeover_enabled: RwLock::new(takeover_enabled),
             context_rules: RwLock::new(Vec::new()),
+            engine_rules: RwLock::new(Vec::new()),
             settings: RwLock::new(None),
             // 单测下不注入 language → 用 "zh" 兜底（Blink 默认 UI 语言）。
             app_language: RwLock::new("zh".to_string()),
@@ -459,6 +497,18 @@ impl RuleRouter {
             .write()
             .unwrap()
             .retain(|r| r.plugin_id != plugin_id);
+    }
+
+    /// 注入本体 engine keyword 规则（0.8.5 §6.4）。
+    ///
+    /// 由 `main.rs` 启动时调用（build_default_registry 同类工作，只不过针对 engine）。
+    /// engine keyword 表运行时不变（engine 由本体编译期决定），无需 remove/热更新方法。
+    ///
+    /// 重复注入同 engine_id 覆盖前值（防单测/重复 setup 泄漏，同 `apply_context_disable_list`）。
+    pub fn add_engine_rule(&self, engine_id: String, keywords: Vec<String>) {
+        let mut rules = self.engine_rules.write().unwrap();
+        rules.retain(|r| r.engine_id != engine_id);
+        rules.push(EngineRule { engine_id, keywords });
     }
 
     /// 从 manifest 注入 Context 规则（0.8.2 §3.4）。
@@ -589,6 +639,17 @@ impl IntentRouter for RuleRouter {
     ) -> Route {
         let q = query.trim();
         let takeover_enabled = *self.takeover_enabled.read().unwrap();
+
+        // ── 0. Engine keyword 优先（0.8.5 §6.4）───────────────────
+        //     本体 engine 的 keyword 是强信号（"剪贴板"不会误命中），命中即独占。
+        //     放在 plugin/context 之前判是因为语义强度天然更高（本体自家数据）。
+        //     takeover_enabled=false 时降级 Mixed——engine 只作 candidate 加不了排序，
+        //     0.8.5 阶段行为回退到"和其他引擎混排"，跟 plugin Takeover 降级同心智。
+        if takeover_enabled {
+            if let Some(hit) = match_engine_keyword(q, &self.engine_rules.read().unwrap()) {
+                return Route::EngineTakeover { engine_id: hit.0, arg: hit.1 };
+            }
+        }
 
         // ── 1. keyword / regex 匹配 ────────────────────────────
         let mut hits: Vec<Hit> = Vec::new();
@@ -1175,6 +1236,43 @@ fn resolve_surface(declared: Surface, mt: &MatchType, takeover_enabled: bool) ->
 /// - `pinyin_initials`（如 `fy`）→ Initials，**弱信号**，`resolve_surface(Auto)` 下不独占。
 ///
 /// 3 者可能重合（纯 ASCII keyword 三者相等）→ 只走一次 Exact/Prefix，行为不变。
+/// 匹配本体 engine keyword（0.8.5 §6.4）。
+///
+/// 与插件 `match_keyword` 分离的原因：
+/// - engine keyword 只走强信号（原文 exact / prefix + 空格），不做首拼派生
+///   （engine 场景无 UX 教学诉求，首拼弱信号价值不大）
+/// - 单条 EngineRule 携带多触发词，一次遍历取第一命中
+///
+/// 返回 `(engine_id, ExecArg)`：无参 → ExecArg::None；带参 → ExecArg::UserExplicit。
+fn match_engine_keyword(q: &str, rules: &[EngineRule]) -> Option<(String, ExecArg)> {
+    if q.is_empty() {
+        return None;
+    }
+    let q_lower = q.to_ascii_lowercase();
+    for rule in rules {
+        for kw in &rule.keywords {
+            let kw_lower = kw.to_ascii_lowercase();
+            // Exact
+            if q_lower == kw_lower {
+                return Some((rule.engine_id.clone(), ExecArg::None));
+            }
+            // Prefix + 空格分隔的参数
+            let mut with_space = kw_lower.clone();
+            with_space.push(' ');
+            if q_lower.starts_with(&with_space) {
+                let arg = q[kw.len()..].trim();
+                let exec_arg = if arg.is_empty() {
+                    ExecArg::None
+                } else {
+                    ExecArg::UserExplicit(arg.to_string())
+                };
+                return Some((rule.engine_id.clone(), exec_arg));
+            }
+        }
+    }
+    None
+}
+
 fn match_keyword(query: &str, keyword: &str) -> Option<MatchType> {
     let q_lower = query.to_ascii_lowercase();
     let orig_lower = keyword.to_ascii_lowercase();
@@ -1262,6 +1360,68 @@ mod tests {
         let h = std::collections::HashMap::new();
         // 0.8.4 §5.3.1：route 断 Awareness 依赖,不再传 snapshot；hint=None
         tauri::async_runtime::block_on(r.route(q, &h, None))
+    }
+
+    // ── 0.8.5 §6.4 EngineTakeover 分派 ──────────────────────────
+
+    #[test]
+    fn engine_keyword_exact_produces_engine_takeover_no_arg() {
+        let r = router_with_rules(true);
+        r.add_engine_rule("clipboard".into(), vec!["剪贴板".into(), "clip".into()]);
+        let route = run_route(&r, "剪贴板");
+        assert!(matches!(
+            &route,
+            Route::EngineTakeover { engine_id, arg }
+                if engine_id == "clipboard" && matches!(arg, ExecArg::None)
+        ));
+    }
+
+    #[test]
+    fn engine_keyword_prefix_produces_engine_takeover_with_arg() {
+        let r = router_with_rules(true);
+        r.add_engine_rule("clipboard".into(), vec!["剪贴板".into(), "clip".into()]);
+        let route = run_route(&r, "剪贴板 hello");
+        assert!(matches!(
+            &route,
+            Route::EngineTakeover { engine_id, arg }
+                if engine_id == "clipboard"
+                    && matches!(arg, ExecArg::UserExplicit(s) if s == "hello")
+        ));
+    }
+
+    #[test]
+    fn engine_keyword_case_insensitive_english() {
+        let r = router_with_rules(true);
+        r.add_engine_rule("clipboard".into(), vec!["剪贴板".into(), "clip".into()]);
+        let route = run_route(&r, "CLIP world");
+        assert!(matches!(
+            &route,
+            Route::EngineTakeover { engine_id, arg }
+                if engine_id == "clipboard"
+                    && matches!(arg, ExecArg::UserExplicit(s) if s == "world")
+        ));
+    }
+
+    #[test]
+    fn engine_keyword_no_match_falls_through_to_plugin_rules() {
+        // 无 engine 命中时，plugin rules 正常生效（不因 engine 检查阻断）
+        let r = router_with_rules(true);
+        r.add_engine_rule("clipboard".into(), vec!["剪贴板".into(), "clip".into()]);
+        let route = run_route(&r, "echo hi");
+        assert!(matches!(
+            route,
+            Route::Takeover { plugin_id, .. } if plugin_id == "builtin.echo"
+        ));
+    }
+
+    #[test]
+    fn engine_keyword_disabled_when_takeover_off() {
+        // takeover_enabled=false 时 engine 也不独占（跟 plugin Takeover 降级同心智）
+        let r = router_with_rules(false);
+        r.add_engine_rule("clipboard".into(), vec!["剪贴板".into()]);
+        let route = run_route(&r, "剪贴板");
+        // 应该走 Mixed（plugin echo 也匹配不到"剪贴板"，candidates 空）
+        assert!(matches!(route, Route::Mixed { .. }));
     }
 
     #[test]

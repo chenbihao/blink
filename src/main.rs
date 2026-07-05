@@ -180,6 +180,10 @@ fn main() {
                 router.set_setting_resolver(engine.clone() as std::sync::Arc<dyn domain::plugin::PluginSettingResolver>);
                 router.set_app_language(app_config.language.clone());
 
+                // 0.8.5 §6.4：注入本体 engine 的 keyword 规则（先注入 engine，再注入插件——
+                // engine 优先级更高，命中即独占返回；插件 Takeover 走各自 manifest triggers）。
+                domain::search::register_engine_rules(&router);
+
                 // 注入规则到 RuleRouter（合并 manifest triggers + 用户自定义 triggers）
                 for plugin in &plugins {
                     if !engine.is_enabled(plugin.id()) {
@@ -216,7 +220,7 @@ fn main() {
             let search_service = std::sync::Arc::new(domain::search::SearchService::new(
                 app.handle().clone(),
                 pool.clone(),
-                domain::search::build_engines(engine_configs),
+                domain::search::build_engines(engine_configs, pool.clone()),
                 plugin_engine.clone(),
                 router.clone(),
             ));
@@ -312,6 +316,10 @@ fn main() {
             app::commands::set_disabled_context_bindings,
             app::commands::trigger_chord,
             app::commands::list_chord_actions,
+            app::commands::list_all_chord_actions,
+            app::commands::set_disabled_chord_actions,
+            app::commands::update_chord_toggles,
+            app::commands::update_clipboard_enabled,
             app::commands::is_alt_down,
             app::commands::hide_chord_ball,
             app::commands::confirm_chord_selection,

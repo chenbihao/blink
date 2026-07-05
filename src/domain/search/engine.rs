@@ -31,9 +31,11 @@ pub enum SearchAction {
     None,
     /// 打开路径(应用/快捷方式/文件/URL)。
     Open { path: String },
-    /// 复制文本到剪贴板(计算结果 / 插件 Copy)。
+    /// 复制文本到剪贴板(计算结果 / 插件 Copy / 剪贴板历史)。
     /// `text` 为结构化 payload,经 `into_app_entry` 透传到前端 `Action.payload`。
-    Copy { text: String },
+    /// `hit_id` 是命中回写通道（0.8.5 §6.4）——ClipboardEngine 展开的历史条目带 `Some(item.id)`,
+    /// 前端复制成功后 `record_clipboard_hit` 频率加权。CalcEngine / Plugin Copy 传 `None`。
+    Copy { text: String, hit_id: Option<String> },
     /// 运行内置动作（0.8.0 §1.3）：`id` 为动作注册表 key，`arg` 为参数（可选）。
     /// 前端命中 `Action.kind == Run` → `invoke("run_builtin_action", { id, arg })`。
     /// 取代原 `SearchAction::Open{path: "__BLINK_ACTION_XXX__"}` 魔法串。
@@ -118,7 +120,7 @@ impl SearchItem {
                 action: Action::default(),
                 score_detail,
             },
-            SearchAction::Copy { text } => AppEntry {
+            SearchAction::Copy { text, hit_id } => AppEntry {
                 name: self.title,
                 pinyin_name: String::new(),
                 pinyin_full: String::new(),
@@ -134,6 +136,7 @@ impl SearchItem {
                 action: Action {
                     kind: ActionKind::Copy,
                     payload: Some(text),
+                    hit_id,
                     ..Action::default()
                 },
                 score_detail,
@@ -186,6 +189,20 @@ pub trait SearchEngine: Send + Sync + std::any::Any {
     async fn search(&self, query: &str, ctx: &QueryContext<'_>) -> Vec<SearchItem>;
     /// 支持 downcast 到具体类型（用于配置更新）。
     fn as_any(&self) -> &dyn std::any::Any;
+    /// 是否只在 `Route::EngineTakeover` 分派下工作（0.8.5 §6.4）。
+    ///
+    /// **true**：SearchService `Route::Mixed` 分支遍历时**跳过**此引擎——避免它在
+    /// 无 keyword 命中的常规查询里污染结果（如 ClipboardEngine 收到任意文本会 fuzzy
+    /// 搜整个剪贴板历史）。此类 engine 只应通过 `Route::EngineTakeover` 显式分派进入。
+    ///
+    /// **false**（默认）：常规 sync/async 引擎，Mixed 分支会调用。
+    ///
+    /// **为何走 trait 而非 SearchService 里 hard-code 一个 id 名单**：类型墙原则——
+    /// "我只在 keyword 命中时活"是引擎的**自我声明**，不该由 orchestrator 记账。
+    /// 未来若加更多 takeover-only engine（如"待办事项"入口）零改动。
+    fn takeover_only(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -221,7 +238,7 @@ mod tests {
             title: "= 2".into(),
             subtitle: Some("按 Enter 复制结果".into()),
             score: 1.0,
-            action: SearchAction::Copy { text: "2".into() },
+            action: SearchAction::Copy { text: "2".into(), hit_id: None },
             source: "calc".into(),
             score_detail: Some("calc=1.0".into()),
         };

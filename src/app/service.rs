@@ -175,11 +175,14 @@ impl Service for ClipboardService {
         "clipboard"
     }
     async fn start(&self, ctx: &AppContext) -> Result<(), String> {
-        let mut cfg = ctx.config.clipboard.clone();
-        // 0.8.5：剪贴板历史默认启用。0.7 default false 已持久化到老用户 db，但 0.7 无配置 UI
-        // 让用户主动关（false 是默认值不是用户选择）。这里内存覆盖启用，不写 db。
-        // #13 配置面板做后改回尊重 cfg.enabled + 提供 toggle。
-        cfg.enabled = true;
+        let cfg = ctx.config.clipboard.clone();
+        // 0.8.5.1 §6.6：改回尊重 cfg.enabled——设置页新增 Chord tab 后用户有明确开关入口,
+        // 不再"内存覆盖 true"绕过老用户 db 里的 false（那是 0.7 遗留默认值兜底策略）。
+        // ClipboardConfig::default().enabled = true（新用户 opt-in）,老用户如已 false 会尊重之。
+        if !cfg.enabled {
+            tracing::info!("剪贴板监听器: cfg.enabled=false, 跳过启动");
+            return Ok(());
+        }
         crate::infra::platform::clipboard::start_listener(ctx.pool.clone(), cfg);
         Ok(())
     }

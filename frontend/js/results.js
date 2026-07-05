@@ -118,10 +118,12 @@ function appendNew(items, didReset) {
   // 插件占位的 source 就是 plugin_id（如 "builtin.weather"），直接匹配即可。
   if ((changed || hasEmptyResult) && !didReset) {
     // 收集所有返回的插件来源（包括错误信息和空结果标记）
+    // 白名单里是"引擎来源"（sync/async 引擎），它们的结果不占 placeholder，
+    // 不该被这条清理逻辑误消。ClipboardEngine (0.8.5 §6.4) 走 sync lane，加入白名单。
     const pluginsReturned = new Set(
       [...realItems, ...(hasEmptyResult ? [emptyResultMarker] : [])]
         .map((x) => x.source)
-        .filter((s) => s && !["file", "start_menu", "calc"].includes(s))
+        .filter((s) => s && !["file", "start_menu", "calc", "clipboard"].includes(s))
     );
     // 清除对应插件的占位符
     allItems = allItems.filter((x) => {
@@ -318,6 +320,9 @@ function createItem(app, i) {
       // arg 可能是任意 JSON——存字符串化后的形式，激活时 parse 回去
       li.dataset.actionRunArg = JSON.stringify(app.action.run_arg);
     }
+    // 0.8.5 §6.4：Copy 命中回写通道——ClipboardEngine 展开的历史条目带 hitId,
+    // actions.js 复制成功后调 record_clipboard_hit 频率加权。camelCase 与后端 rename 对齐。
+    if (app.action.hitId) li.dataset.actionHitId = app.action.hitId;
   }
   // 0.8.0 §1.3 智能感知：内置动作 + Run + 携带 Context 参数 → 加 .context-aware
   //   CSS 挂左侧强调条 + badge 显示"来自剪贴板 · <预览>"
@@ -424,6 +429,7 @@ function itemData(li) {
       hint: li.dataset.actionHint,
       runId: li.dataset.actionRunId,
       runArg,
+      hitId: li.dataset.actionHitId, // 0.8.5 §6.4 Clipboard Copy 回写通道
     },
   };
 }

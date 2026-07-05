@@ -195,12 +195,20 @@ impl SearchService {
     ///
     /// 0.8.2 §3.4：同时转发到 `IntentRouter::set_app_language`——`RuleRouter` 用来
     /// 支持 `TextIsNonTargetLang` 中 `target_lang="auto"` 的回退。
+    ///
+    /// 0.8.5.1 §6.6：同时转发到 ClipboardEngine——subtitle 时间描述 zh/en 切换。
     pub fn update_language(&self, language: String) {
         {
             let mut guard = self.language.write().unwrap();
             *guard = language.clone();
         }
-        self.router.set_app_language(language);
+        self.router.set_app_language(language.clone());
+        // 转发到 ClipboardEngine（sync lane 里唯一持 language 的 engine）
+        for engine in &self.sync_engines {
+            if let Some(clip) = engine.as_any().downcast_ref::<super::clipboard_engine::ClipboardEngine>() {
+                clip.update_language(language.clone());
+            }
+        }
         tracing::debug!("SearchService 界面语言已热更新");
     }
 
@@ -338,10 +346,36 @@ impl SearchService {
                     vec![placeholder_entry(&plugin_id, &display_name(&plugin_id))]
                 }
             }
-            Route::Mixed { candidates } => {
-                // sync lane 照常召回 → 首批。
+            Route::EngineTakeover { engine_id, arg } => {
+                // 本体 engine 独占（0.8.5 §6.4）：只调匹配的 sync engine，跳过其他所有引擎与插件。
+                // 与 plugin Takeover 的差别：本体调用是同步的，无 IPC/防抖，不需要 placeholder；
+                // 引擎 search 用剥离 keyword 后的 arg 而非原 query——engine 端只专注参数展开。
+                let arg_str = arg.to_plugin_string(); // ExecArg::None → "", UserExplicit → 内容
                 let mut items = Vec::new();
                 for engine in &self.sync_engines {
+                    if engine.id() == engine_id {
+                        items.extend(engine.search(&arg_str, &search_ctx).await);
+                        break;
+                    }
+                }
+                if items.is_empty() {
+                    tracing::debug!(engine = %engine_id, "engine takeover 未产出结果，可能是空历史/无匹配");
+                }
+                let limit = self.max_results.load(Ordering::SeqCst);
+                fuse_items(items, limit)
+                    .into_iter()
+                    .map(SearchItem::into_app_entry)
+                    .collect()
+            }
+            Route::Mixed { candidates } => {
+                // sync lane 照常召回 → 首批。跳过 takeover_only engine（0.8.5 §6.4）——
+                // 那类 engine（如 ClipboardEngine）只在 keyword 命中时活，Mixed 里不该
+                // 遍历，否则任意输入都会污染结果。
+                let mut items = Vec::new();
+                for engine in &self.sync_engines {
+                    if engine.takeover_only() {
+                        continue;
+                    }
                     items.extend(engine.search(q, &search_ctx).await);
                 }
 
@@ -458,6 +492,11 @@ impl SearchService {
                 }
                 route
             }
+            // EngineTakeover 不走 plugin 的 enabled / min_arg_length 检查——
+            // 本体 engine 由本体决定生死（如 ClipboardEngine 通过 ClipboardService cfg.enabled
+            // 控制监听器；search 阶段无第二重开关）。带参 engine 也不设参数长度门槛
+            // （剪贴板搜索 "a" 一个字符也合理，engine 自决定 fuzzy 阈值）。
+            Route::EngineTakeover { .. } => route,
             Route::Mixed { candidates } => Route::Mixed {
                 candidates: candidates
                     .into_iter()
@@ -580,7 +619,12 @@ impl SearchService {
             }
 
             // ── 2. 每个 async 引擎独立 spawn(关键修复:不互相阻塞)
+            //     跳过 takeover_only（0.8.5 §6.4）——同 sync 分支的语义对齐。
+            //     目前无 takeover_only 的 async engine，此过滤是防御性对齐 trait 语义。
             for engine in async_engines {
+                if engine.takeover_only() {
+                    continue;
+                }
                 let q = query.clone();
                 let app = app.clone();
                 let latest_seq = latest_seq.clone();

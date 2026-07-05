@@ -130,6 +130,10 @@ export function renderKey(key, opts = {}) {
 /**
  * 组合键渲染：返回 `<span class="kbd-group">` 元素，内含多个 `<kbd>` 子元素。
  *
+ * 键与键之间用 `+` 连接符（`.kbd-plus`）——让"这几个是同一个组合键"的心智清晰，
+ * 避免 `Alt A` 被读成"Alt 和 A 两个独立键"。**设计语言统一**，见
+ * docs/production-design/design-language.md §"键盘提示"。
+ *
  * @param {string | string[]} combo "Ctrl+K" 或 ["Ctrl", "K"]
  * @param {{symbolOnly?: boolean}} opts 透传给 renderKey
  * @returns {HTMLElement}
@@ -140,9 +144,15 @@ export function renderCombo(combo, opts = {}) {
   const keys = Array.isArray(combo)
     ? combo
     : String(combo).split(/[+\s]+/).filter(Boolean);
-  for (const k of keys) {
+  keys.forEach((k, i) => {
+    if (i > 0) {
+      const plus = document.createElement("span");
+      plus.className = "kbd-plus";
+      plus.textContent = "+";
+      group.appendChild(plus);
+    }
     group.appendChild(renderKey(k, opts));
-  }
+  });
   return group;
 }
 

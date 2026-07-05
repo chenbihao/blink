@@ -163,6 +163,16 @@ function applyConfigToUI(config) {
     autoTabKeyEl.value = config.autosuggest_tab_key;
   }
 
+  // Chord 交互（0.8.5 §6.6）
+  const chordEnabledEl = document.getElementById("chord-enabled");
+  if (chordEnabledEl) chordEnabledEl.checked = config.chord_enabled !== false;
+  const chordHintEl = document.getElementById("chord-hint-visible");
+  if (chordHintEl) chordHintEl.checked = config.chord_hint_visible !== false;
+  const clipEnabledEl = document.getElementById("clipboard-enabled");
+  if (clipEnabledEl && config.clipboard) {
+    clipEnabledEl.checked = config.clipboard.enabled !== false;
+  }
+
   // 应用主题（设置页本身即时正确显示）
   applyTheme(config.theme || "auto");
 
@@ -567,6 +577,63 @@ async function loadContextBindings() {
   }
 
   container.querySelectorAll(".context-binding-toggle").forEach((el) => {
+    el.addEventListener("change", save);
+  });
+}
+
+// ── Chord 动作列表（0.8.5 §6.6）─────────────────────────────────────────
+/**
+ * 加载并渲染 Chord 动作开关列表。
+ * 每条动作一个 setting-row + 开关；取消勾选后经 `set_disabled_chord_actions` 写回。
+ * 与 loadContextBindings 心智同源（同为"逐条能力开关+黑名单"模式）。
+ */
+async function loadChordActions() {
+  const container = document.getElementById("chord-actions-container");
+  if (!container) return;
+
+  let actions = [];
+  let disabled = [];
+  try {
+    // list_chord_actions 只返 enabled 的,拿 disabled 列表另外调
+    // 但这里我们要展示所有动作（含被禁用的）,直接读所有并交叉比对
+    actions = await invoke("list_all_chord_actions");
+  } catch (e) {
+    console.error("list_all_chord_actions failed:", e);
+    return;
+  }
+
+  if (!Array.isArray(actions) || actions.length === 0) {
+    container.innerHTML = "";
+    return;
+  }
+
+  container.innerHTML = actions
+    .map((a) => {
+      const combo = `Alt+${a.key.toUpperCase()}`;
+      return `<div class="setting-row" data-chord-id="${escapeHtml(a.id)}">
+        <label class="setting-label">${combo} · ${escapeHtml(a.label)}</label>
+        <label class="switch">
+          <input type="checkbox" class="chord-action-toggle" data-id="${escapeHtml(a.id)}" ${a.enabled ? "checked" : ""} />
+          <span class="slider"></span>
+        </label>
+      </div>`;
+    })
+    .join("");
+
+  async function save() {
+    const disabled = Array.from(
+      container.querySelectorAll(".chord-action-toggle"),
+    )
+      .filter((el) => !el.checked)
+      .map((el) => el.dataset.id);
+    try {
+      await invoke("set_disabled_chord_actions", { disabled });
+    } catch (e) {
+      console.error("set_disabled_chord_actions failed:", e);
+    }
+  }
+
+  container.querySelectorAll(".chord-action-toggle").forEach((el) => {
     el.addEventListener("change", save);
   });
 }
@@ -1748,6 +1815,42 @@ if (autosuggestMinScoreEl) autosuggestMinScoreEl.addEventListener("change", save
 const autosuggestTabKeyEl = document.getElementById("autosuggest-tab-key");
 if (autosuggestTabKeyEl) autosuggestTabKeyEl.addEventListener("change", saveAutosuggest);
 
+// ── Chord 总控 + 剪贴板开关（0.8.5 §6.6）──────────────────────────────────
+
+async function saveChordToggles() {
+  const chordEnabled = document.getElementById("chord-enabled")?.checked !== false;
+  const chordHintVisible = document.getElementById("chord-hint-visible")?.checked !== false;
+  try {
+    await invoke("update_chord_toggles", { chordEnabled, chordHintVisible });
+    if (currentConfig) {
+      currentConfig.chord_enabled = chordEnabled;
+      currentConfig.chord_hint_visible = chordHintVisible;
+    }
+  } catch (err) {
+    console.error("update_chord_toggles failed:", err);
+  }
+}
+
+async function saveClipboardEnabled() {
+  const enabled = document.getElementById("clipboard-enabled")?.checked !== false;
+  try {
+    await invoke("update_clipboard_enabled", { enabled });
+    if (currentConfig?.clipboard) {
+      currentConfig.clipboard.enabled = enabled;
+    }
+  } catch (err) {
+    console.error("update_clipboard_enabled failed:", err);
+  }
+}
+
+const chordEnabledEl = document.getElementById("chord-enabled");
+if (chordEnabledEl) chordEnabledEl.addEventListener("change", saveChordToggles);
+const chordHintVisibleEl = document.getElementById("chord-hint-visible");
+if (chordHintVisibleEl) chordHintVisibleEl.addEventListener("change", saveChordToggles);
+const clipboardEnabledEl = document.getElementById("clipboard-enabled");
+if (clipboardEnabledEl) clipboardEnabledEl.addEventListener("change", saveClipboardEnabled);
+
+
 // ── 日志 ─────────────────────────────────────────────────────────────────────
 
 const logLevelSelect = document.getElementById("log-level");
@@ -1958,6 +2061,7 @@ loadLogInfo();
 loadNetworkConfig();
 loadContextConfig();
 loadContextBindings();
+loadChordActions();
 loadPerfStats();
 loadAboutInfo();
 

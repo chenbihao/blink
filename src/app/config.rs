@@ -518,6 +518,25 @@ pub async fn update_disabled_chord_actions(
     save_config(pool, &config).await
 }
 
+/// 获取 Chord 总开关 + 提示可见性（前端 shown 时读一次）。
+pub async fn get_chord_toggles(pool: &SqlitePool) -> (bool, bool) {
+    let cfg = get_config(pool).await;
+    (cfg.chord_enabled, cfg.chord_hint_visible)
+}
+
+/// 更新 Chord 总开关 + 提示可见性（设置页保存时调）。
+/// 触发 `blink://config-changed` 由命令层负责。
+pub async fn update_chord_toggles(
+    pool: &SqlitePool,
+    chord_enabled: bool,
+    chord_hint_visible: bool,
+) -> Result<(), String> {
+    let mut config = get_config(pool).await;
+    config.chord_enabled = chord_enabled;
+    config.chord_hint_visible = chord_hint_visible;
+    save_config(pool, &config).await
+}
+
 /// 更新通用配置（主题 / 搜索历史 / 结果数）。仅持久化；
 /// max_results 的运行时热更新由命令层通知 SearchService（热路径零 IO），
 /// theme 由各窗口启动/shown 时读 config 生效（设置页本身即时预览）。

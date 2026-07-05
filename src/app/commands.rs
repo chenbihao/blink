@@ -348,7 +348,11 @@ pub async fn update_autosuggest_config(
 /// 触发 Chord 动作（0.8.5 §六）。前端 Alt+字母 → invoke 此 command。
 ///
 /// key 为字母（不区分大小写）。未注册 → Err（前端 log，不弹窗）。
-/// stub 阶段动作只 log；#10/#11/#12 替换为真实实现。
+///
+/// **surface 分派**（0.8.5 §6.4 简化后）：
+/// - `MiniBall` (Alt+Q 划词)：hide 主窗 + show chord-ball 悬浮窗
+/// - `Screenshot` (Alt+A) / `Default` / 其它：action 自己在 execute 内决定 UI 反馈
+///   （如 ClipboardHistoryAction 自 emit fill-query），command 层不再统一后处理
 #[tauri::command]
 pub async fn trigger_chord(app: tauri::AppHandle, key: String) -> Result<(), String> {
     tracing::debug!(%key, "trigger_chord");
@@ -361,10 +365,6 @@ pub async fn trigger_chord(app: tauri::AppHandle, key: String) -> Result<(), Str
         // 隐藏主窗（球作划词指示，主窗不打扰）+ 显示悬浮球
         crate::infra::platform::window::hide(&app, "chord");
         crate::infra::platform::window::show_chord_ball(&app)?;
-    } else if surface == crate::domain::chord::ChordSurface::Panel {
-        // Alt+C 剪贴板：主窗 show + emit 触发面板
-        crate::infra::platform::window::invoke(&app);
-        let _ = app.emit("blink://chord-panel", "clipboard");
     }
     Ok(())
 }
@@ -388,17 +388,77 @@ pub async fn confirm_chord_selection(app: tauri::AppHandle) -> Result<(), String
     Ok(())
 }
 
-/// 列出所有已注册的 Chord 动作元数据（0.8.5 §六 增强菜单渲染用）。
+/// 列出所有已注册的 Chord 动作元数据（0.8.5 §六 Ghost overlay 提示层渲染用）。
 ///
-/// 每条：`{ id, key, label, surface }`。已 disabled 的跳过。
+/// 每条：`{ id, key, label, surface }`。已 disabled 的跳过；label 按当前 UI 语言解析。
 #[tauri::command]
 pub async fn list_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Value> {
     let pool = app.state::<sqlx::SqlitePool>();
     let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
+    let language = crate::app::config::get_config(&pool).await.language;
     let Some(registry) = app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>() else {
         return Vec::new();
     };
-    registry.list(&disabled)
+    registry.list(&disabled, &language)
+}
+
+/// 列出所有已注册的 Chord 动作 + enabled 状态（0.8.5.1 §6.6 设置页用）。
+///
+/// 与 `list_chord_actions` 的区别:不过滤 disabled,而是每条附带 `enabled` 字段。
+/// 用于设置页展示"所有可开关的动作",让用户能勾选禁用。
+#[tauri::command]
+pub async fn list_all_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Value> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
+    let language = crate::app::config::get_config(&pool).await.language;
+    let Some(registry) = app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>() else {
+        return Vec::new();
+    };
+    registry.list_all(&disabled, &language)
+}
+
+/// 设置 disable 的 Chord 动作 id 列表（0.8.5.1 §6.6 设置页保存）。
+#[tauri::command]
+pub async fn set_disabled_chord_actions(
+    app: tauri::AppHandle,
+    disabled: Vec<String>,
+) -> Result<(), String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::app::config::update_disabled_chord_actions(&pool, disabled).await?;
+    // 广播 config-changed 让主窗前端重刷 chord 提示条
+    let _ = app.emit("blink://config-changed", ());
+    Ok(())
+}
+
+/// 更新 Chord 总开关 + 提示条可见性（0.8.5.1 §6.6 设置页保存）。
+#[tauri::command]
+pub async fn update_chord_toggles(
+    app: tauri::AppHandle,
+    chord_enabled: bool,
+    chord_hint_visible: bool,
+) -> Result<(), String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::app::config::update_chord_toggles(&pool, chord_enabled, chord_hint_visible).await?;
+    let _ = app.emit("blink://config-changed", ());
+    Ok(())
+}
+
+/// 更新剪贴板监听 enabled 开关（0.8.5.1 §6.6 设置页保存）。
+///
+/// **注**：改动需重启才能真正生效——ClipboardService 只在启动时读一次 cfg。
+/// 提示"改动需重启生效"由前端 UI 负责。运行时热启停监听器是 0.9 才考虑（涉及 Windows
+/// 消息窗口的销毁与重建,复杂度不匹配当前收益）。
+#[tauri::command]
+pub async fn update_clipboard_enabled(
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    let mut cfg = crate::app::config::get_config(&pool).await;
+    cfg.clipboard.enabled = enabled;
+    crate::app::config::save_config(&pool, &cfg).await?;
+    let _ = app.emit("blink://config-changed", ());
+    Ok(())
 }
 
 /// 当前 Alt 键是否物理按下（0.8.5 §6.1）。前端轮询驱动 alt-active 状态——

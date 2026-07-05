@@ -369,7 +369,7 @@ impl super::PluginSettingResolver for PluginEngine {
 fn to_search_item(plugin_id: &str, item: PluginItem) -> SearchItem {
     let action = match item.action {
         PluginAction::None => SearchAction::None,
-        PluginAction::Copy { text } => SearchAction::Copy { text },
+        PluginAction::Copy { text } => SearchAction::Copy { text, hit_id: None },
         PluginAction::Open { path } => SearchAction::Open { path },
     };
     // 负分 = 插件错误信息，不 clamp（保留负分排到最后）

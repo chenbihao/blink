@@ -4,11 +4,11 @@
 //! 且未来动作类型会增多（插件动作、文件打开等）——集中在此便于扩展。
 //! 行为由后端提供的 action.kind 驱动，与提示栏（hints.js）同源，语义一致。
 
-import { launchApp, runBuiltinAction, hideWindow } from "./api.js";
+import { launchApp, runBuiltinAction, hideWindow, recordClipboardHit } from "./api.js";
 
 /**
  * 激活一个结果项。
- * @param {{lnkPath?: string, calcValue?: string, payload?: string, action?: {kind: string, runId?: string, runArg?: any}, isError?: boolean}} data
+ * @param {{lnkPath?: string, calcValue?: string, payload?: string, action?: {kind: string, runId?: string, runArg?: any, hitId?: string}, isError?: boolean}} data
  */
 export async function activateItem(data) {
   if (!data) return;
@@ -26,6 +26,13 @@ export async function activateItem(data) {
       } catch (e) {
         console.error("clipboard write failed:", e);
         return; // 保留窗口，让用户察觉并重试
+      }
+      // 0.8.5 §6.4：ClipboardEngine 展开的历史条目带 hitId → 回写频率加权（fire-and-forget）。
+      // 失败不阻塞隐藏——回写不成功用户也已经复制到剪贴板，下次仍能召回。
+      if (data.action?.hitId) {
+        recordClipboardHit(data.action.hitId).catch((e) =>
+          console.warn("record_clipboard_hit failed:", e)
+        );
       }
       hideWindow();
     }

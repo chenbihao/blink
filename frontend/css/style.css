@@ -100,6 +100,42 @@ body {
   opacity: 0.85;
 }
 
+/* Chord 提示（0.8.5 §6.4）：`<kbd>Alt</kbd><kbd>A</kbd> 截图 · ...` 键帽 + 标签影子。
+   显示条件三重与门:
+   1. body.chord-visible（keyboard.js 设,联动 chordEligible: query 空 + 结果空 + Alt 按下）
+   2. .ghost-suggest 为空（Ghost 补全优先——补全是强意图信号,Chord 是弱待命列表,不共存）
+   3. .ghost-chord 自身非空（数据未加载时不显示空框）
+   键帽走 kbd.css 通用样式,标签更淡与键帽形成对比。 */
+#ghost-overlay .ghost-chord {
+  display: none;
+  font-size: 0.72em; /* 相对 overlay 18px → ~13px，键帽再按 kbd.css 的 0.9em 收缩 */
+  color: var(--text-faint);
+  vertical-align: middle;
+  /* 让内嵌的 kbd/chord-item 恢复正常 white-space 排布,避免继承 overlay 的 pre 造成键帽间大空隙 */
+  white-space: normal;
+}
+
+body.chord-visible #ghost-overlay:has(.ghost-suggest:empty) .ghost-chord:not(:empty) {
+  display: inline;
+}
+
+#ghost-overlay .ghost-chord .chord-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  color: var(--text);
+  opacity: 0.7;
+}
+
+#ghost-overlay .ghost-chord .chord-sep {
+  /* 竖线 + 左右大 margin,视觉上强分组边界（比 · 显著）
+     opacity 略低,不抢键帽/标签的注意力 */
+  color: var(--text-faint);
+  opacity: 0.35;
+  margin: 0 0.7em;
+  font-weight: 300;
+}
+
 /* Ghost 有内容时隐藏输入框自身 placeholder（0.8.3）:
    空 query + Context Ghost 场景下,placeholder「输入应用名、计算…」会与 Ghost 文字
    重叠。ghost.js 在 update 时给 <input> 加 data-ghost-active 属性,由此规则接管。 */

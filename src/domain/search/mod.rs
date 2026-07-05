@@ -57,6 +57,11 @@ pub struct Action {
     /// 无需再改契约；当前只填 `Value::String(...)` 或 `null`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_arg: Option<serde_json::Value>,
+    /// `Copy` 动作的命中回写 id（0.8.5 §6.4）。仅 ClipboardEngine 展开的历史条目非空;
+    /// 前端复制成功后 `invoke("record_clipboard_hit", { id })` 频率加权。
+    /// CalcEngine / Plugin Copy 恒为 None。序列化 `hitId`(camelCase 前端一致)。
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "hitId")]
+    pub hit_id: Option<String>,
 }
 
 impl Default for Action {
@@ -69,6 +74,7 @@ impl Default for Action {
             payload: None,
             run_id: None,
             run_arg: None,
+            hit_id: None,
         }
     }
 }
@@ -138,6 +144,7 @@ pub use scorer::{apply_history, boost_priority, BuiltinMatch, clamp_plugin_score
 mod builtin_engine;
 pub mod calc;
 mod calc_engine;
+pub(crate) mod clipboard_engine;
 pub mod file_engine;
 mod mock_slow_engine;
 mod start_menu_engine;
@@ -146,6 +153,7 @@ use builtin_engine::BuiltinEngine;
 // BuiltinActionInfo + list_builtin_actions 由 commands::list_builtin_actions 用（设置页）。
 pub use builtin_engine::{list_builtin_actions, BuiltinActionInfo, BuiltinActionKind};
 use calc_engine::CalcEngine;
+use clipboard_engine::ClipboardEngine;
 use file_engine::FileEngine;
 use mock_slow_engine::MockSlowEngine;
 use start_menu_engine::StartMenuEngine;
@@ -161,14 +169,22 @@ pub struct EngineConfigs {
     pub calc: crate::app::config::CalcConfig,
 }
 
-/// 构造引擎列表(sync: builtin + calc + start_menu;async: file)。
+/// 构造引擎列表(sync: builtin + calc + clipboard + start_menu;async: file)。
 /// PluginEngine 0.4 退化为执行器,不再作为 dyn SearchEngine,由 SearchService 直接持有。
-pub fn build_engines(configs: EngineConfigs) -> Vec<std::sync::Arc<dyn SearchEngine>> {
+///
+/// `pool` 用于持 SqlitePool 的引擎（当前仅 ClipboardEngine 0.8.5 §6.4）。
+/// 其他引擎无状态或用 config 快照，不接触 pool。
+pub fn build_engines(
+    configs: EngineConfigs,
+    pool: sqlx::SqlitePool,
+) -> Vec<std::sync::Arc<dyn SearchEngine>> {
     let mut engines: Vec<std::sync::Arc<dyn SearchEngine>> = vec![
         // BuiltinEngine（始终启用，本体功能）
         std::sync::Arc::new(BuiltinEngine),
         // CalcEngine（可配置）
         std::sync::Arc::new(CalcEngine::with_config(configs.calc)),
+        // ClipboardEngine（0.8.5 §6.4，keyword 剪贴板/clip 触发展开历史）
+        std::sync::Arc::new(ClipboardEngine::new(pool)),
         // StartMenuEngine（可配置）
         std::sync::Arc::new(StartMenuEngine::with_config(configs.start_menu)),
     ];
@@ -181,6 +197,21 @@ pub fn build_engines(configs: EngineConfigs) -> Vec<std::sync::Arc<dyn SearchEng
         engines.push(std::sync::Arc::new(MockSlowEngine));
     }
     engines
+}
+
+/// 注册本体 engine 的 keyword 规则到 RuleRouter（0.8.5 §6.4）。
+///
+/// engine keyword 命中 → `Route::EngineTakeover`，独占返回区。
+/// 与插件 keyword 表分离——本体 engine 命中优先级恒高于插件（本体自家数据信号更强，
+/// "剪贴板" 不会误命中其他插件），route() 中先检查 engine 表再检查 plugin 表。
+///
+/// **触发词硬编码**：与 BuiltinAction keyword 沿用同策略（0.8.1 决定 keyword 硬编码到 0.9）。
+/// 未来跟 BuiltinAction/Plugin 统一 Action trait 时一起走 manifest。
+pub fn register_engine_rules(router: &crate::domain::intent::RuleRouter) {
+    router.add_engine_rule(
+        clipboard_engine::ENGINE_ID.to_string(),
+        clipboard_engine::TRIGGERS.iter().map(|s| s.to_string()).collect(),
+    );
 }
 
 // 通用逻辑
