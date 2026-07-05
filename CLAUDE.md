@@ -4,7 +4,7 @@
 
 > 📖 **产品设计与文档导航**：请先阅读 [docs/production-design/00-overview.md](docs/production-design/00-overview.md) 了解产品定位、里程碑与完整文档体系。改核心前必读对应 phases 文档。
 
-更新时间 20260704
+更新时间 20260705
 
 ---
 
@@ -13,7 +13,7 @@
 Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而是 **Universal Action Layer（统一操作层）**。
 终极目标：感知用户上下文、主动推荐动作，让任何操作都比原来的路径更快。
 
-当前处于 **0.8 感知与操作层进行中**：0.1~0.7 全部完成；0.8.0 ~ 0.8.5 已落地（UIA 划词、内置动作、Ghost Text 输入补全、翻译插件 Context 路由、Suggestion 契约 + Ghost 采纳 + 智能感知面板 + awareness 域重构、四域架构重构 ExecArg 类型墙 + RankingHint Surface Booster、Chord 交互底层）；0.8.6 规划中（Alt+A 区域截图）；AI 相关能力（Provider / Chat / Embedding）全部移至 0.9。
+当前处于 **0.8 感知与操作层进行中**：0.1~0.7 全部完成；0.8.0 ~ 0.8.5 已落地（UIA 划词、内置动作、Ghost Text 输入补全、翻译插件 Context 路由、Suggestion 契约 + Ghost 采纳 + 智能感知面板 + awareness 域重构、四域架构重构 ExecArg 类型墙 + RankingHint Surface Booster、Chord 交互底层）；**0.8.6 = 架构固化**（Action trait / SuggestionProducer + Arbiter / ConfigStore / SearchService 拆分 / AppContext 真依赖容器 / 内置动作 i18n）规划中；**0.8.7 = Alt+A 区域截图**（原 0.8.6 内容）；AI 相关能力（Provider / Chat / Embedding）全部移至 0.9。
 
 **最新特性（0.8）**：
 - ✅ **0.8.0** UIA 划词文本感知（鼠标选中文本自动抓取）
@@ -23,8 +23,9 @@ Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而�
 - ✅ **0.8.3** 感知交互统一：`Suggestion` 契约抽象（合并 completion_hint + context_suggestion，为 0.9 AI 铺路）+ Context 转 Ghost + Tab 采纳 + 上下文智能感知面板 + Ghost 本地化 display + origin 来源提示（来自划词/剪贴板）+ **awareness 域重构**（`AwarenessSnapshot { texts: Vec<AwarenessText { source, text }> }` 数据侧带 origin,intent 层零推断,删除 3 个推断 helper）
 - ✅ **0.8.4** **四域架构重构**：Awareness / Suggestion / Routing / Execution 四域强边界（`route` 断 Awareness）+ `ExecArg` 类型墙 + RankingHint Surface Booster + Suggestion 覆盖非空 query + 内置动作保持「展示即抽参」（不延后，详见 phases §5.1）+ PluginProtocol.clipboard_text deprecated
 - ✅ **0.8.5** **Chord 交互底层**：Ghost overlay `.ghost-chord` 影子层提示（`:has()` 让位 Ghost 补全）+ 独立悬浮球 `chord-ball` webview（`WS_EX_NOACTIVATE` 不抢焦点）+ Alt+Q 划词 confirm flow + Alt+C 剪贴板走 `Route::EngineTakeover`（新增 `SearchEngine::takeover_only()` trait + 独立 `ClipboardEngine`）+ 剪贴板监听器补 0.7 漏 + 设置页 Chord tab + `ChordAction::label` 走 `LocalizableText`
-- 📋 **0.8.6** Alt+A 区域截图（Chord 三剑客补齐；全屏透明覆盖窗 + 拖选 + 写入剪贴板 + 记录历史）
-- 🔜 **0.9** AI Provider 抽象 + 云端插件 + Chat View + VectorRouter（**基于 0.8.4 四域架构的信任边界**——AI 只能产 Suggestion,不能直接触发 Execution）
+- 📋 **0.8.6** **架构固化**（为 0.9 铺物理骨架，纯横向重构不动业务）：Phase 1 —— Action trait 收敛（`SearchAction/BuiltinActionKind/PluginAction/ChordAction` 四份枚举 → 统一 `Action` trait + `ActionOutcome`）+ Suggestion Producer/Arbiter 拆分（`RankingHint` 从 `Suggestion` 剥离）+ ConfigStore\<T\> 分片（`AppConfig` 拆 6 片 + 前端泛型 `get/set_config<key>` + 广播事件）；Phase 2 —— SearchService God Method 拆 `RouteExecutor` + `PluginQueryContext.clipboard_text` 彻底删除 + `AppContext` 真依赖容器 + 内置动作 title/subtitle i18n。测试基线 276 可增不可减
+- 📋 **0.8.7** Alt+A 区域截图（Chord 三剑客补齐；全屏透明覆盖窗 + 拖选 + 写入剪贴板 + 记录历史）
+- 🔜 **0.9** AI Provider 抽象 + 云端插件 + Chat View + VectorRouter（**基于 0.8.4 四域信任边界 + 0.8.6 物理骨架**——AI 只能产 Suggestion，不能直接触发 Execution；三个统一入口 Action trait / SuggestionProducer / ConfigStore 分别承接 AI 的产出）
 
 ---
 
@@ -77,34 +78,32 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 
 ## 5. 模块拆分速查
 
-平台相关模块统一拆为 `mod.rs`（接口 + 通用逻辑）+ `windows.rs`（Windows 实现）。
+**目录结构（0.8.4 起域驱动）**：
+- `src/main.rs` — Tauri 启动 + 托盘 + 各服务 wiring
+- `src/app/` — 应用层：commands（Tauri IPC 入口）、config、service（生命周期骨架）
+- `src/domain/` — 业务域（四域架构，见 phases/0.8 §5）：
+  - `context/` — Awareness 域纯逻辑（`is_url` / `is_file_path` / `AwarenessSnapshot`；采集实现在 `infra/platform/context/`）
+  - `intent/` — Suggestion 域 + Routing 域：`RuleRouter` / `Suggestion` / `ExecArg` / `RankingHint`
+  - `search/` — Query 域：`SearchService` + `SearchEngine` trait + 各引擎（builtin / calc / clipboard / file / start_menu）
+  - `plugin/` — 插件系统：manifest 解析 + JSONL 协议 + tokio 子进程
+  - `chord/` — Chord 交互：`ChordAction` trait + `ChordRegistry`
+- `src/infra/` — 基础设施层：
+  - `platform/` — 平台相关（`mod.rs` 抽象 + `windows.rs` 实现）：hotkey / window / selection / clipboard / context / locale
+  - `data/` — SQLite 持久化：history / clipboard / config KV
+  - `utils/` — 通用工具：logging / perf / text（拼音）
 
-### Rust 后端（`src/`）
-
-| 模块 | 核心职责 |
-|---|---|
-| `main.rs` | Tauri 初始化、托盘、tracing、自定义协议注册、启动各后台任务 |
-| `commands.rs` | Tauri command 层 — 前端 `invoke()` 入口，轻量编排 |
-| `config.rs` | `AppConfig`（快捷键/tap阈值/grace/自启/语言/日志级别/主题/代理等）SQLite 持久化 + 热更新 |
-| `hotkey/` | 全局热键：`WH_KEYBOARD_LL` + 物理态查询状态机 + 录制 |
-| `window/` | 窗口控制：显隐、看门狗失焦轮询、显示器定位 |
-| `search/` | 同步/异步双 lane 搜索 + 引擎抽象 + 开始菜单/文件/计算/内置/插件引擎 + 图标提取 |
-| `plugin/` | 插件系统：manifest 解析 + JSONL 协议 + tokio 子进程（Process/Python/Node/Powershell） |
-| `context/` | Context 层：环境感知、敏感应用黑名单（采集实现在 `infra/platform/context/`；纯逻辑判定 `is_url` / `is_file_path` 在 `domain/context/probe.rs`）|
-| `selection/` | **0.8 新增**：UIA 划词监听 + 文本抓取 + 缓存 |
-| `intent.rs` | 意图引擎 RuleRouter：关键字→动作路由 |
-| `clipboard.rs` | 剪贴板历史：监听/存储/搜索/管理 |
-| `perf.rs` | 性能统计：SQLite 指标存储 + RAII Timer + 百分位查询 |
-| `service.rs` | Service 骨架：`Service` trait + `AppContext` + 生命周期统一编排 |
-| `history.rs` | SQLite 历史记录（频率加权 + 衰减）+ `config` 表 KV 读写 |
+**0.8.6 架构固化后新增**（规划）：
+- `src/domain/execution/` — Execution 域物理落地：`Action` trait + `ActionOutcome` + Builtin/Plugin/Chord 三种来源 adapter + registry
+- `src/domain/intent/suggestion/` — Suggestion 域拆分：`SuggestionProducer` trait + `SuggestionArbiter` + Keyword/Context 两个 producer
 
 ### 前端（`frontend/`）
 
-- 主窗口：`index.html` + `style.css` + `js/*.js`（搜索/结果/键盘/动作/生命周期/主题/i18n）
-- 设置页：`settings.html` + `settings.js` + `settings.css`（通用/快捷键/引擎/插件/网络/上下文/存储/调试）
+- 主窗口：`index.html` + `style.css` + `js/*.js`（搜索/结果/键盘/动作/生命周期/主题/i18n/Ghost/Chord）
+- 设置页：`settings.html` + `settings.js` + `settings.css`（通用/快捷键/引擎/插件/网络/上下文/Chord 交互/存储/调试）
+- 悬浮球：`chord-ball.html`（0.8.5 新）
 - 右键菜单：`contextmenu-popup.html`
 
-前端用 `invoke()` 调 Rust commands，用 `TAU.event.listen()` 监听后端事件（`blink://shown`/`hidden`/`results`）。
+前端用 `invoke()` 调 Rust commands，用 `TAU.event.listen()` 监听后端事件（`blink://shown`/`hidden`/`results`/`chord-translate`/`chord-fill-query`）。
 
 ---
 
@@ -134,4 +133,33 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 
 SQLite `%APPDATA%\blink\blink.db`：
 - `history(lnk_path, hit_count, last_used_at)` — 启动历史，频率加权 + 衰减
-- `config(key, value, updated_at)` — 配置 KV（分命名空间：`app_config` / `engine:{id}` / `plugin:{id}` / `context:{key}`）
+- `config(key, value, updated_at)` — 配置 KV（分命名空间：`app_config` / `engine:{id}` / `plugin:{id}` / `context:{key}`；**0.8.6 起** `app_config` 拆为 `app.hotkey` / `app.appearance` / `app.search` / `app.suggestion` / `app.chord` / `app.disable` 6 片）
+- `clipboard(id, text, kind, hit_count, last_used_at)` — 剪贴板历史（0.7 + 0.8.5 补监听）
+- `perf(metric, value, at)` — 性能统计
+
+---
+
+## 9. 四域架构（0.8.4 起为设计基座）
+
+**必读**：[docs/production-design/phases/0.8-context-interaction.md §五](docs/production-design/phases/0.8-context-interaction.md)（四域重构）+ [§八](docs/production-design/phases/0.8-context-interaction.md#八08.6-规划架构固化为-0.9-铺物理骨架)（0.8.6 架构固化）。
+
+```
+Awareness (环境感知)     — 抓 snapshot,纯数据不做判断
+    ↓  唯一读它的层
+Suggestion (建议生产)    — Signal → Ghost 建议,待用户采纳
+    ↓  ★ 信任边界:Tab/点击/打字才穿过
+Routing    (路由决策)    — Query → Route,对 Awareness 无知
+    ↓  只有用户显式选择才穿过
+Execution  (执行)        — UserExplicit 参数才真执行
+```
+
+**三条铁则**（架构强制，类型系统钉死）：
+1. **呈现权 ≠ 执行权**：Routing 只出候选，Execution 需第二次交互
+2. **参数注入必须显式**：`ExecArg::UserExplicit(String)` 类型墙
+3. **弱信号 pull 不 push**：Routing 无法读 Awareness，Context 只能通过 Suggestion 域影响
+
+**0.8.6 架构固化的三个统一入口**（0.9 AI 的物理骨架）：
+- `Action` trait（`domain/execution/`）—— 一切副作用的统一入口；四份动作枚举 → 一个 trait + `ActionOutcome`
+- `SuggestionProducer` trait + `SuggestionArbiter`（`domain/intent/suggestion/`）—— 一切建议的统一入口；Keyword/Context/(0.9)AI 三源竞争
+- `ConfigStore<T>` 泛型 + `blink://config-changed` 事件 —— 一切配置的统一入口；`AppConfig` 拆片
+

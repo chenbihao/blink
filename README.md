@@ -1,8 +1,7 @@
 <h1 align="center">Blink</h1>
 
 <p align="center">
-  <strong>Windows 全局快捷入口，更快、更丝滑、更智能。</strong><br/>
-  A launcher for Windows. Faster, smoother, smarter.
+  <strong>A Universal Action Layer for Windows — senses what you're doing, makes every action faster than the original path.</strong>
 </p>
 
 <p align="center">
@@ -17,36 +16,73 @@
 </p>
 
 <p align="center">
-  <img src="docs/blink-rust.png" width="680" alt="Blink Demo"/>
+  <img src="docs/images/blink-rust.png" width="680" alt="Blink Demo"/>
 </p>
 
-[View the demonstration GIF](docs/blink.gif)
+[View the demo GIF](docs/images/blink.gif)
+
+---
+
+## What is Blink
+
+Blink isn't a launcher — it's a **Universal Action Layer**:
+search is just one entry point, **action execution is the destination**. By sensing context and proactively suggesting actions, sequences like "select English → translate", "copy URL → open link", "screenshot → clipboard" go from **multiple steps** to **zero input or one Tab**.
+
+- ⚡ **Fast** — Summon &lt; 50ms, first result &lt; 20ms
+- 🎯 **Context-aware** — Auto-senses selection / clipboard / foreground app; unobtrusive but always ready
+- 🧩 **Extensible** — Sandboxed plugin processes (Rust / Python / Node.js / PowerShell); crashes don't affect core
 
 ---
 
 ## Features
 
-- **Instant Launch** — `Alt + Space` to summon, < 50ms hotkey response, auto-hide on blur
-- **App Search** — Scan Start Menu, fuzzy match + Pinyin initials (`wx` → 微信)
-- **File Search** — Everything support with local fallback when Everything is not installed
-- **Calculator** — Type `1+1` or `100*0.25`, press Enter to copy result
-- **Clipboard History** — Search through your clipboard history
-- **Plugin System** — Native (Rust) + Script plugins (Python / Node.js / PowerShell)
-- **Built-in Plugins** — Translation (Youdao/Baidu/DeepL/Ali/Tencent), Weather, IP lookup, and more
-- **Themes** — Mocha dark / Latte light / Follow system, and more
-- **i18n** — 中文 / English
-- **Context Menu** — Right-click for smart actions based on result type
-- **Configurable** — Custom hotkey, engine toggles, auto-start, proxy, log levels, and more
+### Core Search
 
-### Vision · Where We're Heading
+- **Instant Launch** — `Alt + Space` (customizable, right-Alt tap supported), auto-hide on blur
+- **App Search** — Scans Start Menu; fuzzy match + Pinyin initials + full Pinyin (`wx` → 微信, `dksz` → 打开设置)
+- **File Search** — Integrates Everything; falls back to local directory scan when Everything is absent
+- **Live Calculator** — Type `1+1` or `100*0.25`, press Enter to copy
+- **Clipboard History** — Background auto-record + fuzzy search history
 
-Blink isn't just a launcher — it's a **Universal Action Layer**. Here's what we're building toward:
+### Awareness & Proactive Suggestions (0.8)
 
+- **Selection Awareness** — Grabs selected text in other apps (UIA + mouse hook); one-key translate/search after summoning
+- **Ghost Text Autocomplete** — Type `fy hello`, see inline gray `→ fanyi hello`; press Tab to promote to translation
+- **Context-Aware Suggestions** — Clipboard is URL / file path → auto-suggest "Open link / Reveal in Explorer"; select English text → Ghost suggestion to translate
+- **Weak signals pull, don't push** — Awareness lives on the side channel; adoption = zero disruption, non-adoption = zero cost; each Context trigger can be disabled individually in settings
+
+### Chord Mode (0.8.5 — Alt-hold shortcuts)
+
+Hold Alt while the main window is open; letter keys trigger actions directly:
+
+| Combo | Action |
+|---|---|
+| `Alt + Q` | Smart selection (floating ball, doesn't steal focus — select text in the origin app, click to confirm, main window restores with text filled) |
+| `Alt + C` | Clipboard history top-9 (press Alt+1~9 to quick-pick) |
+| `Alt + A` | Region screenshot (planned for 0.8.7) |
+
+### Plugins & Ecosystem
+
+- **Plugin System** — Isolated processes + JSONL protocol; crashes don't affect core. Runtimes: Rust / Python / Node.js / PowerShell
+- **Built-in Plugins** — Translation (Youdao / Baidu / DeepL / Ali / Tencent), Weather, IP lookup
+- **Surface Ownership Model** — Trigger and presentation are orthogonal; plugins choose `inline` mixed / `priority` pinned / `takeover` exclusive return area
+
+### Platform & UX
+
+- **Context Menu** — Smart actions by result type (open location, copy path, run as admin, reset ranking, etc.)
+- **Themes** — Catppuccin Mocha dark / Latte light / Follow system
+- **i18n** — Full 中文 / English bilingual (including plugin content)
+- **Configurable** — Hotkeys, engine toggles, auto-start, proxy, log levels, per-item context awareness toggles
+
+---
+
+## Vision · Where We're Heading
+
+- 🤖 **AI Intent (0.9)** — Describe what you want in natural language; Blink matches the action. AI only produces suggestions, never executes directly — Tab acceptance is the final human review
+- 💬 **AI Chat View (0.9)** — Support OpenAI / DeepSeek / any OpenAI-compatible API; chat expands via `view: chat`
+- 🧠 **VectorRouter (0.9)** — Semantic intent matching beyond keyword rules
+- ⚡ **Proactive Suggestions** — Zero input, right action at the right time
 - 🎤 **Voice Input** — VAD + speech-to-text, speak instead of type
-- 🤖 **AI Intent** — Describe what you want in natural language, Blink figures out the action
-- 🧠 **Context Awareness** — Blink knows what app you're in, what text you selected, and suggests the right actions
-  before you type
-- ⚡ **Proactive Suggestions** — Zero input needed, the right action at the right time
 
 ---
 
@@ -60,22 +96,24 @@ Download the latest installer from [Releases](../../releases).
 
 1. Blink sits in the system tray after launch
 2. **`Alt + Space`** → summon the input bar
-3. Type an app name (Pinyin initials supported, e.g. `wx` for 微信)
-4. Type a math expression (e.g. `1+1`, `100*0.25`)
-5. Type a trigger word for plugins (e.g. `fy hello` → translate)
-6. **↑↓** to navigate, **Enter** or **Alt + number** for quick to launch / copy
-7. **Esc** or click outside → hide
+3. Type app name (Pinyin initials/full supported), math expression, or plugin trigger word
+4. **↑↓** to navigate, **Enter** or **Alt + 1~9** for quick launch
+5. While main window is open, **hold Alt** → Ghost overlay shows Chord shortcuts (Alt+A/Q/C)
+6. **Esc** or click outside → hide
 
 ### Keyboard Shortcuts
 
-| Action        | Description                        |
-|---------------|------------------------------------|
-| `Alt + Space` | Summon / hide Blink                |
-| `↑` `↓`       | Navigate search results            |
-| `Alt + 1~9`   | Quick launch result by position    |
-| `Enter`       | Launch selected item / copy result |
-| `PgUp` `PgDn` | Page up/down                       |
-| `Esc`         | Hide Blink                         |
+| Action        | Description |
+|---------------|---|
+| `Alt + Space` | Summon / hide |
+| `↑` `↓`       | Navigate results |
+| `Alt + 1~9`   | Quick launch by position |
+| `Tab`         | Accept Ghost completion (`fy` → `fanyi `) or Context suggestion |
+| `Enter`       | Launch / copy result |
+| `PgUp` `PgDn` | Page up/down |
+| `Alt + Q`     | Chord: smart selection |
+| `Alt + C`     | Chord: clipboard history |
+| `Esc`         | Hide |
 
 ---
 
@@ -93,39 +131,44 @@ Download the latest installer from [Releases](../../releases).
 # Dev mode (debug, console logging)
 cargo tauri dev
 
-# Release build
-cargo install tauri-cli
-cargo tauri build
+# Release build (includes plugin compilation)
+cargo xtask release
 
 # Tests
 cargo test --bin blink
 ```
 
+### Want to modify the core?
+
+Read [`docs/production-design/`](docs/production-design/README.md) first:
+- [`00-overview.md`](docs/production-design/00-overview.md) — Product vision + milestones
+- [`product-platform.md §5.0`](docs/production-design/product-platform.md) — Four-domain architecture rules
+- [`phases/{version}-*.md`](docs/production-design/phases/) — Design decisions and pitfalls per version
+
 ---
 
 ## Roadmap
 
-- ✅ **0.1** — Core interaction (hotkey/window/focus/IME) + search + config
-- ✅ **0.2** — Service architecture + multi-engine search + caching
-- ✅ **0.3** — Plugin system skeleton + hotkey physical-state refactor
-- ✅ **0.4** — Intent router (RuleRouter) + Context layer
-- ✅ **0.5** — Unified config + file search (Everything) + context menu + themes + i18n
-- ✅ **0.6** — Plugin packaging + Python/Node.js script support
-- ✅ **0.7** — Plugin ecosystem + local search fallback + performance stats
-- 📋 **0.8** — Intent routing optimization + AI provider abstraction
-- 🔮 **0.9+** — Plugin marketplace · Deep context · Proactive suggestions
+| Version | Content | Status |
+|---|---|---|
+| **0.1 ~ 0.7** | Core interaction → plugin ecosystem → clipboard history → perf stats | ✅ Done |
+| **0.8.0 ~ 0.8.5** | UIA selection / parameterized builtin actions / Ghost Text / translation Context / **four-domain architecture** / Chord foundation | ✅ Done |
+| **0.8.6** | Architecture hardening (physical skeleton for 0.9: Action trait / SuggestionProducer / ConfigStore) | 🚧 In progress |
+| **0.8.7** | Alt+A region screenshot | 📋 Planned |
+| **0.9** | AI Provider abstraction · Cloud AI plugin · AI Chat View · VectorRouter semantic matching | 📋 Planned |
+| **Beyond** | Proactive suggestions · Voice input · Plugin marketplace | 🔮 |
 
 ---
 
 ## Special Thanks
 
 - [Wox](https://github.com/Wox-launcher/Wox) — The launcher that started it all on Windows
-- [Alfred](https://www.alfredapp.com/) — Proved that a global input box can be the first entry for human-computer
-  interaction
+- [Alfred](https://www.alfredapp.com/) — Proved that a global input box can be the first entry for human-computer interaction
 - [Raycast](https://www.raycast.com/) — Modern launcher experience, gold standard for plugin ecosystems
 - [uTools](https://u.tools/) — Reference for localized experience on Chinese desktops
 - [Flow Launcher](https://www.flowlauncher.com/) — Community-driven open-source launcher on Windows
 - [Everything](https://www.voidtools.com/) — Lightning-fast file search, integrated as Blink's file search backend
+- [Quicker](https://getquicker.net/) — Inspiration for the Chord interaction pattern
 
 ---
 
