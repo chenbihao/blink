@@ -38,6 +38,16 @@ const DICT = {
     "panel.debug": "调试",
     "panel.about": "关于",
 
+    // ── 面板 lede（每个 tab h2 下的一句导览）──
+    "general.lede": "全局偏好：主题、语言、历史与结果条数上限。",
+    "hotkey.lede": "唤起 Blink 的键，以及看门狗判定的时间阈值。",
+    "engines.lede": "应用 / 文件 / 计算器 / 内置动作 —— 搜索候选的来源。",
+    "plugins.lede": "已安装的第三方与内置插件，逐一开关与配置。",
+    "network.lede": "HTTP / HTTPS 代理，本体与所有插件共用一份配置。",
+    "storage.lede": "数据库与历史记录的存储位置和清理操作。",
+    "debug.lede": "日志级别与性能采样，排查用不到就不用打开。",
+    "about.lede": "版本、技术栈与源码仓库。",
+
     // ── 通用 Tab ──
     "general.auto_start.label": "开机自启",
     "general.auto_start.hint": "开机自动启动",
@@ -86,11 +96,11 @@ const DICT = {
     "hotkey.reset": "恢复默认",
     "hotkey.reset.title": "恢复默认",
     "hotkey.tap.label": "tap 阈值",
-    "hotkey.tap.title": "短按到抬起的最长时长，超过则判定为长按（Hold），不触发唤起",
-    "hotkey.tap.hint": "按下到抬起若超过此时长，视为长按（保留系统修饰键功能），不触发 Blink。",
+    "hotkey.tap.title": "短按到抬起的最长时长，超过则判定为长按（Hold），不触发唤起。按下到抬起若超过此时长，视为长按（保留系统修饰键功能），不触发 Blink。",
+    "hotkey.tap.hint": "",
     "hotkey.grace.label": "看门狗 grace period",
-    "hotkey.grace.title": "窗口刚显示后的失焦保护期，避免焦点还没切过来就被误判为失焦而隐藏",
-    "hotkey.grace.hint": "窗口显示后此段时间内不检测失焦，避免焦点切换尚未完成时被误判隐藏。",
+    "hotkey.grace.title": "窗口刚显示后的失焦保护期，避免焦点还没切过来就被误判为失焦而隐藏。窗口显示后此段时间内不检测失焦，避免焦点切换尚未完成时被误判隐藏。",
+    "hotkey.grace.hint": "",
     "hotkey.recording": "请按下快捷键...（10秒超时）",
     "hotkey.unit.ms": "{value}ms",
 
@@ -167,6 +177,8 @@ const DICT = {
     "file_dialog.exe_filter": "可执行文件",
 
     // ── 调试 Tab：日志 ──
+    "debug.section.log": "日志 · 排查现场",
+    "debug.section.perf": "性能统计 · 最近采样",
     "log.level.label": "日志级别",
     "log.level.error": "error（仅错误）",
     "log.level.info": "info",
@@ -217,6 +229,7 @@ const DICT = {
     // ── 存储 Tab ──
     "storage.history.label": "历史记录",
     "storage.db_path.label": "数据库路径",
+    "storage.action.label": "操作",
     "storage.clear": "清空历史记录",
     "storage.clear.confirm": "确定清空所有历史记录？",
     "storage.history_count": "{count} 条记录",
@@ -242,26 +255,29 @@ const DICT = {
 
     // ── 上下文 Tab（动态渲染）──
     "context.title": "环境感知",
-    "context.desc": "唤起时自动采集前台应用、剪贴板等上下文，用于搜索增强",
+    "context.desc": "总开关：关闭后所有采集立即停止",
     "context.lede": "Blink 观察你选中 / 复制 / 剪贴的内容，主动推荐能对它做的事。",
     "context.section.capture": "采集 · 数据从哪来",
+    "context.section.filter": "过滤 · 哪些应用不采",
     "context.section.trigger": "触发 · 什么算命中",
     "context.section.present": "呈现 · 用户如何看到",
+    "context.filter.title": "敏感应用",
+    "context.filter.desc": "前台是这些应用时暂停一切采集，避免密码 / 网银界面被读到",
+    "context.trigger.card.title": "Ghost 触发规则",
+    "context.trigger.card.desc": "环境自动触发的建议（选中英文→翻译、剪贴板 URL→打开链接 等）；关闭后 Ghost 不再出现",
     "context.autosuggest.title": "输入补全 · Ghost Text",
     "context.bindings.title": "Context 触发规则",
-    "context.bindings.hint": "环境自动触发的建议（选中英文→翻译、剪贴板 URL→打开链接 等）；关闭后 Ghost 不再出现",
     "context.bindings.empty": "暂无已注册的 Context 触发规则",
-    "context.privacy.title": "采集与敏感应用",
     "context.trigger.text_is_non_target_lang": "文本非目标语言",
     "context.trigger.clipboard_is_url": "剪贴板是 URL",
     "context.trigger.clipboard_is_file_path": "剪贴板是文件路径",
     "context.trigger.selection_non_empty": "选区非空",
     "context.clipboard": "采集剪贴板文本",
-    "context.selection": "划词感知（选中文本抓取）",
+    "context.selection": "划词感知（选中文本）",
     "context.selection.hint": "鼠标划选文本后自动抓取，唤起 Blink 时作为上下文使用。局限：仅 Windows；依赖应用支持 UIA TextPattern，浏览器（Chrome/Edge/Firefox）、Office、VS Code、原生 Win32 支持较好，部分 Electron 应用（如新版 QQ/微信/Discord）、终端、游戏可能抓不到；无选区时可先复制文本，Blink 会自动读剪贴板。",
 
     // ── Chord 交互面板（0.8.5.1 §6.6）──
-    "chord.hint": "主窗可见且未开始输入时，按住 Alt 可触发快捷动作（区域截图 / 智能划词 / 剪贴板历史）",
+    "chord.lede": "主窗可见且未开始输入时，按住 Alt 可触发快捷动作（区域截图 / 划词翻译 / 剪贴板历史）",
     "chord.general.title": "总控",
     "chord.enabled.label": "启用 Chord",
     "chord.enabled.hint": "关闭后 Alt+字母 不再触发 Chord 动作",
@@ -277,8 +293,6 @@ const DICT = {
     "chord.clipboard.title": "剪贴板历史",
     "chord.clipboard.enabled.label": "监听剪贴板写入",
     "chord.clipboard.enabled.hint": "开启后自动记录复制内容，输入\"剪贴板\"或 Alt+C 召回历史（如启动时为关闭状态，首次打开需重启一次让监听器建立）",
-    "context.sensitive.title": "敏感应用（前台时不采集上下文）",
-    "context.sensitive.hint": "如密码管理器、银行软件等，保护隐私",
     "context.add_app": "＋ 添加应用",
     "context.empty": "暂无敏感应用",
     "context.remove.title": "移除",
@@ -295,8 +309,6 @@ const DICT = {
     "plugin.no_trigger": "无触发关键词",
     "plugin.trigger": "触发: {kw}",
     "plugin.no_config": "（该插件无可配置项）",
-    "plugin.enabled": "已启用",
-    "plugin.disabled": "已禁用",
     "plugin.toggle.title": "启用/禁用插件",
     "plugin.section": "配置",
     "plugin.save": "保存配置",
@@ -385,6 +397,16 @@ const DICT = {
     "panel.debug": "Debug",
     "panel.about": "About",
 
+    // ── Panel lede (one-line intro under each tab h2) ──
+    "general.lede": "Global preferences: theme, language, history, and result limits.",
+    "hotkey.lede": "The key that summons Blink and watchdog timing thresholds.",
+    "engines.lede": "Apps / files / calculator / built-in actions — where search results come from.",
+    "plugins.lede": "Installed third-party and built-in plugins — toggle and configure each.",
+    "network.lede": "HTTP / HTTPS proxy shared by the app and all plugins.",
+    "storage.lede": "Storage location and cleanup for the database and history.",
+    "debug.lede": "Log level and performance samples — leave closed unless troubleshooting.",
+    "about.lede": "Version, tech stack, and source repository.",
+
     // ── General tab ──
     "general.auto_start.label": "Launch at startup",
     "general.auto_start.hint": "Start automatically on boot",
@@ -431,11 +453,11 @@ const DICT = {
     "hotkey.reset": "Reset to default",
     "hotkey.reset.title": "Reset to default",
     "hotkey.tap.label": "Tap threshold",
-    "hotkey.tap.title": "Max press-to-release duration before it's treated as a hold (system modifier) instead of a tap",
-    "hotkey.tap.hint": "If the key stays down longer than this, it's treated as a hold (preserving system modifier behavior) and Blink is NOT invoked.",
+    "hotkey.tap.title": "Max press-to-release duration before it's treated as a hold (system modifier) instead of a tap. If the key stays down longer than this, it's treated as a hold (preserving system modifier behavior) and Blink is NOT invoked.",
+    "hotkey.tap.hint": "",
     "hotkey.grace.label": "Watchdog grace period",
-    "hotkey.grace.title": "Focus-loss protection window after the window is shown — prevents hiding before focus transfer completes",
-    "hotkey.grace.hint": "Focus-loss detection is suppressed for this duration after the window appears, so it isn't hidden before focus finishes transferring.",
+    "hotkey.grace.title": "Focus-loss protection window after the window is shown — prevents hiding before focus transfer completes. Focus-loss detection is suppressed for this duration after the window appears, so it isn't hidden before focus finishes transferring.",
+    "hotkey.grace.hint": "",
     "hotkey.recording": "Press a shortcut... (10s timeout)",
     "hotkey.unit.ms": "{value}ms",
 
@@ -512,6 +534,8 @@ const DICT = {
     "file_dialog.exe_filter": "Executable files",
 
     // ── Debug tab: logging ──
+    "debug.section.log": "Logging · Troubleshooting",
+    "debug.section.perf": "Performance · Recent samples",
     "log.level.label": "Log level",
     "log.level.error": "error (errors only)",
     "log.level.info": "info",
@@ -562,6 +586,7 @@ const DICT = {
     // ── Storage tab ──
     "storage.history.label": "History",
     "storage.db_path.label": "Database path",
+    "storage.action.label": "Actions",
     "storage.clear": "Clear history",
     "storage.clear.confirm": "Clear all history?",
     "storage.history_count": "{count} records",
@@ -587,26 +612,29 @@ const DICT = {
 
     // ── Context tab (dynamic) ──
     "context.title": "Context Awareness",
-    "context.desc": "Auto-capture foreground app, clipboard, etc. on summon for search boost",
+    "context.desc": "Master switch: turn off to stop all capture instantly",
     "context.lede": "Blink watches what you select / copy / paste, and proactively recommends what to do with it.",
     "context.section.capture": "Capture · Where data comes from",
+    "context.section.filter": "Filter · Which apps are skipped",
     "context.section.trigger": "Trigger · What counts as a hit",
     "context.section.present": "Present · How the user sees it",
+    "context.filter.title": "Sensitive apps",
+    "context.filter.desc": "Pause all capture when these apps are foreground — avoids reading passwords / banking UIs",
+    "context.trigger.card.title": "Ghost trigger rules",
+    "context.trigger.card.desc": "Suggestions triggered by environment (select English→translate, clipboard URL→open link, etc.); disabling hides the Ghost",
     "context.autosuggest.title": "Input Autosuggestion · Ghost Text",
     "context.bindings.title": "Context Triggers",
-    "context.bindings.hint": "Suggestions triggered by environment (select English→translate, clipboard URL→open link, etc.); disabling hides the Ghost",
     "context.bindings.empty": "No registered Context triggers",
-    "context.privacy.title": "Capture & Sensitive Apps",
     "context.trigger.text_is_non_target_lang": "Text is non-target language",
     "context.trigger.clipboard_is_url": "Clipboard is URL",
     "context.trigger.clipboard_is_file_path": "Clipboard is file path",
     "context.trigger.selection_non_empty": "Selection non-empty",
     "context.clipboard": "Capture clipboard text",
-    "context.selection": "Selection awareness (grab highlighted text)",
+    "context.selection": "Selection awareness",
     "context.selection.hint": "Auto-captures text you highlight with the mouse and passes it as context when you summon Blink. Limitations: Windows only; requires apps to support UIA TextPattern — browsers (Chrome/Edge/Firefox), Office, VS Code and native Win32 work well; some Electron apps (newer QQ/WeChat/Discord), terminals and games may fail. If no selection is grabbed, just copy the text — Blink will read your clipboard.",
 
     // ── Chord panel (0.8.5.1 §6.6) ──
-    "chord.hint": "When the main window is visible and no input has started, hold Alt to trigger quick actions (Screenshot / Smart Selection / Clipboard).",
+    "chord.lede": "When the main window is visible and no input has started, hold Alt to trigger quick actions (Screenshot / Selection Translate / Clipboard).",
     "chord.general.title": "General",
     "chord.enabled.label": "Enable Chord",
     "chord.enabled.hint": "When off, Alt+letter no longer triggers Chord actions",
@@ -622,8 +650,6 @@ const DICT = {
     "chord.clipboard.title": "Clipboard History",
     "chord.clipboard.enabled.label": "Listen for clipboard writes",
     "chord.clipboard.enabled.hint": "When on, copied content is automatically recorded; type \"clip\" or press Alt+C to recall (if disabled at startup, first re-enable needs one restart to build the listener)",
-    "context.sensitive.title": "Sensitive apps (no capture when in foreground)",
-    "context.sensitive.hint": "e.g. password managers, banking apps; protects privacy",
     "context.add_app": "+ Add app",
     "context.empty": "No sensitive apps",
     "context.remove.title": "Remove",
@@ -640,8 +666,6 @@ const DICT = {
     "plugin.no_trigger": "No trigger keyword",
     "plugin.trigger": "Trigger: {kw}",
     "plugin.no_config": "(No configurable options)",
-    "plugin.enabled": "Enabled",
-    "plugin.disabled": "Disabled",
     "plugin.toggle.title": "Enable/disable plugin",
     "plugin.section": "Configuration",
     "plugin.save": "Save",
@@ -750,7 +774,18 @@ export function applyI18n(lang) {
   if (lang) setLang(lang);
   for (const [attr, prop] of ATTRS) {
     document.querySelectorAll(`[${attr}]`).forEach((el) => {
-      el[prop] = t(el.getAttribute(attr));
+      if (prop === "textContent" && el.childElementCount > 0) {
+        // 保留子元素（如 field-hint-icon），只更新第一个文本节点
+        const text = t(el.getAttribute(attr));
+        let textNode = [...el.childNodes].find((n) => n.nodeType === Node.TEXT_NODE);
+        if (textNode) {
+          textNode.textContent = text;
+        } else {
+          el.insertBefore(document.createTextNode(text), el.firstChild);
+        }
+      } else {
+        el[prop] = t(el.getAttribute(attr));
+      }
     });
   }
 }

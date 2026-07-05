@@ -157,3 +157,45 @@
 - `·` 圆点保留给"参数分隔"语义（如 statusbar `翻页 · 3/5`）
 
 **唯一真源**：`frontend/css/kbd.css` + `frontend/js/kbd.js`。修改键位视觉只改这两个文件，业务模块不允许再造轮子。
+
+### 14.8 设计 token 层（0.8.8 归档 · 强制）
+
+**唯一真源**：`frontend/css/theme.css` 的 `:root` 区块（与 dark/light/gruvbox 主题变量并列）。
+
+**分层心智**：
+- **色彩层**（随主题切换）—— `--bg / --text / --accent / --surface / --shadow` 等,`dark|light|gruvbox|nvchad-*|genshin-*` 主题各自覆盖
+- **形状与节奏层**（跨主题共享，不随主题变）—— `--radius-* / --transition-*`,固化「同一款 UI 在不同主题下形状一致，只换颜色」
+
+**圆角四档**（`--radius-*`）：
+
+| Token | 值 | 使用场景 |
+|---|---|---|
+| `--radius-sm` | 4px | tag/input 内嵌打勾等细节元素 |
+| `--radius-md` | 6px | 按钮、卡片主流(15+ 处占比最高) |
+| `--radius-lg` | 8px | 大面板/perf-section 类大卡片 |
+| `--radius-xl` | 12px | 顶级容器(主窗输入框、模态外壳) |
+
+**过渡时长三档**（`--transition-*`）：
+
+| Token | 值 | 使用场景 |
+|---|---|---|
+| `--transition-fast` | 0.1s | 悬停/点击的即时反馈 |
+| `--transition-base` | 0.15s | 状态切换默认(color/border 联动) |
+| `--transition-slow` | 0.2s | 大幅度形变、淡入淡出、开关滑块 |
+
+**铁则**：
+
+1. **新增 CSS 优先用 token,不 hardcode 数值** —— 出现新的圆角/过渡值必须先反思能否复用现有档;确实特殊(如 chord-ball 圆球 `border-radius: 50%`、结果 hover 超快 `0.08s`)才保留原写法。
+2. **低频/特例值保留原写法,不搞过度归一** —— `border-radius: 10px / 9px / 5px / 2px / 24px` 这类**单次使用**的值,继续 hardcode;强行加 `--radius-2xl / --radius-3xs` 反而稀释语义。
+3. **色彩绝不 hardcode** —— 任何颜色都必须走主题变量（`var(--text)` / `var(--surface)` 等）,否则主题切换会瞎眼；圆角/过渡允许 hardcode 特例,颜色不允许。
+
+**归档**（0.8.8 首轮迁移完成范围）：
+- `settings.css` 26 处 radius / 24 处 transition 已迁 token（占比 ~85%）
+- `style.css` 3 处 radius 已迁 token
+- `contextmenu-popup.html` 内联 style 2 处已迁 token
+- **未迁**：`chord-ball.html` / `chord-screenshot.html` 是独立 overlay,不 link `theme.css`,视觉独立于主题体系,保留 hardcode 心智一致
+
+**0.9 前 chore 池**（不阻塞 0.8 归档）：
+- 间距 token(`--space-*`) 系统 —— 现在 padding/gap 全 hardcode,种类过多(6/8/10/12/14/16px 都有),先积累样本再定档
+- 阴影层级 token(`--elevation-*`) —— 当前只有 `--shadow` / `--shadow-strong` 两档,可能不够
+- 主窗与设置页共用**按钮基础样式**抽 `common.css` —— 涉及 class 命名重构,风险偏高,与 0.8.6 ConfigStore 分片同批做

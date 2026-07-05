@@ -75,6 +75,11 @@ export function confirmChordSelection() {
   return invoke("confirm_chord_selection");
 }
 
+/** 轮询选区缓存（chord-ball 前端用，检测划词是否成功）。返回文本或 null。 */
+export function pollChordSelection() {
+  return invoke("poll_chord_selection");
+}
+
 /** 拉取剪贴板历史（Alt+C 面板渲染用）。 */
 export function getClipboardHistory(limit) {
   return invoke("get_clipboard_history", { limit: limit ?? 20 });

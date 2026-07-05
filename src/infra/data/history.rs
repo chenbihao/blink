@@ -188,6 +188,15 @@ pub async fn set_config(pool: &SqlitePool, key: &str, value: &str) -> Result<(),
     Ok(())
 }
 
+/// 删除配置值（0.8.8 §8.7：`AppConfig` 分片迁移完毕后清理旧 `app_config` 单 key）。
+pub async fn delete_config(pool: &SqlitePool, key: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM config WHERE key = ?1")
+        .bind(key)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// 获取所有配置。
 pub async fn get_all_config(pool: &SqlitePool) -> HashMap<String, String> {
     let rows: Vec<(String, String)> = sqlx::query_as("SELECT key, value FROM config")

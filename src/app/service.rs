@@ -29,7 +29,7 @@ pub struct AppContext {
     // ── 0.8.6 §8.2.3：核心服务引用 ─────────────────────────
     pub search_service: std::sync::Arc<crate::domain::search::SearchService>,
     #[allow(dead_code)] // 0.9 插件查询时消费
-    pub plugin_engine: Option<std::sync::Arc<crate::domain::plugin::PluginEngine>>,
+    pub plugin_engine: std::sync::Arc<crate::domain::plugin::PluginEngine>,
     #[allow(dead_code)] // Service 启动时按需取用
     pub router: std::sync::Arc<crate::domain::intent::RuleRouter>,
     #[allow(dead_code)]

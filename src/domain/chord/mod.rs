@@ -220,7 +220,7 @@ fn bilingual(zh: &str, en: &str) -> LocalizableText {
 
 /// 构建默认 ChordRegistry（注册第一批动作）。
 /// - Alt+A 区域截图（0.8.7：ScreenshotAction 真实实现）
-/// - Alt+Q 智能划词（MiniBall surface）
+/// - Alt+Q 划词翻译（MiniBall surface）
 /// - Alt+C 剪贴板历史（0.8.5 §6.4）
 pub fn build_default_registry() -> ChordRegistry {
     let mut reg = ChordRegistry::new();
@@ -230,7 +230,7 @@ pub fn build_default_registry() -> ChordRegistry {
     reg.register(Arc::new(StubAction {
         id: "selection",
         key: 'q',
-        label: bilingual("智能划词", "Smart selection"),
+        label: bilingual("划词翻译", "Selection translate"),
         surface: ChordSurface::MiniBall,
     }));
     reg.register(Arc::new(ClipboardHistoryAction {

@@ -373,6 +373,7 @@ mod tests {
             modifiers: modifiers.iter().map(|s| s.to_string()).collect(),
             key: key.to_string(),
             display: String::new(),
+            ..Default::default()
         }
     }
 

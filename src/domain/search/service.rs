@@ -63,7 +63,7 @@ pub struct SearchService {
     pool: SqlitePool,
     sync_engines: Vec<Arc<dyn SearchEngine>>,
     async_engines: Vec<Arc<dyn SearchEngine>>,
-    plugin_engine: Option<Arc<PluginEngine>>,
+    plugin_engine: Arc<PluginEngine>,
     router: Arc<dyn IntentRouter>,
     /// 最近一次 query 的 seq,用于丢弃过期 async 增量(emit 前校验)。
     latest_seq: Arc<AtomicU64>,
@@ -110,7 +110,7 @@ impl SearchService {
         app: AppHandle,
         pool: SqlitePool,
         engines: Vec<Arc<dyn SearchEngine>>,
-        plugin_engine: Option<Arc<PluginEngine>>,
+        plugin_engine: Arc<PluginEngine>,
         router: Arc<dyn IntentRouter>,
         min_score_shared: Arc<RwLock<f64>>,
     ) -> Self {
@@ -323,11 +323,16 @@ impl SearchService {
         sug
     }
 
-    /// 插件显示名称查找。
+    /// 插件显示名称查找。空插件场景（无 manifest 命中）自动回退到剥离 `builtin.` 前缀。
     fn display_name(&self, id: &str) -> String {
-        match &self.plugin_engine {
-            Some(pe) => pe.get_display_name(id),
-            None => id.strip_prefix("builtin.").unwrap_or(id).to_string(),
+        // PluginEngine::get_display_name 内部即：find_plugin.map(name).unwrap_or(id.to_string())
+        // 缺 manifest 时会返 `id` 原样（含 `builtin.` 前缀）—— 保留旧行为专门剥掉前缀
+        // （旧 None 分支的语义）。
+        let name = self.plugin_engine.get_display_name(id);
+        if name == id {
+            id.strip_prefix("builtin.").unwrap_or(id).to_string()
+        } else {
+            name
         }
     }
 
@@ -337,9 +342,7 @@ impl SearchService {
             return None;
         }
         let lang = self.language.read().unwrap().clone();
-        self.plugin_engine
-            .as_ref()
-            .and_then(|pe| pe.get_empty_arg_hint(id, &lang))
+        self.plugin_engine.get_empty_arg_hint(id, &lang)
     }
 
     /// Takeover executor（0.8.6 §8.2.1）：插件独占返回区。
@@ -476,9 +479,7 @@ impl SearchService {
     /// filter 只看 `plugin_id` + `arg`——禁用插件 / min_arg_length 过滤链自动覆盖
     /// Context 命中的候选,无需额外分支。
     fn filter_route(&self, route: Route) -> Route {
-        let Some(pe) = &self.plugin_engine else {
-            return route;
-        };
+        let pe = &self.plugin_engine;
         match route {
             Route::Takeover { ref plugin_id, ref arg, .. } => {
                 // 检查禁用
@@ -522,9 +523,7 @@ impl SearchService {
     /// Takeover 分支:查询单插件 → emit 增量。
     /// 即使插件返回空结果也要 emit(空 items 通知前端清除占位符,避免永远转圈)。
     fn spawn_takeover(&self, plugin_id: String, arg: String, seq: u64) {
-        let Some(plugin_engine) = self.plugin_engine.clone() else {
-            return;
-        };
+        let plugin_engine = self.plugin_engine.clone();
         let debounce_ms = plugin_engine.get_debounce_ms(&plugin_id);
         let app = self.app.clone();
         let latest_seq = Arc::clone(&self.latest_seq);
@@ -582,44 +581,42 @@ impl SearchService {
                 .collect();
 
             // ── 1. 插件查询任务（独立 spawn，支持 per-plugin 防抖）
-            if let Some(ref pe) = plugin_engine {
-                if !plugin_ids.is_empty() {
-                    let plugin_ctx = crate::domain::plugin::PluginQueryContext::from_snapshot(&snapshot);
-                    let pe = pe.clone();
-                    let plugin_ids = plugin_ids.clone();
-                    let app = app.clone();
-                    let latest_seq = latest_seq.clone();
-                    // 取所有命中插件中最大的 debounce_ms（同一批查询共享一个 task）
-                    let max_debounce = plugin_ids
-                        .iter()
-                        .map(|(id, _)| pe.get_debounce_ms(id))
-                        .max()
-                        .unwrap_or(0);
-                    tauri::async_runtime::spawn(async move {
-                        // 防抖:等待连续输入停止后再查询,避免每次按键都触发网络请求
-                        if max_debounce > 0 {
-                            tokio::time::sleep(std::time::Duration::from_millis(max_debounce)).await;
-                            if seq != latest_seq.load(Ordering::SeqCst) {
-                                tracing::trace!(debounce_ms = max_debounce, "插件防抖:seq 已过期,跳过");
-                                return;
-                            }
+            if !plugin_ids.is_empty() {
+                let plugin_ctx = crate::domain::plugin::PluginQueryContext::from_snapshot(&snapshot);
+                let pe = plugin_engine.clone();
+                let plugin_ids = plugin_ids.clone();
+                let app = app.clone();
+                let latest_seq = latest_seq.clone();
+                // 取所有命中插件中最大的 debounce_ms（同一批查询共享一个 task）
+                let max_debounce = plugin_ids
+                    .iter()
+                    .map(|(id, _)| pe.get_debounce_ms(id))
+                    .max()
+                    .unwrap_or(0);
+                tauri::async_runtime::spawn(async move {
+                    // 防抖:等待连续输入停止后再查询,避免每次按键都触发网络请求
+                    if max_debounce > 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(max_debounce)).await;
+                        if seq != latest_seq.load(Ordering::SeqCst) {
+                            tracing::trace!(debounce_ms = max_debounce, "插件防抖:seq 已过期,跳过");
+                            return;
                         }
-                        let mut items = pe.query_subset(&plugin_ids, &plugin_ctx).await;
-                        // priority 候选 score 抬高,确保置顶
-                        for item in &mut items {
-                            if priority_set.contains(&item.source) {
-                                item.score = boost_priority(item.score);
-                            }
+                    }
+                    let mut items = pe.query_subset(&plugin_ids, &plugin_ctx).await;
+                    // priority 候选 score 抬高,确保置顶
+                    for item in &mut items {
+                        if priority_set.contains(&item.source) {
+                            item.score = boost_priority(item.score);
                         }
-                        if seq == latest_seq.load(Ordering::SeqCst) {
-                            // 即使空结果也要 emit,让前端清除占位符
-                            tracing::trace!(count = items.len(), "插件查询返回");
-                            // 插件查询：空结果时用第一个 plugin_id 作为来源
-                            let empty_source = plugin_ids.first().map(|(id, _)| id.as_str());
-                            emit_results(&app, seq, items, limit, empty_source);
-                        }
-                    });
-                }
+                    }
+                    if seq == latest_seq.load(Ordering::SeqCst) {
+                        // 即使空结果也要 emit,让前端清除占位符
+                        tracing::trace!(count = items.len(), "插件查询返回");
+                        // 插件查询：空结果时用第一个 plugin_id 作为来源
+                        let empty_source = plugin_ids.first().map(|(id, _)| id.as_str());
+                        emit_results(&app, seq, items, limit, empty_source);
+                    }
+                });
             }
 
             // ── 2. 每个 async 引擎独立 spawn(关键修复:不互相阻塞)

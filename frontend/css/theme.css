@@ -76,3 +76,27 @@
   --border-glow: rgba(0, 0, 0, 0.06);
   --danger-hover-bg: rgba(210, 15, 57, 0.1);
 }
+
+/* ── 设计 token（0.8.8 归档：跨主题共享的形状/节奏语言）────────────────────
+   与 dark/light/gruvbox 主题变量并列在 :root 下——**不随主题切换**,
+   只随「统一设计语言」演化。新增 CSS 请优先用这些 token,不要 hardcode 数值。
+   命名参考:见 docs/production-design/product-principles.md「设计语言」小节。
+
+   **迁移策略**（0.8.8 只做一小步）：
+   - `settings.css` / `style.css` 里的**高频** hardcode 替换成 token（radius 6/8/4、transition 主流三档）
+   - 低频/一次性值(如 `border-radius: 24px` 用于滑块外壳) 保留原写法,不硬拉
+   - 新增 css 请一律走 token，规范由 principles 文档约束
+*/
+:root {
+  /* 圆角:四档。sm = tag/input 内嵌打勾等细节;md = 按钮/卡片主流;lg = 大面板;xl = 顶级容器(主窗输入框/模态外壳) */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+
+  /* 过渡时长:三档。fast = 悬停/点击反馈;base = 状态切换默认;slow = 大幅度形变/淡入淡出 */
+  --transition-fast: 0.1s;
+  --transition-base: 0.15s;
+  --transition-slow: 0.2s;
+}
+

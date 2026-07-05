@@ -57,7 +57,7 @@ Blink 不是启动器（launcher），是 **Universal Action Layer（统一操�
 
 | 组合 | 动作 |
 |---|---|
-| `Alt + Q` | 智能划词（独立悬浮球，去原应用选文本后 confirm，主窗还原 + 自动填充） |
+| `Alt + Q` | 划词翻译（独立悬浮球，去原应用选文本后 confirm，主窗还原 + 自动填充） |
 | `Alt + C` | 剪贴板历史 top-9（Alt+1~9 快速选中回填） |
 | `Alt + A` | 区域截图（0.8.7 规划中） |
 
@@ -111,7 +111,7 @@ Blink 不是启动器（launcher），是 **Universal Action Layer（统一操�
 | `Tab`         | 采纳 Ghost 补全（`fy` → `fanyi `）或采纳 Context 建议 |
 | `Enter`       | 启动 / 复制结果 |
 | `PgUp` `PgDn` | 翻页 |
-| `Alt + Q`     | Chord：智能划词 |
+| `Alt + Q`     | Chord：划词翻译 |
 | `Alt + C`     | Chord：剪贴板历史 |
 | `Esc`         | 隐藏 |
 

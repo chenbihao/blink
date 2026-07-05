@@ -178,42 +178,6 @@ pub async fn list_builtin_actions(
     crate::domain::search::list_builtin_actions(&disabled, &registry, &config.language)
 }
 
-/// 更新禁用的内置动作列表（0.8.0 §1.3 设置页面板）。
-///
-/// 写 SQLite 后**同时**触发 SearchService 热更新——下次搜索立即生效，无需重启。
-#[tauri::command]
-pub async fn set_disabled_builtin_actions(
-    app: tauri::AppHandle,
-    disabled: Vec<String>,
-) -> Result<(), String> {
-    let pool = app.state::<sqlx::SqlitePool>();
-    crate::app::config::update_disabled_builtin_actions(&pool, disabled.clone()).await?;
-    // 热更新内存快照（搜索热路径读的是此值，非 SQLite）
-    let search_service = app.state::<std::sync::Arc<crate::domain::search::SearchService>>();
-    search_service.update_disabled_builtin_actions(disabled.clone());
-    tracing::info!(count = disabled.len(), ?disabled, "内置动作禁用列表已更新");
-    Ok(())
-}
-
-/// 更新 Autosuggestion 配置（0.8.1 §2.8）。
-///
-/// 写 SQLite + 触发 SearchService 热更新。tab_key 只影响前端键位监听——
-/// 前端设置页保存后可自行更新 window 单例，无需回听后端事件（简单直接）。
-#[tauri::command]
-pub async fn update_autosuggest_config(
-    app: tauri::AppHandle,
-    enabled: bool,
-    min_score: f64,
-    tab_key: String,
-) -> Result<(), String> {
-    let pool = app.state::<sqlx::SqlitePool>();
-    crate::app::config::update_autosuggest_config(&pool, enabled, min_score, tab_key.clone()).await?;
-    if let Some(ss) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
-        ss.update_autosuggest_config(enabled, min_score);
-    }
-    tracing::info!(enabled, min_score, %tab_key, "Autosuggest 配置已更新");
-    Ok(())
-}
 
 /// 触发 Chord 动作（0.8.5 §六）。前端 Alt+字母 → invoke 此 command。
 ///
@@ -291,6 +255,13 @@ pub fn hide_screenshot_overlay(app: tauri::AppHandle) {
     crate::infra::platform::window::hide_screenshot_overlay(&app);
 }
 
+/// 轮询选区缓存（chord-ball 前端 200ms 轮询，检测划词是否成功）。
+/// 返回 Some(text) 表示选区已就绪；None 表示尚未抓到或已过期。
+#[tauri::command]
+pub fn poll_chord_selection() -> Option<String> {
+    crate::infra::platform::selection::get_last_selection()
+}
+
 /// 确认划词（0.8.5 §6.5）：读 selection 缓存 → emit 到主窗 → 主窗 show + 球 hide。
 /// 主窗前端 listen `blink://chord-translate` 填搜索框「翻译 {text}」触发翻译插件。
 #[tauri::command]
@@ -333,60 +304,6 @@ pub async fn list_all_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Va
     registry.list_all(&disabled, &language)
 }
 
-/// 设置 disable 的 Chord 动作 id 列表（0.8.5.1 §6.6 设置页保存）。
-#[tauri::command]
-pub async fn set_disabled_chord_actions(
-    app: tauri::AppHandle,
-    disabled: Vec<String>,
-) -> Result<(), String> {
-    let pool = app.state::<sqlx::SqlitePool>();
-    crate::app::config::update_disabled_chord_actions(&pool, disabled.clone()).await?;
-    // 广播 config-changed 让主窗前端重刷 chord 提示条
-    let _ = app.emit("blink://config-changed", ());
-    tracing::info!(count = disabled.len(), ?disabled, "Chord 动作禁用列表已更新");
-    Ok(())
-}
-
-/// 更新 Chord 总开关 + 提示条可见性（0.8.5.1 §6.6 设置页保存）。
-#[tauri::command]
-pub async fn update_chord_toggles(
-    app: tauri::AppHandle,
-    chord_enabled: bool,
-    chord_hint_visible: bool,
-) -> Result<(), String> {
-    let pool = app.state::<sqlx::SqlitePool>();
-    crate::app::config::update_chord_toggles(&pool, chord_enabled, chord_hint_visible).await?;
-    let _ = app.emit("blink://config-changed", ());
-    tracing::info!(chord_enabled, chord_hint_visible, "Chord 开关已更新");
-    Ok(())
-}
-
-/// 更新剪贴板监听 enabled 开关（0.8.5.1 §6.6 · 0.8.7 修复：接线 set_active 热切）。
-///
-/// **修复前**（0.8.5.1 ~ 0.8.6）只写 DB,监听器 `ACTIVE` 保持启动时值,前端 hint 也写着
-/// "改动需重启生效"——但 `clipboard::set_active` 早就是 pub 且幂等的,接线上即可热切。
-/// 现在关掉后 `on_clipboard_change` 立即短路,重新打开也立即恢复,无需重启。
-///
-/// **注**：`enabled=true` 时能立即恢复,是因为监听窗口在启动时就注册好并常驻(仿
-/// selection 范式,`start_watcher_thread` 一旦拉起就不停),`ACTIVE` 只是回调里的门闸。
-/// 但**如果启动时 cfg.enabled=false**,`ClipboardService::start` 直接 return,监听窗口
-/// 从未建立——这种情况下再打开开关仍需重启。已在设置页 hint 里点明。
-#[tauri::command]
-pub async fn update_clipboard_enabled(
-    app: tauri::AppHandle,
-    enabled: bool,
-) -> Result<(), String> {
-    let pool = app.state::<sqlx::SqlitePool>();
-    let mut cfg = crate::app::config::get_config(&pool).await;
-    cfg.clipboard.enabled = enabled;
-    crate::app::config::save_config(&pool, &cfg).await?;
-    // 热切换 ACTIVE 门闸——立即生效(前提是监听窗口在启动时已建立)。
-    crate::infra::platform::clipboard::set_active(enabled);
-    let _ = app.emit("blink://config-changed", ());
-    tracing::info!(enabled, "剪贴板监听开关已更新");
-    Ok(())
-}
-
 /// 当前 Alt 键是否物理按下（0.8.5 §6.1）。前端轮询驱动 alt-active 状态——
 /// WebView2 不转发 Alt 键自身的 keydown 到 JS，前端监听不可靠，改轮询物理态。
 #[tauri::command]
@@ -410,7 +327,8 @@ pub async fn list_context_bindings(app: tauri::AppHandle) -> Vec<serde_json::Val
         config.disabled_context_bindings.iter().cloned().collect();
     let lang = config.language.clone();
 
-    // 从 PluginEngine 拉所有插件的 manifest.triggers 里的 Context 变体
+    // 从 PluginEngine 拉所有插件的 manifest.triggers 里的 Context 变体。
+    // PluginEngine 现在为 `Arc<PluginEngine>`（空插件也构造，见 main.rs），无需 Option 处理。
     let Some(pe) = app.try_state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>() else {
         return Vec::new();
     };
@@ -435,23 +353,6 @@ pub async fn list_context_bindings(app: tauri::AppHandle) -> Vec<serde_json::Val
         }
     }
     bindings
-}
-
-/// 更新 context binding disable 列表（0.8.3 §4.6 设置页面板）。
-///
-/// 写 SQLite + 触发 SearchService（→ RuleRouter）热更新——下次搜索立即生效。
-#[tauri::command]
-pub async fn set_disabled_context_bindings(
-    app: tauri::AppHandle,
-    disabled: Vec<String>,
-) -> Result<(), String> {
-    let pool = app.state::<sqlx::SqlitePool>();
-    crate::app::config::update_disabled_context_bindings(&pool, disabled.clone()).await?;
-    if let Some(ss) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
-        ss.update_disabled_context_bindings(disabled.clone());
-    }
-    tracing::info!(count = disabled.len(), ?disabled, "Context binding 禁用列表已更新");
-    Ok(())
 }
 
 /// 设置页-存储：获取历史记录统计信息。
@@ -509,126 +410,227 @@ pub async fn get_config(app: tauri::AppHandle) -> crate::app::config::AppConfig 
     crate::app::config::get_config(&pool).await
 }
 
-/// 更新快捷键配置。
+/// 泛型配置写入（0.8.6 P1-C 前端泛型化）。
+///
+/// 前端统一调用 `invoke('set_config', { key, value })`，后端按 key 路由到
+/// 对应分片持久化 + 副作用（SearchService 热更新 / 平台 API / emit 事件）。
+///
+/// # 支持的 key
+///
+/// **AppConfig 分片**：`language` / `log_level` / `auto_start` / `hotkey` /
+/// `tap_threshold` / `grace_period` / `general_config` / `autosuggest` /
+/// `chord_toggles` / `clipboard_enabled` / `disabled_builtin_actions` /
+/// `disabled_context_bindings` / `disabled_chord_actions`
+///
+/// **引擎配置**：`file_search` / `start_menu_config` / `calc_config` / `global_proxy`
+///
+/// **插件配置**：`plugin_config`
+///
+/// **Context 配置**：`context_config`
 #[tauri::command]
-pub async fn update_hotkey(
+pub async fn set_config(
     app: tauri::AppHandle,
-    modifiers: Vec<String>,
     key: String,
-    display: String,
+    value: serde_json::Value,
 ) -> Result<(), String> {
     let pool = app.state::<sqlx::SqlitePool>();
-    let hotkey = crate::app::config::HotkeyConfig {
-        modifiers,
-        key,
-        display,
-    };
-    // 保存到数据库
-    crate::app::config::update_hotkey(&pool, hotkey.clone()).await?;
-    // 同时更新运行时热键配置
-    crate::infra::platform::hotkey::update_config(hotkey.clone());
-    tracing::info!(display = %hotkey.display, "全局热键已更新");
-    Ok(())
-}
 
-/// 更新 tap 阈值。
-#[tauri::command]
-pub async fn update_tap_threshold(app: tauri::AppHandle, threshold: u64) -> Result<(), String> {
-    let pool = app.state::<sqlx::SqlitePool>();
-    crate::app::config::update_tap_threshold(&pool, threshold).await?;
-    // 同时更新运行时热键配置
-    crate::infra::platform::hotkey::update_tap_threshold(threshold);
-    tracing::debug!(threshold, "tap 阈值已更新");
-    Ok(())
-}
+    match key.as_str() {
+        // ── 单值字段（直接解析） ──────────────────────────────────────────
+        "language" => {
+            let language: String = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            crate::app::config::update_language(&pool, language.clone()).await?;
+            if let Some(ss) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
+                ss.update_language(language.clone());
+            }
+            let _ = app.emit("blink://config-changed", ());
+            tracing::info!(%language, "语言已更新");
+        }
+        "log_level" => {
+            let level: String = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            crate::app::config::update_log_level(&pool, level.clone()).await?;
+            crate::infra::utils::logging::update_level(&level);
+            tracing::info!(%level, "日志级别已切换");
+        }
+        "auto_start" => {
+            let auto_start: bool = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            crate::app::config::update_auto_start(&pool, auto_start).await?;
+            use tauri_plugin_autostart::ManagerExt;
+            let manager = app.autolaunch();
+            if auto_start { manager.enable().map_err(|e| e.to_string())?; }
+            else { manager.disable().map_err(|e| e.to_string())?; }
+            tracing::info!(auto_start, "开机自启配置已更新");
+        }
+        "tap_threshold" => {
+            let threshold: u64 = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            crate::app::config::update_tap_threshold(&pool, threshold).await?;
+            crate::infra::platform::hotkey::update_tap_threshold(threshold);
+            tracing::debug!(threshold, "tap 阈值已更新");
+        }
+        "grace_period" => {
+            let period: u64 = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            crate::app::config::update_grace_period(&pool, period).await?;
+            crate::infra::platform::window::update_grace_period(period);
+            tracing::debug!(period, "grace period 已更新");
+        }
+        "clipboard_enabled" => {
+            let enabled: bool = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            // 只读写 clipboard:config 分片，不走门面 get_config（避免 7 片全读全写）。
+            // 0.9 删掉 AppConfig.clipboard 字段后此处不受影响。
+            let mut clip_cfg = crate::app::config::ConfigStore::get::<crate::infra::data::clipboard::ClipboardConfig>(&pool).await;
+            clip_cfg.enabled = enabled;
+            crate::app::config::ConfigStore::set(&pool, &clip_cfg).await?;
+            crate::infra::platform::clipboard::set_active(enabled);
+            let _ = app.emit("blink://config-changed", ());
+            tracing::info!(enabled, "剪贴板监听开关已更新");
+        }
 
-/// 更新 grace period。
-#[tauri::command]
-pub async fn update_grace_period(app: tauri::AppHandle, period: u64) -> Result<(), String> {
-    let pool = app.state::<sqlx::SqlitePool>();
-    crate::app::config::update_grace_period(&pool, period).await?;
-    // 同时更新运行时窗口配置
-    crate::infra::platform::window::update_grace_period(period);
-    tracing::debug!(period, "grace period 已更新");
-    Ok(())
-}
+        // ── 结构体字段（按 key 对应 serde 解析） ──────────────────────────
+        "hotkey" => {
+            let hotkey: crate::app::config::HotkeyConfig =
+                serde_json::from_value(value).map_err(|e| e.to_string())?;
+            crate::app::config::update_hotkey(&pool, hotkey.clone()).await?;
+            crate::infra::platform::hotkey::update_config(hotkey.clone());
+            tracing::info!(display = %hotkey.display, "全局热键已更新");
+        }
+        "general_config" => {
+            let general: crate::app::config::GeneralConfig =
+                serde_json::from_value(value).map_err(|e| e.to_string())?;
+            let max_results = general.max_results;
+            crate::app::config::update_general_config(&pool, &general).await?;
+            if let Some(ss) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
+                ss.update_max_results(max_results as usize);
+            }
+            let _ = app.emit("blink://config-changed", ());
+            tracing::info!(
+                theme = %general.theme,
+                search_history_enabled = general.search_history_enabled,
+                search_history_days = general.search_history_days,
+                max_results,
+                page_size = general.page_size,
+                "通用配置已更新"
+            );
+        }
+        "autosuggest" => {
+            let v: crate::app::config::AutosuggestUpdate =
+                serde_json::from_value(value).map_err(|e| e.to_string())?;
+            crate::app::config::update_autosuggest_config(
+                &pool, v.enabled, v.min_score, v.tab_key.clone(),
+            ).await?;
+            if let Some(ss) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
+                ss.update_autosuggest_config(v.enabled, v.min_score);
+            }
+            tracing::info!(v.enabled, v.min_score, tab_key = %v.tab_key, "Autosuggest 配置已更新");
+        }
+        "chord_toggles" => {
+            let v: crate::app::config::ChordTogglesUpdate =
+                serde_json::from_value(value).map_err(|e| e.to_string())?;
+            crate::app::config::update_chord_toggles(
+                &pool, v.chord_enabled, v.chord_hint_visible,
+            ).await?;
+            let _ = app.emit("blink://config-changed", ());
+            tracing::info!(v.chord_enabled, v.chord_hint_visible, "Chord 开关已更新");
+        }
 
-/// 更新开机自启设置：存配置 + 真正注册/注销系统开机自启（注册表 Run 项）。
-#[tauri::command]
-pub async fn update_auto_start(app: tauri::AppHandle, auto_start: bool) -> Result<(), String> {
-    let pool = app.state::<sqlx::SqlitePool>();
-    crate::app::config::update_auto_start(&pool, auto_start).await?;
-    use tauri_plugin_autostart::ManagerExt;
-    let manager = app.autolaunch();
-    if auto_start {
-        manager.enable().map_err(|e| e.to_string())?;
-    } else {
-        manager.disable().map_err(|e| e.to_string())?;
+        // ── Disable 列表 ──────────────────────────────────────────────────
+        "disabled_builtin_actions" => {
+            let disabled: Vec<String> = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            crate::app::config::update_disabled_builtin_actions(&pool, disabled.clone()).await?;
+            let search_service = app.state::<std::sync::Arc<crate::domain::search::SearchService>>();
+            search_service.update_disabled_builtin_actions(disabled.clone());
+            tracing::info!(count = disabled.len(), ?disabled, "内置动作禁用列表已更新");
+        }
+        "disabled_context_bindings" => {
+            let disabled: Vec<String> = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            crate::app::config::update_disabled_context_bindings(&pool, disabled.clone()).await?;
+            if let Some(ss) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
+                ss.update_disabled_context_bindings(disabled.clone());
+            }
+            tracing::info!(count = disabled.len(), ?disabled, "Context binding 禁用列表已更新");
+        }
+        "disabled_chord_actions" => {
+            let disabled: Vec<String> = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            crate::app::config::update_disabled_chord_actions(&pool, disabled.clone()).await?;
+            let _ = app.emit("blink://config-changed", ());
+            tracing::info!(count = disabled.len(), ?disabled, "Chord 动作禁用列表已更新");
+        }
+
+        // ── 引擎配置 ──────────────────────────────────────────────────────
+        "file_search" => {
+            let fs: crate::app::config::FileSearchConfig =
+                serde_json::from_value(value).map_err(|e| e.to_string())?;
+            crate::app::config::update_file_search(&pool, fs.clone()).await?;
+            if let Some(ss) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
+                ss.update_engine_config("file", crate::domain::search::EngineConfigUpdate::File(fs.clone())).await;
+            }
+            tracing::info!(enabled = fs.enabled, data_source = %fs.data_source, "文件搜索配置已更新");
+        }
+        "start_menu_config" => {
+            let sm: crate::app::config::StartMenuConfig =
+                serde_json::from_value(value).map_err(|e| e.to_string())?;
+            crate::app::config::update_start_menu_config(&pool, &sm).await?;
+            if let Some(ss) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
+                ss.update_engine_config("start_menu", crate::domain::search::EngineConfigUpdate::StartMenu(sm.clone())).await;
+            }
+            tracing::info!(enabled = sm.enabled, scan_depth = sm.scan_depth, "应用搜索配置已更新");
+        }
+        "calc_config" => {
+            let cc: crate::app::config::CalcConfig =
+                serde_json::from_value(value).map_err(|e| e.to_string())?;
+            crate::app::config::update_calc_config(&pool, &cc).await?;
+            if let Some(ss) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
+                ss.update_engine_config("calc", crate::domain::search::EngineConfigUpdate::Calc(cc.clone())).await;
+            }
+            tracing::info!(enabled = cc.enabled, "计算器配置已更新");
+        }
+        "global_proxy" => {
+            let v: crate::app::config::GlobalProxyUpdate =
+                serde_json::from_value(value).map_err(|e| e.to_string())?;
+            let config = serde_json::json!({ "http": v.http, "https": v.https });
+            crate::app::config::set_engine_config(&pool, "_global_proxy", &config).await?;
+            let engine = app.state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>();
+            let has_http = !v.http.is_empty();
+            let has_https = !v.https.is_empty();
+            let proxy = if !has_http && !has_https { None } else { Some((v.http, v.https)) };
+            engine.update_global_proxy(proxy).await;
+            tracing::info!(has_http, has_https, "全局代理配置已更新");
+        }
+
+        // ── 插件配置 ──────────────────────────────────────────────────────
+        "plugin_config" => {
+            let v: crate::app::config::PluginConfigUpdate =
+                serde_json::from_value(value).map_err(|e| e.to_string())?;
+            let engine = app.state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>();
+            let router = app.state::<std::sync::Arc<crate::domain::intent::RuleRouter>>();
+            let mut config = engine.get_config(&v.plugin_id).unwrap_or_default();
+            config.enabled = v.enabled;
+            config.settings = v.settings;
+            let result = engine.update_config(&v.plugin_id, config, Some(&router)).await;
+            match &result {
+                Ok(_) => tracing::info!(plugin_id = %v.plugin_id, enabled = v.enabled, "插件配置已更新"),
+                Err(err) => tracing::warn!(plugin_id = %v.plugin_id, error = %err, "插件配置更新失败"),
+            }
+            result?;
+        }
+
+        // ── Context 配置 ──────────────────────────────────────────────────
+        "context_config" => {
+            let ctx: crate::app::config::ContextConfig =
+                serde_json::from_value(value).map_err(|e| e.to_string())?;
+            crate::app::config::set_context_config(&pool, &ctx).await?;
+            crate::infra::platform::selection::set_active(ctx.selection_enabled);
+            crate::infra::platform::selection::set_sensitive_apps(ctx.sensitive_apps.clone());
+            if let Some(mem) = app.try_state::<std::sync::Arc<std::sync::RwLock<crate::app::config::ContextConfig>>>() {
+                *mem.write().unwrap() = ctx;
+            }
+            tracing::debug!("Context 配置已更新");
+        }
+
+        _ => {
+            return Err(format!("未知的配置 key: {key}"));
+        }
     }
-    tracing::info!(auto_start, "开机自启配置已更新");
-    Ok(())
-}
 
-/// 更新语言设置。广播 `blink://config-changed` 事件。
-#[tauri::command]
-pub async fn update_language(app: tauri::AppHandle, language: String) -> Result<(), String> {
-    let pool = app.state::<sqlx::SqlitePool>();
-    crate::app::config::update_language(&pool, language.clone()).await?;
-    // 热更新 SearchService 的 language 快照（0.8.1）— 立即影响 empty_arg_hint 等
-    // LocalizableText 的展示语言，无需重启。
-    if let Some(service) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
-        service.update_language(language.clone());
-    }
-    let _ = app.emit("blink://config-changed", ());
-    tracing::info!(%language, "语言已更新");
-    Ok(())
-}
-
-/// 更新日志级别（存配置 + 运行时 reload，立即生效）。
-#[tauri::command]
-pub async fn update_log_level(app: tauri::AppHandle, level: String) -> Result<(), String> {
-    let pool = app.state::<sqlx::SqlitePool>();
-    crate::app::config::update_log_level(&pool, level.clone()).await?;
-    crate::infra::utils::logging::update_level(&level);
-    tracing::info!(%level, "日志级别已切换");
-    Ok(())
-}
-
-/// 更新通用配置（主题 / 搜索历史 / 结果数）。
-/// 存配置 + max_results 热更新到 SearchService 内存（搜索热路径零 IO）。
-/// 广播 `blink://config-changed` 事件，主窗口/右键菜单即时响应主题等变更。
-#[tauri::command]
-pub async fn update_general_config(
-    app: tauri::AppHandle,
-    theme: String,
-    search_history_enabled: bool,
-    search_history_days: u32,
-    max_results: u32,
-    page_size: u32,
-) -> Result<(), String> {
-    let pool = app.state::<sqlx::SqlitePool>();
-    let general = crate::app::config::GeneralConfig {
-        theme,
-        search_history_enabled,
-        search_history_days,
-        max_results,
-        page_size,
-    };
-    crate::app::config::update_general_config(&pool, &general).await?;
-    // max_results 热更新到 SearchService 内存（若已注册）
-    if let Some(ss) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
-        ss.update_max_results(max_results as usize);
-    }
-    tracing::info!(
-        theme = %general.theme,
-        search_history_enabled,
-        search_history_days,
-        max_results,
-        page_size,
-        "通用配置已更新"
-    );
-    // 广播配置变更事件，主窗口/右键菜单即时响应
-    let _ = app.emit("blink://config-changed", ());
     Ok(())
 }
 
@@ -676,41 +678,6 @@ pub async fn reset_config(app: tauri::AppHandle) -> Result<(), String> {
     crate::app::config::save_config(&pool, &config).await
 }
 
-/// 更新文件搜索配置。
-#[tauri::command]
-pub async fn update_file_search(
-    app: tauri::AppHandle,
-    enabled: bool,
-    data_source: String,
-    everything_port: u16,
-    max_results: u32,
-) -> Result<(), String> {
-    let pool = app.state::<sqlx::SqlitePool>();
-    // 保留已有的本地扫描配置，只更新基础字段
-    let existing = crate::app::config::get_file_search_config(&pool).await;
-    let file_search = crate::app::config::FileSearchConfig {
-        enabled,
-        data_source,
-        everything_port,
-        max_results,
-        ..existing
-    };
-    crate::app::config::update_file_search(&pool, file_search.clone()).await?;
-
-    // 热更新 SearchService 中的引擎配置
-    if let Some(ss) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
-        ss.update_engine_config("file", crate::domain::search::EngineConfigUpdate::File(file_search.clone())).await;
-    }
-    tracing::info!(
-        enabled = file_search.enabled,
-        data_source = %file_search.data_source,
-        everything_port = file_search.everything_port,
-        max_results = file_search.max_results,
-        "文件搜索配置已更新"
-    );
-    Ok(())
-}
-
 /// 获取应用搜索配置。
 #[tauri::command]
 pub async fn get_start_menu_config(app: tauri::AppHandle) -> crate::app::config::StartMenuConfig {
@@ -718,54 +685,11 @@ pub async fn get_start_menu_config(app: tauri::AppHandle) -> crate::app::config:
     crate::app::config::get_start_menu_config(&pool).await
 }
 
-/// 更新应用搜索配置。
-#[tauri::command]
-pub async fn update_start_menu_config(
-    app: tauri::AppHandle,
-    enabled: bool,
-    scan_depth: u32,
-    include_uwp: bool,
-) -> Result<(), String> {
-    let pool = app.state::<sqlx::SqlitePool>();
-    let config = crate::app::config::StartMenuConfig { enabled, scan_depth, include_uwp };
-    crate::app::config::update_start_menu_config(&pool, &config).await?;
-
-    // 热更新 SearchService 中的引擎配置
-    if let Some(ss) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
-        ss.update_engine_config("start_menu", crate::domain::search::EngineConfigUpdate::StartMenu(config.clone())).await;
-    }
-    tracing::info!(
-        enabled = config.enabled,
-        scan_depth = config.scan_depth,
-        include_uwp = config.include_uwp,
-        "应用搜索配置已更新"
-    );
-    Ok(())
-}
-
 /// 获取计算器配置。
 #[tauri::command]
 pub async fn get_calc_config(app: tauri::AppHandle) -> crate::app::config::CalcConfig {
     let pool = app.state::<sqlx::SqlitePool>();
     crate::app::config::get_calc_config(&pool).await
-}
-
-/// 更新计算器配置。
-#[tauri::command]
-pub async fn update_calc_config(
-    app: tauri::AppHandle,
-    enabled: bool,
-) -> Result<(), String> {
-    let pool = app.state::<sqlx::SqlitePool>();
-    let config = crate::app::config::CalcConfig { enabled };
-    crate::app::config::update_calc_config(&pool, &config).await?;
-
-    // 热更新 SearchService 中的引擎配置
-    if let Some(ss) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
-        ss.update_engine_config("calc", crate::domain::search::EngineConfigUpdate::Calc(config.clone())).await;
-    }
-    tracing::info!(enabled = config.enabled, "计算器配置已更新");
-    Ok(())
 }
 
 /// 探测 Everything HTTP Server 状态。
@@ -785,71 +709,11 @@ pub async fn probe_everything(port: u16) -> bool {
 /// 获取所有已加载插件的信息（设置页用）。已含 enabled + settings（0.5.1）。
 #[tauri::command]
 pub async fn get_plugins(app: tauri::AppHandle) -> Vec<serde_json::Value> {
-    let engine = app.state::<Option<std::sync::Arc<crate::domain::plugin::PluginEngine>>>();
-    match engine.as_ref() {
-        Some(e) => {
-            // 读当前语言,供 manifest 配置文案按 locale 取值(设置页中英双语)
-            let pool = app.state::<sqlx::SqlitePool>();
-            let lang = crate::app::config::get_config(&pool).await.language;
-            e.list_plugins(&lang)
-        }
-        None => Vec::new(),
-    }
-}
-
-/// 更新全局网络代理配置（保存 DB + 更新内存 + 杀掉旧进程，下次查询自动用新）。
-#[tauri::command]
-pub async fn update_global_proxy(
-    app: tauri::AppHandle,
-    http: String,
-    https: String,
-) -> Result<(), String> {
+    let engine = app.state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>();
+    // 读当前语言,供 manifest 配置文案按 locale 取值(设置页中英双语)
     let pool = app.state::<sqlx::SqlitePool>();
-    let engine = app.state::<Option<std::sync::Arc<crate::domain::plugin::PluginEngine>>>();
-
-    // 存 DB
-    let config = serde_json::json!({ "http": http, "https": https });
-    crate::app::config::set_engine_config(&pool, "_global_proxy", &config).await?;
-
-    // 更新内存 + 杀进程
-    let has_http = !http.is_empty();
-    let has_https = !https.is_empty();
-    if let Some(e) = engine.as_ref() {
-        let proxy = if !has_http && !has_https {
-            None
-        } else {
-            Some((http, https))
-        };
-        e.update_global_proxy(proxy).await;
-    }
-
-    tracing::info!(has_http, has_https, "全局代理配置已更新");
-    Ok(())
-}
-
-/// 更新插件配置（enabled + settings）：写 DB + 更新 PluginEngine 内存（0.5.1）。
-#[tauri::command]
-pub async fn update_plugin_config(
-    app: tauri::AppHandle,
-    plugin_id: String,
-    enabled: bool,
-    settings: serde_json::Value,
-) -> Result<(), String> {
-    let engine = app.state::<Option<std::sync::Arc<crate::domain::plugin::PluginEngine>>>();
-    let Some(e) = engine.as_ref() else {
-        return Err("插件引擎未初始化".into());
-    };
-    // 读取现有配置（保留 disable_default_triggers 和 custom_triggers）
-    let mut config = e.get_config(&plugin_id).unwrap_or_default();
-    config.enabled = enabled;
-    config.settings = settings;
-    let router = app.state::<std::sync::Arc<crate::domain::intent::RuleRouter>>();
-    let result = e.update_config(&plugin_id, config, Some(&router)).await;
-    match &result {
-        Ok(_) => tracing::info!(%plugin_id, enabled, "插件配置已更新"),
-        Err(err) => tracing::warn!(%plugin_id, enabled, error = %err, "插件配置更新失败"),
-    }
-    result
+    let lang = crate::app::config::get_config(&pool).await.language;
+    engine.list_plugins(&lang)
 }
 
 /// 禁用/恢复某个默认触发词。
@@ -860,14 +724,11 @@ pub async fn toggle_default_trigger(
     keyword: String,
     disabled: bool,
 ) -> Result<(), String> {
-    let engine = app.state::<Option<std::sync::Arc<crate::domain::plugin::PluginEngine>>>();
-    let Some(e) = engine.as_ref() else {
-        return Err("插件引擎未初始化".into());
-    };
+    let engine = app.state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>();
     let router = app.state::<std::sync::Arc<crate::domain::intent::RuleRouter>>();
 
     // 读取现有配置
-    let mut config = e.get_config(&plugin_id).unwrap_or_default();
+    let mut config = engine.get_config(&plugin_id).unwrap_or_default();
 
     if disabled {
         // 加入禁用列表
@@ -879,7 +740,7 @@ pub async fn toggle_default_trigger(
         config.disabled_default_triggers.retain(|k| k != &keyword);
     }
 
-    e.update_config(&plugin_id, config, Some(&router)).await?;
+    engine.update_config(&plugin_id, config, Some(&router)).await?;
     tracing::info!(plugin_id, keyword, disabled, "默认触发词状态已更新");
     Ok(())
 }
@@ -891,13 +752,10 @@ pub async fn add_custom_trigger(
     plugin_id: String,
     keyword: String,
 ) -> Result<(), String> {
-    let engine = app.state::<Option<std::sync::Arc<crate::domain::plugin::PluginEngine>>>();
-    let Some(e) = engine.as_ref() else {
-        return Err("插件引擎未初始化".into());
-    };
+    let engine = app.state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>();
     let router = app.state::<std::sync::Arc<crate::domain::intent::RuleRouter>>();
 
-    let mut config = e.get_config(&plugin_id).unwrap_or_default();
+    let mut config = engine.get_config(&plugin_id).unwrap_or_default();
 
     // 检查是否已存在（不区分大小写，简单重复检查）
     let keyword_lower = keyword.to_lowercase();
@@ -912,7 +770,7 @@ pub async fn add_custom_trigger(
         surface: None,
     });
 
-    e.update_config(&plugin_id, config, Some(&router)).await?;
+    engine.update_config(&plugin_id, config, Some(&router)).await?;
     tracing::info!(plugin_id, keyword, "自定义触发词已添加");
     Ok(())
 }
@@ -924,13 +782,10 @@ pub async fn delete_custom_trigger(
     plugin_id: String,
     keyword: String,
 ) -> Result<(), String> {
-    let engine = app.state::<Option<std::sync::Arc<crate::domain::plugin::PluginEngine>>>();
-    let Some(e) = engine.as_ref() else {
-        return Err("插件引擎未初始化".into());
-    };
+    let engine = app.state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>();
     let router = app.state::<std::sync::Arc<crate::domain::intent::RuleRouter>>();
 
-    let mut config = e.get_config(&plugin_id).unwrap_or_default();
+    let mut config = engine.get_config(&plugin_id).unwrap_or_default();
     let before_len = config.custom_triggers.len();
     config.custom_triggers.retain(|t| t.keyword != keyword);
 
@@ -938,7 +793,7 @@ pub async fn delete_custom_trigger(
         return Err(format!("触发词 '{keyword}' 不存在"));
     }
 
-    e.update_config(&plugin_id, config, Some(&router)).await?;
+    engine.update_config(&plugin_id, config, Some(&router)).await?;
     tracing::info!(plugin_id, keyword, "自定义触发词已删除");
     Ok(())
 }
@@ -955,21 +810,6 @@ pub async fn get_engine_config(
         .unwrap_or_else(|| serde_json::json!({})))
 }
 
-/// 更新引擎配置（通用 API）。
-#[tauri::command]
-pub async fn update_engine_config(
-    app: tauri::AppHandle,
-    engine_id: String,
-    config: serde_json::Value,
-) -> Result<(), String> {
-    let pool = app.state::<sqlx::SqlitePool>();
-    crate::app::config::set_engine_config(&pool, &engine_id, &config).await?;
-
-    // 通知引擎配置更新（FileEngine 需要重新探测端口等）
-    tracing::info!(%engine_id, "引擎通用配置已更新");
-    Ok(())
-}
-
 /// 获取 Context 层配置（设置页用）。优先读内存 state（最新），兜底读 DB。
 #[tauri::command]
 pub async fn get_context_config(
@@ -982,35 +822,6 @@ pub async fn get_context_config(
     }
     let pool = app.state::<sqlx::SqlitePool>();
     Ok(crate::app::config::get_context_config(&pool).await)
-}
-
-/// 更新 Context 层配置：写 DB + 更新内存 state（热生效，下次唤起即生效）。
-#[tauri::command]
-pub async fn update_context_config(
-    app: tauri::AppHandle,
-    config: crate::app::config::ContextConfig,
-) -> Result<(), String> {
-    let pool = app.state::<sqlx::SqlitePool>();
-    tracing::info!(
-        enabled = config.enabled,
-        clipboard = config.clipboard_enabled,
-        selection = config.selection_enabled,
-        sensitive_count = config.sensitive_apps.len(),
-        "Context 配置更新请求"
-    );
-    crate::app::config::set_context_config(&pool, &config).await?;
-    // 划词监听热切换：从关→开时装钩子(幂等)，从开→关时让回调短路 + 清缓存。
-    crate::infra::platform::selection::set_active(config.selection_enabled);
-    // 敏感应用黑名单同步：划词维护一份影子列表，让钩子回调能在抓取前门控（隐私）。
-    // 见 selection::SENSITIVE_APPS 的 TODO——0.9 awareness 重构会收敛。
-    crate::infra::platform::selection::set_sensitive_apps(config.sensitive_apps.clone());
-    if let Some(mem) =
-        app.try_state::<std::sync::Arc<std::sync::RwLock<crate::app::config::ContextConfig>>>()
-    {
-        *mem.write().unwrap() = config;
-        tracing::debug!("Context 内存配置已热更新");
-    }
-    Ok(())
 }
 
 /// 打开文件/快捷方式所在文件夹（explorer /select 定位选中）。
@@ -1484,18 +1295,6 @@ pub async fn export_perf_report(app: tauri::AppHandle) -> Result<Option<String>,
 pub async fn clear_perf_data(app: tauri::AppHandle) -> Result<u64, String> {
     let pool = app.state::<sqlx::SqlitePool>();
     crate::infra::utils::perf::clear_all(&pool).await
-}
-
-/// 更新解释器自定义路径（暂未实现持久化，Phase 0.6 第一版只做探测展示）。
-#[tauri::command]
-pub async fn update_interpreter_config(
-    _python_path: Option<String>,
-    _node_path: Option<String>,
-) -> Result<(), String> {
-    // TODO: Phase 0.6 后续实现持久化到 SQLite config 表
-    // 目前只做展示，不做持久化
-    tracing::warn!("update_interpreter_config 暂未实现持久化");
-    Ok(())
 }
 
 /// 在外部浏览器打开 URL。

@@ -2,6 +2,7 @@ import { invoke } from "./js/tauri.js";
 import { applyTheme } from "./js/theme.js";
 import { t, applyI18n, setLang } from "./js/i18n.js";
 import { renderKey } from "./js/kbd.js";
+import { saveConfig } from "./js/config-keys.js";
 
 // WebView2 下按 Alt 会激活宿主窗口的系统菜单、进入菜单模态，webview 消息泵随之
 // 暂停——后端返回的 invoke 响应会堆在队列里无法分发，表现就是「录制时按钮卡住、
@@ -275,7 +276,7 @@ async function loadBuiltinActions() {
     }
   } catch (e) {
     console.error("loadBuiltinActions failed:", e);
-    list.innerHTML = `<p class="hint" style="padding: 12px 0; color: #f38ba8;">${escapeHtml(String(e))}</p>`;
+    list.innerHTML = `<p class="hint msg-error" style="padding: 12px 0;">${escapeHtml(String(e))}</p>`;
   }
 }
 
@@ -322,12 +323,12 @@ function bindBuiltinActionEvents(list) {
     const msg = document.getElementById("builtin-actions-save-msg");
     if (msg) msg.textContent = "";
     try {
-      await invoke("set_disabled_builtin_actions", { disabled });
+      await saveConfig("disabled_builtin_actions", disabled);
     } catch (err) {
       console.error("set_disabled_builtin_actions failed:", err);
       if (msg) {
         msg.textContent = `${t("engine.builtin_actions.save_failed")}: ${err}`;
-        msg.className = "plugin-save-msg error";
+        msg.className = "plugin-save-msg msg-error";
       }
       // 回滚 UI 状态：重新加载列表
       loadBuiltinActions();
@@ -376,7 +377,7 @@ async function loadNetworkConfig() {
     icon: "🌐",
     title: t("network.title"),
     desc: t("network.desc"),
-    body: renderConfigSection(t("network.section"), PROXY_SCHEMA, proxyConfig, { saveLabel: t("network.save") }),
+    body: renderConfigSection(t("network.section"), PROXY_SCHEMA, proxyConfig, { saveLabel: t("network.save"), flat: true }),
   });
 
   // 绑定保存事件
@@ -387,23 +388,24 @@ async function loadNetworkConfig() {
     const http = container.querySelector('.plugin-field[data-key="http_proxy"]')?.value || "";
     const https = container.querySelector('.plugin-field[data-key="https_proxy"]')?.value || "";
     try {
-      await invoke("update_global_proxy", { http, https });
+      await saveConfig("global_proxy", { http, https });
       // 网络代理留长句"已保存,下次查询自动生效"——用户需要知道生效时机(不必重启)
-      if (msg) { msg.textContent = t("network.saved_msg"); msg.style.color = "#a6e3a1"; setTimeout(() => { if (msg) msg.textContent = ""; }, 3000); }
+      if (msg) { msg.textContent = t("network.saved_msg"); msg.className = "plugin-save-msg msg-success"; setTimeout(() => { if (msg) { msg.textContent = ""; msg.className = "plugin-save-msg"; } }, 3000); }
       clearUnsaved(container);
     } catch (e) {
       console.error("save proxy failed:", e);
-      if (msg) { msg.textContent = t("network.save_failed"); msg.style.color = "#f38ba8"; }
+      if (msg) { msg.textContent = t("network.save_failed"); msg.className = "plugin-save-msg msg-error"; }
     }
   });
 }
 
-// 加载并渲染上下文配置（0.5.2：环境感知采集控制 + 敏感应用列表化选择器 + 自动保存）
+// 加载并渲染上下文配置（0.8.9 UX：拆成两卡 — 采集卡 + 过滤卡 —— 敏感应用独立）
 async function loadContextConfig() {
-  const container = document.getElementById("context-container");
-  if (!container) return;
+  const captureContainer = document.getElementById("context-container");
+  const filterContainer = document.getElementById("context-filter-container");
+  if (!captureContainer || !filterContainer) return;
 
-  let cfg = { enabled: true, clipboard_enabled: true, selection_enabled: true, sensitive_apps: [] };
+  let cfg = { enabled: true, clipboardEnabled: true, selectionEnabled: true, sensitive_apps: [] };
   try {
     const data = await invoke("get_context_config");
     if (data) cfg = data;
@@ -422,58 +424,53 @@ async function loadContextConfig() {
     console.error("load clipboard enabled failed:", e);
   }
 
-  // ── 渲染卡片 ──
+  // ── 本地状态（敏感应用列表在两卡间共享，走同一次 save）──
+  let sensitiveApps = [...(cfg.sensitive_apps || [])];
+
+  // ── ① 采集卡（三个即时采集开关 + 总开关）──
   const CLIPBOARD_FIELD = booleanField("clipboard_enabled", t("context.clipboard"));
   const SELECTION_FIELD = booleanField("selection_enabled", t("context.selection"), {
     description: t("context.selection.hint"),
   });
   const enableSwitch = `<label class="switch"><input type="checkbox" class="context-enabled" ${cfg.enabled ? "checked" : ""} /><span class="slider"></span></label>`;
 
-  // 剪贴板历史录入开关(0.8.7 UX 重排:从 Chord tab 迁至此处,与"采集剪贴板文本"
-  // 同框,让用户在一处决定"blink 到底能看/能存多少剪贴板")。
-  // 注:此开关走独立命令 update_clipboard_enabled,不属于 update_context_config payload
-  // ——语义分离:context.clipboard_enabled 是"即时读",clipboard.enabled 是"历史录入"。
-  // 结构 & 尺寸对齐 renderSettingField(booleanField()) —— 标题/开关同行、描述走 field-desc、
-  // switch 用 switch-sm(条目级);否则与相邻两个采集开关视觉不一致(#issue: 大小 switch 混排)。
-  const clipboardHistoryFieldHtml = `<div class="plugin-field-row">
-      <div class="field-head">
-        <span class="field-title">${t("chord.clipboard.enabled.label")}</span>
-        <label class="switch switch-sm"><input type="checkbox" id="clipboard-enabled" ${clipboardHistEnabled ? "checked" : ""} /><span class="slider"></span></label>
-      </div>
-      <div class="field-desc">${t("chord.clipboard.enabled.hint")}</div>
+  // 剪贴板历史录入开关(0.8.7 UX：从 Chord tab 迁至此处,与"采集剪贴板文本"同框)
+  // 走独立命令 update_clipboard_enabled,不属于 update_context_config payload
+  // ——语义分离:context.clipboard_enabled 是"即时读",clipboard.enabled 是"历史录入"
+  const clipboardHistoryFieldHtml = `<div class="setting-row">
+      <label class="setting-label">${t("chord.clipboard.enabled.label")}<span class="field-hint-icon" title="${escapeAttr(t("chord.clipboard.enabled.hint"))}">ⓘ</span></label>
+      <label class="switch switch-sm"><input type="checkbox" id="clipboard-enabled" ${clipboardHistEnabled ? "checked" : ""} /><span class="slider"></span></label>
     </div>`;
 
-  container.innerHTML = renderExtensionCard({
+  captureContainer.innerHTML = renderExtensionCard({
     icon: "🌍",
     title: t("context.title"),
     desc: t("context.desc"),
     headerRight: enableSwitch,
     attrs: "data-autosave",
-    body: `<div class="plugin-config-section" style="padding-top: 0;">
-        ${renderSettingField(CLIPBOARD_FIELD, cfg.clipboard_enabled)}
-        ${renderSettingField(SELECTION_FIELD, cfg.selection_enabled)}
-        ${clipboardHistoryFieldHtml}
-        <div class="plugin-field-row">
-          <div class="field-head">
-            <span class="field-title">${t("context.sensitive.title")}</span>
-            <span class="hint">${t("context.sensitive.hint")}</span>
-          </div>
-          <div class="context-sensitive-list"></div>
-          <button class="btn-small context-add-btn" style="margin-top:8px;">${t("context.add_app")}</button>
-        </div>
-        <div class="context-save-msg"></div>
-      </div>`,
+    body: `${renderSettingField(CLIPBOARD_FIELD, cfg.clipboardEnabled, true)}
+        ${renderSettingField(SELECTION_FIELD, cfg.selectionEnabled, true)}
+        ${clipboardHistoryFieldHtml}`,
   });
 
-  // 本地状态
-  let sensitiveApps = [...(cfg.sensitive_apps || [])];
+  // ── ② 过滤卡（敏感应用独立）──
+  filterContainer.innerHTML = renderExtensionCard({
+    icon: "🛡",
+    title: t("context.filter.title"),
+    desc: t("context.filter.desc"),
+    attrs: "data-autosave",
+    body: `<div class="context-sensitive-list"></div>
+        <div class="context-sensitive-actions">
+          <button class="btn-small context-add-btn">${t("context.add_app")}</button>
+        </div>`,
+  });
 
   // ── 渲染敏感应用列表（chip 样式 + × 移除）──
   function renderSensitiveList() {
-    const listEl = container.querySelector(".context-sensitive-list");
+    const listEl = filterContainer.querySelector(".context-sensitive-list");
     if (!listEl) return;
     if (sensitiveApps.length === 0) {
-      listEl.innerHTML = `<div class="context-empty-hint">${t("context.empty")}</div>`;
+      listEl.innerHTML = `<div class="hint" style="padding: 4px 0;">${t("context.empty")}</div>`;
       return;
     }
     listEl.innerHTML = sensitiveApps
@@ -502,35 +499,26 @@ async function loadContextConfig() {
   // 设计约定(0.8.7 UX 统一):自动保存"静默成功、喧哗失败"——UI 状态变更本身就是反馈,
   // 不再显示"✓ 已自动保存",避免噪音;失败保留红字并回滚由调用侧处理。
   async function save() {
-    const enabled = container.querySelector(".context-enabled").checked;
-    const clipboard_enabled = container.querySelector('.plugin-field[data-key="clipboard_enabled"]')?.checked ?? true;
-    const selection_enabled = container.querySelector('.plugin-field[data-key="selection_enabled"]')?.checked ?? true;
-    const msg = container.querySelector(".context-save-msg");
+    const enabled = captureContainer.querySelector(".context-enabled").checked;
+    const clipboardEnabled = captureContainer.querySelector('.plugin-field[data-key="clipboard_enabled"]')?.checked ?? true;
+    const selectionEnabled = captureContainer.querySelector('.plugin-field[data-key="selection_enabled"]')?.checked ?? true;
     try {
-      await invoke("update_context_config", {
-        config: { enabled, clipboard_enabled, selection_enabled, sensitive_apps: [...sensitiveApps] },
-      });
-      // 成功静默(不再 msg.textContent = 已自动保存)
-      if (msg) msg.textContent = "";
+      await saveConfig("context_config", { enabled, clipboardEnabled, selectionEnabled, sensitive_apps: [...sensitiveApps] });
     } catch (e) {
       console.error("save context config failed:", e);
-      if (msg) {
-        msg.textContent = t("context.save_failed");
-        msg.style.color = "#f38ba8";
-      }
     }
   }
 
   // 总开关 + 剪贴板采集开关 + 划词开关 → change 自动保存
-  container.querySelector(".context-enabled")?.addEventListener("change", save);
-  container.querySelector('.plugin-field[data-key="clipboard_enabled"]')?.addEventListener("change", save);
-  container.querySelector('.plugin-field[data-key="selection_enabled"]')?.addEventListener("change", save);
+  captureContainer.querySelector(".context-enabled")?.addEventListener("change", save);
+  captureContainer.querySelector('.plugin-field[data-key="clipboard_enabled"]')?.addEventListener("change", save);
+  captureContainer.querySelector('.plugin-field[data-key="selection_enabled"]')?.addEventListener("change", save);
   // 剪贴板历史录入(0.8.7 从 Chord tab 迁入,走独立命令 update_clipboard_enabled)
-  container.querySelector("#clipboard-enabled")?.addEventListener("change", saveClipboardEnabled);
+  captureContainer.querySelector("#clipboard-enabled")?.addEventListener("change", saveClipboardEnabled);
 
-  // ── 添加应用弹窗 ──
-  container.querySelector(".context-add-btn")?.addEventListener("click", async () => {
-    await showAddProcessModal(container, sensitiveApps, async (added) => {
+  // ── 添加应用弹窗（敏感应用在过滤卡内）──
+  filterContainer.querySelector(".context-add-btn")?.addEventListener("click", async () => {
+    await showAddProcessModal(filterContainer, sensitiveApps, async (added) => {
       sensitiveApps.push(...added);
       // 去重
       sensitiveApps = [...new Set(sensitiveApps)];
@@ -541,14 +529,19 @@ async function loadContextConfig() {
 }
 
 /**
- * 加载并渲染 Context 触发规则列表（0.8.3 §4.6）。
+ * 加载并渲染 Context 触发规则列表（0.8.9 UX：卡头总开关 + 只读能力清单）。
  *
- * 从后端 `list_context_bindings` 命令拉所有已注册 binding + enabled 状态,
- * 每条一个 setting-row + 开关。取消勾选后经 `set_disabled_context_bindings` 写回。
+ * 从后端 `list_context_bindings` 拉所有已注册 binding + enabled 状态。
+ * 卡头总开关驱动全部规则：
+ *   - 关 → 传所有 key 到 `set_disabled_context_bindings`（全禁）
+ *   - 开 → 传空数组（全启）
+ * 初值宽容:任一 binding 启用即视为"总开关开",覆盖历史"部分禁用"态。
  */
 async function loadContextBindings() {
+  const card = document.getElementById("context-triggers-card");
   const container = document.getElementById("context-bindings-container");
-  if (!container) return;
+  const masterToggle = document.getElementById("context-triggers-enabled");
+  if (!container || !card || !masterToggle) return;
 
   let bindings = [];
   try {
@@ -559,8 +552,12 @@ async function loadContextBindings() {
 
   if (!Array.isArray(bindings) || bindings.length === 0) {
     container.innerHTML = `<div class="action-list-empty">${t("context.bindings.empty")}</div>`;
+    masterToggle.checked = false;
+    masterToggle.disabled = true;
+    card.classList.add("is-disabled");
     return;
   }
+  masterToggle.disabled = false;
 
   // trigger_key → 图标(0.8.7 UX 重排:动作行加视觉锚点,识别度对齐引擎/插件卡)
   const TRIGGER_ICONS = {
@@ -570,48 +567,40 @@ async function loadContextBindings() {
     selection_non_empty: "✂️",
   };
 
-  // 每条 binding 一个 .action-list-row(紧凑行:icon + 主/副 + 开关)
+  // 只读能力清单：一行 icon + trigger → target,不带单项开关
   container.innerHTML = bindings
     .map((b) => {
       const icon = TRIGGER_ICONS[b.trigger_key] || "•";
       const triggerI18nKey = `context.trigger.${b.trigger_key}`;
       const triggerLabel = t(triggerI18nKey) || b.trigger_key;
       const targetLabel = escapeHtml(b.target_label || b.target_id);
-      const rowClass = b.enabled ? "" : "is-disabled";
-      return `<div class="action-list-row ${rowClass}" data-binding-key="${escapeHtml(b.key)}">
+      return `<div class="action-list-row" data-binding-key="${escapeHtml(b.key)}">
         <div class="action-icon">${icon}</div>
         <div class="action-info">
           <div class="action-title">${escapeHtml(triggerLabel)} → ${targetLabel}</div>
         </div>
-        <label class="switch action-toggle">
-          <input type="checkbox" class="context-binding-toggle" data-key="${escapeHtml(b.key)}" ${b.enabled ? "checked" : ""} />
-          <span class="slider"></span>
-        </label>
       </div>`;
     })
     .join("");
 
-  // 计算并保存 disabled 列表
-  async function save() {
-    const disabled = Array.from(
-      container.querySelectorAll(".context-binding-toggle"),
-    )
-      .filter((el) => !el.checked)
-      .map((el) => el.dataset.key);
+  // 初值:只要有任一 binding 启用即"总开关开"(宽容历史部分禁用状态)
+  const anyEnabled = bindings.some((b) => b.enabled);
+  masterToggle.checked = anyEnabled;
+  card.classList.toggle("is-disabled", !anyEnabled);
+
+  // 总开关持久化:关 → 全部 key 加入 disabled;开 → 空 disabled
+  const allKeys = bindings.map((b) => b.key);
+  masterToggle.addEventListener("change", async () => {
+    const enabled = masterToggle.checked;
+    card.classList.toggle("is-disabled", !enabled);
     try {
-      await invoke("set_disabled_context_bindings", { disabled });
+      await saveConfig("disabled_context_bindings", enabled ? [] : allKeys);
     } catch (e) {
       console.error("set_disabled_context_bindings failed:", e);
+      // 回滚 UI 状态
+      masterToggle.checked = !enabled;
+      card.classList.toggle("is-disabled", enabled);
     }
-  }
-
-  container.querySelectorAll(".context-binding-toggle").forEach((el) => {
-    el.addEventListener("change", (e) => {
-      // 同步整行 is-disabled 视觉态
-      const row = e.target.closest(".action-list-row");
-      if (row) row.classList.toggle("is-disabled", !e.target.checked);
-      save();
-    });
   });
 }
 
@@ -619,7 +608,8 @@ async function loadContextBindings() {
 /**
  * 加载并渲染 Chord 动作开关列表。
  * 每条动作一个 setting-row + 开关；取消勾选后经 `set_disabled_chord_actions` 写回。
- * 与 loadContextBindings 心智同源（同为"逐条能力开关+黑名单"模式）。
+ * 注:Context bindings 已在 0.8.9 UX 改为"卡头总开关 + 只读清单",此处仍保留逐条开关
+ *    (Chord 每条动作有不同快捷键需求,单项控制价值更高)。
  */
 async function loadChordActions() {
   const container = document.getElementById("chord-actions-container");
@@ -677,7 +667,7 @@ async function loadChordActions() {
       .filter((el) => !el.checked)
       .map((el) => el.dataset.id);
     try {
-      await invoke("set_disabled_chord_actions", { disabled });
+      await saveConfig("disabled_chord_actions", disabled);
     } catch (e) {
       console.error("set_disabled_chord_actions failed:", e);
     }
@@ -714,7 +704,7 @@ async function showAddProcessModal(container, existing, onAdd) {
       <input type="text" class="modal-search" placeholder="${t("context.modal.search_ph")}" />
       <div class="modal-list"></div>
       <div class="modal-footer">
-        <span class="modal-hint">${t("context.modal.hint")}</span>
+        <span class="hint">${t("context.modal.hint")}</span>
         <button class="btn-small modal-done">${t("context.modal.done")}</button>
       </div>
     </div>`;
@@ -807,12 +797,12 @@ async function loadPlugins() {
     plugins = await invoke("get_plugins");
   } catch (e) {
     console.error("loadPlugins failed:", e);
-    container.innerHTML = `<p style="color: #f38ba8; padding: 20px;">${t("plugin.load_failed")}</p>`;
+    container.innerHTML = `<p class="msg-error" style="padding: 20px;">${t("plugin.load_failed")}</p>`;
     return;
   }
 
   if (plugins.length === 0) {
-    container.innerHTML = `<p style="color: #6c7086; padding: 20px;">${t("plugin.empty")}</p>`;
+    container.innerHTML = `<p class="msg-muted" style="padding: 20px;">${t("plugin.empty")}</p>`;
     return;
   }
 
@@ -844,7 +834,6 @@ function renderPluginCard(plugin) {
     : `<div class="plugin-no-config">${t("plugin.no_config")}</div>`;
 
   const headerRight = `<div class="plugin-master-toggle">
-      <span class="toggle-label">${enabled ? t("plugin.enabled") : t("plugin.disabled")}</span>
       <label class="switch" title="${t("plugin.toggle.title")}">
         <input type="checkbox" class="plugin-enabled" ${enabled ? "checked" : ""} />
         <span class="slider"></span>
@@ -854,7 +843,7 @@ function renderPluginCard(plugin) {
   return renderExtensionCard({
     icon,
     title: `${escapeHtml(plugin.name || plugin.id)}<span class="version-badge">v${escapeHtml(plugin.version || "1.0.0")}</span>${triggersTags}`,
-    desc: `<div class="plugin-desc-text">${escapeHtml(desc)}</div>`,
+    desc: escapeHtml(desc),
     headerRight,
     attrs: `data-plugin-id="${plugin.id}"`,
     classes: enabled ? "" : "is-disabled",
@@ -909,7 +898,7 @@ function renderTriggersTags(plugin) {
 }
 
 // 渲染单个配置项控件（boolean→checkbox 方框, enum→下拉, number/string→输入框, sortable_list→可拖动列表）
-function renderSettingField(field, value) {
+function renderSettingField(field, value, useSettingRow = false) {
   const val = value !== undefined ? value : field.default;
   let control;
   switch (field.type) {
@@ -933,21 +922,35 @@ function renderSettingField(field, value) {
       break;
     }
     case "number":
-      control = `<div class="number-input-wrapper"><input type="number" class="plugin-field" data-key="${field.key}" value="${escapeAttr(val ?? "")}" ${field.min != null ? `min="${field.min}"` : ""} ${field.max != null ? `max="${field.max}"` : ""} /><div class="number-spinner"><button type="button" class="spinner-up" aria-label="${t("spinner.increase")}">＋</button><button type="button" class="spinner-down" aria-label="${t("spinner.decrease")}">－</button></div></div>`;
+      control = `<div class="number-input-wrapper"><input type="number" class="plugin-field" data-key="${field.key}" value="${escapeAttr(val ?? "")}" ${field.min != null ? `min="${field.min}"` : ""} ${field.max != null ? `max="${field.max}"` : ""} /><div class="number-spinner"><button type="button" class="spinner-up" aria-label="${t("spinner.increase")}">▲</button><button type="button" class="spinner-down" aria-label="${t("spinner.decrease")}">▼</button></div></div>`;
       break;
     case "string":
     default:
       control = `<input type="text" class="plugin-field" data-key="${field.key}" value="${escapeAttr(val ?? "")}" />`;
       break;
   }
-  const desc = field.description ? `<div class="field-desc">${escapeHtml(field.description)}</div>` : "";
+  // 描述文本：有则显示为标题后的感叹号图标 tooltip
+  const descIcon = field.description
+    ? `<span class="field-hint-icon" title="${escapeAttr(field.description)}">ⓘ</span>`
+    : "";
+
+  // 上下文感知页面使用 setting-row 结构，与设置页其他部分统一
+  if (useSettingRow) {
+    return `
+      <div class="setting-row">
+        <label class="setting-label">${escapeHtml(field.title)}${descIcon}</label>
+        ${control}
+      </div>
+    `;
+  }
+
+  // 插件配置页面使用 plugin-field-row 结构
   return `
     <div class="plugin-field-row">
       <div class="field-head">
-        <span class="field-title">${escapeHtml(field.title)}</span>
+        <span class="field-title">${escapeHtml(field.title)}${descIcon}</span>
         ${control}
       </div>
-      ${desc}
     </div>
   `;
 }
@@ -1209,6 +1212,14 @@ function renderConfigSection(title, schema, values, opts = {}) {
        </div>`
     : "";
 
+  // 扁平模式（非插件页）：不使用 .plugin-config-section 嵌套
+  if (opts.flat) {
+    return `<div class="plugin-section-title">${escapeHtml(title)}</div>
+       ${ungroupedHtml}
+       ${groupedHtml}
+       ${saveRow}`;
+  }
+
   // 整个配置区可折叠
   if (opts.collapsible) {
     const collapsed = opts.collapsed !== false; // 默认收起
@@ -1269,7 +1280,7 @@ function bindPluginCardEvents(plugin) {
     const settings = collectSettings(card, schema);
     const enabled = enabledOverride !== undefined ? enabledOverride : card.querySelector(".plugin-enabled").checked;
     try {
-      await invoke("update_plugin_config", { pluginId: id, enabled, settings });
+      await saveConfig("plugin_config", { pluginId: id, enabled, settings });
       return true;
     } catch (err) {
       console.error("update_plugin_config failed:", err);
@@ -1410,15 +1421,58 @@ function bindPluginCardEvents(plugin) {
     }
   });
 
-  // 点击其他地方/ESC 取消添加
-  addInputInline?.addEventListener("blur", (e) => {
-    setTimeout(() => {
-      if (!e.target.value.trim()) {
-        e.target.style.display = "none";
-        if (addBtnInline) addBtnInline.style.display = "inline-flex";
-        if (addBtnText) addBtnText.style.display = "inline-block";
+  // 点击其他地方：有内容则保存，无内容则取消
+  addInputInline?.addEventListener("blur", async (e) => {
+    const kw = (e.target.value || "").trim();
+    if (!kw) {
+      // 无内容，直接隐藏
+      e.target.style.display = "none";
+      if (addBtnInline) addBtnInline.style.display = "inline-flex";
+      if (addBtnText) addBtnText.style.display = "inline-block";
+      return;
+    }
+
+    // 有内容，保存
+    try {
+      await invoke("add_custom_trigger", { pluginId: id, keyword: kw });
+
+      // 插入新标签
+      const newTag = document.createElement("span");
+      newTag.className = "trigger-tag trigger-tag-custom";
+      newTag.innerHTML = `
+        <span class="trigger-tag-text">${escapeHtml(kw)}</span>
+        <button class="trigger-tag-btn trigger-tag-btn-delete" title="${t("plugin.trigger_delete")}" data-keyword="${escapeAttr(kw)}">
+          ×
+        </button>
+      `;
+
+      // 插入到添加按钮前面
+      const addBtn = triggersRow?.querySelector(".trigger-add-tag-btn, .trigger-add-inline-btn");
+      if (addBtn && triggersRow) {
+        triggersRow.insertBefore(newTag, addBtn);
+      } else if (triggersRow) {
+        triggersRow.appendChild(newTag);
       }
-    }, 200);
+
+      // 绑定删除事件
+      newTag.querySelector(".trigger-tag-btn-delete")?.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        try {
+          await invoke("delete_custom_trigger", { pluginId: id, keyword: kw });
+          newTag.remove();
+        } catch (err) {
+          console.error("delete_custom_trigger failed:", err);
+        }
+      });
+
+      // 重置输入框
+      e.target.value = "";
+      e.target.style.display = "none";
+      if (addBtnInline) addBtnInline.style.display = "inline-flex";
+      if (addBtnText) addBtnText.style.display = "inline-block";
+    } catch (err) {
+      console.error("add_custom_trigger failed:", err);
+    }
   });
 
   addInputInline?.addEventListener("keydown", (e) => {
@@ -1487,9 +1541,9 @@ function flash(card, msg, isError) {
   const el = card.querySelector(".plugin-save-msg");
   if (!el) return;
   el.textContent = msg;
-  el.style.color = isError ? "#f38ba8" : "#a6e3a1";
+  el.className = `plugin-save-msg ${isError ? "msg-error" : "msg-success"}`;
   clearTimeout(el._t);
-  el._t = setTimeout(() => { el.textContent = ""; }, 2000);
+  el._t = setTimeout(() => { el.textContent = ""; el.className = "plugin-save-msg"; }, 2000);
 }
 
 // ── 待保存提示 ─────────────────────────────────────────────────────────────────
@@ -1560,6 +1614,23 @@ document.getElementById("file-search-data-source")?.addEventListener("change", (
   }
 });
 
+// 应用搜索——扫描深度 spinner / UWP 开关变化时标记未保存
+// （spinner 的 click handler dispatch change 事件而非 input，原 input 监听覆盖不到）
+["start-menu-scan-depth", "start-menu-include-uwp"].forEach((id) => {
+  document.getElementById(id)?.addEventListener("change", (e) => {
+    const row = e.target.closest(".setting-row");
+    if (row) {
+      const label = row.querySelector("label");
+      if (label && !label.querySelector(".unsaved-badge")) {
+        const badge = document.createElement("span");
+        badge.className = "unsaved-badge";
+        badge.textContent = t("plugin.unsaved");
+        label.appendChild(badge);
+      }
+    }
+  });
+});
+
 // 应用搜索开关变化时标记未保存
 document.getElementById("start-menu-enabled")?.addEventListener("change", () => {
   const card = document.getElementById("save-start-menu")?.closest(".extension-card");
@@ -1603,7 +1674,7 @@ if (hotkeyResetBtn) {
   hotkeyResetBtn.addEventListener("click", async (e) => {
     e.stopPropagation();
     const defaultHotkey = { modifiers: [], key: "ralt", display: "RightAlt" };
-    await invoke("update_hotkey", {
+    await saveConfig("hotkey", {
       modifiers: defaultHotkey.modifiers,
       key: defaultHotkey.key,
       display: defaultHotkey.display,
@@ -1632,7 +1703,7 @@ async function startRecording() {
     console.log("[startRecording] record_hotkey resolved:", JSON.stringify(result));
 
     // 保存录制结果
-    await invoke("update_hotkey", {
+    await saveConfig("hotkey", {
       modifiers: result.modifiers,
       key: result.key,
       display: result.display,
@@ -1674,7 +1745,7 @@ if (tapSlider) {
   tapSlider.addEventListener("change", async (e) => {
     const value = parseInt(e.target.value);
     try {
-      await invoke("update_tap_threshold", { threshold: value });
+      await saveConfig("tap_threshold", value);
       if (currentConfig) currentConfig.tap_threshold = value;
     } catch (err) {
       console.error("update_tap_threshold failed:", err);
@@ -1693,7 +1764,7 @@ if (graceSlider) {
   graceSlider.addEventListener("change", async (e) => {
     const value = parseInt(e.target.value);
     try {
-      await invoke("update_grace_period", { period: value });
+      await saveConfig("grace_period", value);
       if (currentConfig) currentConfig.grace_period = value;
     } catch (err) {
       console.error("update_grace_period failed:", err);
@@ -1708,7 +1779,7 @@ const autoStartCheckbox = document.getElementById("auto-start");
 if (autoStartCheckbox) {
   autoStartCheckbox.addEventListener("change", async (e) => {
     try {
-      await invoke("update_auto_start", { autoStart: e.target.checked });
+      await saveConfig("auto_start", e.target.checked);
       if (currentConfig) currentConfig.auto_start = e.target.checked;
     } catch (err) {
       console.error("update_auto_start failed:", err);
@@ -1722,7 +1793,7 @@ if (languageSelect) {
   languageSelect.addEventListener("change", async (e) => {
     const lang = e.target.value;
     try {
-      await invoke("update_language", { language: lang });
+      await saveConfig("language", lang);
       if (currentConfig) currentConfig.language = lang;
       // 即时切换整页语言：静态文本 + 动态渲染区 + 计量/徽章
       setLang(lang);
@@ -1763,7 +1834,7 @@ if (themeSelect) {
     applyTheme(mode); // 即时预览
     try {
       const g = readGeneral();
-      await invoke("update_general_config", g);
+      await saveConfig("general_config", g);
       if (currentConfig) currentConfig.theme = mode;
     } catch (err) {
       console.error("update_general_config (theme) failed:", err);
@@ -1797,7 +1868,7 @@ if (shEnabledCheckbox) {
   shEnabledCheckbox.addEventListener("change", async (e) => {
     try {
       const g = readGeneral();
-      await invoke("update_general_config", g);
+      await saveConfig("general_config", g);
       if (currentConfig) currentConfig.search_history_enabled = e.target.checked;
     } catch (err) {
       console.error("update_general_config (history enabled) failed:", err);
@@ -1810,7 +1881,7 @@ if (shDaysInput) {
   shDaysInput.addEventListener("change", async () => {
     try {
       const g = readGeneral();
-      await invoke("update_general_config", g);
+      await saveConfig("general_config", g);
       if (currentConfig) currentConfig.search_history_days = g.searchHistoryDays;
     } catch (err) {
       console.error("update_general_config (history days) failed:", err);
@@ -1823,7 +1894,7 @@ if (maxResultsInput) {
   maxResultsInput.addEventListener("change", async () => {
     try {
       const g = readGeneral();
-      await invoke("update_general_config", g);
+      await saveConfig("general_config", g);
       if (currentConfig) currentConfig.max_results = g.maxResults;
     } catch (err) {
       console.error("update_general_config (max results) failed:", err);
@@ -1836,7 +1907,7 @@ if (pageSizeInput) {
   pageSizeInput.addEventListener("change", async () => {
     try {
       const g = readGeneral();
-      await invoke("update_general_config", g);
+      await saveConfig("general_config", g);
       if (currentConfig) currentConfig.page_size = g.pageSize;
     } catch (err) {
       console.error("update_general_config (page size) failed:", err);
@@ -1852,7 +1923,7 @@ async function saveAutosuggest() {
   const minScore = Math.min(0.95, Math.max(0.5, parseFloat(scoreRaw) || 0.7));
   const tabKey = document.getElementById("autosuggest-tab-key")?.value || "Tab";
   try {
-    await invoke("update_autosuggest_config", { enabled, minScore, tabKey });
+    await saveConfig("autosuggest", { enabled, minScore, tabKey });
     if (currentConfig) {
       currentConfig.autosuggest_enabled = enabled;
       currentConfig.autosuggest_min_score = minScore;
@@ -1877,7 +1948,7 @@ async function saveChordToggles() {
   const chordEnabled = document.getElementById("chord-enabled")?.checked === true;
   const chordHintVisible = document.getElementById("chord-hint-visible")?.checked === true;
   try {
-    await invoke("update_chord_toggles", { chordEnabled, chordHintVisible });
+    await saveConfig("chord_toggles", { chordEnabled, chordHintVisible });
     if (currentConfig) {
       currentConfig.chord_enabled = chordEnabled;
       currentConfig.chord_hint_visible = chordHintVisible;
@@ -1890,7 +1961,7 @@ async function saveChordToggles() {
 async function saveClipboardEnabled() {
   const enabled = document.getElementById("clipboard-enabled")?.checked !== false;
   try {
-    await invoke("update_clipboard_enabled", { enabled });
+    await saveConfig("clipboard_enabled", enabled);
     if (currentConfig?.clipboard) {
       currentConfig.clipboard.enabled = enabled;
     }
@@ -1912,7 +1983,7 @@ const logLevelSelect = document.getElementById("log-level");
 if (logLevelSelect) {
   logLevelSelect.addEventListener("change", async (e) => {
     try {
-      await invoke("update_log_level", { level: e.target.value });
+      await saveConfig("log_level", e.target.value);
       if (currentConfig) currentConfig.log_level = e.target.value;
     } catch (err) {
       console.error("update_log_level failed:", err);
@@ -1974,12 +2045,12 @@ document.getElementById("save-start-menu")?.addEventListener("click", async () =
   const includeUwp = document.getElementById("start-menu-include-uwp")?.checked ?? true;
 
   try {
-    await invoke("update_start_menu_config", { enabled, scanDepth, includeUwp });
+    await saveConfig("start_menu_config", { enabled, scanDepth, includeUwp });
     const msgEl = document.getElementById("start-menu-save-msg");
     if (msgEl) {
       msgEl.textContent = t("plugin.saved_msg");
-      msgEl.style.color = "#a6e3a1";
-      setTimeout(() => { msgEl.textContent = ""; }, 2000);
+      msgEl.className = "plugin-save-msg msg-success";
+      setTimeout(() => { msgEl.textContent = ""; msgEl.className = "plugin-save-msg"; }, 2000);
     }
     const card = document.getElementById("save-start-menu")?.closest(".extension-card");
     if (card) clearUnsaved(card);
@@ -1992,7 +2063,7 @@ document.getElementById("save-start-menu")?.addEventListener("click", async () =
 // 计算器配置保存（开关变化即时保存）
 document.getElementById("calc-enabled")?.addEventListener("change", async (e) => {
   try {
-    await invoke("update_calc_config", { enabled: e.target.checked });
+    await saveConfig("calc_config", { enabled: e.target.checked });
   } catch (err) {
     console.error("update_calc_config failed:", err);
     e.target.checked = !e.target.checked; // 回滚
@@ -2072,8 +2143,8 @@ document.getElementById("save-file-search")?.addEventListener("click", async () 
     const msgEl = document.getElementById("file-search-save-msg");
     if (msgEl) {
       msgEl.textContent = t("error.port_range");
-      msgEl.style.color = "#f38ba8";
-      setTimeout(() => { msgEl.textContent = ""; }, 3000);
+      msgEl.className = "plugin-save-msg msg-error";
+      setTimeout(() => { msgEl.textContent = ""; msgEl.className = "plugin-save-msg"; }, 3000);
     }
     return;
   }
@@ -2081,7 +2152,7 @@ document.getElementById("save-file-search")?.addEventListener("click", async () 
   console.log("保存文件搜索配置 - 参数:", { enabled, dataSource, everythingPort: port, maxResults });
 
   try {
-    await invoke("update_file_search", {
+    await saveConfig("file_search", {
       enabled,
       dataSource,
       everythingPort: port,
@@ -2092,8 +2163,8 @@ document.getElementById("save-file-search")?.addEventListener("click", async () 
     const msgEl = document.getElementById("file-search-save-msg");
     if (msgEl) {
       msgEl.textContent = t("plugin.saved_msg");
-      msgEl.style.color = "#a6e3a1";
-      setTimeout(() => { msgEl.textContent = ""; }, 2000);
+      msgEl.className = "plugin-save-msg msg-success";
+      setTimeout(() => { msgEl.textContent = ""; msgEl.className = "plugin-save-msg"; }, 2000);
     }
     // 清除待保存提示
     const fileSearchCard = document.getElementById("save-file-search")?.closest(".extension-card");
@@ -2289,7 +2360,6 @@ document.getElementById("perf-clear")?.addEventListener("click", async () => {
 
 function updateInterpreterUI(type, status) {
   const statusEl = document.getElementById(`${type}-status`);
-  const versionEl = document.getElementById(`${type}-version`);
   const pathEl = document.getElementById(`${type}-path`);
   const browseBtn = document.getElementById(`${type}-browse`);
 
@@ -2297,22 +2367,23 @@ function updateInterpreterUI(type, status) {
 
   if (status.found) {
     if (status.version_ok) {
-      statusEl.textContent = t("engine.status.available");
+      // 合并显示：版本号 + 可用状态
+      const versionText = status.version ? `${status.version} ` : "";
+      statusEl.textContent = `${versionText}${t("engine.status.available")}`;
       statusEl.className = "status-badge status-available";
       statusEl.dataset.badgeState = "available";
     } else {
-      statusEl.textContent = t("engine.status.version_low");
+      // 版本过低也合并显示
+      const versionText = status.version ? `${status.version} ` : "";
+      statusEl.textContent = `${versionText}${t("engine.status.version_low")}`;
       statusEl.className = "status-badge status-warning";
       statusEl.dataset.badgeState = "version_low";
     }
-    versionEl.textContent = status.version || "";
-    versionEl.style.display = status.version ? "inline" : "none";
     pathEl.value = status.path || "";
   } else {
     statusEl.textContent = t("engine.status.not_found");
     statusEl.className = "status-badge status-unavailable";
     statusEl.dataset.badgeState = "not_found";
-    versionEl.style.display = "none";
     pathEl.value = status.error || t("engine.status.not_found");
   }
 
@@ -2414,18 +2485,23 @@ document.addEventListener("click", (e) => {
   const input = wrapper?.querySelector("input[type='number']");
   if (!input) return;
 
-  const min = parseInt(input.min, 10) || 0;
-  const max = parseInt(input.max, 10) || Infinity;
-  const step = parseInt(input.step, 10) || 1;
-  let value = parseInt(input.value, 10) || 0;
+  const min = parseFloat(input.min);
+  const max = parseFloat(input.max);
+  const step = parseFloat(input.step) || 1;
+  let value = parseFloat(input.value) || 0;
+
+  // 确定小数位数（基于 step），避免浮点精度问题
+  const stepStr = input.step || "1";
+  const decimals = stepStr.includes(".") ? stepStr.split(".")[1].length : 0;
 
   if (btn.classList.contains("spinner-up")) {
-    value = Math.min(value + step, max);
+    value = Math.min(value + step, isNaN(max) ? Infinity : max);
   } else {
-    value = Math.max(value - step, min);
+    value = Math.max(value - step, isNaN(min) ? -Infinity : min);
   }
 
-  input.value = value;
+  // 固定小数位数，避免 0.7000000000000001 这样的问题
+  input.value = decimals > 0 ? value.toFixed(decimals) : value;
   // 触发 change 事件，让绑定的事件处理函数生效
   input.dispatchEvent(new Event("change", { bubbles: true }));
 });

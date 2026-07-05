@@ -202,39 +202,38 @@ fn main() {
             let min_score_shared = std::sync::Arc::new(std::sync::RwLock::new(app_config.autosuggest_min_score));
             router.init_arbiter(min_score_shared.clone());
 
-            let plugin_engine = if plugins.is_empty() {
-                None
-            } else {
-                tracing::info!(count = plugins.len(), "PluginEngine 已构造");
-                let engine = std::sync::Arc::new(domain::plugin::PluginEngine::new(plugins.clone(), pool.clone(), proxy));
-                // 0.4→0.5 自动迁移（首次运行时执行一次，后续 marker 跳过）
-                tauri::async_runtime::block_on(infra::data::history::migrate_0_4_to_0_5(&pool, &plugins));
-                // 加载/初始化每个插件配置(不存在则写默认 {enabled, settings:null})。
-                tauri::async_runtime::block_on(engine.init_configs());
+            // 无条件构造 PluginEngine（空 plugins 也是合法态）。
+            // 早期用 Option<Arc<PluginEngine>> 表示"无插件"，但导致：
+            // - Tauri state 类型每处易拼错（`try_state::<Arc<PE>>` vs `state::<Option<Arc<PE>>>`）
+            // - 消费点 15 处充斥 `as_ref()` / `if let Some(pe)` 样板
+            // PluginEngine::new 无必须条件，plugins=vec![] 时各方法均安全（空迭代 / find_plugin 返 None）。
+            tracing::info!(count = plugins.len(), "PluginEngine 已构造");
+            let plugin_engine = std::sync::Arc::new(domain::plugin::PluginEngine::new(plugins.clone(), pool.clone(), proxy));
+            // 0.4→0.5 自动迁移（首次运行时执行一次，后续 marker 跳过；空 plugins 时循环空转）
+            tauri::async_runtime::block_on(infra::data::history::migrate_0_4_to_0_5(&pool, &plugins));
+            // 加载/初始化每个插件配置(不存在则写默认 {enabled, settings:null})。
+            tauri::async_runtime::block_on(plugin_engine.init_configs());
 
-                // 0.8.2 §3.4：把 PluginEngine 作为 PluginSettingResolver 后置注入 RuleRouter,
-                // 让 Context 触发能读插件 target_lang(如翻译)。同步 app_language 快照。
-                router.set_setting_resolver(engine.clone() as std::sync::Arc<dyn domain::plugin::PluginSettingResolver>);
-                router.set_app_language(app_config.language.clone());
+            // 0.8.2 §3.4：把 PluginEngine 作为 PluginSettingResolver 后置注入 RuleRouter,
+            // 让 Context 触发能读插件 target_lang(如翻译)。同步 app_language 快照。
+            router.set_setting_resolver(plugin_engine.clone() as std::sync::Arc<dyn domain::plugin::PluginSettingResolver>);
+            router.set_app_language(app_config.language.clone());
 
-                // 0.8.5 §6.4：注入本体 engine 的 keyword 规则（先注入 engine，再注入插件——
-                // engine 优先级更高，命中即独占返回；插件 Takeover 走各自 manifest triggers）。
-                domain::search::register_engine_rules(&router);
+            // 0.8.5 §6.4：注入本体 engine 的 keyword 规则（先注入 engine，再注入插件——
+            // engine 优先级更高，命中即独占返回；插件 Takeover 走各自 manifest triggers）。
+            domain::search::register_engine_rules(&router);
 
-                // 注入规则到 RuleRouter（合并 manifest triggers + 用户自定义 triggers）
-                for plugin in &plugins {
-                    if !engine.is_enabled(plugin.id()) {
-                        tracing::debug!(plugin = %plugin.id(), "插件已禁用,跳过规则注入");
-                        continue;
-                    }
-                    // 读取配置（含自定义 triggers）
-                    let config = engine.get_config(plugin.id()).unwrap_or_default();
-                    let effective_triggers = config.effective_triggers(&plugin.manifest().triggers);
-                    router.reload_plugin_triggers(plugin.id(), &effective_triggers);
+            // 注入规则到 RuleRouter（合并 manifest triggers + 用户自定义 triggers）
+            for plugin in &plugins {
+                if !plugin_engine.is_enabled(plugin.id()) {
+                    tracing::debug!(plugin = %plugin.id(), "插件已禁用,跳过规则注入");
+                    continue;
                 }
-
-                Some(engine)
-            };
+                // 读取配置（含自定义 triggers）
+                let config = plugin_engine.get_config(plugin.id()).unwrap_or_default();
+                let effective_triggers = config.effective_triggers(&plugin.manifest().triggers);
+                router.reload_plugin_triggers(plugin.id(), &effective_triggers);
+            }
 
             // 构造三层搜索引擎配置（应用搜索 / 文件搜索 / 计算器）
             let start_menu_config = tauri::async_runtime::block_on(app::config::get_start_menu_config(&pool));
@@ -366,17 +365,13 @@ fn main() {
             app::commands::launch_app,
             app::commands::run_builtin_action,
             app::commands::list_builtin_actions,
-            app::commands::set_disabled_builtin_actions,
             app::commands::list_context_bindings,
-            app::commands::set_disabled_context_bindings,
             app::commands::trigger_chord,
             app::commands::list_chord_actions,
             app::commands::list_all_chord_actions,
-            app::commands::set_disabled_chord_actions,
-            app::commands::update_chord_toggles,
-            app::commands::update_clipboard_enabled,
             app::commands::is_alt_down,
             app::commands::hide_chord_ball,
+            app::commands::poll_chord_selection,
             app::commands::confirm_chord_selection,
             app::commands::capture_region,
             app::commands::hide_screenshot_overlay,
@@ -385,31 +380,18 @@ fn main() {
             app::commands::get_app_info,
             app::commands::resize_window,
             app::commands::get_config,
-            app::commands::update_hotkey,
-            app::commands::update_tap_threshold,
-            app::commands::update_grace_period,
-            app::commands::update_general_config,
-            app::commands::update_auto_start,
-            app::commands::update_language,
+            app::commands::set_config,
             app::commands::reset_config,
             app::commands::record_hotkey,
-            app::commands::update_log_level,
             app::commands::open_log_file,
             app::commands::open_log_dir,
             app::commands::get_log_info,
-            app::commands::update_file_search,
             app::commands::get_start_menu_config,
-            app::commands::update_start_menu_config,
             app::commands::get_calc_config,
-            app::commands::update_calc_config,
             app::commands::probe_everything,
             app::commands::get_engine_config,
-            app::commands::update_engine_config,
             app::commands::get_plugins,
-            app::commands::update_plugin_config,
-            app::commands::update_global_proxy,
             app::commands::get_context_config,
-            app::commands::update_context_config,
             app::commands::open_containing_folder,
             app::commands::open_lnk_target,
             app::commands::copy_to_clipboard,
@@ -419,7 +401,6 @@ fn main() {
             app::commands::hide_context_menu,
             app::commands::context_menu_action,
             app::commands::probe_interpreters,
-            app::commands::update_interpreter_config,
             app::commands::open_file_dialog,
             app::commands::get_clipboard_history,
             app::commands::search_clipboard_history,
@@ -437,10 +418,8 @@ fn main() {
             app::commands::toggle_default_trigger,
             app::commands::add_custom_trigger,
             app::commands::delete_custom_trigger,
-            app::commands::update_autosuggest_config,
-            // 0.8.6 §8.1.3 泛型配置命令（ConfigStore）
             app::commands::get_config_section,
-            app::commands::set_config_section
+            app::commands::set_config_section,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -2,8 +2,8 @@
 
 > **定位**: Universal Action Layer（统一操作层）—— 感知用户上下文、主动推荐动作,让任何操作都比原来的路径更快。
 >
-> **状态**: 0.7 已完成,0.8 进行中（0.8.0 ~ 0.8.5 完成；0.8.6 架构固化规划中；0.8.7 Alt+A 截图规划中），0.9 AI 层规划中
-> **更新时间**: 2026-07-05
+> **状态**: 0.8 全部完成归档（0.8.0 ~ 0.8.8），0.9 AI 层规划中
+> **更新时间**: 2026-07-06
 
 ---
 
@@ -57,7 +57,7 @@
 | **0.5** | [phases/0.5-config-search-extension.md](./phases/0.5-config-search-extension.md) | 配置架构统一 KV + Everything 文件搜索 + 右键菜单 + 主题系统 | ✅ 完成 |
 | **0.6** | [phases/0.6-plugin-packaging-scripting.md](./phases/0.6-plugin-packaging-scripting.md) | 插件打包路径 + Python/Node.js 脚本支持 + 统一错误处理 | ✅ 完成 |
 | **0.7** | [phases/0.7-plugin-ecosystem-local-search.md](./phases/0.7-plugin-ecosystem-local-search.md) | 插件生态(翻译/剪贴板历史)+ 本地搜索 Fallback + 性能统计 | ✅ 完成 |
-| **0.8** | [phases/0.8-context-interaction.md](./phases/0.8-context-interaction.md) | 感知与操作层 —— UIA 划词 + 内置动作抽象 + Autosuggestion + 翻译 Context 路由 + 四域架构 + Chord 交互（0.8.6 架构固化、0.8.7 补 Alt+A 截图） | 🚧 进行中 |
+| **0.8** | [phases/0.8-context-interaction.md](./phases/0.8-context-interaction.md) | 感知与操作层 —— UIA 划词 + 内置动作抽象 + Autosuggestion + 翻译 Context 路由 + 四域架构 + Chord 交互 + Alt+A 截图（0.8.6 架构固化大部分已落地，两项遗留推 0.9 前） | ✅ 归档收尾 |
 | **0.9** | [phases/0.9-ai-layer.md](./phases/0.9-ai-layer.md) | 智能层 —— AI Provider Trait + 云端插件 + Chat View + VectorRouter | 📋 规划中 |
 
 ### 2.3 其他参考
@@ -80,8 +80,9 @@
 | **0.8.3** | 感知交互统一：`Suggestion` 抽象 + Context 转 Ghost 采纳 + 智能感知面板 + Ghost 本地化 + origin 提示 + **awareness 域重构** | ✅ 完成 |
 | **0.8.4** | **四域架构重构**：route 断 Awareness + ExecArg 类型墙 + RankingHint Surface Booster + Suggestion 覆盖非空 query | ✅ 完成 |
 | **0.8.5** | **Chord 模式底层能力**：注册机制 + 独立悬浮窗 + Alt+Q 划词 + Alt+C 剪贴板（EngineTakeover）+ 配置面板 | ✅ 完成 |
-| **0.8.6** | **架构固化**：Action trait / SuggestionProducer + Arbiter / ConfigStore / SearchService 拆分 / AppContext 真依赖容器 / 内置动作 i18n（为 0.9 铺物理骨架，纯横向重构） | 📋 规划中 |
-| **0.8.7** | Alt+A 区域截图 | 📋 规划中 |
+| **0.8.6** | **架构固化**：Action trait / SuggestionProducer + Arbiter / ConfigStore / SearchService 拆分 / AppContext 真依赖容器 / 内置动作 i18n（为 0.9 铺物理骨架，纯横向重构） | ✅ 完成 |
+| **0.8.7** | Alt+A 区域截图（DWM Cloak + BGRA 全链路 + 快速 PNG，总感知延迟 ~320ms） | ✅ 完成 |
+| **0.8.8** | 收尾归档（文档同步 + 遗留项梳理，剩余优化项进 0.9 前 chore 池） | ✅ 完成 |
 | 0.9.0 | 最小 AI Provider Trait + 注册机制 | 后置 |
 | 0.9.1 | 云端 AI 插件（OpenAI 兼容）+ 密钥安全存储 | 后置 |
 | 0.9.2 | AI Chat View 对话界面 + `ai xxx` 触发 | 后置 |

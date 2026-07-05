@@ -28,7 +28,7 @@ body {
   width: 100%;
   padding: 12px;
   background: var(--bg);
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   overflow: hidden;
   box-shadow: 0 8px 32px var(--shadow), 0 0 0 1px var(--border-glow);
   cursor: default;
@@ -166,7 +166,7 @@ body.chord-visible #ghost-overlay:has(.ghost-suggest:empty) .ghost-chord:not(:em
 #results li {
   /* 左内边距与输入框文字对齐（输入框 padding-left 10px） */
   padding: 9px 10px;
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   cursor: pointer; /* 指针手型，明确可点击 */
   font-size: 14px;
   transition: background 0.08s ease;
@@ -244,7 +244,7 @@ body.chord-visible #ghost-overlay:has(.ghost-suggest:empty) .ghost-chord:not(:em
   font-family: ui-monospace, Consolas, monospace;
   color: var(--text);
   background: var(--surface-2);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   text-align: center;
 }
 

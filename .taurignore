@@ -1,0 +1,57 @@
+# Tauri dev 后端 watcher 排除规则（与 .gitignore 语法一致）
+#
+# 目的：Tauri dev 模式默认监听 workspace 根目录，任何文件变更都触发 cargo rebuild。
+# 本文件排除**与 Rust 后端零关系**的目录与文件类型，让 md 文档、图标、
+# AI/IDE 配置等变更不会误触后端重编译。
+#
+# 保守策略：只排除 100% 确定不影响后端编译产物的路径；
+# frontend/ 与 plugins/ 因为可能通过 include_str! / 资源打包影响后端，暂不加入。
+#
+# 关联：docs/production-design/phases/0.8-context-interaction.md §十（0.8.8 收尾）
+
+# ── 文档（Markdown 变更不应触发 rebuild）─────────
+docs/
+*.md
+LICENSE
+LICENSE.*
+
+# ── 图标 / 静态资源（不参与 Rust 编译）───────────
+icons/
+*.png
+*.jpg
+*.jpeg
+*.ico
+*.svg
+*.gif
+
+# ── 打包产物 ─────────────────────────────────────
+*.msi
+*.exe
+*.dll
+*.pdb
+*.log
+
+# ── AI / IDE 配置 ───────────────────────────────
+.claude/
+.cursor/
+.copilot/
+.codex/
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── OS ─────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── 版本控制元数据 ──────────────────────────────
+.git/
+.gitattributes
+
+# ── 其他元数据 ──────────────────────────────────
+*.toml.bak
+*.rs.bak
+.env
+.env.local

@@ -47,13 +47,17 @@ impl PluginEngine {
             .iter()
             .map(|p| {
                 let manifest = p.manifest();
+                // 插件卡片"关键词："行只展示 Keyword/Regex 触发（用户可编辑的入口）。
+                // Context 触发是"能力声明",归属"智能感知"面板（list_context_bindings），
+                // 不与 keyword tag 混排 —— 不然会渲染出 `context: TextIsNonTargetLang`
+                // 这类 Debug 字面量，且用户在此处也无法操作它。
                 let triggers: Vec<String> = manifest
                     .triggers
                     .iter()
-                    .map(|t| match t {
-                        super::PluginTrigger::Keyword { keyword, .. } => keyword.clone(),
-                        super::PluginTrigger::Regex { pattern, .. } => format!("regex: {pattern}"),
-                        super::PluginTrigger::Context { when, .. } => format!("context: {when:?}"),
+                    .filter_map(|t| match t {
+                        super::PluginTrigger::Keyword { keyword, .. } => Some(keyword.clone()),
+                        super::PluginTrigger::Regex { pattern, .. } => Some(format!("regex: {pattern}")),
+                        super::PluginTrigger::Context { .. } => None,
                     })
                     .collect();
 

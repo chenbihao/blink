@@ -28,17 +28,57 @@
         cursor: pointer;
         -webkit-app-region: drag; /* 球可拖动定位 */
         user-select: none;
+        transition: background 0.3s ease, box-shadow 0.3s ease;
+      }
+      #ball.ready {
+        background: #34c759;
+        box-shadow: 0 4px 16px rgba(52, 199, 89, 0.4);
+      }
+      #ball.ready::after {
+        content: "";
+        position: absolute;
+        width: 48px;
+        height: 48px;
+        border-radius: 50%;
+        background: rgba(52, 199, 89, 0.3);
+        animation: pulse 1.2s ease-out 1;
+        pointer-events: none;
+      }
+      @keyframes pulse {
+        0% { transform: scale(1); opacity: 0.6; }
+        100% { transform: scale(1.8); opacity: 0; }
       }
     </style>
   </head>
   <body>
     <div id="ball">划词翻译</div>
     <script type="module">
-      import { confirmChordSelection } from "./js/api.js";
+      import { confirmChordSelection, pollChordSelection } from "./js/api.js";
+
+      const ball = document.getElementById("ball");
+      let resolved = false;
+
       // 点球 → 读选区缓存 + 主窗显示翻译结果 + 球 hide
-      document.getElementById("ball").addEventListener("click", () => {
+      ball.addEventListener("click", () => {
         confirmChordSelection();
       });
+
+      // 轮询选区：200ms 一次，检测划词是否成功
+      const pollId = setInterval(async () => {
+        if (resolved) return;
+        try {
+          const text = await pollChordSelection();
+          if (text) {
+            resolved = true;
+            clearInterval(pollId);
+            ball.classList.add("ready");
+            ball.textContent = "已选词";
+          }
+        } catch (_) { /* ignore */ }
+      }, 200);
+
+      // 清理：窗口隐藏/关闭时停止轮询
+      window.addEventListener("beforeunload", () => clearInterval(pollId));
     </script>
   </body>
 </html>

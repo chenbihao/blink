@@ -515,16 +515,6 @@ fn encode_rgba_to_png(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// 清空图标缓存。
-#[allow(dead_code)]
-pub fn clear_cache() {
-    if let Ok(mut cache) = ICON_CACHE.lock() {
-        if let Some(map) = cache.as_mut() {
-            map.clear();
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

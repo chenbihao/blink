@@ -8,7 +8,11 @@
     <link rel="stylesheet" href="css/themes-nvchad.css" />
     <link rel="stylesheet" href="css/themes-genshin.css" />
     <link rel="stylesheet" href="css/kbd.css" />
-    <link rel="stylesheet" href="css/settings.css" />
+    <link rel="stylesheet" href="css/settings-base.css" />
+    <link rel="stylesheet" href="css/settings-components.css" />
+    <link rel="stylesheet" href="css/settings-plugin.css" />
+    <link rel="stylesheet" href="css/settings-debug.css" />
+    <link rel="stylesheet" href="css/settings-modal.css" />
   </head>
   <body>
     <div class="container">
@@ -32,25 +36,24 @@
         <!-- 通用 -->
         <div id="general" class="panel active">
           <h2 data-i18n="panel.general">通用</h2>
+          <p class="panel-lede" data-i18n="general.lede">全局偏好：主题、语言、历史与结果条数上限。</p>
           <div class="setting-row">
-            <label class="setting-label" data-i18n="general.auto_start.label">开机自启</label>
+            <label class="setting-label" data-i18n="general.auto_start.label">开机自启<span class="field-hint-icon" data-i18n-title="general.auto_start.hint">ⓘ</span></label>
             <label class="checkbox">
               <input type="checkbox" id="auto-start" />
               <span class="checkmark"></span>
             </label>
-            <span class="hint" data-i18n="general.auto_start.hint">开机自动启动</span>
           </div>
           <div class="setting-row">
-            <label class="setting-label" data-i18n="general.language.label">语言</label>
+            <label class="setting-label" data-i18n="general.language.label">语言<span class="field-hint-icon" data-i18n-title="general.language.hint">ⓘ</span></label>
             <select id="language">
               <!-- 语言名用各自语言显示，不参与 i18n -->
               <option value="zh" selected>中文</option>
               <option value="en">English</option>
             </select>
-            <span class="hint" data-i18n="general.language.hint">界面语言，切换后立即生效</span>
           </div>
           <div class="setting-row">
-            <label class="setting-label" data-i18n="general.theme.label">主题</label>
+            <label class="setting-label" data-i18n="general.theme.label">主题<span class="field-hint-icon" data-i18n-title="general.theme.hint">ⓘ</span></label>
             <select id="theme">
               <option value="auto" data-i18n="general.theme.auto">跟随系统</option>
               <optgroup label="Blink">
@@ -155,48 +158,43 @@
                 <option value="jay-ye-huimei" data-i18n="general.theme.jay-ye-huimei">Jay 叶惠美</option>
               </optgroup>
             </select>
-            <span class="hint" data-i18n="general.theme.hint">立即生效</span>
           </div>
           <div class="setting-row">
-            <label class="setting-label" data-i18n="general.history_enabled.label">记录搜索历史</label>
+            <label class="setting-label" data-i18n="general.history_enabled.label">记录搜索历史<span class="field-hint-icon" data-i18n-title="general.history_enabled.hint">ⓘ</span></label>
             <label class="checkbox">
               <input type="checkbox" id="search-history-enabled" />
               <span class="checkmark"></span>
             </label>
-            <span class="hint" data-i18n="general.history_enabled.hint">关闭后不再记录频率权重</span>
           </div>
           <div class="setting-row">
-            <label class="setting-label" data-i18n="general.history_days.label">历史保留天数</label>
+            <label class="setting-label" data-i18n="general.history_days.label">历史保留天数<span class="field-hint-icon" data-i18n-title="general.history_days.hint">ⓘ</span></label>
             <div class="number-input-wrapper">
               <input type="number" id="search-history-days" min="0" max="365" value="180" />
               <div class="number-spinner">
-                <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">＋</button>
-                <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">－</button>
+                <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">▲</button>
+                <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">▼</button>
               </div>
             </div>
-            <span class="hint" data-i18n="general.history_days.hint">0 = 永久保留</span>
           </div>
           <div class="setting-row">
-            <label class="setting-label" data-i18n="general.max_results.label">最大结果数</label>
+            <label class="setting-label" data-i18n="general.max_results.label">最大结果数<span class="field-hint-icon" data-i18n-title="general.max_results.hint">ⓘ</span></label>
             <div class="number-input-wrapper">
               <input type="number" id="max-results" min="1" max="100" value="50" />
               <div class="number-spinner">
-                <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">＋</button>
-                <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">－</button>
+                <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">▲</button>
+                <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">▼</button>
               </div>
             </div>
-            <span class="hint" data-i18n="general.max_results.hint">搜索融合后返回上限</span>
           </div>
           <div class="setting-row">
-            <label class="setting-label" data-i18n="general.page_size.label">每页条数</label>
+            <label class="setting-label" data-i18n="general.page_size.label">每页条数<span class="field-hint-icon" data-i18n-title="general.page_size.hint">ⓘ</span></label>
             <div class="number-input-wrapper">
               <input type="number" id="page-size" min="1" max="20" value="9" />
               <div class="number-spinner">
-                <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">＋</button>
-                <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">－</button>
+                <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">▲</button>
+                <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">▼</button>
               </div>
             </div>
-            <span class="hint" data-i18n="general.page_size.hint">每屏最多显示多少条结果</span>
           </div>
 
           <!-- 0.8.3 §4.9 输入补全（Ghost Text，0.8.1 §2.8）已挪至「上下文感知」面板 -->
@@ -205,6 +203,7 @@
         <!-- 快捷键 -->
         <div id="hotkey" class="panel">
           <h2 data-i18n="panel.hotkey">快捷键</h2>
+          <p class="panel-lede" data-i18n="hotkey.lede">唤起 Blink 的键，以及看门狗判定的时间阈值。</p>
           <div class="setting-row">
             <label class="setting-label" data-i18n="hotkey.label">唤起快捷键</label>
             <div class="hotkey-input-wrapper">
@@ -213,22 +212,21 @@
             </div>
           </div>
           <div class="setting-row">
-            <label class="setting-label" data-i18n="hotkey.tap.label" data-i18n-title="hotkey.tap.title" title="短按到抬起的最长时长，超过则判定为长按（Hold），不触发唤起">tap 阈值</label>
+            <label class="setting-label" data-i18n="hotkey.tap.label">tap 阈值<span class="field-hint-icon" data-i18n-title="hotkey.tap.title">ⓘ</span></label>
             <input type="range" id="tap-threshold" min="150" max="500" value="300" step="50" />
             <span id="tap-threshold-value">300ms</span>
-            <div class="hint-line" data-i18n="hotkey.tap.hint">按下到抬起若超过此时长，视为长按（保留系统修饰键功能），不触发 Blink。</div>
           </div>
           <div class="setting-row">
-            <label class="setting-label" data-i18n="hotkey.grace.label" data-i18n-title="hotkey.grace.title" title="窗口刚显示后的失焦保护期，避免焦点还没切过来就被误判为失焦而隐藏">看门狗 grace period</label>
+            <label class="setting-label" data-i18n="hotkey.grace.label">看门狗 grace period<span class="field-hint-icon" data-i18n-title="hotkey.grace.title">ⓘ</span></label>
             <input type="range" id="grace-ms" min="200" max="1000" value="500" step="50" />
             <span id="grace-ms-value">500ms</span>
-            <div class="hint-line" data-i18n="hotkey.grace.hint">窗口显示后此段时间内不检测失焦，避免焦点切换尚未完成时被误判隐藏。</div>
           </div>
         </div>
 
         <!-- 引擎 -->
         <div id="engines" class="panel">
           <h2 data-i18n="panel.engines">搜索引擎</h2>
+          <p class="panel-lede" data-i18n="engines.lede">应用 / 文件 / 计算器 / 内置动作 —— 搜索候选的来源。</p>
 
           <!-- 应用搜索（StartMenu） -->
           <div class="extension-card">
@@ -245,27 +243,22 @@
             </div>
 
             <div class="extension-body">
-              <div class="plugin-config-section">
-                <div class="plugin-section-title" data-i18n="engine.start_menu.config">配置</div>
-                <div class="setting-row">
-                  <label class="setting-label" data-i18n="engine.start_menu.scan_depth.label">扫描深度</label>
-                  <div class="number-input-wrapper">
-                    <input type="number" id="start-menu-scan-depth" min="1" max="10" value="3" />
-                    <div class="number-spinner">
-                      <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">▲</button>
-                      <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">▼</button>
-                    </div>
+              <div class="setting-row">
+                <label class="setting-label" data-i18n="engine.start_menu.scan_depth.label">扫描深度<span class="field-hint-icon" data-i18n-title="engine.start_menu.scan_depth.hint">ⓘ</span></label>
+                <div class="number-input-wrapper">
+                  <input type="number" id="start-menu-scan-depth" min="1" max="10" value="3" />
+                  <div class="number-spinner">
+                    <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">▲</button>
+                    <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">▼</button>
                   </div>
-                  <span class="hint" data-i18n="engine.start_menu.scan_depth.hint">索引深度，越大越全但越慢</span>
                 </div>
-                <div class="setting-row">
-                  <label class="setting-label" data-i18n="engine.start_menu.include_uwp.label">包含 UWP/MSIX 应用</label>
-                  <label class="checkbox">
-                    <input type="checkbox" id="start-menu-include-uwp" checked />
-                    <span class="checkmark"></span>
-                  </label>
-                  <span class="hint" data-i18n="engine.start_menu.include_uwp.hint">搜索 Microsoft Store 安装的打包应用</span>
-                </div>
+              </div>
+              <div class="setting-row">
+                <label class="setting-label" data-i18n="engine.start_menu.include_uwp.label">包含 UWP/MSIX 应用<span class="field-hint-icon" data-i18n-title="engine.start_menu.include_uwp.hint">ⓘ</span></label>
+                <label class="checkbox">
+                  <input type="checkbox" id="start-menu-include-uwp" checked />
+                  <span class="checkmark"></span>
+                </label>
               </div>
               <div class="plugin-save-row">
                 <button id="save-start-menu" class="btn-small" data-i18n="engine.save">保存配置</button>
@@ -290,29 +283,24 @@
 
             <div class="extension-body">
               <!-- 数据源选择 -->
-              <div class="plugin-config-section">
-                <div class="plugin-section-title" data-i18n="engine.file_search.data_source">数据源</div>
-                <div class="setting-row">
-                  <label class="setting-label" data-i18n="engine.file_search.data_source.label">搜索模式</label>
-                  <select id="file-search-data-source">
-                    <option value="auto" data-i18n="engine.file_search.data_source.auto">自动（优先 Everything，降级本地）</option>
-                    <option value="everything" data-i18n="engine.file_search.data_source.everything">仅 Everything</option>
-                    <option value="local" data-i18n="engine.file_search.data_source.local">仅本地扫描</option>
-                  </select>
-                  <span class="hint" data-i18n="engine.file_search.data_source.hint">选择文件搜索的数据来源</span>
-                </div>
+              <div class="setting-row">
+                <label class="setting-label" data-i18n="engine.file_search.data_source.label">搜索模式<span class="field-hint-icon" data-i18n-title="engine.file_search.data_source.hint">ⓘ</span></label>
+                <select id="file-search-data-source">
+                  <option value="auto" data-i18n="engine.file_search.data_source.auto">自动（优先 Everything，降级本地）</option>
+                  <option value="everything" data-i18n="engine.file_search.data_source.everything">仅 Everything</option>
+                  <option value="local" data-i18n="engine.file_search.data_source.local">仅本地扫描</option>
+                </select>
               </div>
 
               <!-- Everything 配置（非 local 模式时显示） -->
-              <div id="everything-config" class="plugin-config-section">
-                <div class="plugin-section-title">Everything <span class="engine-toggle-hint" data-i18n="engine.everything.hint">（可选，需安装）</span></div>
+              <div id="everything-config">
                 <div class="setting-row">
                   <label class="setting-label" data-i18n="engine.everything.status.label">状态</label>
                   <span id="everything-status" class="status-badge status-unknown" data-i18n="engine.status.probing">探测中…</span>
                   <button id="probe-everything" class="btn-small" data-i18n="engine.probe">重新探测</button>
                 </div>
                 <div class="setting-row">
-                  <label class="setting-label" data-i18n="engine.everything.port.label">HTTP 端口</label>
+                  <label class="setting-label" data-i18n="engine.everything.port.label">HTTP 端口<span class="field-hint-icon" data-i18n-title="engine.everything.port.hint">ⓘ</span></label>
                   <div class="number-input-wrapper">
                     <input type="number" id="everything-port" min="1" max="65535" value="80" />
                     <div class="number-spinner">
@@ -320,10 +308,9 @@
                       <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">▼</button>
                     </div>
                   </div>
-                  <span class="hint" data-i18n="engine.everything.port.hint">Everything 选项 → HTTP 服务器</span>
                 </div>
                 <div class="setting-row">
-                  <label class="setting-label" data-i18n="engine.everything.max_results.label">最大结果数</label>
+                  <label class="setting-label" data-i18n="engine.everything.max_results.label">最大结果数<span class="field-hint-icon" data-i18n-title="engine.everything.max_results.hint">ⓘ</span></label>
                   <div class="number-input-wrapper">
                     <input type="number" id="everything-max-results" min="1" max="100" value="20" />
                     <div class="number-spinner">
@@ -331,7 +318,6 @@
                       <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">▼</button>
                     </div>
                   </div>
-                  <span class="hint" data-i18n="engine.everything.max_results.hint">每次检索返回的文件数量上限</span>
                 </div>
               </div>
 
@@ -369,49 +355,29 @@
 
             <div class="extension-body">
               <!-- Python 解释器 -->
-              <div class="plugin-config-section">
-                <div class="plugin-section-title" data-i18n="engine.python.title">Python</div>
-
-                <div class="setting-row">
-                  <label class="setting-label" data-i18n="engine.python.status">当前状态</label>
-                  <span id="python-status" class="status-badge status-unknown" data-i18n="engine.status.probing">探测中…</span>
-                  <span id="python-version" class="version-badge" style="display:none"></span>
-                  <button id="python-probe" class="btn-small" data-i18n="engine.probe">重新探测</button>
-                </div>
-
-                <div class="setting-row">
-                  <label class="setting-label" data-i18n="engine.python.path">Python 路径</label>
-                  <input type="text" id="python-path" class="input-wide" data-i18n-ph="engine.python.path.ph" placeholder="自动探测或手动输入..." readonly />
-                  <button id="python-browse" class="btn-small" data-i18n="engine.browse">浏览</button>
-                </div>
-
-                <div class="setting-row">
-                  <label></label>
-                  <span class="hint" data-i18n="engine.python.hint">用于运行 .py 脚本插件，需要 Python 3.8+</span>
-                </div>
+              <div class="plugin-section-title" data-i18n="engine.python.title">Python</div>
+              <div class="setting-row">
+                <label class="setting-label" data-i18n="engine.python.status">当前状态</label>
+                <span id="python-status" class="status-badge status-unknown" data-i18n="engine.status.probing">探测中…</span>
+                <button id="python-probe" class="btn-small" data-i18n="engine.probe">重新探测</button>
+              </div>
+              <div class="setting-row">
+                <label class="setting-label" data-i18n="engine.python.path">Python 路径<span class="field-hint-icon" data-i18n-title="engine.python.hint">ⓘ</span></label>
+                <input type="text" id="python-path" class="input-wide" data-i18n-ph="engine.python.path.ph" placeholder="自动探测或手动输入..." readonly />
+                <button id="python-browse" class="btn-small" data-i18n="engine.browse">浏览</button>
               </div>
 
               <!-- Node.js 解释器 -->
-              <div class="plugin-config-section">
-                <div class="plugin-section-title" data-i18n="engine.node.title">Node.js</div>
-
-                <div class="setting-row">
-                  <label class="setting-label" data-i18n="engine.node.status">当前状态</label>
-                  <span id="node-status" class="status-badge status-unknown" data-i18n="engine.status.probing">探测中…</span>
-                  <span id="node-version" class="version-badge" style="display:none"></span>
-                  <button id="node-probe" class="btn-small" data-i18n="engine.probe">重新探测</button>
-                </div>
-
-                <div class="setting-row">
-                  <label class="setting-label" data-i18n="engine.node.path">Node 路径</label>
-                  <input type="text" id="node-path" class="input-wide" data-i18n-ph="engine.node.path.ph" placeholder="自动探测或手动输入..." readonly />
-                  <button id="node-browse" class="btn-small" data-i18n="engine.browse">浏览</button>
-                </div>
-
-                <div class="setting-row">
-                  <label></label>
-                  <span class="hint" data-i18n="engine.node.hint">用于运行 .js 脚本插件，需要 Node.js 16+</span>
-                </div>
+              <div class="plugin-section-title" data-i18n="engine.node.title">Node.js</div>
+              <div class="setting-row">
+                <label class="setting-label" data-i18n="engine.node.status">当前状态</label>
+                <span id="node-status" class="status-badge status-unknown" data-i18n="engine.status.probing">探测中…</span>
+                <button id="node-probe" class="btn-small" data-i18n="engine.probe">重新探测</button>
+              </div>
+              <div class="setting-row">
+                <label class="setting-label" data-i18n="engine.node.path">Node 路径<span class="field-hint-icon" data-i18n-title="engine.node.hint">ⓘ</span></label>
+                <input type="text" id="node-path" class="input-wide" data-i18n-ph="engine.node.path.ph" placeholder="自动探测或手动输入..." readonly />
+                <button id="node-browse" class="btn-small" data-i18n="engine.browse">浏览</button>
               </div>
             </div>
           </div>
@@ -427,7 +393,7 @@
               <span id="builtin-actions-save-msg" class="plugin-save-msg"></span>
             </div>
             <div class="extension-body">
-              <div id="builtin-actions-list" class="plugin-config-section">
+              <div id="builtin-actions-list">
                 <!-- 内容由 renderBuiltinActions() 动态渲染 -->
               </div>
             </div>
@@ -437,6 +403,7 @@
         <!-- 插件 -->
         <div id="plugins" class="panel">
           <h2 data-i18n="panel.plugins">插件管理</h2>
+          <p class="panel-lede" data-i18n="plugins.lede">已安装的第三方与内置插件，逐一开关与配置。</p>
           <div id="plugins-container">
             <!-- 插件卡片由 JS 动态渲染 -->
           </div>
@@ -445,34 +412,51 @@
         <!-- 网络 -->
         <div id="network" class="panel">
           <h2 data-i18n="panel.network">网络配置</h2>
+          <p class="panel-lede" data-i18n="network.lede">HTTP / HTTPS 代理，本体与所有插件共用一份配置。</p>
           <div id="network-container">
             <!-- 网络配置由 JS 动态渲染 -->
           </div>
         </div>
 
-        <!-- 上下文（0.8.7 UX 重排：采集 → 触发 → 呈现，顺流分层）───────── -->
+        <!-- 上下文（0.8.9 UX：采集 → 过滤 → 触发 → 呈现，四段等距）──────── -->
         <div id="context" class="panel">
           <h2 data-i18n="panel.context">上下文感知</h2>
           <p class="panel-lede" data-i18n="context.lede">Blink 观察你选中 / 复制 / 剪贴的内容，主动推荐能对它做的事。</p>
 
-          <!-- 采集：数据从哪来 ────────────────────────────────────── -->
+          <!-- ① 采集：数据从哪来 ────────────────────────────────────── -->
           <div class="section-label" data-i18n="context.section.capture">采集 · 数据从哪来</div>
           <div id="context-container">
-            <!-- 由 JS 动态渲染（含划词/剪贴板即时采集、剪贴板历史录入、敏感应用） -->
+            <!-- 由 JS 动态渲染（三个即时采集开关） -->
           </div>
 
-          <!-- 触发：什么算命中 ────────────────────────────────────── -->
-          <div class="section-label" data-i18n="context.section.trigger">触发 · 什么算命中</div>
-          <div class="section-lede-row">
-            <span class="hint" data-i18n="context.bindings.hint">环境自动触发的建议（选中英文→翻译、剪贴板 URL→打开链接 等）；关闭后 Ghost 不再出现</span>
+          <!-- ② 过滤：哪些应用不采 ────────────────────────────────── -->
+          <div class="section-label" data-i18n="context.section.filter">过滤 · 哪些应用不采</div>
+          <div id="context-filter-container">
+            <!-- 由 JS 动态渲染（敏感应用 chip 列表） -->
           </div>
-          <div class="extension-card">
-            <div id="context-bindings-container" class="action-list">
-              <!-- 由 JS 动态渲染紧凑 action-list-row -->
+
+          <!-- ③ 触发：什么算命中 ────────────────────────────────────── -->
+          <div class="section-label" data-i18n="context.section.trigger">触发 · 什么算命中</div>
+          <div class="extension-card" id="context-triggers-card">
+            <div class="extension-header">
+              <div class="extension-icon">⚡</div>
+              <div class="extension-info">
+                <h3 data-i18n="context.trigger.card.title">Ghost 触发规则</h3>
+                <p class="extension-desc" data-i18n="context.trigger.card.desc">环境自动触发的建议（选中英文→翻译、剪贴板 URL→打开链接 等）；关闭后 Ghost 不再出现</p>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="context-triggers-enabled" />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="extension-body">
+              <div id="context-bindings-container" class="action-list">
+                <!-- 由 JS 动态渲染紧凑 action-list-row（只读能力清单） -->
+              </div>
             </div>
           </div>
 
-          <!-- 呈现：用户如何看到 ────────────────────────────────── -->
+          <!-- ④ 呈现：用户如何看到 ────────────────────────────────── -->
           <div class="section-label" data-i18n="context.section.present">呈现 · 用户如何看到</div>
           <div class="extension-card">
             <div class="extension-header">
@@ -488,23 +472,21 @@
             </div>
             <div class="extension-body">
               <div class="setting-row">
-                <label class="setting-label" data-i18n="general.autosuggest.min_score.label">模糊阈值</label>
+                <label class="setting-label" for="autosuggest-min-score" data-i18n="general.autosuggest.min_score.label">模糊阈值<span class="field-hint-icon" data-i18n-title="general.autosuggest.min_score.hint">ⓘ</span></label>
                 <div class="number-input-wrapper">
-                  <input type="number" id="autosuggest-min-score" min="0.5" max="0.95" step="0.05" value="0.70" />
+                  <input type="number" id="autosuggest-min-score" min="0.5" max="0.95" step="0.05" value="0.70" inputmode="decimal" />
                   <div class="number-spinner">
-                    <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">＋</button>
-                    <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">－</button>
+                    <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">▲</button>
+                    <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">▼</button>
                   </div>
                 </div>
-                <span class="hint" data-i18n="general.autosuggest.min_score.hint">部分拼音触发 Ghost Text 的最低相似度（0.5~0.95）</span>
               </div>
               <div class="setting-row">
-                <label class="setting-label" data-i18n="general.autosuggest.tab_key.label">接受补全键</label>
+                <label class="setting-label" for="autosuggest-tab-key" data-i18n="general.autosuggest.tab_key.label">接受补全键<span class="field-hint-icon" data-i18n-title="general.autosuggest.tab_key.hint">ⓘ</span></label>
                 <select id="autosuggest-tab-key">
                   <option value="Tab">Tab</option>
                   <option value="ArrowRight">→ (右箭头)</option>
                 </select>
-                <span class="hint" data-i18n="general.autosuggest.tab_key.hint">按此键把输入替换为规范形式并触发搜索</span>
               </div>
             </div>
           </div>
@@ -513,7 +495,7 @@
         <!-- Chord 交互（0.8.5 §6.6 · 0.8.7 UX 重排：Hero 主开关 + 紧凑动作行）─── -->
         <div id="chord" class="panel">
           <h2 data-i18n="panel.chord">Chord 交互</h2>
-          <p class="panel-lede" data-i18n="chord.hint">主窗可见且未开始输入时，按住 Alt 可触发快捷动作（区域截图 / 智能划词 / 剪贴板历史）</p>
+          <p class="panel-lede" data-i18n="chord.lede">主窗可见且未开始输入时，按住 Alt 可触发快捷动作（区域截图 / 划词翻译 / 剪贴板历史）</p>
 
           <!-- 交互设置 ─────────────────────────────────────────── -->
           <div class="extension-card">
@@ -530,21 +512,17 @@
             </div>
             <div class="extension-body">
               <div class="setting-row">
-                <label class="setting-label" data-i18n="chord.hint_visible.label">显示提示条</label>
-                <label class="switch">
+                <label class="setting-label" data-i18n="chord.hint_visible.label">显示提示条<span class="field-hint-icon" data-i18n-title="chord.hint_visible.hint">ⓘ</span></label>
+                <label class="switch switch-sm">
                   <input type="checkbox" id="chord-hint-visible" />
                   <span class="slider"></span>
                 </label>
-                <span class="hint" data-i18n="chord.hint_visible.hint">按住 Alt 时是否在输入框内浮现单行动作提示</span>
               </div>
             </div>
           </div>
 
           <!-- 动作清单 ─────────────────────────────────────────── -->
-          <div class="section-label" data-i18n="chord.section.actions">动作 · Alt + 字母 直达</div>
-          <div class="section-lede-row">
-            <span class="hint" data-i18n="chord.actions.hint">取消勾选后该 Chord 不再列在提示条，Alt+字母 也不再触发</span>
-          </div>
+          <div class="section-label" data-i18n="chord.section.actions">动作 · Alt + 字母 直达<span class="field-hint-icon" data-i18n-title="chord.actions.hint">ⓘ</span></div>
           <div class="extension-card">
             <div id="chord-actions-container" class="action-list">
               <!-- 由 JS 动态渲染紧凑 action-list-row -->
@@ -557,6 +535,7 @@
         <!-- 存储 -->
         <div id="storage" class="panel">
           <h2 data-i18n="panel.storage">存储</h2>
+          <p class="panel-lede" data-i18n="storage.lede">数据库与历史记录的存储位置和清理操作。</p>
           <div class="setting-row">
             <label class="setting-label" data-i18n="storage.history.label">历史记录</label>
             <span id="history-count" class="value">加载中…</span>
@@ -566,6 +545,7 @@
             <span id="db-path" class="value">-</span>
           </div>
           <div class="setting-row">
+            <label class="setting-label" data-i18n="storage.action.label">操作</label>
             <button id="clear-history" class="btn-danger" data-i18n="storage.clear">清空历史记录</button>
           </div>
         </div>
@@ -573,35 +553,35 @@
         <!-- 调试 -->
         <div id="debug" class="panel">
           <h2 data-i18n="panel.debug">调试</h2>
+          <p class="panel-lede" data-i18n="debug.lede">日志级别与性能采样，排查用不到就不用打开。</p>
+
+          <div class="section-label" data-i18n="debug.section.log">日志 · 排查现场</div>
+
+          <div class="setting-row log-path-row">
+            <label class="setting-label" data-i18n="log.file.label">日志文件</label>
+            <span id="log-file-path" class="value">-</span>
+          </div>
 
           <div class="setting-row">
-            <label class="setting-label" data-i18n="log.level.label">日志级别</label>
+            <label class="setting-label" data-i18n="log.level.label">日志级别<span class="field-hint-icon" data-i18n-title="log.level.hint">ⓘ</span></label>
             <select id="log-level">
               <option value="error" selected data-i18n="log.level.error">error（仅错误）</option>
               <option value="info" data-i18n="log.level.info">info</option>
               <option value="debug" data-i18n="log.level.debug">debug（详细）</option>
               <option value="trace" data-i18n="log.level.trace">trace（最详细）</option>
             </select>
-            <span class="hint" data-i18n="log.level.hint">切换立即生效，写入日志文件</span>
-          </div>
-
-          <div class="setting-row log-path-row">
-            <label data-i18n="log.file.label">日志文件</label>
-            <span id="log-file-path" class="value">-</span>
           </div>
 
           <div class="setting-row">
             <label class="setting-label" data-i18n="log.action.label">操作</label>
-            <button id="open-log-file" class="btn" data-i18n="log.open_file">打开日志</button>
-            <button id="open-log-dir" class="btn" data-i18n="log.open_dir">打开文件夹</button>
+            <button id="open-log-file" class="btn-small" data-i18n="log.open_file">打开日志</button>
+            <button id="open-log-dir" class="btn-small" data-i18n="log.open_dir">打开文件夹</button>
           </div>
 
           <!-- 性能统计区 -->
+          <div class="section-label" data-i18n="debug.section.perf">性能统计 · 最近采样</div>
           <div class="perf-section">
-            <h3 class="perf-section-title" data-i18n="debug.perf.title">性能统计</h3>
-
             <div class="debug-toolbar">
-              <span class="debug-toolbar-hint" data-i18n="debug.perf.hint">最近 100 次采样</span>
               <div class="debug-actions">
                 <button id="perf-refresh" class="btn-small" data-i18n="debug.perf.refresh">刷新</button>
                 <button id="perf-export" class="btn-small" data-i18n="debug.perf.export">导出报告</button>
@@ -639,6 +619,7 @@
         <!-- 关于 -->
         <div id="about" class="panel">
           <h2 data-i18n="panel.about">关于</h2>
+          <p class="panel-lede" data-i18n="about.lede">版本、技术栈与源码仓库。</p>
           <div class="setting-row">
             <label class="setting-label" data-i18n="about.version.label">版本</label>
             <span class="value" id="about-version">—</span>

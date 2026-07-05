@@ -13,7 +13,7 @@
 Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而是 **Universal Action Layer（统一操作层）**。
 终极目标：感知用户上下文、主动推荐动作，让任何操作都比原来的路径更快。
 
-当前处于 **0.8 感知与操作层进行中**：0.1~0.7 全部完成；0.8.0 ~ 0.8.5 + 0.8.7 已落地（UIA 划词、内置动作、Ghost Text 输入补全、翻译插件 Context 路由、Suggestion 契约 + Ghost 采纳 + 智能感知面板 + awareness 域重构、四域架构重构 ExecArg 类型墙 + RankingHint Surface Booster、Chord 交互底层、Alt+A 区域截图）；**0.8.6 = 架构固化**（Action trait / SuggestionProducer + Arbiter / ConfigStore / SearchService 拆分 / AppContext 真依赖容器 / 内置动作 i18n）规划中；AI 相关能力（Provider / Chat / Embedding）全部移至 0.9。
+当前处于 **0.8 感知与操作层已完成**：0.1~0.7 全部完成；0.8.0 ~ 0.8.8 全部落地（UIA 划词、内置动作、Ghost Text 输入补全、翻译插件 Context 路由、Suggestion 契约 + Ghost 采纳 + 智能感知面板 + awareness 域重构、四域架构重构 ExecArg 类型墙 + RankingHint Surface Booster、Chord 交互底层、Alt+A 区域截图、**0.8.6 架构固化全部完成**（Action trait / SuggestionProducer + Arbiter / AppContext 真依赖容器 / `PluginQueryContext.clipboard_text` 移除 / 内置动作 i18n / ConfigStore 6 分片后端 + 迁移 + **前端 IPC 泛型化**（20+ `update_*` → 1 个 `set_config` 命令 + `config-keys.js`）/ SearchService 拆 RouteExecutor）、0.8.8 归档收尾）；AI 相关能力（Provider / Chat / Embedding）全部移至 0.9。
 
 **最新特性（0.8）**：
 - ✅ **0.8.0** UIA 划词文本感知（鼠标选中文本自动抓取）
@@ -23,8 +23,9 @@ Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而�
 - ✅ **0.8.3** 感知交互统一：`Suggestion` 契约抽象（合并 completion_hint + context_suggestion，为 0.9 AI 铺路）+ Context 转 Ghost + Tab 采纳 + 上下文感知面板 + Ghost 本地化 display + origin 来源提示（来自划词/剪贴板）+ **awareness 域重构**（`AwarenessSnapshot { texts: Vec<AwarenessText { source, text }> }` 数据侧带 origin,intent 层零推断,删除 3 个推断 helper）
 - ✅ **0.8.4** **四域架构重构**：Awareness / Suggestion / Routing / Execution 四域强边界（`route` 断 Awareness）+ `ExecArg` 类型墙 + RankingHint Surface Booster + Suggestion 覆盖非空 query + 内置动作保持「展示即抽参」（不延后，详见 phases §5.1）+ PluginProtocol.clipboard_text deprecated
 - ✅ **0.8.5** **Chord 交互底层**：Ghost overlay `.ghost-chord` 影子层提示（`:has()` 让位 Ghost 补全）+ 独立悬浮球 `chord-ball` webview（`WS_EX_NOACTIVATE` 不抢焦点）+ Alt+Q 划词 confirm flow + Alt+C 剪贴板走 `Route::EngineTakeover`（新增 `SearchEngine::takeover_only()` trait + 独立 `ClipboardEngine`）+ 剪贴板监听器补 0.7 漏 + 设置页 Chord tab + `ChordAction::label` 走 `LocalizableText`
-- 📋 **0.8.6** **架构固化**（为 0.9 铺物理骨架，纯横向重构不动业务）：Phase 1 —— Action trait 收敛（`SearchAction/BuiltinActionKind/PluginAction/ChordAction` 四份枚举 → 统一 `Action` trait + `ActionOutcome`）+ Suggestion Producer/Arbiter 拆分（`RankingHint` 从 `Suggestion` 剥离）+ ConfigStore\<T\> 分片（`AppConfig` 拆 6 片 + 前端泛型 `get/set_config<key>` + 广播事件）；Phase 2 —— SearchService God Method 拆 `RouteExecutor` + `PluginQueryContext.clipboard_text` 彻底删除 + `AppContext` 真依赖容器 + 内置动作 title/subtitle i18n。测试基线 300 可增不可减
+- ✅ **0.8.6** **架构固化全部完成**（为 0.9 铺物理骨架，纯横向重构不动业务）：Action trait 收敛完成（`SearchAction/BuiltinActionKind/PluginAction/ChordAction` 统一走 `Action` trait + `ActionOutcome`，位于 `src/domain/execution/`）+ Suggestion Producer/Arbiter 完成（`src/domain/intent/suggestion/`）+ AppContext 真依赖容器完成 + `PluginQueryContext.clipboard_text` 已删 + 内置动作 title/subtitle i18n 完成 + **ConfigStore 6 分片后端完成** + **前端 IPC 泛型化完成**（20+ `update_*` 命令收敛为 1 个 `set_config` 泛型命令 + `frontend/js/config-keys.js`）+ SearchService God Method 已拆为 `exec_takeover` / `exec_engine_takeover` / `exec_mixed`。测试基线 309 通过
 - ✅ **0.8.7** **Alt+A 区域截图**：Chord 三剑客补齐；`src/infra/platform/screenshot/` 新增 GDI 截屏模块 + `SESSION` 单点缓存 + `crop_rgba` 纯函数（7 个单测）；DWM Cloak 隐藏主窗绕过 Win11 fade 动画；BGRA 全链路（BitBlt→SESSION→CF_DIB 免全屏 swap）；PNG 编码 `Compression::Fast + FilterType::NoFilter + u32 位运算 swap + dev profile 局部 opt=3` 从 600ms → ~150ms；总感知延迟 ~320ms（dev），release 更快
+- ✅ **0.8.8** **收尾归档**：0.8.6 落地盘点补入文档 §8.7 + 里程碑表状态同步 + `.taurignore` 落地（改 md 不触发 rebuild）+ 冗余清理小刀（删 `icon::clear_cache` / `update_interpreter_config` / `text::normalize_candidates` 三处僵尸，净减 54 行）+ **设计 token 层落地**（`theme.css` 新增 `--radius-sm/md/lg/xl` + `--transition-fast/base/slow`，`settings.css` ~85% hardcode 迁 token，铁则写入 principles §14.8）+ 版本号统一到 0.8.8 + **P1-C ConfigStore 6 分片后端 + 前端 IPC 泛型化**（20+ `update_*` → 1 个 `set_config` 命令 + `config-keys.js`）+ **P2-A SearchService 拆分**（God Method → `exec_takeover` / `exec_engine_takeover` / `exec_mixed`）。测试基线 309 通过
 - 🔜 **0.9** AI Provider 抽象 + 云端插件 + Chat View + VectorRouter（**基于 0.8.4 四域信任边界 + 0.8.6 物理骨架**——AI 只能产 Suggestion，不能直接触发 Execution；三个统一入口 Action trait / SuggestionProducer / ConfigStore 分别承接 AI 的产出）
 
 ---
@@ -92,9 +93,10 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
   - `data/` — SQLite 持久化：history / clipboard / config KV
   - `utils/` — 通用工具：logging / perf / text（拼音）
 
-**0.8.6 架构固化后新增**（规划）：
-- `src/domain/execution/` — Execution 域物理落地：`Action` trait + `ActionOutcome` + Builtin/Plugin/Chord 三种来源 adapter + registry
-- `src/domain/intent/suggestion/` — Suggestion 域拆分：`SuggestionProducer` trait + `SuggestionArbiter` + Keyword/Context 两个 producer
+**0.8.6 架构固化落地**：
+- `src/domain/execution/` — Execution 域物理落地:`Action` trait + `ActionOutcome` + Builtin/Plugin/Chord 三种来源 adapter + registry ✅
+- `src/domain/intent/suggestion/` — Suggestion 域拆分:`SuggestionProducer` trait + `SuggestionArbiter` + Keyword/Context 两个 producer ✅
+- `ConfigStore<T>` 分片:抽象层 ✅ + `AppConfig` 6 分片后端 ✅ + **前端 IPC 泛型化 ✅**（20+ `update_*` → 1 个 `set_config` 命令 + `frontend/js/config-keys.js`）
 
 ### 前端（`frontend/`）
 
@@ -134,7 +136,7 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 
 SQLite `%APPDATA%\blink\blink.db`：
 - `history(lnk_path, hit_count, last_used_at)` — 启动历史，频率加权 + 衰减
-- `config(key, value, updated_at)` — 配置 KV（分命名空间：`app_config` / `engine:{id}` / `plugin:{id}` / `context:{key}`；**0.8.6 起** `app_config` 拆为 `app.hotkey` / `app.appearance` / `app.search` / `app.suggestion` / `app.chord` / `app.disable` 6 片）
+- `config(key, value, updated_at)` — 配置 KV(分命名空间:`app.hotkey / app.appearance / app.search / app.suggestion / app.chord / app.disable` 六分片 + `engine:{id}` / `plugin:{id}` / `context:*` / `clipboard:config`;**0.8.8 已落地**——`AppConfig` 门面 struct 内部走 6 分片,老 `app_config` 单 key 自动迁移;20+ `update_*` 命令→泛型 `set_config<K>` 收敛留 0.9 起步和 AI Provider 一起做)
 - `clipboard(id, text, kind, hit_count, last_used_at)` — 剪贴板历史（0.7 + 0.8.5 补监听）
 - `perf(metric, value, at)` — 性能统计
 
@@ -160,7 +162,7 @@ Execution  (执行)        — UserExplicit 参数才真执行
 3. **弱信号 pull 不 push**：Routing 无法读 Awareness，Context 只能通过 Suggestion 域影响
 
 **0.8.6 架构固化的三个统一入口**（0.9 AI 的物理骨架）：
-- `Action` trait（`domain/execution/`）—— 一切副作用的统一入口；四份动作枚举 → 一个 trait + `ActionOutcome`
-- `SuggestionProducer` trait + `SuggestionArbiter`（`domain/intent/suggestion/`）—— 一切建议的统一入口；Keyword/Context/(0.9)AI 三源竞争
-- `ConfigStore<T>` 泛型 + `blink://config-changed` 事件 —— 一切配置的统一入口；`AppConfig` 拆片
+- `Action` trait（`domain/execution/`）—— 一切副作用的统一入口;四份动作枚举 → 一个 trait + `ActionOutcome` ✅
+- `SuggestionProducer` trait + `SuggestionArbiter`（`domain/intent/suggestion/`）—— 一切建议的统一入口;Keyword/Context/(0.9)AI 三源竞争 ✅
+- `ConfigStore<T>` 泛型 + `AppConfig` 6 分片后端 + 前端 `set_config` 泛型命令 ✅ —— 一切配置的统一入口;0.9 加 `AIConfig` 只需 `impl ConfigKey for AIConfig` + 前端 `saveConfig("ai_config", {...})`
 

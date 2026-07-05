@@ -48,8 +48,28 @@ impl ConfigStore {
 
 // ── ConfigKey 实现 ─────────────────────────────────────────────────────────
 
-impl ConfigKey for AppConfig {
-    const KEY: &'static str = "app_config";
+impl ConfigKey for HotkeyConfig {
+    const KEY: &'static str = "app.hotkey";
+}
+
+impl ConfigKey for AppearanceConfig {
+    const KEY: &'static str = "app.appearance";
+}
+
+impl ConfigKey for SearchConfig {
+    const KEY: &'static str = "app.search";
+}
+
+impl ConfigKey for SuggestionConfig {
+    const KEY: &'static str = "app.suggestion";
+}
+
+impl ConfigKey for ChordConfig {
+    const KEY: &'static str = "app.chord";
+}
+
+impl ConfigKey for DisableConfig {
+    const KEY: &'static str = "app.disable";
 }
 
 impl ConfigKey for StartMenuConfig {
@@ -64,9 +84,25 @@ impl ConfigKey for ContextConfig {
     const KEY: &'static str = "context:config";
 }
 
+impl ConfigKey for crate::infra::data::clipboard::ClipboardConfig {
+    /// 0.8.8 §8.7:剪贴板配置从原 `app_config.clipboard` nested 字段独立提升为 KV,
+    /// 与 6 个 AppConfig 分片同级(但不属于 `app.*` 命名空间,归到 `clipboard:*`)。
+    const KEY: &'static str = "clipboard:config";
+}
+
+// 旧 `app_config` 单 key 迁移到分片后不再作为 ConfigKey；
+// `AppConfig` 结构体保留为**门面**（Facade），内部 `get_config` / `save_config`
+// 现在拆分到 6 片 KV（`app.hotkey` / `app.appearance` / `app.search` /
+// `app.suggestion` / `app.chord` / `app.disable`）。首次读遇到旧 key 时自动迁移。
+// 详见 0.8-context §8.7 + 0.8.8 收尾。
+
 // ── 配置结构体 ──────────────────────────────────────────────────────────────────
 
 /// 快捷键配置。
+///
+/// **0.8.8 分片扩展**：原只承载按键数据,现在合并 `tap_threshold` / `grace_period`
+/// 两字段,让 `app.hotkey` KV 分片包含所有"热键行为"配置(对齐 phases/0.8 §8.4)。
+/// 前端读 `HotkeyConfig` 时 tap/grace 走 serde default,老前端零改动。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HotkeyConfig {
     /// 修饰键列表（ctrl, shift, alt, meta/win）
@@ -75,6 +111,12 @@ pub struct HotkeyConfig {
     pub key: String,
     /// 显示名称（如 "RightAlt", "Ctrl+Shift+Space"）
     pub display: String,
+    /// tap 阈值(毫秒)——按下时长小于此值算 tap;超过算 hold(0.8.5 Chord 触发)
+    #[serde(default = "default_tap_threshold")]
+    pub tap_threshold: u64,
+    /// 看门狗 grace period(毫秒)——窗口失焦后延迟隐藏的容忍时长
+    #[serde(default = "default_grace_period")]
+    pub grace_period: u64,
 }
 
 impl Default for HotkeyConfig {
@@ -83,9 +125,141 @@ impl Default for HotkeyConfig {
             modifiers: vec!["alt".to_string()],
             key: " ".to_string(),
             display: "Alt+Space".to_string(),
+            tap_threshold: default_tap_threshold(),
+            grace_period: default_grace_period(),
         }
     }
 }
+
+fn default_tap_threshold() -> u64 { 300 }
+fn default_grace_period() -> u64 { 500 }
+
+// ── AppConfig 分片（0.8.8 §8.7）─────────────────────────────────────────────
+//
+// 把原巨型 `AppConfig` 按逻辑域拆成 6 个功能分片。老结构保留为门面 struct,
+// 前端与副作用命令签名零改动。`get_config` 内部改为读 6 片组装、`save_config`
+// 拆分回 6 片。首次读遇到旧 `app_config` 单 key 走迁移路径,读完写回分片再删旧 key。
+//
+// **心智约定**:
+// - 分片 struct 只承载**数据**,不放行为(save/load 走 `ConfigStore::get::<T>()`)
+// - 每字段 `#[serde(default = "...")]` 防止新增字段导致老 json 反序列化失败
+// - `AppConfig` 门面 struct 保留不动——`update_*` 函数继续走 `get_config → mutate → save_config`,
+//   代价是每次 update 读写全部分片(可接受;IO 是 SQLite 本地),换取零业务改动
+// - 0.9 前端泛型 `get_config<K>` / `set_config<K>` 接入后,`update_*` 可以逐步收敛为
+//   "只写自己那片"(P1-C 完全形态,当前是过渡)
+
+/// 外观配置分片。theme / language / auto_start + log_level(应用级设置无更合适去处,归到此片)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppearanceConfig {
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    #[serde(default = "default_language")]
+    pub language: String,
+    #[serde(default = "default_false")]
+    pub auto_start: bool,
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
+}
+
+impl Default for AppearanceConfig {
+    fn default() -> Self {
+        Self {
+            theme: default_theme(),
+            language: default_language(),
+            auto_start: false,
+            log_level: default_log_level(),
+        }
+    }
+}
+
+/// 搜索行为分片。历史 / 结果数 / 分页 / surface takeover。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchConfig {
+    #[serde(default = "default_true")]
+    pub search_history_enabled: bool,
+    #[serde(default = "default_30")]
+    pub search_history_days: u32,
+    #[serde(default = "default_50")]
+    pub max_results: u32,
+    #[serde(default = "default_page_size")]
+    pub page_size: u32,
+    #[serde(default = "default_surface_takeover_enabled")]
+    pub surface_takeover_enabled: bool,
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            search_history_enabled: true,
+            search_history_days: 30,
+            max_results: 50,
+            page_size: default_page_size(),
+            surface_takeover_enabled: true,
+        }
+    }
+}
+
+/// 建议行为分片。autosuggest + proactive。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuggestionConfig {
+    #[serde(default = "default_true")]
+    pub autosuggest_enabled: bool,
+    #[serde(default = "default_autosuggest_min_score")]
+    pub autosuggest_min_score: f64,
+    #[serde(default = "default_autosuggest_tab_key")]
+    pub autosuggest_tab_key: String,
+    #[serde(default = "default_false")]
+    pub proactive_enabled: bool,
+    #[serde(default = "default_5")]
+    pub empty_query_topn: u32,
+}
+
+impl Default for SuggestionConfig {
+    fn default() -> Self {
+        Self {
+            autosuggest_enabled: true,
+            autosuggest_min_score: 0.7,
+            autosuggest_tab_key: "Tab".to_string(),
+            proactive_enabled: false,
+            empty_query_topn: 5,
+        }
+    }
+}
+
+/// Chord 交互分片。总开关 + 提示可见性。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChordConfig {
+    #[serde(default = "default_false")]
+    pub chord_enabled: bool,
+    #[serde(default = "default_true")]
+    pub chord_hint_visible: bool,
+}
+
+impl Default for ChordConfig {
+    fn default() -> Self {
+        Self {
+            chord_enabled: false,
+            chord_hint_visible: true,
+        }
+    }
+}
+
+/// 三类 disable 黑名单聚合分片。**未来加新黑名单类型(如 `disabled_ai_providers`)
+/// 直接进此片,不用穿透到其他片。**
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DisableConfig {
+    #[serde(default)]
+    pub disabled_builtin_actions: Vec<String>,
+    #[serde(default)]
+    pub disabled_context_bindings: Vec<String>,
+    #[serde(default)]
+    pub disabled_chord_actions: Vec<String>,
+}
+
+fn default_language() -> String {
+    "zh".to_string()
+}
+
 
 /// 日志级别默认值（旧配置无此字段时用 serde default 补，不丢其他配置）。
 fn default_log_level() -> String {
@@ -144,6 +318,7 @@ fn default_autosuggest_tab_key() -> String {
 
 /// 应用搜索配置（StartMenuEngine）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StartMenuConfig {
     /// 是否启用应用搜索
     #[serde(default = "default_true")]
@@ -224,6 +399,7 @@ fn default_local_max_results() -> u32 {
 /// - `"everything"`：只用 Everything HTTP，不可用则无文件结果
 /// - `"local"`：只用本地目录扫描，不尝试 Everything
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FileSearchConfig {
     /// 是否启用文件搜索（总开关）
     #[serde(default = "default_file_search_enabled")]
@@ -377,6 +553,7 @@ impl Default for AppConfig {
 /// 聚合更新（`update_general_config`）避免单字段命令爆炸。
 /// `proactive_enabled` / `empty_query_topn` 属 P3 主动建议，暂不纳入（字段仍保留在 AppConfig）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GeneralConfig {
     /// 主题：auto / light / dark
     pub theme: String,
@@ -402,54 +579,213 @@ impl From<&AppConfig> for GeneralConfig {
     }
 }
 
+// ── set_config 命令辅助结构体（0.8.6 P1-C 前端泛型化）─────────────────────────
+
+/// Autosuggestion 更新参数。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutosuggestUpdate {
+    pub enabled: bool,
+    pub min_score: f64,
+    pub tab_key: String,
+}
+
+/// Chord 开关更新参数。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChordTogglesUpdate {
+    pub chord_enabled: bool,
+    pub chord_hint_visible: bool,
+}
+
+/// 全局代理更新参数。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalProxyUpdate {
+    pub http: String,
+    pub https: String,
+}
+
+/// 插件配置更新参数。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginConfigUpdate {
+    pub plugin_id: String,
+    pub enabled: bool,
+    pub settings: serde_json::Value,
+}
+
 // ── 配置操作函数 ────────────────────────────────────────────────────────────────
 
-/// 初始化配置：如果配置不存在，写入默认值（首次运行）。
-/// 语言默认值按系统语言推断（中文系→zh，其余→en）；仅首次生效，用户在设置页
-/// 改过后以此为准。
+/// 初始化配置：首次运行写默认值 + 检测旧 `app_config` 单 key 触发迁移。
+///
+/// **迁移路径**（0.8.8 §8.7）：
+/// - 检测 SQLite `config` 表是否存在旧 `app_config` 单 key
+/// - 存在则读出解析成 `AppConfig`,拆到 6 片(`app.hotkey / app.appearance / app.search /
+///   app.suggestion / app.chord / app.disable`) + `clipboard:config`
+/// - 删除旧 `app_config` key
+/// - 老用户升级透明,新用户直接走分片路径
 pub async fn init_config(pool: &SqlitePool) -> Result<(), String> {
+    // Step 1: 检测旧 KV 迁移
+    if let Some(json) = crate::infra::data::history::get_config(pool, "app_config").await {
+        tracing::info!("检测到旧 app_config 单 key,开始迁移到分片 KV");
+        let legacy: AppConfig = serde_json::from_str(&json).unwrap_or_default();
+        save_config(pool, &legacy).await?;
+        crate::infra::data::history::delete_config(pool, "app_config")
+            .await
+            .map_err(|e| e.to_string())?;
+        tracing::info!("app_config 单 key 已拆分到 6 分片 + clipboard 独立 KV,旧 key 删除");
+    }
+
+    // Step 2: 首次运行:若分片全部空(等价于全新数据库或迁移前的老数据库),写默认值 + 系统语言
     let existing = crate::infra::data::history::get_all_config(pool).await;
-    if existing.is_empty() {
+    let has_any_shard = existing.contains_key("app.hotkey")
+        || existing.contains_key("app.appearance")
+        || existing.contains_key("app.search")
+        || existing.contains_key("app.suggestion")
+        || existing.contains_key("app.chord")
+        || existing.contains_key("app.disable");
+    if !has_any_shard {
         let mut config = AppConfig::default();
         config.language = crate::infra::platform::locale::detect_system_language();
-        tracing::info!(language = %config.language, "首次运行，按系统语言设置默认语言");
+        tracing::info!(language = %config.language, "首次运行,按系统语言设置默认语言");
         save_config(pool, &config).await?;
     }
 
-    // 一次性迁移：修正旧版默认值 key:"space" → key:" "（空格字符，匹配 vk_to_key）。
-    // 仅当热键 display 含 "Space" 且 key 是错误的 "space" 时修正。
+    // Step 3: 一次性数据修正——旧版热键 key:"space" → " "(空格字符,匹配 vk_to_key)
     {
         let mut config = get_config(pool).await;
         if config.hotkey.key == "space" && config.hotkey.display.contains("Space") {
             config.hotkey.key = " ".to_string();
             save_config(pool, &config).await?;
-            tracing::info!("迁移：修正热键 key 'space' → ' '");
+            tracing::info!("迁移:修正热键 key 'space' → ' '");
         }
     }
 
     Ok(())
 }
 
-/// 获取完整配置。
+/// 获取完整配置（0.8.8 §8.7:门面 view,内部组合 6 分片 + clipboard 独立 KV）。
+///
+/// `AppConfig` struct 是**门面**,不是 KV 存储单位。读走
+/// `ConfigStore::get::<HotkeyConfig / AppearanceConfig / ...>()` 分别拿 6 片,
+/// 再加上 `ClipboardConfig`(第 7 独立 KV),组装成 `AppConfig`。**若所有分片
+/// 都未存在,回落 `AppConfig::default()`——与旧行为一致**。
 pub async fn get_config(pool: &SqlitePool) -> AppConfig {
-    let config_json = crate::infra::data::history::get_config(pool, "app_config").await;
-    match config_json {
-        Some(json) => serde_json::from_str(&json).unwrap_or_default(),
-        None => AppConfig::default(),
+    let hotkey = ConfigStore::get::<HotkeyConfig>(pool).await;
+    let appearance = ConfigStore::get::<AppearanceConfig>(pool).await;
+    let search = ConfigStore::get::<SearchConfig>(pool).await;
+    let suggestion = ConfigStore::get::<SuggestionConfig>(pool).await;
+    let chord = ConfigStore::get::<ChordConfig>(pool).await;
+    let disable = ConfigStore::get::<DisableConfig>(pool).await;
+    let clipboard = ConfigStore::get::<crate::infra::data::clipboard::ClipboardConfig>(pool).await;
+
+    AppConfig {
+        // ── HotkeyConfig 分片:hotkey 全字段 + tap/grace 展平到 AppConfig 门面 ──
+        hotkey: HotkeyConfig {
+            modifiers: hotkey.modifiers.clone(),
+            key: hotkey.key.clone(),
+            display: hotkey.display.clone(),
+            tap_threshold: hotkey.tap_threshold,
+            grace_period: hotkey.grace_period,
+        },
+        tap_threshold: hotkey.tap_threshold,
+        grace_period: hotkey.grace_period,
+        // ── AppearanceConfig 分片 ──────────────────────────────
+        theme: appearance.theme,
+        language: appearance.language,
+        auto_start: appearance.auto_start,
+        log_level: appearance.log_level,
+        // ── SearchConfig 分片 ─────────────────────────────────
+        surface_takeover_enabled: search.surface_takeover_enabled,
+        search_history_enabled: search.search_history_enabled,
+        search_history_days: search.search_history_days,
+        max_results: search.max_results,
+        page_size: search.page_size,
+        // ── SuggestionConfig 分片 ──────────────────────────────
+        autosuggest_enabled: suggestion.autosuggest_enabled,
+        autosuggest_min_score: suggestion.autosuggest_min_score,
+        autosuggest_tab_key: suggestion.autosuggest_tab_key,
+        proactive_enabled: suggestion.proactive_enabled,
+        empty_query_topn: suggestion.empty_query_topn,
+        // ── ChordConfig 分片 ────────────────────────────────
+        chord_enabled: chord.chord_enabled,
+        chord_hint_visible: chord.chord_hint_visible,
+        // ── DisableConfig 分片 ──────────────────────────────
+        disabled_builtin_actions: disable.disabled_builtin_actions,
+        disabled_context_bindings: disable.disabled_context_bindings,
+        disabled_chord_actions: disable.disabled_chord_actions,
+        // ── ClipboardConfig 独立 KV ─────────────────────────
+        clipboard,
     }
 }
 
-/// 保存完整配置。
+/// 保存完整配置（0.8.8 §8.7:拆分回 6 分片 + clipboard 独立 KV,原子性由 SQLite 单表事务保障）。
+///
+/// 每次调用会写 7 次 SQL(6 分片 + clipboard),对不常见操作(设置页保存)可接受。
+/// 0.9 前端接入通用 `set_config<K>` 后,`update_*` 内部可优化为"只写自己那片"。
 pub async fn save_config(pool: &SqlitePool, config: &AppConfig) -> Result<(), String> {
-    let json = serde_json::to_string(config).map_err(|e| e.to_string())?;
-    crate::infra::data::history::set_config(pool, "app_config", &json).await.map_err(|e| e.to_string())?;
+    // Hotkey 分片:tap/grace 从 AppConfig 门面 top-level 或 hotkey 子字段任取(以门面 top-level 为准,
+    // 因老 update_tap_threshold / update_grace_period 写的是 top-level 字段)
+    let hotkey_shard = HotkeyConfig {
+        modifiers: config.hotkey.modifiers.clone(),
+        key: config.hotkey.key.clone(),
+        display: config.hotkey.display.clone(),
+        tap_threshold: config.tap_threshold,
+        grace_period: config.grace_period,
+    };
+    ConfigStore::set(pool, &hotkey_shard).await?;
+
+    ConfigStore::set(pool, &AppearanceConfig {
+        theme: config.theme.clone(),
+        language: config.language.clone(),
+        auto_start: config.auto_start,
+        log_level: config.log_level.clone(),
+    }).await?;
+
+    ConfigStore::set(pool, &SearchConfig {
+        search_history_enabled: config.search_history_enabled,
+        search_history_days: config.search_history_days,
+        max_results: config.max_results,
+        page_size: config.page_size,
+        surface_takeover_enabled: config.surface_takeover_enabled,
+    }).await?;
+
+    ConfigStore::set(pool, &SuggestionConfig {
+        autosuggest_enabled: config.autosuggest_enabled,
+        autosuggest_min_score: config.autosuggest_min_score,
+        autosuggest_tab_key: config.autosuggest_tab_key.clone(),
+        proactive_enabled: config.proactive_enabled,
+        empty_query_topn: config.empty_query_topn,
+    }).await?;
+
+    ConfigStore::set(pool, &ChordConfig {
+        chord_enabled: config.chord_enabled,
+        chord_hint_visible: config.chord_hint_visible,
+    }).await?;
+
+    ConfigStore::set(pool, &DisableConfig {
+        disabled_builtin_actions: config.disabled_builtin_actions.clone(),
+        disabled_context_bindings: config.disabled_context_bindings.clone(),
+        disabled_chord_actions: config.disabled_chord_actions.clone(),
+    }).await?;
+
+    ConfigStore::set(pool, &config.clipboard).await?;
+
     Ok(())
 }
 
 /// 更新快捷键配置。
+///
+/// **0.8.8 §8.7**：只改 hotkey 三字段(modifiers/key/display),`HotkeyConfig` 里
+/// tap_threshold / grace_period 字段忽略——它们由 `update_tap_threshold` / `update_grace_period`
+/// 各自持有,避免"命令层构造 HotkeyConfig 时用 Default 覆盖用户已保存的 tap/grace"。
 pub async fn update_hotkey(pool: &SqlitePool, hotkey: HotkeyConfig) -> Result<(), String> {
     let mut config = get_config(pool).await;
-    config.hotkey = hotkey;
+    // 只覆写按键三字段,保留 tap/grace(它们是分片的其他维度)
+    config.hotkey.modifiers = hotkey.modifiers;
+    config.hotkey.key = hotkey.key;
+    config.hotkey.display = hotkey.display;
     save_config(pool, &config).await
 }
 
@@ -847,6 +1183,7 @@ impl PluginConfig {
 /// - selection_enabled: 是否启用划词感知（鼠标划选文本 → UIA 抓取 → 缓存，供 invoke 时读取）
 /// - sensitive_apps: 敏感应用进程名黑名单（如密码管理器），前台为这些应用时不采集（隐私保护）
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ContextConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -933,8 +1270,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn config_key_app_config() {
-        assert_eq!(AppConfig::KEY, "app_config");
+    fn config_key_app_shards() {
+        // 0.8.8 §8.7:AppConfig 拆为 6 片,验证各分片 KV key
+        assert_eq!(HotkeyConfig::KEY, "app.hotkey");
+        assert_eq!(AppearanceConfig::KEY, "app.appearance");
+        assert_eq!(SearchConfig::KEY, "app.search");
+        assert_eq!(SuggestionConfig::KEY, "app.suggestion");
+        assert_eq!(ChordConfig::KEY, "app.chord");
+        assert_eq!(DisableConfig::KEY, "app.disable");
     }
 
     #[test]
@@ -950,6 +1293,12 @@ mod tests {
     #[test]
     fn config_key_context() {
         assert_eq!(ContextConfig::KEY, "context:config");
+    }
+
+    #[test]
+    fn config_key_clipboard() {
+        // 0.8.8 §8.7:clipboard 从 nested 提升为独立 KV(不属于 app.* 命名空间)
+        assert_eq!(<crate::infra::data::clipboard::ClipboardConfig as ConfigKey>::KEY, "clipboard:config");
     }
 
     #[test]
@@ -973,5 +1322,221 @@ mod tests {
         assert!(parsed.autosuggest_enabled);
         assert!((parsed.autosuggest_min_score - 0.7).abs() < 1e-9);
         assert_eq!(parsed.autosuggest_tab_key, "Tab");
+    }
+
+    #[test]
+    fn shard_defaults_match_appconfig_default() {
+        // 6 分片 + clipboard 的 Default 值必须与 AppConfig::default() 对应字段一致
+        // ——否则首次从空数据库组装出的 AppConfig 会与旧行为不一致。
+        let app = AppConfig::default();
+        let hotkey = HotkeyConfig::default();
+        let app_shard = AppearanceConfig::default();
+        let search = SearchConfig::default();
+        let suggestion = SuggestionConfig::default();
+        let chord = ChordConfig::default();
+        let disable = DisableConfig::default();
+
+        assert_eq!(hotkey.key, app.hotkey.key);
+        assert_eq!(hotkey.tap_threshold, app.tap_threshold);
+        assert_eq!(hotkey.grace_period, app.grace_period);
+        assert_eq!(app_shard.theme, app.theme);
+        assert_eq!(app_shard.language, app.language);
+        assert_eq!(app_shard.log_level, app.log_level);
+        assert_eq!(app_shard.auto_start, app.auto_start);
+        assert_eq!(search.max_results, app.max_results);
+        assert_eq!(search.surface_takeover_enabled, app.surface_takeover_enabled);
+        assert_eq!(suggestion.autosuggest_enabled, app.autosuggest_enabled);
+        assert_eq!(suggestion.proactive_enabled, app.proactive_enabled);
+        assert_eq!(chord.chord_enabled, app.chord_enabled);
+        assert_eq!(chord.chord_hint_visible, app.chord_hint_visible);
+        assert_eq!(disable.disabled_builtin_actions, app.disabled_builtin_actions);
+    }
+
+    // ── 分片迁移集成测试（0.8.8 §8.7）──────────────────────────────────
+    //
+    // 用 in-memory SQLite 池验证:老 app_config 单 key → 6 分片 + clipboard 独立 KV 迁移路径。
+    // 用 `tauri::async_runtime::block_on` 桥接,与项目其他 async 单测保持一致(见 intent/mod.rs)。
+
+    async fn in_memory_pool() -> SqlitePool {
+        use sqlx::sqlite::SqlitePoolOptions;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory pool");
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS config (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create config table");
+        pool
+    }
+
+    #[test]
+    fn get_config_on_empty_db_returns_defaults() {
+        tauri::async_runtime::block_on(async {
+            let pool = in_memory_pool().await;
+            let cfg = get_config(&pool).await;
+            assert_eq!(cfg.theme, AppConfig::default().theme);
+            assert_eq!(cfg.hotkey.key, AppConfig::default().hotkey.key);
+            assert_eq!(cfg.tap_threshold, 300);
+            assert_eq!(cfg.grace_period, 500);
+        });
+    }
+
+    #[test]
+    fn save_and_get_config_roundtrip() {
+        tauri::async_runtime::block_on(async {
+            let pool = in_memory_pool().await;
+            let mut cfg = AppConfig::default();
+            cfg.theme = "light".to_string();
+            cfg.language = "en".to_string();
+            cfg.max_results = 42;
+            cfg.autosuggest_min_score = 0.85;
+            cfg.chord_enabled = true;
+            cfg.disabled_builtin_actions = vec!["shutdown".to_string()];
+            cfg.tap_threshold = 250;
+            cfg.hotkey.key = "F1".to_string();
+            save_config(&pool, &cfg).await.unwrap();
+
+            let loaded = get_config(&pool).await;
+            assert_eq!(loaded.theme, "light");
+            assert_eq!(loaded.language, "en");
+            assert_eq!(loaded.max_results, 42);
+            assert!((loaded.autosuggest_min_score - 0.85).abs() < 1e-9);
+            assert!(loaded.chord_enabled);
+            assert_eq!(loaded.disabled_builtin_actions, vec!["shutdown"]);
+            assert_eq!(loaded.tap_threshold, 250);
+            assert_eq!(loaded.hotkey.key, "F1");
+            // Hotkey 分片里的 tap_threshold 与门面 top-level 应一致
+            assert_eq!(loaded.hotkey.tap_threshold, 250);
+        });
+    }
+
+    #[test]
+    fn shards_persist_to_distinct_kv_keys() {
+        tauri::async_runtime::block_on(async {
+            // save_config 后,SQLite 里应有 7 个独立 key(6 分片 + clipboard),而不是单个 app_config
+            let pool = in_memory_pool().await;
+            save_config(&pool, &AppConfig::default()).await.unwrap();
+
+            let all = crate::infra::data::history::get_all_config(&pool).await;
+            assert!(all.contains_key("app.hotkey"), "app.hotkey 分片应存在");
+            assert!(all.contains_key("app.appearance"), "app.appearance 分片应存在");
+            assert!(all.contains_key("app.search"), "app.search 分片应存在");
+            assert!(all.contains_key("app.suggestion"), "app.suggestion 分片应存在");
+            assert!(all.contains_key("app.chord"), "app.chord 分片应存在");
+            assert!(all.contains_key("app.disable"), "app.disable 分片应存在");
+            assert!(all.contains_key("clipboard:config"), "clipboard 独立 KV 应存在");
+            assert!(!all.contains_key("app_config"), "旧单 key 不应重现");
+        });
+    }
+
+    #[test]
+    fn legacy_app_config_migrates_to_shards() {
+        tauri::async_runtime::block_on(async {
+            // 模拟老用户升级:预置 app_config 单 key,init_config 后应拆到分片 + 删旧 key
+            let pool = in_memory_pool().await;
+
+            // 手写老格式 json(带 6 分片对应的关键字段)
+            let legacy_json = r#"{
+                "hotkey": {"modifiers": ["ctrl", "alt"], "key": "k", "display": "Ctrl+Alt+K"},
+                "tap_threshold": 250,
+                "grace_period": 400,
+                "auto_start": true,
+                "language": "en",
+                "log_level": "debug",
+                "surface_takeover_enabled": false,
+                "theme": "gruvbox",
+                "search_history_enabled": false,
+                "search_history_days": 60,
+                "max_results": 25,
+                "page_size": 7,
+                "proactive_enabled": true,
+                "empty_query_topn": 3,
+                "clipboard": {"enabled": false, "max_items": 100, "retention_days": 3, "search_enabled": false, "blacklist_keywords": []},
+                "disabled_builtin_actions": ["shutdown", "restart"],
+                "autosuggest_enabled": false,
+                "autosuggest_min_score": 0.9,
+                "autosuggest_tab_key": "ArrowRight",
+                "disabled_context_bindings": ["builtin.translate::text_is_non_target_lang"],
+                "chord_enabled": true,
+                "chord_hint_visible": false,
+                "disabled_chord_actions": ["screenshot"]
+            }"#;
+            crate::infra::data::history::set_config(&pool, "app_config", legacy_json)
+                .await
+                .unwrap();
+
+            init_config(&pool).await.unwrap();
+
+            // Step A: 旧 key 应被删除
+            assert!(
+                crate::infra::data::history::get_config(&pool, "app_config").await.is_none(),
+                "app_config 单 key 应在迁移后删除"
+            );
+
+            // Step B: 分片应包含迁移后的数据
+            let all = crate::infra::data::history::get_all_config(&pool).await;
+            assert!(all.contains_key("app.hotkey"));
+            assert!(all.contains_key("clipboard:config"));
+
+            // Step C: 通过 get_config 组装的门面应还原所有字段
+            let cfg = get_config(&pool).await;
+            assert_eq!(cfg.hotkey.modifiers, vec!["ctrl", "alt"]);
+            assert_eq!(cfg.hotkey.key, "k");
+            assert_eq!(cfg.tap_threshold, 250);
+            assert_eq!(cfg.grace_period, 400);
+            assert!(cfg.auto_start);
+            assert_eq!(cfg.language, "en");
+            assert_eq!(cfg.log_level, "debug");
+            assert!(!cfg.surface_takeover_enabled);
+            assert_eq!(cfg.theme, "gruvbox");
+            assert!(!cfg.search_history_enabled);
+            assert_eq!(cfg.max_results, 25);
+            assert!(cfg.proactive_enabled);
+            assert_eq!(cfg.empty_query_topn, 3);
+            assert!(!cfg.clipboard.enabled);
+            assert_eq!(cfg.clipboard.max_items, 100);
+            assert_eq!(cfg.disabled_builtin_actions, vec!["shutdown", "restart"]);
+            assert!(!cfg.autosuggest_enabled);
+            assert!((cfg.autosuggest_min_score - 0.9).abs() < 1e-9);
+            assert_eq!(cfg.autosuggest_tab_key, "ArrowRight");
+            assert_eq!(cfg.disabled_context_bindings, vec!["builtin.translate::text_is_non_target_lang"]);
+            assert!(cfg.chord_enabled);
+            assert!(!cfg.chord_hint_visible);
+            assert_eq!(cfg.disabled_chord_actions, vec!["screenshot"]);
+        });
+    }
+
+    #[test]
+    fn update_hotkey_preserves_tap_grace() {
+        tauri::async_runtime::block_on(async {
+            // update_hotkey 只该动 modifiers/key/display,不该覆盖 tap/grace(回归 bug 防护)
+            let pool = in_memory_pool().await;
+            let mut cfg = AppConfig::default();
+            cfg.tap_threshold = 250;
+            cfg.grace_period = 700;
+            save_config(&pool, &cfg).await.unwrap();
+
+            // 命令层构造 HotkeyConfig 时用 Default(300/500),但 update_hotkey 内部应保留原 tap/grace
+            let new_hotkey = HotkeyConfig {
+                modifiers: vec!["ctrl".to_string()],
+                key: "F2".to_string(),
+                display: "Ctrl+F2".to_string(),
+                ..Default::default()  // tap=300 / grace=500,但不该覆盖
+            };
+            update_hotkey(&pool, new_hotkey).await.unwrap();
+
+            let loaded = get_config(&pool).await;
+            assert_eq!(loaded.hotkey.key, "F2");
+            assert_eq!(loaded.tap_threshold, 250, "update_hotkey 不该覆盖 tap_threshold");
+            assert_eq!(loaded.grace_period, 700, "update_hotkey 不该覆盖 grace_period");
+        });
     }
 }

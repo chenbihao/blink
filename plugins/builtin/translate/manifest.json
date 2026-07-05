@@ -27,6 +27,19 @@
   "capabilities": ["query"],
   "settings_schema": [
     {
+      "key": "target_lang",
+      "type": "enum",
+      "title": { "zh": "目标语言", "en": "Target language" },
+      "options": [
+        { "value": "auto", "label": { "zh": "自动检测", "en": "Auto-detect" } },
+        { "value": "zh", "label": { "zh": "中文", "en": "Chinese" } },
+        { "value": "en", "label": { "zh": "英文", "en": "English" } },
+        { "value": "ja", "label": { "zh": "日文", "en": "Japanese" } },
+        { "value": "ko", "label": { "zh": "韩文", "en": "Korean" } }
+      ],
+      "default": "zh"
+    },
+    {
       "key": "default_engine",
       "type": "enum",
       "title": { "zh": "默认翻译引擎", "en": "Default engine" },
@@ -52,19 +65,6 @@
         { "value": "deepl", "label": "DeepL" }
       ],
       "default": ["tencent", "ali", "baidu", "youdao", "deepl"]
-    },
-    {
-      "key": "target_lang",
-      "type": "enum",
-      "title": { "zh": "目标语言", "en": "Target language" },
-      "options": [
-        { "value": "auto", "label": { "zh": "自动检测", "en": "Auto-detect" } },
-        { "value": "zh", "label": { "zh": "中文", "en": "Chinese" } },
-        { "value": "en", "label": { "zh": "英文", "en": "English" } },
-        { "value": "ja", "label": { "zh": "日文", "en": "Japanese" } },
-        { "value": "ko", "label": { "zh": "韩文", "en": "Korean" } }
-      ],
-      "default": "zh"
     },
     {
       "key": "tencent_secret_id",

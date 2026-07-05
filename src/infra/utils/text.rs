@@ -85,27 +85,6 @@ pub fn pinyin_full(s: &str) -> String {
     result
 }
 
-/// keyword / query 的归一化候选:[原文小写, 拼音首字母],过滤空串。
-///
-/// 应用搜索与意图 keyword 匹配共用此原语——各自匹配策略不同,但归一化一致。
-/// 例:`"天气"` → `["天气", "tq"]`;`"WeChat"` → `["wechat", "wechat"]`(去重后只剩一个)。
-///
-/// 0.8.1 起意图侧不再消费此函数（改用 pinyin_initials/pinyin_full 独立展开三候选），
-/// 保留供应用搜索侧未来使用。
-#[allow(dead_code)]
-pub fn normalize_candidates(s: &str) -> Vec<String> {
-    let lower = s.to_ascii_lowercase();
-    let pinyin = pinyin_initials(s);
-    let mut out = Vec::with_capacity(2);
-    if !lower.is_empty() {
-        out.push(lower);
-    }
-    if !pinyin.is_empty() && !out.contains(&pinyin) {
-        out.push(pinyin);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,17 +103,6 @@ mod tests {
         // 中英混合
         assert_eq!(pinyin_full("VS Code"), "vscode");
         assert_eq!(pinyin_full("微信PC"), "weixinpc");
-    }
-
-    #[test]
-    fn normalize_candidates_basic() {
-        // 中文:小写 + 首拼两个候选
-        let c = normalize_candidates("天气");
-        assert_eq!(c, vec!["天气", "tq"]);
-
-        // 纯 ASCII:小写与首拼相同,去重后只剩一个
-        let c = normalize_candidates("WeChat");
-        assert_eq!(c, vec!["wechat"]);
     }
 
     // ── StringTruncateExt 测试 ────────────────────────────────────────

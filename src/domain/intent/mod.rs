@@ -829,7 +829,7 @@ impl RuleRouter {
     ) -> Option<Suggestion> {
         let trimmed = query.trim();
         if trimmed.is_empty() {
-            let sug = self.context_suggestion(snapshot);
+            let sug = self.context_suggestion(query, snapshot);
             *self.last_ranking_hint.lock().unwrap() = sug.as_ref().and_then(|s| s.ranking_hint.clone());
             sug
         } else if let Some((hint, score)) =
@@ -847,7 +847,7 @@ impl RuleRouter {
             *self.last_ranking_hint.lock().unwrap() = None;
             Some(sug)
         } else {
-            let sug = self.context_suggestion(snapshot);
+            let sug = self.context_suggestion(query, snapshot);
             *self.last_ranking_hint.lock().unwrap() = sug.as_ref().and_then(|s| s.ranking_hint.clone());
             sug
         }
@@ -857,14 +857,24 @@ impl RuleRouter {
     ///
     /// 多 Context 命中取 confidence 最高；产出的 Suggestion 携带 RankingHint（Surface Booster
     /// 单向反馈）。无命中返回 None。
+    ///
+    /// **采纳后自抑制**（0.8.8 bugfix）：`query` 非空且已命中同 plugin 的 keyword 时返回
+    /// None——避免 Tab 采纳 Context Ghost 后 query 变成 `翻译 xxx`、Context 仍产同一
+    /// Suggestion 导致的 Ghost 反复弹出 / 无限 Tab 叠加。保留 0.8.4 §5.3.3 非空 fallback：
+    /// query 命中的是**其他** plugin 的 keyword（或未命中任何 keyword）时 Context 仍可产出。
     #[allow(deprecated)] // 构造 Suggestion 时填充 ranking_hint，0.9 彻底移除字段后简化
-    pub(crate) fn context_suggestion(&self, snapshot: &ContextSnapshot) -> Option<Suggestion> {
+    pub(crate) fn context_suggestion(&self, query: &str, snapshot: &ContextSnapshot) -> Option<Suggestion> {
         let hits = self.match_context_hits(snapshot);
         let best_ctx = hits.into_iter().max_by(|a, b| {
             let ca = a.when.map(|w| context_confidence(&w, a.origin)).unwrap_or(0.0);
             let cb = b.when.map(|w| context_confidence(&w, b.origin)).unwrap_or(0.0);
             ca.partial_cmp(&cb).unwrap_or(std::cmp::Ordering::Equal)
         })?;
+
+        // 采纳后自抑制：query 已命中 best_ctx 所属 plugin 的 keyword → 静默
+        if self.query_hits_plugin_keyword(query, &best_ctx.plugin_id) {
+            return None;
+        }
 
         let when = best_ctx.when.as_ref()?;
         let confidence = context_confidence(when, best_ctx.origin);
@@ -1121,6 +1131,30 @@ impl RuleRouter {
             kws.iter().find(|k| is_ascii(k))
         };
         picked.cloned().or_else(|| kws.into_iter().next())
+    }
+
+    /// 判断 query 是否已命中指定 plugin 的任一 keyword（原文/pinyin_full/pinyin_initials 三形式）。
+    ///
+    /// 用于 `ContextProducer` 的采纳后自抑制护栏（0.8.8 bugfix）：Tab 采纳 Context Ghost
+    /// 后 query 变成 `翻译 xxx`，若此时 Context 仍产同一 plugin 的 Suggestion → Ghost 反复
+    /// 弹出、用户可无限 Tab 叠加。此 helper 让 Producer 在"用户已明确用 keyword 表达意图"
+    /// 时静默——语义上"你已经进 Takeover 了，我不用再劝你翻译"。
+    ///
+    /// 复用 `match_keyword` 保和 `route()` 判定一致（同 Exact / Prefix / InitialsExact /
+    /// InitialsPrefix 四种命中都算命中）。
+    pub(crate) fn query_hits_plugin_keyword(&self, query: &str, plugin_id: &str) -> bool {
+        let q = query.trim();
+        if q.is_empty() {
+            return false;
+        }
+        let rules = self.rules.read().unwrap();
+        rules
+            .iter()
+            .filter(|r| r.plugin_id == plugin_id)
+            .any(|r| match &r.kind {
+                RuleKind::Keyword(kw) => match_keyword(q, kw).is_some(),
+                RuleKind::Regex(_) => false,
+            })
     }
 }
 
@@ -2606,5 +2640,103 @@ mod tests {
         assert_eq!(sug2.origin, Some(SuggestionOrigin::Clipboard));
         // 0.75 * 0.85 = 0.6375
         assert!((sug2.confidence - 0.6375).abs() < 1e-9, "expected 0.6375, got {}", sug2.confidence);
+    }
+
+    // ── 0.8.8 bugfix · Context 采纳后自抑制护栏 ──────────────────────────
+    // 用户报告的 bug：Ghost 显示 `翻译 "tab"` → 按 Tab 采纳 → query 变 `翻译 tab`
+    // → Context 又产同一 Suggestion → Ghost 又画回来 → 无限 Tab 叠加。
+    // 根因：ContextProducer 不看 query，snapshot 只要命中就一直产。
+    // 修复：query 已命中同 plugin keyword → context_suggestion 静默。
+    //
+    // 【为何护栏落点在 Context 而不是 Keyword】
+    // best_suggestion 里非空 query 是"keyword 分支优先，fuzzy 未命中才 fallback Context"。
+    // 死角 case：query="翻译 tab"，keyword 表里"翻译"因为带空格 fuzzy 不达分数阈值 →
+    // Keyword 分支返回 None → 落到 Context fallback → 未加护栏时会产同一 Suggestion。
+
+    #[test]
+    fn context_suggestion_silenced_after_keyword_accepted() {
+        // 核心回归：Tab 采纳 Context Ghost `翻译 "tab"` 后 query 变 `翻译 tab`，
+        // 此时 keyword fuzzy 因带空格不达阈值 → 走 Context fallback → 护栏必须静默。
+        let r = translate_router_with_target("zh");
+        r.add_keyword_rule(
+            "builtin.translate".into(),
+            "翻译".into(),
+            Surface::Auto,
+            SurfaceView::List,
+        );
+        let snap = snap_selection("hello world foo");
+
+        // 用户 Tab 采纳后的 query：既走不进 Keyword 分支（fuzzy 带空格失败），
+        // 也不该走进 Context fallback（护栏兜住）→ 整个 Suggestion 为 None。
+        // 之前的 bug 行为：Suggestion 又给出 Context「翻译 "hello world foo"」→ Ghost 复活。
+        let sug = r.best_suggestion("翻译 tab", &snap, 0.7);
+        assert!(
+            sug.is_none(),
+            "Context should be silenced when query already hits same plugin's keyword, got: {sug:?}",
+        );
+
+        // 对照组：无关 query 未命中任何 keyword → Context fallback 仍生效（0.8.4 §5.3.3）
+        let sug_fallback = r.best_suggestion("xyz random", &snap, 0.7);
+        assert!(sug_fallback.is_some(), "unrelated query should still get Context fallback");
+        assert_eq!(sug_fallback.unwrap().source, SuggestionSource::Context);
+    }
+
+    #[test]
+    fn context_suggestion_silenced_with_pinyin_keyword_forms() {
+        // 拼音三形式同 plugin 采纳后一样要静默。直接测 `context_suggestion` 避开
+        // `best_suggestion` 里 Keyword-first fuzzy 分支的干扰——因为拼音短 query
+        // 有可能被 Keyword 分支先接住返回 Keyword Suggestion，测不到 Context 护栏。
+        let r = translate_router_with_target("zh");
+        r.add_keyword_rule(
+            "builtin.translate".into(),
+            "翻译".into(),
+            Surface::Auto,
+            SurfaceView::List,
+        );
+        let snap = snap_selection("hello world foo");
+
+        // 三种形式都能触发 query_hits_plugin_keyword → context_suggestion 直接返回 None
+        assert!(r.context_suggestion("翻译 tab", &snap).is_none(), "原文 Prefix should silence");
+        assert!(r.context_suggestion("fanyi tab", &snap).is_none(), "pinyin_full Prefix should silence");
+        assert!(r.context_suggestion("fy tab", &snap).is_none(), "pinyin_initials Prefix should silence");
+        assert!(r.context_suggestion("翻译", &snap).is_none(), "原文 Exact should silence");
+        assert!(r.context_suggestion("fanyi", &snap).is_none(), "pinyin_full Exact should silence");
+        assert!(r.context_suggestion("fy", &snap).is_none(), "pinyin_initials Exact should silence");
+
+        // 对照：空 query / 无关 query 仍能产 Context
+        assert!(r.context_suggestion("", &snap).is_some(), "empty query still fires");
+        assert!(r.context_suggestion("xyz random", &snap).is_some(), "unrelated query still fires");
+    }
+
+    #[test]
+    fn query_hits_plugin_keyword_matches_all_forms() {
+        // helper 单测：三种 keyword 形式（原文/pinyin_full/pinyin_initials）都算命中。
+        let r = RuleRouter::new(true);
+        r.add_keyword_rule(
+            "builtin.translate".into(),
+            "翻译".into(),
+            Surface::Auto,
+            SurfaceView::List,
+        );
+
+        // 原文 Exact
+        assert!(r.query_hits_plugin_keyword("翻译", "builtin.translate"));
+        // 原文 Prefix
+        assert!(r.query_hits_plugin_keyword("翻译 hello", "builtin.translate"));
+        // pinyin_full Exact
+        assert!(r.query_hits_plugin_keyword("fanyi", "builtin.translate"));
+        // pinyin_full Prefix
+        assert!(r.query_hits_plugin_keyword("fanyi hello", "builtin.translate"));
+        // pinyin_initials Exact
+        assert!(r.query_hits_plugin_keyword("fy", "builtin.translate"));
+
+        // 未命中
+        assert!(!r.query_hits_plugin_keyword("chrome", "builtin.translate"));
+        // 空 query
+        assert!(!r.query_hits_plugin_keyword("", "builtin.translate"));
+        // 只有空格
+        assert!(!r.query_hits_plugin_keyword("   ", "builtin.translate"));
+        // 命中的是别的 plugin
+        assert!(!r.query_hits_plugin_keyword("翻译", "other.plugin"));
     }
 }
