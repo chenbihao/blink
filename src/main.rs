@@ -164,6 +164,9 @@ fn main() {
             let plugins = domain::plugin::load_builtin_plugins(app.handle(), proxy.clone());
             // 构造意图路由 RuleRouter,从插件 manifest 注入规则(合并用户自定义 triggers)。
             let router = std::sync::Arc::new(domain::intent::RuleRouter::new(app_config.surface_takeover_enabled));
+            // 0.8.6 §8.1.2：共享 min_score 引用（SearchService ↔ KeywordProducer）
+            let min_score_shared = std::sync::Arc::new(std::sync::RwLock::new(app_config.autosuggest_min_score));
+            router.init_arbiter(min_score_shared.clone());
 
             let plugin_engine = if plugins.is_empty() {
                 None
@@ -223,6 +226,7 @@ fn main() {
                 domain::search::build_engines(engine_configs, pool.clone()),
                 plugin_engine.clone(),
                 router.clone(),
+                min_score_shared,
             ));
             app.manage(search_service.clone());
             // 初始化 SearchService 的 max_results 内存值（来自 AppConfig，搜索热路径零 IO）
@@ -256,18 +260,28 @@ fn main() {
             app.manage(std::sync::Arc::new(std::sync::RwLock::new(context_config)));
             // RuleRouter 单独注册供设置页 API 用（triggers 热更新）
             app.manage(router.clone());
-            // PluginEngine 单独注册供设置页 API 用
-            app.manage(plugin_engine);
 
-            // 后台服务编排:按依赖拓扑顺序启动(搜索预扫 / 看门狗 / 热键监听等)。
-            // pool 与 config 就绪后才构建 AppContext —— 前置初始化(DB/配置/日志/托盘/窗口)
-            // 仍留在 setup 中,它们是构建 ctx 的前提。
+            // 0.8.5 Chord：构建 registry（注册 stub 动作）
+            let chord_registry = std::sync::Arc::new(crate::domain::chord::build_default_registry());
+            // 0.8.6 Action 统一执行入口
+            let action_registry = std::sync::Arc::new(crate::domain::execution::ActionRegistry::new());
+
+            // PluginEngine：clone 一份给 AppContext，原值继续 manage
+            let plugin_engine_for_ctx = plugin_engine.clone();
+
+            // 后台服务编排:按依赖拓扑顺序启动。
+            // 0.8.6 §8.2.3：AppContext 持有全部核心服务引用（真依赖容器）。
             let ctx = app::service::AppContext {
                 app: app.handle().clone(),
                 pool: pool.clone(),
                 config: app_config,
+                search_service: search_service.clone(),
+                plugin_engine: plugin_engine_for_ctx,
+                router: router.clone(),
+                chord_registry: chord_registry.clone(),
+                action_registry: action_registry.clone(),
             };
-            let services = app::service::all_services(search_service);
+            let services = app::service::all_services();
             let svc_start = std::time::Instant::now();
             for svc in &services {
                 if let Err(e) = tauri::async_runtime::block_on(svc.start(&ctx)) {
@@ -294,12 +308,12 @@ fn main() {
                 None,
             ));
 
-            // 0.8.5 Chord：构建 registry（注册 stub 动作）+ 注册 app state（command 层 try_state 取）
-            let chord_registry = std::sync::Arc::new(crate::domain::chord::build_default_registry());
+            // 注册到 Tauri state（command 层 app.state 取用）
+            app.manage(plugin_engine);
             app.manage(chord_registry);
+            app.manage(action_registry);
 
             // 持有服务列表,保证其生命周期与 app 一致。
-            // 0.2.1 各服务随进程退出即可,不接退出钩子;stop / 逆序清理留到 0.3 插件进程。
             app.manage(services);
 
             Ok(())
@@ -380,7 +394,10 @@ fn main() {
             app::commands::toggle_default_trigger,
             app::commands::add_custom_trigger,
             app::commands::delete_custom_trigger,
-            app::commands::update_autosuggest_config
+            app::commands::update_autosuggest_config,
+            // 0.8.6 §8.1.3 泛型配置命令（ConfigStore）
+            app::commands::get_config_section,
+            app::commands::set_config_section
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

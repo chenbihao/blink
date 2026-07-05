@@ -15,6 +15,11 @@
 //! `best_suggestion` 需在构造 `Suggestion` 时**直接从 fuzzy 打分层拿分**，而不是
 //! 从 `CompletionHint.score` 读取（它不存在）。见 `RuleRouter::best_suggestion` 实现。
 
+pub mod arbiter;
+pub mod context;
+pub mod keyword;
+pub mod producer;
+
 use serde::Serialize;
 
 use super::RankingHint;
@@ -95,6 +100,11 @@ pub struct Suggestion {
     /// 0.8.4 §5.3.1 Surface Booster：Suggestion 域向 Routing 域的单向排序反馈。
     /// Context 类 Suggestion 携带(命中的 plugin_id)；Keyword 类恒 None。
     /// **不序列化给前端**（后端内部反馈通道,`skip_serializing`）。
+    ///
+    /// **0.8.6 deprecated**：RankingHint 改由 `SuggestionArbiter::best()` 独立返回，
+    /// 不再挂在 Suggestion 上。本字段保留供 `best_suggestion_direct` fallback 使用，
+    /// 生产环境走 arbiter 路径时此字段恒 None。
+    #[deprecated(since = "0.8.6", note = "RankingHint 由 SuggestionArbiter 独立返回，不再挂在 Suggestion 上")]
     #[serde(skip_serializing)]
     pub ranking_hint: Option<RankingHint>,
 }

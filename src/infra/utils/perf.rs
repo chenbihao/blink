@@ -164,6 +164,7 @@ pub struct Timer {
 }
 
 impl Timer {
+    #[allow(dead_code)] // 便捷构造器，未来计时场景消费
     pub fn new(category: MetricCategory, name: &str) -> Self {
         Self {
             category,

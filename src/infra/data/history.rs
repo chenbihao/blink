@@ -70,8 +70,11 @@ pub async fn migrate_0_4_to_0_5(
             default_config.settings = plugin.manifest().default_settings();
             match serde_json::to_string(&default_config) {
                 Ok(json) => {
-                    set_config(pool, &key, &json).await;
-                    tracing::info!(plugin = %plugin_id, "初始化插件默认配置");
+                    if let Err(e) = set_config(pool, &key, &json).await {
+                        tracing::warn!(plugin = %plugin_id, error = %e, "插件配置写入失败");
+                    } else {
+                        tracing::info!(plugin = %plugin_id, "初始化插件默认配置");
+                    }
                 }
                 Err(e) => tracing::warn!(plugin = %plugin_id, error = %e, "插件配置初始化失败"),
             }
@@ -79,7 +82,9 @@ pub async fn migrate_0_4_to_0_5(
     }
 
     // 标记迁移完成
-    set_config(pool, MARKER_KEY, "1").await;
+    if let Err(e) = set_config(pool, MARKER_KEY, "1").await {
+        tracing::warn!(error = %e, "迁移标记写入失败");
+    }
     tracing::info!("0.4→0.5 配置迁移完成");
 }
 
@@ -169,9 +174,9 @@ pub async fn get_config(pool: &SqlitePool, key: &str) -> Option<String> {
 }
 
 /// 设置配置值（存在则更新，不存在则插入）。
-pub async fn set_config(pool: &SqlitePool, key: &str, value: &str) {
+pub async fn set_config(pool: &SqlitePool, key: &str, value: &str) -> Result<(), sqlx::Error> {
     let now = chrono::Utc::now().timestamp();
-    let _ = sqlx::query(
+    sqlx::query(
         "INSERT INTO config (key, value, updated_at) VALUES (?1, ?2, ?3)
          ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at = ?3",
     )
@@ -179,7 +184,8 @@ pub async fn set_config(pool: &SqlitePool, key: &str, value: &str) {
     .bind(value)
     .bind(now)
     .execute(pool)
-    .await;
+    .await?;
+    Ok(())
 }
 
 /// 获取所有配置。

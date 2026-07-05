@@ -87,6 +87,10 @@ pub struct SearchService {
     /// route() 下一轮读此值做 surface boost——跨轮反馈滞后一轮,0.8.4 同步阶段可接受
     /// （0.9 AI 异步化后失效,见 0.8 文档 §5.6）。
     last_ranking_hint: Arc<Mutex<Option<RankingHint>>>,
+    /// 共享的 min_score 阈值（0.8.6 §8.1.2）。
+    /// 与 `KeywordProducer` 共享同一份 `Arc<RwLock<f64>>`——
+    /// `update_autosuggest_config` 热更新时写入此引用，producer 侧同步生效。
+    min_score_shared: Arc<RwLock<f64>>,
 }
 
 #[derive(Clone, Copy)]
@@ -108,6 +112,7 @@ impl SearchService {
         engines: Vec<Arc<dyn SearchEngine>>,
         plugin_engine: Option<Arc<PluginEngine>>,
         router: Arc<dyn IntentRouter>,
+        min_score_shared: Arc<RwLock<f64>>,
     ) -> Self {
         let mut sync_engines = Vec::new();
         let mut async_engines = Vec::new();
@@ -131,6 +136,7 @@ impl SearchService {
             autosuggest: Arc::new(RwLock::new(AutosuggestState::default())),
             language: Arc::new(RwLock::new("zh".to_string())),
             last_ranking_hint: Arc::new(Mutex::new(None)),
+            min_score_shared,
         }
     }
 
@@ -176,6 +182,8 @@ impl SearchService {
     pub fn update_autosuggest_config(&self, enabled: bool, min_score: f64) {
         let mut guard = self.autosuggest.write().unwrap();
         *guard = AutosuggestState { enabled, min_score };
+        // 同步到共享引用——KeywordProducer 侧同步生效
+        *self.min_score_shared.write().unwrap() = min_score;
         tracing::debug!(enabled, min_score, "Autosuggest 配置已热更新");
     }
 
@@ -272,9 +280,7 @@ impl SearchService {
 
         let q = query.trim();
         let history = crate::infra::data::history::get_weights(&self.pool).await;
-        // 读取上下文快照（读锁，可并行）
         let snapshot = self.snapshot.read().unwrap().clone();
-        // 读取 disable 列表（读锁，可并行）
         let disabled = self.disabled_builtin_actions.read().unwrap().clone();
         let search_ctx = QueryContext {
             history: &history,
@@ -282,179 +288,177 @@ impl SearchService {
             disabled_builtin_actions: &disabled,
         };
 
-        // 空 query 也要走 router.route()（决定 Takeover/Mixed 调度,空 query 走 Mixed）。
-        // 0.8.4 §5.3.1：route 断 Awareness 依赖,不再收 snapshot;Context 命中只走
-        // best_suggestion 产 Ghost + Tab 采纳（Suggestion 域）。Surface Booster 通过
-        // last_ranking_hint 单向反馈（只影响排序,不代参/召回）。
+        // 路由决策（0.8.4：route 断 Awareness 依赖）
         let ranking_hint = self.last_ranking_hint.lock().unwrap().clone();
         let route = self.router.route(q, &history, ranking_hint.as_ref()).await;
-        // 过滤不符合前置条件的路由(禁用插件 + 参数过短),避免占位符死态。
         let route = self.filter_route(route);
 
-        // Suggestion（0.8.3 §4.4）：统一走 best_suggestion 主入口，空/非空 query 各自路径由
-        // router 内部分派（空→Context / 非空→Keyword）。enabled 关闭时短路 None。
-        //
-        // **P0 修订项**：0.8.1 老 `completion_hint` 字段已废；`best_suggestion` 内部
-        // 直接从 fuzzy 打分层拿 confidence（`compute_hint_scored`），不再走 `CompletionHint.score`
-        // 那条不存在的公开字段（§4.13 P0-2）。
-        let suggestion = {
-            let cfg = *self.autosuggest.read().unwrap();
-            if cfg.enabled {
-                // query 用未 trim 的原文（保尾空格）；上层 `q` 已被 trim。
-                let sug = self.router.best_suggestion(query, &snapshot, cfg.min_score);
-                // 0.8.4 §5.3.1：缓存 RankingHint 喂给下一轮 route（Surface Booster 跨轮反馈）
-                *self.last_ranking_hint.lock().unwrap() = sug
-                    .as_ref()
-                    .and_then(|s| s.ranking_hint.clone());
-                sug
-            } else {
-                None
-            }
-        };
+        // Suggestion（0.8.3 / 0.8.6 arbiter）
+        let suggestion = self.compute_suggestion(query, &snapshot);
 
-        // 获取插件显示名称的闭包
-        let display_name = |id: &str| match &self.plugin_engine {
-            Some(pe) => pe.get_display_name(id),
-            None => id.strip_prefix("builtin.").unwrap_or(id).to_string(),
-        };
-
-        // 空参数引导文案闭包（0.8.1）：manifest 配置了 `empty_arg_hint` 且 arg 空时，
-        // 框架合成一条静态 hint entry 直接展示，**不发起插件查询**。
-        // 用于翻译/搜索类"必须要参数才有意义"的插件，替代插件内部硬编码的
-        // "请输入文本" 逻辑（省一次 IPC + 支持 i18n + Tab 补全时也命中）。
-        let lang_snapshot = self.language.read().unwrap().clone();
-        let empty_arg_hint = |id: &str, arg: &crate::domain::intent::ExecArg| -> Option<String> {
-            // ExecArg::None = 无参(0.8.4 §5.3.2);UserExplicit 恒非空串(match_keyword 空串→None)
-            if !arg.is_none() {
-                return None;
-            }
-            self.plugin_engine
-                .as_ref()
-                .and_then(|pe| pe.get_empty_arg_hint(id, &lang_snapshot))
-        };
-
+        // 按 Route 分派到三个 executor（0.8.6 §8.2.1 拆 God Method）
         let entries = match route {
             Route::Takeover { plugin_id, arg, .. } => {
-                // 空参数 + 有 empty_arg_hint → 直接合成静态 entry，不 spawn 查询。
-                if let Some(hint_text) = empty_arg_hint(&plugin_id, &arg) {
-                    tracing::debug!(plugin = %plugin_id, "empty_arg_hint 命中 Takeover，跳过插件查询");
-                    vec![empty_arg_hint_entry(&plugin_id, &display_name(&plugin_id), hint_text)]
-                } else {
-                    // 独占:跳过本地引擎,只查该插件。
-                    // 先同步返回占位项(带明确的"正在查询"反馈),避免窗口空白,让用户知道命令已被识别。
-                    self.spawn_takeover(plugin_id.clone(), arg.to_plugin_string(), seq);
-                    vec![placeholder_entry(&plugin_id, &display_name(&plugin_id))]
-                }
+                self.exec_takeover(plugin_id, arg, seq)
             }
             Route::EngineTakeover { engine_id, arg } => {
-                // 本体 engine 独占（0.8.5 §6.4）：只调匹配的 sync engine，跳过其他所有引擎与插件。
-                // 与 plugin Takeover 的差别：本体调用是同步的，无 IPC/防抖，不需要 placeholder；
-                // 引擎 search 用剥离 keyword 后的 arg 而非原 query——engine 端只专注参数展开。
-                let arg_str = arg.to_plugin_string(); // ExecArg::None → "", UserExplicit → 内容
-                let mut items = Vec::new();
-                for engine in &self.sync_engines {
-                    if engine.id() == engine_id {
-                        items.extend(engine.search(&arg_str, &search_ctx).await);
-                        break;
-                    }
-                }
-                if items.is_empty() {
-                    tracing::debug!(engine = %engine_id, "engine takeover 未产出结果，可能是空历史/无匹配");
-                }
-                let limit = self.max_results.load(Ordering::SeqCst);
-                fuse_items(items, limit)
-                    .into_iter()
-                    .map(SearchItem::into_app_entry)
-                    .collect()
+                self.exec_engine_takeover(engine_id, arg, &search_ctx).await
             }
             Route::Mixed { candidates } => {
-                // sync lane 照常召回 → 首批。跳过 takeover_only engine（0.8.5 §6.4）——
-                // 那类 engine（如 ClipboardEngine）只在 keyword 命中时活，Mixed 里不该
-                // 遍历，否则任意输入都会污染结果。
-                let mut items = Vec::new();
-                for engine in &self.sync_engines {
-                    if engine.takeover_only() {
-                        continue;
-                    }
-                    items.extend(engine.search(q, &search_ctx).await);
-                }
-
-                // 拆两批：真正要走 async lane 的候选 vs 空参数直接合成 hint 的候选。
-                // 后者不占 placeholder（有内容直接给），也不进 plugin_ids（不需要 spawn）。
-                let mut hint_entries: Vec<AppEntry> = Vec::new();
-                let candidates: Vec<Candidate> = candidates
-                    .into_iter()
-                    .filter_map(|c| match empty_arg_hint(&c.plugin_id, &c.arg) {
-                        Some(hint_text) => {
-                            tracing::debug!(plugin = %c.plugin_id, surface = ?c.surface, "empty_arg_hint 命中 Mixed 候选，跳过插件查询");
-                            let mut entry = empty_arg_hint_entry(&c.plugin_id, &display_name(&c.plugin_id), hint_text);
-                            // hint score 按 candidate surface 决定置顶还是普通位置：
-                            // Priority → 置顶分（同 placeholder 逻辑，让 hint 显示在首位）
-                            // Inline → 普通位置
-                            entry.score = placeholder_score(matches!(c.surface, Surface::Priority));
-                            hint_entries.push(entry);
-                            None
-                        }
-                        None => Some(c),
-                    })
-                    .collect();
-
-                // 分离 priority / inline 候选,准备 async lane。
-                let (priority, inline): (Vec<Candidate>, Vec<Candidate>) = candidates
-                    .into_iter()
-                    .partition(|c| matches!(c.surface, Surface::Priority));
-
-                let plugin_ids: Vec<(String, String)> = priority
-                    .iter()
-                    .chain(inline.iter())
-                    .map(|c| (c.plugin_id.clone(), c.arg.to_plugin_string()))
-                    .collect();
-
-                // 命中的插件：同步返回占位项（加载中反馈），避免窗口空白
-                // Priority 插件占位给高 score 置顶，Inline 插件占位给低 score 放后面
-                let priority_set: std::collections::HashSet<String> = priority
-                    .iter()
-                    .map(|c| c.plugin_id.clone())
-                    .collect();
-                let placeholders: Vec<AppEntry> = plugin_ids
-                    .iter()
-                    .map(|(id, _)| {
-                        let mut entry = placeholder_entry(id, &display_name(id));
-                        entry.score = placeholder_score(priority_set.contains(id));
-                        entry
-                    })
-                    .collect();
-
-                if !plugin_ids.is_empty() || !self.async_engines.is_empty() {
-                    self.spawn_mixed_lane(
-                        q.to_string(),
-                        plugin_ids,
-                        priority,
-                        seq,
-                    );
-                }
-
-                // 占位项放最后,不抢占 sync lane 结果的首位
-                let limit = self.max_results.load(Ordering::SeqCst);
-                let mut all_items: Vec<AppEntry> = fuse_items(items, limit)
-                    .into_iter()
-                    .map(SearchItem::into_app_entry)
-                    .collect();
-                // 排序契约：`hint_entries` 与 `placeholders` 都用 `placeholder_score(true/false)` 打分——
-                // Priority 项拿到置顶分（同 placeholder 逻辑）。这里 extend 到尾部**依赖前端按 score
-                // 降序重排**（见 `frontend/js/results.js` 的 `allItems.sort` 处），后端不再排。
-                all_items.extend(hint_entries);
-                all_items.extend(placeholders);
-
-                // 记录搜索耗时（sync lane 返回首结果）
-                let elapsed = search_start.elapsed().as_secs_f64() * 1000.0;
-                crate::infra::utils::perf::record(crate::infra::utils::perf::MetricCategory::SearchEngine, "total", elapsed, None);
-
-                all_items
+                self.exec_mixed(q, candidates, seq, &search_ctx, search_start).await
             }
         };
 
         SearchResponse { entries, suggestion }
+    }
+
+    /// Suggestion 计算（从 search() 提取，0.8.6 §8.2.1）。
+    fn compute_suggestion(&self, query: &str, snapshot: &crate::infra::platform::context::ContextSnapshot) -> Option<Suggestion> {
+        let cfg = *self.autosuggest.read().unwrap();
+        if !cfg.enabled {
+            return None;
+        }
+        let sug = self.router.best_suggestion(query, snapshot, cfg.min_score);
+        *self.last_ranking_hint.lock().unwrap() = self.router.take_last_ranking_hint();
+        sug
+    }
+
+    /// 插件显示名称查找。
+    fn display_name(&self, id: &str) -> String {
+        match &self.plugin_engine {
+            Some(pe) => pe.get_display_name(id),
+            None => id.strip_prefix("builtin.").unwrap_or(id).to_string(),
+        }
+    }
+
+    /// 空参数引导文案（0.8.1）：manifest 配置了 `empty_arg_hint` 且 arg 空时返回引导文本。
+    fn empty_arg_hint(&self, id: &str, arg: &crate::domain::intent::ExecArg) -> Option<String> {
+        if !arg.is_none() {
+            return None;
+        }
+        let lang = self.language.read().unwrap().clone();
+        self.plugin_engine
+            .as_ref()
+            .and_then(|pe| pe.get_empty_arg_hint(id, &lang))
+    }
+
+    /// Takeover executor（0.8.6 §8.2.1）：插件独占返回区。
+    fn exec_takeover(
+        &self,
+        plugin_id: String,
+        arg: crate::domain::intent::ExecArg,
+        seq: u64,
+    ) -> Vec<AppEntry> {
+        if let Some(hint_text) = self.empty_arg_hint(&plugin_id, &arg) {
+            tracing::debug!(plugin = %plugin_id, "empty_arg_hint 命中 Takeover，跳过插件查询");
+            return vec![empty_arg_hint_entry(&plugin_id, &self.display_name(&plugin_id), hint_text)];
+        }
+        self.spawn_takeover(plugin_id.clone(), arg.to_plugin_string(), seq);
+        vec![placeholder_entry(&plugin_id, &self.display_name(&plugin_id))]
+    }
+
+    /// EngineTakeover executor（0.8.6 §8.2.1）：本体 engine 独占。
+    async fn exec_engine_takeover(
+        &self,
+        engine_id: String,
+        arg: crate::domain::intent::ExecArg,
+        search_ctx: &QueryContext<'_>,
+    ) -> Vec<AppEntry> {
+        let arg_str = arg.to_plugin_string();
+        let mut items = Vec::new();
+        for engine in &self.sync_engines {
+            if engine.id() == engine_id {
+                items.extend(engine.search(&arg_str, search_ctx).await);
+                break;
+            }
+        }
+        if items.is_empty() {
+            tracing::debug!(engine = %engine_id, "engine takeover 未产出结果，可能是空历史/无匹配");
+        }
+        let limit = self.max_results.load(Ordering::SeqCst);
+        fuse_items(items, limit)
+            .into_iter()
+            .map(SearchItem::into_app_entry)
+            .collect()
+    }
+
+    /// Mixed executor（0.8.6 §8.2.1）：sync 引擎 + async 插件混排。
+    async fn exec_mixed(
+        &self,
+        q: &str,
+        candidates: Vec<Candidate>,
+        seq: u64,
+        search_ctx: &QueryContext<'_>,
+        search_start: std::time::Instant,
+    ) -> Vec<AppEntry> {
+        // sync lane 召回（跳过 takeover_only engine）
+        let mut items = Vec::new();
+        for engine in &self.sync_engines {
+            if engine.takeover_only() {
+                continue;
+            }
+            items.extend(engine.search(q, search_ctx).await);
+        }
+
+        // 拆分：empty_arg_hint 命中的候选 vs 需要 async 查询的候选
+        let mut hint_entries: Vec<AppEntry> = Vec::new();
+        let candidates: Vec<Candidate> = candidates
+            .into_iter()
+            .filter_map(|c| match self.empty_arg_hint(&c.plugin_id, &c.arg) {
+                Some(hint_text) => {
+                    tracing::debug!(plugin = %c.plugin_id, surface = ?c.surface, "empty_arg_hint 命中 Mixed 候选，跳过插件查询");
+                    let mut entry = empty_arg_hint_entry(&c.plugin_id, &self.display_name(&c.plugin_id), hint_text);
+                    entry.score = placeholder_score(matches!(c.surface, Surface::Priority));
+                    hint_entries.push(entry);
+                    None
+                }
+                None => Some(c),
+            })
+            .collect();
+
+        // 分离 priority / inline，准备 async lane
+        let (priority, inline): (Vec<Candidate>, Vec<Candidate>) = candidates
+            .into_iter()
+            .partition(|c| matches!(c.surface, Surface::Priority));
+
+        let plugin_ids: Vec<(String, String)> = priority
+            .iter()
+            .chain(inline.iter())
+            .map(|c| (c.plugin_id.clone(), c.arg.to_plugin_string()))
+            .collect();
+
+        let priority_set: std::collections::HashSet<String> = priority
+            .iter()
+            .map(|c| c.plugin_id.clone())
+            .collect();
+        let placeholders: Vec<AppEntry> = plugin_ids
+            .iter()
+            .map(|(id, _)| {
+                let mut entry = placeholder_entry(id, &self.display_name(id));
+                entry.score = placeholder_score(priority_set.contains(id));
+                entry
+            })
+            .collect();
+
+        if !plugin_ids.is_empty() || !self.async_engines.is_empty() {
+            self.spawn_mixed_lane(q.to_string(), plugin_ids, priority, seq);
+        }
+
+        let limit = self.max_results.load(Ordering::SeqCst);
+        let mut all_items: Vec<AppEntry> = fuse_items(items, limit)
+            .into_iter()
+            .map(SearchItem::into_app_entry)
+            .collect();
+        all_items.extend(hint_entries);
+        all_items.extend(placeholders);
+
+        let elapsed = search_start.elapsed().as_secs_f64() * 1000.0;
+        crate::infra::utils::perf::record(
+            crate::infra::utils::perf::MetricCategory::SearchEngine,
+            "total", elapsed, None,
+        );
+
+        all_items
     }
 
     /// 过滤不满足前置条件的路由命中(0.5.1):禁用插件 + 参数过短。

@@ -18,70 +18,25 @@ use super::engine::{QueryContext, SearchAction, SearchEngine, SearchItem};
 use super::scorer::{apply_history, BuiltinMatch};
 use crate::domain::context::trigger::{self as ctx_trigger, ContextTrigger, ParamSource};
 
-/// 内置动作定义。
+/// 内置动作定义（引擎内部模型，用于 keyword 匹配 + Context 触发 + 搜索结果展示）。
+///
+/// 0.8.6：分派逻辑已迁移到 `domain::execution::ActionRegistry`，本结构仅保留
+/// keyword/context 匹配和搜索结果 `SearchItem` 构造所需的字段。
 struct BuiltinAction {
-    /// 唯一标识
+    /// 唯一标识（与 ActionRegistry 的 Action::id() 一致）
     id: &'static str,
-    /// 主显示标题
+    /// 主显示标题（keyword 匹配 + SearchItem.title；设置页走 Action trait 的 LocalizableText）
     title: &'static str,
-    /// 副标题/说明
+    /// 副标题/说明（SearchItem.subtitle）
     subtitle: &'static str,
     /// 匹配关键词（拼音首字母也会自动匹配，如 "设置" → "sz"）
     keywords: &'static [&'static str],
-    /// 动作类型
-    kind: BuiltinActionKind,
     /// Context 触发条件；空 slice = 不参与 Context 路由（0.8.0 §1.3）。
-    #[allow(dead_code)] // Task 7 双路匹配引入后被读
     context: &'static [ContextTrigger],
     /// 参数来源；`None` = 无参数动作（0.8.0 §1.3）。
-    #[allow(dead_code)] // Task 7/8 引入参数化 Action 后被读
     param_source: ParamSource,
-    /// 用户没配置过时的默认启用状态。用户 disable 状态存
-    /// `AppConfig.disabled_builtin_actions: Vec<String>`。
-    #[allow(dead_code)] // Task 3+ 引入 disable 逻辑后被读
+    /// 默认启用状态。用户 disable 状态存 `AppConfig.disabled_builtin_actions`。
     default_enabled: bool,
-}
-
-/// 内置动作类型（分派 tag）。
-///
-/// **归位说明**：0.7 版本此 enum 曾在 `commands.rs` 里以私有形式重复定义，0.8.0 §1.3
-/// 收敛到这里；命令层通过 `run_builtin_action(id)` 反查后匹配分派。
-///
-/// 与前端契约 `crate::domain::search::ActionKind`（Open/Copy/RunAction）撞名故加 `Builtin` 前缀。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BuiltinActionKind {
-    /// 打开设置窗口
-    OpenSettings,
-    /// 锁定工作站
-    LockWorkstation,
-    /// 关机
-    Shutdown,
-    /// 重启
-    Restart,
-    /// 睡眠
-    Sleep,
-    /// 清空搜索历史
-    ClearHistory,
-    /// 退出 Blink
-    ExitBlink,
-    /// 打开日志文件
-    OpenLogs,
-    /// 打开数据目录
-    OpenDataDir,
-    // 0.8.0 §1.3 参数化动作 ↓
-    /// 用系统默认程序打开 URL（arg = clipboard 内的 URL 字符串）
-    OpenUrl,
-    /// 用系统默认程序打开文件/目录（arg = clipboard 内的文件路径）
-    OpenPath,
-    /// explorer /select 在资源管理器中定位到文件（arg = clipboard 内的文件路径）
-    RevealInExplorer,
-}
-
-impl BuiltinActionKind {
-    /// 从 action id 字符串反查 kind（`run_builtin_action` 分派用）。
-    pub fn from_action_id(id: &str) -> Option<Self> {
-        ACTIONS.iter().find(|a| a.id == id).map(|a| a.kind)
-    }
 }
 
 /// 内置动作注册表。
@@ -93,7 +48,6 @@ const ACTIONS: &[BuiltinAction] = &[
         title: "打开设置",
         subtitle: "Blink 偏好设置",
         keywords: &["设置", "settings", "sz", "偏好", "配置"],
-        kind: BuiltinActionKind::OpenSettings,
         context: &[],
         param_source: ParamSource::None,
         default_enabled: true,
@@ -103,7 +57,6 @@ const ACTIONS: &[BuiltinAction] = &[
         title: "锁定电脑",
         subtitle: "Lock Workstation",
         keywords: &["锁定", "lock", "锁屏", "sd"],
-        kind: BuiltinActionKind::LockWorkstation,
         context: &[],
         param_source: ParamSource::None,
         default_enabled: true,
@@ -113,7 +66,6 @@ const ACTIONS: &[BuiltinAction] = &[
         title: "关机",
         subtitle: "Shutdown",
         keywords: &["关机", "shutdown", "gj"],
-        kind: BuiltinActionKind::Shutdown,
         context: &[],
         param_source: ParamSource::None,
         default_enabled: true,
@@ -123,7 +75,6 @@ const ACTIONS: &[BuiltinAction] = &[
         title: "重启",
         subtitle: "Restart",
         keywords: &["重启", "restart", "cq"],
-        kind: BuiltinActionKind::Restart,
         context: &[],
         param_source: ParamSource::None,
         default_enabled: true,
@@ -133,7 +84,6 @@ const ACTIONS: &[BuiltinAction] = &[
         title: "睡眠",
         subtitle: "Sleep",
         keywords: &["睡眠", "sleep", "sm"],
-        kind: BuiltinActionKind::Sleep,
         context: &[],
         param_source: ParamSource::None,
         default_enabled: true,
@@ -143,7 +93,6 @@ const ACTIONS: &[BuiltinAction] = &[
         title: "清空搜索历史",
         subtitle: "清除所有应用启动记录",
         keywords: &["清空历史", "clear history", "qkls", "清除历史"],
-        kind: BuiltinActionKind::ClearHistory,
         context: &[],
         param_source: ParamSource::None,
         default_enabled: true,
@@ -153,7 +102,6 @@ const ACTIONS: &[BuiltinAction] = &[
         title: "退出 Blink",
         subtitle: "Exit Blink Launcher",
         keywords: &["退出", "exit", "quit", "tc", "关闭", "结束"],
-        kind: BuiltinActionKind::ExitBlink,
         context: &[],
         param_source: ParamSource::None,
         default_enabled: true,
@@ -163,7 +111,6 @@ const ACTIONS: &[BuiltinAction] = &[
         title: "打开日志文件",
         subtitle: "Open Blink Log File",
         keywords: &["日志", "log", "日志文件", "rz"],
-        kind: BuiltinActionKind::OpenLogs,
         context: &[],
         param_source: ParamSource::None,
         default_enabled: true,
@@ -173,7 +120,6 @@ const ACTIONS: &[BuiltinAction] = &[
         title: "打开数据目录",
         subtitle: "Open Blink Data Folder",
         keywords: &["目录", "文件夹", "数据", "ml"],
-        kind: BuiltinActionKind::OpenDataDir,
         context: &[],
         param_source: ParamSource::None,
         default_enabled: true,
@@ -185,7 +131,6 @@ const ACTIONS: &[BuiltinAction] = &[
         subtitle: "用默认浏览器打开剪贴板中的 URL",
         // keyword 让用户输入"打开链接"也能召回；空 query 时 Context 命中主导
         keywords: &["打开链接", "open url", "dkurl", "url", "链接"],
-        kind: BuiltinActionKind::OpenUrl,
         context: &[ContextTrigger::ClipboardIsUrl],
         param_source: ParamSource::Clipboard,
         default_enabled: true,
@@ -195,7 +140,6 @@ const ACTIONS: &[BuiltinAction] = &[
         title: "打开路径",
         subtitle: "用系统默认程序打开剪贴板中的文件或目录",
         keywords: &["打开路径", "打开目录", "open path", "dklj", "路径"],
-        kind: BuiltinActionKind::OpenPath,
         context: &[ContextTrigger::ClipboardIsFilePath],
         param_source: ParamSource::Clipboard,
         default_enabled: true,
@@ -205,7 +149,6 @@ const ACTIONS: &[BuiltinAction] = &[
         title: "在资源管理器中显示",
         subtitle: "定位到剪贴板中的文件（explorer /select）",
         keywords: &["定位", "resource", "reveal", "explorer", "dw", "资源管理器"],
-        kind: BuiltinActionKind::RevealInExplorer,
         context: &[ContextTrigger::ClipboardIsFilePath],
         param_source: ParamSource::Clipboard,
         default_enabled: true,
@@ -418,22 +361,39 @@ pub struct BuiltinActionInfo {
     pub default_enabled: bool,
 }
 
-/// 列出所有内置动作元数据 + 当前 enabled 状态。
+/// 列出所有内置动作元数据 + 当前 enabled 状态（0.8.6 §8.2.4 i18n）。
 ///
 /// `disabled_ids` 从 `AppConfig.disabled_builtin_actions` 读得——由命令层注入，
 /// 保持 domain 层与 SQLite 解耦。
-pub fn list_builtin_actions(disabled_ids: &[String]) -> Vec<BuiltinActionInfo> {
+/// `language` 用于解析 `LocalizableText` 到当前 UI 语言字符串。
+///
+/// 0.8.6 重构：title/subtitle 从 `ActionRegistry` 的 `Action::title()/subtitle()` 取，
+/// 走 `LocalizableText::resolve(language)`；不再从 `ACTIONS` 表硬编码中文读。
+pub fn list_builtin_actions(
+    disabled_ids: &[String],
+    registry: &crate::domain::execution::ActionRegistry,
+    language: &str,
+) -> Vec<BuiltinActionInfo> {
     ACTIONS
         .iter()
-        .map(|a| BuiltinActionInfo {
-            id: a.id.to_string(),
-            title: a.title.to_string(),
-            subtitle: a.subtitle.to_string(),
-            keywords: a.keywords.iter().map(|k| k.to_string()).collect(),
-            trigger_desc: describe_triggers(a.keywords, a.context),
-            param_desc: describe_param_source(a.param_source),
-            enabled: !disabled_ids.iter().any(|id| id == a.id),
-            default_enabled: a.default_enabled,
+        .map(|a| {
+            let (title, subtitle) = match registry.get(a.id) {
+                Some(action) => (
+                    action.title().resolve(language),
+                    action.subtitle().resolve(language),
+                ),
+                None => (a.title.to_string(), a.subtitle.to_string()), // fallback
+            };
+            BuiltinActionInfo {
+                id: a.id.to_string(),
+                title,
+                subtitle,
+                keywords: a.keywords.iter().map(|k| k.to_string()).collect(),
+                trigger_desc: describe_triggers(a.keywords, a.context),
+                param_desc: describe_param_source(a.param_source),
+                enabled: !disabled_ids.iter().any(|id| id == a.id),
+                default_enabled: a.default_enabled,
+            }
         })
         .collect()
 }

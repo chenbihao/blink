@@ -42,12 +42,14 @@ pub fn start_listener(pool: SqlitePool, cfg: ClipboardConfig) {
 }
 
 /// 热切换开关（设置页 toggle 调）。
+#[allow(dead_code)] // 设置页 API 预留（当前 commands 层直接更新 config）
 pub fn set_active(active: bool) {
     ACTIVE.store(active, Ordering::Relaxed);
     tracing::debug!(active, "剪贴板监听 active 切换");
 }
 
 /// 热更新黑名单（设置页改调）。
+#[allow(dead_code)] // 设置页 API 预留（当前 commands 层直接更新 config）
 pub fn set_blacklist(keywords: Vec<String>) {
     if let Some(s) = STATE.get() {
         *s.blacklist.write().unwrap() = keywords;

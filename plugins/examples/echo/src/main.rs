@@ -24,8 +24,6 @@ struct PluginQueryContext {
     pub foreground_app: Option<String>,
     #[serde(default)]
     pub window_title: Option<String>,
-    #[serde(default)]
-    pub clipboard_text: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,8 +98,8 @@ fn main() {
 
 /// 回显 query + 显示 Context 快照（验证链路通了）。
 fn handle_query(id: String, query: String, ctx: PluginQueryContext) -> PluginResponse {
-    eprintln!("echo: query={query:?}, foreground_app={:?}, clipboard={:?}",
-              ctx.foreground_app, ctx.clipboard_text);
+    eprintln!("echo: query={query:?}, foreground_app={:?}",
+              ctx.foreground_app);
 
     let mut items = Vec::new();
 
@@ -123,22 +121,7 @@ fn handle_query(id: String, query: String, ctx: PluginQueryContext) -> PluginRes
         });
     }
 
-    // 3. 剪贴板内容
-    if let Some(clip) = &ctx.clipboard_text {
-        // 按字符数截断（非字节数），避免 UTF-8 字符边界 panic
-        let max_chars = 30;
-        let clip_short = if clip.chars().count() > max_chars {
-            format!("{}...", clip.chars().take(max_chars).collect::<String>())
-        } else {
-            clip.clone()
-        };
-        items.push(PluginItem {
-            title: format!("剪贴板: {clip_short}"),
-            subtitle: Some(format!("共 {} 字符", clip.chars().count())),
-            score: 0.85,
-            action: PluginAction::Copy { text: clip.clone() },
-        });
-    }
+    // 3. 剪贴板内容（0.8.6 §8.2.2：clipboard_text 已从协议移除，插件须走 Suggestion 域）
 
     PluginResponse { id, items }
 }

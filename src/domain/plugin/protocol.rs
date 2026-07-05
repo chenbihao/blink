@@ -52,6 +52,9 @@ impl PluginRequest {
 }
 
 /// 查询上下文(随请求传给插件;包含环境上下文供插件决策)。
+///
+/// 0.8.6 §8.2.2：`clipboard_text` 已移除——插件直接读 Awareness 违反四域架构。
+/// 插件想要环境信息须走 Suggestion 域 → 用户 Tab 采纳 → `ExecArg::UserExplicit` 注入。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginQueryContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -62,16 +65,6 @@ pub struct PluginQueryContext {
     /// 前台窗口标题
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_title: Option<String>,
-    /// 剪贴板文本（截断 200 字符）
-    ///
-    /// ⚠️ **deprecated（0.8.4 §5.3.5）**：这是允许插件违反四域的历史妥协
-    /// （插件直接读 Awareness）。1.0 前彻底移除——插件想要环境信息须走 Suggestion + 参数。
-    #[deprecated(
-        since = "0.8.4",
-        note = "插件直接读 Awareness 违反四域;0.9 前移除,改走 Suggestion + 参数"
-    )]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub clipboard_text: Option<String>,
 }
 
 impl PluginQueryContext {
@@ -84,16 +77,10 @@ impl PluginQueryContext {
             ),
             None => (None, None),
         };
-        #[allow(deprecated)] // 0.8.4 §5.3.5:clipboard_text 已 deprecated,历史兼容至 1.0 前移除
         PluginQueryContext {
-            lang: None, // 后续加配置项预留
+            lang: None,
             foreground_app,
             window_title,
-            // 0.8.3 收尾：走 AwarenessSnapshot::find_text 抽剪贴板文本,PluginQueryContext
-            // 外部契约不变（仍是 clipboard_text 字段名）。
-            clipboard_text: snapshot
-                .find_text(crate::infra::platform::context::AwarenessSource::Clipboard)
-                .map(|v| v.text.to_string()),
         }
     }
 }

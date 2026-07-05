@@ -2,6 +2,7 @@
 
 pub mod chord;
 pub mod context;
+pub mod execution;
 pub mod intent;
 pub mod plugin;
 pub mod search;

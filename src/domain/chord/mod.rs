@@ -47,19 +47,19 @@ impl ChordSurface {
     }
 }
 
-/// Chord 动作契约。实现方注册到 [`ChordRegistry`]，前端按 `key` 触发。
+/// Chord 动作契约（0.8.6 §8.1.1：`ChordAction: Action` supertrait）。
+///
+/// 在 `Action` trait 基础上扩展 Chord 特有属性（触发键 / 窗口形态 / 显示名）。
+/// `execute` 统一走 `Action::execute`，返回 `ActionOutcome`（Emit / Nop 等）。
+/// 实现方注册到 [`ChordRegistry`]，前端按 `key` 触发。
 #[async_trait::async_trait]
-pub trait ChordAction: Send + Sync {
-    /// 唯一 id（disable 列表存储项，如 `"screenshot"`）。
-    fn id(&self) -> &'static str;
+pub trait ChordAction: crate::domain::execution::Action {
     /// 触发字母（小写，如 `'a'`）。前端 Alt+此字母 → trigger_chord。
     fn key(&self) -> char;
     /// 显示名（走 `LocalizableText`——registry 声明 zh/en，list() 按 language 解析）。
     fn label(&self) -> &LocalizableText;
     /// 触发后的窗口形态。
     fn surface(&self) -> ChordSurface;
-    /// 执行动作。stub 阶段只 log；真实动作（#10/#11/#12）在此实现副作用。
-    async fn execute(&self, app: &tauri::AppHandle) -> Result<(), String>;
 }
 
 /// Chord 动作注册表。
@@ -117,6 +117,9 @@ impl ChordRegistry {
 
     /// 按字母键触发对应动作，返回动作的 surface（供 command 层决定显示哪个窗口）。
     /// 键未注册 → Err（前端会 log，不弹窗）。
+    ///
+    /// 0.8.6 重构：统一走 `Action::execute` 返回 `ActionOutcome`，
+    /// registry 层按 outcome 分派副作用（Emit → emit 事件）。
     pub async fn trigger(&self, key: &str, app: &tauri::AppHandle) -> Result<ChordSurface, String> {
         let lower = key.to_lowercase();
         let action = self
@@ -126,7 +129,26 @@ impl ChordRegistry {
             .ok_or_else(|| format!("未注册的 chord 键: {lower}"))?;
         let surface = action.surface();
         tracing::info!(id = action.id(), key = %lower, surface = ?surface, "chord trigger");
-        action.execute(app).await?;
+
+        let cx = crate::domain::execution::ActionContext::new(app, None);
+        let outcome = action.execute(&cx).await.map_err(|e| e.to_string())?;
+        // 按 outcome 分派副作用
+        match outcome {
+            crate::domain::execution::ActionOutcome::Copy { text, .. } => {
+                // Chord 动作的 Copy：当前无 Chord action 产出此变体（预留 0.9）。
+                // 真正的剪贴板写入由 command 层或 SearchService::search 的 Copy 路径处理。
+                tracing::debug!(len = text.len(), "chord action Copy outcome（当前未消费）");
+            }
+            crate::domain::execution::ActionOutcome::Emit { event, payload } => {
+                app.emit(&event, payload).map_err(|e| e.to_string())?;
+            }
+            crate::domain::execution::ActionOutcome::Open { path } => {
+                if let Err(e) = open::that(&path) {
+                    tracing::error!(error = %e, %path, "chord action 打开路径失败");
+                }
+            }
+            crate::domain::execution::ActionOutcome::Nop => {}
+        }
         Ok(surface)
     }
 }
@@ -147,10 +169,24 @@ struct StubAction {
 }
 
 #[async_trait::async_trait]
-impl ChordAction for StubAction {
-    fn id(&self) -> &'static str {
+impl crate::domain::execution::Action for StubAction {
+    fn id(&self) -> &str {
         self.id
     }
+    fn title(&self) -> &LocalizableText {
+        &self.label
+    }
+    fn subtitle(&self) -> &LocalizableText {
+        &self.label // stub: subtitle 同 title
+    }
+    async fn execute(&self, _cx: &crate::domain::execution::ActionContext<'_>) -> Result<crate::domain::execution::ActionOutcome, crate::domain::execution::ExecError> {
+        tracing::info!(id = self.id, "chord stub action（待 #10 实现）");
+        Ok(crate::domain::execution::ActionOutcome::Nop)
+    }
+}
+
+#[async_trait::async_trait]
+impl ChordAction for StubAction {
     fn key(&self) -> char {
         self.key
     }
@@ -159,10 +195,6 @@ impl ChordAction for StubAction {
     }
     fn surface(&self) -> ChordSurface {
         self.surface
-    }
-    async fn execute(&self, _app: &tauri::AppHandle) -> Result<(), String> {
-        tracing::info!(id = self.id, "chord stub action（待 #10 实现）");
-        Ok(())
     }
 }
 
@@ -204,7 +236,7 @@ pub fn build_default_registry() -> ChordRegistry {
 ///
 /// **策略**：Chord 只提供快捷键直达能力，不新造独占 UI。execute 里：
 /// 1. `window::invoke(app)` — 主窗 show + 焦点
-/// 2. `emit "blink://chord-fill-query"` payload = `"剪贴板 "` — 前端填搜索框 + dispatch input
+/// 2. 返回 `ActionOutcome::Emit { event: "blink://chord-fill-query" }` — 前端填搜索框 + dispatch input
 /// 3. 后续走 ClipboardEngine 常规召回链，激活时 SearchAction::Copy + record_clipboard_hit
 ///
 /// surface = Default —— 不切窗口形态、不 emit chord-panel（Panel 变体已 deprecated）。
@@ -213,10 +245,29 @@ struct ClipboardHistoryAction {
 }
 
 #[async_trait::async_trait]
-impl ChordAction for ClipboardHistoryAction {
-    fn id(&self) -> &'static str {
+impl crate::domain::execution::Action for ClipboardHistoryAction {
+    fn id(&self) -> &str {
         "clipboard_history"
     }
+    fn title(&self) -> &LocalizableText {
+        &self.label
+    }
+    fn subtitle(&self) -> &LocalizableText {
+        &self.label
+    }
+    async fn execute(&self, cx: &crate::domain::execution::ActionContext<'_>) -> Result<crate::domain::execution::ActionOutcome, crate::domain::execution::ExecError> {
+        // 主窗 show + 焦点（同步）
+        crate::infra::platform::window::invoke(cx.app_handle);
+        // 返回 Emit outcome，由 ChordRegistry::trigger 负责实际 emit
+        Ok(crate::domain::execution::ActionOutcome::Emit {
+            event: "blink://chord-fill-query".to_string(),
+            payload: serde_json::Value::String("剪贴板 ".to_string()),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl ChordAction for ClipboardHistoryAction {
     fn key(&self) -> char {
         'c'
     }
@@ -225,13 +276,5 @@ impl ChordAction for ClipboardHistoryAction {
     }
     fn surface(&self) -> ChordSurface {
         ChordSurface::Default
-    }
-    async fn execute(&self, app: &tauri::AppHandle) -> Result<(), String> {
-        // 主窗 show + 焦点（同步）
-        crate::infra::platform::window::invoke(app);
-        // 前端 lifecycle listen 后填搜索框 + dispatch input → ClipboardEngine 召回
-        app.emit("blink://chord-fill-query", "剪贴板 ")
-            .map_err(|e| e.to_string())?;
-        Ok(())
     }
 }

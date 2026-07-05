@@ -17,15 +17,25 @@ use tauri::AppHandle;
 
 use crate::app::config::AppConfig;
 
-/// 服务启动期的共享依赖容器。
+/// 服务启动期的共享依赖容器（0.8.6 §8.2.3 扩展为真依赖容器）。
+///
+/// 持有所有核心服务的 `Arc` 引用——Service 启动时按需取用，
+/// 不再散落在 `main.rs` 的 `app.manage()` 调用中。
 pub struct AppContext {
     pub app: AppHandle,
-    /// 数据库连接池。0.2.1 各 Service 暂未直接用(command 层走 `app.state`),
-    /// 预留给 0.2.2 起需在 Service 内访问 DB 的场景(如 SearchService 读历史权重)。
     #[allow(dead_code)]
     pub pool: SqlitePool,
-    /// 启动时的配置快照(各 Service 据此初始化运行时状态)。
     pub config: AppConfig,
+    // ── 0.8.6 §8.2.3：核心服务引用 ─────────────────────────
+    pub search_service: std::sync::Arc<crate::domain::search::SearchService>,
+    #[allow(dead_code)] // 0.9 插件查询时消费
+    pub plugin_engine: Option<std::sync::Arc<crate::domain::plugin::PluginEngine>>,
+    #[allow(dead_code)] // Service 启动时按需取用
+    pub router: std::sync::Arc<crate::domain::intent::RuleRouter>,
+    #[allow(dead_code)]
+    pub chord_registry: std::sync::Arc<crate::domain::chord::ChordRegistry>,
+    #[allow(dead_code)]
+    pub action_registry: std::sync::Arc<crate::domain::execution::ActionRegistry>,
 }
 
 /// 统一生命周期接口。0.2.1 各服务的 `start` 多为同步初始化,但 trait 用 `async-trait`
@@ -34,6 +44,14 @@ pub struct AppContext {
 pub trait Service: Send + Sync {
     /// 服务名(日志 / 诊断用)。
     fn name(&self) -> &'static str;
+
+    /// 显式声明依赖的其他服务名（0.8.6 §8.2.3）。
+    /// 启动器按拓扑顺序调用——被依赖的服务先 start。
+    /// 默认无依赖。
+    #[allow(dead_code)] // 拓扑排序启动器预留（当前按注册顺序启动）
+    fn deps(&self) -> &'static [&'static str] {
+        &[]
+    }
 
     /// 启动:注册后台任务、初始化运行时状态。按依赖拓扑顺序调用。
     async fn start(&self, ctx: &AppContext) -> Result<(), String>;
@@ -76,19 +94,19 @@ impl Service for HistoryService {
 
 /// 搜索生命周期服务:启动 SearchService 持有的各引擎后台任务(如开始菜单预扫)。
 ///
-/// SearchService 本身由 main.rs 构造并 `app.manage(Arc<SearchService>)`(command 层经
-/// state 取用);此 wrapper 只负责在 Service 框架内统一触发其 `start()`。
-pub struct SearchLifecycle {
-    service: std::sync::Arc<crate::domain::search::SearchService>,
-}
+/// 0.8.6 §8.2.3：从 AppContext 取 SearchService 引用，不再单独持有。
+pub struct SearchLifecycle;
 
 #[async_trait::async_trait]
 impl Service for SearchLifecycle {
     fn name(&self) -> &'static str {
         "search"
     }
-    async fn start(&self, _ctx: &AppContext) -> Result<(), String> {
-        self.service.start();
+    fn deps(&self) -> &'static [&'static str] {
+        &["config", "history"] // 依赖配置和历史服务先初始化
+    }
+    async fn start(&self, ctx: &AppContext) -> Result<(), String> {
+        ctx.search_service.start();
         Ok(())
     }
 }
@@ -148,6 +166,9 @@ impl Service for SelectionService {
     fn name(&self) -> &'static str {
         "selection"
     }
+    fn deps(&self) -> &'static [&'static str] {
+        &["config"] // 依赖 ContextConfig
+    }
     async fn start(&self, ctx: &AppContext) -> Result<(), String> {
         // 依 ContextConfig.selection_enabled 决定是否启用划词监听。
         // 用户可在设置-上下文-环境感知里热切换（见 commands::update_context_config）。
@@ -188,13 +209,14 @@ impl Service for ClipboardService {
     }
 }
 
-/// `search` 为已构造的 SearchService(main.rs 持有并 manage),此处包成生命周期 wrapper
-/// 统一启动其引擎后台任务。
-pub fn all_services(search: std::sync::Arc<crate::domain::search::SearchService>) -> Vec<Box<dyn Service>> {
+/// 按依赖拓扑顺序构造服务列表。
+///
+/// 0.8.6 §8.2.3：SearchService 从 AppContext 取，不再作为参数传入。
+pub fn all_services() -> Vec<Box<dyn Service>> {
     vec![
         Box::new(ConfigService),
         Box::new(HistoryService),
-        Box::new(SearchLifecycle { service: search }),
+        Box::new(SearchLifecycle),
         Box::new(WindowService),
         Box::new(HotkeyService),
         Box::new(SelectionService),

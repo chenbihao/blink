@@ -6,6 +6,64 @@
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
+// ── ConfigKey trait + ConfigStore（0.8.6 §8.1.3）────────────────────────────────
+
+/// 配置分片标识 trait（0.8.6 §8.1.3）。
+///
+/// 每个配置分片实现此 trait，声明自己的 KV key。
+/// `ConfigStore<T>` 用 `T::KEY` 做 SQLite 存取。
+///
+/// 0.9 AI Provider 加 `AIConfig` 只需 `impl ConfigKey for AIConfig { const KEY = "ai.provider"; }`。
+#[allow(dead_code)] // 0.9 接入时消费；当前已有 impl 但泛型调用点尚未建立
+pub trait ConfigKey: Serialize + for<'de> Deserialize<'de> + Default + Send + Sync + 'static {
+    /// SQLite config 表的 key（如 `"app_config"` / `"app.hotkey"`）。
+    const KEY: &'static str;
+}
+
+/// 泛型配置存取（0.8.6 §8.1.3）。
+///
+/// `ConfigStore<T>` 是无状态的——所有操作直接走 SQLite，不持连接池。
+/// 调用方传 `&SqlitePool`。
+#[allow(dead_code)] // 0.9 接入时消费；当前已有 impl 但泛型调用点尚未建立
+pub struct ConfigStore;
+
+impl ConfigStore {
+    /// 读取配置分片。不存在或解析失败返回 `T::default()`。
+    #[allow(dead_code)]
+    pub async fn get<T: ConfigKey>(pool: &SqlitePool) -> T {
+        crate::infra::data::history::get_config(pool, T::KEY)
+            .await
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default()
+    }
+
+    /// 写入配置分片。
+    #[allow(dead_code)]
+    pub async fn set<T: ConfigKey>(pool: &SqlitePool, config: &T) -> Result<(), String> {
+        let json = serde_json::to_string(config).map_err(|e| e.to_string())?;
+        crate::infra::data::history::set_config(pool, T::KEY, &json).await.map_err(|e| e.to_string())?;
+        Ok(())
+    }
+}
+
+// ── ConfigKey 实现 ─────────────────────────────────────────────────────────
+
+impl ConfigKey for AppConfig {
+    const KEY: &'static str = "app_config";
+}
+
+impl ConfigKey for StartMenuConfig {
+    const KEY: &'static str = "engine:start_menu";
+}
+
+impl ConfigKey for CalcConfig {
+    const KEY: &'static str = "engine:calc";
+}
+
+impl ConfigKey for ContextConfig {
+    const KEY: &'static str = "context:config";
+}
+
 // ── 配置结构体 ──────────────────────────────────────────────────────────────────
 
 /// 快捷键配置。
@@ -383,7 +441,7 @@ pub async fn get_config(pool: &SqlitePool) -> AppConfig {
 /// 保存完整配置。
 pub async fn save_config(pool: &SqlitePool, config: &AppConfig) -> Result<(), String> {
     let json = serde_json::to_string(config).map_err(|e| e.to_string())?;
-    crate::infra::data::history::set_config(pool, "app_config", &json).await;
+    crate::infra::data::history::set_config(pool, "app_config", &json).await.map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -478,6 +536,7 @@ pub async fn update_autosuggest_config(
 /// 获取当前 disable 的 context binding key 列表（快照读）。
 ///
 /// 设置页初始化时读一次，启动时读一次注入到 SearchService → RuleRouter 内存快照。
+#[allow(dead_code)] // 设置页 API 预留（当前 commands 层直接读 AppConfig）
 pub async fn get_disabled_context_bindings(pool: &SqlitePool) -> Vec<String> {
     get_config(pool).await.disabled_context_bindings
 }
@@ -519,6 +578,7 @@ pub async fn update_disabled_chord_actions(
 }
 
 /// 获取 Chord 总开关 + 提示可见性（前端 shown 时读一次）。
+#[allow(dead_code)] // 设置页 API 预留（当前 commands 层直接读 AppConfig）
 pub async fn get_chord_toggles(pool: &SqlitePool) -> (bool, bool) {
     let cfg = get_config(pool).await;
     (cfg.chord_enabled, cfg.chord_hint_visible)
@@ -562,7 +622,7 @@ pub async fn get_engine_config(pool: &SqlitePool, engine_id: &str) -> Option<ser
 pub async fn set_engine_config(pool: &SqlitePool, engine_id: &str, config: &serde_json::Value) -> Result<(), String> {
     let key = format!("engine:{}", engine_id);
     let json = serde_json::to_string(config).map_err(|e| e.to_string())?;
-    crate::infra::data::history::set_config(pool, &key, &json).await;
+    crate::infra::data::history::set_config(pool, &key, &json).await.map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -649,6 +709,7 @@ pub struct PluginConfig {
     pub settings: serde_json::Value,
     /// 已禁用的默认触发词列表（用户 ban 掉的）
     #[serde(default)]
+    #[allow(dead_code)] // serde 消费写入，业务逻辑通过 effective_triggers() 间接读
     pub disabled_default_triggers: Vec<String>,
     /// 用户自定义触发关键字
     #[serde(default)]
@@ -662,7 +723,9 @@ struct CompatPluginConfig {
     #[serde(default = "default_null")]
     pub settings: serde_json::Value,
     // 旧格式：bool（是否禁用所有默认触发词）
+    // serde 反序列化用，迁移逻辑已简化为直接读新格式——旧格式字段保留以兼容老配置 JSON
     #[serde(default)]
+    #[allow(dead_code)]
     pub disable_default_triggers: Option<bool>,
     // 新格式：Vec<String>（被 ban 的具体触发词列表）
     #[serde(default)]
@@ -714,7 +777,7 @@ pub async fn set_plugin_config(
 ) -> Result<(), String> {
     let key = format!("plugin:{plugin_id}");
     let json = serde_json::to_string(config).map_err(|e| e.to_string())?;
-    crate::infra::data::history::set_config(pool, &key, &json).await;
+    crate::infra::data::history::set_config(pool, &key, &json).await.map_err(|e| e.to_string())?;
     tracing::debug!(plugin_id, enabled = config.enabled, "插件配置已更新");
     Ok(())
 }
@@ -829,7 +892,7 @@ pub async fn set_context_config(
     config: &ContextConfig,
 ) -> Result<(), String> {
     let json = serde_json::to_string(config).map_err(|e| e.to_string())?;
-    crate::infra::data::history::set_config(pool, "context:config", &json).await;
+    crate::infra::data::history::set_config(pool, "context:config", &json).await.map_err(|e| e.to_string())?;
     tracing::debug!(
         enabled = config.enabled,
         clipboard = config.clipboard_enabled,
@@ -863,3 +926,51 @@ pub async fn set_context_config(
 // 2. 支持平台特定的配置项
 // 3. 更容易进行单元测试（mock ConfigManager）
 //
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_key_app_config() {
+        assert_eq!(AppConfig::KEY, "app_config");
+    }
+
+    #[test]
+    fn config_key_start_menu() {
+        assert_eq!(StartMenuConfig::KEY, "engine:start_menu");
+    }
+
+    #[test]
+    fn config_key_calc() {
+        assert_eq!(CalcConfig::KEY, "engine:calc");
+    }
+
+    #[test]
+    fn config_key_context() {
+        assert_eq!(ContextConfig::KEY, "context:config");
+    }
+
+    #[test]
+    fn app_config_default_serde_roundtrip() {
+        let config = AppConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.language, config.language);
+        assert_eq!(parsed.theme, config.theme);
+        assert_eq!(parsed.hotkey.key, config.hotkey.key);
+    }
+
+    #[test]
+    fn app_config_from_default_json() {
+        // 验证默认值 JSON 能正确反序列化
+        let config = AppConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.language, "zh");
+        assert_eq!(parsed.theme, "auto");
+        assert!(parsed.autosuggest_enabled);
+        assert!((parsed.autosuggest_min_score - 0.7).abs() < 1e-9);
+        assert_eq!(parsed.autosuggest_tab_key, "Tab");
+    }
+}

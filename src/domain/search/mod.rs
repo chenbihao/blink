@@ -149,9 +149,8 @@ pub mod file_engine;
 mod mock_slow_engine;
 mod start_menu_engine;
 use builtin_engine::BuiltinEngine;
-// BuiltinActionKind 由 commands::run_builtin_action 分派用；
 // BuiltinActionInfo + list_builtin_actions 由 commands::list_builtin_actions 用（设置页）。
-pub use builtin_engine::{list_builtin_actions, BuiltinActionInfo, BuiltinActionKind};
+pub use builtin_engine::{list_builtin_actions, BuiltinActionInfo};
 use calc_engine::CalcEngine;
 use clipboard_engine::ClipboardEngine;
 use file_engine::FileEngine;

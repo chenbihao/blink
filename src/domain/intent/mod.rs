@@ -13,7 +13,7 @@
 //! - 非空 query 场景，keyword+context 同 plugin 命中的 `merge_hits` 加分逻辑保留（增强 keyword 命中，不是抢首屏）。
 //! - `suggest_completion`（0.8.1 旧接口）保留供 fallback / 单测，生产走 `best_suggestion` 统一入口。
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::domain::context::trigger::{self as ctx_trigger, ContextTrigger};
 use crate::domain::plugin::PluginSettingResolver;
@@ -85,6 +85,7 @@ pub enum ExecArg {
 
 impl ExecArg {
     /// 取用户显式参数；`None` 返回 `None`。
+    #[allow(dead_code)] // 内部工具方法，未来扩展点
     pub fn as_str(&self) -> Option<&str> {
         match self {
             ExecArg::UserExplicit(s) => Some(s.as_str()),
@@ -106,6 +107,7 @@ impl ExecArg {
     ///
     /// `UserExplicit(s)` → `Some(Value::String(s))`，`None` → `None`。
     /// 前端契约层零变化。
+    #[allow(dead_code)] // 未来 SearchService → Action trait 迁移时消费
     pub fn to_run_action_arg(&self) -> Option<serde_json::Value> {
         match self {
             ExecArg::UserExplicit(s) => Some(serde_json::Value::String(s.clone())),
@@ -295,6 +297,7 @@ pub trait IntentRouter: Send + Sync {
     ) -> Route;
 
     /// 算 ghost text 补全（0.8.1 §2.4）。默认实现返回 None（非 RuleRouter 实现无需支持）。
+    #[allow(dead_code)] // 0.8.1 遗留 API；0.8.3 起走 best_suggestion，保留供单测
     fn suggest_completion(&self, _query: &str, _min_score: f64) -> Option<CompletionHint> {
         None
     }
@@ -321,6 +324,12 @@ pub trait IntentRouter: Send + Sync {
 
     /// 更新 context binding 禁用列表（0.8.3 §4.6）。默认 no-op。
     fn apply_context_disable_list(&self, _keys: Vec<String>) {}
+
+    /// 取走上一次 `best_suggestion` 产出的 RankingHint（0.8.6 §8.1.2）。
+    /// 默认返回 None（非 RuleRouter 实现无需支持）。
+    fn take_last_ranking_hint(&self) -> Option<RankingHint> {
+        None
+    }
 }
 
 // ── RuleRouter ────────────────────────────────────────────
@@ -361,6 +370,13 @@ pub struct RuleRouter {
     /// key = `binding_key(target_id, trigger_key)`。命中 key 的 binding 在
     /// `match_context_hits` 中被跳过——route() 与 best_suggestion() 共用此判定。
     disabled_bindings: RwLock<std::collections::HashSet<String>>,
+    /// Suggestion 多源竞争仲裁器（0.8.6 §8.1.2）。
+    /// `best_suggestion` 委托此 arbiter，不再内嵌 if/else 分支。
+    arbiter: RwLock<suggestion::arbiter::SuggestionArbiter>,
+    /// 上一次 `best_suggestion` 产出的 RankingHint（0.8.6 §8.1.2）。
+    /// 由 arbiter 竞争后写入，SearchService 下一轮 `route()` 读取做 Surface Booster。
+    /// 替代原 `Suggestion.ranking_hint` 的跨轮反馈通道。
+    last_ranking_hint: Mutex<Option<RankingHint>>,
 }
 
 struct Rule {
@@ -433,7 +449,38 @@ impl RuleRouter {
             // 单测下不注入 language → 用 "zh" 兜底（Blink 默认 UI 语言）。
             app_language: RwLock::new("zh".to_string()),
             disabled_bindings: RwLock::new(std::collections::HashSet::new()),
+            // arbiter 初始为空，构造完成后通过 `init_arbiter` 注入 producers
+            arbiter: RwLock::new(suggestion::arbiter::SuggestionArbiter::new()),
+            last_ranking_hint: Mutex::new(None),
         }
+    }
+
+    /// 初始化 SuggestionArbiter 的 producers（0.8.6 §8.1.2）。
+    ///
+    /// 必须在 `RuleRouter` 被 `Arc` 包装后调用——`ContextProducer` 和 `KeywordProducer`
+    /// 都需要 `Arc<RuleRouter>` 来访问内部数据。
+    ///
+    /// `min_score` 是共享引用——`SearchService` 的 autosuggest 配置热更新时写入新值，
+    /// `KeywordProducer.produce` 每次读取最新阈值，无需额外通知。
+    ///
+    /// 在 `main.rs` 中 `Arc::new(RuleRouter::new(...))` 之后立即调用。
+    pub fn init_arbiter(self: &Arc<Self>, min_score: Arc<std::sync::RwLock<f64>>) {
+        let mut arbiter = self.arbiter.write().unwrap();
+        arbiter.register(Arc::new(suggestion::keyword::KeywordProducer::from_router(
+            self.clone(),
+            min_score,
+        )));
+        arbiter.register(Arc::new(suggestion::context::ContextProducer::new(
+            self.clone(),
+        )));
+    }
+
+    /// 取走上一次 `best_suggestion` 产出的 RankingHint（一次性消费）。
+    ///
+    /// SearchService 每次 `search()` 结束后调用此方法拿 hint，
+    /// 存入 `last_ranking_hint` 给下一轮 `route()` 做 Surface Booster。
+    pub fn take_last_ranking_hint(&self) -> Option<RankingHint> {
+        self.last_ranking_hint.lock().unwrap().take()
     }
 
     /// 后置注入 `PluginSettingResolver`（0.8.2 §3.4）。
@@ -617,7 +664,7 @@ impl RuleRouter {
     /// 收集所有 keyword 规则的 `(原文, pinyin_full)` 二元组，供 ghost text 计算（0.8.1）。
     /// regex 跳过（无"完整形式"概念）。同一 keyword 多次注册（不同插件同 keyword）会重复；
     /// `compute_hint` 内部按分数取最高，无副作用。
-    fn collect_suggest_keywords(&self) -> Vec<(String, String)> {
+    pub(crate) fn collect_suggest_keywords(&self) -> Vec<(String, String)> {
         let rules = self.rules.read().unwrap();
         rules
             .iter()
@@ -739,30 +786,19 @@ impl IntentRouter for RuleRouter {
         snapshot: &ContextSnapshot,
         min_score: f64,
     ) -> Option<Suggestion> {
-        // 0.8.4 §5.3.3：空/非空 query 都可能产 Context Ghost。
-        // - 空 query：Context 主战场
-        // - 非空 query：先 Keyword 补全（首拼/拼音/汉字）；**无命中时 fallback Context Ghost**
-        //   （如打 chrome + 剪贴板 URL → 产「打开链接」Ghost,不抢首屏、需 Tab 采纳）。
-        //   多源真正 confidence 竞争留 0.9 AI（届时 Keyword/Context/AI 同路径竞争）。
-        let trimmed = query.trim();
-        if trimmed.is_empty() {
-            self.context_suggestion(snapshot)
-        } else if let Some((hint, score)) =
-            suggest::compute_hint_scored(&self.collect_suggest_keywords(), query, min_score)
-        {
-            Some(Suggestion {
-                display: hint.display,
-                replacement: hint.replacement,
-                source: SuggestionSource::Keyword,
-                confidence: score.min(1.0), // f64::INFINITY exact 命中 → 1.0
-                prefix_len: hint.prefix_len,
-                origin: None, // Keyword 无外部来源
-                ranking_hint: None, // Keyword 不推 boost（Routing 域已命中 keyword）
-            })
-        } else {
-            // Keyword 无命中 → fallback Context Ghost（0.8.4 §5.3.3）
-            self.context_suggestion(snapshot)
+        // 0.8.6 §8.1.2：委托 SuggestionArbiter 做多源竞争。
+        // Keyword/Context 两个 producer 各自独立产出候选，arbiter 按 confidence 选 top-1。
+        let arbiter = self.arbiter.read().unwrap();
+        if arbiter.producer_count() > 0 {
+            // arbiter 已初始化（生产环境通过 init_arbiter 注入 producers）
+            let (sug, hint) = arbiter.best(query, snapshot);
+            *self.last_ranking_hint.lock().unwrap() = hint;
+            return sug;
         }
+        drop(arbiter); // 释放读锁再调 fallback
+
+        // fallback：arbiter 未初始化时（单测环境），走原直接实现
+        self.best_suggestion_direct(query, snapshot, min_score)
     }
 
     fn set_app_language(&self, language: String) {
@@ -773,14 +809,56 @@ impl IntentRouter for RuleRouter {
     fn apply_context_disable_list(&self, keys: Vec<String>) {
         RuleRouter::apply_context_disable_list(self, keys);
     }
+
+    fn take_last_ranking_hint(&self) -> Option<RankingHint> {
+        RuleRouter::take_last_ranking_hint(self)
+    }
 }
 
 impl RuleRouter {
+    /// 直接实现的 best_suggestion（0.8.6 arbiter 未初始化时的 fallback）。
+    ///
+    /// 与原 `best_suggestion` 逻辑完全一致：空 query → Context，非空 → Keyword + fallback Context。
+    /// 单测环境走此路径（`init_arbiter` 未调用）。
+    #[allow(deprecated)] // fallback 仍读 Suggestion.ranking_hint，生产环境走 arbiter 不会到这里
+    fn best_suggestion_direct(
+        &self,
+        query: &str,
+        snapshot: &ContextSnapshot,
+        min_score: f64,
+    ) -> Option<Suggestion> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            let sug = self.context_suggestion(snapshot);
+            *self.last_ranking_hint.lock().unwrap() = sug.as_ref().and_then(|s| s.ranking_hint.clone());
+            sug
+        } else if let Some((hint, score)) =
+            suggest::compute_hint_scored(&self.collect_suggest_keywords(), query, min_score)
+        {
+            let sug = Suggestion {
+                display: hint.display,
+                replacement: hint.replacement,
+                source: SuggestionSource::Keyword,
+                confidence: score.min(1.0),
+                prefix_len: hint.prefix_len,
+                origin: None,
+                ranking_hint: None,
+            };
+            *self.last_ranking_hint.lock().unwrap() = None;
+            Some(sug)
+        } else {
+            let sug = self.context_suggestion(snapshot);
+            *self.last_ranking_hint.lock().unwrap() = sug.as_ref().and_then(|s| s.ranking_hint.clone());
+            sug
+        }
+    }
+
     /// 从 Context 命中产出 top-1 Suggestion（0.8.4 §5.3.3：空 query 主战场 + 非空 query fallback）。
     ///
     /// 多 Context 命中取 confidence 最高；产出的 Suggestion 携带 RankingHint（Surface Booster
     /// 单向反馈）。无命中返回 None。
-    fn context_suggestion(&self, snapshot: &ContextSnapshot) -> Option<Suggestion> {
+    #[allow(deprecated)] // 构造 Suggestion 时填充 ranking_hint，0.9 彻底移除字段后简化
+    pub(crate) fn context_suggestion(&self, snapshot: &ContextSnapshot) -> Option<Suggestion> {
         let hits = self.match_context_hits(snapshot);
         let best_ctx = hits.into_iter().max_by(|a, b| {
             let ca = a.when.map(|w| context_confidence(&w, a.origin)).unwrap_or(0.0);

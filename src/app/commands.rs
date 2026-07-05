@@ -121,166 +121,19 @@ pub async fn launch_app(app: tauri::AppHandle, lnk_path: String) -> Result<(), S
     Ok(())
 }
 
-/// 解析内置动作标识。
+// 0.8.6 重构：execute_builtin_action 已迁移到 domain::execution 的各 Action struct。
+// run_builtin_action 现在通过 ActionRegistry 查找并执行。
+
+/// 运行内置动作（0.8.0 §1.3 / 0.8.6 §8.1.1 重构）。
 ///
-/// 已废弃：0.8.0 §1.3 前后端全部走 `SearchAction::RunAction` + `run_builtin_action`
-/// 命令，`__BLINK_ACTION_XXX__` 魔法串完全移除。
-
-// 引入统一 enum（0.8.0 §1.3 归位到 builtin_engine.rs）
-use crate::domain::search::BuiltinActionKind;
-
-/// 执行内置动作。
+/// 前端 `Action.kind === "run"` → `invoke("run_builtin_action", { id, arg })`。
+/// `id` 为内置动作注册表 key（如 `"open_settings"`），后端按 id 从 `ActionRegistry` 查找
+/// 对应的 `Action` 实现并执行。
 ///
-/// `arg` 由 `run_builtin_action` 从前端 `Action.run_arg` 透传下来（0.8.0 §1.3）：
-/// - 无参动作（现有 9 个 + 未来无参新增）忽略 `arg`
-/// - 参数化动作（OpenUrl / OpenPath / RevealInExplorer）从 `arg` 里取字符串（clipboard 内容）
-async fn execute_builtin_action(
-    app: &tauri::AppHandle,
-    action: BuiltinActionKind,
-    arg: Option<serde_json::Value>,
-) -> Result<(), String> {
-    /// 从 `arg` 抽出非空字符串——参数化动作专用。
-    fn arg_as_str(arg: &Option<serde_json::Value>, kind: &str) -> Result<String, String> {
-        arg.as_ref()
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .ok_or_else(|| format!("{kind}: 缺少字符串参数"))
-    }
-
-    match action {
-        BuiltinActionKind::OpenSettings => {
-            // 打开设置窗口（已存在则聚焦，否则创建），同时隐藏主窗口
-            tracing::debug!("执行内置动作：打开设置");
-            crate::infra::platform::window::hide(&app, "open_settings");
-            crate::infra::platform::window::open_settings(&app);
-        }
-        BuiltinActionKind::LockWorkstation => {
-            // Windows API：锁定工作站
-            #[cfg(target_os = "windows")]
-            unsafe {
-                use windows::Win32::System::Shutdown::LockWorkStation;
-                let _ = LockWorkStation();
-            }
-        }
-        BuiltinActionKind::Shutdown => {
-            // 调用 shutdown.exe 关机（/s = shutdown，/t 0 = 立即）
-            #[cfg(target_os = "windows")]
-            {
-                let _ = std::process::Command::new("shutdown.exe")
-                    .args(["/s", "/t", "0"])
-                    .spawn();
-            }
-        }
-        BuiltinActionKind::Restart => {
-            // 重启
-            #[cfg(target_os = "windows")]
-            {
-                let _ = std::process::Command::new("shutdown.exe")
-                    .args(["/r", "/t", "0"])
-                    .spawn();
-            }
-        }
-        BuiltinActionKind::Sleep => {
-            // 睡眠：调用 rundll32.exe powrprof.dll,SetSuspendState 0,1,0
-            #[cfg(target_os = "windows")]
-            {
-                let _ = std::process::Command::new("rundll32.exe")
-                    .args(["powrprof.dll,SetSuspendState", "0,1,0"])
-                    .spawn();
-            }
-        }
-        BuiltinActionKind::ClearHistory => {
-            // 清空搜索历史
-            let pool = app.state::<sqlx::SqlitePool>();
-            crate::infra::data::history::clear(&pool).await;
-            tracing::info!("搜索历史已清空");
-        }
-        BuiltinActionKind::ExitBlink => {
-            // 退出 Blink
-            app.exit(0);
-        }
-        BuiltinActionKind::OpenLogs => {
-            // 打开日志文件
-            tracing::debug!("执行内置动作：打开日志文件");
-            let log_path = crate::infra::utils::logging::current_log_file();
-            let log_dir = crate::infra::utils::logging::log_dir();
-            tracing::debug!(log_path = %log_path.display(), log_dir = %log_dir.display(), "日志路径");
-
-            if log_path.exists() {
-                tracing::debug!(path = %log_path.display(), "日志文件存在，打开");
-                if let Err(e) = open::that(&log_path) {
-                    tracing::error!(error = %e, "打开日志文件失败，尝试打开目录");
-                    let _ = open::that(&log_dir);
-                }
-            } else {
-                tracing::debug!("日志文件不存在，打开目录");
-                let _ = open::that(&log_dir);
-            }
-        }
-        BuiltinActionKind::OpenDataDir => {
-            // 打开数据目录（APPDATA/Blink）
-            tracing::debug!("执行内置动作：打开数据目录");
-            if let Ok(appdata) = std::env::var("APPDATA") {
-                let dir = std::path::PathBuf::from(appdata).join("Blink");
-                tracing::debug!(dir = %dir.display(), "数据目录路径");
-                if let Err(e) = open::that(&dir) {
-                    tracing::error!(error = %e, dir = %dir.display(), "打开数据目录失败");
-                }
-            } else {
-                tracing::error!("APPDATA 环境变量未找到");
-            }
-        }
-        // ── 0.8.0 §1.3 参数化动作 ─────────────────────────────────────────
-        BuiltinActionKind::OpenUrl => {
-            // 用系统默认程序打开 URL。open crate 会调 ShellExecuteW（HTTP/HTTPS → 浏览器）
-            let url = arg_as_str(&arg, "open_url")?;
-            tracing::debug!(%url, "执行内置动作：打开链接");
-            if let Err(e) = open::that(&url) {
-                tracing::error!(error = %e, %url, "打开链接失败");
-                return Err(format!("打开链接失败: {e}"));
-            }
-        }
-        BuiltinActionKind::OpenPath => {
-            // 用系统默认程序打开文件/目录
-            let path = arg_as_str(&arg, "open_path")?;
-            tracing::debug!(%path, "执行内置动作：打开路径");
-            if let Err(e) = open::that(&path) {
-                tracing::error!(error = %e, %path, "打开路径失败");
-                return Err(format!("打开路径失败: {e}"));
-            }
-        }
-        BuiltinActionKind::RevealInExplorer => {
-            // explorer /select,<path> —— 打开父目录并选中该文件/目录
-            let path = arg_as_str(&arg, "reveal_in_explorer")?;
-            tracing::debug!(%path, "执行内置动作：在资源管理器中显示");
-            #[cfg(target_os = "windows")]
-            {
-                // 注意：explorer.exe 参数间用逗号，不是空格；且要拆成两个独立 arg 传给 Command
-                //   Command::new("explorer.exe").args(["/select,", path]) 才是正确用法
-                //   （不是 .arg(format!("/select,{path}"))，那样 explorer 会把逗号后当整体路径）
-                let status = std::process::Command::new("explorer.exe")
-                    .args(["/select,", &path])
-                    .spawn();
-                if let Err(e) = status {
-                    tracing::error!(error = %e, %path, "调用 explorer.exe 失败");
-                    return Err(format!("调用 explorer.exe 失败: {e}"));
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-/// 运行内置动作（0.8.0 §1.3）。
+/// 0.8.6 重构：原 `BuiltinActionKind` match 分支迁移到 `domain::execution` 的
+/// 各 `Action` struct 实现，本函数变为薄委托层。
 ///
-/// 前端命中 `Action.kind == "run"` 时调用：`invoke("run_builtin_action", { id, arg })`。
-/// 替代 0.7 的 `__BLINK_ACTION_XXX__` 魔法串路径——`id` 从注册表反查 `BuiltinActionKind`
-/// 后走同一套执行分支，`arg` 透传给参数化动作（OpenUrl / OpenPath / RevealInExplorer）。
-///
-/// 未知 id → 返回 `Err`；前端会打印到控制台，不弹窗（用户误传的可能性 = 0，都是我们自己
-/// 注册的动作）。
+/// 未知 id → 返回 `Err`；前端会打印到控制台，不弹窗。
 #[tauri::command]
 pub async fn run_builtin_action(
     app: tauri::AppHandle,
@@ -288,25 +141,41 @@ pub async fn run_builtin_action(
     arg: Option<serde_json::Value>,
 ) -> Result<(), String> {
     tracing::debug!(%id, ?arg, "run_builtin_action: 收到请求");
-    let Some(kind) = BuiltinActionKind::from_action_id(&id) else {
+
+    let registry = app.state::<crate::domain::execution::ActionRegistry>();
+    let Some(action) = registry.get(&id) else {
         let msg = format!("未知内置动作 id: {id}");
         tracing::warn!(%id, "run_builtin_action: 未知 id");
         return Err(msg);
     };
-    execute_builtin_action(&app, kind, arg).await?;
+
+    let cx = crate::domain::execution::ActionContext::new(&app, arg);
+    match action.execute(&cx).await {
+        Ok(_outcome) => {
+            // 内置动作全部返回 Nop；outcome 为未来扩展预留
+        }
+        Err(e) => {
+            tracing::error!(%id, error = %e, "内置动作执行失败");
+            return Err(e.to_string());
+        }
+    }
+
     // 所有内置动作都隐藏主窗口；设置窗口在 OpenSettings 分支里已单独显示。
     crate::infra::platform::window::hide(&app, "run_builtin_action");
     Ok(())
 }
 
-/// 列出所有内置动作元数据 + 当前 enabled 状态（0.8.0 §1.3 设置页面板）。
+/// 列出所有内置动作元数据 + 当前 enabled 状态（0.8.0 §1.3 / 0.8.6 §8.2.4 i18n）。
 #[tauri::command]
 pub async fn list_builtin_actions(
     app: tauri::AppHandle,
 ) -> Vec<crate::domain::search::BuiltinActionInfo> {
     let pool = app.state::<sqlx::SqlitePool>();
     let disabled = crate::app::config::get_disabled_builtin_actions(&pool).await;
-    crate::domain::search::list_builtin_actions(&disabled)
+    let registry = app.state::<std::sync::Arc<crate::domain::execution::ActionRegistry>>();
+    // 读当前语言（从 AppConfig 快照取）
+    let config = crate::app::config::get_config(&pool).await;
+    crate::domain::search::list_builtin_actions(&disabled, &registry, &config.language)
 }
 
 /// 更新禁用的内置动作列表（0.8.0 §1.3 设置页面板）。
@@ -1570,6 +1439,57 @@ pub async fn open_url(url: String) -> Result<(), String> {
     {
         // 非 Windows 平台使用 open crate（后续可添加）
         return Err("当前平台暂不支持打开 URL".to_string());
+    }
+
+    Ok(())
+}
+
+// ── 泛型配置命令（0.8.6 §8.1.3 ConfigStore）──────────────────────────────────
+
+/// 泛型配置读取（0.8.6 §8.1.3）。
+///
+/// 前端 `invoke("get_config_section", { key: "app_config" })` → 返回该 key 的 JSON 值。
+/// 不存在返回 `null`（前端自行 fallback 到默认值）。
+///
+/// **key 命名空间**：
+/// - `app_config`：完整 AppConfig（兼容旧 key）
+/// - `engine:{id}`：引擎配置（start_menu / calc / file_search）
+/// - `plugin:{id}`：插件配置
+/// - `context:config`：Context 层配置
+///
+/// 0.9 扩展：`ai.provider` / `ai.chat` 等直接加 key，零脚手架。
+#[tauri::command]
+pub async fn get_config_section(
+    app: tauri::AppHandle,
+    key: String,
+) -> Result<serde_json::Value, String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    let json_str = crate::infra::data::history::get_config(&pool, &key).await;
+    match json_str {
+        Some(s) => serde_json::from_str(&s).map_err(|e| format!("配置解析失败: {e}")),
+        None => Ok(serde_json::Value::Null),
+    }
+}
+
+/// 泛型配置写入（0.8.6 §8.1.3）。
+///
+/// 前端 `invoke("set_config_section", { key: "app_config", value: {...} })` → 写入 SQLite。
+/// 写入成功后 emit `blink://config-changed` 事件，前端各模块按需订阅。
+///
+/// **幂等性**：直接覆盖写，不需要先读后写。
+#[tauri::command]
+pub async fn set_config_section(
+    app: tauri::AppHandle,
+    key: String,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    let json = serde_json::to_string(&value).map_err(|e| format!("序列化失败: {e}"))?;
+    crate::infra::data::history::set_config(&pool, &key, &json).await.map_err(|e| format!("配置写入失败: {e}"))?;
+
+    // 广播配置变更事件（前端各模块按 key 订阅）
+    if let Err(e) = app.emit("blink://config-changed", serde_json::json!({ "key": key })) {
+        tracing::debug!(error = %e, "emit blink://config-changed failed");
     }
 
     Ok(())
