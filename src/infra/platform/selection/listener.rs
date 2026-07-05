@@ -137,7 +137,7 @@ fn on_selection() {
             super::set_last_selection(text);
         }
         None => {
-            tracing::debug!("选词抓取：无选区或应用不支持 UIA TextPattern");
+            tracing::trace!("选词抓取：无选区或应用不支持 UIA TextPattern");
         }
     });
 }

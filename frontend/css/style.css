@@ -344,3 +344,14 @@ body.alt-active #results li .item-badge {
 #statusbar .hint-origin {
   opacity: 0.55;
 }
+
+/* Chord 降级到 statusbar（有 Ghost 时右侧显示键帽） */
+#statusbar .chord-sep {
+  color: var(--text-faint);
+  opacity: 0.35;
+  margin: 0 0.5em;
+  font-weight: 300;
+}
+#statusbar .chord-label {
+  opacity: 0.7;
+}

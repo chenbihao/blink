@@ -4,7 +4,7 @@
 
 > 📖 **产品设计与文档导航**：请先阅读 [docs/production-design/00-overview.md](docs/production-design/00-overview.md) 了解产品定位、里程碑与完整文档体系。改核心前必读对应 phases 文档。
 
-更新时间 20260705
+更新时间 20260706
 
 ---
 
@@ -13,18 +13,18 @@
 Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而是 **Universal Action Layer（统一操作层）**。
 终极目标：感知用户上下文、主动推荐动作，让任何操作都比原来的路径更快。
 
-当前处于 **0.8 感知与操作层进行中**：0.1~0.7 全部完成；0.8.0 ~ 0.8.5 已落地（UIA 划词、内置动作、Ghost Text 输入补全、翻译插件 Context 路由、Suggestion 契约 + Ghost 采纳 + 智能感知面板 + awareness 域重构、四域架构重构 ExecArg 类型墙 + RankingHint Surface Booster、Chord 交互底层）；**0.8.6 = 架构固化**（Action trait / SuggestionProducer + Arbiter / ConfigStore / SearchService 拆分 / AppContext 真依赖容器 / 内置动作 i18n）规划中；**0.8.7 = Alt+A 区域截图**（原 0.8.6 内容）；AI 相关能力（Provider / Chat / Embedding）全部移至 0.9。
+当前处于 **0.8 感知与操作层进行中**：0.1~0.7 全部完成；0.8.0 ~ 0.8.5 + 0.8.7 已落地（UIA 划词、内置动作、Ghost Text 输入补全、翻译插件 Context 路由、Suggestion 契约 + Ghost 采纳 + 智能感知面板 + awareness 域重构、四域架构重构 ExecArg 类型墙 + RankingHint Surface Booster、Chord 交互底层、Alt+A 区域截图）；**0.8.6 = 架构固化**（Action trait / SuggestionProducer + Arbiter / ConfigStore / SearchService 拆分 / AppContext 真依赖容器 / 内置动作 i18n）规划中；AI 相关能力（Provider / Chat / Embedding）全部移至 0.9。
 
 **最新特性（0.8）**：
 - ✅ **0.8.0** UIA 划词文本感知（鼠标选中文本自动抓取）
 - ✅ **0.8.0** 内置动作抽象升级：`SearchAction::RunAction` + Context 感知（剪贴板 URL/文件路径触发"打开链接/打开路径/资源管理器定位"）+ 设置页 disable 面板 + 拼音全拼匹配
 - ✅ **0.8.1** Autosuggestion / Ghost Text：首拼命中降级 Priority + 灰色行内补全 + Tab 显式升级；suggest fuzzy 覆盖中文原文与 pinyin_full 双候选；插件 manifest 支持 `empty_arg_hint`（空 arg 命中直接展示静态提示，跳过进程/IPC 调用）
 - ✅ **0.8.2** 翻译插件 Context 感知路由：选中/剪贴板非目标语言 → 翻译插件被路由（`needs_translation` + `PluginSettingResolver` trait；URL/文件路径护栏内建）。**注**：架构层已完成，UX 层的 push 模式过于激进 → 0.8.3 转 Ghost
-- ✅ **0.8.3** 感知交互统一：`Suggestion` 契约抽象（合并 completion_hint + context_suggestion，为 0.9 AI 铺路）+ Context 转 Ghost + Tab 采纳 + 上下文智能感知面板 + Ghost 本地化 display + origin 来源提示（来自划词/剪贴板）+ **awareness 域重构**（`AwarenessSnapshot { texts: Vec<AwarenessText { source, text }> }` 数据侧带 origin,intent 层零推断,删除 3 个推断 helper）
+- ✅ **0.8.3** 感知交互统一：`Suggestion` 契约抽象（合并 completion_hint + context_suggestion，为 0.9 AI 铺路）+ Context 转 Ghost + Tab 采纳 + 上下文感知面板 + Ghost 本地化 display + origin 来源提示（来自划词/剪贴板）+ **awareness 域重构**（`AwarenessSnapshot { texts: Vec<AwarenessText { source, text }> }` 数据侧带 origin,intent 层零推断,删除 3 个推断 helper）
 - ✅ **0.8.4** **四域架构重构**：Awareness / Suggestion / Routing / Execution 四域强边界（`route` 断 Awareness）+ `ExecArg` 类型墙 + RankingHint Surface Booster + Suggestion 覆盖非空 query + 内置动作保持「展示即抽参」（不延后，详见 phases §5.1）+ PluginProtocol.clipboard_text deprecated
 - ✅ **0.8.5** **Chord 交互底层**：Ghost overlay `.ghost-chord` 影子层提示（`:has()` 让位 Ghost 补全）+ 独立悬浮球 `chord-ball` webview（`WS_EX_NOACTIVATE` 不抢焦点）+ Alt+Q 划词 confirm flow + Alt+C 剪贴板走 `Route::EngineTakeover`（新增 `SearchEngine::takeover_only()` trait + 独立 `ClipboardEngine`）+ 剪贴板监听器补 0.7 漏 + 设置页 Chord tab + `ChordAction::label` 走 `LocalizableText`
-- 📋 **0.8.6** **架构固化**（为 0.9 铺物理骨架，纯横向重构不动业务）：Phase 1 —— Action trait 收敛（`SearchAction/BuiltinActionKind/PluginAction/ChordAction` 四份枚举 → 统一 `Action` trait + `ActionOutcome`）+ Suggestion Producer/Arbiter 拆分（`RankingHint` 从 `Suggestion` 剥离）+ ConfigStore\<T\> 分片（`AppConfig` 拆 6 片 + 前端泛型 `get/set_config<key>` + 广播事件）；Phase 2 —— SearchService God Method 拆 `RouteExecutor` + `PluginQueryContext.clipboard_text` 彻底删除 + `AppContext` 真依赖容器 + 内置动作 title/subtitle i18n。测试基线 276 可增不可减
-- 📋 **0.8.7** Alt+A 区域截图（Chord 三剑客补齐；全屏透明覆盖窗 + 拖选 + 写入剪贴板 + 记录历史）
+- 📋 **0.8.6** **架构固化**（为 0.9 铺物理骨架，纯横向重构不动业务）：Phase 1 —— Action trait 收敛（`SearchAction/BuiltinActionKind/PluginAction/ChordAction` 四份枚举 → 统一 `Action` trait + `ActionOutcome`）+ Suggestion Producer/Arbiter 拆分（`RankingHint` 从 `Suggestion` 剥离）+ ConfigStore\<T\> 分片（`AppConfig` 拆 6 片 + 前端泛型 `get/set_config<key>` + 广播事件）；Phase 2 —— SearchService God Method 拆 `RouteExecutor` + `PluginQueryContext.clipboard_text` 彻底删除 + `AppContext` 真依赖容器 + 内置动作 title/subtitle i18n。测试基线 300 可增不可减
+- ✅ **0.8.7** **Alt+A 区域截图**：Chord 三剑客补齐；`src/infra/platform/screenshot/` 新增 GDI 截屏模块 + `SESSION` 单点缓存 + `crop_rgba` 纯函数（7 个单测）；DWM Cloak 隐藏主窗绕过 Win11 fade 动画；BGRA 全链路（BitBlt→SESSION→CF_DIB 免全屏 swap）；PNG 编码 `Compression::Fast + FilterType::NoFilter + u32 位运算 swap + dev profile 局部 opt=3` 从 600ms → ~150ms；总感知延迟 ~320ms（dev），release 更快
 - 🔜 **0.9** AI Provider 抽象 + 云端插件 + Chat View + VectorRouter（**基于 0.8.4 四域信任边界 + 0.8.6 物理骨架**——AI 只能产 Suggestion，不能直接触发 Execution；三个统一入口 Action trait / SuggestionProducer / ConfigStore 分别承接 AI 的产出）
 
 ---
@@ -88,7 +88,7 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
   - `plugin/` — 插件系统：manifest 解析 + JSONL 协议 + tokio 子进程
   - `chord/` — Chord 交互：`ChordAction` trait + `ChordRegistry`
 - `src/infra/` — 基础设施层：
-  - `platform/` — 平台相关（`mod.rs` 抽象 + `windows.rs` 实现）：hotkey / window / selection / clipboard / context / locale
+  - `platform/` — 平台相关（`mod.rs` 抽象 + `windows.rs` 实现）：hotkey / window / selection / clipboard / context / locale / screenshot
   - `data/` — SQLite 持久化：history / clipboard / config KV
   - `utils/` — 通用工具：logging / perf / text（拼音）
 
@@ -101,6 +101,7 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 - 主窗口：`index.html` + `style.css` + `js/*.js`（搜索/结果/键盘/动作/生命周期/主题/i18n/Ghost/Chord）
 - 设置页：`settings.html` + `settings.js` + `settings.css`（通用/快捷键/引擎/插件/网络/上下文/Chord 交互/存储/调试）
 - 悬浮球：`chord-ball.html`（0.8.5 新）
+- 截图 overlay：`chord-screenshot.html`（0.8.7 新）
 - 右键菜单：`contextmenu-popup.html`
 
 前端用 `invoke()` 调 Rust commands，用 `TAU.event.listen()` 监听后端事件（`blink://shown`/`hidden`/`results`/`chord-translate`/`chord-fill-query`）。

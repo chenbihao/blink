@@ -27,7 +27,8 @@ let chordActions = [];
 let ghostChordEl = null;
 
 // 配置快照（lifecycle shown 或 config-changed 时刷新）
-let chordEnabled = true;
+// 初值 false：config 还没到时保守禁用,避免"用户没开却弹提示"的一瞬闪现
+let chordEnabled = false;
 let hintVisible = true;
 
 /** 初始化：绑定 overlay DOM。main.js 启动时调一次。 */
@@ -40,17 +41,36 @@ export function isEnabled() {
   return chordEnabled;
 }
 
+/** 当前 Chord 动作列表（statusbar 降级渲染用）。 */
+export function getActions() {
+  return chordEnabled && hintVisible ? chordActions : [];
+}
+
+// ── 可见性变化回调（statusbar 订阅用）─────────────────────────────────────
+let onVisibilityChangeCallback = null;
+
+/** 订阅 chord-visible 状态变化（statusbar.init 调一次）。 */
+export function onVisibilityChange(cb) {
+  onVisibilityChangeCallback = cb;
+}
+
+/** keyboard.js setAlt() 调用，通知订阅者重绘。 */
+export function notifyVisibilityChange() {
+  if (onVisibilityChangeCallback) onVisibilityChangeCallback();
+}
+
 /** 拉取 Chord 动作列表并渲染（shown / config-changed 时调）。 */
 export async function refresh() {
   // 先刷新配置快照
   try {
     const cfg = await invoke("get_config");
     if (cfg) {
-      chordEnabled = cfg.chord_enabled !== false;
+      // 0.8.7:chord 默认关,读取用 === true 精确判定,不再"缺失当 true"
+      chordEnabled = cfg.chord_enabled === true;
       hintVisible = cfg.chord_hint_visible !== false;
     }
   } catch (e) {
-    /* 保持默认 true */
+    /* 保持默认 false */
   }
 
   if (!chordEnabled) {

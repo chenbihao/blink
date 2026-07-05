@@ -11,8 +11,10 @@
 import { actionHint } from "./hints.js";
 import { t } from "./i18n.js";
 import * as ghost from "./ghost.js";
+import * as chord from "./chord.js";
 import * as autosuggestConfig from "./autosuggest-config.js";
-import { renderKey, renderHint } from "./kbd.js";
+import { renderKey, renderHint, renderCombo } from "./kbd.js";
+import { syncWindowSize } from "./window-size.js";
 
 const el = document.getElementById("statusbar");
 
@@ -20,9 +22,11 @@ const el = document.getElementById("statusbar");
 let lastActive = null;
 let lastPaging = { page: 1, pageCount: 1 };
 
-/** 初始化：订阅 ghost 状态。main.js 在 ghost.init() 之后调一次。 */
+/** 初始化：订阅 ghost + chord 状态。main.js 在 ghost.init() 之后调一次。 */
 export function init() {
   ghost.onChange(() => render());
+  // chord-visible 变化 → 重绘 + 窗口 resize（statusbar 高度可能变化）
+  chord.onVisibilityChange(() => { render(); syncWindowSize(); });
 }
 
 /**
@@ -98,8 +102,29 @@ function buildLeft(active, hasHint) {
   return left;
 }
 
-/** 右侧：多于一屏才显示翻页提示。 */
+/** 右侧：有 Ghost + Chord 可见时渲染 Chord 键帽；否则渲染翻页提示。 */
 function buildRight(paging) {
+  // 有 Ghost hint（Context/Keyword）+ Alt 按住 + Chord 动作存在 → 右侧降级显示 Chord
+  const actions = chord.getActions();
+  if (ghost.hasHint() && document.body.classList.contains("chord-visible") && actions.length) {
+    const right = document.createElement("span");
+    right.className = "hint-right";
+    actions.forEach((a, i) => {
+      if (i > 0) {
+        const sep = document.createElement("span");
+        sep.className = "chord-sep";
+        sep.textContent = "│";
+        right.appendChild(sep);
+      }
+      right.appendChild(renderCombo(`Alt+${a.key.toUpperCase()}`));
+      const label = document.createElement("span");
+      label.className = "chord-label";
+      label.textContent = a.label;
+      right.appendChild(label);
+    });
+    return right;
+  }
+  // 常规：多于一屏才显示翻页提示
   if (paging.pageCount <= 1) return null;
   const right = document.createElement("span");
   right.className = "hint-right";

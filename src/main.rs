@@ -66,6 +66,40 @@ fn main() {
                 responder.respond(response);
             });
         })
+        // 自定义协议：http://blink-screenshot.localhost/capture（Windows 上 Tauri v2 会把
+        // `blink-screenshot://` 重写成 `http://blink-screenshot.localhost/`，与 blink-icon 同）
+        // —— 返回当前 SESSION 的 PNG bytes。
+        //
+        // 由 `screenshot::begin_session()` 提前截屏并存 SESSION，协议只做"读内存 + 编码 PNG"，
+        // 不再触发新的截屏——避免"overlay show 之后才 BitBlt"的时序竞态。
+        // SESSION 为空 → 404，overlay 前端可显示错误提示。
+        .register_asynchronous_uri_scheme_protocol("blink-screenshot", |_ctx, _request, responder| {
+            tauri::async_runtime::spawn(async move {
+                let bytes = tauri::async_runtime::spawn_blocking(|| {
+                    crate::infra::platform::screenshot::session_png()
+                })
+                .await
+                .ok()
+                .flatten();
+
+                let response = match bytes {
+                    Some(bytes) => tauri::http::Response::builder()
+                        .status(200)
+                        .header("Content-Type", "image/png")
+                        .header("Cache-Control", "no-store")
+                        .body(bytes)
+                        .unwrap(),
+                    None => {
+                        tracing::warn!("blink-screenshot: SESSION 为空,返回 404");
+                        tauri::http::Response::builder()
+                            .status(404)
+                            .body(Vec::new())
+                            .unwrap()
+                    }
+                };
+                responder.respond(response);
+            });
+        })
         .setup(|app| {
             // 启动总耗时（setup 结束时手动记录，因为 setup 在同步上下文，没有 runtime 句柄）
             let startup_start = std::time::Instant::now();
@@ -313,6 +347,13 @@ fn main() {
             app.manage(chord_registry);
             app.manage(action_registry);
 
+            // TODO(perf): 后台冷启动预热次级窗口 —— chord-screenshot / context-menu 首次显示
+            // 各要 300~400ms 冷启动（WebView2 建实例）。启动后延迟 2~3s 在后台一次性 build
+            // 好这些窗口然后立即 hide,后续 show 只是切可见性 (<50ms)。
+            //   - 代价:常驻内存 +10~20MB × N 个窗口
+            //   - 收益:Alt+A / 右键菜单等首次触发无感冷启动
+            //   - 触发时机:所有 setup 完成 + 前端主窗 shown 之后（不与启动性能路径抢资源）
+
             // 持有服务列表,保证其生命周期与 app 一致。
             app.manage(services);
 
@@ -337,6 +378,8 @@ fn main() {
             app::commands::is_alt_down,
             app::commands::hide_chord_ball,
             app::commands::confirm_chord_selection,
+            app::commands::capture_region,
+            app::commands::hide_screenshot_overlay,
             app::commands::get_storage_info,
             app::commands::clear_history,
             app::commands::get_app_info,

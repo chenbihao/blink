@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Blink Screenshot</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100vw;
+        height: 100vh;
+        overflow: hidden;
+        user-select: none;
+        /*
+         * 极淡的兜底色——canvas 画完前 (~50ms 现在) 让窗口不完全透明,
+         * 避免 DWM 透明窗被穿透到桌面的错觉。
+         *
+         * **不能太黑**：body 是纯色 shade,canvas 最终画面是"截图 * 0.55 + 黑 * 0.45"
+         * (drawDimmed 里的暗色蒙版),两者亮度差太大会让用户看到"先黑幕后画面"的两层感。
+         * 用 0.15 极淡后,视觉上 body 和 canvas 差距小,衔接自然。
+         */
+        background: rgba(0, 0, 0, 0.15);
+      }
+      /*
+       * canvas 内部像素 = 截图物理像素；CSS 尺寸 = 物理像素 / DPR。
+       * width/height 属性在 JS 里设，样式只负责铺满 + crosshair 光标。
+       */
+      #canvas {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        cursor: crosshair;
+      }
+      #size-hint {
+        position: fixed;
+        background: rgba(0, 0, 0, 0.75);
+        color: #fff;
+        font-size: 12px;
+        font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+        padding: 2px 8px;
+        border-radius: 3px;
+        pointer-events: none;
+        display: none;
+        z-index: 10;
+        white-space: nowrap;
+      }
+      #error-hint {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        color: #fff;
+        background: rgba(200, 40, 40, 0.85);
+        padding: 12px 20px;
+        border-radius: 6px;
+        font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+        font-size: 14px;
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="canvas"></canvas>
+    <div id="size-hint"></div>
+    <div id="error-hint"></div>
+    <script type="module">
+      import { captureRegion, hideScreenshotOverlay } from "./js/api.js";
+
+      const canvas = document.getElementById("canvas");
+      const ctx = canvas.getContext("2d");
+      const sizeHint = document.getElementById("size-hint");
+      const errorHint = document.getElementById("error-hint");
+
+      let screenshot = null;
+      // 选区坐标存 CSS 逻辑像素（鼠标事件的 offsetX/Y 天然给的就是它），
+      // 只在最后 send 时乘 DPR 转成物理像素——单一变换点，好排查偏移。
+      let startX = 0, startY = 0;
+      let endX = 0, endY = 0;
+      let isDragging = false;
+      let sent = false; // 防止 mouseup 触发两次
+
+      loadScreenshot();
+
+      // 后端复用窗口时调用此函数触发重新加载
+      window.__blinkReloadScreenshot = function () {
+        isDragging = false;
+        sent = false;
+        screenshot = null;
+        sizeHint.style.display = "none";
+        errorHint.style.display = "none";
+        // 立刻清 canvas —— show → img.onload 之间有 ~几十ms 空档，
+        // 不清的话用户会看到上次结束时的画面（老蓝色虚线框闪一下）。
+        // 顺便把 canvas 内部尺寸复位到 1x1，避免旧图残留占用大 buffer。
+        if (canvas.width > 0) {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+        loadScreenshot();
+      };
+
+      function loadScreenshot() {
+        // Tauri v2 在 Windows 上会把 `blink-screenshot://` 重写成
+        // `http://blink-screenshot.localhost/`（与 blink-icon 同），直接用后者最稳。
+        // 加缓存破坏参数——WebView2 复用窗口时如果 URL 完全一致会走缓存。
+        const img = new Image();
+        img.onload = () => {
+          screenshot = img;
+          // canvas 内部像素 = 截图的物理像素（BitBlt 产出）
+          canvas.width = img.width;
+          canvas.height = img.height;
+          drawDimmed();
+        };
+        img.onerror = (e) => {
+          console.error("截图加载失败", e);
+          errorHint.textContent = "截图加载失败，按 ESC 关闭";
+          errorHint.style.display = "block";
+        };
+        img.src = "http://blink-screenshot.localhost/capture?t=" + Date.now();
+      }
+
+      // ── 鼠标事件 ──────────────────────────────────────
+
+      canvas.addEventListener("mousedown", (e) => {
+        if (!screenshot) return;
+        isDragging = true;
+        sent = false;
+        startX = e.offsetX;
+        startY = e.offsetY;
+        endX = startX;
+        endY = startY;
+      });
+
+      canvas.addEventListener("mousemove", (e) => {
+        if (!screenshot || !isDragging) return;
+        endX = e.offsetX;
+        endY = e.offsetY;
+        drawSelection();
+      });
+
+      canvas.addEventListener("mouseup", (e) => {
+        if (!screenshot || !isDragging) return;
+        isDragging = false;
+        endX = e.offsetX;
+        endY = e.offsetY;
+
+        const rect = norm(startX, startY, endX, endY);
+        if (rect.w < 3 || rect.h < 3) {
+          // 太小视为"单击取消"（QQ/Snipping Tool 默认行为）——直接关 overlay,
+          // 免得用户还得再按一次 ESC。
+          hideScreenshotOverlay();
+          return;
+        }
+        if (sent) return;
+        sent = true;
+        sendSelection(rect);
+      });
+
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          hideScreenshotOverlay();
+        }
+      });
+
+      // 失焦兜底：用户按 Win 键/切走 → 关掉 overlay 避免卡屏
+      window.addEventListener("blur", () => {
+        hideScreenshotOverlay();
+      });
+
+      // ── 绘制 ──────────────────────────────────────────
+
+      /** 暗色蒙版（初始态 + 无选区时） */
+      function drawDimmed() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(screenshot, 0, 0);
+        ctx.fillStyle = "rgba(0, 0, 0, 0.45)";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+
+      /** 选区绘制：选区外暗 + 选区内亮。坐标全用 CSS 像素 * DPR 换算到 canvas 内部像素。 */
+      function drawSelection() {
+        const dpr = window.devicePixelRatio || 1;
+        const r = norm(startX, startY, endX, endY);
+        // 转 canvas 内部像素
+        const px = r.x * dpr;
+        const py = r.y * dpr;
+        const pw = r.w * dpr;
+        const ph = r.h * dpr;
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(screenshot, 0, 0);
+
+        ctx.fillStyle = "rgba(0, 0, 0, 0.45)";
+        ctx.fillRect(0, 0, canvas.width, py);
+        ctx.fillRect(0, py + ph, canvas.width, canvas.height - py - ph);
+        ctx.fillRect(0, py, px, ph);
+        ctx.fillRect(px + pw, py, canvas.width - px - pw, ph);
+
+        ctx.strokeStyle = "#4a9eff";
+        ctx.lineWidth = 2 * dpr;
+        ctx.setLineDash([6 * dpr, 3 * dpr]);
+        ctx.strokeRect(px, py, pw, ph);
+        ctx.setLineDash([]);
+
+        // size-hint 显示物理像素尺寸（用户直觉感知的截图尺寸就是物理像素）
+        sizeHint.textContent = `${Math.round(pw)} × ${Math.round(ph)}`;
+        sizeHint.style.display = "block";
+        sizeHint.style.left = (r.x + 4) + "px";
+        sizeHint.style.top = (r.y > 24 ? r.y - 22 : r.y + 4) + "px";
+      }
+
+      // ── 工具 ──────────────────────────────────────────
+
+      function norm(x1, y1, x2, y2) {
+        return {
+          x: Math.min(x1, x2), y: Math.min(y1, y2),
+          w: Math.abs(x2 - x1), h: Math.abs(y2 - y1),
+        };
+      }
+
+      /** 把选区（CSS 像素）转成物理像素后回传后端 —— 只发 4 个整数，裁剪在后端做。 */
+      function sendSelection(rect) {
+        const dpr = window.devicePixelRatio || 1;
+        const x = Math.round(rect.x * dpr);
+        const y = Math.round(rect.y * dpr);
+        const w = Math.round(rect.w * dpr);
+        const h = Math.round(rect.h * dpr);
+        captureRegion(x, y, w, h).catch((e) => {
+          console.error("capture_region 失败", e);
+          errorHint.textContent = "截图保存失败：" + e;
+          errorHint.style.display = "block";
+          sent = false; // 允许用户重试
+        });
+      }
+    </script>
+  </body>
+</html>

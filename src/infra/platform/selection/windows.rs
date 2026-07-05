@@ -120,7 +120,7 @@ pub(crate) fn get_selected_text(hwnd_raw: isize) -> Option<String> {
     };
     let total = unsafe { candidates.Length() }.unwrap_or(0);
     if total == 0 {
-        tracing::debug!("选区抓取：子树中无支持 TextPattern 的元素");
+        tracing::trace!("选区抓取：子树中无支持 TextPattern 的元素");
         return None;
     }
     tracing::trace!(candidates = total, "选区抓取：FindAll 候选元素数");

@@ -84,3 +84,13 @@ export function getClipboardHistory(limit) {
 export function recordClipboardHit(id) {
   return invoke("record_clipboard_hit", { id });
 }
+
+/** 确认截图选区（0.8.7）：只传物理像素坐标，裁剪由后端从 SESSION 完成。 */
+export function captureRegion(x, y, w, h) {
+  return invoke("capture_region", { x, y, w, h });
+}
+
+/** 隐藏截图覆盖窗（ESC 取消调）。 */
+export function hideScreenshotOverlay() {
+  return invoke("hide_screenshot_overlay");
+}

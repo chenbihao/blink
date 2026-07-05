@@ -328,13 +328,14 @@ pub struct AppConfig {
     /// 用户禁用的 context binding key 列表（0.8.3 §4.6）。
     /// key 格式 `{target_id}::{trigger_key}`（如 `"builtin.translate::text_is_non_target_lang"`）。
     /// 存 binding key 字符串，`RuleRouter::match_context_hits` 命中即跳过。
-    /// 默认空——所有 binding 默认启用；用户在「上下文智能感知」面板取消后追加。
+    /// 默认空——所有 binding 默认启用；用户在「上下文感知」面板取消后追加。
     #[serde(default)]
     pub disabled_context_bindings: Vec<String>,
-    /// Chord 模式总开关（0.8.5 §6.6）。默认 true。关闭后前端不响应 Alt+字母触发。
-    #[serde(default = "default_true")]
+    /// Chord 模式总开关（0.8.5 §6.6）。**默认关闭**（0.8.7 起）：Chord 是"进阶交互"，
+    /// 新用户 opt-in 更符合"不打扰"原则；老用户如已开启会尊重之。关闭时前端不响应 Alt+字母触发。
+    #[serde(default = "default_false")]
     pub chord_enabled: bool,
-    /// Chord 增强菜单可见性（0.8.5 §6.6）。默认 true。alt-active 时下拉增强菜单。
+    /// Chord 增强菜单可见性（0.8.5 §6.6）。默认 true——一旦启用 Chord，提示条是发现路径。
     #[serde(default = "default_true")]
     pub chord_hint_visible: bool,
     /// 用户禁用的 Chord 动作 id 列表（0.8.5 §6.6）。存 action id，触发/列表时跳过。
@@ -365,7 +366,7 @@ impl Default for AppConfig {
             autosuggest_min_score: 0.7,
             autosuggest_tab_key: "Tab".to_string(),
             disabled_context_bindings: Vec::new(),
-            chord_enabled: true,
+            chord_enabled: false,
             chord_hint_visible: true,
             disabled_chord_actions: Vec::new(),
         }

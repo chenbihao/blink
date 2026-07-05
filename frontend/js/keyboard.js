@@ -157,9 +157,14 @@ function setAlt(on) {
   // 用户输入后按 Alt 不该弹出菜单遮 Ghost / results（触发路径也会被 onChordTrigger 门禁挡住，
   // 双闸保一致）。alt-active 仍标记物理 Alt 态供其他 UI（如 results 上的 Alt+1~9 角标）用。
   const showChord = on && chordEligible();
+  const prevChordVisible = document.body.classList.contains("chord-visible");
   document.body.classList.toggle("alt-active", on);
   document.body.classList.toggle("chord-visible", showChord);
-  // Chord 提示走 ghost overlay 的 absolute 层,不占布局,无需 resize。
+  // Chord 提示在 ghost overlay（无 Ghost 时）或 statusbar（有 Ghost 时），
+  // 状态变化需通知 statusbar 重绘。
+  if (showChord !== prevChordVisible) {
+    chord.notifyVisibilityChange();
+  }
 }
 
 /** 清除 Alt 角标态（供生命周期 shown/hidden 兜底调用）。 */

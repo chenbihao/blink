@@ -115,6 +115,18 @@ impl ChordRegistry {
             .collect()
     }
 
+    /// 按字母键查找已注册动作的 id（无关 disabled 状态）。
+    ///
+    /// 供 command 层做 disabled 门禁——先查 id → 再对比 DB 里的 disabled 列表。
+    /// registry 本身不持 disabled 状态，保持"注册/分派"单一职责。
+    pub fn action_id_for_key(&self, key: &str) -> Option<&str> {
+        let lower = key.to_lowercase();
+        self.actions
+            .iter()
+            .find(|a| a.key().to_string() == lower)
+            .map(|a| a.id())
+    }
+
     /// 按字母键触发对应动作，返回动作的 surface（供 command 层决定显示哪个窗口）。
     /// 键未注册 → Err（前端会 log，不弹窗）。
     ///
@@ -207,18 +219,13 @@ fn bilingual(zh: &str, en: &str) -> LocalizableText {
 }
 
 /// 构建默认 ChordRegistry（注册第一批动作）。
-/// - Alt+A 截图（Screenshot surface，#10 落地时替换 stub）
-/// - Alt+Q 智能划词（MiniBall surface，已在 #11 落地为真实实现——registry 只声明，
-///   真正的悬浮球逻辑在 commands::trigger_chord 消费 surface 后走 window::show_chord_ball）
-/// - Alt+C 剪贴板历史（0.8.5 §6.4 起走 fill-query：把"剪贴板 " 填进主窗搜索框，
-///   由 ClipboardEngine 展开 results，激活时 Copy + 回写 hit）
+/// - Alt+A 区域截图（0.8.7：ScreenshotAction 真实实现）
+/// - Alt+Q 智能划词（MiniBall surface）
+/// - Alt+C 剪贴板历史（0.8.5 §6.4）
 pub fn build_default_registry() -> ChordRegistry {
     let mut reg = ChordRegistry::new();
-    reg.register(Arc::new(StubAction {
-        id: "screenshot",
-        key: 'a',
+    reg.register(Arc::new(ScreenshotAction {
         label: bilingual("区域截图", "Screenshot"),
-        surface: ChordSurface::Screenshot,
     }));
     reg.register(Arc::new(StubAction {
         id: "selection",
@@ -230,6 +237,82 @@ pub fn build_default_registry() -> ChordRegistry {
         label: bilingual("剪贴板历史", "Clipboard history"),
     }));
     reg
+}
+
+/// Alt+A 区域截图（0.8.7 §九）。
+///
+/// **执行时序**（防"截到自己"竞态）：
+/// 1. 隐藏主窗 → sleep 80ms 让 DWM 合成完成
+/// 2. `begin_session` 截取虚拟屏幕存进 SESSION（此刻桌面已无 blink 窗口）
+/// 3. `show_screenshot_overlay(meta)` 建 overlay + SetWindowPos 按物理像素定位
+/// 4. overlay 前端拉 `blink-screenshot://capture` → 只读 SESSION → 拖选 → capture_region 落地
+struct ScreenshotAction {
+    label: LocalizableText,
+}
+
+#[async_trait::async_trait]
+impl crate::domain::execution::Action for ScreenshotAction {
+    fn id(&self) -> &str {
+        "screenshot"
+    }
+    fn title(&self) -> &LocalizableText {
+        &self.label
+    }
+    fn subtitle(&self) -> &LocalizableText {
+        &self.label
+    }
+    async fn execute(&self, cx: &crate::domain::execution::ActionContext<'_>) -> Result<crate::domain::execution::ActionOutcome, crate::domain::execution::ExecError> {
+        let t0 = std::time::Instant::now();
+
+        // 1. 隐藏主窗——走 cloak 路径（无 Win11 fade 动画，瞬间从桌面消失）
+        crate::infra::platform::window::hide_for_screenshot(cx.app_handle);
+
+        // 2. 等 DWM 完成一次不含主窗的新合成（DwmFlush + IsVisible 轮询，通常 <20ms）
+        let app_handle = cx.app_handle.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::infra::platform::window::wait_frame_after_hide(&app_handle);
+        })
+        .await
+        .ok();
+
+        // 3. 截屏存 SESSION（此刻桌面上没有 blink，BitBlt 不会拍到自己）。
+        //    Win32 阻塞调用（BitBlt + GetDIBits 合计 ~50-100ms 全屏）—— 走 spawn_blocking
+        //    避免挤占 tokio worker。
+        let meta = tokio::task::spawn_blocking(crate::infra::platform::screenshot::begin_session)
+            .await
+            .map_err(|e| crate::domain::execution::ExecError::Runtime(format!("截屏 task 崩溃: {e}")))?
+            .map_err(|e| {
+                // 截屏失败也要撤销 cloak,避免主窗永远隐形
+                crate::infra::platform::window::unhide_after_screenshot(cx.app_handle);
+                crate::domain::execution::ExecError::Runtime(e)
+            })?;
+
+        // 4. 撤销 cloak（主窗保持 hidden 状态，只是解除 DWM 雾化标志）——放在建 overlay
+        //    之前：万一建 overlay 失败也不会残留 cloak；主窗不 show 用户看不到差别
+        crate::infra::platform::window::unhide_after_screenshot(cx.app_handle);
+
+        // 5. 建 overlay + 按 meta 精确定位（物理像素）
+        crate::infra::platform::window::show_screenshot_overlay(cx.app_handle, meta)
+            .map_err(|e| {
+                crate::infra::platform::screenshot::end_session();
+                crate::domain::execution::ExecError::Runtime(e)
+            })?;
+        tracing::info!(total_ms = t0.elapsed().as_millis() as u64, "screenshot overlay 已就绪");
+        Ok(crate::domain::execution::ActionOutcome::Nop)
+    }
+}
+
+#[async_trait::async_trait]
+impl ChordAction for ScreenshotAction {
+    fn key(&self) -> char {
+        'a'
+    }
+    fn label(&self) -> &LocalizableText {
+        &self.label
+    }
+    fn surface(&self) -> ChordSurface {
+        ChordSurface::Screenshot
+    }
 }
 
 /// Alt+C 剪贴板历史（0.8.5 §6.4 定位反思后重构）。

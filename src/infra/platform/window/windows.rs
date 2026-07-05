@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
-use windows::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE};
+use windows::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmFlush, DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE};
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO,
@@ -403,6 +403,183 @@ pub fn hide_chord_ball(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("chord-ball") {
         let _ = win.hide();
     }
+}
+
+/// 显示截图覆盖窗（0.8.7 §九）。
+///
+/// **前置条件**：调用方已通过 `screenshot::begin_session()` 完成截屏，SESSION 中
+/// 已有位图；`meta` 是该 session 的元数据（物理像素坐标 + 尺寸）。
+///
+/// 流程：构建 overlay → SetWindowPos 按物理像素强制定位（绕开 Tauri 逻辑像素接口）
+/// → 前端通过 `blink-screenshot://capture` 协议只读 SESSION 拿 PNG。
+/// 前端拿到图后先铺暗色蒙版，用户拖选才显示亮区；ESC / 失焦 / 确认走 command 层。
+pub fn show_screenshot_overlay(
+    app: &AppHandle,
+    meta: crate::infra::platform::screenshot::ScreenCaptureMeta,
+) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+    const LABEL: &str = "chord-screenshot";
+
+    // 复用已存在的窗口：先 eval 清屏 + 重定位 → show → 触发重新加载
+    if let Some(win) = app.get_webview_window(LABEL) {
+        // 先清屏再 show —— 否则窗口刚出来会看到上次结束时的选区/虚线框闪一下
+        // （webview `.show()` 到 __blinkReloadScreenshot 执行之间有毫秒级空档）
+        let _ = win.eval("window.__blinkReloadScreenshot && window.__blinkReloadScreenshot()");
+        if let Ok(hwnd) = win.hwnd() {
+            place_at_physical(HWND(hwnd.0 as _), meta.virtual_x, meta.virtual_y, meta.width, meta.height);
+        }
+        let _ = win.show();
+        return Ok(());
+    }
+
+    // 首次构建：inner_size / position 会被后续 SetWindowPos 覆盖，这里只是让 Tauri 别报参数错。
+    let win = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("chord-screenshot.html".into()))
+        .title("")
+        .inner_size(meta.width as f64, meta.height as f64)
+        .position(meta.virtual_x as f64, meta.virtual_y as f64)
+        .decorations(false)
+        .transparent(true) // 透明背景，让 canvas 上的桌面截图独占视觉
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .shadow(false)
+        .focused(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    if let Ok(hwnd) = win.hwnd() {
+        place_at_physical(HWND(hwnd.0 as _), meta.virtual_x, meta.virtual_y, meta.width, meta.height);
+    }
+
+    Ok(())
+}
+
+/// 按物理像素强制定位窗口，覆盖 Tauri 逻辑像素接口的 DPI 缩放。
+///
+/// 截图 overlay 必须精确对齐虚拟屏幕物理像素——否则前端 canvas.width（物理像素）
+/// 与窗口 CSS 尺寸的比值会与 DPR 失配，选区坐标全歪。
+fn place_at_physical(hwnd: HWND, x: i32, y: i32, w: u32, h: u32) {
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOP),
+            x,
+            y,
+            w as i32,
+            h as i32,
+            SET_WINDOW_POS_FLAGS(SWP_NOACTIVATE.0),
+        );
+    }
+}
+
+/// 隐藏截图覆盖窗 + 清空 SESSION（释放位图内存）。
+pub fn hide_screenshot_overlay(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("chord-screenshot") {
+        let _ = win.hide();
+    }
+    crate::infra::platform::screenshot::end_session();
+}
+
+/// 截图专用：**瞬间**隐藏主窗（DWM Cloak + hide），零 fade 动画。
+///
+/// **和 `hide()` 的区别**：
+/// - `hide()` 走 `ShowWindow(SW_HIDE)`，触发 Windows 11 系统级 fade-out（~200ms 视觉延迟）
+/// - `hide_for_screenshot()` 先 `DwmSetWindowAttribute(DWMWA_CLOAK, TRUE)` 让 DWM
+///   **立即**从合成里剔除窗口（无动画），再调 `ShowWindow(SW_HIDE)` 落 Win32 状态
+///
+/// Cloak 是任务视图/Alt-Tab 预览用的机制，DWM 层瞬间"雾化"窗口——远快于走 fade。
+///
+/// 调用侧应在截图完成后（成功或取消）调 `unhide_after_screenshot` 撤销 cloak，
+/// 否则下次 `show()` 出来的窗口是不可见的。
+pub fn hide_for_screenshot(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        STATE.store(ST_HIDDEN, Ordering::SeqCst);
+        if let Ok(hwnd) = win.hwnd() {
+            let hwnd = HWND(hwnd.0 as _);
+            unsafe {
+                let cloak: i32 = 1;
+                let _ = DwmSetWindowAttribute(
+                    hwnd,
+                    windows::Win32::Graphics::Dwm::DWMWA_CLOAK,
+                    &cloak as *const _ as *const _,
+                    std::mem::size_of::<i32>() as u32,
+                );
+            }
+        }
+        let _ = win.hide();
+        let _ = app.emit("blink://hidden", ());
+    }
+    // 联动隐藏右键菜单（保留窗口供下次复用）
+    if let Some(menu_win) = app.get_webview_window("context-menu") {
+        let _ = menu_win.hide();
+    }
+}
+
+/// 撤销 `hide_for_screenshot` 的 cloak 标志。
+///
+/// 只清 cloak，不 `show`——主窗此时仍应保持 hidden 状态（截图完成后主窗不该出来）。
+/// 下次 `invoke()` 时 `show()` 会正常工作。
+pub fn unhide_after_screenshot(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        if let Ok(hwnd) = win.hwnd() {
+            let hwnd = HWND(hwnd.0 as _);
+            unsafe {
+                let cloak: i32 = 0;
+                let _ = DwmSetWindowAttribute(
+                    hwnd,
+                    windows::Win32::Graphics::Dwm::DWMWA_CLOAK,
+                    &cloak as *const _ as *const _,
+                    std::mem::size_of::<i32>() as u32,
+                );
+            }
+        }
+    }
+}
+
+/// 等主窗真正从桌面上消失（截图前调用，防"BitBlt 拍到主窗"）。
+///
+/// 配 `hide_for_screenshot()` 使用时无需等 fade 动画——cloak 是瞬时的，只需要一次
+/// DwmFlush 保证 DWM 完成一帧新合成（不含主窗）即可。
+///
+/// 调用侧应保证跑在 blocking 线程（tokio `spawn_blocking`），DwmFlush 是同步阻塞。
+pub fn wait_frame_after_hide(app: &AppHandle) {
+    use std::time::Instant;
+    use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+
+    let t0 = Instant::now();
+
+    // DwmFlush x 2：等 DWM 完成一次不含主窗的新合成（cloak 后瞬时生效，两次 flush 兜底）
+    unsafe {
+        let _ = DwmFlush();
+        let _ = DwmFlush();
+    }
+    let t_flush = t0.elapsed();
+
+    // 轮询 IsWindowVisible —— cloak + hide 后立刻就是 false，这里主要作日志用
+    let hwnd = app
+        .get_webview_window("main")
+        .and_then(|w| w.hwnd().ok())
+        .map(|h| HWND(h.0 as _));
+    let mut polled_ms = 0u64;
+    let mut visible_final = None;
+    if let Some(hwnd) = hwnd {
+        loop {
+            let visible = unsafe { IsWindowVisible(hwnd).as_bool() };
+            visible_final = Some(visible);
+            if !visible || polled_ms >= 100 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(8));
+            polled_ms += 8;
+        }
+    }
+
+    tracing::debug!(
+        flush_ms = t_flush.as_millis() as u64,
+        poll_ms = polled_ms,
+        total_ms = t0.elapsed().as_millis() as u64,
+        visible_final = ?visible_final,
+        "wait_frame_after_hide 完成"
+    );
 }
 
 pub fn open_settings(app: &AppHandle) {

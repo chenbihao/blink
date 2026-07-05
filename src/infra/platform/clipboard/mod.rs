@@ -15,7 +15,7 @@ use crate::infra::data::clipboard::ClipboardConfig;
 #[cfg(target_os = "windows")]
 mod windows;
 
-struct State {
+pub(super) struct State {
     pool: SqlitePool,
     blacklist: RwLock<Vec<String>>,
     max_items: u32,
@@ -41,8 +41,7 @@ pub fn start_listener(pool: SqlitePool, cfg: ClipboardConfig) {
     tracing::debug!(enabled = cfg.enabled, "剪贴板监听已就绪");
 }
 
-/// 热切换开关（设置页 toggle 调）。
-#[allow(dead_code)] // 设置页 API 预留（当前 commands 层直接更新 config）
+/// 热切换开关（0.8.7 起 `update_clipboard_enabled` 会调它做真热切）。
 pub fn set_active(active: bool) {
     ACTIVE.store(active, Ordering::Relaxed);
     tracing::debug!(active, "剪贴板监听 active 切换");
@@ -64,4 +63,14 @@ pub(super) fn is_active() -> bool {
 #[cfg(target_os = "windows")]
 pub(super) fn state() -> Option<&'static State> {
     STATE.get()
+}
+
+/// 把 **BGRA** 像素数据写入系统剪贴板（CF_DIB 格式）。
+///
+/// `pixels` 格式：BGRA、top-down、每行 `width * 4` 字节（BitBlt 原生输出即此格式）。
+/// 内部只做 top-down → bottom-up 翻转，不做 R↔B swap，省掉全屏 shuffle 一次。
+/// 写入后其他应用（画图/PPT/微信）可直接 Ctrl+V 粘贴。
+#[cfg(target_os = "windows")]
+pub fn write_bgra_to_clipboard(pixels: &[u8], width: u32, height: u32) -> Result<(), String> {
+    windows::write_bgra_to_clipboard(pixels, width, height)
 }

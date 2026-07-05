@@ -597,6 +597,133 @@ h2:active {
   content: none; /* 分隔符 · 已在 join 时给了，避免重复 */
 }
 
+/* ── Panel Lede & Section Label（0.8.7 UX 重排）─────────────────────────────
+   panel-lede: 每个 tab h2 下面一段概述,回答"这个 tab 管什么"
+   section-label: tab 内的一大节标注(采集/触发/呈现 · 动作等),竖线 + 灰字
+   section-lede-row: section-label 下的一行提示,不占 setting-row 空间 */
+
+.panel-lede {
+  margin: -4px 0 20px 0;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  line-height: 1.6;
+  max-width: 640px;
+}
+
+.section-label {
+  position: relative;
+  margin: 28px 0 10px;
+  padding-left: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: var(--text-dim);
+}
+
+.section-label::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 2px;
+  bottom: 2px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+  opacity: 0.7;
+}
+
+.section-lede-row {
+  margin: -4px 0 10px 10px;
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* ── Action List Row（0.8.7 UX 重排）─────────────────────────────────────
+   Chord 动作、Context 触发规则共用的紧凑单行组件。
+   一行:icon + kbd chip(可选) + 主副标题 + 右侧开关。
+   与 .builtin-action-row 姊妹关系:那个是引擎 tab 里的展示卡,这个是可开关列表。
+   高度 ~48px,比 .setting-row 更紧凑,信息密度更高。 */
+
+.action-list {
+  padding: 4px 12px;
+}
+
+.action-list-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 4px;
+  border-bottom: 1px solid var(--surface);
+}
+
+.action-list-row:last-child {
+  border-bottom: none;
+}
+
+.action-list-row .action-icon {
+  flex: 0 0 auto;
+  font-size: 18px;
+  width: 28px;
+  text-align: center;
+  opacity: 0.9;
+}
+
+.action-list-row .action-kbd {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  min-width: 62px;
+  justify-content: center;
+  background: var(--surface);
+  border: 1px solid var(--surface-2);
+  border-radius: 5px;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11.5px;
+  color: var(--text-sub);
+  line-height: 1;
+}
+
+.action-list-row .action-info {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.action-list-row .action-title {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--text);
+  line-height: 1.35;
+}
+
+.action-list-row .action-subtitle {
+  font-size: 12px;
+  color: var(--text-faint);
+  line-height: 1.4;
+}
+
+.action-list-row .action-toggle {
+  flex: 0 0 auto;
+}
+
+.action-list-row.is-disabled .action-title,
+.action-list-row.is-disabled .action-icon {
+  opacity: 0.55;
+}
+
+/* action-list 空态提示（无已注册项） */
+.action-list-empty {
+  padding: 20px 4px;
+  color: var(--text-faint);
+  font-size: 12.5px;
+  text-align: center;
+}
+
 /* ── 开关组件 ─────────────────────────────────────────────────────────────── */
 
 .switch {

@@ -16,6 +16,18 @@ opt-level = "s"
 panic = "abort"
 strip = true
 
+# dev 构建下把压缩/编解码热路径的依赖也开满优化——这些 crate 我们不 debug，
+# 但它们是截图/图标提取的热路径。debug 编译时慢约 5%，运行时 5-30x 加速。
+# png 依赖 miniz_oxide 做 DEFLATE，miniz_oxide 依赖 adler2。
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.adler2]
+opt-level = 3
+[profile.dev.package.flate2]
+opt-level = 3
+
 [workspace.lints.clippy]
 string_slice = "deny"  # 禁止直接按字节切片字符串（会导致中文 panic）
 

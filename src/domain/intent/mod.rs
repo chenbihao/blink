@@ -339,7 +339,7 @@ pub trait IntentRouter: Send + Sync {
 /// 0.8.2 §3.4 起持三张规则表：keyword / regex（原有）+ context（新增）。
 /// Context 规则通过 `PluginSettingResolver` 反查插件 `target_lang`（`auto` → `app_language`）。
 ///
-/// 0.8.3 §4.6 加 `disabled_bindings`：用户在「上下文智能感知」面板关掉某条 context binding
+/// 0.8.3 §4.6 加 `disabled_bindings`：用户在「上下文感知」面板关掉某条 context binding
 /// 时进此集合。key 格式 `{target_id}::{trigger_key}`（双冒号避开 target_id 内部点/冒号）。
 /// 采用黑名单模式，`context_rules` 依然是运行时唯一 trigger→target 表——从 manifest 加载
 /// = 默认全启用，disable 项在 `match_context_hits` 中按 key 跳过。

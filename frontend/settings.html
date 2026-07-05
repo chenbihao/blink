@@ -20,7 +20,7 @@
         <button class="tab" data-tab="engines" data-i18n="tab.engines">引擎</button>
         <button class="tab" data-tab="plugins" data-i18n="tab.plugins">插件</button>
         <button class="tab" data-tab="network" data-i18n="tab.network">网络</button>
-        <button class="tab" data-tab="context" data-i18n="tab.context">上下文智能感知</button>
+        <button class="tab" data-tab="context" data-i18n="tab.context">上下文感知</button>
         <button class="tab" data-tab="chord" data-i18n="tab.chord">Chord 交互</button>
         <button class="tab" data-tab="storage" data-i18n="tab.storage">存储</button>
         <button class="tab" data-tab="debug" data-i18n="tab.debug">调试</button>
@@ -199,7 +199,7 @@
             <span class="hint" data-i18n="general.page_size.hint">每屏最多显示多少条结果</span>
           </div>
 
-          <!-- 0.8.3 §4.9 输入补全（Ghost Text，0.8.1 §2.8）已挪至「上下文智能感知」面板 -->
+          <!-- 0.8.3 §4.9 输入补全（Ghost Text，0.8.1 §2.8）已挪至「上下文感知」面板 -->
         </div>
 
         <!-- 快捷键 -->
@@ -450,101 +450,108 @@
           </div>
         </div>
 
-        <!-- 上下文 -->
+        <!-- 上下文（0.8.7 UX 重排：采集 → 触发 → 呈现，顺流分层）───────── -->
         <div id="context" class="panel">
-          <h2 data-i18n="panel.context">上下文智能感知</h2>
+          <h2 data-i18n="panel.context">上下文感知</h2>
+          <p class="panel-lede" data-i18n="context.lede">Blink 观察你选中 / 复制 / 剪贴的内容，主动推荐能对它做的事。</p>
 
-          <!-- 输入补全（Ghost Text，0.8.1 §2.8 · 0.8.3 §4.9 挪位）─────── -->
-          <h3 style="margin-top: 0" data-i18n="context.autosuggest.title">输入补全</h3>
-          <div class="setting-row">
-            <label class="setting-label" data-i18n="general.autosuggest.enabled.label">启用 Ghost Text 补全</label>
-            <label class="switch">
-              <input type="checkbox" id="autosuggest-enabled" />
-              <span class="slider"></span>
-            </label>
-            <span class="hint" data-i18n="general.autosuggest.enabled.hint">首拼命中时在输入框显示灰色补全提示，按 Tab 接受</span>
-          </div>
-          <div class="setting-row">
-            <label class="setting-label" data-i18n="general.autosuggest.min_score.label">模糊阈值</label>
-            <div class="number-input-wrapper">
-              <input type="number" id="autosuggest-min-score" min="0.5" max="0.95" step="0.05" value="0.70" />
-              <div class="number-spinner">
-                <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">＋</button>
-                <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">－</button>
-              </div>
-            </div>
-            <span class="hint" data-i18n="general.autosuggest.min_score.hint">部分拼音触发 Ghost Text 的最低相似度（0.5~0.95）</span>
-          </div>
-          <div class="setting-row">
-            <label class="setting-label" data-i18n="general.autosuggest.tab_key.label">接受补全键</label>
-            <select id="autosuggest-tab-key">
-              <option value="Tab">Tab</option>
-              <option value="ArrowRight">→ (右箭头)</option>
-            </select>
-            <span class="hint" data-i18n="general.autosuggest.tab_key.hint">按此键把输入替换为规范形式并触发搜索</span>
+          <!-- 采集：数据从哪来 ────────────────────────────────────── -->
+          <div class="section-label" data-i18n="context.section.capture">采集 · 数据从哪来</div>
+          <div id="context-container">
+            <!-- 由 JS 动态渲染（含划词/剪贴板即时采集、剪贴板历史录入、敏感应用） -->
           </div>
 
-          <!-- Context 触发规则（0.8.3 §4.6）───────────────────────── -->
-          <h3 style="margin-top: 20px" data-i18n="context.bindings.title">Context 触发规则</h3>
-          <div class="setting-row" style="display: block;">
+          <!-- 触发：什么算命中 ────────────────────────────────────── -->
+          <div class="section-label" data-i18n="context.section.trigger">触发 · 什么算命中</div>
+          <div class="section-lede-row">
             <span class="hint" data-i18n="context.bindings.hint">环境自动触发的建议（选中英文→翻译、剪贴板 URL→打开链接 等）；关闭后 Ghost 不再出现</span>
           </div>
-          <div id="context-bindings-container">
-            <!-- 由 JS 动态渲染 -->
+          <div class="extension-card">
+            <div id="context-bindings-container" class="action-list">
+              <!-- 由 JS 动态渲染紧凑 action-list-row -->
+            </div>
           </div>
 
-          <!-- 环境感知采集控制 + 敏感应用（0.5.2 原内容保留）─────── -->
-          <h3 style="margin-top: 20px" data-i18n="context.privacy.title">采集与敏感应用</h3>
-          <div id="context-container">
-            <!-- 由 JS 动态渲染 -->
+          <!-- 呈现：用户如何看到 ────────────────────────────────── -->
+          <div class="section-label" data-i18n="context.section.present">呈现 · 用户如何看到</div>
+          <div class="extension-card">
+            <div class="extension-header">
+              <div class="extension-icon">💡</div>
+              <div class="extension-info">
+                <h3 data-i18n="context.autosuggest.title">输入补全 · Ghost Text</h3>
+                <p class="extension-desc" data-i18n="general.autosuggest.enabled.hint">首拼命中时在输入框显示灰色补全提示，按 Tab 接受</p>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="autosuggest-enabled" />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="extension-body">
+              <div class="setting-row">
+                <label class="setting-label" data-i18n="general.autosuggest.min_score.label">模糊阈值</label>
+                <div class="number-input-wrapper">
+                  <input type="number" id="autosuggest-min-score" min="0.5" max="0.95" step="0.05" value="0.70" />
+                  <div class="number-spinner">
+                    <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">＋</button>
+                    <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">－</button>
+                  </div>
+                </div>
+                <span class="hint" data-i18n="general.autosuggest.min_score.hint">部分拼音触发 Ghost Text 的最低相似度（0.5~0.95）</span>
+              </div>
+              <div class="setting-row">
+                <label class="setting-label" data-i18n="general.autosuggest.tab_key.label">接受补全键</label>
+                <select id="autosuggest-tab-key">
+                  <option value="Tab">Tab</option>
+                  <option value="ArrowRight">→ (右箭头)</option>
+                </select>
+                <span class="hint" data-i18n="general.autosuggest.tab_key.hint">按此键把输入替换为规范形式并触发搜索</span>
+              </div>
+            </div>
           </div>
         </div>
 
-        <!-- Chord 交互（0.8.5 §6.6）─────────────────────────────── -->
+        <!-- Chord 交互（0.8.5 §6.6 · 0.8.7 UX 重排：Hero 主开关 + 紧凑动作行）─── -->
         <div id="chord" class="panel">
           <h2 data-i18n="panel.chord">Chord 交互</h2>
-          <div class="setting-row" style="display: block;">
-            <span class="hint" data-i18n="chord.hint">主窗可见且未开始输入时，按住 Alt 可触发快捷动作（区域截图 / 智能划词 / 剪贴板历史）</span>
+          <p class="panel-lede" data-i18n="chord.hint">主窗可见且未开始输入时，按住 Alt 可触发快捷动作（区域截图 / 智能划词 / 剪贴板历史）</p>
+
+          <!-- 交互设置 ─────────────────────────────────────────── -->
+          <div class="extension-card">
+            <div class="extension-header">
+              <div class="extension-icon">⌘</div>
+              <div class="extension-info">
+                <h3 data-i18n="chord.enabled.label">启用 Chord</h3>
+                <p class="extension-desc" data-i18n="chord.enabled.hint">关闭后 Alt+字母 不再触发 Chord 动作</p>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="chord-enabled" />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="extension-body">
+              <div class="setting-row">
+                <label class="setting-label" data-i18n="chord.hint_visible.label">显示提示条</label>
+                <label class="switch">
+                  <input type="checkbox" id="chord-hint-visible" />
+                  <span class="slider"></span>
+                </label>
+                <span class="hint" data-i18n="chord.hint_visible.hint">按住 Alt 时是否在输入框内浮现单行动作提示</span>
+              </div>
+            </div>
           </div>
 
-          <!-- 总开关 -->
-          <h3 style="margin-top: 20px" data-i18n="chord.general.title">总控</h3>
-          <div class="setting-row">
-            <label class="setting-label" data-i18n="chord.enabled.label">启用 Chord</label>
-            <label class="switch">
-              <input type="checkbox" id="chord-enabled" />
-              <span class="slider"></span>
-            </label>
-            <span class="hint" data-i18n="chord.enabled.hint">关闭后 Alt+字母 不再触发 Chord 动作</span>
-          </div>
-          <div class="setting-row">
-            <label class="setting-label" data-i18n="chord.hint_visible.label">显示提示条</label>
-            <label class="switch">
-              <input type="checkbox" id="chord-hint-visible" />
-              <span class="slider"></span>
-            </label>
-            <span class="hint" data-i18n="chord.hint_visible.hint">按住 Alt 时是否在输入框内浮现单行动作提示</span>
-          </div>
-
-          <!-- 逐条动作开关 -->
-          <h3 style="margin-top: 20px" data-i18n="chord.actions.title">动作列表</h3>
-          <div class="setting-row" style="display: block;">
+          <!-- 动作清单 ─────────────────────────────────────────── -->
+          <div class="section-label" data-i18n="chord.section.actions">动作 · Alt + 字母 直达</div>
+          <div class="section-lede-row">
             <span class="hint" data-i18n="chord.actions.hint">取消勾选后该 Chord 不再列在提示条，Alt+字母 也不再触发</span>
           </div>
-          <div id="chord-actions-container">
-            <!-- 由 JS 动态渲染 -->
+          <div class="extension-card">
+            <div id="chord-actions-container" class="action-list">
+              <!-- 由 JS 动态渲染紧凑 action-list-row -->
+            </div>
           </div>
 
-          <!-- 剪贴板监听 -->
-          <h3 style="margin-top: 20px" data-i18n="chord.clipboard.title">剪贴板历史</h3>
-          <div class="setting-row">
-            <label class="setting-label" data-i18n="chord.clipboard.enabled.label">监听剪贴板写入</label>
-            <label class="switch">
-              <input type="checkbox" id="clipboard-enabled" />
-              <span class="slider"></span>
-            </label>
-            <span class="hint" data-i18n="chord.clipboard.enabled.hint">开启后自动记录复制内容，输入"剪贴板"或 Alt+C 召回历史（改动需重启生效）</span>
-          </div>
+          <!-- 剪贴板历史开关已迁至「上下文感知 · 采集」;此处不再重复 -->
         </div>
 
         <!-- 存储 -->

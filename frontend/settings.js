@@ -163,15 +163,12 @@ function applyConfigToUI(config) {
     autoTabKeyEl.value = config.autosuggest_tab_key;
   }
 
-  // Chord 交互（0.8.5 §6.6）
+  // Chord 交互（0.8.5 §6.6 · 0.8.7 起默认关闭：新用户 opt-in）
   const chordEnabledEl = document.getElementById("chord-enabled");
-  if (chordEnabledEl) chordEnabledEl.checked = config.chord_enabled !== false;
+  if (chordEnabledEl) chordEnabledEl.checked = config.chord_enabled === true;
   const chordHintEl = document.getElementById("chord-hint-visible");
   if (chordHintEl) chordHintEl.checked = config.chord_hint_visible !== false;
-  const clipEnabledEl = document.getElementById("clipboard-enabled");
-  if (clipEnabledEl && config.clipboard) {
-    clipEnabledEl.checked = config.clipboard.enabled !== false;
-  }
+  // #clipboard-enabled 由 loadContextConfig 从 currentConfig.clipboard.enabled 初始化(卡异步渲染)
 
   // 应用主题（设置页本身即时正确显示）
   applyTheme(config.theme || "auto");
@@ -321,20 +318,11 @@ function bindBuiltinActionEvents(list) {
       const toggle = row.querySelector(".builtin-action-toggle");
       if (toggle && !toggle.checked) disabled.push(row.dataset.actionId);
     });
+    // 0.8.7 UX 统一:自动保存静默成功,只保留失败态红字。
     const msg = document.getElementById("builtin-actions-save-msg");
-    if (msg) {
-      msg.textContent = t("engine.builtin_actions.saving");
-      msg.className = "plugin-save-msg";
-    }
+    if (msg) msg.textContent = "";
     try {
       await invoke("set_disabled_builtin_actions", { disabled });
-      if (msg) {
-        msg.textContent = t("engine.builtin_actions.saved");
-        // 2 秒后自动清除
-        setTimeout(() => {
-          if (msg.textContent === t("engine.builtin_actions.saved")) msg.textContent = "";
-        }, 2000);
-      }
     } catch (err) {
       console.error("set_disabled_builtin_actions failed:", err);
       if (msg) {
@@ -400,7 +388,8 @@ async function loadNetworkConfig() {
     const https = container.querySelector('.plugin-field[data-key="https_proxy"]')?.value || "";
     try {
       await invoke("update_global_proxy", { http, https });
-      if (msg) { msg.textContent = t("network.saved_msg"); msg.style.color = "#a6e3a1"; }
+      // 网络代理留长句"已保存,下次查询自动生效"——用户需要知道生效时机(不必重启)
+      if (msg) { msg.textContent = t("network.saved_msg"); msg.style.color = "#a6e3a1"; setTimeout(() => { if (msg) msg.textContent = ""; }, 3000); }
       clearUnsaved(container);
     } catch (e) {
       console.error("save proxy failed:", e);
@@ -422,12 +411,37 @@ async function loadContextConfig() {
     console.error("load context config failed:", e);
   }
 
+  // 剪贴板历史录入的初值不能靠 currentConfig(可能还没加载),直接单独拉一次 get_config
+  let clipboardHistEnabled = true;
+  try {
+    const fullCfg = await invoke("get_config");
+    if (fullCfg && fullCfg.clipboard) {
+      clipboardHistEnabled = fullCfg.clipboard.enabled !== false;
+    }
+  } catch (e) {
+    console.error("load clipboard enabled failed:", e);
+  }
+
   // ── 渲染卡片 ──
   const CLIPBOARD_FIELD = booleanField("clipboard_enabled", t("context.clipboard"));
   const SELECTION_FIELD = booleanField("selection_enabled", t("context.selection"), {
     description: t("context.selection.hint"),
   });
   const enableSwitch = `<label class="switch"><input type="checkbox" class="context-enabled" ${cfg.enabled ? "checked" : ""} /><span class="slider"></span></label>`;
+
+  // 剪贴板历史录入开关(0.8.7 UX 重排:从 Chord tab 迁至此处,与"采集剪贴板文本"
+  // 同框,让用户在一处决定"blink 到底能看/能存多少剪贴板")。
+  // 注:此开关走独立命令 update_clipboard_enabled,不属于 update_context_config payload
+  // ——语义分离:context.clipboard_enabled 是"即时读",clipboard.enabled 是"历史录入"。
+  // 结构 & 尺寸对齐 renderSettingField(booleanField()) —— 标题/开关同行、描述走 field-desc、
+  // switch 用 switch-sm(条目级);否则与相邻两个采集开关视觉不一致(#issue: 大小 switch 混排)。
+  const clipboardHistoryFieldHtml = `<div class="plugin-field-row">
+      <div class="field-head">
+        <span class="field-title">${t("chord.clipboard.enabled.label")}</span>
+        <label class="switch switch-sm"><input type="checkbox" id="clipboard-enabled" ${clipboardHistEnabled ? "checked" : ""} /><span class="slider"></span></label>
+      </div>
+      <div class="field-desc">${t("chord.clipboard.enabled.hint")}</div>
+    </div>`;
 
   container.innerHTML = renderExtensionCard({
     icon: "🌍",
@@ -438,6 +452,7 @@ async function loadContextConfig() {
     body: `<div class="plugin-config-section" style="padding-top: 0;">
         ${renderSettingField(CLIPBOARD_FIELD, cfg.clipboard_enabled)}
         ${renderSettingField(SELECTION_FIELD, cfg.selection_enabled)}
+        ${clipboardHistoryFieldHtml}
         <div class="plugin-field-row">
           <div class="field-head">
             <span class="field-title">${t("context.sensitive.title")}</span>
@@ -484,6 +499,8 @@ async function loadContextConfig() {
   renderSensitiveList();
 
   // ── 自动保存 ──
+  // 设计约定(0.8.7 UX 统一):自动保存"静默成功、喧哗失败"——UI 状态变更本身就是反馈,
+  // 不再显示"✓ 已自动保存",避免噪音;失败保留红字并回滚由调用侧处理。
   async function save() {
     const enabled = container.querySelector(".context-enabled").checked;
     const clipboard_enabled = container.querySelector('.plugin-field[data-key="clipboard_enabled"]')?.checked ?? true;
@@ -493,11 +510,8 @@ async function loadContextConfig() {
       await invoke("update_context_config", {
         config: { enabled, clipboard_enabled, selection_enabled, sensitive_apps: [...sensitiveApps] },
       });
-      if (msg) {
-        msg.textContent = t("context.auto_saved");
-        msg.style.color = "#a6e3a1";
-        setTimeout(() => { if (msg) msg.textContent = ""; }, 2000);
-      }
+      // 成功静默(不再 msg.textContent = 已自动保存)
+      if (msg) msg.textContent = "";
     } catch (e) {
       console.error("save context config failed:", e);
       if (msg) {
@@ -507,10 +521,12 @@ async function loadContextConfig() {
     }
   }
 
-  // 总开关 + 剪贴板开关 + 划词开关 → change 自动保存
+  // 总开关 + 剪贴板采集开关 + 划词开关 → change 自动保存
   container.querySelector(".context-enabled")?.addEventListener("change", save);
   container.querySelector('.plugin-field[data-key="clipboard_enabled"]')?.addEventListener("change", save);
   container.querySelector('.plugin-field[data-key="selection_enabled"]')?.addEventListener("change", save);
+  // 剪贴板历史录入(0.8.7 从 Chord tab 迁入,走独立命令 update_clipboard_enabled)
+  container.querySelector("#clipboard-enabled")?.addEventListener("change", saveClipboardEnabled);
 
   // ── 添加应用弹窗 ──
   container.querySelector(".context-add-btn")?.addEventListener("click", async () => {
@@ -542,19 +558,32 @@ async function loadContextBindings() {
   }
 
   if (!Array.isArray(bindings) || bindings.length === 0) {
-    container.innerHTML = `<div class="context-empty-hint">${t("context.bindings.empty")}</div>`;
+    container.innerHTML = `<div class="action-list-empty">${t("context.bindings.empty")}</div>`;
     return;
   }
 
-  // 每条 binding 一个 setting-row（复用现有样式）
+  // trigger_key → 图标(0.8.7 UX 重排:动作行加视觉锚点,识别度对齐引擎/插件卡)
+  const TRIGGER_ICONS = {
+    text_is_non_target_lang: "🌐",
+    clipboard_is_url: "🔗",
+    clipboard_is_file_path: "📂",
+    selection_non_empty: "✂️",
+  };
+
+  // 每条 binding 一个 .action-list-row(紧凑行:icon + 主/副 + 开关)
   container.innerHTML = bindings
     .map((b) => {
+      const icon = TRIGGER_ICONS[b.trigger_key] || "•";
       const triggerI18nKey = `context.trigger.${b.trigger_key}`;
       const triggerLabel = t(triggerI18nKey) || b.trigger_key;
-      const arrowLabel = `${triggerLabel} → ${escapeHtml(b.target_label || b.target_id)}`;
-      return `<div class="setting-row" data-binding-key="${escapeHtml(b.key)}">
-        <label class="setting-label">${arrowLabel}</label>
-        <label class="switch">
+      const targetLabel = escapeHtml(b.target_label || b.target_id);
+      const rowClass = b.enabled ? "" : "is-disabled";
+      return `<div class="action-list-row ${rowClass}" data-binding-key="${escapeHtml(b.key)}">
+        <div class="action-icon">${icon}</div>
+        <div class="action-info">
+          <div class="action-title">${escapeHtml(triggerLabel)} → ${targetLabel}</div>
+        </div>
+        <label class="switch action-toggle">
           <input type="checkbox" class="context-binding-toggle" data-key="${escapeHtml(b.key)}" ${b.enabled ? "checked" : ""} />
           <span class="slider"></span>
         </label>
@@ -577,7 +606,12 @@ async function loadContextBindings() {
   }
 
   container.querySelectorAll(".context-binding-toggle").forEach((el) => {
-    el.addEventListener("change", save);
+    el.addEventListener("change", (e) => {
+      // 同步整行 is-disabled 视觉态
+      const row = e.target.closest(".action-list-row");
+      if (row) row.classList.toggle("is-disabled", !e.target.checked);
+      save();
+    });
   });
 }
 
@@ -592,7 +626,6 @@ async function loadChordActions() {
   if (!container) return;
 
   let actions = [];
-  let disabled = [];
   try {
     // list_chord_actions 只返 enabled 的,拿 disabled 列表另外调
     // 但这里我们要展示所有动作（含被禁用的）,直接读所有并交叉比对
@@ -603,16 +636,33 @@ async function loadChordActions() {
   }
 
   if (!Array.isArray(actions) || actions.length === 0) {
-    container.innerHTML = "";
+    container.innerHTML = `<div class="action-list-empty">${t("chord.actions.empty")}</div>`;
     return;
   }
 
+  // Chord id → 图标 + 副标题(0.8.7 UX 重排:一眼看懂每个 Chord 做啥)
+  const CHORD_META = {
+    screenshot: { icon: "🖼", subtitle: t("chord.action.screenshot.subtitle") },
+    selection: { icon: "✂️", subtitle: t("chord.action.selection.subtitle") },
+    clipboard_history: { icon: "📋", subtitle: t("chord.action.clipboard_history.subtitle") },
+  };
+
   container.innerHTML = actions
     .map((a) => {
-      const combo = `Alt+${a.key.toUpperCase()}`;
-      return `<div class="setting-row" data-chord-id="${escapeHtml(a.id)}">
-        <label class="setting-label">${combo} · ${escapeHtml(a.label)}</label>
-        <label class="switch">
+      const meta = CHORD_META[a.id] || { icon: "•", subtitle: "" };
+      const combo = `Alt + ${a.key.toUpperCase()}`;
+      const rowClass = a.enabled ? "" : "is-disabled";
+      const subtitleHtml = meta.subtitle
+        ? `<div class="action-subtitle">${escapeHtml(meta.subtitle)}</div>`
+        : "";
+      return `<div class="action-list-row ${rowClass}" data-chord-id="${escapeHtml(a.id)}">
+        <div class="action-icon">${meta.icon}</div>
+        <div class="action-kbd">${combo}</div>
+        <div class="action-info">
+          <div class="action-title">${escapeHtml(a.label)}</div>
+          ${subtitleHtml}
+        </div>
+        <label class="switch action-toggle">
           <input type="checkbox" class="chord-action-toggle" data-id="${escapeHtml(a.id)}" ${a.enabled ? "checked" : ""} />
           <span class="slider"></span>
         </label>
@@ -634,7 +684,11 @@ async function loadChordActions() {
   }
 
   container.querySelectorAll(".chord-action-toggle").forEach((el) => {
-    el.addEventListener("change", save);
+    el.addEventListener("change", (e) => {
+      const row = e.target.closest(".action-list-row");
+      if (row) row.classList.toggle("is-disabled", !e.target.checked);
+      save();
+    });
   });
 }
 
@@ -1226,8 +1280,9 @@ function bindPluginCardEvents(plugin) {
 
   card.querySelector(".plugin-enabled")?.addEventListener("change", async (e) => {
     const ok = await save(e.target.checked);
-    if (ok) flash(card, e.target.checked ? t("plugin.enabled") : t("plugin.disabled"));
-    else e.target.checked = !e.target.checked; // 回滚
+    // 0.8.7 UX 统一:自动保存静默成功——toggle 状态本身即反馈,不再 flash"已启用/已禁用"。
+    // 失败态由 save() 内部 flash 报错并在这里回滚。
+    if (!ok) e.target.checked = !e.target.checked;
   });
 
   card.querySelector(".plugin-save")?.addEventListener("click", async () => {
@@ -1818,8 +1873,9 @@ if (autosuggestTabKeyEl) autosuggestTabKeyEl.addEventListener("change", saveAuto
 // ── Chord 总控 + 剪贴板开关（0.8.5 §6.6）──────────────────────────────────
 
 async function saveChordToggles() {
-  const chordEnabled = document.getElementById("chord-enabled")?.checked !== false;
-  const chordHintVisible = document.getElementById("chord-hint-visible")?.checked !== false;
+  // checkbox.checked 是纯 boolean; 用 === true 精确读取(0.8.7:chord 默认关,不再兜底 true)
+  const chordEnabled = document.getElementById("chord-enabled")?.checked === true;
+  const chordHintVisible = document.getElementById("chord-hint-visible")?.checked === true;
   try {
     await invoke("update_chord_toggles", { chordEnabled, chordHintVisible });
     if (currentConfig) {
@@ -1847,8 +1903,7 @@ const chordEnabledEl = document.getElementById("chord-enabled");
 if (chordEnabledEl) chordEnabledEl.addEventListener("change", saveChordToggles);
 const chordHintVisibleEl = document.getElementById("chord-hint-visible");
 if (chordHintVisibleEl) chordHintVisibleEl.addEventListener("change", saveChordToggles);
-const clipboardEnabledEl = document.getElementById("clipboard-enabled");
-if (clipboardEnabledEl) clipboardEnabledEl.addEventListener("change", saveClipboardEnabled);
+// #clipboard-enabled 已随 0.8.7 UX 重排迁至上下文卡的动态渲染 body,绑定在 loadContextConfig 内完成
 
 
 // ── 日志 ─────────────────────────────────────────────────────────────────────
