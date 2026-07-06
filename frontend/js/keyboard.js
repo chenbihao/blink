@@ -204,3 +204,17 @@ export function stopAltPoll() {
     setAlt(false);
   }
 }
+
+/**
+ * chord 配置就绪后补检 Alt 态（lifecycle.js chord.refresh() 完成后调）。
+ *
+ * 修首次唤起竞态：shown 时 chord.refresh()（async 未 await）和 startAltPoll() 同时启动，
+ * 若 config IPC 慢于首个 poll tick（首启冷启动常见），用户正按着 Alt 但 chordEnabled
+ * 还是 false → chord-visible 不设置 → 用户松手后 config 才到 → 错过。
+ * refresh 完成后调此函数，用已知 altLast 重判一次即可（不重新查物理态，避免异步开销）。
+ */
+export function recheckAlt() {
+  if (altLast) {
+    setAlt(true);
+  }
+}

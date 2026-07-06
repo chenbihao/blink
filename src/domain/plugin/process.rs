@@ -8,6 +8,7 @@
 //! - Windows:CREATE_NO_WINDOW 防控制台子进程弹窗。
 
 use std::collections::HashMap;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -122,6 +123,7 @@ fn probe_version(
 ) -> (Option<String>, bool) {
     let output = match std::process::Command::new(exe_path)
         .arg(version_arg)
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
     {
         Ok(o) => o,

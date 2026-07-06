@@ -9,6 +9,7 @@
 //! 0.7.4: 两层缓存架构 — 内存 LRU(200) + SQLite BLOB 持久化。
 
 use std::collections::HashMap;
+use std::os::windows::process::CommandExt;
 use std::sync::Mutex;
 use std::time::{Instant, SystemTime};
 
@@ -27,6 +28,9 @@ use sqlx::SqlitePool;
 
 /// 默认提取尺寸（物理像素）。32 足够列表项显示，高 DPI 下 GetImage 会按需给更大位图。
 const ICON_SIZE: i32 = 32;
+
+/// Windows: CREATE_NO_WINDOW 防控制台子进程弹窗。
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// 内存 LRU 缓存容量。
 const MEMORY_CACHE_CAPACITY: usize = 200;
@@ -348,6 +352,7 @@ fn get_app_user_model_id(package_family_name: &str) -> Option<String> {
     // 执行 PowerShell 命令
     let output = std::process::Command::new("powershell")
         .args(["-NoProfile", "-Command", &ps_command])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .ok()?;
 

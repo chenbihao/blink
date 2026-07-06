@@ -5,7 +5,7 @@ import { queryEl } from "./dom.js";
 import * as results from "./results.js";
 import * as search from "./search.js";
 import * as chord from "./chord.js";
-import { clearAlt, startAltPoll, stopAltPoll } from "./keyboard.js";
+import { clearAlt, startAltPoll, stopAltPoll, recheckAlt } from "./keyboard.js";
 import { applyThemeFromConfig } from "./theme.js";
 import { applyI18nFromConfig } from "./i18n.js";
 
@@ -28,7 +28,7 @@ export function init() {
     // candidate,该调用现在的作用是拿 `response.suggestion` 走 Ghost 通道——函数名保留,
     // 内部实现在 search.js 已重写。
     search.fetchContextSuggestions();
-    chord.refresh(); // 0.8.5：拉 Chord 动作列表渲染增强菜单
+    chord.refresh().then(recheckAlt); // 0.8.5：拉 Chord 动作列表渲染增强菜单；就绪后补检 Alt 态（修首次唤起竞态）
     startAltPoll(); // 0.8.5：轮询 Alt 物理态驱动 alt-active（WebView2 不转发 Alt keydown）
   });
 

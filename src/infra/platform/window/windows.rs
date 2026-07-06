@@ -547,9 +547,9 @@ pub fn wait_frame_after_hide(app: &AppHandle) {
 
     let t0 = Instant::now();
 
-    // DwmFlush x 2：等 DWM 完成一次不含主窗的新合成（cloak 后瞬时生效，两次 flush 兜底）
+    // DwmFlush x 1：cloak 后瞬时生效，一次 flush 保证 DWM 完成不含主窗的新合成。
+    // 0.8.8 优化：从 2 次减到 1 次，实测截图无残影，省 ~10ms。
     unsafe {
-        let _ = DwmFlush();
         let _ = DwmFlush();
     }
     let t_flush = t0.elapsed();
@@ -580,6 +580,90 @@ pub fn wait_frame_after_hide(app: &AppHandle) {
         visible_final = ?visible_final,
         "wait_frame_after_hide 完成"
     );
+}
+
+/// 后台预热次级窗口：延迟创建 chord-ball / chord-screenshot / context-menu 并立即隐藏。
+///
+/// WebView2 首次建实例 300~400ms，预热后 show 只是切可见性 (<50ms)。
+/// 代价：常驻内存 +10~20MB × 3；收益：Alt+A / 右键菜单 / 悬浮球首次触发无感。
+pub fn preheat_secondary_windows(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        // 等主窗稳定 + 前端加载完毕，不与启动路径抢资源
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        tracing::debug!("preheat: 开始预热次级窗口");
+
+        // --- chord-ball（悬浮球，48×48 透明无焦点） ---
+        if app.get_webview_window("chord-ball").is_none() {
+            use tauri::{WebviewUrl, WebviewWindowBuilder};
+            match WebviewWindowBuilder::new(&app, "chord-ball", WebviewUrl::App("chord-ball.html".into()))
+                .title("")
+                .inner_size(48.0, 48.0)
+                .decorations(false)
+                .transparent(true)
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .shadow(false)
+                .focused(false)
+                .visible(false)
+                .build()
+            {
+                Ok(win) => {
+                    if let Ok(hwnd) = win.hwnd() {
+                        apply_no_activate(HWND(hwnd.0 as _));
+                    }
+                    tracing::debug!("preheat: chord-ball ✓");
+                }
+                Err(e) => tracing::warn!(error = %e, "preheat: chord-ball 失败"),
+            }
+        }
+
+        // --- chord-screenshot（截图 overlay，透明全屏层） ---
+        if app.get_webview_window("chord-screenshot").is_none() {
+            use tauri::{WebviewUrl, WebviewWindowBuilder};
+            match WebviewWindowBuilder::new(&app, "chord-screenshot", WebviewUrl::App("chord-screenshot.html".into()))
+                .title("")
+                .inner_size(1920.0, 1080.0) // 默认尺寸，实际使用时 place_at_physical 会覆盖
+                .decorations(false)
+                .transparent(true)
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .shadow(false)
+                .focused(false)
+                .visible(false)
+                .build()
+            {
+                Ok(_) => tracing::debug!("preheat: chord-screenshot ✓"),
+                Err(e) => tracing::warn!(error = %e, "preheat: chord-screenshot 失败"),
+            }
+        }
+
+        // --- context-menu（右键菜单，非透明小窗） ---
+        if app.get_webview_window("context-menu").is_none() {
+            use tauri::{WebviewUrl, WebviewWindowBuilder};
+            match WebviewWindowBuilder::new(&app, "context-menu", WebviewUrl::App("contextmenu-popup.html".into()))
+                .title("")
+                .inner_size(200.0, 200.0) // 默认尺寸，实际使用时会 resize
+                .decorations(false)
+                .transparent(false)
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .focused(false)
+                .resizable(false)
+                .visible(false)
+                .build()
+            {
+                Ok(win) => {
+                    if let Ok(hwnd) = win.hwnd() {
+                        force_topmost(HWND(hwnd.0 as _));
+                    }
+                    tracing::debug!("preheat: context-menu ✓");
+                }
+                Err(e) => tracing::warn!(error = %e, "preheat: context-menu 失败"),
+            }
+        }
+
+        tracing::debug!("preheat: 预热完成");
+    });
 }
 
 pub fn open_settings(app: &AppHandle) {

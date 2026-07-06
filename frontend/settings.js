@@ -2217,6 +2217,45 @@ async function loadAboutInfo() {
   } catch (e) {
     console.error("loadAboutInfo failed:", e);
   }
+
+  // 检查更新按钮
+  const checkBtn = document.getElementById("about-check-update");
+  if (checkBtn) {
+    checkBtn.addEventListener("click", () => checkForUpdate(checkBtn));
+  }
+}
+
+async function checkForUpdate(btn) {
+  const el = document.getElementById("about-update");
+  if (!el) return;
+
+  // 检查中
+  btn.disabled = true;
+  btn.textContent = t("about.update.checking");
+  el.hidden = true;
+
+  try {
+    const result = await invoke("check_update");
+    if (result.has_update) {
+      el.hidden = false;
+      el.innerHTML = `${t("about.update.available", { version: result.latest_version })} · <a href="#" class="about-update-link" data-external>${t("about.update.download")}</a>`;
+      el.querySelector(".about-update-link").addEventListener("click", (e) => {
+        e.preventDefault();
+        openExternalUrl(result.release_url);
+      });
+      btn.textContent = t("about.update.check");
+    } else {
+      el.hidden = false;
+      el.textContent = t("about.update.latest");
+      btn.textContent = t("about.update.check");
+    }
+  } catch (e) {
+    console.error("checkForUpdate failed:", e);
+    el.hidden = false;
+    el.textContent = t("about.update.failed");
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // ── 性能统计（调试 Tab）──────────────────────────────────────────────────────

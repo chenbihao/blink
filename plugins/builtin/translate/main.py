@@ -20,6 +20,7 @@ import hashlib
 import hmac
 import json
 import random
+import re
 import sys
 import time
 import uuid
@@ -40,6 +41,26 @@ LANG_MAP = {
     "ja": {"youdao": "ja", "baidu": "jp", "deepl": "JA"},
     "ko": {"youdao": "ko", "baidu": "kor", "deepl": "KO"},
 }
+
+
+def _preprocess_code_identifiers(text: str) -> str:
+    """拆分程序员命名风格，让翻译 API 能正确理解。
+
+    处理：
+      - snake_case / SCREAMING_SNAKE → 空格分隔
+      - camelCase / PascalCase → 空格分隔（连续大写缩写保持整体，如 HTTP、URL）
+      - kebab-case → 空格分隔
+
+    单个单词和中文不受影响（正则不匹配 = 原样返回）。
+    """
+    # 下划线 / 连字符 → 空格
+    text = re.sub(r'[_\-]+', ' ', text)
+    # camelCase / PascalCase 拆分：
+    #   大写+小写前断开（HTTPSConnection → HTTPS Connection）
+    #   小写+大写前断开（getUserName → get UserName）
+    text = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', text)
+    text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+    return text.strip()
 
 
 def _detect_lang(text: str) -> str:
@@ -424,6 +445,11 @@ def handle_query(query_id: str, query: str, settings: Optional[Dict[str, Any]] =
     if not text:
         return {"id": query_id, "items": []}
 
+    # 程序员命名风格预处理：snake_case / camelCase / SCREAMING_SNAKE → 空格分隔
+    # 在语言检测前执行，帮助识别为英文而非乱码
+    original_text = text  # 保留原始输入用于结果显示/复制
+    text = _preprocess_code_identifiers(text)
+
     # 自动交换语言
     target_lang = _auto_swap_lang(text, target_lang)
 
@@ -447,23 +473,36 @@ def handle_query(query_id: str, query: str, settings: Optional[Dict[str, Any]] =
     items = [
         {
             "title": f"📝 {result}",
-            "subtitle": f"按 Enter 复制译文 | 原文: {text[:50]}{'...' if len(text) > 50 else ''}",
+            "subtitle": f"按 Enter 复制译文 | 原文: {original_text[:50]}{'...' if len(original_text) > 50 else ''}",
             "score": 1.0,
             "action": {
                 "type": "copy",
                 "text": result
             }
         },
-        {
-            "title": f"📄 {text[:60]}{'...' if len(text) > 60 else ''}",
-            "subtitle": "按 Enter 复制原文",
-            "score": 0.8,
+    ]
+
+    # 预处理改变了文本 → 额外提供拆分后的版本供复制
+    if text != original_text:
+        items.append({
+            "title": f"🔤 {text}",
+            "subtitle": "按 Enter 复制拆分后的命名 | 来自命名风格预处理",
+            "score": 0.9,
             "action": {
                 "type": "copy",
                 "text": text
             }
+        })
+
+    items.append({
+        "title": f"📄 {original_text[:60]}{'...' if len(original_text) > 60 else ''}",
+        "subtitle": "按 Enter 复制原文",
+        "score": 0.8,
+        "action": {
+            "type": "copy",
+            "text": original_text
         }
-    ]
+    })
 
     return {"id": query_id, "items": items}
 

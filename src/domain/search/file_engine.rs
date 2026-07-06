@@ -35,6 +35,8 @@ pub struct FileEngine {
     config: Arc<RwLock<FileSearchConfig>>,
     /// Everything 探测状态
     everything_status: Arc<RwLock<EverythingStatus>>,
+    /// 上次探测时间（用于 Unavailable 状态下定期重试）
+    last_probe_at: Arc<RwLock<Option<Instant>>>,
     /// reqwest 客户端（复用连接）
     client: reqwest::Client,
     /// 本地目录 Fallback 缓存
@@ -108,6 +110,7 @@ impl FileEngine {
         Self {
             config: Arc::new(RwLock::new(config)),
             everything_status: Arc::new(RwLock::new(EverythingStatus::Unknown)),
+            last_probe_at: Arc::new(RwLock::new(None)),
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(3))
                 .build()
@@ -146,10 +149,23 @@ impl FileEngine {
 
     /// 搜索 Everything HTTP API。
     async fn search_everything(&self, port: u16, query: &str, max_results: u32) -> Vec<SearchItem> {
-        // 先探测（首次搜索时）
+        // Unavailable 状态下定期重试（每 30 秒一次，兼容后续启动 Everything 的场景）
+        const RETRY_INTERVAL: Duration = Duration::from_secs(30);
+
         {
             let mut status = self.everything_status.write().await;
-            if *status == EverythingStatus::Unknown {
+            let should_retry = match *status {
+                EverythingStatus::Unknown => true,
+                EverythingStatus::Unavailable => {
+                    let last = self.last_probe_at.read().await;
+                    last.map_or(true, |t| t.elapsed() >= RETRY_INTERVAL)
+                }
+                EverythingStatus::Available => false,
+            };
+
+            if should_retry {
+                let now = Instant::now();
+                *self.last_probe_at.write().await = Some(now);
                 *status = if self.probe_everything(port).await {
                     tracing::debug!("Everything HTTP Server 探测成功，端口 {port}");
                     EverythingStatus::Available
@@ -476,8 +492,9 @@ impl SearchEngine for FileEngine {
     }
 
     fn start(&self) {
-        // 后台异步探测 Everything 状态（仅在需要时）
+        // 后台异步探测 Everything 状态（带重试，兼容 Everything 比 Blink 启动慢的场景）
         let status = self.everything_status.clone();
+        let last_probe_at = self.last_probe_at.clone();
         let client = self.client.clone();
         let config = self.config.clone();
 
@@ -493,20 +510,33 @@ impl SearchEngine for FileEngine {
             }
 
             let port = cfg.everything_port;
-            let url = format!("http://localhost:{port}/?search=__blink_probe__&json=1&count=1");
-            let available = match client.get(&url).send().await {
-                Ok(resp) => resp.status().is_success(),
-                Err(_) => false,
-            };
+            drop(cfg); // 释放读锁
 
-            let mut s = status.write().await;
-            *s = if available {
-                tracing::info!("Everything HTTP Server 可用，端口 {port}");
-                EverythingStatus::Available
-            } else {
-                tracing::info!("Everything HTTP Server 不可用，文件搜索降级");
-                EverythingStatus::Unavailable
-            };
+            // 最多重试 3 次，间隔 2 秒（兼容 Everything 比 Blink 启动慢的场景）
+            let max_retries = 3u32;
+            for attempt in 1..=max_retries {
+                let url = format!("http://localhost:{port}/?search=__blink_probe__&json=1&count=1");
+                let available = match client.get(&url).send().await {
+                    Ok(resp) => resp.status().is_success(),
+                    Err(_) => false,
+                };
+
+                if available {
+                    tracing::info!("Everything HTTP Server 可用，端口 {port}（第 {attempt} 次探测）");
+                    *status.write().await = EverythingStatus::Available;
+                    *last_probe_at.write().await = Some(Instant::now());
+                    return;
+                }
+
+                if attempt < max_retries {
+                    tracing::debug!("Everything HTTP Server 探测失败，{attempt}/{max_retries}，2 秒后重试");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            }
+
+            tracing::info!("Everything HTTP Server 不可用（已重试 {max_retries} 次），文件搜索降级");
+            *status.write().await = EverythingStatus::Unavailable;
+            *last_probe_at.write().await = Some(Instant::now());
         });
     }
 

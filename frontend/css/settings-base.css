@@ -162,3 +162,44 @@ h2:active {
   font-size: 12px;
   line-height: 1.5;
 }
+
+/* ── 关于面板：更新提示（紧跟版本号） ── */
+
+.about-check-btn {
+  margin-left: 8px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 4px);
+  background: transparent;
+  color: var(--text-sub);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color var(--transition-fast), color var(--transition-fast);
+}
+
+.about-check-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.about-check-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.about-update {
+  margin-left: 8px;
+  padding-left: 10px;
+  font-size: 12px;
+  color: var(--text-faint);
+  border-left: 1px solid var(--border);
+}
+
+.about-update-link {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.about-update-link:hover {
+  text-decoration: underline;
+}

@@ -240,6 +240,12 @@ const DICT = {
     "about.stack.label": "技术栈",
     "about.license.label": "许可",
     "about.repository.label": "仓库",
+    "about.update.check": "检查更新",
+    "about.update.checking": "检查中…",
+    "about.update.available": "新版本 v{version} 可用",
+    "about.update.download": "前往下载",
+    "about.update.latest": "已是最新版本",
+    "about.update.failed": "检查失败，请稍后重试",
 
     // ── 网络 Tab（动态渲染）──
     "network.title": "全局网络代理",
@@ -597,6 +603,12 @@ const DICT = {
     "about.stack.label": "Tech stack",
     "about.license.label": "License",
     "about.repository.label": "Repository",
+    "about.update.check": "Check for updates",
+    "about.update.checking": "Checking…",
+    "about.update.available": "New version v{version} available",
+    "about.update.download": "Download",
+    "about.update.latest": "Already up to date",
+    "about.update.failed": "Check failed, please try later",
 
     // ── Network tab (dynamic) ──
     "network.title": "Global Network Proxy",

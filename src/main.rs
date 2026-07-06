@@ -346,12 +346,8 @@ fn main() {
             app.manage(chord_registry);
             app.manage(action_registry);
 
-            // TODO(perf): 后台冷启动预热次级窗口 —— chord-screenshot / context-menu 首次显示
-            // 各要 300~400ms 冷启动（WebView2 建实例）。启动后延迟 2~3s 在后台一次性 build
-            // 好这些窗口然后立即 hide,后续 show 只是切可见性 (<50ms)。
-            //   - 代价:常驻内存 +10~20MB × N 个窗口
-            //   - 收益:Alt+A / 右键菜单等首次触发无感冷启动
-            //   - 触发时机:所有 setup 完成 + 前端主窗 shown 之后（不与启动性能路径抢资源）
+            // 后台预热次级窗口（3s 延迟，不阻塞启动；WebView2 冷启动 300~400ms → 预热后 show <50ms）
+            infra::platform::window::preheat_secondary_windows(app.handle().clone());
 
             // 持有服务列表,保证其生命周期与 app 一致。
             app.manage(services);
@@ -378,6 +374,7 @@ fn main() {
             app::commands::get_storage_info,
             app::commands::clear_history,
             app::commands::get_app_info,
+            app::commands::check_update,
             app::commands::resize_window,
             app::commands::get_config,
             app::commands::set_config,

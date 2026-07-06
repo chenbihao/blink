@@ -1,10 +1,10 @@
-//! 截图模块（0.8.7 §九）。
+//! 截图模块（0.8.7 §九，0.8.8 预编码优化）。
 //!
 //! **架构**：
-//! - `begin_session()` — 截取整个虚拟屏幕一次，BGRA 位图存进进程内 `SESSION`
+//! - `begin_session()` — 截取整个虚拟屏幕一次，**立即编码 PNG**，存进进程内 `SESSION`
 //! - `session_meta()` — 拿元数据（虚拟屏幕坐标 + 像素尺寸），供 overlay 定位窗口
-//! - `session_png()` — 把 SESSION 的完整位图编码 PNG，供 `blink-screenshot://` 协议返回
-//! - `crop_and_take(x, y, w, h)` — 按物理像素坐标裁剪，返回子矩形 BGRA
+//! - `session_png()` — 返回 SESSION 的**预编码 PNG** 字节（零编码延迟）
+//! - `crop(x, y, w, h)` — 按物理像素坐标裁剪，返回子矩形 BGRA
 //! - `end_session()` — 清空 SESSION（overlay 关闭时调；防内存驻留）
 //!
 //! **为什么改成 SESSION**：
@@ -23,6 +23,13 @@
 //!   debug 下每次处理 4 字节而不是逐字节 + auto-vectorize → swap 部分 10-14x 加速
 //! - `Cargo.toml` 里 dev profile 单独把 `png / miniz_oxide / flate2 / adler2` 开 opt=3：
 //!   这些 crate 是 DEFLATE 热路径，dev debug 循环慢 5-10x。整合 5x 提速
+//!
+//! **预编码 PNG**（0.8.8 优化）：
+//! 原流程：前端拉 `blink-screenshot://` → `session_png()` 现场编码 → 返回。
+//! 编码 2560x1440 全屏 PNG 在 dev 下 ~150ms，是用户感知延迟的最大瓶颈。
+//! 改后：`begin_session()` 截屏后立即编码 PNG 存进 `png_bytes`，`session_png()` 只读内存。
+//! 前端拉取时零编码延迟，总感知从 ~320ms 降到 ~170ms（dev）。
+//! 代价：SESSION 多占一份 PNG 内存（~10-30MB），`end_session()` 时一并释放。
 //!
 //! **纯逻辑抽出**：`crop_rgba` 是纯函数（BGRA 输入 + 矩形输出），带越界 clamp，
 //! 覆盖单测；平台相关的 BitBlt 走 `windows.rs`。
@@ -45,46 +52,58 @@ pub struct ScreenCaptureMeta {
     pub height: u32,
 }
 
-/// 完整截图会话状态（BGRA 位图 + 元数据）。
+/// 完整截图会话状态（BGRA 位图 + 预编码 PNG + 元数据）。
 ///
 /// **为什么存 BGRA 不存 RGBA**：BitBlt 原生输出 BGRA，写剪贴板 CF_DIB 也要 BGRA。
 /// SESSION 存 BGRA 可以省掉全屏 R↔B swap（3.7M 像素 x 3.5MB shuffle，低配机 ~30ms）。
 /// PNG 编码这个偏门路径承担按行 swap 成本（`encode_png` 内部处理）。
+///
+/// **为什么预编码 PNG**（0.8.8 优化）：
+/// 原流程：前端拉 `blink-screenshot://` → `session_png()` 现场编码 → 返回。
+/// 编码 2560x1440 全屏 PNG 在 dev 下 ~150ms，是用户感知延迟的最大瓶颈。
+/// 改后：`begin_session()` 截屏后立即编码 PNG 存进 `png_bytes`，`session_png()` 只读内存。
+/// 前端拉取时零编码延迟，总感知从 ~320ms 降到 ~170ms（dev）。
 struct Session {
     /// BGRA、top-down、每行 `width * 4` 字节。
     pixels: Vec<u8>,
+    /// 预编码的 PNG 字节（`begin_session` 时编码好，`session_png` 直接返回）。
+    png_bytes: Vec<u8>,
     meta: ScreenCaptureMeta,
 }
 
 static SESSION: RwLock<Option<Session>> = RwLock::new(None);
 
-/// 启动截图会话：截取整个虚拟屏幕，存进 SESSION，返回元数据。
+/// 启动截图会话：截取整个虚拟屏幕，**立即编码 PNG**，存进 SESSION，返回元数据。
 ///
 /// **调用时机**：主窗已隐藏、overlay 尚未显示。这样 BitBlt 拍到的是"没有 blink"的桌面。
+///
+/// **预编码 PNG**（0.8.8 优化）：截屏后立即编码 PNG 存进 `png_bytes`，前端拉取时
+/// `session_png()` 只读内存返回，省掉 ~150ms 编码延迟。
 #[cfg(target_os = "windows")]
 pub fn begin_session() -> Result<ScreenCaptureMeta, String> {
     let (pixels, meta) = windows::capture_virtual_screen()?;
+
+    // 截屏后立即编码 PNG——此时主窗已 hide，BitBlt 不会拍到自己
+    let png_bytes = encode_png(&pixels, meta.width, meta.height)
+        .map_err(|e| format!("预编码 PNG 失败: {e}"))?;
+
     let meta_copy = meta;
     *SESSION.write().map_err(|e| format!("SESSION 写锁失败: {e}"))? =
-        Some(Session { pixels, meta });
-    tracing::debug!(?meta_copy, "截图 SESSION 已建立");
+        Some(Session { pixels, png_bytes, meta });
+    tracing::debug!(?meta_copy, "截图 SESSION 已建立（含预编码 PNG）");
     Ok(meta_copy)
 }
 
-/// 把 SESSION 的完整位图编码为 PNG。SESSION 为空返回 None。
+/// 返回 SESSION 的预编码 PNG 字节。SESSION 为空返回 None。
 ///
 /// 供 `blink-screenshot://capture` 协议使用；overlay 前端 `<img src>` 拉这个。
-/// SESSION 存的是 BGRA（BitBlt 原生），PNG 需要 RGBA——编码前**按行 swap**（不修改 SESSION）。
+///
+/// **0.8.8 优化**：PNG 已在 `begin_session()` 时编码好存进 `png_bytes`，
+/// 这里只读内存返回，零编码延迟。
 pub fn session_png() -> Option<Vec<u8>> {
     let guard = SESSION.read().ok()?;
     let s = guard.as_ref()?;
-    match encode_png(&s.pixels, s.meta.width, s.meta.height) {
-        Ok(bytes) => Some(bytes),
-        Err(e) => {
-            tracing::error!(error = %e, "SESSION PNG 编码失败");
-            None
-        }
-    }
+    Some(s.png_bytes.clone())
 }
 
 /// 按物理像素坐标裁剪 SESSION 的位图，返回 **BGRA** 子矩形 + 尺寸。

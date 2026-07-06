@@ -80,6 +80,7 @@
       let endX = 0, endY = 0;
       let isDragging = false;
       let sent = false; // 防止 mouseup 触发两次
+      let clickTimeout = null; // 双击检测：单击后 200ms 内再点 → 全屏截图
 
       loadScreenshot();
 
@@ -122,7 +123,7 @@
       // ── 鼠标事件 ──────────────────────────────────────
 
       canvas.addEventListener("mousedown", (e) => {
-        if (!screenshot) return;
+        if (!screenshot || e.button !== 0) return; // 只响应左键
         isDragging = true;
         sent = false;
         startX = e.offsetX;
@@ -146,14 +147,37 @@
 
         const rect = norm(startX, startY, endX, endY);
         if (rect.w < 3 || rect.h < 3) {
-          // 太小视为"单击取消"（QQ/Snipping Tool 默认行为）——直接关 overlay,
-          // 免得用户还得再按一次 ESC。
-          hideScreenshotOverlay();
+          // 太小视为"单击"——延迟隐藏，给双击留窗口（dblclick 在第二次 mouseup 后才触发）
+          if (clickTimeout) clearTimeout(clickTimeout);
+          clickTimeout = setTimeout(() => {
+            clickTimeout = null;
+            hideScreenshotOverlay();
+          }, 200);
           return;
         }
         if (sent) return;
         sent = true;
         sendSelection(rect);
+      });
+
+      // 双击全屏截图：两次快速点击（<200ms，位置相近）→ 截取整个屏幕
+      canvas.addEventListener("dblclick", (e) => {
+        if (!screenshot || sent) return;
+        if (clickTimeout) { clearTimeout(clickTimeout); clickTimeout = null; }
+        sent = true;
+        // canvas.width/height 就是物理像素（BitBlt 产出），直接传
+        captureRegion(0, 0, canvas.width, canvas.height).catch((err) => {
+          console.error("全屏截图失败", err);
+          errorHint.textContent = "截图保存失败：" + err;
+          errorHint.style.display = "block";
+          sent = false;
+        });
+      });
+
+      // 右键取消截图
+      canvas.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        hideScreenshotOverlay();
       });
 
       document.addEventListener("keydown", (e) => {

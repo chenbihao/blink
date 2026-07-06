@@ -381,6 +381,73 @@ pub fn get_app_info() -> serde_json::Value {
     })
 }
 
+/// 设置页-关于：检查 GitHub 最新 Release 版本。
+/// 返回 `{ has_update, current_version, latest_version, release_url }`。
+/// 网络失败或解析异常时静默返回 `has_update: false`（不打扰用户）。
+#[tauri::command]
+pub async fn check_update() -> serde_json::Value {
+    let current = env!("CARGO_PKG_VERSION");
+    let repo = env!("CARGO_PKG_REPOSITORY");
+    // 从 "https://github.com/owner/repo" 提取 "owner/repo"
+    let repo_path = repo
+        .trim_start_matches("https://github.com/")
+        .trim_start_matches("http://github.com/")
+        .trim_end_matches('/');
+
+    let api_url = format!("https://api.github.com/repos/{repo_path}/releases/latest");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .user_agent("blink-updater")
+        .build()
+        .unwrap_or_default();
+
+    let Ok(resp) = client.get(&api_url).send().await else {
+        tracing::debug!("check_update: 请求 GitHub API 失败");
+        return serde_json::json!({ "has_update": false, "current_version": current });
+    };
+    if !resp.status().is_success() {
+        tracing::debug!("check_update: GitHub API 返回 {}", resp.status());
+        return serde_json::json!({ "has_update": false, "current_version": current });
+    }
+    let Ok(body) = resp.json::<serde_json::Value>().await else {
+        tracing::debug!("check_update: 解析 JSON 失败");
+        return serde_json::json!({ "has_update": false, "current_version": current });
+    };
+
+    let tag = body["tag_name"].as_str().unwrap_or("");
+    let latest = tag.trim_start_matches('v');
+    let release_url = body["html_url"]
+        .as_str()
+        .unwrap_or(&format!("https://github.com/{repo_path}/releases/latest"))
+        .to_string();
+
+    let has_update = version_gt(latest, current);
+    if has_update {
+        tracing::info!("发现新版本: {current} -> {latest}");
+    }
+
+    serde_json::json!({
+        "has_update": has_update,
+        "current_version": current,
+        "latest_version": latest,
+        "release_url": release_url,
+    })
+}
+
+/// 语义化版本比较：a > b 则返回 true。
+fn version_gt(a: &str, b: &str) -> bool {
+    let parse = |s: &str| -> (u64, u64, u64) {
+        let parts: Vec<u64> = s.split('.').filter_map(|p| p.parse().ok()).collect();
+        (
+            parts.first().copied().unwrap_or(0),
+            parts.get(1).copied().unwrap_or(0),
+            parts.get(2).copied().unwrap_or(0),
+        )
+    };
+    parse(a) > parse(b)
+}
+
 /// 设置页-存储：清空历史记录。
 #[tauri::command]
 pub async fn clear_history(app: tauri::AppHandle) -> Result<(), String> {
@@ -1383,4 +1450,30 @@ pub async fn set_config_section(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::version_gt;
+
+    #[test]
+    fn version_gt_basic() {
+        assert!(version_gt("0.9.0", "0.8.8"));
+        assert!(version_gt("1.0.0", "0.99.99"));
+        assert!(!version_gt("0.8.8", "0.8.8"));
+        assert!(!version_gt("0.8.7", "0.8.8"));
+    }
+
+    #[test]
+    fn version_gt_patch() {
+        assert!(version_gt("0.8.9", "0.8.8"));
+        assert!(!version_gt("0.8.8", "0.8.9"));
+    }
+
+    #[test]
+    fn version_gt_malformed() {
+        // 不完整版本号也能比较（缺失部分按 0 算）
+        assert!(version_gt("0.9", "0.8.8"));
+        assert!(!version_gt("0.8", "0.8.1"));
+    }
 }

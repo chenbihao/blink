@@ -98,19 +98,47 @@ fn build_plugins(copy_to_bin: bool) {
     }
 }
 
+/// 仅将已编译的插件 exe 拷贝到 plugins/builtin/<id>/bin/（不重新编译）。
+/// 用于 CI: 先 `cargo xtask plugins` 编译，再 `cargo xtask copy` 拷贝，最后 `cargo tauri build`。
+fn copy_plugins() {
+    let root = workspace_root();
+    let target_release = root.join("target").join("release");
+    let builtin_dir = root.join("plugins").join("builtin");
+
+    let rust_plugins = discover_rust_plugins();
+    println!("📦 拷贝 {} 个 Rust 插件到 bin ...", rust_plugins.len());
+
+    for id in &rust_plugins {
+        let pkg = format!("blink-plugin-{id}");
+        let src = target_release.join(format!("{pkg}.exe"));
+        if !src.exists() {
+            panic!("找不到 {pkg}.exe，请先运行 `cargo xtask plugins`");
+        }
+        let dest_dir = builtin_dir.join(id).join("bin");
+        std::fs::create_dir_all(&dest_dir)
+            .unwrap_or_else(|e| panic!("创建 {} 失败: {e}", dest_dir.display()));
+        let dest = dest_dir.join(format!("{pkg}.exe"));
+        std::fs::copy(&src, &dest)
+            .unwrap_or_else(|e| panic!("拷贝 {pkg}.exe 失败: {e}"));
+        println!("  {pkg}.exe -> {}", dest.display());
+    }
+    println!("✅ 插件拷贝完成");
+}
+
 fn main() {
     let task = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| panic!("用法: cargo xtask <plugins|release>"));
+        .unwrap_or_else(|| panic!("用法: cargo xtask <plugins|copy|release>"));
 
     match task.as_str() {
         "plugins" => build_plugins(false), // 开发期：仅编译，不复制到 bin
+        "copy" => copy_plugins(),          // CI：仅拷贝已编译的 exe 到 bin
         "release" => {
             build_plugins(true); // 打包期：编译 + 复制到 bin
             let root = workspace_root();
             println!("📦 cargo tauri build ...");
             run("cargo", &["tauri", "build"], &root);
         }
-        other => panic!("未知子命令: {other}\n用法: cargo xtask <plugins|release>"),
+        other => panic!("未知子命令: {other}\n用法: cargo xtask <plugins|copy|release>"),
     }
 }

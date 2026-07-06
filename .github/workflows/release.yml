@@ -44,9 +44,10 @@ jobs:
       # echo/ip/weather 编译为 release exe 并拷贝到 plugins/builtin/<id>/bin/。
       # 这些 *.exe 不入 git，必须现场生成；tauri 打包时作为 resources 随 MSI/NSIS。
       - name: 编译 Rust 插件
-        # xtask 编译插件并拷贝到 plugins/builtin/<id>/bin/（随 MSI resources 打包）。
-        # beforeBuildCommand 已移除：cwd 由 xtask 锚定，本地 `cargo xtask release` 与 CI 同源。
         run: cargo xtask plugins
+
+      - name: 拷贝插件到 bin
+        run: cargo xtask copy
 
       # ── 同步版本号：用 Git Tag 覆盖 tauri.conf.json 中的版本 ───────────────────
       - name: Sync version from Git tag
