@@ -59,7 +59,7 @@ Hold Alt while the main window is open; letter keys trigger actions directly:
 |---|---|
 | `Alt + Q` | Smart selection (floating ball, doesn't steal focus — select text in the origin app, click to confirm, main window restores with text filled) |
 | `Alt + C` | Clipboard history top-9 (press Alt+1~9 to quick-pick) |
-| `Alt + A` | Region screenshot (planned for 0.8.7) |
+| `Alt + A` | Region screenshot (area capture → clipboard / save) |
 
 ### Plugins & Ecosystem
 
@@ -111,8 +111,8 @@ Download the latest installer from [Releases](../../releases).
 | `Tab`         | Accept Ghost completion (`fy` → `fanyi `) or Context suggestion |
 | `Enter`       | Launch / copy result |
 | `PgUp` `PgDn` | Page up/down |
-| `Alt + Q`     | Chord: smart selection |
 | `Alt + C`     | Chord: clipboard history |
+| `Alt + A`     | Chord: region screenshot |
 | `Esc`         | Hide |
 
 ---
@@ -153,8 +153,9 @@ Read [`docs/production-design/`](docs/production-design/README.md) first:
 |---|---|---|
 | **0.1 ~ 0.7** | Core interaction → plugin ecosystem → clipboard history → perf stats | ✅ Done |
 | **0.8.0 ~ 0.8.5** | UIA selection / parameterized builtin actions / Ghost Text / translation Context / **four-domain architecture** / Chord foundation | ✅ Done |
-| **0.8.6** | Architecture hardening (physical skeleton for 0.9: Action trait / SuggestionProducer / ConfigStore) | 🚧 In progress |
-| **0.8.7** | Alt+A region screenshot | 📋 Planned |
+| **0.8.6** | Architecture hardening (physical skeleton for 0.9: Action trait / SuggestionProducer / ConfigStore / ConfigStore 6-shard + IPC generic) | ✅ Done |
+| **0.8.7** | Alt+A region screenshot (GDI capture + DWM Cloak + BGRA pipeline + fast PNG) | ✅ Done |
+| **0.8.8** | 0.8 wrap-up (docs sync + design tokens + cleanup) | ✅ Done |
 | **0.9** | AI Provider abstraction · Cloud AI plugin · AI Chat View · VectorRouter semantic matching | 📋 Planned |
 | **Beyond** | Proactive suggestions · Voice input · Plugin marketplace | 🔮 |
 

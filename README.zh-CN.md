@@ -59,7 +59,7 @@ Blink 不是启动器（launcher），是 **Universal Action Layer（统一操�
 |---|---|
 | `Alt + Q` | 划词翻译（独立悬浮球，去原应用选文本后 confirm，主窗还原 + 自动填充） |
 | `Alt + C` | 剪贴板历史 top-9（Alt+1~9 快速选中回填） |
-| `Alt + A` | 区域截图（0.8.7 规划中） |
+| `Alt + A` | 区域截图（框选区域 → 剪贴板 / 保存） |
 
 ### 插件与生态
 
@@ -111,8 +111,8 @@ Blink 不是启动器（launcher），是 **Universal Action Layer（统一操�
 | `Tab`         | 采纳 Ghost 补全（`fy` → `fanyi `）或采纳 Context 建议 |
 | `Enter`       | 启动 / 复制结果 |
 | `PgUp` `PgDn` | 翻页 |
-| `Alt + Q`     | Chord：划词翻译 |
 | `Alt + C`     | Chord：剪贴板历史 |
+| `Alt + A`     | Chord：区域截图 |
 | `Esc`         | 隐藏 |
 
 ---
@@ -153,8 +153,9 @@ cargo test --bin blink
 |---|---|---|
 | **0.1 ~ 0.7** | 基础交互 → 插件生态 → 剪贴板历史 → 性能统计 | ✅ 完成 |
 | **0.8.0 ~ 0.8.5** | UIA 划词 / 内置动作参数化 / Ghost Text / 翻译 Context / **四域架构** / Chord 交互底层 | ✅ 完成 |
-| **0.8.6** | 架构固化（为 0.9 铺物理骨架：Action trait / SuggestionProducer / ConfigStore） | 🚧 进行中 |
-| **0.8.7** | Alt+A 区域截图 | 📋 规划 |
+| **0.8.6** | 架构固化（为 0.9 铺物理骨架：Action trait / SuggestionProducer / ConfigStore / ConfigStore 6 分片 + IPC 泛型化） | ✅ 完成 |
+| **0.8.7** | Alt+A 区域截图（GDI 截屏 + DWM Cloak + BGRA 全链路 + 快速 PNG） | ✅ 完成 |
+| **0.8.8** | 0.8 收尾归档（文档同步 + 设计 token + 冗余清理） | ✅ 完成 |
 | **0.9** | AI Provider 抽象 · 云端 AI 插件 · AI Chat View · VectorRouter 语义匹配 | 📋 规划 |
 | **更远** | Proactive 主动建议 · 语音输入 · 插件市场 | 🔮 |
 
