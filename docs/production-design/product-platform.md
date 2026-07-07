@@ -120,22 +120,26 @@ Route 与前端协议已预留 view 字段——0.9 接 AI 对话时不改路由
 
 **违反流向的代码不应存在**——类型层拒绝 + 域接口收敛 + 单测按域拆分。
 
-### 5.1 三级路由模型
+### 5.1 路由模型
 
 ```
-用户输入 → RuleRouter（规则） → 命中 → 目标引擎子集
-         → 未命中 → VectorRouter（zvec） → 未命中 → AIRouter（云） → 全未命中 → Generic（全引擎召回）
+用户输入 → RuleRouter（规则） → 命中 → 直接执行（确定性快速通道）
+         → 未命中 → 前置过滤 → AI 路由（轻量模型，0.9） → 高置信 + 安全动作 → 执行
+                                                          → 不确定 / 需多轮 → 回退
+         → 全未命中 → Generic（全引擎召回）
 ```
 
-**完全属于 Routing 域**（§5.0）。三级路由器都接受 `(query, history, ranking_hint)`，都不看 Awareness。VectorRouter / AIRouter 是内部策略升级，不改变域边界。
+**完全属于 Routing 域**（§5.0）。路由器都接受 `(query, history, ranking_hint)`，都不看 Awareness。AI 路由是内部策略升级，不改变域边界。
 
-当前只实现 `RuleRouter`（keyword/regex），0.9 才接入 VectorRouter/AIRouter。trait 先定全，避免返工。
+当前只实现 `RuleRouter`（keyword/regex），0.9 接入 AI 路由（轻量模型做意图分类 + 抽参）。**AI 是回退决策者，不是默认路径**——确定性命中永远走快速通道（不过 AI），保护 P0（详见 §6.4）。
+
+> VectorRouter（向量语义匹配）原计划在 0.9，现已移出——LLM 路由更强，向量的归宿是后期 RAG / 记忆（0.11+）。
 
 ### 5.2 Route 不是 Intent（意图分类推迟）
 
 `route()` 返回 `Route`（呈现调度：Takeover/EngineTakeover/Mixed），而非语义枚举 `Intent`（OpenApp/Calculate/Plugin/Ai/Generic）。
 
-**理由**：`Intent` 的真实消费者（VectorRouter 语义分类、AIRouter）在 0.9 才出现。过早引入会造空抽象——路由层只需区分"怎么占用返回区"，不需要"用户想干什么"。等 0.9 有真实分类需求时，在 `Intent` 之上派生 `Route`。
+**理由**：`Intent` 的真实消费者（AI 路由的语义分类）在 0.9 才出现。过早引入会造空抽象——路由层只需区分"怎么占用返回区"，不需要"用户想干什么"。等 0.9 有真实分类需求时，在 `Intent` 之上派生 `Route`。
 
 ### 5.3 keyword 匹配
 
@@ -169,26 +173,57 @@ Suggestion 域是唯一能读 Awareness 的层，也是**AI 意图判定器的�
 
 ---
 
-## 6. AI 能力（方向已定，实现在 0.9）
+## 6. 护城河定位 + 统一 Tool 架构（0.9+ 智能化方向）
 
-### 6.1 AI 路由：逐级降级
+> 0.9+ 完整演进见 [phases/0.9-ai-layer.md](./phases/0.9-ai-layer.md) / [0.10-voice-agent.md](./phases/0.10-voice-agent.md) / [0.11-local-ecosystem.md](./phases/0.11-local-ecosystem.md)。本节只留产品级铁则。
 
-```
-规则判断 → 未命中 → 本地小模型（可选） → 不可用/置信度低 → 云模型
-```
+### 6.1 护城河：感知 + 执行，不是推理
 
-未装本地模型时，规则未命中直接降级到云模型。不默认全发 AI。
+Blink 不是「内置 AI 的启动器」，是**「本地 AI 的感知与执行层」**。推理大脑可插拔（任意 Provider / Agent），护城河是 Web AI 客户端够不着的三样：
 
-### 6.2 本地小模型 = 可选重型插件
+| 护城河 | 说明 | Web AI 能做到吗 |
+|---|---|---|
+| **全局感知** | 右 Alt 全屏全局唤起 + UIA 划词 + 剪贴板 + 前台应用 +（0.10）语音 | ❌ |
+| **本地执行** | 打开文件 / 运行命令 / 资源管理器定位 / 截图（系统权限） | ❌ |
+| **速度** | 唤起 &lt; 50ms、首个结果 &lt; 20ms | ❌ |
 
-- 本地生成模型内存占用大，不进 core
-- 作为**重型插件**，按需下载、显式启用；不启用则完全忽略
-- 推理栈：llama.cpp / whisper.cpp，走 GGUF/ONNX 量化
-- core 只依赖 `AIProvider` trait，具体实现由插件提供
+**产品铁则**：任何让 Blink 变成「纯对话壳子」的设计都要拒绝。AI 是消费者（调 Blink 的 tool）兼生产者（产 Suggestion），Blink 是身体。大脑可换，身体不可换。
 
-### 6.3 AI 对话 = takeover view
+### 6.2 一切皆 tool（统一架构）
 
-AI 对话不是 item 列表，而是 `view: chat` 的 takeover 区域——下方展开对话界面，走流式 JSONL。这是 §4.3 view 字段预留的目的。
+builtin / 插件 /（未来）MCP server / skill 归一为 **tool 模型**，走同一份能力描述 schema（向 MCP tool schema / OpenAI function calling 靠拢）。`Action` trait 进化为 tool-call 兼容入口。
+
+- **统一描述层，保留执行分层**：builtin 同进程的性能不为了「统一」牺牲成 IPC
+- **顺带解决**：builtin（Rust 枚举）与插件（JSON manifest）描述风格 / 调用方式不一致的两个老问题——「主窗口命令式参数如何转 CLI/IPC 参数」的统一中间表示，就是 schema 的 `parameters`
+- 细节见 [phases/0.9 §三](./phases/0.9-ai-layer.md)
+
+### 6.3 Provider 多档（能力供应商）
+
+Provider 不只是聊天 API，是**能力供应商**：LLM（`chat`/`chat_stream`）/ STT（`transcribe`，0.10）/ embedding（留 RAG）。一个 Provider 可只供一项（本地 whisper 只供 STT），也可全供（OpenAI）。
+
+三档配置（参考 Obsidian YOLO 式交互）：**路由模型**（意图分类 + 抽参，快、便宜、可本地）/ **轻量模型**（日常单轮）/ **主模型**（多步推理）。档位空缺自动降级。
+
+> **不照搬 YOLO 全自动执行**：危险动作必确认，四域信任边界不让步。细节见 [phases/0.9 §四](./phases/0.9-ai-layer.md)。
+
+### 6.4 两条路径铁则 + AI 反馈铁则
+
+- **确定性路径**（&lt; 1s）：命中规则 → 直接执行，**不过 AI**，保护 P0
+- **模糊意图路径**：未命中才走 AI 路由（AI 永远是**回退决策者**，不是默认路径）
+- **AI 反馈铁则**：AI 调用期间主窗口必有 loading / 过渡，**不能让用户死等**——不能把延迟从「唤起」挪到「路由」，那是体验等价退化
+
+### 6.5 三步走演进
+
+| 版本 | 主题 |
+|---|---|
+| **0.9** | Agent 地基：统一 tool 架构 + Provider + **纯文本**闭环（零语音） |
+| **0.10** | 语音指令闭环：STT + 双 chord + Agent 窗口（架构不变，只加感知层） |
+| **0.11** | 本地化与生态：本地模型 / skill 化 / MCP 双向 / RAG 记忆 |
+
+**解耦智慧**：先验证大脑（0.9 文本闭环），再加感官（0.10 语音）。如果 0.9 就发现「AI 路由调本地能力」有坑，能在投语音之前止损。
+
+### 6.6 AI 对话 = takeover view（0.10 起）
+
+AI 对话不是 item 列表，而是 `view: chat` 的 takeover 区域——下方展开对话界面，走流式 JSONL。这是 §4.3 view 字段预留的目的。Agent 窗口在 0.10 落地，展开需用户确认（Alt+1），不自动抢焦点。
 
 ---
 
@@ -198,7 +233,7 @@ AI 对话不是 item 列表，而是 `view: chat` 的 takeover 区域——下�
 
 | 域 | 统一入口 | 0.9 AI 如何接入 |
 |---|---|---|
-| **Execution** | `Action` trait + `ActionOutcome` | AI Provider 产 `ChatAction`/`RunAgentAction` 直接实现 `Action` |
+| **Execution** | `Action` trait + `ActionOutcome` | AI 产 tool-call 候选，经 `Action` 执行（0.9 tool-call 进化） |
 | **Suggestion** | `SuggestionProducer` trait + `SuggestionArbiter` | `AIProducer` register 到 arbiter，三源竞争 |
 | **配置** | `ConfigStore<T>` 泛型 + `blink://config-changed` 广播 | AI Provider 配置 `impl ConfigKey for AIConfig`，前端零脚手架 |
 
@@ -222,7 +257,7 @@ pub enum ActionOutcome {
 - **BuiltinAction** → 每个 kind 一个 struct，各自 `impl Action`
 - **PluginBackedAction** → SearchService 拿到 PluginItem 时包装
 - **ChordAction** → 直接实现 `Action`（副作用走 `Emit`）
-- **（0.9）AI Action** → 由 AI Provider 插件产出
+- **（0.9）AI Action** → AI 产 tool-call 候选，经统一 `Action` 执行
 
 前端契约 `Action { kind, payload }` 保持不变——只是"投影"。
 
@@ -262,8 +297,8 @@ pub struct SuggestionArbiter {
 ### 7.4 与 0.9 AI 的对齐
 
 三个 trait 就是 0.9 AI 的三个入口：
-- AI 产的**动作** → `Action`
-- AI 判定的**建议** → `SuggestionProducer`
-- AI 的**配置** → `ConfigStore`
+- AI 产的 **tool-call 候选 / 动作** → `Action`
+- AI 判定的 **建议** → `SuggestionProducer`
+- AI 的 **配置** → `ConfigStore`
 
-**四域信任边界依旧成立**：AI 只能产 Suggestion，不能构造 `ExecArg::UserExplicit`。用户 Tab 采纳后才穿过 Suggestion → Execution 边界。
+**四域信任边界依旧成立**：AI 只能产 Suggestion / tool-call 候选，不能构造 `ExecArg::UserExplicit`。用户 Tab 采纳后才穿过 Suggestion → Execution 边界。

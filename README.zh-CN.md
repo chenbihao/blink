@@ -78,11 +78,12 @@ Blink 不是启动器（launcher），是 **Universal Action Layer（统一操�
 
 ## 愿景 · 我们要去哪
 
-- 🤖 **AI 意图（0.9）** — 用自然语言描述你想做什么，Blink 自动匹配动作；AI 只产建议不直接执行，Tab 采纳是最后一道人类审核
-- 💬 **AI Chat View（0.9）** — 支持 OpenAI / DeepSeek / 通义 / 豆包等 OpenAI 兼容 API，Chat 走 `view: chat` 展开
-- 🧠 **VectorRouter 语义匹配（0.9）** — 意图分类不局限于 keyword，语义近似也能命中
-- ⚡ **Proactive 主动建议** — 零输入，在对的时间给出对的动作
-- 🎤 **语音输入** — VAD + 语音识别，用说的代替打字
+Blink 正演进为**本地 AI 的感知与执行层**——推理大脑可插拔（任意供应商 / Agent），但 Blink 的护城河是 Web AI 客户端够不着的：全局上下文感知、本地动作执行、亚 50ms 速度。
+
+- 🧱 **0.9 Agent 地基** — 把 builtin / 插件 /（未来）MCP / skill 归一为统一 tool 模型；Provider 多档（路由 / 轻量 / 主）；主窗口纯文本闭环，AI 作回退路由。零语音，纯文本。
+- 🎤 **0.10 语音指令闭环** — 双 chord 语音入口（输入法 vs 指令）；「找那个我忘记名字的文件」→ Everything 搜索 → 结果回流。架构不变，只加感知层。
+- 🔌 **0.11 本地化与生态** — 本地模型按需下载 / skill 化 / MCP 双向 / RAG 记忆。
+- 🛡️ **信任边界不破** — AI 只产建议 / tool-call 候选，不直接执行；Tab 采纳是最后一道人类审核。
 
 ---
 
@@ -156,8 +157,10 @@ cargo test --bin blink
 | **0.8.6** | 架构固化（为 0.9 铺物理骨架：Action trait / SuggestionProducer / ConfigStore / ConfigStore 6 分片 + IPC 泛型化） | ✅ 完成 |
 | **0.8.7** | Alt+A 区域截图（GDI 截屏 + DWM Cloak + BGRA 全链路 + 快速 PNG） | ✅ 完成 |
 | **0.8.8** | 0.8 收尾归档（文档同步 + 设计 token + 冗余清理） | ✅ 完成 |
-| **0.9** | AI Provider 抽象 · 云端 AI 插件 · AI Chat View · VectorRouter 语义匹配 | 📋 规划 |
-| **更远** | Proactive 主动建议 · 语音输入 · 插件市场 | 🔮 |
+| **0.9** | Agent 地基：统一 tool 架构 · Provider 多档 · 主窗口文本闭环（无语音） | 📋 规划 |
+| **0.10** | 语音指令闭环：STT · 双 chord 语音入口 · 语音找文件 · Agent 窗口 | 📋 规划 |
+| **0.11** | 本地化与生态：本地模型按需下载 · skill 化 · MCP 双向 · RAG 记忆 | 🔮 |
+| **更远** | 插件市场 · 更深的主动建议 | 🔮 |
 
 ---
 

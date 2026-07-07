@@ -34,7 +34,9 @@ production-design/
     ├── 0.6-plugin-packaging-scripting.md ← 插件打包 + Python/Node.js脚本支持
     ├── 0.7-plugin-ecosystem-local-search.md ← 插件生态 + 本地搜索Fallback + 性能统计
     ├── 0.8-context-interaction.md      ← 感知与操作层:UIA划词+Autosuggestion+四域架构+Chord+0.8.6架构固化
-    └── 0.9-ai-layer.md                 ← 📋 智能层:AI Provider+云端插件+Chat View+VectorRouter
+    ├── 0.9-ai-layer.md                 ← 📋 Agent 地基:统一 tool 架构+Provider 多档+主窗口文本闭环(零语音)
+    ├── 0.10-voice-agent.md             ← 📋 语音指令闭环:STT+双 chord+语音找文件+Agent 窗口
+    └── 0.11-local-ecosystem.md         ← 📋 本地化与生态:本地模型/skill 化/MCP 双向/RAG 记忆
 ```
 
 ---

@@ -78,11 +78,12 @@ Hold Alt while the main window is open; letter keys trigger actions directly:
 
 ## Vision · Where We're Heading
 
-- 🤖 **AI Intent (0.9)** — Describe what you want in natural language; Blink matches the action. AI only produces suggestions, never executes directly — Tab acceptance is the final human review
-- 💬 **AI Chat View (0.9)** — Support OpenAI / DeepSeek / any OpenAI-compatible API; chat expands via `view: chat`
-- 🧠 **VectorRouter (0.9)** — Semantic intent matching beyond keyword rules
-- ⚡ **Proactive Suggestions** — Zero input, right action at the right time
-- 🎤 **Voice Input** — VAD + speech-to-text, speak instead of type
+Blink is evolving into the **perception & execution layer for local AI** — the reasoning brain is pluggable (any provider / agent), but Blink's moat is what web AI clients can't reach: global context sensing, local action execution, and sub-50ms speed.
+
+- 🧱 **0.9 — Agent Foundation** — Unify builtin / plugin / (future) MCP / skill into one tool model; multi-tier Provider (router / light / main); main-window text loop with AI as a fallback router. Zero voice — text only.
+- 🎤 **0.10 — Voice Action Loop** — Dual-chord voice entry (dictation vs command); "find that file I forgot the name of" → Everything search → result back. Architecture unchanged, only adds a sensing layer.
+- 🔌 **0.11 — Local & Ecosystem** — On-demand local models / skill-ification / bidirectional MCP / RAG memory.
+- 🛡️ **Trust boundary holds** — AI only produces suggestions / tool-call candidates, never executes directly; Tab acceptance is the final human review.
 
 ---
 
@@ -156,8 +157,10 @@ Read [`docs/production-design/`](docs/production-design/README.md) first:
 | **0.8.6** | Architecture hardening (physical skeleton for 0.9: Action trait / SuggestionProducer / ConfigStore / ConfigStore 6-shard + IPC generic) | ✅ Done |
 | **0.8.7** | Alt+A region screenshot (GDI capture + DWM Cloak + BGRA pipeline + fast PNG) | ✅ Done |
 | **0.8.8** | 0.8 wrap-up (docs sync + design tokens + cleanup) | ✅ Done |
-| **0.9** | AI Provider abstraction · Cloud AI plugin · AI Chat View · VectorRouter semantic matching | 📋 Planned |
-| **Beyond** | Proactive suggestions · Voice input · Plugin marketplace | 🔮 |
+| **0.9** | Agent foundation: unified tool architecture · multi-tier Provider · main-window text loop (no voice) | 📋 Planned |
+| **0.10** | Voice action loop: STT · dual-chord voice entry · voice file-search · Agent window | 📋 Planned |
+| **0.11** | Local & ecosystem: on-demand local models · skill-ification · bidirectional MCP · RAG memory | 🔮 |
+| **Beyond** | Plugin marketplace · deeper proactive suggestions | 🔮 |
 
 ---
 
@@ -176,4 +179,3 @@ Read [`docs/production-design/`](docs/production-design/README.md) first:
 ## License
 
 [MIT](LICENSE)
- 

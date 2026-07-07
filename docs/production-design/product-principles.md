@@ -54,8 +54,10 @@
 | **0.8** | **感知与操作层** ——UIA 划词 / 内置动作参数化 / Autosuggestion Ghost / 翻译 Context 路由 / **四域架构 + ExecArg 类型墙** / Chord 交互底层 |
 | **0.8.6** | **架构固化**（为 0.9 铺物理骨架）：Action trait / SuggestionProducer+Arbiter / ConfigStore\<T\> / AppContext 真依赖容器 |
 | **0.8.7** | Alt+A 区域截图 |
-| **0.9** | **智能层**：AI Provider Trait / 云端 AI 插件 / AI Chat View（takeover view=chat）/ VectorRouter 语义匹配 |
-| **更远** | Proactive 主动建议；语音输入（VAD+STT）；自定义 view |
+| **0.8.8** | 0.8 归档收尾（文档同步 + 设计 token + 冗余清理） |
+| **0.9** | **Agent 地基**：统一 tool 架构（builtin/插件/MCP/skill 归一）+ Provider 多档 + 主窗口纯文本闭环（零语音） |
+| **0.10** | **语音指令闭环**：STT + 双 chord 语音入口 + 语音找文件北极星场景 + Agent 对话窗口 |
+| **0.11** | **本地化与生态**：本地模型按需下载 / skill 化 / MCP 双向 / RAG 记忆（按需增强） |
 
 ---
 
@@ -89,6 +91,19 @@
 | **感知类路径无副作用兜底** | UIA 划词只进内存 snapshot，不改剪贴板；拿不到就是拿不到，不用有副作用的兜底方案 |
 | **manifest 声明 ≠ 用户启用** | 感知/Context 触发集中到设置面板逐条开关，manifest 只声明"能力" |
 | **变换 keyword 拓扑要保 Tab 采纳可回原路径** | Ghost.replacement 反查 Router 内 keyword 表按 UI 语言字符集偏好挑，不用 id 末段 |
+
+### 13.4 关键铁则（0.9 AI 沉淀）
+
+| 铁则 | 说明 |
+|---|---|
+| **护城河是感知 + 执行，不是推理** | AI 是消费者兼生产者，Blink 是身体；任何让 Blink 变成「纯对话壳子」的设计都要拒绝（详见 platform §6.1） |
+| **两条路径分离** | 确定性命中走快速通道（&lt; 1s，不过 AI）；未命中才走 AI 路由。AI 是回退决策者，不是默认路径 |
+| **AI 调用必有感知反馈** | 路由思考时主窗 loading，结果回流有过渡；不能把延迟从「唤起」挪到「路由」（体验等价退化） |
+| **危险动作必确认（独立于交互模式）** | 轻量路由「能直接执行」仅限可逆 / 安全动作；删除 / 发送 / 移动哪怕高置信也必须 Tab / 确认。**主窗口 / Agent 窗口都适用**——即使 Agent 窗口的 `AgentBuilder` tool loop 里 AI 自主决定要调，Dangerous 动作依然要人机确认（走内嵌卡片，不用 Modal） |
+| **授权粒度按交互模式分层** | **主窗口模式**：用户在"搜索"未授权 tool loop，AI 只产 Suggestion / tool-call 候选，`ExecArg::UserExplicit` 类型墙每次工具都检查；**Agent 窗口模式**（0.10 Alt+1 展开）：用户显式授权，粒度扩为"整个会话"，允许 `AgentBuilder` 自主循环——但 Dangerous 独立于粒度扩展一律确认。详见 [0.9-ai-layer.md §4.3](./phases/0.9-ai-layer.md#43-provider-落地形态2026-07-定型) |
+| **统一 tool，保留执行分层** | builtin/插件/MCP/skill 统一描述 schema；但同进程 vs IPC 执行分层不牺牲 |
+| **本地一切按需下载** | 本地 LLM/STT/embedding 模型不捆绑，安装包 &lt; 100MB 是硬约束 |
+| **AI / 语音上云强告知** | 第一次启用必须有强告知门（发给谁/发什么/能关什么）；语音含声纹默认本地 |
 
 ---
 

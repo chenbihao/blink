@@ -4,7 +4,7 @@
 
 > 📖 **产品设计与文档导航**：请先阅读 [docs/production-design/00-overview.md](docs/production-design/00-overview.md) 了解产品定位、里程碑与完整文档体系。改核心前必读对应 phases 文档。
 
-更新时间 20260706
+更新时间 20260708
 
 ---
 
@@ -13,7 +13,7 @@
 Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而是 **Universal Action Layer（统一操作层）**。
 终极目标：感知用户上下文、主动推荐动作，让任何操作都比原来的路径更快。
 
-当前处于 **0.8 感知与操作层已完成**：0.1~0.7 全部完成；0.8.0 ~ 0.8.8 全部落地（UIA 划词、内置动作、Ghost Text 输入补全、翻译插件 Context 路由、Suggestion 契约 + Ghost 采纳 + 智能感知面板 + awareness 域重构、四域架构重构 ExecArg 类型墙 + RankingHint Surface Booster、Chord 交互底层、Alt+A 区域截图、**0.8.6 架构固化全部完成**（Action trait / SuggestionProducer + Arbiter / AppContext 真依赖容器 / `PluginQueryContext.clipboard_text` 移除 / 内置动作 i18n / ConfigStore 6 分片后端 + 迁移 + **前端 IPC 泛型化**（20+ `update_*` → 1 个 `set_config` 命令 + `config-keys.js`）/ SearchService 拆 RouteExecutor）、0.8.8 归档收尾）；AI 相关能力（Provider / Chat / Embedding）全部移至 0.9。
+当前处于 **0.8 感知与操作层已完成**：0.1~0.7 全部完成；0.8.0 ~ 0.8.8 全部落地（UIA 划词、内置动作、Ghost Text 输入补全、翻译插件 Context 路由、Suggestion 契约 + Ghost 采纳 + 智能感知面板 + awareness 域重构、四域架构重构 ExecArg 类型墙 + RankingHint Surface Booster、Chord 交互底层、Alt+A 区域截图、**0.8.6 架构固化全部完成**（Action trait / SuggestionProducer + Arbiter / AppContext 真依赖容器 / `PluginQueryContext.clipboard_text` 移除 / 内置动作 i18n / ConfigStore 6 分片后端 + 迁移 + **前端 IPC 泛型化**（20+ `update_*` → 1 个 `set_config` 命令 + `config-keys.js`）/ SearchService 拆 RouteExecutor）、0.8.8 归档收尾）；AI 相关能力（统一 tool 架构 / Provider / 语音 / 生态）规划在 0.9 ~ 0.11 三步走（详见 [phases/0.9-ai-layer.md](docs/production-design/phases/0.9-ai-layer.md)）。
 
 **最新特性（0.8）**：
 - ✅ **0.8.0** UIA 划词文本感知（鼠标选中文本自动抓取）
@@ -26,7 +26,9 @@ Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而�
 - ✅ **0.8.6** **架构固化全部完成**（为 0.9 铺物理骨架，纯横向重构不动业务）：Action trait 收敛完成（`SearchAction/BuiltinActionKind/PluginAction/ChordAction` 统一走 `Action` trait + `ActionOutcome`，位于 `src/domain/execution/`）+ Suggestion Producer/Arbiter 完成（`src/domain/intent/suggestion/`）+ AppContext 真依赖容器完成 + `PluginQueryContext.clipboard_text` 已删 + 内置动作 title/subtitle i18n 完成 + **ConfigStore 6 分片后端完成** + **前端 IPC 泛型化完成**（20+ `update_*` 命令收敛为 1 个 `set_config` 泛型命令 + `frontend/js/config-keys.js`）+ SearchService God Method 已拆为 `exec_takeover` / `exec_engine_takeover` / `exec_mixed`。测试基线 309 通过
 - ✅ **0.8.7** **Alt+A 区域截图**：Chord 三剑客补齐；`src/infra/platform/screenshot/` 新增 GDI 截屏模块 + `SESSION` 单点缓存 + `crop_rgba` 纯函数（7 个单测）；DWM Cloak 隐藏主窗绕过 Win11 fade 动画；BGRA 全链路（BitBlt→SESSION→CF_DIB 免全屏 swap）；PNG 编码 `Compression::Fast + FilterType::NoFilter + u32 位运算 swap + dev profile 局部 opt=3` 从 600ms → ~150ms；总感知延迟 ~320ms（dev），release 更快
 - ✅ **0.8.8** **收尾归档**：0.8.6 落地盘点补入文档 §8.7 + 里程碑表状态同步 + `.taurignore` 落地（改 md 不触发 rebuild）+ 冗余清理小刀（删 `icon::clear_cache` / `update_interpreter_config` / `text::normalize_candidates` 三处僵尸，净减 54 行）+ **设计 token 层落地**（`theme.css` 新增 `--radius-sm/md/lg/xl` + `--transition-fast/base/slow`，`settings.css` ~85% hardcode 迁 token，铁则写入 principles §14.8）+ 版本号统一到 0.8.8 + **P1-C ConfigStore 6 分片后端 + 前端 IPC 泛型化**（20+ `update_*` → 1 个 `set_config` 命令 + `config-keys.js`）+ **P2-A SearchService 拆分**（God Method → `exec_takeover` / `exec_engine_takeover` / `exec_mixed`）。测试基线 309 通过
-- 🔜 **0.9** AI Provider 抽象 + 云端插件 + Chat View + VectorRouter（**基于 0.8.4 四域信任边界 + 0.8.6 物理骨架**——AI 只能产 Suggestion，不能直接触发 Execution；三个统一入口 Action trait / SuggestionProducer / ConfigStore 分别承接 AI 的产出）
+- 🔜 **0.9 Agent 地基**（三步走第一步）：统一 tool 架构（builtin/插件/MCP/skill 归一）+ Provider 多档（路由/轻量/主，**rig-core 全 buildin 直编**）+ 主窗口纯文本闭环（**零语音**）。基于 0.8.4 四域信任边界 + 0.8.6 物理骨架——**rig 用法按交互模式分层**：主窗口只用 `CompletionModel` + 自路由 ToolCall（未授权 tool loop）；Agent 窗口（0.10）允许 `AgentBuilder` + memory + tool loop（用户显式授权）；`Action::danger_class() == Dangerous` 独立于模式一律 Tab 确认。**0.9.0 阶段(纯架构零 AI)已锁三处硬约束**：§4.6 AIProvider trait 类型收窄编译期钉死 / §5.3 AI 路径 SLO 分档(首视觉 <100ms / P50 <800ms / P95 <2s / 硬超时 2500ms) / §5.7 未命中过滤四铁则(默认关+命中不过 AI+可全局关+必埋遥测)。依赖前置：tauri 2.11.3→2.11.5 + reqwest 0.12→0.13（rig 硬要求 `^0.13`）。详见 [phases/0.9-ai-layer.md](docs/production-design/phases/0.9-ai-layer.md)
+- 🔜 **0.10 语音指令闭环**：STT + 双 chord 语音入口 + 语音找文件北极星场景 + Agent 对话窗口。架构不变只加感知层。详见 [phases/0.10-voice-agent.md](docs/production-design/phases/0.10-voice-agent.md)
+- 🔜 **0.11 本地化与生态**：本地模型按需下载 / skill 化 / MCP 双向 / RAG 记忆（按需增强）。详见 [phases/0.11-local-ecosystem.md](docs/production-design/phases/0.11-local-ecosystem.md)
 
 ---
 
@@ -88,6 +90,7 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
   - `search/` — Query 域：`SearchService` + `SearchEngine` trait + 各引擎（builtin / calc / clipboard / file / start_menu）
   - `plugin/` — 插件系统：manifest 解析 + JSONL 协议 + tokio 子进程
   - `chord/` — Chord 交互：`ChordAction` trait + `ChordRegistry`
+  - `ai/`（🔜 0.9 规划）— AI 域：Provider trait（多档：路由/轻量/主，包 rig-core `CompletionModel`）+ 注册表 + ChatMessage + ToolCall 分派。详见 [phases/0.9-ai-layer.md](docs/production-design/phases/0.9-ai-layer.md)
 - `src/infra/` — 基础设施层：
   - `platform/` — 平台相关（`mod.rs` 抽象 + `windows.rs` 实现）：hotkey / window / selection / clipboard / context / locale / screenshot
   - `data/` — SQLite 持久化：history / clipboard / config KV
