@@ -2,7 +2,7 @@
 
 > **定位**: Universal Action Layer（统一操作层）—— 感知用户上下文、主动推荐动作,让任何操作都比原来的路径更快。
 >
-> **状态**: 0.8 全部完成归档（0.8.0 ~ 0.8.8），0.9 Agent 地基规划中（三步走：0.9 地基 / 0.10 语音 / 0.11 生态）
+> **状态**: 0.8 全部完成归档（0.8.0 ~ 0.8.8），**0.9.0 已完成**（依赖前置 + tool-call 进化,纯架构零 AI）,0.9.1 起进入 AI 落地阶段
 > **更新时间**: 2026-07-08
 
 ---
@@ -85,7 +85,7 @@
 | **0.8.6** | **架构固化**：Action trait / SuggestionProducer + Arbiter / ConfigStore / SearchService 拆分 / AppContext 真依赖容器 / 内置动作 i18n（为 0.9 铺物理骨架，纯横向重构） | ✅ 完成 |
 | **0.8.7** | Alt+A 区域截图（DWM Cloak + BGRA 全链路 + 快速 PNG，总感知延迟 ~320ms） | ✅ 完成 |
 | **0.8.8** | 收尾归档（文档同步 + 遗留项梳理，剩余优化项进 0.9 前 chore 池） | ✅ 完成 |
-| **0.9.0** | 依赖前置升级（tauri 2.11.5 / reqwest 0.13）+ **rig-core 引入** + 统一能力 schema + Action trait tool-call 进化 + `danger_class()` 元数据（纯架构零 AI） | 规划中 |
+| **0.9.0** | 依赖前置升级（tauri 2.11.5 / reqwest 0.13）+ **rig-core 引入** + 统一能力 schema + Action trait tool-call 进化 + `danger_class()` 元数据（纯架构零 AI） | ✅ 完成 |
 | **0.9.1** | Provider 抽象（LLM + STT 预留，全 buildin 走 rig）+ 密钥安全（Credential Manager）+ 三档配置页 | 规划中 |
 | **0.9.2** | 主窗口文本闭环（**只用 rig Provider 层，`AgentBuilder` 留 0.10 展开**）+ 轻量路由 + 反馈动画 | 规划中 |
 | **0.10.0** | STT 接入（云端优先）+ 双 chord 语音入口 + 输入法模式 | 后置 |

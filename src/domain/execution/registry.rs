@@ -110,4 +110,45 @@ mod tests {
             assert_eq!(action.id(), *id, "Action::id() 与注册表 key 不一致");
         }
     }
+
+    /// 0.9.0 §3.3 铁则:12 个 builtin 全部显式覆盖 `schema()`——
+    /// name 与 id 一致 + description 非空。若有人新增 builtin 忘了写 schema
+    /// (走了 default impl 的空 description),此测会 fail。
+    #[test]
+    fn all_builtins_have_explicit_schema() {
+        let reg = ActionRegistry::new();
+        for id in [
+            "open_settings", "lock", "shutdown", "restart", "sleep",
+            "clear_history", "exit_blink", "open_logs", "open_data_dir",
+            "open_url", "open_path", "reveal_in_explorer",
+        ] {
+            let action = reg.get(id).expect(id);
+            let schema = action.schema();
+            assert_eq!(schema.name, id, "{id}: schema.name 与 id 不一致");
+            assert!(
+                !schema.description.is_empty(),
+                "{id}: schema.description 为空——走了 default impl,请显式覆盖(0.9.0 §3.3 铁则)"
+            );
+        }
+    }
+
+    /// 0.9.0 §5.4 白名单铁则:分类正确性——参数化 3 个是 Safe,
+    /// 系统级不可逆 6 个(lock/shutdown/restart/sleep/clear_history/exit_blink)是 Dangerous。
+    #[test]
+    fn danger_class_matches_expected_partition() {
+        use crate::domain::execution::DangerClass;
+        let reg = ActionRegistry::new();
+
+        // Safe:只读打开 UI + 参数化动作(参数走 UserExplicit 类型墙)
+        for id in ["open_settings", "open_logs", "open_data_dir", "open_url", "open_path", "reveal_in_explorer"] {
+            let action = reg.get(id).expect(id);
+            assert_eq!(action.danger_class(), DangerClass::Safe, "{id} 应为 Safe");
+        }
+
+        // Dangerous:系统级不可逆 / 数据不可逆 / 让用户失去 Blink
+        for id in ["lock", "shutdown", "restart", "sleep", "clear_history", "exit_blink"] {
+            let action = reg.get(id).expect(id);
+            assert_eq!(action.danger_class(), DangerClass::Dangerous, "{id} 应为 Dangerous");
+        }
+    }
 }

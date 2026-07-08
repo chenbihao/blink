@@ -191,6 +191,18 @@ impl crate::domain::execution::Action for StubAction {
     fn subtitle(&self) -> &LocalizableText {
         &self.label // stub: subtitle 同 title
     }
+    /// 0.9.0 §3.3 铁则:Chord 动作显式覆盖 schema.
+    /// Stub 未落地——description 标"stub"给 AI 看得清楚,免误调用
+    fn schema(&self) -> crate::domain::execution::ActionSchema {
+        crate::domain::execution::ActionSchema::empty(
+            self.id,
+            "Chord stub action (not yet implemented)",
+        )
+    }
+    /// Stub 无副作用——Safe
+    fn danger_class(&self) -> crate::domain::execution::DangerClass {
+        crate::domain::execution::DangerClass::Safe
+    }
     async fn execute(&self, _cx: &crate::domain::execution::ActionContext<'_>) -> Result<crate::domain::execution::ActionOutcome, crate::domain::execution::ExecError> {
         tracing::info!(id = self.id, "chord stub action（待 #10 实现）");
         Ok(crate::domain::execution::ActionOutcome::Nop)
@@ -260,6 +272,17 @@ impl crate::domain::execution::Action for ScreenshotAction {
     }
     fn subtitle(&self) -> &LocalizableText {
         &self.label
+    }
+    /// 0.9.0 §3.3 铁则:Chord 动作显式覆盖 schema
+    fn schema(&self) -> crate::domain::execution::ActionSchema {
+        crate::domain::execution::ActionSchema::empty(
+            "screenshot",
+            "Capture a region of the screen (Alt+A chord). Interactive—no arguments.",
+        )
+    }
+    /// 截图只读屏幕像素,不改文件系统——Safe
+    fn danger_class(&self) -> crate::domain::execution::DangerClass {
+        crate::domain::execution::DangerClass::Safe
     }
     async fn execute(&self, cx: &crate::domain::execution::ActionContext<'_>) -> Result<crate::domain::execution::ActionOutcome, crate::domain::execution::ExecError> {
         let t0 = std::time::Instant::now();
@@ -337,6 +360,17 @@ impl crate::domain::execution::Action for ClipboardHistoryAction {
     }
     fn subtitle(&self) -> &LocalizableText {
         &self.label
+    }
+    /// 0.9.0 §3.3 铁则:Chord 动作显式覆盖 schema
+    fn schema(&self) -> crate::domain::execution::ActionSchema {
+        crate::domain::execution::ActionSchema::empty(
+            "clipboard_history",
+            "Open the clipboard history browser (Alt+C chord). No arguments—fills the main search box.",
+        )
+    }
+    /// 剪贴板浏览只读——Safe
+    fn danger_class(&self) -> crate::domain::execution::DangerClass {
+        crate::domain::execution::DangerClass::Safe
     }
     async fn execute(&self, cx: &crate::domain::execution::ActionContext<'_>) -> Result<crate::domain::execution::ActionOutcome, crate::domain::execution::ExecError> {
         // 主窗 show + 焦点（同步）

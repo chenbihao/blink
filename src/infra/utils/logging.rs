@@ -95,7 +95,10 @@ pub fn current_log_file() -> PathBuf {
 
 /// 级别字符串归一化为 EnvFilter 指令（非法值降级 error）。
 fn parse_level(level: &str) -> String {
-    // 第三方库（sqlx/tauri）压到 warn，避免 query/asset 等 debug 噪音淹没 blink 自身日志
+    // 第三方库（sqlx/tauri）压到 warn，避免 query/asset 等 debug 噪音淹没 blink 自身日志。
+    // **AI SLO 埋点**(0.9.0 §5.3)：`blink::ai::slo` target 是 `blink` 的子级,自动继承根级
+    // filter——`info/debug/trace` 都会捕获;`error` 级别下 SLO event 会被过滤（预期,
+    // 用户显式压 error 是"我什么都不想看"信号,不该被 AI 遥测污染）。
     match level {
         "trace" => "trace,sqlx=warn,tauri=warn,hyper=warn,reqwest=warn",
         "debug" => "debug,sqlx=warn,tauri=warn",

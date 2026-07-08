@@ -350,3 +350,48 @@ pub async fn export_report(pool: &SqlitePool) -> serde_json::Value {
         "metrics": all,
     })
 }
+
+// ── AI 路径 SLO 埋点骨架（0.9.0 §5.3；数据发射留 0.9.2 落地）─────────────
+//
+// **动机**：AI 路径的延迟目标与确定性路径（<20ms）不同——首视觉反馈 <100ms、
+// 意图 P50 <800ms / P95 <2s、硬超时 2500ms 静默回退。tracing target 现在就位,
+// 让 0.9.1/0.9.2 消费方接入零对齐成本。
+//
+// **用法**（0.9.2 起）：
+// ```rust
+// tracing::info!(
+//     target: crate::infra::utils::perf::ai_slo::TARGET,
+//     { crate::infra::utils::perf::ai_slo::FIRST_TOKEN_MS } = 120,
+//     { crate::infra::utils::perf::ai_slo::INTENT_TOTAL_MS } = 780,
+//     "ai routing intent returned"
+// );
+// ```
+//
+// **filter 预留**：`src/infra/utils/logging.rs` 的 env-filter 已经默认让
+// `blink::ai::slo=info` 通过（因为 `blink=info` 是根级默认级别）。
+pub mod ai_slo {
+    /// tracing target 名——所有 AI 路径 SLO 埋点用此 target,便于按 target 过滤 / 收集
+    #[allow(dead_code)] // 0.9.2 起消费
+    pub const TARGET: &str = "blink::ai::slo";
+
+    /// 字段:首 token 延迟（毫秒）——LLM 返回第一个 token 的时刻减去请求发送时刻
+    #[allow(dead_code)]
+    pub const FIRST_TOKEN_MS: &str = "first_token_ms";
+
+    /// 字段:意图返回总耗时（毫秒）——请求发送到 tool_calls 全部收齐
+    #[allow(dead_code)]
+    pub const INTENT_TOTAL_MS: &str = "intent_total_ms";
+
+    /// 字段:是否回退到常规搜索（超时 / 低置信 / 用户过滤 → true）
+    #[allow(dead_code)]
+    pub const FALLBACK_TO_SEARCH: &str = "fallback_to_search";
+
+    /// 字段:是否命中硬超时（2500ms）——静默回退,不弹错
+    #[allow(dead_code)]
+    pub const TIMEOUT: &str = "timeout";
+
+    /// 字段:选中的路由档位（"router" / "light" / "main"）——观测多档降级
+    #[allow(dead_code)]
+    pub const TIER: &str = "tier";
+}
+
