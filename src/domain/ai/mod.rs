@@ -1,0 +1,30 @@
+//! AI 领域层（0.9.1 起）——Provider 抽象 + 意图路由骨架。
+//!
+//! **0.9.1 阶段边界**：
+//! - `spike/` —— Phase 1 抗延迟骨架验证代码（临时；Phase 6 后删除或转正式测试）
+//! - `provider.rs` —— `AIProvider` trait（Phase 4 落地，§2.6 类型收窄）
+//! - `message.rs`  —— `ChatMessage` / `Role` / `ToolCall` / `CompletionRequest / Response`
+//! - `registry.rs` —— `AIProviderRegistry` + `ProviderFactory`（Phase 5a 落地，
+//!   Provider 池 + 三档 dispatch + 切换零重启）
+//!
+//! **rig 隔离墙**：`domain::ai` 是唯一 import `rig_core` 的领域模块（除
+//! `domain::execution::schema.rs::to_rig_tool`）；上层只 `use domain::ai::AIProvider`,
+//! 拿不到 rig 类型。
+//!
+//! **§2.6 类型收窄**：主窗口 `use crate::domain::ai::AIProvider` 编译期就没有
+//! `AgentBuilder / prompt / memory`——这些留 0.10 落 `agent_window/` 独立模块。
+
+pub mod factory;
+pub mod message;
+pub mod provider;
+pub mod registry;
+pub mod spike;
+
+#[allow(unused_imports)] // 0.9.1 Phase 5 起被 AppContext 消费
+pub use factory::default_factory;
+#[allow(unused_imports)]
+pub use message::{ChatMessage, CompletionRequest, CompletionResponse, Role, ToolCall, Usage};
+#[allow(unused_imports)]
+pub use provider::{AIError, AIProvider};
+#[allow(unused_imports)]
+pub use registry::{AIProviderRegistry, ProviderFactory};

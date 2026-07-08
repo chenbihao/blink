@@ -90,7 +90,6 @@ impl Default for SuggestionArbiter {
 mod tests {
     use super::*;
     use crate::infra::platform::context::AwarenessSnapshot;
-    use super::super::SuggestionOrigin;
 
     /// mock producer：固定返回指定 suggestions
     struct MockProducer {

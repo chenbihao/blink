@@ -299,6 +299,25 @@ fn main() {
             // 0.8.6 Action 统一执行入口
             let action_registry = std::sync::Arc::new(crate::domain::execution::ActionRegistry::new());
 
+            // 0.9.1 Phase 5a：AIProviderRegistry
+            // AI 配置分片(第 7 分片,独立于 AppConfig 门面);默认 enabled=false,老用户零副作用。
+            // Phase 5a 用 NoopFactory 占位——Phase 5b 起换 RigFactory 真接 rig-core。
+            let ai_config = tauri::async_runtime::block_on(
+                app::config::ConfigStore::get::<app::ai_config::AIConfig>(&pool),
+            );
+            let ai_registry = std::sync::Arc::new(
+                crate::domain::ai::AIProviderRegistry::from_config(
+                    crate::domain::ai::default_factory(),
+                    &ai_config,
+                ),
+            );
+            tracing::info!(
+                enabled = ai_config.enabled,
+                providers = ai_config.providers.len(),
+                pool_size = ai_registry.size(),
+                "AIProviderRegistry 已构造(Phase 5a NoopFactory 占位)"
+            );
+
             // PluginEngine：clone 一份给 AppContext，原值继续 manage
             let plugin_engine_for_ctx = plugin_engine.clone();
 
@@ -308,11 +327,13 @@ fn main() {
                 app: app.handle().clone(),
                 pool: pool.clone(),
                 config: app_config,
+                ai_config: ai_config.clone(),
                 search_service: search_service.clone(),
                 plugin_engine: plugin_engine_for_ctx,
                 router: router.clone(),
                 chord_registry: chord_registry.clone(),
                 action_registry: action_registry.clone(),
+                ai_registry: ai_registry.clone(),
             };
             let services = app::service::all_services();
             let svc_start = std::time::Instant::now();
@@ -345,6 +366,8 @@ fn main() {
             app.manage(plugin_engine);
             app.manage(chord_registry);
             app.manage(action_registry);
+            // 0.9.1 Phase 5a：AI Provider registry(Phase 5b 起 SearchService 消费)
+            app.manage(ai_registry);
 
             // 后台预热次级窗口（3s 延迟，不阻塞启动；WebView2 冷启动 300~400ms → 预热后 show <50ms）
             infra::platform::window::preheat_secondary_windows(app.handle().clone());
@@ -417,6 +440,9 @@ fn main() {
             app::commands::delete_custom_trigger,
             app::commands::get_config_section,
             app::commands::set_config_section,
+            app::commands::save_ai_secret,
+            app::commands::delete_ai_secret,
+            app::commands::has_ai_secret,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

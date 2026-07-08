@@ -174,3 +174,206 @@
   padding: 12px 16px;
   border-top: 1px solid var(--surface);
 }
+
+/* ── AI Tab 专用（0.9.1 Phase 6）─────────────────────────────────────────── */
+
+/* 独立 modal 变体（供 AI 添加供应商弹窗用；不复用 .modal 因为它绑了列表布局） */
+.modal-card {
+  background: var(--bg);
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius-xl);
+  padding: 20px 24px;
+  min-width: 440px;
+  max-width: 520px;
+  box-shadow: 0 12px 40px var(--shadow);
+}
+.modal-card h3 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 12px;
+}
+.modal-card .setting-row {
+  padding: 8px 0;
+}
+.modal-card .setting-row-column {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+.modal-card .setting-row-column .setting-label {
+  margin-bottom: 4px;
+}
+.modal-hint {
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 4px 0 8px;
+}
+.modal-error {
+  color: var(--red);
+  font-size: 12px;
+  min-height: 16px;
+  padding: 4px 0;
+}
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 8px;
+}
+.btn-primary {
+  background: var(--accent);
+  color: var(--bg);
+  border: none;
+  border-radius: var(--radius-md);
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+.btn-primary:hover {
+  filter: brightness(1.1);
+}
+
+/* AI 顶部 banner（有档位降级/未指派时显示）
+   —— 用 --accent 作为"注意"色，跨主题都有;边框宽度 3px 突出警示条 */
+.ai-banner {
+  background: var(--accent-bg);
+  color: var(--accent);
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  border-left: 3px solid var(--accent);
+  margin-bottom: 12px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* AI 三档下拉旁的即时降级提示 */
+.ai-tier-degrade {
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 4px 0 8px 4px;
+  min-height: 16px;
+}
+.ai-tier-degrade.warning {
+  color: var(--accent);
+}
+.ai-tier-degrade.error {
+  color: var(--red);
+}
+
+/* AI 供应商卡片列表容器 */
+#ai-providers-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.ai-provider-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--surface);
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+}
+.ai-provider-icon {
+  font-size: 18px;
+  color: var(--text-dim);
+}
+.ai-provider-info {
+  flex: 1;
+  min-width: 0;
+}
+.ai-provider-title {
+  font-size: 13px;
+  color: var(--text);
+  font-weight: 500;
+}
+.ai-provider-meta {
+  font-size: 11px;
+  color: var(--text-faint);
+  margin-top: 2px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+.ai-provider-status {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--green-bg);
+  color: var(--green);
+}
+.ai-provider-status.no-key {
+  background: var(--red-bg);
+  color: var(--red);
+}
+.ai-provider-delete {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 16px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+.ai-provider-delete:hover {
+  color: var(--red);
+  background: var(--red-bg);
+}
+.ai-providers-empty {
+  color: var(--text-faint);
+  font-size: 12px;
+  padding: 12px;
+  text-align: center;
+  background: var(--surface);
+  border-radius: var(--radius-md);
+  border: 1px dashed var(--surface-2);
+}
+.ai-providers-add {
+  align-self: flex-start;
+  background: none;
+  border: 1px dashed var(--surface-2);
+  color: var(--text-dim);
+  padding: 8px 14px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: 12px;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+.ai-providers-add:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* AI 底部 toast（配完 Provider 后询问总开关） */
+.ai-toast {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  background: var(--bg);
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius-md);
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-shadow: 0 8px 24px var(--shadow);
+  z-index: 10001;
+  animation: ai-toast-in 220ms var(--transition-fast) both;
+}
+.ai-toast-text {
+  color: var(--text);
+  font-size: 13px;
+}
+@keyframes ai-toast-in {
+  from {
+    transform: translateY(20px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}

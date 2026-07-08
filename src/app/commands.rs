@@ -693,12 +693,109 @@ pub async fn set_config(
             tracing::debug!("Context 配置已更新");
         }
 
+        // ── AI 配置(0.9.1 Phase 3-6) ──────────────────────────────────────
+        //
+        // 完整 AIConfig 分片写入(第 7 分片,独立于 AppConfig 门面);写完
+        // 通知 registry reload —— 骨架条 #7(切换零重启)在此触发。
+        //
+        // **注意**:AIConfig 结构里不含密钥,只含 `secret_ref` CM 别名。
+        // 密钥独立走 `save_ai_secret / delete_ai_secret` 两个命令,永不进 SQLite。
+        "ai_config" => {
+            let ai: crate::app::ai_config::AIConfig =
+                serde_json::from_value(value).map_err(|e| e.to_string())?;
+            crate::app::config::ConfigStore::set(&pool, &ai).await?;
+
+            // registry 热更新——空档降级 / factory 失败静默跳过 / 复用未变动实例
+            if let Some(reg) = app.try_state::<std::sync::Arc<crate::domain::ai::AIProviderRegistry>>() {
+                reg.reload(&ai);
+            }
+
+            let _ = app.emit("blink://config-changed", serde_json::json!({ "key": "ai_config" }));
+            tracing::info!(
+                enabled = ai.enabled,
+                providers = ai.providers.len(),
+                tier_router = ai.tier_router.is_some(),
+                tier_light = ai.tier_light.is_some(),
+                tier_main = ai.tier_main.is_some(),
+                "AI 配置已更新"
+            );
+        }
+
         _ => {
             return Err(format!("未知的配置 key: {key}"));
         }
     }
 
     Ok(())
+}
+
+// ── AI 密钥专用命令(0.9.1 Phase 6)─────────────────────────────────────────
+//
+// **为什么与 set_config 分开**:
+// - `set_config` 走 `serde_json::Value`,任何字段都可能被 debug 打印/序列化
+// - 密钥必须**只在** SecretString 生命周期内存活,IPC 参数拿到明文后立即
+//   转 SecretString + 写 CM + 清零
+// - 前端 IPC 参数是 `provider_id + secret`,后端**永不**回传/回显密钥
+//
+// **调用契约**:
+// - 保存 Provider 前弹密钥输入框 → invoke("save_ai_secret", {providerId, secret})
+// - 删除 Provider 前 invoke("delete_ai_secret", {providerId}) —— 之后再删 ai_config
+//   里的 provider entry(否则 secret_ref 悬空)
+// - 编辑 Key = 前端强制"清空重填",不允许"只改 base_url 保留旧 Key"(§5.2 铁则)
+
+/// 保存 Provider API Key 到 Windows Credential Manager。
+///
+/// **参数**:
+/// - `provider_id`:`ProviderEntry.id`(UUID,前端生成)
+/// - `secret`:明文密钥——只在本 command 函数内活着,写完 CM 立即 SecretString drop
+///
+/// **失败**:
+/// - `InvalidRef`:provider_id 含非法字符
+/// - `Platform`:CM 写入失败(极少见,通常 headless session)
+#[tauri::command]
+pub async fn save_ai_secret(
+    provider_id: String,
+    secret: String,
+) -> Result<(), String> {
+    // 立即包进 SecretString——之后再也不用明文引用
+    let secret_wrapped = crate::infra::platform::secret::SecretString::new(secret);
+    crate::infra::platform::secret::save_secret(&provider_id, "key", &secret_wrapped)
+        .map_err(|e| e.to_string())?;
+    // 日志绝不含 secret 内容
+    tracing::info!(%provider_id, "AI Provider 密钥已保存到 Credential Manager");
+    Ok(())
+}
+
+/// 从 Credential Manager 删除 Provider API Key。
+///
+/// **调用时机**:删除 Provider entry 前先调此,确保 CM 端幂等清理。
+/// 未找到别名视为已删,静默返回 Ok(§5.2 铁则 3)。
+#[tauri::command]
+pub async fn delete_ai_secret(provider_id: String) -> Result<(), String> {
+    match crate::infra::platform::secret::delete_secret(&provider_id, "key") {
+        Ok(()) => {
+            tracing::info!(%provider_id, "AI Provider 密钥已从 CM 删除");
+            Ok(())
+        }
+        Err(crate::infra::platform::secret::SecretError::NotFound(_)) => {
+            // 幂等——CM 里没有此别名,视为已删
+            tracing::debug!(%provider_id, "AI Provider 密钥不在 CM 中,跳过删除");
+            Ok(())
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// 检查 Provider 是否已配 API Key(不返回明文,只返 true/false)。
+///
+/// 用于设置页初始化时判断 Provider 卡片显示"已配置"标记。
+#[tauri::command]
+pub async fn has_ai_secret(provider_id: String) -> Result<bool, String> {
+    match crate::infra::platform::secret::load_secret(&provider_id, "key") {
+        Ok(_) => Ok(true),
+        Err(crate::infra::platform::secret::SecretError::NotFound(_)) => Ok(false),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// 打开当天日志文件（资源管理器中定位；文件不存在则打开文件夹）。

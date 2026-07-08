@@ -15,7 +15,9 @@
 use sqlx::SqlitePool;
 use tauri::AppHandle;
 
+use crate::app::ai_config::AIConfig;
 use crate::app::config::AppConfig;
+use crate::domain::ai::AIProviderRegistry;
 
 /// 服务启动期的共享依赖容器（0.8.6 §8.2.3 扩展为真依赖容器）。
 ///
@@ -26,6 +28,10 @@ pub struct AppContext {
     #[allow(dead_code)]
     pub pool: SqlitePool,
     pub config: AppConfig,
+    /// 0.9.1 Phase 3:AI 配置分片(独立第 7 分片,不进 AppConfig 门面)。
+    /// 默认 `enabled=false` —— 老用户零副作用。
+    #[allow(dead_code)] // 0.9.1 Phase 5-6 起 AI dispatch 消费
+    pub ai_config: AIConfig,
     // ── 0.8.6 §8.2.3：核心服务引用 ─────────────────────────
     pub search_service: std::sync::Arc<crate::domain::search::SearchService>,
     #[allow(dead_code)] // 0.9 插件查询时消费
@@ -36,6 +42,11 @@ pub struct AppContext {
     pub chord_registry: std::sync::Arc<crate::domain::chord::ChordRegistry>,
     #[allow(dead_code)]
     pub action_registry: std::sync::Arc<crate::domain::execution::ActionRegistry>,
+    /// 0.9.1 Phase 5a:AI Provider 池 + 三档 dispatch。
+    /// **未配置或全 factory 失败 → 空池**,`resolve` 一律返 `NotConfigured`;
+    /// SearchService 拿到 NotConfigured → fallback 常规 fuzzy(§6.4 兜底铁则)。
+    #[allow(dead_code)] // 0.9.2 起 SearchService::exec_ai_intent 消费
+    pub ai_registry: std::sync::Arc<AIProviderRegistry>,
 }
 
 /// 统一生命周期接口。0.2.1 各服务的 `start` 多为同步初始化,但 trait 用 `async-trait`

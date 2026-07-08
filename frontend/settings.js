@@ -2544,3 +2544,476 @@ document.addEventListener("click", (e) => {
   // 触发 change 事件，让绑定的事件处理函数生效
   input.dispatchEvent(new Event("change", { bubbles: true }));
 });
+
+// ── AI Tab（0.9.1 Phase 6）───────────────────────────────────────────────────
+//
+// 数据流：
+//   loadAIConfig() 拉后端 → 渲染 UI + 记 currentAIConfig
+//   用户改字段 → 写 currentAIConfig → saveAIConfig() → invoke set_config('ai_config')
+//   添加供应商 → modal → save_ai_secret(先写 CM)→ 更新 currentAIConfig.providers →
+//     saveAIConfig() → 弹 toast 询问总开关（§5.3 严格 opt-in）
+//   删除供应商 → 确认 → delete_ai_secret（幂等）→ 移除 provider entry →
+//     若引用了 tier 则同时清 tier → saveAIConfig()
+//
+// **不发密钥回前端**：has_ai_secret 只返 bool，用户想改 Key 必须"清空重填"（§5.2）
+
+let currentAIConfig = null;
+let hasSecretMap = new Map(); // provider_id → boolean
+
+const AI_KIND_LABEL = {
+  openai: "OpenAI",
+  deepseek: "DeepSeek",
+  anthropic: "Anthropic",
+  openai_compat: "OpenAI-Compat",
+};
+
+async function loadAIConfig() {
+  // 读第 7 分片 —— 老用户拿到 default（enabled=false, providers=[]）
+  try {
+    const cfg = await invoke("get_config_section", { key: "app.ai" });
+    // null → 空配置（首次运行；后端返 Value::Null）
+    currentAIConfig = cfg && typeof cfg === "object" ? cfg : defaultAIConfig();
+  } catch (e) {
+    console.error("get_config_section app.ai failed:", e);
+    currentAIConfig = defaultAIConfig();
+  }
+  // 密钥存在性并行查询
+  hasSecretMap = new Map();
+  const providers = currentAIConfig.providers || [];
+  await Promise.all(
+    providers.map(async (p) => {
+      try {
+        const has = await invoke("has_ai_secret", { providerId: p.id });
+        hasSecretMap.set(p.id, !!has);
+      } catch {
+        hasSecretMap.set(p.id, false);
+      }
+    })
+  );
+  applyAIConfigToUI();
+  bindAIEvents();
+}
+
+function defaultAIConfig() {
+  return {
+    enabled: false,
+    allow_intent_routing: false,
+    min_query_len: 4,
+    require_whitespace: true,
+    exclude_pure_numeric: true,
+    respect_awareness_url_path: true,
+    providers: [],
+    tier_router: null,
+    tier_light: null,
+    tier_main: null,
+    direct_execute_safe_actions: false,
+    slo_hard_timeout_ms: null,
+  };
+}
+
+function applyAIConfigToUI() {
+  const c = currentAIConfig;
+  const $ = (id) => document.getElementById(id);
+  $("ai-enabled").checked = !!c.enabled;
+  $("ai-allow-routing").checked = !!c.allow_intent_routing;
+  $("ai-min-query-len").value = c.min_query_len ?? 4;
+  $("ai-require-whitespace").checked = c.require_whitespace !== false;
+  $("ai-exclude-pure-numeric").checked = c.exclude_pure_numeric !== false;
+  $("ai-respect-awareness-url-path").checked = c.respect_awareness_url_path !== false;
+  $("ai-direct-safe").checked = !!c.direct_execute_safe_actions;
+  $("ai-timeout-ms").value = c.slo_hard_timeout_ms ?? 2500;
+
+  renderAIProviders();
+  renderAITierSelects();
+  renderAITierBanner();
+}
+
+function renderAIProviders() {
+  const container = document.getElementById("ai-providers-container");
+  const providers = currentAIConfig.providers || [];
+  if (providers.length === 0) {
+    container.innerHTML =
+      `<div class="ai-providers-empty">${escapeHtml(t("ai.providers.empty"))}</div>
+       <button class="ai-providers-add" id="ai-add-provider">${escapeHtml(t("ai.providers.add"))}</button>`;
+    document.getElementById("ai-add-provider").addEventListener("click", openAIProviderModal);
+    return;
+  }
+  const cards = providers
+    .map((p) => {
+      const kindLabel = AI_KIND_LABEL[p.kind] || p.kind;
+      const modelIds = (p.models || []).map((m) => m.id).join(", ");
+      const hasKey = hasSecretMap.get(p.id) === true;
+      const statusCls = hasKey ? "" : "no-key";
+      const statusText = hasKey ? t("ai.provider.configured") : t("ai.provider.not_configured");
+      return `
+        <div class="ai-provider-card" data-provider-id="${escapeAttr(p.id)}">
+          <div class="ai-provider-icon">🔌</div>
+          <div class="ai-provider-info">
+            <div class="ai-provider-title">${escapeHtml(p.display_name)} · ${escapeHtml(kindLabel)}</div>
+            <div class="ai-provider-meta">${escapeHtml(modelIds || "(no model)")}</div>
+          </div>
+          <span class="ai-provider-status ${statusCls}">${escapeHtml(statusText)}</span>
+          <button class="ai-provider-delete" data-provider-id="${escapeAttr(p.id)}" title="${escapeAttr(t("ai.provider.delete"))}">✕</button>
+        </div>`;
+    })
+    .join("");
+  container.innerHTML =
+    cards + `<button class="ai-providers-add" id="ai-add-provider">${escapeHtml(t("ai.providers.add"))}</button>`;
+
+  document.getElementById("ai-add-provider").addEventListener("click", openAIProviderModal);
+  container.querySelectorAll(".ai-provider-delete").forEach((btn) => {
+    btn.addEventListener("click", () => deleteAIProvider(btn.dataset.providerId));
+  });
+}
+
+function renderAITierSelects() {
+  const providers = currentAIConfig.providers || [];
+  const options = [`<option value="">${escapeHtml(t("ai.tier.unassigned"))}</option>`];
+  providers.forEach((p) => {
+    (p.models || []).forEach((m) => {
+      const val = `${p.id}::${m.id}`;
+      const label = `${p.display_name} / ${m.id}`;
+      options.push(`<option value="${escapeAttr(val)}">${escapeHtml(label)}</option>`);
+    });
+  });
+  const html = options.join("");
+  ["router", "light", "main"].forEach((tier) => {
+    const sel = document.getElementById(`ai-tier-${tier}`);
+    sel.innerHTML = html;
+    const assign = currentAIConfig[`tier_${tier}`];
+    sel.value = assign ? `${assign.provider_id}::${assign.model_id}` : "";
+  });
+  renderAITierDegrade();
+}
+
+function renderAITierDegrade() {
+  const cfg = currentAIConfig;
+  // 简单版：如果 tier_x 空，展示"→ 降级到 xxx"提示
+  // Router 空 → 降到 Light 或 Main；Light 空 → 降到 Main；Main 空 → 全部失效
+  const chain = { router: ["light", "main"], light: ["main"], main: [] };
+  ["router", "light", "main"].forEach((tier) => {
+    const el = document.getElementById(`ai-tier-${tier}-degrade`);
+    if (!el) return;
+    const assign = cfg[`tier_${tier}`];
+    if (assign) {
+      // 判断悬空
+      const provider = (cfg.providers || []).find((p) => p.id === assign.provider_id);
+      const model = provider && (provider.models || []).find((m) => m.id === assign.model_id);
+      if (!provider || !model) {
+        el.textContent = t("ai.tier.no_provider");
+        el.className = "ai-tier-degrade error";
+      } else {
+        el.textContent = "";
+        el.className = "ai-tier-degrade";
+      }
+      return;
+    }
+    // 空档 —— 找降级目标
+    let target = null;
+    for (const next of chain[tier]) {
+      const a = cfg[`tier_${next}`];
+      if (!a) continue;
+      const provider = (cfg.providers || []).find((p) => p.id === a.provider_id);
+      const model = provider && (provider.models || []).find((m) => m.id === a.model_id);
+      if (provider && model) {
+        target = { tier: next, label: provider.display_name };
+        break;
+      }
+    }
+    if (target) {
+      el.textContent = t("ai.tier.degrade_to", { tier: t(`ai.tier.${target.tier}`) });
+      el.className = "ai-tier-degrade warning";
+    } else {
+      // 主档也空 → 整个 AI 意图辅助不生效
+      el.textContent = tier === "main" && cfg.enabled ? t("ai.tier.no_provider") : "";
+      el.className = tier === "main" && cfg.enabled ? "ai-tier-degrade error" : "ai-tier-degrade";
+    }
+  });
+}
+
+function renderAITierBanner() {
+  const banner = document.getElementById("ai-tier-banner");
+  const cfg = currentAIConfig;
+  if (!cfg.enabled) {
+    banner.style.display = "none";
+    return;
+  }
+  // 展开 §6.4：任一档降级/悬空则显示 banner
+  const hasIssue = ["router", "light", "main"].some((tier) => {
+    const assign = cfg[`tier_${tier}`];
+    if (!assign) return tier !== "main"; // 主档空 = 严重（也算 issue）
+    const provider = (cfg.providers || []).find((p) => p.id === assign.provider_id);
+    const model = provider && (provider.models || []).find((m) => m.id === assign.model_id);
+    return !provider || !model;
+  });
+  // tier_main 为 null 时 `!mainAssign` 已短路;some 内不必再判 tier_main
+  const mainAssign = cfg.tier_main;
+  const mainMissing = !mainAssign || !(cfg.providers || []).some((p) =>
+    (p.models || []).some((m) => p.id === mainAssign.provider_id && m.id === mainAssign.model_id)
+  );
+  if (!hasIssue && !mainMissing) {
+    banner.style.display = "none";
+    return;
+  }
+  banner.style.display = "block";
+  banner.textContent = mainMissing
+    ? t("ai.tier.no_provider").replace(/^→\s*/, "⚠️ ")
+    : "⚠️ " + t("ai.tier.degrade_to", { tier: t("ai.tier.main") });
+}
+
+function bindAIEvents() {
+  // 幂等——多次 loadAIConfig 时避免重复绑定
+  const root = document.getElementById("ai");
+  if (root.dataset.eventsBound === "1") return;
+  root.dataset.eventsBound = "1";
+
+  const $ = (id) => document.getElementById(id);
+
+  $("ai-enabled").addEventListener("change", (e) => {
+    currentAIConfig.enabled = e.target.checked;
+    renderAITierBanner();
+    saveAIConfig();
+  });
+  $("ai-allow-routing").addEventListener("change", (e) => {
+    currentAIConfig.allow_intent_routing = e.target.checked;
+    saveAIConfig();
+  });
+  $("ai-min-query-len").addEventListener("change", (e) => {
+    const v = parseInt(e.target.value, 10);
+    currentAIConfig.min_query_len = isNaN(v) ? 4 : Math.max(1, Math.min(20, v));
+    e.target.value = currentAIConfig.min_query_len;
+    saveAIConfig();
+  });
+  $("ai-require-whitespace").addEventListener("change", (e) => {
+    currentAIConfig.require_whitespace = e.target.checked;
+    saveAIConfig();
+  });
+  $("ai-exclude-pure-numeric").addEventListener("change", (e) => {
+    currentAIConfig.exclude_pure_numeric = e.target.checked;
+    saveAIConfig();
+  });
+  $("ai-respect-awareness-url-path").addEventListener("change", (e) => {
+    currentAIConfig.respect_awareness_url_path = e.target.checked;
+    saveAIConfig();
+  });
+  $("ai-direct-safe").addEventListener("change", (e) => {
+    currentAIConfig.direct_execute_safe_actions = e.target.checked;
+    saveAIConfig();
+  });
+  $("ai-timeout-ms").addEventListener("change", (e) => {
+    const v = parseInt(e.target.value, 10);
+    currentAIConfig.slo_hard_timeout_ms = isNaN(v) ? null : Math.max(500, Math.min(10000, v));
+    e.target.value = currentAIConfig.slo_hard_timeout_ms ?? 2500;
+    saveAIConfig();
+  });
+
+  ["router", "light", "main"].forEach((tier) => {
+    $(`ai-tier-${tier}`).addEventListener("change", (e) => {
+      const val = e.target.value;
+      if (!val) {
+        currentAIConfig[`tier_${tier}`] = null;
+      } else {
+        // 只切第一个 "::":provider_id 是 UUID 不含 "::",但 model_id 可能含
+        // "::"(代理/网关 model 名带命名空间);indexOf 保证剩余整体归 model_id
+        const sep = val.indexOf("::");
+        const providerId = val.slice(0, sep);
+        const modelId = val.slice(sep + 2);
+        currentAIConfig[`tier_${tier}`] = { provider_id: providerId, model_id: modelId };
+      }
+      renderAITierDegrade();
+      renderAITierBanner();
+      saveAIConfig();
+    });
+  });
+
+  // Modal 事件
+  $("ai-modal-cancel").addEventListener("click", closeAIProviderModal);
+  $("ai-modal-save").addEventListener("click", saveNewProviderFromModal);
+  $("ai-modal-overlay").addEventListener("click", (e) => {
+    if (e.target.id === "ai-modal-overlay") closeAIProviderModal();
+  });
+
+  // Toast
+  $("ai-toast-enable").addEventListener("click", () => {
+    currentAIConfig.enabled = true;
+    $("ai-enabled").checked = true;
+    hideAIEnableToast();
+    renderAITierBanner();
+    saveAIConfig();
+  });
+  $("ai-toast-later").addEventListener("click", hideAIEnableToast);
+}
+
+function openAIProviderModal() {
+  const $ = (id) => document.getElementById(id);
+  $("ai-modal-kind").value = "openai";
+  $("ai-modal-display-name").value = "";
+  $("ai-modal-base-url").value = "";
+  $("ai-modal-api-key").value = "";
+  $("ai-modal-models").value = "";
+  $("ai-modal-error").textContent = "";
+  $("ai-modal-overlay").style.display = "flex";
+  setTimeout(() => $("ai-modal-display-name").focus(), 50);
+}
+
+function closeAIProviderModal() {
+  document.getElementById("ai-modal-overlay").style.display = "none";
+  // 清空 Key 输入框，防止残留在 DOM
+  document.getElementById("ai-modal-api-key").value = "";
+}
+
+async function saveNewProviderFromModal() {
+  const $ = (id) => document.getElementById(id);
+  const errEl = $("ai-modal-error");
+  errEl.textContent = "";
+
+  const kind = $("ai-modal-kind").value;
+  const displayName = $("ai-modal-display-name").value.trim();
+  const baseUrl = $("ai-modal-base-url").value.trim();
+  // 去首尾空白(含 BOM/换行,不去中间)——用户复制粘贴极易带入,存进 CM 后
+  // API 401 且无法自查;主流供应商 Key 内部不含空白,首尾清理收益远大于风险。
+  // 用 trim() 而非手写正则:ECMAScript 的 WhiteSpace 已含 U+FEFF,无需显式匹配
+  const apiKey = $("ai-modal-api-key").value.trim();
+  const modelsRaw = $("ai-modal-models").value.trim();
+
+  if (!displayName) {
+    errEl.textContent = t("ai.modal.save.empty_display");
+    return;
+  }
+  if (!apiKey) {
+    errEl.textContent = t("ai.modal.save.empty_key");
+    return;
+  }
+  const modelIds = modelsRaw
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (modelIds.length === 0) {
+    errEl.textContent = t("ai.modal.save.empty_models");
+    return;
+  }
+
+  const providerId = (crypto.randomUUID && crypto.randomUUID()) || `p-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  // 1. 先写密钥到 CM —— 失败则整个操作失败
+  try {
+    await invoke("save_ai_secret", { providerId, secret: apiKey });
+  } catch (e) {
+    errEl.textContent = t("ai.error.save_failed", { err: String(e) });
+    return;
+  }
+
+  // 2. 构造 provider entry
+  const newProvider = {
+    id: providerId,
+    display_name: displayName,
+    kind: kind,
+    base_url: baseUrl || null,
+    secret_ref: `blink/${providerId}/key`,
+    models: modelIds.map((id) => ({
+      id,
+      display_name: id,
+      context_window: null,
+      input_price_per_million: null,
+      output_price_per_million: null,
+    })),
+    created_at: Math.floor(Date.now() / 1000),
+  };
+
+  // 3. 追加到配置 + 保存
+  currentAIConfig.providers = [...(currentAIConfig.providers || []), newProvider];
+  hasSecretMap.set(providerId, true);
+
+  try {
+    await saveAIConfig();
+  } catch (e) {
+    // 保存 config 失败 → 回滚 CM
+    try {
+      await invoke("delete_ai_secret", { providerId });
+    } catch {}
+    currentAIConfig.providers = currentAIConfig.providers.filter((p) => p.id !== providerId);
+    hasSecretMap.delete(providerId);
+    errEl.textContent = t("ai.error.save_failed", { err: String(e) });
+    return;
+  }
+
+  // 4. 关 modal，重渲染 UI
+  closeAIProviderModal();
+  renderAIProviders();
+  renderAITierSelects();
+
+  // 5. §5.3 严格 opt-in：如果总开关还关着，弹 toast 询问
+  if (!currentAIConfig.enabled) {
+    showAIEnableToast();
+  }
+}
+
+async function deleteAIProvider(providerId) {
+  const provider = (currentAIConfig.providers || []).find((p) => p.id === providerId);
+  if (!provider) return;
+
+  // §6.4 UX：删除前提示 tier 引用
+  const referenced = [];
+  ["router", "light", "main"].forEach((tier) => {
+    const a = currentAIConfig[`tier_${tier}`];
+    if (a && a.provider_id === providerId) referenced.push(t(`ai.tier.${tier}`));
+  });
+  let msg = t("ai.provider.delete.confirm");
+  if (referenced.length > 0) {
+    msg = `${t("ai.provider.referenced", { tiers: referenced.join("、") })}\n\n${msg}`;
+  }
+  if (!confirm(msg)) return;
+
+  // 1. CM 密钥删除（幂等）
+  try {
+    await invoke("delete_ai_secret", { providerId });
+  } catch (e) {
+    console.error("delete_ai_secret failed:", e);
+    // 继续走——config 侧也要清理
+  }
+
+  // 2. 清 config
+  currentAIConfig.providers = (currentAIConfig.providers || []).filter((p) => p.id !== providerId);
+  hasSecretMap.delete(providerId);
+  ["router", "light", "main"].forEach((tier) => {
+    const a = currentAIConfig[`tier_${tier}`];
+    if (a && a.provider_id === providerId) {
+      currentAIConfig[`tier_${tier}`] = null;
+    }
+  });
+
+  // 3. §5.3：删除后若已无 provider，自动关总开关
+  if (currentAIConfig.providers.length === 0 && currentAIConfig.enabled) {
+    currentAIConfig.enabled = false;
+    document.getElementById("ai-enabled").checked = false;
+  }
+
+  await saveAIConfig();
+  renderAIProviders();
+  renderAITierSelects();
+  renderAITierBanner();
+}
+
+async function saveAIConfig() {
+  try {
+    await saveConfig("ai_config", currentAIConfig);
+  } catch (e) {
+    console.error("save ai_config failed:", e);
+    throw e;
+  }
+}
+
+function showAIEnableToast() {
+  const toast = document.getElementById("ai-enable-toast");
+  toast.style.display = "flex";
+  // 8 秒后自动隐藏——如果用户不理会视为"稍后"
+  clearTimeout(showAIEnableToast._t);
+  showAIEnableToast._t = setTimeout(hideAIEnableToast, 8000);
+}
+function hideAIEnableToast() {
+  document.getElementById("ai-enable-toast").style.display = "none";
+  clearTimeout(showAIEnableToast._t);
+}
+
+// 页面初始化时加载一次
+loadAIConfig();
