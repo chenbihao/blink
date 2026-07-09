@@ -117,11 +117,17 @@ function appendNew(items, didReset) {
   // 其他插件的占位保留(还在查询中)。引擎(File/StartMenu)结果不清占位。
   // 插件占位的 source 就是 plugin_id（如 "builtin.weather"），直接匹配即可。
   if ((changed || hasEmptyResult) && !didReset) {
-    // 收集所有返回的插件来源（包括错误信息和空结果标记）
+    // 收集所有返回**真结果**的来源(含错误信息、空结果标记)。
+    // **必须排除"占位本身"**——AI lane 独立 emit 一次占位(is_placeholder=true,
+    // score>=0, source="ai"),若收进 pluginsReturned 会把自己刚 push 的占位清掉,
+    // 导致"AI 正在回答…"这行从未出现在 UI 上(0.9.2 §6.4 tab 采纳后无反馈 bug)。
+    // 但"空结果标记"(is_placeholder=true, score=-2)必须保留——它就是"我这个
+    // 插件没结果,请清掉我的 loading"的信号。
     // 白名单里是"引擎来源"（sync/async 引擎），它们的结果不占 placeholder，
     // 不该被这条清理逻辑误消。ClipboardEngine (0.8.5 §6.4) 走 sync lane，加入白名单。
     const pluginsReturned = new Set(
       [...realItems, ...(hasEmptyResult ? [emptyResultMarker] : [])]
+        .filter((x) => !x.is_placeholder || x.score === -2)
         .map((x) => x.source)
         .filter((s) => s && !["file", "start_menu", "calc", "clipboard"].includes(s))
     );
@@ -345,12 +351,40 @@ function createItem(app, i) {
     li.dataset.isError = "true";
   }
 
-  // 插件命中占位：加载动画+灰字
-  if (app.is_placeholder) {
+  // 0.9.2 §6.4:AI lane 结果——专用样式(多行展开、accent 强调、AI 徽章图标)
+  //   placeholder 和真结果都命中 .ai-item,CSS 靠 `.is-loading` 区分状态。
+  //   为了让"占位 → 真结果"几何**完全稳定**(不跳变高度、图标位不错位):
+  //   占位与真结果共用 `.ai-icon-badge` 24×24 位置——占位时内嵌一个小 spinner,
+  //   真结果时展示"AI"字样。整条 li 的高度只随 name 文本行数变化。
+  const isAiItem = app.source === "ai";
+  if (isAiItem) {
+    li.classList.add("ai-item");
+  }
+
+  // 插件命中占位:加载动画+灰字(引擎/插件的通用占位路径)
+  if (app.is_placeholder && !isAiItem) {
     li.classList.add("is-loading");
     const spinner = document.createElement("span");
     spinner.className = "loading-spinner";
     li.appendChild(spinner);
+  } else if (isAiItem) {
+    // AI 占位与真结果**共用**同一 24×24 徽章位:
+    //   - 占位:徽章里嵌 .ai-badge-spinner 小圆环(6px),`.is-loading` 类挂在 li 上
+    //   - 真结果:徽章里显示 "AI" 字样
+    // 这样 spinner → 结果切换时,徽章外框位置/尺寸完全不动,视觉稳定。
+    if (app.is_placeholder) li.classList.add("is-loading");
+    const badge = document.createElement("span");
+    badge.className = "ai-icon-badge";
+    if (app.is_placeholder) {
+      const spinner = document.createElement("span");
+      spinner.className = "ai-badge-spinner";
+      badge.appendChild(spinner);
+      badge.setAttribute("aria-label", "AI 加载中");
+    } else {
+      badge.textContent = "AI";
+      badge.setAttribute("aria-label", "AI");
+    }
+    li.appendChild(badge);
   }
 
   // 图标：自定义协议按需懒加载（calc 无 lnk_path 不显示）。

@@ -15,9 +15,11 @@
 //! `AgentBuilder / prompt / memory`——这些留 0.10 落 `agent_window/` 独立模块。
 
 pub mod factory;
+pub mod gating;
 pub mod message;
 pub mod provider;
 pub mod registry;
+pub mod rig_provider;
 pub mod spike;
 
 #[allow(unused_imports)] // 0.9.1 Phase 5 起被 AppContext 消费

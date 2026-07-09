@@ -308,6 +308,7 @@
   background: var(--red-bg);
   color: var(--red);
 }
+.ai-provider-edit,
 .ai-provider-delete {
   background: none;
   border: none;
@@ -317,6 +318,10 @@
   padding: 4px 8px;
   border-radius: var(--radius-sm);
   transition: color var(--transition-fast), background var(--transition-fast);
+}
+.ai-provider-edit:hover {
+  color: var(--accent);
+  background: var(--surface-2);
 }
 .ai-provider-delete:hover {
   color: var(--red);

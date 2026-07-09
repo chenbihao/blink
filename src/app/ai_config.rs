@@ -147,26 +147,36 @@ pub struct ProviderEntry {
     pub created_at: i64,
 }
 
-/// 供应商种类。
+/// 供应商种类——**按协议分层,不按厂商**(0.9.2 第二步重构)。
 ///
-/// **0.9.1 仅列 4 类**:主流 + OpenAI 兼容;更多留 0.9.2 前端上线时按需扩。
+/// **设计原则**:
+/// - 用户脑子里的模型是"协议 + 端点",不是"厂商"
+/// - 90%+ 平台走 OpenAI Chat Completions(硅基流动/DeepSeek/Moonshot/Groq/OpenRouter/xAI/…)
+/// - 前端 modal 通过**预设下拉**兜底 base_url,用户不用查文档
 ///
-/// **序列化姿态**:每个变体用显式 `rename` 输出稳定字符串,方便前端硬编码对比。
-/// 不用 `rename_all = "snake_case"` 因为 `OpenAI` 会被拆成 `"open_a_i"`,失控。
+/// **老配置迁移**(§5.3 静默):
+/// - `"openai" / "deepseek" / "openai_compat"` → `OpenAICompatible`(base_url 缺失时按旧 kind 补 preset)
+/// - `"anthropic"` → `AnthropicMessages`
+/// - 通过 `#[serde(alias)]` 实现,零 toast、零 UI 感知
+///
+/// **序列化姿态**:每个变体显式 `rename` 输出稳定字符串。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ProviderKind {
-    /// OpenAI 官方
-    #[serde(rename = "openai")]
-    OpenAI,
-    /// DeepSeek(国内直连)
-    #[serde(rename = "deepseek")]
-    DeepSeek,
-    /// Anthropic
-    #[serde(rename = "anthropic")]
-    Anthropic,
-    /// 任意 OpenAI-compatible endpoint(Groq / Moonshot / 一元 / 自建代理)
-    #[serde(rename = "openai_compat")]
-    OpenAICompat,
+    /// OpenAI Chat Completions 协议——涵盖 OpenAI 官方 / DeepSeek / 硅基流动 /
+    /// Moonshot / Groq / OpenRouter / xAI / 自建代理等所有兼容 `/v1/chat/completions`
+    /// 的平台。base_url 由用户填(前端预设下拉可一键填充)。
+    ///
+    /// **迁移别名**:老配置里 `"openai" / "deepseek" / "openai_compat"` 全部落到这里。
+    #[serde(rename = "openai_compatible", alias = "openai", alias = "deepseek", alias = "openai_compat")]
+    OpenAICompatible,
+
+    /// Anthropic Messages 协议——`/v1/messages`,仅 Claude 官方。
+    #[serde(rename = "anthropic_messages", alias = "anthropic")]
+    AnthropicMessages,
+
+    /// Google Gemini GenerateContent 协议——`/v1beta/models/*:generateContent`,仅 Gemini。
+    #[serde(rename = "gemini_generate_content")]
+    GeminiGenerateContent,
 }
 
 /// 一个模型的元数据——纯记账,不驱动行为。
@@ -328,7 +338,7 @@ mod tests {
         ProviderEntry {
             id: id.to_string(),
             display_name: format!("Test {id}"),
-            kind: ProviderKind::OpenAI,
+            kind: ProviderKind::OpenAICompatible,
             base_url: None,
             secret_ref: format!("blink/{id}/key"),
             models: vec![ModelEntry {
@@ -505,15 +515,39 @@ mod tests {
 
     #[test]
     fn provider_kind_serializes_stable_strings() {
-        // 显式 rename 稳定输出（不用 snake_case,避免 OpenAI → "open_a_i" 灾难）
-        assert_eq!(serde_json::to_string(&ProviderKind::OpenAI).unwrap(), "\"openai\"");
-        assert_eq!(serde_json::to_string(&ProviderKind::DeepSeek).unwrap(), "\"deepseek\"");
-        assert_eq!(serde_json::to_string(&ProviderKind::Anthropic).unwrap(), "\"anthropic\"");
-        assert_eq!(serde_json::to_string(&ProviderKind::OpenAICompat).unwrap(), "\"openai_compat\"");
+        // 显式 rename 稳定输出(0.9.2 第二步:按协议 3 类)
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::OpenAICompatible).unwrap(),
+            "\"openai_compatible\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::AnthropicMessages).unwrap(),
+            "\"anthropic_messages\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::GeminiGenerateContent).unwrap(),
+            "\"gemini_generate_content\""
+        );
 
         // 反序列化 roundtrip
-        let k: ProviderKind = serde_json::from_str("\"openai\"").unwrap();
-        assert_eq!(k, ProviderKind::OpenAI);
+        let k: ProviderKind = serde_json::from_str("\"openai_compatible\"").unwrap();
+        assert_eq!(k, ProviderKind::OpenAICompatible);
+    }
+
+    #[test]
+    fn provider_kind_legacy_aliases_migrate_silently() {
+        // 老配置迁移铁则:所有旧值都能反序列化到新 kind,零错误、零 toast
+        let cases = [
+            ("\"openai\"", ProviderKind::OpenAICompatible),
+            ("\"deepseek\"", ProviderKind::OpenAICompatible),
+            ("\"openai_compat\"", ProviderKind::OpenAICompatible),
+            ("\"anthropic\"", ProviderKind::AnthropicMessages),
+        ];
+        for (input, expected) in cases {
+            let k: ProviderKind = serde_json::from_str(input)
+                .unwrap_or_else(|e| panic!("老 kind {input} 迁移失败: {e}"));
+            assert_eq!(k, expected, "{input} 应迁移到 {expected:?}");
+        }
     }
 
     #[test]

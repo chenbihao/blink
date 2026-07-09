@@ -48,6 +48,12 @@ export function reset() {
   ghost.clear();
 }
 
+/** 取当前 seq(供 ghost 采纳 AI Ghost 时复用,让 trigger_ai emit 的占位/结果能过
+ *  `blink://results` listener 的 seq 校验;若 ghost 自造 Date.now() seq 会撞不上)。 */
+export function getSeq() {
+  return seq;
+}
+
 /** 用当前输入重新触发一次搜索（右键菜单重置记录后刷新结果用）。 */
 export function retrigger() {
   onInput();

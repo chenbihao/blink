@@ -145,7 +145,7 @@ pub mod tests {
     #[async_trait]
     impl AIProvider for MockProvider {
         fn kind(&self) -> ProviderKind {
-            ProviderKind::OpenAICompat
+            ProviderKind::OpenAICompatible
         }
         fn model_id(&self) -> &str {
             &self.model
@@ -183,7 +183,7 @@ pub mod tests {
             "open_url",
             serde_json::json!({ "url": "https://example.com" }),
         ));
-        assert!(matches!(p.kind(), ProviderKind::OpenAICompat));
+        assert!(matches!(p.kind(), ProviderKind::OpenAICompatible));
         assert_eq!(p.model_id(), "mock-echo");
     }
 

@@ -27,7 +27,8 @@ use crate::infra::platform::context::AwarenessSource;
 
 /// 建议来源。前端可按此分样式（Context 弱区分——更浅灰度或不同 icon）。
 ///
-/// 0.9 预留 `Ai` 变体：AI 意图判定器成为另一个 Suggestion 生产者,走同一竞争路径。
+/// 0.9.2 起加 `Ai` 变体:AI 意图判定不占"输入补全",而是产 Ghost 提示"按 Tab 问 AI",
+/// 用户显式采纳才真调 completion(避免打字过程连续触发)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SuggestionSource {
@@ -37,7 +38,10 @@ pub enum SuggestionSource {
     /// 0.8.3 环境感知（选中英文 → 翻译 / 剪贴板 URL → 打开链接）。
     /// 空 query 独占（非空 query 时 keyword 意图更强，Context 让位）。
     Context,
-    // 0.9 预留：Ai —— AI function calling / 意图判定
+    /// 0.9.2 AI 触发提示 —— gate 过筛子且无 Keyword/Context 命中时产,
+    /// display="按 Tab 问 AI",replacement=原 query(采纳时前端走独立路径 invoke `trigger_ai`,
+    /// **不** 触发新一轮 search)。避免打字过程连续触发 AI 调用。
+    Ai,
 }
 
 /// Context 类 Suggestion 的取值来源（0.8.3 §4.9 UX 加强）——

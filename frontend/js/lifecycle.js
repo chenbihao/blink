@@ -60,4 +60,12 @@ export function init() {
     queryEl.value = String(event.payload ?? "");
     queryEl.dispatchEvent(new Event("input", { bubbles: true }));
   });
+
+  // 0.9.2.1：剪贴板变化 → AwarenessSnapshot 已局部刷新 → 用当前 query 重跑
+  // 一次让 Context Ghost / AI 四筛子读到新剪贴板。retrigger 内部会区分空/非空
+  // query 分别走 fetchContextSuggestions / onInput，Ghost 通道天然覆盖。
+  // 后端只在主窗口可见时才 emit，前端无需再判可见。
+  listen("blink://awareness-updated", () => {
+    search.retrigger();
+  });
 }

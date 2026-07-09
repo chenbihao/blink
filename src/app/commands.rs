@@ -98,6 +98,27 @@ pub async fn search_apps(
     results
 }
 
+/// 前端按 Tab 采纳 AI Ghost Suggestion 时调用(0.9.2 Phase 5b)。
+///
+/// **为什么单独命令而非走 search_apps 的 debounce 路径**:
+/// - AI 调用相对昂贵(几百 ms 到几秒)且消耗 token,不能因打字过程反复触发
+/// - 用户显式按 Tab 才走 → 单次调用充分执行,避免 h2 stream 堆积/自 cancel
+///
+/// 参数:
+/// - `query`:要问 AI 的原文(前端保存的 `suggestion.replacement`)
+/// - `seq`:与 search 复用同一自增计数,让后续 emit 的结果能被 results.js 正确匹配
+#[tauri::command]
+pub async fn trigger_ai(query: String, seq: u64, app: tauri::AppHandle) -> Result<(), String> {
+    tracing::debug!(
+        target: crate::infra::utils::perf::ai_slo::TARGET,
+        "AI trigger: seq={seq} qlen={}",
+        query.chars().count(),
+    );
+    let service = app.state::<std::sync::Arc<crate::domain::search::SearchService>>();
+    service.trigger_ai(query, seq);
+    Ok(())
+}
+
 /// 前端回车/点击时调用：启动选中的应用（普通 lnk 路径）。
 ///
 /// 0.8.0 §1.3 起，内置动作走 `run_builtin_action`（前端 `Action.kind == "run"` 时分派），
@@ -756,11 +777,17 @@ pub async fn set_config(
 pub async fn save_ai_secret(
     provider_id: String,
     secret: String,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
     // 立即包进 SecretString——之后再也不用明文引用
     let secret_wrapped = crate::infra::platform::secret::SecretString::new(secret);
     crate::infra::platform::secret::save_secret(&provider_id, "key", &secret_wrapped)
         .map_err(|e| e.to_string())?;
+    // Bump registry 内的密钥 epoch —— 让下次 reload invalidate 所有旧实例,
+    // 保证"改密钥立即生效"(前端保存密钥后会紧接着调 set_config('ai_config') 触发 reload)。
+    if let Some(reg) = app.try_state::<std::sync::Arc<crate::domain::ai::AIProviderRegistry>>() {
+        reg.bump_secret_epoch();
+    }
     // 日志绝不含 secret 内容
     tracing::info!(%provider_id, "AI Provider 密钥已保存到 Credential Manager");
     Ok(())
@@ -770,15 +797,34 @@ pub async fn save_ai_secret(
 ///
 /// **调用时机**:删除 Provider entry 前先调此,确保 CM 端幂等清理。
 /// 未找到别名视为已删,静默返回 Ok(§5.2 铁则 3)。
+///
+/// **对称性**:与 `save_ai_secret` 一样在成功/幂等分支都 `bump_secret_epoch` ——
+/// 让下次 reload 时任何仍引用此 pid 的旧 Arc 因 fingerprint 变化被强制丢弃。
+/// 当前 UX 是"删 provider 顺带删密钥",紧随的 `set_config('ai_config')` 已经会
+/// reload;这里 bump 一次是**未来 UX 铺路**(若加"清空密钥保留 provider"入口,
+/// 光删 CM 不 bump 会让旧 Arc 继续带过期密钥用)。
 #[tauri::command]
-pub async fn delete_ai_secret(provider_id: String) -> Result<(), String> {
+pub async fn delete_ai_secret(
+    provider_id: String,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let bump = || {
+        if let Some(reg) =
+            app.try_state::<std::sync::Arc<crate::domain::ai::AIProviderRegistry>>()
+        {
+            reg.bump_secret_epoch();
+        }
+    };
     match crate::infra::platform::secret::delete_secret(&provider_id, "key") {
         Ok(()) => {
+            bump();
             tracing::info!(%provider_id, "AI Provider 密钥已从 CM 删除");
             Ok(())
         }
         Err(crate::infra::platform::secret::SecretError::NotFound(_)) => {
-            // 幂等——CM 里没有此别名,视为已删
+            // 幂等——CM 里没有此别名,视为已删;也 bump(池里若有引用此 pid 的
+            // 旧 Arc,下次 reload 会因 fingerprint 变化重建)。
+            bump();
             tracing::debug!(%provider_id, "AI Provider 密钥不在 CM 中,跳过删除");
             Ok(())
         }

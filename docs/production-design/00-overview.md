@@ -86,8 +86,9 @@
 | **0.8.7** | Alt+A 区域截图（DWM Cloak + BGRA 全链路 + 快速 PNG，总感知延迟 ~320ms） | ✅ 完成 |
 | **0.8.8** | 收尾归档（文档同步 + 遗留项梳理，剩余优化项进 0.9 前 chore 池） | ✅ 完成 |
 | **0.9.0** | 依赖前置升级（tauri 2.11.5 / reqwest 0.13）+ **rig-core 引入** + 统一能力 schema + Action trait tool-call 进化 + `danger_class()` 元数据（纯架构零 AI） | ✅ 完成 |
-| **0.9.1** | Provider 抽象（LLM + STT 预留，全 buildin 走 rig）+ 密钥安全（Credential Manager）+ 三档配置页 | 规划中 |
-| **0.9.2** | 主窗口文本闭环（**只用 rig Provider 层，`AgentBuilder` 留 0.10 展开**）+ 轻量路由 + 反馈动画 | 规划中 |
+| **0.9.1** | Provider 抽象（LLM + STT 预留，全 buildin 走 rig）+ 密钥安全（Credential Manager）+ 三档配置页 | ✅ 完成 |
+| **0.9.2 第一步** | 主窗口文本闭环(第一次真跑 completion,只用 rig Provider 层 + Chat Completions API) + 四筛子决策树 + SLO 埋点上数据 | ✅ 完成 |
+| **0.9.2 第二步** | 反馈动画打磨 + 轻量路由 + 四筛子阈值 spike + tool_call 执行链路 | 规划中 |
 | **0.10.0** | STT 接入（云端优先）+ 双 chord 语音入口 + 输入法模式 | 后置 |
 | **0.10.1** | 语音找文件北极星场景 + 指令闭环 | 后置 |
 | **0.10.2** | Agent 对话窗口 + 流式 MD + 确认反馈 | 后置 |

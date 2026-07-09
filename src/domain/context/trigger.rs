@@ -52,14 +52,29 @@ impl TextSource {
     /// **关键契约**：返回 `AwarenessView` 而不是 `&str` —— 调用方拿到 `(source, text)`
     /// 一起,避免 intent 层事后推断 origin。
     ///
-    /// 空/None（trim 后无内容）返回 None。`SelectionThenClipboard` 优先选区,失败
-    /// 回退剪贴板 —— 通过 `AwarenessSnapshot::find_text` 的单一入口保证 trim 判定
-    /// 与后续任何消费方一致。
+    /// 空/None（trim 后无内容）返回 None。
+    ///
+    /// **`SelectionThenClipboard` 策略（0.9.2.1 修订）**：两条都非空时**按 captured_at
+    /// 择新**——旧行为是「Selection 恒压 Clipboard」,导致主窗口打开时更新剪贴板后
+    /// Selection 陈旧的 view 一直压新剪贴板,Ghost 老不刷。改按时间戳后语义是「最新
+    /// 的用户行为胜」:刚划的词优先,刚复制的文本优先。两者只有一条时按原语义。
+    ///
+    /// 时间戳打平（同一 `Instant`,理论上不可能除非人工构造）取 Selection——沿用旧默认。
     pub fn extract<'a>(&self, snapshot: &'a AwarenessSnapshot) -> Option<AwarenessView<'a>> {
         match self {
-            TextSource::SelectionThenClipboard => snapshot
-                .find_text(AwarenessSource::Selection)
-                .or_else(|| snapshot.find_text(AwarenessSource::Clipboard)),
+            TextSource::SelectionThenClipboard => {
+                let sel = snapshot.find_text(AwarenessSource::Selection);
+                let clip = snapshot.find_text(AwarenessSource::Clipboard);
+                match (sel, clip) {
+                    (Some(s), Some(c)) => {
+                        // 严格新的才胜:c > s 时选 clip,否则选 sel(打平沿用旧默认)
+                        if c.captured_at > s.captured_at { Some(c) } else { Some(s) }
+                    }
+                    (Some(s), None) => Some(s),
+                    (None, Some(c)) => Some(c),
+                    (None, None) => None,
+                }
+            }
         }
     }
 }
@@ -215,8 +230,24 @@ mod tests {
     }
 
     #[test]
-    fn text_source_extract_prefers_selection() {
+    fn text_source_extract_picks_newer_when_both_present() {
+        // 0.9.2.1：SelectionThenClipboard 改为按 captured_at 择新。
+        // `snap_with_both` 先 upsert Selection 后 upsert Clipboard,Clipboard 更新
+        // → 应取 Clipboard。这与旧「Selection 恒压 Clipboard」语义相反,是本次修复的目的。
         let s = snap_with_both("SEL", "CLIP");
+        let view = TextSource::SelectionThenClipboard.extract(&s).unwrap();
+        assert_eq!(view.text, "CLIP");
+        assert_eq!(view.source, AwarenessSource::Clipboard);
+    }
+
+    #[test]
+    fn text_source_extract_picks_selection_when_selection_newer() {
+        // 反向验证:Clipboard 先 upsert、Selection 后 upsert → 取 Selection。
+        // 覆盖用户先复制、再划词的时序。
+        let mut s = AwarenessSnapshot::default();
+        s.upsert_text(AwarenessSource::Clipboard, Some("CLIP".into()));
+        std::thread::sleep(std::time::Duration::from_millis(2)); // 拉开 Instant
+        s.upsert_text(AwarenessSource::Selection, Some("SEL".into()));
         let view = TextSource::SelectionThenClipboard.extract(&s).unwrap();
         assert_eq!(view.text, "SEL");
         assert_eq!(view.source, AwarenessSource::Selection);

@@ -1,38 +1,41 @@
-//! 具体 Provider 工厂——按 `ProviderKind` 分派到 rig-core 实体或本地实现。
+//! Provider 工厂——按 `ProviderKind` 构造对应 rig client 并封装成 `AIProvider`。
 //!
-//! ## 阶段与状态(0.9.1 Phase 5a)
+//! ## 阶段与状态(0.9.2 Phase 5b)
 //!
-//! **本文件是"骨架 + 占位"**:
-//! - `NoopFactory` 兜底占位——所有 build 请求都返 `NotConfigured`。
-//!   用于 0.9.1 Phase 5a-6 中间态:AIConfig 已配置但 factory 不构造实例,
-//!   `resolve_tier` 一律 NotConfigured,SearchService fallback 常规 fuzzy。
-//! - `RigFactory` (0.9.1 Phase 5b) —— 接 rig `providers::openai/anthropic/...`,
-//!   真跑 completion。**留 5b 落**,因为需要:
-//!     - 密钥从 CM 读:`secret::load_secret(&entry.id, "key")`
-//!     - reqwest Client 冷构造 + `.timeout()` 挂 §3.3 硬超时
-//!     - rig `CompletionModel::completion_request` 调用
-//!   现在没有前端设置页无法端到端验证,先留骨架。
+//! **RigFactory 已上线**——`default_factory()` 返 `RigFactory`,真跑 rig completion。
 //!
-//! ## 为什么必须先落骨架
+//! `NoopFactory` 保留:
+//! - 作为 registry baseline 单测的固定入参(证明"我没接 rig 时也能证明 registry 骨架正确")
+//! - 为 0.11 增本地模型 factory 时提供参考实现模板
 //!
-//! §6.4 兜底铁则:AI 配置错误不能破坏主链路。`NoopFactory` 让老用户"AI 未配置"
-//! 路径**运行时零冒烟**——即使 AppContext 持了 AIProviderRegistry,dispatch 也
-//! 走 NotConfigured 兜底。这个铁则不能靠"用户没配就跳过 registry 构造"实现,
-//! 因为 0.9.2 起 SearchService 需要一个稳定的 `ai_registry` 引用。
+//! ## §6.4 兜底铁则
+//!
+//! AI 配置错误绝不破坏主链路。RigFactory::build 失败链:
+//! - `secret::load_secret` 缺 → `AIError::NotConfigured`(不是 Provider,语义"未配置")
+//! - `openai_compat` 缺 base_url → `AIError::Provider`(用户配错,需感知)
+//! - rig `Client::builder().build()` 失败 → `AIError::Provider("client build failed")`
+//!
+//! 所有失败都被 registry.reload 的 skip + warn 消化——单个 provider 挂不影响其他。
+//!
+//! ## 类型收窄
+//!
+//! 每个 arm 构造出不同具体类型的 `RigProvider<M>`(泛型 M 由 ProviderKind 敲定),
+//! 全部擦除到 `Arc<dyn AIProvider>` 回给 registry。上层拿不到 rig 类型——§2.6。
 
 use std::sync::Arc;
 
-use crate::app::ai_config::{ModelEntry, ProviderEntry};
+use rig_core::client::CompletionClient;
+
+use crate::app::ai_config::{ModelEntry, ProviderEntry, ProviderKind};
 use crate::domain::ai::provider::{AIError, AIProvider};
 use crate::domain::ai::registry::ProviderFactory;
+use crate::domain::ai::rig_provider::{RigProvider, expose_for_rig};
+use crate::infra::platform::secret;
 
 /// **占位 factory** —— 所有 `build` 请求返 `NotConfigured`。
 ///
-/// **用途**:0.9.1 Phase 5a-6 中间态。老用户 AI 未配置 →
-/// registry 无实例 → dispatch NotConfigured → SearchService fallback。
-///
-/// **Phase 5b 替换**:换成 `RigFactory` 接真 rig client。此 factory 保留作为
-/// 单测 baseline("我没接 rig 时也能证明 registry 骨架正确")。
+/// **保留原因**:registry baseline 单测入参、未来本地模型 factory 模板。
+/// 生产用 `RigFactory`。
 pub struct NoopFactory;
 
 impl ProviderFactory for NoopFactory {
@@ -41,24 +44,167 @@ impl ProviderFactory for NoopFactory {
         entry: &ProviderEntry,
         model: &ModelEntry,
     ) -> Result<Arc<dyn AIProvider>, AIError> {
-        // 记 warn 便于开发期发现"你以为接了但没接"
         tracing::warn!(
             target: crate::infra::utils::perf::ai_slo::TARGET,
-            provider_id = %entry.id,
-            model_id = %model.id,
-            kind = ?entry.kind,
-            "NoopFactory 拒绝构造 provider——Phase 5b 起接 rig 才真跑"
+            "NoopFactory 拒绝构造 {} · {}——仅用作单测 baseline",
+            entry.display_name,
+            model.id,
         );
         Err(AIError::NotConfigured)
     }
 }
 
-/// 默认 factory 构造——Phase 5b 起返回 `RigFactory`,当前返回 `NoopFactory`。
+/// **生产 factory** —— 接 rig-core 各 provider client,真跑 LLM。
+///
+/// 每次 `build` 都:
+/// 1. 从 CM 读密钥(缺 → NotConfigured)
+/// 2. 按 `entry.kind` 构造 rig `Client`(base_url 可覆盖)
+/// 3. `client.completion_model(&model.id)` 得到具体 `CompletionModel`
+/// 4. 包进 `RigProvider<M>` → 擦除 `Arc<dyn AIProvider>`
+///
+/// **密钥生命周期**:`load_secret` → `expose_for_rig(&s)` **只一次** →
+/// 传给 rig `.api_key(k)`。返回后 `SecretString` Drop 走 zeroize。
+pub struct RigFactory;
+
+impl ProviderFactory for RigFactory {
+    fn build(
+        &self,
+        entry: &ProviderEntry,
+        model: &ModelEntry,
+    ) -> Result<Arc<dyn AIProvider>, AIError> {
+        // 1. 读密钥——缺=未配置,不是错误
+        let key = secret::load_secret(&entry.id, "key").map_err(|e| {
+            tracing::debug!(
+                target: crate::infra::utils::perf::ai_slo::TARGET,
+                "AI factory: {} 密钥未配置 ({e})",
+                entry.display_name,
+            );
+            AIError::NotConfigured
+        })?;
+        let key_str = expose_for_rig(&key);
+        // key 在此作用域内保留,rig builder 需要 &str;函数返回时 key 出栈 → zeroize
+
+        // 2. 按协议分派构造 —— 每 arm 独立返回 Arc<dyn AIProvider>
+        //    (0.9.2 第二步:3 类协议,老 kind 已通过 serde alias 迁移到 OpenAICompatible)
+        let provider: Arc<dyn AIProvider> = match entry.kind {
+            ProviderKind::OpenAICompatible => {
+                build_openai_compatible(&key_str, entry.base_url.as_deref(), &model.id)?
+            }
+            ProviderKind::AnthropicMessages => {
+                build_anthropic(&key_str, entry.base_url.as_deref(), &model.id)?
+            }
+            ProviderKind::GeminiGenerateContent => {
+                build_gemini(&key_str, entry.base_url.as_deref(), &model.id)?
+            }
+        };
+
+        tracing::info!(
+            target: crate::infra::utils::perf::ai_slo::TARGET,
+            "AI factory: 构造 {} · kind={:?} · model={}",
+            entry.display_name,
+            entry.kind,
+            model.id,
+        );
+        Ok(provider)
+    }
+}
+
+// ── 各 Provider 构造 ─────────────────────────────────────────────────────
+
+/// OpenAI Chat Completions 协议——**通用兼容层**(0.9.2 第二步)。
+///
+/// **覆盖范围**:OpenAI 官方 / DeepSeek / 硅基流动 / Moonshot / Groq / OpenRouter /
+/// xAI / 自建代理——所有走 `/v1/chat/completions` 的端点。
+///
+/// **base_url 政策**:
+/// - `Some(url)` → 用用户填的 url(前端预设下拉可一键填 preset)
+/// - `None` → 走 rig `CompletionsClient` 默认 base(`api.openai.com`);多数用户会
+///   通过前端 preset 填,None 极少见,但保持不 panic 兼容手动 JSON 编辑场景
+///
+/// **为什么不再区分 `deepseek::Client` / `openai::Client`**:
+/// rig 里 `deepseek::Client` 内部就是 Chat Completions 协议 + 预置 base_url,
+/// 我们把预置放到前端 preset 下拉,后端只留一条协议路径,更干净。
+fn build_openai_compatible(
+    key: &str,
+    base_url: Option<&str>,
+    model_id: &str,
+) -> Result<Arc<dyn AIProvider>, AIError> {
+    use rig_core::providers::openai;
+    // **护栏**:base_url 空一律拒绝构造——rig 默认落到 `api.openai.com`,用户拿着
+    // 第三方 Key 打去 OpenAI 官方必 401 且极难自诊断(前端已有校验;这里是双重保险,
+    // 防止老配置迁移 / 手动编辑 db 绕过前端)。
+    let url = base_url.filter(|s| !s.is_empty()).ok_or_else(|| {
+        AIError::Provider(
+            "OpenAI Compatible 协议必须配 base_url(如 https://api.openai.com/v1)".into(),
+        )
+    })?;
+    let client = openai::CompletionsClient::builder()
+        .api_key(key)
+        .base_url(url)
+        .build()
+        .map_err(|_| AIError::Provider("openai-compatible client 构造失败".into()))?;
+    let model = client.completion_model(model_id);
+    Ok(Arc::new(RigProvider::new(
+        ProviderKind::OpenAICompatible,
+        model_id,
+        model,
+        None,
+    )))
+}
+
+/// Anthropic Messages 协议——`/v1/messages`,仅 Claude 官方。
+fn build_anthropic(
+    key: &str,
+    base_url: Option<&str>,
+    model_id: &str,
+) -> Result<Arc<dyn AIProvider>, AIError> {
+    use rig_core::providers::anthropic;
+    let mut builder = anthropic::Client::builder().api_key(key);
+    if let Some(url) = base_url.filter(|s| !s.is_empty()) {
+        builder = builder.base_url(url);
+    }
+    let client = builder
+        .build()
+        .map_err(|_| AIError::Provider("anthropic client 构造失败".into()))?;
+    let model = client.completion_model(model_id);
+    Ok(Arc::new(RigProvider::new(
+        ProviderKind::AnthropicMessages,
+        model_id,
+        model,
+        None,
+    )))
+}
+
+/// Google Gemini GenerateContent 协议——`/v1beta/models/*:generateContent`。
+///
+/// rig 0.39 里 `gemini::Client::builder()` 支持 `api_key` 但不显式支持 `base_url`
+/// (Gemini 端点固定在 googleapis.com);如果用户填了 base_url 我们也不报错,
+/// 仅忽略——避免"填了没用又不知道"的困惑,统一走 rig 默认。
+fn build_gemini(
+    key: &str,
+    _base_url: Option<&str>,
+    model_id: &str,
+) -> Result<Arc<dyn AIProvider>, AIError> {
+    use rig_core::providers::gemini;
+    let client = gemini::Client::builder()
+        .api_key(key)
+        .build()
+        .map_err(|_| AIError::Provider("gemini client 构造失败".into()))?;
+    let model = client.completion_model(model_id);
+    Ok(Arc::new(RigProvider::new(
+        ProviderKind::GeminiGenerateContent,
+        model_id,
+        model,
+        None,
+    )))
+}
+
+/// 默认 factory 构造——**0.9.2 Phase 5b 起返回 `RigFactory`**。
 ///
 /// **调用位置**:`main.rs::setup`。挂进 `AIProviderRegistry`。
-#[allow(dead_code)] // 0.9.1 Phase 5a 定义,main.rs 起消费
+#[allow(dead_code)] // 由 main.rs 消费
 pub fn default_factory() -> Arc<dyn ProviderFactory> {
-    Arc::new(NoopFactory)
+    Arc::new(RigFactory)
 }
 
 // ── 测试 ────────────────────────────────────────────────────────────────
@@ -66,15 +212,15 @@ pub fn default_factory() -> Arc<dyn ProviderFactory> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::ai_config::{ProviderKind};
+    use crate::app::ai_config::ProviderKind;
 
-    fn sample_entry() -> ProviderEntry {
+    fn sample_entry(kind: ProviderKind, base_url: Option<String>) -> ProviderEntry {
         ProviderEntry {
-            id: "p1".into(),
+            id: "test-provider-uuid".into(),
             display_name: "Test".into(),
-            kind: ProviderKind::OpenAI,
-            base_url: None,
-            secret_ref: "blink/p1/key".into(),
+            kind,
+            base_url,
+            secret_ref: "blink/test-provider-uuid/key".into(),
             models: Vec::new(),
             created_at: 0,
         }
@@ -82,7 +228,7 @@ mod tests {
 
     fn sample_model() -> ModelEntry {
         ModelEntry {
-            id: "m1".into(),
+            id: "gpt-4o-mini".into(),
             display_name: "M1".into(),
             context_window: None,
             input_price_per_million: None,
@@ -93,19 +239,43 @@ mod tests {
     #[test]
     fn noop_factory_always_returns_not_configured() {
         let f = NoopFactory;
-        let result = f.build(&sample_entry(), &sample_model());
+        let result = f.build(
+            &sample_entry(ProviderKind::OpenAICompatible, None),
+            &sample_model(),
+        );
         assert!(matches!(result, Err(AIError::NotConfigured)));
     }
 
     #[test]
-    fn default_factory_returns_noop_in_phase_5a() {
-        // 0.9.1 Phase 5a:default 是 NoopFactory
-        // 0.9.1 Phase 5b 起:替换为 RigFactory,该测试需同步改
+    fn default_factory_is_rig_factory_in_phase_5b() {
+        // 0.9.2 第二步:default 是 RigFactory。
+        // 无密钥场景 → load_secret 缺 → NotConfigured(§6.4 兜底铁则,不 panic)
         let f = default_factory();
-        let result = f.build(&sample_entry(), &sample_model());
+        let entry = sample_entry(ProviderKind::OpenAICompatible, None);
+        let result = f.build(&entry, &sample_model());
         assert!(
             matches!(result, Err(AIError::NotConfigured)),
-            "Phase 5a default 必须仍是 NoopFactory"
+            "无密钥应返 NotConfigured 而非其他错误(is_ok={})",
+            result.is_ok()
         );
+    }
+
+    #[test]
+    fn all_three_kinds_have_factory_arms() {
+        // 三类协议都能触达 factory dispatch;无密钥场景一律 NotConfigured 早于协议构造。
+        // 这是"分派完整性"测试:防止未来新增 kind 时忘了 factory arm。
+        let f = RigFactory;
+        for kind in [
+            ProviderKind::OpenAICompatible,
+            ProviderKind::AnthropicMessages,
+            ProviderKind::GeminiGenerateContent,
+        ] {
+            let entry = sample_entry(kind, None);
+            let result = f.build(&entry, &sample_model());
+            assert!(
+                matches!(result, Err(AIError::NotConfigured)),
+                "kind={kind:?} 无密钥应返 NotConfigured"
+            );
+        }
     }
 }

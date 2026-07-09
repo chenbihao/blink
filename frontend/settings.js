@@ -766,8 +766,14 @@ async function showAddProcessModal(container, existing, onAdd) {
     overlay.remove();
   }
   overlay.querySelector(".modal-close").addEventListener("click", close);
-  overlay.addEventListener("click", (e) => {
-    if (e.target === overlay) close();
+  // mousedown + mouseup 双重命中才判定"点空白",避免从 input 里划词拖出边界误关
+  let downOnOverlay = false;
+  overlay.addEventListener("mousedown", (e) => {
+    downOnOverlay = e.target === overlay;
+  });
+  overlay.addEventListener("mouseup", (e) => {
+    if (downOnOverlay && e.target === overlay) close();
+    downOnOverlay = false;
   });
   document.addEventListener(
     "keydown",
@@ -2561,10 +2567,9 @@ let currentAIConfig = null;
 let hasSecretMap = new Map(); // provider_id → boolean
 
 const AI_KIND_LABEL = {
-  openai: "OpenAI",
-  deepseek: "DeepSeek",
-  anthropic: "Anthropic",
-  openai_compat: "OpenAI-Compat",
+  openai_compatible: "OpenAI Compatible",
+  anthropic_messages: "Anthropic",
+  gemini_generate_content: "Gemini",
 };
 
 async function loadAIConfig() {
@@ -2653,6 +2658,7 @@ function renderAIProviders() {
             <div class="ai-provider-meta">${escapeHtml(modelIds || "(no model)")}</div>
           </div>
           <span class="ai-provider-status ${statusCls}">${escapeHtml(statusText)}</span>
+          <button class="ai-provider-edit" data-provider-id="${escapeAttr(p.id)}" title="${escapeAttr(t("ai.provider.edit"))}">✎</button>
           <button class="ai-provider-delete" data-provider-id="${escapeAttr(p.id)}" title="${escapeAttr(t("ai.provider.delete"))}">✕</button>
         </div>`;
     })
@@ -2661,6 +2667,9 @@ function renderAIProviders() {
     cards + `<button class="ai-providers-add" id="ai-add-provider">${escapeHtml(t("ai.providers.add"))}</button>`;
 
   document.getElementById("ai-add-provider").addEventListener("click", openAIProviderModal);
+  container.querySelectorAll(".ai-provider-edit").forEach((btn) => {
+    btn.addEventListener("click", () => openAIProviderModal(btn.dataset.providerId));
+  });
   container.querySelectorAll(".ai-provider-delete").forEach((btn) => {
     btn.addEventListener("click", () => deleteAIProvider(btn.dataset.providerId));
   });
@@ -2802,7 +2811,7 @@ function bindAIEvents() {
   });
   $("ai-timeout-ms").addEventListener("change", (e) => {
     const v = parseInt(e.target.value, 10);
-    currentAIConfig.slo_hard_timeout_ms = isNaN(v) ? null : Math.max(500, Math.min(10000, v));
+    currentAIConfig.slo_hard_timeout_ms = isNaN(v) ? null : Math.max(500, Math.min(30000, v));
     e.target.value = currentAIConfig.slo_hard_timeout_ms ?? 2500;
     saveAIConfig();
   });
@@ -2829,8 +2838,38 @@ function bindAIEvents() {
   // Modal 事件
   $("ai-modal-cancel").addEventListener("click", closeAIProviderModal);
   $("ai-modal-save").addEventListener("click", saveNewProviderFromModal);
-  $("ai-modal-overlay").addEventListener("click", (e) => {
-    if (e.target.id === "ai-modal-overlay") closeAIProviderModal();
+  // 点击 overlay 空白关 modal:必须 mousedown + mouseup 都在 overlay 上才算——
+  // 否则从 textarea 里划词拖出边界时,click 的 target 会被算成 overlay(mousedown
+  // 与 mouseup 的最近共同祖先),导致「选个字就把 modal 关了」。
+  {
+    let downOnOverlay = false;
+    const overlayEl = $("ai-modal-overlay");
+    overlayEl.addEventListener("mousedown", (e) => {
+      downOnOverlay = e.target.id === "ai-modal-overlay";
+    });
+    overlayEl.addEventListener("mouseup", (e) => {
+      if (downOnOverlay && e.target.id === "ai-modal-overlay") {
+        closeAIProviderModal();
+      }
+      downOnOverlay = false;
+    });
+  }
+  // Preset 下拉:选中平台后一键填 kind + base_url + display_name(空 name 才填)
+  $("ai-modal-preset").addEventListener("change", (e) => {
+    const overlay = $("ai-modal-overlay");
+    const isEdit = !!overlay.dataset.editProviderId;
+    applyAIPresetToModal(e.target.value, isEdit);
+  });
+  // Kind 手改:回退 preset 为 custom(避免 preset 显示与实际不一致)
+  $("ai-modal-kind").addEventListener("change", () => {
+    $("ai-modal-preset").value = "custom";
+  });
+  // Base URL 手改:同上回退
+  $("ai-modal-base-url").addEventListener("input", () => {
+    const bu = $("ai-modal-base-url").value.trim();
+    const kind = $("ai-modal-kind").value;
+    // 命中已有 preset 就回填,不命中就 custom
+    $("ai-modal-preset").value = guessPresetForProvider(kind, bu);
   });
 
   // Toast
@@ -2844,28 +2883,191 @@ function bindAIEvents() {
   $("ai-toast-later").addEventListener("click", hideAIEnableToast);
 }
 
-function openAIProviderModal() {
+/**
+ * AI 供应商预设表(0.9.2 第二步方案 B)——按厂商展开成"协议 + base_url"。
+ *
+ * 用户在 modal 里选"OpenAI 官方 / DeepSeek 官方 / 硅基流动 / …"就一键填 kind +
+ * base_url,不用去查每家 API 文档;选"自定义"清空所有字段,回归手填模式。
+ *
+ * **base_url = null**:该协议不需要用户填(Anthropic / Gemini 走 rig 默认)。
+ * **kind 必须与后端 ProviderKind serde rename 值一致**(见 src/app/ai_config.rs)。
+ */
+const AI_PRESETS = {
+  openai: {
+    kind: "openai_compatible",
+    base_url: "https://api.openai.com/v1",
+    display_name_default: "OpenAI",
+  },
+  deepseek: {
+    kind: "openai_compatible",
+    base_url: "https://api.deepseek.com/v1",
+    display_name_default: "DeepSeek",
+  },
+  siliconflow: {
+    kind: "openai_compatible",
+    base_url: "https://api.siliconflow.cn/v1",
+    display_name_default: "SiliconFlow",
+  },
+  moonshot: {
+    kind: "openai_compatible",
+    base_url: "https://api.moonshot.cn/v1",
+    display_name_default: "Moonshot",
+  },
+  groq: {
+    kind: "openai_compatible",
+    base_url: "https://api.groq.com/openai/v1",
+    display_name_default: "Groq",
+  },
+  openrouter: {
+    kind: "openai_compatible",
+    base_url: "https://openrouter.ai/api/v1",
+    display_name_default: "OpenRouter",
+  },
+  anthropic: {
+    kind: "anthropic_messages",
+    base_url: null,
+    display_name_default: "Anthropic",
+  },
+  gemini: {
+    kind: "gemini_generate_content",
+    base_url: null,
+    display_name_default: "Google Gemini",
+  },
+  custom: {
+    kind: null,
+    base_url: null,
+    display_name_default: null,
+  },
+};
+
+/**
+ * 猜测 provider 编辑时该回填到哪个 preset。
+ * 完全匹配 kind + base_url → 命中;否则回落到 "custom"。
+ */
+function guessPresetForProvider(kind, baseUrl) {
+  const bu = (baseUrl || "").trim().replace(/\/$/, "");
+  for (const [key, preset] of Object.entries(AI_PRESETS)) {
+    if (key === "custom") continue;
+    if (preset.kind !== kind) continue;
+    const presetBu = (preset.base_url || "").replace(/\/$/, "");
+    if (presetBu === bu) return key;
+  }
+  return "custom";
+}
+
+/**
+ * 应用 preset 到 modal 字段——kind / base_url / display_name(仅新增时空 name 才填)。
+ * `custom` 走特殊分支:不动 kind/base_url,让用户自己填。
+ *
+ * **重名策略**(方案 B):新增模式下,若已存在同名 provider,自动追加 " (2)" / " (3)"
+ * 后缀避免肉眼混淆。用户可继续手动改。编辑模式不动 display_name。
+ */
+function applyAIPresetToModal(presetKey, isEdit) {
   const $ = (id) => document.getElementById(id);
-  $("ai-modal-kind").value = "openai";
-  $("ai-modal-display-name").value = "";
-  $("ai-modal-base-url").value = "";
-  $("ai-modal-api-key").value = "";
-  $("ai-modal-models").value = "";
+  const preset = AI_PRESETS[presetKey];
+  if (!preset || presetKey === "custom") return;
+  if (preset.kind) $("ai-modal-kind").value = preset.kind;
+  $("ai-modal-base-url").value = preset.base_url || "";
+  if (!isEdit && preset.display_name_default && !$("ai-modal-display-name").value.trim()) {
+    $("ai-modal-display-name").value = uniqueDisplayName(preset.display_name_default);
+  }
+}
+
+/**
+ * 生成不与现有 provider 重名的 display_name——重名时追加 " (2)" / " (3)" 后缀。
+ *
+ * 消除"添加两个 OpenAI 官方后列表全是同名卡片"的肉眼歧义。
+ * 底层 UUID 独立,只是 UI 显示层加区分。
+ */
+function uniqueDisplayName(base) {
+  const existing = new Set(
+    (currentAIConfig.providers || []).map((p) => (p.display_name || "").trim()),
+  );
+  if (!existing.has(base)) return base;
+  for (let i = 2; i < 100; i++) {
+    const candidate = `${base} (${i})`;
+    if (!existing.has(candidate)) return candidate;
+  }
+  return base; // 兜底(几乎不可能触达)
+}
+
+/**
+ * 打开 AI 供应商 modal。
+ *
+ * @param {string} [editProviderId] 传 provider id 进入编辑模式;不传/传 undefined 进入新增模式。
+ *
+ * **编辑模式差异**:
+ * - 标题变"编辑 AI 供应商"
+ * - kind 选择行隐藏(kind 不可改;想改 kind = 删了重加)
+ * - display_name / base_url / models 预填
+ * - api_key 输入框留空,placeholder 提示"留空 = 保留原密钥"
+ * - hint 变"填新值将覆盖旧密钥"
+ * - 保存时 apiKey 空 → 跳过 save_ai_secret,仅更新 provider entry
+ *
+ * modal 状态通过 overlay 的 dataset.editProviderId 传递,close 时清除。
+ */
+function openAIProviderModal(editProviderId) {
+  const $ = (id) => document.getElementById(id);
+  const overlay = $("ai-modal-overlay");
+  const isEdit = typeof editProviderId === "string" && editProviderId.length > 0;
+
+  if (isEdit) {
+    const p = (currentAIConfig.providers || []).find((x) => x.id === editProviderId);
+    if (!p) {
+      console.warn("[ai] 编辑模式找不到 provider", editProviderId);
+      return;
+    }
+    overlay.dataset.editProviderId = editProviderId;
+    $("ai-modal-title").textContent = t("ai.modal.title.edit");
+    $("ai-modal-kind-row").style.display = "none";
+    // preset 行编辑时也隐藏——kind 不可改,让 preset 选择也没意义
+    $("ai-modal-preset-row").style.display = "none";
+    $("ai-modal-kind").value = p.kind;
+    $("ai-modal-preset").value = guessPresetForProvider(p.kind, p.base_url);
+    $("ai-modal-display-name").value = p.display_name || "";
+    $("ai-modal-base-url").value = p.base_url || "";
+    $("ai-modal-api-key").value = "";
+    $("ai-modal-api-key").placeholder = t("ai.modal.api_key.ph.edit");
+    $("ai-modal-api-key-hint").textContent = t("ai.modal.api_key.hint.edit");
+    $("ai-modal-models").value = (p.models || []).map((m) => m.id).join("\n");
+  } else {
+    delete overlay.dataset.editProviderId;
+    $("ai-modal-title").textContent = t("ai.modal.title");
+    $("ai-modal-kind-row").style.display = "";
+    $("ai-modal-preset-row").style.display = "";
+    // 新增默认 preset = OpenAI 官方,同时应用一次填 kind + base_url + display_name
+    $("ai-modal-preset").value = "openai";
+    $("ai-modal-kind").value = "openai_compatible";
+    $("ai-modal-display-name").value = "";
+    $("ai-modal-base-url").value = "";
+    $("ai-modal-api-key").value = "";
+    $("ai-modal-api-key").placeholder = t("ai.modal.api_key.ph");
+    $("ai-modal-api-key-hint").textContent = t("ai.modal.api_key.hint");
+    $("ai-modal-models").value = "";
+    applyAIPresetToModal("openai", false);
+  }
   $("ai-modal-error").textContent = "";
-  $("ai-modal-overlay").style.display = "flex";
+  overlay.style.display = "flex";
   setTimeout(() => $("ai-modal-display-name").focus(), 50);
 }
 
 function closeAIProviderModal() {
-  document.getElementById("ai-modal-overlay").style.display = "none";
+  const overlay = document.getElementById("ai-modal-overlay");
+  overlay.style.display = "none";
   // 清空 Key 输入框，防止残留在 DOM
   document.getElementById("ai-modal-api-key").value = "";
+  // 清编辑状态
+  delete overlay.dataset.editProviderId;
 }
 
 async function saveNewProviderFromModal() {
   const $ = (id) => document.getElementById(id);
   const errEl = $("ai-modal-error");
   errEl.textContent = "";
+
+  const overlay = $("ai-modal-overlay");
+  const editingId = overlay.dataset.editProviderId || null;
+  const isEdit = !!editingId;
 
   const kind = $("ai-modal-kind").value;
   const displayName = $("ai-modal-display-name").value.trim();
@@ -2880,7 +3082,15 @@ async function saveNewProviderFromModal() {
     errEl.textContent = t("ai.modal.save.empty_display");
     return;
   }
-  if (!apiKey) {
+  // OpenAI Compatible 协议必须有 base_url——不填会撞去 rig 默认 api.openai.com,
+  // 用户拿着第三方 Key 打去 OpenAI 官方 → 401,极难自诊断(踩过一次坑)。
+  // Anthropic / Gemini 协议 base_url 由 rig 内建,可以空。
+  if (kind === "openai_compatible" && !baseUrl) {
+    errEl.textContent = t("ai.modal.save.empty_base_url");
+    return;
+  }
+  // 编辑模式:apiKey 允许空(表示保留原密钥);新增模式必填
+  if (!isEdit && !apiKey) {
     errEl.textContent = t("ai.modal.save.empty_key");
     return;
   }
@@ -2893,6 +3103,15 @@ async function saveNewProviderFromModal() {
     return;
   }
 
+  if (isEdit) {
+    await saveEditedProvider(editingId, { kind, displayName, baseUrl, apiKey, modelIds, errEl });
+  } else {
+    await saveNewProvider({ kind, displayName, baseUrl, apiKey, modelIds, errEl });
+  }
+}
+
+/** 新增 provider(0.9.1 原路径)。 */
+async function saveNewProvider({ kind, displayName, baseUrl, apiKey, modelIds, errEl }) {
   const providerId = (crypto.randomUUID && crypto.randomUUID()) || `p-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   // 1. 先写密钥到 CM —— 失败则整个操作失败
@@ -2946,6 +3165,79 @@ async function saveNewProviderFromModal() {
   if (!currentAIConfig.enabled) {
     showAIEnableToast();
   }
+}
+
+/**
+ * 编辑既有 provider(0.9.2 新增)。
+ *
+ * 与新增的差异:
+ * - **kind 不变**:即使用户在 modal 里改了,也用原 provider 的 kind(kind 行已隐藏)
+ * - **id 保持**:同一 provider 保 secret_ref / tier_* 引用不失效
+ * - **密钥 apiKey 空 → 跳过 save_ai_secret**:保留原密钥
+ * - **失败回滚**:若 save_ai_secret 成功但 saveAIConfig 失败,尝试恢复旧密钥不现实
+ *   (旧明文不在手上),只能保留新密钥 + 回退元数据变更
+ */
+async function saveEditedProvider(providerId, { displayName, baseUrl, apiKey, modelIds, errEl }) {
+  const idx = (currentAIConfig.providers || []).findIndex((p) => p.id === providerId);
+  if (idx < 0) {
+    errEl.textContent = t("ai.error.save_failed", { err: "provider not found" });
+    return;
+  }
+  const old = currentAIConfig.providers[idx];
+
+  // 1. 若填了新密钥 → 覆写 CM
+  const changingKey = apiKey.length > 0;
+  if (changingKey) {
+    try {
+      await invoke("save_ai_secret", { providerId, secret: apiKey });
+    } catch (e) {
+      errEl.textContent = t("ai.error.save_failed", { err: String(e) });
+      return;
+    }
+  }
+
+  // 2. 构造更新后的 provider entry(kind + id + created_at 保持)
+  const updated = {
+    ...old,
+    display_name: displayName,
+    base_url: baseUrl || null,
+    models: modelIds.map((id) => {
+      const existing = (old.models || []).find((m) => m.id === id);
+      // 已存在的 model 保留元数据(display_name / context_window / 价格);新增的用默认
+      return (
+        existing || {
+          id,
+          display_name: id,
+          context_window: null,
+          input_price_per_million: null,
+          output_price_per_million: null,
+        }
+      );
+    }),
+  };
+  currentAIConfig.providers = [
+    ...currentAIConfig.providers.slice(0, idx),
+    updated,
+    ...currentAIConfig.providers.slice(idx + 1),
+  ];
+  if (changingKey) hasSecretMap.set(providerId, true);
+
+  // 3. 保存到后端 —— 触发 registry.reload 增量热更新
+  try {
+    await saveAIConfig();
+  } catch (e) {
+    // 回退元数据(密钥若已覆写就保留新的——旧明文不在手上无法恢复)
+    currentAIConfig.providers[idx] = old;
+    errEl.textContent = t("ai.error.save_failed", { err: String(e) });
+    return;
+  }
+
+  // 4. 检查 tier 引用是否受影响(model 被删可能导致悬空)
+  //    这里不主动清理 tier 引用,`resolve_tier` 已有悬空降级 + banner 提示
+  closeAIProviderModal();
+  renderAIProviders();
+  renderAITierSelects();
+  renderAITierBanner();
 }
 
 async function deleteAIProvider(providerId) {

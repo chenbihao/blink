@@ -13,9 +13,15 @@ use serde::Serialize;
 use sqlx::SqlitePool;
 use tauri::{AppHandle, Emitter};
 
+use crate::app::ai_config::Tier;
+use crate::domain::ai::gating::{AiGate, GateOutcome, should_invoke_ai};
+use crate::domain::ai::message::{ChatMessage, CompletionRequest};
+use crate::domain::ai::provider::AIError;
+use crate::domain::ai::registry::AIProviderRegistry;
 use crate::infra::platform::context::ContextSnapshot;
 use crate::domain::intent::{Candidate, IntentRouter, RankingHint, Route, Suggestion, Surface};
 use crate::domain::plugin::PluginEngine;
+use crate::infra::utils::perf::ai_slo;
 
 use super::engine::{Lane, QueryContext, SearchEngine, SearchItem};
 use super::scorer::{boost_priority, placeholder_score, source_rank};
@@ -91,6 +97,12 @@ pub struct SearchService {
     /// 与 `KeywordProducer` 共享同一份 `Arc<RwLock<f64>>`——
     /// `update_autosuggest_config` 热更新时写入此引用，producer 侧同步生效。
     min_score_shared: Arc<RwLock<f64>>,
+    /// AI Provider registry（0.9.2 Phase 5b setter 注入）。
+    ///
+    /// **为什么用 setter 注入而不是 `new` 参数**:`main.rs:256` 先建 search_service、
+    /// `:308` 后建 ai_registry —— 构造顺序倒挂,setter 规避不动 wiring 顺序。
+    /// setup 早期(setter 未调)读到 None → 跳过 AI lane → fallback fuzzy,无害。
+    ai_registry: Arc<RwLock<Option<Arc<AIProviderRegistry>>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -137,7 +149,20 @@ impl SearchService {
             language: Arc::new(RwLock::new("zh".to_string())),
             last_ranking_hint: Arc::new(Mutex::new(None)),
             min_score_shared,
+            ai_registry: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// 注入 AI Provider registry(0.9.2 Phase 5b)。
+    ///
+    /// **调用位置**:`main.rs::setup` 在构造完 ai_registry 后调用一次。
+    /// 未调用时 `ai_registry` 为 None → search() 走 AI lane 时安静跳过。
+    ///
+    /// **热更新**:registry.reload 由 `set_config('ai_config')` 触发,持有的
+    /// `Arc<AIProviderRegistry>` 引用不变,`reload` 内部改池,SearchService 无感。
+    pub fn set_ai_registry(&self, registry: Arc<AIProviderRegistry>) {
+        *self.ai_registry.write().expect("ai_registry lock poisoned") = Some(registry);
+        tracing::info!(target: ai_slo::TARGET, "AI registry 已注入 SearchService");
     }
 
     /// 更新上下文快照（window::invoke 时调用）。
@@ -157,6 +182,22 @@ impl SearchService {
         use crate::infra::platform::context::AwarenessSource;
         let mut guard = self.snapshot.write().unwrap();
         guard.upsert_text(AwarenessSource::Selection, text);
+    }
+
+    /// 写回剪贴板文本（clipboard listener 检测到剪贴板变化时调用）。
+    ///
+    /// **动机**：`update_snapshot` 只在热键 invoke 时执行一次；主窗口保持打开时
+    /// 用户复制/剪切新内容,snapshot 里的 Clipboard 项会陈旧,导致 Context ghost /
+    /// AI 四筛子读到旧值。与 `update_selected_text` 对称补上局部刷新入口。
+    ///
+    /// **调用侧门控**：调用方（`main.rs` 注册的 clipboard hook）负责三重门控——
+    /// `ContextConfig.enabled` / `clipboard_enabled` / 前台敏感应用检查,与
+    /// `context::collect()` 逻辑对齐,避免密码管理器 Ctrl+C 悄悄进 snapshot。
+    /// 本方法不做门控,只负责 upsert;`None` 时清空同 source 项。
+    pub fn update_clipboard_text(&self, text: Option<String>) {
+        use crate::infra::platform::context::AwarenessSource;
+        let mut guard = self.snapshot.write().unwrap();
+        guard.upsert_text(AwarenessSource::Clipboard, text);
     }
 
     /// 更新最大结果数（update_general_config 时调用）。热更新，搜索热路径零 IO。
@@ -294,7 +335,24 @@ impl SearchService {
         let route = self.filter_route(route);
 
         // Suggestion（0.8.3 / 0.8.6 arbiter）
-        let suggestion = self.compute_suggestion(query, &snapshot);
+        let mut suggestion = self.compute_suggestion(query, &snapshot);
+
+        // ── 0.9.2 Phase 5b:AI Ghost Suggestion 覆盖 ─────────────────────
+        // Tab 显式触发的核心机制:在**Keyword/Context 都没命中**且**过筛子**时,
+        // 产 `SuggestionSource::Ai` Ghost,让用户按 Tab 显式触发 AI。
+        // 避免:边打字边 spawn AI 造成的连续调用浪费。
+        //
+        // **触发条件**(与 §3.6 未命中过滤铁则一致):
+        // 1. Keyword/Context Suggestion 未命中(suggestion.is_none())
+        // 2. Route = Mixed{candidates: []}(无 plugin/engine 规则命中,filter 后)
+        //    Takeover/EngineTakeover 天然命中规则,不覆盖
+        // 3. gating 四筛子过
+        //
+        // Takeover 被 filter 降级成 Mixed{[]} 时也允许走 AI——用户被拦了没得选,
+        // 正是需要 AI 帮忙的场景。
+        if suggestion.is_none() && matches!(&route, Route::Mixed { candidates } if candidates.is_empty()) {
+            suggestion = self.maybe_ai_suggestion(q);
+        }
 
         // 按 Route 分派到三个 executor（0.8.6 §8.2.1 拆 God Method）
         let entries = match route {
@@ -310,6 +368,47 @@ impl SearchService {
         };
 
         SearchResponse { entries, suggestion }
+    }
+
+    /// 若过 gating 且 AI registry 就绪,产 AI Ghost Suggestion(0.9.2 Phase 5b)。
+    ///
+    /// display="按 Tab 问 AI",replacement=原 query(前端见 `source==="ai"` 走独立
+    /// invoke `trigger_ai` 路径,**不**触发新一轮 search,避免"采纳后又搜索"的循环)。
+    fn maybe_ai_suggestion(&self, q: &str) -> Option<Suggestion> {
+        use crate::domain::intent::SuggestionSource;
+
+        // 空 query 直接排除——AI Ghost 强绑非空 query
+        if q.is_empty() {
+            return None;
+        }
+
+        let reg = self.ai_registry.read().expect("ai_registry lock poisoned").clone()?;
+        let cfg = reg.config_snapshot();
+        let gate = AiGate::from(&cfg);
+        match should_invoke_ai(q, &gate) {
+            GateOutcome::Invoke => {
+                // display 提示文案由前端 i18n 决定,后端只填英文占位;
+                // 但当前前端 ghost.js 直接读 display——先填中文,待 0.9.2 第二步统一 i18n
+                #[allow(deprecated)]
+                Some(Suggestion {
+                    display: "按 Tab 问 AI".to_string(),
+                    replacement: q.to_string(),
+                    source: SuggestionSource::Ai,
+                    confidence: 0.5,
+                    prefix_len: 0,
+                    origin: None,
+                    ranking_hint: None,
+                })
+            }
+            GateOutcome::Fallback(reason) => {
+                if matches!(reason, crate::domain::ai::gating::FallbackReason::Disabled) {
+                    tracing::trace!(target: ai_slo::TARGET, ?reason, "AI Ghost 未触发");
+                } else {
+                    tracing::debug!(target: ai_slo::TARGET, ?reason, query = %q, "AI Ghost 未触发");
+                }
+                None
+            }
+        }
     }
 
     /// Suggestion 计算（从 search() 提取，0.8.6 §8.2.1）。
@@ -443,6 +542,9 @@ impl SearchService {
             })
             .collect();
 
+        // AI lane 触发不在这里判——0.9.2 起 AI 走 Tab 显式触发,在 search() 主入口
+        // 通过 maybe_ai_suggestion 覆盖 SearchResponse.suggestion 出 Ghost。
+
         if !plugin_ids.is_empty() || !self.async_engines.is_empty() {
             self.spawn_mixed_lane(q.to_string(), plugin_ids, priority, seq);
         }
@@ -452,8 +554,14 @@ impl SearchService {
             .into_iter()
             .map(SearchItem::into_app_entry)
             .collect();
+
         all_items.extend(hint_entries);
         all_items.extend(placeholders);
+
+        // ── 0.9.2 AI Ghost 已在 `search()` 主入口通过 `maybe_ai_suggestion` 覆盖 ──
+        // 不在 exec_mixed 自动 spawn AI:边打字连续 spawn 会浪费 token + h2 stream 堆积。
+        // 用户看到 Ghost "按 Tab 问 AI" 后显式按 Tab → 前端 invoke `trigger_ai` command
+        // → SearchService::trigger_ai → 单次 spawn。
 
         let elapsed = search_start.elapsed().as_secs_f64() * 1000.0;
         crate::infra::utils::perf::record(
@@ -462,6 +570,155 @@ impl SearchService {
         );
 
         all_items
+    }
+
+    /// 显式触发 AI(0.9.2 Phase 5b Tab 显式触发)——由 `trigger_ai` command 调用。
+    ///
+    /// 单次 spawn,复用 `spawn_mixed_lane` 模式:
+    /// - `tauri::async_runtime::spawn` 独立 task
+    /// - **同步 emit AI placeholder** 走 `blink://results`,让 UI <100ms 见到"AI 思考中…"
+    /// - AI 完成后 emit 真结果替换占位
+    ///
+    /// **前置**:调用方需已过 gating 筛子(前端见 Ghost 才允许按 Tab)。
+    /// 若 registry 为 None(setup 未完成)或 resolve NotConfigured → 静默 clear + 返 Ok。
+    pub fn trigger_ai(&self, query: String, seq: u64) {
+        let Some(registry) = self.ai_registry.read().expect("ai_registry lock poisoned").clone()
+        else {
+            tracing::debug!(target: ai_slo::TARGET, "trigger_ai: registry 未就绪,忽略");
+            return;
+        };
+        // 记住这次 seq 作为最新——后续 emit 用此校验(避免和 search_apps 的 seq 混串)
+        self.latest_seq.store(seq, Ordering::SeqCst);
+
+        // 立即 emit 占位:让 UI 在 Tab 按下瞬间就有反馈
+        emit_ai_result(&self.app, seq, ai_placeholder_entry());
+
+        self.spawn_ai_lane(query, registry, seq);
+    }
+
+    /// AI lane(0.9.2 Phase 5b)——独立 spawn,不阻塞主链路。
+    ///
+    /// 复用 `spawn_mixed_lane` 模式:
+    /// - `tauri::async_runtime::spawn` 独立 task
+    /// - seq 校验丢弃过期结果
+    /// - `emit_results` 前端自动 merge 替换占位(`source="ai"` 一致)
+    ///
+    /// **§6.4 兜底铁则**:任何 Err 分支都 emit 空清占位 + 打 SLO,不 panic、
+    /// 不影响已同步返回的 fuzzy 主结果。
+    ///
+    /// **日志政策**(0.9.2 优化):每个调用两条 event
+    /// - 起始 1 条 `debug`——包含 provider/tier/model/timeout,方便对上号
+    /// - 结束 1 条 `info`(成功)或 `warn`(失败)——包含 elapsed/first_token_ms/结果
+    /// 不再逐字段拆散、不打"发起 → 收到 → 映射"三条,让 grep 出的日志一目了然。
+    fn spawn_ai_lane(
+        &self,
+        query: String,
+        registry: Arc<AIProviderRegistry>,
+        seq: u64,
+    ) {
+        let app = self.app.clone();
+        let latest_seq = Arc::clone(&self.latest_seq);
+        tauri::async_runtime::spawn(async move {
+            // resolve(Tier::Router) —— 空档降级链在 registry.resolve 内部走
+            let (provider, actual_tier) = match registry.resolve(Tier::Router) {
+                Ok(t) => t,
+                Err(AIError::NotConfigured) => {
+                    // 无 provider 池:清占位,不打 SLO(不算真调用)
+                    tracing::debug!(
+                        target: ai_slo::TARGET,
+                        "AI: 未配置或档位悬空,清占位"
+                    );
+                    emit_ai_clear(&app, seq);
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(target: ai_slo::TARGET, "AI resolve 失败: {e}");
+                    emit_ai_clear(&app, seq);
+                    return;
+                }
+            };
+            // provider 上下文——所有 SLO 日志都要带,方便用户自诊断"哪个供应商慢/错"
+            let provider_kind = provider.kind();
+            let provider_model = provider.model_id().to_string();
+
+            let cfg = registry.config_snapshot();
+            let timeout_ms = cfg.slo_hard_timeout_ms.unwrap_or(2500);
+
+            let req = CompletionRequest {
+                messages: vec![ChatMessage::user(&query)],
+                tools: Vec::new(), // 0.9.2 第一步不传 tools(tool_call 执行留 0.9.3)
+                max_tokens: None,
+                temperature: Some(0.0),
+                timeout_ms: Some(timeout_ms),
+            };
+
+            // 起始日志:一行说清"哪个 provider + 什么档 + 什么模型 + 多长超时"
+            tracing::debug!(
+                target: ai_slo::TARGET,
+                "AI → {:?}/{} tier={:?} timeout={}ms qlen={}",
+                provider_kind,
+                provider_model,
+                actual_tier,
+                timeout_ms,
+                query.chars().count(),
+            );
+
+            let start = std::time::Instant::now();
+            let result = provider.complete(req).await;
+            let elapsed = start.elapsed().as_millis() as u32;
+
+            // seq 校验:用户已输入新 query → 丢弃结果
+            if seq != latest_seq.load(Ordering::SeqCst) {
+                tracing::trace!(target: ai_slo::TARGET, "AI 结果过期,丢弃 seq={seq}");
+                return;
+            }
+
+            // 结束日志:成功/失败合并到一处,字段与起始日志对得上
+            match result {
+                Ok(resp) => {
+                    let text_len = resp.text.as_ref().map(|s| s.chars().count()).unwrap_or(0);
+                    let tool_calls = resp.tool_calls.len();
+                    tracing::info!(
+                        target: ai_slo::TARGET,
+                        "AI ← {:?}/{} ok elapsed={}ms first_token={}ms text={}chars tool_calls={}",
+                        provider_kind,
+                        provider_model,
+                        elapsed,
+                        resp.first_token_ms,
+                        text_len,
+                        tool_calls,
+                    );
+                    match resp.text.filter(|t| !t.trim().is_empty()) {
+                        Some(text) => emit_ai_result(&app, seq, ai_result_entry(text)),
+                        None => {
+                            // 只 tool_calls 无文本(0.9.2 不消费)或纯空 → 清占位
+                            emit_ai_clear(&app, seq);
+                        }
+                    }
+                }
+                Err(AIError::Timeout) => {
+                    tracing::warn!(
+                        target: ai_slo::TARGET,
+                        "AI ← {:?}/{} TIMEOUT elapsed={}ms (fallback→fuzzy)",
+                        provider_kind,
+                        provider_model,
+                        elapsed,
+                    );
+                    emit_ai_clear(&app, seq);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: ai_slo::TARGET,
+                        "AI ← {:?}/{} ERR elapsed={}ms (fallback→fuzzy): {}",
+                        provider_kind,
+                        provider_model,
+                        elapsed,
+                        e,
+                    );
+                    emit_ai_clear(&app, seq);
+                }
+            }
+        });
     }
 
     /// 过滤不满足前置条件的路由命中(0.5.1):禁用插件 + 参数过短。
@@ -774,6 +1031,106 @@ fn empty_arg_hint_entry(plugin_id: &str, display_name: &str, hint: String) -> Ap
     }
 }
 
+// ── AI lane 辅助(0.9.2 Phase 5b)─────────────────────────────────────────
+
+/// AI source 标记——占位与结果统一用此值,前端 `results.js` 现有 merge 按 source
+/// 匹配替换占位(与 plugin placeholder 同机制,零前端改动)。
+pub(crate) const AI_SOURCE: &str = "ai";
+
+/// AI 占位项——`exec_mixed` 同步返回,<100ms 就绪(§3.3 首视觉反馈)。
+///
+/// - `source="ai"` 与真结果一致,前端自动替换
+/// - `is_placeholder=true` 触发前端占位样式
+/// - `action=Default`(Open + 空 lnk_path) → 前端点击/回车无操作(placeholder 不可执行)
+pub(crate) fn ai_placeholder_entry() -> AppEntry {
+    AppEntry {
+        name: "AI 正在回答…".into(),
+        pinyin_name: String::new(),
+        pinyin_full: String::new(),
+        lnk_path: String::new(),
+        is_calc: false,
+        score: 0.5, // 中位:可见但不抢首;真结果 0.7 会略高
+        is_placeholder: true,
+        is_error: false,
+        source: AI_SOURCE.into(),
+        // 占位状态**只保留一个信号源**——name 已足够表达"AI 在想",
+        // 再叠一行 "请稍候" 是冗余。真结果时才用 description 承载"回车复制"提示。
+        description: None,
+        action: Action::default(),
+        score_detail: None,
+    }
+}
+
+/// AI 真结果项——回车/点击复制回答全文到剪贴板。
+///
+/// **为什么用 `ActionKind::Copy`**(0.9.2 第一步不引新 kind):
+/// - 最接近"用户拿走这条文本"语义
+/// - 不引入新 `ActionKind::Ai` 变体(留 0.9.3 tool_call 执行链路时统一考虑)
+/// - `Action.payload` 已为"携带待复制文本"设计,完美匹配
+///
+/// **name 不截断**:前端 `.ai-item` 走多行展开样式(0.9.2 §6.4),完整文本存进
+/// `name` 让 CSS `white-space: pre-wrap` 自然渲染。`payload` 也是完整文本,
+/// Copy 动作复制全文(两处冗余但语义清晰,不引结构复杂度)。
+pub(crate) fn ai_result_entry(text: String) -> AppEntry {
+    use crate::domain::search::ActionKind;
+    AppEntry {
+        name: text.clone(),
+        pinyin_name: String::new(),
+        pinyin_full: String::new(),
+        lnk_path: String::new(),
+        is_calc: false,
+        score: 0.7, // 略高于普通 fuzzy 的默认位次,让 AI 回答在无 rule 命中时置顶
+        is_placeholder: false,
+        is_error: false,
+        source: AI_SOURCE.into(),
+        description: Some("回车复制回答".into()),
+        action: Action {
+            kind: ActionKind::Copy,
+            payload: Some(text),
+            hint: Some("复制回答".into()),
+            ..Default::default()
+        },
+        score_detail: None,
+    }
+}
+
+/// emit AI 结果——单条 AppEntry 走 `blink://results`,前端 merge 按 `source="ai"`
+/// 替换 placeholder。
+///
+/// 不复用 `emit_results`:那个吃 `Vec<SearchItem>` 走 fuse_items(会重排序),
+/// AI 只有一条,直接构造 payload emit 更直白。
+fn emit_ai_result(app: &AppHandle, seq: u64, entry: AppEntry) {
+    if let Err(e) = app.emit("blink://results", ResultsPayload { seq, items: vec![entry] }) {
+        tracing::debug!(error = %e, "emit AI result failed");
+    }
+}
+
+/// emit AI 清占位——发一个 `source="ai"` 的空标记项,前端识别后移除占位行。
+///
+/// 用途:超时/供应商错/密钥缺失/AI 返回空文本——所有"没有真结果"的分支都清占位,
+/// 避免"AI 思考中…"永久转圈。
+fn emit_ai_clear(app: &AppHandle, seq: u64) {
+    // 复用 `emit_results` 的空结果标记规约:score=-2, is_placeholder=true, source=xxx。
+    // 前端识别 name.is_empty() && source=="ai" 即清除对应占位。
+    let clear_marker = AppEntry {
+        name: String::new(),
+        pinyin_name: String::new(),
+        pinyin_full: String::new(),
+        lnk_path: String::new(),
+        is_calc: false,
+        score: -2.0,
+        is_placeholder: true,
+        is_error: false,
+        source: AI_SOURCE.into(),
+        description: None,
+        action: Action::default(),
+        score_detail: None,
+    };
+    if let Err(e) = app.emit("blink://results", ResultsPayload { seq, items: vec![clear_marker] }) {
+        tracing::debug!(error = %e, "emit AI clear failed");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -797,6 +1154,41 @@ mod tests {
         let r = fuse_items(items, 10);
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].score, 0.9); // 先出现的保留
+    }
+
+    // ── AI lane entry 构造 ─────────────────────────────────────────────
+
+    #[test]
+    fn ai_placeholder_entry_has_ai_source_and_is_placeholder() {
+        let e = ai_placeholder_entry();
+        assert_eq!(e.source, AI_SOURCE);
+        assert!(e.is_placeholder);
+        assert!(!e.name.is_empty(), "占位应显示提示文案");
+        assert_eq!(e.action.kind as u8, Action::default().kind as u8);
+        // placeholder score 中位:比真结果 0.7 低,比 -2.0 清标记高
+        assert!(e.score > -1.0 && e.score < 0.7);
+    }
+
+    #[test]
+    fn ai_result_entry_uses_copy_kind_with_full_text_payload() {
+        use crate::domain::search::ActionKind;
+        let text = "Hello, this is an AI answer.".to_string();
+        let e = ai_result_entry(text.clone());
+        assert_eq!(e.source, AI_SOURCE);
+        assert!(!e.is_placeholder);
+        assert!(matches!(e.action.kind, ActionKind::Copy));
+        assert_eq!(e.action.payload.as_deref(), Some(text.as_str()));
+        assert_eq!(e.name, text, "短文本 name 应完整");
+    }
+
+    #[test]
+    fn ai_result_entry_keeps_full_text_in_name_and_payload() {
+        // 0.9.2 §6.4:前端 .ai-item 走多行展开样式,name 不再截断,承担渲染;
+        // payload 依旧是完整文本,Copy 动作复制全文。
+        let long = "a".repeat(500);
+        let e = ai_result_entry(long.clone());
+        assert_eq!(e.name, long, "name 应保留完整文本供前端多行渲染");
+        assert_eq!(e.action.payload.as_deref(), Some(long.as_str()));
     }
 
     #[test]

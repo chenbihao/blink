@@ -4,7 +4,7 @@
 
 > 📖 **产品设计与文档导航**：请先阅读 [docs/production-design/00-overview.md](docs/production-design/00-overview.md) 了解产品定位、里程碑与完整文档体系。改核心前必读对应 phases 文档。
 
-更新时间 20260708
+更新时间 20260709
 
 ---
 
@@ -13,7 +13,7 @@
 Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而是 **Universal Action Layer（统一操作层）**。
 终极目标：感知用户上下文、主动推荐动作，让任何操作都比原来的路径更快。
 
-当前处于 **0.9.1 AI 地基完成——进入 0.9.2 应用闭环阶段**：0.1~0.7 全部完成；0.8.0 ~ 0.8.8 全部落地；0.9.0 依赖前置 + Action trait tool-call 进化完成；**0.9.1 AI 地基全部落地**（`AIProvider` trait 类型收窄 + SecretString + Credential Manager 密钥层 + AIConfig 第 7 分片 + 空档降级 + `AIProviderRegistry` + `ProviderFactory` trait + 切换零重启 + 前端 AI Tab 完整 UX）。**测试基线 380 通过，零 warning**。AI 相关能力（真 rig client / 语音 / 生态）规划在 0.9.2 ~ 0.11 三步走（详见 [phases/0.9-ai-layer.md](docs/production-design/phases/0.9-ai-layer.md)）。
+当前处于 **0.9.2 第一步 AI 文本闭环完成——进入 0.9.2 收尾阶段**：0.1~0.7 全部完成；0.8.0 ~ 0.8.8 全部落地；0.9.0 依赖前置 + Action trait tool-call 进化完成；0.9.1 AI 地基全部落地；**0.9.2 第一步 AI 文本闭环全部落地**（RigFactory 替换 NoopFactory 真跑 rig-core / 四筛子决策树纯函数 / SearchService AI lane 独立 spawn + placeholder + emit 流式补发 / SLO 埋点 first_token_ms + intent_total_ms + tier + fallback_to_search + timeout / §6.4 兜底铁则:任何 AI 失败静默清占位不破坏主链路)。**测试基线 410 通过,零 warning**。第二步(轻量路由 prompt 调优 + 反馈动画打磨 + 四筛子阈值 spike + tool_call 执行)留 0.9.3。详见 [phases/0.9-ai-layer.md](docs/production-design/phases/0.9-ai-layer.md)。
 
 **最新特性（0.8）**：
 - ✅ **0.8.0** UIA 划词文本感知（鼠标选中文本自动抓取）
@@ -37,8 +37,16 @@ Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而�
   - **命令新增**:`save_ai_secret / delete_ai_secret / has_ai_secret`（明文只在参数一次窗口存活,never 回传;失败回滚 CM 密钥防悬空）;`set_config('ai_config')` 分派 → registry.reload → **切换零重启在真前端触发下走通**
   - **AppContext 挂载**:`ai_config` + `ai_registry` 字段;main.rs setup 读 AIConfig + 构造 registry + 挂 Tauri state
   - 测试基线 **380 通过零 warning**（+53:5 spike skeleton + 5 secret hygiene + 12 secret backend + 13 ai_config + 8 provider + 8 registry + 2 factory)
-  - **未完成部分**:Phase 5b（真 rig Client 落地 `RigFactory` 替换 `NoopFactory`）并入 0.9.2 SearchService 一起做——那时能"配 Provider → 触发 completion → 观察 SLO"端到端验证
-- 🔜 **0.9.2** 主窗口文本闭环 + 轻量路由 + 反馈动画 + SLO 埋点上数据 + 未命中过滤四筛子 spike 阈值 + **Phase 5b 真 rig Client 落地**（RigFactory 替换 NoopFactory）。详见 [phases/0.9-ai-layer.md](docs/production-design/phases/0.9-ai-layer.md)
+  - **未完成部分**:Phase 5b（真 rig Client 落地 `RigFactory` 替换 `NoopFactory`）并入 0.9.2 第一步一并完成
+- ✅ **0.9.2 第一步**（AI 文本闭环——第一次真跑 completion,严格 4 件事收敛,tool_call/SSE/动画/路由调优留第二步)：
+  - **Phase 5b RigFactory 替换 NoopFactory**（`src/domain/ai/factory.rs` + `rig_provider.rs`）:真接 rig-core 0.39——OpenAI（走 `CompletionsClient` Chat Completions API 而非默认 Responses API,更普适;DeepSeek 走 rig 官方内置 `deepseek::Client` 不走 OpenAICompat 兼容层;OpenAICompat 缺 base_url 直接返 `Provider(err)` 清晰失败);`RigProvider<M: CompletionModel>` 泛型 struct(rig `CompletionModel` 非 object-safe,含 Clone + 3 关联类型)由 factory 按 ProviderKind 敲定后擦除到 `Arc<dyn AIProvider>`;`tokio::time::timeout` 包 `model.completion()` 精确硬超时(rig `CompletionError` 无 timeout 语义,不能指望它自报);`map_rig_response` 遍历 `OneOrMany<AssistantContent>` 拼 text/收 ToolCall + skip Reasoning/Image;`map_rig_error` 保守只带 stage 名不透传 URL/body/密钥;密钥读取 `secret::load_secret` → `expose_for_rig` 单点破口传给 rig `.api_key(k)` 一次窗口用完出栈自动 zeroize
+  - **四筛子决策树**（`src/domain/ai/gating.rs`,纯函数）:`should_invoke_ai(q, &AiGate)` 5 条筛子(总开关 / URL/路径 / 长度 / 空格 / 纯数字),复用 `context/probe.rs::is_url + is_file_path`;`AiGate::from(&AIConfig)` 从配置派生;`FallbackReason` 枚举供 SLO 分组;文档默认阈值(min_query_len=4),阈值 spike 留第二步
+  - **SearchService AI lane 独立 spawn**（`src/domain/search/service.rs`）:`ai_registry` 字段 + `set_ai_registry` setter 注入(规避 search_service 先于 ai_registry 构造的顺序倒挂);`exec_mixed` 末尾在"无任何 plugin/engine 候选 + 无 empty_arg_hint 兜底"(§3.6 铁则"命中规则不走 AI")时补 `ai_placeholder_entry` + `spawn_ai_lane`;spawn 独立 task + seq 校验丢弃过期 + 复用 `blink://results` 事件 + `source="ai"` 前端零改动 merge 自动替换占位;AI 真结果走 `ActionKind::Copy` + `payload=完整文本`(回车复制回答,不引入新 kind);超长回答 name 截 200 char + payload 完整
+  - **SLO 埋点上数据**（`perf.rs::ai_slo` target 常量 → tracing::info/warn）:每次 AI 调用 emit `first_token_ms / intent_total_ms / tier / fallback_to_search / timeout` 字段;成功 info、Timeout/Err 都 warn 标 `fallback_to_search=true`
+  - **§6.4 兜底铁则实机验证**:AI 任何失败(NotConfigured / Timeout / Network / Provider / Serialization)全部 `emit_ai_clear` 静默清占位 + 打 SLO;主链路已同步返回的 fuzzy 结果不受影响;`spawn_ai_lane` 全程独立 task 绝不 `?` 或 panic
+  - 测试基线 **410 通过零 warning**(+30:15 gating + 11 rig_provider map_* + 3 ai_entry 构造 + 1 factory 断言修正);release build 通过
+  - **第二步待完成**:主窗口文本闭环 UX 打磨(反馈动画/loading fade-in 150ms 反闪烁 UI 层)+ 轻量路由 prompt 调优 + 四筛子阈值 spike + Phase 5c tool_call 执行链路(danger_class 分流 + Dangerous 确认 UX)
+- 🔜 **0.9.2 第二步** 反馈动画打磨 + 路由 prompt 调优 + 四筛子阈值 spike + tool_call 执行链路。详见 [phases/0.9-ai-layer.md](docs/production-design/phases/0.9-ai-layer.md)
 - 🔜 **0.10 语音指令闭环**：STT + 双 chord 语音入口 + 语音找文件北极星场景 + Agent 对话窗口。架构不变只加感知层。详见 [phases/0.10-voice-agent.md](docs/production-design/phases/0.10-voice-agent.md)
 - 🔜 **0.11 本地化与生态**：本地模型按需下载 / skill 化 / MCP 双向 / RAG 记忆（按需增强）。详见 [phases/0.11-local-ecosystem.md](docs/production-design/phases/0.11-local-ecosystem.md)
 

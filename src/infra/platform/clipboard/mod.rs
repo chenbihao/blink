@@ -4,6 +4,11 @@
 //! `config::ClipboardConfig`（配置）。不持有 AppHandle、不 emit 事件、不调 domain/commands。
 //! 前端读 db（`get_clipboard_history` command）与监听器完全解耦——监听器只管写，
 //! 前端只管读，两者不直接对接。
+//!
+//! **0.9.2.1 补丁**：为了修主窗口保持打开时剪贴板变化 AwarenessSnapshot 不刷新的 bug,
+//! 引入 `set_change_hook()` 注册一个泛型回调——listener 侧仍不认 SearchService/domain,
+//! 只在剪贴板文本通过 title 黑名单 + 去重后同步调 hook。调用侧（`main.rs`）负责
+//! ContextConfig 门控 + 回写 SearchService。listener 架构解耦精神保持。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{OnceLock, RwLock};
@@ -23,6 +28,14 @@ pub(super) struct State {
 
 static STATE: OnceLock<State> = OnceLock::new();
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// 剪贴板文本变化的观察者回调（0.9.2.1）。
+///
+/// **契约**：只在 title 黑名单过滤 + 短窗口去重 + 非空文本三关都过后触发。
+/// 参数是刚入库的文本引用——回调应尽快返回,不要阻塞监听线程（内部持有 clipboard
+/// 消息循环）。跨 send 边界用 `Fn + Send + Sync`。
+pub type ChangeHook = Box<dyn Fn(&str) + Send + Sync + 'static>;
+static CHANGE_HOOK: OnceLock<ChangeHook> = OnceLock::new();
 
 /// 启动剪贴板监听（幂等）。监听线程持有 pool + cfg，WM_CLIPBOARDUPDATE 时存。
 /// 仿 selection：监听窗口一旦创建不卸，关闭态靠 ACTIVE 短路（跨线程卸载不安全）。
@@ -63,6 +76,26 @@ pub(super) fn is_active() -> bool {
 #[cfg(target_os = "windows")]
 pub(super) fn state() -> Option<&'static State> {
     STATE.get()
+}
+
+/// 注册剪贴板文本变化的观察者回调（0.9.2.1，一次性，OnceLock 兜底避免重复注册）。
+///
+/// **调用时机**：`main.rs::setup` 里在 SearchService 已构造 + AppHandle 可用后调用。
+/// 回调闭包需自行 clone `Arc<SearchService>` 并持有 `AppHandle`。
+///
+/// **重复调用**：静默忽略（OnceLock 语义）；测试场景先 `hook` 后 `start_listener` 也 OK。
+pub fn set_change_hook(hook: ChangeHook) {
+    if CHANGE_HOOK.set(hook).is_err() {
+        tracing::debug!("剪贴板 change hook 已注册过,忽略后续注册");
+    }
+}
+
+/// 内部触发（windows.rs 调用）——非空文本 + 已入库策略后触发一次。
+#[cfg(target_os = "windows")]
+pub(super) fn notify_change(text: &str) {
+    if let Some(hook) = CHANGE_HOOK.get() {
+        hook(text);
+    }
 }
 
 /// 把 **BGRA** 像素数据写入系统剪贴板（CF_DIB 格式）。

@@ -138,6 +138,10 @@ fn on_clipboard_change() {
         }
         *guard = Some((text_hash, now_ms));
     }
+    // 0.9.2.1：入库前先触发 hook,让 SearchService.snapshot 局部刷新 Clipboard 项
+    //（过滤 + 去重后触发,与真实入库同步;hook 侧再做 ContextConfig 门控与敏感应用
+    // 过滤,避免密码管理器 Ctrl+C 悄悄进 snapshot）。
+    super::notify_change(&text);
     let Some(s) = state() else { return };
     let preview = clipboard::make_preview(&text);
     let item = ClipboardItem {
@@ -194,14 +198,37 @@ fn foreground_title() -> Option<String> {
 }
 
 fn read_clipboard_text() -> Option<String> {
-    unsafe {
-        if OpenClipboard(None).is_err() {
-            return None;
+    // 短重试 + 微退避:写入方(浏览器/编辑器)刚 SetClipboardData + CloseClipboard,
+    // 我们收到 WM_CLIPBOARDUPDATE 立即 OpenClipboard 有几率抢不过 —— 系统内部把
+    // 剪贴板持有权切给写入方的窗口需要几毫秒。不重试会直接漏掉这次变化,导致
+    // AwarenessSnapshot 不刷新(bug-2026-07-09)。
+    //
+    // 最多重试 5 次,每次退避 8ms,总上限 ~40ms —— clipboard listener 独立线程
+    // 消息循环,阻塞可接受;不至于让消息循环卡到影响后续 WM 到达。
+    const MAX_ATTEMPTS: u32 = 5;
+    const BACKOFF_MS: u64 = 8;
+    for attempt in 0..MAX_ATTEMPTS {
+        unsafe {
+            if OpenClipboard(None).is_ok() {
+                let res = read_clipboard_inner();
+                let _ = CloseClipboard();
+                if res.is_some() {
+                    if attempt > 0 {
+                        tracing::debug!(attempt, "剪贴板读取重试成功");
+                    }
+                    return res;
+                }
+                // Open 成功但读文本失败(非 CF_UNICODETEXT 等) —— 不是竞争问题,不重试
+                return None;
+            }
         }
-        let res = read_clipboard_inner();
-        let _ = CloseClipboard();
-        res
+        // Open 失败(竞争) —— 退避后重试
+        if attempt + 1 < MAX_ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(BACKOFF_MS));
+        }
     }
+    tracing::debug!(attempts = MAX_ATTEMPTS, "剪贴板 OpenClipboard 重试仍失败,放弃");
+    None
 }
 
 unsafe fn read_clipboard_inner() -> Option<String> {

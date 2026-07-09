@@ -11,8 +11,9 @@
 //! `ProviderFactory` trait —— 5b 落 rig client 时提供 `RigProviderFactory` 实现,
 //! 单测时用 `MockProviderFactory`。
 //!
-//! **cache 策略**:key = `(provider_id, model_id)`。Provider 切换配置时,
-//! 未变动的 (pid, mid) 保留旧实例(不重建 rig Client),减少冷构造抖动。
+//! **cache 策略**:key = `(provider_id, model_id)` + fingerprint。Provider 切换
+//! 配置时,未变动的 `(pid, mid, fingerprint)` 保留旧实例(不重建 rig Client);
+//! **任一影响 rig client 的字段变动**(kind / base_url / 密钥版本)都 invalidate。
 //!
 //! **§6.4 兜底铁则**:AI 配置错误绝不破坏主链路——
 //! - `resolve_tier` 返 `Err(NotConfigured)` → 上层 SearchService fallback 常规 fuzzy
@@ -20,9 +21,10 @@
 //! - 全部构造失败 → registry 是空的,`resolve_tier` 一律 NotConfigured
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
-use crate::app::ai_config::{AIConfig, ModelEntry, ProviderEntry, Tier};
+use crate::app::ai_config::{AIConfig, ModelEntry, ProviderEntry, ProviderKind, Tier};
 use crate::domain::ai::provider::{AIError, AIProvider};
 
 /// Provider 构造工厂——把 `ProviderEntry` + `ModelEntry` 变成 `Arc<dyn AIProvider>`。
@@ -43,16 +45,49 @@ pub trait ProviderFactory: Send + Sync {
     ) -> Result<Arc<dyn AIProvider>, AIError>;
 }
 
-/// (provider_id, model_id) —— provider 缓存 key。
-type CacheKey = (String, String);
+/// Provider 缓存 key —— `(pid, mid, fingerprint)`。
+///
+/// **fingerprint** 是"影响 rig client 构造的所有字段"的紧凑摘要:
+/// `kind` + `base_url` + `secret_epoch`(密钥版本号,registry 实例内单调递增)。
+/// 用户改任一字段都会让老 key 不再命中,强制重建实例——**这是"改了配置不生效"
+/// 这类 bug 的根治方案**。
+///
+/// **不哈希 API key 本身**:密钥值绝不进 struct 字段。用一个 registry 内部 epoch,
+/// 每次 `bump_secret_epoch` 后 bump,让所有 provider 的实例全部 invalidate——
+/// 粒度粗但简单可靠,且**与用户改密钥的频率(极低)完美匹配**。
+type CacheKey = (String, String, String);
+
+/// 密钥版本号——每次 `bump_secret_epoch` 后 bump,让实例 invalidate。
+///
+/// **位于 registry 实例内**(而非全局 static):不同 registry 之间不串扰,测试
+/// 可以并发跑。生产只有一个 registry 实例,行为等价。
+///
+/// 用 AtomicU64 是因为 bump 路径可能来自任何线程(save_ai_secret IPC 处理)。
+///
+/// **调用契约**:调用方 bump 后必须触发 `reload()`(通常通过
+/// `set_config('ai_config')` 走一遍完整流程)。只 bump 不 reload,fingerprint
+/// 里的 epoch 变化不会被观察到。
+fn compute_provider_fingerprint(p: &ProviderEntry, secret_epoch: u64) -> String {
+    // 简单拼接,不用 hasher——字段少、可读性高、诊断日志能直接看
+    let kind = match p.kind {
+        ProviderKind::OpenAICompatible => "oai",
+        ProviderKind::AnthropicMessages => "anth",
+        ProviderKind::GeminiGenerateContent => "gem",
+    };
+    let bu = p.base_url.as_deref().unwrap_or("");
+    format!("{kind}|{bu}|e{secret_epoch}")
+}
 
 /// Provider registry —— 运行时可热更新。
 pub struct AIProviderRegistry {
     factory: Arc<dyn ProviderFactory>,
-    /// 已构造的 provider 池——按 (provider_id, model_id) 索引
+    /// 已构造的 provider 池——按 (provider_id, model_id, fingerprint) 索引
     providers: RwLock<HashMap<CacheKey, Arc<dyn AIProvider>>>,
     /// 当前 config 快照(轻量副本;修改 config 必须走 reload)
     config: RwLock<AIConfig>,
+    /// 密钥版本号——保存密钥后 bump 一次,让下次 reload 强制重建所有实例。
+    /// 见 [`compute_provider_fingerprint`] 与 `bump_secret_epoch`。
+    secret_epoch: AtomicU64,
 }
 
 impl AIProviderRegistry {
@@ -65,6 +100,7 @@ impl AIProviderRegistry {
             factory,
             providers: RwLock::new(HashMap::new()),
             config: RwLock::new(AIConfig::default()),
+            secret_epoch: AtomicU64::new(0),
         }
     }
 
@@ -82,21 +118,37 @@ impl AIProviderRegistry {
     /// 增量热更新——从新 `AIConfig` 重建 provider 池,复用未变动的实例。
     ///
     /// **§4.4 骨架条 #7 落地**:切 provider 不重启进程,只重建 registry 内部池。
-    /// - 老 (pid, mid) 仍在新 config 里 → 保留旧 Arc(不重建 rig Client)
-    /// - 老 (pid, mid) 不再存在 → 从池里剔除(旧 Arc 引用计数归零时释放)
-    /// - 新 (pid, mid) 未构造 → 调 factory 构造;失败 skip + warn
+    /// - 老 (pid, mid, fp) 仍在新 config 里 → 保留旧 Arc(不重建 rig Client)
+    /// - 老 (pid, mid, fp) 不再匹配 → 从池里剔除(**任一字段变动都 invalidate**)
+    /// - 新 (pid, mid, fp) 未构造 → 调 factory 构造;失败 skip + warn
+    ///
+    /// **fingerprint 铁则**:cache key 的第三段是 `provider_fingerprint`,包含
+    /// kind + base_url + secret_epoch。用户改 base_url / 换密钥 / 改协议后,新的
+    /// fingerprint 与老实例不同 → 强制重建,保证"改配置立即生效"。
     #[allow(dead_code)]
     pub fn reload(&self, config: &AIConfig) {
         use std::collections::HashSet;
 
+        // 快照当前 secret_epoch —— 同一次 reload 内共享,避免中途 bump 导致
+        // "第 1 步与第 4 步 fingerprint 不一致"这种诡异 race。
+        let epoch = self.secret_epoch.load(Ordering::SeqCst);
+
         // 1. 目标 key 集合(HashSet——O(1) 查,retain 不退化成 O(n²))
+        let fp_by_pid: HashMap<String, String> = config
+            .providers
+            .iter()
+            .map(|p| (p.id.clone(), compute_provider_fingerprint(p, epoch)))
+            .collect();
         let target_keys: HashSet<CacheKey> = config
             .providers
             .iter()
-            .flat_map(|p| p.models.iter().map(move |m| (p.id.clone(), m.id.clone())))
+            .flat_map(|p| {
+                let fp = fp_by_pid.get(&p.id).cloned().unwrap_or_default();
+                p.models.iter().map(move |m| (p.id.clone(), m.id.clone(), fp.clone()))
+            })
             .collect();
 
-        // 2. **读锁**算 diff——池里缺哪些 (pid, mid) 要构造。
+        // 2. **读锁**算 diff——池里缺哪些 (pid, mid, fp) 要构造。
         //    故意只拿读锁:factory.build 期间不阻塞 dispatch 的 resolve()。
         let to_build: Vec<(&ProviderEntry, &ModelEntry)> = {
             let pool = self.providers.read().expect("providers lock poisoned");
@@ -104,7 +156,10 @@ impl AIProviderRegistry {
                 .providers
                 .iter()
                 .flat_map(|p| p.models.iter().map(move |m| (p, m)))
-                .filter(|(p, m)| !pool.contains_key(&(p.id.clone(), m.id.clone())))
+                .filter(|(p, m)| {
+                    let fp = fp_by_pid.get(&p.id).cloned().unwrap_or_default();
+                    !pool.contains_key(&(p.id.clone(), m.id.clone(), fp))
+                })
                 .collect()
         };
 
@@ -117,7 +172,11 @@ impl AIProviderRegistry {
         for (provider, model) in &to_build {
             match self.factory.build(provider, model) {
                 Ok(instance) => {
-                    built.push(((provider.id.clone(), model.id.clone()), instance))
+                    let fp = fp_by_pid.get(&provider.id).cloned().unwrap_or_default();
+                    built.push((
+                        (provider.id.clone(), model.id.clone(), fp),
+                        instance,
+                    ))
                 }
                 Err(e) => {
                     failed_count += 1;
@@ -166,7 +225,11 @@ impl AIProviderRegistry {
         let Some((provider_entry, model_entry, actual_tier)) = config.resolve_tier(tier) else {
             return Err(AIError::NotConfigured);
         };
-        let key = (provider_entry.id.clone(), model_entry.id.clone());
+        // cache key 三段:pid + mid + fingerprint。fingerprint 由当前 config 快照 +
+        // registry 内 secret_epoch 决定,与 reload 时插入的 key 完全一致。
+        let epoch = self.secret_epoch.load(Ordering::SeqCst);
+        let fp = compute_provider_fingerprint(provider_entry, epoch);
+        let key = (provider_entry.id.clone(), model_entry.id.clone(), fp);
 
         let pool = self.providers.read().expect("providers lock poisoned");
         let provider = pool.get(&key).cloned().ok_or_else(|| {
@@ -194,6 +257,17 @@ impl AIProviderRegistry {
     #[allow(dead_code)]
     pub fn config_snapshot(&self) -> AIConfig {
         self.config.read().expect("config lock poisoned").clone()
+    }
+
+    /// Bump 密钥版本号——`save_ai_secret` 成功后调,让下次 reload 时**所有**实例
+    /// invalidate 并按新密钥重建。
+    ///
+    /// **调用契约**:bump 后必须紧跟一次 `reload()`,否则 fingerprint 变化不会
+    /// 被观察到(现有实例仍旧,resolve 返回它们时也仍是旧密钥)。
+    /// commands.rs 的 `save_ai_secret` 只 bump——reload 由前端紧接着的
+    /// `set_config('ai_config')` IPC 触发。
+    pub fn bump_secret_epoch(&self) {
+        self.secret_epoch.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -256,7 +330,7 @@ mod tests {
                 .map(|(pid, models)| ProviderEntry {
                     id: pid.into(),
                     display_name: pid.into(),
-                    kind: ProviderKind::OpenAI,
+                    kind: ProviderKind::OpenAICompatible,
                     base_url: None,
                     secret_ref: format!("blink/{pid}/key"),
                     models: models
@@ -350,6 +424,59 @@ mod tests {
 
         let new_p1_m1 = reg.resolve(Tier::Router).unwrap().0;
         assert!(Arc::ptr_eq(&old_p1_m1, &new_p1_m1), "reload 后 instance 应完全复用");
+    }
+
+    #[test]
+    fn reload_rebuilds_when_base_url_changes() {
+        // fingerprint 覆盖了 base_url:改 base_url 后必须重建实例。
+        // **这是"改了配置不生效"这类 bug 的回归守卫**。
+        let f = Arc::new(CountingFactory::new());
+        let cfg1 = make_config(vec![("p1", vec!["m1"])], Some(("p1", "m1")));
+        let reg = AIProviderRegistry::from_config(f.clone(), &cfg1);
+        assert_eq!(f.calls(), 1);
+        let old = reg.resolve(Tier::Router).unwrap().0;
+
+        // 改 base_url
+        let mut cfg2 = cfg1.clone();
+        cfg2.providers[0].base_url = Some("https://api.new.com/v1".into());
+        reg.reload(&cfg2);
+        assert_eq!(f.calls(), 2, "base_url 变了必须重建");
+
+        let new = reg.resolve(Tier::Router).unwrap().0;
+        assert!(!Arc::ptr_eq(&old, &new), "新实例不该等于旧实例");
+    }
+
+    #[test]
+    fn reload_rebuilds_when_kind_changes() {
+        // fingerprint 覆盖了 kind:改协议后必须重建实例。
+        let f = Arc::new(CountingFactory::new());
+        let cfg1 = make_config(vec![("p1", vec!["m1"])], Some(("p1", "m1")));
+        let reg = AIProviderRegistry::from_config(f.clone(), &cfg1);
+        let old = reg.resolve(Tier::Router).unwrap().0;
+
+        let mut cfg2 = cfg1.clone();
+        cfg2.providers[0].kind = ProviderKind::AnthropicMessages;
+        reg.reload(&cfg2);
+        assert_eq!(f.calls(), 2);
+        let new = reg.resolve(Tier::Router).unwrap().0;
+        assert!(!Arc::ptr_eq(&old, &new));
+    }
+
+    #[test]
+    fn bump_secret_epoch_forces_rebuild_on_next_reload() {
+        // bump_secret_epoch 后 fingerprint 变化 → reload 强制重建所有实例。
+        // **这是"改了 API Key 不生效"这类 bug 的回归守卫**。
+        let f = Arc::new(CountingFactory::new());
+        let cfg = make_config(vec![("p1", vec!["m1"])], Some(("p1", "m1")));
+        let reg = AIProviderRegistry::from_config(f.clone(), &cfg);
+        let old = reg.resolve(Tier::Router).unwrap().0;
+
+        // 用户改密钥场景:save_ai_secret bump epoch → set_config 触发 reload
+        reg.bump_secret_epoch();
+        reg.reload(&cfg);
+        assert_eq!(f.calls(), 2, "epoch bump 后必须重建实例");
+        let new = reg.resolve(Tier::Router).unwrap().0;
+        assert!(!Arc::ptr_eq(&old, &new));
     }
 
     #[test]

@@ -305,6 +305,85 @@ body.alt-active #results li .item-badge {
   white-space: normal; /* 允许换行显示长错误信息 */
 }
 
+/* ── AI lane 结果项(0.9.2 §6.4)────────────────────────────────────────────
+   AI 回答不同于普通命中:文本可能几段话,一行 nowrap ellipsis 完全无用。
+   视觉语言与 `.context-aware`(左侧 3px 强调条 + accent-bg)刻意拉开:
+   - 不用左侧强调条,让 AI 与"打开剪贴板 URL"这类感知候选一眼可辨
+   - 徽章位实心 accent 底 + 白字 "AI",辨识度独占
+   - name 用 pre-wrap + 3 行截断,不撑爆列表节奏(全文靠 payload 复制取)
+   - desc(回车复制提示)靠 flex order 上移到 name 前,长文本不会把提示挤到底部
+   - 占位与真结果共用 24×24 徽章位,`.is-loading` 只切徽章内容不动几何
+*/
+#results li.ai-item {
+  align-items: flex-start; /* 图标 + 徽章顶部对齐,不居中 */
+  white-space: normal; /* 覆盖父级 nowrap */
+}
+
+#results li.ai-item .item-body {
+  /* desc 上移到 name 前:"回车复制回答" → "AI 回答内容"。
+     长文本再多也不会把关键交互提示挤出视野。占位状态 desc 为空,order 无副作用。 */
+  gap: 2px;
+}
+
+#results li.ai-item .item-name {
+  order: 2;
+  white-space: pre-wrap; /* 保留 AI 返回的换行 */
+  word-break: break-word;
+  overflow: hidden;
+  text-overflow: initial;
+  /* 3 行封顶:与列表节奏对齐;更长的全文已在 payload 里,回车复制不受影响。 */
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+#results li.ai-item .item-desc {
+  order: 1;
+  color: var(--text-dim);
+  font-size: 11px;
+  white-space: nowrap;
+  letter-spacing: 0.2px;
+}
+
+/* AI 图标徽章:实心 accent 底 + 白字,与 context-aware 的强调条彻底区分。
+   占位/真结果共用同一 24×24 尺寸(几何稳定),内容切换不引跳变。 */
+#results li .ai-icon-badge {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: ui-monospace, Consolas, monospace;
+  color: #fff;
+  background: var(--accent);
+  border-radius: var(--radius-sm);
+  letter-spacing: 0.5px;
+}
+
+/* AI 占位徽章内嵌小 spinner:12px 圆环,accent 底 + 白色描一段,复用 spin 动画。
+   与外层 spinner(灰底 accent 顶)在色彩上区分,不会与插件占位混淆。 */
+#results li .ai-badge-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+/* AI 占位:name 强制单行,行高与徽章对齐,不叠 3 行截断。 */
+#results li.ai-item.is-loading .item-name {
+  color: var(--text-dim);
+  font-style: normal; /* 铁则:中文不斜体 */
+  -webkit-line-clamp: 1;
+  line-height: 24px; /* 与徽章高度一致,垂直居中不错位 */
+}
+
 /* 右键菜单已迁移到独立窗口实现（contextmenu-popup.html），
    不再需要 DOM 内联样式。 */
 

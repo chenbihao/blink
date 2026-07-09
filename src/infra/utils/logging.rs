@@ -99,13 +99,18 @@ fn parse_level(level: &str) -> String {
     // **AI SLO 埋点**(0.9.0 §5.3)：`blink::ai::slo` target 是 `blink` 的子级,自动继承根级
     // filter——`info/debug/trace` 都会捕获;`error` 级别下 SLO event 会被过滤（预期,
     // 用户显式压 error 是"我什么都不想看"信号,不该被 AI 遥测污染）。
+    //
+    // **AI 相关噪音压制**（0.9.2 第一步）:rig 依赖链 h2 / rustls / tower / hpack
+    // 在 TRACE 下会喷协议帧(每个 HTTP/2 请求上百行),用户开 trace 是要看自家逻辑,
+    // 不是看 TLS 握手。这些统一压到 warn。`rig_core` 保留在原级别——它的
+    // `completions request/response` TRACE 对诊断"发了什么/收了什么"很有价值。
+    let ai_noise = "h2=warn,rustls=warn,tower=warn,hpack=warn";
     match level {
-        "trace" => "trace,sqlx=warn,tauri=warn,hyper=warn,reqwest=warn",
-        "debug" => "debug,sqlx=warn,tauri=warn",
-        "info" => "info,sqlx=warn,tauri=warn",
-        _ => "error",
+        "trace" => format!("trace,sqlx=warn,tauri=warn,hyper=warn,reqwest=warn,{ai_noise}"),
+        "debug" => format!("debug,sqlx=warn,tauri=warn,{ai_noise}"),
+        "info" => format!("info,sqlx=warn,tauri=warn,{ai_noise}"),
+        _ => "error".to_string(),
     }
-    .to_string()
 }
 
 /// 清理超过保留天数的旧日志（按文件 mtime，启动时执行）。

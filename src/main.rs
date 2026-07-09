@@ -7,7 +7,7 @@ mod infra;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    Manager, WindowEvent,
+    Emitter, Manager, WindowEvent,
 };
 
 fn main() {
@@ -290,7 +290,49 @@ fn main() {
             }
             // 注入 ContextConfig 内存缓存：invoke 热键回调零 IO 读它（热更新见 update_context_config）
             let context_config = tauri::async_runtime::block_on(app::config::get_context_config(&pool));
-            app.manage(std::sync::Arc::new(std::sync::RwLock::new(context_config)));
+            let context_config_arc = std::sync::Arc::new(std::sync::RwLock::new(context_config));
+            app.manage(context_config_arc.clone());
+
+            // 0.9.2.1：注册剪贴板变化 hook,让主窗口打开时用户在其内部（或其他 app）
+            // Ctrl+C 后 AwarenessSnapshot 里的 Clipboard 项也能局部刷新——之前 snapshot
+            // 只在 window::invoke 时一次性 collect,主窗口保持打开期间就一直是老快照。
+            //
+            // 门控与 context::collect() 保持一致：总开关 + clipboard_enabled + 前台敏感应用
+            // 检查（复用 collect 内部逻辑,避免密码管理器 Ctrl+C 悄悄写入 snapshot）。
+            //
+            // hook 在 clipboard listener 线程被同步调用（消息循环）,只做轻量 RwLock 读 +
+            // upsert_text；两者都不阻塞。
+            {
+                let ctx_arc = context_config_arc.clone();
+                let ss = search_service.clone();
+                let app_handle = app.handle().clone();
+                infra::platform::clipboard::set_change_hook(Box::new(move |text: &str| {
+                    let cfg = { ctx_arc.read().unwrap().clone() };
+                    // 总开关 / 剪贴板开关 —— 与 collect() 前两道门一致
+                    if !cfg.enabled || !cfg.clipboard_enabled {
+                        return;
+                    }
+                    // 前台敏感应用（如密码管理器）—— 与 collect() 第三道门一致。
+                    // 只有敏感时才丢弃；非敏感或拿不到前台照常回写。
+                    if let Some(fg) = infra::platform::context::foreground_app() {
+                        if cfg.is_sensitive(&fg.process_name) {
+                            tracing::debug!(app = %fg.process_name, "剪贴板变化 hook：前台敏感,跳过 snapshot 回写");
+                            return;
+                        }
+                    }
+                    ss.update_clipboard_text(Some(text.to_string()));
+                    tracing::debug!(len = text.chars().count(), "剪贴板变化 → snapshot 已局部刷新");
+                    // 通知主窗口用当前 query 重跑一次（刷 Context Ghost / AI 四筛子）。
+                    // 只在主窗口可见时发——隐藏时窗口收不到 emit（Tauri 2 hidden webview
+                    // drop event,见 [[tauri-hidden-webview-emit-dropped]]）,而且下一次
+                    // invoke 会 collect() 重拍快照,不需要 push。
+                    if infra::platform::window::is_visible() {
+                        if let Err(e) = app_handle.emit("blink://awareness-updated", ()) {
+                            tracing::debug!(?e, "emit blink://awareness-updated 失败");
+                        }
+                    }
+                }));
+            }
             // RuleRouter 单独注册供设置页 API 用（triggers 热更新）
             app.manage(router.clone());
 
@@ -299,9 +341,8 @@ fn main() {
             // 0.8.6 Action 统一执行入口
             let action_registry = std::sync::Arc::new(crate::domain::execution::ActionRegistry::new());
 
-            // 0.9.1 Phase 5a：AIProviderRegistry
+            // 0.9.2 Phase 5b:AIProviderRegistry 用 RigFactory 真接 rig-core。
             // AI 配置分片(第 7 分片,独立于 AppConfig 门面);默认 enabled=false,老用户零副作用。
-            // Phase 5a 用 NoopFactory 占位——Phase 5b 起换 RigFactory 真接 rig-core。
             let ai_config = tauri::async_runtime::block_on(
                 app::config::ConfigStore::get::<app::ai_config::AIConfig>(&pool),
             );
@@ -311,11 +352,14 @@ fn main() {
                     &ai_config,
                 ),
             );
+            // 注入 SearchService(0.9.2 setter 注入,规避 search_service 先于 ai_registry
+            // 构造的顺序倒挂)。未注入时 exec_mixed 的 AI lane 会安静跳过。
+            search_service.set_ai_registry(ai_registry.clone());
             tracing::info!(
                 enabled = ai_config.enabled,
                 providers = ai_config.providers.len(),
                 pool_size = ai_registry.size(),
-                "AIProviderRegistry 已构造(Phase 5a NoopFactory 占位)"
+                "AIProviderRegistry 已构造(0.9.2 Phase 5b RigFactory)"
             );
 
             // PluginEngine：clone 一份给 AppContext，原值继续 manage
@@ -381,6 +425,7 @@ fn main() {
             app::commands::hide_window,
             app::commands::hide_settings_window,
             app::commands::search_apps,
+            app::commands::trigger_ai,
             app::commands::launch_app,
             app::commands::run_builtin_action,
             app::commands::list_builtin_actions,

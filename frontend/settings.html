@@ -645,7 +645,7 @@
               <div class="setting-row">
                 <label class="setting-label" data-i18n="ai.advanced.timeout">硬超时（毫秒）<span class="field-hint-icon" data-i18n-title="ai.advanced.timeout.hint">ⓘ</span></label>
                 <div class="number-input-wrapper">
-                  <input type="number" id="ai-timeout-ms" min="500" max="10000" step="100" value="2500" />
+                  <input type="number" id="ai-timeout-ms" min="500" max="30000" step="500" value="2500" />
                   <div class="number-spinner">
                     <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">▲</button>
                     <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">▼</button>
@@ -656,17 +656,31 @@
           </div>
         </div>
 
-        <!-- 添加供应商 modal ─────────────────────────────────────────── -->
+        <!-- 添加 / 编辑供应商 modal ───────────────────────────────────── -->
         <div id="ai-modal-overlay" class="modal-overlay" style="display:none;">
           <div class="modal-card">
-            <h3 data-i18n="ai.modal.title">添加 AI 供应商</h3>
-            <div class="setting-row">
-              <label class="setting-label" data-i18n="ai.modal.kind">供应商种类</label>
+            <h3 id="ai-modal-title" data-i18n="ai.modal.title">添加 AI 供应商</h3>
+            <!-- 预设:一键填充协议 + base_url;选自定义时手填 -->
+            <div class="setting-row" id="ai-modal-preset-row">
+              <label class="setting-label" data-i18n="ai.modal.preset">快速选择</label>
+              <select id="ai-modal-preset" class="input-wide">
+                <option value="openai" data-i18n="ai.modal.preset.openai">OpenAI 官方</option>
+                <option value="deepseek" data-i18n="ai.modal.preset.deepseek">DeepSeek 官方</option>
+                <option value="siliconflow" data-i18n="ai.modal.preset.siliconflow">硅基流动</option>
+                <option value="moonshot" data-i18n="ai.modal.preset.moonshot">Moonshot (Kimi)</option>
+                <option value="groq" data-i18n="ai.modal.preset.groq">Groq</option>
+                <option value="openrouter" data-i18n="ai.modal.preset.openrouter">OpenRouter</option>
+                <option value="anthropic" data-i18n="ai.modal.preset.anthropic">Anthropic Claude</option>
+                <option value="gemini" data-i18n="ai.modal.preset.gemini">Google Gemini</option>
+                <option value="custom" data-i18n="ai.modal.preset.custom">自定义</option>
+              </select>
+            </div>
+            <div class="setting-row" id="ai-modal-kind-row">
+              <label class="setting-label" data-i18n="ai.modal.kind">协议</label>
               <select id="ai-modal-kind" class="input-wide">
-                <option value="openai" data-i18n="ai.modal.kind.openai">OpenAI</option>
-                <option value="deepseek" data-i18n="ai.modal.kind.deepseek">DeepSeek</option>
-                <option value="anthropic" data-i18n="ai.modal.kind.anthropic">Anthropic</option>
-                <option value="openai_compat" data-i18n="ai.modal.kind.openai_compat">OpenAI 兼容</option>
+                <option value="openai_compatible" data-i18n="ai.modal.kind.openai_compatible">OpenAI Compatible</option>
+                <option value="anthropic_messages" data-i18n="ai.modal.kind.anthropic_messages">Anthropic Messages</option>
+                <option value="gemini_generate_content" data-i18n="ai.modal.kind.gemini_generate_content">Gemini GenerateContent</option>
               </select>
             </div>
             <div class="setting-row">
@@ -681,7 +695,7 @@
               <label class="setting-label" data-i18n="ai.modal.api_key">API Key</label>
               <input type="password" id="ai-modal-api-key" class="input-wide" data-i18n-ph="ai.modal.api_key.ph" autocomplete="off" />
             </div>
-            <p class="modal-hint" data-i18n="ai.modal.api_key.hint">密钥立即写入 Windows Credential Manager，SQLite 永不存原文</p>
+            <p class="modal-hint" id="ai-modal-api-key-hint" data-i18n="ai.modal.api_key.hint">密钥立即写入 Windows Credential Manager，SQLite 永不存原文</p>
             <div class="setting-row setting-row-column">
               <label class="setting-label" data-i18n="ai.modal.models">模型（每行一个 model id）</label>
               <textarea id="ai-modal-models" class="input-wide" rows="3" data-i18n-ph="ai.modal.models.ph"></textarea>

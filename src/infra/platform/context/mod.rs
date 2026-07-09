@@ -49,19 +49,24 @@ pub struct AwarenessText {
     pub source: AwarenessSource,
     /// 原文（未 trim,消费方通过 `find_text` 拿到的已经是 trim 后的 view）
     pub text: String,
-    /// 单条独立时间戳（未来"清理陈旧选区"用；0.8.3 阶段不消费）
-    #[allow(dead_code)]
+    /// 单条独立时间戳（0.9.2.1 起被 `TextSource::SelectionThenClipboard` 消费:
+    /// 选区与剪贴板同时非空时按时间戳择新,避免主窗口打开时更新剪贴板后仍显示老选区）
     pub captured_at: Instant,
 }
 
 /// 借出的文本视图 —— `find_text` 返回,把 `source` + trim 后 `&str` 一起带给调用方。
 ///
 /// **关键契约**：调用方拿到 `AwarenessView` 就有 origin,不必再反推"这是选区还是剪贴板"。
+///
+/// 0.9.2.1：`captured_at` 加入,供 `TextSource::SelectionThenClipboard` 按时间戳择新
+/// —— 避免"snapshot 已刷新剪贴板但 Selection 老、导致翻译 Ghost 一直是老选区"的死角。
 #[derive(Debug, Clone, Copy)]
 pub struct AwarenessView<'a> {
     pub source: AwarenessSource,
     /// trim 后的文本（`find_text` 已保证非空）
     pub text: &'a str,
+    /// 采集时刻（`AwarenessText.captured_at` 直接透传）
+    pub captured_at: Instant,
 }
 
 /// 唤起瞬间的系统环境快照（0.8.3 收尾 · 替代旧 `ContextSnapshot`）。
@@ -106,7 +111,7 @@ impl AwarenessSnapshot {
             .find_map(|t| {
                 let trimmed = t.text.trim();
                 if trimmed.is_empty() { None } else {
-                    Some(AwarenessView { source, text: trimmed })
+                    Some(AwarenessView { source, text: trimmed, captured_at: t.captured_at })
                 }
             })
     }
@@ -238,6 +243,23 @@ pub fn list_running_processes() -> Vec<RunningProcess> {
     #[cfg(not(target_os = "windows"))]
     {
         Vec::new()
+    }
+}
+
+/// 采集当前前台应用信息（对外暴露 · 0.9.2.1）。
+///
+/// 供 clipboard listener 的 change hook 判断「前台是否为敏感应用」用——不能重复
+/// 走 `collect()`（那个包了 config 门控 + 剪贴板采集,hook 里已经拿到 text 了）。
+///
+/// 内部就是把 `collect_foreground_app()` 的 pub(super) 语义提到 crate 级。
+pub fn foreground_app() -> Option<ForegroundAppInfo> {
+    #[cfg(target_os = "windows")]
+    {
+        collect_foreground_app()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
     }
 }
 
