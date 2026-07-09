@@ -39,7 +39,7 @@ use rig_core::completion::{
     CompletionRequest as RigCompletionRequest, Message as RigMessage,
 };
 
-use crate::app::ai_config::ProviderKind;
+use crate::app::ai_config::{CustomParam, ProviderKind};
 use crate::domain::ai::message::{
     CompletionRequest, CompletionResponse, Role, ToolCall, Usage,
 };
@@ -58,30 +58,69 @@ const DEFAULT_HARD_TIMEOUT_MS: u32 = 2500;
 ///
 /// **无 PhantomData**:`model: M` 字段已经消耗了泛型参数 M,不需要额外的
 /// `PhantomData<M>`(那是"仅带类型标记但不实际持有 M"时的模板,与此处场景无关)。
+///
+/// **0.9.4 Step 1 模型级参数默认值**:`default_temperature / default_max_tokens /
+/// custom_parameters` 三个字段承载 `ModelEntry` 里的调用参数。构造时一次固化,
+/// `complete()` 时用 request 值 fallback 到这里(见 `build_rig_request`)。
 pub(crate) struct RigProvider<M: RigCompletionModel> {
     kind: ProviderKind,
     model_id: String,
     model: M,
     default_timeout_ms: u32,
+    // 0.9.4 Step 1:模型级参数默认值——None 表示"不覆盖,请求方决定"
+    default_temperature: Option<f32>,
+    default_max_tokens: Option<u32>,
+    /// 自定义参数——透传到 rig `additional_params`。构造时把 `Vec<CustomParam>`
+    /// 折叠成一个 `serde_json::Value::Object`,请求时若非空就直接塞给 rig。
+    custom_params_json: Option<serde_json::Value>,
 }
 
 impl<M: RigCompletionModel> RigProvider<M> {
     /// 构造——`RigFactory` 在挑好 rig client + model_id 后调这个。
     ///
     /// `default_timeout_ms` 从 `AIConfig::slo_hard_timeout_ms` 或 `DEFAULT_HARD_TIMEOUT_MS` 来。
+    /// `default_temperature / default_max_tokens / custom_parameters` 从 `ModelEntry` 来。
     #[allow(dead_code)] // 0.9.2 Phase 5b 由 factory 消费
     pub(crate) fn new(
         kind: ProviderKind,
         model_id: impl Into<String>,
         model: M,
         default_timeout_ms: Option<u32>,
+        default_temperature: Option<f32>,
+        default_max_tokens: Option<u32>,
+        custom_parameters: &[CustomParam],
     ) -> Self {
         Self {
             kind,
             model_id: model_id.into(),
             model,
             default_timeout_ms: default_timeout_ms.unwrap_or(DEFAULT_HARD_TIMEOUT_MS),
+            default_temperature,
+            default_max_tokens,
+            custom_params_json: build_custom_params_json(custom_parameters),
         }
+    }
+}
+
+/// 把 `Vec<CustomParam>` 折叠成一个 `serde_json::Value::Object`。
+///
+/// 空 vec 返回 `None`——请求侧看到 None 就完全不塞 `additional_params`,保持"零透传"语义。
+/// 重复 key 后者覆盖前者(与 JS `Object.fromEntries` 一致,用户预期)。
+fn build_custom_params_json(params: &[CustomParam]) -> Option<serde_json::Value> {
+    if params.is_empty() {
+        return None;
+    }
+    let mut map = serde_json::Map::with_capacity(params.len());
+    for p in params {
+        if p.key.trim().is_empty() {
+            continue; // 前端应过滤空 key,后端多一层防御
+        }
+        map.insert(p.key.clone(), p.value.clone());
+    }
+    if map.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(map))
     }
 }
 
@@ -103,7 +142,12 @@ where
         let timeout_ms = req.timeout_ms.unwrap_or(self.default_timeout_ms);
         let deadline = Duration::from_millis(timeout_ms as u64);
 
-        let rig_req = build_rig_request(&req)?;
+        let rig_req = build_rig_request(
+            &req,
+            self.default_temperature,
+            self.default_max_tokens,
+            self.custom_params_json.as_ref(),
+        )?;
 
         let start = Instant::now();
         // 外层 tokio::time::timeout —— rig 自己不报 timeout(见文件顶注)
@@ -131,7 +175,21 @@ where
 ///
 /// **约束**:`chat_history` 必须至少 1 条(rig 契约"最后一条是 prompt")。
 /// 空 vec 或全 system → 返 `AIError::Serialization`。
-fn build_rig_request(req: &CompletionRequest) -> Result<RigCompletionRequest, AIError> {
+///
+/// **0.9.4 Step 1 参数 fallback 优先级**:
+/// - `temperature`: `req.temperature` > `default_temperature`(model 层) > None(供应商默认)
+/// - `max_tokens`:同上
+/// - `additional_params`: 请求方目前不显式塞,直接用 model 层 `custom_params_json`
+///   (未来若 request 层要合并,需增字段)
+///
+/// **铁则**:请求方显式指定(路由档 `temperature=0.0`)优先——model 层默认不能覆盖它,
+/// 保证 SearchService 路由的确定性(见 §3.6)。
+fn build_rig_request(
+    req: &CompletionRequest,
+    default_temperature: Option<f32>,
+    default_max_tokens: Option<u32>,
+    custom_params: Option<&serde_json::Value>,
+) -> Result<RigCompletionRequest, AIError> {
     // 抽 system → preamble;user 消息进 chat_history
     let mut preamble: Option<String> = None;
     let mut user_msgs: Vec<RigMessage> = Vec::new();
@@ -162,16 +220,20 @@ fn build_rig_request(req: &CompletionRequest) -> Result<RigCompletionRequest, AI
     // ActionSchema → rig::ToolDefinition(唯一 tool 类型投影)
     let tools = req.tools.iter().map(|s| s.to_rig_tool()).collect();
 
+    // 参数 fallback:req 显式值 > model 层默认值 > None(rig 让 provider 自己决定)
+    let effective_temperature = req.temperature.or(default_temperature).map(|f| f as f64);
+    let effective_max_tokens = req.max_tokens.or(default_max_tokens).map(|n| n as u64);
+
     Ok(RigCompletionRequest {
         model: None,
         preamble,
         chat_history,
         documents: Vec::new(),
         tools,
-        temperature: req.temperature.map(|f| f as f64),
-        max_tokens: req.max_tokens.map(|n| n as u64),
+        temperature: effective_temperature,
+        max_tokens: effective_max_tokens,
         tool_choice: None,
-        additional_params: None,
+        additional_params: custom_params.cloned(),
         output_schema: None,
     })
 }
@@ -467,7 +529,7 @@ mod tests {
             temperature: None,
             timeout_ms: None,
         };
-        let rig = build_rig_request(&req).unwrap();
+        let rig = build_rig_request(&req, None, None, None).unwrap();
         assert_eq!(rig.preamble.as_deref(), Some("You are helpful."));
         assert_eq!(rig.chat_history.len(), 1);
     }
@@ -486,7 +548,7 @@ mod tests {
             temperature: None,
             timeout_ms: None,
         };
-        let rig = build_rig_request(&req).unwrap();
+        let rig = build_rig_request(&req, None, None, None).unwrap();
         assert_eq!(rig.preamble.as_deref(), Some("a\nb"));
     }
 
@@ -502,7 +564,7 @@ mod tests {
             temperature: Some(0.2),
             timeout_ms: None,
         };
-        let rig = build_rig_request(&req).unwrap();
+        let rig = build_rig_request(&req, None, None, None).unwrap();
         assert_eq!(rig.tools.len(), 2);
         assert_eq!(rig.tools[0].name, "open_settings");
         assert_eq!(rig.tools[1].name, "lock");
@@ -522,7 +584,7 @@ mod tests {
             temperature: None,
             timeout_ms: None,
         };
-        assert!(matches!(build_rig_request(&req), Err(AIError::Serialization(_))));
+        assert!(matches!(build_rig_request(&req, None, None, None), Err(AIError::Serialization(_))));
     }
 
     #[test]
@@ -535,7 +597,7 @@ mod tests {
             temperature: None,
             timeout_ms: None,
         };
-        assert!(matches!(build_rig_request(&req), Err(AIError::Serialization(_))));
+        assert!(matches!(build_rig_request(&req, None, None, None), Err(AIError::Serialization(_))));
     }
 
     #[test]
@@ -551,7 +613,69 @@ mod tests {
             temperature: None,
             timeout_ms: None,
         };
-        assert!(matches!(build_rig_request(&req), Err(AIError::Serialization(_))));
+        assert!(matches!(build_rig_request(&req, None, None, None), Err(AIError::Serialization(_))));
+    }
+
+    // ── 0.9.4 Step 1:模型级参数 fallback ───────────────────────────────
+
+    #[test]
+    fn build_rig_request_uses_model_defaults_when_request_omits() {
+        // request 没指定 temperature/max_tokens → 用 model 层默认
+        let req = CompletionRequest {
+            messages: vec![ChatMessage::user("q")],
+            tools: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            timeout_ms: None,
+        };
+        let rig = build_rig_request(&req, Some(0.7), Some(4096), None).unwrap();
+        // f32 → f64 有精度损失,允许 1e-6 误差
+        assert!((rig.temperature.unwrap() - 0.7).abs() < 1e-6);
+        assert_eq!(rig.max_tokens, Some(4096));
+    }
+
+    #[test]
+    fn build_rig_request_request_overrides_model_defaults() {
+        // 路由档铁则:request 显式指定必须优先——即使 model 默认也不能覆盖
+        let req = CompletionRequest {
+            messages: vec![ChatMessage::user("q")],
+            tools: Vec::new(),
+            max_tokens: Some(64),
+            temperature: Some(0.0),
+            timeout_ms: None,
+        };
+        let rig = build_rig_request(&req, Some(0.7), Some(4096), None).unwrap();
+        assert_eq!(rig.temperature, Some(0.0));
+        assert_eq!(rig.max_tokens, Some(64));
+    }
+
+    #[test]
+    fn build_rig_request_passes_custom_params_verbatim() {
+        // custom_parameters 组装后透传到 additional_params
+        let req = CompletionRequest {
+            messages: vec![ChatMessage::user("q")],
+            tools: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            timeout_ms: None,
+        };
+        let extra = json!({"top_p": 0.9, "web_search": true});
+        let rig = build_rig_request(&req, None, None, Some(&extra)).unwrap();
+        assert_eq!(rig.additional_params.as_ref(), Some(&extra));
+    }
+
+    #[test]
+    fn build_custom_params_json_folds_and_dedupes() {
+        // 空 → None;后 key 覆盖前;空 key 忽略
+        assert!(build_custom_params_json(&[]).is_none());
+
+        let ps = vec![
+            CustomParam { key: "top_p".into(), value: json!(0.5) },
+            CustomParam { key: "".into(), value: json!("skipped") },
+            CustomParam { key: "top_p".into(), value: json!(0.9) },
+        ];
+        let out = build_custom_params_json(&ps).unwrap();
+        assert_eq!(out, json!({"top_p": 0.9}));
     }
 
     // ── map_rig_response ────────────────────────────────────────────────

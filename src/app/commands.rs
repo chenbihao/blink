@@ -882,6 +882,358 @@ pub async fn has_ai_secret(provider_id: String) -> Result<bool, String> {
     }
 }
 
+/// 用 CM 里已存的密钥拉取可用模型列表(0.9.4)。
+///
+/// 编辑供应商时,前端拿不到 CM 里的明文密钥,但需要展示可用模型列表。
+/// 此 command 从 CM 读密钥 → 发 HTTP 请求 → 返回模型 id 列表,密钥不暴露给前端。
+///
+/// **参数**:
+/// - `provider_id`: Provider UUID,用于从 CM 读密钥
+/// - `kind`: 协议类型
+/// - `base_url`: 供应商 base URL
+///
+/// **返回**:模型 id 列表;密钥不存在返回空列表;拉取失败返回错误。
+#[tauri::command]
+pub async fn fetch_ai_models(
+    provider_id: String,
+    kind: String,
+    base_url: Option<String>,
+) -> Result<Vec<String>, String> {
+    use crate::app::ai_config::ProviderKind;
+
+    // 1. 从 CM 读密钥
+    let secret = match crate::infra::platform::secret::load_secret(&provider_id, "key") {
+        Ok(s) => s,
+        Err(crate::infra::platform::secret::SecretError::NotFound(_)) => {
+            // 密钥不存在 → 返回空,前端会提示"请先填写 API Key"
+            return Ok(Vec::new());
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+    let api_key = secret.expose();
+
+    let kind: ProviderKind =
+        serde_json::from_str(&format!("\"{}\"", kind)).map_err(|_| format!("未知协议: {kind}"))?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("HTTP 客户端创建失败: {e}"))?;
+
+    let result = match kind {
+        ProviderKind::OpenAICompatible => {
+            let base = base_url.as_deref().unwrap_or("https://api.openai.com/v1");
+            let base = base.trim_end_matches('/');
+            let urls = if base.ends_with("/v1") {
+                vec![
+                    format!("{}/models", base),
+                    format!("{}/models", base.trim_end_matches("/v1")),
+                ]
+            } else {
+                vec![format!("{}/models", base), format!("{}/v1/models", base)]
+            };
+            fetch_openai_models(&client, &urls, &api_key).await
+        }
+        ProviderKind::AnthropicMessages => {
+            // Anthropic 不暴露模型列表
+            Err("Anthropic 不支持自动获取模型列表".to_string())
+        }
+        ProviderKind::GeminiGenerateContent => {
+            let base = base_url
+                .as_deref()
+                .unwrap_or("https://generativelanguage.googleapis.com");
+            let url = format!(
+                "{}/v1beta/models?key={}",
+                base.trim_end_matches('/'),
+                &api_key
+            );
+            fetch_gemini_models(&client, &url).await
+        }
+    };
+    // api_key(SecretString) 在这里出作用域 → zeroize
+    result
+}
+
+async fn fetch_openai_models(
+    client: &reqwest::Client,
+    urls: &[String],
+    api_key: &str,
+) -> Result<Vec<String>, String> {
+    let mut last_err = String::new();
+    for url in urls {
+        match client
+            .get(url)
+            .header("Authorization", format!("Bearer {api_key}"))
+            .header("Accept", "application/json")
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                let models = resp
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()
+                    .and_then(|v| {
+                        let arr = v.get("data").and_then(|d| d.as_array())
+                            .or_else(|| v.get("models").and_then(|m| m.as_array()))
+                            .or_else(|| v.as_array());
+                        arr.map(|a| {
+                            a.iter()
+                                .filter_map(|m| {
+                                    m.get("id").and_then(|id| id.as_str()).map(String::from)
+                                        .or_else(|| m.get("name").and_then(|n| n.as_str()).map(String::from))
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .unwrap_or_default();
+                if !models.is_empty() {
+                    let mut sorted = models;
+                    sorted.sort();
+                    sorted.dedup();
+                    return Ok(sorted);
+                }
+                last_err = "返回空列表".into();
+            }
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                last_err = format!("HTTP {status}");
+                if status == 401 || status == 403 {
+                    return Err(format!("认证失败(HTTP {status})"));
+                }
+            }
+            Err(e) => {
+                last_err = format!("{e}");
+            }
+        }
+    }
+    Err(format!("获取模型失败: {last_err}"))
+}
+
+async fn fetch_gemini_models(client: &reqwest::Client, url: &str) -> Result<Vec<String>, String> {
+    match client
+        .get(url)
+        .header("Accept", "application/json")
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            let models = resp
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|v| {
+                    v.get("models").and_then(|m| m.as_array()).map(|arr| {
+                        arr.iter()
+                            .filter_map(|m| {
+                                m.get("name")
+                                    .and_then(|n| n.as_str())
+                                    .map(|s| s.replace("models/", ""))
+                                    .filter(|n| n.to_lowercase().contains("gemini"))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .unwrap_or_default();
+            if models.is_empty() {
+                Err("返回空列表".to_string())
+            } else {
+                let mut sorted = models;
+                sorted.sort();
+                Ok(sorted)
+            }
+        }
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            if status == 401 || status == 403 {
+                Err(format!("认证失败(HTTP {status})"))
+            } else {
+                Err(format!("获取模型失败(HTTP {status})"))
+            }
+        }
+        Err(e) => Err(format!("获取模型失败: {e}")),
+    }
+}
+
+/// 测试 AI 供应商连通性(0.9.4)。
+///
+/// 用 `reqwest` 直接发一个最小请求验证 Key + URL 是否可用。
+///
+/// **参数**:
+/// - `kind`: 协议类型
+/// - `base_url`: 供应商 base URL
+/// - `api_key`: 明文密钥(新增模式);编辑模式下可空
+/// - `provider_id`: 可选;编辑模式下传入,从 CM 读已有密钥(api_key 为空时生效)
+///
+/// **密钥优先级**:api_key 非空 → 用 api_key;否则 provider_id 非空 → 从 CM 读
+#[tauri::command]
+pub async fn test_ai_provider(
+    kind: String,
+    base_url: Option<String>,
+    api_key: String,
+    provider_id: Option<String>,
+) -> Result<String, String> {
+    use crate::app::ai_config::ProviderKind;
+
+    // 确定密钥来源:输入框优先,其次 CM
+    let _cm_secret; // 持有 SecretString 生命周期
+    let effective_key = if !api_key.trim().is_empty() {
+        api_key.trim().to_string()
+    } else if let Some(pid) = provider_id.as_deref() {
+        match crate::infra::platform::secret::load_secret(pid, "key") {
+            Ok(s) => {
+                _cm_secret = Some(s);
+                _cm_secret.as_ref().unwrap().expose().to_string()
+            }
+            Err(crate::infra::platform::secret::SecretError::NotFound(_)) => {
+                return Err("未找到已保存的密钥，请填写 API Key".to_string());
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    } else {
+        return Err("请填写 API Key".to_string());
+    };
+
+    let kind: ProviderKind =
+        serde_json::from_str(&format!("\"{}\"", kind)).map_err(|_| format!("未知协议: {kind}"))?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("HTTP 客户端创建失败: {e}"))?;
+
+    let result = match kind {
+        ProviderKind::OpenAICompatible => {
+            let base = base_url.as_deref().unwrap_or("https://api.openai.com/v1");
+            let base = base.trim_end_matches('/');
+            // 尝试 /models 和 /v1/models 两个路径
+            let urls = if base.ends_with("/v1") {
+                vec![
+                    format!("{}/models", base),
+                    format!("{}/models", base.trim_end_matches("/v1")),
+                ]
+            } else {
+                vec![format!("{}/models", base), format!("{}/v1/models", base)]
+            };
+            test_openai_models_endpoint(&client, &urls, &effective_key).await
+        }
+        ProviderKind::AnthropicMessages => {
+            let base = base_url.as_deref().unwrap_or("https://api.anthropic.com");
+            let url = format!("{}/v1/messages", base.trim_end_matches('/'));
+            test_anthropic_endpoint(&client, &url, &effective_key).await
+        }
+        ProviderKind::GeminiGenerateContent => {
+            let base = base_url
+                .as_deref()
+                .unwrap_or("https://generativelanguage.googleapis.com");
+            let url = format!(
+                "{}/v1beta/models?key={}",
+                base.trim_end_matches('/'),
+                &effective_key
+            );
+            test_gemini_endpoint(&client, &url).await
+        }
+    };
+
+    result
+}
+
+async fn test_openai_models_endpoint(
+    client: &reqwest::Client,
+    urls: &[String],
+    api_key: &str,
+) -> Result<String, String> {
+    let mut last_err = String::new();
+    for url in urls {
+        match client
+            .get(url)
+            .header("Authorization", format!("Bearer {api_key}"))
+            .header("Accept", "application/json")
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                let count = resp
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()
+                    .and_then(|v| v.get("data").and_then(|d| d.as_array().map(|a| a.len())))
+                    .unwrap_or(0);
+                return Ok(format!("连接成功,发现 {count} 个模型"));
+            }
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                last_err = format!("HTTP {status}");
+                if status == 401 || status == 403 {
+                    return Err(format!("认证失败(HTTP {status}),请检查 API Key"));
+                }
+            }
+            Err(e) => {
+                last_err = format!("{e}");
+            }
+        }
+    }
+    Err(format!("连接失败: {last_err}"))
+}
+
+async fn test_anthropic_endpoint(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: &str,
+) -> Result<String, String> {
+    match client
+        .post(url)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .body(r#"{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}"#)
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            Ok("连接成功,Anthropic API 可用".to_string())
+        }
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            if status == 401 || status == 403 {
+                Err(format!("认证失败(HTTP {status}),请检查 API Key"))
+            } else {
+                // 400 等其他状态码说明 Key 通了但请求格式有问题——也算连通
+                Ok(format!("连接成功(HTTP {status}),Anthropic API 可达"))
+            }
+        }
+        Err(e) => Err(format!("连接失败: {e}")),
+    }
+}
+
+async fn test_gemini_endpoint(client: &reqwest::Client, url: &str) -> Result<String, String> {
+    match client
+        .get(url)
+        .header("Accept", "application/json")
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            let count = resp
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|v| v.get("models").and_then(|m| m.as_array().map(|a| a.len())))
+                .unwrap_or(0);
+            Ok(format!("连接成功,发现 {count} 个模型"))
+        }
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            if status == 401 || status == 403 {
+                Err(format!("认证失败(HTTP {status}),请检查 API Key"))
+            } else {
+                Err(format!("连接失败(HTTP {status})"))
+            }
+        }
+        Err(e) => Err(format!("连接失败: {e}")),
+    }
+}
+
 /// 打开当天日志文件（资源管理器中定位；文件不存在则打开文件夹）。
 #[tauri::command]
 pub fn open_log_file() -> Result<(), String> {

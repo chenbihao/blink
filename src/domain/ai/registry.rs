@@ -338,9 +338,13 @@ mod tests {
                         .map(|mid| ModelEntry {
                             id: mid.into(),
                             display_name: mid.into(),
+                            enabled: true,
                             context_window: None,
                             input_price_per_million: None,
                             output_price_per_million: None,
+                            temperature: None,
+                            max_tokens: None,
+                            custom_parameters: Vec::new(),
                         })
                         .collect(),
                     created_at: 0,

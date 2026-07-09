@@ -532,6 +532,8 @@ fn main() {
             app::commands::save_ai_secret,
             app::commands::delete_ai_secret,
             app::commands::has_ai_secret,
+            app::commands::test_ai_provider,
+            app::commands::fetch_ai_models,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

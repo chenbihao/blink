@@ -57,6 +57,9 @@
   align-items: center;
   justify-content: center;
   z-index: 10000;
+  /* 0.9.4:内容溢出时(极端小窗口 + 长 modal)允许 overlay 自身滚,不截顶部 */
+  overflow-y: auto;
+  padding: 16px 0;
 }
 .modal {
   background: var(--bg);
@@ -185,6 +188,11 @@
   padding: 20px 24px;
   min-width: 440px;
   max-width: 520px;
+  /* 0.9.4:高度封顶,内容过多时内部滚动,避免被 settings 窗口挡住 */
+  max-height: 85vh;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--surface-2) transparent;
   box-shadow: 0 12px 40px var(--shadow);
 }
 .modal-card h3 {
@@ -220,6 +228,25 @@
   justify-content: flex-end;
   gap: 8px;
   padding-top: 8px;
+}
+
+/* AI 供应商 modal 三段分区(0.9.4)——品牌 · 连接 · 模型 */
+.ai-modal-section {
+  padding: 4px 0 8px;
+  border-bottom: 1px solid var(--surface);
+  margin-bottom: 6px;
+}
+.ai-modal-section:last-of-type {
+  border-bottom: none;
+  margin-bottom: 0;
+}
+.ai-modal-section-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 2px 0 6px;
 }
 .btn-primary {
   background: var(--accent);
@@ -270,18 +297,52 @@
   margin-bottom: 8px;
 }
 .ai-provider-card {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  background: var(--surface);
+  /* 0.9.4 视觉提层:卡片沉一档,跟 panel 底(--bg)对比出层次 */
+  background: var(--bg-deep);
   border: 1px solid var(--surface-2);
   border-radius: var(--radius-md);
-  padding: 10px 14px;
+  overflow: hidden;
+  transition: border-color var(--transition-fast);
 }
-.ai-provider-icon {
-  font-size: 18px;
-  color: var(--text-dim);
+.ai-provider-card:hover {
+  border-color: var(--text-faint);
 }
+/* header 内的 flex 布局由 .ai-provider-header 承担 */
+.ai-provider-card .ai-provider-mono,
+.ai-provider-card .ai-provider-info,
+.ai-provider-card .ai-provider-status,
+.ai-provider-card .ai-provider-edit,
+.ai-provider-card .ai-provider-delete {
+  /* 继承原有样式,无需改动 */
+}
+/* 0.9.4:tint monogram 方块——替代原 🔌 emoji,跟 modal preset 视觉呼应 */
+.ai-provider-mono {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  letter-spacing: 0.02em;
+}
+.ai-provider-mono--cjk {
+  font-size: 10px;
+  letter-spacing: 0;
+}
+.ai-provider-mono[data-tint="blue"]    { background: #3b82f6; }
+.ai-provider-mono[data-tint="amber"]   { background: #f59e0b; }
+.ai-provider-mono[data-tint="teal"]    { background: #14b8a6; }
+.ai-provider-mono[data-tint="rose"]    { background: #f43f5e; }
+.ai-provider-mono[data-tint="orange"]  { background: #f97316; }
+.ai-provider-mono[data-tint="purple"]  { background: #a855f7; }
+.ai-provider-mono[data-tint="indigo"]  { background: #6366f1; }
+.ai-provider-mono[data-tint="green"]   { background: #22c55e; }
+.ai-provider-mono[data-tint="slate"]   { background: #64748b; }
+.ai-provider-mono[data-tint="ink"]     { background: #334155; }
 .ai-provider-info {
   flex: 1;
   min-width: 0;
@@ -290,12 +351,17 @@
   font-size: 13px;
   color: var(--text);
   font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .ai-provider-meta {
   font-size: 11px;
   color: var(--text-faint);
   margin-top: 2px;
-  font-family: var(--font-mono, ui-monospace, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .ai-provider-status {
   font-size: 11px;
@@ -381,4 +447,482 @@
     transform: none;
     opacity: 1;
   }
+}
+
+/* ── 0.9.4 AI 供应商配置 UI 升级 ────────────────────────────────────────── */
+
+/* 更宽的 modal(网格 picker + 模型列表需要更多空间) */
+.modal-card-lg {
+  min-width: 520px;
+  max-width: 600px;
+  max-height: 80vh;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--surface-2) transparent;
+}
+
+/* ── 预设选择器(0.9.4 修正:平铺按钮布局) ───────────────────
+ *
+ * 每个按钮:小 tint monogram + 名称;已添加时右上角小圆点;
+ * flex-wrap 自适应换行,信息密度高,一眼扫完。
+ * custom 独占最后一行,虚线分隔。
+ */
+.ai-preset-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 0;
+}
+.ai-preset-item {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 4px 4px;
+  background: var(--surface);
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text);
+  transition: border-color var(--transition-fast), background var(--transition-fast);
+  white-space: nowrap;
+}
+.ai-preset-item:hover {
+  background: var(--surface-2);
+  border-color: var(--text-faint);
+}
+.ai-preset-item.selected {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+.ai-preset-item.selected .ai-preset-item-name {
+  font-weight: 500;
+}
+/* custom 换行独占一行(通过 flex-basis 强制) + 虚线上分隔 */
+.ai-preset-item--custom {
+  flex-basis: 100%;
+  justify-content: center;
+  border-style: dashed;
+  margin-top: 2px;
+}
+.ai-preset-item-mono {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 600;
+  color: #fff;
+  letter-spacing: 0.02em;
+  /* tint 由 data-tint 属性驱动(见下) */
+}
+.ai-preset-item-mono--cjk {
+  /* 中文 monogram(如"深度""硅基")两字比字母宽,减一号避免溢出 */
+  font-size: 9px;
+  letter-spacing: 0;
+}
+.ai-preset-item-name {
+  line-height: 1.4;
+}
+/* "已添加"标记——右上角 accent 小圆点,不占横向宽度 */
+.ai-preset-item[data-added="1"]::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* tint monogram 背景色——与旧 dot 保持一致,便于视觉迁移 */
+.ai-preset-item-mono[data-tint="blue"]    { background: #3b82f6; }
+.ai-preset-item-mono[data-tint="amber"]   { background: #f59e0b; }
+.ai-preset-item-mono[data-tint="teal"]    { background: #14b8a6; }
+.ai-preset-item-mono[data-tint="rose"]    { background: #f43f5e; }
+.ai-preset-item-mono[data-tint="orange"]  { background: #f97316; }
+.ai-preset-item-mono[data-tint="purple"]  { background: #a855f7; }
+.ai-preset-item-mono[data-tint="indigo"]  { background: #6366f1; }
+.ai-preset-item-mono[data-tint="green"]   { background: #22c55e; }
+.ai-preset-item-mono[data-tint="slate"]   { background: #64748b; }
+.ai-preset-item-mono[data-tint="ink"]     { background: #334155; }
+
+/* ── API Key 行 + 测试按钮 ──────────────────────────────────── */
+.ai-modal-api-key-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex: 1;
+}
+.ai-modal-api-key-row input {
+  flex: 1;
+}
+.ai-test-btn {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.ai-test-btn.testing {
+  opacity: 0.6;
+  pointer-events: none;
+}
+.ai-test-result {
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  margin: 4px 0 8px;
+}
+.ai-test-result.success {
+  background: var(--green-bg);
+  color: var(--green);
+}
+.ai-test-result.error {
+  background: var(--red-bg);
+  color: var(--red);
+}
+
+/* ── 模型下拉候选(Model modal popover 复用样式)──────────── */
+.ai-model-dropdown-item {
+  padding: 6px 10px;
+  font-size: 12px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--text);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.ai-model-dropdown-item:hover {
+  background: var(--surface);
+}
+.ai-model-dropdown-item.is-added {
+  opacity: 0.4;
+  cursor: default;
+}
+.ai-model-dropdown-item .added-tag {
+  font-size: 10px;
+  color: var(--text-faint);
+  font-family: inherit;
+}
+.ai-model-dropdown-empty {
+  padding: 12px 10px;
+  font-size: 12px;
+  color: var(--text-faint);
+  text-align: center;
+}
+.ai-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--surface-2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: ai-spin 0.6s linear infinite;
+}
+@keyframes ai-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── Provider accordion + 模型表格 ─────────────────────────── */
+.ai-provider-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  padding: 10px 14px;
+  user-select: none;
+}
+.ai-provider-header:hover {
+  background: var(--surface-2);
+  border-radius: var(--radius-md);
+}
+.ai-provider-chevron {
+  font-size: 12px;
+  color: var(--text-faint);
+  flex-shrink: 0;
+  transition: transform var(--transition-fast);
+}
+.ai-provider-models {
+  padding: 0 14px 10px;
+}
+.ai-models-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin-top: 6px;
+  /* 0.9.4 修正:固定列布局,不同 provider 展开视觉一致 */
+  table-layout: fixed;
+}
+/* 列宽通过 colgroup 显式指定;比例保持 Model ID 稍宽,启用/操作按内容够用 */
+.ai-models-table col.col-id      { width: auto; }         /* 剩余空间 */
+.ai-models-table col.col-name    { width: 32%; }
+.ai-models-table col.col-enabled { width: 56px; }
+.ai-models-table col.col-actions { width: 90px; }
+.ai-models-table th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-dim);
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--surface-2);
+  font-size: 11px;
+}
+.ai-models-table td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--surface);
+  color: var(--text);
+  vertical-align: middle;
+  /* 内容过长省略号显示——不再让长 model id 撑破布局 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ai-models-table-id {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+}
+.ai-model-delete {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+.ai-model-delete:hover {
+  color: var(--red);
+  background: var(--red-bg);
+}
+.ai-models-table-empty {
+  font-size: 12px;
+  color: var(--text-faint);
+  padding: 8px 0;
+  text-align: center;
+}
+
+/* ── 0.9.4 Step 1:模型表格新元素 ────────────────────────── */
+.ai-models-table-actions {
+  white-space: nowrap;
+}
+.ai-model-edit-btn {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  transition: color var(--transition-fast), background var(--transition-fast);
+  margin-right: 2px;
+}
+.ai-model-edit-btn:hover {
+  color: var(--accent);
+  background: var(--surface-2);
+}
+/* 已配调用参数徽章——跟 Model ID 同行,小灰字提示 */
+.ai-model-params-badge {
+  font-size: 10px;
+  color: var(--accent);
+  margin-left: 6px;
+  padding: 1px 4px;
+  background: var(--accent-bg);
+  border-radius: 4px;
+  font-family: initial;
+}
+/* 表格底部添加按钮——虚线框,与 provider "add" 视觉一致 */
+.ai-model-add-inline {
+  margin-top: 8px;
+  background: none;
+  border: 1px dashed var(--surface-2);
+  color: var(--text-dim);
+  padding: 6px 12px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: 12px;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+  width: 100%;
+}
+.ai-model-add-inline:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+/* 0.9.4:新增 provider 后引导脉冲——3 次呼吸,与 JS 里 3s 超时对齐 */
+.ai-model-add-inline--pulse {
+  animation: ai-add-pulse 1s ease-in-out 3;
+  color: var(--accent);
+  border-color: var(--accent);
+  border-style: solid;
+}
+@keyframes ai-add-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 transparent; }
+  50%      { box-shadow: 0 0 0 4px var(--accent-bg); }
+}
+
+/* ── 0.9.4 Step 1:模型编辑 modal ─────────────────────────── */
+.ai-model-edit-provider-info {
+  font-size: 11px;
+  color: var(--text-faint);
+  padding: 0 0 12px;
+  margin: -6px 0 0;
+}
+/* 只读 ID 输入(编辑模式)——视觉上灰化,禁止 caret */
+.input-readonly {
+  background: var(--surface) !important;
+  color: var(--text-dim) !important;
+  cursor: not-allowed;
+}
+/* 0.9.4 Step 1:Model ID 行 + 拉取按钮 */
+.ai-model-id-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex: 1;
+}
+.ai-model-id-row input {
+  flex: 1;
+}
+.ai-model-fetch-btn {
+  flex-shrink: 0;
+  padding: 5px 10px;
+  font-size: 14px;
+  line-height: 1;
+}
+/* 拉取 popover:紧挨 ID 行,盖住下方内容;点选后关闭 */
+.ai-model-fetch-popover {
+  margin: 4px 0 8px;
+  background: var(--bg);
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 12px var(--shadow);
+  overflow: hidden;
+}
+.ai-model-fetch-popover-head {
+  display: flex;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--surface-2);
+  align-items: center;
+}
+.ai-model-fetch-filter {
+  flex: 1;
+  padding: 5px 8px;
+  background: var(--surface);
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 12px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+.ai-model-fetch-close {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  transition: color var(--transition-fast), background var(--transition-fast);
+}
+.ai-model-fetch-close:hover {
+  color: var(--red);
+  background: var(--red-bg);
+}
+.ai-model-fetch-list {
+  max-height: 220px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--surface-2) transparent;
+}
+/* 参数行(temperature / max_tokens)——头部 label + toggle,body 折叠区 */
+.ai-model-param {
+  padding: 6px 0;
+}
+.ai-model-param-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ai-model-param-head .setting-label {
+  margin: 0;
+}
+.ai-model-param-body {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0 4px;
+}
+.ai-model-param-body input[type="range"] {
+  flex: 1;
+}
+.ai-model-param-num {
+  width: 80px;
+  flex-shrink: 0;
+  padding: 4px 8px;
+  background: var(--surface);
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 12px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+/* 自定义参数键值对 */
+.ai-model-custom-params {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 0 8px;
+}
+.ai-model-custom-params-empty {
+  font-size: 11px;
+  color: var(--text-faint);
+  padding: 6px 0;
+  text-align: center;
+  font-style: normal;
+}
+.ai-model-custom-param-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.ai-model-custom-param-key,
+.ai-model-custom-param-val {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  background: var(--surface);
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 12px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+.ai-model-custom-param-key {
+  flex: 0 0 30%;
+}
+.ai-model-custom-param-del {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  transition: color var(--transition-fast), background var(--transition-fast);
+  flex-shrink: 0;
+}
+.ai-model-custom-param-del:hover {
+  color: var(--red);
+  background: var(--red-bg);
+}
+.ai-model-custom-params-add {
+  margin-top: 2px;
+  align-self: flex-start;
 }

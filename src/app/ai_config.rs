@@ -185,7 +185,11 @@ pub enum ProviderKind {
     GeminiGenerateContent,
 }
 
-/// 一个模型的元数据——纯记账,不驱动行为。
+/// 一个模型的元数据 + 调用参数默认值。
+///
+/// **0.9.4 Step 1** 起 `temperature / max_tokens / custom_parameters` 三个字段进入,
+/// 变成"调用参数**默认值**"载体——请求方(SearchService 路由档等)不指定时 fallback 到这里。
+/// 优先级见 `RigProvider::complete`(rig_provider.rs)。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelEntry {
     /// 供应商 model id(如 `"gpt-5-nano" / "claude-opus-4-8"`)。
@@ -193,6 +197,11 @@ pub struct ModelEntry {
 
     /// 用户可读展示名(自定义,不影响调用)。
     pub display_name: String,
+
+    /// 是否启用。默认 true——老配置缺字段时 serde 填充,零迁移成本。
+    /// 前端模型表格的启用开关控制此字段。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 
     /// 上下文窗口大小(可选)。前端提示"这个模型能吃多少 token"。
     #[serde(default)]
@@ -205,6 +214,33 @@ pub struct ModelEntry {
     /// output 单价(美元 / 1M tokens),可选。
     #[serde(default)]
     pub output_price_per_million: Option<f32>,
+
+    // ── 0.9.4 Step 1:调用参数默认值 ──────────────────────────────────────
+    /// 采样温度默认值。`CompletionRequest.temperature` 为 `None` 时 fallback 此值;
+    /// 请求方显式指定(如路由档 `temperature=0.0`)时**优先级高于此字段**——保证路由确定性。
+    #[serde(default)]
+    pub temperature: Option<f32>,
+
+    /// 输出 token 上限默认值。`CompletionRequest.max_tokens=None` 时 fallback。
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+
+    /// 自定义参数——透传到 rig `additional_params`(见 rig-core `CompletionRequest`)。
+    /// 常见用途:`top_p` / `reasoning_effort` / 各家扩展 flag。
+    /// 前端 value 输入自动推断类型(number/bool/json/string)。
+    #[serde(default)]
+    pub custom_parameters: Vec<CustomParam>,
+}
+
+/// 自定义参数键值对——序列化到 rig `additional_params` JSON。
+///
+/// **value 用 `serde_json::Value`**:string/number/bool/array/object 全能装。
+/// 前端输入 `"0.9"` 会推断成 number,`"true"` 推断成 bool,`{...}` 推断成 object,
+/// 其余 fallback string。推断逻辑在前端(`settings.js` 提交时 JSON.parse 尝试)。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CustomParam {
+    pub key: String,
+    pub value: serde_json::Value,
 }
 
 /// 三档指派——引用 provider + model。
@@ -265,12 +301,12 @@ impl AIConfig {
         for (idx, (actual, assignment)) in chain.iter().enumerate() {
             let Some(a) = assignment else { continue };
             let Some(pair) = self.find_provider_model(a) else {
-                // 悬空引用——warn 后继续降级
+                // 悬空引用 或 model 被禁用——warn 后继续降级
                 tracing::warn!(
                     target: crate::infra::utils::perf::ai_slo::TARGET,
                     requested = ?tier, actual = ?actual,
                     provider_id = %a.provider_id, model_id = %a.model_id,
-                    "AI 档位引用悬空,降级到下一档"
+                    "AI 档位引用不可用(悬空或已禁用),降级到下一档"
                 );
                 continue;
             };
@@ -286,10 +322,16 @@ impl AIConfig {
         None
     }
 
-    /// 查找 assignment 对应的 (Provider, Model);任一悬空返回 None。
+    /// 查找 assignment 对应的 (Provider, Model);任一悬空或 model 被禁用返回 None。
+    ///
+    /// **0.9.4:enabled=false 视同悬空**——用户在前端关掉 model 开关的语义就是
+    /// "从可选池里剔除"。resolve_tier 上层看到 None 会 warn + 降级到下一档。
     fn find_provider_model(&self, a: &TierAssignment) -> Option<(&ProviderEntry, &ModelEntry)> {
         let provider = self.providers.iter().find(|p| p.id == a.provider_id)?;
-        let model = provider.models.iter().find(|m| m.id == a.model_id)?;
+        let model = provider
+            .models
+            .iter()
+            .find(|m| m.id == a.model_id && m.enabled)?;
         Some((provider, model))
     }
 
@@ -354,9 +396,13 @@ mod tests {
             models: vec![ModelEntry {
                 id: model_id.to_string(),
                 display_name: model_id.to_string(),
+                enabled: true,
                 context_window: Some(128_000),
                 input_price_per_million: Some(0.1),
                 output_price_per_million: Some(0.4),
+                temperature: None,
+                max_tokens: None,
+                custom_parameters: Vec::new(),
             }],
             created_at: 1_700_000_000,
         }
@@ -487,6 +533,56 @@ mod tests {
     }
 
     #[test]
+    fn resolve_tier_disabled_model_falls_through_like_dangling() {
+        // 0.9.4:enabled=false 语义等同悬空——resolve_tier 应降级到下一档
+        let mut provider = sample_provider("p1", "gpt-4");
+        provider.models[0].enabled = false; // 用户在前端关掉了这个 model
+        // 再加一个启用的 model 用作降级目标(在 tier_main 指过来)
+        provider.models.push(ModelEntry {
+            id: "gpt-3.5".to_string(),
+            display_name: "GPT-3.5".to_string(),
+            enabled: true,
+            context_window: None,
+            input_price_per_million: None,
+            output_price_per_million: None,
+            temperature: None,
+            max_tokens: None,
+            custom_parameters: Vec::new(),
+        });
+        let c = AIConfig {
+            providers: vec![provider],
+            tier_router: Some(TierAssignment {
+                provider_id: "p1".to_string(),
+                model_id: "gpt-4".to_string(), // 已禁用
+            }),
+            tier_main: Some(TierAssignment {
+                provider_id: "p1".to_string(),
+                model_id: "gpt-3.5".to_string(), // 启用
+            }),
+            ..Default::default()
+        };
+        let (_p, m, actual) = c.resolve_tier(Tier::Router).unwrap();
+        assert_eq!(actual, Tier::Main, "禁用 model 应触发降级到 Main");
+        assert_eq!(m.id, "gpt-3.5");
+    }
+
+    #[test]
+    fn resolve_tier_returns_none_when_all_tiers_disabled() {
+        // 全档指向的 model 都禁用 → 全域降级失败,返回 None
+        let mut provider = sample_provider("p1", "gpt-4");
+        provider.models[0].enabled = false;
+        let c = AIConfig {
+            providers: vec![provider],
+            tier_main: Some(TierAssignment {
+                provider_id: "p1".to_string(),
+                model_id: "gpt-4".to_string(),
+            }),
+            ..Default::default()
+        };
+        assert!(c.resolve_tier(Tier::Main).is_none(), "全禁用时应返回 None,SearchService fallback fuzzy");
+    }
+
+    #[test]
     fn tiers_referencing_returns_all_hits() {
         // 一个 provider 被 Router + Light 引用
         let c = AIConfig {
@@ -515,6 +611,55 @@ mod tests {
         assert_eq!(c.min_query_len, 4);
         assert!(c.require_whitespace);
         assert!(c.providers.is_empty());
+    }
+
+    #[test]
+    fn model_entry_backward_compat_without_call_params() {
+        // 0.9.4 Step 1:老 config 的 model 没有 temperature/max_tokens/custom_parameters
+        // 三个新字段,反序列化零错误,值全落 None / 空 vec。
+        let json = r#"{
+            "id": "gpt-5-nano",
+            "display_name": "GPT-5 Nano",
+            "enabled": true
+        }"#;
+        let m: ModelEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(m.id, "gpt-5-nano");
+        assert!(m.enabled);
+        assert!(m.temperature.is_none());
+        assert!(m.max_tokens.is_none());
+        assert!(m.custom_parameters.is_empty());
+    }
+
+    #[test]
+    fn model_entry_call_params_serialize_roundtrip() {
+        // 三新字段全填 + custom_parameters 混合 number / bool / string:roundtrip 稳定。
+        let m = ModelEntry {
+            id: "gpt-5-mini".into(),
+            display_name: "M".into(),
+            enabled: true,
+            context_window: None,
+            input_price_per_million: None,
+            output_price_per_million: None,
+            temperature: Some(0.7),
+            max_tokens: Some(4096),
+            custom_parameters: vec![
+                CustomParam {
+                    key: "top_p".into(),
+                    value: serde_json::json!(0.9),
+                },
+                CustomParam {
+                    key: "web_search".into(),
+                    value: serde_json::json!(true),
+                },
+                CustomParam {
+                    key: "extra_body".into(),
+                    value: serde_json::json!("raw-string"),
+                },
+            ],
+        };
+        let s = serde_json::to_string(&m).unwrap();
+        let m2: ModelEntry = serde_json::from_str(&s).unwrap();
+        assert_eq!(m, m2);
     }
 
     #[test]

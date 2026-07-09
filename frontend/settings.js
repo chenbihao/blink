@@ -1,4 +1,4 @@
-import { invoke } from "./js/tauri.js";
+import { invoke, confirmDialog, messageDialog } from "./js/tauri.js";
 import { applyTheme } from "./js/theme.js";
 import { t, applyI18n, setLang } from "./js/i18n.js";
 import { renderKey } from "./js/kbd.js";
@@ -2036,10 +2036,13 @@ async function loadStorageInfo() {
 }
 
 document.getElementById("clear-history")?.addEventListener("click", async () => {
-  if (confirm(t("storage.clear.confirm"))) {
-    await invoke("clear_history");
-    loadStorageInfo();
-  }
+  const ok = await confirmDialog(t("storage.clear.confirm"), {
+    title: t("common.confirm"),
+    kind: "warning",
+  });
+  if (!ok) return;
+  await invoke("clear_history");
+  loadStorageInfo();
 });
 
 // ── 扩展 Tab：搜索引擎配置 ──────────────────────────────────────────────────
@@ -2062,7 +2065,7 @@ document.getElementById("save-start-menu")?.addEventListener("click", async () =
     if (card) clearUnsaved(card);
   } catch (e) {
     console.error("update_start_menu_config failed:", e);
-    alert(t("common.save_failed_msg", { err: e }));
+    messageDialog(t("common.save_failed_msg", { err: e }), { title: t("common.error"), kind: "error" });
   }
 });
 
@@ -2181,7 +2184,7 @@ document.getElementById("save-file-search")?.addEventListener("click", async () 
     }
   } catch (e) {
     console.error("update_file_search failed:", e);
-    alert(t("common.save_failed_msg", { err: e }));
+    messageDialog(t("common.save_failed_msg", { err: e }), { title: t("common.error"), kind: "error" });
   }
 });
 
@@ -2386,7 +2389,11 @@ document.getElementById("perf-export")?.addEventListener("click", async () => {
 
 // 清除记录按钮
 document.getElementById("perf-clear")?.addEventListener("click", async () => {
-  if (!confirm(t("debug.perf.clear.confirm"))) return;
+  const ok = await confirmDialog(t("debug.perf.clear.confirm"), {
+    title: t("common.confirm"),
+    kind: "warning",
+  });
+  if (!ok) return;
   try {
     await invoke("clear_perf_data");
     loadPerfStats();
@@ -2646,20 +2653,67 @@ function renderAIProviders() {
   const cards = providers
     .map((p) => {
       const kindLabel = AI_KIND_LABEL[p.kind] || p.kind;
-      const modelIds = (p.models || []).map((m) => m.id).join(", ");
+      const models = p.models || [];
+      const modelSummary = models.map((m) => m.id).join(", ");
       const hasKey = hasSecretMap.get(p.id) === true;
       const statusCls = hasKey ? "" : "no-key";
       const statusText = hasKey ? t("ai.provider.configured") : t("ai.provider.not_configured");
+      // 0.9.4:tint monogram 方块——按 kind + base_url 反查 preset,fallback ink 色
+      const presetKey = guessPresetForProvider(p.kind, p.base_url);
+      const preset = AI_PRESET_CATALOG[presetKey] || AI_PRESET_CATALOG.custom;
+      const monogram = preset.monogram || "?";
+      const isCJK = /[一-鿿]/.test(monogram);
+      const monoCjkCls = isCJK ? " ai-provider-mono--cjk" : "";
+      // 0.9.4:可编辑模型表格(展开时显示)——colgroup 固定列宽,长 id 溢出走 ellipsis
+      const modelsTable = models.length > 0
+        ? `<table class="ai-models-table">
+            <colgroup>
+              <col class="col-id" />
+              <col class="col-name" />
+              <col class="col-enabled" />
+              <col class="col-actions" />
+            </colgroup>
+            <thead><tr><th>Model ID</th><th>显示名</th><th>启用</th><th>操作</th></tr></thead>
+            <tbody>${models.map((m) => {
+              const enabled = m.enabled !== false;
+              // 0.9.4 Step 1:有 temperature / max_tokens / custom_parameters 的模型显示 · 参数徽章
+              const hasParams = m.temperature != null || m.max_tokens != null || (m.custom_parameters && m.custom_parameters.length > 0);
+              const paramsBadge = hasParams
+                ? '<span class="ai-model-params-badge" title="已配置调用参数">·参数</span>'
+                : '';
+              return `<tr data-model-id="${escapeAttr(m.id)}" data-provider-id="${escapeAttr(p.id)}">
+                <td class="ai-models-table-id" title="${escapeAttr(m.id)}">${escapeHtml(m.id)}${paramsBadge}</td>
+                <td title="${escapeAttr(m.display_name || m.id)}">${escapeHtml(m.display_name || m.id)}</td>
+                <td>
+                  <label class="switch switch-sm">
+                    <input type="checkbox" class="ai-model-toggle" data-model-id="${escapeAttr(m.id)}" data-provider-id="${escapeAttr(p.id)}" ${enabled ? "checked" : ""} />
+                    <span class="slider"></span>
+                  </label>
+                </td>
+                <td class="ai-models-table-actions">
+                  <button class="ai-model-edit-btn" data-model-id="${escapeAttr(m.id)}" data-provider-id="${escapeAttr(p.id)}" title="${escapeAttr(t("ai.model.edit"))}">✎</button>
+                  <button class="ai-model-delete" data-model-id="${escapeAttr(m.id)}" data-provider-id="${escapeAttr(p.id)}" title="${escapeAttr(t("ai.model.delete"))}">✕</button>
+                </td>
+              </tr>`;
+            }).join("")}</tbody>
+          </table>
+          <button class="ai-model-add-inline" data-provider-id="${escapeAttr(p.id)}">${escapeHtml(t("ai.model.add"))}</button>`
+        : `<div class="ai-models-table-empty">${escapeHtml(t("ai.model.empty"))}</div>
+           <button class="ai-model-add-inline" data-provider-id="${escapeAttr(p.id)}">${escapeHtml(t("ai.model.add"))}</button>`;
       return `
         <div class="ai-provider-card" data-provider-id="${escapeAttr(p.id)}">
-          <div class="ai-provider-icon">🔌</div>
-          <div class="ai-provider-info">
-            <div class="ai-provider-title">${escapeHtml(p.display_name)} · ${escapeHtml(kindLabel)}</div>
-            <div class="ai-provider-meta">${escapeHtml(modelIds || "(no model)")}</div>
+          <div class="ai-provider-header" data-provider-id="${escapeAttr(p.id)}">
+            <span class="ai-provider-mono${monoCjkCls}" data-tint="${preset.tint}">${escapeHtml(monogram)}</span>
+            <div class="ai-provider-info">
+              <div class="ai-provider-title">${escapeHtml(p.display_name)}</div>
+              <div class="ai-provider-meta">${escapeHtml(kindLabel)} · ${escapeHtml(modelSummary || "(no model)")}</div>
+            </div>
+            <span class="ai-provider-status ${statusCls}">${escapeHtml(statusText)}</span>
+            <span class="ai-provider-chevron">▸</span>
+            <button class="ai-provider-edit" data-provider-id="${escapeAttr(p.id)}" title="${escapeAttr(t("ai.provider.edit"))}">✎</button>
+            <button class="ai-provider-delete" data-provider-id="${escapeAttr(p.id)}" title="${escapeAttr(t("ai.provider.delete"))}">✕</button>
           </div>
-          <span class="ai-provider-status ${statusCls}">${escapeHtml(statusText)}</span>
-          <button class="ai-provider-edit" data-provider-id="${escapeAttr(p.id)}" title="${escapeAttr(t("ai.provider.edit"))}">✎</button>
-          <button class="ai-provider-delete" data-provider-id="${escapeAttr(p.id)}" title="${escapeAttr(t("ai.provider.delete"))}">✕</button>
+          <div class="ai-provider-models" style="display:none;">${modelsTable}</div>
         </div>`;
     })
     .join("");
@@ -2667,11 +2721,605 @@ function renderAIProviders() {
     cards + `<button class="ai-providers-add" id="ai-add-provider">${escapeHtml(t("ai.providers.add"))}</button>`;
 
   document.getElementById("ai-add-provider").addEventListener("click", openAIProviderModal);
+  // 0.9.4:accordion 展开/折叠
+  container.querySelectorAll(".ai-provider-header").forEach((header) => {
+    header.addEventListener("click", (e) => {
+      if (e.target.closest(".ai-provider-edit") || e.target.closest(".ai-provider-delete")) return;
+      const card = header.closest(".ai-provider-card");
+      const modelsDiv = card.querySelector(".ai-provider-models");
+      const chevron = header.querySelector(".ai-provider-chevron");
+      const isOpen = modelsDiv.style.display !== "none";
+      modelsDiv.style.display = isOpen ? "none" : "";
+      chevron.textContent = isOpen ? "▸" : "▾";
+    });
+  });
   container.querySelectorAll(".ai-provider-edit").forEach((btn) => {
-    btn.addEventListener("click", () => openAIProviderModal(btn.dataset.providerId));
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openAIProviderModal(btn.dataset.providerId);
+    });
   });
   container.querySelectorAll(".ai-provider-delete").forEach((btn) => {
-    btn.addEventListener("click", () => deleteAIProvider(btn.dataset.providerId));
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      deleteAIProvider(btn.dataset.providerId);
+    });
+  });
+  // 0.9.4:模型启用/禁用开关
+  container.querySelectorAll(".ai-model-toggle").forEach((toggle) => {
+    toggle.addEventListener("change", (e) => {
+      e.stopPropagation();
+      const { providerId, modelId } = toggle.dataset;
+      toggleModelEnabled(providerId, modelId, toggle.checked);
+    });
+  });
+  // 0.9.4:模型删除按钮
+  container.querySelectorAll(".ai-model-delete").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const { providerId, modelId } = btn.dataset;
+      deleteModelFromProvider(providerId, modelId);
+    });
+  });
+  // 0.9.4 Step 1:模型编辑(打开独立模型 modal)
+  container.querySelectorAll(".ai-model-edit-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const { providerId, modelId } = btn.dataset;
+      openAIModelEditModal(providerId, modelId);
+    });
+  });
+  // 0.9.4 Step 1:表格底部添加模型(新增模式)
+  container.querySelectorAll(".ai-model-add-inline").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openAIModelEditModal(btn.dataset.providerId, null);
+    });
+  });
+}
+
+/** 切换模型启用状态(0.9.4)。 */
+function toggleModelEnabled(providerId, modelId, enabled) {
+  const providers = currentAIConfig.providers || [];
+  const provider = providers.find((p) => p.id === providerId);
+  if (!provider) return;
+  const model = (provider.models || []).find((m) => m.id === modelId);
+  if (!model) return;
+  model.enabled = enabled;
+  saveAIConfig()
+    .then(() => {
+      // 0.9.4:禁用可能让某个 tier 变悬空,tier select 里也要同步 disabled 状态 + banner 重新算
+      renderAITierSelects();
+      renderAITierBanner();
+    })
+    .catch((e) => console.error("[ai] toggle model enabled failed:", e));
+}
+
+/**
+ * 保存 provider 后引导用户添加模型(0.9.4)。
+ *
+ * **触发场景**:只有"新增 provider"时调,编辑时不动(避免打扰)。
+ *
+ * **行为**:
+ * 1. 展开对应卡片的 accordion(models 区显现)
+ * 2. 高亮"+ 添加模型"按钮,3 秒后淡出
+ * 3. `scrollIntoView` 让按钮进入视口
+ *
+ * **失败静默**:找不到 DOM(还没渲染完)时 setTimeout 一次;仍失败就放弃。
+ */
+function guideAddModelForProvider(providerId) {
+  const tryGuide = (retries) => {
+    const card = document.querySelector(`.ai-provider-card[data-provider-id="${CSS.escape(providerId)}"]`);
+    if (!card) {
+      if (retries > 0) setTimeout(() => tryGuide(retries - 1), 80);
+      return;
+    }
+    // 展开 accordion
+    const modelsDiv = card.querySelector(".ai-provider-models");
+    const chevron = card.querySelector(".ai-provider-chevron");
+    if (modelsDiv && modelsDiv.style.display === "none") {
+      modelsDiv.style.display = "";
+      if (chevron) chevron.textContent = "▾";
+    }
+    // 高亮"+ 添加模型"按钮
+    const addBtn = card.querySelector(".ai-model-add-inline");
+    if (addBtn) {
+      addBtn.classList.add("ai-model-add-inline--pulse");
+      addBtn.scrollIntoView({ behavior: "smooth", block: "center" });
+      // 3s 后收回高亮(与 CSS animation 时长一致)
+      setTimeout(() => addBtn.classList.remove("ai-model-add-inline--pulse"), 3000);
+    }
+  };
+  // 首帧未必渲染完,重试最多 3 次
+  setTimeout(() => tryGuide(3), 20);
+}
+
+/** 从 provider 中删除单个模型(0.9.4)。始终 confirm,tier 引用时提示更严重后果。 */
+async function deleteModelFromProvider(providerId, modelId) {
+  // 检查是否被 tier 引用——决定 confirm 提示的严重程度
+  const refs = [];
+  ["router", "light", "main"].forEach((tier) => {
+    const a = currentAIConfig[`tier_${tier}`];
+    if (a && a.provider_id === providerId && a.model_id === modelId) refs.push(t(`ai.tier.${tier}`));
+  });
+  // 无论有无 tier 引用,删除都需要 confirm——避免误点 ✕ 秒删
+  const msg = refs.length > 0
+    ? t("ai.model.delete.referenced", { model: modelId, tiers: refs.join("、") })
+    : t("ai.model.delete.confirm", { model: modelId });
+  const ok = await confirmDialog(msg, {
+    title: t("ai.model.delete"),
+    kind: refs.length > 0 ? "warning" : "info",
+  });
+  if (!ok) return;
+
+  const providers = currentAIConfig.providers || [];
+  const provider = providers.find((p) => p.id === providerId);
+  if (!provider) return;
+  provider.models = (provider.models || []).filter((m) => m.id !== modelId);
+  // 清理悬空 tier 引用
+  ["router", "light", "main"].forEach((tier) => {
+    const a = currentAIConfig[`tier_${tier}`];
+    if (a && a.provider_id === providerId && a.model_id === modelId) {
+      currentAIConfig[`tier_${tier}`] = null;
+    }
+  });
+  saveAIConfig()
+    .then(() => {
+      renderAIProviders();
+      renderAITierSelects();
+      renderAITierBanner();
+    })
+    .catch((e) => console.error("[ai] delete model failed:", e));
+}
+
+// ── 模型编辑 modal(0.9.4 Step 1)────────────────────────────────────────
+//
+// **两种模式**:
+// - 新增(modelId=null):表格底部 `+ 添加模型` 触发,允许编辑 Model ID
+// - 编辑(modelId=非空):行 ✎ 触发,Model ID 只读(动它意味着删旧建新,场景复杂,留 Step 2)
+//
+// **数据流**:modal 内改动落到 _modelEditDraft 草稿;点保存 → 落回
+// currentAIConfig.providers[i].models[j] → saveAIConfig() → set_config('ai_config')
+// → registry.reload(热切换,复用 fingerprint 不变的实例)。
+//
+// **参数覆盖开关联动**:temperature/max_tokens 各有一个 toggle;关闭时对应
+// slider/input disabled,保存时字段落成 null。开启时用 body 里最新值。
+
+/** modal 当前编辑的 provider + model 引用(草稿) */
+let _modelEditProviderId = null;
+let _modelEditOriginalId = null; // 编辑模式下原 model id(判定改名)
+let _modelEditDraft = null;      // { id, display_name, enabled, temperature, max_tokens, custom_parameters }
+
+/** 打开模型编辑 modal(0.9.4 Step 1)。modelId 为 null 时是"新增"模式。 */
+function openAIModelEditModal(providerId, modelId) {
+  const provider = (currentAIConfig.providers || []).find((p) => p.id === providerId);
+  if (!provider) return;
+  const isEdit = modelId != null;
+  const existing = isEdit ? (provider.models || []).find((m) => m.id === modelId) : null;
+  if (isEdit && !existing) return; // model 被并发删除,静默不动
+
+  _modelEditProviderId = providerId;
+  _modelEditOriginalId = isEdit ? existing.id : null;
+  _modelEditDraft = {
+    id: existing?.id ?? "",
+    display_name: existing?.display_name ?? "",
+    enabled: existing?.enabled !== false,
+    temperature: existing?.temperature ?? null,
+    max_tokens: existing?.max_tokens ?? null,
+    custom_parameters: (existing?.custom_parameters || []).map((cp) => ({ ...cp })),
+  };
+
+  const $ = (id) => document.getElementById(id);
+  // 标题 + 副标题
+  $("ai-model-edit-title").textContent = t(isEdit ? "ai.model_modal.title.edit" : "ai.model_modal.title.add");
+  const info = $("ai-model-edit-provider-info");
+  info.textContent = t("ai.model_modal.provider_info", { name: provider.display_name });
+
+  // 基础字段
+  const idInput = $("ai-model-edit-id");
+  idInput.value = _modelEditDraft.id;
+  idInput.readOnly = isEdit; // 编辑模式下 ID 不可改;新增模式可自由输入
+  idInput.classList.toggle("input-readonly", isEdit);
+  $("ai-model-edit-display-name").value = _modelEditDraft.display_name;
+
+  // 拉取按钮:新增模式显示,编辑模式隐藏(ID 只读没必要拉)
+  const fetchBtn = $("ai-model-edit-fetch");
+  if (fetchBtn) fetchBtn.style.display = isEdit ? "none" : "";
+  // popover 每次打开时清空隐藏
+  closeModelFetchPopover();
+  _modelFetchCache = null; // 换 provider 后作废缓存
+
+  // 参数(覆盖开关联动)
+  setupModelParamRow("temperature", _modelEditDraft.temperature, 0.7);
+  setupModelParamRow("max-tokens", _modelEditDraft.max_tokens, 4096);
+
+  // 自定义参数列表
+  renderCustomParams();
+
+  // 错误行清空
+  $("ai-model-edit-error").textContent = "";
+  // 显示 overlay
+  const overlay = $("ai-model-edit-overlay");
+  overlay.style.display = "flex";
+  setTimeout(() => idInput.focus(), 40);
+}
+
+/** 参数行(temperature / max-tokens)通用设置:同步覆盖 toggle 与两个联动 input。 */
+function setupModelParamRow(key, currentValue, fallbackValue) {
+  const $ = (id) => document.getElementById(id);
+  const toggle = $(`ai-model-edit-${key}-toggle`);
+  const body = $(`ai-model-param-${key}-body`);
+  const range = $(`ai-model-edit-${key}-range`);
+  const num = $(`ai-model-edit-${key}-num`);
+  const enabled = currentValue != null;
+  toggle.checked = enabled;
+  body.style.display = enabled ? "" : "none";
+  const shown = enabled ? currentValue : fallbackValue;
+  range.value = shown;
+  num.value = shown;
+}
+
+/** 渲染自定义参数键值对列表。 */
+function renderCustomParams() {
+  const container = document.getElementById("ai-model-edit-custom-params");
+  if (!container) return;
+  const params = _modelEditDraft.custom_parameters || [];
+  if (params.length === 0) {
+    container.innerHTML = `<div class="ai-model-custom-params-empty">${escapeHtml(t("ai.model_modal.custom_params.empty"))}</div>`;
+    return;
+  }
+  container.innerHTML = params.map((p, idx) => {
+    // value 用 JSON.stringify 展示原始类型(数字/布尔/字符串引号);用户编辑时输入 raw 文本
+    const valDisplay = p.value == null
+      ? ""
+      : (typeof p.value === "string" ? p.value : JSON.stringify(p.value));
+    return `<div class="ai-model-custom-param-row" data-idx="${idx}">
+      <input type="text" class="ai-model-custom-param-key" data-idx="${idx}" value="${escapeAttr(p.key || "")}" placeholder="${escapeAttr(t("ai.model_modal.custom_params.key.ph"))}" />
+      <input type="text" class="ai-model-custom-param-val" data-idx="${idx}" value="${escapeAttr(valDisplay)}" placeholder="${escapeAttr(t("ai.model_modal.custom_params.val.ph"))}" />
+      <button type="button" class="ai-model-custom-param-del" data-idx="${idx}" title="${escapeAttr(t("common.delete"))}">✕</button>
+    </div>`;
+  }).join("");
+  // 绑定输入 → 落草稿
+  container.querySelectorAll(".ai-model-custom-param-key").forEach((el) => {
+    el.addEventListener("input", () => {
+      const i = Number(el.dataset.idx);
+      _modelEditDraft.custom_parameters[i].key = el.value;
+    });
+  });
+  container.querySelectorAll(".ai-model-custom-param-val").forEach((el) => {
+    el.addEventListener("input", () => {
+      const i = Number(el.dataset.idx);
+      _modelEditDraft.custom_parameters[i].value = coerceCustomParamValue(el.value);
+    });
+  });
+  container.querySelectorAll(".ai-model-custom-param-del").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const i = Number(btn.dataset.idx);
+      _modelEditDraft.custom_parameters.splice(i, 1);
+      renderCustomParams();
+    });
+  });
+}
+
+/**
+ * value 自动推断类型:数字 / 布尔 / JSON / 字符串。
+ * - "true" / "false" → bool
+ * - "" → 空字符串保留(用户可能就想传空)
+ * - 纯数字 → number
+ * - `{...}` / `[...]` / `"..."` 能解析为 JSON → JSON 值
+ * - 其它 → string(原样)
+ */
+function coerceCustomParamValue(raw) {
+  if (typeof raw !== "string") return raw;
+  const trimmed = raw.trim();
+  if (trimmed === "") return "";
+  if (trimmed === "true") return true;
+  if (trimmed === "false") return false;
+  if (trimmed === "null") return null;
+  // 数字(整数或小数,允许负号)
+  if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+    const n = Number(trimmed);
+    if (Number.isFinite(n)) return n;
+  }
+  // JSON 对象 / 数组 / 引号字符串
+  if (/^[[{"]/.test(trimmed)) {
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      // JSON 解析失败,回落字符串
+    }
+  }
+  return raw;
+}
+
+/** 关闭模型编辑 modal。 */
+function closeAIModelEditModal() {
+  const overlay = document.getElementById("ai-model-edit-overlay");
+  if (overlay) overlay.style.display = "none";
+  closeModelFetchPopover();
+  _modelEditProviderId = null;
+  _modelEditOriginalId = null;
+  _modelEditDraft = null;
+  _modelFetchCache = null;
+}
+
+// ── 拉取模型 popover(0.9.4 Step 1 增强)─────────────────────────────
+//
+// 当前 provider 的 API 拉一次模型列表,让用户点选替代手打。
+// 只在新增模式(ID 输入可写)显示;编辑模式隐藏按钮。
+//
+// **缓存**:一次 provider 打开期内只拉一次,close 时清。避免用户开关 popover 反复请求。
+
+/** 打开一次期间的 provider 模型缓存;{ models, error, loading } 或 null。 */
+let _modelFetchCache = null;
+
+/** 点击 🔍 触发——首次拉取,后续切换开关。 */
+async function toggleModelFetchPopover() {
+  const popover = document.getElementById("ai-model-edit-fetch-popover");
+  if (!popover) return;
+  const isOpen = popover.style.display !== "none";
+  if (isOpen) {
+    closeModelFetchPopover();
+    return;
+  }
+  popover.style.display = "";
+  // 首次打开 → 拉取
+  if (!_modelFetchCache) {
+    await performModelFetch();
+  }
+  renderModelFetchList("");
+  // 聚焦搜索框
+  const filter = document.getElementById("ai-model-edit-fetch-filter");
+  if (filter) { filter.value = ""; setTimeout(() => filter.focus(), 30); }
+}
+
+/** 关闭 popover 但保留缓存(下次打开秒开)。 */
+function closeModelFetchPopover() {
+  const popover = document.getElementById("ai-model-edit-fetch-popover");
+  if (popover) popover.style.display = "none";
+}
+
+/** 执行拉取——从当前 modal 关联的 provider 抓 model 列表。 */
+async function performModelFetch() {
+  const providerId = _modelEditProviderId;
+  const provider = (currentAIConfig.providers || []).find((p) => p.id === providerId);
+  if (!provider) {
+    _modelFetchCache = { models: [], error: t("ai.model_modal.err.provider_gone"), loading: false };
+    return;
+  }
+  _modelFetchCache = { models: [], error: null, loading: true };
+  renderModelFetchList("");
+  try {
+    const models = await fetchAvailableModelsFor(provider.kind, provider.base_url, providerId);
+    _modelFetchCache = { models: models || [], error: null, loading: false };
+  } catch (e) {
+    _modelFetchCache = { models: [], error: String(e.message || e), loading: false };
+  }
+}
+
+/** 渲染 popover 列表——按 filter 过滤;已存在的 model 灰化"已添加"。 */
+function renderModelFetchList(filter) {
+  const list = document.getElementById("ai-model-edit-fetch-list");
+  if (!list) return;
+  const cache = _modelFetchCache;
+  if (!cache || cache.loading) {
+    list.innerHTML = `<div class="ai-model-dropdown-empty"><span class="ai-spinner"></span> ${escapeHtml(t("ai.model_modal.fetch.loading"))}</div>`;
+    return;
+  }
+  if (cache.error) {
+    list.innerHTML = `<div class="ai-model-dropdown-empty">${escapeHtml(t("ai.model_modal.fetch.failed", { err: cache.error }))}</div>`;
+    return;
+  }
+  const provider = (currentAIConfig.providers || []).find((p) => p.id === _modelEditProviderId);
+  const existingIds = new Set((provider?.models || []).map((m) => m.id));
+  const q = (filter || "").trim().toLowerCase();
+  const filtered = cache.models
+    .filter((m) => (q ? m.toLowerCase().includes(q) : true))
+    .slice(0, 100);
+  if (filtered.length === 0) {
+    const msg = cache.models.length === 0
+      ? t("ai.model_modal.fetch.empty")
+      : t("ai.model_modal.fetch.no_match");
+    list.innerHTML = `<div class="ai-model-dropdown-empty">${escapeHtml(msg)}</div>`;
+    return;
+  }
+  list.innerHTML = filtered.map((m) => {
+    const isExisting = existingIds.has(m);
+    return `<div class="ai-model-dropdown-item${isExisting ? " is-added" : ""}" data-model-id="${escapeAttr(m)}">
+      <span>${escapeHtml(m)}</span>
+      ${isExisting ? `<span class="added-tag">${escapeHtml(t("ai.modal.badge.added"))}</span>` : ""}
+    </div>`;
+  }).join("");
+  list.querySelectorAll(".ai-model-dropdown-item:not(.is-added)").forEach((item) => {
+    item.addEventListener("click", () => {
+      const id = item.dataset.modelId;
+      // 填入 Model ID 输入框,若显示名为空则自动填一份
+      const idInput = document.getElementById("ai-model-edit-id");
+      const dispInput = document.getElementById("ai-model-edit-display-name");
+      if (idInput) idInput.value = id;
+      if (dispInput && !dispInput.value.trim()) dispInput.value = id;
+      closeModelFetchPopover();
+      if (idInput) idInput.focus();
+    });
+  });
+}
+
+/**
+ * 保存模型编辑——校验 + 落回 currentAIConfig + saveAIConfig。
+ *
+ * **校验**:
+ * - Model ID 非空
+ * - 新增模式下 ID 不能与本 provider 下已有 model 重复
+ * - custom_parameters 里 key 空的自动忽略(不报错)
+ */
+async function saveModelEdit() {
+  const $ = (id) => document.getElementById(id);
+  const errorEl = $("ai-model-edit-error");
+  errorEl.textContent = "";
+
+  const providerId = _modelEditProviderId;
+  const provider = (currentAIConfig.providers || []).find((p) => p.id === providerId);
+  if (!provider) {
+    errorEl.textContent = t("ai.model_modal.err.provider_gone");
+    return;
+  }
+  const isEdit = _modelEditOriginalId != null;
+
+  // 读表单
+  const id = $("ai-model-edit-id").value.trim();
+  const displayName = $("ai-model-edit-display-name").value.trim();
+  const tempToggle = $("ai-model-edit-temperature-toggle").checked;
+  const tempVal = Number($("ai-model-edit-temperature-num").value);
+  const maxToggle = $("ai-model-edit-max-tokens-toggle").checked;
+  const maxVal = Number($("ai-model-edit-max-tokens-num").value);
+
+  // 校验
+  if (!id) {
+    errorEl.textContent = t("ai.model_modal.err.empty_id");
+    return;
+  }
+  if (!isEdit) {
+    if ((provider.models || []).some((m) => m.id === id)) {
+      errorEl.textContent = t("ai.model_modal.err.duplicate_id");
+      return;
+    }
+  }
+  if (tempToggle && (!Number.isFinite(tempVal) || tempVal < 0 || tempVal > 2)) {
+    errorEl.textContent = t("ai.model_modal.err.temperature_range");
+    return;
+  }
+  if (maxToggle && (!Number.isFinite(maxVal) || maxVal < 1)) {
+    errorEl.textContent = t("ai.model_modal.err.max_tokens_range");
+    return;
+  }
+
+  // 清洗 custom_parameters:去掉空 key 行
+  const cleanedCustom = (_modelEditDraft.custom_parameters || []).filter((cp) => (cp.key || "").trim().length > 0);
+
+  // 落回 provider.models
+  const newModel = {
+    id,
+    display_name: displayName || id,
+    enabled: isEdit ? _modelEditDraft.enabled : true,
+    context_window: null,
+    input_price_per_million: null,
+    output_price_per_million: null,
+    temperature: tempToggle ? tempVal : null,
+    max_tokens: maxToggle ? Math.floor(maxVal) : null,
+    custom_parameters: cleanedCustom,
+  };
+
+  if (isEdit) {
+    const idx = (provider.models || []).findIndex((m) => m.id === _modelEditOriginalId);
+    if (idx < 0) {
+      errorEl.textContent = t("ai.model_modal.err.model_gone");
+      return;
+    }
+    // 保留 enabled / context_window / 价格字段(未来 Step 2 若加)
+    const old = provider.models[idx];
+    newModel.enabled = old.enabled !== false;
+    newModel.context_window = old.context_window ?? null;
+    newModel.input_price_per_million = old.input_price_per_million ?? null;
+    newModel.output_price_per_million = old.output_price_per_million ?? null;
+    provider.models[idx] = newModel;
+  } else {
+    provider.models = provider.models || [];
+    provider.models.push(newModel);
+  }
+
+  try {
+    await saveAIConfig();
+  } catch (e) {
+    errorEl.textContent = t("ai.error.save_failed", { err: String(e) });
+    return;
+  }
+  closeAIModelEditModal();
+  renderAIProviders();
+  renderAITierSelects();
+  renderAITierBanner();
+}
+
+/** 模型 modal 事件绑定——由 init 阶段调用一次。 */
+function bindAIModelEditModalEvents() {
+  const $ = (id) => document.getElementById(id);
+  const overlay = $("ai-model-edit-overlay");
+  if (!overlay) return;
+
+  // 参数覆盖 toggle 联动 body 显隐 + slider 与 number 双向同步
+  ["temperature", "max-tokens"].forEach((key) => {
+    const toggle = $(`ai-model-edit-${key}-toggle`);
+    const body = $(`ai-model-param-${key}-body`);
+    const range = $(`ai-model-edit-${key}-range`);
+    const num = $(`ai-model-edit-${key}-num`);
+    if (!toggle || !body || !range || !num) return;
+    toggle.addEventListener("change", () => {
+      body.style.display = toggle.checked ? "" : "none";
+    });
+    range.addEventListener("input", () => { num.value = range.value; });
+    num.addEventListener("input", () => {
+      const v = Number(num.value);
+      if (Number.isFinite(v)) range.value = v;
+    });
+  });
+
+  // 添加自定义参数
+  $("ai-model-edit-custom-params-add").addEventListener("click", () => {
+    if (!_modelEditDraft) return;
+    _modelEditDraft.custom_parameters.push({ key: "", value: "" });
+    renderCustomParams();
+    // 焦点到新增行的 key input
+    setTimeout(() => {
+      const rows = document.querySelectorAll(".ai-model-custom-param-key");
+      const last = rows[rows.length - 1];
+      if (last) last.focus();
+    }, 20);
+  });
+
+  // 取消 / 保存
+  $("ai-model-edit-cancel").addEventListener("click", closeAIModelEditModal);
+  $("ai-model-edit-save").addEventListener("click", saveModelEdit);
+
+  // 0.9.4 Step 1:拉取模型 popover
+  const fetchBtn = $("ai-model-edit-fetch");
+  if (fetchBtn) {
+    fetchBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleModelFetchPopover();
+    });
+  }
+  const fetchClose = $("ai-model-edit-fetch-close");
+  if (fetchClose) fetchClose.addEventListener("click", closeModelFetchPopover);
+  const fetchFilter = $("ai-model-edit-fetch-filter");
+  if (fetchFilter) {
+    fetchFilter.addEventListener("input", () => renderModelFetchList(fetchFilter.value));
+    fetchFilter.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") closeModelFetchPopover();
+    });
+  }
+  // 点 popover 外关闭(限本 modal 内;overlay 不算外)
+  overlay.addEventListener("click", (e) => {
+    const popover = $("ai-model-edit-fetch-popover");
+    if (!popover || popover.style.display === "none") return;
+    if (e.target.closest("#ai-model-edit-fetch-popover")) return;
+    if (e.target.id === "ai-model-edit-fetch") return; // 让 toggle 自己处理
+    closeModelFetchPopover();
+  });
+
+  // 点空白关闭(mousedown/mouseup 都落在 overlay 上,与 provider modal 一致)
+  let downOnOverlay = false;
+  overlay.addEventListener("mousedown", (e) => {
+    downOnOverlay = e.target.id === "ai-model-edit-overlay";
+  });
+  overlay.addEventListener("mouseup", (e) => {
+    if (downOnOverlay && e.target.id === "ai-model-edit-overlay") closeAIModelEditModal();
+    downOnOverlay = false;
+  });
+
+  // ESC 关闭
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && overlay.style.display !== "none") {
+      closeAIModelEditModal();
+    }
   });
 }
 
@@ -2681,8 +3329,13 @@ function renderAITierSelects() {
   providers.forEach((p) => {
     (p.models || []).forEach((m) => {
       const val = `${p.id}::${m.id}`;
-      const label = `${p.display_name} / ${m.id}`;
-      options.push(`<option value="${escapeAttr(val)}">${escapeHtml(label)}</option>`);
+      // 0.9.4:禁用的 model 显示但 disabled,并挂"(已禁用)"后缀——避免误选
+      const isEnabled = m.enabled !== false;
+      const label = isEnabled
+        ? `${p.display_name} / ${m.id}`
+        : `${p.display_name} / ${m.id} ${t("ai.tier.model_disabled")}`;
+      const disabledAttr = isEnabled ? "" : " disabled";
+      options.push(`<option value="${escapeAttr(val)}"${disabledAttr}>${escapeHtml(label)}</option>`);
     });
   });
   const html = options.join("");
@@ -2700,16 +3353,32 @@ function renderAITierDegrade() {
   // 简单版：如果 tier_x 空，展示"→ 降级到 xxx"提示
   // Router 空 → 降到 Light 或 Main；Light 空 → 降到 Main；Main 空 → 全部失效
   const chain = { router: ["light", "main"], light: ["main"], main: [] };
+  // 0.9.4:enabled=false 视同悬空——与后端 find_provider_model 一致
+  const isUsable = (a) => {
+    if (!a) return false;
+    const provider = (cfg.providers || []).find((p) => p.id === a.provider_id);
+    if (!provider) return false;
+    const model = (provider.models || []).find((m) => m.id === a.model_id);
+    return !!model && model.enabled !== false;
+  };
+  const findAssignmentDetail = (a) => {
+    const provider = (cfg.providers || []).find((p) => p.id === a.provider_id);
+    const model = provider && (provider.models || []).find((m) => m.id === a.model_id);
+    return { provider, model };
+  };
   ["router", "light", "main"].forEach((tier) => {
     const el = document.getElementById(`ai-tier-${tier}-degrade`);
     if (!el) return;
     const assign = cfg[`tier_${tier}`];
     if (assign) {
-      // 判断悬空
-      const provider = (cfg.providers || []).find((p) => p.id === assign.provider_id);
-      const model = provider && (provider.models || []).find((m) => m.id === assign.model_id);
+      const { provider, model } = findAssignmentDetail(assign);
       if (!provider || !model) {
+        // 悬空:model / provider 被删过
         el.textContent = t("ai.tier.no_provider");
+        el.className = "ai-tier-degrade error";
+      } else if (model.enabled === false) {
+        // 0.9.4:model 存在但被禁用——最容易被用户忽视的坑,单独 warn
+        el.textContent = t("ai.tier.model_disabled_warn", { model: model.id });
         el.className = "ai-tier-degrade error";
       } else {
         el.textContent = "";
@@ -2717,17 +3386,14 @@ function renderAITierDegrade() {
       }
       return;
     }
-    // 空档 —— 找降级目标
+    // 空档 —— 找降级目标(必须是可用的,即启用且非悬空)
     let target = null;
     for (const next of chain[tier]) {
       const a = cfg[`tier_${next}`];
-      if (!a) continue;
+      if (!isUsable(a)) continue;
       const provider = (cfg.providers || []).find((p) => p.id === a.provider_id);
-      const model = provider && (provider.models || []).find((m) => m.id === a.model_id);
-      if (provider && model) {
-        target = { tier: next, label: provider.display_name };
-        break;
-      }
+      target = { tier: next, label: provider.display_name };
+      break;
     }
     if (target) {
       el.textContent = t("ai.tier.degrade_to", { tier: t(`ai.tier.${target.tier}`) });
@@ -2747,18 +3413,19 @@ function renderAITierBanner() {
     banner.style.display = "none";
     return;
   }
-  // 展开 §6.4：任一档降级/悬空则显示 banner
+  // 展开 §6.4:任一档降级/悬空/model 已禁用则显示 banner
   const hasIssue = ["router", "light", "main"].some((tier) => {
     const assign = cfg[`tier_${tier}`];
-    if (!assign) return tier !== "main"; // 主档空 = 严重（也算 issue）
+    if (!assign) return tier !== "main"; // 主档空 = 严重(也算 issue)
     const provider = (cfg.providers || []).find((p) => p.id === assign.provider_id);
     const model = provider && (provider.models || []).find((m) => m.id === assign.model_id);
-    return !provider || !model;
+    return !provider || !model || model.enabled === false;
   });
-  // tier_main 为 null 时 `!mainAssign` 已短路;some 内不必再判 tier_main
+  // tier_main 悬空 或 model 被禁用 → 视同缺主档
   const mainAssign = cfg.tier_main;
   const mainMissing = !mainAssign || !(cfg.providers || []).some((p) =>
-    (p.models || []).some((m) => p.id === mainAssign.provider_id && m.id === mainAssign.model_id)
+    p.id === mainAssign.provider_id &&
+    (p.models || []).some((m) => m.id === mainAssign.model_id && m.enabled !== false)
   );
   if (!hasIssue && !mainMissing) {
     banner.style.display = "none";
@@ -2854,12 +3521,7 @@ function bindAIEvents() {
       downOnOverlay = false;
     });
   }
-  // Preset 下拉:选中平台后一键填 kind + base_url + display_name(空 name 才填)
-  $("ai-modal-preset").addEventListener("change", (e) => {
-    const overlay = $("ai-modal-overlay");
-    const isEdit = !!overlay.dataset.editProviderId;
-    applyAIPresetToModal(e.target.value, isEdit);
-  });
+  // 0.9.4:Preset 由网格 tile 点击驱动(见 renderPresetGrid),不再需要 select change
   // Kind 手改:回退 preset 为 custom(避免 preset 显示与实际不一致)
   $("ai-modal-kind").addEventListener("change", () => {
     $("ai-modal-preset").value = "custom";
@@ -2868,9 +3530,49 @@ function bindAIEvents() {
   $("ai-modal-base-url").addEventListener("input", () => {
     const bu = $("ai-modal-base-url").value.trim();
     const kind = $("ai-modal-kind").value;
-    // 命中已有 preset 就回填,不命中就 custom
     $("ai-modal-preset").value = guessPresetForProvider(kind, bu);
   });
+
+  // 0.9.4:测试连接按钮
+  $("ai-modal-test").addEventListener("click", async () => {
+    const $ = (id) => document.getElementById(id);
+    const btn = $("ai-modal-test");
+    const resultEl = $("ai-modal-test-result");
+    const kind = $("ai-modal-kind").value;
+    const baseUrl = $("ai-modal-base-url").value.trim() || null;
+    const apiKey = $("ai-modal-api-key").value.trim();
+    const overlay = $("ai-modal-overlay");
+    const providerId = overlay.dataset.editProviderId || null;
+
+    // 没填 key 且不是编辑模式 → 提示填写
+    if (!apiKey && !providerId) {
+      resultEl.textContent = "请先填写 API Key";
+      resultEl.className = "ai-test-result error";
+      resultEl.style.display = "";
+      return;
+    }
+
+    btn.classList.add("testing");
+    btn.textContent = "测试中…";
+    resultEl.style.display = "none";
+    try {
+      // 编辑模式 + 没填新 key → 后端从 CM 读已有密钥测试
+      const msg = await invoke("test_ai_provider", {
+        kind, baseUrl, apiKey: apiKey || "", providerId: providerId || null,
+      });
+      resultEl.textContent = `✅ ${msg}`;
+      resultEl.className = "ai-test-result success";
+      resultEl.style.display = "";
+    } catch (e) {
+      resultEl.textContent = `❌ ${e}`;
+      resultEl.className = "ai-test-result error";
+      resultEl.style.display = "";
+    } finally {
+      btn.classList.remove("testing");
+      btn.textContent = t("ai.modal.test");
+    }
+  });
+
 
   // Toast
   $("ai-toast-enable").addEventListener("click", () => {
@@ -2881,72 +3583,119 @@ function bindAIEvents() {
     saveAIConfig();
   });
   $("ai-toast-later").addEventListener("click", hideAIEnableToast);
+
+  // 0.9.4 Step 1:模型编辑 modal(独立于 provider modal)
+  bindAIModelEditModalEvents();
 }
 
 /**
- * AI 供应商预设表(0.9.2 第二步方案 B)——按厂商展开成"协议 + base_url"。
+ * AI 供应商预设目录(0.9.4 升级)——按厂商展开成"协议 + base_url + 视觉信息"。
  *
- * 用户在 modal 里选"OpenAI 官方 / DeepSeek 官方 / 硅基流动 / …"就一键填 kind +
- * base_url,不用去查每家 API 文档;选"自定义"清空所有字段,回归手填模式。
+ * 用户在 modal 里点网格 tile 就一键填 kind + base_url,不用去查每家 API 文档;
+ * 选"自定义"清空所有字段,回归手填模式。
  *
  * **base_url = null**:该协议不需要用户填(Anthropic / Gemini 走 rig 默认)。
  * **kind 必须与后端 ProviderKind serde rename 值一致**(见 src/app/ai_config.rs)。
+ * **category**:分类标签(main=国际主流 / cn=国内 / gw=网关 / local=本地)。
+ * **monogram**:tile 上显示的 2-3 字母缩写。
+ * **tint**:tile 图标背景色(对应 CSS data-tint 属性)。
  */
-const AI_PRESETS = {
+const AI_PRESET_CATALOG = {
   openai: {
     kind: "openai_compatible",
     base_url: "https://api.openai.com/v1",
     display_name_default: "OpenAI",
-  },
-  deepseek: {
-    kind: "openai_compatible",
-    base_url: "https://api.deepseek.com/v1",
-    display_name_default: "DeepSeek",
-  },
-  siliconflow: {
-    kind: "openai_compatible",
-    base_url: "https://api.siliconflow.cn/v1",
-    display_name_default: "SiliconFlow",
-  },
-  moonshot: {
-    kind: "openai_compatible",
-    base_url: "https://api.moonshot.cn/v1",
-    display_name_default: "Moonshot",
-  },
-  groq: {
-    kind: "openai_compatible",
-    base_url: "https://api.groq.com/openai/v1",
-    display_name_default: "Groq",
-  },
-  openrouter: {
-    kind: "openai_compatible",
-    base_url: "https://openrouter.ai/api/v1",
-    display_name_default: "OpenRouter",
+    monogram: "OA",
+    tint: "green",
+    category: "main",
   },
   anthropic: {
     kind: "anthropic_messages",
     base_url: null,
     display_name_default: "Anthropic",
+    monogram: "An",
+    tint: "amber",
+    category: "main",
   },
   gemini: {
     kind: "gemini_generate_content",
     base_url: null,
     display_name_default: "Google Gemini",
+    monogram: "Ge",
+    tint: "teal",
+    category: "main",
+  },
+  deepseek: {
+    kind: "openai_compatible",
+    base_url: "https://api.deepseek.com/v1",
+    display_name_default: "DeepSeek",
+    monogram: "深度",
+    tint: "blue",
+    category: "cn",
+  },
+  siliconflow: {
+    kind: "openai_compatible",
+    base_url: "https://api.siliconflow.cn/v1",
+    display_name_default: "SiliconFlow",
+    monogram: "硅基",
+    tint: "blue",
+    category: "cn",
+  },
+  moonshot: {
+    kind: "openai_compatible",
+    base_url: "https://api.moonshot.cn/v1",
+    display_name_default: "Moonshot",
+    monogram: "Ki",
+    tint: "purple",
+    category: "cn",
+  },
+  groq: {
+    kind: "openai_compatible",
+    base_url: "https://api.groq.com/openai/v1",
+    display_name_default: "Groq",
+    monogram: "Gq",
+    tint: "orange",
+    category: "gw",
+  },
+  openrouter: {
+    kind: "openai_compatible",
+    base_url: "https://openrouter.ai/api/v1",
+    display_name_default: "OpenRouter",
+    monogram: "OR",
+    tint: "purple",
+    category: "gw",
+  },
+  ollama: {
+    kind: "openai_compatible",
+    base_url: "http://localhost:11434/v1",
+    display_name_default: "Ollama",
+    monogram: "Ol",
+    tint: "slate",
+    category: "local",
   },
   custom: {
     kind: null,
     base_url: null,
     display_name_default: null,
+    monogram: "+",
+    tint: "ink",
+    category: "custom",
   },
 };
 
-/**
- * 猜测 provider 编辑时该回填到哪个 preset。
- * 完全匹配 kind + base_url → 命中;否则回落到 "custom"。
- */
+/** tile 渲染顺序(按分类分组)。 */
+const AI_PRESET_ORDER = [
+  "openai", "anthropic", "gemini",
+  "deepseek", "siliconflow", "moonshot",
+  "groq", "openrouter",
+  "ollama",
+  "custom",
+];
+
+/** 猜测 provider 编辑时该回填到哪个 preset。完全匹配 kind + base_url → 命中;否则回落到 "custom"。 */
 function guessPresetForProvider(kind, baseUrl) {
   const bu = (baseUrl || "").trim().replace(/\/$/, "");
-  for (const [key, preset] of Object.entries(AI_PRESETS)) {
+  for (const [key, preset] of Object.entries(AI_PRESET_CATALOG)) {
     if (key === "custom") continue;
     if (preset.kind !== kind) continue;
     const presetBu = (preset.base_url || "").replace(/\/$/, "");
@@ -2956,21 +3705,137 @@ function guessPresetForProvider(kind, baseUrl) {
 }
 
 /**
+ * 渲染预设列表(0.9.4 修正:平铺按钮布局)。
+ *
+ * **每个按钮**:小 tint monogram + 名称;已添加时按钮右上角 accent 小圆点。
+ * **flex-wrap 自适应换行,信息密度高,一眼扫完。
+ * **custom**:独占最后一行,虚线边框区分。
+ *
+ * **CJK monogram**(`深度`/`硅基`) 自动降字号,保持视觉一致。
+ * 选中高亮,点击触发 applyAIPresetToModal。
+ */
+function renderPresetList(selectedKey, isEdit) {
+  const list = document.getElementById("ai-preset-list");
+  if (!list) return;
+  // 计算"已添加":同 kind + 同 base_url 视作已配一次(guessPresetForProvider 有归一化)。
+  const addedKinds = new Set(
+    (currentAIConfig.providers || []).map((p) => {
+      const key = guessPresetForProvider(p.kind, p.base_url);
+      return key !== "custom" ? key : null;
+    }).filter(Boolean),
+  );
+  list.innerHTML = AI_PRESET_ORDER.map((key) => {
+    const preset = AI_PRESET_CATALOG[key];
+    const isSelected = key === selectedKey;
+    const isCustom = key === "custom";
+    const name = preset.display_name_default || t("ai.modal.preset.custom");
+    const monogram = preset.monogram || "?";
+    // CJK 缩字号——2 个汉字比 2 个字母宽,需要小一号才不挤
+    const isCJK = /[一-鿿]/.test(monogram);
+    const cjkCls = isCJK ? " ai-preset-item-mono--cjk" : "";
+    const customCls = isCustom ? " ai-preset-item--custom" : "";
+    const selectedCls = isSelected ? " selected" : "";
+    const addedAttr = addedKinds.has(key) ? ' data-added="1"' : "";
+    const addedTitle = addedKinds.has(key) ? ` title="${escapeAttr(t("ai.modal.badge.added"))}"` : "";
+    return `<button type="button" class="ai-preset-item${selectedCls}${customCls}" data-preset="${key}"${addedAttr}${addedTitle}>
+      <span class="ai-preset-item-mono${cjkCls}" data-tint="${preset.tint}">${escapeHtml(monogram)}</span>
+      <span class="ai-preset-item-name">${escapeHtml(name)}</span>
+    </button>`;
+  }).join("");
+  list.querySelectorAll(".ai-preset-item").forEach((item) => {
+    item.addEventListener("click", () => {
+      const key = item.dataset.preset;
+      list.querySelectorAll(".ai-preset-item").forEach((i) => i.classList.remove("selected"));
+      item.classList.add("selected");
+      document.getElementById("ai-modal-preset").value = key;
+      applyAIPresetToModal(key, isEdit);
+    });
+  });
+}
+
+/**
  * 应用 preset 到 modal 字段——kind / base_url / display_name(仅新增时空 name 才填)。
  * `custom` 走特殊分支:不动 kind/base_url,让用户自己填。
- *
- * **重名策略**(方案 B):新增模式下,若已存在同名 provider,自动追加 " (2)" / " (3)"
- * 后缀避免肉眼混淆。用户可继续手动改。编辑模式不动 display_name。
  */
 function applyAIPresetToModal(presetKey, isEdit) {
   const $ = (id) => document.getElementById(id);
-  const preset = AI_PRESETS[presetKey];
+  const preset = AI_PRESET_CATALOG[presetKey];
   if (!preset || presetKey === "custom") return;
   if (preset.kind) $("ai-modal-kind").value = preset.kind;
   $("ai-modal-base-url").value = preset.base_url || "";
   if (!isEdit && preset.display_name_default && !$("ai-modal-display-name").value.trim()) {
     $("ai-modal-display-name").value = uniqueDisplayName(preset.display_name_default);
   }
+  // 清空测试结果
+  const testResult = $("ai-modal-test-result");
+  if (testResult) { testResult.style.display = "none"; testResult.textContent = ""; }
+}
+
+/**
+ * 拉取可用模型列表(0.9.4)。
+ * **不硬编码任何模型**——全部通过 API 获取。
+ *
+ * - OpenAI 兼容:GET {base_url}/models
+ * - Gemini:GET {base_url}/v1beta/models?key={apiKey}
+ * - Anthropic:不暴露模型列表,抛异常提示手动输入
+ */
+async function fetchAvailableModels(kind, baseUrl, apiKey) {
+  if (kind === "openai_compatible") {
+    const base = (baseUrl || "").trim().replace(/\/$/, "");
+    if (!base) throw new Error("Base URL 不能为空");
+    const urls = base.endsWith("/v1")
+      ? [`${base}/models`, `${base.replace(/\/v1$/, "")}/models`]
+      : [`${base}/models`, `${base}/v1/models`];
+    let lastErr = null;
+    for (const url of urls) {
+      try {
+        const resp = await fetch(url, {
+          headers: { "Authorization": `Bearer ${apiKey}`, "Accept": "application/json" },
+        });
+        if (!resp.ok) {
+          lastErr = `HTTP ${resp.status}`;
+          if (resp.status === 401 || resp.status === 403) {
+            throw new Error("认证失败，请检查 API Key");
+          }
+          continue;
+        }
+        const json = await resp.json();
+        const models = (json.data || json.models || []).map((m) => m.id || m.name).filter(Boolean);
+        if (models.length > 0) return [...new Set(models)].sort();
+        lastErr = "返回空列表";
+      } catch (e) {
+        if (e.message.includes("认证失败")) throw e;
+        lastErr = String(e);
+      }
+    }
+    throw new Error(lastErr || "无法获取模型列表");
+  }
+  if (kind === "anthropic_messages") {
+    // Anthropic 没有公开的模型列表端点
+    throw new Error("Anthropic 不支持自动获取模型列表，请手动输入 model id");
+  }
+  if (kind === "gemini_generate_content") {
+    const base = (baseUrl || "https://generativelanguage.googleapis.com").trim().replace(/\/$/, "");
+    const url = `${base}/v1beta/models?key=${apiKey}`;
+    try {
+      const resp = await fetch(url, { headers: { "Accept": "application/json" } });
+      if (!resp.ok) {
+        if (resp.status === 401 || resp.status === 403) {
+          throw new Error("认证失败，请检查 API Key");
+        }
+        throw new Error(`HTTP ${resp.status}`);
+      }
+      const json = await resp.json();
+      const models = (json.models || [])
+        .map((m) => (m.name || "").replace(/^models\//, ""))
+        .filter((n) => n.toLowerCase().includes("gemini"));
+      if (models.length > 0) return models.sort();
+      throw new Error("返回空列表");
+    } catch (e) {
+      throw new Error(`Gemini 模型获取失败: ${e.message}`);
+    }
+  }
+  throw new Error("未知协议");
 }
 
 /**
@@ -3020,7 +3885,6 @@ function openAIProviderModal(editProviderId) {
     overlay.dataset.editProviderId = editProviderId;
     $("ai-modal-title").textContent = t("ai.modal.title.edit");
     $("ai-modal-kind-row").style.display = "none";
-    // preset 行编辑时也隐藏——kind 不可改,让 preset 选择也没意义
     $("ai-modal-preset-row").style.display = "none";
     $("ai-modal-kind").value = p.kind;
     $("ai-modal-preset").value = guessPresetForProvider(p.kind, p.base_url);
@@ -3029,13 +3893,11 @@ function openAIProviderModal(editProviderId) {
     $("ai-modal-api-key").value = "";
     $("ai-modal-api-key").placeholder = t("ai.modal.api_key.ph.edit");
     $("ai-modal-api-key-hint").textContent = t("ai.modal.api_key.hint.edit");
-    $("ai-modal-models").value = (p.models || []).map((m) => m.id).join("\n");
   } else {
     delete overlay.dataset.editProviderId;
     $("ai-modal-title").textContent = t("ai.modal.title");
     $("ai-modal-kind-row").style.display = "";
     $("ai-modal-preset-row").style.display = "";
-    // 新增默认 preset = OpenAI 官方,同时应用一次填 kind + base_url + display_name
     $("ai-modal-preset").value = "openai";
     $("ai-modal-kind").value = "openai_compatible";
     $("ai-modal-display-name").value = "";
@@ -3043,12 +3905,36 @@ function openAIProviderModal(editProviderId) {
     $("ai-modal-api-key").value = "";
     $("ai-modal-api-key").placeholder = t("ai.modal.api_key.ph");
     $("ai-modal-api-key-hint").textContent = t("ai.modal.api_key.hint");
-    $("ai-modal-models").value = "";
+    renderPresetList("openai", false);
     applyAIPresetToModal("openai", false);
   }
+  const testResult = $("ai-modal-test-result");
+  if (testResult) { testResult.style.display = "none"; testResult.textContent = ""; testResult.className = "ai-test-result"; }
   $("ai-modal-error").textContent = "";
   overlay.style.display = "flex";
   setTimeout(() => $("ai-modal-display-name").focus(), 50);
+}
+
+/**
+ * 拉取可用模型列表(Model modal 复用)。
+ *
+ * **两种调用路径**:
+ * - 已存 provider(有 providerId + 无 apiKey):后端从 CM 读密钥,前端不接触明文
+ * - 未存 provider(无 providerId + 有 apiKey):前端拿明文直接 fetch(用于新建 provider 场景;
+ *   0.9.4 Step 1 之后 Model modal 只在已存 provider 上加模型,此分支保留兼容)
+ *
+ * **返回**:model id 数组;抛错时向上传播错误信息(前端展示为 popover 空态)。
+ */
+async function fetchAvailableModelsFor(kind, baseUrl, providerId) {
+  if (providerId) {
+    // 已保存 provider → 后端 command(密钥不出 CM)
+    const models = await invoke("fetch_ai_models", { providerId, kind, baseUrl: baseUrl || null });
+    return models || [];
+  }
+  // 未保存 provider → 前端明文(仅新建 provider 模型区被砍前的旧路径,Model modal 用不到)
+  const apiKey = document.getElementById("ai-modal-api-key")?.value?.trim();
+  if (!apiKey) throw new Error("请先填写 API Key");
+  return await fetchAvailableModels(kind, baseUrl, apiKey);
 }
 
 function closeAIProviderModal() {
@@ -3072,46 +3958,30 @@ async function saveNewProviderFromModal() {
   const kind = $("ai-modal-kind").value;
   const displayName = $("ai-modal-display-name").value.trim();
   const baseUrl = $("ai-modal-base-url").value.trim();
-  // 去首尾空白(含 BOM/换行,不去中间)——用户复制粘贴极易带入,存进 CM 后
-  // API 401 且无法自查;主流供应商 Key 内部不含空白,首尾清理收益远大于风险。
-  // 用 trim() 而非手写正则:ECMAScript 的 WhiteSpace 已含 U+FEFF,无需显式匹配
   const apiKey = $("ai-modal-api-key").value.trim();
-  const modelsRaw = $("ai-modal-models").value.trim();
 
   if (!displayName) {
     errEl.textContent = t("ai.modal.save.empty_display");
     return;
   }
-  // OpenAI Compatible 协议必须有 base_url——不填会撞去 rig 默认 api.openai.com,
-  // 用户拿着第三方 Key 打去 OpenAI 官方 → 401,极难自诊断(踩过一次坑)。
-  // Anthropic / Gemini 协议 base_url 由 rig 内建,可以空。
   if (kind === "openai_compatible" && !baseUrl) {
     errEl.textContent = t("ai.modal.save.empty_base_url");
     return;
   }
-  // 编辑模式:apiKey 允许空(表示保留原密钥);新增模式必填
   if (!isEdit && !apiKey) {
     errEl.textContent = t("ai.modal.save.empty_key");
     return;
   }
-  const modelIds = modelsRaw
-    .split(/\r?\n/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (modelIds.length === 0) {
-    errEl.textContent = t("ai.modal.save.empty_models");
-    return;
-  }
 
   if (isEdit) {
-    await saveEditedProvider(editingId, { kind, displayName, baseUrl, apiKey, modelIds, errEl });
+    await saveEditedProvider(editingId, { kind, displayName, baseUrl, apiKey, errEl });
   } else {
-    await saveNewProvider({ kind, displayName, baseUrl, apiKey, modelIds, errEl });
+    await saveNewProvider({ kind, displayName, baseUrl, apiKey, errEl });
   }
 }
 
-/** 新增 provider(0.9.1 原路径)。 */
-async function saveNewProvider({ kind, displayName, baseUrl, apiKey, modelIds, errEl }) {
+/** 新增 provider(0.9.4 简化:models 空数组,由用户后续在卡片里逐个添加)。 */
+async function saveNewProvider({ kind, displayName, baseUrl, apiKey, errEl }) {
   const providerId = (crypto.randomUUID && crypto.randomUUID()) || `p-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   // 1. 先写密钥到 CM —— 失败则整个操作失败
@@ -3122,20 +3992,14 @@ async function saveNewProvider({ kind, displayName, baseUrl, apiKey, modelIds, e
     return;
   }
 
-  // 2. 构造 provider entry
+  // 2. 构造 provider entry(models 空——用户保存后由卡片里"+ 添加模型"引导)
   const newProvider = {
     id: providerId,
     display_name: displayName,
     kind: kind,
     base_url: baseUrl || null,
     secret_ref: `blink/${providerId}/key`,
-    models: modelIds.map((id) => ({
-      id,
-      display_name: id,
-      context_window: null,
-      input_price_per_million: null,
-      output_price_per_million: null,
-    })),
+    models: [],
     created_at: Math.floor(Date.now() / 1000),
   };
 
@@ -3161,23 +4025,25 @@ async function saveNewProvider({ kind, displayName, baseUrl, apiKey, modelIds, e
   renderAIProviders();
   renderAITierSelects();
 
-  // 5. §5.3 严格 opt-in：如果总开关还关着，弹 toast 询问
+  // 5. 0.9.4:新增 provider 后自动展开卡片 + 引导用户添加模型
+  guideAddModelForProvider(providerId);
+
+  // 6. §5.3 严格 opt-in：如果总开关还关着，弹 toast 询问
   if (!currentAIConfig.enabled) {
     showAIEnableToast();
   }
 }
 
 /**
- * 编辑既有 provider(0.9.2 新增)。
+ * 编辑既有 provider(0.9.4 简化:models 保持不动,只更 display_name/base_url/key)。
  *
  * 与新增的差异:
  * - **kind 不变**:即使用户在 modal 里改了,也用原 provider 的 kind(kind 行已隐藏)
  * - **id 保持**:同一 provider 保 secret_ref / tier_* 引用不失效
+ * - **models 保持**:模型增删改统一走独立 Model modal,provider modal 不动 models
  * - **密钥 apiKey 空 → 跳过 save_ai_secret**:保留原密钥
- * - **失败回滚**:若 save_ai_secret 成功但 saveAIConfig 失败,尝试恢复旧密钥不现实
- *   (旧明文不在手上),只能保留新密钥 + 回退元数据变更
  */
-async function saveEditedProvider(providerId, { displayName, baseUrl, apiKey, modelIds, errEl }) {
+async function saveEditedProvider(providerId, { displayName, baseUrl, apiKey, errEl }) {
   const idx = (currentAIConfig.providers || []).findIndex((p) => p.id === providerId);
   if (idx < 0) {
     errEl.textContent = t("ai.error.save_failed", { err: "provider not found" });
@@ -3196,24 +4062,11 @@ async function saveEditedProvider(providerId, { displayName, baseUrl, apiKey, mo
     }
   }
 
-  // 2. 构造更新后的 provider entry(kind + id + created_at 保持)
+  // 2. 构造更新后的 provider entry(kind + id + created_at + models 全保持)
   const updated = {
     ...old,
     display_name: displayName,
     base_url: baseUrl || null,
-    models: modelIds.map((id) => {
-      const existing = (old.models || []).find((m) => m.id === id);
-      // 已存在的 model 保留元数据(display_name / context_window / 价格);新增的用默认
-      return (
-        existing || {
-          id,
-          display_name: id,
-          context_window: null,
-          input_price_per_million: null,
-          output_price_per_million: null,
-        }
-      );
-    }),
   };
   currentAIConfig.providers = [
     ...currentAIConfig.providers.slice(0, idx),
@@ -3232,8 +4085,7 @@ async function saveEditedProvider(providerId, { displayName, baseUrl, apiKey, mo
     return;
   }
 
-  // 4. 检查 tier 引用是否受影响(model 被删可能导致悬空)
-  //    这里不主动清理 tier 引用,`resolve_tier` 已有悬空降级 + banner 提示
+  // 4. 检查 tier 引用是否受影响(model 未动,不会新增悬空)
   closeAIProviderModal();
   renderAIProviders();
   renderAITierSelects();
@@ -3244,17 +4096,23 @@ async function deleteAIProvider(providerId) {
   const provider = (currentAIConfig.providers || []).find((p) => p.id === providerId);
   if (!provider) return;
 
-  // §6.4 UX：删除前提示 tier 引用
+  // §6.4 UX:删除前提示 tier 引用 + 附带 model 数量,避免误删多模型 provider
   const referenced = [];
   ["router", "light", "main"].forEach((tier) => {
     const a = currentAIConfig[`tier_${tier}`];
     if (a && a.provider_id === providerId) referenced.push(t(`ai.tier.${tier}`));
   });
-  let msg = t("ai.provider.delete.confirm");
+  const modelCount = (provider.models || []).length;
+  const providerName = provider.display_name || provider.id;
+  let msg = t("ai.provider.delete.confirm", { name: providerName, models: modelCount });
   if (referenced.length > 0) {
     msg = `${t("ai.provider.referenced", { tiers: referenced.join("、") })}\n\n${msg}`;
   }
-  if (!confirm(msg)) return;
+  const ok = await confirmDialog(msg, {
+    title: t("ai.provider.delete"),
+    kind: referenced.length > 0 ? "warning" : "info",
+  });
+  if (!ok) return;
 
   // 1. CM 密钥删除（幂等）
   try {

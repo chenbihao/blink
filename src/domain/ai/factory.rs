@@ -86,15 +86,17 @@ impl ProviderFactory for RigFactory {
 
         // 2. 按协议分派构造 —— 每 arm 独立返回 Arc<dyn AIProvider>
         //    (0.9.2 第二步:3 类协议,老 kind 已通过 serde alias 迁移到 OpenAICompatible)
+        //    0.9.4 Step 1:model 参数默认值(temperature/max_tokens/custom_parameters)
+        //    随 model 引用一路传到 RigProvider::new,由 complete() 做 fallback。
         let provider: Arc<dyn AIProvider> = match entry.kind {
             ProviderKind::OpenAICompatible => {
-                build_openai_compatible(&key_str, entry.base_url.as_deref(), &model.id)?
+                build_openai_compatible(&key_str, entry.base_url.as_deref(), model)?
             }
             ProviderKind::AnthropicMessages => {
-                build_anthropic(&key_str, entry.base_url.as_deref(), &model.id)?
+                build_anthropic(&key_str, entry.base_url.as_deref(), model)?
             }
             ProviderKind::GeminiGenerateContent => {
-                build_gemini(&key_str, entry.base_url.as_deref(), &model.id)?
+                build_gemini(&key_str, entry.base_url.as_deref(), model)?
             }
         };
 
@@ -127,7 +129,7 @@ impl ProviderFactory for RigFactory {
 fn build_openai_compatible(
     key: &str,
     base_url: Option<&str>,
-    model_id: &str,
+    model: &ModelEntry,
 ) -> Result<Arc<dyn AIProvider>, AIError> {
     use rig_core::providers::openai;
     // **护栏**:base_url 空一律拒绝构造——rig 默认落到 `api.openai.com`,用户拿着
@@ -143,12 +145,15 @@ fn build_openai_compatible(
         .base_url(url)
         .build()
         .map_err(|_| AIError::Provider("openai-compatible client 构造失败".into()))?;
-    let model = client.completion_model(model_id);
+    let rig_model = client.completion_model(&model.id);
     Ok(Arc::new(RigProvider::new(
         ProviderKind::OpenAICompatible,
-        model_id,
-        model,
+        model.id.clone(),
+        rig_model,
         None,
+        model.temperature,
+        model.max_tokens,
+        &model.custom_parameters,
     )))
 }
 
@@ -156,7 +161,7 @@ fn build_openai_compatible(
 fn build_anthropic(
     key: &str,
     base_url: Option<&str>,
-    model_id: &str,
+    model: &ModelEntry,
 ) -> Result<Arc<dyn AIProvider>, AIError> {
     use rig_core::providers::anthropic;
     let mut builder = anthropic::Client::builder().api_key(key);
@@ -166,12 +171,15 @@ fn build_anthropic(
     let client = builder
         .build()
         .map_err(|_| AIError::Provider("anthropic client 构造失败".into()))?;
-    let model = client.completion_model(model_id);
+    let rig_model = client.completion_model(&model.id);
     Ok(Arc::new(RigProvider::new(
         ProviderKind::AnthropicMessages,
-        model_id,
-        model,
+        model.id.clone(),
+        rig_model,
         None,
+        model.temperature,
+        model.max_tokens,
+        &model.custom_parameters,
     )))
 }
 
@@ -183,19 +191,22 @@ fn build_anthropic(
 fn build_gemini(
     key: &str,
     _base_url: Option<&str>,
-    model_id: &str,
+    model: &ModelEntry,
 ) -> Result<Arc<dyn AIProvider>, AIError> {
     use rig_core::providers::gemini;
     let client = gemini::Client::builder()
         .api_key(key)
         .build()
         .map_err(|_| AIError::Provider("gemini client 构造失败".into()))?;
-    let model = client.completion_model(model_id);
+    let rig_model = client.completion_model(&model.id);
     Ok(Arc::new(RigProvider::new(
         ProviderKind::GeminiGenerateContent,
-        model_id,
-        model,
+        model.id.clone(),
+        rig_model,
         None,
+        model.temperature,
+        model.max_tokens,
+        &model.custom_parameters,
     )))
 }
 
@@ -230,9 +241,13 @@ mod tests {
         ModelEntry {
             id: "gpt-4o-mini".into(),
             display_name: "M1".into(),
+            enabled: true,
             context_window: None,
             input_price_per_million: None,
             output_price_per_million: None,
+            temperature: None,
+            max_tokens: None,
+            custom_parameters: Vec::new(),
         }
     }
 
