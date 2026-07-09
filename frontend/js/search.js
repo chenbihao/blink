@@ -38,6 +38,13 @@ export function init() {
     results.merge(payload.items, payload.seq);
     // 增量事件不带 suggestion（同步首次返回已给过），此处不动 ghost。
   });
+
+  // 0.9.2 第二步:AI Dangerous 动作确认——后端 emit 确认请求,前端替换占位为确认卡片。
+  listen("blink://ai-confirm-action", (event) => {
+    const p = event.payload;
+    if (!p || p.seq !== seq) return;
+    results.showAiConfirm(p);
+  });
 }
 
 /** 复位：取消防抖 + 作废在途请求（生命周期 shown/hidden 调用）。 */

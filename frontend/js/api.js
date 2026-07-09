@@ -20,6 +20,11 @@ export function runBuiltinAction(id, arg) {
   return invoke("run_builtin_action", { id, arg: arg ?? null });
 }
 
+/** AI Dangerous 动作确认执行（0.9.2 第二步）——用户在确认卡片上按 Enter 后调用。 */
+export function confirmAiAction(actionName, arguments_) {
+  return invoke("confirm_ai_action", { action_name: actionName, arguments: arguments_ });
+}
+
 /** 隐藏主窗口。 */
 export function hideWindow() {
   return invoke("hide_window");

@@ -384,6 +384,29 @@ body.alt-active #results li .item-badge {
   line-height: 24px; /* 与徽章高度一致,垂直居中不错位 */
 }
 
+/* AI 占位淡入(0.9.2 第二步 §3.3):避免占位突然出现的视觉跳变。 */
+@keyframes ai-fade-in {
+  from { opacity: 0; transform: translateY(-2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+#results li.ai-item.is-loading {
+  animation: ai-fade-in 150ms ease;
+}
+
+/* AI 确认卡片(0.9.2 第二步):Dangerous 动作的确认态,accent 色强调。 */
+#results li.ai-item.ai-confirm {
+  border-left: 3px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+#results li.ai-item.ai-confirm .item-name {
+  color: var(--text);
+  font-weight: 600;
+}
+#results li.ai-item.ai-confirm .item-desc {
+  color: var(--accent);
+  font-size: 12px;
+}
+
 /* 右键菜单已迁移到独立窗口实现（contextmenu-popup.html），
    不再需要 DOM 内联样式。 */
 

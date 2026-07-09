@@ -11,13 +11,14 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use serde::Serialize;
 use sqlx::SqlitePool;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::app::ai_config::Tier;
 use crate::domain::ai::gating::{AiGate, GateOutcome, should_invoke_ai};
 use crate::domain::ai::message::{ChatMessage, CompletionRequest};
 use crate::domain::ai::provider::AIError;
 use crate::domain::ai::registry::AIProviderRegistry;
+use crate::domain::execution::{ActionContext, ActionRegistry, ActionSchema, DangerClass};
 use crate::infra::platform::context::ContextSnapshot;
 use crate::domain::intent::{Candidate, IntentRouter, RankingHint, Route, Suggestion, Surface};
 use crate::domain::plugin::PluginEngine;
@@ -618,6 +619,7 @@ impl SearchService {
     ) {
         let app = self.app.clone();
         let latest_seq = Arc::clone(&self.latest_seq);
+        let lang = self.language.read().expect("language lock poisoned").clone();
         tauri::async_runtime::spawn(async move {
             // resolve(Tier::Router) —— 空档降级链在 registry.resolve 内部走
             let (provider, actual_tier) = match registry.resolve(Tier::Router) {
@@ -644,23 +646,36 @@ impl SearchService {
             let cfg = registry.config_snapshot();
             let timeout_ms = cfg.slo_hard_timeout_ms.unwrap_or(2500);
 
+            // 0.9.2 第二步:从 ActionRegistry 收集 tools + 构造路由 system prompt
+            let action_reg = app.state::<Arc<ActionRegistry>>();
+            let tools: Vec<ActionSchema> = action_reg
+                .ids()
+                .filter_map(|id| action_reg.get(id).map(|a| a.schema()))
+                .collect();
+            let tools_count = tools.len();
+            let system_prompt = build_routing_prompt(&tools);
+
             let req = CompletionRequest {
-                messages: vec![ChatMessage::user(&query)],
-                tools: Vec::new(), // 0.9.2 第一步不传 tools(tool_call 执行留 0.9.3)
+                messages: vec![
+                    ChatMessage::system(&system_prompt),
+                    ChatMessage::user(&query),
+                ],
+                tools,
                 max_tokens: None,
                 temperature: Some(0.0),
                 timeout_ms: Some(timeout_ms),
             };
 
-            // 起始日志:一行说清"哪个 provider + 什么档 + 什么模型 + 多长超时"
+            // 起始日志:一行说清"哪个 provider + 什么档 + 什么模型 + 多长超时 + 几个 tool"
             tracing::debug!(
                 target: ai_slo::TARGET,
-                "AI → {:?}/{} tier={:?} timeout={}ms qlen={}",
+                "AI → {:?}/{} tier={:?} timeout={}ms qlen={} tools={}",
                 provider_kind,
                 provider_model,
                 actual_tier,
                 timeout_ms,
                 query.chars().count(),
+                tools_count,
             );
 
             let start = std::time::Instant::now();
@@ -677,7 +692,7 @@ impl SearchService {
             match result {
                 Ok(resp) => {
                     let text_len = resp.text.as_ref().map(|s| s.chars().count()).unwrap_or(0);
-                    let tool_calls = resp.tool_calls.len();
+                    let tc_count = resp.tool_calls.len();
                     tracing::info!(
                         target: ai_slo::TARGET,
                         "AI ← {:?}/{} ok elapsed={}ms first_token={}ms text={}chars tool_calls={}",
@@ -686,14 +701,74 @@ impl SearchService {
                         elapsed,
                         resp.first_token_ms,
                         text_len,
-                        tool_calls,
+                        tc_count,
                     );
+
+                    // 0.9.2 第二步:优先处理 tool_call
+                    if !resp.tool_calls.is_empty() {
+                        let tc = &resp.tool_calls[0]; // 主窗口只取第一个
+                        let action_reg = app.state::<Arc<ActionRegistry>>();
+
+                        match action_reg.get(&tc.name) {
+                            Some(action) => {
+                                match action.danger_class() {
+                                    DangerClass::Safe => {
+                                        // Safe:直接执行
+                                        let cx = ActionContext::from_arguments(&app, tc.arguments.clone());
+                                        match action.execute(&cx).await {
+                                            Ok(_outcome) => {
+                                                tracing::info!(
+                                                    target: ai_slo::TARGET,
+                                                    "AI tool_call 执行成功: {} args={}",
+                                                    tc.name,
+                                                    tc.arguments,
+                                                );
+                                                // 执行成功 → 展示"已执行"结果 + 清占位
+                                                emit_ai_result(&app, seq, ai_action_done_entry(&tc.name, action.as_ref()));
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    target: ai_slo::TARGET,
+                                                    "AI tool_call 执行失败: {} err={}",
+                                                    tc.name,
+                                                    e,
+                                                );
+                                                emit_ai_clear(&app, seq);
+                                            }
+                                        }
+                                    }
+                                    DangerClass::Dangerous => {
+                                        // Dangerous:emit 确认请求到前端,等用户 Enter/Esc
+                                        tracing::info!(
+                                            target: ai_slo::TARGET,
+                                            "AI tool_call 需确认: {} (Dangerous)",
+                                            tc.name,
+                                        );
+                                        let title = action.title().resolve(&lang).to_string();
+                                        emit_ai_confirm(&app, seq, &tc.name, &tc.arguments, &title);
+                                    }
+                                }
+                            }
+                            None => {
+                                // 未知 action → 回退到文本回答(若有)或清占位
+                                tracing::warn!(
+                                    target: ai_slo::TARGET,
+                                    "AI tool_call 未知动作: {},回退文本",
+                                    tc.name,
+                                );
+                                match resp.text.filter(|t| !t.trim().is_empty()) {
+                                    Some(text) => emit_ai_result(&app, seq, ai_result_entry(text)),
+                                    None => emit_ai_clear(&app, seq),
+                                }
+                            }
+                        }
+                        return;
+                    }
+
+                    // 纯文本回答(无 tool_call)
                     match resp.text.filter(|t| !t.trim().is_empty()) {
                         Some(text) => emit_ai_result(&app, seq, ai_result_entry(text)),
-                        None => {
-                            // 只 tool_calls 无文本(0.9.2 不消费)或纯空 → 清占位
-                            emit_ai_clear(&app, seq);
-                        }
+                        None => emit_ai_clear(&app, seq),
                     }
                 }
                 Err(AIError::Timeout) => {
@@ -1033,6 +1108,36 @@ fn empty_arg_hint_entry(plugin_id: &str, display_name: &str, hint: String) -> Ap
 
 // ── AI lane 辅助(0.9.2 Phase 5b)─────────────────────────────────────────
 
+/// 构建 AI 路由 system prompt——告诉 LLM 它的角色、可用工具、判断规则。
+///
+/// **设计原则**:
+/// - 短小精悍——Router 档模型 token 预算有限,system prompt 控制在 500 token 内
+/// - 工具列表只给 name + description（不含 parameters schema）——省 token + 避免模型过度拟合参数格式
+/// - 明确"不确定就文本回答"——宁可多回答不乱调 tool
+fn build_routing_prompt(tools: &[ActionSchema]) -> String {
+    let mut prompt = String::from(
+        "你是 Blink 的意图路由器。用户输入未命中确定性规则,由你判断意图。\n\n",
+    );
+
+    if !tools.is_empty() {
+        prompt.push_str("【可用工具】\n");
+        for t in tools {
+            prompt.push_str(&format!("- {}: {}\n", t.name, t.description));
+        }
+        prompt.push('\n');
+    }
+
+    prompt.push_str(
+        "【判断规则】\n\
+         1. 如果用户意图明确匹配某个工具 → 返回该工具的 tool_call（参数从用户输入提取）\n\
+         2. 如果是问题/对话/翻译请求/不确定 → 直接文本回答\n\
+         3. 不确定时宁可文本回答,不要猜测工具参数\n\n\
+         【语言】跟随用户输入语言回答。",
+    );
+
+    prompt
+}
+
 /// AI source 标记——占位与结果统一用此值,前端 `results.js` 现有 merge 按 source
 /// 匹配替换占位(与 plugin placeholder 同机制,零前端改动)。
 pub(crate) const AI_SOURCE: &str = "ai";
@@ -1128,6 +1233,59 @@ fn emit_ai_clear(app: &AppHandle, seq: u64) {
     };
     if let Err(e) = app.emit("blink://results", ResultsPayload { seq, items: vec![clear_marker] }) {
         tracing::debug!(error = %e, "emit AI clear failed");
+    }
+}
+
+/// AI tool_call 执行成功项——展示"已执行 {动作名}"。
+///
+/// 与 `ai_result_entry` 类似但文案不同:不是"回车复制回答",而是"已完成"。
+/// 回车/点击无额外操作(执行已在后端完成)。
+fn ai_action_done_entry(_action_id: &str, action: &dyn crate::domain::execution::Action) -> AppEntry {
+    let title = action.title().resolve("zh"); // 默认中文,后续可接 language
+    AppEntry {
+        name: format!("已执行：{title}"),
+        pinyin_name: String::new(),
+        pinyin_full: String::new(),
+        lnk_path: String::new(),
+        is_calc: false,
+        score: 0.7,
+        is_placeholder: false,
+        is_error: false,
+        source: AI_SOURCE.into(),
+        description: Some("AI 已执行此动作".into()),
+        action: Action::default(),
+        score_detail: None,
+    }
+}
+
+/// AI Dangerous 动作确认请求——emit 到前端,展示确认卡片等用户 Enter/Esc。
+///
+/// **事件**: `blink://ai-confirm-action`
+/// **payload**: `{ seq, actionName, actionTitle, arguments, dangerClass }`
+fn emit_ai_confirm(
+    app: &AppHandle,
+    seq: u64,
+    action_name: &str,
+    arguments: &serde_json::Value,
+    title: &str,
+) {
+    #[derive(serde::Serialize, Clone)]
+    struct ConfirmPayload {
+        seq: u64,
+        action_name: String,
+        action_title: String,
+        arguments: serde_json::Value,
+        danger_class: String,
+    }
+    let payload = ConfirmPayload {
+        seq,
+        action_name: action_name.to_string(),
+        action_title: title.to_string(),
+        arguments: arguments.clone(),
+        danger_class: "Dangerous".to_string(),
+    };
+    if let Err(e) = app.emit("blink://ai-confirm-action", payload) {
+        tracing::debug!(error = %e, "emit AI confirm failed");
     }
 }
 

@@ -4,7 +4,7 @@
 //! 且未来动作类型会增多（插件动作、文件打开等）——集中在此便于扩展。
 //! 行为由后端提供的 action.kind 驱动，与提示栏（hints.js）同源，语义一致。
 
-import { launchApp, runBuiltinAction, hideWindow, recordClipboardHit } from "./api.js";
+import { launchApp, runBuiltinAction, confirmAiAction, hideWindow, recordClipboardHit } from "./api.js";
 
 /**
  * 激活一个结果项。
@@ -14,6 +14,17 @@ export async function activateItem(data) {
   if (!data) return;
   // 错误信息项不可执行
   if (data.isError) return;
+
+  // 0.9.2 第二步:AI Dangerous 动作确认卡片——Enter 确认执行
+  if (data.aiConfirm) {
+    try {
+      await confirmAiAction(data.aiConfirm.actionName, data.aiConfirm.arguments);
+    } catch (e) {
+      console.error("confirm_ai_action failed:", e);
+    }
+    return;
+  }
+
   const kind = data.action?.kind;
 
   if (kind === "copy") {

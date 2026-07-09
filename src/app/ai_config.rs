@@ -44,6 +44,11 @@ pub struct AIConfig {
     #[serde(default = "default_min_query_len")]
     pub min_query_len: u8,
 
+    /// CJK(中日韩)最短 query 长度。中文不需要空格分词,"翻译"=2 char 是完整意图。
+    /// `< min_query_len_cjk` 且含 CJK 字符时不走 AI。默认 2。
+    #[serde(default = "default_min_query_len_cjk")]
+    pub min_query_len_cjk: u8,
+
     /// 必须包含至少一个空格(避免"打错一个字"就打 LLM)。
     #[serde(default = "default_true")]
     pub require_whitespace: bool,
@@ -94,6 +99,7 @@ impl Default for AIConfig {
             enabled: false,
             allow_intent_routing: false,
             min_query_len: default_min_query_len(),
+            min_query_len_cjk: default_min_query_len_cjk(),
             require_whitespace: true,
             exclude_pure_numeric: true,
             respect_awareness_url_path: true,
@@ -322,6 +328,10 @@ impl AIConfig {
 
 fn default_min_query_len() -> u8 {
     4
+}
+
+fn default_min_query_len_cjk() -> u8 {
+    2
 }
 
 fn default_true() -> bool {
@@ -556,6 +566,7 @@ mod tests {
             enabled: true,
             allow_intent_routing: true,
             min_query_len: 8,
+            min_query_len_cjk: 3,
             require_whitespace: false,
             exclude_pure_numeric: false,
             respect_awareness_url_path: true,
@@ -575,6 +586,7 @@ mod tests {
         assert_eq!(restored.enabled, original.enabled);
         assert_eq!(restored.allow_intent_routing, original.allow_intent_routing);
         assert_eq!(restored.min_query_len, original.min_query_len);
+        assert_eq!(restored.min_query_len_cjk, original.min_query_len_cjk);
         assert_eq!(restored.providers.len(), 1);
         assert_eq!(restored.providers[0].id, "p1");
         assert_eq!(restored.tier_router, original.tier_router);

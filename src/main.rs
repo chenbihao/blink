@@ -428,6 +428,7 @@ fn main() {
             app::commands::trigger_ai,
             app::commands::launch_app,
             app::commands::run_builtin_action,
+            app::commands::confirm_ai_action,
             app::commands::list_builtin_actions,
             app::commands::list_context_bindings,
             app::commands::trigger_chord,

@@ -44,6 +44,7 @@ pub struct AiGate {
     pub enabled: bool,
     pub allow_intent_routing: bool,
     pub min_query_len: u8,
+    pub min_query_len_cjk: u8,
     pub require_whitespace: bool,
     pub exclude_pure_numeric: bool,
     pub respect_awareness_url_path: bool,
@@ -55,6 +56,7 @@ impl From<&AIConfig> for AiGate {
             enabled: cfg.enabled,
             allow_intent_routing: cfg.allow_intent_routing,
             min_query_len: cfg.min_query_len,
+            min_query_len_cjk: cfg.min_query_len_cjk,
             require_whitespace: cfg.require_whitespace,
             exclude_pure_numeric: cfg.exclude_pure_numeric,
             respect_awareness_url_path: cfg.respect_awareness_url_path,
@@ -103,7 +105,9 @@ pub fn should_invoke_ai(q: &str, gate: &AiGate) -> GateOutcome {
     }
 
     // ③ 长度:按字符数(中文一字算一 char,不是 3 byte)
-    if q.chars().count() < gate.min_query_len as usize {
+    // CJK 用独立阈值(默认 2)——"翻译"=2 char 是完整意图,不该被英文分词习惯的筛子误伤
+    let min_len = if contains_cjk(q) { gate.min_query_len_cjk } else { gate.min_query_len };
+    if q.chars().count() < min_len as usize {
         return GateOutcome::Fallback(FallbackReason::TooShort);
     }
 
@@ -160,6 +164,7 @@ mod tests {
             enabled: true,
             allow_intent_routing: true,
             min_query_len: 1,
+            min_query_len_cjk: 1,
             require_whitespace: false,
             exclude_pure_numeric: false,
             respect_awareness_url_path: false,
@@ -172,6 +177,7 @@ mod tests {
             enabled: true,
             allow_intent_routing: true,
             min_query_len: 4,
+            min_query_len_cjk: 2,
             require_whitespace: true,
             exclude_pure_numeric: true,
             respect_awareness_url_path: true,
@@ -232,16 +238,41 @@ mod tests {
 
     #[test]
     fn too_short_by_char_count_not_byte_count() {
-        // 中文"翻译"= 2 chars / 6 bytes,min=4 时应判 TooShort
+        // 英文"ab"= 2 chars,min=4 时应判 TooShort
         let g = default_gate();
         assert_eq!(
-            should_invoke_ai("翻译", &g),
+            should_invoke_ai("ab", &g),
             GateOutcome::Fallback(FallbackReason::TooShort)
         );
-        // 4 char 中文含空格通过("翻 译ab")
+        // 4 char 英文含空格通过("ab cd")
         let mut g2 = default_gate();
         g2.min_query_len = 3;
-        assert_eq!(should_invoke_ai("翻 译ab", &g2), GateOutcome::Invoke);
+        assert_eq!(should_invoke_ai("ab cd", &g2), GateOutcome::Invoke);
+    }
+
+    #[test]
+    fn cjk_uses_shorter_threshold() {
+        // "翻译"= 2 char CJK,min_query_len_cjk=2 → 通过(旧 min_query_len=4 时代会被拦)
+        let g = default_gate();
+        assert_eq!(should_invoke_ai("翻译", &g), GateOutcome::Invoke);
+        // "翻"= 1 char CJK,min_query_len_cjk=2 → TooShort
+        assert_eq!(
+            should_invoke_ai("翻", &g),
+            GateOutcome::Fallback(FallbackReason::TooShort)
+        );
+    }
+
+    #[test]
+    fn cjk_threshold_independent_of_english_threshold() {
+        // 英文 min=4,CJK min=2——互不干扰
+        let g = default_gate();
+        // "ab"= 2 char 英文 → TooShort(英 文阈值 4)
+        assert_eq!(
+            should_invoke_ai("ab", &g),
+            GateOutcome::Fallback(FallbackReason::TooShort)
+        );
+        // "翻译"= 2 char CJK → Invoke(CJK 阈值 2)
+        assert_eq!(should_invoke_ai("翻译", &g), GateOutcome::Invoke);
     }
 
     #[test]
@@ -266,11 +297,11 @@ mod tests {
     }
 
     #[test]
-    fn cjk_short_still_hits_too_short_before_whitespace() {
-        // "翻译"= 2 char,先被 min_query_len 拦(TooShort 优先于 CJK 豁免检查)
+    fn cjk_single_char_still_hits_too_short() {
+        // "翻"= 1 char CJK,min_query_len_cjk=2 → TooShort
         let g = default_gate();
         assert_eq!(
-            should_invoke_ai("翻译", &g),
+            should_invoke_ai("翻", &g),
             GateOutcome::Fallback(FallbackReason::TooShort)
         );
     }
@@ -370,7 +401,7 @@ mod tests {
             GateOutcome::Fallback(FallbackReason::Disabled)
         );
         assert_eq!(
-            should_invoke_ai("12", &g),
+            should_invoke_ai("ab", &g),
             GateOutcome::Fallback(FallbackReason::Disabled)
         );
     }

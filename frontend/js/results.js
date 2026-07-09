@@ -371,11 +371,22 @@ function createItem(app, i) {
     // AI 占位与真结果**共用**同一 24×24 徽章位:
     //   - 占位:徽章里嵌 .ai-badge-spinner 小圆环(6px),`.is-loading` 类挂在 li 上
     //   - 真结果:徽章里显示 "AI" 字样
+    //   - 确认卡片:徽章里显示 "⚠" 字样
     // 这样 spinner → 结果切换时,徽章外框位置/尺寸完全不动,视觉稳定。
+    const isConfirm = !!app._aiConfirm;
+    if (isConfirm) {
+      li.classList.add("ai-confirm");
+      // 存储确认数据供 Enter 处理
+      li.dataset.aiConfirmActionName = app._aiConfirm.actionName;
+      li.dataset.aiConfirmArguments = JSON.stringify(app._aiConfirm.arguments);
+    }
     if (app.is_placeholder) li.classList.add("is-loading");
     const badge = document.createElement("span");
     badge.className = "ai-icon-badge";
-    if (app.is_placeholder) {
+    if (isConfirm) {
+      badge.textContent = "⚠";
+      badge.setAttribute("aria-label", "需要确认");
+    } else if (app.is_placeholder) {
       const spinner = document.createElement("span");
       spinner.className = "ai-badge-spinner";
       badge.appendChild(spinner);
@@ -453,11 +464,24 @@ function itemData(li) {
       console.error("actionRunArg parse failed:", e, runArgRaw);
     }
   }
+  // AI 确认卡片数据
+  let aiConfirm = null;
+  if (li.dataset.aiConfirmActionName) {
+    try {
+      aiConfirm = {
+        actionName: li.dataset.aiConfirmActionName,
+        arguments: JSON.parse(li.dataset.aiConfirmArguments || "{}"),
+      };
+    } catch (e) {
+      console.error("aiConfirmArguments parse failed:", e);
+    }
+  }
   return {
     lnkPath: li.dataset.lnkPath,
     calcValue: li.dataset.calcValue,
     payload: li.dataset.actionPayload,
     isError: li.dataset.isError === "true",
+    aiConfirm,
     action: {
       kind: li.dataset.actionKind,
       hint: li.dataset.actionHint,
@@ -466,6 +490,56 @@ function itemData(li) {
       hitId: li.dataset.actionHitId, // 0.8.5 §6.4 Clipboard Copy 回写通道
     },
   };
+}
+
+/**
+ * AI Dangerous 动作确认卡片(0.9.2 第二步)。
+ * 后端 emit `blink://ai-confirm-action` → 前端替换 AI 占位为确认卡片,
+ * 用户 Enter 确认执行 / Esc 取消。
+ *
+ * @param {{seq: number, action_name: string, action_title: string, arguments: object, danger_class: string}} payload
+ */
+export function showAiConfirm(payload) {
+  // 替换 allItems 中的 AI 占位为确认卡片
+  const idx = allItems.findIndex(
+    (it) => it.source === "ai" && it.is_placeholder
+  );
+  const confirmItem = {
+    name: payload.action_title,
+    pinyinName: "",
+    pinyinFull: "",
+    lnkPath: "",
+    isCalc: false,
+    score: 0.8,
+    isPlaceholder: false,
+    isError: false,
+    source: "ai",
+    description: "Enter 确认执行 · Esc 取消",
+    action: { kind: "default" },
+    // 确认卡片专用字段(不进后端,纯前端)
+    _aiConfirm: {
+      actionName: payload.action_name,
+      arguments: payload.arguments,
+    },
+  };
+  if (idx >= 0) {
+    allItems[idx] = confirmItem;
+  } else {
+    allItems.unshift(confirmItem);
+  }
+  renderPage();
+}
+
+/** 获取当前 AI 确认卡片的数据(供 actions.js 调用)。 */
+export function getAiConfirmData() {
+  const li = pageLis[selected];
+  if (!li) return null;
+  return li.dataset.aiConfirmActionName
+    ? {
+        actionName: li.dataset.aiConfirmActionName,
+        arguments: li.dataset.aiConfirmArguments,
+      }
+    : null;
 }
 
 function updateSelection() {

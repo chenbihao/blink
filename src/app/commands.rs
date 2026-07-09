@@ -186,6 +186,44 @@ pub async fn run_builtin_action(
     Ok(())
 }
 
+/// AI Dangerous 动作确认执行（0.9.2 第二步）。
+///
+/// 前端收到 `blink://ai-confirm-action` 事件后展示确认卡片,
+/// 用户按 Enter 确认 → invoke 此 command → 后端执行动作。
+///
+/// **安全**:与 `run_builtin_action` 同样的查找 + 执行路径,
+/// 但 arguments 来自 AI 的 `ToolCall.arguments`(结构化 JSON Object),
+/// 走 `ActionContext::from_arguments` 而非 `ActionContext::new`。
+#[tauri::command]
+pub async fn confirm_ai_action(
+    app: tauri::AppHandle,
+    action_name: String,
+    arguments: serde_json::Value,
+) -> Result<(), String> {
+    tracing::debug!(%action_name, ?arguments, "confirm_ai_action: 用户确认 AI 动作");
+
+    let registry = app.state::<std::sync::Arc<crate::domain::execution::ActionRegistry>>();
+    let Some(action) = registry.get(&action_name) else {
+        let msg = format!("未知动作 id: {action_name}");
+        tracing::warn!(%action_name, "confirm_ai_action: 未知 id");
+        return Err(msg);
+    };
+
+    let cx = crate::domain::execution::ActionContext::from_arguments(&app, arguments);
+    match action.execute(&cx).await {
+        Ok(_outcome) => {
+            tracing::info!(%action_name, "confirm_ai_action: 执行成功");
+        }
+        Err(e) => {
+            tracing::error!(%action_name, error = %e, "confirm_ai_action: 执行失败");
+            return Err(e.to_string());
+        }
+    }
+
+    crate::infra::platform::window::hide(&app, "confirm_ai_action");
+    Ok(())
+}
+
 /// 列出所有内置动作元数据 + 当前 enabled 状态（0.8.0 §1.3 / 0.8.6 §8.2.4 i18n）。
 #[tauri::command]
 pub async fn list_builtin_actions(
