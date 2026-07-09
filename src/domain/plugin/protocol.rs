@@ -1,7 +1,12 @@
 //! 插件协议(JSONL,见 production-design/phases/0.2-core-plugin-design.md §3.2)。
 //!
-//! newline-delimited JSON,每行一个完整 JSON。本切片实现 `query`→`response`(单行)与
-//! core→插件单向 `cancel`(查询超时发送,插件可忽略);流式(stream/delta/done)/ attachments 暂不实现。
+//! newline-delimited JSON,每行一个完整 JSON。本切片实现:
+//! - `query`→`response`(单行查询)
+//! - core→插件单向 `cancel`(查询超时发送,插件可忽略)
+//! - `tool_call`→`tool_result`(0.9.3 AI tool-call 执行)
+//! - `http_request`→`http_response`(插件发起 HTTP 请求,core 代为执行)
+//!
+//! 流式(stream/delta/done)/ attachments 暂不实现。
 //!
 //! bin crate 无 lib target,示例插件目前各持一份本 struct 的副本(后续抽 SDK crate)。
 
@@ -35,6 +40,22 @@ pub enum PluginRequest {
         body: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+    },
+    /// tool-call 执行请求(core→插件,0.9.3)。
+    ///
+    /// AI 路由产出 tool_call → `ActionRegistry` 查到 `PluginActionAdapter` →
+    /// adapter 通过 `PluginHandle::execute_tool()` 发此消息到插件子进程。
+    /// 插件执行后返回 `ToolResult`。
+    #[serde(rename = "tool_call")]
+    ToolCall {
+        id: String,
+        /// 对应 manifest.tools[].name
+        tool_name: String,
+        /// AI 产出的参数(JSON Object)
+        arguments: serde_json::Value,
+        /// 该插件的 PluginConfig.settings（与 Query 同规则透传）
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        settings: Option<serde_json::Value>,
     },
 }
 
@@ -86,7 +107,7 @@ impl PluginQueryContext {
 }
 
 /// 插件 → core 的上行消息(一行 = 一个完整 JSON)。
-/// 包含普通查询响应和插件发起的 HTTP 请求。
+/// 包含普通查询响应、插件发起的 HTTP 请求、tool-call 结果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum PluginUpstreamMessage {
@@ -96,6 +117,26 @@ pub enum PluginUpstreamMessage {
     /// HTTP 请求(插件→core):请求 core 代为发起 HTTP 请求。
     #[serde(rename = "http_request")]
     HttpRequest(HttpRequest),
+    /// tool-call 执行结果(插件→core,0.9.3)。
+    #[serde(rename = "tool_result")]
+    ToolResult(ToolResultPayload),
+}
+
+/// 插件返回的 tool-call 执行结果(0.9.3)。
+///
+/// **与 `PluginResponse` 统一格式**——`items` 复用 `PluginItem`，
+/// 插件的 `handle_query` 和 `handle_tool_call` 可共用结果构造逻辑。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolResultPayload {
+    /// 关联的请求 id(与 `PluginRequest::ToolCall.id` 对应)。
+    pub id: String,
+    /// 结构化结果项——与 `PluginResponse.items` 同格式。
+    /// 第一项的 `title` 作为 AI 回答展示；`action` 决定回车行为。
+    #[serde(default)]
+    pub items: Vec<PluginItem>,
+    /// 执行错误(成功时为 None)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<PluginErrorPayload>,
 }
 
 /// 插件 → core 响应(一行 = 一个完整 JSON)。
@@ -277,5 +318,115 @@ mod tests {
         assert!(json.contains("\"type\":\"http_response\""));
         assert!(json.contains("\"status\":200"));
         assert!(json.contains("\"body\":\"ok\""));
+    }
+
+    // ── 0.9.3 tool_call / tool_result ────────────────────────────────────
+
+    #[test]
+    fn tool_call_request_serializes_with_type_tag() {
+        let req = PluginRequest::ToolCall {
+            id: "tc_1".into(),
+            tool_name: "translate".into(),
+            arguments: serde_json::json!({ "text": "hello", "target_lang": "zh" }),
+            settings: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"type\":\"tool_call\""));
+        assert!(json.contains("\"tool_name\":\"translate\""));
+        assert!(json.contains("\"text\":\"hello\""));
+        // settings=None 时 skip_serializing_if 生效
+        assert!(!json.contains("\"settings\""));
+    }
+
+    #[test]
+    fn tool_call_request_with_settings() {
+        let req = PluginRequest::ToolCall {
+            id: "tc_2".into(),
+            tool_name: "translate".into(),
+            arguments: serde_json::json!({ "text": "hi" }),
+            settings: Some(serde_json::json!({ "engine": "deepl" })),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"settings\""));
+        assert!(json.contains("\"engine\":\"deepl\""));
+    }
+
+    #[test]
+    fn tool_call_request_parses_from_json() {
+        let json = r#"{"type":"tool_call","id":"tc_1","tool_name":"translate","arguments":{"text":"hello"}}"#;
+        let req: PluginRequest = serde_json::from_str(json).unwrap();
+        match req {
+            PluginRequest::ToolCall { id, tool_name, arguments, settings } => {
+                assert_eq!(id, "tc_1");
+                assert_eq!(tool_name, "translate");
+                assert_eq!(arguments["text"], "hello");
+                assert!(settings.is_none());
+            }
+            _ => panic!("应是 ToolCall"),
+        }
+    }
+
+    #[test]
+    fn tool_result_upstream_serializes_with_type_tag() {
+        let msg = PluginUpstreamMessage::ToolResult(ToolResultPayload {
+            id: "tc_1".into(),
+            items: vec![PluginItem {
+                title: "你好".into(),
+                subtitle: Some("翻译自: hello".into()),
+                score: 1.0,
+                action: PluginAction::Copy { text: "你好".into() },
+            }],
+            error: None,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"tool_result\""));
+        assert!(json.contains("\"你好\""));
+        assert!(json.contains("\"翻译自: hello\""));
+        assert!(!json.contains("\"error\""));
+    }
+
+    #[test]
+    fn tool_result_with_error() {
+        let msg = PluginUpstreamMessage::ToolResult(ToolResultPayload {
+            id: "tc_1".into(),
+            items: vec![],
+            error: Some(PluginErrorPayload {
+                code: "EXEC_FAILED".into(),
+                message: "翻译服务不可用".into(),
+            }),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"tool_result\""));
+        assert!(json.contains("\"EXEC_FAILED\""));
+        assert!(json.contains("\"翻译服务不可用\""));
+    }
+
+    #[test]
+    fn tool_result_parses_from_json() {
+        let json = r#"{"type":"tool_result","id":"tc_1","items":[{"title":"你好","score":1.0,"action":{"type":"copy","text":"你好"}}]}"#;
+        let msg: PluginUpstreamMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            PluginUpstreamMessage::ToolResult(payload) => {
+                assert_eq!(payload.id, "tc_1");
+                assert_eq!(payload.items.len(), 1);
+                assert_eq!(payload.items[0].title, "你好");
+                assert!(payload.error.is_none());
+            }
+            _ => panic!("应是 ToolResult"),
+        }
+    }
+
+    #[test]
+    fn tool_result_empty_items_with_error() {
+        // 空 items + error = 失败场景
+        let json = r#"{"type":"tool_result","id":"tc_1","items":[],"error":{"code":"FAIL","message":"err"}}"#;
+        let msg: PluginUpstreamMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            PluginUpstreamMessage::ToolResult(payload) => {
+                assert!(payload.items.is_empty());
+                assert!(payload.error.is_some());
+            }
+            _ => panic!("应是 ToolResult"),
+        }
     }
 }

@@ -42,6 +42,54 @@ pub struct PluginManifest {
     /// 配置项元数据声明(驱动设置页 UI 渲染)。缺失则该插件用裸 JSON 编辑(降级)。
     #[serde(default)]
     pub settings_schema: Vec<SettingField>,
+    /// 插件声明的 tool 列表(0.9.3)——AI 路由可调用的能力。
+    ///
+    /// 每个 tool 对应一份 `ActionSchema` + `DangerClass`，启动时注册进
+    /// `ActionRegistry`，与 builtin 动作并列供 AI tool-call 消费。
+    /// 缺失或空 = 该插件不参与 AI tool-call（老插件向后兼容）。
+    #[serde(default)]
+    pub tools: Vec<ToolDef>,
+}
+
+/// 插件声明的 tool 定义(0.9.3)——对齐 `ActionSchema` + `DangerClass`。
+///
+/// manifest 示例:
+/// ```jsonc
+/// "tools": [{
+///   "name": "translate",
+///   "description": "翻译文本到目标语言",
+///   "parameters": { "type": "object", "properties": { "text": { "type": "string" } } },
+///   "danger_class": "Safe"
+/// }]
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ToolDef {
+    /// tool 唯一标识——全局唯一(ActionRegistry 按此查找)，冲突则 warn + 跳过。
+    pub name: String,
+    /// 人类可读描述，直接送入 LLM。
+    #[serde(default)]
+    pub description: String,
+    /// JSON Schema Object（draft-07），对齐 OpenAI function calling / MCP tool schema。
+    #[serde(default = "default_empty_object_schema")]
+    pub parameters: serde_json::Value,
+    /// 危险等级——Safe 可直接执行，Dangerous 需人机确认。默认 Safe。
+    #[serde(default)]
+    pub danger_class: DangerClassDef,
+}
+
+/// manifest 侧 danger_class 声明——映射到 `domain::execution::DangerClass`。
+///
+/// 用独立 enum 而非直接引用 execution 模块，保持 manifest 解析层零业务依赖。
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub enum DangerClassDef {
+    #[default]
+    Safe,
+    Dangerous,
+}
+
+fn default_empty_object_schema() -> serde_json::Value {
+    serde_json::json!({ "type": "object", "properties": {} })
 }
 
 /// 插件运行时类型。
@@ -770,5 +818,92 @@ mod tests {
             strip_windows_verbatim_prefix(Path::new(r"\\?\UNC\server\share\a")),
             PathBuf::from(r"\\server\share\a"),
         );
+    }
+
+    // ── 0.9.3 tools 字段 ─────────────────────────────────────────────────
+
+    #[test]
+    fn tools_field_defaults_to_empty() {
+        // 老 manifest 无 tools 字段 → 空 vec，向后兼容
+        let json = r#"{"schema_version":1,"id":"x","name":"X","version":"0","runtime":{"exec":"x.exe"}}"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(m.tools.is_empty());
+    }
+
+    #[test]
+    fn tools_parses_single_tool() {
+        let json = r#"{
+            "schema_version": 1, "id": "translate", "name": "翻译", "version": "0",
+            "runtime": {"exec": "main.py", "type": "python"},
+            "tools": [{
+                "name": "translate",
+                "description": "翻译文本到目标语言",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": { "type": "string", "description": "要翻译的文本" }
+                    },
+                    "required": ["text"]
+                },
+                "danger_class": "Safe"
+            }]
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.tools.len(), 1);
+        let t = &m.tools[0];
+        assert_eq!(t.name, "translate");
+        assert_eq!(t.description, "翻译文本到目标语言");
+        assert_eq!(t.parameters["properties"]["text"]["type"], "string");
+        assert_eq!(t.danger_class, DangerClassDef::Safe);
+    }
+
+    #[test]
+    fn tools_defaults_danger_class_to_safe() {
+        let json = r#"{
+            "schema_version": 1, "id": "x", "name": "X", "version": "0",
+            "runtime": {"exec": "x.exe"},
+            "tools": [{ "name": "foo", "description": "bar" }]
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.tools[0].danger_class, DangerClassDef::Safe);
+    }
+
+    #[test]
+    fn tools_defaults_parameters_to_empty_object() {
+        let json = r#"{
+            "schema_version": 1, "id": "x", "name": "X", "version": "0",
+            "runtime": {"exec": "x.exe"},
+            "tools": [{ "name": "foo" }]
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.tools[0].parameters["type"], "object");
+        assert!(m.tools[0].parameters["properties"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn tools_danger_class_dangerous_parses() {
+        let json = r#"{
+            "schema_version": 1, "id": "x", "name": "X", "version": "0",
+            "runtime": {"exec": "x.exe"},
+            "tools": [{ "name": "delete_file", "danger_class": "Dangerous" }]
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.tools[0].danger_class, DangerClassDef::Dangerous);
+    }
+
+    #[test]
+    fn tools_multiple_tools() {
+        let json = r#"{
+            "schema_version": 1, "id": "x", "name": "X", "version": "0",
+            "runtime": {"exec": "x.exe"},
+            "tools": [
+                { "name": "translate", "description": "翻译" },
+                { "name": "detect_lang", "description": "检测语言" }
+            ]
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.tools.len(), 2);
+        assert_eq!(m.tools[0].name, "translate");
+        assert_eq!(m.tools[1].name, "detect_lang");
     }
 }

@@ -19,6 +19,29 @@
     { "type": "keyword", "keyword": "weather", "exclusive": true }
   ],
   "capabilities": ["query"],
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "查询指定城市的当前天气，包括温度、天气状况和风速。数据来自 open-meteo（免费无需 API key）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "city": {
+            "type": "string",
+            "description": "城市名称（中文或英文），如「北京」「Tokyo」「New York」"
+          },
+          "unit": {
+            "type": "string",
+            "description": "温度单位",
+            "enum": ["celsius", "fahrenheit"],
+            "default": "celsius"
+          }
+        },
+        "required": ["city"]
+      },
+      "danger_class": "Safe"
+    }
+  ],
   "settings_schema": [
     {
       "key": "default_city",

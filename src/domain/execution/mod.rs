@@ -13,6 +13,7 @@
 //! 本模块是后端内部的执行抽象——外部 JSON 零变化。
 
 mod builtin;
+pub mod group;
 mod registry;
 mod schema;
 

@@ -186,6 +186,11 @@ impl PluginEngine {
         self.plugins.iter().find(|p| p.id() == id).cloned()
     }
 
+    /// 获取所有已加载插件的句柄（0.9.3 插件 tool 注册用）。
+    pub fn all_plugins(&self) -> &[Arc<PluginHandle>] {
+        &self.plugins
+    }
+
     // ── 配置管理(0.5.1)──────────────────────────────────────────────────────
 
     /// 启动时从 DB 加载所有插件配置;不存在则写默认。
@@ -329,7 +334,7 @@ impl PluginEngine {
     }
 
     /// 取插件 settings(None = 无配置或 settings 为 null)。
-    fn get_settings(&self, id: &str) -> Option<serde_json::Value> {
+    pub fn get_settings(&self, id: &str) -> Option<serde_json::Value> {
         self.configs
             .read()
             .unwrap()

@@ -507,6 +507,73 @@ def handle_query(query_id: str, query: str, settings: Optional[Dict[str, Any]] =
     return {"id": query_id, "items": items}
 
 
+# ── 0.9.3 tool-call 处理 ────────────────────────────────────────────────────
+
+def handle_tool_call(tool_call_id: str, tool_name: str, arguments: Dict[str, Any],
+                     settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """处理 AI tool-call 请求（0.9.3）
+
+    返回格式与 PluginResponse 统一：{"id": ..., "items": [...], "error": ...}
+    items 复用 PluginItem 结构：{title, subtitle, score, action}
+    """
+    settings = settings or {}
+    engine = settings.get("default_engine", "youdao")
+
+    if tool_name == "translate":
+        text = arguments.get("text", "").strip()
+        if not text:
+            return {
+                "id": tool_call_id,
+                "items": [],
+                "error": {"code": "MISSING_ARG", "message": "缺少 text 参数"}
+            }
+
+        target_lang = arguments.get("target_lang", "")
+        if not target_lang or target_lang == "auto":
+            target_lang = settings.get("target_lang", "zh")
+        target_lang = _auto_swap_lang(text, target_lang)
+
+        print(f"[translate] tool_call: id={tool_call_id}, text={text!r}, target={target_lang}",
+              file=sys.stderr, flush=True)
+
+        # 翻译
+        result = _try_translate(text, target_lang, engine, settings)
+
+        if not result:
+            return {
+                "id": tool_call_id,
+                "items": [],
+                "error": {"code": "TRANSLATE_FAILED", "message": "翻译失败，请检查 API 配置或网络连接"}
+            }
+
+        lang_display = {"zh": "中文", "en": "英文", "ja": "日文", "ko": "韩文"}
+        target_display = lang_display.get(target_lang, target_lang)
+
+        # 复用 PluginItem 格式，与 handle_query 统一
+        items = [
+            {
+                "title": f"📝 {result}",
+                "subtitle": f"翻译自: {text[:50]}{'...' if len(text) > 50 else ''} → {target_display}",
+                "score": 1.0,
+                "action": {"type": "copy", "text": result}
+            },
+            {
+                "title": f"📄 {text[:60]}{'...' if len(text) > 60 else ''}",
+                "subtitle": "按 Enter 复制原文",
+                "score": 0.8,
+                "action": {"type": "copy", "text": text}
+            }
+        ]
+
+        return {"id": tool_call_id, "items": items}
+
+    return {
+        "id": tool_call_id,
+        "items": [],
+        "error": {"code": "UNKNOWN_TOOL", "message": f"未知 tool: {tool_name}"}
+    }
+
+
 # ── 主循环 ────────────────────────────────────────────────────────────────────
 
 def main():
@@ -527,6 +594,17 @@ def main():
                 settings = req.get("settings")
                 resp = handle_query(query_id, query, settings)
                 print(json.dumps(resp, ensure_ascii=False), flush=True)
+
+            elif req_type == "tool_call":
+                # 0.9.3: AI tool-call 请求
+                tool_call_id = req.get("id", "")
+                tool_name = req.get("tool_name", "")
+                arguments = req.get("arguments", {})
+                settings = req.get("settings")
+                resp = handle_tool_call(tool_call_id, tool_name, arguments, settings)
+                # 包装成 PluginUpstreamMessage::ToolResult 格式
+                wrapped = {"type": "tool_result", **resp}
+                print(json.dumps(wrapped, ensure_ascii=False), flush=True)
 
             elif req_type == "cancel":
                 pass

@@ -13,26 +13,11 @@
 Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而是 **Universal Action Layer（统一操作层）**。
 终极目标：感知用户上下文、主动推荐动作，让任何操作都比原来的路径更快。
 
-当前处于 **0.9 全部完成——准备进入 0.10**：0.1~0.7 全部完成；0.8.0 ~ 0.8.8 全部落地；0.9 AI 层全闭环（Provider 多档 + 密钥安全 + rig-core 真接入 + 四筛子决策树 + tool_call 执行链路 + Dangerous 确认 UX + 反馈动画 + SLO 埋点）。**测试基线 429 通过,零 warning**。详见 [phases/0.9-ai-layer.md](docs/production-design/phases/0.9-ai-layer.md)。
+当前处于 **0.9 进行中**（0.9.0~0.9.3 已完成）。详见 [phases/0.9-ai-layer.md](docs/production-design/phases/0.9-ai-layer.md)。
 
-**最新特性（0.8）**：
-- ✅ **0.8.0** UIA 划词文本感知（鼠标选中文本自动抓取）
-- ✅ **0.8.0** 内置动作抽象升级：`SearchAction::RunAction` + Context 感知（剪贴板 URL/文件路径触发"打开链接/打开路径/资源管理器定位"）+ 设置页 disable 面板 + 拼音全拼匹配
-- ✅ **0.8.1** Autosuggestion / Ghost Text：首拼命中降级 Priority + 灰色行内补全 + Tab 显式升级；suggest fuzzy 覆盖中文原文与 pinyin_full 双候选；插件 manifest 支持 `empty_arg_hint`（空 arg 命中直接展示静态提示，跳过进程/IPC 调用）
-- ✅ **0.8.2** 翻译插件 Context 感知路由：选中/剪贴板非目标语言 → 翻译插件被路由（`needs_translation` + `PluginSettingResolver` trait；URL/文件路径护栏内建）。**注**：架构层已完成，UX 层的 push 模式过于激进 → 0.8.3 转 Ghost
-- ✅ **0.8.3** 感知交互统一：`Suggestion` 契约抽象（合并 completion_hint + context_suggestion，为 0.9 AI 铺路）+ Context 转 Ghost + Tab 采纳 + 上下文感知面板 + Ghost 本地化 display + origin 来源提示（来自划词/剪贴板）+ **awareness 域重构**（`AwarenessSnapshot { texts: Vec<AwarenessText { source, text }> }` 数据侧带 origin,intent 层零推断,删除 3 个推断 helper）
-- ✅ **0.8.4** **四域架构重构**：Awareness / Suggestion / Routing / Execution 四域强边界（`route` 断 Awareness）+ `ExecArg` 类型墙 + RankingHint Surface Booster + Suggestion 覆盖非空 query + 内置动作保持「展示即抽参」（不延后，详见 phases §5.1）+ PluginProtocol.clipboard_text deprecated
-- ✅ **0.8.5** **Chord 交互底层**：Ghost overlay `.ghost-chord` 影子层提示（`:has()` 让位 Ghost 补全）+ 独立悬浮球 `chord-ball` webview（`WS_EX_NOACTIVATE` 不抢焦点）+ Alt+Q 划词 confirm flow + Alt+C 剪贴板走 `Route::EngineTakeover`（新增 `SearchEngine::takeover_only()` trait + 独立 `ClipboardEngine`）+ 剪贴板监听器补 0.7 漏 + 设置页 Chord tab + `ChordAction::label` 走 `LocalizableText`
-- ✅ **0.8.6** **架构固化全部完成**（为 0.9 铺物理骨架，纯横向重构不动业务）：Action trait 收敛完成（`SearchAction/BuiltinActionKind/PluginAction/ChordAction` 统一走 `Action` trait + `ActionOutcome`，位于 `src/domain/execution/`）+ Suggestion Producer/Arbiter 完成（`src/domain/intent/suggestion/`）+ AppContext 真依赖容器完成 + `PluginQueryContext.clipboard_text` 已删 + 内置动作 title/subtitle i18n 完成 + **ConfigStore 6 分片后端完成** + **前端 IPC 泛型化完成**（20+ `update_*` 命令收敛为 1 个 `set_config` 泛型命令 + `frontend/js/config-keys.js`）+ SearchService God Method 已拆为 `exec_takeover` / `exec_engine_takeover` / `exec_mixed`。测试基线 309 通过
-- ✅ **0.8.7** **Alt+A 区域截图**：Chord 三剑客补齐；`src/infra/platform/screenshot/` 新增 GDI 截屏模块 + `SESSION` 单点缓存 + `crop_rgba` 纯函数（7 个单测）；DWM Cloak 隐藏主窗绕过 Win11 fade 动画；BGRA 全链路（BitBlt→SESSION→CF_DIB 免全屏 swap）；PNG 编码 `Compression::Fast + FilterType::NoFilter + u32 位运算 swap + dev profile 局部 opt=3` 从 600ms → ~150ms；总感知延迟 ~320ms（dev），release 更快
-- ✅ **0.8.8** **收尾归档**：0.8.6 落地盘点补入文档 §8.7 + 里程碑表状态同步 + `.taurignore` 落地（改 md 不触发 rebuild）+ 冗余清理小刀（删 `icon::clear_cache` / `update_interpreter_config` / `text::normalize_candidates` 三处僵尸，净减 54 行）+ **设计 token 层落地**（`theme.css` 新增 `--radius-sm/md/lg/xl` + `--transition-fast/base/slow`，`settings.css` ~85% hardcode 迁 token，铁则写入 principles §14.8）+ 版本号统一到 0.8.8 + **P1-C ConfigStore 6 分片后端 + 前端 IPC 泛型化**（20+ `update_*` → 1 个 `set_config` 命令 + `config-keys.js`）+ **P2-A SearchService 拆分**（God Method → `exec_takeover` / `exec_engine_takeover` / `exec_mixed`）。测试基线 309 通过
-- ✅ **0.9 AI 层全闭环**（0.9.0 + 0.9.1 + 0.9.2，详见 [phases/0.9-ai-layer.md](docs/production-design/phases/0.9-ai-layer.md)）：
-  - **架构底座**（0.9.0）：`ActionSchema` + `DangerClass` + `ActionContext.arguments` 结构化；12 builtin + 3 chord 全显式 schema/danger_class（6 Safe + 6 Dangerous）；SLO tracing target 骨架；依赖前置 tauri 2.11.5 + reqwest 0.13 + rig-core 0.39
-  - **AI 地基**（0.9.1）：`SecretString` + Windows Credential Manager 密钥安全；`AIConfig` 第 7 分片（opt-in + 三档降级）；`AIProvider` trait 类型收窄（编译期无 agent_session）；`AIProviderRegistry` + 前端 AI Tab 完整 UX
-  - **真接入 + 闭环**（0.9.2）：`RigFactory` 替换 NoopFactory（OpenAI CompletionsClient / DeepSeek native）；四筛子决策树（CJK 豁免空格 + 独立阈值 2）；AI lane 独立 spawn + placeholder + emit；路由 prompt + tools 传入 → tool_call 执行（Safe 直接执行 / Dangerous 确认卡片）；SLO 埋点上数据；§6.4 兜底铁则；反馈动画 fade-in 150ms
-  - 测试基线 **429 通过零 warning**
-- 🔜 **0.10 语音指令闭环**：STT + 双 chord 语音入口 + 语音找文件北极星场景 + Agent 对话窗口。架构不变只加感知层。详见 [phases/0.10-voice-agent.md](docs/production-design/phases/0.10-voice-agent.md)
-- 🔜 **0.11 本地化与生态**：本地模型按需下载 / skill 化 / MCP 双向 / RAG 记忆（按需增强）。详见 [phases/0.11-local-ecosystem.md](docs/production-design/phases/0.11-local-ecosystem.md)
+- ✅ **0.9.3 插件 tool-call 支持**：AI 路由能调用插件声明的 tool，ActionRegistry 改 RwLock 支持动态注册。详见 [0.9-ai-layer.md §四](docs/production-design/phases/0.9-ai-layer.md#四插件-tool-call-支持093)
+- 🔜 **0.10 语音指令闭环**：STT + 双 chord 语音入口 + 语音找文件 + Agent 对话窗口。详见 [phases/0.10-voice-agent.md](docs/production-design/phases/0.10-voice-agent.md)
+- 🔜 **0.11 本地化与生态**：本地模型 / skill / MCP / RAG。详见 [phases/0.11-local-ecosystem.md](docs/production-design/phases/0.11-local-ecosystem.md)
 
 ---
 
@@ -85,48 +70,45 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 
 ## 5. 模块拆分速查
 
-**目录结构（0.8.4 起域驱动）**：
+**目录结构（域驱动）**：
 - `src/main.rs` — Tauri 启动 + 托盘 + 各服务 wiring
-- `src/app/` — 应用层：commands（Tauri IPC 入口）、config、service（生命周期骨架）
-- `src/domain/` — 业务域（四域架构，见 phases/0.8 §5）：
-  - `context/` — Awareness 域纯逻辑（`is_url` / `is_file_path` / `AwarenessSnapshot`；采集实现在 `infra/platform/context/`）
-  - `intent/` — Suggestion 域 + Routing 域：`RuleRouter` / `Suggestion` / `ExecArg` / `RankingHint`
-  - `search/` — Query 域：`SearchService` + `SearchEngine` trait + 各引擎（builtin / calc / clipboard / file / start_menu）
-  - `plugin/` — 插件系统：manifest 解析 + JSONL 协议 + tokio 子进程
-  - `chord/` — Chord 交互：`ChordAction` trait + `ChordRegistry`
-  - `ai/`（🔜 0.9 规划）— AI 域：Provider trait（多档：路由/轻量/主，包 rig-core `CompletionModel`）+ 注册表 + ChatMessage + ToolCall 分派。详见 [phases/0.9-ai-layer.md](docs/production-design/phases/0.9-ai-layer.md)
+- `src/app/` — 应用层：commands（Tauri IPC 入口）、config、ai_config（第 7 分片）
+- `src/domain/` — 业务域（四域架构，见 §9）：
+  - `context/` — Awareness：`is_url` / `is_file_path` / `AwarenessSnapshot`
+  - `intent/` — Suggestion + Routing：`RuleRouter` / `Suggestion` / `ExecArg` / `RankingHint` / `SuggestionProducer` / `SuggestionArbiter`
+  - `search/` — SearchService + SearchEngine trait + 各引擎（builtin / calc / clipboard / file / start_menu）
+  - `execution/` — `Action` trait + `ActionOutcome` + `ActionContext` + `ActionSchema` + `DangerClass` + `ActionRegistry`（12 builtin + 3 chord）
+  - `plugin/` — manifest 解析 + JSONL 协议 + tokio 子进程
+  - `chord/` — `ChordAction` trait + `ChordRegistry`
+  - `ai/` — `AIProvider` trait + `AIProviderRegistry` + `RigFactory` + `gating`（四筛子）+ `message`（ChatMessage / ToolCall）+ `rig_provider`
 - `src/infra/` — 基础设施层：
-  - `platform/` — 平台相关（`mod.rs` 抽象 + `windows.rs` 实现）：hotkey / window / selection / clipboard / context / locale / screenshot
-  - `data/` — SQLite 持久化：history / clipboard / config KV
-  - `utils/` — 通用工具：logging / perf / text（拼音）
-
-**0.8.6 架构固化落地**：
-- `src/domain/execution/` — Execution 域物理落地:`Action` trait（0.9.0 tool-call 进化,加 `schema()` + `danger_class()`）+ `ActionOutcome` + `ActionContext.arguments` 结构化 + Builtin/Chord 显式实现 + registry ✅（Plugin adapter 0.9.1 与 AI 一起做）
-- `src/domain/intent/suggestion/` — Suggestion 域拆分:`SuggestionProducer` trait + `SuggestionArbiter` + Keyword/Context 两个 producer ✅
-- `ConfigStore<T>` 分片:抽象层 ✅ + `AppConfig` 6 分片后端 ✅ + **前端 IPC 泛型化 ✅**（20+ `update_*` → 1 个 `set_config` 命令 + `frontend/js/config-keys.js`）
+  - `platform/` — `mod.rs` 抽象 + `windows.rs`：hotkey / window / selection / clipboard / context / locale / screenshot / secret（Credential Manager）
+  - `data/` — SQLite：history / clipboard / config KV（`ConfigStore<T>` 6 分片）
+  - `utils/` — logging / perf（SLO）/ text（拼音）
 
 ### 前端（`frontend/`）
 
 - 主窗口：`index.html` + `style.css` + `js/*.js`（搜索/结果/键盘/动作/生命周期/主题/i18n/Ghost/Chord）
-- 设置页：`settings.html` + `settings.js` + `settings.css`（通用/快捷键/引擎/插件/网络/上下文/Chord 交互/存储/调试）
-- 悬浮球：`chord-ball.html`（0.8.5 新）
-- 截图 overlay：`chord-screenshot.html`（0.8.7 新）
+- 设置页：`settings.html` + `settings.js` + `settings.css`
+- 悬浮球：`chord-ball.html`
+- 截图 overlay：`chord-screenshot.html`
 - 右键菜单：`contextmenu-popup.html`
 
-前端用 `invoke()` 调 Rust commands，用 `TAU.event.listen()` 监听后端事件（`blink://shown`/`hidden`/`results`/`chord-translate`/`chord-fill-query`）。
+前端用 `invoke()` 调 Rust commands，用 `TAU.event.listen()` 监听后端事件（`blink://shown`/`hidden`/`results`/`chord-translate`/`chord-fill-query`/`ai-confirm-action`）。
 
 ---
 
 ## 6. 编码约定
 
-| 规则 | 说明 |
-|---|---|
-| **配置化优先** | 可选行为（默认值用户可能想改的）做成配置项 + 合理默认；纯内部参数不暴露。 |
-| **统一 tracing 日志** | 禁止散落 `println!/eprintln!`；error=异常、warn=潜在问题、info=状态变化、debug=主流程、trace=诊断细节 |
-| **结构化日志** | `tracing::debug!(%query, "搜索")` 而非字符串拼接；错误必带上下文 `(%path, %e)` |
-| **改完自审** | 每次完成改动后自己 review（diff / 编译 / 副作用）再报告 |
-| **平台抽象预留** | 平台相关逻辑走 `mod.rs` 接口 + `windows.rs` 实现 |
-| **不过度工程** | 0.x 阶段不对外发布，产品化基础设施（manifest 升级/权限强制/插件市场）1.0 前不做 |
+| 规则                     | 说明                                                                          |
+|------------------------|-----------------------------------------------------------------------------|
+| **配置化优先**              | 可选行为（默认值用户可能想改的）做成配置项 + 合理默认；纯内部参数不暴露。                                      |
+| **统一 tracing 日志**      | 禁止散落 `println!/eprintln!`；error=异常、warn=潜在问题、info=状态变化、debug=主流程、trace=诊断细节 |
+| **结构化日志**              | `tracing::debug!(%query, "搜索")` 而非字符串拼接；错误必带上下文 `(%path, %e)`               |
+| **改完自审**               | 每次完成改动后自己 review（diff / 编译 / 副作用）再报告                                        |
+| **平台抽象预留**             | 平台相关逻辑走 `mod.rs` 接口 + `windows.rs` 实现                                       |
+| **不过度工程**              | 0.x 阶段不对外发布，产品化基础设施（manifest 升级/权限强制/插件市场）1.0 前不做                           |
+| **架构要有前瞻性**           | 精心设计持续演进，不过早腐败，不随便堆砌坏味道与技术债，持续收敛，Clean Architecture                         |
 
 ---
 
@@ -143,8 +125,8 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 
 SQLite `%APPDATA%\blink\blink.db`：
 - `history(lnk_path, hit_count, last_used_at)` — 启动历史，频率加权 + 衰减
-- `config(key, value, updated_at)` — 配置 KV(分命名空间:`app.hotkey / app.appearance / app.search / app.suggestion / app.chord / app.disable` 六分片 + `engine:{id}` / `plugin:{id}` / `context:*` / `clipboard:config`;**0.8.8 已落地**——`AppConfig` 门面 struct 内部走 6 分片,老 `app_config` 单 key 自动迁移;20+ `update_*` 命令→泛型 `set_config<K>` 收敛留 0.9 起步和 AI Provider 一起做)
-- `clipboard(id, text, kind, hit_count, last_used_at)` — 剪贴板历史（0.7 + 0.8.5 补监听）
+- `config(key, value, updated_at)` — 配置 KV（`AppConfig` 6 分片门面 + `AIConfig` 第 7 分片 + `engine:{id}` / `plugin:{id}`）；前端泛型 `set_config` 命令
+- `clipboard(id, text, kind, hit_count, last_used_at)` — 剪贴板历史
 - `perf(metric, value, at)` — 性能统计
 
 ---
@@ -168,8 +150,8 @@ Execution  (执行)        — UserExplicit 参数才真执行
 2. **参数注入必须显式**：`ExecArg::UserExplicit(String)` 类型墙
 3. **弱信号 pull 不 push**：Routing 无法读 Awareness，Context 只能通过 Suggestion 域影响
 
-**0.8.6 架构固化的三个统一入口**（0.9 AI 的物理骨架）：
-- `Action` trait（`domain/execution/`）—— 一切副作用的统一入口;四份动作枚举 → 一个 trait + `ActionOutcome` ✅
-- `SuggestionProducer` trait + `SuggestionArbiter`（`domain/intent/suggestion/`）—— 一切建议的统一入口;Keyword/Context/(0.9)AI 三源竞争 ✅
-- `ConfigStore<T>` 泛型 + `AppConfig` 6 分片后端 + 前端 `set_config` 泛型命令 ✅ —— 一切配置的统一入口;0.9 加 `AIConfig` 只需 `impl ConfigKey for AIConfig` + 前端 `saveConfig("ai_config", {...})`
+**三个统一入口**：
+- `Action` trait（`domain/execution/`）—— 一切副作用的统一入口
+- `SuggestionProducer` + `SuggestionArbiter`（`domain/intent/suggestion/`）—— 一切建议的统一入口（Keyword / Context / AI 三源竞争）
+- `ConfigStore<T>` + 前端 `set_config` —— 一切配置的统一入口
 

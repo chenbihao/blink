@@ -3,6 +3,7 @@
 //! 本切片:builtin 插件加载(扫描 manifest)+ 进程拉起(JSONL stdio)+ PluginEngine
 //! 接 async lane。第三方插件目录(%APPDATA%\blink\plugins)、permissions、热重载等后续。
 
+mod action;
 mod engine;
 mod manifest;
 mod process;
@@ -13,6 +14,7 @@ use std::sync::Arc;
 
 use tauri::{AppHandle, Manager};
 
+pub use action::PluginActionAdapter;
 pub use engine::PluginEngine;
 pub use manifest::{LocalizableText, ManifestContextWhen, ManifestSurfaceHint, PluginManifest, PluginTrigger};
 pub use process::{InterpretersStatus, PluginHandle, probe_interpreters};

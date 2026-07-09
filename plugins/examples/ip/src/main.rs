@@ -22,7 +22,6 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "type")]
 enum CoreToPlugin {
     /// 查询请求
-    /// 查询请求
     #[serde(rename = "query")]
     Query {
         id: String,
@@ -47,6 +46,16 @@ enum CoreToPlugin {
         #[allow(dead_code)]
         id: String,
     },
+    /// tool-call 请求（0.9.3）
+    #[serde(rename = "tool_call")]
+    ToolCall {
+        id: String,
+        tool_name: String,
+        #[serde(default)]
+        arguments: serde_json::Value,
+        #[serde(default)]
+        settings: Option<serde_json::Value>,
+    },
 }
 
 /// 插件 → core 的上行消息
@@ -59,6 +68,24 @@ enum PluginToCore {
     /// HTTP 请求（请求 core 代理）
     #[serde(rename = "http_request")]
     HttpRequest(HttpRequest),
+    /// tool-call 结果（0.9.3）
+    #[serde(rename = "tool_result")]
+    ToolResult(ToolResultPayload),
+}
+
+/// tool-call 结果（与 PluginResponse 统一格式）
+#[derive(Debug, Serialize)]
+struct ToolResultPayload {
+    id: String,
+    items: Vec<PluginItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<PluginError>,
+}
+
+#[derive(Debug, Serialize)]
+struct PluginError {
+    code: String,
+    message: String,
 }
 
 /// HTTP 请求消息
@@ -105,6 +132,8 @@ struct PendingQuery {
     use_ipv6: bool,
     local_ip: Option<String>,
     local_ipv6: Option<String>,
+    /// 是否来自 tool-call（决定返回 Response 还是 ToolResult）
+    is_tool_call: bool,
 }
 
 fn main() {
@@ -151,6 +180,7 @@ fn main() {
                         use_ipv6,
                         local_ip,
                         local_ipv6,
+                        is_tool_call: false,
                     },
                 );
 
@@ -214,8 +244,53 @@ fn main() {
                     }
                 }
 
-                let resp = PluginToCore::Response(PluginResponse { id: ctx.query_id, items });
-                send_message(&mut stdout, &resp);
+                // tool_call 和 query 共用结果路径
+                if ctx.is_tool_call {
+                    let resp = PluginToCore::ToolResult(ToolResultPayload {
+                        id: ctx.query_id,
+                        items,
+                        error: None,
+                    });
+                    send_message(&mut stdout, &resp);
+                } else {
+                    let resp = PluginToCore::Response(PluginResponse { id: ctx.query_id, items });
+                    send_message(&mut stdout, &resp);
+                }
+            }
+            CoreToPlugin::ToolCall { id, tool_name: _, arguments, settings } => {
+                // 0.9.3: tool-call 与 query 共用逻辑，只是返回 ToolResult 格式
+                let use_ipv6 = settings
+                    .as_ref()
+                    .and_then(|s| s.get("use_ipv6"))
+                    .and_then(|v| v.as_bool())
+                    .or_else(|| {
+                        arguments.get("include_ipv6").and_then(|v| v.as_bool())
+                    })
+                    .unwrap_or(false);
+
+                let local_ip = get_local_ip();
+                let local_ipv6 = if use_ipv6 { get_local_ip_v6() } else { None };
+
+                let http_id = format!("tc_{}", chrono::Local::now().timestamp_millis());
+                pending.lock().unwrap().insert(
+                    http_id.clone(),
+                    PendingQuery {
+                        query_id: id,
+                        use_ipv6,
+                        local_ip,
+                        local_ipv6,
+                        is_tool_call: true,
+                    },
+                );
+
+                let http_req = PluginToCore::HttpRequest(HttpRequest {
+                    id: http_id,
+                    method: "GET".into(),
+                    url: "http://ip-api.com/json/?fields=status,query,city,country".into(),
+                    body: None,
+                    timeout_ms: 10000,
+                });
+                send_message(&mut stdout, &http_req);
             }
             CoreToPlugin::Cancel { .. } => {
                 // 不支持取消，忽略

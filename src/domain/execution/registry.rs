@@ -2,16 +2,21 @@
 //!
 //! `ActionRegistry` 持有所有内置动作的 `Arc<dyn Action>` 实例，
 //! 按 id 查找。`run_builtin_action` command 通过此注册表分派。
+//!
+//! 0.9.3:内部改 `RwLock`，`register()` 变 `&self`，支持启动后动态注册插件 tool。
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use super::builtin::*;
 use super::Action;
 
 /// 动作注册表。id → `Arc<dyn Action>` 的映射。
+///
+/// 内部 `RwLock` 允许 `register(&self)` —— 启动时注册插件 tool 不需要 `&mut`。
+/// 读多写少（注册只在启动时发生），`RwLock` 读可并行。
 pub struct ActionRegistry {
-    actions: HashMap<String, Arc<dyn Action>>,
+    actions: RwLock<HashMap<String, Arc<dyn Action>>>,
 }
 
 impl ActionRegistry {
@@ -40,24 +45,36 @@ impl ActionRegistry {
             actions.insert(action.id().to_string(), action);
         }
 
-        ActionRegistry { actions }
+        ActionRegistry { actions: RwLock::new(actions) }
     }
 
-    /// 按 id 查找动作。
-    pub fn get(&self, id: &str) -> Option<&Arc<dyn Action>> {
-        self.actions.get(id)
+    /// 按 id 查找动作（clone Arc，锁内完成）。
+    pub fn get(&self, id: &str) -> Option<Arc<dyn Action>> {
+        self.actions.read().unwrap().get(id).cloned()
     }
 
     /// 列出所有已注册的动作 id。
-    #[allow(dead_code)]
-    pub fn ids(&self) -> impl Iterator<Item = &str> {
-        self.actions.keys().map(|s| s.as_str())
+    pub fn ids(&self) -> Vec<String> {
+        self.actions.read().unwrap().keys().cloned().collect()
     }
 
-    /// 注册一个自定义动作（0.9 AI Provider 用）。
-    #[allow(dead_code)]
-    pub fn register(&mut self, action: Arc<dyn Action>) {
-        self.actions.insert(action.id().to_string(), action);
+    /// 注册一个自定义动作（0.9.3 插件 tool 注册）。
+    ///
+    /// `&self` 而非 `&mut self` —— 内部 `RwLock` 允许启动后动态注册。
+    /// 若 id 已存在，warn + 跳过（不覆盖 builtin）。
+    pub fn register(&self, action: Arc<dyn Action>) {
+        let id = action.id().to_string();
+        let mut actions = self.actions.write().unwrap();
+        if actions.contains_key(&id) {
+            tracing::warn!(id = %id, "ActionRegistry::register: id 已存在,跳过");
+            return;
+        }
+        actions.insert(id, action);
+    }
+
+    /// 已注册动作数量。
+    pub fn len(&self) -> usize {
+        self.actions.read().unwrap().len()
     }
 }
 
@@ -74,7 +91,7 @@ mod tests {
     #[test]
     fn registry_has_12_builtin_actions() {
         let reg = ActionRegistry::new();
-        assert_eq!(reg.ids().count(), 12);
+        assert_eq!(reg.len(), 12);
     }
 
     #[test]
@@ -150,5 +167,15 @@ mod tests {
             let action = reg.get(id).expect(id);
             assert_eq!(action.danger_class(), DangerClass::Dangerous, "{id} 应为 Dangerous");
         }
+    }
+
+    /// 0.9.3:register(&self) 支持启动后动态注册。
+    #[test]
+    fn register_with_ref_self_works() {
+        let reg = ActionRegistry::new();
+        assert_eq!(reg.len(), 12);
+        // 注册一个新动作
+        reg.register(Arc::new(OpenSettingsAction)); // 重复 id,应跳过
+        assert_eq!(reg.len(), 12, "重复 id 不应增加数量");
     }
 }

@@ -25,6 +25,26 @@
     { "type": "context", "when": "text_is_non_target_lang", "surface": "priority" }
   ],
   "capabilities": ["query"],
+  "tools": [
+    {
+      "name": "translate",
+      "description": "翻译文本到目标语言。支持中英日韩等多语言互译。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string", "description": "要翻译的文本" },
+          "target_lang": {
+            "type": "string",
+            "description": "目标语言代码",
+            "enum": ["zh", "en", "ja", "ko"],
+            "default": "zh"
+          }
+        },
+        "required": ["text"]
+      },
+      "danger_class": "Safe"
+    }
+  ],
   "settings_schema": [
     {
       "key": "target_lang",

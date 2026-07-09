@@ -16,6 +16,23 @@
     { "type": "keyword", "keyword": "ip", "exclusive": true }
   ],
   "capabilities": ["query"],
+  "tools": [
+    {
+      "name": "get_ip",
+      "description": "获取本机 IP 地址信息，包括本地 IPv4、可选 IPv6、公网 IP 及地理位置。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "include_ipv6": {
+            "type": "boolean",
+            "description": "是否包含 IPv6 地址",
+            "default": false
+          }
+        }
+      },
+      "danger_class": "Safe"
+    }
+  ],
   "settings_schema": [
     {
       "key": "use_ipv6",

@@ -4,6 +4,7 @@ mod app;
 mod domain;
 mod infra;
 
+use domain::execution::Action;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
@@ -340,6 +341,48 @@ fn main() {
             let chord_registry = std::sync::Arc::new(crate::domain::chord::build_default_registry());
             // 0.8.6 Action 统一执行入口
             let action_registry = std::sync::Arc::new(crate::domain::execution::ActionRegistry::new());
+
+            // 0.9.3:注册插件 tool 到 ActionRegistry——让 AI 路由能调用插件能力。
+            // 遍历所有已加载插件的 manifest.tools，为每个 tool 创建 PluginActionAdapter 并注册。
+            {
+                let mut plugin_tool_count = 0usize;
+                for plugin_handle in plugin_engine.all_plugins() {
+                    let manifest = plugin_handle.manifest();
+                    if manifest.tools.is_empty() {
+                        continue;
+                    }
+                    for tool_def in &manifest.tools {
+                        let adapter = crate::domain::plugin::PluginActionAdapter::new(
+                            plugin_handle.clone(),
+                            tool_def,
+                            &manifest.name,
+                        );
+                        if action_registry.get(adapter.id()).is_some() {
+                            tracing::warn!(
+                                plugin = %manifest.id,
+                                tool = %adapter.id(),
+                                "插件 tool id 与已有 Action 冲突,跳过"
+                            );
+                            continue;
+                        }
+                        tracing::info!(
+                            plugin = %manifest.id,
+                            tool = %adapter.id(),
+                            danger = ?tool_def.danger_class,
+                            "注册插件 tool"
+                        );
+                        action_registry.register(std::sync::Arc::new(adapter));
+                        plugin_tool_count += 1;
+                    }
+                }
+                if plugin_tool_count > 0 {
+                    tracing::info!(
+                        count = plugin_tool_count,
+                        total = action_registry.len(),
+                        "插件 tool 注册完成"
+                    );
+                }
+            }
 
             // 0.9.2 Phase 5b:AIProviderRegistry 用 RigFactory 真接 rig-core。
             // AI 配置分片(第 7 分片,独立于 AppConfig 门面);默认 enabled=false,老用户零副作用。

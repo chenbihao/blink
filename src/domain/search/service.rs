@@ -646,12 +646,9 @@ impl SearchService {
             let cfg = registry.config_snapshot();
             let timeout_ms = cfg.slo_hard_timeout_ms.unwrap_or(2500);
 
-            // 0.9.2 第二步:从 ActionRegistry 收集 tools + 构造路由 system prompt
+            // 0.9.3:使用聚合后的 tools 列表（内置动作 3 组 + 插件独立）
             let action_reg = app.state::<Arc<ActionRegistry>>();
-            let tools: Vec<ActionSchema> = action_reg
-                .ids()
-                .filter_map(|id| action_reg.get(id).map(|a| a.schema()))
-                .collect();
+            let tools = crate::domain::execution::group::build_aggregated_tools(&action_reg);
             let tools_count = tools.len();
             let system_prompt = build_routing_prompt(&tools);
 
@@ -704,27 +701,32 @@ impl SearchService {
                         tc_count,
                     );
 
-                    // 0.9.2 第二步:优先处理 tool_call
+                    // 0.9.3:处理 tool_call（支持分组解析）
                     if !resp.tool_calls.is_empty() {
                         let tc = &resp.tool_calls[0]; // 主窗口只取第一个
                         let action_reg = app.state::<Arc<ActionRegistry>>();
 
-                        match action_reg.get(&tc.name) {
-                            Some(action) => {
+                        // 解析 tool_call → (具体 Action, 解析后参数)
+                        // 聚合 tool: name="system_action", arguments={action:"lock"} → (LockAction, {})
+                        // 独立 tool: name="plugin:translate", arguments={text:"hello"} → (PluginAction, {text:"hello"})
+                        let resolved = resolve_tool_call(tc, &action_reg);
+
+                        match resolved {
+                            Some((action, args)) => {
                                 match action.danger_class() {
                                     DangerClass::Safe => {
                                         // Safe:直接执行
-                                        let cx = ActionContext::from_arguments(&app, tc.arguments.clone());
+                                        let cx = ActionContext::from_arguments(&app, args.clone());
                                         match action.execute(&cx).await {
-                                            Ok(_outcome) => {
+                                            Ok(outcome) => {
                                                 tracing::info!(
                                                     target: ai_slo::TARGET,
                                                     "AI tool_call 执行成功: {} args={}",
                                                     tc.name,
-                                                    tc.arguments,
+                                                    args,
                                                 );
-                                                // 执行成功 → 展示"已执行"结果 + 清占位
-                                                emit_ai_result(&app, seq, ai_action_done_entry(&tc.name, action.as_ref()));
+                                                // 执行成功 → 展示结果(含执行输出)
+                                                emit_ai_result(&app, seq, ai_action_done_entry(action.as_ref(), &outcome));
                                             }
                                             Err(e) => {
                                                 tracing::warn!(
@@ -745,7 +747,8 @@ impl SearchService {
                                             tc.name,
                                         );
                                         let title = action.title().resolve(&lang).to_string();
-                                        emit_ai_confirm(&app, seq, &tc.name, &tc.arguments, &title);
+                                        let display_name = resolve_display_name(tc, &action);
+                                        emit_ai_confirm(&app, seq, &display_name, &args, &title);
                                     }
                                 }
                             }
@@ -1138,6 +1141,57 @@ fn build_routing_prompt(tools: &[ActionSchema]) -> String {
     prompt
 }
 
+/// 解析 AI tool_call → 具体 Action + 解析后参数。
+///
+/// **聚合 tool**：name="system_action", arguments={action:"lock"} → (LockAction, {})
+/// **独立 tool**：name="plugin:translate", arguments={text:"hello"} → (PluginAction, {text:"hello"})
+///
+/// 返回 None 表示未找到对应 Action。
+fn resolve_tool_call(
+    tc: &crate::domain::ai::message::ToolCall,
+    registry: &Arc<ActionRegistry>,
+) -> Option<(Arc<dyn crate::domain::execution::Action>, serde_json::Value)> {
+    use crate::domain::execution::group;
+
+    // 检查是否命中分组
+    if group::find_group(&tc.name).is_some() {
+        // 从 arguments 中提取 action 字段
+        let action_id = tc.arguments.get("action")?.as_str()?;
+        let action = registry.get(action_id)?;
+
+        // 移除 action 字段，剩余参数透传
+        let mut args = tc.arguments.clone();
+        if let Some(obj) = args.as_object_mut() {
+            obj.remove("action");
+        }
+
+        Some((action, args))
+    } else {
+        // 独立 tool，直接查找
+        let action = registry.get(&tc.name)?;
+        Some((action, tc.arguments.clone()))
+    }
+}
+
+/// 解析展示名称（用于日志和前端显示）。
+///
+/// 聚合 tool: "system_action" + action="lock" → "lock"
+/// 独立 tool: "plugin:translate" → "plugin:translate"
+fn resolve_display_name(
+    tc: &crate::domain::ai::message::ToolCall,
+    action: &Arc<dyn crate::domain::execution::Action>,
+) -> String {
+    use crate::domain::execution::group;
+
+    if group::find_group(&tc.name).is_some() {
+        // 聚合 tool，用具体 action id
+        action.id().to_string()
+    } else {
+        // 独立 tool，用原始 name
+        tc.name.clone()
+    }
+}
+
 /// AI source 标记——占位与结果统一用此值,前端 `results.js` 现有 merge 按 source
 /// 匹配替换占位(与 plugin placeholder 同机制,零前端改动)。
 pub(crate) const AI_SOURCE: &str = "ai";
@@ -1236,25 +1290,68 @@ fn emit_ai_clear(app: &AppHandle, seq: u64) {
     }
 }
 
-/// AI tool_call 执行成功项——展示"已执行 {动作名}"。
+/// AI tool_call 执行成功项——展示执行结果。
 ///
-/// 与 `ai_result_entry` 类似但文案不同:不是"回车复制回答",而是"已完成"。
-/// 回车/点击无额外操作(执行已在后端完成)。
-fn ai_action_done_entry(_action_id: &str, action: &dyn crate::domain::execution::Action) -> AppEntry {
+/// 与 `ai_result_entry` 类似但语义不同:
+/// - 有执行结果(如 get_ip 返回 IP 地址)→ 展示结果文本,回车可复制
+/// - 无执行结果(如 open_url)→ 展示"已执行 {动作名}"
+fn ai_action_done_entry(
+    action: &dyn crate::domain::execution::Action,
+    outcome: &crate::domain::execution::ActionOutcome,
+) -> AppEntry {
+    use crate::domain::execution::ActionOutcome;
+    use crate::domain::search::ActionKind;
+
     let title = action.title().resolve("zh"); // 默认中文,后续可接 language
-    AppEntry {
-        name: format!("已执行：{title}"),
-        pinyin_name: String::new(),
-        pinyin_full: String::new(),
-        lnk_path: String::new(),
-        is_calc: false,
-        score: 0.7,
-        is_placeholder: false,
-        is_error: false,
-        source: AI_SOURCE.into(),
-        description: Some("AI 已执行此动作".into()),
-        action: Action::default(),
-        score_detail: None,
+
+    // 从 ActionOutcome 提取结果文本
+    let result_text = match outcome {
+        ActionOutcome::Copy { text, .. } => Some(text.clone()),
+        ActionOutcome::Open { path } => Some(format!("已打开: {path}")),
+        ActionOutcome::Emit { .. } => None, // 副作用型,无文本结果
+        ActionOutcome::Nop => None,
+    };
+
+    match result_text {
+        Some(text) if !text.is_empty() => {
+            // 有结果文本 → 展示结果,回车可复制(与 ai_result_entry 一致)
+            AppEntry {
+                name: text.clone(),
+                pinyin_name: String::new(),
+                pinyin_full: String::new(),
+                lnk_path: String::new(),
+                is_calc: false,
+                score: 0.7,
+                is_placeholder: false,
+                is_error: false,
+                source: AI_SOURCE.into(),
+                description: Some(format!("✓ {title} · 回车复制")),
+                action: Action {
+                    kind: ActionKind::Copy,
+                    payload: Some(text),
+                    hint: Some("复制结果".into()),
+                    ..Default::default()
+                },
+                score_detail: None,
+            }
+        }
+        _ => {
+            // 无结果文本 → 展示"已执行"
+            AppEntry {
+                name: format!("✓ 已执行：{title}"),
+                pinyin_name: String::new(),
+                pinyin_full: String::new(),
+                lnk_path: String::new(),
+                is_calc: false,
+                score: 0.7,
+                is_placeholder: false,
+                is_error: false,
+                source: AI_SOURCE.into(),
+                description: Some("AI 已执行此动作".into()),
+                action: Action::default(),
+                score_detail: None,
+            }
+        }
     }
 }
 
