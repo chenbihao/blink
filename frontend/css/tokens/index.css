@@ -1,0 +1,9 @@
+/* ── Token 层汇总 ────────────────────────────────────────────────────────────
+   按铁则顺序：vendor → color → space → type → effect。
+   组件只见语义 token，不见 OP 原始命名。 */
+
+@import '../vendor/open-props.min.css';
+@import './color.css';
+@import './space.css';
+@import './type.css';
+@import './effect.css';

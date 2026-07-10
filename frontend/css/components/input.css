@@ -1,0 +1,110 @@
+/* ── 输入框组件 ───────────────────────────────────────────────────────────────
+   来源：settings-components.css:56-87,285-313 + settings-plugin.css:405-438
+   统一 select padding；SVG 箭头 %236c7086 硬编码接受为已知限制 */
+
+/* 通用输入框 */
+.input-small,
+.input-wide {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius-md);
+  padding: var(--space-sm) var(--space-md);
+  font-size: var(--text-md);
+  height: 32px;
+  font-family: ui-monospace, Consolas, monospace;
+  transition: border-color var(--transition-base), box-shadow var(--transition-base);
+}
+
+.input-small:focus,
+.input-wide:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--ring-focus);
+}
+
+.input-small {
+  width: 80px;
+}
+
+.input-wide {
+  flex: 1;
+  min-width: 200px;
+  max-width: 500px;
+}
+
+/* 数字输入框：隐藏原生 spinner，使用自定义样式 */
+input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+}
+
+/* 文本域 */
+textarea {
+  width: 100%;
+  background: var(--bg-sidebar);
+  color: var(--text);
+  border: 1px solid var(--surface);
+  border-radius: var(--radius-md);
+  padding: var(--space-md);
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
+  resize: vertical;
+}
+
+/* 下拉选择框（SVG 箭头硬编码 %236c7086，跨主题不变） */
+select {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius-md);
+  padding: var(--space-sm) var(--space-xl) var(--space-sm) var(--space-md);
+  font-size: var(--text-md);
+  height: 32px;
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%236c7086'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  cursor: pointer;
+}
+
+select:hover {
+  border-color: var(--text-faint);
+}
+
+select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--ring-focus);
+}
+
+/* Range 输入框 */
+input[type="range"] {
+  width: 200px;
+  accent-color: var(--accent);
+}
+
+/* 数字输入框包装器 */
+.number-input-wrapper {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.number-input-wrapper input[type="number"] {
+  width: 72px;
+  padding: var(--space-sm) var(--space-xs);
+}
+
+/* 只读输入框（双 class 高特异性替代 !important） */
+.input-wide.input-readonly,
+.input-small.input-readonly {
+  background: var(--surface);
+  color: var(--text-dim);
+  cursor: not-allowed;
+}

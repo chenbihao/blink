@@ -1,0 +1,66 @@
+/* ── Spinner 组件（合并 spin/ai-spin → blink-spin）───────────────────────────
+   来源：style.css:195-207,370-377 + settings-modal.css:619-630
+   统一 @keyframes blink-spin，消除重名冲突。 */
+
+@keyframes blink-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* 基础 spinner */
+.spinner {
+  display: inline-block;
+  border: 2px solid var(--surface-2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: blink-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+/* 尺寸修饰 */
+.spinner-sm {
+  width: 12px;
+  height: 12px;
+}
+
+.spinner-md {
+  width: 16px;
+  height: 16px;
+}
+
+.spinner-lg {
+  width: 20px;
+  height: 20px;
+}
+
+/* 主窗口 loading spinner（#results li .loading-spinner） */
+#results li .loading-spinner {
+  width: 16px;
+  height: 16px;
+  margin-right: 12px;
+  border: 2px solid var(--surface-2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: blink-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+/* AI 占位徽章内嵌小 spinner（12px，accent 底 + 白色描一段） */
+#results li .ai-badge-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid color-mix(in srgb, var(--on-accent) 35%, transparent);
+  border-top-color: var(--on-accent);
+  border-radius: 50%;
+  animation: blink-spin 0.8s linear infinite;
+}
+
+/* AI 设置页 spinner（原 ai-spinner） */
+.ai-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--surface-2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: blink-spin 0.6s linear infinite;
+}

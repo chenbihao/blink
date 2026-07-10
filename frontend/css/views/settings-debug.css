@@ -1,5 +1,6 @@
 /* ═══════════════════════════════════════════════════════════════════════════
-   settings-debug.css — 调试面板：诊断卡片、性能统计、日志区
+   views/settings-debug.css — 设置页·调试视图（诊断卡片、性能统计、日志区）
+   搬自 settings-debug.css（0.9.5 原样搬迁）
    ═══════════════════════════════════════════════════════════════════════════ */
 
 /* ── 调试面板 ─────────────────────────────────────────────────────────────── */
@@ -14,7 +15,7 @@
 .debug-card {
   background: var(--bg-sidebar);
   border: 1px solid var(--surface);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-md);
   padding: 16px;
   text-align: center;
 }
@@ -27,7 +28,7 @@
 
 .debug-value {
   font-size: 24px;
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   font-family: ui-monospace, Consolas, monospace;
   color: var(--green);
 }
@@ -35,7 +36,7 @@
 .debug-value.no-data {
   font-size: 14px;
   color: var(--text-faint);
-  font-weight: 400;
+  font-weight: var(--weight-normal);
 }
 
 .debug-value.error {
@@ -52,7 +53,7 @@
 /* 子标题 h4（"慢查询日志"） */
 .perf-subsection-title {
   font-size: 13px;
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   color: var(--text);
   margin-top: 20px;
   margin-bottom: 12px;
@@ -66,7 +67,7 @@
 
 .perf-slow-title {
   font-size: 12px;
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   color: var(--text-sub);
   margin-bottom: 6px;
 }
@@ -102,7 +103,7 @@
 
 .perf-slow-time {
   color: var(--red);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   font-family: ui-monospace, Consolas, monospace;
   min-width: 60px;
   text-align: right;
@@ -152,6 +153,8 @@
 
 #debug .log-path-row {
   align-items: flex-start;
+  min-height: auto; /* 纯文本行不需要 48px 统一高度 */
+  padding: var(--space-sm) 0;
 }
 
 #log-file-path {
@@ -159,5 +162,5 @@
   word-break: break-all;
   font-size: 12px;
   color: var(--text-sub);
-  line-height: 1.6;
+  line-height: var(--leading-relaxed);
 }

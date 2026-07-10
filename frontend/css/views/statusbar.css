@@ -1,0 +1,50 @@
+/* ── 状态栏 views（#statusbar）────────────────────────────────────────────── */
+/* 来源 style.css:413-459。scoped #statusbar .kbd 覆盖留此（晚于 components/kbd.css 加载）。 */
+
+/* ── 底部提示栏 ───────────────────────────────────────────────────────────────
+   无结果时 .visible 移除 → display:none，不占窗口高度。 */
+#statusbar {
+  display: none;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: var(--space-md);
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--surface);
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}
+
+#statusbar.visible {
+  display: flex;
+}
+
+#statusbar .hint-right {
+  font-family: ui-monospace, Consolas, monospace;
+}
+
+/* statusbar 里的键帽稍收紧字距，跟 11px 文字视觉对齐；
+   相邻键帽之间用 margin-left 表达"连续按键"，键帽外侧文本用 margin-right 隔开一空格。 */
+#statusbar .kbd {
+  font-size: 0.95em;
+  margin-right: 0.2em; /* 键帽后跟文字：Enter 打开 */
+}
+#statusbar .kbd + .kbd {
+  margin-left: -0.1em; /* 键帽紧邻键帽：↑↓ 视觉靠近，无额外间距 */
+}
+
+/* 0.8.3 §4.9：Context Suggestion 来源提示（"· 来自划词"）弱化——比常规 hint 更浅,
+   让用户扫一眼就知道是元信息不是核心提示。中文不用斜体（辨识度差）。 */
+#statusbar .hint-origin {
+  opacity: var(--opacity-dim);
+}
+
+/* Chord 降级到 statusbar（有 Ghost 时右侧显示键帽） */
+#statusbar .chord-sep {
+  color: var(--text-faint);
+  opacity: var(--opacity-disabled);
+  margin: 0 0.5em;
+  font-weight: var(--weight-light);
+}
+#statusbar .chord-label {
+  opacity: var(--opacity-muted);
+}

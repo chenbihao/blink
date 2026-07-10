@@ -1,0 +1,38 @@
+/* ── 右键菜单组件（从 contextmenu-popup.html 内联抽出）───────────────────────
+   来源：contextmenu-popup.html:25-59 */
+
+.context-menu {
+  min-width: 170px;
+  padding: var(--space-sm);
+  background: var(--bg);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+  font-size: var(--text-base);
+  user-select: none;
+  color: var(--text);
+}
+
+.context-menu-item {
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.context-menu-item:hover {
+  background: var(--surface);
+}
+
+.context-menu-item.danger {
+  color: var(--red);
+}
+
+.context-menu-item.danger:hover {
+  background: var(--danger-hover-bg);
+}
+
+.context-menu-sep {
+  height: 1px;
+  margin: var(--space-xs) var(--space-sm);
+  background: var(--surface);
+}

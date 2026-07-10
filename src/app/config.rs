@@ -159,6 +159,9 @@ pub struct AppearanceConfig {
     pub auto_start: bool,
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    /// 主窗口透明度 (0.0 ~ 1.0)，默认 1.0 不透明
+    #[serde(default = "default_window_opacity")]
+    pub window_opacity: f64,
 }
 
 impl Default for AppearanceConfig {
@@ -168,6 +171,7 @@ impl Default for AppearanceConfig {
             language: default_language(),
             auto_start: false,
             log_level: default_log_level(),
+            window_opacity: default_window_opacity(),
         }
     }
 }
@@ -270,6 +274,10 @@ fn default_surface_takeover_enabled() -> bool {
     true
 }
 
+fn default_window_opacity() -> f64 {
+    1.0
+}
+
 // ── AppConfig 新增字段默认值（0.5） ────────────────────────────────────────────────
 
 fn default_theme() -> String {
@@ -318,7 +326,6 @@ fn default_autosuggest_tab_key() -> String {
 
 /// 应用搜索配置（StartMenuEngine）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct StartMenuConfig {
     /// 是否启用应用搜索
     #[serde(default = "default_true")]
@@ -399,7 +406,6 @@ fn default_local_max_results() -> u32 {
 /// - `"everything"`：只用 Everything HTTP，不可用则无文件结果
 /// - `"local"`：只用本地目录扫描，不尝试 Everything
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct FileSearchConfig {
     /// 是否启用文件搜索（总开关）
     #[serde(default = "default_file_search_enabled")]
@@ -517,6 +523,9 @@ pub struct AppConfig {
     /// 用户禁用的 Chord 动作 id 列表（0.8.5 §6.6）。存 action id，触发/列表时跳过。
     #[serde(default)]
     pub disabled_chord_actions: Vec<String>,
+    /// 主窗口透明度 (0.0 ~ 1.0)，默认 1.0 不透明
+    #[serde(default = "default_window_opacity")]
+    pub window_opacity: f64,
 }
 
 impl Default for AppConfig {
@@ -545,6 +554,7 @@ impl Default for AppConfig {
             chord_enabled: false,
             chord_hint_visible: true,
             disabled_chord_actions: Vec::new(),
+            window_opacity: default_window_opacity(),
         }
     }
 }
@@ -553,7 +563,6 @@ impl Default for AppConfig {
 /// 聚合更新（`update_general_config`）避免单字段命令爆炸。
 /// `proactive_enabled` / `empty_query_topn` 属 P3 主动建议，暂不纳入（字段仍保留在 AppConfig）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct GeneralConfig {
     /// 主题：auto / light / dark
     pub theme: String,
@@ -696,6 +705,7 @@ pub async fn get_config(pool: &SqlitePool) -> AppConfig {
         language: appearance.language,
         auto_start: appearance.auto_start,
         log_level: appearance.log_level,
+        window_opacity: appearance.window_opacity,
         // ── SearchConfig 分片 ─────────────────────────────────
         surface_takeover_enabled: search.surface_takeover_enabled,
         search_history_enabled: search.search_history_enabled,
@@ -741,6 +751,7 @@ pub async fn save_config(pool: &SqlitePool, config: &AppConfig) -> Result<(), St
         language: config.language.clone(),
         auto_start: config.auto_start,
         log_level: config.log_level.clone(),
+        window_opacity: config.window_opacity,
     }).await?;
 
     ConfigStore::set(pool, &SearchConfig {

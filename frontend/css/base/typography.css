@@ -1,0 +1,13 @@
+/* ── 排版基线（统一 font-family）──────────────────────────────────────────────
+   来源：style.css:14-18 + settings-base.css:22
+   所有窗口共享同一字体栈。 */
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  color: var(--text);
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}

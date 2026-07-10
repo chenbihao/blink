@@ -1,0 +1,64 @@
+/* ── 按钮组件（5 变体）────────────────────────────────────────────────────────
+   来源：settings-components.css:91-135 + settings-modal.css:251-263
+   2026-07-11 token 替换 */
+
+.btn {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius-md);
+  padding: var(--space-sm) var(--space-lg);
+  font-size: var(--text-md);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.btn:hover {
+  background: var(--surface-2);
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--bg);
+  border: none;
+  border-radius: var(--radius-md);
+  padding: var(--space-sm) 14px;
+  font-size: var(--text-md);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.btn-primary:hover {
+  filter: brightness(1.1);
+}
+
+.btn-danger {
+  background: var(--red-bg);
+  color: var(--red);
+  border: 1px solid var(--red-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-sm) var(--space-lg);
+  font-size: var(--text-md);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.btn-danger:hover {
+  background: var(--red-border);
+}
+
+.btn-small {
+  background: var(--surface);
+  color: var(--text-sub);
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius-md);
+  padding: var(--space-sm) var(--space-lg);
+  font-size: var(--text-base);
+  cursor: pointer;
+  transition: all var(--transition-base);
+}
+
+.btn-small:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}

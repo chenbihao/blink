@@ -1,0 +1,19 @@
+/* ── 全局 reset（合并 5 份重复）────────────────────────────────────────────────
+   来源：style.css:1-12 + settings-base.css:11-25 + chord-ball.html:8-15
+         + chord-screenshot.html:7-23 + contextmenu-popup.html:11-23
+   并集不丢项；chord-screenshot 的 0.15 兜底背景注释一起搬。 */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+}

@@ -546,7 +546,7 @@ pub async fn get_config(app: tauri::AppHandle) -> crate::app::config::AppConfig 
 /// **AppConfig 分片**：`language` / `log_level` / `auto_start` / `hotkey` /
 /// `tap_threshold` / `grace_period` / `general_config` / `autosuggest` /
 /// `chord_toggles` / `clipboard_enabled` / `disabled_builtin_actions` /
-/// `disabled_context_bindings` / `disabled_chord_actions`
+/// `disabled_context_bindings` / `disabled_chord_actions` / `window_opacity`
 ///
 /// **引擎配置**：`file_search` / `start_menu_config` / `calc_config` / `global_proxy`
 ///
@@ -680,6 +680,16 @@ pub async fn set_config(
             let _ = app.emit("blink://config-changed", ());
             tracing::info!(count = disabled.len(), ?disabled, "Chord 动作禁用列表已更新");
         }
+        "window_opacity" => {
+            let opacity: f64 = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            let opacity = opacity.clamp(0.2, 1.0); // 最低 20% 防止完全不可见
+            let mut config = crate::app::config::get_config(&pool).await;
+            config.window_opacity = opacity;
+            crate::app::config::save_config(&pool, &config).await?;
+            // 前端通过 blink://config-changed 事件自行读取并设置 CSS 变量
+            let _ = app.emit("blink://config-changed", ());
+            tracing::info!(opacity, "主窗口透明度已更新");
+        }
 
         // ── 引擎配置 ──────────────────────────────────────────────────────
         "file_search" => {
@@ -776,6 +786,8 @@ pub async fn set_config(
                 tier_router = ai.tier_router.is_some(),
                 tier_light = ai.tier_light.is_some(),
                 tier_main = ai.tier_main.is_some(),
+                direct_execute_safe_actions = ai.direct_execute_safe_actions,
+                slo_hard_timeout_ms = ?ai.slo_hard_timeout_ms,
                 "AI 配置已更新"
             );
         }

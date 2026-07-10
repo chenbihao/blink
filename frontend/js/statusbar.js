@@ -9,7 +9,7 @@
 //! 全部改用 i18n 模板 `{{key:X}}` 占位符 + `renderHint` 渲染出 <kbd> DOM。
 
 import { actionHint } from "./hints.js";
-import { t } from "./i18n.js";
+import { t } from "./i18n/index.js";
 import * as ghost from "./ghost.js";
 import * as chord from "./chord.js";
 import * as autosuggestConfig from "./autosuggest-config.js";

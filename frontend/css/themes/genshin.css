@@ -1,6 +1,8 @@
 /* ── 原神主题 ────────────────────────────────────────────────────────────────
    来自原神角色配色方案，每个角色 5-6 色。
-   surface 从 bg 混合派生保持中性，accent 为角色标志色。 */
+   surface 从 bg 混合派生保持中性，accent 为角色标志色。
+
+   公共变量（11 套完全相同）提到底部通配选择器，每套只保留角色特有色。 */
 
 [data-theme="genshin-kokomi"] {
   --bg: #2e2c69;
@@ -14,15 +16,6 @@
   --text-faint: #7a617e;
   --accent: #8e8dc8;
   --accent-bg: rgba(142, 141, 200, 0.15);
-  --green: #a6e3a1;
-  --red: #f38ba8;
-  --red-bg: #482932;
-  --red-border: #794554;
-  --green-bg: #314430;
-  --shadow: rgba(0, 0, 0, 0.6);
-  --shadow-strong: rgba(0, 0, 0, 0.6);
-  --border-glow: rgba(255, 255, 255, 0.05);
-  --danger-hover-bg: rgba(243, 139, 168, 0.12);
 }
 
 [data-theme="genshin-fischl"] {
@@ -37,15 +30,6 @@
   --text-faint: #ac9ba3;
   --accent: #b7b3ed;
   --accent-bg: rgba(183, 179, 237, 0.15);
-  --green: #a6e3a1;
-  --red: #f38ba8;
-  --red-bg: #482932;
-  --red-border: #794554;
-  --green-bg: #314430;
-  --shadow: rgba(0, 0, 0, 0.6);
-  --shadow-strong: rgba(0, 0, 0, 0.6);
-  --border-glow: rgba(255, 255, 255, 0.05);
-  --danger-hover-bg: rgba(243, 139, 168, 0.12);
 }
 
 [data-theme="genshin-nilou"] {
@@ -60,15 +44,6 @@
   --text-faint: #607f9b;
   --accent: #d64f38;
   --accent-bg: rgba(214, 79, 56, 0.15);
-  --green: #a6e3a1;
-  --red: #f38ba8;
-  --red-bg: #482932;
-  --red-border: #794554;
-  --green-bg: #314430;
-  --shadow: rgba(0, 0, 0, 0.6);
-  --shadow-strong: rgba(0, 0, 0, 0.6);
-  --border-glow: rgba(255, 255, 255, 0.05);
-  --danger-hover-bg: rgba(243, 139, 168, 0.12);
 }
 
 [data-theme="genshin-ganyu"] {
@@ -83,15 +58,6 @@
   --text-faint: #74809e;
   --accent: #c4d8f2;
   --accent-bg: rgba(196, 216, 242, 0.15);
-  --green: #a6e3a1;
-  --red: #f38ba8;
-  --red-bg: #482932;
-  --red-border: #794554;
-  --green-bg: #314430;
-  --shadow: rgba(0, 0, 0, 0.6);
-  --shadow-strong: rgba(0, 0, 0, 0.6);
-  --border-glow: rgba(255, 255, 255, 0.05);
-  --danger-hover-bg: rgba(243, 139, 168, 0.12);
 }
 
 [data-theme="genshin-hutao"] {
@@ -106,15 +72,6 @@
   --text-faint: #795649;
   --accent: #c94737;
   --accent-bg: rgba(201, 71, 55, 0.15);
-  --green: #a6e3a1;
-  --red: #f38ba8;
-  --red-bg: #482932;
-  --red-border: #794554;
-  --green-bg: #314430;
-  --shadow: rgba(0, 0, 0, 0.6);
-  --shadow-strong: rgba(0, 0, 0, 0.6);
-  --border-glow: rgba(255, 255, 255, 0.05);
-  --danger-hover-bg: rgba(243, 139, 168, 0.12);
 }
 
 [data-theme="genshin-diona"] {
@@ -129,15 +86,6 @@
   --text-faint: #a29498;
   --accent: #dd9e5b;
   --accent-bg: rgba(221, 158, 91, 0.15);
-  --green: #a6e3a1;
-  --red: #f38ba8;
-  --red-bg: #482932;
-  --red-border: #794554;
-  --green-bg: #314430;
-  --shadow: rgba(0, 0, 0, 0.6);
-  --shadow-strong: rgba(0, 0, 0, 0.6);
-  --border-glow: rgba(255, 255, 255, 0.05);
-  --danger-hover-bg: rgba(243, 139, 168, 0.12);
 }
 
 [data-theme="genshin-nahida"] {
@@ -152,15 +100,6 @@
   --text-faint: #776f5d;
   --accent: #b9c78d;
   --accent-bg: rgba(185, 199, 141, 0.15);
-  --green: #a6e3a1;
-  --red: #f38ba8;
-  --red-bg: #482932;
-  --red-border: #794554;
-  --green-bg: #314430;
-  --shadow: rgba(0, 0, 0, 0.6);
-  --shadow-strong: rgba(0, 0, 0, 0.6);
-  --border-glow: rgba(255, 255, 255, 0.05);
-  --danger-hover-bg: rgba(243, 139, 168, 0.12);
 }
 
 [data-theme="genshin-ayaka"] {
@@ -175,15 +114,6 @@
   --text-faint: #c7b0be;
   --accent: #ae6b81;
   --accent-bg: rgba(174, 107, 129, 0.15);
-  --green: #a6e3a1;
-  --red: #f38ba8;
-  --red-bg: #482932;
-  --red-border: #794554;
-  --green-bg: #314430;
-  --shadow: rgba(0, 0, 0, 0.6);
-  --shadow-strong: rgba(0, 0, 0, 0.6);
-  --border-glow: rgba(255, 255, 255, 0.05);
-  --danger-hover-bg: rgba(243, 139, 168, 0.12);
 }
 
 [data-theme="genshin-klee"] {
@@ -198,15 +128,6 @@
   --text-faint: #8b584a;
   --accent: #b43a24;
   --accent-bg: rgba(180, 58, 36, 0.15);
-  --green: #a6e3a1;
-  --red: #f38ba8;
-  --red-bg: #482932;
-  --red-border: #794554;
-  --green-bg: #314430;
-  --shadow: rgba(0, 0, 0, 0.6);
-  --shadow-strong: rgba(0, 0, 0, 0.6);
-  --border-glow: rgba(255, 255, 255, 0.05);
-  --danger-hover-bg: rgba(243, 139, 168, 0.12);
 }
 
 [data-theme="genshin-sigewinne"] {
@@ -221,15 +142,6 @@
   --text-faint: #f3f7fb;
   --accent: #d55276;
   --accent-bg: rgba(213, 82, 118, 0.15);
-  --green: #a6e3a1;
-  --red: #f38ba8;
-  --red-bg: #482932;
-  --red-border: #794554;
-  --green-bg: #314430;
-  --shadow: rgba(0, 0, 0, 0.6);
-  --shadow-strong: rgba(0, 0, 0, 0.6);
-  --border-glow: rgba(255, 255, 255, 0.05);
-  --danger-hover-bg: rgba(243, 139, 168, 0.12);
 }
 
 [data-theme="genshin-sucrose"] {
@@ -244,6 +156,10 @@
   --text-faint: #46606b;
   --accent: #7ba28c;
   --accent-bg: rgba(123, 162, 140, 0.15);
+}
+
+/* ── 公共变量（11 套完全相同） ────────────────────────────────────────────── */
+[data-theme^="genshin-"] {
   --green: #a6e3a1;
   --red: #f38ba8;
   --red-bg: #482932;

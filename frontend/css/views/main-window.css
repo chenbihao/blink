@@ -1,0 +1,179 @@
+/* ── 主窗口 views（#app / #search-bar / #query / ghost overlay）────────── */
+/* 来源 style.css:20-144。Step 5 拆分。body.chord-visible #ghost-overlay:has(...) 恐怖选择器原样保留，勿改 token。 */
+
+/* ── 卡片容器 ─────────────────────────────────────────────────────────────────
+   #app 四周 padding 即「呼吸空间」+ 拖动手柄（data-tauri-drag-region="deep"）。
+   高度由内容撑开，JS 测真实高度回传 resize_window，不再硬编码。
+   Step 7: 毛玻璃效果 + 双层阴影 + 内描边高光。
+   毛玻璃默认开启，可通过 body.no-glass 禁用（集显/虚拟机/远程桌面性能兜底）。 */
+#app {
+  display: flex;
+  flex-direction: column;
+  /* 0.5.3+ 右键菜单是独立窗口，不再需要 min-height: 100vh 覆盖背景；
+     移除后清空查询时窗口才能正确收缩回输入框高度。 */
+  width: 100%;
+  padding: var(--space-md);
+  background: var(--bg-glass);
+  border-radius: 8px;             /* 与 DWMWCP_ROUND (~8px) 同步，避免圆角缝隙 */
+  overflow: hidden;
+  box-shadow: var(--shadow-card);
+  cursor: default;
+  /* 毛玻璃效果（Windows 11 亚克力） */
+  backdrop-filter: var(--blur-glass);
+  -webkit-backdrop-filter: var(--blur-glass);
+  /* 内描边高光（模拟光源从顶部照射） */
+  position: relative;
+}
+
+/* 毛玻璃禁用态（性能兜底） */
+body.no-glass #app {
+  background: var(--bg);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+#app::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--border-glow) 20%,
+    var(--border-glow) 80%,
+    transparent
+  );
+  pointer-events: none;
+  z-index: var(--z-base);
+}
+
+body.no-glass #app::before {
+  display: none;
+}
+
+/* ── 输入区 ───────────────────────────────────────────────────────────────────
+   #search-bar 是输入框的容器；输入框透明融入卡片。 */
+#search-bar {
+  flex-shrink: 0;
+  /* 排除拖动区域：输入区不能拖，否则第一次点击触发拖动检测而不是输入 */
+  -webkit-app-region: no-drag;
+}
+
+#query {
+  width: 100%;
+  padding: var(--space-sm) var(--space-md);
+  font-size: var(--text-2xl);
+  background: transparent;
+  color: var(--text);
+  border: none;
+  outline: none;
+  user-select: text;
+  caret-color: var(--accent);
+  line-height: var(--leading-snug);
+  /* 排除拖动区域：输入框不能拖，否则第一次点击触发拖动检测而不是输入 */
+  -webkit-app-region: no-drag;
+  /* Step 7: focus 呼吸描边 */
+  border-radius: var(--radius-md);
+  transition: box-shadow var(--transition-base) ease;
+}
+
+/* focus 描边已移除外层已有边框，不需要套在输入框上的描边 */
+
+/* 呼吸描边效果不佳，暂时禁用
+@keyframes focus-breathe {
+  0%, 100% {
+    box-shadow: 0 0 0 2px var(--accent-bg), 0 0 12px color-mix(in srgb, var(--accent) 20%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 3px var(--accent-bg), 0 0 16px color-mix(in srgb, var(--accent) 30%, transparent);
+  }
+} */
+
+#query::placeholder {
+  color: var(--text-faint);
+  font-weight: var(--weight-light);
+}
+
+/* ── Ghost overlay（0.8.1 §2.6）─────────────────────────────────────────────
+   .input-wrap 定位容器；#ghost-overlay 与 <input> 绝对定位重叠，同 padding/font/line-height。
+   .ghost-typed 与用户输入等宽但透明（占位对齐），.ghost-suggest 灰色显示补全提示。
+   pointer-events:none 让键盘/鼠标事件全部落到 <input>。 */
+.input-wrap {
+  position: relative;
+  width: 100%;
+}
+
+#ghost-overlay {
+  position: absolute;
+  inset: 0;
+  padding: var(--space-sm) var(--space-md); /* 与 #query 完全一致 */
+  font-size: var(--text-2xl);
+  line-height: var(--leading-snug);
+  pointer-events: none;
+  white-space: pre; /* 保留用户输入里的空格对齐 */
+  overflow: hidden;
+  font-family: inherit;
+}
+
+#ghost-overlay .ghost-typed {
+  color: transparent; /* 只占位，实际字符由下层 <input> 显示 */
+}
+
+#ghost-overlay .ghost-suggest {
+  /* 纯"影子"提示——只有 fuzzy 补全场景（display 非空）才会有文字。
+     键帽 chip 不放这里，走 statusbar（视觉分层：passive suggestion vs active hint）。 */
+  color: var(--text-faint);
+  opacity: var(--opacity-faint);
+}
+
+/* Context 类 Suggestion（0.8.3 §4.9 弱区分）：只降透明度,不用斜体——
+   中文斜体在小字号下辨识度差,弱化改由更低 opacity + 微调字号承担。 */
+#ghost-overlay .ghost-suggest.ghost-context {
+  opacity: var(--opacity-faint);
+}
+
+/* Chord 提示（0.8.5 §6.4）：`<kbd>Alt</kbd><kbd>A</kbd> 截图 · ...` 键帽 + 标签影子。
+   显示条件三重与门:
+   1. body.chord-visible（keyboard.js 设,联动 chordEligible: query 空 + 结果空 + Alt 按下）
+   2. .ghost-suggest 为空（Ghost 补全优先——补全是强意图信号,Chord 是弱待命列表,不共存）
+   3. .ghost-chord 自身非空（数据未加载时不显示空框）
+   键帽走 kbd.css 通用样式,标签更淡与键帽形成对比。 */
+#ghost-overlay .ghost-chord {
+  display: none;
+  font-size: 0.72em; /* 相对 overlay 18px → ~13px，键帽再按 kbd.css 的 0.9em 收缩 */
+  color: var(--text-faint);
+  vertical-align: middle;
+  /* 让内嵌的 kbd/chord-item 恢复正常 white-space 排布,避免继承 overlay 的 pre 造成键帽间大空隙 */
+  white-space: normal;
+}
+
+body.chord-visible #ghost-overlay:has(.ghost-suggest:empty) .ghost-chord:not(:empty) {
+  display: inline;
+}
+
+#ghost-overlay .ghost-chord .chord-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  color: var(--text);
+  opacity: var(--opacity-muted);
+}
+
+#ghost-overlay .ghost-chord .chord-sep {
+  /* 竖线 + 左右大 margin,视觉上强分组边界（比 · 显著）
+     opacity 略低,不抢键帽/标签的注意力 */
+  color: var(--text-faint);
+  opacity: var(--opacity-disabled);
+  margin: 0 0.7em;
+  font-weight: var(--weight-light);
+}
+
+/* Ghost 有内容时隐藏输入框自身 placeholder（0.8.3）:
+   空 query + Context Ghost 场景下,placeholder「输入应用名、计算…」会与 Ghost 文字
+   重叠。ghost.js 在 update 时给 <input> 加 data-ghost-active 属性,由此规则接管。 */
+#query[data-ghost-active]::placeholder {
+  color: transparent;
+}

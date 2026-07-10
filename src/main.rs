@@ -172,16 +172,19 @@ fn main() {
                 });
             }
 
-            // 托盘菜单：设置 + 退出
+            // 托盘菜单：设置 + 关于 + 分隔线 + 退出
             let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
+            let about = MenuItem::with_id(app, "about", "About", true, None::<&str>)?;
+            let sep = tauri::menu::PredefinedMenuItem::separator(app)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Blink", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&settings, &quit])?;
+            let menu = Menu::with_items(app, &[&settings, &about, &sep, &quit])?;
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .tooltip("Blink")
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "settings" => open_settings(app),
+                    "about" => open_about(app),
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -212,6 +215,8 @@ fn main() {
             let plugin_engine = std::sync::Arc::new(domain::plugin::PluginEngine::new(plugins.clone(), pool.clone(), proxy));
             // 0.4→0.5 自动迁移（首次运行时执行一次，后续 marker 跳过；空 plugins 时循环空转）
             tauri::async_runtime::block_on(infra::data::history::migrate_0_4_to_0_5(&pool, &plugins));
+            // 0.9.5 camelCase→snake_case 迁移（前端重构统一字段命名，存量 DB 需改写）
+            tauri::async_runtime::block_on(infra::data::history::migrate_camelcase_to_snake(&pool));
             // 加载/初始化每个插件配置(不存在则写默认 {enabled, settings:null})。
             tauri::async_runtime::block_on(plugin_engine.init_configs());
 
@@ -402,7 +407,7 @@ fn main() {
                 enabled = ai_config.enabled,
                 providers = ai_config.providers.len(),
                 pool_size = ai_registry.size(),
-                "AIProviderRegistry 已构造(0.9.2 Phase 5b RigFactory)"
+                "AIProviderRegistry 已构造(5b RigFactory)"
             );
 
             // PluginEngine：clone 一份给 AppContext，原值继续 manage
@@ -542,6 +547,15 @@ fn main() {
 /// 打开设置窗口（委托给 window 模块统一实现）。
 fn open_settings(app: &tauri::AppHandle) {
     infra::platform::window::open_settings(app);
+}
+
+/// 打开设置窗口并定位到「关于」Tab。
+fn open_about(app: &tauri::AppHandle) {
+    open_settings(app);
+    if let Some(w) = app.get_webview_window("settings") {
+        // HTML 异步加载，需延迟等 DOM 就绪后再切 Tab
+        let _ = w.eval("setTimeout(() => document.querySelector('.tab[data-tab=\"about\"]')?.click(), 300)");
+    }
 }
 
 /// 最小 percent-decode：还原前端 `encodeURIComponent` 编码的图标路径。

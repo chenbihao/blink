@@ -75,3 +75,16 @@ export async function applyThemeFromConfig() {
   }
   applyTheme(mode);
 }
+
+/** 从 AppConfig 读 window_opacity 并设置 CSS 变量 --glass-opacity。启动时与每次 shown/config-changed 刷新。 */
+export async function applyGlassOpacityFromConfig() {
+  try {
+    const cfg = await invoke("get_config");
+    if (cfg && cfg.window_opacity !== undefined) {
+      document.documentElement.style.setProperty("--glass-opacity", cfg.window_opacity);
+    }
+  } catch (e) {
+    console.error("applyGlassOpacityFromConfig: 读 config 失败", e);
+  }
+}
+

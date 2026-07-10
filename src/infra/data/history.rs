@@ -88,6 +88,81 @@ pub async fn migrate_0_4_to_0_5(
     tracing::info!("0.4→0.5 配置迁移完成");
 }
 
+/// 0.9.5 前端重构把 camelCase 字段名统一为 snake_case，同时移除了后端 `serde(rename_all = "camelCase")`。
+/// 存量 DB 中的旧 JSON 仍是 camelCase，直接反序列化会静默 fallback 默认值（用户配置丢失）。
+/// 此迁移把三个 config key 的字段名从 camelCase 改写为 snake_case，跑一次后写 marker 跳过。
+pub async fn migrate_camelcase_to_snake(pool: &SqlitePool) {
+    const MARKER_KEY: &str = "migration_camelcase_to_snake_done";
+    if get_config(pool, MARKER_KEY).await.is_some() {
+        return;
+    }
+    tracing::info!("开始执行 camelCase→snake_case 配置迁移");
+
+    // 字段映射表：camelCase → snake_case
+    let general_map: &[(&str, &str)] = &[
+        ("searchHistoryEnabled", "search_history_enabled"),
+        ("searchHistoryDays", "search_history_days"),
+        ("maxResults", "max_results"),
+        ("pageSize", "page_size"),
+    ];
+    let start_menu_map: &[(&str, &str)] = &[
+        ("scanDepth", "scan_depth"),
+        ("includeUwp", "include_uwp"),
+    ];
+    let file_search_map: &[(&str, &str)] = &[
+        ("dataSource", "data_source"),
+        ("everythingPort", "everything_port"),
+        ("maxResults", "max_results"),
+        ("localDirs", "local_dirs"),
+        ("localMaxDepth", "local_max_depth"),
+        ("localCacheTtlSec", "local_cache_ttl_sec"),
+        ("localMaxResults", "local_max_results"),
+    ];
+
+    let tasks: &[(&str, &[(&str, &str)])] = &[
+        ("general_config", general_map),
+        ("engine:start_menu", start_menu_map),
+        ("engine:file_search", file_search_map),
+    ];
+
+    for &(key, ref map) in tasks {
+        let Some(json_str) = get_config(pool, key).await else {
+            continue;
+        };
+        let Ok(mut obj) = serde_json::from_str::<serde_json::Value>(&json_str) else {
+            tracing::warn!(key, "配置 JSON 解析失败，跳过迁移");
+            continue;
+        };
+        let Some(map_obj) = obj.as_object_mut() else {
+            continue;
+        };
+        let mut changed = false;
+        for &(from, to) in map.iter() {
+            if let Some(val) = map_obj.remove(from) {
+                map_obj.insert(to.to_string(), val);
+                changed = true;
+            }
+        }
+        if changed {
+            match serde_json::to_string(&obj) {
+                Ok(new_json) => {
+                    if let Err(e) = set_config(pool, key, &new_json).await {
+                        tracing::warn!(key, error = %e, "迁移写入失败");
+                    } else {
+                        tracing::info!(key, "camelCase→snake_case 迁移完成");
+                    }
+                }
+                Err(e) => tracing::warn!(key, error = %e, "迁移序列化失败"),
+            }
+        }
+    }
+
+    if let Err(e) = set_config(pool, MARKER_KEY, "1").await {
+        tracing::warn!(error = %e, "迁移标记写入失败");
+    }
+    tracing::info!("camelCase→snake_case 配置迁移完成");
+}
+
 /// 记录一次执行：存在则 hit_count+1，不存在则插入。
 pub async fn record_launch(pool: &SqlitePool, lnk_path: &str) {
     let now = chrono::Utc::now().timestamp();
@@ -215,4 +290,126 @@ pub fn db_path_str() -> String {
 fn db_path() -> PathBuf {
     let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(appdata).join("blink").join("blink.db")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn in_memory_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory pool");
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS config (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create config table");
+        pool
+    }
+
+    #[test]
+    fn camelcase_to_snake_migrates_general_config() {
+        tauri::async_runtime::block_on(async {
+            let pool = in_memory_pool().await;
+            // 模拟旧前端写入的 camelCase JSON
+            let old_json = r#"{"theme":"gruvbox","searchHistoryEnabled":false,"searchHistoryDays":60,"maxResults":25,"pageSize":7}"#;
+            set_config(&pool, "general_config", old_json).await.unwrap();
+
+            migrate_camelcase_to_snake(&pool).await;
+
+            let migrated = get_config(&pool, "general_config").await.unwrap();
+            let v: serde_json::Value = serde_json::from_str(&migrated).unwrap();
+            assert_eq!(v["search_history_enabled"], false);
+            assert_eq!(v["search_history_days"], 60);
+            assert_eq!(v["max_results"], 25);
+            assert_eq!(v["page_size"], 7);
+            assert_eq!(v["theme"], "gruvbox");
+            // 旧 camelCase key 应已消失
+            assert!(v.get("searchHistoryEnabled").is_none());
+            assert!(v.get("maxResults").is_none());
+        });
+    }
+
+    #[test]
+    fn camelcase_to_snake_migrates_start_menu() {
+        tauri::async_runtime::block_on(async {
+            let pool = in_memory_pool().await;
+            let old_json = r#"{"enabled":true,"scanDepth":5,"includeUwp":false}"#;
+            set_config(&pool, "engine:start_menu", old_json).await.unwrap();
+
+            migrate_camelcase_to_snake(&pool).await;
+
+            let migrated = get_config(&pool, "engine:start_menu").await.unwrap();
+            let v: serde_json::Value = serde_json::from_str(&migrated).unwrap();
+            assert_eq!(v["scan_depth"], 5);
+            assert_eq!(v["include_uwp"], false);
+            assert!(v.get("scanDepth").is_none());
+        });
+    }
+
+    #[test]
+    fn camelcase_to_snake_migrates_file_search() {
+        tauri::async_runtime::block_on(async {
+            let pool = in_memory_pool().await;
+            let old_json = r#"{"enabled":true,"dataSource":"everything","everythingPort":8080,"maxResults":30}"#;
+            set_config(&pool, "engine:file_search", old_json).await.unwrap();
+
+            migrate_camelcase_to_snake(&pool).await;
+
+            let migrated = get_config(&pool, "engine:file_search").await.unwrap();
+            let v: serde_json::Value = serde_json::from_str(&migrated).unwrap();
+            assert_eq!(v["data_source"], "everything");
+            assert_eq!(v["everything_port"], 8080);
+            assert_eq!(v["max_results"], 30);
+            assert!(v.get("dataSource").is_none());
+        });
+    }
+
+    #[test]
+    fn camelcase_to_snake_skips_already_migrated() {
+        tauri::async_runtime::block_on(async {
+            let pool = in_memory_pool().await;
+            // 已经是 snake_case 的数据不应被改动
+            let snake_json = r#"{"theme":"dark","search_history_enabled":true,"search_history_days":30,"max_results":50,"page_size":9}"#;
+            set_config(&pool, "general_config", snake_json).await.unwrap();
+
+            migrate_camelcase_to_snake(&pool).await;
+
+            let migrated = get_config(&pool, "general_config").await.unwrap();
+            assert_eq!(migrated, snake_json, "snake_case 数据不应被改写");
+        });
+    }
+
+    #[test]
+    fn camelcase_to_snake_marker_prevents_rerun() {
+        tauri::async_runtime::block_on(async {
+            let pool = in_memory_pool().await;
+            let old_json = r#"{"theme":"dark","searchHistoryEnabled":false,"searchHistoryDays":10,"maxResults":50,"pageSize":9}"#;
+            set_config(&pool, "general_config", old_json).await.unwrap();
+
+            // 第一次迁移
+            migrate_camelcase_to_snake(&pool).await;
+            let first = get_config(&pool, "general_config").await.unwrap();
+
+            // 再次写入旧数据，第二次迁移应跳过（marker 已存在）
+            set_config(&pool, "general_config", old_json).await.unwrap();
+            migrate_camelcase_to_snake(&pool).await;
+            let second = get_config(&pool, "general_config").await.unwrap();
+
+            // 第二次迁移跳过了，所以 second 仍是手动写入的旧 camelCase
+            assert_eq!(second, old_json, "marker 存在时不应再迁移");
+            // 而第一次迁移的结果是 snake_case
+            let v: serde_json::Value = serde_json::from_str(&first).unwrap();
+            assert!(v.get("searchHistoryEnabled").is_none());
+        });
+    }
 }

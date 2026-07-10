@@ -7,7 +7,7 @@ import { queryEl, resultsEl } from "./dom.js";
 import { activateItem } from "./actions.js";
 import { openContainingFolder, openLnkTarget, resetItemHistory, runBuiltinAction, copyToClipboard, invoke } from "./api.js";
 import { retrigger } from "./search.js";
-import { t } from "./i18n.js";
+import { t } from "./i18n/index.js";
 
 /** 当前菜单数据（用于 Popup 点击时回调执行）。 */
 let currentItems = [];
@@ -36,10 +36,10 @@ export function init() {
     currentItems = items;
 
     // 估算菜单尺寸（精确匹配 CSS 实际大小）
-    // item: padding 8px * 2 + 字体 ~16px = 32px
-    // separator: 1px height + 6px * 2 margin = 13px
-    // container padding: 6px * 2 = 12px
-    const estimatedHeight = items.reduce((h, it) => h + (it.separator ? 13 : 32), 0) + 12;
+    // item: padding 8px * 2 + font 12px * line-height 1.5 = 34px
+    // separator: 1px height + margin 4px * 2 = 9px
+    // container padding: var(--space-sm) 8px * 2 = 16px
+    const estimatedHeight = items.reduce((h, it) => h + (it.separator ? 9 : 34), 0) + 16;
     const estimatedWidth = 180;
 
     showPopupWindow(e.screenX, e.screenY, estimatedWidth, estimatedHeight, items);

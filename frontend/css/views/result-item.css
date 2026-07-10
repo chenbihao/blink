@@ -1,0 +1,251 @@
+/* ── 结果列表 views（#results + 所有 li 变体）────────────────────────────── */
+/* 来源 style.css:149-194/208-366/378-408，排除 loading-spinner+@keyframes spin(195-207) 与 ai-badge-spinner(368-377)——已在 components/spinner.css。 */
+/* badge 保留原 class 名 item-badge/ai-icon-badge；scoped 覆盖 body.alt-active 留此文件。 */
+
+/* ── 结果列表 ───────────────────────────────────────────────────────────────── */
+
+#results {
+  list-style: none;
+  /* 分页模型：每页最多 9 条，列表不滚动、不截断，由内容自然撑开高度，
+     window-size.js 测 #app 真实高度精确贴合（彻底摆脱 max-height 像素估算）。 */
+  /* 整个列表排除拖动区域，包括所有子元素，避免第一次点击被拖动检测吞掉 */
+  -webkit-app-region: no-drag;
+}
+
+/* 有结果：与输入区之间一条淡分隔线。无结果时该容器为空、高度为 0，不显示边框。 */
+#results.has-items {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--surface);
+}
+
+#results li {
+  /* 左内边距与输入框文字对齐（输入框 padding-left 10px） */
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-md);
+  cursor: pointer; /* 指针手型，明确可点击 */
+  font-size: var(--text-lg);
+  transition: background 0.08s ease, transform var(--transition-fast) ease;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.4;
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  /* 排除拖动区域：结果项不能拖，否则第一次点击触发拖动检测而不是 click */
+  -webkit-app-region: no-drag;
+}
+
+/* Step 7: hover 微交互 - 轻微右移 */
+#results li:hover {
+  transform: translateX(1px);
+}
+
+/* Step 7: selected 态柔和反馈 */
+#results li.selected {
+  background: var(--accent-bg);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+#results li .app-icon {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+}
+
+/* 插件查询中占位动画 - 明确用户命令已被识别 */
+#results li.is-loading {
+  color: var(--text-dim);
+  opacity: var(--opacity-faint);
+}
+
+/* 正文：名称 + 描述副行，纵向排列，占满中间剩余宽度 */
+#results li .item-body {
+  flex: 1;
+  min-width: 0; /* 关键：允许子元素 text-overflow 生效 */
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+#results li .item-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#results li .item-desc {
+  font-size: var(--text-base);
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* calc 结果的描述用同色系但稍暗，不抢主行绿色 */
+#results li.calc-result .item-desc {
+  color: var(--text-dim);
+}
+
+/* Alt 数字角标：默认隐藏，按住 Alt（body.alt-active）时显示 */
+#results li .item-badge {
+  flex-shrink: 0;
+  display: none;
+  min-width: 18px;
+  padding: var(--space-2xs) var(--space-xs);
+  font-size: var(--text-sm);
+  font-family: ui-monospace, Consolas, monospace;
+  color: var(--text);
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+  text-align: center;
+}
+
+body.alt-active #results li .item-badge {
+  display: inline-block;
+}
+
+#results li.active,
+#results li:hover {
+  background: var(--surface);
+}
+
+#results li.active {
+  background: var(--surface-2);
+}
+
+#results li.calc-result {
+  color: var(--green);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: var(--text-xl);
+  font-weight: var(--weight-medium);
+}
+
+/* 插件错误信息：橙色警告样式，不可点击 */
+#results li.error-item {
+  color: var(--yellow, #e5c07b);
+  font-size: var(--text-md);
+  cursor: default; /* 不可点击 */
+  opacity: var(--opacity-faint);
+}
+
+/* ── 智能感知候选（0.8.0 §1.3）─────────────────────────────────────────────
+   `.context-aware` = 内置动作 + Run + 携带 Context 参数（如"打开链接"配 URL）
+   视觉：左侧一条 3px accent 强调条 + 副行改为参数值预览（monospace 微 accent 色）
+   目的：让"依剪贴板/选区出现"的候选与普通结果一眼可辨，且直接展示将执行的目标；
+   原 subtitle 在此场景下反而冗余，直接被参数替换更清爽。 */
+
+#results li.context-aware {
+  /* 用左内边框做强调条；不改 padding-left 避免图标位错位（原 padding-left: 10px 保持） */
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+#results li.context-aware.active,
+#results li.context-aware:hover {
+  /* 悬浮/激活时叠加轻微 accent 底色，强调条保持可见 */
+  background: var(--accent-bg);
+}
+
+#results li .item-desc-arg {
+  font-family: ui-monospace, Consolas, monospace;
+  color: var(--accent);
+  opacity: var(--opacity-faint);
+}
+
+#results li.error-item .item-desc {
+  color: var(--text-dim);
+  font-size: var(--text-base);
+  white-space: normal; /* 允许换行显示长错误信息 */
+}
+
+/* ── AI lane 结果项(0.9.2 §6.4)────────────────────────────────────────────
+   AI 回答不同于普通命中:文本可能几段话,一行 nowrap ellipsis 完全无用。
+   视觉语言与 `.context-aware`(左侧 3px 强调条 + accent-bg)刻意拉开:
+   - 不用左侧强调条,让 AI 与"打开剪贴板 URL"这类感知候选一眼可辨
+   - 徽章位实心 accent 底 + 白字 "AI",辨识度独占
+   - name 用 pre-wrap + 3 行截断,不撑爆列表节奏(全文靠 payload 复制取)
+   - desc(回车复制提示)靠 flex order 上移到 name 前,长文本不会把提示挤到底部
+   - 占位与真结果共用 24×24 徽章位,`.is-loading` 只切徽章内容不动几何
+*/
+#results li.ai-item {
+  align-items: flex-start; /* 图标 + 徽章顶部对齐,不居中 */
+  white-space: normal; /* 覆盖父级 nowrap */
+}
+
+#results li.ai-item .item-body {
+  /* desc 上移到 name 前:"回车复制回答" → "AI 回答内容"。
+     长文本再多也不会把关键交互提示挤出视野。占位状态 desc 为空,order 无副作用。 */
+  gap: 2px;
+}
+
+#results li.ai-item .item-name {
+  order: 2;
+  white-space: pre-wrap; /* 保留 AI 返回的换行 */
+  word-break: break-word;
+  overflow: hidden;
+  text-overflow: initial;
+  /* 3 行封顶:与列表节奏对齐;更长的全文已在 payload 里,回车复制不受影响。 */
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  line-height: var(--leading-normal);
+  color: var(--text);
+}
+
+#results li.ai-item .item-desc {
+  order: 1;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  letter-spacing: 0.2px;
+}
+
+/* AI 图标徽章:实心 accent 底 + 白字,与 context-aware 的强调条彻底区分。
+   占位/真结果共用同一 24×24 尺寸(几何稳定),内容切换不引跳变。 */
+#results li .ai-icon-badge {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-bold);
+  font-family: ui-monospace, Consolas, monospace;
+  color: var(--on-accent);
+  background: var(--accent);
+  border-radius: var(--radius-sm);
+  letter-spacing: 0.5px;
+}
+
+/* AI 占位:name 强制单行,行高与徽章对齐,不叠 3 行截断。 */
+#results li.ai-item.is-loading .item-name {
+  color: var(--text-dim);
+  font-style: normal; /* 铁则:中文不斜体 */
+  -webkit-line-clamp: 1;
+  line-height: 24px; /* 与徽章高度一致,垂直居中不错位 — 特例，不用 token */
+}
+
+/* AI 占位淡入(0.9.2 第二步 §3.3):避免占位突然出现的视觉跳变。 */
+@keyframes ai-fade-in {
+  from { opacity: 0; transform: translateY(-2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+#results li.ai-item.is-loading {
+  animation: ai-fade-in 150ms ease;
+}
+
+/* AI 确认卡片(0.9.2 第二步):Dangerous 动作的确认态,accent 色强调。 */
+#results li.ai-item.ai-confirm {
+  border-left: 3px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+#results li.ai-item.ai-confirm .item-name {
+  color: var(--text);
+  font-weight: var(--weight-semibold);
+}
+#results li.ai-item.ai-confirm .item-desc {
+  color: var(--accent);
+  font-size: var(--text-base);
+}

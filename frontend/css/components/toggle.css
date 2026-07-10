@@ -1,0 +1,64 @@
+/* ── 开关组件 ─────────────────────────────────────────────────────────────────
+   来源：settings-components.css:139-183 + settings-plugin.css:441-451
+   2026-07-11 token 替换 */
+
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 24px;
+}
+
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: var(--surface-2);
+  transition: var(--transition-slow);
+  border-radius: var(--radius-pill);
+}
+
+.slider:before {
+  position: absolute;
+  content: "";
+  height: 18px;
+  width: 18px;
+  left: 3px;
+  bottom: 3px;
+  background-color: var(--bg-sidebar);
+  transition: var(--transition-slow);
+  border-radius: 50%;
+}
+
+input:checked + .slider {
+  background-color: var(--accent);
+}
+
+input:checked + .slider:before {
+  transform: translateX(20px);
+  background-color: var(--bg);
+}
+
+/* 小号开关（设置行内） */
+.switch-sm {
+  width: 36px;
+  height: 20px;
+}
+
+.switch-sm .slider:before {
+  height: 14px;
+  width: 14px;
+}
+
+input:checked + .switch-sm .slider:before {
+  transform: translateX(16px);
+}

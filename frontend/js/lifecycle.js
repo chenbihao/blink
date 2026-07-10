@@ -6,8 +6,8 @@ import * as results from "./results.js";
 import * as search from "./search.js";
 import * as chord from "./chord.js";
 import { clearAlt, startAltPoll, stopAltPoll, recheckAlt } from "./keyboard.js";
-import { applyThemeFromConfig } from "./theme.js";
-import { applyI18nFromConfig } from "./i18n.js";
+import { applyThemeFromConfig, applyGlassOpacityFromConfig } from "./theme.js";
+import { applyI18nFromConfig } from "./i18n/index.js";
 
 /** 注册生命周期事件监听。 */
 export function init() {
@@ -19,6 +19,7 @@ export function init() {
     queryEl.focus();
     // 异步刷新主题（设置页可能改了 theme）；不 await，不阻塞 focus
     applyThemeFromConfig();
+    applyGlassOpacityFromConfig(); // 刷新毛玻璃透明度
     // 刷新界面语言（设置页可能改了 language）；不 await，不阻塞 focus
     applyI18nFromConfig();
     // 刷新最大结果数（设置页可能改了 max_results）
@@ -43,6 +44,7 @@ export function init() {
   // 配置变更即时响应（设置页切换主题/语言等，无需关闭再打开主窗口）
   listen("blink://config-changed", () => {
     applyThemeFromConfig();
+    applyGlassOpacityFromConfig(); // 毛玻璃透明度即时生效
     applyI18nFromConfig();
     results.refreshMaxResults();
     chord.refresh(); // 0.8.5.1 §6.6：Chord 开关/可见性改动即时生效

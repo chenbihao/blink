@@ -3,7 +3,7 @@
    每个主题通过 [data-theme="nvchad-xxx"] 选择器覆盖 CSS 变量。
    参考：https://github.com/NvChad/base46
 
-   自动生成于 generate_nvchad_themes.py，勿手动编辑。 */
+   手写维护（generate_nvchad_themes.py 脚本已不在仓库）。 */
 
 /* Aquarium（https://github.com/FrenzyExists/aquarium-vim）
    深海蓝紫色调，低饱和度柔和配色 */

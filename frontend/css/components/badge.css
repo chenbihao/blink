@@ -1,0 +1,41 @@
+/* ── 状态标签/徽章组件 ────────────────────────────────────────────────────────
+   来源：style.css:238-253,352-366 + settings-components.css:256-281 + settings-plugin.css:52-60,524-540
+   主窗口 .item-badge/.ai-icon-badge 是 #results scoped，留 views/result-item.css（JS 输出原 class 名）。 */
+
+/* 状态标签（通用） */
+.status-badge {
+  padding: var(--space-xs) var(--space-md);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
+}
+
+.status-unknown {
+  background: var(--surface-2);
+  color: var(--text-sub);
+}
+
+.status-available {
+  background: var(--green-bg);
+  color: var(--green);
+}
+
+.status-unavailable {
+  background: var(--red-bg);
+  color: var(--red);
+}
+
+.status-enabled {
+  background: var(--green-bg);
+  color: var(--green);
+}
+
+/* 主窗口 Alt 数字角标（.item-badge）与 AI 图标徽章（.ai-icon-badge）属 #results scoped，
+   留 views/result-item.css 用原 class 名（results.js 渲染输出 item-badge/ai-icon-badge）。 */
+
+/* 保存成功提示 */
+.plugin-save-msg {
+  color: var(--green);
+  font-size: var(--text-base);
+  margin-left: var(--space-sm);
+}

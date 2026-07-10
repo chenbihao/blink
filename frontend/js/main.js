@@ -8,11 +8,12 @@ import * as ghost from "./ghost.js";
 import * as statusbar from "./statusbar.js";
 import * as autosuggestConfig from "./autosuggest-config.js";
 import * as chord from "./chord.js";
-import { applyThemeFromConfig } from "./theme.js";
-import { applyI18nFromConfig } from "./i18n.js";
+import { applyThemeFromConfig, applyGlassOpacityFromConfig } from "./theme.js";
+import { applyI18nFromConfig } from "./i18n/index.js";
 
 // 启动应用主题（设置页改 theme 后，lifecycle 在 shown 时重新读取刷新）
 applyThemeFromConfig();
+applyGlassOpacityFromConfig(); // 启动时应用毛玻璃透明度
 // 启动界面语言（静态文本如搜索框 placeholder；shown 时刷新）
 applyI18nFromConfig();
 ghost.init();

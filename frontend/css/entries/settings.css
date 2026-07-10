@@ -1,0 +1,38 @@
+/* ── 设置页 entry ────────────────────────────────────────────────────────────
+   加载顺序铁则：reset → tokens → themes → base → components → views
+   settings.html 只需 <link href="css/entries/settings.css"> */
+
+/* reset（Step 2 建） */
+@import '../base/reset.css';
+
+/* token 层（含 vendor/open-props） */
+@import '../tokens/index.css';
+
+/* 主题变量（默认 dark） */
+@import '../themes/dark.css';
+@import '../themes/light.css';
+@import '../themes/gruvbox.css';
+@import '../themes/neutral.css';
+@import '../themes/nvchad.css';
+@import '../themes/genshin.css';
+
+/* base 排版 */
+@import '../base/typography.css';
+
+/* 组件（Step 3/4 建） */
+@import '../components/spinner.css';
+@import '../components/button.css';
+@import '../components/toggle.css';
+@import '../components/checkbox.css';
+@import '../components/badge.css';
+@import '../components/form-row.css';
+@import '../components/input.css';
+@import '../components/modal.css';
+@import '../components/chip.css';
+@import '../components/card.css';
+@import '../components/kbd.css';
+
+/* views（设置页视图：布局+通用组件+插件 / 调试 / AI modal） */
+@import '../views/settings.css';
+@import '../views/settings-debug.css';
+@import '../views/settings-ai.css';

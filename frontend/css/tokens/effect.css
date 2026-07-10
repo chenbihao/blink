@@ -1,0 +1,60 @@
+/* ── 效果 token（圆角/过渡/阴影/透明度/z-index/ease）──────────────────────────
+   不随主题切换，只随「统一设计语言」演化。
+   2026-07-11 重设计：5 档圆角 + 4 档透明度 + 4 层 z-index + 3 种 ease。 */
+
+:root {
+  /* ── 圆角五档 ────────────────────────────────────────────────────────────── */
+  --radius-xs: 2px;    /* 极小圆角（分隔线端点） */
+  --radius-sm: 4px;    /* checkbox、kbd、小 tag */
+  --radius-md: 10px;   /* 按钮、卡片、输入框（主流） */
+  --radius-lg: 16px;   /* 大卡片、菜单 */
+  --radius-pill: 24px; /* 开关滑轨、胶囊按钮 */
+
+  /* ── 过渡时长三档 ────────────────────────────────────────────────────────── */
+  --transition-fast: 0.1s;   /* 悬停/点击反馈 */
+  --transition-base: 0.15s;  /* 状态切换默认 */
+  --transition-slow: 0.2s;   /* 大幅度形变/淡入淡出 */
+
+  /* ── 透明度四档（语义） ──────────────────────────────────────────────────── */
+  --opacity-disabled: 0.4;   /* 禁用态 */
+  --opacity-dim: 0.6;        /* 次要信息、loading */
+  --opacity-muted: 0.7;      /* 描述文字、弱化 */
+  --opacity-faint: 0.85;     /* ghost 提示、毛玻璃 */
+
+  /* ── z-index 四层 ────────────────────────────────────────────────────────── */
+  --z-base: 1;               /* 内描边高光等 */
+  --z-dropdown: 10;          /* 截图 overlay、下拉 */
+  --z-modal: 10000;          /* 弹窗 */
+  --z-toast: 10001;          /* toast 通知 */
+
+  /* ── Ease 曲线（引用 OP，零成本） ────────────────────────────────────────── */
+  --ease-spring: var(--ease-spring-2);  /* 弹性弹出（chord ball、modal） */
+  --ease-bounce: var(--ease-bounce-2);  /* 回弹反馈 */
+  --ease-smooth: var(--ease-3);         /* 平滑过渡 */
+
+  /* ── 复合阴影 token ──────────────────────────────────────────────────────── */
+  --shadow-card: 0 1px 2px rgba(0,0,0,.3), 0 24px 48px rgba(0,0,0,.5), 0 0 0 1px var(--border-glow);
+  --shadow-modal: 0 12px 40px var(--shadow);
+  --ring-focus: 0 0 0 3px var(--accent-bg);
+
+  /* ── 毛玻璃效果 ──────────────────────────────────────────────────────────── */
+  --blur-glass: blur(24px) saturate(180%);
+  --glass-opacity: 0.85;
+  --bg-glass: rgba(30, 30, 46, var(--glass-opacity));
+
+  /* ── Chord 品牌色（跨主题固定） ──────────────────────────────────────────── */
+  --brand-blue: #4a9eff;
+  --brand-green: #34c759;
+
+  /* ── AI 供应商 monogram tint ─────────────────────────────────────────────── */
+  --tint-blue: #3b82f6;
+  --tint-amber: #f59e0b;
+  --tint-teal: #14b8a6;
+  --tint-rose: #f43f5e;
+  --tint-orange: #f97316;
+  --tint-purple: #a855f7;
+  --tint-indigo: #6366f1;
+  --tint-green: #22c55e;
+  --tint-slate: #64748b;
+  --tint-ink: #334155;
+}

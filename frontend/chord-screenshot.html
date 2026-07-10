@@ -3,63 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <title>Blink Screenshot</title>
-    <style>
-      html, body {
-        margin: 0;
-        padding: 0;
-        width: 100vw;
-        height: 100vh;
-        overflow: hidden;
-        user-select: none;
-        /*
-         * 极淡的兜底色——canvas 画完前 (~50ms 现在) 让窗口不完全透明,
-         * 避免 DWM 透明窗被穿透到桌面的错觉。
-         *
-         * **不能太黑**：body 是纯色 shade,canvas 最终画面是"截图 * 0.55 + 黑 * 0.45"
-         * (drawDimmed 里的暗色蒙版),两者亮度差太大会让用户看到"先黑幕后画面"的两层感。
-         * 用 0.15 极淡后,视觉上 body 和 canvas 差距小,衔接自然。
-         */
-        background: rgba(0, 0, 0, 0.15);
-      }
-      /*
-       * canvas 内部像素 = 截图物理像素；CSS 尺寸 = 物理像素 / DPR。
-       * width/height 属性在 JS 里设，样式只负责铺满 + crosshair 光标。
-       */
-      #canvas {
-        position: absolute;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        cursor: crosshair;
-      }
-      #size-hint {
-        position: fixed;
-        background: rgba(0, 0, 0, 0.75);
-        color: #fff;
-        font-size: 12px;
-        font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-        padding: 2px 8px;
-        border-radius: 3px;
-        pointer-events: none;
-        display: none;
-        z-index: 10;
-        white-space: nowrap;
-      }
-      #error-hint {
-        position: fixed;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        color: #fff;
-        background: rgba(200, 40, 40, 0.85);
-        padding: 12px 20px;
-        border-radius: 6px;
-        font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-        font-size: 14px;
-        display: none;
-      }
-    </style>
+    <link rel="stylesheet" href="css/entries/chord-screenshot.css" />
   </head>
   <body>
     <canvas id="canvas"></canvas>

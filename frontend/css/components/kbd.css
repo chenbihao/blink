@@ -23,7 +23,7 @@
   text-align: center;
   color: var(--text);
   background: var(--surface-2);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   vertical-align: 0.05em;
   white-space: nowrap;
 }
@@ -40,7 +40,7 @@
 
 .kbd-plus {
   color: var(--text-faint);
-  opacity: 0.7;
+  opacity: var(--opacity-muted);
   font-size: 0.85em;
   font-weight: 400;
   /* 与键帽垂直居中对齐 */

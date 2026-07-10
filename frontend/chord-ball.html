@@ -4,51 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Blink Chord</title>
-    <style>
-      html, body {
-        margin: 0;
-        padding: 0;
-        height: 100%;
-        background: transparent;
-        overflow: hidden;
-        font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
-      }
-      #ball {
-        width: 48px;
-        height: 48px;
-        margin: 0;
-        border-radius: 50%;
-        background: #4a9eff;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
-        color: white;
-        font-size: 9px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        cursor: pointer;
-        -webkit-app-region: drag; /* 球可拖动定位 */
-        user-select: none;
-        transition: background 0.3s ease, box-shadow 0.3s ease;
-      }
-      #ball.ready {
-        background: #34c759;
-        box-shadow: 0 4px 16px rgba(52, 199, 89, 0.4);
-      }
-      #ball.ready::after {
-        content: "";
-        position: absolute;
-        width: 48px;
-        height: 48px;
-        border-radius: 50%;
-        background: rgba(52, 199, 89, 0.3);
-        animation: pulse 1.2s ease-out 1;
-        pointer-events: none;
-      }
-      @keyframes pulse {
-        0% { transform: scale(1); opacity: 0.6; }
-        100% { transform: scale(1.8); opacity: 0; }
-      }
-    </style>
+    <link rel="stylesheet" href="css/entries/chord-ball.css" />
   </head>
   <body>
     <div id="ball">划词翻译</div>
