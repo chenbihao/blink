@@ -537,6 +537,7 @@ fn main() {
             app::commands::save_ai_secret,
             app::commands::delete_ai_secret,
             app::commands::has_ai_secret,
+            app::commands::get_ai_secret_hint,
             app::commands::test_ai_provider,
             app::commands::fetch_ai_models,
         ])

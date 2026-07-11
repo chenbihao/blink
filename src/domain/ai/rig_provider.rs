@@ -33,17 +33,20 @@
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use rig_core::OneOrMany;
 use rig_core::completion::{
     AssistantContent, CompletionError, CompletionModel as RigCompletionModel,
     CompletionRequest as RigCompletionRequest, Message as RigMessage,
 };
+use rig_core::streaming::StreamedAssistantContent as RigStreamChunk;
+use tokio::sync::mpsc;
 
 use crate::app::ai_config::{CustomParam, ProviderKind};
 use crate::domain::ai::message::{
     CompletionRequest, CompletionResponse, Role, ToolCall, Usage,
 };
-use crate::domain::ai::provider::{AIError, AIProvider};
+use crate::domain::ai::provider::{AIError, AIProvider, StreamChunk};
 use crate::infra::platform::secret::SecretString;
 
 /// 默认硬超时(§3.3 骨架层)——用户未在 `CompletionRequest.timeout_ms` 覆盖时的兜底。
@@ -143,6 +146,7 @@ where
         let deadline = Duration::from_millis(timeout_ms as u64);
 
         let rig_req = build_rig_request(
+            self.kind,
             &req,
             self.default_temperature,
             self.default_max_tokens,
@@ -158,6 +162,81 @@ where
             Err(_) => Err(AIError::Timeout), // tokio timeout,future 已被 drop
             Ok(Err(rig_err)) => Err(map_rig_error(rig_err)),
             Ok(Ok(rig_resp)) => Ok(map_rig_response(rig_resp, elapsed)),
+        }
+    }
+
+    /// 流式 completion —— 调 rig `model.stream()` 逐 chunk 通过 channel 发送。
+    ///
+    /// **硬超时**:外层 `tokio::time::timeout` 包住整个流式过程(与 complete 一致)。
+    /// 超时时 future drop → stream abort → reqwest task 自动释放。
+    ///
+    /// **tool_calls 收集**:流式过程中 Text chunk 实时发送;tool_calls 在流结束后
+    /// 通过 `StreamChunk::Done` 一次性返回(调用方统一处理)。
+    async fn stream(
+        &self,
+        req: CompletionRequest,
+        tx: mpsc::UnboundedSender<StreamChunk>,
+    ) -> Result<(), AIError> {
+        let timeout_ms = req.timeout_ms.unwrap_or(self.default_timeout_ms);
+        let deadline = Duration::from_millis(timeout_ms as u64);
+
+        let rig_req = build_rig_request(
+            self.kind,
+            &req,
+            self.default_temperature,
+            self.default_max_tokens,
+            self.custom_params_json.as_ref(),
+        )?;
+
+        let start = Instant::now();
+
+        // 外层 tokio::time::timeout 包住整个流式过程
+        let stream_result = tokio::time::timeout(deadline, async {
+            let mut streaming_resp = self.model.stream(rig_req).await.map_err(map_rig_error)?;
+            let mut tool_calls: Vec<ToolCall> = Vec::new();
+
+            // StreamingCompletionResponse 自身实现 Stream trait
+            while let Some(chunk_result) = StreamExt::next(&mut streaming_resp).await {
+                match chunk_result {
+                    Ok(raw_choice) => match raw_choice {
+                        RigStreamChunk::Text(t) => {
+                            if tx.send(StreamChunk::Text(t.text)).is_err() {
+                                // 接收端已关闭(调用方 drop 了)——提前终止
+                                return Ok::<(), AIError>(());
+                            }
+                        }
+                        RigStreamChunk::ToolCall { tool_call: tc, .. } => {
+                            tool_calls.push(ToolCall {
+                                id: tc.id.clone(),
+                                name: tc.function.name.clone(),
+                                arguments: tc.function.arguments.clone(),
+                            });
+                        }
+                        _ => {} // ToolCallDelta / Reasoning / Final 等忽略
+                    },
+                    Err(e) => return Err(map_rig_error(e)),
+                }
+            }
+
+            // 流结束——发 Done
+            let _ = tx.send(StreamChunk::Done {
+                tool_calls,
+                // usage 在流结束后从 streaming_resp 聚合状态取
+                usage: Usage {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                },
+            });
+            Ok(())
+        })
+        .await;
+
+        let _elapsed = start.elapsed().as_millis() as u32;
+
+        match stream_result {
+            Err(_) => Err(AIError::Timeout),
+            Ok(Err(e)) => Err(e),
+            Ok(Ok(())) => Ok(()),
         }
     }
 }
@@ -184,7 +263,11 @@ where
 ///
 /// **铁则**:请求方显式指定(路由档 `temperature=0.0`)优先——model 层默认不能覆盖它,
 /// 保证 SearchService 路由的确定性(见 §3.6)。
+///
+/// **Anthropic 特殊处理**:`max_tokens` 是 Anthropic API 的必填字段,
+/// 若请求方和 model 层都未指定,强制使用 4096 作为默认值。
 fn build_rig_request(
+    kind: ProviderKind,
     req: &CompletionRequest,
     default_temperature: Option<f32>,
     default_max_tokens: Option<u32>,
@@ -222,7 +305,14 @@ fn build_rig_request(
 
     // 参数 fallback:req 显式值 > model 层默认值 > None(rig 让 provider 自己决定)
     let effective_temperature = req.temperature.or(default_temperature).map(|f| f as f64);
-    let effective_max_tokens = req.max_tokens.or(default_max_tokens).map(|n| n as u64);
+    let mut effective_max_tokens = req.max_tokens.or(default_max_tokens).map(|n| n as u64);
+
+    // Anthropic 特殊处理:max_tokens 是必填字段,若都未指定则强制使用默认值
+    if kind == ProviderKind::AnthropicMessages && effective_max_tokens.is_none() {
+        const ANTHROPIC_DEFAULT_MAX_TOKENS: u64 = 4096;
+        effective_max_tokens = Some(ANTHROPIC_DEFAULT_MAX_TOKENS);
+        tracing::debug!("Anthropic max_tokens 未设置,使用默认值 {}", ANTHROPIC_DEFAULT_MAX_TOKENS);
+    }
 
     Ok(RigCompletionRequest {
         model: None,
@@ -318,8 +408,10 @@ pub(crate) fn map_rig_error(e: CompletionError) -> AIError {
         }
         // URL 构造错误——通常是 base_url 配错(用户可 debug)
         CompletionError::UrlError(_) => AIError::Provider("base_url 格式无效".into()),
-        // 请求构造错误(reqwest builder 层)
-        CompletionError::RequestError(_) => AIError::Network("请求构造失败".into()),
+        // 请求构造错误(reqwest builder 层)——提取底层错误信息帮助诊断
+        CompletionError::RequestError(e) => {
+            AIError::Network(format!("请求构造失败: {}", sanitize_message(&e.to_string())))
+        }
         // 供应商返回结构解析失败——最常见:model_id 不匹配供应商
         CompletionError::ResponseError(_) => AIError::Serialization(
             "响应结构不匹配(检查供应商类型与 model_id 是否一致)".into(),
@@ -529,7 +621,7 @@ mod tests {
             temperature: None,
             timeout_ms: None,
         };
-        let rig = build_rig_request(&req, None, None, None).unwrap();
+        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None).unwrap();
         assert_eq!(rig.preamble.as_deref(), Some("You are helpful."));
         assert_eq!(rig.chat_history.len(), 1);
     }
@@ -548,7 +640,7 @@ mod tests {
             temperature: None,
             timeout_ms: None,
         };
-        let rig = build_rig_request(&req, None, None, None).unwrap();
+        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None).unwrap();
         assert_eq!(rig.preamble.as_deref(), Some("a\nb"));
     }
 
@@ -564,7 +656,7 @@ mod tests {
             temperature: Some(0.2),
             timeout_ms: None,
         };
-        let rig = build_rig_request(&req, None, None, None).unwrap();
+        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None).unwrap();
         assert_eq!(rig.tools.len(), 2);
         assert_eq!(rig.tools[0].name, "open_settings");
         assert_eq!(rig.tools[1].name, "lock");
@@ -584,7 +676,7 @@ mod tests {
             temperature: None,
             timeout_ms: None,
         };
-        assert!(matches!(build_rig_request(&req, None, None, None), Err(AIError::Serialization(_))));
+        assert!(matches!(build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None), Err(AIError::Serialization(_))));
     }
 
     #[test]
@@ -597,7 +689,7 @@ mod tests {
             temperature: None,
             timeout_ms: None,
         };
-        assert!(matches!(build_rig_request(&req, None, None, None), Err(AIError::Serialization(_))));
+        assert!(matches!(build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None), Err(AIError::Serialization(_))));
     }
 
     #[test]
@@ -613,7 +705,7 @@ mod tests {
             temperature: None,
             timeout_ms: None,
         };
-        assert!(matches!(build_rig_request(&req, None, None, None), Err(AIError::Serialization(_))));
+        assert!(matches!(build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None), Err(AIError::Serialization(_))));
     }
 
     // ── 0.9.4 Step 1:模型级参数 fallback ───────────────────────────────
@@ -628,7 +720,7 @@ mod tests {
             temperature: None,
             timeout_ms: None,
         };
-        let rig = build_rig_request(&req, Some(0.7), Some(4096), None).unwrap();
+        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, Some(0.7), Some(4096), None).unwrap();
         // f32 → f64 有精度损失,允许 1e-6 误差
         assert!((rig.temperature.unwrap() - 0.7).abs() < 1e-6);
         assert_eq!(rig.max_tokens, Some(4096));
@@ -644,7 +736,7 @@ mod tests {
             temperature: Some(0.0),
             timeout_ms: None,
         };
-        let rig = build_rig_request(&req, Some(0.7), Some(4096), None).unwrap();
+        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, Some(0.7), Some(4096), None).unwrap();
         assert_eq!(rig.temperature, Some(0.0));
         assert_eq!(rig.max_tokens, Some(64));
     }
@@ -660,7 +752,7 @@ mod tests {
             timeout_ms: None,
         };
         let extra = json!({"top_p": 0.9, "web_search": true});
-        let rig = build_rig_request(&req, None, None, Some(&extra)).unwrap();
+        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, Some(&extra)).unwrap();
         assert_eq!(rig.additional_params.as_ref(), Some(&extra));
     }
 

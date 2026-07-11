@@ -266,6 +266,15 @@ pub enum Route {
         /// 传给 engine 的参数（无参 → None，带参 → UserExplicit）。
         arg: ExecArg,
     },
+    /// AI 前缀触发（0.9.x）：用户输入 "ai xxx" 直接进入 AI 模式。
+    ///
+    /// 与 EngineTakeover 类似是强信号独占，但走 AI 路径而非 engine 路径。
+    /// 在 route() 中优先级介于 EngineTakeover 和 plugin keyword 之间——
+    /// "ai" 是本体保留前缀，不会与插件 keyword 冲突。
+    AiTrigger {
+        /// "ai " 之后的用户输入（已 trim）。
+        arg: String,
+    },
     /// 混排:本地引擎照常召回;命中插件按各自 surface 参与排序。
     Mixed { candidates: Vec<Candidate> },
 }
@@ -698,6 +707,17 @@ impl IntentRouter for RuleRouter {
             }
         }
 
+        // ── 0.5. AI 前缀触发（0.9.x）────────────────────────────────
+        //     用户输入 "ai xxx" 直接进入 AI 模式，不走 plugin keyword 匹配。
+        //     "ai" 是本体保留前缀，优先级介于 EngineTakeover 和 plugin keyword 之间。
+        //     空 arg（"ai" 或 "ai "）不触发——等同于无参，留给 Ghost 兜底。
+        if takeover_enabled && q.len() > 3 && q[..3].eq_ignore_ascii_case("ai ") {
+            let arg = q[3..].trim();
+            if !arg.is_empty() {
+                return Route::AiTrigger { arg: arg.to_string() };
+            }
+        }
+
         // ── 1. keyword / regex 匹配 ────────────────────────────
         let mut hits: Vec<Hit> = Vec::new();
         {
@@ -818,7 +838,7 @@ impl IntentRouter for RuleRouter {
 impl RuleRouter {
     /// 直接实现的 best_suggestion（0.8.6 arbiter 未初始化时的 fallback）。
     ///
-    /// 与原 `best_suggestion` 逻辑完全一致：空 query → Context，非空 → Keyword + fallback Context。
+    /// 策略：空 query → Context Ghost；非空 → Keyword Ghost（无命中则 None）。
     /// 单测环境走此路径（`init_arbiter` 未调用）。
     #[allow(deprecated)] // fallback 仍读 Suggestion.ranking_hint，生产环境走 arbiter 不会到这里
     fn best_suggestion_direct(
@@ -847,23 +867,26 @@ impl RuleRouter {
             *self.last_ranking_hint.lock().unwrap() = None;
             Some(sug)
         } else {
-            let sug = self.context_suggestion(query, snapshot);
-            *self.last_ranking_hint.lock().unwrap() = sug.as_ref().and_then(|s| s.ranking_hint.clone());
-            sug
+            // 非空 query 无 Keyword 命中 → 不显示 Ghost
+            *self.last_ranking_hint.lock().unwrap() = None;
+            None
         }
     }
 
-    /// 从 Context 命中产出 top-1 Suggestion（0.8.4 §5.3.3：空 query 主战场 + 非空 query fallback）。
+    /// 从 Context 命中产出 top-1 Suggestion（空 query 专属）。
     ///
     /// 多 Context 命中取 confidence 最高；产出的 Suggestion 携带 RankingHint（Surface Booster
     /// 单向反馈）。无命中返回 None。
     ///
-    /// **采纳后自抑制**（0.8.8 bugfix）：`query` 非空且已命中同 plugin 的 keyword 时返回
-    /// None——避免 Tab 采纳 Context Ghost 后 query 变成 `翻译 xxx`、Context 仍产同一
-    /// Suggestion 导致的 Ghost 反复弹出 / 无限 Tab 叠加。保留 0.8.4 §5.3.3 非空 fallback：
-    /// query 命中的是**其他** plugin 的 keyword（或未命中任何 keyword）时 Context 仍可产出。
+    /// **非空 query 短路**：用户已输入内容时不再显示 Context Ghost——输入即意图表达，
+    /// 环境感知建议会干扰用户操作。Context Ghost 只在空 query（用户刚唤起、尚未表达意图）时出现。
     #[allow(deprecated)] // 构造 Suggestion 时填充 ranking_hint，0.9 彻底移除字段后简化
     pub(crate) fn context_suggestion(&self, query: &str, snapshot: &ContextSnapshot) -> Option<Suggestion> {
+        // 非空 query 不显示 Context Ghost——用户已表达意图，环境感知会干扰
+        if !query.trim().is_empty() {
+            return None;
+        }
+
         let hits = self.match_context_hits(snapshot);
         let best_ctx = hits.into_iter().max_by(|a, b| {
             let ca = a.when.map(|w| context_confidence(&w, a.origin)).unwrap_or(0.0);
@@ -2166,16 +2189,16 @@ mod tests {
     }
 
     #[test]
-    fn suggestion_context_fallback_on_non_empty_query() {
-        // 0.8.4 §5.3.3：非空 query 无 Keyword 命中时 fallback 产 Context Ghost
+    fn suggestion_context_only_on_empty_query() {
+        // 非空 query 不显示 Context Ghost——用户已输入内容即意图表达，环境感知会干扰
         let r = translate_router_with_target("zh");
         let snap = snap_selection("hello world foo");
         // 空 query → Context Suggestion
         let sug = r.best_suggestion("", &snap, 0.7).expect("expected context");
         assert_eq!(sug.source, SuggestionSource::Context);
-        // 非空 query（无 keyword 命中）+ 选中英文 → fallback Context Ghost（不抢首屏,Tab 采纳）
-        let sug = r.best_suggestion("chrome", &snap, 0.7).expect("expected context fallback");
-        assert_eq!(sug.source, SuggestionSource::Context);
+        // 非空 query → 不显示 Context Ghost
+        let sug = r.best_suggestion("chrome", &snap, 0.7);
+        assert!(sug.is_none(), "非空 query 不应显示 Context Ghost");
     }
 
     #[test]
@@ -2474,13 +2497,12 @@ mod tests {
     }
 
     #[test]
-    fn suggestion_non_empty_query_fallback_context() {
-        // 0.8.4 §5.3.3：非空 query（未命中 keyword）+ 选中英文 → fallback Context Ghost
-        // （翻转 0.8.3「空/非空互斥」决策——Suggestion 域覆盖非空 query,Awareness 不干扰 Routing）
+    fn suggestion_non_empty_query_no_context_ghost() {
+        // 非空 query 不显示 Context Ghost——用户已输入内容即意图表达，环境感知会干扰
         let r = translate_router_with_target("zh");
         let snap = snap_selection("hello world foo");
-        let sug = r.best_suggestion("chrome", &snap, 0.7).expect("expected context fallback");
-        assert_eq!(sug.source, SuggestionSource::Context);
+        let sug = r.best_suggestion("chrome", &snap, 0.7);
+        assert!(sug.is_none(), "非空 query 不应显示 Context Ghost");
     }
 
     // ── 0.8.3 收尾 · 参数不隐式注入回归 ──────────────────────────
@@ -2690,10 +2712,9 @@ mod tests {
             "Context should be silenced when query already hits same plugin's keyword, got: {sug:?}",
         );
 
-        // 对照组：无关 query 未命中任何 keyword → Context fallback 仍生效（0.8.4 §5.3.3）
+        // 对照组：非空无关 query 也不显示 Context Ghost
         let sug_fallback = r.best_suggestion("xyz random", &snap, 0.7);
-        assert!(sug_fallback.is_some(), "unrelated query should still get Context fallback");
-        assert_eq!(sug_fallback.unwrap().source, SuggestionSource::Context);
+        assert!(sug_fallback.is_none(), "non-empty query should not get Context Ghost");
     }
 
     #[test]
@@ -2718,9 +2739,9 @@ mod tests {
         assert!(r.context_suggestion("fanyi", &snap).is_none(), "pinyin_full Exact should silence");
         assert!(r.context_suggestion("fy", &snap).is_none(), "pinyin_initials Exact should silence");
 
-        // 对照：空 query / 无关 query 仍能产 Context
+        // 对照：空 query 仍能产 Context，非空无关 query 不产 Context
         assert!(r.context_suggestion("", &snap).is_some(), "empty query still fires");
-        assert!(r.context_suggestion("xyz random", &snap).is_some(), "unrelated query still fires");
+        assert!(r.context_suggestion("xyz random", &snap).is_none(), "non-empty query should not fire");
     }
 
     #[test]

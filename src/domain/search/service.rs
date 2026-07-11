@@ -16,7 +16,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::app::ai_config::Tier;
 use crate::domain::ai::gating::{AiGate, GateOutcome, should_invoke_ai};
 use crate::domain::ai::message::{ChatMessage, CompletionRequest};
-use crate::domain::ai::provider::AIError;
+use crate::domain::ai::provider::{AIError, StreamChunk};
 use crate::domain::ai::registry::AIProviderRegistry;
 use crate::domain::execution::{ActionContext, ActionRegistry, ActionSchema, DangerClass};
 use crate::infra::platform::context::ContextSnapshot;
@@ -355,13 +355,20 @@ impl SearchService {
             suggestion = self.maybe_ai_suggestion(q);
         }
 
-        // 按 Route 分派到三个 executor（0.8.6 §8.2.1 拆 God Method）
+        // 按 Route 分派到四个 executor（0.8.6 §8.2.1 拆 God Method）
         let entries = match route {
             Route::Takeover { plugin_id, arg, .. } => {
                 self.exec_takeover(plugin_id, arg, seq)
             }
             Route::EngineTakeover { engine_id, arg } => {
                 self.exec_engine_takeover(engine_id, arg, &search_ctx).await
+            }
+            // AI 前缀触发：产 AI Suggestion，让前端 Ghost + Tab 触发。
+            // 不直接调用 trigger_ai——用户输入过程中不应立即消耗 token，
+            // 需要用户按 Tab 显式确认后才真正调用 AI。
+            Route::AiTrigger { arg } => {
+                suggestion = self.make_ai_suggestion(&arg);
+                vec![]
             }
             Route::Mixed { candidates } => {
                 self.exec_mixed(q, candidates, seq, &search_ctx, search_start).await
@@ -410,6 +417,39 @@ impl SearchService {
                 None
             }
         }
+    }
+
+    /// AI 前缀触发专用 Suggestion 构造（0.9.x）。
+    ///
+    /// 用户输入 "ai xxx" 显式触发，跳过 gating 四筛子——"ai" 前缀本身就是强信号。
+    /// 返回的 Suggestion 让前端 Ghost 渲染 "按 Tab 问 AI"，用户按 Tab 后走
+    /// `acceptCurrent() → invoke("trigger_ai")` 路径。
+    ///
+    /// **为什么不直接调 trigger_ai**：输入过程中不应立即消耗 token，
+    /// 需要用户按 Tab 显式确认后才真正调用 AI（与 Ghost Tab 触发机制统一）。
+    fn make_ai_suggestion(&self, arg: &str) -> Option<Suggestion> {
+        use crate::domain::intent::SuggestionSource;
+
+        let reg = self.ai_registry.read().expect("ai_registry lock poisoned").clone()?;
+        // 检查 AI 是否启用——用户显式触发也要尊重总开关
+        let cfg = reg.config_snapshot();
+        if !cfg.enabled {
+            tracing::trace!(target: ai_slo::TARGET, "AiTrigger: AI 未启用，跳过");
+            return None;
+        }
+
+        // display 提示文案由前端 i18n 决定,后端只填英文占位;
+        // 但当前前端 ghost.js 直接读 display——先填中文,待 0.9.2 第二步统一 i18n
+        #[allow(deprecated)]
+        Some(Suggestion {
+            display: "按 Tab 问 AI".to_string(),
+            replacement: arg.to_string(),
+            source: SuggestionSource::Ai,
+            confidence: 1.0,  // AI 前缀触发是强信号，confidence 高于兜底的 0.5
+            prefix_len: 0,
+            origin: None,
+            ranking_hint: None,
+        })
     }
 
     /// Suggestion 计算（从 search() 提取，0.8.6 §8.2.1）。
@@ -664,136 +704,175 @@ impl SearchService {
             };
 
             // 起始日志:一行说清"哪个 provider + 什么档 + 什么模型 + 多长超时 + 几个 tool"
+            let use_streaming = cfg.streaming;
             tracing::debug!(
                 target: ai_slo::TARGET,
-                "AI → {:?}/{} tier={:?} timeout={}ms qlen={} tools={}",
+                "AI → {:?}/{} tier={:?} timeout={}ms qlen={} tools={} streaming={}",
                 provider_kind,
                 provider_model,
                 actual_tier,
                 timeout_ms,
                 query.chars().count(),
                 tools_count,
+                use_streaming,
             );
 
             let start = std::time::Instant::now();
-            let result = provider.complete(req).await;
-            let elapsed = start.elapsed().as_millis() as u32;
 
-            // seq 校验:用户已输入新 query → 丢弃结果
-            if seq != latest_seq.load(Ordering::SeqCst) {
-                tracing::trace!(target: ai_slo::TARGET, "AI 结果过期,丢弃 seq={seq}");
-                return;
-            }
+            if use_streaming {
+                // ── 流式路径:provider.stream() + channel 逐 chunk emit ──
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                let provider_clone = Arc::clone(&provider);
+                let stream_future = async move { provider_clone.stream(req, tx).await };
 
-            // 结束日志:成功/失败合并到一处,字段与起始日志对得上
-            match result {
-                Ok(resp) => {
-                    let text_len = resp.text.as_ref().map(|s| s.chars().count()).unwrap_or(0);
-                    let tc_count = resp.tool_calls.len();
-                    tracing::info!(
-                        target: ai_slo::TARGET,
-                        "AI ← {:?}/{} ok elapsed={}ms first_token={}ms text={}chars tool_calls={}",
-                        provider_kind,
-                        provider_model,
-                        elapsed,
-                        resp.first_token_ms,
-                        text_len,
-                        tc_count,
-                    );
+                // spawn 流式 producer;主 task 做 consumer + emit
+                let producer_handle = tauri::async_runtime::spawn(stream_future);
 
-                    // 0.9.3:处理 tool_call（支持分组解析）
-                    if !resp.tool_calls.is_empty() {
-                        let tc = &resp.tool_calls[0]; // 主窗口只取第一个
-                        let action_reg = app.state::<Arc<ActionRegistry>>();
+                let mut accumulated = String::new();
 
-                        // 解析 tool_call → (具体 Action, 解析后参数)
-                        // 聚合 tool: name="system_action", arguments={action:"lock"} → (LockAction, {})
-                        // 独立 tool: name="plugin:translate", arguments={text:"hello"} → (PluginAction, {text:"hello"})
-                        let resolved = resolve_tool_call(tc, &action_reg);
-
-                        match resolved {
-                            Some((action, args)) => {
-                                match action.danger_class() {
-                                    DangerClass::Safe => {
-                                        // Safe:直接执行
-                                        let cx = ActionContext::from_arguments(&app, args.clone());
-                                        match action.execute(&cx).await {
-                                            Ok(outcome) => {
-                                                tracing::info!(
-                                                    target: ai_slo::TARGET,
-                                                    "AI tool_call 执行成功: {} args={}",
-                                                    tc.name,
-                                                    args,
-                                                );
-                                                // 执行成功 → 展示结果(含执行输出)
-                                                emit_ai_result(&app, seq, ai_action_done_entry(action.as_ref(), &outcome));
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    target: ai_slo::TARGET,
-                                                    "AI tool_call 执行失败: {} err={}",
-                                                    tc.name,
-                                                    e,
-                                                );
-                                                emit_ai_clear(&app, seq);
-                                            }
-                                        }
-                                    }
-                                    DangerClass::Dangerous => {
-                                        // Dangerous:emit 确认请求到前端,等用户 Enter/Esc
-                                        tracing::info!(
-                                            target: ai_slo::TARGET,
-                                            "AI tool_call 需确认: {} (Dangerous)",
-                                            tc.name,
-                                        );
-                                        let title = action.title().resolve(&lang).to_string();
-                                        let display_name = resolve_display_name(tc, &action);
-                                        emit_ai_confirm(&app, seq, &display_name, &args, &title);
-                                    }
-                                }
-                            }
-                            None => {
-                                // 未知 action → 回退到文本回答(若有)或清占位
-                                tracing::warn!(
-                                    target: ai_slo::TARGET,
-                                    "AI tool_call 未知动作: {},回退文本",
-                                    tc.name,
-                                );
-                                match resp.text.filter(|t| !t.trim().is_empty()) {
-                                    Some(text) => emit_ai_result(&app, seq, ai_result_entry(text)),
-                                    None => emit_ai_clear(&app, seq),
-                                }
-                            }
-                        }
+                // 逐 chunk 消费
+                while let Some(chunk) = rx.recv().await {
+                    // seq 校验:用户已输入新 query → 丢弃后续 chunk
+                    if seq != latest_seq.load(Ordering::SeqCst) {
+                        tracing::trace!(target: ai_slo::TARGET, "AI stream 过期,丢弃 seq={seq}");
+                        // abort producer task
+                        producer_handle.abort();
                         return;
                     }
 
-                    // 纯文本回答(无 tool_call)
-                    match resp.text.filter(|t| !t.trim().is_empty()) {
-                        Some(text) => emit_ai_result(&app, seq, ai_result_entry(text)),
-                        None => emit_ai_clear(&app, seq),
+                    match chunk {
+                        StreamChunk::Text(text) => {
+                            accumulated.push_str(&text);
+                            emit_ai_stream(&app, seq, &text, &accumulated, false);
+                        }
+                        StreamChunk::Done { tool_calls, .. } => {
+                            let elapsed = start.elapsed().as_millis() as u32;
+                            let text_len = accumulated.chars().count();
+                            tracing::info!(
+                                target: ai_slo::TARGET,
+                                "AI ← {:?}/{} stream ok elapsed={}ms text={}chars tool_calls={}",
+                                provider_kind,
+                                provider_model,
+                                elapsed,
+                                text_len,
+                                tool_calls.len(),
+                            );
+
+                            // 处理 tool_calls(与非流式路径一致)
+                            // ★ 先处理 tool_calls 再决定是否发 done=true——
+                            //   tool-call 路径自己 emit 最终结果(confirm/done/clear),
+                            //   不需要 done=true 提前把 placeholder 变成可复制文本,
+                            //   否则 Dangerous 确认卡片会插入新卡而非替换占位。
+                            if !tool_calls.is_empty() {
+                                handle_ai_tool_calls(
+                                    &app, seq, &tool_calls, &accumulated, &lang,
+                                ).await;
+                            } else {
+                                // 纯文本回答——先发 done=true 再发可复制结果
+                                emit_ai_stream(&app, seq, "", &accumulated, true);
+                                if !accumulated.trim().is_empty() {
+                                    emit_ai_result(&app, seq, ai_result_entry(accumulated));
+                                }
+                            }
+                            return;
+                        }
                     }
                 }
-                Err(AIError::Timeout) => {
-                    tracing::warn!(
-                        target: ai_slo::TARGET,
-                        "AI ← {:?}/{} TIMEOUT elapsed={}ms (fallback→fuzzy)",
-                        provider_kind,
-                        provider_model,
-                        elapsed,
-                    );
-                    emit_ai_clear(&app, seq);
+
+                // channel 关闭但没收到 Done → producer 出错了
+                let producer_result = producer_handle.await;
+                let elapsed = start.elapsed().as_millis() as u32;
+                match producer_result {
+                    Ok(Ok(())) => {
+                        // 不该走到这里(正常应收到 Done),兜底发结果
+                        tracing::warn!(target: ai_slo::TARGET, "AI stream 结束但未收到 Done");
+                        if !accumulated.trim().is_empty() {
+                            emit_ai_stream(&app, seq, "", &accumulated, true);
+                            emit_ai_result(&app, seq, ai_result_entry(accumulated));
+                        } else {
+                            emit_ai_clear(&app, seq);
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            target: ai_slo::TARGET,
+                            "AI ← {:?}/{} stream ERR elapsed={}ms: {}",
+                            provider_kind, provider_model, elapsed, e,
+                        );
+                        emit_ai_clear(&app, seq);
+                    }
+                    Err(join_err) => {
+                        tracing::warn!(
+                            target: ai_slo::TARGET,
+                            "AI stream task panic: {}",
+                            join_err,
+                        );
+                        emit_ai_clear(&app, seq);
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        target: ai_slo::TARGET,
-                        "AI ← {:?}/{} ERR elapsed={}ms (fallback→fuzzy): {}",
-                        provider_kind,
-                        provider_model,
-                        elapsed,
-                        e,
-                    );
-                    emit_ai_clear(&app, seq);
+            } else {
+                // ── 非流式路径:provider.complete() 一次性返回 ──
+                let result = provider.complete(req).await;
+                let elapsed = start.elapsed().as_millis() as u32;
+
+                // seq 校验:用户已输入新 query → 丢弃结果
+                if seq != latest_seq.load(Ordering::SeqCst) {
+                    tracing::trace!(target: ai_slo::TARGET, "AI 结果过期,丢弃 seq={seq}");
+                    return;
+                }
+
+                // 结束日志:成功/失败合并到一处,字段与起始日志对得上
+                match result {
+                    Ok(resp) => {
+                        let text_len = resp.text.as_ref().map(|s| s.chars().count()).unwrap_or(0);
+                        let tc_count = resp.tool_calls.len();
+                        tracing::info!(
+                            target: ai_slo::TARGET,
+                            "AI ← {:?}/{} ok elapsed={}ms first_token={}ms text={}chars tool_calls={}",
+                            provider_kind,
+                            provider_model,
+                            elapsed,
+                            resp.first_token_ms,
+                            text_len,
+                            tc_count,
+                        );
+
+                        // 0.9.3:处理 tool_call（支持分组解析）
+                        if !resp.tool_calls.is_empty() {
+                            handle_ai_tool_calls(
+                                &app, seq, &resp.tool_calls,
+                                resp.text.as_deref().unwrap_or(""), &lang,
+                            ).await;
+                            return;
+                        }
+
+                        // 纯文本回答(无 tool_call)
+                        match resp.text.filter(|t| !t.trim().is_empty()) {
+                            Some(text) => emit_ai_result(&app, seq, ai_result_entry(text)),
+                            None => emit_ai_clear(&app, seq),
+                        }
+                    }
+                    Err(AIError::Timeout) => {
+                        tracing::warn!(
+                            target: ai_slo::TARGET,
+                            "AI ← {:?}/{} TIMEOUT elapsed={}ms (fallback→fuzzy)",
+                            provider_kind,
+                            provider_model,
+                            elapsed,
+                        );
+                        emit_ai_clear(&app, seq);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: ai_slo::TARGET,
+                            "AI ← {:?}/{} ERR elapsed={}ms (fallback→fuzzy): {}",
+                            provider_kind,
+                            provider_model,
+                            elapsed,
+                            e,
+                        );
+                        emit_ai_clear(&app, seq);
+                    }
                 }
             }
         });
@@ -837,6 +916,8 @@ impl SearchService {
             // 控制监听器；search 阶段无第二重开关）。带参 engine 也不设参数长度门槛
             // （剪贴板搜索 "a" 一个字符也合理，engine 自决定 fuzzy 阈值）。
             Route::EngineTakeover { .. } => route,
+            // AiTrigger 同 EngineTakeover——"ai" 是本体保留前缀，不走 plugin 检查。
+            Route::AiTrigger { .. } => route,
             Route::Mixed { candidates } => Route::Mixed {
                 candidates: candidates
                     .into_iter()
@@ -1264,6 +1345,33 @@ fn emit_ai_result(app: &AppHandle, seq: u64, entry: AppEntry) {
     }
 }
 
+/// AI 流式 chunk 事件 payload——每个 Text chunk emit 一次,前端增量拼接展示。
+#[derive(Clone, Serialize)]
+struct AiStreamPayload {
+    seq: u64,
+    /// 增量文本片段
+    delta: String,
+    /// 累积全文(前端直接替换 name,不用自己拼接)
+    accumulated: String,
+    /// 是否为最后一条(流结束)
+    done: bool,
+}
+
+/// emit AI 流式 chunk —— `blink://ai-stream` 事件。
+fn emit_ai_stream(app: &AppHandle, seq: u64, delta: &str, accumulated: &str, done: bool) {
+    if let Err(e) = app.emit(
+        "blink://ai-stream",
+        AiStreamPayload {
+            seq,
+            delta: delta.to_string(),
+            accumulated: accumulated.to_string(),
+            done,
+        },
+    ) {
+        tracing::debug!(error = %e, "emit AI stream failed");
+    }
+}
+
 /// emit AI 清占位——发一个 `source="ai"` 的空标记项,前端识别后移除占位行。
 ///
 /// 用途:超时/供应商错/密钥缺失/AI 返回空文本——所有"没有真结果"的分支都清占位,
@@ -1287,6 +1395,75 @@ fn emit_ai_clear(app: &AppHandle, seq: u64) {
     };
     if let Err(e) = app.emit("blink://results", ResultsPayload { seq, items: vec![clear_marker] }) {
         tracing::debug!(error = %e, "emit AI clear failed");
+    }
+}
+
+/// 处理 AI tool_calls —— 流式/非流式共用的执行逻辑。
+///
+/// 解析 tool_call → (Action, 参数),按 DangerClass 分支:
+/// - Safe:直接执行,emit 执行结果
+/// - Dangerous:emit 确认卡片,等用户 Enter/Esc
+/// - 未知 action:回退到文本回答(若有)
+async fn handle_ai_tool_calls(
+    app: &AppHandle,
+    seq: u64,
+    tool_calls: &[crate::domain::ai::message::ToolCall],
+    fallback_text: &str,
+    lang: &str,
+) {
+    let tc = &tool_calls[0]; // 主窗口只取第一个
+    let action_reg = app.state::<Arc<ActionRegistry>>();
+    let resolved = resolve_tool_call(tc, &action_reg);
+
+    match resolved {
+        Some((action, args)) => match action.danger_class() {
+            DangerClass::Safe => {
+                let cx = ActionContext::from_arguments(app, args.clone());
+                match action.execute(&cx).await {
+                    Ok(outcome) => {
+                        tracing::info!(
+                            target: ai_slo::TARGET,
+                            "AI tool_call 执行成功: {} args={}",
+                            tc.name, args,
+                        );
+                        // 先清流式占位/残留,再发执行结果——避免 AI 文本与执行结果短暂共存
+                        emit_ai_clear(app, seq);
+                        emit_ai_result(app, seq, ai_action_done_entry(action.as_ref(), &outcome));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: ai_slo::TARGET,
+                            "AI tool_call 执行失败: {} err={}",
+                            tc.name, e,
+                        );
+                        emit_ai_clear(app, seq);
+                    }
+                }
+            }
+            DangerClass::Dangerous => {
+                tracing::info!(
+                    target: ai_slo::TARGET,
+                    "AI tool_call 需确认: {} (Dangerous)",
+                    tc.name,
+                );
+                let title = action.title().resolve(lang).to_string();
+                let display_name = resolve_display_name(tc, &action);
+                emit_ai_confirm(app, seq, &display_name, &args, &title);
+            }
+        },
+        None => {
+            tracing::warn!(
+                target: ai_slo::TARGET,
+                "AI tool_call 未知动作: {},回退文本",
+                tc.name,
+            );
+            match fallback_text.trim() {
+                t if !t.is_empty() => {
+                    emit_ai_result(app, seq, ai_result_entry(t.to_string()));
+                }
+                _ => emit_ai_clear(app, seq),
+            }
+        }
     }
 }
 

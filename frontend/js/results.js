@@ -131,9 +131,12 @@ function appendNew(items, didReset) {
         .map((x) => x.source)
         .filter((s) => s && !["file", "start_menu", "calc", "clipboard"].includes(s))
     );
-    // 清除对应插件的占位符
+    // 清除对应插件的占位符 + 流式中断的 AI 残留
+    //   is_placeholder=true → 常规占位清理
+    //   _isStreaming=true   → 流式首 chunk 后 is_placeholder 被清除,但流未正常结束,
+    //                         clear marker 到达时仍需清理(否则残留不完整 AI 文本)
     allItems = allItems.filter((x) => {
-      if (!x.is_placeholder) return true;
+      if (!x.is_placeholder && !x._isStreaming) return true;
       return !pluginsReturned.has(x.source);
     });
   }
@@ -540,6 +543,49 @@ export function getAiConfirmData() {
         arguments: li.dataset.aiConfirmArguments,
       }
     : null;
+}
+
+/**
+ * AI 流式 chunk 更新——后端逐段推送文本,前端增量替换 AI 结果项的 name。
+ * @param {{seq: number, delta: string, accumulated: string, done: boolean}} payload
+ */
+export function updateAiStream(payload) {
+  // 找 AI 占位或已有的 AI 结果项
+  const idx = allItems.findIndex(
+    (it) => it.source === "ai" && (it.is_placeholder || !it.is_error)
+  );
+  if (idx < 0) return;
+
+  if (payload.done) {
+    // 流结束——替换为完整结果项(与 ai_result_entry 对齐,支持 Copy action)
+    allItems[idx] = {
+      name: payload.accumulated,
+      pinyinName: "",
+      pinyinFull: "",
+      lnkPath: "",
+      isCalc: false,
+      score: 0.7,
+      isPlaceholder: false,
+      isError: false,
+      source: "ai",
+      description: "回车复制回答",
+      action: {
+        kind: "copy",
+        payload: payload.accumulated,
+        hint: "复制回答",
+      },
+    };
+  } else {
+    // 增量更新——只改 name,保持 placeholder 状态(前端样式靠 .is-loading 控制)
+    allItems[idx].name = payload.accumulated;
+    // 首次有内容时去掉 placeholder 标记(让 AI 文本样式生效)
+    if (allItems[idx].is_placeholder && payload.accumulated.length > 0) {
+      allItems[idx].is_placeholder = false;
+      allItems[idx]._isStreaming = true; // 标记流式进行中——clear 机制依赖此标记
+      allItems[idx].score = 0.7;
+    }
+  }
+  renderPage();
 }
 
 function updateSelection() {

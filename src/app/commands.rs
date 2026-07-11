@@ -894,6 +894,18 @@ pub async fn has_ai_secret(provider_id: String) -> Result<bool, String> {
     }
 }
 
+/// 获取 Provider 密钥的首尾掩码(如 `"sk-a••••cdef"`),供编辑 modal 占位展示。
+///
+/// 不返回明文——仅返回 `format_hint` 结果。密钥不存在返回 `None`。
+#[tauri::command]
+pub async fn get_ai_secret_hint(provider_id: String) -> Result<Option<String>, String> {
+    match crate::infra::platform::secret::load_secret(&provider_id, "key") {
+        Ok(secret) => Ok(Some(crate::infra::platform::secret::format_hint(secret.expose()))),
+        Err(crate::infra::platform::secret::SecretError::NotFound(_)) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// 用 CM 里已存的密钥拉取可用模型列表(0.9.4)。
 ///
 /// 编辑供应商时,前端拿不到 CM 里的明文密钥,但需要展示可用模型列表。
@@ -947,8 +959,9 @@ pub async fn fetch_ai_models(
             fetch_openai_models(&client, &urls, &api_key).await
         }
         ProviderKind::AnthropicMessages => {
-            // Anthropic 不暴露模型列表
-            Err("Anthropic 不支持自动获取模型列表".to_string())
+            let base = base_url.as_deref().unwrap_or("https://api.anthropic.com");
+            let url = format!("{}/v1/models?limit=100", base.trim_end_matches('/'));
+            fetch_anthropic_models(&client, &url, &api_key).await
         }
         ProviderKind::GeminiGenerateContent => {
             let base = base_url
@@ -1067,6 +1080,58 @@ async fn fetch_gemini_models(client: &reqwest::Client, url: &str) -> Result<Vec<
     }
 }
 
+/// 获取 Anthropic 模型列表。
+///
+/// Anthropic API: `GET /v1/models`
+/// - Header: `x-api-key: {key}`, `anthropic-version: 2023-06-01`
+/// - Response: `{ "data": [{ "id": "model-id", ... }], "has_more": false }`
+async fn fetch_anthropic_models(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: &str,
+) -> Result<Vec<String>, String> {
+    match client
+        .get(url)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("Accept", "application/json")
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            let models = resp
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|v| {
+                    v.get("data").and_then(|d| d.as_array()).map(|arr| {
+                        arr.iter()
+                            .filter_map(|m| m.get("id").and_then(|id| id.as_str()).map(String::from))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .unwrap_or_default();
+            if models.is_empty() {
+                Err("返回空列表".to_string())
+            } else {
+                let mut sorted = models;
+                sorted.sort();
+                sorted.dedup();
+                Ok(sorted)
+            }
+        }
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            if status == 401 || status == 403 {
+                Err(format!("认证失败(HTTP {status}),请检查 API Key"))
+            } else {
+                Err(format!("获取模型失败(HTTP {status})"))
+            }
+        }
+        Err(e) => Err(format!("获取模型失败: {e}")),
+    }
+}
+
 /// 测试 AI 供应商连通性(0.9.4)。
 ///
 /// 用 `reqwest` 直接发一个最小请求验证 Key + URL 是否可用。
@@ -1131,8 +1196,16 @@ pub async fn test_ai_provider(
         }
         ProviderKind::AnthropicMessages => {
             let base = base_url.as_deref().unwrap_or("https://api.anthropic.com");
-            let url = format!("{}/v1/messages", base.trim_end_matches('/'));
-            test_anthropic_endpoint(&client, &url, &effective_key).await
+            let base = base.trim_end_matches('/');
+            // 优先用 models 端点(更轻量),失败再 fallback 到 messages 端点
+            let models_url = format!("{}/v1/models?limit=1", base);
+            match test_anthropic_models_endpoint(&client, &models_url, &effective_key).await {
+                ok @ Ok(_) => ok,
+                Err(_) => {
+                    let messages_url = format!("{}/v1/messages", base);
+                    test_anthropic_endpoint(&client, &messages_url, &effective_key).await
+                }
+            }
         }
         ProviderKind::GeminiGenerateContent => {
             let base = base_url
@@ -1186,6 +1259,41 @@ async fn test_openai_models_endpoint(
         }
     }
     Err(format!("连接失败: {last_err}"))
+}
+
+/// 测试 Anthropic 模型列表端点连通性(更轻量,不消耗 token)。
+async fn test_anthropic_models_endpoint(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: &str,
+) -> Result<String, String> {
+    match client
+        .get(url)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("Accept", "application/json")
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            let count = resp
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|v| v.get("data").and_then(|d| d.as_array().map(|a| a.len())))
+                .unwrap_or(0);
+            Ok(format!("连接成功,发现 {count} 个模型"))
+        }
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            if status == 401 || status == 403 {
+                Err(format!("认证失败(HTTP {status}),请检查 API Key"))
+            } else {
+                Err(format!("获取模型失败(HTTP {status})"))
+            }
+        }
+        Err(e) => Err(format!("连接失败: {e}")),
+    }
 }
 
 async fn test_anthropic_endpoint(

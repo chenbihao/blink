@@ -25,8 +25,11 @@ export function init() {
   queryEl.addEventListener("input", onInput);
   // IME 组字感知：避免中文拼音中间态触发无效搜索
   queryEl.addEventListener("compositionstart", () => { isComposing = true; });
+  queryEl.addEventListener("compositionupdate", onCompositionUpdate);
   queryEl.addEventListener("compositionend", () => {
     isComposing = false;
+    // 组字结束：恢复 ghost-typed 为最终 query（compositionupdate 可能残留中间态）
+    ghost.syncTypedText(queryEl.value);
     onInput(); // 组字结束后立即触发一次完整输入搜索
   });
   // async lane 慢引擎完成后推送增量；校验 seq（防过期）。
@@ -44,6 +47,13 @@ export function init() {
     const p = event.payload;
     if (!p || p.seq !== seq) return;
     results.showAiConfirm(p);
+  });
+
+  // AI 流式 chunk——后端逐文本片段推送,前端增量更新 AI 结果项。
+  listen("blink://ai-stream", (event) => {
+    const p = event.payload;
+    if (!p || p.seq !== seq) return;
+    results.updateAiStream(p);
   });
 }
 
@@ -91,6 +101,17 @@ export async function fetchContextSuggestions() {
   } catch (e) {
     console.error("fetchContextSuggestions failed:", e);
   }
+}
+
+/**
+ * IME compositionupdate 事件处理：拼音/笔画每变化一次就触发。
+ * 把当前 IME 文字同步到 ghost-typed（透明占位），让 ghost-suggest 跟随后移。
+ * 示例：用户输入 "ni" → "ni'h" → "ni'hao"，ghost-typed 实时更新，suggest 不重叠。
+ */
+function onCompositionUpdate() {
+  if (!isComposing) return;
+  // composition 期间不触发搜索（等 compositionend），只同步 ghost 位置
+  ghost.syncTypedText(queryEl.value);
 }
 
 function onInput() {

@@ -27,6 +27,6 @@ pub use factory::default_factory;
 #[allow(unused_imports)]
 pub use message::{ChatMessage, CompletionRequest, CompletionResponse, Role, ToolCall, Usage};
 #[allow(unused_imports)]
-pub use provider::{AIError, AIProvider};
+pub use provider::{AIError, AIProvider, StreamChunk};
 #[allow(unused_imports)]
 pub use registry::{AIProviderRegistry, ProviderFactory};

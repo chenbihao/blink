@@ -58,6 +58,15 @@ function notify() {
   if (onChangeCallback) onChangeCallback(currentSuggestion);
 }
 
+/**
+ * 同步 IME 组字文字到 ghost-typed（透明占位），让 ghost-suggest 跟随后移。
+ * 中文输入法 composition 期间调用：拼音每变化一次就同步一次，避免 ghost 与输入重叠。
+ * @param {string} text - 当前 IME 组字中的文字（可能带拼音/候选字）
+ */
+export function syncTypedText(text) {
+  if (ghostTypedEl) ghostTypedEl.textContent = text;
+}
+
 /** 更新 ghost 显示。suggestion 为 null/undefined 时清空。 */
 export function update(query, suggestion) {
   const prev = currentSuggestion;

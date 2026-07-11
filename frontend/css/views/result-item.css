@@ -164,7 +164,7 @@ body.alt-active #results li .item-badge {
    视觉语言与 `.context-aware`(左侧 3px 强调条 + accent-bg)刻意拉开:
    - 不用左侧强调条,让 AI 与"打开剪贴板 URL"这类感知候选一眼可辨
    - 徽章位实心 accent 底 + 白字 "AI",辨识度独占
-   - name 用 pre-wrap + 3 行截断,不撑爆列表节奏(全文靠 payload 复制取)
+   - name 用 pre-wrap 自然撑开(全文可见,长回答由 window-size.js 动态适配窗口)
    - desc(回车复制提示)靠 flex order 上移到 name 前,长文本不会把提示挤到底部
    - 占位与真结果共用 24×24 徽章位,`.is-loading` 只切徽章内容不动几何
 */
@@ -185,10 +185,7 @@ body.alt-active #results li .item-badge {
   word-break: break-word;
   overflow: hidden;
   text-overflow: initial;
-  /* 3 行封顶:与列表节奏对齐;更长的全文已在 payload 里,回车复制不受影响。 */
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
+  /* 不限行数:AI 回答由内容自然撑开,window-size.js 动态测高贴合窗口。 */
   line-height: var(--leading-normal);
   color: var(--text);
 }

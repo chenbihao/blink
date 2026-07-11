@@ -86,6 +86,12 @@ pub struct AIConfig {
     #[serde(default)]
     pub direct_execute_safe_actions: bool,
 
+    // ── 流式输出 ─────────────────────────────────────────────────────────
+    /// 流式输出开关——**默认 true**。开启后 AI 文本逐 chunk 推送到前端,
+    /// 用户无需等待完整响应。关闭时 fallback 到非流式 complete(一次性返回)。
+    #[serde(default = "default_true")]
+    pub streaming: bool,
+
     // ── SLO 覆盖(§3.3 骨架层) ─────────────────────────────────────────────
     /// 单次路由调用硬超时(毫秒)。`None` → 用 default 2500ms。
     /// 用户可在设置页调,但不建议 > 3000(会破坏 fallback 平滑)。
@@ -108,6 +114,7 @@ impl Default for AIConfig {
             tier_light: None,
             tier_main: None,
             direct_execute_safe_actions: false,
+            streaming: true,
             slo_hard_timeout_ms: None,
         }
     }
@@ -414,6 +421,7 @@ mod tests {
         assert!(!c.enabled, "默认必须 opt-in（§3.6 铁则 1）");
         assert!(!c.allow_intent_routing);
         assert!(!c.direct_execute_safe_actions);
+        assert!(c.streaming, "流式默认开启");
         assert_eq!(c.min_query_len, 4);
         assert!(c.require_whitespace);
         assert!(c.exclude_pure_numeric);
@@ -610,6 +618,7 @@ mod tests {
         assert!(!c.enabled);
         assert_eq!(c.min_query_len, 4);
         assert!(c.require_whitespace);
+        assert!(c.streaming, "老配置缺 streaming 字段应默认 true");
         assert!(c.providers.is_empty());
     }
 
@@ -723,6 +732,7 @@ mod tests {
             tier_light: None,
             tier_main: None,
             direct_execute_safe_actions: true,
+            streaming: false,
             slo_hard_timeout_ms: Some(3000),
         };
         let s = serde_json::to_string(&original).unwrap();
@@ -739,6 +749,7 @@ mod tests {
             restored.direct_execute_safe_actions,
             original.direct_execute_safe_actions
         );
+        assert_eq!(restored.streaming, original.streaming);
         assert_eq!(restored.slo_hard_timeout_ms, Some(3000));
     }
 }

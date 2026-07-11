@@ -340,12 +340,13 @@ dependencies = [
 
 [[package]]
 name = "blink"
-version = "0.9.2"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "chrono",
  "dirs-next",
  "evalexpr",
+ "futures",
  "nucleo",
  "once_cell",
  "open",

@@ -33,8 +33,14 @@ let hasSecretMap = new Map();
 let _modelEditProviderId = null;
 let _modelEditOriginalId = null;
 let _modelEditDraft = null;
+let _modelSavedToastTimer = null;
 /** 拉取模型 popover 缓存 { models, error, loading } 或 null */
 let _modelFetchCache = null;
+
+// 供应商 modal 内模型多选状态
+let _providerModelCache = null;       // { models, error, loading }
+let _providerSelectedModels = [];     // string[]
+let _editOriginalModelIds = [];       // 编辑模式：打开时已有的 model id
 
 /**
  * 初始化 AI Tab
@@ -87,6 +93,7 @@ function defaultAIConfig() {
     tier_light: null,
     tier_main: null,
     direct_execute_safe_actions: false,
+    streaming: true,
     slo_hard_timeout_ms: null,
   };
 }
@@ -103,6 +110,7 @@ function applyAIConfigToUI() {
   if ($("ai-require-whitespace")) $("ai-require-whitespace").checked = c.require_whitespace !== false;
   if ($("ai-exclude-pure-numeric")) $("ai-exclude-pure-numeric").checked = c.exclude_pure_numeric !== false;
   if ($("ai-respect-awareness-url-path")) $("ai-respect-awareness-url-path").checked = c.respect_awareness_url_path !== false;
+  if ($("ai-streaming")) $("ai-streaming").checked = c.streaming !== false;
   if ($("ai-direct-safe")) $("ai-direct-safe").checked = !!c.direct_execute_safe_actions;
   if ($("ai-timeout-ms")) $("ai-timeout-ms").value = c.slo_hard_timeout_ms ?? 2500;
 
@@ -352,6 +360,29 @@ function openAIModelEditModal(providerId, modelId) {
   $("ai-model-edit-title").textContent = t(isEdit ? "ai.model_modal.title.edit" : "ai.model_modal.title.add");
   $("ai-model-edit-provider-info").textContent = t("ai.model_modal.provider_info", { name: provider.display_name });
 
+  // 新增模式：隐藏调用参数 & 高级段；编辑模式：显示全部
+  const paramsSection = document.getElementById("ai-model-param-temperature")?.closest(".ai-modal-section");
+  if (paramsSection) {
+    const allSections = paramsSection.parentElement?.querySelectorAll(".ai-modal-section");
+    // 调用参数段 & 高级段是 modal 内第 2、3 个 section（第 1 个是基础）
+    if (allSections && allSections.length >= 3) {
+      allSections[1].style.display = isEdit ? "" : "none";
+      allSections[2].style.display = isEdit ? "" : "none";
+    }
+  }
+  // 按钮：新增显示"保存并继续"+"完成"，编辑显示"保存"+"取消"
+  const continueBtn = document.getElementById("ai-model-edit-continue");
+  const saveBtn = document.getElementById("ai-model-edit-save");
+  const cancelBtn = document.getElementById("ai-model-edit-cancel");
+  if (continueBtn) {
+    continueBtn.style.display = isEdit ? "none" : "";
+    continueBtn.textContent = t("ai.model_modal.save_continue");
+  }
+  if (saveBtn) {
+    saveBtn.textContent = isEdit ? t("ai.model_modal.save") : t("ai.model_modal.done");
+  }
+  if (cancelBtn) cancelBtn.textContent = t("ai.model_modal.cancel");
+
   const idInput = $("ai-model-edit-id");
   idInput.value = _modelEditDraft.id;
   idInput.readOnly = isEdit;
@@ -553,9 +584,9 @@ function renderModelFetchList(filter) {
 }
 
 /**
- * 保存模型编辑——校验 + 落回 currentAIConfig + saveAIConfig
+ * 校验并保存模型——共用逻辑，返回 true 成功 / false 失败（错误已写入 UI）
  */
-async function saveModelEdit() {
+async function validateAndSaveModel() {
   const $ = (id) => document.getElementById(id);
   const errorEl = $("ai-model-edit-error");
   errorEl.textContent = "";
@@ -564,7 +595,7 @@ async function saveModelEdit() {
   const provider = (currentAIConfig.providers || []).find((p) => p.id === providerId);
   if (!provider) {
     errorEl.textContent = t("ai.model_modal.err.provider_gone");
-    return;
+    return false;
   }
   const isEdit = _modelEditOriginalId != null;
 
@@ -577,19 +608,19 @@ async function saveModelEdit() {
 
   if (!id) {
     errorEl.textContent = t("ai.model_modal.err.empty_id");
-    return;
+    return false;
   }
   if (!isEdit && (provider.models || []).some((m) => m.id === id)) {
     errorEl.textContent = t("ai.model_modal.err.duplicate_id");
-    return;
+    return false;
   }
   if (tempToggle && (!Number.isFinite(tempVal) || tempVal < 0 || tempVal > 2)) {
     errorEl.textContent = t("ai.model_modal.err.temperature_range");
-    return;
+    return false;
   }
   if (maxToggle && (!Number.isFinite(maxVal) || maxVal < 1)) {
     errorEl.textContent = t("ai.model_modal.err.max_tokens_range");
-    return;
+    return false;
   }
 
   const cleanedCustom = (_modelEditDraft.custom_parameters || []).filter((cp) => (cp.key || "").trim().length > 0);
@@ -610,7 +641,7 @@ async function saveModelEdit() {
     const idx = (provider.models || []).findIndex((m) => m.id === _modelEditOriginalId);
     if (idx < 0) {
       errorEl.textContent = t("ai.model_modal.err.model_gone");
-      return;
+      return false;
     }
     const old = provider.models[idx];
     newModel.enabled = old.enabled !== false;
@@ -626,13 +657,60 @@ async function saveModelEdit() {
   try {
     await saveAIConfig();
   } catch (e) {
+    // 回滚
+    if (isEdit) {
+      // 编辑模式回滚：无法恢复旧值（已被覆盖），只能提示
+    } else {
+      provider.models = provider.models.filter((m) => m.id !== id);
+    }
     errorEl.textContent = t("ai.error.save_failed", { err: String(e) });
-    return;
+    return false;
   }
+  return true;
+}
+
+/**
+ * 保存并关闭（编辑模式默认行为）
+ */
+async function saveModelEdit() {
+  const ok = await validateAndSaveModel();
+  if (!ok) return;
   closeAIModelEditModal();
   renderAIProviders();
   renderAITierSelects();
   renderAITierBanner();
+}
+
+/**
+ * 保存并继续添加（新增模式）
+ */
+async function saveAndContinueModelEdit() {
+  const ok = await validateAndSaveModel();
+  if (!ok) return;
+  // 重置表单，准备下一个
+  const $ = (id) => document.getElementById(id);
+  $("ai-model-edit-id").value = "";
+  $("ai-model-edit-id").readOnly = false;
+  $("ai-model-edit-id").classList.remove("input-readonly");
+  $("ai-model-edit-display-name").value = "";
+  $("ai-model-edit-error").textContent = "";
+  closeModelFetchPopover();
+  _modelFetchCache = null;
+  setTimeout(() => $("ai-model-edit-id").focus(), 40);
+  // toast
+  showModelSavedToast();
+  // 刷新列表（让用户看到刚加的模型出现在 tier select 等处）
+  renderAIProviders();
+  renderAITierSelects();
+  renderAITierBanner();
+}
+
+function showModelSavedToast() {
+  const toast = document.getElementById("ai-model-saved-toast");
+  if (!toast) return;
+  toast.style.display = "flex";
+  clearTimeout(_modelSavedToastTimer);
+  _modelSavedToastTimer = setTimeout(() => { toast.style.display = "none"; }, 2500);
 }
 
 /** 模型 modal 事件绑定——由 bindAIEvents 调一次 */
@@ -670,6 +748,7 @@ function bindAIModelEditModalEvents() {
 
   $("ai-model-edit-cancel")?.addEventListener("click", closeAIModelEditModal);
   $("ai-model-edit-save")?.addEventListener("click", saveModelEdit);
+  $("ai-model-edit-continue")?.addEventListener("click", saveAndContinueModelEdit);
 
   const fetchBtn = $("ai-model-edit-fetch");
   if (fetchBtn) {
@@ -854,6 +933,10 @@ function bindAIEvents() {
     currentAIConfig.respect_awareness_url_path = e.target.checked;
     saveAIConfig();
   });
+  $("ai-streaming")?.addEventListener("change", (e) => {
+    currentAIConfig.streaming = e.target.checked;
+    saveAIConfig();
+  });
   $("ai-direct-safe")?.addEventListener("change", (e) => {
     currentAIConfig.direct_execute_safe_actions = e.target.checked;
     saveAIConfig();
@@ -907,6 +990,29 @@ function bindAIEvents() {
     const bu = $("ai-modal-base-url").value.trim();
     const kind = $("ai-modal-kind").value;
     $("ai-modal-preset").value = guessPresetForProvider(kind, bu);
+  });
+
+  // 供应商 modal 模型多选：聚焦拉取 + 实时搜索 + Enter 快速添加
+  $("ai-provider-model-input")?.addEventListener("focus", () => triggerProviderModelFetch());
+  $("ai-provider-model-input")?.addEventListener("input", (e) => filterProviderModels(e.target.value));
+  $("ai-provider-model-input")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const val = e.target.value.trim();
+      if (val && !_providerSelectedModels.includes(val)) {
+        _providerSelectedModels.push(val);
+        renderProviderModelTags();
+        e.target.value = "";
+        filterProviderModels("");
+      }
+    }
+  });
+  // 点击 modal 外部区域关闭下拉（但不关 modal）
+  $("ai-modal-overlay")?.addEventListener("click", (e) => {
+    const dropdown = $("ai-provider-model-dropdown");
+    if (!dropdown || dropdown.style.display === "none") return;
+    if (e.target.closest("#ai-provider-model-select")) return;
+    dropdown.style.display = "none";
   });
 
   $("ai-modal-test")?.addEventListener("click", async () => {
@@ -965,29 +1071,42 @@ function bindAIEvents() {
  * kind 必须与后端 ProviderKind serde rename 值一致。
  */
 const AI_PRESET_CATALOG = {
-  openai: { kind: "openai_compatible", base_url: "https://api.openai.com/v1", display_name_default: "OpenAI", monogram: "OA", tint: "green", category: "main" },
-  anthropic: { kind: "anthropic_messages", base_url: null, display_name_default: "Anthropic", monogram: "An", tint: "amber", category: "main" },
-  gemini: { kind: "gemini_generate_content", base_url: null, display_name_default: "Google Gemini", monogram: "Ge", tint: "teal", category: "main" },
-  deepseek: { kind: "openai_compatible", base_url: "https://api.deepseek.com/v1", display_name_default: "DeepSeek", monogram: "深度", tint: "blue", category: "cn" },
-  siliconflow: { kind: "openai_compatible", base_url: "https://api.siliconflow.cn/v1", display_name_default: "SiliconFlow", monogram: "硅基", tint: "blue", category: "cn" },
-  moonshot: { kind: "openai_compatible", base_url: "https://api.moonshot.cn/v1", display_name_default: "Moonshot", monogram: "Ki", tint: "purple", category: "cn" },
-  groq: { kind: "openai_compatible", base_url: "https://api.groq.com/openai/v1", display_name_default: "Groq", monogram: "Gq", tint: "orange", category: "gw" },
-  openrouter: { kind: "openai_compatible", base_url: "https://openrouter.ai/api/v1", display_name_default: "OpenRouter", monogram: "OR", tint: "purple", category: "gw" },
-  mistral: { kind: "openai_compatible", base_url: "https://api.mistral.ai/v1", display_name_default: "Mistral", monogram: "Mi", tint: "orange", category: "gw" },
-  xai: { kind: "openai_compatible", base_url: "https://api.x.ai/v1", display_name_default: "xAI", monogram: "xA", tint: "slate", category: "gw" },
-  together: { kind: "openai_compatible", base_url: "https://api.together.xyz/v1", display_name_default: "Together", monogram: "Tg", tint: "green", category: "gw" },
-  perplexity: { kind: "openai_compatible", base_url: "https://api.perplexity.ai", display_name_default: "Perplexity", monogram: "Px", tint: "teal", category: "gw" },
-  huggingface: { kind: "openai_compatible", base_url: "https://api-inference.huggingface.co/v1", display_name_default: "Hugging Face", monogram: "HF", tint: "amber", category: "gw" },
-  ollama: { kind: "openai_compatible", base_url: "http://localhost:11434/v1", display_name_default: "Ollama", monogram: "Ol", tint: "slate", category: "local" },
-  custom: { kind: null, base_url: null, display_name_default: null, monogram: null, tint: "ink", category: "custom" },
+  "openai":            { kind: "openai_compatible",     base_url: "https://api.openai.com/v1",                          display_name_default: "OpenAI",               monogram: "OA",   tint: "green",  category: "main" },
+  "anthropic":         { kind: "anthropic_messages",    base_url: null,                                                 display_name_default: "Anthropic",            monogram: "An",   tint: "amber",  category: "main" },
+  "gemini":            { kind: "gemini_generate_content",base_url: null,                                                display_name_default: "Google Gemini",        monogram: "Ge",   tint: "teal",   category: "main" },
+  "deepseek":          { kind: "openai_compatible",     base_url: "https://api.deepseek.com/v1",                        display_name_default: "DeepSeek",             monogram: "深度",  tint: "blue",   category: "cn" },
+  "siliconflow":       { kind: "openai_compatible",     base_url: "https://api.siliconflow.cn/v1",                      display_name_default: "SiliconFlow",          monogram: "硅基",  tint: "blue",   category: "cn" },
+  "moonshot":          { kind: "openai_compatible",     base_url: "https://api.moonshot.cn/v1",                         display_name_default: "Moonshot",             monogram: "Ki",   tint: "purple", category: "cn" },
+  "zhipu":             { kind: "openai_compatible",     base_url: "https://open.bigmodel.cn/api/paas/v4",               display_name_default: "Zhipu",                monogram: "智谱",  tint: "indigo", category: "cn" },
+  "zhipu-anthropic":   { kind: "anthropic_messages",    base_url: "https://open.bigmodel.cn/api/anthropic",             display_name_default: "Zhipu (Anthropic)",    monogram: "智谱",  tint: "indigo", category: "cn" },
+  "doubao":            { kind: "openai_compatible",     base_url: "https://ark.cn-beijing.volces.com/api/v3",           display_name_default: "Doubao",               monogram: "豆包",  tint: "rose",   category: "cn" },
+  "volcengine-anthropic":{ kind: "anthropic_messages",  base_url: "https://ark.cn-beijing.volces.com/api/coding",       display_name_default: "Volcengine (Anthropic)",monogram: "火山",  tint: "rose",   category: "cn" },
+  "aliyun":            { kind: "openai_compatible",     base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",  display_name_default: "Aliyun",               monogram: "阿里",  tint: "orange", category: "cn" },
+  "stepfun":           { kind: "openai_compatible",     base_url: "https://api.stepfun.com/v1",                        display_name_default: "StepFun",             monogram: "阶跃",  tint: "purple", category: "cn" },
+  "minimax":           { kind: "openai_compatible",     base_url: "https://api.minimax.chat/v1",                       display_name_default: "MiniMax",             monogram: "MM",   tint: "pink",   category: "cn" },
+  "hunyuan":           { kind: "openai_compatible",     base_url: "https://api.hunyuan.cloud.tencent.com/v1",          display_name_default: "Hunyuan",             monogram: "混元",  tint: "teal",   category: "cn" },
+  "xiaomimimo":        { kind: "openai_compatible",     base_url: "https://token-plan-cn.xiaomimimo.com/v1",           display_name_default: "Xiaomi MiMo",         monogram: "小米", tint: "orange", category: "cn" },
+  "xiaomimimo-anthropic":{ kind: "anthropic_messages",  base_url: "https://token-plan-cn.xiaomimimo.com/anthropic",    display_name_default: "Xiaomi MiMo (Anthropic)",monogram: "小米", tint: "orange", category: "cn" },
+  "groq":              { kind: "openai_compatible",     base_url: "https://api.groq.com/openai/v1",                    display_name_default: "Groq",                monogram: "Gq",   tint: "orange", category: "gw" },
+  "openrouter":        { kind: "openai_compatible",     base_url: "https://openrouter.ai/api/v1",                      display_name_default: "OpenRouter",          monogram: "OR",   tint: "purple", category: "gw" },
+  "mistral":           { kind: "openai_compatible",     base_url: "https://api.mistral.ai/v1",                         display_name_default: "Mistral",             monogram: "Mi",   tint: "orange", category: "gw" },
+  "xai":               { kind: "openai_compatible",     base_url: "https://api.x.ai/v1",                               display_name_default: "xAI",                 monogram: "xA",   tint: "slate",  category: "gw" },
+  "together":          { kind: "openai_compatible",     base_url: "https://api.together.xyz/v1",                       display_name_default: "Together",            monogram: "Tg",   tint: "green",  category: "gw" },
+  "perplexity":        { kind: "openai_compatible",     base_url: "https://api.perplexity.ai",                         display_name_default: "Perplexity",          monogram: "Px",   tint: "teal",   category: "gw" },
+  "huggingface":       { kind: "openai_compatible",     base_url: "https://api-inference.huggingface.co/v1",           display_name_default: "Hugging Face",        monogram: "HF",   tint: "amber",  category: "gw" },
+  "nvidia":            { kind: "openai_compatible",     base_url: "https://integrate.api.nvidia.com/v1",               display_name_default: "NVIDIA",              monogram: "NV",   tint: "green",  category: "gw" },
+  "agnes-ai":          { kind: "openai_compatible",     base_url: "https://apihub.agnes-ai.com/v1",                    display_name_default: "Agnes AI",            monogram: "Ag",   tint: "rose",   category: "gw" },
+  "ollama":            { kind: "openai_compatible",     base_url: "http://localhost:11434/v1",                          display_name_default: "Ollama",              monogram: "Ol",   tint: "slate",  category: "local" },
+  "lm-studio":         { kind: "openai_compatible",     base_url: "http://localhost:1234/v1",                          display_name_default: "LM Studio",           monogram: "LM",   tint: "slate",  category: "local" },
+  "custom":            { kind: null,                    base_url: null,                                                 display_name_default: null,                  monogram: null,   tint: "ink",    category: "custom" },
 };
 
 /** tile 渲染顺序（按分类分组） */
 const AI_PRESET_ORDER = [
   "openai", "anthropic", "gemini",
-  "deepseek", "siliconflow", "moonshot",
-  "groq", "openrouter", "mistral", "xai", "together", "perplexity", "huggingface",
-  "ollama",
+  "deepseek", "siliconflow", "moonshot", "zhipu", "zhipu-anthropic", "doubao", "volcengine-anthropic", "aliyun", "stepfun", "minimax", "hunyuan", "xiaomimimo", "xiaomimimo-anthropic",
+  "groq", "openrouter", "mistral", "xai", "together", "perplexity", "huggingface", "nvidia", "agnes-ai",
+  "ollama", "lm-studio",
   "custom",
 ];
 
@@ -1057,6 +1176,8 @@ function applyAIPresetToModal(presetKey, isEdit) {
   }
   const testResult = $("ai-modal-test-result");
   if (testResult) { testResult.style.display = "none"; testResult.textContent = ""; }
+  // 切换品牌时重置模型选择（不同供应商 API 可用模型不同）
+  clearProviderModelSelect();
 }
 
 /**
@@ -1153,8 +1274,6 @@ function openAIProviderModal(editProviderId) {
     }
     overlay.dataset.editProviderId = editProviderId;
     $("ai-modal-title").textContent = t("ai.modal.title.edit");
-    $("ai-modal-kind-row").style.display = "none";
-    $("ai-modal-preset-row").style.display = "none";
     $("ai-modal-kind").value = p.kind;
     $("ai-modal-preset").value = guessPresetForProvider(p.kind, p.base_url);
     $("ai-modal-display-name").value = p.display_name || "";
@@ -1162,6 +1281,27 @@ function openAIProviderModal(editProviderId) {
     $("ai-modal-api-key").value = "";
     $("ai-modal-api-key").placeholder = t("ai.modal.api_key.ph.edit");
     $("ai-modal-api-key-hint").textContent = t("ai.modal.api_key.hint.edit");
+    // 异步拉取首尾掩码更新 placeholder
+    invoke("get_ai_secret_hint", { providerId: editProviderId }).then((masked) => {
+      if (masked && $("ai-modal-api-key").value === "") {
+        $("ai-modal-api-key").placeholder = masked + " — " + t("ai.modal.api_key.ph.edit");
+      }
+    }).catch(() => { /* 拉取失败保持原 placeholder */ });
+    // 品牌 & 协议：显示但只读
+    $("ai-modal-kind-row").style.display = "";
+    $("ai-modal-preset-row").style.display = "";
+    renderPresetList(guessPresetForProvider(p.kind, p.base_url), true);
+    $("ai-modal-kind").disabled = true;
+    $("ai-preset-list").querySelectorAll(".ai-preset-item").forEach((el) => {
+      el.style.pointerEvents = "none";
+      el.style.opacity = "0.5";
+    });
+    // 模型段：预填已有模型 tag，可继续追加
+    $("ai-modal-model-section").style.display = "";
+    clearProviderModelSelect();
+    _providerSelectedModels = (p.models || []).map((m) => m.id);
+    _editOriginalModelIds = [..._providerSelectedModels];
+    renderProviderModelTags();
   } else {
     delete overlay.dataset.editProviderId;
     $("ai-modal-title").textContent = t("ai.modal.title");
@@ -1176,6 +1316,10 @@ function openAIProviderModal(editProviderId) {
     $("ai-modal-api-key-hint").textContent = t("ai.modal.api_key.hint");
     renderPresetList("openai", false);
     applyAIPresetToModal("openai", false);
+    $("ai-modal-kind").disabled = false;
+    clearProviderModelSelect();
+    _editOriginalModelIds = [];
+    $("ai-modal-model-section").style.display = "";
   }
   const testResult = $("ai-modal-test-result");
   if (testResult) { testResult.style.display = "none"; testResult.textContent = ""; testResult.className = "ai-test-result"; }
@@ -1235,14 +1379,14 @@ async function saveNewProviderFromModal() {
   }
 
   if (isEdit) {
-    await saveEditedProvider(editingId, { kind, displayName, baseUrl, apiKey, errEl });
+    await saveEditedProvider(editingId, { kind, displayName, baseUrl, apiKey, errEl, selectedModels: _providerSelectedModels });
   } else {
-    await saveNewProvider({ kind, displayName, baseUrl, apiKey, errEl });
+    await saveNewProvider({ kind, displayName, baseUrl, apiKey, errEl, selectedModels: _providerSelectedModels });
   }
 }
 
-/** 新增 provider（models 空数组，由用户后续在卡片里逐个添加） */
-async function saveNewProvider({ kind, displayName, baseUrl, apiKey, errEl }) {
+/** 新增 provider（models 可由 modal 内勾选批量创建） */
+async function saveNewProvider({ kind, displayName, baseUrl, apiKey, errEl, selectedModels }) {
   const providerId = (crypto.randomUUID && crypto.randomUUID()) || `p-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   try {
@@ -1252,13 +1396,25 @@ async function saveNewProvider({ kind, displayName, baseUrl, apiKey, errEl }) {
     return;
   }
 
+  const initialModels = (selectedModels || []).map((modelId) => ({
+    id: modelId,
+    display_name: modelId,
+    enabled: true,
+    context_window: null,
+    input_price_per_million: null,
+    output_price_per_million: null,
+    temperature: null,
+    max_tokens: null,
+    custom_parameters: [],
+  }));
+
   const newProvider = {
     id: providerId,
     display_name: displayName,
     kind,
     base_url: baseUrl || null,
     secret_ref: `blink/${providerId}/key`,
-    models: [],
+    models: initialModels,
     created_at: Math.floor(Date.now() / 1000),
   };
 
@@ -1278,16 +1434,19 @@ async function saveNewProvider({ kind, displayName, baseUrl, apiKey, errEl }) {
   closeAIProviderModal();
   renderAIProviders();
   renderAITierSelects();
-  guideAddModelForProvider(providerId);
+  // 没选模型才引导手动添加
+  if (!selectedModels || selectedModels.length === 0) {
+    guideAddModelForProvider(providerId);
+  }
   if (!currentAIConfig.enabled) {
     showAIEnableToast();
   }
 }
 
 /**
- * 编辑既有 provider（kind + id + created_at + models 全保持；apiKey 空 → 保留原密钥）
+ * 编辑既有 provider（kind + id + created_at 保持；apiKey 空 → 保留原密钥；模型可追加）
  */
-async function saveEditedProvider(providerId, { displayName, baseUrl, apiKey, errEl }) {
+async function saveEditedProvider(providerId, { displayName, baseUrl, apiKey, errEl, selectedModels }) {
   const idx = (currentAIConfig.providers || []).findIndex((p) => p.id === providerId);
   if (idx < 0) {
     errEl.textContent = t("ai.error.save_failed", { err: "provider not found" });
@@ -1305,7 +1464,24 @@ async function saveEditedProvider(providerId, { displayName, baseUrl, apiKey, er
     }
   }
 
-  const updated = { ...old, display_name: displayName, base_url: baseUrl || null };
+  // 合并新选模型（跳过已存在的）
+  const existingIds = new Set((old.models || []).map((m) => m.id));
+  const newModels = (selectedModels || [])
+    .filter((modelId) => !existingIds.has(modelId))
+    .map((modelId) => ({
+      id: modelId,
+      display_name: modelId,
+      enabled: true,
+      context_window: null,
+      input_price_per_million: null,
+      output_price_per_million: null,
+      temperature: null,
+      max_tokens: null,
+      custom_parameters: [],
+    }));
+  const mergedModels = [...(old.models || []), ...newModels];
+
+  const updated = { ...old, display_name: displayName, base_url: baseUrl || null, models: mergedModels };
   currentAIConfig.providers = [
     ...currentAIConfig.providers.slice(0, idx),
     updated,
@@ -1397,6 +1573,201 @@ function hideAIEnableToast() {
   if (!toast) return;
   toast.style.display = "none";
   clearTimeout(showAIEnableToast._t);
+}
+
+// ── 供应商 modal 模型多选 ─────────────────────────────────────────────────────
+
+/** 重置模型多选状态 */
+function clearProviderModelSelect() {
+  _providerModelCache = null;
+  _providerSelectedModels = [];
+  _editOriginalModelIds = [];
+  const input = document.getElementById("ai-provider-model-input");
+  if (input) input.value = "";
+  const dropdown = document.getElementById("ai-provider-model-dropdown");
+  if (dropdown) { dropdown.style.display = "none"; dropdown.innerHTML = ""; }
+  renderProviderModelTags();
+}
+
+/**
+ * 聚焦输入框时触发拉取（首次拉取，后续切换显示）
+ */
+async function triggerProviderModelFetch() {
+  if (_providerModelCache && !_providerModelCache.loading && !_providerModelCache.error) {
+    // 已有缓存，直接显示
+    filterProviderModels(document.getElementById("ai-provider-model-input")?.value || "");
+    return;
+  }
+  const dropdown = document.getElementById("ai-provider-model-dropdown");
+  if (!dropdown) return;
+  dropdown.style.display = "";
+  _providerModelCache = { models: [], error: null, loading: true };
+  filterProviderModels("");
+
+  const $ = (id) => document.getElementById(id);
+  const kind = $("ai-modal-kind").value;
+  const baseUrl = $("ai-modal-base-url").value.trim();
+  const apiKey = $("ai-modal-api-key").value.trim();
+  const overlay = $("ai-modal-overlay");
+  const providerId = overlay?.dataset?.editProviderId || null;
+
+  if (!apiKey && !providerId) {
+    _providerModelCache = { models: [], error: "请先填写 API Key", loading: false };
+    filterProviderModels("");
+    return;
+  }
+
+  try {
+    const models = await fetchAvailableModelsFor(kind, baseUrl, providerId);
+    _providerModelCache = { models: models || [], error: null, loading: false };
+  } catch (e) {
+    _providerModelCache = { models: [], error: String(e.message || e), loading: false };
+  }
+  filterProviderModels(document.getElementById("ai-provider-model-input")?.value || "");
+}
+
+/**
+ * 按关键词过滤模型列表并渲染下拉
+ */
+function filterProviderModels(filter) {
+  const dropdown = document.getElementById("ai-provider-model-dropdown");
+  if (!dropdown) return;
+  dropdown.style.display = "";
+
+  const cache = _providerModelCache;
+  if (!cache || cache.loading) {
+    dropdown.innerHTML = `<div class="ai-provider-model-dropdown-empty"><span class="ai-spinner"></span> 正在拉取模型列表…</div>`;
+    return;
+  }
+  if (cache.error) {
+    // 拉取失败：显示错误 + 手动输入提示
+    const q = (filter || "").trim();
+    let html = `<div class="ai-provider-model-dropdown-empty">❌ ${escapeHtml(cache.error)}</div>`;
+    if (q && !_providerSelectedModels.includes(q)) {
+      html += `<div class="ai-provider-model-dropdown-item ai-manual-add" data-model-id="${escapeAttr(q)}">
+        <span>+ 添加 "${escapeHtml(q)}"</span>
+      </div>`;
+    }
+    dropdown.innerHTML = html;
+    bindManualAddHandlers(dropdown);
+    return;
+  }
+
+  const q = (filter || "").trim();
+  const qLower = q.toLowerCase();
+  const filtered = cache.models
+    .filter((m) => (q ? m.toLowerCase().includes(qLower) : true))
+    .slice(0, 100);
+
+  const selectedSet = new Set(_providerSelectedModels);
+  // 编辑模式：provider 已有的模型也算"已添加"
+  const editPid = document.getElementById("ai-modal-overlay")?.dataset?.editProviderId;
+  const provider = editPid ? (currentAIConfig.providers || []).find((p) => p.id === editPid) : null;
+  const providerModelIds = new Set((provider?.models || []).map((m) => m.id));
+
+  let itemsHtml = filtered.map((m) => {
+    const isSelected = selectedSet.has(m);
+    const isProviderExisting = providerModelIds.has(m) && !isSelected;
+    if (isSelected) {
+      return `<label class="ai-provider-model-dropdown-item" data-model-id="${escapeAttr(m)}">
+        <input type="checkbox" checked data-model-id="${escapeAttr(m)}" />
+        <span>${escapeHtml(m)}</span>
+      </label>`;
+    }
+    if (isProviderExisting) {
+      return `<label class="ai-provider-model-dropdown-item is-already" data-model-id="${escapeAttr(m)}">
+        <input type="checkbox" disabled data-model-id="${escapeAttr(m)}" />
+        <span>${escapeHtml(m)}</span>
+        <span class="added-label">已添加</span>
+      </label>`;
+    }
+    return `<label class="ai-provider-model-dropdown-item" data-model-id="${escapeAttr(m)}">
+      <input type="checkbox" data-model-id="${escapeAttr(m)}" />
+      <span>${escapeHtml(m)}</span>
+    </label>`;
+  }).join("");
+
+  // 无匹配 + 有输入 → 显示手动添加选项
+  if (filtered.length === 0 && q) {
+    if (!selectedSet.has(q) && !providerModelIds.has(q)) {
+      itemsHtml += `<div class="ai-provider-model-dropdown-item ai-manual-add" data-model-id="${escapeAttr(q)}">
+        <span>+ 添加 "${escapeHtml(q)}"</span>
+      </div>`;
+    } else {
+      itemsHtml += `<div class="ai-provider-model-dropdown-empty">无匹配模型</div>`;
+    }
+  } else if (filtered.length === 0) {
+    itemsHtml += `<div class="ai-provider-model-dropdown-empty">未返回可用模型</div>`;
+  }
+
+  // 有匹配但输入文本本身不在列表中 → 也显示手动添加
+  if (q && filtered.length > 0 && !cache.models.some((m) => m.toLowerCase() === qLower) && !selectedSet.has(q) && !providerModelIds.has(q)) {
+    itemsHtml += `<div class="ai-provider-model-dropdown-item ai-manual-add" data-model-id="${escapeAttr(q)}">
+      <span>+ 添加 "${escapeHtml(q)}"</span>
+    </div>`;
+  }
+
+  dropdown.innerHTML = itemsHtml;
+
+  // checkbox 事件
+  dropdown.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
+    cb.addEventListener("change", () => {
+      toggleProviderModel(cb.dataset.modelId, cb.checked);
+    });
+  });
+  bindManualAddHandlers(dropdown);
+}
+
+/** 绑定手动添加项的点击事件 */
+function bindManualAddHandlers(container) {
+  container.querySelectorAll(".ai-manual-add").forEach((el) => {
+    el.addEventListener("click", () => {
+      const modelId = el.dataset.modelId;
+      if (!modelId || _providerSelectedModels.includes(modelId)) return;
+      _providerSelectedModels.push(modelId);
+      renderProviderModelTags();
+      // 清空输入框 & 刷新下拉
+      const input = document.getElementById("ai-provider-model-input");
+      if (input) input.value = "";
+      filterProviderModels("");
+    });
+  });
+}
+
+/** 切换模型选中状态 */
+function toggleProviderModel(modelId, selected) {
+  if (selected) {
+    if (!_providerSelectedModels.includes(modelId)) {
+      _providerSelectedModels.push(modelId);
+    }
+  } else {
+    _providerSelectedModels = _providerSelectedModels.filter((m) => m !== modelId);
+  }
+  renderProviderModelTags();
+}
+
+/** 渲染已选模型 tag 列表 */
+function renderProviderModelTags() {
+  const container = document.getElementById("ai-provider-model-tags");
+  if (!container) return;
+  if (_providerSelectedModels.length === 0) {
+    container.innerHTML = "";
+    return;
+  }
+  container.innerHTML = _providerSelectedModels.map((m) =>
+    `<span class="ai-provider-model-tag">
+      ${escapeHtml(m)}
+      <button type="button" class="ai-provider-model-tag-remove" data-model-id="${escapeAttr(m)}">✕</button>
+    </span>`
+  ).join("");
+  container.querySelectorAll(".ai-provider-model-tag-remove").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      toggleProviderModel(btn.dataset.modelId, false);
+      // 同步取消 dropdown 中的 checkbox
+      const cb = document.querySelector(`#ai-provider-model-dropdown input[type="checkbox"][data-model-id="${CSS.escape(btn.dataset.modelId)}"]`);
+      if (cb) cb.checked = false;
+    });
+  });
 }
 
 // ── helper ────────────────────────────────────────────────────────────────────

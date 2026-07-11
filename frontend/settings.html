@@ -511,6 +511,13 @@
           <div class="extension-card">
             <div class="extension-body">
               <div class="setting-row">
+                <label class="setting-label" data-i18n="ai.advanced.streaming">流式输出<span class="field-hint-icon" data-i18n-title="ai.advanced.streaming.hint">ⓘ</span></label>
+                <label class="switch switch-sm">
+                  <input type="checkbox" id="ai-streaming" />
+                  <span class="slider"></span>
+                </label>
+              </div>
+              <div class="setting-row">
                 <label class="setting-label" data-i18n="ai.advanced.direct_safe">允许直接执行 Safe 动作<span class="field-hint-icon" data-i18n-title="ai.advanced.direct_safe.hint">ⓘ</span></label>
                 <label class="switch switch-sm">
                   <input type="checkbox" id="ai-direct-safe" />
@@ -575,6 +582,22 @@
               </div>
               <p class="modal-hint" id="ai-modal-api-key-hint" data-i18n="ai.modal.api_key.hint">密钥立即写入 Windows Credential Manager，SQLite 永不存原文</p>
               <p id="ai-modal-test-result" class="ai-test-result" style="display:none;"></p>
+            </div>
+
+            <!-- 段三:模型（新增模式；编辑模式隐藏） -->
+            <div class="ai-modal-section" id="ai-modal-model-section">
+              <div class="ai-modal-section-label">模型（可选，保存后仍可管理）</div>
+              <div class="ai-provider-model-select" id="ai-provider-model-select">
+                <div class="ai-provider-model-select-input-row">
+                  <input type="text" id="ai-provider-model-input" class="ai-provider-model-input" placeholder="聚焦自动拉取，输入关键词筛选…" autocomplete="off" />
+                </div>
+                <div id="ai-provider-model-dropdown" class="ai-provider-model-dropdown" style="display:none;">
+                  <!-- 由 JS 动态渲染 -->
+                </div>
+                <div id="ai-provider-model-tags" class="ai-provider-model-tags">
+                  <!-- 已选模型 tag 由 JS 动态渲染 -->
+                </div>
+              </div>
             </div>
 
             <p id="ai-modal-error" class="modal-error"></p>
@@ -678,9 +701,15 @@
             <p id="ai-model-edit-error" class="modal-error"></p>
             <div class="modal-actions">
               <button id="ai-model-edit-cancel" class="btn-small" data-i18n="ai.model_modal.cancel">取消</button>
+              <button id="ai-model-edit-continue" class="btn-primary btn-continue" data-i18n="ai.model_modal.save_continue">继续添加</button>
               <button id="ai-model-edit-save" class="btn-primary" data-i18n="ai.model_modal.save">保存</button>
             </div>
           </div>
+        </div>
+
+        <!-- Toast:模型保存成功（0.9.4 "保存并继续"反馈）─────────────────── -->
+        <div id="ai-model-saved-toast" class="ai-toast ai-toast-model-saved" style="display:none;">
+          <span class="ai-toast-text">✓ 模型已保存</span>
         </div>
 
         <!-- 上下文（0.8.9 UX：采集 → 过滤 → 触发 → 呈现，四段等距）──────── -->

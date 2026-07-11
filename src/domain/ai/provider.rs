@@ -26,8 +26,9 @@
 //! - `MockProvider` 用于测试,验证 dispatch 骨架
 
 use async_trait::async_trait;
+use tokio::sync::mpsc;
 
-use super::message::{CompletionRequest, CompletionResponse};
+use super::message::{CompletionRequest, CompletionResponse, ToolCall, Usage};
 use crate::app::ai_config::ProviderKind;
 
 /// AI 调用错误——**故意不含供应商原始错误明细**(避免密钥/内网 URL 泄漏到日志)。
@@ -63,6 +64,19 @@ impl std::fmt::Display for AIError {
 
 impl std::error::Error for AIError {}
 
+/// 流式 chunk —— provider 通过 channel 逐条发送,消费方(SearchService)逐条 emit 前端。
+#[derive(Debug, Clone)]
+pub enum StreamChunk {
+    /// 增量文本片段——前端逐段拼接展示。
+    Text(String),
+    /// 流结束——携带 tool_calls(若有)。
+    Done {
+        tool_calls: Vec<ToolCall>,
+        #[allow(dead_code)] // 流式过程中 usage 可能不精确,保留供未来 SLO 消费
+        usage: Usage,
+    },
+}
+
 /// **主窗口路径**的 AI 抽象——单次 completion + tool_calls,**无 agent loop**。
 ///
 /// **实现约束**:
@@ -88,6 +102,33 @@ pub trait AIProvider: Send + Sync {
     /// - 用户 ESC → 上层 drop 这个 future,provider 内部 reqwest task 自动 abort
     /// - 首 token 就返 `first_token_ms`(SSE 模式)——SLO 观测入口
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, AIError>;
+
+    /// 流式 completion——通过 channel 逐 chunk 发送文本片段。
+    ///
+    /// **默认实现**:fallback 到 `complete()`,一次性把结果发完。
+    /// 真正支持流式的 provider(如 RigProvider)应覆盖此方法。
+    ///
+    /// **硬超时**:调用方负责在外层包 `tokio::time::timeout`;provider 内部
+    /// 也应实现自己的超时(与 `complete` 一致)。
+    ///
+    /// **中断**:调用方 drop 返回的 future 即可中断;provider 内部 stream 会被
+    /// abort(与 `complete` 的 reqwest task abort 一致)。
+    async fn stream(
+        &self,
+        req: CompletionRequest,
+        tx: mpsc::UnboundedSender<StreamChunk>,
+    ) -> Result<(), AIError> {
+        // 默认实现:complete 后一次性发完
+        let resp = self.complete(req).await?;
+        if let Some(text) = resp.text {
+            let _ = tx.send(StreamChunk::Text(text));
+        }
+        let _ = tx.send(StreamChunk::Done {
+            tool_calls: resp.tool_calls,
+            usage: resp.usage,
+        });
+        Ok(())
+    }
 }
 
 // **注意**:此文件绝不 impl / re-export 任何 `AgentBuilder` / `Prompt` / `memory`。

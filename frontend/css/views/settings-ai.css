@@ -67,6 +67,9 @@
 .modal-card .setting-row-column .setting-label {
   margin-bottom: 4px;
 }
+.modal-card .setting-label {
+  width: 100px;
+}
 .modal-hint {
   font-size: var(--text-base);
   color: var(--text-dim);
@@ -760,4 +763,163 @@
 .ai-model-custom-params-add {
   margin-top: 2px;
   align-self: flex-start;
+}
+
+/* ── 供应商 modal 模型多选（输入框聚焦拉取）────────────── */
+.ai-provider-model-select {
+  position: relative;
+}
+.ai-provider-model-input {
+  width: 100%;
+  padding: 7px 10px;
+  background: var(--surface);
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: var(--text-base);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  box-sizing: border-box;
+}
+.ai-provider-model-input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+.ai-provider-model-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin-top: 2px;
+  background: var(--bg);
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius-md);
+  box-shadow: 0 6px 20px var(--shadow);
+  max-height: 200px;
+  overflow-y: auto;
+  z-index: 10;
+  scrollbar-width: thin;
+  scrollbar-color: var(--surface-2) transparent;
+}
+.ai-provider-model-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: var(--text-base);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--text);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+.ai-provider-model-dropdown-item:hover {
+  background: var(--surface);
+}
+.ai-provider-model-dropdown-item input[type="checkbox"] {
+  pointer-events: none;
+  accent-color: var(--accent);
+}
+.ai-provider-model-dropdown-item.is-already {
+  opacity: var(--opacity-dim);
+  cursor: default;
+  pointer-events: none;
+}
+.ai-provider-model-dropdown-item .added-label {
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  margin-left: auto;
+}
+.ai-provider-model-dropdown-empty {
+  padding: 12px 10px;
+  font-size: var(--text-base);
+  color: var(--text-faint);
+  text-align: center;
+}
+/* 手动添加项（拉取失败 / 无匹配时的 fallback） */
+.ai-provider-model-dropdown-item.ai-manual-add {
+  color: var(--accent);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-weight: var(--weight-medium);
+  border-top: 1px solid var(--surface-2);
+  cursor: pointer;
+}
+.ai-provider-model-dropdown-item.ai-manual-add:hover {
+  background: var(--accent-bg);
+}
+.ai-provider-model-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-height: 0;
+  padding-top: 4px;
+}
+.ai-provider-model-tags:empty {
+  display: none;
+}
+.ai-provider-model-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  background: var(--accent-bg);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--accent);
+  cursor: default;
+}
+.ai-provider-model-tag-remove {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  padding: 0;
+  line-height: 1;
+  opacity: 0.6;
+  transition: opacity var(--transition-fast);
+}
+.ai-provider-model-tag-remove:hover {
+  opacity: 1;
+}
+.ai-provider-model-dropdown-empty .ai-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--surface-2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: ai-spinner-spin 0.6s linear infinite;
+  vertical-align: middle;
+  margin-right: 4px;
+}
+@keyframes ai-spinner-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── 模型保存 toast ─────────────────────────────────────── */
+.ai-toast-model-saved {
+  background: var(--green-bg, #e6ffed);
+  border: 1px solid var(--green, #2da44e);
+  color: var(--green, #2da44e);
+  animation: ai-toast-in 200ms ease both;
+}
+.ai-toast-model-saved .ai-toast-text {
+  color: var(--green, #2da44e);
+  font-weight: var(--weight-medium);
+}
+
+/* ── "保存并继续"按钮 ────────────────────────────────────── */
+.btn-continue {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.btn-continue:hover {
+  background: var(--surface-3, var(--surface-2));
+  filter: brightness(1.05);
+}
+
+/* ── 模型 modal 区段按模式显隐 ─────────────────────────────── */
+.ai-model-add-only {
+  /* 新增模式隐藏的段：通过 JS 切换 display */
 }

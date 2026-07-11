@@ -162,6 +162,21 @@ pub fn format_masked(s: &str) -> String {
     format!("••••••••{last4}")
 }
 
+/// 生成提示字符串——编辑 modal placeholder 专用,展示首尾各 4 字符。
+///
+/// - 长度 ≤ 8:退化为全掩码(太短则首尾重叠无意义)
+/// - 长度 > 8:`{first4}••••{last4}` 形如 `sk-a••••cdef`
+#[allow(dead_code)]
+pub fn format_hint(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= 8 {
+        return "••••••••".to_string();
+    }
+    let first4: String = chars.iter().take(4).collect();
+    let last4: String = chars.iter().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    format!("{first4}••••{last4}")
+}
+
 // ── 测试 ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -255,5 +270,23 @@ mod tests {
         let disp = s.to_string();
         assert!(disp.ends_with("c123"));
         assert!(disp.starts_with("••••••••"));
+    }
+
+    #[test]
+    fn format_hint_shows_first4_and_last4() {
+        assert_eq!(format_hint("sk-1234567890abcdef"), "sk-1••••cdef");
+        assert_eq!(format_hint("abcdefghij"), "abcd••••ghij");
+    }
+
+    #[test]
+    fn format_hint_short_key_fully_masked() {
+        assert_eq!(format_hint("abcdefgh"), "••••••••");
+        assert_eq!(format_hint("short"), "••••••••");
+    }
+
+    #[test]
+    fn format_hint_unicode_boundary_safe() {
+        // 12 个字符 > 8,前后各 4
+        assert_eq!(format_hint("秘密密钥测试数据值1234"), "秘密密钥••••1234");
     }
 }
