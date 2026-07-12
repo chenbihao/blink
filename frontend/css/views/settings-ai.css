@@ -41,10 +41,10 @@
   border: 1px solid var(--surface-2);
   border-radius: var(--radius-lg);
   padding: 20px 24px;
-  min-width: 440px;
-  max-width: 520px;
-  /* 0.9.4:高度封顶,内容过多时内部滚动,避免被 settings 窗口挡住 */
-  max-height: 85vh;
+  min-width: 60vw;
+  max-width: 80vw;
+  /* 高度封顶,内容过多时内部滚动,避免被 settings 窗口挡住 */
+  max-height: 90vh;
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: var(--surface-2) transparent;
@@ -319,17 +319,39 @@
   scrollbar-color: var(--surface-2) transparent;
 }
 
-/* ── 预设选择器(0.9.4 修正:平铺按钮布局) ───────────────────
+/* ── 预设选择器(分组展示 + 组内按 name 排序) ───────────────────
  *
  * 每个按钮:小 tint monogram + 名称;已添加时右上角小圆点;
- * flex-wrap 自适应换行,信息密度高,一眼扫完。
- * custom 独占最后一行,虚线分隔。
+ * 按 category 分组(flex-wrap 自适应换行),信息密度高,一眼扫完。
+ * custom 独占最后一组,虚线分隔。
  */
 .ai-preset-list {
   display: flex;
+  flex-direction: column;
+  padding: 4px 0;
+}
+.ai-preset-group {
+  display: flex;
+  flex-direction: column;
+}
+.ai-preset-group + .ai-preset-group {
+  margin-top: 4px;
+}
+.ai-preset-group-label {
+  font-size: var(--text-2xs);
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 6px 0 2px;
+  font-weight: var(--weight-medium);
+}
+.ai-preset-group:first-child .ai-preset-group-label {
+  padding-top: 0;
+}
+.ai-preset-group-items {
+  display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 4px 0;
 }
 .ai-preset-item {
   position: relative;
@@ -616,67 +638,71 @@
   margin: -6px 0 0;
 }
 /* 只读输入框灰化样式已抽到 components/input.css（.input-wide.input-readonly 双 class，无 !important） */
-/* 0.9.4 Step 1:Model ID 行 + 拉取按钮 */
-.ai-model-id-row {
-  display: flex;
-  gap: 8px;
-  align-items: center;
+/* 模型编辑 modal:Model ID 输入框 + 下拉（聚焦拉取，与供应商 modal 统一风格） */
+.ai-model-edit-id-wrap {
+  position: relative;
   flex: 1;
 }
-.ai-model-id-row input {
-  flex: 1;
+.ai-model-edit-id-wrap input {
+  width: 100%;
+  box-sizing: border-box;
 }
-.ai-model-fetch-btn {
-  flex-shrink: 0;
-  padding: 5px 10px;
-  font-size: var(--text-lg);
-  line-height: var(--leading-none);
-}
-/* 拉取 popover:紧挨 ID 行,盖住下方内容;点选后关闭 */
-.ai-model-fetch-popover {
-  margin: 4px 0 8px;
+.ai-model-edit-fetch-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin-top: 2px;
   background: var(--bg);
   border: 1px solid var(--surface-2);
   border-radius: var(--radius-md);
-  box-shadow: 0 4px 12px var(--shadow);
-  overflow: hidden;
-}
-.ai-model-fetch-popover-head {
-  display: flex;
-  gap: 6px;
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--surface-2);
-  align-items: center;
-}
-.ai-model-fetch-filter {
-  flex: 1;
-  padding: 5px 8px;
-  background: var(--surface);
-  border: 1px solid var(--surface-2);
-  border-radius: var(--radius-sm);
-  color: var(--text);
-  font-size: var(--text-base);
-  font-family: var(--font-mono, ui-monospace, monospace);
-}
-.ai-model-fetch-close {
-  background: none;
-  border: none;
-  color: var(--text-faint);
-  cursor: pointer;
-  font-size: var(--text-md);
-  padding: 2px 6px;
-  border-radius: var(--radius-sm);
-  transition: color var(--transition-fast), background var(--transition-fast);
-}
-.ai-model-fetch-close:hover {
-  color: var(--red);
-  background: var(--red-bg);
-}
-.ai-model-fetch-list {
-  max-height: 220px;
+  box-shadow: 0 6px 20px var(--shadow);
+  max-height: 200px;
   overflow-y: auto;
+  z-index: 10;
   scrollbar-width: thin;
   scrollbar-color: var(--surface-2) transparent;
+}
+.ai-model-edit-fetch-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: var(--text-base);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--text);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+.ai-model-edit-fetch-dropdown-item:hover {
+  background: var(--surface);
+}
+.ai-model-edit-fetch-dropdown-item.is-added {
+  opacity: var(--opacity-dim);
+  cursor: default;
+  pointer-events: none;
+}
+.ai-model-edit-fetch-dropdown-item .added-tag {
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  margin-left: auto;
+}
+.ai-model-edit-fetch-dropdown-empty {
+  padding: 12px 10px;
+  font-size: var(--text-base);
+  color: var(--text-faint);
+  text-align: center;
+}
+.ai-model-edit-fetch-dropdown-empty .ai-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--surface-2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: ai-spinner-spin 0.6s linear infinite;
+  vertical-align: middle;
+  margin-right: 4px;
 }
 /* 参数行(temperature / max_tokens)——头部 label + toggle,body 折叠区 */
 .ai-model-param {

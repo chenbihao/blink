@@ -908,33 +908,59 @@ pub async fn get_ai_secret_hint(provider_id: String) -> Result<Option<String>, S
 
 /// 用 CM 里已存的密钥拉取可用模型列表(0.9.4)。
 ///
-/// 编辑供应商时,前端拿不到 CM 里的明文密钥,但需要展示可用模型列表。
-/// 此 command 从 CM 读密钥 → 发 HTTP 请求 → 返回模型 id 列表,密钥不暴露给前端。
+/// 获取供应商可用模型列表。
+///
+/// **密钥优先级**:api_key 非空 → 用 api_key;否则 provider_id 非空 → 从 CM 读。
 ///
 /// **参数**:
-/// - `provider_id`: Provider UUID,用于从 CM 读密钥
 /// - `kind`: 协议类型
 /// - `base_url`: 供应商 base URL
+/// - `api_key`: 明文密钥(新增供应商时前端传入);可空
+/// - `provider_id`: 已保存供应商的 UUID,用于从 CM 读密钥;可空
 ///
-/// **返回**:模型 id 列表;密钥不存在返回空列表;拉取失败返回错误。
+/// **返回**:模型 id 列表;拉取失败返回错误。
 #[tauri::command]
 pub async fn fetch_ai_models(
-    provider_id: String,
     kind: String,
     base_url: Option<String>,
+    api_key: Option<String>,
+    provider_id: Option<String>,
 ) -> Result<Vec<String>, String> {
     use crate::app::ai_config::ProviderKind;
 
-    // 1. 从 CM 读密钥
-    let secret = match crate::infra::platform::secret::load_secret(&provider_id, "key") {
-        Ok(s) => s,
-        Err(crate::infra::platform::secret::SecretError::NotFound(_)) => {
-            // 密钥不存在 → 返回空,前端会提示"请先填写 API Key"
+    // 密钥优先级:输入框 → CM
+    let _cm_secret;
+    let effective_key = if let Some(ref key) = api_key {
+        if !key.trim().is_empty() {
+            key.trim().to_string()
+        } else if let Some(pid) = provider_id.as_deref() {
+            match crate::infra::platform::secret::load_secret(pid, "key") {
+                Ok(s) => {
+                    _cm_secret = Some(s);
+                    _cm_secret.as_ref().unwrap().expose().to_string()
+                }
+                Err(crate::infra::platform::secret::SecretError::NotFound(_)) => {
+                    return Ok(Vec::new());
+                }
+                Err(e) => return Err(e.to_string()),
+            }
+        } else {
             return Ok(Vec::new());
         }
-        Err(e) => return Err(e.to_string()),
+    } else if let Some(pid) = provider_id.as_deref() {
+        match crate::infra::platform::secret::load_secret(pid, "key") {
+            Ok(s) => {
+                _cm_secret = Some(s);
+                _cm_secret.as_ref().unwrap().expose().to_string()
+            }
+            Err(crate::infra::platform::secret::SecretError::NotFound(_)) => {
+                return Ok(Vec::new());
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    } else {
+        return Ok(Vec::new());
     };
-    let api_key = secret.expose();
 
     let kind: ProviderKind =
         serde_json::from_str(&format!("\"{}\"", kind)).map_err(|_| format!("未知协议: {kind}"))?;
@@ -956,12 +982,12 @@ pub async fn fetch_ai_models(
             } else {
                 vec![format!("{}/models", base), format!("{}/v1/models", base)]
             };
-            fetch_openai_models(&client, &urls, &api_key).await
+            fetch_openai_models(&client, &urls, &effective_key).await
         }
         ProviderKind::AnthropicMessages => {
             let base = base_url.as_deref().unwrap_or("https://api.anthropic.com");
             let url = format!("{}/v1/models?limit=100", base.trim_end_matches('/'));
-            fetch_anthropic_models(&client, &url, &api_key).await
+            fetch_anthropic_models(&client, &url, &effective_key).await
         }
         ProviderKind::GeminiGenerateContent => {
             let base = base_url
@@ -970,12 +996,12 @@ pub async fn fetch_ai_models(
             let url = format!(
                 "{}/v1beta/models?key={}",
                 base.trim_end_matches('/'),
-                &api_key
+                &effective_key
             );
             fetch_gemini_models(&client, &url).await
         }
     };
-    // api_key(SecretString) 在这里出作用域 → zeroize
+    // effective_key(String) 在这里出作用域
     result
 }
 
@@ -1751,6 +1777,9 @@ pub async fn record_hotkey() -> Result<serde_json::Value, String> {
 
 /// 显示右键菜单独立窗口（突破主窗口边界裁剪）。
 /// 复用已有窗口：首次创建，后续 hide → 更新数据 → show，避免重复创建 WebView2 的开销。
+///
+/// `x/y` 是鼠标屏幕坐标（物理像素），`width/height` 是 CSS 像素尺寸。
+/// 后端通过 `clamp_context_menu` 做多屏感知定位 + DPI 缩放。
 #[tauri::command]
 pub async fn show_context_menu(
     app: tauri::AppHandle,
@@ -1778,13 +1807,18 @@ pub async fn show_context_menu(
         }
     };
 
+    // 多屏感知定位：找到鼠标所在显示器，DPI 缩放 + 工作区 clamp
+    let (fx, fy, fw, fh) = crate::infra::platform::window::clamp_context_menu(
+        x as i32, y as i32, width, height,
+    );
+
     // 复用已有窗口：resize → reposition → show → eval 渲染新数据 → force_topmost
     // ⚠️ 不能在隐藏态用 emit 传数据：WebView2 在 IsVisible=false 时会丢弃事件
     // （曾导致「窗口尺寸已撑开、内容却没更新」）。改用 eval（走 ExecuteScript 注入
     // 脚本到 webview 队列，show 之后必执行），比事件系统更可靠地更新菜单内容。
     if let Some(win) = app.get_webview_window("context-menu") {
-        let _ = win.set_size(tauri::PhysicalSize::new(width as u32, height as u32));
-        let _ = win.set_position(tauri::PhysicalPosition::new(x as i32, y as i32));
+        let _ = win.set_size(tauri::PhysicalSize::new(fw, fh));
+        let _ = win.set_position(tauri::PhysicalPosition::new(fx, fy));
         let _ = win.show();
         let theme_js = serde_json::to_string(&theme).unwrap_or_else(|_| "\"dark\"".to_string());
         let js = format!(
@@ -1797,22 +1831,22 @@ pub async fn show_context_menu(
         if let Ok(hwnd) = win.hwnd() {
             crate::infra::platform::window::force_topmost(windows::Win32::Foundation::HWND(hwnd.0 as _));
         }
-        tracing::trace!(x, y, width, height, items_len = items.len(), "右键菜单窗口复用");
+        tracing::trace!(fx, fy, fw, fh, items_len = items.len(), "右键菜单窗口复用");
         return Ok(());
     }
 
     // 首次创建：通过 URL 参数传递初始数据
     let encoded_items = urlencoding::encode(&items).to_string();
     let url = format!("contextmenu-popup.html?items={encoded_items}&theme={theme}");
-    tracing::debug!(x, y, width, height, "创建右键菜单窗口");
+    tracing::debug!(fx, fy, fw, fh, "创建右键菜单窗口");
     let _win = WebviewWindowBuilder::new(
         &app,
         "context-menu",
         WebviewUrl::App(url.into()),
     )
     .title("")
-    .inner_size(width, height)
-    .position(x, y)
+    .inner_size(fw as f64, fh as f64)
+    .position(fx as f64, fy as f64)
     .decorations(false)
     .transparent(false)
     .always_on_top(true)
@@ -1828,7 +1862,7 @@ pub async fn show_context_menu(
         crate::infra::platform::window::force_topmost(windows::Win32::Foundation::HWND(hwnd.0 as _));
     }
 
-    tracing::trace!(x, y, width, height, items_len = items.len(), "右键菜单窗口已创建");
+    tracing::trace!(fx, fy, fw, fh, items_len = items.len(), "右键菜单窗口已创建");
     Ok(())
 }
 

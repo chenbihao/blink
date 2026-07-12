@@ -670,12 +670,12 @@ impl SearchService {
                         target: ai_slo::TARGET,
                         "AI: 未配置或档位悬空,清占位"
                     );
-                    emit_ai_clear(&app, seq);
+                    emit_ai_clear(&app, seq, Some("AI 未配置或档位悬空"));
                     return;
                 }
                 Err(e) => {
                     tracing::warn!(target: ai_slo::TARGET, "AI resolve 失败: {e}");
-                    emit_ai_clear(&app, seq);
+                    emit_ai_clear(&app, seq, Some(&format!("AI 错误: {e}")));
                     return;
                 }
             };
@@ -684,7 +684,7 @@ impl SearchService {
             let provider_model = provider.model_id().to_string();
 
             let cfg = registry.config_snapshot();
-            let timeout_ms = cfg.slo_hard_timeout_ms.unwrap_or(2500);
+            let timeout_ms = cfg.slo_hard_timeout_ms.unwrap_or(20_000);
 
             // 0.9.3:使用聚合后的 tools 列表（内置动作 3 组 + 插件独立）
             let action_reg = app.state::<Arc<ActionRegistry>>();
@@ -790,7 +790,7 @@ impl SearchService {
                             emit_ai_stream(&app, seq, "", &accumulated, true);
                             emit_ai_result(&app, seq, ai_result_entry(accumulated));
                         } else {
-                            emit_ai_clear(&app, seq);
+                            emit_ai_clear(&app, seq, None);
                         }
                     }
                     Ok(Err(e)) => {
@@ -799,7 +799,7 @@ impl SearchService {
                             "AI ← {:?}/{} stream ERR elapsed={}ms: {}",
                             provider_kind, provider_model, elapsed, e,
                         );
-                        emit_ai_clear(&app, seq);
+                        emit_ai_clear(&app, seq, Some(&format!("{e}")));
                     }
                     Err(join_err) => {
                         tracing::warn!(
@@ -807,7 +807,7 @@ impl SearchService {
                             "AI stream task panic: {}",
                             join_err,
                         );
-                        emit_ai_clear(&app, seq);
+                        emit_ai_clear(&app, seq, Some("AI 内部错误"));
                     }
                 }
             } else {
@@ -849,7 +849,7 @@ impl SearchService {
                         // 纯文本回答(无 tool_call)
                         match resp.text.filter(|t| !t.trim().is_empty()) {
                             Some(text) => emit_ai_result(&app, seq, ai_result_entry(text)),
-                            None => emit_ai_clear(&app, seq),
+                            None => emit_ai_clear(&app, seq, None),
                         }
                     }
                     Err(AIError::Timeout) => {
@@ -860,7 +860,7 @@ impl SearchService {
                             provider_model,
                             elapsed,
                         );
-                        emit_ai_clear(&app, seq);
+                        emit_ai_clear(&app, seq, Some("AI 调用超时"));
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -871,7 +871,7 @@ impl SearchService {
                             elapsed,
                             e,
                         );
-                        emit_ai_clear(&app, seq);
+                        emit_ai_clear(&app, seq, Some(&format!("{e}")));
                     }
                 }
             }
@@ -1376,25 +1376,47 @@ fn emit_ai_stream(app: &AppHandle, seq: u64, delta: &str, accumulated: &str, don
 ///
 /// 用途:超时/供应商错/密钥缺失/AI 返回空文本——所有"没有真结果"的分支都清占位,
 /// 避免"AI 思考中…"永久转圈。
-fn emit_ai_clear(app: &AppHandle, seq: u64) {
-    // 复用 `emit_results` 的空结果标记规约:score=-2, is_placeholder=true, source=xxx。
-    // 前端识别 name.is_empty() && source=="ai" 即清除对应占位。
-    let clear_marker = AppEntry {
-        name: String::new(),
-        pinyin_name: String::new(),
-        pinyin_full: String::new(),
-        lnk_path: String::new(),
-        is_calc: false,
-        score: -2.0,
-        is_placeholder: true,
-        is_error: false,
-        source: AI_SOURCE.into(),
-        description: None,
-        action: Action::default(),
-        score_detail: None,
-    };
-    if let Err(e) = app.emit("blink://results", ResultsPayload { seq, items: vec![clear_marker] }) {
-        tracing::debug!(error = %e, "emit AI clear failed");
+///
+/// 若传 `error_msg`,前端展示为橙色错误项(不可点击),用户能看到失败原因。
+fn emit_ai_clear(app: &AppHandle, seq: u64, error_msg: Option<&str>) {
+    if let Some(msg) = error_msg {
+        // 错误项:is_error=true,前端渲染为橙色警告(复用插件 error-item 样式)
+        let error_entry = AppEntry {
+            name: msg.to_string(),
+            pinyin_name: String::new(),
+            pinyin_full: String::new(),
+            lnk_path: String::new(),
+            is_calc: false,
+            score: 0.5,
+            is_placeholder: false,
+            is_error: true,
+            source: AI_SOURCE.into(),
+            description: None,
+            action: Action::default(),
+            score_detail: None,
+        };
+        if let Err(e) = app.emit("blink://results", ResultsPayload { seq, items: vec![error_entry] }) {
+            tracing::debug!(error = %e, "emit AI error failed");
+        }
+    } else {
+        // 无错误信息时走原逻辑:空标记清占位
+        let clear_marker = AppEntry {
+            name: String::new(),
+            pinyin_name: String::new(),
+            pinyin_full: String::new(),
+            lnk_path: String::new(),
+            is_calc: false,
+            score: -2.0,
+            is_placeholder: true,
+            is_error: false,
+            source: AI_SOURCE.into(),
+            description: None,
+            action: Action::default(),
+            score_detail: None,
+        };
+        if let Err(e) = app.emit("blink://results", ResultsPayload { seq, items: vec![clear_marker] }) {
+            tracing::debug!(error = %e, "emit AI clear failed");
+        }
     }
 }
 
@@ -1427,7 +1449,7 @@ async fn handle_ai_tool_calls(
                             tc.name, args,
                         );
                         // 先清流式占位/残留,再发执行结果——避免 AI 文本与执行结果短暂共存
-                        emit_ai_clear(app, seq);
+                        emit_ai_clear(app, seq, None);
                         emit_ai_result(app, seq, ai_action_done_entry(action.as_ref(), &outcome));
                     }
                     Err(e) => {
@@ -1436,7 +1458,7 @@ async fn handle_ai_tool_calls(
                             "AI tool_call 执行失败: {} err={}",
                             tc.name, e,
                         );
-                        emit_ai_clear(app, seq);
+                        emit_ai_clear(app, seq, Some(&format!("动作执行失败: {e}")));
                     }
                 }
             }
@@ -1461,7 +1483,7 @@ async fn handle_ai_tool_calls(
                 t if !t.is_empty() => {
                     emit_ai_result(app, seq, ai_result_entry(t.to_string()));
                 }
-                _ => emit_ai_clear(app, seq),
+                _ => emit_ai_clear(app, seq, Some(&format!("AI 调用了未知动作: {}", tc.name))),
             }
         }
     }

@@ -1,11 +1,11 @@
 <h1 align="center">Blink</h1>
 
 <p align="center">
-  <strong>A Universal Action Layer for Windows — senses what you're doing, makes every action faster than the original path.</strong>
+  <strong>Windows 全局操作层 —— 感知你在做什么，让每一个操作都比原来更快。</strong>
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · <a href="README.zh-CN.md">中文</a>
+  <a href="README_EN.md">English</a> · <a href="README.md">中文</a>
 </p>
 
 <p align="center">
@@ -19,164 +19,149 @@
   <img src="docs/images/blink-rust.png" width="680" alt="Blink Demo"/>
 </p>
 
-[View the demo GIF](docs/images/blink.gif)
+[查看演示动图](docs/images/blink.gif)
 
 ---
 
-## What is Blink
+## 这是什么
 
-Blink isn't a launcher — it's a **Universal Action Layer**:
-search is just one entry point, **action execution is the destination**. By sensing context and proactively suggesting actions, sequences like "select English → translate", "copy URL → open link", "screenshot → clipboard" go from **multiple steps** to **zero input or one Tab**.
+Blink 不是启动器（launcher），是 **Universal Action Layer（统一操作层）**：
+搜索只是入口之一，**动作执行才是终点**。感知上下文、主动推荐动作，让"选中一段英文 → 翻译"、"复制了 URL → 打开链接"、"截图 → 存剪贴板"这类操作从**多步骤**变成**零输入或一次 Tab**。
 
-- ⚡ **Fast** — Summon &lt; 50ms, first result &lt; 20ms
-- 🎯 **Context-aware** — Auto-senses selection / clipboard / foreground app; unobtrusive but always ready
-- 🧩 **Extensible** — Sandboxed plugin processes (Rust / Python / Node.js / PowerShell); crashes don't affect core
+- ⚡ **极速** — 唤起 &lt; 50ms，首个结果 &lt; 20ms
+- 🎯 **懂上下文** — 选中/剪贴板/前台应用自动感知，不打扰但随手可用
+- 🧩 **可扩展** — 独立进程插件（Rust/Python/Node.js/PowerShell），崩溃不影响核心
 
 ---
 
-## Features
+## 核心能力
 
-### Core Search
+### 极速搜索
 
-- **Instant Launch** — `Alt + Space` (customizable, right-Alt tap supported), auto-hide on blur
-- **App Search** — Scans Start Menu; fuzzy match + Pinyin initials + full Pinyin (`wx` → 微信, `dksz` → 打开设置)
-- **File Search** — Integrates Everything; falls back to local directory scan when Everything is absent
-- **Live Calculator** — Type `1+1` or `100*0.25`, press Enter to copy
-- **Clipboard History** — Background auto-record + fuzzy search history
+- **应用搜索** — 扫描开始菜单，模糊匹配 + 拼音首字母 + 全拼（`wx` → 微信、`dksz` → 打开设置）
+- **文件搜索** — 集成 Everything，未安装时回退到本地目录扫描
+- **实时计算** — `1+1` / `100*0.25` 回车即复制
+- **剪贴板历史** — 后台自动记录，支持模糊搜索
 
-### Awareness & Proactive Suggestions (0.8)
+### 上下文感知
 
-- **Selection Awareness** — Grabs selected text in other apps (UIA + mouse hook); one-key translate/search after summoning
-- **Ghost Text Autocomplete** — Type `fy hello`, see inline gray `→ fanyi hello`; press Tab to promote to translation
-- **Context-Aware Suggestions** — Clipboard is URL / file path → auto-suggest "Open link / Reveal in Explorer"; select English text → Ghost suggestion to translate
-- **Weak signals pull, don't push** — Awareness lives on the side channel; adoption = zero disruption, non-adoption = zero cost; each Context trigger can be disabled individually in settings
+- **划词感知** — 在其他应用选中文本，Blink 自动抓取，唤起后一键翻译/搜索
+- **Ghost Text 补全** — 输入 `fy hello`，自动提示 `fanyi hello`，按 Tab 触发翻译
+- **智能推荐** — 剪贴板是 URL/文件路径 → 自动推荐"打开链接/在资源管理器定位"；选中英文 → Ghost 建议翻译
+- **弱意图不打扰** — 感知在后台静默运行，看到就用、看不到不碍事；每项功能都可在设置里单独关闭
 
-### Chord Mode (0.8.5 — Alt-hold shortcuts)
+### Chord 快捷动作
 
-Hold Alt while the main window is open; letter keys trigger actions directly:
+主窗打开时按住 Alt，字母键直达动作：
 
-| Combo | Action |
+| 组合 | 动作 |
 |---|---|
-| `Alt + Q` | Smart selection (floating ball, doesn't steal focus — select text in the origin app, click to confirm, main window restores with text filled) |
-| `Alt + C` | Clipboard history top-9 (press Alt+1~9 to quick-pick) |
-| `Alt + A` | Region screenshot (area capture → clipboard / save) |
+| `Alt + 1~9` | 快速触发结果列表中对应位置的项 |
+| `Alt + C` | 剪贴板历史 |
+| `Alt + A` | 区域截图（框选区域 → 剪贴板 / 保存） |
 
-### Plugins & Ecosystem
+### 插件生态
 
-- **Plugin System** — Isolated processes + JSONL protocol; crashes don't affect core. Runtimes: Rust / Python / Node.js / PowerShell
-- **Built-in Plugins** — Translation (Youdao / Baidu / DeepL / Ali / Tencent), Weather, IP lookup
-- **Surface Ownership Model** — Trigger and presentation are orthogonal; plugins choose `inline` mixed / `priority` pinned / `takeover` exclusive return area
+- **独立进程** — JSONL 通信，崩溃不影响核心；支持 Rust / Python / Node.js / PowerShell
+- **内置插件** — 翻译（有道 / 百度 / DeepL / 阿里 / 腾讯）、天气、IP 查询
+- **展示方式灵活** — 插件可混排在结果中 / 置顶显示 / 独占整个返回区
 
-### Platform & UX
+### 体验细节
 
-- **Context Menu** — Smart actions by result type (open location, copy path, run as admin, reset ranking, etc.)
-- **Themes** — Catppuccin Mocha dark / Latte light / Follow system
-- **i18n** — Full 中文 / English bilingual (including plugin content)
-- **Configurable** — Hotkeys, engine toggles, auto-start, proxy, log levels, per-item context awareness toggles
-
----
-
-## Vision · Where We're Heading
-
-Blink is evolving into the **perception & execution layer for local AI** — the reasoning brain is pluggable (any provider / agent), but Blink's moat is what web AI clients can't reach: global context sensing, local action execution, and sub-50ms speed.
-
-- 🧱 **0.9 — Agent Foundation** — Unify builtin / plugin / (future) MCP / skill into one tool model; multi-tier Provider (router / light / main); main-window text loop with AI as a fallback router. Zero voice — text only.
-- 🎤 **0.10 — Voice Action Loop** — Dual-chord voice entry (dictation vs command); "find that file I forgot the name of" → Everything search → result back. Architecture unchanged, only adds a sensing layer.
-- 🔌 **0.11 — Local & Ecosystem** — On-demand local models / skill-ification / bidirectional MCP / RAG memory.
-- 🛡️ **Trust boundary holds** — AI only produces suggestions / tool-call candidates, never executes directly; Tab acceptance is the final human review.
+- **右键菜单** — 按结果类型智能推荐（打开位置、复制路径、以管理员运行等）
+- **主题** — Catppuccin Mocha 暗色 / Latte 亮色 / 跟随系统
+- **国际化** — 中文 / English 全项目双语（含插件文案）
+- **可配置** — 快捷键、引擎开关、开机自启、代理、日志级别、上下文感知逐条开关
 
 ---
 
-## Installation
+## 路线图
 
-Download the latest installer from [Releases](../../releases).
+**已完成：** 基础搜索 → 插件生态 → 上下文感知 → Chord 交互 → AI 对话能力 → 前端架构重整
 
----
+**下一步：**
 
-## Usage
-
-1. Blink sits in the system tray after launch
-2. **`Alt + Space`** → summon the input bar
-3. Type app name (Pinyin initials/full supported), math expression, or plugin trigger word
-4. **↑↓** to navigate, **Enter** or **Alt + 1~9** for quick launch
-5. While main window is open, **hold Alt** → Ghost overlay shows Chord shortcuts (Alt+A/Q/C)
-6. **Esc** or click outside → hide
-
-### Keyboard Shortcuts
-
-| Action        | Description |
-|---------------|---|
-| `Alt + Space` | Summon / hide |
-| `↑` `↓`       | Navigate results |
-| `Alt + 1~9`   | Quick launch by position |
-| `Tab`         | Accept Ghost completion (`fy` → `fanyi `) or Context suggestion |
-| `Enter`       | Launch / copy result |
-| `PgUp` `PgDn` | Page up/down |
-| `Alt + C`     | Chord: clipboard history |
-| `Alt + A`     | Chord: region screenshot |
-| `Esc`         | Hide |
+| 方向 | 内容 | 状态 |
+|---|---|---|
+| 🎤 **语音指令** | STT · 双 chord 语音入口 · 语音找文件 · Agent 对话窗口 | 📋 规划中 |
+| 🔌 **本地化与生态** | 本地模型按需下载 · skill 化 · MCP 双向 · RAG 记忆 | 📋 规划中 |
+| 🛡️ **信任边界** | AI 只推荐动作，不直接执行；确认权始终在你手中 | ✅ 已内建 |
 
 ---
 
-## Development
+## 安装
 
-### Prerequisites
+从 [Releases](../../releases) 下载最新安装包。
+
+---
+
+## 使用
+
+1. 启动后 Blink 常驻系统托盘
+2. **`Alt + Space`** → 唤起输入框
+3. 输入应用名（拼音首字母/全拼皆可）、算式、插件触发词
+4. **↑↓** 选择，**Enter** 或 **Alt + 1~9** 快速触发
+5. 主窗打开时按住 **Alt** → 可看到快捷动作提示
+6. **Esc** 或失焦 → 隐藏
+
+### 快捷键速查
+
+| 操作 | 说明 |
+|---|---|
+| `Alt + Space` | 唤起 / 隐藏 |
+| `↑` `↓` | 上下选择 |
+| `Alt + 1~9` | 快速触发结果列表中对应位置的项 |
+| `Tab` | 采纳补全建议（如 `fy` → `fanyi `）或上下文推荐 |
+| `Enter` | 启动 / 复制结果 |
+| `PgUp` `PgDn` | 翻页 |
+| `Alt + C` | Chord：剪贴板历史 |
+| `Alt + A` | Chord：区域截图 |
+| `Esc` | 隐藏 |
+
+---
+
+## 开发
+
+### 环境要求
 
 - [Rust](https://www.rust-lang.org/tools/install) 1.75+
-- [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (MSVC C++ workload)
-- [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) (pre-installed on Windows 10/11)
+- [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)（MSVC C++ 工作负载）
+- [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)（Windows 10/11 通常已预装）
 
-### Build & Run
+### 构建运行
 
 ```bash
-# Dev mode (debug, console logging)
+# 开发模式（debug，控制台日志）
 cargo tauri dev
 
-# Release build (includes plugin compilation)
+# 打包发布（含插件编译）
 cargo xtask release
 
-# Tests
+# 运行测试
 cargo test --bin blink
 ```
 
-### Want to modify the core?
+### 想改核心？
 
-Read [`docs/production-design/`](docs/production-design/README.md) first:
-- [`00-overview.md`](docs/production-design/00-overview.md) — Product vision + milestones
-- [`product-platform.md §5.0`](docs/production-design/product-platform.md) — Four-domain architecture rules
-- [`phases/{version}-*.md`](docs/production-design/phases/) — Design decisions and pitfalls per version
-
----
-
-## Roadmap
-
-| Version | Content | Status |
-|---|---|---|
-| **0.1 ~ 0.7** | Core interaction → plugin ecosystem → clipboard history → perf stats | ✅ Done |
-| **0.8.0 ~ 0.8.5** | UIA selection / parameterized builtin actions / Ghost Text / translation Context / **four-domain architecture** / Chord foundation | ✅ Done |
-| **0.8.6** | Architecture hardening (physical skeleton for 0.9: Action trait / SuggestionProducer / ConfigStore / ConfigStore 6-shard + IPC generic) | ✅ Done |
-| **0.8.7** | Alt+A region screenshot (GDI capture + DWM Cloak + BGRA pipeline + fast PNG) | ✅ Done |
-| **0.8.8** | 0.8 wrap-up (docs sync + design tokens + cleanup) | ✅ Done |
-| **0.9** | Agent foundation: unified tool architecture · multi-tier Provider · main-window text loop (no voice) | 📋 Planned |
-| **0.10** | Voice action loop: STT · dual-chord voice entry · voice file-search · Agent window | 📋 Planned |
-| **0.11** | Local & ecosystem: on-demand local models · skill-ification · bidirectional MCP · RAG memory | 🔮 |
-| **Beyond** | Plugin marketplace · deeper proactive suggestions | 🔮 |
+先读 [`docs/production-design/`](docs/production-design/README.md)：
+- [`00-overview.md`](docs/production-design/00-overview.md) — 产品愿景 + 里程碑
+- [`product-platform.md §5.0`](docs/production-design/product-platform.md) — 四域架构铁则
+- [`phases/{version}-*.md`](docs/production-design/phases/) — 各版本设计决策 + 踩坑记录
 
 ---
 
-## Special Thanks
+## 致谢
 
-- [Wox](https://github.com/Wox-launcher/Wox) — The launcher that started it all on Windows
-- [Alfred](https://www.alfredapp.com/) — Proved that a global input box can be the first entry for human-computer interaction
-- [Raycast](https://www.raycast.com/) — Modern launcher experience, gold standard for plugin ecosystems
-- [uTools](https://u.tools/) — Reference for localized experience on Chinese desktops
-- [Flow Launcher](https://www.flowlauncher.com/) — Community-driven open-source launcher on Windows
-- [Everything](https://www.voidtools.com/) — Lightning-fast file search, integrated as Blink's file search backend
-- [Quicker](https://getquicker.net/) — Inspiration for the Chord interaction pattern
+- [Wox](https://github.com/Wox-launcher/Wox) — Windows 上的先驱 Launcher
+- [Alfred](https://www.alfredapp.com/) — 证明了全局输入框可以成为人机交互的第一入口
+- [Raycast](https://www.raycast.com/) — 现代化 Launcher 体验，插件生态的标杆
+- [uTools](https://u.tools/) — 国产效率工具，本地化体验的参考
+- [Flow Launcher](https://www.flowlauncher.com/) — Windows 上的开源 Launcher，社区驱动的典范
+- [Everything](https://www.voidtools.com/) — 极速文件搜索，Blink 文件搜索的集成方案
+- [Quicker](https://getquicker.net/) — Chord 交互模式的灵感来源
 
 ---
 
-## License
+## 许可
 
 [MIT](LICENSE)
-

@@ -4,7 +4,7 @@
 
 > 📖 **产品设计与文档导航**：请先阅读 [docs/production-design/00-overview.md](docs/production-design/00-overview.md) 了解产品定位、里程碑与完整文档体系。改核心前必读对应 phases 文档。
 
-更新时间 20260711
+更新时间 20260713
 
 ---
 
@@ -13,10 +13,9 @@
 Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而是 **Universal Action Layer（统一操作层）**。
 终极目标：感知用户上下文、主动推荐动作，让任何操作都比原来的路径更快。
 
-当前处于 **0.9 进行中**（0.9.0~0.9.3 + 0.9.5 已完成）。详见 [phases/0.9-ai-layer.md](docs/production-design/phases/0.9-ai-layer.md)。
+当前 **0.9.0~0.9.6 完成**（Agent 地基 + 插件 tool-call + 供应商配置 UI + 前端架构重整 + 收尾发版）。详见 [phases/0.9-ai-layer.md](docs/production-design/phases/0.9-ai-layer.md)。
 
-- ✅ **0.9.3 插件 tool-call 支持**：AI 路由能调用插件声明的 tool，ActionRegistry 改 RwLock 支持动态注册。详见 [0.9-ai-layer.md §四](docs/production-design/phases/0.9-ai-layer.md#四插件-tool-call-支持093)
-- ✅ **0.9.5 前端架构重整**：Open Props(token 数值源) + CSS 七层分层(vendor/tokens/themes/base/components/views/entries) + settings.js/i18n.js 拆分（纯结构重构）。详见 [0.9-ai-layer.md §五](docs/production-design/phases/0.9-ai-layer.md#五095-前端架构重整已完成纯结构重构)
+- 🔜 **0.9.7 Capability 能力协议层**：原子能力 + 统一声明/返回 + inventory 注册 + 截图/剪贴板焊死链路拆解 + 接 AI tool 池（为 0.10 北极星铺路）。详见 [phases/0.9.7-capability-layer.md](docs/production-design/phases/0.9.7-capability-layer.md)
 - 🔜 **0.10 语音指令闭环**：STT + 双 chord 语音入口 + 语音找文件 + Agent 对话窗口。详见 [phases/0.10-voice-agent.md](docs/production-design/phases/0.10-voice-agent.md)
 - 🔜 **0.11 本地化与生态**：本地模型 / skill / MCP / RAG。详见 [phases/0.11-local-ecosystem.md](docs/production-design/phases/0.11-local-ecosystem.md)
 

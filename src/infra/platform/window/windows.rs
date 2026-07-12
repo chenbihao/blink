@@ -352,6 +352,66 @@ pub fn clamp_to_work_area(win: &WebviewWindow) {
     }
 }
 
+/// 右键菜单多屏感知定位：根据鼠标坐标找到正确显示器，DPI 缩放 + 工作区 clamp。
+///
+/// 返回值 `(x, y, width, height)` 均为**物理像素**，可直接传给 `PhysicalSize` / `PhysicalPosition`。
+///
+/// - `screen_x/y`：鼠标屏幕坐标（物理像素，来自 `contextmenu.screenX/Y`）
+/// - `css_w/h`：菜单的 CSS 像素尺寸（前端估算值）
+pub fn clamp_context_menu(screen_x: i32, screen_y: i32, css_w: f64, css_h: f64) -> (i32, i32, u32, u32) {
+    unsafe {
+        let pt = POINT { x: screen_x, y: screen_y };
+        let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+
+        // 获取目标显示器工作区（排除任务栏）
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        let work = if GetMonitorInfoW(hmon, &mut mi).as_bool() {
+            mi.rcWork
+        } else {
+            // fallback：拿不到就用主屏
+            let hmon_primary = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+            let mut mi2: MONITORINFO = std::mem::zeroed();
+            mi2.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+            if GetMonitorInfoW(hmon_primary, &mut mi2).as_bool() {
+                mi2.rcWork
+            } else {
+                // 极端兜底：返回原坐标原尺寸
+                return (screen_x, screen_y, css_w as u32, css_h as u32);
+            }
+        };
+
+        // 目标显示器 DPI → scale factor
+        let mut dpi_x: u32 = 96;
+        let mut dpi_y: u32 = 96;
+        let _ = GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
+        let scale = (dpi_x.max(96) as f64) / 96.0;
+
+        // CSS 像寸 → 物理像素
+        let phys_w = (css_w * scale).round() as i32;
+        let phys_h = (css_h * scale).round() as i32;
+
+        // 保留 4px 边距，clamp 到工作区内
+        let margin = 4;
+        let max_x = work.right - phys_w - margin;
+        let max_y = work.bottom - phys_h - margin;
+        let x = screen_x.clamp(work.left + margin, max_x.max(work.left + margin));
+        let y = screen_y.clamp(work.top + margin, max_y.max(work.top + margin));
+
+        tracing::trace!(
+            screen_x, screen_y, css_w, css_h,
+            dpi = dpi_x, scale,
+            phys_w, phys_h,
+            work_left = work.left, work_top = work.top,
+            work_right = work.right, work_bottom = work.bottom,
+            final_x = x, final_y = y,
+            "clamp_context_menu: 多屏定位"
+        );
+
+        (x, y, phys_w as u32, phys_h as u32)
+    }
+}
+
 /// 打开设置窗口：已存在则聚焦，否则创建（无边框 + 透明 + 圆角）。
 ///
 /// 统一入口：主窗口搜索结果和托盘菜单都走这里，避免重复代码漏配置。

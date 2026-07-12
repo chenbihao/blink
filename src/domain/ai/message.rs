@@ -114,7 +114,7 @@ pub struct CompletionRequest {
     pub max_tokens: Option<u32>,
     /// 采样温度——0.0=确定,1.0=创意。路由模型建议 0.0-0.2
     pub temperature: Option<f32>,
-    /// 硬超时(毫秒)——None 用 AIConfig 的 `slo_hard_timeout_ms` 或 default 2500
+    /// 硬超时(毫秒)——None 用 AIConfig 的 `slo_hard_timeout_ms` 或 default 20000
     pub timeout_ms: Option<u32>,
 }
 

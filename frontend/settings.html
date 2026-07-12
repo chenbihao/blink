@@ -630,22 +630,14 @@
               <div class="ai-modal-section-label" data-i18n="ai.model_modal.section.basic">基础</div>
               <div class="setting-row">
                 <label class="setting-label" data-i18n="ai.model_modal.model_id">Model ID</label>
-                <div class="ai-model-id-row">
+                <div class="ai-model-edit-id-wrap" id="ai-model-edit-id-wrap">
                   <input type="text" id="ai-model-edit-id" class="input-wide" data-i18n-ph="ai.model_modal.model_id.ph" autocomplete="off" />
-                  <button type="button" id="ai-model-edit-fetch" class="btn-small ai-model-fetch-btn" data-i18n-title="ai.model_modal.fetch.title">🔍</button>
+                  <div id="ai-model-edit-fetch-dropdown" class="ai-model-edit-fetch-dropdown" style="display:none;">
+                    <!-- 由 JS 动态渲染 -->
+                  </div>
                 </div>
               </div>
-              <p class="modal-hint" data-i18n="ai.model_modal.model_id.hint">供应商 API 使用的 id，不可与本供应商下其他模型重复</p>
-              <!-- 拉取模型 popover(新增模式;编辑模式按钮隐藏) -->
-              <div id="ai-model-edit-fetch-popover" class="ai-model-fetch-popover" style="display:none;">
-                <div class="ai-model-fetch-popover-head">
-                  <input type="text" id="ai-model-edit-fetch-filter" class="ai-model-fetch-filter" data-i18n-ph="ai.model_modal.fetch.filter.ph" autocomplete="off" />
-                  <button type="button" id="ai-model-edit-fetch-close" class="ai-model-fetch-close" title="关闭">✕</button>
-                </div>
-                <div id="ai-model-edit-fetch-list" class="ai-model-fetch-list">
-                  <!-- 由 JS 动态渲染 -->
-                </div>
-              </div>
+              <p class="modal-hint" data-i18n="ai.model_modal.model_id.hint">聚焦自动拉取可用模型，输入关键词筛选；也可手动输入</p>
               <div class="setting-row">
                 <label class="setting-label" data-i18n="ai.model_modal.display_name">显示名</label>
                 <input type="text" id="ai-model-edit-display-name" class="input-wide" data-i18n-ph="ai.model_modal.display_name.ph" />

@@ -93,8 +93,7 @@ pub struct AIConfig {
     pub streaming: bool,
 
     // ── SLO 覆盖(§3.3 骨架层) ─────────────────────────────────────────────
-    /// 单次路由调用硬超时(毫秒)。`None` → 用 default 2500ms。
-    /// 用户可在设置页调,但不建议 > 3000(会破坏 fallback 平滑)。
+    /// 单次路由调用硬超时(毫秒)。`None` → 用 default 20000ms。
     #[serde(default)]
     pub slo_hard_timeout_ms: Option<u32>,
 }

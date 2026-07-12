@@ -389,9 +389,7 @@ function openAIModelEditModal(providerId, modelId) {
   idInput.classList.toggle("input-readonly", isEdit);
   $("ai-model-edit-display-name").value = _modelEditDraft.display_name;
 
-  const fetchBtn = $("ai-model-edit-fetch");
-  if (fetchBtn) fetchBtn.style.display = isEdit ? "none" : "";
-  closeModelFetchPopover();
+  closeModelFetchDropdown();
   _modelFetchCache = null;
 
   setupModelParamRow("temperature", _modelEditDraft.temperature, 0.7);
@@ -486,7 +484,7 @@ function coerceCustomParamValue(raw) {
 function closeAIModelEditModal() {
   const overlay = document.getElementById("ai-model-edit-overlay");
   if (overlay) overlay.style.display = "none";
-  closeModelFetchPopover();
+  closeModelFetchDropdown();
   _modelEditProviderId = null;
   _modelEditOriginalId = null;
   _modelEditDraft = null;
@@ -495,28 +493,21 @@ function closeAIModelEditModal() {
 
 // ── 拉取模型 popover ──────────────────────────────────────────────────────────
 
-/** 点击 🔍 触发——首次拉取，后续切换开关 */
-async function toggleModelFetchPopover() {
-  const popover = document.getElementById("ai-model-edit-fetch-popover");
-  if (!popover) return;
-  const isOpen = popover.style.display !== "none";
-  if (isOpen) {
-    closeModelFetchPopover();
-    return;
-  }
-  popover.style.display = "";
+/** 聚焦触发——首次拉取，后续直接显示 */
+async function openModelFetchDropdown() {
+  const dropdown = document.getElementById("ai-model-edit-fetch-dropdown");
+  if (!dropdown) return;
+  dropdown.style.display = "";
   if (!_modelFetchCache) {
     await performModelFetch();
   }
-  renderModelFetchList("");
-  const filter = document.getElementById("ai-model-edit-fetch-filter");
-  if (filter) { filter.value = ""; setTimeout(() => filter.focus(), 30); }
+  renderModelFetchList(document.getElementById("ai-model-edit-id")?.value || "");
 }
 
-/** 关闭 popover 但保留缓存（下次打开秒开） */
-function closeModelFetchPopover() {
-  const popover = document.getElementById("ai-model-edit-fetch-popover");
-  if (popover) popover.style.display = "none";
+/** 关闭下拉但保留缓存（下次打开秒开） */
+function closeModelFetchDropdown() {
+  const dropdown = document.getElementById("ai-model-edit-fetch-dropdown");
+  if (dropdown) dropdown.style.display = "none";
 }
 
 /** 执行拉取——从当前 modal 关联的 provider 抓 model 列表 */
@@ -537,17 +528,17 @@ async function performModelFetch() {
   }
 }
 
-/** 渲染 popover 列表——按 filter 过滤；已存在的 model 灰化"已添加" */
+/** 渲染下拉列表——按 filter 过滤；已存在的 model 灰化"已添加" */
 function renderModelFetchList(filter) {
-  const list = document.getElementById("ai-model-edit-fetch-list");
-  if (!list) return;
+  const dropdown = document.getElementById("ai-model-edit-fetch-dropdown");
+  if (!dropdown) return;
   const cache = _modelFetchCache;
   if (!cache || cache.loading) {
-    list.innerHTML = `<div class="ai-model-dropdown-empty"><span class="ai-spinner"></span> ${escapeHtml(t("ai.model_modal.fetch.loading"))}</div>`;
+    dropdown.innerHTML = `<div class="ai-model-edit-fetch-dropdown-empty"><span class="ai-spinner"></span> ${escapeHtml(t("ai.model_modal.fetch.loading"))}</div>`;
     return;
   }
   if (cache.error) {
-    list.innerHTML = `<div class="ai-model-dropdown-empty">${escapeHtml(t("ai.model_modal.fetch.failed", { err: cache.error }))}</div>`;
+    dropdown.innerHTML = `<div class="ai-model-edit-fetch-dropdown-empty">${escapeHtml(t("ai.model_modal.fetch.failed", { err: cache.error }))}</div>`;
     return;
   }
   const provider = (currentAIConfig.providers || []).find((p) => p.id === _modelEditProviderId);
@@ -560,25 +551,25 @@ function renderModelFetchList(filter) {
     const msg = cache.models.length === 0
       ? t("ai.model_modal.fetch.empty")
       : t("ai.model_modal.fetch.no_match");
-    list.innerHTML = `<div class="ai-model-dropdown-empty">${escapeHtml(msg)}</div>`;
+    dropdown.innerHTML = `<div class="ai-model-edit-fetch-dropdown-empty">${escapeHtml(msg)}</div>`;
     return;
   }
-  list.innerHTML = filtered.map((m) => {
+  dropdown.innerHTML = filtered.map((m) => {
     const isExisting = existingIds.has(m);
-    return `<div class="ai-model-dropdown-item${isExisting ? " is-added" : ""}" data-model-id="${escapeAttr(m)}">
+    return `<div class="ai-model-edit-fetch-dropdown-item${isExisting ? " is-added" : ""}" data-model-id="${escapeAttr(m)}">
       <span>${escapeHtml(m)}</span>
       ${isExisting ? `<span class="added-tag">${escapeHtml(t("ai.modal.badge.added"))}</span>` : ""}
     </div>`;
   }).join("");
-  list.querySelectorAll(".ai-model-dropdown-item:not(.is-added)").forEach((item) => {
-    item.addEventListener("click", () => {
+  dropdown.querySelectorAll(".ai-model-edit-fetch-dropdown-item:not(.is-added)").forEach((item) => {
+    item.addEventListener("mousedown", (e) => {
+      e.preventDefault();
       const id = item.dataset.modelId;
       const idInput = document.getElementById("ai-model-edit-id");
       const dispInput = document.getElementById("ai-model-edit-display-name");
       if (idInput) idInput.value = id;
       if (dispInput && !dispInput.value.trim()) dispInput.value = id;
-      closeModelFetchPopover();
-      if (idInput) idInput.focus();
+      closeModelFetchDropdown();
     });
   });
 }
@@ -694,7 +685,7 @@ async function saveAndContinueModelEdit() {
   $("ai-model-edit-id").classList.remove("input-readonly");
   $("ai-model-edit-display-name").value = "";
   $("ai-model-edit-error").textContent = "";
-  closeModelFetchPopover();
+  closeModelFetchDropdown();
   _modelFetchCache = null;
   setTimeout(() => $("ai-model-edit-id").focus(), 40);
   // toast
@@ -750,32 +741,45 @@ function bindAIModelEditModalEvents() {
   $("ai-model-edit-save")?.addEventListener("click", saveModelEdit);
   $("ai-model-edit-continue")?.addEventListener("click", saveAndContinueModelEdit);
 
-  const fetchBtn = $("ai-model-edit-fetch");
-  if (fetchBtn) {
-    fetchBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      toggleModelFetchPopover();
+  // 聚焦 Model ID 输入框时自动拉取模型列表
+  const idInput = $("ai-model-edit-id");
+  if (idInput) {
+    idInput.addEventListener("focus", () => openModelFetchDropdown());
+    idInput.addEventListener("input", () => {
+      const dropdown = $("ai-model-edit-fetch-dropdown");
+      if (dropdown && dropdown.style.display !== "none") {
+        renderModelFetchList(idInput.value);
+      }
+    });
+    idInput.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        const dropdown = $("ai-model-edit-fetch-dropdown");
+        if (dropdown && dropdown.style.display !== "none") {
+          e.stopPropagation();
+          closeModelFetchDropdown();
+        }
+      }
     });
   }
-  $("ai-model-edit-fetch-close")?.addEventListener("click", closeModelFetchPopover);
-  const fetchFilter = $("ai-model-edit-fetch-filter");
-  if (fetchFilter) {
-    fetchFilter.addEventListener("input", () => renderModelFetchList(fetchFilter.value));
-    fetchFilter.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") closeModelFetchPopover();
+  // 点击 model select 区域外关闭下拉（但不关 modal）
+  const idWrap = $("ai-model-edit-id-wrap");
+  if (idWrap) {
+    idWrap.addEventListener("mousedown", (e) => {
+      if (e.target.closest(".ai-model-edit-fetch-dropdown")) return;
+      // 点击 input 本身不关闭
     });
   }
-  overlay.addEventListener("click", (e) => {
-    const popover = $("ai-model-edit-fetch-popover");
-    if (!popover || popover.style.display === "none") return;
-    if (e.target.closest("#ai-model-edit-fetch-popover")) return;
-    if (e.target.id === "ai-model-edit-fetch") return;
-    closeModelFetchPopover();
-  });
 
   let downOnOverlay = false;
   overlay.addEventListener("mousedown", (e) => {
     downOnOverlay = e.target.id === "ai-model-edit-overlay";
+    // 点击下拉外部时关闭下拉
+    const dropdown = $("ai-model-edit-fetch-dropdown");
+    if (dropdown && dropdown.style.display !== "none") {
+      if (!e.target.closest("#ai-model-edit-id-wrap")) {
+        closeModelFetchDropdown();
+      }
+    }
   });
   overlay.addEventListener("mouseup", (e) => {
     if (downOnOverlay && e.target.id === "ai-model-edit-overlay") closeAIModelEditModal();
@@ -968,21 +972,7 @@ function bindAIEvents() {
   // Provider modal 事件
   $("ai-modal-cancel")?.addEventListener("click", closeAIProviderModal);
   $("ai-modal-save")?.addEventListener("click", saveNewProviderFromModal);
-  {
-    let downOnOverlay = false;
-    const overlayEl = $("ai-modal-overlay");
-    if (overlayEl) {
-      overlayEl.addEventListener("mousedown", (e) => {
-        downOnOverlay = e.target.id === "ai-modal-overlay";
-      });
-      overlayEl.addEventListener("mouseup", (e) => {
-        if (downOnOverlay && e.target.id === "ai-modal-overlay") {
-          closeAIProviderModal();
-        }
-        downOnOverlay = false;
-      });
-    }
-  }
+  // 供应商 modal：不绑点击外部关闭（避免配置中途误触丢失表单）
   $("ai-modal-kind")?.addEventListener("change", () => {
     $("ai-modal-preset").value = "custom";
   });
@@ -1101,15 +1091,6 @@ const AI_PRESET_CATALOG = {
   "custom":            { kind: null,                    base_url: null,                                                 display_name_default: null,                  monogram: null,   tint: "ink",    category: "custom" },
 };
 
-/** tile 渲染顺序（按分类分组） */
-const AI_PRESET_ORDER = [
-  "openai", "anthropic", "gemini",
-  "deepseek", "siliconflow", "moonshot", "zhipu", "zhipu-anthropic", "doubao", "volcengine-anthropic", "aliyun", "stepfun", "minimax", "hunyuan", "xiaomimimo", "xiaomimimo-anthropic",
-  "groq", "openrouter", "mistral", "xai", "together", "perplexity", "huggingface", "nvidia", "agnes-ai",
-  "ollama", "lm-studio",
-  "custom",
-];
-
 /** 猜测 provider 编辑时该回填到哪个 preset。完全匹配 kind + base_url → 命中；否则 "custom" */
 function guessPresetForProvider(kind, baseUrl) {
   const bu = (baseUrl || "").trim().replace(/\/$/, "");
@@ -1122,8 +1103,17 @@ function guessPresetForProvider(kind, baseUrl) {
   return "custom";
 }
 
+/** 预设分组顺序与翻译 key */
+const AI_PRESET_GROUPS = [
+  { category: "main",   i18nKey: "ai.preset.group.main" },
+  { category: "cn",     i18nKey: "ai.preset.group.cn" },
+  { category: "gw",     i18nKey: "ai.preset.group.gw" },
+  { category: "local",  i18nKey: "ai.preset.group.local" },
+  { category: "custom", i18nKey: "ai.preset.group.custom" },
+];
+
 /**
- * 渲染预设列表（平铺按钮布局，flex-wrap 自适应）
+ * 渲染预设列表（按 category 分组，组内按 name 排序）
  */
 function renderPresetList(selectedKey, isEdit) {
   const list = document.getElementById("ai-preset-list");
@@ -1134,23 +1124,52 @@ function renderPresetList(selectedKey, isEdit) {
       return key !== "custom" ? key : null;
     }).filter(Boolean),
   );
-  list.innerHTML = AI_PRESET_ORDER.map((key) => {
-    const preset = AI_PRESET_CATALOG[key];
-    const isSelected = key === selectedKey;
-    const isCustom = key === "custom";
-    const name = preset.display_name_default || t("ai.modal.preset.custom");
-    const monogram = preset.monogram || "?";
-    const isCJK = /[一-鿿]/.test(monogram);
-    const cjkCls = isCJK ? " ai-preset-item-mono--cjk" : "";
-    const customCls = isCustom ? " ai-preset-item--custom" : "";
-    const selectedCls = isSelected ? " selected" : "";
-    const addedAttr = addedKinds.has(key) ? ' data-added="1"' : "";
-    const addedTitle = addedKinds.has(key) ? ` title="${escapeAttr(t("ai.modal.badge.added"))}"` : "";
-    return `<button type="button" class="ai-preset-item${selectedCls}${customCls}" data-preset="${key}"${addedAttr}${addedTitle}>
-      <span class="ai-preset-item-mono${cjkCls}" data-tint="${preset.tint}">${escapeHtml(monogram)}</span>
-      <span class="ai-preset-item-name">${escapeHtml(name)}</span>
-    </button>`;
-  }).join("");
+
+  // 按 category 分组收集 key
+  const grouped = new Map();
+  for (const key of Object.keys(AI_PRESET_CATALOG)) {
+    const cat = AI_PRESET_CATALOG[key].category || "custom";
+    if (!grouped.has(cat)) grouped.set(cat, []);
+    grouped.get(cat).push(key);
+  }
+  // 组内按 display_name 排序（custom 不排）
+  for (const [cat, keys] of grouped) {
+    if (cat === "custom") continue;
+    keys.sort((a, b) => {
+      const na = AI_PRESET_CATALOG[a].display_name_default || "";
+      const nb = AI_PRESET_CATALOG[b].display_name_default || "";
+      return na.localeCompare(nb);
+    });
+  }
+
+  let html = "";
+  for (const { category, i18nKey } of AI_PRESET_GROUPS) {
+    const keys = grouped.get(category);
+    if (!keys || keys.length === 0) continue;
+    html += `<div class="ai-preset-group">`;
+    html += `<div class="ai-preset-group-label">${escapeHtml(t(i18nKey))}</div>`;
+    html += `<div class="ai-preset-group-items">`;
+    for (const key of keys) {
+      const preset = AI_PRESET_CATALOG[key];
+      const isSelected = key === selectedKey;
+      const isCustom = key === "custom";
+      const name = preset.display_name_default || t("ai.modal.preset.custom");
+      const monogram = preset.monogram || "?";
+      const isCJK = /[一-鿿]/.test(monogram);
+      const cjkCls = isCJK ? " ai-preset-item-mono--cjk" : "";
+      const customCls = isCustom ? " ai-preset-item--custom" : "";
+      const selectedCls = isSelected ? " selected" : "";
+      const addedAttr = addedKinds.has(key) ? ' data-added="1"' : "";
+      const addedTitle = addedKinds.has(key) ? ` title="${escapeAttr(t("ai.modal.badge.added"))}"` : "";
+      html += `<button type="button" class="ai-preset-item${selectedCls}${customCls}" data-preset="${key}"${addedAttr}${addedTitle}>
+        <span class="ai-preset-item-mono${cjkCls}" data-tint="${preset.tint}">${escapeHtml(monogram)}</span>
+        <span class="ai-preset-item-name">${escapeHtml(name)}</span>
+      </button>`;
+    }
+    html += `</div></div>`;
+  }
+  list.innerHTML = html;
+
   list.querySelectorAll(".ai-preset-item").forEach((item) => {
     item.addEventListener("click", () => {
       const key = item.dataset.preset;
@@ -1171,7 +1190,7 @@ function applyAIPresetToModal(presetKey, isEdit) {
   if (!preset || presetKey === "custom") return;
   if (preset.kind) $("ai-modal-kind").value = preset.kind;
   $("ai-modal-base-url").value = preset.base_url || "";
-  if (!isEdit && preset.display_name_default && !$("ai-modal-display-name").value.trim()) {
+  if (!isEdit && preset.display_name_default) {
     $("ai-modal-display-name").value = uniqueDisplayName(preset.display_name_default);
   }
   const testResult = $("ai-modal-test-result");
@@ -1180,69 +1199,6 @@ function applyAIPresetToModal(presetKey, isEdit) {
   clearProviderModelSelect();
 }
 
-/**
- * 拉取可用模型列表（不硬编码，全部通过 API 获取）
- * - OpenAI 兼容：GET {base_url}/models
- * - Gemini：GET {base_url}/v1beta/models?key={apiKey}
- * - Anthropic：不暴露模型列表，抛异常提示手动输入
- */
-async function fetchAvailableModels(kind, baseUrl, apiKey) {
-  if (kind === "openai_compatible") {
-    const base = (baseUrl || "").trim().replace(/\/$/, "");
-    if (!base) throw new Error("Base URL 不能为空");
-    const urls = base.endsWith("/v1")
-      ? [`${base}/models`, `${base.replace(/\/v1$/, "")}/models`]
-      : [`${base}/models`, `${base}/v1/models`];
-    let lastErr = null;
-    for (const url of urls) {
-      try {
-        const resp = await fetch(url, {
-          headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
-        });
-        if (!resp.ok) {
-          lastErr = `HTTP ${resp.status}`;
-          if (resp.status === 401 || resp.status === 403) {
-            throw new Error("认证失败，请检查 API Key");
-          }
-          continue;
-        }
-        const json = await resp.json();
-        const models = (json.data || json.models || []).map((m) => m.id || m.name).filter(Boolean);
-        if (models.length > 0) return [...new Set(models)].sort();
-        lastErr = "返回空列表";
-      } catch (e) {
-        if (e.message.includes("认证失败")) throw e;
-        lastErr = String(e);
-      }
-    }
-    throw new Error(lastErr || "无法获取模型列表");
-  }
-  if (kind === "anthropic_messages") {
-    throw new Error("Anthropic 不支持自动获取模型列表，请手动输入 model id");
-  }
-  if (kind === "gemini_generate_content") {
-    const base = (baseUrl || "https://generativelanguage.googleapis.com").trim().replace(/\/$/, "");
-    const url = `${base}/v1beta/models?key=${apiKey}`;
-    try {
-      const resp = await fetch(url, { headers: { Accept: "application/json" } });
-      if (!resp.ok) {
-        if (resp.status === 401 || resp.status === 403) {
-          throw new Error("认证失败，请检查 API Key");
-        }
-        throw new Error(`HTTP ${resp.status}`);
-      }
-      const json = await resp.json();
-      const models = (json.models || [])
-        .map((m) => (m.name || "").replace(/^models\//, ""))
-        .filter((n) => n.toLowerCase().includes("gemini"));
-      if (models.length > 0) return models.sort();
-      throw new Error("返回空列表");
-    } catch (e) {
-      throw new Error(`Gemini 模型获取失败: ${e.message}`);
-    }
-  }
-  throw new Error("未知协议");
-}
 
 /** 生成不与现有 provider 重名的 display_name */
 function uniqueDisplayName(base) {
@@ -1329,17 +1285,18 @@ function openAIProviderModal(editProviderId) {
 }
 
 /**
- * 拉取可用模型列表（Model modal 复用）。
- * 已存 provider → 后端 command（密钥不出 CM）；未存 → 前端明文 fetch。
+ * 拉取可用模型列表（Model modal / Provider modal 复用）。
+ * 全部走后端 command：密钥优先用输入框明文，其次从 CM 读。
  */
 async function fetchAvailableModelsFor(kind, baseUrl, providerId) {
-  if (providerId) {
-    const models = await invoke("fetch_ai_models", { providerId, kind, baseUrl: baseUrl || null });
-    return models || [];
-  }
-  const apiKey = document.getElementById("ai-modal-api-key")?.value?.trim();
-  if (!apiKey) throw new Error("请先填写 API Key");
-  return await fetchAvailableModels(kind, baseUrl, apiKey);
+  const apiKey = document.getElementById("ai-modal-api-key")?.value?.trim() || null;
+  const models = await invoke("fetch_ai_models", {
+    kind,
+    baseUrl: baseUrl || null,
+    apiKey: apiKey || null,
+    providerId: providerId || null,
+  });
+  return models || [];
 }
 
 function closeAIProviderModal() {
@@ -1612,7 +1569,7 @@ async function triggerProviderModelFetch() {
   const providerId = overlay?.dataset?.editProviderId || null;
 
   if (!apiKey && !providerId) {
-    _providerModelCache = { models: [], error: "请先填写 API Key", loading: false };
+    _providerModelCache = { models: [], error: t("ai.modal.test.empty_key"), loading: false };
     filterProviderModels("");
     return;
   }

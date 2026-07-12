@@ -130,6 +130,13 @@ body.alt-active #results li .item-badge {
   opacity: var(--opacity-faint);
 }
 
+/* AI 错误项：徽章也变黄，视觉一致 */
+#results li.ai-item.error-item .ai-icon-badge {
+  color: var(--yellow, #e5c07b);
+  border-color: var(--yellow, #e5c07b);
+  opacity: 1;
+}
+
 /* ── 智能感知候选（0.8.0 §1.3）─────────────────────────────────────────────
    `.context-aware` = 内置动作 + Run + 携带 Context 参数（如"打开链接"配 URL）
    视觉：左侧一条 3px accent 强调条 + 副行改为参数值预览（monospace 微 accent 色）

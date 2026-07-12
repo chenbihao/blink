@@ -35,7 +35,7 @@ use crate::app::ai_config::ProviderKind;
 #[derive(Debug)]
 #[allow(dead_code)] // 0.9.1 Phase 4 定义,Phase 5 起 dispatch 消费
 pub enum AIError {
-    /// 硬超时(§3.3 骨架层)——`AIConfig::slo_hard_timeout_ms` 或 default 2500ms 到期
+    /// 硬超时(§3.3 骨架层)——`AIConfig::slo_hard_timeout_ms` 或 default 20000ms 到期
     Timeout,
     /// 用户中断(ESC / 换 query)——`tokio::select!` 或 `AbortHandle` 触发
     Cancelled,
@@ -98,7 +98,7 @@ pub trait AIProvider: Send + Sync {
 
     /// 单次 completion。**主窗口路径唯一入口**。
     ///
-    /// - 请求内 `timeout_ms` 优先,回落到 provider 实例内部 default(2500ms)
+    /// - 请求内 `timeout_ms` 优先,回落到 provider 实例内部 default(20000ms)
     /// - 用户 ESC → 上层 drop 这个 future,provider 内部 reqwest task 自动 abort
     /// - 首 token 就返 `first_token_ms`(SSE 模式)——SLO 观测入口
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, AIError>;
@@ -193,7 +193,7 @@ pub mod tests {
         }
         async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, AIError> {
             // 尊重请求内的 timeout_ms——即使 mock 也要证明骨架 SLO 的通路
-            let timeout = req.timeout_ms.unwrap_or(2500);
+            let timeout = req.timeout_ms.unwrap_or(20_000);
             if self.delay_ms >= timeout as u64 {
                 // 主动返回 Timeout,证明"provider 内部会挡住 timeout"这条铁则
                 tokio::time::sleep(std::time::Duration::from_millis(timeout as u64)).await;

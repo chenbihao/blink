@@ -35,13 +35,14 @@ export function init() {
     if (!items.length) return;
     currentItems = items;
 
-    // 估算菜单尺寸（精确匹配 CSS 实际大小）
-    // item: padding 8px * 2 + font 12px * line-height 1.5 = 34px
+    // 估算菜单尺寸（CSS 像素，后端会按目标显示器 DPI 缩放为物理像素）
+    // item: padding 8px * 2 + font 13px * line-height 1.5 ≈ 35.5px
     // separator: 1px height + margin 4px * 2 = 9px
     // container padding: var(--space-sm) 8px * 2 = 16px
-    const estimatedHeight = items.reduce((h, it) => h + (it.separator ? 9 : 34), 0) + 16;
+    const estimatedHeight = items.reduce((h, it) => h + (it.separator ? 9 : 36), 0) + 16;
     const estimatedWidth = 180;
 
+    // 直接传原始屏幕坐标，多屏定位 + 边界 clamp 由后端处理
     showPopupWindow(e.screenX, e.screenY, estimatedWidth, estimatedHeight, items);
   });
 
@@ -73,18 +74,13 @@ function closestLi(target) {
 
 /**
  * 调用后端创建独立 Popup 窗口显示菜单。
- * x, y 是屏幕坐标。
+ * x, y 是屏幕坐标（物理像素），width/height 是 CSS 像素。
+ * 多屏定位 + DPI 缩放 + 边界 clamp 均由后端 clamp_context_menu 处理。
  */
 function showPopupWindow(x, y, width, height, items) {
-  // 智能翻转：屏幕右/下空间不够时，菜单显示在鼠标左/上方
-  const screenWidth = window.screen.width;
-  const screenHeight = window.screen.height;
-  const finalX = x + width + 4 > screenWidth ? Math.max(4, x - width) : x;
-  const finalY = y + height + 4 > screenHeight ? Math.max(4, y - height) : y;
-
   invoke("show_context_menu", {
-    x: finalX,
-    y: finalY,
+    x: x,
+    y: y,
     width: width,
     height: height,
     items: JSON.stringify(items),

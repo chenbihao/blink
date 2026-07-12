@@ -2,8 +2,8 @@
 
 > **定位**: Universal Action Layer（统一操作层）—— 感知用户上下文、主动推荐动作,让任何操作都比原来的路径更快。
 >
-> **状态**: 0.8 全部完成归档（0.8.0 ~ 0.8.8），0.9.0 ~ 0.9.3 已完成（Agent 地基 + 插件 tool-call），**0.9.5 前端架构重整已完成**（Open Props + 组件化分层 + 设置页 views 归位，纯结构重构）
-> **更新时间**: 2026-07-11
+> **状态**: 0.8 全部归档；**0.9.0~0.9.6 完成**（Agent 地基 + 插件 tool-call + 供应商配置 UI + 前端架构重整 + 收尾发版）。**0.9.7 Capability 能力协议层规划中**（为 0.10 铺路）。下一站 0.10 语音指令闭环。
+> **更新时间**: 2026-07-13
 
 ---
 
@@ -58,8 +58,8 @@
 | **0.6** | [phases/0.6-plugin-packaging-scripting.md](./phases/0.6-plugin-packaging-scripting.md) | 插件打包路径 + Python/Node.js 脚本支持 + 统一错误处理 | ✅ 完成 |
 | **0.7** | [phases/0.7-plugin-ecosystem-local-search.md](./phases/0.7-plugin-ecosystem-local-search.md) | 插件生态(翻译/剪贴板历史)+ 本地搜索 Fallback + 性能统计 | ✅ 完成 |
 | **0.8** | [phases/0.8-context-interaction.md](./phases/0.8-context-interaction.md) | 感知与操作层 —— UIA 划词 + 内置动作抽象 + Autosuggestion + 翻译 Context 路由 + 四域架构 + Chord 交互 + Alt+A 截图（0.8.6 架构固化大部分已落地，两项遗留推 0.9 前） | ✅ 归档收尾 |
-| **0.9** | [phases/0.9-ai-layer.md](./phases/0.9-ai-layer.md) | Agent 地基 —— **rig-core 全 buildin 直编（按交互模式分层用）** + 统一 tool 架构 + Provider 多档 + 主窗口纯文本闭环（零语音）+ 依赖前置升级（tauri 2.11.5 / reqwest 0.13） | 📋 规划中 |
-| **0.9.5** | [phases/0.9-ai-layer.md §五](./phases/0.9-ai-layer.md#五095-前端架构重整已完成纯结构重构) | 前端架构重整 —— Open Props(token 数值源) + CSS 七层分层 + settings.js/i18n.js 拆分（纯结构重构） | ✅ 完成 |
+| **0.9** | [phases/0.9-ai-layer.md](./phases/0.9-ai-layer.md) | Agent 地基 —— rig-core 全 buildin 直编 + 统一 tool 架构 + Provider 多档 + 主窗口文本闭环 + 插件 tool-call + 供应商配置 UI + 前端架构重整 | ✅ 完成 |
+| **0.9.7** | [phases/0.9.7-capability-layer.md](./phases/0.9.7-capability-layer.md) | Capability 能力协议层 —— 原子能力 + 统一声明 + 统一返回 + inventory 注册 + 截图/剪贴板焊死链路拆解 | 📋 规划中 |
 | **0.10** | [phases/0.10-voice-agent.md](./phases/0.10-voice-agent.md) | 语音指令闭环 —— STT + 双 chord + 语音找文件北极星 + Agent 窗口 | 📋 规划中 |
 | **0.11** | [phases/0.11-local-ecosystem.md](./phases/0.11-local-ecosystem.md) | 本地化与生态 —— 本地模型 / skill 化 / MCP 双向 / RAG 记忆 | 📋 规划中 |
 
@@ -86,11 +86,14 @@
 | **0.8.6** | **架构固化**：Action trait / SuggestionProducer + Arbiter / ConfigStore / SearchService 拆分 / AppContext 真依赖容器 / 内置动作 i18n（为 0.9 铺物理骨架，纯横向重构） | ✅ 完成 |
 | **0.8.7** | Alt+A 区域截图（DWM Cloak + BGRA 全链路 + 快速 PNG，总感知延迟 ~320ms） | ✅ 完成 |
 | **0.8.8** | 收尾归档（文档同步 + 遗留项梳理，剩余优化项进 0.9 前 chore 池） | ✅ 完成 |
-| **0.9.0** | 依赖前置升级（tauri 2.11.5 / reqwest 0.13）+ **rig-core 引入** + 统一能力 schema + Action trait tool-call 进化 + `danger_class()` 元数据（纯架构零 AI） | ✅ 完成 |
+| **0.9.0** | 依赖前置升级（tauri 2.11.5 / reqwest 0.13）+ rig-core 引入 + 统一能力 schema + Action trait tool-call 进化 + danger_class 元数据 | ✅ 完成 |
 | **0.9.1** | Provider 抽象（LLM + STT 预留，全 buildin 走 rig）+ 密钥安全（Credential Manager）+ 三档配置页 | ✅ 完成 |
-| **0.9.2 第一步** | 主窗口文本闭环(第一次真跑 completion,只用 rig Provider 层 + Chat Completions API) + 四筛子决策树 + SLO 埋点上数据 | ✅ 完成 |
-| **0.9.2 第二步** | 反馈动画打磨 + 轻量路由 + 四筛子阈值 spike + tool_call 执行链路 | 规划中 |
-| **0.9.5** | 前端架构重整（Open Props + 组件化分层 + settings.js/i18n.js 拆分 + 设置页 views 归位） | ✅ 完成 |
+| **0.9.2** | 主窗口文本闭环（rig Provider 层 + Chat Completions）+ 四筛子决策树 + tool_call 执行链路 + SLO 埋点 | ✅ 完成 |
+| **0.9.3** | 插件 tool-call + ActionRegistry 改 RwLock + Tool 分组聚合 | ✅ 完成 |
+| **0.9.4** | 供应商配置 UI（预设 Picker + 模型自动发现 + 连通测试） | ✅ 完成 |
+| **0.9.5** | 前端架构重整（Open Props + CSS 七层 + JS 拆分）+ AI 调用体验优化 | ✅ 完成 |
+| **0.9.6** | 收尾：README 中英分拆 + AI 配置/调用体验打磨 + 命令与服务微调 | ✅ 完成 |
+| **0.9.7** | Capability 能力协议层（原子能力 + 统一声明/返回 + inventory 注册 + 截图/剪贴板拆解 + 接 AI tool 池） | 📋 规划中 |
 | **0.10.0** | STT 接入（云端优先）+ 双 chord 语音入口 + 输入法模式 | 后置 |
 | **0.10.1** | 语音找文件北极星场景 + 指令闭环 | 后置 |
 | **0.10.2** | Agent 对话窗口 + 流式 MD + 确认反馈 | 后置 |
@@ -112,6 +115,7 @@
 | 最小操作路径准则 / 中文不斜体 / 键盘提示统一 | [product-principles.md §13-14](./product-principles.md) |
 | 0.8 感知与操作层在做什么? | [phases/0.8-context-interaction.md](./phases/0.8-context-interaction.md) |
 | 0.9 Agent 地基准备怎么落? | [phases/0.9-ai-layer.md](./phases/0.9-ai-layer.md) |
+| 0.9.7 Capability 能力协议层（原子化 / 统一返回 / 为 0.10 北极星铺路）? | [phases/0.9.7-capability-layer.md](./phases/0.9.7-capability-layer.md) |
 | 0.10 语音指令闭环? | [phases/0.10-voice-agent.md](./phases/0.10-voice-agent.md) |
 | 0.11 本地化与生态扩展? | [phases/0.11-local-ecosystem.md](./phases/0.11-local-ecosystem.md) |
 | 开发规范、模块拆分、Tauri Commands | [CLAUDE.md](../../CLAUDE.md) |

@@ -52,7 +52,7 @@ use crate::infra::platform::secret::SecretString;
 /// 默认硬超时(§3.3 骨架层)——用户未在 `CompletionRequest.timeout_ms` 覆盖时的兜底。
 ///
 /// 与 `AIConfig::slo_hard_timeout_ms` 默认值一致(见 §3.3 SLO 表)。
-const DEFAULT_HARD_TIMEOUT_MS: u32 = 2500;
+const DEFAULT_HARD_TIMEOUT_MS: u32 = 20_000;
 
 /// rig-core 承载的 `AIProvider` 实体。泛型 M 由 factory 按 `ProviderKind` 敲定。
 ///

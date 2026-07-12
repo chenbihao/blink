@@ -354,7 +354,7 @@ pub async fn export_report(pool: &SqlitePool) -> serde_json::Value {
 // ── AI 路径 SLO 埋点骨架（0.9.0 §5.3；数据发射留 0.9.2 落地）─────────────
 //
 // **动机**：AI 路径的延迟目标与确定性路径（<20ms）不同——首视觉反馈 <100ms、
-// 意图 P50 <800ms / P95 <2s、硬超时 2500ms 静默回退。tracing target 现在就位,
+// 意图 P50 <800ms / P95 <2s、硬超时 20000ms 静默回退。tracing target 现在就位,
 // 让 0.9.1/0.9.2 消费方接入零对齐成本。
 //
 // **用法**（0.9.2 起）：
@@ -386,7 +386,7 @@ pub mod ai_slo {
     #[allow(dead_code)]
     pub const FALLBACK_TO_SEARCH: &str = "fallback_to_search";
 
-    /// 字段:是否命中硬超时（2500ms）——静默回退,不弹错
+    /// 字段:是否命中硬超时（20000ms）——静默回退,不弹错
     #[allow(dead_code)]
     pub const TIMEOUT: &str = "timeout";
 
