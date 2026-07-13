@@ -346,6 +346,8 @@ fn main() {
             let chord_registry = std::sync::Arc::new(crate::domain::chord::build_default_registry());
             // 0.8.6 Action 统一执行入口
             let action_registry = std::sync::Arc::new(crate::domain::execution::ActionRegistry::new());
+            // 0.9.7 Capability 能力协议层（inventory 自动收集 5 个样板能力）
+            let capability_registry = std::sync::Arc::new(crate::domain::capability::CapabilityRegistry::new());
 
             // 0.9.3:注册插件 tool 到 ActionRegistry——让 AI 路由能调用插件能力。
             // 遍历所有已加载插件的 manifest.tools，为每个 tool 创建 PluginActionAdapter 并注册。
@@ -425,6 +427,7 @@ fn main() {
                 router: router.clone(),
                 chord_registry: chord_registry.clone(),
                 action_registry: action_registry.clone(),
+                capability_registry: capability_registry.clone(),
                 ai_registry: ai_registry.clone(),
             };
             let services = app::service::all_services();
@@ -458,6 +461,8 @@ fn main() {
             app.manage(plugin_engine);
             app.manage(chord_registry);
             app.manage(action_registry);
+            // 0.9.7 Capability 能力协议层（Step 4 起 AI tool 池消费）
+            app.manage(capability_registry);
             // 0.9.1 Phase 5a：AI Provider registry(Phase 5b 起 SearchService 消费)
             app.manage(ai_registry);
 

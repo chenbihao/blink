@@ -27,6 +27,8 @@ pub enum MetricCategory {
     Plugin,
     /// 图标提取
     IconExtract,
+    /// 能力调用（0.9.7 Capability 层 invoke 包装层自动埋点）
+    Capability,
 }
 
 impl std::fmt::Display for MetricCategory {
@@ -37,6 +39,7 @@ impl std::fmt::Display for MetricCategory {
             Self::SearchEngine => write!(f, "search_engine"),
             Self::Plugin => write!(f, "plugin"),
             Self::IconExtract => write!(f, "icon_extract"),
+            Self::Capability => write!(f, "capability"),
         }
     }
 }

@@ -42,6 +42,11 @@ pub struct AppContext {
     pub chord_registry: std::sync::Arc<crate::domain::chord::ChordRegistry>,
     #[allow(dead_code)]
     pub action_registry: std::sync::Arc<crate::domain::execution::ActionRegistry>,
+    /// 0.9.7 Capability 能力协议层（inventory 自动收集）。
+    /// Step 4 起 `build_aggregated_tools` 消费，AI tool_call 命中 Capability。
+    /// **运行时通过 `app.state::<Arc<CapabilityRegistry>>()` 访问**，AppContext 仅服务于 setup 期。
+    #[allow(dead_code)]
+    pub capability_registry: std::sync::Arc<crate::domain::capability::CapabilityRegistry>,
     /// 0.9.1 Phase 5a:AI Provider 池 + 三档 dispatch。
     /// **未配置或全 factory 失败 → 空池**,`resolve` 一律返 `NotConfigured`;
     /// SearchService 拿到 NotConfigured → fallback 常规 fuzzy(§6.4 兜底铁则)。

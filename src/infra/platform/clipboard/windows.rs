@@ -197,6 +197,13 @@ fn foreground_title() -> Option<String> {
     }
 }
 
+/// 读当前剪贴板文本（0.9.7：公开给 read_clipboard Capability）。
+///
+/// 含短重试（与监听器内部同一逻辑），读文本成功返回 Some，非文本/空返回 None。
+pub fn read_current_text() -> Option<String> {
+    read_clipboard_text()
+}
+
 fn read_clipboard_text() -> Option<String> {
     // 短重试 + 微退避:写入方(浏览器/编辑器)刚 SetClipboardData + CloseClipboard,
     // 我们收到 WM_CLIPBOARDUPDATE 立即 OpenClipboard 有几率抢不过 —— 系统内部把
@@ -348,5 +355,65 @@ pub fn write_bgra_to_clipboard(pixels: &[u8], width: u32, height: u32) -> Result
     }
 
     tracing::debug!(width, height, "截图已写入剪贴板");
+    Ok(())
+}
+
+/// 把文本写入系统剪贴板（CF_UNICODETEXT 格式）（0.9.7：write_clipboard Capability）。
+///
+/// 与 `write_bgra_to_clipboard` 同模式：GlobalAlloc → GlobalLock → 写 UTF-16 →
+/// EmptyClipboard → SetClipboardData。失败清理 GlobalFree，成对 CloseClipboard。
+pub fn write_text_to_clipboard(text: &str) -> Result<(), String> {
+    use windows::Win32::Foundation::{GlobalFree, HANDLE};
+    use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    use windows::Win32::System::Ole::CF_UNICODETEXT;
+
+    // 编码 UTF-16 + null 终止符
+    let mut wide: Vec<u16> = text.encode_utf16().collect();
+    wide.push(0); // null terminator
+    let byte_len = wide.len() * 2;
+
+    unsafe {
+        let hmem = GlobalAlloc(GMEM_MOVEABLE, byte_len)
+            .map_err(|e| format!("GlobalAlloc 失败: {e}"))?;
+
+        let fill_result = (|| -> Result<(), String> {
+            let ptr = GlobalLock(hmem);
+            if ptr.is_null() {
+                return Err("GlobalLock 失败".into());
+            }
+            // 写 UTF-16 字节（外层已 unsafe，内层不需再包）
+            let byte_slice =
+                std::slice::from_raw_parts(wide.as_ptr() as *const u8, byte_len);
+            std::ptr::copy_nonoverlapping(byte_slice.as_ptr(), ptr as *mut u8, byte_len);
+            let _ = GlobalUnlock(hmem);
+            Ok(())
+        })();
+
+        if let Err(e) = fill_result {
+            let _ = GlobalFree(Some(hmem));
+            return Err(e);
+        }
+
+        if let Err(e) = OpenClipboard(None) {
+            let _ = GlobalFree(Some(hmem));
+            return Err(format!("OpenClipboard 失败: {e}"));
+        }
+
+        let set_result: Result<(), String> = (|| {
+            let _ = EmptyClipboard();
+            SetClipboardData(CF_UNICODETEXT.0.into(), Some(HANDLE(hmem.0 as _)))
+                .map_err(|e| format!("SetClipboardData 失败: {e}"))?;
+            Ok(())
+        })();
+        let _ = CloseClipboard();
+
+        if let Err(e) = set_result {
+            let _ = GlobalFree(Some(hmem));
+            return Err(e);
+        }
+    }
+
+    tracing::debug!(len = text.chars().count(), "文本已写入剪贴板");
     Ok(())
 }

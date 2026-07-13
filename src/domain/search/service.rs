@@ -8,6 +8,7 @@
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Instant;
 
 use serde::Serialize;
 use sqlx::SqlitePool;
@@ -18,6 +19,7 @@ use crate::domain::ai::gating::{AiGate, GateOutcome, should_invoke_ai};
 use crate::domain::ai::message::{ChatMessage, CompletionRequest};
 use crate::domain::ai::provider::{AIError, StreamChunk};
 use crate::domain::ai::registry::AIProviderRegistry;
+use crate::domain::capability::{CapabilityError, CapabilityRegistry, CapabilityResult, InvokeContext};
 use crate::domain::execution::{ActionContext, ActionRegistry, ActionSchema, DangerClass};
 use crate::infra::platform::context::ContextSnapshot;
 use crate::domain::intent::{Candidate, IntentRouter, RankingHint, Route, Suggestion, Surface};
@@ -26,7 +28,7 @@ use crate::infra::utils::perf::ai_slo;
 
 use super::engine::{Lane, QueryContext, SearchEngine, SearchItem};
 use super::scorer::{boost_priority, placeholder_score, source_rank};
-use super::{Action, AppEntry};
+use super::{Action, ActionKind, AppEntry};
 
 /// 同步搜索返回契约（0.8.3 §4.3）——`SearchService::search` / `search_apps` command 出口。
 ///
@@ -686,11 +688,17 @@ impl SearchService {
             let cfg = registry.config_snapshot();
             let timeout_ms = cfg.slo_hard_timeout_ms.unwrap_or(20_000);
 
-            // 0.9.3:使用聚合后的 tools 列表（内置动作 3 组 + 插件独立）
+            // 0.9.7 Step 4: 聚合 tools 列表 = Action 分组 + 插件独立 + Capability 独立
             let action_reg = app.state::<Arc<ActionRegistry>>();
-            let tools = crate::domain::execution::group::build_aggregated_tools(&action_reg);
+            let cap_reg = app.state::<Arc<CapabilityRegistry>>();
+            let tools = crate::domain::execution::group::build_aggregated_tools(&action_reg, &cap_reg);
             let tools_count = tools.len();
             let system_prompt = build_routing_prompt(&tools);
+
+            // 0.9.7 Step 4 铁则 1: AI lane 派给 Capability 的预算 = AI 总预算 - 已耗时间。
+            // handle_ai_tool_calls 收到此 deadline 后构造 InvokeContext 传给 Capability。
+            let ai_start = std::time::Instant::now();
+            let ai_deadline = Some(ai_start + std::time::Duration::from_millis(timeout_ms as u64));
 
             let req = CompletionRequest {
                 messages: vec![
@@ -717,7 +725,8 @@ impl SearchService {
                 use_streaming,
             );
 
-            let start = std::time::Instant::now();
+            // start 已在 ai_deadline 计算前定义为 ai_start
+            let start = ai_start;
 
             if use_streaming {
                 // ── 流式路径:provider.stream() + channel 逐 chunk emit ──
@@ -766,6 +775,7 @@ impl SearchService {
                             if !tool_calls.is_empty() {
                                 handle_ai_tool_calls(
                                     &app, seq, &tool_calls, &accumulated, &lang,
+                                    &latest_seq, ai_deadline,
                                 ).await;
                             } else {
                                 // 纯文本回答——先发 done=true 再发可复制结果
@@ -842,6 +852,7 @@ impl SearchService {
                             handle_ai_tool_calls(
                                 &app, seq, &resp.tool_calls,
                                 resp.text.as_deref().unwrap_or(""), &lang,
+                                &latest_seq, ai_deadline,
                             ).await;
                             return;
                         }
@@ -1345,6 +1356,16 @@ fn emit_ai_result(app: &AppHandle, seq: u64, entry: AppEntry) {
     }
 }
 
+/// emit AI 多条结果——Capability `Items` 返回时用（如 search_files 返回文件列表）。
+///
+/// 前端 merge 按 `source="ai"` 整体替换 placeholder——多条结果
+/// 在前端渲染为可选列表，Alt+1 打开第一条。
+fn emit_ai_result_multi(app: &AppHandle, seq: u64, entries: Vec<AppEntry>) {
+    if let Err(e) = app.emit("blink://results", ResultsPayload { seq, items: entries }) {
+        tracing::debug!(error = %e, "emit AI multi-result failed");
+    }
+}
+
 /// AI 流式 chunk 事件 payload——每个 Text chunk emit 一次,前端增量拼接展示。
 #[derive(Clone, Serialize)]
 struct AiStreamPayload {
@@ -1422,7 +1443,10 @@ fn emit_ai_clear(app: &AppHandle, seq: u64, error_msg: Option<&str>) {
 
 /// 处理 AI tool_calls —— 流式/非流式共用的执行逻辑。
 ///
-/// 解析 tool_call → (Action, 参数),按 DangerClass 分支:
+/// **0.9.7 Step 4**: 先查 CapabilityRegistry,命中则走 Capability 分支;
+/// 未命中再走 Action 解析。
+///
+/// Action 路径: 解析 tool_call → (Action, 参数),按 DangerClass 分支:
 /// - Safe:直接执行,emit 执行结果
 /// - Dangerous:emit 确认卡片,等用户 Enter/Esc
 /// - 未知 action:回退到文本回答(若有)
@@ -1432,8 +1456,19 @@ async fn handle_ai_tool_calls(
     tool_calls: &[crate::domain::ai::message::ToolCall],
     fallback_text: &str,
     lang: &str,
+    latest_seq: &AtomicU64,
+    deadline: Option<Instant>,
 ) {
     let tc = &tool_calls[0]; // 主窗口只取第一个
+
+    // 0.9.7 Step 4: 先查 Capability——Capability 优先于 Action
+    let cap_reg = app.state::<Arc<CapabilityRegistry>>();
+    if cap_reg.get(&tc.name).is_some() {
+        handle_capability_call(app, seq, tc, &cap_reg, latest_seq, deadline).await;
+        return;
+    }
+
+    // Action 路径
     let action_reg = app.state::<Arc<ActionRegistry>>();
     let resolved = resolve_tool_call(tc, &action_reg);
 
@@ -1485,6 +1520,179 @@ async fn handle_ai_tool_calls(
                 }
                 _ => emit_ai_clear(app, seq, Some(&format!("AI 调用了未知动作: {}", tc.name))),
             }
+        }
+    }
+}
+
+// ── 0.9.7 Step 4: Capability 调用 + 前端投影 ────────────────────────────────
+
+/// 处理 AI tool_call 命中 Capability 的分支（0.9.7 Step 4）。
+///
+/// 流程：
+/// 1. seq 校验（开始前）——用户已切走则直接返回（Cancelled，不 emit）
+/// 2. 构造 `InvokeContext`（deadline 从 AI lane 总预算派生）
+/// 3. `capability_registry.invoke()` ——内部含 SLO 埋点
+/// 4. seq 校验（完成后）——capability 可能耗时较长，完成后再次校验
+/// 5. 投影 `CapabilityResult` → 前端 `AppEntry` 列表 emit
+/// 6. `CapabilityError`（除 Cancelled）→ emit 错误展示
+async fn handle_capability_call(
+    app: &AppHandle,
+    seq: u64,
+    tc: &crate::domain::ai::message::ToolCall,
+    cap_registry: &Arc<CapabilityRegistry>,
+    latest_seq: &AtomicU64,
+    deadline: Option<Instant>,
+) {
+    // 铁则 2: seq 校验——用户已切走 → Cancelled,不 emit
+    if seq != latest_seq.load(Ordering::SeqCst) {
+        tracing::trace!(
+            target: ai_slo::TARGET,
+            capability = %tc.name,
+            "Capability seq 过期(开始前),丢弃"
+        );
+        return;
+    }
+
+    tracing::info!(
+        target: ai_slo::TARGET,
+        capability = %tc.name,
+        args = %tc.arguments,
+        "AI tool_call → Capability invoke"
+    );
+
+    // 构造 InvokeContext——能力通过 app_handle 自取所需 state（如 SqlitePool）。
+    // 无需预注入 config：inventory 零参构造 + app_handle 按需访问 = 可扩展且不造假。
+    let ctx = InvokeContext {
+        app_handle: app,
+        deadline,
+    };
+
+    // invoke 包装层内含 SLO 埋点（§3.5 铁则 3）
+    let result = cap_registry.invoke(&tc.name, tc.arguments.clone(), &ctx).await;
+
+    // 铁则 2: seq 再次校验——capability 可能耗时较长，完成后用户可能已切走
+    if seq != latest_seq.load(Ordering::SeqCst) {
+        tracing::trace!(
+            target: ai_slo::TARGET,
+            capability = %tc.name,
+            "Capability seq 过期(完成后),丢弃"
+        );
+        return;
+    }
+
+    match result {
+        Ok(cap_result) => {
+            // 先清流式占位/残留,再发执行结果
+            emit_ai_clear(app, seq, None);
+            let entries = capability_result_to_entries(&cap_result);
+            if entries.is_empty() {
+                emit_ai_clear(app, seq, Some("能力执行完成,但无返回结果"));
+            } else {
+                emit_ai_result_multi(app, seq, entries);
+            }
+        }
+        Err(CapabilityError::Cancelled) => {
+            // 不 emit 给前端（用户已切走,无需反馈）
+            tracing::trace!(
+                target: ai_slo::TARGET,
+                capability = %tc.name,
+                "Capability cancelled,不 emit"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: ai_slo::TARGET,
+                capability = %tc.name,
+                error = %e,
+                "Capability invoke 失败"
+            );
+            emit_ai_clear(app, seq, Some(&format!("能力调用失败: {e}")));
+        }
+    }
+}
+
+/// `CapabilityResult` → `Vec<AppEntry>` 前端投影（0.9.7 Step 4）。
+///
+/// 消费方决定投影形态——主窗口模式走此函数（前端展示）;
+/// AI multi-turn 走 `CapabilityResult::to_rig_tool_result()`（0.10）;
+/// CLI 走 stdout（0.11）。Capability 层零分支。
+fn capability_result_to_entries(result: &CapabilityResult) -> Vec<AppEntry> {
+    match result {
+        CapabilityResult::Text { content } => {
+            vec![ai_result_entry(content.clone())]
+        }
+        CapabilityResult::Items { items } => {
+            if items.is_empty() {
+                vec![]
+            } else {
+                items
+                    .iter()
+                    .map(|item| {
+                        // 从 payload 提取 path（如果有）→ Open 动作
+                        let path = item.payload.get("path").and_then(|v| v.as_str());
+                        AppEntry {
+                            name: item.title.clone(),
+                            pinyin_name: String::new(),
+                            pinyin_full: String::new(),
+                            lnk_path: path.unwrap_or("").to_string(),
+                            is_calc: false,
+                            score: item.score.unwrap_or(0.5),
+                            is_placeholder: false,
+                            is_error: false,
+                            source: AI_SOURCE.into(),
+                            description: item.subtitle.clone(),
+                            action: if path.is_some() {
+                                Action {
+                                    kind: ActionKind::Open,
+                                    ..Default::default()
+                                }
+                            } else {
+                                Action::default()
+                            },
+                            score_detail: None,
+                        }
+                    })
+                    .collect()
+            }
+        }
+        CapabilityResult::Blob { mime, bytes } => {
+            // Blob → 展示摘要信息（0.10 多模态才把图片喂回 AI）
+            let size_kb = bytes.len() as f64 / 1024.0;
+            let size_text = if size_kb >= 1024.0 {
+                format!("{:.1} MB", size_kb / 1024.0)
+            } else {
+                format!("{:.1} KB", size_kb)
+            };
+            vec![AppEntry {
+                name: format!("✓ 已获取 {} ({})", mime, size_text),
+                pinyin_name: String::new(),
+                pinyin_full: String::new(),
+                lnk_path: String::new(),
+                is_calc: false,
+                score: 0.7,
+                is_placeholder: false,
+                is_error: false,
+                source: AI_SOURCE.into(),
+                description: Some("AI 已获取数据".into()),
+                action: Action::default(),
+                score_detail: None,
+            }]
+        }
+        CapabilityResult::Done { summary } => {
+            vec![AppEntry {
+                name: format!("✓ {}", summary),
+                pinyin_name: String::new(),
+                pinyin_full: String::new(),
+                lnk_path: String::new(),
+                is_calc: false,
+                score: 0.7,
+                is_placeholder: false,
+                is_error: false,
+                source: AI_SOURCE.into(),
+                description: Some("AI 已执行此能力".into()),
+                action: Action::default(),
+                score_detail: None,
+            }]
         }
     }
 }
@@ -1665,5 +1873,128 @@ mod tests {
         let items = (0..10).map(|i| item(&format!("e{i}"), 0.5, "start_menu")).collect();
         let r = fuse_items(items, 3);
         assert_eq!(r.len(), 3);
+    }
+
+    // ── 0.9.7 Step 4: capability_result_to_entries 前端投影测试 ─────────────
+
+    #[test]
+    fn cap_text_projects_to_copy_entry() {
+        let r = CapabilityResult::Text { content: "hello world".into() };
+        let entries = capability_result_to_entries(&r);
+        assert_eq!(entries.len(), 1);
+        assert!(!entries[0].is_placeholder);
+        assert_eq!(entries[0].source, AI_SOURCE);
+        // Text → Copy 动作（复用 ai_result_entry）
+        assert!(matches!(entries[0].action.kind, ActionKind::Copy));
+    }
+
+    #[test]
+    fn cap_items_projects_to_open_entries_with_path() {
+        use serde_json::json;
+        let r = CapabilityResult::Items {
+            items: vec![
+                crate::domain::capability::ItemResult {
+                    title: "report.pdf".into(),
+                    subtitle: Some("C:\\docs".into()),
+                    payload: json!({ "path": "C:\\docs\\report.pdf" }),
+                    score: Some(0.9),
+                },
+                crate::domain::capability::ItemResult {
+                    title: "notes.txt".into(),
+                    subtitle: None,
+                    payload: json!({ "path": "D:\\notes.txt" }),
+                    score: Some(0.5),
+                },
+            ],
+        };
+        let entries = capability_result_to_entries(&r);
+        assert_eq!(entries.len(), 2);
+        // 第一项：有 path → Open 动作
+        assert_eq!(entries[0].name, "report.pdf");
+        assert_eq!(entries[0].lnk_path, "C:\\docs\\report.pdf");
+        assert!(matches!(entries[0].action.kind, ActionKind::Open));
+        assert_eq!(entries[0].score, 0.9);
+        // 第二项
+        assert_eq!(entries[1].name, "notes.txt");
+        assert_eq!(entries[1].lnk_path, "D:\\notes.txt");
+    }
+
+    #[test]
+    fn cap_items_empty_returns_empty_vec() {
+        let r = CapabilityResult::Items { items: vec![] };
+        let entries = capability_result_to_entries(&r);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn cap_blob_projects_to_summary_entry() {
+        let r = CapabilityResult::Blob {
+            mime: "image/png".into(),
+            bytes: vec![0x89; 1024], // 1KB
+        };
+        let entries = capability_result_to_entries(&r);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].name.contains("image/png"));
+        assert!(entries[0].name.contains("KB"));
+    }
+
+    #[test]
+    fn cap_done_projects_to_summary_entry() {
+        let r = CapabilityResult::Done { summary: "已写入文本".into() };
+        let entries = capability_result_to_entries(&r);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].name.contains("已写入文本"));
+    }
+
+    // ── 边界测试 ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn cap_items_without_path_uses_default_action() {
+        // Items 的 payload 不含 path → lnk_path 空、action 走 Default（Open kind）
+        use serde_json::json;
+        let r = CapabilityResult::Items {
+            items: vec![crate::domain::capability::ItemResult {
+                title: "进程信息".into(),
+                subtitle: Some("PID: 1234".into()),
+                payload: json!({ "pid": 1234 }),  // 无 path 字段
+                score: None,
+            }],
+        };
+        let entries = capability_result_to_entries(&r);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].lnk_path, "");          // 无 path → 空 lnk_path
+        assert!(entries[0].action.payload.is_none()); // 无 payload
+        // Action::default() kind = Open，但 lnk_path 空 → 前端 open 空路径走 no-op
+        assert!(matches!(entries[0].action.kind, ActionKind::Open));
+    }
+
+    #[test]
+    fn cap_blob_large_size_shows_mb() {
+        // Blob > 1MB → 名称含 "MB" 而非 "KB"
+        let r = CapabilityResult::Blob {
+            mime: "image/png".into(),
+            bytes: vec![0x00; 2 * 1024 * 1024], // 2MB
+        };
+        let entries = capability_result_to_entries(&r);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].name.contains("MB"));
+        assert!(!entries[0].name.contains("KB"));
+    }
+
+    #[test]
+    fn cap_items_none_subtitle_yields_none_description() {
+        // subtitle = None → AppEntry.description = None
+        use serde_json::json;
+        let r = CapabilityResult::Items {
+            items: vec![crate::domain::capability::ItemResult {
+                title: "file.txt".into(),
+                subtitle: None,
+                payload: json!({ "path": "C:\\file.txt" }),
+                score: Some(0.5),
+            }],
+        };
+        let entries = capability_result_to_entries(&r);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].description.is_none());
     }
 }

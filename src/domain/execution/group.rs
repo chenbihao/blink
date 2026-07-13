@@ -8,9 +8,14 @@
 //! - 聚合只在 AI 投影层，不影响手动执行路径（ActionRegistry.get(id) → execute）
 //! - 插件 tool 不参与聚合，保持独立
 //! - 分组静态定义，运行时按 ActionRegistry 白名单过滤
+//!
+//! **0.9.7 Step 4 扩展**：`build_aggregated_tools` 同时收集 CapabilityRegistry 的能力 schema，
+//! 让 AI tool_call 能命中 Capability（search_files / capture_screen 等）。
+//! Capability 不参与分组聚合——保持独立 tool，与插件 tool 同模式。
 
 use super::registry::ActionRegistry;
 use super::schema::ActionSchema;
+use crate::domain::capability::CapabilityRegistry;
 
 /// Tool 分组定义。
 ///
@@ -150,9 +155,18 @@ pub fn find_group(name: &str) -> Option<&'static ToolGroup> {
 
 /// 构建聚合后的 tools 列表（供 AI 路由使用）。
 ///
-/// - 内置动作 → 按分组聚合为 3 个 tool
-/// - 插件 tool → 保持独立（跳过已分组的内置动作）
-pub fn build_aggregated_tools(registry: &ActionRegistry) -> Vec<ActionSchema> {
+/// 三源归一（0.9.7 Step 4）：
+/// 1. 内置动作 → 按分组聚合为 3 个 tool
+/// 2. 插件 tool → 保持独立（跳过已分组的内置动作）
+/// 3. Capability → 独立 tool（不参与分组，schema 直接投影为 ActionSchema）
+///
+/// **Capability 与 Action 的 name 冲突策略**：Capability 优先——
+/// AI tool_call 命中时 `handle_ai_tool_calls` 先查 CapabilityRegistry。
+/// 理论上不应冲突（Action id 如 "lock" vs Capability id 如 "search_files"）。
+pub fn build_aggregated_tools(
+    registry: &ActionRegistry,
+    cap_registry: &CapabilityRegistry,
+) -> Vec<ActionSchema> {
     let mut tools = Vec::new();
 
     // 1. 内置动作 → 按分组聚合
@@ -177,6 +191,27 @@ pub fn build_aggregated_tools(registry: &ActionRegistry) -> Vec<ActionSchema> {
         if let Some(action) = registry.get(&id) {
             tools.push(action.schema());
         }
+    }
+
+    // 3. Capability → 独立 tool（不参与分组，schema 直接投影为 ActionSchema）
+    // CapabilitySchema 与 ActionSchema 结构相同（name/description/parameters），
+    // 直接字段拷贝投影——零适配，0.11 MCP 派生也从这份 schema 出。
+    for cap_schema in cap_registry.list() {
+        // 冲突检测：若 Action 已有同名 tool，warn 并跳过（Capability 优先在 resolve 阶段体现，
+        // schema 层不重复发给 LLM——避免模型困惑于两个同名 tool）
+        let name = &cap_schema.name;
+        if tools.iter().any(|t| &t.name == name) {
+            tracing::warn!(
+                tool = %name,
+                "build_aggregated_tools: Capability name 与已有 Action tool 冲突,跳过 Capability schema"
+            );
+            continue;
+        }
+        tools.push(ActionSchema {
+            name: cap_schema.name,
+            description: cap_schema.description,
+            parameters: cap_schema.parameters,
+        });
     }
 
     tools

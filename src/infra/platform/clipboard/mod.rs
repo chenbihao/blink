@@ -107,3 +107,18 @@ pub(super) fn notify_change(text: &str) {
 pub fn write_bgra_to_clipboard(pixels: &[u8], width: u32, height: u32) -> Result<(), String> {
     windows::write_bgra_to_clipboard(pixels, width, height)
 }
+
+/// 读当前剪贴板文本（0.9.7 read_clipboard Capability）。
+///
+/// 返回 `Some(text)` = 文本剪贴板；`None` = 空/非文本（图片/文件列表）。
+/// 含短重试（与监听器同一逻辑），读不到返回 None 不报错。
+#[cfg(target_os = "windows")]
+pub fn read_current_text() -> Option<String> {
+    windows::read_current_text()
+}
+
+/// 把文本写入系统剪贴板（CF_UNICODETEXT 格式）（0.9.7 write_clipboard Capability）。
+#[cfg(target_os = "windows")]
+pub fn write_text_to_clipboard(text: &str) -> Result<(), String> {
+    windows::write_text_to_clipboard(text)
+}

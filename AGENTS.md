@@ -4,7 +4,7 @@
 
 > 📖 **产品设计与文档导航**：请先阅读 [docs/production-design/00-overview.md](docs/production-design/00-overview.md) 了解产品定位、里程碑与完整文档体系。改核心前必读对应 phases 文档。
 
-更新时间 20260713
+更新时间 20260714
 
 ---
 
@@ -13,9 +13,8 @@
 Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而是 **Universal Action Layer（统一操作层）**。
 终极目标：感知用户上下文、主动推荐动作，让任何操作都比原来的路径更快。
 
-当前 **0.9.0~0.9.6 完成**（Agent 地基 + 插件 tool-call + 供应商配置 UI + 前端架构重整 + 收尾发版）。详见 [phases/0.9-ai-layer.md](docs/production-design/phases/0.9-ai-layer.md)。
+当前 **0.9.0~0.9.7 完成**（Agent 地基 + 插件 tool-call + 供应商配置 UI + 前端架构重整 + 收尾发版 + Capability 能力协议层）。详见 [phases/0.9-ai-layer.md](docs/production-design/phases/0.9-ai-layer.md)。
 
-- 🔜 **0.9.7 Capability 能力协议层**：原子能力 + 统一声明/返回 + inventory 注册 + 截图/剪贴板焊死链路拆解 + 接 AI tool 池（为 0.10 北极星铺路）。详见 [phases/0.9.7-capability-layer.md](docs/production-design/phases/0.9.7-capability-layer.md)
 - 🔜 **0.10 语音指令闭环**：STT + 双 chord 语音入口 + 语音找文件 + Agent 对话窗口。详见 [phases/0.10-voice-agent.md](docs/production-design/phases/0.10-voice-agent.md)
 - 🔜 **0.11 本地化与生态**：本地模型 / skill / MCP / RAG。详见 [phases/0.11-local-ecosystem.md](docs/production-design/phases/0.11-local-ecosystem.md)
 
@@ -81,6 +80,7 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
   - `plugin/` — manifest 解析 + JSONL 协议 + tokio 子进程
   - `chord/` — `ChordAction` trait + `ChordRegistry`
   - `ai/` — `AIProvider` trait + `AIProviderRegistry` + `RigFactory` + `gating`（四筛子）+ `message`（ChatMessage / ToolCall）+ `rig_provider`
+  - `capability/` — `Capability` trait + `InvokeContext` + `CapabilitySchema` + `CapabilityResult` + `CapabilityError` + `CapabilityRegistry`（inventory 自动注册）+ `builtins/`（capture_screen / crop_image / read_clipboard / write_clipboard / search_files）
 - `src/infra/` — 基础设施层：
   - `platform/` — `mod.rs` 抽象 + `windows.rs`：hotkey / window / selection / clipboard / context / locale / screenshot / secret（Credential Manager）
   - `data/` — SQLite：history / clipboard / config KV（`ConfigStore<T>` 6 分片）

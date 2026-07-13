@@ -2,8 +2,8 @@
 
 > **定位**: Universal Action Layer（统一操作层）—— 感知用户上下文、主动推荐动作,让任何操作都比原来的路径更快。
 >
-> **状态**: 0.8 全部归档；**0.9.0~0.9.6 完成**（Agent 地基 + 插件 tool-call + 供应商配置 UI + 前端架构重整 + 收尾发版）。**0.9.7 Capability 能力协议层规划中**（为 0.10 铺路）。下一站 0.10 语音指令闭环。
-> **更新时间**: 2026-07-13
+> **状态**: 0.8 全部归档；**0.9 全部完成**（Agent 地基 + 插件 tool-call + 供应商配置 UI + 前端架构重整 + Capability 能力协议层）。下一站 0.10 语音指令闭环。
+> **更新时间**: 2026-07-14
 
 ---
 
@@ -58,8 +58,7 @@
 | **0.6** | [phases/0.6-plugin-packaging-scripting.md](./phases/0.6-plugin-packaging-scripting.md) | 插件打包路径 + Python/Node.js 脚本支持 + 统一错误处理 | ✅ 完成 |
 | **0.7** | [phases/0.7-plugin-ecosystem-local-search.md](./phases/0.7-plugin-ecosystem-local-search.md) | 插件生态(翻译/剪贴板历史)+ 本地搜索 Fallback + 性能统计 | ✅ 完成 |
 | **0.8** | [phases/0.8-context-interaction.md](./phases/0.8-context-interaction.md) | 感知与操作层 —— UIA 划词 + 内置动作抽象 + Autosuggestion + 翻译 Context 路由 + 四域架构 + Chord 交互 + Alt+A 截图（0.8.6 架构固化大部分已落地，两项遗留推 0.9 前） | ✅ 归档收尾 |
-| **0.9** | [phases/0.9-ai-layer.md](./phases/0.9-ai-layer.md) | Agent 地基 —— rig-core 全 buildin 直编 + 统一 tool 架构 + Provider 多档 + 主窗口文本闭环 + 插件 tool-call + 供应商配置 UI + 前端架构重整 | ✅ 完成 |
-| **0.9.7** | [phases/0.9.7-capability-layer.md](./phases/0.9.7-capability-layer.md) | Capability 能力协议层 —— 原子能力 + 统一声明 + 统一返回 + inventory 注册 + 截图/剪贴板焊死链路拆解 | 📋 规划中 |
+| **0.9** | [phases/0.9-ai-layer.md](./phases/0.9-ai-layer.md) | Agent 地基 —— rig-core 全 buildin 直编 + 统一 tool 架构 + Provider 多档 + 主窗口文本闭环 + 插件 tool-call + 供应商配置 UI + 前端架构重整 + Capability 能力协议层 | ✅ 完成 |
 | **0.10** | [phases/0.10-voice-agent.md](./phases/0.10-voice-agent.md) | 语音指令闭环 —— STT + 双 chord + 语音找文件北极星 + Agent 窗口 | 📋 规划中 |
 | **0.11** | [phases/0.11-local-ecosystem.md](./phases/0.11-local-ecosystem.md) | 本地化与生态 —— 本地模型 / skill 化 / MCP 双向 / RAG 记忆 | 📋 规划中 |
 
@@ -93,7 +92,7 @@
 | **0.9.4** | 供应商配置 UI（预设 Picker + 模型自动发现 + 连通测试） | ✅ 完成 |
 | **0.9.5** | 前端架构重整（Open Props + CSS 七层 + JS 拆分）+ AI 调用体验优化 | ✅ 完成 |
 | **0.9.6** | 收尾：README 中英分拆 + AI 配置/调用体验打磨 + 命令与服务微调 | ✅ 完成 |
-| **0.9.7** | Capability 能力协议层（原子能力 + 统一声明/返回 + inventory 注册 + 截图/剪贴板拆解 + 接 AI tool 池） | 📋 规划中 |
+| **0.9.7** | Capability 能力协议层（原子能力 + 统一声明/返回 + inventory 注册 + 截图/剪贴板拆解 + 接 AI tool 池） | ✅ 完成 |
 | **0.10.0** | STT 接入（云端优先）+ 双 chord 语音入口 + 输入法模式 | 后置 |
 | **0.10.1** | 语音找文件北极星场景 + 指令闭环 | 后置 |
 | **0.10.2** | Agent 对话窗口 + 流式 MD + 确认反馈 | 后置 |
@@ -114,8 +113,7 @@
 | 选中文本/剪贴板感知怎么做?隐私如何保证? | [product-context-future.md](./product-context-future.md) |
 | 最小操作路径准则 / 中文不斜体 / 键盘提示统一 | [product-principles.md §13-14](./product-principles.md) |
 | 0.8 感知与操作层在做什么? | [phases/0.8-context-interaction.md](./phases/0.8-context-interaction.md) |
-| 0.9 Agent 地基准备怎么落? | [phases/0.9-ai-layer.md](./phases/0.9-ai-layer.md) |
-| 0.9.7 Capability 能力协议层（原子化 / 统一返回 / 为 0.10 北极星铺路）? | [phases/0.9.7-capability-layer.md](./phases/0.9.7-capability-layer.md) |
+| 0.9 Agent 地基 + Capability 能力协议层怎么落? | [phases/0.9-ai-layer.md](./phases/0.9-ai-layer.md) |
 | 0.10 语音指令闭环? | [phases/0.10-voice-agent.md](./phases/0.10-voice-agent.md) |
 | 0.11 本地化与生态扩展? | [phases/0.11-local-ecosystem.md](./phases/0.11-local-ecosystem.md) |
 | 开发规范、模块拆分、Tauri Commands | [CLAUDE.md](../../CLAUDE.md) |
