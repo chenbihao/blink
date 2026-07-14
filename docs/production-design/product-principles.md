@@ -10,7 +10,7 @@
 
 | # | 取舍 | 为什么妥协 |
 |---|---|---|
-| 1 | 热键 hook 杀软敏感 | 右 Alt tap 体验优于 `RegisterHotKey`；杀软问题分发期签名解决 |
+| 1 | 热键 hook 杀软敏感 | Alt+Space 体验优于 `RegisterHotKey`；杀软问题分发期签名解决 |
 | 2 | 图标提取用 COM + 自定义协议 | 不进搜索热路径；换来常驻内存不膨胀 |
 | 3 | 插件进程有冷启动延迟 | 独立进程安全隔离的代价；懒启动 + 常驻复用缓解 |
 | 4 | Takeover 首批为空（async 增量） | 渐进式设计的代价；带参场景插件应够快，加占位项缓解 |
@@ -44,7 +44,7 @@
 
 | 阶段 | 产品决策 |
 |---|---|
-| **0.1 MVP** | Universal Action Layer 定位；右 Alt tap；P0 主链路可靠性 |
+| **0.1 MVP** | Universal Action Layer 定位；Alt+Space tap；P0 主链路可靠性 |
 | **0.2** | 渐进式搜索（sync/async 双 lane）；配置化优先；空 query 历史雏形 |
 | **0.3** | 插件 = 召回源（不独占）；动作透传前端；热键物理态重构 |
 | **0.4** | **呈现权 surface 模型**（inline/priority/takeover）；触发与呈现正交；RuleRouter |

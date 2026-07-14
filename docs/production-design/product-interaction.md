@@ -32,13 +32,13 @@ Blink 不是启动器（launcher），而是**统一操作层**——感知上�
 
 ## 2. 核心交互体验
 
-### 2.1 唤起：右 Alt tap
+### 2.1 唤起：Alt+Space tap
 
-默认唤起键 = **右 Alt 单击（tap）**。
+默认唤起键 = **Alt+Space（tap）**。
 
 | 关键点 | 说明 |
 |---|---|
-| **不吞键** | hook 回调全程 `CallNextHookEx` 放行，右 Alt 仍作系统修饰键 |
+| **不吞键** | hook 回调全程 `CallNextHookEx` 放行，Alt 仍作系统修饰键 |
 | **tap/hold 区分** | keydown 记时刻，keyup 时若无其他键且时长 ≤ 阈值 → tap；否则 hold 放行 |
 | **提前预热** | keydown 即异步预热窗口，keyup 确认后立即 focus + 显示 |
 

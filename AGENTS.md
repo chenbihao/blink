@@ -15,7 +15,7 @@ Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而�
 
 当前 **0.9.0~0.9.7 完成**（Agent 地基 + 插件 tool-call + 供应商配置 UI + 前端架构重整 + 收尾发版 + Capability 能力协议层）。详见 [phases/0.9-ai-layer.md](docs/production-design/phases/0.9-ai-layer.md)。
 
-- 🔜 **0.10 语音指令闭环**：STT + 双 chord 语音入口 + 语音找文件 + Agent 对话窗口。详见 [phases/0.10-voice-agent.md](docs/production-design/phases/0.10-voice-agent.md)
+- 🔜 **0.10 语音输入**：STT + 语音打字（G1 主窗口语音输入 / G2 语音输入法上屏）+ Agent 对话窗口（后置）。工具箱层定 FunASR、引擎定 sherpa-onnx。详见 [phases/0.10-voice-agent.md](docs/production-design/phases/0.10-voice-agent.md)
 - 🔜 **0.11 本地化与生态**：本地模型 / skill / MCP / RAG。详见 [phases/0.11-local-ecosystem.md](docs/production-design/phases/0.11-local-ecosystem.md)
 
 ---
@@ -25,7 +25,7 @@ Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而�
 > **如果用户按快捷键后不能立即输入，其他所有功能都没有意义。**
 
 所有改动都应服务于这条主链路的可靠性：
-`右 Alt 单击 → 窗口出现 → 自动 Focus → 用户直接输入 → ESC/失焦隐藏`。
+`Alt+Space → 窗口出现 → 自动 Focus → 用户直接输入 → ESC/失焦隐藏`。
 
 | 指标 | 目标 |
 |---|---|
@@ -59,7 +59,7 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 
 | 决策 | 说明 |
 |---|---|
-| **热键不吞键** | hook 回调全程 `CallNextHookEx` 放行，右 Alt 仍可作系统修饰键。tap/hold 靠按压时长 + 期间是否出现其他键区分。 |
+| **热键不吞键** | hook 回调全程 `CallNextHookEx` 放行，Alt 仍可作系统修饰键。tap/hold 靠按压时长 + 期间是否出现其他键区分。 |
 | **看门狗失焦检测** | 不依赖 `WM_ACTIVATE`，每 150ms 轮询 `GetForegroundWindow()`，按**进程 PID** 判定（非死比 HWND）。 |
 | **搜索双路匹配** | 同时对原始名和拼音首字母做 nucleo fuzzy 取最高分；历史 `ln(hit+1)*0.3` 加权（上限 0.8）。 |
 | **图标懒加载** | 图标提取**不进搜索热路径**，由自定义协议 `blink-icon` 按需提供。 |

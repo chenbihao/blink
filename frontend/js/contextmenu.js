@@ -39,11 +39,20 @@ export function init() {
     // item: padding 8px * 2 + font 13px * line-height 1.5 ≈ 35.5px
     // separator: 1px height + margin 4px * 2 = 9px
     // container padding: var(--space-sm) 8px * 2 = 16px
-    const estimatedHeight = items.reduce((h, it) => h + (it.separator ? 9 : 36), 0) + 16;
-    const estimatedWidth = 180;
+    //
+    // 缓冲量（--shadow-card 的三层需要呼吸位，否则 overflow:hidden 会把边剪掉）：
+    //   - 宽：右侧 box-shadow spread 1px 外描边 + CSS→物理像素 round 半像素累计 → +8
+    //   - 高：底部 spread 1px + `0 1px 2px` / `0 24px 48px` 阴影想画在窗口内 → +8
+    // 不给缓冲会体感"右边少 2~3px、下面少 4~6px"。
+    const H_BUFFER = 8;
+    const V_BUFFER = 8;
+    const rows = items.reduce((h, it) => h + (it.separator ? 9 : 36), 0);
+    const estimatedHeight = rows + 16 + V_BUFFER;
+    const estimatedWidth = 180 + H_BUFFER;
 
-    // 直接传原始屏幕坐标，多屏定位 + 边界 clamp 由后端处理
-    showPopupWindow(e.screenX, e.screenY, estimatedWidth, estimatedHeight, items);
+    // 光标物理坐标由后端 GetCursorPos 直接读取——MouseEvent.screenX/Y 在 WebView2
+    // 里是 CSS 像素，高 DPI 屏当物理像素用会偏 1/3；索性不传，避免 dpr 猜谜。
+    showPopupWindow(estimatedWidth, estimatedHeight, items);
   });
 
   // ESC 关闭
@@ -74,13 +83,11 @@ function closestLi(target) {
 
 /**
  * 调用后端创建独立 Popup 窗口显示菜单。
- * x, y 是屏幕坐标（物理像素），width/height 是 CSS 像素。
- * 多屏定位 + DPI 缩放 + 边界 clamp 均由后端 clamp_context_menu 处理。
+ * `width/height` 是 CSS 像素尺寸。光标物理坐标 + DPI 缩放 + 多屏边界翻转
+ * 均由后端 `clamp_context_menu`（`GetCursorPos`）处理。
  */
-function showPopupWindow(x, y, width, height, items) {
+function showPopupWindow(width, height, items) {
   invoke("show_context_menu", {
-    x: x,
-    y: y,
     width: width,
     height: height,
     items: JSON.stringify(items),

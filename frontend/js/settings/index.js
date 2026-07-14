@@ -87,6 +87,24 @@ async function init() {
 // 窗口关闭按钮
 document.getElementById("close-btn")?.addEventListener("click", hideSettingsWindow);
 
+// ESC 隐藏窗口（与主窗口一致）
+// 优先级降级：
+//   1. 有可见 modal（AI provider / model edit / context picker 等）→ 交给 modal 内部处理器关闭
+//   2. 正在录制热键 → 录制流程会 preventDefault 吞键，此处不处理
+//   3. 否则调用 hide_settings_window
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  // 有 modal 打开：让 modal 内部的 Escape 处理器负责关闭
+  const modalOpen = Array.from(document.querySelectorAll(".modal-overlay")).some(
+    (el) => el.style.display !== "none",
+  );
+  if (modalOpen) return;
+  // 正在录制热键：交给录制流程
+  if (document.querySelector(".hotkey-btn.recording")) return;
+  e.preventDefault();
+  hideSettingsWindow();
+});
+
 // 窗口 shown 事件刷新配置
 window.addEventListener("focus", async () => {
   try {

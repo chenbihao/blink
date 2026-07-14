@@ -108,8 +108,9 @@ pub trait AIProvider: Send + Sync {
     /// **默认实现**:fallback 到 `complete()`,一次性把结果发完。
     /// 真正支持流式的 provider(如 RigProvider)应覆盖此方法。
     ///
-    /// **硬超时**:调用方负责在外层包 `tokio::time::timeout`;provider 内部
-    /// 也应实现自己的超时(与 `complete` 一致)。
+    /// **超时**:provider 内部分两阶段——连接阶段(等首个响应)用 `timeout_ms`
+    /// 作硬超时;流式阶段每个 chunk 的等待用 `timeout_ms` 作 idle timeout。
+    /// 只要 token 持续到达就不会超时。
     ///
     /// **中断**:调用方 drop 返回的 future 即可中断;provider 内部 stream 会被
     /// abort(与 `complete` 的 reqwest task abort 一致)。

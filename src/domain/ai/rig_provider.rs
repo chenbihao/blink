@@ -19,6 +19,16 @@
 //! 包住 `model.completion(request)`**——这是 spike `skeleton.rs:19` 已验证的模式,
 //! future drop 时 in-flight reqwest task 自动 abort,<100ms 释放。
 //!
+//! ## 流式两阶段超时(0.9.7+)
+//!
+//! `stream()` 的超时不是一把包住全过程的硬超时,而是分两阶段:
+//! - **Phase 1(连接)**:`model.stream()` 建立连接——用完整 deadline 作硬超时
+//! - **Phase 2(chunk 循环)**:每个 chunk 的等待用 deadline 作 **idle timeout**
+//!   (两个 chunk 之间的最大间隔)。token 持续到达则不超时,只有 stall 才判超时。
+//!
+//! 这修复了"流式返回到一半触发硬超时"的问题——AI 正在工作(持续吐 token)不应
+//! 被打断。idle timeout 与连接超时复用同一 `timeout_ms`,未来可拆分独立配置。
+//!
 //! ## 错误映射保守原则
 //!
 //! rig 返回的错误里可能带 URL / response body / status message——本文件的
@@ -167,8 +177,11 @@ where
 
     /// 流式 completion —— 调 rig `model.stream()` 逐 chunk 通过 channel 发送。
     ///
-    /// **硬超时**:外层 `tokio::time::timeout` 包住整个流式过程(与 complete 一致)。
-    /// 超时时 future drop → stream abort → reqwest task 自动释放。
+    /// **两阶段超时**(见文件顶注「流式两阶段超时」):
+    /// - Phase 1:`model.stream()` 建立连接——用完整 deadline 作硬超时
+    /// - Phase 2:逐 chunk 循环——每个 chunk 的等待用 deadline 作 idle timeout
+    ///
+    /// 只要 token 持续到达,总时长不限;只有 chunk 间出现 deadline 长的 stall 才超时。
     ///
     /// **tool_calls 收集**:流式过程中 Text chunk 实时发送;tool_calls 在流结束后
     /// 通过 `StreamChunk::Done` 一次性返回(调用方统一处理)。
@@ -190,54 +203,68 @@ where
 
         let start = Instant::now();
 
-        // 外层 tokio::time::timeout 包住整个流式过程
-        let stream_result = tokio::time::timeout(deadline, async {
-            let mut streaming_resp = self.model.stream(rig_req).await.map_err(map_rig_error)?;
-            let mut tool_calls: Vec<ToolCall> = Vec::new();
+        // ── Phase 1: 建立连接,等首个响应 ──────────────────────────────
+        // 用完整 deadline 作硬超时——AI 在 deadline 内没开始返回(连接慢/排队),判超时。
+        let mut streaming_resp = match tokio::time::timeout(
+            deadline,
+            self.model.stream(rig_req),
+        )
+        .await
+        {
+            Err(_) => return Err(AIError::Timeout), // 连接阶段超时
+            Ok(Err(rig_err)) => return Err(map_rig_error(rig_err)),
+            Ok(Ok(resp)) => resp,
+        };
 
-            // StreamingCompletionResponse 自身实现 Stream trait
-            while let Some(chunk_result) = StreamExt::next(&mut streaming_resp).await {
-                match chunk_result {
-                    Ok(raw_choice) => match raw_choice {
-                        RigStreamChunk::Text(t) => {
-                            if tx.send(StreamChunk::Text(t.text)).is_err() {
-                                // 接收端已关闭(调用方 drop 了)——提前终止
-                                return Ok::<(), AIError>(());
-                            }
-                        }
-                        RigStreamChunk::ToolCall { tool_call: tc, .. } => {
-                            tool_calls.push(ToolCall {
-                                id: tc.id.clone(),
-                                name: tc.function.name.clone(),
-                                arguments: tc.function.arguments.clone(),
-                            });
-                        }
-                        _ => {} // ToolCallDelta / Reasoning / Final 等忽略
-                    },
-                    Err(e) => return Err(map_rig_error(e)),
-                }
-            }
+        let mut tool_calls: Vec<ToolCall> = Vec::new();
 
-            // 流结束——发 Done
-            let _ = tx.send(StreamChunk::Done {
-                tool_calls,
-                // usage 在流结束后从 streaming_resp 聚合状态取
-                usage: Usage {
-                    input_tokens: 0,
-                    output_tokens: 0,
+        // ── Phase 2: 逐 chunk 消费,每个 chunk 用 deadline 作 idle timeout ──
+        // token 持续到达则不超时;只有两个 chunk 间隔超过 deadline 才判 stall 超时。
+        loop {
+            let chunk_result = match tokio::time::timeout(
+                deadline,
+                StreamExt::next(&mut streaming_resp),
+            )
+            .await
+            {
+                Err(_) => return Err(AIError::Timeout), // chunk 间 idle 超时
+                Ok(None) => break,                       // 流正常结束
+                Ok(Some(result)) => result,
+            };
+
+            match chunk_result {
+                Ok(raw_choice) => match raw_choice {
+                    RigStreamChunk::Text(t) => {
+                        if tx.send(StreamChunk::Text(t.text)).is_err() {
+                            // 接收端已关闭(调用方 drop 了)——提前终止
+                            return Ok(());
+                        }
+                    }
+                    RigStreamChunk::ToolCall { tool_call: tc, .. } => {
+                        tool_calls.push(ToolCall {
+                            id: tc.id.clone(),
+                            name: tc.function.name.clone(),
+                            arguments: tc.function.arguments.clone(),
+                        });
+                    }
+                    _ => {} // ToolCallDelta / Reasoning / Final 等忽略
                 },
-            });
-            Ok(())
-        })
-        .await;
+                Err(e) => return Err(map_rig_error(e)),
+            }
+        }
+
+        // 流结束——发 Done
+        let _ = tx.send(StreamChunk::Done {
+            tool_calls,
+            // usage 在流结束后从 streaming_resp 聚合状态取
+            usage: Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+            },
+        });
 
         let _elapsed = start.elapsed().as_millis() as u32;
-
-        match stream_result {
-            Err(_) => Err(AIError::Timeout),
-            Ok(Err(e)) => Err(e),
-            Ok(Ok(())) => Ok(()),
-        }
+        Ok(())
     }
 }
 

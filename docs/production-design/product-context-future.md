@@ -96,7 +96,7 @@
 - 发 AI 前 Context 字段需用户开关 + 可脱敏；语音默认本地 STT，云端 STT 需显式开启
 - 录音不持久化、不入 SQLite；成功只记时长
 - 敏感应用黑名单（银行、密码管理器）生效时跳过
-- 详见 [phases/0.9 §4.4](./phases/0.9-ai-layer.md)（密钥安全）+ [phases/0.10 §六](./phases/0.10-voice-agent.md)（语音隐私升级）
+- 详见 [phases/0.9 §4.4](./phases/0.9-ai-layer.md)（密钥安全）+ [phases/0.10 §八](./phases/0.10-voice-agent.md)（语音隐私升级）
 
 ### 8.3 代码签名
 

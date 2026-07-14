@@ -1778,13 +1778,12 @@ pub async fn record_hotkey() -> Result<serde_json::Value, String> {
 /// 显示右键菜单独立窗口（突破主窗口边界裁剪）。
 /// 复用已有窗口：首次创建，后续 hide → 更新数据 → show，避免重复创建 WebView2 的开销。
 ///
-/// `x/y` 是鼠标屏幕坐标（物理像素），`width/height` 是 CSS 像素尺寸。
-/// 后端通过 `clamp_context_menu` 做多屏感知定位 + DPI 缩放。
+/// `width/height` 是菜单的 **CSS 像素**尺寸；光标物理坐标由后端 `GetCursorPos` 直接读取，
+/// 不接受前端传入的 `screenX/Y`（WebView2 里那是 CSS 像素，高 DPI 屏会偏 1/3+）。
+/// 定位/缩放/边界翻转全部走 `clamp_context_menu`。
 #[tauri::command]
 pub async fn show_context_menu(
     app: tauri::AppHandle,
-    x: f64,
-    y: f64,
     width: f64,
     height: f64,
     items: String,
@@ -1807,19 +1806,36 @@ pub async fn show_context_menu(
         }
     };
 
-    // 多屏感知定位：找到鼠标所在显示器，DPI 缩放 + 工作区 clamp
-    let (fx, fy, fw, fh) = crate::infra::platform::window::clamp_context_menu(
-        x as i32, y as i32, width, height,
-    );
+    // 多屏感知定位：Win32 直接拿光标物理坐标 + 目标屏 DPI 缩放 + 智能翻转
+    let (fx, fy, fw, fh) = crate::infra::platform::window::clamp_context_menu(width, height);
 
     // 复用已有窗口：resize → reposition → show → eval 渲染新数据 → force_topmost
     // ⚠️ 不能在隐藏态用 emit 传数据：WebView2 在 IsVisible=false 时会丢弃事件
     // （曾导致「窗口尺寸已撑开、内容却没更新」）。改用 eval（走 ExecuteScript 注入
     // 脚本到 webview 队列，show 之后必执行），比事件系统更可靠地更新菜单内容。
     if let Some(win) = app.get_webview_window("context-menu") {
-        let _ = win.set_size(tauri::PhysicalSize::new(fw, fh));
-        let _ = win.set_position(tauri::PhysicalPosition::new(fx, fy));
+        // ⚠️ 不能用 set_size + set_position：窗口在主屏预热、跨到 DPI 不同的屏时，
+        // set_position 会触发 WM_DPICHANGED，tao 据此重设尺寸（不动位置），
+        // 与刚排队的 set_size 竞态，导致多屏不同 DPI 下菜单尺寸/位置偏（Tauri #3610）。
+        // 改用 SetWindowPos 一次原子设定位置+尺寸，绕开 tao 的 DPI 重设逻辑。
+        //
+        // 但即使走 SetWindowPos，跨 DPI 屏时 Windows 仍会给 hwnd 发 WM_DPICHANGED，
+        // tao 的 wndproc 收到后会按建议 rect 再改一次尺寸——把我们刚设的物理尺寸推翻，
+        // 症状是「切屏首次右键宽高错，第二次才对」。破法：show 之后再补一次
+        // place_at_physical，让 WM_DPICHANGED 的抢跑跑完后再纠正一次。
+        let hwnd_opt = win.hwnd().ok().map(|h| windows::Win32::Foundation::HWND(h.0 as _));
+        if let Some(hwnd) = hwnd_opt {
+            crate::infra::platform::window::place_at_physical(hwnd, fx, fy, fw, fh);
+        } else {
+            // hwnd 拿不到时的兜底（理论上不会到这）
+            let _ = win.set_size(tauri::PhysicalSize::new(fw, fh));
+            let _ = win.set_position(tauri::PhysicalPosition::new(fx, fy));
+        }
         let _ = win.show();
+        // 补一次：show 触发的 WM_DPICHANGED 若把尺寸改回去了，这里覆盖回来
+        if let Some(hwnd) = hwnd_opt {
+            crate::infra::platform::window::place_at_physical(hwnd, fx, fy, fw, fh);
+        }
         let theme_js = serde_json::to_string(&theme).unwrap_or_else(|_| "\"dark\"".to_string());
         let js = format!(
             "window.__renderContextMenu && window.__renderContextMenu({items}, {theme})",
@@ -1828,14 +1844,18 @@ pub async fn show_context_menu(
         );
         let _ = win.eval(&js);
         // Win32 直接设 TOPMOST，比 Tauri 的 set_always_on_top 更可靠
-        if let Ok(hwnd) = win.hwnd() {
-            crate::infra::platform::window::force_topmost(windows::Win32::Foundation::HWND(hwnd.0 as _));
+        if let Some(hwnd) = hwnd_opt {
+            crate::infra::platform::window::force_topmost(hwnd);
         }
         tracing::trace!(fx, fy, fw, fh, items_len = items.len(), "右键菜单窗口复用");
         return Ok(());
     }
 
     // 首次创建：通过 URL 参数传递初始数据
+    // ⚠️ builder 的 inner_size / position 是**逻辑像素**（tao 内部按 LogicalSize 处理），
+    // 但 fw/fh/fx/fy 是物理像素——直接塞给 builder 会被 Tauri 按主屏 DPI 再放大一遍。
+    // 这里传 CSS 尺寸（逻辑像素）让 builder 别炸，位置随便给个占位；build 完立刻
+    // place_at_physical 强制矫正到目标物理坐标 + 尺寸，跟截图 overlay 同套路。
     let encoded_items = urlencoding::encode(&items).to_string();
     let url = format!("contextmenu-popup.html?items={encoded_items}&theme={theme}");
     tracing::debug!(fx, fy, fw, fh, "创建右键菜单窗口");
@@ -1845,21 +1865,30 @@ pub async fn show_context_menu(
         WebviewUrl::App(url.into()),
     )
     .title("")
-    .inner_size(fw as f64, fh as f64)
-    .position(fx as f64, fy as f64)
+    .inner_size(width, height) // 逻辑像素占位，稍后 place_at_physical 覆盖
+    .position(0.0, 0.0)
     .decorations(false)
     .transparent(false)
     .always_on_top(true)
     .skip_taskbar(true)
-    .visible(true)
+    .visible(false) // 先隐藏建，place 后再 show，避免闪一下错位窗口
     .focused(false)
     .resizable(false)
     .build()
     .map_err(|e| format!("创建右键菜单窗口失败: {e}"))?;
 
-    // 首次创建也走 Win32 强制置顶（与复用路径一致）
     if let Ok(hwnd) = _win.hwnd() {
-        crate::infra::platform::window::force_topmost(windows::Win32::Foundation::HWND(hwnd.0 as _));
+        let hwnd = windows::Win32::Foundation::HWND(hwnd.0 as _);
+        crate::infra::platform::window::place_at_physical(hwnd, fx, fy, fw, fh);
+        let _ = _win.show();
+        // 首次创建同样补一次：show 若触发 WM_DPICHANGED 会撞乱刚设的尺寸
+        crate::infra::platform::window::place_at_physical(hwnd, fx, fy, fw, fh);
+        crate::infra::platform::window::force_topmost(hwnd);
+    } else {
+        // hwnd 拿不到的兜底路径
+        let _ = _win.set_size(tauri::PhysicalSize::new(fw, fh));
+        let _ = _win.set_position(tauri::PhysicalPosition::new(fx, fy));
+        let _ = _win.show();
     }
 
     tracing::trace!(fx, fy, fw, fh, items_len = items.len(), "右键菜单窗口已创建");

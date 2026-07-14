@@ -352,15 +352,23 @@ pub fn clamp_to_work_area(win: &WebviewWindow) {
     }
 }
 
-/// 右键菜单多屏感知定位：根据鼠标坐标找到正确显示器，DPI 缩放 + 工作区 clamp。
+/// 右键菜单多屏感知定位：直接用 Win32 `GetCursorPos` 拿光标**物理坐标**，
+/// 找到目标显示器，按其 DPI 把 CSS 尺寸换算成物理尺寸 + 工作区 clamp。
+///
+/// **不接受前端的 x/y**：`MouseEvent.screenX/Y` 在 WebView2 里是 **CSS 像素**，
+/// 高 DPI 屏（如 150%）直接当物理像素用会偏 1/3 位置；多屏跨 DPI 更乱。
+/// 光标物理坐标由 Win32 直接给，绕过所有浏览器坐标系猜谜。
 ///
 /// 返回值 `(x, y, width, height)` 均为**物理像素**，可直接传给 `PhysicalSize` / `PhysicalPosition`。
 ///
-/// - `screen_x/y`：鼠标屏幕坐标（物理像素，来自 `contextmenu.screenX/Y`）
-/// - `css_w/h`：菜单的 CSS 像素尺寸（前端估算值）
-pub fn clamp_context_menu(screen_x: i32, screen_y: i32, css_w: f64, css_h: f64) -> (i32, i32, u32, u32) {
+/// - `css_w/h`：菜单的 CSS 像素尺寸（前端估算值，会按目标屏 DPI 缩放）
+pub fn clamp_context_menu(css_w: f64, css_h: f64) -> (i32, i32, u32, u32) {
     unsafe {
-        let pt = POINT { x: screen_x, y: screen_y };
+        // 光标物理坐标（进程需 DPI-aware，Tauri 默认 PerMonitorV2 已满足）
+        let mut pt = POINT { x: 0, y: 0 };
+        let _ = GetCursorPos(&mut pt);
+        let screen_x = pt.x;
+        let screen_y = pt.y;
         let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
 
         // 获取目标显示器工作区（排除任务栏）
@@ -391,12 +399,24 @@ pub fn clamp_context_menu(screen_x: i32, screen_y: i32, css_w: f64, css_h: f64) 
         let phys_w = (css_w * scale).round() as i32;
         let phys_h = (css_h * scale).round() as i32;
 
-        // 保留 4px 边距，clamp 到工作区内
+        // 智能翻转：右/下空间不够时，菜单显示在光标左/上方（老 0.5.3+ 前端行为）
+        //   贴边 clamp 会让菜单紧贴屏幕右/下边缘，视觉上像是"卡住"了。
         let margin = 4;
+        let prefer_x = if screen_x + phys_w + margin > work.right {
+            (screen_x - phys_w).max(work.left + margin)
+        } else {
+            screen_x
+        };
+        let prefer_y = if screen_y + phys_h + margin > work.bottom {
+            (screen_y - phys_h).max(work.top + margin)
+        } else {
+            screen_y
+        };
+        // 再做一次工作区 clamp（防单块屏幕比菜单还小的极端情况）
         let max_x = work.right - phys_w - margin;
         let max_y = work.bottom - phys_h - margin;
-        let x = screen_x.clamp(work.left + margin, max_x.max(work.left + margin));
-        let y = screen_y.clamp(work.top + margin, max_y.max(work.top + margin));
+        let x = prefer_x.clamp(work.left + margin, max_x.max(work.left + margin));
+        let y = prefer_y.clamp(work.top + margin, max_y.max(work.top + margin));
 
         tracing::trace!(
             screen_x, screen_y, css_w, css_h,
@@ -515,9 +535,18 @@ pub fn show_screenshot_overlay(
 
 /// 按物理像素强制定位窗口，覆盖 Tauri 逻辑像素接口的 DPI 缩放。
 ///
-/// 截图 overlay 必须精确对齐虚拟屏幕物理像素——否则前端 canvas.width（物理像素）
-/// 与窗口 CSS 尺寸的比值会与 DPR 失配，选区坐标全歪。
-fn place_at_physical(hwnd: HWND, x: i32, y: i32, w: u32, h: u32) {
+/// **为何要走 Win32 而非 Tauri 的 `set_size` + `set_position`**：
+/// 当窗口跨过一块 DPI 不同的显示器时（如从主屏 150% 移到副屏 100%），
+/// `set_position` 会触发 `WM_DPICHANGED`，tao 的窗口过程据此**按 DPI 比例
+/// 重设窗口尺寸但不动位置**——与刚排队的 `set_size` 竞态，导致最终尺寸/位置
+/// 不可预测（Tauri issue #3610 / #10263，无边框窗口尤甚）。`SetWindowPos` 一次
+/// 原子地设定位置+尺寸，绕开 tao 的 WM_DPICHANGED 重设尺寸逻辑，所见即所得。
+///
+/// 用途：
+/// - 截图 overlay 必须精确对齐虚拟屏幕物理像素（canvas.width 与窗口 CSS 尺寸比
+///   值需与 DPR 匹配，否则选区坐标全歪）
+/// - 右键菜单复用路径（窗口在主屏预热，需移到任意屏的物理坐标）
+pub fn place_at_physical(hwnd: HWND, x: i32, y: i32, w: u32, h: u32) {
     unsafe {
         let _ = SetWindowPos(
             hwnd,
@@ -726,36 +755,115 @@ pub fn preheat_secondary_windows(app: AppHandle) {
     });
 }
 
+/// 打开设置窗口：**每次都定位到光标所在屏的工作区中心**。
+///
+/// - 已存在：从 iconic 恢复 → 读当前 outer_size 保留用户 resize 过的尺寸 →
+///   `place_at_physical` 一次原子挪到光标屏中心（避开 WM_DPICHANGED 抢跑）。
+/// - 首次创建：build 完立刻按目标屏 DPI 把 960×680 CSS → 物理尺寸，挪过去。
+///
+/// 语义：用户在哪块屏发起动作（右键 → 打开设置 / 托盘 → 设置），设置就出现在
+/// 那块屏。跟 Universal Action Layer 的直觉一致，也省了跨屏找窗口的动作。
 pub fn open_settings(app: &AppHandle) {
+    // 光标所在屏工作区 + DPI（一次读，两条路径复用）
+    let (work, target_dpi) = unsafe {
+        let mut pt = POINT { x: 0, y: 0 };
+        let _ = GetCursorPos(&mut pt);
+        let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        let work = if GetMonitorInfoW(hmon, &mut mi).as_bool() {
+            mi.rcWork
+        } else {
+            windows::Win32::Foundation::RECT { left: 0, top: 0, right: 1920, bottom: 1080 }
+        };
+        let mut dpi_x: u32 = 96;
+        let mut dpi_y: u32 = 96;
+        let _ = GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
+        (work, dpi_x.max(96))
+    };
+    let work_w = work.right - work.left;
+    let work_h = work.bottom - work.top;
+
     if let Some(w) = app.get_webview_window("settings") {
-        // 如果窗口已最小化，先恢复
-        if let Ok(hwnd) = w.hwnd() {
-            let hwnd = HWND(hwnd.0 as _);
+        // 从最小化恢复
+        let hwnd_raw = w.hwnd().ok();
+        if let Some(h) = hwnd_raw {
+            let hwnd = HWND(h.0 as _);
             unsafe {
                 if IsIconic(hwnd).as_bool() {
                     let _ = ShowWindow(hwnd, SW_RESTORE);
                 }
             }
         }
-        let _ = w.show();
+        // 保留 **CSS 尺寸**（不是物理）——跨 DPI 屏保留物理尺寸会越挪越离谱：
+        //   主屏 150% 首次 1440 phys(=960 CSS)
+        //   → 挪副屏 100%,tao 处理 WM_DPICHANGED 按 100/150 缩到 960 phys
+        //   → 回主屏读 outer_size=960 phys,若直接用作物理 → 主屏 150% 视觉 640 CSS,变小 1/3
+        // 用当前 scale_factor 折算 CSS,再按目标屏 DPI 换回物理。scale_factor 和 outer_size
+        // 都反映"窗口当前所在屏",配对读一致快照,比值稳定 = CSS 尺寸恒定。
+        let cur_scale = w.scale_factor().unwrap_or(1.0).max(1.0);
+        let cur_phys = w
+            .outer_size()
+            .unwrap_or_else(|_| tauri::PhysicalSize::new(
+                (960.0 * cur_scale).round() as u32,
+                (680.0 * cur_scale).round() as u32,
+            ));
+        let css_w = (cur_phys.width as f64) / cur_scale;
+        let css_h = (cur_phys.height as f64) / cur_scale;
+        let target_scale = (target_dpi as f64) / 96.0;
+        let phys_w = (css_w * target_scale).round() as i32;
+        let phys_h = (css_h * target_scale).round() as i32;
+        // clamp 到目标屏工作区
+        let win_w = phys_w.min(work_w).max(1);
+        let win_h = phys_h.min(work_h).max(1);
+        let fx = work.left + (work_w - win_w) / 2;
+        let fy = work.top + (work_h - win_h) / 2;
+        if let Some(h) = hwnd_raw {
+            let hwnd = HWND(h.0 as _);
+            place_at_physical(hwnd, fx, fy, win_w as u32, win_h as u32);
+            let _ = w.show();
+            // 跨 DPI 屏时 WM_DPICHANGED 会抢跑改尺寸,补一次覆盖回来
+            place_at_physical(hwnd, fx, fy, win_w as u32, win_h as u32);
+        } else {
+            let _ = w.set_position(PhysicalPosition::new(fx, fy));
+            let _ = w.show();
+        }
         let _ = w.set_focus();
         return;
     }
     use tauri::{WebviewUrl, WebviewWindowBuilder};
+    // 首次创建：先 hidden build（避免主屏闪一下），然后按目标屏 DPI 把默认
+    // CSS 尺寸(960×680) 折算成物理尺寸，place_at_physical 挪到光标屏中心。
+    // 位置给 (0,0) 占位，builder 的 .center() 只会居中主屏——用不上。
     let win = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
         .title("Blink Settings")
         .inner_size(960.0, 680.0)
         .min_inner_size(760.0, 520.0)
-        .center()
+        .position(0.0, 0.0)
+        .visible(false)
         .decorations(false)
         .transparent(true)
         .shadow(false)
         .background_color(tauri::window::Color(0, 0, 0, 0))
         .build()
         .expect("创建设置窗口失败");
-    if let Ok(hwnd) = win.hwnd() {
-        let hwnd = windows::Win32::Foundation::HWND(hwnd.0 as _);
+    let scale = (target_dpi as f64) / 96.0;
+    let phys_w = (960.0 * scale).round() as i32;
+    let phys_h = (680.0 * scale).round() as i32;
+    let win_w = phys_w.min(work_w);
+    let win_h = phys_h.min(work_h);
+    let fx = work.left + (work_w - win_w) / 2;
+    let fy = work.top + (work_h - win_h) / 2;
+    if let Ok(h) = win.hwnd() {
+        let hwnd = HWND(h.0 as _);
         strip_window_border(hwnd);
         enable_rounded_corners(hwnd);
+        place_at_physical(hwnd, fx, fy, win_w as u32, win_h as u32);
+        let _ = win.show();
+        // 补一次：show 触发 WM_DPICHANGED 时 tao 会改尺寸，覆盖回来
+        place_at_physical(hwnd, fx, fy, win_w as u32, win_h as u32);
+        let _ = win.set_focus();
+    } else {
+        let _ = win.show();
     }
 }

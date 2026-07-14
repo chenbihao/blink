@@ -15,7 +15,7 @@
 
 | 维度 | 说明 |
 |---|---|
-| **唤起方式** | 右 Alt 单击(tap)唤起,按住不松开进入 Chord 模式直接触发动作 |
+| **唤起方式** | Alt+Space(tap)唤起,按住不松开进入 Chord 模式直接触发动作 |
 | **核心体验** | 唤起→输入→执行,全程&lt;1秒,比鼠标/菜单更快 |
 | **P0 至上** | 如果用户按快捷键后不能立即输入,其他所有功能都没有意义 |
 | **演进方向** | 被动搜索 → Context 感知主动推荐 → AI 辅助操作 |
@@ -59,7 +59,7 @@
 | **0.7** | [phases/0.7-plugin-ecosystem-local-search.md](./phases/0.7-plugin-ecosystem-local-search.md) | 插件生态(翻译/剪贴板历史)+ 本地搜索 Fallback + 性能统计 | ✅ 完成 |
 | **0.8** | [phases/0.8-context-interaction.md](./phases/0.8-context-interaction.md) | 感知与操作层 —— UIA 划词 + 内置动作抽象 + Autosuggestion + 翻译 Context 路由 + 四域架构 + Chord 交互 + Alt+A 截图（0.8.6 架构固化大部分已落地，两项遗留推 0.9 前） | ✅ 归档收尾 |
 | **0.9** | [phases/0.9-ai-layer.md](./phases/0.9-ai-layer.md) | Agent 地基 —— rig-core 全 buildin 直编 + 统一 tool 架构 + Provider 多档 + 主窗口文本闭环 + 插件 tool-call + 供应商配置 UI + 前端架构重整 + Capability 能力协议层 | ✅ 完成 |
-| **0.10** | [phases/0.10-voice-agent.md](./phases/0.10-voice-agent.md) | 语音指令闭环 —— STT + 双 chord + 语音找文件北极星 + Agent 窗口 | 📋 规划中 |
+| **0.10** | [phases/0.10-voice-agent.md](./phases/0.10-voice-agent.md) | 语音输入 —— STT + 语音打字(G1 主窗口输入 / G2 输入法上屏)+ Agent 窗口(后置) | 📋 规划中 |
 | **0.11** | [phases/0.11-local-ecosystem.md](./phases/0.11-local-ecosystem.md) | 本地化与生态 —— 本地模型 / skill 化 / MCP 双向 / RAG 记忆 | 📋 规划中 |
 
 ### 2.3 其他参考
@@ -93,9 +93,10 @@
 | **0.9.5** | 前端架构重整（Open Props + CSS 七层 + JS 拆分）+ AI 调用体验优化 | ✅ 完成 |
 | **0.9.6** | 收尾：README 中英分拆 + AI 配置/调用体验打磨 + 命令与服务微调 | ✅ 完成 |
 | **0.9.7** | Capability 能力协议层（原子能力 + 统一声明/返回 + inventory 注册 + 截图/剪贴板拆解 + 接 AI tool 池） | ✅ 完成 |
-| **0.10.0** | STT 接入（云端优先）+ 双 chord 语音入口 + 输入法模式 | 后置 |
-| **0.10.1** | 语音找文件北极星场景 + 指令闭环 | 后置 |
-| **0.10.2** | Agent 对话窗口 + 流式 MD + 确认反馈 | 后置 |
+| **0.10.0** | STT 接入（云端 rig 跑通）+ 语音 chord + G1 主窗口语音输入 | 后置 |
+| **0.10.1** | G2 文本注入通道（从零搭）+ 语音输入法上屏 | 后置 |
+| **0.10.2** | 本地 STT（sherpa-onnx + FunASR，按需下载） | 后置 |
+| **0.10.3** | Agent 对话窗口 + 流式 MD + 确认反馈（可选/后置） | 后置 |
 | **0.11.x** | 本地模型 / skill 化 / MCP 双向 / RAG 记忆（按需） | 后置 |
 
 ---
@@ -106,7 +107,7 @@
 
 | 你想了解 | 看这里 |
 |---|---|
-| 热键为什么是右 Alt tap? Chord 模式怎么工作? | [product-interaction.md §2](./product-interaction.md) |
+| 热键为什么是 Alt+Space? Chord 模式怎么工作? | [product-interaction.md §2](./product-interaction.md) |
 | 插件系统怎么设计的? 意图路由怎么实现? | [product-platform.md §4-5](./product-platform.md) |
 | 四域架构（Awareness/Suggestion/Routing/Execution）铁则? | [product-platform.md §5.0](./product-platform.md) |
 | 0.8.6 架构骨架（Action trait / SuggestionProducer / ConfigStore）? | [product-platform.md §7](./product-platform.md) + [phases/0.8 §八](./phases/0.8-context-interaction.md) |
@@ -114,6 +115,6 @@
 | 最小操作路径准则 / 中文不斜体 / 键盘提示统一 | [product-principles.md §13-14](./product-principles.md) |
 | 0.8 感知与操作层在做什么? | [phases/0.8-context-interaction.md](./phases/0.8-context-interaction.md) |
 | 0.9 Agent 地基 + Capability 能力协议层怎么落? | [phases/0.9-ai-layer.md](./phases/0.9-ai-layer.md) |
-| 0.10 语音指令闭环? | [phases/0.10-voice-agent.md](./phases/0.10-voice-agent.md) |
+| 0.10 语音输入(STT + 语音打字)? | [phases/0.10-voice-agent.md](./phases/0.10-voice-agent.md) |
 | 0.11 本地化与生态扩展? | [phases/0.11-local-ecosystem.md](./phases/0.11-local-ecosystem.md) |
 | 开发规范、模块拆分、Tauri Commands | [CLAUDE.md](../../CLAUDE.md) |
