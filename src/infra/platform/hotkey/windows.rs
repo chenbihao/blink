@@ -10,6 +10,7 @@
 //!   主键 up 时若未 aborted、时长达标 → 触发 Tap(修饰键只在 arm 时现查,keyup 不复查,
 //!   避免快速松手时修饰键略早释放导致漏触发)。
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
@@ -17,6 +18,15 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use super::{HotkeyEvent, get_current_config, get_tap_threshold, send_event};
+
+/// 全局标志：语音录音中。hotkey hook 读它判断 ESC 是否应触发取消。
+/// VoiceService 在 start/cancel/stop 时写它。
+static VOICE_RECORDING: AtomicBool = AtomicBool::new(false);
+
+/// 设置语音录音标志（供 VoiceService 调用）。
+pub fn set_voice_recording(active: bool) {
+    VOICE_RECORDING.store(active, Ordering::SeqCst);
+}
 
 // ── 修饰键物理态 bitmask ────────────────────────────────────────────────────────
 // 8 个具体修饰键各占一位。用于「现查物理态 → 与配置精确匹配」,替代旧的累积镜像。
@@ -29,7 +39,7 @@ const MOD_RALT: u16 = 1 << 5;
 const MOD_LMETA: u16 = 1 << 6;
 const MOD_RMETA: u16 = 1 << 7;
 
-/// hook 线程私有状态(触发判定)。仅 3 个字段,生命周期都限于一次主键 down→up。
+/// hook 线程私有状态(触发判定)。生命周期都限于一次主键 down→up。
 struct State {
     /// 主键首次 down 时刻(tap/hold 时长判定)。
     down_since: Option<Instant>,
@@ -39,6 +49,11 @@ struct State {
     armed_key: Option<String>,
     /// armed 后是否出现过其他键 down(出现 → 判 hold,不触发)。
     aborted: bool,
+    /// Hold timer 是否已 fire(超过 tap 阈值)。
+    /// false = 还在 tap 窗口内;true = Hold 事件已发出,keyup 时发 HoldRelease。
+    hold_fired: bool,
+    /// SetTimer 返回的 timer ID(用于 KillTimer)。None = 无活动 timer。
+    hold_timer_id: Option<usize>,
 }
 
 thread_local! {
@@ -46,6 +61,29 @@ thread_local! {
         down_since: None,
         armed_key: None,
         aborted: false,
+        hold_fired: false,
+        hold_timer_id: None,
+    });
+}
+
+/// Hold timer 回调:超过 tap 阈值时被 hook 线程消息循环 dispatch。
+/// 设 hold_fired=true 并发送 Hold 事件(语音录音开始)。
+unsafe extern "system" fn hold_timer_callback(
+    _hwnd: windows::Win32::Foundation::HWND,
+    _msg: u32,
+    id_event: usize,
+    _time: u32,
+) {
+    // One-shot: 立即 KillTimer 防止重复 fire
+    let _ = unsafe { KillTimer(None, id_event) };
+    STATE.with(|cell| {
+        let mut s = cell.borrow_mut();
+        s.hold_timer_id = None;
+        // 只有仍在 armed 且未 fire 过才发 Hold
+        if s.armed_key.is_some() && !s.hold_fired && !s.aborted {
+            s.hold_fired = true;
+            send_event(HotkeyEvent::Hold(Instant::now()));
+        }
     });
 }
 
@@ -271,6 +309,15 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
             return unsafe { CallNextHookEx(None, code, wparam, lparam) };
         }
 
+        // hold 录音中吞掉 Alt+Space 的 keydown：防止 Windows 反复弹出系统菜单（"噔噔噔"声）。
+        // 仅在 hold_fired=true（录音已启动）时吞 keydown，keyup 不吞（否则 HoldRelease 收不到）。
+        if is_down && VOICE_RECORDING.load(Ordering::SeqCst)
+            && (vk == VK_SPACE.0 as u32 || vk == VK_MENU.0 as u32 || vk == VK_LMENU.0 as u32 || vk == VK_RMENU.0 as u32)
+            && unsafe { GetAsyncKeyState(VK_MENU.0 as i32) } < 0
+        {
+            return LRESULT(1);
+        }
+
         let config = get_current_config();
         let tap_threshold = get_tap_threshold();
 
@@ -279,6 +326,12 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
             let key = vk_to_key(vk);
 
             if is_down {
+                // ESC 录音取消：录音中按 ESC → 发 VoiceCancel
+                if vk == VK_ESCAPE.0 as u32 && VOICE_RECORDING.load(Ordering::SeqCst) {
+                    send_event(HotkeyEvent::VoiceCancel(Instant::now()));
+                    return; // 不 set aborted，让 ESC 自然放行
+                }
+
                 let Some(key) = key else {
                     // 未映射键 down:armed 期间出现 → 判 hold(用户按了别的键)。
                     if s.armed_key.is_some() {
@@ -292,7 +345,11 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
                         // 同一主键重复 down = autorepeat,忽略(不重置 down_since)。
                         return;
                     }
-                    // armed 后按了别的键 → hold。
+                    // 修饰键 auto-repeat 不算 abort（Alt/Ctrl/Shift 按住会自动重复）
+                    if is_modifier_key(vk) {
+                        return;
+                    }
+                    // armed 后按了别的非修饰键 → hold。
                     s.aborted = true;
                     return;
                 }
@@ -302,6 +359,12 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
                     s.armed_key = Some(key);
                     s.down_since = Some(Instant::now());
                     s.aborted = false;
+                    s.hold_fired = false;
+                    // 启动 hold timer:超阈值后发 Hold 事件(语音录音开始)
+                    let timer_id = unsafe {
+                        SetTimer(None, 1, tap_threshold as u32, Some(hold_timer_callback))
+                    };
+                    s.hold_timer_id = Some(timer_id);
                 }
             } else if is_up {
                 let Some(key) = key else { return };
@@ -309,22 +372,34 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
                 if s.armed_key.as_deref() != Some(key.as_str()) {
                     return;
                 }
+                // 清理 hold timer(tap 路径下 timer 可能还没 fire)
+                if let Some(tid) = s.hold_timer_id.take() {
+                    let _ = unsafe { KillTimer(None, tid) };
+                }
                 let since = s.down_since.take();
                 let aborted = s.aborted;
+                let hold_fired = s.hold_fired;
                 s.armed_key = None;
                 s.aborted = false;
+                s.hold_fired = false;
 
                 if aborted {
                     return;
                 }
                 let Some(since) = since else { return };
-                if since.elapsed() > Duration::from_millis(tap_threshold) {
-                    return; // hold,非 tap
+
+                // 判断是 Hold 释放还是 Tap:
+                // - hold_fired=true → Hold 事件已发(超过阈值)→ 发 HoldRelease
+                // - hold_fired=false → 在 tap 窗口内松开 → 发 Tap(也兼容 elapsed 判断,
+                //   双保险:timer 未 fire 但已超阈值,仍判 hold)
+                if hold_fired || since.elapsed() > Duration::from_millis(tap_threshold) {
+                    // Hold 释放(语音录音停止→STT→注入)
+                    send_event(HotkeyEvent::HoldRelease(Instant::now()));
+                } else {
+                    // Tap 触发。无需在此复查修饰键:arm 时已现查物理态精确匹配,
+                    // 按下期间任何异键 down 都会 aborted。
+                    send_event(HotkeyEvent::Tap(Instant::now()));
                 }
-                // 触发。无需在此复查修饰键:arm 时已现查物理态精确匹配(根治了残留误触发),
-                // 按下期间任何异键 down 都会 aborted。keyup 时若再查修饰键物理态,会因「快速
-                // 按组合键时 Alt 略早于主键松开」导致漏触发,故不复查。
-                send_event(HotkeyEvent::Tap(Instant::now()));
             }
         });
     }

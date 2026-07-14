@@ -82,7 +82,7 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
   - `ai/` — `AIProvider` trait + `AIProviderRegistry` + `RigFactory` + `gating`（四筛子）+ `message`（ChatMessage / ToolCall）+ `rig_provider`
   - `capability/` — `Capability` trait + `InvokeContext` + `CapabilitySchema` + `CapabilityResult` + `CapabilityError` + `CapabilityRegistry`（inventory 自动注册）+ `builtins/`（capture_screen / crop_image / read_clipboard / write_clipboard / search_files）
 - `src/infra/` — 基础设施层：
-  - `platform/` — `mod.rs` 抽象 + `windows.rs`：hotkey / window / selection / clipboard / context / locale / screenshot / secret（Credential Manager）
+  - `platform/` — `mod.rs` 抽象 + `windows.rs`：hotkey / window / selection / clipboard / context / locale / screenshot / secret（Credential Manager）/ python（uv 自管理 Python 环境）
   - `data/` — SQLite：history / clipboard / config KV（`ConfigStore<T>` 6 分片）
   - `utils/` — logging / perf（SLO）/ text（拼音）
 
@@ -100,15 +100,16 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 
 ## 6. 编码约定
 
-| 规则                     | 说明                                                                          |
-|------------------------|-----------------------------------------------------------------------------|
-| **配置化优先**              | 可选行为（默认值用户可能想改的）做成配置项 + 合理默认；纯内部参数不暴露。                                      |
-| **统一 tracing 日志**      | 禁止散落 `println!/eprintln!`；error=异常、warn=潜在问题、info=状态变化、debug=主流程、trace=诊断细节 |
-| **结构化日志**              | `tracing::debug!(%query, "搜索")` 而非字符串拼接；错误必带上下文 `(%path, %e)`               |
-| **改完自审**               | 每次完成改动后自己 review（diff / 编译 / 副作用）再报告                                        |
-| **平台抽象预留**             | 平台相关逻辑走 `mod.rs` 接口 + `windows.rs` 实现                                       |
-| **不过度工程**              | 0.x 阶段不对外发布，产品化基础设施（manifest 升级/权限强制/插件市场）1.0 前不做                           |
-| **架构要有前瞻性**           | 精心设计持续演进，不过早腐败，不随便堆砌坏味道与技术债，持续收敛，Clean Architecture                         |
+| 规则                | 说明                                                                          |
+|-------------------|-----------------------------------------------------------------------------|
+| **配置化优先**         | 可选行为（默认值用户可能想改的）做成配置项 + 合理默认；纯内部参数不暴露。                                      |
+| **关键节点打印日志**     | 关键的节点需要打日志，量要适中且等级合适，开发流程也可以打一些临时日志用来排查问题，但在收尾时要注意清理                        |
+| **统一 tracing 日志** | 禁止散落 `println!/eprintln!`；error=异常、warn=潜在问题、info=状态变化、debug=主流程、trace=诊断细节 |
+| **结构化日志**         | `tracing::debug!(%query, "搜索")` 而非字符串拼接；错误必带上下文 `(%path, %e)`               |
+| **改完自审**          | 每次完成改动后自己 review（diff / 编译 / 副作用）再报告                                        |
+| **平台抽象预留**        | 平台相关逻辑走 `mod.rs` 接口 + `windows.rs` 实现                                       |
+| **不过度工程**         | 0.x 阶段不对外发布，产品化基础设施（manifest 升级/权限强制/插件市场）1.0 前不做                           |
+| **架构要有前瞻性**       | 精心设计持续演进，不过早腐败，不随便堆砌坏味道与技术债，持续收敛，Clean Architecture                         |
 
 ---
 
@@ -128,6 +129,10 @@ SQLite `%APPDATA%\blink\blink.db`：
 - `config(key, value, updated_at)` — 配置 KV（`AppConfig` 6 分片门面 + `AIConfig` 第 7 分片 + `engine:{id}` / `plugin:{id}`）；前端泛型 `set_config` 命令
 - `clipboard(id, text, kind, hit_count, last_used_at)` — 剪贴板历史
 - `perf(metric, value, at)` — 性能统计
+
+文件系统 `%APPDATA%\blink\`：
+- `python\uv\uv.exe` — uv 二进制（本地安装，Blink 自管理）
+- `python\venv\` — Python 3.12 虚拟环境（uv 创建，funasr 等包安装于此）
 
 ---
 

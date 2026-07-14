@@ -18,6 +18,17 @@
                .ghost-chord 单行小字提示 Alt+A/Q/C（仅 chord-visible + 无 ghost-suggest 时显示）。 -->
           <div id="ghost-overlay" aria-hidden="true"><span class="ghost-typed"></span><span class="ghost-suggest"></span><span class="ghost-chord"></span></div>
           <input id="query" type="text" autocomplete="off" spellcheck="false" />
+          <!-- 0.10 G1 录音指示器：录音中显示音量波动条 + "语音输入中" -->
+          <div id="voice-indicator" class="voice-indicator hidden">
+            <div class="voice-wave">
+              <div class="vw-bar"></div>
+              <div class="vw-bar"></div>
+              <div class="vw-bar"></div>
+              <div class="vw-bar"></div>
+              <div class="vw-bar"></div>
+            </div>
+            <span class="voice-label">语音输入中</span>
+          </div>
         </div>
       </div>
       <ul id="results"></ul>

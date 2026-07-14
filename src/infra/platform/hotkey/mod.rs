@@ -33,6 +33,12 @@ use crate::app::config::HotkeyConfig;
 pub enum HotkeyEvent {
     /// 快捷键触发（tap），附带触发时刻用于延迟测量。
     Tap(Instant),
+    /// 长按开始(hold)——按住超过 tap 阈值时触发,语音录音开始。
+    Hold(Instant),
+    /// 长按结束(hold release)——松开已触发 Hold 的按键,语音录音停止→STT→注入。
+    HoldRelease(Instant),
+    /// 语音取消(ESC)——录音中按 ESC,取消录音不识别不注入。
+    VoiceCancel(Instant),
 }
 
 /// 热键运行时状态(配置 + tap 阈值 + 事件发送端)。
@@ -55,7 +61,7 @@ static RUNTIME: OnceLock<HotkeyRuntime> = OnceLock::new();
 mod windows;
 
 #[cfg(target_os = "windows")]
-pub use windows::{start_hook_thread, is_alt_down};
+pub use windows::{start_hook_thread, is_alt_down, set_voice_recording};
 
 // 快捷键录制
 mod recorder;

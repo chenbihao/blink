@@ -291,6 +291,10 @@ export const en = {
   // ── AI panel (0.9.1 Phase 6) ──
   "tab.ai": "AI",
   "panel.ai": "AI Intent Routing",
+
+  // ── Voice panel (0.10) ──
+  "tab.voice": "Voice Input",
+  "panel.voice": "Voice Input",
   "ai.lede": "When typing hits no rule, AI tries to understand and suggest actions. Keys are stored in Windows Credential Manager; SQLite only keeps a reference.",
   "ai.enabled.label": "Enable AI intent routing",
   "ai.enabled.hint": "Off by default even after configuring a provider — you must explicitly opt in.",

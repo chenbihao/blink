@@ -8,3 +8,4 @@ pub mod execution;
 pub mod intent;
 pub mod plugin;
 pub mod search;
+pub mod stt; // 0.10：语音转文字（STT engine trait + mock + 模型注册表）

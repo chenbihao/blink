@@ -177,3 +177,43 @@ body.chord-visible #ghost-overlay:has(.ghost-suggest:empty) .ghost-chord:not(:em
 #query[data-ghost-active]::placeholder {
   color: transparent;
 }
+
+/* ── 0.10 G1 录音指示器 ──────────────────────────────────────────── */
+
+.voice-indicator {
+  position: absolute;
+  right: var(--space-md);
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.voice-indicator.hidden {
+  display: none;
+}
+
+.voice-indicator .voice-wave {
+  display: flex;
+  gap: 2px;
+  height: 20px;
+  align-items: center;
+}
+
+.voice-indicator .vw-bar {
+  width: 3px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--green);
+  transition: height 0.08s ease-out;
+  min-height: 4px;
+}
+
+.voice-indicator .voice-label {
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+  white-space: nowrap;
+}

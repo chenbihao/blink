@@ -118,17 +118,20 @@ fn on_selection() {
         return;
     }
     // 隐私门控：前台是敏感应用（如密码管理器）时直接跳过抓取，源头拦截，缓存永远不落敏感文本。
+    // 仅当配置了敏感应用时才查进程名——省两次 syscall（OpenProcess + QueryFullProcessImageNameW）。
     // 与 context::collect 的敏感应用检查语义一致（共用 ContextConfig.sensitive_apps）。
-    if let Some(proc_name) = super::windows::process_name_of_window(fg_raw)
-        && super::is_process_sensitive(&proc_name)
-    {
-        tracing::debug!(app = %proc_name, "划词感知：前台为敏感应用，跳过抓取");
-        return;
+    if super::has_sensitive_apps() {
+        if let Some(proc_name) = super::windows::process_name_of_window(fg_raw)
+            && super::is_process_sensitive(&proc_name)
+        {
+            tracing::debug!(app = %proc_name, "划词感知：前台为敏感应用，跳过抓取");
+            return;
+        }
     }
     std::thread::spawn(move || match super::get_selected_text(fg_raw) {
         Some(text) => {
             let len = text.chars().count();
-            tracing::debug!(len, "选词抓取成功（黄金时机 UIA）");
+            tracing::debug!(len, "选词抓取成功");
             // 选区内容属用户隐私（同剪贴板），仅 trace 级谨慎记录前 100 字符。
             tracing::trace!(
                 selected_text = %text.chars().take(100).collect::<String>(),
@@ -136,9 +139,7 @@ fn on_selection() {
             );
             super::set_last_selection(text);
         }
-        None => {
-            tracing::trace!("选词抓取：无选区或应用不支持 UIA TextPattern");
-        }
+        None => {}
     });
 }
 

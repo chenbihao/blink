@@ -63,6 +63,42 @@ export function init() {
     queryEl.dispatchEvent(new Event("input", { bubbles: true }));
   });
 
+  // 0.10 语音输入:G1 流式 partial 文字实时更新 #query
+  // (G2 的 partial 由 mini overlay 窗口处理,主窗口不可见时不接收)
+  listen("blink://voice-partial", (event) => {
+    const { text, target } = event.payload ?? {};
+    if (target === "g1" && text) {
+      queryEl.value = text;
+      queryEl.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  });
+
+  // 0.10 G1 录音音量波动条
+  const voiceIndicator = document.getElementById("voice-indicator");
+  const vwBars = voiceIndicator?.querySelectorAll(".vw-bar") ?? [];
+  listen("blink://voice-level", (event) => {
+    const { level, target } = event.payload ?? {};
+    if (target !== "g1") return;
+    if (voiceIndicator?.classList.contains("hidden")) {
+      voiceIndicator?.classList.remove("hidden");
+    }
+    const lv = Math.max(0, Math.min(1, level || 0));
+    vwBars.forEach((bar, i) => {
+      const factor = [0.6, 0.85, 1.0, 0.85, 0.6][i] || 0.7;
+      const jitter = (Math.sin(Date.now() / 80 + i * 1.3) + 1) * 0.15;
+      const h = Math.max(4, (lv * factor + jitter * lv) * 18);
+      bar.style.height = h + "px";
+    });
+  });
+
+  // 0.10 录音结束 → 隐藏 G1 指示器
+  listen("blink://voice-recording-end", () => {
+    if (voiceIndicator) {
+      voiceIndicator.classList.add("hidden");
+      vwBars.forEach((bar) => (bar.style.height = "4px"));
+    }
+  });
+
   // 0.9.2.1：剪贴板变化 → AwarenessSnapshot 已局部刷新 → 用当前 query 重跑
   // 一次让 Context Ghost / AI 四筛子读到新剪贴板。retrigger 内部会区分空/非空
   // query 分别走 fetchContextSuggestions / onInput，Ghost 通道天然覆盖。

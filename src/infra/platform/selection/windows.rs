@@ -1,20 +1,30 @@
 //! Windows 平台选区抓取：UIA TextPattern。
 //!
-//! API 路径：
-//!   CUIAutomation → ElementFromHandle(顶层 HWND) → FindAll(子树, TextPattern 可用)
-//!   → 遍历所有 Edit/Document 候选 → GetCurrentPattern(TextPattern) → GetSelection()
-//!   → 取首个非空 TextRange → GetText()。
+//! API 路径（三段式，逐级降级）：
+//! 1. **GetFocusedElement（主）**：直取焦点元素 → TextPattern → GetSelection。O(1)。
+//! 2. **祖先链**：焦点元素无 TextPattern 时，`FindFirst(Ancestors)` 向上找。
+//!    场景：焦点是 `<span>` 子节点，TextPattern 在容器祖先上。O(深度)。
+//! 3. **焦点子树后代**：`FindFirst(Descendants)` 在焦点元素子树内向下找。
+//!    场景：焦点是 WebView2 宿主 Pane，TextPattern 在其子 Document 上。O(焦点子树)。
 //!
-//! 为何要 FindAll 而非 FindFirst：顶层窗口本身无 TextPattern，且子树里往往有多个
-//! 支持 TextPattern 的元素（如 Chrome 的地址栏 Edit + 网页正文 Document）。FindFirst
-//! 只取第一个，常命中无实际选区的元素（地址栏）。FindAll 遍历找「有非空选区」的那个才准。
-//! 该方法不依赖焦点时机——show 后窗口仍在、子树结构与选区内容不变，适合后台 spawn_blocking。
+//! **不再使用 FindAll(Subtree) 全树回退**。原因：
+//! - FindAll 遍历整个窗口 UIA 树（含标题栏/工具栏等无关区域），大子树应用 1-12 秒
+//! - 三段式已覆盖选区所有可能位置：焦点元素本身 / 其祖先 / 其后代
+//! - FindAll 耗时期间选区退化——实测候选虽在但选区已空，1-12 秒纯浪费
+//! - UIA COM 是同步阻塞调用，无 async API；加超时需额外线程且被放弃的线程仍在跑
 //!
-//! 局限：Scintilla(Notepad3)/Java Swing 等控件不暴露 UIA TextPattern，子树里一个候选都没有，
+//! 局限：Scintilla(Notepad3)/Java Swing 等控件不暴露 UIA TextPattern，三段式均不命中，
 //! 这类 UIA 无解，只能靠 Ctrl+C 兜底（文档 §1.1 初期不做，属「明确不支持」）。
 //!
 //! COM 公寓用 MTA（UIA 官方建议），与图标提取那条 STA 路径互不影响。
-//! 日志：失败用 debug（诊断哪些应用抓不到），成功路径细节用 trace（验证完毕后降噪）。
+//!
+//! 日志策略：
+//! - 命中（正常路径）：trace，含阶段名 + 耗时
+//! - 未命中（常见：用户在非文本区域拖拽/点击）：trace，含诊断字段
+//! - 耗时超阈值(>200ms)：升级为 warn（性能退化信号）
+//! - COM 初始化/创建失败：debug（罕见，诊断用）
+
+use std::time::Instant;
 
 use windows::core::Interface;
 use windows::Win32::Foundation::HWND;
@@ -23,8 +33,9 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationTextPattern, PropertyConditionFlags_None,
-    TreeScope_Subtree, UIA_IsTextPatternAvailablePropertyId, UIA_TextPatternId,
+    CUIAutomation, IUIAutomation, IUIAutomationCondition, IUIAutomationElement,
+    IUIAutomationTextPattern, PropertyConditionFlags_None, TreeScope_Ancestors,
+    TreeScope_Descendants, UIA_IsTextPatternAvailablePropertyId, UIA_TextPatternId,
 };
 
 // 用于 hwnd → 进程名 的 Win32 调用（隐私门控：见 listener.rs on_selection）
@@ -38,6 +49,9 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 
+/// 耗时告警阈值：超过此值打 warn。
+const SLOW_THRESHOLD_MS: u128 = 200;
+
 /// COM 初始化 RAII guard（MTA），与 icon.rs 的 ComGuard 同款范式。
 struct ComGuard {
     should_uninit: bool,
@@ -48,7 +62,6 @@ impl ComGuard {
         // 线程已是其他公寓（如 STA）时返回 RPC_E_CHANGED_MODE，此时不该由我们 uninit。
         let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
         if hr.is_ok() {
-            tracing::trace!("CoInit MTA OK");
             ComGuard { should_uninit: true }
         } else {
             // 不阻断：UIA 在已有公寓（如 STA）下也能工作，只是建议 MTA。
@@ -68,10 +81,9 @@ impl Drop for ComGuard {
 
 /// 抓取指定窗口当前的鼠标选区文本。
 ///
-/// 任意环节失败均返回 None，绝不抛错。每步 debug 级留痕便于诊断。
+/// 三段式策略（逐级降级），任意环节失败均返回 None，绝不抛错。
 pub(crate) fn get_selected_text(hwnd_raw: isize) -> Option<String> {
     if hwnd_raw == 0 {
-        tracing::debug!("选区抓取：hwnd 为 0，跳过");
         return None;
     }
     // 生命周期：_com 最先声明、最后析构，确保 COM 对象 Release 完成后再 CoUninitialize。
@@ -86,98 +98,140 @@ pub(crate) fn get_selected_text(hwnd_raw: isize) -> Option<String> {
             }
         };
 
-    let root =
-        match unsafe { automation.ElementFromHandle(HWND(hwnd_raw as *mut std::ffi::c_void)) } {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::debug!(error = %e, "选区抓取：ElementFromHandle 失败");
-                return None;
-            }
-        };
+    let start = Instant::now();
 
-    // 子树查找第一个支持 TextPattern 的元素（Edit/Document 控件）。
-    let cond = match unsafe {
-        automation.CreatePropertyConditionEx(
-            UIA_IsTextPatternAvailablePropertyId,
-            &VARIANT::from(true),
-            PropertyConditionFlags_None,
-        )
-    } {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::debug!(error = %e, "选区抓取：CreatePropertyConditionEx 失败");
-            return None;
-        }
-    };
-
-    // FindAll 收集所有支持 TextPattern 的元素，遍历找有非空选区的那个。
-    let candidates = match unsafe { root.FindAll(TreeScope_Subtree, &cond) } {
-        Ok(a) => a,
-        Err(_) => {
-            tracing::debug!("选区抓取：FindAll 失败");
-            return None;
-        }
-    };
-    let total = unsafe { candidates.Length() }.unwrap_or(0);
-    if total == 0 {
-        tracing::trace!("选区抓取：子树中无支持 TextPattern 的元素");
-        return None;
-    }
-    tracing::trace!(candidates = total, "选区抓取：FindAll 候选元素数");
-
-    // 性能保护：大子树（如浏览器）候选可能很多，限定最多扫描数，避免遍历过久。
-    const MAX_CANDIDATES: i32 = 64;
-    for i in 0..total.min(MAX_CANDIDATES) {
-        let elem = match unsafe { candidates.GetElement(i) } {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::trace!(error = %e, index = i, "选区抓取：候选 GetElement 失败，跳过");
-                continue;
-            }
-        };
-
-        let pattern: IUIAutomationTextPattern =
-            match unsafe { elem.GetCurrentPattern(UIA_TextPatternId) } {
-                Ok(p) => match p.cast::<IUIAutomationTextPattern>() {
-                    Ok(tp) => tp,
-                    Err(_) => continue,
-                },
-                Err(_) => continue,
-            };
-
-        let sels = match unsafe { pattern.GetSelection() } {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let c = unsafe { sels.Length() }.unwrap_or(0);
-        if c == 0 {
-            continue;
+    // ── Phase 1: GetFocusedElement — 焦点元素直取 ──────────────
+    // 选词瞬间焦点就在用户操作的控件上，选区也在它上面。O(1) 跨进程调用。
+    if let Ok(focused) = unsafe { automation.GetFocusedElement() } {
+        // 1a. 焦点元素自身是否支持 TextPattern 且有选区
+        if let Some(text) = extract_selection(&focused) {
+            log_hit(&start, "GetFocusedElement");
+            return Some(text);
         }
 
-        // 取该元素首个非空 TextRange
-        for j in 0..c {
-            let range = match unsafe { sels.GetElement(j) } {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            if let Ok(text) = unsafe { range.GetText(-1) } {
-                let text = text.to_string();
-                if !text.trim().is_empty() {
-                    let ct = unsafe { elem.CurrentControlType() }
-                        .map(|t| t.0)
-                        .unwrap_or(0);
-                    tracing::trace!(
-                        index = i,
-                        control_type = ct,
-                        "选区抓取：命中带选区的元素"
-                    );
+        let cond = create_text_pattern_condition(&automation);
+
+        // ── Phase 2: 祖先链查找 ─────────────────────────────────
+        // 焦点元素自身无 TextPattern 时，向上找最近的 TextPattern 祖先。
+        // 场景：焦点是 <span> 等子节点，TextPattern 在容器祖先上。O(深度)。
+        if let Some(ref cond) = cond {
+            if let Ok(ancestor) = unsafe { focused.FindFirst(TreeScope_Ancestors, cond) } {
+                if let Some(text) = extract_selection(&ancestor) {
+                    log_hit(&start, "祖先链");
                     return Some(text);
                 }
             }
         }
+
+        // ── Phase 3: 焦点子树后代查找 ───────────────────────────
+        // 祖先链也未命中时，在焦点元素的子树内向下找 TextPattern 元素。
+        // 场景：焦点是 WebView2 宿主 Pane（无 TextPattern），其子 Document 有 TextPattern。
+        // O(焦点子树)，远小于 FindAll(Subtree) 的 O(全窗口子树)。
+        let mut descendant_ct: i32 = 0; // 若找到后代，记录其控件类型供诊断
+        if let Some(ref cond) = cond {
+            if let Ok(descendant) = unsafe { focused.FindFirst(TreeScope_Descendants, cond) } {
+                descendant_ct = unsafe { descendant.CurrentControlType() }
+                    .map(|t| t.0)
+                    .unwrap_or(0);
+                if let Some(text) = extract_selection(&descendant) {
+                    log_hit(&start, "焦点子树后代");
+                    return Some(text);
+                }
+                // 后代有 TextPattern 但无选区——选区可能已退化
+            }
+        }
+
+        // ── 三段式均未命中：合并为单条日志 ─────────────────────
+        // 这是常见情况（用户在非文本区域拖拽/点击，或不支持 UIA 的应用），
+        // 用 trace 而非 debug 避免日志噪音。诊断信息合并到一条。
+        let elapsed_ms = start.elapsed().as_millis();
+        let (ct, class) = element_info(&focused);
+        if elapsed_ms > SLOW_THRESHOLD_MS {
+            tracing::warn!(
+                elapsed_ms,
+                control_type = ct,
+                class = %class,
+                descendant_control_type = descendant_ct,
+                "选区抓取：三段式未命中（耗时超阈值）"
+            );
+        } else {
+            tracing::trace!(
+                elapsed_ms,
+                control_type = ct,
+                class = %class,
+                descendant_control_type = descendant_ct,
+                "选区抓取：三段式未命中"
+            );
+        }
     }
 
-    tracing::debug!(candidates = total, "选区抓取：所有候选均无非空选区");
+    None
+}
+
+/// 命中时记录单条 trace（超阈值升级 warn）。
+fn log_hit(start: &Instant, phase: &str) {
+    let elapsed_ms = start.elapsed().as_millis();
+    if elapsed_ms > SLOW_THRESHOLD_MS {
+        tracing::warn!(phase, elapsed_ms, "选区抓取：命中但耗时超阈值");
+    } else {
+        tracing::trace!(phase, elapsed_ms, "选区抓取：命中");
+    }
+}
+
+/// 获取元素的控件类型和类名（诊断用）。
+fn element_info(elem: &IUIAutomationElement) -> (i32, String) {
+    let ct = unsafe { elem.CurrentControlType() }
+        .map(|t| t.0)
+        .unwrap_or(0);
+    let class = unsafe { elem.CurrentClassName() }
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    (ct, class)
+}
+
+/// 创建「IsTextPatternAvailable == true」属性条件。失败返回 None。
+fn create_text_pattern_condition(automation: &IUIAutomation) -> Option<IUIAutomationCondition> {
+    unsafe {
+        automation
+            .CreatePropertyConditionEx(
+                UIA_IsTextPatternAvailablePropertyId,
+                &VARIANT::from(true),
+                PropertyConditionFlags_None,
+            )
+            .ok()
+    }
+}
+
+/// 从单个 UIA 元素提取选区文本。
+///
+/// 元素必须支持 TextPattern 且当前有非空选区，否则返回 None。
+/// 三段式各阶段共用此函数。
+fn extract_selection(elem: &IUIAutomationElement) -> Option<String> {
+    let pattern: IUIAutomationTextPattern = unsafe { elem.GetCurrentPattern(UIA_TextPatternId) }
+        .ok()?
+        .cast::<IUIAutomationTextPattern>()
+        .ok()?;
+
+    let sels = unsafe { pattern.GetSelection() }.ok()?;
+    let count = unsafe { sels.Length() }.unwrap_or(0);
+    if count == 0 {
+        return None;
+    }
+
+    // 取该元素首个非空 TextRange
+    for j in 0..count {
+        let range = match unsafe { sels.GetElement(j) } {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        // -1 = 无限制；选区文本是用户选中的内容，长度可控。
+        if let Ok(text) = unsafe { range.GetText(-1) } {
+            let text = text.to_string();
+            if !text.trim().is_empty() {
+                return Some(text);
+            }
+        }
+    }
     None
 }
 

@@ -5,6 +5,9 @@
 use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 
+// SttEngine trait needed for LocalSttEngine::finalize() in diagnose_stt
+use crate::domain::stt::SttEngine;
+
 /// 打开文件选择对话框，返回选中的文件路径（取消时返回 null）。
 #[tauri::command]
 pub async fn open_file_dialog(
@@ -2166,6 +2169,874 @@ pub async fn set_config_section(
     }
 
     Ok(())
+}
+
+// ── STT / 语音命令（0.10）─────────────────────────────────────────────────────
+
+/// 读取 STT 配置。
+#[tauri::command]
+pub async fn get_stt_config(
+    app: tauri::AppHandle,
+) -> Result<crate::app::stt_config::SttConfig, String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    let config = crate::app::config::ConfigStore::get::<crate::app::stt_config::SttConfig>(&pool)
+        .await;
+    Ok(config)
+}
+
+/// 保存 STT 配置。
+#[tauri::command]
+pub async fn set_stt_config(
+    app: tauri::AppHandle,
+    config: crate::app::stt_config::SttConfig,
+) -> Result<(), String> {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::app::config::ConfigStore::set(&pool, &config)
+        .await
+        .map_err(|e| format!("保存 STT 配置失败: {e}"))?;
+    // 更新内存缓存（供 STT 引擎同步读取）
+    crate::app::stt_config::update_cache(&config);
+    // 广播配置变更
+    let _ = app.emit("blink://config-changed", serde_json::json!({ "key": "stt:config" }));
+    Ok(())
+}
+
+/// 列出可用 STT 模型。
+///
+/// 新方案中模型由 FunASR 自动管理（首次使用时自动从 ModelScope 下载）。
+/// 此接口返回模型元数据，供前端展示和选择。
+#[tauri::command]
+pub async fn list_stt_models() -> Result<Vec<serde_json::Value>, String> {
+    let models = crate::domain::stt::model_registry();
+    let config = crate::app::stt_config::get_stt_config();
+
+let result: Vec<serde_json::Value> = models
+.iter()
+.map(|m| {
+let is_selected = config.local_model_id.as_deref() == Some(m.id);
+serde_json::json!({
+"id": m.id,
+"display_name": m.display_name,
+"engine": m.engine,
+"streaming": m.streaming,
+"params": m.params,
+"size_mb": m.size_mb,
+"languages": m.languages,
+"device": m.device,
+                "description": m.description,
+                "funasr_model_id": m.funasr_model_id,
+                "is_selected": is_selected,
+                // 兼容前端: 新方案中模型由 FunASR 自动管理,"已就绪"状态取决于服务是否运行
+                "status": "managed_by_funasr",
+            })
+        })
+        .collect();
+    Ok(result)
+}
+
+/// 选择本地 STT 模型。
+///
+/// 新方案中模型由 FunASR 自动管理（首次启动 funasr-server 时自动下载）。
+/// 此命令仅设置配置中的 `local_model_id` 和 `funasr_model`，
+/// 实际模型下载在 funasr-server 首次启动时由 FunASR 自动完成。
+#[tauri::command]
+pub async fn download_stt_model(
+    _app: tauri::AppHandle,
+    model_id: String,
+) -> Result<(), String> {
+    let model = crate::domain::stt::find_model(&model_id)
+        .ok_or_else(|| format!("未知模型: {model_id}"))?;
+
+    tracing::info!(
+        model = %model_id,
+        funasr_model = model.funasr_model_id,
+        "选择 STT 模型（FunASR 自动管理下载）",
+    );
+
+    // 更新配置：设置选中的模型 + funasr_model 标识
+    let mut config = crate::app::stt_config::get_stt_config();
+    config.local_model_id = Some(model_id);
+    config.local_engine.funasr_model = model.funasr_model_id.to_string();
+    crate::app::stt_config::update_cache(&config);
+
+    Ok(())
+}
+
+/// 取消选择 STT 模型。
+///
+/// 新方案中模型由 FunASR 管理，此命令仅清除配置中的选中状态。
+#[tauri::command]
+pub async fn delete_stt_model(model_id: String) -> Result<(), String> {
+    tracing::info!(model = %model_id, "取消选择 STT 模型");
+    let mut config = crate::app::stt_config::get_stt_config();
+    if config.local_model_id.as_deref() == Some(model_id.as_str()) {
+        config.local_model_id = None;
+        crate::app::stt_config::update_cache(&config);
+    }
+    Ok(())
+}
+
+/// 取消语音录音(ESC 中断)。
+#[tauri::command]
+pub fn cancel_voice_recording(app: tauri::AppHandle) {
+    if let Some(vs) = app.try_state::<std::sync::Arc<crate::app::voice::VoiceService>>() {
+        vs.cancel_recording();
+    }
+}
+
+/// 查询当前是否正在语音录音。
+#[tauri::command]
+pub fn is_voice_recording(app: tauri::AppHandle) -> bool {
+    if let Some(vs) = app.try_state::<std::sync::Arc<crate::app::voice::VoiceService>>() {
+        vs.is_recording()
+    } else {
+        false
+    }
+}
+
+/// 音频测试活跃标志(全局,供 start/stop_audio_test 共享)。
+static AUDIO_TEST_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 列出可用的音频输入设备。
+#[tauri::command]
+pub fn list_audio_devices() -> Vec<crate::infra::platform::audio::AudioDevice> {
+    crate::infra::platform::audio::list_input_devices()
+}
+
+/// 测试音频设备:开始采集并发送音量级别事件。
+/// 前端通过 `blink://audio-test-level` 事件接收音量级别 (0.0~1.0)。
+#[tauri::command]
+pub async fn start_audio_test(
+    app: tauri::AppHandle,
+    device_id: Option<String>,
+) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+
+    tracing::info!(?device_id, "音频测试: 开始");
+
+    // 停止之前的测试（如果有）
+    AUDIO_TEST_ACTIVE.store(false, Ordering::SeqCst);
+
+    let mut capture = if let Some(id) = device_id {
+        crate::infra::platform::audio::create_capture_with_device(id)
+    } else {
+        crate::infra::platform::audio::create_capture()
+    };
+
+    let format = crate::infra::platform::audio::AudioFormat::default();
+    let mut rx = capture.start(format).map_err(|e| {
+        tracing::error!(%e, "音频测试: 采集启动失败");
+        format!("音频采集启动失败: {e}")
+    })?;
+
+    AUDIO_TEST_ACTIVE.store(true, Ordering::SeqCst);
+
+    tracing::info!("音频测试: 采集已启动, 等待数据...");
+
+    let app_clone = app.clone();
+    tokio::spawn(async move {
+        let mut chunk_count = 0u32;
+        let mut max_level = 0.0f64;
+        while let Some(chunk) = rx.recv().await {
+            if !AUDIO_TEST_ACTIVE.load(Ordering::SeqCst) {
+                break;
+            }
+            chunk_count += 1;
+            // 计算 RMS 音量
+            let level = if chunk.samples.is_empty() {
+                0.0
+            } else {
+                let sum_sq: f64 = chunk.samples.iter().map(|s| (*s as f64) * (*s as f64)).sum();
+                let rms = (sum_sq / chunk.samples.len() as f64).sqrt();
+                (rms * 3.0).min(1.0)
+            };
+            if level > max_level {
+                max_level = level;
+            }
+            // 首个 chunk + 每 10 个 chunk 打一次日志，让用户知道数据在流动
+            if chunk_count == 1 {
+                tracing::info!(
+                    samples = chunk.samples.len(),
+                    "音频测试: 收到首个 chunk"
+                );
+            } else if chunk_count % 10 == 0 {
+                tracing::debug!(
+                    chunk_count,
+                    level = format!("{:.3}", level),
+                    max_level = format!("{:.3}", max_level),
+                    "音频测试: 数据流动中"
+                );
+            }
+            let _ = app_clone.emit(
+                "blink://audio-test-level",
+                serde_json::json!({ "level": level }),
+            );
+        }
+        // capture 的 Drop 会设置 capturing=false，capture 线程随即退出
+        drop(capture);
+        tracing::info!(
+            chunk_count,
+            max_level = format!("{:.3}", max_level),
+            "音频测试: 已停止"
+        );
+    });
+
+    Ok(())
+}
+
+/// 停止音频测试。
+#[tauri::command]
+pub fn stop_audio_test() {
+    use std::sync::atomic::Ordering;
+    AUDIO_TEST_ACTIVE.store(false, Ordering::SeqCst);
+    tracing::info!("音频测试: 用户停止");
+}
+
+// ── Python 环境管理（uv 自管理）────────────────────────────────────────
+
+/// 全局 funasr-server 子进程句柄。
+static FUNASR_SERVER_CHILD: std::sync::Mutex<Option<tokio::process::Child>> = std::sync::Mutex::new(None);
+
+/// 查询 Python 环境 + funasr-server 状态。
+///
+/// 返回 uv/venv/funasr 安装状态 + server 运行状态，供前端展示和诊断。
+///
+/// 异步执行：Python 子进程检测在 spawn_blocking 线程池中执行，不阻塞 UI 线程。
+#[tauri::command]
+pub async fn get_funasr_env() -> crate::domain::stt::funasr::FunasrEnv {
+    let config = crate::app::stt_config::get_stt_config();
+    crate::domain::stt::funasr::get_env_status_async(
+        config.local_engine.server_port,
+        config.local_engine.funasr_model.clone(),
+    )
+    .await
+}
+
+/// 一键安装 Python 环境（uv + venv + funasr）。
+///
+/// Blink 通过 uv 自动创建独立的 Python 3.12 虚拟环境并安装 funasr。
+/// 用户无需手动安装 Python 或 pip 包。
+///
+/// 进度通过 `blink://python-env-progress` 事件通知前端：
+/// - `{"stage": "uv", "status": "starting"}` — 检查/下载 uv
+/// - `{"stage": "uv", "status": "done"}` — uv 就绪
+/// - `{"stage": "venv", "status": "starting"}` — 创建 venv
+/// - `{"stage": "venv", "status": "done"}` — venv 就绪
+/// - `{"stage": "funasr", "status": "installing"}` — 安装 funasr
+/// - `{"stage": "funasr", "status": "done"}` — funasr 安装完成
+/// - `{"stage": "complete", "status": "ready"}` — 全部完成
+/// - `{"stage": "error", "error": "..."}` — 出错
+#[tauri::command]
+pub async fn setup_python_env(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Emitter;
+
+    let emit_progress = |stage: &str, status: &str| {
+        let _ = app.emit(
+            "blink://python-env-progress",
+            serde_json::json!({ "stage": stage, "status": status }),
+        );
+    };
+
+    let emit_log = |line: &str| {
+        let _ = app.emit(
+            "blink://funasr-server-log",
+            serde_json::json!({ "line": line }),
+        );
+    };
+
+    let py = crate::infra::platform::python::check_status_async().await;
+
+    // Step 1: uv
+    if !py.uv_available {
+        emit_progress("uv", "starting");
+        emit_log("[Blink] 下载安装 uv 中...");
+        match crate::infra::platform::python::ensure_uv().await {
+            Ok(path) => {
+                tracing::info!(path = %path.display(), "uv 安装完成");
+                emit_log(&format!("[Blink] ✅ uv 安装完成: {}", path.display()));
+            }
+            Err(e) => {
+                emit_progress("error", &e);
+                emit_log(&format!("[Blink] ❌ uv 安装失败: {e}"));
+                return Err(e);
+            }
+        }
+    }
+    emit_progress("uv", "done");
+
+    // Step 2: venv
+    let uv_path = crate::infra::platform::python::find_uv()
+        .ok_or_else(|| "uv 不可用".to_string())?;
+
+    if !py.venv_exists {
+        emit_progress("venv", "starting");
+        emit_log("[Blink] 创建 Python 3.12 虚拟环境...");
+        if let Err(e) = crate::infra::platform::python::create_venv(&uv_path).await {
+            emit_progress("error", &e);
+            emit_log(&format!("[Blink] ❌ venv 创建失败: {e}"));
+            return Err(e);
+        }
+    }
+    emit_progress("venv", "done");
+    emit_log("[Blink] ✅ Python venv 就绪");
+
+    // Step 3: torch
+    // 安装 CPU 或 CUDA 版 PyTorch，取决于配置的设备
+    if !py.torch_installed {
+        let device = crate::app::stt_config::get_stt_config().local_engine.device;
+        let is_cuda = device == "cuda";
+        let (torch_index, torch_desc) = if is_cuda {
+            ("https://download.pytorch.org/whl/cu121", "PyTorch CUDA 版（~2GB，请耐心等待）")
+        } else {
+            ("https://download.pytorch.org/whl/cpu", "PyTorch CPU 版（~200MB，请耐心等待）")
+        };
+        emit_progress("torch", "installing");
+        emit_log(&format!("[Blink] 安装 {}...", torch_desc));
+        if let Err(e) = crate::infra::platform::python::install_packages_with_index(
+            &uv_path,
+            &["torch", "torchaudio"],
+            torch_index,
+        ).await {
+            emit_progress("error", &e);
+            emit_log(&format!("[Blink] ❌ PyTorch 安装失败: {e}"));
+            return Err(e);
+        }
+    }
+    emit_progress("torch", "done");
+    emit_log("[Blink] ✅ PyTorch 安装完成");
+
+    // Step 4: funasr + server 依赖
+    if !py.funasr_installed {
+        emit_progress("funasr", "installing");
+        emit_log("[Blink] 安装 funasr + fastapi + uvicorn 中...");
+        if let Err(e) = crate::infra::platform::python::install_packages(&uv_path, &["funasr", "fastapi", "uvicorn", "python-multipart"]).await {
+            emit_progress("error", &e);
+            emit_log(&format!("[Blink] ❌ funasr 安装失败: {e}"));
+            return Err(e);
+        }
+    }
+    emit_progress("funasr", "done");
+    emit_progress("complete", "ready");
+    emit_log("[Blink] ✅ Python 环境安装完成，可以启动服务了");
+
+    tracing::info!("Python 环境一键安装完成");
+    Ok(())
+}
+
+/// 启动 funasr-server 子进程。
+///
+/// 在后台异步启动 FunASR server，前端通过 `blink://funasr-server-status` 事件
+/// 监听启动进度。模型首次下载可能需要较长时间。
+#[tauri::command]
+pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Emitter;
+
+    let config = crate::app::stt_config::get_stt_config();
+    let model = config.local_engine.funasr_model.clone();
+    let port = config.local_engine.server_port;
+    let device = config.local_engine.device.clone();
+
+    // 检查 Python 环境是否就绪，未就绪则自动安装
+    let py_status = crate::infra::platform::python::check_status_async().await;
+    if !py_status.env_ready {
+        let _ = app.emit(
+            "blink://funasr-server-status",
+            serde_json::json!({ "stage": "setup_env", "message": "正在安装 Python 环境..." }),
+        );
+        match crate::infra::platform::python::setup(&device).await {
+            Ok(()) => {
+                tracing::info!("Python 环境自动安装完成");
+            }
+            Err(e) => {
+                let _ = app.emit(
+                    "blink://funasr-server-status",
+                    serde_json::json!({ "stage": "error", "error": format!("Python 环境安装失败: {e}") }),
+                );
+                return Err(format!("Python 环境安装失败: {e}
+请在设置页手动点击「安装环境」按钮。"));
+            }
+        }
+    }
+
+    let _ = app.emit(
+        "blink://funasr-server-status",
+        serde_json::json!({ "stage": "starting", "model": model, "port": port }),
+    );
+
+    match crate::domain::stt::funasr::start_server(&model, port, &device).await {
+        Ok(Some((child, mut log_rx))) => {
+            // 存储子进程句柄
+            {
+                let mut guard = FUNASR_SERVER_CHILD.lock().unwrap();
+                *guard = Some(child);
+            }
+
+            // ── 转发 funasr-server 日志到前端 ──
+            // 日志来自 start_server 内部的 stdout/stderr 读取 task，
+            // 通过 unbounded channel 发送，这里转发为 Tauri 事件。
+            let app_log = app.clone();
+            tokio::spawn(async move {
+                while let Some(line) = log_rx.recv().await {
+                    let _ = app_log.emit(
+                        "blink://funasr-server-log",
+                        serde_json::json!({ "line": line }),
+                    );
+                }
+            });
+
+            // ── 异步等待服务就绪（带子进程退出检测）──
+            let app_clone = app.clone();
+            tokio::spawn(async move {
+                let url = format!("http://localhost:{port}/v1/models");
+                let client = match reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(5))
+                    .build()
+                {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = app_clone.emit(
+                            "blink://funasr-server-status",
+                            serde_json::json!({ "stage": "error", "error": format!("HTTP client 创建失败: {e}") }),
+                        );
+                        return;
+                    }
+                };
+
+                let deadline = std::time::Instant::now()
+                    + std::time::Duration::from_secs(
+                        crate::domain::stt::funasr::SERVER_STARTUP_TIMEOUT_SECS,
+                    );
+
+                loop {
+                    if std::time::Instant::now() > deadline {
+                        let _ = app_clone.emit(
+                            "blink://funasr-server-status",
+                            serde_json::json!({
+                                "stage": "error",
+                                "error": format!(
+                                    "funasr-server 在 {}s 内未就绪（端口 {}）",
+                                    crate::domain::stt::funasr::SERVER_STARTUP_TIMEOUT_SECS,
+                                    port
+                                )
+                            }),
+                        );
+                        tracing::error!(port, "funasr-server 启动超时");
+                        return;
+                    }
+
+                    // 检查子进程是否已退出（崩溃 / 异常终止）
+                    {
+                        let mut guard = FUNASR_SERVER_CHILD.lock().unwrap();
+                        if let Some(child) = guard.as_mut() {
+                            match child.try_wait() {
+                                Ok(Some(status)) => {
+                                    // 子进程已退出
+                                    *guard = None;
+                                    drop(guard);
+                                    crate::domain::stt::funasr::mark_server_stopped();
+                                    let _ = app_clone.emit(
+                                        "blink://funasr-server-status",
+                                        serde_json::json!({
+                                            "stage": "error",
+                                            "error": format!("funasr-server 进程已退出: {status}")
+                                        }),
+                                    );
+                                    tracing::error!(%status, port, "funasr-server 进程异常退出");
+                                    return;
+                                }
+                                Ok(None) => {} // 仍在运行
+                                Err(e) => {
+                                    tracing::warn!(%e, "try_wait 失败");
+                                }
+                            }
+                        } else {
+                            // 子进程已被停止（用户点击停止按钮）
+                            return;
+                        }
+                    }
+
+                    // HTTP 健康检查
+                    match client.get(&url).send().await {
+                        Ok(resp) if resp.status().is_success() => {
+                            let _ = app_clone.emit(
+                                "blink://funasr-server-status",
+                                serde_json::json!({ "stage": "ready", "port": port }),
+                            );
+                            tracing::info!(port, "funasr-server 就绪");
+                            return;
+                        }
+                        _ => {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        }
+                    }
+                }
+            });
+
+            Ok(())
+        }
+        Ok(None) => {
+            // 服务已在运行
+            let _ = app.emit(
+                "blink://funasr-server-status",
+                serde_json::json!({ "stage": "ready", "port": port }),
+            );
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// 停止 funasr-server 子进程。
+#[tauri::command]
+pub async fn stop_funasr_server() -> Result<(), String> {
+    // 先从 Mutex 中取出 child，避免跨 await 持有 MutexGuard（非 Send）
+    let mut child_opt = FUNASR_SERVER_CHILD.lock().unwrap().take();
+    if let Some(child) = child_opt.as_mut() {
+        let _ = child.kill().await;
+        crate::domain::stt::funasr::mark_server_stopped();
+    }
+    tracing::info!("funasr-server 已停止");
+    Ok(())
+}
+
+/// STT 诊断：检查 FunASR 环境 + 服务状态 + 配置。
+///
+/// 返回详细诊断报告，帮助定位 "STT 不工作" 的具体原因：
+/// 1. Python 是否安装及版本
+/// 2. funasr 包是否安装及版本
+/// 3. funasr-server 是否在运行（健康检查）
+/// 4. 当前配置（模式、模型、端口）
+/// 5. 如果服务就绪，下载示例音频调一次 HTTP API 验证识别效果
+///
+/// 所有诊断步骤同步输出到 tracing 日志，便于从日志文件排查问题。
+#[tauri::command]
+pub async fn diagnose_stt() -> Result<serde_json::Value, String> {
+    let mut report = serde_json::json!({
+        "funasr_env": {},
+        "config": {},
+        "models": [],
+        "api_test": null,
+    });
+
+    let config = crate::app::stt_config::get_stt_config();
+    let port = config.local_engine.server_port;
+
+    tracing::info!("=== STT 诊断开始 ===");
+
+    // ── FunASR 环境状态（异步，不阻塞 UI）──
+    let env = crate::domain::stt::funasr::get_env_status_async(
+        port,
+        config.local_engine.funasr_model.clone(),
+    )
+    .await;
+
+    let server_ready = crate::domain::stt::funasr::is_server_ready(port);
+
+    // 同步诊断信息到 tracing 日志
+    tracing::info!(
+        available = env.uv_available,
+        version = ?env.uv_version,
+        "诊断: uv"
+    );
+    tracing::info!(
+        exists = env.venv_exists,
+        version = ?env.venv_python_version,
+        "诊断: venv"
+    );
+    tracing::info!(
+        installed = env.torch_installed,
+        version = ?env.torch_version,
+        "诊断: torch"
+    );
+    tracing::info!(
+        installed = env.funasr_installed,
+        version = ?env.funasr_version,
+        "诊断: funasr"
+    );
+    tracing::info!(
+        running = env.server_running,
+        ready = server_ready,
+        port,
+        "诊断: server"
+    );
+
+    report["funasr_env"] = serde_json::json!({
+        "uv_available": env.uv_available,
+        "uv_version": env.uv_version,
+        "venv_exists": env.venv_exists,
+        "venv_python_version": env.venv_python_version,
+        "torch_installed": env.torch_installed,
+        "torch_version": env.torch_version,
+        "funasr_installed": env.funasr_installed,
+        "funasr_version": env.funasr_version,
+        "env_ready": env.env_ready,
+        "server_running": env.server_running,
+        "server_port": env.server_port,
+        "server_model": env.server_model,
+        "server_ready": server_ready,
+    });
+
+    // ── 配置状态 ──
+    tracing::info!(
+        mode = ?config.mode,
+        model = %config.local_engine.funasr_model,
+        device = %config.local_engine.device,
+        streaming = config.streaming,
+        "诊断: config"
+    );
+
+    report["config"] = serde_json::json!({
+        "enabled": config.enabled,
+        "mode": format!("{:?}", config.mode),
+        "local_model_id": config.local_model_id,
+        "funasr_model": config.local_engine.funasr_model,
+        "server_port": config.local_engine.server_port,
+        "device": config.local_engine.device,
+        "streaming": config.streaming,
+    });
+
+    // ── 模型列表 ──
+    let models = crate::domain::stt::model_registry();
+    for model in models {
+        report["models"].as_array_mut().unwrap().push(serde_json::json!({
+            "id": model.id,
+            "display_name": model.display_name,
+            "funasr_model_id": model.funasr_model_id,
+            "streaming": model.streaming,
+            "params": model.params,
+            "size_mb": model.size_mb,
+            "device": model.device,
+            "is_selected": config.local_model_id.as_deref() == Some(model.id),
+        }));
+    }
+
+    // ── API 测试：如果服务就绪，下载示例音频测试识别 ──
+    if server_ready {
+        tracing::info!("诊断: 开始 API 测试（下载示例音频）");
+        // FunASR 官方中文示例音频（BAC009 数据集）
+        let audio_url = "https://isv-data.oss-cn-hangzhou.aliyuncs.com/ics/MaaS/ASR/test_audio/BAC009S0764W0121.wav";
+
+        match test_audio_via_server(audio_url, port).await {
+            Ok(text) => {
+                tracing::info!(%text, "诊断: API 测试成功");
+                report["api_test"] = serde_json::json!({
+                    "wav_written": true,
+                    "result": {
+                        "success": true,
+                        "text": text,
+                    },
+                });
+            }
+            Err(e) => {
+                tracing::warn!(%e, "诊断: API 测试失败");
+                report["api_test"] = serde_json::json!({
+                    "wav_written": true,
+                    "result": {
+                        "success": false,
+                        "error": e,
+                    },
+                });
+            }
+        }
+    } else {
+        tracing::info!("诊断: API 测试跳过（服务未就绪）");
+        report["api_test"] = serde_json::json!({
+            "skipped": true,
+            "reason": "funasr-server 未就绪",
+        });
+    }
+
+    tracing::info!("=== STT 诊断完成 ===");
+    tracing::info!(report = %report, "STT 诊断报告");
+    Ok(report)
+}
+
+/// 下载示例音频并通过 funasr-server 测试识别。
+///
+/// 流程：
+/// 1. HTTP 下载 WAV 音频
+/// 2. 解析 WAV → f32 PCM 样本
+/// 3. 分块喂入 LocalSttEngine（模拟 transcribe_chunk）
+/// 4. 调用 finalize → POST 到 funasr-server
+/// 5. 返回识别文本
+async fn test_audio_via_server(audio_url: &str, port: u16) -> Result<String, String> {
+    // 1. 下载音频
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("HTTP client 创建失败: {e}"))?;
+
+    let resp = client
+        .get(audio_url)
+        .send()
+        .await
+        .map_err(|e| format!("下载示例音频失败: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("下载音频 HTTP 失败: {}", resp.status()));
+    }
+
+    let wav_bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("读取音频字节失败: {e}"))?;
+
+    tracing::info!(size = wav_bytes.len(), "诊断: 示例音频下载完成");
+
+    // 2. 解析 WAV → f32 PCM 样本
+    let samples = crate::domain::stt::local::parse_wav_to_f32(&wav_bytes)?;
+    let duration_ms = (samples.len() as f64 / 16000.0 * 1000.0) as u64;
+    tracing::info!(
+        samples = samples.len(),
+        duration_ms,
+        "诊断: WAV 解析完成"
+    );
+
+    // 3. 创建引擎并分块喂入音频
+    let engine = crate::domain::stt::local::LocalSttEngine::for_diagnostic(port);
+    let chunk_size = 1600usize; // 100ms chunks
+    for chunk in samples.chunks(chunk_size) {
+        engine
+            .transcribe_chunk(chunk)
+            .map_err(|e| e.to_string())?;
+    }
+
+    // 4. 调用 finalize → POST 到 funasr-server
+    tracing::info!("诊断: 调用 funasr-server 转录...");
+    let result = engine.finalize().map_err(|e| e.to_string())?;
+
+    Ok(result)
+}
+
+// ── 空间管理 ────────────────────────────────────────────────────────
+
+/// 递归计算目录大小（字节）。
+fn dir_size_bytes(path: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    for entry in walkdir::WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
+        if entry.file_type().is_file() {
+            total += entry.metadata().map(|m| m.len()).unwrap_or(0);
+        }
+    }
+    total
+}
+
+/// 字节 → MB（保留两位小数）。
+fn bytes_to_mb(bytes: u64) -> f64 {
+    ((bytes as f64 / (1024.0 * 1024.0)) * 100.0).round() / 100.0
+}
+
+/// 获取 STT 相关空间占用信息。
+///
+/// 返回 uv 二进制、Python venv、ModelScope 模型缓存的大小。
+#[tauri::command]
+pub async fn get_stt_space_usage() -> serde_json::Value {
+    let python_dir = dirs_next::data_dir()
+        .unwrap_or_default()
+        .join("blink")
+        .join("python");
+
+    let uv_dir = python_dir.join("uv");
+    let venv_dir = python_dir.join("venv");
+
+    // ModelScope 模型缓存：默认在 ~/.cache/modelscope/
+    // 也检查 MODELSCOPE_CACHE 环境变量
+    let modelscope_cache = std::env::var("MODELSCOPE_CACHE")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            dirs_next::home_dir().map(|h| h.join(".cache").join("modelscope"))
+        });
+
+    let mut items = Vec::new();
+    let mut total_bytes: u64 = 0;
+
+    // uv 二进制
+    if uv_dir.exists() {
+        let size = dir_size_bytes(&uv_dir);
+        total_bytes += size;
+        items.push(serde_json::json!({
+            "label": "uv 二进制",
+            "path": uv_dir.display().to_string(),
+            "size_mb": bytes_to_mb(size),
+        }));
+    }
+
+    // Python venv（含 torch + funasr）
+    if venv_dir.exists() {
+        let size = dir_size_bytes(&venv_dir);
+        total_bytes += size;
+        items.push(serde_json::json!({
+            "label": "Python 虚拟环境 (venv + torch + funasr)",
+            "path": venv_dir.display().to_string(),
+            "size_mb": bytes_to_mb(size),
+        }));
+    }
+
+    // ModelScope 模型缓存
+    if let Some(cache_dir) = &modelscope_cache {
+        if cache_dir.exists() {
+            let size = dir_size_bytes(cache_dir);
+            total_bytes += size;
+            items.push(serde_json::json!({
+                "label": "FunASR 模型缓存 (ModelScope)",
+                "path": cache_dir.display().to_string(),
+                "size_mb": bytes_to_mb(size),
+            }));
+        }
+    }
+
+    serde_json::json!({
+        "items": items,
+        "total_mb": bytes_to_mb(total_bytes),
+    })
+}
+
+/// 清理 STT Python 环境（删除 venv + uv）。
+///
+/// 会先停止 funasr-server（如果在运行），然后删除整个 python 目录。
+/// 清理后需重新安装环境才能使用本地 STT。
+#[tauri::command]
+pub async fn cleanup_stt_space() -> Result<(), String> {
+    // 先停止 funasr-server
+    let mut child_opt = FUNASR_SERVER_CHILD.lock().unwrap().take();
+    if let Some(child) = child_opt.as_mut() {
+        let _ = child.kill().await;
+        crate::domain::stt::funasr::mark_server_stopped();
+    }
+    drop(child_opt);
+
+    let python_dir = dirs_next::data_dir()
+        .unwrap_or_default()
+        .join("blink")
+        .join("python");
+
+    let mut errors = Vec::new();
+
+    // 删除 venv
+    let venv_dir = python_dir.join("venv");
+    if venv_dir.exists() {
+        tracing::info!(path = %venv_dir.display(), "清理 venv");
+        if let Err(e) = std::fs::remove_dir_all(&venv_dir) {
+            errors.push(format!("删除 venv 失败: {e}"));
+        }
+    }
+
+    // 删除 uv
+    let uv_dir = python_dir.join("uv");
+    if uv_dir.exists() {
+        tracing::info!(path = %uv_dir.display(), "清理 uv");
+        if let Err(e) = std::fs::remove_dir_all(&uv_dir) {
+            errors.push(format!("删除 uv 失败: {e}"));
+        }
+    }
+
+    if errors.is_empty() {
+        tracing::info!("STT 空间清理完成");
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
 }
 
 #[cfg(test)]

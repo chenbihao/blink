@@ -415,6 +415,15 @@ fn main() {
             // PluginEngine：clone 一份给 AppContext，原值继续 manage
             let plugin_engine_for_ctx = plugin_engine.clone();
 
+            // 0.10: VoiceService(hold-to-talk 管线编排)
+            // 初始化 STT 配置缓存（供 STT 引擎同步读取）
+            let stt_config = tauri::async_runtime::block_on(
+                app::config::ConfigStore::get::<app::stt_config::SttConfig>(&pool),
+            );
+            app::stt_config::init_cache(stt_config);
+
+            let voice_service = std::sync::Arc::new(app::voice::VoiceService::new(app.handle().clone()));
+
             // 后台服务编排:按依赖拓扑顺序启动。
             // 0.8.6 §8.2.3：AppContext 持有全部核心服务引用（真依赖容器）。
             let ctx = app::service::AppContext {
@@ -429,6 +438,7 @@ fn main() {
                 action_registry: action_registry.clone(),
                 capability_registry: capability_registry.clone(),
                 ai_registry: ai_registry.clone(),
+                voice_service: voice_service.clone(),
             };
             let services = app::service::all_services();
             let svc_start = std::time::Instant::now();
@@ -465,6 +475,8 @@ fn main() {
             app.manage(capability_registry);
             // 0.9.1 Phase 5a：AI Provider registry(Phase 5b 起 SearchService 消费)
             app.manage(ai_registry);
+            // 0.10: VoiceService(command 层 cancel_voice_recording / is_voice_recording 消费)
+            app.manage(voice_service);
 
             // 后台预热次级窗口（3s 延迟，不阻塞启动；WebView2 冷启动 300~400ms → 预热后 show <50ms）
             infra::platform::window::preheat_secondary_windows(app.handle().clone());
@@ -545,7 +557,25 @@ fn main() {
             app::commands::get_ai_secret_hint,
             app::commands::test_ai_provider,
             app::commands::fetch_ai_models,
-        ])
+            // 0.10 STT / 语音
+            app::commands::get_stt_config,
+            app::commands::set_stt_config,
+            app::commands::list_stt_models,
+            app::commands::download_stt_model,
+            app::commands::delete_stt_model,
+app::commands::cancel_voice_recording,
+app::commands::is_voice_recording,
+app::commands::list_audio_devices,
+app::commands::start_audio_test,
+app::commands::stop_audio_test,
+app::commands::get_funasr_env,
+app::commands::setup_python_env,
+app::commands::start_funasr_server,
+app::commands::stop_funasr_server,
+app::commands::diagnose_stt,
+app::commands::get_stt_space_usage,
+app::commands::cleanup_stt_space,
+])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

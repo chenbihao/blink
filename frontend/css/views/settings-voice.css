@@ -1,0 +1,603 @@
+/* ── 语音输入 Tab 样式（0.10）────────────────────────────────────────────── */
+/* 使用 Blink 主题 token，与设置页其他 Tab 风格一致 */
+
+#voice .radio-group {
+  display: flex;
+  gap: 16px;
+}
+
+#voice .radio {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  font-size: var(--text-sm, 13px);
+  color: var(--text);
+}
+
+#voice .radio input[type="radio"] {
+  accent-color: var(--accent);
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+}
+
+#voice .subsection-title {
+  font-size: var(--text-base, 14px);
+  font-weight: 600;
+  color: var(--text);
+  margin: 16px 0 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border-glow);
+}
+
+#voice .setting-hint {
+  font-size: var(--text-xs, 12px);
+  color: var(--text-dim);
+  margin: 4px 0 8px;
+}
+
+#voice .setting-hint-block {
+  margin-top: 16px;
+  padding: 12px;
+  background: var(--surface);
+  border-radius: 8px;
+  border: 1px solid var(--border-glow);
+}
+
+#voice .setting-hint-block p {
+  font-size: var(--text-xs, 12px);
+  color: var(--text-sub);
+  margin: 4px 0;
+  line-height: 1.5;
+}
+
+#voice .setting-hint-block strong {
+  color: var(--text);
+}
+
+/* input[type="text"] 继承设置页通用样式 */
+#voice input[type="text"] {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius-md, 6px);
+  padding: 6px 10px;
+  font-size: var(--text-md, 13px);
+  font-family: inherit;
+  outline: none;
+  height: 32px;
+}
+
+#voice input[type="text"]:focus {
+  border-color: var(--accent);
+}
+
+#voice input[type="text"]::placeholder {
+  color: var(--text-faint);
+}
+
+/* 模型列表 */
+#voice .model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+#voice .model-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border-glow);
+  border-radius: 8px;
+  flex-wrap: wrap;
+}
+
+#voice .model-info {
+  flex: 1;
+  min-width: 0;
+}
+
+#voice .model-name {
+  font-size: var(--text-sm, 13px);
+  font-weight: 500;
+  color: var(--text);
+}
+
+#voice .model-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 4px;
+  font-size: var(--text-xs, 11px);
+  color: var(--text-dim);
+  flex-wrap: wrap;
+}
+
+#voice .model-badge {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  font-size: 10px;
+  color: var(--text-sub);
+}
+
+#voice .model-badge.streaming {
+  background: var(--green-bg);
+  color: var(--green);
+}
+
+#voice .model-params {
+  color: var(--text-sub);
+  font-weight: 500;
+}
+
+#voice .model-status.model-downloaded {
+  color: var(--green);
+}
+
+#voice .model-status.model-not-downloaded {
+  color: var(--text-faint);
+}
+
+#voice .model-btn {
+  padding: 4px 12px;
+  font-size: var(--text-xs, 12px);
+  border: 1px solid var(--border-glow);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+#voice .model-btn:hover {
+  background: var(--surface-2);
+}
+
+#voice .model-btn.download {
+  border-color: rgba(137, 180, 250, 0.3);
+  color: var(--accent);
+}
+
+#voice .model-btn.use {
+  border-color: rgba(137, 180, 250, 0.3);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+#voice .model-btn.delete {
+  border-color: rgba(243, 139, 168, 0.3);
+  color: var(--red);
+}
+
+#voice .model-row.model-selected {
+  border-color: var(--accent);
+  background: var(--accent-faint, rgba(137, 180, 250, 0.05));
+}
+
+#voice .model-badge.selected {
+  background: var(--accent);
+  color: var(--bg);
+  font-weight: 500;
+}
+
+/* 下载进度条 */
+#voice .model-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin-top: 4px;
+}
+
+#voice .progress-bar {
+  flex: 1;
+  height: 4px;
+  background: var(--surface-2);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+#voice .progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+  width: 0%;
+}
+
+#voice .progress-text {
+  font-size: var(--text-xs, 11px);
+  color: var(--text-dim);
+  min-width: 30px;
+  text-align: right;
+}
+
+#voice .action-list-empty {
+  text-align: center;
+  padding: 16px;
+  color: var(--text-faint);
+  font-size: var(--text-xs, 12px);
+}
+
+/* ── 音频设备选择 + 调试 ────────────────────────────────────────────── */
+
+#voice-audio-device {
+  padding: 4px 8px;
+  font-size: var(--text-sm, 13px);
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  min-width: 200px;
+}
+
+#voice-audio-device:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.audio-test-container {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+}
+
+.audio-test-btn {
+  padding: 6px 16px;
+  font-size: var(--text-sm, 13px);
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.audio-test-btn:hover {
+  background: var(--surface-3);
+}
+
+.audio-test-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-faint, transparent);
+}
+
+.audio-test-meter {
+  flex: 1;
+  height: 8px;
+  background: var(--surface-2);
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.audio-test-bar {
+  height: 100%;
+  width: 0%;
+  background: var(--color-success, #38a169);
+  border-radius: 3px;
+  transition: width 0.05s linear, background 0.2s;
+  min-width: 0;
+}
+
+/* ── 推理引擎下载 ────────────────────────────────────────────────────── */
+
+#voice .engine-status-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 0;
+}
+
+#voice .engine-status-info {
+  flex: 1;
+  min-width: 0;
+}
+
+#voice .engine-status-text {
+  font-size: var(--text-sm, 13px);
+  color: var(--text-dim);
+}
+
+#voice .engine-download-btn {
+  padding: 6px 16px;
+  font-size: var(--text-sm, 13px);
+  color: var(--accent);
+  background: var(--surface-2);
+  border: 1px solid rgba(137, 180, 250, 0.3);
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+#voice .engine-download-btn:hover:not(:disabled) {
+  background: var(--surface-3);
+  border-color: var(--accent);
+}
+
+#voice .engine-download-btn:disabled {
+  color: var(--text-faint);
+  cursor: default;
+  opacity: 0.7;
+}
+
+#voice .engine-download-btn.installed {
+  color: var(--green, #38a169);
+  border-color: rgba(56, 161, 105, 0.3);
+  background: var(--green-bg, rgba(56, 161, 105, 0.08));
+  cursor: default;
+}
+
+#voice .engine-download-btn.installed:hover {
+  background: var(--green-bg, rgba(56, 161, 105, 0.08));
+  border-color: rgba(56, 161, 105, 0.3);
+}
+
+#voice .engine-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 12px;
+}
+
+/* ── STT 诊断（按钮在统一日志窗口头部）────────────────────────────── */
+
+#voice .stt-diagnose-btn {
+  padding: 3px 10px;
+  font-size: var(--text-xs, 11px);
+  border: 1px solid var(--border-glow);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+#voice .stt-diagnose-btn:hover {
+  background: var(--surface-2);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+#voice .stt-diagnose-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* ── 统一日志窗口（FunASR 日志 + 诊断输出共用）────────────────────── */
+
+#voice .voice-log-wrap {
+  margin: 8px 0 12px;
+  border: 1px solid var(--border-glow);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+#voice .voice-log-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border-glow);
+}
+
+#voice .voice-log-title {
+  font-size: 11px;
+  color: var(--text-sub);
+  font-weight: 600;
+}
+
+#voice .voice-log-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+#voice .voice-log-clear-btn {
+  background: none;
+  border: none;
+  color: var(--text-sub);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+#voice .voice-log-clear-btn:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+#voice .voice-server-log {
+  background: var(--surface);
+  padding: 8px 10px;
+  font-size: 11px;
+  font-family: "Cascadia Code", "Consolas", monospace;
+  color: var(--text-sub);
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+  line-height: 1.5;
+  min-height: 40px;
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+
+/* ── 推理设备选择器 ────────────────────────────────────────────────── */
+
+#voice #funasr-device-select {
+  padding: 4px 8px;
+  font-size: var(--text-sm, 13px);
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  min-width: 160px;
+}
+
+#voice #funasr-device-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+#voice #funasr-device-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── 按钮成功状态（绿色，不置灰）────────────────────────────────── */
+
+#voice .engine-download-btn.success {
+  color: var(--green, #38a169);
+  border-color: rgba(56, 161, 105, 0.4);
+  background: var(--green-bg, rgba(56, 161, 105, 0.08));
+  cursor: default;
+}
+
+#voice .engine-download-btn.success:hover {
+  background: var(--green-bg, rgba(56, 161, 105, 0.08));
+  border-color: rgba(56, 161, 105, 0.4);
+}
+
+#voice .engine-download-btn.running {
+  color: var(--green, #38a169);
+  border-color: rgba(56, 161, 105, 0.4);
+  background: var(--green-bg, rgba(56, 161, 105, 0.08));
+  cursor: default;
+}
+
+#voice .engine-download-btn.running:hover {
+  background: var(--green-bg, rgba(56, 161, 105, 0.08));
+  border-color: rgba(56, 161, 105, 0.4);
+}
+
+/* ── 空间管理 ────────────────────────────────────────────────────── */
+
+#voice .stt-space-usage {
+  margin-top: 8px;
+}
+
+#voice .stt-space-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border-glow);
+  border-radius: 6px;
+  margin-bottom: 6px;
+}
+
+#voice .stt-space-label {
+  font-size: var(--text-sm, 13px);
+  color: var(--text);
+}
+
+#voice .stt-space-path {
+  font-size: var(--text-xs, 11px);
+  color: var(--text-faint);
+  margin-top: 2px;
+  font-family: "Cascadia Code", "Consolas", monospace;
+  word-break: break-all;
+}
+
+#voice .stt-space-size {
+  font-size: var(--text-sm, 13px);
+  color: var(--text-dim);
+  font-weight: 500;
+  white-space: nowrap;
+  margin-left: 12px;
+}
+
+#voice .stt-space-total {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border-glow);
+  border-radius: 6px;
+}
+
+#voice .stt-space-total-label {
+  font-size: var(--text-sm, 13px);
+  font-weight: 600;
+  color: var(--text);
+}
+
+#voice .stt-space-total-size {
+  font-size: var(--text-base, 14px);
+  font-weight: 600;
+  color: var(--accent);
+}
+
+#voice .stt-space-actions {
+  margin-top: 12px;
+  display: flex;
+  gap: 8px;
+}
+
+#voice .stt-space-cleanup-btn {
+  padding: 6px 16px;
+  font-size: var(--text-sm, 13px);
+  border: 1px solid rgba(243, 139, 168, 0.3);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--red, #e53e3e);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+#voice .stt-space-cleanup-btn:hover:not(:disabled) {
+  background: rgba(243, 139, 168, 0.08);
+}
+
+#voice .stt-space-cleanup-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+#voice .stt-space-refresh-btn {
+  padding: 6px 16px;
+  font-size: var(--text-sm, 13px);
+  border: 1px solid var(--border-glow);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+#voice .stt-space-refresh-btn:hover {
+  background: var(--surface-2);
+}
+
+#voice .stt-space-loading {
+  text-align: center;
+  padding: 16px;
+  color: var(--text-faint);
+  font-size: var(--text-xs, 12px);
+}
+
+#voice .stt-space-hint {
+  font-size: var(--text-xs, 12px);
+  color: var(--text-faint);
+  margin-top: 8px;
+  line-height: 1.5;
+}

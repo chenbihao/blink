@@ -20,6 +20,7 @@ import { initStorageTab } from "./tabs/storage.js";
 import { initDebugTab } from "./tabs/debug.js";
 import { initAboutTab } from "./tabs/about.js";
 import { initAITab } from "./tabs/ai.js";
+import { initVoiceTab } from "./tabs/voice.js";
 import { initChordTab } from "./tabs/chord.js";
 
 // ── Tab 切换 ─────────────────────────────────────────────────────────────────
@@ -74,6 +75,7 @@ async function init() {
     initDebugTab(cfg);
     initAboutTab(cfg);
     initAITab();
+    initVoiceTab();
     initChordTab();
 
     console.log("Settings initialized");

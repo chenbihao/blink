@@ -292,6 +292,10 @@ export const zh = {
   // ── AI 交互面板（0.9.1 Phase 6）──
   "tab.ai": "AI",
   "panel.ai": "AI 意图辅助",
+
+  // ── 语音输入面板（0.10）──
+  "tab.voice": "语音输入",
+  "panel.voice": "语音输入",
   "ai.lede": "打字未命中规则时，AI 尝试理解并推荐操作。密钥存 Windows Credential Manager，SQLite 只存别名。",
   "ai.enabled.label": "启用 AI 意图辅助",
   "ai.enabled.hint": "关闭时任何输入都不走 AI（默认关，即使配了供应商也需手动打开）",

@@ -4,6 +4,9 @@
 //! 1. **划词监听**（主）：全局鼠标钩子在「划词瞬间」抓取（焦点未失、选区未退化），
 //!    缓存最近选区，绕开 Electron 应用失焦退化问题。见 `listener.rs`。
 //! 2. **get_selected_text**：纯 UIA 抓取原语（按 HWND），供划词监听调用。见 `windows.rs`。
+//!    三段式策略：`GetFocusedElement`(O(1)) → 祖先链 `FindFirst(Ancestors)`(O(深度))
+//!    → 焦点子树 `FindFirst(Descendants)`(O(焦点子树))。无 FindAll 全树回退。
+//!    带计时日志与阈值告警。
 //!
 //! 缓存独立于 SearchService（避免 infra→domain 反向依赖），由 `window::invoke` 合并进 snapshot。
 
@@ -92,6 +95,11 @@ fn sensitive_apps() -> &'static RwLock<Vec<String>> {
 /// 划词感知当前是否启用。回调线程读它决定是否处理选词。
 pub(crate) fn is_active() -> bool {
     LISTENER_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// 敏感应用列表是否非空。钩子线程用它决定是否需要查进程名（省两次 syscall）。
+pub(crate) fn has_sensitive_apps() -> bool {
+    !sensitive_apps().read().unwrap().is_empty()
 }
 
 /// 查询进程名是否命中敏感应用黑名单（大小写不敏感、前后空白）。

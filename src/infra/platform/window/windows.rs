@@ -485,6 +485,54 @@ pub fn hide_chord_ball(app: &AppHandle) {
     }
 }
 
+/// 显示语音录音 mini overlay（0.10 G2）。
+/// 独立 webview 窗口，不抢焦点（WS_EX_NOACTIVATE），显示在光标附近。
+/// 录音结束后由 voice::VoiceService::stop_recording 发 voice-recording-end → 前端隐藏。
+pub fn show_voice_overlay(app: &AppHandle) {
+    const LABEL: &str = "voice-overlay";
+    let (mx, my) = unsafe {
+        let mut pt = POINT { x: 0, y: 0 };
+        let _ = GetCursorPos(&mut pt);
+        (pt.x, pt.y)
+    };
+
+    if let Some(win) = app.get_webview_window(LABEL) {
+        let _ = win.set_position(tauri::PhysicalPosition::new(mx + 16, my + 16));
+        let _ = win.show();
+        return;
+    }
+
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+    match WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("voice-overlay.html".into()))
+        .title("")
+        .inner_size(280.0, 100.0)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .shadow(false)
+        .focused(false)
+        .visible(true)
+        .build()
+    {
+        Ok(win) => {
+            let _ = win.set_position(tauri::PhysicalPosition::new(mx + 16, my + 16));
+            if let Ok(hwnd) = win.hwnd() {
+                apply_no_activate(HWND(hwnd.0 as _));
+            }
+            tracing::debug!("voice-overlay: 已显示");
+        }
+        Err(e) => tracing::warn!(error = %e, "voice-overlay: 创建失败"),
+    }
+}
+
+/// 隐藏语音录音 mini overlay。
+pub fn hide_voice_overlay(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("voice-overlay") {
+        let _ = win.hide();
+    }
+}
+
 /// 显示截图覆盖窗（0.8.7 §九）。
 ///
 /// **前置条件**：调用方已通过 `screenshot::begin_session()` 完成截屏，SESSION 中
@@ -748,6 +796,31 @@ pub fn preheat_secondary_windows(app: AppHandle) {
                     tracing::debug!("preheat: context-menu ✓");
                 }
                 Err(e) => tracing::warn!(error = %e, "preheat: context-menu 失败"),
+            }
+        }
+
+        // --- voice-overlay（语音录音 mini overlay，0.10 G2） ---
+        if app.get_webview_window("voice-overlay").is_none() {
+            use tauri::{WebviewUrl, WebviewWindowBuilder};
+            match WebviewWindowBuilder::new(&app, "voice-overlay", WebviewUrl::App("voice-overlay.html".into()))
+                .title("")
+                .inner_size(280.0, 100.0)
+                .decorations(false)
+                .transparent(true)
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .shadow(false)
+                .focused(false)
+                .visible(false)
+                .build()
+            {
+                Ok(win) => {
+                    if let Ok(hwnd) = win.hwnd() {
+                        apply_no_activate(HWND(hwnd.0 as _));
+                    }
+                    tracing::debug!("preheat: voice-overlay ✓");
+                }
+                Err(e) => tracing::warn!(error = %e, "preheat: voice-overlay 失败"),
             }
         }
 

@@ -84,6 +84,10 @@ impl ConfigKey for ContextConfig {
     const KEY: &'static str = "context:config";
 }
 
+impl ConfigKey for crate::app::stt_config::SttConfig {
+    const KEY: &'static str = "stt:config";
+}
+
 impl ConfigKey for crate::infra::data::clipboard::ClipboardConfig {
     /// 0.8.8 §8.7:剪贴板配置从原 `app_config.clipboard` nested 字段独立提升为 KV,
     /// 与 6 个 AppConfig 分片同级(但不属于 `app.*` 命名空间,归到 `clipboard:*`)。

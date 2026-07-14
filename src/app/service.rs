@@ -17,6 +17,7 @@ use tauri::AppHandle;
 
 use crate::app::ai_config::AIConfig;
 use crate::app::config::AppConfig;
+use crate::app::voice::VoiceService;
 use crate::domain::ai::AIProviderRegistry;
 
 /// 服务启动期的共享依赖容器（0.8.6 §8.2.3 扩展为真依赖容器）。
@@ -52,6 +53,9 @@ pub struct AppContext {
     /// SearchService 拿到 NotConfigured → fallback 常规 fuzzy(§6.4 兜底铁则)。
     #[allow(dead_code)] // 0.9.2 起 SearchService::exec_ai_intent 消费
     pub ai_registry: std::sync::Arc<AIProviderRegistry>,
+    /// 0.10 语音服务(hold-to-talk 管线编排)。
+    /// HotkeyService 在 Hold/HoldRelease 事件中调用。
+    pub voice_service: std::sync::Arc<VoiceService>,
 }
 
 /// 统一生命周期接口。0.2.1 各服务的 `start` 多为同步初始化,但 trait 用 `async-trait`
@@ -151,6 +155,7 @@ impl Service for HotkeyService {
     }
     async fn start(&self, ctx: &AppContext) -> Result<(), String> {
         let app = ctx.app.clone();
+        let voice_service = ctx.voice_service.clone();
         let mut rx = crate::infra::platform::hotkey::start(ctx.config.hotkey.clone(), ctx.config.tap_threshold);
         tauri::async_runtime::spawn(async move {
             while let Some(ev) = rx.recv().await {
@@ -165,6 +170,18 @@ impl Service for HotkeyService {
                             // 记录热键唤起耗时（按键 → 窗口 invoke）
                             crate::infra::utils::perf::record(crate::infra::utils::perf::MetricCategory::Hotkey, "key_to_show", elapsed, None);
                         }
+                    }
+                    crate::infra::platform::hotkey::HotkeyEvent::Hold(_) => {
+                        // 长按开始 → 语音录音开始
+                        voice_service.start_recording();
+                    }
+                    crate::infra::platform::hotkey::HotkeyEvent::HoldRelease(_) => {
+                        // 长按结束 → 停止录音 → STT → 注入/fill-query
+                        voice_service.stop_recording();
+                    }
+                    crate::infra::platform::hotkey::HotkeyEvent::VoiceCancel(_) => {
+                        // ESC 取消录音
+                        voice_service.cancel_recording();
                     }
                 }
             }
