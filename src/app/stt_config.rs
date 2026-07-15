@@ -109,6 +109,9 @@ pub struct LocalEngineConfig {
     /// CPU 推理线程数(None = 自动)
     #[serde(default)]
     pub num_threads: Option<u32>,
+    /// Blink 启动后自动启动 funasr-server（懒加载，延迟 3s）
+    #[serde(default)]
+    pub auto_start_server: bool,
 }
 
 fn default_server_port() -> u16 {
@@ -134,6 +137,7 @@ impl Default for LocalEngineConfig {
             funasr_model: default_funasr_model(),
             device: default_device(),
             num_threads: None,
+            auto_start_server: false,
         }
     }
 }

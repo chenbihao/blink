@@ -35,14 +35,15 @@ impl Default for MockSttEngine {
     }
 }
 
+#[async_trait::async_trait]
 impl SttEngine for MockSttEngine {
-    fn transcribe_chunk(&self, _samples: &[f32]) -> Result<String, SttError> {
+    async fn transcribe_chunk(&self, _samples: &[f32]) -> Result<String, SttError> {
         let elapsed = self.elapsed();
         let text = super::mock_text_for_elapsed(elapsed);
         Ok(text.to_string())
     }
 
-    fn finalize(&self) -> Result<String, SttError> {
+    async fn finalize(&self) -> Result<String, SttError> {
         let elapsed = self.elapsed();
         // finalize 时返回完整假文本
         let text = if elapsed < Duration::from_secs(2) {
@@ -68,27 +69,27 @@ impl SttEngine for MockSttEngine {
 mod tests {
     use super::*;
 
-    #[test]
-    fn mock_engine_returns_progressive_text() {
+    #[tokio::test]
+    async fn mock_engine_returns_progressive_text() {
         let engine = MockSttEngine::new();
         engine.reset();
 
         // 立即调用 (< 2s) → 空文本
-        let t0 = engine.transcribe_chunk(&[]).unwrap();
+        let t0 = engine.transcribe_chunk(&[]).await.unwrap();
         assert!(t0.is_empty());
 
         // finalize → 有文本
-        let final_text = engine.finalize().unwrap();
+        let final_text = engine.finalize().await.unwrap();
         assert!(!final_text.is_empty());
     }
 
-    #[test]
-    fn mock_engine_reset_restarts_timer() {
+    #[tokio::test]
+    async fn mock_engine_reset_restarts_timer() {
         let engine = MockSttEngine::new();
-        let _ = engine.finalize().unwrap();
+        let _ = engine.finalize().await.unwrap();
 
         engine.reset();
-        let t = engine.transcribe_chunk(&[]).unwrap();
+        let t = engine.transcribe_chunk(&[]).await.unwrap();
         // reset 后立即调用 → elapsed < 2s → 空文本
         assert!(t.is_empty());
     }

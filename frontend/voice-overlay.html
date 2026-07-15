@@ -5,16 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Blink Voice</title>
     <link rel="stylesheet" href="css/tokens/color.css" />
+    <link rel="stylesheet" href="css/components/voice-wave.css" />
     <link rel="stylesheet" href="css/entries/voice-overlay.css" />
   </head>
   <body>
     <div id="overlay">
-      <div class="wave" id="wave">
-        <div class="bar"></div>
-        <div class="bar"></div>
-        <div class="bar"></div>
-        <div class="bar"></div>
-        <div class="bar"></div>
+      <div class="voice-wave" id="wave">
+        <div class="vw-bar"></div>
+        <div class="vw-bar"></div>
+        <div class="vw-bar"></div>
+        <div class="vw-bar"></div>
+        <div class="vw-bar"></div>
       </div>
       <div class="text" id="partial-text">语音输入中…</div>
       <div class="hint">松开结束 · ESC 取消</div>
@@ -24,18 +25,18 @@
 
       const textEl = document.getElementById("partial-text");
       const waveEl = document.getElementById("wave");
-      const bars = waveEl.querySelectorAll(".bar");
+      const bars = waveEl.querySelectorAll(".vw-bar");
 
       // 监听音量级别 → 驱动波形条高度
       listen("blink://voice-level", (event) => {
         const { level, target } = event.payload ?? {};
         if (target !== "g2") return;
         const lv = Math.max(0, Math.min(1, level || 0));
-        // 每个条用不同倍率 + 随机偏移，营造自然波形效果
         bars.forEach((bar, i) => {
           const factor = [0.6, 0.85, 1.0, 0.85, 0.6][i] || 0.7;
-          const jitter = (Math.sin(Date.now() / 80 + i * 1.3) + 1) * 0.15;
-          const h = Math.max(3, (lv * factor + jitter * lv) * 28);
+          // jitter 独立于 lv：即使安静时也有微妙呼吸感
+          const jitter = (Math.sin(Date.now() / 80 + i * 1.3) + 1) * 0.08;
+          const h = Math.max(4, (lv * factor + jitter) * 20);
           bar.style.height = h + "px";
         });
       });
@@ -51,7 +52,14 @@
       // 录音结束 → 重置
       listen("blink://voice-recording-end", () => {
         textEl.textContent = "语音输入中…";
-        bars.forEach((bar) => (bar.style.height = "3px"));
+        bars.forEach((bar) => (bar.style.height = "4px"));
+      });
+
+      // 语音错误提示（服务未启动等）
+      listen("blink://voice-error", (event) => {
+        const { message, target } = event.payload ?? {};
+        if (target !== "g2" || !message) return;
+        textEl.textContent = message;
       });
     </script>
   </body>

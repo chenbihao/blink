@@ -85,8 +85,9 @@ export function init() {
     const lv = Math.max(0, Math.min(1, level || 0));
     vwBars.forEach((bar, i) => {
       const factor = [0.6, 0.85, 1.0, 0.85, 0.6][i] || 0.7;
-      const jitter = (Math.sin(Date.now() / 80 + i * 1.3) + 1) * 0.15;
-      const h = Math.max(4, (lv * factor + jitter * lv) * 18);
+      // jitter 独立于 lv：即使安静时也有微妙呼吸感
+      const jitter = (Math.sin(Date.now() / 80 + i * 1.3) + 1) * 0.08;
+      const h = Math.max(4, (lv * factor + jitter) * 20);
       bar.style.height = h + "px";
     });
   });
@@ -97,6 +98,20 @@ export function init() {
       voiceIndicator.classList.add("hidden");
       vwBars.forEach((bar) => (bar.style.height = "4px"));
     }
+  });
+
+  // 0.10 语音错误提示（服务未启动等）
+  listen("blink://voice-error", (event) => {
+    const { message, target } = event.payload ?? {};
+    if (target !== "g1" || !message) return;
+    // 在搜索框中显示错误提示，用户输入时自动清除
+    queryEl.value = "";
+    queryEl.placeholder = message;
+    queryEl.dispatchEvent(new Event("input", { bubbles: true }));
+    // 3s 后恢复原 placeholder
+    setTimeout(() => {
+      queryEl.placeholder = "";
+    }, 3000);
   });
 
   // 0.9.2.1：剪贴板变化 → AwarenessSnapshot 已局部刷新 → 用当前 query 重跑

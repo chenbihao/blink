@@ -100,8 +100,66 @@ impl VoiceService {
         };
 
         // 创建 STT engine + audio capture
-        let engine = crate::domain::stt::create_engine();
         let config = crate::app::stt_config::get_stt_config();
+
+        // ── 服务就绪检查：本地模式下检查 FunASR 服务是否运行 ──
+        let need_check = match config.mode {
+            crate::app::stt_config::SttMode::Local => true,
+            crate::app::stt_config::SttMode::Cloud => config.cloud_provider.is_none(),
+        };
+        if need_check {
+            let (ready, msg) = match config.mode {
+                crate::app::stt_config::SttMode::Local => {
+                    let port = config.local_engine.server_port;
+                    if crate::domain::stt::funasr::is_server_ready(port) {
+                        (true, String::new())
+                    } else {
+                        (false, "FunASR 服务未启动，请在设置页「语音输入」中启动服务".to_string())
+                    }
+                }
+                crate::app::stt_config::SttMode::Cloud => {
+                    (false, "云端 STT 未配置供应商，请在设置页中配置".to_string())
+                }
+            };
+            if !ready {
+                tracing::warn!(target = ?session.target, %msg, "语音录音中止：服务未就绪");
+                let target_str = if session.target == VoiceTarget::MainWindow { "g1" } else { "g2" };
+
+                // G2: 先显示 overlay，再延迟 emit 错误消息
+                // （窗口刚 show 时事件可能未就绪，延迟 100ms 确保接收）
+                if session.target == VoiceTarget::ForegroundApp {
+                    platform::window::show_voice_overlay(&self.app);
+                    let app_clone = self.app.clone();
+                    let msg_clone = msg.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        let _ = app_clone.emit(
+                            "blink://voice-error",
+                            serde_json::json!({
+                                "message": msg_clone,
+                                "target": "g2",
+                            }),
+                        );
+                        // 2s 后自动隐藏
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        platform::window::hide_voice_overlay(&app_clone);
+                    });
+                } else {
+                    // G1: 直接 emit（主窗口已可见，事件就绪）
+                    let _ = self.app.emit(
+                        "blink://voice-error",
+                        serde_json::json!({
+                            "message": msg,
+                            "target": target_str,
+                        }),
+                    );
+                }
+                // 不启动录音，直接返回
+                return;
+            }
+        }
+
+        let engine = crate::domain::stt::create_engine();
         let mut capture = if let Some(dev_id) = config.audio_device_id {
             platform::audio::create_capture_with_device(dev_id)
         } else {
@@ -147,7 +205,7 @@ impl VoiceService {
                             }),
                         );
 
-                        match engine_for_task.transcribe_chunk(&chunk.samples) {
+                        match engine_for_task.transcribe_chunk(&chunk.samples).await {
                             Ok(text) => {
                                 if !text.is_empty() {
                                     let _ = app.emit(
@@ -177,32 +235,39 @@ impl VoiceService {
     }
 
     /// HoldRelease 事件:停止录音 → STT 最终识别 → 注入/填充。
-    pub fn stop_recording(&self) {
-        let mut session = self.session.lock().unwrap();
+    ///
+    /// async 因为 `SttEngine::finalize` 是 async（HTTP 请求）。
+    /// 调用方（HotkeyService）在 async task 中 .await 此方法。
+    pub async fn stop_recording(&self) {
+        // 取出 engine + 停止采集，然后立即释放锁
+        let (engine, target) = {
+            let mut session = self.session.lock().unwrap();
 
-        if !session.recording {
-            tracing::warn!("stop_recording: 未在录音中,忽略");
-            return;
-        }
+            if !session.recording {
+                tracing::warn!("stop_recording: 未在录音中,忽略");
+                return;
+            }
 
-        // 停止采集
-        if let Some(mut capture) = session.capture.take() {
-            capture.stop();
-        }
+            // 停止采集
+            if let Some(mut capture) = session.capture.take() {
+                capture.stop();
+            }
 
-        // 最终识别
-        let final_text = session
-            .engine
-            .as_ref()
-            .and_then(|engine| engine.finalize().ok())
-            .unwrap_or_default();
+            let target = session.target;
+            let engine = session.engine.take();
+            session.recording = false;
 
-        session.recording = false;
-        let target = session.target;
-        session.engine = None;
+            // 清除全局录音标志
+            crate::infra::platform::hotkey::set_voice_recording(false);
 
-        // 清除全局录音标志
-        crate::infra::platform::hotkey::set_voice_recording(false);
+            (engine, target)
+        }; // 锁在此释放，await 不持锁
+
+        // 最终识别（async HTTP）
+        let final_text = match engine {
+            Some(e) => e.finalize().await.unwrap_or_default(),
+            None => String::new(),
+        };
 
         tracing::info!(
             target = ?target,
@@ -210,9 +275,6 @@ impl VoiceService {
             %final_text,
             "语音识别完成"
         );
-
-        // 释放锁后执行注入(避免阻塞其他操作)
-        drop(session);
 
         if final_text.is_empty() {
             tracing::info!("识别结果为空,跳过注入");
@@ -286,14 +348,28 @@ impl VoiceService {
     }
 }
 
-/// 计算 PCM 样本的 RMS（均方根）音量，返回 0.0 ~ 1.0。
-/// 用于前端音量波动条可视化。
+/// 计算 PCM 样本的音量级别（0.0 ~ 1.0），用于前端波形条可视化。
+///
+/// 使用 RMS（均方根）+ 噪声门限 + 平方根曲线：
+/// - RMS < 0.001（噪声门限）→ 0.0（静默）
+/// - RMS 0.001~0.15 映射到 0.0~1.0，用 sqrt 曲线增强小信号区域
+/// - 平方根曲线让安静说话也能有 20-30% 的音量指示，不会"看起来没反应"
 fn compute_rms(samples: &[f32]) -> f64 {
     if samples.is_empty() {
         return 0.0;
     }
     let sum_sq: f64 = samples.iter().map(|s| (*s as f64) * (*s as f64)).sum();
     let rms = (sum_sq / samples.len() as f64).sqrt();
-    // 归一化到 0~1：RMS 通常在 0~0.3 范围，乘以 3 放大
-    (rms * 3.0).min(1.0)
+
+    // 噪声门限：低于此值视为静默
+    const NOISE_FLOOR: f64 = 0.001;
+    if rms < NOISE_FLOOR {
+        return 0.0;
+    }
+
+    // 线性映射到 0~1（参考电平 0.15 = 正常说话音量）
+    let normalized = ((rms - NOISE_FLOOR) / (0.15 - NOISE_FLOOR)).min(1.0);
+
+    // 平方根曲线：增强小信号区域，让安静说话也有明显指示
+    normalized.sqrt()
 }

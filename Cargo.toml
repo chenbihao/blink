@@ -68,6 +68,8 @@ winreg = "0.55"
 walkdir = "2.5"
 # cpal: 跨平台音频 I/O（0.10 语音输入麦克风采集，Windows 上走 WASAPI）
 cpal = "0.18"
+# zip: 纯 Rust zip 解压（uv 二进制安装，替代 PowerShell Expand-Archive）
+zip = "2.2"
 # sherpa-onnx 引擎通过 Windows 自带 tar.exe 解压 .tar.bz2，无需额外 Rust 依赖
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",

@@ -177,7 +177,7 @@ impl Service for HotkeyService {
                     }
                     crate::infra::platform::hotkey::HotkeyEvent::HoldRelease(_) => {
                         // 长按结束 → 停止录音 → STT → 注入/fill-query
-                        voice_service.stop_recording();
+                        voice_service.stop_recording().await;
                     }
                     crate::infra::platform::hotkey::HotkeyEvent::VoiceCancel(_) => {
                         // ESC 取消录音

@@ -131,7 +131,7 @@ export async function initVoiceTab() {
   // FunASR 环境管理 + 统一日志 + 诊断 + 设备切换
   initFunasrEnv(config);
 
-  // 本地模型列表
+  // 本地模型选择（下拉框）
   loadLocalModels(config);
 
   // 空间管理
@@ -151,78 +151,59 @@ export async function initVoiceTab() {
   }
 
   async function loadLocalModels(cfg) {
-    const container = document.getElementById("voice-models-list");
-    if (!container) return;
+    const select = document.getElementById("funasr-model-select");
+    if (!select) return;
 
     let models = [];
     try {
       models = await invoke("list_stt_models");
     } catch (e) {
       console.error("list_stt_models failed:", e);
-      container.innerHTML = '<div class="action-list-empty">加载模型列表失败</div>';
       return;
     }
 
     if (!Array.isArray(models) || models.length === 0) {
-      container.innerHTML = '<div class="action-list-empty">暂无可用模型</div>';
+      select.innerHTML = '<option value="">暂无可用模型</option>';
       return;
     }
 
-    container.innerHTML = models
+    select.innerHTML = models
       .map((m) => {
-        const isSelected = m.is_selected;
-        const selectedBadge = isSelected ? '<span class="model-badge selected">当前</span>' : "";
-        const streamBadge = m.streaming
-          ? '<span class="model-badge streaming">流式</span>'
-          : '<span class="model-badge">非流式</span>';
-
-        let btnHtml;
-        if (isSelected) {
-          btnHtml = `<button class="model-btn delete" data-model-id="${m.id}" data-action="delete">取消选择</button>`;
-        } else {
-          btnHtml = `<button class="model-btn use" data-model-id="${m.id}" data-action="use">选择</button>`;
-        }
-
-        return `
-          <div class="model-row ${isSelected ? "model-selected" : ""}" data-model-id="${m.id}">
-            <div class="model-info">
-              <div class="model-name">${m.display_name} ${selectedBadge}</div>
-              <div class="model-meta">
-                ${streamBadge}
-                <span class="model-params">${m.params} 参数</span>
-                <span class="model-size">下载约 ${m.size_mb} MB</span>
-                <span class="model-langs">${(m.languages || []).join(", ")}</span>
-                <span class="model-device">${m.device}</span>
-              </div>
-              ${m.description ? `<div class="model-desc">${m.description}</div>` : ""}
-            </div>
-            <div class="model-actions">${btnHtml}</div>
-          </div>
-        `;
+        const selected = m.is_selected ? "selected" : "";
+        const tag = m.streaming ? " (流式)" : "";
+        const sizeStr = m.size_mb >= 1024
+          ? (m.size_mb / 1024).toFixed(1) + " GB"
+          : m.size_mb + " MB";
+        return `<option value="${m.id}" ${selected}>${m.display_name}${tag} · ${m.params} · 约 ${sizeStr}</option>`;
       })
       .join("");
 
-    container.querySelectorAll(".model-btn").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const modelId = btn.dataset.modelId;
-        const action = btn.dataset.action;
-        if (action === "delete") {
-          await deleteModel(modelId);
-        } else if (action === "use") {
-          await invoke("download_stt_model", { modelId });
-          loadLocalModels(cfg);
-        }
-      });
-    });
-  }
-
-  async function deleteModel(modelId) {
-    try {
-      await invoke("delete_stt_model", { modelId });
-      loadLocalModels(config);
-    } catch (e) {
-      console.error("delete_stt_model failed:", e);
+    // 如果当前没有选中的，默认选第一个
+    if (!models.some((m) => m.is_selected) && models.length > 0) {
+      select.value = models[0].id;
     }
+
+    select.addEventListener("change", async () => {
+      const modelId = select.value;
+      if (!modelId) return;
+      try {
+        await invoke("download_stt_model", { modelId });
+        const m = models.find((m) => m.id === modelId);
+        if (m) {
+          appendLog(`[Blink] 已选择模型: ${m.display_name}（首次启动服务时自动下载）`);
+          // 同步 config
+          cfg.local_engine.funasr_model = m.funasr_model_id;
+          cfg.local_model_id = modelId;
+          // 如果服务正在运行，提示重启
+          const isRunning = startBtn?.classList.contains("running");
+          if (isRunning) {
+            appendLog("[Blink] 模型已切换，请先停止再重新启动服务以加载新模型");
+          }
+        }
+      } catch (e) {
+        console.error("download_stt_model failed:", e);
+      }
+    });
   }
 }
 
@@ -303,6 +284,25 @@ async function initFunasrEnv(config) {
       const isRunning = startBtn?.classList.contains("running");
       if (isRunning) {
         appendLog("[Blink] 服务正在运行，切换设备后请先停止再重新启动");
+      }
+    });
+  }
+
+  // ── 自动启动服务开关 ──
+  const autoStartToggle = document.getElementById("funasr-auto-start-toggle");
+  if (autoStartToggle) {
+    autoStartToggle.checked = config.local_engine.auto_start_server || false;
+    autoStartToggle.addEventListener("change", () => {
+      config.local_engine.auto_start_server = autoStartToggle.checked;
+      invoke("set_stt_config", { config }).catch(console.error);
+      if (autoStartToggle.checked) {
+        appendLog("[Blink] 已开启自动启动服务，Blink 启动时会自动在后台启动 funasr-server");
+        // 如果服务还没启动，立即启动一次
+        const isRunning = startBtn?.classList.contains("running");
+        if (!isRunning && startBtn) {
+          appendLog("[Blink] 立即启动服务...");
+          startBtn.click();
+        }
       }
     });
   }

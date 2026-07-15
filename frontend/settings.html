@@ -795,17 +795,28 @@
             <!-- FunASR 服务 -->
             <h3 class="subsection-title">FunASR 服务</h3>
             <p class="setting-hint">环境就绪后，点击「启动服务」。首次启动会自动从 ModelScope 下载模型（国内 CDN，稳定）。启动后服务常驻后台，下次使用无需重启。</p>
-            <div class="setting-row">
-              <label class="setting-label">推理设备<span class="field-hint-icon" title="CPU 通用性好且内存占用低；CUDA 需 NVIDIA GPU + CUDA Toolkit，推理更快。切换后需重启服务生效。">ⓘ</span></label>
-              <select id="funasr-device-select">
-                <option value="cpu" selected>CPU</option>
-                <option value="cuda">CUDA (GPU)</option>
-              </select>
+            <div class="setting-row-funasr">
+              <div class="setting-row-item">
+                <label class="setting-label">模型</label>
+                <select id="funasr-model-select"></select>
+              </div>
+              <div class="setting-row-item">
+                <label class="setting-label">推理设备<span class="field-hint-icon" title="CPU 通用性好且内存占用低；CUDA 需 NVIDIA GPU + CUDA Toolkit，推理更快。切换后需重启服务生效。">ⓘ</span></label>
+                <select id="funasr-device-select">
+                  <option value="cpu" selected>CPU</option>
+                  <option value="cuda">CUDA (GPU)</option>
+                </select>
+              </div>
             </div>
             <div class="engine-status-row">
               <div id="funasr-server-status-info" class="engine-status-info">
                 <span id="funasr-server-status-text" class="engine-status-text"></span>
               </div>
+              <label class="engine-auto-start-label" title="开启后 Blink 启动时自动在后台启动 funasr-server（延迟 5s 懒加载）">自动启动</label>
+              <label class="switch switch-sm">
+                <input type="checkbox" id="funasr-auto-start-toggle" />
+                <span class="slider"></span>
+              </label>
               <button type="button" id="funasr-start-btn" class="engine-download-btn">启动服务</button>
               <button type="button" id="funasr-stop-btn" class="engine-download-btn" disabled>停止服务</button>
             </div>
@@ -822,11 +833,6 @@
               </div>
               <pre id="voice-server-log" class="voice-server-log"></pre>
             </div>
-
-            <!-- 模型选择 -->
-            <h3 class="subsection-title">模型选择</h3>
-            <p class="setting-hint">选择 FunASR 模型。模型在首次启动服务时由 FunASR 自动从 ModelScope 下载。</p>
-            <div id="voice-models-list" class="model-list"></div>
 
             <!-- 空间管理 -->
             <h3 class="subsection-title">空间管理</h3>

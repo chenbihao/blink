@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "secondary-windows",
+  "description": "次级窗口（voice-overlay / chord-ball / chord-screenshot / context-menu-popup）的 capability。这些窗口需要 core:default 来接收 Tauri 事件（blink://voice-level / voice-partial / chord-translate 等）和调用 invoke。不授予窗口操作权限（拖拽/调尺寸），避免与 main 窗口混淆。",
+  "windows": ["voice-overlay", "chord-ball", "chord-screenshot", "contextmenu-popup"],
+  "permissions": ["core:default"]
+}

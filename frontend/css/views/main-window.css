@@ -203,14 +203,7 @@ body.chord-visible #ghost-overlay:has(.ghost-suggest:empty) .ghost-chord:not(:em
   align-items: center;
 }
 
-.voice-indicator .vw-bar {
-  width: 3px;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--green);
-  transition: height 0.08s ease-out;
-  min-height: 4px;
-}
+/* .vw-bar 样式已抽到 css/components/voice-wave.css（G1 + G2 共用） */
 
 .voice-indicator .voice-label {
   font-size: var(--text-xs);

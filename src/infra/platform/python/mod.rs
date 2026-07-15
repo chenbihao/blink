@@ -38,6 +38,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 /// Blink 管理的 Python 版本。
 ///
@@ -193,7 +194,7 @@ fn get_uv_version(uv_path: &Path) -> Option<String> {
 
 /// 下载并安装 uv 到本地目录。
 ///
-/// 从 GitHub releases 下载 uv zip 包，用 PowerShell `Expand-Archive` 解压，
+/// 从 GitHub releases 下载 uv zip 包，用纯 Rust `zip` crate 解压，
 /// 提取 `uv.exe` 到 `%APPDATA%\blink\python\uv\uv.exe`。
 pub async fn install_uv() -> Result<PathBuf, String> {
     let uv_dir = uv_install_dir();
@@ -225,12 +226,7 @@ pub async fn install_uv() -> Result<PathBuf, String> {
 
     tracing::info!(size = zip_bytes.len(), "uv zip 下载完成");
 
-    // ── 保存 zip 到临时文件 ──
-    let zip_path = uv_dir.join("uv_download.zip");
-    std::fs::write(&zip_path, &zip_bytes)
-        .map_err(|e| format!("保存 uv zip 失败: {e}"))?;
-
-    // ── 用 PowerShell Expand-Archive 解压 ──
+    // ── 用 zip crate 解压（纯 Rust，无 PowerShell 依赖）──
     let extract_dir = uv_dir.join("extract");
     if extract_dir.exists() {
         let _ = std::fs::remove_dir_all(&extract_dir);
@@ -238,25 +234,36 @@ pub async fn install_uv() -> Result<PathBuf, String> {
     std::fs::create_dir_all(&extract_dir)
         .map_err(|e| format!("创建解压目录失败: {e}"))?;
 
-    let ps_cmd = format!(
-        "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
-        zip_path.display(),
-        extract_dir.display()
-    );
+    let cursor = std::io::Cursor::new(&zip_bytes[..]);
+    let mut archive = zip::ZipArchive::new(cursor)
+        .map_err(|e| format!("打开 zip 失败: {e}"))?;
 
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
-        .output()
-        .map_err(|e| format!("启动 PowerShell 解压失败: {e}"))?;
+    for i in 0..archive.len() {
+        let mut file = archive
+            .by_index(i)
+            .map_err(|e| format!("读取 zip 条目失败: {e}"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(format!(
-            "解压 uv zip 失败: exit={:?}, stderr={stderr}, stdout={stdout}",
-            output.status.code()
-        ));
+        let outpath = match file.enclosed_name() {
+            Some(path) => extract_dir.join(path),
+            None => continue,
+        };
+
+        if file.is_dir() {
+            std::fs::create_dir_all(&outpath)
+                .map_err(|e| format!("创建目录失败: {e}"))?;
+        } else {
+            if let Some(parent) = outpath.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("创建父目录失败: {e}"))?;
+            }
+            let mut outfile = std::fs::File::create(&outpath)
+                .map_err(|e| format!("创建文件失败: {e}"))?;
+            std::io::copy(&mut file, &mut outfile)
+                .map_err(|e| format!("写入文件失败: {e}"))?;
+        }
     }
+
+    tracing::info!("uv zip 解压完成（纯 Rust zip crate）");
 
     // ── 在解压目录中查找 uv.exe ──
     let uv_exe = find_file_recursive(&extract_dir, "uv.exe")
@@ -268,7 +275,6 @@ pub async fn install_uv() -> Result<PathBuf, String> {
         .map_err(|e| format!("复制 uv.exe 失败: {e}"))?;
 
     // ── 清理临时文件 ──
-    let _ = std::fs::remove_file(&zip_path);
     let _ = std::fs::remove_dir_all(&extract_dir);
 
     tracing::info!(path = %target.display(), "uv 安装完成");
@@ -395,6 +401,130 @@ async fn install_packages_inner(
             "安装包失败 (exit={:?}):\nstdout: {stdout}\nstderr: {stderr}",
             output.status.code()
         ));
+    }
+
+    tracing::info!("Python 包安装完成");
+    Ok(())
+}
+
+// ── CUDA 检测 ────────────────────────────────────────────────────────────
+
+/// 检测系统是否有 NVIDIA GPU 及 CUDA 版本。
+///
+/// 通过运行 `nvidia-smi` 并解析输出中的 CUDA 版本。
+/// 兼容新旧驱动格式：
+/// - 旧：`CUDA Version: 12.2`
+/// - 新：`CUDA UMD Version: 13.3`
+/// 返回 CUDA 版本字符串（如 "12.2" / "13.3"），无 GPU 时返回 None。
+pub fn detect_cuda() -> Option<String> {
+    let output = Command::new("nvidia-smi").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        // 匹配 "CUDA Version: X.Y" 或 "CUDA UMD Version: X.Y"
+        if line.contains("CUDA") && line.contains("Version:") {
+            // 取 "Version:" 后面的版本号
+            if let Some(idx) = line.find("Version:") {
+                let rest = &line[idx + "Version:".len()..];
+                // 跳过空格，取第一个数字串（如 "12.2" 或 "13.3"）
+                let version = rest
+                    .trim_start()
+                    .split_whitespace()
+                    .next()?
+                    .trim_end_matches('|')
+                    .trim();
+                if !version.is_empty() && version.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                    return Some(version.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 检查 uv 是否支持 `--torch-backend` 参数（uv ≥ 0.4.0）。
+///
+/// 通过 `uv pip install --help` 输出中是否包含 `--torch-backend` 判定。
+fn uv_supports_torch_backend(uv_path: &Path) -> bool {
+    let output = match Command::new(uv_path)
+        .args(["pip", "install", "--help"])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.contains("--torch-backend")
+}
+
+// ── 流式安装 ──────────────────────────────────────────────────────────────
+
+/// 在 venv 中安装 Python 包，stdout/stderr 实时逐行转发到 `on_log`。
+///
+/// 比 [`install_packages`] 多了日志流式输出——安装 torch + funasr 可能 5-10 分钟，
+/// 用户可以实时看到 uv 的安装进度行（如 `Downloading torch-2.x.x`、`Resolved 47 packages`）。
+async fn install_packages_streaming(
+    uv_path: &Path,
+    packages: &[&str],
+    extra_args: &[&str],
+    on_log: &Arc<dyn Fn(&str) + Send + Sync>,
+) -> Result<(), String> {
+    let python = venv_python()
+        .ok_or_else(|| "venv 未创建，无法安装包".to_string())?;
+
+    tracing::info!(packages = ?packages, extra_args = ?extra_args, "安装 Python 包（流式）...");
+
+    let mut cmd = tokio::process::Command::new(uv_path);
+    cmd.args(["pip", "install", "--python"]).arg(&python);
+    cmd.args(extra_args);
+    cmd.args(packages);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("执行 uv pip install 失败: {e}"))?;
+
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+
+    // 并发读取 stdout + stderr，逐行转发到 on_log
+    let on_log1 = Arc::clone(on_log);
+    let stdout_task = tokio::spawn(async move {
+        let reader = tokio::io::BufReader::new(stdout);
+        use tokio::io::AsyncBufReadExt;
+        let mut lines = reader.lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            on_log1(&line);
+        }
+    });
+
+    let on_log2 = Arc::clone(on_log);
+    let stderr_task = tokio::spawn(async move {
+        let reader = tokio::io::BufReader::new(stderr);
+        use tokio::io::AsyncBufReadExt;
+        let mut lines = reader.lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            on_log2(&line);
+        }
+    });
+
+    // 等待进程结束（带超时）
+    let status = tokio::time::timeout(
+        std::time::Duration::from_secs(PIP_INSTALL_TIMEOUT_SECS),
+        child.wait(),
+    )
+    .await
+    .map_err(|_| format!("安装包超时（{PIP_INSTALL_TIMEOUT_SECS}s），可能网络较慢，请重试"))?
+    .map_err(|e| format!("等待 uv pip install 完成失败: {e}"))?;
+
+    // 等待读取 task 排空剩余输出
+    let _ = tokio::join!(stdout_task, stderr_task);
+
+    if !status.success() {
+        return Err(format!("安装包失败 (exit={:?})", status.code()));
     }
 
     tracing::info!("Python 包安装完成");
@@ -535,58 +665,152 @@ pub async fn check_status_async() -> PythonEnvStatus {
 
 // ── 一键设置 ─────────────────────────────────────────────────────────────
 
-/// 一键设置完整 Python 环境。
+/// 一键设置完整 Python 环境（无进度回调）。
+///
+/// 内部调用 [`setup_with_progress`]，传入 no-op 回调。
+/// 需要进度/日志通知的场景（如设置页）直接调用 [`setup_with_progress`]。
+pub async fn setup(device: &str) -> Result<(), String> {
+    let on_progress: Arc<dyn Fn(&str, &str) + Send + Sync> = Arc::new(|_, _| ());
+    let on_log: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(|_| ());
+    setup_with_progress(device, on_progress, on_log).await
+}
+
+/// 一键设置完整 Python 环境，带进度 + 日志回调。
 ///
 /// 步骤：
 /// 1. 确保 uv 可用（查找 → 下载安装）
 /// 2. 创建 venv（uv 自动下载 Python 3.12）
-/// 3. 安装 PyTorch（CPU 或 CUDA 版，取决于 `device` 参数）
-/// 4. 安装 funasr + fastapi + uvicorn + python-multipart（funasr-server 依赖）
+/// 3. 安装所有包（funasr + fastapi + uvicorn + python-multipart + torch）
 ///
-/// 此函数是幂等的：如果环境已就绪，直接返回 Ok。
+/// **torch 安装策略**（B1 改进）：
+/// - 若 uv 支持 `--torch-backend`（≥0.4.0）：一条命令安装所有包，
+///   `--torch-backend=auto` 让 uv 自动检测 CUDA 版本并选择正确的 PyTorch 变体。
+///   CPU 用户用 `--torch-backend=cpu`。
+/// - 否则（旧版 uv）：回退到两步安装（先 torch 从 pytorch.org index，
+///   再 funasr 从 PyPI）。
 ///
-/// `device` 参数控制 PyTorch 版本："cpu" 安装 CPU 版（~200MB），"cuda" 安装 CUDA 版（~2GB）。
-pub async fn setup(device: &str) -> Result<(), String> {
+/// `on_progress(stage, status)`：阶段进度（如 `("uv", "done")`）。
+/// `on_log(line)`：安装过程中的逐行日志输出（含 uv 的 `Downloading...` 行）。
+pub async fn setup_with_progress(
+    device: &str,
+    on_progress: Arc<dyn Fn(&str, &str) + Send + Sync>,
+    on_log: Arc<dyn Fn(&str) + Send + Sync>,
+) -> Result<(), String> {
     // 快速检查：如果已就绪，跳过
     let status = check_status();
     if status.env_ready {
         tracing::info!("Python 环境已就绪，跳过安装");
+        on_progress("complete", "ready");
         return Ok(());
     }
 
     // Step 1: uv
-    let uv_path = ensure_uv().await?;
-    tracing::info!(uv = %uv_path.display(), "uv 就绪");
+    if !status.uv_available {
+        on_progress("uv", "starting");
+        on_log("[Blink] 下载安装 uv 中...");
+        match ensure_uv().await {
+            Ok(path) => {
+                tracing::info!(path = %path.display(), "uv 安装完成");
+                on_log(&format!("[Blink] ✅ uv 安装完成: {}", path.display()));
+            }
+            Err(e) => {
+                on_progress("error", &e);
+                on_log(&format!("[Blink] ❌ uv 安装失败: {e}"));
+                return Err(e);
+            }
+        }
+    }
+    on_progress("uv", "done");
+
+    let uv_path = find_uv().ok_or("uv 不可用")?;
 
     // Step 2: venv
-    create_venv(&uv_path).await?;
-    tracing::info!("venv 就绪");
+    if !status.venv_exists {
+        on_progress("venv", "starting");
+        on_log("[Blink] 创建 Python 3.12 虚拟环境...");
+        if let Err(e) = create_venv(&uv_path).await {
+            on_progress("error", &e);
+            on_log(&format!("[Blink] ❌ venv 创建失败: {e}"));
+            return Err(e);
+        }
+    }
+    on_progress("venv", "done");
+    on_log("[Blink] ✅ Python venv 就绪");
 
-    // Step 3: torch（CPU 或 CUDA 版）
-    // funasr 依赖 torch 但不通过 pip 依赖声明（ML 包惯例），需手动安装。
-    if !check_torch().0 {
-        let is_cuda = device == "cuda";
-        let (index_url, desc) = if is_cuda {
-            ("https://download.pytorch.org/whl/cu121", "CUDA")
+    // Step 3: 安装包（torch + funasr）
+    if !status.torch_installed || !status.funasr_installed {
+        let supports_tbb = uv_supports_torch_backend(&uv_path);
+
+        if supports_tbb {
+            // ── 新方案：一条命令 + --torch-backend ──
+            let backend = if device == "cuda" {
+                match detect_cuda() {
+                    Some(v) => {
+                        on_log(&format!("[Blink] 检测到 CUDA {v}，使用 GPU 加速"));
+                        "auto" // uv 自动匹配 CUDA 版本
+                    }
+                    None => {
+                        on_log("[Blink] ⚠️ 未检测到 CUDA，使用 CPU 版 PyTorch");
+                        "cpu"
+                    }
+                }
+            } else {
+                "cpu"
+            };
+
+            on_progress("packages", "installing");
+            let desc = if backend == "auto" { "PyTorch (CUDA auto) + funasr" } else { "PyTorch (CPU) + funasr" };
+            on_log(&format!("[Blink] 安装 {desc}...（这可能需要几分钟）"));
+
+            install_packages_streaming(
+                &uv_path,
+                // torch + torchaudio 必须显式列出——funasr 不声明 torch 依赖（ML 包惯例），
+                // --torch-backend 只控制 torch 包的 index，不会自动把 torch 加入安装列表。
+                &["torch", "torchaudio", "funasr", "fastapi", "uvicorn", "python-multipart"],
+                &["--torch-backend", backend],
+                &on_log,
+            )
+            .await?;
         } else {
-            (TORCH_CPU_INDEX_URL, "CPU")
-        };
-        tracing::info!(device = %desc, "安装 PyTorch...");
-        install_packages_with_index(
-            &uv_path,
-            &["torch", "torchaudio"],
-            index_url,
-        )
-        .await?;
-    }
-    tracing::info!("PyTorch 安装完成");
+            // ── 回退：旧版 uv 两步安装 ──
+            on_log("[Blink] ⚠️ uv 版本较旧，使用两步安装（torch + funasr）");
 
-    // Step 4: funasr + server 依赖
-    // funasr-server 需要 fastapi/uvicorn/python-multipart，但 funasr 包不声明这些依赖。
-    if !check_funasr().0 {
-        install_packages(&uv_path, &["funasr", "fastapi", "uvicorn", "python-multipart"]).await?;
+            // Step 3a: torch
+            if !status.torch_installed {
+                let is_cuda = device == "cuda";
+                let (index_url, desc) = if is_cuda {
+                    ("https://download.pytorch.org/whl/cu121", "PyTorch CUDA 版（~2GB，请耐心等待）")
+                } else {
+                    (TORCH_CPU_INDEX_URL, "PyTorch CPU 版（~200MB）")
+                };
+                on_progress("torch", "installing");
+                on_log(&format!("[Blink] 安装 {desc}..."));
+                install_packages_with_index(
+                    &uv_path,
+                    &["torch", "torchaudio"],
+                    index_url,
+                )
+                .await?;
+            }
+            on_progress("torch", "done");
+            on_log("[Blink] ✅ PyTorch 安装完成");
+
+            // Step 3b: funasr + server 依赖
+            if !status.funasr_installed {
+                on_progress("funasr", "installing");
+                on_log("[Blink] 安装 funasr + fastapi + uvicorn...");
+                install_packages(
+                    &uv_path,
+                    &["funasr", "fastapi", "uvicorn", "python-multipart"],
+                )
+                .await?;
+            }
+        }
     }
-    tracing::info!("funasr 安装完成");
+
+    on_progress("packages", "done");
+    on_progress("complete", "ready");
+    on_log("[Blink] ✅ Python 环境安装完成，可以启动服务了");
 
     tracing::info!("Python 环境设置完成");
     Ok(())

@@ -2360,7 +2360,7 @@ pub async fn start_audio_test(
                     "音频测试: 收到首个 chunk"
                 );
             } else if chunk_count % 10 == 0 {
-                tracing::debug!(
+                tracing::trace!(
                     chunk_count,
                     level = format!("{:.3}", level),
                     max_level = format!("{:.3}", max_level),
@@ -2430,97 +2430,28 @@ pub async fn get_funasr_env() -> crate::domain::stt::funasr::FunasrEnv {
 pub async fn setup_python_env(app: tauri::AppHandle) -> Result<(), String> {
     use tauri::Emitter;
 
-    let emit_progress = |stage: &str, status: &str| {
-        let _ = app.emit(
-            "blink://python-env-progress",
-            serde_json::json!({ "stage": stage, "status": status }),
-        );
-    };
+    // 进度回调：转发到前端 blink://python-env-progress
+    let app_progress = app.clone();
+    let on_progress: std::sync::Arc<dyn Fn(&str, &str) + Send + Sync> =
+        std::sync::Arc::new(move |stage, status| {
+            let _ = app_progress.emit(
+                "blink://python-env-progress",
+                serde_json::json!({ "stage": stage, "status": status }),
+            );
+        });
 
-    let emit_log = |line: &str| {
-        let _ = app.emit(
-            "blink://funasr-server-log",
-            serde_json::json!({ "line": line }),
-        );
-    };
+    // 日志回调：转发到前端 blink://funasr-server-log（含 uv 逐行安装进度）
+    let app_log = app.clone();
+    let on_log: std::sync::Arc<dyn Fn(&str) + Send + Sync> =
+        std::sync::Arc::new(move |line| {
+            let _ = app_log.emit(
+                "blink://funasr-server-log",
+                serde_json::json!({ "line": line }),
+            );
+        });
 
-    let py = crate::infra::platform::python::check_status_async().await;
-
-    // Step 1: uv
-    if !py.uv_available {
-        emit_progress("uv", "starting");
-        emit_log("[Blink] 下载安装 uv 中...");
-        match crate::infra::platform::python::ensure_uv().await {
-            Ok(path) => {
-                tracing::info!(path = %path.display(), "uv 安装完成");
-                emit_log(&format!("[Blink] ✅ uv 安装完成: {}", path.display()));
-            }
-            Err(e) => {
-                emit_progress("error", &e);
-                emit_log(&format!("[Blink] ❌ uv 安装失败: {e}"));
-                return Err(e);
-            }
-        }
-    }
-    emit_progress("uv", "done");
-
-    // Step 2: venv
-    let uv_path = crate::infra::platform::python::find_uv()
-        .ok_or_else(|| "uv 不可用".to_string())?;
-
-    if !py.venv_exists {
-        emit_progress("venv", "starting");
-        emit_log("[Blink] 创建 Python 3.12 虚拟环境...");
-        if let Err(e) = crate::infra::platform::python::create_venv(&uv_path).await {
-            emit_progress("error", &e);
-            emit_log(&format!("[Blink] ❌ venv 创建失败: {e}"));
-            return Err(e);
-        }
-    }
-    emit_progress("venv", "done");
-    emit_log("[Blink] ✅ Python venv 就绪");
-
-    // Step 3: torch
-    // 安装 CPU 或 CUDA 版 PyTorch，取决于配置的设备
-    if !py.torch_installed {
-        let device = crate::app::stt_config::get_stt_config().local_engine.device;
-        let is_cuda = device == "cuda";
-        let (torch_index, torch_desc) = if is_cuda {
-            ("https://download.pytorch.org/whl/cu121", "PyTorch CUDA 版（~2GB，请耐心等待）")
-        } else {
-            ("https://download.pytorch.org/whl/cpu", "PyTorch CPU 版（~200MB，请耐心等待）")
-        };
-        emit_progress("torch", "installing");
-        emit_log(&format!("[Blink] 安装 {}...", torch_desc));
-        if let Err(e) = crate::infra::platform::python::install_packages_with_index(
-            &uv_path,
-            &["torch", "torchaudio"],
-            torch_index,
-        ).await {
-            emit_progress("error", &e);
-            emit_log(&format!("[Blink] ❌ PyTorch 安装失败: {e}"));
-            return Err(e);
-        }
-    }
-    emit_progress("torch", "done");
-    emit_log("[Blink] ✅ PyTorch 安装完成");
-
-    // Step 4: funasr + server 依赖
-    if !py.funasr_installed {
-        emit_progress("funasr", "installing");
-        emit_log("[Blink] 安装 funasr + fastapi + uvicorn 中...");
-        if let Err(e) = crate::infra::platform::python::install_packages(&uv_path, &["funasr", "fastapi", "uvicorn", "python-multipart"]).await {
-            emit_progress("error", &e);
-            emit_log(&format!("[Blink] ❌ funasr 安装失败: {e}"));
-            return Err(e);
-        }
-    }
-    emit_progress("funasr", "done");
-    emit_progress("complete", "ready");
-    emit_log("[Blink] ✅ Python 环境安装完成，可以启动服务了");
-
-    tracing::info!("Python 环境一键安装完成");
-    Ok(())
+    let device = crate::app::stt_config::get_stt_config().local_engine.device;
+    crate::infra::platform::python::setup_with_progress(&device, on_progress, on_log).await
 }
 
 /// 启动 funasr-server 子进程。
@@ -2535,6 +2466,26 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
     let model = config.local_engine.funasr_model.clone();
     let port = config.local_engine.server_port;
     let device = config.local_engine.device.clone();
+
+    // CUDA 诊断：启动前确认 GPU 是否可用
+    if device == "cuda" {
+        match crate::infra::platform::python::detect_cuda() {
+            Some(v) => {
+                let _ = app.emit(
+                    "blink://funasr-server-log",
+                    serde_json::json!({ "line": format!("[Blink] ✅ 检测到 CUDA {v}，funasr-server 将使用 GPU 加速") }),
+                );
+                tracing::info!(cuda = %v, "CUDA 检测成功，使用 GPU 加速");
+            }
+            None => {
+                let _ = app.emit(
+                    "blink://funasr-server-log",
+                    serde_json::json!({ "line": "[Blink] ⚠️ 配置为 CUDA 模式但未检测到 NVIDIA GPU，funasr-server 将回退到 CPU" }),
+                );
+                tracing::warn!("配置为 CUDA 但未检测到 GPU，将回退到 CPU");
+            }
+        }
+    }
 
     // 检查 Python 环境是否就绪，未就绪则自动安装
     let py_status = crate::infra::platform::python::check_status_async().await;
@@ -2560,8 +2511,33 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
 
     let _ = app.emit(
         "blink://funasr-server-status",
-        serde_json::json!({ "stage": "starting", "model": model, "port": port }),
+        serde_json::json!({ "stage": "starting", "model": model, "port": port, "device": device }),
     );
+
+    // ── 防止重复启动：如果已有子进程在运行，直接返回 ──
+    {
+        let mut guard = FUNASR_SERVER_CHILD.lock().unwrap();
+        if let Some(child) = guard.as_mut() {
+            match child.try_wait() {
+                Ok(None) => {
+                    // 子进程仍在运行，不重复启动
+                    drop(guard);
+                    let _ = app.emit(
+                        "blink://funasr-server-status",
+                        serde_json::json!({ "stage": "already_running", "port": port }),
+                    );
+                    tracing::info!("funasr-server 子进程已在运行，跳过重复启动");
+                    return Ok(());
+                }
+                Ok(Some(_)) => {
+                    // 子进程已退出，清理后继续
+                    *guard = None;
+                    tracing::info!("检测到旧的 funasr-server 子进程已退出，清理后重新启动");
+                }
+                Err(_) => {}
+            }
+        }
+    }
 
     match crate::domain::stt::funasr::start_server(&model, port, &device).await {
         Ok(Some((child, mut log_rx))) => {
@@ -2699,6 +2675,19 @@ pub async fn stop_funasr_server() -> Result<(), String> {
     Ok(())
 }
 
+/// Blink 退出时同步停止 funasr-server 子进程（避免孤儿进程）。
+///
+/// 使用 `start_kill()`（非 async）——发送 kill 信号后不等待进程退出，
+/// 避免阻塞 app 退出。由 `main.rs` 的 `RunEvent::Exit` handler 调用。
+pub fn shutdown_funasr_server_blocking() {
+    let mut child_opt = FUNASR_SERVER_CHILD.lock().unwrap().take();
+    if let Some(child) = child_opt.as_mut() {
+        let _ = child.start_kill();
+        crate::domain::stt::funasr::mark_server_stopped();
+        tracing::info!("funasr-server 已在 Blink 退出时停止");
+    }
+}
+
 /// STT 诊断：检查 FunASR 环境 + 服务状态 + 配置。
 ///
 /// 返回详细诊断报告，帮助定位 "STT 不工作" 的具体原因：
@@ -2730,7 +2719,12 @@ pub async fn diagnose_stt() -> Result<serde_json::Value, String> {
     )
     .await;
 
-    let server_ready = crate::domain::stt::funasr::is_server_ready(port);
+    let server_ready_tcp = crate::domain::stt::funasr::is_server_ready(port);
+    let server_ready = if server_ready_tcp {
+        crate::domain::stt::funasr::is_server_ready_http(port).await
+    } else {
+        false
+    };
 
     // 同步诊断信息到 tracing 日志
     tracing::info!(
@@ -2892,18 +2886,19 @@ async fn test_audio_via_server(audio_url: &str, port: u16) -> Result<String, Str
         "诊断: WAV 解析完成"
     );
 
-    // 3. 创建引擎并分块喂入音频
-    let engine = crate::domain::stt::local::LocalSttEngine::for_diagnostic(port);
-    let chunk_size = 1600usize; // 100ms chunks
-    for chunk in samples.chunks(chunk_size) {
-        engine
-            .transcribe_chunk(chunk)
-            .map_err(|e| e.to_string())?;
-    }
+        // 3. 创建引擎并分块喂入音频
+        let engine = crate::domain::stt::local::LocalSttEngine::for_diagnostic(port);
+        let chunk_size = 1600usize; // 100ms chunks
+        for chunk in samples.chunks(chunk_size) {
+            engine
+                .transcribe_chunk(chunk)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
 
-    // 4. 调用 finalize → POST 到 funasr-server
-    tracing::info!("诊断: 调用 funasr-server 转录...");
-    let result = engine.finalize().map_err(|e| e.to_string())?;
+        // 4. 调用 finalize → POST 到 funasr-server
+        tracing::info!("诊断: 调用 funasr-server 转录...");
+        let result = engine.finalize().await.map_err(|e| e.to_string())?;
 
     Ok(result)
 }

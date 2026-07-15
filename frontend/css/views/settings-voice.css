@@ -298,6 +298,30 @@
   margin: 8px 0;
 }
 
+#voice .setting-row-funasr {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+#voice .setting-row-funasr .setting-row-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#voice .setting-row-funasr .setting-row-item select {
+  min-width: 280px;
+}
+
+#voice .engine-auto-start-label {
+  font-size: var(--text-sm, 13px);
+  color: var(--text-dim);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
 #voice .engine-status-info {
   flex: 1;
   min-width: 0;

@@ -505,7 +505,7 @@ pub fn show_voice_overlay(app: &AppHandle) {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
     match WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("voice-overlay.html".into()))
         .title("")
-        .inner_size(280.0, 100.0)
+        .inner_size(300.0, 140.0)
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
@@ -804,7 +804,7 @@ pub fn preheat_secondary_windows(app: AppHandle) {
             use tauri::{WebviewUrl, WebviewWindowBuilder};
             match WebviewWindowBuilder::new(&app, "voice-overlay", WebviewUrl::App("voice-overlay.html".into()))
                 .title("")
-                .inner_size(280.0, 100.0)
+                .inner_size(300.0, 140.0)
                 .decorations(false)
                 .transparent(true)
                 .always_on_top(true)

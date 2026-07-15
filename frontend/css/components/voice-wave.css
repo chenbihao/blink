@@ -1,0 +1,31 @@
+/* ── 语音波形条组件（G1 主窗口 + G2 mini overlay 共用）─────────────────────────
+   统一 5 条波形 + idle 呼吸动画 + JS 控制时自动禁用 idle。
+   G1 index.html 和 G2 voice-overlay.html 共用此类名和样式。 */
+
+.voice-wave {
+  display: flex;
+  gap: 2px;
+  height: 20px;
+  align-items: center;
+}
+
+.vw-bar {
+  width: 3px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--green, #a6e3a1);
+  transition: height 0.08s ease-out;
+  min-height: 4px;
+  /* idle 呼吸动画：JS 设置 inline style 后通过 [style] 选择器自动禁用 */
+  animation: vw-breathe 1.4s ease-in-out infinite;
+}
+
+@keyframes vw-breathe {
+  0%, 100% { height: 4px; opacity: 0.6; }
+  50% { height: 8px; opacity: 1; }
+}
+
+/* JS 接管后禁用 idle 动画 */
+.vw-bar[style] {
+  animation: none;
+}

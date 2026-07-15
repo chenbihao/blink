@@ -126,9 +126,14 @@ pub async fn get_env_status_async(server_port: u16, server_model: String) -> Fun
     }
 }
 
-/// 检查 funasr-server 是否在指定端口上响应。
+/// 检查 funasr-server 是否在指定端口上监听（TCP 级别）。
 ///
-/// 通过 TCP 连接检测端口是否在监听（比 HTTP 健康检查更轻量，且不需要 blocking feature）。
+/// **注意**：此函数只检查 TCP 端口是否可连接，**不验证 HTTP API 是否就绪**。
+/// `funasr-server` 启动后 uvicorn 先绑定 TCP 端口，但模型可能还在加载（30-60s），
+/// 此时 TCP 连接成功但 HTTP 请求会失败。
+///
+/// 用于快速预检（如 `LocalSttEngine::new` 中的快速失败判断）。
+/// 在需要确保 API 真正就绪的场景，使用 [`is_server_ready_http`]。
 pub fn is_server_ready(port: u16) -> bool {
     use std::net::TcpStream;
     use std::time::Duration;
@@ -140,6 +145,28 @@ pub fn is_server_ready(port: u16) -> bool {
     ) {
         Ok(_) => true,
         Err(_) => false,
+    }
+}
+
+/// 检查 funasr-server 的 HTTP API 是否真正就绪。
+///
+/// 通过 `GET /health` 端点验证：不仅 TCP 端口在监听，而且 FastAPI 应用已启动、
+/// 模型已加载。返回模型加载状态供调用方判断。
+///
+/// 在 `finalize`（async）中使用，确保转录请求不会因模型未加载而失败。
+pub async fn is_server_ready_http(port: u16) -> bool {
+    let url = format!("http://localhost:{port}/health");
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    match client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => true,
+        _ => false,
     }
 }
 
@@ -214,15 +241,21 @@ pub async fn start_server(
         "启动 funasr-server 子进程",
     );
 
+    // 构建启动命令并打印（方便排查）
+    let cmd_display = if use_exe {
+        format!("funasr-server --model {model} --port {port} --device {device}")
+    } else {
+        format!("python -m funasr.bin.server --model {model} --port {port} --device {device}")
+    };
+    tracing::info!("funasr-server 启动命令: {cmd_display}");
+
     let mut cmd = if use_exe {
-        // 直接用 funasr-server.exe
         let mut c = tokio::process::Command::new(&server_exe);
         c.args(["--model", model])
             .args(["--port", &port.to_string()])
             .args(["--device", device]);
         c
     } else {
-        // 回退：python -m funasr.bin.server
         let mut c = tokio::process::Command::new(&python);
         c.args(["-m", "funasr.bin.server"])
             .args(["--model", model])
@@ -230,6 +263,11 @@ pub async fn start_server(
             .args(["--device", device]);
         c
     };
+
+    // Python 输出无缓冲 + UTF-8 模式（修复 Windows 控制台中文乱码）
+    cmd.env("PYTHONUNBUFFERED", "1");
+    cmd.env("PYTHONUTF8", "1");
+    cmd.env("PYTHONIOENCODING", "utf-8");
 
     let mut child = cmd
         .stdout(std::process::Stdio::piped())
@@ -244,14 +282,29 @@ pub async fn start_server(
 
     let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
+    // 读取 stdout/stderr，拆分 \r 以捕获 tqdm 进度条（modelscope 下载进度用 \r 刷新同一行）
     if let Some(stdout) = stdout {
         let tx = log_tx.clone();
         tokio::spawn(async move {
             use tokio::io::{AsyncBufReadExt, BufReader};
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::info!(target: "funasr::stdout", "{}", line);
-                let _ = tx.send(line);
+            let mut reader = BufReader::new(stdout);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf).await {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let s = String::from_utf8_lossy(&buf);
+                        for part in s.split('\r') {
+                            let trimmed = part.trim_end_matches(['\n', '\r']);
+                            if !trimmed.is_empty() {
+                                tracing::info!(target: "funasr::stdout", "{}", trimmed);
+                                let _ = tx.send(trimmed.to_string());
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
             }
         });
     }
@@ -260,10 +313,24 @@ pub async fn start_server(
         let tx = log_tx.clone();
         tokio::spawn(async move {
             use tokio::io::{AsyncBufReadExt, BufReader};
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::info!(target: "funasr::stderr", "{}", line);
-                let _ = tx.send(line);
+            let mut reader = BufReader::new(stderr);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf).await {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let s = String::from_utf8_lossy(&buf);
+                        for part in s.split('\r') {
+                            let trimmed = part.trim_end_matches(['\n', '\r']);
+                            if !trimmed.is_empty() {
+                                tracing::info!(target: "funasr::stderr", "{}", trimmed);
+                                let _ = tx.send(trimmed.to_string());
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
             }
         });
     }

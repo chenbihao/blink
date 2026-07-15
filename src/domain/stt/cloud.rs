@@ -43,8 +43,9 @@ impl Default for CloudSttEngine {
     }
 }
 
+#[async_trait::async_trait]
 impl SttEngine for CloudSttEngine {
-    fn transcribe_chunk(&self, samples: &[f32]) -> Result<String, SttError> {
+    async fn transcribe_chunk(&self, samples: &[f32]) -> Result<String, SttError> {
         // 非流式模式：只累积，不返回 partial
         self.samples
             .lock()
@@ -53,7 +54,7 @@ impl SttEngine for CloudSttEngine {
         Ok(String::new())
     }
 
-    fn finalize(&self) -> Result<String, SttError> {
+    async fn finalize(&self) -> Result<String, SttError> {
         let samples = self.samples.lock().unwrap().clone();
         if samples.is_empty() {
             return Ok(String::new());
@@ -91,20 +92,13 @@ impl SttEngine for CloudSttEngine {
             "云端 STT 请求"
         );
 
-        // 使用 block_in_place 在 tokio 多线程运行时中执行 async HTTP
-        let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                transcribe_async(
-                    &url,
-                    &api_key.expose(),
-                    &provider.model_id,
-                    &wav_bytes,
-                )
-                .await
-            })
-        });
-
-        result
+        transcribe_async(
+            &url,
+            &api_key.expose(),
+            &provider.model_id,
+            &wav_bytes,
+        )
+        .await
     }
 
     fn reset(&self) {
@@ -257,15 +251,15 @@ mod tests {
         assert_eq!(s1, -32767); // clamped to min
     }
 
-    #[test]
-    fn cloud_engine_accumulates_and_resets() {
+    #[tokio::test]
+    async fn cloud_engine_accumulates_and_resets() {
         let engine = CloudSttEngine::new();
 
         // 累积样本（不返回 partial）
-        let result = engine.transcribe_chunk(&[0.1, 0.2, 0.3]).unwrap();
+        let result = engine.transcribe_chunk(&[0.1, 0.2, 0.3]).await.unwrap();
         assert!(result.is_empty());
 
-        engine.transcribe_chunk(&[0.4, 0.5]).unwrap();
+        engine.transcribe_chunk(&[0.4, 0.5]).await.unwrap();
 
         // reset 清空
         engine.reset();

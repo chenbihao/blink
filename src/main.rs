@@ -481,6 +481,23 @@ fn main() {
             // 后台预热次级窗口（3s 延迟，不阻塞启动；WebView2 冷启动 300~400ms → 预热后 show <50ms）
             infra::platform::window::preheat_secondary_windows(app.handle().clone());
 
+            // 0.10: 自动启动 funasr-server（懒加载，延迟 5s 避免与启动竞争资源）
+            {
+                let stt_config = app::stt_config::get_stt_config();
+                if stt_config.enabled
+                    && stt_config.mode == app::stt_config::SttMode::Local
+                    && stt_config.local_engine.auto_start_server
+                {
+                    let app_clone = app.handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        tracing::info!("自动启动 funasr-server（auto_start_server 已开启）");
+                        // 复用 start_funasr_server 命令逻辑（包含环境检查 + 子进程管理）
+                        let _ = app::commands::start_funasr_server(app_clone).await;
+                    });
+                }
+            }
+
             // 持有服务列表,保证其生命周期与 app 一致。
             app.manage(services);
 
@@ -576,8 +593,14 @@ app::commands::diagnose_stt,
 app::commands::get_stt_space_usage,
 app::commands::cleanup_stt_space,
 ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            if let tauri::RunEvent::Exit = event {
+                // Blink 退出时 kill funasr-server 子进程，避免孤儿进程
+                crate::app::commands::shutdown_funasr_server_blocking();
+            }
+        });
 }
 
 /// 打开设置窗口（委托给 window 模块统一实现）。

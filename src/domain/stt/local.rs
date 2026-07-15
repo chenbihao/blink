@@ -56,6 +56,8 @@ pub struct LocalSttEngine {
     sample_rate: u32,
     /// funasr-server 监听端口
     server_port: u16,
+    /// FunASR 模型标识（传给 /v1/audio/transcriptions 的 model 字段）
+    funasr_model: String,
     /// 是否已在创建时确认服务就绪
     server_ready: bool,
 }
@@ -67,6 +69,7 @@ impl LocalSttEngine {
     /// 如果服务未就绪，返回错误（提示用户在设置页启动服务）。
     pub fn new(config: &crate::app::stt_config::SttConfig) -> Result<Self, String> {
         let port = config.local_engine.server_port;
+        let model = config.local_engine.funasr_model.clone();
 
         let ready = super::funasr::is_server_ready(port);
         if !ready {
@@ -77,12 +80,13 @@ impl LocalSttEngine {
             ));
         }
 
-        tracing::info!(port, "本地 STT 引擎: FunASR server (就绪)");
+        tracing::info!(port, model = %model, "本地 STT 引擎: FunASR server (就绪)");
 
         Ok(Self {
             samples: Mutex::new(Vec::new()),
             sample_rate: 16000,
             server_port: port,
+            funasr_model: model,
             server_ready: true,
         })
     }
@@ -93,6 +97,7 @@ impl LocalSttEngine {
             samples: Mutex::new(Vec::new()),
             sample_rate: 16000,
             server_port: port,
+            funasr_model: "sensevoice".to_string(),
             server_ready: super::funasr::is_server_ready(port),
         }
     }
@@ -177,25 +182,19 @@ impl LocalSttEngine {
     /// 调用 FunASR server 的 OpenAI 兼容 API 做语音转录。
     ///
     /// 复用 CloudSttEngine 的 HTTP 逻辑，只是目标指向 localhost。
-    fn transcribe_via_server(&self, wav_bytes: &[u8]) -> Result<String, String> {
+    async fn transcribe_via_server(&self, wav_bytes: &[u8]) -> Result<String, String> {
         let base_url = super::funasr::server_base_url(self.server_port);
         let url = format!("{base_url}/audio/transcriptions");
 
         tracing::debug!(%url, samples = self.samples.lock().unwrap().len(), "FunASR 转录请求");
 
-        // 在 block_in_place 中执行 async HTTP
-        let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                transcribe_async(&url, &wav_bytes).await
-            })
-        });
-
-        result
+        transcribe_async(&url, &wav_bytes, &self.funasr_model).await
     }
 }
 
+#[async_trait::async_trait]
 impl SttEngine for LocalSttEngine {
-    fn transcribe_chunk(&self, samples: &[f32]) -> Result<String, SttError> {
+    async fn transcribe_chunk(&self, samples: &[f32]) -> Result<String, SttError> {
         // 非流式模式：只累积，不返回 partial
         self.samples
             .lock()
@@ -204,17 +203,17 @@ impl SttEngine for LocalSttEngine {
         Ok(String::new())
     }
 
-    fn finalize(&self) -> Result<String, SttError> {
+    async fn finalize(&self) -> Result<String, SttError> {
         let samples = self.samples.lock().unwrap().clone();
 
         if samples.is_empty() {
             return Ok(String::new());
         }
 
-        // 检查服务是否就绪
-        if !super::funasr::is_server_ready(self.server_port) {
+        // 检查服务 HTTP API 是否就绪（TCP 可连但模型可能还在加载）
+        if !super::funasr::is_server_ready_http(self.server_port).await {
             return Err(SttError::Engine(format!(
-                "FunASR 服务未就绪（端口 {}）。请在设置页启动服务。",
+                "FunASR 服务 HTTP API 未就绪（端口 {}）。模型可能仍在加载中，请稍后重试或在设置页检查状态。",
                 self.server_port
             )));
         }
@@ -232,6 +231,7 @@ impl SttEngine for LocalSttEngine {
         // 调用 FunASR server
         let text = self
             .transcribe_via_server(&wav_bytes)
+            .await
             .map_err(SttError::Engine)?;
 
         tracing::info!(
@@ -256,7 +256,7 @@ impl SttEngine for LocalSttEngine {
 /// 异步 HTTP 转录请求（OpenAI 兼容格式）。
 ///
 /// 与 CloudSttEngine::transcribe_async 类似，但不需要 API key。
-async fn transcribe_async(url: &str, wav_bytes: &[u8]) -> Result<String, String> {
+async fn transcribe_async(url: &str, wav_bytes: &[u8], model: &str) -> Result<String, String> {
     use reqwest::multipart;
 
     let part = multipart::Part::bytes(wav_bytes.to_vec())
@@ -265,7 +265,7 @@ async fn transcribe_async(url: &str, wav_bytes: &[u8]) -> Result<String, String>
         .map_err(|e| format!("multipart 构建失败: {e}"))?;
 
     let form = multipart::Form::new()
-        .text("model", "sensevoice") // funasr-server 忽略此字段，但 OpenAI 格式要求
+        .text("model", model.to_string())
         .part("file", part);
 
     let client = reqwest::Client::builder()
@@ -382,12 +382,12 @@ mod tests {
     }
 
     /// 验证 LocalSttEngine 的 transcribe_chunk + finalize 流程（不含 HTTP）。
-    #[test]
-    fn stt_engine_accumulates_samples() {
+    #[tokio::test]
+    async fn stt_engine_accumulates_samples() {
         let engine = LocalSttEngine::for_diagnostic(65535); // 不会被调用的端口
 
-        engine.transcribe_chunk(&[0.1, 0.2, 0.3]).unwrap();
-        engine.transcribe_chunk(&[0.4, 0.5]).unwrap();
+        engine.transcribe_chunk(&[0.1, 0.2, 0.3]).await.unwrap();
+        engine.transcribe_chunk(&[0.4, 0.5]).await.unwrap();
 
         let samples = engine.samples.lock().unwrap();
         assert_eq!(samples.len(), 5);
@@ -396,11 +396,11 @@ mod tests {
     }
 
     /// 验证 reset 清空累积的样本。
-    #[test]
-    fn stt_engine_reset_clears_samples() {
+    #[tokio::test]
+    async fn stt_engine_reset_clears_samples() {
         let engine = LocalSttEngine::for_diagnostic(65535);
 
-        engine.transcribe_chunk(&[0.1, 0.2, 0.3]).unwrap();
+        engine.transcribe_chunk(&[0.1, 0.2, 0.3]).await.unwrap();
         assert_eq!(engine.samples.lock().unwrap().len(), 3);
 
         engine.reset();
@@ -491,12 +491,12 @@ mod tests {
         // 模拟 transcribe_chunk（累积）
         let chunk_size = 1600usize; // 100ms
         for chunk in samples.chunks(chunk_size) {
-            engine.transcribe_chunk(chunk).unwrap();
+            engine.transcribe_chunk(chunk).await.unwrap();
         }
 
         // finalize → POST 到 funasr-server
         eprintln!("调用 funasr-server 转录...");
-        let result = engine.finalize();
+        let result = engine.finalize().await;
 
         match &result {
             Ok(text) => {

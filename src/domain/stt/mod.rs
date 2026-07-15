@@ -66,15 +66,19 @@ impl std::error::Error for SttError {}
 /// STT 引擎 trait。
 ///
 /// 生命周期: `reset` → 多次 `transcribe_chunk` → `finalize` → (下次) `reset`。
+///
+/// `transcribe_chunk` 和 `finalize` 为 async——非流式引擎在 chunk 中累积音频,
+/// finalize 时一次性 HTTP 请求返回;流式引擎(0.10.3+)在 chunk 中实时返回 partial。
+#[async_trait::async_trait]
 pub trait SttEngine: Send + Sync {
     /// 接收一段音频 chunk,返回当前累积识别的 partial text。
     ///
     /// 流式模式下每次调用返回逐步完善的文本;
     /// 非流式模式下可以累积音频,在 `finalize` 时一次性返回。
-    fn transcribe_chunk(&self, samples: &[f32]) -> Result<String, SttError>;
+    async fn transcribe_chunk(&self, samples: &[f32]) -> Result<String, SttError>;
 
     /// 录音结束,返回最终识别文本。
-    fn finalize(&self) -> Result<String, SttError>;
+    async fn finalize(&self) -> Result<String, SttError>;
 
     /// 重置引擎状态(新录音会话前调用)。
     fn reset(&self);

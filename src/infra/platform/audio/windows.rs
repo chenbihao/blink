@@ -179,7 +179,7 @@ fn capture_thread(
                 return;
             }
             let f32_data = convert_to_f32(data, sample_format);
-            log_raw_diag(&f32_data, &cb_diag);
+            // log_raw_diag(&f32_data, &cb_diag);
             process_and_send(
                 &f32_data,
                 in_channels,
@@ -307,7 +307,7 @@ fn log_raw_diag(data: &[f32], counter: &AtomicU32) {
         .map(|s| format!("{:+.6}", s))
         .collect::<Vec<_>>()
         .join(", ");
-    tracing::info!(
+    tracing::trace!(
         callback = n,
         len,
         all_zero,
