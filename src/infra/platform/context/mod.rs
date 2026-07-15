@@ -110,8 +110,14 @@ impl AwarenessSnapshot {
             .filter(|t| t.source == source)
             .find_map(|t| {
                 let trimmed = t.text.trim();
-                if trimmed.is_empty() { None } else {
-                    Some(AwarenessView { source, text: trimmed, captured_at: t.captured_at })
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(AwarenessView {
+                        source,
+                        text: trimmed,
+                        captured_at: t.captured_at,
+                    })
                 }
             })
     }
@@ -333,7 +339,10 @@ mod tests {
         let mut s = AwarenessSnapshot::with_clipboard("CLIP");
         s.upsert_text(AwarenessSource::Selection, Some("SEL".into()));
         assert_eq!(s.find_text(AwarenessSource::Selection).unwrap().text, "SEL");
-        assert_eq!(s.find_text(AwarenessSource::Clipboard).unwrap().text, "CLIP");
+        assert_eq!(
+            s.find_text(AwarenessSource::Clipboard).unwrap().text,
+            "CLIP"
+        );
     }
 
     #[test]

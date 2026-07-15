@@ -55,25 +55,23 @@ pub fn pcm_to_wav(samples: &[f32], sample_rate: u32, channels: u16) -> Vec<u8> {
 /// 与 [`pcm_to_wav`] 使用相同的编码逻辑，但直接写入文件而非返回字节。
 /// 供诊断命令写测试音频文件使用。
 #[allow(dead_code)]
-pub fn write_wav_file(
-    path: &Path,
-    samples: &[f32],
-    sample_rate: u32,
-) -> Result<(), String> {
+pub fn write_wav_file(path: &Path, samples: &[f32], sample_rate: u32) -> Result<(), String> {
     let data_len = samples.len() * 2; // 16-bit = 2 bytes/sample
     let file_size = 36 + data_len as u32;
 
-    let mut file = std::fs::File::create(path)
-        .map_err(|e| format!("创建 WAV 文件失败: {e}"))?;
+    let mut file = std::fs::File::create(path).map_err(|e| format!("创建 WAV 文件失败: {e}"))?;
 
     // RIFF header
-    file.write_all(b"RIFF").map_err(|e| format!("写 RIFF 失败: {e}"))?;
+    file.write_all(b"RIFF")
+        .map_err(|e| format!("写 RIFF 失败: {e}"))?;
     file.write_all(&file_size.to_le_bytes())
         .map_err(|e| format!("写 file_size 失败: {e}"))?;
-    file.write_all(b"WAVE").map_err(|e| format!("写 WAVE 失败: {e}"))?;
+    file.write_all(b"WAVE")
+        .map_err(|e| format!("写 WAVE 失败: {e}"))?;
 
     // fmt chunk
-    file.write_all(b"fmt ").map_err(|e| format!("写 fmt 失败: {e}"))?;
+    file.write_all(b"fmt ")
+        .map_err(|e| format!("写 fmt 失败: {e}"))?;
     file.write_all(&16u32.to_le_bytes())
         .map_err(|e| format!("写 chunk_size 失败: {e}"))?;
     file.write_all(&1u16.to_le_bytes())
@@ -91,7 +89,8 @@ pub fn write_wav_file(
         .map_err(|e| format!("写 bits_per_sample 失败: {e}"))?;
 
     // data chunk
-    file.write_all(b"data").map_err(|e| format!("写 data 失败: {e}"))?;
+    file.write_all(b"data")
+        .map_err(|e| format!("写 data 失败: {e}"))?;
     file.write_all(&(data_len as u32).to_le_bytes())
         .map_err(|e| format!("写 data_size 失败: {e}"))?;
 
@@ -102,7 +101,8 @@ pub fn write_wav_file(
         let i16_sample = (clamped * 32767.0) as i16;
         pcm.extend_from_slice(&i16_sample.to_le_bytes());
     }
-    file.write_all(&pcm).map_err(|e| format!("写 PCM 数据失败: {e}"))?;
+    file.write_all(&pcm)
+        .map_err(|e| format!("写 PCM 数据失败: {e}"))?;
 
     Ok(())
 }
@@ -125,9 +125,12 @@ pub fn parse_wav_to_f32(data: &[u8]) -> Result<Vec<f32>, String> {
 
     while offset + 8 <= data.len() {
         let chunk_id = &data[offset..offset + 4];
-        let chunk_size =
-            u32::from_le_bytes([data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7]])
-                as usize;
+        let chunk_size = u32::from_le_bytes([
+            data[offset + 4],
+            data[offset + 5],
+            data[offset + 6],
+            data[offset + 7],
+        ]) as usize;
 
         if chunk_id == b"data" {
             // 16-bit PCM samples
@@ -204,9 +207,7 @@ pub async fn transcribe_async(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(super::SttError::Engine(format!(
-            "HTTP {status}: {body}"
-        )));
+        return Err(super::SttError::Engine(format!("HTTP {status}: {body}")));
     }
 
     #[derive(serde::Deserialize)]

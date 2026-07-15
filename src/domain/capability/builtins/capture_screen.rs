@@ -59,14 +59,12 @@ impl Capability for CaptureScreen {
         }
 
         // 无 SESSION → 新截一帧（begin_session 内部截屏 + 编码 PNG）
-        let _meta = tokio::task::spawn_blocking(
-            crate::infra::platform::screenshot::begin_session,
-        )
-        .await
-        .map_err(|e| CapabilityError::Internal {
-            detail: format!("截屏 task 崩溃: {e}"),
-        })?
-        .map_err(|e| CapabilityError::Internal { detail: e })?;
+        let _meta = tokio::task::spawn_blocking(crate::infra::platform::screenshot::begin_session)
+            .await
+            .map_err(|e| CapabilityError::Internal {
+                detail: format!("截屏 task 崩溃: {e}"),
+            })?
+            .map_err(|e| CapabilityError::Internal { detail: e })?;
 
         // begin_session 成功后 SESSION 已填充，读 PNG
         match crate::infra::platform::screenshot::session_png() {

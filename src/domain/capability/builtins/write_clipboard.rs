@@ -34,7 +34,8 @@ impl Capability for WriteClipboard {
     fn schema(&self) -> CapabilitySchema {
         CapabilitySchema {
             name: "write_clipboard".into(),
-            description: "写入系统剪贴板。支持文本（text）或图片（image_bytes + width + height）。".into(),
+            description: "写入系统剪贴板。支持文本（text）或图片（image_bytes + width + height）。"
+                .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -83,18 +84,16 @@ impl Capability for WriteClipboard {
         }
 
         // image_bytes 模式
-        let width = args
-            .get("width")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| CapabilityError::InvalidArgs {
+        let width = args.get("width").and_then(Value::as_u64).ok_or_else(|| {
+            CapabilityError::InvalidArgs {
                 detail: "image 模式缺少 width".into(),
-            })? as u32;
-        let height = args
-            .get("height")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| CapabilityError::InvalidArgs {
+            }
+        })? as u32;
+        let height = args.get("height").and_then(Value::as_u64).ok_or_else(|| {
+            CapabilityError::InvalidArgs {
                 detail: "image 模式缺少 height".into(),
-            })? as u32;
+            }
+        })? as u32;
         let image_bytes = args
             .get("image_bytes")
             .and_then(Value::as_array)

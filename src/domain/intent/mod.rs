@@ -217,7 +217,9 @@ mod exec_arg_tests {
 
     #[test]
     fn ranking_hint_carries_plugin_id() {
-        let h = RankingHint { boost_plugin_id: "builtin.translate".to_string() };
+        let h = RankingHint {
+            boost_plugin_id: "builtin.translate".to_string(),
+        };
         assert_eq!(h.boost_plugin_id, "builtin.translate");
     }
 }
@@ -564,7 +566,10 @@ impl RuleRouter {
     pub fn add_engine_rule(&self, engine_id: String, keywords: Vec<String>) {
         let mut rules = self.engine_rules.write().unwrap();
         rules.retain(|r| r.engine_id != engine_id);
-        rules.push(EngineRule { engine_id, keywords });
+        rules.push(EngineRule {
+            engine_id,
+            keywords,
+        });
     }
 
     /// 从 manifest 注入 Context 规则（0.8.2 §3.4）。
@@ -645,8 +650,20 @@ impl RuleRouter {
         tracing::debug!(
             plugin_id,
             total = triggers.len(),
-            kw = self.rules.read().unwrap().iter().filter(|r| r.plugin_id == plugin_id).count(),
-            ctx = self.context_rules.read().unwrap().iter().filter(|r| r.plugin_id == plugin_id).count(),
+            kw = self
+                .rules
+                .read()
+                .unwrap()
+                .iter()
+                .filter(|r| r.plugin_id == plugin_id)
+                .count(),
+            ctx = self
+                .context_rules
+                .read()
+                .unwrap()
+                .iter()
+                .filter(|r| r.plugin_id == plugin_id)
+                .count(),
             "插件触发规则已重载",
         );
     }
@@ -703,7 +720,10 @@ impl IntentRouter for RuleRouter {
         //     0.8.5 阶段行为回退到"和其他引擎混排"，跟 plugin Takeover 降级同心智。
         if takeover_enabled {
             if let Some(hit) = match_engine_keyword(q, &self.engine_rules.read().unwrap()) {
-                return Route::EngineTakeover { engine_id: hit.0, arg: hit.1 };
+                return Route::EngineTakeover {
+                    engine_id: hit.0,
+                    arg: hit.1,
+                };
             }
         }
 
@@ -714,7 +734,9 @@ impl IntentRouter for RuleRouter {
         if takeover_enabled && q.len() > 3 && q[..3].eq_ignore_ascii_case("ai ") {
             let arg = q[3..].trim();
             if !arg.is_empty() {
-                return Route::AiTrigger { arg: arg.to_string() };
+                return Route::AiTrigger {
+                    arg: arg.to_string(),
+                };
             }
         }
 
@@ -729,7 +751,10 @@ impl IntentRouter for RuleRouter {
                         // regex 命中:无"参数"概念,但 auto 对 regex 视为强信号 → takeover。
                         // 归入 Prefix{arg: ""} 让 resolve_surface(Auto) 取 Takeover。
                         if re.is_match(q) {
-                            Some(MatchType::Prefix { arg: String::new(), hint: None })
+                            Some(MatchType::Prefix {
+                                arg: String::new(),
+                                hint: None,
+                            })
                         } else {
                             None
                         }
@@ -748,7 +773,8 @@ impl IntentRouter for RuleRouter {
                     };
                     let hint: Option<String> = match &mt {
                         MatchType::Exact { hint } | MatchType::Prefix { hint, .. } => hint.clone(),
-                        MatchType::InitialsExact { hint } | MatchType::InitialsPrefix { hint, .. } => Some(hint.clone()),
+                        MatchType::InitialsExact { hint }
+                        | MatchType::InitialsPrefix { hint, .. } => Some(hint.clone()),
                     };
                     let actual = resolve_surface(rule.surface, &mt, takeover_enabled);
                     hits.push(Hit {
@@ -850,7 +876,8 @@ impl RuleRouter {
         let trimmed = query.trim();
         if trimmed.is_empty() {
             let sug = self.context_suggestion(query, snapshot);
-            *self.last_ranking_hint.lock().unwrap() = sug.as_ref().and_then(|s| s.ranking_hint.clone());
+            *self.last_ranking_hint.lock().unwrap() =
+                sug.as_ref().and_then(|s| s.ranking_hint.clone());
             sug
         } else if let Some((hint, score)) =
             suggest::compute_hint_scored(&self.collect_suggest_keywords(), query, min_score)
@@ -881,7 +908,11 @@ impl RuleRouter {
     /// **非空 query 短路**：用户已输入内容时不再显示 Context Ghost——输入即意图表达，
     /// 环境感知建议会干扰用户操作。Context Ghost 只在空 query（用户刚唤起、尚未表达意图）时出现。
     #[allow(deprecated)] // 构造 Suggestion 时填充 ranking_hint，0.9 彻底移除字段后简化
-    pub(crate) fn context_suggestion(&self, query: &str, snapshot: &ContextSnapshot) -> Option<Suggestion> {
+    pub(crate) fn context_suggestion(
+        &self,
+        query: &str,
+        snapshot: &ContextSnapshot,
+    ) -> Option<Suggestion> {
         // 非空 query 不显示 Context Ghost——用户已表达意图，环境感知会干扰
         if !query.trim().is_empty() {
             return None;
@@ -889,8 +920,14 @@ impl RuleRouter {
 
         let hits = self.match_context_hits(snapshot);
         let best_ctx = hits.into_iter().max_by(|a, b| {
-            let ca = a.when.map(|w| context_confidence(&w, a.origin)).unwrap_or(0.0);
-            let cb = b.when.map(|w| context_confidence(&w, b.origin)).unwrap_or(0.0);
+            let ca = a
+                .when
+                .map(|w| context_confidence(&w, a.origin))
+                .unwrap_or(0.0);
+            let cb = b
+                .when
+                .map(|w| context_confidence(&w, b.origin))
+                .unwrap_or(0.0);
             ca.partial_cmp(&cb).unwrap_or(std::cmp::Ordering::Equal)
         })?;
 
@@ -1003,12 +1040,10 @@ impl RuleRouter {
             //    - `ClipboardIsUrl` / `ClipboardIsFilePath`：trigger 语义锁定 Clipboard 来源
             //    - `SelectionNonEmpty`：trigger 语义锁定 Selection 来源
             let (display_text, origin) = match &rule.when {
-                ContextTrigger::TextIsNonTargetLang { source } => {
-                    match source.extract(snapshot) {
-                        Some(view) => (truncate_arg(view.text), Some(view.source)),
-                        None => (String::new(), None),
-                    }
-                }
+                ContextTrigger::TextIsNonTargetLang { source } => match source.extract(snapshot) {
+                    Some(view) => (truncate_arg(view.text), Some(view.source)),
+                    None => (String::new(), None),
+                },
                 ContextTrigger::ClipboardIsUrl | ContextTrigger::ClipboardIsFilePath => {
                     (String::new(), Some(AwarenessSource::Clipboard))
                 }
@@ -1019,7 +1054,9 @@ impl RuleRouter {
 
             // 6. 门禁：TextIsNonTargetLang 抽不到展示文本 → 不召回
             //    （其他 when 是 event-only 触发，不受此闸约束）
-            if matches!(rule.when, ContextTrigger::TextIsNonTargetLang { .. }) && display_text.is_empty() {
+            if matches!(rule.when, ContextTrigger::TextIsNonTargetLang { .. })
+                && display_text.is_empty()
+            {
                 tracing::trace!(plugin = %rule.plugin_id, "context 命中但展示文本空,跳过召回");
                 continue;
             }
@@ -1076,9 +1113,10 @@ impl RuleRouter {
         // hit.arg 是执行参数(ExecArg),context hit 恒 None;展示文本属 Suggestion 域
         // (唯一能读 Awareness 的层)。仅 TextIsNonTargetLang 携带展示文本。
         let arg_text: String = match &hit.when {
-            Some(ContextTrigger::TextIsNonTargetLang { source }) => {
-                source.extract(snapshot).map(|v| truncate_arg(v.text)).unwrap_or_default()
-            }
+            Some(ContextTrigger::TextIsNonTargetLang { source }) => source
+                .extract(snapshot)
+                .map(|v| truncate_arg(v.text))
+                .unwrap_or_default(),
             _ => String::new(),
         };
 
@@ -1452,7 +1490,10 @@ fn match_keyword(query: &str, keyword: &str) -> Option<MatchType> {
             return Some(if *is_strong {
                 MatchType::Prefix { arg, hint: None }
             } else {
-                MatchType::InitialsPrefix { arg, hint: derived_hint }
+                MatchType::InitialsPrefix {
+                    arg,
+                    hint: derived_hint,
+                }
             });
         }
     }
@@ -1581,9 +1622,7 @@ mod tests {
     fn explicit_takeover_always() {
         let r = router_with_rules(true);
         let route = run_route(&r, "ip");
-        assert!(
-            matches!(route, Route::Takeover { plugin_id, .. } if plugin_id == "builtin.ip")
-        );
+        assert!(matches!(route, Route::Takeover { plugin_id, .. } if plugin_id == "builtin.ip"));
     }
 
     #[test]
@@ -1610,9 +1649,7 @@ mod tests {
     fn no_hit_returns_empty_mixed() {
         let r = router_with_rules(true);
         let route = run_route(&r, "chrome");
-        assert!(
-            matches!(route, Route::Mixed { candidates } if candidates.is_empty())
-        );
+        assert!(matches!(route, Route::Mixed { candidates } if candidates.is_empty()));
     }
 
     #[test]
@@ -1715,12 +1752,20 @@ mod tests {
     #[test]
     fn multiple_takeovers_first_wins() {
         let r = RuleRouter::new(true);
-        r.add_keyword_rule("a".into(), "foo".into(), Surface::Takeover, SurfaceView::List);
-        r.add_keyword_rule("b".into(), "foo".into(), Surface::Takeover, SurfaceView::List);
-        let route = run_route(&r, "foo");
-        assert!(
-            matches!(route, Route::Takeover { plugin_id, .. } if plugin_id == "a")
+        r.add_keyword_rule(
+            "a".into(),
+            "foo".into(),
+            Surface::Takeover,
+            SurfaceView::List,
         );
+        r.add_keyword_rule(
+            "b".into(),
+            "foo".into(),
+            Surface::Takeover,
+            SurfaceView::List,
+        );
+        let route = run_route(&r, "foo");
+        assert!(matches!(route, Route::Takeover { plugin_id, .. } if plugin_id == "a"));
     }
 
     #[test]
@@ -1734,9 +1779,7 @@ mod tests {
         )
         .unwrap();
         let route = run_route(&r, "0xFF");
-        assert!(
-            matches!(route, Route::Takeover { plugin_id, .. } if plugin_id == "builtin.hex")
-        );
+        assert!(matches!(route, Route::Takeover { plugin_id, .. } if plugin_id == "builtin.hex"));
     }
 
     #[test]
@@ -1750,15 +1793,16 @@ mod tests {
         )
         .unwrap();
         let route = run_route(&r, "123");
-        assert!(
-            matches!(route, Route::Mixed { candidates } if candidates.is_empty())
-        );
+        assert!(matches!(route, Route::Mixed { candidates } if candidates.is_empty()));
     }
 
     #[test]
     fn regex_invalid_pattern_skipped() {
         let r = RuleRouter::new(true);
-        assert!(r.add_regex_rule("x".into(), "[", Surface::Auto, SurfaceView::List).is_err());
+        assert!(
+            r.add_regex_rule("x".into(), "[", Surface::Auto, SurfaceView::List)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1789,7 +1833,9 @@ mod tests {
             SurfaceView::List,
         );
         // 首拼 "fy" 应能命中 fanyi
-        let hint = r.suggest_completion("fy hello", 0.7).expect("should have hint");
+        let hint = r
+            .suggest_completion("fy hello", 0.7)
+            .expect("should have hint");
         assert_eq!(hint.display, "fanyi");
         assert_eq!(hint.replacement, "fanyi hello");
 
@@ -1846,7 +1892,11 @@ mod tests {
     }
 
     /// 0.8.3 §4.4：空 query 场景验 best_suggestion（Context 走 Ghost 不产 candidate）。
-    fn run_best_suggestion(r: &RuleRouter, q: &str, snapshot: &ContextSnapshot) -> Option<Suggestion> {
+    fn run_best_suggestion(
+        r: &RuleRouter,
+        q: &str,
+        snapshot: &ContextSnapshot,
+    ) -> Option<Suggestion> {
         r.best_suggestion(q, snapshot, 0.7)
     }
 
@@ -1869,9 +1919,11 @@ mod tests {
             },
             crate::domain::plugin::ManifestSurfaceHint::Priority,
         );
-        r.set_setting_resolver(Arc::new(
-            MockResolver::new().with("builtin.translate", "target_lang", target),
-        ));
+        r.set_setting_resolver(Arc::new(MockResolver::new().with(
+            "builtin.translate",
+            "target_lang",
+            target,
+        )));
         r
     }
 
@@ -1908,21 +1960,39 @@ mod tests {
 
         // 情形 A:Selection 先、Clipboard 后 → Clipboard 胜
         let mut snap_a = ContextSnapshot::default();
-        snap_a.upsert_text(AwarenessSource::Selection, Some("selected english text".into()));
+        snap_a.upsert_text(
+            AwarenessSource::Selection,
+            Some("selected english text".into()),
+        );
         std::thread::sleep(std::time::Duration::from_millis(2));
-        snap_a.upsert_text(AwarenessSource::Clipboard, Some("clipboard content here".into()));
+        snap_a.upsert_text(
+            AwarenessSource::Clipboard,
+            Some("clipboard content here".into()),
+        );
         let sug_a = run_best_suggestion(&r, "", &snap_a).expect("expected context suggestion");
-        assert!(sug_a.replacement.contains("clipboard content here"),
-            "较新的 Clipboard 应胜出,replacement={}", sug_a.replacement);
+        assert!(
+            sug_a.replacement.contains("clipboard content here"),
+            "较新的 Clipboard 应胜出,replacement={}",
+            sug_a.replacement
+        );
 
         // 情形 B:Clipboard 先、Selection 后 → Selection 胜（覆盖用户先复制再划词）
         let mut snap_b = ContextSnapshot::default();
-        snap_b.upsert_text(AwarenessSource::Clipboard, Some("clipboard content here".into()));
+        snap_b.upsert_text(
+            AwarenessSource::Clipboard,
+            Some("clipboard content here".into()),
+        );
         std::thread::sleep(std::time::Duration::from_millis(2));
-        snap_b.upsert_text(AwarenessSource::Selection, Some("selected english text".into()));
+        snap_b.upsert_text(
+            AwarenessSource::Selection,
+            Some("selected english text".into()),
+        );
         let sug_b = run_best_suggestion(&r, "", &snap_b).expect("expected context suggestion");
-        assert!(sug_b.replacement.contains("selected english text"),
-            "较新的 Selection 应胜出,replacement={}", sug_b.replacement);
+        assert!(
+            sug_b.replacement.contains("selected english text"),
+            "较新的 Selection 应胜出,replacement={}",
+            sug_b.replacement
+        );
     }
 
     #[test]
@@ -1968,9 +2038,11 @@ mod tests {
             },
             crate::domain::plugin::ManifestSurfaceHint::Priority,
         );
-        r.set_setting_resolver(Arc::new(
-            MockResolver::new().with("builtin.translate", "target_lang", "auto"),
-        ));
+        r.set_setting_resolver(Arc::new(MockResolver::new().with(
+            "builtin.translate",
+            "target_lang",
+            "auto",
+        )));
         r.set_app_language("en".into());
         // app_language=en，selection 是中文 → 触发翻译（走 best_suggestion）
         let snapshot = snap_selection("你好世界啊");
@@ -2023,14 +2095,13 @@ mod tests {
             },
             crate::domain::plugin::ManifestSurfaceHint::Priority,
         );
-        r.set_setting_resolver(Arc::new(
-            MockResolver::new().with("builtin.translate", "target_lang", "zh"),
-        ));
-        let route = run_route_with_snapshot(
-            &r,
-            "翻译 hello",
-            snap_clipboard("some other english text"),
-        );
+        r.set_setting_resolver(Arc::new(MockResolver::new().with(
+            "builtin.translate",
+            "target_lang",
+            "zh",
+        )));
+        let route =
+            run_route_with_snapshot(&r, "翻译 hello", snap_clipboard("some other english text"));
         // 走 Takeover 且 arg 用 keyword_arg="hello"
         assert!(matches!(
             route,
@@ -2121,9 +2192,11 @@ mod tests {
             },
             crate::domain::plugin::ManifestSurfaceHint::Inline, // 声明 Inline
         );
-        r.set_setting_resolver(Arc::new(
-            MockResolver::new().with("builtin.translate", "target_lang", "zh"),
-        ));
+        r.set_setting_resolver(Arc::new(MockResolver::new().with(
+            "builtin.translate",
+            "target_lang",
+            "zh",
+        )));
         // 非空 query: `翻译` 无参 → Priority；ctx 补 Inline → merge_hits surface_max = Priority
         let route = run_route_with_snapshot(&r, "翻译", snap_selection("hello world foo"));
         if let Route::Mixed { candidates } = route {
@@ -2169,9 +2242,16 @@ mod tests {
     fn suggestion_keyword_first_letters_returns_keyword_source() {
         // Keyword 分支：非空 query "fy" 命中"翻译"首拼 → Suggestion { source=Keyword }
         let r = RuleRouter::new(true);
-        r.add_keyword_rule("builtin.translate".into(), "翻译".into(), Surface::Auto, SurfaceView::List);
+        r.add_keyword_rule(
+            "builtin.translate".into(),
+            "翻译".into(),
+            Surface::Auto,
+            SurfaceView::List,
+        );
         let snap = ContextSnapshot::default();
-        let sug = r.best_suggestion("fy", &snap, 0.7).expect("expected keyword suggestion");
+        let sug = r
+            .best_suggestion("fy", &snap, 0.7)
+            .expect("expected keyword suggestion");
         assert_eq!(sug.source, SuggestionSource::Keyword);
         assert_eq!(sug.display, "fanyi");
         assert!((0.0..=1.0).contains(&sug.confidence));
@@ -2181,9 +2261,16 @@ mod tests {
     fn suggestion_keyword_exact_confidence_is_one() {
         // Keyword exact 命中 → confidence 恒 1.0（f64::INFINITY 归一 min(_,1.0)）
         let r = RuleRouter::new(true);
-        r.add_keyword_rule("builtin.translate".into(), "翻译".into(), Surface::Auto, SurfaceView::List);
+        r.add_keyword_rule(
+            "builtin.translate".into(),
+            "翻译".into(),
+            Surface::Auto,
+            SurfaceView::List,
+        );
         let snap = ContextSnapshot::default();
-        let sug = r.best_suggestion("fanyi", &snap, 0.7).expect("expected suggestion");
+        let sug = r
+            .best_suggestion("fanyi", &snap, 0.7)
+            .expect("expected suggestion");
         assert_eq!(sug.source, SuggestionSource::Keyword);
         assert_eq!(sug.confidence, 1.0);
     }
@@ -2217,9 +2304,10 @@ mod tests {
         let snap = snap_selection("hello world foo");
         assert!(r.best_suggestion("", &snap, 0.7).is_some());
         // disable 后不命中
-        r.apply_context_disable_list(vec![
-            binding_key("builtin.translate", "text_is_non_target_lang"),
-        ]);
+        r.apply_context_disable_list(vec![binding_key(
+            "builtin.translate",
+            "text_is_non_target_lang",
+        )]);
         assert!(r.best_suggestion("", &snap, 0.7).is_none());
         // 清空 disable 列表 → 恢复
         r.apply_context_disable_list(vec![]);
@@ -2234,7 +2322,9 @@ mod tests {
             fn get_string(&self, _plugin_id: &str, _key: &str) -> Option<String> {
                 Some("zh".into())
             }
-            fn is_enabled(&self, _plugin_id: &str) -> bool { false }
+            fn is_enabled(&self, _plugin_id: &str) -> bool {
+                false
+            }
         }
         let r = RuleRouter::new(true);
         r.add_context_rule(
@@ -2253,7 +2343,12 @@ mod tests {
     fn suggestion_none_on_empty_query_no_context_hit() {
         // 空 query + 无 Context 命中 → None（不兜底历史，§4.12 备忘）
         let r = RuleRouter::new(true);
-        r.add_keyword_rule("builtin.translate".into(), "翻译".into(), Surface::Auto, SurfaceView::List);
+        r.add_keyword_rule(
+            "builtin.translate".into(),
+            "翻译".into(),
+            Surface::Auto,
+            SurfaceView::List,
+        );
         let snap = ContextSnapshot::default(); // 无选区/剪贴板
         assert!(r.best_suggestion("", &snap, 0.7).is_none());
     }
@@ -2277,13 +2372,18 @@ mod tests {
             },
             crate::domain::plugin::ManifestSurfaceHint::Priority,
         );
-        r.set_setting_resolver(Arc::new(
-            MockResolver::new().with("builtin.translate", "target_lang", "zh"),
-        ));
+        r.set_setting_resolver(Arc::new(MockResolver::new().with(
+            "builtin.translate",
+            "target_lang",
+            "zh",
+        )));
         // 剪贴板是 URL：URL binding 命中；TextIsNonTargetLang 因 URL 护栏不命中
         // → top-1 就是 URL（无并存竞争，边界更清晰）
-        let snap = snap_clipboard("https://example.com/very-long-english-page-title-here-for-testing");
-        let sug = r.best_suggestion("", &snap, 0.7).expect("expected top-1 suggestion");
+        let snap =
+            snap_clipboard("https://example.com/very-long-english-page-title-here-for-testing");
+        let sug = r
+            .best_suggestion("", &snap, 0.7)
+            .expect("expected top-1 suggestion");
         assert!(sug.replacement.contains("open_url"));
     }
 
@@ -2322,7 +2422,12 @@ mod tests {
         // best_suggestion 本身不查 autosuggest_enabled（那是 SearchService 层）,
         // 但走 keyword 分支时 min_score 过高会返回 None。等效验证。
         let r = RuleRouter::new(true);
-        r.add_keyword_rule("builtin.translate".into(), "翻译".into(), Surface::Auto, SurfaceView::List);
+        r.add_keyword_rule(
+            "builtin.translate".into(),
+            "翻译".into(),
+            Surface::Auto,
+            SurfaceView::List,
+        );
         // 阈值 1.5 → 归一化后 fuzzy 分不可能到 1.5 → None
         let snap = ContextSnapshot::default();
         assert!(r.best_suggestion("fan", &snap, 1.5).is_none());
@@ -2331,18 +2436,31 @@ mod tests {
     #[test]
     fn suggestion_binding_key_format_double_colon() {
         // §4.6 决策：双冒号避开 target_id 内部点/冒号
-        assert_eq!(binding_key("builtin.translate", "text_is_non_target_lang"),
-                   "builtin.translate::text_is_non_target_lang");
-        assert_eq!(binding_key("open_url", "clipboard_is_url"),
-                   "open_url::clipboard_is_url");
+        assert_eq!(
+            binding_key("builtin.translate", "text_is_non_target_lang"),
+            "builtin.translate::text_is_non_target_lang"
+        );
+        assert_eq!(
+            binding_key("open_url", "clipboard_is_url"),
+            "open_url::clipboard_is_url"
+        );
     }
 
     #[test]
     fn suggestion_trigger_key_snake_case() {
         // 对齐 manifest 侧 snake_case
-        assert_eq!(trigger_key(&ContextTrigger::ClipboardIsUrl), "clipboard_is_url");
-        assert_eq!(trigger_key(&ContextTrigger::ClipboardIsFilePath), "clipboard_is_file_path");
-        assert_eq!(trigger_key(&ContextTrigger::SelectionNonEmpty), "selection_non_empty");
+        assert_eq!(
+            trigger_key(&ContextTrigger::ClipboardIsUrl),
+            "clipboard_is_url"
+        );
+        assert_eq!(
+            trigger_key(&ContextTrigger::ClipboardIsFilePath),
+            "clipboard_is_file_path"
+        );
+        assert_eq!(
+            trigger_key(&ContextTrigger::SelectionNonEmpty),
+            "selection_non_empty"
+        );
         assert_eq!(
             trigger_key(&ContextTrigger::TextIsNonTargetLang {
                 source: crate::domain::context::trigger::TextSource::SelectionThenClipboard,
@@ -2356,9 +2474,15 @@ mod tests {
         // 无 keyword rule 时 replacement fallback 到 id 末段（保历史行为）
         let r = translate_router_with_target("zh");
         let snap = snap_selection("hello world foo");
-        let sug = r.best_suggestion("", &snap, 0.7).expect("expected suggestion");
+        let sug = r
+            .best_suggestion("", &snap, 0.7)
+            .expect("expected suggestion");
         // short_target_name("builtin.translate") = "translate"
-        assert!(sug.replacement.starts_with("translate"), "replacement={}", sug.replacement);
+        assert!(
+            sug.replacement.starts_with("translate"),
+            "replacement={}",
+            sug.replacement
+        );
     }
 
     #[test]
@@ -2367,8 +2491,18 @@ mod tests {
         // 保证 Tab 采纳后能命中 keyword 表 → 走 Takeover。**这是产品闭环关键**。
         let r = RuleRouter::new(true);
         // 同时注册两个 keyword,模拟翻译插件 manifest
-        r.add_keyword_rule("builtin.translate".into(), "翻译".into(), Surface::Auto, SurfaceView::List);
-        r.add_keyword_rule("builtin.translate".into(), "translate".into(), Surface::Auto, SurfaceView::List);
+        r.add_keyword_rule(
+            "builtin.translate".into(),
+            "翻译".into(),
+            Surface::Auto,
+            SurfaceView::List,
+        );
+        r.add_keyword_rule(
+            "builtin.translate".into(),
+            "translate".into(),
+            Surface::Auto,
+            SurfaceView::List,
+        );
         r.add_context_rule(
             "builtin.translate".into(),
             ContextTrigger::TextIsNonTargetLang {
@@ -2376,21 +2510,39 @@ mod tests {
             },
             crate::domain::plugin::ManifestSurfaceHint::Priority,
         );
-        r.set_setting_resolver(Arc::new(
-            MockResolver::new().with("builtin.translate", "target_lang", "zh"),
-        ));
+        r.set_setting_resolver(Arc::new(MockResolver::new().with(
+            "builtin.translate",
+            "target_lang",
+            "zh",
+        )));
         r.set_app_language("zh".into());
         let snap = snap_selection("hello world foo");
-        let sug = r.best_suggestion("", &snap, 0.7).expect("expected suggestion");
-        assert!(sug.replacement.starts_with("翻译 "), "expected CJK keyword, got: {}", sug.replacement);
+        let sug = r
+            .best_suggestion("", &snap, 0.7)
+            .expect("expected suggestion");
+        assert!(
+            sug.replacement.starts_with("翻译 "),
+            "expected CJK keyword, got: {}",
+            sug.replacement
+        );
     }
 
     #[test]
     fn suggestion_replacement_prefers_ascii_keyword_in_en_ui() {
         // en UI 下 replacement 应用英文 keyword `translate`
         let r = RuleRouter::new(true);
-        r.add_keyword_rule("builtin.translate".into(), "翻译".into(), Surface::Auto, SurfaceView::List);
-        r.add_keyword_rule("builtin.translate".into(), "translate".into(), Surface::Auto, SurfaceView::List);
+        r.add_keyword_rule(
+            "builtin.translate".into(),
+            "翻译".into(),
+            Surface::Auto,
+            SurfaceView::List,
+        );
+        r.add_keyword_rule(
+            "builtin.translate".into(),
+            "translate".into(),
+            Surface::Auto,
+            SurfaceView::List,
+        );
         r.add_context_rule(
             "builtin.translate".into(),
             ContextTrigger::TextIsNonTargetLang {
@@ -2398,14 +2550,22 @@ mod tests {
             },
             crate::domain::plugin::ManifestSurfaceHint::Priority,
         );
-        r.set_setting_resolver(Arc::new(
-            MockResolver::new().with("builtin.translate", "target_lang", "en"),
-        ));
+        r.set_setting_resolver(Arc::new(MockResolver::new().with(
+            "builtin.translate",
+            "target_lang",
+            "en",
+        )));
         r.set_app_language("en".into());
         // en UI + target=en → 需要选中非英文（中文）才触发翻译
         let snap = snap_selection("你好世界啊");
-        let sug = r.best_suggestion("", &snap, 0.7).expect("expected suggestion");
-        assert!(sug.replacement.starts_with("translate "), "expected ASCII keyword, got: {}", sug.replacement);
+        let sug = r
+            .best_suggestion("", &snap, 0.7)
+            .expect("expected suggestion");
+        assert!(
+            sug.replacement.starts_with("translate "),
+            "expected ASCII keyword, got: {}",
+            sug.replacement
+        );
     }
 
     #[test]
@@ -2417,11 +2577,21 @@ mod tests {
         }
         impl PluginSettingResolver for NamedResolver {
             fn get_string(&self, _plugin_id: &str, key: &str) -> Option<String> {
-                if key == "target_lang" { Some(self.target_lang.clone()) } else { None }
+                if key == "target_lang" {
+                    Some(self.target_lang.clone())
+                } else {
+                    None
+                }
             }
             fn get_display_name(&self, plugin_id: &str, lang: &str) -> Option<String> {
-                if plugin_id != "builtin.translate" { return None; }
-                Some(if lang.starts_with("zh") { "翻译".into() } else { "Translate".into() })
+                if plugin_id != "builtin.translate" {
+                    return None;
+                }
+                Some(if lang.starts_with("zh") {
+                    "翻译".into()
+                } else {
+                    "Translate".into()
+                })
             }
         }
         let r = RuleRouter::new(true);
@@ -2432,18 +2602,34 @@ mod tests {
             },
             crate::domain::plugin::ManifestSurfaceHint::Priority,
         );
-        r.set_setting_resolver(Arc::new(NamedResolver { target_lang: "zh".into() }));
+        r.set_setting_resolver(Arc::new(NamedResolver {
+            target_lang: "zh".into(),
+        }));
         r.set_app_language("zh".into());
         let snap = snap_selection("hello world foo");
-        let sug = r.best_suggestion("", &snap, 0.7).expect("expected suggestion");
-        assert!(sug.display.starts_with("翻译 "), "zh display should use 翻译: {}", sug.display);
+        let sug = r
+            .best_suggestion("", &snap, 0.7)
+            .expect("expected suggestion");
+        assert!(
+            sug.display.starts_with("翻译 "),
+            "zh display should use 翻译: {}",
+            sug.display
+        );
 
         // 切 en UI
-        r.set_setting_resolver(Arc::new(NamedResolver { target_lang: "en".into() }));
+        r.set_setting_resolver(Arc::new(NamedResolver {
+            target_lang: "en".into(),
+        }));
         r.set_app_language("en".into());
         let snap_zh = snap_selection("你好世界啊");
-        let sug = r.best_suggestion("", &snap_zh, 0.7).expect("expected suggestion");
-        assert!(sug.display.starts_with("Translate "), "en display should use Translate: {}", sug.display);
+        let sug = r
+            .best_suggestion("", &snap_zh, 0.7)
+            .expect("expected suggestion");
+        assert!(
+            sug.display.starts_with("Translate "),
+            "en display should use Translate: {}",
+            sug.display
+        );
     }
 
     #[test]
@@ -2452,7 +2638,12 @@ mod tests {
         // 这条闭环旧实现（fallback 到 id 末段 `translate`）+ 无 keyword rule 会断链;
         // 新实现从 rules 反查偏好字符集的 keyword,确保能命中。
         let r = RuleRouter::new(true);
-        r.add_keyword_rule("builtin.translate".into(), "翻译".into(), Surface::Auto, SurfaceView::List);
+        r.add_keyword_rule(
+            "builtin.translate".into(),
+            "翻译".into(),
+            Surface::Auto,
+            SurfaceView::List,
+        );
         r.add_context_rule(
             "builtin.translate".into(),
             ContextTrigger::TextIsNonTargetLang {
@@ -2460,14 +2651,18 @@ mod tests {
             },
             crate::domain::plugin::ManifestSurfaceHint::Priority,
         );
-        r.set_setting_resolver(Arc::new(
-            MockResolver::new().with("builtin.translate", "target_lang", "zh"),
-        ));
+        r.set_setting_resolver(Arc::new(MockResolver::new().with(
+            "builtin.translate",
+            "target_lang",
+            "zh",
+        )));
         r.set_app_language("zh".into());
         let snap = snap_selection("hello world foo");
 
         // 1. 拿 Context Ghost 的 replacement
-        let sug = r.best_suggestion("", &snap, 0.7).expect("expected suggestion");
+        let sug = r
+            .best_suggestion("", &snap, 0.7)
+            .expect("expected suggestion");
         let replacement = sug.replacement.clone();
 
         // 2. 用 replacement 走 route(),期待 Takeover 命中 builtin.translate
@@ -2482,7 +2677,10 @@ mod tests {
                 // 未升 Takeover 也算过——至少 candidate 命中就说明闭环没断
                 assert_eq!(candidates[0].plugin_id, "builtin.translate");
             }
-            other => panic!("expected Takeover/Mixed with hits for replacement={:?}, got {:?}", replacement, other),
+            other => panic!(
+                "expected Takeover/Mixed with hits for replacement={:?}, got {:?}",
+                replacement, other
+            ),
         }
     }
 
@@ -2492,8 +2690,14 @@ mod tests {
         let r = translate_router_with_target("zh");
         let long_text = "hello ".repeat(200); // > 40 字符
         let snap = snap_selection(&long_text);
-        let sug = r.best_suggestion("", &snap, 0.7).expect("expected suggestion");
-        assert!(sug.display.contains('…'), "display should contain ellipsis: {}", sug.display);
+        let sug = r
+            .best_suggestion("", &snap, 0.7)
+            .expect("expected suggestion");
+        assert!(
+            sug.display.contains('…'),
+            "display should contain ellipsis: {}",
+            sug.display
+        );
     }
 
     #[test]
@@ -2515,7 +2719,12 @@ mod tests {
         // 首拼 `fy` 命中「翻译」keyword（arg=""）,剪贴板有英文 context 命中 → merge
         // 后 arg 仍应为空,不应被 ctx.arg 代填。
         let r = RuleRouter::new(true);
-        r.add_keyword_rule("builtin.translate".into(), "翻译".into(), Surface::Auto, SurfaceView::List);
+        r.add_keyword_rule(
+            "builtin.translate".into(),
+            "翻译".into(),
+            Surface::Auto,
+            SurfaceView::List,
+        );
         r.add_context_rule(
             "builtin.translate".into(),
             ContextTrigger::TextIsNonTargetLang {
@@ -2523,14 +2732,18 @@ mod tests {
             },
             crate::domain::plugin::ManifestSurfaceHint::Priority,
         );
-        r.set_setting_resolver(std::sync::Arc::new(
-            MockResolver::new().with("builtin.translate", "target_lang", "zh"),
-        ));
+        r.set_setting_resolver(std::sync::Arc::new(MockResolver::new().with(
+            "builtin.translate",
+            "target_lang",
+            "zh",
+        )));
         let snap = snap_clipboard("hello world foo bar");
         let route = run_route_with_snapshot(&r, "fy", snap);
         // 首拼弱信号 + 无参 → Priority（不 Takeover）,arg 保持空
         if let Route::Mixed { candidates } = route {
-            let translate = candidates.iter().find(|c| c.plugin_id == "builtin.translate")
+            let translate = candidates
+                .iter()
+                .find(|c| c.plugin_id == "builtin.translate")
                 .expect("翻译插件应出现在候选");
             assert!(translate.arg.is_none(), "参数不应被剪贴板隐式注入,应保持空");
         } else {
@@ -2544,7 +2757,12 @@ mod tests {
         // Context 命中同 plugin 应把 Priority 保住（surface_max 不会降级）,
         // 但 arg 仍应保持空（用户没给参数）。
         let r = RuleRouter::new(true);
-        r.add_keyword_rule("builtin.translate".into(), "翻译".into(), Surface::Auto, SurfaceView::List);
+        r.add_keyword_rule(
+            "builtin.translate".into(),
+            "翻译".into(),
+            Surface::Auto,
+            SurfaceView::List,
+        );
         r.add_context_rule(
             "builtin.translate".into(),
             ContextTrigger::TextIsNonTargetLang {
@@ -2552,13 +2770,17 @@ mod tests {
             },
             crate::domain::plugin::ManifestSurfaceHint::Priority,
         );
-        r.set_setting_resolver(std::sync::Arc::new(
-            MockResolver::new().with("builtin.translate", "target_lang", "zh"),
-        ));
+        r.set_setting_resolver(std::sync::Arc::new(MockResolver::new().with(
+            "builtin.translate",
+            "target_lang",
+            "zh",
+        )));
         let snap = snap_clipboard("hello world foo bar");
         let route = run_route_with_snapshot(&r, "翻译", snap);
         if let Route::Mixed { candidates } = route {
-            let translate = candidates.iter().find(|c| c.plugin_id == "builtin.translate")
+            let translate = candidates
+                .iter()
+                .find(|c| c.plugin_id == "builtin.translate")
                 .expect("翻译插件应出现");
             // 双源命中 → Priority 保住
             assert!(matches!(translate.surface, Surface::Priority));
@@ -2591,17 +2813,26 @@ mod tests {
             other => panic!("无 hint 应 Mixed,got {:?}", other),
         };
         assert_eq!(candidates.len(), 1, "无 hint 单 candidate");
-        assert!(matches!(candidates[0].surface, Surface::Inline), "无 hint 应 Inline");
+        assert!(
+            matches!(candidates[0].surface, Surface::Inline),
+            "无 hint 应 Inline"
+        );
         assert_eq!(candidates[0].arg, ExecArg::UserExplicit("北京".to_string()));
 
         // 有 hint boost weather：surface 升 Priority,arg 不变（不被 hint 动）,候选集不变
-        let hint = RankingHint { boost_plugin_id: "builtin.weather".into() };
-        let candidates = match tauri::async_runtime::block_on(r.route("tq 北京", &h, Some(&hint))) {
+        let hint = RankingHint {
+            boost_plugin_id: "builtin.weather".into(),
+        };
+        let candidates = match tauri::async_runtime::block_on(r.route("tq 北京", &h, Some(&hint)))
+        {
             Route::Mixed { candidates } => candidates,
             other => panic!("有 hint 应 Mixed,got {:?}", other),
         };
         assert_eq!(candidates.len(), 1, "hint 不召回新 candidate");
-        assert!(matches!(candidates[0].surface, Surface::Priority), "hint 应 boost 到 Priority");
+        assert!(
+            matches!(candidates[0].surface, Surface::Priority),
+            "hint 应 boost 到 Priority"
+        );
         assert_eq!(
             candidates[0].arg,
             ExecArg::UserExplicit("北京".to_string()),
@@ -2616,7 +2847,9 @@ mod tests {
         // 选中英文 → origin = Selection
         let r = translate_router_with_target("zh");
         let snap = snap_selection("hello world foo");
-        let sug = r.best_suggestion("", &snap, 0.7).expect("expected suggestion");
+        let sug = r
+            .best_suggestion("", &snap, 0.7)
+            .expect("expected suggestion");
         assert_eq!(sug.origin, Some(SuggestionOrigin::Selection));
     }
 
@@ -2625,7 +2858,9 @@ mod tests {
         // 只剪贴板有内容 → origin = Clipboard
         let r = translate_router_with_target("zh");
         let snap = snap_clipboard("hello world foo");
-        let sug = r.best_suggestion("", &snap, 0.7).expect("expected suggestion");
+        let sug = r
+            .best_suggestion("", &snap, 0.7)
+            .expect("expected suggestion");
         assert_eq!(sug.origin, Some(SuggestionOrigin::Clipboard));
     }
 
@@ -2639,9 +2874,17 @@ mod tests {
             crate::domain::plugin::ManifestSurfaceHint::Priority,
         );
         let mut snapshot = ContextSnapshot::default();
-        snapshot.upsert_text(AwarenessSource::Selection, Some("some selected text".into()));
-        snapshot.upsert_text(AwarenessSource::Clipboard, Some("https://example.com".into()));
-        let sug = r.best_suggestion("", &snapshot, 0.7).expect("expected suggestion");
+        snapshot.upsert_text(
+            AwarenessSource::Selection,
+            Some("some selected text".into()),
+        );
+        snapshot.upsert_text(
+            AwarenessSource::Clipboard,
+            Some("https://example.com".into()),
+        );
+        let sug = r
+            .best_suggestion("", &snapshot, 0.7)
+            .expect("expected suggestion");
         assert_eq!(sug.origin, Some(SuggestionOrigin::Clipboard));
     }
 
@@ -2649,9 +2892,16 @@ mod tests {
     fn suggestion_origin_none_for_keyword_branch() {
         // Keyword 分支恒 origin=None
         let r = RuleRouter::new(true);
-        r.add_keyword_rule("builtin.translate".into(), "翻译".into(), Surface::Auto, SurfaceView::List);
+        r.add_keyword_rule(
+            "builtin.translate".into(),
+            "翻译".into(),
+            Surface::Auto,
+            SurfaceView::List,
+        );
         let snap = ContextSnapshot::default();
-        let sug = r.best_suggestion("fy", &snap, 0.7).expect("expected keyword suggestion");
+        let sug = r
+            .best_suggestion("fy", &snap, 0.7)
+            .expect("expected keyword suggestion");
         assert_eq!(sug.source, SuggestionSource::Keyword);
         assert!(sug.origin.is_none());
     }
@@ -2670,13 +2920,21 @@ mod tests {
         let with_sel = snap_selection("hello world foo");
         let sug1 = r.best_suggestion("", &with_sel, 0.7).unwrap();
         assert_eq!(sug1.origin, Some(SuggestionOrigin::Selection));
-        assert!((sug1.confidence - 0.75).abs() < 1e-9, "expected 0.75, got {}", sug1.confidence);
+        assert!(
+            (sug1.confidence - 0.75).abs() < 1e-9,
+            "expected 0.75, got {}",
+            sug1.confidence
+        );
 
         let with_clip = snap_clipboard("hello world foo");
         let sug2 = r.best_suggestion("", &with_clip, 0.7).unwrap();
         assert_eq!(sug2.origin, Some(SuggestionOrigin::Clipboard));
         // 0.75 * 0.85 = 0.6375
-        assert!((sug2.confidence - 0.6375).abs() < 1e-9, "expected 0.6375, got {}", sug2.confidence);
+        assert!(
+            (sug2.confidence - 0.6375).abs() < 1e-9,
+            "expected 0.6375, got {}",
+            sug2.confidence
+        );
     }
 
     // ── 0.8.8 bugfix · Context 采纳后自抑制护栏 ──────────────────────────
@@ -2714,7 +2972,10 @@ mod tests {
 
         // 对照组：非空无关 query 也不显示 Context Ghost
         let sug_fallback = r.best_suggestion("xyz random", &snap, 0.7);
-        assert!(sug_fallback.is_none(), "non-empty query should not get Context Ghost");
+        assert!(
+            sug_fallback.is_none(),
+            "non-empty query should not get Context Ghost"
+        );
     }
 
     #[test]
@@ -2732,16 +2993,40 @@ mod tests {
         let snap = snap_selection("hello world foo");
 
         // 三种形式都能触发 query_hits_plugin_keyword → context_suggestion 直接返回 None
-        assert!(r.context_suggestion("翻译 tab", &snap).is_none(), "原文 Prefix should silence");
-        assert!(r.context_suggestion("fanyi tab", &snap).is_none(), "pinyin_full Prefix should silence");
-        assert!(r.context_suggestion("fy tab", &snap).is_none(), "pinyin_initials Prefix should silence");
-        assert!(r.context_suggestion("翻译", &snap).is_none(), "原文 Exact should silence");
-        assert!(r.context_suggestion("fanyi", &snap).is_none(), "pinyin_full Exact should silence");
-        assert!(r.context_suggestion("fy", &snap).is_none(), "pinyin_initials Exact should silence");
+        assert!(
+            r.context_suggestion("翻译 tab", &snap).is_none(),
+            "原文 Prefix should silence"
+        );
+        assert!(
+            r.context_suggestion("fanyi tab", &snap).is_none(),
+            "pinyin_full Prefix should silence"
+        );
+        assert!(
+            r.context_suggestion("fy tab", &snap).is_none(),
+            "pinyin_initials Prefix should silence"
+        );
+        assert!(
+            r.context_suggestion("翻译", &snap).is_none(),
+            "原文 Exact should silence"
+        );
+        assert!(
+            r.context_suggestion("fanyi", &snap).is_none(),
+            "pinyin_full Exact should silence"
+        );
+        assert!(
+            r.context_suggestion("fy", &snap).is_none(),
+            "pinyin_initials Exact should silence"
+        );
 
         // 对照：空 query 仍能产 Context，非空无关 query 不产 Context
-        assert!(r.context_suggestion("", &snap).is_some(), "empty query still fires");
-        assert!(r.context_suggestion("xyz random", &snap).is_none(), "non-empty query should not fire");
+        assert!(
+            r.context_suggestion("", &snap).is_some(),
+            "empty query still fires"
+        );
+        assert!(
+            r.context_suggestion("xyz random", &snap).is_none(),
+            "non-empty query should not fire"
+        );
     }
 
     #[test]

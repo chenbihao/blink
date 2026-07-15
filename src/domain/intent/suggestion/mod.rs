@@ -108,7 +108,10 @@ pub struct Suggestion {
     /// **0.8.6 deprecated**：RankingHint 改由 `SuggestionArbiter::best()` 独立返回，
     /// 不再挂在 Suggestion 上。本字段保留供 `best_suggestion_direct` fallback 使用，
     /// 生产环境走 arbiter 路径时此字段恒 None。
-    #[deprecated(since = "0.8.6", note = "RankingHint 由 SuggestionArbiter 独立返回，不再挂在 Suggestion 上")]
+    #[deprecated(
+        since = "0.8.6",
+        note = "RankingHint 由 SuggestionArbiter 独立返回，不再挂在 Suggestion 上"
+    )]
     #[serde(skip_serializing)]
     pub ranking_hint: Option<RankingHint>,
 }

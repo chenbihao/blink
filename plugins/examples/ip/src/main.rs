@@ -194,7 +194,12 @@ fn main() {
                 });
                 send_message(&mut stdout, &http_req);
             }
-            CoreToPlugin::HttpResponse { id, status, body, error } => {
+            CoreToPlugin::HttpResponse {
+                id,
+                status,
+                body,
+                error,
+            } => {
                 let mut pending_guard = pending_clone.lock().unwrap();
                 let Some(ctx) = pending_guard.remove(&id) else {
                     eprintln!("http response for unknown request: {id}");
@@ -253,19 +258,25 @@ fn main() {
                     });
                     send_message(&mut stdout, &resp);
                 } else {
-                    let resp = PluginToCore::Response(PluginResponse { id: ctx.query_id, items });
+                    let resp = PluginToCore::Response(PluginResponse {
+                        id: ctx.query_id,
+                        items,
+                    });
                     send_message(&mut stdout, &resp);
                 }
             }
-            CoreToPlugin::ToolCall { id, tool_name: _, arguments, settings } => {
+            CoreToPlugin::ToolCall {
+                id,
+                tool_name: _,
+                arguments,
+                settings,
+            } => {
                 // 0.9.3: tool-call 与 query 共用逻辑，只是返回 ToolResult 格式
                 let use_ipv6 = settings
                     .as_ref()
                     .and_then(|s| s.get("use_ipv6"))
                     .and_then(|v| v.as_bool())
-                    .or_else(|| {
-                        arguments.get("include_ipv6").and_then(|v| v.as_bool())
-                    })
+                    .or_else(|| arguments.get("include_ipv6").and_then(|v| v.as_bool()))
                     .unwrap_or(false);
 
                 let local_ip = get_local_ip();

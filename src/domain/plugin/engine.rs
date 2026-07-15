@@ -32,7 +32,11 @@ pub struct PluginEngine {
 }
 
 impl PluginEngine {
-    pub fn new(plugins: Vec<Arc<PluginHandle>>, pool: SqlitePool, global_proxy: Option<(String, String)>) -> Self {
+    pub fn new(
+        plugins: Vec<Arc<PluginHandle>>,
+        pool: SqlitePool,
+        global_proxy: Option<(String, String)>,
+    ) -> Self {
         PluginEngine {
             plugins,
             configs: Arc::new(RwLock::new(HashMap::new())),
@@ -56,7 +60,9 @@ impl PluginEngine {
                     .iter()
                     .filter_map(|t| match t {
                         super::PluginTrigger::Keyword { keyword, .. } => Some(keyword.clone()),
-                        super::PluginTrigger::Regex { pattern, .. } => Some(format!("regex: {pattern}")),
+                        super::PluginTrigger::Regex { pattern, .. } => {
+                            Some(format!("regex: {pattern}"))
+                        }
                         super::PluginTrigger::Context { .. } => None,
                     })
                     .collect();
@@ -280,10 +286,7 @@ impl PluginEngine {
     ///
     /// 用于设置页遍历 `manifest.triggers` 收集所有 `PluginTrigger::Context`。
     pub fn list_manifests(&self) -> Vec<super::PluginManifest> {
-        self.plugins
-            .iter()
-            .map(|p| p.manifest().clone())
-            .collect()
+        self.plugins.iter().map(|p| p.manifest().clone()).collect()
     }
 
     /// 获取插件的显示名称,回退为 plugin_id。
@@ -315,8 +318,13 @@ impl PluginEngine {
     /// `lang` 由 SearchService 传入（AppConfig.language 快照）；`resolve` 内部按
     /// lang → zh → 首个 的顺序回退，永不 panic。
     pub fn get_empty_arg_hint(&self, id: &str, lang: &str) -> Option<String> {
-        self.find_plugin(id)
-            .and_then(|p| p.manifest().runtime.empty_arg_hint.as_ref().map(|h| h.resolve(lang)))
+        self.find_plugin(id).and_then(|p| {
+            p.manifest()
+                .runtime
+                .empty_arg_hint
+                .as_ref()
+                .map(|h| h.resolve(lang))
+        })
     }
 
     /// 更新全局代理配置 + 重置所有插件进程(保存后调用)。

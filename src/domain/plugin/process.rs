@@ -16,10 +16,13 @@ use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{Mutex, oneshot};
 
 use super::manifest::{PluginManifest, RuntimeType};
-use super::protocol::{PluginAction, PluginItem, PluginRequest, PluginResponse, PluginUpstreamMessage, ToolResultPayload};
+use super::protocol::{
+    PluginAction, PluginItem, PluginRequest, PluginResponse, PluginUpstreamMessage,
+    ToolResultPayload,
+};
 
 /// Windows CreateProcess 标志:不创建控制台窗口。
 #[cfg(windows)]
@@ -119,11 +122,7 @@ pub fn find_interpreter(candidates: &[&str]) -> Result<PathBuf, PluginError> {
 }
 
 /// 探测解释器版本，返回 (version_string, version_ok)。
-fn probe_version(
-    exe_path: &Path,
-    version_arg: &str,
-    min_version: &str,
-) -> (Option<String>, bool) {
+fn probe_version(exe_path: &Path, version_arg: &str, min_version: &str) -> (Option<String>, bool) {
     let output = match std::process::Command::new(exe_path)
         .arg(version_arg)
         .creation_flags(CREATE_NO_WINDOW)
@@ -139,7 +138,9 @@ fn probe_version(
 
     // 简单的版本提取：找第一个数字.数字.数字模式
     let version_re = regex::Regex::new(r"(\d+\.\d+\.\d+)").unwrap();
-    let version = version_re.find(version_output).map(|m| m.as_str().to_string());
+    let version = version_re
+        .find(version_output)
+        .map(|m| m.as_str().to_string());
 
     let version_ok = version
         .as_ref()
@@ -259,8 +260,13 @@ impl PluginProcess {
                                     tracing::debug!(plugin = %id, url = %req.url, "插件发起 HTTP 请求");
                                     let stdin = Arc::clone(&stdin);
                                     tauri::async_runtime::spawn(async move {
-                                        let (status, body, error) =
-                                            execute_http_request(&req.method, &req.url, req.body.as_deref(), req.timeout_ms).await;
+                                        let (status, body, error) = execute_http_request(
+                                            &req.method,
+                                            &req.url,
+                                            req.body.as_deref(),
+                                            req.timeout_ms,
+                                        )
+                                        .await;
                                         // 构造 http_response 消息写回插件
                                         let resp = PluginRequest::HttpResponse {
                                             id: req.id,
@@ -277,7 +283,8 @@ impl PluginProcess {
                                 }
                                 Ok(PluginUpstreamMessage::ToolResult(payload)) => {
                                     // 0.9.3:tool-call 结果路由到 pending_tools
-                                    if let Some(tx) = pending_tools.lock().await.remove(&payload.id) {
+                                    if let Some(tx) = pending_tools.lock().await.remove(&payload.id)
+                                    {
                                         let _ = tx.send(payload);
                                     } else {
                                         tracing::debug!(plugin = %id, id = %payload.id, "孤儿 tool_result(无 pending)");
@@ -287,7 +294,8 @@ impl PluginProcess {
                                     // 向后兼容：尝试旧格式（直接 PluginResponse struct）
                                     match serde_json::from_str::<PluginResponse>(&line) {
                                         Ok(resp) => {
-                                            if let Some(tx) = pending.lock().await.remove(&resp.id) {
+                                            if let Some(tx) = pending.lock().await.remove(&resp.id)
+                                            {
                                                 let _ = tx.send(resp);
                                             } else {
                                                 tracing::debug!(plugin = %id, id = %resp.id, "孤儿响应(无 pending)");
@@ -387,7 +395,7 @@ impl PluginProcess {
                     return Ok(vec![PluginItem {
                         title: err.message,
                         subtitle: None,
-                        score: -1.0, // 负分，排序到最后
+                        score: -1.0,                // 负分，排序到最后
                         action: PluginAction::None, // 纯展示，无操作
                     }]);
                 }
@@ -413,7 +421,9 @@ impl PluginProcess {
             title: message.to_string(),
             subtitle: None,
             score: -1.0,
-            action: PluginAction::Open { path: String::new() },
+            action: PluginAction::Open {
+                path: String::new(),
+            },
         }]
     }
 
@@ -453,7 +463,10 @@ impl PluginProcess {
                 .write_all((line + "\n").as_bytes())
                 .await
                 .map_err(|_| PluginError::ProcessClosed)?;
-            stdin.flush().await.map_err(|_| PluginError::ProcessClosed)?;
+            stdin
+                .flush()
+                .await
+                .map_err(|_| PluginError::ProcessClosed)?;
         }
 
         match tokio::time::timeout(Duration::from_millis(timeout_ms), rx).await {
@@ -477,8 +490,12 @@ impl PluginProcess {
     /// 插件可忽略;整体限时 200ms——插件若不读 stdin(stdin 管道堵塞)则放弃,
     /// 避免独占 stdin 锁把单次超时拖垮成「插件永久不可用」。
     async fn send_cancel(&self, req_id: &str) {
-        let req = PluginRequest::Cancel { id: req_id.to_string() };
-        let Ok(line) = serde_json::to_string(&req) else { return; };
+        let req = PluginRequest::Cancel {
+            id: req_id.to_string(),
+        };
+        let Ok(line) = serde_json::to_string(&req) else {
+            return;
+        };
         let write = async {
             let mut stdin = self.stdin.lock().await;
             stdin.write_all((line + "\n").as_bytes()).await?;
@@ -500,7 +517,11 @@ pub struct PluginHandle {
 }
 
 impl PluginHandle {
-    pub fn new(manifest: Arc<PluginManifest>, dir: PathBuf, proxy: Option<(String, String)>) -> Self {
+    pub fn new(
+        manifest: Arc<PluginManifest>,
+        dir: PathBuf,
+        proxy: Option<(String, String)>,
+    ) -> Self {
         PluginHandle {
             manifest,
             dir,
@@ -562,7 +583,8 @@ impl PluginHandle {
                 let runtime_type = self.manifest.runtime.r#type;
                 tracing::info!(plugin = %self.manifest.id, ?runtime_type, exec = %exec.display(), "拉起插件进程");
                 let proxy = self.proxy.lock().unwrap().clone();
-                match PluginProcess::spawn(&exec, &self.dir, &self.manifest.id, runtime_type, proxy) {
+                match PluginProcess::spawn(&exec, &self.dir, &self.manifest.id, runtime_type, proxy)
+                {
                     Ok(proc) => *guard = Some(Arc::new(proc)),
                     Err(e) => {
                         // 进程拉起失败 → 返回友好错误项,用户知道发生了什么
@@ -588,7 +610,11 @@ impl PluginHandle {
         // 用 Arc::ptr_eq 判定身份,勿误清他人的新进程。
         if matches!(result, Err(PluginError::ProcessClosed)) {
             let mut guard = self.process.lock().await;
-            if guard.as_ref().map(|p| Arc::ptr_eq(p, &proc)).unwrap_or(false) {
+            if guard
+                .as_ref()
+                .map(|p| Arc::ptr_eq(p, &proc))
+                .unwrap_or(false)
+            {
                 *guard = None;
             }
         }
@@ -628,7 +654,8 @@ impl PluginHandle {
                 let runtime_type = self.manifest.runtime.r#type;
                 tracing::info!(plugin = %self.manifest.id, ?runtime_type, exec = %exec.display(), "拉起插件进程(tool-call)");
                 let proxy = self.proxy.lock().unwrap().clone();
-                match PluginProcess::spawn(&exec, &self.dir, &self.manifest.id, runtime_type, proxy) {
+                match PluginProcess::spawn(&exec, &self.dir, &self.manifest.id, runtime_type, proxy)
+                {
                     Ok(proc) => *guard = Some(Arc::new(proc)),
                     Err(e) => {
                         let msg = match e {
@@ -646,12 +673,18 @@ impl PluginHandle {
             Arc::clone(guard.as_ref().unwrap())
         };
 
-        let result = proc.execute_tool(tool_name, arguments, settings, timeout_ms).await;
+        let result = proc
+            .execute_tool(tool_name, arguments, settings, timeout_ms)
+            .await;
 
         // 进程关闭类错误:清理句柄,下次重启。
         if matches!(result, Err(PluginError::ProcessClosed)) {
             let mut guard = self.process.lock().await;
-            if guard.as_ref().map(|p| Arc::ptr_eq(p, &proc)).unwrap_or(false) {
+            if guard
+                .as_ref()
+                .map(|p| Arc::ptr_eq(p, &proc))
+                .unwrap_or(false)
+            {
                 *guard = None;
             }
         }
@@ -768,4 +801,3 @@ async fn execute_http_request(
         Err(e) => (0, None, Some(e.to_string())),
     }
 }
-

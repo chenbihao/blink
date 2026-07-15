@@ -37,7 +37,7 @@
 //!
 //! 新方案（FunASR server）：
 //! - Blink 通过 uv 自动安装 Python 3.12 + funasr（用户零手动操作）
-//! - `funasr-server --model sensevoice` 一键启动
+//! - `funasr-server --model iic/SenseVoiceSmall` 一键启动
 //! - OpenAI 兼容 API = 复用现有 HTTP 代码
 //! - FunASR 原生 pipeline
 
@@ -98,7 +98,7 @@ impl LocalSttEngine {
             samples: Mutex::new(Vec::new()),
             sample_rate: 16000,
             server_port: port,
-            funasr_model: "sensevoice".to_string(),
+            funasr_model: "iic/SenseVoiceSmall".to_string(),
             server_ready: super::funasr::is_server_ready(port),
         }
     }
@@ -134,10 +134,7 @@ impl LocalSttEngine {
 impl SttEngine for LocalSttEngine {
     async fn transcribe_chunk(&self, samples: &[f32]) -> Result<String, SttError> {
         // 非流式模式：只累积，不返回 partial
-        self.samples
-            .lock()
-            .unwrap()
-            .extend_from_slice(samples);
+        self.samples.lock().unwrap().extend_from_slice(samples);
         Ok(String::new())
     }
 
@@ -257,7 +254,11 @@ mod tests {
                 .expect("HTTP client 创建失败");
 
             let resp = client.get(audio_url).send().await.expect("下载音频失败");
-            assert!(resp.status().is_success(), "下载音频 HTTP 失败: {}", resp.status());
+            assert!(
+                resp.status().is_success(),
+                "下载音频 HTTP 失败: {}",
+                resp.status()
+            );
 
             let bytes = resp.bytes().await.expect("读取音频字节失败");
             std::fs::write(&tmp_wav, &bytes).expect("写入音频文件失败");
@@ -268,7 +269,11 @@ mod tests {
 
         // 解析 WAV → f32 PCM 样本
         let samples = super::super::wav::parse_wav_to_f32(&wav_bytes).expect("WAV 解析失败");
-        eprintln!("音频: {} 样本, {:.1}s", samples.len(), samples.len() as f64 / 16000.0);
+        eprintln!(
+            "音频: {} 样本, {:.1}s",
+            samples.len(),
+            samples.len() as f64 / 16000.0
+        );
 
         // 创建引擎实例
         let engine = LocalSttEngine::for_diagnostic(port);

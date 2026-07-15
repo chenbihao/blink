@@ -180,10 +180,7 @@ pub fn placeholder_score(is_priority: bool) -> f32 {
 /// StartMenuEngine 用的 top-relative 归一化。
 /// 空列表 / 全零分 返回原序列（分数置 0）。
 pub fn normalize_top_relative<T>(items: &mut [(T, f32)]) {
-    let max_score = items
-        .iter()
-        .map(|(_, s)| *s)
-        .fold(0.0f32, f32::max);
+    let max_score = items.iter().map(|(_, s)| *s).fold(0.0f32, f32::max);
 
     if max_score > 0.0 {
         for (_, s) in items {

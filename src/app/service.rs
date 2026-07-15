@@ -156,7 +156,10 @@ impl Service for HotkeyService {
     async fn start(&self, ctx: &AppContext) -> Result<(), String> {
         let app = ctx.app.clone();
         let voice_service = ctx.voice_service.clone();
-        let mut rx = crate::infra::platform::hotkey::start(ctx.config.hotkey.clone(), ctx.config.tap_threshold);
+        let mut rx = crate::infra::platform::hotkey::start(
+            ctx.config.hotkey.clone(),
+            ctx.config.tap_threshold,
+        );
         tauri::async_runtime::spawn(async move {
             while let Some(ev) = rx.recv().await {
                 match ev {
@@ -168,7 +171,12 @@ impl Service for HotkeyService {
                             let elapsed = trigger_time.elapsed().as_secs_f64() * 1000.0;
                             crate::infra::platform::window::invoke(&app);
                             // 记录热键唤起耗时（按键 → 窗口 invoke）
-                            crate::infra::utils::perf::record(crate::infra::utils::perf::MetricCategory::Hotkey, "key_to_show", elapsed, None);
+                            crate::infra::utils::perf::record(
+                                crate::infra::utils::perf::MetricCategory::Hotkey,
+                                "key_to_show",
+                                elapsed,
+                                None,
+                            );
                         }
                     }
                     crate::infra::platform::hotkey::HotkeyEvent::Hold(_) => {

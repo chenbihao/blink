@@ -44,7 +44,12 @@ struct SelectionCache {
 static CACHE: OnceLock<RwLock<SelectionCache>> = OnceLock::new();
 
 fn cache() -> &'static RwLock<SelectionCache> {
-    CACHE.get_or_init(|| RwLock::new(SelectionCache { text: None, at: None }))
+    CACHE.get_or_init(|| {
+        RwLock::new(SelectionCache {
+            text: None,
+            at: None,
+        })
+    })
 }
 
 /// 缓存最近选区（划词抓取线程调用）。

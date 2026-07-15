@@ -10,14 +10,14 @@ use super::AppEntry;
 /// 打包应用（UWP/MSIX）。每个应用通过 AppUserModelId 标识，`lnk_path` 格式为
 /// `shell:AppsFolder\{AppUserModelId}`，Windows Shell 原生支持此格式启动。
 pub fn scan_apps_folder() -> Vec<AppEntry> {
-    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+    use windows::Win32::Storage::EnhancedStorage::PKEY_AppUserModel_ID;
+    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+    use windows::Win32::System::Variant::VT_LPWSTR;
+    use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
     use windows::Win32::UI::Shell::{
-        BHID_StorageEnum, BHID_PropertyStore, IEnumShellItems, IShellItem,
+        BHID_PropertyStore, BHID_StorageEnum, IEnumShellItems, IShellItem,
         SHCreateItemFromParsingName, SIGDN_NORMALDISPLAY,
     };
-    use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
-    use windows::Win32::Storage::EnhancedStorage::PKEY_AppUserModel_ID;
-    use windows::Win32::System::Variant::VT_LPWSTR;
 
     let start = std::time::Instant::now();
     let mut entries = Vec::new();
@@ -42,8 +42,7 @@ pub fn scan_apps_folder() -> Vec<AppEntry> {
                 SHCreateItemFromParsingName(windows::core::w!("shell:AppsFolder"), None)?;
 
             // 枚举子项
-            let enum_items: IEnumShellItems =
-                apps_folder.BindToHandler(None, &BHID_StorageEnum)?;
+            let enum_items: IEnumShellItems = apps_folder.BindToHandler(None, &BHID_StorageEnum)?;
 
             let mut fetched: u32 = 0;
             let mut item_array: [Option<IShellItem>; 1] = [None];
@@ -59,7 +58,9 @@ pub fn scan_apps_folder() -> Vec<AppEntry> {
                         let name = pwstr.to_string().unwrap_or_default();
                         // 释放 PWSTR（CoTaskMemAlloc 分配的）
                         if !pwstr.is_null() {
-                            windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
+                            windows::Win32::System::Com::CoTaskMemFree(Some(
+                                pwstr.as_ptr() as *const _
+                            ));
                         }
                         name
                     }
@@ -71,7 +72,9 @@ pub fn scan_apps_folder() -> Vec<AppEntry> {
                 }
 
                 // 获取 AppUserModelId
-                let app_user_model_id = match item.BindToHandler::<_, IPropertyStore>(None, &BHID_PropertyStore) {
+                let app_user_model_id = match item
+                    .BindToHandler::<_, IPropertyStore>(None, &BHID_PropertyStore)
+                {
                     Ok(prop_store) => {
                         let prop_var = prop_store.GetValue(&PKEY_AppUserModel_ID);
                         match prop_var {
@@ -129,7 +132,11 @@ pub fn scan_apps_folder() -> Vec<AppEntry> {
     }
 
     let elapsed = start.elapsed();
-    tracing::debug!(count = entries.len(), elapsed_ms = elapsed.as_millis(), "AppsFolder 扫描完成");
+    tracing::debug!(
+        count = entries.len(),
+        elapsed_ms = elapsed.as_millis(),
+        "AppsFolder 扫描完成"
+    );
 
     entries
 }

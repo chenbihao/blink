@@ -144,7 +144,9 @@ impl AIProviderRegistry {
             .iter()
             .flat_map(|p| {
                 let fp = fp_by_pid.get(&p.id).cloned().unwrap_or_default();
-                p.models.iter().map(move |m| (p.id.clone(), m.id.clone(), fp.clone()))
+                p.models
+                    .iter()
+                    .map(move |m| (p.id.clone(), m.id.clone(), fp.clone()))
             })
             .collect();
 
@@ -173,10 +175,7 @@ impl AIProviderRegistry {
             match self.factory.build(provider, model) {
                 Ok(instance) => {
                     let fp = fp_by_pid.get(&provider.id).cloned().unwrap_or_default();
-                    built.push((
-                        (provider.id.clone(), model.id.clone(), fp),
-                        instance,
-                    ))
+                    built.push(((provider.id.clone(), model.id.clone(), fp), instance))
                 }
                 Err(e) => {
                     failed_count += 1;
@@ -322,7 +321,10 @@ mod tests {
         }
     }
 
-    fn make_config(providers: Vec<(&str, Vec<&str>)>, tier_router: Option<(&str, &str)>) -> AIConfig {
+    fn make_config(
+        providers: Vec<(&str, Vec<&str>)>,
+        tier_router: Option<(&str, &str)>,
+    ) -> AIConfig {
         AIConfig {
             enabled: true,
             providers: providers
@@ -362,9 +364,18 @@ mod tests {
     fn empty_registry_returns_not_configured() {
         let f = Arc::new(CountingFactory::new());
         let reg = AIProviderRegistry::new(f);
-        assert!(matches!(reg.resolve(Tier::Router), Err(AIError::NotConfigured)));
-        assert!(matches!(reg.resolve(Tier::Light), Err(AIError::NotConfigured)));
-        assert!(matches!(reg.resolve(Tier::Main), Err(AIError::NotConfigured)));
+        assert!(matches!(
+            reg.resolve(Tier::Router),
+            Err(AIError::NotConfigured)
+        ));
+        assert!(matches!(
+            reg.resolve(Tier::Light),
+            Err(AIError::NotConfigured)
+        ));
+        assert!(matches!(
+            reg.resolve(Tier::Main),
+            Err(AIError::NotConfigured)
+        ));
         assert_eq!(reg.size(), 0);
     }
 
@@ -427,7 +438,10 @@ mod tests {
         assert_eq!(f.calls(), 2, "同 config reload 不该再 build");
 
         let new_p1_m1 = reg.resolve(Tier::Router).unwrap().0;
-        assert!(Arc::ptr_eq(&old_p1_m1, &new_p1_m1), "reload 后 instance 应完全复用");
+        assert!(
+            Arc::ptr_eq(&old_p1_m1, &new_p1_m1),
+            "reload 后 instance 应完全复用"
+        );
     }
 
     #[test]

@@ -87,7 +87,6 @@ unsafe extern "system" fn hold_timer_callback(
     });
 }
 
-
 /// 启动 Windows 钩子线程。
 pub fn start_hook_thread() {
     std::thread::Builder::new()
@@ -188,14 +187,30 @@ pub fn is_alt_down() -> bool {
 /// 采样当前 8 个修饰键的物理态为 bitmask。
 fn current_modifier_mask() -> u16 {
     let mut mask = 0u16;
-    if key_down(VK_LCONTROL) { mask |= MOD_LCTRL; }
-    if key_down(VK_RCONTROL) { mask |= MOD_RCTRL; }
-    if key_down(VK_LSHIFT) { mask |= MOD_LSHIFT; }
-    if key_down(VK_RSHIFT) { mask |= MOD_RSHIFT; }
-    if key_down(VK_LMENU) { mask |= MOD_LALT; }
-    if key_down(VK_RMENU) { mask |= MOD_RALT; }
-    if key_down(VK_LWIN) { mask |= MOD_LMETA; }
-    if key_down(VK_RWIN) { mask |= MOD_RMETA; }
+    if key_down(VK_LCONTROL) {
+        mask |= MOD_LCTRL;
+    }
+    if key_down(VK_RCONTROL) {
+        mask |= MOD_RCTRL;
+    }
+    if key_down(VK_LSHIFT) {
+        mask |= MOD_LSHIFT;
+    }
+    if key_down(VK_RSHIFT) {
+        mask |= MOD_RSHIFT;
+    }
+    if key_down(VK_LMENU) {
+        mask |= MOD_LALT;
+    }
+    if key_down(VK_RMENU) {
+        mask |= MOD_RALT;
+    }
+    if key_down(VK_LWIN) {
+        mask |= MOD_LMETA;
+    }
+    if key_down(VK_RWIN) {
+        mask |= MOD_RMETA;
+    }
     mask
 }
 
@@ -209,20 +224,32 @@ fn modifiers_satisfied(config: &crate::app::config::HotkeyConfig) -> bool {
     modifiers_mask_satisfies_config(&config.modifiers, mask)
 }
 
-
-
 /// 将虚拟键码转换为配置中的键名。
 fn vk_to_key(vk: u32) -> Option<String> {
     // 修饰键。通用码（VK_SHIFT / VK_CONTROL / VK_MENU，不分左右）当作左侧——
     // 兼容某些驱动/事件流只发通用码的情况；否则这些按键会被 vk_to_key 忽略，
     // 导致录制单独修饰键（如左 Alt）时永远等不到松开事件、无法结束。
-    if vk == VK_LCONTROL.0 as u32 || vk == VK_CONTROL.0 as u32 { return Some("lctrl".to_string()); }
-    if vk == VK_RCONTROL.0 as u32 { return Some("rctrl".to_string()); }
-    if vk == VK_LSHIFT.0 as u32 || vk == VK_SHIFT.0 as u32 { return Some("lshift".to_string()); }
-    if vk == VK_RSHIFT.0 as u32 { return Some("rshift".to_string()); }
-    if vk == VK_LMENU.0 as u32 || vk == VK_MENU.0 as u32 { return Some("lalt".to_string()); }
-    if vk == VK_RMENU.0 as u32 { return Some("ralt".to_string()); }
-    if vk == VK_LWIN.0 as u32 || vk == VK_RWIN.0 as u32 { return Some("meta".to_string()); }
+    if vk == VK_LCONTROL.0 as u32 || vk == VK_CONTROL.0 as u32 {
+        return Some("lctrl".to_string());
+    }
+    if vk == VK_RCONTROL.0 as u32 {
+        return Some("rctrl".to_string());
+    }
+    if vk == VK_LSHIFT.0 as u32 || vk == VK_SHIFT.0 as u32 {
+        return Some("lshift".to_string());
+    }
+    if vk == VK_RSHIFT.0 as u32 {
+        return Some("rshift".to_string());
+    }
+    if vk == VK_LMENU.0 as u32 || vk == VK_MENU.0 as u32 {
+        return Some("lalt".to_string());
+    }
+    if vk == VK_RMENU.0 as u32 {
+        return Some("ralt".to_string());
+    }
+    if vk == VK_LWIN.0 as u32 || vk == VK_RWIN.0 as u32 {
+        return Some("meta".to_string());
+    }
 
     // 字母键 (A-Z)
     if (0x41..=0x5A).contains(&vk) {
@@ -243,29 +270,71 @@ fn vk_to_key(vk: u32) -> Option<String> {
     }
 
     // 特殊键
-    if vk == VK_SPACE.0 as u32 { return Some(" ".to_string()); }
-    if vk == VK_RETURN.0 as u32 { return Some("Enter".to_string()); }
-    if vk == VK_ESCAPE.0 as u32 { return Some("Escape".to_string()); }
-    if vk == VK_BACK.0 as u32 { return Some("Backspace".to_string()); }
-    if vk == VK_TAB.0 as u32 { return Some("Tab".to_string()); }
-    if vk == VK_DELETE.0 as u32 { return Some("Delete".to_string()); }
-    if vk == VK_UP.0 as u32 { return Some("ArrowUp".to_string()); }
-    if vk == VK_DOWN.0 as u32 { return Some("ArrowDown".to_string()); }
-    if vk == VK_LEFT.0 as u32 { return Some("ArrowLeft".to_string()); }
-    if vk == VK_RIGHT.0 as u32 { return Some("ArrowRight".to_string()); }
+    if vk == VK_SPACE.0 as u32 {
+        return Some(" ".to_string());
+    }
+    if vk == VK_RETURN.0 as u32 {
+        return Some("Enter".to_string());
+    }
+    if vk == VK_ESCAPE.0 as u32 {
+        return Some("Escape".to_string());
+    }
+    if vk == VK_BACK.0 as u32 {
+        return Some("Backspace".to_string());
+    }
+    if vk == VK_TAB.0 as u32 {
+        return Some("Tab".to_string());
+    }
+    if vk == VK_DELETE.0 as u32 {
+        return Some("Delete".to_string());
+    }
+    if vk == VK_UP.0 as u32 {
+        return Some("ArrowUp".to_string());
+    }
+    if vk == VK_DOWN.0 as u32 {
+        return Some("ArrowDown".to_string());
+    }
+    if vk == VK_LEFT.0 as u32 {
+        return Some("ArrowLeft".to_string());
+    }
+    if vk == VK_RIGHT.0 as u32 {
+        return Some("ArrowRight".to_string());
+    }
 
     // 标点/符号键（OEM 键，按美式键盘布局命名）。非修饰键，作为主键录制。
-    if vk == 0xBA { return Some(";".to_string()); }   // VK_OEM_1      ';'
-    if vk == 0xBB { return Some("=".to_string()); }   // VK_OEM_PLUS   '='
-    if vk == 0xBC { return Some(",".to_string()); }   // VK_OEM_COMMA  ','
-    if vk == 0xBD { return Some("-".to_string()); }   // VK_OEM_MINUS  '-'
-    if vk == 0xBE { return Some(".".to_string()); }   // VK_OEM_PERIOD '.'
-    if vk == 0xBF { return Some("/".to_string()); }   // VK_OEM_2      '/'
-    if vk == 0xC0 { return Some("`".to_string()); }   // VK_OEM_3      '`'
-    if vk == 0xDB { return Some("[".to_string()); }   // VK_OEM_4      '['
-    if vk == 0xDC { return Some("\\".to_string()); }  // VK_OEM_5      '\'
-    if vk == 0xDD { return Some("]".to_string()); }   // VK_OEM_6      ']'
-    if vk == 0xDE { return Some("'".to_string()); }   // VK_OEM_7      '''
+    if vk == 0xBA {
+        return Some(";".to_string());
+    } // VK_OEM_1      ';'
+    if vk == 0xBB {
+        return Some("=".to_string());
+    } // VK_OEM_PLUS   '='
+    if vk == 0xBC {
+        return Some(",".to_string());
+    } // VK_OEM_COMMA  ','
+    if vk == 0xBD {
+        return Some("-".to_string());
+    } // VK_OEM_MINUS  '-'
+    if vk == 0xBE {
+        return Some(".".to_string());
+    } // VK_OEM_PERIOD '.'
+    if vk == 0xBF {
+        return Some("/".to_string());
+    } // VK_OEM_2      '/'
+    if vk == 0xC0 {
+        return Some("`".to_string());
+    } // VK_OEM_3      '`'
+    if vk == 0xDB {
+        return Some("[".to_string());
+    } // VK_OEM_4      '['
+    if vk == 0xDC {
+        return Some("\\".to_string());
+    } // VK_OEM_5      '\'
+    if vk == 0xDD {
+        return Some("]".to_string());
+    } // VK_OEM_6      ']'
+    if vk == 0xDE {
+        return Some("'".to_string());
+    } // VK_OEM_7      '''
 
     None
 }
@@ -301,9 +370,7 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
             // 录制期间吞掉 Alt+Space：WebView2 在底层把 WM_SYSKEYDOWN(VK_SPACE)+Alt
             // 转发给宿主，前端 preventDefault 拦不住，会呼出左上角系统菜单并冻结
             // webview 消息泵。仅在录制期间、仅此组合吞键，不破坏日常「不吞键」原则。
-            if vk == VK_SPACE.0 as u32
-                && unsafe { GetAsyncKeyState(VK_MENU.0 as i32) } < 0
-            {
+            if vk == VK_SPACE.0 as u32 && unsafe { GetAsyncKeyState(VK_MENU.0 as i32) } < 0 {
                 return LRESULT(1);
             }
             return unsafe { CallNextHookEx(None, code, wparam, lparam) };
@@ -311,8 +378,12 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
 
         // hold 录音中吞掉 Alt+Space 的 keydown：防止 Windows 反复弹出系统菜单（"噔噔噔"声）。
         // 仅在 hold_fired=true（录音已启动）时吞 keydown，keyup 不吞（否则 HoldRelease 收不到）。
-        if is_down && VOICE_RECORDING.load(Ordering::SeqCst)
-            && (vk == VK_SPACE.0 as u32 || vk == VK_MENU.0 as u32 || vk == VK_LMENU.0 as u32 || vk == VK_RMENU.0 as u32)
+        if is_down
+            && VOICE_RECORDING.load(Ordering::SeqCst)
+            && (vk == VK_SPACE.0 as u32
+                || vk == VK_MENU.0 as u32
+                || vk == VK_LMENU.0 as u32
+                || vk == VK_RMENU.0 as u32)
             && unsafe { GetAsyncKeyState(VK_MENU.0 as i32) } < 0
         {
             return LRESULT(1);
@@ -454,13 +525,19 @@ mod tests {
 
     #[test]
     fn mask_for_config_modifier_names() {
-        assert_eq!(mask_for_config_modifier("ctrl"), Some(MOD_LCTRL | MOD_RCTRL));
+        assert_eq!(
+            mask_for_config_modifier("ctrl"),
+            Some(MOD_LCTRL | MOD_RCTRL)
+        );
         assert_eq!(mask_for_config_modifier("lctrl"), Some(MOD_LCTRL));
         assert_eq!(mask_for_config_modifier("rctrl"), Some(MOD_RCTRL));
         assert_eq!(mask_for_config_modifier("alt"), Some(MOD_LALT | MOD_RALT));
         assert_eq!(mask_for_config_modifier("lalt"), Some(MOD_LALT));
         assert_eq!(mask_for_config_modifier("ralt"), Some(MOD_RALT));
-        assert_eq!(mask_for_config_modifier("meta"), Some(MOD_LMETA | MOD_RMETA));
+        assert_eq!(
+            mask_for_config_modifier("meta"),
+            Some(MOD_LMETA | MOD_RMETA)
+        );
         assert_eq!(mask_for_config_modifier("cmd"), None); // 未知名
     }
 
@@ -468,7 +545,10 @@ mod tests {
     fn exact_specific_modifier() {
         assert!(modifiers_mask_satisfies_config(&["lalt".into()], MOD_LALT));
         assert!(!modifiers_mask_satisfies_config(&["lalt".into()], MOD_RALT)); // 右非左
-        assert!(!modifiers_mask_satisfies_config(&["lalt".into()], MOD_LALT | MOD_LCTRL)); // 多余 ctrl
+        assert!(!modifiers_mask_satisfies_config(
+            &["lalt".into()],
+            MOD_LALT | MOD_LCTRL
+        )); // 多余 ctrl
     }
 
     #[test]
@@ -476,7 +556,10 @@ mod tests {
         assert!(modifiers_mask_satisfies_config(&["alt".into()], MOD_LALT));
         assert!(modifiers_mask_satisfies_config(&["alt".into()], MOD_RALT));
         // 通用名也不允许两侧同时(多余)
-        assert!(!modifiers_mask_satisfies_config(&["alt".into()], MOD_LALT | MOD_RALT));
+        assert!(!modifiers_mask_satisfies_config(
+            &["alt".into()],
+            MOD_LALT | MOD_RALT
+        ));
     }
 
     #[test]
@@ -485,14 +568,20 @@ mod tests {
             &["alt".into(), "ctrl".into()],
             MOD_LALT | MOD_LCTRL
         ));
-        assert!(!modifiers_mask_satisfies_config(&["alt".into(), "ctrl".into()], MOD_LALT)); // 缺 ctrl
+        assert!(!modifiers_mask_satisfies_config(
+            &["alt".into(), "ctrl".into()],
+            MOD_LALT
+        )); // 缺 ctrl
     }
 
     #[test]
     fn ctrl_alt_space_must_not_match_alt_space() {
         // 核心安全断言:配置 Alt+空格,物理按下 Ctrl+Alt → 不匹配(remaining 含 ctrl)
         let alt_only = ["alt".to_string()];
-        assert!(!modifiers_mask_satisfies_config(&alt_only, MOD_LALT | MOD_LCTRL));
+        assert!(!modifiers_mask_satisfies_config(
+            &alt_only,
+            MOD_LALT | MOD_LCTRL
+        ));
     }
 
     #[test]
@@ -509,7 +598,10 @@ mod tests {
             MOD_RALT | MOD_LSHIFT
         );
         // 非 AltGr 场景不动
-        assert_eq!(apply_altgr_correction(MOD_LALT | MOD_LCTRL), MOD_LALT | MOD_LCTRL);
+        assert_eq!(
+            apply_altgr_correction(MOD_LALT | MOD_LCTRL),
+            MOD_LALT | MOD_LCTRL
+        );
         assert_eq!(apply_altgr_correction(MOD_RALT), MOD_RALT);
         assert_eq!(apply_altgr_correction(MOD_LCTRL), MOD_LCTRL);
     }

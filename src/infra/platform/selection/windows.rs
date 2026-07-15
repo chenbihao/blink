@@ -26,10 +26,9 @@
 
 use std::time::Instant;
 
-use windows::core::Interface;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
+    CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
 };
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::{
@@ -37,6 +36,7 @@ use windows::Win32::UI::Accessibility::{
     IUIAutomationTextPattern, PropertyConditionFlags_None, TreeScope_Ancestors,
     TreeScope_Descendants, UIA_IsTextPatternAvailablePropertyId, UIA_TextPatternId,
 };
+use windows::core::Interface;
 
 // 用于 hwnd → 进程名 的 Win32 调用（隐私门控：见 listener.rs on_selection）
 use std::ffi::OsString;
@@ -44,8 +44,7 @@ use std::os::windows::ffi::OsStringExt;
 use std::path::Path;
 use windows::Win32::Foundation::{HANDLE, MAX_PATH};
 use windows::Win32::System::Threading::{
-    OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
-    PROCESS_NAME_WIN32,
+    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 
@@ -62,11 +61,15 @@ impl ComGuard {
         // 线程已是其他公寓（如 STA）时返回 RPC_E_CHANGED_MODE，此时不该由我们 uninit。
         let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
         if hr.is_ok() {
-            ComGuard { should_uninit: true }
+            ComGuard {
+                should_uninit: true,
+            }
         } else {
             // 不阻断：UIA 在已有公寓（如 STA）下也能工作，只是建议 MTA。
             tracing::debug!(hr = hr.0, "CoInit MTA 失败（线程已是其他公寓），继续尝试");
-            ComGuard { should_uninit: false }
+            ComGuard {
+                should_uninit: false,
+            }
         }
     }
 }

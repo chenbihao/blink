@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
+use sqlx::sqlite::SqlitePoolOptions;
 
 /// 初始化 SQLite 连接 + 建表。返回连接池。
 pub async fn init_db() -> Result<SqlitePool, String> {
@@ -105,10 +105,8 @@ pub async fn migrate_camelcase_to_snake(pool: &SqlitePool) {
         ("maxResults", "max_results"),
         ("pageSize", "page_size"),
     ];
-    let start_menu_map: &[(&str, &str)] = &[
-        ("scanDepth", "scan_depth"),
-        ("includeUwp", "include_uwp"),
-    ];
+    let start_menu_map: &[(&str, &str)] =
+        &[("scanDepth", "scan_depth"), ("includeUwp", "include_uwp")];
     let file_search_map: &[(&str, &str)] = &[
         ("dataSource", "data_source"),
         ("everythingPort", "everything_port"),
@@ -185,7 +183,9 @@ pub async fn get_weights(pool: &SqlitePool) -> HashMap<String, (i64, i64)> {
             .fetch_all(pool)
             .await
             .unwrap_or_default();
-    rows.into_iter().map(|(path, hit, last)| (path, (hit, last))).collect()
+    rows.into_iter()
+        .map(|(path, hit, last)| (path, (hit, last)))
+        .collect()
 }
 
 /// 获取历史记录总条数。
@@ -344,7 +344,9 @@ mod tests {
         tauri::async_runtime::block_on(async {
             let pool = in_memory_pool().await;
             let old_json = r#"{"enabled":true,"scanDepth":5,"includeUwp":false}"#;
-            set_config(&pool, "engine:start_menu", old_json).await.unwrap();
+            set_config(&pool, "engine:start_menu", old_json)
+                .await
+                .unwrap();
 
             migrate_camelcase_to_snake(&pool).await;
 
@@ -361,7 +363,9 @@ mod tests {
         tauri::async_runtime::block_on(async {
             let pool = in_memory_pool().await;
             let old_json = r#"{"enabled":true,"dataSource":"everything","everythingPort":8080,"maxResults":30}"#;
-            set_config(&pool, "engine:file_search", old_json).await.unwrap();
+            set_config(&pool, "engine:file_search", old_json)
+                .await
+                .unwrap();
 
             migrate_camelcase_to_snake(&pool).await;
 
@@ -380,7 +384,9 @@ mod tests {
             let pool = in_memory_pool().await;
             // 已经是 snake_case 的数据不应被改动
             let snake_json = r#"{"theme":"dark","search_history_enabled":true,"search_history_days":30,"max_results":50,"page_size":9}"#;
-            set_config(&pool, "general_config", snake_json).await.unwrap();
+            set_config(&pool, "general_config", snake_json)
+                .await
+                .unwrap();
 
             migrate_camelcase_to_snake(&pool).await;
 

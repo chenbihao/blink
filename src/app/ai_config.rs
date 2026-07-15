@@ -179,7 +179,12 @@ pub enum ProviderKind {
     /// 的平台。base_url 由用户填(前端预设下拉可一键填充)。
     ///
     /// **迁移别名**:老配置里 `"openai" / "deepseek" / "openai_compat"` 全部落到这里。
-    #[serde(rename = "openai_compatible", alias = "openai", alias = "deepseek", alias = "openai_compat")]
+    #[serde(
+        rename = "openai_compatible",
+        alias = "openai",
+        alias = "deepseek",
+        alias = "openai_compat"
+    )]
     OpenAICompatible,
 
     /// Anthropic Messages 协议——`/v1/messages`,仅 Claude 官方。
@@ -443,7 +448,10 @@ mod tests {
         // secret_ref 是别名,可以出现
         assert!(s.contains("blink/p1/key"));
         // 但绝不能出现"api_key" / "sk-" / "secret"（正文里的字段名）
-        assert!(!s.to_lowercase().contains("api_key"), "序列化含 api_key: {s}");
+        assert!(
+            !s.to_lowercase().contains("api_key"),
+            "序列化含 api_key: {s}"
+        );
         assert!(!s.contains("sk-"), "序列化含 sk- 前缀: {s}");
     }
 
@@ -586,7 +594,10 @@ mod tests {
             }),
             ..Default::default()
         };
-        assert!(c.resolve_tier(Tier::Main).is_none(), "全禁用时应返回 None,SearchService fallback fuzzy");
+        assert!(
+            c.resolve_tier(Tier::Main).is_none(),
+            "全禁用时应返回 None,SearchService fallback fuzzy"
+        );
     }
 
     #[test]

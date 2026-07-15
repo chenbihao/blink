@@ -8,8 +8,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use super::builtin::*;
 use super::Action;
+use super::builtin::*;
 
 /// 动作注册表。id → `Arc<dyn Action>` 的映射。
 ///
@@ -45,7 +45,9 @@ impl ActionRegistry {
             actions.insert(action.id().to_string(), action);
         }
 
-        ActionRegistry { actions: RwLock::new(actions) }
+        ActionRegistry {
+            actions: RwLock::new(actions),
+        }
     }
 
     /// 按 id 查找动作（clone Arc，锁内完成）。
@@ -98,9 +100,18 @@ mod tests {
     fn registry_contains_expected_ids() {
         let reg = ActionRegistry::new();
         let expected = [
-            "open_settings", "lock", "shutdown", "restart", "sleep",
-            "clear_history", "exit_blink", "open_logs", "open_data_dir",
-            "open_url", "open_path", "reveal_in_explorer",
+            "open_settings",
+            "lock",
+            "shutdown",
+            "restart",
+            "sleep",
+            "clear_history",
+            "exit_blink",
+            "open_logs",
+            "open_data_dir",
+            "open_url",
+            "open_path",
+            "reveal_in_explorer",
         ];
         for id in &expected {
             assert!(reg.get(id).is_some(), "缺少动作: {id}");
@@ -118,9 +129,18 @@ mod tests {
         // 验证每个 Action::id() 与原 BuiltinActionKind 的 action_id 一致
         let reg = ActionRegistry::new();
         let expected_ids = [
-            "open_settings", "lock", "shutdown", "restart", "sleep",
-            "clear_history", "exit_blink", "open_logs", "open_data_dir",
-            "open_url", "open_path", "reveal_in_explorer",
+            "open_settings",
+            "lock",
+            "shutdown",
+            "restart",
+            "sleep",
+            "clear_history",
+            "exit_blink",
+            "open_logs",
+            "open_data_dir",
+            "open_url",
+            "open_path",
+            "reveal_in_explorer",
         ];
         for id in &expected_ids {
             let action = reg.get(id).expect(id);
@@ -135,9 +155,18 @@ mod tests {
     fn all_builtins_have_explicit_schema() {
         let reg = ActionRegistry::new();
         for id in [
-            "open_settings", "lock", "shutdown", "restart", "sleep",
-            "clear_history", "exit_blink", "open_logs", "open_data_dir",
-            "open_url", "open_path", "reveal_in_explorer",
+            "open_settings",
+            "lock",
+            "shutdown",
+            "restart",
+            "sleep",
+            "clear_history",
+            "exit_blink",
+            "open_logs",
+            "open_data_dir",
+            "open_url",
+            "open_path",
+            "reveal_in_explorer",
         ] {
             let action = reg.get(id).expect(id);
             let schema = action.schema();
@@ -157,15 +186,33 @@ mod tests {
         let reg = ActionRegistry::new();
 
         // Safe:只读打开 UI + 参数化动作(参数走 UserExplicit 类型墙)
-        for id in ["open_settings", "open_logs", "open_data_dir", "open_url", "open_path", "reveal_in_explorer"] {
+        for id in [
+            "open_settings",
+            "open_logs",
+            "open_data_dir",
+            "open_url",
+            "open_path",
+            "reveal_in_explorer",
+        ] {
             let action = reg.get(id).expect(id);
             assert_eq!(action.danger_class(), DangerClass::Safe, "{id} 应为 Safe");
         }
 
         // Dangerous:系统级不可逆 / 数据不可逆 / 让用户失去 Blink
-        for id in ["lock", "shutdown", "restart", "sleep", "clear_history", "exit_blink"] {
+        for id in [
+            "lock",
+            "shutdown",
+            "restart",
+            "sleep",
+            "clear_history",
+            "exit_blink",
+        ] {
             let action = reg.get(id).expect(id);
-            assert_eq!(action.danger_class(), DangerClass::Dangerous, "{id} 应为 Dangerous");
+            assert_eq!(
+                action.danger_class(),
+                DangerClass::Dangerous,
+                "{id} 应为 Dangerous"
+            );
         }
     }
 

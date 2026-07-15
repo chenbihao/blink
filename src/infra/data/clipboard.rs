@@ -57,9 +57,15 @@ pub struct ClipboardConfig {
     pub blacklist_keywords: Vec<String>,
 }
 
-fn default_max_items() -> u32 { 500 }
-fn default_retention_days() -> u32 { 7 }
-fn default_true() -> bool { true }
+fn default_max_items() -> u32 {
+    500
+}
+fn default_retention_days() -> u32 {
+    7
+}
+fn default_true() -> bool {
+    true
+}
 fn default_blacklist() -> Vec<String> {
     vec![
         "密码".to_string(),
@@ -156,7 +162,12 @@ pub async fn search(pool: &SqlitePool, query: &str, limit: i64) -> Vec<Clipboard
 
     let query_lower = query.to_ascii_lowercase();
     let mut matcher = Matcher::new(Config::DEFAULT);
-    let pattern = Pattern::new(&query_lower, CaseMatching::Smart, Normalization::Smart, AtomKind::Fuzzy);
+    let pattern = Pattern::new(
+        &query_lower,
+        CaseMatching::Smart,
+        Normalization::Smart,
+        AtomKind::Fuzzy,
+    );
     let mut buf = Vec::new();
 
     let mut scored: Vec<(u32, ClipboardItem)> = items
@@ -245,9 +256,9 @@ pub async fn cleanup_excess(pool: &SqlitePool, max_items: u32) {
 #[allow(dead_code)] // 预留给剪贴板监听器
 pub fn is_blacklisted(title: &str, blacklist: &[String]) -> bool {
     let title_lower = title.to_ascii_lowercase();
-    blacklist.iter().any(|keyword| {
-        title_lower.contains(&keyword.to_ascii_lowercase())
-    })
+    blacklist
+        .iter()
+        .any(|keyword| title_lower.contains(&keyword.to_ascii_lowercase()))
 }
 
 /// 生成预览文本（截断前 80 字符）。

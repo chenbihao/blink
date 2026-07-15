@@ -106,7 +106,11 @@ pub fn should_invoke_ai(q: &str, gate: &AiGate) -> GateOutcome {
 
     // ③ 长度:按字符数(中文一字算一 char,不是 3 byte)
     // CJK 用独立阈值(默认 2)——"翻译"=2 char 是完整意图,不该被英文分词习惯的筛子误伤
-    let min_len = if contains_cjk(q) { gate.min_query_len_cjk } else { gate.min_query_len };
+    let min_len = if contains_cjk(q) {
+        gate.min_query_len_cjk
+    } else {
+        gate.min_query_len
+    };
     if q.chars().count() < min_len as usize {
         return GateOutcome::Fallback(FallbackReason::TooShort);
     }

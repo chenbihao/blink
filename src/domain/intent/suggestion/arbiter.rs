@@ -13,9 +13,9 @@ use std::sync::Arc;
 use crate::domain::intent::RankingHint;
 use crate::infra::platform::context::AwarenessSnapshot;
 
+use super::producer::SuggestionProducer;
 #[allow(unused_imports)] // SuggestionSource 仅 #[cfg(test)] 消费
 use super::{Suggestion, SuggestionSource};
-use super::producer::SuggestionProducer;
 
 /// 多源 Suggestion 竞争仲裁器。
 pub struct SuggestionArbiter {
@@ -24,7 +24,9 @@ pub struct SuggestionArbiter {
 
 impl SuggestionArbiter {
     pub fn new() -> Self {
-        Self { producers: Vec::new() }
+        Self {
+            producers: Vec::new(),
+        }
     }
 
     /// 注册一个 producer。
@@ -48,7 +50,11 @@ impl SuggestionArbiter {
     /// - Suggestion：前端渲染 Ghost text + Tab 采纳
     /// - RankingHint：独立通道回 SearchService（下一轮 route 的 Surface Booster）
     #[allow(deprecated)] // 读取 Suggestion.ranking_hint 做过渡期剥离，0.9 彻底移除字段后此方法简化
-    pub fn best(&self, query: &str, snapshot: &AwarenessSnapshot) -> (Option<Suggestion>, Option<RankingHint>) {
+    pub fn best(
+        &self,
+        query: &str,
+        snapshot: &AwarenessSnapshot,
+    ) -> (Option<Suggestion>, Option<RankingHint>) {
         let mut all: Vec<Suggestion> = Vec::new();
         for producer in &self.producers {
             all.extend(producer.produce(query, snapshot));
@@ -99,11 +105,17 @@ mod tests {
 
     impl MockProducer {
         fn new(source: SuggestionSource, suggestions: Vec<Suggestion>) -> Self {
-            Self { source, suggestions }
+            Self {
+                source,
+                suggestions,
+            }
         }
 
         fn empty(source: SuggestionSource) -> Self {
-            Self { source, suggestions: Vec::new() }
+            Self {
+                source,
+                suggestions: Vec::new(),
+            }
         }
     }
 
@@ -128,7 +140,11 @@ mod tests {
         }
     }
 
-    fn make_sug_with_hint(source: SuggestionSource, confidence: f64, plugin_id: &str) -> Suggestion {
+    fn make_sug_with_hint(
+        source: SuggestionSource,
+        confidence: f64,
+        plugin_id: &str,
+    ) -> Suggestion {
         Suggestion {
             display: format!("{source:?}"),
             replacement: format!("{source:?} "),
@@ -136,7 +152,9 @@ mod tests {
             confidence,
             prefix_len: 0,
             origin: None,
-            ranking_hint: Some(RankingHint { boost_plugin_id: plugin_id.to_string() }),
+            ranking_hint: Some(RankingHint {
+                boost_plugin_id: plugin_id.to_string(),
+            }),
         }
     }
 
@@ -214,7 +232,11 @@ mod tests {
         )));
         arbiter.register(Arc::new(MockProducer::new(
             SuggestionSource::Context,
-            vec![make_sug_with_hint(SuggestionSource::Context, 0.9, "builtin.translate")],
+            vec![make_sug_with_hint(
+                SuggestionSource::Context,
+                0.9,
+                "builtin.translate",
+            )],
         )));
         let snap = AwarenessSnapshot::default();
         let (sug, hint) = arbiter.best("", &snap);

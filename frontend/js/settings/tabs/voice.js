@@ -134,6 +134,9 @@ export async function initVoiceTab() {
   // 本地模型选择（下拉框）
   loadLocalModels(config);
 
+  // 0.10.3 高级选项
+  initAdvancedOptions(config);
+
   // 空间管理
   initSpaceManagement();
 
@@ -190,10 +193,27 @@ export async function initVoiceTab() {
         await invoke("download_stt_model", { modelId });
         const m = models.find((m) => m.id === modelId);
         if (m) {
-          appendLog(`[Blink] 已选择模型: ${m.display_name}（首次启动服务时自动下载）`);
-          // 同步 config
+          appendLog(`[Blink] 已选择模型: ${m.display_name}${m.streaming ? "（流式）" : "（非流式）"}`);
+          // 同步 config（download_stt_model 已持久化 funasr_model + local_model_id）
           cfg.local_engine.funasr_model = m.funasr_model_id;
           cfg.local_model_id = modelId;
+
+          // 自动配置 streaming_model：
+          // - 流式模型 → streaming_model = funasr_model（共用同一个模型实例）
+          // - 非流式模型 → streaming_model = null（仅非流式模式）
+          // download_stt_model 已在后端统一持久化 funasr_model + streaming_model + streaming
+          if (m.streaming) {
+            cfg.local_engine.streaming_model = m.funasr_model_id;
+            cfg.streaming = true;
+            // 同步 UI 开关
+            const streamingCheckbox = document.getElementById("voice-streaming");
+            if (streamingCheckbox) streamingCheckbox.checked = true;
+            appendLog(`[Blink] 已启用流式识别（模型 ${m.funasr_model_id} 同时用于流式和非流式）`);
+          } else {
+            cfg.local_engine.streaming_model = null;
+            appendLog(`[Blink] 非流式模型，流式识别不可用`);
+          }
+
           // 如果服务正在运行，提示重启
           const isRunning = startBtn?.classList.contains("running");
           if (isRunning) {
@@ -203,6 +223,49 @@ export async function initVoiceTab() {
       } catch (e) {
         console.error("download_stt_model failed:", e);
       }
+    });
+  }
+}
+
+// ── 0.10.3 高级选项（热词 / ITN / 流式模型 / 注入方式）──────────────────
+
+async function initAdvancedOptions(config) {
+  // G2 注入方式
+  const injectMethodSelect = document.getElementById("voice-inject-method-select");
+  if (injectMethodSelect) {
+    const method = config.inject_method || "sendinput";
+    injectMethodSelect.value = method;
+    injectMethodSelect.addEventListener("change", () => {
+      config.inject_method = injectMethodSelect.value;
+      invoke("set_stt_config", { config }).catch(console.error);
+    });
+  }
+
+  // 热词
+  const hotwordsTextarea = document.getElementById("voice-hotwords");
+  if (hotwordsTextarea) {
+    hotwordsTextarea.value = config.local_engine.hotwords || "";
+    // 失焦时保存（避免每次按键都触发保存）
+    hotwordsTextarea.addEventListener("blur", () => {
+      config.local_engine.hotwords = hotwordsTextarea.value || null;
+      invoke("set_stt_config", { config }).catch(console.error);
+    });
+    // 自动收扁：无内容时高度收扁为单行，有内容时按内容自适应
+    function autoResizeHotwords() {
+      hotwordsTextarea.style.height = "auto";
+      hotwordsTextarea.style.height = Math.max(hotwordsTextarea.scrollHeight, 32) + "px";
+    }
+    hotwordsTextarea.addEventListener("input", autoResizeHotwords);
+    autoResizeHotwords();
+  }
+
+  // ITN 开关
+  const itnToggle = document.getElementById("voice-use-itn-toggle");
+  if (itnToggle) {
+    itnToggle.checked = config.local_engine.use_itn !== false;
+    itnToggle.addEventListener("change", () => {
+      config.local_engine.use_itn = itnToggle.checked;
+      invoke("set_stt_config", { config }).catch(console.error);
     });
   }
 }
@@ -395,8 +458,12 @@ async function initFunasrEnv(config) {
         appendLog(`[诊断] venv: ${env.venv_exists ? "✅" : "❌"} ${env.venv_python_version || ""}`);
         appendLog(`[诊断] torch: ${env.torch_installed ? "✅" : "❌"} ${env.torch_version || ""}`);
         appendLog(`[诊断] funasr: ${env.funasr_installed ? "✅" : "❌"} ${env.funasr_version || ""}`);
+        appendLog(`[诊断] websockets: ${env.websockets_installed ? "✅" : "❌"} ${env.websockets_version || ""}`);
         appendLog(`[诊断] server_running: ${env.server_running ? "✅" : "❌"} port=${env.server_port}`);
         appendLog(`[诊断] server_ready: ${env.server_ready ? "✅" : "❌"}`);
+        if (env.websocket_ready !== undefined) {
+          appendLog(`[诊断] websocket_ready: ${env.websocket_ready ? "✅" : "❌"} ${env.websocket_error ? "(" + env.websocket_error + ")" : ""}`);
+        }
 
         const cfg = report.config || {};
         appendLog(`[诊断] mode=${cfg.mode}, model=${cfg.local_model_id || "未选择"}, device=${cfg.device}, streaming=${cfg.streaming}`);
@@ -468,14 +535,29 @@ async function initFunasrEnv(config) {
     if (!p) return;
 
     if (p.stage === "ready") {
-      if (serverStatusText) serverStatusText.textContent = "✅ FunASR 服务就绪";
+      const isStreaming = config.streaming && p.streaming_model;
+      const modelName = isStreaming ? p.streaming_model : p.model;
+      const modeLabel = isStreaming ? "流式" : "非流式";
+      if (serverStatusText) serverStatusText.textContent = `✅ FunASR 服务就绪（${modelName} · ${modeLabel}）`;
       if (startBtn) {
         startBtn.classList.add("running");
         startBtn.textContent = "已运行 ✓";
         startBtn.disabled = false;
       }
       if (stopBtn) stopBtn.disabled = false;
-      appendLog("[Blink] ✅ funasr-server 就绪");
+      appendLog(`[Blink] ✅ funasr-server 就绪（${modelName} · ${modeLabel}）`);
+    } else if (p.stage === "already_running") {
+      const isStreaming = config.streaming && p.streaming_model;
+      const modelName = isStreaming ? p.streaming_model : p.model;
+      const modeLabel = isStreaming ? "流式" : "非流式";
+      if (serverStatusText) serverStatusText.textContent = `✅ FunASR 服务就绪（${modelName} · ${modeLabel}）`;
+      if (startBtn) {
+        startBtn.classList.add("running");
+        startBtn.textContent = "已运行 ✓";
+        startBtn.disabled = false;
+      }
+      if (stopBtn) stopBtn.disabled = false;
+      appendLog(`[Blink] ✅ funasr-server 已在运行（${modelName} · ${modeLabel}）`);
     } else if (p.stage === "error") {
       if (serverStatusText) serverStatusText.textContent = `❌ 服务错误: ${p.error || ""}`;
       if (startBtn) {
@@ -523,6 +605,12 @@ async function initFunasrEnv(config) {
       parts.push(`✅ funasr ${env.funasr_version || ""}`);
     }
 
+    if (!env.websockets_installed) {
+      parts.push("❌ websockets 未安装（流式 STT 不可用）");
+    } else {
+      parts.push(`✅ websockets ${env.websockets_version || ""}`);
+    }
+
     // 综合状态 + 按钮控制（不置灰，用绿色样式标记成功）
     if (env.env_ready) {
       if (setupBtn) {
@@ -556,7 +644,10 @@ async function initFunasrEnv(config) {
         startBtn.disabled = false;
       }
       if (stopBtn) stopBtn.disabled = false;
-      if (serverStatusText) serverStatusText.textContent = "✅ 服务运行中";
+      const isStreaming = config.streaming && env.server_streaming_model;
+      const modelName = isStreaming ? env.server_streaming_model : env.server_model;
+      const modeLabel = isStreaming ? "流式" : "非流式";
+      if (serverStatusText) serverStatusText.textContent = `✅ 服务运行中（${modelName} · ${modeLabel}）`;
     } else {
       if (startBtn && env.env_ready) {
         startBtn.classList.remove("running");
@@ -674,8 +765,7 @@ async function initSpaceManagement() {
         <button type="button" class="stt-space-refresh-btn" id="stt-space-refresh-btn">刷新</button>
       </div>
       <p class="stt-space-hint">
-        清理会删除 Python venv 和 uv 二进制（FunASR 模型缓存由 ModelScope 管理，需手动清理 ~/.cache/modelscope 目录）。
-        清理后需重新安装环境才能使用本地 STT。
+        清理会删除 Python venv、uv 二进制和模型缓存。清理后需重新安装环境才能使用本地 STT。
       </p>
     `;
 

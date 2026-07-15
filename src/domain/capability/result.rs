@@ -27,7 +27,9 @@ use serde_json::Value;
 impl CapabilityResult {
     #[allow(dead_code)] // 0.10 multi-turn 消费；0.9.7 单轮流程走前端投影
     pub fn to_rig_tool_result(&self) -> Vec<rig_core::completion::message::ToolResultContent> {
-        use rig_core::completion::message::{Image, ToolResultContent, DocumentSourceKind, ImageMediaType, MimeType};
+        use rig_core::completion::message::{
+            DocumentSourceKind, Image, ImageMediaType, MimeType, ToolResultContent,
+        };
 
         match self {
             CapabilityResult::Text { content } => {
@@ -35,8 +37,7 @@ impl CapabilityResult {
             }
             CapabilityResult::Items { items } => {
                 // Items → 序列化 JSON 文本喂 LLM（模型读 JSON 上下文）
-                let json = serde_json::to_string(items)
-                    .unwrap_or_else(|_| "[]".to_string());
+                let json = serde_json::to_string(items).unwrap_or_else(|_| "[]".to_string());
                 vec![ToolResultContent::text(json)]
             }
             CapabilityResult::Blob { mime, bytes } => {
@@ -68,15 +69,11 @@ impl CapabilityResult {
 pub enum CapabilityResult {
     /// 纯文本：OCR / IP 查询 / 总结。
     /// → 前端 Copy、AI 当文本上下文。
-    Text {
-        content: String,
-    },
+    Text { content: String },
 
     /// 结构化列表：文件搜索 / 剪贴板历史 / 进程列表。
     /// → 前端渲染条目、AI 读 JSON。
-    Items {
-        items: Vec<ItemResult>,
-    },
+    Items { items: Vec<ItemResult> },
 
     /// 二进制：截图 / 音频 / 文件内容。
     /// → 字节+mime，投影方式由消费方决定（base64/raw/file_url）。
@@ -86,16 +83,11 @@ pub enum CapabilityResult {
     ///
     /// **已知性能点**：截图 ~14MB clone 不便宜。0.9.7 先 clone 跑通；
     /// 若热路径出现，改 `Arc<Vec<u8>>` 或投影层避免深拷贝。
-    Blob {
-        mime: String,
-        bytes: Vec<u8>,
-    },
+    Blob { mime: String, bytes: Vec<u8> },
 
     /// 无返回值副作用：已写入 / 已打开 / 已锁定。
     /// → 携带人类可读 summary，AI lane 展示"✓ 已执行"。
-    Done {
-        summary: String,
-    },
+    Done { summary: String },
 }
 
 /// 结构化列表的单项（`CapabilityResult::Items` 的元素）。
@@ -175,13 +167,17 @@ mod tests {
     #[test]
     fn all_variants_roundtrip_through_json() {
         let variants: Vec<CapabilityResult> = vec![
-            CapabilityResult::Text { content: "a".into() },
+            CapabilityResult::Text {
+                content: "a".into(),
+            },
             CapabilityResult::Items { items: vec![] },
             CapabilityResult::Blob {
                 mime: "x".into(),
                 bytes: vec![],
             },
-            CapabilityResult::Done { summary: "s".into() },
+            CapabilityResult::Done {
+                summary: "s".into(),
+            },
         ];
         for v in &variants {
             let json = serde_json::to_string(v).unwrap();
@@ -210,7 +206,9 @@ mod tests {
     #[test]
     fn rig_projection_text_produces_text_content() {
         use rig_core::completion::message::ToolResultContent;
-        let r = CapabilityResult::Text { content: "hello".into() };
+        let r = CapabilityResult::Text {
+            content: "hello".into(),
+        };
         let contents = r.to_rig_tool_result();
         assert_eq!(contents.len(), 1);
         assert!(matches!(contents[0], ToolResultContent::Text(_)));
@@ -259,7 +257,9 @@ mod tests {
     #[test]
     fn rig_projection_done_produces_text() {
         use rig_core::completion::message::ToolResultContent;
-        let r = CapabilityResult::Done { summary: "已写入".into() };
+        let r = CapabilityResult::Done {
+            summary: "已写入".into(),
+        };
         let contents = r.to_rig_tool_result();
         assert_eq!(contents.len(), 1);
         if let ToolResultContent::Text(t) = &contents[0] {

@@ -53,9 +53,7 @@ use rig_core::streaming::StreamedAssistantContent as RigStreamChunk;
 use tokio::sync::mpsc;
 
 use crate::app::ai_config::{CustomParam, ProviderKind};
-use crate::domain::ai::message::{
-    CompletionRequest, CompletionResponse, Role, ToolCall, Usage,
-};
+use crate::domain::ai::message::{CompletionRequest, CompletionResponse, Role, ToolCall, Usage};
 use crate::domain::ai::provider::{AIError, AIProvider, StreamChunk};
 use crate::infra::platform::secret::SecretString;
 
@@ -205,32 +203,24 @@ where
 
         // ── Phase 1: 建立连接,等首个响应 ──────────────────────────────
         // 用完整 deadline 作硬超时——AI 在 deadline 内没开始返回(连接慢/排队),判超时。
-        let mut streaming_resp = match tokio::time::timeout(
-            deadline,
-            self.model.stream(rig_req),
-        )
-        .await
-        {
-            Err(_) => return Err(AIError::Timeout), // 连接阶段超时
-            Ok(Err(rig_err)) => return Err(map_rig_error(rig_err)),
-            Ok(Ok(resp)) => resp,
-        };
+        let mut streaming_resp =
+            match tokio::time::timeout(deadline, self.model.stream(rig_req)).await {
+                Err(_) => return Err(AIError::Timeout), // 连接阶段超时
+                Ok(Err(rig_err)) => return Err(map_rig_error(rig_err)),
+                Ok(Ok(resp)) => resp,
+            };
 
         let mut tool_calls: Vec<ToolCall> = Vec::new();
 
         // ── Phase 2: 逐 chunk 消费,每个 chunk 用 deadline 作 idle timeout ──
         // token 持续到达则不超时;只有两个 chunk 间隔超过 deadline 才判 stall 超时。
         loop {
-            let chunk_result = match tokio::time::timeout(
-                deadline,
-                StreamExt::next(&mut streaming_resp),
-            )
-            .await
-            {
-                Err(_) => return Err(AIError::Timeout), // chunk 间 idle 超时
-                Ok(None) => break,                       // 流正常结束
-                Ok(Some(result)) => result,
-            };
+            let chunk_result =
+                match tokio::time::timeout(deadline, StreamExt::next(&mut streaming_resp)).await {
+                    Err(_) => return Err(AIError::Timeout), // chunk 间 idle 超时
+                    Ok(None) => break,                      // 流正常结束
+                    Ok(Some(result)) => result,
+                };
 
             match chunk_result {
                 Ok(raw_choice) => match raw_choice {
@@ -338,7 +328,10 @@ fn build_rig_request(
     if kind == ProviderKind::AnthropicMessages && effective_max_tokens.is_none() {
         const ANTHROPIC_DEFAULT_MAX_TOKENS: u64 = 4096;
         effective_max_tokens = Some(ANTHROPIC_DEFAULT_MAX_TOKENS);
-        tracing::debug!("Anthropic max_tokens 未设置,使用默认值 {}", ANTHROPIC_DEFAULT_MAX_TOKENS);
+        tracing::debug!(
+            "Anthropic max_tokens 未设置,使用默认值 {}",
+            ANTHROPIC_DEFAULT_MAX_TOKENS
+        );
     }
 
     Ok(RigCompletionRequest {
@@ -436,13 +429,14 @@ pub(crate) fn map_rig_error(e: CompletionError) -> AIError {
         // URL 构造错误——通常是 base_url 配错(用户可 debug)
         CompletionError::UrlError(_) => AIError::Provider("base_url 格式无效".into()),
         // 请求构造错误(reqwest builder 层)——提取底层错误信息帮助诊断
-        CompletionError::RequestError(e) => {
-            AIError::Network(format!("请求构造失败: {}", sanitize_message(&e.to_string())))
-        }
+        CompletionError::RequestError(e) => AIError::Network(format!(
+            "请求构造失败: {}",
+            sanitize_message(&e.to_string())
+        )),
         // 供应商返回结构解析失败——最常见:model_id 不匹配供应商
-        CompletionError::ResponseError(_) => AIError::Serialization(
-            "响应结构不匹配(检查供应商类型与 model_id 是否一致)".into(),
-        ),
+        CompletionError::ResponseError(_) => {
+            AIError::Serialization("响应结构不匹配(检查供应商类型与 model_id 是否一致)".into())
+        }
         // rig 直接 emit 的 ProviderError(理论上罕见——见文档顶注)
         CompletionError::ProviderError(msg) => {
             AIError::Provider(format!("供应商错误: {}", sanitize_message(&msg)))
@@ -482,12 +476,11 @@ fn map_http_error(e: rig_core::http_client::Error) -> AIError {
             let msg = truncate_chars(&format!("{inner}"), 160);
             AIError::Network(format!("传输失败: {msg}"))
         }
-        H::Protocol(inner) => {
-            AIError::Network(format!("HTTP 协议错误: {}", truncate_chars(&format!("{inner}"), 120)))
-        }
-        H::InvalidHeaderValue(_) => {
-            AIError::Provider("请求头非法(检查密钥是否含控制字符)".into())
-        }
+        H::Protocol(inner) => AIError::Network(format!(
+            "HTTP 协议错误: {}",
+            truncate_chars(&format!("{inner}"), 120)
+        )),
+        H::InvalidHeaderValue(_) => AIError::Provider("请求头非法(检查密钥是否含控制字符)".into()),
         H::InvalidContentType(_) => {
             AIError::Serialization("响应 Content-Type 非法(供应商返回非 JSON?)".into())
         }
@@ -518,7 +511,10 @@ fn diagnose_status(status: u16, sanitized_msg: &str) -> String {
     if excerpt.is_empty() {
         format!("HTTP {status} · {hint}")
     } else {
-        format!("HTTP {status} · {hint} · 响应: {}", truncate_chars(&excerpt, 120))
+        format!(
+            "HTTP {status} · {hint} · 响应: {}",
+            truncate_chars(&excerpt, 120)
+        )
     }
 }
 
@@ -562,7 +558,14 @@ fn sanitize_message(msg: &str) -> String {
         } else if rest_lower.starts_with("sk-") {
             (3, true)
         } else if rest_lower.starts_with("api_key=") || rest_lower.starts_with("apikey=") {
-            (if rest_lower.starts_with("api_key=") { 8 } else { 7 }, true)
+            (
+                if rest_lower.starts_with("api_key=") {
+                    8
+                } else {
+                    7
+                },
+                true,
+            )
         } else if rest_lower.starts_with("token=") {
             (6, true)
         } else if rest_lower.starts_with("key=") {
@@ -631,7 +634,9 @@ mod tests {
     use crate::domain::ai::message::ChatMessage;
     use crate::domain::execution::ActionSchema;
     use rig_core::completion::{CompletionResponse as RigResp, Usage as RigUsage};
-    use rig_core::message::{Text as RigText, ToolCall as RigToolCall, ToolFunction as RigToolFunc};
+    use rig_core::message::{
+        Text as RigText, ToolCall as RigToolCall, ToolFunction as RigToolFunc,
+    };
     use serde_json::json;
 
     // ── build_rig_request ───────────────────────────────────────────────
@@ -648,7 +653,8 @@ mod tests {
             temperature: None,
             timeout_ms: None,
         };
-        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None).unwrap();
+        let rig =
+            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None).unwrap();
         assert_eq!(rig.preamble.as_deref(), Some("You are helpful."));
         assert_eq!(rig.chat_history.len(), 1);
     }
@@ -667,7 +673,8 @@ mod tests {
             temperature: None,
             timeout_ms: None,
         };
-        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None).unwrap();
+        let rig =
+            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None).unwrap();
         assert_eq!(rig.preamble.as_deref(), Some("a\nb"));
     }
 
@@ -683,7 +690,8 @@ mod tests {
             temperature: Some(0.2),
             timeout_ms: None,
         };
-        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None).unwrap();
+        let rig =
+            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None).unwrap();
         assert_eq!(rig.tools.len(), 2);
         assert_eq!(rig.tools[0].name, "open_settings");
         assert_eq!(rig.tools[1].name, "lock");
@@ -703,7 +711,10 @@ mod tests {
             temperature: None,
             timeout_ms: None,
         };
-        assert!(matches!(build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None), Err(AIError::Serialization(_))));
+        assert!(matches!(
+            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None),
+            Err(AIError::Serialization(_))
+        ));
     }
 
     #[test]
@@ -716,23 +727,26 @@ mod tests {
             temperature: None,
             timeout_ms: None,
         };
-        assert!(matches!(build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None), Err(AIError::Serialization(_))));
+        assert!(matches!(
+            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None),
+            Err(AIError::Serialization(_))
+        ));
     }
 
     #[test]
     fn build_rig_request_rejects_assistant_role_in_0_9_2() {
         // 0.9.2 主窗口不该出现 assistant / tool——多轮留 0.10 agent 窗口
         let req = CompletionRequest {
-            messages: vec![
-                ChatMessage::user("q"),
-                ChatMessage::assistant("a"),
-            ],
+            messages: vec![ChatMessage::user("q"), ChatMessage::assistant("a")],
             tools: Vec::new(),
             max_tokens: None,
             temperature: None,
             timeout_ms: None,
         };
-        assert!(matches!(build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None), Err(AIError::Serialization(_))));
+        assert!(matches!(
+            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None),
+            Err(AIError::Serialization(_))
+        ));
     }
 
     // ── 0.9.4 Step 1:模型级参数 fallback ───────────────────────────────
@@ -747,7 +761,14 @@ mod tests {
             temperature: None,
             timeout_ms: None,
         };
-        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, Some(0.7), Some(4096), None).unwrap();
+        let rig = build_rig_request(
+            ProviderKind::OpenAICompatible,
+            &req,
+            Some(0.7),
+            Some(4096),
+            None,
+        )
+        .unwrap();
         // f32 → f64 有精度损失,允许 1e-6 误差
         assert!((rig.temperature.unwrap() - 0.7).abs() < 1e-6);
         assert_eq!(rig.max_tokens, Some(4096));
@@ -763,7 +784,14 @@ mod tests {
             temperature: Some(0.0),
             timeout_ms: None,
         };
-        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, Some(0.7), Some(4096), None).unwrap();
+        let rig = build_rig_request(
+            ProviderKind::OpenAICompatible,
+            &req,
+            Some(0.7),
+            Some(4096),
+            None,
+        )
+        .unwrap();
         assert_eq!(rig.temperature, Some(0.0));
         assert_eq!(rig.max_tokens, Some(64));
     }
@@ -779,7 +807,14 @@ mod tests {
             timeout_ms: None,
         };
         let extra = json!({"top_p": 0.9, "web_search": true});
-        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, Some(&extra)).unwrap();
+        let rig = build_rig_request(
+            ProviderKind::OpenAICompatible,
+            &req,
+            None,
+            None,
+            Some(&extra),
+        )
+        .unwrap();
         assert_eq!(rig.additional_params.as_ref(), Some(&extra));
     }
 
@@ -789,9 +824,18 @@ mod tests {
         assert!(build_custom_params_json(&[]).is_none());
 
         let ps = vec![
-            CustomParam { key: "top_p".into(), value: json!(0.5) },
-            CustomParam { key: "".into(), value: json!("skipped") },
-            CustomParam { key: "top_p".into(), value: json!(0.9) },
+            CustomParam {
+                key: "top_p".into(),
+                value: json!(0.5),
+            },
+            CustomParam {
+                key: "".into(),
+                value: json!("skipped"),
+            },
+            CustomParam {
+                key: "top_p".into(),
+                value: json!(0.9),
+            },
         ];
         let out = build_custom_params_json(&ps).unwrap();
         assert_eq!(out, json!({"top_p": 0.9}));
@@ -859,7 +903,10 @@ mod tests {
         assert_eq!(ours.tool_calls[0].id, "call_abc");
         assert_eq!(ours.tool_calls[0].name, "open_url");
         assert_eq!(
-            ours.tool_calls[0].arguments.get("url").and_then(|v| v.as_str()),
+            ours.tool_calls[0]
+                .arguments
+                .get("url")
+                .and_then(|v| v.as_str()),
             Some("https://a.b")
         );
     }
@@ -920,7 +967,10 @@ mod tests {
         match ours {
             AIError::Serialization(msg) => {
                 assert!(!msg.contains("choices"), "不该带原文: {msg}");
-                assert!(msg.contains("model_id") || msg.contains("响应"), "需诊断 hint: {msg}");
+                assert!(
+                    msg.contains("model_id") || msg.contains("响应"),
+                    "需诊断 hint: {msg}"
+                );
             }
             _ => panic!("预期 Serialization,得到 {ours:?}"),
         }
@@ -969,7 +1019,10 @@ mod tests {
         let body = r#"{"error":{"message":"Model 'x' does not exist","type":"invalid_request"}}"#;
         let out = diagnose_status(404, body);
         // 抽出的应是 error.message,而非整个 JSON
-        assert!(out.contains("Model 'x' does not exist"), "未抽 error.message: {out}");
+        assert!(
+            out.contains("Model 'x' does not exist"),
+            "未抽 error.message: {out}"
+        );
         // 且 body 里的 JSON 大括号不应出现在 excerpt
         assert!(!out.contains("\"type\""), "不该包含额外字段");
     }

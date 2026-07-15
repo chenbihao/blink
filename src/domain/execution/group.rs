@@ -173,7 +173,9 @@ pub fn build_aggregated_tools(
     for group in BUILTIN_GROUPS {
         let schema = group.to_schema(registry);
         // 只有当分组内有实际动作时才添加
-        if !schema.parameters.get("properties")
+        if !schema
+            .parameters
+            .get("properties")
             .and_then(|p| p.get("action"))
             .and_then(|a| a.get("enum"))
             .and_then(|e| e.as_array())

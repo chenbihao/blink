@@ -15,7 +15,7 @@ Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而�
 
 当前 **0.9.0~0.9.7 完成**（Agent 地基 + 插件 tool-call + 供应商配置 UI + 前端架构重整 + 收尾发版 + Capability 能力协议层）。详见 [phases/0.9-ai-layer.md](docs/production-design/phases/0.9-ai-layer.md)。
 
-- 🔜 **0.10 语音输入**：STT + 语音打字（G1 主窗口语音输入 / G2 语音输入法上屏）+ Agent 对话窗口（后置）。工具箱层定 FunASR、引擎定 sherpa-onnx。详见 [phases/0.10-voice-agent.md](docs/production-design/phases/0.10-voice-agent.md)
+- 🔜 **0.10 语音输入**：STT + 语音打字（G1 主窗口语音输入 / G2 语音输入法上屏）+ Agent 对话窗口（后置）。工具箱层定 FunASR、引擎定 sherpa-onnx。详见 [phases/0.10-voice-agent.md](docs/production-design/phases/0.10-voice-agent.md)（0.10.3 已完成：blink_stt_server 统一服务 + 真流式 WebSocket + SendInput Unicode 注入 + 热词/ITN）
 - 🔜 **0.11 本地化与生态**：本地模型 / skill / MCP / RAG。详见 [phases/0.11-local-ecosystem.md](docs/production-design/phases/0.11-local-ecosystem.md)
 
 ---

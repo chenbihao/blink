@@ -35,7 +35,10 @@ pub enum SearchAction {
     /// `text` 为结构化 payload,经 `into_app_entry` 透传到前端 `Action.payload`。
     /// `hit_id` 是命中回写通道（0.8.5 §6.4）——ClipboardEngine 展开的历史条目带 `Some(item.id)`,
     /// 前端复制成功后 `record_clipboard_hit` 频率加权。CalcEngine / Plugin Copy 传 `None`。
-    Copy { text: String, hit_id: Option<String> },
+    Copy {
+        text: String,
+        hit_id: Option<String>,
+    },
     /// 运行内置动作（0.8.0 §1.3）：`id` 为动作注册表 key，`arg` 为参数（可选）。
     /// 前端命中 `Action.kind == Run` → `invoke("run_builtin_action", { id, arg })`。
     /// 取代原 `SearchAction::Open{path: "__BLINK_ACTION_XXX__"}` 魔法串。
@@ -238,7 +241,10 @@ mod tests {
             title: "= 2".into(),
             subtitle: Some("按 Enter 复制结果".into()),
             score: 1.0,
-            action: SearchAction::Copy { text: "2".into(), hit_id: None },
+            action: SearchAction::Copy {
+                text: "2".into(),
+                hit_id: None,
+            },
             source: "calc".into(),
             score_detail: Some("calc=1.0".into()),
         };

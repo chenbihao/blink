@@ -12,7 +12,9 @@ use std::sync::Arc;
 
 use tauri::Manager;
 
-use crate::domain::execution::{Action, ActionContext, ActionOutcome, ActionSchema, DangerClass, ExecError};
+use crate::domain::execution::{
+    Action, ActionContext, ActionOutcome, ActionSchema, DangerClass, ExecError,
+};
 use crate::domain::plugin::manifest::{DangerClassDef, LocalizableText, ToolDef};
 
 use super::process::PluginHandle;

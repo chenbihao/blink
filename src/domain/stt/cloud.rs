@@ -47,10 +47,7 @@ impl Default for CloudSttEngine {
 impl SttEngine for CloudSttEngine {
     async fn transcribe_chunk(&self, samples: &[f32]) -> Result<String, SttError> {
         // 非流式模式：只累积，不返回 partial
-        self.samples
-            .lock()
-            .unwrap()
-            .extend_from_slice(samples);
+        self.samples.lock().unwrap().extend_from_slice(samples);
         Ok(String::new())
     }
 

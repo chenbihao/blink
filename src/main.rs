@@ -6,9 +6,9 @@ mod infra;
 
 use domain::execution::Action;
 use tauri::{
+    Emitter, Manager, WindowEvent,
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    Emitter, Manager, WindowEvent,
 };
 
 fn main() {
@@ -18,7 +18,7 @@ fn main() {
     #[cfg(windows)]
     unsafe {
         use windows::Win32::UI::HiDpi::{
-            SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
         };
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
@@ -613,7 +613,9 @@ fn open_about(app: &tauri::AppHandle) {
     open_settings(app);
     if let Some(w) = app.get_webview_window("settings") {
         // HTML 异步加载，需延迟等 DOM 就绪后再切 Tab
-        let _ = w.eval("setTimeout(() => document.querySelector('.tab[data-tab=\"about\"]')?.click(), 300)");
+        let _ = w.eval(
+            "setTimeout(() => document.querySelector('.tab[data-tab=\"about\"]')?.click(), 300)",
+        );
     }
 }
 

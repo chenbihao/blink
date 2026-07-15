@@ -28,8 +28,8 @@
 //! 注意：某些虚拟声卡驱动（如 VR/远程桌面）可能劫持此 API，导致返回的默认设备
 //! 与 mmsys.cpl 面板显示的不一致。设置页设备列表会标注当前默认设备名称供用户参考。
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use super::{AudioCapture, AudioChunk, AudioError, AudioFormat};
@@ -291,8 +291,8 @@ fn on_stream_error(err: CpalError) {
 /// `HKCU\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone`
 /// Value = "Allow" / "Deny"
 fn check_microphone_privacy() {
-    use winreg::enums::*;
     use winreg::RegKey;
+    use winreg::enums::*;
 
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let key_path = r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone";
@@ -547,7 +547,11 @@ mod tests {
         match result {
             Ok(Some(chunk)) => {
                 assert!(!chunk.samples.is_empty(), "音频数据为空");
-                let sum_sq: f64 = chunk.samples.iter().map(|s| (*s as f64) * (*s as f64)).sum();
+                let sum_sq: f64 = chunk
+                    .samples
+                    .iter()
+                    .map(|s| (*s as f64) * (*s as f64))
+                    .sum();
                 let rms = (sum_sq / chunk.samples.len() as f64).sqrt();
                 eprintln!(
                     "收到 {} 个样本 ({:.1}ms), RMS = {:.6}, sample_rate = {}",

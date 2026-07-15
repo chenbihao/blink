@@ -139,8 +139,8 @@ pub trait AIProvider: Send + Sync {
 
 #[cfg(test)]
 pub mod tests {
-    use super::*;
     use super::super::message::{ChatMessage, ToolCall, Usage};
+    use super::*;
     use crate::domain::execution::ActionSchema;
 
     /// 测试专用 Provider——固定返回预置结果,不打网络。
@@ -161,7 +161,10 @@ pub mod tests {
                         name: name.into(),
                         arguments: args,
                     }],
-                    usage: Usage { input_tokens: 10, output_tokens: 5 },
+                    usage: Usage {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                    },
                     first_token_ms: 42,
                     total_ms: 87,
                 },
@@ -247,7 +250,10 @@ pub mod tests {
             assert_eq!(resp.tool_calls.len(), 1);
             assert_eq!(resp.tool_calls[0].name, "open_url");
             assert_eq!(
-                resp.tool_calls[0].arguments.get("url").and_then(|v| v.as_str()),
+                resp.tool_calls[0]
+                    .arguments
+                    .get("url")
+                    .and_then(|v| v.as_str()),
                 Some("https://example.com")
             );
             assert!(resp.first_token_ms > 0, "first_token_ms 必须由 provider 填");
@@ -270,7 +276,10 @@ pub mod tests {
             let result = p.complete(req).await;
             let elapsed = start.elapsed();
 
-            assert!(matches!(result, Err(AIError::Timeout)), "预期 Timeout,实际: {result:?}");
+            assert!(
+                matches!(result, Err(AIError::Timeout)),
+                "预期 Timeout,实际: {result:?}"
+            );
             // 允许 ±50ms 抖动
             assert!(
                 elapsed.as_millis() >= 90 && elapsed.as_millis() <= 200,

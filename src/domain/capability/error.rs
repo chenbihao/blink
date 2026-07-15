@@ -17,29 +17,19 @@ use serde::Serialize;
 #[allow(dead_code)]
 pub enum CapabilityError {
     /// 参数缺失/类型错（args 不符 schema）。
-    InvalidArgs {
-        detail: String,
-    },
+    InvalidArgs { detail: String },
     /// 权限不足（剪贴板被锁/无截图权限）。
-    Permission {
-        detail: String,
-    },
+    Permission { detail: String },
     /// 超时——`invoke` 检查 `ctx.is_expired()` 返回 true，或 `timeout_at` 触发。
     /// 投影到 AI："工具超时，可重试或换路径"。
-    Timeout {
-        detail: String,
-    },
+    Timeout { detail: String },
     /// 调用方取消——用户 ESC / seq 过期 / future drop。
     /// **不报错给 LLM**（直接 abort 整条 tool_call 链，与 AI stream abort 语义一致）。
     Cancelled,
     /// 能力不存在（id 未注册——AI 幻觉调了不存在的 tool）。
-    NotFound {
-        id: String,
-    },
+    NotFound { id: String },
     /// 内部错误（Win32 失败/IO 错误）。
-    Internal {
-        detail: String,
-    },
+    Internal { detail: String },
 }
 
 impl std::fmt::Display for CapabilityError {
@@ -68,7 +58,9 @@ impl CapabilityError {
     ///
     /// **0.9.7 仅定义**，当前单轮流程走前端 `emit_ai_clear` 展示错误。
     #[allow(dead_code)] // 0.10 multi-turn 消费
-    pub fn to_rig_tool_result_text(&self) -> Option<rig_core::completion::message::ToolResultContent> {
+    pub fn to_rig_tool_result_text(
+        &self,
+    ) -> Option<rig_core::completion::message::ToolResultContent> {
         use rig_core::completion::message::ToolResultContent;
         match self {
             CapabilityError::Cancelled => None, // 不报错给 LLM
@@ -123,19 +115,10 @@ mod tests {
                 CapabilityError::Permission { detail: "x".into() },
                 "permission",
             ),
-            (
-                CapabilityError::Timeout { detail: "x".into() },
-                "timeout",
-            ),
+            (CapabilityError::Timeout { detail: "x".into() }, "timeout"),
             (CapabilityError::Cancelled, "cancelled"),
-            (
-                CapabilityError::NotFound { id: "x".into() },
-                "not_found",
-            ),
-            (
-                CapabilityError::Internal { detail: "x".into() },
-                "internal",
-            ),
+            (CapabilityError::NotFound { id: "x".into() }, "not_found"),
+            (CapabilityError::Internal { detail: "x".into() }, "internal"),
         ];
         for (err, expected_kind) in &cases {
             let v = serde_json::to_value(err).unwrap();
@@ -146,7 +129,10 @@ mod tests {
     #[test]
     fn display_is_human_readable() {
         assert_eq!(
-            CapabilityError::Timeout { detail: "5s".into() }.to_string(),
+            CapabilityError::Timeout {
+                detail: "5s".into()
+            }
+            .to_string(),
             "超时: 5s"
         );
         assert_eq!(CapabilityError::Cancelled.to_string(), "已取消");
@@ -157,13 +143,19 @@ mod tests {
     #[test]
     fn rig_projection_cancelled_returns_none() {
         // Cancelled 不投影给 LLM——直接 abort 整条 tool_call 链
-        assert!(CapabilityError::Cancelled.to_rig_tool_result_text().is_none());
+        assert!(
+            CapabilityError::Cancelled
+                .to_rig_tool_result_text()
+                .is_none()
+        );
     }
 
     #[test]
     fn rig_projection_timeout_returns_text() {
         use rig_core::completion::message::ToolResultContent;
-        let e = CapabilityError::Timeout { detail: "5s".into() };
+        let e = CapabilityError::Timeout {
+            detail: "5s".into(),
+        };
         let content = e.to_rig_tool_result_text().unwrap();
         assert!(matches!(content, ToolResultContent::Text(_)));
         if let ToolResultContent::Text(t) = &content {
@@ -176,7 +168,9 @@ mod tests {
     #[test]
     fn rig_projection_not_found_returns_text() {
         use rig_core::completion::message::ToolResultContent;
-        let e = CapabilityError::NotFound { id: "nonexistent".into() };
+        let e = CapabilityError::NotFound {
+            id: "nonexistent".into(),
+        };
         let content = e.to_rig_tool_result_text().unwrap();
         assert!(matches!(content, ToolResultContent::Text(_)));
     }

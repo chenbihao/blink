@@ -457,8 +457,8 @@ where
                     }
                     // 对象 → 直接反序列化为 SettingOption
                     serde_json::Value::Object(_) => {
-                        let opt: SettingOption = serde_json::from_value(val)
-                            .map_err(de::Error::custom)?;
+                        let opt: SettingOption =
+                            serde_json::from_value(val).map_err(de::Error::custom)?;
                         options.push(opt);
                     }
                     other => {
@@ -620,12 +620,19 @@ mod tests {
     fn keyword_trigger_default_exclusive() {
         let json = r#"{"type":"keyword","keyword":"ip"}"#;
         let t: PluginTrigger = serde_json::from_str(json).unwrap();
-        assert!(matches!(t, PluginTrigger::Keyword { exclusive: true, .. }));
+        assert!(matches!(
+            t,
+            PluginTrigger::Keyword {
+                exclusive: true,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn missing_timeout_defaults_3000() {
-        let json = r#"{"schema_version":1,"id":"x","name":"X","version":"0","runtime":{"exec":"x.exe"}}"#;
+        let json =
+            r#"{"schema_version":1,"id":"x","name":"X","version":"0","runtime":{"exec":"x.exe"}}"#;
         let m: PluginManifest = serde_json::from_str(json).unwrap();
         assert_eq!(m.timeout_ms(), 3000);
     }
@@ -657,7 +664,8 @@ mod tests {
 
     #[test]
     fn no_schema_defaults_null() {
-        let json = r#"{"schema_version":1,"id":"x","name":"X","version":"0","runtime":{"exec":"x.exe"}}"#;
+        let json =
+            r#"{"schema_version":1,"id":"x","name":"X","version":"0","runtime":{"exec":"x.exe"}}"#;
         let m: PluginManifest = serde_json::from_str(json).unwrap();
         assert!(m.settings_schema.is_empty());
         assert!(m.default_settings().is_null());
@@ -680,7 +688,10 @@ mod tests {
         assert_eq!(m.settings_schema.len(), 2);
         assert_eq!(m.settings_schema[0].options.len(), 3);
         assert_eq!(m.settings_schema[0].options[0].value, "youdao");
-        assert_eq!(m.settings_schema[0].options[0].label.resolve("zh"), "youdao");
+        assert_eq!(
+            m.settings_schema[0].options[0].label.resolve("zh"),
+            "youdao"
+        );
         let defaults = m.default_settings();
         assert_eq!(defaults["default_engine"], "youdao");
         assert_eq!(defaults["target_lang"], "zh");
@@ -699,7 +710,8 @@ mod tests {
         let got = m.exec_path(&dir);
         assert!(
             !got.to_string_lossy().starts_with(r"\\?\"),
-            "exec_path 结果不应带 \\\\?\\ 前缀，实际={}", got.display(),
+            "exec_path 结果不应带 \\\\?\\ 前缀，实际={}",
+            got.display(),
         );
     }
 
@@ -797,7 +809,9 @@ mod tests {
         }"#;
         let m: PluginManifest = serde_json::from_str(json).unwrap();
         assert_eq!(m.triggers.len(), 1);
-        assert!(matches!(&m.triggers[0], PluginTrigger::Keyword { keyword, .. } if keyword == "ok"));
+        assert!(
+            matches!(&m.triggers[0], PluginTrigger::Keyword { keyword, .. } if keyword == "ok")
+        );
     }
 
     #[cfg(windows)]
@@ -825,7 +839,8 @@ mod tests {
     #[test]
     fn tools_field_defaults_to_empty() {
         // 老 manifest 无 tools 字段 → 空 vec，向后兼容
-        let json = r#"{"schema_version":1,"id":"x","name":"X","version":"0","runtime":{"exec":"x.exe"}}"#;
+        let json =
+            r#"{"schema_version":1,"id":"x","name":"X","version":"0","runtime":{"exec":"x.exe"}}"#;
         let m: PluginManifest = serde_json::from_str(json).unwrap();
         assert!(m.tools.is_empty());
     }
@@ -877,7 +892,12 @@ mod tests {
         }"#;
         let m: PluginManifest = serde_json::from_str(json).unwrap();
         assert_eq!(m.tools[0].parameters["type"], "object");
-        assert!(m.tools[0].parameters["properties"].as_object().unwrap().is_empty());
+        assert!(
+            m.tools[0].parameters["properties"]
+                .as_object()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

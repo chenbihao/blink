@@ -120,4 +120,3 @@ mod tests {
         assert_eq!(try_eval("2.0*3").as_deref(), Some("6"));
     }
 }
-

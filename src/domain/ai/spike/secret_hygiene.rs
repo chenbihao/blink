@@ -43,7 +43,10 @@ fn secret_debug_channel_never_leaks() {
     );
 
     // 但至少要有个明显的标记表示"这是掩码后的"——避免误认为空字符串
-    assert!(debug_output.contains("redacted"), "Debug 输出应含 redacted 标记");
+    assert!(
+        debug_output.contains("redacted"),
+        "Debug 输出应含 redacted 标记"
+    );
 }
 
 /// 断言 2:tracing 的 `%display` 通路不泄漏。

@@ -88,8 +88,13 @@ pub fn begin_session() -> Result<ScreenCaptureMeta, String> {
         .map_err(|e| format!("预编码 PNG 失败: {e}"))?;
 
     let meta_copy = meta;
-    *SESSION.write().map_err(|e| format!("SESSION 写锁失败: {e}"))? =
-        Some(Session { pixels, png_bytes, meta });
+    *SESSION
+        .write()
+        .map_err(|e| format!("SESSION 写锁失败: {e}"))? = Some(Session {
+        pixels,
+        png_bytes,
+        meta,
+    });
     tracing::debug!(?meta_copy, "截图 SESSION 已建立（含预编码 PNG）");
     Ok(meta_copy)
 }
@@ -189,7 +194,11 @@ pub fn crop_rgba(
 pub fn encode_png(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
     let stride = (width as usize) * 4;
     if pixels.len() != stride * (height as usize) {
-        return Err(format!("像素长度与尺寸不符: {} vs {}", pixels.len(), stride * height as usize));
+        return Err(format!(
+            "像素长度与尺寸不符: {} vs {}",
+            pixels.len(),
+            stride * height as usize
+        ));
     }
     // 预分配 buffer：无压缩 PNG 大小 ≈ 像素字节数 + header 开销
     let mut buf = Vec::with_capacity(stride * (height as usize) + 4096);
@@ -208,9 +217,8 @@ pub fn encode_png(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Str
         //   差别仅 R/B 位置对换 → mask 0x00FF00FF 提出 R/B 两字节交换
         let mut row_buf = vec![0u32; px_per_row];
         // Safety: row_buf 是 Vec<u32>，转 &mut [u8] 长度乘 4，对齐无问题
-        let row_buf_bytes = unsafe {
-            std::slice::from_raw_parts_mut(row_buf.as_mut_ptr() as *mut u8, stride)
-        };
+        let row_buf_bytes =
+            unsafe { std::slice::from_raw_parts_mut(row_buf.as_mut_ptr() as *mut u8, stride) };
         for row_idx in 0..height as usize {
             let src = &pixels[row_idx * stride..(row_idx + 1) * stride];
             row_buf_bytes.copy_from_slice(src);

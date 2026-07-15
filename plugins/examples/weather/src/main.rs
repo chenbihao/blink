@@ -170,7 +170,11 @@ fn main() {
         };
 
         match msg {
-            CoreToPlugin::Query { id, query, settings } => {
+            CoreToPlugin::Query {
+                id,
+                query,
+                settings,
+            } => {
                 let default_city = settings
                     .as_ref()
                     .and_then(|s| s.get("default_city"))
@@ -185,7 +189,11 @@ fn main() {
 
                 // 城市:优先 query 参数,其次默认城市
                 let city = query.trim();
-                let city = if city.is_empty() { default_city.trim() } else { city };
+                let city = if city.is_empty() {
+                    default_city.trim()
+                } else {
+                    city
+                };
 
                 if city.is_empty() {
                     let resp = PluginToCore::Response(PluginResponse {
@@ -225,7 +233,12 @@ fn main() {
                 });
                 send_message(&mut stdout, &http_req);
             }
-            CoreToPlugin::ToolCall { id, tool_name: _, arguments, settings } => {
+            CoreToPlugin::ToolCall {
+                id,
+                tool_name: _,
+                arguments,
+                settings,
+            } => {
                 // 0.9.3: tool-call 与 query 共用逻辑，只是返回 ToolResult 格式
                 let default_city = settings
                     .as_ref()
@@ -237,12 +250,25 @@ fn main() {
                     .and_then(|s| s.get("temperature_unit"))
                     .and_then(|v| v.as_str())
                     .map(|s| s == "fahrenheit")
-                    .or_else(|| arguments.get("unit").and_then(|v| v.as_str()).map(|s| s == "fahrenheit"))
+                    .or_else(|| {
+                        arguments
+                            .get("unit")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s == "fahrenheit")
+                    })
                     .unwrap_or(false);
 
                 // 城市:优先 arguments,其次 settings 默认城市
-                let city = arguments.get("city").and_then(|v| v.as_str()).unwrap_or("").trim();
-                let city = if city.is_empty() { default_city.trim() } else { city };
+                let city = arguments
+                    .get("city")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim();
+                let city = if city.is_empty() {
+                    default_city.trim()
+                } else {
+                    city
+                };
 
                 if city.is_empty() {
                     let resp = PluginToCore::ToolResult(ToolResultPayload {
@@ -281,7 +307,12 @@ fn main() {
                 });
                 send_message(&mut stdout, &http_req);
             }
-            CoreToPlugin::HttpResponse { id, status, body, error } => {
+            CoreToPlugin::HttpResponse {
+                id,
+                status,
+                body,
+                error,
+            } => {
                 let mut pending_guard = pending_clone.lock().unwrap();
                 let Some(stage) = pending_guard.remove(&id) else {
                     eprintln!("http response for unknown request: {id}");
@@ -289,16 +320,31 @@ fn main() {
                 };
 
                 match stage {
-                    WeatherStage::Geocoding { query_id, city, use_fahrenheit, is_tool_call } => {
+                    WeatherStage::Geocoding {
+                        query_id,
+                        city,
+                        use_fahrenheit,
+                        is_tool_call,
+                    } => {
                         // geocoding 响应
                         if error.is_some() || status != 200 {
-                            let resp = make_error_response(query_id, is_tool_call, "fetch_failed", &format!("查询「{city}」失败，请检查网络"));
+                            let resp = make_error_response(
+                                query_id,
+                                is_tool_call,
+                                "fetch_failed",
+                                &format!("查询「{city}」失败，请检查网络"),
+                            );
                             send_message(&mut stdout, &resp);
                             continue;
                         }
 
                         let Some(body) = body else {
-                            let resp = make_error_response(query_id, is_tool_call, "fetch_failed", &format!("查询「{city}」失败：无响应"));
+                            let resp = make_error_response(
+                                query_id,
+                                is_tool_call,
+                                "fetch_failed",
+                                &format!("查询「{city}」失败：无响应"),
+                            );
                             send_message(&mut stdout, &resp);
                             continue;
                         };
@@ -306,14 +352,24 @@ fn main() {
                         let geo: GeoResponse = match serde_json::from_str(&body) {
                             Ok(g) => g,
                             Err(e) => {
-                                let resp = make_error_response(query_id, is_tool_call, "fetch_failed", &format!("解析「{city}」失败：{e}"));
+                                let resp = make_error_response(
+                                    query_id,
+                                    is_tool_call,
+                                    "fetch_failed",
+                                    &format!("解析「{city}」失败：{e}"),
+                                );
                                 send_message(&mut stdout, &resp);
                                 continue;
                             }
                         };
 
                         let Some(loc) = geo.results.into_iter().next() else {
-                            let resp = make_error_response(query_id, is_tool_call, "fetch_failed", &format!("未找到城市「{city}」"));
+                            let resp = make_error_response(
+                                query_id,
+                                is_tool_call,
+                                "fetch_failed",
+                                &format!("未找到城市「{city}」"),
+                            );
                             send_message(&mut stdout, &resp);
                             continue;
                         };
@@ -345,16 +401,33 @@ fn main() {
                         });
                         send_message(&mut stdout, &http_req);
                     }
-                    WeatherStage::Weather { query_id, city_name, admin1, country, use_fahrenheit, is_tool_call } => {
+                    WeatherStage::Weather {
+                        query_id,
+                        city_name,
+                        admin1,
+                        country,
+                        use_fahrenheit,
+                        is_tool_call,
+                    } => {
                         // weather 响应
                         if error.is_some() || status != 200 {
-                            let resp = make_error_response(query_id, is_tool_call, "fetch_failed", &format!("查询「{city_name}」天气失败，请检查网络"));
+                            let resp = make_error_response(
+                                query_id,
+                                is_tool_call,
+                                "fetch_failed",
+                                &format!("查询「{city_name}」天气失败，请检查网络"),
+                            );
                             send_message(&mut stdout, &resp);
                             continue;
                         }
 
                         let Some(body) = body else {
-                            let resp = make_error_response(query_id, is_tool_call, "fetch_failed", &format!("查询「{city_name}」天气失败：无响应"));
+                            let resp = make_error_response(
+                                query_id,
+                                is_tool_call,
+                                "fetch_failed",
+                                &format!("查询「{city_name}」天气失败：无响应"),
+                            );
                             send_message(&mut stdout, &resp);
                             continue;
                         };
@@ -362,7 +435,12 @@ fn main() {
                         let weather: WeatherResponse = match serde_json::from_str(&body) {
                             Ok(w) => w,
                             Err(e) => {
-                                let resp = make_error_response(query_id, is_tool_call, "fetch_failed", &format!("解析天气失败：{e}"));
+                                let resp = make_error_response(
+                                    query_id,
+                                    is_tool_call,
+                                    "fetch_failed",
+                                    &format!("解析天气失败：{e}"),
+                                );
                                 send_message(&mut stdout, &resp);
                                 continue;
                             }
@@ -378,7 +456,10 @@ fn main() {
                         let region = if admin1.is_empty() { country } else { admin1 };
 
                         let title = format!("{city_name} {temp_str} {desc}");
-                        let subtitle = format!("{region} · 风速 {:.0}km/h | 按 Enter 复制", cur.wind_speed_10m);
+                        let subtitle = format!(
+                            "{region} · 风速 {:.0}km/h | 按 Enter 复制",
+                            cur.wind_speed_10m
+                        );
 
                         let items = vec![PluginItem {
                             title,
@@ -401,20 +482,39 @@ fn main() {
 
 /// 根据 is_tool_call 创建错误响应（Response 或 ToolResult）
 fn make_error_response(id: String, is_tool_call: bool, code: &str, message: &str) -> PluginToCore {
-    let error = Some(PluginError { code: code.into(), message: message.into() });
+    let error = Some(PluginError {
+        code: code.into(),
+        message: message.into(),
+    });
     if is_tool_call {
-        PluginToCore::ToolResult(ToolResultPayload { id, items: vec![], error })
+        PluginToCore::ToolResult(ToolResultPayload {
+            id,
+            items: vec![],
+            error,
+        })
     } else {
-        PluginToCore::Response(PluginResponse { id, items: vec![], error })
+        PluginToCore::Response(PluginResponse {
+            id,
+            items: vec![],
+            error,
+        })
     }
 }
 
 /// 根据 is_tool_call 创建成功响应（Response 或 ToolResult）
 fn make_success_response(id: String, is_tool_call: bool, items: Vec<PluginItem>) -> PluginToCore {
     if is_tool_call {
-        PluginToCore::ToolResult(ToolResultPayload { id, items, error: None })
+        PluginToCore::ToolResult(ToolResultPayload {
+            id,
+            items,
+            error: None,
+        })
     } else {
-        PluginToCore::Response(PluginResponse { id, items, error: None })
+        PluginToCore::Response(PluginResponse {
+            id,
+            items,
+            error: None,
+        })
     }
 }
 

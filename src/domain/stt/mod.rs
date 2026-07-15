@@ -29,9 +29,11 @@
 //! 旧方案使用 sherpa-onnx（C++ ONNX 子进程），因下载不稳定、模型格式
 //! 不匹配等问题已废弃。新方案直接使用 FunASR Python 工具箱：
 //! - Blink 通过 uv 自动管理 Python 3.12 + funasr 安装（用户零手动操作）
-//! - `funasr-server --model sensevoice` 启动
+//! - `funasr-server --model iic/SenseVoiceSmall` 启动
 //! - 通过 OpenAI 兼容 API (localhost:8000) 做转录
 //! - FunASR 自动管理模型下载（ModelScope CDN）、VAD、标点
+//!
+//! 0.10.3 真流式：自定义 `blink_stt_server.py`，同时支持 HTTP 非流式 + WebSocket 流式。
 
 use std::fmt;
 use std::time::Duration;
@@ -104,7 +106,7 @@ pub struct ModelDescriptor {
     /// 引擎名("funasr")
     pub engine: &'static str,
     /// FunASR 模型标识(传给 funasr-server --model 参数)
-    /// 如 "sensevoice" / "paraformer" / "paraformer-zh-streaming"
+    /// 如 "iic/SenseVoiceSmall" / "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online"
     pub funasr_model_id: &'static str,
     /// 是否支持流式（指模型本身的能力，非当前 funasr-server HTTP 模式是否流式）
     pub streaming: bool,
@@ -135,7 +137,7 @@ static MODELS: [ModelDescriptor; 2] = [
         id: "sensevoice-small",
         display_name: "FunASR SenseVoice-Small",
         engine: "funasr",
-        funasr_model_id: "sensevoice",
+        funasr_model_id: "iic/SenseVoiceSmall",
         streaming: false,
         params: "234M",
         size_mb: 234,
@@ -144,16 +146,16 @@ static MODELS: [ModelDescriptor; 2] = [
         description: "五语种 ASR（中/英/日/韩/粤），CPU 17 倍实时，带情感与音频事件标签。体积小、速度快，推荐 CPU 首选",
     },
     ModelDescriptor {
-        id: "paraformer",
-        display_name: "FunASR Paraformer-zh",
+        id: "paraformer-zh-streaming",
+        display_name: "FunASR Paraformer-zh-streaming",
         engine: "funasr",
-        funasr_model_id: "paraformer",
-        streaming: false,
+        funasr_model_id: "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online",
+        streaming: true,
         params: "220M",
         size_mb: 880,
         languages: &["zh", "en"],
-        device: "cpu",
-        description: "中英双语 ASR + 字符级时间戳 + 热词。220M 参数，FP32 格式下载约 880MB（含 VAD + 标点模型）",
+        device: "cuda",
+        description: "中英双语流式 ASR，chunk_size=[0,10,5]（600ms 块），延迟 ~860ms。GPU 推荐。同样支持非流式调用（is_final=True）",
     },
 ];
 
@@ -210,17 +212,19 @@ impl DownloadProgress {
 
 // ── STT Engines ──────────────────────────────────────────────────────────
 
-mod mock;
 mod cloud;
-pub mod local;
 pub mod funasr;
+pub mod local;
+mod mock;
+pub mod streaming;
 pub(crate) mod wav;
 
 /// 创建 STT 引擎实例(工厂函数)。
 ///
 /// 根据 SttConfig 选择引擎：
 /// - Cloud 模式 + 已配置 cloud_provider → CloudSttEngine
-/// - Local 模式 + funasr-server 已就绪 → LocalSttEngine (FunASR)
+/// - Local 模式 + streaming=true + streaming_model 已配置 → StreamingSttEngine (WebSocket)
+/// - Local 模式 + streaming=false → LocalSttEngine (HTTP 非流式)
 /// - 未配置/未启用/服务未就绪 → MockSttEngine
 pub fn create_engine() -> Box<dyn SttEngine> {
     let config = crate::app::stt_config::get_stt_config();
@@ -240,14 +244,35 @@ pub fn create_engine() -> Box<dyn SttEngine> {
             }
         }
         crate::app::stt_config::SttMode::Local => {
-            match local::LocalSttEngine::new(&config) {
-                Ok(engine) => {
-                    tracing::info!("STT 引擎: local (FunASR)");
-                    Box::new(engine)
+            // 0.10.3: streaming=true 且配置了 streaming_model → 流式引擎
+            if config.streaming && config.local_engine.streaming_model.is_some() {
+                match streaming::StreamingSttEngine::new(config.local_engine.server_port) {
+                    Ok(engine) => {
+                        tracing::info!("STT 引擎: streaming (WebSocket)");
+                        Box::new(engine)
+                    }
+                    Err(e) => {
+                        tracing::warn!(%e, "STT streaming 引擎创建失败,回退非流式");
+                        // 回退到非流式
+                        match local::LocalSttEngine::new(&config) {
+                            Ok(engine) => Box::new(engine),
+                            Err(e) => {
+                                tracing::warn!(%e, "STT local 引擎创建失败,回退 mock");
+                                Box::new(mock::MockSttEngine::new())
+                            }
+                        }
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!(%e, "STT local 引擎创建失败,回退 mock");
-                    Box::new(mock::MockSttEngine::new())
+            } else {
+                match local::LocalSttEngine::new(&config) {
+                    Ok(engine) => {
+                        tracing::info!("STT 引擎: local (FunASR)");
+                        Box::new(engine)
+                    }
+                    Err(e) => {
+                        tracing::warn!(%e, "STT local 引擎创建失败,回退 mock");
+                        Box::new(mock::MockSttEngine::new())
+                    }
                 }
             }
         }

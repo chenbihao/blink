@@ -75,7 +75,10 @@ pub fn is_url(s: &str) -> bool {
         return false;
     }
     // 剥离端口 `:port`（IPv4/domain）
-    let host_no_port = host_only.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_only);
+    let host_no_port = host_only
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(host_only);
     if host_no_port.is_empty() {
         return false;
     }
@@ -114,7 +117,10 @@ pub fn is_file_path(s: &str) -> bool {
     let bytes = s.as_bytes();
 
     // UNC / 长路径前缀：以 \\ 开头（\\server\share 或 \\?\...）
-    if bytes.len() >= 3 && (bytes[0] == b'\\' || bytes[0] == b'/') && (bytes[1] == b'\\' || bytes[1] == b'/') {
+    if bytes.len() >= 3
+        && (bytes[0] == b'\\' || bytes[0] == b'/')
+        && (bytes[1] == b'\\' || bytes[1] == b'/')
+    {
         // 至少要有 \\x\y 结构，x 非空
         // 简化：只要 \\ 后跟非分隔符字符就通过
         return bytes[2] != b'\\' && bytes[2] != b'/';
@@ -348,7 +354,7 @@ mod tests {
         assert!(!is_url("https://"));
         assert!(!is_url("ftp://"));
         assert!(!is_url("http://缺")); // 无 TLD 的中文单字
-        assert!(!is_url("http://foo"));  // 无 TLD 的短标识
+        assert!(!is_url("http://foo")); // 无 TLD 的短标识
         assert!(!is_url("http://.com")); // 点前无字符
         assert!(!is_url("http://foo.")); // 点后无字符
     }
@@ -565,9 +571,15 @@ mod tests {
     #[test]
     fn needs_translation_url_guard() {
         // 复制 URL 不该触发翻译（P0-2 关键回归：与内置动作「打开链接」互斥）
-        assert!(!needs_translation("https://github.com/anthropics/xxx", "zh"));
+        assert!(!needs_translation(
+            "https://github.com/anthropics/xxx",
+            "zh"
+        ));
         assert!(!needs_translation("http://example.com", "zh"));
-        assert!(!needs_translation("https://user:pass@example.com/path?q=1", "zh"));
+        assert!(!needs_translation(
+            "https://user:pass@example.com/path?q=1",
+            "zh"
+        ));
         assert!(!needs_translation("file:///C:/foo", "zh"));
     }
 
@@ -646,10 +658,7 @@ mod tests {
             "zh",
         ));
         // \r\n 换行也算
-        assert!(!needs_translation(
-            "https://a.com\r\nhttps://b.com",
-            "zh",
-        ));
+        assert!(!needs_translation("https://a.com\r\nhttps://b.com", "zh",));
         // 多行文件路径同理
         assert!(!needs_translation(
             "C:\\Users\\a\\file.txt\nD:\\other.txt",
@@ -660,10 +669,7 @@ mod tests {
     #[test]
     fn needs_translation_multiline_normal_text_ok() {
         // 首行不是 URL / 路径的多行英文，应该照常触发
-        assert!(needs_translation(
-            "hello world\nsecond line here",
-            "zh",
-        ));
+        assert!(needs_translation("hello world\nsecond line here", "zh",));
         // 首行是普通英文，后续含 URL —— 依旧触发（护栏只挡"首行是链接"）
         assert!(needs_translation(
             "check this out\nhttps://example.com",

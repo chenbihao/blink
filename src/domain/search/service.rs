@@ -19,11 +19,13 @@ use crate::domain::ai::gating::{AiGate, GateOutcome, should_invoke_ai};
 use crate::domain::ai::message::{ChatMessage, CompletionRequest};
 use crate::domain::ai::provider::{AIError, StreamChunk};
 use crate::domain::ai::registry::AIProviderRegistry;
-use crate::domain::capability::{CapabilityError, CapabilityRegistry, CapabilityResult, InvokeContext};
+use crate::domain::capability::{
+    CapabilityError, CapabilityRegistry, CapabilityResult, InvokeContext,
+};
 use crate::domain::execution::{ActionContext, ActionRegistry, ActionSchema, DangerClass};
-use crate::infra::platform::context::ContextSnapshot;
 use crate::domain::intent::{Candidate, IntentRouter, RankingHint, Route, Suggestion, Surface};
 use crate::domain::plugin::PluginEngine;
+use crate::infra::platform::context::ContextSnapshot;
 use crate::infra::utils::perf::ai_slo;
 
 use super::engine::{Lane, QueryContext, SearchEngine, SearchItem};
@@ -116,7 +118,10 @@ struct AutosuggestState {
 
 impl Default for AutosuggestState {
     fn default() -> Self {
-        Self { enabled: true, min_score: 0.7 }
+        Self {
+            enabled: true,
+            min_score: 0.7,
+        }
     }
 }
 
@@ -257,7 +262,10 @@ impl SearchService {
         self.router.set_app_language(language.clone());
         // 转发到 ClipboardEngine（sync lane 里唯一持 language 的 engine）
         for engine in &self.sync_engines {
-            if let Some(clip) = engine.as_any().downcast_ref::<super::clipboard_engine::ClipboardEngine>() {
+            if let Some(clip) = engine
+                .as_any()
+                .downcast_ref::<super::clipboard_engine::ClipboardEngine>()
+            {
                 clip.update_language(language.clone());
             }
         }
@@ -279,19 +287,28 @@ impl SearchService {
             if engine.id() == engine_id {
                 match config {
                     EngineConfigUpdate::StartMenu(cfg) => {
-                        if let Some(sm) = engine.as_any().downcast_ref::<super::start_menu_engine::StartMenuEngine>() {
+                        if let Some(sm) = engine
+                            .as_any()
+                            .downcast_ref::<super::start_menu_engine::StartMenuEngine>()
+                        {
                             sm.update_config(cfg);
                             tracing::debug!(engine = engine_id, "StartMenuEngine 配置已热更新");
                         }
                     }
                     EngineConfigUpdate::Calc(cfg) => {
-                        if let Some(calc) = engine.as_any().downcast_ref::<super::calc_engine::CalcEngine>() {
+                        if let Some(calc) = engine
+                            .as_any()
+                            .downcast_ref::<super::calc_engine::CalcEngine>()
+                        {
                             calc.update_config(cfg);
                             tracing::debug!(engine = engine_id, "CalcEngine 配置已热更新");
                         }
                     }
                     EngineConfigUpdate::File(cfg) => {
-                        if let Some(file) = engine.as_any().downcast_ref::<super::file_engine::FileEngine>() {
+                        if let Some(file) = engine
+                            .as_any()
+                            .downcast_ref::<super::file_engine::FileEngine>()
+                        {
                             file.update_config(cfg).await;
                             tracing::debug!(engine = engine_id, "FileEngine 配置已热更新");
                         }
@@ -353,15 +370,15 @@ impl SearchService {
         //
         // Takeover 被 filter 降级成 Mixed{[]} 时也允许走 AI——用户被拦了没得选,
         // 正是需要 AI 帮忙的场景。
-        if suggestion.is_none() && matches!(&route, Route::Mixed { candidates } if candidates.is_empty()) {
+        if suggestion.is_none()
+            && matches!(&route, Route::Mixed { candidates } if candidates.is_empty())
+        {
             suggestion = self.maybe_ai_suggestion(q);
         }
 
         // 按 Route 分派到四个 executor（0.8.6 §8.2.1 拆 God Method）
         let entries = match route {
-            Route::Takeover { plugin_id, arg, .. } => {
-                self.exec_takeover(plugin_id, arg, seq)
-            }
+            Route::Takeover { plugin_id, arg, .. } => self.exec_takeover(plugin_id, arg, seq),
             Route::EngineTakeover { engine_id, arg } => {
                 self.exec_engine_takeover(engine_id, arg, &search_ctx).await
             }
@@ -373,11 +390,15 @@ impl SearchService {
                 vec![]
             }
             Route::Mixed { candidates } => {
-                self.exec_mixed(q, candidates, seq, &search_ctx, search_start).await
+                self.exec_mixed(q, candidates, seq, &search_ctx, search_start)
+                    .await
             }
         };
 
-        SearchResponse { entries, suggestion }
+        SearchResponse {
+            entries,
+            suggestion,
+        }
     }
 
     /// 若过 gating 且 AI registry 就绪,产 AI Ghost Suggestion(0.9.2 Phase 5b)。
@@ -392,7 +413,11 @@ impl SearchService {
             return None;
         }
 
-        let reg = self.ai_registry.read().expect("ai_registry lock poisoned").clone()?;
+        let reg = self
+            .ai_registry
+            .read()
+            .expect("ai_registry lock poisoned")
+            .clone()?;
         let cfg = reg.config_snapshot();
         let gate = AiGate::from(&cfg);
         match should_invoke_ai(q, &gate) {
@@ -432,7 +457,11 @@ impl SearchService {
     fn make_ai_suggestion(&self, arg: &str) -> Option<Suggestion> {
         use crate::domain::intent::SuggestionSource;
 
-        let reg = self.ai_registry.read().expect("ai_registry lock poisoned").clone()?;
+        let reg = self
+            .ai_registry
+            .read()
+            .expect("ai_registry lock poisoned")
+            .clone()?;
         // 检查 AI 是否启用——用户显式触发也要尊重总开关
         let cfg = reg.config_snapshot();
         if !cfg.enabled {
@@ -447,7 +476,7 @@ impl SearchService {
             display: "按 Tab 问 AI".to_string(),
             replacement: arg.to_string(),
             source: SuggestionSource::Ai,
-            confidence: 1.0,  // AI 前缀触发是强信号，confidence 高于兜底的 0.5
+            confidence: 1.0, // AI 前缀触发是强信号，confidence 高于兜底的 0.5
             prefix_len: 0,
             origin: None,
             ranking_hint: None,
@@ -455,7 +484,11 @@ impl SearchService {
     }
 
     /// Suggestion 计算（从 search() 提取，0.8.6 §8.2.1）。
-    fn compute_suggestion(&self, query: &str, snapshot: &crate::infra::platform::context::ContextSnapshot) -> Option<Suggestion> {
+    fn compute_suggestion(
+        &self,
+        query: &str,
+        snapshot: &crate::infra::platform::context::ContextSnapshot,
+    ) -> Option<Suggestion> {
         let cfg = *self.autosuggest.read().unwrap();
         if !cfg.enabled {
             return None;
@@ -496,10 +529,17 @@ impl SearchService {
     ) -> Vec<AppEntry> {
         if let Some(hint_text) = self.empty_arg_hint(&plugin_id, &arg) {
             tracing::debug!(plugin = %plugin_id, "empty_arg_hint 命中 Takeover，跳过插件查询");
-            return vec![empty_arg_hint_entry(&plugin_id, &self.display_name(&plugin_id), hint_text)];
+            return vec![empty_arg_hint_entry(
+                &plugin_id,
+                &self.display_name(&plugin_id),
+                hint_text,
+            )];
         }
         self.spawn_takeover(plugin_id.clone(), arg.to_plugin_string(), seq);
-        vec![placeholder_entry(&plugin_id, &self.display_name(&plugin_id))]
+        vec![placeholder_entry(
+            &plugin_id,
+            &self.display_name(&plugin_id),
+        )]
     }
 
     /// EngineTakeover executor（0.8.6 §8.2.1）：本体 engine 独占。
@@ -572,10 +612,8 @@ impl SearchService {
             .map(|c| (c.plugin_id.clone(), c.arg.to_plugin_string()))
             .collect();
 
-        let priority_set: std::collections::HashSet<String> = priority
-            .iter()
-            .map(|c| c.plugin_id.clone())
-            .collect();
+        let priority_set: std::collections::HashSet<String> =
+            priority.iter().map(|c| c.plugin_id.clone()).collect();
         let placeholders: Vec<AppEntry> = plugin_ids
             .iter()
             .map(|(id, _)| {
@@ -609,7 +647,9 @@ impl SearchService {
         let elapsed = search_start.elapsed().as_secs_f64() * 1000.0;
         crate::infra::utils::perf::record(
             crate::infra::utils::perf::MetricCategory::SearchEngine,
-            "total", elapsed, None,
+            "total",
+            elapsed,
+            None,
         );
 
         all_items
@@ -625,7 +665,11 @@ impl SearchService {
     /// **前置**:调用方需已过 gating 筛子(前端见 Ghost 才允许按 Tab)。
     /// 若 registry 为 None(setup 未完成)或 resolve NotConfigured → 静默 clear + 返 Ok。
     pub fn trigger_ai(&self, query: String, seq: u64) {
-        let Some(registry) = self.ai_registry.read().expect("ai_registry lock poisoned").clone()
+        let Some(registry) = self
+            .ai_registry
+            .read()
+            .expect("ai_registry lock poisoned")
+            .clone()
         else {
             tracing::debug!(target: ai_slo::TARGET, "trigger_ai: registry 未就绪,忽略");
             return;
@@ -653,15 +697,14 @@ impl SearchService {
     /// - 起始 1 条 `debug`——包含 provider/tier/model/timeout,方便对上号
     /// - 结束 1 条 `info`(成功)或 `warn`(失败)——包含 elapsed/first_token_ms/结果
     /// 不再逐字段拆散、不打"发起 → 收到 → 映射"三条,让 grep 出的日志一目了然。
-    fn spawn_ai_lane(
-        &self,
-        query: String,
-        registry: Arc<AIProviderRegistry>,
-        seq: u64,
-    ) {
+    fn spawn_ai_lane(&self, query: String, registry: Arc<AIProviderRegistry>, seq: u64) {
         let app = self.app.clone();
         let latest_seq = Arc::clone(&self.latest_seq);
-        let lang = self.language.read().expect("language lock poisoned").clone();
+        let lang = self
+            .language
+            .read()
+            .expect("language lock poisoned")
+            .clone();
         tauri::async_runtime::spawn(async move {
             // resolve(Tier::Router) —— 空档降级链在 registry.resolve 内部走
             let (provider, actual_tier) = match registry.resolve(Tier::Router) {
@@ -691,7 +734,8 @@ impl SearchService {
             // 0.9.7 Step 4: 聚合 tools 列表 = Action 分组 + 插件独立 + Capability 独立
             let action_reg = app.state::<Arc<ActionRegistry>>();
             let cap_reg = app.state::<Arc<CapabilityRegistry>>();
-            let tools = crate::domain::execution::group::build_aggregated_tools(&action_reg, &cap_reg);
+            let tools =
+                crate::domain::execution::group::build_aggregated_tools(&action_reg, &cap_reg);
             let tools_count = tools.len();
             let system_prompt = build_routing_prompt(&tools);
 
@@ -774,9 +818,15 @@ impl SearchService {
                             //   否则 Dangerous 确认卡片会插入新卡而非替换占位。
                             if !tool_calls.is_empty() {
                                 handle_ai_tool_calls(
-                                    &app, seq, &tool_calls, &accumulated, &lang,
-                                    &latest_seq, ai_deadline,
-                                ).await;
+                                    &app,
+                                    seq,
+                                    &tool_calls,
+                                    &accumulated,
+                                    &lang,
+                                    &latest_seq,
+                                    ai_deadline,
+                                )
+                                .await;
                             } else {
                                 // 纯文本回答——先发 done=true 再发可复制结果
                                 emit_ai_stream(&app, seq, "", &accumulated, true);
@@ -850,10 +900,15 @@ impl SearchService {
                         // 0.9.3:处理 tool_call（支持分组解析）
                         if !resp.tool_calls.is_empty() {
                             handle_ai_tool_calls(
-                                &app, seq, &resp.tool_calls,
-                                resp.text.as_deref().unwrap_or(""), &lang,
-                                &latest_seq, ai_deadline,
-                            ).await;
+                                &app,
+                                seq,
+                                &resp.tool_calls,
+                                resp.text.as_deref().unwrap_or(""),
+                                &lang,
+                                &latest_seq,
+                                ai_deadline,
+                            )
+                            .await;
                             return;
                         }
 
@@ -906,7 +961,11 @@ impl SearchService {
     fn filter_route(&self, route: Route) -> Route {
         let pe = &self.plugin_engine;
         match route {
-            Route::Takeover { ref plugin_id, ref arg, .. } => {
+            Route::Takeover {
+                ref plugin_id,
+                ref arg,
+                ..
+            } => {
                 // 检查禁用
                 if !pe.is_enabled(plugin_id) {
                     tracing::debug!(plugin = %plugin_id, "禁用插件命中 takeover,降级 Generic");
@@ -1009,7 +1068,8 @@ impl SearchService {
 
             // ── 1. 插件查询任务（独立 spawn，支持 per-plugin 防抖）
             if !plugin_ids.is_empty() {
-                let plugin_ctx = crate::domain::plugin::PluginQueryContext::from_snapshot(&snapshot);
+                let plugin_ctx =
+                    crate::domain::plugin::PluginQueryContext::from_snapshot(&snapshot);
                 let pe = plugin_engine.clone();
                 let plugin_ids = plugin_ids.clone();
                 let app = app.clone();
@@ -1056,7 +1116,7 @@ impl SearchService {
                 let q = query.clone();
                 let app = app.clone();
                 let latest_seq = latest_seq.clone();
-                let history = history.clone();  // history 是 Arc<HashMap> 内部 move clone
+                let history = history.clone(); // history 是 Arc<HashMap> 内部 move clone
                 let snapshot = snapshot.clone();
                 tauri::async_runtime::spawn(async move {
                     // async lane 引擎（file/mock）不消费 disabled_builtin_actions；
@@ -1068,7 +1128,11 @@ impl SearchService {
                     };
                     let items = engine.search(&q, &ctx).await;
                     if seq == latest_seq.load(Ordering::SeqCst) && !items.is_empty() {
-                        tracing::trace!(engine = engine.id(), count = items.len(), "async lane 引擎返回");
+                        tracing::trace!(
+                            engine = engine.id(),
+                            count = items.len(),
+                            "async lane 引擎返回"
+                        );
                         emit_results(&app, seq, items, limit, None);
                     }
                 });
@@ -1105,7 +1169,13 @@ fn fuse_items(items: Vec<SearchItem>, limit: usize) -> Vec<SearchItem> {
 /// emit 增量结果到前端。
 /// 即使 items 为空也会 emit（空结果需要通知前端清除占位符）。
 /// empty_source: 空结果时携带的来源 plugin_id，用于前端只清除对应占位符。
-fn emit_results(app: &AppHandle, seq: u64, items: Vec<SearchItem>, limit: usize, empty_source: Option<&str>) {
+fn emit_results(
+    app: &AppHandle,
+    seq: u64,
+    items: Vec<SearchItem>,
+    limit: usize,
+    empty_source: Option<&str>,
+) {
     let entries: Vec<AppEntry> = if items.is_empty() {
         // 空结果:发送一个标记项让前端知道该插件已返回(清除占位符)
         // 用特殊 score=-2 标记,前端 merge 后会被排序到最后但保留来源信息
@@ -1151,7 +1221,13 @@ fn emit_results(app: &AppHandle, seq: u64, items: Vec<SearchItem>, limit: usize,
             );
         }
     }
-    if let Err(e) = app.emit("blink://results", ResultsPayload { seq, items: entries }) {
+    if let Err(e) = app.emit(
+        "blink://results",
+        ResultsPayload {
+            seq,
+            items: entries,
+        },
+    ) {
         tracing::debug!(error = %e, "emit blink://results failed");
     }
 }
@@ -1210,9 +1286,8 @@ fn empty_arg_hint_entry(plugin_id: &str, display_name: &str, hint: String) -> Ap
 /// - 工具列表只给 name + description（不含 parameters schema）——省 token + 避免模型过度拟合参数格式
 /// - 明确"不确定就文本回答"——宁可多回答不乱调 tool
 fn build_routing_prompt(tools: &[ActionSchema]) -> String {
-    let mut prompt = String::from(
-        "你是 Blink 的意图路由器。用户输入未命中确定性规则,由你判断意图。\n\n",
-    );
+    let mut prompt =
+        String::from("你是 Blink 的意图路由器。用户输入未命中确定性规则,由你判断意图。\n\n");
 
     if !tools.is_empty() {
         prompt.push_str("【可用工具】\n");
@@ -1351,7 +1426,13 @@ pub(crate) fn ai_result_entry(text: String) -> AppEntry {
 /// 不复用 `emit_results`:那个吃 `Vec<SearchItem>` 走 fuse_items(会重排序),
 /// AI 只有一条,直接构造 payload emit 更直白。
 fn emit_ai_result(app: &AppHandle, seq: u64, entry: AppEntry) {
-    if let Err(e) = app.emit("blink://results", ResultsPayload { seq, items: vec![entry] }) {
+    if let Err(e) = app.emit(
+        "blink://results",
+        ResultsPayload {
+            seq,
+            items: vec![entry],
+        },
+    ) {
         tracing::debug!(error = %e, "emit AI result failed");
     }
 }
@@ -1361,7 +1442,13 @@ fn emit_ai_result(app: &AppHandle, seq: u64, entry: AppEntry) {
 /// 前端 merge 按 `source="ai"` 整体替换 placeholder——多条结果
 /// 在前端渲染为可选列表，Alt+1 打开第一条。
 fn emit_ai_result_multi(app: &AppHandle, seq: u64, entries: Vec<AppEntry>) {
-    if let Err(e) = app.emit("blink://results", ResultsPayload { seq, items: entries }) {
+    if let Err(e) = app.emit(
+        "blink://results",
+        ResultsPayload {
+            seq,
+            items: entries,
+        },
+    ) {
         tracing::debug!(error = %e, "emit AI multi-result failed");
     }
 }
@@ -1416,7 +1503,13 @@ fn emit_ai_clear(app: &AppHandle, seq: u64, error_msg: Option<&str>) {
             action: Action::default(),
             score_detail: None,
         };
-        if let Err(e) = app.emit("blink://results", ResultsPayload { seq, items: vec![error_entry] }) {
+        if let Err(e) = app.emit(
+            "blink://results",
+            ResultsPayload {
+                seq,
+                items: vec![error_entry],
+            },
+        ) {
             tracing::debug!(error = %e, "emit AI error failed");
         }
     } else {
@@ -1435,7 +1528,13 @@ fn emit_ai_clear(app: &AppHandle, seq: u64, error_msg: Option<&str>) {
             action: Action::default(),
             score_detail: None,
         };
-        if let Err(e) = app.emit("blink://results", ResultsPayload { seq, items: vec![clear_marker] }) {
+        if let Err(e) = app.emit(
+            "blink://results",
+            ResultsPayload {
+                seq,
+                items: vec![clear_marker],
+            },
+        ) {
             tracing::debug!(error = %e, "emit AI clear failed");
         }
     }
@@ -1568,7 +1667,9 @@ async fn handle_capability_call(
     };
 
     // invoke 包装层内含 SLO 埋点（§3.5 铁则 3）
-    let result = cap_registry.invoke(&tc.name, tc.arguments.clone(), &ctx).await;
+    let result = cap_registry
+        .invoke(&tc.name, tc.arguments.clone(), &ctx)
+        .await;
 
     // 铁则 2: seq 再次校验——capability 可能耗时较长，完成后用户可能已切走
     if seq != latest_seq.load(Ordering::SeqCst) {
@@ -1863,14 +1964,19 @@ mod tests {
 
     #[test]
     fn calc_wins_tie_break_on_equal_score() {
-        let items = vec![item("app", 1.0, "start_menu"), item("calc:1+1", 1.0, "calc")];
+        let items = vec![
+            item("app", 1.0, "start_menu"),
+            item("calc:1+1", 1.0, "calc"),
+        ];
         let r = fuse_items(items, 10);
         assert_eq!(r[0].source, "calc");
     }
 
     #[test]
     fn truncates_to_limit() {
-        let items = (0..10).map(|i| item(&format!("e{i}"), 0.5, "start_menu")).collect();
+        let items = (0..10)
+            .map(|i| item(&format!("e{i}"), 0.5, "start_menu"))
+            .collect();
         let r = fuse_items(items, 3);
         assert_eq!(r.len(), 3);
     }
@@ -1879,7 +1985,9 @@ mod tests {
 
     #[test]
     fn cap_text_projects_to_copy_entry() {
-        let r = CapabilityResult::Text { content: "hello world".into() };
+        let r = CapabilityResult::Text {
+            content: "hello world".into(),
+        };
         let entries = capability_result_to_entries(&r);
         assert_eq!(entries.len(), 1);
         assert!(!entries[0].is_placeholder);
@@ -1940,7 +2048,9 @@ mod tests {
 
     #[test]
     fn cap_done_projects_to_summary_entry() {
-        let r = CapabilityResult::Done { summary: "已写入文本".into() };
+        let r = CapabilityResult::Done {
+            summary: "已写入文本".into(),
+        };
         let entries = capability_result_to_entries(&r);
         assert_eq!(entries.len(), 1);
         assert!(entries[0].name.contains("已写入文本"));
@@ -1956,13 +2066,13 @@ mod tests {
             items: vec![crate::domain::capability::ItemResult {
                 title: "进程信息".into(),
                 subtitle: Some("PID: 1234".into()),
-                payload: json!({ "pid": 1234 }),  // 无 path 字段
+                payload: json!({ "pid": 1234 }), // 无 path 字段
                 score: None,
             }],
         };
         let entries = capability_result_to_entries(&r);
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].lnk_path, "");          // 无 path → 空 lnk_path
+        assert_eq!(entries[0].lnk_path, ""); // 无 path → 空 lnk_path
         assert!(entries[0].action.payload.is_none()); // 无 payload
         // Action::default() kind = Open，但 lnk_path 空 → 前端 open 空路径走 no-op
         assert!(matches!(entries[0].action.kind, ActionKind::Open));

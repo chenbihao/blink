@@ -834,6 +834,27 @@
               <pre id="voice-server-log" class="voice-server-log"></pre>
             </div>
 
+            <!-- 高级选项（0.10.3） -->
+            <h3 class="subsection-title">高级选项</h3>
+            <div class="setting-row">
+              <label class="setting-label">G2 注入方式<span class="field-hint-icon" title="SendInput Unicode：逐字符注入，不碰剪贴板（推荐）。Clipboard：Ctrl+V 粘贴，兼容性最好但有剪贴板污染。">ⓘ</span></label>
+              <select id="voice-inject-method-select">
+                <option value="sendinput" selected>SendInput Unicode</option>
+                <option value="clipboard">Clipboard + Ctrl+V</option>
+              </select>
+            </div>
+            <div class="setting-row voice-hotwords-row">
+              <label class="setting-label">热词<span class="field-hint-icon" title="每行一个热词，格式「词 权重」（权重 1-100，默认 100）。热词可提升专有名词识别率。">ⓘ</span></label>
+              <textarea id="voice-hotwords" class="voice-hotwords-input" rows="1" placeholder="每行一个，格式：美团 100 / 快手 80"></textarea>
+            </div>
+            <div class="setting-row">
+              <label class="setting-label">ITN 逆文本归一化<span class="field-hint-icon" title="将「二零二四年」转换为「2024年」，数字/日期/时间等自动归一化。推荐开启。">ⓘ</span></label>
+              <label class="switch switch-sm">
+                <input type="checkbox" id="voice-use-itn-toggle" checked />
+                <span class="slider"></span>
+              </label>
+            </div>
+
             <!-- 空间管理 -->
             <h3 class="subsection-title">空间管理</h3>
             <div id="stt-space-usage" class="stt-space-usage">

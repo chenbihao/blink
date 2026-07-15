@@ -5,7 +5,6 @@
 
 use std::sync::Mutex;
 
-use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::DataExchange::{
     AddClipboardFormatListener, CloseClipboard, GetClipboardData, OpenClipboard,
@@ -15,9 +14,10 @@ use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
 use windows::Win32::System::Ole::CF_UNICODETEXT;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetForegroundWindow, GetMessageW,
-    GetWindowTextW, RegisterClassW, TranslateMessage, MSG, WINDOW_EX_STYLE, WINDOW_STYLE,
+    GetWindowTextW, MSG, RegisterClassW, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE,
     WM_CLIPBOARDUPDATE, WNDCLASSW,
 };
+use windows::core::{PCWSTR, w};
 
 use crate::infra::data::clipboard::{self, ClipboardItem};
 
@@ -81,7 +81,12 @@ fn watcher_main() {
     }
 }
 
-unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+unsafe extern "system" fn wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     if msg == WM_CLIPBOARDUPDATE {
         let active = is_active();
         tracing::trace!(active, "WM_CLIPBOARDUPDATE 收到");
@@ -133,7 +138,10 @@ fn on_clipboard_change() {
             && last_hash == text_hash
             && now_ms.saturating_sub(last_ms) < DEDUP_WINDOW_MS
         {
-            tracing::debug!(len = text.chars().count(), "剪贴板：10s 内同文本重复,跳过入库");
+            tracing::debug!(
+                len = text.chars().count(),
+                "剪贴板：10s 内同文本重复,跳过入库"
+            );
             return;
         }
         *guard = Some((text_hash, now_ms));
@@ -234,7 +242,10 @@ fn read_clipboard_text() -> Option<String> {
             std::thread::sleep(std::time::Duration::from_millis(BACKOFF_MS));
         }
     }
-    tracing::debug!(attempts = MAX_ATTEMPTS, "剪贴板 OpenClipboard 重试仍失败,放弃");
+    tracing::debug!(
+        attempts = MAX_ATTEMPTS,
+        "剪贴板 OpenClipboard 重试仍失败,放弃"
+    );
     None
 }
 
@@ -265,14 +276,19 @@ unsafe fn read_clipboard_inner() -> Option<String> {
 pub fn write_bgra_to_clipboard(pixels: &[u8], width: u32, height: u32) -> Result<(), String> {
     use windows::Win32::Foundation::{GlobalFree, HANDLE};
     use windows::Win32::Graphics::Gdi::BITMAPINFOHEADER;
-    use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
-    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
     use windows::Win32::System::Ole::CF_DIB;
 
     let row_bytes = width as usize * 4;
     let expected = row_bytes * height as usize;
     if pixels.len() != expected {
-        return Err(format!("像素数据长度不匹配: {} vs {expected}", pixels.len()));
+        return Err(format!(
+            "像素数据长度不匹配: {} vs {expected}",
+            pixels.len()
+        ));
     }
 
     // 构造 DIB：BITMAPINFOHEADER + BGRA 像素（CF_DIB 要求 BGRA + bottom-up）
@@ -280,8 +296,8 @@ pub fn write_bgra_to_clipboard(pixels: &[u8], width: u32, height: u32) -> Result
     let dib_size = header_size + expected;
 
     unsafe {
-        let hmem = GlobalAlloc(GMEM_MOVEABLE, dib_size)
-            .map_err(|e| format!("GlobalAlloc 失败: {e}"))?;
+        let hmem =
+            GlobalAlloc(GMEM_MOVEABLE, dib_size).map_err(|e| format!("GlobalAlloc 失败: {e}"))?;
 
         // 从这里往下的任意 early return 都必须 GlobalFree(hmem)——只有
         // SetClipboardData 成功后所有权才转给系统。
@@ -364,8 +380,10 @@ pub fn write_bgra_to_clipboard(pixels: &[u8], width: u32, height: u32) -> Result
 /// EmptyClipboard → SetClipboardData。失败清理 GlobalFree，成对 CloseClipboard。
 pub fn write_text_to_clipboard(text: &str) -> Result<(), String> {
     use windows::Win32::Foundation::{GlobalFree, HANDLE};
-    use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
-    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
     use windows::Win32::System::Ole::CF_UNICODETEXT;
 
     // 编码 UTF-16 + null 终止符
@@ -374,8 +392,8 @@ pub fn write_text_to_clipboard(text: &str) -> Result<(), String> {
     let byte_len = wide.len() * 2;
 
     unsafe {
-        let hmem = GlobalAlloc(GMEM_MOVEABLE, byte_len)
-            .map_err(|e| format!("GlobalAlloc 失败: {e}"))?;
+        let hmem =
+            GlobalAlloc(GMEM_MOVEABLE, byte_len).map_err(|e| format!("GlobalAlloc 失败: {e}"))?;
 
         let fill_result = (|| -> Result<(), String> {
             let ptr = GlobalLock(hmem);
@@ -383,8 +401,7 @@ pub fn write_text_to_clipboard(text: &str) -> Result<(), String> {
                 return Err("GlobalLock 失败".into());
             }
             // 写 UTF-16 字节（外层已 unsafe，内层不需再包）
-            let byte_slice =
-                std::slice::from_raw_parts(wide.as_ptr() as *const u8, byte_len);
+            let byte_slice = std::slice::from_raw_parts(wide.as_ptr() as *const u8, byte_len);
             std::ptr::copy_nonoverlapping(byte_slice.as_ptr(), ptr as *mut u8, byte_len);
             let _ = GlobalUnlock(hmem);
             Ok(())

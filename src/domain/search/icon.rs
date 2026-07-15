@@ -14,15 +14,15 @@ use std::sync::Mutex;
 use std::time::{Instant, SystemTime};
 
 use once_cell::sync::OnceCell;
-use windows::core::PCWSTR;
 use windows::Win32::Foundation::SIZE;
 use windows::Win32::Graphics::Gdi::{
-    GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS,
+    BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, GetDC, GetDIBits, GetObjectW, ReleaseDC,
 };
-use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows::Win32::UI::Shell::{
     IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
 };
+use windows::core::PCWSTR;
 
 use sqlx::SqlitePool;
 
@@ -190,7 +190,12 @@ pub fn get_icon_png(path: &str) -> Option<Vec<u8>> {
                 if let Some(entry) = map.get_mut(path) {
                     // 更新访问时间
                     entry.last_access = Instant::now();
-                    crate::infra::utils::perf::record(crate::infra::utils::perf::MetricCategory::IconExtract, "hit", 0.0, None);
+                    crate::infra::utils::perf::record(
+                        crate::infra::utils::perf::MetricCategory::IconExtract,
+                        "hit",
+                        0.0,
+                        None,
+                    );
                     return entry.data.clone();
                 }
             }
@@ -199,14 +204,22 @@ pub fn get_icon_png(path: &str) -> Option<Vec<u8>> {
 
     // Layer 2: SQLite 持久化缓存
     if let Some(Some(blob)) = load_from_db(path) {
-        crate::infra::utils::perf::record(crate::infra::utils::perf::MetricCategory::IconExtract, "hit_db", 0.0, None);
+        crate::infra::utils::perf::record(
+            crate::infra::utils::perf::MetricCategory::IconExtract,
+            "hit_db",
+            0.0,
+            None,
+        );
         // 写入内存缓存
         if let Ok(mut cache) = ICON_CACHE.lock() {
             let map = cache.get_or_insert_with(HashMap::new);
-            map.insert(path.to_string(), CacheEntry {
-                data: Some(blob.clone()),
-                last_access: Instant::now(),
-            });
+            map.insert(
+                path.to_string(),
+                CacheEntry {
+                    data: Some(blob.clone()),
+                    last_access: Instant::now(),
+                },
+            );
         }
         return Some(blob);
     }
@@ -232,17 +245,21 @@ pub fn get_icon_png(path: &str) -> Option<Vec<u8>> {
         let map = cache.get_or_insert_with(HashMap::new);
         // LRU 淘汰：超过容量时删除最久未访问的
         if map.len() >= MEMORY_CACHE_CAPACITY {
-            if let Some(oldest_key) = map.iter()
+            if let Some(oldest_key) = map
+                .iter()
                 .min_by_key(|(_, entry)| entry.last_access)
                 .map(|(k, _)| k.clone())
             {
                 map.remove(&oldest_key);
             }
         }
-        map.insert(path.to_string(), CacheEntry {
-            data: result.clone(),
-            last_access: Instant::now(),
-        });
+        map.insert(
+            path.to_string(),
+            CacheEntry {
+                data: result.clone(),
+                last_access: Instant::now(),
+            },
+        );
     }
 
     result
@@ -309,8 +326,8 @@ impl Drop for ComGuard {
 /// 检测路径是否为 UWP/MSIX 包路径（`C:\ProgramData\Packages\...`）。
 fn is_uwp_package_path(path: &str) -> bool {
     let normalized = path.replace('/', "\\");
-    normalized.starts_with("C:\\ProgramData\\Packages\\") ||
-    normalized.starts_with("c:\\programdata\\packages\\")
+    normalized.starts_with("C:\\ProgramData\\Packages\\")
+        || normalized.starts_with("c:\\programdata\\packages\\")
 }
 
 /// 将 UWP 包路径转换为 shell:AppsFolder 格式。
@@ -378,34 +395,38 @@ fn extract_icon_png(path: &str, size: i32) -> Option<Vec<u8>> {
     let _com_guard = ComGuard::init();
 
     // shell:AppsFolder 路径（UWP/MSIX 应用，由 scan_apps_folder 生成）
-    let shell_path = if path.starts_with("shell:AppsFolder\\") || path.starts_with("shell:AppsFolder/") {
-        // 已经是 shell 路径，直接使用（归一化为反斜杠）
-        path.replace('/', "\\")
-    } else if is_uwp_package_path(path) {
-        // UWP/MSIX 包路径（权限受限，Path::exists() 可能返回 false）
-        match convert_uwp_to_shell_path(path) {
-            Some(sp) => sp,
-            None => {
-                tracing::debug!(%path, "UWP 路径转换失败");
+    let shell_path =
+        if path.starts_with("shell:AppsFolder\\") || path.starts_with("shell:AppsFolder/") {
+            // 已经是 shell 路径，直接使用（归一化为反斜杠）
+            path.replace('/', "\\")
+        } else if is_uwp_package_path(path) {
+            // UWP/MSIX 包路径（权限受限，Path::exists() 可能返回 false）
+            match convert_uwp_to_shell_path(path) {
+                Some(sp) => sp,
+                None => {
+                    tracing::debug!(%path, "UWP 路径转换失败");
+                    return None;
+                }
+            }
+        } else {
+            // 非 UWP 路径：含 `#` 的是 .NET NativeImages，SHCreateItemFromParsingName 无法解析
+            if path.contains('#') {
                 return None;
             }
-        }
-    } else {
-        // 非 UWP 路径：含 `#` 的是 .NET NativeImages，SHCreateItemFromParsingName 无法解析
-        if path.contains('#') {
-            return None;
-        }
-        // 路径不存在的直接跳过（UWP 路径因权限问题不能用此检查）
-        if !std::path::Path::new(path).exists() {
-            return None;
-        }
-        path.replace('/', "\\")
-    };
+            // 路径不存在的直接跳过（UWP 路径因权限问题不能用此检查）
+            if !std::path::Path::new(path).exists() {
+                return None;
+            }
+            path.replace('/', "\\")
+        };
 
     unsafe {
         // SHCreateItemFromParsingName 是 Shell 名称解析 API，要求规范 Windows 路径（全反斜杠）。
         // 扫描得到的路径可能混用 '/'（开始菜单子目录字面量用了正斜杠），需归一化，否则报 0x80070057。
-        let wide: Vec<u16> = shell_path.encode_utf16().chain(std::iter::once(0)).collect();
+        let wide: Vec<u16> = shell_path
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
 
         // 直接请求 IShellItemImageFactory，省去额外 cast。
         let factory: IShellItemImageFactory =
@@ -584,13 +605,19 @@ mod tests {
     #[test]
     fn uwp_path_detection() {
         // UWP 包路径应该被识别
-        assert!(is_uwp_package_path("C:\\ProgramData\\Packages\\com.flutter.kazumi_wbnnev551gwxy"));
-        assert!(is_uwp_package_path("C:/ProgramData/Packages/9426MICRO-STARINTERNATION.DragonCenter_kzh8wxbdkxb8p"));
+        assert!(is_uwp_package_path(
+            "C:\\ProgramData\\Packages\\com.flutter.kazumi_wbnnev551gwxy"
+        ));
+        assert!(is_uwp_package_path(
+            "C:/ProgramData/Packages/9426MICRO-STARINTERNATION.DragonCenter_kzh8wxbdkxb8p"
+        ));
 
         // 非 UWP 路径不应该被识别
         assert!(!is_uwp_package_path("C:\\Windows\\explorer.exe"));
         assert!(!is_uwp_package_path("C:\\Program Files\\SomeApp\\app.exe"));
-        assert!(!is_uwp_package_path("C:\\Users\\test\\AppData\\Roaming\\SomeApp\\app.lnk"));
+        assert!(!is_uwp_package_path(
+            "C:\\Users\\test\\AppData\\Roaming\\SomeApp\\app.lnk"
+        ));
     }
 
     #[test]

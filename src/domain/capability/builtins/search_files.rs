@@ -76,12 +76,11 @@ impl Capability for SearchFiles {
         args: Value,
         ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError> {
-        let query = args
-            .get("query")
-            .and_then(Value::as_str)
-            .ok_or_else(|| CapabilityError::InvalidArgs {
+        let query = args.get("query").and_then(Value::as_str).ok_or_else(|| {
+            CapabilityError::InvalidArgs {
                 detail: "缺少 query 参数".into(),
-            })?;
+            }
+        })?;
 
         if query.trim().is_empty() {
             return Err(CapabilityError::InvalidArgs {
@@ -142,9 +141,7 @@ impl Capability for SearchFiles {
                 crate::domain::capability::ItemResult {
                     title: item.title,
                     subtitle: item.subtitle,
-                    payload: path
-                        .map(|p| json!({ "path": p }))
-                        .unwrap_or(json!({})),
+                    payload: path.map(|p| json!({ "path": p })).unwrap_or(json!({})),
                     score: Some(item.score),
                 }
             })

@@ -8,8 +8,8 @@ use std::sync::Arc;
 use crate::domain::intent::RuleRouter;
 use crate::infra::platform::context::AwarenessSnapshot;
 
-use super::{Suggestion, SuggestionSource};
 use super::producer::SuggestionProducer;
+use super::{Suggestion, SuggestionSource};
 
 /// Context Suggestion 生产者。
 ///

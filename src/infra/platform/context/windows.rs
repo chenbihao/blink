@@ -9,12 +9,12 @@ use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::Path;
 
-use windows::Win32::Foundation::{HANDLE, MAX_PATH, HWND};
+use windows::Win32::Foundation::{HANDLE, HWND, MAX_PATH};
 use windows::Win32::System::DataExchange::{GetClipboardData, OpenClipboard};
 use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
 use windows::Win32::System::Threading::{
-    GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION,
+    GetCurrentProcessId, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
@@ -121,9 +121,9 @@ pub(super) fn collect_foreground_app() -> Option<ForegroundAppInfo> {
 /// 供设置页「敏感应用」选择器：用户从实际运行的程序里挑，避免手输错进程名。
 pub(super) fn list_window_processes() -> Vec<super::RunningProcess> {
     use std::collections::BTreeSet;
-    use windows::core::BOOL;
     use windows::Win32::Foundation::LPARAM;
     use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, IsWindowVisible};
+    use windows::core::BOOL;
 
     // EnumWindows 回调：收集 (进程名, 窗口标题)。
     // edition 2024：unsafe fn 体内默认非 unsafe 上下文，需显式 unsafe {} 块。
@@ -261,10 +261,6 @@ pub(super) fn collect_clipboard_text() -> Option<String> {
         let _ = GlobalUnlock(windows::Win32::Foundation::HGLOBAL(hdata.0));
         let _ = windows::Win32::System::DataExchange::CloseClipboard();
 
-        if text.is_empty() {
-            None
-        } else {
-            Some(text)
-        }
+        if text.is_empty() { None } else { Some(text) }
     }
 }

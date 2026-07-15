@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 /// 查询上下文快照（从 core 传来，字段为 Option，值缺失则为 None）
 #[derive(Debug, Deserialize, Default)]
 struct PluginQueryContext {
-    #[allow(dead_code)]  // context 协议字段,echo 不消费(其余字段已在用),保留以体现完整快照
+    #[allow(dead_code)] // context 协议字段,echo 不消费(其余字段已在用),保留以体现完整快照
     #[serde(default)]
     pub lang: Option<String>,
     #[serde(default)]
@@ -59,9 +59,13 @@ struct PluginItem {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum PluginAction {
-    Copy { text: String },
+    Copy {
+        text: String,
+    },
     #[allow(dead_code)]
-    Open { path: String },
+    Open {
+        path: String,
+    },
 }
 
 fn main() {
@@ -98,8 +102,10 @@ fn main() {
 
 /// 回显 query + 显示 Context 快照（验证链路通了）。
 fn handle_query(id: String, query: String, ctx: PluginQueryContext) -> PluginResponse {
-    eprintln!("echo: query={query:?}, foreground_app={:?}",
-              ctx.foreground_app);
+    eprintln!(
+        "echo: query={query:?}, foreground_app={:?}",
+        ctx.foreground_app
+    );
 
     let mut items = Vec::new();
 
@@ -108,7 +114,9 @@ fn handle_query(id: String, query: String, ctx: PluginQueryContext) -> PluginRes
         title: format!("echo: {query}"),
         subtitle: Some("Blink Rust 示例插件".to_string()),
         score: 1.0,
-        action: PluginAction::Copy { text: format!("echo: {query}") },
+        action: PluginAction::Copy {
+            text: format!("echo: {query}"),
+        },
     });
 
     // 2. 前台应用信息

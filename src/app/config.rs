@@ -15,7 +15,9 @@ use sqlx::SqlitePool;
 ///
 /// 0.9 AI Provider 加 `AIConfig` 只需 `impl ConfigKey for AIConfig { const KEY = "ai.provider"; }`。
 #[allow(dead_code)] // 0.9 接入时消费；当前已有 impl 但泛型调用点尚未建立
-pub trait ConfigKey: Serialize + for<'de> Deserialize<'de> + Default + Send + Sync + 'static {
+pub trait ConfigKey:
+    Serialize + for<'de> Deserialize<'de> + Default + Send + Sync + 'static
+{
     /// SQLite config 表的 key（如 `"app_config"` / `"app.hotkey"`）。
     const KEY: &'static str;
 }
@@ -41,7 +43,9 @@ impl ConfigStore {
     #[allow(dead_code)]
     pub async fn set<T: ConfigKey>(pool: &SqlitePool, config: &T) -> Result<(), String> {
         let json = serde_json::to_string(config).map_err(|e| e.to_string())?;
-        crate::infra::data::history::set_config(pool, T::KEY, &json).await.map_err(|e| e.to_string())?;
+        crate::infra::data::history::set_config(pool, T::KEY, &json)
+            .await
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 }
@@ -135,8 +139,12 @@ impl Default for HotkeyConfig {
     }
 }
 
-fn default_tap_threshold() -> u64 { 300 }
-fn default_grace_period() -> u64 { 500 }
+fn default_tap_threshold() -> u64 {
+    300
+}
+fn default_grace_period() -> u64 {
+    500
+}
 
 // ── AppConfig 分片（0.8.8 §8.7）─────────────────────────────────────────────
 //
@@ -267,7 +275,6 @@ pub struct DisableConfig {
 fn default_language() -> String {
     "zh".to_string()
 }
-
 
 /// 日志级别默认值（旧配置无此字段时用 serde default 补，不丢其他配置）。
 fn default_log_level() -> String {
@@ -750,40 +757,60 @@ pub async fn save_config(pool: &SqlitePool, config: &AppConfig) -> Result<(), St
     };
     ConfigStore::set(pool, &hotkey_shard).await?;
 
-    ConfigStore::set(pool, &AppearanceConfig {
-        theme: config.theme.clone(),
-        language: config.language.clone(),
-        auto_start: config.auto_start,
-        log_level: config.log_level.clone(),
-        window_opacity: config.window_opacity,
-    }).await?;
+    ConfigStore::set(
+        pool,
+        &AppearanceConfig {
+            theme: config.theme.clone(),
+            language: config.language.clone(),
+            auto_start: config.auto_start,
+            log_level: config.log_level.clone(),
+            window_opacity: config.window_opacity,
+        },
+    )
+    .await?;
 
-    ConfigStore::set(pool, &SearchConfig {
-        search_history_enabled: config.search_history_enabled,
-        search_history_days: config.search_history_days,
-        max_results: config.max_results,
-        page_size: config.page_size,
-        surface_takeover_enabled: config.surface_takeover_enabled,
-    }).await?;
+    ConfigStore::set(
+        pool,
+        &SearchConfig {
+            search_history_enabled: config.search_history_enabled,
+            search_history_days: config.search_history_days,
+            max_results: config.max_results,
+            page_size: config.page_size,
+            surface_takeover_enabled: config.surface_takeover_enabled,
+        },
+    )
+    .await?;
 
-    ConfigStore::set(pool, &SuggestionConfig {
-        autosuggest_enabled: config.autosuggest_enabled,
-        autosuggest_min_score: config.autosuggest_min_score,
-        autosuggest_tab_key: config.autosuggest_tab_key.clone(),
-        proactive_enabled: config.proactive_enabled,
-        empty_query_topn: config.empty_query_topn,
-    }).await?;
+    ConfigStore::set(
+        pool,
+        &SuggestionConfig {
+            autosuggest_enabled: config.autosuggest_enabled,
+            autosuggest_min_score: config.autosuggest_min_score,
+            autosuggest_tab_key: config.autosuggest_tab_key.clone(),
+            proactive_enabled: config.proactive_enabled,
+            empty_query_topn: config.empty_query_topn,
+        },
+    )
+    .await?;
 
-    ConfigStore::set(pool, &ChordConfig {
-        chord_enabled: config.chord_enabled,
-        chord_hint_visible: config.chord_hint_visible,
-    }).await?;
+    ConfigStore::set(
+        pool,
+        &ChordConfig {
+            chord_enabled: config.chord_enabled,
+            chord_hint_visible: config.chord_hint_visible,
+        },
+    )
+    .await?;
 
-    ConfigStore::set(pool, &DisableConfig {
-        disabled_builtin_actions: config.disabled_builtin_actions.clone(),
-        disabled_context_bindings: config.disabled_context_bindings.clone(),
-        disabled_chord_actions: config.disabled_chord_actions.clone(),
-    }).await?;
+    ConfigStore::set(
+        pool,
+        &DisableConfig {
+            disabled_builtin_actions: config.disabled_builtin_actions.clone(),
+            disabled_context_bindings: config.disabled_context_bindings.clone(),
+            disabled_chord_actions: config.disabled_chord_actions.clone(),
+        },
+    )
+    .await?;
 
     ConfigStore::set(pool, &config.clipboard).await?;
 
@@ -952,7 +979,10 @@ pub async fn update_chord_toggles(
 /// 更新通用配置（主题 / 搜索历史 / 结果数）。仅持久化；
 /// max_results 的运行时热更新由命令层通知 SearchService（热路径零 IO），
 /// theme 由各窗口启动/shown 时读 config 生效（设置页本身即时预览）。
-pub async fn update_general_config(pool: &SqlitePool, general: &GeneralConfig) -> Result<(), String> {
+pub async fn update_general_config(
+    pool: &SqlitePool,
+    general: &GeneralConfig,
+) -> Result<(), String> {
     let mut config = get_config(pool).await;
     config.theme = general.theme.clone();
     config.search_history_enabled = general.search_history_enabled;
@@ -965,16 +995,22 @@ pub async fn update_general_config(pool: &SqlitePool, general: &GeneralConfig) -
 /// 获取引擎配置（通用 API）。
 pub async fn get_engine_config(pool: &SqlitePool, engine_id: &str) -> Option<serde_json::Value> {
     let key = format!("engine:{}", engine_id);
-    crate::infra::data::history::get_config(pool, &key).await.and_then(|json| {
-        serde_json::from_str(&json).ok()
-    })
+    crate::infra::data::history::get_config(pool, &key)
+        .await
+        .and_then(|json| serde_json::from_str(&json).ok())
 }
 
 /// 更新引擎配置（通用 API）。
-pub async fn set_engine_config(pool: &SqlitePool, engine_id: &str, config: &serde_json::Value) -> Result<(), String> {
+pub async fn set_engine_config(
+    pool: &SqlitePool,
+    engine_id: &str,
+    config: &serde_json::Value,
+) -> Result<(), String> {
     let key = format!("engine:{}", engine_id);
     let json = serde_json::to_string(config).map_err(|e| e.to_string())?;
-    crate::infra::data::history::set_config(pool, &key, &json).await.map_err(|e| e.to_string())?;
+    crate::infra::data::history::set_config(pool, &key, &json)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -987,7 +1023,10 @@ pub async fn get_file_search_config(pool: &SqlitePool) -> FileSearchConfig {
 }
 
 /// 更新文件搜索配置（写入 engine:file_search）。
-pub async fn update_file_search(pool: &SqlitePool, file_search: FileSearchConfig) -> Result<(), String> {
+pub async fn update_file_search(
+    pool: &SqlitePool,
+    file_search: FileSearchConfig,
+) -> Result<(), String> {
     let engine_json = serde_json::to_value(file_search).map_err(|e| e.to_string())?;
     set_engine_config(pool, "file_search", &engine_json).await?;
     tracing::debug!("文件搜索配置已更新");
@@ -1005,10 +1044,17 @@ pub async fn get_start_menu_config(pool: &SqlitePool) -> StartMenuConfig {
 }
 
 /// 更新应用搜索配置。
-pub async fn update_start_menu_config(pool: &SqlitePool, config: &StartMenuConfig) -> Result<(), String> {
+pub async fn update_start_menu_config(
+    pool: &SqlitePool,
+    config: &StartMenuConfig,
+) -> Result<(), String> {
     let json = serde_json::to_value(config).map_err(|e| e.to_string())?;
     set_engine_config(pool, "start_menu", &json).await?;
-    tracing::debug!(enabled = config.enabled, scan_depth = config.scan_depth, "应用搜索配置已更新");
+    tracing::debug!(
+        enabled = config.enabled,
+        scan_depth = config.scan_depth,
+        "应用搜索配置已更新"
+    );
     Ok(())
 }
 
@@ -1089,9 +1135,7 @@ struct CompatPluginConfig {
 impl From<CompatPluginConfig> for PluginConfig {
     fn from(compat: CompatPluginConfig) -> Self {
         // 优先用新格式；如果是旧格式且为 true，则暂时用空列表（下次保存时自动迁移）
-        let disabled_default_triggers = compat
-            .disabled_default_triggers
-            .unwrap_or_default();
+        let disabled_default_triggers = compat.disabled_default_triggers.unwrap_or_default();
 
         Self {
             enabled: compat.enabled,
@@ -1129,7 +1173,9 @@ pub async fn set_plugin_config(
 ) -> Result<(), String> {
     let key = format!("plugin:{plugin_id}");
     let json = serde_json::to_string(config).map_err(|e| e.to_string())?;
-    crate::infra::data::history::set_config(pool, &key, &json).await.map_err(|e| e.to_string())?;
+    crate::infra::data::history::set_config(pool, &key, &json)
+        .await
+        .map_err(|e| e.to_string())?;
     tracing::debug!(plugin_id, enabled = config.enabled, "插件配置已更新");
     Ok(())
 }
@@ -1240,12 +1286,11 @@ pub async fn get_context_config(pool: &SqlitePool) -> ContextConfig {
 }
 
 /// 设置 Context 配置（upsert,写 `context:config`）。
-pub async fn set_context_config(
-    pool: &SqlitePool,
-    config: &ContextConfig,
-) -> Result<(), String> {
+pub async fn set_context_config(pool: &SqlitePool, config: &ContextConfig) -> Result<(), String> {
     let json = serde_json::to_string(config).map_err(|e| e.to_string())?;
-    crate::infra::data::history::set_config(pool, "context:config", &json).await.map_err(|e| e.to_string())?;
+    crate::infra::data::history::set_config(pool, "context:config", &json)
+        .await
+        .map_err(|e| e.to_string())?;
     tracing::debug!(
         enabled = config.enabled,
         clipboard = config.clipboard_enabled,
@@ -1313,7 +1358,10 @@ mod tests {
     #[test]
     fn config_key_clipboard() {
         // 0.8.8 §8.7:clipboard 从 nested 提升为独立 KV(不属于 app.* 命名空间)
-        assert_eq!(<crate::infra::data::clipboard::ClipboardConfig as ConfigKey>::KEY, "clipboard:config");
+        assert_eq!(
+            <crate::infra::data::clipboard::ClipboardConfig as ConfigKey>::KEY,
+            "clipboard:config"
+        );
     }
 
     #[test]
@@ -1359,12 +1407,18 @@ mod tests {
         assert_eq!(app_shard.log_level, app.log_level);
         assert_eq!(app_shard.auto_start, app.auto_start);
         assert_eq!(search.max_results, app.max_results);
-        assert_eq!(search.surface_takeover_enabled, app.surface_takeover_enabled);
+        assert_eq!(
+            search.surface_takeover_enabled,
+            app.surface_takeover_enabled
+        );
         assert_eq!(suggestion.autosuggest_enabled, app.autosuggest_enabled);
         assert_eq!(suggestion.proactive_enabled, app.proactive_enabled);
         assert_eq!(chord.chord_enabled, app.chord_enabled);
         assert_eq!(chord.chord_hint_visible, app.chord_hint_visible);
-        assert_eq!(disable.disabled_builtin_actions, app.disabled_builtin_actions);
+        assert_eq!(
+            disable.disabled_builtin_actions,
+            app.disabled_builtin_actions
+        );
     }
 
     // ── 分片迁移集成测试（0.8.8 §8.7）──────────────────────────────────
@@ -1442,12 +1496,21 @@ mod tests {
 
             let all = crate::infra::data::history::get_all_config(&pool).await;
             assert!(all.contains_key("app.hotkey"), "app.hotkey 分片应存在");
-            assert!(all.contains_key("app.appearance"), "app.appearance 分片应存在");
+            assert!(
+                all.contains_key("app.appearance"),
+                "app.appearance 分片应存在"
+            );
             assert!(all.contains_key("app.search"), "app.search 分片应存在");
-            assert!(all.contains_key("app.suggestion"), "app.suggestion 分片应存在");
+            assert!(
+                all.contains_key("app.suggestion"),
+                "app.suggestion 分片应存在"
+            );
             assert!(all.contains_key("app.chord"), "app.chord 分片应存在");
             assert!(all.contains_key("app.disable"), "app.disable 分片应存在");
-            assert!(all.contains_key("clipboard:config"), "clipboard 独立 KV 应存在");
+            assert!(
+                all.contains_key("clipboard:config"),
+                "clipboard 独立 KV 应存在"
+            );
             assert!(!all.contains_key("app_config"), "旧单 key 不应重现");
         });
     }
@@ -1492,7 +1555,9 @@ mod tests {
 
             // Step A: 旧 key 应被删除
             assert!(
-                crate::infra::data::history::get_config(&pool, "app_config").await.is_none(),
+                crate::infra::data::history::get_config(&pool, "app_config")
+                    .await
+                    .is_none(),
                 "app_config 单 key 应在迁移后删除"
             );
 
@@ -1522,7 +1587,10 @@ mod tests {
             assert!(!cfg.autosuggest_enabled);
             assert!((cfg.autosuggest_min_score - 0.9).abs() < 1e-9);
             assert_eq!(cfg.autosuggest_tab_key, "ArrowRight");
-            assert_eq!(cfg.disabled_context_bindings, vec!["builtin.translate::text_is_non_target_lang"]);
+            assert_eq!(
+                cfg.disabled_context_bindings,
+                vec!["builtin.translate::text_is_non_target_lang"]
+            );
             assert!(cfg.chord_enabled);
             assert!(!cfg.chord_hint_visible);
             assert_eq!(cfg.disabled_chord_actions, vec!["screenshot"]);
@@ -1544,14 +1612,20 @@ mod tests {
                 modifiers: vec!["ctrl".to_string()],
                 key: "F2".to_string(),
                 display: "Ctrl+F2".to_string(),
-                ..Default::default()  // tap=300 / grace=500,但不该覆盖
+                ..Default::default() // tap=300 / grace=500,但不该覆盖
             };
             update_hotkey(&pool, new_hotkey).await.unwrap();
 
             let loaded = get_config(&pool).await;
             assert_eq!(loaded.hotkey.key, "F2");
-            assert_eq!(loaded.tap_threshold, 250, "update_hotkey 不该覆盖 tap_threshold");
-            assert_eq!(loaded.grace_period, 700, "update_hotkey 不该覆盖 grace_period");
+            assert_eq!(
+                loaded.tap_threshold, 250,
+                "update_hotkey 不该覆盖 tap_threshold"
+            );
+            assert_eq!(
+                loaded.grace_period, 700,
+                "update_hotkey 不该覆盖 grace_period"
+            );
         });
     }
 }

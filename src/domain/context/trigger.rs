@@ -68,7 +68,11 @@ impl TextSource {
                 match (sel, clip) {
                     (Some(s), Some(c)) => {
                         // 严格新的才胜:c > s 时选 clip,否则选 sel(打平沿用旧默认)
-                        if c.captured_at > s.captured_at { Some(c) } else { Some(s) }
+                        if c.captured_at > s.captured_at {
+                            Some(c)
+                        } else {
+                            Some(s)
+                        }
                     }
                     (Some(s), None) => Some(s),
                     (None, Some(c)) => Some(c),
@@ -147,11 +151,13 @@ pub fn is_hit(
             .find_text(AwarenessSource::Clipboard)
             .map(|v| probe::is_file_path(v.text))
             .unwrap_or(false),
-        ContextTrigger::SelectionNonEmpty => snapshot
-            .find_text(AwarenessSource::Selection)
-            .is_some(),
+        ContextTrigger::SelectionNonEmpty => {
+            snapshot.find_text(AwarenessSource::Selection).is_some()
+        }
         ContextTrigger::TextIsNonTargetLang { source } => {
-            let Some(view) = source.extract(snapshot) else { return false };
+            let Some(view) = source.extract(snapshot) else {
+                return false;
+            };
             let Some(target) = target else { return false };
             probe::needs_translation(view.text, target)
         }

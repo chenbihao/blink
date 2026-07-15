@@ -28,7 +28,7 @@ use std::sync::{Arc, RwLock};
 use sqlx::SqlitePool;
 
 use super::engine::{Lane, QueryContext, SearchAction, SearchEngine, SearchItem};
-use crate::infra::data::clipboard::{query_recent, search as search_history, ClipboardItem};
+use crate::infra::data::clipboard::{ClipboardItem, query_recent, search as search_history};
 
 /// Engine id — 对应 `SearchEngine::id()` 与 `Route::EngineTakeover.engine_id`。
 pub const ENGINE_ID: &str = "clipboard";
@@ -136,7 +136,13 @@ fn to_search_item(item: ClipboardItem, index: usize, lang: &str) -> SearchItem {
 fn preview_line(raw: &str) -> String {
     let flat: String = raw
         .chars()
-        .map(|c| if c.is_control() || c == '\n' || c == '\r' { ' ' } else { c })
+        .map(|c| {
+            if c.is_control() || c == '\n' || c == '\r' {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect();
     // 压缩连续空白
     let mut out = String::with_capacity(flat.len());
@@ -170,16 +176,32 @@ fn format_subtitle(item: &ClipboardItem, lang: &str) -> String {
     let elapsed = (now - item.created_at).max(0);
     let is_zh = lang == "zh";
     let time_desc = if elapsed < 60 {
-        if is_zh { "刚刚".to_string() } else { "just now".to_string() }
+        if is_zh {
+            "刚刚".to_string()
+        } else {
+            "just now".to_string()
+        }
     } else if elapsed < 3600 {
         let n = elapsed / 60;
-        if is_zh { format!("{n} 分钟前") } else { format!("{n} min ago") }
+        if is_zh {
+            format!("{n} 分钟前")
+        } else {
+            format!("{n} min ago")
+        }
     } else if elapsed < 86400 {
         let n = elapsed / 3600;
-        if is_zh { format!("{n} 小时前") } else { format!("{n} h ago") }
+        if is_zh {
+            format!("{n} 小时前")
+        } else {
+            format!("{n} h ago")
+        }
     } else {
         let n = elapsed / 86400;
-        if is_zh { format!("{n} 天前") } else { format!("{n} d ago") }
+        if is_zh {
+            format!("{n} 天前")
+        } else {
+            format!("{n} d ago")
+        }
     };
     let char_count = item.text.chars().count();
     format!("{time_desc} · {char_count} chars")

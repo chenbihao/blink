@@ -18,9 +18,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::app::config::StartMenuConfig;
 
+use super::AppEntry;
 use super::engine::{Lane, QueryContext, SearchAction, SearchEngine, SearchItem};
 use super::scorer::normalize_top_relative;
-use super::AppEntry;
 
 /// 搜索结果上限(融合前每引擎各自截断)。
 const ENGINE_LIMIT: usize = 50;
@@ -86,7 +86,10 @@ impl StartMenuEngine {
                 let cfg = config.read().unwrap();
                 (cfg.scan_depth, cfg.include_uwp)
             };
-            let _ = tokio::task::spawn_blocking(move || full_scan_into_cache(&cache, depth, include_uwp)).await;
+            let _ = tokio::task::spawn_blocking(move || {
+                full_scan_into_cache(&cache, depth, include_uwp)
+            })
+            .await;
         });
     }
 
@@ -101,7 +104,9 @@ impl StartMenuEngine {
                 (cfg.scan_depth, cfg.include_uwp)
             };
             let c = Arc::clone(&cache);
-            let _ = tokio::task::spawn_blocking(move || full_scan_into_cache(&c, depth, include_uwp)).await;
+            let _ =
+                tokio::task::spawn_blocking(move || full_scan_into_cache(&c, depth, include_uwp))
+                    .await;
 
             loop {
                 tokio::time::sleep(CHECK_INTERVAL).await;
@@ -119,9 +124,11 @@ impl StartMenuEngine {
                 let need_full = {
                     let guard = cache.read().unwrap();
                     // 连续增量次数达到阈值
-                    let incremental_exceeded = guard.incremental_count >= FORCE_FULL_AFTER_INCREMENTAL;
+                    let incremental_exceeded =
+                        guard.incremental_count >= FORCE_FULL_AFTER_INCREMENTAL;
                     // 距离上次全量刷新超过 2 小时
-                    let time_for_full = guard.last_full_refresh
+                    let time_for_full = guard
+                        .last_full_refresh
                         .map(|t| t.elapsed() >= FULL_REFRESH_INTERVAL)
                         .unwrap_or(true);
                     incremental_exceeded || time_for_full
@@ -133,11 +140,17 @@ impl StartMenuEngine {
                 };
                 if need_full {
                     let c = Arc::clone(&cache);
-                    let _ = tokio::task::spawn_blocking(move || full_scan_into_cache(&c, depth, include_uwp)).await;
+                    let _ = tokio::task::spawn_blocking(move || {
+                        full_scan_into_cache(&c, depth, include_uwp)
+                    })
+                    .await;
                 } else if roots_changed_since_last(&cache) {
                     // mtime 变化 → 增量扫描（.lnk 部分增量，UWP 部分全量重建）
                     let c = Arc::clone(&cache);
-                    let _ = tokio::task::spawn_blocking(move || incremental_scan(&c, depth, include_uwp)).await;
+                    let _ = tokio::task::spawn_blocking(move || {
+                        incremental_scan(&c, depth, include_uwp)
+                    })
+                    .await;
                 }
             }
         });
@@ -157,7 +170,8 @@ impl StartMenuEngine {
             (cfg.scan_depth, cfg.include_uwp)
         };
         let c = Arc::clone(&self.cache);
-        let _ = tokio::task::spawn_blocking(move || full_scan_into_cache(&c, depth, include_uwp)).await;
+        let _ =
+            tokio::task::spawn_blocking(move || full_scan_into_cache(&c, depth, include_uwp)).await;
         self.cache.read().unwrap().entries.clone()
     }
 }
@@ -203,7 +217,11 @@ fn incremental_scan(cache: &RwLock<CacheState>, max_depth: u32, include_uwp: boo
     // 读取当前缓存的文件路径集合
     let cached_paths: HashMap<String, SystemTime> = {
         let guard = cache.read().unwrap();
-        guard.cached_entries.iter().map(|e| (e.path.clone(), e.mtime)).collect()
+        guard
+            .cached_entries
+            .iter()
+            .map(|e| (e.path.clone(), e.mtime))
+            .collect()
     };
 
     // 扫描当前目录，收集所有 .lnk 文件的 (path, mtime)
@@ -230,15 +248,22 @@ fn incremental_scan(cache: &RwLock<CacheState>, max_depth: u32, include_uwp: boo
 
     // 找出删除的文件
     let current_paths: std::collections::HashSet<String> = current_files.keys().cloned().collect();
-    let removed_count = cached_paths.keys().filter(|p| !current_paths.contains(*p)).count();
+    let removed_count = cached_paths
+        .keys()
+        .filter(|p| !current_paths.contains(*p))
+        .count();
 
     // 更新缓存
     {
         let mut guard = cache.write().unwrap();
 
         // 保留未变化的 .lnk 条目
-        let mut updated_cached: Vec<CachedAppEntry> = guard.cached_entries.iter()
-            .filter(|e| current_paths.contains(&e.path) && cached_paths.get(&e.path) == Some(&e.mtime))
+        let mut updated_cached: Vec<CachedAppEntry> = guard
+            .cached_entries
+            .iter()
+            .filter(|e| {
+                current_paths.contains(&e.path) && cached_paths.get(&e.path) == Some(&e.mtime)
+            })
             .cloned()
             .collect();
 
@@ -291,7 +316,12 @@ fn scan_current_files(max_depth: u32) -> HashMap<String, SystemTime> {
 }
 
 /// 递归扫描目录，收集 .lnk 文件的 (path, mtime)。
-fn scan_dir_recursive(dir: &std::path::Path, files: &mut HashMap<String, SystemTime>, max_depth: u32, current_depth: u32) {
+fn scan_dir_recursive(
+    dir: &std::path::Path,
+    files: &mut HashMap<String, SystemTime>,
+    max_depth: u32,
+    current_depth: u32,
+) {
     if current_depth >= max_depth {
         return;
     }
@@ -366,12 +396,13 @@ impl SearchEngine for StartMenuEngine {
 ///
 /// 流程：raw 分 → top-relative 归一化到 [0,1] → 统一历史加权。
 /// 历史加权使用 `scorer::history_boost`，与 Builtin/Calc/File/Plugin 共用同一公式。
-fn normalize_to_items(scored: Vec<(u32, AppEntry)>, history: &HashMap<String, (i64, i64)>) -> Vec<SearchItem> {
+fn normalize_to_items(
+    scored: Vec<(u32, AppEntry)>,
+    history: &HashMap<String, (i64, i64)>,
+) -> Vec<SearchItem> {
     // 先转成 f32 元组，用统一归一化函数处理
-    let mut normalized: Vec<(AppEntry, f32)> = scored
-        .into_iter()
-        .map(|(raw, e)| (e, raw as f32))
-        .collect();
+    let mut normalized: Vec<(AppEntry, f32)> =
+        scored.into_iter().map(|(raw, e)| (e, raw as f32)).collect();
     normalize_top_relative(&mut normalized);
 
     normalized
@@ -444,6 +475,9 @@ mod tests {
         // A: 1.0 + 0 (无历史) = 1.0
         assert!((items[0].score - 1.0).abs() < 1e-6);
         // B: 0.5 + ln(11)*0.3 ≈ 0.5 + 0.719 = 1.219
-        assert!(items[1].score > items[0].score, "history should boost B above A");
+        assert!(
+            items[1].score > items[0].score,
+            "history should boost B above A"
+        );
     }
 }

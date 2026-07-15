@@ -158,7 +158,14 @@ pub fn format_masked(s: &str) -> String {
     if s.chars().count() <= 4 {
         return "••••".to_string();
     }
-    let last4: String = s.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    let last4: String = s
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     format!("••••••••{last4}")
 }
 
@@ -173,7 +180,14 @@ pub fn format_hint(s: &str) -> String {
         return "••••••••".to_string();
     }
     let first4: String = chars.iter().take(4).collect();
-    let last4: String = chars.iter().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    let last4: String = chars
+        .iter()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     format!("{first4}••••{last4}")
 }
 

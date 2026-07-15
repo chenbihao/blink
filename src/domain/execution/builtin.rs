@@ -54,7 +54,9 @@ fn param_string_schema(
 pub struct OpenSettingsAction;
 #[async_trait::async_trait]
 impl Action for OpenSettingsAction {
-    fn id(&self) -> &str { "open_settings" }
+    fn id(&self) -> &str {
+        "open_settings"
+    }
     fn title(&self) -> &LocalizableText {
         static T: std::sync::OnceLock<LocalizableText> = std::sync::OnceLock::new();
         T.get_or_init(|| bilingual("打开设置", "Open Settings"))
@@ -66,7 +68,9 @@ impl Action for OpenSettingsAction {
     fn schema(&self) -> ActionSchema {
         ActionSchema::empty("open_settings", "Open the Blink settings window")
     }
-    fn danger_class(&self) -> DangerClass { DangerClass::Safe }
+    fn danger_class(&self) -> DangerClass {
+        DangerClass::Safe
+    }
     async fn execute(&self, cx: &ActionContext<'_>) -> Result<ActionOutcome, ExecError> {
         tracing::debug!("执行内置动作：打开设置");
         crate::infra::platform::window::hide(cx.app_handle, "open_settings");
@@ -78,7 +82,9 @@ impl Action for OpenSettingsAction {
 pub struct LockWorkstationAction;
 #[async_trait::async_trait]
 impl Action for LockWorkstationAction {
-    fn id(&self) -> &str { "lock" }
+    fn id(&self) -> &str {
+        "lock"
+    }
     fn title(&self) -> &LocalizableText {
         static T: std::sync::OnceLock<LocalizableText> = std::sync::OnceLock::new();
         T.get_or_init(|| bilingual("锁定电脑", "Lock Workstation"))
@@ -91,7 +97,9 @@ impl Action for LockWorkstationAction {
         ActionSchema::empty("lock", "Lock the Windows workstation")
     }
     /// 系统级动作,AI 意外锁屏体验极差——Dangerous 白名单
-    fn danger_class(&self) -> DangerClass { DangerClass::Dangerous }
+    fn danger_class(&self) -> DangerClass {
+        DangerClass::Dangerous
+    }
     async fn execute(&self, _cx: &ActionContext<'_>) -> Result<ActionOutcome, ExecError> {
         #[cfg(target_os = "windows")]
         unsafe {
@@ -105,7 +113,9 @@ impl Action for LockWorkstationAction {
 pub struct ShutdownAction;
 #[async_trait::async_trait]
 impl Action for ShutdownAction {
-    fn id(&self) -> &str { "shutdown" }
+    fn id(&self) -> &str {
+        "shutdown"
+    }
     fn title(&self) -> &LocalizableText {
         static T: std::sync::OnceLock<LocalizableText> = std::sync::OnceLock::new();
         T.get_or_init(|| bilingual("关机", "Shutdown"))
@@ -118,7 +128,9 @@ impl Action for ShutdownAction {
         ActionSchema::empty("shutdown", "Shut down the computer immediately")
     }
     /// 关机不可逆丢数据——Dangerous 白名单
-    fn danger_class(&self) -> DangerClass { DangerClass::Dangerous }
+    fn danger_class(&self) -> DangerClass {
+        DangerClass::Dangerous
+    }
     async fn execute(&self, _cx: &ActionContext<'_>) -> Result<ActionOutcome, ExecError> {
         #[cfg(target_os = "windows")]
         {
@@ -133,7 +145,9 @@ impl Action for ShutdownAction {
 pub struct RestartAction;
 #[async_trait::async_trait]
 impl Action for RestartAction {
-    fn id(&self) -> &str { "restart" }
+    fn id(&self) -> &str {
+        "restart"
+    }
     fn title(&self) -> &LocalizableText {
         static T: std::sync::OnceLock<LocalizableText> = std::sync::OnceLock::new();
         T.get_or_init(|| bilingual("重启", "Restart"))
@@ -146,7 +160,9 @@ impl Action for RestartAction {
         ActionSchema::empty("restart", "Restart the computer immediately")
     }
     /// 重启会丢未保存数据——Dangerous 白名单
-    fn danger_class(&self) -> DangerClass { DangerClass::Dangerous }
+    fn danger_class(&self) -> DangerClass {
+        DangerClass::Dangerous
+    }
     async fn execute(&self, _cx: &ActionContext<'_>) -> Result<ActionOutcome, ExecError> {
         #[cfg(target_os = "windows")]
         {
@@ -161,7 +177,9 @@ impl Action for RestartAction {
 pub struct SleepAction;
 #[async_trait::async_trait]
 impl Action for SleepAction {
-    fn id(&self) -> &str { "sleep" }
+    fn id(&self) -> &str {
+        "sleep"
+    }
     fn title(&self) -> &LocalizableText {
         static T: std::sync::OnceLock<LocalizableText> = std::sync::OnceLock::new();
         T.get_or_init(|| bilingual("睡眠", "Sleep"))
@@ -174,7 +192,9 @@ impl Action for SleepAction {
         ActionSchema::empty("sleep", "Put the computer to sleep")
     }
     /// AI 自动进睡眠打断用户工作流——Dangerous 白名单
-    fn danger_class(&self) -> DangerClass { DangerClass::Dangerous }
+    fn danger_class(&self) -> DangerClass {
+        DangerClass::Dangerous
+    }
     async fn execute(&self, _cx: &ActionContext<'_>) -> Result<ActionOutcome, ExecError> {
         #[cfg(target_os = "windows")]
         {
@@ -189,7 +209,9 @@ impl Action for SleepAction {
 pub struct ClearHistoryAction;
 #[async_trait::async_trait]
 impl Action for ClearHistoryAction {
-    fn id(&self) -> &str { "clear_history" }
+    fn id(&self) -> &str {
+        "clear_history"
+    }
     fn title(&self) -> &LocalizableText {
         static T: std::sync::OnceLock<LocalizableText> = std::sync::OnceLock::new();
         T.get_or_init(|| bilingual("清空搜索历史", "Clear Search History"))
@@ -199,10 +221,15 @@ impl Action for ClearHistoryAction {
         T.get_or_init(|| bilingual("清除所有应用启动记录", "Clear all app launch records"))
     }
     fn schema(&self) -> ActionSchema {
-        ActionSchema::empty("clear_history", "Clear all app launch history records (irreversible)")
+        ActionSchema::empty(
+            "clear_history",
+            "Clear all app launch history records (irreversible)",
+        )
     }
     /// 历史数据不可逆——Dangerous 白名单
-    fn danger_class(&self) -> DangerClass { DangerClass::Dangerous }
+    fn danger_class(&self) -> DangerClass {
+        DangerClass::Dangerous
+    }
     async fn execute(&self, cx: &ActionContext<'_>) -> Result<ActionOutcome, ExecError> {
         let pool = cx.app_handle.state::<sqlx::SqlitePool>();
         crate::infra::data::history::clear(&pool).await;
@@ -214,7 +241,9 @@ impl Action for ClearHistoryAction {
 pub struct ExitBlinkAction;
 #[async_trait::async_trait]
 impl Action for ExitBlinkAction {
-    fn id(&self) -> &str { "exit_blink" }
+    fn id(&self) -> &str {
+        "exit_blink"
+    }
     fn title(&self) -> &LocalizableText {
         static T: std::sync::OnceLock<LocalizableText> = std::sync::OnceLock::new();
         T.get_or_init(|| bilingual("退出 Blink", "Exit Blink"))
@@ -227,7 +256,9 @@ impl Action for ExitBlinkAction {
         ActionSchema::empty("exit_blink", "Exit the Blink launcher process")
     }
     /// 退出主体让用户失去 Blink——Dangerous 白名单
-    fn danger_class(&self) -> DangerClass { DangerClass::Dangerous }
+    fn danger_class(&self) -> DangerClass {
+        DangerClass::Dangerous
+    }
     async fn execute(&self, cx: &ActionContext<'_>) -> Result<ActionOutcome, ExecError> {
         cx.app_handle.exit(0);
         Ok(ActionOutcome::Nop)
@@ -237,7 +268,9 @@ impl Action for ExitBlinkAction {
 pub struct OpenLogsAction;
 #[async_trait::async_trait]
 impl Action for OpenLogsAction {
-    fn id(&self) -> &str { "open_logs" }
+    fn id(&self) -> &str {
+        "open_logs"
+    }
     fn title(&self) -> &LocalizableText {
         static T: std::sync::OnceLock<LocalizableText> = std::sync::OnceLock::new();
         T.get_or_init(|| bilingual("打开日志文件", "Open Log File"))
@@ -247,9 +280,14 @@ impl Action for OpenLogsAction {
         T.get_or_init(|| bilingual("Open Blink Log File", "Open Blink Log File"))
     }
     fn schema(&self) -> ActionSchema {
-        ActionSchema::empty("open_logs", "Open the Blink log file with the default viewer")
+        ActionSchema::empty(
+            "open_logs",
+            "Open the Blink log file with the default viewer",
+        )
     }
-    fn danger_class(&self) -> DangerClass { DangerClass::Safe }
+    fn danger_class(&self) -> DangerClass {
+        DangerClass::Safe
+    }
     async fn execute(&self, _cx: &ActionContext<'_>) -> Result<ActionOutcome, ExecError> {
         tracing::debug!("执行内置动作：打开日志文件");
         let log_path = crate::infra::utils::logging::current_log_file();
@@ -273,7 +311,9 @@ impl Action for OpenLogsAction {
 pub struct OpenDataDirAction;
 #[async_trait::async_trait]
 impl Action for OpenDataDirAction {
-    fn id(&self) -> &str { "open_data_dir" }
+    fn id(&self) -> &str {
+        "open_data_dir"
+    }
     fn title(&self) -> &LocalizableText {
         static T: std::sync::OnceLock<LocalizableText> = std::sync::OnceLock::new();
         T.get_or_init(|| bilingual("打开数据目录", "Open Data Directory"))
@@ -283,9 +323,14 @@ impl Action for OpenDataDirAction {
         T.get_or_init(|| bilingual("Open Blink Data Folder", "Open Blink Data Folder"))
     }
     fn schema(&self) -> ActionSchema {
-        ActionSchema::empty("open_data_dir", "Open the Blink data folder in the system file manager")
+        ActionSchema::empty(
+            "open_data_dir",
+            "Open the Blink data folder in the system file manager",
+        )
     }
-    fn danger_class(&self) -> DangerClass { DangerClass::Safe }
+    fn danger_class(&self) -> DangerClass {
+        DangerClass::Safe
+    }
     async fn execute(&self, _cx: &ActionContext<'_>) -> Result<ActionOutcome, ExecError> {
         tracing::debug!("执行内置动作：打开数据目录");
         if let Ok(appdata) = std::env::var("APPDATA") {
@@ -306,24 +351,40 @@ impl Action for OpenDataDirAction {
 pub struct OpenUrlAction;
 #[async_trait::async_trait]
 impl Action for OpenUrlAction {
-    fn id(&self) -> &str { "open_url" }
+    fn id(&self) -> &str {
+        "open_url"
+    }
     fn title(&self) -> &LocalizableText {
         static T: std::sync::OnceLock<LocalizableText> = std::sync::OnceLock::new();
         T.get_or_init(|| bilingual("打开链接", "Open URL"))
     }
     fn subtitle(&self) -> &LocalizableText {
         static T: std::sync::OnceLock<LocalizableText> = std::sync::OnceLock::new();
-        T.get_or_init(|| bilingual("用默认浏览器打开剪贴板中的 URL", "Open clipboard URL in default browser"))
+        T.get_or_init(|| {
+            bilingual(
+                "用默认浏览器打开剪贴板中的 URL",
+                "Open clipboard URL in default browser",
+            )
+        })
     }
     fn schema(&self) -> ActionSchema {
-        param_string_schema("open_url", "Open a URL in the default web browser", "url", "URL to open")
+        param_string_schema(
+            "open_url",
+            "Open a URL in the default web browser",
+            "url",
+            "URL to open",
+        )
     }
     /// 参数走 `ExecArg::UserExplicit` 类型墙(0.8.4),主窗口只接受用户显式采纳的 URL——Safe
-    fn danger_class(&self) -> DangerClass { DangerClass::Safe }
+    fn danger_class(&self) -> DangerClass {
+        DangerClass::Safe
+    }
     async fn execute(&self, cx: &ActionContext<'_>) -> Result<ActionOutcome, ExecError> {
         // 优先读语义键 `url`(0.9.0 起 AI 路径 / 前端契约迁移目标),
         // 回退到 `_legacy_arg`(0.8.x 装配点)
-        let url = cx.arg_str("url", "open_url").or_else(|_| cx.arg_as_str("open_url"))?;
+        let url = cx
+            .arg_str("url", "open_url")
+            .or_else(|_| cx.arg_as_str("open_url"))?;
         tracing::debug!(%url, "执行内置动作：打开链接");
         if let Err(e) = open::that(&url) {
             tracing::error!(error = %e, %url, "打开链接失败");
@@ -336,21 +397,37 @@ impl Action for OpenUrlAction {
 pub struct OpenPathAction;
 #[async_trait::async_trait]
 impl Action for OpenPathAction {
-    fn id(&self) -> &str { "open_path" }
+    fn id(&self) -> &str {
+        "open_path"
+    }
     fn title(&self) -> &LocalizableText {
         static T: std::sync::OnceLock<LocalizableText> = std::sync::OnceLock::new();
         T.get_or_init(|| bilingual("打开路径", "Open Path"))
     }
     fn subtitle(&self) -> &LocalizableText {
         static T: std::sync::OnceLock<LocalizableText> = std::sync::OnceLock::new();
-        T.get_or_init(|| bilingual("用系统默认程序打开剪贴板中的文件或目录", "Open clipboard file/directory with default program"))
+        T.get_or_init(|| {
+            bilingual(
+                "用系统默认程序打开剪贴板中的文件或目录",
+                "Open clipboard file/directory with default program",
+            )
+        })
     }
     fn schema(&self) -> ActionSchema {
-        param_string_schema("open_path", "Open a file or directory with the system default program", "path", "Absolute file or directory path")
+        param_string_schema(
+            "open_path",
+            "Open a file or directory with the system default program",
+            "path",
+            "Absolute file or directory path",
+        )
     }
-    fn danger_class(&self) -> DangerClass { DangerClass::Safe }
+    fn danger_class(&self) -> DangerClass {
+        DangerClass::Safe
+    }
     async fn execute(&self, cx: &ActionContext<'_>) -> Result<ActionOutcome, ExecError> {
-        let path = cx.arg_str("path", "open_path").or_else(|_| cx.arg_as_str("open_path"))?;
+        let path = cx
+            .arg_str("path", "open_path")
+            .or_else(|_| cx.arg_as_str("open_path"))?;
         tracing::debug!(%path, "执行内置动作：打开路径");
         if let Err(e) = open::that(&path) {
             tracing::error!(error = %e, %path, "打开路径失败");
@@ -363,21 +440,37 @@ impl Action for OpenPathAction {
 pub struct RevealInExplorerAction;
 #[async_trait::async_trait]
 impl Action for RevealInExplorerAction {
-    fn id(&self) -> &str { "reveal_in_explorer" }
+    fn id(&self) -> &str {
+        "reveal_in_explorer"
+    }
     fn title(&self) -> &LocalizableText {
         static T: std::sync::OnceLock<LocalizableText> = std::sync::OnceLock::new();
         T.get_or_init(|| bilingual("在资源管理器中显示", "Reveal in Explorer"))
     }
     fn subtitle(&self) -> &LocalizableText {
         static T: std::sync::OnceLock<LocalizableText> = std::sync::OnceLock::new();
-        T.get_or_init(|| bilingual("定位到剪贴板中的文件（explorer /select）", "Locate clipboard file in Explorer"))
+        T.get_or_init(|| {
+            bilingual(
+                "定位到剪贴板中的文件（explorer /select）",
+                "Locate clipboard file in Explorer",
+            )
+        })
     }
     fn schema(&self) -> ActionSchema {
-        param_string_schema("reveal_in_explorer", "Reveal a file in Windows Explorer (highlight it in its folder)", "path", "Absolute file path to reveal")
+        param_string_schema(
+            "reveal_in_explorer",
+            "Reveal a file in Windows Explorer (highlight it in its folder)",
+            "path",
+            "Absolute file path to reveal",
+        )
     }
-    fn danger_class(&self) -> DangerClass { DangerClass::Safe }
+    fn danger_class(&self) -> DangerClass {
+        DangerClass::Safe
+    }
     async fn execute(&self, cx: &ActionContext<'_>) -> Result<ActionOutcome, ExecError> {
-        let path = cx.arg_str("path", "reveal_in_explorer").or_else(|_| cx.arg_as_str("reveal_in_explorer"))?;
+        let path = cx
+            .arg_str("path", "reveal_in_explorer")
+            .or_else(|_| cx.arg_as_str("reveal_in_explorer"))?;
         tracing::debug!(%path, "执行内置动作：在资源管理器中显示");
         #[cfg(target_os = "windows")]
         {

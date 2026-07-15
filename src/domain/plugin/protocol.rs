@@ -219,7 +219,9 @@ mod tests {
         assert_eq!(resp.id, "req_1");
         assert_eq!(resp.items.len(), 1);
         assert_eq!(resp.items[0].title, "本机 IP");
-        assert!(matches!(&resp.items[0].action, PluginAction::Copy { text } if text == "192.168.1.5"));
+        assert!(
+            matches!(&resp.items[0].action, PluginAction::Copy { text } if text == "192.168.1.5")
+        );
         assert!(resp.error.is_none());
     }
 
@@ -280,7 +282,9 @@ mod tests {
                 title: "本机 IP".into(),
                 subtitle: None,
                 score: 0.9,
-                action: PluginAction::Copy { text: "192.168.1.5".into() },
+                action: PluginAction::Copy {
+                    text: "192.168.1.5".into(),
+                },
             }],
             error: None,
         };
@@ -356,7 +360,12 @@ mod tests {
         let json = r#"{"type":"tool_call","id":"tc_1","tool_name":"translate","arguments":{"text":"hello"}}"#;
         let req: PluginRequest = serde_json::from_str(json).unwrap();
         match req {
-            PluginRequest::ToolCall { id, tool_name, arguments, settings } => {
+            PluginRequest::ToolCall {
+                id,
+                tool_name,
+                arguments,
+                settings,
+            } => {
                 assert_eq!(id, "tc_1");
                 assert_eq!(tool_name, "translate");
                 assert_eq!(arguments["text"], "hello");
@@ -374,7 +383,9 @@ mod tests {
                 title: "你好".into(),
                 subtitle: Some("翻译自: hello".into()),
                 score: 1.0,
-                action: PluginAction::Copy { text: "你好".into() },
+                action: PluginAction::Copy {
+                    text: "你好".into(),
+                },
             }],
             error: None,
         });

@@ -116,7 +116,10 @@ pub struct AudioDevice {
 pub trait AudioCapture: Send {
     /// 开始采集。返回一个接收音频 chunk 的 channel receiver。
     /// 采集在内部线程/task 中运行,直到 `stop` 被调用。
-    fn start(&mut self, format: AudioFormat) -> Result<tokio::sync::mpsc::UnboundedReceiver<AudioChunk>, AudioError>;
+    fn start(
+        &mut self,
+        format: AudioFormat,
+    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<AudioChunk>, AudioError>;
 
     /// 停止采集。内部线程退出,channel 关闭。
     fn stop(&mut self);

@@ -6,11 +6,11 @@
 use std::sync::{Arc, RwLock};
 
 use crate::domain::intent::RuleRouter;
-use crate::infra::platform::context::AwarenessSnapshot;
 use crate::domain::intent::suggest;
+use crate::infra::platform::context::AwarenessSnapshot;
 
-use super::{Suggestion, SuggestionSource};
 use super::producer::SuggestionProducer;
+use super::{Suggestion, SuggestionSource};
 
 /// Keyword Suggestion 生产者。
 ///

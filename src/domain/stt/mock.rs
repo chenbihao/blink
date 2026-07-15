@@ -96,9 +96,18 @@ mod tests {
 
     #[test]
     fn mock_text_for_elapsed_progression() {
-        assert_eq!(super::super::mock_text_for_elapsed(Duration::from_secs(0)), "");
-        assert_eq!(super::super::mock_text_for_elapsed(Duration::from_secs(2)), "你好");
-        assert_eq!(super::super::mock_text_for_elapsed(Duration::from_secs(3)), "你好世界");
+        assert_eq!(
+            super::super::mock_text_for_elapsed(Duration::from_secs(0)),
+            ""
+        );
+        assert_eq!(
+            super::super::mock_text_for_elapsed(Duration::from_secs(2)),
+            "你好"
+        );
+        assert_eq!(
+            super::super::mock_text_for_elapsed(Duration::from_secs(3)),
+            "你好世界"
+        );
         assert_eq!(
             super::super::mock_text_for_elapsed(Duration::from_secs(10)),
             "你好世界这是一段测试语音识别的文字结果"

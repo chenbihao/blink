@@ -41,13 +41,12 @@ impl Capability for ReadClipboard {
         _args: Value,
         _ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError> {
-        let text = tokio::task::spawn_blocking(|| {
-            crate::infra::platform::clipboard::read_current_text()
-        })
-        .await
-        .map_err(|e| CapabilityError::Internal {
-            detail: format!("read_clipboard task 崩溃: {e}"),
-        })?;
+        let text =
+            tokio::task::spawn_blocking(|| crate::infra::platform::clipboard::read_current_text())
+                .await
+                .map_err(|e| CapabilityError::Internal {
+                    detail: format!("read_clipboard task 崩溃: {e}"),
+                })?;
 
         let content = text.unwrap_or_default();
         if content.is_empty() {

@@ -181,6 +181,9 @@ mod tests {
         let m = ChatMessage::user("hi");
         let s = serde_json::to_string(&m).unwrap();
         // skip_serializing_if 生效:tool_call_id 字段完全不出现
-        assert!(!s.contains("tool_call_id"), "非 Tool 消息不应含 tool_call_id 字段: {s}");
+        assert!(
+            !s.contains("tool_call_id"),
+            "非 Tool 消息不应含 tool_call_id 字段: {s}"
+        );
     }
 }

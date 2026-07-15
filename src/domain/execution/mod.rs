@@ -70,7 +70,10 @@ impl<'a> ActionContext<'a> {
         let arguments = if arguments.is_object() {
             arguments
         } else {
-            tracing::warn!(?arguments, "ActionContext::from_arguments 收到非 Object 参数，退化为 {{}}");
+            tracing::warn!(
+                ?arguments,
+                "ActionContext::from_arguments 收到非 Object 参数，退化为 {{}}"
+            );
             serde_json::json!({})
         };
         Self {
@@ -118,7 +121,10 @@ pub enum ActionOutcome {
     /// 复制到剪贴板（计算结果 / 插件 Copy / 剪贴板历史）。
     /// `hit_id` 是命中回写通道（0.8.5 §6.4）——前端复制成功后 `record_clipboard_hit` 频率加权。
     #[allow(dead_code)] // 0.9 AI / 插件 adapter 消费；当前 Copy 走 SearchAction 路径
-    Copy { text: String, hit_id: Option<String> },
+    Copy {
+        text: String,
+        hit_id: Option<String>,
+    },
     /// 打开路径 / URL / 应用。
     #[allow(dead_code)] // Chord action 预留；当前 Open 走 SearchAction 路径
     Open { path: String },
@@ -270,7 +276,10 @@ mod tests {
     fn arg_as_str_reads_legacy_key() {
         // 兼容层:老装配路径通过 arg_as_str 读 _legacy_arg
         let args = json!({ "_legacy_arg": "C:/tmp/foo.txt" });
-        assert_eq!(extract(&args, "_legacy_arg", "open_path").unwrap(), "C:/tmp/foo.txt");
+        assert_eq!(
+            extract(&args, "_legacy_arg", "open_path").unwrap(),
+            "C:/tmp/foo.txt"
+        );
     }
 
     #[test]
@@ -292,5 +301,3 @@ mod tests {
         assert_eq!(normalized, input);
     }
 }
-
-

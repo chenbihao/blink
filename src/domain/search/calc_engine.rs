@@ -58,7 +58,10 @@ impl SearchEngine for CalcEngine {
                 title: format!("= {result}"),
                 subtitle: Some("按 Enter 复制结果".into()),
                 score: super::scorer::calc_score(),
-                action: SearchAction::Copy { text: result, hit_id: None },
+                action: SearchAction::Copy {
+                    text: result,
+                    hit_id: None,
+                },
                 source: "calc".into(),
                 score_detail: Some("calc=1.0".into()),
             }],
@@ -90,7 +93,9 @@ mod tests {
         let items = run("1+1");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "= 2");
-        assert!(matches!(&items[0].action, SearchAction::Copy { text, hit_id: None } if text == "2"));
+        assert!(
+            matches!(&items[0].action, SearchAction::Copy { text, hit_id: None } if text == "2")
+        );
         assert_eq!(items[0].source, "calc");
     }
 

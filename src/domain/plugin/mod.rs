@@ -16,7 +16,9 @@ use tauri::{AppHandle, Manager};
 
 pub use action::PluginActionAdapter;
 pub use engine::PluginEngine;
-pub use manifest::{LocalizableText, ManifestContextWhen, ManifestSurfaceHint, PluginManifest, PluginTrigger};
+pub use manifest::{
+    LocalizableText, ManifestContextWhen, ManifestSurfaceHint, PluginManifest, PluginTrigger,
+};
 pub use process::{InterpretersStatus, PluginHandle, probe_interpreters};
 pub use protocol::PluginQueryContext;
 
@@ -75,7 +77,10 @@ fn builtin_plugins_dir(app: &AppHandle) -> PathBuf {
 /// 加载所有 builtin 插件:扫描 `<dir>/*/manifest.json` → 解析 → 过滤 query 能力。
 /// 失败的单个插件跳过(降级,不影响其余),记日志。返回懒启动的 PluginHandle。
 /// proxy=(http_proxy, https_proxy)，进程启动时 env 注入，ureq/reqwest 原生读取。
-pub fn load_builtin_plugins(app: &AppHandle, proxy: Option<(String, String)>) -> Vec<Arc<PluginHandle>> {
+pub fn load_builtin_plugins(
+    app: &AppHandle,
+    proxy: Option<(String, String)>,
+) -> Vec<Arc<PluginHandle>> {
     let dir = builtin_plugins_dir(app);
     let Ok(read_dir) = std::fs::read_dir(&dir) else {
         tracing::debug!(dir = %dir.display(), "无 builtin 插件目录,跳过");
@@ -92,7 +97,11 @@ pub fn load_builtin_plugins(app: &AppHandle, proxy: Option<(String, String)>) ->
         match PluginManifest::from_path(&manifest_path) {
             Ok(m) if m.supports_query() => {
                 tracing::info!(plugin = %m.id, "已加载插件 manifest");
-                loaded.push(Arc::new(PluginHandle::new(Arc::new(m), plugin_dir, proxy.clone())));
+                loaded.push(Arc::new(PluginHandle::new(
+                    Arc::new(m),
+                    plugin_dir,
+                    proxy.clone(),
+                )));
             }
             Ok(m) => {
                 tracing::debug!(plugin = %m.id, "插件无 query 能力,跳过");

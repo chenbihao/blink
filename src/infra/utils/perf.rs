@@ -76,10 +76,12 @@ pub async fn init(pool: &SqlitePool) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_perf_cat_name ON performance_metrics(category, name)")
-        .execute(pool)
-        .await
-        .map_err(|e| e.to_string())?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_perf_cat_name ON performance_metrics(category, name)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
 
     // 注册全局 pool
     let _ = POOL.set(pool.clone());
@@ -191,12 +193,7 @@ impl Timer {
 impl Drop for Timer {
     fn drop(&mut self) {
         let elapsed = self.start.elapsed().as_secs_f64() * 1000.0;
-        record(
-            self.category,
-            &self.name,
-            elapsed,
-            self.metadata.as_deref(),
-        );
+        record(self.category, &self.name, elapsed, self.metadata.as_deref());
     }
 }
 
@@ -281,13 +278,15 @@ pub async fn query_slow(
     .await
     .unwrap_or_default()
     .into_iter()
-    .map(|(category, name, value_ms, metadata, created_at)| PerformanceMetric {
-        category,
-        name,
-        value_ms,
-        metadata,
-        created_at,
-    })
+    .map(
+        |(category, name, value_ms, metadata, created_at)| PerformanceMetric {
+            category,
+            name,
+            value_ms,
+            metadata,
+            created_at,
+        },
+    )
     .collect()
 }
 
@@ -397,4 +396,3 @@ pub mod ai_slo {
     #[allow(dead_code)]
     pub const TIER: &str = "tier";
 }
-

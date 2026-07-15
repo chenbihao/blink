@@ -18,16 +18,19 @@ use std::ptr;
 
 use windows::Win32::Foundation::{ERROR_NOT_FOUND, FILETIME};
 use windows::Win32::Security::Credentials::{
-    CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_FLAGS,
-    CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
+    CRED_FLAGS, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree,
+    CredReadW, CredWriteW,
 };
 use windows::core::PWSTR;
 
-use super::{build_target_name, SecretError, SecretString};
+use super::{SecretError, SecretString, build_target_name};
 
 /// 把 Rust `&str` 转成 CM API 需要的 null-terminated wide string。
 fn to_wide(s: &str) -> Vec<u16> {
-    OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 /// 写密钥到 Credential Manager。已存在则覆盖。
@@ -146,9 +149,8 @@ pub fn load_secret(provider_id: &str, purpose: &str) -> Result<SecretString, Sec
 
     // UTF-8 还原——写入时严格 UTF-8;若 blob 被外部篡改/损坏成非法 UTF-8,
     // 显式报 Platform 而非静默替换成 U+FFFD(否则后续 API 调用 401 且无从定位)。
-    let raw = String::from_utf8(blob_bytes).map_err(|_| {
-        SecretError::Platform("密钥 blob 不是合法 UTF-8(可能已损坏)".to_string())
-    })?;
+    let raw = String::from_utf8(blob_bytes)
+        .map_err(|_| SecretError::Platform("密钥 blob 不是合法 UTF-8(可能已损坏)".to_string()))?;
     let secret_string = SecretString::new(raw);
 
     // 日志里不引 secret 内容——只报"读到了,长度多少"
@@ -167,8 +169,13 @@ pub fn delete_secret(provider_id: &str, purpose: &str) -> Result<(), SecretError
     let target_w = to_wide(&target);
 
     // Safety: PCWSTR 指向 target_w 有效切片
-    let result =
-        unsafe { CredDeleteW(windows::core::PCWSTR(target_w.as_ptr()), CRED_TYPE_GENERIC, None) };
+    let result = unsafe {
+        CredDeleteW(
+            windows::core::PCWSTR(target_w.as_ptr()),
+            CRED_TYPE_GENERIC,
+            None,
+        )
+    };
 
     if let Err(e) = result {
         if e.code() == windows::core::HRESULT::from_win32(ERROR_NOT_FOUND.0) {

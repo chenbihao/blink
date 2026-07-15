@@ -1,26 +1,28 @@
 //! Windows 平台特定的窗口控制实现：Win32 API。
 
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use tokio::time::sleep;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
+use tokio::time::sleep;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
-use windows::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmFlush, DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE};
-use windows::Win32::UI::Controls::MARGINS;
+use windows::Win32::Graphics::Dwm::{
+    DWMWA_WINDOW_CORNER_PREFERENCE, DwmExtendFrameIntoClientArea, DwmFlush, DwmSetWindowAttribute,
+};
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO,
-    MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
+    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
+    MonitorFromPoint, MonitorFromWindow,
 };
 use windows::Win32::System::Threading::GetCurrentProcessId;
-use windows::Win32::UI::WindowsAndMessaging::{
-    CallWindowProcW, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW,
-    GetWindowThreadProcessId, IsIconic, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    GWLP_WNDPROC, GWL_STYLE, HWND_TOP, SET_WINDOW_POS_FLAGS, SWP_FRAMECHANGED, SWP_NOMOVE,
-    SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_RESTORE, WNDPROC, WS_CAPTION, WS_THICKFRAME,
-};
+use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CallWindowProcW, GWL_STYLE, GWLP_WNDPROC, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW,
+    GetWindowThreadProcessId, HWND_TOP, IsIconic, SET_WINDOW_POS_FLAGS, SW_RESTORE,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, WNDPROC, WS_CAPTION, WS_THICKFRAME,
+};
 
 const ST_HIDDEN: u8 = 0;
 const ST_VISIBLE: u8 = 1;
@@ -62,7 +64,9 @@ pub fn invoke(app: &AppHandle) {
     );
 
     // 2. 更新 SearchService 中的快照
-    if let Some(search_service) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
+    if let Some(search_service) =
+        app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
+    {
         search_service.update_snapshot(snapshot);
         // 选区来自划词监听缓存（鼠标划词黄金时机抓取），单独回填，不覆盖整份快照。
         // 不再在 show 后抓取——那会让 Electron 应用失焦退化选区（0.8.0 §1.1 实测）。
@@ -233,7 +237,11 @@ static ORIGINAL_WNDPROC: OnceLock<isize> = OnceLock::new();
 /// 只能在窗口过程层拦截 WM_SYSCOMMAND。仅作用于主窗口。
 pub fn install_sysmenu_blocker(hwnd: HWND) {
     unsafe {
-        let original = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, sysmenu_block_proc as *const () as usize as isize);
+        let original = SetWindowLongPtrW(
+            hwnd,
+            GWLP_WNDPROC,
+            sysmenu_block_proc as *const () as usize as isize,
+        );
         let _ = ORIGINAL_WNDPROC.set(original);
     }
 }
@@ -313,10 +321,15 @@ fn launcher_position(_win: &WebviewWindow) -> Option<PhysicalPosition<i32>> {
             let cx = rc.left + (rc.right - rc.left) / 2;
             let cy = rc.top + (rc.bottom - rc.top) / 2;
             tracing::trace!(
-                cursor_x = pt.x, cursor_y = pt.y,
-                mon_left = rc.left, mon_top = rc.top,
-                mon_right = rc.right, mon_bottom = rc.bottom,
-                dpi_x, w, h,
+                cursor_x = pt.x,
+                cursor_y = pt.y,
+                mon_left = rc.left,
+                mon_top = rc.top,
+                mon_right = rc.right,
+                mon_bottom = rc.bottom,
+                dpi_x,
+                w,
+                h,
                 "launcher_position: located on monitor under cursor"
             );
             return Some(PhysicalPosition::new(cx - w / 2, cy - h / 2));
@@ -327,7 +340,9 @@ fn launcher_position(_win: &WebviewWindow) -> Option<PhysicalPosition<i32>> {
 
 /// resize 后若窗口底部超出显示器工作区，向上移动使其完整可见。
 pub fn clamp_to_work_area(win: &WebviewWindow) {
-    let Ok(pos) = win.outer_position() else { return };
+    let Ok(pos) = win.outer_position() else {
+        return;
+    };
     let Ok(size) = win.outer_size() else { return };
     let Ok(hwnd_raw) = win.hwnd() else { return };
     let hwnd = HWND(hwnd_raw.0 as _);
@@ -345,7 +360,10 @@ pub fn clamp_to_work_area(win: &WebviewWindow) {
             let new_y = (work.bottom - size.height as i32).max(work.top);
             let _ = win.set_position(PhysicalPosition::new(pos.x, new_y));
             tracing::debug!(
-                old_y = pos.y, new_y, work_bottom = work.bottom, height = size.height,
+                old_y = pos.y,
+                new_y,
+                work_bottom = work.bottom,
+                height = size.height,
                 "窗口超出屏幕底部,上移"
             );
         }
@@ -419,12 +437,20 @@ pub fn clamp_context_menu(css_w: f64, css_h: f64) -> (i32, i32, u32, u32) {
         let y = prefer_y.clamp(work.top + margin, max_y.max(work.top + margin));
 
         tracing::trace!(
-            screen_x, screen_y, css_w, css_h,
-            dpi = dpi_x, scale,
-            phys_w, phys_h,
-            work_left = work.left, work_top = work.top,
-            work_right = work.right, work_bottom = work.bottom,
-            final_x = x, final_y = y,
+            screen_x,
+            screen_y,
+            css_w,
+            css_h,
+            dpi = dpi_x,
+            scale,
+            phys_w,
+            phys_h,
+            work_left = work.left,
+            work_top = work.top,
+            work_right = work.right,
+            work_bottom = work.bottom,
+            final_x = x,
+            final_y = y,
             "clamp_context_menu: 多屏定位"
         );
 
@@ -483,7 +509,11 @@ fn apply_no_activate(hwnd: HWND) {
 pub fn get_foreground_hwnd() -> Option<isize> {
     unsafe {
         let hwnd = windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow();
-        if hwnd.is_invalid() { None } else { Some(hwnd.0 as isize) }
+        if hwnd.is_invalid() {
+            None
+        } else {
+            Some(hwnd.0 as isize)
+        }
     }
 }
 
@@ -492,7 +522,9 @@ pub fn get_foreground_hwnd() -> Option<isize> {
 /// 使用 `SetForegroundWindow` 恢复录音开始时保存的前台窗口。
 /// 配合 Alt 键欺骗绕过 Windows 的前台锁定限制。
 pub fn restore_foreground(hwnd: isize) {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{keybd_event, VK_LMENU, KEYEVENTF_KEYUP, KEYBD_EVENT_FLAGS};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_LMENU, keybd_event,
+    };
     use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
     unsafe {
         // Alt 按一下 → 满足 SetForegroundWindow 的"用户输入"条件
@@ -577,28 +609,41 @@ pub fn show_screenshot_overlay(
         // （webview `.show()` 到 __blinkReloadScreenshot 执行之间有毫秒级空档）
         let _ = win.eval("window.__blinkReloadScreenshot && window.__blinkReloadScreenshot()");
         if let Ok(hwnd) = win.hwnd() {
-            place_at_physical(HWND(hwnd.0 as _), meta.virtual_x, meta.virtual_y, meta.width, meta.height);
+            place_at_physical(
+                HWND(hwnd.0 as _),
+                meta.virtual_x,
+                meta.virtual_y,
+                meta.width,
+                meta.height,
+            );
         }
         let _ = win.show();
         return Ok(());
     }
 
     // 首次构建：inner_size / position 会被后续 SetWindowPos 覆盖，这里只是让 Tauri 别报参数错。
-    let win = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("chord-screenshot.html".into()))
-        .title("")
-        .inner_size(meta.width as f64, meta.height as f64)
-        .position(meta.virtual_x as f64, meta.virtual_y as f64)
-        .decorations(false)
-        .transparent(true) // 透明背景，让 canvas 上的桌面截图独占视觉
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .shadow(false)
-        .focused(true)
-        .build()
-        .map_err(|e| e.to_string())?;
+    let win =
+        WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("chord-screenshot.html".into()))
+            .title("")
+            .inner_size(meta.width as f64, meta.height as f64)
+            .position(meta.virtual_x as f64, meta.virtual_y as f64)
+            .decorations(false)
+            .transparent(true) // 透明背景，让 canvas 上的桌面截图独占视觉
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .shadow(false)
+            .focused(true)
+            .build()
+            .map_err(|e| e.to_string())?;
 
     if let Ok(hwnd) = win.hwnd() {
-        place_at_physical(HWND(hwnd.0 as _), meta.virtual_x, meta.virtual_y, meta.width, meta.height);
+        place_at_physical(
+            HWND(hwnd.0 as _),
+            meta.virtual_x,
+            meta.virtual_y,
+            meta.width,
+            meta.height,
+        );
     }
 
     Ok(())
@@ -755,17 +800,21 @@ pub fn preheat_secondary_windows(app: AppHandle) {
         // --- chord-ball（悬浮球，48×48 透明无焦点） ---
         if app.get_webview_window("chord-ball").is_none() {
             use tauri::{WebviewUrl, WebviewWindowBuilder};
-            match WebviewWindowBuilder::new(&app, "chord-ball", WebviewUrl::App("chord-ball.html".into()))
-                .title("")
-                .inner_size(48.0, 48.0)
-                .decorations(false)
-                .transparent(true)
-                .always_on_top(true)
-                .skip_taskbar(true)
-                .shadow(false)
-                .focused(false)
-                .visible(false)
-                .build()
+            match WebviewWindowBuilder::new(
+                &app,
+                "chord-ball",
+                WebviewUrl::App("chord-ball.html".into()),
+            )
+            .title("")
+            .inner_size(48.0, 48.0)
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .shadow(false)
+            .focused(false)
+            .visible(false)
+            .build()
             {
                 Ok(win) => {
                     if let Ok(hwnd) = win.hwnd() {
@@ -780,17 +829,21 @@ pub fn preheat_secondary_windows(app: AppHandle) {
         // --- chord-screenshot（截图 overlay，透明全屏层） ---
         if app.get_webview_window("chord-screenshot").is_none() {
             use tauri::{WebviewUrl, WebviewWindowBuilder};
-            match WebviewWindowBuilder::new(&app, "chord-screenshot", WebviewUrl::App("chord-screenshot.html".into()))
-                .title("")
-                .inner_size(1920.0, 1080.0) // 默认尺寸，实际使用时 place_at_physical 会覆盖
-                .decorations(false)
-                .transparent(true)
-                .always_on_top(true)
-                .skip_taskbar(true)
-                .shadow(false)
-                .focused(false)
-                .visible(false)
-                .build()
+            match WebviewWindowBuilder::new(
+                &app,
+                "chord-screenshot",
+                WebviewUrl::App("chord-screenshot.html".into()),
+            )
+            .title("")
+            .inner_size(1920.0, 1080.0) // 默认尺寸，实际使用时 place_at_physical 会覆盖
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .shadow(false)
+            .focused(false)
+            .visible(false)
+            .build()
             {
                 Ok(_) => tracing::debug!("preheat: chord-screenshot ✓"),
                 Err(e) => tracing::warn!(error = %e, "preheat: chord-screenshot 失败"),
@@ -800,17 +853,21 @@ pub fn preheat_secondary_windows(app: AppHandle) {
         // --- context-menu（右键菜单，非透明小窗） ---
         if app.get_webview_window("context-menu").is_none() {
             use tauri::{WebviewUrl, WebviewWindowBuilder};
-            match WebviewWindowBuilder::new(&app, "context-menu", WebviewUrl::App("contextmenu-popup.html".into()))
-                .title("")
-                .inner_size(200.0, 200.0) // 默认尺寸，实际使用时会 resize
-                .decorations(false)
-                .transparent(false)
-                .always_on_top(true)
-                .skip_taskbar(true)
-                .focused(false)
-                .resizable(false)
-                .visible(false)
-                .build()
+            match WebviewWindowBuilder::new(
+                &app,
+                "context-menu",
+                WebviewUrl::App("contextmenu-popup.html".into()),
+            )
+            .title("")
+            .inner_size(200.0, 200.0) // 默认尺寸，实际使用时会 resize
+            .decorations(false)
+            .transparent(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .focused(false)
+            .resizable(false)
+            .visible(false)
+            .build()
             {
                 Ok(win) => {
                     if let Ok(hwnd) = win.hwnd() {
@@ -825,17 +882,21 @@ pub fn preheat_secondary_windows(app: AppHandle) {
         // --- voice-overlay（语音录音 mini overlay，0.10 G2） ---
         if app.get_webview_window("voice-overlay").is_none() {
             use tauri::{WebviewUrl, WebviewWindowBuilder};
-            match WebviewWindowBuilder::new(&app, "voice-overlay", WebviewUrl::App("voice-overlay.html".into()))
-                .title("")
-                .inner_size(300.0, 140.0)
-                .decorations(false)
-                .transparent(true)
-                .always_on_top(true)
-                .skip_taskbar(true)
-                .shadow(false)
-                .focused(false)
-                .visible(false)
-                .build()
+            match WebviewWindowBuilder::new(
+                &app,
+                "voice-overlay",
+                WebviewUrl::App("voice-overlay.html".into()),
+            )
+            .title("")
+            .inner_size(300.0, 140.0)
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .shadow(false)
+            .focused(false)
+            .visible(false)
+            .build()
             {
                 Ok(win) => {
                     if let Ok(hwnd) = win.hwnd() {
@@ -870,7 +931,12 @@ pub fn open_settings(app: &AppHandle) {
         let work = if GetMonitorInfoW(hmon, &mut mi).as_bool() {
             mi.rcWork
         } else {
-            windows::Win32::Foundation::RECT { left: 0, top: 0, right: 1920, bottom: 1080 }
+            windows::Win32::Foundation::RECT {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            }
         };
         let mut dpi_x: u32 = 96;
         let mut dpi_y: u32 = 96;
@@ -898,12 +964,12 @@ pub fn open_settings(app: &AppHandle) {
         // 用当前 scale_factor 折算 CSS,再按目标屏 DPI 换回物理。scale_factor 和 outer_size
         // 都反映"窗口当前所在屏",配对读一致快照,比值稳定 = CSS 尺寸恒定。
         let cur_scale = w.scale_factor().unwrap_or(1.0).max(1.0);
-        let cur_phys = w
-            .outer_size()
-            .unwrap_or_else(|_| tauri::PhysicalSize::new(
+        let cur_phys = w.outer_size().unwrap_or_else(|_| {
+            tauri::PhysicalSize::new(
                 (960.0 * cur_scale).round() as u32,
                 (680.0 * cur_scale).round() as u32,
-            ));
+            )
+        });
         let css_w = (cur_phys.width as f64) / cur_scale;
         let css_h = (cur_phys.height as f64) / cur_scale;
         let target_scale = (target_dpi as f64) / 96.0;

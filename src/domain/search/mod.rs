@@ -125,7 +125,9 @@ pub struct AppEntry {
 mod windows;
 
 #[cfg(target_os = "windows")]
-pub use windows::{scan_start_menu, scan_apps_folder, launch, roots_modified, start_menu_roots, parse_lnk_entry};
+pub use windows::{
+    launch, parse_lnk_entry, roots_modified, scan_apps_folder, scan_start_menu, start_menu_roots,
+};
 
 #[cfg(target_os = "windows")]
 pub mod icon;
@@ -138,7 +140,10 @@ pub use engine::{Lane, QueryContext, SearchAction, SearchEngine, SearchItem};
 // 统一打分/加权模块（0.6 第一阶段重构）
 pub(crate) mod scorer;
 #[allow(unused_imports)]
-pub use scorer::{apply_history, boost_priority, BuiltinMatch, clamp_plugin_score, history_boost, normalize_top_relative, placeholder_score};
+pub use scorer::{
+    BuiltinMatch, apply_history, boost_priority, clamp_plugin_score, history_boost,
+    normalize_top_relative, placeholder_score,
+};
 
 // 具体引擎
 mod builtin_engine;
@@ -150,7 +155,7 @@ mod mock_slow_engine;
 mod start_menu_engine;
 use builtin_engine::BuiltinEngine;
 // BuiltinActionInfo + list_builtin_actions 由 commands::list_builtin_actions 用（设置页）。
-pub use builtin_engine::{list_builtin_actions, BuiltinActionInfo};
+pub use builtin_engine::{BuiltinActionInfo, list_builtin_actions};
 use calc_engine::CalcEngine;
 use clipboard_engine::ClipboardEngine;
 use file_engine::FileEngine;
@@ -159,7 +164,7 @@ use start_menu_engine::StartMenuEngine;
 
 // 多路搜索服务:路由 + 融合 + 渐进式调度
 mod service;
-pub use service::{SearchService, SearchResponse, EngineConfigUpdate};
+pub use service::{EngineConfigUpdate, SearchResponse, SearchService};
 
 /// 引擎配置集合（三层独立控制）。
 pub struct EngineConfigs {
@@ -209,7 +214,10 @@ pub fn build_engines(
 pub fn register_engine_rules(router: &crate::domain::intent::RuleRouter) {
     router.add_engine_rule(
         clipboard_engine::ENGINE_ID.to_string(),
-        clipboard_engine::TRIGGERS.iter().map(|s| s.to_string()).collect(),
+        clipboard_engine::TRIGGERS
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     );
 }
 
@@ -219,7 +227,9 @@ use nucleo::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo::{Config, Matcher, Utf32Str};
 
 // 文本归一化原语抽至 `crate::text`(0.4 §4.4),应用搜索与意图共用。
-pub use crate::infra::utils::text::{pinyin_full as to_pinyin_full, pinyin_initials as to_pinyin_initials};
+pub use crate::infra::utils::text::{
+    pinyin_full as to_pinyin_full, pinyin_initials as to_pinyin_initials,
+};
 
 /// fuzzy 打分核心：返回 `(nucleo raw 分, 条目)`，按分降序、取 top-N。
 ///
@@ -238,7 +248,12 @@ pub fn fuzzy_score_entries(
     // 查询转小写：确保大写 "WX" 能匹配小写 "wx" 的拼音首字母
     let query_lower = query.to_ascii_lowercase();
     let mut matcher = Matcher::new(Config::DEFAULT);
-    let pattern = Pattern::new(&query_lower, CaseMatching::Smart, Normalization::Smart, AtomKind::Fuzzy);
+    let pattern = Pattern::new(
+        &query_lower,
+        CaseMatching::Smart,
+        Normalization::Smart,
+        AtomKind::Fuzzy,
+    );
     let mut buf = Vec::new();
     let mut scored: Vec<(u32, &AppEntry)> = entries
         .iter()
@@ -341,14 +356,23 @@ mod tests {
         let entries = vec![entry("微信", "wechat.lnk"), entry("Word", "word.lnk")];
         // 全拼搜索：wei 应该匹配微信
         let r = fuzzy_score_entries("wei", &entries, 10);
-        assert!(r.iter().any(|(_, e)| e.name == "微信"), "全拼 wei 应匹配微信");
+        assert!(
+            r.iter().any(|(_, e)| e.name == "微信"),
+            "全拼 wei 应匹配微信"
+        );
 
         // 完整全拼：weixin 应该匹配微信
         let r = fuzzy_score_entries("weixin", &entries, 10);
-        assert!(r.iter().any(|(_, e)| e.name == "微信"), "全拼 weixin 应匹配微信");
+        assert!(
+            r.iter().any(|(_, e)| e.name == "微信"),
+            "全拼 weixin 应匹配微信"
+        );
 
         // 全拼前缀模糊：weix 应该匹配微信
         let r = fuzzy_score_entries("weix", &entries, 10);
-        assert!(r.iter().any(|(_, e)| e.name == "微信"), "全拼 weix 应匹配微信");
+        assert!(
+            r.iter().any(|(_, e)| e.name == "微信"),
+            "全拼 weix 应匹配微信"
+        );
     }
 }

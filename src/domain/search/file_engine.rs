@@ -223,7 +223,10 @@ impl FileEngine {
         };
 
         // 调试：打印 JSON 结构
-        tracing::trace!("Everything JSON keys: {:?}", json.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+        tracing::trace!(
+            "Everything JSON keys: {:?}",
+            json.as_object().map(|o| o.keys().collect::<Vec<_>>())
+        );
 
         let mut items = Vec::new();
         let results = match json["results"].as_array() {
@@ -304,10 +307,17 @@ impl FileEngine {
 
         let query_lower = query.to_ascii_lowercase();
         let mut matcher = Matcher::new(Config::DEFAULT);
-        let pattern = Pattern::new(&query_lower, CaseMatching::Smart, Normalization::Smart, AtomKind::Fuzzy);
+        let pattern = Pattern::new(
+            &query_lower,
+            CaseMatching::Smart,
+            Normalization::Smart,
+            AtomKind::Fuzzy,
+        );
         let mut buf = Vec::new();
 
-        let mut scored: Vec<(u32, &CachedFileEntry)> = cache.entries.iter()
+        let mut scored: Vec<(u32, &CachedFileEntry)> = cache
+            .entries
+            .iter()
             .filter_map(|entry| {
                 let haystack = Utf32Str::new(&entry.name, &mut buf);
                 let score = pattern.score(haystack, &mut matcher)?;
@@ -334,7 +344,9 @@ impl FileEngine {
                     title: entry.name.clone(),
                     subtitle: Some(subtitle),
                     score: super::scorer::file_search_score(0), // Fallback 结果给统一分数
-                    action: SearchAction::Open { path: entry.full_path.clone() },
+                    action: SearchAction::Open {
+                        path: entry.full_path.clone(),
+                    },
                     source: "file_local".into(),
                     score_detail: Some("local_fallback".into()),
                 }
@@ -364,7 +376,10 @@ impl FileEngine {
 
         // 从缓存搜索
         let results = self.search_fallback(query, cfg.local_max_results);
-        tracing::debug!("FileEngine: 本地搜索 query={query}, 返回 {} 个结果", results.len());
+        tracing::debug!(
+            "FileEngine: 本地搜索 query={query}, 返回 {} 个结果",
+            results.len()
+        );
         results
     }
 
@@ -414,7 +429,9 @@ impl FileEngine {
                 for entry in walker {
                     let file_name = entry.file_name().to_string_lossy().to_string();
                     let full_path = entry.path().to_string_lossy().to_string();
-                    let parent = entry.path().parent()
+                    let parent = entry
+                        .path()
+                        .parent()
                         .map(|p| p.to_string_lossy().to_string())
                         .unwrap_or_default();
 
@@ -458,20 +475,19 @@ fn resolve_special_dir(name: &str) -> Option<PathBuf> {
             // 开始菜单：用户目录 + 公共目录
             let user = dirs_next::data_dir()
                 .map(|d| d.join("Microsoft").join("Windows").join("Start Menu"));
-            let public = std::env::var("ProgramData")
-                .ok()
-                .map(|d| PathBuf::from(d).join("Microsoft").join("Windows").join("Start Menu"));
+            let public = std::env::var("ProgramData").ok().map(|d| {
+                PathBuf::from(d)
+                    .join("Microsoft")
+                    .join("Windows")
+                    .join("Start Menu")
+            });
             // 返回用户目录（主要位置）
             user.or(public)
         }
         _ => {
             // 尝试作为绝对路径
             let path = PathBuf::from(name);
-            if path.exists() {
-                Some(path)
-            } else {
-                None
-            }
+            if path.exists() { Some(path) } else { None }
         }
     }
 }
@@ -522,19 +538,25 @@ impl SearchEngine for FileEngine {
                 };
 
                 if available {
-                    tracing::info!("Everything HTTP Server 可用，端口 {port}（第 {attempt} 次探测）");
+                    tracing::info!(
+                        "Everything HTTP Server 可用，端口 {port}（第 {attempt} 次探测）"
+                    );
                     *status.write().await = EverythingStatus::Available;
                     *last_probe_at.write().await = Some(Instant::now());
                     return;
                 }
 
                 if attempt < max_retries {
-                    tracing::debug!("Everything HTTP Server 探测失败，{attempt}/{max_retries}，2 秒后重试");
+                    tracing::debug!(
+                        "Everything HTTP Server 探测失败，{attempt}/{max_retries}，2 秒后重试"
+                    );
                     tokio::time::sleep(Duration::from_secs(2)).await;
                 }
             }
 
-            tracing::info!("Everything HTTP Server 不可用（已重试 {max_retries} 次），文件搜索降级");
+            tracing::info!(
+                "Everything HTTP Server 不可用（已重试 {max_retries} 次），文件搜索降级"
+            );
             *status.write().await = EverythingStatus::Unavailable;
             *last_probe_at.write().await = Some(Instant::now());
         });
@@ -562,8 +584,14 @@ impl SearchEngine for FileEngine {
         }
 
         // 模式 "everything" 或 "auto"：先尝试 Everything
-        tracing::debug!("FileEngine: 搜索 Everything，query={q}, port={}, max_results={}", cfg.everything_port, cfg.max_results);
-        let results = self.search_everything(cfg.everything_port, q, cfg.max_results).await;
+        tracing::debug!(
+            "FileEngine: 搜索 Everything，query={q}, port={}, max_results={}",
+            cfg.everything_port,
+            cfg.max_results
+        );
+        let results = self
+            .search_everything(cfg.everything_port, q, cfg.max_results)
+            .await;
 
         // 模式 "auto"：Everything 不可用时降级本地
         if results.is_empty() && data_source == "auto" {

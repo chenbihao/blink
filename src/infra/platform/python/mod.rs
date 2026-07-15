@@ -87,6 +87,11 @@ pub struct PythonEnvStatus {
     pub torch_installed: bool,
     /// torch 版本号
     pub torch_version: Option<String>,
+    /// 已安装的 PyTorch 是否支持 CUDA（`torch.cuda.is_available()`）
+    ///
+    /// CPU-only build 返回 false。用于诊断 GPU 是否真正生效，
+    /// 以及在切换到 CUDA 模式时判断是否需要重装 PyTorch。
+    pub torch_cuda_available: bool,
 
     // ── funasr ──
     /// funasr 包是否已安装在 venv 中
@@ -94,8 +99,15 @@ pub struct PythonEnvStatus {
     /// funasr 版本号
     pub funasr_version: Option<String>,
 
+    // ── websockets（流式 STT 必需）──
+    /// websockets 包是否已安装在 venv 中
+    /// uvicorn[standard] 自带 websockets，流式 STT 的 WebSocket /ws/stream 端点依赖此库
+    pub websockets_installed: bool,
+    /// websockets 版本号
+    pub websockets_version: Option<String>,
+
     // ── 综合 ──
-    /// 环境是否完全就绪（uv + venv + torch + funasr 四者齐备）
+    /// 环境是否完全就绪（uv + venv + torch + funasr + websockets 五者齐备）
     pub env_ready: bool,
 }
 
@@ -129,23 +141,19 @@ fn venv_dir() -> PathBuf {
 /// 返回 `None` 表示 venv 尚未创建。
 pub fn venv_python() -> Option<PathBuf> {
     let path = venv_dir().join("Scripts").join("python.exe");
-    if path.exists() {
-        Some(path)
-    } else {
-        None
-    }
+    if path.exists() { Some(path) } else { None }
 }
 
 /// 获取 venv 中的 `funasr-server.exe` 路径（pip install funasr 自动生成）。
 ///
 /// 返回 `None` 表示 venv 尚未创建或 funasr 未安装。
+///
+/// 0.10.3 起 Blink 改用 `python blink_stt_server.py` 启动服务，
+/// 此函数不再被调用，但保留以备回退或诊断用途。
+#[allow(dead_code)]
 pub fn venv_funasr_server() -> Option<PathBuf> {
     let path = venv_dir().join("Scripts").join("funasr-server.exe");
-    if path.exists() {
-        Some(path)
-    } else {
-        None
-    }
+    if path.exists() { Some(path) } else { None }
 }
 
 // ── uv 检测 ──────────────────────────────────────────────────────────────
@@ -198,8 +206,7 @@ fn get_uv_version(uv_path: &Path) -> Option<String> {
 /// 提取 `uv.exe` 到 `%APPDATA%\blink\python\uv\uv.exe`。
 pub async fn install_uv() -> Result<PathBuf, String> {
     let uv_dir = uv_install_dir();
-    std::fs::create_dir_all(&uv_dir)
-        .map_err(|e| format!("创建 uv 目录失败: {e}"))?;
+    std::fs::create_dir_all(&uv_dir).map_err(|e| format!("创建 uv 目录失败: {e}"))?;
 
     // ── 下载 uv zip ──
     tracing::info!(url = UV_DOWNLOAD_URL, "下载 uv 二进制...");
@@ -231,12 +238,10 @@ pub async fn install_uv() -> Result<PathBuf, String> {
     if extract_dir.exists() {
         let _ = std::fs::remove_dir_all(&extract_dir);
     }
-    std::fs::create_dir_all(&extract_dir)
-        .map_err(|e| format!("创建解压目录失败: {e}"))?;
+    std::fs::create_dir_all(&extract_dir).map_err(|e| format!("创建解压目录失败: {e}"))?;
 
     let cursor = std::io::Cursor::new(&zip_bytes[..]);
-    let mut archive = zip::ZipArchive::new(cursor)
-        .map_err(|e| format!("打开 zip 失败: {e}"))?;
+    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("打开 zip 失败: {e}"))?;
 
     for i in 0..archive.len() {
         let mut file = archive
@@ -249,17 +254,14 @@ pub async fn install_uv() -> Result<PathBuf, String> {
         };
 
         if file.is_dir() {
-            std::fs::create_dir_all(&outpath)
-                .map_err(|e| format!("创建目录失败: {e}"))?;
+            std::fs::create_dir_all(&outpath).map_err(|e| format!("创建目录失败: {e}"))?;
         } else {
             if let Some(parent) = outpath.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("创建父目录失败: {e}"))?;
+                std::fs::create_dir_all(parent).map_err(|e| format!("创建父目录失败: {e}"))?;
             }
-            let mut outfile = std::fs::File::create(&outpath)
-                .map_err(|e| format!("创建文件失败: {e}"))?;
-            std::io::copy(&mut file, &mut outfile)
-                .map_err(|e| format!("写入文件失败: {e}"))?;
+            let mut outfile =
+                std::fs::File::create(&outpath).map_err(|e| format!("创建文件失败: {e}"))?;
+            std::io::copy(&mut file, &mut outfile).map_err(|e| format!("写入文件失败: {e}"))?;
         }
     }
 
@@ -271,8 +273,7 @@ pub async fn install_uv() -> Result<PathBuf, String> {
 
     // ── 复制 uv.exe 到目标位置 ──
     let target = local_uv_exe();
-    std::fs::copy(&uv_exe, &target)
-        .map_err(|e| format!("复制 uv.exe 失败: {e}"))?;
+    std::fs::copy(&uv_exe, &target).map_err(|e| format!("复制 uv.exe 失败: {e}"))?;
 
     // ── 清理临时文件 ──
     let _ = std::fs::remove_dir_all(&extract_dir);
@@ -309,8 +310,7 @@ pub async fn create_venv(uv_path: &Path) -> Result<(), String> {
     }
 
     // 确保父目录存在
-    std::fs::create_dir_all(python_dir())
-        .map_err(|e| format!("创建 python 目录失败: {e}"))?;
+    std::fs::create_dir_all(python_dir()).map_err(|e| format!("创建 python 目录失败: {e}"))?;
 
     tracing::info!(python = PYTHON_VERSION, venv = %venv.display(), "创建 Python venv...");
 
@@ -363,15 +363,13 @@ async fn install_packages_inner(
     packages: &[&str],
     index_url: Option<&str>,
 ) -> Result<(), String> {
-    let python = venv_python()
-        .ok_or_else(|| "venv 未创建，无法安装包".to_string())?;
+    let python = venv_python().ok_or_else(|| "venv 未创建，无法安装包".to_string())?;
 
     tracing::info!(packages = ?packages, index_url = ?index_url, "安装 Python 包...");
 
     let install_future = async {
         let mut cmd = tokio::process::Command::new(uv_path);
-        cmd.args(["pip", "install", "--python"])
-            .arg(&python);
+        cmd.args(["pip", "install", "--python"]).arg(&python);
 
         if let Some(url) = index_url {
             cmd.args(["--index-url", url]);
@@ -389,9 +387,7 @@ async fn install_packages_inner(
         install_future,
     )
     .await
-    .map_err(|_| {
-        format!("安装包超时（{PIP_INSTALL_TIMEOUT_SECS}s），可能网络较慢，请重试")
-    })?
+    .map_err(|_| format!("安装包超时（{PIP_INSTALL_TIMEOUT_SECS}s），可能网络较慢，请重试"))?
     .map_err(|e| format!("执行 uv pip install 失败: {e}"))?;
 
     if !output.status.success() {
@@ -404,6 +400,38 @@ async fn install_packages_inner(
     }
 
     tracing::info!("Python 包安装完成");
+    Ok(())
+}
+
+// ── 包卸载 ───────────────────────────────────────────────────────────────
+
+/// 从 venv 中卸载 Python 包。
+///
+/// 使用 `uv pip uninstall --python <venv_python> <packages...>`。
+/// 用于在重装 PyTorch（CPU→CUDA 变体替换）前彻底清除旧安装，
+/// 避免 uv 检测到版本号匹配而跳过实际替换。
+pub async fn uninstall_packages(uv_path: &Path, packages: &[&str]) -> Result<(), String> {
+    let python = venv_python().ok_or_else(|| "venv 未创建，无法卸载包".to_string())?;
+
+    tracing::info!(packages = ?packages, "卸载 Python 包...");
+
+    let output = tokio::process::Command::new(uv_path)
+        .args(["pip", "uninstall", "--python"])
+        .arg(&python)
+        .args(packages)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| format!("执行 uv pip uninstall 失败: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // 卸载不存在的包不算错误（uv 可能返回非零退出码）
+        tracing::warn!(%stderr, "卸载包返回非零退出码（可能包不存在）");
+    }
+
+    tracing::info!("Python 包卸载完成");
     Ok(())
 }
 
@@ -435,7 +463,13 @@ pub fn detect_cuda() -> Option<String> {
                     .next()?
                     .trim_end_matches('|')
                     .trim();
-                if !version.is_empty() && version.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                if !version.is_empty()
+                    && version
+                        .chars()
+                        .next()
+                        .map(|c| c.is_ascii_digit())
+                        .unwrap_or(false)
+                {
                     return Some(version.to_string());
                 }
             }
@@ -471,8 +505,7 @@ async fn install_packages_streaming(
     extra_args: &[&str],
     on_log: &Arc<dyn Fn(&str) + Send + Sync>,
 ) -> Result<(), String> {
-    let python = venv_python()
-        .ok_or_else(|| "venv 未创建，无法安装包".to_string())?;
+    let python = venv_python().ok_or_else(|| "venv 未创建，无法安装包".to_string())?;
 
     tracing::info!(packages = ?packages, extra_args = ?extra_args, "安装 Python 包（流式）...");
 
@@ -560,6 +593,39 @@ pub fn check_torch() -> (bool, Option<String>) {
     }
 }
 
+/// 检查已安装的 PyTorch 是否支持 CUDA。
+///
+/// 运行 `python -c "import torch; print(torch.cuda.is_available())"`。
+/// CPU-only build 返回 false。用于诊断 GPU 是否真正生效。
+///
+/// 如果 torch 未安装或导入失败（如 `torch._C` 损坏），返回 false。
+pub fn check_torch_cuda() -> bool {
+    let python = match venv_python() {
+        Some(p) => p,
+        None => return false,
+    };
+
+    match Command::new(python)
+        .args([
+            "-c",
+            "import torch; print(torch.cuda.is_available())",
+        ])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            stdout == "True"
+        }
+        Ok(output) => {
+            // torch import 失败（如 torch._C 损坏）
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!(%stderr, "PyTorch import 失败，CUDA 不可用");
+            false
+        }
+        _ => false,
+    }
+}
+
 /// 检查 venv 中的 Python 版本。
 fn check_venv_python_version() -> Option<String> {
     let python = venv_python()?;
@@ -598,6 +664,34 @@ pub fn check_funasr() -> (bool, Option<String>) {
     }
 }
 
+/// 检查 websockets 包是否已安装在 venv 中。
+///
+/// `uvicorn[standard]` 自带 `websockets` 库，是 FastAPI WebSocket 端点
+/// （流式 STT 的 `/ws/stream`）的必需依赖。如果只安装了裸 `uvicorn`
+/// 而非 `uvicorn[standard]`，WebSocket 端点会返回 404。
+///
+/// 返回 (是否已安装, 版本号)。
+pub fn check_websockets() -> (bool, Option<String>) {
+    let python = match venv_python() {
+        Some(p) => p,
+        None => return (false, None),
+    };
+
+    match Command::new(python)
+        .args([
+            "-c",
+            "import importlib.metadata as m; print(m.version('websockets'))",
+        ])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            (true, Some(version))
+        }
+        _ => (false, None),
+    }
+}
+
 /// 获取完整环境状态快照。
 pub fn check_status() -> PythonEnvStatus {
     let uv_path = find_uv();
@@ -617,13 +711,29 @@ pub fn check_status() -> PythonEnvStatus {
         (false, None)
     };
 
+    // 只在 torch 已安装时才检查 CUDA 支持（避免无意义的子进程调用）
+    let torch_cuda_available = torch_installed && check_torch_cuda();
+    if torch_installed {
+        tracing::info!(
+            torch_cuda_available,
+            "PyTorch CUDA 支持检测"
+        );
+    }
+
     let (funasr_installed, funasr_version) = if venv_exists {
         check_funasr()
     } else {
         (false, None)
     };
 
-    let env_ready = uv_available && venv_exists && torch_installed && funasr_installed;
+    let (websockets_installed, websockets_version) = if venv_exists {
+        check_websockets()
+    } else {
+        (false, None)
+    };
+
+    let env_ready =
+        uv_available && venv_exists && torch_installed && funasr_installed && websockets_installed;
 
     PythonEnvStatus {
         uv_available,
@@ -633,8 +743,11 @@ pub fn check_status() -> PythonEnvStatus {
         venv_python_version,
         torch_installed,
         torch_version,
+        torch_cuda_available,
         funasr_installed,
         funasr_version,
+        websockets_installed,
+        websockets_version,
         env_ready,
     }
 }
@@ -656,8 +769,11 @@ pub async fn check_status_async() -> PythonEnvStatus {
                 venv_python_version: None,
                 torch_installed: false,
                 torch_version: None,
+                torch_cuda_available: false,
                 funasr_installed: false,
                 funasr_version: None,
+                websockets_installed: false,
+                websockets_version: None,
                 env_ready: false,
             }
         })
@@ -696,9 +812,22 @@ pub async fn setup_with_progress(
     on_progress: Arc<dyn Fn(&str, &str) + Send + Sync>,
     on_log: Arc<dyn Fn(&str) + Send + Sync>,
 ) -> Result<(), String> {
-    // 快速检查：如果已就绪，跳过
+    // 快速检查：如果已就绪，跳过安装。
+    // 但当 device == "cuda" 时，需额外验证已安装的 PyTorch 是否含 CUDA 支持——
+    // 如果之前以 CPU 模式安装了 CPU-only PyTorch，切换到 CUDA 后需重装。
     let status = check_status();
-    if status.env_ready {
+    let need_torch_reinstall = device == "cuda"
+        && status.torch_installed
+        && !status.torch_cuda_available;
+
+    if need_torch_reinstall {
+        tracing::warn!(
+            "配置为 CUDA 模式但已安装的 PyTorch 不含 CUDA 支持，将重装 PyTorch"
+        );
+        on_log("[Blink] ⚠️ 检测到当前 PyTorch 为 CPU 版，正在重装 CUDA 版 PyTorch...");
+    }
+
+    if status.env_ready && !need_torch_reinstall {
         tracing::info!("Python 环境已就绪，跳过安装");
         on_progress("complete", "ready");
         return Ok(());
@@ -738,7 +867,17 @@ pub async fn setup_with_progress(
     on_log("[Blink] ✅ Python venv 就绪");
 
     // Step 3: 安装包（torch + funasr）
-    if !status.torch_installed || !status.funasr_installed {
+    // 当 need_torch_reinstall 时，即使 torch 已安装也需重装（CPU→CUDA）
+    if !status.torch_installed || !status.funasr_installed || need_torch_reinstall {
+        // CPU→CUDA 重装：先彻底卸载旧 PyTorch，再安装 CUDA 版。
+        // --reinstall-package / --force-reinstall 都不够可靠——
+        // uv 检测到版本号匹配会复用缓存的 CPU wheel，不会真正替换为 CUDA 变体。
+        // 只有先 uninstall 清除残留文件，再 fresh install 才能确保 CUDA wheel 生效。
+        if need_torch_reinstall {
+            on_log("[Blink] 卸载旧版 PyTorch (CPU)...");
+            uninstall_packages(&uv_path, &["torch", "torchaudio"]).await?;
+        }
+
         let supports_tbb = uv_supports_torch_backend(&uv_path);
 
         if supports_tbb {
@@ -759,14 +898,30 @@ pub async fn setup_with_progress(
             };
 
             on_progress("packages", "installing");
-            let desc = if backend == "auto" { "PyTorch (CUDA auto) + funasr" } else { "PyTorch (CPU) + funasr" };
+            let desc = if backend == "auto" {
+                "PyTorch (CUDA auto) + funasr"
+            } else {
+                "PyTorch (CPU) + funasr"
+            };
             on_log(&format!("[Blink] 安装 {desc}...（这可能需要几分钟）"));
 
             install_packages_streaming(
                 &uv_path,
                 // torch + torchaudio 必须显式列出——funasr 不声明 torch 依赖（ML 包惯例），
                 // --torch-backend 只控制 torch 包的 index，不会自动把 torch 加入安装列表。
-                &["torch", "torchaudio", "funasr", "fastapi", "uvicorn", "python-multipart"],
+                // torch_complex 是 FunASR 的可选依赖，不声明在 funasr 的 install_requires 中。
+                // numba>=0.59 强制使用支持 Python 3.12 的版本（含预编译 wheel），
+                // 避免 funasr→umap-learn→numba 0.53→llvmlite 0.36 在 3.12 上编译失败。
+                &[
+                    "torch",
+                    "torchaudio",
+                    "torch_complex",
+                    "numba>=0.59",
+                    "funasr",
+                    "fastapi",
+                    "uvicorn[standard]",
+                    "python-multipart",
+                ],
                 &["--torch-backend", backend],
                 &on_log,
             )
@@ -776,32 +931,33 @@ pub async fn setup_with_progress(
             on_log("[Blink] ⚠️ uv 版本较旧，使用两步安装（torch + funasr）");
 
             // Step 3a: torch
-            if !status.torch_installed {
+            // need_torch_reinstall 时即使 torch 已安装也需重装（CPU→CUDA）
+            // 先 uninstall 已在上面完成，此处直接安装
+            if !status.torch_installed || need_torch_reinstall {
                 let is_cuda = device == "cuda";
                 let (index_url, desc) = if is_cuda {
-                    ("https://download.pytorch.org/whl/cu121", "PyTorch CUDA 版（~2GB，请耐心等待）")
+                    (
+                        "https://download.pytorch.org/whl/cu121",
+                        "PyTorch CUDA 版（~2GB，请耐心等待）",
+                    )
                 } else {
                     (TORCH_CPU_INDEX_URL, "PyTorch CPU 版（~200MB）")
                 };
                 on_progress("torch", "installing");
                 on_log(&format!("[Blink] 安装 {desc}..."));
-                install_packages_with_index(
-                    &uv_path,
-                    &["torch", "torchaudio"],
-                    index_url,
-                )
-                .await?;
+                install_packages_with_index(&uv_path, &["torch", "torchaudio"], index_url).await?;
             }
             on_progress("torch", "done");
             on_log("[Blink] ✅ PyTorch 安装完成");
 
-            // Step 3b: funasr + server 依赖
-            if !status.funasr_installed {
+            // Step 3b: funasr + server 依赖 + torch_complex
+            if !status.funasr_installed || need_torch_reinstall {
                 on_progress("funasr", "installing");
-                on_log("[Blink] 安装 funasr + fastapi + uvicorn...");
+                on_log("[Blink] 安装 funasr + fastapi + uvicorn[standard]...");
+                // numba>=0.59 强制使用支持 Python 3.12 的版本，避免 llvmlite 编译失败
                 install_packages(
                     &uv_path,
-                    &["funasr", "fastapi", "uvicorn", "python-multipart"],
+                    &["funasr", "fastapi", "uvicorn[standard]", "python-multipart", "torch_complex", "numba>=0.59"],
                 )
                 .await?;
             }
@@ -820,7 +976,10 @@ pub async fn setup_with_progress(
 
 /// 递归查找目录中指定文件名的文件。
 fn find_file_recursive(dir: &Path, name: &str) -> Option<PathBuf> {
-    for entry in walkdir::WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
+    for entry in walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         if entry.file_name().to_str() == Some(name) {
             return Some(entry.path().to_path_buf());
         }
@@ -837,21 +996,30 @@ mod tests {
     #[test]
     fn python_dir_under_appdata() {
         let dir = python_dir();
-        assert!(dir.ends_with("blink\\python") || dir.ends_with("blink/python"),
-            "python_dir 应在 blink/python 下, got: {}", dir.display());
+        assert!(
+            dir.ends_with("blink\\python") || dir.ends_with("blink/python"),
+            "python_dir 应在 blink/python 下, got: {}",
+            dir.display()
+        );
     }
 
     #[test]
     fn venv_python_path_is_scripts_python_exe() {
         let python = venv_dir().join("Scripts").join("python.exe");
-        assert!(python.ends_with("venv\\Scripts\\python.exe") || python.ends_with("venv/Scripts/python.exe"));
+        assert!(
+            python.ends_with("venv\\Scripts\\python.exe")
+                || python.ends_with("venv/Scripts/python.exe")
+        );
     }
 
     #[test]
     fn local_uv_exe_path_is_correct() {
         let uv = local_uv_exe();
-        assert!(uv.ends_with("uv\\uv.exe") || uv.ends_with("uv/uv.exe"),
-            "local_uv_exe 应在 uv/uv.exe, got: {}", uv.display());
+        assert!(
+            uv.ends_with("uv\\uv.exe") || uv.ends_with("uv/uv.exe"),
+            "local_uv_exe 应在 uv/uv.exe, got: {}",
+            uv.display()
+        );
     }
 
     #[test]
@@ -881,5 +1049,32 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         assert!(find_file_recursive(&tmp, "nonexistent.exe").is_none());
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn check_websockets_does_not_panic() {
+        // 只验证不 panic，实际状态取决于运行环境
+        let _ = check_websockets();
+    }
+
+    #[test]
+    fn check_status_includes_websockets_field() {
+        let status = check_status();
+        // websockets_installed 字段应存在且为 bool（不 panic 即可）
+        let _ = status.websockets_installed;
+        let _ = &status.websockets_version;
+    }
+
+    /// 验证 env_ready 包含 websockets 检查：
+    /// 如果 funasr 已安装但 websockets 未安装，env_ready 应为 false。
+    #[test]
+    fn env_ready_requires_websockets() {
+        let status = check_status();
+        if status.funasr_installed && !status.websockets_installed {
+            assert!(
+                !status.env_ready,
+                "env_ready 应为 false 当 websockets 未安装（即使 funasr 已安装）"
+            );
+        }
     }
 }

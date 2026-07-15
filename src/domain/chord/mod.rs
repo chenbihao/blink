@@ -69,12 +69,18 @@ pub struct ChordRegistry {
 
 impl ChordRegistry {
     pub fn new() -> Self {
-        Self { actions: Vec::new() }
+        Self {
+            actions: Vec::new(),
+        }
     }
 
     /// 注册一个动作。
     pub fn register(&mut self, action: Arc<dyn ChordAction>) {
-        tracing::debug!(id = action.id(), key = action.key().to_string(), "chord action registered");
+        tracing::debug!(
+            id = action.id(),
+            key = action.key().to_string(),
+            "chord action registered"
+        );
         self.actions.push(action);
     }
 
@@ -203,7 +209,10 @@ impl crate::domain::execution::Action for StubAction {
     fn danger_class(&self) -> crate::domain::execution::DangerClass {
         crate::domain::execution::DangerClass::Safe
     }
-    async fn execute(&self, _cx: &crate::domain::execution::ActionContext<'_>) -> Result<crate::domain::execution::ActionOutcome, crate::domain::execution::ExecError> {
+    async fn execute(
+        &self,
+        _cx: &crate::domain::execution::ActionContext<'_>,
+    ) -> Result<crate::domain::execution::ActionOutcome, crate::domain::execution::ExecError> {
         tracing::info!(id = self.id, "chord stub action（待 #10 实现）");
         Ok(crate::domain::execution::ActionOutcome::Nop)
     }
@@ -284,7 +293,10 @@ impl crate::domain::execution::Action for ScreenshotAction {
     fn danger_class(&self) -> crate::domain::execution::DangerClass {
         crate::domain::execution::DangerClass::Safe
     }
-    async fn execute(&self, cx: &crate::domain::execution::ActionContext<'_>) -> Result<crate::domain::execution::ActionOutcome, crate::domain::execution::ExecError> {
+    async fn execute(
+        &self,
+        cx: &crate::domain::execution::ActionContext<'_>,
+    ) -> Result<crate::domain::execution::ActionOutcome, crate::domain::execution::ExecError> {
         let t0 = std::time::Instant::now();
 
         // 1. 隐藏主窗——走 cloak 路径（无 Win11 fade 动画，瞬间从桌面消失）
@@ -303,7 +315,9 @@ impl crate::domain::execution::Action for ScreenshotAction {
         //    避免挤占 tokio worker。
         let meta = tokio::task::spawn_blocking(crate::infra::platform::screenshot::begin_session)
             .await
-            .map_err(|e| crate::domain::execution::ExecError::Runtime(format!("截屏 task 崩溃: {e}")))?
+            .map_err(|e| {
+                crate::domain::execution::ExecError::Runtime(format!("截屏 task 崩溃: {e}"))
+            })?
             .map_err(|e| {
                 // 截屏失败也要撤销 cloak,避免主窗永远隐形
                 crate::infra::platform::window::unhide_after_screenshot(cx.app_handle);
@@ -315,12 +329,16 @@ impl crate::domain::execution::Action for ScreenshotAction {
         crate::infra::platform::window::unhide_after_screenshot(cx.app_handle);
 
         // 5. 建 overlay + 按 meta 精确定位（物理像素）
-        crate::infra::platform::window::show_screenshot_overlay(cx.app_handle, meta)
-            .map_err(|e| {
+        crate::infra::platform::window::show_screenshot_overlay(cx.app_handle, meta).map_err(
+            |e| {
                 crate::infra::platform::screenshot::end_session();
                 crate::domain::execution::ExecError::Runtime(e)
-            })?;
-        tracing::info!(total_ms = t0.elapsed().as_millis() as u64, "screenshot overlay 已就绪");
+            },
+        )?;
+        tracing::info!(
+            total_ms = t0.elapsed().as_millis() as u64,
+            "screenshot overlay 已就绪"
+        );
         Ok(crate::domain::execution::ActionOutcome::Nop)
     }
 }
@@ -372,7 +390,10 @@ impl crate::domain::execution::Action for ClipboardHistoryAction {
     fn danger_class(&self) -> crate::domain::execution::DangerClass {
         crate::domain::execution::DangerClass::Safe
     }
-    async fn execute(&self, cx: &crate::domain::execution::ActionContext<'_>) -> Result<crate::domain::execution::ActionOutcome, crate::domain::execution::ExecError> {
+    async fn execute(
+        &self,
+        cx: &crate::domain::execution::ActionContext<'_>,
+    ) -> Result<crate::domain::execution::ActionOutcome, crate::domain::execution::ExecError> {
         // 主窗 show + 焦点（同步）
         crate::infra::platform::window::invoke(cx.app_handle);
         // 返回 Emit outcome，由 ChordRegistry::trigger 负责实际 emit

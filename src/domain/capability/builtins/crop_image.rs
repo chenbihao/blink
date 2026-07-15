@@ -50,42 +50,45 @@ impl Capability for CropImage {
         _ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError> {
         // 解析参数
-        let x = args
-            .get("x")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| CapabilityError::InvalidArgs { detail: "缺少 x".into() })?
-            as i32;
-        let y = args
-            .get("y")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| CapabilityError::InvalidArgs { detail: "缺少 y".into() })?
-            as i32;
-        let w = args
-            .get("w")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| CapabilityError::InvalidArgs { detail: "缺少 w".into() })?
-            as u32;
-        let h = args
-            .get("h")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| CapabilityError::InvalidArgs { detail: "缺少 h".into() })?
-            as u32;
+        let x =
+            args.get("x")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| CapabilityError::InvalidArgs {
+                    detail: "缺少 x".into(),
+                })? as i32;
+        let y =
+            args.get("y")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| CapabilityError::InvalidArgs {
+                    detail: "缺少 y".into(),
+                })? as i32;
+        let w =
+            args.get("w")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| CapabilityError::InvalidArgs {
+                    detail: "缺少 w".into(),
+                })? as u32;
+        let h =
+            args.get("h")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| CapabilityError::InvalidArgs {
+                    detail: "缺少 h".into(),
+                })? as u32;
 
         // 裁剪（BGRA）+ 编码 PNG —— spawn_blocking 避免 Win32/编码阻塞 tokio
-        let png = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CapabilityError> {
-            let (bgra, cw, ch) =
-                crate::infra::platform::screenshot::crop(x, y, w, h).ok_or_else(|| {
-                    CapabilityError::InvalidArgs {
+        let png =
+            tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CapabilityError> {
+                let (bgra, cw, ch) = crate::infra::platform::screenshot::crop(x, y, w, h)
+                    .ok_or_else(|| CapabilityError::InvalidArgs {
                         detail: "截图会话为空或裁剪区域无效".into(),
-                    }
-                })?;
-            crate::infra::platform::screenshot::encode_png(&bgra, cw, ch)
-                .map_err(|e| CapabilityError::Internal { detail: e })
-        })
-        .await
-        .map_err(|e| CapabilityError::Internal {
-            detail: format!("crop task 崩溃: {e}"),
-        })??;
+                    })?;
+                crate::infra::platform::screenshot::encode_png(&bgra, cw, ch)
+                    .map_err(|e| CapabilityError::Internal { detail: e })
+            })
+            .await
+            .map_err(|e| CapabilityError::Internal {
+                detail: format!("crop task 崩溃: {e}"),
+            })??;
 
         Ok(CapabilityResult::Blob {
             mime: "image/png".into(),

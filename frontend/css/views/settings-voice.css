@@ -461,6 +461,38 @@
   cursor: text;
 }
 
+/* ── 热词输入框（setting-row 内，左 title 右输入框，空时收扁）────────── */
+
+#voice .voice-hotwords-row {
+  align-items: flex-start;
+}
+
+#voice .voice-hotwords-input {
+  flex: 1;
+  min-height: 32px;
+  max-height: 200px;
+  overflow-y: auto;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius-md, 6px);
+  padding: 6px 10px;
+  font-family: inherit;
+  font-size: var(--text-md, 13px);
+  line-height: 1.5;
+  resize: none;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+#voice .voice-hotwords-input:focus {
+  border-color: var(--accent);
+}
+
+#voice .voice-hotwords-input::placeholder {
+  color: var(--text-faint);
+}
+
 /* ── 推理设备选择器 ────────────────────────────────────────────────── */
 
 #voice #funasr-device-select {

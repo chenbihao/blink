@@ -70,7 +70,11 @@ fn build_plugins(copy_to_bin: bool) {
     let builtin_dir = root.join("plugins").join("builtin");
 
     let rust_plugins = discover_rust_plugins();
-    println!("🔨 发现 {} 个 Rust 插件: {:?}", rust_plugins.len(), rust_plugins);
+    println!(
+        "🔨 发现 {} 个 Rust 插件: {:?}",
+        rust_plugins.len(),
+        rust_plugins
+    );
     println!("🔨 编译 Rust 插件（release）...");
 
     for id in &rust_plugins {
@@ -118,8 +122,7 @@ fn copy_plugins() {
         std::fs::create_dir_all(&dest_dir)
             .unwrap_or_else(|e| panic!("创建 {} 失败: {e}", dest_dir.display()));
         let dest = dest_dir.join(format!("{pkg}.exe"));
-        std::fs::copy(&src, &dest)
-            .unwrap_or_else(|e| panic!("拷贝 {pkg}.exe 失败: {e}"));
+        std::fs::copy(&src, &dest).unwrap_or_else(|e| panic!("拷贝 {pkg}.exe 失败: {e}"));
         println!("  {pkg}.exe -> {}", dest.display());
     }
     println!("✅ 插件拷贝完成");

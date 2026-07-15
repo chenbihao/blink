@@ -15,7 +15,7 @@
 use serde::Serialize;
 
 use super::engine::{QueryContext, SearchAction, SearchEngine, SearchItem};
-use super::scorer::{apply_history, BuiltinMatch};
+use super::scorer::{BuiltinMatch, apply_history};
 use crate::domain::context::trigger::{self as ctx_trigger, ContextTrigger, ParamSource};
 
 /// 内置动作定义（引擎内部模型，用于 keyword 匹配 + Context 触发 + 搜索结果展示）。
@@ -621,7 +621,11 @@ mod tests {
         let items = tauri::async_runtime::block_on(engine.search("", &ctx));
         let open_url = items.iter().find(|it| it.id == "builtin:open_url");
         assert!(open_url.is_some(), "剪贴板是 URL 应召回 open_url");
-        assert_eq!(open_url.unwrap().score, 1.0, "空 query Context-only base_score=1.0");
+        assert_eq!(
+            open_url.unwrap().score,
+            1.0,
+            "空 query Context-only base_score=1.0"
+        );
         // arg 应携带 URL 字符串
         if let super::SearchAction::RunAction { arg, .. } = &open_url.unwrap().action {
             assert_eq!(
@@ -695,7 +699,10 @@ mod tests {
         let ctx = make_ctx(&history, &snapshot);
 
         let items = tauri::async_runtime::block_on(engine.search("打开链接", &ctx));
-        let open_url_items: Vec<_> = items.iter().filter(|it| it.id == "builtin:open_url").collect();
+        let open_url_items: Vec<_> = items
+            .iter()
+            .filter(|it| it.id == "builtin:open_url")
+            .collect();
         assert_eq!(open_url_items.len(), 1, "同一 Action 至多一条 SearchItem");
         assert!(
             open_url_items[0]

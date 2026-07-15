@@ -24,8 +24,8 @@ use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 
 use crate::domain::stt::SttEngine;
-use crate::infra::platform::audio::{AudioCapture, AudioFormat};
 use crate::infra::platform;
+use crate::infra::platform::audio::{AudioCapture, AudioFormat};
 
 /// 语音目标(G1 主窗口 / G2 前台应用)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +42,8 @@ struct VoiceSession {
     engine: Option<Arc<dyn SttEngine>>,
     /// 音频采集器
     capture: Option<Box<dyn AudioCapture>>,
+    /// 音频采集 task 的 JoinHandle（stop/cancel 时 abort，避免与 finalize 锁竞争）
+    audio_task: Option<tokio::task::JoinHandle<()>>,
     /// 目标(G1/G2)
     target: VoiceTarget,
     /// 是否正在录音
@@ -57,6 +59,7 @@ impl Default for VoiceSession {
         Self {
             engine: None,
             capture: None,
+            audio_task: None,
             target: VoiceTarget::ForegroundApp,
             recording: false,
             last_partial: String::new(),
@@ -117,7 +120,10 @@ impl VoiceService {
                     if crate::domain::stt::funasr::is_server_ready(port) {
                         (true, String::new())
                     } else {
-                        (false, "FunASR 服务未启动，请在设置页「语音输入」中启动服务".to_string())
+                        (
+                            false,
+                            "FunASR 服务未启动，请在设置页「语音输入」中启动服务".to_string(),
+                        )
                     }
                 }
                 crate::app::stt_config::SttMode::Cloud => {
@@ -126,7 +132,11 @@ impl VoiceService {
             };
             if !ready {
                 tracing::warn!(target = ?session.target, %msg, "语音录音中止：服务未就绪");
-                let target_str = if session.target == VoiceTarget::MainWindow { "g1" } else { "g2" };
+                let target_str = if session.target == VoiceTarget::MainWindow {
+                    "g1"
+                } else {
+                    "g2"
+                };
 
                 // G2: 先显示 overlay，再延迟 emit 错误消息
                 // （窗口刚 show 时事件可能未就绪，延迟 100ms 确保接收）
@@ -197,11 +207,15 @@ impl VoiceService {
                 let engine: Arc<dyn SttEngine> = Arc::from(engine);
                 let engine_for_task = engine.clone();
 
-                tokio::spawn(async move {
+                let task_handle = tokio::spawn(async move {
                     while let Some(chunk) = rx.recv().await {
                         // 计算 RMS 音量（0.0 ~ 1.0）
                         let level = compute_rms(&chunk.samples);
-                        let target_str = if target == VoiceTarget::MainWindow { "g1" } else { "g2" };
+                        let target_str = if target == VoiceTarget::MainWindow {
+                            "g1"
+                        } else {
+                            "g2"
+                        };
                         let _ = app.emit(
                             "blink://voice-level",
                             serde_json::json!({
@@ -232,6 +246,7 @@ impl VoiceService {
 
                 session.engine = Some(engine);
                 session.capture = Some(capture);
+                session.audio_task = Some(task_handle);
             }
             Err(e) => {
                 tracing::error!(%e, "音频采集启动失败");
@@ -244,7 +259,7 @@ impl VoiceService {
     /// async 因为 `SttEngine::finalize` 是 async（HTTP 请求）。
     /// 调用方（HotkeyService）在 async task 中 .await 此方法。
     pub async fn stop_recording(&self) {
-        // 取出 engine + 停止采集，然后立即释放锁
+        // 取出 engine + 停止采集 + abort 音频 task，然后立即释放锁
         let (engine, target) = {
             let mut session = self.session.lock().unwrap();
 
@@ -258,6 +273,15 @@ impl VoiceService {
                 capture.stop();
             }
 
+            // ★ abort 音频采集 task —— 释放 streaming engine 的 inner 锁
+            // transcribe_chunk 可能在 ensure_connected 中阻塞（WebSocket 握手慢），
+            // 持有 tokio::sync::Mutex。如果不 abort，finalize() 会永久阻塞在锁上。
+            // abort 会取消 future，drop MutexGuard，释放锁。
+            if let Some(handle) = session.audio_task.take() {
+                handle.abort();
+                tracing::debug!("音频采集 task 已 abort");
+            }
+
             let target = session.target;
             let engine = session.engine.take();
             session.recording = false;
@@ -268,9 +292,25 @@ impl VoiceService {
             (engine, target)
         }; // 锁在此释放，await 不持锁
 
-        // 最终识别（async HTTP）
+        // 最终识别（async）
+        // 加 10s 超时保护：即使 abort 后仍有异常情况（如 WS 半连接），不会永久卡住
         let final_text = match engine {
-            Some(e) => e.finalize().await.unwrap_or_default(),
+            Some(e) => {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    e.finalize(),
+                ).await {
+                    Ok(Ok(text)) => text,
+                    Ok(Err(e)) => {
+                        tracing::warn!(%e, "STT finalize 失败");
+                        String::new()
+                    }
+                    Err(_) => {
+                        tracing::warn!("STT finalize 超时（10s），放弃等待");
+                        String::new()
+                    }
+                }
+            }
             None => String::new(),
         };
 
@@ -340,6 +380,11 @@ impl VoiceService {
 
         if let Some(mut capture) = session.capture.take() {
             capture.stop();
+        }
+
+        // abort 音频采集 task（与 stop_recording 一致）
+        if let Some(handle) = session.audio_task.take() {
+            handle.abort();
         }
 
         session.recording = false;

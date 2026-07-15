@@ -6,12 +6,11 @@
 
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{
-    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDCW, DeleteDC, DeleteObject,
-    GetDIBits, SelectObject, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, RGBQUAD, SRCCOPY,
+    BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDCW,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDIBits, RGBQUAD, SRCCOPY, SelectObject,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN,
+    GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
 
 use super::ScreenCaptureMeta;

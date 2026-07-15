@@ -132,7 +132,10 @@ mod tests {
     fn danger_class_serializes_stable() {
         // 用 externally tagged 的默认 serde 形式（"Safe" / "Dangerous"），
         // 配置文件 / IPC 消息里的 danger_class 字段稳定
-        assert_eq!(serde_json::to_string(&DangerClass::Safe).unwrap(), "\"Safe\"");
+        assert_eq!(
+            serde_json::to_string(&DangerClass::Safe).unwrap(),
+            "\"Safe\""
+        );
         assert_eq!(
             serde_json::to_string(&DangerClass::Dangerous).unwrap(),
             "\"Dangerous\""

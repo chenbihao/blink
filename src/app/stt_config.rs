@@ -12,11 +12,14 @@
 //!
 //! ## 本地 STT 配置
 //!
-//! 本地 STT 使用 FunASR Python 工具箱的 `funasr-server`。
+//! 本地 STT 使用 blink_stt_server.py（0.10.3 自定义统一服务，兼容官方 funasr-server API）。
 //! 配置项：
-//! - `server_port`: funasr-server 监听端口（默认 8000）
-//! - `funasr_model`: FunASR 模型标识（如 "sensevoice"）
+//! - `server_port`: 监听端口（默认 8000）
+//! - `funasr_model`: 非流式模型标识（如 "iic/SenseVoiceSmall"）
+//! - `streaming_model`: 流式模型标识（如 "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online"，None = 非流式）
 //! - `device`: 推理设备（"cpu" 或 "cuda"）
+//! - `hotwords`: 热词列表（每行 "词 权重"）
+//! - `use_itn`: ITN 逆文本归一化
 
 use serde::{Deserialize, Serialize};
 
@@ -32,14 +35,12 @@ pub struct SttConfig {
     pub mode: SttMode,
 
     // ── 云端配置 ──────────────────────────────────────────────────
-
     /// 云端 STT 供应商配置(mode = Cloud 时生效)
     #[serde(default)]
     pub cloud_provider: Option<SttCloudProvider>,
 
     // ── 本地配置 ──────────────────────────────────────────────────
-
-    /// 本地引擎配置(FunASR server)
+    /// 本地引擎配置(blink_stt_server)
     #[serde(default)]
     pub local_engine: LocalEngineConfig,
 
@@ -59,10 +60,27 @@ pub struct SttConfig {
     pub audio_device_id: Option<String>,
 
     // ── 行为开关 ──────────────────────────────────────────────────
-
     /// 流式识别开关(默认开——边说边出字;关闭则松开后一次性识别)
     #[serde(default = "default_streaming")]
     pub streaming: bool,
+
+    // ── 0.10.3 新增：文本注入方式 ──
+    /// G2 文本注入方式（默认 SendInput Unicode，不碰剪贴板）
+    #[serde(default = "default_inject_method")]
+    pub inject_method: InjectMethod,
+}
+
+/// 文本注入方式（G2 语音输入法上屏）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum InjectMethod {
+    /// Clipboard + Ctrl+V（0.10.1~0.10.2，兼容性最好但有剪贴板污染）
+    Clipboard,
+    /// SendInput Unicode 逐字符（0.10.3 默认，不碰剪贴板）
+    #[default]
+    SendInput,
+    /// TSF Composition via imekit（0.10.3+ 可选，真·原地流式）
+    Tsf,
 }
 
 /// STT 模式。
@@ -72,7 +90,7 @@ pub enum SttMode {
     /// 云端 STT(走 OpenAI 兼容 API)
     #[default]
     Cloud,
-    /// 本地 STT(FunASR server)
+    /// 本地 STT(blink_stt_server)
     Local,
 }
 
@@ -93,15 +111,16 @@ pub struct SttCloudProvider {
     pub model_id: String,
 }
 
-/// 本地引擎配置(FunASR server)。
+/// 本地引擎配置(blink_stt_server)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalEngineConfig {
-    /// funasr-server 监听端口（默认 8000）
+    /// 监听端口（默认 8000）
     #[serde(default = "default_server_port")]
     pub server_port: u16,
-    /// FunASR 模型标识(传给 funasr-server --model 参数)
-    /// 如 "sensevoice" / "paraformer"
-    #[serde(default = "default_funasr_model")]
+    /// 非流式模型标识(传给 blink_stt_server --model 参数)
+    /// 如 "iic/SenseVoiceSmall"（五语种 ASR，CPU 首选）
+    /// 注意：使用完整 ModelScope ID（含 `iic/` 前缀），短名在 FunASR 1.3.14 中解析会失败
+    #[serde(default = "default_funasr_model", deserialize_with = "deserialize_funasr_model")]
     pub funasr_model: String,
     /// 推理设备: "cpu" 或 "cuda"
     #[serde(default = "default_device")]
@@ -109,9 +128,21 @@ pub struct LocalEngineConfig {
     /// CPU 推理线程数(None = 自动)
     #[serde(default)]
     pub num_threads: Option<u32>,
-    /// Blink 启动后自动启动 funasr-server（懒加载，延迟 3s）
+    /// Blink 启动后自动启动服务（懒加载，延迟 3s）
     #[serde(default)]
     pub auto_start_server: bool,
+    // ── 0.10.3 新增 ──
+    /// 流式模型标识，如 "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online"（None = 非流式）
+    /// 仅在 streaming=true 时使用，配合 blink_stt_server.py 的 WebSocket /ws/stream 端点
+    #[serde(default)]
+    pub streaming_model: Option<String>,
+    /// 热词列表（每行 "词 权重"），存为 hotwords.txt 传给 FunASR
+    /// 提升专有名词识别率
+    #[serde(default)]
+    pub hotwords: Option<String>,
+    /// ITN 逆文本归一化（"二零二四年" → "2024年"），默认 true
+    #[serde(default = "default_use_itn")]
+    pub use_itn: bool,
 }
 
 fn default_server_port() -> u16 {
@@ -119,7 +150,27 @@ fn default_server_port() -> u16 {
 }
 
 fn default_funasr_model() -> String {
-    "sensevoice".to_string()
+    "iic/SenseVoiceSmall".to_string()
+}
+
+/// 反序列化时归一化旧配置中的模型名。
+///
+/// FunASR 1.3.14 的 AutoModel 短名解析在某些场景下会失效（ModelScope API
+/// 返回 404），因此统一使用完整 ModelScope ID（含 `iic/` 前缀）。
+/// 此函数将已知的旧名映射到正确的完整 ID。
+fn deserialize_funasr_model<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    use serde::Deserialize;
+    let raw = String::deserialize(deserializer)?;
+    Ok(match raw.as_str() {
+        "sensevoice" | "SenseVoice" | "SenseVoiceSmall" => "iic/SenseVoiceSmall".to_string(),
+        "paraformer-zh-streaming" => {
+            "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online"
+                .to_string()
+        }
+        other => other.to_string(),
+    })
 }
 
 fn default_device() -> String {
@@ -130,6 +181,14 @@ fn default_streaming() -> bool {
     true
 }
 
+fn default_use_itn() -> bool {
+    true
+}
+
+fn default_inject_method() -> InjectMethod {
+    InjectMethod::SendInput
+}
+
 impl Default for LocalEngineConfig {
     fn default() -> Self {
         Self {
@@ -138,6 +197,9 @@ impl Default for LocalEngineConfig {
             device: default_device(),
             num_threads: None,
             auto_start_server: false,
+            streaming_model: None,
+            hotwords: None,
+            use_itn: default_use_itn(),
         }
     }
 }
@@ -153,6 +215,7 @@ impl Default for SttConfig {
             model_dir: None,
             audio_device_id: None,
             streaming: default_streaming(),
+            inject_method: default_inject_method(),
         }
     }
 }
@@ -202,8 +265,13 @@ mod tests {
         assert!(cfg.cloud_provider.is_none());
         assert!(cfg.streaming);
         assert_eq!(cfg.local_engine.server_port, 8000);
-        assert_eq!(cfg.local_engine.funasr_model, "sensevoice");
+        assert_eq!(cfg.local_engine.funasr_model, "iic/SenseVoiceSmall");
         assert_eq!(cfg.local_engine.device, "cpu");
+        // 0.10.3 新增字段默认值
+        assert!(cfg.local_engine.streaming_model.is_none());
+        assert!(cfg.local_engine.hotwords.is_none());
+        assert!(cfg.local_engine.use_itn);
+        assert_eq!(cfg.inject_method, InjectMethod::SendInput);
     }
 
     #[test]
@@ -218,15 +286,19 @@ mod tests {
             }),
             local_engine: LocalEngineConfig {
                 server_port: 9000,
-                funasr_model: "paraformer".into(),
+                funasr_model: "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online".into(),
                 device: "cuda".into(),
                 num_threads: Some(4),
                 auto_start_server: true,
+                streaming_model: Some("iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online".into()),
+                hotwords: Some("美团 100\n快手 80".into()),
+                use_itn: false,
             },
             local_model_id: Some("sensevoice-small".into()),
             model_dir: None,
             audio_device_id: Some("麦克风 (Realtek Audio)".into()),
             streaming: true,
+            inject_method: InjectMethod::Clipboard,
         };
         let s = serde_json::to_string(&original).unwrap();
         let restored: SttConfig = serde_json::from_str(&s).unwrap();
@@ -234,11 +306,27 @@ mod tests {
         assert_eq!(restored.enabled, original.enabled);
         assert_eq!(restored.mode, SttMode::Local);
         assert_eq!(restored.cloud_provider.as_ref().unwrap().kind, "openai");
-        assert_eq!(restored.cloud_provider.as_ref().unwrap().model_id, "whisper-large-v3");
+        assert_eq!(
+            restored.cloud_provider.as_ref().unwrap().model_id,
+            "whisper-large-v3"
+        );
         assert_eq!(restored.local_engine.server_port, 9000);
-        assert_eq!(restored.local_engine.funasr_model, "paraformer");
+        assert_eq!(
+            restored.local_engine.funasr_model,
+            "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online"
+        );
         assert_eq!(restored.local_engine.device, "cuda");
         assert_eq!(restored.local_engine.num_threads, Some(4));
+        assert_eq!(
+            restored.local_engine.streaming_model.as_deref(),
+            Some("iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online")
+        );
+        assert_eq!(
+            restored.local_engine.hotwords.as_deref(),
+            Some("美团 100\n快手 80")
+        );
+        assert!(!restored.local_engine.use_itn);
+        assert_eq!(restored.inject_method, InjectMethod::Clipboard);
         assert_eq!(restored.local_model_id.as_deref(), Some("sensevoice-small"));
         assert!(restored.streaming);
     }
@@ -251,9 +339,11 @@ mod tests {
         assert!(cfg.enabled);
         assert_eq!(cfg.mode, SttMode::Cloud);
         assert!(cfg.streaming);
+        assert_eq!(cfg.inject_method, InjectMethod::SendInput);
         // local_engine 用 default
         assert_eq!(cfg.local_engine.server_port, 8000);
-        assert_eq!(cfg.local_engine.funasr_model, "sensevoice");
+        assert_eq!(cfg.local_engine.funasr_model, "iic/SenseVoiceSmall");
+        assert!(cfg.local_engine.use_itn);
     }
 
     #[test]
@@ -264,14 +354,52 @@ mod tests {
         assert_eq!(s, r#""cloud""#);
     }
 
+    #[test]
+    fn inject_method_serializes_as_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&InjectMethod::Clipboard).unwrap(),
+            r#""clipboard""#
+        );
+        assert_eq!(
+            serde_json::to_string(&InjectMethod::SendInput).unwrap(),
+            r#""sendinput""#
+        );
+        assert_eq!(
+            serde_json::to_string(&InjectMethod::Tsf).unwrap(),
+            r#""tsf""#
+        );
+    }
+
     /// 验证旧的 onnxruntime_path 字段不再存在，反序列化不报错。
     #[test]
     fn deserialize_old_config_without_onnxruntime_field() {
         // 旧配置可能含 onnxruntime_path，新结构忽略它
-        let json = r#"{"enabled":true,"mode":"local","local_engine":{"server_port":8000,"funasr_model":"sensevoice","device":"cpu"}}"#;
+        let json = r#"{"enabled":true,"mode":"local","local_engine":{"server_port":8000,"funasr_model":"SenseVoiceSmall","device":"cpu"}}"#;
         let cfg: SttConfig = serde_json::from_str(json).unwrap();
         assert!(cfg.enabled);
         assert_eq!(cfg.mode, SttMode::Local);
         assert_eq!(cfg.local_engine.server_port, 8000);
+        // 0.10.3 新增字段应有默认值
+        assert!(cfg.local_engine.streaming_model.is_none());
+        assert!(cfg.local_engine.use_itn);
+    }
+
+    /// 验证旧配置中的 "sensevoice" 模型名被归一化为完整 ModelScope ID。
+    #[test]
+    fn deserialize_normalizes_old_sensevoice_model_name() {
+        let json = r#"{"enabled":true,"mode":"local","local_engine":{"server_port":8000,"funasr_model":"sensevoice","device":"cpu"}}"#;
+        let cfg: SttConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            cfg.local_engine.funasr_model, "iic/SenseVoiceSmall",
+            "旧配置中的 'sensevoice' 应被归一化为 'iic/SenseVoiceSmall'"
+        );
+    }
+
+    /// 验证旧配置中的 "SenseVoiceSmall" 短名被归一化为完整 ModelScope ID。
+    #[test]
+    fn deserialize_preserves_correct_model_name() {
+        let json = r#"{"enabled":true,"mode":"local","local_engine":{"server_port":8000,"funasr_model":"SenseVoiceSmall","device":"cpu"}}"#;
+        let cfg: SttConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.local_engine.funasr_model, "iic/SenseVoiceSmall");
     }
 }

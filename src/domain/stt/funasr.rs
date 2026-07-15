@@ -1,14 +1,20 @@
-//! FunASR Python 环境管理 + server 生命周期。
+//! Blink STT Server Python 环境管理 + 生命周期（0.10.3）。
 //!
 //! ## 设计
 //!
-//! 不再使用 sherpa-onnx 二进制 + ONNX 模型，改为直接使用 FunASR Python 工具箱。
-//! FunASR 提供 `funasr-server` 命令，启动 OpenAI 兼容的 API 服务。
+//! 0.10.3 使用自定义 `blink_stt_server.py` 替换官方 `funasr-server`，
+//! 统一支持非流式 HTTP + 流式 WebSocket + 热词/ITN 增强参数。
 //!
 //! 本模块负责：
-//! 1. 通过 [`infra::platform::python`] 模块管理 uv + venv + funasr 安装
-//! 2. 启动 / 停止 funasr-server 子进程（使用 venv 中的 Python）
-//! 3. 健康检查（确认服务就绪）
+//! 1. 嵌入 `blink_stt_server.py` 并在启动时释放到 `%APPDATA%\blink\python\`
+//! 2. 通过 [`infra::platform::python`] 模块管理 uv + venv + funasr 安装
+//! 3. 启动 / 停止 blink_stt_server 子进程（使用 venv 中的 Python）
+//! 4. 健康检查（确认服务就绪）
+//!
+//! ## 兼容性
+//!
+//! HTTP 端点路径和响应格式与官方 `funasr-server` 完全一致，
+//! 现有 `LocalSttEngine` 和 `is_server_ready_http()` 无需修改。
 //!
 //! ## uv 自管理环境
 //!
@@ -16,30 +22,22 @@
 //! Python 或 pip 包。环境位于 `%APPDATA%\blink\python\venv\`。
 //!
 //! 详见 [`crate::infra::platform::python`] 模块文档。
-//!
-//! ## FunASR 与 sherpa-onnx 的关系（历史）
-//!
-//! 旧方案：sherpa-onnx（C++ ONNX 引擎）+ 第三方 ONNX 模型转换（csukuangfj on HuggingFace）
-//! 新方案：FunASR（Python 工具箱）原生推理 + OpenAI 兼容 API
-//!
-//! 新方案优势：
-//! - FunASR 自动从 ModelScope 下载模型（国内 CDN，稳定）
-//! - 内置 VAD + 标点恢复 + 说话人分离 pipeline
-//! - OpenAI 兼容 API = 复用现有 CloudSttEngine HTTP 代码
-//! - 无需管理 ONNX 模型文件、二进制版本
-//! - **uv 自管理环境**：用户零手动安装，Blink 全自动管理 Python 依赖
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// FunASR 模型 ID（对应 funasr-server --model 参数）。
+/// 嵌入的 blink_stt_server.py 脚本（随 Rust 二进制发布）。
+const BLINK_STT_SERVER_PY: &str = include_str!("../../../resources/python/blink_stt_server.py");
+
+/// 默认非流式模型。
 #[allow(dead_code)]
-pub const DEFAULT_MODEL: &str = "sensevoice";
+pub const DEFAULT_MODEL: &str = "iic/SenseVoiceSmall";
 
 /// 默认监听端口。
 #[allow(dead_code)]
 pub const DEFAULT_PORT: u16 = 8000;
 
-/// funasr-server 启动超时（秒）。
+/// server 启动超时（秒）。
 /// 首次启动需要从 ModelScope 下载模型（~234MB），加上 PyTorch 加载，
 /// 可能需要 3-5 分钟。后续启动仅模型加载，通常 30-60 秒。
 pub const SERVER_STARTUP_TIMEOUT_SECS: u64 = 300;
@@ -47,9 +45,84 @@ pub const SERVER_STARTUP_TIMEOUT_SECS: u64 = 300;
 /// 全局 server 进程句柄（由 LocalSttEngine 管理）。
 static SERVER_RUNNING: AtomicBool = AtomicBool::new(false);
 
+// ── Python 脚本释放 ────────────────────────────────────────────────────────
+
+/// 获取 `%APPDATA%\blink\python\` 目录路径。
+fn python_dir() -> PathBuf {
+    dirs_next::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("blink")
+        .join("python")
+}
+
+/// 获取 blink_stt_server.py 的目标路径。
+pub fn server_script_path() -> PathBuf {
+    python_dir().join("blink_stt_server.py")
+}
+
+/// 确保 blink_stt_server.py 已释放到 `%APPDATA%\blink\python\`。
+///
+/// 每次调用都覆写（保证脚本随 Blink 版本更新），失败不阻断——
+/// 如果文件已存在且内容相同则跳过写入。
+///
+/// 返回脚本路径，失败时返回 None（调用方应提示用户）。
+pub fn ensure_server_script() -> Result<PathBuf, String> {
+    let dir = python_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建 python 目录失败: {e}"))?;
+
+    let script_path = server_script_path();
+
+    // 检查是否已存在且内容一致（避免无谓写入）
+    let need_write = match std::fs::read_to_string(&script_path) {
+        Ok(existing) => existing != BLINK_STT_SERVER_PY,
+        Err(_) => true, // 不存在或读取失败
+    };
+
+    if need_write {
+        tracing::info!(
+            path = %script_path.display(),
+            "释放 blink_stt_server.py（{}字节）",
+            BLINK_STT_SERVER_PY.len()
+        );
+        std::fs::write(&script_path, BLINK_STT_SERVER_PY)
+            .map_err(|e| format!("写入 blink_stt_server.py 失败: {e}"))?;
+    }
+
+    Ok(script_path)
+}
+
+/// 将热词配置写入 `%APPDATA%\blink\python\hotwords.txt`。
+///
+/// 返回文件路径（如果 hotwords 为空则返回 None，不写文件）。
+pub fn write_hotwords_file(hotwords: &Option<String>) -> Option<PathBuf> {
+    let hotwords = hotwords.as_ref()?;
+    if hotwords.trim().is_empty() {
+        return None;
+    }
+
+    let dir = python_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return None;
+    }
+
+    let path = dir.join("hotwords.txt");
+    match std::fs::write(&path, hotwords) {
+        Ok(()) => {
+            tracing::info!(path = %path.display(), "热词文件已写入");
+            Some(path)
+        }
+        Err(e) => {
+            tracing::warn!(%e, "热词文件写入失败");
+            None
+        }
+    }
+}
+
+// ── 状态结构 ──────────────────────────────────────────────────────────────
+
 /// FunASR 环境 + 服务完整状态。
 ///
-/// 聚合了 Python 环境状态（uv/venv/funasr）和 funasr-server 运行状态，
+/// 聚合了 Python 环境状态（uv/venv/funasr）和 server 运行状态，
 /// 供前端展示和诊断使用。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FunasrEnv {
@@ -66,27 +139,39 @@ pub struct FunasrEnv {
     pub torch_installed: bool,
     /// torch 版本
     pub torch_version: Option<String>,
+    /// 已安装的 PyTorch 是否支持 CUDA
+    pub torch_cuda_available: bool,
     /// funasr 包是否已安装
     pub funasr_installed: bool,
     /// funasr 版本
     pub funasr_version: Option<String>,
+    /// websockets 包是否已安装（流式 STT WebSocket 端点必需）
+    pub websockets_installed: bool,
+    /// websockets 版本
+    pub websockets_version: Option<String>,
     /// Python 环境是否完全就绪
     pub env_ready: bool,
 
-    // ── funasr-server 状态 ──
-    /// funasr-server 是否正在运行
+    // ── server 状态 ──
+    /// server 是否正在运行
     pub server_running: bool,
     /// 当前配置的监听端口
     pub server_port: u16,
-    /// 当前配置的模型
+    /// 当前配置的非流式模型
     pub server_model: String,
+    /// 当前配置的流式模型（None = 未配置流式）
+    pub server_streaming_model: Option<String>,
 }
 
-/// 获取 FunASR 环境 + 服务的完整状态（同步版，会阻塞调用线程）。
+/// 获取环境 + 服务的完整状态（同步版，会阻塞调用线程）。
 ///
 /// 仅用于测试和诊断。生产代码应使用 [`get_env_status_async`]。
 #[allow(dead_code)]
-pub fn get_env_status(server_port: u16, server_model: &str) -> FunasrEnv {
+pub fn get_env_status(
+    server_port: u16,
+    server_model: &str,
+    server_streaming_model: Option<String>,
+) -> FunasrEnv {
     let py_status = crate::infra::platform::python::check_status();
 
     FunasrEnv {
@@ -96,20 +181,28 @@ pub fn get_env_status(server_port: u16, server_model: &str) -> FunasrEnv {
         venv_python_version: py_status.venv_python_version,
         torch_installed: py_status.torch_installed,
         torch_version: py_status.torch_version,
+        torch_cuda_available: py_status.torch_cuda_available,
         funasr_installed: py_status.funasr_installed,
         funasr_version: py_status.funasr_version,
+        websockets_installed: py_status.websockets_installed,
+        websockets_version: py_status.websockets_version,
         env_ready: py_status.env_ready,
         server_running: SERVER_RUNNING.load(Ordering::SeqCst),
         server_port,
         server_model: server_model.to_string(),
+        server_streaming_model,
     }
 }
 
-/// 获取 FunASR 环境 + 服务的完整状态（异步版，不阻塞 async 运行时）。
+/// 获取环境 + 服务的完整状态（异步版，不阻塞 async 运行时）。
 ///
 /// 将 Python 子进程检测放到 `spawn_blocking` 线程池执行。
 /// 适用于 Tauri async 命令中调用，避免阻塞 UI 线程。
-pub async fn get_env_status_async(server_port: u16, server_model: String) -> FunasrEnv {
+pub async fn get_env_status_async(
+    server_port: u16,
+    server_model: String,
+    server_streaming_model: Option<String>,
+) -> FunasrEnv {
     let py_status = crate::infra::platform::python::check_status_async().await;
 
     FunasrEnv {
@@ -119,19 +212,86 @@ pub async fn get_env_status_async(server_port: u16, server_model: String) -> Fun
         venv_python_version: py_status.venv_python_version,
         torch_installed: py_status.torch_installed,
         torch_version: py_status.torch_version,
+        torch_cuda_available: py_status.torch_cuda_available,
         funasr_installed: py_status.funasr_installed,
         funasr_version: py_status.funasr_version,
+        websockets_installed: py_status.websockets_installed,
+        websockets_version: py_status.websockets_version,
         env_ready: py_status.env_ready,
         server_running: SERVER_RUNNING.load(Ordering::SeqCst),
         server_port,
         server_model,
+        server_streaming_model,
     }
 }
 
-/// 检查 funasr-server 是否在指定端口上监听（TCP 级别）。
+// ── 健康检查 ──────────────────────────────────────────────────────────────
+
+/// 判断一行 funasr 日志是否为噪声（应过滤掉）。
+///
+/// FunASR 的 stderr 会输出大量 tqdm 进度条和推理指标，对调试无帮助且刷屏：
+/// - `{'load_data': '0.000', ...}` — 推理指标
+/// - `rtf_avg: 0.227: 100%|██████████|...` — RTF 平均值 + 进度条
+/// - `100%|██████████| 1/1 [00:00<00:00, 8.24it/s]` — tqdm 进度条
+/// - 纯 ANSI 转义序列（`\x1b[34m` 等）
+fn is_funasr_noise(line: &str) -> bool {
+    // tqdm 进度条行
+    if line.contains("it/s]") {
+        return true;
+    }
+    // 推理指标行：`{'load_data': ...}` 或 `rtf_avg:`
+    if line.starts_with("{'load_data'") || line.starts_with("rtf_avg:") {
+        return true;
+    }
+    // 含进度条百分比的行：`100%|` 开头
+    if line.contains("|") && line.contains("%|") {
+        return true;
+    }
+    // FunASR 内部加载噪声
+    if line.contains("trust_remote_code:") {
+        return true;
+    }
+    if line.starts_with("scope_map:") || line.starts_with("excludes:") {
+        return true;
+    }
+    if line.starts_with("funasr version:") {
+        return true;
+    }
+    if line.contains("Check update of funasr") || line.contains("You are using the latest version") {
+        return true;
+    }
+    // 纯 ANSI 转义 + 空白
+    let stripped = strip_ansi(line);
+    stripped.is_empty()
+}
+
+/// 去除 ANSI 转义序列，返回纯文本内容。
+fn strip_ansi(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // ESC sequence: ESC [ ... m
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                while let Some(&c2) = chars.peek() {
+                    chars.next();
+                    if c2.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result.trim().to_string()
+}
+
+/// 检查 server 是否在指定端口上监听（TCP 级别）。
 ///
 /// **注意**：此函数只检查 TCP 端口是否可连接，**不验证 HTTP API 是否就绪**。
-/// `funasr-server` 启动后 uvicorn 先绑定 TCP 端口，但模型可能还在加载（30-60s），
+/// server 启动后 uvicorn 先绑定 TCP 端口，但模型可能还在加载（30-60s），
 /// 此时 TCP 连接成功但 HTTP 请求会失败。
 ///
 /// 用于快速预检（如 `LocalSttEngine::new` 中的快速失败判断）。
@@ -142,7 +302,9 @@ pub fn is_server_ready(port: u16) -> bool {
 
     let addr = format!("localhost:{port}");
     match TcpStream::connect_timeout(
-        &addr.parse().unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], port))),
+        &addr
+            .parse()
+            .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], port))),
         Duration::from_secs(2),
     ) {
         Ok(_) => true,
@@ -150,7 +312,7 @@ pub fn is_server_ready(port: u16) -> bool {
     }
 }
 
-/// 检查 funasr-server 的 HTTP API 是否真正就绪。
+/// 检查 server 的 HTTP API 是否真正就绪。
 ///
 /// 通过 `GET /health` 端点验证：不仅 TCP 端口在监听，而且 FastAPI 应用已启动、
 /// 模型已加载。返回模型加载状态供调用方判断。
@@ -172,20 +334,71 @@ pub async fn is_server_ready_http(port: u16) -> bool {
     }
 }
 
-/// 启动 funasr-server 子进程（异步）。
+/// 检查 server 的 WebSocket 端点 `/ws/stream` 是否可用。
 ///
-/// 使用 Blink 自管理的 venv 中的 Python 启动 `funasr-server`。
+/// 通过尝试建立 WebSocket 连接验证：不仅 TCP 端口在监听、HTTP API 就绪，
+/// 而且 WebSocket 升级功能正常（即 `websockets` 库已安装）。
+///
+/// 返回 `(是否就绪, 失败原因)`。失败原因用于诊断（如 "404 Not Found" 表示缺少 websockets 库）。
+pub async fn is_websocket_ready(port: u16) -> (bool, Option<String>) {
+    let ws_url = format!("ws://localhost:{port}/ws/stream");
+    match tokio_tungstenite::connect_async(&ws_url).await {
+        Ok((_ws, _resp)) => (true, None),
+        Err(e) => {
+            let msg = format!("{e}");
+            (false, Some(msg))
+        }
+    }
+}
+
+// ── server 启动参数 ────────────────────────────────────────────────────────
+
+/// blink_stt_server 启动参数（0.10.3）。
+#[derive(Debug, Clone)]
+pub struct ServerStartParams {
+    /// 非流式模型标识（如 "sensevoice"）
+    pub model: String,
+    /// 流式模型标识（如 "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online"，None = 不启用流式）
+    pub streaming_model: Option<String>,
+    /// 监听端口
+    pub port: u16,
+    /// 推理设备: "cpu" 或 "cuda"
+    pub device: String,
+    /// 热词文件路径（None = 不启用热词）
+    pub hotwords_path: Option<PathBuf>,
+    /// ITN 开关
+    pub use_itn: bool,
+}
+
+impl ServerStartParams {
+    /// 从 SttConfig 构建（读取配置 + 写热词文件）。
+    pub fn from_config() -> Result<Self, String> {
+        let config = crate::app::stt_config::get_stt_config();
+        let local = &config.local_engine;
+
+        // 释放 Python 脚本
+        ensure_server_script()?;
+
+        // 写热词文件
+        let hotwords_path = write_hotwords_file(&local.hotwords);
+
+        Ok(Self {
+            model: local.funasr_model.clone(),
+            streaming_model: local.streaming_model.clone(),
+            port: local.server_port,
+            device: local.device.clone(),
+            hotwords_path,
+            use_itn: local.use_itn,
+        })
+    }
+}
+
+// ── server 启动 ───────────────────────────────────────────────────────────
+
+/// 启动 blink_stt_server 子进程（异步）。
+///
+/// 使用 Blink 自管理的 venv 中的 Python 启动 `blink_stt_server.py`。
 /// 如果环境未就绪（venv 不存在或 funasr 未安装），返回错误提示用户安装。
-///
-/// 参数：
-/// - `model`: FunASR 模型名（如 "sensevoice" / "paraformer"）
-/// - `port`: 监听端口
-/// - `device`: "cpu" 或 "cuda"
-///
-/// 返回子进程句柄 + 日志通道接收端。调用方负责管理子进程生命周期，
-/// 并应 spawn 一个 task 持续读取日志通道转发到前端（避免管道阻塞）。
-///
-/// 如果端口已被占用（服务已在运行），直接返回 Ok(None)。
 ///
 /// # ⚠️ 管道死锁防范
 ///
@@ -193,14 +406,24 @@ pub async fn is_server_ready_http(port: u16) -> bool {
 /// OS 管道缓冲区（Windows ~4KB）写满后子进程会永久阻塞在 write 上。
 /// 本函数内部已 spawn 两个 tokio task 分别读取 stdout/stderr，转发到
 /// tracing 日志和返回的 channel。
+///
+/// 如果端口已被占用（服务已在运行），直接返回 Ok(None)。
 pub async fn start_server(
-    model: &str,
-    port: u16,
-    device: &str,
-) -> Result<Option<(tokio::process::Child, tokio::sync::mpsc::UnboundedReceiver<String>)>, String> {
+    params: &ServerStartParams,
+) -> Result<
+    Option<(
+        tokio::process::Child,
+        tokio::sync::mpsc::UnboundedReceiver<String>,
+    )>,
+    String,
+> {
+    let model = &params.model;
+    let port = params.port;
+    let device = &params.device;
+
     // 如果服务已就绪，无需启动
     if is_server_ready(port) {
-        tracing::info!(port, "funasr-server 已在运行");
+        tracing::info!(port, "blink_stt_server 已在运行");
         SERVER_RUNNING.store(true, Ordering::SeqCst);
         return Ok(None);
     }
@@ -224,67 +447,92 @@ pub async fn start_server(
         );
     }
 
-    // 获取 funasr-server 可执行文件路径（pip install funasr 自动生成）
-    let server_exe = crate::infra::platform::python::venv_funasr_server()
-        .unwrap_or_else(|| {
-            // 回退：如果 funasr-server.exe 不存在，用 python -m funasr.bin.server
-            // 但正常情况下 pip install funasr 会生成 funasr-server.exe
-            tracing::warn!("funasr-server.exe 未找到，尝试用 python -m 方式启动");
-            python.clone()
-        });
-    let use_exe = server_exe != python;
+    // 检查 websockets 是否已安装（流式 STT WebSocket 端点必需）
+    // 如果缺失（如旧版本安装了裸 uvicorn 而非 uvicorn[standard]），自动安装
+    let (ws_ok, _) = crate::infra::platform::python::check_websockets();
+    if !ws_ok {
+        tracing::warn!("websockets 包未安装，正在自动安装 uvicorn[standard]...");
+        let uv_path =
+            crate::infra::platform::python::find_uv().ok_or("uv 不可用，无法安装 websockets")?;
+        crate::infra::platform::python::install_packages(&uv_path, &["uvicorn[standard]"])
+            .await
+            .map_err(|e| {
+                format!("自动安装 websockets 失败: {e}（请手动在设置页点击「安装环境」）")
+            })?;
+        tracing::info!("websockets 包已自动安装");
+    }
+
+    // 确保 blink_stt_server.py 已释放
+    let script_path = ensure_server_script()?;
 
     tracing::info!(
-        server_exe = %server_exe.display(),
+        script = %script_path.display(),
         ?funasr_ver,
         model,
+        streaming_model = ?params.streaming_model,
         port,
         device,
-        "启动 funasr-server 子进程",
+        "启动 blink_stt_server 子进程",
     );
 
-    // 构建启动命令并打印（方便排查）
-    let cmd_display = if use_exe {
-        format!("funasr-server --model {model} --port {port} --device {device}")
-    } else {
-        format!("python -m funasr.bin.server --model {model} --port {port} --device {device}")
-    };
-    tracing::info!("funasr-server 启动命令: {cmd_display}");
+    // 构建启动命令: python blink_stt_server.py --model ... --port ... --device ...
+    let mut cmd_display =
+        format!("python blink_stt_server.py --model {model} --port {port} --device {device}");
+    if let Some(ref sm) = params.streaming_model {
+        cmd_display.push_str(&format!(" --streaming-model {sm}"));
+    }
+    if let Some(ref hw_path) = params.hotwords_path {
+        cmd_display.push_str(&format!(" --hotwords {}", hw_path.display()));
+    }
+    if params.use_itn {
+        cmd_display.push_str(" --use-itn");
+    }
+    tracing::info!("blink_stt_server 启动命令: {cmd_display}");
 
-    let mut cmd = if use_exe {
-        let mut c = tokio::process::Command::new(&server_exe);
-        c.args(["--model", model])
-            .args(["--port", &port.to_string()])
-            .args(["--device", device]);
-        c
-    } else {
-        let mut c = tokio::process::Command::new(&python);
-        c.args(["-m", "funasr.bin.server"])
-            .args(["--model", model])
-            .args(["--port", &port.to_string()])
-            .args(["--device", device]);
-        c
-    };
+    let mut cmd = tokio::process::Command::new(&python);
+    cmd.arg(&script_path)
+        .args(["--model", model])
+        .args(["--port", &port.to_string()])
+        .args(["--device", device]);
+
+    if let Some(ref sm) = params.streaming_model {
+        cmd.args(["--streaming-model", sm]);
+    }
+    if let Some(ref hw_path) = params.hotwords_path {
+        cmd.arg("--hotwords").arg(hw_path);
+    }
+    if params.use_itn {
+        cmd.arg("--use-itn");
+    }
 
     // Python 输出无缓冲 + UTF-8 模式（修复 Windows 控制台中文乱码）
     cmd.env("PYTHONUNBUFFERED", "1");
     cmd.env("PYTHONUTF8", "1");
     cmd.env("PYTHONIOENCODING", "utf-8");
 
+    // 将 ModelScope 模型缓存重定向到 Blink 自管理目录，
+    // 避免模型文件游离在 ~/.cache/modelscope，清理时一键删除。
+    let models_dir = python_dir().join("models");
+    if let Err(e) = std::fs::create_dir_all(&models_dir) {
+        tracing::warn!(%e, "创建 models 目录失败，ModelScope 将使用默认缓存路径");
+    } else {
+        let models_path = models_dir.display().to_string();
+        tracing::info!(path = %models_path, "ModelScope 缓存目录");
+        cmd.env("MODELSCOPE_CACHE", &models_path);
+    }
+
     let mut child = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| format!("启动 funasr-server 失败: {e}"))?;
+        .map_err(|e| format!("启动 blink_stt_server 失败: {e}"))?;
 
     // ── 提取管道句柄，spawn 异步读取 task ──
-    // 不读取会导致管道缓冲区写满后子进程永久阻塞（Windows ~4KB）。
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
     let (log_tx, log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
-    // 读取 stdout/stderr，拆分 \r 以捕获 tqdm 进度条（modelscope 下载进度用 \r 刷新同一行）
     if let Some(stdout) = stdout {
         let tx = log_tx.clone();
         tokio::spawn(async move {
@@ -299,10 +547,11 @@ pub async fn start_server(
                         let s = String::from_utf8_lossy(&buf);
                         for part in s.split('\r') {
                             let trimmed = part.trim_end_matches(['\n', '\r']);
-                            if !trimmed.is_empty() {
-                                tracing::info!(target: "funasr::stdout", "{}", trimmed);
-                                let _ = tx.send(trimmed.to_string());
+                            if trimmed.is_empty() || is_funasr_noise(trimmed) {
+                                continue;
                             }
+                            tracing::info!(target: "funasr::stdout", "{}", trimmed);
+                            let _ = tx.send(trimmed.to_string());
                         }
                     }
                     Err(_) => break,
@@ -325,10 +574,11 @@ pub async fn start_server(
                         let s = String::from_utf8_lossy(&buf);
                         for part in s.split('\r') {
                             let trimmed = part.trim_end_matches(['\n', '\r']);
-                            if !trimmed.is_empty() {
-                                tracing::info!(target: "funasr::stderr", "{}", trimmed);
-                                let _ = tx.send(trimmed.to_string());
+                            if trimmed.is_empty() || is_funasr_noise(trimmed) {
+                                continue;
                             }
+                            tracing::info!(target: "funasr::stderr", "{}", trimmed);
+                            let _ = tx.send(trimmed.to_string());
                         }
                     }
                     Err(_) => break,
@@ -337,23 +587,16 @@ pub async fn start_server(
         });
     }
 
-    // 丢弃原始 sender，这样当所有转发 task 结束后 receiver 会收到 None
     drop(log_tx);
 
     SERVER_RUNNING.store(true, Ordering::SeqCst);
 
-    tracing::info!("funasr-server 子进程已启动，等待模型加载...");
+    tracing::info!("blink_stt_server 子进程已启动，等待模型加载...");
 
     Ok(Some((child, log_rx)))
 }
 
-/// 异步等待 funasr-server 就绪（HTTP 健康检查轮询）。
-///
-/// 在 `start_server` 之后调用，轮询 `/v1/models` 端点直到服务响应或超时。
-///
-/// **注意**：本函数仅做 HTTP 轮询，不检测子进程是否已退出。
-/// 如果子进程启动后立即崩溃，本函数会空等至超时。
-/// 建议调用方自行通过 `child.try_wait()` 检测子进程退出。
+/// 异步等待 server 就绪（HTTP 健康检查轮询）。
 #[allow(dead_code)]
 pub async fn wait_for_server_ready(port: u16) -> Result<(), String> {
     let url = format!("http://localhost:{port}/v1/models");
@@ -362,18 +605,19 @@ pub async fn wait_for_server_ready(port: u16) -> Result<(), String> {
         .build()
         .map_err(|e| format!("HTTP client 创建失败: {e}"))?;
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(SERVER_STARTUP_TIMEOUT_SECS);
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(SERVER_STARTUP_TIMEOUT_SECS);
 
     loop {
         if std::time::Instant::now() > deadline {
             return Err(format!(
-                "funasr-server 在 {SERVER_STARTUP_TIMEOUT_SECS}s 内未就绪（端口 {port}）"
+                "blink_stt_server 在 {SERVER_STARTUP_TIMEOUT_SECS}s 内未就绪（端口 {port}）"
             ));
         }
 
         match client.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                tracing::info!(port, "funasr-server 就绪");
+                tracing::info!(port, "blink_stt_server 就绪");
                 return Ok(());
             }
             _ => {
@@ -388,7 +632,7 @@ pub fn mark_server_stopped() {
     SERVER_RUNNING.store(false, Ordering::SeqCst);
 }
 
-/// 生成 funasr-server 的 base_url（供 CloudSttEngine 使用）。
+/// 生成 server 的 base_url（供 HTTP 转录使用）。
 pub fn server_base_url(port: u16) -> String {
     format!("http://localhost:{port}/v1")
 }
@@ -398,7 +642,185 @@ pub fn server_base_url(port: u16) -> String {
 pub fn server_status_summary(port: u16, model: &str) -> String {
     let ready = is_server_ready(port);
     let running = SERVER_RUNNING.load(Ordering::SeqCst);
-    format!(
-        "funasr-server: model={model}, port={port}, running={running}, ready={ready}"
-    )
+    format!("blink_stt_server: model={model}, port={port}, running={running}, ready={ready}")
+}
+
+// ── 测试 ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_script_is_not_empty() {
+        assert!(!BLINK_STT_SERVER_PY.is_empty());
+        // 验证脚本是有效 Python（含关键标识）
+        assert!(BLINK_STT_SERVER_PY.contains("blink_stt_server"));
+        assert!(BLINK_STT_SERVER_PY.contains("/v1/audio/transcriptions"));
+        assert!(BLINK_STT_SERVER_PY.contains("/ws/stream"));
+        assert!(BLINK_STT_SERVER_PY.contains("/health"));
+    }
+
+    #[test]
+    fn server_script_path_is_in_python_dir() {
+        let path = server_script_path();
+        assert!(
+            path.ends_with("python\\blink_stt_server.py")
+                || path.ends_with("python/blink_stt_server.py"),
+            "script path should be in python dir, got: {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn ensure_server_script_creates_file() {
+        // 释放脚本（幂等操作）
+        let path = ensure_server_script().expect("ensure_server_script 失败");
+        assert!(path.exists(), "script file should exist after ensure");
+
+        // 验证文件内容与嵌入内容一致
+        let content = std::fs::read_to_string(&path).expect("读取脚本失败");
+        assert_eq!(content, BLINK_STT_SERVER_PY);
+    }
+
+    #[test]
+    fn write_hotwords_none_for_empty() {
+        let result = write_hotwords_file(&None);
+        assert!(result.is_none());
+
+        let result = write_hotwords_file(&Some("   \n  ".to_string()));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn write_hotwords_creates_file() {
+        let hotwords = "美团 100\n快手 80\nBlink 100".to_string();
+        let path = write_hotwords_file(&Some(hotwords.clone()));
+        assert!(path.is_some(), "热词文件应被创建");
+
+        let path = path.unwrap();
+        assert!(path.exists(), "热词文件应存在");
+        assert!(path.ends_with("hotwords.txt"));
+
+        let content = std::fs::read_to_string(&path).expect("读取热词文件失败");
+        assert_eq!(content, hotwords);
+    }
+
+    // ── WebSocket 相关测试 ──
+
+    /// 验证嵌入的 Python 脚本包含 WebSocket 库检测函数。
+    #[test]
+    fn embedded_script_contains_websocket_check() {
+        assert!(
+            BLINK_STT_SERVER_PY.contains("_check_websocket_support"),
+            "blink_stt_server.py 应包含 _check_websocket_support 函数"
+        );
+        assert!(
+            BLINK_STT_SERVER_PY.contains("import websockets"),
+            "blink_stt_server.py 应检测 websockets 库"
+        );
+        assert!(
+            BLINK_STT_SERVER_PY.contains("uvicorn[standard]"),
+            "blink_stt_server.py 应在警告中提示安装 uvicorn[standard]"
+        );
+    }
+
+    /// 验证嵌入的 Python 脚本包含 WebSocket 端点定义。
+    #[test]
+    fn embedded_script_contains_websocket_endpoint() {
+        assert!(
+            BLINK_STT_SERVER_PY.contains("@app.websocket(\"/ws/stream\")"),
+            "blink_stt_server.py 应定义 /ws/stream WebSocket 端点"
+        );
+        assert!(
+            BLINK_STT_SERVER_PY.contains("WebSocketDisconnect"),
+            "blink_stt_server.py 应处理 WebSocketDisconnect"
+        );
+    }
+
+    /// 验证 start_server 中检测 websockets 并自动安装的逻辑存在。
+    /// 通过检查 check_websockets 函数是否公开导出来间接验证。
+    #[test]
+    fn start_server_contains_websockets_auto_install() {
+        // check_websockets 函数应存在且可调用（编译时即验证）
+        let _ = crate::infra::platform::python::check_websockets();
+        // is_websocket_ready 函数应存在（编译时即验证）
+        // 注意：is_websocket_ready 是 async，此处仅验证函数存在
+    }
+
+    // ── 日志噪声过滤测试 ──
+
+    #[test]
+    fn noise_filter_detects_tqdm_progress() {
+        assert!(is_funasr_noise("100%|\x1b[34m██████████\x1b[0m| 1/1 [00:00<00:00, 8.24it/s]"));
+        assert!(is_funasr_noise("  0%|\x1b[34m          \x1b[0m| 0/1 [00:00<?, ?it/s]"));
+    }
+
+    #[test]
+    fn noise_filter_detects_rtf_metrics() {
+        assert!(is_funasr_noise("{'load_data': '0.000', 'extract_feat': 0.0, 'forward': '0.000', 'batch_size': '1', 'rtf': '-0.000'}, : 100%|\x1b[34m██████████\x1b[0m| 1/1 [00:00<?, ?it/s]"));
+        assert!(is_funasr_noise("rtf_avg: 0.227: 100%|\x1b[34m██████████\x1b[0m| 1/1 [00:00<00:00,  8.24it/s]"));
+    }
+
+    #[test]
+    fn noise_filter_preserves_useful_logs() {
+        assert!(!is_funasr_noise("INFO:     Started server process [293704]"));
+        assert!(!is_funasr_noise("INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)"));
+        assert!(!is_funasr_noise("Downloading 11 files from iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online@master"));
+        assert!(!is_funasr_noise("19:16:18 [root] INFO: Loading pretrained params from C:\\Users\\...\\model.pt"));
+        assert!(!is_funasr_noise("Loading ckpt: ..., status: <All keys matched successfully>"));
+    }
+
+    #[test]
+    fn noise_filter_detects_funasr_internal_noise() {
+        assert!(is_funasr_noise("19:51:15 [root] WARNING: trust_remote_code: False"));
+        assert!(is_funasr_noise("scope_map: ['module.', 'None']"));
+        assert!(is_funasr_noise("excludes: None"));
+        assert!(is_funasr_noise("funasr version: 1.3.14."));
+        assert!(is_funasr_noise("Check update of funasr, and it would cost few times."));
+        assert!(is_funasr_noise("You are using the latest version of funasr-1.3.14"));
+    }
+
+    #[test]
+    fn noise_filter_detects_pure_ansi() {
+        assert!(is_funasr_noise("\x1b[34m\x1b[0m"));
+        assert!(is_funasr_noise(""));
+    }
+
+    /// 验证嵌入的 Python 脚本包含模型名解析函数（修复 FunASR 1.3.14 短名 404 问题）。
+    #[test]
+    fn embedded_script_contains_model_alias_resolution() {
+        assert!(
+            BLINK_STT_SERVER_PY.contains("_MODEL_ALIASES"),
+            "blink_stt_server.py 应包含 _MODEL_ALIASES 模型别名映射"
+        );
+        assert!(
+            BLINK_STT_SERVER_PY.contains("_resolve_model_id"),
+            "blink_stt_server.py 应包含 _resolve_model_id 函数"
+        );
+        assert!(
+            BLINK_STT_SERVER_PY.contains("iic/SenseVoiceSmall"),
+            "blink_stt_server.py 应包含完整 ModelScope ID 'iic/SenseVoiceSmall'"
+        );
+    }
+
+    /// 验证嵌入的 Python 脚本包含 SenseVoice 输出标签后处理。
+    ///
+    /// SenseVoice 模型输出形如 `<|zh|><|NEUTRAL|><|Speech|><|withitn|>文本`，
+    /// 需用 `rich_transcription_postprocess` 去除这些元数据标签。
+    #[test]
+    fn embedded_script_contains_postprocess_for_sensevoice_tags() {
+        assert!(
+            BLINK_STT_SERVER_PY.contains("_postprocess_text"),
+            "blink_stt_server.py 应包含 _postprocess_text 后处理函数"
+        );
+        assert!(
+            BLINK_STT_SERVER_PY.contains("rich_transcription_postprocess"),
+            "blink_stt_server.py 应导入 rich_transcription_postprocess"
+        );
+        assert!(
+            BLINK_STT_SERVER_PY.contains("_postprocess_text(raw_text)"),
+            "transcribe 端点应调用 _postprocess_text"
+        );
+    }
 }

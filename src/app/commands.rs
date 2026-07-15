@@ -240,7 +240,6 @@ pub async fn list_builtin_actions(
     crate::domain::search::list_builtin_actions(&disabled, &registry, &config.language)
 }
 
-
 /// 触发 Chord 动作（0.8.5 §六）。前端 Alt+字母 → invoke 此 command。
 ///
 /// key 为字母（不区分大小写）。未注册 → Err（前端 log，不弹窗）。
@@ -256,7 +255,8 @@ pub async fn list_builtin_actions(
 #[tauri::command]
 pub async fn trigger_chord(app: tauri::AppHandle, key: String) -> Result<(), String> {
     tracing::debug!(%key, "trigger_chord");
-    let Some(registry) = app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>() else {
+    let Some(registry) = app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
+    else {
         return Err("chord registry 未就绪".into());
     };
     // 查该 key 对应的 action id,若在 disabled 列表 → 早退
@@ -345,7 +345,8 @@ pub async fn list_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Value>
     let pool = app.state::<sqlx::SqlitePool>();
     let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
     let language = crate::app::config::get_config(&pool).await.language;
-    let Some(registry) = app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>() else {
+    let Some(registry) = app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
+    else {
         return Vec::new();
     };
     registry.list(&disabled, &language)
@@ -360,7 +361,8 @@ pub async fn list_all_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Va
     let pool = app.state::<sqlx::SqlitePool>();
     let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
     let language = crate::app::config::get_config(&pool).await.language;
-    let Some(registry) = app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>() else {
+    let Some(registry) = app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
+    else {
         return Vec::new();
     };
     registry.list_all(&disabled, &language)
@@ -372,7 +374,6 @@ pub async fn list_all_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Va
 pub fn is_alt_down() -> bool {
     crate::infra::platform::hotkey::is_alt_down()
 }
-
 
 /// 列出所有已注册的 context binding + 当前 enabled 状态（0.8.3 §4.6 设置页面板）。
 ///
@@ -569,7 +570,9 @@ pub async fn set_config(
         "language" => {
             let language: String = serde_json::from_value(value).map_err(|e| e.to_string())?;
             crate::app::config::update_language(&pool, language.clone()).await?;
-            if let Some(ss) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
+            if let Some(ss) =
+                app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
+            {
                 ss.update_language(language.clone());
             }
             let _ = app.emit("blink://config-changed", ());
@@ -586,8 +589,11 @@ pub async fn set_config(
             crate::app::config::update_auto_start(&pool, auto_start).await?;
             use tauri_plugin_autostart::ManagerExt;
             let manager = app.autolaunch();
-            if auto_start { manager.enable().map_err(|e| e.to_string())?; }
-            else { manager.disable().map_err(|e| e.to_string())?; }
+            if auto_start {
+                manager.enable().map_err(|e| e.to_string())?;
+            } else {
+                manager.disable().map_err(|e| e.to_string())?;
+            }
             tracing::info!(auto_start, "开机自启配置已更新");
         }
         "tap_threshold" => {
@@ -606,7 +612,10 @@ pub async fn set_config(
             let enabled: bool = serde_json::from_value(value).map_err(|e| e.to_string())?;
             // 只读写 clipboard:config 分片，不走门面 get_config（避免 7 片全读全写）。
             // 0.9 删掉 AppConfig.clipboard 字段后此处不受影响。
-            let mut clip_cfg = crate::app::config::ConfigStore::get::<crate::infra::data::clipboard::ClipboardConfig>(&pool).await;
+            let mut clip_cfg = crate::app::config::ConfigStore::get::<
+                crate::infra::data::clipboard::ClipboardConfig,
+            >(&pool)
+            .await;
             clip_cfg.enabled = enabled;
             crate::app::config::ConfigStore::set(&pool, &clip_cfg).await?;
             crate::infra::platform::clipboard::set_active(enabled);
@@ -627,7 +636,9 @@ pub async fn set_config(
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
             let max_results = general.max_results;
             crate::app::config::update_general_config(&pool, &general).await?;
-            if let Some(ss) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
+            if let Some(ss) =
+                app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
+            {
                 ss.update_max_results(max_results as usize);
             }
             let _ = app.emit("blink://config-changed", ());
@@ -644,9 +655,15 @@ pub async fn set_config(
             let v: crate::app::config::AutosuggestUpdate =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
             crate::app::config::update_autosuggest_config(
-                &pool, v.enabled, v.min_score, v.tab_key.clone(),
-            ).await?;
-            if let Some(ss) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
+                &pool,
+                v.enabled,
+                v.min_score,
+                v.tab_key.clone(),
+            )
+            .await?;
+            if let Some(ss) =
+                app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
+            {
                 ss.update_autosuggest_config(v.enabled, v.min_score);
             }
             tracing::info!(v.enabled, v.min_score, tab_key = %v.tab_key, "Autosuggest 配置已更新");
@@ -654,9 +671,8 @@ pub async fn set_config(
         "chord_toggles" => {
             let v: crate::app::config::ChordTogglesUpdate =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::update_chord_toggles(
-                &pool, v.chord_enabled, v.chord_hint_visible,
-            ).await?;
+            crate::app::config::update_chord_toggles(&pool, v.chord_enabled, v.chord_hint_visible)
+                .await?;
             let _ = app.emit("blink://config-changed", ());
             tracing::info!(v.chord_enabled, v.chord_hint_visible, "Chord 开关已更新");
         }
@@ -665,23 +681,34 @@ pub async fn set_config(
         "disabled_builtin_actions" => {
             let disabled: Vec<String> = serde_json::from_value(value).map_err(|e| e.to_string())?;
             crate::app::config::update_disabled_builtin_actions(&pool, disabled.clone()).await?;
-            let search_service = app.state::<std::sync::Arc<crate::domain::search::SearchService>>();
+            let search_service =
+                app.state::<std::sync::Arc<crate::domain::search::SearchService>>();
             search_service.update_disabled_builtin_actions(disabled.clone());
             tracing::info!(count = disabled.len(), ?disabled, "内置动作禁用列表已更新");
         }
         "disabled_context_bindings" => {
             let disabled: Vec<String> = serde_json::from_value(value).map_err(|e| e.to_string())?;
             crate::app::config::update_disabled_context_bindings(&pool, disabled.clone()).await?;
-            if let Some(ss) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
+            if let Some(ss) =
+                app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
+            {
                 ss.update_disabled_context_bindings(disabled.clone());
             }
-            tracing::info!(count = disabled.len(), ?disabled, "Context binding 禁用列表已更新");
+            tracing::info!(
+                count = disabled.len(),
+                ?disabled,
+                "Context binding 禁用列表已更新"
+            );
         }
         "disabled_chord_actions" => {
             let disabled: Vec<String> = serde_json::from_value(value).map_err(|e| e.to_string())?;
             crate::app::config::update_disabled_chord_actions(&pool, disabled.clone()).await?;
             let _ = app.emit("blink://config-changed", ());
-            tracing::info!(count = disabled.len(), ?disabled, "Chord 动作禁用列表已更新");
+            tracing::info!(
+                count = disabled.len(),
+                ?disabled,
+                "Chord 动作禁用列表已更新"
+            );
         }
         "window_opacity" => {
             let opacity: f64 = serde_json::from_value(value).map_err(|e| e.to_string())?;
@@ -699,8 +726,14 @@ pub async fn set_config(
             let fs: crate::app::config::FileSearchConfig =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
             crate::app::config::update_file_search(&pool, fs.clone()).await?;
-            if let Some(ss) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
-                ss.update_engine_config("file", crate::domain::search::EngineConfigUpdate::File(fs.clone())).await;
+            if let Some(ss) =
+                app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
+            {
+                ss.update_engine_config(
+                    "file",
+                    crate::domain::search::EngineConfigUpdate::File(fs.clone()),
+                )
+                .await;
             }
             tracing::info!(enabled = fs.enabled, data_source = %fs.data_source, "文件搜索配置已更新");
         }
@@ -708,17 +741,33 @@ pub async fn set_config(
             let sm: crate::app::config::StartMenuConfig =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
             crate::app::config::update_start_menu_config(&pool, &sm).await?;
-            if let Some(ss) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
-                ss.update_engine_config("start_menu", crate::domain::search::EngineConfigUpdate::StartMenu(sm.clone())).await;
+            if let Some(ss) =
+                app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
+            {
+                ss.update_engine_config(
+                    "start_menu",
+                    crate::domain::search::EngineConfigUpdate::StartMenu(sm.clone()),
+                )
+                .await;
             }
-            tracing::info!(enabled = sm.enabled, scan_depth = sm.scan_depth, "应用搜索配置已更新");
+            tracing::info!(
+                enabled = sm.enabled,
+                scan_depth = sm.scan_depth,
+                "应用搜索配置已更新"
+            );
         }
         "calc_config" => {
             let cc: crate::app::config::CalcConfig =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
             crate::app::config::update_calc_config(&pool, &cc).await?;
-            if let Some(ss) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
-                ss.update_engine_config("calc", crate::domain::search::EngineConfigUpdate::Calc(cc.clone())).await;
+            if let Some(ss) =
+                app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
+            {
+                ss.update_engine_config(
+                    "calc",
+                    crate::domain::search::EngineConfigUpdate::Calc(cc.clone()),
+                )
+                .await;
             }
             tracing::info!(enabled = cc.enabled, "计算器配置已更新");
         }
@@ -730,7 +779,11 @@ pub async fn set_config(
             let engine = app.state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>();
             let has_http = !v.http.is_empty();
             let has_https = !v.https.is_empty();
-            let proxy = if !has_http && !has_https { None } else { Some((v.http, v.https)) };
+            let proxy = if !has_http && !has_https {
+                None
+            } else {
+                Some((v.http, v.https))
+            };
             engine.update_global_proxy(proxy).await;
             tracing::info!(has_http, has_https, "全局代理配置已更新");
         }
@@ -744,10 +797,16 @@ pub async fn set_config(
             let mut config = engine.get_config(&v.plugin_id).unwrap_or_default();
             config.enabled = v.enabled;
             config.settings = v.settings;
-            let result = engine.update_config(&v.plugin_id, config, Some(&router)).await;
+            let result = engine
+                .update_config(&v.plugin_id, config, Some(&router))
+                .await;
             match &result {
-                Ok(_) => tracing::info!(plugin_id = %v.plugin_id, enabled = v.enabled, "插件配置已更新"),
-                Err(err) => tracing::warn!(plugin_id = %v.plugin_id, error = %err, "插件配置更新失败"),
+                Ok(_) => {
+                    tracing::info!(plugin_id = %v.plugin_id, enabled = v.enabled, "插件配置已更新")
+                }
+                Err(err) => {
+                    tracing::warn!(plugin_id = %v.plugin_id, error = %err, "插件配置更新失败")
+                }
             }
             result?;
         }
@@ -759,7 +818,9 @@ pub async fn set_config(
             crate::app::config::set_context_config(&pool, &ctx).await?;
             crate::infra::platform::selection::set_active(ctx.selection_enabled);
             crate::infra::platform::selection::set_sensitive_apps(ctx.sensitive_apps.clone());
-            if let Some(mem) = app.try_state::<std::sync::Arc<std::sync::RwLock<crate::app::config::ContextConfig>>>() {
+            if let Some(mem) = app
+                .try_state::<std::sync::Arc<std::sync::RwLock<crate::app::config::ContextConfig>>>()
+            {
                 *mem.write().unwrap() = ctx;
             }
             tracing::debug!("Context 配置已更新");
@@ -778,11 +839,16 @@ pub async fn set_config(
             crate::app::config::ConfigStore::set(&pool, &ai).await?;
 
             // registry 热更新——空档降级 / factory 失败静默跳过 / 复用未变动实例
-            if let Some(reg) = app.try_state::<std::sync::Arc<crate::domain::ai::AIProviderRegistry>>() {
+            if let Some(reg) =
+                app.try_state::<std::sync::Arc<crate::domain::ai::AIProviderRegistry>>()
+            {
                 reg.reload(&ai);
             }
 
-            let _ = app.emit("blink://config-changed", serde_json::json!({ "key": "ai_config" }));
+            let _ = app.emit(
+                "blink://config-changed",
+                serde_json::json!({ "key": "ai_config" }),
+            );
             tracing::info!(
                 enabled = ai.enabled,
                 providers = ai.providers.len(),
@@ -857,13 +923,9 @@ pub async fn save_ai_secret(
 /// reload;这里 bump 一次是**未来 UX 铺路**(若加"清空密钥保留 provider"入口,
 /// 光删 CM 不 bump 会让旧 Arc 继续带过期密钥用)。
 #[tauri::command]
-pub async fn delete_ai_secret(
-    provider_id: String,
-    app: tauri::AppHandle,
-) -> Result<(), String> {
+pub async fn delete_ai_secret(provider_id: String, app: tauri::AppHandle) -> Result<(), String> {
     let bump = || {
-        if let Some(reg) =
-            app.try_state::<std::sync::Arc<crate::domain::ai::AIProviderRegistry>>()
+        if let Some(reg) = app.try_state::<std::sync::Arc<crate::domain::ai::AIProviderRegistry>>()
         {
             reg.bump_secret_epoch();
         }
@@ -903,7 +965,9 @@ pub async fn has_ai_secret(provider_id: String) -> Result<bool, String> {
 #[tauri::command]
 pub async fn get_ai_secret_hint(provider_id: String) -> Result<Option<String>, String> {
     match crate::infra::platform::secret::load_secret(&provider_id, "key") {
-        Ok(secret) => Ok(Some(crate::infra::platform::secret::format_hint(secret.expose()))),
+        Ok(secret) => Ok(Some(crate::infra::platform::secret::format_hint(
+            secret.expose(),
+        ))),
         Err(crate::infra::platform::secret::SecretError::NotFound(_)) => Ok(None),
         Err(e) => Err(e.to_string()),
     }
@@ -1028,14 +1092,20 @@ async fn fetch_openai_models(
                     .await
                     .ok()
                     .and_then(|v| {
-                        let arr = v.get("data").and_then(|d| d.as_array())
+                        let arr = v
+                            .get("data")
+                            .and_then(|d| d.as_array())
                             .or_else(|| v.get("models").and_then(|m| m.as_array()))
                             .or_else(|| v.as_array());
                         arr.map(|a| {
                             a.iter()
                                 .filter_map(|m| {
-                                    m.get("id").and_then(|id| id.as_str()).map(String::from)
-                                        .or_else(|| m.get("name").and_then(|n| n.as_str()).map(String::from))
+                                    m.get("id")
+                                        .and_then(|id| id.as_str())
+                                        .map(String::from)
+                                        .or_else(|| {
+                                            m.get("name").and_then(|n| n.as_str()).map(String::from)
+                                        })
                                 })
                                 .collect::<Vec<_>>()
                         })
@@ -1135,7 +1205,9 @@ async fn fetch_anthropic_models(
                 .and_then(|v| {
                     v.get("data").and_then(|d| d.as_array()).map(|arr| {
                         arr.iter()
-                            .filter_map(|m| m.get("id").and_then(|id| id.as_str()).map(String::from))
+                            .filter_map(|m| {
+                                m.get("id").and_then(|id| id.as_str()).map(String::from)
+                            })
                             .collect::<Vec<_>>()
                     })
                 })
@@ -1391,7 +1463,9 @@ pub fn open_log_file() -> Result<(), String> {
         format!("/select,{}", path.display())
     } else {
         // 当天尚无日志（如 error 级未产生），直接打开文件夹
-        crate::infra::utils::logging::log_dir().display().to_string()
+        crate::infra::utils::logging::log_dir()
+            .display()
+            .to_string()
     };
     std::process::Command::new("explorer.exe")
         .arg(arg)
@@ -1489,7 +1563,9 @@ pub async fn toggle_default_trigger(
         config.disabled_default_triggers.retain(|k| k != &keyword);
     }
 
-    engine.update_config(&plugin_id, config, Some(&router)).await?;
+    engine
+        .update_config(&plugin_id, config, Some(&router))
+        .await?;
     tracing::info!(plugin_id, keyword, disabled, "默认触发词状态已更新");
     Ok(())
 }
@@ -1508,18 +1584,26 @@ pub async fn add_custom_trigger(
 
     // 检查是否已存在（不区分大小写，简单重复检查）
     let keyword_lower = keyword.to_lowercase();
-    if config.custom_triggers.iter().any(|t| t.keyword.to_lowercase() == keyword_lower) {
+    if config
+        .custom_triggers
+        .iter()
+        .any(|t| t.keyword.to_lowercase() == keyword_lower)
+    {
         return Err(format!("触发词 '{keyword}' 已存在"));
     }
 
     // 添加新触发词
-    config.custom_triggers.push(crate::app::config::CustomTrigger {
-        keyword: keyword.clone(),
-        enabled: true,
-        surface: None,
-    });
+    config
+        .custom_triggers
+        .push(crate::app::config::CustomTrigger {
+            keyword: keyword.clone(),
+            enabled: true,
+            surface: None,
+        });
 
-    engine.update_config(&plugin_id, config, Some(&router)).await?;
+    engine
+        .update_config(&plugin_id, config, Some(&router))
+        .await?;
     tracing::info!(plugin_id, keyword, "自定义触发词已添加");
     Ok(())
 }
@@ -1542,7 +1626,9 @@ pub async fn delete_custom_trigger(
         return Err(format!("触发词 '{keyword}' 不存在"));
     }
 
-    engine.update_config(&plugin_id, config, Some(&router)).await?;
+    engine
+        .update_config(&plugin_id, config, Some(&router))
+        .await?;
     tracing::info!(plugin_id, keyword, "自定义触发词已删除");
     Ok(())
 }
@@ -1616,11 +1702,14 @@ pub async fn open_containing_folder(path: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn open_lnk_target(lnk_path: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
-        use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
         use windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW;
+        use windows::Win32::System::Com::{
+            CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+            CoUninitialize, IPersistFile,
+        };
         use windows::Win32::UI::Shell::{IShellLinkW, ShellExecuteW};
         use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-        use windows::core::{Interface, GUID, PCWSTR, w};
+        use windows::core::{GUID, Interface, PCWSTR, w};
 
         // CLSID_ShellLink（00021401-0000-0000-C000-000000000046）
         const CLSID_SHELLLINK: GUID = GUID::from_u128(0x00021401_0000_0000_C000_000000000046);
@@ -1630,23 +1719,29 @@ pub async fn open_lnk_target(lnk_path: String) -> Result<(), String> {
         let should_uninit = com_hr.is_ok();
         struct ComUninit(bool);
         impl Drop for ComUninit {
-            fn drop(&mut self) { if self.0 { unsafe { CoUninitialize() }; } }
+            fn drop(&mut self) {
+                if self.0 {
+                    unsafe { CoUninitialize() };
+                }
+            }
         }
         let _com = ComUninit(should_uninit);
 
         unsafe {
             // 创建 ShellLink COM 对象
-            let link: IShellLinkW = CoCreateInstance(
-                &CLSID_SHELLLINK,
-                None,
-                CLSCTX_INPROC_SERVER,
-            ).map_err(|e| format!("创建 ShellLink 失败: {e}"))?;
+            let link: IShellLinkW = CoCreateInstance(&CLSID_SHELLLINK, None, CLSCTX_INPROC_SERVER)
+                .map_err(|e| format!("创建 ShellLink 失败: {e}"))?;
 
             // 加载 .lnk 文件
-            let persist: IPersistFile = link.cast()
+            let persist: IPersistFile = link
+                .cast()
                 .map_err(|e| format!("获取 IPersistFile 失败: {e}"))?;
             let lnk_wide: Vec<u16> = lnk_path.encode_utf16().chain(std::iter::once(0)).collect();
-            persist.Load(PCWSTR(lnk_wide.as_ptr()), windows::Win32::System::Com::STGM_READ)
+            persist
+                .Load(
+                    PCWSTR(lnk_wide.as_ptr()),
+                    windows::Win32::System::Com::STGM_READ,
+                )
                 .map_err(|e| format!("加载 .lnk 失败: {e}"))?;
 
             // 解析目标路径
@@ -1655,7 +1750,8 @@ pub async fn open_lnk_target(lnk_path: String) -> Result<(), String> {
             link.GetPath(&mut buf, &mut find_data as *mut _, 0)
                 .map_err(|e| format!("获取目标路径失败: {e}"))?;
 
-            let target = PCWSTR(buf.as_ptr()).to_string()
+            let target = PCWSTR(buf.as_ptr())
+                .to_string()
                 .map_err(|e| format!("路径转换失败: {e}"))?;
             let target = target.trim();
 
@@ -1691,13 +1787,21 @@ pub async fn open_lnk_target(lnk_path: String) -> Result<(), String> {
 pub async fn copy_to_clipboard(text: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         use windows::Win32::Foundation::HWND;
-        use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
-        use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+        use windows::Win32::System::DataExchange::{
+            CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+        };
+        use windows::Win32::System::Memory::{
+            GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock,
+        };
 
         // RAII guard: 确保 CloseClipboard 在所有路径上被调用
         struct ClipboardGuard;
         impl Drop for ClipboardGuard {
-            fn drop(&mut self) { unsafe { let _ = CloseClipboard(); } }
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = CloseClipboard();
+                }
+            }
         }
 
         unsafe {
@@ -1753,11 +1857,10 @@ pub async fn list_running_processes() -> Vec<crate::infra::platform::context::Ru
 #[tauri::command]
 pub async fn record_hotkey() -> Result<serde_json::Value, String> {
     // 在阻塞线程中等待录制（事件由 ll_proc 喂入 recorder 状态机）
-    let result = tokio::task::spawn_blocking(|| {
-        crate::infra::platform::hotkey::record_hotkey_blocking()
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+    let result =
+        tokio::task::spawn_blocking(|| crate::infra::platform::hotkey::record_hotkey_blocking())
+            .await
+            .map_err(|e| e.to_string())?;
 
     match result {
         Some(record) => {
@@ -1803,7 +1906,11 @@ pub async fn show_context_menu(
                 .and_then(|k| k.get_value::<u32, _>("AppsUseLightTheme"))
                 .map(|v| v == 1)
                 .unwrap_or(false);
-            if is_light { "light".to_string() } else { "dark".to_string() }
+            if is_light {
+                "light".to_string()
+            } else {
+                "dark".to_string()
+            }
         } else {
             raw
         }
@@ -1826,7 +1933,10 @@ pub async fn show_context_menu(
         // tao 的 wndproc 收到后会按建议 rect 再改一次尺寸——把我们刚设的物理尺寸推翻，
         // 症状是「切屏首次右键宽高错，第二次才对」。破法：show 之后再补一次
         // place_at_physical，让 WM_DPICHANGED 的抢跑跑完后再纠正一次。
-        let hwnd_opt = win.hwnd().ok().map(|h| windows::Win32::Foundation::HWND(h.0 as _));
+        let hwnd_opt = win
+            .hwnd()
+            .ok()
+            .map(|h| windows::Win32::Foundation::HWND(h.0 as _));
         if let Some(hwnd) = hwnd_opt {
             crate::infra::platform::window::place_at_physical(hwnd, fx, fy, fw, fh);
         } else {
@@ -1862,23 +1972,19 @@ pub async fn show_context_menu(
     let encoded_items = urlencoding::encode(&items).to_string();
     let url = format!("contextmenu-popup.html?items={encoded_items}&theme={theme}");
     tracing::debug!(fx, fy, fw, fh, "创建右键菜单窗口");
-    let _win = WebviewWindowBuilder::new(
-        &app,
-        "context-menu",
-        WebviewUrl::App(url.into()),
-    )
-    .title("")
-    .inner_size(width, height) // 逻辑像素占位，稍后 place_at_physical 覆盖
-    .position(0.0, 0.0)
-    .decorations(false)
-    .transparent(false)
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .visible(false) // 先隐藏建，place 后再 show，避免闪一下错位窗口
-    .focused(false)
-    .resizable(false)
-    .build()
-    .map_err(|e| format!("创建右键菜单窗口失败: {e}"))?;
+    let _win = WebviewWindowBuilder::new(&app, "context-menu", WebviewUrl::App(url.into()))
+        .title("")
+        .inner_size(width, height) // 逻辑像素占位，稍后 place_at_physical 覆盖
+        .position(0.0, 0.0)
+        .decorations(false)
+        .transparent(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .visible(false) // 先隐藏建，place 后再 show，避免闪一下错位窗口
+        .focused(false)
+        .resizable(false)
+        .build()
+        .map_err(|e| format!("创建右键菜单窗口失败: {e}"))?;
 
     if let Ok(hwnd) = _win.hwnd() {
         let hwnd = windows::Win32::Foundation::HWND(hwnd.0 as _);
@@ -1894,7 +2000,14 @@ pub async fn show_context_menu(
         let _ = _win.show();
     }
 
-    tracing::trace!(fx, fy, fw, fh, items_len = items.len(), "右键菜单窗口已创建");
+    tracing::trace!(
+        fx,
+        fy,
+        fw,
+        fh,
+        items_len = items.len(),
+        "右键菜单窗口已创建"
+    );
     Ok(())
 }
 
@@ -2012,7 +2125,8 @@ pub async fn get_perf_percentiles(
     limit: Option<i64>,
 ) -> serde_json::Value {
     let pool = app.state::<sqlx::SqlitePool>();
-    crate::infra::utils::perf::query_percentiles(&pool, &category, &name, limit.unwrap_or(100)).await
+    crate::infra::utils::perf::query_percentiles(&pool, &category, &name, limit.unwrap_or(100))
+        .await
 }
 
 /// 查询慢查询日志。
@@ -2161,7 +2275,9 @@ pub async fn set_config_section(
 ) -> Result<(), String> {
     let pool = app.state::<sqlx::SqlitePool>();
     let json = serde_json::to_string(&value).map_err(|e| format!("序列化失败: {e}"))?;
-    crate::infra::data::history::set_config(&pool, &key, &json).await.map_err(|e| format!("配置写入失败: {e}"))?;
+    crate::infra::data::history::set_config(&pool, &key, &json)
+        .await
+        .map_err(|e| format!("配置写入失败: {e}"))?;
 
     // 广播配置变更事件（前端各模块按 key 订阅）
     if let Err(e) = app.emit("blink://config-changed", serde_json::json!({ "key": key })) {
@@ -2179,8 +2295,8 @@ pub async fn get_stt_config(
     app: tauri::AppHandle,
 ) -> Result<crate::app::stt_config::SttConfig, String> {
     let pool = app.state::<sqlx::SqlitePool>();
-    let config = crate::app::config::ConfigStore::get::<crate::app::stt_config::SttConfig>(&pool)
-        .await;
+    let config =
+        crate::app::config::ConfigStore::get::<crate::app::stt_config::SttConfig>(&pool).await;
     Ok(config)
 }
 
@@ -2197,7 +2313,10 @@ pub async fn set_stt_config(
     // 更新内存缓存（供 STT 引擎同步读取）
     crate::app::stt_config::update_cache(&config);
     // 广播配置变更
-    let _ = app.emit("blink://config-changed", serde_json::json!({ "key": "stt:config" }));
+    let _ = app.emit(
+        "blink://config-changed",
+        serde_json::json!({ "key": "stt:config" }),
+    );
     Ok(())
 }
 
@@ -2210,19 +2329,19 @@ pub async fn list_stt_models() -> Result<Vec<serde_json::Value>, String> {
     let models = crate::domain::stt::model_registry();
     let config = crate::app::stt_config::get_stt_config();
 
-let result: Vec<serde_json::Value> = models
-.iter()
-.map(|m| {
-let is_selected = config.local_model_id.as_deref() == Some(m.id);
-serde_json::json!({
-"id": m.id,
-"display_name": m.display_name,
-"engine": m.engine,
-"streaming": m.streaming,
-"params": m.params,
-"size_mb": m.size_mb,
-"languages": m.languages,
-"device": m.device,
+    let result: Vec<serde_json::Value> = models
+        .iter()
+        .map(|m| {
+            let is_selected = config.local_model_id.as_deref() == Some(m.id);
+            serde_json::json!({
+            "id": m.id,
+            "display_name": m.display_name,
+            "engine": m.engine,
+            "streaming": m.streaming,
+            "params": m.params,
+            "size_mb": m.size_mb,
+            "languages": m.languages,
+            "device": m.device,
                 "description": m.description,
                 "funasr_model_id": m.funasr_model_id,
                 "is_selected": is_selected,
@@ -2237,15 +2356,12 @@ serde_json::json!({
 /// 选择本地 STT 模型。
 ///
 /// 新方案中模型由 FunASR 自动管理（首次启动 funasr-server 时自动下载）。
-/// 此命令仅设置配置中的 `local_model_id` 和 `funasr_model`，
+/// 此命令设置配置中的 `local_model_id` 和 `funasr_model` 并持久化到数据库，
 /// 实际模型下载在 funasr-server 首次启动时由 FunASR 自动完成。
 #[tauri::command]
-pub async fn download_stt_model(
-    _app: tauri::AppHandle,
-    model_id: String,
-) -> Result<(), String> {
-    let model = crate::domain::stt::find_model(&model_id)
-        .ok_or_else(|| format!("未知模型: {model_id}"))?;
+pub async fn download_stt_model(app: tauri::AppHandle, model_id: String) -> Result<(), String> {
+    let model =
+        crate::domain::stt::find_model(&model_id).ok_or_else(|| format!("未知模型: {model_id}"))?;
 
     tracing::info!(
         model = %model_id,
@@ -2257,6 +2373,24 @@ pub async fn download_stt_model(
     let mut config = crate::app::stt_config::get_stt_config();
     config.local_model_id = Some(model_id);
     config.local_engine.funasr_model = model.funasr_model_id.to_string();
+
+    // 自动配置 streaming_model：
+    // - 流式模型 → streaming_model = funasr_model（共用同一个模型实例），自动开启流式
+    // - 非流式模型 → streaming_model = None
+    if model.streaming {
+        config.local_engine.streaming_model = Some(model.funasr_model_id.to_string());
+        config.streaming = true;
+    } else {
+        config.local_engine.streaming_model = None;
+    }
+
+    // 持久化到数据库（否则重启后丢失模型选择）
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::app::config::ConfigStore::set(&pool, &config)
+        .await
+        .map_err(|e| format!("保存 STT 配置失败: {e}"))?;
+
+    // 更新内存缓存
     crate::app::stt_config::update_cache(&config);
 
     Ok(())
@@ -2346,7 +2480,11 @@ pub async fn start_audio_test(
             let level = if chunk.samples.is_empty() {
                 0.0
             } else {
-                let sum_sq: f64 = chunk.samples.iter().map(|s| (*s as f64) * (*s as f64)).sum();
+                let sum_sq: f64 = chunk
+                    .samples
+                    .iter()
+                    .map(|s| (*s as f64) * (*s as f64))
+                    .sum();
                 let rms = (sum_sq / chunk.samples.len() as f64).sqrt();
                 (rms * 3.0).min(1.0)
             };
@@ -2355,10 +2493,7 @@ pub async fn start_audio_test(
             }
             // 首个 chunk + 每 10 个 chunk 打一次日志，让用户知道数据在流动
             if chunk_count == 1 {
-                tracing::info!(
-                    samples = chunk.samples.len(),
-                    "音频测试: 收到首个 chunk"
-                );
+                tracing::info!(samples = chunk.samples.len(), "音频测试: 收到首个 chunk");
             } else if chunk_count % 10 == 0 {
                 tracing::trace!(
                     chunk_count,
@@ -2395,7 +2530,8 @@ pub fn stop_audio_test() {
 // ── Python 环境管理（uv 自管理）────────────────────────────────────────
 
 /// 全局 funasr-server 子进程句柄。
-static FUNASR_SERVER_CHILD: std::sync::Mutex<Option<tokio::process::Child>> = std::sync::Mutex::new(None);
+static FUNASR_SERVER_CHILD: std::sync::Mutex<Option<tokio::process::Child>> =
+    std::sync::Mutex::new(None);
 
 /// 查询 Python 环境 + funasr-server 状态。
 ///
@@ -2404,12 +2540,13 @@ static FUNASR_SERVER_CHILD: std::sync::Mutex<Option<tokio::process::Child>> = st
 /// 异步执行：Python 子进程检测在 spawn_blocking 线程池中执行，不阻塞 UI 线程。
 #[tauri::command]
 pub async fn get_funasr_env() -> crate::domain::stt::funasr::FunasrEnv {
-    let config = crate::app::stt_config::get_stt_config();
-    crate::domain::stt::funasr::get_env_status_async(
-        config.local_engine.server_port,
-        config.local_engine.funasr_model.clone(),
-    )
-    .await
+let config = crate::app::stt_config::get_stt_config();
+crate::domain::stt::funasr::get_env_status_async(
+config.local_engine.server_port,
+config.local_engine.funasr_model.clone(),
+config.local_engine.streaming_model.clone(),
+)
+.await
 }
 
 /// 一键安装 Python 环境（uv + venv + funasr）。
@@ -2442,30 +2579,34 @@ pub async fn setup_python_env(app: tauri::AppHandle) -> Result<(), String> {
 
     // 日志回调：转发到前端 blink://funasr-server-log（含 uv 逐行安装进度）
     let app_log = app.clone();
-    let on_log: std::sync::Arc<dyn Fn(&str) + Send + Sync> =
-        std::sync::Arc::new(move |line| {
-            let _ = app_log.emit(
-                "blink://funasr-server-log",
-                serde_json::json!({ "line": line }),
-            );
-        });
+    let on_log: std::sync::Arc<dyn Fn(&str) + Send + Sync> = std::sync::Arc::new(move |line| {
+        let _ = app_log.emit(
+            "blink://funasr-server-log",
+            serde_json::json!({ "line": line }),
+        );
+    });
 
     let device = crate::app::stt_config::get_stt_config().local_engine.device;
     crate::infra::platform::python::setup_with_progress(&device, on_progress, on_log).await
 }
 
-/// 启动 funasr-server 子进程。
+/// 启动 blink_stt_server 子进程。
 ///
-/// 在后台异步启动 FunASR server，前端通过 `blink://funasr-server-status` 事件
+/// 在后台异步启动 STT server，前端通过 `blink://funasr-server-status` 事件
 /// 监听启动进度。模型首次下载可能需要较长时间。
 #[tauri::command]
 pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
     use tauri::Emitter;
 
-    let config = crate::app::stt_config::get_stt_config();
-    let model = config.local_engine.funasr_model.clone();
-    let port = config.local_engine.server_port;
-    let device = config.local_engine.device.clone();
+    // 从配置构建启动参数（含脚本释放 + 热词文件写入）
+    let params = match crate::domain::stt::funasr::ServerStartParams::from_config() {
+        Ok(p) => p,
+        Err(e) => return Err(e),
+    };
+    let model = params.model.clone();
+    let port = params.port;
+    let device = params.device.clone();
+    let streaming_model = params.streaming_model.clone();
 
     // CUDA 诊断：启动前确认 GPU 是否可用
     if device == "cuda" {
@@ -2488,23 +2629,49 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
     }
 
     // 检查 Python 环境是否就绪，未就绪则自动安装
+    // setup_with_progress 内部会检测已安装 PyTorch 是否含 CUDA 支持，
+    // 若 device==cuda 但 PyTorch 为 CPU 版，会自动重装 CUDA 版。
     let py_status = crate::infra::platform::python::check_status_async().await;
-    if !py_status.env_ready {
+    if !py_status.env_ready || (device == "cuda" && !py_status.torch_cuda_available) {
+        let need_cuda_reinstall = device == "cuda" && py_status.torch_installed && !py_status.torch_cuda_available;
         let _ = app.emit(
             "blink://funasr-server-status",
             serde_json::json!({ "stage": "setup_env", "message": "正在安装 Python 环境..." }),
         );
+        if need_cuda_reinstall {
+            let _ = app.emit(
+                "blink://funasr-server-log",
+                serde_json::json!({ "line": "[Blink] ⚠️ 当前 PyTorch 为 CPU 版，正在重装 CUDA 版 PyTorch（可能需要数分钟）..." }),
+            );
+        }
         match crate::infra::platform::python::setup(&device).await {
             Ok(()) => {
-                tracing::info!("Python 环境自动安装完成");
+                tracing::info!("Python 环境安装完成");
+                // 安装后重新检查 CUDA 支持
+                if device == "cuda" {
+                    let cuda_ok = crate::infra::platform::python::check_torch_cuda();
+                    if cuda_ok {
+                        let _ = app.emit(
+                            "blink://funasr-server-log",
+                            serde_json::json!({ "line": "[Blink] ✅ PyTorch CUDA 支持已就绪，GPU 加速可用" }),
+                        );
+                    } else {
+                        let _ = app.emit(
+                            "blink://funasr-server-log",
+                            serde_json::json!({ "line": "[Blink] ⚠️ PyTorch CUDA 支持不可用，将使用 CPU 推理" }),
+                        );
+                    }
+                }
             }
             Err(e) => {
                 let _ = app.emit(
                     "blink://funasr-server-status",
                     serde_json::json!({ "stage": "error", "error": format!("Python 环境安装失败: {e}") }),
                 );
-                return Err(format!("Python 环境安装失败: {e}
-请在设置页手动点击「安装环境」按钮。"));
+                return Err(format!(
+                    "Python 环境安装失败: {e}
+请在设置页手动点击「安装环境」按钮。"
+                ));
             }
         }
     }
@@ -2524,7 +2691,7 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
                     drop(guard);
                     let _ = app.emit(
                         "blink://funasr-server-status",
-                        serde_json::json!({ "stage": "already_running", "port": port }),
+                        serde_json::json!({ "stage": "already_running", "port": port, "model": &model, "streaming_model": &streaming_model }),
                     );
                     tracing::info!("funasr-server 子进程已在运行，跳过重复启动");
                     return Ok(());
@@ -2539,7 +2706,7 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
         }
     }
 
-    match crate::domain::stt::funasr::start_server(&model, port, &device).await {
+    match crate::domain::stt::funasr::start_server(&params).await {
         Ok(Some((child, mut log_rx))) => {
             // 存储子进程句柄
             {
@@ -2562,6 +2729,8 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
 
             // ── 异步等待服务就绪（带子进程退出检测）──
             let app_clone = app.clone();
+            let model_clone = model.clone();
+            let streaming_model_clone = streaming_model.clone();
             tokio::spawn(async move {
                 let url = format!("http://localhost:{port}/v1/models");
                 let client = match reqwest::Client::builder()
@@ -2636,7 +2805,7 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
                         Ok(resp) if resp.status().is_success() => {
                             let _ = app_clone.emit(
                                 "blink://funasr-server-status",
-                                serde_json::json!({ "stage": "ready", "port": port }),
+                                serde_json::json!({ "stage": "ready", "port": port, "model": &model_clone, "streaming_model": &streaming_model_clone }),
                             );
                             tracing::info!(port, "funasr-server 就绪");
                             return;
@@ -2654,7 +2823,7 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
             // 服务已在运行
             let _ = app.emit(
                 "blink://funasr-server-status",
-                serde_json::json!({ "stage": "ready", "port": port }),
+                serde_json::json!({ "stage": "ready", "port": port, "model": &model, "streaming_model": &streaming_model }),
             );
             Ok(())
         }
@@ -2713,11 +2882,12 @@ pub async fn diagnose_stt() -> Result<serde_json::Value, String> {
     tracing::info!("=== STT 诊断开始 ===");
 
     // ── FunASR 环境状态（异步，不阻塞 UI）──
-    let env = crate::domain::stt::funasr::get_env_status_async(
-        port,
-        config.local_engine.funasr_model.clone(),
-    )
-    .await;
+let env = crate::domain::stt::funasr::get_env_status_async(
+port,
+config.local_engine.funasr_model.clone(),
+config.local_engine.streaming_model.clone(),
+)
+.await;
 
     let server_ready_tcp = crate::domain::stt::funasr::is_server_ready(port);
     let server_ready = if server_ready_tcp {
@@ -2754,6 +2924,27 @@ pub async fn diagnose_stt() -> Result<serde_json::Value, String> {
         "诊断: server"
     );
 
+    // ── WebSocket 就绪检查（流式 STT 专用）──
+    let ws_ready = if server_ready {
+        let (ready, err) = crate::domain::stt::funasr::is_websocket_ready(port).await;
+        tracing::info!(
+            ws_ready = ready,
+            ws_error = ?err,
+            "诊断: WebSocket /ws/stream"
+        );
+        if !ready {
+            if let Some(ref e) = err {
+                tracing::warn!(
+                    error = %e,
+                    "WebSocket 端点不可用——如果错误包含 404，说明服务端缺少 websockets 库"
+                );
+            }
+        }
+        (ready, err)
+    } else {
+        (false, Some("server 未就绪".to_string()))
+    };
+
     report["funasr_env"] = serde_json::json!({
         "uv_available": env.uv_available,
         "uv_version": env.uv_version,
@@ -2761,13 +2952,18 @@ pub async fn diagnose_stt() -> Result<serde_json::Value, String> {
         "venv_python_version": env.venv_python_version,
         "torch_installed": env.torch_installed,
         "torch_version": env.torch_version,
+        "torch_cuda_available": env.torch_cuda_available,
         "funasr_installed": env.funasr_installed,
         "funasr_version": env.funasr_version,
+        "websockets_installed": env.websockets_installed,
+        "websockets_version": env.websockets_version,
         "env_ready": env.env_ready,
         "server_running": env.server_running,
         "server_port": env.server_port,
         "server_model": env.server_model,
         "server_ready": server_ready,
+        "websocket_ready": ws_ready.0,
+        "websocket_error": ws_ready.1,
     });
 
     // ── 配置状态 ──
@@ -2792,16 +2988,19 @@ pub async fn diagnose_stt() -> Result<serde_json::Value, String> {
     // ── 模型列表 ──
     let models = crate::domain::stt::model_registry();
     for model in models {
-        report["models"].as_array_mut().unwrap().push(serde_json::json!({
-            "id": model.id,
-            "display_name": model.display_name,
-            "funasr_model_id": model.funasr_model_id,
-            "streaming": model.streaming,
-            "params": model.params,
-            "size_mb": model.size_mb,
-            "device": model.device,
-            "is_selected": config.local_model_id.as_deref() == Some(model.id),
-        }));
+        report["models"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": model.id,
+                "display_name": model.display_name,
+                "funasr_model_id": model.funasr_model_id,
+                "streaming": model.streaming,
+                "params": model.params,
+                "size_mb": model.size_mb,
+                "device": model.device,
+                "is_selected": config.local_model_id.as_deref() == Some(model.id),
+            }));
     }
 
     // ── API 测试：如果服务就绪，下载示例音频测试识别 ──
@@ -2880,25 +3079,21 @@ async fn test_audio_via_server(audio_url: &str, port: u16) -> Result<String, Str
     // 2. 解析 WAV → f32 PCM 样本
     let samples = crate::domain::stt::wav::parse_wav_to_f32(&wav_bytes)?;
     let duration_ms = (samples.len() as f64 / 16000.0 * 1000.0) as u64;
-    tracing::info!(
-        samples = samples.len(),
-        duration_ms,
-        "诊断: WAV 解析完成"
-    );
+    tracing::info!(samples = samples.len(), duration_ms, "诊断: WAV 解析完成");
 
-        // 3. 创建引擎并分块喂入音频
-        let engine = crate::domain::stt::local::LocalSttEngine::for_diagnostic(port);
-        let chunk_size = 1600usize; // 100ms chunks
-        for chunk in samples.chunks(chunk_size) {
-            engine
-                .transcribe_chunk(chunk)
-                .await
-                .map_err(|e| e.to_string())?;
-        }
+    // 3. 创建引擎并分块喂入音频
+    let engine = crate::domain::stt::local::LocalSttEngine::for_diagnostic(port);
+    let chunk_size = 1600usize; // 100ms chunks
+    for chunk in samples.chunks(chunk_size) {
+        engine
+            .transcribe_chunk(chunk)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
 
-        // 4. 调用 finalize → POST 到 funasr-server
-        tracing::info!("诊断: 调用 funasr-server 转录...");
-        let result = engine.finalize().await.map_err(|e| e.to_string())?;
+    // 4. 调用 finalize → POST 到 funasr-server
+    tracing::info!("诊断: 调用 funasr-server 转录...");
+    let result = engine.finalize().await.map_err(|e| e.to_string())?;
 
     Ok(result)
 }
@@ -2908,7 +3103,10 @@ async fn test_audio_via_server(audio_url: &str, port: u16) -> Result<String, Str
 /// 递归计算目录大小（字节）。
 fn dir_size_bytes(path: &std::path::Path) -> u64 {
     let mut total = 0u64;
-    for entry in walkdir::WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
+    for entry in walkdir::WalkDir::new(path)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         if entry.file_type().is_file() {
             total += entry.metadata().map(|m| m.len()).unwrap_or(0);
         }
@@ -2934,14 +3132,11 @@ pub async fn get_stt_space_usage() -> serde_json::Value {
     let uv_dir = python_dir.join("uv");
     let venv_dir = python_dir.join("venv");
 
-    // ModelScope 模型缓存：默认在 ~/.cache/modelscope/
-    // 也检查 MODELSCOPE_CACHE 环境变量
-    let modelscope_cache = std::env::var("MODELSCOPE_CACHE")
-        .ok()
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            dirs_next::home_dir().map(|h| h.join(".cache").join("modelscope"))
-        });
+    // ModelScope 模型缓存：Blink 将其重定向到 python/models 目录（通过 MODELSCOPE_CACHE 环境变量）。
+    // 旧版本可能仍在 ~/.cache/modelscope，也检查并显示。
+    let models_dir = python_dir.join("models");
+    let legacy_modelscope_cache = dirs_next::home_dir()
+        .map(|h| h.join(".cache").join("modelscope"));
 
     let mut items = Vec::new();
     let mut total_bytes: u64 = 0;
@@ -2968,16 +3163,29 @@ pub async fn get_stt_space_usage() -> serde_json::Value {
         }));
     }
 
-    // ModelScope 模型缓存
-    if let Some(cache_dir) = &modelscope_cache {
-        if cache_dir.exists() {
-            let size = dir_size_bytes(cache_dir);
-            total_bytes += size;
-            items.push(serde_json::json!({
-                "label": "FunASR 模型缓存 (ModelScope)",
-                "path": cache_dir.display().to_string(),
-                "size_mb": bytes_to_mb(size),
-            }));
+    // ModelScope 模型缓存（Blink 自管理目录）
+    if models_dir.exists() {
+        let size = dir_size_bytes(&models_dir);
+        total_bytes += size;
+        items.push(serde_json::json!({
+            "label": "FunASR 模型缓存",
+            "path": models_dir.display().to_string(),
+            "size_mb": bytes_to_mb(size),
+        }));
+    }
+
+    // 旧版残留：~/.cache/modelscope（可能存在历史下载）
+    if let Some(legacy_dir) = &legacy_modelscope_cache {
+        if legacy_dir.exists() {
+            let size = dir_size_bytes(legacy_dir);
+            if size > 0 {
+                total_bytes += size;
+                items.push(serde_json::json!({
+                    "label": "旧版模型缓存残留 (ModelScope 默认路径)",
+                    "path": legacy_dir.display().to_string(),
+                    "size_mb": bytes_to_mb(size),
+                }));
+            }
         }
     }
 
@@ -3023,6 +3231,26 @@ pub async fn cleanup_stt_space() -> Result<(), String> {
         tracing::info!(path = %uv_dir.display(), "清理 uv");
         if let Err(e) = std::fs::remove_dir_all(&uv_dir) {
             errors.push(format!("删除 uv 失败: {e}"));
+        }
+    }
+
+    // 删除模型缓存（Blink 自管理目录）
+    let models_dir = python_dir.join("models");
+    if models_dir.exists() {
+        tracing::info!(path = %models_dir.display(), "清理模型缓存");
+        if let Err(e) = std::fs::remove_dir_all(&models_dir) {
+            errors.push(format!("删除模型缓存失败: {e}"));
+        }
+    }
+
+    // 清理旧版残留：~/.cache/modelscope
+    if let Some(legacy_dir) = dirs_next::home_dir().map(|h| h.join(".cache").join("modelscope")) {
+        if legacy_dir.exists() {
+            tracing::info!(path = %legacy_dir.display(), "清理旧版模型缓存残留");
+            if let Err(e) = std::fs::remove_dir_all(&legacy_dir) {
+                // 旧版残留清理失败不阻断（可能被其他程序占用）
+                tracing::warn!(%e, "清理旧版模型缓存残留失败（不阻断）");
+            }
         }
     }
 
