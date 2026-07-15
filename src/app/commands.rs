@@ -2878,7 +2878,7 @@ async fn test_audio_via_server(audio_url: &str, port: u16) -> Result<String, Str
     tracing::info!(size = wav_bytes.len(), "诊断: 示例音频下载完成");
 
     // 2. 解析 WAV → f32 PCM 样本
-    let samples = crate::domain::stt::local::parse_wav_to_f32(&wav_bytes)?;
+    let samples = crate::domain::stt::wav::parse_wav_to_f32(&wav_bytes)?;
     let duration_ms = (samples.len() as f64 / 16000.0 * 1000.0) as u64;
     tracing::info!(
         samples = samples.len(),

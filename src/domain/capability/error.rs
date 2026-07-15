@@ -14,6 +14,7 @@ use serde::Serialize;
 /// 能力调用错误——六变体覆盖所有失败场景。
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(dead_code)]
 pub enum CapabilityError {
     /// 参数缺失/类型错（args 不符 schema）。
     InvalidArgs {

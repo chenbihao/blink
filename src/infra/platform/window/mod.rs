@@ -25,4 +25,4 @@
 mod windows;
 
 #[cfg(target_os = "windows")]
-pub use windows::{invoke, hide, hide_for_screenshot, unhide_after_screenshot, start_watchdog, on_focused, update_grace_period, is_visible, install_sysmenu_blocker, clamp_to_work_area, clamp_context_menu, enable_rounded_corners, force_topmost, place_at_physical, show_chord_ball, hide_chord_ball, show_screenshot_overlay, hide_screenshot_overlay, show_voice_overlay, hide_voice_overlay, wait_frame_after_hide, preheat_secondary_windows, open_settings};
+pub use windows::{invoke, hide, hide_for_screenshot, unhide_after_screenshot, start_watchdog, on_focused, update_grace_period, is_visible, install_sysmenu_blocker, clamp_to_work_area, clamp_context_menu, enable_rounded_corners, force_topmost, place_at_physical, show_chord_ball, hide_chord_ball, show_screenshot_overlay, hide_screenshot_overlay, show_voice_overlay, hide_voice_overlay, wait_frame_after_hide, preheat_secondary_windows, open_settings, get_foreground_hwnd, restore_foreground};

@@ -40,6 +40,7 @@ use std::time::Duration;
 
 /// STT 识别错误。
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum SttError {
     /// 引擎未初始化
     NotInitialized,
@@ -84,6 +85,7 @@ pub trait SttEngine: Send + Sync {
     fn reset(&self);
 
     /// 引擎显示名称(日志/调试用)。
+    #[allow(dead_code)]
     fn name(&self) -> &str;
 }
 
@@ -212,6 +214,7 @@ mod mock;
 mod cloud;
 pub mod local;
 pub mod funasr;
+pub(crate) mod wav;
 
 /// 创建 STT 引擎实例(工厂函数)。
 ///

@@ -82,7 +82,7 @@ impl SttEngine for CloudSttEngine {
         let url = format!("{base_url}/audio/transcriptions");
 
         // PCM → WAV
-        let wav_bytes = pcm_to_wav(&samples, self.sample_rate, 1);
+        let wav_bytes = super::wav::pcm_to_wav(&samples, self.sample_rate, 1);
 
         tracing::info!(
             url = %url,
@@ -92,9 +92,9 @@ impl SttEngine for CloudSttEngine {
             "云端 STT 请求"
         );
 
-        transcribe_async(
+        super::wav::transcribe_async(
             &url,
-            &api_key.expose(),
+            Some(&api_key.expose()),
             &provider.model_id,
             &wav_bytes,
         )
@@ -110,58 +110,6 @@ impl SttEngine for CloudSttEngine {
     }
 }
 
-/// 异步 HTTP 转录请求。
-async fn transcribe_async(
-    url: &str,
-    api_key: &str,
-    model_id: &str,
-    wav_bytes: &[u8],
-) -> Result<String, SttError> {
-    use reqwest::multipart;
-
-    let part = multipart::Part::bytes(wav_bytes.to_vec())
-        .file_name("audio.wav")
-        .mime_str("audio/wav")
-        .map_err(|e| SttError::Engine(format!("multipart 构建失败: {e}")))?;
-
-    let form = multipart::Form::new()
-        .text("model", model_id.to_string())
-        .part("file", part);
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| SttError::Engine(format!("HTTP client 创建失败: {e}")))?;
-
-    let resp = client
-        .post(url)
-        .bearer_auth(api_key)
-        .multipart(form)
-        .send()
-        .await
-        .map_err(|e| SttError::Engine(format!("HTTP 请求失败: {e}")))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(SttError::Engine(format!(
-            "HTTP {status}: {body}"
-        )));
-    }
-
-    #[derive(serde::Deserialize)]
-    struct TranscriptionResponse {
-        text: String,
-    }
-
-    let result: TranscriptionResponse = resp
-        .json()
-        .await
-        .map_err(|e| SttError::Engine(format!("JSON 解析失败: {e}")))?;
-
-    Ok(result.text)
-}
-
 /// 获取供应商默认 base_url。
 fn default_base_url(kind: &str) -> &'static str {
     match kind {
@@ -171,85 +119,9 @@ fn default_base_url(kind: &str) -> &'static str {
     }
 }
 
-/// PCM f32 样本 → WAV 字节（16-bit PCM, little-endian）。
-fn pcm_to_wav(samples: &[f32], sample_rate: u32, channels: u16) -> Vec<u8> {
-    let num_samples = samples.len();
-    let bits_per_sample = 16u16;
-    let byte_rate = sample_rate * channels as u32 * (bits_per_sample / 8) as u32;
-    let block_align = channels * (bits_per_sample / 8);
-    let data_size = num_samples * (bits_per_sample / 8) as usize;
-    let file_size = 36 + data_size; // RIFF header (12) + fmt chunk (24) + data
-
-    let mut wav = Vec::with_capacity(44 + data_size);
-
-    // RIFF header
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&(file_size as u32).to_le_bytes());
-    wav.extend_from_slice(b"WAVE");
-
-    // fmt chunk
-    wav.extend_from_slice(b"fmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes()); // chunk size
-    wav.extend_from_slice(&1u16.to_le_bytes()); // audio format = PCM
-    wav.extend_from_slice(&channels.to_le_bytes());
-    wav.extend_from_slice(&sample_rate.to_le_bytes());
-    wav.extend_from_slice(&byte_rate.to_le_bytes());
-    wav.extend_from_slice(&block_align.to_le_bytes());
-    wav.extend_from_slice(&bits_per_sample.to_le_bytes());
-
-    // data chunk
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&(data_size as u32).to_le_bytes());
-
-    // PCM samples: f32 → i16
-    for &sample in samples {
-        let clamped = sample.max(-1.0).min(1.0);
-        let i16_sample = (clamped * 32767.0) as i16;
-        wav.extend_from_slice(&i16_sample.to_le_bytes());
-    }
-
-    wav
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn wav_header_is_correct() {
-        let samples = vec![0.0, 0.5, -0.5, 1.0, -1.0];
-        let wav = pcm_to_wav(&samples, 16000, 1);
-
-        // RIFF header
-        assert_eq!(&wav[0..4], b"RIFF");
-        assert_eq!(&wav[8..12], b"WAVE");
-
-        // fmt chunk
-        assert_eq!(&wav[12..16], b"fmt ");
-        assert_eq!(u32::from_le_bytes([wav[16], wav[17], wav[18], wav[19]]), 16);
-        assert_eq!(u16::from_le_bytes([wav[20], wav[21]]), 1); // PCM
-
-        // data chunk
-        assert_eq!(&wav[36..40], b"data");
-        let data_size = u32::from_le_bytes([wav[40], wav[41], wav[42], wav[43]]);
-        assert_eq!(data_size as usize, samples.len() * 2);
-
-        // Total size = 44 header + data
-        assert_eq!(wav.len(), 44 + samples.len() * 2);
-    }
-
-    #[test]
-    fn wav_samples_are_clamped() {
-        let samples = vec![2.0, -2.0]; // 超出范围
-        let wav = pcm_to_wav(&samples, 16000, 1);
-
-        // 第一个样本（data 从 offset 44 开始）
-        let s0 = i16::from_le_bytes([wav[44], wav[45]]);
-        let s1 = i16::from_le_bytes([wav[46], wav[47]]);
-
-        assert_eq!(s0, 32767); // clamped to max
-        assert_eq!(s1, -32767); // clamped to min
-    }
 
     #[tokio::test]
     async fn cloud_engine_accumulates_and_resets() {

@@ -21,6 +21,7 @@ use std::fmt;
 
 /// 文本注入错误。
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum InjectError {
     /// 剪贴板操作失败
     Clipboard(String),

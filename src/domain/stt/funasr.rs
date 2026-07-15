@@ -32,9 +32,11 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// FunASR 模型 ID（对应 funasr-server --model 参数）。
+#[allow(dead_code)]
 pub const DEFAULT_MODEL: &str = "sensevoice";
 
 /// 默认监听端口。
+#[allow(dead_code)]
 pub const DEFAULT_PORT: u16 = 8000;
 
 /// funasr-server 启动超时（秒）。
@@ -352,6 +354,7 @@ pub async fn start_server(
 /// **注意**：本函数仅做 HTTP 轮询，不检测子进程是否已退出。
 /// 如果子进程启动后立即崩溃，本函数会空等至超时。
 /// 建议调用方自行通过 `child.try_wait()` 检测子进程退出。
+#[allow(dead_code)]
 pub async fn wait_for_server_ready(port: u16) -> Result<(), String> {
     let url = format!("http://localhost:{port}/v1/models");
     let client = reqwest::Client::builder()
@@ -391,6 +394,7 @@ pub fn server_base_url(port: u16) -> String {
 }
 
 /// 获取用于日志诊断的服务器状态摘要。
+#[allow(dead_code)]
 pub fn server_status_summary(port: u16, model: &str) -> String {
     let ready = is_server_ready(port);
     let running = SERVER_RUNNING.load(Ordering::SeqCst);

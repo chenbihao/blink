@@ -44,8 +44,8 @@ pub fn inject_text_clipboard(text: &str) -> Result<(), InjectError> {
     // 3. SendInput: Ctrl↓ → V↓ → V↑ → Ctrl↑
     send_paste().map_err(|e| InjectError::SendInput(e))?;
 
-    // 4. 等待前台应用处理粘贴
-    std::thread::sleep(Duration::from_millis(50));
+    // 4. 等待前台应用处理粘贴（100ms：Electron/Office 等需要更多时间）
+    std::thread::sleep(Duration::from_millis(100));
 
     // 5. 恢复原剪贴板文本
     if let Some(original) = backup {

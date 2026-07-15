@@ -479,6 +479,29 @@ fn apply_no_activate(hwnd: HWND) {
     }
 }
 
+/// 获取当前前台窗口的 HWND（供 G2 注入前恢复焦点用）。
+pub fn get_foreground_hwnd() -> Option<isize> {
+    unsafe {
+        let hwnd = windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow();
+        if hwnd.is_invalid() { None } else { Some(hwnd.0 as isize) }
+    }
+}
+
+/// 恢复前台窗口焦点（G2 注入文本前调用）。
+///
+/// 使用 `SetForegroundWindow` 恢复录音开始时保存的前台窗口。
+/// 配合 Alt 键欺骗绕过 Windows 的前台锁定限制。
+pub fn restore_foreground(hwnd: isize) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{keybd_event, VK_LMENU, KEYEVENTF_KEYUP, KEYBD_EVENT_FLAGS};
+    use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+    unsafe {
+        // Alt 按一下 → 满足 SetForegroundWindow 的"用户输入"条件
+        keybd_event(VK_LMENU.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
+        keybd_event(VK_LMENU.0 as u8, 0, KEYBD_EVENT_FLAGS(KEYEVENTF_KEYUP.0), 0);
+        let _ = SetForegroundWindow(HWND(hwnd as *mut _));
+    }
+}
+
 pub fn hide_chord_ball(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("chord-ball") {
         let _ = win.hide();

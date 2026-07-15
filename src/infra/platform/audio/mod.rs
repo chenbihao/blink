@@ -39,9 +39,11 @@ pub struct AudioChunk {
     /// PCM 样本(f32,交错声道若 channels > 1)
     pub samples: Vec<f32>,
     /// 这段数据的格式
+    #[allow(dead_code)]
     pub format: AudioFormat,
 }
 
+#[allow(dead_code)]
 impl AudioChunk {
     /// 创建空 chunk。
     pub fn empty(format: AudioFormat) -> Self {
@@ -72,6 +74,7 @@ impl AudioChunk {
 
 /// 音频采集错误。
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum AudioError {
     /// 设备不可用
     DeviceUnavailable(String),
@@ -119,6 +122,7 @@ pub trait AudioCapture: Send {
     fn stop(&mut self);
 
     /// 是否正在采集。
+    #[allow(dead_code)]
     fn is_capturing(&self) -> bool;
 }
 

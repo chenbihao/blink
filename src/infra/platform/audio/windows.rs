@@ -28,7 +28,7 @@
 //! 注意：某些虚拟声卡驱动（如 VR/远程桌面）可能劫持此 API，导致返回的默认设备
 //! 与 mmsys.cpl 面板显示的不一致。设置页设备列表会标注当前默认设备名称供用户参考。
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -161,15 +161,11 @@ fn capture_thread(
     // Windows 会静默返回零数据（不报错）。这是 OS 级行为，不是 cpal 的问题。
     check_microphone_privacy();
 
-    // 诊断计数器：前 5 次回调打印原始数据统计
-    let diag_counter = Arc::new(AtomicU32::new(0));
-
     // ── 构建输入流（统一回调，build_input_stream_raw）──
     // 使用 build_input_stream_raw 统一回调类型，所有采样格式在回调内通过
     // convert_to_f32 统一转换，避免 match-on-format 产生的多个重复闭包分支。
     let cb_capturing = capturing.clone();
     let cb_tx = tx.clone();
-    let cb_diag = diag_counter.clone();
 
     let stream = match device.build_input_stream_raw(
         stream_config,
@@ -179,7 +175,6 @@ fn capture_thread(
                 return;
             }
             let f32_data = convert_to_f32(data, sample_format);
-            // log_raw_diag(&f32_data, &cb_diag);
             process_and_send(
                 &f32_data,
                 in_channels,
@@ -284,39 +279,6 @@ fn log_device_list(host: &cpal::Host) {
 /// cpal 音频流错误回调。
 fn on_stream_error(err: CpalError) {
     tracing::error!(%err, "cpal: 音频流错误");
-}
-
-/// 诊断日志：前 5 次回调打印原始数据统计。
-///
-/// 用于区分「WASAPI 返回零数据」vs「我们的 downmix/resample 逻辑产生零」。
-/// 如果 raw 数据就是零 → Windows 麦克风隐私设置问题或虚拟声卡。
-/// 如果 raw 非零但处理后为零 → 代码 bug。
-fn log_raw_diag(data: &[f32], counter: &AtomicU32) {
-    let n = counter.fetch_add(1, Ordering::Relaxed);
-    if n >= 5 {
-        return;
-    }
-    let len = data.len();
-    let all_zero = data.iter().all(|&s| s == 0.0);
-    let max_abs = data.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-    let min = data.iter().copied().fold(0.0f32, f32::min);
-    let max = data.iter().copied().fold(0.0f32, f32::max);
-    let prefix: String = data
-        .iter()
-        .take(8)
-        .map(|s| format!("{:+.6}", s))
-        .collect::<Vec<_>>()
-        .join(", ");
-    tracing::trace!(
-        callback = n,
-        len,
-        all_zero,
-        max_abs,
-        min,
-        max,
-        prefix = %prefix,
-        "cpal 回调原始数据诊断"
-    );
 }
 
 /// 检查 Windows 麦克风隐私设置。
@@ -544,7 +506,10 @@ mod tests {
     fn downmix_stereo_to_mono() {
         let input = vec![0.2, 0.4, 0.6, 0.8]; // 2 frames stereo
         let output = downmix(&input, 2, 1);
-        assert_eq!(output, vec![0.3, 0.7]); // averages
+        // f32 除法有精度误差，用近似比较
+        assert_eq!(output.len(), 2);
+        assert!((output[0] - 0.3).abs() < 1e-6, "got {}", output[0]);
+        assert!((output[1] - 0.7).abs() < 1e-6, "got {}", output[1]);
     }
 
     #[test]

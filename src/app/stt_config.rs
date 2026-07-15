@@ -221,6 +221,7 @@ mod tests {
                 funasr_model: "paraformer".into(),
                 device: "cuda".into(),
                 num_threads: Some(4),
+                auto_start_server: true,
             },
             local_model_id: Some("sensevoice-small".into()),
             model_dir: None,

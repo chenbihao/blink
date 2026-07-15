@@ -48,6 +48,8 @@ struct VoiceSession {
     recording: bool,
     /// 最新 partial 文本
     last_partial: String,
+    /// G2: 录音开始时的前台窗口 HWND（用于注入前恢复焦点）
+    prev_fg_hwnd: Option<isize>,
 }
 
 impl Default for VoiceSession {
@@ -58,6 +60,7 @@ impl Default for VoiceSession {
             target: VoiceTarget::ForegroundApp,
             recording: false,
             last_partial: String::new(),
+            prev_fg_hwnd: None,
         }
     }
 }
@@ -183,6 +186,8 @@ impl VoiceService {
 
                 // G2: 显示 mini overlay 窗口
                 if session.target == VoiceTarget::ForegroundApp {
+                    // 保存前台窗口 HWND（注入前恢复焦点，提升 Ctrl+V 成功率）
+                    session.prev_fg_hwnd = platform::window::get_foreground_hwnd();
                     platform::window::show_voice_overlay(&self.app);
                 }
 
@@ -301,7 +306,16 @@ impl VoiceService {
                 // G2: 注入前台应用
                 // 注入在 spawn_blocking 中执行(SendInput 需要同线程)
                 let app = self.app.clone();
+                let prev_hwnd = {
+                    let session = self.session.lock().unwrap();
+                    session.prev_fg_hwnd
+                };
                 tokio::task::spawn_blocking(move || {
+                    // 注入前恢复前台窗口焦点（finalize 期间焦点可能漂移）
+                    if let Some(hwnd) = prev_hwnd {
+                        platform::window::restore_foreground(hwnd);
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
                     match platform::inject::inject_text(&final_text) {
                         Ok(()) => {
                             tracing::info!("G2: 文字已注入前台应用");
@@ -372,4 +386,62 @@ fn compute_rms(samples: &[f32]) -> f64 {
 
     // 平方根曲线：增强小信号区域，让安静说话也有明显指示
     normalized.sqrt()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_rms;
+
+    #[test]
+    fn rms_empty_returns_zero() {
+        assert_eq!(compute_rms(&[]), 0.0);
+    }
+
+    #[test]
+    fn rms_silence_returns_zero() {
+        // 全零样本 → RMS = 0 < NOISE_FLOOR → 0.0
+        assert_eq!(compute_rms(&[0.0; 1000]), 0.0);
+    }
+
+    #[test]
+    fn rms_noise_floor_returns_zero() {
+        // 极小值（低于 NOISE_FLOOR = 0.001）→ 静默
+        let samples = vec![0.0001f32; 100];
+        assert_eq!(compute_rms(&samples), 0.0);
+    }
+
+    #[test]
+    fn rms_normal_speech_nonzero() {
+        // 模拟正常说话音量（幅度 ~0.3）
+        let samples: Vec<f32> = (0..1600)
+            .map(|i| {
+                let t = i as f32 / 16000.0;
+                (2.0 * std::f32::consts::PI * 440.0 * t).sin() * 0.3
+            })
+            .collect();
+        let level = compute_rms(&samples);
+        // RMS ≈ 0.3 / √2 ≈ 0.212，远超 0.15 上限 → normalized = 1.0 → level = 1.0
+        assert!(level > 0.0, "正常音量不应返回 0");
+        assert!(level <= 1.0, "音量不应超过 1.0");
+    }
+
+    #[test]
+    fn rms_clamped_to_one() {
+        // 最大幅度 → 不超过 1.0
+        let samples = vec![1.0f32; 100];
+        let level = compute_rms(&samples);
+        assert!(level <= 1.0, "音量上限为 1.0，got {level}");
+    }
+
+    #[test]
+    fn rms_sqrt_curve_enhances_small_signals() {
+        // 小信号（RMS 略高于 NOISE_FLOOR）应因 sqrt 曲线得到增强
+        // RMS ≈ 0.01 → normalized = (0.01 - 0.001) / (0.15 - 0.001) ≈ 0.0604
+        // sqrt(0.0604) ≈ 0.246
+        let samples = vec![0.01f32; 100];
+        let level = compute_rms(&samples);
+        assert!(level > 0.0, "小信号应非零");
+        // 线性值 ≈ 0.06，sqrt 后 ≈ 0.25，应明显大于线性值
+        assert!(level > 0.06, "sqrt 曲线应增强小信号: got {level}");
+    }
 }
