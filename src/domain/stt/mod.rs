@@ -34,6 +34,9 @@
 //! - FunASR 自动管理模型下载（ModelScope CDN）、VAD、标点
 //!
 //! 0.10.3 真流式：自定义 `blink_stt_server.py`，同时支持 HTTP 非流式 + WebSocket 流式。
+//!
+//! 0.10.4 伪流式：VAD 切句 + 累积预览，在非自回归 SenseVoice 上实现"边说边出字"体感。
+//! 详见 `pseudo_streaming.rs` 和 `vad.rs`。
 
 use std::fmt;
 use std::time::Duration;
@@ -132,7 +135,7 @@ pub fn model_registry() -> &'static [ModelDescriptor] {
     &MODELS
 }
 
-static MODELS: [ModelDescriptor; 2] = [
+static MODELS: [ModelDescriptor; 3] = [
     ModelDescriptor {
         id: "sensevoice-small",
         display_name: "FunASR SenseVoice-Small",
@@ -144,6 +147,20 @@ static MODELS: [ModelDescriptor; 2] = [
         languages: &["zh", "en", "ja", "ko", "yue"],
         device: "cpu",
         description: "五语种 ASR（中/英/日/韩/粤），CPU 17 倍实时，带情感与音频事件标签。体积小、速度快，推荐 CPU 首选",
+    },
+    ModelDescriptor {
+        id: "paraformer-zh",
+        display_name: "FunASR Paraformer-zh (SeacoParaformer)",
+        engine: "funasr",
+        // 使用短名，FunASR 内部 name_maps_ms 会解析为完整 ID:
+        // iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch
+        funasr_model_id: "paraformer-zh",
+        streaming: false,
+        params: "220M",
+        size_mb: 880 + 1130,
+        languages: &["zh", "en"],
+        device: "cpu",
+        description: "纯中文非流式 ASR（SeacoParaformer），原生支持热词 boosting 与 ITN。自动配置 VAD(fsmn-vad) + 标点(ct-punc) 子模型。整句准确率高于 SenseVoice，不会幻觉英文语气词。配合伪流式使用体验最佳",
     },
     ModelDescriptor {
         id: "paraformer-zh-streaming",
@@ -216,16 +233,23 @@ mod cloud;
 pub mod funasr;
 pub mod local;
 mod mock;
+pub mod pseudo_streaming;
 pub mod streaming;
+pub mod vad;
 pub(crate) mod wav;
 
 /// 创建 STT 引擎实例(工厂函数)。
 ///
 /// 根据 SttConfig 选择引擎：
 /// - Cloud 模式 + 已配置 cloud_provider → CloudSttEngine
-/// - Local 模式 + streaming=true + streaming_model 已配置 → StreamingSttEngine (WebSocket)
-/// - Local 模式 + streaming=false → LocalSttEngine (HTTP 非流式)
+/// - Local 模式 + StreamingMode::True + streaming_model 已配置 → StreamingSttEngine (WebSocket)
+/// - Local 模式 + StreamingMode::Pseudo → PseudoStreamingSttEngine (VAD + 预览) ⭐ 默认
+/// - Local 模式 + StreamingMode::Off → LocalSttEngine (HTTP 非流式)
 /// - 未配置/未启用/服务未就绪 → MockSttEngine
+///
+/// **兼容性**：旧配置 `streaming: bool` 自动迁移——
+/// `true` → `StreamingMode::True`，`false` → `StreamingMode::Off`。
+/// 新配置默认 `StreamingMode::Pseudo`。
 pub fn create_engine() -> Box<dyn SttEngine> {
     let config = crate::app::stt_config::get_stt_config();
 
@@ -244,34 +268,81 @@ pub fn create_engine() -> Box<dyn SttEngine> {
             }
         }
         crate::app::stt_config::SttMode::Local => {
-            // 0.10.3: streaming=true 且配置了 streaming_model → 流式引擎
-            if config.streaming && config.local_engine.streaming_model.is_some() {
-                match streaming::StreamingSttEngine::new(config.local_engine.server_port) {
-                    Ok(engine) => {
-                        tracing::info!("STT 引擎: streaming (WebSocket)");
-                        Box::new(engine)
-                    }
-                    Err(e) => {
-                        tracing::warn!(%e, "STT streaming 引擎创建失败,回退非流式");
-                        // 回退到非流式
-                        match local::LocalSttEngine::new(&config) {
+            let streaming_mode = config.streaming_mode();
+
+            match streaming_mode {
+                crate::app::stt_config::StreamingMode::True => {
+                    // 真流式：streaming_model 已配置 → StreamingSttEngine (WebSocket)
+                    if config.local_engine.streaming_model.is_some() {
+                        match streaming::StreamingSttEngine::new(config.local_engine.server_port) {
+                            Ok(engine) => {
+                                tracing::info!("STT 引擎: streaming (WebSocket)");
+                                Box::new(engine)
+                            }
+                            Err(e) => {
+                                tracing::warn!(%e, "STT streaming 引擎创建失败,回退伪流式");
+                                match pseudo_streaming::PseudoStreamingSttEngine::new(&config) {
+                                    Ok(engine) => Box::new(engine),
+                                    Err(e) => {
+                                        tracing::warn!(%e, "STT 伪流式引擎创建失败,回退非流式");
+                                        match local::LocalSttEngine::new(&config) {
+                                            Ok(engine) => Box::new(engine),
+                                            Err(e) => {
+                                                tracing::warn!(%e, "STT local 引擎创建失败,回退 mock");
+                                                Box::new(mock::MockSttEngine::new())
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        tracing::info!("STT 真流式模式但未配置 streaming_model,使用伪流式");
+                        match pseudo_streaming::PseudoStreamingSttEngine::new(&config) {
                             Ok(engine) => Box::new(engine),
                             Err(e) => {
-                                tracing::warn!(%e, "STT local 引擎创建失败,回退 mock");
-                                Box::new(mock::MockSttEngine::new())
+                                tracing::warn!(%e, "STT 伪流式引擎创建失败,回退非流式");
+                                match local::LocalSttEngine::new(&config) {
+                                    Ok(engine) => Box::new(engine),
+                                    Err(e) => {
+                                        tracing::warn!(%e, "STT local 引擎创建失败,回退 mock");
+                                        Box::new(mock::MockSttEngine::new())
+                                    }
+                                }
                             }
                         }
                     }
                 }
-            } else {
-                match local::LocalSttEngine::new(&config) {
-                    Ok(engine) => {
-                        tracing::info!("STT 引擎: local (FunASR)");
-                        Box::new(engine)
+                crate::app::stt_config::StreamingMode::Pseudo => {
+                    // 伪流式：VAD 切句 + 累积预览（SenseVoice）
+                    match pseudo_streaming::PseudoStreamingSttEngine::new(&config) {
+                        Ok(engine) => {
+                            tracing::info!("STT 引擎: pseudo-streaming (VAD + HTTP 轮询)");
+                            Box::new(engine)
+                        }
+                        Err(e) => {
+                            tracing::warn!(%e, "STT 伪流式引擎创建失败,回退非流式");
+                            match local::LocalSttEngine::new(&config) {
+                                Ok(engine) => Box::new(engine),
+                                Err(e) => {
+                                    tracing::warn!(%e, "STT local 引擎创建失败,回退 mock");
+                                    Box::new(mock::MockSttEngine::new())
+                                }
+                            }
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!(%e, "STT local 引擎创建失败,回退 mock");
-                        Box::new(mock::MockSttEngine::new())
+                }
+                crate::app::stt_config::StreamingMode::Off => {
+                    // 非流式：hold → release → 一次性 HTTP
+                    match local::LocalSttEngine::new(&config) {
+                        Ok(engine) => {
+                            tracing::info!("STT 引擎: local (FunASR)");
+                            Box::new(engine)
+                        }
+                        Err(e) => {
+                            tracing::warn!(%e, "STT local 引擎创建失败,回退 mock");
+                            Box::new(mock::MockSttEngine::new())
+                        }
                     }
                 }
             }

@@ -227,13 +227,39 @@ impl VoiceService {
                         match engine_for_task.transcribe_chunk(&chunk.samples).await {
                             Ok(text) => {
                                 if !text.is_empty() {
-                                    let _ = app.emit(
-                                        "blink://voice-partial",
-                                        serde_json::json!({
-                                            "text": text,
-                                            "target": target_str,
-                                        }),
-                                    );
+                                    // 尝试解析 JSON（伪流式引擎返回 confirmed + preview）
+                                    if let Ok(v) =
+                                        serde_json::from_str::<serde_json::Value>(&text)
+                                    {
+                                        let confirmed = v
+                                            .get("confirmed")
+                                            .and_then(|t| t.as_str())
+                                            .unwrap_or("");
+                                        let preview = v
+                                            .get("preview")
+                                            .and_then(|t| t.as_str())
+                                            .unwrap_or("");
+                                        // 只在有内容时 emit
+                                        if !confirmed.is_empty() || !preview.is_empty() {
+                                            let _ = app.emit(
+                                                "blink://voice-partial",
+                                                serde_json::json!({
+                                                    "confirmed": confirmed,
+                                                    "preview": preview,
+                                                    "target": target_str,
+                                                }),
+                                            );
+                                        }
+                                    } else {
+                                        // 纯文本（真流式 / 非流式引擎的兼容路径）
+                                        let _ = app.emit(
+                                            "blink://voice-partial",
+                                            serde_json::json!({
+                                                "text": text,
+                                                "target": target_str,
+                                            }),
+                                        );
+                                    }
                                 }
                             }
                             Err(e) => {

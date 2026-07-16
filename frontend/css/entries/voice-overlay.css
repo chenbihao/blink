@@ -54,6 +54,16 @@ body {
   min-height: 20px;
 }
 
+/* 0.10.4 伪流式双色文本 */
+.voice-confirmed {
+  color: var(--text);
+}
+
+.voice-preview {
+  color: var(--text-sub);
+  opacity: 0.6;
+}
+
 /* 提示 */
 .hint {
   color: var(--text-dim);

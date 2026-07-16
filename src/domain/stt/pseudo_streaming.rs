@@ -1,0 +1,1250 @@
+//! 伪流式 STT 引擎——VAD 切句定稿 + 累积预览。
+//!
+//! ## 设计
+//!
+//! 在非自回归的 SenseVoice 上实现"边说边出字"体感：
+//! - 每 500ms 对累积音频做一次 HTTP 识别 → 预览文本（灰色半透明）
+//! - VAD 检测到句尾时对本句音频做定稿识别 → 确认文本（不再变化）
+//!
+//! 用户体验：
+//! ```text
+//! 定稿: "你好世界。"          ← 白色，不变
+//! 预览: "今天天气"            ← 灰色，可能变化
+//! ```
+//!
+//! ## 与其他引擎的关系
+//!
+//! - [`LocalSttEngine`](super::local::LocalSttEngine)：非流式（transcribe_chunk 空转）
+//! - [`StreamingSttEngine`](super::streaming::StreamingSttEngine)：真流式（WebSocket 逐字）
+//! - **本引擎**：伪流式（VAD 切句 + 定时 HTTP 轮询）
+//!
+//! ## transcribe_chunk 返回值
+//!
+//! 返回 JSON 字符串 `{"confirmed":"...","preview":"..."}`，
+//! voice.rs 解析后分别 emit confirmed 和 preview。
+//! 如果 confirmed 和 preview 都为空，返回空字符串（兼容现有逻辑）。
+//!
+//! ## 并发安全
+//!
+//! 使用 `Arc<std::sync::Mutex>` 保护内部状态。后台 HTTP task 通过 clone 的
+//! `Arc` 在完成后短暂加锁写入结果。`transcribe_chunk` 是 async 但不跨 await
+//! 持有 `std::sync::Mutex`（先 lock 取数据/写数据，再 drop guard，再 await）。
+
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use super::vad::{EnergyVad, VadEvent};
+use super::{SttEngine, SttError};
+
+/// 预览识别间隔（毫秒）。
+const PREVIEW_INTERVAL_MS: u64 = 500;
+
+/// 累积音频超过此时长时，预览间隔自动拉长（毫秒）。
+const PREVIEW_SLOWDOWN_THRESHOLD_MS: u64 = 8000;
+
+/// 预览间隔在慢速模式下的值（毫秒）。
+const PREVIEW_SLOW_INTERVAL_MS: u64 = 1000;
+
+/// finalize 等待 in_flight 请求的最大时间。
+const FINALIZE_WAIT_TIMEOUT_MS: u64 = 3000;
+
+/// 伪流式 STT 引擎。
+///
+/// 组合 VAD 切句 + 累积预览，在非自回归 SenseVoice 上实现"边说边出字"体感。
+pub struct PseudoStreamingSttEngine {
+    /// 内部状态
+    inner: Arc<Mutex<PseudoInner>>,
+    /// 复用 HTTP client（避免每次建连）
+    client: reqwest::Client,
+    /// funasr-server 监听端口
+    server_port: u16,
+    /// FunASR 模型标识
+    funasr_model: String,
+    /// 采样率
+    sample_rate: u32,
+}
+
+/// 伪流式引擎内部状态。
+struct PseudoInner {
+    /// VAD 切句器
+    vad: EnergyVad,
+    /// 句子缓冲管理
+    sentences: SentenceBuffer,
+    /// 累积音频样本
+    samples: Vec<f32>,
+    /// 上一次触发预览识别的时刻
+    last_preview: Instant,
+    /// 是否有预览识别请求在飞行中
+    preview_in_flight: bool,
+    /// 最新预览文本
+    latest_preview: String,
+    /// 是否有定稿识别请求在飞行中
+    finalize_in_flight: bool,
+    /// 最新定稿文本（句尾触发，尚未追加到 confirmed_sentences）
+    pending_confirmed: Option<String>,
+}
+
+/// 句子缓冲管理。
+struct SentenceBuffer {
+    /// 已定稿的句子列表
+    confirmed_sentences: Vec<String>,
+    /// 当前句子的起始样本索引
+    current_sentence_start: usize,
+}
+
+impl SentenceBuffer {
+    fn new() -> Self {
+        Self {
+            confirmed_sentences: Vec::new(),
+            current_sentence_start: 0,
+        }
+    }
+
+    /// 句尾事件：取出本句音频范围，标记下一句起始。
+    fn on_sentence_end(&mut self, total_samples: usize) -> std::ops::Range<usize> {
+        let range = self.current_sentence_start..total_samples;
+        self.current_sentence_start = total_samples;
+        range
+    }
+
+    /// 追加一句定稿文本。
+    fn append_confirmed(&mut self, text: &str) {
+        if !text.is_empty() {
+            self.confirmed_sentences.push(text.to_string());
+        }
+    }
+
+    /// 获取已确认部分的文本。
+    fn confirmed_text(&self) -> String {
+        self.confirmed_sentences.join("")
+    }
+}
+
+impl PseudoStreamingSttEngine {
+    /// 创建伪流式 STT 引擎。
+    ///
+    /// 从 SttConfig 读取端口和模型配置，检查 funasr-server 是否就绪。
+    pub fn new(config: &crate::app::stt_config::SttConfig) -> Result<Self, String> {
+        let port = config.local_engine.server_port;
+        let model = config.local_engine.funasr_model.clone();
+
+        let ready = super::funasr::is_server_ready(port);
+        if !ready {
+            return Err(format!(
+                "FunASR 服务未在端口 {port} 上运行。\
+                 请在设置页「语音输入」→「本地模式」中点击「启动服务」按钮。"
+            ));
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|e| format!("HTTP client 创建失败: {e}"))?;
+
+        tracing::info!(port, model = %model, "伪流式 STT 引擎: VAD + HTTP 轮询 (就绪)");
+
+        Ok(Self {
+            inner: Arc::new(Mutex::new(PseudoInner {
+                vad: EnergyVad::new(16000),
+                sentences: SentenceBuffer::new(),
+                samples: Vec::new(),
+                last_preview: Instant::now(),
+                preview_in_flight: false,
+                latest_preview: String::new(),
+                finalize_in_flight: false,
+                pending_confirmed: None,
+            })),
+            client,
+            server_port: port,
+            funasr_model: model,
+            sample_rate: 16000,
+        })
+    }
+
+    /// 返回当前应使用的预览间隔（累积过长时降频）。
+    fn preview_interval(samples_len: usize, sample_rate: u32) -> Duration {
+        let duration_ms = (samples_len as f64 / sample_rate as f64 * 1000.0) as u64;
+        if duration_ms > PREVIEW_SLOWDOWN_THRESHOLD_MS {
+            Duration::from_millis(PREVIEW_SLOW_INTERVAL_MS)
+        } else {
+            Duration::from_millis(PREVIEW_INTERVAL_MS)
+        }
+    }
+
+    /// 组装返回 JSON 字符串。
+    fn compose_result(confirmed: &str, preview: &str) -> String {
+        if confirmed.is_empty() && preview.is_empty() {
+            return String::new();
+        }
+        serde_json::json!({
+            "confirmed": confirmed,
+            "preview": preview,
+        })
+        .to_string()
+    }
+
+    /// HTTP 转录 URL。
+    fn transcription_url(&self) -> String {
+        format!(
+            "{}/audio/transcriptions",
+            super::funasr::server_base_url(self.server_port)
+        )
+    }
+
+    /// 异步 HTTP 转录（同步等待结果）。
+    async fn transcribe_samples(&self, samples: &[f32]) -> Result<String, SttError> {
+        if samples.is_empty() {
+            return Ok(String::new());
+        }
+
+        if !super::funasr::is_server_ready_http(self.server_port).await {
+            return Err(SttError::Engine(format!(
+                "FunASR 服务 HTTP API 未就绪（端口 {}）",
+                self.server_port
+            )));
+        }
+
+        // 裁剪尾部静音，减少 SenseVoice 幻觉英文语气词
+        let trimmed = trim_trailing_silence(samples, self.sample_rate);
+        let wav_bytes = super::wav::pcm_to_wav(&trimmed, self.sample_rate, 1);
+        let url = self.transcription_url();
+
+        use reqwest::multipart;
+        let part = multipart::Part::bytes(wav_bytes.to_vec())
+            .file_name("audio.wav")
+            .mime_str("audio/wav")
+            .map_err(|e| SttError::Engine(format!("multipart 构建失败: {e}")))?;
+        let form = multipart::Form::new()
+            .text("model", self.funasr_model.clone())
+            .part("file", part);
+
+        let resp = self
+            .client
+            .post(&url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| SttError::Engine(format!("HTTP 请求失败: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(SttError::Engine(format!("HTTP {status}: {body}")));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct TranscriptionResponse {
+            text: String,
+        }
+
+        let result: TranscriptionResponse = resp
+            .json()
+            .await
+            .map_err(|e| SttError::Engine(format!("JSON 解析失败: {e}")))?;
+
+        // 剥离 SenseVoice 幻觉的英文语气词
+        let cleaned = strip_filler_words(&result.text);
+        Ok(cleaned)
+    }
+
+    /// 后台 spawn 一个定稿识别 task。
+    fn spawn_sentence_finalize(&self, sentence_samples: Vec<f32>) {
+        if sentence_samples.is_empty() {
+            return;
+        }
+
+        // 标记 in_flight
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.finalize_in_flight = true;
+        }
+
+        let inner = Arc::clone(&self.inner);
+        let client = self.client.clone();
+        let url = self.transcription_url();
+        let model = self.funasr_model.clone();
+        let sample_rate = self.sample_rate;
+
+        tokio::spawn(async move {
+            // 裁剪尾部静音，减少 SenseVoice 幻觉英文语气词
+            let trimmed = trim_trailing_silence(&sentence_samples, sample_rate);
+            let wav_bytes = super::wav::pcm_to_wav(&trimmed, sample_rate, 1);
+
+            use reqwest::multipart;
+            let part = match multipart::Part::bytes(wav_bytes)
+                .file_name("audio.wav")
+                .mime_str("audio/wav")
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(%e, "定稿识别 multipart 构建失败");
+                    let mut inner = inner.lock().unwrap();
+                    inner.finalize_in_flight = false;
+                    return;
+                }
+            };
+            let form = multipart::Form::new().text("model", model).part("file", part);
+
+            match client.post(&url).multipart(form).send().await {
+                Ok(resp) => {
+                    if resp.status().is_success() {
+                        #[derive(serde::Deserialize)]
+                        struct R {
+                            text: String,
+                        }
+                            match resp.json::<R>().await {
+                                Ok(r) => {
+                                    let cleaned = strip_filler_words(&r.text);
+                                    tracing::debug!(
+                                        text = %cleaned,
+                                        raw = %r.text,
+                                        samples = sentence_samples.len(),
+                                        "定稿识别完成"
+                                    );
+                                    // 写入 pending_confirmed，下次 transcribe_chunk 时收取
+                                    let mut inner = inner.lock().unwrap();
+                                    inner.pending_confirmed = Some(cleaned);
+                                }
+                            Err(e) => {
+                                tracing::warn!(%e, "定稿识别 JSON 解析失败");
+                            }
+                        }
+                    } else {
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        tracing::warn!(%status, %body, "定稿识别 HTTP 错误");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(%e, "定稿识别 HTTP 请求失败");
+                }
+            }
+
+            // 清除 in_flight 标志
+            let mut inner = inner.lock().unwrap();
+            inner.finalize_in_flight = false;
+        });
+    }
+
+    /// 后台 spawn 一个预览识别 task。
+    fn spawn_preview_recognition(&self, samples_snapshot: Vec<f32>) {
+        if samples_snapshot.is_empty() {
+            return;
+        }
+
+        // 标记 in_flight
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.preview_in_flight = true;
+        }
+
+        let inner = Arc::clone(&self.inner);
+        let client = self.client.clone();
+        let url = self.transcription_url();
+        let model = self.funasr_model.clone();
+        let sample_rate = self.sample_rate;
+
+        tokio::spawn(async move {
+            // 裁剪尾部静音，减少 SenseVoice 幻觉英文语气词
+            let trimmed = trim_trailing_silence(&samples_snapshot, sample_rate);
+            let wav_bytes = super::wav::pcm_to_wav(&trimmed, sample_rate, 1);
+
+            use reqwest::multipart;
+            let part = match multipart::Part::bytes(wav_bytes)
+                .file_name("audio.wav")
+                .mime_str("audio/wav")
+            {
+                Ok(p) => p,
+                Err(_) => {
+                    let mut inner = inner.lock().unwrap();
+                    inner.preview_in_flight = false;
+                    return;
+                }
+            };
+            let form = multipart::Form::new().text("model", model).part("file", part);
+
+            match client.post(&url).multipart(form).send().await {
+                Ok(resp) => {
+                    if resp.status().is_success() {
+                        #[derive(serde::Deserialize)]
+                        struct R {
+                            text: String,
+                        }
+                        if let Ok(r) = resp.json::<R>().await {
+                            if !r.text.is_empty() {
+                                let cleaned = strip_filler_words(&r.text);
+                                if !cleaned.is_empty() {
+                                    tracing::trace!(text = %cleaned, raw = %r.text, "预览识别完成");
+                                    // 写入 latest_preview
+                                    let mut inner = inner.lock().unwrap();
+                                    inner.latest_preview = cleaned;
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::trace!(%e, "预览识别失败（非致命）");
+                }
+            }
+
+            // 清除 in_flight 标志
+            let mut inner = inner.lock().unwrap();
+            inner.preview_in_flight = false;
+        });
+    }
+}
+
+/// 从预览文本中剥离已确认的前缀部分。
+///
+/// 预览识别只取未确认音频，但模型仍可能因句子边界切分不完全
+/// 而在 preview 开头重复部分 confirmed 文本。此函数做兜底清理：
+///
+/// 1. 精确前缀匹配 → 直接剥离
+/// 2. 逐字符匹配 → 剥离匹配部分（应对标点差异等）
+/// 3. 无匹配 → 原样返回
+///
+/// # 算法
+///
+/// 逐字符从开头比较 confirmed 和 preview，遇到第一个不匹配的字符停止。
+/// 匹配长度 ≥ confirmed 长度的 50% 时才剥离（避免误剥离短公共前缀如"我"）。
+fn strip_confirmed_prefix(confirmed: &str, preview: &str) -> String {
+    if confirmed.is_empty() || preview.is_empty() {
+        return preview.to_string();
+    }
+
+    // 1. 精确前缀匹配
+    if let Some(stripped) = preview.strip_prefix(confirmed) {
+        return stripped.to_string();
+    }
+
+    // 2. 逐字符匹配（应对标点差异）
+    let confirmed_chars: Vec<char> = confirmed.chars().collect();
+    let preview_chars: Vec<char> = preview.chars().collect();
+
+    let mut match_len = 0;
+    for (c, p) in confirmed_chars.iter().zip(preview_chars.iter()) {
+        if c == p {
+            match_len += 1;
+        } else {
+            break;
+        }
+    }
+
+    // 匹配长度需达到 confirmed 的 50% 才剥离
+    // 避免短公共前缀（如 "我"）导致误剥离
+    if match_len > 0 && match_len * 2 >= confirmed_chars.len() {
+        preview_chars[match_len..].iter().collect()
+    } else {
+        preview.to_string()
+    }
+}
+
+/// 尾部静音裁剪阈值（与 VAD 一致）。
+const TRIM_SILENCE_THRESHOLD: f64 = 0.005;
+
+/// 裁剪后保留的尾部缓冲（毫秒），避免切掉软辅音尾音。
+const TRIM_TAIL_BUFFER_MS: u32 = 150;
+
+/// 裁剪音频尾部的静音/低能量段。
+///
+/// SenseVoice 等多语言模型在尾部静音上容易幻觉出英文语气词
+///（如 "Yeah." "Okay."）。裁剪尾部静音可大幅减少此问题。
+///
+/// 算法：从末尾向前扫描，找到最后一个超过阈值的样本，
+/// 保留该位置 + `TRIM_TAIL_BUFFER_MS` 缓冲后的部分。
+fn trim_trailing_silence(samples: &[f32], sample_rate: u32) -> Vec<f32> {
+    if samples.is_empty() {
+        return Vec::new();
+    }
+
+    // 从末尾向前找最后一个有声样本
+    let threshold = TRIM_SILENCE_THRESHOLD as f32;
+    let mut last_audible = None;
+    for (i, &s) in samples.iter().enumerate().rev() {
+        if s.abs() > threshold {
+            last_audible = Some(i);
+            break;
+        }
+    }
+
+    match last_audible {
+        None => {
+            // 全静音 → 原样返回（不破坏空音频逻辑）
+            samples.to_vec()
+        }
+        Some(idx) => {
+            let buffer_samples = (TRIM_TAIL_BUFFER_MS as u64
+                * sample_rate as u64
+                / 1000) as usize;
+            let end = (idx + 1 + buffer_samples).min(samples.len());
+            samples[..end].to_vec()
+        }
+    }
+}
+
+/// SenseVoice 常见英文语气词幻觉。
+///
+/// 这些词在中文语音识别中不应出现，是多语言模型在静音段上的已知幻觉。
+const FILLER_WORDS: &[&str] = &[
+    "Yeah", "yeah", "Okay", "okay", "OK", "ok", "Mm", "mm", "Hmm", "hmm",
+    "Uh", "uh", "Oh", "oh", "Ah", "ah", "Um", "um", "No", "no",
+    "Yes", "yes", "Well", "well", "So", "so", "Right", "right",
+    "Like", "like", "But", "but", "And", "and",
+];
+
+/// 判断字符是否为中文。
+fn is_chinese_char(c: char) -> bool {
+    matches!(c, '\u{4e00}'..='\u{9fff}' | '\u{3400}'..='\u{4dbf}')
+}
+
+/// 判断字符是否为 emoji 或非语音符号。
+///
+/// SenseVoice 模型有时会在文本中插入 emoji（如 😊😄）。
+/// 覆盖常见 emoji Unicode 区间。
+fn is_emoji(c: char) -> bool {
+    matches!(c,
+        '\u{1F600}'..='\u{1F64F}'   // emoticons
+        | '\u{1F300}'..='\u{1F5FF}'  // symbols & pictographs
+        | '\u{1F680}'..='\u{1F6FF}'  // transport & map symbols
+        | '\u{1F1E0}'..='\u{1F1FF}'  // flags (iOS)
+        | '\u{2700}'..='\u{27BF}'    // dingbats
+        | '\u{1F900}'..='\u{1F9FF}'  // supplemental symbols and pictographs
+        | '\u{2600}'..='\u{26FF}'    // miscellaneous symbols
+        | '\u{1FA00}'..='\u{1FA6F}'  // chess symbols
+        | '\u{1FA70}'..='\u{1FAFF}'  // symbols and pictographs extended-a
+    )
+}
+
+/// 清除文本中的 emoji 字符。
+fn strip_emoji(text: &str) -> String {
+    text.chars().filter(|c| !is_emoji(*c)).collect()
+}
+
+/// 判断字符是否为 CJK 字符（中文/日文/韩文）。
+///
+/// 用于检测字符间空格是否应被移除——Paraformer 的字符级 tokenizer
+/// 会在每个 CJK 字符之间插入空格。
+fn is_cjk_char(c: char) -> bool {
+    matches!(c,
+        '\u{4e00}'..='\u{9fff}'   // CJK Unified Ideographs
+        | '\u{3400}'..='\u{4dbf}' // CJK Extension A
+        | '\u{3040}'..='\u{30ff}' // Hiragana + Katakana
+        | '\u{ac00}'..='\u{d7af}' // Hangul Syllables
+    )
+}
+
+/// 去除 CJK 字符之间的空格。
+///
+/// Paraformer / SeacoParaformer 使用字符级 tokenizer，
+/// 原始输出形如 "那 我 现 在 能 输 入 了 吗"。
+/// 此函数移除 CJK 字符之间的空白，同时保留英文单词间的正常空格。
+///
+/// 算法：遍历字符序列，当当前字符是 CJK 且下一个非空字符也是 CJK 时，
+/// 跳过中间的空白。保留 CJK 与非 CJK 之间的单个空格。
+fn strip_cjk_spaces(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return String::new();
+    }
+
+    let mut result = Vec::with_capacity(chars.len());
+    let mut i = 0;
+
+    while i < chars.len() {
+        let c = chars[i];
+
+        if c.is_whitespace() && !result.is_empty() {
+            // 查看前面已写入的最后一个非空字符
+            let prev = result.last().copied();
+            // 向后查找下一个非空字符
+            let mut j = i + 1;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+
+            match prev {
+                Some(p) if is_cjk_char(p) => {
+                    // 前面是 CJK
+                    if j < chars.len() && is_cjk_char(chars[j]) {
+                        // 后面也是 CJK → 跳过空格
+                        i = j;
+                        continue;
+                    }
+                    // 后面不是 CJK → 保留一个空格
+                    result.push(' ');
+                    i += 1;
+                    continue;
+                }
+                _ => {
+                    // 前面不是 CJK → 保留一个空格
+                    result.push(' ');
+                    i += 1;
+                    continue;
+                }
+            }
+        }
+
+        result.push(c);
+        i += 1;
+    }
+
+    result.into_iter().collect()
+}
+
+/// 剥离 SenseVoice 幻觉产生的尾部英文语气词和 emoji。
+///
+/// 当识别文本以中文为主时，模型可能在尾部静音段幻觉出
+/// 英文填充词（如 "Yeah." "Okay."）或 emoji。此函数做后处理清理。
+///
+/// 此外，Paraformer 字符级 tokenizer 会在每个 CJK 字符间插入空格，
+/// 此函数也一并清理。
+///
+/// 仅当文本包含中文字符时才执行剥离，避免误伤纯英文识别。
+fn strip_filler_words(text: &str) -> String {
+    // 首先去除 emoji（无论是否有中文）
+    let no_emoji = strip_emoji(text);
+    // 去除 CJK 字符间的空格（Paraformer 字符级 tokenizer 副产物）
+    let no_cjk_spaces = strip_cjk_spaces(&no_emoji);
+    let trimmed = no_cjk_spaces.trim();
+    if trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+
+    // 检查是否包含中文字符
+    let has_chinese = trimmed.chars().any(is_chinese_char);
+    if !has_chinese {
+        return trimmed.to_string();
+    }
+
+    let mut result = trimmed.to_string();
+
+    // 循环剥离尾部语气词（可能多个连续出现）
+    loop {
+        let stripped = strip_one_filler_suffix(&result);
+        if stripped.len() == result.len() {
+            break;
+        }
+        result = stripped;
+    }
+
+    // 清理尾部残留的空格和标点
+    result.trim_end().to_string()
+}
+
+/// 尝试从文本末尾剥离一个英文语气词后缀。
+/// 返回剥离后的文本；如果没有匹配则原样返回。
+fn strip_one_filler_suffix(text: &str) -> String {
+    let lower = text.to_lowercase();
+
+    for &filler in FILLER_WORDS {
+        let filler_lower = filler.to_lowercase();
+
+        // 模式 1: "...中文 Yeah." → 匹配 " Yeah." / " Yeah," 等
+        // 前面是空格或中文标点
+        for &suffix in &[".", ",", "!", "?", ""] {
+            let pattern = format!(" {}{}", filler_lower, suffix);
+            if lower.ends_with(&pattern) {
+                let cut = text.len() - pattern.len();
+                return text[..cut].to_string();
+            }
+        }
+
+        // 模式 2: "...中文Yeah." → 无空格直接拼接（较少见但存在）
+        // 仅当 filler 前面是中文字符或中文标点时才匹配
+        for &suffix in &[".", ",", "!", "?"] {
+            let pattern = format!("{}{}", filler_lower, suffix);
+            if lower.ends_with(&pattern) {
+                let cut = text.len() - pattern.len();
+                if cut > 0 {
+                    let prev_char = text[..cut].chars().next_back();
+                    if let Some(pc) = prev_char {
+                        // 非 ASCII 字符 = 中文（汉字或标点）
+                        if !pc.is_ascii() {
+                            return text[..cut].to_string();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    text.to_string()
+}
+
+#[async_trait::async_trait]
+impl SttEngine for PseudoStreamingSttEngine {
+    async fn transcribe_chunk(&self, samples: &[f32]) -> Result<String, SttError> {
+        // ── 1. 累积音频 + 喂 VAD ──
+        let (_vad_event, sentence_range, should_preview, samples_snapshot) = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.samples.extend_from_slice(samples);
+            let total = inner.samples.len();
+
+            // 喂 VAD
+            let event = inner.vad.process_chunk(samples);
+
+            // 处理句尾
+            let range = if event == VadEvent::SentenceEnd {
+                Some(inner.sentences.on_sentence_end(total))
+            } else {
+                None
+            };
+
+            // 检查是否该触发预览
+            let interval = Self::preview_interval(total, self.sample_rate);
+            let should_preview = inner.last_preview.elapsed() >= interval
+                && !inner.preview_in_flight;
+
+            // 收取 pending 定稿结果（如果有）
+            if let Some(text) = inner.pending_confirmed.take() {
+                inner.sentences.append_confirmed(&text);
+            }
+
+            // 句尾时清空预览（本句已定稿，下一段预览从空开始）
+            if event == VadEvent::SentenceEnd {
+                inner.latest_preview.clear();
+            }
+
+            let snapshot = if should_preview {
+                // 只取未确认部分的音频（current_sentence_start 之后），
+                // 避免预览重复已定稿的句子内容
+                let start = inner.sentences.current_sentence_start;
+                if start < inner.samples.len() {
+                    inner.samples[start..].to_vec()
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+
+            if should_preview {
+                inner.last_preview = Instant::now();
+            }
+
+            (event, range, should_preview, snapshot)
+        };
+
+        // ── 2. VAD 句尾 → spawn 定稿识别（后台 HTTP） ──
+        if let Some(range) = sentence_range {
+            let sentence_samples: Vec<f32> = {
+                let inner = self.inner.lock().unwrap();
+                inner.samples.get(range).map(|s| s.to_vec()).unwrap_or_default()
+            };
+
+            if !sentence_samples.is_empty() {
+                self.spawn_sentence_finalize(sentence_samples);
+            }
+
+            // VAD 句尾后重置句子计数
+            self.inner.lock().unwrap().vad.reset_sentence();
+        }
+
+        // ── 3. 500ms 定时 → spawn 预览识别（后台 HTTP） ──
+        if should_preview {
+            self.spawn_preview_recognition(samples_snapshot);
+        }
+
+        // ── 4. 组装返回 ──
+        // strip_confirmed_prefix 兜底：即使预览只取了未确认音频，
+        // 模型仍可能因为句子边界切分不完全而产生部分重叠文本
+        let (confirmed, preview) = {
+            let inner = self.inner.lock().unwrap();
+            let confirmed = inner.sentences.confirmed_text();
+            let preview = strip_confirmed_prefix(&confirmed, &inner.latest_preview);
+            (confirmed, preview)
+        };
+
+        Ok(Self::compose_result(&confirmed, &preview))
+    }
+
+    async fn finalize(&self) -> Result<String, SttError> {
+        // 1. 定稿剩余音频（finalize 识别）
+        let remaining_samples: Vec<f32> = {
+            let inner = self.inner.lock().unwrap();
+            let start = inner.sentences.current_sentence_start;
+            if start < inner.samples.len() {
+                inner.samples[start..].to_vec()
+            } else {
+                Vec::new()
+            }
+        };
+
+        let finalize_text = if !remaining_samples.is_empty() {
+            match self.transcribe_samples(&remaining_samples).await {
+                Ok(text) => text,
+                Err(e) => {
+                    tracing::warn!(%e, "finalize 定稿识别失败，使用已有结果");
+                    String::new()
+                }
+            }
+        } else {
+            String::new()
+        };
+
+        // 2. 等待 in_flight 预览/定稿请求完成（最多 3s）
+        let deadline = Instant::now() + Duration::from_millis(FINALIZE_WAIT_TIMEOUT_MS);
+        loop {
+            let (preview_in_flight, finalize_in_flight) = {
+                let inner = self.inner.lock().unwrap();
+                (inner.preview_in_flight, inner.finalize_in_flight)
+            };
+
+            if !preview_in_flight && !finalize_in_flight {
+                break;
+            }
+            if Instant::now() >= deadline {
+                tracing::warn!("finalize: 等待 in_flight 请求超时，使用已有结果");
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // 3. 收取 pending 定稿结果
+        {
+            let mut inner = self.inner.lock().unwrap();
+            if let Some(text) = inner.pending_confirmed.take() {
+                inner.sentences.append_confirmed(&text);
+            }
+        }
+
+        // 4. 拼接 confirmed + finalize_text + 最后一段 preview
+        let final_text = {
+            let inner = self.inner.lock().unwrap();
+            let mut result = inner.sentences.confirmed_text();
+            if !finalize_text.is_empty() {
+                result.push_str(&finalize_text);
+            }
+            // 如果 finalize 没有识别到文本，用最后一段 preview 兜底
+            if result.is_empty() && !inner.latest_preview.is_empty() {
+                result = inner.latest_preview.clone();
+            }
+            result
+        };
+
+        tracing::info!(
+            text_len = final_text.chars().count(),
+            %final_text,
+            "PseudoStreamingSttEngine 识别完成",
+        );
+
+        Ok(final_text)
+    }
+
+    fn reset(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.vad.reset();
+        inner.sentences = SentenceBuffer::new();
+        inner.samples.clear();
+        inner.last_preview = Instant::now();
+        inner.preview_in_flight = false;
+        inner.latest_preview.clear();
+        inner.finalize_in_flight = false;
+        inner.pending_confirmed = None;
+        tracing::debug!("PseudoStreamingSttEngine::reset");
+    }
+
+    fn name(&self) -> &str {
+        "pseudo-streaming"
+    }
+}
+
+// ── 测试 ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sentence_buffer_compose() {
+        let mut buf = SentenceBuffer::new();
+        buf.append_confirmed("你好世界。");
+        buf.append_confirmed("今天天气不错。");
+        assert_eq!(
+            buf.confirmed_text(),
+            "你好世界。今天天气不错。"
+        );
+    }
+
+    #[test]
+    fn sentence_buffer_empty() {
+        let buf = SentenceBuffer::new();
+        assert_eq!(buf.confirmed_text(), "");
+    }
+
+    #[test]
+    fn sentence_buffer_on_sentence_end() {
+        let mut buf = SentenceBuffer::new();
+        let range1 = buf.on_sentence_end(1000);
+        assert_eq!(range1, 0..1000);
+        let range2 = buf.on_sentence_end(2500);
+        assert_eq!(range2, 1000..2500);
+    }
+
+    #[test]
+    fn compose_result_empty_returns_empty_string() {
+        assert_eq!(PseudoStreamingSttEngine::compose_result("", ""), "");
+    }
+
+    #[test]
+    fn compose_result_with_preview_only() {
+        let result = PseudoStreamingSttEngine::compose_result("", "你好");
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["confirmed"], "");
+        assert_eq!(v["preview"], "你好");
+    }
+
+    #[test]
+    fn compose_result_with_both() {
+        let result = PseudoStreamingSttEngine::compose_result("你好。", "世界");
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["confirmed"], "你好。");
+        assert_eq!(v["preview"], "世界");
+    }
+
+    #[test]
+    fn preview_interval_normal() {
+        let interval = PseudoStreamingSttEngine::preview_interval(16000 * 3, 16000);
+        assert_eq!(interval, Duration::from_millis(PREVIEW_INTERVAL_MS));
+    }
+
+    #[test]
+    fn preview_interval_slowdown() {
+        let interval = PseudoStreamingSttEngine::preview_interval(16000 * 10, 16000);
+        assert_eq!(interval, Duration::from_millis(PREVIEW_SLOW_INTERVAL_MS));
+    }
+
+    // ── strip_confirmed_prefix 测试 ──
+
+    #[test]
+    fn strip_prefix_exact_match() {
+        // preview 完全以 confirmed 开头 → 剥离
+        assert_eq!(
+            strip_confirmed_prefix("你好世界。", "你好世界。今天天气"),
+            "今天天气"
+        );
+    }
+
+    #[test]
+    fn strip_prefix_no_confirmed() {
+        // confirmed 为空 → 原样返回
+        assert_eq!(strip_confirmed_prefix("", "你好"), "你好");
+    }
+
+    #[test]
+    fn strip_prefix_no_preview() {
+        // preview 为空 → 原样返回
+        assert_eq!(strip_confirmed_prefix("你好", ""), "");
+    }
+
+    #[test]
+    fn strip_prefix_no_overlap() {
+        // 完全不匹配 → 原样返回
+        assert_eq!(
+            strip_confirmed_prefix("你好世界。", "今天天气不错"),
+            "今天天气不错"
+        );
+    }
+
+    #[test]
+    fn strip_prefix_partial_match() {
+        // 部分匹配（前 2 字符匹配，第 3 个不同）→ 剥离匹配部分
+        // confirmed = "你好世"（3 chars），匹配 2 个 = 67% ≥ 50% → 剥离
+        assert_eq!(
+            strip_confirmed_prefix("你好世", "你好时间今天天气"),
+            "时间今天天气"
+        );
+    }
+
+    #[test]
+    fn strip_prefix_short_common_prefix_not_stripped() {
+        // 短公共前缀（2 字符 = 33% < 50%）→ 不剥离
+        // confirmed = "你好世界今天"（6 chars），匹配 2 个 = 33%
+        assert_eq!(
+            strip_confirmed_prefix("你好世界今天", "你好朋友"),
+            "你好朋友"
+        );
+    }
+
+    #[test]
+    fn strip_prefix_preview_equals_confirmed() {
+        // preview == confirmed → 剥离后为空
+        assert_eq!(strip_confirmed_prefix("你好世界。", "你好世界。"), "");
+    }
+
+    // ── trim_trailing_silence 测试 ──
+
+    #[test]
+    fn trim_silence_all_silence() {
+        // 全静音 → 原样返回
+        let samples = vec![0.0f32; 1600];
+        let trimmed = trim_trailing_silence(&samples, 16000);
+        assert_eq!(trimmed.len(), 1600);
+    }
+
+    #[test]
+    fn trim_silence_empty() {
+        let trimmed = trim_trailing_silence(&[], 16000);
+        assert!(trimmed.is_empty());
+    }
+
+    #[test]
+    fn trim_silence_trims_trailing_zeros() {
+        // 有声 50ms + 静音 1s → 裁剪后保留有声 + 150ms 缓冲
+        let mut samples = vec![0.1f32; 800]; // 有声 50ms
+        samples.extend(vec![0.0f32; 16000]); // 静音 1s
+        let trimmed = trim_trailing_silence(&samples, 16000);
+        // 最后有声样本在 index 799，缓冲 = 150ms * 16000 / 1000 = 2400
+        // end = min(800 + 2400, 16800) = 3200
+        assert_eq!(trimmed.len(), 3200);
+    }
+
+    #[test]
+    fn trim_silence_no_trailing_silence() {
+        // 无尾部静音 → 原样返回（缓冲不超出长度）
+        let samples = vec![0.1f32; 1600];
+        let trimmed = trim_trailing_silence(&samples, 16000);
+        // idx = 1599, buffer = 2400, end = min(1600, 1600) = 1600
+        assert_eq!(trimmed.len(), 1600);
+    }
+
+    // ── strip_filler_words 测试 ──
+
+    #[test]
+    fn filler_strip_yeah_period() {
+        assert_eq!(
+            strip_filler_words("我现在在做一个语音输入的。Yeah."),
+            "我现在在做一个语音输入的。"
+        );
+    }
+
+    #[test]
+    fn filler_strip_okay_period() {
+        assert_eq!(
+            strip_filler_words("然后有一个假的流逝输入。Okay."),
+            "然后有一个假的流逝输入。"
+        );
+    }
+
+    #[test]
+    fn filler_strip_multiple_fillers() {
+        // 连续多个语气词
+        assert_eq!(
+            strip_filler_words("你好世界。Yeah. Okay."),
+            "你好世界。"
+        );
+    }
+
+    #[test]
+    fn filler_strip_no_chinese_not_stripped() {
+        // 纯英文不剥离
+        assert_eq!(
+            strip_filler_words("Hello world Yeah."),
+            "Hello world Yeah."
+        );
+    }
+
+    #[test]
+    fn filler_strip_no_filler() {
+        // 无语气词 → 原样
+        assert_eq!(
+            strip_filler_words("你好世界。今天天气不错。"),
+            "你好世界。今天天气不错。"
+        );
+    }
+
+    #[test]
+    fn filler_strip_empty() {
+        assert_eq!(strip_filler_words(""), "");
+    }
+
+    #[test]
+    fn filler_strip_only_filler_with_chinese() {
+        // 中文 + 纯语气词（无标点）
+        assert_eq!(
+            strip_filler_words("你好世界 Yeah"),
+            "你好世界"
+        );
+    }
+
+    #[test]
+    fn filler_strip_no_space_variant() {
+        // 无空格直接拼接（中文后直接跟英文）
+        assert_eq!(
+            strip_filler_words("你好世界。Yeah."),
+            "你好世界。"
+        );
+    }
+
+    #[test]
+    fn filler_strip_chinese_period_then_yeah() {
+        // 用户实际遇到的 case：中文句号后无空格直接跟英文语气词
+        assert_eq!(
+            strip_filler_words("我现在呢在做一个语音输入的。然后有一个假的流逝输入。Yeah."),
+            "我现在呢在做一个语音输入的。然后有一个假的流逝输入。"
+        );
+    }
+
+    #[test]
+    fn filler_strip_preserves_chinese_text() {
+        // 确保不会误剥离正常中文文本
+        assert_eq!(
+            strip_filler_words("好的，我知道了。"),
+            "好的，我知道了。"
+        );
+    }
+
+    // ── emoji 过滤测试 ──
+
+    #[test]
+    fn filler_strip_emoji_from_chinese() {
+        // 中文 + emoji → 去除 emoji
+        assert_eq!(
+            strip_filler_words("你好世界😊"),
+            "你好世界"
+        );
+    }
+
+    #[test]
+    fn filler_strip_emoji_and_filler() {
+        // 中文 + emoji + 英文语气词 → 全部清除
+        assert_eq!(
+            strip_filler_words("你好世界。😊 Yeah."),
+            "你好世界。"
+        );
+    }
+
+    #[test]
+    fn filler_strip_multiple_emoji() {
+        // 多个 emoji
+        assert_eq!(
+            strip_filler_words("测试文本😄🎉"),
+            "测试文本"
+        );
+    }
+
+    #[test]
+    fn filler_strip_emoji_only() {
+        // 纯 emoji → 空字符串
+        assert_eq!(strip_filler_words("😊😄"), "");
+    }
+
+    // ── CJK 间空格去除测试（Paraformer 字符级 tokenizer 副产物）──
+
+    #[test]
+    fn cjk_spaces_basic() {
+        // Paraformer 典型输出：每个字之间都有空格
+        assert_eq!(
+            strip_filler_words("那 我 现 在 能 输 入 了 吗"),
+            "那我现在能输入了吗"
+        );
+    }
+
+    #[test]
+    fn cjk_spaces_with_punctuation() {
+        // 带标点的情况
+        assert_eq!(
+            strip_filler_words("哎 为 什 么 我 输 入 会 带 一 堆 空 格 呀"),
+            "哎为什么我输入会带一堆空格呀"
+        );
+    }
+
+    #[test]
+    fn cjk_spaces_preserves_english_spaces() {
+        // 英文单词间的空格应保留
+        assert_eq!(
+            strip_filler_words("Hello world"),
+            "Hello world"
+        );
+    }
+
+    #[test]
+    fn cjk_spaces_mixed_chinese_english() {
+        // 中英混排：CJK 间空格去除，CJK 与英文间保留一个空格
+        assert_eq!(
+            strip_filler_words("我 在 用 Blink 输 入 法"),
+            "我在用 Blink 输入法"
+        );
+    }
+
+    #[test]
+    fn cjk_spaces_multiple_spaces() {
+        // 多个连续空格
+        assert_eq!(
+            strip_filler_words("你  好  世  界"),
+            "你好世界"
+        );
+    }
+
+    #[test]
+    fn cjk_spaces_no_spaces_unchanged() {
+        // 无空格的中文不受影响
+        assert_eq!(
+            strip_filler_words("你好世界"),
+            "你好世界"
+        );
+    }
+
+    #[test]
+    fn cjk_spaces_empty() {
+        assert_eq!(strip_filler_words(""), "");
+    }
+
+    #[test]
+    fn cjk_spaces_with_filler_and_spaces() {
+        // CJK 空格 + 英文语气词同时出现
+        assert_eq!(
+            strip_filler_words("那 我 现 在 能 输 入 了 吗 Yeah."),
+            "那我现在能输入了吗"
+        );
+    }
+
+    #[test]
+    fn cjk_spaces_strips_function_directly() {
+        // 直接测试 strip_cjk_spaces 函数
+        assert_eq!(strip_cjk_spaces("你 好 世 界"), "你好世界");
+        assert_eq!(strip_cjk_spaces("Hello world"), "Hello world");
+        assert_eq!(strip_cjk_spaces("中 文 Hello world 文 本"), "中文 Hello world 文本");
+    }
+
+    #[test]
+    fn engine_reset_clears_state() {
+        let engine = PseudoStreamingSttEngine {
+            inner: Arc::new(Mutex::new(PseudoInner {
+                vad: {
+                    let mut v = EnergyVad::new(16000);
+                    // 模拟有状态
+                    v.process_chunk(&[0.1; 1600]);
+                    v
+                },
+                sentences: {
+                    let mut s = SentenceBuffer::new();
+                    s.append_confirmed("测试");
+                    s
+                },
+                samples: vec![0.1; 1000],
+                last_preview: Instant::now() - Duration::from_secs(10),
+                preview_in_flight: true,
+                latest_preview: "测试预览".to_string(),
+                finalize_in_flight: true,
+                pending_confirmed: Some("pending".to_string()),
+            })),
+            client: reqwest::Client::new(),
+            server_port: 8000,
+            funasr_model: "test".to_string(),
+            sample_rate: 16000,
+        };
+
+        engine.reset();
+
+        let inner = engine.inner.lock().unwrap();
+        assert!(!inner.vad.is_speaking());
+        assert!(inner.samples.is_empty());
+        assert!(inner.latest_preview.is_empty());
+        assert!(!inner.preview_in_flight);
+        assert!(!inner.finalize_in_flight);
+        assert!(inner.pending_confirmed.is_none());
+        assert_eq!(inner.sentences.confirmed_text(), "");
+    }
+}

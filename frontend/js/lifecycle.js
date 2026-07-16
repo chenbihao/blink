@@ -65,10 +65,23 @@ export function init() {
 
   // 0.10 语音输入:G1 流式 partial 文字实时更新 #query
   // (G2 的 partial 由 mini overlay 窗口处理,主窗口不可见时不接收)
+  // 0.10.4: 支持 confirmed/preview 双字段（伪流式引擎）
   listen("blink://voice-partial", (event) => {
-    const { text, target } = event.payload ?? {};
-    if (target === "g1" && text) {
-      queryEl.value = text;
+    const payload = event.payload ?? {};
+    if (payload.target !== "g1") return;
+
+    // 优先使用 confirmed + preview 双字段（伪流式）
+    if (payload.confirmed !== undefined || payload.preview !== undefined) {
+      const confirmed = payload.confirmed || "";
+      const preview = payload.preview || "";
+      const combined = confirmed + preview;
+      if (combined) {
+        queryEl.value = combined;
+        queryEl.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    } else if (payload.text) {
+      // 兼容旧格式（真流式 / 非流式引擎）
+      queryEl.value = payload.text;
       queryEl.dispatchEvent(new Event("input", { bubbles: true }));
     }
   });

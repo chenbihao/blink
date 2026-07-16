@@ -70,7 +70,10 @@ _MODEL_ALIASES = {
     "sensevoice": "iic/SenseVoiceSmall",
     "SenseVoice": "iic/SenseVoiceSmall",
     "paraformer-zh-streaming": "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online",
-    "paraformer-zh": "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404",
+    # paraformer-zh 短名交给 FunASR 内部的 name_maps_ms 解析，
+    # 它会映射到 SeacoParaformer（iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch），
+    # 这是原生支持热词的 Paraformer 变体。
+    # 不在 _MODEL_ALIASES 中映射，避免覆盖 FunASR 的正确解析。
 }
 
 
@@ -91,10 +94,28 @@ def _resolve_model_id(name: str) -> str:
     return name
 
 
+# ── 模型类型检测 ────────────────────────────────────────────────────────
+
+def _is_sensevoice(model_name: str) -> bool:
+    """判断模型是否为 SenseVoice。
+
+    SenseVoice 内置 VAD + 标点 + ITN + 情感标签，不需要额外子模型。
+    Paraformer / SeacoParaformer 没有内置这些功能，需要配置子模型。
+    """
+    name_lower = model_name.lower()
+    return "sensevoice" in name_lower
+
+
 # ── 模型加载 ──────────────────────────────────────────────────────────
 
 def _load_nonstream_model():
-    """加载非流式模型（SenseVoice），lazy load。
+    """加载非流式模型，lazy load。
+
+    模型类型自动适配子模型配置：
+    - SenseVoice: 内置 VAD + 标点 + ITN，无需子模型
+    - Paraformer / SeacoParaformer: 需配置 vad_model + punc_model
+      - vad_model="fsmn-vad": 语音端点检测（~3MB）
+      - punc_model="ct-punc": 标点恢复 + ITN（~1.1GB）
 
     当 funasr_model == streaming_model 时，共用流式模型实例，不重复加载。
     """
@@ -137,6 +158,15 @@ def _load_nonstream_model():
             "device": args.device,
             "disable_update": True,  # 跳过更新检查，减少日志噪声
         }
+
+        # Paraformer / SeacoParaformer 需要额外的 VAD 和标点子模型。
+        # SenseVoice 内置了这些功能，不需要（也不应该）添加子模型。
+        if not _is_sensevoice(args.model):
+            kwargs["vad_model"] = "fsmn-vad"
+            kwargs["punc_model"] = "ct-punc"
+            logger.info(f"检测到非 SenseVoice 模型，自动配置 vad_model=fsmn-vad, punc_model=ct-punc")
+        else:
+            logger.info(f"检测到 SenseVoice 模型，使用内置 VAD/标点/ITN")
 
         _nonstream_model = AutoModel(**kwargs)
         logger.info(f"非流式模型 {args.model} 加载完成")
@@ -213,18 +243,58 @@ def _f32_bytes_to_numpy(data: bytes) -> np.ndarray:
 
 # ── 文本后处理 ───────────────────────────────────────────────────────────
 
+import re as _re
+
 # rich_transcription_postprocess 延迟导入缓存
 _rich_postprocess_fn = None
 
+# Emoji 和非语音字符的正则模式。
+# SenseVoice 模型有时会在文本中插入 emoji（如 😊😄）或事件描述（如 (大笑)(掌声)），
+# 这些在中文语音输入场景中不需要。
+_EMOJI_PATTERN = _re.compile(
+    "["
+    "\U0001F600-\U0001F64F"  # emoticons
+    "\U0001F300-\U0001F5FF"  # symbols & pictographs
+    "\U0001F680-\U0001F6FF"  # transport & map symbols
+    "\U0001F1E0-\U0001F1FF"  # flags (iOS)
+    "\U00002700-\U000027BF"  # dingbats
+    "\U0001F900-\U0001F9FF"  # supplemental symbols and pictographs
+    "\U00002600-\U000026FF"  # miscellaneous symbols
+    "\U0001FA00-\U0001FA6F"  # chess symbols
+    "\U0001FA70-\U0001FAFF"  # symbols and pictographs extended-a
+    "]",
+    flags=_re.UNICODE,
+)
+
+# SenseVoice 事件描述（括号形式），如 (大笑)(掌声)(音乐)(噪音)
+_EVENT_DESC_PATTERN = _re.compile(
+    r"[\(（](?:大笑|小笑|掌声|音乐|噪音|哭泣|叹气|咳嗽|呼吸|背景音|无声|笑声|哭声|"
+    r"欢呼声|尖叫声|说话声|敲击声|响铃声|爆竹声|狗叫声|猫叫声|鸟叫声|水声|风声|雷声|"
+    r"引擎声|键盘声|电话铃声|门铃声|脚步声)"
+    r"[\)）]"
+)
+
+
+# 中文字符之间的空格模式。
+# Paraformer / SeacoParaformer 使用字符级 tokenizer，原始输出每个字之间都有空格：
+#   "那 我 现 在 能 输 入 了 吗"
+# SenseVoice 不存在此问题。
+# 此正则匹配两个 CJK 字符之间的空白，仅删除空白，保留两端的字符。
+_CJK_SPACE_PATTERN = _re.compile(
+    r"(?<=[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u30ff\uac00-\ud7af])"
+    r"\s+"
+    r"(?=[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u30ff\uac00-\ud7af])"
+)
+
 
 def _postprocess_text(raw_text: str) -> str:
-    """对模型原始输出做后处理，去除 SenseVoice 元数据标签。
+    """对模型原始输出做后处理。
 
-    SenseVoice 模型输出形如:
-        <|zh|><|NEUTRAL|><|Speech|><|withitn|>你好世界
-    rich_transcription_postprocess 会去除 <|...|> 标签，只保留纯文本。
-
-    Paraformer-streaming 模型不产出这些标签，调用此函数是 no-op。
+    处理步骤：
+    1. rich_transcription_postprocess：去除 SenseVoice 的 <|zh|><|NEUTRAL|> 等元数据标签
+    2. 去除 emoji（SenseVoice 有时会插入）
+    3. 去除事件描述如 (大笑)(掌声)（SenseVoice 有时会插入）
+    4. 去除中文字符之间的空格（Paraformer 字符级 tokenizer 的副产物）
     """
     global _rich_postprocess_fn
     if _rich_postprocess_fn is None:
@@ -234,7 +304,21 @@ def _postprocess_text(raw_text: str) -> str:
         except ImportError:
             logger.warning("无法导入 rich_transcription_postprocess，标签可能残留")
             _rich_postprocess_fn = lambda s: s  # noqa: E731
-    return _rich_postprocess_fn(raw_text)
+    text = _rich_postprocess_fn(raw_text)
+
+    # 去除 emoji
+    text = _EMOJI_PATTERN.sub("", text)
+
+    # 去除事件描述（括号形式）
+    text = _EVENT_DESC_PATTERN.sub("", text)
+
+    # 去除中文字符之间的空格（Paraformer 字符级 tokenizer 副产物）
+    text = _CJK_SPACE_PATTERN.sub("", text)
+
+    # 清理可能残留的多余空格
+    text = text.strip()
+
+    return text
 
 
 # ── HTTP 端点 ─────────────────────────────────────────────────────────────
@@ -314,7 +398,13 @@ async def transcribe(
         # 构建 generate 参数
         gen_kwargs = {"input": tmp_path}
 
+        # language 参数是 SenseVoice 专有的（减少英文语气词幻觉）。
+        # Paraformer 不识别此参数，传了也不会报错但无效果。
+        if _is_sensevoice(args.model):
+            gen_kwargs["language"] = "zh"
+
         # 热词（优先请求参数，其次启动参数）
+        # SeacoParaformer 原生支持热词 boosting；SenseVoice 对热词支持有限。
         hotword_str = hotword or args.hotwords
         if hotword_str:
             # 如果 hotword 是文件路径，直接传；否则写临时文件
@@ -329,7 +419,9 @@ async def transcribe(
                     hw_path = hw_tmp.name
                 gen_kwargs["hotword"] = hw_path
 
-        # ITN
+        # ITN（逆文本归一化：“二零二四年” → “2024年”）
+        # SenseVoice 通过 <|withitn|> 标签内置 ITN；
+        # Paraformer 的 ITN 由 punc_model (ct-punc) 提供。
         itn_val = True  # 默认开
         if use_itn is not None:
             itn_val = use_itn.lower() in ("true", "1", "yes")
@@ -342,16 +434,19 @@ async def transcribe(
 
         result = stt_model.generate(**gen_kwargs)
 
-        # FunASR 返回 list[dict]，每个 dict 含 "text" 字段
+        # FunASR 返回 list[dict]，每个 dict 含 "text" 字段。
+        # 当配置了 vad_model 时，长音频会被切成多段，每段一个 dict；
+        # 无 vad_model 时通常只有一段。
+        # 需拼接所有段的文本。
         if isinstance(result, list) and len(result) > 0:
-            raw_text = result[0].get("text", "")
+            parts = [r.get("text", "") for r in result if isinstance(r, dict)]
+            raw_text = "".join(parts)
         elif isinstance(result, dict):
             raw_text = result.get("text", "")
         else:
             raw_text = str(result)
 
-        # SenseVoice 模型输出含 <|zh|><|NEUTRAL|><|Speech|><|withitn|> 等元数据标签，
-        # 需用 rich_transcription_postprocess 清除。
+        # 后处理：去除 SenseVoice 元数据标签 / emoji / CJK 间空格
         text = _postprocess_text(raw_text)
 
         logger.info(f"转录结果: {text[:100]}")

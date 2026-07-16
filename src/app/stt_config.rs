@@ -23,6 +23,21 @@
 
 use serde::{Deserialize, Serialize};
 
+/// 流式模式选择（0.10.4）。
+///
+/// 三选一：真流式 / 伪流式 / 非流式。
+/// 通过 `SttConfig::streaming_mode()` 获取（兼容旧 `streaming: bool` 字段）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StreamingMode {
+    /// 真流式：WebSocket 边说边出字（Paraformer-streaming）
+    True,
+    /// 伪流式：VAD 切句定稿 + 累积预览（SenseVoice）⭐ 默认
+    Pseudo,
+    /// 非流式：hold → release → 一次性识别
+    Off,
+}
+
 /// STT 配置分片。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SttConfig {
@@ -60,9 +75,18 @@ pub struct SttConfig {
     pub audio_device_id: Option<String>,
 
     // ── 行为开关 ──────────────────────────────────────────────────
-    /// 流式识别开关(默认开——边说边出字;关闭则松开后一次性识别)
+    /// 流式识别开关（旧字段，保留向后兼容）
+    ///
+    /// 0.10.4 引入 `streaming_mode` 枚举后，此字段仅用于迁移：
+    /// - `streaming_mode = None` 时：`true` → `StreamingMode::True`，`false` → `StreamingMode::Off`
+    /// - `streaming_mode = Some(mode)` 时：忽略此字段
     #[serde(default = "default_streaming")]
     pub streaming: bool,
+
+    // ── 0.10.4 新增：流式模式枚举 ──
+    /// 流式模式（None = 由旧 `streaming` 字段推断）
+    #[serde(default)]
+    pub streaming_mode: Option<StreamingMode>,
 
     // ── 0.10.3 新增：文本注入方式 ──
     /// G2 文本注入方式（默认 SendInput Unicode，不碰剪贴板）
@@ -164,10 +188,18 @@ fn deserialize_funasr_model<'de, D: serde::Deserializer<'de>>(
     use serde::Deserialize;
     let raw = String::deserialize(deserializer)?;
     Ok(match raw.as_str() {
+        // SenseVoice 短名需要显式映射，因为 FunASR name_maps_ms 中没有这些别名
         "sensevoice" | "SenseVoice" | "SenseVoiceSmall" => "iic/SenseVoiceSmall".to_string(),
+        // paraformer-zh 短名不映射——FunASR 内部 name_maps_ms 会解析为
+        // iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch (SeacoParaformer)
+        // 如果在这里映射为完整 ID，反而会绕过 FunASR 的正确解析
         "paraformer-zh-streaming" => {
             "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online"
                 .to_string()
+        }
+        // 兼容旧配置：曾经用过的错误完整 ID，归一化为短名让 FunASR 正确解析
+        "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404" => {
+            "paraformer-zh".to_string()
         }
         other => other.to_string(),
     })
@@ -215,7 +247,28 @@ impl Default for SttConfig {
             model_dir: None,
             audio_device_id: None,
             streaming: default_streaming(),
+            streaming_mode: None,
             inject_method: default_inject_method(),
+        }
+    }
+}
+
+impl SttConfig {
+    /// 获取有效的流式模式。
+    ///
+    /// 优先使用 `streaming_mode` 字段；为 None 时从旧 `streaming` 字段推断：
+    /// - `streaming = true` → `StreamingMode::True`
+    /// - `streaming = false` → `StreamingMode::Off`
+    ///
+    /// 注意：新安装的默认配置 `streaming = true, streaming_mode = None` 会推断为 `True`。
+    /// 要使用伪流式，需在设置页将 `streaming_mode` 设为 `"pseudo"`。
+    pub fn streaming_mode(&self) -> StreamingMode {
+        if let Some(mode) = self.streaming_mode {
+            mode
+        } else if self.streaming {
+            StreamingMode::True
+        } else {
+            StreamingMode::Off
         }
     }
 }
@@ -298,6 +351,7 @@ mod tests {
             model_dir: None,
             audio_device_id: Some("麦克风 (Realtek Audio)".into()),
             streaming: true,
+            streaming_mode: Some(StreamingMode::Pseudo),
             inject_method: InjectMethod::Clipboard,
         };
         let s = serde_json::to_string(&original).unwrap();
@@ -329,6 +383,7 @@ mod tests {
         assert_eq!(restored.inject_method, InjectMethod::Clipboard);
         assert_eq!(restored.local_model_id.as_deref(), Some("sensevoice-small"));
         assert!(restored.streaming);
+        assert_eq!(restored.streaming_mode, Some(StreamingMode::Pseudo));
     }
 
     #[test]
@@ -340,6 +395,8 @@ mod tests {
         assert_eq!(cfg.mode, SttMode::Cloud);
         assert!(cfg.streaming);
         assert_eq!(cfg.inject_method, InjectMethod::SendInput);
+        // streaming_mode 缺省为 None → 由 streaming=true 推断为 True
+        assert_eq!(cfg.streaming_mode(), StreamingMode::True);
         // local_engine 用 default
         assert_eq!(cfg.local_engine.server_port, 8000);
         assert_eq!(cfg.local_engine.funasr_model, "iic/SenseVoiceSmall");
@@ -382,6 +439,53 @@ mod tests {
         // 0.10.3 新增字段应有默认值
         assert!(cfg.local_engine.streaming_model.is_none());
         assert!(cfg.local_engine.use_itn);
+        // 0.10.4: streaming_mode 为 None，streaming 为默认 true → 推断为 True
+        assert_eq!(cfg.streaming_mode(), StreamingMode::True);
+    }
+
+    /// 验证 streaming_mode 枚举序列化。
+    #[test]
+    fn streaming_mode_serializes_as_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&StreamingMode::True).unwrap(),
+            r#""true""#
+        );
+        assert_eq!(
+            serde_json::to_string(&StreamingMode::Pseudo).unwrap(),
+            r#""pseudo""#
+        );
+        assert_eq!(
+            serde_json::to_string(&StreamingMode::Off).unwrap(),
+            r#""off""#
+        );
+    }
+
+    /// 验证 streaming_mode() 兼容推断逻辑。
+    #[test]
+    fn streaming_mode_inference_from_old_field() {
+        // 旧配置 streaming=true, streaming_mode=None → True
+        let cfg = SttConfig {
+            streaming: true,
+            streaming_mode: None,
+            ..SttConfig::default()
+        };
+        assert_eq!(cfg.streaming_mode(), StreamingMode::True);
+
+        // 旧配置 streaming=false, streaming_mode=None → Off
+        let cfg = SttConfig {
+            streaming: false,
+            streaming_mode: None,
+            ..SttConfig::default()
+        };
+        assert_eq!(cfg.streaming_mode(), StreamingMode::Off);
+
+        // 新配置 streaming_mode=Some(Pseudo) → Pseudo（忽略旧字段）
+        let cfg = SttConfig {
+            streaming: true,
+            streaming_mode: Some(StreamingMode::Pseudo),
+            ..SttConfig::default()
+        };
+        assert_eq!(cfg.streaming_mode(), StreamingMode::Pseudo);
     }
 
     /// 验证旧配置中的 "sensevoice" 模型名被归一化为完整 ModelScope ID。
@@ -401,5 +505,27 @@ mod tests {
         let json = r#"{"enabled":true,"mode":"local","local_engine":{"server_port":8000,"funasr_model":"SenseVoiceSmall","device":"cpu"}}"#;
         let cfg: SttConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.local_engine.funasr_model, "iic/SenseVoiceSmall");
+    }
+
+    /// 验证 "paraformer-zh" 短名保持不变（FunASR 内部 name_maps_ms 解析为 SeacoParaformer）。
+    #[test]
+    fn deserialize_keeps_paraformer_zh_short_name() {
+        let json = r#"{"enabled":true,"mode":"local","local_engine":{"server_port":8000,"funasr_model":"paraformer-zh","device":"cpu"}}"#;
+        let cfg: SttConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            cfg.local_engine.funasr_model, "paraformer-zh",
+            "短名 'paraformer-zh' 应保持不变，由 FunASR 内部 name_maps_ms 解析为 SeacoParaformer"
+        );
+    }
+
+    /// 验证旧的错误完整 ID 被归一化为短名。
+    #[test]
+    fn deserialize_normalizes_old_wrong_full_id() {
+        let json = r#"{"enabled":true,"mode":"local","local_engine":{"server_port":8000,"funasr_model":"iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404","device":"cpu"}}"#;
+        let cfg: SttConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            cfg.local_engine.funasr_model, "paraformer-zh",
+            "错误的完整 ID 应归一化为短名 'paraformer-zh'"
+        );
     }
 }

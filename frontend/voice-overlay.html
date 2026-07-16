@@ -42,10 +42,26 @@
       });
 
       // 监听流式 partial 文本
+      // 0.10.4: 支持 confirmed/preview 双字段（伪流式引擎）
       listen("blink://voice-partial", (event) => {
-        const { text, target } = event.payload ?? {};
-        if (target === "g2" && text) {
-          textEl.textContent = text;
+        const payload = event.payload ?? {};
+        if (payload.target !== "g2") return;
+
+        // 优先使用 confirmed + preview 双字段（伪流式）
+        if (payload.confirmed !== undefined || payload.preview !== undefined) {
+          const confirmed = payload.confirmed || "";
+          const preview = payload.preview || "";
+          if (confirmed || preview) {
+            // 双色渲染：confirmed 白色 + preview 灰色半透明
+            textEl.innerHTML =
+              '<span class="voice-confirmed"></span>' +
+              '<span class="voice-preview"></span>';
+            textEl.querySelector(".voice-confirmed").textContent = confirmed;
+            textEl.querySelector(".voice-preview").textContent = preview;
+          }
+        } else if (payload.text) {
+          // 兼容旧格式（真流式 / 非流式引擎）
+          textEl.textContent = payload.text;
         }
       });
 
