@@ -106,7 +106,7 @@ pub enum InjectMethod {
     /// SendInput Unicode 逐字符（0.10.3 默认，不碰剪贴板）
     #[default]
     SendInput,
-    /// TSF Composition via imekit（0.10.3+ 可选，真·原地流式）
+    /// TSF Composition via imekit（0.10.5，真·原地流式，详见 phases/0.10.5-tsf-composition.md）
     Tsf,
 }
 
@@ -423,6 +423,22 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&InjectMethod::Tsf).unwrap(),
             r#""tsf""#
+        );
+    }
+
+    #[test]
+    fn inject_method_deserializes_from_lowercase() {
+        assert_eq!(
+            serde_json::from_str::<InjectMethod>(r#""clipboard""#).unwrap(),
+            InjectMethod::Clipboard
+        );
+        assert_eq!(
+            serde_json::from_str::<InjectMethod>(r#""sendinput""#).unwrap(),
+            InjectMethod::SendInput
+        );
+        assert_eq!(
+            serde_json::from_str::<InjectMethod>(r#""tsf""#).unwrap(),
+            InjectMethod::Tsf
         );
     }
 

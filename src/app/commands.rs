@@ -3139,6 +3139,134 @@ async fn test_audio_via_server(audio_url: &str, port: u16) -> Result<String, Str
     Ok(result)
 }
 
+/// 云端 STT 连接测试：下载示例音频 → 发送到云端供应商 API → 返回识别文本。
+///
+/// 与 `diagnose_stt` 中的 `test_audio_via_server` 对称，
+/// 区别是此命令发送到云端供应商而非本地 funasr-server。
+#[tauri::command]
+pub async fn test_cloud_stt() -> Result<serde_json::Value, String> {
+    let config = crate::app::stt_config::get_stt_config();
+
+    let provider = config.cloud_provider.as_ref().ok_or_else(|| {
+        "未配置云端供应商".to_string()
+    })?;
+
+    // 加载 API Key
+    let secret_id = format!("stt:{}", provider.kind);
+    let api_key = crate::infra::platform::secret::load_secret(&secret_id, "key")
+        .map_err(|e| format!("API Key 未配置: {e}"))?;
+
+    // 构建 base_url
+    let base_url = provider
+        .base_url
+        .as_deref()
+        .unwrap_or_else(|| match provider.kind.as_str() {
+            "openai" => "https://api.openai.com/v1",
+            "groq" => "https://api.groq.com/openai/v1",
+            "mimo" => "https://api.xiaomimimo.com/v1",
+            "mimo_plan" => "https://token-plan-cn.xiaomimimo.com/v1",
+            _ => "https://api.openai.com/v1",
+        })
+        .trim_end_matches('/');
+
+    // 按供应商协议路由：mimo 走 chat-completions，其他走标准 transcriptions
+    let is_chat_asr = crate::domain::stt::wav::uses_chat_completion_asr(&provider.kind);
+    let endpoint = if is_chat_asr {
+        "chat/completions"
+    } else {
+        "audio/transcriptions"
+    };
+    let url = format!("{base_url}/{endpoint}");
+
+    tracing::info!(
+        url = %url,
+        model = %provider.model_id,
+        protocol = if is_chat_asr { "chat-completion" } else { "whisper" },
+        "云端 STT 测试"
+    );
+
+    // 下载示例音频（复用与本地诊断相同的音频）
+    let audio_url = "https://isv-data.oss-cn-hangzhou.aliyuncs.com/ics/MaaS/ASR/test_audio/BAC009S0764W0121.wav";
+    let dl_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("HTTP client 创建失败: {e}"))?;
+
+    let resp = dl_client
+        .get(audio_url)
+        .send()
+        .await
+        .map_err(|e| format!("下载示例音频失败: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Ok(serde_json::json!({
+            "success": false,
+            "error": format!("下载音频 HTTP {}", resp.status()),
+        }));
+    }
+
+    let wav_bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("读取音频字节失败: {e}"))?;
+
+    tracing::info!(size = wav_bytes.len(), "云端 STT 测试: 示例音频下载完成");
+
+    // 发送到云端 API（按供应商协议路由）
+    let result = if is_chat_asr {
+        crate::domain::stt::wav::transcribe_via_chat_async(
+            &url,
+            api_key.expose(),
+            &provider.model_id,
+            &wav_bytes,
+        )
+        .await
+    } else {
+        crate::domain::stt::wav::transcribe_async(
+            &url,
+            Some(api_key.expose()),
+            &provider.model_id,
+            &wav_bytes,
+        )
+        .await
+    };
+
+    match result {
+        Ok(text) => {
+            tracing::info!(%text, "云端 STT 测试成功");
+            Ok(serde_json::json!({
+                "success": true,
+                "text": text,
+            }))
+        }
+        Err(e) => {
+            let err_str = e.to_string();
+            tracing::warn!(%err_str, "云端 STT 测试失败");
+
+            // 根据错误内容给出更友好的提示
+            let friendly = if err_str.contains("404") {
+                format!(
+                    "供应商未提供该接口（404）。\
+                     请确认 {url} 存在。\
+                     若使用 Mimo，请确认模型 ID 为 mimo-v2.5-asr；\
+                     若使用其他供应商，请确认其支持音频转写端点。"
+                )
+            } else if err_str.contains("401") || err_str.contains("403") {
+                "认证失败（401/403）。请检查 API Key 是否正确，以及是否有相应权限。".to_string()
+            } else if err_str.contains("400") {
+                format!("请求参数错误（400）。请检查模型 ID「{}」是否正确。原始错误: {err_str}", provider.model_id)
+            } else {
+                err_str
+            };
+
+            Ok(serde_json::json!({
+                "success": false,
+                "error": friendly,
+            }))
+        }
+    }
+}
+
 // ── 空间管理 ────────────────────────────────────────────────────────
 
 /// 递归计算目录大小（字节）。

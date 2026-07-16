@@ -719,15 +719,6 @@
             </label>
           </div>
 
-          <!-- 模式切换 -->
-          <div class="setting-row">
-            <label class="setting-label">STT 模式</label>
-            <div class="radio-group">
-              <label class="radio"><input type="radio" name="voice-mode" id="voice-mode-cloud" value="cloud" checked /> 云端</label>
-              <label class="radio"><input type="radio" name="voice-mode" id="voice-mode-local" value="local" /> 本地</label>
-            </div>
-          </div>
-
           <!-- 音频设备 + 调试 -->
           <div class="setting-row">
             <label class="setting-label">音频输入设备</label>
@@ -745,39 +736,68 @@
             </div>
           </div>
 
-          <!-- 流式识别（通用设置，提前到模式无关区） -->
-          <div class="setting-row">
-            <label class="setting-label">流式识别<span class="field-hint-icon" title="开启后边说边出字（需模型支持）。关闭则松开后一次性识别。">ⓘ</span></label>
+          <!-- 流式识别（仅本地模式生效） -->
+          <div class="setting-row" id="voice-streaming-row">
+            <label class="setting-label">流式识别<span class="field-hint-icon" title="仅本地模式生效。开启后 VAD 切句 + 每 500ms 预览识别，实现边说边出字。云端模式始终为松开后一次性识别（避免重复 API 调用导致账单膨胀）。">ⓘ</span></label>
             <label class="checkbox">
               <input type="checkbox" id="voice-streaming" checked />
               <span class="checkmark"></span>
             </label>
+            <span id="voice-streaming-hint" class="voice-streaming-hint"></span>
+          </div>
+
+          <!-- STT 模式切换（决定下方显示云端 / 本地配置） -->
+          <div class="setting-row">
+            <label class="setting-label">STT 模式</label>
+            <div class="radio-group">
+              <label class="radio"><input type="radio" name="voice-mode" id="voice-mode-cloud" value="cloud" checked /> 云端</label>
+              <label class="radio"><input type="radio" name="voice-mode" id="voice-mode-local" value="local" /> 本地</label>
+            </div>
           </div>
 
           <!-- 云端配置 ──────────────────────────────────────────────── -->
           <div id="voice-cloud-section">
             <h3 class="subsection-title">云端供应商</h3>
+            <p class="setting-hint">所有供应商均使用 OpenAI 兼容接口（<code>/v1/audio/transcriptions</code>），仅 Base URL 不同。API Key 独立存储于系统凭据管理器，与大模型密钥互不共享。</p>
+            <p class="setting-hint">云端模式为非流式：按住说话 → 松开后一次性发送整段音频识别。不支持边说边出字预览（云端 API 按音频时长计费，伪流式的重复请求会导致账单膨胀）。</p>
             <div class="setting-row">
               <label class="setting-label">供应商</label>
               <select id="voice-cloud-kind">
-                <option value="openai">OpenAI (Whisper)</option>
+                <option value="openai">OpenAI</option>
                 <option value="groq">Groq</option>
-                <option value="azure">Azure</option>
-                <option value="gemini">Gemini</option>
-                <option value="huggingface">HuggingFace</option>
-                <option value="mistral">Mistral</option>
-                <option value="openrouter">OpenRouter</option>
+                <option value="mimo">小米 Mimo</option>
+<option value="mimo_plan">小米 Mimo Plan</option>
+                <option value="custom">自定义（OpenAI 兼容）</option>
               </select>
             </div>
             <div class="setting-row">
-              <label class="setting-label">模型 ID</label>
-              <input type="text" id="voice-cloud-model" placeholder="whisper-large-v3" />
-            </div>
-            <div class="setting-row">
-              <label class="setting-label">自定义 Base URL<span class="field-hint-icon" title="可选，留空使用供应商默认地址">ⓘ</span></label>
+              <label class="setting-label">Base URL<span class="field-hint-icon" title="选择供应商时自动填充，可手动修改">ⓘ</span></label>
               <input type="text" id="voice-cloud-base-url" placeholder="https://api.openai.com/v1" />
             </div>
-            <p class="setting-hint">API Key 复用 AI 设置页的 Credential Manager 管理。</p>
+            <div class="setting-row">
+              <label class="setting-label">API Key</label>
+              <div class="voice-cloud-key-wrap">
+                <input type="password" id="voice-cloud-api-key" placeholder="sk-..." autocomplete="off" />
+                <button type="button" id="voice-cloud-key-save-btn" class="voice-cloud-key-btn">保存</button>
+                <button type="button" id="voice-cloud-key-clear-btn" class="voice-cloud-key-btn voice-cloud-key-btn-danger" style="display:none;">清除</button>
+              </div>
+            </div>
+            <div class="setting-row">
+              <label class="setting-label">模型 ID</label>
+              <div class="voice-cloud-model-wrap">
+                <input type="text" id="voice-cloud-model" list="voice-cloud-model-list" placeholder="whisper-large-v3" />
+                <datalist id="voice-cloud-model-list"></datalist>
+                <button type="button" id="voice-cloud-model-fetch-btn" class="voice-cloud-key-btn" title="从供应商拉取可用模型列表">拉取</button>
+              </div>
+            </div>
+            <!-- 云端测试 -->
+            <div class="setting-row">
+              <label class="setting-label">连接测试</label>
+              <div class="voice-cloud-test-wrap">
+                <button type="button" id="voice-cloud-test-btn" class="voice-cloud-key-btn">测试</button>
+                <span id="voice-cloud-test-result" class="voice-cloud-test-result"></span>
+              </div>
+            </div>
           </div>
 
           <!-- 本地配置 ──────────────────────────────────────────────── -->
@@ -837,8 +857,9 @@
             <!-- 高级选项（0.10.3） -->
             <h3 class="subsection-title">高级选项</h3>
             <div class="setting-row">
-              <label class="setting-label">G2 注入方式<span class="field-hint-icon" title="SendInput Unicode：逐字符注入，不碰剪贴板（推荐）。Clipboard：Ctrl+V 粘贴，兼容性最好但有剪贴板污染。">ⓘ</span></label>
+              <label class="setting-label">G2 注入方式<span class="field-hint-icon" title="TSF Composition（实验性）：走 Windows 文本服务框架，理论兼容 Terminal/UWP/Office/Electron+IME，尚未充分验证。SendInput Unicode（默认）：逐字符注入，不碰剪贴板。Clipboard：Ctrl+V 粘贴，兼容性最广但有剪贴板污染。">ⓘ</span></label>
               <select id="voice-inject-method-select">
+                <option value="tsf">TSF Composition（实验性）</option>
                 <option value="sendinput" selected>SendInput Unicode</option>
                 <option value="clipboard">Clipboard + Ctrl+V</option>
               </select>

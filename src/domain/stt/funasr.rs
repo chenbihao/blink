@@ -499,7 +499,7 @@ pub async fn start_server(
     }
     tracing::info!("blink_stt_server 启动命令: {cmd_display}");
 
-    let mut cmd = tokio::process::Command::new(&python);
+    let mut cmd = crate::infra::platform::no_window_tokio(tokio::process::Command::new(&python));
     cmd.arg(&script_path)
         .args(["--model", model])
         .args(["--port", &port.to_string()])

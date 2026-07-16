@@ -2,6 +2,13 @@
 //!
 //! 供 `cloud.rs`（云端 STT）和 `local.rs`（本地 FunASR STT）共用，
 //! 消除原先三处重复的 `pcm_to_wav` / `transcribe_async` 实现。
+//!
+//! ## 云端 STT 的两种 API 协议
+//!
+//! 1. **标准 Whisper 接口**（OpenAI / Groq 等）：
+//!    `POST /v1/audio/transcriptions`，multipart/form-data 上传 WAV。
+//! 2. **Chat-Completion ASR**（Mimo 等）：
+//!    `POST /v1/chat/completions`，JSON body 中以 base64 data-URI 嵌入音频。
 
 use std::io::Write;
 use std::path::Path;
@@ -162,7 +169,17 @@ pub fn parse_wav_to_f32(data: &[u8]) -> Result<Vec<f32>, String> {
     Ok(samples)
 }
 
-// ── HTTP 转录 ────────────────────────────────────────────────────────────
+// ── 供应商协议判定 ───────────────────────────────────────────────────────
+
+/// 判断云端 STT 供应商是否使用 chat-completion ASR 协议。
+///
+/// - `mimo` / `mimo_plan`：使用 `POST /v1/chat/completions`，base64 音频嵌入 messages
+/// - 其他（openai / groq / custom）：使用标准 `POST /v1/audio/transcriptions`
+pub fn uses_chat_completion_asr(provider_kind: &str) -> bool {
+    matches!(provider_kind, "mimo" | "mimo_plan")
+}
+
+// ── HTTP 转录（标准 Whisper 接口）────────────────────────────────────────
 
 /// 异步 HTTP 转录请求（OpenAI 兼容格式）。
 ///
@@ -221,6 +238,94 @@ pub async fn transcribe_async(
         .map_err(|e| super::SttError::Engine(format!("JSON 解析失败: {e}")))?;
 
     Ok(result.text)
+}
+
+// ── HTTP 转录（Chat-Completion ASR 接口）─────────────────────────────────
+
+/// 通过 chat completions API 做语音转文字（Mimo 等供应商）。
+///
+/// 请求格式：`POST /v1/chat/completions`，JSON body，音频以 base64 data-URI
+/// 嵌入 `messages[0].content[0].input_audio.data`。
+///
+/// - `url`：完整 URL（如 `https://api.xiaomimimo.com/v1/chat/completions`）
+/// - `api_key`：Bearer token
+/// - `model_id`：模型标识（如 `mimo-v2.5-asr`）
+/// - `wav_bytes`：WAV 格式音频字节
+///
+/// 返回 `choices[0].message.content` 文本。
+pub async fn transcribe_via_chat_async(
+    url: &str,
+    api_key: &str,
+    model_id: &str,
+    wav_bytes: &[u8],
+) -> Result<String, super::SttError> {
+    use base64::Engine as _;
+
+    let audio_b64 = base64::engine::general_purpose::STANDARD.encode(wav_bytes);
+    let data_uri = format!("data:audio/wav;base64,{audio_b64}");
+
+    let body = serde_json::json!({
+        "model": model_id,
+        "messages": [{
+            "role": "user",
+            "content": [{
+                "type": "input_audio",
+                "input_audio": {
+                    "data": data_uri
+                }
+            }]
+        }],
+        "asr_options": {
+            "language": "auto"
+        }
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| super::SttError::Engine(format!("HTTP client 创建失败: {e}")))?;
+
+    let resp = client
+        .post(url)
+        .bearer_auth(api_key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| super::SttError::Engine(format!("HTTP 请求失败: {e}")))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let resp_body = resp.text().await.unwrap_or_default();
+        return Err(super::SttError::Engine(format!("HTTP {status}: {resp_body}")));
+    }
+
+    // Chat completion 响应: { "choices": [{ "message": { "content": "..." } }] }
+    #[derive(serde::Deserialize)]
+    struct ChatResponse {
+        choices: Vec<ChatChoice>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ChatChoice {
+        message: ChatMessage,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ChatMessage {
+        content: String,
+    }
+
+    let result: ChatResponse = resp
+        .json()
+        .await
+        .map_err(|e| super::SttError::Engine(format!("JSON 解析失败: {e}")))?;
+
+    result
+        .choices
+        .into_iter()
+        .next()
+        .map(|c| c.message.content)
+        .ok_or_else(|| super::SttError::Engine("响应中无 choices".to_string()))
 }
 
 // ── 测试 ──────────────────────────────────────────────────────────────────

@@ -40,6 +40,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
+use super::{no_window, no_window_tokio};
+
 /// Blink 管理的 Python 版本。
 ///
 /// FunASR 1.3.x 兼容 Python 3.8-3.12；3.12 有所有依赖的预编译 wheel
@@ -158,7 +160,7 @@ pub fn venv_funasr_server() -> Option<PathBuf> {
 /// 2. 本地安装（`%APPDATA%\blink\python\uv\uv.exe`）
 pub fn find_uv() -> Option<PathBuf> {
     // 1. Check PATH via `where uv`
-    if let Ok(output) = Command::new("where").args(["uv"]).output() {
+    if let Ok(output) = no_window(Command::new("where")).args(["uv"]).output() {
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             if let Some(first_line) = stdout.lines().next() {
@@ -183,7 +185,7 @@ pub fn find_uv() -> Option<PathBuf> {
 
 /// 获取 uv 版本号。
 fn get_uv_version(uv_path: &Path) -> Option<String> {
-    Command::new(uv_path)
+    no_window(Command::new(uv_path))
         .args(["--version"])
         .output()
         .ok()
@@ -307,14 +309,16 @@ pub async fn create_venv(uv_path: &Path) -> Result<(), String> {
 
     tracing::info!(python = PYTHON_VERSION, venv = %venv.display(), "创建 Python venv...");
 
-    let output = tokio::process::Command::new(uv_path)
-        .args(["venv", "--python", PYTHON_VERSION])
-        .arg(&venv)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .await
-        .map_err(|e| format!("执行 uv venv 失败: {e}"))?;
+    let output = no_window_tokio(
+        tokio::process::Command::new(uv_path),
+    )
+    .args(["venv", "--python", PYTHON_VERSION])
+    .arg(&venv)
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .output()
+    .await
+    .map_err(|e| format!("执行 uv venv 失败: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -370,9 +374,8 @@ async fn install_packages_inner(
 
         cmd.args(packages)
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .await
+            .stderr(std::process::Stdio::piped());
+        no_window_tokio(cmd).output().await
     };
 
     let output = tokio::time::timeout(
@@ -408,15 +411,17 @@ pub async fn uninstall_packages(uv_path: &Path, packages: &[&str]) -> Result<(),
 
     tracing::info!(packages = ?packages, "卸载 Python 包...");
 
-    let output = tokio::process::Command::new(uv_path)
-        .args(["pip", "uninstall", "--python"])
-        .arg(&python)
-        .args(packages)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .await
-        .map_err(|e| format!("执行 uv pip uninstall 失败: {e}"))?;
+    let output = no_window_tokio(
+        tokio::process::Command::new(uv_path),
+    )
+    .args(["pip", "uninstall", "--python"])
+    .arg(&python)
+    .args(packages)
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .output()
+    .await
+    .map_err(|e| format!("执行 uv pip uninstall 失败: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -438,7 +443,7 @@ pub async fn uninstall_packages(uv_path: &Path, packages: &[&str]) -> Result<(),
 /// - 新：`CUDA UMD Version: 13.3`
 /// 返回 CUDA 版本字符串（如 "12.2" / "13.3"），无 GPU 时返回 None。
 pub fn detect_cuda() -> Option<String> {
-    let output = Command::new("nvidia-smi").output().ok()?;
+    let output = no_window(Command::new("nvidia-smi")).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -475,7 +480,7 @@ pub fn detect_cuda() -> Option<String> {
 ///
 /// 通过 `uv pip install --help` 输出中是否包含 `--torch-backend` 判定。
 fn uv_supports_torch_backend(uv_path: &Path) -> bool {
-    let output = match Command::new(uv_path)
+    let output = match no_window(Command::new(uv_path))
         .args(["pip", "install", "--help"])
         .output()
     {
@@ -508,6 +513,7 @@ async fn install_packages_streaming(
     cmd.args(packages);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
+    let mut cmd = no_window_tokio(cmd);
 
     let mut child = cmd
         .spawn()
@@ -571,7 +577,7 @@ pub fn check_torch() -> (bool, Option<String>) {
         None => return (false, None),
     };
 
-    match Command::new(python)
+    match no_window(Command::new(python))
         .args([
             "-c",
             "import importlib.metadata as m; print(m.version('torch'))",
@@ -598,7 +604,7 @@ pub fn check_torch_cuda() -> bool {
         None => return false,
     };
 
-    match Command::new(python)
+    match no_window(Command::new(python))
         .args([
             "-c",
             "import torch; print(torch.cuda.is_available())",
@@ -622,7 +628,7 @@ pub fn check_torch_cuda() -> bool {
 /// 检查 venv 中的 Python 版本。
 fn check_venv_python_version() -> Option<String> {
     let python = venv_python()?;
-    Command::new(python)
+    no_window(Command::new(python))
         .args(["--version"])
         .output()
         .ok()
@@ -642,7 +648,7 @@ pub fn check_funasr() -> (bool, Option<String>) {
         None => return (false, None),
     };
 
-    match Command::new(python)
+    match no_window(Command::new(python))
         .args([
             "-c",
             "import importlib.metadata as m; print(m.version('funasr'))",

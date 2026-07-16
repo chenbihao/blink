@@ -4,13 +4,15 @@
 //!
 //! hold-to-talk 场景下非流式：
 //! - `transcribe_chunk`：累积 PCM 样本，不返回 partial（空字符串）
-//! - `finalize`：将累积的 PCM 转为 WAV，POST 到 `/v1/audio/transcriptions`，返回识别文本
+//! - `finalize`：将累积的 PCM 转为 WAV，发送到云端 API，返回识别文本
 //!
 //! ## API 兼容性
 //!
-//! 支持 OpenAI / Groq / Azure OpenAI 等兼容 `/v1/audio/transcriptions` 的供应商。
-//! 请求格式：multipart/form-data，字段 `file`(audio.wav) + `model`(model_id)。
-//! 响应格式：`{"text": "..."}`。
+//! 支持两种协议（按供应商 kind 自动路由）：
+//! 1. **标准 Whisper 接口**（openai / groq / custom）：
+//!    `POST /v1/audio/transcriptions`，multipart/form-data 上传 WAV。
+//! 2. **Chat-Completion ASR**（mimo）：
+//!    `POST /v1/chat/completions`，JSON body 中以 base64 data-URI 嵌入音频。
 
 use std::sync::Mutex;
 
@@ -76,26 +78,39 @@ impl SttEngine for CloudSttEngine {
             .unwrap_or_else(|| default_base_url(&provider.kind))
             .trim_end_matches('/');
 
-        let url = format!("{base_url}/audio/transcriptions");
-
         // PCM → WAV
         let wav_bytes = super::wav::pcm_to_wav(&samples, self.sample_rate, 1);
 
         tracing::info!(
-            url = %url,
+            provider = %provider.kind,
             model = %provider.model_id,
             samples = samples.len(),
             duration_ms = (samples.len() as f64 / self.sample_rate as f64 * 1000.0) as u64,
             "云端 STT 请求"
         );
 
-        super::wav::transcribe_async(
-            &url,
-            Some(&api_key.expose()),
-            &provider.model_id,
-            &wav_bytes,
-        )
-        .await
+        // 按供应商协议路由
+        if super::wav::uses_chat_completion_asr(&provider.kind) {
+            let url = format!("{base_url}/chat/completions");
+            tracing::debug!(%url, "chat-completion ASR 路径");
+            super::wav::transcribe_via_chat_async(
+                &url,
+                &api_key.expose(),
+                &provider.model_id,
+                &wav_bytes,
+            )
+            .await
+        } else {
+            let url = format!("{base_url}/audio/transcriptions");
+            tracing::debug!(%url, "标准 Whisper 路径");
+            super::wav::transcribe_async(
+                &url,
+                Some(&api_key.expose()),
+                &provider.model_id,
+                &wav_bytes,
+            )
+            .await
+        }
     }
 
     fn reset(&self) {
@@ -112,6 +127,8 @@ fn default_base_url(kind: &str) -> &'static str {
     match kind {
         "openai" => "https://api.openai.com/v1",
         "groq" => "https://api.groq.com/openai/v1",
+        "mimo" => "https://api.xiaomimimo.com/v1",
+        "mimo_plan" => "https://token-plan-cn.xiaomimimo.com/v1",
         _ => "https://api.openai.com/v1",
     }
 }

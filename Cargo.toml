@@ -33,6 +33,7 @@ string_slice = "deny"  # 禁止直接按字节切片字符串（会导致中文 
 
 [dependencies]
 async-trait = "0.1"
+base64 = "0.22"
 chrono = "0.4.45"
 dirs-next = "2.0"
 evalexpr = "13.1.0"
@@ -68,9 +69,12 @@ winreg = "0.55"
 walkdir = "2.5"
 # cpal: 跨平台音频 I/O（0.10 语音输入麦克风采集，Windows 上走 WASAPI）
 cpal = "0.18"
+# imekit: 跨平台 IME 协议封装（0.10.5 G2 文本注入，Windows 上走 TSF Composition + IMM32 + SendInput 三级回退）
+imekit = "0.2"
 # zip: 纯 Rust zip 解压（uv 二进制安装，替代 PowerShell Expand-Archive）
 zip = "2.2"
 # sherpa-onnx 引擎通过 Windows 自带 tar.exe 解压 .tar.bz2，无需额外 Rust 依赖
+# imekit 0.2.3 依赖 windows 0.59，与 Blink 的 0.62.2 可共存（仅调 imekit 公开 API，不共享 TSF 类型）
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",

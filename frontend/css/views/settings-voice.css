@@ -56,8 +56,9 @@
   color: var(--text);
 }
 
-/* input[type="text"] 继承设置页通用样式 */
-#voice input[type="text"] {
+/* input 继承设置页通用样式 */
+#voice input[type="text"],
+#voice input[type="password"] {
   background: var(--surface);
   color: var(--text);
   border: 1px solid var(--surface-2);
@@ -69,12 +70,138 @@
   height: 32px;
 }
 
-#voice input[type="text"]:focus {
+#voice input[type="text"]:focus,
+#voice input[type="password"]:focus {
   border-color: var(--accent);
 }
 
-#voice input[type="text"]::placeholder {
+#voice input[type="text"]::placeholder,
+#voice input[type="password"]::placeholder {
   color: var(--text-faint);
+}
+
+/* ── 流式开关 dimmed 状态（云端模式下不生效）────────────────── */
+
+#voice .setting-row-dimmed {
+  opacity: 0.45;
+}
+
+#voice .voice-streaming-hint {
+  font-size: var(--text-xs, 12px);
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+/* ── 云端供应商配置区 ─────────────────────────────────────────── */
+
+#voice-cloud-section input[type="text"],
+#voice-cloud-section input[type="password"] {
+  flex: 1;
+  min-width: 200px;
+  max-width: 420px;
+}
+
+#voice-cloud-section select {
+  min-width: 200px;
+}
+
+/* API Key 输入组 */
+.voice-cloud-key-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 200px;
+  max-width: 500px;
+}
+
+#voice-cloud-section .voice-cloud-key-wrap input[type="password"] {
+  flex: 1;
+  min-width: 0;
+  max-width: none;
+}
+
+/* 模型 ID 输入组 */
+.voice-cloud-model-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 200px;
+  max-width: 500px;
+}
+
+#voice-cloud-section .voice-cloud-model-wrap input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  max-width: none;
+}
+
+.voice-cloud-key-btn {
+  padding: 6px 16px;
+  font-size: var(--text-sm, 13px);
+  color: var(--accent);
+  background: var(--accent-bg, rgba(137, 180, 250, 0.06));
+  border: 1px solid rgba(137, 180, 250, 0.25);
+  border-radius: var(--radius-md, 6px);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.voice-cloud-key-btn:hover {
+  background: var(--accent-faint, rgba(137, 180, 250, 0.12));
+  border-color: var(--accent);
+}
+
+.voice-cloud-key-btn.voice-cloud-key-btn-danger {
+  color: var(--red, #e53e3e);
+  background: var(--red-bg, rgba(243, 139, 168, 0.06));
+  border-color: rgba(243, 139, 168, 0.25);
+}
+
+.voice-cloud-key-btn.voice-cloud-key-btn-danger:hover {
+  background: rgba(243, 139, 168, 0.12);
+  border-color: var(--red, #e53e3e);
+}
+
+.voice-cloud-key-status {
+  font-size: var(--text-xs, 12px);
+  white-space: nowrap;
+}
+
+.voice-cloud-key-status.configured {
+  color: var(--green, #38a169);
+}
+
+.voice-cloud-key-status.not-configured {
+  color: var(--text-faint);
+}
+
+/* 云端测试结果 */
+.voice-cloud-test-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 200px;
+  max-width: 600px;
+}
+
+.voice-cloud-test-result {
+  font-size: var(--text-xs, 12px);
+  color: var(--text-dim);
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.voice-cloud-test-result.success {
+  color: var(--green, #38a169);
+}
+
+.voice-cloud-test-result.error {
+  color: var(--red, #e53e3e);
 }
 
 /* 模型列表 */

@@ -10,7 +10,10 @@
 import { invoke, listen } from "../../tauri.js";
 
 /**
- * 初始化语音输入 Tab
+ * 初始化语音输入 Tab（轻量：只绑定事件 + 加载配置，不跑探测命令）。
+ *
+ * 昂贵的探测命令（get_funasr_env / get_stt_space_usage / list_stt_models）
+ * 延迟到用户首次切换到语音 Tab 时才执行（见 activateVoiceTab）。
  */
 export async function initVoiceTab() {
   const panel = document.getElementById("voice");
@@ -97,29 +100,194 @@ export async function initVoiceTab() {
   const kindSelect = document.getElementById("voice-cloud-kind");
   const modelInput = document.getElementById("voice-cloud-model");
   const baseUrlInput = document.getElementById("voice-cloud-base-url");
+  const apiKeyInput = document.getElementById("voice-cloud-api-key");
+  const apiKeySaveBtn = document.getElementById("voice-cloud-key-save-btn");
+  const apiKeyClearBtn = document.getElementById("voice-cloud-key-clear-btn");
+  const modelFetchBtn = document.getElementById("voice-cloud-model-fetch-btn");
+  const modelDatalist = document.getElementById("voice-cloud-model-list");
+  const testBtn = document.getElementById("voice-cloud-test-btn");
+  const testResult = document.getElementById("voice-cloud-test-result");
+
+  // 供应商 → 默认 Base URL 预设（所有供应商均走 OpenAI 兼容接口）
+  const CLOUD_BASE_URL_PRESETS = {
+    openai: "https://api.openai.com/v1",
+    groq: "https://api.groq.com/openai/v1",
+    mimo: "https://api.xiaomimimo.com/v1",
+    mimo_plan: "https://token-plan-cn.xiaomimimo.com/v1",
+    custom: "",
+  };
+
+  // 当前供应商的 secret_ref（如 stt:openai）
+  function sttSecretId() {
+    return `stt:${kindSelect?.value || "openai"}`;
+  }
+
   if (kindSelect && modelInput) {
     const cp = config.cloud_provider;
     if (cp) {
-      kindSelect.value = cp.kind;
+      // 兼容已移除的旧供应商（azure/gemini 等）→ 归为 custom
+      const knownKinds = ["openai", "groq", "mimo", "mimo_plan", "custom"];
+      kindSelect.value = knownKinds.includes(cp.kind) ? cp.kind : "custom";
       modelInput.value = cp.model_id;
-      if (baseUrlInput && cp.base_url) baseUrlInput.value = cp.base_url;
+      if (baseUrlInput) {
+        baseUrlInput.value = cp.base_url || CLOUD_BASE_URL_PRESETS[cp.kind] || "";
+      }
     }
-    kindSelect.addEventListener("change", saveCloudProvider);
+    refreshApiKeyHint();
+    kindSelect.addEventListener("change", () => {
+      // 供应商切换时自动填充 Base URL
+      const kind = kindSelect.value;
+      if (baseUrlInput) baseUrlInput.value = CLOUD_BASE_URL_PRESETS[kind] || "";
+      // 清空已拉取的模型列表
+      if (modelDatalist) modelDatalist.innerHTML = "";
+      saveCloudProvider();
+      refreshApiKeyHint();
+    });
     modelInput.addEventListener("blur", saveCloudProvider);
     if (baseUrlInput) baseUrlInput.addEventListener("blur", saveCloudProvider);
+  }
+
+  // API Key 保存（独立存储于系统凭据管理器，secret_ref = stt:{kind}）
+  if (apiKeySaveBtn) {
+    apiKeySaveBtn.addEventListener("click", async () => {
+      const key = apiKeyInput?.value?.trim();
+      if (!key) return;
+      try {
+        await invoke("save_ai_secret", { providerId: sttSecretId(), secret: key });
+        apiKeyInput.value = "";
+        refreshApiKeyHint();
+      } catch (e) {
+        console.error("save_ai_secret failed:", e);
+      }
+    });
+  }
+
+  // API Key 清除
+  if (apiKeyClearBtn) {
+    apiKeyClearBtn.addEventListener("click", async () => {
+      try {
+        await invoke("delete_ai_secret", { providerId: sttSecretId() });
+        apiKeyInput.value = "";
+        refreshApiKeyHint();
+      } catch (e) {
+        console.error("delete_ai_secret failed:", e);
+      }
+    });
+  }
+
+  // 刷新 API Key 掩码提示（复用 get_ai_secret_hint，掩码显示在输入框 placeholder 中）
+  async function refreshApiKeyHint() {
+    if (!apiKeyInput) return;
+    const sid = sttSecretId();
+    try {
+      const masked = await invoke("get_ai_secret_hint", { providerId: sid });
+      if (masked) {
+        apiKeyInput.placeholder = masked + " — 输入新 Key 以替换";
+        if (apiKeyClearBtn) apiKeyClearBtn.style.display = "";
+      } else {
+        apiKeyInput.placeholder = "sk-...";
+        if (apiKeyClearBtn) apiKeyClearBtn.style.display = "none";
+      }
+    } catch {
+      // get_ai_secret_hint 不可用时回退到 has_ai_secret
+      try {
+        const has = await invoke("has_ai_secret", { providerId: sid });
+        apiKeyInput.placeholder = has ? "✓ 已配置 — 输入新 Key 以替换" : "sk-...";
+        if (apiKeyClearBtn) apiKeyClearBtn.style.display = has ? "" : "none";
+      } catch {
+        apiKeyInput.placeholder = "sk-...";
+      }
+    }
+  }
+
+  // 模型 ID 拉取（复用 fetch_ai_models，过滤只保留音频/语音相关模型）
+  if (modelFetchBtn) {
+    modelFetchBtn.addEventListener("click", async () => {
+      modelFetchBtn.textContent = "拉取中…";
+      modelFetchBtn.disabled = true;
+      try {
+        const baseUrl = baseUrlInput?.value?.trim() || null;
+        const apiKey = apiKeyInput?.value?.trim() || null;
+        const models = await invoke("fetch_ai_models", {
+          kind: "openai_compatible",
+          baseUrl,
+          apiKey: apiKey || null,
+          providerId: apiKey ? null : sttSecretId(),
+        });
+        if (modelDatalist && Array.isArray(models) && models.length > 0) {
+          // 过滤：只保留 whisper / audio / speech 相关模型
+          const sttModels = models.filter((m) =>
+            /whisper|audio|speech|asr/i.test(m)
+          );
+          // 保留 HTML 中的预设选项
+          const presetOpts = modelDatalist.innerHTML;
+          const fetchedOpts = sttModels
+            .map((m) => `<option value="${m}"></option>`)
+            .join("");
+          modelDatalist.innerHTML = presetOpts + fetchedOpts;
+          modelFetchBtn.textContent = sttModels.length > 0
+            ? `已拉取 ${sttModels.length} 个`
+            : `拉取成功（未找到音频模型）`;
+          if (modelInput) modelInput.focus();
+          setTimeout(() => { modelFetchBtn.textContent = "拉取"; }, 2500);
+        } else {
+          modelFetchBtn.textContent = "无可用模型";
+          setTimeout(() => { modelFetchBtn.textContent = "拉取"; }, 2500);
+        }
+      } catch (e) {
+        console.error("fetch_ai_models failed:", e);
+        modelFetchBtn.textContent = "拉取失败";
+        setTimeout(() => { modelFetchBtn.textContent = "拉取"; }, 2500);
+      } finally {
+        modelFetchBtn.disabled = false;
+      }
+    });
+  }
+
+  // 云端连接测试（下载示例音频 → 发送到云端 API → 返回识别文本）
+  if (testBtn) {
+    testBtn.addEventListener("click", async () => {
+      testBtn.textContent = "测试中…";
+      testBtn.disabled = true;
+      if (testResult) {
+        testResult.textContent = "";
+        testResult.className = "voice-cloud-test-result";
+      }
+      try {
+        const result = await invoke("test_cloud_stt");
+        if (testResult) {
+          if (result.success) {
+            testResult.textContent = `✓ 识别成功："${result.text}"`;
+            testResult.className = "voice-cloud-test-result success";
+          } else {
+            testResult.textContent = `✗ 失败：${result.error}`;
+            testResult.className = "voice-cloud-test-result error";
+          }
+        }
+      } catch (e) {
+        if (testResult) {
+          testResult.textContent = `✗ 失败：${e}`;
+          testResult.className = "voice-cloud-test-result error";
+        }
+      } finally {
+        testBtn.textContent = "测试";
+        testBtn.disabled = false;
+      }
+    });
   }
 
   function saveCloudProvider() {
     const kind = kindSelect?.value || "openai";
     const model_id = modelInput?.value || "";
-    const base_url = baseUrlInput?.value || null;
+    const base_url = baseUrlInput?.value?.trim() || null;
     if (!model_id) return;
     config.cloud_provider = { kind, model_id, base_url };
     invoke("set_stt_config", { config }).catch(console.error);
   }
 
-  // 伪流式识别开关（VAD 切句 + 累积预览）
+  // 伪流式识别开关（VAD 切句 + 累积预览）——仅本地模式生效
   const streamingCheckbox = document.getElementById("voice-streaming");
+  const streamingHint = document.getElementById("voice-streaming-hint");
   if (streamingCheckbox) {
     streamingCheckbox.checked = config.streaming_mode === "pseudo";
     streamingCheckbox.addEventListener("change", () => {
@@ -128,28 +296,58 @@ export async function initVoiceTab() {
     });
   }
 
-  // FunASR 环境管理 + 统一日志 + 诊断 + 设备切换
-  initFunasrEnv(config);
-
-  // 本地模型选择（下拉框）
-  loadLocalModels(config);
-
-  // 0.10.3 高级选项
+  // 0.10.3 高级选项（轻量，不跑探测）
   initAdvancedOptions(config);
-
-  // 空间管理
-  initSpaceManagement();
 
   // 模式可见性
   updateModeVisibility();
 
+  // ── 延迟激活：首次切换到语音 Tab 时才跑探测命令 ──
+  let activated = false;
+
+  async function activateVoiceTab() {
+    if (activated) return;
+    activated = true;
+
+    // FunASR 环境管理 + 统一日志 + 诊断 + 设备切换（含 refreshEnv 探测）
+    initFunasrEnv(config);
+
+    // 本地模型选择（下拉框）
+    loadLocalModels(config);
+
+    // 空间管理（含 get_stt_space_usage 探测）
+    initSpaceManagement();
+  }
+
+  // 监听语音 Tab 按钮点击，首次点击时激活
+  const voiceTabBtn = document.querySelector('.tab[data-tab="voice"]');
+  if (voiceTabBtn) {
+    voiceTabBtn.addEventListener("click", activateVoiceTab, { once: true });
+  }
+
+  // 如果设置页打开时语音 Tab 已是激活状态（如从深链跳转），立即激活
+  if (voiceTabBtn?.classList.contains("active")) {
+    activateVoiceTab();
+  }
+
   function updateModeVisibility() {
     const cloudSection = document.getElementById("voice-cloud-section");
     const localSection = document.getElementById("voice-local-section");
+    const streamingRow = document.getElementById("voice-streaming-row");
+    const isLocal = localRadio?.checked;
     if (cloudSection && localSection) {
-      const isLocal = localRadio?.checked;
       cloudSection.style.display = isLocal ? "none" : "";
       localSection.style.display = isLocal ? "" : "none";
+    }
+    // 流式开关仅本地模式生效：云端时置灰 + 提示
+    if (streamingRow) {
+      streamingRow.classList.toggle("setting-row-dimmed", !isLocal);
+    }
+    if (streamingCheckbox) {
+      streamingCheckbox.disabled = !isLocal;
+    }
+    if (streamingHint) {
+      streamingHint.textContent = isLocal ? "" : "仅本地模式生效";
     }
   }
 
@@ -711,7 +909,11 @@ async function initSpaceManagement() {
   if (!container) return;
 
   async function loadUsage() {
-    container.innerHTML = '<div class="stt-space-loading">加载中...</div>';
+    // 首次加载时显示 loading；刷新时保留旧内容避免闪屏
+    const isFirstLoad = !container.querySelector(".stt-space-row");
+    if (isFirstLoad) {
+      container.innerHTML = '<div class="stt-space-loading">加载中...</div>';
+    }
     try {
       const data = await invoke("get_stt_space_usage");
       renderUsage(data);

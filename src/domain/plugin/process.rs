@@ -8,7 +8,6 @@
 //! - Windows:CREATE_NO_WINDOW 防控制台子进程弹窗。
 
 use std::collections::HashMap;
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -23,10 +22,6 @@ use super::protocol::{
     PluginAction, PluginItem, PluginRequest, PluginResponse, PluginUpstreamMessage,
     ToolResultPayload,
 };
-
-/// Windows CreateProcess 标志:不创建控制台窗口。
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// 查询错误。
 #[derive(Debug)]
@@ -123,9 +118,8 @@ pub fn find_interpreter(candidates: &[&str]) -> Result<PathBuf, PluginError> {
 
 /// 探测解释器版本，返回 (version_string, version_ok)。
 fn probe_version(exe_path: &Path, version_arg: &str, min_version: &str) -> (Option<String>, bool) {
-    let output = match std::process::Command::new(exe_path)
+    let output = match crate::infra::platform::no_window(std::process::Command::new(exe_path))
         .arg(version_arg)
-        .creation_flags(CREATE_NO_WINDOW)
         .output()
     {
         Ok(o) => o,
@@ -211,7 +205,7 @@ impl PluginProcess {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         #[cfg(windows)]
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.creation_flags(crate::infra::platform::CREATE_NO_WINDOW);
         // 注入全局代理 env（ureq/reqwest 原生读取，插件零代码）
         if let Some((http, https)) = proxy {
             if !http.is_empty() {
