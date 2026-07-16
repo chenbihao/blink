@@ -145,12 +145,28 @@ impl SttEngine for LocalSttEngine {
             return Ok(String::new());
         }
 
-        // 检查服务 HTTP API 是否就绪（TCP 可连但模型可能还在加载）
-        if !super::funasr::is_server_ready_http(self.server_port).await {
-            return Err(SttError::Engine(format!(
-                "FunASR 服务 HTTP API 未就绪（端口 {}）。模型可能仍在加载中，请稍后重试或在设置页检查状态。",
-                self.server_port
-            )));
+        // 检查模型是否已加载完毕（区分 HTTP 未就绪 / 模型加载中 / 模型就绪）
+        let model_status = super::funasr::check_model_loaded(self.server_port).await;
+        match model_status {
+            super::funasr::ModelLoadStatus::Ready => {} // 模型就绪，继续转录
+            super::funasr::ModelLoadStatus::Loading | super::funasr::ModelLoadStatus::Idle => {
+                return Err(SttError::Engine(format!(
+                    "模型正在加载中（端口 {}），首次使用需下载 ~234MB 模型文件，请稍后在设置页等待加载完成后重试。",
+                    self.server_port
+                )));
+            }
+            super::funasr::ModelLoadStatus::Error => {
+                return Err(SttError::Engine(format!(
+                    "模型加载失败（端口 {}），请在设置页查看日志或检查网络连接后重启服务。",
+                    self.server_port
+                )));
+            }
+            super::funasr::ModelLoadStatus::Unreachable => {
+                return Err(SttError::Engine(format!(
+                    "FunASR 服务不可达（端口 {}）。请确认服务已在设置页启动。",
+                    self.server_port
+                )));
+            }
         }
 
         let duration_ms = (samples.len() as f64 / self.sample_rate as f64 * 1000.0) as u64;
@@ -234,11 +250,31 @@ mod tests {
     async fn stt_end_to_end_with_funasr_sample() {
         let port: u16 = 8000;
 
-        // 检查 funasr-server 是否在运行
+        // 检查 funasr-server 是否在运行且模型已加载
         if !super::super::funasr::is_server_ready(port) {
             eprintln!("跳过：funasr-server 未在端口 {port} 上运行");
             eprintln!("要运行此测试，请先在设置页安装环境并启动服务");
             return;
+        }
+
+        // 等待模型加载完成（首次需下载 ~234MB，可能需要数分钟）
+        let model_deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(super::super::funasr::SERVER_STARTUP_TIMEOUT_SECS);
+        loop {
+            match super::super::funasr::check_model_loaded(port).await {
+                super::super::funasr::ModelLoadStatus::Ready => break,
+                super::super::funasr::ModelLoadStatus::Error => {
+                    eprintln!("跳过：模型加载失败，请检查服务状态");
+                    return;
+                }
+                _ if std::time::Instant::now() > model_deadline => {
+                    eprintln!("跳过：模型加载超时");
+                    return;
+                }
+                _ => {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                }
+            }
         }
 
         // FunASR 示例音频

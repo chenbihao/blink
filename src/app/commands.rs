@@ -2337,7 +2337,6 @@ pub async fn list_stt_models() -> Result<Vec<serde_json::Value>, String> {
             "id": m.id,
             "display_name": m.display_name,
             "engine": m.engine,
-            "streaming": m.streaming,
             "params": m.params,
             "size_mb": m.size_mb,
             "languages": m.languages,
@@ -2373,16 +2372,6 @@ pub async fn download_stt_model(app: tauri::AppHandle, model_id: String) -> Resu
     let mut config = crate::app::stt_config::get_stt_config();
     config.local_model_id = Some(model_id);
     config.local_engine.funasr_model = model.funasr_model_id.to_string();
-
-    // 自动配置 streaming_model：
-    // - 流式模型 → streaming_model = funasr_model（共用同一个模型实例），自动开启流式
-    // - 非流式模型 → streaming_model = None
-    if model.streaming {
-        config.local_engine.streaming_model = Some(model.funasr_model_id.to_string());
-        config.streaming = true;
-    } else {
-        config.local_engine.streaming_model = None;
-    }
 
     // 持久化到数据库（否则重启后丢失模型选择）
     let pool = app.state::<sqlx::SqlitePool>();
@@ -2544,7 +2533,6 @@ let config = crate::app::stt_config::get_stt_config();
 crate::domain::stt::funasr::get_env_status_async(
 config.local_engine.server_port,
 config.local_engine.funasr_model.clone(),
-config.local_engine.streaming_model.clone(),
 )
 .await
 }
@@ -2606,7 +2594,6 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
     let model = params.model.clone();
     let port = params.port;
     let device = params.device.clone();
-    let streaming_model = params.streaming_model.clone();
 
     // CUDA 诊断：启动前确认 GPU 是否可用
     if device == "cuda" {
@@ -2691,7 +2678,7 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
                     drop(guard);
                     let _ = app.emit(
                         "blink://funasr-server-status",
-                        serde_json::json!({ "stage": "already_running", "port": port, "model": &model, "streaming_model": &streaming_model }),
+                        serde_json::json!({ "stage": "already_running", "port": port, "model": &model }),
                     );
                     tracing::info!("funasr-server 子进程已在运行，跳过重复启动");
                     return Ok(());
@@ -2728,29 +2715,18 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
             });
 
             // ── 异步等待服务就绪（带子进程退出检测）──
+            // 两阶段检查：先等 FastAPI HTTP 起来，再等模型加载完成。
+            // 模型首次需从 ModelScope 下载（~234MB），可能需要数分钟。
             let app_clone = app.clone();
             let model_clone = model.clone();
-            let streaming_model_clone = streaming_model.clone();
             tokio::spawn(async move {
-                let url = format!("http://localhost:{port}/v1/models");
-                let client = match reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(5))
-                    .build()
-                {
-                    Ok(c) => c,
-                    Err(e) => {
-                        let _ = app_clone.emit(
-                            "blink://funasr-server-status",
-                            serde_json::json!({ "stage": "error", "error": format!("HTTP client 创建失败: {e}") }),
-                        );
-                        return;
-                    }
-                };
-
                 let deadline = std::time::Instant::now()
                     + std::time::Duration::from_secs(
                         crate::domain::stt::funasr::SERVER_STARTUP_TIMEOUT_SECS,
                     );
+
+                // 是否已通知前端「模型加载中」（避免每轮轮询都发事件）
+                let mut loading_notified = false;
 
                 loop {
                     if std::time::Instant::now() > deadline {
@@ -2800,17 +2776,43 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
                         }
                     }
 
-                    // HTTP 健康检查
-                    match client.get(&url).send().await {
-                        Ok(resp) if resp.status().is_success() => {
+                    // 检查模型加载状态（/health 端点的 model_status 字段）
+                    let model_status =
+                        crate::domain::stt::funasr::check_model_loaded(port).await;
+                    match model_status {
+                        crate::domain::stt::funasr::ModelLoadStatus::Ready => {
                             let _ = app_clone.emit(
                                 "blink://funasr-server-status",
-                                serde_json::json!({ "stage": "ready", "port": port, "model": &model_clone, "streaming_model": &streaming_model_clone }),
+                                serde_json::json!({ "stage": "ready", "port": port, "model": &model_clone }),
                             );
-                            tracing::info!(port, "funasr-server 就绪");
+                            tracing::info!(port, "funasr-server 就绪（模型已加载）");
                             return;
                         }
-                        _ => {
+                        crate::domain::stt::funasr::ModelLoadStatus::Error => {
+                            let _ = app_clone.emit(
+                                "blink://funasr-server-status",
+                                serde_json::json!({
+                                    "stage": "error",
+                                    "error": "模型加载失败，请检查网络连接后重试，或查看日志排查原因"
+                                }),
+                            );
+                            tracing::error!(port, "funasr-server 模型加载失败");
+                            return;
+                        }
+                        crate::domain::stt::funasr::ModelLoadStatus::Loading
+                        | crate::domain::stt::funasr::ModelLoadStatus::Idle => {
+                            if !loading_notified {
+                                let _ = app_clone.emit(
+                                    "blink://funasr-server-status",
+                                    serde_json::json!({ "stage": "loading_model", "port": port, "model": &model_clone }),
+                                );
+                                tracing::info!(port, "funasr-server HTTP 已就绪，模型加载中...");
+                                loading_notified = true;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        }
+                        crate::domain::stt::funasr::ModelLoadStatus::Unreachable => {
+                            // FastAPI 尚未启动，继续等待
                             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         }
                     }
@@ -2820,11 +2822,67 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
             Ok(())
         }
         Ok(None) => {
-            // 服务已在运行
-            let _ = app.emit(
-                "blink://funasr-server-status",
-                serde_json::json!({ "stage": "ready", "port": port, "model": &model, "streaming_model": &streaming_model }),
-            );
+            // 服务已在运行——检查模型是否已加载，避免报告 ready 但模型还在下载
+            let app_clone = app.clone();
+            let model_clone = model.clone();
+            tokio::spawn(async move {
+                let deadline = std::time::Instant::now()
+                    + std::time::Duration::from_secs(
+                        crate::domain::stt::funasr::SERVER_STARTUP_TIMEOUT_SECS,
+                    );
+                let mut loading_notified = false;
+                loop {
+                    if std::time::Instant::now() > deadline {
+                        let _ = app_clone.emit(
+                            "blink://funasr-server-status",
+                            serde_json::json!({
+                                "stage": "error",
+                                "error": format!(
+                                    "funasr-server 模型在 {}s 内未加载完成（端口 {}）",
+                                    crate::domain::stt::funasr::SERVER_STARTUP_TIMEOUT_SECS,
+                                    port
+                                )
+                            }),
+                        );
+                        return;
+                    }
+                    let model_status =
+                        crate::domain::stt::funasr::check_model_loaded(port).await;
+                    match model_status {
+                        crate::domain::stt::funasr::ModelLoadStatus::Ready => {
+                            let _ = app_clone.emit(
+                                "blink://funasr-server-status",
+                                serde_json::json!({ "stage": "ready", "port": port, "model": &model_clone }),
+                            );
+                            return;
+                        }
+                        crate::domain::stt::funasr::ModelLoadStatus::Error => {
+                            let _ = app_clone.emit(
+                                "blink://funasr-server-status",
+                                serde_json::json!({
+                                    "stage": "error",
+                                    "error": "模型加载失败，请检查网络连接后重试"
+                                }),
+                            );
+                            return;
+                        }
+                        crate::domain::stt::funasr::ModelLoadStatus::Loading
+                        | crate::domain::stt::funasr::ModelLoadStatus::Idle => {
+                            if !loading_notified {
+                                let _ = app_clone.emit(
+                                    "blink://funasr-server-status",
+                                    serde_json::json!({ "stage": "loading_model", "port": port, "model": &model_clone }),
+                                );
+                                loading_notified = true;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        }
+                        crate::domain::stt::funasr::ModelLoadStatus::Unreachable => {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        }
+                    }
+                }
+            });
             Ok(())
         }
         Err(e) => Err(e),
@@ -2885,15 +2943,22 @@ pub async fn diagnose_stt() -> Result<serde_json::Value, String> {
 let env = crate::domain::stt::funasr::get_env_status_async(
 port,
 config.local_engine.funasr_model.clone(),
-config.local_engine.streaming_model.clone(),
 )
 .await;
 
     let server_ready_tcp = crate::domain::stt::funasr::is_server_ready(port);
-    let server_ready = if server_ready_tcp {
-        crate::domain::stt::funasr::is_server_ready_http(port).await
+    let model_status = if server_ready_tcp {
+        crate::domain::stt::funasr::check_model_loaded(port).await
     } else {
-        false
+        crate::domain::stt::funasr::ModelLoadStatus::Unreachable
+    };
+    let server_ready = model_status == crate::domain::stt::funasr::ModelLoadStatus::Ready;
+    let model_status_str = match model_status {
+        crate::domain::stt::funasr::ModelLoadStatus::Ready => "ready",
+        crate::domain::stt::funasr::ModelLoadStatus::Loading => "loading",
+        crate::domain::stt::funasr::ModelLoadStatus::Idle => "idle",
+        crate::domain::stt::funasr::ModelLoadStatus::Error => "error",
+        crate::domain::stt::funasr::ModelLoadStatus::Unreachable => "unreachable",
     };
 
     // 同步诊断信息到 tracing 日志
@@ -2920,30 +2985,10 @@ config.local_engine.streaming_model.clone(),
     tracing::info!(
         running = env.server_running,
         ready = server_ready,
+        model_status = %model_status_str,
         port,
         "诊断: server"
     );
-
-    // ── WebSocket 就绪检查（流式 STT 专用）──
-    let ws_ready = if server_ready {
-        let (ready, err) = crate::domain::stt::funasr::is_websocket_ready(port).await;
-        tracing::info!(
-            ws_ready = ready,
-            ws_error = ?err,
-            "诊断: WebSocket /ws/stream"
-        );
-        if !ready {
-            if let Some(ref e) = err {
-                tracing::warn!(
-                    error = %e,
-                    "WebSocket 端点不可用——如果错误包含 404，说明服务端缺少 websockets 库"
-                );
-            }
-        }
-        (ready, err)
-    } else {
-        (false, Some("server 未就绪".to_string()))
-    };
 
     report["funasr_env"] = serde_json::json!({
         "uv_available": env.uv_available,
@@ -2955,15 +3000,12 @@ config.local_engine.streaming_model.clone(),
         "torch_cuda_available": env.torch_cuda_available,
         "funasr_installed": env.funasr_installed,
         "funasr_version": env.funasr_version,
-        "websockets_installed": env.websockets_installed,
-        "websockets_version": env.websockets_version,
         "env_ready": env.env_ready,
         "server_running": env.server_running,
         "server_port": env.server_port,
         "server_model": env.server_model,
         "server_ready": server_ready,
-        "websocket_ready": ws_ready.0,
-        "websocket_error": ws_ready.1,
+        "model_status": model_status_str,
     });
 
     // ── 配置状态 ──
@@ -2995,7 +3037,6 @@ config.local_engine.streaming_model.clone(),
                 "id": model.id,
                 "display_name": model.display_name,
                 "funasr_model_id": model.funasr_model_id,
-                "streaming": model.streaming,
                 "params": model.params,
                 "size_mb": model.size_mb,
                 "device": model.device,
@@ -3260,6 +3301,30 @@ pub async fn cleanup_stt_space() -> Result<(), String> {
     } else {
         Err(errors.join("; "))
     }
+}
+
+/// 打开 STT Python 环境所在文件夹（`%APPDATA%\blink\python\`）。
+///
+/// 方便用户查看 venv、uv、模型缓存等文件。目录不存在时自动创建。
+#[tauri::command]
+pub fn open_stt_folder() -> Result<(), String> {
+    let python_dir = dirs_next::data_dir()
+        .unwrap_or_default()
+        .join("blink")
+        .join("python");
+
+    // 目录不存在时先创建，避免 explorer 打开"文档"等默认位置
+    if !python_dir.exists() {
+        std::fs::create_dir_all(&python_dir)
+            .map_err(|e| format!("创建目录失败: {e}"))?;
+    }
+
+    tracing::info!(path = %python_dir.display(), "打开 STT 文件夹");
+    std::process::Command::new("explorer.exe")
+        .arg(&python_dir)
+        .spawn()
+        .map_err(|e| format!("打开文件夹失败: {e}"))?;
+    Ok(())
 }
 
 #[cfg(test)]

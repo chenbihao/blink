@@ -336,23 +336,17 @@
   padding: 6px 16px;
   font-size: var(--text-sm, 13px);
   color: var(--accent);
-  background: var(--surface-2);
-  border: 1px solid rgba(137, 180, 250, 0.3);
-  border-radius: 6px;
+  background: var(--accent-bg, rgba(137, 180, 250, 0.06));
+  border: 1px solid rgba(137, 180, 250, 0.25);
+  border-radius: var(--radius-md, 6px);
   cursor: pointer;
   white-space: nowrap;
-  transition: background 0.15s, border-color 0.15s;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
 }
 
 #voice .engine-download-btn:hover:not(:disabled) {
-  background: var(--surface-3);
+  background: var(--accent-faint, rgba(137, 180, 250, 0.12));
   border-color: var(--accent);
-}
-
-#voice .engine-download-btn:disabled {
-  color: var(--text-faint);
-  cursor: default;
-  opacity: 0.7;
 }
 
 #voice .engine-download-btn.installed {
@@ -380,22 +374,17 @@
   padding: 3px 10px;
   font-size: var(--text-xs, 11px);
   border: 1px solid var(--border-glow);
-  border-radius: 4px;
+  border-radius: var(--radius-sm, 4px);
   background: var(--surface);
   color: var(--text-dim);
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
 }
 
-#voice .stt-diagnose-btn:hover {
+#voice .stt-diagnose-btn:hover:not(:disabled) {
   background: var(--surface-2);
   border-color: var(--accent);
   color: var(--text);
-}
-
-#voice .stt-diagnose-btn:disabled {
-  opacity: 0.6;
-  cursor: default;
 }
 
 /* ── 统一日志窗口（FunASR 日志 + 诊断输出共用）────────────────────── */
@@ -516,7 +505,8 @@
   cursor: not-allowed;
 }
 
-/* ── 按钮成功状态（绿色，不置灰）────────────────────────────────── */
+/* ── 按钮统一状态（success / running / disabled）────────────────── */
+/* 所有语音 Tab 按钮共用一套状态样式，避免灰色按钮问题 */
 
 #voice .engine-download-btn.success {
   color: var(--green, #38a169);
@@ -540,6 +530,20 @@
 #voice .engine-download-btn.running:hover {
   background: var(--green-bg, rgba(56, 161, 105, 0.08));
   border-color: rgba(56, 161, 105, 0.4);
+}
+
+/* disabled 统一用 opacity，不变色——避免「灰色按钮」视觉问题 */
+#voice .engine-download-btn:disabled,
+#voice .stt-space-cleanup-btn:disabled,
+#voice .stt-space-refresh-btn:disabled,
+#voice .stt-space-open-folder-btn:disabled,
+#voice .stt-diagnose-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+  /* 保留原色调，仅降低透明度，不再强制变灰 */
+  color: inherit;
+  background: inherit;
+  border-color: inherit;
 }
 
 /* ── 空间管理 ────────────────────────────────────────────────────── */
@@ -613,35 +617,47 @@
   padding: 6px 16px;
   font-size: var(--text-sm, 13px);
   border: 1px solid rgba(243, 139, 168, 0.3);
-  border-radius: 6px;
-  background: var(--surface);
+  border-radius: var(--radius-md, 6px);
+  background: var(--red-bg, rgba(243, 139, 168, 0.06));
   color: var(--red, #e53e3e);
   cursor: pointer;
-  transition: background 0.15s;
+  transition: background var(--transition-fast);
 }
 
 #voice .stt-space-cleanup-btn:hover:not(:disabled) {
-  background: rgba(243, 139, 168, 0.08);
-}
-
-#voice .stt-space-cleanup-btn:disabled {
-  opacity: 0.5;
-  cursor: default;
+  background: rgba(243, 139, 168, 0.12);
+  border-color: var(--red, #e53e3e);
 }
 
 #voice .stt-space-refresh-btn {
   padding: 6px 16px;
   font-size: var(--text-sm, 13px);
   border: 1px solid var(--border-glow);
-  border-radius: 6px;
+  border-radius: var(--radius-md, 6px);
   background: var(--surface);
   color: var(--text-dim);
   cursor: pointer;
-  transition: background 0.15s;
+  transition: background var(--transition-fast);
 }
 
-#voice .stt-space-refresh-btn:hover {
+#voice .stt-space-refresh-btn:hover:not(:disabled) {
   background: var(--surface-2);
+}
+
+#voice .stt-space-open-folder-btn {
+  padding: 6px 16px;
+  font-size: var(--text-sm, 13px);
+  border: 1px solid var(--border-glow);
+  border-radius: var(--radius-md, 6px);
+  background: var(--surface);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+#voice .stt-space-open-folder-btn:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text);
 }
 
 #voice .stt-space-loading {

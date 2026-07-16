@@ -592,6 +592,7 @@ app::commands::stop_funasr_server,
 app::commands::diagnose_stt,
 app::commands::get_stt_space_usage,
 app::commands::cleanup_stt_space,
+app::commands::open_stt_folder,
 ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

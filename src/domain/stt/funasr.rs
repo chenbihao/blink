@@ -14,7 +14,7 @@
 //! ## 兼容性
 //!
 //! HTTP 端点路径和响应格式与官方 `funasr-server` 完全一致，
-//! 现有 `LocalSttEngine` 和 `is_server_ready_http()` 无需修改。
+//! 现有 Rust 侧的 `LocalSttEngine` / `PseudoStreamingSttEngine` 和 `check_model_loaded()` 无需修改。
 //!
 //! ## uv 自管理环境
 //!
@@ -145,10 +145,6 @@ pub struct FunasrEnv {
     pub funasr_installed: bool,
     /// funasr 版本
     pub funasr_version: Option<String>,
-    /// websockets 包是否已安装（流式 STT WebSocket 端点必需）
-    pub websockets_installed: bool,
-    /// websockets 版本
-    pub websockets_version: Option<String>,
     /// Python 环境是否完全就绪
     pub env_ready: bool,
 
@@ -159,8 +155,6 @@ pub struct FunasrEnv {
     pub server_port: u16,
     /// 当前配置的非流式模型
     pub server_model: String,
-    /// 当前配置的流式模型（None = 未配置流式）
-    pub server_streaming_model: Option<String>,
 }
 
 /// 获取环境 + 服务的完整状态（同步版，会阻塞调用线程）。
@@ -170,7 +164,6 @@ pub struct FunasrEnv {
 pub fn get_env_status(
     server_port: u16,
     server_model: &str,
-    server_streaming_model: Option<String>,
 ) -> FunasrEnv {
     let py_status = crate::infra::platform::python::check_status();
 
@@ -184,13 +177,10 @@ pub fn get_env_status(
         torch_cuda_available: py_status.torch_cuda_available,
         funasr_installed: py_status.funasr_installed,
         funasr_version: py_status.funasr_version,
-        websockets_installed: py_status.websockets_installed,
-        websockets_version: py_status.websockets_version,
         env_ready: py_status.env_ready,
         server_running: SERVER_RUNNING.load(Ordering::SeqCst),
         server_port,
         server_model: server_model.to_string(),
-        server_streaming_model,
     }
 }
 
@@ -201,7 +191,6 @@ pub fn get_env_status(
 pub async fn get_env_status_async(
     server_port: u16,
     server_model: String,
-    server_streaming_model: Option<String>,
 ) -> FunasrEnv {
     let py_status = crate::infra::platform::python::check_status_async().await;
 
@@ -215,13 +204,10 @@ pub async fn get_env_status_async(
         torch_cuda_available: py_status.torch_cuda_available,
         funasr_installed: py_status.funasr_installed,
         funasr_version: py_status.funasr_version,
-        websockets_installed: py_status.websockets_installed,
-        websockets_version: py_status.websockets_version,
         env_ready: py_status.env_ready,
         server_running: SERVER_RUNNING.load(Ordering::SeqCst),
         server_port,
         server_model,
-        server_streaming_model,
     }
 }
 
@@ -295,7 +281,7 @@ fn strip_ansi(s: &str) -> String {
 /// 此时 TCP 连接成功但 HTTP 请求会失败。
 ///
 /// 用于快速预检（如 `LocalSttEngine::new` 中的快速失败判断）。
-/// 在需要确保 API 真正就绪的场景，使用 [`is_server_ready_http`]。
+/// 在需要确保模型真正就绪的场景，使用 [`check_model_loaded`]。
 pub fn is_server_ready(port: u16) -> bool {
     use std::net::TcpStream;
     use std::time::Duration;
@@ -314,10 +300,13 @@ pub fn is_server_ready(port: u16) -> bool {
 
 /// 检查 server 的 HTTP API 是否真正就绪。
 ///
-/// 通过 `GET /health` 端点验证：不仅 TCP 端口在监听，而且 FastAPI 应用已启动、
-/// 模型已加载。返回模型加载状态供调用方判断。
+/// 通过 `GET /health` 端点验证：不仅 TCP 端口在监听，而且 FastAPI 应用已启动。
 ///
-/// 在 `finalize`（async）中使用，确保转录请求不会因模型未加载而失败。
+/// **注意**：此函数只检查 HTTP 层面是否可用，**不检查模型是否加载完成**。
+/// 模型可能仍在后台下载/加载中。如需确认模型就绪，使用 [`check_model_loaded`]。
+///
+/// 在 `finalize`（async）中使用，确保转录请求不会因 HTTP 未就绪而失败。
+#[allow(dead_code)]
 pub async fn is_server_ready_http(port: u16) -> bool {
     let url = format!("http://localhost:{port}/health");
     let client = match reqwest::Client::builder()
@@ -334,20 +323,63 @@ pub async fn is_server_ready_http(port: u16) -> bool {
     }
 }
 
-/// 检查 server 的 WebSocket 端点 `/ws/stream` 是否可用。
+/// 模型加载状态（从 Python server `/health` 端点获取）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelLoadStatus {
+    /// Python server 尚未响应（HTTP 不可达或响应异常）
+    Unreachable,
+    /// 模型尚未开始加载（idle）
+    Idle,
+    /// 模型正在下载/加载中（首次需从 ModelScope 下载 ~234MB）
+    Loading,
+    /// 模型已就绪，可接受转录请求
+    Ready,
+    /// 模型加载失败
+    Error,
+}
+
+/// 检查模型是否已加载完毕。
 ///
-/// 通过尝试建立 WebSocket 连接验证：不仅 TCP 端口在监听、HTTP API 就绪，
-/// 而且 WebSocket 升级功能正常（即 `websockets` 库已安装）。
+/// 通过 `GET /health` 端点的 `model_status` 字段判断模型加载状态。
+/// 仅当返回 [`ModelLoadStatus::Ready`] 时，转录请求才能立即响应。
 ///
-/// 返回 `(是否就绪, 失败原因)`。失败原因用于诊断（如 "404 Not Found" 表示缺少 websockets 库）。
-pub async fn is_websocket_ready(port: u16) -> (bool, Option<String>) {
-    let ws_url = format!("ws://localhost:{port}/ws/stream");
-    match tokio_tungstenite::connect_async(&ws_url).await {
-        Ok((_ws, _resp)) => (true, None),
-        Err(e) => {
-            let msg = format!("{e}");
-            (false, Some(msg))
+/// 用于：
+/// - `commands.rs` 启动流程的轮询（区分 "服务已启动但模型还在下载" 与 "模型就绪"）
+/// - `local.rs` 的 `finalize()` 检查（提供更精准的错误提示）
+pub async fn check_model_loaded(port: u16) -> ModelLoadStatus {
+    let url = format!("http://localhost:{port}/health");
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return ModelLoadStatus::Unreachable,
+    };
+
+    match client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            match resp.json::<serde_json::Value>().await {
+                Ok(v) => {
+                    // 优先读 model_status（新字段），回退到 model_loaded（旧字段兼容）
+                    match v.get("model_status").and_then(|s| s.as_str()) {
+                        Some("ready") => ModelLoadStatus::Ready,
+                        Some("loading") => ModelLoadStatus::Loading,
+                        Some("error") => ModelLoadStatus::Error,
+                        Some("idle") => ModelLoadStatus::Idle,
+                        _ => {
+                            // 旧版 server 没有 model_status 字段，回退到 model_loaded
+                            if v.get("model_loaded").and_then(|b| b.as_bool()) == Some(true) {
+                                ModelLoadStatus::Ready
+                            } else {
+                                ModelLoadStatus::Loading
+                            }
+                        }
+                    }
+                }
+                Err(_) => ModelLoadStatus::Unreachable,
+            }
         }
+        _ => ModelLoadStatus::Unreachable,
     }
 }
 
@@ -358,8 +390,6 @@ pub async fn is_websocket_ready(port: u16) -> (bool, Option<String>) {
 pub struct ServerStartParams {
     /// 非流式模型标识（如 "sensevoice"）
     pub model: String,
-    /// 流式模型标识（如 "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online"，None = 不启用流式）
-    pub streaming_model: Option<String>,
     /// 监听端口
     pub port: u16,
     /// 推理设备: "cpu" 或 "cuda"
@@ -384,7 +414,6 @@ impl ServerStartParams {
 
         Ok(Self {
             model: local.funasr_model.clone(),
-            streaming_model: local.streaming_model.clone(),
             port: local.server_port,
             device: local.device.clone(),
             hotwords_path,
@@ -447,21 +476,6 @@ pub async fn start_server(
         );
     }
 
-    // 检查 websockets 是否已安装（流式 STT WebSocket 端点必需）
-    // 如果缺失（如旧版本安装了裸 uvicorn 而非 uvicorn[standard]），自动安装
-    let (ws_ok, _) = crate::infra::platform::python::check_websockets();
-    if !ws_ok {
-        tracing::warn!("websockets 包未安装，正在自动安装 uvicorn[standard]...");
-        let uv_path =
-            crate::infra::platform::python::find_uv().ok_or("uv 不可用，无法安装 websockets")?;
-        crate::infra::platform::python::install_packages(&uv_path, &["uvicorn[standard]"])
-            .await
-            .map_err(|e| {
-                format!("自动安装 websockets 失败: {e}（请手动在设置页点击「安装环境」）")
-            })?;
-        tracing::info!("websockets 包已自动安装");
-    }
-
     // 确保 blink_stt_server.py 已释放
     let script_path = ensure_server_script()?;
 
@@ -469,7 +483,6 @@ pub async fn start_server(
         script = %script_path.display(),
         ?funasr_ver,
         model,
-        streaming_model = ?params.streaming_model,
         port,
         device,
         "启动 blink_stt_server 子进程",
@@ -478,9 +491,6 @@ pub async fn start_server(
     // 构建启动命令: python blink_stt_server.py --model ... --port ... --device ...
     let mut cmd_display =
         format!("python blink_stt_server.py --model {model} --port {port} --device {device}");
-    if let Some(ref sm) = params.streaming_model {
-        cmd_display.push_str(&format!(" --streaming-model {sm}"));
-    }
     if let Some(ref hw_path) = params.hotwords_path {
         cmd_display.push_str(&format!(" --hotwords {}", hw_path.display()));
     }
@@ -495,9 +505,6 @@ pub async fn start_server(
         .args(["--port", &port.to_string()])
         .args(["--device", device]);
 
-    if let Some(ref sm) = params.streaming_model {
-        cmd.args(["--streaming-model", sm]);
-    }
     if let Some(ref hw_path) = params.hotwords_path {
         cmd.arg("--hotwords").arg(hw_path);
     }
@@ -657,7 +664,6 @@ mod tests {
         // 验证脚本是有效 Python（含关键标识）
         assert!(BLINK_STT_SERVER_PY.contains("blink_stt_server"));
         assert!(BLINK_STT_SERVER_PY.contains("/v1/audio/transcriptions"));
-        assert!(BLINK_STT_SERVER_PY.contains("/ws/stream"));
         assert!(BLINK_STT_SERVER_PY.contains("/health"));
     }
 
@@ -704,48 +710,6 @@ mod tests {
 
         let content = std::fs::read_to_string(&path).expect("读取热词文件失败");
         assert_eq!(content, hotwords);
-    }
-
-    // ── WebSocket 相关测试 ──
-
-    /// 验证嵌入的 Python 脚本包含 WebSocket 库检测函数。
-    #[test]
-    fn embedded_script_contains_websocket_check() {
-        assert!(
-            BLINK_STT_SERVER_PY.contains("_check_websocket_support"),
-            "blink_stt_server.py 应包含 _check_websocket_support 函数"
-        );
-        assert!(
-            BLINK_STT_SERVER_PY.contains("import websockets"),
-            "blink_stt_server.py 应检测 websockets 库"
-        );
-        assert!(
-            BLINK_STT_SERVER_PY.contains("uvicorn[standard]"),
-            "blink_stt_server.py 应在警告中提示安装 uvicorn[standard]"
-        );
-    }
-
-    /// 验证嵌入的 Python 脚本包含 WebSocket 端点定义。
-    #[test]
-    fn embedded_script_contains_websocket_endpoint() {
-        assert!(
-            BLINK_STT_SERVER_PY.contains("@app.websocket(\"/ws/stream\")"),
-            "blink_stt_server.py 应定义 /ws/stream WebSocket 端点"
-        );
-        assert!(
-            BLINK_STT_SERVER_PY.contains("WebSocketDisconnect"),
-            "blink_stt_server.py 应处理 WebSocketDisconnect"
-        );
-    }
-
-    /// 验证 start_server 中检测 websockets 并自动安装的逻辑存在。
-    /// 通过检查 check_websockets 函数是否公开导出来间接验证。
-    #[test]
-    fn start_server_contains_websockets_auto_install() {
-        // check_websockets 函数应存在且可调用（编译时即验证）
-        let _ = crate::infra::platform::python::check_websockets();
-        // is_websocket_ready 函数应存在（编译时即验证）
-        // 注意：is_websocket_ready 是 async，此处仅验证函数存在
     }
 
     // ── 日志噪声过滤测试 ──

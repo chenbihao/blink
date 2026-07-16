@@ -108,16 +108,11 @@ fn parse_level(level: &str) -> String {
     // 在 TRACE 下会喷协议帧(每个 HTTP/2 请求上百行),用户开 trace 是要看自家逻辑,
     // 不是看 TLS 握手。这些统一压到 warn。`rig_core` 保留在原级别——它的
     // `completions request/response` TRACE 对诊断"发了什么/收了什么"很有价值。
-    //
-    // **WebSocket 噪音压制**（0.10.3）:tungstenite / tokio_tungstenite 在 TRACE 下
-    // 会喷每个 WebSocket 帧的完整二进制 payload（音频 PCM 数据），每个帧数百行，
-    // 完全淹没 blink 自身日志。统一压到 warn。
     let ai_noise = "h2=warn,rustls=warn,tower=warn,hpack=warn";
-    let ws_noise = "tungstenite=warn,tokio_tungstenite=warn";
     match level {
-        "trace" => format!("trace,sqlx=warn,tauri=warn,hyper=warn,reqwest=warn,{ai_noise},{ws_noise}"),
-        "debug" => format!("debug,sqlx=warn,tauri=warn,{ai_noise},{ws_noise}"),
-        "info" => format!("info,sqlx=warn,tauri=warn,{ai_noise},{ws_noise}"),
+        "trace" => format!("trace,sqlx=warn,tauri=warn,hyper=warn,reqwest=warn,{ai_noise}"),
+        "debug" => format!("debug,sqlx=warn,tauri=warn,{ai_noise}"),
+        "info" => format!("info,sqlx=warn,tauri=warn,{ai_noise}"),
         _ => "error".to_string(),
     }
 }

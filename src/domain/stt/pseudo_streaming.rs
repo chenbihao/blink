@@ -15,8 +15,7 @@
 //! ## 与其他引擎的关系
 //!
 //! - [`LocalSttEngine`](super::local::LocalSttEngine)：非流式（transcribe_chunk 空转）
-//! - [`StreamingSttEngine`](super::streaming::StreamingSttEngine)：真流式（WebSocket 逐字）
-//! - **本引擎**：伪流式（VAD 切句 + 定时 HTTP 轮询）
+//! - **本引擎**：伪流式（VAD 切句 + 定时 HTTP 轮询）⭐ 默认
 //!
 //! ## transcribe_chunk 返回值
 //!
@@ -197,11 +196,28 @@ impl PseudoStreamingSttEngine {
             return Ok(String::new());
         }
 
-        if !super::funasr::is_server_ready_http(self.server_port).await {
-            return Err(SttError::Engine(format!(
-                "FunASR 服务 HTTP API 未就绪（端口 {}）",
-                self.server_port
-            )));
+        // 检查模型是否已加载完毕（区分 HTTP 未就绪 / 模型加载中 / 模型就绪）
+        let model_status = super::funasr::check_model_loaded(self.server_port).await;
+        match model_status {
+            super::funasr::ModelLoadStatus::Ready => {} // 模型就绪，继续转录
+            super::funasr::ModelLoadStatus::Loading | super::funasr::ModelLoadStatus::Idle => {
+                return Err(SttError::Engine(format!(
+                    "模型正在加载中（端口 {}），首次使用需下载 ~234MB 模型文件，请稍后在设置页等待加载完成后重试。",
+                    self.server_port
+                )));
+            }
+            super::funasr::ModelLoadStatus::Error => {
+                return Err(SttError::Engine(format!(
+                    "模型加载失败（端口 {}），请在设置页查看日志或检查网络连接后重启服务。",
+                    self.server_port
+                )));
+            }
+            super::funasr::ModelLoadStatus::Unreachable => {
+                return Err(SttError::Engine(format!(
+                    "FunASR 服务不可达（端口 {}）。请确认服务已在设置页启动。",
+                    self.server_port
+                )));
+            }
         }
 
         // 裁剪尾部静音，减少 SenseVoice 幻觉英文语气词
@@ -498,115 +514,17 @@ fn is_chinese_char(c: char) -> bool {
     matches!(c, '\u{4e00}'..='\u{9fff}' | '\u{3400}'..='\u{4dbf}')
 }
 
-/// 判断字符是否为 emoji 或非语音符号。
-///
-/// SenseVoice 模型有时会在文本中插入 emoji（如 😊😄）。
-/// 覆盖常见 emoji Unicode 区间。
-fn is_emoji(c: char) -> bool {
-    matches!(c,
-        '\u{1F600}'..='\u{1F64F}'   // emoticons
-        | '\u{1F300}'..='\u{1F5FF}'  // symbols & pictographs
-        | '\u{1F680}'..='\u{1F6FF}'  // transport & map symbols
-        | '\u{1F1E0}'..='\u{1F1FF}'  // flags (iOS)
-        | '\u{2700}'..='\u{27BF}'    // dingbats
-        | '\u{1F900}'..='\u{1F9FF}'  // supplemental symbols and pictographs
-        | '\u{2600}'..='\u{26FF}'    // miscellaneous symbols
-        | '\u{1FA00}'..='\u{1FA6F}'  // chess symbols
-        | '\u{1FA70}'..='\u{1FAFF}'  // symbols and pictographs extended-a
-    )
-}
-
-/// 清除文本中的 emoji 字符。
-fn strip_emoji(text: &str) -> String {
-    text.chars().filter(|c| !is_emoji(*c)).collect()
-}
-
-/// 判断字符是否为 CJK 字符（中文/日文/韩文）。
-///
-/// 用于检测字符间空格是否应被移除——Paraformer 的字符级 tokenizer
-/// 会在每个 CJK 字符之间插入空格。
-fn is_cjk_char(c: char) -> bool {
-    matches!(c,
-        '\u{4e00}'..='\u{9fff}'   // CJK Unified Ideographs
-        | '\u{3400}'..='\u{4dbf}' // CJK Extension A
-        | '\u{3040}'..='\u{30ff}' // Hiragana + Katakana
-        | '\u{ac00}'..='\u{d7af}' // Hangul Syllables
-    )
-}
-
-/// 去除 CJK 字符之间的空格。
-///
-/// Paraformer / SeacoParaformer 使用字符级 tokenizer，
-/// 原始输出形如 "那 我 现 在 能 输 入 了 吗"。
-/// 此函数移除 CJK 字符之间的空白，同时保留英文单词间的正常空格。
-///
-/// 算法：遍历字符序列，当当前字符是 CJK 且下一个非空字符也是 CJK 时，
-/// 跳过中间的空白。保留 CJK 与非 CJK 之间的单个空格。
-fn strip_cjk_spaces(text: &str) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() {
-        return String::new();
-    }
-
-    let mut result = Vec::with_capacity(chars.len());
-    let mut i = 0;
-
-    while i < chars.len() {
-        let c = chars[i];
-
-        if c.is_whitespace() && !result.is_empty() {
-            // 查看前面已写入的最后一个非空字符
-            let prev = result.last().copied();
-            // 向后查找下一个非空字符
-            let mut j = i + 1;
-            while j < chars.len() && chars[j].is_whitespace() {
-                j += 1;
-            }
-
-            match prev {
-                Some(p) if is_cjk_char(p) => {
-                    // 前面是 CJK
-                    if j < chars.len() && is_cjk_char(chars[j]) {
-                        // 后面也是 CJK → 跳过空格
-                        i = j;
-                        continue;
-                    }
-                    // 后面不是 CJK → 保留一个空格
-                    result.push(' ');
-                    i += 1;
-                    continue;
-                }
-                _ => {
-                    // 前面不是 CJK → 保留一个空格
-                    result.push(' ');
-                    i += 1;
-                    continue;
-                }
-            }
-        }
-
-        result.push(c);
-        i += 1;
-    }
-
-    result.into_iter().collect()
-}
-
-/// 剥离 SenseVoice 幻觉产生的尾部英文语气词和 emoji。
+/// 剥离 SenseVoice 幻觉产生的尾部英文语气词。
 ///
 /// 当识别文本以中文为主时，模型可能在尾部静音段幻觉出
-/// 英文填充词（如 "Yeah." "Okay."）或 emoji。此函数做后处理清理。
+/// 英文填充词（如 "Yeah." "Okay."）。此函数做后处理清理。
 ///
-/// 此外，Paraformer 字符级 tokenizer 会在每个 CJK 字符间插入空格，
-/// 此函数也一并清理。
+/// emoji 和 CJK 间空格已由 Python server `_postprocess_text` 处理，
+/// 此处不再重复。
 ///
 /// 仅当文本包含中文字符时才执行剥离，避免误伤纯英文识别。
 fn strip_filler_words(text: &str) -> String {
-    // 首先去除 emoji（无论是否有中文）
-    let no_emoji = strip_emoji(text);
-    // 去除 CJK 字符间的空格（Paraformer 字符级 tokenizer 副产物）
-    let no_cjk_spaces = strip_cjk_spaces(&no_emoji);
-    let trimmed = no_cjk_spaces.trim();
+    let trimmed = text.trim();
     if trimmed.is_empty() {
         return trimmed.to_string();
     }
@@ -1093,119 +1011,6 @@ mod tests {
             strip_filler_words("好的，我知道了。"),
             "好的，我知道了。"
         );
-    }
-
-    // ── emoji 过滤测试 ──
-
-    #[test]
-    fn filler_strip_emoji_from_chinese() {
-        // 中文 + emoji → 去除 emoji
-        assert_eq!(
-            strip_filler_words("你好世界😊"),
-            "你好世界"
-        );
-    }
-
-    #[test]
-    fn filler_strip_emoji_and_filler() {
-        // 中文 + emoji + 英文语气词 → 全部清除
-        assert_eq!(
-            strip_filler_words("你好世界。😊 Yeah."),
-            "你好世界。"
-        );
-    }
-
-    #[test]
-    fn filler_strip_multiple_emoji() {
-        // 多个 emoji
-        assert_eq!(
-            strip_filler_words("测试文本😄🎉"),
-            "测试文本"
-        );
-    }
-
-    #[test]
-    fn filler_strip_emoji_only() {
-        // 纯 emoji → 空字符串
-        assert_eq!(strip_filler_words("😊😄"), "");
-    }
-
-    // ── CJK 间空格去除测试（Paraformer 字符级 tokenizer 副产物）──
-
-    #[test]
-    fn cjk_spaces_basic() {
-        // Paraformer 典型输出：每个字之间都有空格
-        assert_eq!(
-            strip_filler_words("那 我 现 在 能 输 入 了 吗"),
-            "那我现在能输入了吗"
-        );
-    }
-
-    #[test]
-    fn cjk_spaces_with_punctuation() {
-        // 带标点的情况
-        assert_eq!(
-            strip_filler_words("哎 为 什 么 我 输 入 会 带 一 堆 空 格 呀"),
-            "哎为什么我输入会带一堆空格呀"
-        );
-    }
-
-    #[test]
-    fn cjk_spaces_preserves_english_spaces() {
-        // 英文单词间的空格应保留
-        assert_eq!(
-            strip_filler_words("Hello world"),
-            "Hello world"
-        );
-    }
-
-    #[test]
-    fn cjk_spaces_mixed_chinese_english() {
-        // 中英混排：CJK 间空格去除，CJK 与英文间保留一个空格
-        assert_eq!(
-            strip_filler_words("我 在 用 Blink 输 入 法"),
-            "我在用 Blink 输入法"
-        );
-    }
-
-    #[test]
-    fn cjk_spaces_multiple_spaces() {
-        // 多个连续空格
-        assert_eq!(
-            strip_filler_words("你  好  世  界"),
-            "你好世界"
-        );
-    }
-
-    #[test]
-    fn cjk_spaces_no_spaces_unchanged() {
-        // 无空格的中文不受影响
-        assert_eq!(
-            strip_filler_words("你好世界"),
-            "你好世界"
-        );
-    }
-
-    #[test]
-    fn cjk_spaces_empty() {
-        assert_eq!(strip_filler_words(""), "");
-    }
-
-    #[test]
-    fn cjk_spaces_with_filler_and_spaces() {
-        // CJK 空格 + 英文语气词同时出现
-        assert_eq!(
-            strip_filler_words("那 我 现 在 能 输 入 了 吗 Yeah."),
-            "那我现在能输入了吗"
-        );
-    }
-
-    #[test]
-    fn cjk_spaces_strips_function_directly() {
-        // 直接测试 strip_cjk_spaces 函数
-        assert_eq!(strip_cjk_spaces("你 好 世 界"), "你好世界");
-        assert_eq!(strip_cjk_spaces("Hello world"), "Hello world");
-        assert_eq!(strip_cjk_spaces("中 文 Hello world 文 本"), "中文 Hello world 文本");
     }
 
     #[test]

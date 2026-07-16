@@ -132,47 +132,19 @@ impl VoiceService {
             };
             if !ready {
                 tracing::warn!(target = ?session.target, %msg, "语音录音中止：服务未就绪");
-                let target_str = if session.target == VoiceTarget::MainWindow {
-                    "g1"
-                } else {
-                    "g2"
-                };
-
-                // G2: 先显示 overlay，再延迟 emit 错误消息
-                // （窗口刚 show 时事件可能未就绪，延迟 100ms 确保接收）
-                if session.target == VoiceTarget::ForegroundApp {
-                    platform::window::show_voice_overlay(&self.app);
-                    let app_clone = self.app.clone();
-                    let msg_clone = msg.clone();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        let _ = app_clone.emit(
-                            "blink://voice-error",
-                            serde_json::json!({
-                                "message": msg_clone,
-                                "target": "g2",
-                            }),
-                        );
-                        // 2s 后自动隐藏
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                        platform::window::hide_voice_overlay(&app_clone);
-                    });
-                } else {
-                    // G1: 直接 emit（主窗口已可见，事件就绪）
-                    let _ = self.app.emit(
-                        "blink://voice-error",
-                        serde_json::json!({
-                            "message": msg,
-                            "target": target_str,
-                        }),
-                    );
-                }
-                // 不启动录音，直接返回
+                self.emit_voice_error(session.target, &msg);
                 return;
             }
         }
 
-        let engine = crate::domain::stt::create_engine();
+        let engine = match crate::domain::stt::create_engine() {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(target = ?session.target, %e, "语音录音中止：引擎创建失败");
+                self.emit_voice_error(session.target, &e);
+                return;
+            }
+        };
         let mut capture = if let Some(dev_id) = config.audio_device_id {
             platform::audio::create_capture_with_device(dev_id)
         } else {
@@ -425,6 +397,47 @@ impl VoiceService {
 
         // 隐藏 mini overlay(G2)
         platform::window::hide_voice_overlay(&self.app);
+    }
+
+    /// 向用户反馈语音错误（G1 直接 emit，G2 先显示 overlay 再延迟 emit）。
+    ///
+    /// **绝不**用 Mock 引擎的假文本上屏——错误就是错误，告知用户而非静默吞掉。
+    fn emit_voice_error(&self, target: VoiceTarget, message: &str) {
+        let target_str = if target == VoiceTarget::MainWindow {
+            "g1"
+        } else {
+            "g2"
+        };
+
+        if target == VoiceTarget::ForegroundApp {
+            // G2: 先显示 overlay，再延迟 emit 错误消息
+            // （窗口刚 show 时事件可能未就绪，延迟 100ms 确保接收）
+            platform::window::show_voice_overlay(&self.app);
+            let app_clone = self.app.clone();
+            let msg_clone = message.to_string();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let _ = app_clone.emit(
+                    "blink://voice-error",
+                    serde_json::json!({
+                        "message": msg_clone,
+                        "target": "g2",
+                    }),
+                );
+                // 2s 后自动隐藏
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                platform::window::hide_voice_overlay(&app_clone);
+            });
+        } else {
+            // G1: 直接 emit（主窗口已可见，事件就绪）
+            let _ = self.app.emit(
+                "blink://voice-error",
+                serde_json::json!({
+                    "message": message,
+                    "target": target_str,
+                }),
+            );
+        }
     }
 
     /// 是否正在录音。

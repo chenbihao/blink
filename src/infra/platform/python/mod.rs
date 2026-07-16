@@ -99,15 +99,8 @@ pub struct PythonEnvStatus {
     /// funasr 版本号
     pub funasr_version: Option<String>,
 
-    // ── websockets（流式 STT 必需）──
-    /// websockets 包是否已安装在 venv 中
-    /// uvicorn[standard] 自带 websockets，流式 STT 的 WebSocket /ws/stream 端点依赖此库
-    pub websockets_installed: bool,
-    /// websockets 版本号
-    pub websockets_version: Option<String>,
-
     // ── 综合 ──
-    /// 环境是否完全就绪（uv + venv + torch + funasr + websockets 五者齐备）
+    /// 环境是否完全就绪（uv + venv + torch + funasr 四者齐备）
     pub env_ready: bool,
 }
 
@@ -664,34 +657,6 @@ pub fn check_funasr() -> (bool, Option<String>) {
     }
 }
 
-/// 检查 websockets 包是否已安装在 venv 中。
-///
-/// `uvicorn[standard]` 自带 `websockets` 库，是 FastAPI WebSocket 端点
-/// （流式 STT 的 `/ws/stream`）的必需依赖。如果只安装了裸 `uvicorn`
-/// 而非 `uvicorn[standard]`，WebSocket 端点会返回 404。
-///
-/// 返回 (是否已安装, 版本号)。
-pub fn check_websockets() -> (bool, Option<String>) {
-    let python = match venv_python() {
-        Some(p) => p,
-        None => return (false, None),
-    };
-
-    match Command::new(python)
-        .args([
-            "-c",
-            "import importlib.metadata as m; print(m.version('websockets'))",
-        ])
-        .output()
-    {
-        Ok(output) if output.status.success() => {
-            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            (true, Some(version))
-        }
-        _ => (false, None),
-    }
-}
-
 /// 获取完整环境状态快照。
 pub fn check_status() -> PythonEnvStatus {
     let uv_path = find_uv();
@@ -726,14 +691,8 @@ pub fn check_status() -> PythonEnvStatus {
         (false, None)
     };
 
-    let (websockets_installed, websockets_version) = if venv_exists {
-        check_websockets()
-    } else {
-        (false, None)
-    };
-
     let env_ready =
-        uv_available && venv_exists && torch_installed && funasr_installed && websockets_installed;
+        uv_available && venv_exists && torch_installed && funasr_installed;
 
     PythonEnvStatus {
         uv_available,
@@ -746,8 +705,6 @@ pub fn check_status() -> PythonEnvStatus {
         torch_cuda_available,
         funasr_installed,
         funasr_version,
-        websockets_installed,
-        websockets_version,
         env_ready,
     }
 }
@@ -772,8 +729,6 @@ pub async fn check_status_async() -> PythonEnvStatus {
                 torch_cuda_available: false,
                 funasr_installed: false,
                 funasr_version: None,
-                websockets_installed: false,
-                websockets_version: None,
                 env_ready: false,
             }
         })
@@ -1051,30 +1006,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    #[test]
-    fn check_websockets_does_not_panic() {
-        // 只验证不 panic，实际状态取决于运行环境
-        let _ = check_websockets();
-    }
-
-    #[test]
-    fn check_status_includes_websockets_field() {
-        let status = check_status();
-        // websockets_installed 字段应存在且为 bool（不 panic 即可）
-        let _ = status.websockets_installed;
-        let _ = &status.websockets_version;
-    }
-
-    /// 验证 env_ready 包含 websockets 检查：
-    /// 如果 funasr 已安装但 websockets 未安装，env_ready 应为 false。
-    #[test]
-    fn env_ready_requires_websockets() {
-        let status = check_status();
-        if status.funasr_installed && !status.websockets_installed {
-            assert!(
-                !status.env_ready,
-                "env_ready 应为 false 当 websockets 未安装（即使 funasr 已安装）"
-            );
-        }
-    }
 }

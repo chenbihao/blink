@@ -24,22 +24,13 @@
 //! ## 引擎选型
 //!
 //! - **云端**: CloudSttEngine (OpenAI 兼容 API,走 reqwest)
-//! - **本地**: LocalSttEngine (FunASR Python 工具箱, funasr-server OpenAI 兼容 API)
+//! - **本地伪流式**: PseudoStreamingSttEngine (VAD 切句 + 定时 HTTP 预览)
+//! - **本地非流式**: LocalSttEngine (HTTP 一次性识别)
 //!
-//! 旧方案使用 sherpa-onnx（C++ ONNX 子进程），因下载不稳定、模型格式
-//! 不匹配等问题已废弃。新方案直接使用 FunASR Python 工具箱：
-//! - Blink 通过 uv 自动管理 Python 3.12 + funasr 安装（用户零手动操作）
-//! - `funasr-server --model iic/SenseVoiceSmall` 启动
-//! - 通过 OpenAI 兼容 API (localhost:8000) 做转录
-//! - FunASR 自动管理模型下载（ModelScope CDN）、VAD、标点
-//!
-//! 0.10.3 真流式：自定义 `blink_stt_server.py`，同时支持 HTTP 非流式 + WebSocket 流式。
-//!
-//! 0.10.4 伪流式：VAD 切句 + 累积预览，在非自回归 SenseVoice 上实现"边说边出字"体感。
-//! 详见 `pseudo_streaming.rs` 和 `vad.rs`。
+//! 0.10.4 起，真流式（WebSocket + Paraformer-streaming）已移除——
+//! 伪流式在准确率、标点、体积、CPU 友好度上全面优于真流式，且 Python 侧零改动。
 
 use std::fmt;
-use std::time::Duration;
 
 // ── 错误类型 ─────────────────────────────────────────────────────────────
 
@@ -74,12 +65,12 @@ impl std::error::Error for SttError {}
 /// 生命周期: `reset` → 多次 `transcribe_chunk` → `finalize` → (下次) `reset`。
 ///
 /// `transcribe_chunk` 和 `finalize` 为 async——非流式引擎在 chunk 中累积音频,
-/// finalize 时一次性 HTTP 请求返回;流式引擎(0.10.3+)在 chunk 中实时返回 partial。
+/// finalize 时一次性 HTTP 请求返回;伪流式引擎在 chunk 中实时返回 partial。
 #[async_trait::async_trait]
 pub trait SttEngine: Send + Sync {
     /// 接收一段音频 chunk,返回当前累积识别的 partial text。
     ///
-    /// 流式模式下每次调用返回逐步完善的文本;
+    /// 伪流式模式下每次调用返回逐步完善的文本;
     /// 非流式模式下可以累积音频,在 `finalize` 时一次性返回。
     async fn transcribe_chunk(&self, samples: &[f32]) -> Result<String, SttError>;
 
@@ -99,7 +90,6 @@ pub trait SttEngine: Send + Sync {
 /// FunASR 模型描述符。
 ///
 /// 描述 FunASR 工具箱支持的模型，用于前端展示和配置引导。
-/// 与旧方案不同：不再涉及 ONNX 文件下载，模型由 FunASR 自动管理。
 #[derive(Debug, Clone)]
 pub struct ModelDescriptor {
     /// 模型 id(唯一标识,如 "sensevoice-small")
@@ -109,15 +99,10 @@ pub struct ModelDescriptor {
     /// 引擎名("funasr")
     pub engine: &'static str,
     /// FunASR 模型标识(传给 funasr-server --model 参数)
-    /// 如 "iic/SenseVoiceSmall" / "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online"
     pub funasr_model_id: &'static str,
-    /// 是否支持流式（指模型本身的能力，非当前 funasr-server HTTP 模式是否流式）
-    pub streaming: bool,
     /// 参数量（如 "234M" / "220M"），来自 FunASR 官方文档
-    /// 注意：这是模型参数数量，不是文件下载大小
     pub params: &'static str,
     /// 模型下载体积(MB,FP32 PyTorch 格式近似值)
-    /// 实际下载由 FunASR 自动完成，含 ASR + VAD + 标点模型
     pub size_mb: u32,
     /// 支持的语言
     pub languages: &'static [&'static str],
@@ -135,13 +120,12 @@ pub fn model_registry() -> &'static [ModelDescriptor] {
     &MODELS
 }
 
-static MODELS: [ModelDescriptor; 3] = [
+static MODELS: [ModelDescriptor; 2] = [
     ModelDescriptor {
         id: "sensevoice-small",
         display_name: "FunASR SenseVoice-Small",
         engine: "funasr",
         funasr_model_id: "iic/SenseVoiceSmall",
-        streaming: false,
         params: "234M",
         size_mb: 234,
         languages: &["zh", "en", "ja", "ko", "yue"],
@@ -152,27 +136,12 @@ static MODELS: [ModelDescriptor; 3] = [
         id: "paraformer-zh",
         display_name: "FunASR Paraformer-zh (SeacoParaformer)",
         engine: "funasr",
-        // 使用短名，FunASR 内部 name_maps_ms 会解析为完整 ID:
-        // iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch
         funasr_model_id: "paraformer-zh",
-        streaming: false,
         params: "220M",
         size_mb: 880 + 1130,
         languages: &["zh", "en"],
         device: "cpu",
-        description: "纯中文非流式 ASR（SeacoParaformer），原生支持热词 boosting 与 ITN。自动配置 VAD(fsmn-vad) + 标点(ct-punc) 子模型。整句准确率高于 SenseVoice，不会幻觉英文语气词。配合伪流式使用体验最佳",
-    },
-    ModelDescriptor {
-        id: "paraformer-zh-streaming",
-        display_name: "FunASR Paraformer-zh-streaming",
-        engine: "funasr",
-        funasr_model_id: "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online",
-        streaming: true,
-        params: "220M",
-        size_mb: 880,
-        languages: &["zh", "en"],
-        device: "cuda",
-        description: "中英双语流式 ASR，chunk_size=[0,10,5]（600ms 块），延迟 ~860ms。GPU 推荐。同样支持非流式调用（is_final=True）",
+        description: "纯中文非流式 ASR（SeacoParaformer），原生支持热词 boosting 与 ITN。自动配置 VAD(fsmn-vad) + 标点(ct-punc) 子模型。整句准确率高于 SenseVoice，不会幻觉英文语气词",
     },
 ];
 
@@ -181,60 +150,14 @@ pub fn find_model(id: &str) -> Option<&'static ModelDescriptor> {
     model_registry().iter().find(|m| m.id == id)
 }
 
-// ── 模型下载状态（保留用于前端兼容，实际由 FunASR 管理）──────────────
-
-/// 模型下载状态(运行时,不持久化)。
-///
-/// 注：新方案中模型由 FunASR 自动管理，此枚举仅用于前端 API 兼容。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-pub enum DownloadStatus {
-    /// 未下载
-    NotDownloaded,
-    /// 下载中
-    Downloading,
-    /// 已下载(可用)
-    Downloaded,
-    /// 下载失败
-    Failed,
-}
-
-/// 模型下载进度(通过 Tauri event 通知前端)。
-///
-/// 注：新方案中模型由 FunASR 自动管理，此结构仅用于前端 API 兼容。
-#[derive(Debug, Clone, serde::Serialize)]
-#[allow(dead_code)]
-pub struct DownloadProgress {
-    /// 模型 id
-    pub model_id: String,
-    /// 已下载字节数
-    pub downloaded_bytes: u64,
-    /// 总字节数(0 = 未知)
-    pub total_bytes: u64,
-    /// 下载速度(bytes/sec)
-    pub speed: f64,
-}
-
-impl DownloadProgress {
-    /// 进度百分比(0.0 ~ 1.0)。total=0 时返回 0。
-    #[allow(dead_code)]
-    pub fn percent(&self) -> f64 {
-        if self.total_bytes == 0 {
-            0.0
-        } else {
-            self.downloaded_bytes as f64 / self.total_bytes as f64
-        }
-    }
-}
-
 // ── STT Engines ──────────────────────────────────────────────────────────
 
 mod cloud;
 pub mod funasr;
 pub mod local;
+#[cfg(test)]
 mod mock;
 pub mod pseudo_streaming;
-pub mod streaming;
 pub mod vad;
 pub(crate) mod wav;
 
@@ -242,107 +165,54 @@ pub(crate) mod wav;
 ///
 /// 根据 SttConfig 选择引擎：
 /// - Cloud 模式 + 已配置 cloud_provider → CloudSttEngine
-/// - Local 模式 + StreamingMode::True + streaming_model 已配置 → StreamingSttEngine (WebSocket)
 /// - Local 模式 + StreamingMode::Pseudo → PseudoStreamingSttEngine (VAD + 预览) ⭐ 默认
 /// - Local 模式 + StreamingMode::Off → LocalSttEngine (HTTP 非流式)
-/// - 未配置/未启用/服务未就绪 → MockSttEngine
 ///
-/// **兼容性**：旧配置 `streaming: bool` 自动迁移——
-/// `true` → `StreamingMode::True`，`false` → `StreamingMode::Off`。
-/// 新配置默认 `StreamingMode::Pseudo`。
-pub fn create_engine() -> Box<dyn SttEngine> {
+/// **不会回退到 Mock 引擎**——未启用 / 未配置 / 服务未就绪时返回 Err，
+/// 由调用方（VoiceService）决定如何向用户反馈错误。
+pub fn create_engine() -> Result<Box<dyn SttEngine>, String> {
     let config = crate::app::stt_config::get_stt_config();
 
     if !config.enabled {
-        return Box::new(mock::MockSttEngine::new());
+        return Err("STT 未启用，请在设置页开启语音输入".to_string());
     }
 
     match config.mode {
         crate::app::stt_config::SttMode::Cloud => {
             if config.cloud_provider.is_some() {
                 tracing::info!("STT 引擎: cloud");
-                Box::new(cloud::CloudSttEngine::new())
+                Ok(Box::new(cloud::CloudSttEngine::new()))
             } else {
-                tracing::warn!("STT cloud 模式但未配置 provider,回退 mock");
-                Box::new(mock::MockSttEngine::new())
+                Err("云端 STT 未配置供应商，请在设置页中配置".to_string())
             }
         }
         crate::app::stt_config::SttMode::Local => {
-            let streaming_mode = config.streaming_mode();
-
-            match streaming_mode {
-                crate::app::stt_config::StreamingMode::True => {
-                    // 真流式：streaming_model 已配置 → StreamingSttEngine (WebSocket)
-                    if config.local_engine.streaming_model.is_some() {
-                        match streaming::StreamingSttEngine::new(config.local_engine.server_port) {
-                            Ok(engine) => {
-                                tracing::info!("STT 引擎: streaming (WebSocket)");
-                                Box::new(engine)
-                            }
-                            Err(e) => {
-                                tracing::warn!(%e, "STT streaming 引擎创建失败,回退伪流式");
-                                match pseudo_streaming::PseudoStreamingSttEngine::new(&config) {
-                                    Ok(engine) => Box::new(engine),
-                                    Err(e) => {
-                                        tracing::warn!(%e, "STT 伪流式引擎创建失败,回退非流式");
-                                        match local::LocalSttEngine::new(&config) {
-                                            Ok(engine) => Box::new(engine),
-                                            Err(e) => {
-                                                tracing::warn!(%e, "STT local 引擎创建失败,回退 mock");
-                                                Box::new(mock::MockSttEngine::new())
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        tracing::info!("STT 真流式模式但未配置 streaming_model,使用伪流式");
-                        match pseudo_streaming::PseudoStreamingSttEngine::new(&config) {
-                            Ok(engine) => Box::new(engine),
-                            Err(e) => {
-                                tracing::warn!(%e, "STT 伪流式引擎创建失败,回退非流式");
-                                match local::LocalSttEngine::new(&config) {
-                                    Ok(engine) => Box::new(engine),
-                                    Err(e) => {
-                                        tracing::warn!(%e, "STT local 引擎创建失败,回退 mock");
-                                        Box::new(mock::MockSttEngine::new())
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+            match config.streaming_mode {
                 crate::app::stt_config::StreamingMode::Pseudo => {
-                    // 伪流式：VAD 切句 + 累积预览（SenseVoice）
                     match pseudo_streaming::PseudoStreamingSttEngine::new(&config) {
                         Ok(engine) => {
                             tracing::info!("STT 引擎: pseudo-streaming (VAD + HTTP 轮询)");
-                            Box::new(engine)
+                            Ok(Box::new(engine))
                         }
                         Err(e) => {
                             tracing::warn!(%e, "STT 伪流式引擎创建失败,回退非流式");
                             match local::LocalSttEngine::new(&config) {
-                                Ok(engine) => Box::new(engine),
-                                Err(e) => {
-                                    tracing::warn!(%e, "STT local 引擎创建失败,回退 mock");
-                                    Box::new(mock::MockSttEngine::new())
+                                Ok(engine) => {
+                                    tracing::info!("STT 引擎: local (FunASR, 非流式回退)");
+                                    Ok(Box::new(engine))
                                 }
+                                Err(e) => Err(format!("STT 引擎创建失败: {e}")),
                             }
                         }
                     }
                 }
                 crate::app::stt_config::StreamingMode::Off => {
-                    // 非流式：hold → release → 一次性 HTTP
                     match local::LocalSttEngine::new(&config) {
                         Ok(engine) => {
                             tracing::info!("STT 引擎: local (FunASR)");
-                            Box::new(engine)
+                            Ok(Box::new(engine))
                         }
-                        Err(e) => {
-                            tracing::warn!(%e, "STT local 引擎创建失败,回退 mock");
-                            Box::new(mock::MockSttEngine::new())
-                        }
+                        Err(e) => Err(format!("STT 引擎创建失败: {e}")),
                     }
                 }
             }
@@ -351,7 +221,10 @@ pub fn create_engine() -> Box<dyn SttEngine> {
 }
 
 /// Mock STT 引擎的假文本库(按时间轮换,模拟"边说边出字")。
-pub fn mock_text_for_elapsed(elapsed: Duration) -> &'static str {
+///
+/// 仅供 `#[cfg(test)]` 的 MockSttEngine 使用，不参与生产路径。
+#[cfg(test)]
+pub fn mock_text_for_elapsed(elapsed: std::time::Duration) -> &'static str {
     match elapsed.as_secs() {
         0..=1 => "",
         2 => "你好",

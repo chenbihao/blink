@@ -1,24 +1,21 @@
 #!/usr/bin/env python3
 """
-blink_stt_server.py — Blink 自定义统一 STT 服务（0.10.3）
+blink_stt_server.py — Blink 自定义 STT 服务
 
-替代官方 funasr-server，同时支持：
-- HTTP POST /v1/audio/transcriptions  ← 非流式（SenseVoice），支持热词/ITN
-- WS   /ws/stream                     ← 真流式（Paraformer-zh-streaming）
+支持：
+- HTTP POST /v1/audio/transcriptions  ← 非流式（SenseVoice / SeacoParaformer），支持热词/ITN
 - GET  /health                        ← 健康检查
 - GET  /v1/models                     ← 模型列表
 
 HTTP 端点路径和响应格式与官方 funasr-server 完全兼容，
-现有 Rust 侧的 LocalSttEngine 和 is_server_ready_http() 无需修改。
+现有 Rust 侧的 LocalSttEngine / PseudoStreamingSttEngine 和 is_server_ready_http() 无需修改。
 
-模型 lazy load：只有实际收到请求时才加载对应模型，
-非流式模式不会加载 streaming 模型（~880MB），反之亦然。
+模型 lazy load：只有实际收到请求时才加载对应模型。
 
 用法:
     python blink_stt_server.py --model SenseVoiceSmall --port 8000 --device cpu
     python blink_stt_server.py --model SenseVoiceSmall --port 8000 --device cpu \
-        --use-itn --hotwords /path/to/hotwords.txt \
-        --streaming-model paraformer-zh-streaming
+        --use-itn --hotwords /path/to/hotwords.txt
 """
 
 import argparse
@@ -30,22 +27,25 @@ import tempfile
 import traceback
 import wave
 import logging
-from typing import Dict, Optional
+from typing import Optional
 
 import numpy as np
 import uvicorn
-from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 
 # ── 全局状态 ──────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Blink STT Server", version="0.10.3")
+app = FastAPI(title="Blink STT Server", version="0.10.4")
 
 # 全局模型实例（lazy load）
-_nonstream_model = None      # 非流式模型（SenseVoice）
-_stream_model = None         # 流式模型（Paraformer-zh-streaming）
-_model_lock_nonstream = None  # threading.Lock
-_model_lock_stream = None
+_model = None          # 非流式模型（SenseVoice / SeacoParaformer）
+_model_lock = None     # threading.Lock
+
+# 模型加载状态："idle" → "loading" → "ready" / "error"
+# 供 /health 端点暴露给 Rust 侧，使启动流程能区分
+# "FastAPI 已就绪但模型还在下载" 与 "模型已就绪可推理"。
+_model_status = "idle"
 
 # 启动参数
 _args: Optional[argparse.Namespace] = None
@@ -69,7 +69,6 @@ _MODEL_ALIASES = {
     "SenseVoiceSmall": "iic/SenseVoiceSmall",
     "sensevoice": "iic/SenseVoiceSmall",
     "SenseVoice": "iic/SenseVoiceSmall",
-    "paraformer-zh-streaming": "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online",
     # paraformer-zh 短名交给 FunASR 内部的 name_maps_ms 解析，
     # 它会映射到 SeacoParaformer（iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch），
     # 这是原生支持热词的 Paraformer 变体。
@@ -108,8 +107,8 @@ def _is_sensevoice(model_name: str) -> bool:
 
 # ── 模型加载 ──────────────────────────────────────────────────────────
 
-def _load_nonstream_model():
-    """加载非流式模型，lazy load。
+def _load_model():
+    """加载模型，lazy load。
 
     模型类型自动适配子模型配置：
     - SenseVoice: 内置 VAD + 标点 + ITN，无需子模型
@@ -117,103 +116,57 @@ def _load_nonstream_model():
       - vad_model="fsmn-vad": 语音端点检测（~3MB）
       - punc_model="ct-punc": 标点恢复 + ITN（~1.1GB）
 
-    当 funasr_model == streaming_model 时，共用流式模型实例，不重复加载。
+    加载状态通过全局 ``_model_status`` 跟踪（idle → loading → ready/error），
+    供 /health 端点暴露给 Rust 侧判断服务是否真正可用。
     """
-    global _nonstream_model, _model_lock_nonstream
-    if _nonstream_model is not None:
-        return _nonstream_model
-
-    # 如果非流式模型名与流式模型名相同，直接共用流式模型实例
-    args = get_args()
-    if (args.streaming_model
-            and _stream_model is not None
-            and args.model == args.streaming_model):
-        _nonstream_model = _stream_model
-        logger.info(f"非流式模型 {args.model} 与流式模型相同，共用实例")
-        return _nonstream_model
+    global _model, _model_lock, _model_status
+    if _model is not None:
+        return _model
 
     import threading
-    if _model_lock_nonstream is None:
-        _model_lock_nonstream = threading.Lock()
+    if _model_lock is None:
+        _model_lock = threading.Lock()
 
-    with _model_lock_nonstream:
-        if _nonstream_model is not None:
-            return _nonstream_model
-
-        # 二次检查：流式模型可能在此期间已加载
-        if (args.streaming_model
-                and _stream_model is not None
-                and args.model == args.streaming_model):
-            _nonstream_model = _stream_model
-            logger.info(f"非流式模型 {args.model} 与流式模型相同，共用实例")
-            return _nonstream_model
-
-        logger.info(f"加载非流式模型: {args.model}, device={args.device}")
-
-        from funasr import AutoModel
-
-        resolved_model = _resolve_model_id(args.model)
-        kwargs = {
-            "model": resolved_model,
-            "device": args.device,
-            "disable_update": True,  # 跳过更新检查，减少日志噪声
-        }
-
-        # Paraformer / SeacoParaformer 需要额外的 VAD 和标点子模型。
-        # SenseVoice 内置了这些功能，不需要（也不应该）添加子模型。
-        if not _is_sensevoice(args.model):
-            kwargs["vad_model"] = "fsmn-vad"
-            kwargs["punc_model"] = "ct-punc"
-            logger.info(f"检测到非 SenseVoice 模型，自动配置 vad_model=fsmn-vad, punc_model=ct-punc")
-        else:
-            logger.info(f"检测到 SenseVoice 模型，使用内置 VAD/标点/ITN")
-
-        _nonstream_model = AutoModel(**kwargs)
-        logger.info(f"非流式模型 {args.model} 加载完成")
-        return _nonstream_model
-
-
-def _load_stream_model():
-    """加载流式模型（Paraformer-zh-streaming），lazy load。"""
-    global _stream_model, _model_lock_stream, _nonstream_model
-    if _stream_model is not None:
-        return _stream_model
-
-    import threading
-    if _model_lock_stream is None:
-        _model_lock_stream = threading.Lock()
-
-    with _model_lock_stream:
-        if _stream_model is not None:
-            return _stream_model
+    with _model_lock:
+        if _model is not None:
+            return _model
 
         args = get_args()
-        streaming_model = args.streaming_model or "paraformer-zh-streaming"
-        logger.info(f"加载流式模型: {streaming_model}, device={args.device}")
+        _model_status = "loading"
+        logger.info(f"加载模型: {args.model}, device={args.device}")
 
-        from funasr import AutoModel
+        try:
+            from funasr import AutoModel
 
-        resolved_model = _resolve_model_id(streaming_model)
-        _stream_model = AutoModel(
-            model=resolved_model,
-            device=args.device,
-            chunk_size=[0, 10, 5],       # 600ms 块
-            # streaming 模型不需要单独 VAD（chunk 内自带）
-            disable_update=True,
-        )
-        logger.info(f"流式模型 {streaming_model} 加载完成")
+            resolved_model = _resolve_model_id(args.model)
+            kwargs = {
+                "model": resolved_model,
+                "device": args.device,
+                "disable_update": True,  # 跳过更新检查，减少日志噪声
+            }
 
-        # 如果非流式模型名相同，自动共用
-        if args.model == streaming_model and _nonstream_model is None:
-            _nonstream_model = _stream_model
-            logger.info(f"非流式模型 {args.model} 与流式模型相同，共用实例")
+            # Paraformer / SeacoParaformer 需要额外的 VAD 和标点子模型。
+            # SenseVoice 内置了这些功能，不需要（也不应该）添加子模型。
+            if not _is_sensevoice(args.model):
+                kwargs["vad_model"] = "fsmn-vad"
+                kwargs["punc_model"] = "ct-punc"
+                logger.info(f"检测到非 SenseVoice 模型，自动配置 vad_model=fsmn-vad, punc_model=ct-punc")
+            else:
+                logger.info(f"检测到 SenseVoice 模型，使用内置 VAD/标点/ITN")
 
-        return _stream_model
+            _model = AutoModel(**kwargs)
+            _model_status = "ready"
+            logger.info(f"模型 {args.model} 加载完成")
+            return _model
+        except Exception as e:
+            _model_status = "error"
+            logger.error(f"模型加载失败: {e}")
+            raise
 
 
 # ── 音频工具 ──────────────────────────────────────────────────────────────
 
-def _wav_bytes_to_numpy(wav_bytes: bytes) -> np.ndarray:
+def _wav_bytes_to_numpy(wav_bytes: bytes):
     """解析 WAV 字节为 numpy f32 数组（16kHz, mono）。"""
     with io.BytesIO(wav_bytes) as bio:
         with wave.open(bio, "rb") as wf:
@@ -234,11 +187,6 @@ def _wav_bytes_to_numpy(wav_bytes: bytes) -> np.ndarray:
         audio = audio[::n_channels]
 
     return audio, framerate
-
-
-def _f32_bytes_to_numpy(data: bytes) -> np.ndarray:
-    """将 f32 little-endian PCM 字节转为 numpy 数组。"""
-    return np.frombuffer(data, dtype=np.float32)
 
 
 # ── 文本后处理 ───────────────────────────────────────────────────────────
@@ -325,11 +273,21 @@ def _postprocess_text(raw_text: str) -> str:
 
 @app.get("/health")
 async def health():
-    """健康检查。返回模型加载状态。"""
+    """健康检查。返回模型加载状态。
+
+    响应字段：
+    - ``status``: 始终为 "ok"（HTTP 层面服务正常）
+    - ``model_loaded``: 模型是否已加载完毕（兼容旧字段）
+    - ``model_status``: 模型加载状态枚举
+      - ``"idle"``: 尚未开始加载
+      - ``"loading"``: 正在下载/加载中（首次需从 ModelScope 下载 ~234MB）
+      - ``"ready"``: 模型已就绪，可接受转录请求
+      - ``"error"``: 加载失败
+    """
     return JSONResponse({
         "status": "ok",
-        "nonstream_model_loaded": _nonstream_model is not None,
-        "stream_model_loaded": _stream_model is not None,
+        "model_loaded": _model is not None,
+        "model_status": _model_status,
     })
 
 
@@ -337,19 +295,16 @@ async def health():
 async def list_models():
     """模型列表（兼容 OpenAI API 格式）。"""
     args = get_args()
-    models = []
-    models.append({
-        "id": args.model,
-        "object": "model",
-        "owned_by": "blink",
-    })
-    if args.streaming_model:
-        models.append({
-            "id": args.streaming_model,
-            "object": "model",
-            "owned_by": "blink",
-        })
-    return {"object": "list", "data": models}
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": args.model,
+                "object": "model",
+                "owned_by": "blink",
+            }
+        ],
+    }
 
 
 @app.post("/v1/audio/transcriptions")
@@ -393,7 +348,7 @@ async def transcribe(
                 wf.writeframes((audio_np * 32767).astype(np.int16).tobytes())
 
         # 加载模型（lazy）
-        stt_model = _load_nonstream_model()
+        stt_model = _load_model()
 
         # 构建 generate 参数
         gen_kwargs = {"input": tmp_path}
@@ -419,7 +374,7 @@ async def transcribe(
                     hw_path = hw_tmp.name
                 gen_kwargs["hotword"] = hw_path
 
-        # ITN（逆文本归一化：“二零二四年” → “2024年”）
+        # ITN（逆文本归一化："二零二四年" → "2024年"）
         # SenseVoice 通过 <|withitn|> 标签内置 ITN；
         # Paraformer 的 ITN 由 punc_model (ct-punc) 提供。
         itn_val = True  # 默认开
@@ -461,139 +416,6 @@ async def transcribe(
             os.unlink(tmp_path)
 
 
-# ── WebSocket 流式端点 ─────────────────────────────────────────────────────
-
-# Paraformer streaming 模型的 chunk_size=[0, 10, 5] 中，每个 unit = 60ms = 960 samples (16kHz)。
-# 每次 generate 调用应收到 current_chunk = 10 * 960 = 9600 samples（600ms）。
-# 客户端（cpal/WASAPI）回调每次只给 ~10ms 的小片段，必须在服务端缓冲对齐后再推理，
-# 否则模型 forward 近似空转（rtf≈0），无法产出文本。
-_STREAM_CHUNK_SAMPLES = 9600  # 10 * 960 = 600ms at 16kHz
-
-
-@app.websocket("/ws/stream")
-async def ws_stream(ws: WebSocket):
-    """真流式转录（WebSocket）。
-
-    协议：
-    - Client → Server: binary frame = raw f32 PCM (16kHz, mono, little-endian)
-    - Server → Client: text frame = JSON {"text": "partial", "is_final": false}
-    - Client 发送空帧时，Server 处理剩余缓冲并发送最终结果 {"text": "...", "is_final": true}
-
-    音频缓冲：客户端每次发送 ~10ms 小片段，服务端缓冲至 600ms（9600 samples）
-    后再调用 FunASR generate，确保模型能正常推理。
-    """
-    await ws.accept()
-
-    # 加载流式模型
-    try:
-        stream_model = _load_stream_model()
-    except Exception as e:
-        logger.error(f"流式模型加载失败: {e}")
-        await ws.send_text(json.dumps({"error": f"model load failed: {e}"}))
-        await ws.close()
-        return
-
-    cache: Dict = {}  # FunASR streaming 状态
-    accumulated_text = ""
-    audio_buffer = np.array([], dtype=np.float32)  # 音频缓冲
-
-    def _process_chunk(audio: np.ndarray, is_final: bool) -> str:
-        """调用模型推理并返回识别文本。"""
-        result = stream_model.generate(
-            input=audio,
-            cache=cache,
-            is_final=is_final,
-            chunk_size=[0, 10, 5],
-        )
-        if isinstance(result, list) and len(result) > 0:
-            return result[0].get("text", "")
-        elif isinstance(result, dict):
-            return result.get("text", "")
-        return ""
-
-    def _merge_text(old: str, new: str) -> str:
-        """将新识别文本合并到累积文本中。
-
-        FunASR Paraformer streaming 模型可能返回增量文本（只含本 chunk 新识别的字）
-        或累积文本（含之前所有 chunk 的文本）。通过检测 new 是否以 old 为前缀
-        来自动适应两种行为，避免重复或丢失。
-        """
-        if not new:
-            return old
-        if not old:
-            return new
-        # 如果 new 以 old 开头，说明模型返回的是累积文本，直接替换
-        if new.startswith(old):
-            return new
-        # 否则是增量文本，追加
-        return old + new
-
-    try:
-        while True:
-            data = await ws.receive_bytes()
-
-            # f32 PCM → numpy
-            try:
-                audio_chunk = _f32_bytes_to_numpy(data)
-            except Exception as e:
-                logger.warning(f"音频块解析失败: {e}")
-                continue
-
-            if len(audio_chunk) == 0:
-                # 空帧 = 客户端 finalize 信号
-                logger.info(f"收到空帧（finalize 信号），缓冲剩余 {len(audio_buffer)} samples")
-                break
-
-            # 追加到缓冲
-            audio_buffer = np.concatenate([audio_buffer, audio_chunk])
-
-            # 缓冲达到一个 chunk 大小时，调用模型推理
-            while len(audio_buffer) >= _STREAM_CHUNK_SAMPLES:
-                chunk_to_process = audio_buffer[:_STREAM_CHUNK_SAMPLES]
-                audio_buffer = audio_buffer[_STREAM_CHUNK_SAMPLES:]
-
-                try:
-                    text = _process_chunk(chunk_to_process, is_final=False)
-                    if text:
-                        accumulated_text = _merge_text(accumulated_text, text)
-                        await ws.send_text(json.dumps({
-                            "text": accumulated_text,
-                            "is_final": False,
-                        }))
-                except Exception as e:
-                    logger.warning(f"流式推理失败: {e}")
-                    continue
-
-    except WebSocketDisconnect:
-        logger.info("WebSocket 客户端断开，发送最终结果")
-    except Exception as e:
-        logger.error(f"WebSocket 异常: {e}")
-    finally:
-        # 处理缓冲中的剩余音频（不足一个 chunk），用 is_final=True 触发最终推理
-        try:
-            if len(audio_buffer) > 0:
-                logger.info(f"最终推理：剩余 {len(audio_buffer)} samples ({len(audio_buffer)/16000:.3f}s)")
-                final_text = _process_chunk(audio_buffer, is_final=True)
-            else:
-                # 无剩余音频，用空帧触发 flush
-                final_text = _process_chunk(np.zeros(1, dtype=np.float32), is_final=True)
-
-            if final_text:
-                accumulated_text = _merge_text(accumulated_text, final_text)
-
-            await ws.send_text(json.dumps({
-                "text": accumulated_text,
-                "is_final": True,
-            }))
-        except Exception as e:
-            logger.warning(f"发送最终结果失败: {e}")
-
-        try:
-            await ws.close()
-        except Exception:
-            pass
-
-
 # ── 启动 ──────────────────────────────────────────────────────────────────
 
 from contextlib import asynccontextmanager
@@ -602,47 +424,27 @@ from contextlib import asynccontextmanager
 async def lifespan(app_instance):
     """FastAPI lifespan handler（替代废弃的 on_event('startup')）。"""
     args = get_args()
-    model_name = args.model
-    streaming_name = args.streaming_model
-    same_model = bool(streaming_name) and (model_name == streaming_name)
 
     logger.info("=" * 60)
-    logger.info("Blink STT Server v0.10.3")
-    if same_model:
-        logger.info(f"  模型:       {model_name}（流式+非流式共用）")
-    else:
-        logger.info(f"  非流式模型: {model_name}")
-        logger.info(f"  流式模型:   {streaming_name or '(禁用)'}")
-    logger.info(f"  设备:       {args.device}")
-    logger.info(f"  端口:       {args.port}")
-    logger.info(f"  热词:       {args.hotwords or '(无)'}")
-    logger.info(f"  ITN:        {args.use_itn}")
+    logger.info("Blink STT Server v0.10.4")
+    logger.info(f"  模型: {args.model}")
+    logger.info(f"  设备: {args.device}")
+    logger.info(f"  端口: {args.port}")
+    logger.info(f"  热词: {args.hotwords or '(无)'}")
+    logger.info(f"  ITN:  {args.use_itn}")
+    logger.info("=" * 60)
 
+    # 预加载模型（后台，避免阻塞 server 启动）
+    # 首次安装后模型需从 ModelScope 下载（~234MB），可能需要数分钟。
+    # _model_status 会在 _load_model 内部经历 idle → loading → ready/error，
+    # Rust 侧通过 /health 轮询此状态，在模型就绪前不会报告服务 "ready"。
     import asyncio
-
-    # 预加载模型（避免首次请求时才下载，导致长时间等待）
-    # 流式模型：**同步预加载**（必须在 server 接受 WebSocket 连接前完成下载和加载，
-    #   否则首次 WebSocket 连接会触发模型下载，导致用户等待数十秒且 UI 卡住）
-    if streaming_name:
-        logger.info("预加载流式模型（同步，首次需下载模型，请耐心等待）...")
+    def _preload_model():
         try:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, _load_stream_model)
-            logger.info("流式模型预加载完成")
+            _load_model()
         except Exception as e:
-            logger.error(f"流式模型预加载失败: {e}")
-            logger.error("流式 STT 端点 /ws/stream 将不可用，非流式端点仍可使用")
-
-    # 非流式模型：当与流式模型相同时，_load_stream_model 已自动共用实例，无需再加载
-    if not same_model:
-        def _preload_nonstream():
-            try:
-                _load_nonstream_model()
-            except Exception as e:
-                logger.warning(f"非流式模型后台预加载失败（将在首次请求时重试）: {e}")
-        asyncio.get_event_loop().run_in_executor(None, _preload_nonstream)
-
-    logger.info("=" * 60)
+            logger.warning(f"模型后台预加载失败（将在首次请求时重试）: {e}")
+    asyncio.get_event_loop().run_in_executor(None, _preload_model)
 
     yield  # server 运行中
 
@@ -654,15 +456,11 @@ app.router.lifespan_context = lifespan
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Blink STT Server (FunASR-based, 0.10.3)"
+        description="Blink STT Server (FunASR-based, 0.10.4)"
     )
     parser.add_argument(
         "--model", default="SenseVoiceSmall",
-        help="非流式模型标识（默认 SenseVoiceSmall）"
-    )
-    parser.add_argument(
-        "--streaming-model", default=None,
-        help="流式模型标识（如 paraformer-zh-streaming，None = 不启用流式）"
+        help="模型标识（默认 SenseVoiceSmall）"
     )
     parser.add_argument(
         "--port", type=int, default=8000,
@@ -683,39 +481,6 @@ def parse_args():
     return parser.parse_args()
 
 
-def _check_websocket_support():
-    """启动前检测 WebSocket 库是否可用。
-
-    uvicorn 的 WebSocket 端点依赖 `websockets` **或** `wsproto` 库（二选一即可）。
-    如果只安装了裸 `uvicorn`（非 `uvicorn[standard]`），WebSocket 端点
-    `/ws/stream` 会返回 404，流式 STT 将无法工作。
-
-    检测到两者均缺失时打印醒目警告，指导用户修复。
-    """
-    has_websockets = False
-    has_wsproto = False
-    try:
-        import websockets  # noqa: F401
-        has_websockets = True
-    except ImportError:
-        pass
-    try:
-        import wsproto  # noqa: F401
-        has_wsproto = True
-    except ImportError:
-        pass
-
-    if not has_websockets and not has_wsproto:
-        logger.warning("=" * 60)
-        logger.warning("⚠️  WebSocket 库缺失！流式 STT 端点 /ws/stream 将返回 404。")
-        logger.warning("    缺失的库: websockets, wsproto（至少需要其一）")
-        logger.warning("    修复方法: pip install 'uvicorn[standard]'")
-        logger.warning("    或在 Blink 设置页点击「安装环境」重新安装依赖。")
-        logger.warning("=" * 60)
-        return False
-    return True
-
-
 def main():
     global _args
     _args = parse_args()
@@ -727,10 +492,6 @@ def main():
         datefmt="%H:%M:%S",
         stream=sys.stdout,
     )
-
-    # 启动前检测 WebSocket 库（仅警告，不阻止启动——非流式模式仍可用）
-    if _args.streaming_model:
-        _check_websocket_support()
 
     # 启动 uvicorn
     uvicorn.run(

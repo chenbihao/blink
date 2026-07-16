@@ -118,12 +118,12 @@ export async function initVoiceTab() {
     invoke("set_stt_config", { config }).catch(console.error);
   }
 
-  // 流式识别开关
+  // 伪流式识别开关（VAD 切句 + 累积预览）
   const streamingCheckbox = document.getElementById("voice-streaming");
   if (streamingCheckbox) {
-    streamingCheckbox.checked = config.streaming;
+    streamingCheckbox.checked = config.streaming_mode === "pseudo";
     streamingCheckbox.addEventListener("change", () => {
-      config.streaming = streamingCheckbox.checked;
+      config.streaming_mode = streamingCheckbox.checked ? "pseudo" : "off";
       invoke("set_stt_config", { config }).catch(console.error);
     });
   }
@@ -173,11 +173,10 @@ export async function initVoiceTab() {
     select.innerHTML = models
       .map((m) => {
         const selected = m.is_selected ? "selected" : "";
-        const tag = m.streaming ? " (流式)" : "";
         const sizeStr = m.size_mb >= 1024
           ? (m.size_mb / 1024).toFixed(1) + " GB"
           : m.size_mb + " MB";
-        return `<option value="${m.id}" ${selected}>${m.display_name}${tag} · ${m.params} · 约 ${sizeStr}</option>`;
+        return `<option value="${m.id}" ${selected} title="${m.description || ""}">${m.display_name} · ${m.params} · 约 ${sizeStr}</option>`;
       })
       .join("");
 
@@ -189,30 +188,15 @@ export async function initVoiceTab() {
     select.addEventListener("change", async () => {
       const modelId = select.value;
       if (!modelId) return;
+
       try {
         await invoke("download_stt_model", { modelId });
         const m = models.find((m) => m.id === modelId);
         if (m) {
-          appendLog(`[Blink] 已选择模型: ${m.display_name}${m.streaming ? "（流式）" : "（非流式）"}`);
+          appendLog(`[Blink] 已选择模型: ${m.display_name}`);
           // 同步 config（download_stt_model 已持久化 funasr_model + local_model_id）
           cfg.local_engine.funasr_model = m.funasr_model_id;
           cfg.local_model_id = modelId;
-
-          // 自动配置 streaming_model：
-          // - 流式模型 → streaming_model = funasr_model（共用同一个模型实例）
-          // - 非流式模型 → streaming_model = null（仅非流式模式）
-          // download_stt_model 已在后端统一持久化 funasr_model + streaming_model + streaming
-          if (m.streaming) {
-            cfg.local_engine.streaming_model = m.funasr_model_id;
-            cfg.streaming = true;
-            // 同步 UI 开关
-            const streamingCheckbox = document.getElementById("voice-streaming");
-            if (streamingCheckbox) streamingCheckbox.checked = true;
-            appendLog(`[Blink] 已启用流式识别（模型 ${m.funasr_model_id} 同时用于流式和非流式）`);
-          } else {
-            cfg.local_engine.streaming_model = null;
-            appendLog(`[Blink] 非流式模型，流式识别不可用`);
-          }
 
           // 如果服务正在运行，提示重启
           const isRunning = startBtn?.classList.contains("running");
@@ -270,7 +254,31 @@ async function initAdvancedOptions(config) {
   }
 }
 
-// ── Python 环境 + FunASR 服务管理 + 统一日志 + 诊断 + 设备切换 ──────────
+// ── 模块级统一日志（供 initFunasrEnv 和 initSpaceManagement 共享）──
+
+const _MAX_LOG_LINES = 200;
+let _logLines = [];
+
+function appendLog(line) {
+  const ts = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+  _logLines.push(`[${ts}] ${line}`);
+  if (_logLines.length > _MAX_LOG_LINES) {
+    _logLines = _logLines.slice(-_MAX_LOG_LINES);
+  }
+  const logPre = document.getElementById("voice-server-log");
+  if (logPre) {
+    logPre.textContent = _logLines.join("\n");
+    logPre.scrollTop = logPre.scrollHeight;
+  }
+}
+
+function clearLog() {
+  _logLines = [];
+  const logPre = document.getElementById("voice-server-log");
+  if (logPre) logPre.textContent = "";
+}
+
+// ── Python 环境 + FunASR 服务管理 + 统一日志 + 诊断 + 设备切换 ──
 
 async function initFunasrEnv(config) {
   const setupBtn = document.getElementById("funasr-setup-btn");
@@ -286,26 +294,7 @@ async function initFunasrEnv(config) {
 
   if (!setupBtn && !startBtn && !statusText) return;
 
-  // ── 统一日志缓冲 ──
-  const MAX_LOG_LINES = 200;
-  let logLines = [];
-
-  function appendLog(line) {
-    const ts = new Date().toLocaleTimeString("zh-CN", { hour12: false });
-    logLines.push(`[${ts}] ${line}`);
-    if (logLines.length > MAX_LOG_LINES) {
-      logLines = logLines.slice(-MAX_LOG_LINES);
-    }
-    if (logPre) {
-      logPre.textContent = logLines.join("\n");
-      logPre.scrollTop = logPre.scrollHeight;
-    }
-  }
-
-  function clearLog() {
-    logLines = [];
-    if (logPre) logPre.textContent = "";
-  }
+  // 日志缓冲已提升为模块级（appendLog / clearLog），此处仅绑定按钮事件
 
   if (logClearBtn) {
     logClearBtn.addEventListener("click", clearLog);
@@ -313,7 +302,7 @@ async function initFunasrEnv(config) {
 
   if (logCopyBtn) {
     logCopyBtn.addEventListener("click", async () => {
-      const text = logLines.join("\n");
+      const text = _logLines.join("\n");
       if (!text) return;
       try {
         await navigator.clipboard.writeText(text);
@@ -457,8 +446,7 @@ async function initFunasrEnv(config) {
         appendLog(`[诊断] uv: ${env.uv_available ? "✅" : "❌"} ${env.uv_version || ""}`);
         appendLog(`[诊断] venv: ${env.venv_exists ? "✅" : "❌"} ${env.venv_python_version || ""}`);
         appendLog(`[诊断] torch: ${env.torch_installed ? "✅" : "❌"} ${env.torch_version || ""}`);
-        appendLog(`[诊断] funasr: ${env.funasr_installed ? "✅" : "❌"} ${env.funasr_version || ""}`);
-        appendLog(`[诊断] websockets: ${env.websockets_installed ? "✅" : "❌"} ${env.websockets_version || ""}`);
+appendLog(`[诊断] funasr: ${env.funasr_installed ? "✅" : "❌"} ${env.funasr_version || ""}`);
         appendLog(`[诊断] server_running: ${env.server_running ? "✅" : "❌"} port=${env.server_port}`);
         appendLog(`[诊断] server_ready: ${env.server_ready ? "✅" : "❌"}`);
         if (env.websocket_ready !== undefined) {
@@ -466,7 +454,7 @@ async function initFunasrEnv(config) {
         }
 
         const cfg = report.config || {};
-        appendLog(`[诊断] mode=${cfg.mode}, model=${cfg.local_model_id || "未选择"}, device=${cfg.device}, streaming=${cfg.streaming}`);
+        appendLog(`[诊断] mode=${cfg.mode}, model=${cfg.local_model_id || "未选择"}, device=${cfg.device}, streaming_mode=${cfg.streaming_mode}`);
 
         if (report.api_test) {
           const api = report.api_test;
@@ -535,29 +523,23 @@ async function initFunasrEnv(config) {
     if (!p) return;
 
     if (p.stage === "ready") {
-      const isStreaming = config.streaming && p.streaming_model;
-      const modelName = isStreaming ? p.streaming_model : p.model;
-      const modeLabel = isStreaming ? "流式" : "非流式";
-      if (serverStatusText) serverStatusText.textContent = `✅ FunASR 服务就绪（${modelName} · ${modeLabel}）`;
+      if (serverStatusText) serverStatusText.textContent = `✅ FunASR 服务就绪（${p.model}）`;
       if (startBtn) {
         startBtn.classList.add("running");
         startBtn.textContent = "已运行 ✓";
         startBtn.disabled = false;
       }
       if (stopBtn) stopBtn.disabled = false;
-      appendLog(`[Blink] ✅ funasr-server 就绪（${modelName} · ${modeLabel}）`);
+      appendLog(`[Blink] ✅ funasr-server 就绪（${p.model}）`);
     } else if (p.stage === "already_running") {
-      const isStreaming = config.streaming && p.streaming_model;
-      const modelName = isStreaming ? p.streaming_model : p.model;
-      const modeLabel = isStreaming ? "流式" : "非流式";
-      if (serverStatusText) serverStatusText.textContent = `✅ FunASR 服务就绪（${modelName} · ${modeLabel}）`;
+      if (serverStatusText) serverStatusText.textContent = `✅ FunASR 服务就绪（${p.model}）`;
       if (startBtn) {
         startBtn.classList.add("running");
         startBtn.textContent = "已运行 ✓";
         startBtn.disabled = false;
       }
       if (stopBtn) stopBtn.disabled = false;
-      appendLog(`[Blink] ✅ funasr-server 已在运行（${modelName} · ${modeLabel}）`);
+      appendLog(`[Blink] ✅ funasr-server 已在运行（${p.model}）`);
     } else if (p.stage === "error") {
       if (serverStatusText) serverStatusText.textContent = `❌ 服务错误: ${p.error || ""}`;
       if (startBtn) {
@@ -570,6 +552,13 @@ async function initFunasrEnv(config) {
     } else if (p.stage === "starting") {
       if (serverStatusText) serverStatusText.textContent = `启动中... (模型: ${p.model}, 端口: ${p.port})`;
       appendLog(`[Blink] funasr-server 启动中 (模型: ${p.model}, 端口: ${p.port}, 设备: ${config.local_engine.device})`);
+    } else if (p.stage === "loading_model") {
+      if (serverStatusText) serverStatusText.textContent = `⏳ 正在下载/加载模型 ${p.model}...（首次约 234MB，请耐心等待）`;
+      if (startBtn) {
+        startBtn.textContent = "加载模型中...";
+        startBtn.disabled = true;
+      }
+      appendLog(`[Blink] ⏳ 服务已启动，模型加载中（首次需下载 ~234MB，可能需要数分钟）...`);
     } else if (p.stage === "setup_env") {
       if (serverStatusText) serverStatusText.textContent = `正在安装 Python 环境...`;
       appendLog("[Blink] 服务启动需要先安装 Python 环境...");
@@ -605,12 +594,6 @@ async function initFunasrEnv(config) {
       parts.push(`✅ funasr ${env.funasr_version || ""}`);
     }
 
-    if (!env.websockets_installed) {
-      parts.push("❌ websockets 未安装（流式 STT 不可用）");
-    } else {
-      parts.push(`✅ websockets ${env.websockets_version || ""}`);
-    }
-
     // 综合状态 + 按钮控制（不置灰，用绿色样式标记成功）
     if (env.env_ready) {
       if (setupBtn) {
@@ -644,10 +627,7 @@ async function initFunasrEnv(config) {
         startBtn.disabled = false;
       }
       if (stopBtn) stopBtn.disabled = false;
-      const isStreaming = config.streaming && env.server_streaming_model;
-      const modelName = isStreaming ? env.server_streaming_model : env.server_model;
-      const modeLabel = isStreaming ? "流式" : "非流式";
-      if (serverStatusText) serverStatusText.textContent = `✅ 服务运行中（${modelName} · ${modeLabel}）`;
+      if (serverStatusText) serverStatusText.textContent = `✅ 服务运行中（${env.server_model}）`;
     } else {
       if (startBtn && env.env_ready) {
         startBtn.classList.remove("running");
@@ -762,6 +742,7 @@ async function initSpaceManagement() {
       </div>
       <div class="stt-space-actions">
         <button type="button" class="stt-space-cleanup-btn" id="stt-space-cleanup-btn">清理 Python 环境</button>
+        <button type="button" class="stt-space-open-folder-btn" id="stt-space-open-folder-btn">打开文件夹</button>
         <button type="button" class="stt-space-refresh-btn" id="stt-space-refresh-btn">刷新</button>
       </div>
       <p class="stt-space-hint">
@@ -774,11 +755,51 @@ async function initSpaceManagement() {
     const cleanupBtn = document.getElementById("stt-space-cleanup-btn");
     if (cleanupBtn) {
       cleanupBtn.addEventListener("click", async () => {
+        // 检查服务是否正在运行——如果在运行，提醒用户先停止
+        let serverRunning = false;
+        try {
+          const env = await invoke("get_funasr_env");
+          serverRunning = env.server_running;
+        } catch (e) {
+          // 查询失败，继续清理流程
+        }
+
+        if (serverRunning) {
+          const confirmed = confirm(
+            "FunASR 服务正在运行。\n\n" +
+            "清理环境会先停止服务，然后删除 Python venv、uv 和模型缓存。\n" +
+            "清理后需重新安装环境才能使用本地 STT。\n\n" +
+            "确定要继续清理吗？"
+          );
+          if (!confirmed) return;
+          appendLog("[Blink] 清理环境：正在停止 funasr-server...");
+          try {
+            await invoke("stop_funasr_server");
+            appendLog("[Blink] ✅ 服务已停止，开始清理环境");
+
+            // 同步重置启动/停止按钮状态（服务已在后端停止）
+            const startBtn = document.getElementById("funasr-start-btn");
+            const stopBtn = document.getElementById("funasr-stop-btn");
+            const serverStatusText = document.getElementById("funasr-server-status-text");
+            if (startBtn) {
+              startBtn.classList.remove("running");
+              startBtn.textContent = "启动服务";
+              startBtn.disabled = false;
+            }
+            if (stopBtn) stopBtn.disabled = true;
+            if (serverStatusText) serverStatusText.textContent = "服务已停止（清理环境）";
+          } catch (e) {
+            console.error("stop_funasr_server failed:", e);
+            appendLog(`[Blink] ⚠️ 停止服务失败: ${e}，继续清理...`);
+          }
+        }
+
         cleanupBtn.disabled = true;
         cleanupBtn.textContent = "清理中...";
         try {
           await invoke("cleanup_stt_space");
           cleanupBtn.textContent = "清理完成 ✓";
+          appendLog("[Blink] ✅ 环境清理完成");
           setTimeout(() => {
             loadUsage();
           }, 1000);
@@ -793,6 +814,18 @@ async function initSpaceManagement() {
     const refreshBtn = document.getElementById("stt-space-refresh-btn");
     if (refreshBtn) {
       refreshBtn.addEventListener("click", loadUsage);
+    }
+
+    const openFolderBtn = document.getElementById("stt-space-open-folder-btn");
+    if (openFolderBtn) {
+      openFolderBtn.addEventListener("click", async () => {
+        try {
+          await invoke("open_stt_folder");
+        } catch (e) {
+          console.error("open_stt_folder failed:", e);
+          appendLog(`[Blink] ❌ 打开文件夹失败: ${e}`);
+        }
+      });
     }
   }
 
