@@ -98,7 +98,7 @@ pub struct SttConfig {
 }
 
 /// 文本注入方式（G2 语音输入法上屏）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum InjectMethod {
     /// Clipboard + Ctrl+V（0.10.1~0.10.2，兼容性最好但有剪贴板污染）
@@ -106,8 +106,30 @@ pub enum InjectMethod {
     /// SendInput Unicode 逐字符（0.10.3 默认，不碰剪贴板）
     #[default]
     SendInput,
-    /// TSF Composition via imekit（0.10.5，真·原地流式，详见 phases/0.10.5-tsf-composition.md）
-    Tsf,
+}
+
+impl<'de> Deserialize<'de> for InjectMethod {
+    /// 兼容旧配置中的 "tsf" 值（TSF 已移除，降级为 SendInput）。
+    ///
+    /// 0.10.5 曾引入 imekit 做 TSF Composition 注入，实测发现 `ITfThreadMgr::GetFocus()`
+    /// 是进程本地的——Blink 在自己进程创建的 TSF 管理器拿不到前台应用的编辑上下文，
+    /// 跨进程时 TSF 路径静默失败，最终退化成 SendInput，无额外价值。已移除。
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "clipboard" => Ok(InjectMethod::Clipboard),
+            "sendinput" => Ok(InjectMethod::SendInput),
+            // 兼容旧配置：TSF 已移除（跨进程不可用），降级为 SendInput
+            "tsf" => {
+                tracing::info!("旧配置 inject_method=tsf 已降级为 sendinput（TSF 跨进程不可用，已移除）");
+                Ok(InjectMethod::SendInput)
+            }
+            other => {
+                tracing::warn!(value = %other, "未知 inject_method 值，使用默认 SendInput");
+                Ok(InjectMethod::SendInput)
+            }
+        }
+    }
 }
 
 /// STT 模式。
@@ -420,10 +442,6 @@ mod tests {
             serde_json::to_string(&InjectMethod::SendInput).unwrap(),
             r#""sendinput""#
         );
-        assert_eq!(
-            serde_json::to_string(&InjectMethod::Tsf).unwrap(),
-            r#""tsf""#
-        );
     }
 
     #[test]
@@ -436,10 +454,20 @@ mod tests {
             serde_json::from_str::<InjectMethod>(r#""sendinput""#).unwrap(),
             InjectMethod::SendInput
         );
-        assert_eq!(
-            serde_json::from_str::<InjectMethod>(r#""tsf""#).unwrap(),
-            InjectMethod::Tsf
-        );
+    }
+
+    /// 验证旧配置中的 "tsf" 值反序列化为 SendInput（TSF 已移除）
+    #[test]
+    fn inject_method_deserializes_old_tsf_to_sendinput() {
+        let method: InjectMethod = serde_json::from_str(r#""tsf""#).unwrap();
+        assert_eq!(method, InjectMethod::SendInput);
+    }
+
+    /// 验证未知值反序列化为 SendInput
+    #[test]
+    fn inject_method_deserializes_unknown_to_sendinput() {
+        let method: InjectMethod = serde_json::from_str(r#""unknown""#).unwrap();
+        assert_eq!(method, InjectMethod::SendInput);
     }
 
     #[test]

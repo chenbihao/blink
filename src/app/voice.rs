@@ -85,28 +85,62 @@ impl VoiceService {
     /// Hold 事件:开始录音。
     ///
     /// 根据 main 窗口是否可见决定 G1/G2 目标。
-    pub fn start_recording(&self) {
-        let mut session = self.session.lock().unwrap();
-
-        if session.recording {
-            tracing::warn!("start_recording: 已在录音中,忽略");
+    ///
+    /// async 因为需要检查模型加载状态（HTTP /health 请求）。
+    pub async fn start_recording(&self) {
+        // ── 总开关检查：STT 未启用时静默忽略 hold 事件 ──
+        let config = crate::app::stt_config::get_stt_config();
+        if !config.enabled {
+            tracing::debug!("语音未启用,忽略 hold 事件");
             return;
         }
 
-        // 判断 G1/G2:主窗口是否可见
-        let main_visible = self
-            .app
-            .get_webview_window("main")
-            .map(|w| w.is_visible().unwrap_or(false))
-            .unwrap_or(false);
-        session.target = if main_visible {
-            VoiceTarget::MainWindow
-        } else {
-            VoiceTarget::ForegroundApp
-        };
+        // ── 立即设置 VOICE_RECORDING 标志 ──
+        // hotkey hook 读此标志吞掉 Alt+Space 的 Space keydown（防止系统菜单 + 空格进输入框）。
+        // 必须在任何 .await 之前设置——否则 await 期间 Space 自动重复键穿透到输入框，
+        // 打出一堆空格导致 chordEligible() 失效。
+        // guard 确保所有早退路径（服务未就绪 / 模型加载中等）清除标志。
+        struct VoiceRecordingGuard { armed: bool }
+        impl VoiceRecordingGuard {
+            fn new() -> Self {
+                crate::infra::platform::hotkey::set_voice_recording(true);
+                Self { armed: true }
+            }
+            fn disarm(&mut self) { self.armed = false; }
+        }
+        impl Drop for VoiceRecordingGuard {
+            fn drop(&mut self) {
+                if self.armed {
+                    crate::infra::platform::hotkey::set_voice_recording(false);
+                }
+            }
+        }
+        let mut _voice_guard = VoiceRecordingGuard::new();
 
-        // 创建 STT engine + audio capture
-        let config = crate::app::stt_config::get_stt_config();
+        // ── 同步预检：锁 session 做 recording 检查 + G1/G2 判定 + 服务就绪检查 ──
+        // scoped block：确保 MutexGuard 不跨 await（Send 约束）
+        let target = {
+            let mut session = self.session.lock().unwrap();
+
+            if session.recording {
+                tracing::warn!("start_recording: 已在录音中,忽略");
+                return;
+            }
+
+            // 判断 G1/G2:主窗口是否可见
+            let main_visible = self
+                .app
+                .get_webview_window("main")
+                .map(|w| w.is_visible().unwrap_or(false))
+                .unwrap_or(false);
+            session.target = if main_visible {
+                VoiceTarget::MainWindow
+            } else {
+                VoiceTarget::ForegroundApp
+            };
+
+            session.target
+        };
 
         // ── 服务就绪检查：本地模式下检查 FunASR 服务是否运行 ──
         let need_check = match config.mode {
@@ -131,10 +165,52 @@ impl VoiceService {
                 }
             };
             if !ready {
-                tracing::warn!(target = ?session.target, %msg, "语音录音中止：服务未就绪");
-                self.emit_voice_error(session.target, &msg);
+                tracing::warn!(target = ?target, %msg, "语音录音中止：服务未就绪");
+                self.emit_voice_error(target, &msg);
                 return;
             }
+
+            // ── 模型加载状态检查（本地模式）──
+            // TCP 端口可达不代表模型已就绪——uvicorn 先绑定端口，模型加载需 30-60s。
+            // 单次检查 /health 端点：Ready → 继续；Loading → 反馈并返回（不阻塞事件循环）。
+            if config.mode == crate::app::stt_config::SttMode::Local {
+                let port = config.local_engine.server_port;
+
+                let status = crate::domain::stt::funasr::check_model_loaded(port).await;
+                match status {
+                    crate::domain::stt::funasr::ModelLoadStatus::Ready => {
+                        // 模型就绪，继续录音流程
+                    }
+                    crate::domain::stt::funasr::ModelLoadStatus::Loading
+                    | crate::domain::stt::funasr::ModelLoadStatus::Idle => {
+                        // 模型加载中 → 向用户反馈，不等待（避免阻塞热键事件循环）
+                        tracing::info!(target = ?target, "模型加载中,跳过本次录音");
+                        self.emit_voice_status(target, "模型加载中，请稍候再试");
+                        return;
+                    }
+                    crate::domain::stt::funasr::ModelLoadStatus::Error => {
+                        let msg = "模型加载失败，请检查设置页日志";
+                        tracing::warn!(target = ?target, %msg);
+                        self.emit_voice_error(target, msg);
+                        return;
+                    }
+                    crate::domain::stt::funasr::ModelLoadStatus::Unreachable => {
+                        let msg = "服务连接失败，请检查设置页中服务状态";
+                        tracing::warn!(target = ?target, %msg);
+                        self.emit_voice_error(target, msg);
+                        return;
+                    }
+                }
+            }
+        }
+
+        // ── 重新获取 session 锁，创建引擎 + 启动采集 ──
+        let mut session = self.session.lock().unwrap();
+
+        // 二次检查：模型加载等待期间可能已被 cancel
+        if session.recording {
+            tracing::warn!("start_recording: 模型加载期间已被其他路径占用");
+            return;
         }
 
         let engine = match crate::domain::stt::create_engine() {
@@ -172,6 +248,17 @@ impl VoiceService {
                     session.prev_fg_hwnd = platform::window::get_foreground_hwnd();
                     platform::window::show_voice_overlay(&self.app);
                 }
+
+                // 通知前端录音已开始（G1 隐藏 Ghost overlay / G2 overlay 已显示）
+                let target_str = if session.target == VoiceTarget::MainWindow {
+                    "g1"
+                } else {
+                    "g2"
+                };
+                let _ = self.app.emit(
+                    "blink://voice-recording-start",
+                    serde_json::json!({ "target": target_str }),
+                );
 
                 // spawn 采集 task: audio chunk → STT → emit partial
                 let app = self.app.clone();
@@ -245,6 +332,9 @@ impl VoiceService {
                 session.engine = Some(engine);
                 session.capture = Some(capture);
                 session.audio_task = Some(task_handle);
+
+                // 录音真正开始，解除 guard（标志由 stop_recording/cancel_recording 清除）
+                _voice_guard.disarm();
             }
             Err(e) => {
                 tracing::error!(%e, "音频采集启动失败");
@@ -263,6 +353,11 @@ impl VoiceService {
 
             if !session.recording {
                 tracing::warn!("stop_recording: 未在录音中,忽略");
+                // 即使没真正录音，start_recording 可能已设置 VOICE_RECORDING（吞 Space 键），
+                // 仍需清除标志 + 清理 UI 状态。
+                crate::infra::platform::hotkey::set_voice_recording(false);
+                platform::window::hide_voice_overlay(&self.app);
+                let _ = self.app.emit("blink://voice-recording-end", ());
                 return;
             }
 
@@ -397,6 +492,47 @@ impl VoiceService {
 
         // 隐藏 mini overlay(G2)
         platform::window::hide_voice_overlay(&self.app);
+
+        // 通知前端录音已结束（G1 隐藏语音指示器 + 恢复 Ghost overlay）
+        let _ = self.app.emit("blink://voice-recording-end", ());
+    }
+
+    /// 向用户反馈语音状态（如"模型加载中"），非错误性质。
+    ///
+    /// G1: emit 事件让前端显示在语音指示器区域。
+    /// G2: 先显示 overlay 窗口再 emit（与 emit_voice_error 类似的时序处理）。
+    fn emit_voice_status(&self, target: VoiceTarget, message: &str) {
+        let target_str = if target == VoiceTarget::MainWindow {
+            "g1"
+        } else {
+            "g2"
+        };
+
+        if target == VoiceTarget::ForegroundApp {
+            // G2: 先显示 overlay，再延迟 emit 状态消息
+            platform::window::show_voice_overlay(&self.app);
+            let app_clone = self.app.clone();
+            let msg_clone = message.to_string();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let _ = app_clone.emit(
+                    "blink://voice-status",
+                    serde_json::json!({
+                        "message": msg_clone,
+                        "target": "g2",
+                    }),
+                );
+            });
+        } else {
+            // G1: 直接 emit
+            let _ = self.app.emit(
+                "blink://voice-status",
+                serde_json::json!({
+                    "message": message,
+                    "target": target_str,
+                }),
+            );
+        }
     }
 
     /// 向用户反馈语音错误（G1 直接 emit，G2 先显示 overlay 再延迟 emit）。

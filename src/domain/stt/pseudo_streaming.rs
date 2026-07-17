@@ -312,10 +312,8 @@ impl PseudoStreamingSttEngine {
                                 Ok(r) => {
                                     let cleaned = strip_filler_words(&r.text);
                                     tracing::debug!(
-                                        text = %cleaned,
-                                        raw = %r.text,
-                                        samples = sentence_samples.len(),
-                                        "定稿识别完成"
+                                        %cleaned, samples = sentence_samples.len(),
+                                        "定稿识别"
                                     );
                                     // 写入 pending_confirmed，下次 transcribe_chunk 时收取
                                     let mut inner = inner.lock().unwrap();
@@ -387,14 +385,17 @@ impl PseudoStreamingSttEngine {
                             text: String,
                         }
                         if let Ok(r) = resp.json::<R>().await {
-                            if !r.text.is_empty() {
-                                let cleaned = strip_filler_words(&r.text);
-                                if !cleaned.is_empty() {
-                                    tracing::trace!(text = %cleaned, raw = %r.text, "预览识别完成");
-                                    // 写入 latest_preview
-                                    let mut inner = inner.lock().unwrap();
-                                    inner.latest_preview = cleaned;
+                            let cleaned = strip_filler_words(&r.text);
+                            if !cleaned.is_empty() {
+                                // 精简日志：raw 仅在与 cleaned 不同时打印
+                                if cleaned != r.text {
+                                    tracing::trace!(%cleaned, raw = %r.text, "预览识别");
+                                } else {
+                                    tracing::trace!(%cleaned, "预览识别");
                                 }
+                                // 写入 latest_preview
+                                let mut inner = inner.lock().unwrap();
+                                inner.latest_preview = cleaned;
                             }
                         }
                     }
@@ -744,7 +745,7 @@ impl SttEngine for PseudoStreamingSttEngine {
         tracing::info!(
             text_len = final_text.chars().count(),
             %final_text,
-            "PseudoStreamingSttEngine 识别完成",
+            "伪流式识别完成",
         );
 
         Ok(final_text)
@@ -760,7 +761,7 @@ impl SttEngine for PseudoStreamingSttEngine {
         inner.latest_preview.clear();
         inner.finalize_in_flight = false;
         inner.pending_confirmed = None;
-        tracing::debug!("PseudoStreamingSttEngine::reset");
+        tracing::debug!("伪流式引擎 reset");
     }
 
     fn name(&self) -> &str {

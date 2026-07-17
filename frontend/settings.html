@@ -857,9 +857,8 @@
             <!-- 高级选项（0.10.3） -->
             <h3 class="subsection-title">高级选项</h3>
             <div class="setting-row">
-              <label class="setting-label">G2 注入方式<span class="field-hint-icon" title="TSF Composition（实验性）：走 Windows 文本服务框架，理论兼容 Terminal/UWP/Office/Electron+IME，尚未充分验证。SendInput Unicode（默认）：逐字符注入，不碰剪贴板。Clipboard：Ctrl+V 粘贴，兼容性最广但有剪贴板污染。">ⓘ</span></label>
+              <label class="setting-label">G2 注入方式<span class="field-hint-icon" title="SendInput Unicode（默认）：逐字符注入，不碰剪贴板，原生 Win32 应用首选。Clipboard：Ctrl+V 粘贴，兼容性最广但临时使用剪贴板。">ⓘ</span></label>
               <select id="voice-inject-method-select">
-                <option value="tsf">TSF Composition（实验性）</option>
                 <option value="sendinput" selected>SendInput Unicode</option>
                 <option value="clipboard">Clipboard + Ctrl+V</option>
               </select>
@@ -1109,7 +1108,7 @@
           </div>
           <div class="setting-row">
             <label class="setting-label" data-i18n="about.repository.label">仓库</label>
-            <span class="value"><a href="#" id="about-repository" data-external>—</a></span>
+            <span class="value"><a href="#" id="about-repository" class="external-link">—</a></span>
           </div>
         </div>
       </main>

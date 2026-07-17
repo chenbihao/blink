@@ -48,6 +48,8 @@ regex = "1.11"
 # rig-core 0.39 只用作 tool schema 类型来源(ToolDefinition);0.9.0 阶段不构造 Client、不调用 LLM。
 # default features 已含 derive+reqwest+rustls;额外加 rmcp 让 0.11 MCP schema 投影零适配。
 rig-core = { version = "0.39", features = ["rmcp"] }
+# semver: 语义化版本比较（检查更新用），支持 pre-release / build metadata
+semver = "1.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 sqlx = { version = "0.9.0", features = ["sqlite", "runtime-tokio"] }
@@ -69,12 +71,9 @@ winreg = "0.55"
 walkdir = "2.5"
 # cpal: 跨平台音频 I/O（0.10 语音输入麦克风采集，Windows 上走 WASAPI）
 cpal = "0.18"
-# imekit: 跨平台 IME 协议封装（0.10.5 G2 文本注入，Windows 上走 TSF Composition + IMM32 + SendInput 三级回退）
-imekit = "0.2"
 # zip: 纯 Rust zip 解压（uv 二进制安装，替代 PowerShell Expand-Archive）
 zip = "2.2"
 # sherpa-onnx 引擎通过 Windows 自带 tar.exe 解压 .tar.bz2，无需额外 Rust 依赖
-# imekit 0.2.3 依赖 windows 0.59，与 Blink 的 0.62.2 可共存（仅调 imekit 公开 API，不共享 TSF 类型）
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",

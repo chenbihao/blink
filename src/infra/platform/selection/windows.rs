@@ -158,13 +158,13 @@ pub(crate) fn get_selected_text(hwnd_raw: isize) -> Option<String> {
                 "选区抓取：三段式未命中（耗时超阈值）"
             );
         } else {
-            tracing::trace!(
-                elapsed_ms,
-                control_type = ct,
-                class = %class,
-                descendant_control_type = descendant_ct,
-                "选区抓取：三段式未命中"
-            );
+            // tracing::trace!(
+            //     elapsed_ms,
+            //     control_type = ct,
+            //     class = %class,
+            //     descendant_control_type = descendant_ct,
+            //     "选区抓取：三段式未命中"
+            // );
         }
     }
 

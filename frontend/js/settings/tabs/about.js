@@ -29,7 +29,8 @@ async function loadAboutInfo() {
     if (repoEl) {
       const url = info.repository || "";
       repoEl.textContent = url || "—";
-      if (url) repoEl.href = url;
+      // 用 data-url 而非 href，走统一的 .external-link 事件委托（外部浏览器打开）
+      if (url) repoEl.dataset.url = url;
     }
   } catch (e) {
     console.error("loadAboutInfo failed:", e);
@@ -50,9 +51,14 @@ function initCheckUpdate() {
     updateEl.textContent = "…";
     try {
       const r = await invoke("check_update");
-      if (r.has_update) {
+      if (r.error) {
+        // 网络失败 / API 异常 —— 区分「真没更新」和「请求失败了」
+        updateEl.textContent = "检查失败，请稍后重试";
+      } else if (r.has_update) {
+        // .external-link + data-url 走统一外链委托（外部浏览器打开）
+        // .about-update-link 套用项目统一超链样式（accent 色）
         const link = r.release_url
-          ? ` · <a href="${r.release_url}" data-external>查看</a>`
+          ? ` · <a href="#" class="external-link about-update-link" data-url="${r.release_url}">查看</a>`
           : "";
         updateEl.innerHTML = `新版本 ${r.latest_version} 可用${link}`;
       } else {

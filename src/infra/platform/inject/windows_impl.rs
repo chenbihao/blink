@@ -56,7 +56,7 @@ pub fn inject_text_unicode(text: &str) -> Result<(), InjectError> {
         return Ok(());
     }
 
-    tracing::debug!(len = text.chars().count(), "inject_text_unicode: 开始注入");
+    // 详细路径日志由 mod.rs 的 inject_text_with_method 统一打印
 
     // 编码为 UTF-16，逐码元构造 INPUT
     let utf16: Vec<u16> = text.encode_utf16().collect();
@@ -92,7 +92,6 @@ pub fn inject_text_unicode(text: &str) -> Result<(), InjectError> {
     // 等待一小段时间让应用处理输入
     std::thread::sleep(Duration::from_millis(30));
 
-    tracing::debug!("inject_text_unicode: 注入完成");
     Ok(())
 }
 
@@ -136,10 +135,7 @@ pub fn inject_text_clipboard(text: &str) -> Result<(), InjectError> {
         return Ok(());
     }
 
-    tracing::debug!(
-        len = text.chars().count(),
-        "inject_text_clipboard: 开始注入"
-    );
+    // 详细路径日志由 mod.rs 的 inject_text_with_method 统一打印
 
     // 1. 备份当前剪贴板文本
     let backup = read_clipboard_text();
@@ -158,7 +154,6 @@ pub fn inject_text_clipboard(text: &str) -> Result<(), InjectError> {
         let _ = set_clipboard_text(&original);
     }
 
-    tracing::debug!("inject_text_clipboard: 注入完成");
     Ok(())
 }
 

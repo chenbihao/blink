@@ -246,6 +246,25 @@ fn is_funasr_noise(line: &str) -> bool {
     if line.contains("Check update of funasr") || line.contains("You are using the latest version") {
         return true;
     }
+    // 非流式转录请求参数行（每次请求都重复，参数在启动时已打印）
+    if line.contains("非流式转录: samples=") {
+        return true;
+    }
+    // 热词解析日志（每次请求都重复打印，只需在启动时看一次）
+    if line.contains("Attempting to parse hotwords") || line.contains("Initialized hotword list") {
+        return true;
+    }
+    // HTTP 访问日志（每次请求都有，噪声大）
+    if line.contains("POST /v1/audio/transcriptions HTTP/1.1")
+        || line.contains("GET /health HTTP/1.1")
+        || line.contains("GET /v1/models HTTP/1.1")
+    {
+        return true;
+    }
+    // FunASR 内部解码日志（每次请求都有，无诊断价值）
+    if line.contains("decoding, utt:") || line.contains("empty speech") {
+        return true;
+    }
     // 纯 ANSI 转义 + 空白
     let stripped = strip_ansi(line);
     stripped.is_empty()
@@ -557,7 +576,7 @@ pub async fn start_server(
                             if trimmed.is_empty() || is_funasr_noise(trimmed) {
                                 continue;
                             }
-                            tracing::info!(target: "funasr::stdout", "{}", trimmed);
+                            tracing::debug!("{}", trimmed);
                             let _ = tx.send(trimmed.to_string());
                         }
                     }
@@ -584,7 +603,7 @@ pub async fn start_server(
                             if trimmed.is_empty() || is_funasr_noise(trimmed) {
                                 continue;
                             }
-                            tracing::info!(target: "funasr::stderr", "{}", trimmed);
+                            tracing::debug!("{}", trimmed);
                             let _ = tx.send(trimmed.to_string());
                         }
                     }
@@ -749,6 +768,49 @@ mod tests {
     fn noise_filter_detects_pure_ansi() {
         assert!(is_funasr_noise("\x1b[34m\x1b[0m"));
         assert!(is_funasr_noise(""));
+    }
+
+    #[test]
+    fn noise_filter_detects_hotword_parsing() {
+        // 热词解析每次请求都重复打印，过滤掉
+        assert!(is_funasr_noise(
+            "19:11:49 [root] INFO: Attempting to parse hotwords from local txt..."
+        ));
+        assert!(is_funasr_noise(
+            "19:11:49 [root] INFO: Initialized hotword list from file: \
+             C:\\Users\\99452\\AppData\\Roaming\\blink\\python\\hotwords.txt, \
+             hotword list: ['伪流式', '<s>']."
+        ));
+    }
+
+    #[test]
+    fn noise_filter_detects_http_access_log() {
+        // HTTP 访问日志每次请求都有，过滤掉
+        assert!(is_funasr_noise(
+            "INFO:     127.0.0.1:5527 - \"POST /v1/audio/transcriptions HTTP/1.1\" 200 OK"
+        ));
+        assert!(is_funasr_noise(
+            "INFO:     127.0.0.1:4444 - \"GET /health HTTP/1.1\" 200 OK"
+        ));
+        assert!(is_funasr_noise(
+            "INFO:     127.0.0.1:4444 - \"GET /v1/models HTTP/1.1\" 200 OK"
+        ));
+    }
+
+    #[test]
+    fn noise_filter_detects_decoding_logs() {
+        // FunASR 内部解码日志，每次请求都有
+        assert!(is_funasr_noise(
+            "19:24:05 [root] INFO: decoding, utt: tmpgfzhfbo3, empty speech"
+        ));
+    }
+
+    #[test]
+    fn noise_filter_detects_transcription_request_params() {
+        // 非流式转录参数行每次请求都重复，参数在启动时已打印
+        assert!(is_funasr_noise(
+            "19:32:08 [blink_stt_server] INFO: 非流式转录: samples=6720, model=paraformer-zh, hotword=yes, itn=True"
+        ));
     }
 
     /// 验证嵌入的 Python 脚本包含模型名解析函数（修复 FunASR 1.3.14 短名 404 问题）。

@@ -5,6 +5,7 @@ import { queryEl } from "./dom.js";
 import * as results from "./results.js";
 import * as search from "./search.js";
 import * as chord from "./chord.js";
+import * as ghost from "./ghost.js";
 import { clearAlt, startAltPoll, stopAltPoll, recheckAlt } from "./keyboard.js";
 import { applyThemeFromConfig, applyGlassOpacityFromConfig } from "./theme.js";
 import { applyI18nFromConfig } from "./i18n/index.js";
@@ -12,10 +13,16 @@ import { applyI18nFromConfig } from "./i18n/index.js";
 /** 注册生命周期事件监听。 */
 export function init() {
   listen("blink://shown", () => {
+    console.debug("[lifecycle] shown received");
     queryEl.value = "";
+    // 先解冻 ghost（上次录音可能残留 frozen），再 reset 让 ghost.clear 正常清 DOM
+    ghost.unfreeze();
+    document.body.classList.remove("voice-active");
     search.reset(); // 作废在途搜索请求
     results.clear();
     clearAlt(); // 清 Alt 角标残留（上次按住 Alt 激活后可能未收到 keyup）
+    const vi = document.getElementById("voice-indicator");
+    if (vi) vi.classList.add("hidden");
     queryEl.focus();
     // 异步刷新主题（设置页可能改了 theme）；不 await，不阻塞 focus
     applyThemeFromConfig();
@@ -63,9 +70,38 @@ export function init() {
     queryEl.dispatchEvent(new Event("input", { bubbles: true }));
   });
 
+  // 0.10 语音录音开始 → G1 隐藏 Ghost overlay + 显示语音指示器
+  // 注意：不清空 ghost-chord 文本内容——CSS body.voice-active 已隐藏它，
+  // 录音结束后移除 voice-active 即可恢复显示。清空 textContent 会导致
+  // chord.refresh() 未重新渲染前 :not(:empty) 不匹配，chord 提示永久消失。
+  listen("blink://voice-recording-start", (event) => {
+    const { target } = event.payload ?? {};
+    if (target !== "g1") return;
+    document.body.classList.add("voice-active");
+    ghost.freeze(); // voice-partial 独占 overlay，search 不覆写
+    // 显示语音指示器
+    if (voiceIndicator) {
+      voiceIndicator.classList.remove("hidden");
+    }
+  });
+
+  // 0.10 语音状态提示（模型加载中等，非错误性质）
+  // 注意：不设 voice-active——只有真正录音（voice-recording-start）才设，
+  // 避免模型加载中隐藏 Chord 提示。
+  listen("blink://voice-status", (event) => {
+    const { message, target } = event.payload ?? {};
+    if (target !== "g1" || !message) return;
+    if (voiceIndicator) {
+      voiceIndicator.classList.remove("hidden");
+      const label = voiceIndicator.querySelector(".voice-label");
+      if (label) label.textContent = message;
+    }
+  });
+
   // 0.10 语音输入:G1 流式 partial 文字实时更新 #query
   // (G2 的 partial 由 mini overlay 窗口处理,主窗口不可见时不接收)
   // 0.10.4: 支持 confirmed/preview 双字段（伪流式引擎）
+  // 0.10.5: G1 应用 G2 的预上屏双色渲染——confirmed 填 #query，preview 走 Ghost overlay
   listen("blink://voice-partial", (event) => {
     const payload = event.payload ?? {};
     if (payload.target !== "g1") return;
@@ -74,11 +110,17 @@ export function init() {
     if (payload.confirmed !== undefined || payload.preview !== undefined) {
       const confirmed = payload.confirmed || "";
       const preview = payload.preview || "";
-      const combined = confirmed + preview;
-      if (combined) {
-        queryEl.value = combined;
-        queryEl.dispatchEvent(new Event("input", { bubbles: true }));
+      // confirmed 填入输入框（已定稿文本）
+      queryEl.value = confirmed;
+      // preview 走 Ghost overlay（灰色半透明，与 G2 预上屏视觉效果一致）
+      // ghost 已 freeze，search 的 ghost.update 不会覆写此处
+      const ghostSuggest = document.querySelector("#ghost-overlay .ghost-suggest");
+      if (ghostSuggest) {
+        ghostSuggest.textContent = preview ? ` ${preview}` : "";
+        ghostSuggest.classList.add("voice-preview-text");
+        ghostSuggest.classList.remove("ghost-context");
       }
+      queryEl.dispatchEvent(new Event("input", { bubbles: true }));
     } else if (payload.text) {
       // 兼容旧格式（真流式 / 非流式引擎）
       queryEl.value = payload.text;
@@ -105,11 +147,16 @@ export function init() {
     });
   });
 
-  // 0.10 录音结束 → 隐藏 G1 指示器
+  // 0.10 录音结束 → 隐藏 G1 指示器 + 解冻 Ghost overlay（恢复 search 建议）
   listen("blink://voice-recording-end", () => {
+    document.body.classList.remove("voice-active");
+    ghost.unfreeze(); // 恢复 ghost.update DOM 写入 + 清除 voice-preview-text + 重绘当前 suggestion
     if (voiceIndicator) {
       voiceIndicator.classList.add("hidden");
       vwBars.forEach((bar) => (bar.style.height = "4px"));
+      // 恢复语音指示器标签默认文案
+      const label = voiceIndicator.querySelector(".voice-label");
+      if (label) label.textContent = "语音输入中";
     }
   });
 
@@ -117,6 +164,11 @@ export function init() {
   listen("blink://voice-error", (event) => {
     const { message, target } = event.payload ?? {};
     if (target !== "g1" || !message) return;
+    document.body.classList.remove("voice-active");
+    ghost.unfreeze(); // 确保解冻（错误可能发生在录音中）
+    if (voiceIndicator) {
+      voiceIndicator.classList.add("hidden");
+    }
     // 在搜索框中显示错误提示，用户输入时自动清除
     queryEl.value = "";
     queryEl.placeholder = message;

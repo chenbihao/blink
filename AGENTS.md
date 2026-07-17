@@ -16,7 +16,7 @@ Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而�
 当前 **0.9.0~0.9.7 完成**（Agent 地基 + 插件 tool-call + 供应商配置 UI + 前端架构重整 + 收尾发版 + Capability 能力协议层）。详见 [phases/0.9-ai-layer.md](docs/production-design/phases/0.9-ai-layer.md)。
 
 - ✅ **0.10 语音输入**：STT + 语音打字（G1 主窗口语音输入 / G2 语音输入法上屏）。工具箱层定 FunASR。详见 [phases/0.10-voice-agent.md](docs/production-design/phases/0.10-voice-agent.md)（0.10.4 已完成：伪流式 VAD 切句 + 累积预览 + 移除真流式 + 架构清理；SenseVoice 准确率 7.81%，CPU 17× 实时，Python 零改动）
-- ✅ **0.10.5 TSF Composition 文本注入**：via imekit（TSF + IMM32 + SendInput 三级回退），解决 SendInput 在部分应用（Terminal / UWP / Office / Electron+IME）无法上屏的问题。代码完成，待用户实测验收。详见 [phases/0.10.5-tsf-composition.md](docs/production-design/phases/0.10.5-tsf-composition.md)
+- ❌ **0.10.5 TSF Composition（已废弃）**：曾引入 imekit 做 TSF 注入，实测发现 `ITfThreadMgr::GetFocus()` 是进程本地的，Blink 拿不到前台应用的编辑上下文，跨进程时 TSF 路径静默失败退化成 SendInput，无额外价值。imekit 依赖与 TSF 实现已移除，回归 SendInput + Clipboard 两级。详见 [phases/0.10-voice-agent.md §五](docs/production-design/phases/0.10-voice-agent.md)
 - 🔜 **0.11 本地化与生态**：本地模型 / skill / MCP / RAG。详见 [phases/0.11-local-ecosystem.md](docs/production-design/phases/0.11-local-ecosystem.md)
 
 ---

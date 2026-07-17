@@ -180,8 +180,8 @@ impl Service for HotkeyService {
                         }
                     }
                     crate::infra::platform::hotkey::HotkeyEvent::Hold(_) => {
-                        // 长按开始 → 语音录音开始
-                        voice_service.start_recording();
+                        // 长按开始 → 语音录音开始（async：可能需等待模型加载）
+                        voice_service.start_recording().await;
                     }
                     crate::infra::platform::hotkey::HotkeyEvent::HoldRelease(_) => {
                         // 长按结束 → 停止录音 → STT → 注入/fill-query

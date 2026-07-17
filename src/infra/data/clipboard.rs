@@ -248,7 +248,7 @@ pub async fn cleanup_excess(pool: &SqlitePool, max_items: u32) {
         .bind(excess)
         .execute(pool)
         .await;
-        tracing::info!(deleted = excess, "清理超量剪贴板历史");
+        // tracing::info!(deleted = excess, "清理超量剪贴板历史");
     }
 }
 

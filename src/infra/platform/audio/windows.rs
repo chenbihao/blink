@@ -128,7 +128,6 @@ fn capture_thread(
     };
 
     let dev_name = device.to_string();
-    tracing::info!(device = %dev_name, "cpal: 已打开音频设备");
 
     // ── 获取设备原生配置 ──
     let supported_config = match device.default_input_config() {
@@ -143,7 +142,7 @@ fn capture_thread(
     let in_channels = supported_config.channels();
     let sample_format = supported_config.sample_format();
 
-    tracing::info!(
+    tracing::debug!(
         device = %dev_name,
         sample_rate = in_sample_rate,
         channels = in_channels,
@@ -200,7 +199,7 @@ fn capture_thread(
         return;
     }
 
-    tracing::info!("cpal: 采集已启动");
+    tracing::debug!("cpal: 采集已启动");
 
     // 保持线程存活——Stream 必须不被 drop 才能持续采集
     while capturing.load(Ordering::SeqCst) {
@@ -268,7 +267,7 @@ fn log_device_list(host: &cpal::Host) {
                 format!("       {}", name)
             });
         }
-        tracing::info!(
+        tracing::trace!(
             count = device_list.len(),
             "cpal: 可用输入设备列表:\n{}",
             device_list.join("\n")
@@ -345,12 +344,12 @@ fn check_microphone_privacy() {
 fn find_device(host: &cpal::Host, name: Option<&str>) -> Option<cpal::Device> {
     match name {
         Some(name) => {
-            tracing::info!(%name, "cpal: 按名称查找设备");
+            tracing::debug!(%name, "cpal: 按名称查找设备");
             if let Ok(devices) = host.input_devices() {
                 for device in devices {
                     let dev_name = device.to_string();
                     if dev_name == name {
-                        tracing::info!(%dev_name, "cpal: 设备名称匹配成功");
+                        tracing::debug!(%dev_name, "cpal: 设备名称匹配成功");
                         return Some(device);
                     }
                 }

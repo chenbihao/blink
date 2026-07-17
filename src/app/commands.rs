@@ -445,10 +445,18 @@ pub fn get_app_info() -> serde_json::Value {
 }
 
 /// 设置页-关于：检查 GitHub 最新 Release 版本。
-/// 返回 `{ has_update, current_version, latest_version, release_url }`。
-/// 网络失败或解析异常时静默返回 `has_update: false`（不打扰用户）。
+///
+/// 流程：请求 GitHub API `/repos/{owner/repo}/releases/latest` →
+/// 取 `tag_name` 去掉 `v` 前缀 → semver 比较与当前版本。
+///
+/// 返回 JSON：
+/// - 成功：`{ has_update, current_version, latest_version, release_url }`
+/// - 网络失败：`{ has_update: false, current_version, error: "..." }`
+///
+/// **走全局代理**：如果用户配置了 `engine:_global_proxy`，检查更新请求也走代理。
+/// 国内直连 `api.github.com` 极易超时，这是此前「检查更新无效」的根因。
 #[tauri::command]
-pub async fn check_update() -> serde_json::Value {
+pub async fn check_update(app: tauri::AppHandle) -> serde_json::Value {
     let current = env!("CARGO_PKG_VERSION");
     let repo = env!("CARGO_PKG_REPOSITORY");
     // 从 "https://github.com/owner/repo" 提取 "owner/repo"
@@ -459,23 +467,60 @@ pub async fn check_update() -> serde_json::Value {
 
     let api_url = format!("https://api.github.com/repos/{repo_path}/releases/latest");
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .user_agent("blink-updater")
-        .build()
-        .unwrap_or_default();
+    // 读取全局代理配置，与插件 HTTP 请求共用
+    let proxy_url = {
+        let pool = app.state::<sqlx::SqlitePool>();
+        let cfg = crate::app::config::get_engine_config(&pool, "_global_proxy").await;
+        cfg.and_then(|v| {
+            let https = v.get("https").and_then(|s| s.as_str()).filter(|s| !s.is_empty());
+            let http = v.get("http").and_then(|s| s.as_str()).filter(|s| !s.is_empty());
+            https.or(http).map(|s| s.to_string())
+        })
+    };
 
-    let Ok(resp) = client.get(&api_url).send().await else {
-        tracing::debug!("check_update: 请求 GitHub API 失败");
-        return serde_json::json!({ "has_update": false, "current_version": current });
+    let mut builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent("blink-updater");
+
+    if let Some(ref url) = proxy_url {
+        match reqwest::Proxy::all(url) {
+            Ok(proxy) => builder = builder.proxy(proxy),
+            Err(e) => tracing::warn!(%e, proxy = %url, "check_update: 代理配置无效，回退直连"),
+        }
+    }
+
+    let client = builder.build().unwrap_or_default();
+
+    let resp_result = client.get(&api_url).send().await;
+    let resp = match resp_result {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(%e, "check_update: 请求 GitHub API 失败");
+            return serde_json::json!({
+                "has_update": false,
+                "current_version": current,
+                "error": format!("网络请求失败: {e}"),
+            });
+        }
     };
     if !resp.status().is_success() {
-        tracing::debug!("check_update: GitHub API 返回 {}", resp.status());
-        return serde_json::json!({ "has_update": false, "current_version": current });
+        tracing::warn!(status = %resp.status(), "check_update: GitHub API 返回非 2xx");
+        return serde_json::json!({
+            "has_update": false,
+            "current_version": current,
+            "error": format!("GitHub API 返回 {}", resp.status()),
+        });
     }
-    let Ok(body) = resp.json::<serde_json::Value>().await else {
-        tracing::debug!("check_update: 解析 JSON 失败");
-        return serde_json::json!({ "has_update": false, "current_version": current });
+    let body = match resp.json::<serde_json::Value>().await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(%e, "check_update: 解析 JSON 失败");
+            return serde_json::json!({
+                "has_update": false,
+                "current_version": current,
+                "error": "响应解析失败".to_string(),
+            });
+        }
     };
 
     let tag = body["tag_name"].as_str().unwrap_or("");
@@ -487,7 +532,9 @@ pub async fn check_update() -> serde_json::Value {
 
     let has_update = version_gt(latest, current);
     if has_update {
-        tracing::info!("发现新版本: {current} -> {latest}");
+        tracing::info!(current, latest, "发现新版本");
+    } else {
+        tracing::debug!(current, latest, "已是最新版本");
     }
 
     serde_json::json!({
@@ -499,7 +546,18 @@ pub async fn check_update() -> serde_json::Value {
 }
 
 /// 语义化版本比较：a > b 则返回 true。
+///
+/// 优先用 `semver` 库严格比较（支持 pre-release / build metadata），
+/// 解析失败时 fallback 到简单数字比较（兼容非标准版本号如 `0.9`）。
 fn version_gt(a: &str, b: &str) -> bool {
+    match (semver::Version::parse(a), semver::Version::parse(b)) {
+        (Ok(va), Ok(vb)) => va > vb,
+        _ => version_gt_fallback(a, b),
+    }
+}
+
+/// Fallback：非标准版本号的简单数字比较，取前三段，缺失按 0 算。
+fn version_gt_fallback(a: &str, b: &str) -> bool {
     let parse = |s: &str| -> (u64, u64, u64) {
         let parts: Vec<u64> = s.split('.').filter_map(|p| p.parse().ok()).collect();
         (
@@ -2317,6 +2375,13 @@ pub async fn set_stt_config(
         "blink://config-changed",
         serde_json::json!({ "key": "stt:config" }),
     );
+    tracing::info!(
+        enabled = config.enabled,
+        mode = ?config.mode,
+        inject_method = ?config.inject_method,
+        streaming_mode = ?config.streaming_mode,
+        "STT 配置已更新"
+    );
     Ok(())
 }
 
@@ -3475,8 +3540,24 @@ mod tests {
 
     #[test]
     fn version_gt_malformed() {
-        // 不完整版本号也能比较（缺失部分按 0 算）
+        // 非标准版本号走 fallback，缺失部分按 0 算
         assert!(version_gt("0.9", "0.8.8"));
         assert!(!version_gt("0.8", "0.8.1"));
+    }
+
+    #[test]
+    fn version_gt_semver_prerelease() {
+        // semver: pre-release 版本低于同版本的 release
+        assert!(!version_gt("1.0.0-rc.1", "1.0.0"));
+        assert!(version_gt("1.0.0", "1.0.0-rc.1"));
+        assert!(version_gt("1.0.0-rc.2", "1.0.0-rc.1"));
+    }
+
+    #[test]
+    fn version_gt_0_10_over_0_9() {
+        // 验证 0.10.x > 0.9.x（此前「检查更新无效」的版本号场景）
+        assert!(version_gt("0.10.4", "0.9.8"));
+        assert!(version_gt("0.10.0", "0.9.99"));
+        assert!(!version_gt("0.9.8", "0.10.4"));
     }
 }

@@ -40,6 +40,13 @@ let ghostSuggestEl = null;
 // 一次一个订阅者就够了（当前只有 statusbar 消费）。多订阅者需求出现时再扩数组。
 let onChangeCallback = null;
 
+// ── 冻结机制（0.10 语音预览独占 overlay）──────────────────────────────────────
+// 语音录音期间 voice-partial 直接写 ghostSuggest 显示 preview 文本，同时 dispatch
+// input → onInput → ghost.update() 会覆写 overlay → 闪屏。freeze 后 update/clear
+// 只更新内部状态 + notify，不碰 DOM；unfreeze 时恢复当前 suggestion 到 DOM。
+let frozen = false;
+let lastQuery = "";
+
 /** 初始化：绑定 overlay DOM。main.js 启动时调一次。 */
 export function init() {
   ghostTypedEl = document.querySelector("#ghost-overlay .ghost-typed");
@@ -67,19 +74,16 @@ export function syncTypedText(text) {
   if (ghostTypedEl) ghostTypedEl.textContent = text;
 }
 
-/** 更新 ghost 显示。suggestion 为 null/undefined 时清空。 */
-export function update(query, suggestion) {
-  const prev = currentSuggestion;
-  currentSuggestion = suggestion || null;
-  if (!ghostTypedEl || !ghostSuggestEl) return;
-  if (!suggestion) {
+/**
+ * 将 currentSuggestion 渲染到 DOM（内部函数）。
+ * 调用方保证 ghostTypedEl / ghostSuggestEl 已初始化。
+ */
+function renderToDom(query) {
+  if (!currentSuggestion) {
     ghostTypedEl.textContent = "";
     ghostSuggestEl.textContent = "";
     ghostSuggestEl.classList.remove("ghost-context");
-    // Ghost 消失 → 恢复 placeholder（`data-ghost-active` 由 CSS 侧隐藏 placeholder,
-    // 避免空 query + Context Ghost 时 placeholder 与 Ghost 文字重叠）
     queryEl.removeAttribute("data-ghost-active");
-    if (prev) notify();
     return;
   }
   ghostTypedEl.textContent = query;
@@ -90,33 +94,48 @@ export function update(query, suggestion) {
   // 0.8.3：Context 类的 display 已是完整独立文本（"翻译 \"the...\""）,不需要 `→` 前缀。
   // Keyword 类保留 `→` 前缀（表达"补全为..."的语义）。
   // 0.9.2:AI 类 display 是 "按 Tab 问 AI",不属于补全语义,也不用 `→` 前缀。
-  if (!suggestion.display) {
+  if (!currentSuggestion.display) {
     ghostSuggestEl.textContent = "";
-  } else if (suggestion.source === "context" || suggestion.source === "ai") {
-    // Context / AI 类:完整独立文本 + 弱区分样式
-    ghostSuggestEl.textContent = ` ${suggestion.display}`;
+  } else if (currentSuggestion.source === "context" || currentSuggestion.source === "ai") {
+    ghostSuggestEl.textContent = ` ${currentSuggestion.display}`;
   } else {
-    // Keyword 类（默认）：`→ fanyi` 补全语义
-    ghostSuggestEl.textContent = ` → ${suggestion.display}`;
+    ghostSuggestEl.textContent = ` → ${currentSuggestion.display}`;
   }
-  // 视觉弱区分（§4.9）：Context / AI 加 class,CSS 侧调更浅灰度
   ghostSuggestEl.classList.toggle(
     "ghost-context",
-    suggestion.source === "context" || suggestion.source === "ai",
+    currentSuggestion.source === "context" || currentSuggestion.source === "ai",
   );
-  // 有内容 Ghost 时隐藏 placeholder（避免空 query 场景 placeholder 叠在 Ghost 上）
-  if (suggestion.display) {
+  if (currentSuggestion.display) {
     queryEl.setAttribute("data-ghost-active", "");
   } else {
     queryEl.removeAttribute("data-ghost-active");
   }
-  notify();
+}
+
+/** 更新 ghost 显示。suggestion 为 null/undefined 时清空。 */
+export function update(query, suggestion) {
+  const prev = currentSuggestion;
+  currentSuggestion = suggestion || null;
+  lastQuery = query;
+  if (!ghostTypedEl || !ghostSuggestEl) return;
+  if (frozen) {
+    // 语音录音期间：voice-partial 独占 overlay DOM，只更新状态 + notify
+    if (prev !== currentSuggestion) notify();
+    return;
+  }
+  renderToDom(query);
+  if (prev !== currentSuggestion || suggestion) notify();
 }
 
 /** 清空 ghost（reset / 窗口 hide / 用户 Esc 时调）。 */
 export function clear() {
   const prev = currentSuggestion;
   currentSuggestion = null;
+  lastQuery = "";
+  if (frozen) {
+    if (prev) notify();
+    return;
+  }
   if (ghostTypedEl) ghostTypedEl.textContent = "";
   if (ghostSuggestEl) {
     ghostSuggestEl.textContent = "";
@@ -190,4 +209,29 @@ export function currentSource() {
  *  值为 "selection" | "clipboard" | null。Keyword 类恒 null。 */
 export function currentOrigin() {
   return currentSuggestion?.origin || null;
+}
+
+// ── 冻结 API（0.10 语音预览独占 overlay）──────────────────────────────────────
+
+/**
+ * 冻结 overlay DOM 写入。语音录音开始时调。
+ * update/clear 只更新内部状态 + notify，不碰 DOM。
+ * voice-partial handler 直接管理 ghostSuggest.textContent 显示 preview。
+ */
+export function freeze() {
+  frozen = true;
+}
+
+/**
+ * 解冻并恢复当前 suggestion 到 DOM。语音录音结束时调。
+ * 清除 voice-partial 残留的 voice-preview-text 样式后，用当前 suggestion 重绘。
+ */
+export function unfreeze() {
+  frozen = false;
+  if (ghostSuggestEl) {
+    ghostSuggestEl.classList.remove("voice-preview-text");
+  }
+  if (ghostTypedEl && ghostSuggestEl) {
+    renderToDom(lastQuery);
+  }
 }

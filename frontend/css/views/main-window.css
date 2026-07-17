@@ -180,6 +180,19 @@ body.chord-visible #ghost-overlay:has(.ghost-suggest:empty) .ghost-chord:not(:em
 
 /* ── 0.10 G1 录音指示器 ──────────────────────────────────────────── */
 
+/* 语音录音中：隐藏 Chord 提示，避免与语音指示器并存造成视觉混乱。
+   ghost-suggest 不隐藏——语音预览文本（voice-preview-text）会复用它显示 preview。 */
+body.voice-active #ghost-overlay .ghost-chord {
+  display: none !important;
+}
+
+/* 语音预览文本样式（G1 预上屏：preview 走 ghost-suggest，灰色半透明，
+   与 G2 voice-overlay 的 .voice-preview 视觉一致） */
+#ghost-overlay .ghost-suggest.voice-preview-text {
+  color: var(--text-dim);
+  opacity: 0.6;
+}
+
 .voice-indicator {
   position: absolute;
   right: var(--space-md);

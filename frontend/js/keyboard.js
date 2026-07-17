@@ -142,11 +142,14 @@ function onChordTrigger(e) {
  *  - 结果列表空
  */
 function chordEligible() {
-  return (
-    chord.isEnabled() &&
-    queryEl.value.trim() === "" &&
-    !results.hasItems()
-  );
+  const enabled = chord.isEnabled();
+  const queryEmpty = queryEl.value.trim() === "";
+  const noResults = !results.hasItems();
+  const eligible = enabled && queryEmpty && noResults;
+  if (!eligible) {
+    console.debug("[chord] chordEligible:", { enabled, queryEmpty, noResults, queryVal: queryEl.value });
+  }
+  return eligible;
 }
 
 // ── 按住 Alt 显示数字角标 ─────────────────────────────────────────────────────
@@ -156,10 +159,12 @@ function setAlt(on) {
   // 0.8.5 §6.4：菜单可见性与触发资格同源——只有 chordEligible() 满足才允许展示。
   // 用户输入后按 Alt 不该弹出菜单遮 Ghost / results（触发路径也会被 onChordTrigger 门禁挡住，
   // 双闸保一致）。alt-active 仍标记物理 Alt 态供其他 UI（如 results 上的 Alt+1~9 角标）用。
-  const showChord = on && chordEligible();
+  const eligible = chordEligible();
+  const showChord = on && eligible;
   const prevChordVisible = document.body.classList.contains("chord-visible");
   document.body.classList.toggle("alt-active", on);
   document.body.classList.toggle("chord-visible", showChord);
+  console.debug("[chord] setAlt:", { on, eligible, showChord, prevChordVisible, altLast });
   // Chord 提示在 ghost overlay（无 Ghost 时）或 statusbar（有 Ghost 时），
   // 状态变化需通知 statusbar 重绘。
   if (showChord !== prevChordVisible) {
@@ -178,8 +183,21 @@ export function clearAlt() {
 let altPollTimer = null;
 let altLast = false;
 
+// Alt 轮询宽限期：窗口 show 后短时间内 SetForegroundWindow 会合成 Alt keyup，
+// 导致 GetAsyncKeyState 暂时返回 false。宽限期内忽略 false 读数，避免误移除 chord-visible。
+let altPollGraceUntil = 0;
+const ALT_POLL_GRACE_MS = 300;
+
 export function startAltPoll() {
   stopAltPoll();
+  // 窗口由 Alt+Space 触发，Alt 此时必为按下态。SetForegroundWindow 会合成
+  // Alt keyup 导致 GetAsyncKeyState 暂时返回 false（IPC 往返期间即完成），
+  // 所以不依赖首次 poll 读数，直接设 altLast = true。
+  // setAlt(true) 不在此调——chord config 可能尚未就绪，由 recheckAlt 在
+  // chord.refresh() 完成后补调（lifecycle.js: chord.refresh().then(recheckAlt)）。
+  altLast = true;
+  // 设宽限期：合成 keyup 后的 false 读数在此期间忽略，只接受 true
+  altPollGraceUntil = Date.now() + ALT_POLL_GRACE_MS;
   const tick = async () => {
     let down = false;
     try {
@@ -187,7 +205,12 @@ export function startAltPoll() {
     } catch (e) {
       console.warn("[alt] is_alt_down 失败", e);
     }
+    // 宽限期内忽略 false（合成 keyup），只接受 true
+    if (!down && Date.now() < altPollGraceUntil) {
+      return;
+    }
     if (down !== altLast) {
+      console.debug("[alt] poll detect:", { down, prevAltLast: altLast });
       altLast = down;
       setAlt(down);
     }
@@ -214,6 +237,7 @@ export function stopAltPoll() {
  * refresh 完成后调此函数，用已知 altLast 重判一次即可（不重新查物理态，避免异步开销）。
  */
 export function recheckAlt() {
+  console.debug("[alt] recheckAlt:", { altLast });
   if (altLast) {
     setAlt(true);
   }

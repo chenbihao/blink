@@ -71,6 +71,20 @@
         bars.forEach((bar) => (bar.style.height = "4px"));
       });
 
+      // 录音开始 → 重置文案（覆盖 voice-status 的加载中文案）
+      listen("blink://voice-recording-start", (event) => {
+        const { target } = event.payload ?? {};
+        if (target !== "g2") return;
+        textEl.textContent = "语音输入中…";
+      });
+
+      // 语音状态提示（模型加载中等）
+      listen("blink://voice-status", (event) => {
+        const { message, target } = event.payload ?? {};
+        if (target !== "g2" || !message) return;
+        textEl.textContent = message;
+      });
+
       // 语音错误提示（服务未启动等）
       listen("blink://voice-error", (event) => {
         const { message, target } = event.payload ?? {};

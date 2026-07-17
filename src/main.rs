@@ -601,9 +601,6 @@ app::commands::open_stt_folder,
             if let tauri::RunEvent::Exit = event {
                 // Blink 退出时 kill funasr-server 子进程，避免孤儿进程
                 crate::app::commands::shutdown_funasr_server_blocking();
-                // 关闭 TSF STA 线程（imekit 注入器）
-                #[cfg(windows)]
-                crate::infra::platform::inject::shutdown_tsf_injector();
             }
         });
 }
