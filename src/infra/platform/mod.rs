@@ -10,6 +10,8 @@ pub mod python;
 pub mod screenshot;
 pub mod secret;
 pub mod selection;
+#[cfg(windows)]
+pub mod uia;
 pub mod window;
 
 // ── 子进程窗口抑制（CREATE_NO_WINDOW）─────────────────────────────────────

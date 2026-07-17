@@ -27,16 +27,15 @@
 use std::time::Instant;
 
 use windows::Win32::Foundation::HWND;
-use windows::Win32::System::Com::{
-    CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
-};
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationCondition, IUIAutomationElement,
+    IUIAutomation, IUIAutomationCondition, IUIAutomationElement,
     IUIAutomationTextPattern, PropertyConditionFlags_None, TreeScope_Ancestors,
     TreeScope_Descendants, UIA_IsTextPatternAvailablePropertyId, UIA_TextPatternId,
 };
 use windows::core::Interface;
+
+use crate::infra::platform::uia;
 
 // 用于 hwnd → 进程名 的 Win32 调用（隐私门控：见 listener.rs on_selection）
 use std::ffi::OsString;
@@ -51,37 +50,6 @@ use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 /// 耗时告警阈值：超过此值打 warn。
 const SLOW_THRESHOLD_MS: u128 = 200;
 
-/// COM 初始化 RAII guard（MTA），与 icon.rs 的 ComGuard 同款范式。
-struct ComGuard {
-    should_uninit: bool,
-}
-
-impl ComGuard {
-    fn init_mta() -> Self {
-        // 线程已是其他公寓（如 STA）时返回 RPC_E_CHANGED_MODE，此时不该由我们 uninit。
-        let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-        if hr.is_ok() {
-            ComGuard {
-                should_uninit: true,
-            }
-        } else {
-            // 不阻断：UIA 在已有公寓（如 STA）下也能工作，只是建议 MTA。
-            tracing::debug!(hr = hr.0, "CoInit MTA 失败（线程已是其他公寓），继续尝试");
-            ComGuard {
-                should_uninit: false,
-            }
-        }
-    }
-}
-
-impl Drop for ComGuard {
-    fn drop(&mut self) {
-        if self.should_uninit {
-            unsafe { CoUninitialize() };
-        }
-    }
-}
-
 /// 抓取指定窗口当前的鼠标选区文本。
 ///
 /// 三段式策略（逐级降级），任意环节失败均返回 None，绝不抛错。
@@ -89,11 +57,14 @@ pub(crate) fn get_selected_text(hwnd_raw: isize) -> Option<String> {
     if hwnd_raw == 0 {
         return None;
     }
-    // 生命周期：_com 最先声明、最后析构，确保 COM 对象 Release 完成后再 CoUninitialize。
-    let _com = ComGuard::init_mta();
-
+    // COM 初始化 + UIA 实例创建（从公共 uia 模块）
+    let _com = uia::ComGuard::init_mta();
     let automation: IUIAutomation =
-        match unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_ALL) } {
+        match unsafe { windows::Win32::System::Com::CoCreateInstance(
+            &windows::Win32::UI::Accessibility::CUIAutomation,
+            None,
+            windows::Win32::System::Com::CLSCTX_ALL,
+        ) } {
             Ok(a) => a,
             Err(e) => {
                 tracing::debug!(error = %e, "选区抓取：CoCreateInstance(CUIAutomation) 失败");

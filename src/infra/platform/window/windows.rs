@@ -519,18 +519,69 @@ pub fn get_foreground_hwnd() -> Option<isize> {
 
 /// 恢复前台窗口焦点（G2 注入文本前调用）。
 ///
-/// 使用 `SetForegroundWindow` 恢复录音开始时保存的前台窗口。
-/// 配合 Alt 键欺骗绕过 Windows 的前台锁定限制。
+/// Alt+Space 唤起 Blink 时，组合键到达前台应用会弹出系统菜单（Alt+Space 的系统行为），
+/// 导致焦点从文本输入框漂移到系统菜单。本函数负责在注入前修复焦点：
+///
+/// 1. **WM_CANCELMODE**：关闭 Alt+Space 弹出的系统菜单（DefWindowProc → EndMenu），
+///    无副作用（不像 ESC 会关对话框/清输入）。
+/// 2. **AttachThreadInput + SetForegroundWindow**：恢复前台窗口，绕过 Windows 前台锁定。
+///    不使用 Alt 欺骗——合成 Alt keydown 会被目标应用接收，在 Electron/Chromium 上
+///    可能激活菜单栏，反而干扰焦点。
+/// 3. **UIA SetFocus**：关闭系统菜单后 Windows 自动恢复焦点到弹出前的控件，
+///    但不保证可靠。用 UIA `GetFocusedElement` + `SetFocus` 保险——如果焦点恢复后
+///    的控件是文本输入框（Edit/Document），主动 SetFocus 确保焦点到位。
+///
+/// > **不吞键时 Alt+Space 只触发系统菜单，不触发 Alt tap 菜单栏激活**——
+/// > 因为 Alt keydown→keyup 之间有 Space 到达应用，Windows 不判定为 Alt tap。
+/// > 所以只需关闭系统菜单，不需要处理 Chromium 菜单栏。
 pub fn restore_foreground(hwnd: isize) {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_LMENU, keybd_event,
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowThreadProcessId, PostMessageW, SetForegroundWindow, WM_CANCELMODE,
     };
-    use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+
+    let target_hwnd = HWND(hwnd as *mut _);
+    if target_hwnd.is_invalid() {
+        return;
+    }
+
     unsafe {
-        // Alt 按一下 → 满足 SetForegroundWindow 的"用户输入"条件
-        keybd_event(VK_LMENU.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
-        keybd_event(VK_LMENU.0 as u8, 0, KEYBD_EVENT_FLAGS(KEYEVENTF_KEYUP.0), 0);
-        let _ = SetForegroundWindow(HWND(hwnd as *mut _));
+        // 1. 关闭 Alt+Space 弹出的系统菜单（异步投递，无副作用）
+        let _ = PostMessageW(Some(target_hwnd), WM_CANCELMODE, WPARAM(0), LPARAM(0));
+
+        // 2. AttachThreadInput + SetForegroundWindow（恢复前台窗口，不使用 Alt 欺骗）
+        let current_tid = GetCurrentThreadId();
+        let mut target_pid: u32 = 0;
+        let target_tid = GetWindowThreadProcessId(target_hwnd, Some(&mut target_pid));
+
+        if target_tid != 0 && target_tid != current_tid {
+            let attached = AttachThreadInput(current_tid, target_tid, true);
+            let _ = SetForegroundWindow(target_hwnd);
+            if attached.as_bool() {
+                let _ = AttachThreadInput(current_tid, target_tid, false);
+            }
+        } else {
+            let _ = SetForegroundWindow(target_hwnd);
+        }
+    }
+
+    // 3. UIA 焦点恢复（保险）：关闭系统菜单后 Windows 自动恢复焦点，
+    //    但不保证可靠。用 UIA GetFocusedElement + SetFocus 主动恢复。
+    //    等 50ms 让菜单关闭 + 焦点自动恢复完成，再检查。
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    if let Some(elem) = crate::infra::platform::uia::get_focused_element() {
+        // 焦点已恢复到某个元素——如果它是文本输入控件，主动 SetFocus 确保到位
+        let ct = unsafe { elem.CurrentControlType() }.map(|t| t.0).unwrap_or(0);
+        if crate::infra::platform::uia::is_text_input_control(ct) {
+            tracing::debug!(control_type = ct, "restore_foreground: 焦点在文本输入控件，SetFocus");
+            let _ = crate::infra::platform::uia::set_focused_element(&elem);
+        } else {
+            tracing::debug!(control_type = ct, "restore_foreground: 焦点不在文本输入控件，不强制 SetFocus");
+        }
+    } else {
+        tracing::debug!("restore_foreground: GetFocusedElement 返回 None（UIA 不可用或无前台窗口）");
     }
 }
 
