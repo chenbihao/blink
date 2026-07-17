@@ -57,6 +57,7 @@ impl EnergyVad {
     ///
     /// 参数：
     /// - `sample_rate`：音频采样率（通常 16000）
+    #[allow(dead_code)]
     pub fn new(sample_rate: u32) -> Self {
         Self {
             silence_threshold: 0.005,
@@ -70,7 +71,6 @@ impl EnergyVad {
     }
 
     /// 创建带自定义参数的能量 VAD。
-    #[allow(dead_code)]
     pub fn with_params(
         sample_rate: u32,
         silence_threshold: f64,

@@ -181,15 +181,20 @@ pub fn uses_chat_completion_asr(provider_kind: &str) -> bool {
 
 // ── HTTP 转录（标准 Whisper 接口）────────────────────────────────────────
 
-/// 异步 HTTP 转录请求（OpenAI 兼容格式）。
+/// 异步 HTTP 转录请求（复用外部 Client）。
 ///
+/// 与 [`transcribe_async`] 逻辑相同，但接受外部 `reqwest::Client`，
+/// 适用于伪流式引擎等需要复用连接池的场景。
+///
+/// - `client`：复用的 HTTP 客户端
 /// - `url`：完整 URL（如 `https://api.openai.com/v1/audio/transcriptions`）
 /// - `api_key`：Bearer token；本地服务传 `None`
 /// - `model_id`：模型标识（如 `whisper-large-v3` / `sensevoice`）
 /// - `wav_bytes`：WAV 格式音频字节
 ///
 /// 返回识别文本。HTTP 错误或 JSON 解析失败转为 [`super::SttError`]。
-pub async fn transcribe_async(
+pub async fn transcribe_with_client(
+    client: &reqwest::Client,
     url: &str,
     api_key: Option<&str>,
     model_id: &str,
@@ -205,11 +210,6 @@ pub async fn transcribe_async(
     let form = multipart::Form::new()
         .text("model", model_id.to_string())
         .part("file", part);
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| super::SttError::Engine(format!("HTTP client 创建失败: {e}")))?;
 
     let mut req = client.post(url).multipart(form);
     if let Some(key) = api_key {
@@ -238,6 +238,31 @@ pub async fn transcribe_async(
         .map_err(|e| super::SttError::Engine(format!("JSON 解析失败: {e}")))?;
 
     Ok(result.text)
+}
+
+/// 异步 HTTP 转录请求（OpenAI 兼容格式，内部创建 Client）。
+///
+/// 便捷封装：内部创建 30s 超时的 `reqwest::Client` 后委托给 [`transcribe_with_client`]。
+/// 需要复用连接池的场景（如伪流式引擎）请直接使用 [`transcribe_with_client`]。
+///
+/// - `url`：完整 URL（如 `https://api.openai.com/v1/audio/transcriptions`）
+/// - `api_key`：Bearer token；本地服务传 `None`
+/// - `model_id`：模型标识（如 `whisper-large-v3` / `sensevoice`）
+/// - `wav_bytes`：WAV 格式音频字节
+///
+/// 返回识别文本。HTTP 错误或 JSON 解析失败转为 [`super::SttError`]。
+pub async fn transcribe_async(
+    url: &str,
+    api_key: Option<&str>,
+    model_id: &str,
+    wav_bytes: &[u8],
+) -> Result<String, super::SttError> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| super::SttError::Engine(format!("HTTP client 创建失败: {e}")))?;
+
+    transcribe_with_client(&client, url, api_key, model_id, wav_bytes).await
 }
 
 // ── HTTP 转录（Chat-Completion ASR 接口）─────────────────────────────────

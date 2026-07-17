@@ -113,9 +113,10 @@ function onBlockModifiers(e) {
 //   此时 Alt+字母应正常进搜索框，别被 Chord 吞掉。
 //   典型场景：用户输入"剪贴板"后按 Alt+C 想输入 C——不该触发 Chord，字母正常入框。
 
-const CHORD_KEYS = new Set(["a", "q", "c"]);
+const CHORD_KEYS = new Set(["a", "c"]);
 
-// 触发后端 trigger_chord（Alt+Q 划词会在后端显示 chord-ball 悬浮窗）。
+// 触发后端 trigger_chord（Alt+A 截图 / Alt+C 剪贴板）。
+// 注意：Alt+Space 语音输入不走此路径——由 native hotkey hold 状态机直接处理。
 function fireChord(key) {
   console.log(`[chord] Alt+${key.toUpperCase()} triggered`);
   triggerChord(key).catch((e) => console.warn("[chord] trigger_chord 失败", e));
@@ -146,9 +147,6 @@ function chordEligible() {
   const queryEmpty = queryEl.value.trim() === "";
   const noResults = !results.hasItems();
   const eligible = enabled && queryEmpty && noResults;
-  if (!eligible) {
-    console.debug("[chord] chordEligible:", { enabled, queryEmpty, noResults, queryVal: queryEl.value });
-  }
   return eligible;
 }
 
@@ -164,7 +162,6 @@ function setAlt(on) {
   const prevChordVisible = document.body.classList.contains("chord-visible");
   document.body.classList.toggle("alt-active", on);
   document.body.classList.toggle("chord-visible", showChord);
-  console.debug("[chord] setAlt:", { on, eligible, showChord, prevChordVisible, altLast });
   // Chord 提示在 ghost overlay（无 Ghost 时）或 statusbar（有 Ghost 时），
   // 状态变化需通知 statusbar 重绘。
   if (showChord !== prevChordVisible) {
@@ -210,7 +207,6 @@ export function startAltPoll() {
       return;
     }
     if (down !== altLast) {
-      console.debug("[alt] poll detect:", { down, prevAltLast: altLast });
       altLast = down;
       setAlt(down);
     }
@@ -237,7 +233,6 @@ export function stopAltPoll() {
  * refresh 完成后调此函数，用已知 altLast 重判一次即可（不重新查物理态，避免异步开销）。
  */
 export function recheckAlt() {
-  console.debug("[alt] recheckAlt:", { altLast });
   if (altLast) {
     setAlt(true);
   }

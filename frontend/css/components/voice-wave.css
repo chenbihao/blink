@@ -14,10 +14,16 @@
   height: 4px;
   border-radius: 2px;
   background: var(--green, #a6e3a1);
-  transition: height 0.08s ease-out;
+  transition: height 0.08s ease-out, background 0.25s ease;
   min-height: 4px;
   /* idle 呼吸动画：JS 设置 inline style 后通过 [style] 选择器自动禁用 */
   animation: vw-breathe 1.4s ease-in-out infinite;
+}
+
+/* 加载态（模型加载中）：波形转蓝色，与录音态绿色区分。
+   voice-status 事件加 .voice-loading，voice-recording-start 移除。 */
+.voice-wave.voice-loading .vw-bar {
+  background: var(--accent, #89b4fa);
 }
 
 @keyframes vw-breathe {

@@ -10,6 +10,17 @@
 import { invoke, listen } from "../../tauri.js";
 
 /**
+ * 保存 STT 配置。
+ * scope 决定后端控制台日志打印哪个区段，避免改本地配置时把云端字段也全部打印出来：
+ * - "global": 总开关 / 模式 / 流式 / 音频设备
+ * - "cloud":  云端供应商
+ * - "local":  本地引擎（模型 / 设备 / 热词 / ITN / VAD）
+ */
+function saveSttConfig(cfg, scope) {
+  invoke("set_stt_config", { config: cfg, scope }).catch(console.error);
+}
+
+/**
  * 初始化语音输入 Tab（轻量：只绑定事件 + 加载配置，不跑探测命令）。
  *
  * 昂贵的探测命令（get_funasr_env / get_stt_space_usage / list_stt_models）
@@ -33,7 +44,7 @@ export async function initVoiceTab() {
     enabledCheckbox.checked = config.enabled;
     enabledCheckbox.addEventListener("change", () => {
       config.enabled = enabledCheckbox.checked;
-      invoke("set_stt_config", { config }).catch(console.error);
+      saveSttConfig(config, "global");
     });
   }
 
@@ -49,14 +60,14 @@ export async function initVoiceTab() {
     cloudRadio.addEventListener("change", () => {
       if (cloudRadio.checked) {
         config.mode = "cloud";
-        invoke("set_stt_config", { config }).catch(console.error);
+        saveSttConfig(config, "global");
         updateModeVisibility();
       }
     });
     localRadio.addEventListener("change", () => {
       if (localRadio.checked) {
         config.mode = "local";
-        invoke("set_stt_config", { config }).catch(console.error);
+        saveSttConfig(config, "global");
         updateModeVisibility();
       }
     });
@@ -89,7 +100,7 @@ export async function initVoiceTab() {
     deviceSelect.addEventListener("change", () => {
       const val = deviceSelect.value;
       config.audio_device_id = val || null;
-      invoke("set_stt_config", { config }).catch(console.error);
+      saveSttConfig(config, "global");
     });
   }
 
@@ -282,21 +293,10 @@ export async function initVoiceTab() {
     const base_url = baseUrlInput?.value?.trim() || null;
     if (!model_id) return;
     config.cloud_provider = { kind, model_id, base_url };
-    invoke("set_stt_config", { config }).catch(console.error);
+    saveSttConfig(config, "cloud");
   }
 
-  // 伪流式识别开关（VAD 切句 + 累积预览）——仅本地模式生效
-  const streamingCheckbox = document.getElementById("voice-streaming");
-  const streamingHint = document.getElementById("voice-streaming-hint");
-  if (streamingCheckbox) {
-    streamingCheckbox.checked = config.streaming_mode === "pseudo";
-    streamingCheckbox.addEventListener("change", () => {
-      config.streaming_mode = streamingCheckbox.checked ? "pseudo" : "off";
-      invoke("set_stt_config", { config }).catch(console.error);
-    });
-  }
-
-  // 0.10.3 高级选项（轻量，不跑探测）
+  // 0.10.3 高级选项（轻量，不跑探测）——流式识别开关也在此初始化
   initAdvancedOptions(config);
 
   // 模式可见性
@@ -333,15 +333,17 @@ export async function initVoiceTab() {
   function updateModeVisibility() {
     const cloudSection = document.getElementById("voice-cloud-section");
     const localSection = document.getElementById("voice-local-section");
-    const streamingRow = document.getElementById("voice-streaming-row");
     const isLocal = localRadio?.checked;
     if (cloudSection && localSection) {
       cloudSection.style.display = isLocal ? "none" : "";
       localSection.style.display = isLocal ? "" : "none";
     }
-    // 流式开关仅本地模式生效：云端时置灰 + 提示
-    if (streamingRow) {
-      streamingRow.classList.toggle("setting-row-dimmed", !isLocal);
+    // 高级选项卡内的流式识别字段：仅本地模式生效
+    const streamingField = document.getElementById("voice-streaming-field");
+    const streamingCheckbox = document.getElementById("voice-streaming");
+    const streamingHint = document.getElementById("voice-streaming-hint");
+    if (streamingField) {
+      streamingField.classList.toggle("setting-row-dimmed", !isLocal);
     }
     if (streamingCheckbox) {
       streamingCheckbox.disabled = !isLocal;
@@ -409,17 +411,23 @@ export async function initVoiceTab() {
   }
 }
 
-// ── 0.10.3 高级选项（热词 / ITN / 流式模型 / 注入方式）──────────────────
+// ── 0.10.3 高级选项（热词 / ITN / VAD）──────────────────
+
+// VAD 参数默认值（与 Rust 侧 default_vad_* 一致）
+const VAD_DEFAULTS = {
+  silence_threshold: 0.005,
+  min_silence_ms: 300,
+  min_sentence_ms: 800,
+};
 
 async function initAdvancedOptions(config) {
-  // G2 注入方式
-  const injectMethodSelect = document.getElementById("voice-inject-method-select");
-  if (injectMethodSelect) {
-    const method = config.inject_method || "sendinput";
-    injectMethodSelect.value = method;
-    injectMethodSelect.addEventListener("change", () => {
-      config.inject_method = injectMethodSelect.value;
-      invoke("set_stt_config", { config }).catch(console.error);
+  // 流式识别（伪流式：VAD 切句 + 累积预览）——仅本地模式生效
+  const streamingCheckbox = document.getElementById("voice-streaming");
+  if (streamingCheckbox) {
+    streamingCheckbox.checked = config.streaming_mode === "pseudo";
+    streamingCheckbox.addEventListener("change", () => {
+      config.streaming_mode = streamingCheckbox.checked ? "pseudo" : "off";
+      saveSttConfig(config, "global");
     });
   }
 
@@ -430,12 +438,13 @@ async function initAdvancedOptions(config) {
     // 失焦时保存（避免每次按键都触发保存）
     hotwordsTextarea.addEventListener("blur", () => {
       config.local_engine.hotwords = hotwordsTextarea.value || null;
-      invoke("set_stt_config", { config }).catch(console.error);
+      saveSttConfig(config, "local");
     });
     // 自动收扁：无内容时高度收扁为单行，有内容时按内容自适应
     function autoResizeHotwords() {
       hotwordsTextarea.style.height = "auto";
-      hotwordsTextarea.style.height = Math.max(hotwordsTextarea.scrollHeight, 32) + "px";
+      const h = Math.min(Math.max(hotwordsTextarea.scrollHeight, 56), 200);
+      hotwordsTextarea.style.height = h + "px";
     }
     hotwordsTextarea.addEventListener("input", autoResizeHotwords);
     autoResizeHotwords();
@@ -447,7 +456,113 @@ async function initAdvancedOptions(config) {
     itnToggle.checked = config.local_engine.use_itn !== false;
     itnToggle.addEventListener("change", () => {
       config.local_engine.use_itn = itnToggle.checked;
-      invoke("set_stt_config", { config }).catch(console.error);
+      saveSttConfig(config, "local");
+    });
+  }
+
+  // VAD 切句参数
+  initVadConfig(config);
+}
+
+function initVadConfig(config) {
+  // 确保 vad 对象存在（旧配置可能没有）
+  if (!config.local_engine.vad) {
+    config.local_engine.vad = { ...VAD_DEFAULTS };
+  }
+  const vad = config.local_engine.vad;
+
+  const thresholdInput = document.getElementById("voice-vad-silence-threshold");
+  const silenceMsInput = document.getElementById("voice-vad-min-silence-ms");
+  const sentenceMsInput = document.getElementById("voice-vad-min-sentence-ms");
+  const thresholdVal = document.getElementById("voice-vad-silence-threshold-val");
+  const silenceMsVal = document.getElementById("voice-vad-min-silence-ms-val");
+  const sentenceMsVal = document.getElementById("voice-vad-min-sentence-ms-val");
+  const resetBtn = document.getElementById("voice-vad-reset-btn");
+
+  // 更新滑动条填充进度（CSS 变量 --fill-pct 驱动 linear-gradient）
+  function updateSliderFill(slider) {
+    if (!slider) return;
+    const min = parseFloat(slider.min);
+    const max = parseFloat(slider.max);
+    const val = parseFloat(slider.value);
+    const pct = max > min ? ((val - min) / (max - min)) * 100 : 0;
+    slider.style.setProperty("--fill-pct", pct + "%");
+  }
+
+  // 回显当前值（缺失时用默认值）
+  if (thresholdInput) {
+    const v = vad.silence_threshold ?? VAD_DEFAULTS.silence_threshold;
+    thresholdInput.value = v;
+    if (thresholdVal) thresholdVal.textContent = v.toFixed(3);
+    updateSliderFill(thresholdInput);
+    thresholdInput.addEventListener("input", () => {
+      const val = parseFloat(thresholdInput.value);
+      if (thresholdVal) thresholdVal.textContent = val.toFixed(3);
+      updateSliderFill(thresholdInput);
+    });
+    thresholdInput.addEventListener("change", () => {
+      const val = parseFloat(thresholdInput.value);
+      if (!isNaN(val) && val >= 0.001 && val <= 0.02) {
+        vad.silence_threshold = val;
+        saveSttConfig(config, "local");
+      }
+    });
+  }
+
+  if (silenceMsInput) {
+    const v = vad.min_silence_ms ?? VAD_DEFAULTS.min_silence_ms;
+    silenceMsInput.value = v;
+    if (silenceMsVal) silenceMsVal.textContent = `${v}ms`;
+    updateSliderFill(silenceMsInput);
+    silenceMsInput.addEventListener("input", () => {
+      const val = parseInt(silenceMsInput.value, 10);
+      if (silenceMsVal) silenceMsVal.textContent = `${val}ms`;
+      updateSliderFill(silenceMsInput);
+    });
+    silenceMsInput.addEventListener("change", () => {
+      const val = parseInt(silenceMsInput.value, 10);
+      if (!isNaN(val) && val >= 100 && val <= 1000) {
+        vad.min_silence_ms = val;
+        saveSttConfig(config, "local");
+      }
+    });
+  }
+
+  if (sentenceMsInput) {
+    const v = vad.min_sentence_ms ?? VAD_DEFAULTS.min_sentence_ms;
+    sentenceMsInput.value = v;
+    if (sentenceMsVal) sentenceMsVal.textContent = `${v}ms`;
+    updateSliderFill(sentenceMsInput);
+    sentenceMsInput.addEventListener("input", () => {
+      const val = parseInt(sentenceMsInput.value, 10);
+      if (sentenceMsVal) sentenceMsVal.textContent = `${val}ms`;
+      updateSliderFill(sentenceMsInput);
+    });
+    sentenceMsInput.addEventListener("change", () => {
+      const val = parseInt(sentenceMsInput.value, 10);
+      if (!isNaN(val) && val >= 200 && val <= 2000) {
+        vad.min_sentence_ms = val;
+        saveSttConfig(config, "local");
+      }
+    });
+  }
+
+  // 恢复默认
+  if (resetBtn) {
+    resetBtn.addEventListener("click", () => {
+      vad.silence_threshold = VAD_DEFAULTS.silence_threshold;
+      vad.min_silence_ms = VAD_DEFAULTS.min_silence_ms;
+      vad.min_sentence_ms = VAD_DEFAULTS.min_sentence_ms;
+      if (thresholdInput) thresholdInput.value = VAD_DEFAULTS.silence_threshold;
+      if (silenceMsInput) silenceMsInput.value = VAD_DEFAULTS.min_silence_ms;
+      if (sentenceMsInput) sentenceMsInput.value = VAD_DEFAULTS.min_sentence_ms;
+      if (thresholdVal) thresholdVal.textContent = VAD_DEFAULTS.silence_threshold.toFixed(3);
+      if (silenceMsVal) silenceMsVal.textContent = `${VAD_DEFAULTS.min_silence_ms}ms`;
+      if (sentenceMsVal) sentenceMsVal.textContent = `${VAD_DEFAULTS.min_sentence_ms}ms`;
+      updateSliderFill(thresholdInput);
+      updateSliderFill(silenceMsInput);
+      updateSliderFill(sentenceMsInput);
+      saveSttConfig(config, "local");
     });
   }
 }
@@ -527,7 +642,7 @@ async function initFunasrEnv(config) {
     deviceSelect.addEventListener("change", () => {
       const newDevice = deviceSelect.value;
       config.local_engine.device = newDevice;
-      invoke("set_stt_config", { config }).catch(console.error);
+      saveSttConfig(config, "local");
       appendLog(`[Blink] 推理设备切换为 ${newDevice.toUpperCase()}，需重启服务生效`);
 
       // 如果服务正在运行，提示重启
@@ -544,7 +659,7 @@ async function initFunasrEnv(config) {
     autoStartToggle.checked = config.local_engine.auto_start_server || false;
     autoStartToggle.addEventListener("change", () => {
       config.local_engine.auto_start_server = autoStartToggle.checked;
-      invoke("set_stt_config", { config }).catch(console.error);
+      saveSttConfig(config, "local");
       if (autoStartToggle.checked) {
         appendLog("[Blink] 已开启自动启动服务，Blink 启动时会自动在后台启动 funasr-server");
         // 如果服务还没启动，立即启动一次
@@ -709,6 +824,22 @@ appendLog(`[诊断] funasr: ${env.funasr_installed ? "✅" : "❌"} ${env.funasr
     }
   });
 
+  // ── 回补历史日志 ──
+  // 服务可能在设置页打开前就自启动（auto_start_server），此时前端
+  // listen 尚未注册，日志只存在于后端缓冲区。先拉取历史日志再注册监听。
+  try {
+    const history = await invoke("get_funasr_log_history");
+    if (Array.isArray(history) && history.length > 0) {
+      _logLines = history.slice(-_MAX_LOG_LINES);
+      if (logPre) {
+        logPre.textContent = _logLines.join("\n");
+        logPre.scrollTop = logPre.scrollHeight;
+      }
+    }
+  } catch (e) {
+    console.error("[voice] get_funasr_log_history failed:", e);
+  }
+
   // ── 监听 funasr-server 日志输出 ──
   listen("blink://funasr-server-log", (event) => {
     const line = event.payload?.line;
@@ -841,6 +972,21 @@ appendLog(`[诊断] funasr: ${env.funasr_installed ? "✅" : "❌"} ${env.funasr
     }
 
     statusText.innerHTML = parts.join("<br>");
+
+    // Python 环境卡片：环境就绪时自动收起（仅显示摘要），未就绪时自动展开
+    const envCard = document.getElementById("python-env-card");
+    const envSummary = document.getElementById("python-env-summary");
+    if (envCard && envSummary) {
+      if (env.env_ready) {
+        envSummary.textContent = "环境就绪 ✓";
+        envSummary.classList.add("ready");
+        envCard.open = false;
+      } else {
+        envSummary.textContent = "环境未就绪 — 点击展开详情";
+        envSummary.classList.remove("ready");
+        envCard.open = true;
+      }
+    }
   }
 }
 

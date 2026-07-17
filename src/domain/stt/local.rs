@@ -109,12 +109,6 @@ impl LocalSttEngine {
         self.server_ready
     }
 
-    /// 获取监听端口。
-    #[allow(dead_code)]
-    pub fn port(&self) -> u16 {
-        self.server_port
-    }
-
     /// 调用 FunASR server 的 OpenAI 兼容 API 做语音转录。
     ///
     /// 复用 [`super::wav::transcribe_async`]，只是目标指向 localhost 且无需 API key。
@@ -146,28 +140,9 @@ impl SttEngine for LocalSttEngine {
         }
 
         // 检查模型是否已加载完毕（区分 HTTP 未就绪 / 模型加载中 / 模型就绪）
-        let model_status = super::funasr::check_model_loaded(self.server_port).await;
-        match model_status {
-            super::funasr::ModelLoadStatus::Ready => {} // 模型就绪，继续转录
-            super::funasr::ModelLoadStatus::Loading | super::funasr::ModelLoadStatus::Idle => {
-                return Err(SttError::Engine(format!(
-                    "模型正在加载中（端口 {}），首次使用需下载 ~234MB 模型文件，请稍后在设置页等待加载完成后重试。",
-                    self.server_port
-                )));
-            }
-            super::funasr::ModelLoadStatus::Error => {
-                return Err(SttError::Engine(format!(
-                    "模型加载失败（端口 {}），请在设置页查看日志或检查网络连接后重启服务。",
-                    self.server_port
-                )));
-            }
-            super::funasr::ModelLoadStatus::Unreachable => {
-                return Err(SttError::Engine(format!(
-                    "FunASR 服务不可达（端口 {}）。请确认服务已在设置页启动。",
-                    self.server_port
-                )));
-            }
-        }
+        super::funasr::check_model_ready_or_error(self.server_port)
+            .await
+            .map_err(SttError::Engine)?;
 
         let duration_ms = (samples.len() as f64 / self.sample_rate as f64 * 1000.0) as u64;
         tracing::debug!(

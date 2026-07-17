@@ -458,45 +458,9 @@ pub fn clamp_context_menu(css_w: f64, css_h: f64) -> (i32, i32, u32, u32) {
     }
 }
 
-/// 打开设置窗口：已存在则聚焦，否则创建（无边框 + 透明 + 圆角）。
-///
-/// 统一入口：主窗口搜索结果和托盘菜单都走这里，避免重复代码漏配置。
-/// 显示 chord-ball 悬浮窗（0.8.5 §6.5 划词指示）。
-/// 独立 webview 窗口，不抢焦点（WS_EX_NOACTIVATE），看门狗按 PID 判定天然豁免
-/// （看门狗只 hide 主窗 "main"，不碰 "chord-ball"）。
-pub fn show_chord_ball(app: &AppHandle) -> Result<(), String> {
-    use tauri::{WebviewUrl, WebviewWindowBuilder};
-    const LABEL: &str = "chord-ball";
-    // 球出现在鼠标附近（划词选区在鼠标处）
-    let (mx, my) = unsafe {
-        let mut pt = POINT { x: 0, y: 0 };
-        let _ = GetCursorPos(&mut pt);
-        (pt.x, pt.y)
-    };
-    if let Some(win) = app.get_webview_window(LABEL) {
-        let _ = win.set_position(PhysicalPosition::new(mx + 16, my + 16));
-        let _ = win.show();
-        return Ok(());
-    }
-    let win = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("chord-ball.html".into()))
-        .title("")
-        .inner_size(48.0, 48.0)
-        .decorations(false)
-        .transparent(true)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .shadow(false)
-        .focused(false)
-        .build()
-        .map_err(|e| e.to_string())?;
-    let _ = win.set_position(PhysicalPosition::new(mx + 16, my + 16));
-    if let Ok(hwnd) = win.hwnd() {
-        apply_no_activate(HWND(hwnd.0 as _));
-    }
-    Ok(())
-}
-
-/// 给窗口加 WS_EX_NOACTIVATE——点击不激活，用户能回原应用选文本（划词必需）。
+/// 给窗口加 WS_EX_NOACTIVATE——点击不激活，用户能回原应用选文本。
+/// 被 voice-overlay / chord-screenshot 等次级窗口复用（划词场景已移除，但
+/// WS_EX_NOACTIVATE 对不抢焦点的 overlay 窗口通用）。
 fn apply_no_activate(hwnd: HWND) {
     use windows::Win32::UI::WindowsAndMessaging::{GWL_EXSTYLE, WS_EX_NOACTIVATE};
     unsafe {
@@ -585,12 +549,6 @@ pub fn restore_foreground(hwnd: isize) {
     }
 }
 
-pub fn hide_chord_ball(app: &AppHandle) {
-    if let Some(win) = app.get_webview_window("chord-ball") {
-        let _ = win.hide();
-    }
-}
-
 /// 显示语音录音 mini overlay（0.10 G2）。
 /// 独立 webview 窗口，不抢焦点（WS_EX_NOACTIVATE），显示在光标附近。
 /// 录音结束后由 voice::VoiceService::stop_recording 发 voice-recording-end → 前端隐藏。
@@ -603,6 +561,8 @@ pub fn show_voice_overlay(app: &AppHandle) {
     };
 
     if let Some(win) = app.get_webview_window(LABEL) {
+        // 0.10.6: 复用时重置尺寸为默认值（上次可能被 autoResize 撑高）
+        let _ = win.set_size(tauri::LogicalSize::new(260.0, 140.0));
         let _ = win.set_position(tauri::PhysicalPosition::new(mx + 16, my + 16));
         let _ = win.show();
         return;
@@ -611,7 +571,7 @@ pub fn show_voice_overlay(app: &AppHandle) {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
     match WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("voice-overlay.html".into()))
         .title("")
-        .inner_size(300.0, 140.0)
+        .inner_size(260.0, 140.0)
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
@@ -838,44 +798,17 @@ pub fn wait_frame_after_hide(app: &AppHandle) {
     );
 }
 
-/// 后台预热次级窗口：延迟创建 chord-ball / chord-screenshot / context-menu 并立即隐藏。
+/// 后台预热次级窗口：延迟创建 chord-screenshot / context-menu 并立即隐藏。
 ///
 /// WebView2 首次建实例 300~400ms，预热后 show 只是切可见性 (<50ms)。
-/// 代价：常驻内存 +10~20MB × 3；收益：Alt+A / 右键菜单 / 悬浮球首次触发无感。
+/// 代价：常驻内存 +10~20MB × 2；收益：Alt+A 截图 / 右键菜单首次触发无感。
+///
+/// chord-ball 悬浮球预热已随划词翻译 chord 移除而删除。
 pub fn preheat_secondary_windows(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         // 等主窗稳定 + 前端加载完毕，不与启动路径抢资源
         tokio::time::sleep(Duration::from_secs(3)).await;
         tracing::debug!("preheat: 开始预热次级窗口");
-
-        // --- chord-ball（悬浮球，48×48 透明无焦点） ---
-        if app.get_webview_window("chord-ball").is_none() {
-            use tauri::{WebviewUrl, WebviewWindowBuilder};
-            match WebviewWindowBuilder::new(
-                &app,
-                "chord-ball",
-                WebviewUrl::App("chord-ball.html".into()),
-            )
-            .title("")
-            .inner_size(48.0, 48.0)
-            .decorations(false)
-            .transparent(true)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .shadow(false)
-            .focused(false)
-            .visible(false)
-            .build()
-            {
-                Ok(win) => {
-                    if let Ok(hwnd) = win.hwnd() {
-                        apply_no_activate(HWND(hwnd.0 as _));
-                    }
-                    tracing::debug!("preheat: chord-ball ✓");
-                }
-                Err(e) => tracing::warn!(error = %e, "preheat: chord-ball 失败"),
-            }
-        }
 
         // --- chord-screenshot（截图 overlay，透明全屏层） ---
         if app.get_webview_window("chord-screenshot").is_none() {
@@ -939,7 +872,7 @@ pub fn preheat_secondary_windows(app: AppHandle) {
                 WebviewUrl::App("voice-overlay.html".into()),
             )
             .title("")
-            .inner_size(300.0, 140.0)
+            .inner_size(260.0, 140.0)
             .decorations(false)
             .transparent(true)
             .always_on_top(true)

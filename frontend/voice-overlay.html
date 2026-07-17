@@ -27,6 +27,27 @@
       const waveEl = document.getElementById("wave");
       const bars = waveEl.querySelectorAll(".vw-bar");
 
+      // ── 自动撑高（0.10.6）─────────────────────────────────────────────
+      // 文本更新后测量内容高度，调用 Rust 侧 resize_voice_overlay 撑高窗口。
+      // 超长文本由 CSS .text { max-height + overflow-y: auto } 限制，窗口不超过 MAX_HEIGHT。
+      const MIN_HEIGHT = 140;
+      const MAX_HEIGHT = 400;
+      let lastResizeHeight = MIN_HEIGHT;
+
+      function autoResize() {
+        requestAnimationFrame(() => {
+          const h = Math.min(
+            Math.max(document.body.scrollHeight, MIN_HEIGHT),
+            MAX_HEIGHT,
+          );
+          // 仅在高度变化 > 2px 时调用，避免频繁 IPC
+          if (Math.abs(h - lastResizeHeight) > 2) {
+            lastResizeHeight = h;
+            invoke("resize_voice_overlay", { height: h }).catch(() => {});
+          }
+        });
+      }
+
       // 监听音量级别 → 驱动波形条高度
       listen("blink://voice-level", (event) => {
         const { level, target } = event.payload ?? {};
@@ -58,10 +79,12 @@
               '<span class="voice-preview"></span>';
             textEl.querySelector(".voice-confirmed").textContent = confirmed;
             textEl.querySelector(".voice-preview").textContent = preview;
+            autoResize();
           }
         } else if (payload.text) {
           // 兼容旧格式（真流式 / 非流式引擎）
           textEl.textContent = payload.text;
+          autoResize();
         }
       });
 
@@ -69,6 +92,8 @@
       listen("blink://voice-recording-end", () => {
         textEl.textContent = "语音输入中…";
         bars.forEach((bar) => (bar.style.height = "4px"));
+        waveEl.classList.remove("voice-loading");
+        autoResize();
       });
 
       // 录音开始 → 重置文案（覆盖 voice-status 的加载中文案）
@@ -76,6 +101,9 @@
         const { target } = event.payload ?? {};
         if (target !== "g2") return;
         textEl.textContent = "语音输入中…";
+        // 录音开始：波形切回绿色（移除加载态蓝色）
+        waveEl.classList.remove("voice-loading");
+        autoResize();
       });
 
       // 语音状态提示（模型加载中等）
@@ -83,6 +111,9 @@
         const { message, target } = event.payload ?? {};
         if (target !== "g2" || !message) return;
         textEl.textContent = message;
+        // 模型加载中：波形转蓝色（录音开始后切回绿色）
+        waveEl.classList.add("voice-loading");
+        autoResize();
       });
 
       // 语音错误提示（服务未启动等）
@@ -90,6 +121,7 @@
         const { message, target } = event.payload ?? {};
         if (target !== "g2" || !message) return;
         textEl.textContent = message;
+        autoResize();
       });
     </script>
   </body>

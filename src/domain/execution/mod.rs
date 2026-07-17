@@ -161,7 +161,7 @@ impl std::error::Error for ExecError {}
 ///
 /// 一切副作用的统一入口。三种来源实现此 trait：
 /// - **Builtin**：12 个内置动作（`builtin/*.rs`）—— 0.9.0 §3.3 全部显式实现 `schema()` + `danger_class()`
-/// - **Chord**：`ScreenshotAction` / `ClipboardHistoryAction` / `StubAction`（`chord/mod.rs`）—— 0.9.0 §3.3 显式实现
+/// - **Chord**：`ScreenshotAction` / `VoiceInputAction` / `ClipboardHistoryAction`（`chord/mod.rs`）—— 0.9.0 §3.3 显式实现
 /// - **Plugin**：每次调用产生的 `PluginItem` **不**直接 `impl Action`——它是运行期动态数据,而非静态可注册动作。
 ///   插件的 tool schema 投影(把每个**插件本身**注册为 tool)推迟到 **0.9.1** 与 `AIProvider` 引入一起做,
 ///   届时 manifest 的 `parameters` 字段和 `AIConfig` 一并设计。0.9.0 保持现状(SearchAction → 前端契约不变)。

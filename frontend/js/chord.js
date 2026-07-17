@@ -18,6 +18,9 @@
 //!   仍可 Alt+字母 触发,只是不显示提示）
 //!
 //! 悬浮球形态（Alt+Q 划词）是独立 webview（chord-ball.html），不在此模块。
+//!
+//! 0.11: Alt+Q 划词翻译 chord 已移除，chord-ball 悬浮球已删除。Alt+Space 语音输入
+//! 作为 display-only chord 条目加入提示条（触发仍走 native hotkey hold，不走 trigger_chord）。
 
 import { invoke } from "./tauri.js";
 import { listChordActions } from "./api.js";
@@ -89,6 +92,15 @@ export async function refresh() {
   render();
 }
 
+/**
+ * 把 chord action 的 key 转成渲染用的键名。
+ * key=' '（语音输入）→ "Space"；其它直接大写。
+ * kbd.js 的 normalize() 会把 "Space" 映射到 KEY_META.space → 显示 "Space"。
+ */
+export function chordKeyLabel(key) {
+  return key === " " ? "Space" : key.toUpperCase();
+}
+
 function render() {
   if (!ghostChordEl) return;
   ghostChordEl.replaceChildren();
@@ -109,7 +121,8 @@ function render() {
     const item = document.createElement("span");
     item.className = "chord-item";
     // renderCombo 走项目通用键帽,组合键内 kbd 用 `+` 连接（见 kbd.css 变更）
-    item.appendChild(renderCombo(`Alt+${a.key.toUpperCase()}`));
+    // key=' '（语音输入）→ "Space"，renderCombo("Alt+Space") 正确渲染键帽
+    item.appendChild(renderCombo(`Alt+${chordKeyLabel(a.key)}`));
     const label = document.createElement("span");
     label.className = "chord-label";
     label.textContent = a.label;

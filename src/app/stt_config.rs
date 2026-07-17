@@ -84,52 +84,12 @@ pub struct SttConfig {
     #[serde(default = "default_streaming_mode", deserialize_with = "deserialize_streaming_mode")]
     pub streaming_mode: StreamingMode,
 
-    // ── 0.10.3 新增：文本注入方式 ──
-    /// G2 文本注入方式（默认 SendInput Unicode，不碰剪贴板）
-    #[serde(default = "default_inject_method")]
-    pub inject_method: InjectMethod,
-
     // ── 已废弃字段（反序列化时忽略，不报错）──
     /// 旧 `streaming: bool` 字段，已由 `streaming_mode` 替代。
     /// 保留仅为反序列化兼容，不实际使用。
     #[serde(default)]
     #[allow(dead_code)]
     pub streaming: bool,
-}
-
-/// 文本注入方式（G2 语音输入法上屏）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum InjectMethod {
-    /// Clipboard + Ctrl+V（0.10.1~0.10.2，兼容性最好但有剪贴板污染）
-    Clipboard,
-    /// SendInput Unicode 逐字符（0.10.3 默认，不碰剪贴板）
-    #[default]
-    SendInput,
-}
-
-impl<'de> Deserialize<'de> for InjectMethod {
-    /// 兼容旧配置中的 "tsf" 值（TSF 已移除，降级为 SendInput）。
-    ///
-    /// 0.10.5 曾引入 imekit 做 TSF Composition 注入，实测发现 `ITfThreadMgr::GetFocus()`
-    /// 是进程本地的——Blink 在自己进程创建的 TSF 管理器拿不到前台应用的编辑上下文，
-    /// 跨进程时 TSF 路径静默失败，最终退化成 SendInput，无额外价值。已移除。
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(deserializer)?;
-        match s.as_str() {
-            "clipboard" => Ok(InjectMethod::Clipboard),
-            "sendinput" => Ok(InjectMethod::SendInput),
-            // 兼容旧配置：TSF 已移除（跨进程不可用），降级为 SendInput
-            "tsf" => {
-                tracing::info!("旧配置 inject_method=tsf 已降级为 sendinput（TSF 跨进程不可用，已移除）");
-                Ok(InjectMethod::SendInput)
-            }
-            other => {
-                tracing::warn!(value = %other, "未知 inject_method 值，使用默认 SendInput");
-                Ok(InjectMethod::SendInput)
-            }
-        }
-    }
 }
 
 /// STT 模式。
@@ -181,19 +141,46 @@ pub struct LocalEngineConfig {
     /// Blink 启动后自动启动服务（懒加载，延迟 3s）
     #[serde(default)]
     pub auto_start_server: bool,
-    /// 热词列表（每行 "词 权重"），存为 hotwords.txt 传给 FunASR
+    /// 热词列表（英文逗号分隔，每项格式「词 权重」），存为 hotwords.txt 传给 FunASR
     /// 提升专有名词识别率
     #[serde(default)]
     pub hotwords: Option<String>,
     /// ITN 逆文本归一化（"二零二四年" → "2024年"），默认 true
     #[serde(default = "default_use_itn")]
     pub use_itn: bool,
+    /// VAD 切句参数（伪流式模式生效）
+    #[serde(default)]
+    pub vad: VadConfig,
 
     // ── 已废弃字段（反序列化时忽略，不报错）──
     /// 旧 `streaming_model` 字段，真流式已移除，保留仅为反序列化兼容。
     #[serde(default)]
     #[allow(dead_code)]
     pub streaming_model: Option<String>,
+}
+
+/// VAD 切句参数（伪流式模式生效）。
+///
+/// 控制伪流式引擎何时判定"用户停顿了"从而触发句尾定稿。
+/// 离麦克风较远或环境噪声较高时，可适当调低 `silence_threshold`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VadConfig {
+    /// RMS 低于此值视为静默（默认 0.005，约 -46dB）。
+    ///
+    /// 离麦克风远时声音能量低，可能被误判为静默导致一直灰色不定稿——
+    /// 此时调低此值（如 0.002）。嘈杂环境调高（如 0.01）避免噪声触发。
+    #[serde(default = "default_vad_silence_threshold")]
+    pub silence_threshold: f64,
+    /// 静默持续多久判定句尾（默认 300ms）。
+    ///
+    /// 说话连贯停顿短时可调低（如 200ms）加快定稿；慢速思考调高（如 500ms）。
+    #[serde(default = "default_vad_min_silence_ms")]
+    pub min_silence_ms: u32,
+    /// 最小句子长度：短于此值不切句（默认 800ms）。
+    ///
+    /// 避免咳嗽、短暂噪声等触发误切。调低可让短句也定稿，但误切风险增大。
+    #[serde(default = "default_vad_min_sentence_ms")]
+    pub min_sentence_ms: u32,
 }
 
 fn default_server_port() -> u16 {
@@ -241,12 +228,20 @@ fn default_use_itn() -> bool {
     true
 }
 
-fn default_streaming_mode() -> StreamingMode {
-    StreamingMode::Pseudo
+fn default_vad_silence_threshold() -> f64 {
+    0.005
 }
 
-fn default_inject_method() -> InjectMethod {
-    InjectMethod::SendInput
+fn default_vad_min_silence_ms() -> u32 {
+    300
+}
+
+fn default_vad_min_sentence_ms() -> u32 {
+    800
+}
+
+fn default_streaming_mode() -> StreamingMode {
+    StreamingMode::Pseudo
 }
 
 /// 反序列化 `streaming_mode` 字段，兼容旧配置。
@@ -285,7 +280,18 @@ impl Default for LocalEngineConfig {
             auto_start_server: false,
             hotwords: None,
             use_itn: default_use_itn(),
+            vad: VadConfig::default(),
             streaming_model: None,
+        }
+    }
+}
+
+impl Default for VadConfig {
+    fn default() -> Self {
+        Self {
+            silence_threshold: default_vad_silence_threshold(),
+            min_silence_ms: default_vad_min_silence_ms(),
+            min_sentence_ms: default_vad_min_sentence_ms(),
         }
     }
 }
@@ -301,7 +307,6 @@ impl Default for SttConfig {
             model_dir: None,
             audio_device_id: None,
             streaming_mode: default_streaming_mode(),
-            inject_method: default_inject_method(),
             streaming: false,
         }
     }
@@ -356,7 +361,9 @@ mod tests {
         assert_eq!(cfg.local_engine.device, "cpu");
         assert!(cfg.local_engine.hotwords.is_none());
         assert!(cfg.local_engine.use_itn);
-        assert_eq!(cfg.inject_method, InjectMethod::SendInput);
+        assert_eq!(cfg.local_engine.vad.silence_threshold, 0.005);
+        assert_eq!(cfg.local_engine.vad.min_silence_ms, 300);
+        assert_eq!(cfg.local_engine.vad.min_sentence_ms, 800);
     }
 
     #[test]
@@ -375,15 +382,19 @@ mod tests {
                 device: "cuda".into(),
                 num_threads: Some(4),
                 auto_start_server: true,
-                hotwords: Some("美团 100\n快手 80".into()),
+                hotwords: Some("美团 100, 快手 80".into()),
                 use_itn: false,
+                vad: VadConfig {
+                    silence_threshold: 0.003,
+                    min_silence_ms: 200,
+                    min_sentence_ms: 600,
+                },
                 streaming_model: None,
             },
             local_model_id: Some("sensevoice-small".into()),
             model_dir: None,
             audio_device_id: Some("麦克风 (Realtek Audio)".into()),
             streaming_mode: StreamingMode::Off,
-            inject_method: InjectMethod::Clipboard,
             streaming: false,
         };
         let s = serde_json::to_string(&original).unwrap();
@@ -402,10 +413,12 @@ mod tests {
         assert_eq!(restored.local_engine.num_threads, Some(4));
         assert_eq!(
             restored.local_engine.hotwords.as_deref(),
-            Some("美团 100\n快手 80")
+            Some("美团 100, 快手 80")
         );
         assert!(!restored.local_engine.use_itn);
-        assert_eq!(restored.inject_method, InjectMethod::Clipboard);
+        assert_eq!(restored.local_engine.vad.silence_threshold, 0.003);
+        assert_eq!(restored.local_engine.vad.min_silence_ms, 200);
+        assert_eq!(restored.local_engine.vad.min_sentence_ms, 600);
         assert_eq!(restored.local_model_id.as_deref(), Some("sensevoice-small"));
         assert_eq!(restored.streaming_mode, StreamingMode::Off);
     }
@@ -418,7 +431,6 @@ mod tests {
         assert!(cfg.enabled);
         assert_eq!(cfg.mode, SttMode::Cloud);
         assert_eq!(cfg.streaming_mode, StreamingMode::Pseudo);
-        assert_eq!(cfg.inject_method, InjectMethod::SendInput);
         assert_eq!(cfg.local_engine.server_port, 8000);
         assert_eq!(cfg.local_engine.funasr_model, "iic/SenseVoiceSmall");
         assert!(cfg.local_engine.use_itn);
@@ -430,44 +442,6 @@ mod tests {
         assert_eq!(s, r#""local""#);
         let s = serde_json::to_string(&SttMode::Cloud).unwrap();
         assert_eq!(s, r#""cloud""#);
-    }
-
-    #[test]
-    fn inject_method_serializes_as_lowercase() {
-        assert_eq!(
-            serde_json::to_string(&InjectMethod::Clipboard).unwrap(),
-            r#""clipboard""#
-        );
-        assert_eq!(
-            serde_json::to_string(&InjectMethod::SendInput).unwrap(),
-            r#""sendinput""#
-        );
-    }
-
-    #[test]
-    fn inject_method_deserializes_from_lowercase() {
-        assert_eq!(
-            serde_json::from_str::<InjectMethod>(r#""clipboard""#).unwrap(),
-            InjectMethod::Clipboard
-        );
-        assert_eq!(
-            serde_json::from_str::<InjectMethod>(r#""sendinput""#).unwrap(),
-            InjectMethod::SendInput
-        );
-    }
-
-    /// 验证旧配置中的 "tsf" 值反序列化为 SendInput（TSF 已移除）
-    #[test]
-    fn inject_method_deserializes_old_tsf_to_sendinput() {
-        let method: InjectMethod = serde_json::from_str(r#""tsf""#).unwrap();
-        assert_eq!(method, InjectMethod::SendInput);
-    }
-
-    /// 验证未知值反序列化为 SendInput
-    #[test]
-    fn inject_method_deserializes_unknown_to_sendinput() {
-        let method: InjectMethod = serde_json::from_str(r#""unknown""#).unwrap();
-        assert_eq!(method, InjectMethod::SendInput);
     }
 
     #[test]

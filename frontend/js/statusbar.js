@@ -116,7 +116,8 @@ function buildRight(paging) {
         sep.textContent = "│";
         right.appendChild(sep);
       }
-      right.appendChild(renderCombo(`Alt+${a.key.toUpperCase()}`));
+      // key=' '（语音输入）→ "Space"，与 chord.js render 统一
+      right.appendChild(renderCombo(`Alt+${chord.chordKeyLabel(a.key)}`));
       const label = document.createElement("span");
       label.className = "chord-label";
       label.textContent = a.label;

@@ -35,22 +35,70 @@ import * as search from "./search.js";
 let currentSuggestion = null;
 let ghostTypedEl = null;
 let ghostSuggestEl = null;
+let ghostOverlayEl = null;
 
 // hint 状态订阅者（statusbar 层）：状态变化时回调，参数为最新 suggestion（null 表示清空）。
 // 一次一个订阅者就够了（当前只有 statusbar 消费）。多订阅者需求出现时再扩数组。
 let onChangeCallback = null;
 
 // ── 冻结机制（0.10 语音预览独占 overlay）──────────────────────────────────────
-// 语音录音期间 voice-partial 直接写 ghostSuggest 显示 preview 文本，同时 dispatch
-// input → onInput → ghost.update() 会覆写 overlay → 闪屏。freeze 后 update/clear
-// 只更新内部状态 + notify，不碰 DOM；unfreeze 时恢复当前 suggestion 到 DOM。
+// 语音录音期间 voice-partial 直接写 ghostSuggest 显示 preview 文本。
+// 0.10.7 起 voice-partial 不再 dispatch input（避免录音期间触发无意义空 query 搜索），
+// 但 awareness-updated（剪贴板变化等）→ search.retrigger() → onInput → ghost.update()
+// 仍可能在录音期间发生并覆写 overlay → 闪屏。freeze 后 update/clear 只更新内部状态
+// + notify，不碰 DOM；unfreeze 时恢复当前 suggestion 到 DOM。
 let frozen = false;
 let lastQuery = "";
 
-/** 初始化：绑定 overlay DOM。main.js 启动时调一次。 */
+/**
+ * 同步 ghost overlay 的水平滚动位置到 #query。
+ *
+ * `#query` 是 `<input>`，文本超长时浏览器自动水平滚动（光标保持可见）。
+ * `#ghost-overlay` 是 `<div>` + `overflow: hidden`，不会自动滚动——
+ * 如果不同步，ghost-typed（透明占位）从左边缘开始，ghost-suggest（影子）
+ * 会被推到裁切区之外完全不可见。
+ *
+ * overflow:hidden 的元素支持 programmatic scrollLeft，所以只需在 input 滚动时
+ * 把 scrollLeft 同步过来即可。（0.10.6）
+ */
+export function syncScroll() {
+  if (ghostOverlayEl) {
+    ghostOverlayEl.scrollLeft = queryEl.scrollLeft;
+  }
+}
+
+/**
+ * 确保输入框文本末尾（光标位置）在可见区域内，并同步 ghost overlay 滚动。（0.10.6）
+ *
+ * **设计约束**：`<input>` 的 `scrollLeft` 上限为 `maxScroll = scrollWidth - clientWidth`，
+ * 此时文本末尾贴右边缘。无法在文本末尾右侧预留空间给影子——浏览器不允许滚过去。
+ * （旧公式 `maxScroll - margin` 反而往左滚，把文本末尾推出可见区域，导致用户看不到最新输入）
+ *
+ * 因此文本溢出时直接滚到 `maxScroll`（文本末尾贴右边缘可见），
+ * 影子文本被 `overflow: hidden` 裁切——文本可见性优先于影子可见性。
+ * 文本不溢出时不做任何事（maxScroll <= 0），影子和文本都自然可见。
+ *
+ * @param {number} [ratio=0.8] - 预留参数（当前未使用）。`<input>` 无法在文本末尾
+ *   右侧留空间，ratio 仅在未来换用可换行元素时才有意义。
+ */
+export function scrollWithMargin(_ratio = 0.8) {
+  const maxScroll = queryEl.scrollWidth - queryEl.clientWidth;
+  if (maxScroll <= 0) {
+    syncScroll();
+    return;
+  }
+  queryEl.scrollLeft = maxScroll;
+  syncScroll();
+}
+
+/** 初始化：绑定 overlay DOM + scroll 同步监听。main.js 启动时调一次。 */
 export function init() {
+  ghostOverlayEl = document.querySelector("#ghost-overlay");
   ghostTypedEl = document.querySelector("#ghost-overlay .ghost-typed");
   ghostSuggestEl = document.querySelector("#ghost-overlay .ghost-suggest");
+
+  // 0.10.6: #query 水平滚动时同步 ghost overlay——覆盖打字 / IME / 语音输入所有场景
+  queryEl.addEventListener("scroll", syncScroll);
 }
 
 /**
@@ -72,6 +120,7 @@ function notify() {
  */
 export function syncTypedText(text) {
   if (ghostTypedEl) ghostTypedEl.textContent = text;
+  syncScroll();
 }
 
 /**
@@ -107,8 +156,11 @@ function renderToDom(query) {
   );
   if (currentSuggestion.display) {
     queryEl.setAttribute("data-ghost-active", "");
+    // 0.10.6: 有影子时调整滚动留出右侧空间给 preview 文本
+    scrollWithMargin();
   } else {
     queryEl.removeAttribute("data-ghost-active");
+    syncScroll();
   }
 }
 
@@ -234,4 +286,5 @@ export function unfreeze() {
   if (ghostTypedEl && ghostSuggestEl) {
     renderToDom(lastQuery);
   }
+  // renderToDom 内部已按有无 display 调用 scrollWithMargin / syncScroll
 }

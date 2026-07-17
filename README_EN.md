@@ -30,6 +30,7 @@ search is just one entry point, **action execution is the destination**. By sens
 
 - ⚡ **Fast** — Summon &lt; 50ms, first result &lt; 20ms
 - 🎯 **Context-aware** — Auto-senses selection / clipboard / foreground app; unobtrusive but always ready
+- 🎤 **Voice Input** — Hold Alt+Space to talk, release to type; supports cloud (OpenAI/Groq) and local (FunASR) engines
 - 🧩 **Extensible** — Sandboxed plugin processes (Rust / Python / Node.js / PowerShell); crashes don't affect core
 
 ---
@@ -59,6 +60,16 @@ Hold Alt while the main window is open; letter keys trigger actions directly:
 | `Alt + 1~9` | Quick launch item by position in results |
 | `Alt + C` | Clipboard history |
 | `Alt + A` | Region screenshot (area capture → clipboard / save) |
+| Hold `Alt + Space` | Voice input (release to type) |
+
+### Voice Input
+
+Hold **Alt+Space** to talk, release to type — no need to switch IME or type manually.
+
+- **Two modes**: Main window voice input (text fills the search box) and **Voice Typing** (text goes directly to the current cursor position, like typing by voice)
+- **Dual engines**: Cloud (OpenAI Whisper / Groq, billed by audio duration) and Local (FunASR SenseVoice, offline & free, 17× real-time on CPU, ~92% accuracy)
+- **Pseudo-streaming**: See words appear as you speak — VAD auto-splits sentences and finalizes text, no need to wait until you finish the whole sentence
+- **Privacy**: Local mode is fully offline, no audio persistence; cloud mode sends audio to the provider
 
 ### Plugin Ecosystem
 
@@ -77,13 +88,12 @@ Hold Alt while the main window is open; letter keys trigger actions directly:
 
 ## Roadmap
 
-**Done:** Core search → Plugin ecosystem → Context awareness → Chord interactions → AI conversation capabilities → Frontend architecture overhaul
+**Done:** Core search → Plugin ecosystem → Context awareness → Chord interactions → AI conversation capabilities → Frontend architecture overhaul → Voice input
 
 **Next:**
 
 | Direction | Content | Status |
 |---|---|---|
-| 🎤 **Voice Actions** | STT · dual-chord voice entry · voice file-search · Agent dialog window | 📋 Planned |
 | 🔌 **Local & Ecosystem** | On-demand local models · skill-ification · bidirectional MCP · RAG memory | 📋 Planned |
 | 🛡️ **Trust Boundary** | AI only recommends actions, never executes directly; confirmation always stays in your hands | ✅ Built-in |
 
@@ -116,6 +126,7 @@ Download the latest installer from [Releases](../../releases).
 | `PgUp` `PgDn` | Page up/down |
 | `Alt + C` | Chord: clipboard history |
 | `Alt + A` | Chord: region screenshot |
+| Hold `Alt+Space` | Voice input (release to type) |
 | `Esc` | Hide |
 
 ---

@@ -11,16 +11,14 @@
 //!
 //! ## 当前实现
 //!
-//! `inject_text()` 根据 `SttConfig.inject_method` 选择注入策略：
-//! - `SendInput`（默认）：逐字符 `KEYEVENTF_UNICODE`，不碰剪贴板
-//! - `Clipboard`：剪贴板 + Ctrl+V（兼容性兜底）
-//!
-//! SendInput Unicode 失败时自动回退到 Clipboard+Ctrl+V（兼容性兜底）。
+//! `inject_text()` 始终走 SendInput Unicode（不碰剪贴板），失败时自动降级到
+//! Clipboard+Ctrl+V。无需用户配置——自动降级覆盖了所有兼容性场景。
 //!
 //! > **0.10.5 TSF 方案已废弃**：曾引入 imekit 做 TSF Composition 注入，实测发现
-//! > `ITfThreadMgr::GetFocus()` 是进程本地的——Blink 在自己进程创建的 TSF 管理器
-//! > 拿不到前台应用的编辑上下文，跨进程时 TSF 路径静默失败，退化成 SendInput，
-//! > 无额外价值。imekit 依赖与 TSF 实现已移除。
+//! > `ITfThreadMgr::GetFocus()` 是进程本地的——Blink 拿不到前台应用的编辑上下文，跨进程时 TSF 路径静默失败退化成 SendInput，无额外价值。imekit 依赖与 TSF 实现已移除。
+//! >
+//! > **inject_method 配置项已移除**：SendInput + 自动降级已覆盖所有场景，
+//! > 用户无需手动选择注入方式。旧配置中的 `inject_method` 字段会被 serde 忽略。
 
 use std::fmt;
 
@@ -50,44 +48,19 @@ impl std::error::Error for InjectError {}
 
 /// 注入文本到前台应用光标处。
 ///
-/// 根据 `SttConfig.inject_method` 选择注入方式：
-/// - `SendInput`（默认）：SendInput Unicode 逐字符，不碰剪贴板
-/// - `Clipboard`：剪贴板 + Ctrl+V
-///
-/// SendInput 失败时自动回退到 Clipboard+Ctrl+V。
+/// 策略：SendInput Unicode（不碰剪贴板）→ 失败时自动降级 Clipboard+Ctrl+V。
 #[cfg(target_os = "windows")]
 pub fn inject_text(text: &str) -> Result<(), InjectError> {
-    let config = crate::app::stt_config::get_stt_config();
-    inject_text_with_method(text, config.inject_method)
-}
-
-/// 按指定方式注入文本。
-#[cfg(target_os = "windows")]
-pub fn inject_text_with_method(
-    text: &str,
-    method: crate::app::stt_config::InjectMethod,
-) -> Result<(), InjectError> {
-    use crate::app::stt_config::InjectMethod;
-
     if text.is_empty() {
         return Ok(());
     }
 
     let chars = text.chars().count();
-
-    match method {
-        InjectMethod::SendInput => {
-            tracing::info!(chars, "G2 注入: SendInput Unicode");
-            match windows_impl::inject_text_unicode(text) {
-                Ok(()) => Ok(()),
-                Err(e) => {
-                    tracing::warn!(%e, chars, "SendInput Unicode 失败, 降级 Clipboard+Ctrl+V");
-                    windows_impl::inject_text_clipboard(text)
-                }
-            }
-        }
-        InjectMethod::Clipboard => {
-            tracing::info!(chars, "G2 注入: Clipboard+Ctrl+V");
+    tracing::info!(chars, "文本注入: SendInput Unicode");
+    match windows_impl::inject_text_unicode(text) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            tracing::warn!(%e, chars, "SendInput Unicode 失败, 降级 Clipboard+Ctrl+V");
             windows_impl::inject_text_clipboard(text)
         }
     }

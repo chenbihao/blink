@@ -13,7 +13,6 @@ import { applyI18nFromConfig } from "./i18n/index.js";
 /** 注册生命周期事件监听。 */
 export function init() {
   listen("blink://shown", () => {
-    console.debug("[lifecycle] shown received");
     queryEl.value = "";
     // 先解冻 ghost（上次录音可能残留 frozen），再 reset 让 ghost.clear 正常清 DOM
     ghost.unfreeze();
@@ -57,12 +56,6 @@ export function init() {
     chord.refresh(); // 0.8.5.1 §6.6：Chord 开关/可见性改动即时生效
   });
 
-  // 0.8.5：Chord 划词确认 → 填搜索框「翻译 {text}」触发翻译插件
-  listen("blink://chord-translate", (event) => {
-    queryEl.value = `翻译 ${event.payload}`;
-    queryEl.dispatchEvent(new Event("input", { bubbles: true }));
-  });
-
   // 0.8.5 §6.4：Chord Alt+C 剪贴板改走 fill-query——后端 ClipboardHistoryAction
   // execute 里 window::invoke + emit "剪贴板 " → 前端填搜索框 + 触发 ClipboardEngine 召回。
   listen("blink://chord-fill-query", (event) => {
@@ -82,6 +75,8 @@ export function init() {
     // 显示语音指示器
     if (voiceIndicator) {
       voiceIndicator.classList.remove("hidden");
+      // 录音开始：波形切回绿色（移除加载态蓝色）
+      voiceIndicator.querySelector(".voice-wave")?.classList.remove("voice-loading");
     }
   });
 
@@ -95,6 +90,8 @@ export function init() {
       voiceIndicator.classList.remove("hidden");
       const label = voiceIndicator.querySelector(".voice-label");
       if (label) label.textContent = message;
+      // 模型加载中：波形转蓝色（录音开始后由 voice-recording-start 切回绿色）
+      voiceIndicator.querySelector(".voice-wave")?.classList.add("voice-loading");
     }
   });
 
@@ -102,6 +99,14 @@ export function init() {
   // (G2 的 partial 由 mini overlay 窗口处理,主窗口不可见时不接收)
   // 0.10.4: 支持 confirmed/preview 双字段（伪流式引擎）
   // 0.10.5: G1 应用 G2 的预上屏双色渲染——confirmed 填 #query，preview 走 Ghost overlay
+  // 0.10.6: 同步更新 .ghost-typed 为 confirmed 文本——freeze 后 renderToDom 不执行，
+  //         .ghost-typed 保持空白导致 preview 影子出现在输入框最左边而非 confirmed 之后
+  // 0.10.7: 录音期间不再 dispatch input 事件——伪流式引擎第一句时 confirmed 为空，
+  //         dispatch input 会触发 onInput → fetchContextSuggestions → search_apps("")
+  //         产生大量无意义空 query 搜索（每个音频 chunk 一次，~70ms 内 6 次）。
+  //         搜索结果在 freeze 期间 ghost.update 不写 DOM，纯无用功。
+  //         录音结束后由 chord-fill-query（正常结束）填入 final_text 并 dispatch input
+  //         触发一次完整搜索，取消时 ESC 隐藏窗口自动清空，无需录音中触发。
   listen("blink://voice-partial", (event) => {
     const payload = event.payload ?? {};
     if (payload.target !== "g1") return;
@@ -112,19 +117,29 @@ export function init() {
       const preview = payload.preview || "";
       // confirmed 填入输入框（已定稿文本）
       queryEl.value = confirmed;
+      // 光标移到末尾 → 浏览器自动滚动 input 到文本末尾（超长时关键）
+      queryEl.setSelectionRange(confirmed.length, confirmed.length);
       // preview 走 Ghost overlay（灰色半透明，与 G2 预上屏视觉效果一致）
       // ghost 已 freeze，search 的 ghost.update 不会覆写此处
+      const ghostTyped = document.querySelector("#ghost-overlay .ghost-typed");
       const ghostSuggest = document.querySelector("#ghost-overlay .ghost-suggest");
+      if (ghostTyped) {
+        // 透明占位：与 #query 内容等宽，让 .ghost-suggest 的 preview 跟随到 confirmed 之后
+        ghostTyped.textContent = confirmed;
+      }
       if (ghostSuggest) {
         ghostSuggest.textContent = preview ? ` ${preview}` : "";
         ghostSuggest.classList.add("voice-preview-text");
         ghostSuggest.classList.remove("ghost-context");
       }
-      queryEl.dispatchEvent(new Event("input", { bubbles: true }));
+      // 0.10.6: 超长文本时确保滚动到文本末尾——setSelectionRange 的原生 scroll
+      // 可能在下一帧才生效，用 rAF 确保读取到正确的 scrollWidth 后主动滚到最右端。
+      requestAnimationFrame(() => ghost.scrollWithMargin());
+      // 不 dispatch input —— 录音期间不触发搜索（见上方 0.10.7 注释）
     } else if (payload.text) {
       // 兼容旧格式（真流式 / 非流式引擎）
       queryEl.value = payload.text;
-      queryEl.dispatchEvent(new Event("input", { bubbles: true }));
+      // 不 dispatch input —— 同上，录音结束后由 chord-fill-query 触发搜索
     }
   });
 
@@ -154,7 +169,8 @@ export function init() {
     if (voiceIndicator) {
       voiceIndicator.classList.add("hidden");
       vwBars.forEach((bar) => (bar.style.height = "4px"));
-      // 恢复语音指示器标签默认文案
+      // 恢复语音指示器标签默认文案 + 清除加载态
+      voiceIndicator.querySelector(".voice-wave")?.classList.remove("voice-loading");
       const label = voiceIndicator.querySelector(".voice-label");
       if (label) label.textContent = "语音输入中";
     }

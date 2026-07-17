@@ -70,18 +70,20 @@ Blink 不是启动器（launcher），而是**统一操作层**——感知上�
 
 **产品价值**：跳过搜索步骤直触发；差异化竞争（Wox/Listary/Flow Launcher 都没有）；扩展性强（新高频动作可接入）。
 
-#### 语音 Chord（0.10 规划）
+#### 语音输入（0.10 已完成）
 
-语音是 Chord 体系的下一个独占入口，分两种意图（详见 [phases/0.10 §二](./phases/0.10-voice-agent.md)）：
+按住 **Alt+Space** 说话，松开自动上屏。分两种场景（详见 [phases/0.10 §二](./phases/0.10-voice-agent.md)）：
 
-| 组合键（待定） | 模式 | 行为 |
+| 模式 | 触发 | 文字去向 |
 |---|---|---|
-| `Alt+V` | 语音输入法 | 边说边转文本，口语优化后上屏到光标处 |
-| `Alt+Shift+V` | 语音指令 | 说意图 → 轻量路由 → 执行 / 展开 Agent |
+| G1 主窗口语音输入 | tap → 再 hold | blink `#query` 搜索框 |
+| G2 语音输入法 | 直接 hold | 外部前台应用光标处（SendInput Unicode + Clipboard 两级回退） |
 
-**为什么双入口而非单入口智能分叉**：Blink 立身之本是可预测——不为「一个键的丝滑」牺牲确定性。指令模式内若没命中 Action 才智能回退到对话。
+支持云端（OpenAI Whisper / Groq）和本地（FunASR SenseVoice，离线免费）双引擎，伪流式 VAD 切句 + 累积预览实现边说边出字。
 
-### 2.5 Agent 对话窗口（0.10）
+### 2.5 Agent 对话窗口（未来版本）
+
+> 0.10 原计划含 Agent 对话窗口，实际落地时聚焦于语音输入（STT + 语音打字），Agent 窗口移至未来版本。
 
 轻量路由判定「需要多轮 / 主窗口不够展示」时，**不自动展开**——产 Suggestion「Alt+1 展开对话」，用户确认才展开。自动展开会抢焦点、打断心流。
 
@@ -89,7 +91,6 @@ Blink 不是启动器（launcher），而是**统一操作层**——感知上�
 - 流式 MD 渲染（打字机 + 代码高亮 + 复制）
 - 确认反馈走统一 kbd 体系：`Alt+1` 展开 / `Alt+2` 拒绝（见 [principles §14.7](./product-principles.md)）
 - ESC 返回搜索；Context 可注入（选区 / 剪贴板 / 前台，可逐项关）
-- 详见 [phases/0.10 §五](./phases/0.10-voice-agent.md)
 
 ---
 

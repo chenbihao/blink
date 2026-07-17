@@ -56,7 +56,7 @@ pub fn inject_text_unicode(text: &str) -> Result<(), InjectError> {
         return Ok(());
     }
 
-    // 详细路径日志由 mod.rs 的 inject_text_with_method 统一打印
+    // 详细路径日志由 mod.rs 的 inject_text 统一打印
 
     // 编码为 UTF-16，逐码元构造 INPUT
     let utf16: Vec<u16> = text.encode_utf16().collect();
@@ -135,7 +135,7 @@ pub fn inject_text_clipboard(text: &str) -> Result<(), InjectError> {
         return Ok(());
     }
 
-    // 详细路径日志由 mod.rs 的 inject_text_with_method 统一打印
+    // 详细路径日志由 mod.rs 的 inject_text 统一打印
 
     // 1. 备份当前剪贴板文本
     let backup = read_clipboard_text();

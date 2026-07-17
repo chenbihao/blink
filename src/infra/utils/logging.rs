@@ -99,7 +99,9 @@ pub fn current_log_file() -> PathBuf {
 
 /// 级别字符串归一化为 EnvFilter 指令（非法值降级 error）。
 fn parse_level(level: &str) -> String {
-    // 第三方库（sqlx/tauri）压到 warn，避免 query/asset 等 debug 噪音淹没 blink 自身日志。
+    // 第三方库（sqlx/tauri/tao）压到 warn，避免 query/asset/IME 字符消息等 debug/trace 噪音
+    // 淹没 blink 自身日志。tao 的「⌨️ Received a CHAR message…」在 TRACE 下每键一条，
+    // 是 IME 合成字符的内部诊断，对用户无价值。
     // **AI SLO 埋点**(0.9.0 §5.3)：`blink::ai::slo` target 是 `blink` 的子级,自动继承根级
     // filter——`info/debug/trace` 都会捕获;`error` 级别下 SLO event 会被过滤（预期,
     // 用户显式压 error 是"我什么都不想看"信号,不该被 AI 遥测污染）。
@@ -110,7 +112,7 @@ fn parse_level(level: &str) -> String {
     // `completions request/response` TRACE 对诊断"发了什么/收了什么"很有价值。
     let ai_noise = "h2=warn,rustls=warn,tower=warn,hpack=warn";
     match level {
-        "trace" => format!("trace,sqlx=warn,tauri=warn,hyper=warn,reqwest=warn,{ai_noise}"),
+        "trace" => format!("trace,sqlx=warn,tauri=warn,tao=warn,hyper=warn,reqwest=warn,{ai_noise}"),
         "debug" => format!("debug,sqlx=warn,tauri=warn,{ai_noise}"),
         "info" => format!("info,sqlx=warn,tauri=warn,{ai_noise}"),
         _ => "error".to_string(),

@@ -272,7 +272,7 @@ export const zh = {
   "context.selection.hint": "鼠标划选文本后自动抓取，唤起 Blink 时作为上下文使用。局限：仅 Windows；依赖应用支持 UIA TextPattern，浏览器（Chrome/Edge/Firefox）、Office、VS Code、原生 Win32 支持较好，部分 Electron 应用（如新版 QQ/微信/Discord）、终端、游戏可能抓不到；无选区时可先复制文本，Blink 会自动读剪贴板。",
 
   // ── Chord 交互面板（0.8.5.1 §6.6）──
-  "chord.lede": "主窗可见且未开始输入时，按住 Alt 可触发快捷动作（区域截图 / 划词翻译 / 剪贴板历史）",
+  "chord.lede": "主窗可见且未开始输入时，按住 Alt 可触发快捷动作（区域截图 / 语音输入 / 剪贴板历史）",
   "chord.general.title": "总控",
   "chord.enabled.label": "启用 Chord",
   "chord.enabled.hint": "关闭后 Alt+字母 不再触发 Chord 动作",
@@ -282,9 +282,9 @@ export const zh = {
   "chord.actions.hint": "取消勾选后该 Chord 不再列在提示条，Alt+字母 也不再触发",
   "chord.actions.empty": "暂无已注册的 Chord 动作",
   "chord.section.actions": "动作 · Alt + 字母 直达",
-  "chord.action.screenshot.subtitle": "全屏拖选区域，写入剪贴板",
-  "chord.action.selection.subtitle": "把当前选中文本抓入 Blink 输入框",
-  "chord.action.clipboard_history.subtitle": "打开剪贴板历史召回面板",
+"chord.action.screenshot.subtitle": "全屏拖选区域，写入剪贴板",
+"chord.action.voice_input.subtitle": "按住 Alt+Space 说话，松开出字",
+"chord.action.clipboard_history.subtitle": "打开剪贴板历史召回面板",
   "chord.clipboard.title": "剪贴板历史",
   "chord.clipboard.enabled.label": "监听剪贴板写入",
   "chord.clipboard.enabled.hint": "开启后自动记录复制内容，输入\"剪贴板\"或 Alt+C 召回历史（如启动时为关闭状态，首次打开需重启一次让监听器建立）",

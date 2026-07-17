@@ -36,6 +36,16 @@ pub enum VoiceTarget {
     ForegroundApp,
 }
 
+impl VoiceTarget {
+    /// 序列化给前端的字符串标签。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            VoiceTarget::MainWindow => "g1",
+            VoiceTarget::ForegroundApp => "g2",
+        }
+    }
+}
+
 /// 语音会话状态。
 struct VoiceSession {
     /// STT 引擎
@@ -48,8 +58,6 @@ struct VoiceSession {
     target: VoiceTarget,
     /// 是否正在录音
     recording: bool,
-    /// 最新 partial 文本
-    last_partial: String,
     /// G2: 录音开始时的前台窗口 HWND（用于注入前恢复焦点）
     prev_fg_hwnd: Option<isize>,
 }
@@ -62,7 +70,6 @@ impl Default for VoiceSession {
             audio_task: None,
             target: VoiceTarget::ForegroundApp,
             recording: false,
-            last_partial: String::new(),
             prev_fg_hwnd: None,
         }
     }
@@ -232,7 +239,6 @@ impl VoiceService {
         match capture.start(format) {
             Ok(mut rx) => {
                 session.recording = true;
-                session.last_partial.clear();
 
                 // 设置全局录音标志（hotkey hook 读它判断 ESC + 吞 Alt+Space）
                 crate::infra::platform::hotkey::set_voice_recording(true);
@@ -250,11 +256,7 @@ impl VoiceService {
                 }
 
                 // 通知前端录音已开始（G1 隐藏 Ghost overlay / G2 overlay 已显示）
-                let target_str = if session.target == VoiceTarget::MainWindow {
-                    "g1"
-                } else {
-                    "g2"
-                };
+                let target_str = session.target.as_str();
                 let _ = self.app.emit(
                     "blink://voice-recording-start",
                     serde_json::json!({ "target": target_str }),
@@ -270,11 +272,7 @@ impl VoiceService {
                     while let Some(chunk) = rx.recv().await {
                         // 计算 RMS 音量（0.0 ~ 1.0）
                         let level = compute_rms(&chunk.samples);
-                        let target_str = if target == VoiceTarget::MainWindow {
-                            "g1"
-                        } else {
-                            "g2"
-                        };
+                        let target_str = target.as_str();
                         let _ = app.emit(
                             "blink://voice-level",
                             serde_json::json!({
@@ -451,7 +449,7 @@ impl VoiceService {
                     }
                     match platform::inject::inject_text(&final_text) {
                         Ok(()) => {
-                            tracing::info!("G2: 文字已注入前台应用");
+                            // tracing::info!("G2: 文字已注入前台应用");
                         }
                         Err(e) => {
                             tracing::error!(%e, "G2: 文本注入失败");
@@ -482,7 +480,6 @@ impl VoiceService {
 
         session.recording = false;
         session.engine = None;
-        session.last_partial.clear();
 
         // 清除全局录音标志
         crate::infra::platform::hotkey::set_voice_recording(false);
@@ -502,12 +499,6 @@ impl VoiceService {
     /// G1: emit 事件让前端显示在语音指示器区域。
     /// G2: 先显示 overlay 窗口再 emit（与 emit_voice_error 类似的时序处理）。
     fn emit_voice_status(&self, target: VoiceTarget, message: &str) {
-        let target_str = if target == VoiceTarget::MainWindow {
-            "g1"
-        } else {
-            "g2"
-        };
-
         if target == VoiceTarget::ForegroundApp {
             // G2: 先显示 overlay，再延迟 emit 状态消息
             platform::window::show_voice_overlay(&self.app);
@@ -519,7 +510,7 @@ impl VoiceService {
                     "blink://voice-status",
                     serde_json::json!({
                         "message": msg_clone,
-                        "target": "g2",
+                        "target": target.as_str(),
                     }),
                 );
             });
@@ -529,7 +520,7 @@ impl VoiceService {
                 "blink://voice-status",
                 serde_json::json!({
                     "message": message,
-                    "target": target_str,
+                    "target": target.as_str(),
                 }),
             );
         }
@@ -539,12 +530,6 @@ impl VoiceService {
     ///
     /// **绝不**用 Mock 引擎的假文本上屏——错误就是错误，告知用户而非静默吞掉。
     fn emit_voice_error(&self, target: VoiceTarget, message: &str) {
-        let target_str = if target == VoiceTarget::MainWindow {
-            "g1"
-        } else {
-            "g2"
-        };
-
         if target == VoiceTarget::ForegroundApp {
             // G2: 先显示 overlay，再延迟 emit 错误消息
             // （窗口刚 show 时事件可能未就绪，延迟 100ms 确保接收）
@@ -557,7 +542,7 @@ impl VoiceService {
                     "blink://voice-error",
                     serde_json::json!({
                         "message": msg_clone,
-                        "target": "g2",
+                        "target": target.as_str(),
                     }),
                 );
                 // 2s 后自动隐藏
@@ -570,7 +555,7 @@ impl VoiceService {
                 "blink://voice-error",
                 serde_json::json!({
                     "message": message,
-                    "target": target_str,
+                    "target": target.as_str(),
                 }),
             );
         }

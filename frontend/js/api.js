@@ -55,7 +55,8 @@ export function copyToClipboard(text) {
   return invoke("copy_to_clipboard", { text });
 }
 
-/** 触发 Chord 动作（0.8.5 §六）——key 为字母（a/q/c），后端按 key 分派到 ChordRegistry。 */
+/** 触发 Chord 动作（0.8.5 §六）——key 为字母（a/c），后端按 key 分派到 ChordRegistry。
+ *  注意：Alt+Space 语音输入不走此路径，由 native hotkey hold 状态机直接处理。 */
 export function triggerChord(key) {
   return invoke("trigger_chord", { key });
 }
@@ -68,21 +69,6 @@ export function listChordActions() {
 /** 当前 Alt 键是否按下（0.8.5 §6.1 前端轮询驱动 alt-active，WebView2 不转发 Alt keydown）。 */
 export function isAltDown() {
   return invoke("is_alt_down");
-}
-
-/** 隐藏 chord-ball 悬浮窗（悬浮球内点击/ESC 调）。 */
-export function hideChordBall() {
-  return invoke("hide_chord_ball");
-}
-
-/** 确认划词：读选区缓存 + 主窗显示翻译结果 + 隐藏球。 */
-export function confirmChordSelection() {
-  return invoke("confirm_chord_selection");
-}
-
-/** 轮询选区缓存（chord-ball 前端用，检测划词是否成功）。返回文本或 null。 */
-export function pollChordSelection() {
-  return invoke("poll_chord_selection");
 }
 
 /** 拉取剪贴板历史（Alt+C 面板渲染用）。 */

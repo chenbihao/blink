@@ -5,13 +5,15 @@
 //! `invoke("trigger_chord")`。后端只提供注册表 + 触发分派，**不碰 LL hook**（hook 的
 //! tap/hold 状态机天然支持，见 phases §6.2 自洽性证明）。
 //!
-//! **四域约束**（0.8.4）：Chord 动作是 Execution 域消费者。真实动作（截图/划词/剪贴板）
-//! 自行采集所需 Awareness（如划词调 selection 模块），参数注入必须显式
+//! **四域约束**（0.8.4）：Chord 动作是 Execution 域消费者。真实动作（截图/剪贴板）
+//! 自行采集所需 Awareness，参数注入必须显式
 //! （`ExecArg::UserExplicit`），不能无脑抽 snapshot 重蹈 0.8.4 修掉的 bug。
+//! Alt+Space 语音输入是 display-only 条目——触发走 native hotkey hold 状态机，
+//! 不经 trigger_chord，execute() 仅作防御性 Nop。
 //!
 //! **i18n**（0.8.5.1 §6.6）：`label` 走 `LocalizableText`——registry 侧声明 zh/en
 //! 双语，`list()` 按当前 UI 语言解析成字符串给前端；ChordAction 实现方（本 mod 的
-//! StubAction / ClipboardHistoryAction）用 `LocalizableText::Localized` 双语字面量。
+//! VoiceInputAction / ClipboardHistoryAction）用 `LocalizableText::Localized` 双语字面量。
 
 use std::sync::Arc;
 
@@ -24,8 +26,6 @@ use crate::domain::plugin::LocalizableText;
 pub enum ChordSurface {
     /// 全屏截图覆盖（Alt+A）
     Screenshot,
-    /// 主窗缩成悬浮小球（Alt+Q）
-    MiniBall,
     /// 主窗切面板形态（预留：未来 AI 面板等真需要独占屏幕的动作）
     /// **0.8.5 §6.4 之后无当前消费者**——Alt+C 剪贴板已改走 `Default` + fill-query。
     /// 保留变体以维持 surface 扩展位；trigger_chord command 层暂无分派。
@@ -40,7 +40,6 @@ impl ChordSurface {
     pub fn as_str(&self) -> &'static str {
         match self {
             ChordSurface::Screenshot => "screenshot",
-            ChordSurface::MiniBall => "mini_ball",
             ChordSurface::Panel => "panel",
             ChordSurface::Default => "default",
         }
@@ -177,35 +176,45 @@ impl Default for ChordRegistry {
     }
 }
 
-// ── stub 动作（0.8.5 骨架占位，#10 截图落地时替换）─────────────────────────────
+// ── Alt+Space 语音输入（display-only chord 条目）─────────────────────────────
 
-struct StubAction {
-    id: &'static str,
-    key: char,
+/// Alt+Space 语音输入（display-only chord 条目）。
+///
+/// **特殊性**：触发**不走 chord tap 路径**——Alt+Space 由 native hotkey hook 的
+/// hold 状态机处理（`HotkeyEvent::Hold` → `VoiceService::start_recording`）。
+/// 此条目仅用于在 chord 提示条中显示「Alt+Space 语音输入」，让 hold-to-talk
+/// 这个隐藏交互变得可发现。
+///
+/// **execute 防御**：前端 `keyboard.js` 的 `CHORD_KEYS` 不含空格，Alt+Space
+/// 不会走 `onChordTrigger → trigger_chord`。若因任何原因被调用（如未来改动），
+/// execute 返回 Nop——真正录音由 hotkey 层已在 hold 时启动。
+///
+/// **可见性门禁**：`list_chord_actions` / `list_all_chord_actions` command 层
+/// 按 `SttConfig.enabled` 过滤——STT 未启用时不返回此条目（提示条不显示、
+/// 设置页不显示），语音的可见性自然绑定到语音总开关。
+struct VoiceInputAction {
     label: LocalizableText,
-    surface: ChordSurface,
 }
 
 #[async_trait::async_trait]
-impl crate::domain::execution::Action for StubAction {
+impl crate::domain::execution::Action for VoiceInputAction {
     fn id(&self) -> &str {
-        self.id
+        "voice_input"
     }
     fn title(&self) -> &LocalizableText {
         &self.label
     }
     fn subtitle(&self) -> &LocalizableText {
-        &self.label // stub: subtitle 同 title
+        &self.label
     }
-    /// 0.9.0 §3.3 铁则:Chord 动作显式覆盖 schema.
-    /// Stub 未落地——description 标"stub"给 AI 看得清楚,免误调用
+    /// 0.9.0 §3.3 铁则:Chord 动作显式覆盖 schema
     fn schema(&self) -> crate::domain::execution::ActionSchema {
         crate::domain::execution::ActionSchema::empty(
-            self.id,
-            "Chord stub action (not yet implemented)",
+            "voice_input",
+            "Voice input via hold-to-talk on Alt+Space. Display-only chord entry — trigger is handled by the native hotkey hook, not trigger_chord.",
         )
     }
-    /// Stub 无副作用——Safe
+    /// 语音录音不改系统状态（音频采集 + STT），注入是 G2 的职责——Safe
     fn danger_class(&self) -> crate::domain::execution::DangerClass {
         crate::domain::execution::DangerClass::Safe
     }
@@ -213,21 +222,23 @@ impl crate::domain::execution::Action for StubAction {
         &self,
         _cx: &crate::domain::execution::ActionContext<'_>,
     ) -> Result<crate::domain::execution::ActionOutcome, crate::domain::execution::ExecError> {
-        tracing::info!(id = self.id, "chord stub action（待 #10 实现）");
+        tracing::warn!(
+            "voice_input chord execute 被调用（不应发生：Alt+Space 由 hotkey hook 处理）"
+        );
         Ok(crate::domain::execution::ActionOutcome::Nop)
     }
 }
 
 #[async_trait::async_trait]
-impl ChordAction for StubAction {
+impl ChordAction for VoiceInputAction {
     fn key(&self) -> char {
-        self.key
+        ' '
     }
     fn label(&self) -> &LocalizableText {
         &self.label
     }
     fn surface(&self) -> ChordSurface {
-        self.surface
+        ChordSurface::Default
     }
 }
 
@@ -239,20 +250,17 @@ fn bilingual(zh: &str, en: &str) -> LocalizableText {
     LocalizableText::Localized(map)
 }
 
-/// 构建默认 ChordRegistry（注册第一批动作）。
+/// 构建默认 ChordRegistry（注册第一批动作）。**注册顺序即提示条展示顺序**。
+/// - Alt+Space 语音输入（display-only，触发走 native hotkey hold，此条目仅用于提示条显示）
 /// - Alt+A 区域截图（0.8.7：ScreenshotAction 真实实现）
-/// - Alt+Q 划词翻译（MiniBall surface）
 /// - Alt+C 剪贴板历史（0.8.5 §6.4）
 pub fn build_default_registry() -> ChordRegistry {
     let mut reg = ChordRegistry::new();
+    reg.register(Arc::new(VoiceInputAction {
+        label: bilingual("语音输入", "Voice input"),
+    }));
     reg.register(Arc::new(ScreenshotAction {
         label: bilingual("区域截图", "Screenshot"),
-    }));
-    reg.register(Arc::new(StubAction {
-        id: "selection",
-        key: 'q',
-        label: bilingual("划词翻译", "Selection translate"),
-        surface: ChordSurface::MiniBall,
     }));
     reg.register(Arc::new(ClipboardHistoryAction {
         label: bilingual("剪贴板历史", "Clipboard history"),

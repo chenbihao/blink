@@ -245,13 +245,16 @@ pub async fn list_builtin_actions(
 /// key 为字母（不区分大小写）。未注册 → Err（前端 log，不弹窗）。
 ///
 /// **surface 分派**（0.8.5 §6.4 简化后）：
-/// - `MiniBall` (Alt+Q 划词)：hide 主窗 + show chord-ball 悬浮窗
-/// - `Screenshot` (Alt+A) / `Default` / 其它：action 自己在 execute 内决定 UI 反馈
+/// - 截图（Alt+A）/ 剪贴板（Alt+C）/ 其它：action 自己在 execute 内决定 UI 反馈
 ///   （如 ClipboardHistoryAction 自 emit fill-query），command 层不再统一后处理
 ///
 /// **门禁**（0.8.7 修复）：设置页取消勾选的 Chord 动作 → disabled 列表命中即静默早退。
 /// 前端 `list_chord_actions` 已过滤 disabled 只是让"提示条不显示"，但 Alt+字母 触发是
 /// **另一条独立路径**（前端 keyboard.js 直接按物理键 invoke），必须在 command 层守门。
+///
+/// **注意**：Alt+Space 语音输入不走此 command——它由 native hotkey hook 的 hold
+/// 状态机直接处理（`HotkeyEvent::Hold` → `VoiceService::start_recording`），
+/// chord registry 里的 `voice_input` 条目仅用于提示条显示（display-only）。
 #[tauri::command]
 pub async fn trigger_chord(app: tauri::AppHandle, key: String) -> Result<(), String> {
     tracing::debug!(%key, "trigger_chord");
@@ -269,20 +272,10 @@ pub async fn trigger_chord(app: tauri::AppHandle, key: String) -> Result<(), Str
             return Ok(());
         }
     }
-    let surface = registry.trigger(&key, &app).await?;
-    // surface=MiniBall → 显示 chord-ball 悬浮窗（划词指示，不抢焦点）
-    if surface == crate::domain::chord::ChordSurface::MiniBall {
-        // 隐藏主窗（球作划词指示，主窗不打扰）+ 显示悬浮球
-        crate::infra::platform::window::hide(&app, "chord");
-        crate::infra::platform::window::show_chord_ball(&app)?;
-    }
+    // surface 现已无 command 层消费者（MiniBall 划词已移除，各 action 自管 UI），
+    // 保留 trigger 返回值以备未来扩展。
+    let _surface = registry.trigger(&key, &app).await?;
     Ok(())
-}
-
-/// 隐藏 chord-ball 悬浮窗（悬浮球内点击/ESC 调）。
-#[tauri::command]
-pub fn hide_chord_ball(app: tauri::AppHandle) {
-    crate::infra::platform::window::hide_chord_ball(&app);
 }
 
 /// 确认截图选区（0.8.7）：前端拖选完成后回调。
@@ -317,55 +310,51 @@ pub fn hide_screenshot_overlay(app: tauri::AppHandle) {
     crate::infra::platform::window::hide_screenshot_overlay(&app);
 }
 
-/// 轮询选区缓存（chord-ball 前端 200ms 轮询，检测划词是否成功）。
-/// 返回 Some(text) 表示选区已就绪；None 表示尚未抓到或已过期。
-#[tauri::command]
-pub fn poll_chord_selection() -> Option<String> {
-    crate::infra::platform::selection::get_last_selection()
-}
-
-/// 确认划词（0.8.5 §6.5）：读 selection 缓存 → emit 到主窗 → 主窗 show + 球 hide。
-/// 主窗前端 listen `blink://chord-translate` 填搜索框「翻译 {text}」触发翻译插件。
-#[tauri::command]
-pub async fn confirm_chord_selection(app: tauri::AppHandle) -> Result<(), String> {
-    let text = crate::infra::platform::selection::get_last_selection();
-    crate::infra::platform::window::hide_chord_ball(&app);
-    crate::infra::platform::window::invoke(&app);
-    if let Some(t) = text {
-        let _ = app.emit("blink://chord-translate", t);
-    }
-    Ok(())
-}
-
 /// 列出所有已注册的 Chord 动作元数据（0.8.5 §六 Ghost overlay 提示层渲染用）。
 ///
 /// 每条：`{ id, key, label, surface }`。已 disabled 的跳过；label 按当前 UI 语言解析。
+///
+/// **voice_input 门禁**：STT 未启用时（`SttConfig.enabled == false`）不返回
+/// `voice_input` 条目——语音总开关关时，提示条不该显示"Alt+Space 语音输入"。
 #[tauri::command]
 pub async fn list_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Value> {
     let pool = app.state::<sqlx::SqlitePool>();
     let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
     let language = crate::app::config::get_config(&pool).await.language;
+    let stt_enabled = crate::app::stt_config::get_stt_config().enabled;
     let Some(registry) = app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
     else {
         return Vec::new();
     };
-    registry.list(&disabled, &language)
+    registry
+        .list(&disabled, &language)
+        .into_iter()
+        .filter(|a| !(a["id"] == "voice_input" && !stt_enabled))
+        .collect()
 }
 
 /// 列出所有已注册的 Chord 动作 + enabled 状态（0.8.5.1 §6.6 设置页用）。
 ///
 /// 与 `list_chord_actions` 的区别:不过滤 disabled,而是每条附带 `enabled` 字段。
 /// 用于设置页展示"所有可开关的动作",让用户能勾选禁用。
+///
+/// **voice_input 门禁**：同 `list_chord_actions`，STT 未启用时不返回此条目
+/// （设置页不显示一个用不了的功能的开关）。
 #[tauri::command]
 pub async fn list_all_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Value> {
     let pool = app.state::<sqlx::SqlitePool>();
     let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
     let language = crate::app::config::get_config(&pool).await.language;
+    let stt_enabled = crate::app::stt_config::get_stt_config().enabled;
     let Some(registry) = app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
     else {
         return Vec::new();
     };
-    registry.list_all(&disabled, &language)
+    registry
+        .list_all(&disabled, &language)
+        .into_iter()
+        .filter(|a| !(a["id"] == "voice_input" && !stt_enabled))
+        .collect()
 }
 
 /// 当前 Alt 键是否物理按下（0.8.5 §6.1）。前端轮询驱动 alt-active 状态——
@@ -583,6 +572,20 @@ pub async fn clear_history(app: tauri::AppHandle) -> Result<(), String> {
 pub async fn resize_window(app: tauri::AppHandle, width: f64, height: f64) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("main") {
         let size = tauri::LogicalSize::new(width, height);
+        win.set_size(size).map_err(|e| e.to_string())?;
+        crate::infra::platform::window::clamp_to_work_area(&win);
+    }
+    Ok(())
+}
+
+/// 调整 voice-overlay 窗口高度（G2 语音 mini overlay 自动撑高）。
+///
+/// 前端在文本更新后调用，传入期望的逻辑高度。宽度固定 300。
+/// 若窗口底部超出显示器工作区，自动上移使其完整可见。
+#[tauri::command]
+pub async fn resize_voice_overlay(app: tauri::AppHandle, height: f64) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("voice-overlay") {
+        let size = tauri::LogicalSize::new(260.0, height);
         win.set_size(size).map_err(|e| e.to_string())?;
         crate::infra::platform::window::clamp_to_work_area(&win);
     }
@@ -2359,10 +2362,17 @@ pub async fn get_stt_config(
 }
 
 /// 保存 STT 配置。
+///
+/// `scope` 用于按区段打印日志，避免改本地配置时把云端字段也全部打印出来：
+/// - `"global"`: 总开关 / 模式 / 流式 / 音频设备
+/// - `"cloud"`: 云端供应商
+/// - `"local"`: 本地引擎（模型 / 设备 / 热词 / ITN / VAD）
+/// - `None`: 兼容旧调用，打印全量字段
 #[tauri::command]
 pub async fn set_stt_config(
     app: tauri::AppHandle,
     config: crate::app::stt_config::SttConfig,
+    scope: Option<String>,
 ) -> Result<(), String> {
     let pool = app.state::<sqlx::SqlitePool>();
     crate::app::config::ConfigStore::set(&pool, &config)
@@ -2375,13 +2385,61 @@ pub async fn set_stt_config(
         "blink://config-changed",
         serde_json::json!({ "key": "stt:config" }),
     );
-    tracing::info!(
-        enabled = config.enabled,
-        mode = ?config.mode,
-        inject_method = ?config.inject_method,
-        streaming_mode = ?config.streaming_mode,
-        "STT 配置已更新"
-    );
+
+    match scope.as_deref() {
+        Some("global") => {
+            tracing::info!(
+                scope = "global",
+                enabled = config.enabled,
+                mode = ?config.mode,
+                streaming_mode = ?config.streaming_mode,
+                audio_device_id = ?config.audio_device_id,
+                "STT 配置已更新"
+            );
+        }
+        Some("cloud") => {
+            tracing::info!(
+                scope = "cloud",
+                cloud_provider = ?config.cloud_provider.as_ref().map(|p| (&p.kind, &p.model_id, &p.base_url)),
+                "STT 配置已更新"
+            );
+        }
+        Some("local") => {
+            tracing::info!(
+                scope = "local",
+                local_model_id = ?config.local_model_id,
+                funasr_model = %config.local_engine.funasr_model,
+                device = %config.local_engine.device,
+                auto_start_server = config.local_engine.auto_start_server,
+                use_itn = config.local_engine.use_itn,
+                hotwords_len = config.local_engine.hotwords.as_ref().map(|h| h.len()).unwrap_or(0),
+                vad_silence_threshold = config.local_engine.vad.silence_threshold,
+                vad_min_silence_ms = config.local_engine.vad.min_silence_ms,
+                vad_min_sentence_ms = config.local_engine.vad.min_sentence_ms,
+                "STT 配置已更新"
+            );
+        }
+        _ => {
+            // 兼容旧调用（无 scope）：打印全量
+            tracing::info!(
+                enabled = config.enabled,
+                mode = ?config.mode,
+                streaming_mode = ?config.streaming_mode,
+                cloud_provider = ?config.cloud_provider.as_ref().map(|p| (&p.kind, &p.model_id, &p.base_url)),
+                local_model_id = ?config.local_model_id,
+                audio_device_id = ?config.audio_device_id,
+                funasr_model = %config.local_engine.funasr_model,
+                device = %config.local_engine.device,
+                auto_start_server = config.local_engine.auto_start_server,
+                use_itn = config.local_engine.use_itn,
+                hotwords_len = config.local_engine.hotwords.as_ref().map(|h| h.len()).unwrap_or(0),
+                vad_silence_threshold = config.local_engine.vad.silence_threshold,
+                vad_min_silence_ms = config.local_engine.vad.min_silence_ms,
+                vad_min_sentence_ms = config.local_engine.vad.min_sentence_ms,
+                "STT 配置已更新"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -2587,6 +2645,43 @@ pub fn stop_audio_test() {
 static FUNASR_SERVER_CHILD: std::sync::Mutex<Option<tokio::process::Child>> =
     std::sync::Mutex::new(None);
 
+/// funasr-server 日志环形缓冲区（最近 200 条）。
+///
+/// 服务可能在设置页打开前就自启动（auto_start_server），此时前端
+/// `listen("blink://funasr-server-log")` 尚未注册，日志会丢失。
+/// 缓冲区让设置页打开时通过 `get_funasr_log_history` 命令回补历史日志。
+const FUNASR_LOG_BUFFER_CAP: usize = 200;
+static FUNASR_LOG_BUFFER: std::sync::Mutex<std::collections::VecDeque<String>> =
+    std::sync::Mutex::new(std::collections::VecDeque::new());
+
+/// 向日志缓冲区追加一行（带时间戳），同时 emit 到前端。
+fn emit_funasr_log(app: &tauri::AppHandle, line: &str) {
+    let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+    let entry = format!("[{}] {}", ts, line);
+    {
+        let mut buf = FUNASR_LOG_BUFFER.lock().unwrap();
+        if buf.len() >= FUNASR_LOG_BUFFER_CAP {
+            buf.pop_front();
+        }
+        buf.push_back(entry.clone());
+    }
+    let _ = app.emit("blink://funasr-server-log", serde_json::json!({ "line": line }));
+}
+
+/// 获取 funasr-server 历史日志（带时间戳）。
+///
+/// 设置页打开时调用此命令回补自启动期间产生的日志，
+/// 避免用户打开设置页后看不到服务启动过程。
+#[tauri::command]
+pub fn get_funasr_log_history() -> Vec<String> {
+    FUNASR_LOG_BUFFER
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect()
+}
+
 /// 查询 Python 环境 + funasr-server 状态。
 ///
 /// 返回 uv/venv/funasr 安装状态 + server 运行状态，供前端展示和诊断。
@@ -2630,14 +2725,11 @@ pub async fn setup_python_env(app: tauri::AppHandle) -> Result<(), String> {
             );
         });
 
-    // 日志回调：转发到前端 blink://funasr-server-log（含 uv 逐行安装进度）
-    let app_log = app.clone();
-    let on_log: std::sync::Arc<dyn Fn(&str) + Send + Sync> = std::sync::Arc::new(move |line| {
-        let _ = app_log.emit(
-            "blink://funasr-server-log",
-            serde_json::json!({ "line": line }),
-        );
-    });
+// 日志回调：转发到前端 blink://funasr-server-log（含 uv 逐行安装进度）
+let app_log = app.clone();
+let on_log: std::sync::Arc<dyn Fn(&str) + Send + Sync> = std::sync::Arc::new(move |line| {
+emit_funasr_log(&app_log, line);
+});
 
     let device = crate::app::stt_config::get_stt_config().local_engine.device;
     crate::infra::platform::python::setup_with_progress(&device, on_progress, on_log).await
@@ -2664,16 +2756,16 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
     if device == "cuda" {
         match crate::infra::platform::python::detect_cuda() {
             Some(v) => {
-                let _ = app.emit(
-                    "blink://funasr-server-log",
-                    serde_json::json!({ "line": format!("[Blink] ✅ 检测到 CUDA {v}，funasr-server 将使用 GPU 加速") }),
+                emit_funasr_log(
+                    &app,
+                    &format!("[Blink] ✅ 检测到 CUDA {v}，funasr-server 将使用 GPU 加速"),
                 );
                 tracing::info!(cuda = %v, "CUDA 检测成功，使用 GPU 加速");
             }
             None => {
-                let _ = app.emit(
-                    "blink://funasr-server-log",
-                    serde_json::json!({ "line": "[Blink] ⚠️ 配置为 CUDA 模式但未检测到 NVIDIA GPU，funasr-server 将回退到 CPU" }),
+                emit_funasr_log(
+                    &app,
+                    "[Blink] ⚠️ 配置为 CUDA 模式但未检测到 NVIDIA GPU，funasr-server 将回退到 CPU",
                 );
                 tracing::warn!("配置为 CUDA 但未检测到 GPU，将回退到 CPU");
             }
@@ -2691,9 +2783,9 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
             serde_json::json!({ "stage": "setup_env", "message": "正在安装 Python 环境..." }),
         );
         if need_cuda_reinstall {
-            let _ = app.emit(
-                "blink://funasr-server-log",
-                serde_json::json!({ "line": "[Blink] ⚠️ 当前 PyTorch 为 CPU 版，正在重装 CUDA 版 PyTorch（可能需要数分钟）..." }),
+            emit_funasr_log(
+                &app,
+                "[Blink] ⚠️ 当前 PyTorch 为 CPU 版，正在重装 CUDA 版 PyTorch（可能需要数分钟）...",
             );
         }
         match crate::infra::platform::python::setup(&device).await {
@@ -2703,14 +2795,14 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
                 if device == "cuda" {
                     let cuda_ok = crate::infra::platform::python::check_torch_cuda();
                     if cuda_ok {
-                        let _ = app.emit(
-                            "blink://funasr-server-log",
-                            serde_json::json!({ "line": "[Blink] ✅ PyTorch CUDA 支持已就绪，GPU 加速可用" }),
+                        emit_funasr_log(
+                            &app,
+                            "[Blink] ✅ PyTorch CUDA 支持已就绪，GPU 加速可用",
                         );
                     } else {
-                        let _ = app.emit(
-                            "blink://funasr-server-log",
-                            serde_json::json!({ "line": "[Blink] ⚠️ PyTorch CUDA 支持不可用，将使用 CPU 推理" }),
+                        emit_funasr_log(
+                            &app,
+                            "[Blink] ⚠️ PyTorch CUDA 支持不可用，将使用 CPU 推理",
                         );
                     }
                 }
@@ -2769,13 +2861,11 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
             // ── 转发 funasr-server 日志到前端 ──
             // 日志来自 start_server 内部的 stdout/stderr 读取 task，
             // 通过 unbounded channel 发送，这里转发为 Tauri 事件。
+            // 同时写入全局缓冲区，供设置页打开时回补历史日志。
             let app_log = app.clone();
             tokio::spawn(async move {
                 while let Some(line) = log_rx.recv().await {
-                    let _ = app_log.emit(
-                        "blink://funasr-server-log",
-                        serde_json::json!({ "line": line }),
-                    );
+                    emit_funasr_log(&app_log, &line);
                 }
             });
 

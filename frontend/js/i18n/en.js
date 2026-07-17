@@ -271,7 +271,7 @@ export const en = {
   "context.selection.hint": "Auto-captures text you highlight with the mouse and passes it as context when you summon Blink. Limitations: Windows only; requires apps to support UIA TextPattern — browsers (Chrome/Edge/Firefox), Office, VS Code and native Win32 work well; some Electron apps (newer QQ/WeChat/Discord), terminals and games may fail. If no selection is grabbed, just copy the text — Blink will read your clipboard.",
 
   // ── Chord panel (0.8.5.1 §6.6) ──
-  "chord.lede": "When the main window is visible and no input has started, hold Alt to trigger quick actions (Screenshot / Selection Translate / Clipboard).",
+  "chord.lede": "When the main window is visible and no input has started, hold Alt to trigger quick actions (Screenshot / Voice input / Clipboard).",
   "chord.general.title": "General",
   "chord.enabled.label": "Enable Chord",
   "chord.enabled.hint": "When off, Alt+letter no longer triggers Chord actions",
@@ -281,9 +281,9 @@ export const en = {
   "chord.actions.hint": "Unchecked actions no longer appear in the hint bar; Alt+letter is also inert",
   "chord.actions.empty": "No Chord actions registered",
   "chord.section.actions": "Actions · Alt + Letter direct",
-  "chord.action.screenshot.subtitle": "Drag-select a region and copy to clipboard",
-  "chord.action.selection.subtitle": "Grab the currently highlighted text into Blink",
-  "chord.action.clipboard_history.subtitle": "Open the clipboard history recall panel",
+"chord.action.screenshot.subtitle": "Drag-select a region and copy to clipboard",
+"chord.action.voice_input.subtitle": "Hold Alt+Space to speak, release to transcribe",
+"chord.action.clipboard_history.subtitle": "Open the clipboard history recall panel",
   "chord.clipboard.title": "Clipboard History",
   "chord.clipboard.enabled.label": "Listen for clipboard writes",
   "chord.clipboard.enabled.hint": "When on, copied content is automatically recorded; type \"clip\" or press Alt+C to recall (if disabled at startup, first re-enable needs one restart to build the listener)",

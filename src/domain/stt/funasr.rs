@@ -29,14 +29,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// 嵌入的 blink_stt_server.py 脚本（随 Rust 二进制发布）。
 const BLINK_STT_SERVER_PY: &str = include_str!("../../../resources/python/blink_stt_server.py");
 
-/// 默认非流式模型。
-#[allow(dead_code)]
-pub const DEFAULT_MODEL: &str = "iic/SenseVoiceSmall";
-
-/// 默认监听端口。
-#[allow(dead_code)]
-pub const DEFAULT_PORT: u16 = 8000;
-
 /// server 启动超时（秒）。
 /// 首次启动需要从 ModelScope 下载模型（~234MB），加上 PyTorch 加载，
 /// 可能需要 3-5 分钟。后续启动仅模型加载，通常 30-60 秒。
@@ -93,10 +85,25 @@ pub fn ensure_server_script() -> Result<PathBuf, String> {
 
 /// 将热词配置写入 `%APPDATA%\blink\python\hotwords.txt`。
 ///
+/// 前端用英文逗号分隔热词（省空间），FunASR 要求每行一个——
+/// 此函数自动将逗号 / 换行混合分隔转为换行格式。
+///
 /// 返回文件路径（如果 hotwords 为空则返回 None，不写文件）。
 pub fn write_hotwords_file(hotwords: &Option<String>) -> Option<PathBuf> {
     let hotwords = hotwords.as_ref()?;
     if hotwords.trim().is_empty() {
+        return None;
+    }
+
+    // 统一分隔：英文逗号 + 换行都可以，每个热词 trim 后去空行
+    let normalized: String = hotwords
+        .split([',', '\n', '\r'])
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if normalized.is_empty() {
         return None;
     }
 
@@ -106,7 +113,7 @@ pub fn write_hotwords_file(hotwords: &Option<String>) -> Option<PathBuf> {
     }
 
     let path = dir.join("hotwords.txt");
-    match std::fs::write(&path, hotwords) {
+    match std::fs::write(&path, &normalized) {
         Ok(()) => {
             tracing::info!(path = %path.display(), "热词文件已写入");
             Some(path)
@@ -155,33 +162,6 @@ pub struct FunasrEnv {
     pub server_port: u16,
     /// 当前配置的非流式模型
     pub server_model: String,
-}
-
-/// 获取环境 + 服务的完整状态（同步版，会阻塞调用线程）。
-///
-/// 仅用于测试和诊断。生产代码应使用 [`get_env_status_async`]。
-#[allow(dead_code)]
-pub fn get_env_status(
-    server_port: u16,
-    server_model: &str,
-) -> FunasrEnv {
-    let py_status = crate::infra::platform::python::check_status();
-
-    FunasrEnv {
-        uv_available: py_status.uv_available,
-        uv_version: py_status.uv_version,
-        venv_exists: py_status.venv_exists,
-        venv_python_version: py_status.venv_python_version,
-        torch_installed: py_status.torch_installed,
-        torch_version: py_status.torch_version,
-        torch_cuda_available: py_status.torch_cuda_available,
-        funasr_installed: py_status.funasr_installed,
-        funasr_version: py_status.funasr_version,
-        env_ready: py_status.env_ready,
-        server_running: SERVER_RUNNING.load(Ordering::SeqCst),
-        server_port,
-        server_model: server_model.to_string(),
-    }
 }
 
 /// 获取环境 + 服务的完整状态（异步版，不阻塞 async 运行时）。
@@ -317,31 +297,6 @@ pub fn is_server_ready(port: u16) -> bool {
     }
 }
 
-/// 检查 server 的 HTTP API 是否真正就绪。
-///
-/// 通过 `GET /health` 端点验证：不仅 TCP 端口在监听，而且 FastAPI 应用已启动。
-///
-/// **注意**：此函数只检查 HTTP 层面是否可用，**不检查模型是否加载完成**。
-/// 模型可能仍在后台下载/加载中。如需确认模型就绪，使用 [`check_model_loaded`]。
-///
-/// 在 `finalize`（async）中使用，确保转录请求不会因 HTTP 未就绪而失败。
-#[allow(dead_code)]
-pub async fn is_server_ready_http(port: u16) -> bool {
-    let url = format!("http://localhost:{port}/health");
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-
-    match client.get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => true,
-        _ => false,
-    }
-}
-
 /// 模型加载状态（从 Python server `/health` 端点获取）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelLoadStatus {
@@ -402,7 +357,26 @@ pub async fn check_model_loaded(port: u16) -> ModelLoadStatus {
     }
 }
 
-// ── server 启动参数 ────────────────────────────────────────────────────────
+/// 检查模型是否就绪，不就绪则返回对应的错误消息。
+///
+/// 供 `LocalSttEngine` 和 `PseudoStreamingSttEngine` 共用，
+/// 消除重复的 match 分支。
+pub async fn check_model_ready_or_error(port: u16) -> Result<(), String> {
+    match check_model_loaded(port).await {
+        ModelLoadStatus::Ready => Ok(()),
+        ModelLoadStatus::Loading | ModelLoadStatus::Idle => Err(format!(
+            "模型正在加载中（端口 {port}），首次使用需下载 ~234MB 模型文件，请稍后在设置页等待加载完成后重试。"
+        )),
+        ModelLoadStatus::Error => Err(format!(
+            "模型加载失败（端口 {port}），请在设置页查看日志或检查网络连接后重启服务。"
+        )),
+        ModelLoadStatus::Unreachable => Err(format!(
+            "FunASR 服务不可达（端口 {port}）。请确认服务已在设置页启动。"
+        )),
+    }
+}
+
+// ── server 启动参数 ────────────────────────────────────────────────────────────────
 
 /// blink_stt_server 启动参数（0.10.3）。
 #[derive(Debug, Clone)]
@@ -622,37 +596,6 @@ pub async fn start_server(
     Ok(Some((child, log_rx)))
 }
 
-/// 异步等待 server 就绪（HTTP 健康检查轮询）。
-#[allow(dead_code)]
-pub async fn wait_for_server_ready(port: u16) -> Result<(), String> {
-    let url = format!("http://localhost:{port}/v1/models");
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| format!("HTTP client 创建失败: {e}"))?;
-
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(SERVER_STARTUP_TIMEOUT_SECS);
-
-    loop {
-        if std::time::Instant::now() > deadline {
-            return Err(format!(
-                "blink_stt_server 在 {SERVER_STARTUP_TIMEOUT_SECS}s 内未就绪（端口 {port}）"
-            ));
-        }
-
-        match client.get(&url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                tracing::info!(port, "blink_stt_server 就绪");
-                return Ok(());
-            }
-            _ => {
-                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-            }
-        }
-    }
-}
-
 /// 标记 server 已停止（子进程退出时调用）。
 pub fn mark_server_stopped() {
     SERVER_RUNNING.store(false, Ordering::SeqCst);
@@ -661,14 +604,6 @@ pub fn mark_server_stopped() {
 /// 生成 server 的 base_url（供 HTTP 转录使用）。
 pub fn server_base_url(port: u16) -> String {
     format!("http://localhost:{port}/v1")
-}
-
-/// 获取用于日志诊断的服务器状态摘要。
-#[allow(dead_code)]
-pub fn server_status_summary(port: u16, model: &str) -> String {
-    let ready = is_server_ready(port);
-    let running = SERVER_RUNNING.load(Ordering::SeqCst);
-    format!("blink_stt_server: model={model}, port={port}, running={running}, ready={ready}")
 }
 
 // ── 测试 ──────────────────────────────────────────────────────────────────
@@ -719,8 +654,9 @@ mod tests {
 
     #[test]
     fn write_hotwords_creates_file() {
-        let hotwords = "美团 100\n快手 80\nBlink 100".to_string();
-        let path = write_hotwords_file(&Some(hotwords.clone()));
+        // 逗号分隔 → 转为换行格式写入文件
+        let hotwords = "美团 100, 快手 80, Blink 100".to_string();
+        let path = write_hotwords_file(&Some(hotwords));
         assert!(path.is_some(), "热词文件应被创建");
 
         let path = path.unwrap();
@@ -728,7 +664,29 @@ mod tests {
         assert!(path.ends_with("hotwords.txt"));
 
         let content = std::fs::read_to_string(&path).expect("读取热词文件失败");
-        assert_eq!(content, hotwords);
+        assert_eq!(content, "美团 100\n快手 80\nBlink 100");
+    }
+
+    #[test]
+    fn write_hotwords_newline_compat() {
+        // 旧换行格式也兼容
+        let hotwords = "美团 100\n快手 80\nBlink 100".to_string();
+        let path = write_hotwords_file(&Some(hotwords));
+        assert!(path.is_some());
+
+        let content = std::fs::read_to_string(&path.unwrap()).expect("读取热词文件失败");
+        assert_eq!(content, "美团 100\n快手 80\nBlink 100");
+    }
+
+    #[test]
+    fn write_hotwords_mixed_separators() {
+        // 逗号 + 换行混合
+        let hotwords = "美团 100, 快手 80\nBlink 100".to_string();
+        let path = write_hotwords_file(&Some(hotwords));
+        assert!(path.is_some());
+
+        let content = std::fs::read_to_string(&path.unwrap()).expect("读取热词文件失败");
+        assert_eq!(content, "美团 100\n快手 80\nBlink 100");
     }
 
     // ── 日志噪声过滤测试 ──

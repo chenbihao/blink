@@ -4,7 +4,7 @@
 
 > 📖 **产品设计与文档导航**：请先阅读 [docs/production-design/00-overview.md](docs/production-design/00-overview.md) 了解产品定位、里程碑与完整文档体系。改核心前必读对应 phases 文档。
 
-更新时间 20260714
+更新时间 20260718
 
 ---
 
@@ -13,10 +13,13 @@
 Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而是 **Universal Action Layer（统一操作层）**。
 终极目标：感知用户上下文、主动推荐动作，让任何操作都比原来的路径更快。
 
-当前 **0.9.0~0.9.7 完成**（Agent 地基 + 插件 tool-call + 供应商配置 UI + 前端架构重整 + 收尾发版 + Capability 能力协议层）。详见 [phases/0.9-ai-layer.md](docs/production-design/phases/0.9-ai-layer.md)。
+当前 **0.10.0~0.10.5 完成**（语音输入：STT + 语音打字 + 伪流式 VAD 切句 + FunASR 本地化 + SendInput 文本注入 + 收尾体验优化）。测试基线 **626 通过**。详见 [phases/0.10-voice-agent.md](docs/production-design/phases/0.10-voice-agent.md)。
 
-- ✅ **0.10 语音输入**：STT + 语音打字（G1 主窗口语音输入 / G2 语音输入法上屏）。工具箱层定 FunASR。详见 [phases/0.10-voice-agent.md](docs/production-design/phases/0.10-voice-agent.md)（0.10.4 已完成：伪流式 VAD 切句 + 累积预览 + 移除真流式 + 架构清理；SenseVoice 准确率 7.81%，CPU 17× 实时，Python 零改动）
-- ❌ **0.10.5 TSF Composition（已废弃）**：曾引入 imekit 做 TSF 注入，实测发现 `ITfThreadMgr::GetFocus()` 是进程本地的，Blink 拿不到前台应用的编辑上下文，跨进程时 TSF 路径静默失败退化成 SendInput，无额外价值。imekit 依赖与 TSF 实现已移除，回归 SendInput + Clipboard 两级。详见 [phases/0.10-voice-agent.md §五](docs/production-design/phases/0.10-voice-agent.md)
+- ✅ **0.10 语音输入**：STT + 语音打字（G1 主窗口语音输入 / G2 语音输入法上屏）。工具箱层定 FunASR（SenseVoice 准确率 7.81%，CPU 17× 实时）。详见 [phases/0.10-voice-agent.md](docs/production-design/phases/0.10-voice-agent.md)
+  - 0.10.4：伪流式 VAD 切句 + 累积预览 + 移除真流式 + 架构清理
+  - 0.10.3：blink_stt_server 统一服务 + SendInput Unicode + 热词/ITN
+  - 0.10.5：收尾体验优化（VAD 参数滑动条 + 热词/高级选项 UI 优化）
+  - 0.10.5 TSF Composition / 0.10.6 hook 吞键：均已废弃（跨进程不可用 / Alt keyup 副作用不可控），回归 SendInput + Clipboard 两级
 - 🔜 **0.11 本地化与生态**：本地模型 / skill / MCP / RAG。详见 [phases/0.11-local-ecosystem.md](docs/production-design/phases/0.11-local-ecosystem.md)
 
 ---
@@ -72,7 +75,7 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 
 **目录结构（域驱动）**：
 - `src/main.rs` — Tauri 启动 + 托盘 + 各服务 wiring
-- `src/app/` — 应用层：commands（Tauri IPC 入口）、config、ai_config（第 7 分片）
+- `src/app/` — 应用层：commands（Tauri IPC 入口）、config、ai_config（第 7 分片）、stt_config（第 8 分片）、voice（语音管线编排）
 - `src/domain/` — 业务域（四域架构，见 §9）：
   - `context/` — Awareness：`is_url` / `is_file_path` / `AwarenessSnapshot`
   - `intent/` — Suggestion + Routing：`RuleRouter` / `Suggestion` / `ExecArg` / `RankingHint` / `SuggestionProducer` / `SuggestionArbiter`
@@ -81,21 +84,23 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
   - `plugin/` — manifest 解析 + JSONL 协议 + tokio 子进程
   - `chord/` — `ChordAction` trait + `ChordRegistry`
   - `ai/` — `AIProvider` trait + `AIProviderRegistry` + `RigFactory` + `gating`（四筛子）+ `message`（ChatMessage / ToolCall）+ `rig_provider`
+  - `stt/` — `SttEngine` trait + 模型注册表 + cloud / local / pseudo_streaming（伪流式 VAD+预览）/ vad / funasr（服务生命周期）/ wav
   - `capability/` — `Capability` trait + `InvokeContext` + `CapabilitySchema` + `CapabilityResult` + `CapabilityError` + `CapabilityRegistry`（inventory 自动注册）+ `builtins/`（capture_screen / crop_image / read_clipboard / write_clipboard / search_files）
 - `src/infra/` — 基础设施层：
-  - `platform/` — `mod.rs` 抽象 + `windows.rs`：hotkey / window / selection / clipboard / context / locale / screenshot / secret（Credential Manager）/ python（uv 自管理 Python 环境）
-  - `data/` — SQLite：history / clipboard / config KV（`ConfigStore<T>` 6 分片）
+  - `platform/` — `mod.rs` 抽象 + `windows.rs`：hotkey / window / selection / clipboard / context / locale / screenshot / secret（Credential Manager）/ python（uv 自管理 Python 环境）/ audio（cpal 麦克风采集）/ inject（文本注入 SendInput+Clipboard 两级回退）
+  - `data/` — SQLite：history / clipboard / config KV（`AppConfig` 6 分片 + `AIConfig` 第 7 分片 + `SttConfig` 第 8 分片）
   - `utils/` — logging / perf（SLO）/ text（拼音）
 
 ### 前端（`frontend/`）
 
 - 主窗口：`index.html` + `style.css` + `js/*.js`（搜索/结果/键盘/动作/生命周期/主题/i18n/Ghost/Chord）
-- 设置页：`settings.html` + `settings.js` + `settings.css`
+- 设置页：`settings.html` + `settings.js` + `settings.css`（含语音 Tab：`js/settings/tabs/voice.js` + `css/views/settings-voice.css`）
 - 悬浮球：`chord-ball.html`
 - 截图 overlay：`chord-screenshot.html`
+- 语音 overlay：`voice-overlay`（G2 语音输入法上屏 mini 窗口）
 - 右键菜单：`contextmenu-popup.html`
 
-前端用 `invoke()` 调 Rust commands，用 `TAU.event.listen()` 监听后端事件（`blink://shown`/`hidden`/`results`/`chord-translate`/`chord-fill-query`/`ai-confirm-action`）。
+前端用 `invoke()` 调 Rust commands，用 `TAU.event.listen()` 监听后端事件（`blink://shown`/`hidden`/`results`/`chord-translate`/`chord-fill-query`/`ai-confirm-action`/`voice-partial`/`audio-test-level`/`funasr-server-status`/`funasr-server-log`/`python-env-progress`）。
 
 ---
 

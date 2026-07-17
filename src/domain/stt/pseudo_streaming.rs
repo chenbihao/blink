@@ -81,6 +81,12 @@ struct PseudoInner {
     finalize_in_flight: bool,
     /// 最新定稿文本（句尾触发，尚未追加到 confirmed_sentences）
     pending_confirmed: Option<String>,
+    /// 预览代际计数器（0.10.6 防重复影子）
+    ///
+    /// 每次 VAD 句尾时递增。`spawn_preview_recognition` 启动时捕获当前代际，
+    /// 返回时校验：若代际不匹配（句尾已发生），说明此预览的音频跨越了句子边界，
+    /// 包含已定稿句子的内容，直接丢弃避免覆盖 `latest_preview` 造成重复影子。
+    preview_generation: u64,
 }
 
 /// 句子缓冲管理。
@@ -140,11 +146,23 @@ impl PseudoStreamingSttEngine {
             .build()
             .map_err(|e| format!("HTTP client 创建失败: {e}"))?;
 
-        tracing::info!(port, model = %model, "伪流式 STT 引擎: VAD + HTTP 轮询 (就绪)");
+        let vad_cfg = &config.local_engine.vad;
+        tracing::info!(
+            port, model = %model,
+            silence_threshold = vad_cfg.silence_threshold,
+            min_silence_ms = vad_cfg.min_silence_ms,
+            min_sentence_ms = vad_cfg.min_sentence_ms,
+            "伪流式 STT 引擎: VAD + HTTP 轮询 (就绪)"
+        );
 
         Ok(Self {
             inner: Arc::new(Mutex::new(PseudoInner {
-                vad: EnergyVad::new(16000),
+                vad: EnergyVad::with_params(
+                    16000,
+                    vad_cfg.silence_threshold,
+                    vad_cfg.min_silence_ms,
+                    vad_cfg.min_sentence_ms,
+                ),
                 sentences: SentenceBuffer::new(),
                 samples: Vec::new(),
                 last_preview: Instant::now(),
@@ -152,6 +170,7 @@ impl PseudoStreamingSttEngine {
                 latest_preview: String::new(),
                 finalize_in_flight: false,
                 pending_confirmed: None,
+                preview_generation: 0,
             })),
             client,
             server_port: port,
@@ -197,69 +216,26 @@ impl PseudoStreamingSttEngine {
         }
 
         // 检查模型是否已加载完毕（区分 HTTP 未就绪 / 模型加载中 / 模型就绪）
-        let model_status = super::funasr::check_model_loaded(self.server_port).await;
-        match model_status {
-            super::funasr::ModelLoadStatus::Ready => {} // 模型就绪，继续转录
-            super::funasr::ModelLoadStatus::Loading | super::funasr::ModelLoadStatus::Idle => {
-                return Err(SttError::Engine(format!(
-                    "模型正在加载中（端口 {}），首次使用需下载 ~234MB 模型文件，请稍后在设置页等待加载完成后重试。",
-                    self.server_port
-                )));
-            }
-            super::funasr::ModelLoadStatus::Error => {
-                return Err(SttError::Engine(format!(
-                    "模型加载失败（端口 {}），请在设置页查看日志或检查网络连接后重启服务。",
-                    self.server_port
-                )));
-            }
-            super::funasr::ModelLoadStatus::Unreachable => {
-                return Err(SttError::Engine(format!(
-                    "FunASR 服务不可达（端口 {}）。请确认服务已在设置页启动。",
-                    self.server_port
-                )));
-            }
-        }
+        super::funasr::check_model_ready_or_error(self.server_port)
+            .await
+            .map_err(SttError::Engine)?;
 
         // 裁剪尾部静音，减少 SenseVoice 幻觉英文语气词
         let trimmed = trim_trailing_silence(samples, self.sample_rate);
         let wav_bytes = super::wav::pcm_to_wav(&trimmed, self.sample_rate, 1);
         let url = self.transcription_url();
 
-        use reqwest::multipart;
-        let part = multipart::Part::bytes(wav_bytes.to_vec())
-            .file_name("audio.wav")
-            .mime_str("audio/wav")
-            .map_err(|e| SttError::Engine(format!("multipart 构建失败: {e}")))?;
-        let form = multipart::Form::new()
-            .text("model", self.funasr_model.clone())
-            .part("file", part);
-
-        let resp = self
-            .client
-            .post(&url)
-            .multipart(form)
-            .send()
-            .await
-            .map_err(|e| SttError::Engine(format!("HTTP 请求失败: {e}")))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(SttError::Engine(format!("HTTP {status}: {body}")));
-        }
-
-        #[derive(serde::Deserialize)]
-        struct TranscriptionResponse {
-            text: String,
-        }
-
-        let result: TranscriptionResponse = resp
-            .json()
-            .await
-            .map_err(|e| SttError::Engine(format!("JSON 解析失败: {e}")))?;
+        let text = super::wav::transcribe_with_client(
+            &self.client,
+            &url,
+            None,
+            &self.funasr_model,
+            &wav_bytes,
+        )
+        .await?;
 
         // 剥离 SenseVoice 幻觉的英文语气词
-        let cleaned = strip_filler_words(&result.text);
+        let cleaned = strip_filler_words(&text);
         Ok(cleaned)
     }
 
@@ -286,51 +262,19 @@ impl PseudoStreamingSttEngine {
             let trimmed = trim_trailing_silence(&sentence_samples, sample_rate);
             let wav_bytes = super::wav::pcm_to_wav(&trimmed, sample_rate, 1);
 
-            use reqwest::multipart;
-            let part = match multipart::Part::bytes(wav_bytes)
-                .file_name("audio.wav")
-                .mime_str("audio/wav")
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(%e, "定稿识别 multipart 构建失败");
+            match super::wav::transcribe_with_client(&client, &url, None, &model, &wav_bytes).await {
+                Ok(text) => {
+                    let cleaned = strip_filler_words(&text);
+                    tracing::debug!(
+                        %cleaned, samples = sentence_samples.len(),
+                        "定稿识别"
+                    );
+                    // 写入 pending_confirmed，下次 transcribe_chunk 时收取
                     let mut inner = inner.lock().unwrap();
-                    inner.finalize_in_flight = false;
-                    return;
-                }
-            };
-            let form = multipart::Form::new().text("model", model).part("file", part);
-
-            match client.post(&url).multipart(form).send().await {
-                Ok(resp) => {
-                    if resp.status().is_success() {
-                        #[derive(serde::Deserialize)]
-                        struct R {
-                            text: String,
-                        }
-                            match resp.json::<R>().await {
-                                Ok(r) => {
-                                    let cleaned = strip_filler_words(&r.text);
-                                    tracing::debug!(
-                                        %cleaned, samples = sentence_samples.len(),
-                                        "定稿识别"
-                                    );
-                                    // 写入 pending_confirmed，下次 transcribe_chunk 时收取
-                                    let mut inner = inner.lock().unwrap();
-                                    inner.pending_confirmed = Some(cleaned);
-                                }
-                            Err(e) => {
-                                tracing::warn!(%e, "定稿识别 JSON 解析失败");
-                            }
-                        }
-                    } else {
-                        let status = resp.status();
-                        let body = resp.text().await.unwrap_or_default();
-                        tracing::warn!(%status, %body, "定稿识别 HTTP 错误");
-                    }
+                    inner.pending_confirmed = Some(cleaned);
                 }
                 Err(e) => {
-                    tracing::warn!(%e, "定稿识别 HTTP 请求失败");
+                    tracing::warn!(%e, "定稿识别失败");
                 }
             }
 
@@ -346,11 +290,12 @@ impl PseudoStreamingSttEngine {
             return;
         }
 
-        // 标记 in_flight
-        {
+        // 标记 in_flight + 捕获当前代际
+        let generation = {
             let mut inner = self.inner.lock().unwrap();
             inner.preview_in_flight = true;
-        }
+            inner.preview_generation
+        };
 
         let inner = Arc::clone(&self.inner);
         let client = self.client.clone();
@@ -363,40 +308,26 @@ impl PseudoStreamingSttEngine {
             let trimmed = trim_trailing_silence(&samples_snapshot, sample_rate);
             let wav_bytes = super::wav::pcm_to_wav(&trimmed, sample_rate, 1);
 
-            use reqwest::multipart;
-            let part = match multipart::Part::bytes(wav_bytes)
-                .file_name("audio.wav")
-                .mime_str("audio/wav")
-            {
-                Ok(p) => p,
-                Err(_) => {
-                    let mut inner = inner.lock().unwrap();
-                    inner.preview_in_flight = false;
-                    return;
-                }
-            };
-            let form = multipart::Form::new().text("model", model).part("file", part);
-
-            match client.post(&url).multipart(form).send().await {
-                Ok(resp) => {
-                    if resp.status().is_success() {
-                        #[derive(serde::Deserialize)]
-                        struct R {
-                            text: String,
+            match super::wav::transcribe_with_client(&client, &url, None, &model, &wav_bytes).await {
+                Ok(text) => {
+                    let cleaned = strip_filler_words(&text);
+                    if !cleaned.is_empty() {
+                        // 精简日志：raw 仅在与 cleaned 不同时打印
+                        if cleaned != text {
+                            tracing::trace!(%cleaned, raw = %text, "预览识别");
+                        } else {
+                            tracing::trace!(%cleaned, "预览识别");
                         }
-                        if let Ok(r) = resp.json::<R>().await {
-                            let cleaned = strip_filler_words(&r.text);
-                            if !cleaned.is_empty() {
-                                // 精简日志：raw 仅在与 cleaned 不同时打印
-                                if cleaned != r.text {
-                                    tracing::trace!(%cleaned, raw = %r.text, "预览识别");
-                                } else {
-                                    tracing::trace!(%cleaned, "预览识别");
-                                }
-                                // 写入 latest_preview
-                                let mut inner = inner.lock().unwrap();
-                                inner.latest_preview = cleaned;
-                            }
+                        // 写入 latest_preview（代际校验：句尾后丢弃过期预览）
+                        let mut inner = inner.lock().unwrap();
+                        if inner.preview_generation == generation {
+                            inner.latest_preview = cleaned;
+                        } else {
+                            tracing::debug!(
+                                gen = generation,
+                                cur_gen = inner.preview_generation,
+                                "丢弃过期预览（句尾已发生）"
+                            );
                         }
                     }
                 }
@@ -621,8 +552,10 @@ impl SttEngine for PseudoStreamingSttEngine {
             }
 
             // 句尾时清空预览（本句已定稿，下一段预览从空开始）
+            // 同时递增 generation，使 in-flight 的旧预览返回时被丢弃（防重复影子）
             if event == VadEvent::SentenceEnd {
                 inner.latest_preview.clear();
+                inner.preview_generation = inner.preview_generation.wrapping_add(1);
             }
 
             let snapshot = if should_preview {
@@ -761,6 +694,7 @@ impl SttEngine for PseudoStreamingSttEngine {
         inner.latest_preview.clear();
         inner.finalize_in_flight = false;
         inner.pending_confirmed = None;
+        inner.preview_generation = inner.preview_generation.wrapping_add(1);
         tracing::debug!("伪流式引擎 reset");
     }
 
@@ -1035,6 +969,7 @@ mod tests {
                 latest_preview: "测试预览".to_string(),
                 finalize_in_flight: true,
                 pending_confirmed: Some("pending".to_string()),
+                preview_generation: 0,
             })),
             client: reqwest::Client::new(),
             server_port: 8000,
@@ -1051,6 +986,7 @@ mod tests {
         assert!(!inner.preview_in_flight);
         assert!(!inner.finalize_in_flight);
         assert!(inner.pending_confirmed.is_none());
+        assert_eq!(inner.preview_generation, 1, "reset 应递增 preview_generation");
         assert_eq!(inner.sentences.confirmed_text(), "");
     }
 }

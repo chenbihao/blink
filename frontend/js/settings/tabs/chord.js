@@ -38,14 +38,16 @@ async function loadChordActions() {
   // Chord id → 图标 + 副标题（一眼看懂每个 Chord 做啥）
   const CHORD_META = {
     screenshot: { icon: "🖼", subtitle: t("chord.action.screenshot.subtitle") },
-    selection: { icon: "✂️", subtitle: t("chord.action.selection.subtitle") },
+    voice_input: { icon: "🎤", subtitle: t("chord.action.voice_input.subtitle") },
     clipboard_history: { icon: "📋", subtitle: t("chord.action.clipboard_history.subtitle") },
   };
 
   container.innerHTML = actions
     .map((a) => {
       const meta = CHORD_META[a.id] || { icon: "•", subtitle: "" };
-      const combo = `Alt + ${a.key.toUpperCase()}`;
+      // key=' '（语音输入）→ 显示 "Space"，与 chord.js / statusbar.js 统一
+      const keyLabel = a.key === " " ? "Space" : a.key.toUpperCase();
+      const combo = `Alt + ${keyLabel}`;
       const rowClass = a.enabled ? "" : "is-disabled";
       const subtitleHtml = meta.subtitle
         ? `<div class="action-subtitle">${escapeHtml(meta.subtitle)}</div>`
