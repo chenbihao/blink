@@ -71,6 +71,12 @@ export function isAltDown() {
   return invoke("is_alt_down");
 }
 
+/** 0.10.7：设置 Chord 独占模式。主窗 Alt hold + chordEligible 时进 true，退出时 false。
+ *  后端 LL hook 在 chord mode 下吞掉 chord 键 keydown，独占触发。 */
+export function setChordMode(on) {
+  return invoke("set_chord_mode", { on });
+}
+
 /** 拉取剪贴板历史（Alt+C 面板渲染用）。 */
 export function getClipboardHistory(limit) {
   return invoke("get_clipboard_history", { limit: limit ?? 20 });

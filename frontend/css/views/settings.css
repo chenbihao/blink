@@ -892,6 +892,154 @@ input[type="number"]::-webkit-outer-spin-button {
   text-align: center;
 }
 
+/* ── 0.10.7 Chord 展开式 accordion（0.10.7.2 修复 hidden + 紧凑布局）── */
+
+/* chord-row 是 action-list-row 的扩展，flex-wrap 让 body 换行到第二行 */
+.chord-row {
+  flex-wrap: wrap;
+}
+
+/* header 整体可点击展开（role=button + tabindex=0 提供键盘可达性） */
+.chord-row-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  cursor: pointer;
+  user-select: none;
+  outline: none;
+  border-radius: var(--radius-sm);
+}
+
+/* 键盘聚焦保留轮廓（可达性），去掉 hover 背景高亮 */
+.chord-row-header:focus-visible {
+  outline: 2px solid var(--accent, #4a9);
+  outline-offset: -2px;
+}
+
+/* 展开箭头：参考插件样式，▶ 默认朝右，展开后旋转 90° 朝下 */
+.chord-expand-arrow {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  font-size: 9px;
+  color: var(--text-dim);
+  transition: transform var(--transition-slow) ease;
+}
+
+.chord-row.is-expanded .chord-expand-arrow {
+  transform: rotate(90deg);
+}
+
+/* kbd 键帽外层 slot：宽度 = --settings-label-width - 32px（减去 arrow 16 + gap 16），
+   让 slot 右缘对齐普通 .setting-label 右缘（180px），从而 action-info 左缘 = 196px，
+   与普通 setting-row 控件左缘统一对齐。action-kbd 在 slot 内左对齐，宽度自适应。 */
+.chord-kbd-slot {
+  flex: 0 0 calc(var(--settings-label-width) - 32px);
+  width: calc(var(--settings-label-width) - 32px);
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+/* 展开体：内部 .chord-field 用 ::before 占位（arrow 16px + gap 16px = 32px），
+   与 header 同构。setting-label 宽度同样减 32px，右缘对齐 kbd-slot 右缘（180px），
+   控件左缘对齐 action-info（196px）。 */
+.chord-row-body {
+  width: 100%;
+  padding: 8px 0 10px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* ⚠️ 关键：display:flex 会覆盖 [hidden] 的 display:none，必须显式声明 */
+.chord-row-body[hidden] {
+  display: none;
+}
+
+/* ── 紧凑字段行：与 header 同构（arrow 占位 + label + 控件），gap 一致 16px，对齐自动成立 ── */
+.chord-field {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 4px 0;
+}
+
+/* arrow 占位：与 header 的 .chord-expand-arrow 同宽（16px），让 .setting-label 左缘
+   对齐 .chord-kbd-slot 左缘（32px = arrow 16 + gap 16）。 */
+.chord-field::before {
+  content: "";
+  flex: 0 0 16px;
+}
+
+/* 展开体 setting-label：宽度同步 kbd-slot（--settings-label-width - 32px），
+   右缘对齐 kbd-slot 右缘（180px），控件左缘对齐 action-info（196px）。 */
+.chord-field .setting-label {
+  width: calc(var(--settings-label-width) - 32px);
+}
+
+/* .setting-label 已定义 width: var(--settings-label-width)，此处加 .chord-field-label
+   仅补充 inline-flex 让 hint icon 垂直对齐，不改宽度 */
+.chord-field-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.chord-field-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* chord 录制按钮复用 .hotkey-btn 样式，仅覆盖 min-width 让其更紧凑 */
+.chord-binding-record.hotkey-btn {
+  min-width: auto;
+  padding: 4px 12px;
+}
+
+.chord-binding-combo {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: var(--text-base);
+  color: var(--text);
+}
+
+/* voice_input 锁定提示：对齐 .chord-field 的 setting-label（arrow 16 + gap 16 = 32px） */
+.chord-locked-note {
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  font-style: italic;
+  padding: 4px 0 4px 32px;
+}
+
+/* ── 剪贴板详细配置 ── */
+.chord-clipboard-detail {
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.chord-clipboard-detail input[type="number"],
+.chord-clipboard-detail input[type="text"] {
+  width: 180px;
+  padding: 5px 10px;
+  background: var(--bg-sidebar);
+  border: 1px solid var(--surface);
+  border-radius: var(--radius-md);
+  color: var(--text);
+  font-size: var(--text-base);
+}
+
+.chord-clipboard-detail input[type="text"] {
+  width: 280px;
+}
+
 /* ── 插件配置卡片（schema 驱动表单）────────────────────────────────────── */
 
 /* 禁用态:整卡半透明 + 配置区不可点 */

@@ -532,6 +532,7 @@ fn main() {
             app::commands::list_chord_actions,
             app::commands::list_all_chord_actions,
             app::commands::is_alt_down,
+            app::commands::set_chord_mode,
             app::commands::capture_region,
             app::commands::hide_screenshot_overlay,
             app::commands::get_storage_info,

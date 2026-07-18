@@ -13,7 +13,7 @@
 //! 用 `app.state::<SqlitePool>()`,AppContext 仅服务于 setup 期的 Service 编排。
 
 use sqlx::SqlitePool;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 use crate::app::ai_config::AIConfig;
 use crate::app::config::AppConfig;
@@ -181,7 +181,23 @@ impl Service for HotkeyService {
                     }
                     crate::infra::platform::hotkey::HotkeyEvent::Hold(_) => {
                         // 长按开始 → 语音录音开始（async：可能需等待模型加载）
-                        voice_service.start_recording().await;
+                        // 0.10.7：chord 门禁——chord 总开关关 / voice_input 在 disabled 列表 →
+                        // 不启动录音。这让设置页的 voice_input 开关真正生效（而非仅控显示）。
+                        let pool = app.state::<sqlx::SqlitePool>();
+                        let chord_cfg = crate::app::config::get_chord_config(&pool).await;
+                        let disabled =
+                            crate::app::config::get_disabled_chord_actions(&pool).await;
+                        let voice_disabled =
+                            disabled.iter().any(|d| d == "voice_input");
+                        if chord_cfg.chord_enabled && !voice_disabled {
+                            voice_service.start_recording().await;
+                        } else {
+                            tracing::debug!(
+                                chord_enabled = chord_cfg.chord_enabled,
+                                voice_disabled,
+                                "hold 触发但 voice_input chord 已禁用,跳过录音"
+                            );
+                        }
                     }
                     crate::infra::platform::hotkey::HotkeyEvent::HoldRelease(_) => {
                         // 长按结束 → 停止录音 → STT → 注入/fill-query
@@ -190,6 +206,29 @@ impl Service for HotkeyService {
                     crate::infra::platform::hotkey::HotkeyEvent::VoiceCancel(_) => {
                         // ESC 取消录音
                         voice_service.cancel_recording();
+                    }
+                    crate::infra::platform::hotkey::HotkeyEvent::Chord(key) => {
+                        // 0.10.7.2：chord 独占模式吞键后,前端收不到 keydown,
+                        // 由 hook 发此事件,此处复用 trigger_chord 逻辑触发动作。
+                        let Some(registry) = app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
+                        else {
+                            tracing::warn!("chord registry 未就绪,跳过 Chord 事件");
+                            continue;
+                        };
+                        let pool = app.state::<sqlx::SqlitePool>();
+                        let chord_cfg = crate::app::config::get_chord_config(&pool).await;
+                        let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
+                        let key_lower = key.to_lowercase();
+                        // 门禁：disabled 列表命中即跳过
+                        if let Some(action_id) = registry.action_id_for_key(&key_lower, &chord_cfg.bindings) {
+                            if disabled.iter().any(|d| d == action_id) {
+                                tracing::debug!(%key_lower, %action_id, "chord 已禁用,跳过触发");
+                                continue;
+                            }
+                        }
+                        if let Err(e) = registry.trigger(&key, &chord_cfg.bindings, &app).await {
+                            tracing::warn!(%key, %e, "chord trigger 失败");
+                        }
                     }
                 }
             }

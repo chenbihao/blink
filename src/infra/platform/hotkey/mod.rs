@@ -39,6 +39,10 @@ pub enum HotkeyEvent {
     HoldRelease(Instant),
     /// 语音取消(ESC)——录音中按 ESC,取消录音不识别不注入。
     VoiceCancel(Instant),
+    /// Chord 触发（0.10.7.2）——chord 独占模式吞键后,前端收不到 keydown,
+    /// 由 hook 直接发此事件,HotkeyService 消费后调 trigger_chord 逻辑。
+    /// 携带已 toLowerCase 的 chord 主键（如 `"a"` / `"c"`）。
+    Chord(String),
 }
 
 /// 热键运行时状态(配置 + tap 阈值 + 事件发送端)。
@@ -55,6 +59,68 @@ struct HotkeyRuntime {
 }
 
 static RUNTIME: OnceLock<HotkeyRuntime> = OnceLock::new();
+
+// ── 0.10.7：Chord 独占模式全局状态 ─────────────────────────────────────────────
+//
+// **设计**：主窗 focused + Alt hold + chordEligible 时，前端调 `set_chord_mode(true)`
+// 命令，后端刷新 `CHORD_KEYS`（当前生效的 tap 语义 chord 键集合）并置 `CHORD_MODE=true`。
+// LL hook 在 chord mode 下，Alt 按下时吞掉 CHORD_KEYS 中的 keydown，让前端
+// `onChordTrigger` 独占处理（preventDefault + trigger_chord），避免其他软件的
+// 全局快捷键（如 Alt+A 截图）抢键。
+//
+// **退出时机**：Alt 松开 / 主窗失焦 / chordEligible 不再满足 → 前端调
+// `set_chord_mode(false)`，`CHORD_MODE=false`，hook 停止吞键。
+//
+// **与"不吞键"铁则的关系**：0.10.5.2 回滚的是"吞 Alt keyup"（破坏 GetKeyState，
+// 导致 Alt+Tab 异常）。0.10.7 吞的是"chord 键的 keydown"（字母键，非修饰键），
+// 且仅在 chord mode 窗口内，Alt 本身全程放行。两者本质不同，详见
+// docs/production-design/phases/0.10-voice-agent.md §10.5。
+
+/// Chord 独占模式是否激活。LL hook 读此标志决定是否吞 chord keydown。
+static CHORD_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 当前生效的 tap 语义 chord 键集合（已 toLowerCase，如 `{"a", "c"}`）。
+/// chord mode 激活时由 `set_chord_mode` 刷新。hook 据此判断哪些 keydown 要吞。
+/// 用 `OnceLock<RwLock<...>>` 因 `HashSet::new()` 非 const fn，无法直接用于 static。
+static CHORD_KEYS: OnceLock<RwLock<std::collections::HashSet<String>>> = OnceLock::new();
+
+/// 初始化 CHORD_KEYS（首次 set_chord_mode 调用时自动触发）。
+fn ensure_chord_keys() -> &'static RwLock<std::collections::HashSet<String>> {
+    CHORD_KEYS.get_or_init(|| RwLock::new(std::collections::HashSet::new()))
+}
+
+/// 查询 chord 独占模式是否激活（供 LL hook 调用）。
+pub fn is_chord_mode() -> bool {
+    CHORD_MODE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// 查询某键是否为当前 chord 键（供 LL hook 调用）。
+/// `key` 调用前已 toLowerCase。未初始化时返回 false。
+pub fn is_chord_key(key: &str) -> bool {
+    CHORD_KEYS
+        .get()
+        .and_then(|g| g.read().ok().map(|g| g.contains(key)))
+        .unwrap_or(false)
+}
+
+/// 设置 chord 独占模式（前端 `set_chord_mode` 命令调用）。
+///
+/// - `on=true`：刷新 `CHORD_KEYS` 为当前 chord 配置的 tap 键集合，置 `CHORD_MODE=true`。
+/// - `on=false`：置 `CHORD_MODE=false`，`CHORD_KEYS` 清空。
+///
+/// `tap_keys` 由 command 层从 `ChordRegistry::list` + bindings 派生（只取 semantic=tap）。
+pub fn set_chord_mode(on: bool, tap_keys: std::collections::HashSet<String>) {
+    let keys = ensure_chord_keys();
+    CHORD_MODE.store(on, std::sync::atomic::Ordering::SeqCst);
+    if let Ok(mut g) = keys.write() {
+        if on {
+            *g = tap_keys;
+        } else {
+            g.clear();
+        }
+    }
+    tracing::debug!(on, "chord mode 已切换");
+}
 
 // 平台特定实现
 #[cfg(target_os = "windows")]

@@ -288,6 +288,24 @@ export const en = {
   "chord.clipboard.enabled.label": "Listen for clipboard writes",
   "chord.clipboard.enabled.hint": "When on, copied content is automatically recorded; type \"clip\" or press Alt+C to recall (if disabled at startup, first re-enable needs one restart to build the listener)",
 
+  // ── 0.10.7 Chord expandable config (0.10.7.1 rewrite: removed expand button labels, recording via backend) ──
+  "chord.binding.key.label": "Trigger key",
+  "chord.binding.key.hint": "Click the keycap on the right and press a new combo to rebind (modifier fixed to Alt, letters only)",
+  "chord.binding.record": "Click to record",
+  "chord.binding.recording": "Press Alt+letter… (10s timeout)",
+  "chord.binding.invalid": "Must be Alt+letter",
+  "chord.binding.reset": "Reset to default",
+  "chord.binding.voice_input.locked": "Voice input key is bound to the hotkey config and cannot be changed here",
+  "chord.clipboard.max_items.label": "Max history items",
+  "chord.clipboard.max_items.hint": "Oldest entries are evicted beyond this count (50-500 recommended)",
+  "chord.clipboard.retention_days.label": "Retention days",
+  "chord.clipboard.retention_days.hint": "Entries older than this are purged (0 = no time-based purge)",
+  "chord.clipboard.search_enabled.label": "Allow search recall",
+  "chord.clipboard.search_enabled.hint": "Recall clipboard history from the main search box",
+  "chord.clipboard.blacklist.label": "Blacklist keywords",
+  "chord.clipboard.blacklist.hint": "Copies containing any keyword are not recorded (comma-separated)",
+  "chord.clipboard.blacklist.placeholder": "password, token, secret",
+
   // ── AI panel (0.9.1 Phase 6) ──
   "tab.ai": "AI",
   "panel.ai": "AI Intent Routing",

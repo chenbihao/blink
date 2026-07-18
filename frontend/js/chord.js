@@ -49,6 +49,26 @@ export function getActions() {
   return chordEnabled && hintVisible ? chordActions : [];
 }
 
+/**
+ * 当前生效的 tap 语义 chord 键集合（0.10.7）。
+ *
+ * keyboard.js 的 `onChordTrigger` 用此集合判断 Alt+字母是否触发 chord。
+ * 只含 `semantic === "tap"` 的动作——hold 语义（如语音输入 Alt+Space）
+ * 由 native hotkey hook 的 hold 状态机处理，不走前端 keydown 路径。
+ *
+ * 键已 toLowerCase，与 `e.key.toLowerCase()` 直接比对。
+ */
+export function getTapKeys() {
+  const set = new Set();
+  if (!chordEnabled) return set;
+  for (const a of chordActions) {
+    if (a.semantic === "tap") {
+      set.add(String(a.key).toLowerCase());
+    }
+  }
+  return set;
+}
+
 // ── 可见性变化回调（statusbar 订阅用）─────────────────────────────────────
 let onVisibilityChangeCallback = null;
 

@@ -242,13 +242,17 @@ impl Default for SuggestionConfig {
     }
 }
 
-/// Chord 交互分片。总开关 + 提示可见性。
+/// Chord 交互分片。总开关 + 提示可见性 + 键位绑定（0.10.7）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChordConfig {
     #[serde(default = "default_false")]
     pub chord_enabled: bool,
     #[serde(default = "default_true")]
     pub chord_hint_visible: bool,
+    /// 0.10.7：chord 键位绑定。serde default 兜底——旧配置无此字段时用各动作 default_key。
+    /// 类型定义在 `domain::chord`（域层），此处仅引用以保持分层正确。
+    #[serde(default)]
+    pub bindings: crate::domain::chord::ChordBindings,
 }
 
 impl Default for ChordConfig {
@@ -256,6 +260,7 @@ impl Default for ChordConfig {
         Self {
             chord_enabled: false,
             chord_hint_visible: true,
+            bindings: crate::domain::chord::ChordBindings::default(),
         }
     }
 }
@@ -531,6 +536,9 @@ pub struct AppConfig {
     /// Chord 增强菜单可见性（0.8.5 §6.6）。默认 true——一旦启用 Chord，提示条是发现路径。
     #[serde(default = "default_true")]
     pub chord_hint_visible: bool,
+    /// 0.10.7：chord 键位绑定（门面镜像，分片在 `ChordConfig.bindings`）。
+    #[serde(default)]
+    pub chord_bindings: crate::domain::chord::ChordBindings,
     /// 用户禁用的 Chord 动作 id 列表（0.8.5 §6.6）。存 action id，触发/列表时跳过。
     #[serde(default)]
     pub disabled_chord_actions: Vec<String>,
@@ -564,6 +572,7 @@ impl Default for AppConfig {
             disabled_context_bindings: Vec::new(),
             chord_enabled: false,
             chord_hint_visible: true,
+            chord_bindings: crate::domain::chord::ChordBindings::default(),
             disabled_chord_actions: Vec::new(),
             window_opacity: default_window_opacity(),
         }
@@ -732,6 +741,7 @@ pub async fn get_config(pool: &SqlitePool) -> AppConfig {
         // ── ChordConfig 分片 ────────────────────────────────
         chord_enabled: chord.chord_enabled,
         chord_hint_visible: chord.chord_hint_visible,
+        chord_bindings: chord.bindings.clone(),
         // ── DisableConfig 分片 ──────────────────────────────
         disabled_builtin_actions: disable.disabled_builtin_actions,
         disabled_context_bindings: disable.disabled_context_bindings,
@@ -798,6 +808,7 @@ pub async fn save_config(pool: &SqlitePool, config: &AppConfig) -> Result<(), St
         &ChordConfig {
             chord_enabled: config.chord_enabled,
             chord_hint_visible: config.chord_hint_visible,
+            bindings: config.chord_bindings.clone(),
         },
     )
     .await?;
@@ -943,6 +954,11 @@ pub async fn get_disabled_chord_actions(pool: &SqlitePool) -> Vec<String> {
     get_config(pool).await.disabled_chord_actions
 }
 
+/// 获取 Chord 配置分片（0.10.7：chord 命令热路径用，只读 chord 这一片，不拉全量 AppConfig）。
+pub async fn get_chord_config(pool: &SqlitePool) -> ChordConfig {
+    ConfigStore::get::<ChordConfig>(pool).await
+}
+
 /// 更新 disable 列表（设置页勾选后调用）。**幂等**：内部去重排序。
 pub async fn update_disabled_chord_actions(
     pool: &SqlitePool,
@@ -974,6 +990,18 @@ pub async fn update_chord_toggles(
     config.chord_enabled = chord_enabled;
     config.chord_hint_visible = chord_hint_visible;
     save_config(pool, &config).await
+}
+
+/// 0.10.7：更新 chord 键位绑定。设置页改键后调用。
+///
+/// 只更新 bindings 字段，保留 chord_enabled / chord_hint_visible / disabled 列表。
+pub async fn update_chord_bindings(
+    pool: &SqlitePool,
+    bindings: crate::domain::chord::ChordBindings,
+) -> Result<(), String> {
+    let mut chord = get_chord_config(pool).await;
+    chord.bindings = bindings;
+    ConfigStore::set(pool, &chord).await
 }
 
 /// 更新通用配置（主题 / 搜索历史 / 结果数）。仅持久化；

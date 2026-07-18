@@ -13,13 +13,14 @@
 Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而是 **Universal Action Layer（统一操作层）**。
 终极目标：感知用户上下文、主动推荐动作，让任何操作都比原来的路径更快。
 
-当前 **0.11.0~0.11.6 完成**（插件通信契约重设计 + AI 调用插件链路完善：结果模型统一 + 工具元信息增强 + 提示词统一管理 + 结果回流 AI + 应用搜索/剪贴板历史 Capability + 翻译插件全 Rust 化）。测试基线 **699 通过**。详见 [phases/0.11-plugin-ai-toolchain.md](docs/production-design/phases/0.11-plugin-ai-toolchain.md)。
+当前 **0.11.0~0.11.6 完成**（插件通信契约重设计 + AI 调用插件链路完善：结果模型统一 + 工具元信息增强 + 提示词统一管理 + 结果回流 AI + 应用搜索/剪贴板历史 Capability + 翻译插件全 Rust 化）。0.10.7 Chord 交互统一化已实现。测试基线 **702 通过**。详见 [phases/0.11-plugin-ai-toolchain.md](docs/production-design/phases/0.11-plugin-ai-toolchain.md)。
 
 - ✅ **0.10 语音输入**：STT + 语音打字（G1 主窗口语音输入 / G2 语音输入法上屏）。工具箱层定 FunASR（SenseVoice 准确率 7.81%，CPU 17× 实时）。详见 [phases/0.10-voice-agent.md](docs/production-design/phases/0.10-voice-agent.md)
   - 0.10.4：伪流式 VAD 切句 + 累积预览 + 移除真流式 + 架构清理
   - 0.10.3：blink_stt_server 统一服务 + SendInput Unicode + 热词/ITN
   - 0.10.5：收尾体验优化（VAD 参数滑动条 + 热词/高级选项 UI 优化）
   - 0.10.5 TSF Composition / 0.10.6 hook 吞键：均已废弃（跨进程不可用 / Alt keyup 副作用不可控），回归 SendInput + Clipboard 两级
+  - 0.10.7：Chord 交互统一化——语音 chord 化 + hold 门禁生效 + chord 键位可配置 + 主窗 Alt 独占（hook 吞 chord keydown）+ 设置页展开式改造（accordion + 键位录制 + 剪贴板详细配置迁回）
 - ✅ **0.11 插件通信契约重设计 + AI 调用插件链路完善**：主线修 0.9.3 遗留（tool-call 结果截断/语义混淆/无回流/元信息不友好）+ 补 AI tool 池缺口（应用搜索 / 剪贴板历史 Capability）+ builtin 插件全 Rust 化（翻译插件，一次性 1:1 迁移）。详见 [phases/0.11-plugin-ai-toolchain.md](docs/production-design/phases/0.11-plugin-ai-toolchain.md)
   - 0.11.0：结果模型统一（PluginItem payload + ActionOutcome::Items + 统一投影）+ AI 结果视觉形态
   - 0.11.1：工具元信息增强（manifest 新字段 + 参数动态注入 + sensitive 铺路）
@@ -71,7 +72,7 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 
 | 决策 | 说明 |
 |---|---|
-| **热键不吞键** | hook 回调全程 `CallNextHookEx` 放行，Alt 仍可作系统修饰键。tap/hold 靠按压时长 + 期间是否出现其他键区分。 |
+| **热键默认不吞键** | hook 回调全程 `CallNextHookEx` 放行，Alt 仍可作系统修饰键。tap/hold 靠按压时长 + 期间是否出现其他键区分。**例外（0.10.7）**：chord 独占模式下，主窗 Alt hold 时吞 chord 键 keydown（仅字母键，不碰 Alt 本身），让 Blink 独占 chord 触发，避免与其他软件 Alt+A 等冲突。退出 chord mode 即恢复放行。 |
 | **看门狗失焦检测** | 不依赖 `WM_ACTIVATE`，每 150ms 轮询 `GetForegroundWindow()`，按**进程 PID** 判定（非死比 HWND）。 |
 | **搜索双路匹配** | 同时对原始名和拼音首字母做 nucleo fuzzy 取最高分；历史 `ln(hit+1)*0.3` 加权（上限 0.8）。 |
 | **图标懒加载** | 图标提取**不进搜索热路径**，由自定义协议 `blink-icon` 按需提供。 |

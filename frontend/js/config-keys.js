@@ -8,7 +8,8 @@
  *
  * **AppConfig 分片**：`language` / `log_level` / `auto_start` / `hotkey` /
  * `tap_threshold` / `grace_period` / `general_config` / `autosuggest` /
- * `chord_toggles` / `clipboard_enabled` / `disabled_builtin_actions` /
+ * `chord_toggles` / `chord_bindings`（0.10.7）/ `clipboard_enabled` /
+ * `clipboard_config`（0.10.7）/ `disabled_builtin_actions` /
  * `disabled_context_bindings` / `disabled_chord_actions`
  *
  * **引擎配置**：`file_search` / `start_menu_config` / `calc_config` / `global_proxy`

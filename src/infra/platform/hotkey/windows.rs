@@ -18,6 +18,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use super::{HotkeyEvent, get_current_config, get_tap_threshold, send_event};
+use super::{is_chord_key, is_chord_mode};
 
 /// 全局标志：语音录音中。hotkey hook 读它判断 ESC 是否应触发取消。
 /// VoiceService 在 start/cancel/stop 时写它。
@@ -387,6 +388,31 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
             && unsafe { GetAsyncKeyState(VK_MENU.0 as i32) } < 0
         {
             return LRESULT(1);
+        }
+
+        // 0.10.7 Chord 独占模式：主窗 focused + Alt hold 时，吞掉 chord 键的 keydown，
+        // **并发 Chord 事件给 HotkeyService 触发**（0.10.7.2 修复：原实现只吞不发，
+        // 导致前端收不到 keydown，chord 触发链路断裂）。
+        //
+        // **吞键范围**：仅 keydown、仅非修饰键、仅 Alt 物理按下、仅键在 CHORD_KEYS 中。
+        // **不吞**：修饰键本身（Alt 全程放行）、keyup（让其他软件收到完整 up）。
+        //
+        // **为什么需要吞键 + 发事件**：前端 `onChordTrigger` 靠 webview keydown 事件触发，
+        // 但 LL hook 吞键后 webview 收不到 keydown。故 hook 吞键后直接发 `Chord(key)` 事件，
+        // HotkeyService 在主线程调 trigger 逻辑，绕过前端 keydown 链路。同时吞键防止
+        // 其他软件的全局快捷键（如 Alt+A 截图）抢键。
+        if is_down
+            && is_chord_mode()
+            && !is_modifier_key(vk)
+            && unsafe { GetAsyncKeyState(VK_MENU.0 as i32) } < 0
+        {
+            if let Some(key) = vk_to_key(vk) {
+                if is_chord_key(&key) {
+                    // 吞键 + 发 Chord 事件
+                    send_event(HotkeyEvent::Chord(key));
+                    return LRESULT(1);
+                }
+            }
         }
 
         let config = get_current_config();

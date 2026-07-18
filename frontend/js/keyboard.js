@@ -1,7 +1,7 @@
 //! 键盘交互：结果导航、激活、ESC 隐藏、修饰键默认行为屏蔽。
 //! 0.8.1：Tab / ArrowRight 拦截接受 ghost text 补全（视配置 autosuggest_tab_key）。
 
-import { hideWindow, triggerChord, isAltDown } from "./api.js";
+import { hideWindow, triggerChord, isAltDown, setChordMode } from "./api.js";
 import { activateItem } from "./actions.js";
 import * as results from "./results.js";
 import * as ghost from "./ghost.js";
@@ -113,10 +113,9 @@ function onBlockModifiers(e) {
 //   此时 Alt+字母应正常进搜索框，别被 Chord 吞掉。
 //   典型场景：用户输入"剪贴板"后按 Alt+C 想输入 C——不该触发 Chord，字母正常入框。
 
-const CHORD_KEYS = new Set(["a", "c"]);
-
-// 触发后端 trigger_chord（Alt+A 截图 / Alt+C 剪贴板）。
-// 注意：Alt+Space 语音输入不走此路径——由 native hotkey hold 状态机直接处理。
+// 触发后端 trigger_chord（Alt+A 截图 / Alt+C 剪贴板等 tap 语义动作）。
+// 注意：Alt+Space 语音输入（hold 语义）不走此路径——由 native hotkey hold 状态机直接处理。
+// 0.10.7：触发键集合从 chord.getTapKeys() 动态获取（用户可配置），不再硬编码。
 function fireChord(key) {
   console.log(`[chord] Alt+${key.toUpperCase()} triggered`);
   triggerChord(key).catch((e) => console.warn("[chord] trigger_chord 失败", e));
@@ -126,7 +125,8 @@ function onChordTrigger(e) {
   if (!e.altKey) return;
   if (e.isComposing || e.keyCode === 229) return; // IME 组字放行
   const key = e.key.toLowerCase();
-  if (!CHORD_KEYS.has(key)) return;
+  // 0.10.7：用动态 tap 键集合（从 chord 配置派生），不再用硬编码 CHORD_KEYS
+  if (!chord.getTapKeys().has(key)) return;
   // 门禁：query 空 + 结果为空才触发（用户还没开始交互）。
   // trim 是防"只有空格"也被判非空。同 setAlt 里的可见性门禁一致——
   // 触发与显示门禁共用同一条件，避免"菜单不该显示但按 Alt+C 生效"或反之。
@@ -162,6 +162,11 @@ function setAlt(on) {
   const prevChordVisible = document.body.classList.contains("chord-visible");
   document.body.classList.toggle("alt-active", on);
   document.body.classList.toggle("chord-visible", showChord);
+  // 0.10.7：chord 独占模式联动——showChord 时进独占（LL hook 吞 chord keydown），
+  // 退出时还原。异步调用，失败仅告警（不影响主流程）。
+  setChordMode(showChord).catch((e) =>
+    console.warn("[chord] set_chord_mode 失败", e),
+  );
   // Chord 提示在 ghost overlay（无 Ghost 时）或 statusbar（有 Ghost 时），
   // 状态变化需通知 statusbar 重绘。
   if (showChord !== prevChordVisible) {

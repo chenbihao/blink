@@ -1,9 +1,14 @@
-//! Chord 模式底层能力（0.8.5 §六）。
+//! Chord 模式底层能力（0.8.5 §六 / 0.10.7 键位配置化）。
 //!
 //! **交互模型**：主窗 visible + Alt hold（状态驱动，非定时器）。前端 `keyboard.js`
 //! 检测 `body.chord-visible` 显示 Ghost overlay 层的提示（§6.5.6）+ 拦截 Alt+字母 →
 //! `invoke("trigger_chord")`。后端只提供注册表 + 触发分派，**不碰 LL hook**（hook 的
 //! tap/hold 状态机天然支持，见 phases §6.2 自洽性证明）。
+//!
+//! **0.10.7 键位配置化**：`ChordAction::key()` → `default_key()`，实际生效键由
+//! `ChordConfig.bindings` 覆盖。`ChordRegistry` 的 list / trigger 等方法接收
+//! `&ChordBindings` 合并默认键与用户配置。voice_input 的 `default_semantic = Hold`，
+//! PR2 起原生 hotkey hook 读 chord 配置决定是否 hold 触发。
 //!
 //! **四域约束**（0.8.4）：Chord 动作是 Execution 域消费者。真实动作（截图/剪贴板）
 //! 自行采集所需 Awareness，参数注入必须显式
@@ -17,9 +22,125 @@
 
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 
 use crate::domain::plugin::LocalizableText;
+
+// ── 0.10.7：chord 键位配置类型（域层定义，app/config 引用）────────────────────
+
+/// chord 键位语义（0.10.7）。
+///
+/// - `Tap`：按下即触发（截图 / 剪贴板），前端 keydown / hook 吞键直达。
+/// - `Hold`：长按触发（语音录音），走 hotkey hook 的 tap/hold 状态机。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChordSemantic {
+    Tap,
+    Hold,
+}
+
+impl Default for ChordSemantic {
+    fn default() -> Self {
+        ChordSemantic::Tap
+    }
+}
+
+/// 单个 chord 动作的键位绑定（0.10.7）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChordBinding {
+    /// 主键（与 hotkey 配置同命名：`" "` / `"a"` / `"c"` 等）。
+    /// 空字符串表示用动作的 `default_key()` 兜底。
+    #[serde(default)]
+    pub key: String,
+    /// 修饰键列表（当前只有 `["alt"]`，预留扩展）。
+    #[serde(default = "default_alt_modifiers")]
+    pub modifiers: Vec<String>,
+    /// 触发语义。未设置时由动作的 `default_semantic()` 兜底。
+    #[serde(default)]
+    pub semantic: ChordSemantic,
+}
+
+impl Default for ChordBinding {
+    fn default() -> Self {
+        Self {
+            key: String::new(),
+            modifiers: default_alt_modifiers(),
+            semantic: ChordSemantic::default(),
+        }
+    }
+}
+
+fn default_alt_modifiers() -> Vec<String> {
+    vec!["alt".to_string()]
+}
+
+/// 所有 chord 动作的键位绑定集合（0.10.7）。
+///
+/// 每个字段对应一个 chord action id。新增 chord 动作时加字段 + serde default 兜底。
+/// `key` 为空字符串时表示用动作的 `default_key()` 兜底；`semantic` 默认 `Tap`
+/// 时由动作的 `default_semantic()` 兜底（注意：无法区分"用户显式设 Tap"与"未设置"，
+/// 因此 hold 类动作如 voice_input 必须在 default_semantic 返回 Hold，且用户若要改回
+/// Tap 需显式设置——当前不暴露此 UI）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChordBindings {
+    #[serde(default)]
+    pub voice_input: ChordBinding,
+    #[serde(default)]
+    pub screenshot: ChordBinding,
+    #[serde(default)]
+    pub clipboard_history: ChordBinding,
+}
+
+impl ChordBindings {
+    /// 按 chord action id 取对应 binding 的不可变引用。
+    /// 未注册的 id 返回 None。
+    pub fn get(&self, id: &str) -> Option<&ChordBinding> {
+        match id {
+            "voice_input" => Some(&self.voice_input),
+            "screenshot" => Some(&self.screenshot),
+            "clipboard_history" => Some(&self.clipboard_history),
+            _ => None,
+        }
+    }
+
+    /// 按 chord action id 取可变引用（设置页改键用）。
+    #[allow(dead_code)]
+    pub fn get_mut(&mut self, id: &str) -> Option<&mut ChordBinding> {
+        match id {
+            "voice_input" => Some(&mut self.voice_input),
+            "screenshot" => Some(&mut self.screenshot),
+            "clipboard_history" => Some(&mut self.clipboard_history),
+            _ => None,
+        }
+    }
+
+    /// 解析某动作的生效键：binding.key 非空用 binding，否则用 default_key。
+    /// 未注册 id 返回 None。
+    pub fn effective_key(&self, id: &str, default_key: char) -> String {
+        match self.get(id) {
+            Some(b) if !b.key.is_empty() => b.key.clone(),
+            _ => default_key.to_string(),
+        }
+    }
+
+    /// 解析某动作的生效语义：binding 显式覆盖（当前实现：voice_input 默认 Hold，
+    /// 其余默认 Tap；若 binding.semantic 被用户显式设置则以 binding 为准）。
+    /// 由于 `ChordSemantic::default() == Tap`，无法区分"未设置"与"显式 Tap"，
+    /// 因此 hold 类动作（voice_input）的 default 必须在调用方处理——本方法
+    /// 直接返回 binding.semantic，调用方在 binding 为默认值时用 default_semantic 兜底。
+    pub fn effective_semantic(&self, id: &str, default_semantic: ChordSemantic) -> ChordSemantic {
+        // 简单策略：binding 未被用户改过（key 为空且 modifiers 为默认 alt）时用 default。
+        // 这避免 voice_input 被错误降级为 Tap。设置页保存时若用户显式改 semantic，
+        // binding.key 一般也会被一起设置（改键必然产生非空 key）。
+        match self.get(id) {
+            Some(b) if !b.key.is_empty() => b.semantic,
+            _ => default_semantic,
+        }
+    }
+}
+
+// ── Chord 触发后的窗口形态 ─────────────────────────────────────────────────────
 
 /// Chord 触发后的窗口形态（决定前端如何切主窗形态）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,15 +167,19 @@ impl ChordSurface {
     }
 }
 
-/// Chord 动作契约（0.8.6 §8.1.1：`ChordAction: Action` supertrait）。
+/// Chord 动作契约（0.8.6 §8.1.1：`ChordAction: Action` supertrait / 0.10.7 键位配置化）。
 ///
-/// 在 `Action` trait 基础上扩展 Chord 特有属性（触发键 / 窗口形态 / 显示名）。
+/// 在 `Action` trait 基础上扩展 Chord 特有属性（默认触发键 / 语义 / 窗口形态 / 显示名）。
 /// `execute` 统一走 `Action::execute`，返回 `ActionOutcome`（Emit / Nop 等）。
-/// 实现方注册到 [`ChordRegistry`]，前端按 `key` 触发。
+/// 实现方注册到 [`ChordRegistry`]，前端按生效键（binding 覆盖 default）触发。
 #[async_trait::async_trait]
 pub trait ChordAction: crate::domain::execution::Action {
-    /// 触发字母（小写，如 `'a'`）。前端 Alt+此字母 → trigger_chord。
-    fn key(&self) -> char;
+    /// 默认触发字母（小写，如 `'a'`）。用户可在设置页通过 binding 覆盖。
+    fn default_key(&self) -> char;
+    /// 默认触发语义。`Tap` = 按下即触发，`Hold` = 长按触发（走 hotkey 状态机）。
+    fn default_semantic(&self) -> ChordSemantic {
+        ChordSemantic::Tap
+    }
     /// 显示名（走 `LocalizableText`——registry 声明 zh/en，list() 按 language 解析）。
     fn label(&self) -> &LocalizableText;
     /// 触发后的窗口形态。
@@ -77,7 +202,8 @@ impl ChordRegistry {
     pub fn register(&mut self, action: Arc<dyn ChordAction>) {
         tracing::debug!(
             id = action.id(),
-            key = action.key().to_string(),
+            default_key = action.default_key().to_string(),
+            semantic = ?action.default_semantic(),
             "chord action registered"
         );
         self.actions.push(action);
@@ -86,15 +212,27 @@ impl ChordRegistry {
     /// 列出所有动作元数据（供前端 Ghost overlay 提示层渲染）。
     ///
     /// - `disabled`:被 disable 的 action id 列表,命中即跳过
+    /// - `bindings`:键位绑定（0.10.7），覆盖各动作的 default_key
     /// - `language`:当前 UI 语言（`AppConfig.language`）,用于解析 `LocalizableText` 到字符串
-    pub fn list(&self, disabled: &[String], language: &str) -> Vec<serde_json::Value> {
+    pub fn list(
+        &self,
+        disabled: &[String],
+        bindings: &ChordBindings,
+        language: &str,
+    ) -> Vec<serde_json::Value> {
         self.actions
             .iter()
             .filter(|a| !disabled.iter().any(|d| d == a.id()))
             .map(|a| {
+                let key = bindings.effective_key(a.id(), a.default_key());
+                let semantic = bindings.effective_semantic(a.id(), a.default_semantic());
                 serde_json::json!({
                     "id": a.id(),
-                    "key": a.key().to_string(),
+                    "key": key,
+                    "semantic": match semantic {
+                        ChordSemantic::Tap => "tap",
+                        ChordSemantic::Hold => "hold",
+                    },
                     "label": a.label().resolve(language),
                     "surface": a.surface().as_str(),
                 })
@@ -104,14 +242,25 @@ impl ChordRegistry {
 
     /// 列出所有动作 + 各自 enabled 状态（供设置页展示所有可开关的 Chord）。
     /// 与 `list` 的区别:不过滤 disabled,而是把 disabled 状态作为 `enabled` 字段返回。
-    pub fn list_all(&self, disabled: &[String], language: &str) -> Vec<serde_json::Value> {
+    pub fn list_all(
+        &self,
+        disabled: &[String],
+        bindings: &ChordBindings,
+        language: &str,
+    ) -> Vec<serde_json::Value> {
         self.actions
             .iter()
             .map(|a| {
                 let is_enabled = !disabled.iter().any(|d| d == a.id());
+                let key = bindings.effective_key(a.id(), a.default_key());
+                let semantic = bindings.effective_semantic(a.id(), a.default_semantic());
                 serde_json::json!({
                     "id": a.id(),
-                    "key": a.key().to_string(),
+                    "key": key,
+                    "semantic": match semantic {
+                        ChordSemantic::Tap => "tap",
+                        ChordSemantic::Hold => "hold",
+                    },
                     "label": a.label().resolve(language),
                     "surface": a.surface().as_str(),
                     "enabled": is_enabled,
@@ -124,11 +273,13 @@ impl ChordRegistry {
     ///
     /// 供 command 层做 disabled 门禁——先查 id → 再对比 DB 里的 disabled 列表。
     /// registry 本身不持 disabled 状态，保持"注册/分派"单一职责。
-    pub fn action_id_for_key(&self, key: &str) -> Option<&str> {
+    ///
+    /// 0.10.7：键位由 binding 覆盖，匹配时用 effective_key。
+    pub fn action_id_for_key(&self, key: &str, bindings: &ChordBindings) -> Option<&str> {
         let lower = key.to_lowercase();
         self.actions
             .iter()
-            .find(|a| a.key().to_string() == lower)
+            .find(|a| bindings.effective_key(a.id(), a.default_key()) == lower)
             .map(|a| a.id())
     }
 
@@ -137,12 +288,19 @@ impl ChordRegistry {
     ///
     /// 0.8.6 重构：统一走 `Action::execute` 返回 `ActionOutcome`，
     /// registry 层按 outcome 分派副作用（Emit → emit 事件）。
-    pub async fn trigger(&self, key: &str, app: &tauri::AppHandle) -> Result<ChordSurface, String> {
+    ///
+    /// 0.10.7：键位由 binding 覆盖，匹配时用 effective_key。
+    pub async fn trigger(
+        &self,
+        key: &str,
+        bindings: &ChordBindings,
+        app: &tauri::AppHandle,
+    ) -> Result<ChordSurface, String> {
         let lower = key.to_lowercase();
         let action = self
             .actions
             .iter()
-            .find(|a| a.key().to_string() == lower)
+            .find(|a| bindings.effective_key(a.id(), a.default_key()) == lower)
             .ok_or_else(|| format!("未注册的 chord 键: {lower}"))?;
         let surface = action.surface();
         tracing::info!(id = action.id(), key = %lower, surface = ?surface, "chord trigger");
@@ -183,15 +341,18 @@ impl Default for ChordRegistry {
 
 // ── Alt+Space 语音输入（display-only chord 条目）─────────────────────────────
 
-/// Alt+Space 语音输入（display-only chord 条目）。
+/// Alt+Space 语音输入（display-only chord 条目，0.10.7 升级为 semantic=hold）。
 ///
 /// **特殊性**：触发**不走 chord tap 路径**——Alt+Space 由 native hotkey hook 的
 /// hold 状态机处理（`HotkeyEvent::Hold` → `VoiceService::start_recording`）。
 /// 此条目仅用于在 chord 提示条中显示「Alt+Space 语音输入」，让 hold-to-talk
 /// 这个隐藏交互变得可发现。
 ///
-/// **execute 防御**：前端 `keyboard.js` 的 `CHORD_KEYS` 不含空格，Alt+Space
-/// 不会走 `onChordTrigger → trigger_chord`。若因任何原因被调用（如未来改动），
+/// **0.10.7**：`default_semantic = Hold`，PR2 起原生 hotkey hook 读 chord 配置
+/// 决定是否 hold 触发；chord 总开关 / disabled 列表也会门禁 hold 路径。
+///
+/// **execute 防御**：前端 `keyboard.js` 的 `CHORD_KEYS` 只含 semantic=tap 的键，
+/// Alt+Space 不会走 `onChordTrigger → trigger_chord`。若因任何原因被调用（如未来改动），
 /// execute 返回 Nop——真正录音由 hotkey 层已在 hold 时启动。
 ///
 /// **可见性门禁**：`list_chord_actions` / `list_all_chord_actions` command 层
@@ -236,8 +397,11 @@ impl crate::domain::execution::Action for VoiceInputAction {
 
 #[async_trait::async_trait]
 impl ChordAction for VoiceInputAction {
-    fn key(&self) -> char {
+    fn default_key(&self) -> char {
         ' '
+    }
+    fn default_semantic(&self) -> ChordSemantic {
+        ChordSemantic::Hold
     }
     fn label(&self) -> &LocalizableText {
         &self.label
@@ -358,7 +522,7 @@ impl crate::domain::execution::Action for ScreenshotAction {
 
 #[async_trait::async_trait]
 impl ChordAction for ScreenshotAction {
-    fn key(&self) -> char {
+    fn default_key(&self) -> char {
         'a'
     }
     fn label(&self) -> &LocalizableText {
@@ -419,7 +583,7 @@ impl crate::domain::execution::Action for ClipboardHistoryAction {
 
 #[async_trait::async_trait]
 impl ChordAction for ClipboardHistoryAction {
-    fn key(&self) -> char {
+    fn default_key(&self) -> char {
         'c'
     }
     fn label(&self) -> &LocalizableText {

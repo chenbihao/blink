@@ -293,11 +293,13 @@ pub async fn trigger_chord(app: tauri::AppHandle, key: String) -> Result<(), Str
     else {
         return Err("chord registry 未就绪".into());
     };
+    let pool = app.state::<sqlx::SqlitePool>();
+    // 0.10.7：读 chord 配置（bindings + disabled），键位由 binding 覆盖
+    let chord_cfg = crate::app::config::get_chord_config(&pool).await;
+    let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
     // 查该 key 对应的 action id,若在 disabled 列表 → 早退
     let key_lower = key.to_lowercase();
-    if let Some(action_id) = registry.action_id_for_key(&key_lower) {
-        let pool = app.state::<sqlx::SqlitePool>();
-        let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
+    if let Some(action_id) = registry.action_id_for_key(&key_lower, &chord_cfg.bindings) {
         if disabled.iter().any(|d| d == action_id) {
             tracing::debug!(%key_lower, %action_id, "chord 已禁用,跳过触发");
             return Ok(());
@@ -305,7 +307,9 @@ pub async fn trigger_chord(app: tauri::AppHandle, key: String) -> Result<(), Str
     }
     // surface 现已无 command 层消费者（MiniBall 划词已移除，各 action 自管 UI），
     // 保留 trigger 返回值以备未来扩展。
-    let _surface = registry.trigger(&key, &app).await?;
+    let _surface = registry
+        .trigger(&key, &chord_cfg.bindings, &app)
+        .await?;
     Ok(())
 }
 
@@ -350,6 +354,7 @@ pub fn hide_screenshot_overlay(app: tauri::AppHandle) {
 #[tauri::command]
 pub async fn list_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Value> {
     let pool = app.state::<sqlx::SqlitePool>();
+    let chord_cfg = crate::app::config::get_chord_config(&pool).await;
     let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
     let language = crate::app::config::get_config(&pool).await.language;
     let stt_enabled = crate::app::stt_config::get_stt_config().enabled;
@@ -358,7 +363,7 @@ pub async fn list_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Value>
         return Vec::new();
     };
     registry
-        .list(&disabled, &language)
+        .list(&disabled, &chord_cfg.bindings, &language)
         .into_iter()
         .filter(|a| !(a["id"] == "voice_input" && !stt_enabled))
         .collect()
@@ -374,6 +379,7 @@ pub async fn list_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Value>
 #[tauri::command]
 pub async fn list_all_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Value> {
     let pool = app.state::<sqlx::SqlitePool>();
+    let chord_cfg = crate::app::config::get_chord_config(&pool).await;
     let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
     let language = crate::app::config::get_config(&pool).await.language;
     let stt_enabled = crate::app::stt_config::get_stt_config().enabled;
@@ -382,7 +388,7 @@ pub async fn list_all_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Va
         return Vec::new();
     };
     registry
-        .list_all(&disabled, &language)
+        .list_all(&disabled, &chord_cfg.bindings, &language)
         .into_iter()
         .filter(|a| !(a["id"] == "voice_input" && !stt_enabled))
         .collect()
@@ -393,6 +399,47 @@ pub async fn list_all_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Va
 #[tauri::command]
 pub fn is_alt_down() -> bool {
     crate::infra::platform::hotkey::is_alt_down()
+}
+
+/// 0.10.7：设置 Chord 独占模式。前端在「主窗 focused + Alt hold + chordEligible」
+/// 满足时调 `set_chord_mode(true)`，Alt 松开 / 失焦 / 不再 eligible 时调
+/// `set_chord_mode(false)`。
+///
+/// 后端读 chord 配置派生 tap 键集合（只含 semantic=tap，排除 hold 的 voice_input），
+/// 传给 hotkey 模块。LL hook 在 chord mode 下吞掉这些键的 keydown，独占 chord 触发。
+///
+/// **非阻塞**：配置读取走 blocking（hotkey 全局状态是同步的，命令本身只需一次读）。
+/// 命令在 Tauri 命令线程执行，不阻塞 hook 线程。
+#[tauri::command]
+pub async fn set_chord_mode(app: tauri::AppHandle, on: bool) -> Result<(), String> {
+    if !on {
+        crate::infra::platform::hotkey::set_chord_mode(false, std::collections::HashSet::new());
+        return Ok(());
+    }
+    // 派生 tap 键集合
+    let pool = app.state::<sqlx::SqlitePool>();
+    let chord_cfg = crate::app::config::get_chord_config(&pool).await;
+    let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
+    let language = crate::app::config::get_config(&pool).await.language;
+    let stt_enabled = crate::app::stt_config::get_stt_config().enabled;
+    let Some(registry) =
+        app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
+    else {
+        return Err("chord registry 未就绪".into());
+    };
+    let actions = registry.list(&disabled, &chord_cfg.bindings, &language);
+    let mut tap_keys = std::collections::HashSet::new();
+    for a in actions {
+        // voice_input 在 STT 未启用时已被 list 过滤；此处再按 semantic=tap 收集
+        if a["semantic"] == "tap" {
+            if let Some(key) = a["key"].as_str() {
+                tap_keys.insert(key.to_lowercase());
+            }
+        }
+    }
+    let _ = stt_enabled; // voice_input 是 hold 语义，不会被收进 tap_keys
+    crate::infra::platform::hotkey::set_chord_mode(true, tap_keys);
+    Ok(())
 }
 
 /// 列出所有已注册的 context binding + 当前 enabled 状态（0.8.3 §4.6 设置页面板）。
@@ -767,6 +814,27 @@ pub async fn set_config(
                 .await?;
             let _ = app.emit("blink://config-changed", ());
             tracing::info!(v.chord_enabled, v.chord_hint_visible, "Chord 开关已更新");
+        }
+        "chord_bindings" => {
+            // 0.10.7：chord 键位绑定（设置页改键用）
+            let bindings: crate::domain::chord::ChordBindings =
+                serde_json::from_value(value).map_err(|e| e.to_string())?;
+            crate::app::config::update_chord_bindings(&pool, bindings.clone()).await?;
+            let _ = app.emit("blink://config-changed", ());
+            tracing::info!("Chord 键位绑定已更新");
+        }
+        "clipboard_config" => {
+            // 0.10.7：剪贴板历史详细配置（retention_days / max_items / blacklist_keywords）
+            let cfg: crate::infra::data::clipboard::ClipboardConfig =
+                serde_json::from_value(value).map_err(|e| e.to_string())?;
+            crate::app::config::ConfigStore::set(&pool, &cfg).await?;
+            let _ = app.emit("blink://config-changed", ());
+            tracing::info!(
+                enabled = cfg.enabled,
+                max_items = cfg.max_items,
+                retention_days = cfg.retention_days,
+                "剪贴板配置已更新"
+            );
         }
 
         // ── Disable 列表 ──────────────────────────────────────────────────

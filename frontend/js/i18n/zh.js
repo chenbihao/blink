@@ -289,6 +289,24 @@ export const zh = {
   "chord.clipboard.enabled.label": "监听剪贴板写入",
   "chord.clipboard.enabled.hint": "开启后自动记录复制内容，输入\"剪贴板\"或 Alt+C 召回历史（如启动时为关闭状态，首次打开需重启一次让监听器建立）",
 
+  // ── 0.10.7 Chord 展开式配置（0.10.7.1 重写：移除展开按钮文案，录制走后端）──
+  "chord.binding.key.label": "触发键位",
+  "chord.binding.key.hint": "点击右侧键帽按下新组合键即可重绑（修饰键固定为 Alt，仅接受字母键）",
+  "chord.binding.record": "点击录制",
+  "chord.binding.recording": "请按下 Alt+字母…（10秒超时）",
+  "chord.binding.invalid": "必须是 Alt+字母",
+  "chord.binding.reset": "恢复默认",
+  "chord.binding.voice_input.locked": "语音输入键位由热键配置决定，暂不支持在此修改",
+  "chord.clipboard.max_items.label": "最大历史条数",
+  "chord.clipboard.max_items.hint": "超过此数量自动淘汰最旧记录（建议 50-500）",
+  "chord.clipboard.retention_days.label": "保留天数",
+  "chord.clipboard.retention_days.hint": "超过此天数的记录自动清理（0 表示不按天数清理）",
+  "chord.clipboard.search_enabled.label": "允许搜索召回",
+  "chord.clipboard.search_enabled.hint": "在主搜索框输入时召回剪贴板历史",
+  "chord.clipboard.blacklist.label": "黑名单关键词",
+  "chord.clipboard.blacklist.hint": "包含任一关键词的复制内容不记录（逗号分隔）",
+  "chord.clipboard.blacklist.placeholder": "password, token, secret",
+
   // ── AI 交互面板（0.9.1 Phase 6）──
   "tab.ai": "AI",
   "panel.ai": "AI 意图辅助",
