@@ -175,7 +175,7 @@ Suggestion 域是唯一能读 Awareness 的层，也是**AI 意图判定器的�
 
 ## 6. 护城河定位 + 统一 Tool 架构（0.9+ 智能化方向）
 
-> 0.9+ 完整演进见 [phases/0.9-ai-layer.md](./phases/0.9-ai-layer.md) / [0.10-voice-agent.md](./phases/0.10-voice-agent.md) / [0.11-local-ecosystem.md](./phases/0.11-local-ecosystem.md)。本节只留产品级铁则。
+> 0.9+ 完整演进见 [phases/0.9-ai-layer.md](./phases/0.9-ai-layer.md) / [0.10-voice-agent.md](./phases/0.10-voice-agent.md) / [0.11-plugin-ai-toolchain.md](./phases/0.11-plugin-ai-toolchain.md)。本节只留产品级铁则。
 
 ### 6.1 护城河：感知 + 执行，不是推理
 

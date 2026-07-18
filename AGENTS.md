@@ -20,7 +20,8 @@ Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而�
   - 0.10.3：blink_stt_server 统一服务 + SendInput Unicode + 热词/ITN
   - 0.10.5：收尾体验优化（VAD 参数滑动条 + 热词/高级选项 UI 优化）
   - 0.10.5 TSF Composition / 0.10.6 hook 吞键：均已废弃（跨进程不可用 / Alt keyup 副作用不可控），回归 SendInput + Clipboard 两级
-- 🔜 **0.11 本地化与生态**：本地模型 / skill / MCP / RAG。详见 [phases/0.11-local-ecosystem.md](docs/production-design/phases/0.11-local-ecosystem.md)
+- 🔜 **0.11 插件通信契约重设计 + AI 调用插件链路完善**：主线修 0.9.3 遗留（tool-call 结果截断/语义混淆/无回流/元信息不友好）+ 补 AI tool 池缺口（应用搜索 / 剪贴板历史 Capability）+ builtin 插件全 Rust 化（翻译插件，一次性 1:1 迁移）。详见 [phases/0.11-plugin-ai-toolchain.md](docs/production-design/phases/0.11-plugin-ai-toolchain.md)
+- 🔜 **0.12 AI 生态完善**：本地模型（ollama/mistral.rs）/ skill 化（配置期 CLI 探索）/ MCP 双向（client + server 护城河）/ A2A / RAG 记忆 / 单独对话窗口（Agent 窗口模式）。详见 [phases/0.12-ai-ecosystem.md](docs/production-design/phases/0.12-ai-ecosystem.md)
 
 ---
 
