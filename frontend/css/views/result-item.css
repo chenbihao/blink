@@ -253,3 +253,37 @@ body.alt-active #results li .item-badge {
   color: var(--accent);
   font-size: var(--text-base);
 }
+
+/* ── 0.11.0 §3.1: AI 工具结果项 —— item[1..] 的工具返回 items ────────────
+   与 AI 总结项(.ai-item, pre-wrap + 24px 徽章)区分:
+   - nowrap 单行（工具结果通常是"文件名/IP/路径"，一行够）
+   - 12px 小号 AI 图标（比 24px 徽章低调，不抢总结项的视觉焦点）
+   - 回车执行各自 action（打开/复制），与查询路径结果行为一致 */
+#results li.ai-tool-item .item-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  -webkit-line-clamp: 1; /* 覆盖普通结果的 3 行截断 */
+}
+
+/* 12px 小号 AI 图标——用 ::before 伪元素,不占额外 DOM 位。
+   accent 色 + 圆角小方块 + "AI" 字,与 24px 徽章同色系但更小。 */
+#results li.ai-tool-item .item-name::before {
+  content: "AI";
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  font-size: 7px;
+  font-weight: var(--weight-bold);
+  font-family: ui-monospace, Consolas, monospace;
+  color: var(--on-accent);
+  background: var(--accent);
+  border-radius: 2px;
+  letter-spacing: 0;
+  margin-right: 6px;
+  vertical-align: middle;
+  line-height: 1;
+}

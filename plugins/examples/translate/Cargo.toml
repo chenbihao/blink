@@ -1,0 +1,19 @@
+[package]
+name = "blink-plugin-translate"
+version = "0.2.0"
+edition = "2024"
+description = "Blink 翻译插件（Rust 版）— 5 引擎多语言翻译"
+
+[lints]
+workspace = true  # 继承 workspace 级别的 lint（如禁止 UTF-8 字节切片）
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+hmac = "0.12"
+sha2 = "0.10"
+sha1 = "0.10"
+md-5 = "0.10"
+base64 = "0.22"
+urlencoding = "2.1"

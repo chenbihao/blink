@@ -58,10 +58,10 @@ pub struct ClipboardConfig {
 }
 
 fn default_max_items() -> u32 {
-    500
+    10000 // 兜底防无限增长；主要靠 retention_days 按天清理
 }
 fn default_retention_days() -> u32 {
-    7
+    30
 }
 fn default_true() -> bool {
     true
@@ -80,8 +80,8 @@ impl Default for ClipboardConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            max_items: 500,
-            retention_days: 7,
+            max_items: 10000, // 兜底；主要靠 retention_days=30 按天清理
+            retention_days: 30,
             search_enabled: true,
             blacklist_keywords: default_blacklist(),
         }
@@ -152,9 +152,34 @@ pub async fn query_recent(pool: &SqlitePool, limit: i64) -> Vec<ClipboardItem> {
     .collect()
 }
 
-/// 模糊搜索剪贴板内容。
+/// 查询近 N 天的剪贴板记录（按时间倒序，最多 limit 条）。
+///
+/// 供 `search` 做 fuzzy 候选池——查近 30 天而非固定 200 条，
+/// 确保 `retention_days` 内的记录都能被搜到。
+pub async fn query_recent_days(pool: &SqlitePool, days: u32, limit: i64) -> Vec<ClipboardItem> {
+    let cutoff = chrono::Utc::now().timestamp() - (days as i64 * 86400);
+    sqlx::query_as::<_, (String, String, String, i64, Option<String>, u32)>(
+        "SELECT id, text, preview, created_at, source_app, hit_count \
+         FROM clipboard_history WHERE created_at > ?1 ORDER BY created_at DESC LIMIT ?2",
+    )
+    .bind(cutoff)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(id, text, preview, created_at, source_app, hit_count)| ClipboardItem {
+        id, text, preview, created_at, source_app, hit_count,
+    })
+    .collect()
+}
+
+/// 模糊搜索剪贴板内容（限定近 30 天，与默认 retention_days 对齐）。
+///
+/// **0.11.5 改动**：原先查最近 200 条做 fuzzy 候选池，现改为查近 30 天的记录——
+/// 这样即使保留期内的记录超过 200 条也能被搜到。30 天与 `retention_days` 默认值对齐。
 pub async fn search(pool: &SqlitePool, query: &str, limit: i64) -> Vec<ClipboardItem> {
-    let items = query_recent(pool, 200).await;
+    let items = query_recent_days(pool, 30, 500).await;
 
     // 使用 nucleo 模糊匹配
     use nucleo::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
@@ -210,8 +235,7 @@ pub async fn clear_all(pool: &SqlitePool) {
         .await;
 }
 
-/// 清理过期条目。
-#[allow(dead_code)] // 预留给启动时清理
+/// 清理过期条目（按天）。启动时由 main.rs 调用。
 pub async fn cleanup_old(pool: &SqlitePool, days: u32) {
     if days == 0 {
         return;
@@ -232,8 +256,7 @@ pub async fn cleanup_old(pool: &SqlitePool, days: u32) {
     }
 }
 
-/// 超量清理：保留最新的 max_items 条。
-#[allow(dead_code)] // 预留给启动时清理
+/// 超量清理：保留最新的 max_items 条（兑底，主要靠 cleanup_old 按天清理）。
 pub async fn cleanup_excess(pool: &SqlitePool, max_items: u32) {
     let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM clipboard_history")
         .fetch_one(pool)

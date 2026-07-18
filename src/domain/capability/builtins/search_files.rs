@@ -68,6 +68,7 @@ impl Capability for SearchFiles {
                 },
                 "required": ["query"]
             }),
+            ..Default::default()
         }
     }
 

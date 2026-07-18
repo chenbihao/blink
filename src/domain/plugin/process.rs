@@ -259,6 +259,7 @@ impl PluginProcess {
                                             &req.url,
                                             req.body.as_deref(),
                                             req.timeout_ms,
+                                            &req.headers,
                                         )
                                         .await;
                                         // 构造 http_response 消息写回插件
@@ -391,6 +392,7 @@ impl PluginProcess {
                         subtitle: None,
                         score: -1.0,                // 负分，排序到最后
                         action: PluginAction::None, // 纯展示，无操作
+                        ..Default::default()
                     }]);
                 }
                 Ok(resp.items)
@@ -418,6 +420,7 @@ impl PluginProcess {
             action: PluginAction::Open {
                 path: String::new(),
             },
+            ..Default::default()
         }]
     }
 
@@ -756,6 +759,7 @@ async fn execute_http_request(
     url: &str,
     body: Option<&str>,
     timeout_ms: u64,
+    headers: &[(String, String)],
 ) -> (u16, Option<String>, Option<String>) {
     use reqwest::Client;
 
@@ -781,7 +785,15 @@ async fn execute_http_request(
     let mut req = client.request(method, url);
     if let Some(b) = body {
         req = req.body(b.to_string());
+    }
+    // 0.11.6: 插件自定义 headers（翻译插件 tencent 引擎需 Authorization 等）。
+    // body 有但插件未指定 Content-Type 时，默认 application/json（向后兼容）。
+    let has_content_type = headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
+    if body.is_some() && !has_content_type {
         req = req.header("Content-Type", "application/json");
+    }
+    for (k, v) in headers {
+        req = req.header(k, v);
     }
 
     match req.send().await {

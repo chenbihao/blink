@@ -443,7 +443,7 @@ mod tests {
             source: String::new(),
             description: Some(lnk.into()),
             action: Action::default(),
-            score_detail: None,
+            ..Default::default()
         }
     }
 

@@ -41,6 +41,7 @@ impl Capability for CropImage {
                 },
                 "required": ["x", "y", "w", "h"]
             }),
+            ..Default::default()
         }
     }
 

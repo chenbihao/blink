@@ -294,6 +294,17 @@ fn main() {
                     }
                 });
             }
+            // 启动清理过期剪贴板历史（按 retention_days 清理，0.11.5 改为按天清理策略）
+            {
+                let cleanup_pool = pool.clone();
+                let days = app_config.clipboard.retention_days;
+                let clip_enabled = app_config.clipboard.enabled;
+                tauri::async_runtime::spawn(async move {
+                    if clip_enabled && days > 0 {
+                        infra::data::clipboard::cleanup_old(&cleanup_pool, days).await;
+                    }
+                });
+            }
             // 注入 ContextConfig 内存缓存：invoke 热键回调零 IO 读它（热更新见 update_context_config）
             let context_config = tauri::async_runtime::block_on(app::config::get_context_config(&pool));
             let context_config_arc = std::sync::Arc::new(std::sync::RwLock::new(context_config));

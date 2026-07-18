@@ -16,6 +16,9 @@ use serde_json::{Value, json};
 ///
 /// 三字段严格对齐 `rig::completion::ToolDefinition`——投影通过 `to_rig_tool()` 完成。
 /// `to_rig_tool()` / （0.11）`to_mcp_tool()` / `to_clap()` 都从这份 schema 派生。
+///
+/// **0.11.2 §2.3**：新增 `sensitive: bool` 字段（default false）——声明敏感
+/// （读隐私数据如应用列表/剪贴板历史），0.12 MCP server 暴露时需用户显式授权。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CapabilitySchema {
     /// 唯一标识（与 `Capability::id()` 一致）。传给模型时作为 tool name。
@@ -24,6 +27,23 @@ pub struct CapabilitySchema {
     pub description: String,
     /// JSON Schema Object，遵循 draft-07。无参能力是 `{"type":"object","properties":{}}`。
     pub parameters: Value,
+    /// 声明敏感（读隐私数据）——0.12 MCP server 暴露时需授权。default false。
+    /// `search_apps` / `search_clipboard_history` 标 true。
+    #[serde(default)]
+    pub sensitive: bool,
+}
+
+impl Default for CapabilitySchema {
+    /// 便利构造：`CapabilitySchema { name, description, parameters, ..Default::default() }`
+    /// 让新增字段（如 sensitive）时已有构造点零改动。
+    fn default() -> Self {
+        CapabilitySchema {
+            name: String::new(),
+            description: String::new(),
+            parameters: json!({ "type": "object", "properties": {} }),
+            sensitive: false,
+        }
+    }
 }
 
 impl CapabilitySchema {
@@ -34,6 +54,7 @@ impl CapabilitySchema {
             name: name.into(),
             description: description.into(),
             parameters: json!({ "type": "object", "properties": {} }),
+            ..Default::default()
         }
     }
 
@@ -76,6 +97,7 @@ mod tests {
                 },
                 "required": ["query"]
             }),
+            ..Default::default()
         };
         assert_eq!(s.parameters["properties"]["query"]["type"], "string");
         assert_eq!(s.parameters["required"][0], "query");
@@ -94,6 +116,7 @@ mod tests {
                 },
                 "required": ["text"]
             }),
+            ..Default::default()
         };
         let rig_def = s.to_rig_tool();
         assert_eq!(rig_def.name, "translate");

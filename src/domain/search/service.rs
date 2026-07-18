@@ -22,7 +22,9 @@ use crate::domain::ai::registry::AIProviderRegistry;
 use crate::domain::capability::{
     CapabilityError, CapabilityRegistry, CapabilityResult, InvokeContext,
 };
-use crate::domain::execution::{ActionContext, ActionRegistry, ActionSchema, DangerClass};
+use crate::domain::execution::{
+    ActionContext, ActionOutcome, ActionRegistry, ActionSchema, DangerClass,
+};
 use crate::domain::intent::{Candidate, IntentRouter, RankingHint, Route, Suggestion, Surface};
 use crate::domain::plugin::PluginEngine;
 use crate::infra::platform::context::ContextSnapshot;
@@ -318,6 +320,40 @@ impl SearchService {
             }
         }
         tracing::warn!(engine = engine_id, "未找到引擎，无法更新配置");
+    }
+
+    /// 供 search_apps Capability 调用——共享 StartMenuEngine 实例,不重复扫描（0.11.2 改进 5）。
+    ///
+    /// **设计动机**：`search_files` Capability 自持 `FileEngine` 实例；
+    /// `search_apps` 若也自持 `StartMenuEngine` 会重复扫描（后台预扫 + 定时刷新），
+    /// 浪费资源 + 缓存不一致。故通过此方法共享 SearchService 已实例化的引擎。
+    ///
+    /// 返回原始 `SearchItem` 列表，Capability 自己投影成 `ItemResult`
+    /// （与 `search_files` 同模式，payload 放结构化数据）。
+    pub async fn search_apps_for_capability(
+        &self,
+        query: &str,
+        max_results: usize,
+    ) -> Vec<SearchItem> {
+        if query.trim().is_empty() {
+            return Vec::new();
+        }
+
+        for engine in &self.sync_engines {
+            if engine.id() == "start_menu" {
+                let history = std::collections::HashMap::new();
+                let snapshot = ContextSnapshot::default();
+                let disabled: Vec<String> = Vec::new();
+                let search_ctx = QueryContext {
+                    history: &history,
+                    snapshot: &snapshot,
+                    disabled_builtin_actions: &disabled,
+                };
+                let items = engine.search(query, &search_ctx).await;
+                return items.into_iter().take(max_results).collect();
+            }
+        }
+        Vec::new()
     }
 
     /// 搜索:先路由 → 按 Takeover/Mixed 分支执行 → 返回首批结果 + spawn 增量。
@@ -1193,7 +1229,7 @@ fn emit_results(
             source: source.into(),
             description: None,
             action: Action::default(),
-            score_detail: None,
+            ..Default::default()
         }]
     } else {
         fuse_items(items, limit)
@@ -1248,7 +1284,7 @@ fn placeholder_entry(plugin_id: &str, display_name: &str) -> AppEntry {
         source: plugin_id.to_string(),
         description: Some("请稍候".into()),
         action: Action::default(),
-        score_detail: None,
+        ..Default::default()
     }
 }
 
@@ -1273,7 +1309,7 @@ fn empty_arg_hint_entry(plugin_id: &str, display_name: &str, hint: String) -> Ap
         source: plugin_id.to_string(),
         description: Some(display_name.to_string()),
         action: Action::default(),
-        score_detail: None,
+        ..Default::default()
     }
 }
 
@@ -1383,7 +1419,7 @@ pub(crate) fn ai_placeholder_entry() -> AppEntry {
         // 再叠一行 "请稍候" 是冗余。真结果时才用 description 承载"回车复制"提示。
         description: None,
         action: Action::default(),
-        score_detail: None,
+        ..Default::default()
     }
 }
 
@@ -1416,7 +1452,8 @@ pub(crate) fn ai_result_entry(text: String) -> AppEntry {
             hint: Some("复制回答".into()),
             ..Default::default()
         },
-        score_detail: None,
+        is_ai_summary: true, // §3.1 AI 总结项——前端 pre-wrap 撑开 + 24px 徽章
+        ..Default::default()
     }
 }
 
@@ -1501,7 +1538,7 @@ fn emit_ai_clear(app: &AppHandle, seq: u64, error_msg: Option<&str>) {
             source: AI_SOURCE.into(),
             description: None,
             action: Action::default(),
-            score_detail: None,
+            ..Default::default()
         };
         if let Err(e) = app.emit(
             "blink://results",
@@ -1526,7 +1563,7 @@ fn emit_ai_clear(app: &AppHandle, seq: u64, error_msg: Option<&str>) {
             source: AI_SOURCE.into(),
             description: None,
             action: Action::default(),
-            score_detail: None,
+            ..Default::default()
         };
         if let Err(e) = app.emit(
             "blink://results",
@@ -1577,14 +1614,35 @@ async fn handle_ai_tool_calls(
                 let cx = ActionContext::from_arguments(app, args.clone());
                 match action.execute(&cx).await {
                     Ok(outcome) => {
+                        // 0.11.0 改进 1: tool_call_id 关联进日志（审计骨架，为改进 2 回流铺路）
                         tracing::info!(
                             target: ai_slo::TARGET,
+                            tool_call_id = %tc.id,
                             "AI tool_call 执行成功: {} args={}",
                             tc.name, args,
                         );
                         // 先清流式占位/残留,再发执行结果——避免 AI 文本与执行结果短暂共存
                         emit_ai_clear(app, seq, None);
-                        emit_ai_result(app, seq, ai_action_done_entry(action.as_ref(), &outcome));
+                        // 0.11.0 改进 1: Items 变体走统一投影（items_to_entries）+ 多条 emit；
+                        // 其他变体走 ai_action_done_entry 单条 emit（现状）。
+                        // 文档 §2.1 ★ 投影路径统一：Action 路径与 Capability 路径共用 items_to_entries。
+                        match &outcome {
+                            ActionOutcome::Items { items } => {
+                                let entries = items_to_entries(items);
+                                if entries.is_empty() {
+                                    emit_ai_clear(app, seq, Some("工具返回空结果"));
+                                } else {
+                                    emit_ai_result_multi(app, seq, entries);
+                                }
+                            }
+                            _ => {
+                                emit_ai_result(
+                                    app,
+                                    seq,
+                                    ai_action_done_entry(action.as_ref(), &outcome),
+                                );
+                            }
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -1722,40 +1780,7 @@ fn capability_result_to_entries(result: &CapabilityResult) -> Vec<AppEntry> {
         CapabilityResult::Text { content } => {
             vec![ai_result_entry(content.clone())]
         }
-        CapabilityResult::Items { items } => {
-            if items.is_empty() {
-                vec![]
-            } else {
-                items
-                    .iter()
-                    .map(|item| {
-                        // 从 payload 提取 path（如果有）→ Open 动作
-                        let path = item.payload.get("path").and_then(|v| v.as_str());
-                        AppEntry {
-                            name: item.title.clone(),
-                            pinyin_name: String::new(),
-                            pinyin_full: String::new(),
-                            lnk_path: path.unwrap_or("").to_string(),
-                            is_calc: false,
-                            score: item.score.unwrap_or(0.5),
-                            is_placeholder: false,
-                            is_error: false,
-                            source: AI_SOURCE.into(),
-                            description: item.subtitle.clone(),
-                            action: if path.is_some() {
-                                Action {
-                                    kind: ActionKind::Open,
-                                    ..Default::default()
-                                }
-                            } else {
-                                Action::default()
-                            },
-                            score_detail: None,
-                        }
-                    })
-                    .collect()
-            }
-        }
+        CapabilityResult::Items { items } => items_to_entries(items),
         CapabilityResult::Blob { mime, bytes } => {
             // Blob → 展示摘要信息（0.10 多模态才把图片喂回 AI）
             let size_kb = bytes.len() as f64 / 1024.0;
@@ -1776,7 +1801,7 @@ fn capability_result_to_entries(result: &CapabilityResult) -> Vec<AppEntry> {
                 source: AI_SOURCE.into(),
                 description: Some("AI 已获取数据".into()),
                 action: Action::default(),
-                score_detail: None,
+                ..Default::default()
             }]
         }
         CapabilityResult::Done { summary } => {
@@ -1792,10 +1817,86 @@ fn capability_result_to_entries(result: &CapabilityResult) -> Vec<AppEntry> {
                 source: AI_SOURCE.into(),
                 description: Some("AI 已执行此能力".into()),
                 action: Action::default(),
-                score_detail: None,
+                ..Default::default()
             }]
         }
     }
+}
+
+/// AI 路径工具结果项上限（0.11.0 §3.3 D5）。
+/// 与查询路径 PAGE_SIZE 9 有区分，AI 更聚焦——省 token + 视觉不爆。
+const AI_TOOL_ITEMS_LIMIT: usize = 5;
+
+/// `ItemResult` 列表 → 前端 `AppEntry` 列表（0.11.0 改进 1 统一投影）。
+///
+/// **统一投影路径**：Action 路径（`PluginActionAdapter` → `ActionOutcome::Items`）与
+/// Capability 路径（`CapabilityResult::Items`）共用此函数，避免"插件 Items 走 A 路径、
+/// Capability Items 走 B 路径"的分叉（文档 §2.1 ★ 投影路径统一）。
+///
+/// **标记位**（§3.1）：每个 item 标 `is_ai_tool_result = true`——前端 nowrap 单行 +
+/// 12px 小号 AI 图标，与查询路径结果视觉可区分。
+///
+/// **payload → action 投影**：
+/// - 有 `path` → `ActionKind::Open`（打开应用/文件）
+/// - 有 `text` → `ActionKind::Copy`（复制文本）
+/// - 都没有 → `Action::default()`（纯展示，回车无操作）
+///
+/// **上限截断**（§3.3 D5）：最多 5 条，超出追加文字项 `还有 N 条，按 ↓ 查看全部`。
+/// AI 总结项（item[0]）不计入上限——调用方在调用前单独构造 summary entry。
+fn items_to_entries(items: &[crate::domain::capability::ItemResult]) -> Vec<AppEntry> {
+    if items.is_empty() {
+        return vec![];
+    }
+
+    let limit = AI_TOOL_ITEMS_LIMIT.min(items.len());
+    let mut entries: Vec<AppEntry> = items
+        .iter()
+        .take(limit)
+        .map(|item| {
+            // 从 payload 提取 path（如果有）→ Open 动作；否则尝试 text → Copy
+            let path = item.payload.get("path").and_then(|v| v.as_str());
+            let text = item.payload.get("text").and_then(|v| v.as_str());
+            AppEntry {
+                name: item.title.clone(),
+                lnk_path: path.unwrap_or("").to_string(),
+                score: item.score.unwrap_or(0.5),
+                is_placeholder: false,
+                is_error: false,
+                source: AI_SOURCE.into(),
+                description: item.subtitle.clone(),
+                action: if path.is_some() {
+                    Action {
+                        kind: ActionKind::Open,
+                        ..Default::default()
+                    }
+                } else if let Some(t) = text {
+                    Action {
+                        kind: ActionKind::Copy,
+                        payload: Some(t.to_string()),
+                        ..Default::default()
+                    }
+                } else {
+                    Action::default()
+                },
+                is_ai_tool_result: true,
+                ..Default::default()
+            }
+        })
+        .collect();
+
+    // §3.3 D5：超出上限追加文字提示项
+    let remaining = items.len().saturating_sub(limit);
+    if remaining > 0 {
+        entries.push(AppEntry {
+            name: format!("还有 {} 条，按 ↓ 查看全部", remaining),
+            score: -1.0, // 排序到最后
+            is_placeholder: true, // 前端识别为提示项
+            source: AI_SOURCE.into(),
+            ..Default::default()
+        });
+    }
+
+    entries
 }
 
 /// AI tool_call 执行成功项——展示执行结果。
@@ -1818,6 +1919,9 @@ fn ai_action_done_entry(
         ActionOutcome::Open { path } => Some(format!("已打开: {path}")),
         ActionOutcome::Emit { .. } => None, // 副作用型,无文本结果
         ActionOutcome::Nop => None,
+        // 0.11.0 改进 1: Items 变体在 handle_ai_tool_calls 走 items_to_entries,
+        // 不走到这里。加此分支满足 match 穷尽性；若误传则走"已执行"兜底。
+        ActionOutcome::Items { .. } => None,
     };
 
     match result_text {
@@ -1840,7 +1944,7 @@ fn ai_action_done_entry(
                     hint: Some("复制结果".into()),
                     ..Default::default()
                 },
-                score_detail: None,
+                ..Default::default()
             }
         }
         _ => {
@@ -1857,7 +1961,7 @@ fn ai_action_done_entry(
                 source: AI_SOURCE.into(),
                 description: Some("AI 已执行此动作".into()),
                 action: Action::default(),
-                score_detail: None,
+                ..Default::default()
             }
         }
     }

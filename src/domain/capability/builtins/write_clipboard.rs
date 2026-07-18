@@ -58,6 +58,7 @@ impl Capability for WriteClipboard {
                     }
                 }
             }),
+            ..Default::default()
         }
     }
 

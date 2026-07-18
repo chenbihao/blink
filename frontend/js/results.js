@@ -110,6 +110,14 @@ function appendNew(items, didReset) {
       allItems.push(item);
       seen.add(key);
       changed = true;
+    } else if (item.source === "ai") {
+      // 0.11.0 §3.2 去重规则：同 key 时 AI 项优先（AI 工具结果 vs 查询路径同 path）
+      // 替换已存在的非 AI 项，让 AI 结果置顶展示
+      const idx = allItems.findIndex((x) => itemKey(x) === key);
+      if (idx >= 0 && allItems[idx].source !== "ai") {
+        allItems[idx] = item;
+        changed = true;
+      }
     }
   }
   if (!changed && !didReset && !hasEmptyResult) return; // 无变化且非新批：不抖动
@@ -354,14 +362,24 @@ function createItem(app, i) {
     li.dataset.isError = "true";
   }
 
-  // 0.9.2 §6.4:AI lane 结果——专用样式(多行展开、accent 强调、AI 徽章图标)
-  //   placeholder 和真结果都命中 .ai-item,CSS 靠 `.is-loading` 区分状态。
+  // 0.9.2 §6.4 + 0.11.0 §3.1:AI lane 结果——区分两种形态
+  //   - AI 总结项 (is_ai_summary=true): .ai-item 完整样式(pre-wrap + 24px 徽章),item[0] 的文本回答
+  //   - AI 工具结果项 (is_ai_tool_result=true): .ai-tool-item 单行 + 12px 小号 AI 图标,item[1..] 的工具 items
+  //   - 占位/错误/确认卡片仍走 .ai-item(复用 24×24 徽章位,视觉稳定)
   //   为了让"占位 → 真结果"几何**完全稳定**(不跳变高度、图标位不错位):
   //   占位与真结果共用 `.ai-icon-badge` 24×24 位置——占位时内嵌一个小 spinner,
   //   真结果时展示"AI"字样。整条 li 的高度只随 name 文本行数变化。
   const isAiItem = app.source === "ai";
+  const isAiSummary = app.is_ai_summary === true;
+  const isAiToolResult = app.is_ai_tool_result === true;
   if (isAiItem) {
-    li.classList.add("ai-item");
+    if (isAiToolResult) {
+      // 0.11.0 §3.1: AI 工具结果项——nowrap 单行 + 12px 小号 AI 图标
+      li.classList.add("ai-tool-item");
+    } else {
+      // AI 总结项 / 占位 / 错误 / 确认卡片——完整 .ai-item 样式(24px 徽章)
+      li.classList.add("ai-item");
+    }
   }
 
   // 插件命中占位:加载动画+灰字(引擎/插件的通用占位路径)

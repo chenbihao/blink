@@ -108,6 +108,7 @@ impl SearchItem {
                 source: self.source.clone(),
                 action: Action::default(),
                 score_detail,
+                ..Default::default()
             },
             SearchAction::Open { path } => AppEntry {
                 name: self.title,
@@ -122,6 +123,7 @@ impl SearchItem {
                 source: self.source.clone(),
                 action: Action::default(),
                 score_detail,
+                ..Default::default()
             },
             SearchAction::Copy { text, hit_id } => AppEntry {
                 name: self.title,
@@ -143,6 +145,7 @@ impl SearchItem {
                     ..Action::default()
                 },
                 score_detail,
+                ..Default::default()
             },
             SearchAction::RunAction { id, arg } => AppEntry {
                 name: self.title,
@@ -162,6 +165,7 @@ impl SearchItem {
                     ..Action::default()
                 },
                 score_detail,
+                ..Default::default()
             },
         }
     }

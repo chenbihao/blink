@@ -2,14 +2,14 @@
   "schema_version": 1,
   "id": "builtin.translate",
   "name": { "zh": "翻译", "en": "Translate" },
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": { "zh": "多引擎文本翻译：腾讯翻译/阿里翻译/百度翻译/有道智云/DeepL", "en": "Multi-engine translation: Tencent / Alibaba / Baidu / Youdao / DeepL" },
   "builtin": true,
   "default_enabled": false,
   "runtime": {
-    "type": "python",
+    "type": "process",
     "protocol": "jsonl",
-    "exec": "./main.py",
+    "exec": "./bin/blink-plugin-translate.exe",
     "timeout_ms": 10000,
     "min_arg_length": 0,
     "debounce_ms": 500,
@@ -42,7 +42,8 @@
         },
         "required": ["text"]
       },
-      "danger_class": "Safe"
+      "danger_class": "Safe",
+      "result_type": "text"
     }
   ],
   "settings_schema": [

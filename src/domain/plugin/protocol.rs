@@ -159,6 +159,10 @@ pub struct HttpRequest {
     pub body: Option<String>,
     #[serde(default = "default_http_timeout")]
     pub timeout_ms: u64,
+    /// HTTP 请求头（0.11.6 翻译插件 tencent 引擎需要 Authorization 等自定义头）。
+    /// 向后兼容：老插件不填 → 空数组 → body 有时默认 Content-Type: application/json。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<(String, String)>,
 }
 
 fn default_http_timeout() -> u64 {
@@ -173,6 +177,13 @@ pub struct PluginErrorPayload {
 }
 
 /// 插件结果项。
+///
+/// **0.11.0 改进 1**：新增 `payload: Option<Value>` 字段——结构化数据给 AI 读，
+/// 与 `title`（前端展示用）分离。与 `CapabilityResult::Items` 的 `ItemResult.payload`
+/// 设计对齐："前端展示用 title/subtitle，AI 读 payload"，两套消费分离。
+///
+/// 向后兼容：老插件不填 payload 时为 `None`，消费方从 `action` 提取兜底
+/// （Copy→`{text}`，Open→`{path}`）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginItem {
     pub title: String,
@@ -181,10 +192,31 @@ pub struct PluginItem {
     #[serde(default = "default_score")]
     pub score: f32,
     pub action: PluginAction,
+    /// 结构化 payload——给 AI 读（任意 JSON）。0.11.0 新增，向后兼容。
+    ///
+    /// **约定**：缺失时（老插件）由消费方从 `action` 提取兜底。
+    /// 插件作者应在 tool-call 路径下主动填此字段，让 AI 拿到结构化数据
+    /// 而非从展示文本反推。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<serde_json::Value>,
 }
 
 fn default_score() -> f32 {
     0.5
+}
+
+impl Default for PluginItem {
+    /// 便利构造：`PluginItem { title, action, ..Default::default() }`
+    /// 让新增字段（如 payload）时已有构造点零改动。
+    fn default() -> Self {
+        PluginItem {
+            title: String::new(),
+            subtitle: None,
+            score: default_score(),
+            action: PluginAction::None,
+            payload: None,
+        }
+    }
 }
 
 /// 插件结果项的动作(结构化 tagged,避免字符串与 payload 的隐式约定)。
@@ -285,6 +317,7 @@ mod tests {
                 action: PluginAction::Copy {
                     text: "192.168.1.5".into(),
                 },
+                ..Default::default()
             }],
             error: None,
         };
@@ -302,6 +335,7 @@ mod tests {
             url: "https://api.example.com".into(),
             body: None,
             timeout_ms: 10000,
+            headers: vec![],
         };
         let wrapped = PluginUpstreamMessage::HttpRequest(req);
         let json = serde_json::to_string(&wrapped).unwrap();
@@ -386,6 +420,8 @@ mod tests {
                 action: PluginAction::Copy {
                     text: "你好".into(),
                 },
+                payload: Some(serde_json::json!({ "translated": "你好", "source": "hello" })),
+                ..Default::default()
             }],
             error: None,
         });
@@ -394,6 +430,9 @@ mod tests {
         assert!(json.contains("\"你好\""));
         assert!(json.contains("\"翻译自: hello\""));
         assert!(!json.contains("\"error\""));
+        // 0.11.0: payload 字段正确序列化
+        assert!(json.contains("\"payload\""));
+        assert!(json.contains("\"translated\""));
     }
 
     #[test]
@@ -439,5 +478,55 @@ mod tests {
             }
             _ => panic!("应是 ToolResult"),
         }
+    }
+
+    // ── 0.11.0: PluginItem.payload 向后兼容 ────────────────────────────────
+
+    #[test]
+    fn legacy_plugin_item_without_payload_parses_as_none() {
+        // 老插件/core 发的 PluginItem 无 payload 字段 → serde default 补 None,向后兼容。
+        // 这是 0.11.0 改进 1 的核心契约:老插件不填 payload 仍能正常工作。
+        let json = r#"{"title":"本机 IP","score":0.9,"action":{"type":"copy","text":"192.168.1.5"}}"#;
+        let item: PluginItem = serde_json::from_str(json).unwrap();
+        assert_eq!(item.title, "本机 IP");
+        assert!(item.payload.is_none(), "老 JSON 无 payload 应解析为 None");
+    }
+
+    #[test]
+    fn plugin_item_with_payload_round_trips() {
+        // 新插件填 payload → 序列化/反序列化 round-trip 保持
+        let item = PluginItem {
+            title: "公网 IP: 1.2.3.4".into(),
+            subtitle: Some("北京 | 按 Enter 复制".into()),
+            score: 0.9,
+            action: PluginAction::Copy {
+                text: "1.2.3.4".into(),
+            },
+            payload: Some(serde_json::json!({
+                "ip": "1.2.3.4",
+                "type": "public",
+                "city": "北京"
+            })),
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        let restored: PluginItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.title, item.title);
+        assert_eq!(restored.payload, item.payload);
+        // payload 是结构化 JSON,AI 可按字段读
+        assert_eq!(restored.payload.unwrap()["ip"], "1.2.3.4");
+    }
+
+    #[test]
+    fn plugin_item_payload_skipped_when_none() {
+        // payload=None 时 skip_serializing_if 生效,JSON 不含 payload 字段
+        // —— 避免对老协议消费方产生干扰,且省 bytes
+        let item = PluginItem {
+            title: "bare".into(),
+            score: 0.5,
+            action: PluginAction::None,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(!json.contains("payload"), "payload=None 时不应序列化");
     }
 }

@@ -80,7 +80,12 @@ impl Default for Action {
 }
 
 /// 应用条目。
-#[derive(Debug, Clone, Serialize)]
+///
+/// **0.11.0 §3.1 AI 结果视觉形态**：新增 `is_ai_summary` / `is_ai_tool_result`
+/// 标记位，区分三种结果形态——AI 总结项（pre-wrap + 24px 徽章）、AI 工具结果项
+/// （nowrap 单行 + 12px 小号 AI 图标）、普通结果项（nowrap 单行，现状）。
+/// 两者皆 false 时为普通结果项，与查询路径一致。
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct AppEntry {
     /// 显示名（lnk 文件名去掉 .lnk）
     pub name: String,
@@ -111,6 +116,7 @@ pub struct AppEntry {
     /// - 引擎结果："start_menu"、"file"、"calc"
     /// - 插件结果：plugin_id（如 "builtin.weather"）
     /// - 插件占位：同 plugin_id（与插件结果匹配实现自动替换）
+    /// - AI 结果："ai"（AI_SOURCE）
     #[serde(default)]
     pub source: String,
     /// 可执行动作（决定 Enter 行为 + 提示栏文案）。与 description 正交。
@@ -118,6 +124,15 @@ pub struct AppEntry {
     /// 分数构成详情（可选，debug 日志用，前端不显示）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score_detail: Option<String>,
+    /// AI 总结项标记（0.11.0 §3.1）——item[0] 的 AI 文本回答，pre-wrap 撑开 + 24px 徽章。
+    /// 回车复制总结文本。仅 `ai_result_entry` / `ai_action_done_entry` 产 text 时为 true。
+    #[serde(default)]
+    pub is_ai_summary: bool,
+    /// AI 工具结果项标记（0.11.0 §3.1）——item[1..] 的工具返回 items，nowrap 单行 +
+    /// 12px 小号 AI 图标。回车执行各自 action（打开/复制）。
+    /// 由 `items_to_entries` 投影工具结果时为 true。
+    #[serde(default)]
+    pub is_ai_tool_result: bool,
 }
 
 // 平台特定实现
@@ -308,7 +323,7 @@ mod tests {
             source: String::new(),
             description: Some(lnk.into()),
             action: Action::default(),
-            score_detail: None,
+            ..Default::default()
         }
     }
 

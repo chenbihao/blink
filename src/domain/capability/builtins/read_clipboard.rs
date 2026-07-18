@@ -33,6 +33,7 @@ impl Capability for ReadClipboard {
                 "type": "object",
                 "properties": {}
             }),
+            ..Default::default()
         }
     }
 

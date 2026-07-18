@@ -41,6 +41,7 @@ impl Capability for CaptureScreen {
                     }
                 }
             }),
+            ..Default::default()
         }
     }
 

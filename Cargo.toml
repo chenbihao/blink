@@ -7,7 +7,7 @@ license = "MIT"
 repository = "https://github.com/chenbihao/blink"
 
 [workspace]
-members = ["plugins/examples/echo", "plugins/examples/ip", "plugins/examples/weather", "xtask"]
+members = ["plugins/examples/echo", "plugins/examples/ip", "plugins/examples/translate", "plugins/examples/weather", "xtask"]
 
 [profile.release]
 codegen-units = 1
