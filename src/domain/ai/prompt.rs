@@ -5,7 +5,7 @@
 //!
 //! **三函数设计**（文档 §2.4）：
 //! - `routing_system_prompt(tools, lang)` —— 主窗口路由 system prompt
-//! - `tool_result_feedback_prompt(lang)` —— Turn 2 结果回流 system prompt
+//! - `tool_result_feedback_prompt(tools, lang)` —— Turn 2 结果回流 system prompt
 //! - `tool_list_section(tools)` —— 工具列表文字段（含 name + description + 参数名 + hint）
 //!
 //! **token 成本控制**（§3.8）：每次构建 system prompt 估算 token 数，超 1500 token
@@ -169,21 +169,57 @@ pub fn routing_system_prompt(tools: &[ToolPromptInfo], _lang: &str) -> String {
     prompt
 }
 
-/// Turn 2 结果回流 system prompt（0.11.4 改进 2 消费，此版本预置）。
+/// Turn 2 结果回流 system prompt（0.11.4 改进 2 消费）。
 ///
-/// 文档 §2.2.4 的 prompt 原文。AI 拿到工具返回结果后，用此 prompt 做第二轮
-/// completion——总结结果 / 链式调 safe tool / 解释错误。
+/// AI 拿到工具返回结果后，用此 prompt 做第二轮 completion——总结结果 /
+/// 链式调 safe tool 完成闭环 / 解释错误。
+///
+/// **tool chain 闭环**：用户说"打开微信" → Turn 1 `search_apps` 返回路径 →
+/// Turn 2 AI 调 `file_action(action=open_path, path=...)` 直接打开。
+/// `file_action` 是分组 tool，`open_path` 是 Safe action，
+/// `handle_turn2_tool_call` 会自动执行（不需用户确认）。
 ///
 /// `_lang` 参数预留 i18n。
-#[allow(dead_code)] // 0.11.4 改进 2 消费
-pub fn tool_result_feedback_prompt(_lang: &str) -> String {
-    "你刚才调用了工具,以下是工具返回的结果。\n\
-     请基于结果用自然语言回答用户,不要简单复述原始数据。\n\
-     如果结果包含多项,挑用户最可能关心的总结;用户想看全部时可提示\"按 ↓ 查看完整列表\"。\n\
-     若需要执行后续操作(如打开搜到的应用),可调用安全工具;危险操作需用户确认。\n\
-     若工具返回错误,请用自然语言解释错误原因,并给出用户可操作的修复建议\n\
-     (如\"API key 未配置,请到设置页 AI tab 配置天气插件密钥\")。不要只说\"失败了\",要让用户知道下一步怎么办。"
-        .to_string()
+pub fn tool_result_feedback_prompt(tools: &[ToolPromptInfo], _lang: &str) -> String {
+    let mut prompt = String::from(
+        "你刚才调用了工具并拿到了结果。现在请基于结果回应用户。\n\n\
+         【行为准则】\n\
+         1. 如果用户意图是执行操作（如打开应用/文件/网址），且结果中包含目标路径 → \
+         调用 file_action 工具（action=open_path, path=结果中的路径）直接打开，不要只返回路径文字\n\
+         2. 如果结果是数据/列表 → 用自然语言总结最可能关心的，提示\"按 ↓ 查看完整列表\"\n\
+         3. 如果工具返回错误 → 用自然语言解释原因 + 给出可操作的修复建议\n\
+         （如\"API key 未配置，请到设置页 AI tab 配置\"），不要只说\"失败了\"\n\
+         4. 不要复述原始 JSON 数据，不要说\"我没有权限\"或\"没有可用的工具\"——\
+         下方列出的安全工具你都可以调用\n\n",
+    );
+
+    if !tools.is_empty() {
+        prompt.push_str("【可调用的安全工具】\n");
+        prompt.push_str(&tool_list_section(tools));
+        prompt.push('\n');
+    }
+
+    prompt.push_str("【语言】跟随用户输入语言回答。");
+
+    // token 监控（§3.8）
+    let tokens = estimate_tokens(&prompt);
+    if tokens > TOKEN_WARN_THRESHOLD {
+        tracing::warn!(
+            tokens = tokens,
+            threshold = TOKEN_WARN_THRESHOLD,
+            tools_count = tools.len(),
+            "Turn 2 feedback prompt 超过 {} token",
+            TOKEN_WARN_THRESHOLD,
+        );
+    } else {
+        tracing::debug!(
+            tokens = tokens,
+            tools_count = tools.len(),
+            "Turn 2 feedback prompt 构建",
+        );
+    }
+
+    prompt
 }
 
 /// 工具列表文字段（含 name + description + 参数摘要 + hint）。
@@ -338,10 +374,31 @@ mod tests {
 
     #[test]
     fn feedback_prompt_contains_error_guidance() {
-        let p = tool_result_feedback_prompt("zh");
+        let p = tool_result_feedback_prompt(&[], "zh");
         assert!(p.contains("错误"));
         assert!(p.contains("修复建议"));
         assert!(p.contains("API key"));
+    }
+
+    #[test]
+    fn feedback_prompt_includes_tool_list_when_nonempty() {
+        let tools = vec![make_tool(
+            "open_path",
+            "Open a file or directory",
+            json!({"type":"object","properties":{"path":{"type":"string","description":"file path"}}}),
+        )];
+        let p = tool_result_feedback_prompt(&tools, "zh");
+        assert!(p.contains("open_path"));
+        assert!(p.contains("安全工具"));
+    }
+
+    #[test]
+    fn feedback_prompt_guides_tool_chain_execution() {
+        // Turn 2 回流引导 AI 在用户意图是执行操作时调 file_action(action=open_path)
+        let p = tool_result_feedback_prompt(&[], "zh");
+        assert!(p.contains("file_action"));
+        assert!(p.contains("open_path"));
+        assert!(p.contains("不要说\"我没有权限\""));
     }
 
     // ── tool_list_section ──

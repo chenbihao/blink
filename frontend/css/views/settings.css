@@ -222,6 +222,11 @@ h2:active {
   border-bottom: 1px solid var(--surface);
 }
 
+/* 含 hint-line（换行说明文字）的行增加垂直内边距，避免内容紧贴上下边线 */
+.setting-row:has(.hint-line) {
+  padding: 8px 0;
+}
+
 /* 独占一行的说明文字，与输入框缩进对齐 */
 .setting-row .hint-line {
   flex-basis: 100%;

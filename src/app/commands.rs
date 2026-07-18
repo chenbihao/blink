@@ -197,6 +197,9 @@ pub async fn run_builtin_action(
 /// **安全**:与 `run_builtin_action` 同样的查找 + 执行路径,
 /// 但 arguments 来自 AI 的 `ToolCall.arguments`(结构化 JSON Object),
 /// 走 `ActionContext::from_arguments` 而非 `ActionContext::new`。
+///
+/// **审计**（0.11.4 补）:用户确认执行后写入 `ai_tool_audit` 表,
+/// turn=0 标记"用户确认执行"路径（区别于 Turn 1/Turn 2 自动执行）。
 #[tauri::command]
 pub async fn confirm_ai_action(
     app: tauri::AppHandle,
@@ -212,10 +215,38 @@ pub async fn confirm_ai_action(
         return Err(msg);
     };
 
-    let cx = crate::domain::execution::ActionContext::from_arguments(&app, arguments);
+    let cx = crate::domain::execution::ActionContext::from_arguments(&app, arguments.clone());
     match action.execute(&cx).await {
-        Ok(_outcome) => {
+        Ok(outcome) => {
             tracing::info!(%action_name, "confirm_ai_action: 执行成功");
+
+            // 写审计日志（turn=0 = 用户确认执行路径）
+            let pool = app.state::<sqlx::SqlitePool>();
+            let (provider_kind_str, model_id_str) =
+                match app.try_state::<std::sync::Arc<crate::domain::ai::AIProviderRegistry>>() {
+                    Some(reg) => match reg.resolve(crate::app::ai_config::Tier::Router) {
+                        Ok((provider, _tier)) => (
+                            provider.kind().as_serde_str().to_string(),
+                            provider.model_id().to_string(),
+                        ),
+                        Err(_) => (String::new(), String::new()),
+                    },
+                    None => (String::new(), String::new()),
+                };
+            let summary = format!(
+                "用户确认执行: {}",
+                crate::domain::search::outcome_to_summary(&outcome)
+            );
+            crate::infra::data::ai_audit::save_audit_log(
+                &pool,
+                &action_name,
+                &arguments,
+                &summary,
+                &provider_kind_str,
+                &model_id_str,
+                0,
+            )
+            .await;
         }
         Err(e) => {
             tracing::error!(%action_name, error = %e, "confirm_ai_action: 执行失败");

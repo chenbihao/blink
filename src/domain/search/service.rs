@@ -849,7 +849,7 @@ impl SearchService {
                 provider_model: provider_model.clone(),
                 should_run: feedback_config.should_run(provider_kind),
                 feedback_config,
-                feedback_prompt: crate::domain::ai::prompt::tool_result_feedback_prompt(&lang),
+                prompt_infos: prompt_infos.clone(),
                 user_query: query.clone(),
                 tools: tools.clone(),
                 pool,
@@ -1657,6 +1657,15 @@ async fn handle_ai_tool_calls(
 ) {
     let tc = &tool_calls[0]; // 主窗口只取第一个
 
+    // §3.2: Turn 1 工具执行前 emit progress_hint 占位文案
+    // 与 Turn 2 (handle_turn2_tool_call) 对齐——用户在工具执行期间看到阶段文案变化
+    let progress_hint = derive_progress_hint(&tc.name, "", &turn2_ctx.progress_hints);
+    emit_ai_result(
+        app,
+        seq,
+        ai_progress_placeholder(format!("AI 正在{progress_hint}…")),
+    );
+
     // 0.9.7 Step 4: 先查 Capability——Capability 优先于 Action
     let cap_reg = app.state::<Arc<CapabilityRegistry>>();
     if cap_reg.get(&tc.name).is_some() {
@@ -2012,8 +2021,8 @@ struct Turn2Context {
     should_run: bool,
     /// 原始配置值（区分 Auto+cloud vs Off，决定是否追加提示文案 §3.7）。
     feedback_config: ToolResultFeedback,
-    /// Turn 2 system prompt（`tool_result_feedback_prompt(lang)`）。
-    feedback_prompt: String,
+    /// Turn 2 prompt 工具信息（全量，Turn 2 时过滤 safe_only 子集）。
+    prompt_infos: Vec<crate::domain::ai::prompt::ToolPromptInfo>,
     /// 用户原始输入（Turn 2 messages 需要）。
     user_query: String,
     /// 全量 tools（Turn 2 过滤 safe_only）。
@@ -2099,7 +2108,7 @@ fn project_capability_result_to_tool_message(result: &CapabilityResult) -> Strin
 }
 
 /// 投影 `ActionOutcome` → 结果摘要（审计日志用）。
-fn outcome_to_summary(outcome: &ActionOutcome) -> String {
+pub(crate) fn outcome_to_summary(outcome: &ActionOutcome) -> String {
     match outcome {
         ActionOutcome::Copy { text, .. } => {
             let truncated = truncate_summary_for_audit(text);
@@ -2465,51 +2474,80 @@ async fn run_turn2_feedback(
         return;
     }
 
-    // 构造 Turn 2 messages
-    // §2.2.1: messages = [system(feedback_prompt), user, assistant(tool_call_1), tool(result_1)]
-    let assistant_content = format!(
-        "{{\"name\":\"{}\",\"arguments\":{}}}",
-        turn1_result.tool_name,
-        turn1_result.arguments
-    );
-    let messages = vec![
-        ChatMessage::system(&ctx.feedback_prompt),
-        ChatMessage::user(&ctx.user_query),
-        ChatMessage::assistant(&assistant_content),
-        ChatMessage::tool(&turn1_result.tool_call_id, &turn1_result.tool_message_content),
-    ];
-
     // Turn 2 tools = safe_only（过滤出 DangerClass::Safe 的 tool）
-    // §2.2.1: Turn 2 允许 AI 再调一次 Safe tool（如 open_path），实现 tool chain
-    let safe_tools: Vec<ActionSchema> = ctx
+    // §2.2.1: Turn 2 允许 AI 再调一次 Safe tool（如 file_action → open_path），实现 tool chain
+    let action_reg = app.state::<Arc<ActionRegistry>>();
+    let cap_reg = app.state::<Arc<CapabilityRegistry>>();
+
+    use crate::domain::execution::group;
+
+    // 过滤 safe_tools 的同时收集对应的 safe tool name 集合
+    let safe_tool_names: std::collections::HashSet<String> = ctx
         .tools
         .iter()
         .filter(|schema| {
-            // 通过 ActionRegistry 查 danger_class
-            let action_reg = app.state::<Arc<ActionRegistry>>();
-            let cap_reg = app.state::<Arc<CapabilityRegistry>>();
-
             // Capability 的 tool 默认 Safe（只读数据）
             if cap_reg.get(&schema.name).is_some() {
                 return true;
             }
 
-            // Action 的 tool 查 danger_class
-            if let Some((action, _)) = resolve_tool_call(
-                &crate::domain::ai::message::ToolCall {
-                    id: String::new(),
-                    name: schema.name.clone(),
-                    arguments: serde_json::json!({}),
-                },
-                &action_reg,
-            ) {
+            // 分组 tool（如 file_action / system_action / blink_action）：
+            // 检查分组内**所有** action 是否都是 Safe。
+            // resolve_tool_call 传空 arguments 无法解析分组（缺 action 字段），
+            // 所以对分组 tool 直接遍历其 action_ids 查 danger_class。
+            if let Some(g) = group::find_group(&schema.name) {
+                return g.action_ids.iter().all(|action_id| {
+                    action_reg
+                        .get(action_id)
+                        .map(|a| a.danger_class() == DangerClass::Safe)
+                        .unwrap_or(false)
+                });
+            }
+
+            // 独立 Action tool（非分组）直接查 danger_class
+            if let Some(action) = action_reg.get(&schema.name) {
                 return action.danger_class() == DangerClass::Safe;
             }
 
             false
         })
+        .map(|s| s.name.clone())
+        .collect();
+
+    let safe_tools: Vec<ActionSchema> = ctx
+        .tools
+        .iter()
+        .filter(|s| safe_tool_names.contains(&s.name))
         .cloned()
         .collect();
+
+    // 0.11.6: Turn 2 system prompt 需要拼接 safe tool 列表，
+    // 让 AI 知道有哪些工具可以链式调用（如 open_path 打开搜到的应用）
+    let safe_prompt_infos: Vec<crate::domain::ai::prompt::ToolPromptInfo> = ctx
+        .prompt_infos
+        .iter()
+        .filter(|p| safe_tool_names.contains(&p.name))
+        .cloned()
+        .collect();
+    let feedback_prompt = crate::domain::ai::prompt::tool_result_feedback_prompt(
+        &safe_prompt_infos,
+        &ctx.lang,
+    );
+
+    // 构造 Turn 2 messages
+    // §2.2.1: messages = [system(feedback_prompt), user, assistant(tool_call_1), tool(result_1)]
+    // 用 serde_json::json! 构造,避免 tool_name 含特殊字符破坏 JSON
+    let assistant_content = serde_json::json!({
+        "name": turn1_result.tool_name,
+        "arguments": turn1_result.arguments,
+    })
+    .to_string();
+    let messages = vec![
+        ChatMessage::system(&feedback_prompt),
+        ChatMessage::user(&ctx.user_query),
+        ChatMessage::assistant_tool_call(&turn1_result.tool_call_id, &assistant_content),
+        ChatMessage::tool(&turn1_result.tool_call_id, &turn1_result.tool_message_content),
+    ];
 
     // Turn 2 独立超时预算（从总预算派生）
     let turn2_timeout = ctx.deadline.map(|d| {
@@ -2533,55 +2571,85 @@ async fn run_turn2_feedback(
         model = %ctx.provider_model,
         tools = safe_tools.len(),
         timeout_ms = ?turn2_timeout,
-        "Turn 2 回流 completion 发起"
+        "Turn 2 回流 streaming 发起"
     );
 
+    // §3.4: Turn 2 text 总结走流式输出（与 Turn 1 文本回答体验一致）
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let provider_clone = Arc::clone(&ctx.provider);
+    let stream_future = async move { provider_clone.stream(req, tx).await };
+    let producer_handle = tauri::async_runtime::spawn(stream_future);
+
     let turn2_start = Instant::now();
-    let result = ctx.provider.complete(req).await;
-    let elapsed = turn2_start.elapsed().as_millis() as u32;
+    let mut accumulated = String::new();
 
-    // seq 校验
-    if seq != latest_seq.load(Ordering::SeqCst) {
-        tracing::trace!(target: ai_slo::TARGET, "Turn 2 完成后 seq 过期,丢弃");
-        return;
-    }
+    // 逐 chunk 消费
+    while let Some(chunk) = rx.recv().await {
+        // seq 校验:用户已输入新 query → 丢弃后续 chunk
+        if seq != latest_seq.load(Ordering::SeqCst) {
+            tracing::trace!(target: ai_slo::TARGET, "Turn 2 stream 过期,丢弃 seq={seq}");
+            producer_handle.abort();
+            return;
+        }
 
-    match result {
-        Ok(resp) => {
-            tracing::info!(
-                target: ai_slo::TARGET,
-                provider = ?ctx.provider_kind,
-                model = %ctx.provider_model,
-                elapsed_ms = elapsed,
-                text_chars = resp.text.as_ref().map(|s| s.chars().count()).unwrap_or(0),
-                tool_calls = resp.tool_calls.len(),
-                "Turn 2 回流完成"
-            );
+        match chunk {
+            StreamChunk::Text(text) => {
+                accumulated.push_str(&text);
+                emit_ai_stream(app, seq, &text, &accumulated, false);
+            }
+            StreamChunk::Done { tool_calls, .. } => {
+                let elapsed = turn2_start.elapsed().as_millis() as u32;
+                tracing::info!(
+                    target: ai_slo::TARGET,
+                    provider = ?ctx.provider_kind,
+                    model = %ctx.provider_model,
+                    elapsed_ms = elapsed,
+                    text_chars = accumulated.chars().count(),
+                    tool_calls = tool_calls.len(),
+                    "Turn 2 回流 stream 完成"
+                );
 
-            // 处理 Turn 2 响应
-            if !resp.tool_calls.is_empty() {
-                // 情况 B/C: tool_call_2
-                let tc2 = &resp.tool_calls[0];
-                handle_turn2_tool_call(app, seq, tc2, ctx, latest_seq).await;
-            } else {
-                // 情况 A: text answer → emit AI 总结
-                emit_ai_clear(app, seq, None);
-                match resp.text.filter(|t| !t.trim().is_empty()) {
-                    Some(text) => {
-                        emit_ai_result(app, seq, ai_result_entry(text));
-                    }
-                    None => {
+                if !tool_calls.is_empty() {
+                    // 情况 B/C: tool_call_2 → 先清流式占位,再处理 tool chain
+                    emit_ai_stream(app, seq, "", &accumulated, true);
+                    let tc2 = &tool_calls[0];
+                    handle_turn2_tool_call(app, seq, tc2, ctx, latest_seq).await;
+                } else {
+                    // 情况 A: text answer → 流式结束,发 done=true + 可复制结果
+                    if accumulated.trim().is_empty() {
                         // Turn 2 返回空 → 降级展示 Turn 1 结果
                         tracing::warn!(
                             target: ai_slo::TARGET,
                             "Turn 2 返回空文本,降级展示 Turn 1 结果"
                         );
+                        emit_ai_clear(app, seq, None);
                         emit_turn1_result(app, seq, &turn1_result);
+                    } else {
+                        emit_ai_stream(app, seq, "", &accumulated, true);
+                        emit_ai_result(app, seq, ai_result_entry(accumulated));
                     }
                 }
+                return;
             }
         }
-        Err(AIError::Timeout) => {
+    }
+
+    // channel 关闭但没收到 Done → producer 出错了
+    let elapsed = turn2_start.elapsed().as_millis() as u32;
+    let producer_result = producer_handle.await;
+    match producer_result {
+        Ok(Ok(())) => {
+            // 不该走到这里(正常应收到 Done),兜底处理
+            tracing::warn!(target: ai_slo::TARGET, "Turn 2 stream 结束但未收到 Done");
+            emit_ai_clear(app, seq, None);
+            if !accumulated.trim().is_empty() {
+                emit_ai_stream(app, seq, "", &accumulated, true);
+                emit_ai_result(app, seq, ai_result_entry(accumulated));
+            } else {
+                emit_turn1_result(app, seq, &turn1_result);
+            }
+        }
+        Ok(Err(AIError::Timeout)) => {
             // §3.4 超时降级: 占位变 "AI 回答较慢,已展示原始结果" + Turn 1 结果直接 emit
             tracing::warn!(
                 target: ai_slo::TARGET,
@@ -2599,13 +2667,25 @@ async fn run_turn2_feedback(
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             emit_turn1_result(app, seq, &turn1_result);
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             tracing::warn!(
                 target: ai_slo::TARGET,
                 provider = ?ctx.provider_kind,
                 elapsed_ms = elapsed,
                 error = %e,
                 "Turn 2 回流失败,降级展示 Turn 1 结果"
+            );
+            emit_ai_clear(app, seq, None);
+            emit_turn1_result(app, seq, &turn1_result);
+        }
+        Err(e) => {
+            // JoinError（task 被 abort 或 panic）
+            tracing::warn!(
+                target: ai_slo::TARGET,
+                provider = ?ctx.provider_kind,
+                elapsed_ms = elapsed,
+                error = %e,
+                "Turn 2 回流 producer task 异常,降级展示 Turn 1 结果"
             );
             emit_ai_clear(app, seq, None);
             emit_turn1_result(app, seq, &turn1_result);

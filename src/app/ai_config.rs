@@ -248,13 +248,16 @@ impl ProviderKind {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ToolResultFeedback {
-    /// 本地模型开 + 云端模型关（默认）。
+    /// 本地模型开 + 云端模型关。
     ///
     /// 0.11 阶段所有 provider 都是云端，实际等同 `Off`；
     /// 0.12 本地模型上线后对它们自动开启。
-    #[default]
     Auto,
     /// 始终开启 Turn 2 回流。
+    ///
+    /// 0.11.6 起为默认值——"打开应用"等 tool chain 闭环场景需要 Turn 2 才能自动执行，
+    /// 默认开启保证核心体验。用户嫌慢/费 token 可手动改 Auto 或 Off。
+    #[default]
     On,
     /// 始终关闭 Turn 2 回流（单轮直通）。
     Off,
@@ -851,12 +854,12 @@ mod tests {
     // ── 0.11.4 改进 2:ToolResultFeedback 三态配置 ────────────────────────
 
     #[test]
-    fn tool_result_feedback_default_is_auto() {
-        assert_eq!(ToolResultFeedback::default(), ToolResultFeedback::Auto);
-        // AIConfig 默认值也应是 Auto
+    fn tool_result_feedback_default_is_on() {
+        // 0.11.6: 默认值从 Auto 改为 On，保证 tool chain 闭环默认可用
+        assert_eq!(ToolResultFeedback::default(), ToolResultFeedback::On);
         assert_eq!(
             AIConfig::default().ai_tool_result_feedback,
-            ToolResultFeedback::Auto
+            ToolResultFeedback::On
         );
     }
 
@@ -893,11 +896,11 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_feedback_legacy_config_defaults_to_auto() {
-        // 老配置没有 ai_tool_result_feedback 字段 → serde default 填 Auto
+    fn tool_result_feedback_legacy_config_defaults_to_on() {
+        // 老配置没有 ai_tool_result_feedback 字段 → serde default 填 On（0.11.6 改）
         let json = r#"{"enabled": false}"#;
         let c: AIConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(c.ai_tool_result_feedback, ToolResultFeedback::Auto);
+        assert_eq!(c.ai_tool_result_feedback, ToolResultFeedback::On);
     }
 
     #[test]

@@ -49,6 +49,7 @@ use rig_core::completion::{
     AssistantContent, CompletionError, CompletionModel as RigCompletionModel,
     CompletionRequest as RigCompletionRequest, Message as RigMessage,
 };
+use rig_core::message::{ToolCall as RigToolCall, ToolFunction as RigToolFunc};
 use rig_core::streaming::StreamedAssistantContent as RigStreamChunk;
 use tokio::sync::mpsc;
 
@@ -262,12 +263,14 @@ where
 
 /// 把我们的 `CompletionRequest` 投影成 rig `CompletionRequest`。
 ///
-/// **消息构造策略**(0.9.2 第一步):
+/// **消息构造策略**:
 /// - `Role::System` → `preamble`(rig legacy 兼容 + 通用)或 `Message::system`;
 ///   优先用 preamble 让多 provider 语义一致(anthropic 不吃 system message)
 /// - `Role::User` → `Message::user(content)`
-/// - `Role::Assistant` → `Message::assistant` 走 `From<String>` 不支持,0.9.2 不构造
-/// - `Role::Tool` → 0.9.2 无 tool loop,不构造(0.9.3 起加)
+/// - `Role::Assistant` → 0.11.4 Turn 2 回流支持:
+///   - `tool_call_id` Some + content 是 `{"name","arguments"}` JSON → `AssistantContent::ToolCall`
+///   - 否则 → `Message::assistant(content)` 纯文本降级
+/// - `Role::Tool` → `Message::tool_result(id, content)`(rig 无独立 Tool 角色,tool 结果放 User 消息)
 ///
 /// **约束**:`chat_history` 必须至少 1 条(rig 契约"最后一条是 prompt")。
 /// 空 vec 或全 system → 返 `AIError::Serialization`。
@@ -304,11 +307,40 @@ fn build_rig_request(
                 });
             }
             Role::User => user_msgs.push(RigMessage::from(m.content.as_str())),
-            Role::Assistant | Role::Tool => {
-                // 0.9.2 第一步不构造这些角色;若真出现说明调用方错了
-                return Err(AIError::Serialization(
-                    "0.9.2 主窗口路径不支持 assistant/tool 消息".into(),
-                ));
+            Role::Assistant => {
+                // 0.11.4 Turn 2 回流:assistant 消息携带 tool_call_id + JSON content
+                // content 格式: {"name":"search_apps","arguments":{...}}
+                // 解析成功 → 构造 AssistantContent::ToolCall（OpenAI tool_calls 语义）
+                // 解析失败或无 tool_call_id → 降级为纯文本 assistant
+                if let Some(tc_id) = &m.tool_call_id {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&m.content) {
+                        if let (Some(name), Some(arguments)) = (
+                            json.get("name").and_then(|v| v.as_str()),
+                            json.get("arguments"),
+                        ) {
+                            let tool_call = RigToolCall::new(
+                                tc_id.clone(),
+                                RigToolFunc::new(name.to_string(), arguments.clone()),
+                            );
+                            user_msgs.push(RigMessage::Assistant {
+                                id: None,
+                                content: OneOrMany::one(AssistantContent::ToolCall(tool_call)),
+                            });
+                            continue;
+                        }
+                    }
+                    tracing::warn!(
+                        target: "blink::ai::slo",
+                        "assistant 消息 JSON 解析失败,降级为纯文本"
+                    );
+                }
+                user_msgs.push(RigMessage::assistant(&m.content));
+            }
+            Role::Tool => {
+                // 0.11.4 Turn 2 回流:tool 结果 → rig 的 UserContent::ToolResult
+                // rig 没有独立的 Tool 消息角色,tool 结果放在 User 消息里
+                let id = m.tool_call_id.clone().unwrap_or_default();
+                user_msgs.push(RigMessage::tool_result(id, &m.content));
             }
         }
     }
@@ -734,19 +766,48 @@ mod tests {
     }
 
     #[test]
-    fn build_rig_request_rejects_assistant_role_in_0_9_2() {
-        // 0.9.2 主窗口不该出现 assistant / tool——多轮留 0.10 agent 窗口
+    fn build_rig_request_supports_turn2_assistant_tool_messages() {
+        // 0.11.4 Turn 2 回流:assistant(带 tool_call_id + JSON) + tool 结果
+        use crate::domain::ai::message::Role;
+        let assistant_content = serde_json::json!({
+            "name": "search_apps",
+            "arguments": {"query": "微信"},
+        })
+        .to_string();
         let req = CompletionRequest {
-            messages: vec![ChatMessage::user("q"), ChatMessage::assistant("a")],
+            messages: vec![
+                ChatMessage::system("feedback prompt"),
+                ChatMessage::user("打开微信"),
+                ChatMessage::assistant_tool_call("call_abc", &assistant_content),
+                ChatMessage::tool("call_abc", "[{\"title\":\"微信\"}]"),
+            ],
             tools: Vec::new(),
             max_tokens: None,
             temperature: None,
             timeout_ms: None,
         };
-        assert!(matches!(
-            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None),
-            Err(AIError::Serialization(_))
-        ));
+        let rig =
+            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None).unwrap();
+        assert_eq!(rig.preamble.as_deref(), Some("feedback prompt"));
+        // system 不进 chat_history;4 条消息中 1 条 system → chat_history 3 条
+        assert_eq!(rig.chat_history.len(), 3);
+        // 验证 assistant 消息不是被拒绝的
+        let _ = Role::Assistant; // 确保导入可用
+    }
+
+    #[test]
+    fn build_rig_request_assistant_without_tool_call_id_falls_back_to_text() {
+        // assistant 无 tool_call_id → 降级为纯文本 assistant 消息
+        let req = CompletionRequest {
+            messages: vec![ChatMessage::user("q"), ChatMessage::assistant("text reply")],
+            tools: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            timeout_ms: None,
+        };
+        let rig =
+            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None).unwrap();
+        assert_eq!(rig.chat_history.len(), 2);
     }
 
     // ── 0.9.4 Step 1:模型级参数 fallback ───────────────────────────────

@@ -246,16 +246,25 @@ fn handle_tool_call<W: Write>(
 
 /// 解析降级顺序设置（兼容字符串和数组格式）。
 fn parse_fallback_order(settings: &Value) -> Vec<String> {
-    let default = vec!["tencent".into(), "ali".into(), "baidu".into(), "youdao".into(), "deepl".into()];
-    let default_val = serde_json::json!(default);
+    let default = || vec!["tencent".into(), "ali".into(), "baidu".into(), "youdao".into(), "deepl".into()];
+    let default_val = serde_json::json!(default());
     let val = settings.get("fallback_order").unwrap_or(&default_val);
     let raw: Vec<String> = match val {
         Value::String(s) => s.split(',').map(|e| e.trim().to_string()).collect(),
         Value::Array(arr) => arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect(),
-        _ => default,
+        _ => return default(),
     };
+    // 空列表或全无效 → 回退默认
+    if raw.is_empty() {
+        return default();
+    }
     let valid: std::collections::HashSet<&str> = valid_engines().iter().copied().collect();
-    raw.into_iter().filter(|e| valid.contains(e.as_str())).collect()
+    let filtered: Vec<String> = raw.into_iter().filter(|e| valid.contains(e.as_str())).collect();
+    if filtered.is_empty() {
+        default()
+    } else {
+        filtered
+    }
 }
 
 /// 尝试翻译：主引擎失败则按 fallback_order 降级。
@@ -433,4 +442,214 @@ fn build_result_items(result: &str, text: &str, original_text: &str, target_lang
     });
 
     items
+}
+
+// ── 单测（AGENTS.md §7: 纯逻辑/算法必须有单测）──────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── preprocess_code_identifiers ─────────────────────────────────────────
+
+    #[test]
+    fn preprocess_plain_text_unchanged() {
+        assert_eq!(preprocess_code_identifiers("hello world"), "hello world");
+        assert_eq!(preprocess_code_identifiers("你好世界"), "你好世界");
+    }
+
+    #[test]
+    fn preprocess_snake_case() {
+        assert_eq!(preprocess_code_identifiers("hello_world"), "hello world");
+        assert_eq!(preprocess_code_identifiers("get_user_name"), "get user name");
+    }
+
+    #[test]
+    fn preprocess_kebab_case() {
+        assert_eq!(preprocess_code_identifiers("hello-world"), "hello world");
+        assert_eq!(preprocess_code_identifiers("content-type"), "content type");
+    }
+
+    #[test]
+    fn preprocess_camel_case() {
+        assert_eq!(preprocess_code_identifiers("getUserName"), "get User Name");
+        assert_eq!(preprocess_code_identifiers("helloWorld"), "hello World");
+    }
+
+    #[test]
+    fn preprocess_screaming_snake() {
+        assert_eq!(preprocess_code_identifiers("MAX_RETRY_COUNT"), "MAX RETRY COUNT");
+    }
+
+    #[test]
+    fn preprocess_acronym_camel() {
+        // HTTPSConnection → HTTPS Connection（大写序列 + 小写 → 大写前断开）
+        assert_eq!(preprocess_code_identifiers("HTTPSConnection"), "HTTPS Connection");
+    }
+
+    #[test]
+    fn preprocess_single_word_upper() {
+        // 单个全大写单词不应被拆分
+        assert_eq!(preprocess_code_identifiers("URL"), "URL");
+        assert_eq!(preprocess_code_identifiers("HTTP"), "HTTP");
+    }
+
+    #[test]
+    fn preprocess_mixed() {
+        assert_eq!(preprocess_code_identifiers("getUserID_str"), "get User ID str");
+    }
+
+    #[test]
+    fn preprocess_empty_string() {
+        assert_eq!(preprocess_code_identifiers(""), "");
+    }
+
+    // ── detect_lang ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn detect_lang_pure_chinese() {
+        assert_eq!(detect_lang("你好世界"), "zh");
+        assert_eq!(detect_lang("今天天气真好"), "zh");
+    }
+
+    #[test]
+    fn detect_lang_pure_english() {
+        assert_eq!(detect_lang("hello world"), "en");
+        assert_eq!(detect_lang("The quick brown fox"), "en");
+    }
+
+    #[test]
+    fn detect_lang_mixed_majority_chinese() {
+        // 中文占比 > 30% → zh。"你好世界 hello" = 4 中文 / 10 字符 = 40%
+        assert_eq!(detect_lang("你好世界 hello"), "zh");
+    }
+
+    #[test]
+    fn detect_lang_mixed_majority_english() {
+        // 中文占比 < 30% → en。"hello world 你好" = 2 中文 / 14 字符 ≈ 14%
+        assert_eq!(detect_lang("hello world 你好"), "en");
+    }
+
+    #[test]
+    fn detect_lang_empty() {
+        assert_eq!(detect_lang(""), "en");
+    }
+
+    #[test]
+    fn detect_lang_japanese_not_chinese() {
+        // 日文假名不在 CJK 统一汉字范围 → en
+        assert_eq!(detect_lang("こんにちは"), "en");
+    }
+
+    // ── auto_swap_lang ───────────────────────────────────────────────────────
+
+    #[test]
+    fn auto_swap_explicit_target_unchanged() {
+        assert_eq!(auto_swap_lang("hello", "zh"), "zh");
+        assert_eq!(auto_swap_lang("你好", "en"), "en");
+        assert_eq!(auto_swap_lang("hello", "ja"), "ja");
+    }
+
+    #[test]
+    fn auto_swap_chinese_to_english() {
+        assert_eq!(auto_swap_lang("你好世界", "auto"), "en");
+    }
+
+    #[test]
+    fn auto_swap_english_to_chinese() {
+        assert_eq!(auto_swap_lang("hello world", "auto"), "zh");
+    }
+
+    // ── parse_fallback_order ─────────────────────────────────────────────────
+
+    #[test]
+    fn fallback_order_default() {
+        let settings = serde_json::json!({});
+        let order = parse_fallback_order(&settings);
+        assert_eq!(order, vec!["tencent", "ali", "baidu", "youdao", "deepl"]);
+    }
+
+    #[test]
+    fn fallback_order_from_array() {
+        let settings = serde_json::json!({"fallback_order": ["baidu", "youdao"]});
+        let order = parse_fallback_order(&settings);
+        assert_eq!(order, vec!["baidu", "youdao"]);
+    }
+
+    #[test]
+    fn fallback_order_from_string() {
+        let settings = serde_json::json!({"fallback_order": "baidu,youdao,deepl"});
+        let order = parse_fallback_order(&settings);
+        assert_eq!(order, vec!["baidu", "youdao", "deepl"]);
+    }
+
+    #[test]
+    fn fallback_order_filters_invalid_engines() {
+        let settings = serde_json::json!({"fallback_order": ["baidu", "invalid_engine", "youdao"]});
+        let order = parse_fallback_order(&settings);
+        assert_eq!(order, vec!["baidu", "youdao"]);
+    }
+
+    #[test]
+    fn fallback_order_empty_array_uses_default() {
+        let settings = serde_json::json!({"fallback_order": []});
+        let order = parse_fallback_order(&settings);
+        assert_eq!(order, vec!["tencent", "ali", "baidu", "youdao", "deepl"]);
+    }
+
+    // ── engine_display_name ──────────────────────────────────────────────────
+
+    #[test]
+    fn engine_display_name_known() {
+        assert_eq!(engine_display_name("youdao"), "有道智云");
+        assert_eq!(engine_display_name("baidu"), "百度翻译");
+        assert_eq!(engine_display_name("deepl"), "DeepL");
+        assert_eq!(engine_display_name("ali"), "阿里翻译");
+        assert_eq!(engine_display_name("tencent"), "腾讯翻译");
+    }
+
+    #[test]
+    fn engine_display_name_unknown_fallback() {
+        assert_eq!(engine_display_name("unknown"), "unknown");
+        assert_eq!(engine_display_name("custom"), "custom");
+    }
+
+    // ── get_engine ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn get_engine_known() {
+        assert!(get_engine("youdao").is_some());
+        assert!(get_engine("baidu").is_some());
+        assert!(get_engine("deepl").is_some());
+        assert!(get_engine("ali").is_some());
+        assert!(get_engine("tencent").is_some());
+    }
+
+    #[test]
+    fn get_engine_unknown() {
+        assert!(get_engine("google").is_none());
+        assert!(get_engine("").is_none());
+    }
+
+    // ── build_result_items ───────────────────────────────────────────────────
+
+    #[test]
+    fn build_result_items_no_preprocess() {
+        let items = build_result_items("你好", "hello", "hello", "zh");
+        // 译文项 + 原文项（无拆分版，因为 text == original_text）
+        assert_eq!(items.len(), 2);
+        assert!(items[0].title.starts_with("📝"));
+        assert!(items[1].title.starts_with("📄"));
+        assert_eq!(items[0].score, 1.0);
+    }
+
+    #[test]
+    fn build_result_items_with_preprocess() {
+        // text != original_text → 多一个拆分版
+        let items = build_result_items("获取用户", "get user", "getUserName", "zh");
+        assert_eq!(items.len(), 3);
+        assert!(items[0].title.starts_with("📝"));
+        assert!(items[1].title.starts_with("🔤"));
+        assert!(items[2].title.starts_with("📄"));
+    }
 }

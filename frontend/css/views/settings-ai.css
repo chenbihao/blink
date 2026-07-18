@@ -973,3 +973,37 @@
   color: var(--text-tertiary, #999);
   font-size: var(--text-xs, 12px);
 }
+
+/* ── 分段按钮组 seg-control（0.11.4 工具回流三态选择器）─────────────── */
+/* 紧凑的胶囊式按钮组，替代 select 下拉，与 switch / number-input 视觉宽度对齐 */
+.seg-control {
+  display: inline-flex;
+  background: var(--surface);
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius-md);
+  padding: 2px;
+  gap: 2px;
+}
+.seg-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--text-sm, 13px);
+  font-weight: var(--weight-medium, 500);
+  padding: 5px 14px;
+  border-radius: calc(var(--radius-md) - 2px);
+  cursor: pointer;
+  transition: background var(--transition-base), color var(--transition-base);
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.seg-btn:hover:not(.active) {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.seg-btn.active {
+  background: var(--accent);
+  color: var(--on-accent, #fff);
+  font-weight: var(--weight-semibold, 600);
+}

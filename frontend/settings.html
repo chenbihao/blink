@@ -527,11 +527,11 @@
               </div>
               <div class="setting-row">
                 <label class="setting-label" data-i18n="ai.advanced.tool_feedback">工具结果回流 AI<span class="field-hint-icon" data-i18n-title="ai.advanced.tool_feedback.hint">ⓘ</span></label>
-                <select id="ai-tool-feedback" class="input-wide">
-                  <option value="auto" data-i18n="ai.advanced.tool_feedback.auto">自动（本地开 / 云端关）</option>
-                  <option value="on" data-i18n="ai.advanced.tool_feedback.on">始终开启</option>
-                  <option value="off" data-i18n="ai.advanced.tool_feedback.off">始终关闭</option>
-                </select>
+                <div class="seg-control" id="ai-tool-feedback">
+                  <button type="button" class="seg-btn" data-value="auto" data-i18n="ai.advanced.tool_feedback.auto">自动</button>
+                  <button type="button" class="seg-btn" data-value="on" data-i18n="ai.advanced.tool_feedback.on">开启</button>
+                  <button type="button" class="seg-btn" data-value="off" data-i18n="ai.advanced.tool_feedback.off">关闭</button>
+                </div>
                 <div class="hint-line" id="ai-tool-feedback-desc">本地模型自动开启 Turn 2 回流，云端模型关闭以节省 token</div>
               </div>
               <div class="setting-row">

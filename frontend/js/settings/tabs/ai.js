@@ -49,8 +49,10 @@ export function initAITab() {
   loadAIConfig();
   // 0.11.4 §3.5: 语言切换时刷新工具回流描述文字（动态文本不走 data-i18n）
   onLangChange(() => {
-    const sel = document.getElementById("ai-tool-feedback");
-    if (sel) updateToolFeedbackDesc(sel.value);
+    const container = document.getElementById("ai-tool-feedback");
+    if (!container) return;
+    const activeBtn = container.querySelector(".seg-btn.active");
+    updateToolFeedbackDesc(activeBtn ? activeBtn.dataset.value : "auto");
   });
 }
 
@@ -100,7 +102,7 @@ function defaultAIConfig() {
     direct_execute_safe_actions: false,
     streaming: true,
     slo_hard_timeout_ms: null,
-    ai_tool_result_feedback: "auto",
+    ai_tool_result_feedback: "on",
   };
 }
 
@@ -119,9 +121,9 @@ function applyAIConfigToUI() {
   if ($("ai-streaming")) $("ai-streaming").checked = c.streaming !== false;
   if ($("ai-direct-safe")) $("ai-direct-safe").checked = !!c.direct_execute_safe_actions;
   if ($("ai-timeout-ms")) $("ai-timeout-ms").value = c.slo_hard_timeout_ms ?? 2500;
-  // 0.11.4 §3.5: 工具结果回流 AI 三态选择器
-  const feedbackValue = c.ai_tool_result_feedback ?? "auto";
-  if ($("ai-tool-feedback")) $("ai-tool-feedback").value = feedbackValue;
+  // 0.11.4 §3.5: 工具结果回流 AI 三态分段按钮
+  const feedbackValue = c.ai_tool_result_feedback ?? "on";
+  setSegControlValue("ai-tool-feedback", feedbackValue);
   updateToolFeedbackDesc(feedbackValue);
 
   renderAIProviders();
@@ -946,6 +948,19 @@ function renderAITierBanner() {
 }
 
 /**
+ * 设置分段按钮组（seg-control）的激活态
+ * @param {string} id - 容器元素 id
+ * @param {string} value - 要激活的按钮 data-value
+ */
+function setSegControlValue(id, value) {
+  const container = document.getElementById(id);
+  if (!container) return;
+  container.querySelectorAll(".seg-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.value === value);
+  });
+}
+
+/**
  * 更新工具结果回流 AI 的描述文字（根据当前选择值切换）
  */
 function updateToolFeedbackDesc(value) {
@@ -999,9 +1014,12 @@ function bindAIEvents() {
     currentAIConfig.direct_execute_safe_actions = e.target.checked;
     saveAIConfig();
   });
-  // 0.11.4 §3.5: 工具结果回流 AI 三态选择器
-  $("ai-tool-feedback")?.addEventListener("change", (e) => {
-    const val = e.target.value;
+  // 0.11.4 §3.5: 工具结果回流 AI 三态分段按钮
+  $("ai-tool-feedback")?.addEventListener("click", (e) => {
+    const btn = e.target.closest(".seg-btn");
+    if (!btn) return;
+    const val = btn.dataset.value;
+    setSegControlValue("ai-tool-feedback", val);
     currentAIConfig.ai_tool_result_feedback = val;
     updateToolFeedbackDesc(val);
     saveAIConfig();
