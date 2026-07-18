@@ -446,6 +446,7 @@ export const zh = {
   "voice.local.diagnose.log_funasr": "[诊断] funasr: {status} {version}",
   "voice.local.diagnose.log_server_running": "[诊断] server_running: {status} port={port}",
   "voice.local.diagnose.log_server_ready": "[诊断] server_ready: {status}",
+  "voice.local.diagnose.log_model_status": "[诊断] model_status: {status}",
   "voice.local.diagnose.log_websocket_ready": "[诊断] websocket_ready: {status} {err}",
   "voice.local.diagnose.log_config": "[诊断] mode={mode}, model={model}, device={device}, streaming_mode={streaming}",
   "voice.local.diagnose.log_api_skip": "[诊断] API 测试: 跳过（{reason}）",

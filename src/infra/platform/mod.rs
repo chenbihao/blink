@@ -6,6 +6,7 @@ pub mod context;
 pub mod hotkey;
 pub mod inject;
 pub mod locale;
+pub mod process;
 pub mod python;
 pub mod screenshot;
 pub mod secret;

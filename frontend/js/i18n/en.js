@@ -445,6 +445,7 @@ export const en = {
   "voice.local.diagnose.log_funasr": "[Diag] funasr: {status} {version}",
   "voice.local.diagnose.log_server_running": "[Diag] server_running: {status} port={port}",
   "voice.local.diagnose.log_server_ready": "[Diag] server_ready: {status}",
+  "voice.local.diagnose.log_model_status": "[Diag] model_status: {status}",
   "voice.local.diagnose.log_websocket_ready": "[Diag] websocket_ready: {status} {err}",
   "voice.local.diagnose.log_config": "[Diag] mode={mode}, model={model}, device={device}, streaming_mode={streaming}",
   "voice.local.diagnose.log_api_skip": "[Diag] API test: skipped ({reason})",

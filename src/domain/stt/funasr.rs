@@ -275,12 +275,20 @@ fn strip_ansi(s: &str) -> String {
 
 /// 检查 server 是否在指定端口上监听（TCP 级别）。
 ///
-/// **注意**：此函数只检查 TCP 端口是否可连接，**不验证 HTTP API 是否就绪**。
+/// **注意**：此函数只检查 TCP 端口是否可连接，**不验证 HTTP API 是否就绪**，
+/// 也**不区分端口占用者是否为 Blink 管理的子进程**。
+///
+/// 以下情况都会返回 `true`：
+/// - Blink 通过 `start_funasr_server` 启动的子进程正在监听
+/// - Blink 崩溃后遗留的孤儿进程仍在监听（child handle 已丢失）
+/// - 其他程序恰好占用了同一端口
+///
 /// server 启动后 uvicorn 先绑定 TCP 端口，但模型可能还在加载（30-60s），
 /// 此时 TCP 连接成功但 HTTP 请求会失败。
 ///
 /// 用于快速预检（如 `LocalSttEngine::new` 中的快速失败判断）。
 /// 在需要确保模型真正就绪的场景，使用 [`check_model_loaded`]。
+/// 在需要清理孤儿进程的场景，使用 `infra::platform::process::kill_process_by_port`。
 pub fn is_server_ready(port: u16) -> bool {
     use std::net::TcpStream;
     use std::time::Duration;

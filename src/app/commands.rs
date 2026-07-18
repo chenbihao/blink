@@ -2979,6 +2979,40 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
         serde_json::json!({ "stage": "starting", "model": model, "port": port, "device": device }),
     );
 
+    // ── 孤儿进程检测：FUNASR_SERVER_CHILD 为空但端口被占 ──
+    // Blink 崩溃/异常退出后，上次的 funasr-server 子进程可能变成孤儿进程继续运行，
+    // 占用监听端口。此时 child handle 丢失，无法通过正常途径管理。
+    // 在启动新服务前先清理孤儿进程，避免端口冲突 + 日志无法捕获。
+    //
+    // MutexGuard 非 Send，必须在独立块中释放，不能跨 await 持有。
+    let has_live_child = {
+        let mut guard = FUNASR_SERVER_CHILD.lock().unwrap();
+        guard
+            .as_mut()
+            .map(|c| c.try_wait().ok().flatten().is_none())
+            .unwrap_or(false)
+    };
+
+    if !has_live_child && crate::domain::stt::funasr::is_server_ready(port) {
+        // 端口被占但没有 Blink 管理的子进程 → 孤儿进程
+        if let Some(pid) = crate::infra::platform::process::kill_process_by_port(port) {
+            emit_funasr_log(
+                &app,
+                &format!("[Blink] ⚠️ 检测到孤儿进程 PID {pid} 占用端口 {port}，已自动清理"),
+            );
+            tracing::warn!(pid, port, "检测到孤儿 funasr-server 进程，已清理");
+        } else {
+            emit_funasr_log(
+                &app,
+                &format!(
+                    "[Blink] ⚠️ 端口 {port} 被占用但无法定位进程，请手动检查任务管理器"
+                ),
+            );
+        }
+        // 等端口释放
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
     // ── 防止重复启动：如果已有子进程在运行，直接返回 ──
     {
         let mut guard = FUNASR_SERVER_CHILD.lock().unwrap();
@@ -3051,6 +3085,14 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
                             }),
                         );
                         tracing::error!(port, "funasr-server 启动超时");
+                        // 清理子进程 + 标记停止（避免 SERVER_RUNNING 残留为 true）
+                        let mut guard = FUNASR_SERVER_CHILD.lock().unwrap();
+                        if let Some(child) = guard.as_mut() {
+                            let _ = child.start_kill();
+                        }
+                        *guard = None;
+                        drop(guard);
+                        crate::domain::stt::funasr::mark_server_stopped();
                         return;
                     }
 
@@ -3131,7 +3173,15 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
             Ok(())
         }
         Ok(None) => {
-            // 服务已在运行——检查模型是否已加载，避免报告 ready 但模型还在下载
+            // 端口已被占用但 FUNASR_SERVER_CHILD 为空——通常是孤儿进程
+            // （start_funasr_server 开头已尝试清理，但可能清理失败或进程刚启动）
+            // 此时无法捕获子进程 stdout/stderr，日志窗口不会有实时日志。
+            emit_funasr_log(
+                &app,
+                &format!(
+                    "[Blink] ⚠️ 端口 {port} 已被占用（可能是之前遗留的进程），无法捕获实时日志。建议先停止服务再重新启动。"
+                ),
+            );
             let app_clone = app.clone();
             let model_clone = model.clone();
             tokio::spawn(async move {
@@ -3153,6 +3203,8 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
                                 )
                             }),
                         );
+                        // 标记停止（Ok(None) 分支没有 child handle，只需标记状态）
+                        crate::domain::stt::funasr::mark_server_stopped();
                         return;
                     }
                     let model_status =
@@ -3199,14 +3251,31 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 /// 停止 funasr-server 子进程。
+///
+/// 先 kill Blink 管理的子进程（通过 child handle），再检查端口是否仍被占。
+/// 如果端口仍被占，说明存在孤儿进程（Blink 崩溃后遗留），通过 PID 清理。
 #[tauri::command]
 pub async fn stop_funasr_server() -> Result<(), String> {
-    // 先从 Mutex 中取出 child，避免跨 await 持有 MutexGuard（非 Send）
+    // 1. 先从 Mutex 中取出 child，避免跨 await 持有 MutexGuard（非 Send）
     let mut child_opt = FUNASR_SERVER_CHILD.lock().unwrap().take();
     if let Some(child) = child_opt.as_mut() {
         let _ = child.kill().await;
-        crate::domain::stt::funasr::mark_server_stopped();
     }
+    drop(child_opt);
+
+    // 2. 检查端口是否仍被占（可能是孤儿进程）
+    let port = crate::app::stt_config::get_stt_config().local_engine.server_port;
+    if crate::domain::stt::funasr::is_server_ready(port) {
+        if let Some(pid) =
+            crate::infra::platform::process::kill_process_by_port(port)
+        {
+            tracing::warn!(pid, port, "停止服务时检测到孤儿进程，已清理");
+        }
+        // 等端口释放
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    crate::domain::stt::funasr::mark_server_stopped();
     tracing::info!("funasr-server 已停止");
     Ok(())
 }

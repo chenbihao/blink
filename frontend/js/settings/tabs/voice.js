@@ -792,6 +792,9 @@ async function initFunasrEnv(config) {
         appendLog(t("voice.local.diagnose.log_funasr", { status: env.funasr_installed ? "✅" : "❌", version: env.funasr_version || "" }));
         appendLog(t("voice.local.diagnose.log_server_running", { status: env.server_running ? "✅" : "❌", port: env.server_port }));
         appendLog(t("voice.local.diagnose.log_server_ready", { status: env.server_ready ? "✅" : "❌" }));
+        if (env.model_status) {
+          appendLog(t("voice.local.diagnose.log_model_status", { status: env.model_status }));
+        }
         if (env.websocket_ready !== undefined) {
           appendLog(t("voice.local.diagnose.log_websocket_ready", { status: env.websocket_ready ? "✅" : "❌", err: env.websocket_error ? "(" + env.websocket_error + ")" : "" }));
         }
