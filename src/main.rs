@@ -117,6 +117,10 @@ fn main() {
             tauri::async_runtime::block_on(infra::data::clipboard::init_db(&pool))
                 .expect("failed to init clipboard db");
 
+            // 初始化 AI 工具调用审计表（0.11.4 改进 2 §2.2.7）
+            tauri::async_runtime::block_on(infra::data::ai_audit::init_db(&pool))
+                .expect("failed to init ai_tool_audit db");
+
             // 初始化图标缓存持久化（0.7.4）
             tauri::async_runtime::block_on(domain::search::icon::init(&pool))
                 .expect("failed to init icon cache");
@@ -582,6 +586,7 @@ fn main() {
             app::commands::get_ai_secret_hint,
             app::commands::test_ai_provider,
             app::commands::fetch_ai_models,
+            app::commands::get_system_prompt_info,
             // 0.10 STT / 语音
             app::commands::get_stt_config,
             app::commands::set_stt_config,

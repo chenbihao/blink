@@ -14,7 +14,7 @@
  * **不发密钥回前端**：has_ai_secret 只返 bool
  */
 import { invoke, confirmDialog } from "../../tauri.js";
-import { t } from "../../i18n/index.js";
+import { t, onLangChange } from "../../i18n/index.js";
 import { saveConfig } from "../../config-keys.js";
 
 /** AI 提供商类型标签 */
@@ -47,6 +47,11 @@ let _editOriginalModelIds = [];       // 编辑模式：打开时已有的 model
  */
 export function initAITab() {
   loadAIConfig();
+  // 0.11.4 §3.5: 语言切换时刷新工具回流描述文字（动态文本不走 data-i18n）
+  onLangChange(() => {
+    const sel = document.getElementById("ai-tool-feedback");
+    if (sel) updateToolFeedbackDesc(sel.value);
+  });
 }
 
 /**
@@ -95,6 +100,7 @@ function defaultAIConfig() {
     direct_execute_safe_actions: false,
     streaming: true,
     slo_hard_timeout_ms: null,
+    ai_tool_result_feedback: "auto",
   };
 }
 
@@ -113,10 +119,48 @@ function applyAIConfigToUI() {
   if ($("ai-streaming")) $("ai-streaming").checked = c.streaming !== false;
   if ($("ai-direct-safe")) $("ai-direct-safe").checked = !!c.direct_execute_safe_actions;
   if ($("ai-timeout-ms")) $("ai-timeout-ms").value = c.slo_hard_timeout_ms ?? 2500;
+  // 0.11.4 §3.5: 工具结果回流 AI 三态选择器
+  const feedbackValue = c.ai_tool_result_feedback ?? "auto";
+  if ($("ai-tool-feedback")) $("ai-tool-feedback").value = feedbackValue;
+  updateToolFeedbackDesc(feedbackValue);
 
   renderAIProviders();
   renderAITierSelects();
   renderAITierBanner();
+  // 0.11.3 §3.8: 展示 system prompt token 数（高级信息）
+  loadSystemPromptInfo();
+}
+
+/**
+ * 加载并展示 system prompt token 信息（0.11.3 §3.8）
+ */
+async function loadSystemPromptInfo() {
+  const tokensEl = document.getElementById("ai-prompt-tokens");
+  const metaEl = document.getElementById("ai-prompt-meta");
+  if (!tokensEl || !metaEl) return;
+
+  try {
+    const info = await invoke("get_system_prompt_info");
+    const tokens = info.tokens ?? 0;
+    const threshold = info.threshold ?? 1500;
+    const toolsCount = info.tools_count ?? 0;
+
+    tokensEl.textContent = `${tokens} / ${threshold}`;
+    // 超阈值红色警告，接近阈值（80%）橙色，正常灰色
+    if (tokens > threshold) {
+      tokensEl.className = "ai-prompt-tokens ai-prompt-tokens--over";
+    } else if (tokens > threshold * 0.8) {
+      tokensEl.className = "ai-prompt-tokens ai-prompt-tokens--warn";
+    } else {
+      tokensEl.className = "ai-prompt-tokens";
+    }
+    metaEl.textContent = `· ${toolsCount} 个工具`;
+  } catch (e) {
+    tokensEl.textContent = "—";
+    tokensEl.className = "ai-prompt-tokens";
+    metaEl.textContent = "";
+    console.warn("[ai] get_system_prompt_info failed:", e);
+  }
 }
 
 /**
@@ -901,6 +945,16 @@ function renderAITierBanner() {
     : "⚠️ " + t("ai.tier.degrade_to", { tier: t("ai.tier.main") });
 }
 
+/**
+ * 更新工具结果回流 AI 的描述文字（根据当前选择值切换）
+ */
+function updateToolFeedbackDesc(value) {
+  const descEl = document.getElementById("ai-tool-feedback-desc");
+  if (!descEl) return;
+  const key = `ai.advanced.tool_feedback.desc.${value || "auto"}`;
+  descEl.textContent = t(key);
+}
+
 // ── AI 事件绑定（幂等）──────────────────────────────────────────────────────
 
 function bindAIEvents() {
@@ -943,6 +997,13 @@ function bindAIEvents() {
   });
   $("ai-direct-safe")?.addEventListener("change", (e) => {
     currentAIConfig.direct_execute_safe_actions = e.target.checked;
+    saveAIConfig();
+  });
+  // 0.11.4 §3.5: 工具结果回流 AI 三态选择器
+  $("ai-tool-feedback")?.addEventListener("change", (e) => {
+    const val = e.target.value;
+    currentAIConfig.ai_tool_result_feedback = val;
+    updateToolFeedbackDesc(val);
     saveAIConfig();
   });
   $("ai-timeout-ms")?.addEventListener("change", (e) => {

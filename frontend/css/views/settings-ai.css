@@ -949,3 +949,27 @@
 .ai-model-add-only {
   /* 新增模式隐藏的段：通过 JS 切换 display */
 }
+
+/* ── System Prompt Token 信息（0.11.3 §3.8）────────────────────────── */
+.ai-prompt-info-display {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-sm, 13px);
+}
+.ai-prompt-tokens {
+  font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+  font-weight: var(--weight-medium, 500);
+  color: var(--text-secondary, #666);
+}
+.ai-prompt-tokens--warn {
+  color: var(--amber, #d97706);
+}
+.ai-prompt-tokens--over {
+  color: var(--red, #dc2626);
+  font-weight: var(--weight-semibold, 600);
+}
+.ai-prompt-meta {
+  color: var(--text-tertiary, #999);
+  font-size: var(--text-xs, 12px);
+}

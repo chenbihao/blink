@@ -96,6 +96,18 @@ pub struct AIConfig {
     /// 单次路由调用硬超时(毫秒)。`None` → 用 default 20000ms。
     #[serde(default)]
     pub slo_hard_timeout_ms: Option<u32>,
+
+    // ── 0.11.4 改进 2:结果回流 AI(Tool Chain + 三态配置) ────────────────
+    /// AI 工具结果回流开关（§2.2.2 三态配置 D2）。
+    ///
+    /// - `Auto`（默认）: 本地模型开 + 云端模型关。0.11 阶段所有 provider 都是云端，
+    ///   实际等同 `Off`；0.12 本地模型（Ollama / Mistral.rs）上线后 `Auto` 对它们自动开启。
+    /// - `On`: 始终开启 Turn 2 回流（总结工具结果 / 链式调 safe tool）。
+    /// - `Off`: 始终关闭（单轮直通，快，省 token）。
+    ///
+    /// 详见 `should_run_tool_feedback`。
+    #[serde(default)]
+    pub ai_tool_result_feedback: ToolResultFeedback,
 }
 
 impl Default for AIConfig {
@@ -115,6 +127,7 @@ impl Default for AIConfig {
             direct_execute_safe_actions: false,
             streaming: true,
             slo_hard_timeout_ms: None,
+            ai_tool_result_feedback: ToolResultFeedback::default(),
         }
     }
 }
@@ -194,6 +207,72 @@ pub enum ProviderKind {
     /// Google Gemini GenerateContent 协议——`/v1beta/models/*:generateContent`,仅 Gemini。
     #[serde(rename = "gemini_generate_content")]
     GeminiGenerateContent,
+}
+
+impl ProviderKind {
+    /// 是否为本地推理 provider（0.11.4 改进 2 §2.2.2 三态配置用）。
+    ///
+    /// 0.11 阶段所有 provider 都是云端（OpenAI / Anthropic / Gemini），返回 false。
+    /// 0.12 本地模型（Ollama / Mistral.rs / llama.cpp）上线后，新增变体覆盖此方法
+    /// 返回 true——`ToolResultFeedback::Auto` 对本地模型自动开启 Turn 2 回流。
+    ///
+    /// **穷尽性保证**：match 不加通配符，0.12 新增变体时编译器强制开发者思考是否本地。
+    pub fn is_local(self) -> bool {
+        match self {
+            ProviderKind::OpenAICompatible
+            | ProviderKind::AnthropicMessages
+            | ProviderKind::GeminiGenerateContent => false,
+        }
+    }
+
+    /// 获取 serde 序列化后的字符串（与 serde rename 对齐）。
+    ///
+    /// 用于审计日志存储 `provider_kind` 字段——保证与 JSON 序列化一致。
+    pub fn as_serde_str(self) -> &'static str {
+        match self {
+            ProviderKind::OpenAICompatible => "openai_compatible",
+            ProviderKind::AnthropicMessages => "anthropic_messages",
+            ProviderKind::GeminiGenerateContent => "gemini_generate_content",
+        }
+    }
+}
+
+/// AI 工具结果回流开关（0.11.4 改进 2 §2.2.2 三态配置 D2）。
+///
+/// 控制 `handle_ai_tool_calls` 在 Turn 1 执行工具后是否进入 Turn 2 回流：
+/// - `Auto`（默认）：本地模型开 + 云端模型关——本地零成本适合 Turn 2，云端省 token
+/// - `On`：始终开启（用户显式想要 AI 总结工具结果 / 链式调 safe tool）
+/// - `Off`：始终关闭（单轮直通，最快）
+///
+/// 序列化为小写字符串，与前端 select option 对齐。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolResultFeedback {
+    /// 本地模型开 + 云端模型关（默认）。
+    ///
+    /// 0.11 阶段所有 provider 都是云端，实际等同 `Off`；
+    /// 0.12 本地模型上线后对它们自动开启。
+    #[default]
+    Auto,
+    /// 始终开启 Turn 2 回流。
+    On,
+    /// 始终关闭 Turn 2 回流（单轮直通）。
+    Off,
+}
+
+impl ToolResultFeedback {
+    /// 根据当前 provider kind 判断是否实际运行 Turn 2 回流。
+    ///
+    /// - `On` → 始终 true
+    /// - `Off` → 始终 false
+    /// - `Auto` → `provider_kind.is_local()`（本地开 / 云端关）
+    pub fn should_run(self, provider_kind: ProviderKind) -> bool {
+        match self {
+            ToolResultFeedback::On => true,
+            ToolResultFeedback::Off => false,
+            ToolResultFeedback::Auto => provider_kind.is_local(),
+        }
+    }
 }
 
 /// 一个模型的元数据 + 调用参数默认值。
@@ -744,6 +823,7 @@ mod tests {
             direct_execute_safe_actions: true,
             streaming: false,
             slo_hard_timeout_ms: Some(3000),
+            ai_tool_result_feedback: ToolResultFeedback::On,
         };
         let s = serde_json::to_string(&original).unwrap();
         let restored: AIConfig = serde_json::from_str(&s).unwrap();
@@ -761,5 +841,102 @@ mod tests {
         );
         assert_eq!(restored.streaming, original.streaming);
         assert_eq!(restored.slo_hard_timeout_ms, Some(3000));
+        assert_eq!(
+            restored.ai_tool_result_feedback,
+            ToolResultFeedback::On,
+            "0.11.4: 回流开关 round-trip"
+        );
+    }
+
+    // ── 0.11.4 改进 2:ToolResultFeedback 三态配置 ────────────────────────
+
+    #[test]
+    fn tool_result_feedback_default_is_auto() {
+        assert_eq!(ToolResultFeedback::default(), ToolResultFeedback::Auto);
+        // AIConfig 默认值也应是 Auto
+        assert_eq!(
+            AIConfig::default().ai_tool_result_feedback,
+            ToolResultFeedback::Auto
+        );
+    }
+
+    #[test]
+    fn tool_result_feedback_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&ToolResultFeedback::Auto).unwrap(),
+            "\"auto\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ToolResultFeedback::On).unwrap(),
+            "\"on\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ToolResultFeedback::Off).unwrap(),
+            "\"off\""
+        );
+    }
+
+    #[test]
+    fn tool_result_feedback_deserializes_lowercase() {
+        assert_eq!(
+            serde_json::from_str::<ToolResultFeedback>("\"auto\"").unwrap(),
+            ToolResultFeedback::Auto
+        );
+        assert_eq!(
+            serde_json::from_str::<ToolResultFeedback>("\"on\"").unwrap(),
+            ToolResultFeedback::On
+        );
+        assert_eq!(
+            serde_json::from_str::<ToolResultFeedback>("\"off\"").unwrap(),
+            ToolResultFeedback::Off
+        );
+    }
+
+    #[test]
+    fn tool_result_feedback_legacy_config_defaults_to_auto() {
+        // 老配置没有 ai_tool_result_feedback 字段 → serde default 填 Auto
+        let json = r#"{"enabled": false}"#;
+        let c: AIConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(c.ai_tool_result_feedback, ToolResultFeedback::Auto);
+    }
+
+    #[test]
+    fn provider_kind_is_local_returns_false_for_all_cloud_variants() {
+        // 0.11 阶段所有 provider 都是云端
+        assert!(!ProviderKind::OpenAICompatible.is_local());
+        assert!(!ProviderKind::AnthropicMessages.is_local());
+        assert!(!ProviderKind::GeminiGenerateContent.is_local());
+    }
+
+    #[test]
+    fn provider_kind_as_serde_str_matches_serde_rename() {
+        // 与 serde rename 对齐
+        assert_eq!(ProviderKind::OpenAICompatible.as_serde_str(), "openai_compatible");
+        assert_eq!(ProviderKind::AnthropicMessages.as_serde_str(), "anthropic_messages");
+        assert_eq!(ProviderKind::GeminiGenerateContent.as_serde_str(), "gemini_generate_content");
+    }
+
+    #[test]
+    fn should_run_tool_feedback_on_always_true() {
+        // On → 无论云端本地都开
+        assert!(ToolResultFeedback::On.should_run(ProviderKind::OpenAICompatible));
+        assert!(ToolResultFeedback::On.should_run(ProviderKind::AnthropicMessages));
+    }
+
+    #[test]
+    fn should_run_tool_feedback_off_always_false() {
+        // Off → 无论云端本地都关
+        assert!(!ToolResultFeedback::Off.should_run(ProviderKind::OpenAICompatible));
+        assert!(!ToolResultFeedback::Off.should_run(ProviderKind::AnthropicMessages));
+    }
+
+    #[test]
+    fn should_run_tool_feedback_auto_follows_provider_locality() {
+        // Auto → 云端关（0.11 阶段所有 provider）
+        assert!(!ToolResultFeedback::Auto.should_run(ProviderKind::OpenAICompatible));
+        assert!(!ToolResultFeedback::Auto.should_run(ProviderKind::AnthropicMessages));
+        assert!(!ToolResultFeedback::Auto.should_run(ProviderKind::GeminiGenerateContent));
+        // 0.12 本地模型上线后，新增变体覆盖 is_local() 返回 true，
+        // Auto 对它们自动开启——此测试在那时会被新变体补充。
     }
 }

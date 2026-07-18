@@ -17,6 +17,7 @@
 pub mod factory;
 pub mod gating;
 pub mod message;
+pub mod prompt;
 pub mod provider;
 pub mod registry;
 pub mod rig_provider;

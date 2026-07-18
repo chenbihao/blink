@@ -53,13 +53,20 @@ pub struct PluginManifest {
 
 /// 插件声明的 tool 定义(0.9.3)——对齐 `ActionSchema` + `DangerClass`。
 ///
+/// **0.11.1 改进 3a**：新增 5 个元信息字段（`result_type` / `hint` / `examples` /
+/// `sensitive` / `progress_hint`）+ `setting_bindings`（3b 参数动态注入用）。
+/// 全部 serde default，老 manifest 零迁移。
+///
 /// manifest 示例:
 /// ```jsonc
 /// "tools": [{
 ///   "name": "translate",
 ///   "description": "翻译文本到目标语言",
 ///   "parameters": { "type": "object", "properties": { "text": { "type": "string" } } },
-///   "danger_class": "Safe"
+///   "danger_class": "Safe",
+///   "result_type": "text",
+///   "progress_hint": "翻译文本",
+///   "setting_bindings": { "target_lang": "target_lang" }
 /// }]
 /// ```
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -75,6 +82,75 @@ pub struct ToolDef {
     /// 危险等级——Safe 可直接执行，Dangerous 需人机确认。默认 Safe。
     #[serde(default)]
     pub danger_class: DangerClassDef,
+
+    // ── 0.11.1 改进 3a：工具元信息增强 ──────────────────────────────────────
+    /// 返回类型声明（0.11.1 §2.3a）——帮 AI 预期结果形态 + 帮 lane 选投影路径。
+    /// 缺失（老插件）为 None，消费方按现有行为兜底（插件走 Items 投影）。
+    #[serde(default)]
+    pub result_type: Option<ToolResultType>,
+    /// 给 AI 的额外提示（0.11.1 §2.3a）——自动拼入 system prompt 工具描述段。
+    /// 插件作者一句话告诉 AI 这个工具的用法窍门，如"返回多个 IP，公网 IP 通常最有价值"。
+    #[serde(default)]
+    pub hint: Option<String>,
+    /// 示例调用（0.11.1 §2.3a）——帮弱模型理解参数用法。
+    /// 0.11 默认不拼入 system prompt（省 token），0.12 本地模型模式注入。
+    #[serde(default)]
+    pub examples: Option<Vec<serde_json::Value>>,
+    /// 声明敏感（0.11.1 §2.3a）——读隐私数据（应用列表/剪贴板历史等）。
+    /// 0.11 不做权限强制，0.12 MCP server 暴露时需用户显式授权。default false。
+    #[serde(default)]
+    pub sensitive: bool,
+    /// 占位文案提示词（0.11.1 §2.3a / §3.2）——拼成 `AI 正在{progress_hint}…`。
+    /// 缺失时回退到 description 前 8 字 + `…`。3 个 builtin 插件均填此字段。
+    #[serde(default)]
+    pub progress_hint: Option<String>,
+    /// 参数→插件 setting 的绑定映射（0.11.1 §2.3b 参数动态注入配置用）。
+    ///
+    /// key = parameters 中的参数名，value = settings 中的 setting key。
+    /// 投影时若对应 setting 已配置（非空），则：
+    /// - 从 `required` 移除该参数（required → optional）
+    /// - 注入 `"default": <setting_value>`
+    /// - description 自动追加"（默认: {value}）"
+    ///
+    /// **投影层改动**：不动 manifest 的 `parameters` 原文，只在 `build_aggregated_tools`
+    /// 时通过 `inject_plugin_settings` 生成新的 ActionSchema。运行时 setting 变更
+    /// 下次构建 tools 时自动生效（每次 AI 请求都重建）。
+    #[serde(default)]
+    pub setting_bindings: Option<std::collections::HashMap<String, String>>,
+}
+
+/// 工具返回类型声明（0.11.1 §2.3a）。
+///
+/// 帮 AI 预期结果形态 + 帮 lane 选投影路径。serde `lowercase`，
+/// 与 manifest 的 `"result_type": "text"` 字符串对齐。
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolResultType {
+    /// 单文本结果（如 translate 译文）。
+    Text,
+    /// 结构化列表（如 get_ip 返回多个 IP、search_apps 返回应用列表）。
+    Items,
+    /// 仅执行完成无数据返回（如 lock 锁屏）。
+    Done,
+}
+
+/// `ToolDef` 的 Default——仅供测试构造便利（`..Default::default()`）。
+/// 实际解析走 serde，name 缺失会由 `from_path` 的 JSON 结构保证必填。
+impl Default for ToolDef {
+    fn default() -> Self {
+        ToolDef {
+            name: String::new(),
+            description: String::new(),
+            parameters: default_empty_object_schema(),
+            danger_class: DangerClassDef::default(),
+            result_type: None,
+            hint: None,
+            examples: None,
+            sensitive: false,
+            progress_hint: None,
+            setting_bindings: None,
+        }
+    }
 }
 
 /// manifest 侧 danger_class 声明——映射到 `domain::execution::DangerClass`。
@@ -925,5 +1001,135 @@ mod tests {
         assert_eq!(m.tools.len(), 2);
         assert_eq!(m.tools[0].name, "translate");
         assert_eq!(m.tools[1].name, "detect_lang");
+    }
+
+    // ── 0.11.1 改进 3a：工具元信息新字段 ──────────────────────────────────
+
+    #[test]
+    fn tools_new_fields_default_when_missing() {
+        // 老 manifest 无新字段 → 全部 default（None / false），向后兼容
+        let json = r#"{
+            "schema_version": 1, "id": "x", "name": "X", "version": "0",
+            "runtime": {"exec": "x.exe"},
+            "tools": [{ "name": "foo", "description": "bar", "danger_class": "Safe" }]
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        let t = &m.tools[0];
+        assert!(t.result_type.is_none());
+        assert!(t.hint.is_none());
+        assert!(t.examples.is_none());
+        assert!(!t.sensitive);
+        assert!(t.progress_hint.is_none());
+        assert!(t.setting_bindings.is_none());
+    }
+
+    #[test]
+    fn tools_result_type_parses_text_items_done() {
+        for (json_val, expected) in [
+            ("\"text\"", ToolResultType::Text),
+            ("\"items\"", ToolResultType::Items),
+            ("\"done\"", ToolResultType::Done),
+        ] {
+            let json = format!(
+                r#"{{"schema_version":1,"id":"x","name":"X","version":"0",
+                "runtime":{{"exec":"x.exe"}},
+                "tools":[{{"name":"t","result_type":{json_val}}}]}}"#
+            );
+            let m: PluginManifest = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                m.tools[0].result_type,
+                Some(expected),
+                "result_type {json_val} 应解析为 {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tools_progress_hint_and_hint_parse() {
+        let json = r#"{
+            "schema_version": 1, "id": "x", "name": "X", "version": "0",
+            "runtime": {"exec": "x.exe"},
+            "tools": [{
+                "name": "get_weather",
+                "description": "查天气",
+                "progress_hint": "查询天气",
+                "hint": "返回结构化数据"
+            }]
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.tools[0].progress_hint.as_deref(), Some("查询天气"));
+        assert_eq!(m.tools[0].hint.as_deref(), Some("返回结构化数据"));
+    }
+
+    #[test]
+    fn tools_sensitive_defaults_false_parses_true() {
+        let json = r#"{
+            "schema_version": 1, "id": "x", "name": "X", "version": "0",
+            "runtime": {"exec": "x.exe"},
+            "tools": [{ "name": "search_apps", "sensitive": true }]
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(m.tools[0].sensitive);
+    }
+
+    #[test]
+    fn tools_examples_parse_array() {
+        let json = r#"{
+            "schema_version": 1, "id": "x", "name": "X", "version": "0",
+            "runtime": {"exec": "x.exe"},
+            "tools": [{
+                "name": "get_weather",
+                "examples": [{"city": "北京"}, {"city": "Tokyo"}]
+            }]
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        let examples = m.tools[0].examples.as_ref().unwrap();
+        assert_eq!(examples.len(), 2);
+        assert_eq!(examples[0]["city"], "北京");
+    }
+
+    #[test]
+    fn tools_setting_bindings_parse_map() {
+        let json = r#"{
+            "schema_version": 1, "id": "x", "name": "X", "version": "0",
+            "runtime": {"exec": "x.exe"},
+            "tools": [{
+                "name": "get_weather",
+                "setting_bindings": {"city": "default_city", "unit": "temperature_unit"}
+            }]
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        let bindings = m.tools[0].setting_bindings.as_ref().unwrap();
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(bindings.get("city").unwrap(), "default_city");
+        assert_eq!(bindings.get("unit").unwrap(), "temperature_unit");
+    }
+
+    #[test]
+    fn tools_new_fields_serialize_roundtrip() {
+        // 新字段 round-trip 稳定——translate manifest 已含 result_type=text。
+        // PluginManifest 只 Deserialize，但 ToolDef 有 Serialize derive，
+        // 对 ToolDef 做 round-trip 验证新字段序列化稳定。
+        let json = r#"{
+            "schema_version": 1, "id": "x", "name": "X", "version": "0",
+            "runtime": {"exec": "x.exe"},
+            "tools": [{
+                "name": "translate",
+                "description": "翻译",
+                "danger_class": "Safe",
+                "result_type": "text",
+                "progress_hint": "翻译文本",
+                "setting_bindings": {"target_lang": "target_lang"}
+            }]
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        let s = serde_json::to_string(&m.tools[0]).unwrap();
+        let t2: ToolDef = serde_json::from_str(&s).unwrap();
+        assert_eq!(t2.result_type, Some(ToolResultType::Text));
+        assert_eq!(t2.progress_hint.as_deref(), Some("翻译文本"));
+        assert_eq!(
+            t2.setting_bindings.as_ref().unwrap().get("target_lang"),
+            Some(&"target_lang".to_string())
+        );
     }
 }

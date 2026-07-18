@@ -173,6 +173,7 @@ mod tests {
             description: "翻译文本".into(),
             parameters: serde_json::json!({ "type": "object", "properties": {} }),
             danger_class: DangerClassDef::Safe,
+            ..Default::default()
         };
         // 验证 schema 映射正确——id 带插件前缀
         let schema = ActionSchema {

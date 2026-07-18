@@ -30,7 +30,10 @@
           }
         }
       },
-      "danger_class": "Safe"
+      "danger_class": "Safe",
+      "result_type": "items",
+      "hint": "返回多个 IP（本地 IPv4/IPv6 + 公网 IP），公网 IP 通常最有价值",
+      "progress_hint": "获取 IP"
     }
   ],
   "settings_schema": [

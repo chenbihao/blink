@@ -1294,6 +1294,61 @@ async fn fetch_anthropic_models(
     }
 }
 
+/// 获取当前 AI system prompt 信息（0.11.3 §3.8 token 监控）。
+///
+/// 构建与 AI lane 相同的 tools 列表 + system prompt，返回 token 数 / 工具数 / 预览。
+/// 设置页 AI tab（高级）展示此信息，让用户感知 prompt 体积。
+#[tauri::command]
+pub async fn get_system_prompt_info(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    use crate::domain::ai::prompt::{build_prompt_infos, estimate_tokens, routing_system_prompt};
+    use crate::domain::capability::CapabilityRegistry;
+    use crate::domain::execution::group::{build_aggregated_tools, inject_plugin_settings};
+    use crate::domain::plugin::PluginEngine;
+    use std::sync::Arc;
+    use tauri::Manager;
+
+    let action_reg = app.state::<Arc<crate::domain::execution::ActionRegistry>>();
+    let cap_reg = app.state::<Arc<CapabilityRegistry>>();
+    let plugin_engine = app.state::<Arc<PluginEngine>>();
+
+    // 构建 tools 列表（与 service.rs AI lane 同逻辑）
+    let mut tools = build_aggregated_tools(&action_reg, &cap_reg);
+
+    // 参数动态注入 + hints 收集
+    let mut plugin_hints: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for ph in plugin_engine.all_plugins() {
+        let manifest = ph.manifest();
+        for td in &manifest.tools {
+            let id = format!("{}:{}", manifest.id, td.name);
+            if let Some(bindings) = &td.setting_bindings {
+                if let Some(pos) = tools.iter().position(|s| s.name == id) {
+                    let settings = plugin_engine.get_settings(&manifest.id);
+                    tools[pos] = inject_plugin_settings(tools[pos].clone(), settings.as_ref(), bindings);
+                }
+            }
+            if let Some(hint) = &td.hint {
+                plugin_hints.insert(id, hint.clone());
+            }
+        }
+    }
+
+    let tools_count = tools.len();
+    let prompt_infos = build_prompt_infos(tools, &plugin_hints);
+    // lang 不影响 prompt 内容（0.x 用中文），传 "zh"
+    let prompt = routing_system_prompt(&prompt_infos, "zh");
+    let tokens = estimate_tokens(&prompt);
+
+    // 预览：前 200 字符（设置页展示用）
+    let preview: String = prompt.chars().take(200).collect();
+
+    Ok(serde_json::json!({
+        "tokens": tokens,
+        "tools_count": tools_count,
+        "preview": preview,
+        "threshold": 1500,
+    }))
+}
+
 /// 测试 AI 供应商连通性(0.9.4)。
 ///
 /// 用 `reqwest` 直接发一个最小请求验证 Key + URL 是否可用。
