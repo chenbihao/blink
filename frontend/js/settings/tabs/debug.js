@@ -6,8 +6,13 @@
  */
 import { invoke, confirmDialog } from "../../tauri.js";
 import { saveConfig } from "../../config-keys.js";
-import { t } from "../../i18n/index.js";
+import { t, onLangChange } from "../../i18n/index.js";
 import { getCurrentConfig } from "../shared/state.js";
+
+/** 缓存性能统计概览，语言切换时用它重渲染（避免重新 IPC 探测） */
+let _cachedOverview = null;
+/** 防止重复注册 onLangChange */
+let _langChangeRegistered = false;
 
 /**
  * 初始化调试设置 Tab
@@ -15,6 +20,14 @@ import { getCurrentConfig } from "../shared/state.js";
 export function initDebugTab() {
   initLogSettings();
   initPerfStats();
+
+  // 语言切换时用缓存数据重渲染性能统计（no_data / unit.ms / stats 等带参数文案）
+  if (!_langChangeRegistered) {
+    _langChangeRegistered = true;
+    onLangChange(() => {
+      if (_cachedOverview) renderPerfStats(_cachedOverview);
+    });
+  }
 }
 
 // ── 日志 ────────────────────────────────────────────────────────────────────
@@ -87,6 +100,7 @@ function initPerfStats() {
 async function loadPerfStats() {
   try {
     const overview = await invoke("get_perf_overview");
+    _cachedOverview = overview;
     renderPerfStats(overview);
   } catch (e) {
     console.error("loadPerfStats failed:", e);

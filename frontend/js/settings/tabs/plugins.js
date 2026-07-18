@@ -7,7 +7,7 @@
  * get_plugins + plugins-container + 整套 schema/触发词/拖拽）。
  */
 import { invoke } from "../../tauri.js";
-import { t } from "../../i18n/index.js";
+import { t, onLangChange } from "../../i18n/index.js";
 import { saveConfig } from "../../config-keys.js";
 import { clearUnsaved, markUnsaved } from "../shared/ui.js";
 
@@ -36,6 +36,9 @@ const PLUGIN_ICONS = {
   "builtin.weather": "🌤️",
 };
 
+/** 防止重复注册 onLangChange */
+let _langChangeRegistered = false;
+
 /**
  * 初始化插件 Tab
  */
@@ -44,6 +47,15 @@ export function initPluginsTab() {
   loadPlugins();
   initNumberSpinner();
   initExternalLinkDelegate();
+
+  // 语言切换时重新渲染（toggle 状态已自动保存；插件配置需重新加载）
+  if (!_langChangeRegistered) {
+    _langChangeRegistered = true;
+    onLangChange(() => {
+      loadBuiltinActions();
+      loadPlugins();
+    });
+  }
 }
 
 // ── 内置动作列表 ──────────────────────────────────────────────────────────────

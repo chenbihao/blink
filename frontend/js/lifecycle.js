@@ -8,7 +8,7 @@ import * as chord from "./chord.js";
 import * as ghost from "./ghost.js";
 import { clearAlt, startAltPoll, stopAltPoll, recheckAlt } from "./keyboard.js";
 import { applyThemeFromConfig, applyGlassOpacityFromConfig } from "./theme.js";
-import { applyI18nFromConfig } from "./i18n/index.js";
+import { applyI18nFromConfig, t } from "./i18n/index.js";
 
 /** 注册生命周期事件监听。 */
 export function init() {
@@ -172,7 +172,7 @@ export function init() {
       // 恢复语音指示器标签默认文案 + 清除加载态
       voiceIndicator.querySelector(".voice-wave")?.classList.remove("voice-loading");
       const label = voiceIndicator.querySelector(".voice-label");
-      if (label) label.textContent = "语音输入中";
+      if (label) label.textContent = t("voice.indicator.recording");
     }
   });
 

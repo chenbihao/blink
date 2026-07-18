@@ -69,6 +69,12 @@ const ATTRS = [
 /**
  * 遍历 DOM 中打了 i18n 标记的元素，按当前语言批量覆盖文本/属性。
  * 带插值的动态文本（如计数、翻页）不能用此法，须调用方自行 t() 重算。
+ *
+ * - `data-i18n` / `data-i18n-ph` / `data-i18n-title` / `data-i18n-aria-label`：
+ *   纯文本覆盖（textContent / placeholder / title / ariaLabel）。
+ * - `data-i18n-html`：翻译串可含受信任的 HTML（如 <code>/<strong>，来自本地字典而非用户输入），
+ *   走 innerHTML 渲染。仅用于静态说明文案；动态用户内容绝不走此属性。
+ *
  * @param {string} [lang] 不传则用 currentLang（传入时也会 setLang）
  */
 export function applyI18n(lang) {
@@ -89,6 +95,10 @@ export function applyI18n(lang) {
       }
     });
   }
+  // data-i18n-html：翻译串可含受信任 HTML，走 innerHTML
+  document.querySelectorAll("[data-i18n-html]").forEach((el) => {
+    el.innerHTML = t(el.getAttribute("data-i18n-html"));
+  });
   // 静态文本刷完后，通知动态文本（状态徽章等 JS 设的 textContent）自行刷新
   for (const cb of langChangeCallbacks) {
     try {

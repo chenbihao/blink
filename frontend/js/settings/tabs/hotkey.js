@@ -4,7 +4,7 @@
  */
 
 import { invoke } from "../../tauri.js";
-import { t } from "../../i18n/index.js";
+import { t, onLangChange } from "../../i18n/index.js";
 import { renderKey } from "../../kbd.js";
 import { saveConfig } from "../../config-keys.js";
 import { getCurrentConfig } from "../shared/state.js";
@@ -18,6 +18,20 @@ export function initHotkeyTab(cfg) {
   applyHotkeyConfig(cfg);
   initHotkeyRecording();
   initSliders();
+
+  // 语言切换时刷新滑块值标签（带参数的 {value}ms 无法用 data-i18n 处理）
+  onLangChange(() => {
+    const tapSlider = document.getElementById("tap-threshold");
+    const tapValue = document.getElementById("tap-threshold-value");
+    if (tapSlider && tapValue) {
+      tapValue.textContent = t("hotkey.unit.ms", { value: tapSlider.value });
+    }
+    const graceSlider = document.getElementById("grace-ms");
+    const graceValue = document.getElementById("grace-ms-value");
+    if (graceSlider && graceValue) {
+      graceValue.textContent = t("hotkey.unit.ms", { value: graceSlider.value });
+    }
+  });
 }
 
 /**

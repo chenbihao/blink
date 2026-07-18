@@ -447,13 +447,8 @@ impl VoiceService {
                         platform::window::restore_foreground(hwnd);
                         std::thread::sleep(std::time::Duration::from_millis(50));
                     }
-                    match platform::inject::inject_text(&final_text) {
-                        Ok(()) => {
-                            // tracing::info!("G2: 文字已注入前台应用");
-                        }
-                        Err(e) => {
-                            tracing::error!(%e, "G2: 文本注入失败");
-                        }
+                    if let Err(e) = platform::inject::inject_text(&final_text) {
+                        tracing::error!(%e, "G2: 文本注入失败");
                     }
                     // 注入完成后隐藏 overlay + emit end
                     platform::window::hide_voice_overlay(&app);

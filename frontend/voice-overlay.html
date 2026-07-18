@@ -18,14 +18,19 @@
         <div class="vw-bar"></div>
       </div>
       <div class="text" id="partial-text">语音输入中…</div>
-      <div class="hint">松开结束 · ESC 取消</div>
+      <div class="hint" data-i18n="voice.overlay.hint">松开结束 · ESC 取消</div>
     </div>
     <script type="module">
       import { listen, invoke } from "./js/tauri.js";
+      import { t, applyI18nFromConfig, onLangChange } from "./js/i18n/index.js";
 
       const textEl = document.getElementById("partial-text");
       const waveEl = document.getElementById("wave");
       const bars = waveEl.querySelectorAll(".vw-bar");
+
+      // textEl 当前是否显示默认文案（非 partial / status / error 文本）
+      // 用于语言切换时判断是否需要更新默认文案
+      let isDefaultText = true;
 
       // ── 自动撑高（0.10.6）─────────────────────────────────────────────
       // 文本更新后测量内容高度，调用 Rust 侧 resize_voice_overlay 撑高窗口。
@@ -47,6 +52,16 @@
           }
         });
       }
+
+      // 初始化 i18n（设置 data-i18n 元素文本 + 触发 onLangChange 回调）
+      applyI18nFromConfig().then(() => {
+        if (isDefaultText) textEl.textContent = t("voice.overlay.recording");
+      });
+
+      // 语言切换时更新默认文案（仅在显示默认文案时）
+      onLangChange(() => {
+        if (isDefaultText) textEl.textContent = t("voice.overlay.recording");
+      });
 
       // 监听音量级别 → 驱动波形条高度
       listen("blink://voice-level", (event) => {
@@ -79,18 +94,21 @@
               '<span class="voice-preview"></span>';
             textEl.querySelector(".voice-confirmed").textContent = confirmed;
             textEl.querySelector(".voice-preview").textContent = preview;
+            isDefaultText = false;
             autoResize();
           }
         } else if (payload.text) {
           // 兼容旧格式（真流式 / 非流式引擎）
           textEl.textContent = payload.text;
+          isDefaultText = false;
           autoResize();
         }
       });
 
       // 录音结束 → 重置
       listen("blink://voice-recording-end", () => {
-        textEl.textContent = "语音输入中…";
+        textEl.textContent = t("voice.overlay.recording");
+        isDefaultText = true;
         bars.forEach((bar) => (bar.style.height = "4px"));
         waveEl.classList.remove("voice-loading");
         autoResize();
@@ -100,7 +118,8 @@
       listen("blink://voice-recording-start", (event) => {
         const { target } = event.payload ?? {};
         if (target !== "g2") return;
-        textEl.textContent = "语音输入中…";
+        textEl.textContent = t("voice.overlay.recording");
+        isDefaultText = true;
         // 录音开始：波形切回绿色（移除加载态蓝色）
         waveEl.classList.remove("voice-loading");
         autoResize();
@@ -111,6 +130,7 @@
         const { message, target } = event.payload ?? {};
         if (target !== "g2" || !message) return;
         textEl.textContent = message;
+        isDefaultText = false;
         // 模型加载中：波形转蓝色（录音开始后切回绿色）
         waveEl.classList.add("voice-loading");
         autoResize();
@@ -121,6 +141,7 @@
         const { message, target } = event.payload ?? {};
         if (target !== "g2" || !message) return;
         textEl.textContent = message;
+        isDefaultText = false;
         autoResize();
       });
     </script>

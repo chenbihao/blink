@@ -4,7 +4,7 @@
  */
 
 import { invoke } from "../../tauri.js";
-import { t } from "../../i18n/index.js";
+import { t, onLangChange } from "../../i18n/index.js";
 import { saveConfig } from "../../config-keys.js";
 import { clearUnsaved, markUnsaved } from "../shared/ui.js";
 
@@ -35,6 +35,23 @@ async function loadNetworkConfig() {
 
   container.innerHTML = renderNetworkCard(proxyConfig);
   bindNetworkEvents(container);
+
+  // 语言切换时重新渲染（保留未保存的输入值，避免用户正在编辑时丢失）
+  onLangChange(() => {
+    const el = document.getElementById("network-container");
+    if (!el) return;
+    const httpInput = el.querySelector('.plugin-field[data-key="http_proxy"]');
+    const httpsInput = el.querySelector('.plugin-field[data-key="https_proxy"]');
+    const http = httpInput?.value ?? proxyConfig.http;
+    const https = httpsInput?.value ?? proxyConfig.https;
+    const renderCfg = { http, https };
+    el.innerHTML = renderNetworkCard(renderCfg);
+    bindNetworkEvents(el);
+    // 如果输入值与已保存值不同，标记 unsaved 徽章
+    if (http !== proxyConfig.http || https !== proxyConfig.https) {
+      markUnsaved(el);
+    }
+  });
 }
 
 /**

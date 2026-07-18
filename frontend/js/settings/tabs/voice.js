@@ -8,6 +8,7 @@
  * - 模型：FunASR 自动管理（首次启动时从 ModelScope 自动下载）
  */
 import { invoke, listen } from "../../tauri.js";
+import { t, onLangChange, getLang } from "../../i18n/index.js";
 
 /**
  * 保存 STT 配置。
@@ -82,13 +83,15 @@ export async function initVoiceTab() {
       const defaultDev = devices.find((d) => d.is_default);
       const defaultOption = deviceSelect.querySelector('option[value=""]');
       if (defaultOption && defaultDev) {
-        defaultOption.textContent = `系统默认（${defaultDev.name}）`;
+        defaultOption.textContent = t("voice.audio_device.default_with_name", { name: defaultDev.name });
+      } else if (defaultOption) {
+        defaultOption.textContent = t("voice.audio_device.default");
       }
 
       for (const dev of devices) {
         const opt = document.createElement("option");
         opt.value = dev.id;
-        opt.textContent = dev.name || `设备 ${dev.id}`;
+        opt.textContent = dev.name || t("voice.audio_device.device_n", { id: dev.id });
         deviceSelect.appendChild(opt);
       }
       if (config.audio_device_id != null) {
@@ -193,20 +196,20 @@ export async function initVoiceTab() {
     try {
       const masked = await invoke("get_ai_secret_hint", { providerId: sid });
       if (masked) {
-        apiKeyInput.placeholder = masked + " — 输入新 Key 以替换";
+        apiKeyInput.placeholder = t("voice.cloud.api_key.hint_masked", { masked });
         if (apiKeyClearBtn) apiKeyClearBtn.style.display = "";
       } else {
-        apiKeyInput.placeholder = "sk-...";
+        apiKeyInput.placeholder = t("voice.cloud.api_key.ph");
         if (apiKeyClearBtn) apiKeyClearBtn.style.display = "none";
       }
     } catch {
       // get_ai_secret_hint 不可用时回退到 has_ai_secret
       try {
         const has = await invoke("has_ai_secret", { providerId: sid });
-        apiKeyInput.placeholder = has ? "✓ 已配置 — 输入新 Key 以替换" : "sk-...";
+        apiKeyInput.placeholder = has ? t("voice.cloud.api_key.hint_set") : t("voice.cloud.api_key.ph");
         if (apiKeyClearBtn) apiKeyClearBtn.style.display = has ? "" : "none";
       } catch {
-        apiKeyInput.placeholder = "sk-...";
+        apiKeyInput.placeholder = t("voice.cloud.api_key.ph");
       }
     }
   }
@@ -214,7 +217,7 @@ export async function initVoiceTab() {
   // 模型 ID 拉取（复用 fetch_ai_models，过滤只保留音频/语音相关模型）
   if (modelFetchBtn) {
     modelFetchBtn.addEventListener("click", async () => {
-      modelFetchBtn.textContent = "拉取中…";
+      modelFetchBtn.textContent = t("voice.cloud.model.fetching");
       modelFetchBtn.disabled = true;
       try {
         const baseUrl = baseUrlInput?.value?.trim() || null;
@@ -237,18 +240,18 @@ export async function initVoiceTab() {
             .join("");
           modelDatalist.innerHTML = presetOpts + fetchedOpts;
           modelFetchBtn.textContent = sttModels.length > 0
-            ? `已拉取 ${sttModels.length} 个`
-            : `拉取成功（未找到音频模型）`;
+            ? t("voice.cloud.model.fetched", { count: sttModels.length })
+            : t("voice.cloud.model.fetch_empty");
           if (modelInput) modelInput.focus();
-          setTimeout(() => { modelFetchBtn.textContent = "拉取"; }, 2500);
+          setTimeout(() => { modelFetchBtn.textContent = t("voice.cloud.model.fetch"); }, 2500);
         } else {
-          modelFetchBtn.textContent = "无可用模型";
-          setTimeout(() => { modelFetchBtn.textContent = "拉取"; }, 2500);
+          modelFetchBtn.textContent = t("voice.cloud.model.fetch_no_models");
+          setTimeout(() => { modelFetchBtn.textContent = t("voice.cloud.model.fetch"); }, 2500);
         }
       } catch (e) {
         console.error("fetch_ai_models failed:", e);
-        modelFetchBtn.textContent = "拉取失败";
-        setTimeout(() => { modelFetchBtn.textContent = "拉取"; }, 2500);
+        modelFetchBtn.textContent = t("voice.cloud.model.fetch_failed");
+        setTimeout(() => { modelFetchBtn.textContent = t("voice.cloud.model.fetch"); }, 2500);
       } finally {
         modelFetchBtn.disabled = false;
       }
@@ -258,7 +261,7 @@ export async function initVoiceTab() {
   // 云端连接测试（下载示例音频 → 发送到云端 API → 返回识别文本）
   if (testBtn) {
     testBtn.addEventListener("click", async () => {
-      testBtn.textContent = "测试中…";
+      testBtn.textContent = t("voice.cloud.test.testing");
       testBtn.disabled = true;
       if (testResult) {
         testResult.textContent = "";
@@ -268,20 +271,20 @@ export async function initVoiceTab() {
         const result = await invoke("test_cloud_stt");
         if (testResult) {
           if (result.success) {
-            testResult.textContent = `✓ 识别成功："${result.text}"`;
+            testResult.textContent = t("voice.cloud.test.success", { text: result.text });
             testResult.className = "voice-cloud-test-result success";
           } else {
-            testResult.textContent = `✗ 失败：${result.error}`;
+            testResult.textContent = t("voice.cloud.test.fail", { err: result.error });
             testResult.className = "voice-cloud-test-result error";
           }
         }
       } catch (e) {
         if (testResult) {
-          testResult.textContent = `✗ 失败：${e}`;
+          testResult.textContent = t("voice.cloud.test.fail", { err: e });
           testResult.className = "voice-cloud-test-result error";
         }
       } finally {
-        testBtn.textContent = "测试";
+        testBtn.textContent = t("voice.cloud.test.btn");
         testBtn.disabled = false;
       }
     });
@@ -295,6 +298,17 @@ export async function initVoiceTab() {
     config.cloud_provider = { kind, model_id, base_url };
     saveSttConfig(config, "cloud");
   }
+
+  // 语言切换时纠正瞬态按钮文案（applyI18n 会把 data-i18n 元素重置为空闲态默认值，
+  // 如果操作正在进行中需覆盖回瞬态文案）
+  onLangChange(() => {
+    if (modelFetchBtn?.disabled) {
+      modelFetchBtn.textContent = t("voice.cloud.model.fetching");
+    }
+    if (testBtn?.disabled) {
+      testBtn.textContent = t("voice.cloud.test.testing");
+    }
+  });
 
   // 0.10.3 高级选项（轻量，不跑探测）——流式识别开关也在此初始化
   initAdvancedOptions(config);
@@ -349,7 +363,7 @@ export async function initVoiceTab() {
       streamingCheckbox.disabled = !isLocal;
     }
     if (streamingHint) {
-      streamingHint.textContent = isLocal ? "" : "仅本地模式生效";
+      streamingHint.textContent = isLocal ? "" : t("voice.mode.local_only_hint");
     }
   }
 
@@ -366,7 +380,7 @@ export async function initVoiceTab() {
     }
 
     if (!Array.isArray(models) || models.length === 0) {
-      select.innerHTML = '<option value="">暂无可用模型</option>';
+      select.innerHTML = `<option value="">${t("voice.local.model.empty")}</option>`;
       return;
     }
 
@@ -374,9 +388,10 @@ export async function initVoiceTab() {
       .map((m) => {
         const selected = m.is_selected ? "selected" : "";
         const sizeStr = m.size_mb >= 1024
-          ? (m.size_mb / 1024).toFixed(1) + " GB"
-          : m.size_mb + " MB";
-        return `<option value="${m.id}" ${selected} title="${m.description || ""}">${m.display_name} · ${m.params} · 约 ${sizeStr}</option>`;
+          ? t("voice.local.model.size_gb", { size: (m.size_mb / 1024).toFixed(1) })
+          : t("voice.local.model.size_mb", { size: m.size_mb });
+        const label = t("voice.local.model.option", { name: m.display_name, params: m.params, size: sizeStr });
+        return `<option value="${m.id}" ${selected} title="${m.description || ""}">${label}</option>`;
       })
       .join("");
 
@@ -393,7 +408,7 @@ export async function initVoiceTab() {
         await invoke("download_stt_model", { modelId });
         const m = models.find((m) => m.id === modelId);
         if (m) {
-          appendLog(`[Blink] 已选择模型: ${m.display_name}`);
+          appendLog(t("voice.local.model.switched_log", { name: m.display_name }));
           // 同步 config（download_stt_model 已持久化 funasr_model + local_model_id）
           cfg.local_engine.funasr_model = m.funasr_model_id;
           cfg.local_model_id = modelId;
@@ -401,7 +416,7 @@ export async function initVoiceTab() {
           // 如果服务正在运行，提示重启
           const isRunning = startBtn?.classList.contains("running");
           if (isRunning) {
-            appendLog("[Blink] 模型已切换，请先停止再重新启动服务以加载新模型");
+            appendLog(t("voice.local.model.switched_running_log"));
           }
         }
       } catch (e) {
@@ -573,7 +588,8 @@ const _MAX_LOG_LINES = 200;
 let _logLines = [];
 
 function appendLog(line) {
-  const ts = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+  const locale = getLang() === "en" ? "en-US" : "zh-CN";
+  const ts = new Date().toLocaleTimeString(locale, { hour12: false });
   _logLines.push(`[${ts}] ${line}`);
   if (_logLines.length > _MAX_LOG_LINES) {
     _logLines = _logLines.slice(-_MAX_LOG_LINES);
@@ -619,8 +635,8 @@ async function initFunasrEnv(config) {
       if (!text) return;
       try {
         await navigator.clipboard.writeText(text);
-        logCopyBtn.textContent = "已复制 ✓";
-        setTimeout(() => { logCopyBtn.textContent = "复制"; }, 1500);
+        logCopyBtn.textContent = t("voice.local.log.copied");
+        setTimeout(() => { logCopyBtn.textContent = t("voice.local.log.copy_btn"); }, 1500);
       } catch (e) {
         console.error("clipboard write failed:", e);
         // fallback: 选中日志区域文本
@@ -643,12 +659,12 @@ async function initFunasrEnv(config) {
       const newDevice = deviceSelect.value;
       config.local_engine.device = newDevice;
       saveSttConfig(config, "local");
-      appendLog(`[Blink] 推理设备切换为 ${newDevice.toUpperCase()}，需重启服务生效`);
+      appendLog(t("voice.local.device.switched_log", { device: newDevice.toUpperCase() }));
 
       // 如果服务正在运行，提示重启
       const isRunning = startBtn?.classList.contains("running");
       if (isRunning) {
-        appendLog("[Blink] 服务正在运行，切换设备后请先停止再重新启动");
+        appendLog(t("voice.local.device.switched_running_log"));
       }
     });
   }
@@ -661,11 +677,11 @@ async function initFunasrEnv(config) {
       config.local_engine.auto_start_server = autoStartToggle.checked;
       saveSttConfig(config, "local");
       if (autoStartToggle.checked) {
-        appendLog("[Blink] 已开启自动启动服务，Blink 启动时会自动在后台启动 funasr-server");
+        appendLog(t("voice.local.funasr.auto_start.log_enabled"));
         // 如果服务还没启动，立即启动一次
         const isRunning = startBtn?.classList.contains("running");
         if (!isRunning && startBtn) {
-          appendLog("[Blink] 立即启动服务...");
+          appendLog(t("voice.local.funasr.auto_start.log_starting_now"));
           startBtn.click();
         }
       }
@@ -673,34 +689,48 @@ async function initFunasrEnv(config) {
   }
 
   // ── 查询初始状态 ──
+  // 缓存最近一次的 env 快照，语言切换时用它重渲染（避免重新 IPC 探测）
+  let _lastEnv = null;
+
   async function refreshEnv() {
     try {
       const env = await invoke("get_funasr_env");
+      _lastEnv = env;
       updateEnvUI(env);
       return env;
     } catch (e) {
       console.error("get_funasr_env failed:", e);
-      if (statusText) statusText.textContent = "状态查询失败";
+      if (statusText) statusText.textContent = t("voice.local.python_env.status_query_failed");
     }
   }
 
   await refreshEnv();
 
+  // 语言切换时用缓存的 env 快照重渲染所有状态文本/按钮文案
+  // （这些元素文本由 updateEnvUI 动态控制，不能带 data-i18n，否则 applyI18n 会覆盖）
+  // 同时纠正诊断按钮的瞬态文案（诊断进行中时 applyI18n 会重置为空闲态默认值）
+  onLangChange(() => {
+    if (_lastEnv) updateEnvUI(_lastEnv);
+    if (diagnoseBtn?.disabled) {
+      diagnoseBtn.textContent = t("voice.local.diagnose.running");
+    }
+  });
+
   // ── 安装环境按钮 ──
   if (setupBtn) {
     setupBtn.addEventListener("click", async () => {
       setupBtn.classList.remove("success");
-      setupBtn.textContent = "安装中...";
-      if (statusText) statusText.textContent = "正在安装 Python 环境...";
-      appendLog("[Blink] 开始安装 Python 环境（uv + venv + torch + funasr）");
+      setupBtn.textContent = t("voice.local.python_env.installing");
+      if (statusText) statusText.textContent = t("voice.local.python_env.install_status_installing");
+      appendLog(t("voice.local.python_env.install_log_start"));
 
       try {
         await invoke("setup_python_env");
       } catch (e) {
         console.error("setup_python_env failed:", e);
-        if (statusText) statusText.textContent = `安装失败: ${e}`;
-        appendLog(`[Blink] ❌ 安装失败: ${e}`);
-        setupBtn.textContent = "安装环境";
+        if (statusText) statusText.textContent = t("voice.local.python_env.install_status_failed", { err: e });
+        appendLog(t("voice.local.python_env.install_log_failed", { err: e }));
+        setupBtn.textContent = t("voice.local.python_env.install_btn");
       }
     });
   }
@@ -709,17 +739,17 @@ async function initFunasrEnv(config) {
   if (startBtn) {
     startBtn.addEventListener("click", async () => {
       startBtn.classList.remove("running");
-      startBtn.textContent = "启动中...";
-      if (serverStatusText) serverStatusText.textContent = "正在启动 funasr-server（首次需要下载模型，可能需要几分钟）...";
-      appendLog("[Blink] 正在启动 funasr-server...");
+      startBtn.textContent = t("voice.local.funasr.btn_starting");
+      if (serverStatusText) serverStatusText.textContent = t("voice.local.funasr.start_status_starting");
+      appendLog(t("voice.local.funasr.log_starting"));
 
       try {
         await invoke("start_funasr_server");
       } catch (e) {
         console.error("start_funasr_server failed:", e);
-        if (serverStatusText) serverStatusText.textContent = `启动失败: ${e}`;
-        appendLog(`[Blink] ❌ 启动失败: ${e}`);
-        startBtn.textContent = "启动服务";
+        if (serverStatusText) serverStatusText.textContent = t("voice.local.funasr.start_failed", { err: e });
+        appendLog(t("voice.local.funasr.start_failed", { err: e }));
+        startBtn.textContent = t("voice.local.funasr.start_btn");
       }
     });
   }
@@ -728,18 +758,18 @@ async function initFunasrEnv(config) {
   if (stopBtn) {
     stopBtn.addEventListener("click", async () => {
       stopBtn.disabled = true;
-      appendLog("[Blink] 正在停止 funasr-server...");
+      appendLog(t("voice.local.funasr.log_stopping"));
       try {
         await invoke("stop_funasr_server");
-        if (serverStatusText) serverStatusText.textContent = "服务已停止";
-        appendLog("[Blink] ✅ funasr-server 已停止");
+        if (serverStatusText) serverStatusText.textContent = t("voice.local.funasr.status_stopped");
+        appendLog(t("voice.local.funasr.log_stopped"));
         startBtn.classList.remove("running");
-        startBtn.textContent = "启动服务";
+        startBtn.textContent = t("voice.local.funasr.start_btn");
         startBtn.disabled = false;
         stopBtn.disabled = false;
       } catch (e) {
         console.error("stop_funasr_server failed:", e);
-        appendLog(`[Blink] ❌ 停止失败: ${e}`);
+        appendLog(t("voice.local.funasr.stop_failed", { err: e }));
       }
       refreshEnv();
     });
@@ -749,42 +779,42 @@ async function initFunasrEnv(config) {
   if (diagnoseBtn) {
     diagnoseBtn.addEventListener("click", async () => {
       diagnoseBtn.disabled = true;
-      diagnoseBtn.textContent = "诊断中...";
-      appendLog("[Blink] === STT 诊断开始 ===");
+      diagnoseBtn.textContent = t("voice.local.diagnose.running");
+      appendLog(t("voice.local.diagnose.log_start"));
 
       try {
         const report = await invoke("diagnose_stt");
         // 格式化诊断报告到日志窗口
         const env = report.funasr_env || {};
-        appendLog(`[诊断] uv: ${env.uv_available ? "✅" : "❌"} ${env.uv_version || ""}`);
-        appendLog(`[诊断] venv: ${env.venv_exists ? "✅" : "❌"} ${env.venv_python_version || ""}`);
-        appendLog(`[诊断] torch: ${env.torch_installed ? "✅" : "❌"} ${env.torch_version || ""}`);
-appendLog(`[诊断] funasr: ${env.funasr_installed ? "✅" : "❌"} ${env.funasr_version || ""}`);
-        appendLog(`[诊断] server_running: ${env.server_running ? "✅" : "❌"} port=${env.server_port}`);
-        appendLog(`[诊断] server_ready: ${env.server_ready ? "✅" : "❌"}`);
+        appendLog(t("voice.local.diagnose.log_uv", { status: env.uv_available ? "✅" : "❌", version: env.uv_version || "" }));
+        appendLog(t("voice.local.diagnose.log_venv", { status: env.venv_exists ? "✅" : "❌", version: env.venv_python_version || "" }));
+        appendLog(t("voice.local.diagnose.log_torch", { status: env.torch_installed ? "✅" : "❌", version: env.torch_version || "" }));
+        appendLog(t("voice.local.diagnose.log_funasr", { status: env.funasr_installed ? "✅" : "❌", version: env.funasr_version || "" }));
+        appendLog(t("voice.local.diagnose.log_server_running", { status: env.server_running ? "✅" : "❌", port: env.server_port }));
+        appendLog(t("voice.local.diagnose.log_server_ready", { status: env.server_ready ? "✅" : "❌" }));
         if (env.websocket_ready !== undefined) {
-          appendLog(`[诊断] websocket_ready: ${env.websocket_ready ? "✅" : "❌"} ${env.websocket_error ? "(" + env.websocket_error + ")" : ""}`);
+          appendLog(t("voice.local.diagnose.log_websocket_ready", { status: env.websocket_ready ? "✅" : "❌", err: env.websocket_error ? "(" + env.websocket_error + ")" : "" }));
         }
 
         const cfg = report.config || {};
-        appendLog(`[诊断] mode=${cfg.mode}, model=${cfg.local_model_id || "未选择"}, device=${cfg.device}, streaming_mode=${cfg.streaming_mode}`);
+        appendLog(t("voice.local.diagnose.log_config", { mode: cfg.mode, model: cfg.local_model_id || "—", device: cfg.device, streaming: cfg.streaming_mode }));
 
         if (report.api_test) {
           const api = report.api_test;
           if (api.skipped) {
-            appendLog(`[诊断] API 测试: 跳过（${api.reason}）`);
+            appendLog(t("voice.local.diagnose.log_api_skip", { reason: api.reason }));
           } else if (api.result?.success) {
-            appendLog(`[诊断] API 测试: ✅ 成功，识别结果: "${api.result.text}"`);
+            appendLog(t("voice.local.diagnose.log_api_success", { text: api.result.text }));
           } else if (api.result?.error) {
-            appendLog(`[诊断] API 测试: ❌ 失败: ${api.result.error}`);
+            appendLog(t("voice.local.diagnose.log_api_fail", { err: api.result.error }));
           }
         }
-        appendLog("[Blink] === STT 诊断完成 ===");
+        appendLog(t("voice.local.diagnose.log_end"));
       } catch (e) {
-        appendLog(`[诊断] ❌ 诊断失败: ${e}`);
+        appendLog(t("voice.local.diagnose.log_failed", { err: e }));
       } finally {
         diagnoseBtn.disabled = false;
-        diagnoseBtn.textContent = "诊断 STT";
+        diagnoseBtn.textContent = t("voice.local.diagnose.title");
       }
     });
   }
@@ -795,28 +825,28 @@ appendLog(`[诊断] funasr: ${env.funasr_installed ? "✅" : "❌"} ${env.funasr
     if (!p) return;
 
     if (p.stage === "complete" && p.status === "ready") {
-      if (statusText) statusText.textContent = "✅ Python 环境就绪";
+      if (statusText) statusText.textContent = t("voice.local.python_env.install_status_done");
       if (setupBtn) {
         setupBtn.classList.add("success");
-        setupBtn.textContent = "环境就绪 ✓";
+        setupBtn.textContent = t("voice.local.python_env.install_btn_ready");
       }
       if (startBtn) startBtn.disabled = false;
-      appendLog("[Blink] ✅ Python 环境安装完成");
+      appendLog(t("voice.local.python_env.install_log_done"));
       refreshEnv();
     } else if (p.stage === "error") {
-      if (statusText) statusText.textContent = `❌ 安装失败: ${p.error || ""}`;
+      if (statusText) statusText.textContent = t("voice.local.python_env.install_status_failed", { err: p.error || "" });
       if (setupBtn) {
         setupBtn.classList.remove("success");
-        setupBtn.textContent = "安装环境";
+        setupBtn.textContent = t("voice.local.python_env.install_btn");
       }
-      appendLog(`[Blink] ❌ 安装失败: ${p.error || ""}`);
+      appendLog(t("voice.local.python_env.install_log_failed", { err: p.error || "" }));
     } else {
       // 进度更新
       const messages = {
-        uv: { starting: "下载 uv 中...", done: "✅ uv 就绪" },
-        venv: { starting: "创建 Python venv 中...", done: "✅ venv 就绪" },
-        torch: { installing: "安装 PyTorch 中（~200MB，请耐心等待）...", done: "✅ PyTorch 安装完成" },
-        funasr: { installing: "安装 funasr 中（可能需要几分钟）...", done: "✅ funasr 安装完成" },
+        uv: { starting: t("voice.install.uv.starting"), done: t("voice.install.uv.done") },
+        venv: { starting: t("voice.install.venv.starting"), done: t("voice.install.venv.done") },
+        torch: { installing: t("voice.install.torch.installing"), done: t("voice.install.torch.done") },
+        funasr: { installing: t("voice.install.funasr.installing"), done: t("voice.install.funasr.done") },
       };
       const msg = messages[p.stage]?.[p.status];
       if (msg && statusText) statusText.textContent = msg;
@@ -852,45 +882,45 @@ appendLog(`[诊断] funasr: ${env.funasr_installed ? "✅" : "❌"} ${env.funasr
     if (!p) return;
 
     if (p.stage === "ready") {
-      if (serverStatusText) serverStatusText.textContent = `✅ FunASR 服务就绪（${p.model}）`;
+      if (serverStatusText) serverStatusText.textContent = t("voice.local.funasr.status_ready", { model: p.model });
       if (startBtn) {
         startBtn.classList.add("running");
-        startBtn.textContent = "已运行 ✓";
+        startBtn.textContent = t("voice.local.funasr.btn_running");
         startBtn.disabled = false;
       }
       if (stopBtn) stopBtn.disabled = false;
-      appendLog(`[Blink] ✅ funasr-server 就绪（${p.model}）`);
+      appendLog(t("voice.local.funasr.log_started", { model: p.model }));
     } else if (p.stage === "already_running") {
-      if (serverStatusText) serverStatusText.textContent = `✅ FunASR 服务就绪（${p.model}）`;
+      if (serverStatusText) serverStatusText.textContent = t("voice.local.funasr.status_ready", { model: p.model });
       if (startBtn) {
         startBtn.classList.add("running");
-        startBtn.textContent = "已运行 ✓";
+        startBtn.textContent = t("voice.local.funasr.btn_running");
         startBtn.disabled = false;
       }
       if (stopBtn) stopBtn.disabled = false;
-      appendLog(`[Blink] ✅ funasr-server 已在运行（${p.model}）`);
+      appendLog(t("voice.local.funasr.log_already_running", { model: p.model }));
     } else if (p.stage === "error") {
-      if (serverStatusText) serverStatusText.textContent = `❌ 服务错误: ${p.error || ""}`;
+      if (serverStatusText) serverStatusText.textContent = t("voice.local.funasr.status_error", { err: p.error || "" });
       if (startBtn) {
         startBtn.classList.remove("running");
-        startBtn.textContent = "启动服务";
+        startBtn.textContent = t("voice.local.funasr.start_btn");
         startBtn.disabled = false;
       }
       if (stopBtn) stopBtn.disabled = true;
-      appendLog(`[Blink] ❌ 服务错误: ${p.error || ""}`);
+      appendLog(t("voice.local.funasr.log_error", { err: p.error || "" }));
     } else if (p.stage === "starting") {
-      if (serverStatusText) serverStatusText.textContent = `启动中... (模型: ${p.model}, 端口: ${p.port})`;
-      appendLog(`[Blink] funasr-server 启动中 (模型: ${p.model}, 端口: ${p.port}, 设备: ${config.local_engine.device})`);
+      if (serverStatusText) serverStatusText.textContent = t("voice.local.funasr.status_starting", { model: p.model, port: p.port });
+      appendLog(t("voice.local.funasr.log_starting_detail", { model: p.model, port: p.port, device: config.local_engine.device }));
     } else if (p.stage === "loading_model") {
-      if (serverStatusText) serverStatusText.textContent = `⏳ 正在下载/加载模型 ${p.model}...（首次约 234MB，请耐心等待）`;
+      if (serverStatusText) serverStatusText.textContent = t("voice.local.funasr.status_loading_model", { model: p.model });
       if (startBtn) {
-        startBtn.textContent = "加载模型中...";
+        startBtn.textContent = t("voice.local.funasr.btn_loading_model");
         startBtn.disabled = true;
       }
-      appendLog(`[Blink] ⏳ 服务已启动，模型加载中（首次需下载 ~234MB，可能需要数分钟）...`);
+      appendLog(t("voice.local.funasr.log_loading_model"));
     } else if (p.stage === "setup_env") {
-      if (serverStatusText) serverStatusText.textContent = `正在安装 Python 环境...`;
-      appendLog("[Blink] 服务启动需要先安装 Python 环境...");
+      if (serverStatusText) serverStatusText.textContent = t("voice.local.funasr.status_setup_env");
+      appendLog(t("voice.local.funasr.log_setup_env"));
     }
   });
 
@@ -900,50 +930,50 @@ appendLog(`[诊断] funasr: ${env.funasr_installed ? "✅" : "❌"} ${env.funasr
     const parts = [];
 
     if (!env.uv_available) {
-      parts.push("❌ uv 未安装");
+      parts.push(t("voice.env.uv.not_installed"));
     } else {
-      parts.push(`✅ uv ${env.uv_version || ""}`);
+      parts.push(t("voice.env.uv.installed", { version: env.uv_version || "" }));
     }
 
     if (!env.venv_exists) {
-      parts.push("❌ Python venv 未创建");
+      parts.push(t("voice.env.venv.not_created"));
     } else {
-      parts.push(`✅ Python ${env.venv_python_version || ""}`);
+      parts.push(t("voice.env.venv.created", { version: env.venv_python_version || "" }));
     }
 
     if (!env.torch_installed) {
-      parts.push("❌ PyTorch 未安装");
+      parts.push(t("voice.env.torch.not_installed"));
     } else {
-      parts.push(`✅ torch ${env.torch_version || ""}`);
+      parts.push(t("voice.env.torch.installed", { version: env.torch_version || "" }));
     }
 
     if (!env.funasr_installed) {
-      parts.push("❌ funasr 未安装");
+      parts.push(t("voice.env.funasr.not_installed"));
     } else {
-      parts.push(`✅ funasr ${env.funasr_version || ""}`);
+      parts.push(t("voice.env.funasr.installed", { version: env.funasr_version || "" }));
     }
 
     // 综合状态 + 按钮控制（不置灰，用绿色样式标记成功）
     if (env.env_ready) {
       if (setupBtn) {
         setupBtn.classList.add("success");
-        setupBtn.textContent = "环境就绪 ✓";
+        setupBtn.textContent = t("voice.local.python_env.install_btn_ready");
         setupBtn.disabled = false;
       }
       if (startBtn && !env.server_running) {
         startBtn.classList.remove("running");
-        startBtn.textContent = "启动服务";
+        startBtn.textContent = t("voice.local.funasr.start_btn");
         startBtn.disabled = false;
       }
     } else {
       if (setupBtn) {
         setupBtn.classList.remove("success");
-        setupBtn.textContent = "安装环境";
+        setupBtn.textContent = t("voice.local.python_env.install_btn");
         setupBtn.disabled = false;
       }
       if (startBtn) {
         startBtn.classList.remove("running");
-        startBtn.textContent = "启动服务";
+        startBtn.textContent = t("voice.local.funasr.start_btn");
         startBtn.disabled = true;
       }
     }
@@ -952,15 +982,15 @@ appendLog(`[诊断] funasr: ${env.funasr_installed ? "✅" : "❌"} ${env.funasr
     if (env.server_running) {
       if (startBtn) {
         startBtn.classList.add("running");
-        startBtn.textContent = "已运行 ✓";
+        startBtn.textContent = t("voice.local.funasr.btn_running");
         startBtn.disabled = false;
       }
       if (stopBtn) stopBtn.disabled = false;
-      if (serverStatusText) serverStatusText.textContent = `✅ 服务运行中（${env.server_model}）`;
+      if (serverStatusText) serverStatusText.textContent = t("voice.local.funasr.server_running", { model: env.server_model });
     } else {
       if (startBtn && env.env_ready) {
         startBtn.classList.remove("running");
-        startBtn.textContent = "启动服务";
+        startBtn.textContent = t("voice.local.funasr.start_btn");
         startBtn.disabled = false;
       }
       if (stopBtn) stopBtn.disabled = true;
@@ -978,11 +1008,11 @@ appendLog(`[诊断] funasr: ${env.funasr_installed ? "✅" : "❌"} ${env.funasr
     const envSummary = document.getElementById("python-env-summary");
     if (envCard && envSummary) {
       if (env.env_ready) {
-        envSummary.textContent = "环境就绪 ✓";
+        envSummary.textContent = t("voice.local.python_env.summary_ready");
         envSummary.classList.add("ready");
         envCard.open = false;
       } else {
-        envSummary.textContent = "环境未就绪 — 点击展开详情";
+        envSummary.textContent = t("voice.local.python_env.summary_not_ready");
         envSummary.classList.remove("ready");
         envCard.open = true;
       }
@@ -1002,7 +1032,7 @@ function initAudioTest(config) {
   btn.addEventListener("click", async () => {
     if (audioTestActive) {
       audioTestActive = false;
-      btn.textContent = "开始测试";
+      btn.textContent = t("voice.audio_test.start");
       btn.classList.remove("active");
       bar.style.width = "0%";
       try {
@@ -1014,7 +1044,7 @@ function initAudioTest(config) {
     }
 
     audioTestActive = true;
-    btn.textContent = "停止测试";
+    btn.textContent = t("voice.audio_test.stop");
     btn.classList.add("active");
 
     const deviceSelect = document.getElementById("voice-audio-device");
@@ -1025,12 +1055,18 @@ function initAudioTest(config) {
     } catch (e) {
       console.error("[voice] start_audio_test failed:", e);
       audioTestActive = false;
-      btn.textContent = "开始测试";
+      btn.textContent = t("voice.audio_test.start");
       btn.classList.remove("active");
       bar.style.background = "var(--color-danger, #e53e3e)";
       bar.style.width = "100%";
       bar.textContent = e;
     }
+  });
+
+  // 语言切换时刷新按钮文案（测试进行中显示「停止测试」，否则显示「开始测试」）
+  onLangChange(() => {
+    if (!btn) return;
+    btn.textContent = audioTestActive ? t("voice.audio_test.stop") : t("voice.audio_test.start");
   });
 
   listen("blink://audio-test-level", (event) => {
@@ -1054,20 +1090,29 @@ async function initSpaceManagement() {
   const container = document.getElementById("stt-space-usage");
   if (!container) return;
 
+  // 缓存最近一次加载的数据，语言切换时用它重渲染（避免重新探测）
+  let lastData = null;
+
   async function loadUsage() {
     // 首次加载时显示 loading；刷新时保留旧内容避免闪屏
     const isFirstLoad = !container.querySelector(".stt-space-row");
     if (isFirstLoad) {
-      container.innerHTML = '<div class="stt-space-loading">加载中...</div>';
+      container.innerHTML = `<div class="stt-space-loading">${t("voice.local.space.loading")}</div>`;
     }
     try {
       const data = await invoke("get_stt_space_usage");
+      lastData = data;
       renderUsage(data);
     } catch (e) {
       console.error("get_stt_space_usage failed:", e);
-      container.innerHTML = '<div class="stt-space-loading">获取空间信息失败</div>';
+      container.innerHTML = `<div class="stt-space-loading">${t("voice.local.space.load_failed")}</div>`;
     }
   }
+
+  // 语言切换时用缓存数据重渲染（仅在已加载过的情况下）
+  onLangChange(() => {
+    if (lastData) renderUsage(lastData);
+  });
 
   function renderUsage(data) {
     const items = data.items || [];
@@ -1085,16 +1130,16 @@ async function initSpaceManagement() {
 
     html += `
       <div class="stt-space-total">
-        <span class="stt-space-total-label">总占用</span>
+        <span class="stt-space-total-label">${t("voice.local.space.total_label")}</span>
         <span class="stt-space-total-size">${formatSize(total)}</span>
       </div>
       <div class="stt-space-actions">
-        <button type="button" class="stt-space-cleanup-btn" id="stt-space-cleanup-btn">清理 Python 环境</button>
-        <button type="button" class="stt-space-open-folder-btn" id="stt-space-open-folder-btn">打开文件夹</button>
-        <button type="button" class="stt-space-refresh-btn" id="stt-space-refresh-btn">刷新</button>
+        <button type="button" class="stt-space-cleanup-btn" id="stt-space-cleanup-btn">${t("voice.local.space.cleanup_btn")}</button>
+        <button type="button" class="stt-space-open-folder-btn" id="stt-space-open-folder-btn">${t("voice.local.space.open_folder_btn")}</button>
+        <button type="button" class="stt-space-refresh-btn" id="stt-space-refresh-btn">${t("voice.local.space.refresh_btn")}</button>
       </div>
       <p class="stt-space-hint">
-        清理会删除 Python venv、uv 二进制和模型缓存。清理后需重新安装环境才能使用本地 STT。
+        ${t("voice.local.space.hint")}
       </p>
     `;
 
@@ -1113,17 +1158,12 @@ async function initSpaceManagement() {
         }
 
         if (serverRunning) {
-          const confirmed = confirm(
-            "FunASR 服务正在运行。\n\n" +
-            "清理环境会先停止服务，然后删除 Python venv、uv 和模型缓存。\n" +
-            "清理后需重新安装环境才能使用本地 STT。\n\n" +
-            "确定要继续清理吗？"
-          );
+          const confirmed = confirm(t("voice.local.space.cleanup_confirm_body"));
           if (!confirmed) return;
-          appendLog("[Blink] 清理环境：正在停止 funasr-server...");
+          appendLog(t("voice.local.space.cleanup_log_stopping"));
           try {
             await invoke("stop_funasr_server");
-            appendLog("[Blink] ✅ 服务已停止，开始清理环境");
+            appendLog(t("voice.local.space.cleanup_log_stopped"));
 
             // 同步重置启动/停止按钮状态（服务已在后端停止）
             const startBtn = document.getElementById("funasr-start-btn");
@@ -1131,29 +1171,29 @@ async function initSpaceManagement() {
             const serverStatusText = document.getElementById("funasr-server-status-text");
             if (startBtn) {
               startBtn.classList.remove("running");
-              startBtn.textContent = "启动服务";
+              startBtn.textContent = t("voice.local.funasr.start_btn");
               startBtn.disabled = false;
             }
             if (stopBtn) stopBtn.disabled = true;
-            if (serverStatusText) serverStatusText.textContent = "服务已停止（清理环境）";
+            if (serverStatusText) serverStatusText.textContent = t("voice.local.space.cleanup_status_stopped");
           } catch (e) {
             console.error("stop_funasr_server failed:", e);
-            appendLog(`[Blink] ⚠️ 停止服务失败: ${e}，继续清理...`);
+            appendLog(t("voice.local.space.cleanup_log_stop_failed", { err: e }));
           }
         }
 
         cleanupBtn.disabled = true;
-        cleanupBtn.textContent = "清理中...";
+        cleanupBtn.textContent = t("voice.local.space.cleanup_btn_cleaning");
         try {
           await invoke("cleanup_stt_space");
-          cleanupBtn.textContent = "清理完成 ✓";
-          appendLog("[Blink] ✅ 环境清理完成");
+          cleanupBtn.textContent = t("voice.local.space.cleanup_btn_done");
+          appendLog(t("voice.local.space.cleanup_log_done"));
           setTimeout(() => {
             loadUsage();
           }, 1000);
         } catch (e) {
           console.error("cleanup_stt_space failed:", e);
-          cleanupBtn.textContent = "清理失败";
+          cleanupBtn.textContent = t("voice.local.space.cleanup_btn_failed");
           cleanupBtn.disabled = false;
         }
       });
@@ -1171,7 +1211,7 @@ async function initSpaceManagement() {
           await invoke("open_stt_folder");
         } catch (e) {
           console.error("open_stt_folder failed:", e);
-          appendLog(`[Blink] ❌ 打开文件夹失败: ${e}`);
+          appendLog(t("voice.local.space.log_open_failed", { err: e }));
         }
       });
     }

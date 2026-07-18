@@ -4,7 +4,7 @@
  * 搬自原 settings.js loadChordActions（0.9.5 拆分时遗漏，0.9.5.1 补回）。
  */
 import { invoke } from "../../tauri.js";
-import { t } from "../../i18n/index.js";
+import { t, onLangChange } from "../../i18n/index.js";
 import { saveConfig } from "../../config-keys.js";
 
 /**
@@ -12,6 +12,9 @@ import { saveConfig } from "../../config-keys.js";
  */
 export function initChordTab() {
   loadChordActions();
+
+  // 语言切换时重新渲染（toggle 状态已自动保存，重新加载不会丢失）
+  onLangChange(loadChordActions);
 }
 
 /**

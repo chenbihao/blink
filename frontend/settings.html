@@ -708,11 +708,11 @@
         <!-- 语音输入（0.10）───────────────────────────────────── -->
         <div id="voice" class="panel">
           <h2 data-i18n="panel.voice">语音输入</h2>
-          <p class="panel-lede">按住 Alt+Space 说话，松开后文字自动上屏。云端 STT 需配置供应商，本地 STT 需安装 FunASR 环境。</p>
+          <p class="panel-lede" id="voice-lede" data-i18n-html="voice.lede">按住 Alt+Space 说话，松开后文字自动上屏。云端 STT 需配置供应商，本地 STT 需安装 FunASR 环境。</p>
 
           <!-- 总开关 -->
           <div class="setting-row">
-            <label class="setting-label">启用语音输入</label>
+            <label class="setting-label" data-i18n="voice.enabled.label">启用语音输入</label>
             <label class="checkbox">
               <input type="checkbox" id="voice-enabled" />
               <span class="checkmark"></span>
@@ -721,15 +721,15 @@
 
           <!-- 音频设备 + 调试 -->
           <div class="setting-row">
-            <label class="setting-label">音频输入设备</label>
+            <label class="setting-label" data-i18n="voice.audio_device.label">音频输入设备</label>
             <select id="voice-audio-device">
-              <option value="">系统默认</option>
+              <option value="" data-i18n="voice.audio_device.default">系统默认</option>
             </select>
           </div>
           <div class="setting-row">
-            <label class="setting-label">音频调试</label>
+            <label class="setting-label" data-i18n="voice.audio_test.label">音频调试</label>
             <div class="audio-test-container">
-              <button type="button" id="voice-audio-test-btn" class="audio-test-btn">开始测试</button>
+              <button type="button" id="voice-audio-test-btn" class="audio-test-btn" data-i18n="voice.audio_test.start">开始测试</button>
               <div class="audio-test-meter">
                 <div class="audio-test-bar" id="audio-test-bar"></div>
               </div>
@@ -738,53 +738,53 @@
 
           <!-- STT 模式切换（决定下方显示云端 / 本地配置） -->
           <div class="setting-row">
-            <label class="setting-label">STT 模式</label>
+            <label class="setting-label" data-i18n="voice.mode.label">STT 模式</label>
             <div class="radio-group">
-              <label class="radio"><input type="radio" name="voice-mode" id="voice-mode-cloud" value="cloud" checked /> 云端</label>
-              <label class="radio"><input type="radio" name="voice-mode" id="voice-mode-local" value="local" /> 本地</label>
+              <label class="radio"><input type="radio" name="voice-mode" id="voice-mode-cloud" value="cloud" checked /> <span data-i18n="voice.mode.cloud">云端</span></label>
+              <label class="radio"><input type="radio" name="voice-mode" id="voice-mode-local" value="local" /> <span data-i18n="voice.mode.local">本地</span></label>
             </div>
           </div>
 
           <!-- 云端配置 ──────────────────────────────────────────────── -->
           <div id="voice-cloud-section">
-            <h3 class="subsection-title">云端供应商</h3>
-            <p class="setting-hint">所有供应商均使用 OpenAI 兼容接口（<code>/v1/audio/transcriptions</code>），仅 Base URL 不同。API Key 独立存储于系统凭据管理器，与大模型密钥互不共享。</p>
-            <p class="setting-hint">云端模式为非流式：按住说话 → 松开后一次性发送整段音频识别。不支持边说边出字预览（云端 API 按音频时长计费，伪流式的重复请求会导致账单膨胀）。</p>
+            <h3 class="subsection-title" data-i18n="voice.cloud.title">云端供应商</h3>
+            <p class="setting-hint" id="voice-cloud-hint1" data-i18n-html="voice.cloud.hint1">所有供应商均使用 OpenAI 兼容接口（<code>/v1/audio/transcriptions</code>），仅 Base URL 不同。API Key 独立存储于系统凭据管理器，与大模型密钥互不共享。</p>
+            <p class="setting-hint" id="voice-cloud-hint2" data-i18n-html="voice.cloud.hint2">云端模式为非流式：按住说话 → 松开后一次性发送整段音频识别。不支持边说边出字预览（云端 API 按音频时长计费，伪流式的重复请求会导致账单膨胀）。</p>
             <div class="setting-row">
-              <label class="setting-label">供应商</label>
+              <label class="setting-label" data-i18n="voice.cloud.kind.label">供应商</label>
               <select id="voice-cloud-kind">
                 <option value="openai">OpenAI</option>
                 <option value="groq">Groq</option>
-                <option value="mimo">小米 Mimo</option>
-<option value="mimo_plan">小米 Mimo Plan</option>
-                <option value="custom">自定义（OpenAI 兼容）</option>
+                <option value="mimo" data-i18n="voice.cloud.kind.mimo">小米 Mimo</option>
+<option value="mimo_plan" data-i18n="voice.cloud.kind.mimo_plan">小米 Mimo Plan</option>
+                <option value="custom" data-i18n="voice.cloud.kind.custom">自定义（OpenAI 兼容）</option>
               </select>
             </div>
             <div class="setting-row">
-              <label class="setting-label">Base URL<span class="field-hint-icon" title="选择供应商时自动填充，可手动修改">ⓘ</span></label>
-              <input type="text" id="voice-cloud-base-url" placeholder="https://api.openai.com/v1" />
+              <label class="setting-label" data-i18n="voice.cloud.base_url.label">Base URL<span class="field-hint-icon" data-i18n-title="voice.cloud.base_url.hint" title="选择供应商时自动填充，可手动修改">ⓘ</span></label>
+              <input type="text" id="voice-cloud-base-url" data-i18n-ph="voice.cloud.base_url.ph" placeholder="https://api.openai.com/v1" />
             </div>
             <div class="setting-row">
-              <label class="setting-label">API Key</label>
+              <label class="setting-label" data-i18n="voice.cloud.api_key.label">API Key</label>
               <div class="voice-cloud-key-wrap">
-                <input type="password" id="voice-cloud-api-key" placeholder="sk-..." autocomplete="off" />
-                <button type="button" id="voice-cloud-key-save-btn" class="voice-cloud-key-btn">保存</button>
-                <button type="button" id="voice-cloud-key-clear-btn" class="voice-cloud-key-btn voice-cloud-key-btn-danger" style="display:none;">清除</button>
+                <input type="password" id="voice-cloud-api-key" data-i18n-ph="voice.cloud.api_key.ph" placeholder="sk-..." autocomplete="off" />
+                <button type="button" id="voice-cloud-key-save-btn" class="voice-cloud-key-btn" data-i18n="voice.cloud.api_key.save">保存</button>
+                <button type="button" id="voice-cloud-key-clear-btn" class="voice-cloud-key-btn voice-cloud-key-btn-danger" style="display:none;" data-i18n="voice.cloud.api_key.clear">清除</button>
               </div>
             </div>
             <div class="setting-row">
-              <label class="setting-label">模型 ID</label>
+              <label class="setting-label" data-i18n="voice.cloud.model.label">模型 ID</label>
               <div class="voice-cloud-model-wrap">
-                <input type="text" id="voice-cloud-model" list="voice-cloud-model-list" placeholder="whisper-large-v3" />
+                <input type="text" id="voice-cloud-model" list="voice-cloud-model-list" data-i18n-ph="voice.cloud.model.ph" placeholder="whisper-large-v3" />
                 <datalist id="voice-cloud-model-list"></datalist>
-                <button type="button" id="voice-cloud-model-fetch-btn" class="voice-cloud-key-btn" title="从供应商拉取可用模型列表">拉取</button>
+                <button type="button" id="voice-cloud-model-fetch-btn" class="voice-cloud-key-btn" data-i18n="voice.cloud.model.fetch" data-i18n-title="voice.cloud.model.fetch.title" title="从供应商拉取可用模型列表">拉取</button>
               </div>
             </div>
             <!-- 云端测试 -->
             <div class="setting-row">
-              <label class="setting-label">连接测试</label>
+              <label class="setting-label" data-i18n="voice.cloud.test.label">连接测试</label>
               <div class="voice-cloud-test-wrap">
-                <button type="button" id="voice-cloud-test-btn" class="voice-cloud-key-btn">测试</button>
+                <button type="button" id="voice-cloud-test-btn" class="voice-cloud-key-btn" data-i18n="voice.cloud.test.btn">测试</button>
                 <span id="voice-cloud-test-result" class="voice-cloud-test-result"></span>
               </div>
             </div>
@@ -795,11 +795,11 @@
             <!-- Python 环境卡片（可折叠：环境就绪时默认收起，仅显示摘要） -->
             <details class="voice-section-card voice-env-card" id="python-env-card">
               <summary class="voice-section-card-header">
-                <span class="voice-section-card-title">Python 环境</span>
+                <span class="voice-section-card-title" data-i18n="voice.local.python_env.title">Python 环境</span>
                 <span class="voice-env-summary" id="python-env-summary">检查中...</span>
               </summary>
               <div class="voice-section-card-body">
-                <p class="setting-hint">Blink 通过 <code>uv</code> 自动管理独立的 Python 3.12 环境，安装 PyTorch + funasr，无需手动安装 Python 或 pip 包。</p>
+                <p class="setting-hint" id="voice-python-env-hint" data-i18n-html="voice.local.python_env.hint">Blink 通过 <code>uv</code> 自动管理独立的 Python 3.12 环境，安装 PyTorch + funasr，无需手动安装 Python 或 pip 包。</p>
                 <div class="engine-status-row">
                   <div id="engine-status-info" class="engine-status-info">
                     <span id="funasr-status-text" class="engine-status-text">检查中...</span>
@@ -812,8 +812,8 @@
             <!-- FunASR 服务卡片 -->
             <div class="voice-section-card">
               <div class="voice-section-card-header">
-                <span class="voice-section-card-title">FunASR 服务</span>
-                <span class="voice-section-card-desc">本地推理服务 · 模型 · 日志</span>
+                <span class="voice-section-card-title" data-i18n="voice.local.funasr.title">FunASR 服务</span>
+                <span class="voice-section-card-desc" data-i18n="voice.local.funasr.desc">本地推理服务 · 模型 · 日志</span>
               </div>
               <div class="voice-section-card-body">
                 <!-- 服务状态行（第一眼要看的，放最前面） -->
@@ -821,25 +821,25 @@
                   <div id="funasr-server-status-info" class="engine-status-info">
                     <span id="funasr-server-status-text" class="engine-status-text"></span>
                   </div>
-                  <label class="engine-auto-start-label" title="开启后 Blink 启动时自动在后台启动 funasr-server（延迟 5s 懒加载）">自动启动</label>
+                  <label class="engine-auto-start-label" data-i18n="voice.local.funasr.auto_start.label" data-i18n-title="voice.local.funasr.auto_start.hint" title="开启后 Blink 启动时自动在后台启动 funasr-server（延迟 5s 懒加载）">自动启动</label>
                   <label class="switch switch-sm">
                     <input type="checkbox" id="funasr-auto-start-toggle" />
                     <span class="slider"></span>
                   </label>
                   <button type="button" id="funasr-start-btn" class="engine-download-btn">启动服务</button>
-                  <button type="button" id="funasr-stop-btn" class="engine-download-btn" disabled>停止服务</button>
+                  <button type="button" id="funasr-stop-btn" class="engine-download-btn" disabled data-i18n="voice.local.funasr.stop_btn">停止服务</button>
                 </div>
 
                 <div class="setting-row-funasr">
                   <div class="setting-row-item">
-                    <label class="setting-label">推理设备<span class="field-hint-icon" title="CPU 通用性好且内存占用低；CUDA 需 NVIDIA GPU + CUDA Toolkit，推理更快。切换后需重启服务生效。">ⓘ</span></label>
+                    <label class="setting-label" data-i18n="voice.local.device.label">推理设备<span class="field-hint-icon" data-i18n-title="voice.local.device.hint" title="CPU 通用性好且内存占用低；CUDA 需 NVIDIA GPU + CUDA Toolkit，推理更快。切换后需重启服务生效。">ⓘ</span></label>
                     <select id="funasr-device-select">
-                      <option value="cpu" selected>CPU</option>
-                      <option value="cuda">CUDA (GPU)</option>
+                      <option value="cpu" selected data-i18n="voice.local.device.cpu">CPU</option>
+                      <option value="cuda" data-i18n="voice.local.device.cuda">CUDA (GPU)</option>
                     </select>
                   </div>
                   <div class="setting-row-item">
-                    <label class="setting-label">模型</label>
+                    <label class="setting-label" data-i18n="voice.local.model.label">模型</label>
                     <select id="funasr-model-select"></select>
                   </div>
                 </div>
@@ -847,11 +847,11 @@
                 <!-- 统一日志窗口（诊断按钮 + 日志区共用） -->
                 <div class="voice-log-wrap">
                   <div class="voice-log-header">
-                    <span class="voice-log-title">服务日志</span>
+                    <span class="voice-log-title" data-i18n="voice.local.log.title">服务日志</span>
                     <div class="voice-log-actions">
-                      <button type="button" id="stt-diagnose-btn" class="stt-diagnose-btn">诊断 STT</button>
-                      <button type="button" id="funasr-log-copy-btn" class="voice-log-clear-btn">复制</button>
-                      <button type="button" id="funasr-log-clear-btn" class="voice-log-clear-btn">清空</button>
+                      <button type="button" id="stt-diagnose-btn" class="stt-diagnose-btn" data-i18n="voice.local.log.diagnose_btn">诊断 STT</button>
+                      <button type="button" id="funasr-log-copy-btn" class="voice-log-clear-btn" data-i18n="voice.local.log.copy_btn">复制</button>
+                      <button type="button" id="funasr-log-clear-btn" class="voice-log-clear-btn" data-i18n="voice.local.log.clear_btn">清空</button>
                     </div>
                   </div>
                   <pre id="voice-server-log" class="voice-server-log"></pre>
@@ -863,14 +863,14 @@
             <details class="voice-advanced-card">
               <summary class="voice-advanced-header">
                 <span class="voice-advanced-chevron"></span>
-                <span class="voice-advanced-title">高级选项</span>
-                <span class="voice-advanced-desc">流式识别 · 热词 · ITN · VAD 切句参数</span>
+                <span class="voice-advanced-title" data-i18n="voice.local.advanced.title">高级选项</span>
+                <span class="voice-advanced-desc" data-i18n="voice.local.advanced.desc">流式识别 · 热词 · ITN · VAD 切句参数</span>
               </summary>
               <div class="voice-advanced-body">
                 <!-- 流式识别（仅本地模式生效） -->
                 <div class="voice-adv-field" id="voice-streaming-field">
                   <div class="voice-adv-field-label">
-                    流式识别<span class="field-hint-icon" title="开启后 VAD 切句 + 每 500ms 预览识别，实现边说边出字。关闭后松开一次性识别。">ⓘ</span>
+                    <span data-i18n="voice.local.streaming.label">流式识别</span><span class="field-hint-icon" data-i18n-title="voice.local.streaming.hint" title="开启后 VAD 切句 + 每 500ms 预览识别，实现边说边出字。关闭后松开一次性识别。">ⓘ</span>
                   </div>
                   <div class="voice-adv-field-control">
                     <label class="switch switch-sm">
@@ -884,37 +884,37 @@
                 <!-- 热词 -->
                 <div class="voice-adv-field voice-adv-field--block">
                   <div class="voice-adv-field-label">
-                    热词<span class="field-hint-icon" title="英文逗号分隔，每项格式「词 权重」（权重 1-100，默认 100）。热词可提升专有名词、品牌名、缩写的识别准确率。">ⓘ</span>
+                    <span data-i18n="voice.local.hotwords.label">热词</span><span class="field-hint-icon" data-i18n-title="voice.local.hotwords.hint" title="英文逗号分隔，每项格式「词 权重」（权重 1-100，默认 100）。热词可提升专有名词、品牌名、缩写的识别准确率。">ⓘ</span>
                   </div>
                   <div class="voice-adv-field-control">
-                    <textarea id="voice-hotwords" class="voice-hotwords-input" rows="2" placeholder="逗号分隔，如：美团 100, 快手 80, Blink 100"></textarea>
+                    <textarea id="voice-hotwords" class="voice-hotwords-input" rows="2" data-i18n-ph="voice.local.hotwords.ph" placeholder="逗号分隔，如：美团 100, 快手 80, Blink 100"></textarea>
                   </div>
                 </div>
 
                 <!-- ITN -->
                 <div class="voice-adv-field">
                   <div class="voice-adv-field-label">
-                    ITN 逆文本归一化<span class="field-hint-icon" title="将「二零二四年」转换为「2024年」，数字/日期/时间等自动归一化。推荐开启。">ⓘ</span>
+                    <span data-i18n="voice.local.itn.label">ITN 逆文本归一化</span><span class="field-hint-icon" data-i18n-title="voice.local.itn.hint" title="将「二零二四年」转换为「2024年」，数字/日期/时间等自动归一化。推荐开启。">ⓘ</span>
                   </div>
                   <div class="voice-adv-field-control">
                     <label class="switch switch-sm">
                       <input type="checkbox" id="voice-use-itn-toggle" checked />
                       <span class="slider"></span>
                     </label>
-                    <span class="voice-adv-field-hint">将「二零二四年」转换为「2024年」</span>
+                    <span class="voice-adv-field-hint" data-i18n="voice.local.itn.preview">将「二零二四年」转换为「2024年」</span>
                   </div>
                 </div>
 
                 <!-- VAD 切句参数 -->
                 <div class="voice-vad-card">
                   <div class="voice-vad-card-header">
-                    <span class="voice-vad-card-title">VAD 切句参数<span class="field-hint-icon" title="控制伪流式引擎何时判定用户停顿从而触发句尾定稿。离麦克风远时声音能量低，可调低静默阈值；说话连贯时可调低静默时长加快定稿。">ⓘ</span></span>
-                    <button type="button" id="voice-vad-reset-btn" class="voice-vad-reset-btn">恢复默认</button>
+                    <span class="voice-vad-card-title"><span data-i18n="voice.local.vad.title">VAD 切句参数</span><span class="field-hint-icon" data-i18n-title="voice.local.vad.hint" title="控制伪流式引擎何时判定用户停顿从而触发句尾定稿。离麦克风远时声音能量低，可调低静默阈值；说话连贯时可调低静默时长加快定稿。">ⓘ</span></span>
+                    <button type="button" id="voice-vad-reset-btn" class="voice-vad-reset-btn" data-i18n="voice.local.vad.reset">恢复默认</button>
                   </div>
                   <div class="voice-vad-params">
                     <div class="voice-vad-param">
                       <div class="voice-vad-param-head">
-                        <span class="voice-vad-param-label">静默阈值<span class="field-hint-icon" title="RMS 低于此值视为静默（默认 0.005，约 -46dB）。离麦克风远一直灰色不定稿时调低（如 0.002）；嘈杂环境调高（如 0.01）。">ⓘ</span></span>
+                        <span class="voice-vad-param-label"><span data-i18n="voice.local.vad.silence_threshold.label">静默阈值</span><span class="field-hint-icon" data-i18n-title="voice.local.vad.silence_threshold.hint" title="RMS 低于此值视为静默（默认 0.005，约 -46dB）。离麦克风远一直灰色不定稿时调低（如 0.002）；嘈杂环境调高（如 0.01）。">ⓘ</span></span>
                         <span id="voice-vad-silence-threshold-val" class="voice-vad-param-value">0.005</span>
                       </div>
                       <input type="range" id="voice-vad-silence-threshold" class="voice-vad-slider" min="0.001" max="0.02" step="0.001" />
@@ -922,7 +922,7 @@
                     </div>
                     <div class="voice-vad-param">
                       <div class="voice-vad-param-head">
-                        <span class="voice-vad-param-label">静默时长<span class="field-hint-icon" title="静默持续多久判定句尾（默认 300ms）。说话连贯停顿短时调低（如 200ms）加快定稿；慢速思考调高（如 500ms）。">ⓘ</span></span>
+                        <span class="voice-vad-param-label"><span data-i18n="voice.local.vad.min_silence_ms.label">静默时长</span><span class="field-hint-icon" data-i18n-title="voice.local.vad.min_silence_ms.hint" title="静默持续多久判定句尾（默认 300ms）。说话连贯停顿短时调低（如 200ms）加快定稿；慢速思考调高（如 500ms）。">ⓘ</span></span>
                         <span id="voice-vad-min-silence-ms-val" class="voice-vad-param-value">300ms</span>
                       </div>
                       <input type="range" id="voice-vad-min-silence-ms" class="voice-vad-slider" min="100" max="1000" step="50" />
@@ -930,7 +930,7 @@
                     </div>
                     <div class="voice-vad-param">
                       <div class="voice-vad-param-head">
-                        <span class="voice-vad-param-label">最小句长<span class="field-hint-icon" title="短于此值不切句（默认 800ms），避免咳嗽、短暂噪声等触发误切。调低可让短句也定稿，但误切风险增大。">ⓘ</span></span>
+                        <span class="voice-vad-param-label"><span data-i18n="voice.local.vad.min_sentence_ms.label">最小句长</span><span class="field-hint-icon" data-i18n-title="voice.local.vad.min_sentence_ms.hint" title="短于此值不切句（默认 800ms），避免咳嗽、短暂噪声等触发误切。调低可让短句也定稿，但误切风险增大。">ⓘ</span></span>
                         <span id="voice-vad-min-sentence-ms-val" class="voice-vad-param-value">800ms</span>
                       </div>
                       <input type="range" id="voice-vad-min-sentence-ms" class="voice-vad-slider" min="200" max="2000" step="100" />
@@ -944,12 +944,12 @@
             <!-- 空间管理卡片 -->
             <div class="voice-section-card">
               <div class="voice-section-card-header">
-                <span class="voice-section-card-title">空间管理</span>
-                <span class="voice-section-card-desc">Python 环境 · 模型缓存占用</span>
+                <span class="voice-section-card-title" data-i18n="voice.local.space.title">空间管理</span>
+                <span class="voice-section-card-desc" data-i18n="voice.local.space.desc">Python 环境 · 模型缓存占用</span>
               </div>
               <div class="voice-section-card-body">
                 <div id="stt-space-usage" class="stt-space-usage">
-                  <div class="stt-space-loading">加载中...</div>
+                  <div class="stt-space-loading" data-i18n="voice.local.space.loading">加载中...</div>
                 </div>
               </div>
             </div>
@@ -957,9 +957,9 @@
 
           <!-- 使用说明 -->
           <div class="setting-hint-block">
-            <p><strong>主窗口语音输入：</strong>Alt+Space 短按出窗 → 再长按说话 → 松开文字填入搜索框</p>
-            <p><strong>语音输入法：</strong>在前台应用中直接长按 Alt+Space → 说话 → 松开文字上屏</p>
-            <p><strong>隐私：</strong>云端模式录音发送到供应商；本地模式完全离线。录音不持久化。</p>
+            <p id="voice-usage-g1" data-i18n-html="voice.usage.g1"><strong>主窗口语音输入：</strong>Alt+Space 短按出窗 → 再长按说话 → 松开文字填入搜索框</p>
+            <p id="voice-usage-g2" data-i18n-html="voice.usage.g2"><strong>语音输入法：</strong>在前台应用中直接长按 Alt+Space → 说话 → 松开文字上屏</p>
+            <p id="voice-usage-privacy" data-i18n-html="voice.usage.privacy"><strong>隐私：</strong>云端模式录音发送到供应商；本地模式完全离线。录音不持久化。</p>
           </div>
         </div>
 

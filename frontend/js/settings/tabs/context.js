@@ -4,9 +4,12 @@
  */
 
 import { invoke } from "../../tauri.js";
-import { t } from "../../i18n/index.js";
+import { t, onLangChange } from "../../i18n/index.js";
 import { saveConfig } from "../../config-keys.js";
 import { getCurrentConfig } from "../shared/state.js";
+
+/** 防止重复注册 onLangChange（initContextTab 可能被多次调用） */
+let _langChangeRegistered = false;
 
 /**
  * 初始化上下文感知 Tab
@@ -15,6 +18,15 @@ import { getCurrentConfig } from "../shared/state.js";
 export function initContextTab(cfg) {
   loadContextConfig();
   loadContextBindings();
+
+  // 语言切换时重新渲染（所有变更都是自动保存的，重新加载不会丢失状态）
+  if (!_langChangeRegistered) {
+    _langChangeRegistered = true;
+    onLangChange(() => {
+      loadContextConfig();
+      loadContextBindings();
+    });
+  }
 }
 
 /**

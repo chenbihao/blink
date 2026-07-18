@@ -5,7 +5,7 @@
 
 import { invoke } from "../../tauri.js";
 import { confirmDialog } from "../../tauri.js";
-import { t } from "../../i18n/index.js";
+import { t, onLangChange } from "../../i18n/index.js";
 
 /**
  * 初始化存储设置 Tab
@@ -27,12 +27,24 @@ export function initStorageTab() {
 /**
  * 加载存储信息
  */
+let _cachedInfo = null;
+
 async function loadStorageInfo() {
   try {
-    const info = await invoke("get_storage_info");
-    document.getElementById("history-count").textContent = t("storage.history_count", { count: info.history_count });
-    document.getElementById("db-path").textContent = info.db_path;
+    _cachedInfo = await invoke("get_storage_info");
+    renderStorageInfo();
   } catch (e) {
     console.error("loadStorageInfo failed:", e);
   }
 }
+
+function renderStorageInfo() {
+  if (!_cachedInfo) return;
+  const histEl = document.getElementById("history-count");
+  const dbEl = document.getElementById("db-path");
+  if (histEl) histEl.textContent = t("storage.history_count", { count: _cachedInfo.history_count });
+  if (dbEl) dbEl.textContent = _cachedInfo.db_path;
+}
+
+// 语言切换时重新渲染文本（history_count 带参数，data-i18n 无法处理）
+onLangChange(renderStorageInfo);
