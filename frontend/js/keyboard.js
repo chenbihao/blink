@@ -121,6 +121,14 @@ function fireChord(key) {
   triggerChord(key).catch((e) => console.warn("[chord] trigger_chord 失败", e));
 }
 
+// chord 独占模式（0.10.7）下的兜底触发路径。
+//
+// **正常路径**：chord mode 激活时 native LL hook 吞掉字母 keydown 并直接 emit
+// `HotkeyEvent::Chord` → 后端 `trigger_chord`，前端 keydown 收不到事件。
+//
+// **此函数的用途**：当 `set_chord_mode` IPC 调用失败（如后端未就绪）时，
+// hook 未吞键，前端 keydown 兜底走此路径触发 chord。两条路径互斥——不会双触发。
+// 维护者注意：不要误以为是双触发 bug 而删除此函数。
 function onChordTrigger(e) {
   if (!e.altKey) return;
   if (e.isComposing || e.keyCode === 229) return; // IME 组字放行

@@ -56,9 +56,15 @@ pub struct ChordBinding {
     /// 修饰键列表（当前只有 `["alt"]`，预留扩展）。
     #[serde(default = "default_alt_modifiers")]
     pub modifiers: Vec<String>,
-    /// 触发语义。未设置时由动作的 `default_semantic()` 兜底。
+    /// 触发语义。`None`（未设置）时由动作的 `default_semantic()` 兜底——
+    /// 这是 0.11 review W3 的修复：此前用 `ChordSemantic`（默认 Tap）无法区分
+    /// "用户显式设 Tap" 与 "未设置"，导致 voice_input 重绑 key 后从 Hold 静默降级 Tap。
+    /// 改成 `Option<ChordSemantic>` 后，`None` 明确表示"未设置，走 default"。
+    ///
+    /// **向后兼容**：老配置 `"semantic": "tap"` 反序列化为 `Some(Tap)`；
+    /// 缺失字段为 `None`（走 default）。
     #[serde(default)]
-    pub semantic: ChordSemantic,
+    pub semantic: Option<ChordSemantic>,
 }
 
 impl Default for ChordBinding {
@@ -66,7 +72,7 @@ impl Default for ChordBinding {
         Self {
             key: String::new(),
             modifiers: default_alt_modifiers(),
-            semantic: ChordSemantic::default(),
+            semantic: None,
         }
     }
 }
@@ -78,10 +84,12 @@ fn default_alt_modifiers() -> Vec<String> {
 /// 所有 chord 动作的键位绑定集合（0.10.7）。
 ///
 /// 每个字段对应一个 chord action id。新增 chord 动作时加字段 + serde default 兜底。
-/// `key` 为空字符串时表示用动作的 `default_key()` 兜底；`semantic` 默认 `Tap`
-/// 时由动作的 `default_semantic()` 兜底（注意：无法区分"用户显式设 Tap"与"未设置"，
-/// 因此 hold 类动作如 voice_input 必须在 default_semantic 返回 Hold，且用户若要改回
-/// Tap 需显式设置——当前不暴露此 UI）。
+/// `key` 为空字符串表示用动作的 `default_key()` 兜底；`semantic` 为 `None`
+/// 表示用动作的 `default_semantic()` 兜底。
+///
+/// **0.11 review W3 修复**：`semantic` 从 `ChordSemantic` 改为 `Option<ChordSemantic>`，
+/// 解决了"无法区分用户显式设 Tap 与未设置"的歧义——voice_input 重绑 key 后不再
+/// 静默从 Hold 降级 Tap。`None` 明确表示"未设置，走 default"。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChordBindings {
     #[serde(default)]
@@ -124,18 +132,26 @@ impl ChordBindings {
         }
     }
 
-    /// 解析某动作的生效语义：binding 显式覆盖（当前实现：voice_input 默认 Hold，
-    /// 其余默认 Tap；若 binding.semantic 被用户显式设置则以 binding 为准）。
-    /// 由于 `ChordSemantic::default() == Tap`，无法区分"未设置"与"显式 Tap"，
-    /// 因此 hold 类动作（voice_input）的 default 必须在调用方处理——本方法
-    /// 直接返回 binding.semantic，调用方在 binding 为默认值时用 default_semantic 兜底。
+    /// 解析某动作的生效语义：`binding.semantic` 为 `Some` 用 binding，否则用 default。
+    ///
+    /// **0.11 review W3**：此前用 `binding.key 非空` 作为"用户改过"的代理判定，
+    /// 用户改了 semantic 但没改 key 时会走 default。改成 `Option<ChordSemantic>` 后，
+    /// `semantic` 字段本身就是"是否设置"的权威信号——语义干净、无歧义。
+    ///
+    /// **0.11.7 修复**：`voice_input` 强制走 default（Hold），忽略 binding.semantic。
+    /// 语义上 voice_input 的键位与语义都由 hotkey 配置决定（前端 UI 已锁 keyLocked），
+    /// 但历史 DB 或前端旧代码（`chord.js` 曾硬编码 `semantic: "tap"`）可能残留脏值。
+    /// 若走 unwrap_or(default) 分支，脏值 `Some(Tap)` 会让 voice_input 被错误收进 tap_keys，
+    /// 导致 LL hook 吞掉 Alt+Space keydown → 主窗唤起失效。此处按 id 特判兜底，
+    /// 与 `default_key()` 的锁定策略保持一致（key 也不接受 binding 覆盖）。
     pub fn effective_semantic(&self, id: &str, default_semantic: ChordSemantic) -> ChordSemantic {
-        // 简单策略：binding 未被用户改过（key 为空且 modifiers 为默认 alt）时用 default。
-        // 这避免 voice_input 被错误降级为 Tap。设置页保存时若用户显式改 semantic，
-        // binding.key 一般也会被一起设置（改键必然产生非空 key）。
+        // voice_input 的语义硬锁：忽略任何 binding.semantic，永远走 default_semantic()。
+        if id == "voice_input" {
+            return default_semantic;
+        }
         match self.get(id) {
-            Some(b) if !b.key.is_empty() => b.semantic,
-            _ => default_semantic,
+            Some(b) => b.semantic.unwrap_or(default_semantic),
+            None => default_semantic,
         }
     }
 }

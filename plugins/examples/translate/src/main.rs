@@ -385,7 +385,9 @@ fn handle_http_response<W: Write>(
         let body = body.unwrap_or_default();
         let result = engine.as_ref().and_then(|e| e.parse_response(&body));
         if result.is_none() {
-            eprintln!("[translate] {} parse failed, body: {}", ctx.engine_id, &body[..body.len().min(500)]);
+            // 按字符截断（不按字节）——多字节 UTF-8 中间切片会 panic
+            let preview: String = body.chars().take(500).collect();
+            eprintln!("[translate] {} parse failed, body: {}", ctx.engine_id, preview);
         }
         result
     };
@@ -409,15 +411,21 @@ fn handle_http_response<W: Write>(
 }
 
 /// 构造翻译结果 items（1:1 对齐 Python：译文 + 原文，预处理变化时加拆分版）。
-fn build_result_items(result: &str, text: &str, original_text: &str, target_lang: &str) -> Vec<PluginItem> {
-    let _lang_display = [("zh","中文"),("en","英文"),("ja","日文"),("ko","韩文")]
-        .iter().find(|(k,_)| *k == target_lang).map(|(_,v)|*v).unwrap_or(target_lang);
-
+///
+/// **0.11 review L7**：首项（译文）显式填 `payload`，让 AI tool-call 路径直接拿到
+/// 结构化数据（与 protocol.rs 文档对齐），不再靠 core 的 action 兜底投影。
+fn build_result_items(result: &str, text: &str, original_text: &str, _target_lang: &str) -> Vec<PluginItem> {
     let mut items = vec![PluginItem {
         title: format!("📝 {result}"),
         subtitle: Some(format!("按 Enter 复制译文 | 原文: {}{}", &original_text[..original_text.chars().take(50).map(char::len_utf8).sum()], if original_text.chars().count() > 50 {"..."} else {""})),
         score: 1.0,
         action: PluginAction::Copy { text: result.into() },
+        // L7: 显式填 payload，AI tool-call 路径直接读 {translated, source}，
+        // 不依赖 core 从 action 兜底（与 protocol.rs 文档"译文项填 payload"一致）
+        payload: Some(serde_json::json!({
+            "translated": result,
+            "source": original_text,
+        })),
         ..Default::default()
     }];
 

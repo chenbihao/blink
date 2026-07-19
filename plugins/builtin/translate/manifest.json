@@ -43,8 +43,8 @@
         "required": ["text"]
       },
       "danger_class": "Safe",
-      "result_type": "text",
-      "hint": "AI tool 路径返回首选引擎译文；查询路径（用户打字）返回多引擎对比",
+      "result_type": "items",
+      "hint": "返回译文（item[0]）+ 拆分版（仅命名风格预处理改变文本时）+ 原文，AI 读 item[0] 即可",
       "progress_hint": "翻译文本",
       "setting_bindings": {
         "target_lang": "target_lang"

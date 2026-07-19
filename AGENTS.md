@@ -29,7 +29,7 @@ Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而�
   - 0.11.4：结果回流 AI（Turn 2 tool chain + 三态配置 + 审计日志 + 占位文案/过渡态/错误展示/自动执行反馈）
   - 0.11.5：剪贴板历史 Capability + 搜索型抽象评估（决定不抽）
   - 0.11.6：翻译插件全量 Rust 化（5 引擎 1:1 迁移）
-- 🔜 **0.12 AI 生态完善**：本地模型（ollama/mistral.rs）/ skill 化（配置期 CLI 探索）/ MCP 双向（client + server 护城河）/ A2A / RAG 记忆 / 单独对话窗口（Agent 窗口模式）。详见 [phases/0.12-ai-ecosystem.md](docs/production-design/phases/0.12-ai-ecosystem.md)
+- 🔜 **0.12 AI 能力架构搭建**：基础设施抽取与清账（投影统一 / **DB 主库+缓存库拆分** / 分层违规修复 / ollama+lmstudio Provider 接入）+ 对话窗口★（独立 Agent 窗口 + rig AgentBuilder，不破主窗口类型收窄铁则）+ 对话机制（conversation 隔离 + 持久化 memory 走 SQLite impl rig ConversationMemory trait + 滑动窗口 + tool loop 无限轮）+ MCP client + RAG（知识库检索作为内部 tool，走 ollama embedding）。**产品边界：Blink 不做 AI 运行时，靠外部 ollama/lmstudio**。MCP server 护城河 / Skill / 记忆向量召回 / mistral.rs / A2A 推 0.13。详见 [phases/0.12-ai-ecosystem.md](docs/production-design/phases/0.12-ai-ecosystem.md)
 
 ---
 

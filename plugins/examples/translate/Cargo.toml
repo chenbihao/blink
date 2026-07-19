@@ -1,6 +1,6 @@
 [package]
 name = "blink-plugin-translate"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Blink 翻译插件（Rust 版）— 5 引擎多语言翻译"
 

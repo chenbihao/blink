@@ -34,6 +34,23 @@ use super::engine::{Lane, QueryContext, SearchEngine, SearchItem};
 use super::scorer::{boost_priority, placeholder_score, source_rank};
 use super::{Action, ActionKind, AppEntry};
 
+// ── AI 调用相关常量（0.11 review L5：把魔法数字抽常量与文档对齐）─────────────────
+
+/// AI 总预算硬超时（毫秒）——`AIConfig::slo_hard_timeout_ms` 缺省时的兜底值。
+/// 对齐文档 §3.3「单次路由调用硬超时」默认 20s。
+const AI_DEFAULT_HARD_TIMEOUT_MS: u32 = 20_000;
+
+/// Turn 2 回流独立超时下限（毫秒）——即使总预算已耗尽，也保证 Turn 2 至少有 5s
+/// 完成总结/链式调用。文档 §2.2.5「Turn 2 独立超时：5-15s」。
+const TURN2_TIMEOUT_MIN_MS: u32 = 5_000;
+
+/// Turn 2 回流独立超时上限（毫秒）。文档 §2.2.5。
+const TURN2_TIMEOUT_MAX_MS: u32 = 15_000;
+
+/// Turn 2 超时降级后展示 Turn 1 结果前的短暂延迟（毫秒）——让"AI 回答较慢"占位
+/// 文案有时间被用户看到，避免一闪而过。文档 §3.4。
+const TURN2_FALLBACK_DELAY_MS: u64 = 300;
+
 /// 同步搜索返回契约（0.8.3 §4.3）——`SearchService::search` / `search_apps` command 出口。
 ///
 /// 在 `Vec<AppEntry>` 之外挂 `suggestion` 独立通道（0.8.3 起替代 0.8.1 的 `completion_hint`）：
@@ -766,7 +783,7 @@ impl SearchService {
             let provider_model = provider.model_id().to_string();
 
             let cfg = registry.config_snapshot();
-            let timeout_ms = cfg.slo_hard_timeout_ms.unwrap_or(20_000);
+            let timeout_ms = cfg.slo_hard_timeout_ms.unwrap_or(AI_DEFAULT_HARD_TIMEOUT_MS);
 
             // 0.9.7 Step 4: 聚合 tools 列表 = Action 分组 + 插件独立 + Capability 独立
             let action_reg = app.state::<Arc<ActionRegistry>>();
@@ -1697,8 +1714,16 @@ async fn handle_ai_tool_calls(
         Some((action, args)) => match action.danger_class() {
             DangerClass::Safe => {
                 // 执行 Safe Action → ToolExecutionResult
-                let result =
-                    execute_action_for_turn1(app, seq, tc, &action, args, &turn2_ctx.lang).await;
+                let result = execute_action_for_turn1(
+                    app,
+                    seq,
+                    tc,
+                    &action,
+                    args,
+                    &turn2_ctx.lang,
+                    latest_seq,
+                )
+                .await;
 
                 // 写审计日志 (turn=1)
                 write_audit(
@@ -1878,14 +1903,17 @@ fn items_to_entries(items: &[crate::domain::capability::ItemResult]) -> Vec<AppE
 /// 与 `ai_result_entry` 类似但语义不同:
 /// - 有执行结果(如 get_ip 返回 IP 地址)→ 展示结果文本,回车可复制
 /// - 无执行结果(如 open_url)→ 展示"已执行 {动作名}"
+///
+/// `lang` 透传自 Turn2Context.lang,让英文界面用户看到英文动作名（0.11 review B4 修复）。
 fn ai_action_done_entry(
     action: &dyn crate::domain::execution::Action,
     outcome: &crate::domain::execution::ActionOutcome,
+    lang: &str,
 ) -> AppEntry {
     use crate::domain::execution::ActionOutcome;
     use crate::domain::search::ActionKind;
 
-    let title = action.title().resolve("zh"); // 默认中文,后续可接 language
+    let title = action.title().resolve(lang);
 
     // 从 ActionOutcome 提取结果文本
     let result_text = match outcome {
@@ -2288,6 +2316,10 @@ async fn execute_capability_for_turn1(
 }
 
 /// 执行 Safe Action 并返回 `ToolExecutionResult`。
+///
+/// **before-seq 校验**（0.11 review W1）：Action 路径含 `open_path` 这类有副作用的动作，
+/// 不能像 Capability（只读）那样靠下游 `dispatch_turn1_result` 兜底——执行前先校验 seq，
+/// 过期 query 直接放弃执行，避免对已切走的 query 触发副作用（如打开文件）。
 async fn execute_action_for_turn1(
     app: &AppHandle,
     seq: u64,
@@ -2295,7 +2327,26 @@ async fn execute_action_for_turn1(
     action: &Arc<dyn crate::domain::execution::Action>,
     args: serde_json::Value,
     lang: &str,
+    latest_seq: &AtomicU64,
 ) -> ToolExecutionResult {
+    // before-seq 校验：用户已切到新 query → 不执行（副作用动作尤其重要）
+    if seq != latest_seq.load(Ordering::SeqCst) {
+        tracing::trace!(
+            target: ai_slo::TARGET,
+            tool = %tc.name,
+            "Turn 1 Action 执行前 seq 过期,跳过（避免对过期 query 执行副作用）"
+        );
+        return ToolExecutionResult {
+            tool_name: tc.name.clone(),
+            tool_call_id: tc.id.clone(),
+            arguments: args,
+            tool_message_content: "查询已过期,跳过执行".to_string(),
+            entries: vec![],
+            result_summary: "查询已过期,跳过执行".to_string(),
+            success: false,
+        };
+    }
+
     let cx = ActionContext::from_arguments(app, args.clone());
     match action.execute(&cx).await {
         Ok(outcome) => {
@@ -2318,7 +2369,7 @@ async fn execute_action_for_turn1(
                         e
                     }
                 }
-                _ => vec![ai_action_done_entry(action.as_ref(), &outcome)],
+                _ => vec![ai_action_done_entry(action.as_ref(), &outcome, lang)],
             };
 
             ToolExecutionResult {
@@ -2352,7 +2403,8 @@ async fn execute_action_for_turn1(
                 action: Action::default(),
                 ..Default::default()
             };
-            let _ = (seq, lang); // 预留
+            // seq 已在函数入口的 before-seq 校验中消费（review W1）；
+            // 此处 action.execute 已发生但失败，构造错误 entry 供下游 emit。
             ToolExecutionResult {
                 tool_name: tc.name.clone(),
                 tool_call_id: tc.id.clone(),
@@ -2552,9 +2604,9 @@ async fn run_turn2_feedback(
     // Turn 2 独立超时预算（从总预算派生）
     let turn2_timeout = ctx.deadline.map(|d| {
         let remaining = d.saturating_duration_since(Instant::now());
-        // 至少 5 秒，最多 15 秒
+        // 文档 §2.2.5：至少 TURN2_TIMEOUT_MIN_MS，最多 TURN2_TIMEOUT_MAX_MS
         let ms = remaining.as_millis() as u32;
-        ms.clamp(5000, 15000)
+        ms.clamp(TURN2_TIMEOUT_MIN_MS, TURN2_TIMEOUT_MAX_MS)
     });
 
     let req = CompletionRequest {
@@ -2637,10 +2689,19 @@ async fn run_turn2_feedback(
     // channel 关闭但没收到 Done → producer 出错了
     let elapsed = turn2_start.elapsed().as_millis() as u32;
     let producer_result = producer_handle.await;
-    match producer_result {
+
+    // 0.11 review W2: Turn 2 失败降级路径补审计日志（turn=2）。
+    // 此前只 Turn 1 自动执行写 turn=1 审计，Turn 2 失败时审计表会显示"工具只调了 1 次"，
+    // 对事后排查 tool chain 失败场景不利。这里统一在降级分支返回失败 summary，循环结束后写审计。
+    let turn2_outcome_summary: Option<String> = match producer_result {
         Ok(Ok(())) => {
             // 不该走到这里(正常应收到 Done),兜底处理
             tracing::warn!(target: ai_slo::TARGET, "Turn 2 stream 结束但未收到 Done");
+            let summary = if accumulated.trim().is_empty() {
+                "Turn 2 stream 提前结束（无文本）".to_string()
+            } else {
+                format!("Turn 2 stream 提前结束（部分文本: {}chars）", accumulated.chars().count())
+            };
             emit_ai_clear(app, seq, None);
             if !accumulated.trim().is_empty() {
                 emit_ai_stream(app, seq, "", &accumulated, true);
@@ -2648,6 +2709,7 @@ async fn run_turn2_feedback(
             } else {
                 emit_turn1_result(app, seq, &turn1_result);
             }
+            Some(summary)
         }
         Ok(Err(AIError::Timeout)) => {
             // §3.4 超时降级: 占位变 "AI 回答较慢,已展示原始结果" + Turn 1 结果直接 emit
@@ -2664,8 +2726,9 @@ async fn run_turn2_feedback(
                 ai_progress_placeholder("AI 回答较慢,已展示原始结果".into()),
             );
             // 短暂延迟后展示 Turn 1 结果
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(TURN2_FALLBACK_DELAY_MS)).await;
             emit_turn1_result(app, seq, &turn1_result);
+            Some(format!("Turn 2 超时（{elapsed}ms）"))
         }
         Ok(Err(e)) => {
             tracing::warn!(
@@ -2677,6 +2740,7 @@ async fn run_turn2_feedback(
             );
             emit_ai_clear(app, seq, None);
             emit_turn1_result(app, seq, &turn1_result);
+            Some(format!("Turn 2 失败: {e}"))
         }
         Err(e) => {
             // JoinError（task 被 abort 或 panic）
@@ -2689,7 +2753,22 @@ async fn run_turn2_feedback(
             );
             emit_ai_clear(app, seq, None);
             emit_turn1_result(app, seq, &turn1_result);
+            Some(format!("Turn 2 producer task 异常: {e}"))
         }
+    };
+
+    // 写 Turn 2 失败降级审计（turn=2，summary 记失败原因）
+    if let Some(summary) = turn2_outcome_summary {
+        write_audit(
+            &ctx.pool,
+            &turn1_result.tool_name,
+            &turn1_result.arguments,
+            &summary,
+            ctx.provider_kind.as_serde_str(),
+            &ctx.provider_model,
+            2,
+        )
+        .await;
     }
 }
 
@@ -2733,11 +2812,12 @@ async fn handle_turn2_tool_call(
                     2,
                 )
                 .await;
-                // emit 执行结果
-                emit_ai_clear(app, seq, None);
+                // emit 执行结果（review L4：空 entries 不先 emit clear 再 emit error，
+                // 直接根据是否有 entries 选 clear-with-msg 或 result_multi——避免双 emit 抖动）
                 if r.entries.is_empty() {
                     emit_ai_clear(app, seq, Some("工具返回空结果"));
                 } else {
+                    emit_ai_clear(app, seq, None);
                     emit_ai_result_multi(app, seq, r.entries);
                 }
             }
@@ -2760,8 +2840,16 @@ async fn handle_turn2_tool_call(
             match action.danger_class() {
                 DangerClass::Safe if !is_open_url => {
                     // 自动执行（D4: open_path 保持自动）
-                    let result = execute_action_for_turn1(app, seq, tc, &action, args, &ctx.lang)
-                        .await;
+                    let result = execute_action_for_turn1(
+                        app,
+                        seq,
+                        tc,
+                        &action,
+                        args,
+                        &ctx.lang,
+                        latest_seq,
+                    )
+                    .await;
 
                     // 写审计日志 (turn=2)
                     write_audit(

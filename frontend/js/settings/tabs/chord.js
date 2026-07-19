@@ -329,7 +329,10 @@ async function startRecording(btn) {
     const fullCfg = await invoke("get_config");
     const bindings = fullCfg?.chord_bindings || {};
     if (!bindings[id]) {
-      bindings[id] = { key: "", modifiers: ["alt"], semantic: "tap" };
+      // 只补 key/modifiers，不写 semantic —— semantic 缺省即走后端 default_semantic()。
+      // 早期版本曾写 `semantic: "tap"`，会让 voice_input（若日后允许改键）从 Hold 静默降级 Tap，
+      // 并被收进 tap_keys 让 LL hook 吞 Alt+Space。0.11.7 已在后端加 id 特判兜底，此处配合去掉。
+      bindings[id] = { key: "", modifiers: ["alt"] };
     }
     bindings[id].key = key;
     await saveConfig("chord_bindings", bindings);

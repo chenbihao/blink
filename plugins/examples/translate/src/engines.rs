@@ -376,8 +376,20 @@ fn serde_urlencoded_encode(params: &Value) -> String {
         .collect::<Vec<_>>().join("&")
 }
 
-/// 生成类 UUID 的 nonce（不用 uuid crate，用时间戳+随机数模拟）。
+/// 生成类 UUID 的 nonce（不用 uuid crate，用时间戳+进程内计数器）。
+///
+/// **0.11 review W4 修复**：此前只用时间戳，快速连续调用（同纳秒）会生成相同 nonce，
+/// 阿里云 `SignatureNonce` 防重放可能拒第二次请求。现在加进程内单调递增 counter，
+/// 保证同进程内每次调用都不同（跨进程靠 PID + 启动时间差异）。
 fn uuid_like() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let now = chrono::Utc::now();
-    format!("{}-{:x}", now.timestamp(), now.timestamp_subsec_nanos())
+    let seq = COUNTER.fetch_add(1, Ordering::SeqCst);
+    format!(
+        "{}-{:x}-{}",
+        now.timestamp(),
+        now.timestamp_subsec_nanos(),
+        seq
+    )
 }

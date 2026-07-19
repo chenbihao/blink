@@ -61,7 +61,7 @@
 | **0.9** | [phases/0.9-ai-layer.md](./phases/0.9-ai-layer.md) | Agent 地基 —— rig-core 全 buildin 直编 + 统一 tool 架构 + Provider 多档 + 主窗口文本闭环 + 插件 tool-call + 供应商配置 UI + 前端架构重整 + Capability 能力协议层 | ✅ 完成 |
 | **0.10** | [phases/0.10-voice-agent.md](./phases/0.10-voice-agent.md) | 语音输入 —— STT + 语音打字(G1 主窗口输入 / G2 输入法上屏)+ 伪流式 VAD 切句 + FunASR 本地化 + SendInput 文本注入 | ✅ 完成 |
 | **0.11** | [phases/0.11-plugin-ai-toolchain.md](./phases/0.11-plugin-ai-toolchain.md) | 插件通信契约重设计 + AI 调用插件链路完善（主线：结果模型统一 / 工具元信息 / 应用搜索 Capability / 提示词管理 / 结果回流+tool chain / 剪贴板历史 Capability / 翻译插件全量 Rust 化） | ✅ 完成 |
-| **0.12** | [phases/0.12-ai-ecosystem.md](./phases/0.12-ai-ecosystem.md) | AI 生态完善（本地模型 / skill 化 / MCP 双向 / A2A / RAG 记忆 / 单独对话窗口） | 📋 规划中 |
+| **0.12** | [phases/0.12-ai-ecosystem.md](./phases/0.12-ai-ecosystem.md) | AI 能力架构搭建（基础设施抽取 + DB 拆分 / 本地 Provider ollama+lmstudio / 对话窗口★ / 对话机制 conversation 隔离+持久化 memory+tool loop / MCP client / RAG；MCP server/Skill/向量召回/mistral.rs/A2A 推 0.13） | 📋 规划中 |
 
 ### 2.3 其他参考
 
@@ -102,7 +102,7 @@
 | **0.10.4** | 伪流式 VAD 切句定稿 + 累积预览 + 移除真流式 + 架构清理 | ✅ 完成 |
 | **0.10.5** | 收尾体验优化（VAD 滑动条 + 高级选项 UI + 文档精简） | ✅ 完成 |
 | **0.11.x** | 插件通信契约重设计 + AI 调用插件链路完善（0.11.0~0.11.6：结果模型统一 / 工具元信息 / 应用搜索 Capability / 提示词管理 / 结果回流+tool chain / 剪贴板历史 Capability / 翻译插件全量 Rust 化）| ✅ 完成 |
-| **0.12.x** | AI 生态完善（0.12.0~0.12.7：ollama 集成 / MCP server 护城河 / MCP client / Skill 化 / 对话窗口 / RAG / 记忆 / 内嵌运行时 / A2A）| 后置 |
+| **0.12.x** | AI 能力架构搭建（0.12.0~0.12.4：基础设施抽取+DB 拆分 / ollama+lmstudio / 对话窗口★ / 对话机制 / MCP client / RAG；MCP server/Skill/向量召回/mistral.rs/A2A 推 0.13）| 后置 |
 
 ---
 
@@ -122,5 +122,5 @@
 | 0.9 Agent 地基 + Capability 能力协议层怎么落? | [phases/0.9-ai-layer.md](./phases/0.9-ai-layer.md) |
 | 0.10 语音输入(STT + 语音打字)? | [phases/0.10-voice-agent.md](./phases/0.10-voice-agent.md) |
 | 0.11 插件通信契约重设计 + AI 调用插件链路完善? | [phases/0.11-plugin-ai-toolchain.md](./phases/0.11-plugin-ai-toolchain.md) |
-| 0.12 AI 生态完善（本地模型 / skill / MCP / RAG / 对话窗口）? | [phases/0.12-ai-ecosystem.md](./phases/0.12-ai-ecosystem.md) |
+| 0.12 AI 能力架构搭建（对话窗口 / 对话机制 / 调用能力 / RAG / DB 拆分 / ollama+lmstudio）? | [phases/0.12-ai-ecosystem.md](./phases/0.12-ai-ecosystem.md) |
 | 开发规范、模块拆分、Tauri Commands | [CLAUDE.md](../../CLAUDE.md) |
