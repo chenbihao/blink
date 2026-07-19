@@ -202,9 +202,30 @@ impl SearchEngine for BuiltinEngine {
             //     否则会出现"复制'缺' + 输入'打开链接'"这种 keyword 蒙混、参数不合法
             //     的僵尸候选，回车执行时报"找不到文件'缺'"。
             //     无 context 声明的 Action（现有 9 个无参动作）不受此闸门约束。
-            let ctx_hit = ctx_trigger::any_hit(action.context, ctx.snapshot, None);
-            if !action.context.is_empty() && !ctx_hit {
-                continue;
+            //
+            //     0.11.8：逐 trigger 判定而非 `any_hit` 聚合——命中后还需查 binding
+            //     黑名单（`disabled_context_bindings`），让内置动作的 context 触发能按
+            //     binding 粒度禁用。多 trigger 时只要有一条命中且未禁用即算通过。
+            let mut ctx_hit = false;
+            if !action.context.is_empty() {
+                for trig in action.context {
+                    if !ctx_trigger::is_hit(trig, ctx.snapshot, None) {
+                        continue;
+                    }
+                    let key = crate::domain::intent::binding_key(
+                        &format!("builtin:{}", action.id),
+                        crate::domain::intent::trigger_key(trig),
+                    );
+                    if ctx.disabled_context_bindings.iter().any(|k| k == &key) {
+                        tracing::trace!(binding = %key, "内置动作 context binding 被禁用，跳过该 trigger");
+                        continue;
+                    }
+                    ctx_hit = true;
+                    break;
+                }
+                if !ctx_hit {
+                    continue;
+                }
             }
 
             // 2b. 参数抽取 + 参数校验：Action 声明需要参数但抽不到值 → 不召回
@@ -410,6 +431,56 @@ pub fn list_builtin_actions(
         .collect()
 }
 
+/// 列出所有内置动作的 Context binding（0.11.8）。
+///
+/// **用途**：设置页「Ghost 触发规则」面板。此前该面板只枚举插件 manifest 的 context
+/// binding（`list_context_bindings` 命令），漏掉了内置参数化动作（`open_url` /
+/// `open_path` / `reveal_in_explorer`）——它们在 `BuiltinEngine.search` 内部自判 context，
+/// 不走 `RuleRouter.context_rules`。本函数补齐这一路，让前端 UI 能 disable 内置动作的
+/// context 触发，对应 `BuiltinEngine` 已支持的 `disabled_context_bindings` 黑名单。
+///
+/// **字段与 `list_context_bindings` 命令对齐**（`commands.rs`），前端 `renderBindingRow`
+/// 无需区分 manifest / builtin 两路来源，走同一渲染逻辑：
+/// - `key`：`{target_id}::{trigger_key}`，如 `builtin:open_url::clipboard_is_url`
+/// - `target_id`：`builtin:{action.id}`，与 `SearchItem.id` 一致
+/// - `trigger_key`：snake_case，由 `intent::trigger_key` 派生
+/// - `target_label`：动作名（i18n 解析），缺失时降级 `target_id`
+/// - `trigger_label`：snake_case key，前端按 i18n 翻译
+/// - `enabled`：binding 是否启用（未在黑名单中）
+///
+/// `disabled` 是 `AppConfig.disabled_context_bindings` 的快照。
+pub fn list_builtin_context_bindings(
+    disabled: &[String],
+    registry: &crate::domain::execution::ActionRegistry,
+    language: &str,
+) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for action in ACTIONS.iter() {
+        if action.context.is_empty() {
+            continue;
+        }
+        let target_id = format!("builtin:{}", action.id);
+        let target_label = registry
+            .get(action.id)
+            .map(|a| a.title().resolve(language))
+            .unwrap_or_else(|| target_id.clone());
+        for trig in action.context {
+            let trigger_key = crate::domain::intent::trigger_key(trig);
+            let key = crate::domain::intent::binding_key(&target_id, trigger_key);
+            let enabled = !disabled.iter().any(|k| k == &key);
+            out.push(serde_json::json!({
+                "key": key,
+                "target_id": target_id,
+                "trigger_key": trigger_key,
+                "target_label": target_label,
+                "trigger_label": trigger_key, // 前端按 key 翻译（i18n）
+                "enabled": enabled,
+            }));
+        }
+    }
+    out
+}
+
 /// 触发方式的**补充**可读描述。
 ///
 /// 组合规则（0.8.0 §1.3 设置页）——只在需要补充信息时才输出，避免与 `keywords: ...` 行重复：
@@ -469,6 +540,7 @@ mod tests {
             history,
             snapshot,
             disabled_builtin_actions: &[],
+            disabled_context_bindings: &[],
         }
     }
 
@@ -608,6 +680,7 @@ mod tests {
             history: &history,
             snapshot: &snapshot,
             disabled_builtin_actions: &disabled,
+            disabled_context_bindings: &[],
         };
 
         // "设置" 原本匹配 open_settings；被 disable 后不召回
@@ -737,10 +810,83 @@ mod tests {
             history: &history,
             snapshot: &snapshot,
             disabled_builtin_actions: &disabled,
+            disabled_context_bindings: &[],
         };
 
         let items = tauri::async_runtime::block_on(engine.search("", &ctx));
         assert!(items.iter().all(|it| it.id != "builtin:open_url"));
+    }
+
+    // ── 0.11.8：context binding 黑名单（disabled_context_bindings） ─────────
+
+    #[test]
+    fn context_binding_disabled_blocks_empty_query_recall() {
+        // 剪贴板是 URL，但 `builtin:open_url::clipboard_is_url` 被 binding 粒度禁用
+        // → 空 query 时 open_url 不召回（与整条禁用等价，但能仅禁 context 不禁 keyword）
+        let engine = BuiltinEngine;
+        let history = HashMap::new();
+        let snapshot = snapshot_with_clipboard("https://example.com");
+        let disabled_ctx = vec!["builtin:open_url::clipboard_is_url".to_string()];
+        let ctx = QueryContext {
+            history: &history,
+            snapshot: &snapshot,
+            disabled_builtin_actions: &[],
+            disabled_context_bindings: &disabled_ctx,
+        };
+
+        let items = tauri::async_runtime::block_on(engine.search("", &ctx));
+        assert!(
+            items.iter().all(|it| it.id != "builtin:open_url"),
+            "binding 黑名单禁用后，空 query Context 召回应被挡下"
+        );
+    }
+
+    #[test]
+    fn context_binding_disabled_keeps_keyword_recall_when_context_still_hits() {
+        // 反向验证：binding 禁用了 context 触发，但 keyword 路径应也不召回——
+        // 因为 builtin_engine 的 Context 门禁要求「参数化 Action 必须 context 命中」，
+        // context 被禁 = context 未命中 = keyword 也不能绕过（与 disabled_builtin_actions
+        // 同语义，只是粒度更细）。这是设计一致性验证。
+        let engine = BuiltinEngine;
+        let history = HashMap::new();
+        let snapshot = snapshot_with_clipboard("https://example.com");
+        let disabled_ctx = vec!["builtin:open_url::clipboard_is_url".to_string()];
+        let ctx = QueryContext {
+            history: &history,
+            snapshot: &snapshot,
+            disabled_builtin_actions: &[],
+            disabled_context_bindings: &disabled_ctx,
+        };
+
+        // keyword "打开链接" 本会命中 open_url，但 context 被 binding 禁用 → 门禁挡下
+        let items = tauri::async_runtime::block_on(engine.search("打开链接", &ctx));
+        assert!(
+            items.iter().all(|it| it.id != "builtin:open_url"),
+            "binding 禁用 context 后，keyword 路径也应被 Context 门禁挡下"
+        );
+    }
+
+    #[test]
+    fn context_binding_unrelated_key_does_not_block() {
+        // 保护：黑名单里是无关 key（其他 action 的 binding）不应误伤本 action。
+        // 剪贴板是 URL，黑名单含 `builtin:open_path::clipboard_is_file_path`（无关）→
+        // open_url 应正常召回。
+        let engine = BuiltinEngine;
+        let history = HashMap::new();
+        let snapshot = snapshot_with_clipboard("https://example.com");
+        let disabled_ctx = vec!["builtin:open_path::clipboard_is_file_path".to_string()];
+        let ctx = QueryContext {
+            history: &history,
+            snapshot: &snapshot,
+            disabled_builtin_actions: &[],
+            disabled_context_bindings: &disabled_ctx,
+        };
+
+        let items = tauri::async_runtime::block_on(engine.search("", &ctx));
+        assert!(
+            items.iter().any(|it| it.id == "builtin:open_url"),
+            "无关 binding key 不应影响 open_url 召回"
+        );
     }
 
     // ── 0.10.8 §11.2 方案 1：context_aware 标记 ──────────────────────────────

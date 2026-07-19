@@ -91,3 +91,160 @@ html, body {
   background: rgba(255, 255, 255, 0.1);
   color: #fff;
 }
+
+/* 0.11.9-f：右键菜单分隔线 */
+.ctx-sep {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.12);
+  margin: 4px 6px;
+}
+
+/* ── 0.11.9-f：pin 窗口内 OCR 面板 ────────────────────── */
+
+#pin-ocr-panel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 200;
+  background: rgba(30, 30, 30, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+  min-width: 320px;
+  width: 480px;
+  max-height: 420px;
+  display: flex;
+  flex-direction: column;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+.pin-ocr-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.pin-ocr-tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.pin-ocr-tab {
+  background: transparent;
+  border: none;
+  color: #888;
+  font-size: 12px;
+  padding: 4px 12px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.pin-ocr-tab:hover {
+  color: #ddd;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.pin-ocr-tab.active {
+  color: #4a9eff;
+  background: rgba(74, 158, 255, 0.12);
+}
+
+.pin-ocr-tab .stale-dot {
+  display: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #f59e0b;
+}
+
+.pin-ocr-tab[data-stale="true"] .stale-dot {
+  display: inline-block;
+}
+
+#pin-ocr-close {
+  background: transparent;
+  border: none;
+  color: #aaa;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: var(--radius-xs);
+}
+
+#pin-ocr-close:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+#pin-ocr-panel textarea {
+  margin: 10px 12px;
+  padding: 10px 12px;
+  min-height: 180px;
+  max-height: 260px;
+  flex: 1;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: var(--radius-xs);
+  color: #eee;
+  font-size: 13px;
+  font-family: "Cascadia Code", "Consolas", "Segoe UI", "Microsoft YaHei", monospace;
+  line-height: 1.6;
+  resize: none;
+  outline: none;
+  overflow-y: auto;
+}
+
+#pin-ocr-panel textarea:focus {
+  border-color: rgba(74, 158, 255, 0.6);
+}
+
+#pin-ocr-panel textarea[hidden] {
+  display: none;
+}
+
+#pin-ocr-panel textarea[data-stale="true"] {
+  opacity: 0.6;
+}
+
+.pin-ocr-footer {
+  padding: 6px 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.pin-ocr-footer button {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: #ddd;
+  font-size: 12px;
+  padding: 4px 12px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+}
+
+.pin-ocr-footer button:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.pin-ocr-footer button.primary {
+  background: rgba(74, 158, 255, 0.85);
+  border-color: rgba(74, 158, 255, 0.9);
+  color: #fff;
+}
+
+.pin-ocr-footer button.primary:hover {
+  background: rgba(74, 158, 255, 1);
+}
+
+.pin-ocr-footer button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}

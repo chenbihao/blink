@@ -3,6 +3,8 @@
 pub mod audio;
 pub mod clipboard;
 pub mod context;
+#[cfg(windows)]
+pub mod dpi;
 pub mod hotkey;
 pub mod inject;
 pub mod locale;

@@ -167,6 +167,11 @@ pub fn is_hit(
 /// 任一 trigger 命中即通过（OR 语义）。空 slice 恒 false（= 不参与 Context 路由）。
 ///
 /// **参数**：`target` 仅供 `TextIsNonTargetLang` 使用；其他 trigger 忽略。
+///
+/// 0.11.8：`BuiltinEngine` 改为逐 trigger 判定（需查 binding 黑名单），不再调用本函数；
+/// 当前唯一消费者是本模块的测试。保留作公共 API——未来出现「多 trigger + 无需逐个查黑名单」
+/// 的场景（如纯 OR 语义的命中预检）可直接复用。
+#[allow(dead_code)]
 pub fn any_hit(
     triggers: &[ContextTrigger],
     snapshot: &AwarenessSnapshot,

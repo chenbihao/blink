@@ -138,7 +138,8 @@ pub fn backend() -> Arc<dyn ScreenshotBackend> {
 }
 
 /// 枚举所有显示器（0.11.7-f）——转发到当前 backend。
-#[allow(dead_code)] // Step 2 Capability 消费
+///
+/// 0.11.9：`show_screenshot_overlay` 注入 `__blinkScreenMeta.displays` 时调用。
 pub fn list_displays() -> Vec<DisplayGeometry> {
     backend().list_displays()
 }

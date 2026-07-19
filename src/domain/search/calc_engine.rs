@@ -84,6 +84,7 @@ mod tests {
             history: &h,
             snapshot: &snapshot,
             disabled_builtin_actions: &[],
+            disabled_context_bindings: &[],
         };
         // 引擎 search 是 async,但 CalcEngine 内部纯同步,用 block_on 跑测试
         tauri::async_runtime::block_on(engine.search(q, &ctx))

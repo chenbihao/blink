@@ -16,7 +16,6 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Controls::MARGINS;
-use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, GWL_STYLE, GWLP_WNDPROC, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW,
     GetWindowThreadProcessId, HWND_TOP, IsIconic, SET_WINDOW_POS_FLAGS, SW_RESTORE,
@@ -310,13 +309,10 @@ fn launcher_position(_win: &WebviewWindow) -> Option<PhysicalPosition<i32>> {
         if GetMonitorInfoW(hmon, &mut mi).as_bool() {
             let rc = mi.rcWork; // 工作区（排除任务栏），与 clamp_to_work_area 一致
 
-            // 目标屏 DPI（EFFECTIVE）→ scale。取不到时按 96 DPI（100%）兜底。
-            let mut dpi_x: u32 = 96;
-            let mut dpi_y: u32 = 96;
-            let _ = GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
-            let scale = (dpi_x.max(96) as f64) / 96.0;
-            let w = (BASE_W_LOGICAL * scale).round() as i32;
-            let h = (BASE_H_LOGICAL * scale).round() as i32;
+            // 0.11.9：走公共 DPI helper
+            let dpi_x = crate::infra::platform::dpi::get_dpi_for_hmonitor(hmon);
+            let w = crate::infra::platform::dpi::logical_to_physical(BASE_W_LOGICAL, dpi_x);
+            let h = crate::infra::platform::dpi::logical_to_physical(BASE_H_LOGICAL, dpi_x);
 
             let cx = rc.left + (rc.right - rc.left) / 2;
             let cy = rc.top + (rc.bottom - rc.top) / 2;
@@ -407,11 +403,9 @@ pub fn clamp_context_menu(css_w: f64, css_h: f64) -> (i32, i32, u32, u32) {
             }
         };
 
-        // 目标显示器 DPI → scale factor
-        let mut dpi_x: u32 = 96;
-        let mut dpi_y: u32 = 96;
-        let _ = GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
-        let scale = (dpi_x.max(96) as f64) / 96.0;
+        // 0.11.9：走公共 DPI helper
+        let dpi_x = crate::infra::platform::dpi::get_dpi_for_hmonitor(hmon);
+        let scale = crate::infra::platform::dpi::scale_factor(dpi_x);
 
         // CSS 像寸 → 物理像素
         let phys_w = (css_w * scale).round() as i32;
@@ -614,16 +608,21 @@ pub fn show_screenshot_overlay(
     use tauri::{WebviewUrl, WebviewWindowBuilder};
     const LABEL: &str = "chord-screenshot";
 
+    // 0.11.9：注入每屏几何 + DPI（前端工具栏/OCR panel 按"选区所在屏"clamp，
+    // 不再以整个虚拟屏幕为基准——副屏左边缘做选区时工具栏不会被推到主屏）。
+    // x/y/w/h 是物理像素，前端用 devicePixelRatio 折算回 CSS 像素与 selCss 对齐。
+    let displays_json = build_displays_json();
+    let meta_js = format!(
+        "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {}, displays: {} }};",
+        meta.virtual_x, meta.virtual_y, meta.width, meta.height, displays_json
+    );
+
     // 复用已存在的窗口：先 eval 清屏 + 重定位 → show → 触发重新加载
     if let Some(win) = app.get_webview_window(LABEL) {
         // 先清屏再 show —— 否则窗口刚出来会看到上次结束时的选区/虚线框闪一下
         // （webview `.show()` 到 __blinkReloadScreenshot 执行之间有毫秒级空档）
         let _ = win.eval("window.__blinkReloadScreenshot && window.__blinkReloadScreenshot()");
-        // 注入虚拟屏幕原点（钉图定位用：CSS 坐标 → 屏幕物理坐标）
-        let _ = win.eval(format!(
-            "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {} }};",
-            meta.virtual_x, meta.virtual_y, meta.width, meta.height
-        ));
+        let _ = win.eval(&meta_js);
         if let Ok(hwnd) = win.hwnd() {
             place_at_physical(
                 HWND(hwnd.0 as _),
@@ -661,13 +660,30 @@ pub fn show_screenshot_overlay(
             meta.height,
         );
     }
-    // 注入虚拟屏幕原点（钉图定位用：CSS 坐标 → 屏幕物理坐标）
-    let _ = win.eval(format!(
-        "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {} }};",
-        meta.virtual_x, meta.virtual_y, meta.width, meta.height
-    ));
+    let _ = win.eval(&meta_js);
 
     Ok(())
+}
+
+/// 构造 `__blinkScreenMeta.displays` 字段的 JS 数组字面量。
+///
+/// 每屏一项：`{ x, y, w, h, dpi, primary }`（物理像素 + DPI）。
+/// 失败时返回空数组 `[]`，前端按"无 displays 信息"降级到旧的虚拟屏幕 clamp。
+fn build_displays_json() -> String {
+    let displays = crate::infra::platform::screenshot::list_displays();
+    if displays.is_empty() {
+        return "[]".to_string();
+    }
+    let items: Vec<String> = displays
+        .iter()
+        .map(|d| {
+            format!(
+                "{{ x: {}, y: {}, w: {}, h: {}, dpi: {}, primary: {} }}",
+                d.x, d.y, d.w, d.h, d.dpi, d.primary
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(", "))
 }
 
 /// 按物理像素强制定位窗口，覆盖 Tauri 逻辑像素接口的 DPI 缩放。
@@ -1054,10 +1070,9 @@ pub fn open_settings(app: &AppHandle) {
                 bottom: 1080,
             }
         };
-        let mut dpi_x: u32 = 96;
-        let mut dpi_y: u32 = 96;
-        let _ = GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
-        (work, dpi_x.max(96))
+        // 0.11.9：走公共 DPI helper（get_dpi_for_hmonitor 内部已 .max(96) 兜底）
+        let target_dpi = crate::infra::platform::dpi::get_dpi_for_hmonitor(hmon);
+        (work, target_dpi)
     };
     let work_w = work.right - work.left;
     let work_h = work.bottom - work.top;
@@ -1088,7 +1103,7 @@ pub fn open_settings(app: &AppHandle) {
         });
         let css_w = (cur_phys.width as f64) / cur_scale;
         let css_h = (cur_phys.height as f64) / cur_scale;
-        let target_scale = (target_dpi as f64) / 96.0;
+        let target_scale = crate::infra::platform::dpi::scale_factor(target_dpi);
         let phys_w = (css_w * target_scale).round() as i32;
         let phys_h = (css_h * target_scale).round() as i32;
         // clamp 到目标屏工作区
@@ -1125,7 +1140,7 @@ pub fn open_settings(app: &AppHandle) {
         .background_color(tauri::window::Color(0, 0, 0, 0))
         .build()
         .expect("创建设置窗口失败");
-    let scale = (target_dpi as f64) / 96.0;
+    let scale = crate::infra::platform::dpi::scale_factor(target_dpi);
     let phys_w = (960.0 * scale).round() as i32;
     let phys_h = (680.0 * scale).round() as i32;
     let win_w = phys_w.min(work_w);

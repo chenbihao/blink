@@ -196,6 +196,11 @@ pub struct QueryContext<'a> {
     /// 用户禁用的内置动作 id（0.8.0 §1.3）。`BuiltinEngine` 召回时跳过。
     /// 其他引擎不消费此字段；用 `&[String]` 而非 `&HashSet` 是因为动作总数 <20 线性查找足够。
     pub disabled_builtin_actions: &'a [String],
+    /// 用户禁用的 context binding key 列表（`{target_id}::{trigger_key}` 格式）。
+    ///
+    /// 0.11.8 起 `BuiltinEngine` 也消费此字段——内置参数化动作（如 `open_url`）的
+    /// context 触发可按 binding 粒度 disable，不再只能整条禁用。其他引擎不消费。
+    pub disabled_context_bindings: &'a [String],
 }
 
 /// 搜索引擎:一路召回源。

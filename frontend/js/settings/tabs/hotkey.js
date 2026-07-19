@@ -51,13 +51,21 @@ function initHotkeyRecording() {
   if (hotkeyResetBtn) {
     hotkeyResetBtn.addEventListener("click", async (e) => {
       e.stopPropagation();
-      const defaultHotkey = { modifiers: [], key: "ralt", display: "RightAlt" };
+      // 从后端拿真·默认值（HotkeyConfig::default()），避免前端硬编码字面量与后端漂移。
+      // 历史 bug：曾把 RightAlt 当默认值，与后端 Alt+Space 不一致。
+      let defaultHotkey;
+      try {
+        defaultHotkey = await invoke("get_default_hotkey");
+      } catch (err) {
+        console.error("[reset] get_default_hotkey failed:", err);
+        return;
+      }
       await saveConfig("hotkey", {
         modifiers: defaultHotkey.modifiers,
         key: defaultHotkey.key,
         display: defaultHotkey.display,
       });
-      renderHotkeyInto(hotkeyRecordBtn, "RightAlt");
+      renderHotkeyInto(hotkeyRecordBtn, defaultHotkey.display);
       const currentConfig = getCurrentConfig();
       if (currentConfig) currentConfig.hotkey = defaultHotkey;
     });
@@ -103,7 +111,7 @@ async function startRecording() {
   } catch (e) {
     console.error("[startRecording] failed:", e);
     const currentConfig = getCurrentConfig();
-    renderHotkeyInto(hotkeyRecordBtn, currentConfig?.hotkey?.display || "RightAlt");
+    renderHotkeyInto(hotkeyRecordBtn, currentConfig?.hotkey?.display || "Alt+Space");
   } finally {
     document.removeEventListener("keydown", suppress, true);
     hotkeyRecordBtn.classList.remove("recording");
@@ -192,7 +200,7 @@ function applyHotkeyConfig(cfg) {
   // 快捷键显示
   const hotkeyBtn = document.getElementById("hotkey-record");
   if (hotkeyBtn && cfg.hotkey) {
-    renderHotkeyInto(hotkeyBtn, cfg.hotkey.display || "RightAlt");
+    renderHotkeyInto(hotkeyBtn, cfg.hotkey.display || "Alt+Space");
   }
 
   // tap 阈值

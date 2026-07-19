@@ -22,6 +22,7 @@ import {
   screenshotSetAnnotationMode,
   hideScreenshotOverlay,
   ocrImage,
+  translateText,
   frontendLog,
 } from "./api.js";
 import * as annot from "./annotation-engine.js";
@@ -132,6 +133,8 @@ function resetState() {
   }
   annotCanvas.width = 0;
   annotCanvas.height = 0;
+  // 0.11.9-c：清阅读模式
+  exitReadingMode();
   // 通知后端清除标注模式
   screenshotSetAnnotationMode(false).catch((e) => console.error('setAnnotationMode(false) 失败', e));
   // 清 OCR 面板（如果上次遗留）
@@ -483,8 +486,62 @@ function exitAnnotationMode() {
   drawDimmed();
 }
 
+// ── 显示器几何（多屏混合 DPI 正确 clamp）──────────────────
+//
+// 后端 show_screenshot_overlay 注入 window.__blinkScreenMeta.displays：
+//   [{ x, y, w, h, dpi, primary }, ...]  —— 全是虚拟屏物理像素
+// selCss / window.inner* 是 CSS 像素，混合 DPI 下两者的「物理↔CSS」换算系数
+// 在不同屏上不同（主屏 100% = 1.0、副屏 150% = 1.5），所以不能用一个 dpr 统一折算。
+// 这里的策略：把每块屏的物理矩形用**它自己的 dpr** 折算成「overlay CSS 坐标系里
+// 这块屏占的矩形」，之后选区中心点 point-in-rect 找出选区所在屏，clamp 基准就是
+// 这块屏的 CSS 矩形。
+
+/**
+ * 取注入的 displays 列表（每屏物理几何 + DPI）。
+ * 缺失返回空数组，调用方按"无多屏信息"降级到旧的 innerWidth/innerHeight clamp。
+ */
+function getDisplays() {
+  const meta = window.__blinkScreenMeta;
+  return (meta && Array.isArray(meta.displays) && meta.displays) || [];
+}
+
+/**
+ * 把单块屏的物理几何折算成 overlay CSS 坐标系里的矩形。
+ * 单屏环境：dpr 与 window.devicePixelRatio 相同，结果就是 (0,0,innerW,innerH)。
+ * 混合 DPI：每屏用各自的 dpr（= dpi/96）折算，结果矩形拼接覆盖整个 overlay。
+ */
+function displayToCss(d) {
+  const dpr = (d && d.dpi ? d.dpi : 96) / 96;
+  return {
+    x: d.x / dpr,
+    y: d.y / dpr,
+    w: d.w / dpr,
+    h: d.h / dpr,
+  };
+}
+
+/**
+ * 给一个 CSS 坐标点，返回它所在屏的 CSS 矩形（含 fallback）。
+ *
+ * 找不到匹配屏（极端：注入的 displays 还没就绪）时，回退到整个 overlay 视口，
+ * 保证函数永不返回 null —— 调用方不必处理空值。
+ */
+function findDisplayCssAt(cssX, cssY) {
+  const displays = getDisplays();
+  for (const d of displays) {
+    const r = displayToCss(d);
+    if (cssX >= r.x && cssX < r.x + r.w && cssY >= r.y && cssY < r.y + r.h) {
+      return r;
+    }
+  }
+  // fallback：整个 overlay 视口（单屏或 displays 未就绪时走这里）
+  return { x: 0, y: 0, w: window.innerWidth, h: window.innerHeight };
+}
+
 /** 定位工具栏到选区右下外侧（PixPin 风格）。
- *  0.11.8-a：若用户已手动拖过工具栏（dataset.userMoved），保留用户位置不重定位。 */
+ *  0.11.8-a：若用户已手动拖过工具栏（dataset.userMoved），保留用户位置不重定位。
+ *  0.11.9：按"选区所在屏"clamp（不再以整个虚拟屏为基准）—— 副屏左边缘做选区时
+ *          工具栏不会被推到另一块屏去。混合 DPI 也正确（每屏 CSS 矩形按各自 dpr 折算）。 */
 function positionToolbar(rect) {
   toolbar.style.display = 'flex';
   // 用户已拖过 → 保留位置，仅确保 display:flex 即可
@@ -498,28 +555,29 @@ function positionToolbar(rect) {
   requestAnimationFrame(() => {
     const tw = toolbar.offsetWidth;
     const th = toolbar.offsetHeight;
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
+    // 选区中心点定位"当前屏"——混合 DPI 下中心点不会落在屏边界外
+    const mon = findDisplayCssAt(rect.x + rect.w / 2, rect.y + rect.h / 2);
+    const MARGIN = 8;
 
     // 右对齐选区右边缘
     let left = rect.x + rect.w - tw;
-    if (left + tw > vw - 8) left = vw - tw - 8;
-    if (left < 8) left = 8;
+    if (left + tw > mon.x + mon.w - MARGIN) left = mon.x + mon.w - tw - MARGIN;
+    if (left < mon.x + MARGIN) left = mon.x + MARGIN;
 
     // 位于选区下方 8px
-    let top = rect.y + rect.h + 8;
+    let top = rect.y + rect.h + MARGIN;
     // 底部空间不足 → 翻转到选区上方
-    if (top + th > vh - 8) {
-      top = rect.y - th - 8;
+    if (top + th > mon.y + mon.h - MARGIN) {
+      top = rect.y - th - MARGIN;
     }
-    // 上方也不够 → 强制在选区内右下角（贴内边）
-    if (top < 8) {
-      top = Math.max(8, vh - th - 8);
+    // 上方也不够 → 贴当前屏底部
+    if (top < mon.y + MARGIN) {
+      top = Math.max(mon.y + MARGIN, mon.y + mon.h - th - MARGIN);
     }
 
     toolbar.style.left = left + 'px';
     toolbar.style.top = top + 'px';
-    console.debug('[screenshot] toolbar 定位', { left, top, tw, th, rect });
+    console.debug('[screenshot] toolbar 定位', { left, top, tw, th, rect, mon });
   });
 }
 
@@ -883,6 +941,21 @@ function doOcrSelection() {
   });
 }
 
+/**
+ * 0.11.9-e：一条龙"翻译"——OCR + 立即翻译,面板停在译文 tab。
+ * 与 doOcrSelection 唯一差别是 showOcrResult 传 `{ autoTranslate: true }`。
+ */
+function doTranslateSelection() {
+  if (!selCss || sent) return;
+  sent = true;
+  compositeSelection((pngBytes) => {
+    ocrImage(pngBytes)
+      .then((result) => showOcrResult(result, { autoTranslate: true }))
+      .catch((err) => console.error('[screenshot] ocr(translate) 失败', err))
+      .finally(() => { sent = false; });
+  });
+}
+
 let cancelInProgress = false;
 function doCancel() {
   if (cancelInProgress) return;
@@ -896,100 +969,524 @@ function doCancel() {
   }
 }
 
-// ── OCR 结果面板 ─────────────────────────────────────
+// ── OCR 阅读模式（0.11.9-c）─────────────────────────────
+//
+// OCR 完成后 overlay 不关,进入"阅读模式":
+// - 原图 word 可鼠标拖选(跨行按 word 数组顺序取连续段,不是矩形框选)
+// - 图上拖选 → 面板 textarea 里对应字符高亮 + selection
+// - 面板 textarea 里选中文字 → 反查覆盖的 words → 图上高亮
+// - 用户在 textarea 里手动编辑后,反向映射失效(内容偏移),此后只保留正向
+//   (图 → panel),textarea → 图 停止联动;tab 上加提示
+//
+// 坐标系:word.bounding_rect 是物理像素相对**裁剪区左上角**(与 annot-canvas 一致)
+//        hit-canvas 内部像素 = 物理像素,CSS 尺寸 = 选区 CSS 尺寸
 
-function showOcrResult(result) {
+const hitCanvas = document.getElementById('ocr-hit-canvas');
+const hitCtx = hitCanvas.getContext('2d');
+
+/** 阅读模式状态。null 表示未激活 */
+let reading = null;
+/**
+ * reading = {
+ *   words: [{ text, rect: {x,y,w,h}, lineIndex }],  // 物理像素相对裁剪区
+ *   charRanges: [{ start, end }],                    // 对应 joined text 的字符范围
+ *   fullText: string,                                // 拼接文本(与 result.text 一致)
+ *   selectionStart: number, selectionEnd: number,    // 当前选中范围(word 索引,不是字符)
+ *   panelDirty: boolean,                              // textarea 内容已被手动编辑
+ *   dragStart: number | null,                        // 拖选起始 word 索引
+ *   hoverWord: number | null,                        // 当前 hover 的 word 索引
+ * }
+ */
+
+/** 从 result 构造 charRanges —— 用与后端 join_words_smart 相同的规则复算字符偏移。
+ *  依赖:相邻 word 何时加空格/换行必须与后端一致。参考 ocr_engine.rs::join_words_smart。 */
+function computeCharRanges(words) {
+  const ranges = new Array(words.length);
+  let cursor = 0;
+  let prevLine = null;
+  let prevTailKind = null;
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    if (!w.text) {
+      ranges[i] = { start: cursor, end: cursor };
+      continue;
+    }
+    // 换行
+    if (prevLine !== null && prevLine !== w.lineIndex) {
+      cursor += 1; // '\n'
+      prevTailKind = null;
+    }
+    // 词间空格
+    if (prevTailKind !== null) {
+      const hk = charKind(w.text.charAt(0));
+      const needSpace = !(prevTailKind === 'cjk' || hk === 'cjk');
+      if (needSpace) cursor += 1;
+    }
+    const start = cursor;
+    // 用 [...text].length 计 code point 数(与 String.length 在 BMP 内一致,
+    // 但 emoji 等 surrogate pair 时才有差别;OCR 输出几乎不出现,兜底稳妥)
+    const len = [...w.text].reduce((n) => n + 1, 0);
+    cursor += w.text.length; // 用 UTF-16 长度以对齐 textarea selection API
+    ranges[i] = { start, end: cursor };
+    // tail kind 用最后一个字符
+    prevTailKind = charKind(w.text.charAt(w.text.length - 1));
+    prevLine = w.lineIndex;
+    void len; // 保留计算但 selection API 用 UTF-16
+  }
+  return ranges;
+}
+
+/** 判定字符分类（'cjk' / 'latin' / 'other'）——与后端 is_cjk_ish/is_latin_word_char 对齐 */
+function charKind(ch) {
+  if (!ch) return 'other';
+  const cp = ch.codePointAt(0);
+  // CJK 段
+  if (
+    (cp >= 0x3400 && cp <= 0x4dbf) ||
+    (cp >= 0x4e00 && cp <= 0x9fff) ||
+    (cp >= 0x20000 && cp <= 0x2a6df) ||
+    (cp >= 0xf900 && cp <= 0xfaff) ||
+    (cp >= 0x3040 && cp <= 0x309f) ||
+    (cp >= 0x30a0 && cp <= 0x30ff) ||
+    (cp >= 0xac00 && cp <= 0xd7af) ||
+    (cp >= 0x3000 && cp <= 0x303f) ||
+    (cp >= 0xff00 && cp <= 0xffef)
+  ) return 'cjk';
+  // Latin
+  if (/[a-zA-Z0-9]/.test(ch)) return 'latin';
+  if ((cp >= 0x00c0 && cp <= 0x024f) || (cp >= 0x1e00 && cp <= 0x1eff)) return 'latin';
+  return 'other';
+}
+
+/** 命中测试：把点击的 CSS 坐标(相对 hitCanvas)映射到物理像素 + 二分/线性找命中 word */
+function hitTestWord(cssX, cssY) {
+  if (!reading) return -1;
+  const dpr = window.devicePixelRatio || 1;
+  const px = cssX * dpr;
+  const py = cssY * dpr;
+  // 命中优先按 y 区间,再按 x 区间;无重叠假设 O(n) 遍历(word 数 100+ 也够快)
+  for (let i = 0; i < reading.words.length; i++) {
+    const r = reading.words[i].rect;
+    if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) return i;
+  }
+  return -1;
+}
+
+/** 找出接近点击点(垂直方向)的最近 word——空白处点击时靠近哪 word 就选哪 */
+function nearestWordByLine(cssX, cssY) {
+  if (!reading || reading.words.length === 0) return -1;
+  const dpr = window.devicePixelRatio || 1;
+  const px = cssX * dpr;
+  const py = cssY * dpr;
+  // 先按 y 找到"最靠近的行"(word.line_index 一致的一批)
+  let bestLine = reading.words[0].lineIndex;
+  let bestDy = Infinity;
+  for (const w of reading.words) {
+    const cy = w.rect.y + w.rect.h / 2;
+    const dy = Math.abs(cy - py);
+    if (dy < bestDy) { bestDy = dy; bestLine = w.lineIndex; }
+  }
+  // 在该行内按 x 距离找最近
+  let bestIdx = -1;
+  let bestDx = Infinity;
+  for (let i = 0; i < reading.words.length; i++) {
+    const w = reading.words[i];
+    if (w.lineIndex !== bestLine) continue;
+    const cx = w.rect.x + w.rect.w / 2;
+    const dx = Math.abs(cx - px);
+    if (dx < bestDx) { bestDx = dx; bestIdx = i; }
+  }
+  return bestIdx;
+}
+
+/** 重绘 hit-canvas：高亮当前选中 words + hover word */
+function redrawHitLayer() {
+  if (!reading) return;
+  hitCtx.clearRect(0, 0, hitCanvas.width, hitCanvas.height);
+  // 选中范围高亮
+  if (reading.selectionStart !== null && reading.selectionEnd !== null) {
+    const lo = Math.min(reading.selectionStart, reading.selectionEnd);
+    const hi = Math.max(reading.selectionStart, reading.selectionEnd);
+    hitCtx.fillStyle = 'rgba(74, 158, 255, 0.35)';
+    for (let i = lo; i <= hi; i++) {
+      const r = reading.words[i].rect;
+      hitCtx.fillRect(r.x, r.y, r.w, r.h);
+    }
+    // 描边让边界清晰
+    hitCtx.strokeStyle = 'rgba(74, 158, 255, 0.85)';
+    hitCtx.lineWidth = Math.max(1, Math.round(window.devicePixelRatio || 1));
+    for (let i = lo; i <= hi; i++) {
+      const r = reading.words[i].rect;
+      hitCtx.strokeRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
+    }
+  }
+  // Hover 提示(浅一点)
+  if (reading.hoverWord !== null && reading.hoverWord >= 0) {
+    const r = reading.words[reading.hoverWord].rect;
+    hitCtx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+    hitCtx.lineWidth = 1;
+    hitCtx.strokeRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
+  }
+}
+
+/** 进入阅读模式:定位 hit-canvas + 装事件 + 首次全选 */
+function enterReadingMode(result) {
+  if (!selCss) return;
+  const words = (result && Array.isArray(result.words)) ? result.words : [];
+  if (words.length === 0) return; // 没 word 数据直接不进阅读模式
+
+  const dpr = window.devicePixelRatio || 1;
+  hitCanvas.style.left = selCss.x + 'px';
+  hitCanvas.style.top = selCss.y + 'px';
+  hitCanvas.style.width = selCss.w + 'px';
+  hitCanvas.style.height = selCss.h + 'px';
+  hitCanvas.width = Math.max(1, Math.round(selCss.w * dpr));
+  hitCanvas.height = Math.max(1, Math.round(selCss.h * dpr));
+  hitCanvas.setAttribute('data-reading', 'true');
+
+  reading = {
+    words: words.map((w) => ({
+      text: w.text,
+      rect: w.rect, // 后端 serde 已 rename bounding_rect -> rect
+      lineIndex: w.line_index,
+    })),
+    charRanges: computeCharRanges(words.map((w) => ({
+      text: w.text,
+      lineIndex: w.line_index,
+    }))),
+    fullText: result.text || '',
+    selectionStart: null,
+    selectionEnd: null,
+    panelDirty: false,
+    dragStart: null,
+    hoverWord: null,
+  };
+
+  bindHitCanvasEvents();
+  redrawHitLayer();
+}
+
+/** 退出阅读模式 */
+function exitReadingMode() {
+  hitCanvas.removeAttribute('data-reading');
+  hitCtx.clearRect(0, 0, hitCanvas.width, hitCanvas.height);
+  reading = null;
+}
+
+// ── hit-canvas 事件（幂等绑定，模块生命周期只装一次） ─
+let hitEventsBound = false;
+function bindHitCanvasEvents() {
+  if (hitEventsBound) return;
+  hitEventsBound = true;
+
+  hitCanvas.addEventListener('mousedown', (e) => {
+    if (!reading || e.button !== 0) return;
+    e.stopPropagation();
+    e.preventDefault();
+    let idx = hitTestWord(e.offsetX, e.offsetY);
+    if (idx < 0) idx = nearestWordByLine(e.offsetX, e.offsetY);
+    if (idx < 0) return;
+    reading.dragStart = idx;
+    reading.selectionStart = idx;
+    reading.selectionEnd = idx;
+    redrawHitLayer();
+    syncSelectionToPanel();
+  });
+
+  hitCanvas.addEventListener('mousemove', (e) => {
+    if (!reading) return;
+    const idx = hitTestWord(e.offsetX, e.offsetY);
+    if (reading.dragStart !== null) {
+      // 拖选中
+      const endIdx = idx >= 0 ? idx : nearestWordByLine(e.offsetX, e.offsetY);
+      if (endIdx >= 0) {
+        reading.selectionEnd = endIdx;
+        redrawHitLayer();
+        syncSelectionToPanel();
+      }
+    } else {
+      // hover 反馈
+      if (idx !== reading.hoverWord) {
+        reading.hoverWord = idx >= 0 ? idx : null;
+        redrawHitLayer();
+      }
+    }
+  });
+
+  hitCanvas.addEventListener('mouseup', () => {
+    if (!reading) return;
+    reading.dragStart = null;
+  });
+
+  hitCanvas.addEventListener('mouseleave', () => {
+    if (!reading) return;
+    reading.hoverWord = null;
+    reading.dragStart = null;
+    redrawHitLayer();
+  });
+
+  // 双击选一整行
+  hitCanvas.addEventListener('dblclick', (e) => {
+    if (!reading) return;
+    let idx = hitTestWord(e.offsetX, e.offsetY);
+    if (idx < 0) idx = nearestWordByLine(e.offsetX, e.offsetY);
+    if (idx < 0) return;
+    const line = reading.words[idx].lineIndex;
+    let lo = idx, hi = idx;
+    while (lo > 0 && reading.words[lo - 1].lineIndex === line) lo--;
+    while (hi < reading.words.length - 1 && reading.words[hi + 1].lineIndex === line) hi++;
+    reading.selectionStart = lo;
+    reading.selectionEnd = hi;
+    redrawHitLayer();
+    syncSelectionToPanel();
+  });
+}
+
+/** 图上选中变化 → 同步到面板 textarea */
+function syncSelectionToPanel() {
+  const panel = document.getElementById('ocr-panel');
+  if (!panel || !reading) return;
+  if (reading.selectionStart === null) return;
+  const ta = panel.querySelector('#ocr-textarea-source');
+  if (!ta || ta.hidden) return;
+  if (reading.panelDirty) return; // 面板已编辑,不再反向覆盖
+  const lo = Math.min(reading.selectionStart, reading.selectionEnd);
+  const hi = Math.max(reading.selectionStart, reading.selectionEnd);
+  const cs = reading.charRanges[lo].start;
+  const ce = reading.charRanges[hi].end;
+  ta.focus();
+  ta.setSelectionRange(cs, ce);
+}
+
+/** 面板 textarea 选中变化 → 反查 words 并高亮图 */
+function syncSelectionFromPanel(ta) {
+  if (!reading) return;
+  if (reading.panelDirty) return;
+  const cs = ta.selectionStart;
+  const ce = ta.selectionEnd;
+  if (cs === ce) {
+    // 光标零宽 → 清图上选中
+    reading.selectionStart = null;
+    reading.selectionEnd = null;
+    redrawHitLayer();
+    return;
+  }
+  // 二分/线性找命中的 word 范围
+  let lo = -1, hi = -1;
+  for (let i = 0; i < reading.charRanges.length; i++) {
+    const r = reading.charRanges[i];
+    if (r.end > cs && lo === -1) lo = i;
+    if (r.start < ce) hi = i;
+    if (r.start >= ce) break;
+  }
+  if (lo === -1 || hi === -1 || lo > hi) return;
+  reading.selectionStart = lo;
+  reading.selectionEnd = hi;
+  redrawHitLayer();
+}
+
+
+//
+// 0.11.9-d：双 tab（原文 / 译文）。工具栏"OCR"按钮打开 → 停原文 tab;
+// "翻译"按钮打开 → 自动 OCR + translate → 切到译文 tab。面板内"翻译"
+// 按钮独立触发翻译。修改原文 → 译文标"过期"(斜纹底 + 橙点)。
+//
+// 参数:
+//   result:       { text, lines, words?, text_angle? } — OCR 结果
+//   options.autoTranslate: 打开面板后立刻触发翻译 + 切到译文 tab
+
+function showOcrResult(result, options = {}) {
   const old = document.getElementById('ocr-panel');
   if (old) old.remove();
+  // 关闭上次可能残留的阅读模式(比如同一 overlay 内多次 OCR)
+  exitReadingMode();
 
   const text = (result && result.text) || '';
+  const initialText = text || '（未识别到文字）';
 
   const panel = document.createElement('div');
   panel.id = 'ocr-panel';
   panel.className = 'ocr-panel';
   panel.innerHTML = `
     <div class="ocr-panel-header">
-      <span>OCR 识别结果（可编辑）</span>
+      <div class="ocr-tabs">
+        <button class="ocr-tab active" data-tab="source">原文</button>
+        <button class="ocr-tab" data-tab="translated">译文 <span class="stale-dot" aria-hidden="true"></span></button>
+      </div>
       <button id="ocr-close" class="tool-btn">✕</button>
     </div>
-    <textarea class="ocr-panel-textarea" spellcheck="false"></textarea>
+    <textarea id="ocr-textarea-source" class="ocr-panel-textarea" spellcheck="false"></textarea>
+    <textarea id="ocr-textarea-translated" class="ocr-panel-textarea" spellcheck="false" hidden placeholder="点击"翻译"按钮生成译文"></textarea>
     <div class="ocr-panel-footer">
       <span class="ocr-panel-hint">可自由选词复制或编辑</span>
       <button id="ocr-trim-spaces" class="tool-btn" ${text ? '' : 'disabled'} title="合并连续空白 + 去除首尾空格">移除空格</button>
-      <button id="ocr-copy" class="tool-btn tool-btn-primary" ${text ? '' : 'disabled'}>复制全部</button>
+      <button id="ocr-translate" class="tool-btn" ${text ? '' : 'disabled'} title="翻译当前文本">翻译</button>
+      <button id="ocr-copy" class="tool-btn tool-btn-primary" ${text ? '' : 'disabled'}>复制</button>
     </div>
   `;
   document.body.appendChild(panel);
 
-  const textarea = panel.querySelector('.ocr-panel-textarea');
-  textarea.value = text || '（未识别到文字）';
+  const sourceTa = panel.querySelector('#ocr-textarea-source');
+  const translatedTa = panel.querySelector('#ocr-textarea-translated');
+  const tabSource = panel.querySelector('.ocr-tab[data-tab="source"]');
+  const tabTranslated = panel.querySelector('.ocr-tab[data-tab="translated"]');
+  const translateBtn = panel.querySelector('#ocr-translate');
+  const trimBtn = panel.querySelector('#ocr-trim-spaces');
+  const copyBtn = panel.querySelector('#ocr-copy');
 
-  panel.style.left = Math.max(8, selCss.x) + 'px';
-  // 默认放在选区上方；如果放不下则翻到选区下方
-  const topAbove = selCss.y - panel.offsetHeight - 8;
-  if (topAbove < 8) {
-    panel.style.top = (selCss.y + selCss.h + 8) + 'px';
-  } else {
-    panel.style.top = topAbove + 'px';
+  sourceTa.value = initialText;
+
+  // 面板尺寸自适应（0.11.9：按内容估算行数,钳到 max-height）
+  // 原逻辑保留,估算基于原文长度即可(译文长度通常同量级)
+  const PANEL_CHROME = 90;
+  const TA_MIN = 200, TA_MAX = 390;
+  const lineH = 22.4;
+  const CHARS_PER_LINE = 40;
+  let textLines = 1;
+  for (const line of String(text || '').split('\n')) {
+    textLines += Math.max(1, Math.ceil((line.length + 1) / CHARS_PER_LINE) || 1);
+    if (textLines > 40) break;
   }
+  const taH = Math.max(TA_MIN, Math.min(TA_MAX, textLines * lineH));
+  panel.style.height = (taH + PANEL_CHROME) + 'px';
+
+  // 屏定位（多屏 clamp，选区所在屏矩形约束四边）
+  const MARGIN = 8;
+  const mon = findDisplayCssAt(selCss.x + selCss.w / 2, selCss.y + selCss.h / 2);
+  const pw = panel.offsetWidth;
+  const ph = panel.offsetHeight;
+
+  let left = Math.max(mon.x + MARGIN, selCss.x);
+  if (left + pw > mon.x + mon.w - MARGIN) {
+    left = Math.max(mon.x + MARGIN, mon.x + mon.w - MARGIN - pw);
+  }
+  let top;
+  const topAbove = selCss.y - ph - MARGIN;
+  const topBelow = selCss.y + selCss.h + MARGIN;
+  if (topAbove >= mon.y + MARGIN) top = topAbove;
+  else if (topBelow + ph <= mon.y + mon.h - MARGIN) top = topBelow;
+  else top = Math.max(mon.y + MARGIN, mon.y + mon.h - MARGIN - ph);
+  panel.style.left = left + 'px';
+  panel.style.top = top + 'px';
 
   // 面板内交互不应触发 overlay 的 blur 隐藏
   panel.addEventListener('mousedown', (e) => e.stopPropagation());
+  document.getElementById('ocr-close').addEventListener('click', () => {
+    exitReadingMode();
+    panel.remove();
+  });
 
-  document.getElementById('ocr-close').addEventListener('click', () => panel.remove());
+  // ── Tab 切换 ─────────────────────────────────────
+  const showTab = (name) => {
+    const isSource = name === 'source';
+    tabSource.classList.toggle('active', isSource);
+    tabTranslated.classList.toggle('active', !isSource);
+    sourceTa.hidden = !isSource;
+    translatedTa.hidden = isSource;
+    // 焦点跟随
+    (isSource ? sourceTa : translatedTa).focus();
+  };
+  tabSource.addEventListener('click', () => showTab('source'));
+  tabTranslated.addEventListener('click', () => showTab('translated'));
 
-  // 0.11.8：移除空格 toggle —— OCR 引擎常在**汉字之间**夹空格（"然 正 确"），
-  // 用户按一次全清，再按一次回原文，方便对比 / 校正。
-  //
-  // 设计要点：
-  // - 每次都从 `originalText`（当前"原文态"）派生结果，避免累积失真
-  // - 用 `[^\S\r\n]+`（所有 Unicode 空白但换行除外）而非 `[ \t　]+`——OCR 输出常混入
-  //   U+00A0 不间断空格、U+2000~U+200B 各种半宽/零宽空格，`\s` + 保留换行是最稳的实用集
-  // - 保留换行结构，防止段落被压成一行
-  // - 状态用按钮 dataset 记，避免闭包状态污染
-  // - 中文场景 replace 用 '' 而不是 ' '——汉字之间不需要词间空格；英文段落偶尔失去
-  //   词间空格是可接受的取舍（用户可手动 undo 或再按一次显示原文）
-  const trimBtn = document.getElementById('ocr-trim-spaces');
-  let originalText = textarea.value;
+  // ── 译文过期标记 ─────────────────────────────────
+  // 原文改动 → 译文标 stale;新翻译时清 stale
+  const markTranslatedStale = (stale) => {
+    tabTranslated.setAttribute('data-stale', stale ? 'true' : 'false');
+    translatedTa.setAttribute('data-stale', stale ? 'true' : 'false');
+  };
+
+  // ── 移除空格（保留兜底） ──────────────────────────
+  // 0.11.9-b 后端已智能拼接,该按钮退化为清理残余不间断空格等;
+  // toggle 语义不变(按一次清, 再按一次原文)。
+  let originalText = sourceTa.value;
   trimBtn.dataset.trimmed = 'false';
-  // 用户手动编辑 textarea → 视作新的"原文态"，重置 toggle
-  textarea.addEventListener('input', () => {
-    originalText = textarea.value;
+  sourceTa.addEventListener('input', () => {
+    originalText = sourceTa.value;
     if (trimBtn.dataset.trimmed === 'true') {
       trimBtn.dataset.trimmed = 'false';
       trimBtn.textContent = '移除空格';
     }
+    // 用户改原文 → 译文过期
+    if (translatedTa.value) markTranslatedStale(true);
+    // 0.11.9-c：文本被手动改动,反向映射失效——停止 textarea→图 联动
+    if (reading && !reading.panelDirty) {
+      reading.panelDirty = true;
+      // 提示条(可选):这里省略,仅通过 tab 视觉不主动做提示,避免面板拥挤
+    }
   });
+
+  // 0.11.9-c：textarea 选中变化 → 图上高亮反查
+  sourceTa.addEventListener('select', () => syncSelectionFromPanel(sourceTa));
+  sourceTa.addEventListener('keyup', () => syncSelectionFromPanel(sourceTa));
+  sourceTa.addEventListener('click', () => syncSelectionFromPanel(sourceTa));
   trimBtn.addEventListener('click', () => {
     if (trimBtn.dataset.trimmed === 'true') {
-      // 当前是 trim 后 → 还原为原文（不触发 input 监听的重置逻辑：先改 dataset 再改 value）
       trimBtn.dataset.trimmed = 'false';
       trimBtn.textContent = '移除空格';
-      // 用 setter 会触发 input 事件——但监听里 `originalText = textarea.value` 会把
-      // 原文赋回原文，dataset 已是 false，textContent 已是"移除空格"，无副作用
-      textarea.value = originalText;
+      sourceTa.value = originalText;
     } else {
-      // 当前是原文 → 移除空格
       const trimmed = originalText
         .split(/\r?\n/)
         .map((line) => line.replace(/[^\S\r\n]+/g, '').trim())
         .join('\n')
-        .replace(/\n{3,}/g, '\n\n'); // 连续 3+ 空行压成 2 行（保留段落分隔）
-      // 先设 dataset/文本，再赋值——避免 input 监听把 trimmed 当新原文
+        .replace(/\n{3,}/g, '\n\n');
       trimBtn.dataset.trimmed = 'true';
       trimBtn.textContent = '显示原文';
-      textarea.value = trimmed;
+      sourceTa.value = trimmed;
     }
-    textarea.focus();
+    sourceTa.focus();
   });
 
-  document.getElementById('ocr-copy').addEventListener('click', () => {
-    const value = textarea.value;
+  // ── 复制（复制当前 tab 内容） ─────────────────────
+  copyBtn.addEventListener('click', () => {
+    const currentTa = sourceTa.hidden ? translatedTa : sourceTa;
+    const value = currentTa.value;
     if (value) {
       navigator.clipboard.writeText(value).catch((e) => console.error('复制失败', e));
     }
+    exitReadingMode();
     panel.remove();
   });
+
+  // ── 翻译 ─────────────────────────────────────────
+  let translating = false;
+  const doTranslate = async () => {
+    if (translating) return;
+    const src = sourceTa.value.trim();
+    if (!src || src === '（未识别到文字）') return;
+    translating = true;
+    translateBtn.disabled = true;
+    translateBtn.textContent = '翻译中…';
+    translatedTa.setAttribute('data-loading', 'true');
+    translatedTa.value = '翻译中,请稍候…';
+    showTab('translated');
+    try {
+      const dst = await translateText(src);
+      translatedTa.value = dst;
+      markTranslatedStale(false);
+    } catch (e) {
+      console.error('[screenshot] 翻译失败', e);
+      translatedTa.value = `翻译失败：${e}`;
+    } finally {
+      translating = false;
+      translateBtn.disabled = false;
+      translateBtn.textContent = '翻译';
+      translatedTa.removeAttribute('data-loading');
+    }
+  };
+  translateBtn.addEventListener('click', doTranslate);
+
+  // ── 一条龙：工具栏"翻译"按钮直接进面板并翻译 ──
+  if (options.autoTranslate && text) {
+    // 面板首次渲染后触发,不阻塞 UI
+    setTimeout(doTranslate, 0);
+  }
+
+  // ── 0.11.9-c：启动阅读模式（有 words 数据才启用） ──
+  if (result && Array.isArray(result.words) && result.words.length > 0) {
+    enterReadingMode(result);
+  }
 }
 
 // ── 水印表单（0.11.8-c：内嵌进 text-dropdown，就地展开）──────────────
@@ -1012,6 +1509,20 @@ function openWatermarkForm() {
   const layoutSelect = dropdown.querySelector('.wm-layout');
   const opacityRange = dropdown.querySelector('.wm-opacity');
   const opacityVal = dropdown.querySelector('.wm-opacity-val');
+  const clearBtn = dropdown.querySelector('.wm-clear');
+
+  // 0.11.9-a：回填已有水印配置（水印现为单例配置,重新打开表单看到当前值）
+  const existing = annot.getWatermark();
+  if (existing) {
+    if (textInput) textInput.value = existing.text;
+    if (layoutSelect) layoutSelect.value = existing.layout;
+    if (opacityRange) {
+      opacityRange.value = Math.round(existing.opacity * 100);
+      if (opacityVal) opacityVal.textContent = `${opacityRange.value}%`;
+    }
+  }
+  // "清除水印"按钮只在已有水印时可点
+  if (clearBtn) clearBtn.disabled = !existing;
 
   // 每次打开时把光标放输入框
   if (textInput) setTimeout(() => textInput.focus(), 0);
@@ -1033,7 +1544,20 @@ function openWatermarkForm() {
   const backBtn = dropdown.querySelector('.wm-back');
   const apply = () => {
     const text = textInput.value.trim();
-    if (!text) { textInput.focus(); return; }
+    // 0.11.9-a：空文本 + 已有水印 → 视为清除(等同点"清除水印"按钮);空文本无水印才 focus 报"没填"
+    if (!text) {
+      if (annot.hasWatermark()) {
+        annot.clearWatermark();
+        if (clearBtn) clearBtn.disabled = true;
+        redrawAnnotFull();
+        updateUndoRedoButtons();
+        backToList();
+        dropdown.setAttribute('data-open', 'false');
+      } else {
+        textInput.focus();
+      }
+      return;
+    }
     annot.commitWatermark({
       text,
       layout: layoutSelect.value,
@@ -1043,6 +1567,8 @@ function openWatermarkForm() {
     });
     redrawAnnotFull();
     updateUndoRedoButtons();
+    // 0.11.9-a：应用后回启用"清除"按钮
+    if (clearBtn) clearBtn.disabled = false;
     backToList();
     dropdown.setAttribute('data-open', 'false');
   };
@@ -1050,6 +1576,15 @@ function openWatermarkForm() {
   if (backBtn) backBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     backToList();
+  });
+  // 0.11.9-a：清除水印按钮
+  if (clearBtn) clearBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    annot.clearWatermark();
+    if (textInput) textInput.value = '';
+    clearBtn.disabled = true;
+    redrawAnnotFull();
+    updateUndoRedoButtons();
   });
   // Enter 应用；ESC 让 keydown handler 关 dropdown
   if (textInput) textInput.addEventListener('keydown', (e) => {
@@ -1324,6 +1859,7 @@ function bindToolbar() {
   bind('btn-cancel', doCancel);
   bind('btn-pin', doPinSelection);
   bind('btn-ocr', doOcrSelection);
+  bind('btn-translate', doTranslateSelection);
   bind('btn-save', doSaveSelection);
   bind('btn-copy', doCopySelection);
 
@@ -1346,15 +1882,16 @@ function bindToolbar() {
     });
     document.addEventListener('mousemove', (e) => {
       if (!dragging) return;
-      const vw = window.innerWidth;
-      const vh = window.innerHeight;
       const tw = toolbar.offsetWidth;
       const th = toolbar.offsetHeight;
+      // 0.11.9：按"鼠标当前所在屏"clamp（用 e.clientX/Y 找当前屏 CSS 矩形）。
+      // 多屏混合 DPI 下，工具栏不会跨屏越界到另一块屏去。
+      const mon = findDisplayCssAt(e.clientX, e.clientY);
+      const MARGIN = 8;
       let left = e.clientX - offsetX;
       let top = e.clientY - offsetY;
-      // 边界约束
-      left = Math.max(8, Math.min(left, vw - tw - 8));
-      top = Math.max(8, Math.min(top, vh - th - 8));
+      left = Math.max(mon.x + MARGIN, Math.min(left, mon.x + mon.w - tw - MARGIN));
+      top = Math.max(mon.y + MARGIN, Math.min(top, mon.y + mon.h - th - MARGIN));
       toolbar.style.left = left + 'px';
       toolbar.style.top = top + 'px';
     });

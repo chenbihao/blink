@@ -131,9 +131,19 @@ export function screenshotSetAnnotationMode(active) {
   return invoke("screenshot_set_annotation_mode", { active });
 }
 
-/** 0.11.7-c：OCR 识别图片中的文字，返回 `{text, lines}`。 */
+/** 0.11.7-c：OCR 识别图片中的文字，返回 `{text, lines, words, text_angle?}`（0.11.9-b word 级）。 */
 export function ocrImage(pngData) {
   return invoke("ocr_image", { pngData });
+}
+
+/**
+ * 0.11.9-d：翻译文本——直调 translate 插件的 tool（绕过 AI 路径）。
+ * @param {string} text 待翻译文本
+ * @param {string?} targetLang 目标语言代码(zh/en/ja/ko);省略走插件 setting 默认值
+ * @returns {Promise<string>} 译文
+ */
+export function translateText(text, targetLang) {
+  return invoke("translate_text", { text, targetLang: targetLang ?? null });
 }
 
 /**

@@ -106,6 +106,11 @@ pub struct SearchService {
     /// BuiltinEngine 通过 QueryContext 只读，设置页保存时经 `update_disabled_builtin_actions`
     /// 热更新。读多写少，用 RwLock；每次 search 短时 read 不阻塞。
     disabled_builtin_actions: Arc<RwLock<Vec<String>>>,
+    /// 用户禁用的 context binding key 列表（`{target_id}::{trigger_key}` 格式，0.8.3 §4.6）。
+    /// 0.11.8 起同时被 `RuleRouter`（manifest context）和 `BuiltinEngine`（内置动作 context）
+    /// 消费——前者在 `apply_context_disable_list` 里独立持有副本，后者经 QueryContext 读。
+    /// 读多写少，用 RwLock；每次 search 短时 read 不阻塞。
+    disabled_context_bindings: Arc<RwLock<Vec<String>>>,
     /// Autosuggestion 配置快照（0.8.1 §2.5）。热更新走 `update_autosuggest_config`。
     /// - `enabled`: 关闭时 `search()` 恒返回 `completion_hint: None`（快速短路，不算 fuzzy）。
     /// - `min_score`: `RuleRouter::suggest_completion` 阈值（默认 0.7）。
@@ -172,6 +177,7 @@ impl SearchService {
             snapshot: Arc::new(RwLock::new(ContextSnapshot::default())),
             max_results: Arc::new(AtomicUsize::new(50)),
             disabled_builtin_actions: Arc::new(RwLock::new(Vec::new())),
+            disabled_context_bindings: Arc::new(RwLock::new(Vec::new())),
             autosuggest: Arc::new(RwLock::new(AutosuggestState::default())),
             language: Arc::new(RwLock::new("zh".to_string())),
             last_ranking_hint: Arc::new(Mutex::new(None)),
@@ -261,8 +267,11 @@ impl SearchService {
     /// 命令层调此方法。转发至 `RuleRouter::apply_context_disable_list`——`RuleRouter` 内部
     /// 用 `HashSet` 存 key，`match_context_hits` 命中即跳过。
     pub fn update_disabled_context_bindings(&self, keys: Vec<String>) {
+        // 0.11.8：RuleRouter 消费 manifest context binding；SearchService 本字段
+        // 喂给 QueryContext 让 BuiltinEngine 读（内置动作 context binding 黑名单）。
+        *self.disabled_context_bindings.write().unwrap() = keys.clone();
         self.router.apply_context_disable_list(keys);
-        tracing::debug!("SearchService context binding 禁用列表已转发至 router");
+        tracing::debug!("SearchService context binding 禁用列表已转发至 router + 本地缓存");
     }
 
     /// 更新界面语言快照（0.8.1）。启动时读一次 AppConfig.language 注入；
@@ -361,10 +370,12 @@ impl SearchService {
                 let history = std::collections::HashMap::new();
                 let snapshot = ContextSnapshot::default();
                 let disabled: Vec<String> = Vec::new();
+                let disabled_ctx: Vec<String> = Vec::new();
                 let search_ctx = QueryContext {
                     history: &history,
                     snapshot: &snapshot,
                     disabled_builtin_actions: &disabled,
+                    disabled_context_bindings: &disabled_ctx,
                 };
                 let items = engine.search(query, &search_ctx).await;
                 return items.into_iter().take(max_results).collect();
@@ -396,10 +407,12 @@ impl SearchService {
         let history = crate::infra::data::history::get_weights(&self.pool).await;
         let snapshot = self.snapshot.read().unwrap().clone();
         let disabled = self.disabled_builtin_actions.read().unwrap().clone();
+        let disabled_ctx = self.disabled_context_bindings.read().unwrap().clone();
         let search_ctx = QueryContext {
             history: &history,
             snapshot: &snapshot,
             disabled_builtin_actions: &disabled,
+            disabled_context_bindings: &disabled_ctx,
         };
 
         // 路由决策（0.8.4：route 断 Awareness 依赖）
@@ -1252,12 +1265,14 @@ impl SearchService {
                 let history = history.clone(); // history 是 Arc<HashMap> 内部 move clone
                 let snapshot = snapshot.clone();
                 tauri::async_runtime::spawn(async move {
-                    // async lane 引擎（file/mock）不消费 disabled_builtin_actions；
-                    // 该字段仅 BuiltinEngine（sync lane）读，此处传空 slice 满足契约。
+                    // async lane 引擎（file/mock）不消费 disabled_builtin_actions /
+                    // disabled_context_bindings；这两个字段仅 BuiltinEngine（sync lane）读，
+                    // 此处传空 slice 满足契约。
                     let ctx = QueryContext {
                         history: &history,
                         snapshot: &snapshot,
                         disabled_builtin_actions: &[],
+                        disabled_context_bindings: &[],
                     };
                     let items = engine.search(&q, &ctx).await;
                     if seq == latest_seq.load(Ordering::SeqCst) && !items.is_empty() {

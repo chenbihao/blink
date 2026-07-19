@@ -117,7 +117,7 @@ pub struct HotkeyConfig {
     pub modifiers: Vec<String>,
     /// 主键（字母、数字、功能键等）
     pub key: String,
-    /// 显示名称（如 "RightAlt", "Ctrl+Shift+Space"）
+    /// 显示名称（如 "Alt+Space", "Ctrl+Shift+Space", "RightAlt"）
     pub display: String,
     /// tap 阈值(毫秒)——按下时长小于此值算 tap;超过算 hold(0.8.5 Chord 触发)
     #[serde(default = "default_tap_threshold")]

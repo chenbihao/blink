@@ -516,6 +516,81 @@ pub async fn ocr_image(_app: tauri::AppHandle, png_data: Vec<u8>) -> Result<serd
     Ok(json)
 }
 
+/// 0.11.9-d：翻译文本命令——OCR 面板/工具栏"翻译"按钮的后端入口。
+///
+/// **绕过 AI 路径**：翻译是确定性动作(用户主动点按钮),不该经过 AI 意图判断
+/// + 网络往返。直接走 `ActionRegistry` 找 translate 插件的 `translate` tool
+/// (id = `builtin.translate:translate`),用 `ExecArg::UserExplicit(json_args)`
+/// 执行,拿 `ActionOutcome::Items` 返 `items[0].title` 即译文。
+///
+/// **参数**：
+/// - `text`: 待翻译文本（必填）
+/// - `target_lang`: 目标语言代码(zh/en/ja/ko);`None` 时插件读 setting 默认值
+///
+/// **失败模式**：
+/// - 插件未启用 / manifest 未加载 → 返 `"翻译插件未安装或未启用"`
+/// - 插件返回空/错误 → 传递原错误信息
+/// - 插件返回非 Items outcome → `"翻译插件返回意外的结果类型"`(理论不会,防御)
+#[tauri::command]
+pub async fn translate_text(
+    app: tauri::AppHandle,
+    text: String,
+    target_lang: Option<String>,
+) -> Result<String, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err("翻译文本不能为空".into());
+    }
+
+    let registry = app.state::<std::sync::Arc<crate::domain::execution::ActionRegistry>>();
+    // translate 插件的 tool 注册 id = "{plugin_id}:{tool_name}" = "builtin.translate:translate"
+    const TRANSLATE_ACTION_ID: &str = "builtin.translate:translate";
+    let Some(action) = registry.get(TRANSLATE_ACTION_ID) else {
+        tracing::warn!("translate_text: 翻译插件未注册");
+        return Err("翻译插件未安装或未启用".into());
+    };
+
+    // 构造插件 tool arguments —— text 必填,target_lang 有值才传(None 让插件读 setting)
+    let mut args = serde_json::Map::new();
+    args.insert("text".into(), serde_json::Value::String(trimmed.to_string()));
+    if let Some(lang) = target_lang.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        args.insert("target_lang".into(), serde_json::Value::String(lang.to_string()));
+    }
+    let arguments = serde_json::Value::Object(args);
+
+    tracing::debug!(text_len = trimmed.chars().count(), ?target_lang, "translate_text: 调翻译插件");
+
+    let cx = crate::domain::execution::ActionContext::from_arguments(&app, arguments);
+    let outcome = action
+        .execute(&cx)
+        .await
+        .map_err(|e| format!("翻译执行失败: {e}"))?;
+
+    match outcome {
+        crate::domain::execution::ActionOutcome::Items { items } => {
+            let translated = items
+                .first()
+                .map(|it| it.title.clone())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "翻译插件返回空结果".to_string())?;
+            tracing::info!(
+                src_len = trimmed.chars().count(),
+                dst_len = translated.chars().count(),
+                "translate_text 完成"
+            );
+            Ok(translated)
+        }
+        crate::domain::execution::ActionOutcome::Copy { text, .. } => {
+            // 兼容:如果插件未来改走 Copy outcome,也取到译文
+            Ok(text)
+        }
+        other => {
+            tracing::warn!(?other, "translate_text: 翻译插件返回意外的 outcome");
+            Err("翻译插件返回意外的结果类型".into())
+        }
+    }
+}
+
 /// 0.11.7：设置/清除标注模式（前端通知后端）。
 #[tauri::command]
 pub fn screenshot_set_annotation_mode(active: bool) {
@@ -632,6 +707,11 @@ pub async fn set_chord_mode(app: tauri::AppHandle, on: bool) -> Result<(), Strin
 /// - `target_label`：从 PluginManifest.name 本地化（缺失时降级 target_id）
 /// - `trigger_label`：显示名（如「文本非目标语言 → 翻译」），i18n key（前端翻）
 /// - `enabled`：用户配置的启用状态
+///
+/// 0.11.8：合并 manifest 与 builtin 两路。此前只枚举插件 manifest 的 context trigger，
+/// 漏掉内置参数化动作（`open_url`/`open_path`/`reveal_in_explorer`）——这些在 BuiltinEngine
+/// 内部自判 context，前端 UI 看不见也关不掉单条。现在 builtin 一路由
+/// `list_builtin_context_bindings` 提供，与 manifest 路径字段格式完全对齐。
 #[tauri::command]
 pub async fn list_context_bindings(app: tauri::AppHandle) -> Vec<serde_json::Value> {
     let pool = app.state::<sqlx::SqlitePool>();
@@ -640,31 +720,43 @@ pub async fn list_context_bindings(app: tauri::AppHandle) -> Vec<serde_json::Val
         config.disabled_context_bindings.iter().cloned().collect();
     let lang = config.language.clone();
 
-    // 从 PluginEngine 拉所有插件的 manifest.triggers 里的 Context 变体。
-    // PluginEngine 现在为 `Arc<PluginEngine>`（空插件也构造，见 main.rs），无需 Option 处理。
-    let Some(pe) = app.try_state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>() else {
-        return Vec::new();
-    };
+    // ── 路径 1：插件 manifest 的 Context trigger（原有逻辑） ───────────────
     let mut bindings = Vec::new();
-    for manifest in pe.list_manifests() {
-        for trigger in &manifest.triggers {
-            if let crate::domain::plugin::PluginTrigger::Context { when, .. } = trigger {
-                let ctx_when: crate::domain::context::trigger::ContextTrigger = (*when).into();
-                let trigger_key = crate::domain::intent::trigger_key(&ctx_when);
-                let key = crate::domain::intent::binding_key(&manifest.id, trigger_key);
-                let target_label = manifest.name.resolve(&lang);
-                let enabled = !disabled.contains(&key);
-                bindings.push(serde_json::json!({
-                    "key": key,
-                    "target_id": manifest.id,
-                    "trigger_key": trigger_key,
-                    "target_label": target_label,
-                    "trigger_label": trigger_key, // 前端按 key 翻译（i18n）
-                    "enabled": enabled,
-                }));
+    if let Some(pe) = app.try_state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>() {
+        for manifest in pe.list_manifests() {
+            for trigger in &manifest.triggers {
+                if let crate::domain::plugin::PluginTrigger::Context { when, .. } = trigger {
+                    let ctx_when: crate::domain::context::trigger::ContextTrigger = (*when).into();
+                    let trigger_key = crate::domain::intent::trigger_key(&ctx_when);
+                    let key = crate::domain::intent::binding_key(&manifest.id, trigger_key);
+                    let target_label = manifest.name.resolve(&lang);
+                    let enabled = !disabled.contains(&key);
+                    bindings.push(serde_json::json!({
+                        "key": key,
+                        "target_id": manifest.id,
+                        "trigger_key": trigger_key,
+                        "target_label": target_label,
+                        "trigger_label": trigger_key, // 前端按 key 翻译（i18n）
+                        "enabled": enabled,
+                    }));
+                }
             }
         }
     }
+
+    // ── 路径 2：内置参数化动作的 Context binding（0.11.8 补齐） ────────────
+    // BuiltinEngine 自判 context、不走 RuleRouter，故需要单独取数。字段格式与路径 1
+    // 完全对齐，前端 renderBindingRow 无需区分来源。
+    if let Some(reg) = app.try_state::<std::sync::Arc<crate::domain::execution::ActionRegistry>>()
+    {
+        let disabled_vec: Vec<String> = disabled.iter().cloned().collect();
+        bindings.extend(crate::domain::search::list_builtin_context_bindings(
+            &disabled_vec,
+            &reg,
+            &lang,
+        ));
+    }
+
     bindings
 }
 
@@ -862,6 +954,24 @@ pub async fn get_config(app: tauri::AppHandle) -> crate::app::config::AppConfig 
     crate::app::config::get_config(&pool).await
 }
 
+/// 获取默认快捷键配置（设置页「恢复默认」按钮调用）。
+///
+/// **单一数据源**：默认值只在 `HotkeyConfig::default()`（`src/app/config.rs`）一处定义。
+/// 前端「恢复默认」按钮调此命令拿到真·默认值，避免前端硬编码字面量与后端漂移
+/// （历史 bug：0.x 时期前端曾把 `"RightAlt"` 当默认值，被 `HotkeyConfig::default()` 的
+/// doc 注释举例误导，与后端实际默认 `Alt+Space` 不一致）。
+#[tauri::command]
+pub fn get_default_hotkey() -> serde_json::Value {
+    let hk = crate::app::config::HotkeyConfig::default();
+    serde_json::to_value(&hk).unwrap_or_else(|_| {
+        serde_json::json!({
+            "modifiers": ["alt"],
+            "key": " ",
+            "display": "Alt+Space",
+        })
+    })
+}
+
 /// 泛型配置写入（0.8.6 P1-C 前端泛型化）。
 ///
 /// 前端统一调用 `invoke('set_config', { key, value })`，后端按 key 路由到
@@ -897,6 +1007,9 @@ pub async fn set_config(
             {
                 ss.update_language(language.clone());
             }
+            // 托盘菜单是 Rust 侧静态构建的（不走前端 i18n），切语言后需主动重建。
+            // on_menu_event 挂在 TrayIcon 上，set_menu 不影响 id 路由。
+            crate::app::tray::rebuild_menu(&app, &language);
             let _ = app.emit("blink://config-changed", ());
             tracing::info!(%language, "语言已更新");
         }

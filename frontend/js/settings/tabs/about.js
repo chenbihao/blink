@@ -52,8 +52,9 @@ function initCheckUpdate() {
     try {
       const r = await invoke("check_update");
       if (r.error) {
-        // 网络失败 / API 异常 —— 区分「真没更新」和「请求失败了」
-        updateEl.textContent = "检查失败，请稍后重试";
+        // 网络失败 / API 异常 —— 显示后端返回的具体原因，方便用户判断
+        // 常见场景：403 = GitHub 匿名限流（60 次/小时），「网络」= 代理/断网
+        updateEl.textContent = friendlyUpdateError(r.error);
       } else if (r.has_update) {
         // .external-link + data-url 走统一外链委托（外部浏览器打开）
         // .about-update-link 套用项目统一超链样式（accent 色）
@@ -71,4 +72,25 @@ function initCheckUpdate() {
       btn.disabled = false;
     }
   });
+}
+
+/**
+ * 把后端 check_update 返回的原始 error 字符串转成一句用户能理解的话。
+ *
+ * 后端返回形如：
+ *   "GitHub API 返回 403 Forbidden"   —— 匿名限流（每小时 60 次）
+ *   "GitHub API 返回 429 Too Many Requests"
+ *   "网络请求失败: ..."                 —— 代理/断网/DNS
+ *   "响应解析失败"                      —— 返回体不是 JSON
+ *
+ * 不识别的错误原样展示——后端措辞已经够清晰，遮遮掩掩反而难排查。
+ */
+function friendlyUpdateError(raw) {
+  const s = String(raw || "");
+  if (/403/.test(s)) return "检查失败：GitHub 限流，请稍后重试";
+  if (/429/.test(s)) return "检查失败：请求过于频繁，请稍后重试";
+  if (/网络/.test(s) || /Network|timeout|Timeout/i.test(s)) {
+    return "检查失败：网络异常，请检查代理或连接";
+  }
+  return `检查失败：${s}`;
 }

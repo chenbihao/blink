@@ -442,17 +442,29 @@ async function loadContextBindings() {
 
 /**
  * 渲染单个绑定行
- * @param {Object} b - 绑定对象
+ *
+ * 0.11.9 修复：0.9.5 重构时误引用了后端不存在的字段 b.name / b.description
+ * （后端 list_context_bindings 实际返回 trigger_key + target_label），导致
+ * 规则项名称渲染成 undefined、描述为空。改用后端实际字段，并通过 i18n key
+ * 翻译 trigger（文案在 zh.js/en.js 的 context.trigger.* 项）。
+ *
+ * 复用 `.action-list-row` 紧凑单行组件（CSS 类 settings.css:844 起本就声明
+ * 「Chord 动作、Context 触发规则共用」；原 .context-binding-* 类全树零定义，
+ * 故不再使用）。
+ *
+ * @param {Object} b - 后端 binding 对象（{ key, trigger_key, target_label, enabled }）
  * @returns {string} HTML 字符串
  */
 function renderBindingRow(b) {
+  const triggerLabel = t(`context.trigger.${b.trigger_key}`) || b.trigger_key || "";
+  const targetLabel = b.target_label || b.target_id || "";
   return `
-    <div class="context-binding-row" data-key="${escapeAttr(b.key)}">
-      <div class="context-binding-info">
-        <div class="context-binding-name">${escapeHtml(b.name)}</div>
-        <div class="context-binding-desc">${escapeHtml(b.description || "")}</div>
+    <div class="action-list-row context-binding-row" data-key="${escapeAttr(b.key)}">
+      <div class="action-icon" aria-hidden="true">${iconHTML("ghost")}</div>
+      <div class="action-info">
+        <div class="action-title">${escapeHtml(triggerLabel)} → ${escapeHtml(targetLabel)}</div>
       </div>
-      <label class="switch">
+      <label class="switch action-toggle">
         <input type="checkbox" class="binding-toggle" ${b.enabled ? "checked" : ""} />
         <span class="slider"></span>
       </label>

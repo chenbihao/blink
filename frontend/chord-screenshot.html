@@ -12,6 +12,9 @@
     <!-- 标注 canvas：覆盖在裁剪区上，显示标注内容（0.11.7-b） -->
     <canvas id="annot-canvas"></canvas>
 
+    <!-- OCR 命中 canvas（0.11.9-c）：阅读模式下画 word 高亮层 -->
+    <canvas id="ocr-hit-canvas" aria-hidden="true"></canvas>
+
     <!-- 选区尺寸提示 -->
     <div id="size-hint"></div>
 
@@ -99,6 +102,7 @@
               <span class="wm-opacity-val">35%</span>
             </label>
             <div class="wm-form-footer">
+              <button class="wm-clear tool-btn" title="清除当前水印" disabled>清除</button>
               <button class="wm-apply tool-btn tool-btn-primary">应用</button>
             </div>
           </div>
@@ -171,6 +175,7 @@
       <!-- 输出区 -->
       <div class="toolbar-group" data-group="output">
         <button class="tool-btn" id="btn-ocr" title="OCR 文字识别"><svg class="icon" aria-hidden="true"><use href="#icon-scan-text"/></svg></button>
+        <button class="tool-btn" id="btn-translate" title="OCR + 翻译"><svg class="icon" aria-hidden="true"><use href="#icon-languages"/></svg></button>
         <button class="tool-btn" id="btn-save" title="保存为文件"><svg class="icon" aria-hidden="true"><use href="#icon-save"/></svg></button>
         <button class="tool-btn" id="btn-pin" title="钉图"><svg class="icon" aria-hidden="true"><use href="#icon-pin"/></svg></button>
         <button class="tool-btn tool-btn-primary" id="btn-copy" title="复制 (双击选区)"><svg class="icon" aria-hidden="true"><use href="#icon-check"/></svg></button>

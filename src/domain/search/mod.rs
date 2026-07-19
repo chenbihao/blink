@@ -180,7 +180,8 @@ mod mock_slow_engine;
 mod start_menu_engine;
 use builtin_engine::BuiltinEngine;
 // BuiltinActionInfo + list_builtin_actions 由 commands::list_builtin_actions 用（设置页）。
-pub use builtin_engine::{BuiltinActionInfo, list_builtin_actions};
+// list_builtin_context_bindings 由 commands::list_context_bindings 合并 builtin 一路用（0.11.8）。
+pub use builtin_engine::{BuiltinActionInfo, list_builtin_actions, list_builtin_context_bindings};
 use calc_engine::CalcEngine;
 use clipboard_engine::ClipboardEngine;
 use file_engine::FileEngine;

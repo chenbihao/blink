@@ -107,7 +107,7 @@ mod tests {
         // minimal 8x8 PNG magic + IHDR + IEND（不严格合法但足够绕过 empty check；
         // FakeBackend 不解码只返回预设，PNG 内容不重要）
         let fake_png = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00];
-        let args = json!({
+        let _args = json!({
             "png": fake_png.iter().map(|b| json!(b)).collect::<Vec<_>>()
         });
 

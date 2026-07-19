@@ -23,13 +23,33 @@
       <div id="zoom-level">100%</div>
     </div>
 
-    <!-- 右键菜单 -->
+    <!-- 右键菜单（0.11.9-f：加 OCR / 翻译 项） -->
     <div id="ctx-menu" style="display:none">
+      <button id="ctx-ocr">识别文字</button>
+      <button id="ctx-translate">翻译文字</button>
+      <div class="ctx-sep"></div>
       <button id="ctx-close">关闭</button>
     </div>
 
+    <!-- OCR 结果浮层（0.11.9-f：pin 窗口内 OCR 后展示） -->
+    <div id="pin-ocr-panel" style="display:none">
+      <div class="pin-ocr-header">
+        <div class="pin-ocr-tabs">
+          <button class="pin-ocr-tab active" data-tab="source">原文</button>
+          <button class="pin-ocr-tab" data-tab="translated">译文 <span class="stale-dot" aria-hidden="true"></span></button>
+        </div>
+        <button id="pin-ocr-close">✕</button>
+      </div>
+      <textarea id="pin-ocr-source" spellcheck="false"></textarea>
+      <textarea id="pin-ocr-translated" spellcheck="false" hidden placeholder="点击"翻译"按钮生成译文"></textarea>
+      <div class="pin-ocr-footer">
+        <button id="pin-ocr-translate">翻译</button>
+        <button id="pin-ocr-copy" class="primary">复制</button>
+      </div>
+    </div>
+
     <script type="module">
-      import { invoke, screenshotPinTransform } from "./js/api.js";
+      import { invoke, screenshotPinTransform, ocrImage, translateText } from "./js/api.js";
 
       const PAD = 20;       // 与后端 PIN_PAD 一致（物理像素，给发光留空间）
       const RESIZE_THRESHOLD = 0.05; // 窗口尺寸余量阈值（5%），超过才 resize
@@ -251,6 +271,143 @@
         hideCtxMenu();
         closePin();
       });
+
+      // ── 0.11.9-f：pin 窗口内 OCR / 翻译 ──────────────────────────
+      //
+      // pin 窗口不做完整"阅读模式 word 拖选",只提供"识别文字"和"翻译"两个
+      // 二等入口——用户 workflow 是"钉图→比对→需要文字时点右键"。要完整
+      // word 交互请 Alt+A 重新截图。
+
+      const pinOcrPanel = document.getElementById('pin-ocr-panel');
+      const pinOcrSource = document.getElementById('pin-ocr-source');
+      const pinOcrTranslated = document.getElementById('pin-ocr-translated');
+      const pinOcrTabs = pinOcrPanel.querySelectorAll('.pin-ocr-tab');
+      const pinOcrTranslateBtn = document.getElementById('pin-ocr-translate');
+      const pinOcrCopyBtn = document.getElementById('pin-ocr-copy');
+      const pinOcrTabTranslated = pinOcrPanel.querySelector('.pin-ocr-tab[data-tab="translated"]');
+
+      let ocrBusy = false;
+
+      /** 把 pin 窗口图片的 CSS 元素编码为 PNG bytes(通过 canvas)。
+       *  用 img 的物理尺寸,不带 zoom scale——OCR 需要原图。 */
+      function pinImageToPng() {
+        return new Promise((resolve, reject) => {
+          if (!physW || !physH || !img.src) {
+            reject(new Error('图片未加载'));
+            return;
+          }
+          const c = document.createElement('canvas');
+          c.width = physW;
+          c.height = physH;
+          const cc = c.getContext('2d');
+          try {
+            cc.drawImage(img, 0, 0, physW, physH);
+            c.toBlob((blob) => {
+              if (!blob) { reject(new Error('toBlob 失败')); return; }
+              blob.arrayBuffer().then((buf) => resolve(new Uint8Array(buf))).catch(reject);
+            }, 'image/png');
+          } catch (e) {
+            reject(e);
+          }
+        });
+      }
+
+      function showPinOcrPanel(text) {
+        pinOcrSource.value = text || '（未识别到文字）';
+        pinOcrTranslated.value = '';
+        pinOcrTabTranslated.removeAttribute('data-stale');
+        pinOcrTranslated.removeAttribute('data-stale');
+        showPinOcrTab('source');
+        pinOcrPanel.style.display = 'flex';
+      }
+
+      function showPinOcrTab(name) {
+        const isSource = name === 'source';
+        pinOcrTabs.forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
+        pinOcrSource.hidden = !isSource;
+        pinOcrTranslated.hidden = isSource;
+      }
+
+      pinOcrTabs.forEach((t) => {
+        t.addEventListener('click', () => showPinOcrTab(t.dataset.tab));
+      });
+
+      pinOcrSource.addEventListener('input', () => {
+        if (pinOcrTranslated.value) {
+          pinOcrTabTranslated.setAttribute('data-stale', 'true');
+          pinOcrTranslated.setAttribute('data-stale', 'true');
+        }
+      });
+
+      document.getElementById('pin-ocr-close').addEventListener('click', () => {
+        pinOcrPanel.style.display = 'none';
+      });
+
+      async function doPinTranslate() {
+        const src = pinOcrSource.value.trim();
+        if (!src || src === '（未识别到文字）') return;
+        pinOcrTranslateBtn.disabled = true;
+        pinOcrTranslateBtn.textContent = '翻译中…';
+        pinOcrTranslated.value = '翻译中,请稍候…';
+        showPinOcrTab('translated');
+        try {
+          const dst = await translateText(src);
+          pinOcrTranslated.value = dst;
+          pinOcrTabTranslated.removeAttribute('data-stale');
+          pinOcrTranslated.removeAttribute('data-stale');
+        } catch (e) {
+          pinOcrTranslated.value = `翻译失败：${e}`;
+        } finally {
+          pinOcrTranslateBtn.disabled = false;
+          pinOcrTranslateBtn.textContent = '翻译';
+        }
+      }
+
+      pinOcrTranslateBtn.addEventListener('click', doPinTranslate);
+
+      pinOcrCopyBtn.addEventListener('click', () => {
+        const currentTa = pinOcrSource.hidden ? pinOcrTranslated : pinOcrSource;
+        const value = currentTa.value;
+        if (value) {
+          navigator.clipboard.writeText(value).catch((e) => console.error('复制失败', e));
+        }
+        pinOcrPanel.style.display = 'none';
+      });
+
+      async function runPinOcr(autoTranslate) {
+        if (ocrBusy) return;
+        ocrBusy = true;
+        try {
+          const png = await pinImageToPng();
+          const result = await ocrImage(png);
+          showPinOcrPanel((result && result.text) || '');
+          if (autoTranslate) {
+            setTimeout(doPinTranslate, 0);
+          }
+        } catch (e) {
+          console.error('pin OCR 失败', e);
+          showPinOcrPanel(`识别失败：${e}`);
+        } finally {
+          ocrBusy = false;
+        }
+      }
+
+      document.getElementById('ctx-ocr').addEventListener('click', () => {
+        hideCtxMenu();
+        runPinOcr(false);
+      });
+
+      document.getElementById('ctx-translate').addEventListener('click', () => {
+        hideCtxMenu();
+        runPinOcr(true);
+      });
+
+      // 防止面板内交互被外层 mousedown/click 打断
+      pinOcrPanel.addEventListener('mousedown', (e) => e.stopPropagation());
+      pinOcrPanel.addEventListener('click', (e) => e.stopPropagation());
+      pinOcrPanel.addEventListener('contextmenu', (e) => e.stopPropagation());
+      pinOcrPanel.addEventListener('dblclick', (e) => e.stopPropagation());
+      pinOcrPanel.addEventListener('wheel', (e) => e.stopPropagation());
 
       function closePin() {
         invoke('screenshot_pin_hide').catch((e) => {

@@ -5,11 +5,7 @@ mod domain;
 mod infra;
 
 use domain::execution::Action;
-use tauri::{
-    Emitter, Manager, WindowEvent,
-    menu::{Menu, MenuItem},
-    tray::TrayIconBuilder,
-};
+use tauri::{Emitter, Manager, WindowEvent, tray::TrayIconBuilder};
 
 fn main() {
     // 开启 Per-Monitor V2 DPI 感知：混合 DPI（例如主屏 100% + 副屏 150%）跨屏时
@@ -177,12 +173,8 @@ fn main() {
                 });
             }
 
-            // 托盘菜单：设置 + 关于 + 分隔线 + 退出
-            let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
-            let about = MenuItem::with_id(app, "about", "About", true, None::<&str>)?;
-            let sep = tauri::menu::PredefinedMenuItem::separator(app)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit Blink", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&settings, &about, &sep, &quit])?;
+            // 托盘菜单：设置 + 关于 + 分隔线 + 退出（按当前语言构建文案，运行时切语言会重建）
+            let menu = app::tray::build_menu(app, &app_config.language)?;
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .tooltip("Blink")
@@ -544,6 +536,7 @@ fn main() {
             app::commands::screenshot_save,
             app::commands::screenshot_set_annotation_mode,
             app::commands::ocr_image,
+            app::commands::translate_text,
             app::commands::hide_screenshot_overlay,
             app::commands::get_storage_info,
             app::commands::clear_history,
@@ -620,7 +613,8 @@ app::commands::get_stt_space_usage,
 app::commands::cleanup_stt_space,
 app::commands::open_stt_folder,
             app::commands::resize_voice_overlay,
-])
+            app::commands::get_default_hotkey,
+        ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, event| {

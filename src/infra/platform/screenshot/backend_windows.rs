@@ -16,7 +16,6 @@ use windows::Win32::Graphics::Gdi::{
     DIB_RGB_COLORS, DeleteDC, DeleteObject, EnumDisplayMonitors, GetDIBits, GetMonitorInfoW, HDC,
     HMONITOR, MONITORINFO, MONITORINFOEXW, RGBQUAD, SRCCOPY, SelectObject,
 };
-use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
@@ -100,9 +99,8 @@ unsafe extern "system" fn monitor_enum_proc(
     let w = (rc.right - rc.left).max(0) as u32;
     let h = (rc.bottom - rc.top).max(0) as u32;
 
-    let mut dpi_x: u32 = 96;
-    let mut dpi_y: u32 = 96;
-    let _ = unsafe { GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
+    // 0.11.9：走公共 DPI helper（消除 4 处复制的 GetDpiForMonitor 块）
+    let dpi_x = crate::infra::platform::dpi::get_dpi_for_hmonitor(hmon);
 
     // szDevice 是 UTF-16，转 String
     let name = String::from_utf16_lossy(

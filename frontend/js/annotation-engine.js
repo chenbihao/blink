@@ -1,23 +1,27 @@
-//! 标注引擎（0.11.7-b，0.11.8 加 pixelate，0.11.8-b 加 watermark）：多种标注 + 撤销 + 颜色/粗细。
+//! 标注引擎（0.11.7-b，0.11.8 加 pixelate，0.11.8-b 加 watermark，0.11.9-a 水印独立图层）：多种标注 + 撤销 + 颜色/粗细。
 //!
 //! 标注数据模型：
 //! ```typescript
 //! interface AnnotationCommand {
-//!   type: 'rect' | 'ellipse' | 'arrow' | 'pencil' | 'text' | 'watermark'
+//!   type: 'rect' | 'ellipse' | 'arrow' | 'pencil' | 'text'
 //!       | 'mosaic' | 'pixelate' | 'eraser';
 //!   points: {x: number, y: number}[];  // 物理像素坐标，相对裁剪区左上角
 //!   color?: string;
 //!   width?: number;
 //!   fill?: boolean;
 //!   text?: string;
-//!   // watermark 独有：
-//!   layout?: 'diagonal' | 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'
-//!          | 'top-center' | 'bottom-center';
 //! }
 //! ```
 //!
 //! - `mosaic`（涂抹，PixPin 风格）：点序列，圆形笔刷沿轨迹取局部平均色
 //! - `pixelate`（经典像素化马赛克）：矩形框选 [起点, 终点]，整个区域分块平均色填充
+//!
+//! **水印**（0.11.9-a 起独立于 commands 栈）：
+//!   `watermarkConfig: { text, layout, color, opacity } | null`。
+//!   覆盖式配置——同一次 overlay 会话内只保留最后一次 `commitWatermark`，不进撤销栈。
+//!   `renderCommandsTo` 每次重绘时把 watermarkConfig 画在最上层。
+//!   动机：0.11.8 把水印当 command push 进撤销栈，同一水印文字点两次就叠两层；
+//!   多次应用/换保存格式都会视觉上"多层水印"。改为单例配置后天然只有一层。
 //!
 //! 标注坐标使用**物理像素**（canvas 内部像素）坐标系，与裁剪区像素对齐。
 //! 前端鼠标事件 `offsetX/Y` 为 CSS 像素，需乘 `devicePixelRatio` 转物理像素。
@@ -46,6 +50,9 @@ let ctx = null;
 let canvas = null;
 /** 原始裁剪区图像（用于马赛克/橡皮擦恢复） */
 let cropImageData = null;
+/** 水印配置（0.11.9-a 起独立于 commands 栈；null = 无水印）
+ *  形状: { text, layout, color, opacity } | null */
+let watermarkConfig = null;
 
 // ── 初始化和重置 ──────────────────────────────────────
 
@@ -60,6 +67,7 @@ export function reset(cropW, cropH, cropImageDataRef) {
   commands = [];
   undoIndex = -1;
   cropImageData = cropImageDataRef;
+  watermarkConfig = null;  // 0.11.9-a：新选区清水印,防止上一轮残留
   if (canvas) {
     canvas.width = cropW;
     canvas.height = cropH;
@@ -309,14 +317,8 @@ export function executeCommand(cmd, targetCtx) {
         c.fillText(cmd.text, p.x, p.y);
       }
       break;
-    case 'watermark':
-      // 0.11.8-b：水印——按 layout 在裁剪区上铺文字。
-      // 尺寸参考裁剪区短边比例（scale=0.06 → 1000px 图约 60px 字），足够醒目但不喧宾夺主。
-      // 颜色带 40% alpha，避免全遮，同时保持辨识度。
-      if (cmd.text && canvas) {
-        drawWatermark(c, cmd, canvas.width, canvas.height);
-      }
-      break;
+    // 注：'watermark' 分支已于 0.11.9-a 移除。水印现走独立 `watermarkConfig`
+    // 单例配置,在 renderCommandsTo 末尾统一绘制,不进 commands 栈。
     case 'mosaic':
       // 涂抹（PixPin 风格）：沿轨迹画圆形笔刷 + 连线，每点取周围平均色。
       // 固定笔刷半径 16px（物理像素），平均色让信息不可辨认 + 笔触有方向性。
@@ -478,24 +480,46 @@ export function withAlpha(color, alpha) {
 }
 
 /**
- * 提交水印命令。由主脚本在用户填完水印表单后调用。
- * 直接进 commands 栈（可撤销/重做），不走 startDraw / endDraw 流程。
+ * 提交/更新水印配置（0.11.9-a：覆盖式,不进 commands 栈）。
+ *
+ * 语义变更（相对 0.11.8）：
+ * - 旧：push 到 commands,能被撤销;同一水印文字点两次叠两层
+ * - 新：覆盖式配置,一次会话只有一份水印;不参与撤销/重做
+ *
+ * 想清除水印走 `clearWatermark()`（对应前端"清除水印"按钮）。
+ *
+ * 参数缺 text 时视为清除（表单里清空文字再应用 = 清除）。
  */
-export function commitWatermark({ text, layout, color, width, opacity }) {
-  if (!text) return;
-  const cmd = {
-    type: 'watermark',
-    points: [],
-    text,
+export function commitWatermark({ text, layout, color, width: _width, opacity } = {}) {
+  const trimmed = typeof text === 'string' ? text.trim() : '';
+  if (!trimmed) {
+    watermarkConfig = null;
+    redrawAll();
+    return;
+  }
+  watermarkConfig = {
+    text: trimmed,
     layout: layout || 'diagonal',
     color: color || currentColor,
-    width: width || currentWidth,
     opacity: typeof opacity === 'number' ? opacity : 0.35,
   };
-  commands = commands.slice(0, undoIndex + 1);
-  commands.push(cmd);
-  undoIndex = commands.length - 1;
   redrawAll();
+}
+
+/** 清除当前水印（供 UI"清除水印"按钮调）。 */
+export function clearWatermark() {
+  watermarkConfig = null;
+  redrawAll();
+}
+
+/** 读取当前水印配置（供 UI 打开表单时回填）。 */
+export function getWatermark() {
+  return watermarkConfig ? { ...watermarkConfig } : null;
+}
+
+/** 是否已配置水印。 */
+export function hasWatermark() {
+  return watermarkConfig !== null;
 }
 
 // ── 涂抹采样辅助 ──────────────────────────────────────
@@ -628,6 +652,9 @@ function redrawAll() {
  *
  * export 供主脚本 redrawAnnotFull 和合成阶段复用——**必须走这个**而非手动 loop
  * executeCommand，否则 highlight-multiply 会退化成"逐笔 alpha 累积"。
+ *
+ * 0.11.9-a：末尾统一绘制 `watermarkConfig`（若有）。水印是"最后一层",
+ * 永远在最上;保存/合成时也走 renderCommandsTo,水印天然只有一层。
  */
 export function renderCommandsTo(cmds, targetCtx, w, h) {
   const highlightMultiplyCmds = [];
@@ -640,6 +667,10 @@ export function renderCommandsTo(cmds, targetCtx, w, h) {
   }
   if (highlightMultiplyCmds.length > 0) {
     renderHighlightMultiplyLayer(highlightMultiplyCmds, targetCtx, w, h);
+  }
+  // 0.11.9-a：水印永远画在最上层（不进 commands 栈,一次会话只一层）
+  if (watermarkConfig) {
+    drawWatermark(targetCtx, watermarkConfig, w, h);
   }
 }
 
@@ -689,7 +720,7 @@ export function getCommands() {
   return commands.slice(0, undoIndex + 1);
 }
 
-/** 是否有标注 */
+/** 是否有标注（含水印,供合成阶段判断是否需要贴 annot layer） */
 export function hasAnnotations() {
-  return commands.length > 0;
+  return commands.length > 0 || watermarkConfig !== null;
 }

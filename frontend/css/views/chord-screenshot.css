@@ -43,6 +43,21 @@ html, body {
   z-index: 2;
 }
 
+/* 0.11.9-c：OCR 阅读模式命中层——位置/尺寸由 JS 动态设置，与 annot-canvas 一致。
+   阅读模式激活时才启用 pointer-events，标注模式下不参与鼠标事件。 */
+#ocr-hit-canvas {
+  position: absolute;
+  display: none;
+  pointer-events: none;
+  z-index: 3;
+  cursor: text;
+}
+
+#ocr-hit-canvas[data-reading="true"] {
+  display: block;
+  pointer-events: auto;
+}
+
 #size-hint {
   position: fixed;
   background: rgba(0, 0, 0, 0.75);
@@ -279,6 +294,52 @@ html, body {
   font-size: 11px;
 }
 
+/* 0.11.9-d：OCR 面板双 tab（原文/译文）——头部标签栏 */
+.ocr-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+}
+
+.ocr-tab {
+  background: transparent;
+  border: none;
+  color: #888;
+  font-size: 12px;
+  padding: 4px 12px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  user-select: none;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ocr-tab:hover {
+  color: #ddd;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.ocr-tab.active {
+  color: #4a9eff;
+  background: rgba(74, 158, 255, 0.12);
+}
+
+/* 译文过期标记（原文改动后） */
+.ocr-tab .stale-dot {
+  display: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #f59e0b;
+}
+
+.ocr-tab[data-stale="true"] .stale-dot {
+  display: inline-block;
+}
+
 .ocr-panel-body {
   padding: 10px;
   font-size: 13px;
@@ -313,6 +374,21 @@ html, body {
 .ocr-panel-textarea:focus {
   border-color: rgba(74, 158, 255, 0.7);
   box-shadow: 0 0 0 2px rgba(74, 158, 255, 0.15);
+}
+
+/* 0.11.9-d：藏起来的 tab（只显示 active tab 的 textarea） */
+.ocr-panel-textarea[hidden] {
+  display: none;
+}
+
+/* 译文过期视觉：斜纹底 + 提示文字 */
+.ocr-panel-textarea[data-stale="true"] {
+  opacity: 0.6;
+}
+
+/* 翻译中占位态 */
+.ocr-panel-textarea[data-loading="true"] {
+  opacity: 0.5;
 }
 
 /* textarea 自定义滚动条（暗色主题，替代原生丑陋滚动条） */
@@ -721,6 +797,7 @@ html, body {
   border-top: 1px solid rgba(255, 255, 255, 0.08);
   display: flex;
   justify-content: flex-end;
+  gap: 6px;
   margin-top: 2px;
 }
 
@@ -729,6 +806,12 @@ html, body {
   height: 24px;
   font-size: 12px;
   padding: 0 12px;
+}
+
+/* 0.11.9-a：清除按钮 disabled 态视觉 */
+.wm-form-footer .wm-clear:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* ── 笔画预览虚圈（0.11.8-c）─────────────────────────────
