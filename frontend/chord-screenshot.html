@@ -6,201 +6,75 @@
     <link rel="stylesheet" href="css/entries/chord-screenshot.css" />
   </head>
   <body>
+    <!-- 主 canvas：全屏截图 + 暗色蒙版 + 亮区 -->
     <canvas id="canvas"></canvas>
+
+    <!-- 标注 canvas：覆盖在裁剪区上，显示标注内容（0.11.7-b） -->
+    <canvas id="annot-canvas"></canvas>
+
+    <!-- 选区尺寸提示 -->
     <div id="size-hint"></div>
+
+    <!-- 错误提示 -->
     <div id="error-hint"></div>
-    <script type="module">
-      import { captureRegion, hideScreenshotOverlay } from "./js/api.js";
 
-      const canvas = document.getElementById("canvas");
-      const ctx = canvas.getContext("2d");
-      const sizeHint = document.getElementById("size-hint");
-      const errorHint = document.getElementById("error-hint");
+    <!-- 工具栏（0.11.7-a/b）：选区完成后显示 -->
+    <div id="toolbar" role="toolbar" aria-label="截图工具栏">
+      <!-- 标注工具区 -->
+      <div class="toolbar-group" data-group="tools">
+        <button class="tool-btn active" data-tool="rect" title="矩形">▭</button>
+        <button class="tool-btn" data-tool="ellipse" title="椭圆">○</button>
+        <button class="tool-btn" data-tool="arrow" title="箭头">➘</button>
+        <button class="tool-btn" data-tool="pencil" title="铅笔">✎</button>
+        <button class="tool-btn" data-tool="text" title="文本">A</button>
+        <button class="tool-btn" data-tool="mosaic" title="马赛克">▦</button>
+        <button class="tool-btn" data-tool="eraser" title="橡皮擦">⌫</button>
+      </div>
 
-      let screenshot = null;
-      // 选区坐标存 CSS 逻辑像素（鼠标事件的 offsetX/Y 天然给的就是它），
-      // 只在最后 send 时乘 DPR 转成物理像素——单一变换点，好排查偏移。
-      let startX = 0, startY = 0;
-      let endX = 0, endY = 0;
-      let isDragging = false;
-      let sent = false; // 防止 mouseup 触发两次
-      let clickTimeout = null; // 双击检测：单击后 200ms 内再点 → 全屏截图
+      <div class="toolbar-divider"></div>
 
-      loadScreenshot();
+      <!-- 颜色区 -->
+      <div class="toolbar-group" data-group="colors">
+        <button class="tool-btn color-swatch active" data-color="#ff0000" title="红色" style="color:#ff0000">●</button>
+        <button class="tool-btn color-swatch" data-color="#ff8c00" title="橙色" style="color:#ff8c00">●</button>
+        <button class="tool-btn color-swatch" data-color="#ffd700" title="黄色" style="color:#ffd700">●</button>
+        <button class="tool-btn color-swatch" data-color="#00cc00" title="绿色" style="color:#00cc00">●</button>
+        <button class="tool-btn color-swatch" data-color="#00cccc" title="青色" style="color:#00cccc">●</button>
+        <button class="tool-btn color-swatch" data-color="#0088ff" title="蓝色" style="color:#0088ff">●</button>
+        <button class="tool-btn color-swatch" data-color="#aa44ff" title="紫色" style="color:#aa44ff">●</button>
+        <button class="tool-btn color-swatch" data-color="#ffffff" title="白色" style="color:#ffffff">●</button>
+        <input type="color" id="color-picker" class="color-input" value="#ff0000" title="自定义颜色" />
+      </div>
 
-      // 后端复用窗口时调用此函数触发重新加载
-      window.__blinkReloadScreenshot = function () {
-        isDragging = false;
-        sent = false;
-        screenshot = null;
-        sizeHint.style.display = "none";
-        errorHint.style.display = "none";
-        // 立刻清 canvas —— show → img.onload 之间有 ~几十ms 空档，
-        // 不清的话用户会看到上次结束时的画面（老蓝色虚线框闪一下）。
-        // 顺便把 canvas 内部尺寸复位到 1x1，避免旧图残留占用大 buffer。
-        if (canvas.width > 0) {
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-        }
-        loadScreenshot();
-      };
+      <div class="toolbar-divider"></div>
 
-      function loadScreenshot() {
-        // Tauri v2 在 Windows 上会把 `blink-screenshot://` 重写成
-        // `http://blink-screenshot.localhost/`（与 blink-icon 同），直接用后者最稳。
-        // 加缓存破坏参数——WebView2 复用窗口时如果 URL 完全一致会走缓存。
-        const img = new Image();
-        img.onload = () => {
-          screenshot = img;
-          // canvas 内部像素 = 截图的物理像素（BitBlt 产出）
-          canvas.width = img.width;
-          canvas.height = img.height;
-          drawDimmed();
-        };
-        img.onerror = (e) => {
-          console.error("截图加载失败", e);
-          errorHint.textContent = "截图加载失败，按 ESC 关闭";
-          errorHint.style.display = "block";
-        };
-        img.src = "http://blink-screenshot.localhost/capture?t=" + Date.now();
-      }
+      <!-- 粗细区 -->
+      <div class="toolbar-group" data-group="widths">
+        <button class="tool-btn width-btn" data-width="2" title="细">──</button>
+        <button class="tool-btn width-btn active" data-width="4" title="中">━</button>
+        <button class="tool-btn width-btn" data-width="8" title="粗">━━</button>
+      </div>
 
-      // ── 鼠标事件 ──────────────────────────────────────
+      <div class="toolbar-divider"></div>
 
-      canvas.addEventListener("mousedown", (e) => {
-        if (!screenshot || e.button !== 0) return; // 只响应左键
-        isDragging = true;
-        sent = false;
-        startX = e.offsetX;
-        startY = e.offsetY;
-        endX = startX;
-        endY = startY;
-      });
+      <!-- 操作区 -->
+      <div class="toolbar-group" data-group="ops">
+        <button class="tool-btn" id="btn-undo" title="撤销 (Ctrl+Z)" disabled>↶</button>
+        <button class="tool-btn" id="btn-redo" title="重做 (Ctrl+Y)" disabled>↷</button>
+      </div>
 
-      canvas.addEventListener("mousemove", (e) => {
-        if (!screenshot || !isDragging) return;
-        endX = e.offsetX;
-        endY = e.offsetY;
-        drawSelection();
-      });
+      <div class="toolbar-divider"></div>
 
-      canvas.addEventListener("mouseup", (e) => {
-        if (!screenshot || !isDragging) return;
-        isDragging = false;
-        endX = e.offsetX;
-        endY = e.offsetY;
+      <!-- 输出区 -->
+      <div class="toolbar-group" data-group="output">
+        <button class="tool-btn" id="btn-ocr" title="OCR 文字识别">🔍</button>
+        <button class="tool-btn" id="btn-save" title="保存为文件">💾</button>
+        <button class="tool-btn" id="btn-pin" title="钉图">📌</button>
+        <button class="tool-btn tool-btn-primary" id="btn-copy" title="复制 (双击选区)">✓</button>
+        <button class="tool-btn" id="btn-cancel" title="取消 (ESC)">✕</button>
+      </div>
+    </div>
 
-        const rect = norm(startX, startY, endX, endY);
-        if (rect.w < 3 || rect.h < 3) {
-          // 太小视为"单击"——延迟隐藏，给双击留窗口（dblclick 在第二次 mouseup 后才触发）
-          if (clickTimeout) clearTimeout(clickTimeout);
-          clickTimeout = setTimeout(() => {
-            clickTimeout = null;
-            hideScreenshotOverlay();
-          }, 200);
-          return;
-        }
-        if (sent) return;
-        sent = true;
-        sendSelection(rect);
-      });
-
-      // 双击全屏截图：两次快速点击（<200ms，位置相近）→ 截取整个屏幕
-      canvas.addEventListener("dblclick", (e) => {
-        if (!screenshot || sent) return;
-        if (clickTimeout) { clearTimeout(clickTimeout); clickTimeout = null; }
-        sent = true;
-        // canvas.width/height 就是物理像素（BitBlt 产出），直接传
-        captureRegion(0, 0, canvas.width, canvas.height).catch((err) => {
-          console.error("全屏截图失败", err);
-          errorHint.textContent = "截图保存失败：" + err;
-          errorHint.style.display = "block";
-          sent = false;
-        });
-      });
-
-      // 右键取消截图
-      canvas.addEventListener("contextmenu", (e) => {
-        e.preventDefault();
-        hideScreenshotOverlay();
-      });
-
-      document.addEventListener("keydown", (e) => {
-        if (e.key === "Escape") {
-          e.preventDefault();
-          hideScreenshotOverlay();
-        }
-      });
-
-      // 失焦兜底：用户按 Win 键/切走 → 关掉 overlay 避免卡屏
-      window.addEventListener("blur", () => {
-        hideScreenshotOverlay();
-      });
-
-      // ── 绘制 ──────────────────────────────────────────
-
-      /** 暗色蒙版（初始态 + 无选区时） */
-      function drawDimmed() {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(screenshot, 0, 0);
-        ctx.fillStyle = "rgba(0, 0, 0, 0.45)";
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-      }
-
-      /** 选区绘制：选区外暗 + 选区内亮。坐标全用 CSS 像素 * DPR 换算到 canvas 内部像素。 */
-      function drawSelection() {
-        const dpr = window.devicePixelRatio || 1;
-        const r = norm(startX, startY, endX, endY);
-        // 转 canvas 内部像素
-        const px = r.x * dpr;
-        const py = r.y * dpr;
-        const pw = r.w * dpr;
-        const ph = r.h * dpr;
-
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(screenshot, 0, 0);
-
-        ctx.fillStyle = "rgba(0, 0, 0, 0.45)";
-        ctx.fillRect(0, 0, canvas.width, py);
-        ctx.fillRect(0, py + ph, canvas.width, canvas.height - py - ph);
-        ctx.fillRect(0, py, px, ph);
-        ctx.fillRect(px + pw, py, canvas.width - px - pw, ph);
-
-        ctx.strokeStyle = "#4a9eff";
-        ctx.lineWidth = 2 * dpr;
-        ctx.setLineDash([6 * dpr, 3 * dpr]);
-        ctx.strokeRect(px, py, pw, ph);
-        ctx.setLineDash([]);
-
-        // size-hint 显示物理像素尺寸（用户直觉感知的截图尺寸就是物理像素）
-        sizeHint.textContent = `${Math.round(pw)} × ${Math.round(ph)}`;
-        sizeHint.style.display = "block";
-        sizeHint.style.left = (r.x + 4) + "px";
-        sizeHint.style.top = (r.y > 24 ? r.y - 22 : r.y + 4) + "px";
-      }
-
-      // ── 工具 ──────────────────────────────────────────
-
-      function norm(x1, y1, x2, y2) {
-        return {
-          x: Math.min(x1, x2), y: Math.min(y1, y2),
-          w: Math.abs(x2 - x1), h: Math.abs(y2 - y1),
-        };
-      }
-
-      /** 把选区（CSS 像素）转成物理像素后回传后端 —— 只发 4 个整数，裁剪在后端做。 */
-      function sendSelection(rect) {
-        const dpr = window.devicePixelRatio || 1;
-        const x = Math.round(rect.x * dpr);
-        const y = Math.round(rect.y * dpr);
-        const w = Math.round(rect.w * dpr);
-        const h = Math.round(rect.h * dpr);
-        captureRegion(x, y, w, h).catch((e) => {
-          console.error("capture_region 失败", e);
-          errorHint.textContent = "截图保存失败：" + e;
-          errorHint.style.display = "block";
-          sent = false; // 允许用户重试
-        });
-      }
-    </script>
+    <script type="module" src="js/chord-screenshot.js"></script>
   </body>
 </html>

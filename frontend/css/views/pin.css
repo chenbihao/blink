@@ -1,0 +1,78 @@
+/* ── 钉图窗口视图（0.11.7-d）─────────────────────────────────── */
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: transparent;
+  user-select: none;
+}
+
+#container {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.01); /* 极透明度让窗口可点击 */
+  cursor: default;
+}
+
+#pin-img {
+  display: block;
+  max-width: none;
+  max-height: none;
+  transform-origin: center center;
+  pointer-events: none;
+  image-rendering: auto;
+}
+
+#zoom-level {
+  position: fixed;
+  bottom: 12px;
+  right: 12px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 12px;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  padding: 2px 8px;
+  border-radius: var(--radius-xs);
+  pointer-events: none;
+  transition: opacity 0.3s ease;
+  z-index: 10;
+}
+
+/* ── 右键菜单 ──────────────────────────────────────────────── */
+
+#ctx-menu {
+  position: fixed;
+  display: none;
+  flex-direction: column;
+  background: rgba(30, 30, 30, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: var(--radius-xs);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  z-index: 100;
+  min-width: 100px;
+  padding: 4px;
+}
+
+#ctx-menu button {
+  background: transparent;
+  border: none;
+  color: #ddd;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  cursor: pointer;
+  border-radius: var(--radius-xs);
+  text-align: left;
+  transition: background 0.1s ease;
+}
+
+#ctx-menu button:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}

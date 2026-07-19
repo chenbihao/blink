@@ -87,12 +87,54 @@ export function recordClipboardHit(id) {
   return invoke("record_clipboard_hit", { id });
 }
 
-/** 确认截图选区（0.8.7）：只传物理像素坐标，裁剪由后端从 SESSION 完成。 */
-export function captureRegion(x, y, w, h) {
-  return invoke("capture_region", { x, y, w, h });
-}
-
-/** 隐藏截图覆盖窗（ESC 取消调）。 */
+/** 隐藏截图覆盖窗（ESC 取消调；无选区路径走这里）。 */
 export function hideScreenshotOverlay() {
   return invoke("hide_screenshot_overlay");
+}
+
+/** 0.11.7-f：接收前端合成后的 PNG，写入剪贴板，结束截图会话。 */
+export function screenshotCopy(pngData) {
+  return invoke("screenshot_copy", { pngData });
+}
+
+/**
+ * 0.11.7 快路径：跳过前端 PNG 编码 + 后端解码，直接从后端 SESSION 裁剪 BGRA
+ * 写剪贴板。仅在无标注 + 有选区时可用；有标注时必须走 `screenshotCopy` 让前端
+ * 合成 PNG 传入。坐标是物理像素、SESSION 坐标系。
+ */
+export function screenshotCopyRegion(x, y, w, h) {
+  return invoke("screenshot_copy_region", { x, y, w, h });
+}
+
+/** 0.11.7-f：取消截图，结束会话，不保存。 */
+export function screenshotCancel() {
+  return invoke("screenshot_cancel");
+}
+
+/** 0.11.7-f：钉图——接收前端合成后的 PNG，创建钉图窗口。 */
+export function screenshotPin(pngData) {
+  return invoke("screenshot_pin", { pngData });
+}
+
+/** 0.11.7-f：保存截图选区为文件。path 可选，不传则弹出保存对话框。 */
+export function screenshotSave(pngData, path) {
+  return invoke("screenshot_save", { pngData, path });
+}
+
+/** 0.11.7-f：通知后端标注模式状态。 */
+export function screenshotSetAnnotationMode(active) {
+  return invoke("screenshot_set_annotation_mode", { active });
+}
+
+/** 0.11.7-c：OCR 识别图片中的文字，返回 `{text, lines}`。 */
+export function ocrImage(pngData) {
+  return invoke("ocr_image", { pngData });
+}
+
+/**
+ * **临时**（0.11.7-f 调试用）：把前端消息转发到后端 tracing 控制台。
+ * TODO(0.11.7 收尾)：0.11.7 稳定后可移除。
+ */
+export function frontendLog(level, message) {
+  return invoke("frontend_log", { level, message }).catch(() => {});
 }

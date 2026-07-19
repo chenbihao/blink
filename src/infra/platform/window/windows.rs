@@ -695,6 +695,62 @@ pub fn hide_screenshot_overlay(app: &AppHandle) {
     crate::infra::platform::screenshot::end_session();
 }
 
+/// 显示钉图窗口（0.11.7-d）。
+///
+/// 复用预热窗口（首次创建 ~300ms → 复用后 <50ms），通过 `eval` 注入 PNG base64 到 `<img>`。
+/// 前端 `data-tauri-drag-region` 属性处理拖拽移动，滚轮缩放由 JS 处理。
+///
+/// **单钉图策略**：目前只支持单张钉图，重复触发会覆盖已有内容。
+pub fn show_pin_window(app: &AppHandle, png_data: Vec<u8>) -> Result<(), String> {
+    use base64::Engine;
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    const LABEL: &str = "chord-pin";
+
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&png_data);
+    let data_url = format!("data:image/png;base64,{b64}");
+
+    // 复用已存在的窗口（预热或上次钉图）
+    if let Some(win) = app.get_webview_window(LABEL) {
+        let js = format!(
+            "if (window.__blinkResetPin) window.__blinkResetPin('{}'); else document.getElementById('pin-img').src = '{}';",
+            data_url, data_url
+        );
+        win.eval(&js).map_err(|e| format!("eval 注入 PNG 失败: {e}"))?;
+        let _ = win.show();
+        let _ = win.set_focus();
+        tracing::debug!("钉图窗口已复用");
+        return Ok(());
+    }
+
+    // 首次创建
+    match WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("pin.html".into()))
+        .title("")
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .inner_size(400.0, 300.0) // 初始尺寸，前端会自适应
+        .center()
+        .build()
+    {
+        Ok(win) => {
+            // 注入 PNG 数据
+            let js = format!(
+                "document.getElementById('pin-img').src = '{}'",
+                data_url
+            );
+            win.eval(&js).map_err(|e| format!("eval 注入 PNG 失败: {e}"))?;
+            let _ = win.show();
+            tracing::debug!("钉图窗口已创建");
+            Ok(())
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "钉图窗口创建失败");
+            Err(format!("钉图窗口创建失败: {e}"))
+        }
+    }
+}
+
 /// 截图专用：**瞬间**隐藏主窗（DWM Cloak + hide），零 fade 动画。
 ///
 /// **和 `hide()` 的区别**：
@@ -816,7 +872,9 @@ pub fn preheat_secondary_windows(app: AppHandle) {
             match WebviewWindowBuilder::new(
                 &app,
                 "chord-screenshot",
-                WebviewUrl::App("chord-screenshot.html".into()),
+                // 0.11.7-f：URL 加 ?preheat=1，前端识别参数跳过 loadScreenshot，
+                // 避免 SESSION 空时 img.onerror 遗留 error-hint 到用户实际唤起的 overlay
+                WebviewUrl::App("chord-screenshot.html?preheat=1".into()),
             )
             .title("")
             .inner_size(1920.0, 1080.0) // 默认尺寸，实际使用时 place_at_physical 会覆盖
@@ -889,6 +947,28 @@ pub fn preheat_secondary_windows(app: AppHandle) {
                     tracing::debug!("preheat: voice-overlay ✓");
                 }
                 Err(e) => tracing::warn!(error = %e, "preheat: voice-overlay 失败"),
+            }
+        }
+
+        // --- chord-pin（钉图窗口，0.11.7-d） ---
+        if app.get_webview_window("chord-pin").is_none() {
+            use tauri::{WebviewUrl, WebviewWindowBuilder};
+            match WebviewWindowBuilder::new(
+                &app,
+                "chord-pin",
+                WebviewUrl::App("pin.html".into()),
+            )
+            .title("")
+            .inner_size(400.0, 300.0)
+            .decorations(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .focused(false)
+            .visible(false)
+            .build()
+            {
+                Ok(_) => tracing::debug!("preheat: chord-pin ✓"),
+                Err(e) => tracing::warn!(error = %e, "preheat: chord-pin 失败"),
             }
         }
 

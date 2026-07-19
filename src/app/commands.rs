@@ -43,6 +43,21 @@ pub fn hide_window(app: tauri::AppHandle) {
     crate::infra::platform::window::hide(&app, "ESC");
 }
 
+/// **临时**（0.11.7-f 调试用）：前端把 console 日志转发到后端 tracing。
+///
+/// TODO(0.11.7 收尾)：0.11.7 稳定后删除此 command 与前端 `frontendLog()` 封装。
+/// 前端诊断转由 devtools 完成。
+#[tauri::command]
+pub fn frontend_log(level: String, message: String) {
+    match level.as_str() {
+        "error" => tracing::error!(target: "blink::frontend", "{message}"),
+        "warn" => tracing::warn!(target: "blink::frontend", "{message}"),
+        "info" => tracing::info!(target: "blink::frontend", "{message}"),
+        "debug" => tracing::debug!(target: "blink::frontend", "{message}"),
+        _ => tracing::trace!(target: "blink::frontend", "{message}"),
+    }
+}
+
 /// 隐藏设置窗口（供设置页的 ESC 调用）。
 #[tauri::command]
 pub fn hide_settings_window(app: tauri::AppHandle) {
@@ -313,30 +328,159 @@ pub async fn trigger_chord(app: tauri::AppHandle, key: String) -> Result<(), Str
     Ok(())
 }
 
-/// 确认截图选区（0.8.7）：前端拖选完成后回调。
+/// 结束一个截图会话（0.11.7-f helper）：清标注模式 + 隐藏 overlay + 清 SESSION。
 ///
-/// - `x/y/w/h`：选区在虚拟屏幕上的**物理像素**坐标（前端已乘 DPR）。
-/// - 从 SESSION 裁剪 RGBA → 写入剪贴板 CF_DIB → 隐藏 overlay + 清 SESSION。
+/// `screenshot_copy/pin/save/cancel` 都以此收尾，一处修改多处受益。
+fn finish_screenshot_session(app: &tauri::AppHandle) {
+    crate::infra::platform::screenshot::set_annotation_mode(false);
+    crate::infra::platform::window::hide_screenshot_overlay(app);
+}
+
+/// 0.11.7-f：接收前端合成后的 PNG（裁剪区 + 标注），写入剪贴板，结束会话。
 ///
-/// 裁剪逻辑走 `screenshot::crop`（越界自动 clamp），PNG 编解码不再来回一遍。
+/// **替代** 0.8.7 `capture_region`（后端从 SESSION 裁剪）——现在前端一份合成路径
+/// 走通所有输出（复制/保存/钉图），双击全屏也走这里。
+///
+/// **异步执行**（0.11.7 review 修）：PNG 解码 + BGRA swap + Win32 剪贴板写入都是
+/// 同步 CPU/syscall 密集操作，全屏 2560x1440 约 50-100ms。放在异步命令直接跑会
+/// 阻塞 tokio 工作线程，影响其他并发任务。用 `spawn_blocking` 挪到阻塞线程池。
+///
+/// **快路径**：如果只需要复制选区（无标注、无全屏合成），前端应走 `screenshot_copy_region`
+/// 直接传坐标——避开前端 toBlob PNG 编码 + 后端 PNG 解码的双重开销，全屏路径
+/// 快 ~150-250ms。有标注 / 全屏合成时才走本命令。
 #[tauri::command]
-pub async fn capture_region(
+pub async fn screenshot_copy(
+    app: tauri::AppHandle,
+    png_data: Vec<u8>,
+) -> Result<(), String> {
+    let bytes_len = png_data.len();
+    tokio::task::spawn_blocking(move || {
+        crate::infra::platform::clipboard::write_png_to_clipboard(&png_data)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking join 失败: {e}"))??;
+    finish_screenshot_session(&app);
+    tracing::info!(bytes = bytes_len, "截图已保存到剪贴板");
+    Ok(())
+}
+
+/// 0.11.7 快路径：直接从 SESSION 裁剪 BGRA → 写剪贴板，跳过 PNG 编解码往返。
+///
+/// **适用场景**：无标注（前端 `annot.hasAnnotations() == false`）+ 有选区。
+///
+/// 相比 `screenshot_copy(png_data)` 的收益：
+/// - 前端省 `canvas.toBlob('image/png')`（2560x1440 ~150ms）
+/// - 后端省 `image::load_from_memory` PNG 解码（~50-100ms）
+/// - IPC payload 从 PNG (~几 MB) 变成 16 字节坐标
+///
+/// 坐标是物理像素、SESSION 坐标系（虚拟屏幕原点为 (0,0)）——前端 mouseup 时
+/// 已按 DPR 转换过。裁剪越界会被 `crop()` 自身 clamp。
+#[tauri::command]
+pub async fn screenshot_copy_region(
     app: tauri::AppHandle,
     x: i32,
     y: i32,
     w: u32,
     h: u32,
 ) -> Result<(), String> {
-    let (bgra, cw, ch) = crate::infra::platform::screenshot::crop(x, y, w, h)
-        .ok_or_else(|| "截图会话为空或选区越界".to_string())?;
-
-    crate::infra::platform::clipboard::write_bgra_to_clipboard(&bgra, cw, ch)?;
-
-    // 隐藏 overlay + 清空 SESSION（hide_screenshot_overlay 内部会 end_session）
-    crate::infra::platform::window::hide_screenshot_overlay(&app);
-
-    tracing::info!(x, y, w = cw, h = ch, "截图已保存到剪贴板");
+    // BGRA 裁剪 + 剪贴板写入都同步，挪到阻塞线程池
+    tokio::task::spawn_blocking(move || -> Result<(u32, u32), String> {
+        let (bgra, cw, ch) = crate::infra::platform::screenshot::crop(x, y, w, h)
+            .ok_or_else(|| "SESSION 为空或选区越界".to_string())?;
+        crate::infra::platform::clipboard::write_bgra_to_clipboard(&bgra, cw, ch)?;
+        Ok((cw, ch))
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking join 失败: {e}"))?
+    .map(|(cw, ch)| tracing::info!(w = cw, h = ch, "截图选区已直传剪贴板（快路径）"))?;
+    finish_screenshot_session(&app);
     Ok(())
+}
+
+/// 0.11.7-f：取消截图，结束会话，不保存。
+#[tauri::command]
+pub fn screenshot_cancel(app: tauri::AppHandle) {
+    finish_screenshot_session(&app);
+    tracing::info!("截图已取消");
+}
+
+/// 0.11.7-f：钉图——接收前端合成后的 PNG，创建钉图窗口。
+#[tauri::command]
+pub fn screenshot_pin(app: tauri::AppHandle, png_data: Vec<u8>) -> Result<(), String> {
+    crate::infra::platform::window::show_pin_window(&app, png_data)?;
+    finish_screenshot_session(&app);
+    tracing::info!("截图已钉到屏幕");
+    Ok(())
+}
+
+/// 0.11.7-f：保存截图选区为文件（PNG/JPEG）。
+///
+/// `path=None` 弹出保存对话框；用户取消时返回 Err，前端应识别 "用户取消了保存"
+/// 字符串以避免噪音。
+#[tauri::command]
+pub async fn screenshot_save(
+    app: tauri::AppHandle,
+    png_data: Vec<u8>,
+    path: Option<String>,
+) -> Result<String, String> {
+    use std::io::Write;
+
+    let file_path = match path {
+        Some(p) => p,
+        None => {
+            let timestamp = chrono::Local::now().format("截图_%Y%m%d_%H%M%S");
+            let default_name = format!("{}.png", timestamp);
+            let dialog = app.dialog().file();
+            let picked = dialog
+                .add_filter("PNG 图片", &["png"])
+                .add_filter("JPEG 图片", &["jpg", "jpeg"])
+                .set_file_name(&default_name)
+                .blocking_save_file();
+            match picked {
+                Some(path) => path.to_string(),
+                None => return Err("用户取消了保存".to_string()),
+            }
+        }
+    };
+
+    let mut file = std::fs::File::create(&file_path)
+        .map_err(|e| format!("创建文件失败: {e}"))?;
+    file.write_all(&png_data)
+        .map_err(|e| format!("写入文件失败: {e}"))?;
+
+    finish_screenshot_session(&app);
+    tracing::info!(path = %file_path, "截图已保存到文件");
+    Ok(file_path)
+}
+
+/// 0.11.7-d：隐藏钉图窗口（hide 而非 close，保留窗口实例供下次钉图复用）。
+#[tauri::command]
+pub fn screenshot_pin_hide(app: tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("chord-pin") {
+        let _ = win.hide();
+    }
+}
+
+/// 0.11.7-c：OCR 识别图片中的文字，返回 `{text, lines}`。
+///
+/// 0.11.7-f：改走 `ocr_engine::backend()` 注入的后端（测试可替换）。
+#[tauri::command]
+pub async fn ocr_image(_app: tauri::AppHandle, png_data: Vec<u8>) -> Result<serde_json::Value, String> {
+    let backend = crate::domain::capability::builtins::ocr_engine::backend();
+    let result = backend
+        .recognize(&png_data)
+        .await
+        .map_err(|e| format!("OCR 识别失败: {e}"))?;
+
+    let json = serde_json::to_value(&result).map_err(|e| format!("序列化 OCR 结果失败: {e}"))?;
+    tracing::debug!(text_len = result.text.len(), "OCR 识别完成");
+    Ok(json)
+}
+
+/// 0.11.7：设置/清除标注模式（前端通知后端）。
+#[tauri::command]
+pub fn screenshot_set_annotation_mode(active: bool) {
+    crate::infra::platform::screenshot::set_annotation_mode(active);
 }
 
 /// 隐藏截图覆盖窗（ESC / 失焦 / 选区过小时调）。

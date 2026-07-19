@@ -32,12 +32,28 @@
 //! 代价：SESSION 多占一份 PNG 内存（~10-30MB），`end_session()` 时一并释放。
 //!
 //! **纯逻辑抽出**：`crop_rgba` 是纯函数（BGRA 输入 + 矩形输出），带越界 clamp，
-//! 覆盖单测；平台相关的 BitBlt 走 `windows.rs`。
+//! 覆盖单测；平台相关的 BitBlt 走 `backend_windows.rs`。
+//!
+//! **0.11.7-f 能力化重构**：
+//! - `ScreenshotBackend` trait（`backend.rs`）——可 mock 的截屏平台抽象
+//! - `WindowsScreenshotBackend`（`backend_windows.rs`）——生产实现，从旧 `windows.rs` 迁移
+//! - `FakeScreenshotBackend`（`backend_fake.rs`）——测试实现
+//! - `list_displays()` — 新增多显示器枚举
+//! - `SESSION` 保留为运行时状态（overlay 交互需要），但 backend 通过 `install_backend` 注入
 
+pub mod backend;
+pub mod backend_fake;
+#[cfg(target_os = "windows")]
+pub mod backend_windows;
+
+// 兼容层：保留 `windows` 子模块导出的公开函数签名（`capture_virtual_screen()`）
 #[cfg(target_os = "windows")]
 mod windows;
 
-use std::sync::RwLock;
+pub use backend::{DisplayGeometry, ScreenshotBackend};
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock, RwLock};
 
 /// 虚拟屏幕元数据（无像素，只描述几何）。
 #[derive(Debug, Clone, Copy)]
@@ -73,15 +89,82 @@ struct Session {
 
 static SESSION: RwLock<Option<Session>> = RwLock::new(None);
 
+/// 标注模式标志（0.11.7）：选区完成后、用户确认输出前为 true。
+/// AI 调用 `capture_screen` 时检测此标志，活跃则新截一帧而非复用 SESSION。
+static ANNOTATION_MODE: AtomicBool = AtomicBool::new(false);
+
+/// 全局注入的 ScreenshotBackend（0.11.7-f）。
+///
+/// **默认**：`WindowsScreenshotBackend`（生产），也可以在测试或平台无关代码里替换。
+/// 通过 `install_backend()` 注入；`backend()` 返回当前 backend。
+///
+/// 使用 `OnceLock<RwLock<Arc<dyn>>>` 而非纯 `OnceLock<Arc<dyn>>`：允许运行时替换
+/// （测试场景可能需要）。生产路径只写一次（`main.rs::setup`）。
+static BACKEND: OnceLock<RwLock<Arc<dyn ScreenshotBackend>>> = OnceLock::new();
+
+/// 安装/替换 backend（0.11.7-f）。
+///
+/// **调用时机**：`main.rs::setup` 里最早期（在任何 `begin_session` / `list_displays`
+/// 调用之前）。可重复调用替换 backend（测试用）。
+#[allow(dead_code)] // Step 2 之前默认走 OnceLock 兜底路径
+pub fn install_backend(backend: Arc<dyn ScreenshotBackend>) {
+    match BACKEND.get() {
+        Some(lock) => {
+            if let Ok(mut w) = lock.write() {
+                *w = backend;
+            }
+        }
+        None => {
+            let _ = BACKEND.set(RwLock::new(backend));
+        }
+    }
+}
+
+/// 获取当前 backend（0.11.7-f）。
+///
+/// **首次调用兜底**：如果没显式 `install_backend`，Windows 平台自动装 `WindowsScreenshotBackend`。
+/// 这让平台代码不必显式初始化，但生产路径仍应在 setup 里主动装（便于测试注入）。
+pub fn backend() -> Arc<dyn ScreenshotBackend> {
+    let lock = BACKEND.get_or_init(|| {
+        #[cfg(target_os = "windows")]
+        let default: Arc<dyn ScreenshotBackend> =
+            Arc::new(backend_windows::WindowsScreenshotBackend::new());
+        #[cfg(not(target_os = "windows"))]
+        let default: Arc<dyn ScreenshotBackend> =
+            panic!("非 Windows 平台需显式 install_backend");
+        RwLock::new(default)
+    });
+    lock.read().expect("backend RwLock 中毒").clone()
+}
+
+/// 枚举所有显示器（0.11.7-f）——转发到当前 backend。
+#[allow(dead_code)] // Step 2 Capability 消费
+pub fn list_displays() -> Vec<DisplayGeometry> {
+    backend().list_displays()
+}
+
+/// 截取指定显示器（0.11.7-f）——转发到当前 backend。
+#[allow(dead_code)] // Step 2 Capability 消费
+pub fn capture_display(display_id: u32) -> Result<(Vec<u8>, DisplayGeometry), String> {
+    backend().capture_display(display_id)
+}
+
 /// 启动截图会话：截取整个虚拟屏幕，**立即编码 PNG**，存进 SESSION，返回元数据。
 ///
 /// **调用时机**：主窗已隐藏、overlay 尚未显示。这样 BitBlt 拍到的是"没有 blink"的桌面。
 ///
 /// **预编码 PNG**（0.8.8 优化）：截屏后立即编码 PNG 存进 `png_bytes`，前端拉取时
 /// `session_png()` 只读内存返回，省掉 ~150ms 编码延迟。
-#[cfg(target_os = "windows")]
+///
+/// **0.11.7-f**：改走注入的 backend 而非直接调 Win32。
+///
+/// **标注模式重置**：新会话开始前复位 `ANNOTATION_MODE`，防止前一次崩溃残留导致
+/// AI `capture_screen` 永远跳过 SESSION 缓存。
 pub fn begin_session() -> Result<ScreenCaptureMeta, String> {
-    let (pixels, meta) = windows::capture_virtual_screen()?;
+    // 新会话开始时清除前一次可能残留的标注模式（backend crash / 前端异常退出等情况）
+    set_annotation_mode(false);
+
+    let (pixels, meta) = backend().capture_virtual_screen()?;
 
     // 截屏后立即编码 PNG——此时主窗已 hide，BitBlt 不会拍到自己
     let png_bytes = encode_png(&pixels, meta.width, meta.height)
@@ -133,6 +216,20 @@ pub fn end_session() {
         }
         *g = None;
     }
+}
+
+/// 设置/清除标注模式（0.11.7）。
+///
+/// 标注模式 = 选区完成到用户确认输出之间。AI 调用 `capture_screen` 时检测此标志，
+/// 活跃则新截一帧而非复用 SESSION（避免读到标注进行中的截图）。
+pub fn set_annotation_mode(active: bool) {
+    ANNOTATION_MODE.store(active, Ordering::SeqCst);
+    tracing::debug!(active, "标注模式状态");
+}
+
+/// 查询标注模式是否活跃（0.11.7）。
+pub fn is_annotation_active() -> bool {
+    ANNOTATION_MODE.load(Ordering::SeqCst)
 }
 
 // ── 纯逻辑（跨平台，可单测） ─────────────────────────────────────────────────

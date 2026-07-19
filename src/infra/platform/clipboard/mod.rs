@@ -108,6 +108,69 @@ pub fn write_bgra_to_clipboard(pixels: &[u8], width: u32, height: u32) -> Result
     windows::write_bgra_to_clipboard(pixels, width, height)
 }
 
+/// 把 **PNG 字节**解码为 BGRA 后写入剪贴板（0.11.7）。
+///
+/// 前端合成 PNG（裁剪区 + 标注）后通过 command 传给后端，后端解码为 BGRA
+/// 再走 `write_bgra_to_clipboard` 写入 CF_DIB。相比直接传 BGRA 多一次解码 + swap
+/// 开销，但避免了前端传 BGRA 的 IPC 大 payload（PNG 压缩后小 5-10x）。
+#[cfg(target_os = "windows")]
+pub fn write_png_to_clipboard(png_data: &[u8]) -> Result<(), String> {
+    use png::ColorType;
+    tracing::debug!(bytes = png_data.len(), "write_png_to_clipboard: 开始解码");
+
+    let decoder = png::Decoder::new(std::io::Cursor::new(png_data));
+    let mut reader = decoder
+        .read_info()
+        .map_err(|e| format!("PNG 读取失败: {e}"))?;
+    let (w, h) = (reader.info().width, reader.info().height);
+    let color_type = reader.info().color_type;
+    tracing::debug!(w, h, ?color_type, "write_png_to_clipboard: PNG header");
+
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader
+        .next_frame(&mut buf)
+        .map_err(|e| format!("PNG 解码失败: {e}"))?;
+    // 截断到实际解码字节数（`output_buffer_size` 可能包含 padding）
+    buf.truncate(info.buffer_size());
+
+    match info.color_type {
+        ColorType::Rgba => {
+            // RGBA → BGRA：swap R↔B
+            let mut bgra = buf;
+            for px in bgra.chunks_exact_mut(4) {
+                px.swap(0, 2);
+            }
+            write_bgra_to_clipboard(&bgra, w, h)
+        }
+        ColorType::Rgb => {
+            // RGB → 扩展为 BGRA（A=255）
+            let mut bgra = Vec::with_capacity((w as usize) * (h as usize) * 4);
+            for chunk in buf.chunks_exact(3) {
+                bgra.extend_from_slice(&[chunk[2], chunk[1], chunk[0], 255]);
+            }
+            write_bgra_to_clipboard(&bgra, w, h)
+        }
+        ColorType::GrayscaleAlpha => {
+            // GrayscaleAlpha → 扩展为 BGRA（灰度值三通道相同）
+            let mut bgra = Vec::with_capacity((w as usize) * (h as usize) * 4);
+            for chunk in buf.chunks_exact(2) {
+                let gray = chunk[0];
+                bgra.extend_from_slice(&[gray, gray, gray, chunk[1]]);
+            }
+            write_bgra_to_clipboard(&bgra, w, h)
+        }
+        ColorType::Grayscale => {
+            // Grayscale → 扩展为 BGRA（灰度值三通道相同，A=255）
+            let mut bgra = Vec::with_capacity((w as usize) * (h as usize) * 4);
+            for &gray in &buf {
+                bgra.extend_from_slice(&[gray, gray, gray, 255]);
+            }
+            write_bgra_to_clipboard(&bgra, w, h)
+        }
+        other => Err(format!("不支持的 PNG 颜色类型: {other:?}，期望 RGBA/RGB/Grayscale/GrayscaleAlpha")),
+    }
+}
+
 /// 读当前剪贴板文本（0.9.7 read_clipboard Capability）。
 ///
 /// 返回 `Some(text)` = 文本剪贴板；`None` = 空/非文本（图片/文件列表）。

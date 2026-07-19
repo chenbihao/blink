@@ -19,7 +19,7 @@
 //! - 取消：drop future + seq 校验，复用 AI stream cancel 模式
 //! - SLO：`MetricCategory::Capability`，`CapabilityRegistry::invoke` 包装层自动埋点
 
-mod builtins; // Step 2 填真实能力（capture_screen 等）
+pub(crate) mod builtins; // Step 2 填真实能力（capture_screen 等）
 mod error;
 mod registry;
 mod result;

@@ -1,11 +1,9 @@
-//! `crop_image` Capability（0.9.7 Step 2）。
+//! `crop_image` Capability（0.9.7 → 0.11.7-f alias）。
 //!
-//! 从 SESSION 裁剪子矩形 → `Blob{png}`。
+//! **0.11.7-f 重构**：核心实现移到 `screenshot.rs`（op=crop）。本文件作为 tool 名
+//! alias 保留 3 个月，避免 AI 提示词层缓存失效（详见 phases/0.11.7 §12.6）。
 //!
-//! 链路：`crop(x,y,w,h)` → BGRA 字节 → `encode_png(bgra,w,h)` → PNG。
-//! `encode_png` 内部做 BGRA→RGBA swap，所以 crop 返回的 BGRA 直接喂入，零多余转换。
-//!
-//! **依赖 SESSION**：若截图会话未建立（用户未 Alt+A），返回 InvalidArgs 提示。
+//! **TODO(0.13)** ⏰ 别名到期删除：与 `capture_screen.rs` 一起清理，删除清单见彼处。
 
 use std::sync::Arc;
 
@@ -15,10 +13,7 @@ use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
 };
 
-/// `crop_image` — 从当前截图会话裁剪区域，返回 PNG。
-///
-/// 入参：`{ "x": int, "y": int, "w": int, "h": int }`（物理像素，虚拟屏幕坐标系）。
-/// 出参：`Blob { mime: "image/png", bytes }`。
+/// `crop_image` — 从当前截图会话裁剪区域（alias to `screenshot { op: crop, x/y/w/h }`）。
 pub struct CropImage;
 
 #[async_trait::async_trait]
@@ -30,7 +25,7 @@ impl Capability for CropImage {
     fn schema(&self) -> CapabilitySchema {
         CapabilitySchema {
             name: "crop_image".into(),
-            description: "从当前截图会话裁剪指定区域，返回 PNG 图片。需先 capture_screen。".into(),
+            description: "从当前截图会话裁剪指定区域，返回 PNG 图片。需先 capture_screen。（alias：等价于 screenshot { op: crop }）".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -50,51 +45,22 @@ impl Capability for CropImage {
         args: Value,
         _ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError> {
-        // 解析参数
-        let x =
-            args.get("x")
-                .and_then(Value::as_i64)
-                .ok_or_else(|| CapabilityError::InvalidArgs {
-                    detail: "缺少 x".into(),
-                })? as i32;
-        let y =
-            args.get("y")
-                .and_then(Value::as_i64)
-                .ok_or_else(|| CapabilityError::InvalidArgs {
-                    detail: "缺少 y".into(),
-                })? as i32;
-        let w =
-            args.get("w")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| CapabilityError::InvalidArgs {
-                    detail: "缺少 w".into(),
-                })? as u32;
-        let h =
-            args.get("h")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| CapabilityError::InvalidArgs {
-                    detail: "缺少 h".into(),
-                })? as u32;
+        // 参数解析（与 op_crop 一致的错误消息）
+        let x = args.get("x").and_then(Value::as_i64).ok_or_else(|| {
+            CapabilityError::InvalidArgs { detail: "缺少 x".into() }
+        })? as i32;
+        let y = args.get("y").and_then(Value::as_i64).ok_or_else(|| {
+            CapabilityError::InvalidArgs { detail: "缺少 y".into() }
+        })? as i32;
+        let w = args.get("w").and_then(Value::as_u64).ok_or_else(|| {
+            CapabilityError::InvalidArgs { detail: "缺少 w".into() }
+        })? as u32;
+        let h = args.get("h").and_then(Value::as_u64).ok_or_else(|| {
+            CapabilityError::InvalidArgs { detail: "缺少 h".into() }
+        })? as u32;
 
-        // 裁剪（BGRA）+ 编码 PNG —— spawn_blocking 避免 Win32/编码阻塞 tokio
-        let png =
-            tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CapabilityError> {
-                let (bgra, cw, ch) = crate::infra::platform::screenshot::crop(x, y, w, h)
-                    .ok_or_else(|| CapabilityError::InvalidArgs {
-                        detail: "截图会话为空或裁剪区域无效".into(),
-                    })?;
-                crate::infra::platform::screenshot::encode_png(&bgra, cw, ch)
-                    .map_err(|e| CapabilityError::Internal { detail: e })
-            })
-            .await
-            .map_err(|e| CapabilityError::Internal {
-                detail: format!("crop task 崩溃: {e}"),
-            })??;
-
-        Ok(CapabilityResult::Blob {
-            mime: "image/png".into(),
-            bytes: png,
-        })
+        // 委托到统一 screenshot Capability 的 op=crop
+        super::screenshot::op_crop(x, y, w, h).await
     }
 }
 
@@ -122,8 +88,16 @@ mod tests {
     }
 
     #[test]
-    fn schema_description_mentions_session() {
+    fn schema_marks_alias() {
         let s = CropImage.schema();
-        assert!(s.description.contains("截图会话"));
+        assert!(s.description.contains("alias"));
+    }
+
+    /// alias 委托：无 SESSION 时应返回 InvalidArgs（与 op_crop 一致）。
+    #[tokio::test]
+    async fn alias_delegates_to_op_crop() {
+        crate::infra::platform::screenshot::end_session();
+        let result = super::super::screenshot::op_crop(0, 0, 10, 10).await;
+        assert!(matches!(result, Err(CapabilityError::InvalidArgs { .. })));
     }
 }

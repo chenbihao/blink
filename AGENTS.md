@@ -4,7 +4,7 @@
 
 > 📖 **产品设计与文档导航**：请先阅读 [docs/production-design/00-overview.md](docs/production-design/00-overview.md) 了解产品定位、里程碑与完整文档体系。改核心前必读对应 phases 文档。
 
-更新时间 20260718
+更新时间 20260719
 
 ---
 
@@ -13,7 +13,7 @@
 Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而是 **Universal Action Layer（统一操作层）**。
 终极目标：感知用户上下文、主动推荐动作，让任何操作都比原来的路径更快。
 
-当前 **0.11.0~0.11.6 完成**（插件通信契约重设计 + AI 调用插件链路完善：结果模型统一 + 工具元信息增强 + 提示词统一管理 + 结果回流 AI + 应用搜索/剪贴板历史 Capability + 翻译插件全 Rust 化）。0.10.7 Chord 交互统一化已实现。测试基线 **702 通过**。详见 [phases/0.11-plugin-ai-toolchain.md](docs/production-design/phases/0.11-plugin-ai-toolchain.md)。
+当前 **0.11.0~0.11.7 完成**（插件通信契约重设计 + AI 调用插件链路完善 + 截图标注增强 + 能力化重构）。0.10.7 Chord 交互统一化已实现。测试基线 **725 通过**。详见 [phases/0.11-plugin-ai-toolchain.md](docs/production-design/phases/0.11-plugin-ai-toolchain.md)。
 
 - ✅ **0.10 语音输入**：STT + 语音打字（G1 主窗口语音输入 / G2 语音输入法上屏）。工具箱层定 FunASR（SenseVoice 准确率 7.81%，CPU 17× 实时）。详见 [phases/0.10-voice-agent.md](docs/production-design/phases/0.10-voice-agent.md)
   - 0.10.4：伪流式 VAD 切句 + 累积预览 + 移除真流式 + 架构清理
@@ -21,7 +21,7 @@ Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而�
   - 0.10.5：收尾体验优化（VAD 参数滑动条 + 热词/高级选项 UI 优化）
   - 0.10.5 TSF Composition / 0.10.6 hook 吞键：均已废弃（跨进程不可用 / Alt keyup 副作用不可控），回归 SendInput + Clipboard 两级
   - 0.10.7：Chord 交互统一化——语音 chord 化 + hold 门禁生效 + chord 键位可配置 + 主窗 Alt 独占（hook 吞 chord keydown）+ 设置页展开式改造（accordion + 键位录制 + 剪贴板详细配置迁回）
-- ✅ **0.11 插件通信契约重设计 + AI 调用插件链路完善**：主线修 0.9.3 遗留（tool-call 结果截断/语义混淆/无回流/元信息不友好）+ 补 AI tool 池缺口（应用搜索 / 剪贴板历史 Capability）+ builtin 插件全 Rust 化（翻译插件，一次性 1:1 迁移）。详见 [phases/0.11-plugin-ai-toolchain.md](docs/production-design/phases/0.11-plugin-ai-toolchain.md)
+- ✅ **0.11 插件通信契约重设计 + AI 调用插件链路完善 + 截图标注增强**：主线修 0.9.3 遗留（tool-call 结果截断/语义混淆/无回流/元信息不友好）+ 补 AI tool 池缺口（应用搜索 / 剪贴板历史 Capability）+ builtin 插件全 Rust 化（翻译插件，一次性 1:1 迁移）+ 截图升级到 PixPin 级现代交互 + 截图能力化重构。详见 [phases/0.11-plugin-ai-toolchain.md](docs/production-design/phases/0.11-plugin-ai-toolchain.md)
   - 0.11.0：结果模型统一（PluginItem payload + ActionOutcome::Items + 统一投影）+ AI 结果视觉形态
   - 0.11.1：工具元信息增强（manifest 新字段 + 参数动态注入 + sensitive 铺路）
   - 0.11.2：应用搜索 Capability（search_apps，共享 StartMenuEngine）
@@ -29,6 +29,7 @@ Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而�
   - 0.11.4：结果回流 AI（Turn 2 tool chain + 三态配置 + 审计日志 + 占位文案/过渡态/错误展示/自动执行反馈）
   - 0.11.5：剪贴板历史 Capability + 搜索型抽象评估（决定不抽）
   - 0.11.6：翻译插件全量 Rust 化（5 引擎 1:1 迁移）
+  - 0.11.7：截图标注增强（选区停留 + 7 种标注 + OCR + 钉图 + 保存 PNG/JPEG）+ 能力化重构（ScreenshotBackend/OcrBackend trait + list_displays + Fake 后端）
 - 🔜 **0.12 AI 能力架构搭建**：基础设施抽取与清账（投影统一 / **DB 主库+缓存库拆分** / 分层违规修复 / ollama+lmstudio Provider 接入）+ 对话窗口★（独立 Agent 窗口 + rig AgentBuilder，不破主窗口类型收窄铁则）+ 对话机制（conversation 隔离 + 持久化 memory 走 SQLite impl rig ConversationMemory trait + 滑动窗口 + tool loop 无限轮）+ MCP client + RAG（知识库检索作为内部 tool，走 ollama embedding）。**产品边界：Blink 不做 AI 运行时，靠外部 ollama/lmstudio**。MCP server 护城河 / Skill / 记忆向量召回 / mistral.rs / A2A 推 0.13。详见 [phases/0.12-ai-ecosystem.md](docs/production-design/phases/0.12-ai-ecosystem.md)
 
 ---

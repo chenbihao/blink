@@ -459,7 +459,7 @@ pub fn build_default_registry() -> ChordRegistry {
 /// 1. 隐藏主窗 → sleep 80ms 让 DWM 合成完成
 /// 2. `begin_session` 截取虚拟屏幕存进 SESSION（此刻桌面已无 blink 窗口）
 /// 3. `show_screenshot_overlay(meta)` 建 overlay + SetWindowPos 按物理像素定位
-/// 4. overlay 前端拉 `blink-screenshot://capture` → 只读 SESSION → 拖选 → capture_region 落地
+/// 4. overlay 前端拉 `blink-screenshot://capture` → 只读 SESSION → 拖选 → 前端合成 PNG → `screenshot_copy/save/pin` 落地（0.11.7 改）
 struct ScreenshotAction {
     label: LocalizableText,
 }

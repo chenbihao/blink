@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Blink Pin</title>
+    <link rel="stylesheet" href="css/entries/pin.css" />
+  </head>
+  <body>
+    <div id="container" data-tauri-drag-region>
+      <img id="pin-img" src="" alt="钉图" draggable="false" />
+      <div id="zoom-level">100%</div>
+    </div>
+
+    <!-- 右键菜单 -->
+    <div id="ctx-menu" style="display:none">
+      <button id="ctx-close">关闭</button>
+    </div>
+
+    <script type="module">
+      import { invoke } from "./js/api.js";
+
+      const img = document.getElementById('pin-img');
+      const container = document.getElementById('container');
+      const zoomLabel = document.getElementById('zoom-level');
+      const ctxMenu = document.getElementById('ctx-menu');
+      let scale = 1;
+      let isCtxOpen = false;
+
+      // 后端复用窗口时通过 eval 调用此函数重置状态
+      window.__blinkResetPin = function(dataUrl) {
+        scale = 1;
+        img.style.transform = 'scale(1)';
+        zoomLabel.textContent = '100%';
+        img.src = dataUrl;
+      };
+
+      // 图片加载完成后自适应窗口尺寸
+      img.addEventListener('load', () => {
+        zoomLabel.textContent = '100%';
+        // 自适应窗口：如果图片太大，缩小到窗口 80%
+        const maxW = window.innerWidth * 0.8;
+        const maxH = window.innerHeight * 0.8;
+        if (img.naturalWidth > maxW || img.naturalHeight > maxH) {
+          const scaleX = maxW / img.naturalWidth;
+          const scaleY = maxH / img.naturalHeight;
+          const fit = Math.min(scaleX, scaleY, 1);
+          if (fit < 1) {
+            scale = fit;
+            img.style.transform = `scale(${scale})`;
+            zoomLabel.textContent = Math.round(scale * 100) + '%';
+          }
+        }
+      });
+
+      // 滚轮缩放
+      container.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const delta = e.deltaY > 0 ? -0.1 : 0.1;
+        scale = Math.max(0.1, Math.min(5, scale + delta));
+        img.style.transform = `scale(${scale})`;
+        zoomLabel.textContent = Math.round(scale * 100) + '%';
+        zoomLabel.style.opacity = '1';
+        clearTimeout(zoomLabel._hideTimer);
+        zoomLabel._hideTimer = setTimeout(() => {
+          zoomLabel.style.opacity = '0';
+        }, 1500);
+      }, { passive: false });
+
+      // 双击重置缩放
+      container.addEventListener('dblclick', () => {
+        scale = 1;
+        img.style.transform = 'scale(1)';
+        zoomLabel.textContent = '100%';
+      });
+
+      // ESC 关闭
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+          closePin();
+        }
+      });
+
+      // 右键菜单
+      container.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        showCtxMenu(e.clientX, e.clientY);
+      });
+
+      document.addEventListener('click', (e) => {
+        if (isCtxOpen && !ctxMenu.contains(e.target)) {
+          hideCtxMenu();
+        }
+      });
+
+      function showCtxMenu(x, y) {
+        ctxMenu.style.display = 'flex';
+        ctxMenu.style.left = x + 'px';
+        ctxMenu.style.top = y + 'px';
+        isCtxOpen = true;
+      }
+
+      function hideCtxMenu() {
+        ctxMenu.style.display = 'none';
+        isCtxOpen = false;
+      }
+
+      document.getElementById('ctx-close').addEventListener('click', () => {
+        hideCtxMenu();
+        closePin();
+      });
+
+      function closePin() {
+        invoke('screenshot_pin_hide').catch((e) => {
+          console.error('screenshot_pin_hide 失败', e);
+        });
+      }
+    </script>
+  </body>
+</html>

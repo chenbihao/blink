@@ -1,11 +1,14 @@
-//! `capture_screen` Capability（0.9.7 Step 2）。
+//! `capture_screen` Capability（0.9.7 → 0.11.7-f alias）。
 //!
-//! 截取整个虚拟屏幕 → `Blob{png}`。
+//! **0.11.7-f 重构**：核心实现移到 `screenshot.rs`（op=capture）。本文件作为 tool 名
+//! alias 保留 3 个月，避免 AI 提示词层缓存失效（详见 phases/0.11.7 §12.6）。
 //!
-//! **SESSION cache 模式**（文档 §5.1 甲方案）：
-//! 有最近一帧 SESSION（Alt+A 截图会话遗留）就复用其 PNG；无则新截。
-//! AI 调用时 SESSION 多半已过期 → 走新截，行为正确。
-//! Alt+A 交互入口复用同一份能力，性能零回退。
+//! **TODO(0.13)** ⏰ 别名到期删除：本文件 + `crop_image.rs` 在 0.13 阶段一起清理。
+//! 需同步：
+//! 1. 从 `capability/builtins/mod.rs` 的 inventory 移除 `CaptureScreen` / `CropImage`
+//! 2. 检查 AI provider 层是否还有 `capture_screen` / `crop_image` 的硬编码引用
+//! 3. 更新 `phases/0.12-ai-ecosystem.md` 里 tool 列表快照
+//! 4. 保底：搜代码库确认无 test / doc / prompt 残留
 
 use std::sync::Arc;
 
@@ -15,10 +18,7 @@ use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
 };
 
-/// `capture_screen` — 截取虚拟屏幕，返回 PNG。
-///
-/// 入参：`{}` 或 `{ "display": 0 }`（display 暂未实现多屏，留参数位）。
-/// 出参：`Blob { mime: "image/png", bytes }`。
+/// `capture_screen` — 截取虚拟屏幕，返回 PNG（alias to `screenshot { op: capture }`）。
 pub struct CaptureScreen;
 
 #[async_trait::async_trait]
@@ -30,13 +30,13 @@ impl Capability for CaptureScreen {
     fn schema(&self) -> CapabilitySchema {
         CapabilitySchema {
             name: "capture_screen".into(),
-            description: "截取屏幕（整个虚拟屏幕），返回 PNG 图片。".into(),
+            description: "截取屏幕（整个虚拟屏幕），返回 PNG 图片。（alias：等价于 screenshot { op: capture }）".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "display": {
                         "type": "integer",
-                        "description": "显示器编号（0=主屏，预留多屏，当前忽略）",
+                        "description": "显示器编号（已废弃，使用 screenshot { op: capture, display_id } 替代）",
                         "default": 0
                     }
                 }
@@ -50,36 +50,8 @@ impl Capability for CaptureScreen {
         _args: Value,
         _ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError> {
-        // SESSION cache 优先——Alt+A 截图会话遗留的最近一帧直接复用
-        if let Some(png) = crate::infra::platform::screenshot::session_png() {
-            tracing::debug!(bytes = png.len(), "capture_screen: 复用 SESSION cache");
-            return Ok(CapabilityResult::Blob {
-                mime: "image/png".into(),
-                bytes: png,
-            });
-        }
-
-        // 无 SESSION → 新截一帧（begin_session 内部截屏 + 编码 PNG）
-        let _meta = tokio::task::spawn_blocking(crate::infra::platform::screenshot::begin_session)
-            .await
-            .map_err(|e| CapabilityError::Internal {
-                detail: format!("截屏 task 崩溃: {e}"),
-            })?
-            .map_err(|e| CapabilityError::Internal { detail: e })?;
-
-        // begin_session 成功后 SESSION 已填充，读 PNG
-        match crate::infra::platform::screenshot::session_png() {
-            Some(png) => {
-                tracing::debug!(bytes = png.len(), "capture_screen: 新截 + 编码 PNG");
-                Ok(CapabilityResult::Blob {
-                    mime: "image/png".into(),
-                    bytes: png,
-                })
-            }
-            None => Err(CapabilityError::Internal {
-                detail: "begin_session 成功但 session_png 返回空".into(),
-            }),
-        }
+        // 委托到统一 screenshot Capability 的 op=capture（无 display_id → 虚拟屏幕）
+        super::screenshot::op_capture(None).await
     }
 }
 
@@ -97,11 +69,24 @@ mod tests {
     }
 
     #[test]
-    fn schema_has_png_description() {
+    fn schema_marks_alias() {
         let s = CaptureScreen.schema();
         assert_eq!(s.name, "capture_screen");
-        assert!(s.description.contains("PNG"));
-        // display 参数存在但非 required（可选）
-        assert!(s.parameters["properties"]["display"]["type"] == "integer");
+        assert!(s.description.contains("alias"));
+    }
+
+    /// alias 委托：走同一 op_capture 路径。
+    #[tokio::test]
+    async fn alias_delegates_to_screenshot_op() {
+        use crate::infra::platform::screenshot::backend_fake::FakeScreenshotBackend;
+        // 与 screenshot::tests 共享全局 backend，串行化
+        let _g = super::super::screenshot::test_helpers::test_lock();
+
+        let fake = Arc::new(FakeScreenshotBackend::single_primary(400, 300));
+        crate::infra::platform::screenshot::install_backend(fake);
+        crate::infra::platform::screenshot::end_session();
+
+        let result = super::super::screenshot::op_capture(None).await.unwrap();
+        assert!(matches!(result, CapabilityResult::Blob { .. }));
     }
 }

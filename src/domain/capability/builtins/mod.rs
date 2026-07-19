@@ -4,8 +4,10 @@
 //! 新增能力 = 新建文件 + 写一行 submit，注册表零改动。
 //!
 //! **内置能力**（文档 §4.1）：
-//! - [`capture_screen`] — 截屏 → `Blob{png}`（SESSION cache 模式）
-//! - [`crop_image`] — 裁剪 → `Blob{png}`（BGRA→PNG）
+//! - [`screenshot`] — 0.11.7-f 统一入口，`op=list_displays|capture|crop`
+//! - [`capture_screen`] — alias to `screenshot { op: capture }`（保留 3 个月）
+//! - [`crop_image`] — alias to `screenshot { op: crop }`（保留 3 个月）
+//! - [`ocr_image`] — OCR 文字识别（0.11.7-c）
 //! - [`read_clipboard`] — 读剪贴板 → `Text`/`Blob`
 //! - [`write_clipboard`] — 写剪贴板 → `Done`（图/文双模式）
 //! - [`search_files`] — 搜文件 → `Items`（包装 FileEngine）
@@ -14,7 +16,10 @@
 
 pub mod capture_screen;
 pub mod crop_image;
+pub mod ocr_engine;
+pub mod ocr_image;
 pub mod read_clipboard;
+pub mod screenshot;
 pub mod search_apps;
 pub mod search_clipboard_history;
 pub mod search_files;

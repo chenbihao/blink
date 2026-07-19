@@ -1,5 +1,8 @@
-/* ── 截图 overlay 视图（从 chord-screenshot.html 内联抽出）────────────────────
-   Step 2: 搬家时保留 0.15 兜底背景注释。 */
+/* ── 截图 overlay 视图（0.11.7 新增工具栏 + 标注层）────────────────────
+   Layer 0: body 兜底背景
+   Layer 1: #canvas — 全屏截图 + 暗色蒙版 + 亮区
+   Layer 2: #annot-canvas — 标注层（覆盖在裁剪区上）
+   Layer 3: #toolbar — 工具栏（HTML 元素） */
 
 html, body {
   margin: 0;
@@ -32,6 +35,14 @@ html, body {
   cursor: crosshair;
 }
 
+/* 标注 canvas：位置和尺寸由 JS 动态设置（覆盖在裁剪区上） */
+#annot-canvas {
+  position: absolute;
+  display: none;
+  pointer-events: none; /* 让主 canvas 处理鼠标事件；标注绘制通过转发实现 */
+  z-index: 2;
+}
+
 #size-hint {
   position: fixed;
   background: rgba(0, 0, 0, 0.75);
@@ -57,5 +68,217 @@ html, body {
   border-radius: var(--radius-sm);
   font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
   font-size: var(--text-lg);
+  pointer-events: none; /* 不能拦截 canvas mousedown（否则拖选失效） */
   display: none;
+}
+
+/* ── 工具栏（0.11.7-a） ─────────────────────────────────── */
+
+#toolbar {
+  position: fixed;
+  display: none;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  background: rgba(30, 30, 30, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  z-index: var(--z-dropdown);
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+.toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.toolbar-divider {
+  width: 1px;
+  height: 20px;
+  background: rgba(255, 255, 255, 0.15);
+  margin: 0 4px;
+}
+
+.tool-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  color: #ddd;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  user-select: none;
+}
+
+.tool-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.tool-btn:active:not(:disabled) {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.tool-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.tool-btn.active {
+  background: rgba(74, 158, 255, 0.25);
+  border-color: rgba(74, 158, 255, 0.6);
+  color: #fff;
+}
+
+.tool-btn-primary {
+  color: #4ade80;
+}
+
+.tool-btn-primary:hover:not(:disabled) {
+  background: rgba(74, 222, 128, 0.15);
+  color: #86efac;
+}
+
+#btn-cancel {
+  color: #f87171;
+}
+
+/* ── 文本标注输入框 ──────────────────────────────────── */
+
+.text-annot-input {
+  position: fixed;
+  z-index: 100;
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid rgba(74, 158, 255, 0.8);
+  border-radius: var(--radius-xs);
+  color: #fff;
+  padding: 2px 6px;
+  outline: none;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  min-width: 60px;
+  max-width: 300px;
+}
+
+.text-annot-input::placeholder {
+  color: rgba(255, 255, 255, 0.35);
+}
+
+/* ── OCR 结果面板 ──────────────────────────────────────── */
+
+.ocr-panel {
+  position: fixed;
+  z-index: 50;
+  background: rgba(30, 30, 30, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  min-width: 200px;
+  max-width: 400px;
+  max-height: 300px;
+  display: flex;
+  flex-direction: column;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+.ocr-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: #aaa;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.ocr-panel-header .tool-btn {
+  min-width: 20px;
+  height: 20px;
+  font-size: 11px;
+}
+
+.ocr-panel-body {
+  padding: 10px;
+  font-size: 13px;
+  color: #eee;
+  line-height: 1.5;
+  overflow-y: auto;
+  flex: 1;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.ocr-panel-footer {
+  padding: 6px 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.ocr-panel-footer .tool-btn {
+  font-size: 12px;
+  padding: 2px 10px;
+  height: 24px;
+}
+
+#btn-cancel:hover {
+  background: rgba(248, 113, 113, 0.15);
+  color: #fca5a5;
+}
+
+/* ── 颜色选择器 ────────────────────────────────────────── */
+
+.color-swatch {
+  font-size: 12px;
+  line-height: 1;
+  padding: 0 2px;
+  min-width: 22px;
+  height: 22px;
+  border-radius: 50%;
+}
+
+.color-swatch.active {
+  border-color: rgba(255, 255, 255, 0.6);
+  box-shadow: 0 0 4px currentColor;
+}
+
+.color-input {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: var(--radius-xs);
+  background: transparent;
+  cursor: pointer;
+}
+
+.color-input::-webkit-color-swatch-wrapper {
+  padding: 1px;
+}
+
+.color-input::-webkit-color-swatch {
+  border: none;
+  border-radius: 2px;
+}
+
+/* ── 粗细选择 ──────────────────────────────────────────── */
+
+.width-btn {
+  font-size: 10px;
+  padding: 0 4px;
+  min-width: 24px;
+  height: 22px;
+  letter-spacing: -1px;
+}
+
+.width-btn.active {
+  border-color: rgba(74, 158, 255, 0.6);
+  background: rgba(74, 158, 255, 0.15);
 }

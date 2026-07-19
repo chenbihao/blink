@@ -30,6 +30,6 @@ pub use windows::{
     get_foreground_hwnd, hide, hide_for_screenshot, hide_screenshot_overlay,
     hide_voice_overlay, install_sysmenu_blocker, invoke, is_visible, on_focused, open_settings,
     place_at_physical, preheat_secondary_windows, restore_foreground,
-    show_screenshot_overlay, show_voice_overlay, start_watchdog, unhide_after_screenshot,
-    update_grace_period, wait_frame_after_hide,
+    show_pin_window, show_screenshot_overlay, show_voice_overlay, start_watchdog,
+    unhide_after_screenshot, update_grace_period, wait_frame_after_hide,
 };

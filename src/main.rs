@@ -87,6 +87,7 @@ fn main() {
                     Some(bytes) => tauri::http::Response::builder()
                         .status(200)
                         .header("Content-Type", "image/png")
+                        .header("Access-Control-Allow-Origin", "*")
                         .header("Cache-Control", "no-store")
                         .body(bytes)
                         .unwrap(),
@@ -521,6 +522,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             app::commands::hide_window,
             app::commands::hide_settings_window,
+            app::commands::frontend_log,
             app::commands::search_apps,
             app::commands::trigger_ai,
             app::commands::launch_app,
@@ -533,7 +535,14 @@ fn main() {
             app::commands::list_all_chord_actions,
             app::commands::is_alt_down,
             app::commands::set_chord_mode,
-            app::commands::capture_region,
+            app::commands::screenshot_copy,
+            app::commands::screenshot_copy_region,
+            app::commands::screenshot_cancel,
+            app::commands::screenshot_pin,
+            app::commands::screenshot_pin_hide,
+            app::commands::screenshot_save,
+            app::commands::screenshot_set_annotation_mode,
+            app::commands::ocr_image,
             app::commands::hide_screenshot_overlay,
             app::commands::get_storage_info,
             app::commands::clear_history,
