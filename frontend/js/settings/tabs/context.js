@@ -5,6 +5,7 @@
 
 import { invoke } from "../../tauri.js";
 import { t, onLangChange } from "../../i18n/index.js";
+import { iconHTML } from "../../icon.js";
 import { saveConfig } from "../../config-keys.js";
 import { getCurrentConfig } from "../shared/state.js";
 
@@ -108,7 +109,7 @@ function renderCaptureCard(cfg, clipboardHistEnabled) {
   return `
     <div class="extension-card" data-autosave>
       <div class="extension-header">
-        <div class="extension-icon">🌍</div>
+        <div class="extension-icon">${iconHTML("spotlight")}</div>
         <div class="extension-info">
           <h3>${t("context.title")}</h3>
           <p class="extension-desc">${t("context.desc")}</p>
@@ -159,7 +160,7 @@ function renderFilterCard() {
   return `
     <div class="extension-card" data-autosave>
       <div class="extension-header">
-        <div class="extension-icon">🛡</div>
+        <div class="extension-icon">${iconHTML("shield")}</div>
         <div class="extension-info">
           <h3>${t("context.filter.title")}</h3>
           <p class="extension-desc">${t("context.filter.desc")}</p>

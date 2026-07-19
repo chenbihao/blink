@@ -2967,6 +2967,7 @@ mod tests {
             action: SearchAction::Open { path: id.into() },
             source: source.into(),
             score_detail: None,
+            context_aware: false,
         }
     }
 

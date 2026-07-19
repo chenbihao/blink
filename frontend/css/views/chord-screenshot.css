@@ -72,50 +72,110 @@ html, body {
   display: none;
 }
 
-/* ── 工具栏（0.11.7-a） ─────────────────────────────────── */
+/* ── 工具栏（0.11.7-a；0.11.8 尺寸放大 1.5×；0.11.8-a 分组重组 + 圆润化；
+      0.11.8-b 尺寸回缩：42→36 单元 / 24→20 图标 / 21→18 字号）──────────────
+   放大策略：不用 CSS zoom（会打乱 position:fixed 坐标系统与 offsetWidth 语义），
+   而是**直接改真值**——按钮、图标、字号、间距一次性等比调整。
+   `positionToolbar` 的 offsetWidth/offsetHeight 天然反映新真值，无需改 JS。 */
 
 #toolbar {
   position: fixed;
   display: none;
   align-items: center;
-  gap: 4px;
-  padding: 4px 6px;
+  gap: 4px;              /* 0.11.8-b：6 → 4 */
+  padding: 5px 7px;      /* 0.11.8-b：6/9 → 5/7 */
   background: rgba(30, 30, 30, 0.92);
   border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: var(--radius-sm);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  /* 0.11.8-a：整体圆润化（PixPin 风格）——外壳 12→10 圆角随尺寸缩 */
+  border-radius: 10px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
   z-index: var(--z-dropdown);
   font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+/* ── 拖动 handle（0.11.8-a）：工具栏最左侧，六点竖排 ─────────────
+   点住 + 拖动可移动整条工具栏。移动后 positionToolbar 尊重用户位置，
+   下次选区不再自动重定位。新一轮截图会清标记回到自动定位。 */
+.toolbar-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 28px;          /* 0.11.8-b：34 → 28 */
+  cursor: grab;
+  user-select: none;
+  border-radius: 5px;
+  color: rgba(255, 255, 255, 0.35);
+  transition: color 0.12s ease, background 0.12s ease;
+}
+
+.toolbar-drag-handle:hover {
+  color: rgba(255, 255, 255, 0.7);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.toolbar-drag-handle:active {
+  cursor: grabbing;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* 六个点组成的抓取指示（径向渐变 dot 双列 × 三行）——CSS 单元素画法：
+   background-image 用两组 radial-gradient 定位左右两列点，size 决定行距。 */
+.drag-dots {
+  width: 5px;
+  height: 18px;          /* 0.11.8-b：22 → 18 */
+  background-image:
+    radial-gradient(circle, currentColor 1.3px, transparent 1.6px),
+    radial-gradient(circle, currentColor 1.3px, transparent 1.6px);
+  background-size: 2.5px 6px;
+  background-position: 0 0, 2.5px 0;
+  background-repeat: repeat-y, repeat-y;
 }
 
 .toolbar-group {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 2px;              /* 0.11.8-b：3 → 2 */
 }
 
 .toolbar-divider {
   width: 1px;
-  height: 20px;
+  height: 24px;          /* 0.11.8-b：30 → 24 */
   background: rgba(255, 255, 255, 0.15);
-  margin: 0 4px;
+  margin: 0 4px;         /* 0.11.8-b：6 → 4 */
 }
 
 .tool-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 28px;
-  height: 28px;
-  padding: 0 6px;
+  min-width: 36px;       /* 0.11.8-b：42 → 36 */
+  height: 36px;          /* 0.11.8-b：42 → 36 */
+  padding: 0 7px;        /* 0.11.8-b：9 → 7 */
   background: transparent;
   border: 1px solid transparent;
-  border-radius: var(--radius-xs);
+  /* 0.11.8-a：PixPin 风格圆润化；0.11.8-b 随按钮缩小 10 → 9 */
+  border-radius: 9px;
   color: #ddd;
-  font-size: 14px;
+  font-size: 18px;       /* 0.11.8-b：21 → 18 */
   cursor: pointer;
   transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
   user-select: none;
+}
+
+/* 0.10.8：Lucide 图标略大于文本字号以匹配原 emoji 视觉重量。
+   0.11.8-b：随工具栏回缩，24 → 20。 */
+.tool-btn .icon {
+  width: 20px;
+  height: 20px;
+  vertical-align: middle;
+}
+
+/* 0.11.8-a：PNG mask 图标（如 WeUI 马赛克）与 sprite Lucide 图标视觉重量一致 */
+.tool-btn .icon-mask {
+  width: 20px;
+  height: 20px;
+  vertical-align: middle;
 }
 
 .tool-btn:hover:not(:disabled) {
@@ -156,19 +216,32 @@ html, body {
 .text-annot-input {
   position: fixed;
   z-index: 100;
+  display: inline-block;
   background: rgba(0, 0, 0, 0.6);
-  border: 1px solid rgba(74, 158, 255, 0.8);
+  border: 1px dashed rgba(74, 158, 255, 0.8);
   border-radius: var(--radius-xs);
   color: #fff;
-  padding: 2px 6px;
+  /* 0.11.8-e：contenteditable span 版本——padding=0 + line-height=1 让字符 glyph 顶
+     严格贴容器顶，与 canvas fillText textBaseline='top' 严格对齐。
+     用负 margin 抵消 1px border（border 是外扩的 content-box）。 */
+  padding: 0;
   outline: none;
-  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-  min-width: 60px;
-  max-width: 300px;
+  box-sizing: content-box;
+  margin: -1px 0 0 -1px;
+  font-family: sans-serif;
+  line-height: 1;
+  min-width: 8px;
+  max-width: 800px;
+  white-space: pre;
+  cursor: text;
+  /* 空内容时显示 placeholder（data-placeholder） */
 }
 
-.text-annot-input::placeholder {
+/* contenteditable 版本 placeholder：::before 显示 data-placeholder */
+.text-annot-input:empty::before {
+  content: attr(data-placeholder);
   color: rgba(255, 255, 255, 0.35);
+  pointer-events: none;
 }
 
 /* ── OCR 结果面板 ──────────────────────────────────────── */
@@ -292,20 +365,25 @@ html, body {
   color: #fca5a5;
 }
 
-/* ── 颜色选择器 ────────────────────────────────────────── */
+/* ── 颜色选择器（0.11.8-b：改实心圆）───────────────────────
+   之前用 Unicode ● 字符（color: <hex>）呈现"暗底 + 小彩点"，改用 background 填色
+   → 整颗圆点被色彩填满，视觉上跟 PixPin 等主流截图工具一致。 */
 
 .color-swatch {
-  font-size: 12px;
-  line-height: 1;
-  padding: 0 2px;
-  min-width: 22px;
-  height: 22px;
+  min-width: 18px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: 50%;
+  cursor: pointer;
+  /* button 默认 background: transparent，被内联 style 的 background:#xxx 覆盖 */
 }
 
 .color-swatch.active {
-  border-color: rgba(255, 255, 255, 0.6);
-  box-shadow: 0 0 4px currentColor;
+  /* active 用双环表达：外描白圈 + 内色圆 */
+  border-color: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 0 0 2px rgba(74, 158, 255, 0.4);
 }
 
 .color-input {
@@ -352,19 +430,66 @@ html, body {
 .dropdown-trigger {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: 3px;              /* 0.11.8：随工具栏放大，2 → 3 */
 }
 
 .dropdown-trigger .caret {
-  font-size: 9px;
+  font-size: 11px;       /* 0.11.8-b：13 → 11 与 split-caret 对齐 */
   opacity: 0.6;
-  margin-left: 1px;
+  margin-left: 2px;
 }
 
-/* 颜色触发器里的圆点 */
+/* 颜色触发器里的圆点（0.11.8-b：改实心圆，与 .color-swatch 视觉统一） */
 .color-dot {
-  font-size: 14px;
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.15);
   line-height: 1;
+}
+
+/* ── Split button（0.11.8-a；0.11.8-b 去分隔线）─────────────────────────
+   主按钮直接使用当前分组记住的工具（点击 = 应用），
+   三角按钮仅展开 dropdown 供切换工具。视觉上贴合成一颗"胶囊"，
+   0.11.8-b 去掉中间竖线，让整个 split 看起来是一颗更整体的按钮。 */
+.split-btn {
+  display: inline-flex;
+  align-items: stretch;
+  gap: 0;
+}
+
+.split-btn .split-main {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  /* 主按钮包住图标；0.11.8-b 随按钮缩小 36→32 padding 6→5 */
+  padding: 0 5px;
+  min-width: 32px;
+}
+
+.split-btn .split-caret {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  /* caret 按钮窄一档，视觉主次分明 */
+  min-width: 16px;
+  padding: 0 3px;
+  /* 0.11.8-b：去掉中间竖线（原 border-left + margin-left:-1px），
+     直接紧贴主按钮，视觉更整体；hover/active 时两半各自反馈依然清晰 */
+  margin-left: 0;
+}
+
+.split-btn .split-caret .caret {
+  font-size: 11px;       /* 0.11.8-b：13 → 11 */
+  opacity: 0.6;
+  line-height: 1;
+}
+
+/* active 时两半共同高亮（无论用户点主按钮还是从 dropdown 选中，
+   都保证 split 整体呈现"当前选中"状态） */
+.split-btn .split-main.active + .split-caret {
+  background: rgba(74, 158, 255, 0.25);
+  border-color: rgba(74, 158, 255, 0.6);
+  color: #fff;
 }
 
 .dropdown {
@@ -375,8 +500,9 @@ html, body {
   flex-direction: column;
   background: rgba(30, 30, 30, 0.96);
   border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: var(--radius-sm);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  /* 0.11.8-a：dropdown 面板圆润化，与工具栏外壳呼应 */
+  border-radius: 10px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
   padding: 4px;
   min-width: 90px;
   z-index: calc(var(--z-dropdown) + 10);
@@ -394,7 +520,8 @@ html, body {
   padding: 5px 8px;
   background: transparent;
   border: none;
-  border-radius: var(--radius-xs);
+  /* 0.11.8-a：item 圆角略大，跟外壳呼应 */
+  border-radius: 8px;
   color: #ddd;
   font-size: 12px;
   font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
@@ -421,9 +548,39 @@ html, body {
   font-size: 14px;
 }
 
+/* 0.11.8：dropdown item 里若装 Lucide 图标（马赛克/涂抹/橡皮擦/形状），
+   给个明确的尺寸——否则会继承 font-size 14px → 1em=14px 图标偏小；
+   与 label（12px）对齐时视觉重量不足。 */
+.dropdown-item .item-icon .icon {
+  width: 16px;
+  height: 16px;
+  stroke-width: 1.75;
+}
+.dropdown-item .item-icon .icon-mask {
+  width: 16px;
+  height: 16px;
+}
+
 .dropdown-item .item-label {
   flex: 1;
 }
+
+/* 0.11.8：粗细选择的横线图标 —— 用 CSS 画固定宽度水平线，粗细由 height 表达。
+   替换原 Unicode "── ━ ━━"（宽度不一、"细"反而看起来最长的问题）。
+   触发器与 dropdown item 共用。
+   在 .dropdown-item .item-icon（18px 容器）内 width-bar 靠 max-width 收敛；
+   在触发器（无容器限制）时占自然 22px。 */
+.width-bar {
+  display: inline-block;
+  width: 22px;
+  max-width: 100%;
+  background: currentColor;
+  border-radius: 1px;
+  vertical-align: middle;
+}
+.width-bar-thin   { height: 1px; }
+.width-bar-medium { height: 2px; }
+.width-bar-thick  { height: 4px; }
 
 /* 颜色下拉特殊布局：8 色网格 + 自定义行 */
 .dropdown-color {
@@ -439,10 +596,9 @@ html, body {
 }
 
 .dropdown-color .color-swatch {
-  width: 26px;
-  height: 26px;
-  min-width: 26px;
-  font-size: 14px;
+  width: 22px;
+  height: 22px;
+  min-width: 22px;
 }
 
 .custom-color-row {
@@ -460,4 +616,131 @@ html, body {
 .custom-color-row .color-input {
   width: 28px;
   height: 22px;
+}
+
+/* ── 水印表单（0.11.8-c：内嵌 text-dropdown 视图切换）─────────────
+   text-dropdown 有两个视图：`list`（默认，选文本/水印）和 `watermark`（表单）。
+   点"水印" item 后视图切表单，跟颜色下拉一致——就地展开，不再弹独立面板。 */
+
+.dropdown-text {
+  min-width: 210px;
+}
+
+.dropdown-view {
+  display: none;
+  flex-direction: column;
+  gap: 6px;
+}
+
+#text-dropdown[data-view="list"] .dropdown-view-list { display: flex; }
+#text-dropdown[data-view="watermark"] .dropdown-view-watermark { display: flex; }
+
+.wm-form-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 12px;
+  color: #ccc;
+}
+
+.wm-back {
+  background: transparent;
+  border: none;
+  color: #aaa;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 4px;
+  border-radius: 6px;
+}
+
+.wm-back:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.wm-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px;
+  font-size: 12px;
+}
+
+.wm-label {
+  width: 42px;
+  color: #aaa;
+  flex-shrink: 0;
+}
+
+.wm-text,
+.wm-layout {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  padding: 0 6px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  color: #eee;
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+}
+
+.wm-text:focus,
+.wm-layout:focus {
+  border-color: rgba(74, 158, 255, 0.7);
+  box-shadow: 0 0 0 2px rgba(74, 158, 255, 0.15);
+}
+
+.wm-layout option {
+  background: #2a2a2a;
+  color: #eee;
+}
+
+.wm-opacity {
+  flex: 1;
+  min-width: 0;
+  accent-color: #4a9eff;
+  height: 20px;
+  margin: 0;
+}
+
+.wm-opacity-val {
+  width: 34px;
+  text-align: right;
+  color: #ccc;
+  font-variant-numeric: tabular-nums;
+}
+
+.wm-form-footer {
+  padding: 4px 4px 2px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 2px;
+}
+
+.wm-form-footer .tool-btn {
+  min-width: 60px;
+  height: 24px;
+  font-size: 12px;
+  padding: 0 12px;
+}
+
+/* ── 笔画预览虚圈（0.11.8-c）─────────────────────────────
+   铅笔/荧光笔/橡皮擦 hover 选区时显示笔尖大小的虚线圆，
+   用户不用真下笔就知道现在会画多粗。JS 更新 width/height/left/top/borderColor。 */
+.stroke-cursor {
+  position: fixed;
+  display: none;
+  border-radius: 50%;
+  border: 1.5px dashed;
+  pointer-events: none;
+  z-index: calc(var(--z-dropdown) + 5);
+  box-sizing: border-box;
+  transition: width 0.06s linear, height 0.06s linear;
 }

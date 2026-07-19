@@ -420,6 +420,7 @@ fn normalize_to_items(
                 action: SearchAction::Open { path: e.lnk_path },
                 source: "start_menu".into(),
                 score_detail: Some(detail),
+                context_aware: false,
             }
         })
         .collect()

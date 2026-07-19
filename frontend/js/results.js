@@ -10,6 +10,7 @@ import { syncWindowSize } from "./window-size.js";
 import { activateItem } from "./actions.js";
 import * as statusbar from "./statusbar.js";
 import { invoke } from "./tauri.js";
+import { renderIcon } from "./icon.js";
 
 /** 每页条数（对齐 Alt+1~9：每页都能用数字键选中）。 */
 let PAGE_SIZE = 9;
@@ -232,6 +233,19 @@ export function hasItems() {
   return allItems.length > 0;
 }
 
+/**
+ * 是否有\"用户主动交互\"的结果项（0.10.8 §11.2 方案 1）。
+ *
+ * 与 `hasItems()` 的区别：过滤掉 `context_aware=true` 的项
+ * （空 query + Context-only 命中，由 BuiltinEngine 标记）。
+ *
+ * 用于 `chordEligible` 判定：仅有\"环境自动填充\"候选时视为\"用户未开始交互\"，
+ * chord 提示条仍允许显示，解锁\"复制 URL 后按 Alt 触发 chord\"场景。
+ */
+export function hasUserItems() {
+  return allItems.some((x) => !x.context_aware);
+}
+
 // ── 内部 ──────────────────────────────────────────────────────────────────────
 
 /** 去重键：应用按路径（小写），计算结果按名，占位按名，其余按 kind+名+描述。 */
@@ -392,7 +406,7 @@ function createItem(app, i) {
     // AI 占位与真结果**共用**同一 24×24 徽章位:
     //   - 占位:徽章里嵌 .ai-badge-spinner 小圆环(6px),`.is-loading` 类挂在 li 上
     //   - 真结果:徽章里显示 "AI" 字样
-    //   - 确认卡片:徽章里显示 "⚠" 字样
+    //   - 确认卡片:徽章里显示 Lucide triangle-alert 图标（0.10.8：从 emoji ⚠ 迁移）
     // 这样 spinner → 结果切换时,徽章外框位置/尺寸完全不动,视觉稳定。
     const isConfirm = !!app._aiConfirm;
     if (isConfirm) {
@@ -405,8 +419,7 @@ function createItem(app, i) {
     const badge = document.createElement("span");
     badge.className = "ai-icon-badge";
     if (isConfirm) {
-      badge.textContent = "⚠";
-      badge.setAttribute("aria-label", "需要确认");
+      badge.appendChild(renderIcon("triangle-alert", { ariaLabel: "需要确认" }));
     } else if (app.is_placeholder) {
       const spinner = document.createElement("span");
       spinner.className = "ai-badge-spinner";

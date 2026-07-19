@@ -13,7 +13,7 @@
 Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而是 **Universal Action Layer（统一操作层）**。
 终极目标：感知用户上下文、主动推荐动作，让任何操作都比原来的路径更快。
 
-当前 **0.11.0~0.11.7 完成**（插件通信契约重设计 + AI 调用插件链路完善 + 截图标注增强 + 能力化重构）。0.10.7 Chord 交互统一化已实现。测试基线 **725 通过**。详见 [phases/0.11-plugin-ai-toolchain.md](docs/production-design/phases/0.11-plugin-ai-toolchain.md)。
+当前 **0.11.0~0.11.7 完成**（插件通信契约重设计 + AI 调用插件链路完善 + 截图标注增强 + 能力化重构）。0.10.7 Chord 交互统一化 + 0.10.8 呈现共存策略收敛与图标包接入均已实现。测试基线 **732 通过**。详见 [phases/0.11-plugin-ai-toolchain.md](docs/production-design/phases/0.11-plugin-ai-toolchain.md)。
 
 - ✅ **0.10 语音输入**：STT + 语音打字（G1 主窗口语音输入 / G2 语音输入法上屏）。工具箱层定 FunASR（SenseVoice 准确率 7.81%，CPU 17× 实时）。详见 [phases/0.10-voice-agent.md](docs/production-design/phases/0.10-voice-agent.md)
   - 0.10.4：伪流式 VAD 切句 + 累积预览 + 移除真流式 + 架构清理
@@ -21,6 +21,7 @@ Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而�
   - 0.10.5：收尾体验优化（VAD 参数滑动条 + 热词/高级选项 UI 优化）
   - 0.10.5 TSF Composition / 0.10.6 hook 吞键：均已废弃（跨进程不可用 / Alt keyup 副作用不可控），回归 SendInput + Clipboard 两级
   - 0.10.7：Chord 交互统一化——语音 chord 化 + hold 门禁生效 + chord 键位可配置 + 主窗 Alt 独占（hook 吞 chord keydown）+ 设置页展开式改造（accordion + 键位录制 + 剪贴板详细配置迁回）
+  - 0.10.8：呈现共存策略收敛（BuiltinEngine 空 query Context-only item 标 context_aware + chordEligible 跳过，修「剪贴板 URL 时 Alt 不触发 chord」）+ statusbar 双行 stack（Ghost 主行 + Chord 副行，修 flex space-between 撕裂）+ 全站 emoji 换 Lucide 图标包（29 处，本地 SVG sprite）。详见 [phases/0.10-voice-agent.md §十一](docs/production-design/phases/0.10-voice-agent.md#十一0108--呈现共存策略收敛--图标包接入规划中)
 - ✅ **0.11 插件通信契约重设计 + AI 调用插件链路完善 + 截图标注增强**：主线修 0.9.3 遗留（tool-call 结果截断/语义混淆/无回流/元信息不友好）+ 补 AI tool 池缺口（应用搜索 / 剪贴板历史 Capability）+ builtin 插件全 Rust 化（翻译插件，一次性 1:1 迁移）+ 截图升级到 PixPin 级现代交互 + 截图能力化重构。详见 [phases/0.11-plugin-ai-toolchain.md](docs/production-design/phases/0.11-plugin-ai-toolchain.md)
   - 0.11.0：结果模型统一（PluginItem payload + ActionOutcome::Items + 统一投影）+ AI 结果视觉形态
   - 0.11.1：工具元信息增强（manifest 新字段 + 参数动态注入 + sensitive 铺路）

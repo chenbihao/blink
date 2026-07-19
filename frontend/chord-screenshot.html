@@ -18,55 +18,126 @@
     <!-- 错误提示 -->
     <div id="error-hint"></div>
 
-    <!-- 工具栏（0.11.7-a/b，0.11.8 收起化）：选区完成后显示 -->
+    <!-- 笔画预览虚圈（0.11.8-c）：铅笔/荧光笔/橡皮擦 hover 时显示笔尖大小 -->
+    <div id="stroke-cursor" class="stroke-cursor" aria-hidden="true"></div>
+
+    <!-- 工具栏（0.11.7-a/b，0.11.8-a 分组重组 + 圆润化 + 拖动 handle） -->
     <div id="toolbar" role="toolbar" aria-label="截图工具栏">
-      <!-- 图形下拉（默认框选）：矩形/椭圆/箭头/铅笔 -->
-      <div class="dropdown-wrap">
-        <button class="tool-btn dropdown-trigger active" id="tool-trigger" title="标注工具">
-          <span id="tool-trigger-icon">▭</span><span class="caret">▾</span>
+      <!-- 拖动 handle（左侧）：mousedown 拖动整条工具栏 -->
+      <div class="toolbar-drag-handle" id="toolbar-drag" title="拖动工具栏">
+        <span class="drag-dots"></span>
+      </div>
+
+      <div class="toolbar-divider"></div>
+
+      <!-- 图形分组（split button）：矩形/椭圆
+           主按钮直接用当前工具，只有 caret 点击才展开分组切换
+           按住 Shift 时约束长宽等比（矩形→正方形、椭圆→圆） -->
+      <div class="dropdown-wrap split-btn">
+        <button class="tool-btn split-main active" id="shape-main" data-tool="rect" title="图形">
+          <span id="shape-main-icon"><svg class="icon" aria-hidden="true"><use href="#icon-square"/></svg></span>
         </button>
-        <div class="dropdown" id="tool-dropdown" data-open="false">
-          <button class="dropdown-item active" data-tool="rect"><span class="item-icon">▭</span><span class="item-label">矩形</span></button>
-          <button class="dropdown-item" data-tool="ellipse"><span class="item-icon">○</span><span class="item-label">椭圆</span></button>
-          <button class="dropdown-item" data-tool="arrow"><span class="item-icon">➘</span><span class="item-label">箭头</span></button>
-          <button class="dropdown-item" data-tool="pencil"><span class="item-icon">✎</span><span class="item-label">铅笔</span></button>
+        <button class="tool-btn split-caret" id="shape-trigger" title="切换图形"><span class="caret">▾</span></button>
+        <div class="dropdown" id="shape-dropdown" data-open="false">
+          <button class="dropdown-item active" data-tool="rect"><span class="item-icon"><svg class="icon" aria-hidden="true"><use href="#icon-square"/></svg></span><span class="item-label">矩形</span></button>
+          <button class="dropdown-item" data-tool="ellipse"><span class="item-icon"><svg class="icon" aria-hidden="true"><use href="#icon-circle"/></svg></span><span class="item-label">椭圆</span></button>
         </div>
       </div>
 
-      <!-- 文本（一级按钮，单击直接选中） -->
-      <button class="tool-btn tool-direct" data-tool="text" title="文本">A</button>
-
-      <!-- 模糊下拉（默认马赛克）：马赛克/涂抹 -->
-      <div class="dropdown-wrap">
-        <button class="tool-btn dropdown-trigger" id="blur-trigger" title="模糊工具">
-          <span id="blur-trigger-icon">🗯</span><span class="caret">▾</span>
+      <!-- 笔画分组（split button）：箭头/铅笔/荧光笔（正片叠底/半透明） -->
+      <div class="dropdown-wrap split-btn">
+        <button class="tool-btn split-main" id="stroke-main" data-tool="arrow" title="笔画">
+          <span id="stroke-main-icon"><svg class="icon" aria-hidden="true"><use href="#icon-move-up-right"/></svg></span>
         </button>
+        <button class="tool-btn split-caret" id="stroke-trigger" title="切换笔画"><span class="caret">▾</span></button>
+        <div class="dropdown" id="stroke-dropdown" data-open="false">
+          <button class="dropdown-item active" data-tool="arrow"><span class="item-icon"><svg class="icon" aria-hidden="true"><use href="#icon-move-up-right"/></svg></span><span class="item-label">箭头</span></button>
+          <button class="dropdown-item" data-tool="pencil"><span class="item-icon"><svg class="icon" aria-hidden="true"><use href="#icon-pencil"/></svg></span><span class="item-label">铅笔</span></button>
+          <button class="dropdown-item" data-tool="highlight-multiply"><span class="item-icon"><svg class="icon" aria-hidden="true"><use href="#icon-ticket-slash"/></svg></span><span class="item-label">荧光笔・正片叠底</span></button>
+          <button class="dropdown-item" data-tool="highlight-translucent"><span class="item-icon"><svg class="icon" aria-hidden="true"><use href="#icon-ticket-slash"/></svg></span><span class="item-label">荧光笔・半透明</span></button>
+        </div>
+      </div>
+
+      <!-- 文本分组（split button）：文本（单点）/ 水印（整片）
+           0.11.8-c：水印二级菜单在同一 dropdown 内切换到表单视图（不再弹独立面板） -->
+      <div class="dropdown-wrap split-btn">
+        <button class="tool-btn split-main" id="text-main" data-tool="text" title="文本">
+          <span id="text-main-icon">A</span>
+        </button>
+        <button class="tool-btn split-caret" id="text-trigger" title="切换文本工具"><span class="caret">▾</span></button>
+        <div class="dropdown dropdown-text" id="text-dropdown" data-open="false" data-view="list">
+          <!-- 列表视图（默认） -->
+          <div class="dropdown-view dropdown-view-list">
+            <button class="dropdown-item active" data-tool="text"><span class="item-icon">A</span><span class="item-label">文本</span></button>
+            <button class="dropdown-item" data-tool="watermark"><span class="item-icon"><svg class="icon" aria-hidden="true"><use href="#icon-stamp"/></svg></span><span class="item-label">水印</span></button>
+          </div>
+          <!-- 水印表单视图（选中 watermark 时切入） -->
+          <div class="dropdown-view dropdown-view-watermark">
+            <div class="wm-form-header">
+              <button class="wm-back" title="返回">‹</button>
+              <span>水印</span>
+            </div>
+            <label class="wm-row">
+              <span class="wm-label">文字</span>
+              <input type="text" class="wm-text" placeholder="水印文字…" maxlength="60" />
+            </label>
+            <label class="wm-row">
+              <span class="wm-label">位置</span>
+              <select class="wm-layout">
+                <option value="diagonal">斜向铺满</option>
+                <option value="top-left">左上角</option>
+                <option value="top-right">右上角</option>
+                <option value="bottom-left">左下角</option>
+                <option value="bottom-right">右下角</option>
+                <option value="top-center">顶部居中</option>
+                <option value="bottom-center">底部居中</option>
+              </select>
+            </label>
+            <label class="wm-row">
+              <span class="wm-label">透明度</span>
+              <input type="range" class="wm-opacity" min="0" max="100" value="35" />
+              <span class="wm-opacity-val">35%</span>
+            </label>
+            <div class="wm-form-footer">
+              <button class="wm-apply tool-btn tool-btn-primary">应用</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 模糊分组（split button）：马赛克/涂抹 -->
+      <div class="dropdown-wrap split-btn">
+        <button class="tool-btn split-main" id="blur-main" data-tool="pixelate" title="模糊工具">
+          <span id="blur-main-icon"><span class="icon-mask icon-mask-mosaic" aria-hidden="true"></span></span>
+        </button>
+        <button class="tool-btn split-caret" id="blur-trigger" title="切换模糊工具"><span class="caret">▾</span></button>
         <div class="dropdown" id="blur-dropdown" data-open="false">
-          <button class="dropdown-item active" data-tool="pixelate"><span class="item-icon">🗯</span><span class="item-label">马赛克</span></button>
-          <button class="dropdown-item" data-tool="mosaic"><span class="item-icon">▦</span><span class="item-label">涂抹</span></button>
+          <button class="dropdown-item active" data-tool="pixelate"><span class="item-icon"><span class="icon-mask icon-mask-mosaic" aria-hidden="true"></span></span><span class="item-label">马赛克</span></button>
+          <button class="dropdown-item" data-tool="mosaic"><span class="item-icon"><svg class="icon" aria-hidden="true"><use href="#icon-spray-can"/></svg></span><span class="item-label">涂抹</span></button>
         </div>
       </div>
 
       <!-- 橡皮擦（一级按钮） -->
-      <button class="tool-btn tool-direct" data-tool="eraser" title="橡皮擦">⌫</button>
+      <button class="tool-btn tool-direct" data-tool="eraser" title="橡皮擦"><svg class="icon" aria-hidden="true"><use href="#icon-eraser"/></svg></button>
 
       <div class="toolbar-divider"></div>
 
-      <!-- 颜色下拉触发器 -->
+      <!-- 颜色下拉触发器
+           0.11.8-b：swatch/trigger-dot 改用 background 填色（原 Unicode ● 视觉是"白底+小彩点"） -->
       <div class="dropdown-wrap">
         <button class="tool-btn dropdown-trigger" id="color-trigger" title="颜色">
-          <span class="color-dot" id="color-trigger-dot" style="color:#ff0000">●</span><span class="caret">▾</span>
+          <span class="color-dot" id="color-trigger-dot" style="background:#ff0000"></span><span class="caret">▾</span>
         </button>
         <div class="dropdown dropdown-color" id="color-dropdown" data-open="false">
           <div class="color-grid">
-            <button class="color-swatch active" data-color="#ff0000" title="红色" style="color:#ff0000">●</button>
-            <button class="color-swatch" data-color="#ff8c00" title="橙色" style="color:#ff8c00">●</button>
-            <button class="color-swatch" data-color="#ffd700" title="黄色" style="color:#ffd700">●</button>
-            <button class="color-swatch" data-color="#00cc00" title="绿色" style="color:#00cc00">●</button>
-            <button class="color-swatch" data-color="#00cccc" title="青色" style="color:#00cccc">●</button>
-            <button class="color-swatch" data-color="#0088ff" title="蓝色" style="color:#0088ff">●</button>
-            <button class="color-swatch" data-color="#aa44ff" title="紫色" style="color:#aa44ff">●</button>
-            <button class="color-swatch" data-color="#ffffff" title="白色" style="color:#ffffff">●</button>
+            <button class="color-swatch active" data-color="#ff0000" title="红色" style="background:#ff0000"></button>
+            <button class="color-swatch" data-color="#ff8c00" title="橙色" style="background:#ff8c00"></button>
+            <button class="color-swatch" data-color="#ffd700" title="黄色" style="background:#ffd700"></button>
+            <button class="color-swatch" data-color="#00cc00" title="绿色" style="background:#00cc00"></button>
+            <button class="color-swatch" data-color="#00cccc" title="青色" style="background:#00cccc"></button>
+            <button class="color-swatch" data-color="#0088ff" title="蓝色" style="background:#0088ff"></button>
+            <button class="color-swatch" data-color="#aa44ff" title="紫色" style="background:#aa44ff"></button>
+            <button class="color-swatch" data-color="#ffffff" title="白色" style="background:#ffffff"></button>
           </div>
           <label class="custom-color-row" title="自定义颜色">
             <span class="item-label">自定义</span>
@@ -78,12 +149,12 @@
       <!-- 粗细下拉触发器 -->
       <div class="dropdown-wrap">
         <button class="tool-btn dropdown-trigger" id="width-trigger" title="粗细">
-          <span id="width-trigger-icon">━</span><span class="caret">▾</span>
+          <span id="width-trigger-icon"><span class="width-bar width-bar-medium"></span></span><span class="caret">▾</span>
         </button>
         <div class="dropdown" id="width-dropdown" data-open="false">
-          <button class="dropdown-item" data-width="2"><span class="item-icon">──</span><span class="item-label">细</span></button>
-          <button class="dropdown-item active" data-width="4"><span class="item-icon">━</span><span class="item-label">中</span></button>
-          <button class="dropdown-item" data-width="8"><span class="item-icon">━━</span><span class="item-label">粗</span></button>
+          <button class="dropdown-item" data-width="2"><span class="item-icon"><span class="width-bar width-bar-thin"></span></span><span class="item-label">细</span></button>
+          <button class="dropdown-item active" data-width="4"><span class="item-icon"><span class="width-bar width-bar-medium"></span></span><span class="item-label">中</span></button>
+          <button class="dropdown-item" data-width="8"><span class="item-icon"><span class="width-bar width-bar-thick"></span></span><span class="item-label">粗</span></button>
         </div>
       </div>
 
@@ -91,19 +162,19 @@
 
       <!-- 操作区 -->
       <div class="toolbar-group" data-group="ops">
-        <button class="tool-btn" id="btn-undo" title="撤销 (Ctrl+Z)" disabled>↶</button>
-        <button class="tool-btn" id="btn-redo" title="重做 (Ctrl+Y)" disabled>↷</button>
+        <button class="tool-btn" id="btn-undo" title="撤销 (Ctrl+Z)" disabled><svg class="icon" aria-hidden="true"><use href="#icon-undo-2"/></svg></button>
+        <button class="tool-btn" id="btn-redo" title="重做 (Ctrl+Y)" disabled><svg class="icon" aria-hidden="true"><use href="#icon-redo-2"/></svg></button>
       </div>
 
       <div class="toolbar-divider"></div>
 
       <!-- 输出区 -->
       <div class="toolbar-group" data-group="output">
-        <button class="tool-btn" id="btn-ocr" title="OCR 文字识别">🔍</button>
-        <button class="tool-btn" id="btn-save" title="保存为文件">💾</button>
-        <button class="tool-btn" id="btn-pin" title="钉图">📌</button>
-        <button class="tool-btn tool-btn-primary" id="btn-copy" title="复制 (双击选区)">✓</button>
-        <button class="tool-btn" id="btn-cancel" title="取消 (ESC)">✕</button>
+        <button class="tool-btn" id="btn-ocr" title="OCR 文字识别"><svg class="icon" aria-hidden="true"><use href="#icon-scan-text"/></svg></button>
+        <button class="tool-btn" id="btn-save" title="保存为文件"><svg class="icon" aria-hidden="true"><use href="#icon-save"/></svg></button>
+        <button class="tool-btn" id="btn-pin" title="钉图"><svg class="icon" aria-hidden="true"><use href="#icon-pin"/></svg></button>
+        <button class="tool-btn tool-btn-primary" id="btn-copy" title="复制 (双击选区)"><svg class="icon" aria-hidden="true"><use href="#icon-check"/></svg></button>
+        <button class="tool-btn" id="btn-cancel" title="取消 (ESC)"><svg class="icon" aria-hidden="true"><use href="#icon-x"/></svg></button>
       </div>
     </div>
 

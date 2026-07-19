@@ -8,6 +8,7 @@
 import { invoke } from "../tauri.js";
 import { applyTheme } from "../theme.js";
 import { t, applyI18n, setLang } from "../i18n/index.js";
+import { ensureSpriteLoaded } from "../icon.js";
 import { loadConfig, hideSettingsWindow } from "./shared/ipc.js";
 import { setCurrentConfig } from "./shared/state.js";
 import { initGeneralTab } from "./tabs/general.js";
@@ -51,6 +52,9 @@ function applyConfigToUI(cfg) {
  */
 async function init() {
   try {
+    // 图标 sprite 先注入（await 保证首屏无 FOUC —— tab 初始化时 innerHTML 拼图标就能立即用）
+    await ensureSpriteLoaded();
+
     // 加载配置
     const cfg = await loadConfig();
     applyConfigToUI(cfg);

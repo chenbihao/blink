@@ -129,6 +129,7 @@ fn to_search_item(item: ClipboardItem, index: usize, lang: &str) -> SearchItem {
         },
         source: "clipboard".into(),
         score_detail: Some(format!("clip=0.9-{:.2}", index as f32 * 0.02)),
+        context_aware: false,
     }
 }
 

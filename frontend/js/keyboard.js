@@ -148,13 +148,18 @@ function onChordTrigger(e) {
  *  三重与门:
  *  - Chord 总开关未关(chord_enabled,读自 chord.js 快照)
  *  - query 空
- *  - 结果列表空
+ *  - **用户主动交互的**结果列表空（0.10.8 §11.2 方案 1：允许 context_aware 项存在）
+ *
+ *  0.10.8 之前用 `results.hasItems()`——只要有任何结果就挡 chord。剪贴板 URL 时
+ *  BuiltinEngine 空 query 会产 open_url 候选（Context-only 命中，`context_aware=true`），
+ *  导致 chord 被挡。现改用 `hasUserItems()`：只统计非 context_aware 项，让"环境自动
+ *  填充候选"与 chord 共存（Ghost + Context item + Chord 都在，用户三选一）。
  */
 function chordEligible() {
   const enabled = chord.isEnabled();
   const queryEmpty = queryEl.value.trim() === "";
-  const noResults = !results.hasItems();
-  const eligible = enabled && queryEmpty && noResults;
+  const noUserResults = !results.hasUserItems();
+  const eligible = enabled && queryEmpty && noUserResults;
   return eligible;
 }
 

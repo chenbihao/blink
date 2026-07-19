@@ -10,6 +10,11 @@ import * as autosuggestConfig from "./autosuggest-config.js";
 import * as chord from "./chord.js";
 import { applyThemeFromConfig, applyGlassOpacityFromConfig } from "./theme.js";
 import { applyI18nFromConfig } from "./i18n/index.js";
+import { ensureSpriteLoaded } from "./icon.js";
+
+// 图标 sprite：早注入，让后续 init() 拼 DOM 时 <use href> 可解析
+// （fire-and-forget，失败降级为无图标，不阻塞主流程 —— 见 icon.js catch 分支）
+ensureSpriteLoaded();
 
 // 启动应用主题（设置页改 theme 后，lifecycle 在 shown 时重新读取刷新）
 applyThemeFromConfig();

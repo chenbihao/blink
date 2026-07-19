@@ -223,6 +223,13 @@ body.alt-active #results li .item-badge {
   letter-spacing: 0.5px;
 }
 
+/* 0.10.8：确认卡片的 triangle-alert 图标需要比 12px 文字大一些视觉才平衡 */
+#results li .ai-icon-badge .icon {
+  width: 14px;
+  height: 14px;
+  stroke-width: 2.25;
+}
+
 /* AI 占位:name 强制单行,行高与徽章对齐,不叠 3 行截断。 */
 #results li.ai-item.is-loading .item-name {
   color: var(--text-dim);

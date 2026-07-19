@@ -27,6 +27,7 @@
 @import '../components/badge.css';
 @import '../components/form-row.css';
 @import '../components/kbd.css';
+@import '../components/icon.css';
 @import '../components/voice-wave.css';
 
 /* views（Step 5 拆分 style.css） */

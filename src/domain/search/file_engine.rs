@@ -274,6 +274,7 @@ impl FileEngine {
                 action: SearchAction::Open { path: full_path },
                 source: "file".into(),
                 score_detail: Some(format!("file_rank={}", i)),
+                context_aware: false,
             });
         }
 
@@ -349,6 +350,7 @@ impl FileEngine {
                     },
                     source: "file_local".into(),
                     score_detail: Some("local_fallback".into()),
+                    context_aware: false,
                 }
             })
             .collect();

@@ -7,6 +7,13 @@
 //!
 //! **文案键帽化**：所有含键位的提示（"↑↓ 选择" / "Enter 打开" / "PgUp/PgDn 翻页"）
 //! 全部改用 i18n 模板 `{{key:X}}` 占位符 + `renderHint` 渲染出 <kbd> DOM。
+//!
+//! **0.10.8 §11.2 方案 2 — 双行 stack**：
+//! Ghost + chord 同时存在时不再左右两端撕裂。左侧改为垂直 stack：
+//! - `.hint-primary`：主行（ghost 提示 / 常规态导航提示）
+//! - `.hint-secondary`：副行（chord 键帽，仅 hasHint + chord-visible + actions 存在时插入）
+//! 右侧翻页保留不动。无 chord 场景保持单行观感（primary 占满，secondary 不插入）。
+//! `#statusbar { min-height }` 稳定基线高度，避免双行切换时窗口抖动。
 
 import { actionHint } from "./hints.js";
 import { t } from "./i18n/index.js";
@@ -52,25 +59,40 @@ function render() {
 
   el.replaceChildren();
   el.appendChild(buildLeft(lastActive, hasHint));
-  const right = buildRight(lastPaging);
+  const right = buildRight(lastPaging, hasHint);
   if (right) el.appendChild(right);
   el.classList.add("visible");
 }
 
-/** 左侧：ghost 提示 优先；否则显示"导航 · Alt+数字 · 当前项动作"。 */
+/** 左侧：`.hint-primary`（ghost 或常规态）+ 可选 `.hint-secondary`（chord 副行）。 */
 function buildLeft(active, hasHint) {
-  const left = document.createElement("span");
+  const left = document.createElement("div");
   left.className = "hint-left";
 
+  const primary = document.createElement("div");
+  primary.className = "hint-primary";
+  fillPrimary(primary, active, hasHint);
+  left.appendChild(primary);
+
+  // 副行：hasHint + chord-visible + 有 chord 动作 → 追加 chord 键帽副行
+  // 无 hint（常规态）时不追加副行——常规态导航提示自身已足够，副行会成噪声。
+  const secondary = buildSecondary(hasHint);
+  if (secondary) left.appendChild(secondary);
+
+  return left;
+}
+
+/** 主行内容填充：hasHint → ghost 提示；否则 → 常规态导航。 */
+function fillPrimary(primary, active, hasHint) {
   if (hasHint) {
     // {key} 传入 kbd Element，模板里 "按 {key} 接受补全 → {target}" 会自动内嵌。
     const display = ghost.currentDisplay();
     const params = { key: renderKey(autosuggestConfig.getTabKey()) };
     if (display) {
-      left.appendChild(renderHint(t("statusbar.autosuggest_accept"),
+      primary.appendChild(renderHint(t("statusbar.autosuggest_accept"),
         { ...params, target: display }));
     } else {
-      left.appendChild(renderHint(t("statusbar.autosuggest_enter"), params));
+      primary.appendChild(renderHint(t("statusbar.autosuggest_enter"), params));
     }
     // 0.8.3 §4.9：Context Suggestion 追加 origin 提示（· 来自划词 / · 来自剪贴板）,
     // Keyword 无 origin → currentOrigin() 返回 null,不追加。
@@ -80,52 +102,58 @@ function buildLeft(active, hasHint) {
       const originText = t(originKey);
       // 降级保护：t() 未命中会返回 key 本身,不显示"suggestion.origin.selection"这种字面串
       if (originText && originText !== originKey) {
-        left.appendChild(document.createTextNode(" · "));
+        primary.appendChild(document.createTextNode(" · "));
         const originEl = document.createElement("span");
         originEl.className = "hint-origin";
         originEl.textContent = originText;
-        left.appendChild(originEl);
+        primary.appendChild(originEl);
       }
     }
-    return left;
+    return;
   }
 
   // 常规态：导航 · Alt+数字 · 动作提示——三段用 · 分隔，各段都走 renderHint 支持键帽。
   if (active) {
-    left.appendChild(renderHint(t("hint.navigate")));
-    left.appendChild(document.createTextNode(" · "));
-    left.appendChild(renderHint(t("hint.alt_number")));
-    left.appendChild(document.createTextNode(" · "));
+    primary.appendChild(renderHint(t("hint.navigate")));
+    primary.appendChild(document.createTextNode(" · "));
+    primary.appendChild(renderHint(t("hint.alt_number")));
+    primary.appendChild(document.createTextNode(" · "));
     const { template, params } = actionHint(active.action);
-    left.appendChild(renderHint(template, params));
+    primary.appendChild(renderHint(template, params));
   }
-  return left;
 }
 
-/** 右侧：有 Ghost + Chord 可见时渲染 Chord 键帽；否则渲染翻页提示。 */
-function buildRight(paging) {
-  // 有 Ghost hint（Context/Keyword）+ Alt 按住 + Chord 动作存在 → 右侧降级显示 Chord
+/** 副行：hasHint + chord-visible + chord 有动作 → 返回 chord 键帽行，否则 null。 */
+function buildSecondary(hasHint) {
+  if (!hasHint) return null;
   const actions = chord.getActions();
-  if (ghost.hasHint() && document.body.classList.contains("chord-visible") && actions.length) {
-    const right = document.createElement("span");
-    right.className = "hint-right";
-    actions.forEach((a, i) => {
-      if (i > 0) {
-        const sep = document.createElement("span");
-        sep.className = "chord-sep";
-        sep.textContent = "│";
-        right.appendChild(sep);
-      }
-      // key=' '（语音输入）→ "Space"，与 chord.js render 统一
-      right.appendChild(renderCombo(`Alt+${chord.chordKeyLabel(a.key)}`));
-      const label = document.createElement("span");
-      label.className = "chord-label";
-      label.textContent = a.label;
-      right.appendChild(label);
-    });
-    return right;
-  }
-  // 常规：多于一屏才显示翻页提示
+  if (!document.body.classList.contains("chord-visible") || !actions.length) return null;
+
+  const secondary = document.createElement("div");
+  secondary.className = "hint-secondary";
+  actions.forEach((a, i) => {
+    if (i > 0) {
+      const sep = document.createElement("span");
+      sep.className = "chord-sep";
+      sep.textContent = "│";
+      secondary.appendChild(sep);
+    }
+    // key=' '（语音输入）→ "Space"，与 chord.js render 统一
+    secondary.appendChild(renderCombo(`Alt+${chord.chordKeyLabel(a.key)}`));
+    const label = document.createElement("span");
+    label.className = "chord-label";
+    label.textContent = a.label;
+    secondary.appendChild(label);
+  });
+  return secondary;
+}
+
+/** 右侧：翻页提示（多于一屏才显示）。
+ *
+ * 0.10.8 之前 chord 会在 `hasHint && chord-visible` 时**降级到右侧**——现在改走左侧副行，
+ * 右侧只负责翻页。`hasHint` 参数保留以后有扩展空间（例如 hint 期间隐藏翻页），暂未使用。
+ */
+function buildRight(paging, _hasHint) {
   if (paging.pageCount <= 1) return null;
   const right = document.createElement("span");
   right.className = "hint-right";

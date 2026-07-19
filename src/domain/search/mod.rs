@@ -133,6 +133,16 @@ pub struct AppEntry {
     /// 由 `items_to_entries` 投影工具结果时为 true。
     #[serde(default)]
     pub is_ai_tool_result: bool,
+    /// 环境自动填充标记（0.10.8 §11.2 方案 1）——空 query + Context-only 命中的候选。
+    ///
+    /// 前端 `chordEligible` 通过 `results.hasUserItems()`（过滤掉 context_aware=true
+    /// 的项）判断是否允许 chord 提示条显示：仅有"环境自动填充"候选时视为"用户未开始
+    /// 交互"，chord 与 Context Ghost 共存不冲突。
+    ///
+    /// **产地**：仅 `BuiltinEngine` 空 query + Context-only 命中时为 true。keyword 命中 /
+    /// 非空 query / 其它引擎的项一律 false。老前端不读此字段视为 false，兼容。
+    #[serde(default)]
+    pub context_aware: bool,
 }
 
 // 平台特定实现

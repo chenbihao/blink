@@ -12,14 +12,14 @@
       <nav class="sidebar">
         <div class="logo">Blink</div>
         <button class="tab active" data-tab="general" data-i18n="tab.general">通用</button>
-        <button class="tab" data-tab="hotkey" data-i18n="tab.hotkey">快捷键</button>
         <button class="tab" data-tab="engines" data-i18n="tab.engines">引擎</button>
         <button class="tab" data-tab="plugins" data-i18n="tab.plugins">插件</button>
-        <button class="tab" data-tab="network" data-i18n="tab.network">网络</button>
         <button class="tab" data-tab="ai" data-i18n="tab.ai">AI</button>
         <button class="tab" data-tab="voice" data-i18n="tab.voice">语音输入</button>
         <button class="tab" data-tab="context" data-i18n="tab.context">上下文感知</button>
         <button class="tab" data-tab="chord" data-i18n="tab.chord">Chord 交互</button>
+        <button class="tab" data-tab="hotkey" data-i18n="tab.hotkey">快捷键</button>
+        <button class="tab" data-tab="network" data-i18n="tab.network">网络</button>
         <button class="tab" data-tab="storage" data-i18n="tab.storage">存储</button>
         <button class="tab" data-tab="debug" data-i18n="tab.debug">调试</button>
         <button class="tab" data-tab="about" data-i18n="tab.about">关于</button>
@@ -200,29 +200,6 @@
           <!-- 0.8.3 §4.9 输入补全（Ghost Text，0.8.1 §2.8）已挪至「上下文感知」面板 -->
         </div>
 
-        <!-- 快捷键 -->
-        <div id="hotkey" class="panel">
-          <h2 data-i18n="panel.hotkey">快捷键</h2>
-          <p class="panel-lede" data-i18n="hotkey.lede">唤起 Blink 的键，以及看门狗判定的时间阈值。</p>
-          <div class="setting-row">
-            <label class="setting-label" data-i18n="hotkey.label">唤起快捷键</label>
-            <div class="hotkey-input-wrapper">
-              <button id="hotkey-record" class="hotkey-btn" data-i18n-title="hotkey.record.title" title="点击后按下快捷键">RightAlt</button>
-              <button id="hotkey-reset" class="btn-small" data-i18n="hotkey.reset" data-i18n-title="hotkey.reset.title" title="恢复默认">恢复默认</button>
-            </div>
-          </div>
-          <div class="setting-row">
-            <label class="setting-label" data-i18n="hotkey.tap.label">tap 阈值<span class="field-hint-icon" data-i18n-title="hotkey.tap.title">ⓘ</span></label>
-            <input type="range" id="tap-threshold" min="150" max="500" value="300" step="50" />
-            <span id="tap-threshold-value">300ms</span>
-          </div>
-          <div class="setting-row">
-            <label class="setting-label" data-i18n="hotkey.grace.label">看门狗 grace period<span class="field-hint-icon" data-i18n-title="hotkey.grace.title">ⓘ</span></label>
-            <input type="range" id="grace-ms" min="200" max="1000" value="500" step="50" />
-            <span id="grace-ms-value">500ms</span>
-          </div>
-        </div>
-
         <!-- 引擎 -->
         <div id="engines" class="panel">
           <h2 data-i18n="panel.engines">搜索引擎</h2>
@@ -231,7 +208,7 @@
           <!-- 应用搜索（StartMenu） -->
           <div class="extension-card">
             <div class="extension-header">
-              <div class="extension-icon">🔍</div>
+              <div class="extension-icon"><svg class="icon" aria-hidden="true"><use href="#icon-search"/></svg></div>
               <div class="extension-info">
                 <h3 data-i18n="engine.start_menu.title">应用搜索</h3>
                 <p class="extension-desc" data-i18n="engine.start_menu.desc">搜索开始菜单、桌面快捷方式等已安装应用</p>
@@ -266,7 +243,7 @@
           <!-- 文件搜索（FileEngine） -->
           <div class="extension-card">
             <div class="extension-header">
-              <div class="extension-icon">📁</div>
+              <div class="extension-icon"><svg class="icon" aria-hidden="true"><use href="#icon-folder"/></svg></div>
               <div class="extension-info">
                 <h3 data-i18n="engine.file_search.title">文件搜索</h3>
                 <p class="extension-desc" data-i18n="engine.file_search.desc">搜索本地文件，支持 Everything 极速索引</p>
@@ -322,7 +299,7 @@
           <!-- 计算器（CalcEngine） -->
           <div class="extension-card">
             <div class="extension-header">
-              <div class="extension-icon">🧮</div>
+              <div class="extension-icon"><svg class="icon" aria-hidden="true"><use href="#icon-calculator"/></svg></div>
               <div class="extension-info">
                 <h3 data-i18n="engine.calc.title">计算器</h3>
                 <p class="extension-desc" data-i18n="engine.calc.desc">输入数学表达式直接计算结果</p>
@@ -337,7 +314,7 @@
           <!-- 脚本解释器（Phase 0.6 新增） -->
           <div class="extension-card">
             <div class="extension-header">
-              <div class="extension-icon">🐍</div>
+              <div class="extension-icon"><svg class="icon" aria-hidden="true"><use href="#icon-terminal"/></svg></div>
               <div class="extension-info">
                 <h3 data-i18n="engine.interpreter.title">脚本解释器</h3>
                 <p class="extension-desc" data-i18n="engine.interpreter.desc">Python / Node.js 脚本插件运行环境</p>
@@ -376,7 +353,7 @@
           <!-- 内置动作（BuiltinEngine，0.8.0 §1.3） -->
           <div class="extension-card">
             <div class="extension-header">
-              <div class="extension-icon">⚡</div>
+              <div class="extension-icon"><svg class="icon" aria-hidden="true"><use href="#icon-zap"/></svg></div>
               <div class="extension-info">
                 <h3 data-i18n="engine.builtin_actions.title">内置动作</h3>
                 <p class="extension-desc" data-i18n="engine.builtin_actions.desc">锁屏、关机、打开设置等系统操作，以及依剪贴板/选区上下文出现的智能动作</p>
@@ -400,15 +377,6 @@
           </div>
         </div>
 
-        <!-- 网络 -->
-        <div id="network" class="panel">
-          <h2 data-i18n="panel.network">网络配置</h2>
-          <p class="panel-lede" data-i18n="network.lede">HTTP / HTTPS 代理，本体与所有插件共用一份配置。</p>
-          <div id="network-container">
-            <!-- 网络配置由 JS 动态渲染 -->
-          </div>
-        </div>
-
         <!-- AI 意图辅助（0.9.1 Phase 6）───────────────────────────────────── -->
         <div id="ai" class="panel">
           <h2 data-i18n="panel.ai">AI 意图辅助</h2>
@@ -420,7 +388,7 @@
           <!-- 总开关 ─────────────────────────────────────────── -->
           <div class="extension-card">
             <div class="extension-header">
-              <div class="extension-icon">🧠</div>
+              <div class="extension-icon"><svg class="icon" aria-hidden="true"><use href="#icon-brain"/></svg></div>
               <div class="extension-info">
                 <h3 data-i18n="ai.enabled.label">启用 AI 意图辅助</h3>
                 <p class="extension-desc" data-i18n="ai.enabled.hint">关闭时任何输入都不走 AI（默认关，即使配了供应商也需手动打开）</p>
@@ -726,38 +694,45 @@
           <h2 data-i18n="panel.voice">语音输入</h2>
           <p class="panel-lede" id="voice-lede" data-i18n-html="voice.lede">按住 Alt+Space 说话，松开后文字自动上屏。云端 STT 需配置供应商，本地 STT 需安装 FunASR 环境。</p>
 
-          <!-- 总开关 -->
-          <div class="setting-row">
-            <label class="setting-label" data-i18n="voice.enabled.label">启用语音输入</label>
-            <label class="checkbox">
-              <input type="checkbox" id="voice-enabled" />
-              <span class="checkmark"></span>
-            </label>
-          </div>
-
-          <!-- 音频设备 + 调试 -->
-          <div class="setting-row">
-            <label class="setting-label" data-i18n="voice.audio_device.label">音频输入设备</label>
-            <select id="voice-audio-device">
-              <option value="" data-i18n="voice.audio_device.default">系统默认</option>
-            </select>
-          </div>
-          <div class="setting-row">
-            <label class="setting-label" data-i18n="voice.audio_test.label">音频调试</label>
-            <div class="audio-test-container">
-              <button type="button" id="voice-audio-test-btn" class="audio-test-btn" data-i18n="voice.audio_test.start">开始测试</button>
-              <div class="audio-test-meter">
-                <div class="audio-test-bar" id="audio-test-bar"></div>
+          <!-- 0.11.8：基础配置卡（总开关 + 音频设备 + 调试 + STT 模式），与其它 tab extension-card 视觉统一 -->
+          <div class="extension-card">
+            <div class="extension-header">
+              <div class="extension-icon"><svg class="icon" aria-hidden="true"><use href="#icon-audio-lines"/></svg></div>
+              <div class="extension-info">
+                <h3 data-i18n="voice.card.title">语音输入</h3>
+                <p class="extension-desc" data-i18n="voice.card.desc">音频采集与 STT 模式选择；关闭后 Alt+Space 不再触发语音</p>
               </div>
+              <label class="switch">
+                <input type="checkbox" id="voice-enabled" />
+                <span class="slider"></span>
+              </label>
             </div>
-          </div>
-
-          <!-- STT 模式切换（决定下方显示云端 / 本地配置） -->
-          <div class="setting-row">
-            <label class="setting-label" data-i18n="voice.mode.label">STT 模式</label>
-            <div class="radio-group">
-              <label class="radio"><input type="radio" name="voice-mode" id="voice-mode-cloud" value="cloud" checked /> <span data-i18n="voice.mode.cloud">云端</span></label>
-              <label class="radio"><input type="radio" name="voice-mode" id="voice-mode-local" value="local" /> <span data-i18n="voice.mode.local">本地</span></label>
+            <div class="extension-body">
+              <!-- 音频设备 -->
+              <div class="setting-row">
+                <label class="setting-label" data-i18n="voice.audio_device.label">音频输入设备</label>
+                <select id="voice-audio-device">
+                  <option value="" data-i18n="voice.audio_device.default">系统默认</option>
+                </select>
+              </div>
+              <!-- 音频调试 -->
+              <div class="setting-row">
+                <label class="setting-label" data-i18n="voice.audio_test.label">音频调试</label>
+                <div class="audio-test-container">
+                  <button type="button" id="voice-audio-test-btn" class="audio-test-btn" data-i18n="voice.audio_test.start">开始测试</button>
+                  <div class="audio-test-meter">
+                    <div class="audio-test-bar" id="audio-test-bar"></div>
+                  </div>
+                </div>
+              </div>
+              <!-- STT 模式切换（决定下方显示云端 / 本地配置） -->
+              <div class="setting-row">
+                <label class="setting-label" data-i18n="voice.mode.label">STT 模式</label>
+                <div class="radio-group">
+                  <label class="radio"><input type="radio" name="voice-mode" id="voice-mode-cloud" value="cloud" checked /> <span data-i18n="voice.mode.cloud">云端</span></label>
+                  <label class="radio"><input type="radio" name="voice-mode" id="voice-mode-local" value="local" /> <span data-i18n="voice.mode.local">本地</span></label>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -1000,7 +975,7 @@
           <div class="section-label" data-i18n="context.section.trigger">触发 · 什么算命中</div>
           <div class="extension-card" id="context-triggers-card">
             <div class="extension-header">
-              <div class="extension-icon">⚡</div>
+              <div class="extension-icon"><svg class="icon" aria-hidden="true"><use href="#icon-ghost"/></svg></div>
               <div class="extension-info">
                 <h3 data-i18n="context.trigger.card.title">Ghost 触发规则</h3>
                 <p class="extension-desc" data-i18n="context.trigger.card.desc">环境自动触发的建议（选中英文→翻译、剪贴板 URL→打开链接 等）；关闭后 Ghost 不再出现</p>
@@ -1021,7 +996,7 @@
           <div class="section-label" data-i18n="context.section.present">呈现 · 用户如何看到</div>
           <div class="extension-card">
             <div class="extension-header">
-              <div class="extension-icon">💡</div>
+              <div class="extension-icon"><svg class="icon" aria-hidden="true"><use href="#icon-lightbulb"/></svg></div>
               <div class="extension-info">
                 <h3 data-i18n="context.autosuggest.title">输入补全 · Ghost Text</h3>
                 <p class="extension-desc" data-i18n="general.autosuggest.enabled.hint">首拼命中时在输入框显示灰色补全提示，按 Tab 接受</p>
@@ -1061,7 +1036,7 @@
           <!-- 交互设置 ─────────────────────────────────────────── -->
           <div class="extension-card">
             <div class="extension-header">
-              <div class="extension-icon">⌘</div>
+              <div class="extension-icon"><svg class="icon" aria-hidden="true"><use href="#icon-command"/></svg></div>
               <div class="extension-info">
                 <h3 data-i18n="chord.enabled.label">启用 Chord</h3>
                 <p class="extension-desc" data-i18n="chord.enabled.hint">关闭后 Alt+字母 不再触发 Chord 动作</p>
@@ -1092,6 +1067,38 @@
 
           <!-- 剪贴板历史详细配置（max_items / retention_days / blacklist）已迁回此 tab 的
                clipboard_history 动作展开体内（0.10.7）；"监听开关"仍在「上下文感知 · 采集」 -->
+        </div>
+
+        <!-- 快捷键（0.11.8：挪到"基础设施"组，与网络/存储邻近，与常用交互 tab 拉开距离） -->
+        <div id="hotkey" class="panel">
+          <h2 data-i18n="panel.hotkey">快捷键</h2>
+          <p class="panel-lede" data-i18n="hotkey.lede">唤起 Blink 的键，以及看门狗判定的时间阈值。</p>
+          <div class="setting-row">
+            <label class="setting-label" data-i18n="hotkey.label">唤起快捷键</label>
+            <div class="hotkey-input-wrapper">
+              <button id="hotkey-record" class="hotkey-btn" data-i18n-title="hotkey.record.title" title="点击后按下快捷键">RightAlt</button>
+              <button id="hotkey-reset" class="btn-small" data-i18n="hotkey.reset" data-i18n-title="hotkey.reset.title" title="恢复默认">恢复默认</button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label" data-i18n="hotkey.tap.label">tap 阈值<span class="field-hint-icon" data-i18n-title="hotkey.tap.title">ⓘ</span></label>
+            <input type="range" id="tap-threshold" min="150" max="500" value="300" step="50" />
+            <span id="tap-threshold-value">300ms</span>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label" data-i18n="hotkey.grace.label">看门狗 grace period<span class="field-hint-icon" data-i18n-title="hotkey.grace.title">ⓘ</span></label>
+            <input type="range" id="grace-ms" min="200" max="1000" value="500" step="50" />
+            <span id="grace-ms-value">500ms</span>
+          </div>
+        </div>
+
+        <!-- 网络（0.11.8：从原 tab 顺序第 5 位挪到 storage 之前，与存储归为"基础设施"组） -->
+        <div id="network" class="panel">
+          <h2 data-i18n="panel.network">网络配置</h2>
+          <p class="panel-lede" data-i18n="network.lede">HTTP / HTTPS 代理，本体与所有插件共用一份配置。</p>
+          <div id="network-container">
+            <!-- 网络配置由 JS 动态渲染 -->
+          </div>
         </div>
 
         <!-- 存储 -->

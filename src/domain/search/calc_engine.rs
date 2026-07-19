@@ -64,6 +64,7 @@ impl SearchEngine for CalcEngine {
                 },
                 source: "calc".into(),
                 score_detail: Some("calc=1.0".into()),
+                context_aware: false,
             }],
             None => Vec::new(),
         }

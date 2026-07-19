@@ -316,6 +316,9 @@ export const zh = {
   "panel.voice": "语音输入",
   "voice.lede": "按住 Alt+Space 说话，松开后文字自动上屏。云端 STT 需配置供应商，本地 STT 需安装 FunASR 环境。",
   "voice.enabled.label": "启用语音输入",
+  // 语音基础配置卡（0.11.8：包裹总开关+音频设备+调试+STT 模式为 extension-card）
+  "voice.card.title": "语音输入",
+  "voice.card.desc": "音频采集与 STT 模式选择；关闭后 Alt+Space 不再触发语音",
   // 音频设备
   "voice.audio_device.label": "音频输入设备",
   "voice.audio_device.default": "系统默认",

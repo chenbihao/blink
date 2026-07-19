@@ -8,32 +8,33 @@
  */
 import { invoke } from "../../tauri.js";
 import { t, onLangChange } from "../../i18n/index.js";
+import { iconHTML } from "../../icon.js";
 import { saveConfig } from "../../config-keys.js";
 import { clearUnsaved, markUnsaved } from "../shared/ui.js";
 
-/** 内置动作图标映射 */
+/** 内置动作图标映射（0.10.8：emoji → Lucide 图标名） */
 const BUILTIN_ACTION_ICONS = {
-  open_settings: "⚙️",
-  lock: "🔒",
-  shutdown: "⏻",
-  restart: "🔁",
-  sleep: "🌙",
-  clear_history: "🧹",
-  exit_blink: "🚪",
-  open_logs: "📄",
-  open_data_dir: "🗂️",
-  open_url: "🔗",
-  open_path: "📁",
-  reveal_in_explorer: "🔍",
+  open_settings: "settings",
+  lock: "lock",
+  shutdown: "power",
+  restart: "refresh-cw",
+  sleep: "moon",
+  clear_history: "eraser",
+  exit_blink: "log-out",
+  open_logs: "file-text",
+  open_data_dir: "folder-open",
+  open_url: "external-link",
+  open_path: "folder",
+  reveal_in_explorer: "folder-search",
 };
 
-/** 插件图标映射 */
+/** 插件图标映射（0.10.8：emoji → Lucide 图标名；builtin.echo 保留 volume-2 声波语义） */
 const PLUGIN_ICONS = {
-  "builtin.ip": "🌐",
-  "builtin.echo": "🔊",
-  "builtin.ai": "🤖",
-  "builtin.translate": "📝",
-  "builtin.weather": "🌤️",
+  "builtin.ip": "globe",
+  "builtin.echo": "volume-2",
+  "builtin.ai": "sparkles",
+  "builtin.translate": "languages",
+  "builtin.weather": "cloud-sun",
 };
 
 /** 防止重复注册 onLangChange */
@@ -88,7 +89,9 @@ async function loadBuiltinActions() {
  * 渲染单个内置动作行
  */
 function renderBuiltinActionRow(a) {
-  const icon = BUILTIN_ACTION_ICONS[a.id] || "•";
+  // 0.10.8：Lucide 图标名 → iconHTML；未知 id 兜底显示占位符
+  const iconName = BUILTIN_ACTION_ICONS[a.id];
+  const iconMarkup = iconName ? iconHTML(iconName) : "•";
   const keywords = (a.keywords || []).join(" / ");
   const meta = [
     `<span>${t("engine.builtin_actions.keywords_label")}: ${escapeHtml(keywords)}</span>`,
@@ -99,7 +102,7 @@ function renderBuiltinActionRow(a) {
   ].filter(Boolean).join(" · ");
 
   return `<div class="builtin-action-row" data-action-id="${escapeAttr(a.id)}">
-    <div class="builtin-action-icon">${icon}</div>
+    <div class="builtin-action-icon">${iconMarkup}</div>
     <div class="builtin-action-info">
       <div class="builtin-action-title">${escapeHtml(a.title)}</div>
       <div class="builtin-action-subtitle">${escapeHtml(a.subtitle)}</div>
@@ -178,7 +181,9 @@ async function loadPlugins() {
  * 渲染单个插件卡片（头部总开关 + 触发词标签嵌入描述行 + 配置区分组）
  */
 function renderPluginCard(plugin) {
-  const icon = PLUGIN_ICONS[plugin.id] || "🔌";
+  // 0.10.8：Lucide 图标名 → iconHTML；未知插件用通用 zap 图标兜底
+  const iconName = PLUGIN_ICONS[plugin.id] || "zap";
+  const icon = iconHTML(iconName);
   const desc = plugin.description || t("plugin.desc_default");
   const enabled = plugin.enabled !== false;
   const schema = plugin.settings_schema || [];

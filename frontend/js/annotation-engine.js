@@ -1,14 +1,18 @@
-//! 标注引擎（0.11.7-b，0.11.8 加 pixelate）：8 种标注工具 + 撤销/重做 + 颜色/粗细。
+//! 标注引擎（0.11.7-b，0.11.8 加 pixelate，0.11.8-b 加 watermark）：多种标注 + 撤销 + 颜色/粗细。
 //!
 //! 标注数据模型：
 //! ```typescript
 //! interface AnnotationCommand {
-//!   type: 'rect' | 'ellipse' | 'arrow' | 'pencil' | 'text' | 'mosaic' | 'pixelate' | 'eraser';
+//!   type: 'rect' | 'ellipse' | 'arrow' | 'pencil' | 'text' | 'watermark'
+//!       | 'mosaic' | 'pixelate' | 'eraser';
 //!   points: {x: number, y: number}[];  // 物理像素坐标，相对裁剪区左上角
 //!   color?: string;
 //!   width?: number;
 //!   fill?: boolean;
 //!   text?: string;
+//!   // watermark 独有：
+//!   layout?: 'diagonal' | 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'
+//!          | 'top-center' | 'bottom-center';
 //! }
 //! ```
 //!
@@ -109,7 +113,8 @@ export function startDraw(x, y) {
 
 /** 拖拽绘制中 */
 export function moveDraw(x, y) {
-  if (currentTool === 'pencil' || currentTool === 'eraser' || currentTool === 'mosaic') {
+  if (currentTool === 'pencil' || currentTool === 'eraser' || currentTool === 'mosaic'
+      || currentTool === 'highlight-multiply' || currentTool === 'highlight-translucent') {
     currentPoints.push({ x, y });
   }
 }
@@ -123,9 +128,10 @@ export function getCurrentPoints() {
 export function endDraw(x, y) {
   const points = [...currentPoints];
   const lastPoint = { x, y };
-  // 铅笔/橡皮擦/涂抹使用完整点序列；其他工具用起点+终点
+  // 铅笔/橡皮擦/涂抹/荧光笔使用完整点序列；其他工具用起点+终点
   let cmdPoints;
-  if (currentTool === 'pencil' || currentTool === 'eraser' || currentTool === 'mosaic') {
+  if (currentTool === 'pencil' || currentTool === 'eraser' || currentTool === 'mosaic'
+      || currentTool === 'highlight-multiply' || currentTool === 'highlight-translucent') {
     cmdPoints = points;
   } else {
     cmdPoints = [{ x: drawStartX, y: drawStartY }, lastPoint];
@@ -254,12 +260,61 @@ export function executeCommand(cmd, targetCtx) {
         c.stroke();
       }
       break;
+    case 'highlight-multiply':
+    case 'highlight-translucent':
+      // 荧光笔（0.11.8-c；0.11.8-d 实现"重叠不加深"）：粗线 + 半透明色沿轨迹。
+      //
+      // 关键难点：单条命令内轨迹自交（例如画 O 或 8）时不能加深。
+      // 直接在 c 上 stroke 半透明色，`lineJoin:round` 让**同一次 stroke() 调用内**
+      // 的自交处不叠加（Canvas 规范：一次 stroke 是一次原子渲染），但如果轨迹够长
+      // 或断点多次，浏览器实际会分批（视具体实现）——为了确定性，两种模式都改成：
+      //   1) 先在离屏 canvas 上用**满 alpha 颜色**画整条 polyline
+      //   2) 再以目标 alpha `drawImage` 到目标 canvas
+      // 这样"这一整笔"作为一层贴上，无论怎么自交都只有一层颜色（multiply 的语义）。
+      //
+      // 两种模式的差别只是 alpha：multiply 更浓，translucent 更淡。
+      // 粗细 = width × 4。
+      if (cmd.points.length >= 2 && canvas) {
+        const alpha = cmd.type === 'highlight-multiply' ? 0.55 : 0.30;
+        const lineW = (cmd.width || currentWidth) * 4;
+        const off = document.createElement('canvas');
+        off.width = canvas.width;
+        off.height = canvas.height;
+        const offCtx = off.getContext('2d');
+        offCtx.strokeStyle = cmd.color || currentColor;
+        offCtx.lineWidth = lineW;
+        offCtx.lineCap = 'round';
+        offCtx.lineJoin = 'round';
+        offCtx.beginPath();
+        offCtx.moveTo(cmd.points[0].x, cmd.points[0].y);
+        for (let i = 1; i < cmd.points.length; i++) {
+          offCtx.lineTo(cmd.points[i].x, cmd.points[i].y);
+        }
+        offCtx.stroke();
+        // 以目标 alpha 贴到主 canvas —— 整条笔画作为"一层"，自交处不加深
+        c.save();
+        c.globalAlpha = alpha;
+        c.drawImage(off, 0, 0);
+        c.restore();
+      }
+      break;
     case 'text':
       if (cmd.text && cmd.points.length >= 1) {
         const p = cmd.points[0];
+        // 0.11.8-b：与前端 input 预览严格对齐——textBaseline='top' 让 p 即左上角
+        // （原默认 'alphabetic' 让 p 是基线，input 用 top 定位视觉会偏移半个字号）
         c.font = `${(cmd.width || currentWidth) * 6}px sans-serif`;
         c.fillStyle = cmd.color || currentColor;
+        c.textBaseline = 'top';
         c.fillText(cmd.text, p.x, p.y);
+      }
+      break;
+    case 'watermark':
+      // 0.11.8-b：水印——按 layout 在裁剪区上铺文字。
+      // 尺寸参考裁剪区短边比例（scale=0.06 → 1000px 图约 60px 字），足够醒目但不喧宾夺主。
+      // 颜色带 40% alpha，避免全遮，同时保持辨识度。
+      if (cmd.text && canvas) {
+        drawWatermark(c, cmd, canvas.width, canvas.height);
       }
       break;
     case 'mosaic':
@@ -304,18 +359,143 @@ export function executeCommand(cmd, targetCtx) {
       }
       break;
     case 'eraser':
-      // 橡皮擦：擦除标注层内容
-      if (cmd.points.length >= 2 && c) {
-        const [p1, p2] = cmd.points;
-        const ex = Math.min(p1.x, p2.x);
-        const ey = Math.min(p1.y, p2.y);
-        const ew = Math.abs(p2.x - p1.x);
-        const eh = Math.abs(p2.y - p1.y);
-        c.clearRect(ex, ey, ew, eh);
+      // 橡皮擦（0.11.8-a 改沿轨迹）：走点序列，用圆形笔刷沿路径 clearRect。
+      // 原实现取"起点+终点"矩形 clearRect，单击/短距离 → 矩形为 0 → 视觉上"无效"。
+      // 现改成 pencil 语义：moveDraw 累积点、endDraw 存整个 points 序列，
+      // 用 destination-out composite 沿路径画半径 = cmd.width * 3 的圆形擦除。
+      if (cmd.points.length >= 1 && c) {
+        const r = Math.max(6, (cmd.width || currentWidth) * 3);
+        c.save();
+        c.globalCompositeOperation = 'destination-out';
+        for (let i = 0; i < cmd.points.length; i++) {
+          const p = cmd.points[i];
+          c.beginPath();
+          c.arc(p.x, p.y, r, 0, Math.PI * 2);
+          c.fill();
+          if (i > 0) {
+            const prev = cmd.points[i - 1];
+            c.strokeStyle = '#000'; // 颜色无所谓，destination-out 只看 alpha
+            c.lineWidth = r * 2;
+            c.lineCap = 'round';
+            c.beginPath();
+            c.moveTo(prev.x, prev.y);
+            c.lineTo(p.x, p.y);
+            c.stroke();
+          }
+        }
+        c.restore();
       }
       break;
   }
   c.restore();
+}
+
+// ── 水印绘制（0.11.8-b）──────────────────────────────────
+
+/**
+ * 绘制水印：按 layout 在裁剪区上铺文字。
+ *
+ * 布局：
+ * - `diagonal`：整片对角平铺，-30° 倾斜，网格间距 = 文字宽度 * 2
+ * - `top-left/top-right/bottom-left/bottom-right`：四角，距边缘 8% 短边
+ * - `top-center/bottom-center`：上下居中
+ *
+ * 字号：短边 * 0.06（大小随图缩放，保证 300px 缩略图与 4K 全屏视觉重量一致）
+ * 颜色：cmd.color + cmd.opacity（0-1，默认 0.35）
+ */
+function drawWatermark(c, cmd, cw, ch) {
+  const short = Math.min(cw, ch);
+  const fontSize = Math.max(12, Math.round(short * 0.06));
+  const layout = cmd.layout || 'diagonal';
+  const opacity = typeof cmd.opacity === 'number' ? cmd.opacity : 0.35;
+  const color = withAlpha(cmd.color || '#000000', opacity);
+  const text = cmd.text;
+
+  c.save();
+  c.font = `${fontSize}px sans-serif`;
+  c.fillStyle = color;
+  c.textBaseline = 'middle';
+  c.textAlign = 'center';
+
+  if (layout === 'diagonal') {
+    // 对角平铺：先旋转坐标系，再在旋转后的大 bbox 内网格铺
+    const angle = -Math.PI / 6; // -30°
+    const metrics = c.measureText(text);
+    const tw = metrics.width;
+    const step = Math.max(tw + fontSize * 3, fontSize * 6);
+    // 旋转后需要覆盖的 bbox（对角线长度即可保证不留空）
+    const diag = Math.sqrt(cw * cw + ch * ch);
+    c.translate(cw / 2, ch / 2);
+    c.rotate(angle);
+    for (let y = -diag / 2; y < diag / 2; y += step * 0.7) {
+      for (let x = -diag / 2; x < diag / 2; x += step) {
+        c.fillText(text, x, y);
+      }
+    }
+  } else {
+    // 单点布局：四角 + 上下居中
+    const pad = Math.max(fontSize * 0.6, short * 0.03);
+    let x = cw / 2, y = ch / 2, align = 'center';
+    switch (layout) {
+      case 'top-left':      x = pad; y = pad + fontSize / 2; align = 'left'; break;
+      case 'top-right':     x = cw - pad; y = pad + fontSize / 2; align = 'right'; break;
+      case 'bottom-left':   x = pad; y = ch - pad - fontSize / 2; align = 'left'; break;
+      case 'bottom-right':  x = cw - pad; y = ch - pad - fontSize / 2; align = 'right'; break;
+      case 'top-center':    x = cw / 2; y = pad + fontSize / 2; align = 'center'; break;
+      case 'bottom-center': x = cw / 2; y = ch - pad - fontSize / 2; align = 'center'; break;
+    }
+    c.textAlign = align;
+    c.fillText(text, x, y);
+  }
+  c.restore();
+}
+
+/** 把 #rrggbb 或 rgb() 转为带 alpha 的 rgba() 字符串。非法输入 fallback 到黑色。
+ *  export 供主脚本预览时复用（保持与引擎最终渲染的 alpha 逻辑一致）。 */
+export function withAlpha(color, alpha) {
+  if (typeof color !== 'string') return `rgba(0,0,0,${alpha})`;
+  const s = color.trim();
+  // #rgb / #rrggbb
+  if (s[0] === '#') {
+    let hex = s.slice(1);
+    if (hex.length === 3) hex = hex.split('').map((c) => c + c).join('');
+    if (hex.length === 6) {
+      const r = parseInt(hex.slice(0, 2), 16);
+      const g = parseInt(hex.slice(2, 4), 16);
+      const b = parseInt(hex.slice(4, 6), 16);
+      return `rgba(${r},${g},${b},${alpha})`;
+    }
+  }
+  // rgb(a) — 用正则拆分，追加 alpha
+  const m = s.match(/rgba?\(([^)]+)\)/i);
+  if (m) {
+    const parts = m[1].split(',').map((p) => p.trim());
+    if (parts.length >= 3) {
+      return `rgba(${parts[0]},${parts[1]},${parts[2]},${alpha})`;
+    }
+  }
+  return `rgba(0,0,0,${alpha})`;
+}
+
+/**
+ * 提交水印命令。由主脚本在用户填完水印表单后调用。
+ * 直接进 commands 栈（可撤销/重做），不走 startDraw / endDraw 流程。
+ */
+export function commitWatermark({ text, layout, color, width, opacity }) {
+  if (!text) return;
+  const cmd = {
+    type: 'watermark',
+    points: [],
+    text,
+    layout: layout || 'diagonal',
+    color: color || currentColor,
+    width: width || currentWidth,
+    opacity: typeof opacity === 'number' ? opacity : 0.35,
+  };
+  commands = commands.slice(0, undoIndex + 1);
+  commands.push(cmd);
+  undoIndex = commands.length - 1;
+  redrawAll();
 }
 
 // ── 涂抹采样辅助 ──────────────────────────────────────
@@ -429,13 +609,76 @@ export function canRedo() {
   return undoIndex < commands.length - 1;
 }
 
-/** 全量重绘标注层 */
+/** 全量重绘标注层（0.11.8-e 加正片叠底单独图层聚合）
+ *
+ * highlight-multiply 特殊处理："同颜色多笔画不加深" —— 按颜色分组，每颜色一个
+ * 离屏 canvas，同色多笔画都 source-over 到同一个 offscreen（无 alpha 累积因为
+ * 满 alpha 颜色），最后一次性 alpha drawImage 到主 canvas。
+ * 跨颜色仍会叠加（合理，红黄叠出橙感）。
+ * highlight-translucent 保持原逐笔 alpha drawImage（"半透明"语义就是"多笔会加深"）。
+ */
 function redrawAll() {
   if (!ctx || !canvas) return;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  // 重绘到 undoIndex 位置
-  for (let i = 0; i <= undoIndex; i++) {
-    executeCommand(commands[i]);
+  renderCommandsTo(commands.slice(0, undoIndex + 1), ctx, canvas.width, canvas.height);
+}
+
+/**
+ * 将命令序列渲染到目标 ctx，尊重 highlight-multiply "同色不加深"语义。
+ *
+ * export 供主脚本 redrawAnnotFull 和合成阶段复用——**必须走这个**而非手动 loop
+ * executeCommand，否则 highlight-multiply 会退化成"逐笔 alpha 累积"。
+ */
+export function renderCommandsTo(cmds, targetCtx, w, h) {
+  const highlightMultiplyCmds = [];
+  for (const cmd of cmds) {
+    if (cmd.type === 'highlight-multiply') {
+      highlightMultiplyCmds.push(cmd);
+    } else {
+      executeCommand(cmd, targetCtx);
+    }
+  }
+  if (highlightMultiplyCmds.length > 0) {
+    renderHighlightMultiplyLayer(highlightMultiplyCmds, targetCtx, w, h);
+  }
+}
+
+/** 把所有 highlight-multiply 命令按颜色分组渲染，每组一个 offscreen 满 alpha stroke，
+ *  然后按颜色出现的先后顺序 alpha drawImage 到目标 ctx。 */
+function renderHighlightMultiplyLayer(cmds, targetCtx, w, h) {
+  const alpha = 0.55;
+  // 按颜色分组，保留每组第一次出现的顺序
+  const colorOrder = [];
+  const layers = new Map(); // color -> offscreen canvas
+  for (const cmd of cmds) {
+    if (!cmd.points || cmd.points.length < 2) continue;
+    const color = cmd.color || currentColor;
+    let layer = layers.get(color);
+    if (!layer) {
+      layer = document.createElement('canvas');
+      layer.width = w;
+      layer.height = h;
+      layers.set(color, layer);
+      colorOrder.push(color);
+    }
+    const lc = layer.getContext('2d');
+    lc.strokeStyle = color;
+    lc.lineWidth = (cmd.width || currentWidth) * 4;
+    lc.lineCap = 'round';
+    lc.lineJoin = 'round';
+    lc.beginPath();
+    lc.moveTo(cmd.points[0].x, cmd.points[0].y);
+    for (let i = 1; i < cmd.points.length; i++) {
+      lc.lineTo(cmd.points[i].x, cmd.points[i].y);
+    }
+    lc.stroke();
+  }
+  // 按插入顺序贴回目标 ctx
+  for (const color of colorOrder) {
+    targetCtx.save();
+    targetCtx.globalAlpha = alpha;
+    targetCtx.drawImage(layers.get(color), 0, 0);
+    targetCtx.restore();
   }
 }
 

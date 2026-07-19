@@ -315,6 +315,9 @@ export const en = {
   "panel.voice": "Voice Input",
   "voice.lede": "Hold Alt+Space to speak; release to transcribe. Cloud STT needs a provider; local STT needs the FunASR environment.",
   "voice.enabled.label": "Enable voice input",
+  // Voice card (0.11.8: wrap toggle + audio device + test + STT mode into an extension-card)
+  "voice.card.title": "Voice Input",
+  "voice.card.desc": "Audio capture and STT mode; disable to stop Alt+Space triggering voice",
   // Audio device
   "voice.audio_device.label": "Audio input device",
   "voice.audio_device.default": "System default",

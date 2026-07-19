@@ -53,6 +53,7 @@ impl SearchEngine for MockSlowEngine {
             action: SearchAction::None, // 纯展示，无操作
             source: "mock_slow".into(),
             score_detail: Some("mock=0.5".into()),
+            context_aware: false,
         }]
     }
 }

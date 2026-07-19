@@ -19,5 +19,8 @@
 /* base 排版 */
 @import '../base/typography.css';
 
+/* 图标（0.10.8：工具栏按钮走 Lucide 图标） */
+@import '../components/icon.css';
+
 /* views */
 @import '../views/chord-screenshot.css';

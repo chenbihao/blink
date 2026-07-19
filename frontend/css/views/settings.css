@@ -713,9 +713,26 @@ input[type="number"]::-webkit-outer-spin-button {
   border-radius: var(--radius-md) var(--radius-md) 0 0; /* 与父卡片圆角同步，避免内部直角背景撑出 */
 }
 
+/* 0.10.8：从"裸 emoji"迁到 Lucide 线性图标后，20px 单图视觉重量不足显得寡淡。
+   给 icon 一个方块容器（40×40）承载视觉重量，图标本体居中 22px，
+   与 h3 (16px) + desc 双行文本形成稳定视觉三角。业界通用做法（Raycast/Linear 设置卡）。
+   color 走 --accent（主题主色）让图标跟随主题变色，视觉从"灰白装饰"升级为"主题符号"。 */
 .extension-icon {
-  font-size: var(--text-3xl);
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
   flex-shrink: 0;
+}
+
+/* 容器内的 Lucide 图标：22px + stroke 1.75 让细线条不失重量感。
+   color 在容器上定，icon 走 stroke:currentColor 自动继承。 */
+.extension-icon .icon {
+  width: 22px;
+  height: 22px;
+  stroke-width: 1.75;
 }
 
 .extension-info {
@@ -774,10 +791,19 @@ input[type="number"]::-webkit-outer-spin-button {
 
 .builtin-action-icon {
   flex: 0 0 auto;
-  font-size: var(--text-3xl);
   width: 32px;
-  text-align: center;
-  opacity: var(--opacity-faint);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+}
+
+/* 0.10.8：紧凑列表行不加背景块（每行 12 个太重），只放大 icon 本体到 20px + stroke 加粗提重量。
+   color 走 --accent 跟随主题（与 .extension-icon 一致）。 */
+.builtin-action-icon .icon {
+  width: 20px;
+  height: 20px;
+  stroke-width: 1.75;
 }
 
 .builtin-action-info {

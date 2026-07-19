@@ -25,6 +25,7 @@ import {
   frontendLog,
 } from "./api.js";
 import * as annot from "./annotation-engine.js";
+import { ensureSpriteLoaded } from "./icon.js";
 
 // ── **临时**（0.11.7-f 调试用）：console 转发到后端 tracing ────────────
 // TODO(0.11.7 收尾)：0.11.7 稳定后移除此块 + api.js 的 frontendLog + Rust 端 frontend_log command
@@ -68,6 +69,7 @@ const annotCtx = annotCanvas.getContext('2d');
 const toolbar = document.getElementById('toolbar');
 const sizeHint = document.getElementById('size-hint');
 const errorHint = document.getElementById('error-hint');
+const strokeCursor = document.getElementById('stroke-cursor');
 
 // ── 状态 ──────────────────────────────────────────────
 
@@ -86,6 +88,9 @@ let annotStartX = 0, annotStartY = 0;
 let annotCurrentX = 0, annotCurrentY = 0;
 
 // ── 初始化 ────────────────────────────────────────────
+
+// 图标 sprite（工具栏按钮走 Lucide 图标；fire-and-forget，加载失败降级为空图标）
+ensureSpriteLoaded();
 
 annot.init(annotCanvas);
 
@@ -132,6 +137,16 @@ function resetState() {
   // 清 OCR 面板（如果上次遗留）
   const oldOcr = document.getElementById('ocr-panel');
   if (oldOcr) oldOcr.remove();
+  // 0.11.8-c：水印表单已内嵌进 text-dropdown（视图切回列表即可）
+  const textDropdown = document.getElementById('text-dropdown');
+  if (textDropdown) {
+    textDropdown.setAttribute('data-view', 'list');
+    textDropdown.setAttribute('data-open', 'false');
+  }
+  // 清工具栏用户拖动位置（新一轮截图重回自动定位）
+  toolbar.removeAttribute('data-user-moved');
+  toolbar.style.left = '';
+  toolbar.style.top = '';
   // 清取消门禁（防止快速 Alt+A → ESC → Alt+A → ESC 被卡）
   cancelInProgress = false;
 }
@@ -288,17 +303,53 @@ function redrawAnnotPreview() {
       }
       break;
     }
+    case 'highlight-multiply':
+    case 'highlight-translucent': {
+      // 0.11.8-d：荧光笔实时预览。粗细 × 4，alpha 与最终一致。
+      // multiply 模式的"重叠不加深"效果由 endDraw 时的整段一次性 stroke 实现，
+      // 预览阶段（单笔仍在画）不需要特殊处理——预览也是单条 stroke，天然不加深。
+      const pts = annot.getCurrentPoints();
+      if (pts.length >= 2) {
+        const w = annot.getWidth();
+        const alpha = tool === 'highlight-multiply' ? 0.55 : 0.30;
+        annotCtx.strokeStyle = annot.withAlpha(annot.getColor(), alpha);
+        annotCtx.lineWidth = w * 4;
+        annotCtx.lineCap = 'round';
+        annotCtx.lineJoin = 'round';
+        annotCtx.beginPath();
+        annotCtx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) {
+          annotCtx.lineTo(pts[i].x, pts[i].y);
+        }
+        annotCtx.stroke();
+      }
+      break;
+    }
     case 'eraser': {
-      // 橡皮擦预览：半透明灰色方块
-      const x = Math.min(annotStartX, annotCurrentX);
-      const y = Math.min(annotStartY, annotCurrentY);
-      const w = Math.abs(annotCurrentX - annotStartX);
-      const h = Math.abs(annotCurrentY - annotStartY);
-      annotCtx.fillStyle = 'rgba(200, 200, 200, 0.3)';
-      annotCtx.fillRect(x, y, w, h);
-      annotCtx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
-      annotCtx.lineWidth = 1;
-      annotCtx.strokeRect(x, y, w, h);
+      // 0.11.8-a：橡皮擦沿轨迹用 destination-out 圆形擦除；预览与最终一致，
+      // 用户拖动时实时看到已擦区域露出下方蒙版（视觉上"被擦掉"）。
+      const pts = annot.getCurrentPoints();
+      if (pts.length >= 1) {
+        const w = annot.getWidth();
+        const r = Math.max(6, w * 3);
+        annotCtx.globalCompositeOperation = 'destination-out';
+        for (let i = 0; i < pts.length; i++) {
+          const p = pts[i];
+          annotCtx.beginPath();
+          annotCtx.arc(p.x, p.y, r, 0, Math.PI * 2);
+          annotCtx.fill();
+          if (i > 0) {
+            const prev = pts[i - 1];
+            annotCtx.strokeStyle = '#000';
+            annotCtx.lineWidth = r * 2;
+            annotCtx.lineCap = 'round';
+            annotCtx.beginPath();
+            annotCtx.moveTo(prev.x, prev.y);
+            annotCtx.lineTo(p.x, p.y);
+            annotCtx.stroke();
+          }
+        }
+      }
       break;
     }
     case 'mosaic': {
@@ -347,13 +398,12 @@ function redrawAnnotPreview() {
   annotCtx.restore();
 }
 
-/** 全量重绘标注层（已提交的命令） */
+/** 全量重绘标注层（已提交的命令）
+ *  0.11.8-e：走引擎的 renderCommandsTo 保证 highlight-multiply 同色不加深。 */
 function redrawAnnotFull() {
   if (!selCss || annotCanvas.width === 0) return;
   annotCtx.clearRect(0, 0, annotCanvas.width, annotCanvas.height);
-  for (const cmd of annot.getCommands()) {
-    annot.executeCommand(cmd, annotCtx);
-  }
+  annot.renderCommandsTo(annot.getCommands(), annotCtx, annotCanvas.width, annotCanvas.height);
 }
 
 // ── 选区与标注模式 ────────────────────────────────────
@@ -425,13 +475,22 @@ function exitAnnotationMode() {
   annotCanvas.height = 0;
   toolbar.style.display = 'none';
   sizeHint.style.display = 'none';
+  // 0.11.8-a：清工具栏用户拖动位置——新选区回到自动定位（否则工具栏悬在旧位置与新选区脱节）
+  toolbar.removeAttribute('data-user-moved');
+  toolbar.style.left = '';
+  toolbar.style.top = '';
   screenshotSetAnnotationMode(false).catch((e) => console.error('setAnnotationMode(false) 失败', e));
   drawDimmed();
 }
 
-/** 定位工具栏到选区右下外侧（PixPin 风格） */
+/** 定位工具栏到选区右下外侧（PixPin 风格）。
+ *  0.11.8-a：若用户已手动拖过工具栏（dataset.userMoved），保留用户位置不重定位。 */
 function positionToolbar(rect) {
   toolbar.style.display = 'flex';
+  // 用户已拖过 → 保留位置，仅确保 display:flex 即可
+  if (toolbar.dataset.userMoved === 'true' && toolbar.style.left && toolbar.style.top) {
+    return;
+  }
   // 先给临时位置让 layout 生效（避免闪一下屏幕左上角）
   toolbar.style.left = '-9999px';
   toolbar.style.top = '-9999px';
@@ -471,6 +530,8 @@ canvas.addEventListener('mousedown', (e) => {
 
   // 有选区状态下点击选区内 → 启动标注绘制
   if (isAnnotating && selCss && pointInRect(e.offsetX, e.offsetY, selCss)) {
+    // 0.11.8-b：watermark 是"面板驱动"工具，不响应 canvas 拖动
+    if (annot.getTool() === 'watermark') return;
     const dpr = window.devicePixelRatio || 1;
     annotStartX = (e.offsetX - selCss.x) * dpr;
     annotStartY = (e.offsetY - selCss.y) * dpr;
@@ -498,11 +559,19 @@ canvas.addEventListener('mousedown', (e) => {
 canvas.addEventListener('mousemove', (e) => {
   if (!screenshot) return;
 
+  // 更新笔画预览虚圈（0.11.8-c）：hover 时显示当前工具的笔尖大小
+  updateStrokeCursor(e.clientX, e.clientY);
+
   // 标注绘制中
   if (isAnnotDragging && selCss) {
     const dpr = window.devicePixelRatio || 1;
     annotCurrentX = (e.offsetX - selCss.x) * dpr;
     annotCurrentY = (e.offsetY - selCss.y) * dpr;
+    // 0.11.8-e：矩形/椭圆按住 Shift 约束长宽等比（→ 正方形 / 圆）
+    if (e.shiftKey) {
+      const constrained = applySquareConstraint(annotStartX, annotStartY, annotCurrentX, annotCurrentY);
+      if (constrained) { annotCurrentX = constrained.x; annotCurrentY = constrained.y; }
+    }
     annot.moveDraw(annotCurrentX, annotCurrentY);
     redrawAnnotPreview();
     return;
@@ -516,6 +585,78 @@ canvas.addEventListener('mousemove', (e) => {
   }
 });
 
+// 鼠标离开 canvas 时隐藏预览圈
+canvas.addEventListener('mouseleave', () => {
+  if (strokeCursor) strokeCursor.style.display = 'none';
+});
+
+// 0.11.8-e：矩形/椭圆拖动期间按/松 Shift 实时更新预览（否则鼠标不动则不重绘）
+// 用最后一次 mousemove 的坐标（保存在 annotCurrentX/Y）重算，若 tool 是 rect/ellipse
+// 且正在拖动，Shift 状态变化就重新 clamp + redrawAnnotPreview。
+function refreshShapePreviewOnShift(e) {
+  if (!isAnnotDragging || !selCss) return;
+  const tool = annot.getTool();
+  if (tool !== 'rect' && tool !== 'ellipse') return;
+  // 用 mousemove 里记录的鼠标原始位置反算——但我们没保存"原始未 clamp 的鼠标位置"。
+  // 折衷：仅在 Shift keydown 时 clamp（annotCurrentX/Y 已是上次 mousemove 值），
+  // Shift keyup 时无法恢复到"真实鼠标位置"——所以放弃 keyup 实时恢复；用户拖动一下
+  // 鼠标即可看到最新几何。这个折衷在实际使用里几乎无感，代价是不引入新的坐标存储。
+  if (e.type === 'keydown' && e.key === 'Shift') {
+    const constrained = applySquareConstraint(annotStartX, annotStartY, annotCurrentX, annotCurrentY);
+    if (constrained) { annotCurrentX = constrained.x; annotCurrentY = constrained.y; }
+    redrawAnnotPreview();
+  }
+}
+window.addEventListener('keydown', refreshShapePreviewOnShift);
+
+/** 更新笔画预览虚圈位置和大小。CSS 像素坐标（clientX/Y）。
+ *  仅在标注模式 + 笔画类工具 hover 选区内时显示；其它情况隐藏。 */
+function updateStrokeCursor(clientX, clientY) {
+  if (!strokeCursor) return;
+  // 只在有选区且鼠标在选区内时显示
+  if (!isAnnotating || !selCss) { strokeCursor.style.display = 'none'; return; }
+  // 拖拽绘制中不显示（否则和实时预览重叠）
+  if (isAnnotDragging) { strokeCursor.style.display = 'none'; return; }
+  // 鼠标是否在选区内
+  // clientX/Y 与 canvas offsetX/Y 差异是 canvas 相对视口的偏移——canvas 是 100%×100%，
+  // 位于 (0,0)，所以 clientX 直接可用比较 selCss（CSS 像素）。
+  if (clientX < selCss.x || clientX > selCss.x + selCss.w ||
+      clientY < selCss.y || clientY > selCss.y + selCss.h) {
+    strokeCursor.style.display = 'none';
+    return;
+  }
+  // 计算 CSS 直径 = 工具的物理笔尖直径 / dpr
+  const tool = annot.getTool();
+  const w = annot.getWidth();
+  const dpr = window.devicePixelRatio || 1;
+  let cssPxDiameter = 0;
+  if (tool === 'pencil') {
+    cssPxDiameter = w / dpr;
+  } else if (tool === 'highlight-multiply' || tool === 'highlight-translucent') {
+    cssPxDiameter = (w * 4) / dpr;
+  } else if (tool === 'eraser') {
+    // 引擎里橡皮擦半径 = max(6, w*3)，直径 = 2r
+    cssPxDiameter = (Math.max(6, w * 3) * 2) / dpr;
+  } else {
+    // 其它工具（矩形/椭圆/箭头/文字/水印/马赛克…）不显示预览圈
+    strokeCursor.style.display = 'none';
+    return;
+  }
+  // 直径 < 4px 太小意义不大，直接隐藏
+  if (cssPxDiameter < 4) { strokeCursor.style.display = 'none'; return; }
+  strokeCursor.style.display = 'block';
+  strokeCursor.style.width = cssPxDiameter + 'px';
+  strokeCursor.style.height = cssPxDiameter + 'px';
+  strokeCursor.style.left = (clientX - cssPxDiameter / 2) + 'px';
+  strokeCursor.style.top = (clientY - cssPxDiameter / 2) + 'px';
+  // 荧光笔用颜色暗示叠加感；橡皮擦用白色描边
+  if (tool === 'eraser') {
+    strokeCursor.style.borderColor = 'rgba(255,255,255,0.9)';
+  } else {
+    strokeCursor.style.borderColor = annot.getColor();
+  }
+}
+
 canvas.addEventListener('mouseup', (e) => {
   if (!screenshot) return;
 
@@ -525,6 +666,11 @@ canvas.addEventListener('mouseup', (e) => {
     const dpr = window.devicePixelRatio || 1;
     annotCurrentX = (e.offsetX - selCss.x) * dpr;
     annotCurrentY = (e.offsetY - selCss.y) * dpr;
+    // 0.11.8-e：矩形/椭圆按住 Shift 约束长宽等比
+    if (e.shiftKey) {
+      const constrained = applySquareConstraint(annotStartX, annotStartY, annotCurrentX, annotCurrentY);
+      if (constrained) { annotCurrentX = constrained.x; annotCurrentY = constrained.y; }
+    }
 
     const tool = annot.getTool();
     // 文本工具：允许零拖拽（点击一次就弹输入框）
@@ -611,6 +757,13 @@ document.addEventListener('keydown', (e) => {
     const ocrPanel = document.getElementById('ocr-panel');
     if (ocrPanel) {
       ocrPanel.remove();
+      return;
+    }
+    // 其次关闭水印面板（0.11.8-c：内嵌 text-dropdown 视图，回列表并关闭）
+    const wmDropdown = document.getElementById('text-dropdown');
+    if (wmDropdown && wmDropdown.getAttribute('data-view') === 'watermark' && wmDropdown.getAttribute('data-open') === 'true') {
+      wmDropdown.setAttribute('data-view', 'list');
+      wmDropdown.setAttribute('data-open', 'false');
       return;
     }
     // 其次关闭展开的下拉菜单
@@ -762,6 +915,7 @@ function showOcrResult(result) {
     <textarea class="ocr-panel-textarea" spellcheck="false"></textarea>
     <div class="ocr-panel-footer">
       <span class="ocr-panel-hint">可自由选词复制或编辑</span>
+      <button id="ocr-trim-spaces" class="tool-btn" ${text ? '' : 'disabled'} title="合并连续空白 + 去除首尾空格">移除空格</button>
       <button id="ocr-copy" class="tool-btn tool-btn-primary" ${text ? '' : 'disabled'}>复制全部</button>
     </div>
   `;
@@ -783,6 +937,52 @@ function showOcrResult(result) {
   panel.addEventListener('mousedown', (e) => e.stopPropagation());
 
   document.getElementById('ocr-close').addEventListener('click', () => panel.remove());
+
+  // 0.11.8：移除空格 toggle —— OCR 引擎常在**汉字之间**夹空格（"然 正 确"），
+  // 用户按一次全清，再按一次回原文，方便对比 / 校正。
+  //
+  // 设计要点：
+  // - 每次都从 `originalText`（当前"原文态"）派生结果，避免累积失真
+  // - 用 `[^\S\r\n]+`（所有 Unicode 空白但换行除外）而非 `[ \t　]+`——OCR 输出常混入
+  //   U+00A0 不间断空格、U+2000~U+200B 各种半宽/零宽空格，`\s` + 保留换行是最稳的实用集
+  // - 保留换行结构，防止段落被压成一行
+  // - 状态用按钮 dataset 记，避免闭包状态污染
+  // - 中文场景 replace 用 '' 而不是 ' '——汉字之间不需要词间空格；英文段落偶尔失去
+  //   词间空格是可接受的取舍（用户可手动 undo 或再按一次显示原文）
+  const trimBtn = document.getElementById('ocr-trim-spaces');
+  let originalText = textarea.value;
+  trimBtn.dataset.trimmed = 'false';
+  // 用户手动编辑 textarea → 视作新的"原文态"，重置 toggle
+  textarea.addEventListener('input', () => {
+    originalText = textarea.value;
+    if (trimBtn.dataset.trimmed === 'true') {
+      trimBtn.dataset.trimmed = 'false';
+      trimBtn.textContent = '移除空格';
+    }
+  });
+  trimBtn.addEventListener('click', () => {
+    if (trimBtn.dataset.trimmed === 'true') {
+      // 当前是 trim 后 → 还原为原文（不触发 input 监听的重置逻辑：先改 dataset 再改 value）
+      trimBtn.dataset.trimmed = 'false';
+      trimBtn.textContent = '移除空格';
+      // 用 setter 会触发 input 事件——但监听里 `originalText = textarea.value` 会把
+      // 原文赋回原文，dataset 已是 false，textContent 已是"移除空格"，无副作用
+      textarea.value = originalText;
+    } else {
+      // 当前是原文 → 移除空格
+      const trimmed = originalText
+        .split(/\r?\n/)
+        .map((line) => line.replace(/[^\S\r\n]+/g, '').trim())
+        .join('\n')
+        .replace(/\n{3,}/g, '\n\n'); // 连续 3+ 空行压成 2 行（保留段落分隔）
+      // 先设 dataset/文本，再赋值——避免 input 监听把 trimmed 当新原文
+      trimBtn.dataset.trimmed = 'true';
+      trimBtn.textContent = '显示原文';
+      textarea.value = trimmed;
+    }
+    textarea.focus();
+  });
+
   document.getElementById('ocr-copy').addEventListener('click', () => {
     const value = textarea.value;
     if (value) {
@@ -792,27 +992,119 @@ function showOcrResult(result) {
   });
 }
 
+// ── 水印表单（0.11.8-c：内嵌进 text-dropdown，就地展开）──────────────
+// 与颜色下拉一致的交互：点"水印" → dropdown 从列表视图切到表单视图；
+// 应用 / 返回 → 切回列表视图 + 关闭 dropdown。
+//
+// 表单元素在 HTML 里静态存在，此函数只负责视图切换 + 事件绑定（幂等）。
+
+let watermarkFormBound = false;
+
+function openWatermarkForm() {
+  const dropdown = document.getElementById('text-dropdown');
+  if (!dropdown) return;
+
+  // 视图切表单，且保持 dropdown 打开（selectTool 已 closeAllDropdowns，这里回开）
+  dropdown.setAttribute('data-view', 'watermark');
+  dropdown.setAttribute('data-open', 'true');
+
+  const textInput = dropdown.querySelector('.wm-text');
+  const layoutSelect = dropdown.querySelector('.wm-layout');
+  const opacityRange = dropdown.querySelector('.wm-opacity');
+  const opacityVal = dropdown.querySelector('.wm-opacity-val');
+
+  // 每次打开时把光标放输入框
+  if (textInput) setTimeout(() => textInput.focus(), 0);
+
+  if (watermarkFormBound) return;
+  watermarkFormBound = true;
+
+  const backToList = () => {
+    dropdown.setAttribute('data-view', 'list');
+  };
+
+  if (opacityRange && opacityVal) {
+    opacityRange.addEventListener('input', () => {
+      opacityVal.textContent = `${opacityRange.value}%`;
+    });
+  }
+
+  const applyBtn = dropdown.querySelector('.wm-apply');
+  const backBtn = dropdown.querySelector('.wm-back');
+  const apply = () => {
+    const text = textInput.value.trim();
+    if (!text) { textInput.focus(); return; }
+    annot.commitWatermark({
+      text,
+      layout: layoutSelect.value,
+      color: annot.getColor(),
+      width: annot.getWidth(),
+      opacity: parseInt(opacityRange.value, 10) / 100,
+    });
+    redrawAnnotFull();
+    updateUndoRedoButtons();
+    backToList();
+    dropdown.setAttribute('data-open', 'false');
+  };
+  if (applyBtn) applyBtn.addEventListener('click', apply);
+  if (backBtn) backBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    backToList();
+  });
+  // Enter 应用；ESC 让 keydown handler 关 dropdown
+  if (textInput) textInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); apply(); }
+  });
+  // 表单内所有交互不冒到 canvas mousedown（避免关闭 dropdown）
+  dropdown.querySelectorAll('.dropdown-view-watermark input, .dropdown-view-watermark select, .dropdown-view-watermark button')
+    .forEach((el) => el.addEventListener('mousedown', (e) => e.stopPropagation()));
+}
+
 // ── 文本标注输入框 ─────────────────────────────────
+//
+// 0.11.8-e：从 `<input>` 换成 `<span contenteditable>`。
+//
+// 根因：Chromium 的 `<input>` 是 UA 表单控件，即使 padding:0 line-height:1，
+// 内部也存在 UA 定义的"控件内 leading"（几像素）——文字在容器内垂直居中而非
+// 顶对齐，与 canvas `textBaseline='top'` 差几像素，视觉上文字比 canvas 预览低。
+//
+// `<span contenteditable>` 是普通 block 元素，line-height:1 时字符 glyph 起点
+// 严格贴容器顶，配合 canvas textBaseline='top' 严格对齐。
+// 副作用：不再需要"隐藏 span 测量宽度"（span 天然按内容自增）。
 
 function showTextInput(x, y) {
   if (!selCss) return;
   const dpr = window.devicePixelRatio || 1;
 
-  const input = document.createElement('input');
-  input.type = 'text';
+  const input = document.createElement('span');
   input.className = 'text-annot-input';
-  input.placeholder = '输入文本…';
+  input.contentEditable = 'true';
+  input.setAttribute('role', 'textbox');
+  input.setAttribute('data-placeholder', '输入文本…');
   // 定位到标注 canvas 上、用户点击位置（CSS 像素）
   input.style.left = (selCss.x + x / dpr) + 'px';
   input.style.top = (selCss.y + y / dpr) + 'px';
-  input.style.fontSize = Math.max(14, annot.getWidth() * 3) + 'px';
+  // 字号与最终 canvas 渲染严格对齐——
+  // 引擎 fillText 用 `width * 6` 物理像素 → CSS 像素 = 物理 / dpr = `width * 6 / dpr`
+  const cssFontPx = (annot.getWidth() * 6) / dpr;
+  input.style.fontSize = cssFontPx + 'px';
+  input.style.fontFamily = 'sans-serif';
+  input.style.lineHeight = '1';
   input.style.color = annot.getColor();
   input.spellcheck = false;
-  input.autocomplete = 'off';
   document.body.appendChild(input);
   input.focus();
-  // 全选已有的提示文字，方便用户直接覆盖
-  setTimeout(() => input.select(), 0);
+
+  // 全选已有内容（若有），方便用户直接覆盖
+  setTimeout(() => {
+    const range = document.createRange();
+    range.selectNodeContents(input);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }, 0);
+
+  const getText = () => (input.textContent || '').trim();
 
   let cleanedUp = false;
   const cleanup = () => {
@@ -827,9 +1119,11 @@ function showTextInput(x, y) {
   };
 
   input.addEventListener('keydown', (e) => {
+    // IME 组合期按 Enter 是"提交候选"而非"提交文本"——跳过 commit
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key === 'Enter') {
       e.preventDefault();
-      commit(input.value.trim());
+      commit(getText());
     } else if (e.key === 'Escape') {
       e.stopPropagation();
       annot.cancelText();
@@ -838,10 +1132,8 @@ function showTextInput(x, y) {
   });
 
   // blur 自动提交——用户点击工具栏或标注区时文本会被提交
-  // 空文本时取消标注
   input.addEventListener('blur', () => {
-    const text = input.value.trim();
-    commit(text);
+    commit(getText());
   });
 }
 
@@ -865,17 +1157,23 @@ function bindToolbar() {
     dropdown.setAttribute('data-open', willOpen ? 'true' : 'false');
   }
 
-  // 触发器
-  const toolTrigger = document.getElementById('tool-trigger');
+  // 触发器（split-caret / 单体 dropdown-trigger 通用）
+  const shapeTrigger = document.getElementById('shape-trigger');
+  const strokeTrigger = document.getElementById('stroke-trigger');
+  const textTrigger = document.getElementById('text-trigger');
   const blurTrigger = document.getElementById('blur-trigger');
   const colorTrigger = document.getElementById('color-trigger');
   const widthTrigger = document.getElementById('width-trigger');
-  const toolDropdown = document.getElementById('tool-dropdown');
+  const shapeDropdown = document.getElementById('shape-dropdown');
+  const strokeDropdown = document.getElementById('stroke-dropdown');
+  const textDropdown = document.getElementById('text-dropdown');
   const blurDropdown = document.getElementById('blur-dropdown');
   const colorDropdown = document.getElementById('color-dropdown');
   const widthDropdown = document.getElementById('width-dropdown');
 
-  if (toolTrigger) toolTrigger.addEventListener('click', (e) => { e.stopPropagation(); toggleDropdown(toolDropdown); });
+  if (shapeTrigger) shapeTrigger.addEventListener('click', (e) => { e.stopPropagation(); toggleDropdown(shapeDropdown); });
+  if (strokeTrigger) strokeTrigger.addEventListener('click', (e) => { e.stopPropagation(); toggleDropdown(strokeDropdown); });
+  if (textTrigger) textTrigger.addEventListener('click', (e) => { e.stopPropagation(); toggleDropdown(textDropdown); });
   if (blurTrigger) blurTrigger.addEventListener('click', (e) => { e.stopPropagation(); toggleDropdown(blurDropdown); });
   if (colorTrigger) colorTrigger.addEventListener('click', (e) => { e.stopPropagation(); toggleDropdown(colorDropdown); });
   if (widthTrigger) widthTrigger.addEventListener('click', (e) => { e.stopPropagation(); toggleDropdown(widthDropdown); });
@@ -890,56 +1188,80 @@ function bindToolbar() {
   });
 
   // ── 工具切换统一入口 ──
-  // 清除所有工具入口（下拉触发器 + 下拉 item + 直接按钮）的 active，
-  // 然后给当前工具的入口加 active + 同步触发器图标。
-  const toolTriggerIcon = document.getElementById('tool-trigger-icon');
-  const blurTriggerIcon = document.getElementById('blur-trigger-icon');
+  // split-btn 结构（0.11.8-a）：
+  //   .split-main   ── 主按钮，点击直接用当前分组选中的工具（data-tool 存"当前工具"）
+  //   .split-caret  ── 三角按钮，仅展开 dropdown 供切换
+  // 切换 dropdown item 时更新对应 split-main 的 data-tool + 图标。
+  const shapeMain = document.getElementById('shape-main');
+  const shapeMainIcon = document.getElementById('shape-main-icon');
+  const strokeMain = document.getElementById('stroke-main');
+  const strokeMainIcon = document.getElementById('stroke-main-icon');
+  const textMain = document.getElementById('text-main');
+  const textMainIcon = document.getElementById('text-main-icon');
+  const blurMain = document.getElementById('blur-main');
+  const blurMainIcon = document.getElementById('blur-main-icon');
 
-  /** 工具 → 所属分组（决定同步哪个触发器的图标 + 哪个下拉 item 高亮） */
+  /** 工具 → 所属分组（决定同步哪个 split-main 的图标 + 哪个下拉 item 高亮） */
   const TOOL_GROUPS = {
-    rect: 'shape', ellipse: 'shape', arrow: 'shape', pencil: 'shape',
-    text: 'direct',
+    rect: 'shape', ellipse: 'shape',
+    arrow: 'stroke', pencil: 'stroke',
+    'highlight-multiply': 'stroke', 'highlight-translucent': 'stroke',
+    text: 'text', watermark: 'text',
     pixelate: 'blur', mosaic: 'blur',
     eraser: 'direct',
   };
 
+  /** 分组 → { main, mainIcon, dropdownSelector } */
+  const GROUP_META = {
+    shape:  { main: shapeMain,  icon: shapeMainIcon,  dropdown: '#shape-dropdown' },
+    stroke: { main: strokeMain, icon: strokeMainIcon, dropdown: '#stroke-dropdown' },
+    text:   { main: textMain,   icon: textMainIcon,   dropdown: '#text-dropdown' },
+    blur:   { main: blurMain,   icon: blurMainIcon,   dropdown: '#blur-dropdown' },
+  };
+
   function selectTool(tool) {
     annot.setTool(tool);
-    // 清除所有工具入口 active（下拉触发器、下拉 item、直接按钮）
-    document.querySelectorAll('#tool-trigger, #blur-trigger, .tool-direct').forEach((b) => b.classList.remove('active'));
-    document.querySelectorAll('#tool-dropdown .dropdown-item, #blur-dropdown .dropdown-item').forEach((b) => b.classList.remove('active'));
+    // 清除所有工具入口 active（split-main、下拉 item、直接按钮）
+    document.querySelectorAll('.split-main, .tool-direct').forEach((b) => b.classList.remove('active'));
+    document.querySelectorAll('.dropdown-item[data-tool]').forEach((b) => b.classList.remove('active'));
     // 标记当前工具的入口 active
     const group = TOOL_GROUPS[tool];
-    if (group === 'shape') {
-      // 标记触发器 + 对应下拉 item
-      const item = document.querySelector(`#tool-dropdown .dropdown-item[data-tool="${tool}"]`);
+    const meta = GROUP_META[group];
+    if (meta) {
+      const item = document.querySelector(`${meta.dropdown} .dropdown-item[data-tool="${tool}"]`);
       if (item) {
         item.classList.add('active');
         const icon = item.querySelector('.item-icon');
-        if (toolTriggerIcon && icon) toolTriggerIcon.textContent = icon.textContent;
+        // 同步 split-main：图标 + data-tool（下次点主按钮直接用它）
+        if (meta.icon && icon) meta.icon.innerHTML = icon.innerHTML;
+        if (meta.main) meta.main.dataset.tool = tool;
       }
-      if (toolTrigger) toolTrigger.classList.add('active');
-    } else if (group === 'blur') {
-      const item = document.querySelector(`#blur-dropdown .dropdown-item[data-tool="${tool}"]`);
-      if (item) {
-        item.classList.add('active');
-        const icon = item.querySelector('.item-icon');
-        if (blurTriggerIcon && icon) blurTriggerIcon.textContent = icon.textContent;
-      }
-      if (blurTrigger) blurTrigger.classList.add('active');
+      if (meta.main) meta.main.classList.add('active');
     } else if (group === 'direct') {
       const btn = document.querySelector(`.tool-direct[data-tool="${tool}"]`);
       if (btn) btn.classList.add('active');
     }
     closeAllDropdowns();
+
+    // 0.11.8-c：watermark 特殊——不用 closeAllDropdowns 关掉，
+    // 而是把 text-dropdown 切到水印表单视图（在原地展开配置项，跟颜色下拉一致的交互）
+    if (tool === 'watermark') {
+      openWatermarkForm();
+    }
   }
 
-  // 图形下拉 item
-  document.querySelectorAll('#tool-dropdown .dropdown-item').forEach((item) => {
-    item.addEventListener('click', () => selectTool(item.dataset.tool));
+  // split-main：点击直接用当前分组记住的工具
+  [shapeMain, strokeMain, textMain, blurMain].forEach((btn) => {
+    if (!btn) return;
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeAllDropdowns();
+      selectTool(btn.dataset.tool);
+    });
   });
-  // 模糊下拉 item
-  document.querySelectorAll('#blur-dropdown .dropdown-item').forEach((item) => {
+
+  // 各分组 dropdown item
+  document.querySelectorAll('#shape-dropdown .dropdown-item, #stroke-dropdown .dropdown-item, #text-dropdown .dropdown-item, #blur-dropdown .dropdown-item').forEach((item) => {
     item.addEventListener('click', () => selectTool(item.dataset.tool));
   });
   // 直接按钮（文本 / 橡皮擦）
@@ -948,6 +1270,7 @@ function bindToolbar() {
   });
 
   // ── 颜色选择（swatch + custom picker）──
+  // 0.11.8-b：swatch/dot 改用 background 填色（原字符 ● + color 呈现"暗底 + 小彩点"）
   const swatches = document.querySelectorAll('.color-swatch');
   const colorPicker = document.getElementById('color-picker');
   const colorTriggerDot = document.getElementById('color-trigger-dot');
@@ -958,7 +1281,7 @@ function bindToolbar() {
       swatches.forEach((b) => b.classList.remove('active'));
       btn.classList.add('active');
       if (colorPicker) colorPicker.value = color;
-      if (colorTriggerDot) colorTriggerDot.style.color = color;
+      if (colorTriggerDot) colorTriggerDot.style.background = color;
       closeAllDropdowns();
     });
   });
@@ -967,7 +1290,7 @@ function bindToolbar() {
       const color = e.target.value;
       annot.setColor(color);
       swatches.forEach((b) => b.classList.remove('active'));
-      if (colorTriggerDot) colorTriggerDot.style.color = color;
+      if (colorTriggerDot) colorTriggerDot.style.background = color;
     });
   }
 
@@ -981,7 +1304,8 @@ function bindToolbar() {
       widthItems.forEach((b) => b.classList.remove('active'));
       item.classList.add('active');
       const icon = item.querySelector('.item-icon');
-      if (widthTriggerIcon && icon) widthTriggerIcon.textContent = icon.textContent;
+      // 0.11.8：item-icon 现在装 .width-bar span 而非 Unicode 文本，用 innerHTML 拷贝
+      if (widthTriggerIcon && icon) widthTriggerIcon.innerHTML = icon.innerHTML;
       closeAllDropdowns();
     });
   });
@@ -1002,6 +1326,45 @@ function bindToolbar() {
   bind('btn-ocr', doOcrSelection);
   bind('btn-save', doSaveSelection);
   bind('btn-copy', doCopySelection);
+
+  // ── 拖动 handle（0.11.8-a）：拖动整条工具栏 ─────────────────
+  // 用户手动拖过之后，positionToolbar 尊重此位置，不再自动重定位。
+  const dragHandle = document.getElementById('toolbar-drag');
+  if (dragHandle) {
+    let dragging = false;
+    let offsetX = 0, offsetY = 0;
+    dragHandle.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      dragging = true;
+      toolbar.dataset.userMoved = 'true';
+      const rect = toolbar.getBoundingClientRect();
+      offsetX = e.clientX - rect.left;
+      offsetY = e.clientY - rect.top;
+      document.body.style.cursor = 'grabbing';
+    });
+    document.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const tw = toolbar.offsetWidth;
+      const th = toolbar.offsetHeight;
+      let left = e.clientX - offsetX;
+      let top = e.clientY - offsetY;
+      // 边界约束
+      left = Math.max(8, Math.min(left, vw - tw - 8));
+      top = Math.max(8, Math.min(top, vh - th - 8));
+      toolbar.style.left = left + 'px';
+      toolbar.style.top = top + 'px';
+    });
+    document.addEventListener('mouseup', () => {
+      if (dragging) {
+        dragging = false;
+        document.body.style.cursor = '';
+      }
+    });
+  }
 }
 
 bindToolbar();
@@ -1054,4 +1417,22 @@ function norm(x1, y1, x2, y2) {
 
 function pointInRect(px, py, rect) {
   return px >= rect.x && px <= rect.x + rect.w && py >= rect.y && py <= rect.y + rect.h;
+}
+
+/**
+ * 矩形/椭圆按住 Shift 约束长宽等比（0.11.8-e）：
+ * 从起点 (sx,sy) 到当前 (ex,ey)，取 max(|dx|,|dy|) 作等边，符号保持原方向。
+ * 只对 rect/ellipse 生效——箭头/铅笔等自由笔画不约束。
+ * 返回修正后的 {x, y}，或 null 表示不需要约束。
+ */
+function applySquareConstraint(sx, sy, ex, ey) {
+  const tool = annot.getTool();
+  if (tool !== 'rect' && tool !== 'ellipse') return null;
+  const dx = ex - sx;
+  const dy = ey - sy;
+  const side = Math.max(Math.abs(dx), Math.abs(dy));
+  return {
+    x: sx + (dx >= 0 ? side : -side),
+    y: sy + (dy >= 0 ? side : -side),
+  };
 }

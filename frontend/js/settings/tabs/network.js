@@ -5,6 +5,7 @@
 
 import { invoke } from "../../tauri.js";
 import { t, onLangChange } from "../../i18n/index.js";
+import { iconHTML } from "../../icon.js";
 import { saveConfig } from "../../config-keys.js";
 import { clearUnsaved, markUnsaved } from "../shared/ui.js";
 
@@ -63,7 +64,7 @@ function renderNetworkCard(proxyConfig) {
   return `
     <div class="extension-card">
       <div class="extension-header">
-        <div class="extension-icon">🌐</div>
+        <div class="extension-icon">${iconHTML("globe")}</div>
         <div class="extension-info">
           <h3>${t("network.title")}</h3>
           <p class="extension-desc">${t("network.desc")}</p>

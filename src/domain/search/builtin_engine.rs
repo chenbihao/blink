@@ -241,9 +241,19 @@ impl SearchEngine for BuiltinEngine {
                 }
             };
 
+            // 0.10.8 §11.2 方案 1：空 query + Context-only 命中 = 环境自动填充候选。
+            // keyword 命中 / 非空 query 表达了用户意图，不标记。
+            let context_aware = is_empty && kw_match.is_none() && ctx_hit;
+
             let item_id = format!("builtin:{}", action.id);
             let score = apply_history(base_score, &item_id, ctx.history);
-            items.push(action_to_search_item(action, score, arg, detail));
+            items.push(action_to_search_item(
+                action,
+                score,
+                arg,
+                detail,
+                context_aware,
+            ));
         }
         items
     }
@@ -318,6 +328,7 @@ fn action_to_search_item(
     score: f32,
     arg: Option<serde_json::Value>,
     score_detail: String,
+    context_aware: bool,
 ) -> SearchItem {
     SearchItem {
         id: format!("builtin:{}", action.id),
@@ -330,6 +341,7 @@ fn action_to_search_item(
         },
         source: "builtin".to_string(),
         score_detail: Some(score_detail),
+        context_aware,
     }
 }
 
@@ -729,5 +741,80 @@ mod tests {
 
         let items = tauri::async_runtime::block_on(engine.search("", &ctx));
         assert!(items.iter().all(|it| it.id != "builtin:open_url"));
+    }
+
+    // ── 0.10.8 §11.2 方案 1：context_aware 标记 ──────────────────────────────
+
+    #[test]
+    fn empty_query_context_only_marks_context_aware() {
+        // 空 query + 剪贴板是 URL → open_url 标 context_aware=true
+        // （前端 chordEligible 据此跳过，允许 chord 提示条与 Context Ghost 共存）
+        let engine = BuiltinEngine;
+        let history = HashMap::new();
+        let snapshot = snapshot_with_clipboard("https://example.com");
+        let ctx = make_ctx(&history, &snapshot);
+
+        let items = tauri::async_runtime::block_on(engine.search("", &ctx));
+        let open_url = items
+            .iter()
+            .find(|it| it.id == "builtin:open_url")
+            .expect("剪贴板是 URL 应召回 open_url");
+        assert!(
+            open_url.context_aware,
+            "空 query + Context-only 命中应标 context_aware=true"
+        );
+    }
+
+    #[test]
+    fn keyword_hit_not_marked_context_aware() {
+        // 非空 query + keyword 命中 + Context 命中 → context_aware=false
+        // 用户已表达意图（"打开链接"），不是环境自动填充。
+        let engine = BuiltinEngine;
+        let history = HashMap::new();
+        let snapshot = snapshot_with_clipboard("https://example.com");
+        let ctx = make_ctx(&history, &snapshot);
+
+        let items = tauri::async_runtime::block_on(engine.search("打开链接", &ctx));
+        let open_url = items
+            .iter()
+            .find(|it| it.id == "builtin:open_url")
+            .expect("keyword+Context 双命中应召回 open_url");
+        assert!(
+            !open_url.context_aware,
+            "keyword 命中表达用户意图，不应标 context_aware"
+        );
+
+        // 空 query 但无 Context 命中的对照——搜索"设置"应召回 open_settings 且非 context_aware
+        let empty_snap = ContextSnapshot::default();
+        let ctx2 = make_ctx(&history, &empty_snap);
+        let items2 = tauri::async_runtime::block_on(engine.search("设置", &ctx2));
+        let open_settings = items2
+            .iter()
+            .find(|it| it.id == "builtin:open_settings")
+            .expect("keyword '设置' 应召回 open_settings");
+        assert!(
+            !open_settings.context_aware,
+            "纯 keyword 命中不应标 context_aware"
+        );
+    }
+
+    #[test]
+    fn non_empty_context_bonus_not_marked_context_aware() {
+        // 非空 query + Context-only 命中（kw_match=None, ctx_hit=true）
+        // 用户已开始输入，即使无 keyword 命中也不算"环境自动填充"。
+        // 构造：query="xyz" 不命中任何 keyword，剪贴板是 URL 触发 Context。
+        let engine = BuiltinEngine;
+        let history = HashMap::new();
+        let snapshot = snapshot_with_clipboard("https://example.com");
+        let ctx = make_ctx(&history, &snapshot);
+
+        let items = tauri::async_runtime::block_on(engine.search("xyz", &ctx));
+        // 若召回（走 (None, true) 分支 base_score=0.3），context_aware 必须为 false
+        if let Some(open_url) = items.iter().find(|it| it.id == "builtin:open_url") {
+            assert!(
+                !open_url.context_aware,
+                "非空 query 即使走 Context-only 分支也不标 context_aware（用户已在输入）"
+            );
+        }
     }
 }

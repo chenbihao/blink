@@ -67,6 +67,14 @@ pub struct SearchItem {
     /// 分数构成详情（可选，用于 debug 日志可观测）。
     /// 格式如 "fuzzy=0.8 hist=+0.2 src=+0.4"，方便调参时理解排序原因。
     pub score_detail: Option<String>,
+    /// 环境自动填充标记（0.10.8 §11.2 方案 1）——空 query + Context-only 命中的候选。
+    ///
+    /// 用于 `chordEligible` 判定："仅有环境自动填充候选" 视为"用户未开始交互",
+    /// chord 提示条仍允许显示（复制 URL 后按 Alt 触发 chord 的场景解锁）。
+    ///
+    /// **产地**：仅 `BuiltinEngine` 空 query + Context 命中且无 keyword 命中时置 true。
+    /// keyword 命中 / 非空 query / 其它引擎产的项一律 false。
+    pub context_aware: bool,
 }
 
 impl SearchItem {
@@ -94,6 +102,9 @@ impl SearchItem {
             d
         });
 
+        // 0.10.8 §11.2：环境自动填充标记透传给前端(chordEligible 判定用)
+        let context_aware = self.context_aware;
+
         match self.action {
             SearchAction::None => AppEntry {
                 name: self.title,
@@ -108,6 +119,7 @@ impl SearchItem {
                 source: self.source.clone(),
                 action: Action::default(),
                 score_detail,
+                context_aware,
                 ..Default::default()
             },
             SearchAction::Open { path } => AppEntry {
@@ -123,6 +135,7 @@ impl SearchItem {
                 source: self.source.clone(),
                 action: Action::default(),
                 score_detail,
+                context_aware,
                 ..Default::default()
             },
             SearchAction::Copy { text, hit_id } => AppEntry {
@@ -145,6 +158,7 @@ impl SearchItem {
                     ..Action::default()
                 },
                 score_detail,
+                context_aware,
                 ..Default::default()
             },
             SearchAction::RunAction { id, arg } => AppEntry {
@@ -165,6 +179,7 @@ impl SearchItem {
                     ..Action::default()
                 },
                 score_detail,
+                context_aware,
                 ..Default::default()
             },
         }
@@ -228,6 +243,7 @@ mod tests {
             },
             source: "start_menu".into(),
             score_detail: Some("fuzzy=0.8".into()),
+            context_aware: false,
         };
         let e = item.into_app_entry();
         assert_eq!(e.name, "App");
@@ -251,6 +267,7 @@ mod tests {
             },
             source: "calc".into(),
             score_detail: Some("calc=1.0".into()),
+            context_aware: false,
         };
         let e = item.into_app_entry();
         assert_eq!(e.name, "= 2");
