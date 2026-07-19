@@ -1,4 +1,4 @@
-/* ── 钉图窗口视图（0.11.7-d）─────────────────────────────────── */
+/* ── 钉图窗口视图（0.11.7-d，0.11.8 透明贴合 + PAD 架构）────────── */
 
 html, body {
   margin: 0;
@@ -11,22 +11,32 @@ html, body {
 }
 
 #container {
+  position: relative;
   width: 100vw;
   height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(0, 0, 0, 0.01); /* 极透明度让窗口可点击 */
-  cursor: default;
+  /* 极淡背景：让透明窗口空白区域仍能接收鼠标事件（拖动/右键/滚轮）。
+     完全透明 (alpha=0) 在 DWM 下可能被当成 click-through，导致拖不动。
+     0.003 几乎不可见，视觉上仍是纯图片贴桌面。 */
+  background: rgba(0, 0, 0, 0.003);
+  cursor: move;
 }
 
 #pin-img {
+  position: absolute;
+  /* width/height 固定（原始物理尺寸/dpr），transform: scale 承载所有缩放。
+     transition 只作用于 transform（GPU 合成层属性，零 reflow，丝滑）。 */
   display: block;
   max-width: none;
   max-height: none;
-  transform-origin: center center;
-  pointer-events: none;
   image-rendering: auto;
+  /* transform 缓动：让连续滚轮的 scale 跳变柔和（GPU 合成，零布局成本）。
+     60ms ease-out：快速响应 + 柔和收尾。 */
+  transition: transform 0.06s ease-out;
+  will-change: transform;
+  /* 淡淡的蓝色边框阴影：让贴图在桌面上有"存在感"但不喧宾夺主。
+     窗口预留了 PIN_PAD=20px 物理像素的空间，所以发光不会被窗口边界裁。 */
+  box-shadow: 0 0 0 1px rgba(74, 158, 255, 0.55),
+              0 0 14px 3px rgba(74, 158, 255, 0.28);
 }
 
 #zoom-level {
@@ -40,11 +50,16 @@ html, body {
   padding: 2px 8px;
   border-radius: var(--radius-xs);
   pointer-events: none;
-  transition: opacity 0.3s ease;
+  transition: opacity 0.25s ease;
+  opacity: 0; /* 默认隐藏，纯贴图感；缩放/悬停时才显示 */
   z-index: 10;
 }
 
-/* ── 右键菜单 ──────────────────────────────────────────────── */
+#container:hover #zoom-level {
+  opacity: 0.5;
+}
+
+/* ── 右键菜单 ──────────────────────────────────────────── */
 
 #ctx-menu {
   position: fixed;

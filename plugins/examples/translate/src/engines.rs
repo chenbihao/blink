@@ -1,4 +1,4 @@
-//! 5 个翻译引擎实现（1:1 迁移自 Python main.py）。
+//! 5 个翻译引擎实现（1:1 迁移自历史 Python 版，0.11.6）。
 //!
 //! 签名算法各引擎不同：
 //! - youdao: SHA256(appKey + text + salt + curtime + appSecret)

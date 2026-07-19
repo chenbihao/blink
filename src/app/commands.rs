@@ -405,11 +405,19 @@ pub fn screenshot_cancel(app: tauri::AppHandle) {
 }
 
 /// 0.11.7-f：钉图——接收前端合成后的 PNG，创建钉图窗口。
+///
+/// `screen_x`/`screen_y` 为选区左上角的**虚拟屏幕物理坐标**，
+/// 让钉图窗口定位到截图原位（"就地贴住"）。
 #[tauri::command]
-pub fn screenshot_pin(app: tauri::AppHandle, png_data: Vec<u8>) -> Result<(), String> {
-    crate::infra::platform::window::show_pin_window(&app, png_data)?;
+pub fn screenshot_pin(
+    app: tauri::AppHandle,
+    png_data: Vec<u8>,
+    screen_x: i32,
+    screen_y: i32,
+) -> Result<(), String> {
+    crate::infra::platform::window::show_pin_window(&app, png_data, screen_x, screen_y)?;
     finish_screenshot_session(&app);
-    tracing::info!("截图已钉到屏幕");
+    tracing::info!(screen_x, screen_y, "截图已钉到屏幕");
     Ok(())
 }
 
@@ -459,6 +467,37 @@ pub fn screenshot_pin_hide(app: tauri::AppHandle) {
     if let Some(win) = app.get_webview_window("chord-pin") {
         let _ = win.hide();
     }
+}
+
+/// 0.11.8：钉图窗口一次性设置位置 + 尺寸（缩放/拖动/onload 跟随共用）。
+///
+/// 走 Win32 `SetWindowPos` 原子地设位置+尺寸，绕开 Tauri 逻辑像素 DPI 竞态。
+/// 参数均为**屏幕物理像素**：
+/// - `win_x`/`win_y`：窗口左上角屏幕坐标（= 图片左上 - PIN_PAD）
+/// - `win_w`/`win_h`：窗口尺寸（= 图片显示尺寸 + 2×PIN_PAD，含发光区）
+///
+/// 前端在缩放/拖动时算好这 4 个值一次性传入，避免多次 set_position/set_size 竞态。
+#[tauri::command]
+pub fn screenshot_pin_transform(
+    app: tauri::AppHandle,
+    win_x: i32,
+    win_y: i32,
+    win_w: u32,
+    win_h: u32,
+) -> Result<(), String> {
+    use windows::Win32::Foundation::HWND;
+    if let Some(win) = app.get_webview_window("chord-pin") {
+        if let Ok(hwnd) = win.hwnd() {
+            crate::infra::platform::window::place_at_physical(
+                HWND(hwnd.0 as _),
+                win_x,
+                win_y,
+                win_w,
+                win_h,
+            );
+        }
+    }
+    Ok(())
 }
 
 /// 0.11.7-c：OCR 识别图片中的文字，返回 `{text, lines}`。

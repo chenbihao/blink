@@ -6,7 +6,19 @@
     <link rel="stylesheet" href="css/entries/pin.css" />
   </head>
   <body>
-    <div id="container" data-tauri-drag-region>
+    <!--
+      丝滑缩放架构（transform scale + 左上角固定 + 离散窗口 resize）：
+      - 图片固定为原始物理尺寸（width/height 不变），用 transform: scale() 缩放。
+        transform 是 GPU 合成层属性，零 reflow，60fps 丝滑无跳变。
+      - 左上角固定缩放：窗口位置（imgScreenX/Y）缩放时不动，只改尺寸。
+        transformOrigin 固定 0,0，scale 时图片左上不动、右下角伸缩，视觉完全连续。
+        （不做鼠标中心缩放——那会同时改位置+尺寸+origin，三者叠加导致跳变。
+         用户想看不同部分用拖动，这是 Snipaste 等工具的标准做法。）
+      - 窗口尺寸跟随 scale，但只在 scale 跨越 ±5% 阈值时 resize 一次（离散），
+        避免每次 wheel 都 resize 窗口（Win32 resize 同步重绘，会跳）。
+      - 拖动：只改窗口位置（screenshotPinTransform），不改尺寸。
+    -->
+    <div id="container">
       <img id="pin-img" src="" alt="钉图" draggable="false" />
       <div id="zoom-level">100%</div>
     </div>
@@ -17,78 +29,209 @@
     </div>
 
     <script type="module">
-      import { invoke } from "./js/api.js";
+      import { invoke, screenshotPinTransform } from "./js/api.js";
+
+      const PAD = 20;       // 与后端 PIN_PAD 一致（物理像素，给发光留空间）
+      const RESIZE_THRESHOLD = 0.05; // 窗口尺寸余量阈值（5%），超过才 resize
 
       const img = document.getElementById('pin-img');
-      const container = document.getElementById('container');
       const zoomLabel = document.getElementById('zoom-level');
       const ctxMenu = document.getElementById('ctx-menu');
-      let scale = 1;
+
+      // ── 核心状态 ──
+      let physW = 0, physH = 0;             // 图片原始物理尺寸
+      let scale = 1;                         // 当前总缩放比例
+      let imgScreenX = 0, imgScreenY = 0;   // 图片左上角屏幕物理坐标（按 scale 算）
+      // 窗口当前对应的 scale（实际 resize 到的尺寸对应的 scale）
+      // 当 |scale - winScale| > RESIZE_THRESHOLD 时才触发新一次 resize
+      let winScale = 1;
+
+      // 拖动状态
+      let isDragging = false;
+      let dragLastPhysX = 0, dragLastPhysY = 0;
+      let dragMoved = false;
+      let dragEndTime = 0;
+      let dragRafId = 0;
+
       let isCtxOpen = false;
 
-      // 后端复用窗口时通过 eval 调用此函数重置状态
-      window.__blinkResetPin = function(dataUrl) {
-        scale = 1;
-        img.style.transform = 'scale(1)';
-        zoomLabel.textContent = '100%';
-        img.src = dataUrl;
-      };
+      /** 当前窗口应显示的图片物理尺寸（按 winScale 算，含余量）。 */
+      function winDispW() { return Math.max(1, Math.round(physW * winScale)); }
+      function winDispH() { return Math.max(1, Math.round(physH * winScale)); }
 
-      // 图片加载完成后自适应窗口尺寸
-      img.addEventListener('load', () => {
-        zoomLabel.textContent = '100%';
-        // 自适应窗口：如果图片太大，缩小到窗口 80%
-        const maxW = window.innerWidth * 0.8;
-        const maxH = window.innerHeight * 0.8;
-        if (img.naturalWidth > maxW || img.naturalHeight > maxH) {
-          const scaleX = maxW / img.naturalWidth;
-          const scaleY = maxH / img.naturalHeight;
-          const fit = Math.min(scaleX, scaleY, 1);
-          if (fit < 1) {
-            scale = fit;
-            img.style.transform = `scale(${scale})`;
-            zoomLabel.textContent = Math.round(scale * 100) + '%';
-          }
-        }
-      });
-
-      // 滚轮缩放
-      container.addEventListener('wheel', (e) => {
-        e.preventDefault();
-        const delta = e.deltaY > 0 ? -0.1 : 0.1;
-        scale = Math.max(0.1, Math.min(5, scale + delta));
+      /** 只更新 img 的 transform（GPU 合成层，丝滑，不动窗口）。 */
+      function applyTransformOnly() {
         img.style.transform = `scale(${scale})`;
+      }
+
+      /** resize 窗口到当前 scale 对应尺寸（离散调用，不在每次 wheel 触发）。 */
+      function resizeWindowIfNeeded() {
+        if (Math.abs(scale - winScale) / winScale < RESIZE_THRESHOLD) return;
+        winScale = scale;
+        const winX = Math.round(imgScreenX - PAD);
+        const winY = Math.round(imgScreenY - PAD);
+        const winW = winDispW() + 2 * PAD;
+        const winH = winDispH() + 2 * PAD;
+        screenshotPinTransform(winX, winY, winW, winH).catch((e) => {
+          console.error('screenshotPinTransform 失败', e);
+        });
+      }
+
+      /** 拖动时只改窗口位置（尺寸不变）。 */
+      function scheduleDragMove() {
+        if (dragRafId !== 0) return;
+        dragRafId = requestAnimationFrame(() => {
+          dragRafId = 0;
+          const winX = Math.round(imgScreenX - PAD);
+          const winY = Math.round(imgScreenY - PAD);
+          const winW = winDispW() + 2 * PAD;
+          const winH = winDispH() + 2 * PAD;
+          screenshotPinTransform(winX, winY, winW, winH).catch(() => {});
+        });
+      }
+
+      function showZoomLabel() {
         zoomLabel.textContent = Math.round(scale * 100) + '%';
         zoomLabel.style.opacity = '1';
         clearTimeout(zoomLabel._hideTimer);
         zoomLabel._hideTimer = setTimeout(() => {
           zoomLabel.style.opacity = '0';
-        }, 1500);
-      }, { passive: false });
+        }, 1200);
+      }
 
-      // 双击重置缩放
-      container.addEventListener('dblclick', () => {
+      // 后端复用窗口时通过 eval 调用此函数重置状态
+      window.__blinkResetPin = function(dataUrl, pngW, pngH, screenX, screenY) {
+        physW = pngW;
+        physH = pngH;
         scale = 1;
-        img.style.transform = 'scale(1)';
+        winScale = 1;
+        imgScreenX = screenX || 0;
+        imgScreenY = screenY || 0;
         zoomLabel.textContent = '100%';
+        zoomLabel.style.opacity = '0';
+        // img 固定为原始物理尺寸对应的 CSS 尺寸（physW/dpr），保证 1:1 像素清晰。
+        // transform: scale 承载所有缩放（GPU 合成层，丝滑）。
+        const dpr = window.devicePixelRatio || 1;
+        img.style.width = (pngW / dpr) + 'px';
+        img.style.height = (pngH / dpr) + 'px';
+        img.style.left = (PAD / dpr) + 'px';
+        img.style.top = (PAD / dpr) + 'px';
+        img.style.transformOrigin = '0 0';
+        img.style.transform = 'scale(1)';
+        img.src = dataUrl;
+        // 立即 resize 窗口到原始尺寸
+        const winX = Math.round(imgScreenX - PAD);
+        const winY = Math.round(imgScreenY - PAD);
+        screenshotPinTransform(winX, winY, pngW + 2 * PAD, pngH + 2 * PAD).catch(() => {});
+      };
+
+      img.addEventListener('load', () => {
+        if (physW === 0 || physH === 0) {
+          physW = img.naturalWidth;
+          physH = img.naturalHeight;
+          const dpr = window.devicePixelRatio || 1;
+          img.style.width = (physW / dpr) + 'px';
+          img.style.height = (physH / dpr) + 'px';
+        }
+        showZoomLabel();
       });
 
-      // ESC 关闭
-      document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') {
-          closePin();
+      // ── 拖动（document 级，mousedown/move/up）─────────────────────────
+      document.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
+        if (e.target.closest('#ctx-menu')) return;
+        isDragging = true;
+        dragMoved = false;
+        const dpr = window.devicePixelRatio || 1;
+        dragLastPhysX = e.screenX * dpr;
+        dragLastPhysY = e.screenY * dpr;
+      });
+
+      document.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        const dpr = window.devicePixelRatio || 1;
+        const curX = e.screenX * dpr;
+        const curY = e.screenY * dpr;
+        const dx = curX - dragLastPhysX;
+        const dy = curY - dragLastPhysY;
+        dragLastPhysX = curX;
+        dragLastPhysY = curY;
+        if (!dragMoved) {
+          if (Math.abs(dx) + Math.abs(dy) > 2) {
+            dragMoved = true;
+          } else {
+            return;
+          }
+        }
+        imgScreenX += dx;
+        imgScreenY += dy;
+        scheduleDragMove();
+      });
+
+      document.addEventListener('mouseup', () => {
+        if (!isDragging) return;
+        isDragging = false;
+        if (dragMoved) {
+          dragEndTime = Date.now();
+        }
+        if (dragRafId !== 0) {
+          cancelAnimationFrame(dragRafId);
+          dragRafId = 0;
+          const winX = Math.round(imgScreenX - PAD);
+          const winY = Math.round(imgScreenY - PAD);
+          screenshotPinTransform(winX, winY, winDispW() + 2 * PAD, winDispH() + 2 * PAD).catch(() => {});
         }
       });
 
-      // 右键菜单
-      container.addEventListener('contextmenu', (e) => {
+      // ── 滚轮缩放（左上角固定，只动 transform，离散 resize 尺寸）─────────
+      // 不做鼠标中心缩放——那会同时改窗口位置 + 尺寸 + transform origin，
+      // 三者叠加导致跳变。改为左上角固定：窗口位置不变，只往右下扩展/收缩，
+      // 视觉完全连续。用户想看不同部分用拖动。
+      document.addEventListener('wheel', (e) => {
         e.preventDefault();
+        const step = e.ctrlKey ? 0.25 : 0.1;
+        const delta = e.deltaY > 0 ? -step : step;
+        const newScale = Math.max(0.1, Math.min(8, scale + delta));
+        if (newScale === scale) return;
+
+        // 只改 scale，imgScreenX/Y 不动（窗口左上角固定）
+        scale = newScale;
+        applyTransformOnly();
+        resizeWindowIfNeeded();
+        showZoomLabel();
+      }, { passive: false });
+
+      // 双击重置缩放到 100%（位置不变）
+      document.addEventListener('dblclick', (e) => {
+        if (e.target.closest('#ctx-menu')) return;
+        if (scale === 1) return;
+        scale = 1;
+        applyTransformOnly();
+        resizeWindowIfNeeded();
+        showZoomLabel();
+      });
+
+      // ── 右键菜单 ──────────────────────────────────────────────────────
+      document.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        if (Date.now() - dragEndTime < 200) return;
+        if (e.target.closest('#ctx-menu')) return;
         showCtxMenu(e.clientX, e.clientY);
       });
 
       document.addEventListener('click', (e) => {
-        if (isCtxOpen && !ctxMenu.contains(e.target)) {
+        if (isCtxOpen && !e.target.closest('#ctx-menu')) {
           hideCtxMenu();
+        }
+      });
+
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+          if (isCtxOpen) {
+            hideCtxMenu();
+          } else {
+            closePin();
+          }
         }
       });
 

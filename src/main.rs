@@ -540,6 +540,7 @@ fn main() {
             app::commands::screenshot_cancel,
             app::commands::screenshot_pin,
             app::commands::screenshot_pin_hide,
+            app::commands::screenshot_pin_transform,
             app::commands::screenshot_save,
             app::commands::screenshot_set_annotation_mode,
             app::commands::ocr_image,

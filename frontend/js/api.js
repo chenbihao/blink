@@ -111,9 +111,14 @@ export function screenshotCancel() {
   return invoke("screenshot_cancel");
 }
 
-/** 0.11.7-f：钉图——接收前端合成后的 PNG，创建钉图窗口。 */
-export function screenshotPin(pngData) {
-  return invoke("screenshot_pin", { pngData });
+/** 0.11.7-f：钉图——接收前端合成后的 PNG + 选区屏幕坐标，创建钉图窗口。 */
+export function screenshotPin(pngData, screenX, screenY) {
+  return invoke("screenshot_pin", { pngData, screenX, screenY });
+}
+
+/** 0.11.8：钉图窗口一次性设置位置+尺寸（物理像素，含 PIN_PAD）。 */
+export function screenshotPinTransform(winX, winY, winW, winH) {
+  return invoke("screenshot_pin_transform", { winX, winY, winW, winH });
 }
 
 /** 0.11.7-f：保存截图选区为文件。path 可选，不传则弹出保存对话框。 */

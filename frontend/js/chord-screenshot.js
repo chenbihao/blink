@@ -302,12 +302,45 @@ function redrawAnnotPreview() {
       break;
     }
     case 'mosaic': {
+      // 涂抹预览：实时显示笔触（与最终 executeCommand 一致）
+      const pts = annot.getCurrentPoints();
+      if (pts.length >= 1) {
+        const r = 16;
+        annotCtx.imageSmoothingEnabled = true;
+        for (let i = 0; i < pts.length; i++) {
+          const p = pts[i];
+          const avg = annot.sampleMosaicColor(p.x, p.y, r);
+          annotCtx.fillStyle = avg;
+          annotCtx.beginPath();
+          annotCtx.arc(p.x, p.y, r, 0, Math.PI * 2);
+          annotCtx.fill();
+          if (i > 0) {
+            const prev = pts[i - 1];
+            annotCtx.strokeStyle = avg;
+            annotCtx.lineWidth = r * 2;
+            annotCtx.lineCap = 'round';
+            annotCtx.beginPath();
+            annotCtx.moveTo(prev.x, prev.y);
+            annotCtx.lineTo(p.x, p.y);
+            annotCtx.stroke();
+          }
+        }
+      }
+      break;
+    }
+    case 'pixelate': {
+      // 马赛克预览：半透明灰色矩形 + 虚线边框（松手才真正像素化，省性能）
       const x = Math.min(annotStartX, annotCurrentX);
       const y = Math.min(annotStartY, annotCurrentY);
       const w = Math.abs(annotCurrentX - annotStartX);
       const h = Math.abs(annotCurrentY - annotStartY);
-      annotCtx.fillStyle = 'rgba(200, 200, 200, 0.3)';
+      annotCtx.fillStyle = 'rgba(150, 150, 150, 0.4)';
       annotCtx.fillRect(x, y, w, h);
+      annotCtx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+      annotCtx.lineWidth = 1;
+      annotCtx.setLineDash([4, 3]);
+      annotCtx.strokeRect(x, y, w, h);
+      annotCtx.setLineDash([]);
       break;
     }
   }
@@ -495,12 +528,11 @@ canvas.addEventListener('mouseup', (e) => {
 
     const tool = annot.getTool();
     // 文本工具：允许零拖拽（点击一次就弹输入框）
-    // 铅笔：只要有轨迹点就生成（在 startDraw 已有 1 个点）
-    // 橡皮擦：允许小距离（用户擦某个小图标）
-    // 矩形/椭圆/箭头/马赛克：需要 >=3px 拖动
+    // 铅笔/橡皮擦/涂抹：只要有轨迹点就生成（startDraw 已有 1 个点，单击也能产生效果）
+    // 矩形/椭圆/箭头：需要 >=3px 拖动（避免误触产生 1px 矩形）
     const dx = annotCurrentX - annotStartX;
     const dy = annotCurrentY - annotStartY;
-    const minDrag = (tool === 'text' || tool === 'eraser' || tool === 'pencil') ? 0 : 3;
+    const minDrag = (tool === 'text' || tool === 'eraser' || tool === 'pencil' || tool === 'mosaic') ? 0 : 3;
     if (Math.abs(dx) < minDrag && Math.abs(dy) < minDrag) {
       console.debug('[screenshot] annotation drag too small, skip', { tool, dx, dy });
       redrawAnnotFull();
@@ -581,6 +613,12 @@ document.addEventListener('keydown', (e) => {
       ocrPanel.remove();
       return;
     }
+    // 其次关闭展开的下拉菜单
+    const openDropdown = document.querySelector('.dropdown[data-open="true"]');
+    if (openDropdown) {
+      openDropdown.setAttribute('data-open', 'false');
+      return;
+    }
     doCancel();
   }
 });
@@ -655,8 +693,13 @@ function doCopyFullScreen() {
 function doPinSelection() {
   if (!selCss || sent) return;
   sent = true;
+  // 计算选区左上角的屏幕物理坐标，让钉图窗口"就地贴住"截图原位
+  const dpr = window.devicePixelRatio || 1;
+  const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+  const screenX = Math.round(meta.vx + selCss.x * dpr);
+  const screenY = Math.round(meta.vy + selCss.y * dpr);
   compositeSelection((pngBytes) => {
-    screenshotPin(pngBytes).catch((err) => {
+    screenshotPin(pngBytes, screenX, screenY).catch((err) => {
       console.error('[screenshot] pin 失败', err);
       sent = false;
     });
@@ -707,22 +750,25 @@ function showOcrResult(result) {
   if (old) old.remove();
 
   const text = (result && result.text) || '';
-  const displayText = text || '（未识别到文字）';
 
   const panel = document.createElement('div');
   panel.id = 'ocr-panel';
   panel.className = 'ocr-panel';
   panel.innerHTML = `
     <div class="ocr-panel-header">
-      <span>OCR 识别结果</span>
+      <span>OCR 识别结果（可编辑）</span>
       <button id="ocr-close" class="tool-btn">✕</button>
     </div>
-    <div class="ocr-panel-body">${escapeHtml(displayText)}</div>
+    <textarea class="ocr-panel-textarea" spellcheck="false"></textarea>
     <div class="ocr-panel-footer">
-      <button id="ocr-copy" class="tool-btn tool-btn-primary" ${text ? '' : 'disabled'}>复制文本</button>
+      <span class="ocr-panel-hint">可自由选词复制或编辑</span>
+      <button id="ocr-copy" class="tool-btn tool-btn-primary" ${text ? '' : 'disabled'}>复制全部</button>
     </div>
   `;
   document.body.appendChild(panel);
+
+  const textarea = panel.querySelector('.ocr-panel-textarea');
+  textarea.value = text || '（未识别到文字）';
 
   panel.style.left = Math.max(8, selCss.x) + 'px';
   // 默认放在选区上方；如果放不下则翻到选区下方
@@ -733,19 +779,17 @@ function showOcrResult(result) {
     panel.style.top = topAbove + 'px';
   }
 
+  // 面板内交互不应触发 overlay 的 blur 隐藏
+  panel.addEventListener('mousedown', (e) => e.stopPropagation());
+
   document.getElementById('ocr-close').addEventListener('click', () => panel.remove());
   document.getElementById('ocr-copy').addEventListener('click', () => {
-    if (text) {
-      navigator.clipboard.writeText(text).catch((e) => console.error('复制失败', e));
+    const value = textarea.value;
+    if (value) {
+      navigator.clipboard.writeText(value).catch((e) => console.error('复制失败', e));
     }
     panel.remove();
   });
-}
-
-function escapeHtml(text) {
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
 }
 
 // ── 文本标注输入框 ─────────────────────────────────
@@ -807,41 +851,138 @@ function showTextInput(x, y) {
 // 每次 Alt+A 复用窗口时不需要重绑（元素身份不变），初始化只跑一次。
 
 function bindToolbar() {
-  // 标注工具切换
-  const toolBtns = document.querySelectorAll('[data-tool]');
-  toolBtns.forEach((btn) => {
-    btn.addEventListener('click', () => {
-      annot.setTool(btn.dataset.tool);
-      toolBtns.forEach((b) => b.classList.remove('active'));
-      btn.classList.add('active');
-    });
+  // ── 下拉菜单（0.11.8 收起化）：触发器点击切换，点外部/选另一项关闭 ──
+
+  /** 关闭所有展开的下拉 */
+  function closeAllDropdowns() {
+    document.querySelectorAll('.dropdown').forEach((d) => d.setAttribute('data-open', 'false'));
+  }
+
+  /** 切换某个下拉的展开状态（打开时关掉其他） */
+  function toggleDropdown(dropdown) {
+    const willOpen = dropdown.getAttribute('data-open') !== 'true';
+    closeAllDropdowns();
+    dropdown.setAttribute('data-open', willOpen ? 'true' : 'false');
+  }
+
+  // 触发器
+  const toolTrigger = document.getElementById('tool-trigger');
+  const blurTrigger = document.getElementById('blur-trigger');
+  const colorTrigger = document.getElementById('color-trigger');
+  const widthTrigger = document.getElementById('width-trigger');
+  const toolDropdown = document.getElementById('tool-dropdown');
+  const blurDropdown = document.getElementById('blur-dropdown');
+  const colorDropdown = document.getElementById('color-dropdown');
+  const widthDropdown = document.getElementById('width-dropdown');
+
+  if (toolTrigger) toolTrigger.addEventListener('click', (e) => { e.stopPropagation(); toggleDropdown(toolDropdown); });
+  if (blurTrigger) blurTrigger.addEventListener('click', (e) => { e.stopPropagation(); toggleDropdown(blurDropdown); });
+  if (colorTrigger) colorTrigger.addEventListener('click', (e) => { e.stopPropagation(); toggleDropdown(colorDropdown); });
+  if (widthTrigger) widthTrigger.addEventListener('click', (e) => { e.stopPropagation(); toggleDropdown(widthDropdown); });
+
+  // 点外部关闭所有下拉（拖选 canvas / 点其他按钮时）
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.dropdown-wrap')) closeAllDropdowns();
+  });
+  document.addEventListener('mousedown', (e) => {
+    // canvas 拖选启动时也关闭下拉
+    if (e.target.id === 'canvas') closeAllDropdowns();
   });
 
-  // 颜色选择（swatch + custom picker）
+  // ── 工具切换统一入口 ──
+  // 清除所有工具入口（下拉触发器 + 下拉 item + 直接按钮）的 active，
+  // 然后给当前工具的入口加 active + 同步触发器图标。
+  const toolTriggerIcon = document.getElementById('tool-trigger-icon');
+  const blurTriggerIcon = document.getElementById('blur-trigger-icon');
+
+  /** 工具 → 所属分组（决定同步哪个触发器的图标 + 哪个下拉 item 高亮） */
+  const TOOL_GROUPS = {
+    rect: 'shape', ellipse: 'shape', arrow: 'shape', pencil: 'shape',
+    text: 'direct',
+    pixelate: 'blur', mosaic: 'blur',
+    eraser: 'direct',
+  };
+
+  function selectTool(tool) {
+    annot.setTool(tool);
+    // 清除所有工具入口 active（下拉触发器、下拉 item、直接按钮）
+    document.querySelectorAll('#tool-trigger, #blur-trigger, .tool-direct').forEach((b) => b.classList.remove('active'));
+    document.querySelectorAll('#tool-dropdown .dropdown-item, #blur-dropdown .dropdown-item').forEach((b) => b.classList.remove('active'));
+    // 标记当前工具的入口 active
+    const group = TOOL_GROUPS[tool];
+    if (group === 'shape') {
+      // 标记触发器 + 对应下拉 item
+      const item = document.querySelector(`#tool-dropdown .dropdown-item[data-tool="${tool}"]`);
+      if (item) {
+        item.classList.add('active');
+        const icon = item.querySelector('.item-icon');
+        if (toolTriggerIcon && icon) toolTriggerIcon.textContent = icon.textContent;
+      }
+      if (toolTrigger) toolTrigger.classList.add('active');
+    } else if (group === 'blur') {
+      const item = document.querySelector(`#blur-dropdown .dropdown-item[data-tool="${tool}"]`);
+      if (item) {
+        item.classList.add('active');
+        const icon = item.querySelector('.item-icon');
+        if (blurTriggerIcon && icon) blurTriggerIcon.textContent = icon.textContent;
+      }
+      if (blurTrigger) blurTrigger.classList.add('active');
+    } else if (group === 'direct') {
+      const btn = document.querySelector(`.tool-direct[data-tool="${tool}"]`);
+      if (btn) btn.classList.add('active');
+    }
+    closeAllDropdowns();
+  }
+
+  // 图形下拉 item
+  document.querySelectorAll('#tool-dropdown .dropdown-item').forEach((item) => {
+    item.addEventListener('click', () => selectTool(item.dataset.tool));
+  });
+  // 模糊下拉 item
+  document.querySelectorAll('#blur-dropdown .dropdown-item').forEach((item) => {
+    item.addEventListener('click', () => selectTool(item.dataset.tool));
+  });
+  // 直接按钮（文本 / 橡皮擦）
+  document.querySelectorAll('.tool-direct').forEach((btn) => {
+    btn.addEventListener('click', () => selectTool(btn.dataset.tool));
+  });
+
+  // ── 颜色选择（swatch + custom picker）──
   const swatches = document.querySelectorAll('.color-swatch');
   const colorPicker = document.getElementById('color-picker');
+  const colorTriggerDot = document.getElementById('color-trigger-dot');
   swatches.forEach((btn) => {
     btn.addEventListener('click', () => {
-      annot.setColor(btn.dataset.color);
+      const color = btn.dataset.color;
+      annot.setColor(color);
       swatches.forEach((b) => b.classList.remove('active'));
       btn.classList.add('active');
-      if (colorPicker) colorPicker.value = btn.dataset.color;
+      if (colorPicker) colorPicker.value = color;
+      if (colorTriggerDot) colorTriggerDot.style.color = color;
+      closeAllDropdowns();
     });
   });
   if (colorPicker) {
     colorPicker.addEventListener('input', (e) => {
-      annot.setColor(e.target.value);
+      const color = e.target.value;
+      annot.setColor(color);
       swatches.forEach((b) => b.classList.remove('active'));
+      if (colorTriggerDot) colorTriggerDot.style.color = color;
     });
   }
 
-  // 粗细
-  const widthBtns = document.querySelectorAll('.width-btn');
-  widthBtns.forEach((btn) => {
-    btn.addEventListener('click', () => {
-      annot.setWidth(parseInt(btn.dataset.width, 10));
-      widthBtns.forEach((b) => b.classList.remove('active'));
-      btn.classList.add('active');
+  // ── 粗细选择 ──
+  const widthTriggerIcon = document.getElementById('width-trigger-icon');
+  const widthItems = widthDropdown ? widthDropdown.querySelectorAll('.dropdown-item') : [];
+  widthItems.forEach((item) => {
+    item.addEventListener('click', () => {
+      const width = parseInt(item.dataset.width, 10);
+      annot.setWidth(width);
+      widthItems.forEach((b) => b.classList.remove('active'));
+      item.classList.add('active');
+      const icon = item.querySelector('.item-icon');
+      if (widthTriggerIcon && icon) widthTriggerIcon.textContent = icon.textContent;
+      closeAllDropdowns();
     });
   });
 

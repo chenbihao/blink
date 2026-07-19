@@ -1,6 +1,6 @@
 //! Blink 翻译插件（Rust 版）— 5 引擎多语言翻译。
 //!
-//! 1:1 迁移自 Python 版（plugins/builtin/translate/main.py）。
+//! 1:1 迁移自历史 Python 版（0.11.6，源码已于 0.11.7 收尾时清理）。
 //! 走 xtask 编译流水线，manifest runtime.type=process。
 //!
 //! **HTTP 代理协议**：不直接联网，通过 JSONL `http_request` → core 代发，

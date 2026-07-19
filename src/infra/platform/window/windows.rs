@@ -619,6 +619,11 @@ pub fn show_screenshot_overlay(
         // 先清屏再 show —— 否则窗口刚出来会看到上次结束时的选区/虚线框闪一下
         // （webview `.show()` 到 __blinkReloadScreenshot 执行之间有毫秒级空档）
         let _ = win.eval("window.__blinkReloadScreenshot && window.__blinkReloadScreenshot()");
+        // 注入虚拟屏幕原点（钉图定位用：CSS 坐标 → 屏幕物理坐标）
+        let _ = win.eval(format!(
+            "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {} }};",
+            meta.virtual_x, meta.virtual_y, meta.width, meta.height
+        ));
         if let Ok(hwnd) = win.hwnd() {
             place_at_physical(
                 HWND(hwnd.0 as _),
@@ -656,6 +661,11 @@ pub fn show_screenshot_overlay(
             meta.height,
         );
     }
+    // 注入虚拟屏幕原点（钉图定位用：CSS 坐标 → 屏幕物理坐标）
+    let _ = win.eval(format!(
+        "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {} }};",
+        meta.virtual_x, meta.virtual_y, meta.width, meta.height
+    ));
 
     Ok(())
 }
@@ -695,53 +705,93 @@ pub fn hide_screenshot_overlay(app: &AppHandle) {
     crate::infra::platform::screenshot::end_session();
 }
 
+/// 钉图窗口的物理像素 padding（窗口比图片大一圈，给发光留空间）。
+/// 20px 足够 box-shadow 的 12px 模糊半径扩散。
+pub const PIN_PAD: i32 = 20;
+
 /// 显示钉图窗口（0.11.7-d）。
 ///
 /// 复用预热窗口（首次创建 ~300ms → 复用后 <50ms），通过 `eval` 注入 PNG base64 到 `<img>`。
-/// 前端 `data-tauri-drag-region` 属性处理拖拽移动，滚轮缩放由 JS 处理。
+///
+/// **纯图片贴桌面效果**（0.11.8）：
+/// - 窗口 `.transparent(true)` 让背景完全透明，只有图片本身可见
+/// - 窗口尺寸 = 图片显示尺寸 + 2×PIN_PAD（预留发光空间，否则 box-shadow 被裁）
+/// - 窗口左上 = `(screen_x - PAD, screen_y - PAD)`，使图片左上落在选区原位
+/// - 缩放时窗口尺寸跟随变化（`screenshot_pin_transform`），图片用 width/height 不用 scale
+///   —— 这样发光区不会因窗口固定被裁，放大时图片也不会被窗口边界裁
 ///
 /// **单钉图策略**：目前只支持单张钉图，重复触发会覆盖已有内容。
-pub fn show_pin_window(app: &AppHandle, png_data: Vec<u8>) -> Result<(), String> {
+pub fn show_pin_window(
+    app: &AppHandle,
+    png_data: Vec<u8>,
+    screen_x: i32,
+    screen_y: i32,
+) -> Result<(), String> {
     use base64::Engine;
     use tauri::{WebviewUrl, WebviewWindowBuilder};
 
     const LABEL: &str = "chord-pin";
+    const FALLBACK_W: f64 = 400.0;
+    const FALLBACK_H: f64 = 300.0;
+
+    // 解析 PNG 像素尺寸用于开窗（失败兜底 400×300）
+    let (png_w, png_h) = crate::infra::platform::screenshot::parse_png_size(&png_data)
+        .map(|(w, h)| (w as f64, h as f64))
+        .unwrap_or((FALLBACK_W, FALLBACK_H));
 
     let b64 = base64::engine::general_purpose::STANDARD.encode(&png_data);
     let data_url = format!("data:image/png;base64,{b64}");
 
+    // 窗口左上 = 图片左上 - PAD（让图片左上对齐选区原位，窗口外圈留 PAD 给发光）
+    let win_x = screen_x - PIN_PAD;
+    let win_y = screen_y - PIN_PAD;
+    let win_w = png_w as u32 + 2 * PIN_PAD as u32;
+    let win_h = png_h as u32 + 2 * PIN_PAD as u32;
+
     // 复用已存在的窗口（预热或上次钉图）
     if let Some(win) = app.get_webview_window(LABEL) {
+        // 先按物理坐标定位（绕开 Tauri 逻辑像素的 DPI 竞态）
+        if let Ok(hwnd) = win.hwnd() {
+            place_at_physical(HWND(hwnd.0 as _), win_x, win_y, win_w, win_h);
+        }
+        // 把图片左上物理坐标也传给前端（__blinkResetPin 第 4/5 参数），
+        // 前端用作缩放基准 imgScreenX/Y，避免 window.screenX 的 DPI 换算问题
         let js = format!(
-            "if (window.__blinkResetPin) window.__blinkResetPin('{}'); else document.getElementById('pin-img').src = '{}';",
-            data_url, data_url
+            "if (window.__blinkResetPin) window.__blinkResetPin('{url}', {w}, {h}, {sx}, {sy}); else document.getElementById('pin-img').src = '{url}';",
+            url = data_url, w = png_w, h = png_h, sx = screen_x, sy = screen_y
         );
         win.eval(&js).map_err(|e| format!("eval 注入 PNG 失败: {e}"))?;
         let _ = win.show();
         let _ = win.set_focus();
-        tracing::debug!("钉图窗口已复用");
+        tracing::debug!(png_w, png_h, screen_x, screen_y, "钉图窗口已复用");
         return Ok(());
     }
 
-    // 首次创建
+    // 首次创建：transparent + 按 (图片尺寸 + 2*PAD) 开窗 + 定位使图片左上落选区原位
     match WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("pin.html".into()))
         .title("")
         .decorations(false)
+        .transparent(true)
         .always_on_top(true)
         .skip_taskbar(true)
-        .inner_size(400.0, 300.0) // 初始尺寸，前端会自适应
-        .center()
+        .shadow(false)
+        .inner_size(win_w as f64, win_h as f64)
+        .position(win_x as f64, win_y as f64)
         .build()
     {
         Ok(win) => {
-            // 注入 PNG 数据
+            // 再用 SetWindowPos 精确对齐物理像素（首次 build 后 Tauri 可能因 DPI 偏移）
+            if let Ok(hwnd) = win.hwnd() {
+                place_at_physical(HWND(hwnd.0 as _), win_x, win_y, win_w, win_h);
+            }
+            // 注入 PNG 数据 + 图片左上物理坐标（首次也走 __blinkResetPin 以统一状态）
             let js = format!(
-                "document.getElementById('pin-img').src = '{}'",
-                data_url
+                "if (window.__blinkResetPin) window.__blinkResetPin('{url}', {w}, {h}, {sx}, {sy}); else document.getElementById('pin-img').src = '{url}';",
+                url = data_url, w = png_w, h = png_h, sx = screen_x, sy = screen_y
             );
             win.eval(&js).map_err(|e| format!("eval 注入 PNG 失败: {e}"))?;
             let _ = win.show();
-            tracing::debug!("钉图窗口已创建");
+            tracing::debug!(png_w, png_h, screen_x, screen_y, "钉图窗口已创建");
             Ok(())
         }
         Err(e) => {
@@ -950,7 +1000,7 @@ pub fn preheat_secondary_windows(app: AppHandle) {
             }
         }
 
-        // --- chord-pin（钉图窗口，0.11.7-d） ---
+        // --- chord-pin（钉图窗口，0.11.7-d；0.11.8 透明贴合） ---
         if app.get_webview_window("chord-pin").is_none() {
             use tauri::{WebviewUrl, WebviewWindowBuilder};
             match WebviewWindowBuilder::new(
@@ -961,6 +1011,8 @@ pub fn preheat_secondary_windows(app: AppHandle) {
             .title("")
             .inner_size(400.0, 300.0)
             .decorations(false)
+            .transparent(true)
+            .shadow(false)
             .always_on_top(true)
             .skip_taskbar(true)
             .focused(false)

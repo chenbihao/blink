@@ -180,9 +180,11 @@ html, body {
   border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: var(--radius-sm);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-  min-width: 200px;
-  max-width: 400px;
-  max-height: 300px;
+  min-width: 320px;
+  max-width: 560px;
+  width: 520px;
+  max-height: 480px;
+  height: 440px;
   display: flex;
   flex-direction: column;
   font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
@@ -215,11 +217,68 @@ html, body {
   word-break: break-all;
 }
 
+/* OCR 可编辑 textarea（0.11.8）：用户可自由选词复制或编辑 */
+.ocr-panel-textarea {
+  margin: 10px 12px;
+  padding: 10px 12px;
+  min-height: 200px;
+  flex: 1;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: var(--radius-xs);
+  color: #eee;
+  font-size: 14px;
+  font-family: "Cascadia Code", "Consolas", "Segoe UI", "Microsoft YaHei", monospace;
+  line-height: 1.6;
+  resize: none;
+  outline: none;
+  user-select: text;
+  -webkit-user-select: text;
+  overflow-y: auto;
+}
+
+.ocr-panel-textarea:focus {
+  border-color: rgba(74, 158, 255, 0.7);
+  box-shadow: 0 0 0 2px rgba(74, 158, 255, 0.15);
+}
+
+/* textarea 自定义滚动条（暗色主题，替代原生丑陋滚动条） */
+.ocr-panel-textarea::-webkit-scrollbar {
+  width: 10px;
+}
+
+.ocr-panel-textarea::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 5px;
+  margin: 4px 0;
+}
+
+.ocr-panel-textarea::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.ocr-panel-textarea::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.32);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+}
+
 .ocr-panel-footer {
   padding: 6px 10px;
   border-top: 1px solid rgba(255, 255, 255, 0.1);
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ocr-panel-hint {
+  font-size: 11px;
+  color: #888;
+  flex: 1;
 }
 
 .ocr-panel-footer .tool-btn {
@@ -281,4 +340,124 @@ html, body {
 .width-btn.active {
   border-color: rgba(74, 158, 255, 0.6);
   background: rgba(74, 158, 255, 0.15);
+}
+
+/* ── 下拉触发器 / 浮层（0.11.8 收起化）────────────────── */
+
+.dropdown-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.dropdown-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.dropdown-trigger .caret {
+  font-size: 9px;
+  opacity: 0.6;
+  margin-left: 1px;
+}
+
+/* 颜色触发器里的圆点 */
+.color-dot {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  display: none;
+  flex-direction: column;
+  background: rgba(30, 30, 30, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  padding: 4px;
+  min-width: 90px;
+  z-index: calc(var(--z-dropdown) + 10);
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+.dropdown[data-open="true"] {
+  display: flex;
+}
+
+.dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-xs);
+  color: #ddd;
+  font-size: 12px;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+
+.dropdown-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.dropdown-item.active {
+  background: rgba(74, 158, 255, 0.2);
+  color: #fff;
+}
+
+.dropdown-item .item-icon {
+  display: inline-flex;
+  width: 18px;
+  justify-content: center;
+  font-size: 14px;
+}
+
+.dropdown-item .item-label {
+  flex: 1;
+}
+
+/* 颜色下拉特殊布局：8 色网格 + 自定义行 */
+.dropdown-color {
+  padding: 6px;
+  min-width: 140px;
+}
+
+.color-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.dropdown-color .color-swatch {
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  font-size: 14px;
+}
+
+.custom-color-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 4px 2px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  margin-top: 2px;
+  font-size: 11px;
+  color: #aaa;
+}
+
+.custom-color-row .color-input {
+  width: 28px;
+  height: 22px;
 }

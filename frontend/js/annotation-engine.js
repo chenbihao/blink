@@ -1,9 +1,9 @@
-//! 标注引擎（0.11.7-b）：7 种标注工具 + 撤销/重做 + 颜色/粗细。
+//! 标注引擎（0.11.7-b，0.11.8 加 pixelate）：8 种标注工具 + 撤销/重做 + 颜色/粗细。
 //!
 //! 标注数据模型：
 //! ```typescript
 //! interface AnnotationCommand {
-//!   type: 'rect' | 'ellipse' | 'arrow' | 'pencil' | 'text' | 'mosaic' | 'eraser';
+//!   type: 'rect' | 'ellipse' | 'arrow' | 'pencil' | 'text' | 'mosaic' | 'pixelate' | 'eraser';
 //!   points: {x: number, y: number}[];  // 物理像素坐标，相对裁剪区左上角
 //!   color?: string;
 //!   width?: number;
@@ -11,6 +11,9 @@
 //!   text?: string;
 //! }
 //! ```
+//!
+//! - `mosaic`（涂抹，PixPin 风格）：点序列，圆形笔刷沿轨迹取局部平均色
+//! - `pixelate`（经典像素化马赛克）：矩形框选 [起点, 终点]，整个区域分块平均色填充
 //!
 //! 标注坐标使用**物理像素**（canvas 内部像素）坐标系，与裁剪区像素对齐。
 //! 前端鼠标事件 `offsetX/Y` 为 CSS 像素，需乘 `devicePixelRatio` 转物理像素。
@@ -106,7 +109,7 @@ export function startDraw(x, y) {
 
 /** 拖拽绘制中 */
 export function moveDraw(x, y) {
-  if (currentTool === 'pencil' || currentTool === 'eraser') {
+  if (currentTool === 'pencil' || currentTool === 'eraser' || currentTool === 'mosaic') {
     currentPoints.push({ x, y });
   }
 }
@@ -120,9 +123,9 @@ export function getCurrentPoints() {
 export function endDraw(x, y) {
   const points = [...currentPoints];
   const lastPoint = { x, y };
-  // 对于非铅笔工具，用起点+终点
+  // 铅笔/橡皮擦/涂抹使用完整点序列；其他工具用起点+终点
   let cmdPoints;
-  if (currentTool === 'pencil' || currentTool === 'eraser') {
+  if (currentTool === 'pencil' || currentTool === 'eraser' || currentTool === 'mosaic') {
     cmdPoints = points;
   } else {
     cmdPoints = [{ x: drawStartX, y: drawStartY }, lastPoint];
@@ -260,34 +263,43 @@ export function executeCommand(cmd, targetCtx) {
       }
       break;
     case 'mosaic':
-      // 马赛克：缩小再放大（nearest-neighbor）
+      // 涂抹（PixPin 风格）：沿轨迹画圆形笔刷 + 连线，每点取周围平均色。
+      // 固定笔刷半径 16px（物理像素），平均色让信息不可辨认 + 笔触有方向性。
+      if (cmd.points.length >= 1 && cropImageData) {
+        const r = 16;
+        c.imageSmoothingEnabled = true;
+        for (let i = 0; i < cmd.points.length; i++) {
+          const p = cmd.points[i];
+          const avg = sampleAverageColor(cropImageData, p.x, p.y, r);
+          c.fillStyle = avg;
+          c.beginPath();
+          c.arc(p.x, p.y, r, 0, Math.PI * 2);
+          c.fill();
+          // 相邻点之间用线段连接（避免离散圆点留缝）
+          if (i > 0) {
+            const prev = cmd.points[i - 1];
+            c.strokeStyle = avg;
+            c.lineWidth = r * 2;
+            c.lineCap = 'round';
+            c.beginPath();
+            c.moveTo(prev.x, prev.y);
+            c.lineTo(p.x, p.y);
+            c.stroke();
+          }
+        }
+      }
+      break;
+    case 'pixelate':
+      // 经典像素化马赛克（矩形框选）：整个区域分块，每块用平均色填充。
+      // blockSize=10，比涂抹更"硬"的遮挡，适合整片打码。
       if (cmd.points.length >= 2 && cropImageData) {
         const [p1, p2] = cmd.points;
-        const mx = Math.min(p1.x, p2.x);
-        const my = Math.min(p1.y, p2.y);
-        const mw = Math.abs(p2.x - p1.x);
-        const mh = Math.abs(p2.y - p1.y);
-        if (mw > 4 && mh > 4) {
-          const blockSize = 8;
-          const tempCanvas = document.createElement('canvas');
-          tempCanvas.width = mw;
-          tempCanvas.height = mh;
-          const tempCtx = tempCanvas.getContext('2d');
-          // 从 cropImageData 中复制原始区域
-          tempCtx.putImageData(cropImageData, -mx, -my);
-          // 缩小到 1/blockSize
-          const smallW = Math.max(1, Math.round(mw / blockSize));
-          const smallH = Math.max(1, Math.round(mh / blockSize));
-          const smallCanvas = document.createElement('canvas');
-          smallCanvas.width = smallW;
-          smallCanvas.height = smallH;
-          const smallCtx = smallCanvas.getContext('2d');
-          smallCtx.imageSmoothingEnabled = false;
-          smallCtx.drawImage(tempCanvas, 0, 0, mw, mh, 0, 0, smallW, smallH);
-          // 放大回原尺寸
-          c.imageSmoothingEnabled = false;
-          c.drawImage(smallCanvas, 0, 0, smallW, smallH, mx, my, mw, mh);
-          c.imageSmoothingEnabled = true;
+        const x = Math.min(p1.x, p2.x);
+        const y = Math.min(p1.y, p2.y);
+        const w = Math.abs(p2.x - p1.x);
+        const h = Math.abs(p2.y - p1.y);
+        if (w > 2 && h > 2) {
+          drawPixelate(c, cropImageData, x, y, w, h, 10);
         }
       }
       break;
@@ -304,6 +316,93 @@ export function executeCommand(cmd, targetCtx) {
       break;
   }
   c.restore();
+}
+
+// ── 涂抹采样辅助 ──────────────────────────────────────
+
+/**
+ * 在 ImageData 上采样 (x,y) 周围 r 半径内所有像素的 RGB 平均色。
+ * 用于涂抹工具（mosaic）：笔刷点局部平均化让原图信息不可辨认。
+ * 坐标系为 ImageData 的像素坐标（物理像素，相对裁剪区左上角）。
+ * 返回 `rgba(r,g,b,1)` 字符串。越界像素自动 clamp。
+ */
+function sampleAverageColor(imageData, x, y, r) {
+  const { data, width: iw, height: ih } = imageData;
+  let sumR = 0, sumG = 0, sumB = 0, count = 0;
+  const x0 = Math.max(0, Math.floor(x - r));
+  const x1 = Math.min(iw - 1, Math.ceil(x + r));
+  const y0 = Math.max(0, Math.floor(y - r));
+  const y1 = Math.min(ih - 1, Math.ceil(y + r));
+  const r2 = r * r;
+  for (let py = y0; py <= y1; py++) {
+    for (let px = x0; px <= x1; px++) {
+      // 圆形 mask：只累加圆内像素
+      const dx = px - x;
+      const dy = py - y;
+      if (dx * dx + dy * dy <= r2) {
+        const idx = (py * iw + px) * 4;
+        sumR += data[idx];
+        sumG += data[idx + 1];
+        sumB += data[idx + 2];
+        count++;
+      }
+    }
+  }
+  if (count === 0) return 'rgba(0,0,0,1)';
+  return `rgba(${Math.round(sumR / count)},${Math.round(sumG / count)},${Math.round(sumB / count)},1)`;
+}
+
+/**
+ * 对外暴露的涂抹采样：使用当前 cropImageData（由 reset() 注入）。
+ * 供预览阶段调用，与 executeCommand 内的采样逻辑共用一份 ImageData。
+ */
+export function sampleMosaicColor(x, y, r) {
+  if (!cropImageData) return 'rgba(0,0,0,1)';
+  return sampleAverageColor(cropImageData, x, y, r);
+}
+
+/**
+ * 经典像素化马赛克绘制：把 (x,y,w,h) 矩形区域分成 blockSize×blockSize 的网格，
+ * 每个网格用该区域内所有像素的 RGB 平均色填充。
+ *
+ * 与「缩小再放大」算法的差别：块内严格用算术平均（信息完全丢失，更"硬"），
+ * 而非 nearest-neighbor（保留某个像素值）。视觉上是经典的方块马赛克。
+ *
+ * 越界像素自动 clamp 到 ImageData 范围。
+ */
+function drawPixelate(c, imageData, x, y, w, h, blockSize) {
+  const { data, width: iw, height: ih } = imageData;
+  c.imageSmoothingEnabled = false;
+  for (let by = y; by < y + h; by += blockSize) {
+    for (let bx = x; bx < x + w; bx += blockSize) {
+      // 当前块的边界（最后一个块可能不足 blockSize）
+      const bxEnd = Math.min(bx + blockSize, x + w);
+      const byEnd = Math.min(by + blockSize, y + h);
+      // clamp 到 ImageData 范围
+      const sx0 = Math.max(0, Math.floor(bx));
+      const sx1 = Math.min(iw - 1, Math.floor(bxEnd - 1));
+      const sy0 = Math.max(0, Math.floor(by));
+      const sy1 = Math.min(ih - 1, Math.floor(byEnd - 1));
+      let sumR = 0, sumG = 0, sumB = 0, count = 0;
+      for (let py = sy0; py <= sy1; py++) {
+        for (let px = sx0; px <= sx1; px++) {
+          const idx = (py * iw + px) * 4;
+          sumR += data[idx];
+          sumG += data[idx + 1];
+          sumB += data[idx + 2];
+          count++;
+        }
+      }
+      if (count === 0) continue;
+      const avgR = Math.round(sumR / count);
+      const avgG = Math.round(sumG / count);
+      const avgB = Math.round(sumB / count);
+      c.fillStyle = `rgb(${avgR},${avgG},${avgB})`;
+      // 在标注层上绘制方块（坐标即图片像素坐标，因为标注 canvas 与裁剪区对齐）
+      c.fillRect(bx, by, bxEnd - bx, byEnd - by);
+    }
+  }
+  c.imageSmoothingEnabled = true;
 }
 
 // ── 撤销/重做 ──────────────────────────────────────────

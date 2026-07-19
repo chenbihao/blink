@@ -332,6 +332,42 @@ pub fn encode_png(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Str
     Ok(buf)
 }
 
+/// 解析 PNG 字节流的像素尺寸（宽 × 高），读 IHDR chunk。
+///
+/// PNG 文件布局（固定头）：
+/// ```text
+/// [0..8]   PNG signature: 89 50 4E 47 0D 0A 1A 0A
+/// [8..12]  IHDR length (big-endian u32, = 13)
+/// [12..16] chunk type "IHDR"
+/// [16..20] width  (big-endian u32)
+/// [20..24] height (big-endian u32)
+/// [24..25] bit depth
+/// [25..26] color type
+/// ...
+/// ```
+///
+/// 只读 offset 16-24 的 width/height，纯字节解析无依赖。
+/// 用于钉图窗口按图片原始尺寸贴合（`show_pin_window`）。
+///
+/// 返回 `None` 表示字节不足或签名错误，调用方应兜底默认尺寸。
+pub fn parse_png_size(png: &[u8]) -> Option<(u32, u32)> {
+    // PNG signature: 89 50 4E 47 0D 0A 1A 0A
+    const PNG_SIG: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    if png.len() < 24 || png[..8] != PNG_SIG {
+        return None;
+    }
+    // IHDR chunk type 检查（"IHDR" = 49 48 44 52）
+    if &png[12..16] != b"IHDR" {
+        return None;
+    }
+    let width = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
+    let height = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some((width, height))
+}
+
 // ── 测试 ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -407,5 +443,38 @@ mod tests {
         let png = encode_png(&src, 4, 3).unwrap();
         // PNG 魔数 89 50 4E 47 0D 0A 1A 0A
         assert_eq!(&png[..8], &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+    }
+
+    #[test]
+    fn parse_png_size_roundtrip_with_encode() {
+        // encode_png 产出的 PNG 必须能被 parse_png_size 正确解析回原尺寸
+        let src = sample_4x3();
+        let png = encode_png(&src, 4, 3).unwrap();
+        assert_eq!(parse_png_size(&png), Some((4, 3)));
+    }
+
+    #[test]
+    fn parse_png_size_nontrivial_dimensions() {
+        // 构造一个 123x456 的最小合法 PNG（只有 signature + IHDR）
+        let mut buf = vec![
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // signature
+            0x00, 0x00, 0x00, 0x0D, // IHDR length = 13
+            b'I', b'H', b'D', b'R', // chunk type
+        ];
+        buf.extend_from_slice(&123u32.to_be_bytes()); // width
+        buf.extend_from_slice(&456u32.to_be_bytes()); // height
+        buf.extend_from_slice(&[8, 6, 0, 0, 0]); // bit depth / color type / ...
+        assert_eq!(parse_png_size(&buf), Some((123, 456)));
+    }
+
+    #[test]
+    fn parse_png_size_rejects_bad_signature() {
+        let bad = vec![0u8; 32];
+        assert_eq!(parse_png_size(&bad), None);
+    }
+
+    #[test]
+    fn parse_png_size_rejects_short_buffer() {
+        assert_eq!(parse_png_size(&[0x89, 0x50]), None);
     }
 }
