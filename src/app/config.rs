@@ -1329,6 +1329,38 @@ pub async fn set_context_config(pool: &SqlitePool, config: &ContextConfig) -> Re
     Ok(())
 }
 
+// ── ScreenshotConfig（0.11.10-b）────────────────────────────────────────────
+//
+// 截图 overlay 相关的行为开关。目前只承载 `prewarm_ocr` 一个字段;后续 0.11.10-i/j
+// 的背景遮罩策略、CJK 字体等也归到此片。
+//
+// 与 ClipboardConfig 一样,不属于 `app.*` 命名空间,独立在 `screenshot:*` 前缀下,
+// 通过 `ConfigStore::<ScreenshotConfig>` 泛型接口读写。
+
+/// 截图 overlay 配置分片。
+///
+/// - `prewarm_ocr`: 拖完选区后是否立即在后台跑 OCR,让「识别」/「翻译」按钮秒响应。
+///   默认开;笔电场景可关(设置页 → 通用/截图)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotConfig {
+    #[serde(default = "default_true")]
+    pub prewarm_ocr: bool,
+}
+
+impl Default for ScreenshotConfig {
+    fn default() -> Self {
+        Self {
+            prewarm_ocr: true,
+        }
+    }
+}
+
+impl ConfigKey for ScreenshotConfig {
+    /// 0.11.10-b:与 clipboard:config 同层,不进 app.* 命名空间。
+    const KEY: &'static str = "screenshot:config";
+}
+
 // ── TODO: 方案 B - Trait 抽象（后续重构）────────────────────────────────────────
 //
 // 当需要支持多平台时，可以将配置管理抽象为 trait：
@@ -1390,6 +1422,31 @@ mod tests {
             <crate::infra::data::clipboard::ClipboardConfig as ConfigKey>::KEY,
             "clipboard:config"
         );
+    }
+
+    #[test]
+    fn config_key_screenshot() {
+        // 0.11.10-b:screenshot 与 clipboard 同层,不属于 app.* 命名空间
+        assert_eq!(ScreenshotConfig::KEY, "screenshot:config");
+    }
+
+    #[test]
+    fn screenshot_config_defaults_prewarm_on() {
+        // 0.11.10-b:预热 OCR 默认开(设置页可关);新装用户直接享受秒响应
+        let sc = ScreenshotConfig::default();
+        assert!(sc.prewarm_ocr);
+    }
+
+    #[test]
+    fn screenshot_config_serde_roundtrip() {
+        // 0.11.10-b:camelCase 序列化(与前端 config-keys 对齐);默认字段 missing 走 default
+        let sc = ScreenshotConfig { prewarm_ocr: false };
+        let json = serde_json::to_string(&sc).unwrap();
+        assert!(json.contains("\"prewarmOcr\""), "expected camelCase key, got: {json}");
+
+        // 缺字段 → 默认值填充(default_true)
+        let restored: ScreenshotConfig = serde_json::from_str("{}").unwrap();
+        assert!(restored.prewarm_ocr);
     }
 
     #[test]

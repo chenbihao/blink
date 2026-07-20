@@ -52,7 +52,7 @@
       import { invoke, screenshotPinTransform, ocrImage, translateText } from "./js/api.js";
 
       const PAD = 20;       // 与后端 PIN_PAD 一致（物理像素，给发光留空间）
-      const RESIZE_THRESHOLD = 0.05; // 窗口尺寸余量阈值（5%），超过才 resize
+      const GLOW_RADIUS = 18; // 发光视觉半径（1px spread + 14px blur ≈ 18px）
 
       const img = document.getElementById('pin-img');
       const zoomLabel = document.getElementById('zoom-level');
@@ -79,14 +79,25 @@
       function winDispW() { return Math.max(1, Math.round(physW * winScale)); }
       function winDispH() { return Math.max(1, Math.round(physH * winScale)); }
 
-      /** 只更新 img 的 transform（GPU 合成层，丝滑，不动窗口）。 */
+      /** 只更新 img 的 transform（GPU 合成层，丝滑，不动窗口）。
+       *  同时反向补偿 box-shadow：box-shadow 在 transform 前渲染，
+       *  会被 scale 放大，所以除以 scale 保持发光大小恒定。 */
       function applyTransformOnly() {
         img.style.transform = `scale(${scale})`;
+        const s = scale;
+        img.style.boxShadow =
+          `0 0 0 ${1/s}px rgba(74, 158, 255, 0.55), ` +
+          `0 0 ${14/s}px ${3/s}px rgba(74, 158, 255, 0.28)`;
       }
 
-      /** resize 窗口到当前 scale 对应尺寸（离散调用，不在每次 wheel 触发）。 */
+      /** resize 窗口到当前 scale 对应尺寸（离散调用，不在每次 wheel 触发）。
+       *  精确检测：当图片边缘距窗口边缘的剩余 padding < GLOW_RADIUS 时
+       *  触发 resize，确保发光不被裁切。 */
       function resizeWindowIfNeeded() {
-        if (Math.abs(scale - winScale) / winScale < RESIZE_THRESHOLD) return;
+        // 当前窗口内，图片两侧的剩余 padding（物理像素）
+        // 窗口宽 = physW * winScale + 2*PAD，图片视觉宽 = physW * scale
+        const padRemaining = (physW * (winScale - scale) + 2 * PAD) / 2;
+        if (padRemaining >= GLOW_RADIUS) return;
         winScale = scale;
         const winX = Math.round(imgScreenX - PAD);
         const winY = Math.round(imgScreenY - PAD);
@@ -138,6 +149,8 @@
         img.style.top = (PAD / dpr) + 'px';
         img.style.transformOrigin = '0 0';
         img.style.transform = 'scale(1)';
+        // 清除内联 box-shadow，让 CSS 默认值生效（scale=1 时无需补偿）
+        img.style.boxShadow = '';
         img.src = dataUrl;
         // 立即 resize 窗口到原始尺寸
         const winX = Math.round(imgScreenX - PAD);

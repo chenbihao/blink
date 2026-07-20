@@ -35,6 +35,11 @@ html, body {
   cursor: crosshair;
 }
 
+/* 选取工具由 JS 根据热区切换 move/resize/crosshair；标注工具统一回到准星。 */
+#canvas[data-tool="select"] {
+  cursor: default;
+}
+
 /* 标注 canvas：位置和尺寸由 JS 动态设置（覆盖在裁剪区上） */
 #annot-canvas {
   position: absolute;
@@ -44,18 +49,32 @@ html, body {
 }
 
 /* 0.11.9-c：OCR 阅读模式命中层——位置/尺寸由 JS 动态设置，与 annot-canvas 一致。
-   阅读模式激活时才启用 pointer-events，标注模式下不参与鼠标事件。 */
+   阅读模式激活时才启用 pointer-events，标注模式下不参与鼠标事件。
+   0.11.10-a：pointer-events 收紧——只有当**当前工具是 `select`**（默认工具）时
+   才截获鼠标，其它标注工具（矩形/箭头/铅笔…）绘制时鼠标穿透到 canvas。
+   `data-tool` 由 chord-screenshot.js 的 selectTool 同步到此元素。 */
 #ocr-hit-canvas {
   position: absolute;
   display: none;
   pointer-events: none;
   z-index: 3;
   cursor: text;
+  box-sizing: border-box;
 }
 
 #ocr-hit-canvas[data-reading="true"] {
   display: block;
+}
+
+#ocr-hit-canvas[data-reading="true"][data-tool="select"] {
   pointer-events: auto;
+  /* 四边保留 8px 给主 canvas 的 resize 热区；中间仍承接 word 拖选。 */
+  clip-path: inset(8px);
+}
+
+/* resize 进行中暂时彻底让出鼠标，防止命中层抢走后续事件。 */
+#ocr-hit-canvas[data-reading="true"][data-tool="select"][data-resizing="true"] {
+  pointer-events: none;
 }
 
 #size-hint {
@@ -281,17 +300,65 @@ html, body {
 .ocr-panel-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   padding: 6px 10px;
   font-size: 12px;
   color: #aaa;
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  /* 0.11.10 重构：header 作为面板拖动抓手（点 toggle/close 时不启动拖动） */
+  cursor: move;
+  user-select: none;
+}
+
+/* 操作按钮组：tabs 和 close 之间的居中区域 */
+.ocr-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  justify-content: center;
+}
+
+/* header 内操作按钮（复制/翻译）：与 close 按钮统一高度 */
+.ocr-panel-actions .tool-btn {
+  min-width: 28px;
+  height: 20px;
+  font-size: 11px;
+  padding: 0 8px;
+}
+
+/* close 按钮推到最右 */
+.ocr-panel-header #ocr-close {
+  margin-left: auto;
 }
 
 .ocr-panel-header .tool-btn {
   min-width: 20px;
   height: 20px;
   font-size: 11px;
+}
+
+/* 「在图上显示」toggle：决定 overlay 显隐，面板与嵌图解耦的核心控件 */
+.ocr-overlay-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-sub, #aaa);
+  cursor: pointer;
+  user-select: none;
+  pointer-events: auto;
+  height: 20px;
+  line-height: 20px;
+}
+
+.ocr-overlay-toggle:hover {
+  color: var(--text, #ddd);
+}
+
+.ocr-overlay-toggle input[type="checkbox"] {
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent, #4a9eff);
 }
 
 /* 0.11.9-d：OCR 面板双 tab（原文/译文）——头部标签栏 */
@@ -323,8 +390,8 @@ html, body {
 }
 
 .ocr-tab.active {
-  color: #4a9eff;
-  background: rgba(74, 158, 255, 0.12);
+  color: var(--accent, #4a9eff);
+  background: var(--accent-bg, rgba(74, 158, 255, 0.12));
 }
 
 /* 译文过期标记（原文改动后） */
@@ -372,8 +439,8 @@ html, body {
 }
 
 .ocr-panel-textarea:focus {
-  border-color: rgba(74, 158, 255, 0.7);
-  box-shadow: 0 0 0 2px rgba(74, 158, 255, 0.15);
+  border-color: var(--accent, rgba(74, 158, 255, 0.7));
+  box-shadow: 0 0 0 2px var(--accent-bg, rgba(74, 158, 255, 0.15));
 }
 
 /* 0.11.9-d：藏起来的 tab（只显示 active tab 的 textarea） */
@@ -415,14 +482,6 @@ html, body {
   border: 2px solid transparent;
 }
 
-.ocr-panel-footer {
-  padding: 6px 10px;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
 
 .ocr-panel-hint {
   font-size: 11px;
@@ -430,10 +489,52 @@ html, body {
   flex: 1;
 }
 
-.ocr-panel-footer .tool-btn {
-  font-size: 12px;
-  padding: 2px 10px;
-  height: 24px;
+/* 0.11.10-i：进阶控件行(背景策略等)——融入面板底部 */
+.ocr-panel-adv {
+  padding: 6px 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(30, 30, 30, 0.95);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+}
+
+.ocr-adv-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-sub, #aaa);
+}
+
+.ocr-adv-item select {
+  background: var(--surface, rgba(255, 255, 255, 0.06));
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: var(--text, #ddd);
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+/* select 下拉选项：修复白底灰字，走主题配色 */
+.ocr-adv-item select option {
+  background: var(--bg-deep, #1e1e2e);
+  color: var(--text, #eee);
+}
+
+.ocr-adv-item select:hover {
+  background: var(--surface-2, rgba(255, 255, 255, 0.12));
+}
+
+.ocr-adv-item input[type="range"] {
+  accent-color: var(--accent, #4a9eff);
+}
+
+.ocr-adv-item input[type="checkbox"] {
+  accent-color: var(--accent, #4a9eff);
 }
 
 #btn-cancel:hover {
@@ -587,6 +688,12 @@ html, body {
 
 .dropdown[data-open="true"] {
   display: flex;
+}
+
+/* 工具栏位于屏幕底部时，JS 给 dropdown 标记 data-placement="top"。 */
+.dropdown[data-placement="top"] {
+  top: auto;
+  bottom: calc(100% + 4px);
 }
 
 .dropdown-item {

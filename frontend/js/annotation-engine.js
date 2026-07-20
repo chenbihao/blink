@@ -50,9 +50,38 @@ let ctx = null;
 let canvas = null;
 /** 原始裁剪区图像（用于马赛克/橡皮擦恢复） */
 let cropImageData = null;
+/** 原始裁剪区缓存 canvas（高斯模糊嵌图背景复用） */
+let cropSourceCanvas = null;
 /** 水印配置（0.11.9-a 起独立于 commands 栈；null = 无水印）
  *  形状: { text, layout, color, opacity } | null */
 let watermarkConfig = null;
+/**
+ * OCR/翻译嵌图图层（0.11.10-h：与水印同为"配置型独立图层"）。
+ *
+ * 一次会话只保留一份 —— OCR 结果 + 可选的译文,覆盖式配置,不进 commands 撤销栈。
+ * mode 决定当前是否画嵌图 + 画的是原文还是译文;两次点[识别]切换 mode/开关同一层。
+ *
+ * 阶段二 c/d 先用简单占位实现:平均色矩形 + 纯文字（字号自适应留 h 阶段）。
+ *
+ * 形状:
+ *   overlayLayer = {
+ *     mode: 'source' | 'translated' | null,   // null = 关闭嵌图（layer 仍存,便于再打开）
+ *     lines: [
+ *       {
+ *         rect: { x, y, w, h },   // 物理像素相对裁剪区（与 word.bounding_rect 同坐标系）
+ *         srcText: string,        // 原文
+ *         dstText: string | null, // 译文（首次翻译前为 null）
+ *         bgColor: string | null, // 采样得到的行背景平均色（h 阶段填充,c/d 先留 null 走默认）
+ *       },
+ *     ],
+ *     bgStrategy: 'average' | 'solid',        // (§2.8) 阶段 i 支持切换
+ *     fontScale: number,           // (§2.9 j 微调) 字号缩放系数,默认 1.0
+ *     showOriginal: boolean,       // (§2.4 j) 译文模式下叠加半透明原文小字
+ *     translationTargetLang: string | null,   // 首次翻译时记录目标语言,重复调用可复用
+ *     loading: boolean,            // 0.11.10-k:翻译中状态,在嵌图中心显示 loading 动画
+ *   }
+ */
+let overlayLayer = null;
 
 // ── 初始化和重置 ──────────────────────────────────────
 
@@ -67,7 +96,15 @@ export function reset(cropW, cropH, cropImageDataRef) {
   commands = [];
   undoIndex = -1;
   cropImageData = cropImageDataRef;
+  cropSourceCanvas = null;
+  if (cropImageDataRef) {
+    cropSourceCanvas = document.createElement('canvas');
+    cropSourceCanvas.width = cropW;
+    cropSourceCanvas.height = cropH;
+    cropSourceCanvas.getContext('2d').putImageData(cropImageDataRef, 0, 0);
+  }
   watermarkConfig = null;  // 0.11.9-a：新选区清水印,防止上一轮残留
+  overlayLayer = null;     // 0.11.10-h：新选区清嵌图图层
   if (canvas) {
     canvas.width = cropW;
     canvas.height = cropH;
@@ -522,6 +559,130 @@ export function hasWatermark() {
   return watermarkConfig !== null;
 }
 
+// ── OCR/翻译嵌图图层 API（0.11.10-h）─────────────────────
+//
+// 配置型独立图层,不进 commands 栈,与水印并列。
+// 两种视图切换（source/translated）复用同一份 lines,只切 mode 属性。
+
+/**
+ * 建立/更新嵌图图层数据。
+ *
+ * 首次点[识别]:传 `{ lines: [{rect, srcText}], mode: 'source' }`
+ * 首次点[翻译]:传 `{ lines: [{rect, srcText, dstText}], mode: 'translated', targetLang }`
+ * 或先建立 source 再补译文:第二次调用只带 dstText 更新已有 lines。
+ *
+ * @param {{ lines: Array, mode?: 'source'|'translated'|null, bgStrategy?: string, targetLang?: string|null }} config
+ */
+export function setOverlay(config = {}) {
+  const lines = Array.isArray(config.lines) ? config.lines : [];
+  const mode = config.mode === undefined ? 'source' : config.mode;
+  // 保留原有 fontScale/showOriginal(若已存在),便于阶段 i/j 局部更新时不丢失。
+  const prev = overlayLayer || {};
+  overlayLayer = {
+    mode,
+    lines: lines.map((l) => ({
+      rect: l.rect,
+      srcText: l.srcText || '',
+      dstText: l.dstText || null,
+      bgColor: l.bgColor || null,
+    })),
+    bgStrategy: config.bgStrategy || 'average',
+    fontScale: typeof config.fontScale === 'number' ? config.fontScale : (prev.fontScale ?? 1.0),
+    showOriginal: typeof config.showOriginal === 'boolean' ? config.showOriginal : (prev.showOriginal ?? false),
+    translationTargetLang: config.targetLang || null,
+  };
+  redrawAll();
+}
+
+/**
+ * 只切换 mode(不换数据源);用户点[识别]↔[翻译] 切换视图时用。
+ * 传 null 关闭嵌图但保留 lines(便于再次开启)。
+ */
+export function setOverlayMode(mode) {
+  if (!overlayLayer) return;
+  overlayLayer.mode = mode;
+  redrawAll();
+}
+
+/** 更新已有 overlayLayer 的 dstText(翻译异步完成后回填)。 */
+export function setOverlayTranslations(dstTexts, targetLang) {
+  if (!overlayLayer || !Array.isArray(dstTexts)) return;
+  const n = Math.min(dstTexts.length, overlayLayer.lines.length);
+  for (let i = 0; i < n; i++) {
+    overlayLayer.lines[i].dstText = dstTexts[i];
+  }
+  overlayLayer.translationTargetLang = targetLang || overlayLayer.translationTargetLang;
+  redrawAll();
+}
+
+/** 更新原文但保留 overlay 的其它显示配置；面板校对后同步时使用。 */
+export function setOverlaySourceTexts(srcTexts) {
+  if (!overlayLayer || !Array.isArray(srcTexts)) return;
+  const n = Math.min(srcTexts.length, overlayLayer.lines.length);
+  for (let i = 0; i < n; i++) {
+    overlayLayer.lines[i].srcText = srcTexts[i];
+    // 原文变化后旧译文不再可信，要求下次切译文时重新翻译。
+    overlayLayer.lines[i].dstText = null;
+  }
+  overlayLayer.translationTargetLang = null;
+  redrawAll();
+}
+
+/** 0.11.10-j:调整嵌图字号缩放系数(0.6-1.4)。 */
+export function setOverlayFontScale(scale) {
+  if (!overlayLayer) return;
+  const clamped = Math.max(0.4, Math.min(2.0, Number(scale) || 1.0));
+  overlayLayer.fontScale = clamped;
+  redrawAll();
+}
+
+/** 0.11.10-j:切换"译文模式下同时显示原文小字"的对照 toggle。 */
+export function setOverlayShowOriginal(flag) {
+  if (!overlayLayer) return;
+  overlayLayer.showOriginal = !!flag;
+  redrawAll();
+}
+
+/** 0.11.10-k:设置翻译中 loading 状态。翻译中在嵌图中心显示 loading 动画。 */
+export function setOverlayLoading(loading) {
+  if (!overlayLayer) return;
+  overlayLayer.loading = !!loading;
+  redrawAll();
+}
+
+/** 清空嵌图图层(整片下线)。 */
+export function clearOverlay() {
+  overlayLayer = null;
+  redrawAll();
+}
+
+/** 只读快照(供 UI 判断 / 面板召唤时读文本)。 */
+export function getOverlay() {
+  return overlayLayer ? {
+    mode: overlayLayer.mode,
+    lines: overlayLayer.lines.map((l) => ({ ...l, rect: { ...l.rect } })),
+    bgStrategy: overlayLayer.bgStrategy,
+    fontScale: overlayLayer.fontScale ?? 1.0,
+    showOriginal: !!overlayLayer.showOriginal,
+    translationTargetLang: overlayLayer.translationTargetLang,
+  } : null;
+}
+
+/** overlayLayer 存在且当前 mode 非 null（有真实内容显示中）。 */
+export function isOverlayActive() {
+  return overlayLayer !== null && overlayLayer.mode !== null;
+}
+
+/** 是否配置了 overlay(哪怕 mode=null)——用于面板召唤条件判断。 */
+export function hasOverlay() {
+  return overlayLayer !== null;
+}
+
+/** 0.11.10-k:overlay 是否处于翻译中 loading 状态。 */
+export function isOverlayLoading() {
+  return overlayLayer !== null && !!overlayLayer.loading;
+}
+
 // ── 涂抹采样辅助 ──────────────────────────────────────
 
 /**
@@ -668,6 +829,10 @@ export function renderCommandsTo(cmds, targetCtx, w, h) {
   if (highlightMultiplyCmds.length > 0) {
     renderHighlightMultiplyLayer(highlightMultiplyCmds, targetCtx, w, h);
   }
+  // 0.11.10-h：OCR/翻译嵌图在水印之前（水印永远最上层）
+  if (overlayLayer && overlayLayer.mode) {
+    drawOverlay(targetCtx, overlayLayer, w, h);
+  }
   // 0.11.9-a：水印永远画在最上层（不进 commands 栈,一次会话只一层）
   if (watermarkConfig) {
     drawWatermark(targetCtx, watermarkConfig, w, h);
@@ -720,7 +885,385 @@ export function getCommands() {
   return commands.slice(0, undoIndex + 1);
 }
 
-/** 是否有标注（含水印,供合成阶段判断是否需要贴 annot layer） */
+/** 是否有标注（含水印/嵌图,供合成阶段判断是否需要贴 annot layer） */
 export function hasAnnotations() {
-  return commands.length > 0 || watermarkConfig !== null;
+  return commands.length > 0
+    || watermarkConfig !== null
+    || (overlayLayer !== null && overlayLayer.mode !== null);
+}
+
+// ── OCR/翻译嵌图渲染（0.11.10-h：图层引擎真本事）─────────────────
+//
+// 输入:overlayLayer.lines + cropImageData(裁剪区原始像素,resize 时存的)。
+// 输出:每行画背景遮罩 + 字号自适应文字。
+//
+// 策略:
+// - 背景色:采样 rect 周围环形环带(rect.h 高向外扩 4px)的像素,忽略暗色"字色"像素,
+//          剩余取 RGB 平均;若采样为空退化到白色。
+// - 字色:根据背景亮度阈值 128 切换深/浅字体(深底→浅字/浅底→深字)。
+// - 字号:起始 rect.h * 1.0,迭代减 1 直到 measureText.width <= rect.w * 0.95,
+//        下限 8px;若仍超宽二分找最长前缀 + 省略号。
+//        相邻行字号偏差超 25% 视为有意不同层级(标题/正文),分组各自均值统一。
+//
+// 所有采样/字号算法都是纯函数(见文件末尾的 `sample*` / `fitFontSize` / `luminance`),
+// 便于后续在 Node 环境 mock ctx 做单测。
+
+function drawOverlay(targetCtx, layer, _w, _h) {
+  if (!layer.lines || layer.lines.length === 0) return;
+  const mode = layer.mode;
+  const bgStrategy = layer.bgStrategy || 'average';
+  const fontScale = layer.fontScale ?? 1.0;
+  const showOriginal = !!layer.showOriginal;
+  const isLoading = !!layer.loading;
+
+  targetCtx.save();
+
+  // 0.11.10-k：翻译中 loading 动画——在嵌图区域中心绘制
+  if (isLoading && mode === 'translated') {
+    // 计算所有 lines 的包围盒
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const line of layer.lines) {
+      const r = line.rect;
+      if (!r || r.w <= 0 || r.h <= 0) continue;
+      minX = Math.min(minX, r.x);
+      minY = Math.min(minY, r.y);
+      maxX = Math.max(maxX, r.x + r.w);
+      maxY = Math.max(maxY, r.y + r.h);
+    }
+    if (minX < maxX && minY < maxY) {
+      const cx = (minX + maxX) / 2;
+      const cy = (minY + maxY) / 2;
+      const radius = 18;
+      // 半透明背景圆
+      targetCtx.beginPath();
+      targetCtx.arc(cx, cy, radius + 8, 0, Math.PI * 2);
+      targetCtx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+      targetCtx.fill();
+      // 旋转弧线（用时间驱动角度）
+      const t = (Date.now() % 1200) / 1200;
+      const startAngle = t * Math.PI * 2;
+      const endAngle = startAngle + Math.PI * 1.2;
+      targetCtx.beginPath();
+      targetCtx.arc(cx, cy, radius, startAngle, endAngle);
+      targetCtx.strokeStyle = '#4a9eff';
+      targetCtx.lineWidth = 3;
+      targetCtx.lineCap = 'round';
+      targetCtx.stroke();
+    }
+    // loading 态仍继续画文字（显示原文作为占位）
+  }
+
+  // ── Pass 1: 预算每行字号,按偏差分组取中位数统一 ──
+  // 同段文字各行 rect.h 基本一致,但宽度适配会让长行字号更小;
+  // 相邻行字号跳变超过阈值视为有意不同层级(标题/正文),分组各自统一。
+  // 用中位数替代均值,天然抗异常行干扰;分组锚点用组内中位数而非首元素。
+  const lineEntries = [];  // { line, r, text }
+  const rawSizes = [];     // 与 lineEntries 一一对应,每行独立 fitFontSize 结果
+  for (const line of layer.lines) {
+    const r = line.rect;
+    if (!r || r.w <= 0 || r.h <= 0) continue;
+    const text = mode === 'translated' ? line.dstText : line.srcText;
+    if (!text) continue;
+    lineEntries.push({ line, r, text });
+    const { size } = fitFontSize(targetCtx, text, r, fontScale);
+    rawSizes.push(size > 0 ? size : 0);
+  }
+  if (lineEntries.length === 0) {
+    targetCtx.restore();
+    return;
+  }
+
+  // 分组:相邻行字号偏差超过 25% 则断开,视为不同层级
+  // 锚点用组内中位数,比首元素更稳定
+  const GROUP_THRESHOLD = 0.25;
+  const groups = [];  // [{start, end, medianSize}]
+  let gStart = 0;
+  const medianOf = (arr) => {
+    if (arr.length === 0) return 0;
+    const sorted = arr.slice().sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 !== 0 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+  };
+
+  for (let i = 1; i <= rawSizes.length; i++) {
+    // 用组内已有行的中位数做锚点
+    const groupSizes = rawSizes.slice(gStart, i).filter((s) => s > 0);
+    const anchor = medianOf(groupSizes);
+    const shouldBreak = i === rawSizes.length
+      || rawSizes[i] === 0
+      || anchor === 0
+      || Math.abs(rawSizes[i] - anchor) / anchor > GROUP_THRESHOLD;
+    if (shouldBreak) {
+      const cleanSizes = rawSizes.slice(gStart, i).filter((s) => s > 0);
+      groups.push({ start: gStart, end: i, medianSize: medianOf(cleanSizes) });
+      gStart = i;
+    }
+  }
+
+  // 为每行分配所属组的统一字号(中位数)
+  const unifiedSizes = new Array(lineEntries.length).fill(0);
+  for (const g of groups) {
+    for (let i = g.start; i < g.end; i++) {
+      unifiedSizes[i] = g.medianSize;
+    }
+  }
+
+  for (let i = 0; i < lineEntries.length; i++) {
+    const { line, r, text } = lineEntries[i];
+    // ── 背景 ──
+    // blur 直接把原图对应区域模糊绘回；其它策略再用色块覆盖。
+    let backgroundDrawn = false;
+    let bg = line.bgColor;
+    if (!bg) {
+      if (bgStrategy === 'solid') {
+        bg = 'rgba(255, 255, 255, 0.92)';
+      } else if (bgStrategy === 'blur') {
+        backgroundDrawn = drawBlurredBackground(targetCtx, r);
+        if (!backgroundDrawn) bg = 'rgba(255, 255, 255, 0.92)';
+      } else {
+        // 平均色策略(默认):采样 rect 周围环形区
+        bg = sampleAverageBackgroundColor(r) || 'rgba(255, 255, 255, 0.95)';
+      }
+    }
+    if (!backgroundDrawn) {
+      targetCtx.fillStyle = bg;
+      targetCtx.fillRect(r.x, r.y, r.w, r.h);
+    }
+
+    // ── 文字 ──
+
+    // 字色：优先采样原图文字颜色（匹配原文字色），失败时用背景亮度决定深/浅
+    const ink = sampleInkColor(r) || (() => {
+      const inkBg = bg || sampleAverageBackgroundColor(r) || 'rgba(255, 255, 255, 0.95)';
+      return pickInkColorByBg(inkBg);
+    })();
+    // 组内统一字号 + 重新计算截断/省略
+    const fontPx = unifiedSizes[i];
+    const display = fitDisplayText(targetCtx, text, r, fontPx);
+    if (fontPx <= 0) continue;
+
+    targetCtx.fillStyle = ink;
+    targetCtx.font = `${fontPx}px system-ui, "Microsoft YaHei", "Noto Sans SC", sans-serif`;
+    targetCtx.textBaseline = 'middle';
+    targetCtx.textAlign = 'left';
+    targetCtx.fillText(display, r.x + 2, r.y + r.h / 2);
+
+    // ── 保留原文对照(0.11.10-j)──
+    // 仅在译文模式 + showOriginal 打开 + 有 srcText 时叠加,画在 rect 顶部小字
+    if (mode === 'translated' && showOriginal && line.srcText && line.srcText !== text) {
+      const smallPx = Math.max(8, Math.floor(fontPx * 0.55));
+      targetCtx.save();
+      targetCtx.globalAlpha = 0.55;
+      targetCtx.fillStyle = ink;
+      targetCtx.font = `${smallPx}px system-ui, "Microsoft YaHei", "Noto Sans SC", sans-serif`;
+      targetCtx.textBaseline = 'top';
+      // 简单截断:测长后 slice
+      let orig = line.srcText;
+      const maxW = r.w - 4;
+      if (targetCtx.measureText(orig).width > maxW) {
+        while (orig.length > 2 && targetCtx.measureText(orig + '…').width > maxW) {
+          orig = orig.slice(0, -1);
+        }
+        orig = orig + '…';
+      }
+      targetCtx.fillText(orig, r.x + 2, r.y + 1);
+      targetCtx.restore();
+    }
+  }
+  targetCtx.restore();
+}
+
+// ── 背景采样(0.11.10-h §2.8)─────────────────────────
+
+/**
+ * 采样 rect 周围环形带的像素平均色(忽略字色暗像素)。
+ *
+ * 环形带 = 以 rect 为核心,向外扩 4px 的边框区域(内圈是 rect 本身)。
+ * 忽略字色的启发式:先算带内所有像素的平均亮度,亮度低于 平均值 - 20 的像素视为"字色",
+ * 不参与最终 RGB 平均。这样文字周围环带上"字延伸出去的部分"不会污染背景色。
+ *
+ * 空采样(rect 挨着裁剪区边缘导致带完全在外)返回 null,调用方 fallback。
+ */
+function sampleAverageBackgroundColor(rect) {
+  if (!cropImageData) return null;
+  const { data, width: iw, height: ih } = cropImageData;
+  const margin = 4;
+  const x0 = Math.max(0, Math.floor(rect.x - margin));
+  const x1 = Math.min(iw - 1, Math.ceil(rect.x + rect.w + margin));
+  const y0 = Math.max(0, Math.floor(rect.y - margin));
+  const y1 = Math.min(ih - 1, Math.ceil(rect.y + rect.h + margin));
+  const rx0 = Math.max(0, Math.floor(rect.x));
+  const rx1 = Math.min(iw - 1, Math.ceil(rect.x + rect.w));
+  const ry0 = Math.max(0, Math.floor(rect.y));
+  const ry1 = Math.min(ih - 1, Math.ceil(rect.y + rect.h));
+
+  // Pass 1:收集环带所有像素 + 记录亮度
+  const samples = [];   // {r,g,b,lum}
+  let sumLum = 0;
+  for (let py = y0; py <= y1; py++) {
+    for (let px = x0; px <= x1; px++) {
+      // 只要环形带内(排除 rect 内部)
+      if (px >= rx0 && px <= rx1 && py >= ry0 && py <= ry1) continue;
+      const idx = (py * iw + px) * 4;
+      const r = data[idx], g = data[idx + 1], b = data[idx + 2];
+      const l = luminance(r, g, b);
+      samples.push({ r, g, b, l });
+      sumLum += l;
+    }
+  }
+  if (samples.length === 0) return null;
+  const avgLum = sumLum / samples.length;
+  const inkThreshold = avgLum - 20;
+
+  // Pass 2:忽略字色像素,累加剩余
+  let sumR = 0, sumG = 0, sumB = 0, count = 0;
+  for (const s of samples) {
+    if (s.l < inkThreshold) continue;
+    sumR += s.r; sumG += s.g; sumB += s.b; count++;
+  }
+  if (count === 0) {
+    // 所有像素都被判定为"字色" → 极小概率,退化用全体平均
+    for (const s of samples) { sumR += s.r; sumG += s.g; sumB += s.b; }
+    count = samples.length;
+  }
+  const R = Math.round(sumR / count);
+  const G = Math.round(sumG / count);
+  const B = Math.round(sumB / count);
+  return `rgba(${R}, ${G}, ${B}, 0.95)`;
+}
+
+/**
+ * 高斯模糊策略：从缓存的原始裁剪图扩大取样，再裁回目标行区域。
+ * 扩大 6px 可避免 blur 边缘透明；目标 ctx 的 save/restore 保证 filter 不外泄。
+ */
+function drawBlurredBackground(targetCtx, rect) {
+  if (!cropSourceCanvas) return false;
+  const blurPx = 4;
+  const pad = blurPx * 2;
+  const sx = Math.max(0, Math.floor(rect.x - pad));
+  const sy = Math.max(0, Math.floor(rect.y - pad));
+  const sx2 = Math.min(cropSourceCanvas.width, Math.ceil(rect.x + rect.w + pad));
+  const sy2 = Math.min(cropSourceCanvas.height, Math.ceil(rect.y + rect.h + pad));
+  const sw = sx2 - sx;
+  const sh = sy2 - sy;
+  if (sw <= 0 || sh <= 0) return false;
+
+  targetCtx.save();
+  targetCtx.beginPath();
+  targetCtx.rect(rect.x, rect.y, rect.w, rect.h);
+  targetCtx.clip();
+  targetCtx.filter = `blur(${blurPx}px)`;
+  targetCtx.drawImage(cropSourceCanvas, sx, sy, sw, sh, sx, sy, sw, sh);
+  targetCtx.filter = 'none';
+  targetCtx.fillStyle = 'rgba(255, 255, 255, 0.08)';
+  targetCtx.fillRect(rect.x, rect.y, rect.w, rect.h);
+  targetCtx.restore();
+  return true;
+}
+
+// ── 字号自适应 + 字色选择(0.11.10-h §2.9)────────────
+
+/**
+ * 计算 sRGB 相对亮度(0-255 范围,近似 ITU-R BT.709)。
+ * 用于:1) 背景采样时判断"字色暗像素"  2) 决定字色深浅。
+ */
+function luminance(r, g, b) {
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+/** 从 CSS 颜色字符串抽 rgb;不支持的格式返回 null。用于背景色 → 字色反查。 */
+function parseRgb(css) {
+  const m = /rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i.exec(css);
+  if (!m) return null;
+  return { r: +m[1], g: +m[2], b: +m[3] };
+}
+
+/** 根据背景色选深/浅字色(阈值 128)。 */
+function pickInkColorByBg(bgCss) {
+  const rgb = parseRgb(bgCss);
+  if (!rgb) return '#111';
+  return luminance(rgb.r, rgb.g, rgb.b) > 128 ? '#111' : '#f5f5f5';
+}
+
+/**
+ * 采样 rect 内部的文字颜色（用于嵌字时匹配原文字色）。
+ *
+ * 算法：采样背景色，然后取高对比度的字色。
+ * - 深色背景 → 白色字
+ * - 浅色背景 → 黑色字
+ *
+ * @returns {string|null} CSS 颜色字符串，采样失败返回 null
+ */
+function sampleInkColor(rect) {
+  const bg = sampleAverageBackgroundColor(rect);
+  if (!bg) return null;
+  return pickInkColorByBg(bg);
+}
+
+/**
+ * 迭代找到能塞进 rect.w * 0.95 的最大字号。
+ *
+ * 起始 rect.h * 0.85 * fontScale,每次 -1 逐步尝试(rect 高度一般不超过 60px,循环上限 ~50 次可控)。
+ * 到达下限 8px 仍超宽 → 用 8px + 二分找最长前缀 + 省略号截断。
+ * rect 极窄(连一个字都放不下 8px)→ 返回 size=0 让 drawOverlay 跳过。
+ *
+ * @param {number} fontScale - 用户在面板里指定的字号缩放系数(0.4-2.0),默认 1.0
+ */
+function fitFontSize(ctx, text, rect, fontScale = 1.0) {
+  const maxWidth = rect.w * 0.95;
+  const minSize = 8;
+  let size = Math.max(minSize, Math.floor(rect.h * 1.0 * fontScale));
+  ctx.save();
+  ctx.font = `${size}px system-ui, "Microsoft YaHei", "Noto Sans SC", sans-serif`;
+  while (size > minSize && ctx.measureText(text).width > maxWidth) {
+    size -= 1;
+    ctx.font = `${size}px system-ui, "Microsoft YaHei", "Noto Sans SC", sans-serif`;
+  }
+  if (ctx.measureText(text).width <= maxWidth) {
+    ctx.restore();
+    return { size, display: text };
+  }
+  // 到 minSize 仍超宽 → 截断 + 省略号
+  const ellipsis = '…';
+  const ellW = ctx.measureText(ellipsis).width;
+  if (ellW > maxWidth) {
+    ctx.restore();
+    return { size: 0, display: '' };   // rect 极窄,一个省略号都放不下
+  }
+  let lo = 0, hi = text.length;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi + 1) / 2);
+    if (ctx.measureText(text.slice(0, mid)).width + ellW <= maxWidth) lo = mid;
+    else hi = mid - 1;
+  }
+  ctx.restore();
+  return { size: minSize, display: text.slice(0, lo) + ellipsis };
+}
+
+/**
+ * 字号已确定时,计算文字在 rect 内的显示文本(超宽则截断+省略号)。
+ * 与 fitFontSize 的截断逻辑相同,但不调整字号。
+ */
+function fitDisplayText(ctx, text, rect, fontSize) {
+  const maxWidth = rect.w * 0.95;
+  ctx.save();
+  ctx.font = `${fontSize}px system-ui, "Microsoft YaHei", "Noto Sans SC", sans-serif`;
+  if (ctx.measureText(text).width <= maxWidth) {
+    ctx.restore();
+    return text;
+  }
+  const ellipsis = '…';
+  const ellW = ctx.measureText(ellipsis).width;
+  if (ellW > maxWidth) {
+    ctx.restore();
+    return '';
+  }
+  let lo = 0, hi = text.length;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi + 1) / 2);
+    if (ctx.measureText(text.slice(0, mid)).width + ellW <= maxWidth) lo = mid;
+    else hi = mid - 1;
+  }
+  ctx.restore();
+  return text.slice(0, lo) + ellipsis;
 }

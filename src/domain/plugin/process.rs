@@ -251,7 +251,7 @@ impl PluginProcess {
                                 }
                                 Ok(PluginUpstreamMessage::HttpRequest(req)) => {
                                     // 插件发起 HTTP 请求 → core 代为执行
-                                    tracing::debug!(plugin = %id, url = %req.url, "插件发起 HTTP 请求");
+                                    tracing::debug!(plugin = %id, url = %req.url.chars().take(80).collect::<String>(), "插件发起 HTTP 请求");
                                     let stdin = Arc::clone(&stdin);
                                     tauri::async_runtime::spawn(async move {
                                         let (status, body, error) = execute_http_request(

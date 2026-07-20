@@ -45,6 +45,18 @@ fn lang_direct(target_lang: &str) -> &'static str {
 
 // ── 有道智云 ──────────────────────────────────────────────────────────────────
 
+/// 有道签名 input 规则：长度 > 20 时截取为 前10字符 + 长度 + 后10字符。
+/// 例如 "Hello WorldHello World" (22字符) → "Hello Wor22ld"
+fn youdao_truncate_input(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= 20 {
+        return text.to_string();
+    }
+    let prefix: String = chars[..10].iter().collect();
+    let suffix: String = chars[chars.len() - 10..].iter().collect();
+    format!("{}{}{}", prefix, chars.len(), suffix)
+}
+
 pub struct YoudaoEngine;
 
 impl TranslateEngine for YoudaoEngine {
@@ -57,7 +69,9 @@ impl TranslateEngine for YoudaoEngine {
 
         let salt: u32 = 10000 + chrono::Local::now().timestamp_subsec_nanos() % 90000;
         let curtime = chrono::Utc::now().timestamp();
-        let sign_str = format!("{app_key}{text}{salt}{curtime}{app_secret}");
+        // 有道签名规则：input 长度 > 20 时截取为 前10 + 长度 + 后10
+        let input_for_sign = youdao_truncate_input(text);
+        let sign_str = format!("{app_key}{input_for_sign}{salt}{curtime}{app_secret}");
         let sign = hex_hash::sha256_hex(&sign_str);
         let tgt = lang_map("youdao", target_lang);
 
@@ -85,6 +99,13 @@ impl TranslateEngine for YoudaoEngine {
     fn parse_response(&self, body: &str) -> Option<String> {
         let v: Value = serde_json::from_str(body).ok()?;
         v.get("translation")?.get(0)?.as_str().map(|s| s.to_string())
+    }
+
+    /// 有道签名 sign_str = {app_key}{text}{salt}{curtime}{app_secret}，
+    /// text 中的私用区字符参与签名 → 服务端签名校验失败(errorCode 202)。
+    /// 跳过 tag 拼接，直接走单行并发。
+    fn supports_tag_batch(&self) -> bool {
+        false
     }
 }
 
@@ -198,6 +219,105 @@ impl TranslateEngine for AliEngine {
             ("FormatType", "text".into()),
             ("Scene", "general".into()),
         ];
+        Self::sign_and_build(params, access_key_secret)
+    }
+
+    fn parse_response(&self, body: &str) -> Option<String> {
+        let v: Value = serde_json::from_str(body).ok()?;
+        v.get("Data")?.get("Translated")?.as_str().map(|s| s.to_string())
+    }
+
+    /// 阿里云机器翻译支持原生批量翻译(`GetBatchTranslate` action)。
+    /// 一次请求最多 50 条,单条 ≤1000 字符,总字符 ≤8000(官方限制)。
+    /// 译文按 `translateId` 与输入 key 一一对应,原生保序,无需 tag hack。
+    fn supports_batch(&self) -> bool {
+        true
+    }
+
+    fn build_batch_request(&self, texts: &[String], target_lang: &str, settings: &Value) -> Option<EngineRequest> {
+        // 官方限制:≤50 条 / 单条 ≤1000 / 总字符 ≤8000。超限交给上层分片,这里只拒绝明显非法。
+        if texts.is_empty() || texts.len() > 50 {
+            return None;
+        }
+
+        let access_key_id = settings.get("ali_access_key_id").and_then(Value::as_str).unwrap_or("");
+        let access_key_secret = settings.get("ali_access_key_secret").and_then(Value::as_str).unwrap_or("");
+        if access_key_id.is_empty() || access_key_secret.is_empty() {
+            return None;
+        }
+
+        // SourceText 是 JSON 对象:{"0":"line0","1":"line1",...}
+        // key 用纯数字字符串,作为 translateId 回传时与输入对齐。
+        let source_map: serde_json::Map<String, Value> = texts
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (i.to_string(), Value::String(t.clone())))
+            .collect();
+        let source_text = serde_json::to_string(&Value::Object(source_map)).ok()?;
+
+        let tgt = lang_direct(target_lang);
+        let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let nonce = uuid_like();
+        let mut params = vec![
+            ("Format", "JSON".into()),
+            ("Version", "2018-10-12".into()),
+            ("AccessKeyId", access_key_id.to_string()),
+            ("SignatureMethod", "HMAC-SHA1".into()),
+            ("Timestamp", timestamp),
+            ("SignatureVersion", "1.0".into()),
+            ("SignatureNonce", nonce),
+            ("Action", "GetBatchTranslate".into()),
+            ("SourceLanguage", "auto".into()),
+            ("TargetLanguage", tgt.to_string()),
+            ("SourceText", source_text),
+            ("FormatType", "text".into()),
+            ("Scene", "general".into()),
+            ("ApiType", "translate_standard".into()),
+        ];
+        Self::sign_and_build(params, access_key_secret)
+    }
+
+    fn parse_batch_response(&self, body: &str, expected: usize) -> Option<Vec<String>> {
+        let v: Value = serde_json::from_str(body).ok()?;
+        // 实际响应结构(经线上验证):
+        //   {"RequestId":"...","TranslatedList":[
+        //     {"code":"200","index":"0","translated":"译文0","wordCount":"30","detectedLanguage":"en"},
+        //     {"code":"200","index":"1","translated":"译文1",...},
+        //     ...
+        //   ]}
+        // 注意:不在 Data 下(单条 TranslateGeneral 才在 Data.Translated);
+        // 字段是 index(不是 translateId);返回顺序不保证与输入一致,需按 index 排序。
+        let arr = v.get("TranslatedList").and_then(Value::as_array)?;
+        if arr.len() != expected {
+            return None;
+        }
+        // 按 index 排序回原顺序;失败的项(code != "200")→ 整批失败,交给上层降级
+        let mut indexed: Vec<(usize, String)> = arr.iter().filter_map(|item| {
+            let code = item.get("code").and_then(Value::as_str).unwrap_or("");
+            if code != "200" {
+                return None;
+            }
+            let idx = item.get("index").and_then(Value::as_str)?.parse::<usize>().ok()?;
+            let text = item.get("translated").and_then(Value::as_str)?.to_string();
+            Some((idx, text))
+        }).collect();
+        if indexed.len() != expected {
+            return None;
+        }
+        indexed.sort_by_key(|(i, _)| *i);
+        // 校验 index 是 0..expected 的完整排列(防缺漏/重复)
+        if !indexed.iter().enumerate().all(|(i, (id, _))| i == *id) {
+            return None;
+        }
+        Some(indexed.into_iter().map(|(_, t)| t).collect())
+    }
+}
+
+impl AliEngine {
+    /// 阿里 RPC 签名公共逻辑:排序 → HMAC-SHA1 → 拼最终 body。
+    /// 单条 (`TranslateGeneral`) 和批量 (`GetBatchTranslate`) 共用。
+    fn sign_and_build(params: Vec<((&str, String))>, access_key_secret: &str) -> Option<EngineRequest> {
+        let mut params = params;
         params.sort_by(|a, b| a.0.cmp(b.0));
 
         // canonicalized: k=v 用 quote 编码（safe 为空）
@@ -211,9 +331,8 @@ impl TranslateEngine for AliEngine {
         let signature = hex_hash::hmac_sha1_b64(signing_key.as_bytes(), string_to_sign.as_bytes());
 
         // 构造最终 body
-        let mut body_params = params;
-        body_params.push(("Signature", signature));
-        let body = body_params.iter()
+        params.push(("Signature", signature));
+        let body = params.iter()
             .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
             .collect::<Vec<_>>().join("&");
 
@@ -224,11 +343,6 @@ impl TranslateEngine for AliEngine {
             timeout_ms: 8000,
             headers: vec![("Content-Type".into(), "application/x-www-form-urlencoded".into())],
         })
-    }
-
-    fn parse_response(&self, body: &str) -> Option<String> {
-        let v: Value = serde_json::from_str(body).ok()?;
-        v.get("Data")?.get("Translated")?.as_str().map(|s| s.to_string())
     }
 }
 

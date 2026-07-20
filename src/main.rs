@@ -537,6 +537,7 @@ fn main() {
             app::commands::screenshot_set_annotation_mode,
             app::commands::ocr_image,
             app::commands::translate_text,
+            app::commands::translate_lines,
             app::commands::hide_screenshot_overlay,
             app::commands::get_storage_info,
             app::commands::clear_history,

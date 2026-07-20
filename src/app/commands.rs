@@ -568,9 +568,11 @@ pub async fn translate_text(
 
     match outcome {
         crate::domain::execution::ActionOutcome::Items { items } => {
+            // 优先读 payload.translated（干净译文）；title 是 UI 展示用的，
+            // 插件会给它加前缀 emoji（如 "📝 {result}"），不能当数据用。
             let translated = items
                 .first()
-                .map(|it| it.title.clone())
+                .and_then(|it| it.payload.get("translated").and_then(|v| v.as_str()).map(str::to_string))
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| "翻译插件返回空结果".to_string())?;
             tracing::info!(
@@ -589,6 +591,122 @@ pub async fn translate_text(
             Err("翻译插件返回意外的结果类型".into())
         }
     }
+}
+
+/// 从 translate_batch 的首项 payload 读取保序结果。
+fn parse_translate_batch_payload(
+    outcome: &crate::domain::execution::ActionOutcome,
+    expected: usize,
+) -> Option<Vec<String>> {
+    let crate::domain::execution::ActionOutcome::Items { items } = outcome else {
+        return None;
+    };
+    let results = items.first()?.payload.get("results")?.as_array()?;
+    if results.len() != expected {
+        return None;
+    }
+    results
+        .iter()
+        .map(|value| value.as_str().map(str::to_string))
+        .collect()
+}
+
+/// 0.11.10-g:批量翻译多行文本。
+///
+/// 首选一次调用插件 `translate_batch` tool，由插件加 tag 后单次请求翻译引擎并保序拆回。
+/// 插件版本不匹配、tag 被引擎破坏或结构化结果异常时，降级为并发单行 `translate_text`，
+/// 保证截图翻译功能不因批量优化失败而不可用。
+#[tauri::command]
+pub async fn translate_lines(
+    app: tauri::AppHandle,
+    lines: Vec<String>,
+    target_lang: Option<String>,
+) -> Result<Vec<String>, String> {
+    if lines.is_empty() {
+        return Ok(Vec::new());
+    }
+    let n = lines.len();
+    tracing::debug!(count = n, ?target_lang, "translate_lines: 批量翻译开始");
+    let started = std::time::Instant::now();
+
+    // 空行不送插件，保留原索引；插件契约只接收非空文本。
+    let non_empty: Vec<(usize, String)> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, text)| !text.trim().is_empty())
+        .map(|(idx, text)| (idx, text.clone()))
+        .collect();
+    if non_empty.is_empty() {
+        return Ok(lines);
+    }
+
+    const TRANSLATE_BATCH_ACTION_ID: &str = "builtin.translate:translate_batch";
+    let registry = app.state::<std::sync::Arc<crate::domain::execution::ActionRegistry>>();
+    if let Some(action) = registry.get(TRANSLATE_BATCH_ACTION_ID) {
+        let texts: Vec<String> = non_empty.iter().map(|(_, text)| text.clone()).collect();
+        let mut args = serde_json::Map::new();
+        args.insert("texts".into(), serde_json::json!(texts));
+        if let Some(lang) = target_lang.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            args.insert("target_lang".into(), serde_json::Value::String(lang.to_string()));
+        }
+        let cx = crate::domain::execution::ActionContext::from_arguments(
+            &app,
+            serde_json::Value::Object(args),
+        );
+        match action.execute(&cx).await {
+            Ok(outcome) => {
+                if let Some(batch_results) = parse_translate_batch_payload(&outcome, non_empty.len()) {
+                    let mut results = lines.clone();
+                    for ((idx, _), translated) in non_empty.iter().zip(batch_results) {
+                        results[*idx] = translated;
+                    }
+                    tracing::info!(
+                        count = n,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "translate_lines 完成（单次批量 tool）"
+                    );
+                    return Ok(results);
+                }
+                tracing::warn!("translate_lines: 批量 tool 返回结构异常，降级为单行并发");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "translate_lines: 批量 tool 失败，降级为单行并发");
+            }
+        }
+    } else {
+        tracing::warn!("translate_lines: translate_batch 未注册，降级为单行并发");
+    }
+
+    let mut handles = Vec::with_capacity(non_empty.len());
+    for (idx, text) in non_empty {
+        let app_clone = app.clone();
+        let tl = target_lang.clone();
+        let src_for_fallback = text.clone();
+        handles.push(tokio::spawn(async move {
+            let result = translate_text(app_clone, text, tl).await;
+            match result {
+                Ok(dst) => (idx, dst),
+                Err(e) => {
+                    tracing::warn!(line = idx, error = %e, "translate_lines: 单行翻译失败，降级到原文");
+                    (idx, src_for_fallback)
+                }
+            }
+        }));
+    }
+
+    let mut results = lines;
+    for handle in handles {
+        match handle.await {
+            Ok((idx, dst)) => results[idx] = dst,
+            Err(e) => tracing::warn!(error = %e, "translate_lines: 任务 join 失败"),
+        }
+    }
+    tracing::info!(
+        count = n,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "translate_lines 完成（单行并发降级）"
+    );
+    Ok(results)
 }
 
 /// 0.11.7：设置/清除标注模式（前端通知后端）。
@@ -989,6 +1107,8 @@ pub fn get_default_hotkey() -> serde_json::Value {
 /// **插件配置**：`plugin_config`
 ///
 /// **Context 配置**：`context_config`
+///
+/// **截图配置**（0.11.10-b）：`screenshot_config` —— ScreenshotConfig 分片（prewarm_ocr 等）
 #[tauri::command]
 pub async fn set_config(
     app: tauri::AppHandle,
@@ -1315,6 +1435,17 @@ pub async fn set_config(
                 slo_hard_timeout_ms = ?ai.slo_hard_timeout_ms,
                 "AI 配置已更新"
             );
+        }
+
+        // ── Screenshot 配置(0.11.10-b)───────────────────────────────────
+        //
+        // 截图 overlay 行为分片。目前只承载 prewarm_ocr;写完不需要热更新任何
+        // 内存副本,前端每次 overlay 显示时按需读取(读路径:`get_config_section`)。
+        "screenshot_config" => {
+            let sc: crate::app::config::ScreenshotConfig =
+                serde_json::from_value(value).map_err(|e| e.to_string())?;
+            crate::app::config::ConfigStore::set(&pool, &sc).await?;
+            tracing::info!(prewarm_ocr = sc.prewarm_ocr, "截图配置已更新");
         }
 
         _ => {
@@ -4131,7 +4262,36 @@ pub fn open_stt_folder() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::version_gt;
+    use super::{parse_translate_batch_payload, version_gt};
+    use crate::domain::capability::ItemResult;
+    use crate::domain::execution::ActionOutcome;
+
+    #[test]
+    fn translate_batch_payload_requires_matching_string_array() {
+        let outcome = ActionOutcome::Items {
+            items: vec![ItemResult {
+                title: "批量翻译".into(),
+                subtitle: None,
+                payload: serde_json::json!({ "results": ["你好", "世界"] }),
+                score: Some(1.0),
+            }],
+        };
+        assert_eq!(
+            parse_translate_batch_payload(&outcome, 2).unwrap(),
+            vec!["你好".to_string(), "世界".to_string()]
+        );
+        assert!(parse_translate_batch_payload(&outcome, 1).is_none());
+
+        let malformed = ActionOutcome::Items {
+            items: vec![ItemResult {
+                title: "批量翻译".into(),
+                subtitle: None,
+                payload: serde_json::json!({ "results": ["你好", 2] }),
+                score: Some(1.0),
+            }],
+        };
+        assert!(parse_translate_batch_payload(&malformed, 2).is_none());
+    }
 
     #[test]
     fn version_gt_basic() {

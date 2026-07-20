@@ -18,6 +18,8 @@
  *
  * **Context 配置**：`context_config`
  *
+ * **截图配置**（0.11.10-b）：`screenshot_config` —— ScreenshotConfig 分片（prewarm_ocr 等）
+ *
  * **AI 配置**（0.9.1 Phase 6）：`ai_config` —— AIConfig 全量分片。
  *   密钥独立走 `save_ai_secret` / `delete_ai_secret` / `has_ai_secret` 命令，
  *   永不进 SQLite / IPC value 序列化路径。

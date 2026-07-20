@@ -33,11 +33,18 @@
 
       <div class="toolbar-divider"></div>
 
+      <!-- 选取工具（0.11.10-a/k）：默认工具，负责选区重选、移动和缩放。
+           有识别结果时，选区内文字由 #ocr-hit-canvas 优先承接拖选；边缘仍保留缩放热区。
+           切到其它工具时把 #ocr-hit-canvas pointer-events 让渡给标注层。 -->
+      <button class="tool-btn tool-direct active" data-tool="select" id="select-main" title="选取（默认）"><svg class="icon" aria-hidden="true"><use href="#icon-mouse-pointer-2"/></svg></button>
+
+      <div class="toolbar-divider"></div>
+
       <!-- 图形分组（split button）：矩形/椭圆
            主按钮直接用当前工具，只有 caret 点击才展开分组切换
            按住 Shift 时约束长宽等比（矩形→正方形、椭圆→圆） -->
       <div class="dropdown-wrap split-btn">
-        <button class="tool-btn split-main active" id="shape-main" data-tool="rect" title="图形">
+        <button class="tool-btn split-main" id="shape-main" data-tool="rect" title="图形">
           <span id="shape-main-icon"><svg class="icon" aria-hidden="true"><use href="#icon-square"/></svg></span>
         </button>
         <button class="tool-btn split-caret" id="shape-trigger" title="切换图形"><span class="caret">▾</span></button>
@@ -174,11 +181,11 @@
 
       <!-- 输出区 -->
       <div class="toolbar-group" data-group="output">
-        <button class="tool-btn" id="btn-ocr" title="OCR 文字识别"><svg class="icon" aria-hidden="true"><use href="#icon-scan-text"/></svg></button>
-        <button class="tool-btn" id="btn-translate" title="OCR + 翻译"><svg class="icon" aria-hidden="true"><use href="#icon-languages"/></svg></button>
+        <button class="tool-btn" id="btn-ocr" title="识别 (OCR + 面板)"><svg class="icon" aria-hidden="true"><use href="#icon-scan-text"/></svg></button>
+        <button class="tool-btn" id="btn-translate" title="翻译 (OCR + 翻译 + 图上嵌译文)"><svg class="icon" aria-hidden="true"><use href="#icon-languages"/></svg></button>
         <button class="tool-btn" id="btn-save" title="保存为文件"><svg class="icon" aria-hidden="true"><use href="#icon-save"/></svg></button>
         <button class="tool-btn" id="btn-pin" title="钉图"><svg class="icon" aria-hidden="true"><use href="#icon-pin"/></svg></button>
-        <button class="tool-btn tool-btn-primary" id="btn-copy" title="复制 (双击选区)"><svg class="icon" aria-hidden="true"><use href="#icon-check"/></svg></button>
+        <button class="tool-btn tool-btn-primary" id="btn-copy" title="复制截图 (双击选区)"><svg class="icon" aria-hidden="true"><use href="#icon-check"/></svg></button>
         <button class="tool-btn" id="btn-cancel" title="取消 (ESC)"><svg class="icon" aria-hidden="true"><use href="#icon-x"/></svg></button>
       </div>
     </div>

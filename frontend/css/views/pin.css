@@ -34,7 +34,9 @@ html, body {
   transition: transform 0.06s ease-out;
   will-change: transform;
   /* 淡淡的蓝色边框阴影：让贴图在桌面上有"存在感"但不喧宾夺主。
-     窗口预留了 PIN_PAD=20px 物理像素的空间，所以发光不会被窗口边界裁。 */
+     窗口预留了 PIN_PAD=20px 物理像素的空间，所以发光不会被窗口边界裁。
+     注意：box-shadow 在 transform 之前渲染，会被 scale 放大；
+     JS 层在 applyTransformOnly() 里反向补偿 blur/spread，保持发光大小恒定。 */
   box-shadow: 0 0 0 1px rgba(74, 158, 255, 0.55),
               0 0 14px 3px rgba(74, 158, 255, 0.28);
 }

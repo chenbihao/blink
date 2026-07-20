@@ -306,6 +306,10 @@ export const en = {
   "chord.clipboard.blacklist.hint": "Copies containing any keyword are not recorded (comma-separated)",
   "chord.clipboard.blacklist.placeholder": "password, token, secret",
 
+  // ── Screenshot config (0.11.10-b) ──
+  "chord.screenshot.prewarm_ocr.label": "Prewarm OCR",
+  "chord.screenshot.prewarm_ocr.hint": "Run OCR in the background right after selection so [Identify]/[Translate] respond instantly; turn off on battery",
+
   // ── AI panel (0.9.1 Phase 6) ──
   "tab.ai": "AI",
   "panel.ai": "AI Intent Routing",

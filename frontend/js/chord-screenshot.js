@@ -23,7 +23,10 @@ import {
   hideScreenshotOverlay,
   ocrImage,
   translateText,
+  translateLines,
+  copyToClipboard,
   frontendLog,
+  invoke,
 } from "./api.js";
 import * as annot from "./annotation-engine.js";
 import { ensureSpriteLoaded } from "./icon.js";
@@ -81,12 +84,34 @@ let isDragging = false;         // 是否正在选区拖拽
 let isAnnotDragging = false;    // 是否正在标注绘制拖拽
 let selCss = null;              // 选区 CSS 像素 {x, y, w, h}
 let isAnnotating = false;       // 是否在标注模式（选区已确定）
-let sent = false;               // 防止重复提交
+let sent = false;               // 防止复制/保存/钉图重复提交
+let ocrBusy = false;            // 显式 OCR 请求门禁（不与输出提交共用）
+let translationBusy = false;    // 图上译文请求中；完成前不允许输出半成品截图
 let singleClickTimeout = null;  // 单击→200ms 后隐藏的定时器
 let blurGuard = false;          // blur 事件短窗口防抖（避免重复触发）
 // 标注绘制状态（物理像素）
 let annotStartX = 0, annotStartY = 0;
 let annotCurrentX = 0, annotCurrentY = 0;
+
+// ── 预热 OCR 状态（0.11.10-b）──────────────────────────
+// 选区拖完后后台异步跑 OCR，让「识别」/「翻译」按钮点击时秒响应。
+// `ocrPrewarm` 存的是 Promise 而非 result——已完成 / 进行中都 await 同一个 Promise。
+// resetState 里清；新选区（重选或退出标注）会替换。
+let ocrPrewarm = null;          // Promise<OcrResult> | null
+let screenshotConfig = { prewarmOcr: true };  // 默认开；overlay 显示时按需读一次覆盖
+
+// 选区/OCR 异步结果都绑定 revision。重选、移动、缩放后旧 Promise 即使晚到也不能回填新选区。
+let selectionRevision = 0;
+let translationRevision = 0;
+
+// 选取工具的拖拽状态：move=移动，resize=八向缩放，new=选区外重新框选。
+let selectionInteraction = null;
+const SELECTION_HANDLE_SIZE = 8;
+const MIN_SELECTION_SIZE = 5;
+
+// 预热触发的最小选区面积（物理像素）——太小的图大概率是纯图无字,浪费一次 OCR
+const PREWARM_MIN_WIDTH = 100;
+const PREWARM_MIN_HEIGHT = 50;
 
 // ── 初始化 ────────────────────────────────────────────
 
@@ -94,6 +119,14 @@ let annotCurrentX = 0, annotCurrentY = 0;
 ensureSpriteLoaded();
 
 annot.init(annotCanvas);
+// 0.11.10-a：默认工具设为 'select'（选取），作为标注/OCR 阅读的中立入口。
+// annotation-engine 内部默认是 'rect'，这里覆盖成新契约的默认值。
+annot.setTool('select');
+// hit-canvas data-tool 与工具同步（CSS 据此决定 pointer-events 是否接收鼠标）
+{
+  const _hc = document.getElementById('ocr-hit-canvas');
+  if (_hc) _hc.setAttribute('data-tool', 'select');
+}
 
 // 0.11.7-f：预热窗口（URL 带 ?preheat=1）跳过 loadScreenshot——SESSION 还没建立，
 // 加载必失败留下 error-hint 状态污染。等用户 Alt+A 触发 __blinkReloadScreenshot 再加载。
@@ -114,7 +147,14 @@ function resetState() {
   isAnnotDragging = false;
   isAnnotating = false;
   sent = false;
+  ocrBusy = false;
+  translationBusy = false;
   selCss = null;
+  selectionInteraction = null;
+  selectionRevision++;
+  translationRevision++;
+  canvas.style.cursor = 'crosshair';
+  canvas.setAttribute('data-tool', 'select');
   screenshot = null;
   if (singleClickTimeout) { clearTimeout(singleClickTimeout); singleClickTimeout = null; }
   // UI 状态清空
@@ -152,10 +192,39 @@ function resetState() {
   toolbar.style.top = '';
   // 清取消门禁（防止快速 Alt+A → ESC → Alt+A → ESC 被卡）
   cancelInProgress = false;
+  // 0.11.10-b：清预热缓存(新一轮 overlay 从零开始)
+  ocrPrewarm = null;
+  // 0.11.10-e：清 OCR 缓存
+  ocrResultCache = null;
+  // 清所有浮层与工具高亮；复用窗口时不能沿用上一轮的工具/视图状态。
+  document.querySelectorAll('.dropdown').forEach((dropdown) => {
+    dropdown.setAttribute('data-open', 'false');
+    dropdown.removeAttribute('data-placement');
+  });
+  document.querySelectorAll('.split-main, .tool-direct').forEach((button) => button.classList.remove('active'));
+  document.querySelectorAll('.dropdown-item[data-tool]').forEach((button) => button.classList.remove('active'));
+  const selectMain = document.getElementById('select-main');
+  if (selectMain) selectMain.classList.add('active');
+  annot.setTool('select');
+  annot.clearOverlay();
+  updateOverlayButtonsActive();
+  updateOutputButtonsDisabled();
+  const _hc = document.getElementById('ocr-hit-canvas');
+  if (_hc) _hc.setAttribute('data-tool', 'select');
 }
 
 function loadScreenshot() {
   errorHint.style.display = 'none';
+  // 0.11.10-b：并行读一下截图配置(不阻塞图像加载)。overlay 显示到用户拖完选区
+  // 至少 500ms+,SQLite KV 读 < 5ms,mouseup 时几乎必然已就绪;失败降级默认值。
+  invoke('get_config_section', { key: 'screenshot:config' })
+    .then((val) => {
+      if (val && typeof val === 'object') {
+        screenshotConfig.prewarmOcr = val.prewarmOcr !== false;
+      }
+    })
+    .catch((e) => console.debug('[screenshot] 读 screenshot:config 失败,用默认值', e));
+
   const img = new Image();
   // 必须设 crossOrigin 否则 canvas 被跨域截图污染，getImageData/toBlob 全不可用
   img.crossOrigin = 'anonymous';
@@ -239,6 +308,23 @@ function drawFinalSelection() {
   ctx.strokeStyle = '#4a9eff';
   ctx.lineWidth = 2 * dpr;
   ctx.strokeRect(px, py, pw, ph);
+
+  // 选取工具显示八个调整手柄，明确提示选区可移动/缩放。
+  if (annot.getTool() === 'select') {
+    const hs = 6 * dpr;
+    const points = [
+      [px, py], [px + pw / 2, py], [px + pw, py],
+      [px + pw, py + ph / 2], [px + pw, py + ph],
+      [px + pw / 2, py + ph], [px, py + ph], [px, py + ph / 2],
+    ];
+    ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = '#4a9eff';
+    ctx.lineWidth = Math.max(1, dpr);
+    for (const [hx, hy] of points) {
+      ctx.fillRect(hx - hs / 2, hy - hs / 2, hs, hs);
+      ctx.strokeRect(hx - hs / 2, hy - hs / 2, hs, hs);
+    }
+  }
 }
 
 // ── 标注预览/重绘 ─────────────────────────────────────
@@ -466,6 +552,45 @@ function enterAnnotationMode(rect) {
 
   // 显示 + 定位工具栏（放到 drawFinalSelection 后，确保 canvas 已画好）
   positionToolbar(rect);
+
+  // 0.11.10-b：后台预热 OCR（不阻塞 UI）——让「识别」/「翻译」秒响应。
+  // 触发条件:配置开 + 选区面积达标(太小的图大概率是纯图无字,浪费)。
+  triggerOcrPrewarm(pw, ph);
+}
+
+/**
+ * 后台预热 OCR:异步调用 ocr_image,结果存 ocrPrewarm Promise。
+ * 已有 Promise 则不重复触发(用户快速重选场景 exitAnnotationMode 会清缓存,不会走到重复分支)。
+ * 失败静默 —— 用户显式点[识别]时会走正常路径,不影响主链路。
+ */
+function triggerOcrPrewarm(pw, ph) {
+  if (!screenshotConfig.prewarmOcr) return;
+  if (pw < PREWARM_MIN_WIDTH || ph < PREWARM_MIN_HEIGHT) {
+    console.debug('[screenshot] 预热 OCR 跳过(选区过小)', { pw, ph });
+    return;
+  }
+  if (ocrPrewarm) return;   // 已在跑,复用
+  const revision = selectionRevision;
+  const startTs = performance.now();
+  ocrPrewarm = new Promise((resolve) => {
+    compositeSelection((pngBytes) => {
+      ocrImage(pngBytes)
+        .then((result) => {
+          if (revision !== selectionRevision) {
+            console.debug('[screenshot] 丢弃旧选区 OCR 预热结果', { revision, current: selectionRevision });
+            resolve(null);
+            return;
+          }
+          const elapsed = Math.round(performance.now() - startTs);
+          console.info('[screenshot] OCR 预热完成', { ms: elapsed, textLen: result?.text?.length ?? 0 });
+          resolve(result);
+        })
+        .catch((err) => {
+          console.warn('[screenshot] OCR 预热失败(用户点识别时会重试)', err);
+          resolve(null);   // 缓存失败标记为 null,doOcrSelection 里识别到 null 会走正常路径
+        });
+    });
+  });
 }
 
 /** 退出标注模式（清除选区，回到可拖选状态） */
@@ -473,11 +598,25 @@ function exitAnnotationMode() {
   console.debug('[screenshot] exitAnnotationMode');
   isAnnotating = false;
   selCss = null;
+  selectionInteraction = null;
+  selectionRevision++;
+  translationRevision++;
+  canvas.style.cursor = 'crosshair';
   annotCanvas.style.display = 'none';
   annotCanvas.width = 0;
   annotCanvas.height = 0;
   toolbar.style.display = 'none';
   sizeHint.style.display = 'none';
+  // 0.11.10-b：清预热缓存(旧选区结果不能给新选区用)
+  ocrPrewarm = null;
+  ocrBusy = false;
+  translationBusy = false;
+  updateOutputButtonsDisabled();
+  // 0.11.10-e：清 OCR 缓存 + 关阅读模式(overlay 生命周期与选区一致)
+  ocrResultCache = null;
+  exitReadingMode();
+  annot.clearOverlay();
+  updateOverlayButtonsActive();
   // 0.11.8-a：清工具栏用户拖动位置——新选区回到自动定位（否则工具栏悬在旧位置与新选区脱节）
   toolbar.removeAttribute('data-user-moved');
   toolbar.style.left = '';
@@ -583,13 +722,192 @@ function positionToolbar(rect) {
 
 // ── 鼠标事件 ──────────────────────────────────────────
 
+function selectionCursor(handle) {
+  if (handle === 'n' || handle === 's') return 'ns-resize';
+  if (handle === 'e' || handle === 'w') return 'ew-resize';
+  if (handle === 'nw' || handle === 'se') return 'nwse-resize';
+  if (handle === 'ne' || handle === 'sw') return 'nesw-resize';
+  return 'move';
+}
+
+/** 命中选区八向缩放热区。坐标和 rect 都是视口 CSS 像素。 */
+function getSelectionHandle(x, y, rect) {
+  if (!rect) return null;
+  const m = SELECTION_HANDLE_SIZE;
+  if (x < rect.x - m || x > rect.x + rect.w + m ||
+      y < rect.y - m || y > rect.y + rect.h + m) return null;
+  const nearL = Math.abs(x - rect.x) <= m;
+  const nearR = Math.abs(x - (rect.x + rect.w)) <= m;
+  const nearT = Math.abs(y - rect.y) <= m;
+  const nearB = Math.abs(y - (rect.y + rect.h)) <= m;
+  if (nearT && nearL) return 'nw';
+  if (nearT && nearR) return 'ne';
+  if (nearB && nearL) return 'sw';
+  if (nearB && nearR) return 'se';
+  if (nearT) return 'n';
+  if (nearB) return 's';
+  if (nearL) return 'w';
+  if (nearR) return 'e';
+  return null;
+}
+
+function invalidateSelectionContent() {
+  selectionRevision++;
+  translationRevision++;
+  ocrPrewarm = null;
+  ocrResultCache = null;
+  ocrBusy = false;
+  translationBusy = false;
+  updateOutputButtonsDisabled();
+  const panel = document.getElementById('ocr-panel');
+  if (panel) panel.remove();
+  exitReadingMode();
+  annot.clearOverlay();
+  updateOverlayButtonsActive();
+  annotCanvas.style.display = 'none';
+  toolbar.style.display = 'none';
+  sizeHint.style.display = 'none';
+  toolbar.removeAttribute('data-user-moved');
+  toolbar.style.left = '';
+  toolbar.style.top = '';
+}
+
+function beginSelectionInteraction(kind, e, handle = null) {
+  if (!selCss) return;
+  const original = { ...selCss };
+  selectionInteraction = {
+    kind,
+    handle,
+    activated: false,
+    startX: e.offsetX,
+    startY: e.offsetY,
+    original,
+    monitor: findDisplayCssAt(original.x + original.w / 2, original.y + original.h / 2),
+  };
+  isDragging = false;
+  if (kind === 'new') {
+    startX = e.offsetX;
+    startY = e.offsetY;
+    endX = startX;
+    endY = startY;
+  }
+  canvas.style.cursor = kind === 'resize' ? selectionCursor(handle) : (kind === 'move' ? 'move' : 'crosshair');
+}
+
+function updateSelectionInteraction(e) {
+  if (!selectionInteraction) return;
+  const totalDx = e.offsetX - selectionInteraction.startX;
+  const totalDy = e.offsetY - selectionInteraction.startY;
+  if (!selectionInteraction.activated) {
+    if (Math.hypot(totalDx, totalDy) < 3) return;
+    selectionInteraction.activated = true;
+    invalidateSelectionContent();
+    if (selectionInteraction.kind === 'new') {
+      isDragging = true;
+      selCss = null;
+    }
+  }
+  if (selectionInteraction.kind === 'new') {
+    endX = e.offsetX;
+    endY = e.offsetY;
+    drawSelection();
+    return;
+  }
+
+  const { original, monitor, handle } = selectionInteraction;
+  const dx = e.offsetX - selectionInteraction.startX;
+  const dy = e.offsetY - selectionInteraction.startY;
+  if (selectionInteraction.kind === 'move') {
+    const x = Math.max(monitor.x, Math.min(original.x + dx, monitor.x + monitor.w - original.w));
+    const y = Math.max(monitor.y, Math.min(original.y + dy, monitor.y + monitor.h - original.h));
+    selCss = { x, y, w: original.w, h: original.h };
+  } else {
+    let left = original.x;
+    let top = original.y;
+    let right = original.x + original.w;
+    let bottom = original.y + original.h;
+    if (handle.includes('w')) left = Math.max(monitor.x, Math.min(e.offsetX, right - MIN_SELECTION_SIZE));
+    if (handle.includes('e')) right = Math.min(monitor.x + monitor.w, Math.max(e.offsetX, left + MIN_SELECTION_SIZE));
+    if (handle.includes('n')) top = Math.max(monitor.y, Math.min(e.offsetY, bottom - MIN_SELECTION_SIZE));
+    if (handle.includes('s')) bottom = Math.min(monitor.y + monitor.h, Math.max(e.offsetY, top + MIN_SELECTION_SIZE));
+    selCss = { x: left, y: top, w: right - left, h: bottom - top };
+  }
+  drawFinalSelection();
+  const dpr = window.devicePixelRatio || 1;
+  sizeHint.textContent = `${Math.round(selCss.w * dpr)} × ${Math.round(selCss.h * dpr)}`;
+  sizeHint.style.display = 'block';
+  sizeHint.style.left = (selCss.x + 4) + 'px';
+  sizeHint.style.top = (selCss.y > 24 ? selCss.y - 22 : selCss.y + 4) + 'px';
+}
+
+function finishSelectionInteraction(e) {
+  if (!selectionInteraction) return false;
+  const { kind, activated } = selectionInteraction;
+  if (!activated) {
+    selectionInteraction = null;
+    canvas.style.cursor = annot.getTool() === 'select' ? 'default' : 'crosshair';
+    return true;
+  }
+  if (kind === 'new') {
+    endX = e.offsetX;
+    endY = e.offsetY;
+    selCss = norm(startX, startY, endX, endY);
+    isDragging = false;
+  }
+  selectionInteraction = null;
+  if (!selCss || selCss.w < MIN_SELECTION_SIZE || selCss.h < MIN_SELECTION_SIZE) {
+    exitAnnotationMode();
+    return true;
+  }
+  // 选区移动、重框、resize 都改变了实际裁剪内容，需要重建坐标系并重新预热 OCR。
+  enterAnnotationMode({ ...selCss });
+  return true;
+}
+
+function updateSelectionCursor(x, y) {
+  if (annot.getTool() !== 'select') {
+    canvas.style.cursor = 'crosshair';
+    return;
+  }
+  if (!isAnnotating || !selCss) {
+    canvas.style.cursor = 'crosshair';
+    return;
+  }
+  const handle = getSelectionHandle(x, y, selCss);
+  if (handle) {
+    canvas.style.cursor = selectionCursor(handle);
+  } else {
+    // 选取工具下，选区内外都允许移动选区；只有选区内会进入 hit-canvas（已 OCR 时）。
+    canvas.style.cursor = 'move';
+  }
+}
+
 canvas.addEventListener('mousedown', (e) => {
   if (!screenshot || e.button !== 0) return;
+
+  const tool = annot.getTool();
+  if (isAnnotating && selCss && tool === 'select') {
+    const handle = getSelectionHandle(e.offsetX, e.offsetY, selCss);
+    if (handle) {
+      beginSelectionInteraction('resize', e, handle);
+      return;
+    }
+    if (pointInRect(e.offsetX, e.offsetY, selCss)) {
+      // 未 OCR 时选区内拖动 = 移动选区；已 OCR 时选区内由 #ocr-hit-canvas 接管选词，
+      // 主 canvas 收不到 pointerdown，所以这里的 move 只在 B 状态（无 reading）生效。
+      beginSelectionInteraction('move', e);
+      return;
+    }
+    // 选区外拖动 = 移动整个选区（不再重新框选）。重选走 ESC 关闭后重新 Alt+A。
+    // 单击不拖动（< 3px）仍 no-op，保留 0.11.10-f 的误点保护。
+    beginSelectionInteraction('move', e);
+    return;
+  }
 
   // 有选区状态下点击选区内 → 启动标注绘制
   if (isAnnotating && selCss && pointInRect(e.offsetX, e.offsetY, selCss)) {
     // 0.11.8-b：watermark 是"面板驱动"工具，不响应 canvas 拖动
-    if (annot.getTool() === 'watermark') return;
+    if (tool === 'watermark') return;
     const dpr = window.devicePixelRatio || 1;
     annotStartX = (e.offsetX - selCss.x) * dpr;
     annotStartY = (e.offsetY - selCss.y) * dpr;
@@ -600,12 +918,13 @@ canvas.addEventListener('mousedown', (e) => {
     return;
   }
 
-  // 有选区但点击选区外 → 清除选区，同时用当前点作为新拖选的起点
+  // 0.11.10-f/k：其它标注工具下点选区外仍 no-op；选取工具已在上方进入重选分支。
   if (isAnnotating && selCss) {
-    exitAnnotationMode();
+    console.debug('[screenshot] annotation tool click outside selection → no-op');
+    return;
   }
 
-  // 启动选区拖拽
+  // 启动选区拖拽（无选区态,或选区已 exit 后回退到拖选态）
   isDragging = true;
   sent = false;
   startX = e.offsetX;
@@ -616,6 +935,13 @@ canvas.addEventListener('mousedown', (e) => {
 
 canvas.addEventListener('mousemove', (e) => {
   if (!screenshot) return;
+
+  updateSelectionCursor(e.offsetX, e.offsetY);
+
+  if (selectionInteraction) {
+    updateSelectionInteraction(e);
+    return;
+  }
 
   // 更新笔画预览虚圈（0.11.8-c）：hover 时显示当前工具的笔尖大小
   updateStrokeCursor(e.clientX, e.clientY);
@@ -646,6 +972,7 @@ canvas.addEventListener('mousemove', (e) => {
 // 鼠标离开 canvas 时隐藏预览圈
 canvas.addEventListener('mouseleave', () => {
   if (strokeCursor) strokeCursor.style.display = 'none';
+  if (!selectionInteraction) canvas.style.cursor = annot.getTool() === 'select' ? 'default' : 'crosshair';
 });
 
 // 0.11.8-e：矩形/椭圆拖动期间按/松 Shift 实时更新预览（否则鼠标不动则不重绘）
@@ -717,6 +1044,8 @@ function updateStrokeCursor(clientX, clientY) {
 
 canvas.addEventListener('mouseup', (e) => {
   if (!screenshot) return;
+
+  if (finishSelectionInteraction(e)) return;
 
   // 标注绘制结束
   if (isAnnotDragging) {
@@ -802,13 +1131,31 @@ canvas.addEventListener('dblclick', (e) => {
   doCopyFullScreen();
 });
 
-// 右键取消
+// 右键：reading 模式激活时弹菜单（选区边缘 clip-path 漏过来的右键），否则取消截图。
 canvas.addEventListener('contextmenu', (e) => {
   e.preventDefault();
-  doCancel();
+  if (reading) {
+    const selText = getReadingSelectionText();
+    showReadingContextMenu(selText || null, e);
+  } else {
+    doCancel();
+  }
 });
 
 document.addEventListener('keydown', (e) => {
+  // 面板中有真正可编辑的文本选区时交给浏览器默认复制，否则复制图上 word 选区。
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
+    const tgt = e.target;
+    const isTextField = tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable);
+    const hasNativeSelection = isTextField && (
+      tgt.isContentEditable ||
+      (typeof tgt.selectionStart === 'number' && tgt.selectionStart !== tgt.selectionEnd)
+    );
+    if (!hasNativeSelection && copyReadingSelection()) {
+      e.preventDefault();
+      return;
+    }
+  }
   if (e.key === 'Escape') {
     e.preventDefault();
     // 优先关闭 OCR 面板
@@ -831,6 +1178,16 @@ document.addEventListener('keydown', (e) => {
       return;
     }
     doCancel();
+    return;
+  }
+  // 0.11.10-e：`E` 键召唤面板抽屉(与工具栏[≡]等价)。
+  //   忽略在 input/textarea/contentEditable 中的按键——用户在面板 textarea 或
+  //   文本标注框里输入 e/E 字母不该触发面板 toggle。
+  if ((e.key === 'e' || e.key === 'E') && !e.ctrlKey && !e.metaKey && !e.altKey && isAnnotating) {
+    const tgt = e.target;
+    if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
+    e.preventDefault();
+    doPanelToggle();
   }
 });
 
@@ -838,19 +1195,53 @@ document.addEventListener('keydown', (e) => {
 // 注意：blur 不调 doCancel，只调 hideScreenshotOverlay（不设 sent）。
 // 如果用户在有选区时失焦，应该保留选区（不取消），而不是默默地结束会话。
 // 截图 overlay 是透明窗口，失焦可能只是用户不小心点到别处，不应直接取消。
+//
+// 0.11.10-f 例外:面板打开时 blur 保留(不 hide)——用户拿 OCR 面板去查词/翻译,
+// 面板内 focus 输入框 window 就会 blur,不能因此关掉 overlay。判定方式:DOM 里
+// 有 #ocr-panel 或 text-dropdown 展开态即视为"有交互面板"。
+// 后续 0.11.10-c/d 引入 overlayLayer 嵌图后,同样纳入豁免。
 window.addEventListener('blur', () => {
   if (blurGuard) return;
   blurGuard = true;
   setTimeout(() => { blurGuard = false; }, 500);
+
+  // 有交互面板/输入态时保留 overlay(§2.6 表格)
+  if (hasActivePanel()) {
+    console.debug('[screenshot] window blur ignored (active panel)');
+    return;
+  }
+
   console.debug('[screenshot] window blur, hiding overlay');
   // 直接隐藏，不经过 doCancel（不设 sent，不干扰后续操作）
   hideScreenshotOverlay().catch((e) => console.error('hideScreenshotOverlay 失败', e));
 });
 
+/** 判断是否有主动召唤出的交互面板/输入态。
+ *  0.11.10-f:blur 时用它决定是否保留 overlay。
+ *  当前覆盖:OCR 面板 + 文本输入框 + 水印表单 + overlay 嵌图激活态。
+ *  0.11.10-e:overlayLayer 处于 mode!=null(有嵌图显示中)也视为"活动内容",
+ *    用户看图上译文时点其他窗口不应关掉截图 overlay。 */
+function hasActivePanel() {
+  if (document.getElementById('ocr-panel')) return true;
+  if (document.querySelector('.text-annot-input')) return true;
+  const wm = document.getElementById('text-dropdown');
+  if (wm && wm.getAttribute('data-view') === 'watermark' && wm.getAttribute('data-open') === 'true') return true;
+  if (annot.isOverlayActive()) return true;
+  return false;
+}
+
 // ── 工具栏动作 ────────────────────────────────────────
 
+function ensureOutputReady() {
+  const overlay = annot.getOverlay();
+  const activeTranslation = translationBusy && overlay && overlay.mode === 'translated';
+  if (!ocrBusy && !activeTranslation) return true;
+  showTransientHint(activeTranslation ? '翻译尚未完成' : '识别尚未完成');
+  return false;
+}
+
 function doCopySelection() {
-  if (!selCss || sent) return;
+  if (!selCss || sent || !ensureOutputReady()) return;
   sent = true;
   console.info('[screenshot] copy selection', { hasAnnot: annot.hasAnnotations() });
 
@@ -902,7 +1293,7 @@ function doCopyFullScreen() {
 }
 
 function doPinSelection() {
-  if (!selCss || sent) return;
+  if (!selCss || sent || !ensureOutputReady()) return;
   sent = true;
   // 计算选区左上角的屏幕物理坐标，让钉图窗口"就地贴住"截图原位
   const dpr = window.devicePixelRatio || 1;
@@ -918,7 +1309,7 @@ function doPinSelection() {
 }
 
 function doSaveSelection() {
-  if (!selCss || sent) return;
+  if (!selCss || sent || !ensureOutputReady()) return;
   sent = true;
   compositeSelection((pngBytes) => {
     screenshotSave(pngBytes, null).catch((err) => {
@@ -930,30 +1321,392 @@ function doSaveSelection() {
   });
 }
 
-function doOcrSelection() {
-  if (!selCss || sent) return;
-  sent = true; // 占位：防止 Copy/Ocr 并发
+/**
+ * 点[识别]——OCR → 面板（原文 tab），图上不嵌字。
+ *
+ * 心智：
+ *   - 首次点 → OCR → 面板展开（原文 tab）→ overlay mode=null（不嵌图）
+ *   - 面板已开 + 原文 tab → 关闭面板 + 清 overlay
+ *   - 面板已开 + 译文 tab → 切到原文 tab + 清 overlay + 隐藏 adv
+ *
+ * 复用预热缓存——已完成/进行中都 await 同一 Promise,0ms 感知。
+ */
+function doIdentifySelection() {
+  if (!selCss) return;
+  const existingPanel = document.getElementById('ocr-panel');
+  if (existingPanel && ocrResultCache) {
+    const tabSource = existingPanel.querySelector('.ocr-tab[data-tab="source"]');
+    const isSourceActive = tabSource && tabSource.classList.contains('active');
+    if (isSourceActive) {
+      existingPanel.remove();
+      // 关闭面板时清 overlay（否则图上残留译文）
+      annot.setOverlayMode(null);
+      redrawAnnotFull();
+      updateToolbarButtonActive();
+    } else {
+      // 从翻译切到识别：清 overlay + 隐藏 adv
+      annot.setOverlayMode(null);
+      redrawAnnotFull();
+      const adv = existingPanel.querySelector('.ocr-panel-adv');
+      if (adv) adv.style.display = 'none';
+      if (tabSource) tabSource.click();
+    }
+    return;
+  }
+  ocrBusy = true;
+  updateOutputButtonsDisabled();
+  const revision = selectionRevision;
+  const onResult = (result) => {
+    if (revision !== selectionRevision) return;
+    activateOverlay(result, {
+      showOverlay: false,      // 识别路径默认不嵌图
+      panelTab: 'source',
+      openPanel: true,
+      autoTranslate: false,
+    });
+    ocrBusy = false;
+    updateOutputButtonsDisabled();
+  };
+  if (ocrPrewarm) {
+    console.debug('[screenshot] doIdentify 走预热缓存');
+    ocrPrewarm.then((result) => {
+      if (revision !== selectionRevision) return;
+      if (result) { onResult(result); return; }
+      _runOcrFresh({ kind: 'identify', revision });
+    }).catch((err) => {
+      if (revision !== selectionRevision) return;
+      console.error('[screenshot] OCR 预热 Promise 异常', err);
+      ocrBusy = false;
+      updateOutputButtonsDisabled();
+      showTransientHint('识别失败');
+    });
+    return;
+  }
+  _runOcrFresh({ kind: 'identify', revision });
+}
+
+/**
+ * 点[翻译]——OCR + 翻译 → 面板（译文 tab）+ overlay 嵌译文。
+ *
+ * 心智：
+ *   - 首次点 → OCR → 自动翻译 → 面板展开（译文 tab）→ overlay mode=translated
+ *   - 面板已开 + 译文 tab → 关闭面板
+ *   - 面板已开 + 原文 tab → 切到译文 tab + 确保 overlay=translated + 显示 adv
+ */
+function doOverlayTranslate() {
+  if (!selCss) return;
+  const existingPanel = document.getElementById('ocr-panel');
+  if (existingPanel && ocrResultCache) {
+    const tabTranslated = existingPanel.querySelector('.ocr-tab[data-tab="translated"]');
+    const isTranslatedActive = tabTranslated && tabTranslated.classList.contains('active');
+    if (isTranslatedActive) {
+      existingPanel.remove();
+      updateToolbarButtonActive();
+    } else {
+      // 从识别切到翻译：确保 overlay = translated + 显示 adv
+      const overlay = annot.getOverlay();
+      if (overlay && overlay.mode !== 'translated') {
+        annot.setOverlayMode('translated');
+        redrawAnnotFull();
+      }
+      const adv = existingPanel.querySelector('.ocr-panel-adv');
+      if (adv) adv.style.display = '';
+      if (tabTranslated) tabTranslated.click();
+    }
+    return;
+  }
+  ocrBusy = true;
+  updateOutputButtonsDisabled();
+  const revision = selectionRevision;
+  const onResult = (result) => {
+    if (revision !== selectionRevision) return;
+    activateOverlay(result, {
+      showOverlay: true,       // 翻译路径默认嵌图（mode='translated'）
+      panelTab: 'translated',
+      openPanel: true,
+      autoTranslate: true,     // 立刻翻译，不再有切 mode 不动作的中间态
+    });
+    ocrBusy = false;
+    updateOutputButtonsDisabled();
+  };
+  if (ocrPrewarm) {
+    console.debug('[screenshot] doTranslate 走预热缓存');
+    ocrPrewarm.then((result) => {
+      if (revision !== selectionRevision) return;
+      if (result) { onResult(result); return; }
+      _runOcrFresh({ kind: 'translate', revision });
+    }).catch((err) => {
+      if (revision !== selectionRevision) return;
+      console.error('[screenshot] OCR 预热 Promise 异常', err);
+      ocrBusy = false;
+      updateOutputButtonsDisabled();
+      showTransientHint('识别失败');
+    });
+    return;
+  }
+  _runOcrFresh({ kind: 'translate', revision });
+}
+
+// 保留旧名字作为别名（尚未替换的调用点走此路径），行为 = 新入口
+const doOcrSelection = doIdentifySelection;
+const doTranslateSelection = doOverlayTranslate;
+
+/** 走完整合成 → OCR → 展示的正常路径(预热未开或失败时兜底)。
+ *  opts.kind 决定走识别路径还是翻译路径（与 activateOverlay 的 opts 对齐）。 */
+function _runOcrFresh(opts = {}) {
+  const kind = opts.kind || 'identify';
+  const revision = opts.revision ?? selectionRevision;
   compositeSelection((pngBytes) => {
     ocrImage(pngBytes)
-      .then((result) => showOcrResult(result))
-      .catch((err) => console.error('[screenshot] ocr 失败', err))
-      .finally(() => { sent = false; }); // OCR 不关 overlay，释放占位
+      .then((result) => {
+        if (revision !== selectionRevision) {
+          console.debug('[screenshot] 丢弃旧选区 OCR 结果', { revision, current: selectionRevision });
+          return;
+        }
+        if (kind === 'translate') {
+          activateOverlay(result, {
+            showOverlay: true,
+            panelTab: 'translated',
+            openPanel: true,
+            autoTranslate: true,
+          });
+        } else {
+          activateOverlay(result, {
+            showOverlay: false,
+            panelTab: 'source',
+            openPanel: true,
+            autoTranslate: false,
+          });
+        }
+      })
+      .catch((err) => {
+        if (revision === selectionRevision) {
+          showTransientHint('识别失败');
+        }
+        console.error('[screenshot] ocr 失败', err);
+      })
+      .finally(() => {
+        if (revision === selectionRevision) {
+          ocrBusy = false;
+          updateOutputButtonsDisabled();
+        }
+      });
   });
 }
 
 /**
- * 0.11.9-e：一条龙"翻译"——OCR + 立即翻译,面板停在译文 tab。
- * 与 doOcrSelection 唯一差别是 showOcrResult 传 `{ autoTranslate: true }`。
+ * 0.11.10-c（重构）：把 OCR 结果落地为 overlayLayer + reading + 面板。
+ *
+ * 心智：面板是主交互面，overlay 是面板的镜像。本函数不再隐式决定 mode/panel 状态，
+ * 改由调用方通过 opts 显式声明四件事：
+ *   - showOverlay: 是否在图上嵌字（识别路径=false / 翻译路径=true）
+ *   - panelTab:    面板默认展开哪个 tab（'source' | 'translated'）
+ *   - openPanel:   是否自动展开面板（识别/翻译主路径=true；被动重算=false）
+ *   - autoTranslate: 是否立刻触发翻译（翻译路径=true）
+ *
+ * 空 lines / 空 text → 提示"未识别到文字",不建立 overlay。
  */
-function doTranslateSelection() {
-  if (!selCss || sent) return;
-  sent = true;
-  compositeSelection((pngBytes) => {
-    ocrImage(pngBytes)
-      .then((result) => showOcrResult(result, { autoTranslate: true }))
-      .catch((err) => console.error('[screenshot] ocr(translate) 失败', err))
-      .finally(() => { sent = false; });
+function activateOverlay(result, opts = {}) {
+  const lines = (result && Array.isArray(result.lines)) ? result.lines : [];
+  const nonEmpty = lines.filter((ln) => ln && ln.text && ln.rect && ln.rect.w > 0 && ln.rect.h > 0);
+  if (nonEmpty.length === 0) {
+    showTransientHint('未识别到文字');
+    return false;
+  }
+  // overlay 层数据始终建立（reading/翻译都要用），但 mode 由 showOverlay 决定：
+  // showOverlay=false → mode=null（图上不渲染，但 lines 保留供面板「在图上显示」勾选时启用）。
+  const mode = opts.showOverlay ? (opts.panelTab === 'translated' ? 'translated' : 'source') : null;
+  annot.setOverlay({
+    lines: nonEmpty.map((ln) => ({
+      rect: { x: ln.rect.x, y: ln.rect.y, w: ln.rect.w, h: ln.rect.h },
+      srcText: ln.text,
+    })),
+    mode,
   });
+  // 缓存 OCR 全量 result(供面板召唤时复用,不需要重跑 OCR)
+  ocrResultCache = result;
+  // overlay 建立后即进入"reading 底座"——hit-canvas 激活,
+  // select 工具下承担 word 拖选（点空白用 nearestWordByLine 起选）。
+  if (result && Array.isArray(result.words) && result.words.length > 0) {
+    enterReadingMode(result);
+  }
+  redrawAnnotFull();
+  updateOverlayButtonsActive();
+  if (opts.openPanel) {
+    showOcrResult(result, { tab: opts.panelTab || 'source', showOverlay: opts.showOverlay });
+  }
+  if (opts.autoTranslate) {
+    requestOverlayTranslation();
+  }
+  return true;
+}
+
+/**
+ * 0.11.10-d：批量翻译 overlayLayer 里所有 line 的 srcText,拿到后一次 setTranslations 回填。
+ *
+ * 0.11.10-g:改走后端 `translate_lines` 批量入口——一次 IPC 拿 N 行译文,
+ * 后端内部并发调 translate_text tool。相比阶段二逐行串行(N 次 IPC)体验大幅改善。
+ * 单行失败后端自动降级到原文(与前端语义一致)。
+ */
+/** 有效文本判断：空字符串和纯空白都视为未翻译。 */
+function hasText(value) {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function requestOverlayTranslation(targetLang) {
+  const revision = ++translationRevision;
+  translationBusy = true;
+  updateOutputButtonsDisabled();
+  translateOverlayLines(targetLang, revision)
+    .catch((e) => {
+      if (revision !== translationRevision) return;
+      showTransientHint('翻译失败');
+      console.error('[screenshot] overlay translate 失败', e);
+    })
+    .finally(() => {
+      if (revision !== translationRevision) return;
+      translationBusy = false;
+      updateOutputButtonsDisabled();
+    });
+}
+
+async function translateOverlayLines(targetLang, revision = ++translationRevision) {
+  const selectionAtStart = selectionRevision;
+  const current = annot.getOverlay();
+  if (!current || current.lines.length === 0) return;
+  // 收集需要翻译的行(已有非空 dstText 的复用不重跑)
+  const srcs = current.lines.map((l) => hasText(l.dstText) ? '' : (l.srcText || ''));
+  const needCount = srcs.filter((s) => hasText(s)).length;
+  if (needCount === 0) return;
+
+  const started = performance.now();
+  let dsts;
+  try {
+    dsts = await translateLines(srcs, targetLang || null);
+  } catch (e) {
+    console.warn('[screenshot] translateLines 失败,降级到逐行单调', e);
+    // 兜底:逐行单调 translate_text 保底,避免"翻译按钮点了没反应"
+    dsts = [];
+    for (let i = 0; i < srcs.length; i++) {
+      if (!hasText(srcs[i])) { dsts.push(''); continue; }
+      try {
+        dsts.push(await translateText(srcs[i], targetLang || null));
+      } catch (_) {
+        dsts.push(srcs[i]);   // 单行失败降级到原文
+      }
+    }
+  }
+  // 用户已重选/移动/缩放或发起更新一轮翻译时，旧结果不得污染当前 overlay。
+  if (selectionAtStart !== selectionRevision || revision !== translationRevision) {
+    console.debug('[screenshot] 丢弃过期翻译结果', { revision, current: translationRevision });
+    return;
+  }
+  const latest = annot.getOverlay();
+  if (!latest || latest.lines.length !== current.lines.length) return;
+  const merged = latest.lines.map((l, i) => hasText(l.dstText) ? l.dstText : (dsts[i] || l.srcText));
+  annot.setOverlayTranslations(merged, targetLang || null);
+  redrawAnnotFull();
+  updateOverlayButtonsActive();
+  tracing_debug('translateOverlayLines 完成', { lines: needCount, ms: Math.round(performance.now() - started) });
+}
+
+function tracing_debug(msg, extra) {
+  console.info('[screenshot] ' + msg, extra || '');
+}
+
+/** 缓存最近一次 OCR 完整结果——供面板召唤(阶段二 e)复用而不需要重跑 OCR */
+let ocrResultCache = null;
+
+/** 简易临时提示(选区附近,2 秒后自动消失)。
+ *  有选区时定位到选区顶部居中(工具栏在右下,顶部不冲突);空间不足翻到底部。
+ *  无选区时回退屏幕中心。 */
+function showTransientHint(msg) {
+  errorHint.textContent = msg;
+  errorHint.style.display = 'block';
+  errorHint.style.background = 'rgba(50,50,50,0.85)';
+  // 先隐藏测量自然宽高
+  errorHint.style.left = '-9999px';
+  errorHint.style.top = '-9999px';
+  errorHint.style.transform = 'none';
+
+  requestAnimationFrame(() => {
+    if (selCss) {
+      const MARGIN = 8;
+      const ew = errorHint.offsetWidth;
+      const eh = errorHint.offsetHeight;
+      const mon = findDisplayCssAt(selCss.x + selCss.w / 2, selCss.y + selCss.h / 2);
+      // 水平：选区居中，clamp 到屏幕内
+      let left = selCss.x + (selCss.w - ew) / 2;
+      left = Math.max(mon.x + MARGIN, Math.min(left, mon.x + mon.w - ew - MARGIN));
+      // 垂直：选区上方优先（工具栏在右下，上方空旷）
+      let top = selCss.y - eh - MARGIN;
+      if (top < mon.y + MARGIN) {
+        // 上方不够 → 放选区下方
+        top = selCss.y + selCss.h + MARGIN;
+      }
+      errorHint.style.left = left + 'px';
+      errorHint.style.top = top + 'px';
+    } else {
+      // 无选区：回退屏幕中心
+      errorHint.style.left = '50%';
+      errorHint.style.top = '50%';
+      errorHint.style.transform = 'translate(-50%, -50%)';
+    }
+  });
+
+  setTimeout(() => {
+    errorHint.style.display = 'none';
+    errorHint.style.background = '';
+    errorHint.style.transform = '';
+  }, 2000);
+}
+
+function updateOutputButtonsDisabled() {
+  const overlay = annot.getOverlay();
+  const disabled = ocrBusy || (translationBusy && overlay && overlay.mode === 'translated');
+  ['btn-save', 'btn-pin', 'btn-copy'].forEach((id) => {
+    const btn = document.getElementById(id);
+    if (btn) btn.disabled = disabled;
+  });
+}
+
+/** 工具栏「识别」/「翻译」按钮高亮态：跟随面板当前 tab。
+ *  面板关 → 两个都不亮；面板开 → 当前 tab 对应的按钮亮。 */
+function updateToolbarButtonActive() {
+  const panel = document.getElementById('ocr-panel');
+  const btnOcr = document.getElementById('btn-ocr');
+  const btnTr = document.getElementById('btn-translate');
+  if (!panel) {
+    if (btnOcr) btnOcr.classList.remove('active');
+    if (btnTr) btnTr.classList.remove('active');
+    return;
+  }
+  const tabTranslated = panel.querySelector('.ocr-tab[data-tab="translated"]');
+  const isTranslatedActive = tabTranslated && tabTranslated.classList.contains('active');
+  if (btnOcr) btnOcr.classList.toggle('active', !isTranslatedActive);
+  if (btnTr) btnTr.classList.toggle('active', isTranslatedActive);
+}
+
+/** 把 overlay 里已经翻译好的 line.dstText 回填到面板译文 textarea。
+ *  只在面板存在且不在 loading 态时生效；面板关闭/翻译中都不动它。 */
+function syncPanelTranslatedFromOverlay() {
+  const overlay = annot.getOverlay();
+  const translatedReady = !!(overlay && overlay.lines.length > 0 && overlay.lines.every((line) => hasText(line.dstText)));
+  const panel = document.getElementById('ocr-panel');
+  if (!translatedReady || !panel) return;
+  const translatedTa = panel.querySelector('#ocr-textarea-translated');
+  if (!translatedTa || translatedTa.getAttribute('data-loading') === 'true') return;
+  translatedTa.value = overlay.lines.map((line) => line.dstText).join('\n');
+  translatedTa.removeAttribute('data-stale');
+  const tab = panel.querySelector('.ocr-tab[data-tab="translated"]');
+  if (tab) tab.removeAttribute('data-stale');
+}
+
+/** 兼容包装：同步工具栏按钮 + 面板译文（旧调用点语义不变）。
+ *  优先在新代码里分别调用上面两个细粒度函数。 */
+function updateOverlayButtonsActive() {
+  updateToolbarButtonActive();
+  syncPanelTranslatedFromOverlay();
 }
 
 let cancelInProgress = false;
@@ -1169,6 +1922,7 @@ function enterReadingMode(result) {
 /** 退出阅读模式 */
 function exitReadingMode() {
   hitCanvas.removeAttribute('data-reading');
+  hitCanvas.removeAttribute('data-resizing');
   hitCtx.clearRect(0, 0, hitCanvas.width, hitCanvas.height);
   reading = null;
 }
@@ -1179,23 +1933,49 @@ function bindHitCanvasEvents() {
   if (hitEventsBound) return;
   hitEventsBound = true;
 
-  hitCanvas.addEventListener('mousedown', (e) => {
+  const beginPointerSelection = (kind, e, handle = null) => {
+    const viewportEvent = { offsetX: e.clientX, offsetY: e.clientY };
+    beginSelectionInteraction(kind, viewportEvent, handle);
+    if (selectionInteraction && typeof hitCanvas.setPointerCapture === 'function') {
+      hitCanvas.setPointerCapture(e.pointerId);
+    }
+  };
+
+  hitCanvas.addEventListener('pointerdown', (e) => {
     if (!reading || e.button !== 0) return;
-    e.stopPropagation();
-    e.preventDefault();
+    const handle = getSelectionHandle(e.clientX, e.clientY, selCss);
+    if (handle) {
+      e.stopPropagation();
+      e.preventDefault();
+      hitCanvas.setAttribute('data-resizing', 'true');
+      beginPointerSelection('resize', e, handle);
+      return;
+    }
     let idx = hitTestWord(e.offsetX, e.offsetY);
+    // 选区内任意位置都进入 word 拖选；空白点命中不到 word 时回落到最近 word 起选。
+    // 选区移动交给主 canvas 的"选区外拖动"分支；hit-canvas 不再承载 move 语义，
+    // 避免 OCR 激活后误触把整个选区挪走、连带 invalidate OCR 数据。
     if (idx < 0) idx = nearestWordByLine(e.offsetX, e.offsetY);
     if (idx < 0) return;
+    e.stopPropagation();
+    e.preventDefault();
     reading.dragStart = idx;
     reading.selectionStart = idx;
     reading.selectionEnd = idx;
     redrawHitLayer();
     syncSelectionToPanel();
+    if (typeof hitCanvas.setPointerCapture === 'function') hitCanvas.setPointerCapture(e.pointerId);
   });
 
-  hitCanvas.addEventListener('mousemove', (e) => {
+  hitCanvas.addEventListener('pointermove', (e) => {
+    if (selectionInteraction) {
+      updateSelectionInteraction({ offsetX: e.clientX, offsetY: e.clientY });
+      return;
+    }
     if (!reading) return;
     const idx = hitTestWord(e.offsetX, e.offsetY);
+    // hit-canvas 现在统一是文字选取语义；cursor 始终保持 text（与拖动行为一致）。
+    hitCanvas.style.cursor = 'text';
     if (reading.dragStart !== null) {
       // 拖选中
       const endIdx = idx >= 0 ? idx : nearestWordByLine(e.offsetX, e.offsetY);
@@ -1213,19 +1993,30 @@ function bindHitCanvasEvents() {
     }
   });
 
-  hitCanvas.addEventListener('mouseup', () => {
-    if (!reading) return;
-    reading.dragStart = null;
-  });
+  const finishHitPointer = (e) => {
+    if (selectionInteraction) {
+      hitCanvas.removeAttribute('data-resizing');
+      hitCanvas.style.cursor = 'text';
+      finishSelectionInteraction({ offsetX: e.clientX, offsetY: e.clientY });
+    } else if (reading) {
+      reading.dragStart = null;
+    }
+    if (typeof hitCanvas.hasPointerCapture === 'function' && hitCanvas.hasPointerCapture(e.pointerId)) {
+      hitCanvas.releasePointerCapture(e.pointerId);
+    }
+  };
+  hitCanvas.addEventListener('pointerup', finishHitPointer);
+  hitCanvas.addEventListener('pointercancel', finishHitPointer);
 
   hitCanvas.addEventListener('mouseleave', () => {
-    if (!reading) return;
+    if (!reading || selectionInteraction) return;
     reading.hoverWord = null;
     reading.dragStart = null;
+    hitCanvas.style.cursor = 'text';
     redrawHitLayer();
   });
 
-  // 双击选一整行
+  // 双击选一整行——0.11.10-e：若面板未开则先召唤面板，之后再高亮整行
   hitCanvas.addEventListener('dblclick', (e) => {
     if (!reading) return;
     let idx = hitTestWord(e.offsetX, e.offsetY);
@@ -1238,6 +2029,10 @@ function bindHitCanvasEvents() {
     reading.selectionStart = lo;
     reading.selectionEnd = hi;
     redrawHitLayer();
+    // 面板未开 → 召唤(用缓存,不重跑 OCR);面板已开 → 只同步选中
+    if (!document.getElementById('ocr-panel') && ocrResultCache) {
+      showOcrResult(ocrResultCache);
+    }
     syncSelectionToPanel();
   });
 }
@@ -1285,24 +2080,120 @@ function syncSelectionFromPanel(ta) {
   redrawHitLayer();
 }
 
+/** 按当前 word 选择范围拼出文本，保持后端智能拼接产生的空格/换行。 */
+function getReadingSelectionText() {
+  if (!reading || reading.selectionStart === null || reading.selectionEnd === null) return '';
+  const lo = Math.min(reading.selectionStart, reading.selectionEnd);
+  const hi = Math.max(reading.selectionStart, reading.selectionEnd);
+  const cs = reading.charRanges[lo]?.start;
+  const ce = reading.charRanges[hi]?.end;
+  if (!Number.isInteger(cs) || !Number.isInteger(ce)) return '';
+  return reading.fullText.slice(cs, ce);
+}
 
-//
-// 0.11.9-d：双 tab（原文 / 译文）。工具栏"OCR"按钮打开 → 停原文 tab;
+function copyReadingSelection() {
+  const text = getReadingSelectionText();
+  if (!text) return false;
+  copyToClipboard(text)
+    .then(() => showTransientHint('已复制所选文字'))
+    .catch((e) => console.error('[screenshot] 复制识别文字失败', e));
+  return true;
+}
+
+// OCR 命中 canvas 右键：阅读模式激活时弹菜单（有选区→选区菜单，无选区→基础菜单）。
+// 不再因"无选区"直接取消截图——用户右键意图是弹菜单,不是取消。
+hitCanvas.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  const selText = getReadingSelectionText();
+  showReadingContextMenu(selText || null, e);
+});
+
+/** 阅读模式右键菜单：复制（选区或全文）/ 取消截图。跟随鼠标定位。
+ *  text 为 null 表示无 word 选区（此时复制 = 全文）。 */
+function showReadingContextMenu(text, mouseEvent) {
+  // 清理旧菜单
+  const old = document.getElementById('reading-ctx-menu');
+  if (old) old.remove();
+
+  // 跟随鼠标定位（加边界 clamp 防止超出屏幕）
+  const MARGIN = 8;
+  let x = mouseEvent.clientX;
+  let y = mouseEvent.clientY;
+  const menuW = 140, menuH = 80;
+  const mon = findDisplayCssAt(x, y);
+  if (x + menuW > mon.x + mon.w - MARGIN) x = mon.x + mon.w - menuW - MARGIN;
+  if (y + menuH > mon.y + mon.h - MARGIN) y = mon.y + mon.h - menuH - MARGIN;
+  x = Math.max(mon.x + MARGIN, x);
+  y = Math.max(mon.y + MARGIN, y);
+
+  const menu = document.createElement('div');
+  menu.id = 'reading-ctx-menu';
+  menu.style.cssText = `
+    position: fixed; left: ${x}px; top: ${y}px; z-index: 9999;
+    background: rgba(30,30,30,0.96); border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 8px; padding: 4px; min-width: 120px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+    font-family: "Segoe UI","Microsoft YaHei",sans-serif; font-size: 13px;
+  `;
+  const makeItem = (label, fn) => {
+    const btn = document.createElement('div');
+    btn.textContent = label;
+    btn.style.cssText = `
+      padding: 6px 12px; color: #ddd; cursor: pointer; border-radius: 6px;
+    `;
+    btn.addEventListener('mouseenter', () => btn.style.background = 'rgba(255,255,255,0.08)');
+    btn.addEventListener('mouseleave', () => btn.style.background = '');
+    btn.addEventListener('click', () => { fn(); menu.remove(); });
+    return btn;
+  };
+
+  // 复制：有选区→选区文本，无选区→全文
+  const copyLabel = text ? '复制' : '复制全文';
+  const copyText = text || (reading ? reading.fullText : '');
+  if (copyText) {
+    menu.appendChild(makeItem(copyLabel, () => {
+      copyToClipboard(copyText)
+        .then(() => showTransientHint(text ? '已复制所选文字' : '已复制全文'))
+        .catch((e) => console.error('复制失败', e));
+    }));
+  }
+
+  // 取消截图
+  menu.appendChild(makeItem('取消截图', () => doCancel()));
+
+  document.body.appendChild(menu);
+
+  // 点击其他地方关闭
+  const close = (ev) => {
+    if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('pointerdown', close); }
+  };
+  setTimeout(() => document.addEventListener('pointerdown', close), 0);
+}
+
+
 // "翻译"按钮打开 → 自动 OCR + translate → 切到译文 tab。面板内"翻译"
 // 按钮独立触发翻译。修改原文 → 译文标"过期"(斜纹底 + 橙点)。
 //
 // 参数:
-//   result:       { text, lines, words?, text_angle? } — OCR 结果
-//   options.autoTranslate: 打开面板后立刻触发翻译 + 切到译文 tab
+//   result:           { text, lines, words?, text_angle? } — OCR 结果
+//   options.tab:      'source' | 'translated' — 打开时默认激活的 tab
+//   options.showOverlay: 是否在图上嵌字（识别路径=false / 翻译路径=true）
 
 function showOcrResult(result, options = {}) {
   const old = document.getElementById('ocr-panel');
   if (old) old.remove();
-  // 关闭上次可能残留的阅读模式(比如同一 overlay 内多次 OCR)
-  exitReadingMode();
+  // 0.11.10-e：不再自动 exitReadingMode——reading 生命周期由 overlay 管理,
+  // 面板召唤/关闭独立于 reading。这样打开面板不会打断图上的 word 拖选态。
+  // 只在没有既有 reading 时才 enterReadingMode(下方判断)。
 
   const text = (result && result.text) || '';
   const initialText = text || '（未识别到文字）';
+  const initialTab = options.tab === 'translated' ? 'translated' : 'source';
+  // 翻译按钮文案：已有译文 → 「重新翻译」，否则 → 「翻译」
+  const overlayForLabel = annot.getOverlay();
+  const hasTranslation = overlayForLabel && overlayForLabel.lines.length > 0
+    && overlayForLabel.lines.every((l) => hasText(l.dstText));
+  const translateLabel = hasTranslation ? '重新翻译' : '翻译';
 
   const panel = document.createElement('div');
   panel.id = 'ocr-panel';
@@ -1310,29 +2201,50 @@ function showOcrResult(result, options = {}) {
   panel.innerHTML = `
     <div class="ocr-panel-header">
       <div class="ocr-tabs">
-        <button class="ocr-tab active" data-tab="source">原文</button>
-        <button class="ocr-tab" data-tab="translated">译文 <span class="stale-dot" aria-hidden="true"></span></button>
+        <button class="ocr-tab ${initialTab === 'source' ? 'active' : ''}" data-tab="source">原文</button>
+        <button class="ocr-tab ${initialTab === 'translated' ? 'active' : ''}" data-tab="translated">译文 <span class="stale-dot" aria-hidden="true"></span></button>
       </div>
-      <button id="ocr-close" class="tool-btn">✕</button>
+      <div class="ocr-panel-actions">
+        <button id="ocr-copy" class="tool-btn tool-btn-primary" ${text ? '' : 'disabled'}>复制</button>
+        <button id="ocr-translate" class="tool-btn" ${text ? '' : 'disabled'} title="翻译当前文本">${translateLabel}</button>
+      </div>
+      <button id="ocr-close" class="tool-btn" title="关闭面板">✕</button>
     </div>
     <textarea id="ocr-textarea-source" class="ocr-panel-textarea" spellcheck="false"></textarea>
-    <textarea id="ocr-textarea-translated" class="ocr-panel-textarea" spellcheck="false" hidden placeholder="点击"翻译"按钮生成译文"></textarea>
-    <div class="ocr-panel-footer">
-      <span class="ocr-panel-hint">可自由选词复制或编辑</span>
-      <button id="ocr-trim-spaces" class="tool-btn" ${text ? '' : 'disabled'} title="合并连续空白 + 去除首尾空格">移除空格</button>
-      <button id="ocr-translate" class="tool-btn" ${text ? '' : 'disabled'} title="翻译当前文本">翻译</button>
-      <button id="ocr-copy" class="tool-btn tool-btn-primary" ${text ? '' : 'disabled'}>复制</button>
+    <textarea id="ocr-textarea-translated" class="ocr-panel-textarea" spellcheck="false" hidden placeholder="点击翻译按钮生成译文"></textarea>
+    <div class="ocr-panel-adv">
+      <label class="ocr-adv-item">
+        <span>嵌图背景</span>
+        <select id="ocr-bg-strategy">
+          <option value="average">平均色</option>
+          <option value="blur">高斯模糊</option>
+          <option value="solid">半透明板</option>
+        </select>
+      </label>
+      <label class="ocr-adv-item">
+        <span>字号</span>
+        <input id="ocr-font-scale" type="range" min="60" max="140" step="10" value="100" title="嵌图字号缩放(60%-140%)" />
+        <span id="ocr-font-scale-val">100%</span>
+      </label>
     </div>
   `;
   document.body.appendChild(panel);
+
+  // 识别路径（initialTab=source）：隐藏 adv 区域（嵌图背景/字号 仅翻译路径有意义）
+  if (initialTab !== 'translated') {
+    const advSection = panel.querySelector('.ocr-panel-adv');
+    if (advSection) advSection.style.display = 'none';
+  }
 
   const sourceTa = panel.querySelector('#ocr-textarea-source');
   const translatedTa = panel.querySelector('#ocr-textarea-translated');
   const tabSource = panel.querySelector('.ocr-tab[data-tab="source"]');
   const tabTranslated = panel.querySelector('.ocr-tab[data-tab="translated"]');
   const translateBtn = panel.querySelector('#ocr-translate');
-  const trimBtn = panel.querySelector('#ocr-trim-spaces');
   const copyBtn = panel.querySelector('#ocr-copy');
+  const bgStrategySelect = panel.querySelector('#ocr-bg-strategy');
+  const fontScaleInput = panel.querySelector('#ocr-font-scale');
+  const fontScaleVal = panel.querySelector('#ocr-font-scale-val');
 
   sourceTa.value = initialText;
 
@@ -1350,31 +2262,85 @@ function showOcrResult(result, options = {}) {
   const taH = Math.max(TA_MIN, Math.min(TA_MAX, textLines * lineH));
   panel.style.height = (taH + PANEL_CHROME) + 'px';
 
-  // 屏定位（多屏 clamp，选区所在屏矩形约束四边）
+  // 抽屉锚定触发按钮：识别路径锚 btn-ocr，翻译路径锚 btn-translate。
+  // 锚点正下方优先，空间不足翻上方，仍不够退到屏内 clamp。
   const MARGIN = 8;
   const mon = findDisplayCssAt(selCss.x + selCss.w / 2, selCss.y + selCss.h / 2);
   const pw = panel.offsetWidth;
   const ph = panel.offsetHeight;
+  // 统一锚定到扫描按钮（无论识别还是翻译路径）
+  const anchorBtn = document.getElementById('btn-ocr');
+  const anchorRect = anchorBtn ? anchorBtn.getBoundingClientRect() : toolbar.getBoundingClientRect();
 
-  let left = Math.max(mon.x + MARGIN, selCss.x);
-  if (left + pw > mon.x + mon.w - MARGIN) {
-    left = Math.max(mon.x + MARGIN, mon.x + mon.w - MARGIN - pw);
-  }
-  let top;
-  const topAbove = selCss.y - ph - MARGIN;
-  const topBelow = selCss.y + selCss.h + MARGIN;
-  if (topAbove >= mon.y + MARGIN) top = topAbove;
-  else if (topBelow + ph <= mon.y + mon.h - MARGIN) top = topBelow;
-  else top = Math.max(mon.y + MARGIN, mon.y + mon.h - MARGIN - ph);
+  let left = anchorRect.left;
+  if (left + pw > mon.x + mon.w - MARGIN) left = mon.x + mon.w - MARGIN - pw;
+  left = Math.max(mon.x + MARGIN, left);
+
+  let top = anchorRect.bottom + 4;
+  if (top + ph > mon.y + mon.h - MARGIN) top = anchorRect.top - ph - 4;
+  if (top < mon.y + MARGIN) top = Math.max(mon.y + MARGIN, mon.y + mon.h - MARGIN - ph);
   panel.style.left = left + 'px';
   panel.style.top = top + 'px';
 
   // 面板内交互不应触发 overlay 的 blur 隐藏
   panel.addEventListener('mousedown', (e) => e.stopPropagation());
   document.getElementById('ocr-close').addEventListener('click', () => {
-    exitReadingMode();
     panel.remove();
+    updateToolbarButtonActive();
   });
+
+  // ── 面板拖动（复用工具栏 drag 机制：header 抓手 + 多屏 clamp） ──
+  // 与工具栏共用 document mousemove/mouseup，靠各自的 dragging 标志位隔离。
+  const header = panel.querySelector('.ocr-panel-header');
+  if (header) {
+    let dragging = false;
+    let offsetX = 0, offsetY = 0;
+    header.addEventListener('mousedown', (e) => {
+      // 点 close 按钮或 toggle 控件时不启动拖动
+      if (e.target.closest('#ocr-close')) return;
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      dragging = true;
+      const rect = panel.getBoundingClientRect();
+      offsetX = e.clientX - rect.left;
+      offsetY = e.clientY - rect.top;
+      document.body.style.cursor = 'grabbing';
+    });
+    const onMove = (e) => {
+      if (!dragging) return;
+      // 自检：面板已被移除（showOcrResult 重开/外部 remove）→ 清理自身监听
+      if (!document.body.contains(panel)) {
+        dragging = false;
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        document.body.style.cursor = '';
+        return;
+      }
+      const pwl = panel.offsetWidth;
+      const phl = panel.offsetHeight;
+      const monMove = findDisplayCssAt(e.clientX, e.clientY);
+      let nl = e.clientX - offsetX;
+      let nt = e.clientY - offsetY;
+      nl = Math.max(monMove.x + MARGIN, Math.min(nl, monMove.x + monMove.w - pwl - MARGIN));
+      nt = Math.max(monMove.y + MARGIN, Math.min(nt, monMove.y + monMove.h - phl - MARGIN));
+      panel.style.left = nl + 'px';
+      panel.style.top = nt + 'px';
+    };
+    const onUp = () => {
+      if (!dragging) return;
+      dragging = false;
+      document.body.style.cursor = '';
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    // close 按钮显式清理一次（其余路径靠 onMove 自检回收）
+    const cleanup = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.getElementById('ocr-close').addEventListener('click', cleanup);
+  }
 
   // ── Tab 切换 ─────────────────────────────────────
   const showTab = (name) => {
@@ -1383,11 +2349,48 @@ function showOcrResult(result, options = {}) {
     tabTranslated.classList.toggle('active', !isSource);
     sourceTa.hidden = !isSource;
     translatedTa.hidden = isSource;
-    // 焦点跟随
     (isSource ? sourceTa : translatedTa).focus();
+    // 切到译文 tab 时：确保 overlay.mode = translated + 自动触发翻译（仅首次）
+    if (!isSource) {
+      const overlay = annot.getOverlay();
+      // 确保 overlay 切到 translated 模式（从识别路径切过来时 mode 可能是 null）
+      if (overlay && overlay.mode !== 'translated') {
+        annot.setOverlayMode('translated');
+        redrawAnnotFull();
+      }
+      // 只有当所有行都没有翻译结果时才自动触发（首次翻译）
+      // 如果已有部分/全部译文，说明之前翻译过，不再重复调用
+      const needsTranslation = overlay && overlay.lines.length > 0
+        && overlay.lines.every((l) => !hasText(l.dstText));
+      if (needsTranslation) {
+        doTranslate();
+      }
+    } else {
+      // 切回原文 tab 时：overlay.mode 改回 null（图上不嵌字，保留 lines 供再次切换）
+      const overlay = annot.getOverlay();
+      if (overlay && overlay.mode !== null) {
+        annot.setOverlayMode(null);
+        redrawAnnotFull();
+      }
+    }
+    // tab 切换后同步工具栏按钮高亮
+    updateToolbarButtonActive();
   };
   tabSource.addEventListener('click', () => showTab('source'));
   tabTranslated.addEventListener('click', () => showTab('translated'));
+
+  // 面板与 overlayLayer 共享同一份当前数据，而不是另起一套翻译状态。
+  const overlayAtOpen = annot.getOverlay();
+  if (overlayAtOpen) {
+    const translatedText = overlayAtOpen.lines.map((line) => line.dstText || '').join('\n');
+    if (hasText(translatedText)) translatedTa.value = translatedText;
+    // initialTab 已在模板里设了 active class；这里只同步 textarea 显示
+    sourceTa.hidden = initialTab !== 'source';
+    translatedTa.hidden = initialTab !== 'translated';
+  } else {
+    sourceTa.hidden = initialTab !== 'source';
+    translatedTa.hidden = initialTab !== 'translated';
+  }
 
   // ── 译文过期标记 ─────────────────────────────────
   // 原文改动 → 译文标 stale;新翻译时清 stale
@@ -1397,60 +2400,62 @@ function showOcrResult(result, options = {}) {
   };
 
   // ── 移除空格（保留兜底） ──────────────────────────
-  // 0.11.9-b 后端已智能拼接,该按钮退化为清理残余不间断空格等;
-  // toggle 语义不变(按一次清, 再按一次原文)。
-  let originalText = sourceTa.value;
-  trimBtn.dataset.trimmed = 'false';
+  // ── 原文编辑 → 译文过期 ──────────────────
   sourceTa.addEventListener('input', () => {
-    originalText = sourceTa.value;
-    if (trimBtn.dataset.trimmed === 'true') {
-      trimBtn.dataset.trimmed = 'false';
-      trimBtn.textContent = '移除空格';
-    }
-    // 用户改原文 → 译文过期
     if (translatedTa.value) markTranslatedStale(true);
-    // 0.11.9-c：文本被手动改动,反向映射失效——停止 textarea→图 联动
-    if (reading && !reading.panelDirty) {
-      reading.panelDirty = true;
-      // 提示条(可选):这里省略,仅通过 tab 视觉不主动做提示,避免面板拥挤
-    }
   });
 
-  // 0.11.9-c：textarea 选中变化 → 图上高亮反查
-  sourceTa.addEventListener('select', () => syncSelectionFromPanel(sourceTa));
-  sourceTa.addEventListener('keyup', () => syncSelectionFromPanel(sourceTa));
-  sourceTa.addEventListener('click', () => syncSelectionFromPanel(sourceTa));
-  trimBtn.addEventListener('click', () => {
-    if (trimBtn.dataset.trimmed === 'true') {
-      trimBtn.dataset.trimmed = 'false';
-      trimBtn.textContent = '移除空格';
-      sourceTa.value = originalText;
-    } else {
-      const trimmed = originalText
-        .split(/\r?\n/)
-        .map((line) => line.replace(/[^\S\r\n]+/g, '').trim())
-        .join('\n')
-        .replace(/\n{3,}/g, '\n\n');
-      trimBtn.dataset.trimmed = 'true';
-      trimBtn.textContent = '显示原文';
-      sourceTa.value = trimmed;
-    }
-    sourceTa.focus();
-  });
-
-  // ── 复制（复制当前 tab 内容） ─────────────────────
+  // ── 复制（复制当前 tab 的选中内容；无选区时复制全文） ──
   copyBtn.addEventListener('click', () => {
     const currentTa = sourceTa.hidden ? translatedTa : sourceTa;
-    const value = currentTa.value;
+    const selected = currentTa.value.slice(currentTa.selectionStart, currentTa.selectionEnd);
+    const value = selected || currentTa.value;
     if (value) {
-      navigator.clipboard.writeText(value).catch((e) => console.error('复制失败', e));
+      copyToClipboard(value)
+        .then(() => showTransientHint(selected ? '已复制所选文字' : '已复制全文'))
+        .catch((e) => console.error('复制失败', e));
     }
-    exitReadingMode();
     panel.remove();
+    updateToolbarButtonActive();
   });
+
+  // ── 背景策略切换（0.11.10-i）─────────────────────
+  // 回读当前 overlay 的 bgStrategy 到 select;change 后触发 overlay 重建 → 重绘
+  if (bgStrategySelect) {
+    const overlayCur = annot.getOverlay();
+    if (overlayCur && overlayCur.bgStrategy) {
+      bgStrategySelect.value = overlayCur.bgStrategy;
+    }
+    bgStrategySelect.addEventListener('click', (e) => e.stopPropagation());
+    bgStrategySelect.addEventListener('change', () => {
+      const cur = annot.getOverlay();
+      if (!cur) return;
+      annot.setOverlay({
+        lines: cur.lines,
+        mode: cur.mode,
+        bgStrategy: bgStrategySelect.value,
+        targetLang: cur.translationTargetLang,
+      });
+      redrawAnnotFull();
+    });
+  }
+
+  // ── 字号微调 ─────────────────────────────────
+  if (fontScaleInput) {
+    const overlayCur = annot.getOverlay();
+    if (overlayCur) fontScaleInput.value = String(Math.round((overlayCur.fontScale ?? 1.0) * 100));
+    fontScaleVal.textContent = fontScaleInput.value + '%';
+    fontScaleInput.addEventListener('input', () => {
+      const pct = parseInt(fontScaleInput.value, 10);
+      fontScaleVal.textContent = pct + '%';
+      annot.setOverlayFontScale(pct / 100);
+      redrawAnnotFull();
+    });
+  }
 
   // ── 翻译 ─────────────────────────────────────────
   let translating = false;
+  let loadingAnimTimer = null;  // 0.11.10-k：loading 动画定时器
   const doTranslate = async () => {
     if (translating) return;
     const src = sourceTa.value.trim();
@@ -1460,31 +2465,80 @@ function showOcrResult(result, options = {}) {
     translateBtn.textContent = '翻译中…';
     translatedTa.setAttribute('data-loading', 'true');
     translatedTa.value = '翻译中,请稍候…';
-    showTab('translated');
-    try {
-      const dst = await translateText(src);
-      translatedTa.value = dst;
-      markTranslatedStale(false);
-    } catch (e) {
-      console.error('[screenshot] 翻译失败', e);
-      translatedTa.value = `翻译失败：${e}`;
-    } finally {
+    // 0.11.10-k：翻译中在嵌图中心显示 loading 动画
+    annot.setOverlayLoading(true);
+    // 启动定时器持续重绘实现旋转动画（每 50ms 一帧）
+    loadingAnimTimer = setInterval(() => {
+      if (!annot.isOverlayLoading()) {
+        clearInterval(loadingAnimTimer);
+        loadingAnimTimer = null;
+        return;
+      }
+      redrawAnnotFull();
+    }, 50);
+    // 注意：不在这里调 showTab('translated')，调用方已负责切 tab
+    const overlayLang = annot.getOverlay()?.translationTargetLang;
+    requestOverlayTranslation(overlayLang);
+    // 轮询等待翻译完成——每 100ms 检查 overlay 是否已回填译文
+    const startTime = Date.now();
+    const waitForTranslation = () => {
+      const latest = annot.getOverlay();
+      const allTranslated = latest && latest.lines.length > 0
+        && latest.lines.every((line) => hasText(line.dstText));
+      if (allTranslated) {
+        // 翻译完成 → 同步 textarea + 结束 loading
+        translating = false;
+        translateBtn.disabled = false;
+        translateBtn.textContent = '重新翻译';
+        translatedTa.removeAttribute('data-loading');
+        if (loadingAnimTimer) { clearInterval(loadingAnimTimer); loadingAnimTimer = null; }
+        annot.setOverlayLoading(false);
+        translatedTa.value = latest.lines.map((line) => line.dstText || '').join('\n');
+        markTranslatedStale(false);
+        return;
+      }
+      // 翻译进行中 →更新进度提示
+      if (translationBusy) {
+        const done = latest ? latest.lines.filter((l) => hasText(l.dstText)).length : 0;
+        const total = latest ? latest.lines.length : 0;
+        if (total > 0 && done > 0) {
+          translatedTa.value = `翻译中 ${done}/${total}…`;
+        }
+        if (Date.now() - startTime < 30000) {
+          setTimeout(waitForTranslation, 100);
+          return;
+        }
+      }
+      // 超时或翻译结束但未全部完成
+      if (loadingAnimTimer) { clearInterval(loadingAnimTimer); loadingAnimTimer = null; }
+      annot.setOverlayLoading(false);
       translating = false;
       translateBtn.disabled = false;
-      translateBtn.textContent = '翻译';
+      translateBtn.textContent = '重新翻译';
       translatedTa.removeAttribute('data-loading');
-    }
+      if (!translationBusy && !(latest && latest.lines.some((l) => hasText(l.dstText)))) {
+        translatedTa.value = '翻译失败，请重试';
+      }
+    };
+    setTimeout(waitForTranslation, 100);
   };
-  translateBtn.addEventListener('click', doTranslate);
+  translateBtn.addEventListener('click', () => {
+    // 点击翻译/重新翻译 → 跳到译文 tab + 触发翻译
+    showTab('translated');
+    // 识别路径下首次点翻译：显示 adv 区域 + 确保 overlay 切到 translated 模式
+    const advSection = panel.querySelector('.ocr-panel-adv');
+    if (advSection) advSection.style.display = '';
+    const overlay = annot.getOverlay();
+    if (overlay && overlay.mode !== 'translated') {
+      annot.setOverlayMode('translated');
+    }
+    doTranslate();
+  });
 
-  // ── 一条龙：工具栏"翻译"按钮直接进面板并翻译 ──
-  if (options.autoTranslate && text) {
-    // 面板首次渲染后触发,不阻塞 UI
-    setTimeout(doTranslate, 0);
-  }
-
-  // ── 0.11.9-c：启动阅读模式（有 words 数据才启用） ──
-  if (result && Array.isArray(result.words) && result.words.length > 0) {
+  // 0.11.10-e：reading 生命周期与 overlay 绑定,而非与面板绑定。
+  //   - overlay 存在时,activateOverlay 里已 enterReadingMode,此处只补齐 result.words 数据。
+  //   - overlay 不存在时(旧路径:showOcrResult 被独立调用),仍需 enterReadingMode。
+  if (result && Array.isArray(result.words) && result.words.length > 0 && !reading) {
     enterReadingMode(result);
   }
 }
@@ -1685,11 +2739,26 @@ function bindToolbar() {
     document.querySelectorAll('.dropdown').forEach((d) => d.setAttribute('data-open', 'false'));
   }
 
+  function positionDropdown(dropdown) {
+    if (!dropdown) return;
+    dropdown.removeAttribute('data-placement');
+    const wrap = dropdown.closest('.dropdown-wrap');
+    const anchor = wrap ? wrap.getBoundingClientRect() : toolbar.getBoundingClientRect();
+    const mon = findDisplayCssAt(anchor.left, anchor.top);
+    dropdown.style.visibility = 'hidden';
+    dropdown.setAttribute('data-open', 'true');
+    const dh = dropdown.offsetHeight;
+    if (anchor.bottom + 4 + dh > mon.y + mon.h - 8 && anchor.top - 4 - dh >= mon.y + 8) {
+      dropdown.setAttribute('data-placement', 'top');
+    }
+    dropdown.style.visibility = '';
+  }
+
   /** 切换某个下拉的展开状态（打开时关掉其他） */
   function toggleDropdown(dropdown) {
     const willOpen = dropdown.getAttribute('data-open') !== 'true';
     closeAllDropdowns();
-    dropdown.setAttribute('data-open', willOpen ? 'true' : 'false');
+    if (willOpen) positionDropdown(dropdown);
   }
 
   // 触发器（split-caret / 单体 dropdown-trigger 通用）
@@ -1738,6 +2807,7 @@ function bindToolbar() {
 
   /** 工具 → 所属分组（决定同步哪个 split-main 的图标 + 哪个下拉 item 高亮） */
   const TOOL_GROUPS = {
+    select: 'direct',
     rect: 'shape', ellipse: 'shape',
     arrow: 'stroke', pencil: 'stroke',
     'highlight-multiply': 'stroke', 'highlight-translucent': 'stroke',
@@ -1756,6 +2826,12 @@ function bindToolbar() {
 
   function selectTool(tool) {
     annot.setTool(tool);
+    canvas.setAttribute('data-tool', tool);
+    updateSelectionCursor(-1, -1);
+    if (selCss) drawFinalSelection();
+    // 0.11.10-a：把当前工具同步到 hit-canvas 的 data-tool 属性，CSS 据此决定
+    // pointer-events（仅 select 工具下 hit-canvas 接收鼠标）
+    hitCanvas.setAttribute('data-tool', tool);
     // 清除所有工具入口 active（split-main、下拉 item、直接按钮）
     document.querySelectorAll('.split-main, .tool-direct').forEach((b) => b.classList.remove('active'));
     document.querySelectorAll('.dropdown-item[data-tool]').forEach((b) => b.classList.remove('active'));

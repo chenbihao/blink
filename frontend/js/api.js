@@ -147,6 +147,14 @@ export function translateText(text, targetLang) {
 }
 
 /**
+ * 0.11.10-g:批量翻译多行文本。输入 `lines[i]` → 输出 `results[i]`。
+ * 单行失败降级到原文（无错误传播），保序。
+ */
+export function translateLines(lines, targetLang) {
+  return invoke("translate_lines", { lines, targetLang: targetLang ?? null });
+}
+
+/**
  * **临时**（0.11.7-f 调试用）：把前端消息转发到后端 tracing 控制台。
  * TODO(0.11.7 收尾)：0.11.7 稳定后可移除。
  */

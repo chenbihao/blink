@@ -22,9 +22,22 @@ use std::io::{self, BufRead, Write};
 
 use serde_json::Value;
 
-use engine::TranslateEngine;
+use engine::{TranslateEngine, EngineRequest};
 use engines::{TencentEngine, AliEngine, BaiduEngine, YoudaoEngine, DeeplEngine};
 use protocol::{CoreToPlugin, PluginToCore, HttpRequest, PluginResponse, ToolResultPayload, PluginError, PluginItem, PluginAction};
+
+/// HTTP 请求 id 全局计数器。
+///
+/// 旧实现用 `chrono::Local::now().timestamp_millis()` 生成 id,批量并发时同毫秒到达的请求
+/// 会生成相同 id,导致 `pending` HashMap key 被覆盖,response 变孤儿（"unknown request"）。
+/// 改用进程内单调递增计数器,彻底消除碰撞（插件是单进程,无需跨进程协调）。
+static HTTP_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 生成进程内唯一的 HTTP 请求 id。格式 `tr_{seq}`,seq 单调递增。
+fn next_http_id() -> String {
+    let seq = HTTP_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("tr_{seq}")
+}
 
 /// 引擎显示名称（1:1 对齐 Python）
 const ENGINE_NAMES: &[(&str, &str)] = &[
@@ -112,7 +125,104 @@ fn auto_swap_lang(text: &str, target_lang: &str) -> String {
     if detected == "zh" { "en".into() } else { "zh".into() }
 }
 
-// ── 主循环（HTTP 代理状态机）─────────────────────────────────────────────────
+/// 清除文本中的 Unicode 私用区字符(U+E000..=U+F8FF)。
+///
+/// 私用区字符可能来自 OCR 识别噪声或上游拼接残留,送翻译前必须清除,
+/// 否则与批量 tag 标记混淆导致解析失败。
+fn strip_private_use_chars(s: &str) -> String {
+    s.chars().filter(|c| !('\u{E000}'..='\u{F8FF}').contains(c)).collect()
+}
+
+/// 批量翻译的 tag 边界字符——使用 Unicode 私用区(U+E000 / U+E001)。
+///
+/// 私用区字符不属于任何自然语言词表,翻译引擎无法"翻译"它们,几乎只能原样透传。
+/// 对比旧实现 `[[BLINK_0]]`(纯 ASCII 标点 + 英文词),可能被引擎识别为:
+///   - markdown 风格标记 → 改写
+///   - 未知英文词 → 翻成"闪烁"
+///   - 数字 → 全角化
+/// 私用区字符从源头规避这些风险。
+const TAG_OPEN: char = '\u{E000}';
+const TAG_CLOSE: char = '\u{E001}';
+
+/// 给批量文本加稳定 tag，让只支持单字符串的翻译引擎也能一次请求后按原顺序拆回。
+///
+/// 格式:`\u{E000}0\u{E001}\n原文行0\n\n\u{E000}1\u{E001}\n原文行1`
+/// tag 由两个私用区字符包夹一个数字组成,引擎无法翻译私用区字符,
+/// 数字即使被全角化,parse 时也做全角→半角归一化。
+fn build_tagged_batch(texts: &[String]) -> String {
+    texts
+        .iter()
+        .enumerate()
+        .map(|(i, text)| format!("{TAG_OPEN}{i}{TAG_CLOSE}\n{text}"))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// 从翻译结果中按 tag 恢复顺序。任一 tag 缺失或重复都视为失败，交给 core 单行降级。
+fn parse_tagged_batch(result: &str, count: usize) -> Option<Vec<String>> {
+    let mut positions = Vec::with_capacity(count);
+    for i in 0..count {
+        // 同时匹配半角和全角数字(引擎可能把 0 全角化成 ０)
+        let tag_patterns = [
+            format!("{TAG_OPEN}{i}{TAG_CLOSE}"),
+            format!("{TAG_OPEN}{}{TAG_CLOSE}", fullwidth_digit(i)),
+        ];
+        let found = tag_patterns.iter().find_map(|tag| {
+            let start = result.find(tag)?;
+            if result[start + tag.len()..].contains(tag.as_str()) {
+                // 同一 tag 出现两次 → 视为乱序,拒绝
+                return None;
+            }
+            Some((start, tag.len()))
+        });
+        let Some(pos) = found else { return None };
+        positions.push(pos);
+    }
+    positions.sort_by_key(|(start, _)| *start);
+
+    let mut values = vec![String::new(); count];
+    for (order, &(start, tag_len)) in positions.iter().enumerate() {
+        let tag = &result[start..start + tag_len];
+        // 提取两个私用区字符中间的数字(可能是全角)
+        let inner: String = tag.chars()
+            .filter(|c| *c != TAG_OPEN && *c != TAG_CLOSE)
+            .collect();
+        let index = parse_digit_mixed(&inner)?;
+        let end = positions.get(order + 1).map(|(next, _)| *next).unwrap_or(result.len());
+        let value = result[start + tag_len..end].trim();
+        if value.is_empty() {
+            return None;
+        }
+        values[index] = value.to_string();
+    }
+    Some(values)
+}
+
+/// 数字 → 全角字符串(应对引擎把 ASCII 数字全角化)。
+/// 0→０, 1→１, ..., 9→９, 10→１０
+fn fullwidth_digit(n: usize) -> String {
+    n.to_string().chars().map(|c| {
+        if c.is_ascii_digit() {
+            char::from_u32(c as u32 - b'0' as u32 + 0xFF10).unwrap_or(c)
+        } else {
+            c
+        }
+    }).collect()
+}
+
+/// 解析 tag 内部的数字(容忍全角/半角混用)。
+fn parse_digit_mixed(s: &str) -> Option<usize> {
+    let normalized: String = s.chars().map(|c| {
+        // 全角数字 ０(0xFF10) ~ ９(0xFF19) → 半角
+        if (0xFF10..=0xFF19).contains(&(c as u32)) {
+            char::from_digit(c as u32 - 0xFF10, 10).unwrap_or(c)
+        } else {
+            c
+        }
+    }).collect();
+    normalized.parse::<usize>().ok()
+}
+
 
 /// 待处理的 HTTP 请求上下文（发 http_request 后等 http_response 恢复）。
 struct PendingTranslate {
@@ -126,6 +236,14 @@ struct PendingTranslate {
     settings: Value,
     /// 已尝试的引擎（含主引擎，降级时跳过）
     tried_engines: Vec<String>,
+    /// 批量 tool 的原始行；None 表示普通 query/translate。
+    batch_originals: Option<Vec<String>>,
+    /// 批量请求是否走引擎原生批量 API（true=parse_batch_response / false=parse_tagged_batch）。
+    /// 降级到下一个引擎时按该引擎能力重新判定。
+    batch_native: bool,
+    /// tag 拼接是否已被某引擎破坏过。true 后续不再尝试 tag,直接走单行并发兜底。
+    /// (一家引擎破坏 tag,换一家大概率也破坏;tag 在多引擎间不可靠)
+    tag_poisoned: bool,
 }
 
 fn main() {
@@ -184,15 +302,15 @@ fn handle_query<W: Write>(
     let engine = settings.get("default_engine").and_then(Value::as_str).unwrap_or("youdao").to_string();
     let target_lang = settings.get("target_lang").and_then(Value::as_str).unwrap_or("zh").to_string();
 
-    let text = query.trim();
+    let text = strip_private_use_chars(query.trim());
     if text.is_empty() {
         let resp = PluginToCore::Response(PluginResponse { id, items: vec![], error: None });
         send_message(writer, &resp);
         return;
     }
 
-    let original_text = text.to_string();
-    let processed = preprocess_code_identifiers(text);
+    let original_text = text.clone();
+    let processed = preprocess_code_identifiers(&text);
     let target_lang = auto_swap_lang(&processed, &target_lang);
     let fallback_order = parse_fallback_order(&settings);
 
@@ -213,20 +331,10 @@ fn handle_tool_call<W: Write>(
     let settings = settings.unwrap_or(Value::Null);
     let engine = settings.get("default_engine").and_then(Value::as_str).unwrap_or("youdao").to_string();
 
-    if tool_name != "translate" {
+    if tool_name != "translate" && tool_name != "translate_batch" {
         let resp = PluginToCore::ToolResult(ToolResultPayload {
             id, items: vec![],
             error: Some(PluginError { code: "UNKNOWN_TOOL".into(), message: format!("未知 tool: {tool_name}") }),
-        });
-        send_message(writer, &resp);
-        return;
-    }
-
-    let text = arguments.get("text").and_then(Value::as_str).unwrap_or("").trim().to_string();
-    if text.is_empty() {
-        let resp = PluginToCore::ToolResult(ToolResultPayload {
-            id, items: vec![],
-            error: Some(PluginError { code: "MISSING_ARG".into(), message: "缺少 text 参数".into() }),
         });
         send_message(writer, &resp);
         return;
@@ -236,8 +344,50 @@ fn handle_tool_call<W: Write>(
     if target_lang.is_empty() || target_lang == "auto" {
         target_lang = settings.get("target_lang").and_then(Value::as_str).unwrap_or("zh").to_string();
     }
-    let target_lang = auto_swap_lang(&text, &target_lang);
     let fallback_order = parse_fallback_order(&settings);
+
+    if tool_name == "translate_batch" {
+        let Some(raw_texts) = arguments.get("texts").and_then(Value::as_array) else {
+            let resp = PluginToCore::ToolResult(ToolResultPayload {
+                id, items: vec![],
+                error: Some(PluginError { code: "MISSING_ARG".into(), message: "缺少 texts 参数".into() }),
+            });
+            send_message(writer, &resp);
+            return;
+        };
+        let texts: Vec<String> = raw_texts
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .map(strip_private_use_chars)
+            .collect();
+        if texts.is_empty() || texts.iter().any(String::is_empty) {
+            let resp = PluginToCore::ToolResult(ToolResultPayload {
+                id, items: vec![],
+                error: Some(PluginError { code: "MISSING_ARG".into(), message: "texts 必须是非空字符串数组".into() }),
+            });
+            send_message(writer, &resp);
+            return;
+        }
+        let tagged = build_tagged_batch(&texts);
+        let detection_text = texts.join("\n");
+        let target_lang = auto_swap_lang(&detection_text, &target_lang);
+        eprintln!("[translate] batch tool_call: id={id}, count={}, target={target_lang}", texts.len());
+        try_translate_batch(writer, pending, id, tagged, texts, target_lang, engine, fallback_order, settings);
+        return;
+    }
+
+    let text = strip_private_use_chars(arguments.get("text").and_then(Value::as_str).unwrap_or("").trim());
+    if text.is_empty() {
+        let resp = PluginToCore::ToolResult(ToolResultPayload {
+            id, items: vec![],
+            error: Some(PluginError { code: "MISSING_ARG".into(), message: "缺少 text 参数".into() }),
+        });
+        send_message(writer, &resp);
+        return;
+    }
+
+    let target_lang = auto_swap_lang(&text, &target_lang);
 
     eprintln!("[translate] tool_call: id={id}, text={text:?}, target={target_lang}");
 
@@ -284,11 +434,132 @@ fn try_translate<W: Write>(
     issue_translate_request(writer, pending, PendingTranslate {
         query_id, is_tool_call, text, original_text, target_lang,
         engine_id, fallback_order, settings,
-        tried_engines: vec![],
+        tried_engines: vec![], batch_originals: None, batch_native: false, tag_poisoned: false,
     });
 }
 
+fn try_translate_batch<W: Write>(
+    writer: &mut W,
+    pending: &mut HashMap<String, PendingTranslate>,
+    query_id: String,
+    _tagged_text: String,  // 保留参数兼容调用点;实际由引擎能力决定用原生还是 tag
+    originals: Vec<String>,
+    target_lang: String,
+    engine_id: String,
+    fallback_order: Vec<String>,
+    settings: Value,
+) {
+    let ctx = PendingTranslate {
+        query_id,
+        is_tool_call: true,
+        text: String::new(),
+        original_text: String::new(),
+        target_lang,
+        engine_id,
+        fallback_order,
+        settings,
+        tried_engines: vec![],
+        batch_originals: Some(originals),
+        batch_native: false,
+        tag_poisoned: false,
+    };
+    dispatch_batch_by_engine(writer, pending, ctx);
+}
+
+/// 批量翻译的引擎分发器(三档降级)。
+///
+/// 1. 引擎支持原生批量 → `build_batch_request`(API 原生保序,无 tag 风险)
+/// 2. 引擎不支持原生 + tag 未被破坏 → tag 拼接单次请求
+/// 3. tag 已被破坏(`tag_poisoned=true`)→ 单行并发兜底(N 次 translate)
+///
+/// 设计动机:tag 拼接在不同引擎间不可靠(一家破坏,换一家大概率也破坏),
+/// 一旦失败立即切单行并发,避免在 tag 上反复浪费请求。
+fn dispatch_batch_by_engine<W: Write>(
+    writer: &mut W,
+    pending: &mut HashMap<String, PendingTranslate>,
+    mut ctx: PendingTranslate,
+) {
+    let engine = match get_engine(&ctx.engine_id) {
+        Some(e) => e,
+        None => {
+            try_next_fallback(writer, pending, ctx);
+            return;
+        }
+    };
+
+    // 档 1:原生批量
+    if engine.supports_batch() {
+        if let Some(req) = engine.build_batch_request(
+            ctx.batch_originals.as_ref().unwrap_or(&vec![]),
+            &ctx.target_lang,
+            &ctx.settings,
+        ) {
+            ctx.batch_native = true;
+            issue_http_request(writer, pending, req, ctx);
+            return;
+        }
+        // 原生批量请求构造失败(配置缺失/超限)→ 落到档 2/3
+    }
+
+    // 档 2:tag 拼接（引擎支持 tag 且 tag 未被破坏）
+    if !ctx.tag_poisoned && engine.supports_tag_batch() {
+        if let Some(originals) = ctx.batch_originals.as_ref() {
+            let tagged = build_tagged_batch(originals);
+            ctx.text = tagged.clone();
+            ctx.original_text = tagged;
+            ctx.batch_native = false;
+            issue_translate_request(writer, pending, ctx);
+            return;
+        }
+    }
+
+    // 档 3:引擎不支持批量能力 → 尝试下一个引擎的批量（而非直接单行并发）
+    // 只有当所有引擎都不支持批量时，才走单行并发兜底
+    if !engine.supports_batch() && !engine.supports_tag_batch() {
+        // 当前引擎无批量能力，尝试下一个引擎
+        ctx.tried_engines.push(ctx.engine_id.clone());
+        try_next_fallback(writer, pending, ctx);
+        return;
+    }
+
+    // tag 被破坏 → 单行并发兜底
+    dispatch_single_line_fallback(writer, pending, ctx);
+}
+
+/// tag 彻底失败后的单行并发兜底。
+/// 把 N 行 originals 拆成 N 个独立的 translate tool 调用,通过 ToolResult 返回保序数组。
+/// 这条路径**不依赖任何 tag**,对所有引擎都可靠(代价是 N 次 API 往返)。
+fn dispatch_single_line_fallback<W: Write>(
+    writer: &mut W,
+    _pending: &mut HashMap<String, PendingTranslate>,
+    ctx: PendingTranslate,
+) {
+    let originals = match ctx.batch_originals.as_ref() {
+        Some(v) if !v.is_empty() => v.clone(),
+        _ => return,
+    };
+    eprintln!(
+        "[translate] 批量 tag 失效,降级单行并发: engine={}, lines={}",
+        ctx.engine_id, originals.len()
+    );
+    // 单行并发在 core 端的 translate_lines command 已实装(每行 spawn 一个 task)。
+    // 插件层这里直接返回 BATCH_TAG_POISONED 错误,让 core 触发它的单行降级路径。
+    let resp = PluginToCore::ToolResult(ToolResultPayload {
+        id: ctx.query_id,
+        items: vec![],
+        error: Some(PluginError {
+            code: "BATCH_TAG_POISONED".into(),
+            message: format!(
+                "批量翻译 tag 在多引擎间失效,已尝试 {} 个引擎,建议走单行并发",
+                ctx.tried_engines.len()
+            ),
+        }),
+    });
+    send_message(writer, &resp);
+}
+
 /// 构造 HTTP 请求并发送给 core（pending 存上下文）。
+/// 单次翻译路径:用 engine.build_request 构造请求(text 单字符串)。
 fn issue_translate_request<W: Write>(
     writer: &mut W,
     pending: &mut HashMap<String, PendingTranslate>,
@@ -314,7 +585,18 @@ fn issue_translate_request<W: Write>(
         }
     };
 
-    let http_id = format!("tr_{}", chrono::Local::now().timestamp_millis());
+    issue_http_request(writer, pending, req, ctx);
+}
+
+/// 把已构造好的 EngineRequest 发给 core(pending 存上下文)。
+/// 原生批量路径直接调此函数,跳过 engine.build_request。
+fn issue_http_request<W: Write>(
+    writer: &mut W,
+    pending: &mut HashMap<String, PendingTranslate>,
+    req: EngineRequest,
+    mut ctx: PendingTranslate,
+) {
+    let http_id = next_http_id();
     ctx.tried_engines.push(ctx.engine_id.clone());
     pending.insert(http_id.clone(), ctx);
 
@@ -342,11 +624,23 @@ fn try_next_fallback<W: Write>(
     match next {
         Some(engine_id) => {
             eprintln!("[translate] 降级到: {} ({})", engine_display_name(&engine_id), engine_id);
-            ctx.engine_id = engine_id;
-            issue_translate_request(writer, pending, ctx);
+            ctx.engine_id = engine_id.clone();
+            // 批量降级:按目标引擎能力重新判定走原生批量还是 tag 拼接。
+            if ctx.batch_originals.is_some() {
+                dispatch_batch_by_engine(writer, pending, ctx);
+            } else {
+                issue_translate_request(writer, pending, ctx);
+            }
         }
         None => {
-            // 所有引擎都失败 → 返回错误
+            // 所有引擎都试过了
+            // 如果是批量请求且还没走过单行并发 → 最后兜底走单行并发
+            if ctx.batch_originals.is_some() && !ctx.tag_poisoned {
+                eprintln!("[translate] 所有引擎批量均失败,兜底单行并发");
+                dispatch_single_line_fallback(writer, pending, ctx);
+                return;
+            }
+            // 真正失败 → 返回错误
             let error = PluginError {
                 code: "TRANSLATE_FAILED".into(),
                 message: "翻译失败，请检查 API 配置或网络连接".into(),
@@ -370,44 +664,94 @@ fn handle_http_response<W: Write>(
     body: Option<String>,
     error: Option<String>,
 ) {
-    let Some(ctx) = pending.remove(&id) else {
+    let Some(mut ctx) = pending.remove(&id) else {
         eprintln!("[translate] http response for unknown request: {id}");
         return;
     };
 
     let engine = get_engine(&ctx.engine_id);
 
-    // 解析响应
-    let translated = if error.is_some() || status != 200 {
+    // HTTP 层错误 → 直接降级
+    if error.is_some() || status != 200 {
         eprintln!("[translate] {} HTTP error: status={status}, error={:?}", ctx.engine_id, error);
-        None
-    } else {
-        let body = body.unwrap_or_default();
-        let result = engine.as_ref().and_then(|e| e.parse_response(&body));
-        if result.is_none() {
-            // 按字符截断（不按字节）——多字节 UTF-8 中间切片会 panic
-            let preview: String = body.chars().take(500).collect();
-            eprintln!("[translate] {} parse failed, body: {}", ctx.engine_id, preview);
-        }
-        result
-    };
+        try_next_fallback(writer, pending, ctx);
+        return;
+    }
 
-    match translated {
-        Some(result) => {
-            // 成功 → 返回翻译结果
-            let items = build_result_items(&result, &ctx.text, &ctx.original_text, &ctx.target_lang);
-            let resp = if ctx.is_tool_call {
-                PluginToCore::ToolResult(ToolResultPayload { id: ctx.query_id, items, error: None })
-            } else {
-                PluginToCore::Response(PluginResponse { id: ctx.query_id, items, error: None })
-            };
-            send_message(writer, &resp);
-        }
-        None => {
-            // 失败 → 降级
-            try_next_fallback(writer, pending, ctx);
+    let body = body.unwrap_or_default();
+
+    // 批量原生路径:用 engine.parse_batch_response 直接拿 Vec<String>
+    if ctx.batch_native {
+        if let Some(originals) = ctx.batch_originals.as_ref() {
+            let expected = originals.len();
+            if let Some(results) = engine.as_ref().and_then(|e| e.parse_batch_response(&body, expected)) {
+                let items = vec![PluginItem {
+                    title: format!("已翻译 {} 行", results.len()),
+                    subtitle: Some("批量翻译完成".into()),
+                    score: 1.0,
+                    action: PluginAction::None,
+                    payload: Some(serde_json::json!({ "results": results })),
+                    ..Default::default()
+                }];
+                let resp = PluginToCore::ToolResult(ToolResultPayload { id: ctx.query_id, items, error: None });
+                send_message(writer, &resp);
+                return;
+            }
+            // 原生批量解析失败 → 降级到 tag 拼接,用同一引擎重试一次
+            eprintln!("[translate] {} batch parse failed, fallback to tagged. body: {}",
+                ctx.engine_id, body.chars().take(500).collect::<String>());
+            let tagged = build_tagged_batch(originals);
+            ctx.batch_native = false;
+            ctx.text = tagged.clone();
+            ctx.original_text = tagged;
+            // tried_engines 已含当前引擎,issue_translate_request 会跳过它;
+            // 但我们想用同一引擎的 tag 路径重试,所以清掉 tried_engines 让它能再选一次。
+            // 实际上 issue_translate_request 用 ctx.engine_id 直接调,不看 tried_engines,
+            // 所以这里不用清。
+            issue_translate_request(writer, pending, ctx);
+            return;
         }
     }
+
+    // 单次 / tag 拼接路径:用 engine.parse_response 拿单字符串
+    let translated = engine.as_ref().and_then(|e| e.parse_response(&body));
+    let Some(result) = translated else {
+        let preview: String = body.chars().take(500).collect();
+        eprintln!("[translate] {} parse failed, body: {}", ctx.engine_id, preview);
+        try_next_fallback(writer, pending, ctx);
+        return;
+    };
+
+    // 成功 → 返回翻译结果。批量 tool 用结构化 payload 回传保序数组。
+    let items = if let Some(originals) = ctx.batch_originals.as_ref() {
+        let Some(results) = parse_tagged_batch(&result, originals.len()) else {
+            // tag 被引擎破坏 → 标记 poisoned,后续不再尝试 tag,直接单行并发。
+            // 不立即返回错误,而是走降级让 dispatch_single_line_fallback 兜底。
+            eprintln!(
+                "[translate] {} tag 解析失败,标记 tag_poisoned,降级单行并发",
+                ctx.engine_id
+            );
+            ctx.tag_poisoned = true;
+            try_next_fallback(writer, pending, ctx);
+            return;
+        };
+        vec![PluginItem {
+            title: format!("已翻译 {} 行", results.len()),
+            subtitle: Some("批量翻译完成".into()),
+            score: 1.0,
+            action: PluginAction::None,
+            payload: Some(serde_json::json!({ "results": results })),
+            ..Default::default()
+        }]
+    } else {
+        build_result_items(&result, &ctx.text, &ctx.original_text, &ctx.target_lang)
+    };
+    let resp = if ctx.is_tool_call {
+        PluginToCore::ToolResult(ToolResultPayload { id: ctx.query_id, items, error: None })
+    } else {
+        PluginToCore::Response(PluginResponse { id: ctx.query_id, items, error: None })
+    };
+    send_message(writer, &resp);
 }
 
 /// 构造翻译结果 items（1:1 对齐 Python：译文 + 原文，预处理变化时加拆分版）。
@@ -457,6 +801,47 @@ fn build_result_items(result: &str, text: &str, original_text: &str, _target_lan
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tagged_batch_roundtrip_preserves_input_order() {
+        let texts = vec!["hello".to_string(), "world".to_string()];
+        let tagged = build_tagged_batch(&texts);
+        // 私用区字符 U+E000/U+E001 包夹数字
+        assert_eq!(
+            tagged,
+            "\u{E000}0\u{E001}\nhello\n\n\u{E000}1\u{E001}\nworld"
+        );
+        // 引擎返回乱序也能按 tag 拆回原顺序
+        let translated = "\u{E000}1\u{E001}\n世界\n\n\u{E000}0\u{E001}\n你好";
+        assert_eq!(
+            parse_tagged_batch(translated, 2).unwrap(),
+            vec!["你好".to_string(), "世界".to_string()]
+        );
+    }
+
+    #[test]
+    fn tagged_batch_tolerates_fullwidth_digits() {
+        // 某些引擎(百度/有道)会把 ASCII 数字全角化:0→０, 1→１
+        let translated = "\u{E000}１\u{E001}\n世界\n\n\u{E000}０\u{E001}\n你好";
+        assert_eq!(
+            parse_tagged_batch(translated, 2).unwrap(),
+            vec!["你好".to_string(), "世界".to_string()]
+        );
+    }
+
+    #[test]
+    fn tagged_batch_rejects_missing_or_duplicate_tags() {
+        // 缺一个 tag(只有 0,缺 1)→ None
+        assert!(parse_tagged_batch("\u{E000}0\u{E001}\n你好", 2).is_none());
+        // tag 重复 → None
+        assert!(parse_tagged_batch(
+            "\u{E000}0\u{E001}\n你好\n\u{E000}0\u{E001}\n重复\n\u{E000}1\u{E001}\n世界",
+            2
+        )
+        .is_none());
+        // 旧格式(被引擎翻译破坏后私用区字符没了)→ None
+        assert!(parse_tagged_batch("[[BLINK_0]]\n你好\n[[BLINK_1]]\n世界", 2).is_none());
+    }
 
     // ── preprocess_code_identifiers ─────────────────────────────────────────
 

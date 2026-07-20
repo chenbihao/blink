@@ -49,6 +49,34 @@
       "setting_bindings": {
         "target_lang": "target_lang"
       }
+    },
+    {
+      "name": "translate_batch",
+      "description": "批量翻译多行文本并保持输入顺序。供截图图上翻译等内部链路使用。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "texts": {
+            "type": "array",
+            "description": "要翻译的非空文本数组",
+            "items": { "type": "string" }
+          },
+          "target_lang": {
+            "type": "string",
+            "description": "目标语言代码",
+            "enum": ["zh", "en", "ja", "ko"],
+            "default": "zh"
+          }
+        },
+        "required": ["texts"]
+      },
+      "danger_class": "Safe",
+      "result_type": "items",
+      "hint": "返回 payload.results，顺序与 texts 一一对应",
+      "progress_hint": "批量翻译文本",
+      "setting_bindings": {
+        "target_lang": "target_lang"
+      }
     }
   ],
   "settings_schema": [

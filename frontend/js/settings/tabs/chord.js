@@ -58,6 +58,17 @@ async function loadChordActions() {
     console.warn("load clipboard config failed:", e);
   }
 
+  // 截图详细配置（0.11.10-b：预热 OCR 开关）——仅 screenshot 动作展开时用
+  let screenshotCfg = null;
+  try {
+    const sc = await invoke("get_config_section", { key: "screenshot:config" });
+    // 与后端 ScreenshotConfig 的 serde camelCase 对齐;字段缺失走默认
+    screenshotCfg = { prewarmOcr: sc?.prewarmOcr !== false };
+  } catch (e) {
+    console.warn("load screenshot config failed:", e);
+    screenshotCfg = { prewarmOcr: true };
+  }
+
   // Chord id → 副标题（不再用 emoji 图标，标题/副标题足够承载语义）
   const CHORD_SUBTITLE = {
     screenshot: t("chord.action.screenshot.subtitle"),
@@ -66,7 +77,7 @@ async function loadChordActions() {
   };
 
   container.innerHTML = actions
-    .map((a) => renderActionRow(a, CHORD_SUBTITLE[a.id], clipboardCfg))
+    .map((a) => renderActionRow(a, CHORD_SUBTITLE[a.id], clipboardCfg, screenshotCfg))
     .join("");
 
   bindRowEvents(container);
@@ -75,7 +86,7 @@ async function loadChordActions() {
 /**
  * 渲染单个 chord 动作行（可展开 accordion）。
  */
-function renderActionRow(a, subtitle, clipboardCfg) {
+function renderActionRow(a, subtitle, clipboardCfg, screenshotCfg) {
   subtitle = subtitle || "";
   // key=' '（语音输入）→ 显示 "Space"
   const keyLabel = a.key === " " ? "Space" : a.key.toUpperCase();
@@ -93,6 +104,9 @@ function renderActionRow(a, subtitle, clipboardCfg) {
   // 剪贴板详细配置（仅 clipboard_history 展开）
   const clipboardDetailHtml =
     a.id === "clipboard_history" ? renderClipboardDetail(clipboardCfg) : "";
+  // 截图详细配置（仅 screenshot 展开;0.11.10-b 起承载 prewarm_ocr）
+  const screenshotDetailHtml =
+    a.id === "screenshot" ? renderScreenshotDetail(screenshotCfg) : "";
 
   // 展开体内容（用 .chord-field 紧凑布局，label 用 --settings-label-width 对齐）
   const bodyInnerHtml = keyLocked
@@ -108,7 +122,8 @@ function renderActionRow(a, subtitle, clipboardCfg) {
            <button class="btn-small chord-binding-reset" data-id="${escapeAttr(a.id)}">${t("chord.binding.reset")}</button>
          </div>
        </div>
-       ${clipboardDetailHtml}`;
+       ${clipboardDetailHtml}
+       ${screenshotDetailHtml}`;
 
   return `<div class="action-list-row chord-row ${rowClass}" data-chord-id="${escapeAttr(a.id)}">
     <div class="chord-row-header" data-id="${escapeAttr(a.id)}" role="button" aria-expanded="false" tabindex="0">
@@ -167,6 +182,27 @@ function renderClipboardDetail(cfg) {
         <span class="field-hint-icon" title="${escapeAttr(t("chord.clipboard.blacklist.hint"))}">ⓘ</span>
       </label>
       <input type="text" class="clip-field" data-field="blacklist_keywords" placeholder="${escapeAttr(t("chord.clipboard.blacklist.placeholder"))}" value="${escapeAttr(blacklist)}" />
+    </div>
+  </div>`;
+}
+
+/**
+ * 渲染截图详细配置区块（screenshot 动作展开体内，0.11.10-b）。
+ *
+ * 目前只承载 `prewarm_ocr`（拖完选区就后台跑 OCR,让「识别」/「翻译」秒响应）。
+ * 后续 0.11.10-i/j 的背景遮罩策略等也归到此区。
+ */
+function renderScreenshotDetail(cfg) {
+  cfg = cfg || { prewarmOcr: true };
+  return `<div class="chord-screenshot-detail">
+    <div class="chord-field">
+      <label class="setting-label chord-field-label">${t("chord.screenshot.prewarm_ocr.label")}
+        <span class="field-hint-icon" title="${escapeAttr(t("chord.screenshot.prewarm_ocr.hint"))}">ⓘ</span>
+      </label>
+      <label class="switch switch-sm">
+        <input type="checkbox" class="screenshot-field" data-field="prewarm_ocr" ${cfg.prewarmOcr !== false ? "checked" : ""} />
+        <span class="slider"></span>
+      </label>
     </div>
   </div>`;
 }
@@ -285,6 +321,15 @@ function bindRowEvents(container) {
       el.addEventListener("click", (e) => e.stopPropagation());
     });
   }
+
+  // ── 截图字段自动保存（0.11.10-b）──
+  const shotDetail = container.querySelector(".chord-screenshot-detail");
+  if (shotDetail) {
+    shotDetail.querySelectorAll(".screenshot-field").forEach((el) => {
+      el.addEventListener("change", () => saveScreenshotDetail(container));
+      el.addEventListener("click", (e) => e.stopPropagation());
+    });
+  }
 }
 
 /**
@@ -390,6 +435,21 @@ async function saveClipboardDetail(container) {
     await saveConfig("clipboard_config", newCfg);
   } catch (e) {
     console.error("save clipboard detail failed:", e);
+  }
+}
+
+/**
+ * 保存截图 detail（0.11.10-b：目前只 prewarm_ocr 一个字段）。
+ * 走 set_config('screenshot_config', {...})——后端按 key 路由到 screenshot:config 分片。
+ */
+async function saveScreenshotDetail(container) {
+  const detail = container.querySelector(".chord-screenshot-detail");
+  if (!detail) return;
+  try {
+    const prewarmOcr = detail.querySelector('[data-field="prewarm_ocr"]')?.checked !== false;
+    await saveConfig("screenshot_config", { prewarmOcr });
+  } catch (e) {
+    console.error("save screenshot detail failed:", e);
   }
 }
 

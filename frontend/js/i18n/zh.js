@@ -307,6 +307,10 @@ export const zh = {
   "chord.clipboard.blacklist.hint": "包含任一关键词的复制内容不记录（逗号分隔）",
   "chord.clipboard.blacklist.placeholder": "password, token, secret",
 
+  // ── 截图配置（0.11.10-b）──
+  "chord.screenshot.prewarm_ocr.label": "预热 OCR",
+  "chord.screenshot.prewarm_ocr.hint": "选区拖完后立即后台识别文字，点[识别]/[翻译]秒响应；笔电场景可关掉省电",
+
   // ── AI 交互面板（0.9.1 Phase 6）──
   "tab.ai": "AI",
   "panel.ai": "AI 意图辅助",
