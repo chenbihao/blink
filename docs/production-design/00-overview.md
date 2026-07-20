@@ -2,7 +2,7 @@
 
 > **定位**: Universal Action Layer（统一操作层）—— 感知用户上下文、主动推荐动作,让任何操作都比原来的路径更快。
 >
-> **状态**: 0.8 归档；0.9 完成（Agent 地基 + Capability 能力协议层）；0.10 完成（语音输入 STT + 语音打字 + 伪流式 VAD 切句 + FunASR 本地化）；**0.11 完成**（插件通信契约重设计 + AI 调用插件链路完善 + 截图标注增强）。下一站 **0.12 AI 生态完善**（本地模型 / skill 化 / MCP 双向 / RAG 记忆 / 对话窗口）。
+> **状态**: 0.8 归档；0.9 完成（Agent 地基 + Capability 能力协议层）；0.10 完成（语音输入 STT + 语音打字 + 伪流式 VAD 切句 + FunASR 本地化）；**0.11 完成**（插件通信契约重设计 + AI 调用插件链路完善 + 截图标注增强 + OCR word 级链路 + 阅读模式 + 翻译衔接 + 水印独立图层）。下一站 **0.11.10 图上翻译**（差异化护城河：截图原位置显示译文，对标 Google Lens / 微信「翻译屏幕」）+ **0.12 AI 生态完善**（本地模型 / skill 化 / MCP 双向 / RAG 记忆 / 对话窗口）。
 > **更新时间**: 2026-07-19
 
 ---
@@ -60,7 +60,8 @@
 | **0.8** | [phases/0.8-context-interaction.md](./phases/0.8-context-interaction.md) | 感知与操作层 —— UIA 划词 + 内置动作抽象 + Autosuggestion + 翻译 Context 路由 + 四域架构 + Chord 交互 + Alt+A 截图（0.8.6 架构固化大部分已落地，两项遗留推 0.9 前） | ✅ 归档收尾 |
 | **0.9** | [phases/0.9-ai-layer.md](./phases/0.9-ai-layer.md) | Agent 地基 —— rig-core 全 buildin 直编 + 统一 tool 架构 + Provider 多档 + 主窗口文本闭环 + 插件 tool-call + 供应商配置 UI + 前端架构重整 + Capability 能力协议层 | ✅ 完成 |
 | **0.10** | [phases/0.10-voice-agent.md](./phases/0.10-voice-agent.md) | 语音输入 —— STT + 语音打字(G1 主窗口输入 / G2 输入法上屏)+ 伪流式 VAD 切句 + FunASR 本地化 + SendInput 文本注入 | ✅ 完成 |
-| **0.11** | [phases/0.11-plugin-ai-toolchain.md](./phases/0.11-plugin-ai-toolchain.md) | 插件通信契约重设计 + AI 调用插件链路完善 + 截图标注增强（主线：结果模型统一 / 工具元信息 / 应用搜索 Capability / 提示词管理 / 结果回流+tool chain / 剪贴板历史 Capability / 翻译插件全量 Rust 化 / 截图 PixPin 级交互 + 能力化重构） | ✅ 完成 |
+| **0.11** | [phases/0.11-plugin-ai-toolchain.md](./phases/0.11-plugin-ai-toolchain.md) | 插件通信契约重设计 + AI 调用插件链路完善 + 截图标注增强 + OCR word 级链路 + 阅读模式 + 翻译衔接 + 水印独立图层（0.11.0~0.11.9） | ✅ 完成 |
+| **0.11.10** | [phases/0.11.10-image-overlay-translation.md](./phases/0.11.10-image-overlay-translation.md) | 图上翻译 + 截图交互重构 —— `overlayLayer` 单例图层（识别/翻译共用一层,`mode` 切换）+ 面板降级为召唤式抽屉 + 工具栏加[选取]默认工具 + 预热 OCR + 误点保护 + 命名 OCR→识别 + line 级批量翻译 + 背景遮罩三档 + 字号自适应 | 📋 规划中 |
 | **0.12** | [phases/0.12-ai-ecosystem.md](./phases/0.12-ai-ecosystem.md) | AI 能力架构搭建（基础设施抽取 + DB 拆分 / 本地 Provider ollama+lmstudio / 对话窗口★ / 对话机制 conversation 隔离+持久化 memory+tool loop / MCP client / RAG；MCP server/Skill/向量召回/mistral.rs/A2A 推 0.13） | 📋 规划中 |
 
 ### 2.3 其他参考
@@ -101,7 +102,8 @@
 | **0.10.3** | blink_stt_server 统一服务 + SendInput Unicode + 热词/ITN | ✅ 完成 |
 | **0.10.4** | 伪流式 VAD 切句定稿 + 累积预览 + 移除真流式 + 架构清理 | ✅ 完成 |
 | **0.10.5** | 收尾体验优化（VAD 滑动条 + 高级选项 UI + 文档精简） | ✅ 完成 |
-| **0.11.x** | 插件通信契约重设计 + AI 调用插件链路完善 + 截图标注增强（0.11.0~0.11.7：结果模型统一 / 工具元信息 / 应用搜索 Capability / 提示词管理 / 结果回流+tool chain / 剪贴板历史 Capability / 翻译插件全量 Rust 化 / 截图 PixPin 级交互 + 能力化重构）| ✅ 完成 |
+| **0.11.x** | 插件通信契约重设计 + AI 调用插件链路完善 + 截图标注增强 + OCR word 级 + 阅读模式 + 翻译衔接 + 水印独立图层（0.11.0~0.11.9）| ✅ 完成 |
+| **0.11.10** | 图上翻译 + 截图交互重构（`overlayLayer` 单例 + 识别/翻译共用一层 + 面板召唤式抽屉 + 选取工具 + 预热 OCR + line 级批量翻译 + 命名 OCR→识别）| 📋 规划中 |
 | **0.12.x** | AI 能力架构搭建（0.12.0~0.12.4：基础设施抽取+DB 拆分 / ollama+lmstudio / 对话窗口★ / 对话机制 / MCP client / RAG；MCP server/Skill/向量召回/mistral.rs/A2A 推 0.13）| 后置 |
 
 ---
@@ -121,6 +123,7 @@
 | 0.8 感知与操作层在做什么? | [phases/0.8-context-interaction.md](./phases/0.8-context-interaction.md) |
 | 0.9 Agent 地基 + Capability 能力协议层怎么落? | [phases/0.9-ai-layer.md](./phases/0.9-ai-layer.md) |
 | 0.10 语音输入(STT + 语音打字)? | [phases/0.10-voice-agent.md](./phases/0.10-voice-agent.md) |
-| 0.11 插件通信契约重设计 + AI 调用插件链路完善 + 截图标注增强? | [phases/0.11-plugin-ai-toolchain.md](./phases/0.11-plugin-ai-toolchain.md) |
+| 0.11 插件通信契约重设计 + AI 调用插件链路完善 + 截图标注增强 + OCR word 级链路 + 阅读模式 + 翻译衔接 + 水印独立图层? | [phases/0.11-plugin-ai-toolchain.md](./phases/0.11-plugin-ai-toolchain.md) |
+| 0.11.10 图上翻译（Image Overlay Translation）+ 截图交互重构? | [phases/0.11.10-image-overlay-translation.md](./phases/0.11.10-image-overlay-translation.md) |
 | 0.12 AI 能力架构搭建（对话窗口 / 对话机制 / 调用能力 / RAG / DB 拆分 / ollama+lmstudio）? | [phases/0.12-ai-ecosystem.md](./phases/0.12-ai-ecosystem.md) |
 | 开发规范、模块拆分、Tauri Commands | [CLAUDE.md](../../CLAUDE.md) |

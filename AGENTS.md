@@ -33,6 +33,7 @@ Blink 是一个 Windows 全局快捷入口，定位不是「启动器」，而�
   - 0.11.7：截图标注增强（选区停留 + 7 种标注 + OCR + 钉图 + 保存 PNG/JPEG）+ 能力化重构（ScreenshotBackend/OcrBackend trait + list_displays + Fake 后端）
   - 0.11.8：截图优化收尾 + 图标包引入（Lucide sprite）
   - 0.11.9：OCR word 级链路（`OcrLine.Words()` + word bounding_rect + 智能拼接替代前端强清）+ 原图阅读模式（word 拖选 + textarea 双向联动）+ 翻译衔接（`translate_text` command 直调 translate 插件 tool；OCR 面板双 tab 原文/译文；工具栏「OCR」「翻译」共用面板）+ 水印独立图层（`watermarkConfig` 单例覆盖式，脱离 commands 撤销栈）+ 钉图窗口右键 OCR/翻译
+- 🔜 **0.11.10 图上翻译 + 截图交互重构**：把 0.11.9 word 级 OCR + translate 插件接完最后一公里 —— 让截图里的外文**原位置显示译文**（对标 Google Lens / 微信「翻译屏幕」）。同时借这次重构：`overlayLayer` 单例图层承载嵌图（`mode='source'|'translated'` 切换,识别/翻译共用一层），面板降级为可召唤编辑抽屉，工具栏加[选取]默认工具解决鼠标层冲突，预热 OCR 让按钮秒响应，点选区外 no-op 保护误点；命名迁移 OCR→识别。详见 [phases/0.11.10-image-overlay-translation.md](docs/production-design/phases/0.11.10-image-overlay-translation.md)
 - 🔜 **0.12 AI 能力架构搭建**：基础设施抽取与清账（投影统一 / **DB 主库+缓存库拆分** / 分层违规修复 / ollama+lmstudio Provider 接入）+ 对话窗口★（独立 Agent 窗口 + rig AgentBuilder，不破主窗口类型收窄铁则）+ 对话机制（conversation 隔离 + 持久化 memory 走 SQLite impl rig ConversationMemory trait + 滑动窗口 + tool loop 无限轮）+ MCP client + RAG（知识库检索作为内部 tool，走 ollama embedding）。**产品边界：Blink 不做 AI 运行时，靠外部 ollama/lmstudio**。MCP server 护城河 / Skill / 记忆向量召回 / mistral.rs / A2A 推 0.13。详见 [phases/0.12-ai-ecosystem.md](docs/production-design/phases/0.12-ai-ecosystem.md)
 
 ---
