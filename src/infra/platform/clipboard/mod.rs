@@ -12,6 +12,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{OnceLock, RwLock};
+use std::time::Instant;
 
 use sqlx::SqlitePool;
 
@@ -36,6 +37,21 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 /// 消息循环）。跨 send 边界用 `Fn + Send + Sync`。
 pub type ChangeHook = Box<dyn Fn(&str) + Send + Sync + 'static>;
 static CHANGE_HOOK: OnceLock<ChangeHook> = OnceLock::new();
+
+/// 剪贴板最后一次文本变化的真实时间戳（hook 触发前记录）。
+///
+/// 供 `context::collect()` 使用——避免 Clipboard 的 `captured_at` 总是 `Instant::now()`
+/// （invoke 瞬间），导致与 Selection 的真实采集时间戳比较无意义。
+static LAST_CHANGED_AT: OnceLock<RwLock<Option<Instant>>> = OnceLock::new();
+
+/// 取剪贴板最后一次文本变化的时间戳。
+///
+/// 返回 `None` 表示自进程启动以来剪贴板从未变化过（或 hook 未触发过）。
+pub fn last_changed_at() -> Option<Instant> {
+    LAST_CHANGED_AT
+        .get()
+        .and_then(|lock| *lock.read().unwrap())
+}
 
 /// 启动剪贴板监听（幂等）。监听线程持有 pool + cfg，WM_CLIPBOARDUPDATE 时存。
 /// 仿 selection：监听窗口一旦创建不卸，关闭态靠 ACTIVE 短路（跨线程卸载不安全）。
@@ -91,8 +107,18 @@ pub fn set_change_hook(hook: ChangeHook) {
 }
 
 /// 内部触发（windows.rs 调用）——非空文本 + 已入库策略后触发一次。
+///
+/// 在调用 hook 前先记录 `LAST_CHANGED_AT`，确保 `context::collect()` 读到的
+/// Clipboard `captured_at` 是"剪贴板真正变化的瞬间"，而非 invoke 的 `Instant::now()`。
 #[cfg(target_os = "windows")]
 pub(super) fn notify_change(text: &str) {
+    // 先记录时间戳（hook 可能触发 update_clipboard_text → upsert_text，
+    // 但 collect() 用的是本时间戳而非 upsert 的 Instant::now()）
+    let now = Instant::now();
+    *LAST_CHANGED_AT
+        .get_or_init(|| RwLock::new(None))
+        .write()
+        .unwrap() = Some(now);
     if let Some(hook) = CHANGE_HOOK.get() {
         hook(text);
     }

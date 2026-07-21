@@ -76,6 +76,7 @@ While the main window is open, hold Alt and letter keys become quick action shor
 | `Alt + Q` | Open AI chat window (coming soon) |
 | `Alt + A` | Region screenshot → OCR / translate / pin / save |
 | `Alt + C` | Clipboard history |
+| `Alt + Space` | Voice input (supports input in the main window or as a separate voice input method) |
 | `Alt + 1~9` | Quick launch item by position in results |
 
 Screenshots support annotation (rectangle, arrow, text, mosaic, etc.), OCR text recognition, on-image translation, and pin-to-top. Hold `Alt + Space` for voice input — supports cloud (OpenAI / Groq) and local (FunASR) dual engines, words appear as you speak with VAD auto-sentence-splitting.
@@ -103,6 +104,11 @@ Plugins run in isolated processes — crashes don't affect Blink's core. Support
 <p align="center">
   <img src="docs/images/feature-ai.gif" width="680" alt="AI Capabilities"/>
 </p>
+
+<p align="center">
+  <img src="docs/images/feature-ai-config.png" width="680" alt="AI 能力"/>
+</p>
+
 
 Every feature in Blink is wrapped as a standard Capability that can be called by AI:
 

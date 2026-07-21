@@ -63,13 +63,17 @@ pub(crate) fn set_last_selection(text: String) {
 const SELECTION_TTL_SECS: u64 = 10;
 
 /// 取最近选区（invoke 调用），带 TTL 过期判断。
-pub fn get_last_selection() -> Option<String> {
+///
+/// 返回 `(text, captured_at)` —— `captured_at` 是划词监听抓取的真实时间戳，
+/// 供 `TextSource::SelectionThenClipboard` 做时间戳择新（避免 `Instant::now()` 覆盖
+/// 导致 Selection/Clipboard 时间戳打平、行为不确定）。
+pub fn get_last_selection() -> Option<(String, Instant)> {
     let g = cache().read().unwrap();
     let at = g.at?;
     if at.elapsed().as_secs() > SELECTION_TTL_SECS {
         return None;
     }
-    g.text.clone()
+    Some((g.text.clone()?, at))
 }
 
 // ── 划词监听（鼠标钩子） ──────────────────────────────────────

@@ -194,35 +194,22 @@ export function clearAlt() {
 
 // alt-active 轮询（0.8.5 §6.1）：WebView2 不转发 Alt 键自身的 keydown 到 JS
 // （系统键被 Windows 用于菜单激活），keydown 监听不可靠。改由 lifecycle shown 启动
-// 轮询、hidden 停止，每 100ms 查物理态，状态变化才 setAlt（避免无谓 resize）。
+// 轮询、hidden 停止，每 100ms 查逻辑 hold 态，状态变化才 setAlt（避免无谓 resize）。
+//
+// 0.11.10：后端 `is_alt_down()` 改读 `ALT_LOGICALLY_HELD`（LL hook 过滤 injected 事件的
+// 逻辑态），已免疫 SetForegroundWindow 合成 keyup 污染。故前端原来的宽限期兜底
+// （altPollGraceUntil / 首次 tick 前 altLast=true）不再需要，poll 直接跟随后端读数。
 let altPollTimer = null;
 let altLast = false;
 
-// Alt 轮询宽限期：窗口 show 后短时间内 SetForegroundWindow 会合成 Alt keyup，
-// 导致 GetAsyncKeyState 暂时返回 false。宽限期内忽略 false 读数，避免误移除 chord-visible。
-let altPollGraceUntil = 0;
-const ALT_POLL_GRACE_MS = 300;
-
 export function startAltPoll() {
   stopAltPoll();
-  // 窗口由 Alt+Space 触发，Alt 此时必为按下态。SetForegroundWindow 会合成
-  // Alt keyup 导致 GetAsyncKeyState 暂时返回 false（IPC 往返期间即完成），
-  // 所以不依赖首次 poll 读数，直接设 altLast = true。
-  // setAlt(true) 不在此调——chord config 可能尚未就绪，由 recheckAlt 在
-  // chord.refresh() 完成后补调（lifecycle.js: chord.refresh().then(recheckAlt)）。
-  altLast = true;
-  // 设宽限期：合成 keyup 后的 false 读数在此期间忽略，只接受 true
-  altPollGraceUntil = Date.now() + ALT_POLL_GRACE_MS;
   const tick = async () => {
     let down = false;
     try {
       down = await isAltDown();
     } catch (e) {
       console.warn("[alt] is_alt_down 失败", e);
-    }
-    // 宽限期内忽略 false（合成 keyup），只接受 true
-    if (!down && Date.now() < altPollGraceUntil) {
-      return;
     }
     if (down !== altLast) {
       altLast = down;

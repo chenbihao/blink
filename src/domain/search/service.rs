@@ -211,10 +211,10 @@ impl SearchService {
     ///
     /// 0.8.3 收尾：走 `AwarenessSnapshot::upsert_text` —— 找到 Selection 项就替换,
     /// 否则 append；None 时删除同 source 项。
-    pub fn update_selected_text(&self, text: Option<String>) {
+    pub fn update_selected_text(&self, text: Option<String>, captured_at: Option<Instant>) {
         use crate::infra::platform::context::AwarenessSource;
         let mut guard = self.snapshot.write().unwrap();
-        guard.upsert_text(AwarenessSource::Selection, text);
+        guard.upsert_text_with_time(AwarenessSource::Selection, text, captured_at);
     }
 
     /// 写回剪贴板文本（clipboard listener 检测到剪贴板变化时调用）。

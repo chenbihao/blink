@@ -1,14 +1,24 @@
 //! Windows 平台特定的热键实现：WH_KEYBOARD_LL 低级键盘钩子。
 //!
 //! 触发判定（tap/hold 状态机）设计：
-//! - **不维护按键累积镜像**。Windows 已维护权威的键物理态(GetAsyncKeyState),应用层
-//!   再累积一份(靠 down/up 事件 push/remove)会被系统注入的合成事件(AltGr 假 Ctrl、
-//!   Alt+Space 额外 Alt、IDEA 瞬时 Alt down/up、WebView2 吞 Alt up)打乱且无法自愈。
+//! - **不维护按键累积镜像**（组合键 arm/keyup 边界场景）。Windows 已维护权威的键物理态
+//!   (GetAsyncKeyState),应用层再累积一份(靠 down/up 事件 push/remove)会被系统注入的
+//!   合成事件(AltGr 假 Ctrl、Alt+Space 额外 Alt、IDEA 瞬时 Alt down/up、WebView2 吞 Alt up)
+//!   打乱且无法自愈。
 //! - 改为:只在**主键 down/up 边界**现查修饰键物理态。状态机仅 3 个字段,不依赖任何
 //!   需要 down/up 配对的累积量。
 //! - 主键 down 且修饰键满足 → armed;armed 后任何异键 down → aborted(判 hold);
 //!   主键 up 时若未 aborted、时长达标 → 触发 Tap(修饰键只在 arm 时现查,keyup 不复查,
 //!   避免快速松手时修饰键略早释放导致漏触发)。
+//!
+//! **例外：跨秒级 hold 状态需要累积**（`ALT_LOGICALLY_HELD`）。
+//! - `SetForegroundWindow` 合成的 Alt keyup 会**持续**污染 `GetAsyncKeyState`——用户手指
+//!   还按着，内核里已经记为松开，直到用户真松开+再按才恢复。这类污染时长跨越秒级，
+//!   arm 边界瞬时判定的"漏一次"容忍不了。
+//! - LL hook 是唯一能看到 `LLKHF_INJECTED` flag 的层，flag=1 的合成事件直接不参与逻辑态。
+//!   `is_alt_down()` / chord 独占吞键 / 语音录音吞 Alt+Space 都读 `ALT_LOGICALLY_HELD`，
+//!   免疫合成事件。
+//! - 铁则仍在——只是明确划分场景：**边界现查、跨时长累积**。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -28,6 +38,25 @@ static VOICE_RECORDING: AtomicBool = AtomicBool::new(false);
 pub fn set_voice_recording(active: bool) {
     VOICE_RECORDING.store(active, Ordering::SeqCst);
 }
+
+/// Alt 键的**逻辑** hold 态：只由**真实**（非 injected）的 LMENU/RMENU keydown/keyup 驱动。
+///
+/// 为什么不是直接读 `GetAsyncKeyState(VK_MENU)`：Windows 的 `SetForegroundWindow`（及某些
+/// 焦点转移场景）会**合成一个 Alt keyup 事件**用于释放系统菜单栏激活态，此事件会持续
+/// 污染 `GetAsyncKeyState` 的物理态读数——用户手指还按着，内核里已经记为松开，直到
+/// 用户真的松开+再按才能恢复。前端 alt-poll 靠 `GetAsyncKeyState` 时，冷启动首唤按住
+/// Alt 呼窗后 chord 会短暂进入又立刻退出（0.11.10 定位）。
+///
+/// 修法：LL hook 是唯一能看到 `LLKHF_INJECTED` flag 的层，flag=1 的合成事件直接不影响
+/// 逻辑态；只信真键盘的 down/up 计数，`is_alt_down()` 读这个而不是 `GetAsyncKeyState`。
+///
+/// **例外声明（与顶部"不做累积镜像"铁则的关系）**：
+/// - 铁则针对**组合键 arm/keyup 边界一次性判定**——那种场景瞬时读物理态最稳，累积镜像会被
+///   合成事件搅乱且无法自愈。`modifiers_satisfied` / `current_modifier_mask` 仍走物理态。
+/// - 本字段针对**跨秒级 hold 状态**（chord 独占期 / 语音录音期 / 前端 alt-poll）——这种
+///   场景物理态被合成事件毒化的时长远长于铁则关心的边界瞬间，反而只有 injected 过滤+
+///   累积才能自愈。
+static ALT_LOGICALLY_HELD: AtomicBool = AtomicBool::new(false);
 
 // ── 修饰键物理态 bitmask ────────────────────────────────────────────────────────
 // 8 个具体修饰键各占一位。用于「现查物理态 → 与配置精确匹配」,替代旧的累积镜像。
@@ -101,6 +130,11 @@ fn hook_thread_main() {
     unsafe {
         let hhook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(ll_proc), None, 0)
             .expect("SetWindowsHookExW failed for WH_KEYBOARD_LL");
+
+        // hook 挂上之前发生的 Alt keydown 收不到，此刻用 GetAsyncKeyState 兜底初始化。
+        // 此时进程刚起，SetForegroundWindow 还没被调用过，物理态尚未被合成 keyup 污染。
+        let alt_now = key_down(VK_LMENU) || key_down(VK_RMENU);
+        ALT_LOGICALLY_HELD.store(alt_now, Ordering::SeqCst);
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -178,11 +212,14 @@ fn key_down(vk: VIRTUAL_KEY) -> bool {
     unsafe { GetAsyncKeyState(vk.0 as i32) as u16 & 0x8000 != 0 }
 }
 
-/// 当前 Alt（任一侧）是否物理按下。供前端轮询——WebView2 不转发 Alt 键自身的
-/// keydown 到 JS（系统键被 Windows 用于菜单激活），前端 keydown 监听不可靠，
-/// 故 0.8.5 增强菜单的 alt-active 状态改由前端轮询此接口驱动（§6.1）。
+/// 当前 Alt（任一侧）是否**逻辑**按下——只跟随真实键盘事件，免疫合成 keyup。
+///
+/// 供前端轮询——WebView2 不转发 Alt 键自身的 keydown 到 JS（系统键被 Windows 用于菜单
+/// 激活），前端 keydown 监听不可靠，故 0.8.5 增强菜单的 alt-active 状态改由前端轮询此
+/// 接口驱动（§6.1）。0.11.10 改为读 `ALT_LOGICALLY_HELD`——见其文档字符串对 SetForegroundWindow
+/// 合成 keyup 污染 `GetAsyncKeyState` 的说明。
 pub fn is_alt_down() -> bool {
-    key_down(VK_LMENU) || key_down(VK_RMENU)
+    ALT_LOGICALLY_HELD.load(Ordering::SeqCst)
 }
 
 /// 采样当前 8 个修饰键的物理态为 bitmask。
@@ -365,6 +402,30 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
         let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
         let is_up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
 
+        // ── Alt 逻辑 hold 态维护（早于任何短路，跨所有分支生效） ──────────────────
+        // `LLKHF_INJECTED` 区分真键盘 vs OS/软件合成事件。SetForegroundWindow 合成的
+        // Alt keyup 带此 flag，直接跳过——保证逻辑态只跟随用户真实按键。
+        // 见 ALT_LOGICALLY_HELD 文档字符串。
+        let injected = (kb.flags & LLKHF_INJECTED) == LLKHF_INJECTED;
+        if !injected && (vk == VK_LMENU.0 as u32 || vk == VK_RMENU.0 as u32) {
+            if is_down {
+                ALT_LOGICALLY_HELD.store(true, Ordering::SeqCst);
+            } else if is_up {
+                // 一侧松开时若另一侧仍按着，逻辑态保持 true；两侧都松才置 false。
+                // 此处读 GetAsyncKeyState 是安全的：走到这里的都是**真实** keyup 事件，
+                // injected 合成 keyup 已被上面 flag 过滤走不到此分支；此刻内核物理态
+                // 反映的正是真实按下情况。
+                let other_vk = if vk == VK_LMENU.0 as u32 {
+                    VK_RMENU
+                } else {
+                    VK_LMENU
+                };
+                if !key_down(other_vk) {
+                    ALT_LOGICALLY_HELD.store(false, Ordering::SeqCst);
+                }
+            }
+        }
+
         // 录制短路：录制期间把事件喂给 recorder，且不碰触发的 thread_local STATE。
         if super::recorder::is_recording() {
             feed_recorder(vk, wparam);
@@ -379,13 +440,16 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
 
         // hold 录音中吞掉 Alt+Space 的 keydown：防止 Windows 反复弹出系统菜单（"噔噔噔"声）。
         // 仅在 hold_fired=true（录音已启动）时吞 keydown，keyup 不吞（否则 HoldRelease 收不到）。
+        //
+        // Alt 判定走 `ALT_LOGICALLY_HELD` 而非 GetAsyncKeyState——录音期间焦点可能被
+        // SetForegroundWindow 移动过，物理态被合成 keyup 污染，若读现查会漏吞 Space。
         if is_down
             && VOICE_RECORDING.load(Ordering::SeqCst)
             && (vk == VK_SPACE.0 as u32
                 || vk == VK_MENU.0 as u32
                 || vk == VK_LMENU.0 as u32
                 || vk == VK_RMENU.0 as u32)
-            && unsafe { GetAsyncKeyState(VK_MENU.0 as i32) } < 0
+            && ALT_LOGICALLY_HELD.load(Ordering::SeqCst)
         {
             return LRESULT(1);
         }
@@ -394,17 +458,20 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
         // **并发 Chord 事件给 HotkeyService 触发**（0.10.7.2 修复：原实现只吞不发，
         // 导致前端收不到 keydown，chord 触发链路断裂）。
         //
-        // **吞键范围**：仅 keydown、仅非修饰键、仅 Alt 物理按下、仅键在 CHORD_KEYS 中。
+        // **吞键范围**：仅 keydown、仅非修饰键、仅 Alt 逻辑 hold、仅键在 CHORD_KEYS 中。
         // **不吞**：修饰键本身（Alt 全程放行）、keyup（让其他软件收到完整 up）。
         //
         // **为什么需要吞键 + 发事件**：前端 `onChordTrigger` 靠 webview keydown 事件触发，
         // 但 LL hook 吞键后 webview 收不到 keydown。故 hook 吞键后直接发 `Chord(key)` 事件，
         // HotkeyService 在主线程调 trigger 逻辑，绕过前端 keydown 链路。同时吞键防止
         // 其他软件的全局快捷键（如 Alt+A 截图）抢键。
+        //
+        // Alt 判定走 `ALT_LOGICALLY_HELD` 而非 GetAsyncKeyState——用户按住 Alt 呼窗时
+        // SetForegroundWindow 合成 keyup 污染物理态，若读现查 chord 独占永不激活。
         if is_down
             && is_chord_mode()
             && !is_modifier_key(vk)
-            && unsafe { GetAsyncKeyState(VK_MENU.0 as i32) } < 0
+            && ALT_LOGICALLY_HELD.load(Ordering::SeqCst)
         {
             if let Some(key) = vk_to_key(vk) {
                 if is_chord_key(&key) {

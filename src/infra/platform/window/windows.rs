@@ -66,11 +66,47 @@ pub fn invoke(app: &AppHandle) {
     if let Some(search_service) =
         app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
     {
-        search_service.update_snapshot(snapshot);
-        // 选区来自划词监听缓存（鼠标划词黄金时机抓取），单独回填，不覆盖整份快照。
-        // 不再在 show 后抓取——那会让 Electron 应用失焦退化选区（0.8.0 §1.1 实测）。
-        if let Some(sel) = crate::infra::platform::selection::get_last_selection() {
-            search_service.update_selected_text(Some(sel));
+        search_service.update_snapshot(snapshot.clone());
+
+        // 选区回填：优先主动 UIA 抓取（invoke 时前台窗口仍有焦点），其次回退缓存。
+        //
+        // 主动抓取：invoke 发生时原 app 还没失焦，UIA 能拿到当前选区。
+        // 比依赖鼠标钩子缓存（10s TTL、仅鼠标划词触发）更可靠——覆盖键盘选区
+        // （Shift+方向键）和非鼠标选区场景。
+        //
+        // 回退缓存：UIA 抓不到时（app 不支持 TextPattern，如 Scintilla/Java Swing）
+        // 用鼠标钩子在"划词黄金时机"抓到的缓存。
+        if context_cfg.selection_enabled {
+            let grabbed = snapshot
+                .foreground_app
+                .as_ref()
+                .and_then(|fg| {
+                    let text =
+                        crate::infra::platform::selection::get_selected_text(fg.hwnd);
+                    match &text {
+                        Some(t) => tracing::debug!(
+                            app = %fg.process_name,
+                            len = t.chars().count(),
+                            "invoke: UIA 主动抓取选区成功"
+                        ),
+                        None => tracing::debug!(
+                            app = %fg.process_name,
+                            "invoke: UIA 主动抓取选区失败（app 不支持 TextPattern 或无选区）,回退钩子缓存"
+                        ),
+                    }
+                    text
+                })
+                .or_else(|| {
+                    // UIA 未命中，回退鼠标钩子缓存
+                    let cached = crate::infra::platform::selection::get_last_selection();
+                    if cached.is_some() {
+                        tracing::trace!("invoke: 回退到鼠标钩子选区缓存");
+                    } else {
+                        tracing::trace!("invoke: 无选区（UIA 未命中 + 缓存为空/过期）");
+                    }
+                    cached.map(|(text, _)| text)
+                });
+            search_service.update_selected_text(grabbed, None);
         }
     }
 

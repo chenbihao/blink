@@ -65,7 +65,8 @@ pub struct AwarenessView<'a> {
     pub source: AwarenessSource,
     /// trim 后的文本（`find_text` 已保证非空）
     pub text: &'a str,
-    /// 采集时刻（`AwarenessText.captured_at` 直接透传）
+    /// 采集时刻（`AwarenessText.captured_at` 直接透传，调试/日志用）
+    #[allow(dead_code)]
     pub captured_at: Instant,
 }
 
@@ -141,6 +142,29 @@ impl AwarenessSnapshot {
         }
     }
 
+    /// 带指定时间戳的 upsert（供 Selection 回填用，保留真实采集时间）。
+    ///
+    /// `captured_at = None` 时 fallback 到 `Instant::now()`（兼容旧路径）。
+    ///
+    /// **动机**：`upsert_text` 总是用 `Instant::now()` 覆盖时间戳，导致 Selection 的
+    /// `captured_at` 丢失了"划词瞬间"，与 Clipboard 的 `Instant::now()` 打平后
+    /// `TextSource::SelectionThenClipboard::extract` 的时间戳比较无意义。
+    pub fn upsert_text_with_time(
+        &mut self,
+        source: AwarenessSource,
+        text: Option<String>,
+        captured_at: Option<Instant>,
+    ) {
+        self.texts.retain(|t| t.source != source);
+        if let Some(text) = text {
+            self.texts.push(AwarenessText {
+                source,
+                text,
+                captured_at: captured_at.unwrap_or_else(Instant::now),
+            });
+        }
+    }
+
     // ── 测试用 helper（单测构造 snapshot 更清晰）──────────────────
 
     /// 单测用：构造只带选区的快照。
@@ -212,10 +236,15 @@ pub fn collect(cfg: &ContextConfig) -> AwarenessSnapshot {
     let mut texts = Vec::new();
     if cfg.clipboard_enabled {
         if let Some(clip) = collect_clipboard_text() {
+            // 用剪贴板最后一次真实变化的时间戳，而非 Instant::now()（invoke 瞬间）。
+            // 避免 Clipboard captured_at 总是最新的，导致与 Selection 的真实采集时间
+            // 比较时 Clipboard 恒胜（即使 Selection 是更晚的用户行为）。
+            let clip_changed_at = crate::infra::platform::clipboard::last_changed_at()
+                .unwrap_or_else(Instant::now);
             texts.push(AwarenessText {
                 source: AwarenessSource::Clipboard,
                 text: clip,
-                captured_at: Instant::now(),
+                captured_at: clip_changed_at,
             });
         }
     }

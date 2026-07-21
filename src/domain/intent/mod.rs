@@ -1951,38 +1951,34 @@ mod tests {
     }
 
     #[test]
-    fn context_hit_newer_source_wins() {
-        // 0.9.2.1：Selection 与 Clipboard 都非空时按 captured_at 择新。
-        // 旧行为「Selection 恒压 Clipboard」在剪贴板被 update_clipboard_text 局部刷新
-        // 而 Selection 陈旧不动的场景下会让 Ghost 一直显示老选区,不刷新——现在改成
-        // 「最新的用户行为胜」:后 upsert 的一方胜出。
+    fn context_hit_selection_always_wins() {
+        // Selection 恒压 Clipboard——划词是显式有意识的用户行为，优先级最高。
+        // 无论 Clipboard 何时更新，只要有 Selection 就选 Selection。
         let r = translate_router_with_target("zh");
 
-        // 情形 A:Selection 先、Clipboard 后 → Clipboard 胜
+        // 情形 A:Selection 先、Clipboard 后 → Selection 仍胜
         let mut snap_a = ContextSnapshot::default();
         snap_a.upsert_text(
             AwarenessSource::Selection,
             Some("selected english text".into()),
         );
-        std::thread::sleep(std::time::Duration::from_millis(2));
         snap_a.upsert_text(
             AwarenessSource::Clipboard,
             Some("clipboard content here".into()),
         );
         let sug_a = run_best_suggestion(&r, "", &snap_a).expect("expected context suggestion");
         assert!(
-            sug_a.replacement.contains("clipboard content here"),
-            "较新的 Clipboard 应胜出,replacement={}",
+            sug_a.replacement.contains("selected english text"),
+            "Selection 恒胜,replacement={}",
             sug_a.replacement
         );
 
-        // 情形 B:Clipboard 先、Selection 后 → Selection 胜（覆盖用户先复制再划词）
+        // 情形 B:Clipboard 先、Selection 后 → Selection 胜
         let mut snap_b = ContextSnapshot::default();
         snap_b.upsert_text(
             AwarenessSource::Clipboard,
             Some("clipboard content here".into()),
         );
-        std::thread::sleep(std::time::Duration::from_millis(2));
         snap_b.upsert_text(
             AwarenessSource::Selection,
             Some("selected english text".into()),
@@ -1990,7 +1986,7 @@ mod tests {
         let sug_b = run_best_suggestion(&r, "", &snap_b).expect("expected context suggestion");
         assert!(
             sug_b.replacement.contains("selected english text"),
-            "较新的 Selection 应胜出,replacement={}",
+            "Selection 恒胜,replacement={}",
             sug_b.replacement
         );
     }

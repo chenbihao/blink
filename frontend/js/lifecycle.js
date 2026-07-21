@@ -19,7 +19,10 @@ export function init() {
     document.body.classList.remove("voice-active");
     search.reset(); // 作废在途搜索请求
     results.clear();
-    clearAlt(); // 清 Alt 角标残留（上次按住 Alt 激活后可能未收到 keyup）
+    // 0.11.10：不再在 shown 时 clearAlt——Alt 逻辑态由 hook 层过滤 injected 事件驱动，
+    // 用户真松开 Alt 会收到真实 keyup，无需业务层兜底清。冷启动按住 Alt 呼窗的场景下，
+    // 之前的 clearAlt 反而会先把 chord-visible/chord-mode 关掉，靠 recheckAlt 补回来，
+    // 中间空窗期用户按 Alt+字母不生效（0.11.10 定位复现）。
     const vi = document.getElementById("voice-indicator");
     if (vi) vi.classList.add("hidden");
     queryEl.focus();
