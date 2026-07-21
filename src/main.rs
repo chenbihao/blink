@@ -566,6 +566,7 @@ fn main() {
             app::commands::hide_context_menu,
             app::commands::context_menu_action,
             app::commands::probe_interpreters,
+            app::commands::get_interpreter_paths,
             app::commands::open_file_dialog,
             app::commands::get_clipboard_history,
             app::commands::search_clipboard_history,

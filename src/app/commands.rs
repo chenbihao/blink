@@ -1102,7 +1102,7 @@ pub fn get_default_hotkey() -> serde_json::Value {
 /// `chord_toggles` / `clipboard_enabled` / `disabled_builtin_actions` /
 /// `disabled_context_bindings` / `disabled_chord_actions` / `window_opacity`
 ///
-/// **引擎配置**：`file_search` / `start_menu_config` / `calc_config` / `global_proxy`
+/// **引擎配置**：`file_search` / `start_menu_config` / `calc_config` / `global_proxy` / `interpreter_paths`
 ///
 /// **插件配置**：`plugin_config`
 ///
@@ -1362,6 +1362,15 @@ pub async fn set_config(
             };
             engine.update_global_proxy(proxy).await;
             tracing::info!(has_http, has_https, "全局代理配置已更新");
+        }
+
+        // ── 解释器路径配置 ────────────────────────────────────────────────
+        "interpreter_paths" => {
+            let json_str = serde_json::to_string(&value).map_err(|e| e.to_string())?;
+            crate::infra::data::history::set_config(&pool, "interpreter_paths", &json_str)
+                .await
+                .map_err(|e| e.to_string())?;
+            tracing::info!("解释器路径配置已更新");
         }
 
         // ── 插件配置 ──────────────────────────────────────────────────────
@@ -2689,10 +2698,26 @@ pub async fn context_menu_action(app: tauri::AppHandle, action_id: u32) -> Resul
 // ─── 脚本解释器配置（Phase 0.6） ───────────────────────────────────────────
 
 /// 探测系统中可用的脚本解释器状态。
+///
+/// 如果提供了 `python_path` 或 `node_path`，优先验证该路径（用户手动配置），
+/// 无效时才回退到 PATH 扫描。
 #[tauri::command]
-pub async fn probe_interpreters() -> crate::domain::plugin::InterpretersStatus {
-    tracing::debug!("探测脚本解释器状态");
-    crate::domain::plugin::probe_interpreters()
+pub async fn probe_interpreters(
+    python_path: Option<String>,
+    node_path: Option<String>,
+) -> crate::domain::plugin::InterpretersStatus {
+    tracing::debug!(?python_path, ?node_path, "探测脚本解释器状态");
+    crate::domain::plugin::probe_interpreters(python_path.as_deref(), node_path.as_deref())
+}
+
+/// 获取已保存的解释器路径配置。
+#[tauri::command]
+pub async fn get_interpreter_paths(app: tauri::AppHandle) -> serde_json::Value {
+    let pool = app.state::<sqlx::SqlitePool>();
+    crate::infra::data::history::get_config(&pool, "interpreter_paths")
+        .await
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::json!({}))
 }
 
 // ─── 剪贴板历史（Phase 0.7.3）──────────────────────────────────────────────────

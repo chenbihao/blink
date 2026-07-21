@@ -231,6 +231,7 @@ function renderAIProviders() {
       return `
         <div class="ai-provider-card" data-provider-id="${escapeAttr(p.id)}">
           <div class="ai-provider-header" data-provider-id="${escapeAttr(p.id)}">
+            <span class="ai-provider-drag-handle" draggable="true" title="拖动排序">⋮⋮</span>
             <span class="ai-provider-chevron">▸</span>
             <span class="ai-provider-mono${monoCjkCls}" data-tint="${preset.tint}">${escapeHtml(monogram)}</span>
             <div class="ai-provider-info">
@@ -252,7 +253,7 @@ function renderAIProviders() {
   // accordion 展开/折叠
   container.querySelectorAll(".ai-provider-header").forEach((header) => {
     header.addEventListener("click", (e) => {
-      if (e.target.closest(".ai-provider-edit") || e.target.closest(".ai-provider-delete")) return;
+      if (e.target.closest(".ai-provider-edit") || e.target.closest(".ai-provider-delete") || e.target.closest(".ai-provider-drag-handle")) return;
       const card = header.closest(".ai-provider-card");
       const modelsDiv = card.querySelector(".ai-provider-models");
       const chevron = header.querySelector(".ai-provider-chevron");
@@ -300,6 +301,126 @@ function renderAIProviders() {
       openAIModelEditModal(btn.dataset.providerId, null);
     });
   });
+
+  // ── 供应商拖动排序（纯 mouse 事件 + 实时 DOM 重排，兼容 WebView2）──
+  let dragState = null; // { card, startY, started }
+  container.querySelectorAll(".ai-provider-card").forEach((card) => {
+    const handle = card.querySelector(".ai-provider-drag-handle");
+    if (!handle) return;
+    handle.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dragState = { card, startY: e.clientY, started: false };
+      document.addEventListener("mousemove", onDragMove);
+      document.addEventListener("mouseup", onDragEnd);
+    });
+  });
+
+  function onDragMove(e) {
+    if (!dragState) return;
+    if (!dragState.started && Math.abs(e.clientY - dragState.startY) > 4) {
+      dragState.started = true;
+      dragState.card.classList.add("dragging");
+    }
+    if (!dragState.started) return;
+
+    // 找鼠标所在的 card（排除自身），实时重排
+    const cards = Array.from(container.querySelectorAll(".ai-provider-card"));
+    const draggedCard = dragState.card;
+
+    for (const c of cards) {
+      if (c === draggedCard) continue;
+      const rect = c.getBoundingClientRect();
+      if (e.clientY >= rect.top && e.clientY <= rect.bottom) {
+        const midY = rect.top + rect.height / 2;
+        if (e.clientY < midY) {
+          container.insertBefore(draggedCard, c);
+        } else {
+          const next = c.nextElementSibling;
+          if (next && next !== draggedCard) {
+            container.insertBefore(draggedCard, next);
+          } else if (!next) {
+            container.appendChild(draggedCard);
+          }
+        }
+        break;
+      }
+    }
+  }
+
+  function onDragEnd() {
+    document.removeEventListener("mousemove", onDragMove);
+    document.removeEventListener("mouseup", onDragEnd);
+    if (!dragState) return;
+    dragState.card.classList.remove("dragging");
+
+    if (dragState.started) {
+      // 从当前 DOM 顺序提取新的 provider 数组顺序
+      const newOrder = Array.from(container.querySelectorAll(".ai-provider-card"))
+        .map((c) => c.dataset.providerId)
+        .filter(Boolean);
+      const providers = currentAIConfig.providers || [];
+      const reordered = newOrder.map((id) => providers.find((p) => p.id === id)).filter(Boolean);
+      if (reordered.length === providers.length) {
+        currentAIConfig.providers = reordered;
+        saveAIConfig()
+          .then(() => renderAITierSelects())
+          .catch((e) => console.error("[ai] reorder provider failed:", e));
+      }
+    }
+    dragState = null;
+  }
+}
+
+/** 获取当前展开的 provider IDs（用于 render 后恢复 accordion 状态） */
+function getExpandedProviderIds() {
+  const ids = [];
+  document.querySelectorAll(".ai-provider-card").forEach((card) => {
+    const modelsDiv = card.querySelector(".ai-provider-models");
+    if (modelsDiv && modelsDiv.style.display !== "none") {
+      ids.push(card.dataset.providerId);
+    }
+  });
+  return ids;
+}
+
+/** 恢复 accordion 展开状态 */
+function restoreExpandedProviderIds(ids) {
+  if (!ids || ids.length === 0) return;
+  ids.forEach((id) => {
+    const card = document.querySelector(`.ai-provider-card[data-provider-id="${CSS.escape(id)}"]`);
+    if (!card) return;
+    const modelsDiv = card.querySelector(".ai-provider-models");
+    const chevron = card.querySelector(".ai-provider-chevron");
+    if (modelsDiv) modelsDiv.style.display = "";
+    if (chevron) chevron.textContent = "▾";
+  });
+}
+
+/**
+ * 拖动排序：将 draggedId 移动到 targetId 前/后
+ */
+function reorderProvider(draggedId, targetId, insertBefore) {
+  const providers = currentAIConfig.providers || [];
+  const fromIdx = providers.findIndex((p) => p.id === draggedId);
+  const toIdx = providers.findIndex((p) => p.id === targetId);
+  if (fromIdx < 0 || toIdx < 0 || fromIdx === toIdx) return;
+
+  const [moved] = providers.splice(fromIdx, 1);
+  // 移除后 toIdx 可能偏移
+  let newIdx = providers.findIndex((p) => p.id === targetId);
+  if (!insertBefore) newIdx += 1;
+  providers.splice(newIdx, 0, moved);
+  currentAIConfig.providers = providers;
+
+  const expandedIds = getExpandedProviderIds();
+  saveAIConfig()
+    .then(() => {
+      renderAIProviders();
+      restoreExpandedProviderIds(expandedIds);
+      renderAITierSelects();
+    })
+    .catch((e) => console.error("[ai] reorder provider failed:", e));
 }
 
 /** 切换模型启用状态 */
@@ -316,6 +437,7 @@ function toggleModelEnabled(providerId, modelId, enabled) {
       renderAITierBanner();
     })
     .catch((e) => console.error("[ai] toggle model enabled failed:", e));
+  // toggle 不重渲染 providers 卡片，accordion 状态不受影响
 }
 
 /**
@@ -372,7 +494,9 @@ async function deleteModelFromProvider(providerId, modelId) {
   });
   saveAIConfig()
     .then(() => {
+      const expandedIds = getExpandedProviderIds();
       renderAIProviders();
+      restoreExpandedProviderIds(expandedIds);
       renderAITierSelects();
       renderAITierBanner();
     })
@@ -713,7 +837,9 @@ async function saveModelEdit() {
   const ok = await validateAndSaveModel();
   if (!ok) return;
   closeAIModelEditModal();
+  const expandedIds = getExpandedProviderIds();
   renderAIProviders();
+  restoreExpandedProviderIds(expandedIds);
   renderAITierSelects();
   renderAITierBanner();
 }
@@ -737,7 +863,9 @@ async function saveAndContinueModelEdit() {
   // toast
   showModelSavedToast();
   // 刷新列表（让用户看到刚加的模型出现在 tier select 等处）
+  const expandedIds = getExpandedProviderIds();
   renderAIProviders();
+  restoreExpandedProviderIds(expandedIds);
   renderAITierSelects();
   renderAITierBanner();
 }
@@ -787,10 +915,12 @@ function bindAIModelEditModalEvents() {
   $("ai-model-edit-save")?.addEventListener("click", saveModelEdit);
   $("ai-model-edit-continue")?.addEventListener("click", saveAndContinueModelEdit);
 
-  // 聚焦 Model ID 输入框时自动拉取模型列表
+  // 聚焦 Model ID 输入框时自动拉取模型列表（编辑模式下 ID 只读，不弹下拉）
   const idInput = $("ai-model-edit-id");
   if (idInput) {
-    idInput.addEventListener("focus", () => openModelFetchDropdown());
+    idInput.addEventListener("focus", () => {
+      if (!idInput.readOnly) openModelFetchDropdown();
+    });
     idInput.addEventListener("input", () => {
       const dropdown = $("ai-model-edit-fetch-dropdown");
       if (dropdown && dropdown.style.display !== "none") {
@@ -845,14 +975,10 @@ function renderAITierSelects() {
   const providers = currentAIConfig.providers || [];
   const options = [`<option value="">${escapeHtml(t("ai.tier.unassigned"))}</option>`];
   providers.forEach((p) => {
-    (p.models || []).forEach((m) => {
+    (p.models || []).filter((m) => m.enabled !== false).forEach((m) => {
       const val = `${p.id}::${m.id}`;
-      const isEnabled = m.enabled !== false;
-      const label = isEnabled
-        ? `${p.display_name} / ${m.id}`
-        : `${p.display_name} / ${m.id} ${t("ai.tier.model_disabled")}`;
-      const disabledAttr = isEnabled ? "" : " disabled";
-      options.push(`<option value="${escapeAttr(val)}"${disabledAttr}>${escapeHtml(label)}</option>`);
+      const label = `${p.display_name} / ${m.display_name || m.id}`;
+      options.push(`<option value="${escapeAttr(val)}">${escapeHtml(label)}</option>`);
     });
   });
   const html = options.join("");
@@ -1082,6 +1208,17 @@ function bindAIEvents() {
     if (!dropdown || dropdown.style.display === "none") return;
     if (e.target.closest("#ai-provider-model-select")) return;
     dropdown.style.display = "none";
+  });
+  // ESC 关闭供应商 modal（若模型编辑 modal 也开着则不处理，让那边先关）
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      const modelOverlay = $("ai-model-edit-overlay");
+      if (modelOverlay && modelOverlay.style.display !== "none") return;
+      const overlay = $("ai-modal-overlay");
+      if (overlay && overlay.style.display !== "none") {
+        closeAIProviderModal();
+      }
+    }
   });
 
   $("ai-modal-test")?.addEventListener("click", async () => {

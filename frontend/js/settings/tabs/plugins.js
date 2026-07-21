@@ -10,7 +10,6 @@ import { invoke } from "../../tauri.js";
 import { t, onLangChange } from "../../i18n/index.js";
 import { iconHTML } from "../../icon.js";
 import { saveConfig } from "../../config-keys.js";
-import { clearUnsaved, markUnsaved } from "../shared/ui.js";
 
 /** 内置动作图标映射（0.10.8：emoji → Lucide 图标名） */
 const BUILTIN_ACTION_ICONS = {
@@ -193,7 +192,7 @@ function renderPluginCard(plugin) {
   const triggersTags = renderTriggersTags(plugin);
 
   const configSection = hasFields
-    ? renderConfigSection(t("plugin.section"), schema, settings, { saveLabel: t("plugin.save"), collapsible: true, collapsed: true })
+    ? renderConfigSection(t("plugin.section"), schema, settings, { collapsible: true, collapsed: true })
     : `<div class="plugin-no-config">${t("plugin.no_config")}</div>`;
 
   const headerRight = `<div class="plugin-master-toggle">
@@ -468,7 +467,7 @@ function initSortableLists() {
 
 /**
  * 更新可拖动列表的值到隐藏 input
- * 手动派发 change 事件，让上层 markUnsaved 生效（否则 hidden input 赋值不冒泡）
+ * 手动派发 change 事件，让上层自动保存生效（否则 hidden input 赋值不冒泡）
  */
 function updateSortableValue(list) {
   const key = list.dataset.key;
@@ -634,18 +633,11 @@ function bindPluginCardEvents(plugin) {
     if (!ok) e.target.checked = !e.target.checked;
   });
 
-  // 字段变更 → 挂 unsaved 徽章（提示用户点保存）
+  // 字段变更 → 自动保存
   card.querySelectorAll(".plugin-field").forEach((el) => {
-    el.addEventListener("input", () => markUnsaved(card));
-    el.addEventListener("change", () => markUnsaved(card));
-  });
-
-  card.querySelector(".plugin-save")?.addEventListener("click", async () => {
-    const ok = await save();
-    if (ok) {
-      clearUnsaved(card);
-      flash(card, t("plugin.saved_msg"));
-    }
+    el.addEventListener("change", async () => {
+      await save();
+    });
   });
 
   // 默认触发词的 ban/恢复按钮

@@ -7,7 +7,6 @@ import { invoke } from "../../tauri.js";
 import { t, onLangChange } from "../../i18n/index.js";
 import { iconHTML } from "../../icon.js";
 import { saveConfig } from "../../config-keys.js";
-import { clearUnsaved, markUnsaved } from "../shared/ui.js";
 
 /**
  * 初始化网络设置 Tab
@@ -37,21 +36,12 @@ async function loadNetworkConfig() {
   container.innerHTML = renderNetworkCard(proxyConfig);
   bindNetworkEvents(container);
 
-  // 语言切换时重新渲染（保留未保存的输入值，避免用户正在编辑时丢失）
+  // 语言切换时重新渲染（自动保存模式，直接用已保存值重渲染）
   onLangChange(() => {
     const el = document.getElementById("network-container");
     if (!el) return;
-    const httpInput = el.querySelector('.plugin-field[data-key="http_proxy"]');
-    const httpsInput = el.querySelector('.plugin-field[data-key="https_proxy"]');
-    const http = httpInput?.value ?? proxyConfig.http;
-    const https = httpsInput?.value ?? proxyConfig.https;
-    const renderCfg = { http, https };
-    el.innerHTML = renderNetworkCard(renderCfg);
+    el.innerHTML = renderNetworkCard(proxyConfig);
     bindNetworkEvents(el);
-    // 如果输入值与已保存值不同，标记 unsaved 徽章
-    if (http !== proxyConfig.http || https !== proxyConfig.https) {
-      markUnsaved(el);
-    }
   });
 }
 
@@ -91,54 +81,34 @@ function renderNetworkCard(proxyConfig) {
             value="${escapeAttr(proxyConfig.https)}"
           />
         </div>
-        <div class="setting-row">
-          <button class="btn-primary plugin-save">${t("network.save")}</button>
-          <span class="plugin-save-msg"></span>
-        </div>
       </div>
     </div>
   `;
 }
 
 /**
- * 绑定网络事件
+ * 绑定网络事件（自动保存：输入变更 → debounce 保存）
  * @param {HTMLElement} container - 容器元素
  */
 function bindNetworkEvents(container) {
-  const btn = container.querySelector(".plugin-save");
-  const msg = container.querySelector(".plugin-save-msg");
-  if (!btn) return;
+  let debounceTimer = null;
 
-  // 字段变更 → 挂 unsaved 徽章
-  container.querySelectorAll('.plugin-field').forEach((el) => {
-    el.addEventListener("input", () => markUnsaved(container));
-    el.addEventListener("change", () => markUnsaved(container));
-  });
-
-  btn.addEventListener("click", async () => {
+  const doSave = async () => {
     const http = container.querySelector('.plugin-field[data-key="http_proxy"]')?.value || "";
     const https = container.querySelector('.plugin-field[data-key="https_proxy"]')?.value || "";
-
     try {
       await saveConfig("global_proxy", { http, https });
-      if (msg) {
-        msg.textContent = t("network.saved_msg");
-        msg.className = "plugin-save-msg msg-success";
-        setTimeout(() => {
-          if (msg) {
-            msg.textContent = "";
-            msg.className = "plugin-save-msg";
-          }
-        }, 3000);
-      }
-      clearUnsaved(container);
     } catch (e) {
       console.error("save proxy failed:", e);
-      if (msg) {
-        msg.textContent = t("network.save_failed");
-        msg.className = "plugin-save-msg msg-error";
-      }
     }
+  };
+
+  // 文本输入 debounce 800ms（避免每 keystroke 都写盘）
+  container.querySelectorAll('.plugin-field').forEach((el) => {
+    el.addEventListener("input", () => {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(doSave, 800);
+    });
   });
 }
 

@@ -95,9 +95,38 @@ fn should_skip_path(path: &std::path::Path) -> bool {
 }
 
 /// 在 PATH 中查找解释器，返回第一个找到的路径。
-pub fn find_interpreter(candidates: &[&str]) -> Result<PathBuf, PluginError> {
-    // TODO: Phase 0.6 后续实现：先从配置读用户自定义路径
-    // 目前直接从 PATH 探测
+///
+/// 如果提供了 `manual_path`，优先验证该路径是否存在：
+/// - 有效则直接返回（用户手动配置优先）
+/// - 无效则记录警告并回退到 PATH 扫描
+pub fn find_interpreter(
+    candidates: &[&str],
+    manual_path: Option<&str>,
+) -> Result<PathBuf, PluginError> {
+    // 1. 优先使用用户手动配置的路径
+    if let Some(path) = manual_path {
+        let p = PathBuf::from(path);
+        if p.is_file() {
+            // 直接指向 exe 文件
+            tracing::debug!(path = %path, "使用手动配置的解释器路径");
+            return Ok(p);
+        }
+        if p.is_dir() {
+            // 选了文件夹 → 在内部查找候选 exe
+            for candidate in candidates {
+                let exe = p.join(format!("{candidate}.exe"));
+                if exe.exists() {
+                    tracing::debug!(path = %exe.display(), "在手动配置的目录中找到解释器");
+                    return Ok(exe);
+                }
+            }
+            tracing::warn!(dir = %path, "手动配置的目录中未找到解释器，回退到 PATH 扫描");
+        } else {
+            tracing::warn!(path = %path, "手动配置的解释器路径不存在，回退到 PATH 扫描");
+        }
+    }
+
+    // 2. 扫描 PATH 环境变量的所有目录
     let path_env = std::env::var("PATH").unwrap_or_default();
     for dir in std::env::split_paths(&path_env) {
         // 跳过无效系统目录
@@ -180,13 +209,13 @@ impl PluginProcess {
                 c
             }
             RuntimeType::Python => {
-                let interpreter = find_interpreter(&["python", "python3", "py"])?;
+                let interpreter = find_interpreter(&["python", "python3", "py"], None)?;
                 let mut c = tokio::process::Command::new(interpreter);
                 c.current_dir(work_dir).arg(exec_path);
                 c
             }
             RuntimeType::Node => {
-                let interpreter = find_interpreter(&["node", "nodejs"])?;
+                let interpreter = find_interpreter(&["node", "nodejs"], None)?;
                 let mut c = tokio::process::Command::new(interpreter);
                 c.current_dir(work_dir).arg(exec_path);
                 c
@@ -698,9 +727,15 @@ pub struct InterpretersStatus {
 }
 
 /// 探测系统中所有支持的脚本解释器状态。
-pub fn probe_interpreters() -> InterpretersStatus {
+///
+/// 如果提供了 `manual_python` 或 `manual_node`，优先验证该路径（用户手动配置），
+/// 无效时才回退到 PATH 扫描。
+pub fn probe_interpreters(
+    manual_python: Option<&str>,
+    manual_node: Option<&str>,
+) -> InterpretersStatus {
     // Python: 最低 3.8
-    let python = match find_interpreter(&["python", "python3", "py"]) {
+    let python = match find_interpreter(&["python", "python3", "py"], manual_python) {
         Ok(path) => {
             let (version, version_ok) = probe_version(&path, "--version", "3.8.0");
             InterpreterStatus {
@@ -725,7 +760,7 @@ pub fn probe_interpreters() -> InterpretersStatus {
     };
 
     // Node.js: 最低 16.0
-    let node = match find_interpreter(&["node", "nodejs"]) {
+    let node = match find_interpreter(&["node", "nodejs"], manual_node) {
         Ok(path) => {
             let (version, version_ok) = probe_version(&path, "--version", "16.0.0");
             InterpreterStatus {

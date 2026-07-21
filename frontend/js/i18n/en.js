@@ -134,6 +134,7 @@ export const en = {
   "engine.status.unavailable": "Unavailable ✗",
   "engine.status.failed": "Probe failed",
   "engine.status.version_low": "Version too low",
+  "engine.status.version_unknown": "Version unknown",
   "engine.status.not_found": "Not found",
 
   // ── Engines tab: interpreters (Phase 0.6) ──

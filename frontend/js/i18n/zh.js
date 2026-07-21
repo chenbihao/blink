@@ -135,6 +135,7 @@ export const zh = {
   "engine.status.unavailable": "不可用 ✗",
   "engine.status.failed": "探测失败",
   "engine.status.version_low": "版本过低",
+  "engine.status.version_unknown": "版本未知",
   "engine.status.not_found": "未找到",
 
   // ── 引擎 Tab：脚本解释器（Phase 0.6） ──

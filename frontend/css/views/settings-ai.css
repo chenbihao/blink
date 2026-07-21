@@ -506,6 +506,30 @@
 .ai-provider-header:hover {
   background: var(--surface);
 }
+/* ── 供应商拖动排序 ── */
+.ai-provider-drag-handle {
+  cursor: grab;
+  color: var(--text-faint);
+  font-size: var(--text-lg);
+  letter-spacing: -2px;
+  flex-shrink: 0;
+  opacity: 0.4;
+  transition: opacity var(--transition-fast);
+  padding: 2px 2px;
+  user-select: none;
+}
+.ai-provider-header:hover .ai-provider-drag-handle {
+  opacity: 0.8;
+}
+.ai-provider-drag-handle:active {
+  cursor: grabbing;
+}
+.ai-provider-card.dragging {
+  opacity: 0.5;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  transform: scale(0.98);
+  transition: opacity 0.15s, transform 0.15s;
+}
 .ai-provider-chevron {
   font-size: var(--text-xl);
   color: var(--text-faint);

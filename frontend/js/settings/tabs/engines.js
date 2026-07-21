@@ -228,6 +228,7 @@ export function refreshInterpreterBadgeText(type) {
   const key =
     statusEl.dataset.badgeState === "available" ? "engine.status.available" :
     statusEl.dataset.badgeState === "version_low" ? "engine.status.version_low" :
+    statusEl.dataset.badgeState === "version_unknown" ? "engine.status.version_unknown" :
     statusEl.dataset.badgeState === "not_found" ? "engine.status.not_found" :
     statusEl.dataset.badgeState === "failed" ? "engine.status.failed" :
     "engine.status.probing";
@@ -252,11 +253,16 @@ function updateInterpreterUI(type, status) {
       statusEl.textContent = `${versionText}${t("engine.status.available")}`;
       statusEl.className = "status-badge status-available";
       statusEl.dataset.badgeState = "available";
-    } else {
-      const versionText = status.version ? `${status.version} ` : "";
-      statusEl.textContent = `${versionText}${t("engine.status.version_low")}`;
+    } else if (status.version) {
+      // 找到了 exe 且获取到版本号，但版本过低
+      statusEl.textContent = `${status.version} ${t("engine.status.version_low")}`;
       statusEl.className = "status-badge status-warning";
       statusEl.dataset.badgeState = "version_low";
+    } else {
+      // 找到了 exe 但无法获取版本（执行失败/输出异常）
+      statusEl.textContent = t("engine.status.version_unknown");
+      statusEl.className = "status-badge status-warning";
+      statusEl.dataset.badgeState = "version_unknown";
     }
     if (pathEl) pathEl.value = status.path || "";
   } else {
@@ -264,6 +270,22 @@ function updateInterpreterUI(type, status) {
     statusEl.className = "status-badge status-unavailable";
     statusEl.dataset.badgeState = "not_found";
     if (pathEl) pathEl.value = status.error || t("engine.status.not_found");
+  }
+}
+
+/**
+ * 保存解释器路径配置到后端（持久化到 SQLite config 表）
+ */
+async function saveInterpreterPaths() {
+  const pythonPath = document.getElementById("python-path")?.value || "";
+  const nodePath = document.getElementById("node-path")?.value || "";
+  try {
+    await invoke("set_config", {
+      key: "interpreter_paths",
+      value: { python_path: pythonPath, node_path: nodePath },
+    });
+  } catch (e) {
+    console.error("saveInterpreterPaths failed:", e);
   }
 }
 
@@ -280,6 +302,7 @@ async function browseInterpreter(kind) {
     if (selected) {
       const pathEl = document.getElementById(`${kind}-path`);
       if (pathEl) pathEl.value = selected;
+      saveInterpreterPaths();
     }
   } catch (e) {
     console.error("browseInterpreter failed:", e);
@@ -288,6 +311,9 @@ async function browseInterpreter(kind) {
 
 /**
  * 探测单个解释器（一次只探测一种，跟文件搜索对齐）
+ *
+ * 如果用户有手动配置的路径，优先探测该路径（验证有效性），
+ * 无效时才回退到 PATH 扫描。
  * @param {"python"|"node"} type - 解释器类型
  */
 async function probeSingleInterpreter(type) {
@@ -299,8 +325,15 @@ async function probeSingleInterpreter(type) {
   statusEl.dataset.badgeState = "probing";
 
   try {
-    const status = await invoke("probe_interpreters");
+    // 传入手动配置的路径，让后端优先验证
+    const manualPath = document.getElementById(`${type}-path`)?.value || null;
+    const status = await invoke("probe_interpreters", {
+      pythonPath: type === "python" ? manualPath : null,
+      nodePath: type === "node" ? manualPath : null,
+    });
     updateInterpreterUI(type, status[type]);
+    // 探测成功后保存路径
+    saveInterpreterPaths();
   } catch (e) {
     console.error(`probeInterpreter ${type} failed:`, e);
     statusEl.textContent = t("engine.status.failed");
@@ -311,10 +344,15 @@ async function probeSingleInterpreter(type) {
 
 /**
  * 探测全部解释器（只在首次启动两个路径都为空时自动调用，避免覆盖用户手动配置）
+ *
+ * 传入当前 input 中的路径（可能为空），后端逻辑：
+ * - 有手动路径 → 验证该路径
+ * - 无手动路径 → 扫描 PATH
  */
 async function probeAllInterpreters() {
-  const pythonPath = document.getElementById("python-path")?.value;
-  const nodePath = document.getElementById("node-path")?.value;
+  const pythonPath = document.getElementById("python-path")?.value || null;
+  const nodePath = document.getElementById("node-path")?.value || null;
+  // 如果两个路径都有值，说明是已保存的配置，不重复探测
   if (pythonPath && nodePath) return;
 
   ["python", "node"].forEach((type) => {
@@ -327,22 +365,47 @@ async function probeAllInterpreters() {
   });
 
   try {
-    const status = await invoke("probe_interpreters");
+    const status = await invoke("probe_interpreters", { pythonPath, nodePath });
     updateInterpreterUI("python", status.python);
     updateInterpreterUI("node", status.node);
+    // 探测成功后保存路径
+    saveInterpreterPaths();
   } catch (e) {
     console.error("probeInterpreters failed:", e);
   }
 }
 
 /**
- * 初始化脚本解释器探测：绑定按钮事件 + 首次自动探测
+ * 初始化脚本解释器探测：加载已保存路径 + 绑定按钮事件 + 首次自动探测
  */
-function initInterpreterProbing() {
+async function initInterpreterProbing() {
+  // 加载已保存的解释器路径
+  try {
+    const saved = await invoke("get_interpreter_paths");
+    if (saved.python_path) {
+      const el = document.getElementById("python-path");
+      if (el) el.value = saved.python_path;
+    }
+    if (saved.node_path) {
+      const el = document.getElementById("node-path");
+      if (el) el.value = saved.node_path;
+    }
+  } catch (e) {
+    console.error("get_interpreter_paths failed:", e);
+  }
+
   document.getElementById("python-probe")?.addEventListener("click", () => probeSingleInterpreter("python"));
   document.getElementById("node-probe")?.addEventListener("click", () => probeSingleInterpreter("node"));
   document.getElementById("python-browse")?.addEventListener("click", () => browseInterpreter("python"));
   document.getElementById("node-browse")?.addEventListener("click", () => browseInterpreter("node"));
+
+  // 手动编辑路径时自动保存
+  ["python", "node"].forEach((kind) => {
+    const pathEl = document.getElementById(`${kind}-path`);
+    if (pathEl) {
+      pathEl.addEventListener("change", saveInterpreterPaths);
+    }
+  });
 
   // 首次启动：两个路径都为空时才自动探测
   setTimeout(() => {
