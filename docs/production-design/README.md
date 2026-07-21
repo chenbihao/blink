@@ -36,7 +36,7 @@ production-design/
     ├── 0.8-context-interaction.md      ← 感知与操作层:UIA划词+Autosuggestion+四域架构+Chord+0.8.6架构固化
     ├── 0.9-ai-layer.md                 ← 📋 Agent 地基:统一 tool 架构+Provider 多档+主窗口文本闭环(零语音)
     ├── 0.10-voice-agent.md             ← ✅ 语音输入:STT+语音打字+伪流式 VAD 切句+FunASR 本地化
-    └── 0.11-plugin-ai-toolchain.md    ← 📋 插件通信契约重设计 + AI 调用插件链路完善
+    └── 0.11-plugin-ai-toolchain.md    ← ✅ 插件通信契约重设计+AI 调用插件链路完善+截图标注增强+OCR word 级+翻译衔接+图上翻译
 ```
 
 ---

@@ -217,13 +217,14 @@ Provider 不只是聊天 API，是**能力供应商**：LLM（`chat`/`chat_strea
 |---|---|
 | **0.9** | Agent 地基：统一 tool 架构 + Provider + **纯文本**闭环（零语音） |
 | **0.10** | 语音输入：STT + 语音打字（G1/G2）+ 伪流式 VAD 切句 + FunASR 本地化 + 文本注入（架构不变，只加感知层） |
-| **0.11** | 本地化与生态：本地模型 / skill 化 / MCP 双向 / RAG 记忆 |
+| **0.11** | 插件通信契约重设计 + AI 调用插件链路完善 + 截图标注增强 + OCR word 级链路 + 阅读模式 + 翻译衔接 + 水印独立图层 + 图上翻译 |
+| **0.12** | AI 能力架构搭建：对话窗口 / 对话机制 / MCP client / RAG 记忆 / DB 拆分 / ollama+lmstudio Provider |
 
 **解耦智慧**：先验证大脑（0.9 文本闭环），再加感官（0.10 语音）。如果 0.9 就发现「AI 路由调本地能力」有坑，能在投语音之前止损。
 
-### 6.6 AI 对话 = takeover view（0.10 起）
+### 6.6 AI 对话 = takeover view（0.12 规划）
 
-AI 对话不是 item 列表，而是 `view: chat` 的 takeover 区域——下方展开对话界面，走流式 JSONL。这是 §4.3 view 字段预留的目的。Agent 窗口在 0.10 落地，展开需用户确认（Alt+1），不自动抢焦点。
+AI 对话不是 item 列表，而是 `view: chat` 的 takeover 区域——下方展开对话界面，走流式 JSONL。这是 §4.3 view 字段预留的目的。Agent 窗口在 0.12 规划（Alt+Q），展开需用户确认，不自动抢焦点。
 
 ---
 

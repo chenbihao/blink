@@ -19,7 +19,7 @@
 | 前台应用（进程 + 窗口标题） | `GetForegroundWindow` + 进程名 | ✅ |
 | 选中文本 | UIA + 鼠标钩子（选词瞬间抓取） | ✅ |
 | 剪贴板 | Clipboard API + SQLite 持久化 + AddClipboardFormatListener | ✅ |
-| **语音输入** | STT（本地 whisper-rs / sherpa-onnx 或云端） | 🔜 0.10 |
+| **语音输入** | STT（本地 FunASR 或云端 OpenAI/Groq） | ✅ 0.10 |
 | 活跃 URL / 编辑器文件 | 浏览器扩展 / 编辑器插件 | ⬜ 远期 |
 | 系统状态（时间/网络/电源） | 系统 API | ⬜ 远期 |
 

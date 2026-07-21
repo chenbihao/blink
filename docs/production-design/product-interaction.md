@@ -8,11 +8,13 @@
 
 ## 1. 产品定位
 
-### 1.1 Universal Action Layer
+### 1.1 不只是启动器
 
-Blink 不是启动器（launcher），而是**统一操作层**——感知上下文、主动推荐动作，让任何操作都比原路径更快。搜索只是入口之一，**动作执行才是终点**。
+**目标：做一个极其丝滑的启动器，并且把常用的功能都丝滑融合，使用 Chord 模式来调用各种增强能力，不止是启动器。**
 
-0.9+ 演进为**本地 AI 的感知与执行层**——推理大脑可插拔，感知与执行是护城河（详见 [platform §6.1](./product-platform.md)）。
+Blink 把"选中英文 → 翻译"、"复制 URL → 打开"、"截图 → OCR 提取文字"这类多步骤操作，变成一次快捷键或一个 Tab。整个体验围绕**丝滑**展开——唤起快、响应快、操作路径短。
+
+通过 **Chord 模式**（主窗口按住 Alt + 字母键）可以快速调用截图、翻译、语音输入等增强能力。底层是**能力化架构**：每个功能都封装为标准 Capability，可供 AI 调用（详见 [platform §6.1](./product-platform.md)）。
 
 ### 1.2 核心原则
 
@@ -81,16 +83,16 @@ Blink 不是启动器（launcher），而是**统一操作层**——感知上�
 
 支持云端（OpenAI Whisper / Groq）和本地（FunASR SenseVoice，离线免费）双引擎，伪流式 VAD 切句 + 累积预览实现边说边出字。
 
-### 2.5 Agent 对话窗口（未来版本）
+### 2.5 Agent 对话窗口（0.12 规划）
 
-> 0.10 原计划含 Agent 对话窗口，实际落地时聚焦于语音输入（STT + 语音打字），Agent 窗口移至未来版本。
+> Chord 模式下 `Alt+Q` 唤起独立 AI 对话窗口（0.12 规划）。
 
-轻量路由判定「需要多轮 / 主窗口不够展示」时，**不自动展开**——产 Suggestion「Alt+1 展开对话」，用户确认才展开。自动展开会抢焦点、打断心流。
+轻量路由判定「需要多轮 / 主窗口不够展示」时，**不自动展开**——产 Suggestion 供用户确认才展开。自动展开会抢焦点、打断心流。
 
-- 复用同一 WebviewWindow，切换到 chat template（0.8.4 view 字段预留 `view: chat`）
-- 流式 MD 渲染（打字机 + 代码高亮 + 复制）
-- 确认反馈走统一 kbd 体系：`Alt+1` 展开 / `Alt+2` 拒绝（见 [principles §14.7](./product-principles.md)）
-- ESC 返回搜索；Context 可注入（选区 / 剪贴板 / 前台，可逐项关）
+- 独立 Agent 窗口，流式 MD 渲染（打字机 + 代码高亮 + 复制）
+- 对话机制：conversation 隔离 + 持久化 memory + tool loop 无限轮
+- Context 可注入（选区 / 剪贴板 / 前台，可逐项关）
+- 详见 [phases/0.12-ai-ecosystem.md](./phases/0.12-ai-ecosystem.md)
 
 ---
 

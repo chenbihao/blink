@@ -1,7 +1,7 @@
 <h1 align="center">Blink</h1>
 
 <p align="center">
-  <strong>A Universal Action Layer for Windows — senses what you're doing, makes every action faster.</strong>
+  <strong>A smooth launcher for Windows — senses what you're doing, makes every action faster.</strong>
 </p>
 
 <p align="center">
@@ -19,83 +19,111 @@
   <img src="docs/images/blink-rust.png" width="680" alt="Blink Demo"/>
 </p>
 
-[View the demo GIF](docs/images/blink.gif)
+---
+
+## More Than a Launcher
+
+**Build an incredibly smooth launcher that seamlessly integrates common features, using Chord mode to invoke various enhanced capabilities — it's more than just a launcher.**
+
+Blink transforms multi-step operations like "select English text → translate", "copy URL → open link", "screenshot → OCR extract text" into a single shortcut or one Tab press. The entire experience revolves around being **smooth** — fast summoning, fast response, short interaction paths.
+
+With **Chord mode** (hold Alt + letter key while the main window is open), you can quickly invoke screenshot, translation, voice input and other enhanced capabilities without switching windows or memorizing complex shortcuts.
+
+Under the hood is a **capability architecture**: every feature (search, screenshot, translation, plugins...) is wrapped as a standard Capability that can be called by AI. In the future, these capabilities will also be available to external AI tools as CLI tools or Skills.
 
 ---
 
-## What is Blink
+## Instant Search
 
-Blink isn't a launcher — it's a **Universal Action Layer**:
-search is just one entry point, **action execution is the destination**. By sensing context and proactively suggesting actions, sequences like "select English → translate", "copy URL → open link", "screenshot → clipboard" go from **multiple steps** to **zero input or one Tab**.
+<p align="center">
+  <img src="docs/images/feature-search.gif" width="680" alt="Instant Search"/>
+</p>
 
-- ⚡ **Fast** — Summon &lt; 50ms, first result &lt; 20ms
-- 🎯 **Context-aware** — Auto-senses selection / clipboard / foreground app; unobtrusive but always ready
-- 🎤 **Voice Input** — Hold Alt+Space to talk, release to type; supports cloud (OpenAI/Groq) and local (FunASR) engines
-- 🧩 **Extensible** — Sandboxed plugin processes (Rust / Python / Node.js / PowerShell); crashes don't affect core
+- **App Search** — Fuzzy matching + Pinyin initials + full Pinyin (`wx` → WeChat, `dksz` → Settings)
+- **File Search** — Integrates Everything, falls back to local directory scan when not installed
+- **Live Calculator** — `sqrt(144)` / `0.75*360`, press Enter to copy
+- **Clipboard History** — Background recording, supports fuzzy search
+- **Tab Quick Accept** — Type `fy`, press Tab to auto-complete to `fanyi `, then start typing what you want to translate
+- **Lightning Fast** — Summon < 50ms, first result < 20ms
 
 ---
 
-## Core Capabilities
+## Context Awareness
 
-### Instant Search
+<p align="center">
+  <img src="docs/images/feature-context.gif" width="680" alt="Context Awareness"/>
+</p>
 
-- **App Search** — Scans Start Menu; fuzzy match + Pinyin initials + full Pinyin (`wx` → 微信, `dksz` → 打开设置)
-- **File Search** — Integrates Everything; falls back to local directory scan when not installed
-- **Live Calculator** — Type `1+1` or `100*0.25`, press Enter to copy
-- **Clipboard History** — Background auto-record + fuzzy search history
+Blink silently senses your context in the background, but never intrudes — use it when you see it, forget it when you don't.
 
-### Context Awareness
+- **Selection Sensing** — Select text in any app, summon Blink to auto-capture it, one-key translate or search
+- **Clipboard Sensing** — Copied a URL? Auto-suggests "open link". Copied English text? Auto-suggests translation via plugins
+- **Ghost Text Autocomplete** — Type `fy`, see gray hint `fanyi `, press Tab to accept quickly, then start typing your content
+- **Per-item Control** — Each sensing type can be individually toggled in settings
 
-- **Selection Sensing** — Grabs selected text in other apps; one-key translate/search after summoning
-- **Ghost Text Autocomplete** — Type `fy hello`, see suggested `fanyi hello`; press Tab to trigger translation
-- **Smart Suggestions** — Clipboard is URL / file path → auto-suggest "Open link / Reveal in Explorer"; select English text → Ghost suggestion to translate
-- **Non-intrusive by design** — Awareness runs silently in the background; useful when you see it, invisible when you don't; each feature can be toggled individually in settings
+---
 
-### Chord Quick Actions
+## Chord Enhancements
 
-Hold Alt while the main window is open; letter keys trigger actions directly:
+<p align="center">
+  <img src="docs/images/feature-chord.gif" width="680" alt="Chord Mode"/>
+</p>
+
+While the main window is open, hold Alt and letter keys become quick action shortcuts. No need to memorize global hotkeys — just glance at the hints when you need them.
 
 | Combo | Action |
 |---|---|
-| `Alt + 1~9` | Quick launch item by position in results |
+| `Alt + Q` | Open AI chat window (coming soon) |
+| `Alt + A` | Region screenshot → OCR / translate / pin / save |
 | `Alt + C` | Clipboard history |
-| `Alt + A` | Region screenshot (area capture → clipboard / save) |
-| Hold `Alt + Space` | Voice input (release to type) |
+| `Alt + 1~9` | Quick launch item by position in results |
 
-### Voice Input
+Screenshots support annotation (rectangle, arrow, text, mosaic, etc.), OCR text recognition, on-image translation, and pin-to-top. Hold `Alt + Space` for voice input — supports cloud (OpenAI / Groq) and local (FunASR) dual engines, words appear as you speak with VAD auto-sentence-splitting.
 
-Hold **Alt+Space** to talk, release to type — no need to switch IME or type manually.
+---
 
-- **Two modes**: Main window voice input (text fills the search box) and **Voice Typing** (text goes directly to the current cursor position, like typing by voice)
-- **Dual engines**: Cloud (OpenAI Whisper / Groq, billed by audio duration) and Local (FunASR SenseVoice, offline & free, 17× real-time on CPU, ~92% accuracy)
-- **Pseudo-streaming**: See words appear as you speak — VAD auto-splits sentences and finalizes text, no need to wait until you finish the whole sentence
-- **Privacy**: Local mode is fully offline, no audio persistence; cloud mode sends audio to the provider
+## Plugin Ecosystem
 
-### Plugin Ecosystem
+<p align="center">
+  <img src="docs/images/feature-plugin.gif" width="680" alt="Plugin Ecosystem"/>
+</p>
 
-- **Isolated Processes** — JSONL protocol; crashes don't affect core. Runtimes: Rust / Python / Node.js / PowerShell
-- **Built-in Plugins** — Translation (Youdao / Baidu / DeepL / Ali / Tencent), Weather, IP lookup
-- **Flexible display modes** — Plugins can mix into results, pin to top, or take over the entire return area
+Plugins run in isolated processes — crashes don't affect Blink's core. Supports Python, Node.js, Rust, or any executable.
 
-### Polish
+- **Translation** — Youdao / Baidu / DeepL / Alibaba / Tencent, five engines built-in
+- **Weather** — Clean weather card
+- **IP Lookup** — Quick network info check
+- **More Possibilities** — Write plugins in your favorite language, JSONL protocol communication, just a few lines of code to integrate
+- **Coming Soon** — One-click discovery of CLI tools on your system, auto-configure them as Blink plugins
 
-- **Context Menu** — Smart actions by result type (open location, copy path, run as admin, etc.)
-- **Themes** — Catppuccin Mocha dark / Latte light / Follow system
-- **i18n** — Full 中文 / English bilingual (including plugin content)
-- **Configurable** — Hotkeys, engine toggles, auto-start, proxy, log levels, per-item context awareness toggles
+---
+
+## AI Ready
+
+<p align="center">
+  <img src="docs/images/feature-ai.gif" width="680" alt="AI Capabilities"/>
+</p>
+
+Every feature in Blink is wrapped as a standard Capability that can be called by AI:
+
+- **Action Invocation** — AI can trigger Blink's built-in actions (search, open apps, execute commands...)
+- **Plugin Invocation** — AI can call any installed plugin
+- **Multi-provider Support** — Built-in presets for OpenAI, DeepSeek, Groq, etc. Configure any compatible provider or local LLM (ollama / lmstudio)
+- **Future Openness** — These capabilities will gradually be available to external AI tools as CLI tools or Skills
+
+The AI chat window is currently in development (`Alt + Q`), enabling natural language commands for complex operations.
 
 ---
 
 ## Roadmap
 
-**Done:** Core search → Plugin ecosystem → Context awareness → Chord interactions → AI conversation capabilities → Frontend architecture overhaul → Voice input
+**Completed:** Core search → Plugin ecosystem → Context awareness → Chord interactions → Voice input → Screenshot annotation → AI basic call chain
 
 **Next:**
 
-| Direction | Content | Status |
-|---|---|---|
-| 🔌 **Local & Ecosystem** | On-demand local models · skill-ification · bidirectional MCP · RAG memory | 📋 Planned |
-| 🛡️ **Trust Boundary** | AI only recommends actions, never executes directly; confirmation always stays in your hands | ✅ Built-in |
+- **Chat Window** — Independent Agent window, natural language commands
+- **Bidirectional MCP** — Let Blink's capabilities be called by external AI tools
+- **Memory** — Let AI remember your preferences and history, getting smarter over time
 
 ---
 
@@ -108,11 +136,11 @@ Download the latest installer from [Releases](../../releases).
 ## Usage
 
 1. Blink sits in the system tray after launch
-2. **`Alt + Space`** → summon the input bar
-3. Type app name (Pinyin initials/full supported), math expression, or plugin trigger word
-4. **↑↓** to navigate, **Enter** or **Alt + 1~9** for quick launch
-5. While main window is open, **hold Alt** → see quick action hints
-6. **Esc** or click outside → hide
+2. `Alt + Space` to summon the input bar
+3. Type app name (Pinyin initials/full Pinyin supported), expression, or plugin trigger word
+4. `↑` `↓` to select, `Enter` or `Alt + 1~9` for quick launch
+5. While main window is open, hold `Alt` to see Chord quick actions
+6. `Esc` or click outside to hide
 
 ### Keyboard Shortcuts
 
@@ -120,13 +148,13 @@ Download the latest installer from [Releases](../../releases).
 |---|---|
 | `Alt + Space` | Summon / hide |
 | `↑` `↓` | Navigate results |
-| `Alt + 1~9` | Quick launch item by position in results |
 | `Tab` | Accept completion suggestion (e.g. `fy` → `fanyi `) or context recommendation |
 | `Enter` | Launch / copy result |
-| `PgUp` `PgDn` | Page up/down |
-| `Alt + C` | Chord: clipboard history |
-| `Alt + A` | Chord: region screenshot |
-| Hold `Alt+Space` | Voice input (release to type) |
+| `Alt + Q` | AI chat window (coming soon) |
+| `Alt + A` | Region screenshot |
+| `Alt + C` | Clipboard history |
+| `Alt + 1~9` | Quick launch by position |
+| `Alt + Space` (hold) | Voice input |
 | `Esc` | Hide |
 
 ---
@@ -142,33 +170,71 @@ Download the latest installer from [Releases](../../releases).
 ### Build & Run
 
 ```bash
-# Dev mode (debug, console logging)
+# Dev mode
 cargo tauri dev
 
 # Release build (includes plugin compilation)
 cargo xtask release
 
-# Tests
+# Run tests
 cargo test --bin blink
 ```
 
-### Want to modify the core?
+### Architecture Overview
 
-Read [`docs/production-design/`](docs/production-design/README.md) first:
-- [`00-overview.md`](docs/production-design/00-overview.md) — Product vision + milestones
-- [`product-platform.md §5.0`](docs/production-design/product-platform.md) — Four-domain architecture rules
-- [`phases/{version}-*.md`](docs/production-design/phases/) — Design decisions and pitfalls per version
+```
+┌─────────────────────────────────────────────────────┐
+│  Frontend (WebView2)                                │
+│  Pure HTML/CSS/JS, no build step                    │
+└──────────────────────┬──────────────────────────────┘
+                       │ invoke / event
+┌──────────────────────┴──────────────────────────────┐
+│  Tauri Commands Layer                               │
+│  IPC entry, connects frontend and backend           │
+└──────────────────────┬──────────────────────────────┘
+                       │
+┌──────────────────────┴──────────────────────────────┐
+│  Domain Layer (Four-domain Architecture)            │
+│                                                     │
+│  Awareness    ── Context sensing (clipboard/        │
+│                 selection/foreground app)            │
+│  Suggestion   ── Generate suggestions (Ghost Text   │
+│                 / smart recommendations)             │
+│  Routing      ── Route decisions (Query → best      │
+│                 action)                             │
+│  Execution    ── Execute actions (unified entry,    │
+│                 explicit trigger)                    │
+│                                                     │
+│  SearchEngine ── Search engines (app/file/          │
+│                 calculator/clipboard)                │
+│  Capability   ── Capability layer (screenshot/OCR/  │
+│                 translation/plugins...)              │
+│  AI Provider  ── AI interface (rig-core, switchable │
+│                 providers)                          │
+└──────────────────────┬──────────────────────────────┘
+                       │
+┌──────────────────────┴──────────────────────────────┐
+│  Infrastructure Layer                               │
+│  SQLite / Win32 API / Platform abstraction /        │
+│  Plugin process management                          │
+└─────────────────────────────────────────────────────┘
+```
+
+### Want to dive deeper?
+
+- [`docs/production-design/00-overview.md`](docs/production-design/00-overview.md) — Product vision and milestones
+- [`docs/production-design/phases/`](docs/production-design/phases/) — Design decisions and pitfalls per version
 
 ---
 
 ## Special Thanks
 
-- [Wox](https://github.com/Wox-launcher/Wox) — The launcher that started it all on Windows
+- [Wox](https://github.com/Wox-launcher/Wox) — The pioneer launcher on Windows
 - [Alfred](https://www.alfredapp.com/) — Proved that a global input box can be the first entry for human-computer interaction
 - [Raycast](https://www.raycast.com/) — Modern launcher experience, gold standard for plugin ecosystems
-- [uTools](https://u.tools/) — Reference for localized experience on Chinese desktops
+- [uTools](https://u.tools/) — Local efficiency tool, reference for localized experience
 - [Flow Launcher](https://www.flowlauncher.com/) — Community-driven open-source launcher on Windows
-- [Everything](https://www.voidtools.com/) — Lightning-fast file search, integrated as Blink's file search backend
+- [Everything](https://www.voidtools.com/) — Lightning-fast file search, Blink's file search integration
 - [Quicker](https://getquicker.net/) — Inspiration for the Chord interaction pattern
 
 ---
