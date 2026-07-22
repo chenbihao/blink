@@ -34,7 +34,8 @@ Blink 是一个 Windows 全局快捷入口，定位不只是「启动器」。**
   - 0.11.8：截图优化收尾 + 图标包引入（Lucide sprite）
   - 0.11.9：OCR word 级链路（`OcrLine.Words()` + word bounding_rect + 智能拼接替代前端强清）+ 原图阅读模式（word 拖选 + textarea 双向联动）+ 翻译衔接（`translate_text` command 直调 translate 插件 tool；OCR 面板双 tab 原文/译文；工具栏「OCR」「翻译」共用面板）+ 水印独立图层（`watermarkConfig` 单例覆盖式，脱离 commands 撤销栈）+ 钉图窗口右键 OCR/翻译
 - ✅ **0.11.10 图上翻译 + 截图交互重构**：`overlayLayer` 图层引擎（原位嵌原文/译文，背景遮罩三档+字号自适应）+ 选取工具（默认激活，解决鼠标层冲突）+ 预热 OCR（按钮秒响应）+ 双按钮单一路径（[识别]/[翻译]各自清晰，消除中间态）+ 面板抽屉化（默认展开，可拖动）+ 误点保护（点选区外 no-op）+ `translate_batch` 批量翻译 + 命名迁移 OCR→识别。测试基线 **751 通过**。详见 [phases/0.11-plugin-ai-toolchain.md §2.10](docs/production-design/phases/0.11-plugin-ai-toolchain.md#210-图上翻译--截图交互重构01110)
-- 🔜 **0.12 AI 能力架构搭建**：基础设施抽取与清账（投影统一 / **DB 主库+缓存库拆分** / 分层违规修复 / ollama+lmstudio Provider 接入）+ 对话窗口★（独立 Agent 窗口 + rig AgentBuilder，不破主窗口类型收窄铁则）+ 对话机制（conversation 隔离 + 持久化 memory 走 SQLite impl rig ConversationMemory trait + 滑动窗口 + tool loop 无限轮）+ MCP client + RAG（知识库检索作为内部 tool，走 ollama embedding）。**产品边界：Blink 不做 AI 运行时，靠外部 ollama/lmstudio**。MCP server 护城河 / Skill / 记忆向量召回 / mistral.rs / A2A 推 0.13。详见 [phases/0.12-ai-ecosystem.md](docs/production-design/phases/0.12-ai-ecosystem.md)
+- 🔜 **0.12 AI 能力架构搭建**：基础设施抽取与清账（投影统一 / **DB 四层拆分** config+history+AI+cache / 分层违规修复 / **Provider 模型统一管理** chat+embedding+STT / ollama+lmstudio Provider 接入 / 存储页多库统计）+ 对话窗口★（独立 Agent 窗口 + **Alt+Q chord** + rig AgentBuilder，不破主窗口类型收窄铁则）+ 对话机制（conversation 隔离 + 持久化 memory 走 SQLite impl rig ConversationMemory trait + 滑动窗口 + tool loop 无限轮）。**产品边界：Blink 不做 AI 运行时，靠外部 ollama/lmstudio**。详见 [phases/0.12-ai-ecosystem.md](docs/production-design/phases/0.12-ai-ecosystem.md)
+- 🔜 **0.13 AI 调用能力扩展**：MCP client（消费外部 tool，McpTool 进适配层）/ RAG（知识库检索，走 ollama embedding + 暴力 cosine）/ 记忆向量召回（DemotingPolicyMemory 钩子 + 语义召回）/ MCP server（护城河——暴露 Blink 能力）/ Skill 化（CLI → AI 生成 skill，需 PoC 验证）。**砍掉项**：mistral.rs / A2A / sqlite-vec。详见 [phases/0.13-ai-capability-expansion.md](docs/production-design/phases/0.13-ai-capability-expansion.md)
 
 ---
 
@@ -144,11 +145,13 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 
 ## 8. 数据存储
 
-SQLite `%APPDATA%\blink\blink.db`：
-- `history(lnk_path, hit_count, last_used_at)` — 启动历史，频率加权 + 衰减
-- `config(key, value, updated_at)` — 配置 KV（`AppConfig` 6 分片门面 + `AIConfig` 第 7 分片 + `engine:{id}` / `plugin:{id}`）；前端泛型 `set_config` 命令
-- `clipboard(id, text, kind, hit_count, last_used_at)` — 剪贴板历史
-- `perf(metric, value, at)` — 性能统计
+> **0.12 规划中：DB 四层拆分**（当前仍为单库 `blink.db`，0.12.0 落地后拆为四库）
+
+SQLite `%APPDATA%\blink\`（0.12 拆分后四库独立）：
+- **配置库 `blink_config.db`** — `config(key, value, updated_at)` 配置 KV（`AppConfig` 6 分片门面 + `AIConfig` 第 7 分片 + `SttConfig` 第 8 分片 + `engine:{id}` / `plugin:{id}` / `clipboard:config` / `screenshot:config` / `context:config`）；未来跨机同步只同步此库
+- **历史库 `blink_history.db`** — `history(lnk_path, hit_count, last_used_at)` 启动历史 + `clipboard_history(id, text, kind, hit_count, last_used_at)` 剪贴板历史
+- **AI 库 `blink_ai.db`** — `ai_tool_audit` AI 工具审计 + `conversations` / `messages`（0.12.2 对话记忆）
+- **缓存库 `blink_cache.db`** — `performance_metrics` 性能统计（高频写）+ `icon_cache` 图标缓存（BLOB）
 
 文件系统 `%APPDATA%\blink\`：
 - `python\uv\uv.exe` — uv 二进制（本地安装，Blink 自管理）
