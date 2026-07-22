@@ -1031,3 +1031,95 @@
   color: var(--on-accent, #fff);
   font-weight: var(--weight-semibold, 600);
 }
+
+/* ── 0.12 §2.7: 模型能力徽标 ────────────────────────────────────────── */
+.ai-cap-badge {
+  display: inline-block;
+  font-size: var(--text-xs, 10px);
+  font-weight: var(--weight-medium, 500);
+  padding: 1px 6px;
+  border-radius: var(--radius-sm, 3px);
+  margin-right: 3px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.ai-cap-chat {
+  background: var(--blue-bg, rgba(59, 130, 246, 0.15));
+  color: var(--blue, #3b82f6);
+}
+.ai-cap-embedding {
+  background: var(--green-bg, rgba(34, 197, 94, 0.15));
+  color: var(--green, #22c55e);
+}
+.ai-cap-stt {
+  background: var(--purple-bg, rgba(168, 85, 247, 0.15));
+  color: var(--purple, #a855f7);
+}
+
+/* 模型表格能力列 */
+.ai-models-table col.col-caps { width: 110px; }
+.ai-models-table-caps {
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* 模型编辑 modal 能力复选框 */
+.ai-model-cap-checks {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+}
+.ai-model-cap-checks .checkbox-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  font-size: var(--text-sm);
+}
+.ai-model-cap-checks .checkbox-inline input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+}
+
+/* ── 0.12 §2.7: 本地模型 Tab ────────────────────────────────────────── */
+.ollama-models-list {
+  margin-top: var(--space-sm);
+}
+.ollama-model-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--surface);
+}
+.ollama-model-row:last-child {
+  border-bottom: none;
+}
+.ollama-model-name {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--text-sm);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ollama-model-caps {
+  flex-shrink: 0;
+}
+.ollama-model-add-btn.added {
+  opacity: 0.5;
+  cursor: default;
+}
+.lmstudio-help {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.lmstudio-help .setting-hint {
+  margin: 0;
+}
+.lmstudio-help .btn-small {
+  margin-top: 8px;
+  align-self: flex-start;
+}

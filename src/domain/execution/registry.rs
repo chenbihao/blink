@@ -78,6 +78,19 @@ impl ActionRegistry {
     pub fn len(&self) -> usize {
         self.actions.read().unwrap().len()
     }
+
+    /// 返回所有已注册动作的 `(id, Arc<dyn Action>)` 对（0.12.0 §2.4）。
+    ///
+    /// 供 `build_agent_tools()` 工厂函数遍历所有动作，包装成 `ToolDyn`。
+    /// 读锁内一次性 clone 所有 Arc，避免多次锁获取。
+    pub fn entries(&self) -> Vec<(String, Arc<dyn Action>)> {
+        self.actions
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
 }
 
 impl Default for ActionRegistry {

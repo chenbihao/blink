@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
-use crate::app::ai_config::{AIConfig, ModelEntry, ProviderEntry, ProviderKind, Tier};
+use crate::app::ai_config::{AIConfig, ModelEntry, ModelCapability, ProviderEntry, ProviderKind, Tier};
 use crate::domain::ai::provider::{AIError, AIProvider};
 
 /// Provider 构造工厂——把 `ProviderEntry` + `ModelEntry` 变成 `Arc<dyn AIProvider>`。
@@ -73,6 +73,7 @@ fn compute_provider_fingerprint(p: &ProviderEntry, secret_epoch: u64) -> String 
         ProviderKind::OpenAICompatible => "oai",
         ProviderKind::AnthropicMessages => "anth",
         ProviderKind::GeminiGenerateContent => "gem",
+        ProviderKind::OllamaHttp => "ollama",
     };
     let bu = p.base_url.as_deref().unwrap_or("");
     format!("{kind}|{bu}|e{secret_epoch}")
@@ -275,7 +276,7 @@ impl AIProviderRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::ai_config::{ModelEntry, ProviderEntry, ProviderKind, TierAssignment};
+    use crate::app::ai_config::{ModelEntry, ModelCapability, ProviderEntry, ProviderKind, TierAssignment};
     use crate::domain::ai::provider::tests::MockProvider;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -347,6 +348,7 @@ mod tests {
                             temperature: None,
                             max_tokens: None,
                             custom_parameters: Vec::new(),
+                            capabilities: vec![ModelCapability::Chat],
                         })
                         .collect(),
                     created_at: 0,

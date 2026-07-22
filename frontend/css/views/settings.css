@@ -1579,3 +1579,77 @@ details.plugin-group .plugin-group-body {
 .trigger-add-inline-input::placeholder {
   color: var(--text-faint);
 }
+
+/* ── 存储页：四库统计卡片 ── */
+.db-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.db-card {
+  border: 1px solid var(--surface);
+  border-radius: var(--radius-lg);
+  padding: 12px 14px;
+  background: var(--bg-elevated, var(--bg));
+  transition: border-color 0.2s;
+}
+
+.db-card:hover {
+  border-color: var(--accent);
+  opacity: var(--opacity-hover, 0.9);
+}
+
+.db-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.db-card-name {
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-base);
+  color: var(--text);
+}
+
+.db-card-file {
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  font-family: var(--font-mono, monospace);
+}
+
+.db-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.db-card-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.db-stat {
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+  background: var(--surface);
+  padding: 2px 8px;
+  border-radius: var(--radius-xs);
+}
+
+.db-card-size {
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
+  color: var(--accent);
+}
+
+.db-card-path {
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  word-break: break-all;
+  line-height: var(--leading-tight);
+}

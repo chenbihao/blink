@@ -22,6 +22,7 @@ pub mod provider;
 pub mod registry;
 pub mod rig_provider;
 pub mod spike;
+pub mod tool_adapter;
 
 #[allow(unused_imports)] // 0.9.1 Phase 5 起被 AppContext 消费
 pub use factory::default_factory;

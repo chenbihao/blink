@@ -164,7 +164,7 @@ pub(crate) mod wav;
 /// 创建 STT 引擎实例(工厂函数)。
 ///
 /// 根据 SttConfig 选择引擎：
-/// - Cloud 模式 + 已配置 cloud_provider → CloudSttEngine
+/// - Cloud 模式 + 已配置云端供应商（cloud 或 cloud_provider）→ CloudSttEngine
 /// - Local 模式 + StreamingMode::Pseudo → PseudoStreamingSttEngine (VAD + 预览) ⭐ 默认
 /// - Local 模式 + StreamingMode::Off → LocalSttEngine (HTTP 非流式)
 ///
@@ -179,7 +179,7 @@ pub fn create_engine() -> Result<Box<dyn SttEngine>, String> {
 
     match config.mode {
         crate::app::stt_config::SttMode::Cloud => {
-            if config.cloud_provider.is_some() {
+            if config.is_cloud_configured() {
                 tracing::info!("STT 引擎: cloud");
                 Ok(Box::new(cloud::CloudSttEngine::new()))
             } else {

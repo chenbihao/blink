@@ -27,7 +27,7 @@ use crate::domain::ai::AIProviderRegistry;
 pub struct AppContext {
     pub app: AppHandle,
     #[allow(dead_code)]
-    pub pool: SqlitePool,
+    pub pools: crate::infra::data::DbPools,
     pub config: AppConfig,
     /// 0.9.1 Phase 3:AI 配置分片(独立第 7 分片,不进 AppConfig 门面)。
     /// 默认 `enabled=false` —— 老用户零副作用。
@@ -183,7 +183,7 @@ impl Service for HotkeyService {
                         // 长按开始 → 语音录音开始（async：可能需等待模型加载）
                         // 0.10.7：chord 门禁——chord 总开关关 / voice_input 在 disabled 列表 →
                         // 不启动录音。这让设置页的 voice_input 开关真正生效（而非仅控显示）。
-                        let pool = app.state::<sqlx::SqlitePool>();
+                        let pool = &app.state::<crate::infra::data::DbPools>().config;
                         let chord_cfg = crate::app::config::get_chord_config(&pool).await;
                         let disabled =
                             crate::app::config::get_disabled_chord_actions(&pool).await;
@@ -215,7 +215,7 @@ impl Service for HotkeyService {
                             tracing::warn!("chord registry 未就绪,跳过 Chord 事件");
                             continue;
                         };
-                        let pool = app.state::<sqlx::SqlitePool>();
+                        let pool = &app.state::<crate::infra::data::DbPools>().config;
                         let chord_cfg = crate::app::config::get_chord_config(&pool).await;
                         let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
                         let key_lower = key.to_lowercase();
@@ -254,7 +254,7 @@ impl Service for SelectionService {
         // 用户可在设置-上下文-环境感知里热切换（见 commands::update_context_config）。
         // 局限：钩子一旦装上，关闭态只是让回调短路（不再抓取），不会真正卸钩子
         //      —— 低级鼠标钩子跨线程卸载不安全，且实测再启用比反复装卸更稳。
-        let cfg = crate::app::config::get_context_config(&ctx.pool).await;
+        let cfg = crate::app::config::get_context_config(&ctx.pools.config).await;
         // 敏感应用黑名单：灌初始值，让钩子回调启动即门控。热更新走 commands::update_context_config。
         crate::infra::platform::selection::set_sensitive_apps(cfg.sensitive_apps.clone());
         if cfg.selection_enabled {
@@ -284,7 +284,7 @@ impl Service for ClipboardService {
             tracing::info!("剪贴板监听器: cfg.enabled=false, 跳过启动");
             return Ok(());
         }
-        crate::infra::platform::clipboard::start_listener(ctx.pool.clone(), cfg);
+        crate::infra::platform::clipboard::start_listener(ctx.pools.history.clone(), cfg);
         Ok(())
     }
 }

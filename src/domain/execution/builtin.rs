@@ -231,7 +231,7 @@ impl Action for ClearHistoryAction {
         DangerClass::Dangerous
     }
     async fn execute(&self, cx: &ActionContext<'_>) -> Result<ActionOutcome, ExecError> {
-        let pool = cx.app_handle.state::<sqlx::SqlitePool>();
+        let pool = &cx.app_handle.state::<crate::infra::data::DbPools>().history;
         crate::infra::data::history::clear(&pool).await;
         tracing::info!("搜索历史已清空");
         Ok(ActionOutcome::Nop)

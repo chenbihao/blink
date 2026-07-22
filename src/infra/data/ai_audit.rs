@@ -42,6 +42,11 @@ pub struct AuditLog {
 /// 结果摘要最大长度（超出截断 + `…`）。
 const RESULT_SUMMARY_MAX: usize = 500;
 
+/// 审计日志保留天数（0.12.0 §2.2.4）。
+const AUDIT_RETENTION_DAYS: i64 = 30;
+/// 审计日志行数上限——超出时删最旧的（0.12.0 §2.2.4）。
+const AUDIT_MAX_ROWS: i64 = 10_000;
+
 /// 初始化 `ai_tool_audit` 表。
 pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
     sqlx::query(
@@ -158,6 +163,61 @@ fn truncate_summary(s: &str) -> String {
     }
     let truncated: String = chars.iter().take(RESULT_SUMMARY_MAX).collect();
     format!("{truncated}…")
+}
+
+/// 审计日志总行数（设置页存储统计用）。
+pub async fn count(pool: &SqlitePool) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM ai_tool_audit")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0)
+}
+
+/// 清空全部审计日志（设置页"清除 AI 调用历史"用）。
+pub async fn clear_all(pool: &SqlitePool) {
+    if let Err(e) = sqlx::query("DELETE FROM ai_tool_audit").execute(pool).await {
+        tracing::warn!(error = %e, "清空 ai_tool_audit 失败");
+    }
+}
+
+/// 清理过期审计日志（0.12.0 §2.2.4）。
+///
+/// 两级策略（与 `icon_cache::cleanup_old` 同模式）：
+/// 1. **按天清理**：删除超过 30 天的记录
+/// 2. **行数兜底**：若仍超过 10000 行，删除最旧的超出部分
+///
+/// 启动时由 `DbPools::spawn_startup_cleanup` 统一调用。
+pub async fn cleanup_old(pool: &SqlitePool) {
+    // 1. 按天清理
+    let cutoff = chrono::Utc::now().timestamp() - AUDIT_RETENTION_DAYS * 86400;
+    match sqlx::query("DELETE FROM ai_tool_audit WHERE created_at < ?1")
+        .bind(cutoff)
+        .execute(pool)
+        .await
+    {
+        Ok(r) => {
+            let rows = r.rows_affected();
+            if rows > 0 {
+                tracing::info!(rows, cutoff, "清理过期审计日志");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "清理过期审计日志失败"),
+    }
+
+    // 2. 行数兜底
+    let total = count(pool).await;
+    if total > AUDIT_MAX_ROWS {
+        let excess = total - AUDIT_MAX_ROWS;
+        let _ = sqlx::query(
+            "DELETE FROM ai_tool_audit WHERE id IN (
+                SELECT id FROM ai_tool_audit ORDER BY created_at ASC LIMIT ?1
+            )",
+        )
+        .bind(excess)
+        .execute(pool)
+        .await;
+        tracing::info!(deleted = excess, total, "清理超量审计日志");
+    }
 }
 
 // ── 单测 ───────────────────────────────────────────────────────────────────────
@@ -313,5 +373,103 @@ mod tests {
             .expect("failed to create in-memory db");
         init_db(&pool).await.expect("first init failed");
         init_db(&pool).await.expect("second init failed");
+    }
+
+    // ── cleanup_old 测试（0.12.0 §2.2.4）───────────────────────────────────
+
+    #[tokio::test]
+    async fn cleanup_old_deletes_expired_records() {
+        let pool = setup_pool().await;
+        let now = chrono::Utc::now().timestamp();
+
+        // 写入一条 31 天前的记录（应被清理）
+        save_audit_log(
+            &pool,
+            "old_tool",
+            &serde_json::json!({}),
+            "old",
+            "openai_compatible",
+            "m",
+            1,
+        )
+        .await;
+        // 手动把 created_at 改到 31 天前
+        let cutoff = now - 31 * 86400;
+        let _ = sqlx::query("UPDATE ai_tool_audit SET created_at = ?1 WHERE tool_name = 'old_tool'")
+            .bind(cutoff)
+            .execute(&pool)
+            .await;
+
+        // 写入一条今天的记录（应保留）
+        save_audit_log(
+            &pool,
+            "new_tool",
+            &serde_json::json!({}),
+            "new",
+            "openai_compatible",
+            "m",
+            1,
+        )
+        .await;
+
+        cleanup_old(&pool).await;
+
+        let logs = query_recent(&pool, 10).await;
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].tool_name, "new_tool");
+    }
+
+    #[tokio::test]
+    async fn cleanup_old_enforces_row_limit() {
+        let pool = setup_pool().await;
+
+        // 写入 AUDIT_MAX_ROWS + 5 条记录（全部今天的，不会被按天清理）
+        for i in 0..(AUDIT_MAX_ROWS + 5) {
+            save_audit_log(
+                &pool,
+                &format!("tool_{i}"),
+                &serde_json::json!({}),
+                "ok",
+                "openai_compatible",
+                "m",
+                1,
+            )
+            .await;
+        }
+
+        assert_eq!(count(&pool).await, AUDIT_MAX_ROWS + 5);
+
+        cleanup_old(&pool).await;
+
+        // 行数兜底应删到 AUDIT_MAX_ROWS
+        assert_eq!(count(&pool).await, AUDIT_MAX_ROWS);
+    }
+
+    #[tokio::test]
+    async fn cleanup_old_no_op_when_under_limits() {
+        let pool = setup_pool().await;
+        // 写入少量记录
+        for i in 0..5 {
+            save_audit_log(
+                &pool,
+                &format!("tool_{i}"),
+                &serde_json::json!({}),
+                "ok",
+                "openai_compatible",
+                "m",
+                1,
+            )
+            .await;
+        }
+        cleanup_old(&pool).await;
+        // 不超 30 天、不超行数，应全保留
+        assert_eq!(count(&pool).await, 5);
+    }
+
+    #[tokio::test]
+    async fn cleanup_old_empty_table_no_panic() {
+        let pool = setup_pool().await;
+        cleanup_old(&pool).await;
+        assert_eq!(count(&pool).await, 0);
     }
 }

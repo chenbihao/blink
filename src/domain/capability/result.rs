@@ -12,24 +12,24 @@
 use serde::Serialize;
 use serde_json::Value;
 
-// ── rig 投影层（0.10 multi-turn 预备，0.9.7 仅定义不消费）─────────────────
+// ── rig 投影层（0.12.0 统一投影入口）──────────────────────────────────────
+//
+// **0.12.0 投影统一**：`to_rig_tool_result()` 是 CapabilityResult → rig ToolResultContent
+// 的**唯一投影入口**。service.rs 旧的 `project_capability_result_to_tool_message` 已删除，
+// Turn 2 回流改调本函数 + `rig_tool_result_to_text()` 提取文本。
+//
+// **Blob 摘要策略**（0.12.0 从 service.rs 迁入）：Blob 不喂原始字节（省 token），
+// 返回人类可读摘要如 "已获取 image/png (1.2 MB)"。
+// 未来 Agent 窗口若需多模态（喂图片给 vision 模型），可加 `to_rig_tool_result_raw()` 方法。
 
-/// rig ToolResultContent 投影——把 `CapabilityResult` 转成 rig 的 tool result 格式。
-///
-/// **0.10 Agent 窗口 multi-turn 流程**消费此函数：AI tool_call → Capability invoke →
-/// 结果投影成 `ToolResultContent` → 喂回 LLM 做下一轮 completion。
-///
-/// **0.9.7 仅定义**，当前单轮流程走前端投影（`capability_result_to_entries`），
-/// 不走 multi-turn。保证 0.10 接 Agent 窗口时"投影层已就绪"。
-///
-/// **Blob 投影策略**：用 `DocumentSourceKind::Raw`（原始字节），不 base64 编码——
-/// provider 适配层（rig 内部）负责按 vendor 要求转 base64/raw，能力层不关心。
 impl CapabilityResult {
-    #[allow(dead_code)] // 0.10 multi-turn 消费；0.9.7 单轮流程走前端投影
+    /// 投影成 rig `ToolResultContent`——tool 结果喂回 LLM 的规范路径。
+    ///
+    /// **消费方**：
+    /// - 主窗口 Turn 2 回流（经 `rig_tool_result_to_text()` 提取文本 → `ChatMessage::tool`）
+    /// - 0.12.1+ 对话窗口 Agent tool loop（直接用 `Vec<ToolResultContent>`）
     pub fn to_rig_tool_result(&self) -> Vec<rig_core::completion::message::ToolResultContent> {
-        use rig_core::completion::message::{
-            DocumentSourceKind, Image, ImageMediaType, MimeType, ToolResultContent,
-        };
+        use rig_core::completion::message::ToolResultContent;
 
         match self {
             CapabilityResult::Text { content } => {
@@ -41,20 +41,38 @@ impl CapabilityResult {
                 vec![ToolResultContent::text(json)]
             }
             CapabilityResult::Blob { mime, bytes } => {
-                // Blob → Image（Raw 字节，provider 适配层负责 base64 编码）
-                let media_type = ImageMediaType::from_mime_type(mime);
-                vec![ToolResultContent::Image(Image {
-                    data: DocumentSourceKind::Raw(bytes.clone()),
-                    media_type,
-                    detail: None,
-                    additional_params: None,
-                })]
+                // Blob → 文本摘要（不喂原始字节省 token）
+                let size_kb = bytes.len() as f64 / 1024.0;
+                let size_text = if size_kb >= 1024.0 {
+                    format!("{:.1} MB", size_kb / 1024.0)
+                } else {
+                    format!("{:.1} KB", size_kb)
+                };
+                vec![ToolResultContent::text(format!("已获取 {} ({})", mime, size_text))]
             }
             CapabilityResult::Done { summary } => {
                 vec![ToolResultContent::text(summary)]
             }
         }
     }
+}
+
+/// 把 `Vec<ToolResultContent>` 提取成纯文本——主窗口 Turn 2 回流用。
+///
+/// `ToolResultContent` 有 Text / Image 两变体；主窗口是文本模型，只取 Text。
+/// 对话窗口（0.12.1+）可直接用 `Vec<ToolResultContent>` 喂多模态模型。
+pub fn rig_tool_result_to_text(
+    contents: &[rig_core::completion::message::ToolResultContent],
+) -> String {
+    use rig_core::completion::message::ToolResultContent;
+    contents
+        .iter()
+        .filter_map(|c| match c {
+            ToolResultContent::Text(t) => Some(t.text().to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// 原子能力的统一返回——四种形态覆盖所有场景。
@@ -237,21 +255,43 @@ mod tests {
     }
 
     #[test]
-    fn rig_projection_blob_produces_image() {
-        use rig_core::completion::message::{DocumentSourceKind, MimeType, ToolResultContent};
+    fn rig_projection_blob_produces_text_summary() {
+        // 0.12.0: Blob → 文本摘要（不喂原始字节省 token）
+        use rig_core::completion::message::ToolResultContent;
         let r = CapabilityResult::Blob {
             mime: "image/png".into(),
             bytes: vec![0x89, 0x50, 0x4E, 0x47],
         };
         let contents = r.to_rig_tool_result();
         assert_eq!(contents.len(), 1);
-        if let ToolResultContent::Image(img) = &contents[0] {
-            // Blob → Raw 字节（不 base64 编码）
-            assert!(matches!(img.data, DocumentSourceKind::Raw(_)));
-            assert_eq!(img.media_type.as_ref().unwrap().to_mime_type(), "image/png");
+        if let ToolResultContent::Text(t) = &contents[0] {
+            assert!(t.text().contains("image/png"));
+            assert!(t.text().contains("KB"));
         } else {
-            panic!("Blob should project to Image");
+            panic!("Blob should project to Text summary");
         }
+    }
+
+    #[test]
+    fn rig_tool_result_to_text_extracts_text() {
+        let r = CapabilityResult::Text {
+            content: "hello world".into(),
+        };
+        let contents = r.to_rig_tool_result();
+        let text = super::rig_tool_result_to_text(&contents);
+        assert_eq!(text, "hello world");
+    }
+
+    #[test]
+    fn rig_tool_result_to_text_handles_blob_summary() {
+        let r = CapabilityResult::Blob {
+            mime: "image/png".into(),
+            bytes: vec![0u8; 2048], // 2 KB
+        };
+        let contents = r.to_rig_tool_result();
+        let text = super::rig_tool_result_to_text(&contents);
+        assert!(text.contains("image/png"));
+        assert!(text.contains("2.0 KB"));
     }
 
     #[test]

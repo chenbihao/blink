@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use rig_core::client::CompletionClient;
 
-use crate::app::ai_config::{ModelEntry, ProviderEntry, ProviderKind};
+use crate::app::ai_config::{ModelCapability, ModelEntry, ProviderEntry, ProviderKind};
 use crate::domain::ai::provider::{AIError, AIProvider};
 use crate::domain::ai::registry::ProviderFactory;
 use crate::domain::ai::rig_provider::{RigProvider, expose_for_rig};
@@ -72,16 +72,28 @@ impl ProviderFactory for RigFactory {
         entry: &ProviderEntry,
         model: &ModelEntry,
     ) -> Result<Arc<dyn AIProvider>, AIError> {
-        // 1. 读密钥——缺=未配置,不是错误
-        let key = secret::load_secret(&entry.id, "key").map_err(|e| {
+        // 1. 读密钥——本地 provider (ollama) 不需要密钥,跳过。
+        //    云端 provider 缺密钥 = 未配置,不是错误。
+        let key_str: String;
+        if entry.kind.requires_secret() {
+            let key = secret::load_secret(&entry.id, "key").map_err(|e| {
+                tracing::debug!(
+                    target: crate::infra::utils::perf::ai_slo::TARGET,
+                    "AI factory: {} 密钥未配置 ({e})",
+                    entry.display_name,
+                );
+                AIError::NotConfigured
+            })?;
+            key_str = expose_for_rig(&key);
+        } else {
+            // 本地 provider 无需密钥——ollama 等
             tracing::debug!(
                 target: crate::infra::utils::perf::ai_slo::TARGET,
-                "AI factory: {} 密钥未配置 ({e})",
+                "AI factory: {} 本地 provider,跳过密钥加载",
                 entry.display_name,
             );
-            AIError::NotConfigured
-        })?;
-        let key_str = expose_for_rig(&key);
+            key_str = String::new(); // 空字符串,rig ollama client 不使用
+        }
         // key 在此作用域内保留,rig builder 需要 &str;函数返回时 key 出栈 → zeroize
 
         // 2. 按协议分派构造 —— 每 arm 独立返回 Arc<dyn AIProvider>
@@ -97,6 +109,10 @@ impl ProviderFactory for RigFactory {
             }
             ProviderKind::GeminiGenerateContent => {
                 build_gemini(&key_str, entry.base_url.as_deref(), model)?
+            }
+            ProviderKind::OllamaHttp => {
+                // 0.12 §2.3: ollama 本地推理 provider
+                build_ollama(entry.base_url.as_deref(), model)?
             }
         };
 
@@ -210,6 +226,42 @@ fn build_gemini(
     )))
 }
 
+/// ollama HTTP API——本地推理,走 rig::providers::ollama（0.12 §2.3）。
+///
+/// **无需 API Key**——ollama 是本地服务,`requires_secret()` 已返回 false。
+/// base_url 默认 `http://localhost:11434`,用户可改（如远程 ollama 实例）。
+///
+/// 同时支持 chat 模型和 embedding 模型——factory 根据 `ModelEntry.capabilities`
+/// 决定构造哪种。当前只构造 completion model（embedding 留给 0.13 RAG）。
+fn build_ollama(
+    base_url: Option<&str>,
+    model: &ModelEntry,
+) -> Result<Arc<dyn AIProvider>, AIError> {
+    use rig_core::providers::ollama;
+
+    // ollama 无需认证——OllamaApiKey::default() = None,不发送 Authorization header。
+    // 但 builder 类型系统要求 Key: ApiKey,必须显式设置。
+    let mut builder = ollama::Client::builder()
+        .api_key(ollama::OllamaApiKey::default());
+    if let Some(url) = base_url.filter(|s| !s.is_empty()) {
+        builder = builder.base_url(url);
+    }
+    let client = builder
+        .build()
+        .map_err(|e| AIError::Provider(format!("ollama client 构造失败: {e}")))?;
+
+    let rig_model = client.completion_model(&model.id);
+    Ok(Arc::new(RigProvider::new(
+        ProviderKind::OllamaHttp,
+        model.id.clone(),
+        rig_model,
+        None,
+        model.temperature,
+        model.max_tokens,
+        &model.custom_parameters,
+    )))
+}
+
 /// 默认 factory 构造——**0.9.2 Phase 5b 起返回 `RigFactory`**。
 ///
 /// **调用位置**:`main.rs::setup`。挂进 `AIProviderRegistry`。
@@ -248,6 +300,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             custom_parameters: Vec::new(),
+            capabilities: vec![ModelCapability::Chat],
         }
     }
 
@@ -276,9 +329,10 @@ mod tests {
     }
 
     #[test]
-    fn all_three_kinds_have_factory_arms() {
-        // 三类协议都能触达 factory dispatch;无密钥场景一律 NotConfigured 早于协议构造。
+    fn all_cloud_kinds_have_factory_arms() {
+        // 云端三类协议都能触达 factory dispatch;无密钥场景一律 NotConfigured 早于协议构造。
         // 这是"分派完整性"测试:防止未来新增 kind 时忘了 factory arm。
+        // 0.12: OllamaHttp 不需要密钥,不走 NotConfigured 路径,单独测试。
         let f = RigFactory;
         for kind in [
             ProviderKind::OpenAICompatible,
@@ -292,5 +346,18 @@ mod tests {
                 "kind={kind:?} 无密钥应返 NotConfigured"
             );
         }
+    }
+
+    #[test]
+    fn ollama_skips_secret_loading() {
+        // 0.12 §2.3: OllamaHttp 是本地 provider,不需要密钥——build 应跳过 load_secret,
+        // 直接进入 match arm 并成功构造 RigProvider（client 构造不连接服务器,只创建 HTTP 客户端）。
+        let f = RigFactory;
+        let entry = sample_entry(ProviderKind::OllamaHttp, None);
+        let result = f.build(&entry, &sample_model());
+        assert!(
+            result.is_ok(),
+            "OllamaHttp 应成功构造 provider(无需密钥,client 构造不连接服务器)"
+        );
     }
 }

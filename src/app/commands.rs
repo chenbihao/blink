@@ -149,11 +149,11 @@ pub async fn launch_app(app: tauri::AppHandle, lnk_path: String) -> Result<(), S
 
     tracing::debug!(%lnk_path, "launch_app: 普通应用启动");
 
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pools = app.state::<crate::infra::data::DbPools>();
     // search_history_enabled=false 时跳过记录（隐私/偏好）；该项频率加权随之失效
-    let config = crate::app::config::get_config(&pool).await;
+    let config = crate::app::config::get_config(&pools.config).await;
     if config.search_history_enabled {
-        crate::infra::data::history::record_launch(&pool, &lnk_path).await;
+        crate::infra::data::history::record_launch(&pools.history, &lnk_path).await;
     }
     crate::domain::search::launch(&lnk_path)?;
     crate::infra::platform::window::hide(&app, "launch");
@@ -235,8 +235,7 @@ pub async fn confirm_ai_action(
         Ok(outcome) => {
             tracing::info!(%action_name, "confirm_ai_action: 执行成功");
 
-            // 写审计日志（turn=0 = 用户确认执行路径）
-            let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().ai;
             let (provider_kind_str, model_id_str) =
                 match app.try_state::<std::sync::Arc<crate::domain::ai::AIProviderRegistry>>() {
                     Some(reg) => match reg.resolve(crate::app::ai_config::Tier::Router) {
@@ -278,7 +277,7 @@ pub async fn confirm_ai_action(
 pub async fn list_builtin_actions(
     app: tauri::AppHandle,
 ) -> Vec<crate::domain::search::BuiltinActionInfo> {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
     let disabled = crate::app::config::get_disabled_builtin_actions(&pool).await;
     let registry = app.state::<std::sync::Arc<crate::domain::execution::ActionRegistry>>();
     // 读当前语言（从 AppConfig 快照取）
@@ -308,7 +307,7 @@ pub async fn trigger_chord(app: tauri::AppHandle, key: String) -> Result<(), Str
     else {
         return Err("chord registry 未就绪".into());
     };
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
     // 0.10.7：读 chord 配置（bindings + disabled），键位由 binding 覆盖
     let chord_cfg = crate::app::config::get_chord_config(&pool).await;
     let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
@@ -729,7 +728,7 @@ pub fn hide_screenshot_overlay(app: tauri::AppHandle) {
 /// `voice_input` 条目——语音总开关关时，提示条不该显示"Alt+Space 语音输入"。
 #[tauri::command]
 pub async fn list_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Value> {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
     let chord_cfg = crate::app::config::get_chord_config(&pool).await;
     let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
     let language = crate::app::config::get_config(&pool).await.language;
@@ -754,7 +753,7 @@ pub async fn list_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Value>
 /// （设置页不显示一个用不了的功能的开关）。
 #[tauri::command]
 pub async fn list_all_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Value> {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
     let chord_cfg = crate::app::config::get_chord_config(&pool).await;
     let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
     let language = crate::app::config::get_config(&pool).await.language;
@@ -793,7 +792,7 @@ pub async fn set_chord_mode(app: tauri::AppHandle, on: bool) -> Result<(), Strin
         return Ok(());
     }
     // 派生 tap 键集合
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
     let chord_cfg = crate::app::config::get_chord_config(&pool).await;
     let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
     let language = crate::app::config::get_config(&pool).await.language;
@@ -832,7 +831,7 @@ pub async fn set_chord_mode(app: tauri::AppHandle, on: bool) -> Result<(), Strin
 /// `list_builtin_context_bindings` 提供，与 manifest 路径字段格式完全对齐。
 #[tauri::command]
 pub async fn list_context_bindings(app: tauri::AppHandle) -> Vec<serde_json::Value> {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
     let config = crate::app::config::get_config(&pool).await;
     let disabled: std::collections::HashSet<String> =
         config.disabled_context_bindings.iter().cloned().collect();
@@ -878,16 +877,81 @@ pub async fn list_context_bindings(app: tauri::AppHandle) -> Vec<serde_json::Val
     bindings
 }
 
-/// 设置页-存储：获取历史记录统计信息。
+/// 设置页-存储：获取四库统计信息（0.12.0 DB 四层拆分）。
+///
+/// 返回各库的行数 + 文件大小 + 路径，前端渲染分区展示。
 #[tauri::command]
 pub async fn get_storage_info(app: tauri::AppHandle) -> serde_json::Value {
-    let pool = app.state::<sqlx::SqlitePool>();
-    let count = crate::infra::data::history::count(&pool).await;
-    let db_path = crate::infra::data::history::db_path_str();
+    let pools = app.state::<crate::infra::data::DbPools>();
+
+    // 历史库：history + clipboard_history 行数
+    let history_count = crate::infra::data::history::count(&pools.history).await;
+    let clipboard_stats = crate::infra::data::clipboard::get_stats(&pools.history).await;
+    let clipboard_count = clipboard_stats
+        .get("total")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    // AI 库：ai_tool_audit 行数
+    let ai_audit_count = crate::infra::data::ai_audit::count(&pools.ai).await;
+
+    // 缓存库：performance_metrics + icon_cache 行数
+    let perf_count = crate::infra::utils::perf::count(&pools.cache).await;
+
+    // 文件大小
+    let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+    let data_dir = std::path::PathBuf::from(&appdata).join("blink");
+
     serde_json::json!({
-        "history_count": count,
-        "db_path": db_path,
+        "databases": {
+            "config": {
+                "name": "配置库",
+                "file": "blink_config.db",
+                "size_bytes": file_size(&data_dir.join("blink_config.db")),
+                "path": data_dir.join("blink_config.db").display().to_string(),
+            },
+            "history": {
+                "name": "历史库",
+                "file": "blink_history.db",
+                "size_bytes": file_size(&data_dir.join("blink_history.db")),
+                "path": data_dir.join("blink_history.db").display().to_string(),
+                "history_count": history_count,
+                "clipboard_count": clipboard_count,
+            },
+            "ai": {
+                "name": "AI 库",
+                "file": "blink_ai.db",
+                "size_bytes": file_size(&data_dir.join("blink_ai.db")),
+                "path": data_dir.join("blink_ai.db").display().to_string(),
+                "audit_count": ai_audit_count,
+            },
+            "cache": {
+                "name": "缓存库",
+                "file": "blink_cache.db",
+                "size_bytes": file_size(&data_dir.join("blink_cache.db")),
+                "path": data_dir.join("blink_cache.db").display().to_string(),
+                "perf_count": perf_count,
+            },
+        },
+        "data_dir": data_dir.display().to_string(),
+        // 兼容旧前端字段
+        "history_count": history_count,
+        "db_path": data_dir.display().to_string(),
     })
+}
+
+/// 获取文件大小（字节），不存在返回 0。
+fn file_size(path: &std::path::Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+/// 清空 AI 审计日志（设置页-存储「清除 AI 调用历史」）。
+#[tauri::command]
+pub async fn clear_ai_audit(app: tauri::AppHandle) -> Result<(), String> {
+    let pool = &app.state::<crate::infra::data::DbPools>().ai;
+    crate::infra::data::ai_audit::clear_all(&pool).await;
+    tracing::info!("AI 审计日志已清空");
+    Ok(())
 }
 
 /// 设置页-关于：应用元信息（版本/名称/描述/仓库）。
@@ -929,7 +993,7 @@ pub async fn check_update(app: tauri::AppHandle) -> serde_json::Value {
 
     // 读取全局代理配置，与插件 HTTP 请求共用
     let proxy_url = {
-        let pool = app.state::<sqlx::SqlitePool>();
+        let pool = &app.state::<crate::infra::data::DbPools>().config;
         let cfg = crate::app::config::get_engine_config(&pool, "_global_proxy").await;
         cfg.and_then(|v| {
             let https = v.get("https").and_then(|s| s.as_str()).filter(|s| !s.is_empty());
@@ -1032,7 +1096,7 @@ fn version_gt_fallback(a: &str, b: &str) -> bool {
 /// 设置页-存储：清空历史记录。
 #[tauri::command]
 pub async fn clear_history(app: tauri::AppHandle) -> Result<(), String> {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().history;
     crate::infra::data::history::clear(&pool).await;
     Ok(())
 }
@@ -1068,7 +1132,7 @@ pub async fn resize_voice_overlay(app: tauri::AppHandle, height: f64) -> Result<
 /// 获取完整配置。
 #[tauri::command]
 pub async fn get_config(app: tauri::AppHandle) -> crate::app::config::AppConfig {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
     crate::app::config::get_config(&pool).await
 }
 
@@ -1115,7 +1179,7 @@ pub async fn set_config(
     key: String,
     value: serde_json::Value,
 ) -> Result<(), String> {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
 
     match key.as_str() {
         // ── 单值字段（直接解析） ──────────────────────────────────────────
@@ -1430,6 +1494,9 @@ pub async fn set_config(
                 reg.reload(&ai);
             }
 
+            // 0.12 §2.7: 同步更新 AIConfig 内存缓存（供 CloudSttEngine 等非 async 上下文读取）
+            crate::app::ai_config::update_ai_cache(&ai);
+
             let _ = app.emit(
                 "blink://config-changed",
                 serde_json::json!({ "key": "ai_config" }),
@@ -1663,6 +1730,12 @@ pub async fn fetch_ai_models(
             );
             fetch_gemini_models(&client, &url).await
         }
+        ProviderKind::OllamaHttp => {
+            // 0.12 §2.3: ollama 模型列表走 /api/tags 端点（无需认证）
+            let base = base_url.as_deref().unwrap_or("http://localhost:11434");
+            let url = format!("{}/api/tags", base.trim_end_matches('/'));
+            fetch_ollama_models(&client, &url).await
+        }
     };
     // effective_key(String) 在这里出作用域
     result
@@ -1772,6 +1845,41 @@ async fn fetch_gemini_models(client: &reqwest::Client, url: &str) -> Result<Vec<
             }
         }
         Err(e) => Err(format!("获取模型失败: {e}")),
+    }
+}
+
+/// 获取 ollama 本地模型列表（0.12 §2.3）。
+///
+/// ollama API: `GET /api/tags`（无需认证）
+/// - Response: `{ "models": [{ "name": "llama3:latest", ... }] }`
+async fn fetch_ollama_models(client: &reqwest::Client, url: &str) -> Result<Vec<String>, String> {
+    match client.get(url).header("Accept", "application/json").send().await {
+        Ok(resp) if resp.status().is_success() => {
+            let models = resp
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|v| {
+                    v.get("models").and_then(|m| m.as_array()).map(|arr| {
+                        arr.iter()
+                            .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .unwrap_or_default();
+            if models.is_empty() {
+                Err("ollama 返回空列表(可能未拉取模型,尝试 ollama pull llama3)".to_string())
+            } else {
+                let mut sorted = models;
+                sorted.sort();
+                Ok(sorted)
+            }
+        }
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            Err(format!("ollama 连接失败(HTTP {status}),确认 ollama serve 已启动"))
+        }
+        Err(e) => Err(format!("ollama 连接失败: {e},确认 ollama serve 已启动且地址正确")),
     }
 }
 
@@ -1970,6 +2078,12 @@ pub async fn test_ai_provider(
             );
             test_gemini_endpoint(&client, &url).await
         }
+        ProviderKind::OllamaHttp => {
+            // 0.12 §2.3: ollama 连接测试走 /api/tags 端点（无需认证）
+            let base = base_url.as_deref().unwrap_or("http://localhost:11434");
+            let url = format!("{}/api/tags", base.trim_end_matches('/'));
+            test_ollama_endpoint(&client, &url).await
+        }
     };
 
     result
@@ -2106,6 +2220,30 @@ async fn test_gemini_endpoint(client: &reqwest::Client, url: &str) -> Result<Str
     }
 }
 
+/// 测试 ollama 连接（0.12 §2.3）。
+///
+/// ollama 无需认证,只需检查 /api/tags 是否可达。
+async fn test_ollama_endpoint(client: &reqwest::Client, url: &str) -> Result<String, String> {
+    match client.get(url).header("Accept", "application/json").send().await {
+        Ok(resp) if resp.status().is_success() => {
+            let count = resp
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|v| v.get("models").and_then(|m| m.as_array().map(|a| a.len())))
+                .unwrap_or(0);
+            Ok(format!("连接成功,发现 {count} 个本地模型"))
+        }
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            Err(format!("ollama 连接失败(HTTP {status}),确认 ollama serve 已启动"))
+        }
+        Err(e) => Err(format!(
+            "ollama 连接失败: {e},确认 ollama serve 已启动且地址正确"
+        )),
+    }
+}
+
 /// 打开当天日志文件（资源管理器中定位；文件不存在则打开文件夹）。
 #[tauri::command]
 pub fn open_log_file() -> Result<(), String> {
@@ -2147,7 +2285,7 @@ pub fn get_log_info() -> serde_json::Value {
 /// 恢复默认配置。
 #[tauri::command]
 pub async fn reset_config(app: tauri::AppHandle) -> Result<(), String> {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
     let config = crate::app::config::AppConfig::default();
     crate::app::config::save_config(&pool, &config).await
 }
@@ -2155,14 +2293,14 @@ pub async fn reset_config(app: tauri::AppHandle) -> Result<(), String> {
 /// 获取应用搜索配置。
 #[tauri::command]
 pub async fn get_start_menu_config(app: tauri::AppHandle) -> crate::app::config::StartMenuConfig {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
     crate::app::config::get_start_menu_config(&pool).await
 }
 
 /// 获取计算器配置。
 #[tauri::command]
 pub async fn get_calc_config(app: tauri::AppHandle) -> crate::app::config::CalcConfig {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
     crate::app::config::get_calc_config(&pool).await
 }
 
@@ -2185,8 +2323,8 @@ pub async fn probe_everything(port: u16) -> bool {
 pub async fn get_plugins(app: tauri::AppHandle) -> Vec<serde_json::Value> {
     let engine = app.state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>();
     // 读当前语言,供 manifest 配置文案按 locale 取值(设置页中英双语)
-    let pool = app.state::<sqlx::SqlitePool>();
-    let lang = crate::app::config::get_config(&pool).await.language;
+let pool = &app.state::<crate::infra::data::DbPools>().config;
+let lang = crate::app::config::get_config(&pool).await.language;
     engine.list_plugins(&lang)
 }
 
@@ -2290,8 +2428,8 @@ pub async fn get_engine_config(
     app: tauri::AppHandle,
     engine_id: String,
 ) -> Result<serde_json::Value, String> {
-    let pool = app.state::<sqlx::SqlitePool>();
-    Ok(crate::app::config::get_engine_config(&pool, &engine_id)
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
+Ok(crate::app::config::get_engine_config(&pool, &engine_id)
         .await
         .unwrap_or_else(|| serde_json::json!({})))
 }
@@ -2306,8 +2444,8 @@ pub async fn get_context_config(
     {
         return Ok(mem.read().unwrap().clone());
     }
-    let pool = app.state::<sqlx::SqlitePool>();
-    Ok(crate::app::config::get_context_config(&pool).await)
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
+Ok(crate::app::config::get_context_config(&pool).await)
 }
 
 /// 打开文件/快捷方式所在文件夹（explorer /select 定位选中）。
@@ -2489,7 +2627,7 @@ pub async fn copy_to_clipboard(text: String) -> Result<(), String> {
 /// 重置某项的历史记录权重（右键菜单「重置该项记录」，0.5.3）。
 #[tauri::command]
 pub async fn reset_item_history(app: tauri::AppHandle, lnk_path: String) -> Result<(), String> {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().history;
     crate::infra::data::history::reset_weight(&pool, &lnk_path).await;
     tracing::debug!(path = %lnk_path, "已重置该项历史权重");
     Ok(())
@@ -2549,8 +2687,8 @@ pub async fn show_context_menu(
 
     // 主题 resolve（auto → dark/light）
     let theme = {
-        let pool = app.state::<sqlx::SqlitePool>();
-        let raw = crate::app::config::get_config(&pool).await.theme;
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
+    let raw = crate::app::config::get_config(&pool).await.theme;
         if raw == "auto" {
             let is_light = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
                 .open_subkey("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize")
@@ -2722,7 +2860,7 @@ pub async fn probe_interpreters(
 /// 获取已保存的解释器路径配置。
 #[tauri::command]
 pub async fn get_interpreter_paths(app: tauri::AppHandle) -> serde_json::Value {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
     crate::infra::data::history::get_config(&pool, "interpreter_paths")
         .await
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -2737,7 +2875,7 @@ pub async fn get_clipboard_history(
     app: tauri::AppHandle,
     limit: Option<i64>,
 ) -> Vec<crate::infra::data::clipboard::ClipboardItem> {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().history;
     crate::infra::data::clipboard::query_recent(&pool, limit.unwrap_or(20)).await
 }
 
@@ -2748,14 +2886,14 @@ pub async fn search_clipboard_history(
     query: String,
     limit: Option<i64>,
 ) -> Vec<crate::infra::data::clipboard::ClipboardItem> {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().history;
     crate::infra::data::clipboard::search(&pool, &query, limit.unwrap_or(20)).await
 }
 
 /// 记录剪贴板命中（用户选择粘贴某条历史）。
 #[tauri::command]
 pub async fn record_clipboard_hit(app: tauri::AppHandle, id: String) -> Result<(), String> {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().history;
     crate::infra::data::clipboard::record_hit(&pool, &id).await;
     Ok(())
 }
@@ -2763,7 +2901,7 @@ pub async fn record_clipboard_hit(app: tauri::AppHandle, id: String) -> Result<(
 /// 删除指定剪贴板条目。
 #[tauri::command]
 pub async fn delete_clipboard_item(app: tauri::AppHandle, id: String) -> Result<(), String> {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().history;
     crate::infra::data::clipboard::delete_item(&pool, &id).await;
     Ok(())
 }
@@ -2771,7 +2909,7 @@ pub async fn delete_clipboard_item(app: tauri::AppHandle, id: String) -> Result<
 /// 清空所有剪贴板历史。
 #[tauri::command]
 pub async fn clear_clipboard_history(app: tauri::AppHandle) -> Result<(), String> {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().history;
     crate::infra::data::clipboard::clear_all(&pool).await;
     Ok(())
 }
@@ -2779,7 +2917,7 @@ pub async fn clear_clipboard_history(app: tauri::AppHandle) -> Result<(), String
 /// 获取剪贴板统计信息。
 #[tauri::command]
 pub async fn get_clipboard_stats(app: tauri::AppHandle) -> serde_json::Value {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().history;
     crate::infra::data::clipboard::get_stats(&pool).await
 }
 
@@ -2788,7 +2926,7 @@ pub async fn get_clipboard_stats(app: tauri::AppHandle) -> serde_json::Value {
 /// 获取性能统计概览（设置页 → 调试 Tab）。
 #[tauri::command]
 pub async fn get_perf_overview(app: tauri::AppHandle) -> serde_json::Value {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().cache;
     crate::infra::utils::perf::get_overview(&pool).await
 }
 
@@ -2800,7 +2938,7 @@ pub async fn get_perf_percentiles(
     name: String,
     limit: Option<i64>,
 ) -> serde_json::Value {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().cache;
     crate::infra::utils::perf::query_percentiles(&pool, &category, &name, limit.unwrap_or(100))
         .await
 }
@@ -2813,7 +2951,7 @@ pub async fn get_perf_slow_queries(
     threshold_ms: f64,
     limit: Option<i64>,
 ) -> Vec<crate::infra::utils::perf::PerformanceMetric> {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().cache;
     crate::infra::utils::perf::query_slow(&pool, &category, threshold_ms, limit.unwrap_or(20)).await
 }
 
@@ -2823,7 +2961,7 @@ pub async fn get_perf_recent(
     app: tauri::AppHandle,
     limit: Option<i64>,
 ) -> Vec<crate::infra::utils::perf::PerformanceMetric> {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().cache;
     crate::infra::utils::perf::query_recent(&pool, limit.unwrap_or(100)).await
 }
 
@@ -2831,7 +2969,7 @@ pub async fn get_perf_recent(
 /// 弹出保存文件对话框，用户选择路径后写入文件，返回保存的路径（取消时返回 null）。
 #[tauri::command]
 pub async fn export_perf_report(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().cache;
     let report = crate::infra::utils::perf::export_report(&pool).await;
 
     // 弹出保存文件对话框
@@ -2869,7 +3007,7 @@ pub async fn export_perf_report(app: tauri::AppHandle) -> Result<Option<String>,
 /// 清除全部性能指标数据。
 #[tauri::command]
 pub async fn clear_perf_data(app: tauri::AppHandle) -> Result<u64, String> {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().cache;
     crate::infra::utils::perf::clear_all(&pool).await
 }
 
@@ -2929,7 +3067,7 @@ pub async fn get_config_section(
     app: tauri::AppHandle,
     key: String,
 ) -> Result<serde_json::Value, String> {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
     let json_str = crate::infra::data::history::get_config(&pool, &key).await;
     match json_str {
         Some(s) => serde_json::from_str(&s).map_err(|e| format!("配置解析失败: {e}")),
@@ -2949,7 +3087,7 @@ pub async fn set_config_section(
     key: String,
     value: serde_json::Value,
 ) -> Result<(), String> {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
     let json = serde_json::to_string(&value).map_err(|e| format!("序列化失败: {e}"))?;
     crate::infra::data::history::set_config(&pool, &key, &json)
         .await
@@ -2970,7 +3108,7 @@ pub async fn set_config_section(
 pub async fn get_stt_config(
     app: tauri::AppHandle,
 ) -> Result<crate::app::stt_config::SttConfig, String> {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
     let config =
         crate::app::config::ConfigStore::get::<crate::app::stt_config::SttConfig>(&pool).await;
     Ok(config)
@@ -2989,7 +3127,7 @@ pub async fn set_stt_config(
     config: crate::app::stt_config::SttConfig,
     scope: Option<String>,
 ) -> Result<(), String> {
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
     crate::app::config::ConfigStore::set(&pool, &config)
         .await
         .map_err(|e| format!("保存 STT 配置失败: {e}"))?;
@@ -3112,7 +3250,7 @@ pub async fn download_stt_model(app: tauri::AppHandle, model_id: String) -> Resu
     config.local_engine.funasr_model = model.funasr_model_id.to_string();
 
     // 持久化到数据库（否则重启后丢失模型选择）
-    let pool = app.state::<sqlx::SqlitePool>();
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
     crate::app::config::ConfigStore::set(&pool, &config)
         .await
         .map_err(|e| format!("保存 STT 配置失败: {e}"))?;

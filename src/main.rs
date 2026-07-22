@@ -102,48 +102,32 @@ fn main() {
             // 启动总耗时（setup 结束时手动记录，因为 setup 在同步上下文，没有 runtime 句柄）
             let startup_start = std::time::Instant::now();
 
-            // 初始化历史记录 SQLite
-            let pool = tauri::async_runtime::block_on(infra::data::history::init_db())
-                .expect("failed to init history db");
+            // 初始化 DB 四层拆分（0.12.0 §2.2）——config/history/ai/cache 各独立 pool
+            let pools = tauri::async_runtime::block_on(infra::data::pools::init_all())
+                .expect("failed to init db pools");
 
-            // 初始化性能统计（0.7.0）
-            tauri::async_runtime::block_on(infra::utils::perf::init(&pool))
-                .expect("failed to init perf metrics");
-
-            // 初始化剪贴板历史表（0.7.3）
-            tauri::async_runtime::block_on(infra::data::clipboard::init_db(&pool))
-                .expect("failed to init clipboard db");
-
-            // 初始化 AI 工具调用审计表（0.11.4 改进 2 §2.2.7）
-            tauri::async_runtime::block_on(infra::data::ai_audit::init_db(&pool))
-                .expect("failed to init ai_tool_audit db");
-
-            // 初始化图标缓存持久化（0.7.4）
-            tauri::async_runtime::block_on(domain::search::icon::init(&pool))
-                .expect("failed to init icon cache");
-
-            // 初始化配置
+            // 初始化配置（配置库）
             let config_start = std::time::Instant::now();
-            tauri::async_runtime::block_on(app::config::init_config(&pool))
+            tauri::async_runtime::block_on(app::config::init_config(&pools.config))
                 .expect("failed to init config");
-            // 记录配置加载耗时（setup 在同步上下文，需用 block_on）
+            // 记录配置加载耗时（缓存库）
             let config_elapsed = config_start.elapsed().as_secs_f64() * 1000.0;
             tauri::async_runtime::block_on(infra::utils::perf::record_blocking(
-                &pool,
+                &pools.cache,
                 infra::utils::perf::MetricCategory::Startup,
                 "config_load",
                 config_elapsed,
                 None,
             ));
 
-            // 读取应用配置(快照)
-            let app_config = tauri::async_runtime::block_on(app::config::get_config(&pool));
+            // 读取应用配置(快照)（配置库）
+            let app_config = tauri::async_runtime::block_on(app::config::get_config(&pools.config));
 
             // 日志级别 reload 到配置值（init 时为默认 error）
             infra::utils::logging::update_level(&app_config.log_level);
 
-            // pool 交给 Tauri 管理(command 层用 app.state 取);AppContext 再留一份 clone
-            app.manage(pool.clone());
+            // pools 交给 Tauri 管理(command 层用 app.state::<DbPools>() 取)
+            app.manage(pools.clone());
 
             // 同步开机自启（确保注册表 Run 项与配置一致，覆盖用户在 app 外改动的情况）
             {
@@ -189,7 +173,7 @@ fn main() {
 
             // 加载 builtin 插件
             // 全局代理配置(engine:_global_proxy → {http,https})，进程启动时 env 注入，ureq/reqwest 原生读取
-            let global_proxy = tauri::async_runtime::block_on(app::config::get_engine_config(&pool, "_global_proxy"));
+            let global_proxy = tauri::async_runtime::block_on(app::config::get_engine_config(&pools.config, "_global_proxy"));
             let proxy = global_proxy.and_then(|v| {
                 let http = v.get("http").and_then(|s| s.as_str()).map(|s| s.to_string());
                 let https = v.get("https").and_then(|s| s.as_str()).map(|s| s.to_string());
@@ -209,11 +193,11 @@ fn main() {
             // - 消费点 15 处充斥 `as_ref()` / `if let Some(pe)` 样板
             // PluginEngine::new 无必须条件，plugins=vec![] 时各方法均安全（空迭代 / find_plugin 返 None）。
             tracing::info!(count = plugins.len(), "PluginEngine 已构造");
-            let plugin_engine = std::sync::Arc::new(domain::plugin::PluginEngine::new(plugins.clone(), pool.clone(), proxy));
+            let plugin_engine = std::sync::Arc::new(domain::plugin::PluginEngine::new(plugins.clone(), pools.config.clone(), proxy));
             // 0.4→0.5 自动迁移（首次运行时执行一次，后续 marker 跳过；空 plugins 时循环空转）
-            tauri::async_runtime::block_on(infra::data::history::migrate_0_4_to_0_5(&pool, &plugins));
+            tauri::async_runtime::block_on(infra::data::history::migrate_0_4_to_0_5(&pools.config, &plugins));
             // 0.9.5 camelCase→snake_case 迁移（前端重构统一字段命名，存量 DB 需改写）
-            tauri::async_runtime::block_on(infra::data::history::migrate_camelcase_to_snake(&pool));
+            tauri::async_runtime::block_on(infra::data::history::migrate_camelcase_to_snake(&pools.history));
             // 加载/初始化每个插件配置(不存在则写默认 {enabled, settings:null})。
             tauri::async_runtime::block_on(plugin_engine.init_configs());
 
@@ -239,9 +223,9 @@ fn main() {
             }
 
             // 构造三层搜索引擎配置（应用搜索 / 文件搜索 / 计算器）
-            let start_menu_config = tauri::async_runtime::block_on(app::config::get_start_menu_config(&pool));
-            let file_config = tauri::async_runtime::block_on(app::config::get_file_search_config(&pool));
-            let calc_config = tauri::async_runtime::block_on(app::config::get_calc_config(&pool));
+            let start_menu_config = tauri::async_runtime::block_on(app::config::get_start_menu_config(&pools.config));
+            let file_config = tauri::async_runtime::block_on(app::config::get_file_search_config(&pools.config));
+            let calc_config = tauri::async_runtime::block_on(app::config::get_calc_config(&pools.config));
             tracing::info!(
                 app_search = start_menu_config.enabled,
                 file_search = file_config.enabled,
@@ -258,8 +242,8 @@ fn main() {
             };
             let search_service = std::sync::Arc::new(domain::search::SearchService::new(
                 app.handle().clone(),
-                pool.clone(),
-                domain::search::build_engines(engine_configs, pool.clone()),
+                pools.history.clone(),
+                domain::search::build_engines(engine_configs, pools.history.clone()),
                 plugin_engine.clone(),
                 router.clone(),
                 min_score_shared,
@@ -280,30 +264,16 @@ fn main() {
             );
             // 初始化界面语言快照（0.8.1）— 供 empty_arg_hint 等 LocalizableText 解析用
             search_service.update_language(app_config.language.clone());
-            // 启动清理过期搜索历史（后台 spawn，不阻塞启动；enabled=false 或 days=0 跳过）
-            {
-                let cleanup_pool = pool.clone();
-                let days = app_config.search_history_days;
-                let enabled = app_config.search_history_enabled;
-                tauri::async_runtime::spawn(async move {
-                    if enabled {
-                        infra::data::history::cleanup_old(&cleanup_pool, days).await;
-                    }
-                });
-            }
-            // 启动清理过期剪贴板历史（按 retention_days 清理，0.11.5 改为按天清理策略）
-            {
-                let cleanup_pool = pool.clone();
-                let days = app_config.clipboard.retention_days;
-                let clip_enabled = app_config.clipboard.enabled;
-                tauri::async_runtime::spawn(async move {
-                    if clip_enabled && days > 0 {
-                        infra::data::clipboard::cleanup_old(&cleanup_pool, days).await;
-                    }
-                });
-            }
+            // 启动后台清理（0.12.0 §2.2.4）：搜索历史 + 剪贴板历史 + AI 审计日志
+            // 缓存库（performance_metrics / icon_cache）的清理在各自 init 时已 spawn。
+            pools.spawn_startup_cleanup(infra::data::CleanupParams {
+                search_history_enabled: app_config.search_history_enabled,
+                search_history_days: app_config.search_history_days,
+                clipboard_enabled: app_config.clipboard.enabled,
+                clipboard_retention_days: app_config.clipboard.retention_days,
+            });
             // 注入 ContextConfig 内存缓存：invoke 热键回调零 IO 读它（热更新见 update_context_config）
-            let context_config = tauri::async_runtime::block_on(app::config::get_context_config(&pool));
+            let context_config = tauri::async_runtime::block_on(app::config::get_context_config(&pools.config));
             let context_config_arc = std::sync::Arc::new(std::sync::RwLock::new(context_config));
             app.manage(context_config_arc.clone());
 
@@ -402,8 +372,10 @@ fn main() {
             // 0.9.2 Phase 5b:AIProviderRegistry 用 RigFactory 真接 rig-core。
             // AI 配置分片(第 7 分片,独立于 AppConfig 门面);默认 enabled=false,老用户零副作用。
             let ai_config = tauri::async_runtime::block_on(
-                app::config::ConfigStore::get::<app::ai_config::AIConfig>(&pool),
+                app::config::ConfigStore::get::<app::ai_config::AIConfig>(&pools.config),
             );
+            // 0.12 §2.7: 初始化 AIConfig 内存缓存（供 CloudSttEngine 等非 async 上下文读取）
+            app::ai_config::init_ai_cache(ai_config.clone());
             let ai_registry = std::sync::Arc::new(
                 crate::domain::ai::AIProviderRegistry::from_config(
                     crate::domain::ai::default_factory(),
@@ -426,7 +398,7 @@ fn main() {
             // 0.10: VoiceService(hold-to-talk 管线编排)
             // 初始化 STT 配置缓存（供 STT 引擎同步读取）
             let stt_config = tauri::async_runtime::block_on(
-                app::config::ConfigStore::get::<app::stt_config::SttConfig>(&pool),
+                app::config::ConfigStore::get::<app::stt_config::SttConfig>(&pools.config),
             );
             app::stt_config::init_cache(stt_config);
 
@@ -436,7 +408,7 @@ fn main() {
             // 0.8.6 §8.2.3：AppContext 持有全部核心服务引用（真依赖容器）。
             let ctx = app::service::AppContext {
                 app: app.handle().clone(),
-                pool: pool.clone(),
+                pools: pools.clone(),
                 config: app_config,
                 ai_config: ai_config.clone(),
                 search_service: search_service.clone(),
@@ -458,17 +430,16 @@ fn main() {
             // 记录服务初始化耗时
             let svc_elapsed = svc_start.elapsed().as_secs_f64() * 1000.0;
             tauri::async_runtime::block_on(infra::utils::perf::record_blocking(
-                &pool,
+                &pools.cache,
                 infra::utils::perf::MetricCategory::Startup,
                 "services_init",
                 svc_elapsed,
                 None,
             ));
             // 记录启动总耗时（setup 在同步上下文，需用 block_on）
-            // 注意：必须在 app.manage(pool) 之前记录，否则 pool 已被 move
             let startup_total_ms = startup_start.elapsed().as_secs_f64() * 1000.0;
             tauri::async_runtime::block_on(infra::utils::perf::record_blocking(
-                &pool,
+                &pools.cache,
                 infra::utils::perf::MetricCategory::Startup,
                 "total",
                 startup_total_ms,
@@ -541,6 +512,7 @@ fn main() {
             app::commands::hide_screenshot_overlay,
             app::commands::get_storage_info,
             app::commands::clear_history,
+            app::commands::clear_ai_audit,
             app::commands::get_app_info,
             app::commands::check_update,
             app::commands::resize_window,

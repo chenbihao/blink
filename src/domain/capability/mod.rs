@@ -27,7 +27,7 @@ mod schema;
 
 pub use error::CapabilityError;
 pub use registry::CapabilityRegistry;
-pub use result::{CapabilityResult, ItemResult};
+pub use result::{rig_tool_result_to_text, CapabilityResult, ItemResult};
 pub use schema::CapabilitySchema;
 
 use serde_json::Value;

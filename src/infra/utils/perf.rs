@@ -290,8 +290,16 @@ pub async fn query_slow(
     .collect()
 }
 
-/// 清理超过 30 天的指标数据。
+/// 性能指标行数上限——防极端膨胀（0.12.0 §2.2.4）。
+const PERF_MAX_ROWS: i64 = 50_000;
+
+/// 清理过期指标数据 + 行数上限兜底（0.12.0 §2.2.4）。
+///
+/// 两级策略：
+/// 1. 按天清理：删除超过 30 天的记录
+/// 2. 行数兜底：若仍超过 50000 行，删除最旧的超出部分
 async fn cleanup_old(pool: &SqlitePool) {
+    // 1. 按天清理（30 天）
     let cutoff = chrono::Utc::now().timestamp() - 30 * 86400;
     match sqlx::query("DELETE FROM performance_metrics WHERE created_at < ?1")
         .bind(cutoff)
@@ -306,6 +314,21 @@ async fn cleanup_old(pool: &SqlitePool) {
         }
         Err(e) => tracing::warn!(error = %e, "清理过期性能指标失败"),
     }
+
+    // 2. 行数兜底（50000 行）
+    let total = count(pool).await;
+    if total > PERF_MAX_ROWS {
+        let excess = total - PERF_MAX_ROWS;
+        let _ = sqlx::query(
+            "DELETE FROM performance_metrics WHERE rowid IN (
+                SELECT rowid FROM performance_metrics ORDER BY created_at ASC LIMIT ?1
+            )",
+        )
+        .bind(excess)
+        .execute(pool)
+        .await;
+        tracing::info!(deleted = excess, total, "清理超量性能指标");
+    }
 }
 
 /// 清除全部性能指标数据。
@@ -317,6 +340,14 @@ pub async fn clear_all(pool: &SqlitePool) -> Result<u64, String> {
     let rows = r.rows_affected();
     tracing::info!(rows, "清除全部性能指标");
     Ok(rows)
+}
+
+/// 性能指标总行数（设置页存储统计用）。
+pub async fn count(pool: &SqlitePool) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM performance_metrics")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0)
 }
 
 /// 获取性能统计概览（供前端调试 Tab 展示）。

@@ -184,7 +184,9 @@ function renderAIProviders() {
       const kindLabel = AI_KIND_LABEL[p.kind] || p.kind;
       const models = p.models || [];
       const modelSummary = models.map((m) => m.id).join(", ");
-      const hasKey = hasSecretMap.get(p.id) === true;
+      // ollama_http 是本地服务,不需要密钥也算已配置
+      const isLocalKind = p.kind === "ollama_http";
+      const hasKey = isLocalKind || hasSecretMap.get(p.id) === true;
       const statusCls = hasKey ? "" : "no-key";
       const statusText = hasKey ? t("ai.provider.configured") : t("ai.provider.not_configured");
       const presetKey = guessPresetForProvider(p.kind, p.base_url);
@@ -199,19 +201,23 @@ function renderAIProviders() {
             <colgroup>
               <col class="col-id" />
               <col class="col-name" />
+              <col class="col-caps" />
               <col class="col-enabled" />
               <col class="col-actions" />
             </colgroup>
-            <thead><tr><th>Model ID</th><th>${escapeHtml(t("ai.model.col.name"))}</th><th>${escapeHtml(t("ai.model.col.enabled"))}</th><th>${escapeHtml(t("ai.model.col.actions"))}</th></tr></thead>
+            <thead><tr><th>Model ID</th><th>${escapeHtml(t("ai.model.col.name"))}</th><th>${escapeHtml(t("ai.model.col.capabilities"))}</th><th>${escapeHtml(t("ai.model.col.enabled"))}</th><th>${escapeHtml(t("ai.model.col.actions"))}</th></tr></thead>
             <tbody>${models.map((m) => {
               const enabled = m.enabled !== false;
               const hasParams = m.temperature != null || m.max_tokens != null || (m.custom_parameters && m.custom_parameters.length > 0);
               const paramsBadge = hasParams
                 ? `<span class="ai-model-params-badge" title="${escapeAttr(t("ai.model.params_badge.title"))}">${escapeHtml(t("ai.model.params_badge"))}</span>`
                 : "";
+              const caps = (m.capabilities || ["chat"]);
+              const capsHtml = caps.map((cap) => `<span class="ai-cap-badge ai-cap-${escapeAttr(cap)}">${escapeHtml(t("ai.cap." + cap))}</span>`).join("");
               return `<tr data-model-id="${escapeAttr(m.id)}" data-provider-id="${escapeAttr(p.id)}">
                 <td class="ai-models-table-id" title="${escapeAttr(m.id)}">${escapeHtml(m.id)}${paramsBadge}</td>
                 <td title="${escapeAttr(m.display_name || m.id)}">${escapeHtml(m.display_name || m.id)}</td>
+                <td class="ai-models-table-caps">${capsHtml}</td>
                 <td>
                   <label class="switch switch-sm">
                     <input type="checkbox" class="ai-model-toggle" data-model-id="${escapeAttr(m.id)}" data-provider-id="${escapeAttr(p.id)}" ${enabled ? "checked" : ""} />
@@ -524,7 +530,14 @@ function openAIModelEditModal(providerId, modelId) {
     temperature: existing?.temperature ?? null,
     max_tokens: existing?.max_tokens ?? null,
     custom_parameters: (existing?.custom_parameters || []).map((cp) => ({ ...cp })),
+    capabilities: existing?.capabilities ? [...existing.capabilities] : ["chat"],
   };
+
+  // 能力复选框回显
+  ["chat", "embedding", "stt"].forEach((cap) => {
+    const cb = document.getElementById(`ai-model-edit-cap-${cap}`);
+    if (cb) cb.checked = _modelEditDraft.capabilities.includes(cap);
+  });
 
   const $ = (id) => document.getElementById(id);
   $("ai-model-edit-title").textContent = t(isEdit ? "ai.model_modal.title.edit" : "ai.model_modal.title.add");
@@ -786,6 +799,13 @@ async function validateAndSaveModel() {
 
   const cleanedCustom = (_modelEditDraft.custom_parameters || []).filter((cp) => (cp.key || "").trim().length > 0);
 
+  // 收集能力复选框
+  const selectedCaps = ["chat", "embedding", "stt"].filter((cap) => {
+    const cb = document.getElementById(`ai-model-edit-cap-${cap}`);
+    return cb && cb.checked;
+  });
+  const capabilities = selectedCaps.length > 0 ? selectedCaps : ["chat"];
+
   const newModel = {
     id,
     display_name: displayName || id,
@@ -796,6 +816,7 @@ async function validateAndSaveModel() {
     temperature: tempToggle ? tempVal : null,
     max_tokens: maxToggle ? Math.floor(maxVal) : null,
     custom_parameters: cleanedCustom,
+    capabilities,
   };
 
   if (isEdit) {
@@ -1302,7 +1323,7 @@ const AI_PRESET_CATALOG = {
   "huggingface":       { kind: "openai_compatible",     base_url: "https://api-inference.huggingface.co/v1",           display_name_default: "Hugging Face",        monogram: "HF",   tint: "amber",  category: "gw" },
   "nvidia":            { kind: "openai_compatible",     base_url: "https://integrate.api.nvidia.com/v1",               display_name_default: "NVIDIA",              monogram: "NV",   tint: "green",  category: "gw" },
   "agnes-ai":          { kind: "openai_compatible",     base_url: "https://apihub.agnes-ai.com/v1",                    display_name_default: "Agnes AI",            monogram: "Ag",   tint: "rose",   category: "gw" },
-  "ollama":            { kind: "openai_compatible",     base_url: "http://localhost:11434/v1",                          display_name_default: "Ollama",              monogram: "Ol",   tint: "slate",  category: "local" },
+  "ollama":            { kind: "ollama_http",           base_url: "http://localhost:11434",                             display_name_default: "Ollama",              monogram: "Ol",   tint: "slate",  category: "local" },
   "lm-studio":         { kind: "openai_compatible",     base_url: "http://localhost:1234/v1",                          display_name_default: "LM Studio",           monogram: "LM",   tint: "slate",  category: "local" },
   "custom":            { kind: null,                    base_url: null,                                                 display_name_default: null,                  monogram: null,   tint: "ink",    category: "custom" },
 };
@@ -1546,7 +1567,8 @@ async function saveNewProviderFromModal() {
     errEl.textContent = t("ai.modal.save.empty_base_url");
     return;
   }
-  if (!isEdit && !apiKey) {
+  // ollama_http 是本地服务,不需要 API Key
+  if (!isEdit && kind !== "ollama_http" && !apiKey) {
     errEl.textContent = t("ai.modal.save.empty_key");
     return;
   }
@@ -1562,11 +1584,14 @@ async function saveNewProviderFromModal() {
 async function saveNewProvider({ kind, displayName, baseUrl, apiKey, errEl, selectedModels }) {
   const providerId = (crypto.randomUUID && crypto.randomUUID()) || `p-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-  try {
-    await invoke("save_ai_secret", { providerId, secret: apiKey });
-  } catch (e) {
-    errEl.textContent = t("ai.error.save_failed", { err: String(e) });
-    return;
+  // ollama_http 是本地服务,不需要保存密钥
+  if (kind !== "ollama_http") {
+    try {
+      await invoke("save_ai_secret", { providerId, secret: apiKey });
+    } catch (e) {
+      errEl.textContent = t("ai.error.save_failed", { err: String(e) });
+      return;
+    }
   }
 
   const initialModels = (selectedModels || []).map((modelId) => ({
@@ -1579,6 +1604,7 @@ async function saveNewProvider({ kind, displayName, baseUrl, apiKey, errEl, sele
     temperature: null,
     max_tokens: null,
     custom_parameters: [],
+    capabilities: ["chat"],
   }));
 
   const newProvider = {
@@ -1651,6 +1677,7 @@ async function saveEditedProvider(providerId, { displayName, baseUrl, apiKey, er
       temperature: null,
       max_tokens: null,
       custom_parameters: [],
+      capabilities: ["chat"],
     }));
   const mergedModels = [...(old.models || []), ...newModels];
 
@@ -1784,7 +1811,7 @@ async function triggerProviderModelFetch() {
   const overlay = $("ai-modal-overlay");
   const providerId = overlay?.dataset?.editProviderId || null;
 
-  if (!apiKey && !providerId) {
+  if (!apiKey && !providerId && kind !== "ollama_http") {
     _providerModelCache = { models: [], error: t("ai.modal.test.empty_key"), loading: false };
     filterProviderModels("");
     return;

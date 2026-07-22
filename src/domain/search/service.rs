@@ -2106,50 +2106,6 @@ fn derive_progress_hint(
     }
 }
 
-/// 投影 `ActionOutcome` → Tool 消息内容（§2.2.3 回流内容投影）。
-///
-/// 这是喂回 AI 的文本，让 AI 据此做 Turn 2 总结或链式调用。
-fn project_outcome_to_tool_message(outcome: &ActionOutcome) -> String {
-    match outcome {
-        ActionOutcome::Copy { text, .. } => {
-            serde_json::json!({ "type": "copy", "text": text }).to_string()
-        }
-        ActionOutcome::Open { path } => {
-            serde_json::json!({ "type": "open", "path": path }).to_string()
-        }
-        ActionOutcome::Emit { event, payload } => {
-            serde_json::json!({ "type": "emit", "event": event, "payload": payload })
-                .to_string()
-        }
-        ActionOutcome::Nop => serde_json::json!({ "type": "nop" }).to_string(),
-        ActionOutcome::Items { items } => {
-            // Items → 序列化 JSON（与 CapabilityResult::Items 一致）
-            serde_json::to_string(items).unwrap_or_else(|_| "[]".to_string())
-        }
-    }
-}
-
-/// 投影 `CapabilityResult` → Tool 消息内容（§2.2.3 回流内容投影）。
-fn project_capability_result_to_tool_message(result: &CapabilityResult) -> String {
-    match result {
-        CapabilityResult::Text { content } => content.clone(),
-        CapabilityResult::Items { items } => {
-            serde_json::to_string(items).unwrap_or_else(|_| "[]".to_string())
-        }
-        CapabilityResult::Blob { mime, bytes } => {
-            // Blob → 摘要（不喂原始字节，省 token）
-            let size_kb = bytes.len() as f64 / 1024.0;
-            let size_text = if size_kb >= 1024.0 {
-                format!("{:.1} MB", size_kb / 1024.0)
-            } else {
-                format!("{:.1} KB", size_kb)
-            };
-            format!("已获取 {} ({})", mime, size_text)
-        }
-        CapabilityResult::Done { summary } => summary.clone(),
-    }
-}
-
 /// 投影 `ActionOutcome` → 结果摘要（审计日志用）。
 pub(crate) fn outcome_to_summary(outcome: &ActionOutcome) -> String {
     match outcome {
@@ -2262,7 +2218,9 @@ async fn execute_capability_for_turn1(
     match result {
         Ok(cap_result) => {
             let entries = capability_result_to_entries(&cap_result);
-            let tool_message = project_capability_result_to_tool_message(&cap_result);
+            let tool_message = crate::domain::capability::rig_tool_result_to_text(
+                &cap_result.to_rig_tool_result(),
+            );
             let summary = capability_result_to_summary(&cap_result);
 
             if entries.is_empty() {
@@ -2371,7 +2329,9 @@ async fn execute_action_for_turn1(
                 "AI tool_call 执行成功: {} args={}",
                 tc.name, args,
             );
-            let tool_message = project_outcome_to_tool_message(&outcome);
+            let tool_message = crate::domain::capability::rig_tool_result_to_text(
+                &outcome.to_rig_tool_result(),
+            );
             let summary = outcome_to_summary(&outcome);
 
             // 构造前端 entries

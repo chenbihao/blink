@@ -154,6 +154,46 @@ pub enum ActionOutcome {
     },
 }
 
+// ── rig 投影层（0.12.0 统一投影入口）──────────────────────────────────────
+
+impl ActionOutcome {
+    /// 投影成 rig `ToolResultContent`——与 `CapabilityResult::to_rig_tool_result()` 同一份契约。
+    ///
+    /// **0.12.0 新增**：消除 service.rs 旧的 `project_outcome_to_tool_message`，
+    /// Turn 2 回流改调本函数 + `rig_tool_result_to_text()` 提取文本。
+    pub fn to_rig_tool_result(&self) -> Vec<rig_core::completion::message::ToolResultContent> {
+        use rig_core::completion::message::ToolResultContent;
+
+        match self {
+            ActionOutcome::Copy { text, .. } => {
+                vec![ToolResultContent::text(
+                    serde_json::json!({ "type": "copy", "text": text }).to_string(),
+                )]
+            }
+            ActionOutcome::Open { path } => {
+                vec![ToolResultContent::text(
+                    serde_json::json!({ "type": "open", "path": path }).to_string(),
+                )]
+            }
+            ActionOutcome::Emit { event, payload } => {
+                vec![ToolResultContent::text(
+                    serde_json::json!({ "type": "emit", "event": event, "payload": payload })
+                        .to_string(),
+                )]
+            }
+            ActionOutcome::Nop => {
+                vec![ToolResultContent::text(
+                    serde_json::json!({ "type": "nop" }).to_string(),
+                )]
+            }
+            ActionOutcome::Items { items } => {
+                let json = serde_json::to_string(items).unwrap_or_else(|_| "[]".to_string());
+                vec![ToolResultContent::text(json)]
+            }
+        }
+    }
+}
+
 /// 动作执行错误。
 #[derive(Debug)]
 pub enum ExecError {

@@ -21,6 +21,7 @@ import { initStorageTab } from "./tabs/storage.js";
 import { initDebugTab } from "./tabs/debug.js";
 import { initAboutTab } from "./tabs/about.js";
 import { initAITab } from "./tabs/ai.js";
+import { initLocalModelTab } from "./tabs/local-model.js";
 import { initVoiceTab } from "./tabs/voice.js";
 import { initChordTab } from "./tabs/chord.js";
 
@@ -78,8 +79,9 @@ async function init() {
     initStorageTab(cfg);
     initDebugTab(cfg);
     initAboutTab(cfg);
-    initAITab();
-    initVoiceTab();
+  initAITab();
+  initLocalModelTab();
+  initVoiceTab();
     initChordTab();
 
     console.log("Settings initialized");

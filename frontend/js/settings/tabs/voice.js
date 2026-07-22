@@ -110,155 +110,109 @@ export async function initVoiceTab() {
   // 音频调试测试
   initAudioTest(config);
 
-  // 云端供应商
-  const kindSelect = document.getElementById("voice-cloud-kind");
-  const modelInput = document.getElementById("voice-cloud-model");
-  const baseUrlInput = document.getElementById("voice-cloud-base-url");
-  const apiKeyInput = document.getElementById("voice-cloud-api-key");
-  const apiKeySaveBtn = document.getElementById("voice-cloud-key-save-btn");
-  const apiKeyClearBtn = document.getElementById("voice-cloud-key-clear-btn");
-  const modelFetchBtn = document.getElementById("voice-cloud-model-fetch-btn");
-  const modelDatalist = document.getElementById("voice-cloud-model-list");
+  // 云端供应商（0.12 改造：引用 AIConfig 供应商中有 STT 能力的模型）
+  const providerModelSelect = document.getElementById("voice-cloud-provider-model");
   const testBtn = document.getElementById("voice-cloud-test-btn");
   const testResult = document.getElementById("voice-cloud-test-result");
+  const gotoAiLink = document.getElementById("voice-cloud-goto-ai");
+  const migrationNotice = document.getElementById("voice-cloud-migration-notice");
 
-  // 供应商 → 默认 Base URL 预设（所有供应商均走 OpenAI 兼容接口）
-  const CLOUD_BASE_URL_PRESETS = {
-    openai: "https://api.openai.com/v1",
-    groq: "https://api.groq.com/openai/v1",
-    mimo: "https://api.xiaomimimo.com/v1",
-    mimo_plan: "https://token-plan-cn.xiaomimimo.com/v1",
-    custom: "",
-  };
-
-  // 当前供应商的 secret_ref（如 stt:openai）
-  function sttSecretId() {
-    return `stt:${kindSelect?.value || "openai"}`;
-  }
-
-  if (kindSelect && modelInput) {
-    const cp = config.cloud_provider;
-    if (cp) {
-      // 兼容已移除的旧供应商（azure/gemini 等）→ 归为 custom
-      const knownKinds = ["openai", "groq", "mimo", "mimo_plan", "custom"];
-      kindSelect.value = knownKinds.includes(cp.kind) ? cp.kind : "custom";
-      modelInput.value = cp.model_id;
-      if (baseUrlInput) {
-        baseUrlInput.value = cp.base_url || CLOUD_BASE_URL_PRESETS[cp.kind] || "";
-      }
-    }
-    refreshApiKeyHint();
-    kindSelect.addEventListener("change", () => {
-      // 供应商切换时自动填充 Base URL
-      const kind = kindSelect.value;
-      if (baseUrlInput) baseUrlInput.value = CLOUD_BASE_URL_PRESETS[kind] || "";
-      // 清空已拉取的模型列表
-      if (modelDatalist) modelDatalist.innerHTML = "";
-      saveCloudProvider();
-      refreshApiKeyHint();
-    });
-    modelInput.addEventListener("blur", saveCloudProvider);
-    if (baseUrlInput) baseUrlInput.addEventListener("blur", saveCloudProvider);
-  }
-
-  // API Key 保存（独立存储于系统凭据管理器，secret_ref = stt:{kind}）
-  if (apiKeySaveBtn) {
-    apiKeySaveBtn.addEventListener("click", async () => {
-      const key = apiKeyInput?.value?.trim();
-      if (!key) return;
-      try {
-        await invoke("save_ai_secret", { providerId: sttSecretId(), secret: key });
-        apiKeyInput.value = "";
-        refreshApiKeyHint();
-      } catch (e) {
-        console.error("save_ai_secret failed:", e);
-      }
-    });
-  }
-
-  // API Key 清除
-  if (apiKeyClearBtn) {
-    apiKeyClearBtn.addEventListener("click", async () => {
-      try {
-        await invoke("delete_ai_secret", { providerId: sttSecretId() });
-        apiKeyInput.value = "";
-        refreshApiKeyHint();
-      } catch (e) {
-        console.error("delete_ai_secret failed:", e);
-      }
-    });
-  }
-
-  // 刷新 API Key 掩码提示（复用 get_ai_secret_hint，掩码显示在输入框 placeholder 中）
-  async function refreshApiKeyHint() {
-    if (!apiKeyInput) return;
-    const sid = sttSecretId();
+  // 从 AIConfig 拉取有 STT 能力模型的供应商列表
+  let _sttAiConfig = null;
+  async function loadSttProviderOptions() {
     try {
-      const masked = await invoke("get_ai_secret_hint", { providerId: sid });
-      if (masked) {
-        apiKeyInput.placeholder = t("voice.cloud.api_key.hint_masked", { masked });
-        if (apiKeyClearBtn) apiKeyClearBtn.style.display = "";
-      } else {
-        apiKeyInput.placeholder = t("voice.cloud.api_key.ph");
-        if (apiKeyClearBtn) apiKeyClearBtn.style.display = "none";
-      }
-    } catch {
-      // get_ai_secret_hint 不可用时回退到 has_ai_secret
-      try {
-        const has = await invoke("has_ai_secret", { providerId: sid });
-        apiKeyInput.placeholder = has ? t("voice.cloud.api_key.hint_set") : t("voice.cloud.api_key.ph");
-        if (apiKeyClearBtn) apiKeyClearBtn.style.display = has ? "" : "none";
-      } catch {
-        apiKeyInput.placeholder = t("voice.cloud.api_key.ph");
+      _sttAiConfig = await invoke("get_config_section", { key: "app.ai" });
+    } catch (e) {
+      console.error("get_config_section app.ai failed:", e);
+      _sttAiConfig = { providers: [] };
+    }
+    const providers = _sttAiConfig.providers || [];
+    const sttOptions = [];
+    providers.forEach((p) => {
+      (p.models || []).forEach((m) => {
+        const caps = m.capabilities || ["chat"];
+        if (caps.includes("stt") && m.enabled !== false) {
+          sttOptions.push({
+            provider_id: p.id,
+            model_id: m.id,
+            provider_name: p.display_name,
+            model_name: m.display_name || m.id,
+          });
+        }
+      });
+    });
+
+    if (!providerModelSelect) return;
+    if (sttOptions.length === 0) {
+      providerModelSelect.innerHTML = `<option value="">${t("voice.cloud.provider_model.empty")}</option>`;
+      return;
+    }
+    const options = [`<option value="">${t("voice.cloud.provider_model.select")}</option>`];
+    sttOptions.forEach((opt) => {
+      const val = `${opt.provider_id}::${opt.model_id}`;
+      const label = `${opt.provider_name} / ${opt.model_name}`;
+      options.push(`<option value="${escapeAttr(val)}">${escapeHtml(label)}</option>`);
+    });
+    providerModelSelect.innerHTML = options.join("");
+
+    // 回显当前配置
+    if (config.cloud) {
+      const val = `${config.cloud.provider_id}::${config.cloud.model_id}`;
+      providerModelSelect.value = val;
+      // 如果当前值不在选项中（供应商被删除了），显示提示
+      if (!sttOptions.some((o) => o.provider_id === config.cloud.provider_id && o.model_id === config.cloud.model_id)) {
+        providerModelSelect.value = "";
       }
     }
   }
 
-  // 模型 ID 拉取（复用 fetch_ai_models，过滤只保留音频/语音相关模型）
-  if (modelFetchBtn) {
-    modelFetchBtn.addEventListener("click", async () => {
-      modelFetchBtn.textContent = t("voice.cloud.model.fetching");
-      modelFetchBtn.disabled = true;
-      try {
-        const baseUrl = baseUrlInput?.value?.trim() || null;
-        const apiKey = apiKeyInput?.value?.trim() || null;
-        const models = await invoke("fetch_ai_models", {
-          kind: "openai_compatible",
-          baseUrl,
-          apiKey: apiKey || null,
-          providerId: apiKey ? null : sttSecretId(),
-        });
-        if (modelDatalist && Array.isArray(models) && models.length > 0) {
-          // 过滤：只保留 whisper / audio / speech 相关模型
-          const sttModels = models.filter((m) =>
-            /whisper|audio|speech|asr/i.test(m)
-          );
-          // 保留 HTML 中的预设选项
-          const presetOpts = modelDatalist.innerHTML;
-          const fetchedOpts = sttModels
-            .map((m) => `<option value="${m}"></option>`)
-            .join("");
-          modelDatalist.innerHTML = presetOpts + fetchedOpts;
-          modelFetchBtn.textContent = sttModels.length > 0
-            ? t("voice.cloud.model.fetched", { count: sttModels.length })
-            : t("voice.cloud.model.fetch_empty");
-          if (modelInput) modelInput.focus();
-          setTimeout(() => { modelFetchBtn.textContent = t("voice.cloud.model.fetch"); }, 2500);
-        } else {
-          modelFetchBtn.textContent = t("voice.cloud.model.fetch_no_models");
-          setTimeout(() => { modelFetchBtn.textContent = t("voice.cloud.model.fetch"); }, 2500);
-        }
-      } catch (e) {
-        console.error("fetch_ai_models failed:", e);
-        modelFetchBtn.textContent = t("voice.cloud.model.fetch_failed");
-        setTimeout(() => { modelFetchBtn.textContent = t("voice.cloud.model.fetch"); }, 2500);
-      } finally {
-        modelFetchBtn.disabled = false;
+  await loadSttProviderOptions();
+
+  // 旧配置迁移提示
+  if (config.cloud_provider && !config.cloud) {
+    const cp = config.cloud_provider;
+    if (migrationNotice) {
+      migrationNotice.style.display = "";
+      migrationNotice.innerHTML = t("voice.cloud.migration_notice", {
+        kind: cp.kind,
+        model: cp.model_id,
+      });
+    }
+  }
+
+  if (providerModelSelect) {
+    providerModelSelect.addEventListener("change", () => {
+      const val = providerModelSelect.value;
+      if (!val) {
+        delete config.cloud;
+      } else {
+        const sep = val.indexOf("::");
+        config.cloud = {
+          provider_id: val.slice(0, sep),
+          model_id: val.slice(sep + 2),
+        };
+        // 清除旧配置
+        delete config.cloud_provider;
+        if (migrationNotice) migrationNotice.style.display = "none";
       }
+      saveSttConfig(config, "cloud");
     });
   }
 
-  // 云端连接测试（下载示例音频 → 发送到云端 API → 返回识别文本）
+  // “前往 AI 供应商”链接
+  if (gotoAiLink) {
+    gotoAiLink.addEventListener("click", (e) => {
+      e.preventDefault();
+      document.querySelector('.tab[data-tab="ai"]')?.click();
+    });
+  }
+
+  // 语言切换时刷新下拉
+  onLangChange(() => {
+    loadSttProviderOptions();
+  });
+
+  // 云端连接测试
   if (testBtn) {
     testBtn.addEventListener("click", async () => {
       testBtn.textContent = t("voice.cloud.test.testing");
@@ -289,26 +243,6 @@ export async function initVoiceTab() {
       }
     });
   }
-
-  function saveCloudProvider() {
-    const kind = kindSelect?.value || "openai";
-    const model_id = modelInput?.value || "";
-    const base_url = baseUrlInput?.value?.trim() || null;
-    if (!model_id) return;
-    config.cloud_provider = { kind, model_id, base_url };
-    saveSttConfig(config, "cloud");
-  }
-
-  // 语言切换时纠正瞬态按钮文案（applyI18n 会把 data-i18n 元素重置为空闲态默认值，
-  // 如果操作正在进行中需覆盖回瞬态文案）
-  onLangChange(() => {
-    if (modelFetchBtn?.disabled) {
-      modelFetchBtn.textContent = t("voice.cloud.model.fetching");
-    }
-    if (testBtn?.disabled) {
-      testBtn.textContent = t("voice.cloud.test.testing");
-    }
-  });
 
   // 0.10.3 高级选项（轻量，不跑探测）——流式识别开关也在此初始化
   initAdvancedOptions(config);
@@ -1087,7 +1021,16 @@ function initAudioTest(config) {
   });
 }
 
-// ── 空间管理 ──────────────────────────────────────────────────────────
+// ── helper ────────────────────────────────────────────────────────────
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function escapeAttr(s) {
+  return escapeHtml(s);
+}
+
 
 async function initSpaceManagement() {
   const container = document.getElementById("stt-space-usage");

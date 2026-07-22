@@ -136,6 +136,35 @@ impl ConfigKey for AIConfig {
     const KEY: &'static str = "app.ai";
 }
 
+// ── 内存缓存（供非 async 上下文读取，如 CloudSttEngine）──────────────────────
+
+use std::sync::{OnceLock, RwLock};
+
+static AI_CONFIG_CACHE: OnceLock<RwLock<AIConfig>> = OnceLock::new();
+
+/// 初始化 AIConfig 缓存（main.rs 启动时调用）。
+pub fn init_ai_cache(config: AIConfig) {
+    let _ = AI_CONFIG_CACHE.set(RwLock::new(config));
+}
+
+/// 更新 AIConfig 缓存（set_config 'ai_config' 命令调用后同步）。
+pub fn update_ai_cache(config: &AIConfig) {
+    if let Some(lock) = AI_CONFIG_CACHE.get() {
+        if let Ok(mut guard) = lock.write() {
+            *guard = config.clone();
+        }
+    }
+}
+
+/// 同步读取 AIConfig 缓存（供 STT 引擎等非 async 上下文使用）。
+/// 若缓存未初始化，返回 default（AI 关闭、providers 为空）。
+pub fn get_ai_config() -> AIConfig {
+    AI_CONFIG_CACHE
+        .get()
+        .and_then(|lock| lock.read().ok().map(|g| g.clone()))
+        .unwrap_or_default()
+}
+
 // ── 单个 Provider ────────────────────────────────────────────────────────
 
 /// 一个 AI 供应商的配置项。
@@ -172,6 +201,21 @@ pub struct ProviderEntry {
     pub created_at: i64,
 }
 
+/// 模型能力类型（0.12 §2.7 Provider 模型统一管理）。
+///
+/// 一个模型可同时具备多种能力（如某些 ollama 模型同时支持 chat + embedding）。
+/// 前端根据 capabilities 过滤模型下拉（如 STT 设置页只展示 capabilities 含 Stt 的模型）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelCapability {
+    /// 对话/补全模型（含 tool use）——主窗口 complete + 对话窗口 agent loop。
+    Chat,
+    /// 嵌入模型——0.13 RAG 向量生产（ollama nomic-embed-text / OpenAI text-embedding-3 等）。
+    Embedding,
+    /// 语音转文字模型——云端 STT（OpenAI whisper / Groq whisper 等）。
+    Stt,
+}
+
 /// 供应商种类——**按协议分层,不按厂商**(0.9.2 第二步重构)。
 ///
 /// **设计原则**:
@@ -185,6 +229,9 @@ pub struct ProviderEntry {
 /// - 通过 `#[serde(alias)]` 实现,零 toast、零 UI 感知
 ///
 /// **序列化姿态**:每个变体显式 `rename` 输出稳定字符串。
+///
+/// **0.12 新增 `OllamaHttp`**:本地推理 provider,走 rig::providers::ollama。
+/// 同时支持 chat 模型和 embedding 模型。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ProviderKind {
     /// OpenAI Chat Completions 协议——涵盖 OpenAI 官方 / DeepSeek / 硅基流动 /
@@ -207,18 +254,24 @@ pub enum ProviderKind {
     /// Google Gemini GenerateContent 协议——`/v1beta/models/*:generateContent`,仅 Gemini。
     #[serde(rename = "gemini_generate_content")]
     GeminiGenerateContent,
+
+    /// ollama HTTP API——本地推理,走 rig::providers::ollama。
+    /// 同时支持 chat 模型和 embedding 模型。
+    /// base_url 默认 `http://localhost:11434`,用户可改。
+    /// **不需要 API Key**——ollama 是本地服务,secret_ref 可为空字符串。
+    #[serde(rename = "ollama_http")]
+    OllamaHttp,
 }
 
 impl ProviderKind {
     /// 是否为本地推理 provider（0.11.4 改进 2 §2.2.2 三态配置用）。
     ///
-    /// 0.11 阶段所有 provider 都是云端（OpenAI / Anthropic / Gemini），返回 false。
-    /// 0.12 本地模型（Ollama / Mistral.rs / llama.cpp）上线后，新增变体覆盖此方法
-    /// 返回 true——`ToolResultFeedback::Auto` 对本地模型自动开启 Turn 2 回流。
+    /// 0.12 起 OllamaHttp 返回 true——`ToolResultFeedback::Auto` 对本地模型自动开启 Turn 2 回流。
     ///
     /// **穷尽性保证**：match 不加通配符，0.12 新增变体时编译器强制开发者思考是否本地。
     pub fn is_local(self) -> bool {
         match self {
+            ProviderKind::OllamaHttp => true,
             ProviderKind::OpenAICompatible
             | ProviderKind::AnthropicMessages
             | ProviderKind::GeminiGenerateContent => false,
@@ -233,7 +286,15 @@ impl ProviderKind {
             ProviderKind::OpenAICompatible => "openai_compatible",
             ProviderKind::AnthropicMessages => "anthropic_messages",
             ProviderKind::GeminiGenerateContent => "gemini_generate_content",
+            ProviderKind::OllamaHttp => "ollama_http",
         }
+    }
+
+    /// 是否需要 API Key（0.12 新增）。
+    ///
+    /// 本地 provider（如 ollama）不需要密钥,前端 modal 可隐藏 key 输入框。
+    pub fn requires_secret(self) -> bool {
+        !self.is_local()
     }
 }
 
@@ -323,6 +384,15 @@ pub struct ModelEntry {
     /// 前端 value 输入自动推断类型(number/bool/json/string)。
     #[serde(default)]
     pub custom_parameters: Vec<CustomParam>,
+
+    /// 模型能力列表（0.12 §2.7）。
+    ///
+    /// 一个模型可同时具备多种能力（如某些 ollama 模型同时支持 chat + embedding）。
+    /// 前端根据 capabilities 过滤模型下拉（如 STT 设置页只展示 capabilities 含 Stt 的模型）。
+    ///
+    /// **默认 `[Chat]`**——老配置缺字段时 serde 填充,零迁移成本。
+    #[serde(default = "default_chat_capability")]
+    pub capabilities: Vec<ModelCapability>,
 }
 
 /// 自定义参数键值对——序列化到 rig `additional_params` JSON。
@@ -473,6 +543,11 @@ fn default_true() -> bool {
     true
 }
 
+/// `ModelEntry.capabilities` 的 serde 默认值——`[Chat]`。
+fn default_chat_capability() -> Vec<ModelCapability> {
+    vec![ModelCapability::Chat]
+}
+
 // ── 测试 ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -496,6 +571,7 @@ mod tests {
                 temperature: None,
                 max_tokens: None,
                 custom_parameters: Vec::new(),
+                capabilities: vec![ModelCapability::Chat],
             }],
             created_at: 1_700_000_000,
         }
@@ -645,6 +721,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             custom_parameters: Vec::new(),
+            capabilities: vec![ModelCapability::Chat],
         });
         let c = AIConfig {
             providers: vec![provider],
@@ -729,6 +806,8 @@ mod tests {
         assert!(m.temperature.is_none());
         assert!(m.max_tokens.is_none());
         assert!(m.custom_parameters.is_empty());
+        // 0.12: 老配置缺 capabilities 字段 → serde default 填 [Chat]
+        assert_eq!(m.capabilities, vec![ModelCapability::Chat]);
     }
 
     #[test]
@@ -757,6 +836,7 @@ mod tests {
                     value: serde_json::json!("raw-string"),
                 },
             ],
+            capabilities: vec![ModelCapability::Chat, ModelCapability::Embedding],
         };
         let s = serde_json::to_string(&m).unwrap();
         let m2: ModelEntry = serde_json::from_str(&s).unwrap();
@@ -771,7 +851,7 @@ mod tests {
 
     #[test]
     fn provider_kind_serializes_stable_strings() {
-        // 显式 rename 稳定输出(0.9.2 第二步:按协议 3 类)
+        // 显式 rename 稳定输出(0.9.2 第二步:按协议 4 类)
         assert_eq!(
             serde_json::to_string(&ProviderKind::OpenAICompatible).unwrap(),
             "\"openai_compatible\""
@@ -784,10 +864,17 @@ mod tests {
             serde_json::to_string(&ProviderKind::GeminiGenerateContent).unwrap(),
             "\"gemini_generate_content\""
         );
+        // 0.12: OllamaHttp
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::OllamaHttp).unwrap(),
+            "\"ollama_http\""
+        );
 
         // 反序列化 roundtrip
         let k: ProviderKind = serde_json::from_str("\"openai_compatible\"").unwrap();
         assert_eq!(k, ProviderKind::OpenAICompatible);
+        let k: ProviderKind = serde_json::from_str("\"ollama_http\"").unwrap();
+        assert_eq!(k, ProviderKind::OllamaHttp);
     }
 
     #[test]
@@ -904,11 +991,13 @@ mod tests {
     }
 
     #[test]
-    fn provider_kind_is_local_returns_false_for_all_cloud_variants() {
-        // 0.11 阶段所有 provider 都是云端
+    fn provider_kind_is_local_returns_false_for_cloud_true_for_local() {
+        // 云端 provider
         assert!(!ProviderKind::OpenAICompatible.is_local());
         assert!(!ProviderKind::AnthropicMessages.is_local());
         assert!(!ProviderKind::GeminiGenerateContent.is_local());
+        // 0.12: 本地 provider
+        assert!(ProviderKind::OllamaHttp.is_local());
     }
 
     #[test]
@@ -917,6 +1006,8 @@ mod tests {
         assert_eq!(ProviderKind::OpenAICompatible.as_serde_str(), "openai_compatible");
         assert_eq!(ProviderKind::AnthropicMessages.as_serde_str(), "anthropic_messages");
         assert_eq!(ProviderKind::GeminiGenerateContent.as_serde_str(), "gemini_generate_content");
+        // 0.12
+        assert_eq!(ProviderKind::OllamaHttp.as_serde_str(), "ollama_http");
     }
 
     #[test]
@@ -935,11 +1026,67 @@ mod tests {
 
     #[test]
     fn should_run_tool_feedback_auto_follows_provider_locality() {
-        // Auto → 云端关（0.11 阶段所有 provider）
+        // Auto → 云端关
         assert!(!ToolResultFeedback::Auto.should_run(ProviderKind::OpenAICompatible));
         assert!(!ToolResultFeedback::Auto.should_run(ProviderKind::AnthropicMessages));
         assert!(!ToolResultFeedback::Auto.should_run(ProviderKind::GeminiGenerateContent));
-        // 0.12 本地模型上线后，新增变体覆盖 is_local() 返回 true，
-        // Auto 对它们自动开启——此测试在那时会被新变体补充。
+        // 0.12: Auto → 本地开
+        assert!(ToolResultFeedback::Auto.should_run(ProviderKind::OllamaHttp));
+    }
+
+    // ── 0.12 §2.7: ModelCapability ────────────────────────────────────────
+
+    #[test]
+    fn model_capability_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&ModelCapability::Chat).unwrap(),
+            "\"chat\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ModelCapability::Embedding).unwrap(),
+            "\"embedding\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ModelCapability::Stt).unwrap(),
+            "\"stt\""
+        );
+    }
+
+    #[test]
+    fn model_entry_default_capabilities_is_chat() {
+        // 老配置缺 capabilities → serde default 填 [Chat]
+        let json = r#"{"id":"m","display_name":"M","enabled":true}"#;
+        let m: ModelEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(m.capabilities, vec![ModelCapability::Chat]);
+    }
+
+    #[test]
+    fn model_entry_multi_capabilities_roundtrip() {
+        let m = ModelEntry {
+            id: "nomic-embed-text".into(),
+            display_name: "Nomic Embed".into(),
+            enabled: true,
+            context_window: None,
+            input_price_per_million: None,
+            output_price_per_million: None,
+            temperature: None,
+            max_tokens: None,
+            custom_parameters: Vec::new(),
+            capabilities: vec![ModelCapability::Chat, ModelCapability::Embedding],
+        };
+        let s = serde_json::to_string(&m).unwrap();
+        let m2: ModelEntry = serde_json::from_str(&s).unwrap();
+        assert_eq!(m, m2);
+        assert_eq!(m2.capabilities.len(), 2);
+    }
+
+    #[test]
+    fn provider_kind_requires_secret() {
+        // 云端 provider 需要密钥
+        assert!(ProviderKind::OpenAICompatible.requires_secret());
+        assert!(ProviderKind::AnthropicMessages.requires_secret());
+        assert!(ProviderKind::GeminiGenerateContent.requires_secret());
+        // 本地 provider 不需要
+        assert!(!ProviderKind::OllamaHttp.requires_secret());
     }
 }

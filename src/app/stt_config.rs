@@ -48,7 +48,18 @@ pub struct SttConfig {
     pub mode: SttMode,
 
     // ── 云端配置 ──────────────────────────────────────────────────
-    /// 云端 STT 供应商配置(mode = Cloud 时生效)
+    /// 云端 STT 配置（0.12 重构:引用 AIConfig 供应商+模型）
+    ///
+    /// 优先使用此字段。若为 None 但 `cloud_provider` 有值（老配置），
+    /// 运行时尝试自动迁移。
+    #[serde(default)]
+    pub cloud: Option<SttCloudConfig>,
+
+    /// 旧云端 STT 供应商配置（0.12 前结构,保留向后兼容）
+    ///
+    /// 老配置反序列化后此字段有值。运行时若 `cloud` 为 None 但此字段有值,
+    /// 尝试在 AIConfig 中找匹配的 provider 自动迁移。
+    /// 迁移完成后（用户下次保存配置）此字段被丢弃。
     #[serde(default)]
     pub cloud_provider: Option<SttCloudProvider>,
 
@@ -103,7 +114,11 @@ pub enum SttMode {
     Local,
 }
 
-/// 云端 STT 供应商配置。
+/// 云端 STT 供应商配置（旧结构,0.12 前独立配置 kind/base_url/model_id）。
+///
+/// **0.12 重构**:改为引用 AIConfig 供应商（见 `SttCloudConfig`）。
+/// 此结构保留仅为反序列化兼容——老配置反序列化后,运行时尝试在 AIConfig 中
+/// 找匹配的 provider 自动迁移到 `SttCloudConfig`。
 ///
 /// **secret 管理**:API Key 不在此结构中——通过 `save_ai_secret` /
 /// `has_ai_secret` 命令存取(复用 AIConfig 的 Credential Manager 体系),
@@ -117,6 +132,21 @@ pub struct SttCloudProvider {
     #[serde(default)]
     pub base_url: Option<String>,
     /// 模型 id(如 "whisper-large-v3")
+    pub model_id: String,
+}
+
+/// 云端 STT 配置（0.12 §2.7 重构:引用 AIConfig 供应商+模型）。
+///
+/// 用户在 AI 供应商页配好 OpenAI(含 whisper 模型,capabilities 含 Stt)后,
+/// STT 设置页只需从下拉框选「供应商 → 模型」,不再重复填 kind/base_url/key。
+///
+/// 密钥、base_url、kind 全部从 AIConfig::ProviderEntry 继承——
+/// 一个 OpenAI key 同时用于 chat(GPT-4)和 STT(whisper),用户只配一次。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SttCloudConfig {
+    /// 引用 AIConfig::providers 中的 provider_id
+    pub provider_id: String,
+    /// 引用该 provider 下的 model_id（该模型的 capabilities 应含 Stt）
     pub model_id: String,
 }
 
@@ -301,6 +331,7 @@ impl Default for SttConfig {
         Self {
             enabled: false,
             mode: SttMode::Cloud,
+            cloud: None,
             cloud_provider: None,
             local_engine: LocalEngineConfig::default(),
             local_model_id: None,
@@ -309,6 +340,85 @@ impl Default for SttConfig {
             streaming_mode: default_streaming_mode(),
             streaming: false,
         }
+    }
+}
+
+impl SttConfig {
+    /// 获取有效的云端 STT 配置（0.12 §2.7）。
+    ///
+    /// 优先返回 `cloud`（新结构）。若 `cloud` 为 None 但 `cloud_provider` 有值（老配置）,
+    /// 尝试在 AIConfig 中找匹配的 provider 自动迁移。
+    ///
+    /// **迁移逻辑**：按 `cloud_provider.kind` 对应的 `ProviderKind` + `base_url` 匹配
+    /// AIConfig 中的 provider。找到则返回临时构造的 `SttCloudConfig`。
+    ///
+    /// 返回 `(SttCloudConfig, migration_needed)`——`migration_needed=true` 表示
+    /// 老配置仍在用,设置页保存时应写回 `cloud` 字段并清空 `cloud_provider`。
+    pub fn effective_cloud(&self, ai_config: &crate::app::ai_config::AIConfig) -> Option<(SttCloudConfig, bool)> {
+        // 1. 新字段有值 → 直接用
+        if let Some(cloud) = &self.cloud {
+            return Some((cloud.clone(), false));
+        }
+
+        // 2. 老字段有值 → 尝试迁移
+        let old = self.cloud_provider.as_ref()?;
+        let old_kind_str = old.kind.as_str();
+
+        // 旧 kind 字符串 → ProviderKind 映射
+        let target_kind = match old_kind_str {
+            "openai" | "groq" | "azure" | "huggingface" | "mistral" | "openrouter" => {
+                crate::app::ai_config::ProviderKind::OpenAICompatible
+            }
+            "anthropic" => crate::app::ai_config::ProviderKind::AnthropicMessages,
+            "gemini" => crate::app::ai_config::ProviderKind::GeminiGenerateContent,
+            _ => {
+                tracing::warn!(kind = %old_kind_str, "STT 云端配置迁移:未知 kind,无法自动匹配");
+                return None;
+            }
+        };
+
+        // 在 AIConfig 中找匹配的 provider（kind + base_url）
+        for provider in &ai_config.providers {
+            if provider.kind != target_kind {
+                continue;
+            }
+            // base_url 匹配：old.base_url 与 provider.base_url 都为 None 或都为 Some 且相等
+            let base_matches = match (&old.base_url, &provider.base_url) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a.trim_end_matches('/') == b.trim_end_matches('/'),
+                _ => false,
+            };
+            if !base_matches {
+                continue;
+            }
+            // 检查 provider 是否有匹配 model_id 的模型
+            if provider.models.iter().any(|m| m.id == old.model_id) {
+                tracing::info!(
+                    provider_id = %provider.id,
+                    model_id = %old.model_id,
+                    "STT 云端配置自动迁移:找到匹配的 AIConfig 供应商"
+                );
+                return Some((
+                    SttCloudConfig {
+                        provider_id: provider.id.clone(),
+                        model_id: old.model_id.clone(),
+                    },
+                    true, // 需要迁移
+                ));
+            }
+        }
+
+        tracing::warn!(
+            kind = %old_kind_str,
+            model_id = %old.model_id,
+            "STT 云端配置迁移:未在 AIConfig 中找到匹配的供应商,需手动迁移"
+        );
+        None
+    }
+
+    /// 云端 STT 是否已配置（`cloud` 或 `cloud_provider` 任一有值）。
+    pub fn is_cloud_configured(&self) -> bool {
+        self.cloud.is_some() || self.cloud_provider.is_some()
     }
 }
 
@@ -371,6 +481,7 @@ mod tests {
         let original = SttConfig {
             enabled: true,
             mode: SttMode::Local,
+            cloud: None,
             cloud_provider: Some(SttCloudProvider {
                 kind: "openai".into(),
                 base_url: Some("https://api.openai.com/v1".into()),
@@ -531,5 +642,141 @@ mod tests {
         let cfg: SttConfig = serde_json::from_str(json).unwrap();
         assert!(cfg.enabled);
         // streaming_model 字段保留但已废弃，不再使用
+    }
+
+    // ── 0.12 §2.7: SttCloudConfig 迁移测试 ────────────────────────────────
+
+    #[test]
+    fn stt_cloud_config_serializes() {
+        let c = SttCloudConfig {
+            provider_id: "p1".into(),
+            model_id: "whisper-large-v3".into(),
+        };
+        let s = serde_json::to_string(&c).unwrap();
+        let c2: SttCloudConfig = serde_json::from_str(&s).unwrap();
+        assert_eq!(c, c2);
+    }
+
+    #[test]
+    fn old_config_with_cloud_provider_deserializes() {
+        // 老配置有 cloud_provider 但没有 cloud → 反序列化成功,cloud 为 None
+        let json = r#"{"enabled":true,"cloud_provider":{"kind":"openai","base_url":"https://api.openai.com/v1","model_id":"whisper-large-v3"}}"#;
+        let cfg: SttConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.cloud.is_none());
+        assert!(cfg.cloud_provider.is_some());
+        assert_eq!(cfg.cloud_provider.as_ref().unwrap().kind, "openai");
+    }
+
+    #[test]
+    fn new_config_with_cloud_field_deserializes() {
+        let json = r#"{"enabled":true,"cloud":{"provider_id":"p1","model_id":"whisper-large-v3"}}"#;
+        let cfg: SttConfig = serde_json::from_str(json).unwrap();
+        assert!(cfg.cloud.is_some());
+        assert!(cfg.cloud_provider.is_none());
+        assert_eq!(cfg.cloud.as_ref().unwrap().provider_id, "p1");
+    }
+
+    #[test]
+    fn effective_cloud_prefers_new_field() {
+        // cloud 有值时,不检查 cloud_provider
+        let cfg = SttConfig {
+            cloud: Some(SttCloudConfig {
+                provider_id: "new-p".into(),
+                model_id: "new-m".into(),
+            }),
+            cloud_provider: Some(SttCloudProvider {
+                kind: "openai".into(),
+                base_url: None,
+                model_id: "old-m".into(),
+            }),
+            ..Default::default()
+        };
+        let ai_config = crate::app::ai_config::AIConfig::default();
+        let (cloud, migration_needed) = cfg.effective_cloud(&ai_config).unwrap();
+        assert_eq!(cloud.provider_id, "new-p");
+        assert!(!migration_needed);
+    }
+
+    #[test]
+    fn effective_cloud_migrates_old_config() {
+        // cloud 为 None,cloud_provider 有值 → 在 AIConfig 中找匹配
+        let cfg = SttConfig {
+            cloud: None,
+            cloud_provider: Some(SttCloudProvider {
+                kind: "openai".into(),
+                base_url: Some("https://api.openai.com/v1".into()),
+                model_id: "whisper-1".into(),
+            }),
+            ..Default::default()
+        };
+        // AIConfig 中有匹配的 provider
+        let ai_config = crate::app::ai_config::AIConfig {
+            providers: vec![crate::app::ai_config::ProviderEntry {
+                id: "ai-p1".into(),
+                display_name: "OpenAI".into(),
+                kind: crate::app::ai_config::ProviderKind::OpenAICompatible,
+                base_url: Some("https://api.openai.com/v1".into()),
+                secret_ref: "blink/ai-p1/key".into(),
+                models: vec![crate::app::ai_config::ModelEntry {
+                    id: "whisper-1".into(),
+                    display_name: "Whisper".into(),
+                    enabled: true,
+                    context_window: None,
+                    input_price_per_million: None,
+                    output_price_per_million: None,
+                    temperature: None,
+                    max_tokens: None,
+                    custom_parameters: Vec::new(),
+                    capabilities: vec![crate::app::ai_config::ModelCapability::Stt],
+                }],
+                created_at: 0,
+            }],
+            ..Default::default()
+        };
+        let (cloud, migration_needed) = cfg.effective_cloud(&ai_config).unwrap();
+        assert_eq!(cloud.provider_id, "ai-p1");
+        assert_eq!(cloud.model_id, "whisper-1");
+        assert!(migration_needed, "老配置应标记为需要迁移");
+    }
+
+    #[test]
+    fn effective_cloud_returns_none_when_no_match() {
+        // cloud 为 None,cloud_provider 有值,但 AIConfig 中无匹配
+        let cfg = SttConfig {
+            cloud: None,
+            cloud_provider: Some(SttCloudProvider {
+                kind: "openai".into(),
+                base_url: None,
+                model_id: "whisper-1".into(),
+            }),
+            ..Default::default()
+        };
+        let ai_config = crate::app::ai_config::AIConfig::default();
+        assert!(cfg.effective_cloud(&ai_config).is_none());
+    }
+
+    #[test]
+    fn is_cloud_configured_checks_both_fields() {
+        let cfg1 = SttConfig {
+            cloud: Some(SttCloudConfig {
+                provider_id: "p".into(),
+                model_id: "m".into(),
+            }),
+            ..Default::default()
+        };
+        assert!(cfg1.is_cloud_configured());
+
+        let cfg2 = SttConfig {
+            cloud_provider: Some(SttCloudProvider {
+                kind: "openai".into(),
+                base_url: None,
+                model_id: "m".into(),
+            }),
+            ..Default::default()
+        };
+        assert!(cfg2.is_cloud_configured());
+
+        let cfg3 = SttConfig::default();
+        assert!(!cfg3.is_cloud_configured());
     }
 }

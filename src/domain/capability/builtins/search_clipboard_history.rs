@@ -86,7 +86,7 @@ impl Capability for SearchClipboardHistory {
             .map(|n| n as i64)
             .unwrap_or(30);
 
-        let pool = ctx.app_handle.state::<sqlx::SqlitePool>();
+        let pool = &ctx.app_handle.state::<crate::infra::data::DbPools>().history;
 
         // 铁则 1：用 deadline 包裹 DB 查询
         let items = tokio::time::timeout_at(
