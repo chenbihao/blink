@@ -62,7 +62,7 @@
 | **0.10** | [phases/0.10-voice-agent.md](./phases/0.10-voice-agent.md) | 语音输入 —— STT + 语音打字(G1 主窗口输入 / G2 输入法上屏)+ 伪流式 VAD 切句 + FunASR 本地化 + SendInput 文本注入 | ✅ 完成 |
 | **0.11** | [phases/0.11-plugin-ai-toolchain.md](./phases/0.11-plugin-ai-toolchain.md) | 插件通信契约重设计 + AI 调用插件链路完善 + 截图标注增强 + OCR word 级链路 + 阅读模式 + 翻译衔接 + 水印独立图层（0.11.0~0.11.9） | ✅ 完成 |
 | **0.11.10** | [phases/0.11-plugin-ai-toolchain.md](./phases/0.11-plugin-ai-toolchain.md#210-图上翻译--截图交互重构01110) | 图上翻译 + 截图交互重构 —— `overlayLayer` 单例图层（识别/翻译共用一层,`mode` 切换）+ 面板降级为召唤式抽屉 + 工具栏加[选取]默认工具 + 预热 OCR + 误点保护 + 命名 OCR→识别 + line 级批量翻译 + 背景遮罩三档 + 字号自适应 | ✅ 基本完成 |
-| **0.12** | [phases/0.12-ai-ecosystem.md](./phases/0.12-ai-ecosystem.md) | AI 能力架构搭建（对话窗口 + Alt+Q chord / 对话机制 conversation 隔离+持久化 memory+tool loop / DB 四层拆分 config+history+AI+cache / Provider 模型统一管理 chat+embedding+STT / ollama+lmstudio） | 📋 规划中 |
+| **0.12** | [phases/0.12-ai-ecosystem.md](./phases/0.12-ai-ecosystem.md) | AI 能力架构搭建（对话窗口 + Alt+Q chord / 对话机制 conversation 隔离+持久化 memory+tool loop / DB 四层拆分 config+history+AI+cache / Provider 模型统一管理 chat+embedding+STT / ollama+lmstudio） | 🔧 进行中 |
 | **0.13** | [phases/0.13-ai-capability-expansion.md](./phases/0.13-ai-capability-expansion.md) | AI 调用能力扩展（MCP client 消费外部 tool / RAG 知识库检索 / 记忆向量召回 / MCP server 护城河 / Skill 化 CLI 探索） | 📋 规划中 |
 
 ### 2.3 其他参考

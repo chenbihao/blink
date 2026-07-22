@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use rig_core::client::CompletionClient;
 
-use crate::app::ai_config::{ModelCapability, ModelEntry, ProviderEntry, ProviderKind};
+use crate::app::ai_config::{ModelEntry, ProviderEntry, ProviderKind};
 use crate::domain::ai::provider::{AIError, AIProvider};
 use crate::domain::ai::registry::ProviderFactory;
 use crate::domain::ai::rig_provider::{RigProvider, expose_for_rig};
@@ -250,6 +250,20 @@ fn build_ollama(
         .build()
         .map_err(|e| AIError::Provider(format!("ollama client 构造失败: {e}")))?;
 
+    // 0.12 §2.7: 校验模型能力--纯 embedding 模型不应构造为 completion model。
+    // 0.12 不构造 embedding model（留给 0.13 RAG），此处仅 warn 不 block。
+    if !model
+        .capabilities
+        .iter()
+        .any(|c| matches!(c, crate::app::ai_config::ModelCapability::Chat))
+    {
+        tracing::warn!(
+            model_id = %model.id,
+            capabilities = ?model.capabilities,
+            "ollama 模型未标记 Chat 能力，构造为 completion model 可能运行时失败（embedding 模型请在 0.13 RAG 消费）"
+        );
+    }
+
     let rig_model = client.completion_model(&model.id);
     Ok(Arc::new(RigProvider::new(
         ProviderKind::OllamaHttp,
@@ -275,7 +289,7 @@ pub fn default_factory() -> Arc<dyn ProviderFactory> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::ai_config::ProviderKind;
+    use crate::app::ai_config::{ModelCapability, ProviderKind};
 
     fn sample_entry(kind: ProviderKind, base_url: Option<String>) -> ProviderEntry {
         ProviderEntry {

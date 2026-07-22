@@ -90,8 +90,6 @@ impl DbPools {
 }
 
 /// 数据目录：%APPDATA%\blink\
-
-/// 数据目录：%APPDATA%\blink\
 fn data_dir() -> PathBuf {
     let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(appdata).join("blink")
@@ -206,6 +204,14 @@ async fn init_cache_schema(pool: &SqlitePool) -> Result<(), String> {
     Ok(())
 }
 
+/// 缓存库纯建表（迁移路径用）--只建 performance_metrics + icon_cache 表，
+/// 不注册全局 pool、不 spawn 清理（迁移 pool 临时使用后即 close）。
+async fn init_cache_schema_only(pool: &SqlitePool) -> Result<(), String> {
+    crate::infra::data::perf::init_schema(pool).await?;
+    crate::infra::data::icon_cache::init_schema(pool).await?;
+    Ok(())
+}
+
 // ── 旧库迁移 ─────────────────────────────────────────────────────────────────
 
 /// 旧 `blink.db` → 四库迁移。
@@ -252,25 +258,57 @@ async fn migrate_legacy_db(dir: &PathBuf) -> Result<(), String> {
     let ai = create_pool(&dir.join("blink_ai.db")).await?;
     let cache = create_pool(&dir.join("blink_cache.db")).await?;
 
-    // 先建表
+    // 先建表（缓存库用纯建表函数，不注册全局 pool--迁移 pool 是临时的，
+    // 占用 OnceCell 会导致 init_all 的最终 pool 注册失败 -> perf/icon_cache 写入静默失效）
     init_config_schema(&config).await?;
     init_history_schema(&history).await?;
     init_ai_schema(&ai).await?;
-    init_cache_schema(&cache).await?;
+    init_cache_schema_only(&cache).await?;
 
     // 各库 ATTACH 旧库 + 迁移对应表
     let legacy_url = format!("sqlite:{}", legacy_path.display());
 
-    // 配置库：config 表
-    migrate_via_attach(&config, &legacy_url, "config").await?;
-    // 历史库：history + clipboard_history 表
-    migrate_via_attach(&history, &legacy_url, "history").await?;
-    migrate_via_attach(&history, &legacy_url, "clipboard_history").await?;
-    // AI 库：ai_tool_audit 表
-    migrate_via_attach(&ai, &legacy_url, "ai_tool_audit").await?;
-    // 缓存库：performance_metrics + icon_cache 表
-    migrate_via_attach(&cache, &legacy_url, "performance_metrics").await?;
-    migrate_via_attach(&cache, &legacy_url, "icon_cache").await?;
+    // 各库 ATTACH 旧库 + 迁移对应表。
+    // 若任一迁移失败，仍需 close 已创建的 pool 避免泄漏。
+    let migrate_result: Result<(), String> = async {
+        // 配置库：config 表
+        migrate_via_attach(&config, &legacy_url, "config").await?;
+        // 历史库：history + clipboard_history 表
+        migrate_via_attach(&history, &legacy_url, "history").await?;
+        migrate_via_attach(&history, &legacy_url, "clipboard_history").await?;
+        // AI 库：ai_tool_audit 表
+        migrate_via_attach(&ai, &legacy_url, "ai_tool_audit").await?;
+        // 缓存库：performance_metrics + icon_cache 表
+        migrate_via_attach(&cache, &legacy_url, "performance_metrics").await?;
+        migrate_via_attach(&cache, &legacy_url, "icon_cache").await?;
+        Ok(())
+    }
+    .await;
+
+    if let Err(e) = migrate_result {
+        // 迁移失败：保留旧库原样（不删），下次启动重试。
+        // 不 return Err--main.rs 用 expect 初始化 pool，return Err 会 panic 阻塞启动。
+        // 旧库保留 = 数据不丢（用户可手动恢复）；新库缺部分表数据但应用仍可用。
+        // P2.7: 写 migration_failed 标记到配置库，设置页存储面板显示警告（避免静默丢数据）。
+        tracing::error!(error = %e, "迁移中途失败，旧 blink.db 保留，下次启动重试");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let reason = format!("migration_failed: {e}");
+        let _ = sqlx::query(
+            "INSERT OR REPLACE INTO config (key, value, updated_at) VALUES ('migration_failed', ?1, ?2)",
+        )
+        .bind(&reason)
+        .bind(now)
+        .execute(&config)
+        .await;
+        config.close().await;
+        history.close().await;
+        ai.close().await;
+        cache.close().await;
+        return Ok(());
+    }
 
     // 写入迁移完成标记到配置库
     let now = std::time::SystemTime::now()
@@ -282,6 +320,10 @@ async fn migrate_legacy_db(dir: &PathBuf) -> Result<(), String> {
         .execute(&config)
         .await
         .map_err(|e| format!("写迁移标记失败: {e}"))?;
+    // P2.7: 清除可能残留的 migration_failed 标记（前次失败本次成功）
+    let _ = sqlx::query("DELETE FROM config WHERE key = 'migration_failed'")
+        .execute(&config)
+        .await;
 
     config.close().await;
     history.close().await;
@@ -313,37 +355,36 @@ async fn migrate_via_attach(
     sqlx::query(sqlx::AssertSqlSafe(format!("ATTACH DATABASE '{legacy_url}' AS legacy")))
         .execute(dst)
         .await
-        .map_err(|e| format!("ATTACH 旧库失败: {e}"))?;;
+        .map_err(|e| format!("ATTACH 旧库失败: {e}"))?;
 
-    // 检查旧库是否有此表
-    let exists: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM legacy.sqlite_master WHERE type='table' AND name=?1")
-        .bind(table)
-        .fetch_one(dst)
-        .await
-        .map_err(|e| format!("检查 legacy.{table} 存在性: {e}"))?;
+    // 迁移逻辑包在块内，确保无论成功失败都 DETACH 旧库（避免连接残留）
+    let result: Result<(), String> = async {
+        // 检查旧库是否有此表
+        let exists: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM legacy.sqlite_master WHERE type='table' AND name=?1")
+                .bind(table)
+                .fetch_one(dst)
+                .await
+                .map_err(|e| format!("检查 legacy.{table} 存在性: {e}"))?;
 
-    if exists.0 > 0 {
-        // 迁移数据（INSERT OR REPLACE 防主键冲突；table 名已白名单校验）
-        let result = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "INSERT OR REPLACE INTO main.{table} SELECT * FROM legacy.{table}"
-        )))
-        .execute(dst)
-        .await;
-
-        match result {
-            Ok(r) => {
-                tracing::info!(table, rows = r.rows_affected(), "表迁移完成");
-            }
-            Err(e) => {
-                tracing::warn!(table, error = %e, "表迁移失败（可能是 schema 差异，跳过）");
-            }
+        if exists.0 > 0 {
+            // 迁移数据（INSERT OR REPLACE 防主键冲突；table 名由调用方硬编码字面量传入）
+            let r = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "INSERT OR REPLACE INTO main.{table} SELECT * FROM legacy.{table}"
+            )))
+            .execute(dst)
+            .await
+            .map_err(|e| format!("迁移表 {table} 失败（schema 差异?）: {e}"))?;
+            tracing::info!(table, rows = r.rows_affected(), "表迁移完成");
+        } else {
+            tracing::debug!(table, "旧库无此表，跳过");
         }
-    } else {
-        tracing::debug!(table, "旧库无此表，跳过");
+        Ok(())
     }
+    .await;
 
-    // DETACH 旧库
+    // DETACH 旧库（无论迁移成功失败都执行）
     let _ = sqlx::query("DETACH DATABASE legacy").execute(dst).await;
 
-    Ok(())
+    result
 }

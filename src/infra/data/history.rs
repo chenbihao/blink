@@ -1,49 +1,9 @@
 //! 历史记录：SQLite 存储执行次数，用于搜索结果频率加权。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use sqlx::SqlitePool;
-use sqlx::sqlite::SqlitePoolOptions;
-
-/// 初始化 SQLite 连接 + 建表。返回连接池。
-pub async fn init_db() -> Result<SqlitePool, String> {
-    let db_path = db_path();
-    let db_dir = db_path.parent().ok_or("invalid db path")?;
-    std::fs::create_dir_all(db_dir).map_err(|e| e.to_string())?;
-
-    let url = format!("sqlite:{}?mode=rwc", db_path.display());
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect(&url)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS history (
-            lnk_path TEXT PRIMARY KEY,
-            hit_count INTEGER NOT NULL DEFAULT 0,
-            last_used_at INTEGER NOT NULL DEFAULT 0
-        )",
-    )
-    .execute(&pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS config (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            updated_at INTEGER NOT NULL DEFAULT 0
-        )",
-    )
-    .execute(&pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    Ok(pool)
-}
 
 /// 0.4→0.5 自动迁移：
 /// 1. ~~`app_config.file_search` → `engine:file_search`~~（已移除，未发版不需要）
@@ -236,61 +196,10 @@ pub async fn cleanup_old(pool: &SqlitePool, days: u32) {
     }
 }
 
-// ── 配置相关函数 ────────────────────────────────────────────────────────────────
-
-/// 获取配置值。
-pub async fn get_config(pool: &SqlitePool, key: &str) -> Option<String> {
-    let row: (String,) = sqlx::query_as("SELECT value FROM config WHERE key = ?1")
-        .bind(key)
-        .fetch_optional(pool)
-        .await
-        .ok()??;
-    Some(row.0)
-}
-
-/// 设置配置值（存在则更新，不存在则插入）。
-pub async fn set_config(pool: &SqlitePool, key: &str, value: &str) -> Result<(), sqlx::Error> {
-    let now = chrono::Utc::now().timestamp();
-    sqlx::query(
-        "INSERT INTO config (key, value, updated_at) VALUES (?1, ?2, ?3)
-         ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at = ?3",
-    )
-    .bind(key)
-    .bind(value)
-    .bind(now)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-/// 删除配置值（0.8.8 §8.7：`AppConfig` 分片迁移完毕后清理旧 `app_config` 单 key）。
-pub async fn delete_config(pool: &SqlitePool, key: &str) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM config WHERE key = ?1")
-        .bind(key)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-/// 获取所有配置。
-pub async fn get_all_config(pool: &SqlitePool) -> HashMap<String, String> {
-    let rows: Vec<(String, String)> = sqlx::query_as("SELECT key, value FROM config")
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
-    rows.into_iter().collect()
-}
-
-/// SQLite 文件路径字符串（供前端显示）。
-pub fn db_path_str() -> String {
-    db_path().to_string_lossy().to_string()
-}
-
-/// SQLite 文件路径：%APPDATA%\blink\blink.db
-fn db_path() -> PathBuf {
-    let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(appdata).join("blink").join("blink.db")
-}
+// ── 配置访问层（0.12.0 §2.2.3 迁移到 infra/data/config.rs）────────────────────
+//
+// 向后兼容重导出——现有调用点 `history::get_config` 等无需改动。
+pub use crate::infra::data::config::{delete_config, get_all_config, get_config, set_config};
 
 #[cfg(test)]
 mod tests {

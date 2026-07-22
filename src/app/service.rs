@@ -10,9 +10,8 @@
 //!
 //! `AppContext` 是共享依赖容器(§1.2),**不是** DI 容器:只把 setup 阶段散落的启动
 //! 依赖收拢显式化。它**不替换** Tauri 的 `app.manage` / `app.state`——command 层继续
-//! 用 `app.state::<SqlitePool>()`,AppContext 仅服务于 setup 期的 Service 编排。
+//! 用 `app.state::<DbPools>()`,AppContext 仅服务于 setup 期的 Service 编排。
 
-use sqlx::SqlitePool;
 use tauri::{AppHandle, Manager};
 
 use crate::app::ai_config::AIConfig;
@@ -98,7 +97,7 @@ impl Service for ConfigService {
     }
 }
 
-/// 历史服务:SqlitePool 已由 main.rs `app.manage` 持有,本版无启动副作用。
+/// 历史服务:DbPools 已由 main.rs `app.manage` 持有,本版无启动副作用。
 /// 占位以统一生命周期。
 pub struct HistoryService;
 

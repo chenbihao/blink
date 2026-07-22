@@ -36,18 +36,20 @@ production-design/
     ├── 0.8-context-interaction.md      ← 感知与操作层:UIA划词+Autosuggestion+四域架构+Chord+0.8.6架构固化
     ├── 0.9-ai-layer.md                 ← 📋 Agent 地基:统一 tool 架构+Provider 多档+主窗口文本闭环(零语音)
     ├── 0.10-voice-agent.md             ← ✅ 语音输入:STT+语音打字+伪流式 VAD 切句+FunASR 本地化
-    └── 0.11-plugin-ai-toolchain.md    ← ✅ 插件通信契约重设计+AI 调用插件链路完善+截图标注增强+OCR word 级+翻译衔接+图上翻译
+    ├── 0.11-plugin-ai-toolchain.md    ← ✅ 插件通信契约重设计+AI 调用插件链路完善+截图标注增强+OCR word 级+翻译衔接+图上翻译
+    ├── 0.12-ai-ecosystem.md           ← 🔧 AI 能力架构搭建:对话窗口+Alt+Q chord+DB 四层拆分+Provider 统一+ollama+Tool 适配层
+    └── 0.13-ai-capability-expansion.md ← 📋 AI 调用能力扩展:MCP client+RAG+记忆向量召回+MCP server+Skill
 ```
 
 ---
 
 ## 三层文档，各司其职
 
-| 层 | 文件 | 回答 | 性质 |
-|---|---|---|---|
-| **总纲** | `00-overview.md` | 产品是什么、整体架构、路线图 | 入口必读 |
-| **产品决策** | `product-*.md` 四卷 | **为什么**这样设计（交互/扩展/感知/原则） | 决策争议回溯处 |
-| **技术实现** | `phases/*.md` | **怎么做**（各版本架构 + 实现总结 + 已知问题） | 改核心前必读 |
+| 层        | 文件                | 回答                           | 性质      |
+|----------|-------------------|------------------------------|---------|
+| **总纲**   | `00-overview.md`  | 产品是什么、整体架构、路线图               | 入口必读    |
+| **产品决策** | `product-*.md` 四卷 | **为什么**这样设计（交互/扩展/感知/原则）     | 决策争议回溯处 |
+| **技术实现** | `phases/*.md`     | **怎么做**（各版本架构 + 实现总结 + 已知问题） | 改核心前必读  |
 
 ---
 
@@ -56,13 +58,14 @@ production-design/
 ### 新增产品决策时
 
 1. 判断属于哪个域 → 写进对应 `product-*.md`
-   - 交互/热键/搜索体验 → `product-interaction.md`
-   - 插件/意图/AI/架构骨架 → `product-platform.md`
-   - Context/隐私/未来演进 → `product-context-future.md`
-   - 横切取舍/工程规范/时间线/横切设计准则 → `product-principles.md`
+    - 交互/热键/搜索体验 → `product-interaction.md`
+    - 插件/意图/AI/架构骨架 → `product-platform.md`
+    - Context/隐私/未来演进 → `product-context-future.md`
+    - 横切取舍/工程规范/时间线/横切设计准则 → `product-principles.md`
 2. 若该决策当期落地，同步进 `phases/{version}-*.md`
 
 **留档原则**（2026-07-05 起精简后）：
+
 - 只保留**最新最终决策**，不保留版本演进注脚（"0.3 时"、"0.4 起"、"来源: MVP §X"）
 - 反面案例、踩坑记录沉淀到 `phases/`，`product-*.md` 只留铁则
 - 交叉引用可以短（`见 §X`），不需要重复内容
@@ -77,6 +80,7 @@ production-design/
 ### 版本档案
 
 `phases/{version}-{topic}.md`
+
 - 已完成版本 = "实现总结 + 关键教训 + 已知问题"
 - 进行中版本 = "设计 + 工作项 + 验收标准"
 
@@ -96,6 +100,7 @@ production-design/
 ## 演进约定
 
 每个大版本完成后：
+
 1. 在 `phases/` 新增/更新 `{version}-{topic}.md` 做实现总结
 2. 产品决策沉淀进对应 `product-*.md`（只留最终决策，不留演进注脚）
 3. 总纲级变化更新 `00-overview.md` 的里程碑速览

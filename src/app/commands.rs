@@ -272,6 +272,37 @@ pub async fn confirm_ai_action(
     Ok(())
 }
 
+/// 对话窗口危险操作确认（0.12.0 §2.4 闭环骨架）。
+///
+/// 对话窗口前端收到 `blink://chat-confirm-action` 事件后展示确认卡片，
+/// 用户确认/拒绝 -> invoke 此 command -> 唤醒 tool_adapter 挂起的 `call`。
+///
+/// **与 `confirm_ai_action` 的区别**：主窗口的 `confirm_ai_action` 重新执行 action
+/// （外部调度，service.rs 的 tool loop 不阻塞）；对话窗口的 `confirm_chat_action`
+/// 只送信号（rig agent loop 内部 `call` 挂起等待，确认后由 `call` 自己执行）。
+/// 两者事件名 / payload / 闭环路径都不同，故分离。
+///
+/// 返回 `true` = 信号已送达（confirm_id 有效）；`false` = confirm_id 不存在（超时/过期）。
+#[tauri::command]
+pub async fn confirm_chat_action(
+    app: tauri::AppHandle,
+    confirm_id: u64,
+    approved: bool,
+) -> Result<bool, String> {
+    let pending = app
+        .state::<std::sync::Arc<crate::domain::ai::tool_adapter::PendingConfirms>>();
+    let delivered = pending.resolve(confirm_id, approved).await;
+    if delivered {
+        tracing::debug!(confirm_id, approved, "confirm_chat_action: 信号已送达");
+    } else {
+        tracing::warn!(
+            confirm_id,
+            "confirm_chat_action: confirm_id 不存在（过期/超时）"
+        );
+    }
+    Ok(delivered)
+}
+
 /// 列出所有内置动作元数据 + 当前 enabled 状态（0.8.0 §1.3 / 0.8.6 §8.2.4 i18n）。
 #[tauri::command]
 pub async fn list_builtin_actions(
@@ -896,7 +927,17 @@ pub async fn get_storage_info(app: tauri::AppHandle) -> serde_json::Value {
     let ai_audit_count = crate::infra::data::ai_audit::count(&pools.ai).await;
 
     // 缓存库：performance_metrics + icon_cache 行数
-    let perf_count = crate::infra::utils::perf::count(&pools.cache).await;
+    // 新代码直接用 data 层真源（utils::perf 的 count 是 re-export，仅兼容旧调用点）
+    let perf_count = crate::infra::data::perf::count(&pools.cache).await;
+    let icon_cache_count = crate::infra::data::icon_cache::count(&pools.cache).await;
+
+    // P2.7: 迁移失败标记（若有，前端存储面板显示警告）
+    let migration_failed: Option<String> =
+        sqlx::query_scalar("SELECT value FROM config WHERE key = 'migration_failed'")
+            .fetch_optional(&pools.config)
+            .await
+            .ok()
+            .flatten();
 
     // 文件大小
     let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
@@ -931,9 +972,12 @@ pub async fn get_storage_info(app: tauri::AppHandle) -> serde_json::Value {
                 "size_bytes": file_size(&data_dir.join("blink_cache.db")),
                 "path": data_dir.join("blink_cache.db").display().to_string(),
                 "perf_count": perf_count,
+                "icon_cache_count": icon_cache_count,
             },
         },
         "data_dir": data_dir.display().to_string(),
+        // P2.7: 迁移失败标记（None = 正常；Some(reason) = 旧库迁移失败，前端显示警告）
+        "migration_failed": migration_failed,
         // 兼容旧前端字段
         "history_count": history_count,
         "db_path": data_dir.display().to_string(),
@@ -951,6 +995,42 @@ pub async fn clear_ai_audit(app: tauri::AppHandle) -> Result<(), String> {
     let pool = &app.state::<crate::infra::data::DbPools>().ai;
     crate::infra::data::ai_audit::clear_all(&pool).await;
     tracing::info!("AI 审计日志已清空");
+    Ok(())
+}
+
+/// 设置页-存储：打开数据文件夹（0.12.0 §2.2.7）。
+///
+/// 调 `ShellExecuteW("explorer", %APPDATA%\blink)` 打开数据目录。
+#[tauri::command]
+pub fn open_data_folder() -> Result<(), String> {
+    let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+    let data_dir = std::path::PathBuf::from(&appdata).join("blink");
+    // 目录不存在时先创建，避免 explorer 打开“文档”等默认位置
+    if !data_dir.exists() {
+        if let Err(e) = std::fs::create_dir_all(&data_dir) {
+            return Err(format!("创建数据目录失败: {e}"));
+        }
+    }
+    std::process::Command::new("explorer.exe")
+        .arg(&data_dir)
+        .spawn()
+        .map_err(|e| format!("打开文件夹失败: {e}"))?;
+    Ok(())
+}
+
+/// 设置页-存储：清空缓存库（0.12.0 §2.2.7）。
+///
+/// 清空 performance_metrics + icon_cache 两表。缓存可重建，清空无风险。
+#[tauri::command]
+pub async fn clear_cache_db(app: tauri::AppHandle) -> Result<(), String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    // 清空 performance_metrics
+    crate::infra::data::perf::clear_all(&pools.cache)
+        .await
+        .map_err(|e| format!("清空 performance_metrics 失败: {e}"))?;
+    // 清空 icon_cache
+    crate::infra::data::icon_cache::clear_all(&pools.cache).await;
+    tracing::info!("缓存库已清空（performance_metrics + icon_cache）");
     Ok(())
 }
 
@@ -3008,7 +3088,7 @@ pub async fn export_perf_report(app: tauri::AppHandle) -> Result<Option<String>,
 #[tauri::command]
 pub async fn clear_perf_data(app: tauri::AppHandle) -> Result<u64, String> {
     let pool = &app.state::<crate::infra::data::DbPools>().cache;
-    crate::infra::utils::perf::clear_all(&pool).await
+    crate::infra::data::perf::clear_all(&pool).await
 }
 
 /// 在外部浏览器打开 URL。
@@ -3124,9 +3204,21 @@ pub async fn get_stt_config(
 #[tauri::command]
 pub async fn set_stt_config(
     app: tauri::AppHandle,
-    config: crate::app::stt_config::SttConfig,
+    mut config: crate::app::stt_config::SttConfig,
     scope: Option<String>,
 ) -> Result<(), String> {
+    // 0.12 §2.7 迁移回写：若老配置 cloud_provider 能在 AIConfig 找到匹配，
+    // 回写 cloud 字段并清空 cloud_provider（兑现 effective_cloud 的 migration_needed 承诺，
+    // 避免老配置永久停留临时态）。用户保存任意区段时触发。
+    if config.cloud.is_none() && config.cloud_provider.is_some() {
+        let ai_config = crate::app::ai_config::get_ai_config();
+        if let Some((cloud, _)) = config.effective_cloud(&ai_config) {
+            tracing::info!("STT 云端配置迁移回写: cloud_provider -> cloud");
+            config.cloud = Some(cloud);
+            config.cloud_provider = None;
+        }
+    }
+
     let pool = &app.state::<crate::infra::data::DbPools>().config;
     crate::app::config::ConfigStore::set(&pool, &config)
         .await
@@ -4123,41 +4215,27 @@ async fn test_audio_via_server(audio_url: &str, port: u16) -> Result<String, Str
 #[tauri::command]
 pub async fn test_cloud_stt() -> Result<serde_json::Value, String> {
     let config = crate::app::stt_config::get_stt_config();
+    let ai_config = crate::app::ai_config::get_ai_config();
 
-    let provider = config.cloud_provider.as_ref().ok_or_else(|| {
-        "未配置云端供应商".to_string()
-    })?;
+    // 0.12 §2.7: 复用 resolve_stt_endpoint，与 finalize 走同一配置解析路径
+    // （支持新结构 cloud 字段 + 老配置自动迁移；旧实现只读 cloud_provider 导致新配置测试必失败）
+    let endpoint = crate::domain::stt::cloud::resolve_stt_endpoint(&config, &ai_config)
+        .map_err(|e| format!("云端 STT 配置解析失败: {e}"))?;
 
-    // 加载 API Key
-    let secret_id = format!("stt:{}", provider.kind);
-    let api_key = crate::infra::platform::secret::load_secret(&secret_id, "key")
-        .map_err(|e| format!("API Key 未配置: {e}"))?;
-
-    // 构建 base_url
-    let base_url = provider
-        .base_url
-        .as_deref()
-        .unwrap_or_else(|| match provider.kind.as_str() {
-            "openai" => "https://api.openai.com/v1",
-            "groq" => "https://api.groq.com/openai/v1",
-            "mimo" => "https://api.xiaomimimo.com/v1",
-            "mimo_plan" => "https://token-plan-cn.xiaomimimo.com/v1",
-            _ => "https://api.openai.com/v1",
-        })
-        .trim_end_matches('/');
-
-    // 按供应商协议路由：mimo 走 chat-completions，其他走标准 transcriptions
-    let is_chat_asr = crate::domain::stt::wav::uses_chat_completion_asr(&provider.kind);
-    let endpoint = if is_chat_asr {
-        "chat/completions"
-    } else {
-        "audio/transcriptions"
-    };
-    let url = format!("{base_url}/{endpoint}");
+    let is_chat_asr = endpoint.uses_chat_completion_asr;
+    let url = format!(
+        "{}/{}",
+        endpoint.base_url,
+        if is_chat_asr {
+            "chat/completions"
+        } else {
+            "audio/transcriptions"
+        }
+    );
 
     tracing::info!(
         url = %url,
-        model = %provider.model_id,
+        model = %endpoint.model_id,
         protocol = if is_chat_asr { "chat-completion" } else { "whisper" },
         "云端 STT 测试"
     );
@@ -4189,24 +4267,8 @@ pub async fn test_cloud_stt() -> Result<serde_json::Value, String> {
 
     tracing::info!(size = wav_bytes.len(), "云端 STT 测试: 示例音频下载完成");
 
-    // 发送到云端 API（按供应商协议路由）
-    let result = if is_chat_asr {
-        crate::domain::stt::wav::transcribe_via_chat_async(
-            &url,
-            api_key.expose(),
-            &provider.model_id,
-            &wav_bytes,
-        )
-        .await
-    } else {
-        crate::domain::stt::wav::transcribe_async(
-            &url,
-            Some(api_key.expose()),
-            &provider.model_id,
-            &wav_bytes,
-        )
-        .await
-    };
+    // 发送到云端 API（复用 send_stt_request，与 finalize 同路径）
+    let result = crate::domain::stt::cloud::send_stt_request(&endpoint, &wav_bytes).await;
 
     match result {
         Ok(text) => {
@@ -4231,7 +4293,7 @@ pub async fn test_cloud_stt() -> Result<serde_json::Value, String> {
             } else if err_str.contains("401") || err_str.contains("403") {
                 "认证失败（401/403）。请检查 API Key 是否正确，以及是否有相应权限。".to_string()
             } else if err_str.contains("400") {
-                format!("请求参数错误（400）。请检查模型 ID「{}」是否正确。原始错误: {err_str}", provider.model_id)
+                format!("请求参数错误（400）。请检查模型 ID「{}」是否正确。原始错误: {err_str}", endpoint.model_id)
             } else {
                 err_str
             };

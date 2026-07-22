@@ -397,9 +397,20 @@ fn main() {
 
             // 0.10: VoiceService(hold-to-talk 管线编排)
             // 初始化 STT 配置缓存（供 STT 引擎同步读取）
-            let stt_config = tauri::async_runtime::block_on(
+            let mut stt_config = tauri::async_runtime::block_on(
                 app::config::ConfigStore::get::<app::stt_config::SttConfig>(&pools.config),
             );
+            // P2.8: 启动期一次性迁移 STT 云端配置（cloud_provider -> cloud 字段，
+            // 避免每次 STT 调用走 effective_cloud 惰性匹配）
+            if stt_config.apply_migration(&ai_config) {
+                let _ = tauri::async_runtime::block_on(
+                    app::config::ConfigStore::set::<app::stt_config::SttConfig>(
+                        &pools.config,
+                        &stt_config,
+                    ),
+                );
+                tracing::info!("STT 云端配置迁移已持久化到配置库");
+            }
             app::stt_config::init_cache(stt_config);
 
             let voice_service = std::sync::Arc::new(app::voice::VoiceService::new(app.handle().clone()));
@@ -456,6 +467,10 @@ fn main() {
             app.manage(ai_registry);
             // 0.10: VoiceService(command 层 cancel_voice_recording / is_voice_recording 消费)
             app.manage(voice_service);
+            // 0.12.0 §2.4: 对话窗口危险确认闭环（tool_adapter call 挂起 + confirm_chat_action 唤醒）
+            app.manage(std::sync::Arc::new(
+                domain::ai::tool_adapter::PendingConfirms::new(),
+            ));
 
             // 后台预热次级窗口（3s 延迟，不阻塞启动；WebView2 冷启动 300~400ms → 预热后 show <50ms）
             infra::platform::window::preheat_secondary_windows(app.handle().clone());
@@ -491,6 +506,7 @@ fn main() {
             app::commands::launch_app,
             app::commands::run_builtin_action,
             app::commands::confirm_ai_action,
+            app::commands::confirm_chat_action,
             app::commands::list_builtin_actions,
             app::commands::list_context_bindings,
             app::commands::trigger_chord,
@@ -513,6 +529,8 @@ fn main() {
             app::commands::get_storage_info,
             app::commands::clear_history,
             app::commands::clear_ai_audit,
+            app::commands::open_data_folder,
+            app::commands::clear_cache_db,
             app::commands::get_app_info,
             app::commands::check_update,
             app::commands::resize_window,

@@ -13,7 +13,7 @@
 Blink 是一个 Windows 全局快捷入口，定位不只是「启动器」。**目标：做一个极其丝滑的启动器，并且把常用的功能都丝滑融合，使用 Chord 模式来调用各种增强能力，不止是启动器。**
 终极目标：感知用户上下文、主动推荐动作，让任何操作都比原来的路径更快。
 
-当前 **0.11.0~0.11.9 完成**（插件通信契约重设计 + AI 调用插件链路完善 + 截图标注增强 + 能力化重构 + 图标包 + OCR word 级链路 + 阅读模式 + 翻译衔接 + 水印独立图层）。0.10.7 Chord 交互统一化 + 0.10.8 呈现共存策略收敛与图标包接入均已实现。测试基线 **747 通过**。详见 [phases/0.11-plugin-ai-toolchain.md](docs/production-design/phases/0.11-plugin-ai-toolchain.md)。
+当前 **0.11.10 完成**（图上翻译 + 截图交互重构，测试基线 **783 通过**），**0.12.0 进行中**（基础设施抽取与清账：投影统一 / DB 四层拆分 / Provider 模型统一 / ollama 接入 / Tool 适配层 / CapabilityRegistry 动态注册 / 存储页优化）。0.10.7 Chord 交互统一化 + 0.10.8 呈现共存策略收敛与图标包接入均已实现。详见 [phases/0.12-ai-ecosystem.md](docs/production-design/phases/0.12-ai-ecosystem.md)。
 
 - ✅ **0.10 语音输入**：STT + 语音打字（G1 主窗口语音输入 / G2 语音输入法上屏）。工具箱层定 FunASR（SenseVoice 准确率 7.81%，CPU 17× 实时）。详见 [phases/0.10-voice-agent.md](docs/production-design/phases/0.10-voice-agent.md)
   - 0.10.4：伪流式 VAD 切句 + 累积预览 + 移除真流式 + 架构清理

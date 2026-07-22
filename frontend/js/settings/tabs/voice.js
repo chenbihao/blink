@@ -7,7 +7,7 @@
  * - 服务：funasr-server（OpenAI 兼容 API, localhost:8000）
  * - 模型：FunASR 自动管理（首次启动时从 ModelScope 自动下载）
  */
-import { invoke, listen } from "../../tauri.js";
+import { invoke, listen, confirmDialog } from "../../tauri.js";
 import { t, onLangChange, getLang } from "../../i18n/index.js";
 
 /**
@@ -1104,7 +1104,7 @@ async function initSpaceManagement() {
         }
 
         if (serverRunning) {
-          const confirmed = confirm(t("voice.local.space.cleanup_confirm_body"));
+          const confirmed = await confirmDialog(t("voice.local.space.cleanup_confirm_body"));
           if (!confirmed) return;
           appendLog(t("voice.local.space.cleanup_log_stopping"));
           try {

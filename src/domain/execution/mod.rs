@@ -265,6 +265,21 @@ pub trait Action: Send + Sync {
         DangerClass::Safe
     }
 
+    /// 是否暴露给 AI agent 作为 tool（0.12.0 §2.4 tool 池粒度控制）。
+    ///
+    /// **default = true**--绝大多数 Action 都该让 AI 可调（`open_url` / `open_path`
+    /// 是 agent 核心能力--帮用户打开东西）。少数"自毁类"动作覆写为 false--
+    /// AI 调它们无意义且危险（如 `exit_blink`：AI 让 Blink 退出 = 自杀，即使有
+    /// 确认卡片也不该由 AI 提议）。
+    ///
+    /// **与 `danger_class` 的区别**：`danger_class` 控制"是否需确认"，
+    /// `ai_eligible` 控制"是否暴露给 AI"。Dangerous + ai_eligible=true = 暴露但需确认；
+    /// ai_eligible=false = 根本不进 tool 池。
+    #[allow(dead_code)] // 0.12.0 由 build_agent_tools 消费
+    fn ai_eligible(&self) -> bool {
+        true
+    }
+
     /// 执行动作，返回副作用意图。
     async fn execute(&self, cx: &ActionContext<'_>) -> Result<ActionOutcome, ExecError>;
 }

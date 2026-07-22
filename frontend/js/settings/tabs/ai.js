@@ -1090,8 +1090,8 @@ function renderAITierBanner() {
   }
   banner.style.display = "block";
   banner.textContent = mainMissing
-    ? t("ai.tier.no_provider").replace(/^→\s*/, "⚠️ ")
-    : "⚠️ " + t("ai.tier.degrade_to", { tier: t("ai.tier.main") });
+    ? t("ai.tier.no_provider").replace(/^→\s*/, "")
+    : t("ai.tier.degrade_to", { tier: t("ai.tier.main") });
 }
 
 /**
@@ -1265,11 +1265,11 @@ function bindAIEvents() {
       const msg = await invoke("test_ai_provider", {
         kind, baseUrl, apiKey: apiKey || "", providerId: providerId || null,
       });
-      resultEl.textContent = `✅ ${msg}`;
+      resultEl.textContent = msg;
       resultEl.className = "ai-test-result success";
       resultEl.style.display = "";
     } catch (e) {
-      resultEl.textContent = `❌ ${e}`;
+      resultEl.textContent = String(e);
       resultEl.className = "ai-test-result error";
       resultEl.style.display = "";
     } finally {

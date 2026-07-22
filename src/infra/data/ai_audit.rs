@@ -20,6 +20,7 @@ use sqlx::SqlitePool;
 
 /// 一条 AI 工具调用审计记录。
 #[derive(Debug, Clone, serde::Serialize)]
+#[allow(dead_code)] // 0.12.x 设置页"AI 调用历史"面板消费
 pub struct AuditLog {
     /// 自增主键。
     pub id: i64,
@@ -128,6 +129,7 @@ pub async fn save_audit_log(
 /// 查询最近的审计日志（按时间倒序）。
 ///
 /// 供设置页"AI 调用历史"展示。`limit` 建议 50-200，避免一次性拉太多。
+#[allow(dead_code)] // 0.12.x 设置页"AI 调用历史"面板消费
 pub async fn query_recent(pool: &SqlitePool, limit: i64) -> Vec<AuditLog> {
     sqlx::query_as::<_, (i64, String, String, String, String, String, i64, i64)>(
         "SELECT id, tool_name, arguments, result_summary, provider_kind, model_id, turn, created_at \

@@ -259,6 +259,10 @@ impl Action for ExitBlinkAction {
     fn danger_class(&self) -> DangerClass {
         DangerClass::Dangerous
     }
+    /// AI 不该让 Blink 自杀--不暴露给对话窗口 tool 池（0.12.0 §2.4）。
+    fn ai_eligible(&self) -> bool {
+        false
+    }
     async fn execute(&self, cx: &ActionContext<'_>) -> Result<ActionOutcome, ExecError> {
         cx.app_handle.exit(0);
         Ok(ActionOutcome::Nop)

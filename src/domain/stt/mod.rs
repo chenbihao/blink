@@ -152,7 +152,7 @@ pub fn find_model(id: &str) -> Option<&'static ModelDescriptor> {
 
 // ── STT Engines ──────────────────────────────────────────────────────────
 
-mod cloud;
+pub(crate) mod cloud;
 pub mod funasr;
 pub mod local;
 #[cfg(test)]

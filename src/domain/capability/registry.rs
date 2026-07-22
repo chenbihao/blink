@@ -70,6 +70,7 @@ impl CapabilityRegistry {
     /// 与 inventory 共存：`new()` 先收集链接期能力，`register()` 在运行期追加。
     ///
     /// **参照**：`ActionRegistry::register`（`execution/registry.rs`）/ `ChordRegistry::register`。
+    #[allow(dead_code)] // 0.13 Skill 化（运行期生成 Capability）消费；0.12.0 铺路
     pub fn register(&self, cap: Arc<dyn Capability>) {
         let id = cap.id().to_string();
         let mut caps = self.caps.write().unwrap();

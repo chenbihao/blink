@@ -1146,6 +1146,11 @@
             <span id="data-dir" class="value">-</span>
           </div>
 
+          <!-- P2.7: 迁移失败警告（旧库迁移失败时显示）-->
+          <div id="migration-warning" class="setting-row migration-warning" hidden>
+            <span data-i18n="storage.migration_failed">旧数据库迁移失败，部分数据可能未迁移，请重试或检查日志。</span>
+          </div>
+
           <!-- 四库统计卡片 -->
           <div id="db-stats-grid" class="db-stats-grid">
             <!-- 配置库 -->
@@ -1200,6 +1205,7 @@
               <div class="db-card-body">
                 <div class="db-card-stats">
                   <span id="db-perf-count" class="db-stat">-</span>
+                  <span id="db-icon-cache-count" class="db-stat">-</span>
                 </div>
                 <div class="db-card-size" id="db-cache-size">-</div>
                 <div class="db-card-path" id="db-cache-path">-</div>
@@ -1216,6 +1222,14 @@
           <div class="setting-row">
             <label class="setting-label" data-i18n="storage.audit.label">AI 调用记录</label>
             <button id="clear-ai-audit" class="btn-danger" data-i18n="storage.clear_audit">清空 AI 调用记录</button>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label" data-i18n="storage.cache.label">缓存库</label>
+            <button id="clear-cache-db" class="btn-danger" data-i18n="storage.clear_cache">清空缓存</button>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label" data-i18n="storage.open_folder.label">数据目录</label>
+            <button id="open-data-folder" class="btn-secondary" data-i18n="storage.open_folder">打开文件夹</button>
           </div>
         </div>
 

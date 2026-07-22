@@ -229,6 +229,24 @@ mod tests {
         }
     }
 
+    /// 0.12.0 §2.4: ai_eligible 粒度控制--exit_blink 不暴露给 AI，其余默认 true。
+    #[test]
+    fn ai_eligible_excludes_self_destruct_actions() {
+        let reg = ActionRegistry::new();
+        // exit_blink 覆写为 false（AI 不该让 Blink 自杀）
+        assert!(
+            !reg.get("exit_blink").unwrap().ai_eligible(),
+            "exit_blink 不该暴露给 AI"
+        );
+        // 其余动作默认 true（含 Dangerous 的 shutdown/lock 等--有确认卡片挡）
+        for id in ["open_settings", "open_url", "shutdown", "lock", "clear_history"] {
+            assert!(
+                reg.get(id).unwrap().ai_eligible(),
+                "{id} 默认应暴露给 AI"
+            );
+        }
+    }
+
     /// 0.9.3:register(&self) 支持启动后动态注册。
     #[test]
     fn register_with_ref_self_works() {

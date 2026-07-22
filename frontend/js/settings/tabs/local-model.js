@@ -6,7 +6,7 @@
  * 2. 一键添加到 AI 供应商：将 ollama 模型加入 AIConfig providers
  * 3. LM Studio 帮助文案：五步图文引导
  */
-import { invoke } from "../../tauri.js";
+import { invoke, messageDialog } from "../../tauri.js";
 import { t, onLangChange } from "../../i18n/index.js";
 import { saveConfig } from "../../config-keys.js";
 
@@ -162,7 +162,7 @@ export async function initLocalModelTab() {
       }
     } catch (e) {
       console.error("save ai_config failed:", e);
-      alert(t("local_model.ollama.add_failed", { err: String(e) }));
+      messageDialog(t("local_model.ollama.add_failed", { err: String(e) }));
     }
   }
 

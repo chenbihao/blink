@@ -1,6 +1,6 @@
 /**
  * 存储设置 Tab 模块
- * 包含：四库统计（config / history / ai / cache）+ 清理操作
+ * 包含：四库统计（config / history / ai / cache）+ 清理操作 + 打开文件夹
  */
 
 import { invoke } from "../../tauri.js";
@@ -32,6 +32,28 @@ export function initStorageTab() {
     await invoke("clear_ai_audit");
     loadStorageInfo();
   });
+
+  document.getElementById("clear-cache-db")?.addEventListener("click", async () => {
+    const ok = await confirmDialog(t("storage.clear_cache.confirm"), {
+      title: t("common.confirm"),
+      kind: "warning",
+    });
+    if (!ok) return;
+    try {
+      await invoke("clear_cache_db");
+      loadStorageInfo();
+    } catch (e) {
+      console.error("clear_cache_db failed:", e);
+    }
+  });
+
+  document.getElementById("open-data-folder")?.addEventListener("click", async () => {
+    try {
+      await invoke("open_data_folder");
+    } catch (e) {
+      console.error("open_data_folder failed:", e);
+    }
+  });
 }
 
 /**
@@ -59,6 +81,17 @@ function formatSize(bytes) {
 
 function renderStorageInfo() {
   if (!_cachedInfo) return;
+
+  // P2.7: 迁移失败警告（旧 blink.db 迁移失败时显示）
+  const warnEl = document.getElementById("migration-warning");
+  if (warnEl) {
+    if (_cachedInfo.migration_failed) {
+      warnEl.hidden = false;
+      warnEl.title = _cachedInfo.migration_failed;
+    } else {
+      warnEl.hidden = true;
+    }
+  }
 
   // 数据目录
   const dirEl = document.getElementById("data-dir");
@@ -96,6 +129,10 @@ function renderStorageInfo() {
   setText(
     "db-perf-count",
     dbs.cache ? t("storage.stat.perf", { count: dbs.cache.perf_count ?? 0 }) : "-"
+  );
+  setText(
+    "db-icon-cache-count",
+    dbs.cache ? t("storage.stat.icon_cache", { count: dbs.cache.icon_cache_count ?? 0 }) : "-"
   );
 }
 

@@ -16,12 +16,15 @@
 //!
 //! ## 0.12 §2.7 Provider 统一
 //!
-//! 密钥、base_url、kind 全部从 AIConfig::ProviderEntry 继承——
+//! 密钥、base_url、kind 全部从 AIConfig::ProviderEntry 继承--
 //! 一个 OpenAI key 同时用于 chat(GPT-4)和 STT(whisper)，用户只配一次。
 //! SttConfig.cloud 引用 AIConfig 中的 provider_id + model_id。
 //!
 //! 旧配置（cloud_provider 有值但 cloud 为 None）走 `effective_cloud()` 自动迁移；
 //! 迁移失败时回退到旧路径（直接读 cloud_provider），保证向后兼容。
+//!
+//! `resolve_stt_endpoint` + `send_stt_request` 是 `finalize` 与 `test_cloud_stt`
+//! 的共用路径，保证测试按钮与实际识别走同一配置解析与发送逻辑。
 
 use std::sync::Mutex;
 
@@ -71,18 +74,17 @@ impl SttEngine for CloudSttEngine {
 
         let config = crate::app::stt_config::get_stt_config();
         let ai_config = ai_config::get_ai_config();
+        let endpoint = resolve_stt_endpoint(&config, &ai_config)?;
 
-        // 0.12 §2.7: 优先从 AIConfig 读密钥/base_url
-        if let Some((cloud, _migration_needed)) = config.effective_cloud(&ai_config) {
-            return self.finalize_via_aiconfig(&cloud, &ai_config, &samples).await;
-        }
-
-        // 回退到旧路径（cloud_provider 直接读，向后兼容）
-        if let Some(old_provider) = &config.cloud_provider {
-            return self.finalize_via_legacy(old_provider, &samples).await;
-        }
-
-        Err(SttError::NotInitialized)
+        let wav_bytes = super::wav::pcm_to_wav(&samples, self.sample_rate, 1);
+        tracing::info!(
+            model = %endpoint.model_id,
+            samples = samples.len(),
+            duration_ms = (samples.len() as f64 / self.sample_rate as f64 * 1000.0) as u64,
+            uses_chat_asr = endpoint.uses_chat_completion_asr,
+            "云端 STT 请求"
+        );
+        send_stt_request(&endpoint, &wav_bytes).await
     }
 
     fn reset(&self) {
@@ -94,130 +96,117 @@ impl SttEngine for CloudSttEngine {
     }
 }
 
-impl CloudSttEngine {
-    /// 新路径：从 AIConfig 查 provider，复用其 secret_ref / base_url / kind。
-    async fn finalize_via_aiconfig(
-        &self,
-        cloud: &crate::app::stt_config::SttCloudConfig,
-        ai_config: &ai_config::AIConfig,
-        samples: &[f32],
-    ) -> Result<String, SttError> {
+/// 解析后的云端 STT endpoint--`finalize` 与 `test_cloud_stt` 共用，
+/// 保证测试按钮与实际识别走同一配置解析路径（0.12 §2.7）。
+pub(crate) struct ResolvedSttEndpoint {
+    /// 去尾斜杠的 base_url（如 `https://api.openai.com/v1`）
+    pub base_url: String,
+    /// API Key（本地 provider 无需密钥时为 None）
+    pub api_key: Option<String>,
+    /// 模型 id
+    pub model_id: String,
+    /// 是否走 chat-completion ASR 协议（mimo 等）
+    pub uses_chat_completion_asr: bool,
+}
+
+/// 解析云端 STT endpoint：优先新路径（`effective_cloud` + AIConfig 供应商，含老配置自动迁移），
+/// 回退旧路径（`cloud_provider` 直接读）。`finalize` 与 `test_cloud_stt` 共用。
+pub(crate) fn resolve_stt_endpoint(
+    config: &crate::app::stt_config::SttConfig,
+    ai_config: &ai_config::AIConfig,
+) -> Result<ResolvedSttEndpoint, SttError> {
+    // 新路径：effective_cloud（cloud 有值直用；cloud_provider 老配置自动迁移）
+    if let Some((cloud, _)) = config.effective_cloud(ai_config) {
         let provider = ai_config
             .providers
             .iter()
             .find(|p| p.id == cloud.provider_id)
             .ok_or_else(|| {
-                SttError::Engine(format!(
-                    "STT 供应商 {} 未在 AI 配置中找到",
-                    cloud.provider_id
-                ))
+                SttError::Engine(format!("STT 供应商 {} 未在 AI 配置中找到", cloud.provider_id))
             })?;
 
-        // 加载 API Key（复用 AIConfig 的 CM secret_ref 体系）
-        let api_key = if provider.kind.requires_secret() {
-            secret::load_secret(&provider.id, "key")
-                .map_err(|e| SttError::Engine(format!("API key 未配置: {e}")))?
-        } else {
-            // 本地 provider 不需要密钥
-            secret::SecretString::new(String::new())
-        };
+        // ollama 是 LLM 推理服务，不支持 STT--早返友好错误（防用户误选）
+        if matches!(provider.kind, ProviderKind::OllamaHttp) {
+            return Err(SttError::Engine(
+                "ollama 不支持语音识别（STT），请在 AI 供应商页选择支持 ASR 的模型".into(),
+            ));
+        }
 
-        // 构建 base_url
+        let api_key = if provider.kind.requires_secret() {
+            Some(
+                secret::load_secret(&provider.id, "key")
+                    .map_err(|e| SttError::Engine(format!("API key 未配置: {e}")))?
+                    .expose()
+                    .to_owned(),
+            )
+        } else {
+            None
+        };
         let base_url = provider
             .base_url
             .as_deref()
             .unwrap_or_else(|| default_base_url_for_kind(provider.kind))
-            .trim_end_matches('/');
-
-        // PCM → WAV
-        let wav_bytes = super::wav::pcm_to_wav(samples, self.sample_rate, 1);
-
-        tracing::info!(
-            provider_id = %provider.id,
-            provider_kind = ?provider.kind,
-            model = %cloud.model_id,
-            samples = samples.len(),
-            duration_ms = (samples.len() as f64 / self.sample_rate as f64 * 1000.0) as u64,
-            "云端 STT 请求"
-        );
-
-        // 协议路由：检测 mimo 等使用 chat-completion ASR 的供应商
-        let uses_chat = is_chat_completion_asr(&provider.base_url);
-
-        if uses_chat {
-            let url = format!("{base_url}/chat/completions");
-            tracing::debug!(%url, "chat-completion ASR 路径");
-            super::wav::transcribe_via_chat_async(
-                &url,
-                &api_key.expose(),
-                &cloud.model_id,
-                &wav_bytes,
-            )
-            .await
-        } else {
-            let url = format!("{base_url}/audio/transcriptions");
-            tracing::debug!(%url, "标准 Whisper 路径");
-            super::wav::transcribe_async(
-                &url,
-                Some(&api_key.expose()),
-                &cloud.model_id,
-                &wav_bytes,
-            )
-            .await
-        }
+            .trim_end_matches('/')
+            .to_string();
+        return Ok(ResolvedSttEndpoint {
+            base_url,
+            api_key,
+            model_id: cloud.model_id.clone(),
+            uses_chat_completion_asr: is_chat_completion_asr(&provider.base_url),
+        });
     }
 
-    /// 旧路径：直接从 SttCloudProvider 读 kind/base_url/model_id（向后兼容）。
-    async fn finalize_via_legacy(
-        &self,
-        provider: &crate::app::stt_config::SttCloudProvider,
-        samples: &[f32],
-    ) -> Result<String, SttError> {
-        // 加载 API Key（旧约定: stt:{kind}）
-        let secret_id = format!("stt:{}", provider.kind);
-        let api_key = secret::load_secret(&secret_id, "key")
-            .map_err(|e| SttError::Engine(format!("API key 未配置: {e}")))?;
-
-        // 构建 base_url
-        let base_url = provider
+    // 旧路径回退（cloud_provider 直接读，向后兼容）
+    if let Some(old) = &config.cloud_provider {
+        let secret_id = format!("stt:{}", old.kind);
+        let api_key = Some(
+            secret::load_secret(&secret_id, "key")
+                .map_err(|e| SttError::Engine(format!("API key 未配置: {e}")))?
+                .expose()
+                .to_owned(),
+        );
+        let base_url = old
             .base_url
             .as_deref()
-            .unwrap_or_else(|| default_base_url(&provider.kind))
-            .trim_end_matches('/');
+            .unwrap_or_else(|| default_base_url(&old.kind))
+            .trim_end_matches('/')
+            .to_string();
+        return Ok(ResolvedSttEndpoint {
+            base_url,
+            api_key,
+            model_id: old.model_id.clone(),
+            uses_chat_completion_asr: super::wav::uses_chat_completion_asr(&old.kind),
+        });
+    }
 
-        // PCM → WAV
-        let wav_bytes = super::wav::pcm_to_wav(samples, self.sample_rate, 1);
+    Err(SttError::NotInitialized)
+}
 
-        tracing::info!(
-            provider = %provider.kind,
-            model = %provider.model_id,
-            samples = samples.len(),
-            duration_ms = (samples.len() as f64 / self.sample_rate as f64 * 1000.0) as u64,
-            "云端 STT 请求（旧路径）"
-        );
-
-        // 按供应商协议路由
-        if super::wav::uses_chat_completion_asr(&provider.kind) {
-            let url = format!("{base_url}/chat/completions");
-            tracing::debug!(%url, "chat-completion ASR 路径");
-            super::wav::transcribe_via_chat_async(
-                &url,
-                &api_key.expose(),
-                &provider.model_id,
-                &wav_bytes,
-            )
-            .await
-        } else {
-            let url = format!("{base_url}/audio/transcriptions");
-            tracing::debug!(%url, "标准 Whisper 路径");
-            super::wav::transcribe_async(
-                &url,
-                Some(&api_key.expose()),
-                &provider.model_id,
-                &wav_bytes,
-            )
-            .await
-        }
+/// 发送 WAV 到云端 STT endpoint（`finalize` 与 `test_cloud_stt` 共用）。
+pub(crate) async fn send_stt_request(
+    endpoint: &ResolvedSttEndpoint,
+    wav_bytes: &[u8],
+) -> Result<String, SttError> {
+    if endpoint.uses_chat_completion_asr {
+        let url = format!("{}/chat/completions", endpoint.base_url);
+        tracing::debug!(%url, "chat-completion ASR 路径");
+        super::wav::transcribe_via_chat_async(
+            &url,
+            endpoint.api_key.as_deref().unwrap_or(""),
+            &endpoint.model_id,
+            wav_bytes,
+        )
+        .await
+    } else {
+        let url = format!("{}/audio/transcriptions", endpoint.base_url);
+        tracing::debug!(%url, "标准 Whisper 路径");
+        super::wav::transcribe_async(
+            &url,
+            endpoint.api_key.as_deref(),
+            &endpoint.model_id,
+            wav_bytes,
+        )
+        .await
     }
 }
 
@@ -246,7 +235,7 @@ fn default_base_url_for_kind(kind: ProviderKind) -> &'static str {
 /// 检测供应商是否使用 chat-completion ASR 协议（0.12 §2.7 新路径用）。
 ///
 /// 旧路径通过 kind 字符串判断（"mimo" / "mimo_plan"）。
-/// 新路径统一为 ProviderKind::OpenAICompatible，无法通过 kind 区分——
+/// 新路径统一为 ProviderKind::OpenAICompatible，无法通过 kind 区分--
 /// 改为检查 base_url 是否包含 mimo 域名。
 fn is_chat_completion_asr(base_url: &Option<String>) -> bool {
     match base_url {
@@ -279,17 +268,19 @@ mod tests {
 
     #[test]
     fn is_chat_completion_asr_detects_mimo_by_base_url() {
-        // mimo 域名 → true
+        // mimo 域名 -> true
         assert!(is_chat_completion_asr(&Some("https://api.xiaomimimo.com/v1".into())));
         assert!(is_chat_completion_asr(&Some(
             "https://token-plan-cn.xiaomimimo.com/v1".into()
         )));
 
-        // 非 mimo → false
+        // 非 mimo -> false
         assert!(!is_chat_completion_asr(&Some("https://api.openai.com/v1".into())));
-        assert!(!is_chat_completion_asr(&Some("https://api.groq.com/openai/v1".into())));
+        assert!(!is_chat_completion_asr(&Some(
+            "https://api.groq.com/openai/v1".into()
+        )));
 
-        // None → false（默认走标准 Whisper）
+        // None -> false（默认走标准 Whisper）
         assert!(!is_chat_completion_asr(&None));
     }
 
@@ -319,5 +310,45 @@ mod tests {
         );
         // 未知 kind 兜底 OpenAI
         assert_eq!(default_base_url("unknown"), "https://api.openai.com/v1");
+    }
+
+    /// ollama 不支持 STT，`resolve_stt_endpoint` 应早返友好错误（不依赖系统资源）。
+    #[test]
+    fn resolve_stt_endpoint_rejects_ollama() {
+        use crate::app::ai_config::{AIConfig, ModelCapability, ProviderEntry};
+        use crate::app::stt_config::{SttCloudConfig, SttConfig};
+
+        let cfg = SttConfig {
+            cloud: Some(SttCloudConfig {
+                provider_id: "p".into(),
+                model_id: "m".into(),
+            }),
+            ..Default::default()
+        };
+        let ai = AIConfig {
+            providers: vec![ProviderEntry {
+                id: "p".into(),
+                display_name: "ollama".into(),
+                kind: ProviderKind::OllamaHttp,
+                base_url: None,
+                secret_ref: "x".into(),
+                models: vec![crate::app::ai_config::ModelEntry {
+                    id: "m".into(),
+                    display_name: "M".into(),
+                    enabled: true,
+                    context_window: None,
+                    input_price_per_million: None,
+                    output_price_per_million: None,
+                    temperature: None,
+                    max_tokens: None,
+                    custom_parameters: Vec::new(),
+                    capabilities: vec![ModelCapability::Chat],
+                }],
+                created_at: 0,
+            }],
+            ..Default::default()
+        };
+        let r = resolve_stt_endpoint(&cfg, &ai);
+        assert!(r.is_err(), "ollama 不应作为 STT 源");
     }
 }
