@@ -5,12 +5,15 @@
 
 import { queryEl, resultsEl } from "./dom.js";
 import { activateItem } from "./actions.js";
-import { openContainingFolder, openLnkTarget, resetItemHistory, runBuiltinAction, copyToClipboard, invoke } from "./api.js";
+import { openContainingFolder, openLnkTarget, resetItemHistory, runBuiltinAction, copyToClipboard, invoke, triggerChord, listChordActions } from "./api.js";
 import { retrigger } from "./search.js";
 import { t } from "./i18n/index.js";
 
 /** 当前菜单数据（用于 Popup 点击时回调执行）。 */
 let currentItems = [];
+
+/** Chord 动作缓存（shown 时预拉取，右键时同步读）。只含 semantic=tap 的动作。 */
+let cachedChordActions = [];
 
 /** 绑定全局右键事件（main.js 装配时调用一次）。 */
 export function init() {
@@ -72,7 +75,25 @@ export function init() {
         item.run();
       }
     });
+
+    // 主窗 shown 时预拉取 chord 动作，右键时同步读缓存（无延迟）
+    listen("blink://shown", refreshChordActions);
   });
+}
+
+/** 拉取 chord 动作并缓存（只保留 tap 语义——截图/剪贴板等，排除 hold 语义的语音输入）。 */
+async function refreshChordActions() {
+  try {
+    const cfg = await invoke("get_config");
+    if (!cfg || cfg.chord_enabled !== true) {
+      cachedChordActions = [];
+      return;
+    }
+    const all = await listChordActions();
+    cachedChordActions = all.filter((a) => a.semantic === "tap");
+  } catch {
+    cachedChordActions = [];
+  }
 }
 
 function closestLi(target) {
@@ -145,6 +166,19 @@ function unifiedMenu() {
   items.push({ label: t("menu.paste"), run: paste });
   items.push({ separator: true });
   items.push({ label: t("menu.selectAll"), run: exec("selectAll") });
+
+  // Chord 快捷入口（tap 语义——截图/剪贴板等，排除 hold 语义的语音输入）
+  if (cachedChordActions.length) {
+    items.push({ separator: true });
+    for (const a of cachedChordActions) {
+      const keyLabel = a.key === " " ? "Space" : a.key.toUpperCase();
+      items.push({
+        label: `${a.label}  Alt+${keyLabel}`,
+        run: () => triggerChord(a.key),
+      });
+    }
+  }
+
   items.push({ separator: true });
   items.push({ label: t("menu.openSettings"), run: () => runBuiltinAction("open_settings") });
   items.push({ label: t("menu.exit"), run: () => runBuiltinAction("exit_blink"), danger: true });

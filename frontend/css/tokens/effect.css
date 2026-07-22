@@ -32,15 +32,16 @@
   --ease-bounce: var(--ease-bounce-2);  /* 回弹反馈 */
   --ease-smooth: var(--ease-3);         /* 平滑过渡 */
 
-  /* ── 复合阴影 token ──────────────────────────────────────────────────────── */
-  --shadow-card: 0 1px 2px rgba(0,0,0,.3), 0 24px 48px rgba(0,0,0,.5), 0 0 0 1px var(--border-glow);
+  /* ── 复合阴影 token（引用 color.css 语义阴影变量，随主题切换）────────────── */
+  --shadow-card: 0 1px 2px var(--shadow), 0 24px 48px var(--shadow-strong), 0 0 0 1px var(--border-glow);
   --shadow-modal: 0 12px 40px var(--shadow);
   --ring-focus: 0 0 0 3px var(--accent-bg);
 
   /* ── 毛玻璃效果 ──────────────────────────────────────────────────────────── */
   --blur-glass: blur(24px) saturate(180%);
   --glass-opacity: 0.85;
-  --bg-glass: rgba(30, 30, 46, var(--glass-opacity));
+  /* --bg-glass 引用 --bg（color.css 语义变量），随主题自动切换底色 */
+  --bg-glass: color-mix(in srgb, var(--bg) calc(var(--glass-opacity) * 100%), transparent);
 
   /* ── Chord 品牌色（跨主题固定） ──────────────────────────────────────────── */
   --brand-blue: #4a9eff;

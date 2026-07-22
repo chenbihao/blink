@@ -8,7 +8,8 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
 use tokio::time::sleep;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
-    DWMWA_WINDOW_CORNER_PREFERENCE, DwmExtendFrameIntoClientArea, DwmFlush, DwmSetWindowAttribute,
+    DWMWA_CLOAK, DWMWA_WINDOW_CORNER_PREFERENCE, DwmExtendFrameIntoClientArea, DwmFlush,
+    DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
@@ -128,6 +129,9 @@ pub fn invoke(app: &AppHandle) {
     INVOKE_AT.store(now, Ordering::SeqCst);
     STATE.store(ST_VISIBLE, Ordering::SeqCst);
     tracing::trace!(grace_ms, "invoke: state → VISIBLE, show + set_focus");
+    // 通知 hotkey：即将调 SetForegroundWindow（Tauri show+set_focus 内部可能触发），
+    // 若 Alt 正按住则设 one-shot flag 跳过合成 Alt keyup，保 ALT_LOGICALLY_HELD 不被毒化。
+    crate::infra::platform::hotkey::expect_synthesized_alt_keyup();
     let _ = win.show();
     let _ = win.set_focus();
     let _ = app.emit("blink://shown", ());
@@ -545,6 +549,8 @@ pub fn restore_foreground(hwnd: isize) {
         let _ = PostMessageW(Some(target_hwnd), WM_CANCELMODE, WPARAM(0), LPARAM(0));
 
         // 2. AttachThreadInput + SetForegroundWindow（恢复前台窗口，不使用 Alt 欺骗）
+        // 通知 hotkey：若 Alt 正按住则设 flag 跳过合成 Alt keyup（RDP 场景必需）
+        crate::infra::platform::hotkey::expect_synthesized_alt_keyup();
         let current_tid = GetCurrentThreadId();
         let mut target_pid: u32 = 0;
         let target_tid = GetWindowThreadProcessId(target_hwnd, Some(&mut target_pid));
@@ -853,6 +859,25 @@ pub fn show_pin_window(
     }
 }
 
+/// Apply or remove DWM Cloak on a window.
+///
+/// Cloak = true: DWM 层瞬间"雾化"窗口（无 fade 动画），WS_VISIBLE 仍为 on。
+/// Cloak = false: 恢复正常可见性。
+///
+/// 调用方负责确保 cloak 状态对称——cloak 后必须在下次 show 前 uncloak，
+/// 否则窗口 show 出来仍不可见。
+pub fn apply_cloak(hwnd: HWND, on: bool) {
+    unsafe {
+        let cloak: i32 = if on { 1 } else { 0 };
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAK,
+            &cloak as *const _ as *const _,
+            std::mem::size_of::<i32>() as u32,
+        );
+    }
+}
+
 /// 截图专用：**瞬间**隐藏主窗（DWM Cloak + hide），零 fade 动画。
 ///
 /// **和 `hide()` 的区别**：
@@ -868,16 +893,7 @@ pub fn hide_for_screenshot(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         STATE.store(ST_HIDDEN, Ordering::SeqCst);
         if let Ok(hwnd) = win.hwnd() {
-            let hwnd = HWND(hwnd.0 as _);
-            unsafe {
-                let cloak: i32 = 1;
-                let _ = DwmSetWindowAttribute(
-                    hwnd,
-                    windows::Win32::Graphics::Dwm::DWMWA_CLOAK,
-                    &cloak as *const _ as *const _,
-                    std::mem::size_of::<i32>() as u32,
-                );
-            }
+            apply_cloak(HWND(hwnd.0 as _), true);
         }
         let _ = win.hide();
         let _ = app.emit("blink://hidden", ());
@@ -895,16 +911,7 @@ pub fn hide_for_screenshot(app: &AppHandle) {
 pub fn unhide_after_screenshot(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         if let Ok(hwnd) = win.hwnd() {
-            let hwnd = HWND(hwnd.0 as _);
-            unsafe {
-                let cloak: i32 = 0;
-                let _ = DwmSetWindowAttribute(
-                    hwnd,
-                    windows::Win32::Graphics::Dwm::DWMWA_CLOAK,
-                    &cloak as *const _ as *const _,
-                    std::mem::size_of::<i32>() as u32,
-                );
-            }
+            apply_cloak(HWND(hwnd.0 as _), false);
         }
     }
 }

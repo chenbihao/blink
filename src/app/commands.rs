@@ -2590,6 +2590,8 @@ pub async fn show_context_menu(
             .map(|h| windows::Win32::Foundation::HWND(h.0 as _));
         if let Some(hwnd) = hwnd_opt {
             crate::infra::platform::window::place_at_physical(hwnd, fx, fy, fw, fh);
+            // 撤销上次 hide_context_menu 设的 DWM Cloak，否则 show 后窗口仍不可见
+            crate::infra::platform::window::apply_cloak(hwnd, false);
         } else {
             // hwnd 拿不到时的兜底（理论上不会到这）
             let _ = win.set_size(tauri::PhysicalSize::new(fw, fh));
@@ -2666,6 +2668,13 @@ pub async fn show_context_menu(
 #[tauri::command]
 pub async fn hide_context_menu(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("context-menu") {
+        // DWM Cloak 先行：瞬间消失无 fade 动画，避免截图时拍到右键窗口残影
+        if let Ok(hwnd) = win.hwnd() {
+            crate::infra::platform::window::apply_cloak(
+                windows::Win32::Foundation::HWND(hwnd.0 as _),
+                true,
+            );
+        }
         let _ = win.hide();
         tracing::trace!("hide_context_menu: 已隐藏右键菜单窗口");
     }

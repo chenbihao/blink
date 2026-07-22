@@ -56,7 +56,7 @@ Under the hood is a **capability architecture**: every feature (search, screensh
 
 Blink silently senses your context in the background, but never intrudes — use it when you see it, forget it when you don't.
 
-- **Selection Sensing** — Select text in any app, summon Blink to auto-capture it, one-key translate or search
+- **Selection Sensing** — Select text in any app, summon Blink to auto-capture it, one-key translate or search (a few apps don't expose UIA text interfaces, so selection may not be detected; in those cases, manually `Ctrl+C` to copy and Blink will read the clipboard content)
 - **Clipboard Sensing** — Copied a URL? Auto-suggests "open link". Copied English text? Auto-suggests translation via plugins
 - **Ghost Text Autocomplete** — Type `fy`, see gray hint `fanyi `, press Tab to accept quickly, then start typing your content
 - **Per-item Control** — Each sensing type can be individually toggled in settings

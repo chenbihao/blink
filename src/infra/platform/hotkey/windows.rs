@@ -39,7 +39,9 @@ pub fn set_voice_recording(active: bool) {
     VOICE_RECORDING.store(active, Ordering::SeqCst);
 }
 
-/// Alt 键的**逻辑** hold 态：只由**真实**（非 injected）的 LMENU/RMENU keydown/keyup 驱动。
+/// Alt 键的**逻辑** hold 态：由所有 LMENU/RMENU keydown/keyup 驱动（含远程控制软件
+/// 注入的事件），仅用 [`EXPECT_SYNTH_KEYUP_AT`] one-shot flag 跳过我们自己
+/// `SetForegroundWindow` 合成的 keyup。
 ///
 /// 为什么不是直接读 `GetAsyncKeyState(VK_MENU)`：Windows 的 `SetForegroundWindow`（及某些
 /// 焦点转移场景）会**合成一个 Alt keyup 事件**用于释放系统菜单栏激活态，此事件会持续
@@ -47,16 +49,37 @@ pub fn set_voice_recording(active: bool) {
 /// 用户真的松开+再按才能恢复。前端 alt-poll 靠 `GetAsyncKeyState` 时，冷启动首唤按住
 /// Alt 呼窗后 chord 会短暂进入又立刻退出（0.11.10 定位）。
 ///
-/// 修法：LL hook 是唯一能看到 `LLKHF_INJECTED` flag 的层，flag=1 的合成事件直接不影响
-/// 逻辑态；只信真键盘的 down/up 计数，`is_alt_down()` 读这个而不是 `GetAsyncKeyState`。
+/// **设计演进**：
+/// - 0.11.10：用 `LLKHF_INJECTED` flag 过滤合成事件——只跟踪非注入的 Alt 事件。
+/// - 0.11.11：移除 `LLKHF_INJECTED` 过滤。该 flag 无法区分"远程控制软件（RustDesk/
+///   TeamViewer）通过 SendInput 注入的真实按键"与"`SetForegroundWindow` 合成的 Alt
+///   keyup"——`SM_REMOTESESSION` 只检测 Windows 原生 RDP，对第三方工具返回 false，
+///   导致远程控制下 Alt 事件被全量过滤。改为：接受所有 Alt 事件，仅用 one-shot
+///   flag 过滤我们自己 `SetForegroundWindow` 合成的 keyup（这是原过滤的真正目标）。
 ///
 /// **例外声明（与顶部"不做累积镜像"铁则的关系）**：
 /// - 铁则针对**组合键 arm/keyup 边界一次性判定**——那种场景瞬时读物理态最稳，累积镜像会被
 ///   合成事件搅乱且无法自愈。`modifiers_satisfied` / `current_modifier_mask` 仍走物理态。
 /// - 本字段针对**跨秒级 hold 状态**（chord 独占期 / 语音录音期 / 前端 alt-poll）——这种
-///   场景物理态被合成事件毒化的时长远长于铁则关心的边界瞬间，反而只有 injected 过滤+
-///   累积才能自愈。
+///   场景物理态被合成事件毒化的时长远长于铁则关心的边界瞬间，反而只有 one-shot flag
+///   过滤合成 keyup + 累积才能自愈。
 static ALT_LOGICALLY_HELD: AtomicBool = AtomicBool::new(false);
+
+/// 一次性 flag：我们自己调 `SetForegroundWindow` 前设此时间戳，LL hook 收到 Alt keyup
+/// 时若在 200ms 窗口内则判定为合成 keyup 并跳过（不更新 `ALT_LOGICALLY_HELD`）。
+///
+/// **设计**：
+/// - 仅在 `ALT_LOGICALLY_HELD == true` 时才设——`SetForegroundWindow` 只在 Alt
+///   按下（系统菜单栏激活态）时才合成 keyup，Alt 未按下时设 flag 是无意义的，
+///   反而会误跳下一个真实 keyup（如 `restore_foreground` 在语音结束后调用时
+///   Alt 已松开）。
+/// - 200ms 时间窗口是兜底：若 `SetForegroundWindow` 未合成 keyup（如窗口已是
+///   前台），flag 会在 200ms 后自然过期，不会误跳后续真实 keyup。
+/// - **本地 vs RDP**：本地场景下合成 keyup 带 `LLKHF_INJECTED`，被 `should_track`
+///   过滤先行拦截，flag 不会被消费——但 keyup 时无条件 `swap(false)` 清除，
+///   防止残留。RDP 场景下合成 keyup 也带 `LLKHF_INJECTED` 但 `should_track=true`，
+///   flag 被消费并跳过 keyup。
+static EXPECT_SYNTH_KEYUP_AT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 // ── 修饰键物理态 bitmask ────────────────────────────────────────────────────────
 // 8 个具体修饰键各占一位。用于「现查物理态 → 与配置精确匹配」,替代旧的累积镜像。
@@ -220,6 +243,26 @@ fn key_down(vk: VIRTUAL_KEY) -> bool {
 /// 合成 keyup 污染 `GetAsyncKeyState` 的说明。
 pub fn is_alt_down() -> bool {
     ALT_LOGICALLY_HELD.load(Ordering::SeqCst)
+}
+
+/// 在调 `SetForegroundWindow` 前调用，通知 LL hook 即将产生合成 Alt keyup。
+///
+/// 仅在 Alt 当前逻辑按下时才设 flag——`SetForegroundWindow` 只在 Alt 按下时
+/// 合成 keyup（释放系统菜单栏激活态）。Alt 未按下时调此函数是 no-op。
+///
+/// 见 [`EXPECT_SYNTH_KEYUP_AT`] 文档字符串了解完整设计。
+pub fn expect_synthesized_alt_keyup() {
+    let held = ALT_LOGICALLY_HELD.load(Ordering::SeqCst);
+    if held {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        EXPECT_SYNTH_KEYUP_AT.store(now, Ordering::SeqCst);
+        tracing::debug!(held, "expect_synthesized_alt_keyup: flag set");
+    } else {
+        tracing::debug!(held, "expect_synthesized_alt_keyup: skip (Alt not held)");
+    }
 }
 
 /// 采样当前 8 个修饰键的物理态为 bitmask。
@@ -403,18 +446,42 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
         let is_up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
 
         // ── Alt 逻辑 hold 态维护（早于任何短路，跨所有分支生效） ──────────────────
-        // `LLKHF_INJECTED` 区分真键盘 vs OS/软件合成事件。SetForegroundWindow 合成的
-        // Alt keyup 带此 flag，直接跳过——保证逻辑态只跟随用户真实按键。
-        // 见 ALT_LOGICALLY_HELD 文档字符串。
+        //
+        // **设计**（0.11.11）：不再使用 `LLKHF_INJECTED` 过滤 Alt 事件。
+        // 该 flag 无法区分“远程控制软件注入的真实按键”与“SetForegroundWindow
+        // 合成的 Alt keyup”——RustDesk/TeamViewer 等第三方远程控制工具通过
+        // SendInput 注入键盘事件，事件携带 LLKHF_INJECTED，但
+        // `GetSystemMetrics(SM_REMOTESESSION)` 对它们返回 false（只检测 Windows
+        // 原生 RDP），导致 Alt 事件被全量过滤，ALT_LOGICALLY_HELD 永不为 true。
+        //
+        // 改为：接受所有 Alt keydown/keyup 事件更新 ALT_LOGICALLY_HELD，仅用
+        // `EXPECT_SYNTH_KEYUP_AT` one-shot flag 过滤我们自己 SetForegroundWindow
+        // 合成的 keyup（这是原 LLKHF_INJECTED 过滤的真正目标）。
         let injected = (kb.flags & LLKHF_INJECTED) == LLKHF_INJECTED;
-        if !injected && (vk == VK_LMENU.0 as u32 || vk == VK_RMENU.0 as u32) {
+
+        if vk == VK_LMENU.0 as u32 || vk == VK_RMENU.0 as u32 {
+            // one-shot flag：Alt keyup 时无条件 swap 清除
+            let was_expected = if is_up {
+                let expected_at = EXPECT_SYNTH_KEYUP_AT.load(Ordering::SeqCst);
+                if expected_at > 0 {
+                    EXPECT_SYNTH_KEYUP_AT.store(0, Ordering::SeqCst);
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0);
+                    now - expected_at < 200
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            let prev_held = ALT_LOGICALLY_HELD.load(Ordering::SeqCst);
             if is_down {
                 ALT_LOGICALLY_HELD.store(true, Ordering::SeqCst);
-            } else if is_up {
-                // 一侧松开时若另一侧仍按着，逻辑态保持 true；两侧都松才置 false。
-                // 此处读 GetAsyncKeyState 是安全的：走到这里的都是**真实** keyup 事件，
-                // injected 合成 keyup 已被上面 flag 过滤走不到此分支；此刻内核物理态
-                // 反映的正是真实按下情况。
+            } else if is_up && !was_expected {
+                // 真实 keyup——一侧松开时若另一侧仍按着，逻辑态保持 true。
                 let other_vk = if vk == VK_LMENU.0 as u32 {
                     VK_RMENU
                 } else {
@@ -424,6 +491,15 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
                     ALT_LOGICALLY_HELD.store(false, Ordering::SeqCst);
                 }
             }
+            // was_expected=true → 跳过（我们自己 SetForegroundWindow 合成的 keyup）
+
+            tracing::trace!(
+                side = if vk == VK_LMENU.0 as u32 { "L" } else { "R" },
+                is_down, is_up, injected, was_expected,
+                prev_held,
+                now_held = ALT_LOGICALLY_HELD.load(Ordering::SeqCst),
+                "alt-event"
+            );
         }
 
         // 录制短路：录制期间把事件喂给 recorder，且不碰触发的 thread_local STATE。

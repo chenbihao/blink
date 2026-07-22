@@ -4,8 +4,6 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Blink Voice</title>
-    <link rel="stylesheet" href="css/tokens/color.css" />
-    <link rel="stylesheet" href="css/components/voice-wave.css" />
     <link rel="stylesheet" href="css/entries/voice-overlay.css" />
   </head>
   <body>
@@ -23,6 +21,10 @@
     <script type="module">
       import { listen, invoke } from "./js/tauri.js";
       import { t, applyI18nFromConfig, onLangChange } from "./js/i18n/index.js";
+      import { applyThemeFromConfig } from "./js/theme.js";
+
+      // 应用主题（与主窗口/设置页统一）
+      applyThemeFromConfig();
 
       const textEl = document.getElementById("partial-text");
       const waveEl = document.getElementById("wave");

@@ -119,7 +119,7 @@ pub fn set_chord_mode(on: bool, tap_keys: std::collections::HashSet<String>) {
             g.clear();
         }
     }
-    tracing::debug!(on, "chord mode 已切换");
+    tracing::trace!(on, "chord mode 已切换");
 }
 
 // 平台特定实现
@@ -127,7 +127,7 @@ pub fn set_chord_mode(on: bool, tap_keys: std::collections::HashSet<String>) {
 mod windows;
 
 #[cfg(target_os = "windows")]
-pub use windows::{is_alt_down, set_voice_recording, start_hook_thread};
+pub use windows::{expect_synthesized_alt_keyup, is_alt_down, set_voice_recording, start_hook_thread};
 
 // 快捷键录制
 mod recorder;

@@ -30,6 +30,7 @@ import {
 } from "./api.js";
 import * as annot from "./annotation-engine.js";
 import { ensureSpriteLoaded } from "./icon.js";
+import { applyThemeFromConfig } from "./theme.js";
 
 // ── **临时**（0.11.7-f 调试用）：console 转发到后端 tracing ────────────
 // TODO(0.11.7 收尾)：0.11.7 稳定后移除此块 + api.js 的 frontendLog + Rust 端 frontend_log command
@@ -117,6 +118,9 @@ const PREWARM_MIN_HEIGHT = 50;
 
 // 图标 sprite（工具栏按钮走 Lucide 图标；fire-and-forget，加载失败降级为空图标）
 ensureSpriteLoaded();
+
+// 应用主题（截图 overlay 的 token 引用如 --accent 等随用户主题切换）
+applyThemeFromConfig();
 
 annot.init(annotCanvas);
 // 0.11.10-a：默认工具设为 'select'（选取），作为标注/OCR 阅读的中立入口。

@@ -50,6 +50,10 @@
 
     <script type="module">
       import { invoke, screenshotPinTransform, ocrImage, translateText } from "./js/api.js";
+      import { applyThemeFromConfig } from "./js/theme.js";
+
+      // 应用主题（右键菜单 / OCR 面板的 token 引用随用户主题切换）
+      applyThemeFromConfig();
 
       const PAD = 20;       // 与后端 PIN_PAD 一致（物理像素，给发光留空间）
       const GLOW_RADIUS = 18; // 发光视觉半径（1px spread + 14px blur ≈ 18px）

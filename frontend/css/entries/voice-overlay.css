@@ -1,23 +1,28 @@
-/* Voice overlay mini 窗口 — G2 录音指示器 */
-/* 使用 Blink 主题 token 配色 */
+/* ── Voice overlay mini 窗口 entry ──────────────────────────────────────────
+   G2 录音指示器。加载顺序铁则：reset → tokens → themes → base → components → views
+   voice-overlay.html 只需 <link href="css/entries/voice-overlay.css"> */
 
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
+/* reset */
+@import '../base/reset.css';
 
-:root {
-  /* 导入 Blink 主题 token 后可用，此处做 fallback */
-  --bg: #1e1e2e;
-  --surface: #313244;
-  --text: #cdd6f4;
-  --text-sub: #a6adc8;
-  --text-dim: #6c7086;
-  --accent: #89b4fa;
-  --green: #a6e3a1;
-  --border-glow: rgba(255, 255, 255, 0.05);
-}
+/* token 层（含 vendor/open-props） */
+@import '../tokens/index.css';
+
+/* 主题变量（默认 dark） */
+@import '../themes/dark.css';
+@import '../themes/light.css';
+@import '../themes/gruvbox.css';
+@import '../themes/neutral.css';
+@import '../themes/nvchad.css';
+@import '../themes/genshin.css';
+
+/* base 排版 */
+@import '../base/typography.css';
+
+/* 组件 */
+@import '../components/voice-wave.css';
+
+/* ── Voice overlay 视图 ──────────────────────────────────────────────────── */
 
 body {
   background: transparent;
@@ -37,14 +42,12 @@ body {
   background: var(--bg);
   border-radius: 14px;
   border: 1px solid var(--border-glow);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 4px 16px var(--shadow);
   min-width: 200px;
   max-width: 360px;
   /* 0.10.6: 窗口由 autoResize() 撑高，overlay 随内容增长 */
   max-height: 380px;
 }
-
-/* 波形条样式已抽到 css/components/voice-wave.css（G1 + G2 共用 .vw-bar / .voice-wave） */
 
 /* 文本区域 */
 .text {

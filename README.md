@@ -56,7 +56,7 @@ Blink 把"选中英文 → 翻译"、"复制了 URL → 打开"、"截图 → OC
 
 Blink 会在后台静默感知你的上下文，但不会打扰你——看到就用，看不到不碍事。
 
-- **划词感知** — 在其他应用选中文本，唤起 Blink 后自动抓取，一键翻译或搜索
+- **划词感知** — 在其他应用选中文本，唤起 Blink 后自动抓取，一键翻译或搜索（有些应用未实现 UIA 文本接口，划词可能无法感知，可手动 `Ctrl+C` 复制后唤起，Blink 会自动读取剪贴板内容）
 - **剪贴板感知** — 复制了 URL？自动推荐打开链接。复制了英文？自动推荐通过插件翻译
 - **Ghost Text 补全** — 输入 `fy`，灰色提示 `fanyi `，按 Tab 快速采纳，直接开始输入要翻译的内容
 - **逐项可控** — 每种感知都可以在设置里单独关闭
@@ -234,7 +234,7 @@ cargo test --bin blink
 - [Flow Launcher](https://www.flowlauncher.com/) — Windows 上的开源 Launcher，社区驱动的典范
 - [Everything](https://www.voidtools.com/) — 极速文件搜索，Blink 文件搜索的集成方案
 - [Quicker](https://getquicker.net/) — Chord 交互模式的灵感来源
-
+ 
 ---
 
 ## 许可
