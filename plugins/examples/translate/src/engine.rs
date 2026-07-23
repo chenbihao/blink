@@ -24,7 +24,12 @@ pub struct EngineRequest {
 ///
 /// **新增引擎默认 `supports_batch() == false`,无需实装批量方法,向后兼容。**
 pub trait TranslateEngine {
-    fn build_request(&self, text: &str, target_lang: &str, settings: &Value) -> Option<EngineRequest>;
+    fn build_request(
+        &self,
+        text: &str,
+        target_lang: &str,
+        settings: &Value,
+    ) -> Option<EngineRequest>;
     fn parse_response(&self, body: &str) -> Option<String>;
 
     /// 是否支持原生批量翻译。默认 false。

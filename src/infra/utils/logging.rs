@@ -112,7 +112,9 @@ fn parse_level(level: &str) -> String {
     // `completions request/response` TRACE 对诊断"发了什么/收了什么"很有价值。
     let ai_noise = "h2=warn,rustls=warn,tower=warn,hpack=warn";
     match level {
-        "trace" => format!("trace,sqlx=warn,tauri=warn,tao=warn,hyper=warn,reqwest=warn,{ai_noise}"),
+        "trace" => {
+            format!("trace,sqlx=warn,tauri=warn,tao=warn,hyper=warn,reqwest=warn,{ai_noise}")
+        }
         "debug" => format!("debug,sqlx=warn,tauri=warn,{ai_noise}"),
         "info" => format!("info,sqlx=warn,tauri=warn,{ai_noise}"),
         _ => "error".to_string(),

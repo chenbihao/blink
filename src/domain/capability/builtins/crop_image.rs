@@ -46,18 +46,30 @@ impl Capability for CropImage {
         _ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError> {
         // 参数解析（与 op_crop 一致的错误消息）
-        let x = args.get("x").and_then(Value::as_i64).ok_or_else(|| {
-            CapabilityError::InvalidArgs { detail: "缺少 x".into() }
-        })? as i32;
-        let y = args.get("y").and_then(Value::as_i64).ok_or_else(|| {
-            CapabilityError::InvalidArgs { detail: "缺少 y".into() }
-        })? as i32;
-        let w = args.get("w").and_then(Value::as_u64).ok_or_else(|| {
-            CapabilityError::InvalidArgs { detail: "缺少 w".into() }
-        })? as u32;
-        let h = args.get("h").and_then(Value::as_u64).ok_or_else(|| {
-            CapabilityError::InvalidArgs { detail: "缺少 h".into() }
-        })? as u32;
+        let x =
+            args.get("x")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| CapabilityError::InvalidArgs {
+                    detail: "缺少 x".into(),
+                })? as i32;
+        let y =
+            args.get("y")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| CapabilityError::InvalidArgs {
+                    detail: "缺少 y".into(),
+                })? as i32;
+        let w =
+            args.get("w")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| CapabilityError::InvalidArgs {
+                    detail: "缺少 w".into(),
+                })? as u32;
+        let h =
+            args.get("h")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| CapabilityError::InvalidArgs {
+                    detail: "缺少 h".into(),
+                })? as u32;
 
         // 委托到统一 screenshot Capability 的 op=crop
         super::screenshot::op_crop(x, y, w, h).await

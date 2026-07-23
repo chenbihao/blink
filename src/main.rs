@@ -457,6 +457,20 @@ fn main() {
                 None,
             ));
 
+            // 0.12.1 Phase 3B-1: chat AgentProvider 懒构造；memory 归 ChatService 所有。
+            let pending_confirms = std::sync::Arc::new(
+                domain::ai::tool_adapter::PendingConfirms::new(),
+            );
+            let chat_service = std::sync::Arc::new(
+                domain::ai::chat_service::ChatService::new(
+                    app.handle().clone(),
+                    ai_registry.clone(),
+                    capability_registry.clone(),
+                    action_registry.clone(),
+                    pending_confirms.clone(),
+                ),
+            );
+
             // 注册到 Tauri state（command 层 app.state 取用）
             app.manage(plugin_engine);
             app.manage(chord_registry);
@@ -468,9 +482,8 @@ fn main() {
             // 0.10: VoiceService(command 层 cancel_voice_recording / is_voice_recording 消费)
             app.manage(voice_service);
             // 0.12.0 §2.4: 对话窗口危险确认闭环（tool_adapter call 挂起 + confirm_chat_action 唤醒）
-            app.manage(std::sync::Arc::new(
-                domain::ai::tool_adapter::PendingConfirms::new(),
-            ));
+            app.manage(pending_confirms);
+            app.manage(chat_service);
 
             // 后台预热次级窗口（3s 延迟，不阻塞启动；WebView2 冷启动 300~400ms → 预热后 show <50ms）
             infra::platform::window::preheat_secondary_windows(app.handle().clone());
@@ -507,6 +520,10 @@ fn main() {
             app::commands::run_builtin_action,
             app::commands::confirm_ai_action,
             app::commands::confirm_chat_action,
+            app::commands::hide_chat_window,
+            app::commands::chat_prompt,
+            app::commands::chat_abort,
+            app::commands::get_chat_status,
             app::commands::list_builtin_actions,
             app::commands::list_context_bindings,
             app::commands::trigger_chord,

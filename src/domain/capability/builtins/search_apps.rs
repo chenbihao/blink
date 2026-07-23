@@ -16,8 +16,8 @@ use tauri::Manager;
 use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
 };
-use crate::domain::search::engine::SearchAction;
 use crate::domain::search::SearchService;
+use crate::domain::search::engine::SearchAction;
 
 /// `search_apps` — 按关键词搜索本机应用（开始菜单）。
 ///

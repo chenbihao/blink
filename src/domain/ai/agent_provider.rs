@@ -27,6 +27,8 @@ use tokio::sync::mpsc;
 use rig_core::agent::{Agent, AgentBuilder, MultiTurnStreamItem};
 use rig_core::client::CompletionClient;
 use rig_core::completion::{CompletionModel, GetTokenUsage};
+use rig_core::memory::ConversationMemory;
+#[cfg(test)]
 use rig_core::memory::InMemoryConversationMemory;
 use rig_core::providers::{anthropic, gemini, ollama, openai};
 use rig_core::streaming::{StreamedAssistantContent, StreamingPrompt};
@@ -34,6 +36,8 @@ use rig_core::tool::ToolDyn;
 use rig_core::wasm_compat::WasmCompatSend;
 
 use crate::app::ai_config::{ModelEntry, ProviderEntry, ProviderKind};
+use std::sync::Arc;
+
 use crate::domain::ai::factory::{
     build_anthropic_client, build_gemini_client, build_ollama_client, build_openai_client,
 };
@@ -79,17 +83,18 @@ const MAX_TURNS: usize = 50;
 impl AgentProvider {
     /// 从 `ProviderEntry`+`ModelEntry` 构造 Agent。
     ///
+    /// - `memory` 由 ChatService 持有，切换 Provider/Model 时复用同一份 memory。
     /// - 读密钥(本地 ollama 跳过,与 `RigFactory::build` 一致)
     /// - 按 `entry.kind` 构造 rig client + `completion_model` 得裸 model(复用 factory 的 `build_*_client`)
     /// - `AgentBuilder` 挂 preamble + tools + memory + `default_max_turns` -> `Agent<M>` -> `ChatAgent`
     ///
     /// **tools 被 move 进唯一命中的 match arm**(match 只走一个 arm,无需 Clone)。
-    #[allow(dead_code)] // 0.12.1 Phase 4 commands 消费
     pub fn new(
         entry: &ProviderEntry,
         model: &ModelEntry,
         tools: Vec<Box<dyn ToolDyn>>,
         preamble: &str,
+        memory: Arc<dyn ConversationMemory>,
     ) -> Result<Self, AIError> {
         // 读密钥--与 RigFactory::build 一致(本地 provider 跳过)
         let key_str: String = if entry.kind.requires_secret() {
@@ -106,7 +111,6 @@ impl AgentProvider {
             String::new()
         };
 
-        let memory = InMemoryConversationMemory::new();
         let agent = match entry.kind {
             ProviderKind::OpenAICompatible => {
                 let client = build_openai_client(&key_str, entry.base_url.as_deref())?;
@@ -137,7 +141,6 @@ impl AgentProvider {
     /// `conversation_id` 贯穿:rig agent 按 id 自动 load/append memory(0.12.1 进程内,
     /// 0.12.2 持久化)。调用方(commands 层)创建 channel,spawn 此 task,chunk 走
     /// `blink://chat-stream` 事件。
-    #[allow(dead_code)] // 0.12.1 Phase 4 commands 消费
     pub async fn stream_prompt(
         &self,
         conversation_id: &str,
@@ -171,14 +174,19 @@ impl AgentProvider {
         M: CompletionModel + 'static,
         <M as CompletionModel>::StreamingResponse: WasmCompatSend + Clone + Unpin + GetTokenUsage,
     {
-        let mut stream = agent.stream_prompt(user_msg).conversation(conversation_id).await;
+        let mut stream = agent
+            .stream_prompt(user_msg)
+            .conversation(conversation_id)
+            .await;
         while let Some(item) = stream.next().await {
             let chunk = match item {
                 Ok(MultiTurnStreamItem::StreamAssistantItem(content)) => match content {
                     StreamedAssistantContent::Text(t) => ChatStreamChunk::Text { text: t.text },
-                    StreamedAssistantContent::ToolCall { tool_call, .. } => ChatStreamChunk::ToolCall {
-                        tool: tool_call.function.name.clone(),
-                    },
+                    StreamedAssistantContent::ToolCall { tool_call, .. } => {
+                        ChatStreamChunk::ToolCall {
+                            tool: tool_call.function.name.clone(),
+                        }
+                    }
                     _ => continue,
                 },
                 Ok(MultiTurnStreamItem::FinalResponse(_)) => ChatStreamChunk::Done,
@@ -196,12 +204,11 @@ impl AgentProvider {
 }
 
 /// 构造 `Agent<M>`(4 arm 共用,泛型 M 由各 arm 具体化)。
-#[allow(dead_code)] // 由 AgentProvider::new 调用;0.12.1 Phase 4 commands 消费 new
 fn build_agent<M>(
     model: M,
     preamble: &str,
     tools: Vec<Box<dyn ToolDyn>>,
-    memory: InMemoryConversationMemory,
+    memory: Arc<dyn ConversationMemory>,
 ) -> Agent<M>
 where
     M: CompletionModel + 'static,
@@ -282,9 +289,7 @@ mod tests {
     /// 验证 `ChatStreamChunk` 序列化带 `kind` tag(前端按 kind 分派)。
     #[test]
     fn chat_stream_chunk_serializes_with_kind_tag() {
-        let text = ChatStreamChunk::Text {
-            text: "hi".into(),
-        };
+        let text = ChatStreamChunk::Text { text: "hi".into() };
         let v = serde_json::to_value(&text).unwrap();
         assert_eq!(v["kind"], "text");
         assert_eq!(v["text"], "hi");

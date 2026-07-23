@@ -9,8 +9,8 @@
 //! 托盘默认 id 为 `"main"`（`TrayIconBuilder::new()` 未显式 `.id()`），`rebuild_menu`
 //! 通过 `app.tray_by_id("main")` 取回。
 
-use tauri::menu::{Menu, MenuItem};
 use tauri::Manager;
+use tauri::menu::{Menu, MenuItem};
 
 /// 托盘菜单项 key（与菜单 item id 一一对应）。
 #[derive(Clone, Copy)]

@@ -79,6 +79,16 @@ fn compute_provider_fingerprint(p: &ProviderEntry, secret_epoch: u64) -> String 
     format!("{kind}|{bu}|e{secret_epoch}")
 }
 
+/// ChatService 构造 AgentProvider 所需的配置快照。
+///
+/// Provider / Model 均为 clone，调用方可在 registry 锁外完成较重的 rig Client 构造。
+#[derive(Clone, Debug)]
+pub struct ResolvedProviderEntries {
+    pub provider: ProviderEntry,
+    pub model: ModelEntry,
+    pub cache_key: (String, String, String),
+}
+
 /// Provider registry —— 运行时可热更新。
 pub struct AIProviderRegistry {
     factory: Arc<dyn ProviderFactory>,
@@ -259,6 +269,23 @@ impl AIProviderRegistry {
         self.config.read().expect("config lock poisoned").clone()
     }
 
+    /// 解析 chat 使用的 Main 档 Provider + Model，并生成与主窗口 registry 一致的缓存 key。
+    ///
+    /// clone 后立即释放 config 读锁，ChatService 可在锁外构造 rig Agent。
+    pub(crate) fn resolve_entries(&self, tier: Tier) -> Result<ResolvedProviderEntries, AIError> {
+        let config = self.config.read().expect("config lock poisoned");
+        let Some((provider, model, _actual_tier)) = config.resolve_tier(tier) else {
+            return Err(AIError::NotConfigured);
+        };
+        let fingerprint =
+            compute_provider_fingerprint(provider, self.secret_epoch.load(Ordering::SeqCst));
+        Ok(ResolvedProviderEntries {
+            provider: provider.clone(),
+            model: model.clone(),
+            cache_key: (provider.id.clone(), model.id.clone(), fingerprint),
+        })
+    }
+
     /// Bump 密钥版本号——`save_ai_secret` 成功后调,让下次 reload 时**所有**实例
     /// invalidate 并按新密钥重建。
     ///
@@ -276,7 +303,9 @@ impl AIProviderRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::ai_config::{ModelEntry, ModelCapability, ProviderEntry, ProviderKind, TierAssignment};
+    use crate::app::ai_config::{
+        ModelCapability, ModelEntry, ProviderEntry, ProviderKind, TierAssignment,
+    };
     use crate::domain::ai::provider::tests::MockProvider;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -533,6 +562,24 @@ mod tests {
         // 请求 Router → 降级到 Main
         let (_, actual) = reg.resolve(Tier::Router).unwrap();
         assert_eq!(actual, Tier::Main);
+    }
+
+    #[test]
+    fn resolve_entries_uses_same_fingerprint_as_provider_pool() {
+        let f = Arc::new(CountingFactory::new());
+        let cfg = make_config(vec![("p1", vec!["m1"])], Some(("p1", "m1")));
+        let reg = AIProviderRegistry::from_config(f, &cfg);
+
+        let resolved = reg.resolve_entries(Tier::Router).unwrap();
+        assert_eq!(resolved.provider.id, "p1");
+        assert_eq!(resolved.model.id, "m1");
+        assert_eq!(resolved.cache_key.0, "p1");
+        assert_eq!(resolved.cache_key.1, "m1");
+        assert!(resolved.cache_key.2.ends_with("|e0"));
+
+        reg.bump_secret_epoch();
+        let after_secret_change = reg.resolve_entries(Tier::Router).unwrap();
+        assert_ne!(resolved.cache_key, after_secret_change.cache_key);
     }
 
     #[test]

@@ -222,6 +222,22 @@ pub fn tool_result_feedback_prompt(tools: &[ToolPromptInfo], _lang: &str) -> Str
     prompt
 }
 
+/// 独立 chat 窗口的 Agent system prompt（0.12.1 Phase 3B）。
+///
+/// Tool schema 由 rig AgentBuilder 独立挂载，此处只约束对话角色、工具使用和安全行为。
+pub fn chat_system_prompt() -> String {
+    String::from(
+        "你是 Blink 的 AI 助手。请直接、准确地帮助用户完成任务。\n\n\
+         【工具使用】\n\
+         1. 需要读取环境或执行操作时，优先调用已提供的工具，不要声称拥有不存在的能力。\n\
+         2. 不确定工具参数时先向用户澄清，不要猜测路径、应用名或不可逆参数。\n\
+         3. 危险操作必须等待 Blink 的用户确认；未确认、被拒绝或超时都视为未执行。\n\
+         4. 工具失败时如实说明原因，并给出可操作的修复建议。\n\n\
+         【安全】不要主动退出 Blink、规避确认机制或假称操作成功。\n\n\
+         【语言】跟随用户输入语言回答。",
+    )
+}
+
 /// 工具列表文字段（含 name + description + 参数摘要 + hint）。
 ///
 /// **分层详略**（§3.8）：system prompt 文字段只含 name + 一句话 description + 参数名
@@ -454,7 +470,11 @@ mod tests {
 
     #[test]
     fn tool_list_omits_hint_when_empty() {
-        let mut tool = make_tool("get_ip", "获取 IP", json!({"type":"object","properties":{}}));
+        let mut tool = make_tool(
+            "get_ip",
+            "获取 IP",
+            json!({"type":"object","properties":{}}),
+        );
         tool.hint = Some(String::new());
         let section = tool_list_section(&tools_vec(&[tool]));
         assert!(!section.contains("提示:"));
@@ -534,10 +554,7 @@ mod tests {
         let infos = build_prompt_infos(tools, &hints);
         assert_eq!(infos.len(), 2);
         assert!(infos[0].hint.is_none()); // get_weather 无 hint
-        assert_eq!(
-            infos[1].hint.as_deref(),
-            Some("公网 IP 最有价值")
-        );
+        assert_eq!(infos[1].hint.as_deref(), Some("公网 IP 最有价值"));
     }
 
     // ── truncate_chars ──
@@ -556,6 +573,15 @@ mod tests {
     #[test]
     fn truncate_exact_length_no_ellipsis() {
         assert_eq!(truncate_chars("一二三", 3), "一二三");
+    }
+
+    #[test]
+    fn chat_prompt_contains_tool_and_safety_contracts() {
+        let prompt = chat_system_prompt();
+        assert!(prompt.contains("工具"));
+        assert!(prompt.contains("用户确认"));
+        assert!(prompt.contains("不要主动退出 Blink"));
+        assert!(prompt.contains("跟随用户输入语言"));
     }
 
     /// 辅助：构造单元素 Vec

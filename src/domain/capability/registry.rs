@@ -262,7 +262,9 @@ mod tests {
     #[test]
     fn register_adds_new_capability() {
         let reg = CapabilityRegistry::default();
-        let cap = Arc::new(MockCap { id_val: "test_mock_cap" }) as Arc<dyn Capability>;
+        let cap = Arc::new(MockCap {
+            id_val: "test_mock_cap",
+        }) as Arc<dyn Capability>;
         reg.register(cap);
         assert!(reg.get("test_mock_cap").is_some());
     }

@@ -60,30 +60,42 @@ impl Capability for Screenshot {
         args: Value,
         _ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError> {
-        let op = args.get("op").and_then(Value::as_str).ok_or_else(|| {
-            CapabilityError::InvalidArgs {
-                detail: "缺少 op 参数".into(),
-            }
-        })?;
+        let op =
+            args.get("op")
+                .and_then(Value::as_str)
+                .ok_or_else(|| CapabilityError::InvalidArgs {
+                    detail: "缺少 op 参数".into(),
+                })?;
 
         match op {
             "list_displays" => op_list_displays().await,
             "capture" => {
-                let display_id = args.get("display_id").and_then(Value::as_u64).map(|v| v as u32);
+                let display_id = args
+                    .get("display_id")
+                    .and_then(Value::as_u64)
+                    .map(|v| v as u32);
                 op_capture(display_id).await
             }
             "crop" => {
                 let x = args.get("x").and_then(Value::as_i64).ok_or_else(|| {
-                    CapabilityError::InvalidArgs { detail: "缺少 x".into() }
+                    CapabilityError::InvalidArgs {
+                        detail: "缺少 x".into(),
+                    }
                 })? as i32;
                 let y = args.get("y").and_then(Value::as_i64).ok_or_else(|| {
-                    CapabilityError::InvalidArgs { detail: "缺少 y".into() }
+                    CapabilityError::InvalidArgs {
+                        detail: "缺少 y".into(),
+                    }
                 })? as i32;
                 let w = args.get("w").and_then(Value::as_u64).ok_or_else(|| {
-                    CapabilityError::InvalidArgs { detail: "缺少 w".into() }
+                    CapabilityError::InvalidArgs {
+                        detail: "缺少 w".into(),
+                    }
                 })? as u32;
                 let h = args.get("h").and_then(Value::as_u64).ok_or_else(|| {
-                    CapabilityError::InvalidArgs { detail: "缺少 h".into() }
+                    CapabilityError::InvalidArgs {
+                        detail: "缺少 h".into(),
+                    }
                 })? as u32;
                 op_crop(x, y, w, h).await
             }
@@ -187,9 +199,11 @@ pub(super) async fn op_crop(
     h: u32,
 ) -> Result<CapabilityResult, CapabilityError> {
     let png = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CapabilityError> {
-        let (bgra, cw, ch) = crate::infra::platform::screenshot::crop(x, y, w, h)
-            .ok_or_else(|| CapabilityError::InvalidArgs {
-                detail: "截图会话为空或裁剪区域无效".into(),
+        let (bgra, cw, ch) =
+            crate::infra::platform::screenshot::crop(x, y, w, h).ok_or_else(|| {
+                CapabilityError::InvalidArgs {
+                    detail: "截图会话为空或裁剪区域无效".into(),
+                }
             })?;
         crate::infra::platform::screenshot::encode_png(&bgra, cw, ch)
             .map_err(|e| CapabilityError::Internal { detail: e })
@@ -224,8 +238,8 @@ pub(super) mod test_helpers {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::test_helpers::test_lock;
+    use super::*;
     use crate::infra::platform::screenshot::backend_fake::FakeScreenshotBackend;
 
     #[test]
@@ -278,7 +292,10 @@ mod tests {
             panic!("期望 Blob 结果");
         };
         assert_eq!(mime, "image/png");
-        assert_eq!(&bytes[..8], &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+        assert_eq!(
+            &bytes[..8],
+            &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+        );
     }
 
     #[tokio::test]
@@ -297,7 +314,10 @@ mod tests {
         let CapabilityResult::Blob { bytes, .. } = result else {
             panic!("期望 Blob 结果");
         };
-        assert_eq!(&bytes[..8], &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+        assert_eq!(
+            &bytes[..8],
+            &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+        );
     }
 
     #[tokio::test]
@@ -319,6 +339,9 @@ mod tests {
         let CapabilityResult::Blob { bytes, .. } = result else {
             panic!("期望 Blob 结果");
         };
-        assert_eq!(&bytes[..8], &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+        assert_eq!(
+            &bytes[..8],
+            &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+        );
     }
 }

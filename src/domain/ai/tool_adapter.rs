@@ -42,15 +42,15 @@
 //! 返回 `Vec<Box<dyn ToolDyn>>` 供对话窗口 Agent 使用。
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use rig_core::tool::ToolDyn;
 use rig_core::wasm_compat::WasmBoxedFuture;
 use serde_json::Value;
 use tauri::Emitter;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{Mutex, oneshot};
 
 use crate::domain::capability::{Capability, CapabilityError, CapabilityRegistry, InvokeContext};
 use crate::domain::execution::{Action, ActionContext, ActionRegistry, DangerClass, ExecError};
@@ -148,15 +148,20 @@ async fn await_dangerous_confirm(
     tool_name: &str,
     tool_type: &'static str,
     arguments: &Value,
+    request_id: u64,
+    conversation_id: &str,
 ) -> ConfirmOutcome {
-    emit_dangerous_confirm(app, confirm_id, tool_name, tool_type, arguments);
+    emit_dangerous_confirm(
+        app,
+        confirm_id,
+        tool_name,
+        tool_type,
+        arguments,
+        request_id,
+        conversation_id,
+    );
     // 挂起等用户确认信号（confirm_chat_action command -> resolve -> rx 收到）
-    match tokio::time::timeout(
-        Duration::from_secs(DANGEROUS_CONFIRM_TIMEOUT_SECS),
-        rx,
-    )
-    .await
-    {
+    match tokio::time::timeout(Duration::from_secs(DANGEROUS_CONFIRM_TIMEOUT_SECS), rx).await {
         Ok(Ok(true)) => ConfirmOutcome::Approved,
         Ok(Ok(false)) => ConfirmOutcome::Rejected,
         Ok(Err(_)) => ConfirmOutcome::Dropped,
@@ -191,19 +196,26 @@ struct ConfirmPayload {
     tool_type: &'static str, // "capability" 或 "action"
     arguments: Value,
     danger_class: &'static str,
+    /// Phase 4: 关联的请求和对话标识，前端按 request_id 校验归属。
+    request_id: u64,
+    conversation_id: String,
 }
 
-/// emit 危险操作确认事件到对话窗口前端。
+/// emit 危险操作确认事件到对话窗口前端（定向发送）。
 ///
 /// **事件名 `blink://chat-confirm-action`**--与主窗口 `blink://ai-confirm-action` 分流：
 /// 主窗口 payload 含 `seq`（强校验），对话窗口 payload 用 `confirm_id`（无 seq）。
 /// 共用事件名会导致主窗口 listener 吞掉对话窗口事件，故分离。
+///
+/// Phase 4：改用 `emit_to("chat")` 定向发送，不向主窗口和其他次级窗口广播。
 fn emit_dangerous_confirm(
     app: &tauri::AppHandle,
     confirm_id: u64,
     tool_name: &str,
     tool_type: &'static str,
     arguments: &Value,
+    request_id: u64,
+    conversation_id: &str,
 ) {
     let payload = ConfirmPayload {
         confirm_id,
@@ -211,8 +223,14 @@ fn emit_dangerous_confirm(
         tool_type,
         arguments: arguments.clone(),
         danger_class: "Dangerous",
+        request_id,
+        conversation_id: conversation_id.to_string(),
     };
-    if let Err(e) = app.emit("blink://chat-confirm-action", payload) {
+    if let Err(e) = app.emit_to(
+        tauri::EventTarget::window("chat"),
+        "blink://chat-confirm-action",
+        payload,
+    ) {
         tracing::debug!(error = %e, "emit chat-confirm-action failed");
     }
 }
@@ -298,6 +316,11 @@ impl ToolDyn for CapabilityTool {
                     "危险操作被 AI 调用，挂起等待用户确认"
                 );
                 let (confirm_id, rx) = self.pending.register().await;
+                // Phase 4: 从 ChatService 获取当前请求上下文，注入确认 payload。
+                let (req_id, conv_id) =
+                    crate::domain::ai::chat_service::current_request_context_from_app(
+                        &self.app_handle,
+                    );
                 match await_dangerous_confirm(
                     &self.pending,
                     &self.app_handle,
@@ -306,6 +329,8 @@ impl ToolDyn for CapabilityTool {
                     self.cap.id(),
                     "capability",
                     &args_value,
+                    req_id,
+                    &conv_id,
                 )
                 .await
                 {
@@ -316,10 +341,7 @@ impl ToolDyn for CapabilityTool {
                         );
                     }
                     ConfirmOutcome::Rejected => {
-                        return Ok(format!(
-                            "用户拒绝了操作: {}（未执行）",
-                            self.cap.id()
-                        ));
+                        return Ok(format!("用户拒绝了操作: {}（未执行）", self.cap.id()));
                     }
                     ConfirmOutcome::Timeout => {
                         return Ok(format!(
@@ -328,10 +350,7 @@ impl ToolDyn for CapabilityTool {
                         ));
                     }
                     ConfirmOutcome::Dropped => {
-                        return Ok(format!(
-                            "确认信号异常，未执行: {}",
-                            self.cap.id()
-                        ));
+                        return Ok(format!("确认信号异常，未执行: {}", self.cap.id()));
                     }
                 }
             }
@@ -346,13 +365,17 @@ impl ToolDyn for CapabilityTool {
             match self.cap.invoke(args_value, &ctx).await {
                 Ok(cap_result) => {
                     let contents = cap_result.to_rig_tool_result();
-                    Ok(crate::domain::capability::rig_tool_result_to_text(&contents))
+                    Ok(crate::domain::capability::rig_tool_result_to_text(
+                        &contents,
+                    ))
                 }
                 Err(e) => {
                     // 原始错误类型记日志（保留类型信息供调试），AI 侧拿中文化消息
                     tracing::warn!(error = %e, capability = %self.cap.id(), "capability invoke 失败");
                     let msg = capability_error_to_string(e);
-                    Err(rig_core::tool::ToolError::ToolCallError(Box::new(ToolErrMsg(msg))))
+                    Err(rig_core::tool::ToolError::ToolCallError(Box::new(
+                        ToolErrMsg(msg),
+                    )))
                 }
             }
         })
@@ -431,6 +454,11 @@ impl ToolDyn for ActionTool {
                     "危险操作被 AI 调用，挂起等待用户确认"
                 );
                 let (confirm_id, rx) = self.pending.register().await;
+                // Phase 4: 从 ChatService 获取当前请求上下文，注入确认 payload。
+                let (req_id, conv_id) =
+                    crate::domain::ai::chat_service::current_request_context_from_app(
+                        &self.app_handle,
+                    );
                 match await_dangerous_confirm(
                     &self.pending,
                     &self.app_handle,
@@ -439,6 +467,8 @@ impl ToolDyn for ActionTool {
                     self.action.id(),
                     "action",
                     &args_value,
+                    req_id,
+                    &conv_id,
                 )
                 .await
                 {
@@ -449,10 +479,7 @@ impl ToolDyn for ActionTool {
                         );
                     }
                     ConfirmOutcome::Rejected => {
-                        return Ok(format!(
-                            "用户拒绝了操作: {}（未执行）",
-                            self.action.id()
-                        ));
+                        return Ok(format!("用户拒绝了操作: {}（未执行）", self.action.id()));
                     }
                     ConfirmOutcome::Timeout => {
                         return Ok(format!(
@@ -461,10 +488,7 @@ impl ToolDyn for ActionTool {
                         ));
                     }
                     ConfirmOutcome::Dropped => {
-                        return Ok(format!(
-                            "确认信号异常，未执行: {}",
-                            self.action.id()
-                        ));
+                        return Ok(format!("确认信号异常，未执行: {}", self.action.id()));
                     }
                 }
             }
@@ -479,12 +503,16 @@ impl ToolDyn for ActionTool {
             match self.action.execute(&cx).await {
                 Ok(outcome) => {
                     let contents = outcome.to_rig_tool_result();
-                    Ok(crate::domain::capability::rig_tool_result_to_text(&contents))
+                    Ok(crate::domain::capability::rig_tool_result_to_text(
+                        &contents,
+                    ))
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, action = %self.action.id(), "action execute 失败");
                     let msg = exec_error_to_string(e);
-                    Err(rig_core::tool::ToolError::ToolCallError(Box::new(ToolErrMsg(msg))))
+                    Err(rig_core::tool::ToolError::ToolCallError(Box::new(
+                        ToolErrMsg(msg),
+                    )))
                 }
             }
         })
@@ -538,8 +566,8 @@ pub fn build_agent_tools(
     action_registry: &ActionRegistry,
     app_handle: &tauri::AppHandle,
     pending: Arc<PendingConfirms>,
-) -> Vec<Box<dyn ToolDyn + Send + Sync>> {
-    let mut tools: Vec<Box<dyn ToolDyn + Send + Sync>> = Vec::new();
+) -> Vec<Box<dyn ToolDyn>> {
+    let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
 
     // 1. 包装所有 Capability
     for (_id, cap) in cap_registry.entries() {
@@ -602,10 +630,7 @@ mod tests {
     async fn pending_confirms_resolve_unknown_id_returns_false() {
         let pc = PendingConfirms::new();
         // 未注册的 id -> false（过期/编号不存在）
-        assert!(
-            !pc.resolve(9999, true).await,
-            "未知 id 应返回 false"
-        );
+        assert!(!pc.resolve(9999, true).await, "未知 id 应返回 false");
     }
 
     #[tokio::test]
@@ -614,10 +639,7 @@ mod tests {
         let (id, _rx) = pc.register().await;
         assert!(pc.resolve(id, true).await, "首次 resolve 成功");
         // 第二次 resolve 同 id -> false（已 remove）
-        assert!(
-            !pc.resolve(id, true).await,
-            "重复 resolve 应返回 false"
-        );
+        assert!(!pc.resolve(id, true).await, "重复 resolve 应返回 false");
     }
 
     #[tokio::test]
@@ -650,10 +672,7 @@ mod tests {
         let deadline = derive_tool_deadline();
         assert!(deadline.is_some(), "deadline 应为 Some");
         let d = deadline.unwrap();
-        assert!(
-            d > now,
-            "deadline 应在当前时刻之后（含 20s 兜底或配置值）"
-        );
+        assert!(d > now, "deadline 应在当前时刻之后（含 20s 兜底或配置值）");
     }
 
     // ── capability_error_to_string 测试 ───────────────────────────────────
@@ -664,12 +683,20 @@ mod tests {
             detail: "缺少 query".into(),
         };
         assert!(capability_error_to_string(e).contains("参数无效"));
-        assert!(capability_error_to_string(CapabilityError::InvalidArgs { detail: "缺少 query".into() }).contains("缺少 query"));
+        assert!(
+            capability_error_to_string(CapabilityError::InvalidArgs {
+                detail: "缺少 query".into()
+            })
+            .contains("缺少 query")
+        );
     }
 
     #[test]
     fn capability_error_cancelled_to_string() {
-        assert_eq!(capability_error_to_string(CapabilityError::Cancelled), "已取消");
+        assert_eq!(
+            capability_error_to_string(CapabilityError::Cancelled),
+            "已取消"
+        );
     }
 
     #[test]

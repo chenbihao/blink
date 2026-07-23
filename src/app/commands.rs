@@ -235,7 +235,7 @@ pub async fn confirm_ai_action(
         Ok(outcome) => {
             tracing::info!(%action_name, "confirm_ai_action: 执行成功");
 
-    let pool = &app.state::<crate::infra::data::DbPools>().ai;
+            let pool = &app.state::<crate::infra::data::DbPools>().ai;
             let (provider_kind_str, model_id_str) =
                 match app.try_state::<std::sync::Arc<crate::domain::ai::AIProviderRegistry>>() {
                     Some(reg) => match reg.resolve(crate::app::ai_config::Tier::Router) {
@@ -289,8 +289,7 @@ pub async fn confirm_chat_action(
     confirm_id: u64,
     approved: bool,
 ) -> Result<bool, String> {
-    let pending = app
-        .state::<std::sync::Arc<crate::domain::ai::tool_adapter::PendingConfirms>>();
+    let pending = app.state::<std::sync::Arc<crate::domain::ai::tool_adapter::PendingConfirms>>();
     let delivered = pending.resolve(confirm_id, approved).await;
     if delivered {
         tracing::debug!(confirm_id, approved, "confirm_chat_action: 信号已送达");
@@ -301,6 +300,106 @@ pub async fn confirm_chat_action(
         );
     }
     Ok(delivered)
+}
+
+/// 隐藏独立 chat 窗口（0.12.1 Phase 3A）。
+///
+/// 窗口层保证先中止 active request，再隐藏 WebView。窗口不存在时 no-op。
+#[tauri::command]
+pub fn hide_chat_window(app: tauri::AppHandle) {
+    crate::infra::platform::window::hide_chat_window(&app);
+}
+
+/// 启动对话 prompt（Phase 4）。
+///
+/// 调用 `ChatService::prompt()` 获取流式 chunk receiver，spawn 后台 task 逐 chunk
+/// 包装成 `ChatStreamEvent` 后定向 emit 到 chat 窗口（`blink://chat-stream`）。
+///
+/// 返回 `request_id`，前端据此过滤已中止请求的尾部 chunk。
+/// 若已有 active request，返回错误。
+#[tauri::command]
+pub async fn chat_prompt(
+    app: tauri::AppHandle,
+    conversation_id: String,
+    message: String,
+) -> Result<u64, String> {
+    let chat = app
+        .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
+        .ok_or("ChatService 未注册")?;
+
+    let handle = chat
+        .prompt(conversation_id, message)
+        .await
+        .map_err(|e| e.to_string())?;
+    let request_id = handle.request_id;
+    let conv_id = handle.conversation_id.clone();
+    let mut chunks = handle.chunks;
+
+    // spawn 后台 task 消费 chunk 流并定向 emit 到 chat 窗口
+    let app_clone = app.clone();
+    let conv_id_clone = conv_id.clone();
+    tokio::spawn(async move {
+        while let Some(chunk) = chunks.recv().await {
+            let is_done = matches!(
+                chunk,
+                crate::domain::ai::agent_provider::ChatStreamChunk::Done
+                    | crate::domain::ai::agent_provider::ChatStreamChunk::Error { .. }
+            );
+            let event = crate::domain::ai::chat_service::ChatStreamEvent {
+                request_id,
+                conversation_id: conv_id_clone.clone(),
+                chunk,
+            };
+            let _ = app_clone.emit_to(
+                tauri::EventTarget::window("chat"),
+                "blink://chat-stream",
+                &event,
+            );
+            if is_done {
+                break;
+            }
+        }
+        // 注意：自然完成时 ChatService::prompt 内部的 task 已调 clear_if(request_id)，
+        // 此处无需再调 abort，避免冗余。
+    });
+
+    tracing::debug!(
+        request_id,
+        conversation_id = %conv_id,
+        "chat_prompt: 后台 stream task 已启动"
+    );
+    Ok(request_id)
+}
+
+/// 中止指定的对话请求（Phase 4）。
+///
+/// 返回 `true` = 已中止；`false` = request_id 不存在（已完成或已中止）。
+#[tauri::command]
+pub fn chat_abort(app: tauri::AppHandle, request_id: u64) -> bool {
+    if let Some(chat) =
+        app.try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
+    {
+        chat.abort(request_id)
+    } else {
+        false
+    }
+}
+
+/// 获取对话服务状态（Phase 4）。
+///
+/// 返回 `{ active: { request_id, conversation_id } | null, provider_configured: bool }`。
+#[tauri::command]
+pub fn get_chat_status(app: tauri::AppHandle) -> crate::domain::ai::chat_service::ChatStatus {
+    if let Some(chat) =
+        app.try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
+    {
+        chat.status()
+    } else {
+        crate::domain::ai::chat_service::ChatStatus {
+            active: None,
+            provider_configured: false,
+        }
+    }
 }
 
 /// 列出所有内置动作元数据 + 当前 enabled 状态（0.8.0 §1.3 / 0.8.6 §8.2.4 i18n）。
@@ -349,12 +448,15 @@ pub async fn trigger_chord(app: tauri::AppHandle, key: String) -> Result<(), Str
             tracing::debug!(%key_lower, %action_id, "chord 已禁用,跳过触发");
             return Ok(());
         }
+        // 0.12.1: AI 总开关关闭时 chat 不仅不可见，也不能由旧前端/直接 IPC 绕过。
+        if action_id == "chat" && !crate::app::ai_config::get_ai_config().enabled {
+            tracing::debug!(%key_lower, "AI 未启用,跳过 chat chord");
+            return Ok(());
+        }
     }
     // surface 现已无 command 层消费者（MiniBall 划词已移除，各 action 自管 UI），
     // 保留 trigger 返回值以备未来扩展。
-    let _surface = registry
-        .trigger(&key, &chord_cfg.bindings, &app)
-        .await?;
+    let _surface = registry.trigger(&key, &chord_cfg.bindings, &app).await?;
     Ok(())
 }
 
@@ -379,10 +481,7 @@ fn finish_screenshot_session(app: &tauri::AppHandle) {
 /// 直接传坐标——避开前端 toBlob PNG 编码 + 后端 PNG 解码的双重开销，全屏路径
 /// 快 ~150-250ms。有标注 / 全屏合成时才走本命令。
 #[tauri::command]
-pub async fn screenshot_copy(
-    app: tauri::AppHandle,
-    png_data: Vec<u8>,
-) -> Result<(), String> {
+pub async fn screenshot_copy(app: tauri::AppHandle, png_data: Vec<u8>) -> Result<(), String> {
     let bytes_len = png_data.len();
     tokio::task::spawn_blocking(move || {
         crate::infra::platform::clipboard::write_png_to_clipboard(&png_data)
@@ -481,8 +580,7 @@ pub async fn screenshot_save(
         }
     };
 
-    let mut file = std::fs::File::create(&file_path)
-        .map_err(|e| format!("创建文件失败: {e}"))?;
+    let mut file = std::fs::File::create(&file_path).map_err(|e| format!("创建文件失败: {e}"))?;
     file.write_all(&png_data)
         .map_err(|e| format!("写入文件失败: {e}"))?;
 
@@ -534,7 +632,10 @@ pub fn screenshot_pin_transform(
 ///
 /// 0.11.7-f：改走 `ocr_engine::backend()` 注入的后端（测试可替换）。
 #[tauri::command]
-pub async fn ocr_image(_app: tauri::AppHandle, png_data: Vec<u8>) -> Result<serde_json::Value, String> {
+pub async fn ocr_image(
+    _app: tauri::AppHandle,
+    png_data: Vec<u8>,
+) -> Result<serde_json::Value, String> {
     let backend = crate::domain::capability::builtins::ocr_engine::backend();
     let result = backend
         .recognize(&png_data)
@@ -582,13 +683,27 @@ pub async fn translate_text(
 
     // 构造插件 tool arguments —— text 必填,target_lang 有值才传(None 让插件读 setting)
     let mut args = serde_json::Map::new();
-    args.insert("text".into(), serde_json::Value::String(trimmed.to_string()));
-    if let Some(lang) = target_lang.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-        args.insert("target_lang".into(), serde_json::Value::String(lang.to_string()));
+    args.insert(
+        "text".into(),
+        serde_json::Value::String(trimmed.to_string()),
+    );
+    if let Some(lang) = target_lang
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        args.insert(
+            "target_lang".into(),
+            serde_json::Value::String(lang.to_string()),
+        );
     }
     let arguments = serde_json::Value::Object(args);
 
-    tracing::debug!(text_len = trimmed.chars().count(), ?target_lang, "translate_text: 调翻译插件");
+    tracing::debug!(
+        text_len = trimmed.chars().count(),
+        ?target_lang,
+        "translate_text: 调翻译插件"
+    );
 
     let cx = crate::domain::execution::ActionContext::from_arguments(&app, arguments);
     let outcome = action
@@ -602,7 +717,12 @@ pub async fn translate_text(
             // 插件会给它加前缀 emoji（如 "📝 {result}"），不能当数据用。
             let translated = items
                 .first()
-                .and_then(|it| it.payload.get("translated").and_then(|v| v.as_str()).map(str::to_string))
+                .and_then(|it| {
+                    it.payload
+                        .get("translated")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                })
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| "翻译插件返回空结果".to_string())?;
             tracing::info!(
@@ -676,8 +796,15 @@ pub async fn translate_lines(
         let texts: Vec<String> = non_empty.iter().map(|(_, text)| text.clone()).collect();
         let mut args = serde_json::Map::new();
         args.insert("texts".into(), serde_json::json!(texts));
-        if let Some(lang) = target_lang.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            args.insert("target_lang".into(), serde_json::Value::String(lang.to_string()));
+        if let Some(lang) = target_lang
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            args.insert(
+                "target_lang".into(),
+                serde_json::Value::String(lang.to_string()),
+            );
         }
         let cx = crate::domain::execution::ActionContext::from_arguments(
             &app,
@@ -685,7 +812,9 @@ pub async fn translate_lines(
         );
         match action.execute(&cx).await {
             Ok(outcome) => {
-                if let Some(batch_results) = parse_translate_batch_payload(&outcome, non_empty.len()) {
+                if let Some(batch_results) =
+                    parse_translate_batch_payload(&outcome, non_empty.len())
+                {
                     let mut results = lines.clone();
                     for ((idx, _), translated) in non_empty.iter().zip(batch_results) {
                         results[*idx] = translated;
@@ -755,8 +884,8 @@ pub fn hide_screenshot_overlay(app: tauri::AppHandle) {
 ///
 /// 每条：`{ id, key, label, surface }`。已 disabled 的跳过；label 按当前 UI 语言解析。
 ///
-/// **voice_input 门禁**：STT 未启用时（`SttConfig.enabled == false`）不返回
-/// `voice_input` 条目——语音总开关关时，提示条不该显示"Alt+Space 语音输入"。
+/// **功能总开关门禁**：`voice_input` 绑定 STT 总开关，`chat` 绑定 AI 总开关；
+/// 未启用时不返回对应条目（提示条不显示）。
 #[tauri::command]
 pub async fn list_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Value> {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
@@ -764,6 +893,7 @@ pub async fn list_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Value>
     let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
     let language = crate::app::config::get_config(&pool).await.language;
     let stt_enabled = crate::app::stt_config::get_stt_config().enabled;
+    let ai_enabled = crate::app::ai_config::get_ai_config().enabled;
     let Some(registry) = app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
     else {
         return Vec::new();
@@ -772,6 +902,7 @@ pub async fn list_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Value>
         .list(&disabled, &chord_cfg.bindings, &language)
         .into_iter()
         .filter(|a| !(a["id"] == "voice_input" && !stt_enabled))
+        .filter(|a| !(a["id"] == "chat" && !ai_enabled))
         .collect()
 }
 
@@ -780,8 +911,8 @@ pub async fn list_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Value>
 /// 与 `list_chord_actions` 的区别:不过滤 disabled,而是每条附带 `enabled` 字段。
 /// 用于设置页展示"所有可开关的动作",让用户能勾选禁用。
 ///
-/// **voice_input 门禁**：同 `list_chord_actions`，STT 未启用时不返回此条目
-/// （设置页不显示一个用不了的功能的开关）。
+/// **功能总开关门禁**：同 `list_chord_actions`；STT/AI 未启用时不返回对应条目，
+/// 设置页不显示一个当前不可用功能的 Chord 开关。
 #[tauri::command]
 pub async fn list_all_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Value> {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
@@ -789,6 +920,7 @@ pub async fn list_all_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Va
     let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
     let language = crate::app::config::get_config(&pool).await.language;
     let stt_enabled = crate::app::stt_config::get_stt_config().enabled;
+    let ai_enabled = crate::app::ai_config::get_ai_config().enabled;
     let Some(registry) = app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
     else {
         return Vec::new();
@@ -797,6 +929,7 @@ pub async fn list_all_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Va
         .list_all(&disabled, &chord_cfg.bindings, &language)
         .into_iter()
         .filter(|a| !(a["id"] == "voice_input" && !stt_enabled))
+        .filter(|a| !(a["id"] == "chat" && !ai_enabled))
         .collect()
 }
 
@@ -828,8 +961,7 @@ pub async fn set_chord_mode(app: tauri::AppHandle, on: bool) -> Result<(), Strin
     let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
     let language = crate::app::config::get_config(&pool).await.language;
     let stt_enabled = crate::app::stt_config::get_stt_config().enabled;
-    let Some(registry) =
-        app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
+    let Some(registry) = app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
     else {
         return Err("chord registry 未就绪".into());
     };
@@ -895,8 +1027,7 @@ pub async fn list_context_bindings(app: tauri::AppHandle) -> Vec<serde_json::Val
     // ── 路径 2：内置参数化动作的 Context binding（0.11.8 补齐） ────────────
     // BuiltinEngine 自判 context、不走 RuleRouter，故需要单独取数。字段格式与路径 1
     // 完全对齐，前端 renderBindingRow 无需区分来源。
-    if let Some(reg) = app.try_state::<std::sync::Arc<crate::domain::execution::ActionRegistry>>()
-    {
+    if let Some(reg) = app.try_state::<std::sync::Arc<crate::domain::execution::ActionRegistry>>() {
         let disabled_vec: Vec<String> = disabled.iter().cloned().collect();
         bindings.extend(crate::domain::search::list_builtin_context_bindings(
             &disabled_vec,
@@ -1036,7 +1167,7 @@ pub async fn clear_cache_db(app: tauri::AppHandle) -> Result<(), String> {
 
 /// 设置页-关于：应用元信息（版本/名称/描述/仓库）。
 /// 版本从 Cargo.toml 编译期注入（`CARGO_PKG_*`），tauri.conf.json 版本单独在 bundle 层使用。
-/// 保持这两处同步：升版本时改 Cargo.toml + tauri.conf.json 两个地方。
+/// CI release workflow 会根据 git tag 自动同步两处版本；本地开发手动维护 Cargo.toml 即可。
 #[tauri::command]
 pub fn get_app_info() -> serde_json::Value {
     serde_json::json!({
@@ -1076,8 +1207,14 @@ pub async fn check_update(app: tauri::AppHandle) -> serde_json::Value {
         let pool = &app.state::<crate::infra::data::DbPools>().config;
         let cfg = crate::app::config::get_engine_config(&pool, "_global_proxy").await;
         cfg.and_then(|v| {
-            let https = v.get("https").and_then(|s| s.as_str()).filter(|s| !s.is_empty());
-            let http = v.get("http").and_then(|s| s.as_str()).filter(|s| !s.is_empty());
+            let https = v
+                .get("https")
+                .and_then(|s| s.as_str())
+                .filter(|s| !s.is_empty());
+            let http = v
+                .get("http")
+                .and_then(|s| s.as_str())
+                .filter(|s| !s.is_empty());
             https.or(http).map(|s| s.to_string())
         })
     };
@@ -1573,6 +1710,12 @@ pub async fn set_config(
             {
                 reg.reload(&ai);
             }
+            // 对话 Agent 按需重建；memory 归 ChatService 所有，不随配置失效。
+            if let Some(chat) =
+                app.try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
+            {
+                chat.notify_config_changed();
+            }
 
             // 0.12 §2.7: 同步更新 AIConfig 内存缓存（供 CloudSttEngine 等非 async 上下文读取）
             crate::app::ai_config::update_ai_cache(&ai);
@@ -1933,7 +2076,12 @@ async fn fetch_gemini_models(client: &reqwest::Client, url: &str) -> Result<Vec<
 /// ollama API: `GET /api/tags`（无需认证）
 /// - Response: `{ "models": [{ "name": "llama3:latest", ... }] }`
 async fn fetch_ollama_models(client: &reqwest::Client, url: &str) -> Result<Vec<String>, String> {
-    match client.get(url).header("Accept", "application/json").send().await {
+    match client
+        .get(url)
+        .header("Accept", "application/json")
+        .send()
+        .await
+    {
         Ok(resp) if resp.status().is_success() => {
             let models = resp
                 .json::<serde_json::Value>()
@@ -1942,7 +2090,11 @@ async fn fetch_ollama_models(client: &reqwest::Client, url: &str) -> Result<Vec<
                 .and_then(|v| {
                     v.get("models").and_then(|m| m.as_array()).map(|arr| {
                         arr.iter()
-                            .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+                            .filter_map(|m| {
+                                m.get("name")
+                                    .and_then(|n| n.as_str())
+                                    .map(|s| s.to_string())
+                            })
                             .collect::<Vec<_>>()
                     })
                 })
@@ -1957,9 +2109,13 @@ async fn fetch_ollama_models(client: &reqwest::Client, url: &str) -> Result<Vec<
         }
         Ok(resp) => {
             let status = resp.status().as_u16();
-            Err(format!("ollama 连接失败(HTTP {status}),确认 ollama serve 已启动"))
+            Err(format!(
+                "ollama 连接失败(HTTP {status}),确认 ollama serve 已启动"
+            ))
         }
-        Err(e) => Err(format!("ollama 连接失败: {e},确认 ollama serve 已启动且地址正确")),
+        Err(e) => Err(format!(
+            "ollama 连接失败: {e},确认 ollama serve 已启动且地址正确"
+        )),
     }
 }
 
@@ -2038,7 +2194,8 @@ pub async fn get_system_prompt_info(app: tauri::AppHandle) -> Result<serde_json:
     let mut tools = build_aggregated_tools(&action_reg, &cap_reg);
 
     // 参数动态注入 + hints 收集
-    let mut plugin_hints: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut plugin_hints: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     for ph in plugin_engine.all_plugins() {
         let manifest = ph.manifest();
         for td in &manifest.tools {
@@ -2046,7 +2203,8 @@ pub async fn get_system_prompt_info(app: tauri::AppHandle) -> Result<serde_json:
             if let Some(bindings) = &td.setting_bindings {
                 if let Some(pos) = tools.iter().position(|s| s.name == id) {
                     let settings = plugin_engine.get_settings(&manifest.id);
-                    tools[pos] = inject_plugin_settings(tools[pos].clone(), settings.as_ref(), bindings);
+                    tools[pos] =
+                        inject_plugin_settings(tools[pos].clone(), settings.as_ref(), bindings);
                 }
             }
             if let Some(hint) = &td.hint {
@@ -2304,7 +2462,12 @@ async fn test_gemini_endpoint(client: &reqwest::Client, url: &str) -> Result<Str
 ///
 /// ollama 无需认证,只需检查 /api/tags 是否可达。
 async fn test_ollama_endpoint(client: &reqwest::Client, url: &str) -> Result<String, String> {
-    match client.get(url).header("Accept", "application/json").send().await {
+    match client
+        .get(url)
+        .header("Accept", "application/json")
+        .send()
+        .await
+    {
         Ok(resp) if resp.status().is_success() => {
             let count = resp
                 .json::<serde_json::Value>()
@@ -2316,7 +2479,9 @@ async fn test_ollama_endpoint(client: &reqwest::Client, url: &str) -> Result<Str
         }
         Ok(resp) => {
             let status = resp.status().as_u16();
-            Err(format!("ollama 连接失败(HTTP {status}),确认 ollama serve 已启动"))
+            Err(format!(
+                "ollama 连接失败(HTTP {status}),确认 ollama serve 已启动"
+            ))
         }
         Err(e) => Err(format!(
             "ollama 连接失败: {e},确认 ollama serve 已启动且地址正确"
@@ -2403,8 +2568,8 @@ pub async fn probe_everything(port: u16) -> bool {
 pub async fn get_plugins(app: tauri::AppHandle) -> Vec<serde_json::Value> {
     let engine = app.state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>();
     // 读当前语言,供 manifest 配置文案按 locale 取值(设置页中英双语)
-let pool = &app.state::<crate::infra::data::DbPools>().config;
-let lang = crate::app::config::get_config(&pool).await.language;
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
+    let lang = crate::app::config::get_config(&pool).await.language;
     engine.list_plugins(&lang)
 }
 
@@ -2509,7 +2674,7 @@ pub async fn get_engine_config(
     engine_id: String,
 ) -> Result<serde_json::Value, String> {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
-Ok(crate::app::config::get_engine_config(&pool, &engine_id)
+    Ok(crate::app::config::get_engine_config(&pool, &engine_id)
         .await
         .unwrap_or_else(|| serde_json::json!({})))
 }
@@ -2525,7 +2690,7 @@ pub async fn get_context_config(
         return Ok(mem.read().unwrap().clone());
     }
     let pool = &app.state::<crate::infra::data::DbPools>().config;
-Ok(crate::app::config::get_context_config(&pool).await)
+    Ok(crate::app::config::get_context_config(&pool).await)
 }
 
 /// 打开文件/快捷方式所在文件夹（explorer /select 定位选中）。
@@ -2767,8 +2932,8 @@ pub async fn show_context_menu(
 
     // 主题 resolve（auto → dark/light）
     let theme = {
-    let pool = &app.state::<crate::infra::data::DbPools>().config;
-    let raw = crate::app::config::get_config(&pool).await.theme;
+        let pool = &app.state::<crate::infra::data::DbPools>().config;
+        let raw = crate::app::config::get_config(&pool).await.theme;
         if raw == "auto" {
             let is_light = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
                 .open_subkey("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize")
@@ -3510,7 +3675,10 @@ fn emit_funasr_log(app: &tauri::AppHandle, line: &str) {
         }
         buf.push_back(entry.clone());
     }
-    let _ = app.emit("blink://funasr-server-log", serde_json::json!({ "line": line }));
+    let _ = app.emit(
+        "blink://funasr-server-log",
+        serde_json::json!({ "line": line }),
+    );
 }
 
 /// 获取 funasr-server 历史日志（带时间戳）。
@@ -3519,12 +3687,7 @@ fn emit_funasr_log(app: &tauri::AppHandle, line: &str) {
 /// 避免用户打开设置页后看不到服务启动过程。
 #[tauri::command]
 pub fn get_funasr_log_history() -> Vec<String> {
-    FUNASR_LOG_BUFFER
-        .lock()
-        .unwrap()
-        .iter()
-        .cloned()
-        .collect()
+    FUNASR_LOG_BUFFER.lock().unwrap().iter().cloned().collect()
 }
 
 /// 查询 Python 环境 + funasr-server 状态。
@@ -3534,12 +3697,12 @@ pub fn get_funasr_log_history() -> Vec<String> {
 /// 异步执行：Python 子进程检测在 spawn_blocking 线程池中执行，不阻塞 UI 线程。
 #[tauri::command]
 pub async fn get_funasr_env() -> crate::domain::stt::funasr::FunasrEnv {
-let config = crate::app::stt_config::get_stt_config();
-crate::domain::stt::funasr::get_env_status_async(
-config.local_engine.server_port,
-config.local_engine.funasr_model.clone(),
-)
-.await
+    let config = crate::app::stt_config::get_stt_config();
+    crate::domain::stt::funasr::get_env_status_async(
+        config.local_engine.server_port,
+        config.local_engine.funasr_model.clone(),
+    )
+    .await
 }
 
 /// 一键安装 Python 环境（uv + venv + funasr）。
@@ -3570,11 +3733,11 @@ pub async fn setup_python_env(app: tauri::AppHandle) -> Result<(), String> {
             );
         });
 
-// 日志回调：转发到前端 blink://funasr-server-log（含 uv 逐行安装进度）
-let app_log = app.clone();
-let on_log: std::sync::Arc<dyn Fn(&str) + Send + Sync> = std::sync::Arc::new(move |line| {
-emit_funasr_log(&app_log, line);
-});
+    // 日志回调：转发到前端 blink://funasr-server-log（含 uv 逐行安装进度）
+    let app_log = app.clone();
+    let on_log: std::sync::Arc<dyn Fn(&str) + Send + Sync> = std::sync::Arc::new(move |line| {
+        emit_funasr_log(&app_log, line);
+    });
 
     let device = crate::app::stt_config::get_stt_config().local_engine.device;
     crate::infra::platform::python::setup_with_progress(&device, on_progress, on_log).await
@@ -3622,7 +3785,8 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
     // 若 device==cuda 但 PyTorch 为 CPU 版，会自动重装 CUDA 版。
     let py_status = crate::infra::platform::python::check_status_async().await;
     if !py_status.env_ready || (device == "cuda" && !py_status.torch_cuda_available) {
-        let need_cuda_reinstall = device == "cuda" && py_status.torch_installed && !py_status.torch_cuda_available;
+        let need_cuda_reinstall =
+            device == "cuda" && py_status.torch_installed && !py_status.torch_cuda_available;
         let _ = app.emit(
             "blink://funasr-server-status",
             serde_json::json!({ "stage": "setup_env", "message": "正在安装 Python 环境..." }),
@@ -3640,10 +3804,7 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
                 if device == "cuda" {
                     let cuda_ok = crate::infra::platform::python::check_torch_cuda();
                     if cuda_ok {
-                        emit_funasr_log(
-                            &app,
-                            "[Blink] ✅ PyTorch CUDA 支持已就绪，GPU 加速可用",
-                        );
+                        emit_funasr_log(&app, "[Blink] ✅ PyTorch CUDA 支持已就绪，GPU 加速可用");
                     } else {
                         emit_funasr_log(
                             &app,
@@ -3695,9 +3856,7 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
         } else {
             emit_funasr_log(
                 &app,
-                &format!(
-                    "[Blink] ⚠️ 端口 {port} 被占用但无法定位进程，请手动检查任务管理器"
-                ),
+                &format!("[Blink] ⚠️ 端口 {port} 被占用但无法定位进程，请手动检查任务管理器"),
             );
         }
         // 等端口释放
@@ -3819,8 +3978,7 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
                     }
 
                     // 检查模型加载状态（/health 端点的 model_status 字段）
-                    let model_status =
-                        crate::domain::stt::funasr::check_model_loaded(port).await;
+                    let model_status = crate::domain::stt::funasr::check_model_loaded(port).await;
                     match model_status {
                         crate::domain::stt::funasr::ModelLoadStatus::Ready => {
                             let _ = app_clone.emit(
@@ -3898,8 +4056,7 @@ pub async fn start_funasr_server(app: tauri::AppHandle) -> Result<(), String> {
                         crate::domain::stt::funasr::mark_server_stopped();
                         return;
                     }
-                    let model_status =
-                        crate::domain::stt::funasr::check_model_loaded(port).await;
+                    let model_status = crate::domain::stt::funasr::check_model_loaded(port).await;
                     match model_status {
                         crate::domain::stt::funasr::ModelLoadStatus::Ready => {
                             let _ = app_clone.emit(
@@ -3955,11 +4112,11 @@ pub async fn stop_funasr_server() -> Result<(), String> {
     drop(child_opt);
 
     // 2. 检查端口是否仍被占（可能是孤儿进程）
-    let port = crate::app::stt_config::get_stt_config().local_engine.server_port;
+    let port = crate::app::stt_config::get_stt_config()
+        .local_engine
+        .server_port;
     if crate::domain::stt::funasr::is_server_ready(port) {
-        if let Some(pid) =
-            crate::infra::platform::process::kill_process_by_port(port)
-        {
+        if let Some(pid) = crate::infra::platform::process::kill_process_by_port(port) {
             tracing::warn!(pid, port, "停止服务时检测到孤儿进程，已清理");
         }
         // 等端口释放
@@ -4009,11 +4166,11 @@ pub async fn diagnose_stt() -> Result<serde_json::Value, String> {
     tracing::info!("=== STT 诊断开始 ===");
 
     // ── FunASR 环境状态（异步，不阻塞 UI）──
-let env = crate::domain::stt::funasr::get_env_status_async(
-port,
-config.local_engine.funasr_model.clone(),
-)
-.await;
+    let env = crate::domain::stt::funasr::get_env_status_async(
+        port,
+        config.local_engine.funasr_model.clone(),
+    )
+    .await;
 
     let server_ready_tcp = crate::domain::stt::funasr::is_server_ready(port);
     let model_status = if server_ready_tcp {
@@ -4293,7 +4450,10 @@ pub async fn test_cloud_stt() -> Result<serde_json::Value, String> {
             } else if err_str.contains("401") || err_str.contains("403") {
                 "认证失败（401/403）。请检查 API Key 是否正确，以及是否有相应权限。".to_string()
             } else if err_str.contains("400") {
-                format!("请求参数错误（400）。请检查模型 ID「{}」是否正确。原始错误: {err_str}", endpoint.model_id)
+                format!(
+                    "请求参数错误（400）。请检查模型 ID「{}」是否正确。原始错误: {err_str}",
+                    endpoint.model_id
+                )
             } else {
                 err_str
             };
@@ -4343,8 +4503,8 @@ pub async fn get_stt_space_usage() -> serde_json::Value {
     // ModelScope 模型缓存：Blink 将其重定向到 python/models 目录（通过 MODELSCOPE_CACHE 环境变量）。
     // 旧版本可能仍在 ~/.cache/modelscope，也检查并显示。
     let models_dir = python_dir.join("models");
-    let legacy_modelscope_cache = dirs_next::home_dir()
-        .map(|h| h.join(".cache").join("modelscope"));
+    let legacy_modelscope_cache =
+        dirs_next::home_dir().map(|h| h.join(".cache").join("modelscope"));
 
     let mut items = Vec::new();
     let mut total_bytes: u64 = 0;
@@ -4482,8 +4642,7 @@ pub fn open_stt_folder() -> Result<(), String> {
 
     // 目录不存在时先创建，避免 explorer 打开"文档"等默认位置
     if !python_dir.exists() {
-        std::fs::create_dir_all(&python_dir)
-            .map_err(|e| format!("创建目录失败: {e}"))?;
+        std::fs::create_dir_all(&python_dir).map_err(|e| format!("创建目录失败: {e}"))?;
     }
 
     tracing::info!(path = %python_dir.display(), "打开 STT 文件夹");

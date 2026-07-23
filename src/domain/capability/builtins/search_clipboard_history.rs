@@ -86,19 +86,19 @@ impl Capability for SearchClipboardHistory {
             .map(|n| n as i64)
             .unwrap_or(30);
 
-        let pool = &ctx.app_handle.state::<crate::infra::data::DbPools>().history;
+        let pool = &ctx
+            .app_handle
+            .state::<crate::infra::data::DbPools>()
+            .history;
 
         // 铁则 1：用 deadline 包裹 DB 查询
-        let items = tokio::time::timeout_at(
-            ctx.deadline_or_far_future(),
-            async {
-                if query.trim().is_empty() {
-                    query_recent(&pool, max_results).await
-                } else {
-                    search_history(&pool, query, max_results).await
-                }
-            },
-        )
+        let items = tokio::time::timeout_at(ctx.deadline_or_far_future(), async {
+            if query.trim().is_empty() {
+                query_recent(&pool, max_results).await
+            } else {
+                search_history(&pool, query, max_results).await
+            }
+        })
         .await
         .map_err(|_| CapabilityError::Timeout {
             detail: format!("search_clipboard_history 超时（query: {query}）"),

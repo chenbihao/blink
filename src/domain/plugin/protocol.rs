@@ -486,7 +486,8 @@ mod tests {
     fn legacy_plugin_item_without_payload_parses_as_none() {
         // 老插件/core 发的 PluginItem 无 payload 字段 → serde default 补 None,向后兼容。
         // 这是 0.11.0 改进 1 的核心契约:老插件不填 payload 仍能正常工作。
-        let json = r#"{"title":"本机 IP","score":0.9,"action":{"type":"copy","text":"192.168.1.5"}}"#;
+        let json =
+            r#"{"title":"本机 IP","score":0.9,"action":{"type":"copy","text":"192.168.1.5"}}"#;
         let item: PluginItem = serde_json::from_str(json).unwrap();
         assert_eq!(item.title, "本机 IP");
         assert!(item.payload.is_none(), "老 JSON 无 payload 应解析为 None");

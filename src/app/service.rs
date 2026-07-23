@@ -184,10 +184,8 @@ impl Service for HotkeyService {
                         // 不启动录音。这让设置页的 voice_input 开关真正生效（而非仅控显示）。
                         let pool = &app.state::<crate::infra::data::DbPools>().config;
                         let chord_cfg = crate::app::config::get_chord_config(&pool).await;
-                        let disabled =
-                            crate::app::config::get_disabled_chord_actions(&pool).await;
-                        let voice_disabled =
-                            disabled.iter().any(|d| d == "voice_input");
+                        let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
+                        let voice_disabled = disabled.iter().any(|d| d == "voice_input");
                         if chord_cfg.chord_enabled && !voice_disabled {
                             voice_service.start_recording().await;
                         } else {
@@ -209,7 +207,8 @@ impl Service for HotkeyService {
                     crate::infra::platform::hotkey::HotkeyEvent::Chord(key) => {
                         // 0.10.7.2：chord 独占模式吞键后,前端收不到 keydown,
                         // 由 hook 发此事件,此处复用 trigger_chord 逻辑触发动作。
-                        let Some(registry) = app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
+                        let Some(registry) =
+                            app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
                         else {
                             tracing::warn!("chord registry 未就绪,跳过 Chord 事件");
                             continue;
@@ -219,7 +218,9 @@ impl Service for HotkeyService {
                         let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
                         let key_lower = key.to_lowercase();
                         // 门禁：disabled 列表命中即跳过
-                        if let Some(action_id) = registry.action_id_for_key(&key_lower, &chord_cfg.bindings) {
+                        if let Some(action_id) =
+                            registry.action_id_for_key(&key_lower, &chord_cfg.bindings)
+                        {
                             if disabled.iter().any(|d| d == action_id) {
                                 tracing::debug!(%key_lower, %action_id, "chord 已禁用,跳过触发");
                                 continue;

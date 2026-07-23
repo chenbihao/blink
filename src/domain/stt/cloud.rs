@@ -122,7 +122,10 @@ pub(crate) fn resolve_stt_endpoint(
             .iter()
             .find(|p| p.id == cloud.provider_id)
             .ok_or_else(|| {
-                SttError::Engine(format!("STT 供应商 {} 未在 AI 配置中找到", cloud.provider_id))
+                SttError::Engine(format!(
+                    "STT 供应商 {} 未在 AI 配置中找到",
+                    cloud.provider_id
+                ))
             })?;
 
         // ollama 是 LLM 推理服务，不支持 STT--早返友好错误（防用户误选）
@@ -269,13 +272,17 @@ mod tests {
     #[test]
     fn is_chat_completion_asr_detects_mimo_by_base_url() {
         // mimo 域名 -> true
-        assert!(is_chat_completion_asr(&Some("https://api.xiaomimimo.com/v1".into())));
+        assert!(is_chat_completion_asr(&Some(
+            "https://api.xiaomimimo.com/v1".into()
+        )));
         assert!(is_chat_completion_asr(&Some(
             "https://token-plan-cn.xiaomimimo.com/v1".into()
         )));
 
         // 非 mimo -> false
-        assert!(!is_chat_completion_asr(&Some("https://api.openai.com/v1".into())));
+        assert!(!is_chat_completion_asr(&Some(
+            "https://api.openai.com/v1".into()
+        )));
         assert!(!is_chat_completion_asr(&Some(
             "https://api.groq.com/openai/v1".into()
         )));

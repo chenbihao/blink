@@ -192,7 +192,6 @@ pub(crate) fn build_ollama_client(
         .map_err(|e| AIError::Provider(format!("ollama client 构造失败: {e}")))
 }
 
-
 /// OpenAI Chat Completions 协议——**通用兼容层**(0.9.2 第二步)。
 ///
 /// **覆盖范围**:OpenAI 官方 / DeepSeek / 硅基流动 / Moonshot / Groq / OpenRouter /

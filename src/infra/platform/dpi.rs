@@ -11,9 +11,7 @@
 #![allow(dead_code)] // 部分函数按需调用，未必全用上
 
 use windows::Win32::Foundation::HWND;
-use windows::Win32::Graphics::Gdi::{
-    MONITOR_DEFAULTTONEAREST, MonitorFromWindow,
-};
+use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromWindow};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 
 /// 默认 DPI（100% 缩放）。失败兜底值。

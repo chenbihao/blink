@@ -48,9 +48,7 @@ static LAST_CHANGED_AT: OnceLock<RwLock<Option<Instant>>> = OnceLock::new();
 ///
 /// 返回 `None` 表示自进程启动以来剪贴板从未变化过（或 hook 未触发过）。
 pub fn last_changed_at() -> Option<Instant> {
-    LAST_CHANGED_AT
-        .get()
-        .and_then(|lock| *lock.read().unwrap())
+    LAST_CHANGED_AT.get().and_then(|lock| *lock.read().unwrap())
 }
 
 /// 启动剪贴板监听（幂等）。监听线程持有 pool + cfg，WM_CLIPBOARDUPDATE 时存。
@@ -193,7 +191,9 @@ pub fn write_png_to_clipboard(png_data: &[u8]) -> Result<(), String> {
             }
             write_bgra_to_clipboard(&bgra, w, h)
         }
-        other => Err(format!("不支持的 PNG 颜色类型: {other:?}，期望 RGBA/RGB/Grayscale/GrayscaleAlpha")),
+        other => Err(format!(
+            "不支持的 PNG 颜色类型: {other:?}，期望 RGBA/RGB/Grayscale/GrayscaleAlpha"
+        )),
     }
 }
 

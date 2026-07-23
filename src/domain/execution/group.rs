@@ -255,8 +255,7 @@ pub fn inject_plugin_settings(
             continue; // 该 setting 未配置，跳过
         };
         // 跳过 null 和空字符串——视为"未配置"
-        let is_empty = setting_val.is_null()
-            || setting_val.as_str().is_some_and(|s| s.is_empty());
+        let is_empty = setting_val.is_null() || setting_val.as_str().is_some_and(|s| s.is_empty());
         if is_empty {
             continue;
         }
@@ -431,7 +430,10 @@ mod tests {
         let desc = result.parameters["properties"]["city"]["description"]
             .as_str()
             .unwrap();
-        assert!(desc.contains("（默认: 北京）"), "description 应含默认值增强: {desc}");
+        assert!(
+            desc.contains("（默认: 北京）"),
+            "description 应含默认值增强: {desc}"
+        );
     }
 
     #[test]
@@ -448,25 +450,30 @@ mod tests {
             Some(&settings_null),
             &bindings,
         );
-        assert!(result.parameters["required"]
-            .as_array()
-            .unwrap()
-            .contains(&serde_json::json!("city")));
+        assert!(
+            result.parameters["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("city"))
+        );
 
         // 空字符串
         let settings_empty = serde_json::json!({"default_city": ""});
         let result = inject_plugin_settings(schema, Some(&settings_empty), &bindings);
-        assert!(result.parameters["required"]
-            .as_array()
-            .unwrap()
-            .contains(&serde_json::json!("city")));
+        assert!(
+            result.parameters["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("city"))
+        );
     }
 
     #[test]
     fn inject_handles_multiple_bindings_simultaneously() {
         // 同时绑定 city→default_city 和 unit→temperature_unit
         let schema = weather_schema_with_city_required();
-        let settings = serde_json::json!({"default_city": "上海", "temperature_unit": "fahrenheit"});
+        let settings =
+            serde_json::json!({"default_city": "上海", "temperature_unit": "fahrenheit"});
         let mut bindings = HashMap::new();
         bindings.insert("city".to_string(), "default_city".to_string());
         bindings.insert("unit".to_string(), "temperature_unit".to_string());
@@ -537,6 +544,9 @@ mod tests {
         let result = inject_plugin_settings(schema, Some(&settings), &bindings);
         let required = result.parameters["required"].as_array().unwrap();
         assert!(!required.contains(&serde_json::json!("city")));
-        assert!(required.contains(&serde_json::json!("text")), "未绑定的 required 应保留");
+        assert!(
+            required.contains(&serde_json::json!("text")),
+            "未绑定的 required 应保留"
+        );
     }
 }

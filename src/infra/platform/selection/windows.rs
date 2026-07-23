@@ -29,9 +29,9 @@ use std::time::Instant;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::{
-    IUIAutomation, IUIAutomationCondition, IUIAutomationElement,
-    IUIAutomationTextPattern, PropertyConditionFlags_None, TreeScope_Ancestors,
-    TreeScope_Descendants, UIA_IsTextPatternAvailablePropertyId, UIA_TextPatternId,
+    IUIAutomation, IUIAutomationCondition, IUIAutomationElement, IUIAutomationTextPattern,
+    PropertyConditionFlags_None, TreeScope_Ancestors, TreeScope_Descendants,
+    UIA_IsTextPatternAvailablePropertyId, UIA_TextPatternId,
 };
 use windows::core::Interface;
 
@@ -59,18 +59,19 @@ pub(crate) fn get_selected_text(hwnd_raw: isize) -> Option<String> {
     }
     // COM 初始化 + UIA 实例创建（从公共 uia 模块）
     let _com = uia::ComGuard::init_mta();
-    let automation: IUIAutomation =
-        match unsafe { windows::Win32::System::Com::CoCreateInstance(
+    let automation: IUIAutomation = match unsafe {
+        windows::Win32::System::Com::CoCreateInstance(
             &windows::Win32::UI::Accessibility::CUIAutomation,
             None,
             windows::Win32::System::Com::CLSCTX_ALL,
-        ) } {
-            Ok(a) => a,
-            Err(e) => {
-                tracing::debug!(error = %e, "选区抓取：CoCreateInstance(CUIAutomation) 失败");
-                return None;
-            }
-        };
+        )
+    } {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::debug!(error = %e, "选区抓取：CoCreateInstance(CUIAutomation) 失败");
+            return None;
+        }
+    };
 
     let start = Instant::now();
 

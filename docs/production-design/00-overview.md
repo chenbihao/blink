@@ -2,7 +2,7 @@
 
 > **定位**: Windows 丝滑启动器 —— 感知用户上下文、主动推荐动作，让任何操作都比原来的路径更快。
 >
-> **状态**: 0.8 归档；0.9 完成（Agent 地基 + Capability 能力协议层）；0.10 完成（语音输入 STT + 语音打字 + 伪流式 VAD 切句 + FunASR 本地化）；0.11 完成（插件通信契约重设计 + AI 调用插件链路完善 + 截图标注增强 + OCR word 级链路 + 阅读模式 + 翻译衔接 + 水印独立图层）；0.11.10 完成（图上翻译 + 截图交互重构 —— overlayLayer 单例图层 + 识别/翻译共用一层 + 面板召唤式抽屉 + 选取工具 + 预热 OCR + line 级批量翻译）；**0.12.0 完成**（基础设施抽取与清账：投影统一 / DB 四层拆分 / Provider 模型统一管理 chat+embedding+STT / ollama+lmstudio 接入 / Tool 适配层 + 危险确认闭环骨架 / CapabilityRegistry 动态注册 / 存储页优化），**0.12.1 进行中**（对话窗口骨架：独立窗口 + AgentProvider + Alt+Q chord）。下一站 **0.12.2 对话机制**（conversation 隔离 + 持久化 memory + tool loop 无限轮）；**0.13 AI 调用能力扩展**（MCP client / RAG / MCP server / Skill / 记忆向量召回 —— 详见 [0.13 文档](./phases/0.13-ai-capability-expansion.md)）。
+> **状态**: 0.8 归档；0.9 完成（Agent 地基 + Capability 能力协议层）；0.10 完成（语音输入）；0.11 完成（插件 AI toolchain + 截图/OCR/图上翻译）；**0.12.0 完成**（DB 四层拆分 / Provider 模型统一 / ollama / Tool 适配层 / 危险确认闭环），**0.12.1 进行中，Phase 0～2 已完成**（rig Agent spike / AgentProvider / Alt+Q / 独立 chat 窗口最小壳），测试基线 **818 通过**。下一步：ChatService、IPC 和正式 chat UI；0.12.2 再做多对话与 SQLite memory；0.13 扩展 MCP / RAG / Skill。
 > **更新时间**: 2026-07-23
 
 ---
@@ -104,9 +104,9 @@
 | **0.10.4** | 伪流式 VAD 切句定稿 + 累积预览 + 移除真流式 + 架构清理 | ✅ 完成 |
 | **0.10.5** | 收尾体验优化（VAD 滑动条 + 高级选项 UI + 文档精简） | ✅ 完成 |
 | **0.11.x** | 插件通信契约重设计 + AI 调用插件链路完善 + 截图标注增强 + OCR word 级 + 阅读模式 + 翻译衔接 + 水印独立图层（0.11.0~0.11.9）| ✅ 完成 |
-| **0.11.10** | 图上翻译 + 截图交互重构（`overlayLayer` 单例 + 识别/翻译共用一层 + 面板召唤式抽屉 + 选取工具 + 预热 OCR + line 级批量翻译 + 命名 OCR→识别）| ✅ 基本完成 |
+| **0.11.10** | 图上翻译 + 截图交互重构（`overlayLayer` 单例 + 识别/翻译共用一层 + 面板召唤式抽屉 + 选取工具 + 预热 OCR + line 级批量翻译 + 命名 OCR→识别）| ✅ 完成 |
 | **0.12.0** | 基础设施抽取与清账（投影统一 / DB 四层拆分 config+history+AI+cache / Provider 模型统一 chat+embedding+STT / ollama 接入 / Tool 适配层 + 危险确认闭环 / CapabilityRegistry 动态注册 / 存储页优化 / message serde 核查）| ✅ 完成 |
-| **0.12.1** | 对话窗口骨架（独立窗口 + AgentProvider + Alt+Q chord + 单轮流式，挂 Tool 适配器）| 🔧 进行中 |
+| **0.12.1** | 对话窗口骨架（Phase 0 rig Agent spike ✅ / Phase 1 AgentProvider ✅ / Phase 2 Alt+Q + 最小窗口壳 ✅；待 ChatService / IPC / 正式 UI）| 🔧 进行中 |
 | **0.12.2** | 对话机制（conversation 隔离 + 持久化 memory + 滑动窗口 + tool loop 无限轮）| 📋 规划中 |
 | **0.13.x** | AI 调用能力扩展（MCP client / RAG / 记忆向量召回 / MCP server / Skill 化）| 📋 规划中 |
 

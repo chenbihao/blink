@@ -112,6 +112,10 @@ pub struct PluginItem {
 pub enum PluginAction {
     #[default]
     None,
-    Copy { text: String },
-    Open { path: String },
+    Copy {
+        text: String,
+    },
+    Open {
+        path: String,
+    },
 }

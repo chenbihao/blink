@@ -107,13 +107,17 @@ impl VoiceService {
         // 必须在任何 .await 之前设置——否则 await 期间 Space 自动重复键穿透到输入框，
         // 打出一堆空格导致 chordEligible() 失效。
         // guard 确保所有早退路径（服务未就绪 / 模型加载中等）清除标志。
-        struct VoiceRecordingGuard { armed: bool }
+        struct VoiceRecordingGuard {
+            armed: bool,
+        }
         impl VoiceRecordingGuard {
             fn new() -> Self {
                 crate::infra::platform::hotkey::set_voice_recording(true);
                 Self { armed: true }
             }
-            fn disarm(&mut self) { self.armed = false; }
+            fn disarm(&mut self) {
+                self.armed = false;
+            }
         }
         impl Drop for VoiceRecordingGuard {
             fn drop(&mut self) {
@@ -285,17 +289,14 @@ impl VoiceService {
                             Ok(text) => {
                                 if !text.is_empty() {
                                     // 尝试解析 JSON（伪流式引擎返回 confirmed + preview）
-                                    if let Ok(v) =
-                                        serde_json::from_str::<serde_json::Value>(&text)
+                                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
                                     {
                                         let confirmed = v
                                             .get("confirmed")
                                             .and_then(|t| t.as_str())
                                             .unwrap_or("");
-                                        let preview = v
-                                            .get("preview")
-                                            .and_then(|t| t.as_str())
-                                            .unwrap_or("");
+                                        let preview =
+                                            v.get("preview").and_then(|t| t.as_str()).unwrap_or("");
                                         // 只在有内容时 emit
                                         if !confirmed.is_empty() || !preview.is_empty() {
                                             let _ = app.emit(
@@ -387,10 +388,7 @@ impl VoiceService {
         // 加 10s 超时保护：即使 abort 后仍有异常情况（如 WS 半连接），不会永久卡住
         let final_text = match engine {
             Some(e) => {
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(10),
-                    e.finalize(),
-                ).await {
+                match tokio::time::timeout(std::time::Duration::from_secs(10), e.finalize()).await {
                     Ok(Ok(text)) => text,
                     Ok(Err(e)) => {
                         tracing::warn!(%e, "STT finalize 失败");

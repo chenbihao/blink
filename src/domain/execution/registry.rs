@@ -239,11 +239,14 @@ mod tests {
             "exit_blink 不该暴露给 AI"
         );
         // 其余动作默认 true（含 Dangerous 的 shutdown/lock 等--有确认卡片挡）
-        for id in ["open_settings", "open_url", "shutdown", "lock", "clear_history"] {
-            assert!(
-                reg.get(id).unwrap().ai_eligible(),
-                "{id} 默认应暴露给 AI"
-            );
+        for id in [
+            "open_settings",
+            "open_url",
+            "shutdown",
+            "lock",
+            "clear_history",
+        ] {
+            assert!(reg.get(id).unwrap().ai_eligible(), "{id} 默认应暴露给 AI");
         }
     }
 

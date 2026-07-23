@@ -49,7 +49,7 @@ jobs:
       - name: 拷贝插件到 bin
         run: cargo xtask copy
 
-      # ── 同步版本号：用 Git Tag 覆盖 tauri.conf.json 中的版本 ───────────────────
+      # ── 同步版本号：用 Git Tag 同时覆盖 tauri.conf.json 和 Cargo.toml 中的版本 ──
       - name: Sync version from Git tag
         shell: bash
         run: |
@@ -64,8 +64,14 @@ jobs:
             \$content | ConvertTo-Json -Depth 10 | Set-Content 'tauri.conf.json' -NoNewline
           "
 
+          # 同步 Cargo.toml（[package] 段的 version 字段）
+          sed -i '0,/^version\s*=\s*".*"/s//version = "'"$VERSION"'"/' Cargo.toml
+
           # 验证修改
-          cat tauri.conf.json | grep version
+          echo "--- tauri.conf.json ---"
+          grep '"version"' tauri.conf.json | head -1
+          echo "--- Cargo.toml ---"
+          grep '^version' Cargo.toml | head -1
 
       # ── 构建 ───────────────────────
       - name: Build Tauri app

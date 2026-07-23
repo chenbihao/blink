@@ -168,9 +168,16 @@ pub async fn query_recent_days(pool: &SqlitePool, days: u32, limit: i64) -> Vec<
     .await
     .unwrap_or_default()
     .into_iter()
-    .map(|(id, text, preview, created_at, source_app, hit_count)| ClipboardItem {
-        id, text, preview, created_at, source_app, hit_count,
-    })
+    .map(
+        |(id, text, preview, created_at, source_app, hit_count)| ClipboardItem {
+            id,
+            text,
+            preview,
+            created_at,
+            source_app,
+            hit_count,
+        },
+    )
     .collect()
 }
 

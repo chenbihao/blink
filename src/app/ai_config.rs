@@ -1003,9 +1003,18 @@ mod tests {
     #[test]
     fn provider_kind_as_serde_str_matches_serde_rename() {
         // 与 serde rename 对齐
-        assert_eq!(ProviderKind::OpenAICompatible.as_serde_str(), "openai_compatible");
-        assert_eq!(ProviderKind::AnthropicMessages.as_serde_str(), "anthropic_messages");
-        assert_eq!(ProviderKind::GeminiGenerateContent.as_serde_str(), "gemini_generate_content");
+        assert_eq!(
+            ProviderKind::OpenAICompatible.as_serde_str(),
+            "openai_compatible"
+        );
+        assert_eq!(
+            ProviderKind::AnthropicMessages.as_serde_str(),
+            "anthropic_messages"
+        );
+        assert_eq!(
+            ProviderKind::GeminiGenerateContent.as_serde_str(),
+            "gemini_generate_content"
+        );
         // 0.12
         assert_eq!(ProviderKind::OllamaHttp.as_serde_str(), "ollama_http");
     }

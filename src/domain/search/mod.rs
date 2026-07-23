@@ -190,8 +190,8 @@ use start_menu_engine::StartMenuEngine;
 
 // 多路搜索服务:路由 + 融合 + 渐进式调度
 mod service;
-pub use service::{EngineConfigUpdate, SearchResponse, SearchService};
 pub(crate) use service::outcome_to_summary;
+pub use service::{EngineConfigUpdate, SearchResponse, SearchService};
 
 /// 引擎配置集合（三层独立控制）。
 pub struct EngineConfigs {

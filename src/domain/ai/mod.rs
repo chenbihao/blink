@@ -15,6 +15,7 @@
 //! `AgentBuilder / prompt / memory`——这些留 0.10 落 `agent_window/` 独立模块。
 
 pub mod agent_provider;
+pub mod chat_service;
 pub mod factory;
 pub mod gating;
 pub mod message;
@@ -32,4 +33,4 @@ pub use message::{ChatMessage, CompletionRequest, CompletionResponse, Role, Tool
 #[allow(unused_imports)]
 pub use provider::{AIError, AIProvider, StreamChunk};
 #[allow(unused_imports)]
-pub use registry::{AIProviderRegistry, ProviderFactory};
+pub use registry::{AIProviderRegistry, ProviderFactory, ResolvedProviderEntries};

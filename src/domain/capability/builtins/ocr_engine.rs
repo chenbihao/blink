@@ -381,7 +381,12 @@ impl OcrBackend for WindowsOcrBackend {
                                 w: r.Width.round().max(0.0) as u32,
                                 h: r.Height.round().max(0.0) as u32,
                             })
-                            .unwrap_or(OcrRect { x: 0, y: 0, w: 0, h: 0 });
+                            .unwrap_or(OcrRect {
+                                x: 0,
+                                y: 0,
+                                w: 0,
+                                h: 0,
+                            });
                         let idx = words.len();
                         words.push(OcrWord {
                             text,
@@ -397,7 +402,12 @@ impl OcrBackend for WindowsOcrBackend {
                         .iter()
                         .map(|&idx| words[idx].bounding_rect),
                 )
-                .unwrap_or(OcrRect { x: 0, y: 0, w: 0, h: 0 });
+                .unwrap_or(OcrRect {
+                    x: 0,
+                    y: 0,
+                    w: 0,
+                    h: 0,
+                });
 
                 // 跳过空行(SDK 偶尔给空 Line + 空 Words),不进 lines
                 if !line_text.is_empty() || !line_word_indices.is_empty() {
@@ -527,7 +537,12 @@ mod tests {
     fn w(text: &str, line: usize) -> OcrWord {
         OcrWord {
             text: text.into(),
-            bounding_rect: OcrRect { x: 0, y: 0, w: 0, h: 0 },
+            bounding_rect: OcrRect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            },
             line_index: line,
         }
     }
@@ -578,12 +593,22 @@ mod tests {
         let lines = vec![
             OcrLine {
                 text: "fallback line 1".into(),
-                bounding_rect: OcrRect { x: 0, y: 0, w: 0, h: 0 },
+                bounding_rect: OcrRect {
+                    x: 0,
+                    y: 0,
+                    w: 0,
+                    h: 0,
+                },
                 word_indices: vec![],
             },
             OcrLine {
                 text: "fallback line 2".into(),
-                bounding_rect: OcrRect { x: 0, y: 0, w: 0, h: 0 },
+                bounding_rect: OcrRect {
+                    x: 0,
+                    y: 0,
+                    w: 0,
+                    h: 0,
+                },
                 word_indices: vec![],
             },
         ];
@@ -611,28 +636,53 @@ mod tests {
 
     #[test]
     fn rect_union_returns_none_when_all_zero() {
-        let empties = [OcrRect { x: 0, y: 0, w: 0, h: 0 }; 3];
+        let empties = [OcrRect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        }; 3];
         assert!(rect_union(empties.into_iter()).is_none());
     }
 
     #[test]
     fn rect_union_computes_bounding_box() {
         let rects = vec![
-            OcrRect { x: 10, y: 20, w: 30, h: 40 },  // 右下 (40, 60)
-            OcrRect { x: 50, y: 5,  w: 20, h: 10 },  // 右下 (70, 15)
+            OcrRect {
+                x: 10,
+                y: 20,
+                w: 30,
+                h: 40,
+            }, // 右下 (40, 60)
+            OcrRect {
+                x: 50,
+                y: 5,
+                w: 20,
+                h: 10,
+            }, // 右下 (70, 15)
         ];
         let u = rect_union(rects.into_iter()).unwrap();
         assert_eq!(u.x, 10);
         assert_eq!(u.y, 5);
-        assert_eq!(u.w, 60);  // 70 - 10
-        assert_eq!(u.h, 55);  // 60 - 5
+        assert_eq!(u.w, 60); // 70 - 10
+        assert_eq!(u.h, 55); // 60 - 5
     }
 
     #[test]
     fn rect_union_skips_zero_rects() {
         let rects = vec![
-            OcrRect { x: 0, y: 0, w: 0, h: 0 },
-            OcrRect { x: 10, y: 10, w: 20, h: 20 },
+            OcrRect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            },
+            OcrRect {
+                x: 10,
+                y: 10,
+                w: 20,
+                h: 20,
+            },
         ];
         let u = rect_union(rects.into_iter()).unwrap();
         assert_eq!(u.x, 10);

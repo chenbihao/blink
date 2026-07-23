@@ -22,9 +22,12 @@ use std::io::{self, BufRead, Write};
 
 use serde_json::Value;
 
-use engine::{TranslateEngine, EngineRequest};
-use engines::{TencentEngine, AliEngine, BaiduEngine, YoudaoEngine, DeeplEngine};
-use protocol::{CoreToPlugin, PluginToCore, HttpRequest, PluginResponse, ToolResultPayload, PluginError, PluginItem, PluginAction};
+use engine::{EngineRequest, TranslateEngine};
+use engines::{AliEngine, BaiduEngine, DeeplEngine, TencentEngine, YoudaoEngine};
+use protocol::{
+    CoreToPlugin, HttpRequest, PluginAction, PluginError, PluginItem, PluginResponse, PluginToCore,
+    ToolResultPayload,
+};
 
 /// HTTP 请求 id 全局计数器。
 ///
@@ -49,7 +52,11 @@ const ENGINE_NAMES: &[(&str, &str)] = &[
 ];
 
 fn engine_display_name(id: &str) -> &str {
-    ENGINE_NAMES.iter().find(|(k, _)| *k == id).map(|(_, v)| *v).unwrap_or(id)
+    ENGINE_NAMES
+        .iter()
+        .find(|(k, _)| *k == id)
+        .map(|(_, v)| *v)
+        .unwrap_or(id)
 }
 
 /// 获取引擎实例（按 id）
@@ -108,7 +115,10 @@ fn detect_lang(text: &str) -> &'static str {
     if total == 0 {
         return "en";
     }
-    let chinese = text.chars().filter(|&c| ('\u{4e00}'..='\u{9fff}').contains(&c)).count();
+    let chinese = text
+        .chars()
+        .filter(|&c| ('\u{4e00}'..='\u{9fff}').contains(&c))
+        .count();
     if (chinese as f64) > total as f64 * 0.3 {
         "zh"
     } else {
@@ -122,7 +132,11 @@ fn auto_swap_lang(text: &str, target_lang: &str) -> String {
         return target_lang.to_string();
     }
     let detected = detect_lang(text);
-    if detected == "zh" { "en".into() } else { "zh".into() }
+    if detected == "zh" {
+        "en".into()
+    } else {
+        "zh".into()
+    }
 }
 
 /// 清除文本中的 Unicode 私用区字符(U+E000..=U+F8FF)。
@@ -130,7 +144,9 @@ fn auto_swap_lang(text: &str, target_lang: &str) -> String {
 /// 私用区字符可能来自 OCR 识别噪声或上游拼接残留,送翻译前必须清除,
 /// 否则与批量 tag 标记混淆导致解析失败。
 fn strip_private_use_chars(s: &str) -> String {
-    s.chars().filter(|c| !('\u{E000}'..='\u{F8FF}').contains(c)).collect()
+    s.chars()
+        .filter(|c| !('\u{E000}'..='\u{F8FF}').contains(c))
+        .collect()
 }
 
 /// 批量翻译的 tag 边界字符——使用 Unicode 私用区(U+E000 / U+E001)。
@@ -184,11 +200,15 @@ fn parse_tagged_batch(result: &str, count: usize) -> Option<Vec<String>> {
     for (order, &(start, tag_len)) in positions.iter().enumerate() {
         let tag = &result[start..start + tag_len];
         // 提取两个私用区字符中间的数字(可能是全角)
-        let inner: String = tag.chars()
+        let inner: String = tag
+            .chars()
             .filter(|c| *c != TAG_OPEN && *c != TAG_CLOSE)
             .collect();
         let index = parse_digit_mixed(&inner)?;
-        let end = positions.get(order + 1).map(|(next, _)| *next).unwrap_or(result.len());
+        let end = positions
+            .get(order + 1)
+            .map(|(next, _)| *next)
+            .unwrap_or(result.len());
         let value = result[start + tag_len..end].trim();
         if value.is_empty() {
             return None;
@@ -201,35 +221,40 @@ fn parse_tagged_batch(result: &str, count: usize) -> Option<Vec<String>> {
 /// 数字 → 全角字符串(应对引擎把 ASCII 数字全角化)。
 /// 0→０, 1→１, ..., 9→９, 10→１０
 fn fullwidth_digit(n: usize) -> String {
-    n.to_string().chars().map(|c| {
-        if c.is_ascii_digit() {
-            char::from_u32(c as u32 - b'0' as u32 + 0xFF10).unwrap_or(c)
-        } else {
-            c
-        }
-    }).collect()
+    n.to_string()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_digit() {
+                char::from_u32(c as u32 - b'0' as u32 + 0xFF10).unwrap_or(c)
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 /// 解析 tag 内部的数字(容忍全角/半角混用)。
 fn parse_digit_mixed(s: &str) -> Option<usize> {
-    let normalized: String = s.chars().map(|c| {
-        // 全角数字 ０(0xFF10) ~ ９(0xFF19) → 半角
-        if (0xFF10..=0xFF19).contains(&(c as u32)) {
-            char::from_digit(c as u32 - 0xFF10, 10).unwrap_or(c)
-        } else {
-            c
-        }
-    }).collect();
+    let normalized: String = s
+        .chars()
+        .map(|c| {
+            // 全角数字 ０(0xFF10) ~ ９(0xFF19) → 半角
+            if (0xFF10..=0xFF19).contains(&(c as u32)) {
+                char::from_digit(c as u32 - 0xFF10, 10).unwrap_or(c)
+            } else {
+                c
+            }
+        })
+        .collect();
     normalized.parse::<usize>().ok()
 }
-
 
 /// 待处理的 HTTP 请求上下文（发 http_request 后等 http_response 恢复）。
 struct PendingTranslate {
     query_id: String,
     is_tool_call: bool,
-    text: String,           // 预处理后的文本
-    original_text: String,  // 原始输入
+    text: String,          // 预处理后的文本
+    original_text: String, // 原始输入
     target_lang: String,
     engine_id: String,
     fallback_order: Vec<String>,
@@ -267,13 +292,34 @@ fn main() {
         };
 
         match msg {
-            CoreToPlugin::Query { id, query, settings } => {
+            CoreToPlugin::Query {
+                id,
+                query,
+                settings,
+            } => {
                 handle_query(&mut stdout, &mut pending, id, query, settings);
             }
-            CoreToPlugin::ToolCall { id, tool_name, arguments, settings } => {
-                handle_tool_call(&mut stdout, &mut pending, id, tool_name, arguments, settings);
+            CoreToPlugin::ToolCall {
+                id,
+                tool_name,
+                arguments,
+                settings,
+            } => {
+                handle_tool_call(
+                    &mut stdout,
+                    &mut pending,
+                    id,
+                    tool_name,
+                    arguments,
+                    settings,
+                );
             }
-            CoreToPlugin::HttpResponse { id, status, body, error } => {
+            CoreToPlugin::HttpResponse {
+                id,
+                status,
+                body,
+                error,
+            } => {
                 handle_http_response(&mut stdout, &mut pending, id, status, body, error);
             }
             CoreToPlugin::Cancel { .. } => {
@@ -299,12 +345,24 @@ fn handle_query<W: Write>(
     settings: Option<Value>,
 ) {
     let settings = settings.unwrap_or(Value::Null);
-    let engine = settings.get("default_engine").and_then(Value::as_str).unwrap_or("youdao").to_string();
-    let target_lang = settings.get("target_lang").and_then(Value::as_str).unwrap_or("zh").to_string();
+    let engine = settings
+        .get("default_engine")
+        .and_then(Value::as_str)
+        .unwrap_or("youdao")
+        .to_string();
+    let target_lang = settings
+        .get("target_lang")
+        .and_then(Value::as_str)
+        .unwrap_or("zh")
+        .to_string();
 
     let text = strip_private_use_chars(query.trim());
     if text.is_empty() {
-        let resp = PluginToCore::Response(PluginResponse { id, items: vec![], error: None });
+        let resp = PluginToCore::Response(PluginResponse {
+            id,
+            items: vec![],
+            error: None,
+        });
         send_message(writer, &resp);
         return;
     }
@@ -316,7 +374,18 @@ fn handle_query<W: Write>(
 
     eprintln!("[translate] query: id={id}, engine={engine}, target={target_lang}");
 
-    try_translate(writer, pending, id, false, processed, original_text, target_lang, engine, fallback_order, settings);
+    try_translate(
+        writer,
+        pending,
+        id,
+        false,
+        processed,
+        original_text,
+        target_lang,
+        engine,
+        fallback_order,
+        settings,
+    );
 }
 
 /// 处理 AI tool-call 请求。
@@ -329,28 +398,48 @@ fn handle_tool_call<W: Write>(
     settings: Option<Value>,
 ) {
     let settings = settings.unwrap_or(Value::Null);
-    let engine = settings.get("default_engine").and_then(Value::as_str).unwrap_or("youdao").to_string();
+    let engine = settings
+        .get("default_engine")
+        .and_then(Value::as_str)
+        .unwrap_or("youdao")
+        .to_string();
 
     if tool_name != "translate" && tool_name != "translate_batch" {
         let resp = PluginToCore::ToolResult(ToolResultPayload {
-            id, items: vec![],
-            error: Some(PluginError { code: "UNKNOWN_TOOL".into(), message: format!("未知 tool: {tool_name}") }),
+            id,
+            items: vec![],
+            error: Some(PluginError {
+                code: "UNKNOWN_TOOL".into(),
+                message: format!("未知 tool: {tool_name}"),
+            }),
         });
         send_message(writer, &resp);
         return;
     }
 
-    let mut target_lang = arguments.get("target_lang").and_then(Value::as_str).unwrap_or("").to_string();
+    let mut target_lang = arguments
+        .get("target_lang")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     if target_lang.is_empty() || target_lang == "auto" {
-        target_lang = settings.get("target_lang").and_then(Value::as_str).unwrap_or("zh").to_string();
+        target_lang = settings
+            .get("target_lang")
+            .and_then(Value::as_str)
+            .unwrap_or("zh")
+            .to_string();
     }
     let fallback_order = parse_fallback_order(&settings);
 
     if tool_name == "translate_batch" {
         let Some(raw_texts) = arguments.get("texts").and_then(Value::as_array) else {
             let resp = PluginToCore::ToolResult(ToolResultPayload {
-                id, items: vec![],
-                error: Some(PluginError { code: "MISSING_ARG".into(), message: "缺少 texts 参数".into() }),
+                id,
+                items: vec![],
+                error: Some(PluginError {
+                    code: "MISSING_ARG".into(),
+                    message: "缺少 texts 参数".into(),
+                }),
             });
             send_message(writer, &resp);
             return;
@@ -363,8 +452,12 @@ fn handle_tool_call<W: Write>(
             .collect();
         if texts.is_empty() || texts.iter().any(String::is_empty) {
             let resp = PluginToCore::ToolResult(ToolResultPayload {
-                id, items: vec![],
-                error: Some(PluginError { code: "MISSING_ARG".into(), message: "texts 必须是非空字符串数组".into() }),
+                id,
+                items: vec![],
+                error: Some(PluginError {
+                    code: "MISSING_ARG".into(),
+                    message: "texts 必须是非空字符串数组".into(),
+                }),
             });
             send_message(writer, &resp);
             return;
@@ -372,16 +465,39 @@ fn handle_tool_call<W: Write>(
         let tagged = build_tagged_batch(&texts);
         let detection_text = texts.join("\n");
         let target_lang = auto_swap_lang(&detection_text, &target_lang);
-        eprintln!("[translate] batch tool_call: id={id}, count={}, target={target_lang}", texts.len());
-        try_translate_batch(writer, pending, id, tagged, texts, target_lang, engine, fallback_order, settings);
+        eprintln!(
+            "[translate] batch tool_call: id={id}, count={}, target={target_lang}",
+            texts.len()
+        );
+        try_translate_batch(
+            writer,
+            pending,
+            id,
+            tagged,
+            texts,
+            target_lang,
+            engine,
+            fallback_order,
+            settings,
+        );
         return;
     }
 
-    let text = strip_private_use_chars(arguments.get("text").and_then(Value::as_str).unwrap_or("").trim());
+    let text = strip_private_use_chars(
+        arguments
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim(),
+    );
     if text.is_empty() {
         let resp = PluginToCore::ToolResult(ToolResultPayload {
-            id, items: vec![],
-            error: Some(PluginError { code: "MISSING_ARG".into(), message: "缺少 text 参数".into() }),
+            id,
+            items: vec![],
+            error: Some(PluginError {
+                code: "MISSING_ARG".into(),
+                message: "缺少 text 参数".into(),
+            }),
         });
         send_message(writer, &resp);
         return;
@@ -391,17 +507,39 @@ fn handle_tool_call<W: Write>(
 
     eprintln!("[translate] tool_call: id={id}, text={text:?}, target={target_lang}");
 
-    try_translate(writer, pending, id, true, text.clone(), text, target_lang, engine, fallback_order, settings);
+    try_translate(
+        writer,
+        pending,
+        id,
+        true,
+        text.clone(),
+        text,
+        target_lang,
+        engine,
+        fallback_order,
+        settings,
+    );
 }
 
 /// 解析降级顺序设置（兼容字符串和数组格式）。
 fn parse_fallback_order(settings: &Value) -> Vec<String> {
-    let default = || vec!["tencent".into(), "ali".into(), "baidu".into(), "youdao".into(), "deepl".into()];
+    let default = || {
+        vec![
+            "tencent".into(),
+            "ali".into(),
+            "baidu".into(),
+            "youdao".into(),
+            "deepl".into(),
+        ]
+    };
     let default_val = serde_json::json!(default());
     let val = settings.get("fallback_order").unwrap_or(&default_val);
     let raw: Vec<String> = match val {
         Value::String(s) => s.split(',').map(|e| e.trim().to_string()).collect(),
-        Value::Array(arr) => arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect(),
+        Value::Array(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect(),
         _ => return default(),
     };
     // 空列表或全无效 → 回退默认
@@ -409,7 +547,10 @@ fn parse_fallback_order(settings: &Value) -> Vec<String> {
         return default();
     }
     let valid: std::collections::HashSet<&str> = valid_engines().iter().copied().collect();
-    let filtered: Vec<String> = raw.into_iter().filter(|e| valid.contains(e.as_str())).collect();
+    let filtered: Vec<String> = raw
+        .into_iter()
+        .filter(|e| valid.contains(e.as_str()))
+        .collect();
     if filtered.is_empty() {
         default()
     } else {
@@ -431,18 +572,31 @@ fn try_translate<W: Write>(
     settings: Value,
 ) {
     // 发起首次翻译请求
-    issue_translate_request(writer, pending, PendingTranslate {
-        query_id, is_tool_call, text, original_text, target_lang,
-        engine_id, fallback_order, settings,
-        tried_engines: vec![], batch_originals: None, batch_native: false, tag_poisoned: false,
-    });
+    issue_translate_request(
+        writer,
+        pending,
+        PendingTranslate {
+            query_id,
+            is_tool_call,
+            text,
+            original_text,
+            target_lang,
+            engine_id,
+            fallback_order,
+            settings,
+            tried_engines: vec![],
+            batch_originals: None,
+            batch_native: false,
+            tag_poisoned: false,
+        },
+    );
 }
 
 fn try_translate_batch<W: Write>(
     writer: &mut W,
     pending: &mut HashMap<String, PendingTranslate>,
     query_id: String,
-    _tagged_text: String,  // 保留参数兼容调用点;实际由引擎能力决定用原生还是 tag
+    _tagged_text: String, // 保留参数兼容调用点;实际由引擎能力决定用原生还是 tag
     originals: Vec<String>,
     target_lang: String,
     engine_id: String,
@@ -540,7 +694,8 @@ fn dispatch_single_line_fallback<W: Write>(
     };
     eprintln!(
         "[translate] 批量 tag 失效,降级单行并发: engine={}, lines={}",
-        ctx.engine_id, originals.len()
+        ctx.engine_id,
+        originals.len()
     );
     // 单行并发在 core 端的 translate_lines command 已实装(每行 spawn 一个 task)。
     // 插件层这里直接返回 BATCH_TAG_POISONED 错误,让 core 触发它的单行降级路径。
@@ -617,13 +772,19 @@ fn try_next_fallback<W: Write>(
     pending: &mut HashMap<String, PendingTranslate>,
     mut ctx: PendingTranslate,
 ) {
-    let next = ctx.fallback_order.iter()
+    let next = ctx
+        .fallback_order
+        .iter()
         .find(|e| !ctx.tried_engines.contains(e))
         .cloned();
 
     match next {
         Some(engine_id) => {
-            eprintln!("[translate] 降级到: {} ({})", engine_display_name(&engine_id), engine_id);
+            eprintln!(
+                "[translate] 降级到: {} ({})",
+                engine_display_name(&engine_id),
+                engine_id
+            );
             ctx.engine_id = engine_id.clone();
             // 批量降级:按目标引擎能力重新判定走原生批量还是 tag 拼接。
             if ctx.batch_originals.is_some() {
@@ -646,9 +807,17 @@ fn try_next_fallback<W: Write>(
                 message: "翻译失败，请检查 API 配置或网络连接".into(),
             };
             let resp = if ctx.is_tool_call {
-                PluginToCore::ToolResult(ToolResultPayload { id: ctx.query_id, items: vec![], error: Some(error) })
+                PluginToCore::ToolResult(ToolResultPayload {
+                    id: ctx.query_id,
+                    items: vec![],
+                    error: Some(error),
+                })
             } else {
-                PluginToCore::Response(PluginResponse { id: ctx.query_id, items: vec![], error: Some(error) })
+                PluginToCore::Response(PluginResponse {
+                    id: ctx.query_id,
+                    items: vec![],
+                    error: Some(error),
+                })
             };
             send_message(writer, &resp);
         }
@@ -673,7 +842,10 @@ fn handle_http_response<W: Write>(
 
     // HTTP 层错误 → 直接降级
     if error.is_some() || status != 200 {
-        eprintln!("[translate] {} HTTP error: status={status}, error={:?}", ctx.engine_id, error);
+        eprintln!(
+            "[translate] {} HTTP error: status={status}, error={:?}",
+            ctx.engine_id, error
+        );
         try_next_fallback(writer, pending, ctx);
         return;
     }
@@ -684,7 +856,10 @@ fn handle_http_response<W: Write>(
     if ctx.batch_native {
         if let Some(originals) = ctx.batch_originals.as_ref() {
             let expected = originals.len();
-            if let Some(results) = engine.as_ref().and_then(|e| e.parse_batch_response(&body, expected)) {
+            if let Some(results) = engine
+                .as_ref()
+                .and_then(|e| e.parse_batch_response(&body, expected))
+            {
                 let items = vec![PluginItem {
                     title: format!("已翻译 {} 行", results.len()),
                     subtitle: Some("批量翻译完成".into()),
@@ -693,13 +868,20 @@ fn handle_http_response<W: Write>(
                     payload: Some(serde_json::json!({ "results": results })),
                     ..Default::default()
                 }];
-                let resp = PluginToCore::ToolResult(ToolResultPayload { id: ctx.query_id, items, error: None });
+                let resp = PluginToCore::ToolResult(ToolResultPayload {
+                    id: ctx.query_id,
+                    items,
+                    error: None,
+                });
                 send_message(writer, &resp);
                 return;
             }
             // 原生批量解析失败 → 降级到 tag 拼接,用同一引擎重试一次
-            eprintln!("[translate] {} batch parse failed, fallback to tagged. body: {}",
-                ctx.engine_id, body.chars().take(500).collect::<String>());
+            eprintln!(
+                "[translate] {} batch parse failed, fallback to tagged. body: {}",
+                ctx.engine_id,
+                body.chars().take(500).collect::<String>()
+            );
             let tagged = build_tagged_batch(originals);
             ctx.batch_native = false;
             ctx.text = tagged.clone();
@@ -717,7 +899,10 @@ fn handle_http_response<W: Write>(
     let translated = engine.as_ref().and_then(|e| e.parse_response(&body));
     let Some(result) = translated else {
         let preview: String = body.chars().take(500).collect();
-        eprintln!("[translate] {} parse failed, body: {}", ctx.engine_id, preview);
+        eprintln!(
+            "[translate] {} parse failed, body: {}",
+            ctx.engine_id, preview
+        );
         try_next_fallback(writer, pending, ctx);
         return;
     };
@@ -747,9 +932,17 @@ fn handle_http_response<W: Write>(
         build_result_items(&result, &ctx.text, &ctx.original_text, &ctx.target_lang)
     };
     let resp = if ctx.is_tool_call {
-        PluginToCore::ToolResult(ToolResultPayload { id: ctx.query_id, items, error: None })
+        PluginToCore::ToolResult(ToolResultPayload {
+            id: ctx.query_id,
+            items,
+            error: None,
+        })
     } else {
-        PluginToCore::Response(PluginResponse { id: ctx.query_id, items, error: None })
+        PluginToCore::Response(PluginResponse {
+            id: ctx.query_id,
+            items,
+            error: None,
+        })
     };
     send_message(writer, &resp);
 }
@@ -758,12 +951,27 @@ fn handle_http_response<W: Write>(
 ///
 /// **0.11 review L7**：首项（译文）显式填 `payload`，让 AI tool-call 路径直接拿到
 /// 结构化数据（与 protocol.rs 文档对齐），不再靠 core 的 action 兜底投影。
-fn build_result_items(result: &str, text: &str, original_text: &str, _target_lang: &str) -> Vec<PluginItem> {
+fn build_result_items(
+    result: &str,
+    text: &str,
+    original_text: &str,
+    _target_lang: &str,
+) -> Vec<PluginItem> {
     let mut items = vec![PluginItem {
         title: format!("📝 {result}"),
-        subtitle: Some(format!("按 Enter 复制译文 | 原文: {}{}", &original_text[..original_text.chars().take(50).map(char::len_utf8).sum()], if original_text.chars().count() > 50 {"..."} else {""})),
+        subtitle: Some(format!(
+            "按 Enter 复制译文 | 原文: {}{}",
+            &original_text[..original_text.chars().take(50).map(char::len_utf8).sum()],
+            if original_text.chars().count() > 50 {
+                "..."
+            } else {
+                ""
+            }
+        )),
         score: 1.0,
-        action: PluginAction::Copy { text: result.into() },
+        action: PluginAction::Copy {
+            text: result.into(),
+        },
         // L7: 显式填 payload，AI tool-call 路径直接读 {translated, source}，
         // 不依赖 core 从 action 兜底（与 protocol.rs 文档"译文项填 payload"一致）
         payload: Some(serde_json::json!({
@@ -786,10 +994,19 @@ fn build_result_items(result: &str, text: &str, original_text: &str, _target_lan
 
     let orig_preview = &original_text[..original_text.chars().take(60).map(char::len_utf8).sum()];
     items.push(PluginItem {
-        title: format!("📄 {orig_preview}{}", if original_text.chars().count() > 60 {"..."} else {""}),
+        title: format!(
+            "📄 {orig_preview}{}",
+            if original_text.chars().count() > 60 {
+                "..."
+            } else {
+                ""
+            }
+        ),
         subtitle: Some("按 Enter 复制原文".into()),
         score: 0.8,
-        action: PluginAction::Copy { text: original_text.into() },
+        action: PluginAction::Copy {
+            text: original_text.into(),
+        },
         ..Default::default()
     });
 
@@ -834,11 +1051,13 @@ mod tests {
         // 缺一个 tag(只有 0,缺 1)→ None
         assert!(parse_tagged_batch("\u{E000}0\u{E001}\n你好", 2).is_none());
         // tag 重复 → None
-        assert!(parse_tagged_batch(
-            "\u{E000}0\u{E001}\n你好\n\u{E000}0\u{E001}\n重复\n\u{E000}1\u{E001}\n世界",
-            2
-        )
-        .is_none());
+        assert!(
+            parse_tagged_batch(
+                "\u{E000}0\u{E001}\n你好\n\u{E000}0\u{E001}\n重复\n\u{E000}1\u{E001}\n世界",
+                2
+            )
+            .is_none()
+        );
         // 旧格式(被引擎翻译破坏后私用区字符没了)→ None
         assert!(parse_tagged_batch("[[BLINK_0]]\n你好\n[[BLINK_1]]\n世界", 2).is_none());
     }
@@ -854,7 +1073,10 @@ mod tests {
     #[test]
     fn preprocess_snake_case() {
         assert_eq!(preprocess_code_identifiers("hello_world"), "hello world");
-        assert_eq!(preprocess_code_identifiers("get_user_name"), "get user name");
+        assert_eq!(
+            preprocess_code_identifiers("get_user_name"),
+            "get user name"
+        );
     }
 
     #[test]
@@ -871,13 +1093,19 @@ mod tests {
 
     #[test]
     fn preprocess_screaming_snake() {
-        assert_eq!(preprocess_code_identifiers("MAX_RETRY_COUNT"), "MAX RETRY COUNT");
+        assert_eq!(
+            preprocess_code_identifiers("MAX_RETRY_COUNT"),
+            "MAX RETRY COUNT"
+        );
     }
 
     #[test]
     fn preprocess_acronym_camel() {
         // HTTPSConnection → HTTPS Connection（大写序列 + 小写 → 大写前断开）
-        assert_eq!(preprocess_code_identifiers("HTTPSConnection"), "HTTPS Connection");
+        assert_eq!(
+            preprocess_code_identifiers("HTTPSConnection"),
+            "HTTPS Connection"
+        );
     }
 
     #[test]
@@ -889,7 +1117,10 @@ mod tests {
 
     #[test]
     fn preprocess_mixed() {
-        assert_eq!(preprocess_code_identifiers("getUserID_str"), "get User ID str");
+        assert_eq!(
+            preprocess_code_identifiers("getUserID_str"),
+            "get User ID str"
+        );
     }
 
     #[test]

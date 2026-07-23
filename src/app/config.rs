@@ -1350,9 +1350,7 @@ pub struct ScreenshotConfig {
 
 impl Default for ScreenshotConfig {
     fn default() -> Self {
-        Self {
-            prewarm_ocr: true,
-        }
+        Self { prewarm_ocr: true }
     }
 }
 
@@ -1442,7 +1440,10 @@ mod tests {
         // 0.11.10-b:camelCase 序列化(与前端 config-keys 对齐);默认字段 missing 走 default
         let sc = ScreenshotConfig { prewarm_ocr: false };
         let json = serde_json::to_string(&sc).unwrap();
-        assert!(json.contains("\"prewarmOcr\""), "expected camelCase key, got: {json}");
+        assert!(
+            json.contains("\"prewarmOcr\""),
+            "expected camelCase key, got: {json}"
+        );
 
         // 缺字段 → 默认值填充(default_true)
         let restored: ScreenshotConfig = serde_json::from_str("{}").unwrap();

@@ -397,10 +397,11 @@ mod tests {
         .await;
         // 手动把 created_at 改到 31 天前
         let cutoff = now - 31 * 86400;
-        let _ = sqlx::query("UPDATE ai_tool_audit SET created_at = ?1 WHERE tool_name = 'old_tool'")
-            .bind(cutoff)
-            .execute(&pool)
-            .await;
+        let _ =
+            sqlx::query("UPDATE ai_tool_audit SET created_at = ?1 WHERE tool_name = 'old_tool'")
+                .bind(cutoff)
+                .execute(&pool)
+                .await;
 
         // 写入一条今天的记录（应保留）
         save_audit_log(

@@ -63,7 +63,7 @@ impl TextSource {
                 let sel = snapshot.find_text(AwarenessSource::Selection);
                 let clip = snapshot.find_text(AwarenessSource::Clipboard);
                 match (sel, clip) {
-                    (Some(s), _) => Some(s),   // Selection 恒胜
+                    (Some(s), _) => Some(s),    // Selection 恒胜
                     (None, Some(c)) => Some(c), // 无 Selection 时回退 Clipboard
                     (None, None) => None,
                 }

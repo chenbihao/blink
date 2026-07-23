@@ -92,7 +92,10 @@ pub struct SttConfig {
     /// - 旧 `streaming_mode = "pseudo"` → `Pseudo`
     /// - 旧 `streaming_mode = "off"` / `streaming = false` → `Off`
     /// - 旧 `streaming = true`（无 streaming_mode）→ `Pseudo`
-    #[serde(default = "default_streaming_mode", deserialize_with = "deserialize_streaming_mode")]
+    #[serde(
+        default = "default_streaming_mode",
+        deserialize_with = "deserialize_streaming_mode"
+    )]
     pub streaming_mode: StreamingMode,
 
     // ── 已废弃字段（反序列化时忽略，不报错）──
@@ -160,7 +163,10 @@ pub struct LocalEngineConfig {
     /// 如 "iic/SenseVoiceSmall"（五语种 ASR，CPU 首选）
     /// 或 "paraformer-zh"（SeacoParaformer，原生支持热词）
     /// 注意：使用完整 ModelScope ID（含 `iic/` 前缀），短名在 FunASR 1.3.14 中解析会失败
-    #[serde(default = "default_funasr_model", deserialize_with = "deserialize_funasr_model")]
+    #[serde(
+        default = "default_funasr_model",
+        deserialize_with = "deserialize_funasr_model"
+    )]
     pub funasr_model: String,
     /// 推理设备: "cpu" 或 "cuda"
     #[serde(default = "default_device")]
@@ -354,7 +360,10 @@ impl SttConfig {
     ///
     /// 返回 `(SttCloudConfig, migration_needed)`——`migration_needed=true` 表示
     /// 老配置仍在用,设置页保存时应写回 `cloud` 字段并清空 `cloud_provider`。
-    pub fn effective_cloud(&self, ai_config: &crate::app::ai_config::AIConfig) -> Option<(SttCloudConfig, bool)> {
+    pub fn effective_cloud(
+        &self,
+        ai_config: &crate::app::ai_config::AIConfig,
+    ) -> Option<(SttCloudConfig, bool)> {
         // 1. 新字段有值 → 直接用
         if let Some(cloud) = &self.cloud {
             return Some((cloud.clone(), false));
@@ -396,12 +405,10 @@ impl SttConfig {
             // 找不到含 Stt 的则降级按 id 匹配 + warn（老数据迁移常见，模型可能未标 Stt）。
             let matches_stt = provider.models.iter().any(|m| {
                 m.id == old.model_id
-                    && m
-                        .capabilities
+                    && m.capabilities
                         .contains(&crate::app::ai_config::ModelCapability::Stt)
             });
-            let matches_id =
-                matches_stt || provider.models.iter().any(|m| m.id == old.model_id);
+            let matches_id = matches_stt || provider.models.iter().any(|m| m.id == old.model_id);
             if matches_id {
                 if !matches_stt {
                     tracing::warn!(
@@ -448,10 +455,7 @@ impl SttConfig {
     /// 与 `effective_cloud` 的关系：`effective_cloud` 是只读的惰性迁移（不修改 self），
     /// `apply_migration` 是写回式迁移（修改 self）。启动期 `apply_migration` 一次性落定，
     /// 运行期 `effective_cloud` 作兜底（万一启动迁移失败 / AIConfig 后续变动）。
-    pub fn apply_migration(
-        &mut self,
-        ai_config: &crate::app::ai_config::AIConfig,
-    ) -> bool {
+    pub fn apply_migration(&mut self, ai_config: &crate::app::ai_config::AIConfig) -> bool {
         if self.cloud.is_some() {
             return false; // 已迁移
         }
@@ -681,7 +685,8 @@ mod tests {
     /// 验证旧配置中的 streaming_model 字段被忽略（不报错）。
     #[test]
     fn deserialize_old_config_with_streaming_model_field() {
-        let json = r#"{"enabled":true,"local_engine":{"streaming_model":"paraformer-zh-streaming"}}"#;
+        let json =
+            r#"{"enabled":true,"local_engine":{"streaming_model":"paraformer-zh-streaming"}}"#;
         let cfg: SttConfig = serde_json::from_str(json).unwrap();
         assert!(cfg.enabled);
         // streaming_model 字段保留但已废弃，不再使用
@@ -903,10 +908,7 @@ mod tests {
         };
         assert!(cfg.apply_migration(&ai_config), "应成功迁移");
         assert!(cfg.cloud.is_some(), "cloud 应已写回");
-        assert!(
-            cfg.cloud_provider.is_none(),
-            "cloud_provider 应已清空"
-        );
+        assert!(cfg.cloud_provider.is_none(), "cloud_provider 应已清空");
         assert_eq!(cfg.cloud.as_ref().unwrap().provider_id, "ai-p1");
     }
 
@@ -946,9 +948,6 @@ mod tests {
         // AIConfig 无匹配 provider -> 不迁移，cloud_provider 保留
         assert!(!cfg.apply_migration(&crate::app::ai_config::AIConfig::default()));
         assert!(cfg.cloud.is_none());
-        assert!(
-            cfg.cloud_provider.is_some(),
-            "无匹配时 cloud_provider 保留"
-        );
+        assert!(cfg.cloud_provider.is_some(), "无匹配时 cloud_provider 保留");
     }
 }

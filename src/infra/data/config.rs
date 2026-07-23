@@ -85,9 +85,7 @@ mod tests {
     #[tokio::test]
     async fn set_then_get_roundtrip() {
         let pool = in_memory_pool().await;
-        set_config(&pool, "test_key", "test_value")
-            .await
-            .unwrap();
+        set_config(&pool, "test_key", "test_value").await.unwrap();
         assert_eq!(
             get_config(&pool, "test_key").await,
             Some("test_value".to_string())

@@ -321,7 +321,9 @@ pub async fn transcribe_via_chat_async(
     if !resp.status().is_success() {
         let status = resp.status();
         let resp_body = resp.text().await.unwrap_or_default();
-        return Err(super::SttError::Engine(format!("HTTP {status}: {resp_body}")));
+        return Err(super::SttError::Engine(format!(
+            "HTTP {status}: {resp_body}"
+        )));
     }
 
     // Chat completion 响应: { "choices": [{ "message": { "content": "..." } }] }

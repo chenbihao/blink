@@ -823,7 +823,9 @@ async fn execute_http_request(
     }
     // 0.11.6: 插件自定义 headers（翻译插件 tencent 引擎需 Authorization 等）。
     // body 有但插件未指定 Content-Type 时，默认 application/json（向后兼容）。
-    let has_content_type = headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
+    let has_content_type = headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
     if body.is_some() && !has_content_type {
         req = req.header("Content-Type", "application/json");
     }

@@ -60,9 +60,20 @@ fn youdao_truncate_input(text: &str) -> String {
 pub struct YoudaoEngine;
 
 impl TranslateEngine for YoudaoEngine {
-    fn build_request(&self, text: &str, target_lang: &str, settings: &Value) -> Option<EngineRequest> {
-        let app_key = settings.get("youdao_app_key").and_then(Value::as_str).unwrap_or("");
-        let app_secret = settings.get("youdao_app_secret").and_then(Value::as_str).unwrap_or("");
+    fn build_request(
+        &self,
+        text: &str,
+        target_lang: &str,
+        settings: &Value,
+    ) -> Option<EngineRequest> {
+        let app_key = settings
+            .get("youdao_app_key")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let app_secret = settings
+            .get("youdao_app_secret")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         if app_key.is_empty() || app_secret.is_empty() {
             return None;
         }
@@ -92,13 +103,19 @@ impl TranslateEngine for YoudaoEngine {
             url: "https://openapi.youdao.com/api".into(),
             body: Some(body),
             timeout_ms: 8000,
-            headers: vec![("Content-Type".into(), "application/x-www-form-urlencoded".into())],
+            headers: vec![(
+                "Content-Type".into(),
+                "application/x-www-form-urlencoded".into(),
+            )],
         })
     }
 
     fn parse_response(&self, body: &str) -> Option<String> {
         let v: Value = serde_json::from_str(body).ok()?;
-        v.get("translation")?.get(0)?.as_str().map(|s| s.to_string())
+        v.get("translation")?
+            .get(0)?
+            .as_str()
+            .map(|s| s.to_string())
     }
 
     /// 有道签名 sign_str = {app_key}{text}{salt}{curtime}{app_secret}，
@@ -114,9 +131,20 @@ impl TranslateEngine for YoudaoEngine {
 pub struct BaiduEngine;
 
 impl TranslateEngine for BaiduEngine {
-    fn build_request(&self, text: &str, target_lang: &str, settings: &Value) -> Option<EngineRequest> {
-        let app_id = settings.get("baidu_app_id").and_then(Value::as_str).unwrap_or("");
-        let app_key = settings.get("baidu_app_key").and_then(Value::as_str).unwrap_or("");
+    fn build_request(
+        &self,
+        text: &str,
+        target_lang: &str,
+        settings: &Value,
+    ) -> Option<EngineRequest> {
+        let app_id = settings
+            .get("baidu_app_id")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let app_key = settings
+            .get("baidu_app_key")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         if app_id.is_empty() || app_key.is_empty() {
             return None;
         }
@@ -148,10 +176,19 @@ impl TranslateEngine for BaiduEngine {
     fn parse_response(&self, body: &str) -> Option<String> {
         let v: Value = serde_json::from_str(body).ok()?;
         let arr = v.get("trans_result")?.as_array()?;
-        let texts: Vec<String> = arr.iter().filter_map(|item| {
-            item.get("dst").and_then(|d| d.as_str()).map(|s| s.to_string())
-        }).collect();
-        if texts.is_empty() { None } else { Some(texts.join("\n")) }
+        let texts: Vec<String> = arr
+            .iter()
+            .filter_map(|item| {
+                item.get("dst")
+                    .and_then(|d| d.as_str())
+                    .map(|s| s.to_string())
+            })
+            .collect();
+        if texts.is_empty() {
+            None
+        } else {
+            Some(texts.join("\n"))
+        }
     }
 }
 
@@ -160,8 +197,16 @@ impl TranslateEngine for BaiduEngine {
 pub struct DeeplEngine;
 
 impl TranslateEngine for DeeplEngine {
-    fn build_request(&self, _text: &str, target_lang: &str, settings: &Value) -> Option<EngineRequest> {
-        let api_key = settings.get("deepl_api_key").and_then(Value::as_str).unwrap_or("");
+    fn build_request(
+        &self,
+        _text: &str,
+        target_lang: &str,
+        settings: &Value,
+    ) -> Option<EngineRequest> {
+        let api_key = settings
+            .get("deepl_api_key")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         if api_key.is_empty() {
             return None;
         }
@@ -179,13 +224,20 @@ impl TranslateEngine for DeeplEngine {
             url: "https://api-free.deepl.com/v2/translate".into(),
             body: Some(body),
             timeout_ms: 8000,
-            headers: vec![("Content-Type".into(), "application/x-www-form-urlencoded".into())],
+            headers: vec![(
+                "Content-Type".into(),
+                "application/x-www-form-urlencoded".into(),
+            )],
         })
     }
 
     fn parse_response(&self, body: &str) -> Option<String> {
         let v: Value = serde_json::from_str(body).ok()?;
-        v.get("translations")?.get(0)?.get("text")?.as_str().map(|s| s.to_string())
+        v.get("translations")?
+            .get(0)?
+            .get("text")?
+            .as_str()
+            .map(|s| s.to_string())
     }
 }
 
@@ -194,9 +246,20 @@ impl TranslateEngine for DeeplEngine {
 pub struct AliEngine;
 
 impl TranslateEngine for AliEngine {
-    fn build_request(&self, text: &str, target_lang: &str, settings: &Value) -> Option<EngineRequest> {
-        let access_key_id = settings.get("ali_access_key_id").and_then(Value::as_str).unwrap_or("");
-        let access_key_secret = settings.get("ali_access_key_secret").and_then(Value::as_str).unwrap_or("");
+    fn build_request(
+        &self,
+        text: &str,
+        target_lang: &str,
+        settings: &Value,
+    ) -> Option<EngineRequest> {
+        let access_key_id = settings
+            .get("ali_access_key_id")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let access_key_secret = settings
+            .get("ali_access_key_secret")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         if access_key_id.is_empty() || access_key_secret.is_empty() {
             return None;
         }
@@ -224,7 +287,10 @@ impl TranslateEngine for AliEngine {
 
     fn parse_response(&self, body: &str) -> Option<String> {
         let v: Value = serde_json::from_str(body).ok()?;
-        v.get("Data")?.get("Translated")?.as_str().map(|s| s.to_string())
+        v.get("Data")?
+            .get("Translated")?
+            .as_str()
+            .map(|s| s.to_string())
     }
 
     /// 阿里云机器翻译支持原生批量翻译(`GetBatchTranslate` action)。
@@ -234,14 +300,25 @@ impl TranslateEngine for AliEngine {
         true
     }
 
-    fn build_batch_request(&self, texts: &[String], target_lang: &str, settings: &Value) -> Option<EngineRequest> {
+    fn build_batch_request(
+        &self,
+        texts: &[String],
+        target_lang: &str,
+        settings: &Value,
+    ) -> Option<EngineRequest> {
         // 官方限制:≤50 条 / 单条 ≤1000 / 总字符 ≤8000。超限交给上层分片,这里只拒绝明显非法。
         if texts.is_empty() || texts.len() > 50 {
             return None;
         }
 
-        let access_key_id = settings.get("ali_access_key_id").and_then(Value::as_str).unwrap_or("");
-        let access_key_secret = settings.get("ali_access_key_secret").and_then(Value::as_str).unwrap_or("");
+        let access_key_id = settings
+            .get("ali_access_key_id")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let access_key_secret = settings
+            .get("ali_access_key_secret")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         if access_key_id.is_empty() || access_key_secret.is_empty() {
             return None;
         }
@@ -292,15 +369,22 @@ impl TranslateEngine for AliEngine {
             return None;
         }
         // 按 index 排序回原顺序;失败的项(code != "200")→ 整批失败,交给上层降级
-        let mut indexed: Vec<(usize, String)> = arr.iter().filter_map(|item| {
-            let code = item.get("code").and_then(Value::as_str).unwrap_or("");
-            if code != "200" {
-                return None;
-            }
-            let idx = item.get("index").and_then(Value::as_str)?.parse::<usize>().ok()?;
-            let text = item.get("translated").and_then(Value::as_str)?.to_string();
-            Some((idx, text))
-        }).collect();
+        let mut indexed: Vec<(usize, String)> = arr
+            .iter()
+            .filter_map(|item| {
+                let code = item.get("code").and_then(Value::as_str).unwrap_or("");
+                if code != "200" {
+                    return None;
+                }
+                let idx = item
+                    .get("index")
+                    .and_then(Value::as_str)?
+                    .parse::<usize>()
+                    .ok()?;
+                let text = item.get("translated").and_then(Value::as_str)?.to_string();
+                Some((idx, text))
+            })
+            .collect();
         if indexed.len() != expected {
             return None;
         }
@@ -316,14 +400,19 @@ impl TranslateEngine for AliEngine {
 impl AliEngine {
     /// 阿里 RPC 签名公共逻辑:排序 → HMAC-SHA1 → 拼最终 body。
     /// 单条 (`TranslateGeneral`) 和批量 (`GetBatchTranslate`) 共用。
-    fn sign_and_build(params: Vec<((&str, String))>, access_key_secret: &str) -> Option<EngineRequest> {
+    fn sign_and_build(
+        params: Vec<((&str, String))>,
+        access_key_secret: &str,
+    ) -> Option<EngineRequest> {
         let mut params = params;
         params.sort_by(|a, b| a.0.cmp(b.0));
 
         // canonicalized: k=v 用 quote 编码（safe 为空）
-        let canonicalized: String = params.iter()
+        let canonicalized: String = params
+            .iter()
             .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
-            .collect::<Vec<_>>().join("&");
+            .collect::<Vec<_>>()
+            .join("&");
 
         // 签名字符串：POST&%2F&<quote(canonicalized)>
         let string_to_sign = format!("POST&%2F&{}", urlencoding::encode(&canonicalized));
@@ -332,16 +421,21 @@ impl AliEngine {
 
         // 构造最终 body
         params.push(("Signature", signature));
-        let body = params.iter()
+        let body = params
+            .iter()
             .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
-            .collect::<Vec<_>>().join("&");
+            .collect::<Vec<_>>()
+            .join("&");
 
         Some(EngineRequest {
             method: "POST".into(),
             url: "https://mt.aliyuncs.com/".into(),
             body: Some(body),
             timeout_ms: 8000,
-            headers: vec![("Content-Type".into(), "application/x-www-form-urlencoded".into())],
+            headers: vec![(
+                "Content-Type".into(),
+                "application/x-www-form-urlencoded".into(),
+            )],
         })
     }
 }
@@ -351,9 +445,20 @@ impl AliEngine {
 pub struct TencentEngine;
 
 impl TranslateEngine for TencentEngine {
-    fn build_request(&self, text: &str, target_lang: &str, settings: &Value) -> Option<EngineRequest> {
-        let secret_id = settings.get("tencent_secret_id").and_then(Value::as_str).unwrap_or("");
-        let secret_key = settings.get("tencent_secret_key").and_then(Value::as_str).unwrap_or("");
+    fn build_request(
+        &self,
+        text: &str,
+        target_lang: &str,
+        settings: &Value,
+    ) -> Option<EngineRequest> {
+        let secret_id = settings
+            .get("tencent_secret_id")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let secret_key = settings
+            .get("tencent_secret_key")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         if secret_id.is_empty() || secret_key.is_empty() {
             return None;
         }
@@ -369,30 +474,36 @@ impl TranslateEngine for TencentEngine {
             "Source": "auto",
             "Target": tgt,
             "ProjectId": 0
-        }).to_string();
+        })
+        .to_string();
 
         let timestamp = chrono::Utc::now().timestamp();
         let date = chrono::DateTime::from_timestamp(timestamp, 0)
             .unwrap_or_else(|| chrono::Utc::now())
-            .format("%Y-%m-%d").to_string();
+            .format("%Y-%m-%d")
+            .to_string();
 
         // Step 1: 规范请求
         let content_type = "application/json; charset=utf-8";
-        let canonical_headers = format!("content-type:{content_type}\nhost:{host}\nx-tc-action:{}\n", action.to_lowercase());
+        let canonical_headers = format!(
+            "content-type:{content_type}\nhost:{host}\nx-tc-action:{}\n",
+            action.to_lowercase()
+        );
         let signed_headers = "content-type;host;x-tc-action";
         let hashed_payload = hex_hash::sha256_hex(&payload);
-        let canonical_request = format!(
-            "POST\n/\n\n{canonical_headers}\n{signed_headers}\n{hashed_payload}"
-        );
+        let canonical_request =
+            format!("POST\n/\n\n{canonical_headers}\n{signed_headers}\n{hashed_payload}");
 
         // Step 2: 拼接待签名字符串
         let algorithm = "TC3-HMAC-SHA256";
         let credential_scope = format!("{date}/{service}/tc3_request");
         let hashed_canonical = hex_hash::sha256_hex(&canonical_request);
-        let string_to_sign = format!("{algorithm}\n{timestamp}\n{credential_scope}\n{hashed_canonical}");
+        let string_to_sign =
+            format!("{algorithm}\n{timestamp}\n{credential_scope}\n{hashed_canonical}");
 
         // Step 3: 计算签名（4 步 HMAC 链）
-        let secret_date = hex_hash::hmac_sha256_raw(format!("TC3{secret_key}").as_bytes(), date.as_bytes());
+        let secret_date =
+            hex_hash::hmac_sha256_raw(format!("TC3{secret_key}").as_bytes(), date.as_bytes());
         let secret_service = hex_hash::hmac_sha256_raw(&secret_date, service.as_bytes());
         let secret_signing = hex_hash::hmac_sha256_raw(&secret_service, b"tc3_request");
         let signature = hex_hash::hmac_sha256_hex(&secret_signing, string_to_sign.as_bytes());
@@ -421,7 +532,10 @@ impl TranslateEngine for TencentEngine {
 
     fn parse_response(&self, body: &str) -> Option<String> {
         let v: Value = serde_json::from_str(body).ok()?;
-        v.get("Response")?.get("TargetText")?.as_str().map(|s| s.to_string())
+        v.get("Response")?
+            .get("TargetText")?
+            .as_str()
+            .map(|s| s.to_string())
     }
 }
 
@@ -439,7 +553,7 @@ mod hex_hash {
     }
 
     pub fn md5_hex(data: &str) -> String {
-        use md5::{Md5, Digest};
+        use md5::{Digest, Md5};
         let mut hasher = Md5::new();
         hasher.update(data.as_bytes());
         hex_encode(&hasher.finalize())
@@ -487,7 +601,8 @@ fn serde_urlencoded_encode(params: &Value) -> String {
             let val = v.as_str().unwrap_or("");
             format!("{}={}", urlencoding::encode(k), urlencoding::encode(val))
         })
-        .collect::<Vec<_>>().join("&")
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 /// 生成类 UUID 的 nonce（不用 uuid crate，用时间戳+进程内计数器）。

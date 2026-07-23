@@ -262,7 +262,8 @@ impl PseudoStreamingSttEngine {
             let trimmed = trim_trailing_silence(&sentence_samples, sample_rate);
             let wav_bytes = super::wav::pcm_to_wav(&trimmed, sample_rate, 1);
 
-            match super::wav::transcribe_with_client(&client, &url, None, &model, &wav_bytes).await {
+            match super::wav::transcribe_with_client(&client, &url, None, &model, &wav_bytes).await
+            {
                 Ok(text) => {
                     let cleaned = strip_filler_words(&text);
                     tracing::debug!(
@@ -308,7 +309,8 @@ impl PseudoStreamingSttEngine {
             let trimmed = trim_trailing_silence(&samples_snapshot, sample_rate);
             let wav_bytes = super::wav::pcm_to_wav(&trimmed, sample_rate, 1);
 
-            match super::wav::transcribe_with_client(&client, &url, None, &model, &wav_bytes).await {
+            match super::wav::transcribe_with_client(&client, &url, None, &model, &wav_bytes).await
+            {
                 Ok(text) => {
                     let cleaned = strip_filler_words(&text);
                     if !cleaned.is_empty() {
@@ -422,9 +424,7 @@ fn trim_trailing_silence(samples: &[f32], sample_rate: u32) -> Vec<f32> {
             samples.to_vec()
         }
         Some(idx) => {
-            let buffer_samples = (TRIM_TAIL_BUFFER_MS as u64
-                * sample_rate as u64
-                / 1000) as usize;
+            let buffer_samples = (TRIM_TAIL_BUFFER_MS as u64 * sample_rate as u64 / 1000) as usize;
             let end = (idx + 1 + buffer_samples).min(samples.len());
             samples[..end].to_vec()
         }
@@ -435,9 +435,8 @@ fn trim_trailing_silence(samples: &[f32], sample_rate: u32) -> Vec<f32> {
 ///
 /// 这些词在中文语音识别中不应出现，是多语言模型在静音段上的已知幻觉。
 const FILLER_WORDS: &[&str] = &[
-    "Yeah", "yeah", "Okay", "okay", "OK", "ok", "Mm", "mm", "Hmm", "hmm",
-    "Uh", "uh", "Oh", "oh", "Ah", "ah", "Um", "um", "No", "no",
-    "Yes", "yes", "Well", "well", "So", "so", "Right", "right",
+    "Yeah", "yeah", "Okay", "okay", "OK", "ok", "Mm", "mm", "Hmm", "hmm", "Uh", "uh", "Oh", "oh",
+    "Ah", "ah", "Um", "um", "No", "no", "Yes", "yes", "Well", "well", "So", "so", "Right", "right",
     "Like", "like", "But", "but", "And", "and",
 ];
 
@@ -543,8 +542,8 @@ impl SttEngine for PseudoStreamingSttEngine {
 
             // 检查是否该触发预览
             let interval = Self::preview_interval(total, self.sample_rate);
-            let should_preview = inner.last_preview.elapsed() >= interval
-                && !inner.preview_in_flight;
+            let should_preview =
+                inner.last_preview.elapsed() >= interval && !inner.preview_in_flight;
 
             // 收取 pending 定稿结果（如果有）
             if let Some(text) = inner.pending_confirmed.take() {
@@ -582,7 +581,11 @@ impl SttEngine for PseudoStreamingSttEngine {
         if let Some(range) = sentence_range {
             let sentence_samples: Vec<f32> = {
                 let inner = self.inner.lock().unwrap();
-                inner.samples.get(range).map(|s| s.to_vec()).unwrap_or_default()
+                inner
+                    .samples
+                    .get(range)
+                    .map(|s| s.to_vec())
+                    .unwrap_or_default()
             };
 
             if !sentence_samples.is_empty() {
@@ -714,10 +717,7 @@ mod tests {
         let mut buf = SentenceBuffer::new();
         buf.append_confirmed("你好世界。");
         buf.append_confirmed("今天天气不错。");
-        assert_eq!(
-            buf.confirmed_text(),
-            "你好世界。今天天气不错。"
-        );
+        assert_eq!(buf.confirmed_text(), "你好世界。今天天气不错。");
     }
 
     #[test]
@@ -883,19 +883,13 @@ mod tests {
     #[test]
     fn filler_strip_multiple_fillers() {
         // 连续多个语气词
-        assert_eq!(
-            strip_filler_words("你好世界。Yeah. Okay."),
-            "你好世界。"
-        );
+        assert_eq!(strip_filler_words("你好世界。Yeah. Okay."), "你好世界。");
     }
 
     #[test]
     fn filler_strip_no_chinese_not_stripped() {
         // 纯英文不剥离
-        assert_eq!(
-            strip_filler_words("Hello world Yeah."),
-            "Hello world Yeah."
-        );
+        assert_eq!(strip_filler_words("Hello world Yeah."), "Hello world Yeah.");
     }
 
     #[test]
@@ -915,19 +909,13 @@ mod tests {
     #[test]
     fn filler_strip_only_filler_with_chinese() {
         // 中文 + 纯语气词（无标点）
-        assert_eq!(
-            strip_filler_words("你好世界 Yeah"),
-            "你好世界"
-        );
+        assert_eq!(strip_filler_words("你好世界 Yeah"), "你好世界");
     }
 
     #[test]
     fn filler_strip_no_space_variant() {
         // 无空格直接拼接（中文后直接跟英文）
-        assert_eq!(
-            strip_filler_words("你好世界。Yeah."),
-            "你好世界。"
-        );
+        assert_eq!(strip_filler_words("你好世界。Yeah."), "你好世界。");
     }
 
     #[test]
@@ -942,10 +930,7 @@ mod tests {
     #[test]
     fn filler_strip_preserves_chinese_text() {
         // 确保不会误剥离正常中文文本
-        assert_eq!(
-            strip_filler_words("好的，我知道了。"),
-            "好的，我知道了。"
-        );
+        assert_eq!(strip_filler_words("好的，我知道了。"), "好的，我知道了。");
     }
 
     #[test]
@@ -986,7 +971,10 @@ mod tests {
         assert!(!inner.preview_in_flight);
         assert!(!inner.finalize_in_flight);
         assert!(inner.pending_confirmed.is_none());
-        assert_eq!(inner.preview_generation, 1, "reset 应递增 preview_generation");
+        assert_eq!(
+            inner.preview_generation, 1,
+            "reset 应递增 preview_generation"
+        );
         assert_eq!(inner.sentences.confirmed_text(), "");
     }
 }

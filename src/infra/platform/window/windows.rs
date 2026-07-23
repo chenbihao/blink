@@ -573,15 +573,101 @@ pub fn restore_foreground(hwnd: isize) {
 
     if let Some(elem) = crate::infra::platform::uia::get_focused_element() {
         // 焦点已恢复到某个元素——如果它是文本输入控件，主动 SetFocus 确保到位
-        let ct = unsafe { elem.CurrentControlType() }.map(|t| t.0).unwrap_or(0);
+        let ct = unsafe { elem.CurrentControlType() }
+            .map(|t| t.0)
+            .unwrap_or(0);
         if crate::infra::platform::uia::is_text_input_control(ct) {
-            tracing::debug!(control_type = ct, "restore_foreground: 焦点在文本输入控件，SetFocus");
+            tracing::debug!(
+                control_type = ct,
+                "restore_foreground: 焦点在文本输入控件，SetFocus"
+            );
             let _ = crate::infra::platform::uia::set_focused_element(&elem);
         } else {
-            tracing::debug!(control_type = ct, "restore_foreground: 焦点不在文本输入控件，不强制 SetFocus");
+            tracing::debug!(
+                control_type = ct,
+                "restore_foreground: 焦点不在文本输入控件，不强制 SetFocus"
+            );
         }
     } else {
-        tracing::debug!("restore_foreground: GetFocusedElement 返回 None（UIA 不可用或无前台窗口）");
+        tracing::debug!(
+            "restore_foreground: GetFocusedElement 返回 None（UIA 不可用或无前台窗口）"
+        );
+    }
+}
+
+/// 显示独立 AI 对话窗口（0.12.1）。
+///
+/// 与 voice-overlay 不同：对话窗口需要接收键盘输入，因此不加 `WS_EX_NOACTIVATE`；
+/// 首次运行时创建，后续复用同一 WebView，避免重复窗口和状态分裂。
+///
+/// **生命周期**（Phase 3A）：点击关闭→隐藏不销毁；隐藏先 abort active request。
+pub fn show_chat_window(app: &AppHandle) -> Result<(), String> {
+    use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+
+    const LABEL: &str = "chat";
+    if let Some(win) = app.get_webview_window(LABEL) {
+        win.show().map_err(|e| format!("显示 chat 窗口失败: {e}"))?;
+        let _ = win.unminimize();
+        win.set_focus()
+            .map_err(|e| format!("聚焦 chat 窗口失败: {e}"))?;
+        return Ok(());
+    }
+
+    let win = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("chat.html".into()))
+        .title("Blink AI")
+        .inner_size(720.0, 560.0)
+        .min_inner_size(480.0, 360.0)
+        .decorations(true)
+        .transparent(false)
+        .always_on_top(false)
+        .skip_taskbar(false)
+        .resizable(true)
+        .focused(true)
+        .visible(true)
+        .center()
+        .build()
+        .map_err(|e| {
+            tracing::warn!(error = %e, "chat window: 创建失败");
+            format!("创建 chat 窗口失败: {e}")
+        })?;
+
+    // Phase 3A: 拦截 CloseRequested → 隐藏不销毁，先 abort active request
+    let app_clone = app.clone();
+    win.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            // 先中止 active request，再隐藏
+            if let Some(cs) = app_clone
+                .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
+            {
+                cs.abort_active();
+            }
+            // 直接通过 app_clone 获取窗口句柄隐藏
+            if let Some(w) = app_clone.get_webview_window("chat") {
+                let _ = w.hide();
+            }
+            tracing::debug!("chat window: CloseRequested → prevent_close + hide");
+        }
+    });
+
+    tracing::info!("chat window: 已显示");
+    Ok(())
+}
+
+/// 隐藏 chat 窗口（Phase 3A）。
+///
+/// 先中止 active request，再隐藏窗口。若窗口不存在则 no-op。
+pub fn hide_chat_window(app: &AppHandle) {
+    // 先 abort active request
+    if let Some(cs) =
+        app.try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
+    {
+        cs.abort_active();
+    }
+    // 再隐藏窗口
+    if let Some(win) = app.get_webview_window("chat") {
+        let _ = win.hide();
+        tracing::debug!("chat window: 已隐藏");
     }
 }
 
@@ -816,9 +902,14 @@ pub fn show_pin_window(
         // 前端用作缩放基准 imgScreenX/Y，避免 window.screenX 的 DPI 换算问题
         let js = format!(
             "if (window.__blinkResetPin) window.__blinkResetPin('{url}', {w}, {h}, {sx}, {sy}); else document.getElementById('pin-img').src = '{url}';",
-            url = data_url, w = png_w, h = png_h, sx = screen_x, sy = screen_y
+            url = data_url,
+            w = png_w,
+            h = png_h,
+            sx = screen_x,
+            sy = screen_y
         );
-        win.eval(&js).map_err(|e| format!("eval 注入 PNG 失败: {e}"))?;
+        win.eval(&js)
+            .map_err(|e| format!("eval 注入 PNG 失败: {e}"))?;
         let _ = win.show();
         let _ = win.set_focus();
         tracing::debug!(png_w, png_h, screen_x, screen_y, "钉图窗口已复用");
@@ -845,9 +936,14 @@ pub fn show_pin_window(
             // 注入 PNG 数据 + 图片左上物理坐标（首次也走 __blinkResetPin 以统一状态）
             let js = format!(
                 "if (window.__blinkResetPin) window.__blinkResetPin('{url}', {w}, {h}, {sx}, {sy}); else document.getElementById('pin-img').src = '{url}';",
-                url = data_url, w = png_w, h = png_h, sx = screen_x, sy = screen_y
+                url = data_url,
+                w = png_w,
+                h = png_h,
+                sx = screen_x,
+                sy = screen_y
             );
-            win.eval(&js).map_err(|e| format!("eval 注入 PNG 失败: {e}"))?;
+            win.eval(&js)
+                .map_err(|e| format!("eval 注入 PNG 失败: {e}"))?;
             let _ = win.show();
             tracing::debug!(png_w, png_h, screen_x, screen_y, "钉图窗口已创建");
             Ok(())
@@ -1062,21 +1158,17 @@ pub fn preheat_secondary_windows(app: AppHandle) {
         // --- chord-pin（钉图窗口，0.11.7-d；0.11.8 透明贴合） ---
         if app.get_webview_window("chord-pin").is_none() {
             use tauri::{WebviewUrl, WebviewWindowBuilder};
-            match WebviewWindowBuilder::new(
-                &app,
-                "chord-pin",
-                WebviewUrl::App("pin.html".into()),
-            )
-            .title("")
-            .inner_size(400.0, 300.0)
-            .decorations(false)
-            .transparent(true)
-            .shadow(false)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .focused(false)
-            .visible(false)
-            .build()
+            match WebviewWindowBuilder::new(&app, "chord-pin", WebviewUrl::App("pin.html".into()))
+                .title("")
+                .inner_size(400.0, 300.0)
+                .decorations(false)
+                .transparent(true)
+                .shadow(false)
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .focused(false)
+                .visible(false)
+                .build()
             {
                 Ok(_) => tracing::debug!("preheat: chord-pin ✓"),
                 Err(e) => tracing::warn!(error = %e, "preheat: chord-pin 失败"),

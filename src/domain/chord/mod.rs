@@ -98,6 +98,9 @@ pub struct ChordBindings {
     pub screenshot: ChordBinding,
     #[serde(default)]
     pub clipboard_history: ChordBinding,
+    /// 0.12.1: AI 对话窗口（默认 Alt+Q）。老配置缺字段时 serde default 兜底。
+    #[serde(default)]
+    pub chat: ChordBinding,
 }
 
 impl ChordBindings {
@@ -108,6 +111,7 @@ impl ChordBindings {
             "voice_input" => Some(&self.voice_input),
             "screenshot" => Some(&self.screenshot),
             "clipboard_history" => Some(&self.clipboard_history),
+            "chat" => Some(&self.chat),
             _ => None,
         }
     }
@@ -119,6 +123,7 @@ impl ChordBindings {
             "voice_input" => Some(&mut self.voice_input),
             "screenshot" => Some(&mut self.screenshot),
             "clipboard_history" => Some(&mut self.clipboard_history),
+            "chat" => Some(&mut self.chat),
             _ => None,
         }
     }
@@ -435,14 +440,18 @@ fn bilingual(zh: &str, en: &str) -> LocalizableText {
     LocalizableText::Localized(map)
 }
 
-/// 构建默认 ChordRegistry（注册第一批动作）。**注册顺序即提示条展示顺序**。
+/// 构建默认 ChordRegistry（注册顺序即提示条展示顺序）。
 /// - Alt+Space 语音输入（display-only，触发走 native hotkey hold，此条目仅用于提示条显示）
+/// - Alt+Q AI 对话（0.12.1：独立对话窗口）
 /// - Alt+A 区域截图（0.8.7：ScreenshotAction 真实实现）
 /// - Alt+C 剪贴板历史（0.8.5 §6.4）
 pub fn build_default_registry() -> ChordRegistry {
     let mut reg = ChordRegistry::new();
     reg.register(Arc::new(VoiceInputAction {
         label: bilingual("语音输入", "Voice input"),
+    }));
+    reg.register(Arc::new(ChatAction {
+        label: bilingual("AI 对话", "AI chat"),
     }));
     reg.register(Arc::new(ScreenshotAction {
         label: bilingual("区域截图", "Screenshot"),
@@ -451,6 +460,75 @@ pub fn build_default_registry() -> ChordRegistry {
         label: bilingual("剪贴板历史", "Clipboard history"),
     }));
     reg
+}
+
+/// Alt+Q AI 对话窗口（0.12.1）。
+///
+/// Chord 只提供快捷入口；对话窗口、AgentProvider 和流式消息各自走独立模块，
+/// 不把 `AgentBuilder` 能力泄露进主窗口 `AIProvider` 路径。
+///
+/// **可用性门禁**：command 层按 `AIConfig.enabled` 同时约束列表可见性和触发入口；
+/// AI 总开关关闭时不会显示、也不能通过直接 IPC 绕过触发。
+struct ChatAction {
+    label: LocalizableText,
+}
+
+#[async_trait::async_trait]
+impl crate::domain::execution::Action for ChatAction {
+    fn id(&self) -> &str {
+        "chat"
+    }
+
+    fn title(&self) -> &LocalizableText {
+        &self.label
+    }
+
+    fn subtitle(&self) -> &LocalizableText {
+        &self.label
+    }
+
+    fn schema(&self) -> crate::domain::execution::ActionSchema {
+        crate::domain::execution::ActionSchema::empty(
+            "chat",
+            "Open the independent AI chat window (Alt+Q chord). No arguments.",
+        )
+    }
+
+    fn danger_class(&self) -> crate::domain::execution::DangerClass {
+        crate::domain::execution::DangerClass::Safe
+    }
+
+    /// 打开 UI 入口不是给 AI 自主调用的 tool--避免对话 Agent 递归打开自己。
+    fn ai_eligible(&self) -> bool {
+        false
+    }
+
+    async fn execute(
+        &self,
+        cx: &crate::domain::execution::ActionContext<'_>,
+    ) -> Result<crate::domain::execution::ActionOutcome, crate::domain::execution::ExecError> {
+        // 看门狗按 PID 判前台；chat 与主窗同进程，不能指望失焦自动隐藏主窗。
+        // 先确认 chat 已创建并聚焦，再隐藏主窗；创建失败时保留主窗，避免用户失去入口。
+        crate::infra::platform::window::show_chat_window(cx.app_handle)
+            .map_err(crate::domain::execution::ExecError::Runtime)?;
+        crate::infra::platform::window::hide(cx.app_handle, "chat_chord");
+        Ok(crate::domain::execution::ActionOutcome::Nop)
+    }
+}
+
+#[async_trait::async_trait]
+impl ChordAction for ChatAction {
+    fn default_key(&self) -> char {
+        'q'
+    }
+
+    fn label(&self) -> &LocalizableText {
+        &self.label
+    }
+
+    fn surface(&self) -> ChordSurface {
+        ChordSurface::Default
+    }
 }
 
 /// Alt+A 区域截图（0.8.7 §九）。
@@ -607,5 +685,61 @@ impl ChordAction for ClipboardHistoryAction {
     }
     fn surface(&self) -> ChordSurface {
         ChordSurface::Default
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_chat_binding_uses_alt_q_tap() {
+        let bindings = ChordBindings::default();
+        assert_eq!(bindings.effective_key("chat", 'q'), "q");
+        assert_eq!(
+            bindings.effective_semantic("chat", ChordSemantic::Tap),
+            ChordSemantic::Tap
+        );
+        assert_eq!(bindings.chat.modifiers, vec!["alt"]);
+    }
+
+    #[test]
+    fn chat_binding_roundtrip_and_override_are_backward_compatible() {
+        let legacy: ChordBindings = serde_json::from_value(serde_json::json!({
+            "voice_input": {},
+            "screenshot": {},
+            "clipboard_history": {}
+        }))
+        .unwrap();
+        assert_eq!(legacy.effective_key("chat", 'q'), "q");
+
+        let mut bindings = legacy;
+        bindings.get_mut("chat").unwrap().key = "x".into();
+        assert_eq!(bindings.effective_key("chat", 'q'), "x");
+    }
+
+    #[test]
+    fn default_registry_exposes_chat_on_q() {
+        let registry = build_default_registry();
+        let bindings = ChordBindings::default();
+        assert_eq!(registry.action_id_for_key("q", &bindings), Some("chat"));
+
+        let listed = registry.list(&[], &bindings, "zh");
+        let chat = listed.iter().find(|item| item["id"] == "chat").unwrap();
+        assert_eq!(chat["key"], "q");
+        assert_eq!(chat["semantic"], "tap");
+        assert_eq!(chat["label"], "AI 对话");
+        assert_eq!(chat["surface"], "default");
+    }
+
+    #[test]
+    fn chat_action_is_not_exposed_to_agent_tool_pool() {
+        let registry = build_default_registry();
+        let chat = registry
+            .actions
+            .iter()
+            .find(|action| action.id() == "chat")
+            .unwrap();
+        assert!(!chat.ai_eligible());
     }
 }

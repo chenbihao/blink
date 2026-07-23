@@ -796,7 +796,9 @@ impl SearchService {
             let provider_model = provider.model_id().to_string();
 
             let cfg = registry.config_snapshot();
-            let timeout_ms = cfg.slo_hard_timeout_ms.unwrap_or(AI_DEFAULT_HARD_TIMEOUT_MS);
+            let timeout_ms = cfg
+                .slo_hard_timeout_ms
+                .unwrap_or(AI_DEFAULT_HARD_TIMEOUT_MS);
 
             // 0.9.7 Step 4: 聚合 tools 列表 = Action 分组 + 插件独立 + Capability 独立
             let action_reg = app.state::<Arc<ActionRegistry>>();
@@ -857,14 +859,10 @@ impl SearchService {
 
             // 0.11.3 改进 4: system prompt 从 ai/prompt.rs 统一生成，
             // 工具列表含参数摘要 + 插件 hint，构建时估算 token 数超阈值 warn。
-            let prompt_infos = crate::domain::ai::prompt::build_prompt_infos(
-                tools.clone(),
-                &plugin_hints,
-            );
-            let system_prompt = crate::domain::ai::prompt::routing_system_prompt(
-                &prompt_infos,
-                &lang,
-            );
+            let prompt_infos =
+                crate::domain::ai::prompt::build_prompt_infos(tools.clone(), &plugin_hints);
+            let system_prompt =
+                crate::domain::ai::prompt::routing_system_prompt(&prompt_infos, &lang);
 
             // 0.9.7 Step 4 铁则 1: AI lane 派给 Capability 的预算 = AI 总预算 - 已耗时间。
             // handle_ai_tool_calls 收到此 deadline 后构造 InvokeContext 传给 Capability。
@@ -1903,7 +1901,7 @@ fn items_to_entries(items: &[crate::domain::capability::ItemResult]) -> Vec<AppE
     if remaining > 0 {
         entries.push(AppEntry {
             name: format!("还有 {} 条，按 ↓ 查看全部", remaining),
-            score: -1.0, // 排序到最后
+            score: -1.0,          // 排序到最后
             is_placeholder: true, // 前端识别为提示项
             source: AI_SOURCE.into(),
             ..Default::default()
@@ -2203,7 +2201,9 @@ async fn execute_capability_for_turn1(
         deadline,
     };
 
-    let result = cap_registry.invoke(&tc.name, tc.arguments.clone(), &ctx).await;
+    let result = cap_registry
+        .invoke(&tc.name, tc.arguments.clone(), &ctx)
+        .await;
 
     // 铁则 2: seq 再次校验
     if seq != latest_seq.load(Ordering::SeqCst) {
@@ -2329,20 +2329,15 @@ async fn execute_action_for_turn1(
                 "AI tool_call 执行成功: {} args={}",
                 tc.name, args,
             );
-            let tool_message = crate::domain::capability::rig_tool_result_to_text(
-                &outcome.to_rig_tool_result(),
-            );
+            let tool_message =
+                crate::domain::capability::rig_tool_result_to_text(&outcome.to_rig_tool_result());
             let summary = outcome_to_summary(&outcome);
 
             // 构造前端 entries
             let entries = match &outcome {
                 ActionOutcome::Items { items } => {
                     let e = items_to_entries(items);
-                    if e.is_empty() {
-                        vec![]
-                    } else {
-                        e
-                    }
+                    if e.is_empty() { vec![] } else { e }
                 }
                 _ => vec![ai_action_done_entry(action.as_ref(), &outcome, lang)],
             };
@@ -2556,10 +2551,8 @@ async fn run_turn2_feedback(
         .filter(|p| safe_tool_names.contains(&p.name))
         .cloned()
         .collect();
-    let feedback_prompt = crate::domain::ai::prompt::tool_result_feedback_prompt(
-        &safe_prompt_infos,
-        &ctx.lang,
-    );
+    let feedback_prompt =
+        crate::domain::ai::prompt::tool_result_feedback_prompt(&safe_prompt_infos, &ctx.lang);
 
     // 构造 Turn 2 messages
     // §2.2.1: messages = [system(feedback_prompt), user, assistant(tool_call_1), tool(result_1)]
@@ -2573,7 +2566,10 @@ async fn run_turn2_feedback(
         ChatMessage::system(&feedback_prompt),
         ChatMessage::user(&ctx.user_query),
         ChatMessage::assistant_tool_call(&turn1_result.tool_call_id, &assistant_content),
-        ChatMessage::tool(&turn1_result.tool_call_id, &turn1_result.tool_message_content),
+        ChatMessage::tool(
+            &turn1_result.tool_call_id,
+            &turn1_result.tool_message_content,
+        ),
     ];
 
     // Turn 2 独立超时预算（从总预算派生）
@@ -2675,7 +2671,10 @@ async fn run_turn2_feedback(
             let summary = if accumulated.trim().is_empty() {
                 "Turn 2 stream 提前结束（无文本）".to_string()
             } else {
-                format!("Turn 2 stream 提前结束（部分文本: {}chars）", accumulated.chars().count())
+                format!(
+                    "Turn 2 stream 提前结束（部分文本: {}chars）",
+                    accumulated.chars().count()
+                )
             };
             emit_ai_clear(app, seq, None);
             if !accumulated.trim().is_empty() {
@@ -2772,8 +2771,8 @@ async fn handle_turn2_tool_call(
 
     // Capability 优先
     if cap_reg.get(&tc.name).is_some() {
-        let result = execute_capability_for_turn1(app, seq, tc, &cap_reg, latest_seq, ctx.deadline)
-            .await;
+        let result =
+            execute_capability_for_turn1(app, seq, tc, &cap_reg, latest_seq, ctx.deadline).await;
         match result {
             Some(r) => {
                 // 写审计日志 (turn=2)
@@ -2816,13 +2815,7 @@ async fn handle_turn2_tool_call(
                 DangerClass::Safe if !is_open_url => {
                     // 自动执行（D4: open_path 保持自动）
                     let result = execute_action_for_turn1(
-                        app,
-                        seq,
-                        tc,
-                        &action,
-                        args,
-                        &ctx.lang,
-                        latest_seq,
+                        app, seq, tc, &action, args, &ctx.lang, latest_seq,
                     )
                     .await;
 

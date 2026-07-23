@@ -495,7 +495,10 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
 
             tracing::trace!(
                 side = if vk == VK_LMENU.0 as u32 { "L" } else { "R" },
-                is_down, is_up, injected, was_expected,
+                is_down,
+                is_up,
+                injected,
+                was_expected,
                 prev_held,
                 now_held = ALT_LOGICALLY_HELD.load(Ordering::SeqCst),
                 "alt-event"

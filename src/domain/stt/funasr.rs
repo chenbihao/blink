@@ -168,10 +168,7 @@ pub struct FunasrEnv {
 ///
 /// 将 Python 子进程检测放到 `spawn_blocking` 线程池执行。
 /// 适用于 Tauri async 命令中调用，避免阻塞 UI 线程。
-pub async fn get_env_status_async(
-    server_port: u16,
-    server_model: String,
-) -> FunasrEnv {
+pub async fn get_env_status_async(server_port: u16, server_model: String) -> FunasrEnv {
     let py_status = crate::infra::platform::python::check_status_async().await;
 
     FunasrEnv {
@@ -223,7 +220,8 @@ fn is_funasr_noise(line: &str) -> bool {
     if line.starts_with("funasr version:") {
         return true;
     }
-    if line.contains("Check update of funasr") || line.contains("You are using the latest version") {
+    if line.contains("Check update of funasr") || line.contains("You are using the latest version")
+    {
         return true;
     }
     // 非流式转录请求参数行（每次请求都重复，参数在启动时已打印）
@@ -701,33 +699,57 @@ mod tests {
 
     #[test]
     fn noise_filter_detects_tqdm_progress() {
-        assert!(is_funasr_noise("100%|\x1b[34m██████████\x1b[0m| 1/1 [00:00<00:00, 8.24it/s]"));
-        assert!(is_funasr_noise("  0%|\x1b[34m          \x1b[0m| 0/1 [00:00<?, ?it/s]"));
+        assert!(is_funasr_noise(
+            "100%|\x1b[34m██████████\x1b[0m| 1/1 [00:00<00:00, 8.24it/s]"
+        ));
+        assert!(is_funasr_noise(
+            "  0%|\x1b[34m          \x1b[0m| 0/1 [00:00<?, ?it/s]"
+        ));
     }
 
     #[test]
     fn noise_filter_detects_rtf_metrics() {
-        assert!(is_funasr_noise("{'load_data': '0.000', 'extract_feat': 0.0, 'forward': '0.000', 'batch_size': '1', 'rtf': '-0.000'}, : 100%|\x1b[34m██████████\x1b[0m| 1/1 [00:00<?, ?it/s]"));
-        assert!(is_funasr_noise("rtf_avg: 0.227: 100%|\x1b[34m██████████\x1b[0m| 1/1 [00:00<00:00,  8.24it/s]"));
+        assert!(is_funasr_noise(
+            "{'load_data': '0.000', 'extract_feat': 0.0, 'forward': '0.000', 'batch_size': '1', 'rtf': '-0.000'}, : 100%|\x1b[34m██████████\x1b[0m| 1/1 [00:00<?, ?it/s]"
+        ));
+        assert!(is_funasr_noise(
+            "rtf_avg: 0.227: 100%|\x1b[34m██████████\x1b[0m| 1/1 [00:00<00:00,  8.24it/s]"
+        ));
     }
 
     #[test]
     fn noise_filter_preserves_useful_logs() {
-        assert!(!is_funasr_noise("INFO:     Started server process [293704]"));
-        assert!(!is_funasr_noise("INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)"));
-        assert!(!is_funasr_noise("Downloading 11 files from iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online@master"));
-        assert!(!is_funasr_noise("19:16:18 [root] INFO: Loading pretrained params from C:\\Users\\...\\model.pt"));
-        assert!(!is_funasr_noise("Loading ckpt: ..., status: <All keys matched successfully>"));
+        assert!(!is_funasr_noise(
+            "INFO:     Started server process [293704]"
+        ));
+        assert!(!is_funasr_noise(
+            "INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)"
+        ));
+        assert!(!is_funasr_noise(
+            "Downloading 11 files from iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online@master"
+        ));
+        assert!(!is_funasr_noise(
+            "19:16:18 [root] INFO: Loading pretrained params from C:\\Users\\...\\model.pt"
+        ));
+        assert!(!is_funasr_noise(
+            "Loading ckpt: ..., status: <All keys matched successfully>"
+        ));
     }
 
     #[test]
     fn noise_filter_detects_funasr_internal_noise() {
-        assert!(is_funasr_noise("19:51:15 [root] WARNING: trust_remote_code: False"));
+        assert!(is_funasr_noise(
+            "19:51:15 [root] WARNING: trust_remote_code: False"
+        ));
         assert!(is_funasr_noise("scope_map: ['module.', 'None']"));
         assert!(is_funasr_noise("excludes: None"));
         assert!(is_funasr_noise("funasr version: 1.3.14."));
-        assert!(is_funasr_noise("Check update of funasr, and it would cost few times."));
-        assert!(is_funasr_noise("You are using the latest version of funasr-1.3.14"));
+        assert!(is_funasr_noise(
+            "Check update of funasr, and it would cost few times."
+        ));
+        assert!(is_funasr_noise(
+            "You are using the latest version of funasr-1.3.14"
+        ));
     }
 
     #[test]

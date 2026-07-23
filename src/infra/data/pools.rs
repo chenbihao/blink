@@ -222,10 +222,6 @@ async fn init_cache_schema_only(pool: &SqlitePool) -> Result<(), String> {
 /// 无需逐行读取/写入，类型安全且高效。
 async fn migrate_legacy_db(dir: &PathBuf) -> Result<(), String> {
     let legacy_path = dir.join("blink.db");
-    if !legacy_path.exists() {
-        tracing::debug!("无旧 blink.db，跳过迁移");
-        return Ok(());
-    }
 
     // 先检查配置库是否已有迁移标记（避免重复迁移）
     let config_path = dir.join("blink_config.db");
@@ -235,19 +231,29 @@ async fn migrate_legacy_db(dir: &PathBuf) -> Result<(), String> {
             .connect(&format!("sqlite:{}", config_path.display()))
             .await
         {
-            if let Ok(row) =
-                sqlx::query_scalar::<_, Option<String>>("SELECT value FROM config WHERE key = 'db_split_done'")
-                    .fetch_one(&pool)
-                    .await
+            if let Ok(row) = sqlx::query_scalar::<_, Option<String>>(
+                "SELECT value FROM config WHERE key = 'db_split_done'",
+            )
+            .fetch_one(&pool)
+            .await
             {
                 if row.as_deref() == Some("true") {
-                    tracing::info!("DB 四层拆分已迁移过，跳过");
+                    // 迁移已完成，清理可能残留的失败标记（上次失败→本次成功的场景）
+                    let _ = sqlx::query("DELETE FROM config WHERE key = 'migration_failed'")
+                        .execute(&pool)
+                        .await;
                     pool.close().await;
+                    tracing::info!("DB 四层拆分已迁移过，跳过");
                     return Ok(());
                 }
             }
             pool.close().await;
         }
+    }
+
+    if !legacy_path.exists() {
+        tracing::debug!("无旧 blink.db，跳过迁移");
+        return Ok(());
     }
 
     tracing::info!("开始旧 blink.db → 四库迁移");
@@ -265,8 +271,9 @@ async fn migrate_legacy_db(dir: &PathBuf) -> Result<(), String> {
     init_ai_schema(&ai).await?;
     init_cache_schema_only(&cache).await?;
 
-    // 各库 ATTACH 旧库 + 迁移对应表
-    let legacy_url = format!("sqlite:{}", legacy_path.display());
+    // ATTACH 旧库用纯文件路径（反斜杠替换为正斜杠，SQLite 跨平台兼容）。
+    // 不加 `sqlite:` 前缀——那是 sqlx 连接字符串格式，ATTACH 不认。
+    let legacy_url = legacy_path.display().to_string().replace('\\', "/");
 
     // 各库 ATTACH 旧库 + 迁移对应表。
     // 若任一迁移失败，仍需 close 已创建的 pool 避免泄漏。
@@ -333,7 +340,9 @@ async fn migrate_legacy_db(dir: &PathBuf) -> Result<(), String> {
     // 删除旧库
     match std::fs::remove_file(&legacy_path) {
         Ok(()) => tracing::info!("旧 blink.db 已删除，迁移完成"),
-        Err(e) => tracing::warn!(error = %e, "删除旧 blink.db 失败（不影响运行，下次启动会跳过迁移）"),
+        Err(e) => {
+            tracing::warn!(error = %e, "删除旧 blink.db 失败（不影响运行，下次启动会跳过迁移）")
+        }
     }
 
     Ok(())
@@ -346,26 +355,25 @@ async fn migrate_legacy_db(dir: &PathBuf) -> Result<(), String> {
 /// 2. 检查 `legacy.table` 是否存在
 /// 3. `INSERT INTO main.table SELECT * FROM legacy.table`（表已建好，INSERT OR REPLACE 防主键冲突）
 /// 4. `DETACH DATABASE legacy`
-async fn migrate_via_attach(
-    dst: &SqlitePool,
-    legacy_url: &str,
-    table: &str,
-) -> Result<(), String> {
+async fn migrate_via_attach(dst: &SqlitePool, legacy_url: &str, table: &str) -> Result<(), String> {
     // ATTACH 旧库（legacy_url 是内部文件路径，非用户输入，安全）
-    sqlx::query(sqlx::AssertSqlSafe(format!("ATTACH DATABASE '{legacy_url}' AS legacy")))
-        .execute(dst)
-        .await
-        .map_err(|e| format!("ATTACH 旧库失败: {e}"))?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "ATTACH DATABASE '{legacy_url}' AS legacy"
+    )))
+    .execute(dst)
+    .await
+    .map_err(|e| format!("ATTACH 旧库失败: {e}"))?;
 
     // 迁移逻辑包在块内，确保无论成功失败都 DETACH 旧库（避免连接残留）
     let result: Result<(), String> = async {
         // 检查旧库是否有此表
-        let exists: (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM legacy.sqlite_master WHERE type='table' AND name=?1")
-                .bind(table)
-                .fetch_one(dst)
-                .await
-                .map_err(|e| format!("检查 legacy.{table} 存在性: {e}"))?;
+        let exists: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM legacy.sqlite_master WHERE type='table' AND name=?1",
+        )
+        .bind(table)
+        .fetch_one(dst)
+        .await
+        .map_err(|e| format!("检查 legacy.{table} 存在性: {e}"))?;
 
         if exists.0 > 0 {
             // 迁移数据（INSERT OR REPLACE 防主键冲突；table 名由调用方硬编码字面量传入）

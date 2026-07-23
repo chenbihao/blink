@@ -48,7 +48,10 @@ impl CapabilityResult {
                 } else {
                     format!("{:.1} KB", size_kb)
                 };
-                vec![ToolResultContent::text(format!("已获取 {} ({})", mime, size_text))]
+                vec![ToolResultContent::text(format!(
+                    "已获取 {} ({})",
+                    mime, size_text
+                ))]
             }
             CapabilityResult::Done { summary } => {
                 vec![ToolResultContent::text(summary)]

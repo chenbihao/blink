@@ -239,8 +239,8 @@ pub fn collect(cfg: &ContextConfig) -> AwarenessSnapshot {
             // 用剪贴板最后一次真实变化的时间戳，而非 Instant::now()（invoke 瞬间）。
             // 避免 Clipboard captured_at 总是最新的，导致与 Selection 的真实采集时间
             // 比较时 Clipboard 恒胜（即使 Selection 是更晚的用户行为）。
-            let clip_changed_at = crate::infra::platform::clipboard::last_changed_at()
-                .unwrap_or_else(Instant::now);
+            let clip_changed_at =
+                crate::infra::platform::clipboard::last_changed_at().unwrap_or_else(Instant::now);
             texts.push(AwarenessText {
                 source: AwarenessSource::Clipboard,
                 text: clip,

@@ -309,16 +309,14 @@ pub async fn create_venv(uv_path: &Path) -> Result<(), String> {
 
     tracing::info!(python = PYTHON_VERSION, venv = %venv.display(), "创建 Python venv...");
 
-    let output = no_window_tokio(
-        tokio::process::Command::new(uv_path),
-    )
-    .args(["venv", "--python", PYTHON_VERSION])
-    .arg(&venv)
-    .stdout(std::process::Stdio::piped())
-    .stderr(std::process::Stdio::piped())
-    .output()
-    .await
-    .map_err(|e| format!("执行 uv venv 失败: {e}"))?;
+    let output = no_window_tokio(tokio::process::Command::new(uv_path))
+        .args(["venv", "--python", PYTHON_VERSION])
+        .arg(&venv)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| format!("执行 uv venv 失败: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -411,17 +409,15 @@ pub async fn uninstall_packages(uv_path: &Path, packages: &[&str]) -> Result<(),
 
     tracing::info!(packages = ?packages, "卸载 Python 包...");
 
-    let output = no_window_tokio(
-        tokio::process::Command::new(uv_path),
-    )
-    .args(["pip", "uninstall", "--python"])
-    .arg(&python)
-    .args(packages)
-    .stdout(std::process::Stdio::piped())
-    .stderr(std::process::Stdio::piped())
-    .output()
-    .await
-    .map_err(|e| format!("执行 uv pip uninstall 失败: {e}"))?;
+    let output = no_window_tokio(tokio::process::Command::new(uv_path))
+        .args(["pip", "uninstall", "--python"])
+        .arg(&python)
+        .args(packages)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| format!("执行 uv pip uninstall 失败: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -605,10 +601,7 @@ pub fn check_torch_cuda() -> bool {
     };
 
     match no_window(Command::new(python))
-        .args([
-            "-c",
-            "import torch; print(torch.cuda.is_available())",
-        ])
+        .args(["-c", "import torch; print(torch.cuda.is_available())"])
         .output()
     {
         Ok(output) if output.status.success() => {
@@ -685,10 +678,7 @@ pub fn check_status() -> PythonEnvStatus {
     // 只在 torch 已安装时才检查 CUDA 支持（避免无意义的子进程调用）
     let torch_cuda_available = torch_installed && check_torch_cuda();
     if torch_installed {
-        tracing::info!(
-            torch_cuda_available,
-            "PyTorch CUDA 支持检测"
-        );
+        tracing::info!(torch_cuda_available, "PyTorch CUDA 支持检测");
     }
 
     let (funasr_installed, funasr_version) = if venv_exists {
@@ -697,8 +687,7 @@ pub fn check_status() -> PythonEnvStatus {
         (false, None)
     };
 
-    let env_ready =
-        uv_available && venv_exists && torch_installed && funasr_installed;
+    let env_ready = uv_available && venv_exists && torch_installed && funasr_installed;
 
     PythonEnvStatus {
         uv_available,
@@ -777,14 +766,11 @@ pub async fn setup_with_progress(
     // 但当 device == "cuda" 时，需额外验证已安装的 PyTorch 是否含 CUDA 支持——
     // 如果之前以 CPU 模式安装了 CPU-only PyTorch，切换到 CUDA 后需重装。
     let status = check_status();
-    let need_torch_reinstall = device == "cuda"
-        && status.torch_installed
-        && !status.torch_cuda_available;
+    let need_torch_reinstall =
+        device == "cuda" && status.torch_installed && !status.torch_cuda_available;
 
     if need_torch_reinstall {
-        tracing::warn!(
-            "配置为 CUDA 模式但已安装的 PyTorch 不含 CUDA 支持，将重装 PyTorch"
-        );
+        tracing::warn!("配置为 CUDA 模式但已安装的 PyTorch 不含 CUDA 支持，将重装 PyTorch");
         on_log("[Blink] ⚠️ 检测到当前 PyTorch 为 CPU 版，正在重装 CUDA 版 PyTorch...");
     }
 
@@ -918,7 +904,14 @@ pub async fn setup_with_progress(
                 // numba>=0.59 强制使用支持 Python 3.12 的版本，避免 llvmlite 编译失败
                 install_packages(
                     &uv_path,
-                    &["funasr", "fastapi", "uvicorn[standard]", "python-multipart", "torch_complex", "numba>=0.59"],
+                    &[
+                        "funasr",
+                        "fastapi",
+                        "uvicorn[standard]",
+                        "python-multipart",
+                        "torch_complex",
+                        "numba>=0.59",
+                    ],
                 )
                 .await?;
             }
@@ -1011,5 +1004,4 @@ mod tests {
         assert!(find_file_recursive(&tmp, "nonexistent.exe").is_none());
         let _ = std::fs::remove_dir_all(&tmp);
     }
-
 }

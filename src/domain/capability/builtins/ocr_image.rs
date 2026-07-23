@@ -24,7 +24,8 @@ impl Capability for OcrImage {
     fn schema(&self) -> CapabilitySchema {
         CapabilitySchema {
             name: "ocr_image".into(),
-            description: "识别图片中的文字，返回识别文本和每行文字的位置坐标。支持中文和英文。".into(),
+            description: "识别图片中的文字，返回识别文本和每行文字的位置坐标。支持中文和英文。"
+                .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -64,11 +65,12 @@ impl Capability for OcrImage {
 
         // 调用注入的 OCR backend
         let b = backend();
-        let result = b.recognize(&png_bytes).await.map_err(|e| {
-            CapabilityError::Internal {
+        let result = b
+            .recognize(&png_bytes)
+            .await
+            .map_err(|e| CapabilityError::Internal {
                 detail: e.to_string(),
-            }
-        })?;
+            })?;
 
         Ok(CapabilityResult::Text {
             content: serde_json::to_string(&result as &OcrResult)
@@ -83,8 +85,8 @@ inventory::submit!(crate::domain::capability::CapabilityEntry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::ocr_engine::{FakeOcrBackend, install_backend};
+    use super::*;
 
     #[test]
     fn id_is_ocr_image() {
@@ -95,7 +97,12 @@ mod tests {
     fn schema_has_png_parameter() {
         let s = OcrImage.schema();
         assert_eq!(s.name, "ocr_image");
-        assert!(s.parameters["required"].as_array().unwrap().contains(&json!("png")));
+        assert!(
+            s.parameters["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("png"))
+        );
     }
 
     /// Capability 通过 backend() 拿注入的 FakeOcrBackend。

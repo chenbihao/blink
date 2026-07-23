@@ -130,8 +130,7 @@ pub fn backend() -> Arc<dyn ScreenshotBackend> {
         let default: Arc<dyn ScreenshotBackend> =
             Arc::new(backend_windows::WindowsScreenshotBackend::new());
         #[cfg(not(target_os = "windows"))]
-        let default: Arc<dyn ScreenshotBackend> =
-            panic!("非 Windows 平台需显式 install_backend");
+        let default: Arc<dyn ScreenshotBackend> = panic!("非 Windows 平台需显式 install_backend");
         RwLock::new(default)
     });
     lock.read().expect("backend RwLock 中毒").clone()
