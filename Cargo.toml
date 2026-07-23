@@ -45,9 +45,10 @@ png = "0.17"
 open = "5.3.5"
 pinyin = "0.11.0"
 regex = "1.11"
-# rig-core 0.39 只用作 tool schema 类型来源(ToolDefinition);0.9.0 阶段不构造 Client、不调用 LLM。
+# rig-core 0.39:tool schema(ToolDefinition) + Provider 接入(0.9.2 起) + 对话窗口 Agent(0.12.1)。
 # default features 已含 derive+reqwest+rustls;额外加 rmcp 让 0.11 MCP schema 投影零适配。
-rig-core = { version = "0.39", features = ["rmcp"] }
+# test-utils 供 0.12.1 spike 验证 rig Agent API(Phase 6 后随 spike 移除)。
+rig-core = { version = "0.39", features = ["rmcp", "test-utils"] }
 # semver: 语义化版本比较（检查更新用），支持 pre-release / build metadata
 semver = "1.0"
 serde = { version = "1.0.228", features = ["derive"] }

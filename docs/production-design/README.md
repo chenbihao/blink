@@ -37,7 +37,7 @@ production-design/
     ├── 0.9-ai-layer.md                 ← 📋 Agent 地基:统一 tool 架构+Provider 多档+主窗口文本闭环(零语音)
     ├── 0.10-voice-agent.md             ← ✅ 语音输入:STT+语音打字+伪流式 VAD 切句+FunASR 本地化
     ├── 0.11-plugin-ai-toolchain.md    ← ✅ 插件通信契约重设计+AI 调用插件链路完善+截图标注增强+OCR word 级+翻译衔接+图上翻译
-    ├── 0.12-ai-ecosystem.md           ← 🔧 AI 能力架构搭建:对话窗口+Alt+Q chord+DB 四层拆分+Provider 统一+ollama+Tool 适配层
+    ├── 0.12-ai-ecosystem.md           ← 🔧 AI 能力架构搭建（0.12.0 完成 / 0.12.1 进行中）:对话窗口+Alt+Q chord+DB 四层拆分+Provider 统一+ollama+Tool 适配层
     └── 0.13-ai-capability-expansion.md ← 📋 AI 调用能力扩展:MCP client+RAG+记忆向量召回+MCP server+Skill
 ```
 

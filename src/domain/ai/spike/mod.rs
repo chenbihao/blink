@@ -22,3 +22,4 @@
 pub mod mock_server;
 pub mod secret_hygiene;
 pub mod skeleton;
+pub mod agent;

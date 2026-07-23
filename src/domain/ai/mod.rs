@@ -14,6 +14,7 @@
 //! **§2.6 类型收窄**：主窗口 `use crate::domain::ai::AIProvider` 编译期就没有
 //! `AgentBuilder / prompt / memory`——这些留 0.10 落 `agent_window/` 独立模块。
 
+pub mod agent_provider;
 pub mod factory;
 pub mod gating;
 pub mod message;

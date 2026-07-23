@@ -128,6 +128,70 @@ impl ProviderFactory for RigFactory {
 }
 
 // ── 各 Provider 构造 ─────────────────────────────────────────────────────
+/// 构造 OpenAI Compatible 协议的 rig client（0.12.1 抽出，AgentProvider 复用拿裸 model）。
+///
+/// **护栏**：base_url 空一律拒绝--rig 默认落 `api.openai.com`，用户拿着第三方 Key 打去
+/// OpenAI 官方必 401 且极难自诊断（前端已有校验；这里是双重保险，防手动编辑 db 绕过）。
+pub(crate) fn build_openai_client(
+    key: &str,
+    base_url: Option<&str>,
+) -> Result<rig_core::providers::openai::CompletionsClient, AIError> {
+    use rig_core::providers::openai;
+    let url = base_url.filter(|s| !s.is_empty()).ok_or_else(|| {
+        AIError::Provider(
+            "OpenAI Compatible 协议必须配 base_url(如 https://api.openai.com/v1)".into(),
+        )
+    })?;
+    openai::CompletionsClient::builder()
+        .api_key(key)
+        .base_url(url)
+        .build()
+        .map_err(|_| AIError::Provider("openai-compatible client 构造失败".into()))
+}
+
+/// 构造 Anthropic Messages 协议的 rig client（0.12.1 抽出）。
+pub(crate) fn build_anthropic_client(
+    key: &str,
+    base_url: Option<&str>,
+) -> Result<rig_core::providers::anthropic::Client, AIError> {
+    use rig_core::providers::anthropic;
+    let mut builder = anthropic::Client::builder().api_key(key);
+    if let Some(url) = base_url.filter(|s| !s.is_empty()) {
+        builder = builder.base_url(url);
+    }
+    builder
+        .build()
+        .map_err(|_| AIError::Provider("anthropic client 构造失败".into()))
+}
+
+/// 构造 Google Gemini 协议的 rig client（0.12.1 抽出）。
+/// rig 0.39 gemini builder 不支持 base_url（端点固定 googleapis.com），用户填的忽略。
+pub(crate) fn build_gemini_client(
+    key: &str,
+    _base_url: Option<&str>,
+) -> Result<rig_core::providers::gemini::Client, AIError> {
+    use rig_core::providers::gemini;
+    gemini::Client::builder()
+        .api_key(key)
+        .build()
+        .map_err(|_| AIError::Provider("gemini client 构造失败".into()))
+}
+
+/// 构造 ollama 本地推理的 rig client（0.12.1 抽出）。
+/// 无需 API Key（OllamaApiKey::default()=None），base_url 默认 localhost:11434。
+pub(crate) fn build_ollama_client(
+    base_url: Option<&str>,
+) -> Result<rig_core::providers::ollama::Client, AIError> {
+    use rig_core::providers::ollama;
+    let mut builder = ollama::Client::builder().api_key(ollama::OllamaApiKey::default());
+    if let Some(url) = base_url.filter(|s| !s.is_empty()) {
+        builder = builder.base_url(url);
+    }
+    builder
+        .build()
+        .map_err(|e| AIError::Provider(format!("ollama client 构造失败: {e}")))
+}
+
 
 /// OpenAI Chat Completions 协议——**通用兼容层**(0.9.2 第二步)。
 ///
@@ -147,20 +211,10 @@ fn build_openai_compatible(
     base_url: Option<&str>,
     model: &ModelEntry,
 ) -> Result<Arc<dyn AIProvider>, AIError> {
-    use rig_core::providers::openai;
     // **护栏**:base_url 空一律拒绝构造——rig 默认落到 `api.openai.com`,用户拿着
     // 第三方 Key 打去 OpenAI 官方必 401 且极难自诊断(前端已有校验;这里是双重保险,
     // 防止老配置迁移 / 手动编辑 db 绕过前端)。
-    let url = base_url.filter(|s| !s.is_empty()).ok_or_else(|| {
-        AIError::Provider(
-            "OpenAI Compatible 协议必须配 base_url(如 https://api.openai.com/v1)".into(),
-        )
-    })?;
-    let client = openai::CompletionsClient::builder()
-        .api_key(key)
-        .base_url(url)
-        .build()
-        .map_err(|_| AIError::Provider("openai-compatible client 构造失败".into()))?;
+    let client = build_openai_client(key, base_url)?;
     let rig_model = client.completion_model(&model.id);
     Ok(Arc::new(RigProvider::new(
         ProviderKind::OpenAICompatible,
@@ -179,14 +233,7 @@ fn build_anthropic(
     base_url: Option<&str>,
     model: &ModelEntry,
 ) -> Result<Arc<dyn AIProvider>, AIError> {
-    use rig_core::providers::anthropic;
-    let mut builder = anthropic::Client::builder().api_key(key);
-    if let Some(url) = base_url.filter(|s| !s.is_empty()) {
-        builder = builder.base_url(url);
-    }
-    let client = builder
-        .build()
-        .map_err(|_| AIError::Provider("anthropic client 构造失败".into()))?;
+    let client = build_anthropic_client(key, base_url)?;
     let rig_model = client.completion_model(&model.id);
     Ok(Arc::new(RigProvider::new(
         ProviderKind::AnthropicMessages,
@@ -206,14 +253,10 @@ fn build_anthropic(
 /// 仅忽略——避免"填了没用又不知道"的困惑,统一走 rig 默认。
 fn build_gemini(
     key: &str,
-    _base_url: Option<&str>,
+    base_url: Option<&str>,
     model: &ModelEntry,
 ) -> Result<Arc<dyn AIProvider>, AIError> {
-    use rig_core::providers::gemini;
-    let client = gemini::Client::builder()
-        .api_key(key)
-        .build()
-        .map_err(|_| AIError::Provider("gemini client 构造失败".into()))?;
+    let client = build_gemini_client(key, base_url)?;
     let rig_model = client.completion_model(&model.id);
     Ok(Arc::new(RigProvider::new(
         ProviderKind::GeminiGenerateContent,
@@ -237,18 +280,9 @@ fn build_ollama(
     base_url: Option<&str>,
     model: &ModelEntry,
 ) -> Result<Arc<dyn AIProvider>, AIError> {
-    use rig_core::providers::ollama;
-
     // ollama 无需认证——OllamaApiKey::default() = None,不发送 Authorization header。
     // 但 builder 类型系统要求 Key: ApiKey,必须显式设置。
-    let mut builder = ollama::Client::builder()
-        .api_key(ollama::OllamaApiKey::default());
-    if let Some(url) = base_url.filter(|s| !s.is_empty()) {
-        builder = builder.base_url(url);
-    }
-    let client = builder
-        .build()
-        .map_err(|e| AIError::Provider(format!("ollama client 构造失败: {e}")))?;
+    let client = build_ollama_client(base_url)?;
 
     // 0.12 §2.7: 校验模型能力--纯 embedding 模型不应构造为 completion model。
     // 0.12 不构造 embedding model（留给 0.13 RAG），此处仅 warn 不 block。

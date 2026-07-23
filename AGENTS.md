@@ -4,7 +4,7 @@
 
 > 📖 **产品设计与文档导航**：请先阅读 [docs/production-design/00-overview.md](docs/production-design/00-overview.md) 了解产品定位、里程碑与完整文档体系。改核心前必读对应 phases 文档。
 
-更新时间 20260722
+更新时间 20260723
 
 ---
 
@@ -13,7 +13,7 @@
 Blink 是一个 Windows 全局快捷入口，定位不只是「启动器」。**目标：做一个极其丝滑的启动器，并且把常用的功能都丝滑融合，使用 Chord 模式来调用各种增强能力，不止是启动器。**
 终极目标：感知用户上下文、主动推荐动作，让任何操作都比原来的路径更快。
 
-当前 **0.11.10 完成**（图上翻译 + 截图交互重构，测试基线 **783 通过**），**0.12.0 进行中**（基础设施抽取与清账：投影统一 / DB 四层拆分 / Provider 模型统一 / ollama 接入 / Tool 适配层 / CapabilityRegistry 动态注册 / 存储页优化）。0.10.7 Chord 交互统一化 + 0.10.8 呈现共存策略收敛与图标包接入均已实现。详见 [phases/0.12-ai-ecosystem.md](docs/production-design/phases/0.12-ai-ecosystem.md)。
+当前 **0.12.0 完成**（基础设施抽取与清账：投影统一 / DB 四层拆分 / Provider 模型统一 / ollama 接入 / Tool 适配层 / CapabilityRegistry 动态注册 / 存储页优化），测试基线 **808 通过**。**0.12.1 进行中**（对话窗口骨架：独立窗口 + AgentProvider + Alt+Q chord）。0.10.7 Chord 交互统一化 + 0.10.8 呈现共存策略收敛与图标包接入均已实现。详见 [phases/0.12-ai-ecosystem.md](docs/production-design/phases/0.12-ai-ecosystem.md)。
 
 - ✅ **0.10 语音输入**：STT + 语音打字（G1 主窗口语音输入 / G2 语音输入法上屏）。工具箱层定 FunASR（SenseVoice 准确率 7.81%，CPU 17× 实时）。详见 [phases/0.10-voice-agent.md](docs/production-design/phases/0.10-voice-agent.md)
   - 0.10.4：伪流式 VAD 切句 + 累积预览 + 移除真流式 + 架构清理
@@ -34,7 +34,7 @@ Blink 是一个 Windows 全局快捷入口，定位不只是「启动器」。**
   - 0.11.8：截图优化收尾 + 图标包引入（Lucide sprite）
   - 0.11.9：OCR word 级链路（`OcrLine.Words()` + word bounding_rect + 智能拼接替代前端强清）+ 原图阅读模式（word 拖选 + textarea 双向联动）+ 翻译衔接（`translate_text` command 直调 translate 插件 tool；OCR 面板双 tab 原文/译文；工具栏「OCR」「翻译」共用面板）+ 水印独立图层（`watermarkConfig` 单例覆盖式，脱离 commands 撤销栈）+ 钉图窗口右键 OCR/翻译
 - ✅ **0.11.10 图上翻译 + 截图交互重构**：`overlayLayer` 图层引擎（原位嵌原文/译文，背景遮罩三档+字号自适应）+ 选取工具（默认激活，解决鼠标层冲突）+ 预热 OCR（按钮秒响应）+ 双按钮单一路径（[识别]/[翻译]各自清晰，消除中间态）+ 面板抽屉化（默认展开，可拖动）+ 误点保护（点选区外 no-op）+ `translate_batch` 批量翻译 + 命名迁移 OCR→识别。测试基线 **783 通过**。详见 [phases/0.11-plugin-ai-toolchain.md §2.10](docs/production-design/phases/0.11-plugin-ai-toolchain.md#210-图上翻译--截图交互重构01110)
-- 🔧 **0.12 AI 能力架构搭建**（0.12.0 进行中）：基础设施抽取与清账（投影统一 ✅ / **DB 四层拆分** ✅ config+history+AI+cache / 分层违规修复 / **Provider 模型统一管理** ✅ chat+embedding+STT / ollama Provider 接入 ✅ / **Tool 适配层** ✅ CapabilityTool/ActionTool impl ToolDyn / 存储页多库统计 ✅）+ 对话窗口★（独立 Agent 窗口 + **Alt+Q chord** + rig AgentBuilder，不破主窗口类型收窄铁则）+ 对话机制（conversation 隔离 + 持久化 memory 走 SQLite impl rig ConversationMemory trait + 滑动窗口 + tool loop 无限轮）。**产品边界：Blink 不做 AI 运行时，靠外部 ollama/lmstudio**。详见 [phases/0.12-ai-ecosystem.md](docs/production-design/phases/0.12-ai-ecosystem.md)
+- 🔧 **0.12 AI 能力架构搭建**（0.12.0 完成 ✅，0.12.1 进行中）：基础设施抽取与清账（投影统一 ✅ / **DB 四层拆分** ✅ config+history+AI+cache / 分层违规修复 ✅ / **Provider 模型统一管理** ✅ chat+embedding+STT / ollama Provider 接入 ✅ / **Tool 适配层** ✅ CapabilityTool/ActionTool impl ToolDyn + 危险确认闭环骨架 / CapabilityRegistry 动态注册 ✅ / 存储页多库统计 ✅ / message serde 核查 ✅ 走 rig Message）+ 对话窗口★（独立 Agent 窗口 + **Alt+Q chord** + rig AgentBuilder，不破主窗口类型收窄铁则）+ 对话机制（conversation 隔离 + 持久化 memory 走 SQLite impl rig ConversationMemory trait + 滑动窗口 + tool loop 无限轮）。**产品边界：Blink 不做 AI 运行时，靠外部 ollama/lmstudio**。详见 [phases/0.12-ai-ecosystem.md](docs/production-design/phases/0.12-ai-ecosystem.md)
 - 🔜 **0.13 AI 调用能力扩展**：MCP client（消费外部 tool，McpTool 进适配层）/ RAG（知识库检索，走 ollama embedding + 暴力 cosine）/ 记忆向量召回（DemotingPolicyMemory 钩子 + 语义召回）/ MCP server（护城河——暴露 Blink 能力）/ Skill 化（CLI → AI 生成 skill，需 PoC 验证）。**砍掉项**：mistral.rs / A2A / sqlite-vec。详见 [phases/0.13-ai-capability-expansion.md](docs/production-design/phases/0.13-ai-capability-expansion.md)
 
 ---
