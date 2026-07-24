@@ -342,7 +342,7 @@ pub async fn chat_prompt(
         while let Some(chunk) = chunks.recv().await {
             let is_done = matches!(
                 chunk,
-                crate::domain::ai::agent_provider::ChatStreamChunk::Done
+                crate::domain::ai::agent_provider::ChatStreamChunk::Done { .. }
                     | crate::domain::ai::agent_provider::ChatStreamChunk::Error { .. }
             );
             let event = crate::domain::ai::chat_service::ChatStreamEvent {
@@ -387,7 +387,8 @@ pub fn chat_abort(app: tauri::AppHandle, request_id: u64) -> bool {
 
 /// 获取对话服务状态（Phase 4）。
 ///
-/// 返回 `{ active: { request_id, conversation_id } | null, provider_configured: bool }`。
+/// 返回 `{ active, provider_configured, provider_name?, model_name? }`。
+/// 0.12.2：`provider_name`/`model_name` 反映当前生效模型（selected 优先，Main 回落）。
 #[tauri::command]
 pub fn get_chat_status(app: tauri::AppHandle) -> crate::domain::ai::chat_service::ChatStatus {
     if let Some(chat) =
@@ -398,8 +399,165 @@ pub fn get_chat_status(app: tauri::AppHandle) -> crate::domain::ai::chat_service
         crate::domain::ai::chat_service::ChatStatus {
             active: None,
             provider_configured: false,
+            provider_name: None,
+            model_name: None,
         }
     }
+}
+
+/// chat 窗口可选模型项（0.12.2 §4.4）。
+///
+/// `id` 形如 `"{provider_id}:{model_id}"`，前端选中后回传给 `select_chat_model`。
+/// `is_main` / `is_light` 标注该模型是否是当前 Main / Light 档（供下拉置顶快捷项）。
+/// `is_selected` 标注该模型是否是 chat 当前生效模型（selected 优先，否则 Main 档）。
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ChatModelOption {
+    pub id: String,
+    pub provider_name: String,
+    pub model_name: String,
+    pub is_main: bool,
+    pub is_light: bool,
+    pub is_selected: bool,
+}
+
+/// 列出 chat 可选的所有 Chat 能力模型（0.12.2 §4.4）。
+///
+/// 从 `AIConfig.providers` 遍历，按 `ModelCapability::Chat` 过滤，标注 Main/Light 档
+/// 和当前 selected。前端据此渲染模型选择器下拉。
+#[tauri::command]
+pub fn get_chat_models(app: tauri::AppHandle) -> Vec<ChatModelOption> {
+    use crate::app::ai_config::{ModelCapability, Tier};
+
+    let Some(registry) =
+        app.try_state::<std::sync::Arc<crate::domain::ai::registry::AIProviderRegistry>>()
+    else {
+        return Vec::new();
+    };
+    let config = registry.config_snapshot();
+
+    // 解析 Main / Light 档当前指向（悬空则 None）
+    let main_pair = config.resolve_tier(Tier::Main).map(|(p, m, _)| (p.id.clone(), m.id.clone()));
+    let light_pair = config
+        .resolve_tier(Tier::Light)
+        .map(|(p, m, _)| (p.id.clone(), m.id.clone()));
+
+    // 当前生效 selected（None 时回落 Main 档）
+    let selected_pair = app
+        .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
+        .and_then(|chat| chat.current_selection())
+        .map(|sel| (sel.provider_id, sel.model_id))
+        .or_else(|| main_pair.clone());
+
+    let mut options = Vec::new();
+    for provider in &config.providers {
+        for model in &provider.models {
+            // 只列 Chat 能力 + enabled 的模型
+            if !model.enabled || !model.capabilities.contains(&ModelCapability::Chat) {
+                continue;
+            }
+            let id = format!("{}:{}", provider.id, model.id);
+            let model_name = if model.display_name.is_empty() {
+                model.id.clone()
+            } else {
+                model.display_name.clone()
+            };
+            let is_main = main_pair
+                .as_ref()
+                .is_some_and(|(pid, mid)| *pid == provider.id && *mid == model.id);
+            let is_light = light_pair
+                .as_ref()
+                .is_some_and(|(pid, mid)| *pid == provider.id && *mid == model.id);
+            let is_selected = selected_pair
+                .as_ref()
+                .is_some_and(|(pid, mid)| *pid == provider.id && *mid == model.id);
+            options.push(ChatModelOption {
+                id,
+                provider_name: provider.display_name.clone(),
+                model_name,
+                is_main,
+                is_light,
+                is_selected,
+            });
+        }
+    }
+    options
+}
+
+/// 设置 chat 运行时选中模型（0.12.2 §4.4）。
+///
+/// - `selection_id = None` 或空字符串：恢复 Main 档默认。
+/// - `selection_id = Some("{provider_id}:{model_id}")`：切换到指定模型。
+///
+/// 返回 `true` = 切换成功；`false` = id 格式错误或 model 不存在/无 Chat 能力。
+/// 切换成功后 ChatService 清 cached_agent，下次 prompt 按新模型重建 AgentProvider。
+#[tauri::command]
+pub async fn select_chat_model(
+    app: tauri::AppHandle,
+    selection_id: Option<String>,
+) -> Result<bool, String> {
+    use crate::app::ai_config::ModelCapability;
+
+    let Some(chat) =
+        app.try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
+    else {
+        return Err("ChatService 未注册".to_string());
+    };
+    let Some(registry) =
+        app.try_state::<std::sync::Arc<crate::domain::ai::registry::AIProviderRegistry>>()
+    else {
+        return Err("AIProviderRegistry 未注册".to_string());
+    };
+
+    // None / 空字符串 = 恢复 Main 档
+    let selection_id = match selection_id {
+        None => {
+            chat.select_model(None);
+            return Ok(true);
+        }
+        Some(s) if s.trim().is_empty() => {
+            chat.select_model(None);
+            return Ok(true);
+        }
+        Some(s) => s,
+    };
+
+    // 解析 "{provider_id}:{model_id}"——注意 model_id 可能含冒号，只按第一个冒号切
+    let Some((provider_id, model_id)) = selection_id.split_once(':') else {
+        return Ok(false);
+    };
+    if provider_id.is_empty() || model_id.is_empty() {
+        return Ok(false);
+    }
+
+    // 校验存在 + Chat 能力
+    let config = registry.config_snapshot();
+    let provider = config
+        .providers
+        .iter()
+        .find(|p| p.id == provider_id)
+        .ok_or_else(|| format!("provider 不存在: {provider_id}"))?;
+    let model = provider
+        .models
+        .iter()
+        .find(|m| m.id == model_id && m.enabled)
+        .ok_or_else(|| format!("model 不存在或已禁用: {model_id}"))?;
+    if !model.capabilities.contains(&ModelCapability::Chat) {
+        return Ok(false);
+    }
+
+    let model_name = if model.display_name.is_empty() {
+        model.id.clone()
+    } else {
+        model.display_name.clone()
+    };
+    let selection = crate::domain::ai::chat_service::ChatModelSelection {
+        provider_id: provider_id.to_string(),
+        model_id: model_id.to_string(),
+        provider_display_name: provider.display_name.clone(),
+        model_display_name: model_name,
+    };
+    chat.select_model(Some(selection));
+    Ok(true)
 }
 
 /// 列出所有内置动作元数据 + 当前 enabled 状态（0.8.0 §1.3 / 0.8.6 §8.2.4 i18n）。

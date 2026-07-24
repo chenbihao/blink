@@ -29,10 +29,27 @@ export function chatAbort(requestId) {
 
 /**
  * 获取 chat 状态。
- * @returns {Promise<{active: {request_id: number, conversation_id: string}|null, provider_configured: boolean}>}
+ * @returns {Promise<{active: {request_id: number, conversation_id: string}|null, provider_configured: boolean, provider_name: string|null, model_name: string|null}>}
  */
 export function getChatStatus() {
   return invoke("get_chat_status");
+}
+
+/**
+ * 列出 chat 可选的所有 Chat 能力模型（0.12.2 §4.4）。
+ * @returns {Promise<Array<{id: string, provider_name: string, model_name: string, is_main: boolean, is_light: boolean, is_selected: boolean}>>}
+ */
+export function getChatModels() {
+  return invoke("get_chat_models");
+}
+
+/**
+ * 设置 chat 运行时选中模型（0.12.2 §4.4）。
+ * @param {string|null} selectionId "{provider_id}:{model_id}"，null=恢复 Main 档
+ * @returns {Promise<boolean>} true=切换成功
+ */
+export function selectChatModel(selectionId) {
+  return invoke("select_chat_model", { selectionId });
 }
 
 /**
@@ -70,13 +87,4 @@ export function listenChatStream(handler) {
  */
 export function listenChatConfirm(handler) {
   return listen("blink://chat-confirm-action", handler);
-}
-
-/**
- * 监听 Provider 变更事件。
- * @param {(event: object) => void} handler
- * @returns {Promise<() => void>} unsubscribe
- */
-export function listenProviderChanged(handler) {
-  return listen("blink://chat-provider-changed", handler);
 }

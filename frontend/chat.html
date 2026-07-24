@@ -8,10 +8,30 @@
 </head>
 <body>
   <div class="chat-root">
+    <!-- Titlebar（无边框窗口自绘标题栏） -->
+    <div class="chat-titlebar" data-tauri-drag-region>
+      <span class="chat-titlebar-title" data-tauri-drag-region>Blink AI</span>
+      <div class="chat-titlebar-btns">
+        <button class="chat-titlebar-btn" id="titlebar-minimize" title="最小化">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        </button>
+        <button class="chat-titlebar-btn" id="titlebar-maximize" title="最大化">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
+        </button>
+        <button class="chat-titlebar-btn chat-titlebar-btn-close" id="titlebar-close" title="关闭">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/></svg>
+        </button>
+      </div>
+    </div>
+
     <!-- Header -->
     <div class="chat-header">
-      <span class="chat-header-title">Blink AI</span>
-      <span class="chat-header-provider" id="chat-provider-label"></span>
+      <button class="chat-model-trigger" id="chat-model-trigger" title="切换模型">
+        <span class="chat-model-trigger-label" id="chat-provider-label">加载中...</span>
+        <svg class="chat-model-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+        <!-- 模型选择器下拉（绝对定位，相对于触发器） -->
+        <div class="chat-model-dropdown" id="chat-model-dropdown" hidden></div>
+      </button>
       <div class="chat-header-actions">
         <button class="chat-header-btn" id="chat-new-btn" title="新对话">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -27,10 +47,18 @@
 
     <!-- Composer -->
     <div class="chat-composer">
-      <textarea id="chat-input" rows="1" placeholder="输入消息..." autofocus></textarea>
-      <button class="chat-send-btn" id="chat-send-btn" disabled>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-      </button>
+      <div class="chat-composer-input-wrap">
+        <textarea id="chat-input" rows="1" placeholder="输入消息..." autofocus></textarea>
+        <div class="chat-composer-bar">
+          <button class="chat-thinking-btn" id="chat-thinking-btn" title="深度思考">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+            <span>深度思考</span>
+          </button>
+          <button class="chat-send-btn" id="chat-send-btn" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 

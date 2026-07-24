@@ -601,54 +601,65 @@ pub fn restore_foreground(hwnd: isize) {
 /// 首次运行时创建，后续复用同一 WebView，避免重复窗口和状态分裂。
 ///
 /// **生命周期**（Phase 3A）：点击关闭→隐藏不销毁；隐藏先 abort active request。
+/// CloseRequested handler 只注册一次的标记。
+static CHAT_CLOSE_HANDLER_REGISTERED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 pub fn show_chat_window(app: &AppHandle) -> Result<(), String> {
     use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
     const LABEL: &str = "chat";
-    if let Some(win) = app.get_webview_window(LABEL) {
-        win.show().map_err(|e| format!("显示 chat 窗口失败: {e}"))?;
-        let _ = win.unminimize();
-        win.set_focus()
-            .map_err(|e| format!("聚焦 chat 窗口失败: {e}"))?;
-        return Ok(());
+    let is_new = app.get_webview_window(LABEL).is_none();
+
+    let win = if is_new {
+        // 首次创建（预热未命中时的 fallback）
+        WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("chat.html".into()))
+            .title("Blink AI")
+            .inner_size(720.0, 560.0)
+            .min_inner_size(480.0, 360.0)
+            .decorations(false)
+            .transparent(false)
+            .always_on_top(false)
+            .skip_taskbar(false)
+            .resizable(true)
+            .focused(true)
+            .visible(true)
+            .center()
+            .build()
+            .map_err(|e| {
+                tracing::warn!(error = %e, "chat window: 创建失败");
+                format!("创建 chat 窗口失败: {e}")
+            })?
+    } else {
+        // 复用预热窗口
+        app.get_webview_window(LABEL).unwrap()
+    };
+
+    // CloseRequested handler：只注册一次（预热窗口复用时不会重复注册）
+    if !CHAT_CLOSE_HANDLER_REGISTERED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        let app_clone = app.clone();
+        win.on_window_event(move |event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                if let Some(cs) = app_clone
+                    .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
+                {
+                    cs.abort_active();
+                }
+                if let Some(w) = app_clone.get_webview_window("chat") {
+                    let _ = w.hide();
+                }
+                tracing::debug!("chat window: CloseRequested → prevent_close + hide");
+            }
+        });
     }
 
-    let win = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("chat.html".into()))
-        .title("Blink AI")
-        .inner_size(720.0, 560.0)
-        .min_inner_size(480.0, 360.0)
-        .decorations(true)
-        .transparent(false)
-        .always_on_top(false)
-        .skip_taskbar(false)
-        .resizable(true)
-        .focused(true)
-        .visible(true)
-        .center()
-        .build()
-        .map_err(|e| {
-            tracing::warn!(error = %e, "chat window: 创建失败");
-            format!("创建 chat 窗口失败: {e}")
-        })?;
-
-    // Phase 3A: 拦截 CloseRequested → 隐藏不销毁，先 abort active request
-    let app_clone = app.clone();
-    win.on_window_event(move |event| {
-        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-            api.prevent_close();
-            // 先中止 active request，再隐藏
-            if let Some(cs) = app_clone
-                .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
-            {
-                cs.abort_active();
-            }
-            // 直接通过 app_clone 获取窗口句柄隐藏
-            if let Some(w) = app_clone.get_webview_window("chat") {
-                let _ = w.hide();
-            }
-            tracing::debug!("chat window: CloseRequested → prevent_close + hide");
-        }
-    });
+    // 每次显示时居中到当前屏幕（与主窗口行为一致）
+    let _ = win.center();
+    win.show().map_err(|e| format!("显示 chat 窗口失败: {e}"))?;
+    let _ = win.unminimize();
+    win.set_focus()
+        .map_err(|e| format!("聚焦 chat 窗口失败: {e}"))?;
 
     tracing::info!("chat window: 已显示");
     Ok(())
@@ -1172,6 +1183,27 @@ pub fn preheat_secondary_windows(app: AppHandle) {
             {
                 Ok(_) => tracing::debug!("preheat: chord-pin ✓"),
                 Err(e) => tracing::warn!(error = %e, "preheat: chord-pin 失败"),
+            }
+        }
+
+        // --- chat（对话窗口，0.12.2 加入预热） ---
+        if app.get_webview_window("chat").is_none() {
+            use tauri::{WebviewUrl, WebviewWindowBuilder};
+            match WebviewWindowBuilder::new(&app, "chat", WebviewUrl::App("chat.html".into()))
+                .title("Blink AI")
+                .inner_size(720.0, 560.0)
+                .min_inner_size(480.0, 360.0)
+                .decorations(false)
+                .transparent(false)
+                .always_on_top(false)
+                .skip_taskbar(false)
+                .resizable(true)
+                .focused(false)
+                .visible(false)
+                .build()
+            {
+                Ok(_) => tracing::debug!("preheat: chat ✓"),
+                Err(e) => tracing::warn!(error = %e, "preheat: chat 失败"),
             }
         }
 

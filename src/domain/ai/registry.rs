@@ -286,6 +286,60 @@ impl AIProviderRegistry {
         })
     }
 
+    /// 按 (provider_id, model_id) 显式解析——供 ChatService 运行时模型选择器(0.12.2 §4.4)。
+    ///
+    /// 与 `resolve_entries(tier)` 共用 cache_key 计算,保证「selected 模型」与
+    /// 「tier 默认模型」命中同一缓存实例(若恰好相同)。
+    ///
+    /// 不做 tier 降级;provider/model 不存在或 model 已禁用则返回 `NotConfigured`。
+    /// 不校验 `ModelCapability::Chat`——调用方(commands 层)在写入 selected 前已校验。
+    pub(crate) fn resolve_explicit_entries(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Result<ResolvedProviderEntries, AIError> {
+        let config = self.config.read().expect("config lock poisoned");
+        let provider = config
+            .providers
+            .iter()
+            .find(|p| p.id == provider_id)
+            .ok_or(AIError::NotConfigured)?;
+        let model = provider
+            .models
+            .iter()
+            .find(|m| m.id == model_id && m.enabled)
+            .ok_or(AIError::NotConfigured)?;
+        let fingerprint =
+            compute_provider_fingerprint(provider, self.secret_epoch.load(Ordering::SeqCst));
+        Ok(ResolvedProviderEntries {
+            provider: provider.clone(),
+            model: model.clone(),
+            cache_key: (provider.id.clone(), model.id.clone(), fingerprint),
+        })
+    }
+
+    /// 校验 (provider_id, model_id) 是否存在且 model enabled(供 commands 层写入 selected 前校验)。
+    ///
+    /// 返回 `(provider_display_name, model_display_name)`,display_name 为空时回落 id。
+    pub(crate) fn validate_model_exists(
+        &self,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Option<(String, String)> {
+        let config = self.config.read().expect("config lock poisoned");
+        let provider = config.providers.iter().find(|p| p.id == provider_id)?;
+        let model = provider
+            .models
+            .iter()
+            .find(|m| m.id == model_id && m.enabled)?;
+        let model_name = if model.display_name.is_empty() {
+            model.id.clone()
+        } else {
+            model.display_name.clone()
+        };
+        Some((provider.display_name.clone(), model_name))
+    }
+
     /// Bump 密钥版本号——`save_ai_secret` 成功后调,让下次 reload 时**所有**实例
     /// invalidate 并按新密钥重建。
     ///
@@ -593,5 +647,71 @@ mod tests {
         let snap = reg.config_snapshot();
         assert_eq!(snap.providers.len(), 1);
         assert_eq!(snap.providers[0].id, "p1");
+    }
+
+    // ── 0.12.2 §4.4 模型选择器：resolve_explicit_entries / validate_model_exists ──
+
+    #[test]
+    fn resolve_explicit_entries_returns_when_exists() {
+        let f = Arc::new(CountingFactory::new());
+        let reg = AIProviderRegistry::new(f);
+        // tier_router 指向 m1,便于对比 cache_key
+        reg.reload(&make_config(vec![("p1", vec!["m1", "m2"])], Some(("p1", "m1"))));
+
+        let entries = reg.resolve_explicit_entries("p1", "m2").unwrap();
+        assert_eq!(entries.provider.id, "p1");
+        assert_eq!(entries.model.id, "m2");
+        // 显式解析的 cache_key 与 tier 解析的 cache_key 第三段(fingerprint)应一致,
+        // 因为同一 provider 的 fingerprint 不变;前两段按各自 (pid, mid) 不同。
+        let tier_entries = reg.resolve_entries(Tier::Router).unwrap();
+        assert_eq!(entries.cache_key.0, tier_entries.cache_key.0, "provider id 应同");
+        assert_eq!(entries.cache_key.2, tier_entries.cache_key.2, "fingerprint 应同");
+        assert_eq!(tier_entries.cache_key.1, "m1");
+        assert_eq!(entries.cache_key.1, "m2");
+    }
+
+    #[test]
+    fn resolve_explicit_entries_rejects_missing() {
+        let f = Arc::new(CountingFactory::new());
+        let reg = AIProviderRegistry::new(f);
+        reg.reload(&make_config(vec![("p1", vec!["m1"])], None));
+
+        // provider 不存在
+        assert!(matches!(
+            reg.resolve_explicit_entries("p_missing", "m1"),
+            Err(AIError::NotConfigured)
+        ));
+        // model 不存在
+        assert!(matches!(
+            reg.resolve_explicit_entries("p1", "m_missing"),
+            Err(AIError::NotConfigured)
+        ));
+    }
+
+    #[test]
+    fn resolve_explicit_entries_rejects_disabled_model() {
+        let f = Arc::new(CountingFactory::new());
+        let reg = AIProviderRegistry::new(f);
+        let mut cfg = make_config(vec![("p1", vec!["m1"])], None);
+        cfg.providers[0].models[0].enabled = false; // 禁用
+        reg.reload(&cfg);
+
+        assert!(matches!(
+            reg.resolve_explicit_entries("p1", "m1"),
+            Err(AIError::NotConfigured)
+        ));
+    }
+
+    #[test]
+    fn validate_model_exists_returns_display_names() {
+        let f = Arc::new(CountingFactory::new());
+        let reg = AIProviderRegistry::new(f);
+        reg.reload(&make_config(vec![("p1", vec!["m1"])], None));
+
+        let names = reg.validate_model_exists("p1", "m1").unwrap();
+        assert_eq!(names, ("p1".to_string(), "m1".to_string()));
+        // 不存在返回 None
+        assert!(reg.validate_model_exists("p1", "m_missing").is_none());
+        assert!(reg.validate_model_exists("p_missing", "m1").is_none());
     }
 }

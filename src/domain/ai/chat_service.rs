@@ -24,7 +24,7 @@ use crate::app::ai_config::Tier;
 use crate::domain::ai::agent_provider::{AgentProvider, ChatStreamChunk};
 use crate::domain::ai::prompt::chat_system_prompt;
 use crate::domain::ai::provider::AIError;
-use crate::domain::ai::registry::AIProviderRegistry;
+use crate::domain::ai::registry::{AIProviderRegistry, ResolvedProviderEntries};
 use crate::domain::ai::tool_adapter::{PendingConfirms, build_agent_tools};
 use crate::domain::capability::CapabilityRegistry;
 use crate::domain::execution::ActionRegistry;
@@ -50,10 +50,27 @@ pub struct ActiveChatStatus {
 }
 
 /// ChatService 状态快照。
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+///
+/// 0.12.2 扩展：`provider_name` / `model_name` 供前端 header 标签实时展示
+/// 当前生效的 Provider + Model（selected 优先，否则 Main 档回落）。
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct ChatStatus {
     pub active: Option<ActiveChatStatus>,
     pub provider_configured: bool,
+    pub provider_name: Option<String>,
+    pub model_name: Option<String>,
+}
+
+/// chat 窗口运行时选中的模型（0.12.2 §4.4）。
+///
+/// `None` 表示用 `Tier::Main` 默认；`Some` 表示用户在模型选择器里显式选了
+/// 某个 provider+model。存内存（RwLock），重启回落 Main，0.12.3 持久化。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ChatModelSelection {
+    pub provider_id: String,
+    pub model_id: String,
+    pub provider_display_name: String,
+    pub model_display_name: String,
 }
 
 /// `prompt()` 返回给 Phase 4 IPC 层的请求句柄。
@@ -193,6 +210,8 @@ pub struct ChatService {
     requests: RequestTracker,
     /// 串行化 prompt 启动过程，防止两个并发 IPC 同时通过 active 检查。
     start_gate: tokio::sync::Mutex<()>,
+    /// 运行时选中的模型（None = 用 Tier::Main 默认）。0.12.2 §4.4。
+    selected: RwLock<Option<ChatModelSelection>>,
 }
 
 impl ChatService {
@@ -214,11 +233,42 @@ impl ChatService {
             cached_agent: RwLock::new(None),
             requests: RequestTracker::new(),
             start_gate: tokio::sync::Mutex::new(()),
+            selected: RwLock::new(None),
         }
     }
 
-    /// 返回当前 Main 档对应的 AgentProvider；配置未变时复用，变化时锁外重建。
+    /// 解析当前应使用的 Provider+Model entries（0.12.2 §4.4）。
     ///
+    /// 优先级：`selected`（用户在模型选择器显式选的）→ `Tier::Main`（回落）。
+    /// selected 引用已失效（provider/model 被删）时自动回落 Main 并清 selected。
+    ///
+    /// 返回 `ResolvedProviderEntries`（含 cache_key，供缓存命中判断）。
+    fn resolve_current_entries(&self) -> Result<ResolvedProviderEntries, AIError> {
+        let selected = self.selected.read().expect("selected lock poisoned").clone();
+        if let Some(sel) = selected {
+            match self
+                .ai_registry
+                .resolve_explicit_entries(&sel.provider_id, &sel.model_id)
+            {
+                Ok(entries) => return Ok(entries),
+                Err(AIError::NotConfigured) => {
+                    // selected 引用的 model 已被删/禁用——清空 selected 回落 Main
+                    tracing::warn!(
+                        provider_id = %sel.provider_id,
+                        model_id = %sel.model_id,
+                        "ChatService: 选中的模型已不可用，回落 Main 档"
+                    );
+                    *self.selected.write().expect("selected lock poisoned") = None;
+                }
+                Err(other) => return Err(other),
+            }
+        }
+        self.ai_registry.resolve_entries(Tier::Main)
+    }
+
+    /// 返回当前生效的 AgentProvider；配置未变时复用，变化时锁外重建。
+    ///
+    /// 0.12.2：生效模型由 `resolve_current_entries()` 决定（selected 优先，Main 回落）。
     /// 两次解析用于防止构造期间设置被修改：若 key 已变化，丢弃刚构造的旧实例并重试。
     /// 最多重试 `MAX_PROVIDER_RETRY` 次，防止极端情况下无限循环。
     pub(crate) fn ensure_provider(&self) -> Result<Arc<AgentProvider>, AIError> {
@@ -230,7 +280,7 @@ impl ChatService {
                 return Err(AIError::Cancelled);
             }
             retry_count += 1;
-            let resolved = self.ai_registry.resolve_entries(Tier::Main)?;
+            let resolved = self.resolve_current_entries()?;
 
             if let Some(provider) = self.cached_provider(&resolved.cache_key) {
                 return Ok(provider);
@@ -253,7 +303,7 @@ impl ChatService {
             )?);
 
             // 构造期间配置可能已更新。只提交仍对应当前 key 的实例。
-            let latest = self.ai_registry.resolve_entries(Tier::Main)?;
+            let latest = self.resolve_current_entries()?;
             if latest.cache_key != resolved.cache_key {
                 tracing::debug!(
                     old_provider = %resolved.provider.id,
@@ -279,6 +329,35 @@ impl ChatService {
             );
             return Ok(provider);
         }
+    }
+
+    /// 设置运行时选中模型（0.12.2 §4.4）。
+    ///
+    /// `Some` = 用户在模型选择器选了某个 provider+model；`None` = 恢复 Main 档默认。
+    /// 写入后清 cached_agent，下次 prompt 按新选择重建 AgentProvider。memory 不动。
+    pub fn select_model(&self, selection: Option<ChatModelSelection>) {
+        *self.selected.write().expect("selected lock poisoned") = selection.clone();
+        *self
+            .cached_agent
+            .write()
+            .expect("chat agent cache lock poisoned") = None;
+        if let Some(sel) = &selection {
+            tracing::info!(
+                provider = %sel.provider_display_name,
+                model = %sel.model_display_name,
+                "ChatService: 用户切换模型"
+            );
+        } else {
+            tracing::info!("ChatService: 模型选择恢复 Main 档");
+        }
+    }
+
+    /// 当前选中的模型快照（供 commands 层 `get_chat_models` 标注 is_selected）。
+    pub fn current_selection(&self) -> Option<ChatModelSelection> {
+        self.selected
+            .read()
+            .expect("selected lock poisoned")
+            .clone()
     }
 
     fn cached_provider(&self, key: &AgentCacheKey) -> Option<Arc<AgentProvider>> {
@@ -393,20 +472,62 @@ impl ChatService {
             .map(|active| (active.request_id, active.conversation_id))
     }
 
-    /// 返回 chat 状态快照。provider_configured 只检查 Main 档引用，不触发 Agent 构造。
+    /// 返回 chat 状态快照。
+    ///
+    /// 0.12.2：`provider_name`/`model_name` 反映当前生效模型（selected 优先，Main 回落），
+    /// 供前端 header 标签展示。`provider_configured` 沿用 Main 档语义（兼容旧前端）。
     pub fn status(&self) -> ChatStatus {
+        let resolved = self.resolve_current_entries().ok();
+        let (provider_name, model_name) = match &resolved {
+            Some(r) => {
+                let model_display = if r.model.display_name.is_empty() {
+                    r.model.id.clone()
+                } else {
+                    r.model.display_name.clone()
+                };
+                (Some(r.provider.display_name.clone()), Some(model_display))
+            }
+            None => (None, None),
+        };
         ChatStatus {
             active: self.requests.status(),
             provider_configured: self.ai_registry.resolve_entries(Tier::Main).is_ok(),
+            provider_name,
+            model_name,
         }
     }
 
     /// 配置变更后主动失效 Agent 缓存；memory 仍由 ChatService 持有。
+    ///
+    /// 0.12.2：额外校验 selected 引用的 model 是否还在——被删/禁用则清 selected，
+    /// 回落 Main 档（避免下次 prompt 时 `resolve_current_entries` 才发现失效，
+    /// 导致用户看到「刚选的模型突然不生效」的困惑）。
     pub fn notify_config_changed(&self) {
         *self
             .cached_agent
             .write()
             .expect("chat agent cache lock poisoned") = None;
+
+        // selected 失效校验：引用的 provider/model 不存在或禁用则清空
+        let selected = self
+            .selected
+            .read()
+            .expect("selected lock poisoned")
+            .clone();
+        if let Some(sel) = selected {
+            let still_valid = self
+                .ai_registry
+                .validate_model_exists(&sel.provider_id, &sel.model_id)
+                .is_some();
+            if !still_valid {
+                tracing::warn!(
+                    provider_id = %sel.provider_id,
+                    model_id = %sel.model_id,
+                    "ChatService: 选中的模型配置后已不可用，清除选择回落 Main 档"
+                );
+                *self.selected.write().expect("selected lock poisoned") = None;
+            }
+        }
         tracing::debug!("ChatService: 配置变化，AgentProvider 缓存已失效");
     }
 }

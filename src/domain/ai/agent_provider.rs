@@ -26,12 +26,12 @@ use tokio::sync::mpsc;
 
 use rig_core::agent::{Agent, AgentBuilder, MultiTurnStreamItem};
 use rig_core::client::CompletionClient;
-use rig_core::completion::{CompletionModel, GetTokenUsage};
+use rig_core::completion::{CompletionModel, GetTokenUsage, message::ToolResult};
 use rig_core::memory::ConversationMemory;
 #[cfg(test)]
 use rig_core::memory::InMemoryConversationMemory;
 use rig_core::providers::{anthropic, gemini, ollama, openai};
-use rig_core::streaming::{StreamedAssistantContent, StreamingPrompt};
+use rig_core::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingPrompt};
 use rig_core::tool::ToolDyn;
 use rig_core::wasm_compat::WasmCompatSend;
 
@@ -48,15 +48,34 @@ use crate::infra::platform::secret;
 /// 对话窗口流式输出 chunk(emit 前端 `blink://chat-stream`)。
 ///
 /// `run_stream` 消费 rig `MultiTurnStreamItem` 转成此枚举,前端按 `kind` 渲染。
+///
+/// 0.12.2 扩展:
+/// - `ToolCall` 加 `call_id`(`rig internal_call_id`),供与 `ToolResult` 配对。
+/// - 新增 `ToolResult`(来自 `StreamUserItem`),携带摘要(前 200 字符,图片转 `[image]`)。
+/// - `Done` 携带 `input_tokens`/`output_tokens`(从 `FinalResponse.usage()` 提取)。
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ChatStreamChunk {
     /// assistant 文本 delta(逐字流式)。
     Text { text: String },
+    /// 思考/reasoning delta(逐字流式,前端折叠展示)。
+    Thinking { text: String },
     /// tool 调用(前端显示"正在调用 XXX")。
-    ToolCall { tool: String },
-    /// 一轮结束(`FinalResponse`)。
-    Done,
+    ///
+    /// `call_id` 是 rig 生成的 `internal_call_id`,用于与后续 `ToolResult` 配对,
+    /// 前端据此把结果摘要挂到对应 ToolCall 卡片。
+    ToolCall { tool: String, call_id: String },
+    /// tool 执行结果(来自 rig `StreamUserItem`)。
+    ///
+    /// `call_id` 与 `ToolCall.call_id` 配对。`summary` 为结果文本(前 200 字符);
+    /// 图片内容以 `[image]` 占位。`success` 由 `content` 是否为空推断。
+    ToolResult {
+        call_id: String,
+        success: bool,
+        summary: String,
+    },
+    /// 一轮结束(`FinalResponse`),携带 token 用量。
+    Done { input_tokens: u32, output_tokens: u32 },
     /// 流错误。
     Error { message: String },
 }
@@ -159,8 +178,14 @@ impl AgentProvider {
     ///
     /// 消费 `MultiTurnStreamItem`(`#[non_exhaustive]`,须 `Ok(_)` 兜底):
     /// - `StreamAssistantItem(Text)` -> `ChatStreamChunk::Text`
-    /// - `StreamAssistantItem(ToolCall)` -> `ChatStreamChunk::ToolCall`
-    /// - `FinalResponse` -> `ChatStreamChunk::Done`
+    /// - `StreamAssistantItem(Reasoning)` -> `ChatStreamChunk::Thinking`
+    /// - `StreamAssistantItem(ReasoningDelta)` -> `ChatStreamChunk::Thinking`
+    /// - `StreamAssistantItem(ToolCall)` -> `ChatStreamChunk::ToolCall { tool, call_id }`
+    ///   (保留 `internal_call_id` 供与 ToolResult 配对)
+    /// - `StreamUserItem(ToolResult)` -> `ChatStreamChunk::ToolResult { call_id, summary }`
+    ///   (0.12.2 新增:rig tool loop 内部 tool 执行结果,摘要前 200 字符)
+    /// - `FinalResponse(resp)` -> `ChatStreamChunk::Done { input_tokens, output_tokens }`
+    ///   (0.12.2: 从 `resp.usage()` 提取,`u64` 截断到 `u32`,与 `map_rig_response` 一致)
     /// - `Err` -> `ChatStreamChunk::Error`
     ///
     /// **中断**:调用方 drop `tx`(或 task 被 abort)即中断,stream 被 drop 后 rig 内部
@@ -182,14 +207,42 @@ impl AgentProvider {
             let chunk = match item {
                 Ok(MultiTurnStreamItem::StreamAssistantItem(content)) => match content {
                     StreamedAssistantContent::Text(t) => ChatStreamChunk::Text { text: t.text },
-                    StreamedAssistantContent::ToolCall { tool_call, .. } => {
-                        ChatStreamChunk::ToolCall {
-                            tool: tool_call.function.name.clone(),
-                        }
+                    StreamedAssistantContent::Reasoning(r) => {
+                        ChatStreamChunk::Thinking { text: r.display_text() }
                     }
+                    StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
+                        ChatStreamChunk::Thinking { text: reasoning }
+                    }
+                    StreamedAssistantContent::ToolCall {
+                        tool_call,
+                        internal_call_id,
+                    } => ChatStreamChunk::ToolCall {
+                        tool: tool_call.function.name.clone(),
+                        call_id: internal_call_id,
+                    },
                     _ => continue,
                 },
-                Ok(MultiTurnStreamItem::FinalResponse(_)) => ChatStreamChunk::Done,
+                Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
+                    tool_result,
+                    internal_call_id,
+                })) => {
+                    let summary = summarize_tool_result(&tool_result);
+                    // 空内容视为失败(如被拒绝的危险 tool / tool 报错)
+                    let success = !summary.is_empty();
+                    ChatStreamChunk::ToolResult {
+                        call_id: internal_call_id,
+                        success,
+                        summary,
+                    }
+                }
+                Ok(MultiTurnStreamItem::FinalResponse(resp)) => {
+                    let usage = resp.usage();
+                    ChatStreamChunk::Done {
+                        // rig Usage 是 u64,截断到 u32(与 map_rig_response 一致)
+                        input_tokens: usage.input_tokens.min(u32::MAX as u64) as u32,
+                        output_tokens: usage.output_tokens.min(u32::MAX as u64) as u32,
+                    }
+                }
                 Ok(_) => continue,
                 Err(e) => ChatStreamChunk::Error {
                     message: format!("{e}"),
@@ -200,6 +253,32 @@ impl AgentProvider {
                 return;
             }
         }
+    }
+}
+
+/// 从 rig `ToolResult` 提取前端展示摘要(0.12.2 §4.7)。
+///
+/// - 文本内容拼接,截前 200 字符。
+/// - 图片内容转 `[image]` 占位(前端暂不展示图片)。
+/// - 多个 content item 用换行分隔。
+const TOOL_RESULT_SUMMARY_MAX: usize = 200;
+
+fn summarize_tool_result(tool_result: &ToolResult) -> String {
+    use rig_core::completion::message::ToolResultContent;
+    let mut parts: Vec<String> = Vec::new();
+    for content in tool_result.content.iter() {
+        match content {
+            ToolResultContent::Text(t) => parts.push(t.text.clone()),
+            ToolResultContent::Image(_) => parts.push("[image]".to_string()),
+        }
+    }
+    let joined = parts.join("\n");
+    // 按 char 截断(避免切坏 UTF-8),超长加省略号
+    if joined.chars().count() <= TOOL_RESULT_SUMMARY_MAX {
+        joined
+    } else {
+        let truncated: String = joined.chars().take(TOOL_RESULT_SUMMARY_MAX).collect();
+        format!("{truncated}…")
     }
 }
 
@@ -252,7 +331,9 @@ mod tests {
             "应 emit Text(hello): {chunks:?}"
         );
         assert!(
-            chunks.iter().any(|c| matches!(c, ChatStreamChunk::Done)),
+            chunks
+                .iter()
+                .any(|c| matches!(c, ChatStreamChunk::Done { .. })),
             "应以 Done 收尾: {chunks:?}"
         );
     }
@@ -281,9 +362,206 @@ mod tests {
         assert!(
             chunks
                 .iter()
-                .any(|c| matches!(c, ChatStreamChunk::ToolCall { tool } if tool == "add")),
+                .any(|c| matches!(c, ChatStreamChunk::ToolCall { tool, .. } if tool == "add")),
             "应 emit ToolCall(add): {chunks:?}"
         );
+        // 0.12.2: ToolCall 必须带 call_id 供 ToolResult 配对
+        assert!(
+            chunks.iter().any(|c| matches!(
+                c,
+                ChatStreamChunk::ToolCall { call_id, .. } if !call_id.is_empty()
+            )),
+            "ToolCall 必须带非空 call_id: {chunks:?}"
+        );
+    }
+
+    /// 验证 tool 执行后 emit `ToolResult` chunk,且 `call_id` 与对应 ToolCall 配对(0.12.2 §4.7)。
+    #[tokio::test]
+    async fn run_stream_emits_tool_result_paired_with_tool_call() {
+        use rig_core::test_utils::MockAddTool;
+        let model = MockCompletionModel::from_stream_turns(vec![
+            // 第 1 轮:模型发起 tool_call
+            vec![
+                MockStreamEvent::tool_call("call_1", "add", serde_json::json!({"x":1,"y":2})),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            // 第 2 轮:模型拿到结果后给出文本回复 + 收尾
+            vec![
+                MockStreamEvent::text("result is 3"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let agent = AgentBuilder::new(model)
+            .tool(MockAddTool)
+            .memory(InMemoryConversationMemory::new())
+            .default_max_turns(5)
+            .build();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        AgentProvider::run_stream(&agent, "c1", "hi", tx).await;
+
+        let mut chunks = Vec::new();
+        while let Some(c) = rx.recv().await {
+            chunks.push(c);
+        }
+
+        // 应同时存在 ToolCall 和 ToolResult,且 call_id 可配对
+        let tool_call_id = chunks.iter().find_map(|c| match c {
+            ChatStreamChunk::ToolCall { tool, call_id } if tool == "add" => Some(call_id.clone()),
+            _ => None,
+        });
+        assert!(tool_call_id.is_some(), "应有 ToolCall(add): {chunks:?}");
+
+        let paired_result = chunks.iter().find_map(|c| match c {
+            ChatStreamChunk::ToolResult {
+                call_id,
+                success,
+                summary,
+            } if call_id == tool_call_id.as_deref().unwrap_or("") => {
+                Some((*success, summary.clone()))
+            }
+            _ => None,
+        });
+        assert!(
+            paired_result.is_some(),
+            "应有与 ToolCall 同 call_id 的 ToolResult: {chunks:?}"
+        );
+        let (success, summary) = paired_result.unwrap();
+        assert!(success, "成功 tool 的 success 应为 true");
+        assert!(
+            summary.contains('3'),
+            "摘要应包含 tool 结果 3: {summary}"
+        );
+    }
+
+    /// 验证 `Done` chunk 携带从 `FinalResponse.usage()` 提取的 token 用量(0.12.2 §4.8)。
+    #[tokio::test]
+    async fn run_stream_done_carries_usage() {
+        use rig_core::completion::Usage as RigUsage;
+        let usage = RigUsage {
+            input_tokens: 150,
+            output_tokens: 80,
+            total_tokens: 230,
+            ..Default::default()
+        };
+        let model = MockCompletionModel::from_stream_turns(vec![vec![
+            MockStreamEvent::text("hello"),
+            MockStreamEvent::final_response(usage),
+        ]]);
+        let agent = AgentBuilder::new(model)
+            .memory(InMemoryConversationMemory::new())
+            .default_max_turns(5)
+            .build();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        AgentProvider::run_stream(&agent, "c1", "hi", tx).await;
+
+        let mut chunks = Vec::new();
+        while let Some(c) = rx.recv().await {
+            chunks.push(c);
+        }
+        let done = chunks.iter().find_map(|c| match c {
+            ChatStreamChunk::Done {
+                input_tokens,
+                output_tokens,
+            } => Some((*input_tokens, *output_tokens)),
+            _ => None,
+        });
+        let (input_tokens, output_tokens) =
+            done.expect("应 emit Done chunk: {chunks:?}");
+        assert_eq!(input_tokens, 150, "Done.input_tokens 应为 150");
+        assert_eq!(output_tokens, 80, "Done.output_tokens 应为 80");
+    }
+
+    /// 验证 `Done` 的 u64→u32 截断(0.12.2 §4.8,与 map_rig_response 一致)。
+    #[tokio::test]
+    async fn run_stream_done_truncates_oversized_usage() {
+        use rig_core::completion::Usage as RigUsage;
+        let usage = RigUsage {
+            input_tokens: u64::from(u32::MAX) + 1000, // 超 u32 范围
+            output_tokens: 50,
+            total_tokens: 0,
+            ..Default::default()
+        };
+        let model = MockCompletionModel::from_stream_turns(vec![vec![
+            MockStreamEvent::text("hi"),
+            MockStreamEvent::final_response(usage),
+        ]]);
+        let agent = AgentBuilder::new(model)
+            .memory(InMemoryConversationMemory::new())
+            .default_max_turns(5)
+            .build();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        AgentProvider::run_stream(&agent, "c1", "hi", tx).await;
+
+        let mut chunks = Vec::new();
+        while let Some(c) = rx.recv().await {
+            chunks.push(c);
+        }
+        let (input_tokens, _) = chunks
+            .iter()
+            .find_map(|c| match c {
+                ChatStreamChunk::Done {
+                    input_tokens,
+                    output_tokens,
+                } => Some((*input_tokens, *output_tokens)),
+                _ => None,
+            })
+            .expect("应 emit Done");
+        assert_eq!(
+            input_tokens, u32::MAX,
+            "超 u32 的 input_tokens 应截断到 u32::MAX"
+        );
+    }
+
+    /// 验证 `summarize_tool_result` 文本截断与图片占位(纯函数测试)。
+    #[test]
+    fn summarize_tool_result_truncates_and_handles_image() {
+        use rig_core::completion::message::{
+            DocumentSourceKind, Image, Text, ToolResultContent,
+        };
+        use rig_core::one_or_many::OneOrMany;
+
+        // 短文本不截断
+        let short = ToolResult {
+            id: "1".into(),
+            call_id: None,
+            content: OneOrMany::one(ToolResultContent::Text(Text::new("ok"))),
+        };
+        assert_eq!(summarize_tool_result(&short), "ok");
+
+        // 长文本截断到 200 字符 + 省略号
+        let long_text = "x".repeat(300);
+        let long = ToolResult {
+            id: "2".into(),
+            call_id: None,
+            content: OneOrMany::one(ToolResultContent::Text(Text::new(long_text))),
+        };
+        let summary = summarize_tool_result(&long);
+        assert_eq!(summary.chars().count(), 201, "200 字符 + 1 省略号");
+        assert!(summary.ends_with('…'));
+
+        // 图片转占位
+        let img = ToolResult {
+            id: "3".into(),
+            call_id: None,
+            content: OneOrMany::one(ToolResultContent::Image(Image {
+                data: DocumentSourceKind::Url("http://example.com/x.png".into()),
+                media_type: None,
+                detail: None,
+                additional_params: None,
+            })),
+        };
+        assert_eq!(summarize_tool_result(&img), "[image]");
+    }
+
+    /// 验证 thinking chunk 序列化为 `kind: "thinking"`。
+    #[test]
+    fn chat_stream_chunk_thinking_serializes() {
+        let chunk = ChatStreamChunk::Thinking {
+            text: "let me think...".into(),
+        };
+        let v = serde_json::to_value(&chunk).unwrap();
+        assert_eq!(v["kind"], "thinking");
+        assert_eq!(v["text"], "let me think...");
     }
 
     /// 验证 `ChatStreamChunk` 序列化带 `kind` tag(前端按 kind 分派)。
@@ -294,8 +572,43 @@ mod tests {
         assert_eq!(v["kind"], "text");
         assert_eq!(v["text"], "hi");
 
-        let done = ChatStreamChunk::Done;
+        let thinking = ChatStreamChunk::Thinking {
+            text: "reasoning...".into(),
+        };
+        let v = serde_json::to_value(&thinking).unwrap();
+        assert_eq!(v["kind"], "thinking");
+
+        let done = ChatStreamChunk::Done {
+            input_tokens: 10,
+            output_tokens: 20,
+        };
         let v = serde_json::to_value(&done).unwrap();
         assert_eq!(v["kind"], "done");
+        assert_eq!(v["input_tokens"], 10);
+        assert_eq!(v["output_tokens"], 20);
+    }
+
+    /// 验证 `ToolResult` 和 `ToolCall` 序列化字段(0.12.2 §4.7)。
+    #[test]
+    fn chat_stream_chunk_tool_result_and_call_serialize() {
+        let tool_call = ChatStreamChunk::ToolCall {
+            tool: "search_apps".into(),
+            call_id: "cid_1".into(),
+        };
+        let v = serde_json::to_value(&tool_call).unwrap();
+        assert_eq!(v["kind"], "tool_call");
+        assert_eq!(v["tool"], "search_apps");
+        assert_eq!(v["call_id"], "cid_1");
+
+        let tool_result = ChatStreamChunk::ToolResult {
+            call_id: "cid_1".into(),
+            success: true,
+            summary: "found 3 apps".into(),
+        };
+        let v = serde_json::to_value(&tool_result).unwrap();
+        assert_eq!(v["kind"], "tool_result");
+        assert_eq!(v["call_id"], "cid_1");
+        assert_eq!(v["success"], true);
+        assert_eq!(v["summary"], "found 3 apps");
     }
 }

@@ -1,7 +1,7 @@
 /**
- * chat 输入组件（0.12.1 Phase 5）。
+ * chat 输入组件（0.12.1 Phase 5, 0.12.2 深度思考开关）。
  *
- * 自增高 textarea + 发送/停止按钮。
+ * 自增高 textarea + 底部工具栏（深度思考开关 + 发送/停止按钮）。
  * Enter 发送，Shift+Enter 换行。生成中按钮切换为停止。
  */
 
@@ -11,21 +11,29 @@ let textarea = null;
 /** @type {HTMLButtonElement} */
 let sendBtn = null;
 
+/** @type {HTMLButtonElement} */
+let thinkingBtn = null;
+
 /** @type {(message: string) => void} */
 let onSend = null;
 
 /** @type {() => void} */
 let onStop = null;
 
+/** @type {(enabled: boolean) => void} */
+let onThinkingToggle = null;
+
 /**
  * 初始化 composer。
- * @param {{ onSend: (message: string) => void, onStop: () => void }} callbacks
+ * @param {{ onSend: (message: string) => void, onStop: () => void, onThinkingToggle: (enabled: boolean) => void }} callbacks
  */
 export function initComposer(callbacks) {
   textarea = document.getElementById("chat-input");
   sendBtn = document.getElementById("chat-send-btn");
+  thinkingBtn = document.getElementById("chat-thinking-btn");
   onSend = callbacks.onSend;
   onStop = callbacks.onStop;
+  onThinkingToggle = callbacks.onThinkingToggle;
 
   if (!textarea || !sendBtn) return;
 
@@ -49,6 +57,15 @@ export function initComposer(callbacks) {
     }
   });
 
+  // 深度思考开关
+  if (thinkingBtn) {
+    thinkingBtn.addEventListener("click", () => {
+      const newState = !thinkingBtn.classList.contains("active");
+      thinkingBtn.classList.toggle("active", newState);
+      if (onThinkingToggle) onThinkingToggle(newState);
+    });
+  }
+
   // 初始状态
   updateSendButtonState();
 }
@@ -62,6 +79,7 @@ export function setStreamingMode() {
   sendBtn.innerHTML = stopIcon;
   sendBtn.disabled = false;
   textarea.disabled = true;
+  if (thinkingBtn) thinkingBtn.disabled = true;
 }
 
 /**
@@ -73,6 +91,7 @@ export function setInputMode() {
   sendBtn.innerHTML = sendIcon;
   textarea.disabled = false;
   textarea.focus();
+  if (thinkingBtn) thinkingBtn.disabled = false;
   updateSendButtonState();
 }
 
@@ -91,6 +110,16 @@ export function clearInput() {
  */
 export function focusInput() {
   if (textarea) textarea.focus();
+}
+
+/**
+ * 设置深度思考开关状态。
+ * @param {boolean} enabled
+ */
+export function setThinkingEnabled(enabled) {
+  if (thinkingBtn) {
+    thinkingBtn.classList.toggle("active", enabled);
+  }
 }
 
 // ── 内部 ─────────────────────────────────────────

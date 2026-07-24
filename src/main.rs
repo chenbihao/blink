@@ -524,6 +524,8 @@ fn main() {
             app::commands::chat_prompt,
             app::commands::chat_abort,
             app::commands::get_chat_status,
+            app::commands::get_chat_models,
+            app::commands::select_chat_model,
             app::commands::list_builtin_actions,
             app::commands::list_context_bindings,
             app::commands::trigger_chord,

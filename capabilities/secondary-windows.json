@@ -1,7 +1,15 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "secondary-windows",
-  "description": "次级窗口（voice-overlay / chord-screenshot / chord-pin / context-menu-popup / chat）的 capability。这些窗口需要 core:default 来接收 Tauri 事件和调用 invoke。dialog:allow-save 用于截图保存为文件。不授予窗口操作权限（拖拽/调尺寸），避免与 main 窗口混淆。",
+  "description": "次级窗口（voice-overlay / chord-screenshot / chord-pin / context-menu-popup / chat）的 capability。core:default 接收事件和 invoke；dialog:allow-save 截图保存；chat 窗口额外授予窗口操作权限（无边框自绘标题栏需要 minimize/maximize/hide）。",
   "windows": ["voice-overlay", "chord-screenshot", "chord-pin", "contextmenu-popup", "chat"],
-  "permissions": ["core:default", "dialog:allow-save"]
+  "permissions": [
+    "core:default",
+    "dialog:allow-save",
+    "core:window:allow-minimize",
+    "core:window:allow-maximize",
+    "core:window:allow-unmaximize",
+    "core:window:allow-hide",
+    "core:window:allow-is-maximized"
+  ]
 }
