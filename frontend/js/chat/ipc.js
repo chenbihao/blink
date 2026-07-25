@@ -69,6 +69,60 @@ export function hideChatWindow() {
   return invoke("hide_chat_window");
 }
 
+/**
+ * 启动 chat 窗口语音录音（0.12.2 §4.3）。
+ * @returns {Promise<void>}
+ */
+export function startChatStt() {
+  return invoke("start_chat_stt");
+}
+
+/**
+ * 停止 chat 窗口语音录音（0.12.2 §4.3）。
+ * @returns {Promise<void>}
+ */
+export function stopChatStt() {
+  return invoke("stop_chat_stt");
+}
+
+// ── 多对话管理（0.12.3 Phase B）──────────────────
+
+/**
+ * 列出所有对话。
+ * @returns {Promise<Array<{id: string, title: string|null, created_at: number, last_active_at: number, message_count: number}>>}
+ */
+export function listChatConversations() {
+  return invoke("list_chat_conversations");
+}
+
+/**
+ * 删除指定对话（级联删除消息）。
+ * @param {string} conversationId
+ * @returns {Promise<boolean>}
+ */
+export function deleteChatConversation(conversationId) {
+  return invoke("delete_chat_conversation", { conversationId });
+}
+
+/**
+ * 重命名对话。
+ * @param {string} conversationId
+ * @param {string} title
+ * @returns {Promise<boolean>}
+ */
+export function renameChatConversation(conversationId, title) {
+  return invoke("rename_chat_conversation", { conversationId, title });
+}
+
+/**
+ * 加载对话的完整消息历史。
+ * @param {string} conversationId
+ * @returns {Promise<Array<{role: string, text: string, thinking: string|null}>>}
+ */
+export function getChatMessages(conversationId) {
+  return invoke("get_chat_messages", { conversationId });
+}
+
 // ── Events ───────────────────────────────────────
 
 /**
@@ -87,4 +141,48 @@ export function listenChatStream(handler) {
  */
 export function listenChatConfirm(handler) {
   return listen("blink://chat-confirm-action", handler);
+}
+
+// ── Voice Events（0.12.2 §4.3）─────────────────
+
+/**
+ * 监听录音开始事件（target="chat" 时进入录音模式）。
+ */
+export function listenVoiceRecordingStart(handler) {
+  return listen("blink://voice-recording-start", handler);
+}
+
+/**
+ * 监听语音识别 partial 文本（实时更新 textarea）。
+ */
+export function listenVoicePartial(handler) {
+  return listen("blink://voice-partial", handler);
+}
+
+/**
+ * 监听录音结束事件（退出录音模式）。
+ */
+export function listenVoiceRecordingEnd(handler) {
+  return listen("blink://voice-recording-end", handler);
+}
+
+/**
+ * 监听语音错误事件。
+ */
+export function listenVoiceError(handler) {
+  return listen("blink://voice-error", handler);
+}
+
+/**
+ * 监听语音音量事件（波形动画）。
+ */
+export function listenVoiceLevel(handler) {
+  return listen("blink://voice-level", handler);
+}
+
+/**
+ * 监听语音状态事件（模型加载中等）。
+ */
+export function listenVoiceStatus(handler) {
+  return listen("blink://voice-status", handler);
 }

@@ -18,6 +18,7 @@ pub mod agent_provider;
 pub mod chat_service;
 pub mod factory;
 pub mod gating;
+pub mod memory;
 pub mod message;
 pub mod prompt;
 pub mod provider;

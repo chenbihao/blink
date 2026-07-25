@@ -5,6 +5,7 @@
 pub mod ai_audit;
 pub mod clipboard;
 pub mod config;
+pub mod conversations;
 pub mod history;
 pub mod icon_cache;
 pub mod perf;

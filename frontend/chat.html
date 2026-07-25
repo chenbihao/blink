@@ -24,39 +24,70 @@
       </div>
     </div>
 
-    <!-- Header -->
-    <div class="chat-header">
-      <button class="chat-model-trigger" id="chat-model-trigger" title="切换模型">
-        <span class="chat-model-trigger-label" id="chat-provider-label">加载中...</span>
-        <svg class="chat-model-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-        <!-- 模型选择器下拉（绝对定位，相对于触发器） -->
-        <div class="chat-model-dropdown" id="chat-model-dropdown" hidden></div>
-      </button>
-      <div class="chat-header-actions">
-        <button class="chat-header-btn" id="chat-new-btn" title="新对话">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-        </button>
-        <button class="chat-header-btn" id="chat-settings-btn" title="设置">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-        </button>
-      </div>
-    </div>
-
-    <!-- Messages -->
-    <div class="chat-messages" id="chat-messages"></div>
-
-    <!-- Composer -->
-    <div class="chat-composer">
-      <div class="chat-composer-input-wrap">
-        <textarea id="chat-input" rows="1" placeholder="输入消息..." autofocus></textarea>
-        <div class="chat-composer-bar">
-          <button class="chat-thinking-btn" id="chat-thinking-btn" title="深度思考">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
-            <span>深度思考</span>
+    <!-- Body: sidebar + main 横向排列 -->
+    <div class="chat-body">
+      <!-- Sidebar（对话列表，push 布局） -->
+      <aside class="chat-sidebar" id="chat-sidebar" data-closed>
+        <div class="chat-sidebar-header">
+          <span class="chat-sidebar-title">对话</span>
+          <button class="chat-sidebar-new" id="chat-sidebar-new" title="新对话">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
           </button>
-          <button class="chat-send-btn" id="chat-send-btn" disabled>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+        </div>
+        <div class="chat-sidebar-list" id="chat-sidebar-list"></div>
+      </aside>
+
+      <!-- Main area -->
+      <div class="chat-main">
+        <!-- Header -->
+        <div class="chat-header">
+          <button class="chat-header-btn" id="chat-sidebar-toggle" title="对话列表">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
           </button>
+          <button class="chat-model-trigger" id="chat-model-trigger" title="切换模型">
+            <span class="chat-model-trigger-label" id="chat-provider-label">加载中...</span>
+            <svg class="chat-model-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+            <!-- 模型选择器下拉（绝对定位，相对于触发器） -->
+            <div class="chat-model-dropdown" id="chat-model-dropdown" hidden></div>
+          </button>
+          <div class="chat-header-actions">
+            <button class="chat-header-btn" id="chat-new-btn" title="新对话">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            </button>
+            <button class="chat-header-btn" id="chat-settings-btn" title="设置">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- Messages -->
+        <div class="chat-messages" id="chat-messages"></div>
+
+        <!-- Composer -->
+        <div class="chat-composer">
+          <div class="chat-composer-input-wrap">
+            <textarea id="chat-input" rows="1" placeholder="输入消息..." autofocus></textarea>
+            <!-- 语音指示器（同主窗口风格：5 条波形 + 标签） -->
+            <div id="voice-indicator" class="voice-indicator hidden">
+              <div class="voice-wave">
+                <div class="vw-bar"></div>
+                <div class="vw-bar"></div>
+                <div class="vw-bar"></div>
+                <div class="vw-bar"></div>
+                <div class="vw-bar"></div>
+              </div>
+              <span class="voice-label">语音输入中</span>
+            </div>
+            <div class="chat-composer-bar">
+              <button class="chat-thinking-btn" id="chat-thinking-btn" title="深度思考">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+                <span>深度思考</span>
+              </button>
+              <button class="chat-send-btn" id="chat-send-btn" disabled>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </div>

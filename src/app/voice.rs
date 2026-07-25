@@ -12,12 +12,14 @@
 //!   → SttEngine::finalize() → 最终文本
 //!   → G1: emit "blink://chord-fill-query"(文本)
 //!     G2: inject_text(文本)
+//!     G3: emit "blink://voice-partial"(target="chat", 文本)
 //! ```
 //!
-//! ## G1/G2 区分
+//! ## G1/G2/G3 区分
 //!
 //! - hold 时主窗口可见(先 tap 出窗)→ G1: 文字填 #query
-//! - hold 时主窗口不可见 → G2: 文字注入前台应用
+//! - hold 时 chat 窗口可见 → G3: 文字填 chat composer textarea
+//! - hold 时主窗口 + chat 均不可见 → G2: 文字注入前台应用
 
 use std::sync::{Arc, Mutex};
 
@@ -27,13 +29,19 @@ use crate::domain::stt::SttEngine;
 use crate::infra::platform;
 use crate::infra::platform::audio::{AudioCapture, AudioFormat};
 
-/// 语音目标(G1 主窗口 / G2 前台应用)。
+/// 语音目标(G1 主窗口 / G2 前台应用 / G3 chat 窗口)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VoiceTarget {
     /// G1: 文字填进 blink 主窗口 #query
     MainWindow,
     /// G2: 文字注入前台应用光标处
     ForegroundApp,
+    /// G3: 文字填进 chat 窗口 composer textarea（0.12.2 §4.3）
+    ///
+    /// 0.12.2: 仅 IPC 驱动（start_chat_stt）。
+    /// 0.12.3: 热键驱动也走此路径——chat 窗口可见时 hold Alt+Space
+    /// 自动检测并走 G3 而非 G2（不唤起前台注入）。
+    ChatWindow,
 }
 
 impl VoiceTarget {
@@ -42,6 +50,7 @@ impl VoiceTarget {
         match self {
             VoiceTarget::MainWindow => "g1",
             VoiceTarget::ForegroundApp => "g2",
+            VoiceTarget::ChatWindow => "chat",
         }
     }
 }
@@ -54,7 +63,7 @@ struct VoiceSession {
     capture: Option<Box<dyn AudioCapture>>,
     /// 音频采集 task 的 JoinHandle（stop/cancel 时 abort，避免与 finalize 锁竞争）
     audio_task: Option<tokio::task::JoinHandle<()>>,
-    /// 目标(G1/G2)
+    /// 目标(G1/G2/G3)
     target: VoiceTarget,
     /// 是否正在录音
     recording: bool,
@@ -128,9 +137,8 @@ impl VoiceService {
         }
         let mut _voice_guard = VoiceRecordingGuard::new();
 
-        // ── 同步预检：锁 session 做 recording 检查 + G1/G2 判定 + 服务就绪检查 ──
-        // scoped block：确保 MutexGuard 不跨 await（Send 约束）
-        let target = {
+        // ── G1/G2 判定 + 互斥检查（scoped block：MutexGuard 不跨 await） ──
+        {
             let mut session = self.session.lock().unwrap();
 
             if session.recording {
@@ -138,29 +146,91 @@ impl VoiceService {
                 return;
             }
 
-            // 判断 G1/G2:主窗口是否可见
+            // 判断 G1/G2/G3：主窗口可见→G1，chat 窗口可见→G3，否则→G2
             let main_visible = self
                 .app
                 .get_webview_window("main")
                 .map(|w| w.is_visible().unwrap_or(false))
                 .unwrap_or(false);
+            let chat_visible = self
+                .app
+                .get_webview_window("chat")
+                .map(|w| w.is_visible().unwrap_or(false))
+                .unwrap_or(false);
             session.target = if main_visible {
                 VoiceTarget::MainWindow
+            } else if chat_visible {
+                VoiceTarget::ChatWindow
             } else {
                 VoiceTarget::ForegroundApp
             };
+        }
 
-            session.target
-        };
+        // ── 共享录音启动逻辑 ──
+        if self.begin_recording(&config, true).await {
+            // 录音真正开始，解除 guard（标志由 stop_recording/cancel_recording 清除）
+            _voice_guard.disarm();
+        }
+    }
+
+    /// Chat 窗口 IPC 驱动:开始录音（0.12.2 §4.3）。
+    ///
+    /// 与 `start_recording` 的区别：
+    /// - 不走热键状态机，由 `start_chat_stt` IPC command 直接调用
+    /// - target 固定为 `ChatWindow`，不做 G1/G2 检测
+    /// - 不设置 `VOICE_RECORDING` 标志（chat 窗口无需吞 Alt+Space）
+    /// - 与 G1/G2 三方互斥（`session.recording` 标志保证同一时刻只有一个 target）
+    pub async fn start_chat_recording(&self) {
+        // ── 总开关检查 ──
+        let config = crate::app::stt_config::get_stt_config();
+        if !config.enabled {
+            tracing::debug!("语音未启用,忽略 chat STT 请求");
+            self.emit_voice_error(VoiceTarget::ChatWindow, "语音输入未启用，请在设置中开启");
+            return;
+        }
+
+        // ── 互斥检查 + 设置 target ──
+        {
+            let mut session = self.session.lock().unwrap();
+            if session.recording {
+                tracing::warn!("start_chat_recording: 已在录音中,忽略");
+                return;
+            }
+            session.target = VoiceTarget::ChatWindow;
+        }
+
+        // ── 共享录音启动逻辑（不设置 hotkey flag） ──
+        self.begin_recording(&config, false).await;
+    }
+
+    /// 共享录音启动逻辑：服务就绪检查 + 模型加载检查 + 引擎创建 + 音频采集 + 采集 task。
+    ///
+    /// **调用方职责**：
+    /// - 配置检查（STT enabled）
+    /// - 设置 `session.target`（G1/G2 检测或 ChatWindow）
+    /// - 检查 `session.recording`（互斥）
+    /// - 管理 `VoiceRecordingGuard`（仅热键路径）
+    ///
+    /// `set_voice_flag`：是否设置 `hotkey::set_voice_recording(true)`。
+    /// 返回 `true` = 录音已启动。
+    async fn begin_recording(
+        &self,
+        config: &crate::app::stt_config::SttConfig,
+        set_voice_flag: bool,
+    ) -> bool {
+        use crate::app::stt_config::SttMode;
+        use crate::domain::stt::funasr::ModelLoadStatus;
+
+        let target = self.session.lock().unwrap().target;
 
         // ── 服务就绪检查：本地模式下检查 FunASR 服务是否运行 ──
         let need_check = match config.mode {
-            crate::app::stt_config::SttMode::Local => true,
-            crate::app::stt_config::SttMode::Cloud => config.cloud_provider.is_none(),
+            SttMode::Local => true,
+            SttMode::Cloud => config.cloud_provider.is_none(),
         };
         if need_check {
             let (ready, msg) = match config.mode {
-                crate::app::stt_config::SttMode::Local => {
+                SttMode::Local => {
                     let port = config.local_engine.server_port;
                     if crate::domain::stt::funasr::is_server_ready(port) {
                         (true, String::new())
@@ -171,45 +241,44 @@ impl VoiceService {
                         )
                     }
                 }
-                crate::app::stt_config::SttMode::Cloud => {
+                SttMode::Cloud => {
                     (false, "云端 STT 未配置供应商，请在设置页中配置".to_string())
                 }
             };
             if !ready {
                 tracing::warn!(target = ?target, %msg, "语音录音中止：服务未就绪");
                 self.emit_voice_error(target, &msg);
-                return;
+                return false;
             }
 
             // ── 模型加载状态检查（本地模式）──
             // TCP 端口可达不代表模型已就绪——uvicorn 先绑定端口，模型加载需 30-60s。
             // 单次检查 /health 端点：Ready → 继续；Loading → 反馈并返回（不阻塞事件循环）。
-            if config.mode == crate::app::stt_config::SttMode::Local {
+            if config.mode == SttMode::Local {
                 let port = config.local_engine.server_port;
 
                 let status = crate::domain::stt::funasr::check_model_loaded(port).await;
                 match status {
-                    crate::domain::stt::funasr::ModelLoadStatus::Ready => {
+                    ModelLoadStatus::Ready => {
                         // 模型就绪，继续录音流程
                     }
-                    crate::domain::stt::funasr::ModelLoadStatus::Loading
-                    | crate::domain::stt::funasr::ModelLoadStatus::Idle => {
+                    ModelLoadStatus::Loading | ModelLoadStatus::Idle => {
                         // 模型加载中 → 向用户反馈，不等待（避免阻塞热键事件循环）
                         tracing::info!(target = ?target, "模型加载中,跳过本次录音");
                         self.emit_voice_status(target, "模型加载中，请稍候再试");
-                        return;
+                        return false;
                     }
-                    crate::domain::stt::funasr::ModelLoadStatus::Error => {
+                    ModelLoadStatus::Error => {
                         let msg = "模型加载失败，请检查设置页日志";
                         tracing::warn!(target = ?target, %msg);
                         self.emit_voice_error(target, msg);
-                        return;
+                        return false;
                     }
-                    crate::domain::stt::funasr::ModelLoadStatus::Unreachable => {
+                    ModelLoadStatus::Unreachable => {
                         let msg = "服务连接失败，请检查设置页中服务状态";
                         tracing::warn!(target = ?target, %msg);
                         self.emit_voice_error(target, msg);
-                        return;
+                        return false;
                     }
                 }
             }
@@ -220,8 +289,8 @@ impl VoiceService {
 
         // 二次检查：模型加载等待期间可能已被 cancel
         if session.recording {
-            tracing::warn!("start_recording: 模型加载期间已被其他路径占用");
-            return;
+            tracing::warn!("begin_recording: 模型加载期间已被其他路径占用");
+            return false;
         }
 
         let engine = match crate::domain::stt::create_engine() {
@@ -229,11 +298,11 @@ impl VoiceService {
             Err(e) => {
                 tracing::warn!(target = ?session.target, %e, "语音录音中止：引擎创建失败");
                 self.emit_voice_error(session.target, &e);
-                return;
+                return false;
             }
         };
-        let mut capture = if let Some(dev_id) = config.audio_device_id {
-            platform::audio::create_capture_with_device(dev_id)
+        let mut capture = if let Some(dev_id) = &config.audio_device_id {
+            platform::audio::create_capture_with_device(dev_id.clone())
         } else {
             platform::audio::create_capture()
         };
@@ -245,7 +314,9 @@ impl VoiceService {
                 session.recording = true;
 
                 // 设置全局录音标志（hotkey hook 读它判断 ESC + 吞 Alt+Space）
-                crate::infra::platform::hotkey::set_voice_recording(true);
+                if set_voice_flag {
+                    crate::infra::platform::hotkey::set_voice_recording(true);
+                }
 
                 tracing::info!(
                     target = ?session.target,
@@ -259,7 +330,7 @@ impl VoiceService {
                     platform::window::show_voice_overlay(&self.app);
                 }
 
-                // 通知前端录音已开始（G1 隐藏 Ghost overlay / G2 overlay 已显示）
+                // 通知前端录音已开始（G1 隐藏 Ghost overlay / G2 overlay 已显示 / G3 chat 麦克风按钮切换态）
                 let target_str = session.target.as_str();
                 let _ = self.app.emit(
                     "blink://voice-recording-start",
@@ -332,11 +403,11 @@ impl VoiceService {
                 session.capture = Some(capture);
                 session.audio_task = Some(task_handle);
 
-                // 录音真正开始，解除 guard（标志由 stop_recording/cancel_recording 清除）
-                _voice_guard.disarm();
+                true
             }
             Err(e) => {
                 tracing::error!(%e, "音频采集启动失败");
+                false
             }
         }
     }
@@ -345,6 +416,9 @@ impl VoiceService {
     ///
     /// async 因为 `SttEngine::finalize` 是 async（HTTP 请求）。
     /// 调用方（HotkeyService）在 async task 中 .await 此方法。
+    ///
+    /// 0.12.2 §4.3：ChatWindow 路径由 `stop_chat_recording` 调用此方法，
+    /// 最终文本通过 `voice-partial(target="chat")` emit 到 chat 窗口。
     pub async fn stop_recording(&self) {
         // 取出 engine + 停止采集 + abort 音频 task，然后立即释放锁
         let (engine, target) = {
@@ -453,8 +527,29 @@ impl VoiceService {
                     let _ = app.emit("blink://voice-recording-end", ());
                 });
             }
+            VoiceTarget::ChatWindow => {
+                // G3: 识别结果 emit 到 chat 窗口（前端监听 voice-partial target="chat"）
+                let _ = self.app.emit(
+                    "blink://voice-partial",
+                    serde_json::json!({
+                        "text": final_text.clone(),
+                        "target": "chat",
+                    }),
+                );
+                tracing::info!(text = %final_text, "G3: 文字已 emit voice-partial(chat)");
+                let _ = self.app.emit("blink://voice-recording-end", ());
+            }
         }
     }
+
+    /// Chat 窗口 IPC 驱动:停止录音（0.12.2 §4.3）。
+    ///
+    /// 与 `stop_recording` 共用同一逻辑——target 已在 `start_chat_recording` 时
+    /// 设为 `ChatWindow`，`stop_recording` 按 target 分支到 G3 路径。
+    pub async fn stop_chat_recording(&self) {
+        self.stop_recording().await;
+    }
+
     pub fn cancel_recording(&self) {
         let mut session = self.session.lock().unwrap();
 
@@ -483,7 +578,7 @@ impl VoiceService {
         // 隐藏 mini overlay(G2)
         platform::window::hide_voice_overlay(&self.app);
 
-        // 通知前端录音已结束（G1 隐藏语音指示器 + 恢复 Ghost overlay）
+        // 通知前端录音已结束（G1 隐藏语音指示器 + 恢复 Ghost overlay / G3 chat 麦克风恢复）
         let _ = self.app.emit("blink://voice-recording-end", ());
     }
 
@@ -491,6 +586,7 @@ impl VoiceService {
     ///
     /// G1: emit 事件让前端显示在语音指示器区域。
     /// G2: 先显示 overlay 窗口再 emit（与 emit_voice_error 类似的时序处理）。
+    /// G3: 直接 emit（chat 窗口已可见）。
     fn emit_voice_status(&self, target: VoiceTarget, message: &str) {
         if target == VoiceTarget::ForegroundApp {
             // G2: 先显示 overlay，再延迟 emit 状态消息
@@ -508,7 +604,7 @@ impl VoiceService {
                 );
             });
         } else {
-            // G1: 直接 emit
+            // G1/G3: 直接 emit
             let _ = self.app.emit(
                 "blink://voice-status",
                 serde_json::json!({
@@ -519,7 +615,7 @@ impl VoiceService {
         }
     }
 
-    /// 向用户反馈语音错误（G1 直接 emit，G2 先显示 overlay 再延迟 emit）。
+    /// 向用户反馈语音错误（G1 直接 emit，G2 先显示 overlay 再延迟 emit，G3 直接 emit）。
     ///
     /// **绝不**用 Mock 引擎的假文本上屏——错误就是错误，告知用户而非静默吞掉。
     fn emit_voice_error(&self, target: VoiceTarget, message: &str) {
@@ -543,7 +639,7 @@ impl VoiceService {
                 platform::window::hide_voice_overlay(&app_clone);
             });
         } else {
-            // G1: 直接 emit（主窗口已可见，事件就绪）
+            // G1/G3: 直接 emit（窗口已可见，事件就绪）
             let _ = self.app.emit(
                 "blink://voice-error",
                 serde_json::json!({

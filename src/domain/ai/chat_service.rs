@@ -16,7 +16,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
-use rig_core::memory::{ConversationMemory, InMemoryConversationMemory};
+use rig_core::memory::ConversationMemory;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
 
@@ -216,12 +216,16 @@ pub struct ChatService {
 
 impl ChatService {
     /// 构造 ChatService。AgentProvider 首次 prompt 时才懒构造，不增加启动路径耗时。
+    ///
+    /// 0.12.3：memory 从 `InMemoryConversationMemory` 换为 `SqliteConversationMemory`，
+    /// 持久化到 AI 库，重启不丢历史。滑动窗口在 memory 层实现（最近 20 条）。
     pub fn new(
         app: tauri::AppHandle,
         ai_registry: Arc<AIProviderRegistry>,
         capability_registry: Arc<CapabilityRegistry>,
         action_registry: Arc<ActionRegistry>,
         pending_confirms: Arc<PendingConfirms>,
+        ai_pool: sqlx::SqlitePool,
     ) -> Self {
         Self {
             app,
@@ -229,7 +233,7 @@ impl ChatService {
             capability_registry,
             action_registry,
             pending_confirms,
-            memory: Arc::new(InMemoryConversationMemory::new()),
+            memory: Arc::new(crate::domain::ai::memory::SqliteConversationMemory::new(ai_pool)),
             cached_agent: RwLock::new(None),
             requests: RequestTracker::new(),
             start_gate: tokio::sync::Mutex::new(()),

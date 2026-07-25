@@ -344,6 +344,7 @@ pub async fn chat_prompt(
                 chunk,
                 crate::domain::ai::agent_provider::ChatStreamChunk::Done { .. }
                     | crate::domain::ai::agent_provider::ChatStreamChunk::Error { .. }
+                    | crate::domain::ai::agent_provider::ChatStreamChunk::MaxTurnsReached { .. }
             );
             let event = crate::domain::ai::chat_service::ChatStreamEvent {
                 request_id,
@@ -558,6 +559,139 @@ pub async fn select_chat_model(
     };
     chat.select_model(Some(selection));
     Ok(true)
+}
+
+/// 启动 chat 窗口语音录音（0.12.2 §4.3）。
+///
+/// 解耦热键驱动——由 chat composer 麦克风按钮 IPC 调用，不走 `HotkeyEvent::Hold`。
+/// 与 G1/G2 三方互斥（`VoiceService` 内部 `session.recording` 保证同一时刻只有一个 target）。
+/// 识别结果通过 `blink://voice-partial(target="chat")` 定向 emit 到 chat 窗口。
+#[tauri::command]
+pub async fn start_chat_stt(app: tauri::AppHandle) -> Result<(), String> {
+    let voice = app
+        .state::<std::sync::Arc<crate::app::voice::VoiceService>>()
+        .inner();
+    voice.start_chat_recording().await;
+    Ok(())
+}
+
+/// 停止 chat 窗口语音录音（0.12.2 §4.3）。
+///
+/// 停止录音 → STT 最终识别 → 通过 `voice-partial(target="chat")` emit 最终文本。
+#[tauri::command]
+pub async fn stop_chat_stt(app: tauri::AppHandle) -> Result<(), String> {
+    let voice = app
+        .state::<std::sync::Arc<crate::app::voice::VoiceService>>()
+        .inner();
+    voice.stop_chat_recording().await;
+    Ok(())
+}
+
+// ── 多对话管理（0.12.3 Phase B）──────────────────────────
+
+/// 列出所有对话（按 last_active_at 倒序）。
+///
+/// 供 chat 侧边栏渲染对话列表。每条含 id / title / created_at / last_active_at / message_count。
+#[tauri::command]
+pub async fn list_chat_conversations(
+    app: tauri::AppHandle,
+) -> Result<Vec<crate::infra::data::conversations::Conversation>, String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    Ok(crate::infra::data::conversations::list_conversations(&pools.ai).await)
+}
+
+/// 删除指定对话（级联删除 messages）。
+#[tauri::command]
+pub async fn delete_chat_conversation(
+    app: tauri::AppHandle,
+    conversation_id: String,
+) -> Result<bool, String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    crate::infra::data::conversations::delete_conversation(&pools.ai, &conversation_id)
+        .await
+}
+
+/// 重命名对话。
+#[tauri::command]
+pub async fn rename_chat_conversation(
+    app: tauri::AppHandle,
+    conversation_id: String,
+    title: String,
+) -> Result<bool, String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    crate::infra::data::conversations::rename_conversation(&pools.ai, &conversation_id, &title)
+        .await
+}
+
+/// chat 消息历史快照（0.12.3 Phase B `get_chat_messages` 返回用）。
+///
+/// 从 rig `Message` 提取 role + 文本内容 + thinking（如有）。
+/// tool_call / tool_result 不在历史快照中展示（流式阶段已展示过）。
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ChatMessageSnapshot {
+    pub role: String,
+    pub text: String,
+    pub thinking: Option<String>,
+}
+
+/// 加载对话的完整消息历史（0.12.3 Phase B）。
+///
+/// 从 DB 加载全量 messages（按 id 升序），反序列化 rig `Message`，
+/// 提取 role + text + thinking，返回 `Vec<ChatMessageSnapshot>`。
+/// 供前端切换对话时重建消息流。
+#[tauri::command]
+pub async fn get_chat_messages(
+    app: tauri::AppHandle,
+    conversation_id: String,
+) -> Result<Vec<ChatMessageSnapshot>, String> {
+    use rig_core::completion::message::{AssistantContent, UserContent};
+    use rig_core::completion::Message;
+
+    let pools = app.state::<crate::infra::data::DbPools>();
+    let rows = crate::infra::data::conversations::load_all_messages(&pools.ai, &conversation_id)
+        .await?;
+
+    let mut snapshots = Vec::with_capacity(rows.len());
+    for (role, content_json) in rows {
+        let msg: Message = serde_json::from_str(&content_json)
+            .map_err(|e| format!("反序列化消息失败: {e}"))?;
+
+        let (text, thinking) = match &msg {
+            Message::User { content } => {
+                let text = content
+                    .iter()
+                    .filter_map(|c| match c {
+                        UserContent::Text(t) => Some(t.text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (text, None)
+            }
+            Message::Assistant { content, .. } => {
+                let mut text = String::new();
+                let mut thinking = String::new();
+                for c in content.iter() {
+                    match c {
+                        AssistantContent::Text(t) => text.push_str(&t.text),
+                        AssistantContent::Reasoning(r) => {
+                            thinking.push_str(&r.display_text());
+                        }
+                        _ => {}
+                    }
+                }
+                (text, if thinking.is_empty() { None } else { Some(thinking) })
+            }
+            Message::System { content } => (content.clone(), None),
+        };
+
+        snapshots.push(ChatMessageSnapshot {
+            role,
+            text,
+            thinking,
+        });
+    }
+    Ok(snapshots)
 }
 
 /// 列出所有内置动作元数据 + 当前 enabled 状态（0.8.0 §1.3 / 0.8.6 §8.2.4 i18n）。

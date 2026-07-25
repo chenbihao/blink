@@ -74,8 +74,18 @@ pub enum ChatStreamChunk {
         success: bool,
         summary: String,
     },
-    /// 一轮结束(`FinalResponse`),携带 token 用量。
-    Done { input_tokens: u32, output_tokens: u32 },
+    /// 一轮结束(`FinalResponse`),携带 token 用量 + 模型名。
+    /// 0.12.3：model_name 供前端在气泡左下角显示。
+    Done {
+        input_tokens: u32,
+        output_tokens: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model_name: Option<String>,
+    },
+    /// 已达 tool loop 上限（0.12.3 Phase C）。
+    ///
+    /// rig `default_max_turns(50)` 耗尽时 emit。前端显示"已达工具调用上限"提示。
+    MaxTurnsReached { max_turns: usize },
     /// 流错误。
     Error { message: String },
 }
@@ -94,6 +104,8 @@ enum ChatAgent {
 /// agent loop 并把流式 chunk 经 channel emit 前端。
 pub struct AgentProvider {
     agent: ChatAgent,
+    /// 当前模型显示名（供 Done chunk 携带，前端在气泡左下角显示）
+    model_name: String,
 }
 
 /// tool loop 上限(§4.4--0.11 主窗口固定 2 次,对话窗口放宽)。
@@ -152,7 +164,7 @@ impl AgentProvider {
                 ChatAgent::Ollama(build_agent(m, preamble, tools, memory))
             }
         };
-        Ok(Self { agent })
+        Ok(Self { agent, model_name: model_display_name(entry, model) })
     }
 
     /// 流式 prompt--驱动 agent loop,chunk 经 `tx` emit 前端。
@@ -166,11 +178,12 @@ impl AgentProvider {
         user_msg: &str,
         tx: mpsc::UnboundedSender<ChatStreamChunk>,
     ) {
+        let model_name = if self.model_name.is_empty() { None } else { Some(self.model_name.clone()) };
         match &self.agent {
-            ChatAgent::OpenAI(a) => Self::run_stream(a, conversation_id, user_msg, tx).await,
-            ChatAgent::Anthropic(a) => Self::run_stream(a, conversation_id, user_msg, tx).await,
-            ChatAgent::Gemini(a) => Self::run_stream(a, conversation_id, user_msg, tx).await,
-            ChatAgent::Ollama(a) => Self::run_stream(a, conversation_id, user_msg, tx).await,
+            ChatAgent::OpenAI(a) => Self::run_stream(a, conversation_id, user_msg, tx, model_name).await,
+            ChatAgent::Anthropic(a) => Self::run_stream(a, conversation_id, user_msg, tx, model_name).await,
+            ChatAgent::Gemini(a) => Self::run_stream(a, conversation_id, user_msg, tx, model_name).await,
+            ChatAgent::Ollama(a) => Self::run_stream(a, conversation_id, user_msg, tx, model_name).await,
         }
     }
 
@@ -195,6 +208,7 @@ impl AgentProvider {
         conversation_id: &str,
         user_msg: &str,
         tx: mpsc::UnboundedSender<ChatStreamChunk>,
+        model_name: Option<String>,
     ) where
         M: CompletionModel + 'static,
         <M as CompletionModel>::StreamingResponse: WasmCompatSend + Clone + Unpin + GetTokenUsage,
@@ -241,18 +255,36 @@ impl AgentProvider {
                         // rig Usage 是 u64,截断到 u32(与 map_rig_response 一致)
                         input_tokens: usage.input_tokens.min(u32::MAX as u64) as u32,
                         output_tokens: usage.output_tokens.min(u32::MAX as u64) as u32,
+                        model_name: model_name.clone(),
                     }
                 }
                 Ok(_) => continue,
-                Err(e) => ChatStreamChunk::Error {
-                    message: format!("{e}"),
-                },
+                Err(e) => {
+                    // 0.12.3 Phase C: 检测 MaxTurnsError 并 emit MaxTurnsReached
+                    let msg = format!("{e}");
+                    if msg.contains("MaxTurnsError") || msg.contains("max turns") {
+                        ChatStreamChunk::MaxTurnsReached {
+                            max_turns: MAX_TURNS,
+                        }
+                    } else {
+                        ChatStreamChunk::Error { message: msg }
+                    }
+                }
             };
             if tx.send(chunk).is_err() {
                 // 接收端关闭(用户中断/窗口关)--提前终止
                 return;
             }
         }
+    }
+}
+
+/// 提取模型显示名（优先 display_name，回退 model id）。
+fn model_display_name(entry: &ProviderEntry, model: &ModelEntry) -> String {
+    if !model.display_name.is_empty() {
+        model.display_name.clone()
+    } else {
+        model.id.clone()
     }
 }
 
@@ -318,7 +350,7 @@ mod tests {
             .default_max_turns(5)
             .build();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        AgentProvider::run_stream(&agent, "c1", "hi", tx).await;
+        AgentProvider::run_stream(&agent, "c1", "hi", tx, None).await;
 
         let mut chunks = Vec::new();
         while let Some(c) = rx.recv().await {
@@ -353,7 +385,7 @@ mod tests {
             .default_max_turns(5)
             .build();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        AgentProvider::run_stream(&agent, "c1", "hi", tx).await;
+        AgentProvider::run_stream(&agent, "c1", "hi", tx, None).await;
 
         let mut chunks = Vec::new();
         while let Some(c) = rx.recv().await {
@@ -397,7 +429,7 @@ mod tests {
             .default_max_turns(5)
             .build();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        AgentProvider::run_stream(&agent, "c1", "hi", tx).await;
+        AgentProvider::run_stream(&agent, "c1", "hi", tx, None).await;
 
         let mut chunks = Vec::new();
         while let Some(c) = rx.recv().await {
@@ -452,7 +484,7 @@ mod tests {
             .default_max_turns(5)
             .build();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        AgentProvider::run_stream(&agent, "c1", "hi", tx).await;
+        AgentProvider::run_stream(&agent, "c1", "hi", tx, None).await;
 
         let mut chunks = Vec::new();
         while let Some(c) = rx.recv().await {
@@ -462,6 +494,7 @@ mod tests {
             ChatStreamChunk::Done {
                 input_tokens,
                 output_tokens,
+                model_name: _,
             } => Some((*input_tokens, *output_tokens)),
             _ => None,
         });
@@ -490,7 +523,7 @@ mod tests {
             .default_max_turns(5)
             .build();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        AgentProvider::run_stream(&agent, "c1", "hi", tx).await;
+        AgentProvider::run_stream(&agent, "c1", "hi", tx, None).await;
 
         let mut chunks = Vec::new();
         while let Some(c) = rx.recv().await {
@@ -502,6 +535,7 @@ mod tests {
                 ChatStreamChunk::Done {
                     input_tokens,
                     output_tokens,
+                    model_name: _,
                 } => Some((*input_tokens, *output_tokens)),
                 _ => None,
             })
@@ -510,6 +544,15 @@ mod tests {
             input_tokens, u32::MAX,
             "超 u32 的 input_tokens 应截断到 u32::MAX"
         );
+    }
+
+    /// 验证 `MaxTurnsReached` chunk 序列化（0.12.3 Phase C）。
+    #[test]
+    fn chat_stream_chunk_max_turns_reached_serializes() {
+        let chunk = ChatStreamChunk::MaxTurnsReached { max_turns: 50 };
+        let v = serde_json::to_value(&chunk).unwrap();
+        assert_eq!(v["kind"], "max_turns_reached");
+        assert_eq!(v["max_turns"], 50);
     }
 
     /// 验证 `summarize_tool_result` 文本截断与图片占位(纯函数测试)。
@@ -581,6 +624,7 @@ mod tests {
         let done = ChatStreamChunk::Done {
             input_tokens: 10,
             output_tokens: 20,
+            model_name: None,
         };
         let v = serde_json::to_value(&done).unwrap();
         assert_eq!(v["kind"], "done");

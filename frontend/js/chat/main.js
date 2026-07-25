@@ -8,7 +8,8 @@ import * as state from "./state.js";
 import * as ipc from "./ipc.js";
 import { initRenderer } from "./renderer.js";
 import * as components from "./components.js";
-import { initComposer, setStreamingMode, setInputMode, clearInput, focusInput, setThinkingEnabled as setComposerThinking } from "./composer.js";
+import { initComposer, setStreamingMode, setInputMode, clearInput, focusInput, setThinkingEnabled as setComposerThinking, showVoiceIndicator, hideVoiceIndicator, showVoiceStatus, updateVoiceLevel, updateVoicePartial, isVoiceRecording } from "./composer.js";
+import { initSidebar, refreshSidebar, showSidebar, hideSidebar, toggleSidebar, setActiveConversation } from "./sidebar.js";
 import { applyThemeFromConfig } from "../theme.js";
 import { listen, invoke } from "../tauri.js";
 
@@ -43,9 +44,20 @@ async function init() {
     onThinkingToggle: handleThinkingToggle,
   });
 
+  initSidebar({
+    onSwitch: handleSwitchConversation,
+    onNew: handleNewConversation,
+  });
+
   // 注册事件监听
   await ipc.listenChatStream(handleStreamEvent);
   await ipc.listenChatConfirm(handleConfirmEvent);
+  await ipc.listenVoicePartial(handleVoicePartial);
+  await ipc.listenVoiceRecordingStart(handleVoiceRecordingStart);
+  await ipc.listenVoiceRecordingEnd(handleVoiceRecordingEnd);
+  await ipc.listenVoiceError(handleVoiceError);
+  await ipc.listenVoiceLevel(handleVoiceLevel);
+  await ipc.listenVoiceStatus(handleVoiceStatus);
 
   // 初始状态：检查 provider 配置 + 加载模型选择器
   try {
@@ -58,6 +70,12 @@ async function init() {
     components.renderEmptyState(false, openSettings);
   }
   refreshModelSelector();
+
+  // 侧边栏 toggle
+  const sidebarToggle = document.getElementById("chat-sidebar-toggle");
+  if (sidebarToggle) {
+    sidebarToggle.addEventListener("click", () => toggleSidebar());
+  }
 
   // 模型选择器交互
   bindModelSelector();
@@ -100,6 +118,9 @@ async function handleSend(message) {
   }
 
   clearInput();
+  // 刷新侧边栏（更新 last_active_at）
+  refreshSidebar();
+  setActiveConversation(state.conversationId);
 }
 
 // ── 停止 ────────────────────────────────────────
@@ -178,6 +199,16 @@ function handleStreamEvent(event) {
       break;
     }
 
+    case "max_turns_reached":
+      // 0.12.3 Phase C: tool loop 触顶提示
+      if (currentAssistantEl) {
+        components.finalizeAssistantMessage(currentAssistantEl, state.streamBuffer, state.thinkingBuffer);
+        state.addMessage({ role: "assistant", content: state.streamBuffer });
+      }
+      components.renderErrorMessage(`已达工具调用上限（${chunk.max_turns}轮），请缩减任务或开启新对话`);
+      finishStreaming();
+      break;
+
     case "done":
       finalizeDone(chunk);
       break;
@@ -221,6 +252,13 @@ function finalizeDone(chunk) {
   if (currentToolEl) {
     components.finalizeToolStatus(currentToolEl, true);
     currentToolEl = null;
+  }
+  // 0.12.3：在最后一条 assistant 消息底部显示模型名
+  if (chunk && chunk.model_name) {
+    const targetEl = currentAssistantEl || components.getLastAssistantEl?.();
+    if (targetEl) {
+      components.renderModelLabel(targetEl, chunk.model_name);
+    }
   }
   // 0.12.2 §4.8：在最后一条 assistant 消息底部显示 token 用量
   if (chunk && (chunk.input_tokens || chunk.output_tokens)) {
@@ -268,6 +306,17 @@ function handleConfirmEvent(event) {
   });
 }
 
+// ── Alt 系统菜单抑制 ──────────────────────────────
+// 无边框窗口按 Alt 键会触发 Win32 默认菜单（左上角弹出）。
+// 拦截 Alt keydown 的默认行为，防止系统菜单弹出。
+// 不影响 Alt 作为修饰键的功能（如 Alt+Space 语音输入由 hook 处理）。
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Alt") {
+    e.preventDefault();
+  }
+});
+
 // ── Esc 键 ──────────────────────────────────────
 
 function handleEsc(e) {
@@ -280,6 +329,57 @@ function handleEsc(e) {
   }
 }
 
+// ── 语音输入（0.12.3 对齐主窗口：热键驱动，非 IPC 按钮）─────────────
+
+/** voice-recording-start: 显示语音指示器（仅 target="chat"） */
+function handleVoiceRecordingStart(event) {
+  const payload = event.payload;
+  if (payload?.target !== "chat") return;
+  showVoiceIndicator();
+}
+
+/** voice-level: 波形动画（仅 target="chat"） */
+function handleVoiceLevel(event) {
+  const payload = event.payload;
+  if (payload?.target !== "chat") return;
+  updateVoiceLevel(payload?.level ?? 0);
+}
+
+/** voice-status: 模型加载中等状态提示（仅 target="chat"） */
+function handleVoiceStatus(event) {
+  const payload = event.payload;
+  if (payload?.target !== "chat") return;
+  if (payload?.message) {
+    showVoiceStatus(payload.message);
+  }
+}
+
+/** voice-partial: 实时更新 textarea（仅 target="chat"） */
+function handleVoicePartial(event) {
+  const payload = event.payload;
+  if (payload?.target !== "chat") return;
+  updateVoicePartial(payload);
+}
+
+/** voice-recording-end: 隐藏语音指示器 */
+function handleVoiceRecordingEnd() {
+  if (isVoiceRecording()) {
+    hideVoiceIndicator();
+  }
+}
+
+/** voice-error: 显示错误 + 隐藏语音指示器 */
+function handleVoiceError(event) {
+  const payload = event.payload;
+  if (payload?.target !== "chat") return;
+  if (isVoiceRecording()) {
+    hideVoiceIndicator();
+  }
+  if (payload?.message) {
+    components.renderErrorMessage(payload.message);
+  }
+}
+
 // ── 新对话 ──────────────────────────────────────
 
 function handleNewConversation() {
@@ -289,6 +389,56 @@ function handleNewConversation() {
   state.resetConversation();
   components.clearMessages();
   components.renderEmptyState(state.providerConfigured, openSettings);
+  setActiveConversation(state.conversationId);
+  refreshSidebar();
+  focusInput();
+}
+
+/**
+ * 切换到指定对话（0.12.3 Phase B）。
+ * 停止当前生成 → 设置 conversation_id → 从后端加载历史消息 → 渲染。
+ * @param {string} conversationId
+ */
+async function handleSwitchConversation(conversationId) {
+  if (state.isStreaming) {
+    handleStop();
+  }
+
+  // 更新 state
+  state.conversationId = conversationId;
+  state.messages.length = 0;
+  state.setStreaming(false);
+  state.setActiveRequestId(null);
+  state.resetStreamBuffer();
+  state.resetThinkingBuffer();
+  state.clearToolCalls();
+
+  components.clearMessages();
+  setActiveConversation(conversationId);
+
+  try {
+    const messages = await ipc.getChatMessages(conversationId);
+    if (messages.length === 0) {
+      components.renderEmptyState(state.providerConfigured, openSettings);
+    } else {
+      for (const msg of messages) {
+        if (msg.role === "user") {
+          components.renderUserMessage(msg.text);
+          state.addMessage({ role: "user", content: msg.text });
+        } else if (msg.role === "assistant") {
+          const el = components.createAssistantMessage();
+          if (el) {
+            components.finalizeAssistantMessage(el, msg.text, msg.thinking || "");
+            state.addMessage({ role: "assistant", content: msg.text });
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.error("[chat] 加载对话历史失败:", e);
+    components.renderEmptyState(state.providerConfigured, openSettings);
+  }
+
   focusInput();
 }
 
@@ -413,21 +563,26 @@ function renderModelDropdown(models) {
 
 /**
  * 渲染单个下拉选项 HTML。
- * @param {string|null} id 模型 id（null = Main 档快捷项，传 null 给 selectChatModel 恢复默认）
- * @param {string} label 显示名（主档/轻量档传模型名，会与 provider 拼接）
- * @param {string} providerName provider 名
- * @param {boolean} selected 是否当前选中
- * @param {string} badge 角标 "main"/"light"/""
+ * 0.12.3 重新设计：供应商名 + 模型名两行布局，左对齐，供应商用弱色小字区分。
+ * @param {string|null} id
+ * @param {string} label 模型显示名
+ * @param {string} providerName 供应商名
+ * @param {boolean} selected
+ * @param {string} badge "main"/"light"/""
  */
 function renderModelOption(id, label, providerName, selected, badge) {
   const badgeHtml = badge
     ? `<span class="chat-model-badge chat-model-badge-${badge}">${badge === "main" ? "主" : "轻"}</span>`
     : '<span class="chat-model-badge-placeholder"></span>';
-  // 显示文案：供应商 · 模型名（供应商为空时只显示模型名）
-  const displayText = providerName ? `${providerName} · ${label}` : label;
-  return `<div class="chat-model-option${selected ? " chat-model-option-selected" : ""}" data-model-id="${id ?? ""}" title="${escapeText(displayText)}">
+  const providerHtml = providerName
+    ? `<span class="chat-model-option-provider">${escapeText(providerName)}</span>`
+    : '';
+  return `<div class="chat-model-option${selected ? " chat-model-option-selected" : ""}" data-model-id="${id ?? ""}" title="${escapeText(providerName ? providerName + ' · ' + label : label)}">
     ${badgeHtml}
-    <span class="chat-model-option-name">${escapeText(displayText)}</span>
+    <div class="chat-model-option-text">
+      <span class="chat-model-option-name">${escapeText(label)}</span>
+      ${providerHtml}
+    </div>
     ${selected ? '<span class="chat-model-check">✓</span>' : '<span class="chat-model-check-placeholder"></span>'}
   </div>`;
 }

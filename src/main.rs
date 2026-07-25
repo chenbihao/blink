@@ -468,6 +468,7 @@ fn main() {
                     capability_registry.clone(),
                     action_registry.clone(),
                     pending_confirms.clone(),
+                    pools.ai.clone(),
                 ),
             );
 
@@ -526,6 +527,12 @@ fn main() {
             app::commands::get_chat_status,
             app::commands::get_chat_models,
             app::commands::select_chat_model,
+            app::commands::start_chat_stt,
+            app::commands::stop_chat_stt,
+            app::commands::list_chat_conversations,
+            app::commands::delete_chat_conversation,
+            app::commands::rename_chat_conversation,
+            app::commands::get_chat_messages,
             app::commands::list_builtin_actions,
             app::commands::list_context_bindings,
             app::commands::trigger_chord,

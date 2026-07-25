@@ -67,6 +67,227 @@
   color: var(--on-accent);
 }
 
+/* ── Body: sidebar + main 横向排列（0.12.3 push 布局） ── */
+
+.chat-body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* ── 主区域容器 ───────────────────────────────── */
+
+.chat-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* ── 侧边栏（0.12.3 push 布局，非 overlay） ────── */
+
+.chat-sidebar {
+  width: 240px;
+  flex-shrink: 0;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: width 0.2s ease, opacity 0.2s ease, border-color 0.2s ease;
+}
+
+/* data-closed 属性控制关闭态：宽度收 0 + 透明 + 隐藏边框 */
+.chat-sidebar[data-closed] {
+  width: 0;
+  opacity: 0;
+  border-right-color: transparent;
+  pointer-events: none;
+}
+
+.chat-sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.chat-sidebar-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.chat-sidebar-new {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.chat-sidebar-new svg {
+  width: 14px;
+  height: 14px;
+}
+
+.chat-sidebar-new:hover {
+  color: var(--text);
+  background: var(--bg);
+}
+
+.chat-sidebar-list {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--space-xs);
+}
+
+.chat-sidebar-empty {
+  padding: var(--space-xl) var(--space-sm);
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.chat-sidebar-empty-hint {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.chat-sidebar-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.12s;
+  gap: var(--space-xs);
+  position: relative;
+}
+
+.chat-sidebar-item:hover {
+  background: var(--bg);
+}
+
+.chat-sidebar-item.active {
+  background: var(--accent-bg);
+}
+
+.chat-sidebar-item.active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 4px;
+  bottom: 4px;
+  width: 3px;
+  border-radius: 0 2px 2px 0;
+  background: var(--accent);
+}
+
+.chat-sidebar-item-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-sidebar-item-title {
+  font-size: 13px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-sidebar-item.active .chat-sidebar-item-title {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.chat-sidebar-item-meta {
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-sidebar-item-delete {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  opacity: 0;
+  transition: all 0.12s;
+  flex-shrink: 0;
+}
+
+.chat-sidebar-item:hover .chat-sidebar-item-delete {
+  opacity: 1;
+}
+
+.chat-sidebar-item-delete svg {
+  width: 12px;
+  height: 12px;
+}
+
+.chat-sidebar-item-delete:hover {
+  color: var(--red, #e5484d);
+  background: rgba(229, 72, 77, 0.1);
+}
+
+.chat-sidebar-rename-input {
+  width: 100%;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 13px;
+  background: var(--bg-deep);
+  color: var(--text);
+  outline: none;
+}
+
+/* ── 语音指示器（0.12.3 对齐主窗口 G1） ──────────── */
+
+/* 与主窗口 index.html 的 #voice-indicator 样式一致 */
+.voice-indicator {
+  position: absolute;
+  right: var(--space-md);
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.voice-indicator.hidden {
+  display: none;
+}
+
+.voice-indicator .voice-label {
+  font-size: var(--text-xs, 12px);
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
 /* ── Header ────────────────────────────────────── */
 
 .chat-header {
@@ -211,10 +432,11 @@
   display: flex;
   align-items: center;
   gap: var(--space-xs);
-  padding: 6px 8px 6px 8px; /* 左 padding 8px 与触发器对齐 */
+  padding: 6px 8px 6px 8px;
   border-radius: 6px;
   cursor: pointer;
   transition: background 0.1s;
+  text-align: left;
 }
 
 .chat-model-option:hover {
@@ -229,10 +451,25 @@
   background: var(--accent-bg);
 }
 
-.chat-model-option-name {
+.chat-model-option-text {
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.chat-model-option-name {
   font-size: 13px;
   color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-model-option-provider {
+  font-size: 11px;
+  color: var(--text-faint);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -729,6 +966,16 @@
 
 .chat-tool-result-error pre {
   border-left: 2px solid var(--red);
+}
+
+/* 模型名标签（0.12.3） */
+.chat-msg-model {
+  margin-top: var(--space-xs);
+  font-size: 11px;
+  color: var(--text-faint);
+  text-align: left;
+  font-style: italic;
+  opacity: 0.7;
 }
 
 /* Token 用量（0.12.2 §4.8） */

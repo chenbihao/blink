@@ -181,9 +181,12 @@ async fn init_history_schema(pool: &SqlitePool) -> Result<(), String> {
     Ok(())
 }
 
-/// AI 库：ai_tool_audit 表
+/// AI 库：ai_tool_audit 表 + conversations/messages 表（0.12.3）
 async fn init_ai_schema(pool: &SqlitePool) -> Result<(), String> {
     crate::infra::data::ai_audit::init_db(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    crate::infra::data::conversations::init_db(pool)
         .await
         .map_err(|e| e.to_string())?;
     Ok(())

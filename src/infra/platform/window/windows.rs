@@ -615,8 +615,8 @@ pub fn show_chat_window(app: &AppHandle) -> Result<(), String> {
         // 首次创建（预热未命中时的 fallback）
         WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("chat.html".into()))
             .title("Blink AI")
-            .inner_size(720.0, 560.0)
-            .min_inner_size(480.0, 360.0)
+            .inner_size(900.0, 680.0)
+            .min_inner_size(560.0, 420.0)
             .decorations(false)
             .transparent(false)
             .always_on_top(false)
@@ -1191,8 +1191,8 @@ pub fn preheat_secondary_windows(app: AppHandle) {
             use tauri::{WebviewUrl, WebviewWindowBuilder};
             match WebviewWindowBuilder::new(&app, "chat", WebviewUrl::App("chat.html".into()))
                 .title("Blink AI")
-                .inner_size(720.0, 560.0)
-                .min_inner_size(480.0, 360.0)
+                .inner_size(900.0, 680.0)
+                .min_inner_size(560.0, 420.0)
                 .decorations(false)
                 .transparent(false)
                 .always_on_top(false)

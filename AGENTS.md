@@ -13,7 +13,7 @@
 Blink 是一个 Windows 全局快捷入口，定位不只是「启动器」。**目标：做一个极其丝滑的启动器，并且把常用的功能都丝滑融合，使用 Chord 模式来调用各种增强能力，不止是启动器。**
 终极目标：感知用户上下文、主动推荐动作，让任何操作都比原来的路径更快。
 
-当前 **0.12.0 完成**（基础设施抽取与清账：投影统一 / DB 四层拆分 / Provider 模型统一 / ollama 接入 / Tool 适配层 / CapabilityRegistry 动态注册 / 存储页优化）。**0.12.1 完成**（独立 chat 窗口 / AgentProvider / ChatService / chat IPC / 流式 Markdown / 工具可视化 / 危险确认），测试基线 **826 通过**。**0.12.2 进行中**（Chat 体验优化：✅ 思考块 / 无边框 / 模型选择（Main+Light+自主）/ Provider 标签 / 复制按钮 / Tool 结果折叠 / Token 用量 / Provider 变更响应；🔜 语音输入留后续——STT 热键驱动耦合深，需新增 `VoiceTarget::ChatWindow`），测试基线 **836 通过**。详见 [phases/0.12-ai-ecosystem.md](docs/production-design/phases/0.12-ai-ecosystem.md)。
+当前 **0.12.0 完成**（基础设施抽取与清账：投影统一 / DB 四层拆分 / Provider 模型统一 / ollama 接入 / Tool 适配层 / CapabilityRegistry 动态注册 / 存储页优化）。**0.12.1 完成**（独立 chat 窗口 / AgentProvider / ChatService / chat IPC / 流式 Markdown / 工具可视化 / 危险确认），测试基线 **826 通过**。**0.12.2 完成**（Chat 体验优化：思考块 / 无边框 / 模型选择（Main+Light+自主）/ Provider 标签 / 复制按钮 / Tool 结果折叠 / Token 用量 / Provider 变更响应 / 语音输入），测试基线 **836 通过**。**0.12.3 完成**（对话持久化：SQLite ConversationMemory + 滑动窗口 / 多对话管理 + 侧边栏 / Tool loop 触顶提示），测试基线 **855 通过**。详见 [phases/0.12-ai-ecosystem.md](docs/production-design/phases/0.12-ai-ecosystem.md)。
 
 - ✅ **0.10 语音输入**：STT + 语音打字（G1 主窗口语音输入 / G2 语音输入法上屏）。工具箱层定 FunASR（SenseVoice 准确率 7.81%，CPU 17× 实时）。详见 [phases/0.10-voice-agent.md](docs/production-design/phases/0.10-voice-agent.md)
   - 0.10.4：伪流式 VAD 切句 + 累积预览 + 移除真流式 + 架构清理
@@ -34,7 +34,7 @@ Blink 是一个 Windows 全局快捷入口，定位不只是「启动器」。**
   - 0.11.8：截图优化收尾 + 图标包引入（Lucide sprite）
   - 0.11.9：OCR word 级链路（`OcrLine.Words()` + word bounding_rect + 智能拼接替代前端强清）+ 原图阅读模式（word 拖选 + textarea 双向联动）+ 翻译衔接（`translate_text` command 直调 translate 插件 tool；OCR 面板双 tab 原文/译文；工具栏「OCR」「翻译」共用面板）+ 水印独立图层（`watermarkConfig` 单例覆盖式，脱离 commands 撤销栈）+ 钉图窗口右键 OCR/翻译
 - ✅ **0.11.10 图上翻译 + 截图交互重构**：`overlayLayer` 图层引擎（原位嵌原文/译文，背景遮罩三档+字号自适应）+ 选取工具（默认激活，解决鼠标层冲突）+ 预热 OCR（按钮秒响应）+ 双按钮单一路径（[识别]/[翻译]各自清晰，消除中间态）+ 面板抽屉化（默认展开，可拖动）+ 误点保护（点选区外 no-op）+ `translate_batch` 批量翻译 + 命名迁移 OCR→识别。测试基线 **783 通过**。详见 [phases/0.11-plugin-ai-toolchain.md §2.10](docs/production-design/phases/0.11-plugin-ai-toolchain.md#210-图上翻译--截图交互重构01110)
-- 🔧 **0.12 AI 能力架构搭建**（0.12.0 完成 ✅，0.12.2 进行中）：基础设施抽取与清账（投影统一 ✅ / **DB 四层拆分** ✅ config+history+AI+cache / 分层违规修复 ✅ / **Provider 模型统一管理** ✅ chat+embedding+STT / ollama Provider 接入 ✅ / **Tool 适配层** ✅ CapabilityTool/ActionTool impl ToolDyn + 危险确认闭环骨架 / CapabilityRegistry 动态注册 ✅ / 存储页多库统计 ✅ / message serde 核查 ✅ 走 rig Message）+ 对话窗口★（独立 Agent 窗口 + **Alt+Q chord** + rig AgentBuilder，不破主窗口类型收窄铁则）+ 对话机制（conversation 隔离 + 持久化 memory 走 SQLite impl rig ConversationMemory trait + 滑动窗口 + tool loop 无限轮）。**产品边界：Blink 不做 AI 运行时，靠外部 ollama/lmstudio**。**0.12.2**（✅ 思考块 / 无边框 / 模型选择（Main+Light+自主）/ Provider 标签 / 复制按钮 / Tool 结果折叠 / Token 用量 / Provider 变更响应；🔜 语音输入留后续——STT 热键驱动耦合深，需新增 `VoiceTarget::ChatWindow`）。详见 [phases/0.12-ai-ecosystem.md](docs/production-design/phases/0.12-ai-ecosystem.md)
+- ✅ **0.12 AI 能力架构搭建**（0.12.0-0.12.3 全部完成）：基础设施抽取与清账（投影统一 ✅ / **DB 四层拆分** ✅ config+history+AI+cache / 分层违规修复 ✅ / **Provider 模型统一管理** ✅ chat+embedding+STT / ollama Provider 接入 ✅ / **Tool 适配层** ✅ CapabilityTool/ActionTool impl ToolDyn + 危险确认闭环骨架 / CapabilityRegistry 动态注册 ✅ / 存储页多库统计 ✅ / message serde 核查 ✅ 走 rig Message）+ 对话窗口★（独立 Agent 窗口 + **Alt+Q chord** + rig AgentBuilder，不破主窗口类型收窄铁则）+ 对话机制（conversation 隔离 + **持久化 memory 走 SQLite impl rig ConversationMemory trait** + 滑动窗口 20 条 + tool loop 无限轮 + 50 turns 触顶提示）+ Chat 体验（思考块 / 无边框 / 模型选择 / Provider 标签 / 复制按钮 / Tool 结果折叠 / Token 用量 / Provider 变更响应 / 语音输入）+ 多对话管理（侧边栏 / 列表切换 / 删除 / 重命名 / 历史恢复）。**产品边界：Blink 不做 AI 运行时，靠外部 ollama/lmstudio**。详见 [phases/0.12-ai-ecosystem.md](docs/production-design/phases/0.12-ai-ecosystem.md)
 - 🔜 **0.13 AI 调用能力扩展**：MCP client（消费外部 tool，McpTool 进适配层）/ RAG（知识库检索，走 ollama embedding + 暴力 cosine）/ 记忆向量召回（DemotingPolicyMemory 钩子 + 语义召回）/ MCP server（护城河——暴露 Blink 能力）/ Skill 化（CLI → AI 生成 skill，需 PoC 验证）。**砍掉项**：mistral.rs / A2A / sqlite-vec。详见 [phases/0.13-ai-capability-expansion.md](docs/production-design/phases/0.13-ai-capability-expansion.md)
 
 ---
@@ -98,7 +98,7 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
   - `execution/` — `Action` trait + `ActionOutcome` + `ActionContext` + `ActionSchema` + `DangerClass` + `ActionRegistry`（12 builtin + 3 chord）
   - `plugin/` — manifest 解析 + JSONL 协议 + tokio 子进程
   - `chord/` — `ChordAction` trait + `ChordRegistry`
-  - `ai/` — `AIProvider` trait + `AIProviderRegistry` + `RigFactory` + `gating`（四筛子）+ `message`（ChatMessage / ToolCall）+ `rig_provider` + `tool_adapter`（CapabilityTool/ActionTool impl ToolDyn，对话窗口 tool 池适配层）
+  - `ai/` — `AIProvider` trait + `AIProviderRegistry` + `RigFactory` + `gating`（四筛子）+ `message`（ChatMessage / ToolCall）+ `rig_provider` + `memory`（SqliteConversationMemory impl rig ConversationMemory）+ `tool_adapter`（CapabilityTool/ActionTool impl ToolDyn，对话窗口 tool 池适配层）
   - `stt/` — `SttEngine` trait + 模型注册表 + cloud / local / pseudo_streaming（伪流式 VAD+预览）/ vad / funasr（服务生命周期）/ wav
   - `capability/` — `Capability` trait + `InvokeContext` + `CapabilitySchema` + `CapabilityResult` + `CapabilityError` + `CapabilityRegistry`（inventory 自动注册）+ `builtins/`（capture_screen / crop_image / read_clipboard / write_clipboard / search_files）
 - `src/infra/` — 基础设施层：
@@ -110,6 +110,7 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 
 - 主窗口：`index.html` + `style.css` + `js/*.js`（搜索/结果/键盘/动作/生命周期/主题/i18n/Ghost/Chord）
 - 设置页：`settings.html` + `settings.js` + `settings.css`（含语音 Tab：`js/settings/tabs/voice.js` + `css/views/settings-voice.css`）
+- 对话窗口：`chat.html` + `js/chat/*.js`（main/state/ipc/renderer/components/composer/sidebar）+ `css/views/chat.css`（流式 Markdown / 模型选择器 / 思考块 / 语音输入 / 多对话侧边栏）
 - 悬浮球：`chord-ball.html`
 - 截图 overlay：`chord-screenshot.html`
 - 语音 overlay：`voice-overlay`（G2 语音输入法上屏 mini 窗口）
@@ -150,7 +151,7 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 SQLite `%APPDATA%\blink\`（四库独立）：
 - **配置库 `blink_config.db`** — `config(key, value, updated_at)` 配置 KV（`AppConfig` 6 分片门面 + `AIConfig` 第 7 分片 + `SttConfig` 第 8 分片 + `engine:{id}` / `plugin:{id}` / `clipboard:config` / `screenshot:config` / `context:config`）；未来跨机同步只同步此库
 - **历史库 `blink_history.db`** — `history(lnk_path, hit_count, last_used_at)` 启动历史 + `clipboard_history(id, text, kind, hit_count, last_used_at)` 剪贴板历史
-- **AI 库 `blink_ai.db`** — `ai_tool_audit` AI 工具审计（0.12.0 加 `cleanup_old` 30 天 + 行数上限 10000）+ `conversations` / `messages`（0.12.3 对话记忆）
+- **AI 库 `blink_ai.db`** — `ai_tool_audit` AI 工具审计（0.12.0 加 `cleanup_old` 30 天 + 行数上限 10000）+ `conversations` / `messages`（0.12.3 对话记忆持久化）
 - **缓存库 `blink_cache.db`** — `performance_metrics` 性能统计（高频写）+ `icon_cache` 图标缓存（BLOB）
 
 文件系统 `%APPDATA%\blink\`：

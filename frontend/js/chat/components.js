@@ -71,6 +71,7 @@ function renderTypingIndicator() {
 
 /**
  * 更新 assistant 消息内容（流式渲染）。
+ * 0.12.3：思考过程独立气泡（不再嵌在 assistant 气泡内部），渲染为独立卡片。
  * @param {HTMLElement} el 消息元素
  * @param {string} text 累积 Markdown 文本
  * @param {string} [thinkingText] 累积 thinking 文本（可选）
@@ -78,14 +79,17 @@ function renderTypingIndicator() {
  */
 export function updateAssistantMessage(el, text, thinkingText, thinkingDone) {
   if (!el) return;
-  el.classList.remove("waiting"); // 首条内容到达，移除 typing 指示器态
-  el.innerHTML = renderThinkingBlock(thinkingText, thinkingDone) + renderMarkdown(text);
+  el.classList.remove("waiting");
+  // 思考过程作为独立气泡，渲染在 assistant 气泡之前
+  const thinkingHtml = renderThinkingBlock(thinkingText, thinkingDone);
+  el.innerHTML = thinkingHtml + `<div class="chat-assistant-content">${renderMarkdown(text)}</div>`;
   scrollToBottom();
 }
 
 /**
  * 完成 assistant 消息（移除 streaming 样式，最终渲染）。
  * 0.12.2 §4.6：注入 hover 复制按钮 + 代码块复制按钮，原始 Markdown 存 dataset。
+ * 0.12.3：思考过程独立气泡。
  * @param {HTMLElement} el 消息元素
  * @param {string} text 完整 Markdown 文本
  * @param {string} [thinkingText] 完整 thinking 文本（可选）
@@ -93,8 +97,9 @@ export function updateAssistantMessage(el, text, thinkingText, thinkingDone) {
 export function finalizeAssistantMessage(el, text, thinkingText) {
   if (!el) return;
   el.classList.remove("streaming", "waiting");
-  el.dataset.rawText = text; // 保留原始 Markdown 供复制（sanitize 后会丢格式）
-  el.innerHTML = renderThinkingBlock(thinkingText, true) + renderMarkdown(text);
+  el.dataset.rawText = text;
+  const thinkingHtml = renderThinkingBlock(thinkingText, true);
+  el.innerHTML = thinkingHtml + `<div class="chat-assistant-content">${renderMarkdown(text)}</div>`;
   injectCopyButton(el, text);
   injectCodeCopyButtons(el);
   scrollToBottom();
@@ -232,6 +237,21 @@ export function appendToolResult(el, summary, success) {
   result.appendChild(summaryEl);
   result.appendChild(pre);
   el.appendChild(result);
+}
+
+/**
+ * 在 assistant 消息底部追加模型名标签（0.12.3）。
+ * @param {HTMLElement} el assistant 消息元素
+ * @param {string} modelName 模型显示名
+ */
+export function renderModelLabel(el, modelName) {
+  if (!el || !modelName) return;
+  const existing = el.querySelector(".chat-msg-model");
+  if (existing) existing.remove();
+  const label = document.createElement("div");
+  label.className = "chat-msg-model";
+  label.textContent = modelName;
+  el.appendChild(label);
 }
 
 /**
