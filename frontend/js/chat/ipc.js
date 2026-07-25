@@ -123,6 +123,121 @@ export function getChatMessages(conversationId) {
   return invoke("get_chat_messages", { conversationId });
 }
 
+// ── 导出对话（0.12.5 §5.6）──────────────────
+
+/**
+ * 保存文本到指定路径（后端 command 封装）。
+ * @param {string} path 文件路径
+ * @param {string} content 文本内容
+ * @returns {Promise<void>}
+ */
+export function saveTextFile(path, content) {
+  return invoke("save_text_file", { path, content });
+}
+
+/**
+ * 导出对话为 Markdown 文件（0.12.5 §5.6）。
+ *
+ * 前端格式化 Markdown + Tauri `dialog.save()` 获取路径 + `save_text_file` 写文件。
+ * 调用方传入对话标题（用于 Markdown 标题 + 文件名）。
+ *
+ * @param {string} conversationId
+ * @param {string} title 对话标题
+ * @returns {Promise<boolean>} true=成功保存，false=用户取消
+ */
+export async function exportConversation(conversationId, title) {
+  // 1. 加载对话消息
+  const messages = await getChatMessages(conversationId);
+
+  // 2. 格式化为 Markdown
+  const markdown = formatConversationMarkdown(title, messages);
+
+  // 3. 打开保存对话框获取路径
+  const save = window.__TAURI__?.dialog?.save;
+  if (typeof save !== "function") {
+    throw new Error("保存对话框不可用");
+  }
+  const safeName = (title || "对话")
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
+    .trim()
+    .slice(0, 50) || "对话";
+  const path = await save({
+    defaultPath: `${safeName}.md`,
+    filters: [{ name: "Markdown", extensions: ["md"] }],
+  });
+  if (!path) return false; // 用户取消
+
+  // 4. 写文件
+  await saveTextFile(path, markdown);
+  return true;
+}
+
+/**
+ * 将对话消息列表格式化为 Markdown 字符串。
+ * @param {string} title 对话标题
+ * @param {Array<{role: string, text: string, thinking: string|null, tool_name?: string, tool_result?: string}>} messages
+ * @returns {string}
+ */
+function formatConversationMarkdown(title, messages) {
+  let md = `# ${title || "对话"}\n\n`;
+  for (const msg of messages) {
+    if (msg.role === "user") {
+      md += `## 用户\n\n${msg.text}\n\n---\n\n`;
+    } else if (msg.role === "assistant") {
+      // 纯工具调用（无文本回复）
+      if (msg.tool_name && !msg.text) {
+        md += `**工具调用：${msg.tool_name}**\n\n`;
+        if (msg.tool_result) {
+          md += `> ${msg.tool_result.replace(/\n/g, "\n> ")}\n\n`;
+        }
+        continue;
+      }
+      md += `## 助手\n\n`;
+      if (msg.thinking) {
+        md += `<details><summary>思考过程</summary>\n\n${msg.thinking}\n\n</details>\n\n`;
+      }
+      if (msg.text) {
+        md += `${msg.text}\n\n`;
+      }
+      if (msg.tool_name) {
+        md += `**工具调用：${msg.tool_name}**\n\n`;
+        if (msg.tool_result) {
+          md += `> ${msg.tool_result.replace(/\n/g, "\n> ")}\n\n`;
+        }
+      }
+      md += `---\n\n`;
+    }
+    // system 消息跳过
+  }
+  return md.trimEnd() + "\n";
+}
+
+// ── 标题生成（0.12.5 §5.3）──────────────────
+
+/**
+ * 异步生成对话标题（0.12.5 §5.3）。
+ * 后台异步调 LLM 生成标题，成功后 emit `chat-title-updated` 事件。
+ * 失败静默降级，不阻塞对话流程。auto_title 关闭时后端直接返回。
+ * @param {string} conversationId
+ * @param {string} firstMessage 首条用户消息
+ * @returns {Promise<void>}
+ */
+export function generateConversationTitle(conversationId, firstMessage) {
+  return invoke("generate_conversation_title", { conversationId, firstMessage });
+}
+
+// ── 消息编辑重发（0.12.5 §5.5）──────────────────
+
+/**
+ * 截断对话消息——保留前 `keepCount` 条，删除其余（0.12.5 §5.5）。
+ * @param {string} conversationId
+ * @param {number} keepCount 保留的消息数
+ * @returns {Promise<void>}
+ */
+export function truncateMessages(conversationId, keepCount) {
+  return invoke("truncate_messages", { conversationId, keepCount });
+}
+
 // ── Events ───────────────────────────────────────
 
 /**
@@ -141,6 +256,15 @@ export function listenChatStream(handler) {
  */
 export function listenChatConfirm(handler) {
   return listen("blink://chat-confirm-action", handler);
+}
+
+/**
+ * 监听对话标题自动更新事件（0.12.5 §5.3）。
+ * @param {(event: {payload: {conversation_id: string, title: string}}) => void} handler
+ * @returns {Promise<() => void>} unsubscribe
+ */
+export function listenChatTitleUpdated(handler) {
+  return listen("blink://chat-title-updated", handler);
 }
 
 // ── Voice Events（0.12.2 §4.3）─────────────────

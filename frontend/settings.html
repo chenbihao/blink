@@ -476,6 +476,28 @@
             </div>
           </div>
 
+          <!-- 对话配置（0.12.5 §5.4） ───────────────────────── -->
+          <div class="section-label" data-i18n="ai.chat.section">对话</div>
+          <div class="extension-card">
+            <div class="extension-body">
+              <div class="setting-row">
+                <label class="setting-label" data-i18n="ai.chat.auto_title.label">LLM 自动命名<span class="field-hint-icon" data-i18n-title="ai.chat.auto_title.hint">ⓘ</span></label>
+                <label class="switch switch-sm">
+                  <input type="checkbox" id="ai-chat-auto-title" />
+                  <span class="slider"></span>
+                </label>
+              </div>
+              <div class="setting-row">
+                <label class="setting-label" data-i18n="ai.chat.title_tier.label">命名模型档位<span class="field-hint-icon" data-i18n-title="ai.chat.title_tier.hint">ⓘ</span></label>
+                <select id="ai-chat-title-tier" class="input-wide">
+                  <option value="main">主档</option>
+                  <option value="light">轻量档</option>
+                  <option value="router">路由档</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
           <!-- 高级 ─────────────────────────────────────── -->
           <div class="section-label" data-i18n="ai.advanced.section">高级</div>
           <div class="extension-card">
@@ -1253,6 +1275,14 @@
               <option value="debug" data-i18n="log.level.debug">debug（详细）</option>
               <option value="trace" data-i18n="log.level.trace">trace（最详细）</option>
             </select>
+          </div>
+
+          <div class="setting-row">
+            <label class="setting-label" data-i18n="log.ai_verbose.label">AI 对话完全打印日志<span class="field-hint-icon" data-i18n-title="log.ai_verbose.hint">ⓘ</span></label>
+            <label class="checkbox-wrap">
+              <input type="checkbox" id="ai-verbose-log">
+              <span class="checkbox-custom"></span>
+            </label>
           </div>
 
           <div class="setting-row">

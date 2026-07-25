@@ -4,16 +4,21 @@
  * 负责创建和更新消息 bubble、Tool 状态卡、确认卡片和空状态。
  */
 
-import { renderMarkdown } from "./renderer.js";
+import { renderMarkdown, highlightCodeBlocks } from "./renderer.js";
 
 /** @type {HTMLElement} 消息容器 */
 let messagesEl = null;
 
+/** @type {((msgIndex: number, newText: string) => void)|null} 编辑消息回调（0.12.5 §5.5） */
+let onEditMessage = null;
+
 /**
  * 初始化组件模块，绑定 DOM 引用。
+ * @param {{onEditMessage?: (msgIndex: number, newText: string) => void}} [callbacks]
  */
-export function initComponents() {
+export function initComponents(callbacks = {}) {
   messagesEl = document.getElementById("chat-messages");
+  onEditMessage = callbacks.onEditMessage || null;
 }
 
 /**
@@ -35,14 +40,24 @@ export function clearMessages() {
 /**
  * 渲染用户消息 bubble。
  * @param {string} text
+ * @returns {HTMLElement|null} 消息元素引用（0.12.5 §5.5 编辑重发需要）
  */
 export function renderUserMessage(text) {
-  if (!messagesEl) return;
+  if (!messagesEl) return null;
   const el = document.createElement("div");
   el.className = "chat-msg chat-msg-user";
   el.textContent = text;
+  el.dataset.rawText = text;
+  // 0.12.6：hover 操作行（复制 + 编辑）
+  const actions = createActionsRow();
+  actions.appendChild(createCopyAction(rawText => el.dataset.rawText || rawText));
+  if (onEditMessage) {
+    actions.appendChild(createEditAction(() => startEditMessage(el, el.dataset.rawText || text)));
+  }
+  el.appendChild(actions);
   messagesEl.appendChild(el);
   scrollToBottom();
+  return el;
 }
 
 /**
@@ -100,34 +115,106 @@ export function finalizeAssistantMessage(el, text, thinkingText) {
   el.dataset.rawText = text;
   const thinkingHtml = renderThinkingBlock(thinkingText, true);
   el.innerHTML = thinkingHtml + `<div class="chat-assistant-content">${renderMarkdown(text)}</div>`;
-  injectCopyButton(el, text);
+  // 0.12.6：hover 操作行（复制 + 重试）
+  const actions = createActionsRow();
+  actions.appendChild(createCopyAction(() => el.dataset.rawText || ""));
+  actions.appendChild(createRetryAction());
+  el.appendChild(actions);
   injectCodeCopyButtons(el);
+  highlightCodeBlocks(el); // 0.12.5 §5.7：代码块语法高亮
   scrollToBottom();
 }
 
+// ── hover 操作行（0.12.6 重构）────────────────────────────────────────────────
+
+/** SVG 图标常量 */
+const ICONS = {
+  copy: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`,
+  check: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`,
+  retry: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>`,
+  edit: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`,
+};
+
 /**
- * 注入消息级 hover 复制按钮（0.12.2 §4.6）。
- * 按钮绝对定位在消息右上角，点击复制原始 Markdown 文本。
- * @param {HTMLElement} el 消息元素
- * @param {string} rawText 原始 Markdown 文本
+ * 创建操作行容器。hover 时 opacity 0→1。
+ * AI 消息浮在左下角外侧，用户消息浮在右下角外侧。
+ * @returns {HTMLElement}
  */
-function injectCopyButton(el, rawText) {
-  const actions = document.createElement("div");
-  actions.className = "chat-msg-actions";
+function createActionsRow() {
+  const row = document.createElement("div");
+  row.className = "chat-msg-actions";
+  return row;
+}
+
+/**
+ * 创建图标按钮（通用）。
+ * @param {string} iconKey ICONSTab key
+ * @param {string} title tooltip
+ * @param {() => void} onClick
+ * @returns {HTMLButtonElement}
+ */
+function createIconButton(iconKey, title, onClick) {
   const btn = document.createElement("button");
-  btn.className = "chat-copy-btn";
-  btn.title = "复制";
-  btn.textContent = "复制";
-  btn.addEventListener("click", async () => {
+  btn.className = "chat-action-btn";
+  btn.type = "button";
+  btn.title = title;
+  btn.innerHTML = ICONS[iconKey] || "";
+  btn.addEventListener("click", onClick);
+  return btn;
+}
+
+/**
+ * 复制操作按钮。点击复制文本，1.5s 内显示 ✓。
+ * @param {() => string | string} rawTextOrGetter 原始文本或获取函数
+ * @returns {HTMLButtonElement}
+ */
+function createCopyAction(rawTextOrGetter) {
+  const btn = createIconButton("copy", "复制", async () => {
+    const text = typeof rawTextOrGetter === "function" ? rawTextOrGetter() : rawTextOrGetter;
     try {
-      await navigator.clipboard.writeText(rawText || "");
-      flashCopyDone(btn);
+      await navigator.clipboard.writeText(text || "");
+      flashIconDone(btn);
     } catch (e) {
       console.error("[chat] 复制失败:", e);
     }
   });
-  actions.appendChild(btn);
-  el.appendChild(actions);
+  return btn;
+}
+
+/**
+ * 重试按钮（仅 assistant 消息）。点击触发 resend 事件。
+ * @returns {HTMLButtonElement}
+ */
+function createRetryAction() {
+  return createIconButton("retry", "重试", () => {
+    // 重试 = 重新发送最后一条用户消息
+    // 通过自定义事件冒泡到 main.js 处理
+    const evt = new CustomEvent("chat:retry", { bubbles: true });
+    document.dispatchEvent(evt);
+  });
+}
+
+/**
+ * 编辑按钮（仅用户消息）。
+ * @param {() => void} onStartEdit
+ * @returns {HTMLButtonElement}
+ */
+function createEditAction(onStartEdit) {
+  return createIconButton("edit", "编辑", onStartEdit);
+}
+
+/**
+ * 图标按钮短暂切换为 ✓ 反馈（1.2s）。
+ * @param {HTMLButtonElement} btn
+ */
+function flashIconDone(btn) {
+  const original = btn.innerHTML;
+  btn.innerHTML = ICONS.check;
+  btn.classList.add("chat-action-btn-done");
+  setTimeout(() => {
+    btn.innerHTML = original;
+    btn.classList.remove("chat-action-btn-done");
+  }, 1200);
 }
 
 /**
@@ -147,7 +234,7 @@ function injectCodeCopyButtons(el) {
     btn.addEventListener("click", async () => {
       try {
         await navigator.clipboard.writeText(code.textContent || "");
-        flashCopyDone(btn);
+        flashIconDone(btn);
       } catch (e) {
         console.error("[chat] 代码块复制失败:", e);
       }
@@ -156,18 +243,122 @@ function injectCodeCopyButtons(el) {
   });
 }
 
+// ── 消息编辑重发（0.12.5 §5.5 → 0.12.6 样式重构）───────────────────────────────
+
 /**
- * 复制按钮短暂显示 ✓ 反馈（1.5s）。
- * @param {HTMLButtonElement} btn
+ * 启动消息编辑——将消息气泡变为内联编辑区。
+ * Enter 重发，Esc 取消。Shift+Enter 换行。底部有确认/取消按钮。
+ * @param {HTMLElement} el 用户消息元素
+ * @param {string} originalText 原始文本
  */
-function flashCopyDone(btn) {
-  const original = btn.textContent;
-  btn.textContent = "✓";
-  btn.classList.add("chat-copy-btn-done");
-  setTimeout(() => {
-    btn.textContent = original;
-    btn.classList.remove("chat-copy-btn-done");
-  }, 1500);
+function startEditMessage(el, originalText) {
+  // 计算消息索引（在 state.messages 中的位置）
+  const allMsgs = messagesEl.querySelectorAll(".chat-msg");
+  const msgIndex = Array.from(allMsgs).indexOf(el);
+  if (msgIndex < 0) return;
+
+  // 移除操作行
+  const actions = el.querySelector(".chat-msg-actions");
+  if (actions) actions.remove();
+
+  // 构建编辑容器
+  const editWrap = document.createElement("div");
+  editWrap.className = "chat-edit-wrap";
+
+  const textarea = document.createElement("textarea");
+  textarea.className = "chat-edit-textarea";
+  textarea.value = originalText;
+  textarea.rows = 1;
+  editWrap.appendChild(textarea);
+
+  // 底部操作行：取消 + 发送
+  const editBar = document.createElement("div");
+  editBar.className = "chat-edit-bar";
+
+  const hint = document.createElement("span");
+  hint.className = "chat-edit-hint";
+  hint.textContent = "Enter 发送 · Esc 取消";
+
+  const cancelBtn = document.createElement("button");
+  cancelBtn.className = "chat-edit-cancel";
+  cancelBtn.textContent = "取消";
+
+  const sendBtn = document.createElement("button");
+  sendBtn.className = "chat-edit-send";
+  sendBtn.textContent = "发送";
+
+  editBar.appendChild(hint);
+  editBar.appendChild(cancelBtn);
+  editBar.appendChild(sendBtn);
+  editWrap.appendChild(editBar);
+
+  el.textContent = "";
+  el.appendChild(editWrap);
+
+  // 自适应高度
+  const autoResize = () => {
+    textarea.style.height = "auto";
+    textarea.style.height = Math.min(textarea.scrollHeight, 200) + "px";
+  };
+  textarea.addEventListener("input", autoResize);
+  autoResize();
+
+  textarea.focus();
+  textarea.select();
+
+  let confirmed = false;
+
+  /** 取消编辑，恢复原消息显示 */
+  const restoreMessage = (text) => {
+    el.textContent = text;
+    el.dataset.rawText = text;
+    // 重新注入操作行
+    const row = createActionsRow();
+    row.appendChild(createCopyAction(() => el.dataset.rawText || ""));
+    if (onEditMessage) {
+      row.appendChild(createEditAction(() => startEditMessage(el, el.dataset.rawText || text)));
+    }
+    el.appendChild(row);
+  };
+
+  /** 确认编辑 → 调回调 */
+  const finishEdit = () => {
+    if (confirmed) return;
+    confirmed = true;
+    const newText = textarea.value.trim();
+    if (newText && newText !== originalText) {
+      onEditMessage(msgIndex, newText);
+    } else {
+      restoreMessage(originalText);
+    }
+  };
+
+  /** 取消编辑 */
+  const cancelEdit = () => {
+    if (confirmed) return;
+    confirmed = true;
+    restoreMessage(originalText);
+  };
+
+  textarea.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      finishEdit();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      cancelEdit();
+    }
+  });
+  sendBtn.addEventListener("click", finishEdit);
+  cancelBtn.addEventListener("click", cancelEdit);
+  // blur 时延迟检测，避免点按钮时 textarea 先 blur 导致提前取消
+  textarea.addEventListener("blur", () => {
+    setTimeout(() => {
+      if (!confirmed && document.activeElement !== sendBtn && document.activeElement !== cancelBtn) {
+        finishEdit();
+      }
+    }, 100);
+  });
 }
 
 /**
@@ -351,6 +542,37 @@ export function renderEmptyState(providerConfigured, onOpenSettings) {
       <h2>Blink AI 对话</h2>
       <p>输入消息开始对话。AI 可以调用工具帮你完成操作。</p>
     `;
+    // 0.12.5 §5.2：引导泡泡——点击预填充到输入框
+    const GUIDE_PROMPTS = [
+      { text: "帮我打开微信", hint: "应用" },
+      { text: "翻译 hello world", hint: "翻译" },
+      { text: "截取屏幕", hint: "截图" },
+      { text: "今天天气怎么样", hint: "问答" },
+    ];
+    const bubblesEl = document.createElement("div");
+    bubblesEl.className = "chat-guide-bubbles";
+    for (const b of GUIDE_PROMPTS) {
+      const btn = document.createElement("button");
+      btn.className = "chat-guide-bubble";
+      const textSpan = document.createElement("span");
+      textSpan.className = "chat-guide-bubble-text";
+      textSpan.textContent = b.text;
+      const hintSpan = document.createElement("span");
+      hintSpan.className = "chat-guide-bubble-hint";
+      hintSpan.textContent = b.hint;
+      btn.appendChild(textSpan);
+      btn.appendChild(hintSpan);
+      btn.addEventListener("click", () => {
+        const input = document.getElementById("chat-input");
+        if (input) {
+          input.value = b.text;
+          input.focus();
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+      });
+      bubblesEl.appendChild(btn);
+    }
+    el.appendChild(bubblesEl);
   } else {
     el.innerHTML = `
       <div class="chat-empty-icon">!</div>

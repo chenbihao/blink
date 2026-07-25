@@ -125,6 +125,8 @@ fn main() {
 
             // 日志级别 reload 到配置值（init 时为默认 error）
             infra::utils::logging::update_level(&app_config.log_level);
+            // AI 详细日志开关 reload（0.12.6）
+            infra::utils::logging::update_ai_verbose_log(app_config.ai_verbose_log);
 
             // pools 交给 Tauri 管理(command 层用 app.state::<DbPools>() 取)
             app.manage(pools.clone());
@@ -534,6 +536,9 @@ fn main() {
             app::commands::rename_chat_conversation,
             app::commands::get_chat_messages,
             app::commands::open_settings_tab,
+app::commands::save_text_file,
+app::commands::generate_conversation_title,
+app::commands::truncate_messages,
             app::commands::list_builtin_actions,
             app::commands::list_context_bindings,
             app::commands::trigger_chord,

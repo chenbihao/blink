@@ -6,6 +6,8 @@
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 use tracing_appender::non_blocking::WorkerGuard;
@@ -35,6 +37,10 @@ const RETAIN_DAYS: u64 = 7;
 static GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 /// 动态级别切换（闭包包装 reload handle，避免暴露泛型类型）
 static RELOAD: OnceLock<Box<dyn Fn(&str) + Send + Sync>> = OnceLock::new();
+/// AI 详细日志开关（设置页切换，true 时解除 rig/rig_core 压制）
+static AI_VERBOSE: AtomicBool = AtomicBool::new(false);
+/// 当前日志级别（供 update_ai_verbose_log 重载用）
+static CURRENT_LEVEL: OnceLock<Mutex<String>> = OnceLock::new();
 
 /// 初始化日志系统。level: error/info/debug。
 pub fn init(level: &str) {
@@ -52,9 +58,12 @@ pub fn init(level: &str) {
     let _ = GUARD.set(guard);
 
     // 动态级别 filter（reload 可运行时改）
+    *current_level().lock().unwrap() = level.to_string();
+
     let filter = EnvFilter::new(parse_level(level));
     let (filter_layer, handle) = tracing_subscriber::reload::Layer::new(filter);
     let _ = RELOAD.set(Box::new(move |lvl: &str| {
+        *current_level().lock().unwrap() = lvl.to_string();
         let _ = handle.reload(EnvFilter::new(parse_level(lvl)));
     }));
 
@@ -80,8 +89,22 @@ pub fn init(level: &str) {
 
 /// 运行时切换日志级别（设置页触发，立即生效）。
 pub fn update_level(level: &str) {
+    *current_level().lock().unwrap() = level.to_string();
     if let Some(f) = RELOAD.get() {
         f(level);
+    }
+}
+
+/// 运行时切换 AI 详细日志开关（设置页触发，立即生效）。
+///
+/// 开启时不压制 rig/rig_core，打印完整 AI 对话上下文
+/// （system prompt、tool 列表、SSE 帧等）。
+/// 关闭时恢复默认压制（rig=warn,rig_core=warn）。
+pub fn update_ai_verbose_log(verbose: bool) {
+    AI_VERBOSE.store(verbose, Ordering::Relaxed);
+    let level = current_level().lock().unwrap().clone();
+    if let Some(f) = RELOAD.get() {
+        f(&level);
     }
 }
 
@@ -98,6 +121,11 @@ pub fn current_log_file() -> PathBuf {
 }
 
 /// 级别字符串归一化为 EnvFilter 指令（非法值降级 error）。
+fn current_level() -> &'static Mutex<String> {
+    CURRENT_LEVEL.get_or_init(|| Mutex::new("error".to_string()))
+}
+
+/// 级别字符串归一化为 EnvFilter 指令（非法值降级 error）。
 fn parse_level(level: &str) -> String {
     // 第三方库（sqlx/tauri/tao）压到 warn，避免 query/asset/IME 字符消息等 debug/trace 噪音
     // 淹没 blink 自身日志。tao 的「⌨️ Received a CHAR message…」在 TRACE 下每键一条，
@@ -108,9 +136,27 @@ fn parse_level(level: &str) -> String {
     //
     // **AI 相关噪音压制**（0.9.2 第一步）:rig 依赖链 h2 / rustls / tower / hpack
     // 在 TRACE 下会喷协议帧(每个 HTTP/2 请求上百行),用户开 trace 是要看自家逻辑,
-    // 不是看 TLS 握手。这些统一压到 warn。`rig_core` 保留在原级别——它的
-    // `completions request/response` TRACE 对诊断"发了什么/收了什么"很有价值。
-    let ai_noise = "h2=warn,rustls=warn,tower=warn,hpack=warn";
+    // 不是看 TLS 握手。这些统一压到 warn。
+    //
+    // **rig_core / rig 压到 warn**（0.12.6 修复）:rig 的 `invoke_agent` / `chat_streaming`
+    // span 携带 `gen_ai.system_instructions`(完整系统提示词) + `gen_ai.prompt`(用户输入)
+    // 等字段,嵌套 span 导致同名字段重复输出(`gen_ai.prompt="…" gen_ai.prompt="…"`),
+    // 且 `rig::completions` 在 TRACE 下每次请求都打印完整 tool 列表 JSON(24 个 tool
+    // schema 数千行)。这些噪音淹没 blink 自身日志,诊断价值远低于信噪比损失。
+    // 压到 warn 后:ERROR(SSE 解析失败等)和 WARN(空响应)仍可见,但不再有 span 字段
+    // 污染——blink 自身的 chat_service / agent_provider / tool_adapter 日志足以覆盖
+    // 诊断需求。
+    //
+    // **AI 详细日志开关**（0.12.6）:设置页可开启临时解除 rig/rig_core 压制,
+    // 打印完整 AI 对话上下文（system prompt、tool 列表、SSE 帧等），用于深度排查。
+    let ai_verbose = AI_VERBOSE.load(Ordering::Relaxed);
+    let ai_noise = if ai_verbose {
+        // AI 详细模式：不压制 rig/rig_core，保留完整对话上下文
+        "h2=warn,rustls=warn,tower=warn,hpack=warn"
+    } else {
+        // 默认：压制 rig/rig_core 内部噪音
+        "h2=warn,rustls=warn,tower=warn,hpack=warn,rig=warn,rig_core=warn"
+    };
     match level {
         "trace" => {
             format!("trace,sqlx=warn,tauri=warn,tao=warn,hyper=warn,reqwest=warn,{ai_noise}")

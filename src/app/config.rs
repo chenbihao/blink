@@ -174,6 +174,9 @@ pub struct AppearanceConfig {
     /// 主窗口透明度 (0.0 ~ 1.0)，默认 1.0 不透明
     #[serde(default = "default_window_opacity")]
     pub window_opacity: f64,
+    /// AI 对话详细日志开关（0.12.6）
+    #[serde(default = "default_false")]
+    pub ai_verbose_log: bool,
 }
 
 impl Default for AppearanceConfig {
@@ -184,6 +187,7 @@ impl Default for AppearanceConfig {
             auto_start: false,
             log_level: default_log_level(),
             window_opacity: default_window_opacity(),
+            ai_verbose_log: false,
         }
     }
 }
@@ -545,6 +549,10 @@ pub struct AppConfig {
     /// 主窗口透明度 (0.0 ~ 1.0)，默认 1.0 不透明
     #[serde(default = "default_window_opacity")]
     pub window_opacity: f64,
+    /// AI 对话详细日志开关（0.12.6）。开启时解除 rig/rig_core 日志压制，
+    /// 打印完整 AI 对话上下文（system prompt、tool 列表、SSE 帧等）。
+    #[serde(default = "default_false")]
+    pub ai_verbose_log: bool,
 }
 
 impl Default for AppConfig {
@@ -575,6 +583,7 @@ impl Default for AppConfig {
             chord_bindings: crate::domain::chord::ChordBindings::default(),
             disabled_chord_actions: Vec::new(),
             window_opacity: default_window_opacity(),
+            ai_verbose_log: false,
         }
     }
 }
@@ -726,6 +735,7 @@ pub async fn get_config(pool: &SqlitePool) -> AppConfig {
         auto_start: appearance.auto_start,
         log_level: appearance.log_level,
         window_opacity: appearance.window_opacity,
+        ai_verbose_log: appearance.ai_verbose_log,
         // ── SearchConfig 分片 ─────────────────────────────────
         surface_takeover_enabled: search.surface_takeover_enabled,
         search_history_enabled: search.search_history_enabled,
@@ -775,6 +785,7 @@ pub async fn save_config(pool: &SqlitePool, config: &AppConfig) -> Result<(), St
             auto_start: config.auto_start,
             log_level: config.log_level.clone(),
             window_opacity: config.window_opacity,
+            ai_verbose_log: config.ai_verbose_log,
         },
     )
     .await?;
@@ -874,6 +885,13 @@ pub async fn update_language(pool: &SqlitePool, language: String) -> Result<(), 
 pub async fn update_log_level(pool: &SqlitePool, level: String) -> Result<(), String> {
     let mut config = get_config(pool).await;
     config.log_level = level;
+    save_config(pool, &config).await
+}
+
+/// 更新 AI 详细日志开关（0.12.6）。
+pub async fn update_ai_verbose_log(pool: &SqlitePool, verbose: bool) -> Result<(), String> {
+    let mut config = get_config(pool).await;
+    config.ai_verbose_log = verbose;
     save_config(pool, &config).await
 }
 

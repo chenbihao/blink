@@ -280,6 +280,19 @@ static ORIGINAL_WNDPROCS: std::sync::Mutex<Option<std::collections::HashMap<isiz
 /// 0.12.4 §6.6：支持多窗口安装（HashMap 按 HWND 存储 original wndproc）。
 pub fn install_sysmenu_blocker(hwnd: HWND) {
     unsafe {
+        // 检查是否已安装——避免重复 SetWindowLongPtrW 返回 sysmenu_block_proc 自身，
+        // 导致 CallWindowProcW(sysmenu_block_proc, ...) 无限递归 → stack overflow。
+        // （0.12.5 修复：此前注释称"重复安装安全"是错误的）
+        let already_installed = ORIGINAL_WNDPROCS
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|m| m.contains_key(&(hwnd.0 as isize)))
+            .unwrap_or(false);
+        if already_installed {
+            return;
+        }
+
         let original = SetWindowLongPtrW(
             hwnd,
             GWLP_WNDPROC,
@@ -657,7 +670,7 @@ pub fn show_chat_window(app: &AppHandle) -> Result<(), String> {
     };
 
     // 0.12.4 §6.6：安装系统菜单拦截器 + 圆角（与主窗口一致）
-    // 首次创建和复用都安装（install_sysmenu_blocker 内部按 HWND 存储，重复安装安全）
+    // install_sysmenu_blocker 内部按 HWND 去重，重复调用安全（0.12.5 修复递归 BUG）
     if let Ok(hwnd) = win.hwnd() {
         let hwnd = windows::Win32::Foundation::HWND(hwnd.0 as _);
         install_sysmenu_blocker(hwnd);

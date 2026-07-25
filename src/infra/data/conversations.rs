@@ -210,6 +210,39 @@ pub async fn clear_messages(pool: &SqlitePool, conversation_id: &str) -> Result<
     Ok(())
 }
 
+/// 截断对话消息——保留前 `keep_count` 条，删除其余（0.12.5 §5.5）。
+///
+/// 用于消息编辑重发：用户编辑第 N 条消息后，保留前 N 条消息（索引 0 到 N-1），
+/// 删除第 N 条及之后的所有消息，然后重新调 `chat_prompt`。
+pub async fn truncate_messages(
+    pool: &SqlitePool,
+    conversation_id: &str,
+    keep_count: i64,
+) -> Result<(), String> {
+    let ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT id FROM messages WHERE conversation_id = ?1 ORDER BY id ASC",
+    )
+    .bind(conversation_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if keep_count >= ids.len() as i64 {
+        return Ok(()); // 无需截断
+    }
+
+    let start_id = ids[keep_count as usize];
+
+    sqlx::query("DELETE FROM messages WHERE conversation_id = ?1 AND id >= ?2")
+        .bind(conversation_id)
+        .bind(start_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
 /// 加载对话的**全部**消息（按 id 升序，即时间顺序）。
 ///
 /// 供 `get_chat_messages` IPC 加载历史用——展示用全量，agent context 用滑动窗口。
@@ -338,6 +371,40 @@ mod tests {
         assert_eq!(count_messages(&pool).await, 0);
         // conversation 记录仍在
         assert_eq!(count_conversations(&pool).await, 1);
+    }
+
+    // ── 0.12.5 §5.5: truncate_messages ──────────────────────────────────
+
+    #[tokio::test]
+    async fn truncate_messages_keeps_first_n() {
+        let pool = setup_pool().await;
+        create_conversation(&pool, "c1", Some("Test")).await.unwrap();
+        for i in 0..5 {
+            append_message(&pool, "c1", "user", &format!("msg{i}")).await.unwrap();
+        }
+        assert_eq!(count_messages(&pool).await, 5);
+
+        // 保留前 3 条，删除其余
+        truncate_messages(&pool, "c1", 3).await.unwrap();
+        assert_eq!(count_messages(&pool).await, 3);
+
+        // 验证保留的是前 3 条（按 id 升序）
+        let msgs = load_all_messages(&pool, "c1").await.unwrap();
+        assert_eq!(msgs.len(), 3);
+        assert!(msgs[0].1.contains("msg0"));
+        assert!(msgs[2].1.contains("msg2"));
+    }
+
+    #[tokio::test]
+    async fn truncate_messages_noop_when_keep_exceeds() {
+        let pool = setup_pool().await;
+        create_conversation(&pool, "c1", Some("Test")).await.unwrap();
+        append_message(&pool, "c1", "user", "msg0").await.unwrap();
+        append_message(&pool, "c1", "user", "msg1").await.unwrap();
+
+        // keep_count > 消息数 → 无操作
+        truncate_messages(&pool, "c1", 10).await.unwrap();
+        assert_eq!(count_messages(&pool).await, 2);
     }
 
     #[tokio::test]

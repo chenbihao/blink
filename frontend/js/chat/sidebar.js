@@ -32,6 +32,9 @@ let onNew = null;
 /** @type {(conversationId: string, newTitle: string) => void} 重命名回调 */
 let onRenamed = null;
 
+/** @type {(conversationId: string, title: string) => void} 导出回调（0.12.5 §5.6） */
+let onExport = null;
+
 /**
  * 初始化侧边栏。
  * @param {{ onSwitch: (conversationId: string) => void, onNew: () => void, onRenamed: (conversationId: string, newTitle: string) => void }} callbacks
@@ -42,6 +45,7 @@ export function initSidebar(callbacks) {
   onSwitch = callbacks.onSwitch;
   onNew = callbacks.onNew;
   onRenamed = callbacks.onRenamed;
+  onExport = callbacks.onExport;
 
   // 新对话按钮
   const newBtn = document.getElementById("chat-sidebar-new");
@@ -132,6 +136,9 @@ function renderConversationItem(conv) {
       <span class="chat-sidebar-item-meta">${count} 条 · ${escapeText(time)}</span>
     </div>
     <div class="chat-sidebar-item-actions">
+      <button class="chat-sidebar-item-export" title="导出" data-action="export">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      </button>
       <button class="chat-sidebar-item-rename" title="重命名" data-action="rename">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
       </button>
@@ -156,6 +163,17 @@ async function handleListClick(e) {
   if (!item) return;
   const convId = item.dataset.convId;
   if (!convId) return;
+
+  // 导出按钮（0.12.5 §5.6）
+  const exportBtn = e.target.closest('[data-action="export"]');
+  if (exportBtn) {
+    e.stopPropagation();
+    if (onExport) {
+      const titleEl = item.querySelector(".chat-sidebar-item-title");
+      onExport(convId, titleEl?.textContent || "");
+    }
+    return;
+  }
 
   // 重命名按钮
   const renameBtn = e.target.closest('[data-action="rename"]');
@@ -239,6 +257,9 @@ function cancelDeleteConfirm(item) {
   const actionsEl = item.querySelector(".chat-sidebar-item-actions");
   if (actionsEl) {
     actionsEl.innerHTML = `
+      <button class="chat-sidebar-item-export" title="导出" data-action="export">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      </button>
       <button class="chat-sidebar-item-rename" title="重命名" data-action="rename">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
       </button>
@@ -305,6 +326,7 @@ async function handleListDblClick(e) {
   if (!item) return;
   if (e.target.closest('[data-action="delete"]')) return;
   if (e.target.closest('[data-action="rename"]')) return;
+  if (e.target.closest('[data-action="export"]')) return;
   if (e.target.closest('.confirming-delete')) return;
 
   const convId = item.dataset.convId;

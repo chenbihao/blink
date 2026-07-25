@@ -102,6 +102,7 @@ function defaultAIConfig() {
     direct_execute_safe_actions: false,
     streaming: true,
     slo_hard_timeout_ms: null,
+    chat_config: { auto_title: false, title_tier: "light" },
     ai_tool_result_feedback: "on",
   };
 }
@@ -121,6 +122,10 @@ function applyAIConfigToUI() {
   if ($("ai-streaming")) $("ai-streaming").checked = c.streaming !== false;
   if ($("ai-direct-safe")) $("ai-direct-safe").checked = !!c.direct_execute_safe_actions;
   if ($("ai-timeout-ms")) $("ai-timeout-ms").value = c.slo_hard_timeout_ms ?? 2500;
+  // 0.12.5 §5.4：对话配置
+  const chatCfg = c.chat_config || { auto_title: false, title_tier: "light" };
+  if ($("ai-chat-auto-title")) $("ai-chat-auto-title").checked = !!chatCfg.auto_title;
+  if ($("ai-chat-title-tier")) $("ai-chat-title-tier").value = chatCfg.title_tier || "light";
   // 0.11.4 §3.5: 工具结果回流 AI 三态分段按钮
   const feedbackValue = c.ai_tool_result_feedback ?? "on";
   setSegControlValue("ai-tool-feedback", feedbackValue);
@@ -1159,6 +1164,17 @@ function bindAIEvents() {
   });
   $("ai-direct-safe")?.addEventListener("change", (e) => {
     currentAIConfig.direct_execute_safe_actions = e.target.checked;
+    saveAIConfig();
+  });
+  // 0.12.5 §5.4：对话配置
+  $("ai-chat-auto-title")?.addEventListener("change", (e) => {
+    currentAIConfig.chat_config = currentAIConfig.chat_config || { auto_title: false, title_tier: "light" };
+    currentAIConfig.chat_config.auto_title = e.target.checked;
+    saveAIConfig();
+  });
+  $("ai-chat-title-tier")?.addEventListener("change", (e) => {
+    currentAIConfig.chat_config = currentAIConfig.chat_config || { auto_title: false, title_tier: "light" };
+    currentAIConfig.chat_config.title_tier = e.target.value;
     saveAIConfig();
   });
   // 0.11.4 §3.5: 工具结果回流 AI 三态分段按钮

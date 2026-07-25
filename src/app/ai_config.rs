@@ -106,6 +106,11 @@ pub struct AIConfig {
     /// - `Off`: 始终关闭（单轮直通，快，省 token）。
     ///
     /// 详见 `should_run_tool_feedback`。
+    // ── 0.12.5 §5.4：对话配置 ──────────────────────────────────────────
+    /// 对话窗口配置子结构（LLM 自动命名等）。
+    #[serde(default)]
+    pub chat_config: ChatConfig,
+
     #[serde(default)]
     pub ai_tool_result_feedback: ToolResultFeedback,
 }
@@ -127,6 +132,7 @@ impl Default for AIConfig {
             direct_execute_safe_actions: false,
             streaming: true,
             slo_hard_timeout_ms: None,
+            chat_config: ChatConfig::default(),
             ai_tool_result_feedback: ToolResultFeedback::default(),
         }
     }
@@ -337,6 +343,41 @@ impl ToolResultFeedback {
             ToolResultFeedback::Auto => provider_kind.is_local(),
         }
     }
+}
+
+// ── 对话配置（0.12.5 §5.4）─────────────────────────────────────────────────
+
+/// 对话窗口配置子结构（0.12.5 §5.4）。
+///
+/// 存于 AIConfig 第 7 分片的 `chat_config` 子字段。
+/// 老配置缺此字段时 serde default 填充——零迁移成本。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChatConfig {
+    /// LLM 自动命名开关——开启后新对话首条消息发送后异步调 LLM 生成标题。
+    /// 默认关闭——opt-in 设计，用户可能不想消耗 token 生成标题。
+    #[serde(default)]
+    pub auto_title: bool,
+
+    /// 命名模型档位——LLM 命名使用的模型档位。
+    /// "main" / "light" / "router"，默认 "light"（日常命名不需要强模型）。
+    #[serde(default = "default_title_tier")]
+    pub title_tier: String,
+}
+
+/// `ChatConfig` 的 Default 实现——`title_tier` 走 `default_title_tier()` 而非空字符串。
+/// serde 在整个 `chat_config` 字段缺失时调 `Default::default()`，此时必须拿到 "light"。
+impl Default for ChatConfig {
+    fn default() -> Self {
+        Self {
+            auto_title: false,
+            title_tier: default_title_tier(),
+        }
+    }
+}
+
+/// `ChatConfig.title_tier` 的 serde 默认值——"light"。
+fn default_title_tier() -> String {
+    "light".to_string()
 }
 
 /// 一个模型的元数据 + 调用参数默认值。
@@ -911,10 +952,11 @@ mod tests {
             tier_light: None,
             tier_main: None,
             direct_execute_safe_actions: true,
-            streaming: false,
-            slo_hard_timeout_ms: Some(3000),
-            ai_tool_result_feedback: ToolResultFeedback::On,
-        };
+        streaming: false,
+        slo_hard_timeout_ms: Some(3000),
+        chat_config: ChatConfig { auto_title: true, title_tier: "router".to_string() },
+        ai_tool_result_feedback: ToolResultFeedback::On,
+    };
         let s = serde_json::to_string(&original).unwrap();
         let restored: AIConfig = serde_json::from_str(&s).unwrap();
 
@@ -936,6 +978,9 @@ mod tests {
             ToolResultFeedback::On,
             "0.11.4: 回流开关 round-trip"
         );
+        // 0.12.5: ChatConfig round-trip
+        assert!(restored.chat_config.auto_title);
+        assert_eq!(restored.chat_config.title_tier, "router");
     }
 
     // ── 0.11.4 改进 2:ToolResultFeedback 三态配置 ────────────────────────
@@ -988,6 +1033,17 @@ mod tests {
         let json = r#"{"enabled": false}"#;
         let c: AIConfig = serde_json::from_str(json).unwrap();
         assert_eq!(c.ai_tool_result_feedback, ToolResultFeedback::On);
+    }
+
+    // ── 0.12.5 §5.4: ChatConfig 向后兼容 ──────────────────────────────
+
+    #[test]
+    fn chat_config_defaults_when_missing() {
+        // 老配置没有 chat_config 字段 → serde default 填充
+        let json = r#"{"enabled": false}"#;
+        let c: AIConfig = serde_json::from_str(json).unwrap();
+        assert!(!c.chat_config.auto_title, "auto_title 默认 false");
+        assert_eq!(c.chat_config.title_tier, "light", "title_tier 默认 light");
     }
 
     #[test]

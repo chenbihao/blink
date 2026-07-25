@@ -339,6 +339,7 @@ pub async fn chat_prompt(
     let app_clone = app.clone();
     let conv_id_clone = conv_id.clone();
     tokio::spawn(async move {
+        let mut done_sent = false;
         while let Some(chunk) = chunks.recv().await {
             let is_done = matches!(
                 chunk,
@@ -346,6 +347,9 @@ pub async fn chat_prompt(
                     | crate::domain::ai::agent_provider::ChatStreamChunk::Error { .. }
                     | crate::domain::ai::agent_provider::ChatStreamChunk::MaxTurnsReached { .. }
             );
+            if is_done {
+                done_sent = true;
+            }
             let event = crate::domain::ai::chat_service::ChatStreamEvent {
                 request_id,
                 conversation_id: conv_id_clone.clone(),
@@ -360,8 +364,24 @@ pub async fn chat_prompt(
                 break;
             }
         }
-        // 注意：自然完成时 ChatService::prompt 内部的 task 已调 clear_if(request_id)，
-        // 此处无需再调 abort，避免冗余。
+        // 0.12.5：chunk 流意外结束（recv 返回 None）且未发送 Done/Error/MaxTurns
+        // → 发送兜底 Done 事件，避免前端永远收不到结束事件而卡在流式模式
+        if !done_sent {
+            let event = crate::domain::ai::chat_service::ChatStreamEvent {
+                request_id,
+                conversation_id: conv_id_clone.clone(),
+                chunk: crate::domain::ai::agent_provider::ChatStreamChunk::Done {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    model_name: None,
+                },
+            };
+            let _ = app_clone.emit_to(
+                tauri::EventTarget::window("chat"),
+                "blink://chat-stream",
+                &event,
+            );
+        }
     });
 
     tracing::debug!(
@@ -762,6 +782,134 @@ pub async fn open_settings_tab(app: tauri::AppHandle, tab: String) -> Result<(),
         );
         let _ = w.eval(&js);
     }
+    Ok(())
+}
+
+/// 保存文本到指定路径（0.12.5 §5.6 导出对话用）。
+///
+/// 前端通过 Tauri `dialog.save()` 获取路径后调用此 command 写文件。
+/// 仅写 UTF-8 文本文件，不做任何特权操作（无路径穿越风险——路径来自用户主动选择）。
+#[tauri::command]
+pub async fn save_text_file(path: String, content: String) -> Result<(), String> {
+    std::fs::write(&path, content.as_bytes())
+        .map_err(|e| format!("写入文件失败: {e}"))?;
+    tracing::info!(%path, bytes = content.len(), "save_text_file: 文件已保存");
+    Ok(())
+}
+
+/// 异步生成对话标题（0.12.5 §5.3）。
+///
+/// 读取 `ChatConfig.auto_title` 开关 + `title_tier` 档位，调
+/// `AIProvider::complete()`（非 Agent 路径，单轮补全）生成 6-10 字语义化标题。
+///
+/// 成功后更新 `conversations.title` 并 emit `blink://chat-title-updated` 事件，
+/// 前端更新 header 标题 + 刷新侧边栏。失败静默降级（保持截断标题）。
+#[tauri::command]
+pub async fn generate_conversation_title(
+    app: tauri::AppHandle,
+    conversation_id: String,
+    first_message: String,
+) -> Result<(), String> {
+    use crate::app::ai_config::Tier;
+    use crate::domain::ai::message::{ChatMessage, CompletionRequest, Role};
+
+    // 1. 读配置——auto_title 关闭则直接返回
+    let registry = app
+        .try_state::<std::sync::Arc<crate::domain::ai::registry::AIProviderRegistry>>()
+        .ok_or("AIProviderRegistry 未注册")?;
+    let config = registry.config_snapshot();
+    let chat_cfg = &config.chat_config;
+    if !chat_cfg.auto_title {
+        return Ok(());
+    }
+
+    // 2. 解析 tier
+    let tier = match chat_cfg.title_tier.as_str() {
+        "main" => Tier::Main,
+        "router" => Tier::Router,
+        _ => Tier::Light,
+    };
+    let (provider, _actual_tier) = registry.resolve(tier).map_err(|e| {
+        tracing::warn!(%conversation_id, "标题生成：provider 解析失败: {e}");
+        e.to_string()
+    })?;
+
+    // 3. 构造精简 prompt
+    let system_prompt = "请用 6-10 个字概括以下用户消息，作为对话标题。只输出标题文本，不要加引号或标点符号。";
+    let user_content: String = first_message.chars().take(500).collect();
+
+    let req = CompletionRequest {
+        messages: vec![
+            ChatMessage {
+                role: Role::System,
+                content: system_prompt.to_string(),
+                tool_call_id: None,
+            },
+            ChatMessage {
+                role: Role::User,
+                content: user_content,
+                tool_call_id: None,
+            },
+        ],
+        tools: Vec::new(),
+        max_tokens: Some(50),
+        temperature: Some(0.0),
+        timeout_ms: Some(10_000),
+    };
+
+    // 4. 调 LLM
+    let resp = provider.complete(req).await.map_err(|e| {
+        tracing::warn!(%conversation_id, "标题生成：LLM 调用失败: {e}");
+        e.to_string()
+    })?;
+
+    // 5. 清理返回文本
+    let title = resp.text
+        .map(|t| {
+            t.trim()
+                .trim_matches('"')
+                .trim_matches(['「', '」', '【', '】', '\'', '『', '』'])
+                .trim()
+                .to_string()
+        })
+        .filter(|t| !t.is_empty())
+        .map(|t| t.chars().take(30).collect::<String>());
+
+    let Some(title) = title else {
+        tracing::debug!(%conversation_id, "标题生成：LLM 返回空文本");
+        return Ok(());
+    };
+
+    // 6. 更新 DB
+    let pools = app.state::<crate::infra::data::DbPools>();
+    crate::infra::data::conversations::rename_conversation(&pools.ai, &conversation_id, &title)
+        .await?;
+
+    // 7. emit 事件到 chat 窗口
+    let _ = app.emit_to(
+        tauri::EventTarget::window("chat"),
+        "blink://chat-title-updated",
+        serde_json::json!({ "conversation_id": conversation_id, "title": title }),
+    );
+
+    tracing::info!(%conversation_id, %title, "对话标题已自动生成");
+    Ok(())
+}
+
+/// 截断对话消息——保留前 `keep_count` 条，删除其余（0.12.5 §5.5）。
+///
+/// 用于消息编辑重发：用户编辑第 N 条消息后，前端调用此 command 截断后续消息，
+/// 然后重新调 `chat_prompt` 重新生成 assistant 回复。
+#[tauri::command]
+pub async fn truncate_messages(
+    app: tauri::AppHandle,
+    conversation_id: String,
+    keep_count: i64,
+) -> Result<(), String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    crate::infra::data::conversations::truncate_messages(&pools.ai, &conversation_id, keep_count)
+        .await?;
+    tracing::info!(%conversation_id, keep_count, "truncate_messages: 消息已截断");
     Ok(())
 }
 
@@ -1782,6 +1930,12 @@ pub async fn set_config(
             crate::app::config::update_log_level(&pool, level.clone()).await?;
             crate::infra::utils::logging::update_level(&level);
             tracing::info!(%level, "日志级别已切换");
+        }
+        "ai_verbose_log" => {
+            let verbose: bool = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            crate::app::config::update_ai_verbose_log(&pool, verbose).await?;
+            crate::infra::utils::logging::update_ai_verbose_log(verbose);
+            tracing::info!(verbose, "AI 详细日志开关已切换");
         }
         "auto_start" => {
             let auto_start: bool = serde_json::from_value(value).map_err(|e| e.to_string())?;

@@ -177,6 +177,8 @@ export const zh = {
   "log.level.debug": "debug（详细）",
   "log.level.trace": "trace（最详细）",
   "log.level.hint": "切换立即生效，写入日志文件",
+  "log.ai_verbose.label": "AI 对话完全打印日志",
+  "log.ai_verbose.hint": "开启后解除 rig 内部日志压制，打印完整 AI 对话上下文（系统提示词、工具列表、SSE 帧等），用于深度排查。关闭时只保留 blink 自身日志。",
   "log.file.label": "日志文件",
   "log.action.label": "操作",
   "log.open_file": "打开日志",

@@ -176,6 +176,8 @@ export const en = {
   "log.level.debug": "debug (verbose)",
   "log.level.trace": "trace (most verbose)",
   "log.level.hint": "Applies immediately, written to log file",
+  "log.ai_verbose.label": "Full AI chat logging",
+  "log.ai_verbose.hint": "When enabled, lifts rig internal log suppression to print full AI conversation context (system prompt, tool list, SSE frames, etc.) for deep debugging. When disabled, only blink's own logs are shown.",
   "log.file.label": "Log file",
   "log.action.label": "Actions",
   "log.open_file": "Open log",

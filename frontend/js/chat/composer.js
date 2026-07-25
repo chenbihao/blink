@@ -57,8 +57,11 @@ export function initComposer(callbacks) {
 
   if (!textarea || !sendBtn) return;
 
-  // textarea 自增高
-  textarea.addEventListener("input", autoResize);
+  // textarea 自增高 + 更新发送按钮状态
+  textarea.addEventListener("input", () => {
+    autoResize();
+    updateSendButtonState();
+  });
 
   // Enter 发送 / Shift+Enter 换行
   textarea.addEventListener("keydown", (e) => {

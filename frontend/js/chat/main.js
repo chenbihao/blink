@@ -37,7 +37,7 @@ async function init() {
   });
 
   initRenderer();
-  components.initComponents();
+  components.initComponents({ onEditMessage: handleEditMessage });
 
   initComposer({
     onSend: handleSend,
@@ -49,11 +49,13 @@ async function init() {
     onSwitch: handleSwitchConversation,
     onNew: handleNewConversation,
     onRenamed: handleSidebarRenamed,
+    onExport: handleExportConversation,
   });
 
   // 注册事件监听
   await ipc.listenChatStream(handleStreamEvent);
   await ipc.listenChatConfirm(handleConfirmEvent);
+  await ipc.listenChatTitleUpdated(handleTitleUpdated);
   await ipc.listenVoicePartial(handleVoicePartial);
   await ipc.listenVoiceRecordingStart(handleVoiceRecordingStart);
   await ipc.listenVoiceRecordingEnd(handleVoiceRecordingEnd);
@@ -88,6 +90,9 @@ async function init() {
   // Esc 键：生成中 → abort；空闲 → 隐藏窗口
   document.addEventListener("keydown", handleEsc);
 
+  // 0.12.6：重试按钮（assistant 消息的 retry action）
+  document.addEventListener("chat:retry", handleRetry);
+
   // 窗口获得焦点时自动聚焦输入框
   window.addEventListener("focus", () => focusInput());
 
@@ -97,7 +102,7 @@ async function init() {
 
 // ── 发送 ────────────────────────────────────────
 
-async function handleSend(message) {
+async function handleSend(message, isEdit = false) {
   // 移除空状态
   components.removeEmptyState();
 
@@ -105,13 +110,17 @@ async function handleSend(message) {
   components.renderUserMessage(message);
   state.addMessage({ role: "user", content: message });
 
-  // 0.12.4 §6.7：新对话首条消息 → 截断生成标题
-  const isNewConversation = state.messages.length === 1;
+  // 0.12.4 §6.7：新对话首条消息 → 截断生成标题（编辑重发不触发）
+  const isNewConversation = !isEdit && state.messages.length === 1;
   if (isNewConversation) {
     const truncatedTitle = message.slice(0, 20) + (message.length > 20 ? "…" : "");
     try {
       await ipc.renameChatConversation(state.conversationId, truncatedTitle);
       updateConversationTitle(truncatedTitle);
+      // 0.12.5 §5.3：异步触发 LLM 命名（不等待，失败静默降级保持截断标题）
+      ipc.generateConversationTitle(state.conversationId, message).catch((e) => {
+        console.warn("[chat] LLM 标题生成失败:", e);
+      });
     } catch (e) {
       console.warn("[chat] 截断标题设置失败:", e);
     }
@@ -130,8 +139,30 @@ async function handleSend(message) {
     state.setActiveRequestId(requestId);
   } catch (e) {
     console.error("[chat] chatPrompt 失败:", e);
-    components.renderErrorMessage(`发送失败: ${e}`);
+    // 移除空的 assistant 消息 DOM（createAssistantMessage 已创建但 chatPrompt 失败）
+    if (currentAssistantEl) {
+      currentAssistantEl.remove();
+      currentAssistantEl = null;
+    }
+    // 友好化错误消息（0.12.5 §5.3）
+    const errStr = String(e);
+    let friendlyMsg;
+    if (errStr.includes("AlreadyActive") || errStr.includes("已有对话请求")) {
+      friendlyMsg = "已有对话正在生成，请等待完成或停止后再发送";
+    } else if (errStr.includes("NotConfigured") || errStr.includes("未配置")) {
+      friendlyMsg = "AI 服务未配置，请在设置中添加供应商和模型";
+    } else if (errStr.includes("Timeout") || errStr.includes("超时")) {
+      friendlyMsg = "AI 响应超时，请检查网络连接或模型状态";
+    } else {
+      friendlyMsg = `发送失败: ${errStr}`;
+    }
+    components.renderErrorMessage(friendlyMsg);
     finishStreaming();
+    // 恢复输入框（不清空，让用户可以修改后重试）
+    const input = document.getElementById("chat-input");
+    if (input) input.disabled = false;
+    refreshSidebar();
+    return;
   }
 
   clearInput();
@@ -141,12 +172,93 @@ async function handleSend(message) {
   setActiveConversation(state.conversationId);
 }
 
+// ── 消息编辑重发（0.12.5 §5.5） ────────────────
+
+/**
+ * 消息编辑重发：截断后续消息（DB + state）→ 重新渲染 → 重新发送。
+ * @param {number} msgIndex 被编辑消息在 state.messages 中的索引
+ * @param {string} newText 编辑后的文本
+ */
+async function handleEditMessage(msgIndex, newText) {
+  if (state.isStreaming) {
+    await handleStop();
+  }
+
+  // 1. 截断 DB 消息（保留前 msgIndex 条）
+  try {
+    await ipc.truncateMessages(state.conversationId, msgIndex);
+  } catch (e) {
+    console.error("[chat] 截断消息失败:", e);
+    return;
+  }
+
+  // 2. 截断 state.messages
+  state.messages.length = msgIndex;
+
+  // 3. 重新渲染消息列表
+  components.clearMessages();
+  for (const msg of state.messages) {
+    if (msg.role === "user") {
+      components.renderUserMessage(msg.content);
+    } else if (msg.role === "assistant") {
+      const el = components.createAssistantMessage();
+      if (el) {
+        components.finalizeAssistantMessage(el, msg.content, "");
+      }
+    }
+  }
+
+  // 4. 重新发送编辑后的消息（isEdit=true 跳过截断标题逻辑）
+  await handleSend(newText, true);
+}
+
+// ── 重试（0.12.6：assistant 消息的 retry 按钮） ────────────────
+
+/**
+ * 重试：重新发送最后一条用户消息。
+ * 截断掉最后一条 assistant 回复（及可能的 tool 消息），
+ * 找到最后一条 user 消息文本，重新发送。
+ */
+async function handleRetry() {
+  if (state.isStreaming) return; // 生成中不允许重试
+
+  // 从 state.messages 反向找最后一条 user 消息
+  let lastUserIndex = -1;
+  for (let i = state.messages.length - 1; i >= 0; i--) {
+    if (state.messages[i].role === "user") {
+      lastUserIndex = i;
+      break;
+    }
+  }
+  if (lastUserIndex < 0) return;
+
+  const lastUserText = state.messages[lastUserIndex].content;
+
+  // 截断到最后一条 user 消息之前（保留到 lastUserIndex-1）
+  // 然后重新发送该用户消息（isEdit=true 跳过标题逻辑）
+  await handleEditMessage(lastUserIndex, lastUserText);
+}
+
 // ── 停止 ────────────────────────────────────────
 
 async function handleStop() {
   if (state.activeRequestId != null) {
     await ipc.chatAbort(state.activeRequestId);
   }
+  // 立即结束流式状态，不依赖后端兜底 Done chunk。
+  // abort 后后端的兜底 Done 会被 request_id 校验过滤（activeRequestId 已清空）。
+  if (currentAssistantEl && (state.streamBuffer || state.thinkingBuffer)) {
+    components.finalizeAssistantMessage(currentAssistantEl, state.streamBuffer, state.thinkingBuffer);
+    state.addMessage({ role: "assistant", content: state.streamBuffer });
+  } else if (currentAssistantEl) {
+    // 无内容的空气泡直接移除
+    currentAssistantEl.remove();
+  }
+  if (currentToolEl) {
+    components.finalizeToolStatus(currentToolEl, true);
+    currentToolEl = null;
+  }
+  finishStreaming();
 }
 
 // ── 深度思考开关 ────────────────────────────────
@@ -236,6 +348,14 @@ function handleStreamEvent(event) {
       break;
 
     case "error":
+      // 移除空的 streaming assistant DOM（有内容则先 finalize）
+      if (currentAssistantEl) {
+        if (state.streamBuffer || state.thinkingBuffer) {
+          components.finalizeAssistantMessage(currentAssistantEl, state.streamBuffer, state.thinkingBuffer);
+        } else {
+          currentAssistantEl.remove();
+        }
+      }
       components.renderErrorMessage(chunk.message);
       finishStreaming();
       break;
@@ -328,6 +448,20 @@ function handleConfirmEvent(event) {
       console.error("[chat] confirmChatAction 失败:", e);
     }
   });
+}
+
+// ── 标题自动更新（0.12.5 §5.3） ────────────────
+
+/**
+ * 对话标题自动更新事件处理（0.12.5 §5.3）。
+ * LLM 生成标题后后端 emit `chat-title-updated`，前端更新 header + 刷新侧边栏。
+ */
+function handleTitleUpdated(event) {
+  const { conversation_id, title } = event.payload;
+  if (conversation_id === state.conversationId) {
+    updateConversationTitle(title);
+  }
+  refreshSidebar();
 }
 
 // ── Alt 系统菜单抑制 ──────────────────────────────
@@ -494,6 +628,22 @@ async function handleSwitchConversation(conversationId) {
 function handleSidebarRenamed(conversationId, newTitle) {
   if (conversationId === state.conversationId) {
     updateConversationTitle(newTitle);
+  }
+}
+
+// ── 导出对话（0.12.5 §5.6） ────────────────────
+
+/**
+ * 导出对话为 Markdown 文件。
+ * 委托 ipc.exportConversation：加载消息 → 格式化 Markdown → Tauri save 对话框 → 写文件。
+ * @param {string} conversationId
+ * @param {string} title 对话标题（用于文件名和 Markdown 标题）
+ */
+async function handleExportConversation(conversationId, title) {
+  try {
+    await ipc.exportConversation(conversationId, title);
+  } catch (e) {
+    console.error("[chat] 导出对话失败:", e);
   }
 }
 

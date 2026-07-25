@@ -217,31 +217,45 @@ impl AgentProvider {
             .stream_prompt(user_msg)
             .conversation(conversation_id)
             .await;
+        let mut done_sent = false;
+        // 跟踪是否收到过实质内容（Text/Thinking/ToolCall/ToolResult）。
+        // rig 在 SSE 解析失败时可能 yield 一个空 FinalResponse（0 token + 无内容），
+        // 需区分"正常空回复"与"请求根本未处理"——后者转为 Error 上报前端。
+        let mut has_content = false;
         while let Some(item) = stream.next().await {
             let chunk = match item {
                 Ok(MultiTurnStreamItem::StreamAssistantItem(content)) => match content {
-                    StreamedAssistantContent::Text(t) => ChatStreamChunk::Text { text: t.text },
+                    StreamedAssistantContent::Text(t) => {
+                        has_content = true;
+                        ChatStreamChunk::Text { text: t.text }
+                    }
                     StreamedAssistantContent::Reasoning(r) => {
+                        has_content = true;
                         ChatStreamChunk::Thinking { text: r.display_text() }
                     }
                     StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
+                        has_content = true;
                         ChatStreamChunk::Thinking { text: reasoning }
                     }
                     StreamedAssistantContent::ToolCall {
                         tool_call,
                         internal_call_id,
-                    } => ChatStreamChunk::ToolCall {
-                        tool: tool_call.function.name.clone(),
-                        call_id: internal_call_id,
-                    },
+                    } => {
+                        has_content = true;
+                        ChatStreamChunk::ToolCall {
+                            tool: tool_call.function.name.clone(),
+                            call_id: internal_call_id,
+                        }
+                    }
                     _ => continue,
                 },
                 Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
                     tool_result,
                     internal_call_id,
                 })) => {
+                    has_content = true;
                     let summary = summarize_tool_result(&tool_result);
-                    // 空内容视为失败(如被拒绝的危险 tool / tool 报错)
+                    // 空内容视为失败（如被拒绝的危险 tool / tool 报错）
                     let success = !summary.is_empty();
                     ChatStreamChunk::ToolResult {
                         call_id: internal_call_id,
@@ -250,12 +264,29 @@ impl AgentProvider {
                     }
                 }
                 Ok(MultiTurnStreamItem::FinalResponse(resp)) => {
+                    done_sent = true;
                     let usage = resp.usage();
-                    ChatStreamChunk::Done {
-                        // rig Usage 是 u64,截断到 u32(与 map_rig_response 一致)
-                        input_tokens: usage.input_tokens.min(u32::MAX as u64) as u32,
-                        output_tokens: usage.output_tokens.min(u32::MAX as u64) as u32,
-                        model_name: model_name.clone(),
+                    // 空响应检测：0 token + 无任何内容 → SSE 解析失败 / 服务过载 / 配额耗尽
+                    // rig 在这些场景下不 yield Err，而是 yield 一个空 FinalResponse，
+                    // 若直接发 Done 前端只显示空气泡无任何提示。
+                    if !has_content && usage.input_tokens == 0 && usage.output_tokens == 0 {
+                        tracing::warn!(
+                            conversation = %conversation_id,
+                            "run_stream: 收到空 FinalResponse（0 token + 无内容），\
+                             可能是服务过载 / SSE 解析失败 / 配额耗尽"
+                        );
+                        ChatStreamChunk::Error {
+                            message:
+                                "AI 返回了无效响应，可能是服务过载或配额耗尽，请稍后重试"
+                                    .to_string(),
+                        }
+                    } else {
+                        ChatStreamChunk::Done {
+                            // rig Usage 是 u64,截断到 u32(与 map_rig_response 一致)
+                            input_tokens: usage.input_tokens.min(u32::MAX as u64) as u32,
+                            output_tokens: usage.output_tokens.min(u32::MAX as u64) as u32,
+                            model_name: model_name.clone(),
+                        }
                     }
                 }
                 Ok(_) => continue,
@@ -275,6 +306,13 @@ impl AgentProvider {
                 // 接收端关闭(用户中断/窗口关)--提前终止
                 return;
             }
+        }
+        // 0.12.5：stream 结束但未发送 Done（rig-core 跳过了 SSE 解析错误后连接关闭）
+        // → 发送 Error chunk，避免前端永远收不到结束事件而卡死
+        if !done_sent {
+            let _ = tx.send(ChatStreamChunk::Error {
+                message: "AI 返回了无效响应，可能是服务过载或配额耗尽，请稍后重试".to_string(),
+            });
         }
     }
 }
@@ -543,6 +581,43 @@ mod tests {
         assert_eq!(
             input_tokens, u32::MAX,
             "超 u32 的 input_tokens 应截断到 u32::MAX"
+        );
+    }
+
+    /// 验证空 FinalResponse（0 token + 无内容）转为 Error chunk（0.12.6 修复）。
+    ///
+    /// rig 在 SSE 解析失败 / 服务过载时可能 yield 一个空 FinalResponse 而非 Err，
+    /// 若直接发 Done 前端只显示空气泡无任何错误提示。此测试确保该场景被正确检测。
+    #[tokio::test]
+    async fn run_stream_empty_final_response_becomes_error() {
+        use rig_core::completion::Usage as RigUsage;
+        let zero_usage = RigUsage::default();
+        let model = MockCompletionModel::from_stream_turns(vec![vec![
+            MockStreamEvent::final_response(zero_usage),
+        ]]);
+        let agent = AgentBuilder::new(model)
+            .memory(InMemoryConversationMemory::new())
+            .default_max_turns(5)
+            .build();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        AgentProvider::run_stream(&agent, "c1", "hi", tx, None).await;
+
+        let mut chunks = Vec::new();
+        while let Some(c) = rx.recv().await {
+            chunks.push(c);
+        }
+        // 应 emit Error，而非 Done
+        assert!(
+            chunks
+                .iter()
+                .any(|c| matches!(c, ChatStreamChunk::Error { .. })),
+            "空 FinalResponse 应转为 Error: {chunks:?}"
+        );
+        assert!(
+            !chunks
+                .iter()
+                .any(|c| matches!(c, ChatStreamChunk::Done { .. })),
+            "空 FinalResponse 不应 emit Done: {chunks:?}"
         );
     }
 
