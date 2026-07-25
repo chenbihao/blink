@@ -172,6 +172,57 @@ async fn await_dangerous_confirm(
     }
 }
 
+/// 危险操作确认+执行的公共逻辑（CapabilityTool / ActionTool 共用）。
+///
+/// 如果 `is_dangerous` 为 true：注册确认 -> emit 事件 -> 挂起等待 ->
+/// - Approved: 继续执行（返回 None）
+/// - Rejected/Timeout/Dropped: 返回 Ok(Some(msg)) 直接返回给 AI
+///
+/// 如果 `is_dangerous` 为 false：直接返回 None，调用方继续执行。
+async fn check_dangerous_confirm(
+    is_dangerous: bool,
+    pending: &PendingConfirms,
+    app: &tauri::AppHandle,
+    tool_name: &str,
+    tool_type: &'static str,
+    args_value: &Value,
+) -> Option<Result<String, rig_core::tool::ToolError>> {
+    if !is_dangerous {
+        return None;
+    }
+    tracing::warn!(%tool_name, "危险操作被 AI 调用，挂起等待用户确认");
+    let (confirm_id, rx) = pending.register().await;
+    let (req_id, conv_id) =
+        crate::domain::ai::chat_service::current_request_context_from_app(app);
+    match await_dangerous_confirm(
+        pending,
+        app,
+        confirm_id,
+        rx,
+        tool_name,
+        tool_type,
+        args_value,
+        req_id,
+        &conv_id,
+    )
+    .await
+    {
+        ConfirmOutcome::Approved => {
+            tracing::info!(%tool_name, "用户确认执行危险 {tool_type}");
+            None
+        }
+        ConfirmOutcome::Rejected => Some(Ok(format!(
+            "用户拒绝了操作: {tool_name}（未执行）"
+        ))),
+        ConfirmOutcome::Timeout => Some(Ok(format!(
+            "确认超时（{DANGEROUS_CONFIRM_TIMEOUT_SECS}秒未响应），未执行: {tool_name}"
+        ))),
+        ConfirmOutcome::Dropped => Some(Ok(format!(
+            "确认信号异常，未执行: {tool_name}"
+        ))),
+    }
+}
+
 // ── 辅助函数 ──────────────────────────────────────────────────────────────────
 
 /// `ToolCallError` 的消息载体。
@@ -309,50 +360,18 @@ impl ToolDyn for CapabilityTool {
                 Err(e) => return Err(rig_core::tool::ToolError::JsonError(e)),
             };
 
-            // 危险操作：挂起等用户确认（四域墙 + 闭环）
-            if self.is_dangerous() {
-                tracing::warn!(
-                    capability = %self.cap.id(),
-                    "危险操作被 AI 调用，挂起等待用户确认"
-                );
-                let (confirm_id, rx) = self.pending.register().await;
-                // Phase 4: 从 ChatService 获取当前请求上下文，注入确认 payload。
-                let (req_id, conv_id) =
-                    crate::domain::ai::chat_service::current_request_context_from_app(
-                        &self.app_handle,
-                    );
-                match await_dangerous_confirm(
-                    &self.pending,
-                    &self.app_handle,
-                    confirm_id,
-                    rx,
-                    self.cap.id(),
-                    "capability",
-                    &args_value,
-                    req_id,
-                    &conv_id,
-                )
-                .await
-                {
-                    ConfirmOutcome::Approved => {
-                        tracing::info!(
-                            capability = %self.cap.id(),
-                            "用户确认执行危险 capability"
-                        );
-                    }
-                    ConfirmOutcome::Rejected => {
-                        return Ok(format!("用户拒绝了操作: {}（未执行）", self.cap.id()));
-                    }
-                    ConfirmOutcome::Timeout => {
-                        return Ok(format!(
-                            "确认超时（{DANGEROUS_CONFIRM_TIMEOUT_SECS}秒未响应），未执行: {}",
-                            self.cap.id()
-                        ));
-                    }
-                    ConfirmOutcome::Dropped => {
-                        return Ok(format!("确认信号异常，未执行: {}", self.cap.id()));
-                    }
-                }
+            // 危险操作确认（四域墙 + 闭环）
+            if let Some(result) = check_dangerous_confirm(
+                self.is_dangerous(),
+                &self.pending,
+                &self.app_handle,
+                self.cap.id(),
+                "capability",
+                &args_value,
+            )
+            .await
+            {
+                return result;
             }
 
             // 构造 InvokeContext（P1.3: 从 slo_hard_timeout_ms 派生 deadline）
@@ -447,50 +466,18 @@ impl ToolDyn for ActionTool {
                 Err(e) => return Err(rig_core::tool::ToolError::JsonError(e)),
             };
 
-            // 危险操作：挂起等用户确认（四域墙 + 闭环）
-            if self.is_dangerous() {
-                tracing::warn!(
-                    action = %self.action.id(),
-                    "危险操作被 AI 调用，挂起等待用户确认"
-                );
-                let (confirm_id, rx) = self.pending.register().await;
-                // Phase 4: 从 ChatService 获取当前请求上下文，注入确认 payload。
-                let (req_id, conv_id) =
-                    crate::domain::ai::chat_service::current_request_context_from_app(
-                        &self.app_handle,
-                    );
-                match await_dangerous_confirm(
-                    &self.pending,
-                    &self.app_handle,
-                    confirm_id,
-                    rx,
-                    self.action.id(),
-                    "action",
-                    &args_value,
-                    req_id,
-                    &conv_id,
-                )
-                .await
-                {
-                    ConfirmOutcome::Approved => {
-                        tracing::info!(
-                            action = %self.action.id(),
-                            "用户确认执行危险 action"
-                        );
-                    }
-                    ConfirmOutcome::Rejected => {
-                        return Ok(format!("用户拒绝了操作: {}（未执行）", self.action.id()));
-                    }
-                    ConfirmOutcome::Timeout => {
-                        return Ok(format!(
-                            "确认超时（{DANGEROUS_CONFIRM_TIMEOUT_SECS}秒未响应），未执行: {}",
-                            self.action.id()
-                        ));
-                    }
-                    ConfirmOutcome::Dropped => {
-                        return Ok(format!("确认信号异常，未执行: {}", self.action.id()));
-                    }
-                }
+            // 危险操作确认（四域墙 + 闭环）
+            if let Some(result) = check_dangerous_confirm(
+                self.is_dangerous(),
+                &self.pending,
+                &self.app_handle,
+                self.action.id(),
+                "action",
+                &args_value,
+            )
+            .await
+            {
+                return result;
             }
 
             // 构造 ActionContext

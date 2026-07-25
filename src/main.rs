@@ -196,10 +196,11 @@ fn main() {
             // PluginEngine::new 无必须条件，plugins=vec![] 时各方法均安全（空迭代 / find_plugin 返 None）。
             tracing::info!(count = plugins.len(), "PluginEngine 已构造");
             let plugin_engine = std::sync::Arc::new(domain::plugin::PluginEngine::new(plugins.clone(), pools.config.clone(), proxy));
-            // 0.4→0.5 自动迁移（首次运行时执行一次，后续 marker 跳过；空 plugins 时循环空转）
-            tauri::async_runtime::block_on(infra::data::history::migrate_0_4_to_0_5(&pools.config, &plugins));
+            // 0.4→0.5 配置迁移（首次运行时执行一次，后续 marker 跳过；空 plugins 时循环空转）
+            tauri::async_runtime::block_on(infra::data::config::migrate_0_4_to_0_5(&pools.config, &plugins));
             // 0.9.5 camelCase→snake_case 迁移（前端重构统一字段命名，存量 DB 需改写）
-            tauri::async_runtime::block_on(infra::data::history::migrate_camelcase_to_snake(&pools.history));
+            // 此函数读写 config 表，必须用配置库 pool
+            tauri::async_runtime::block_on(infra::data::config::migrate_camelcase_to_snake(&pools.config));
             // 加载/初始化每个插件配置(不存在则写默认 {enabled, settings:null})。
             tauri::async_runtime::block_on(plugin_engine.init_configs());
 
@@ -471,6 +472,7 @@ fn main() {
                     action_registry.clone(),
                     pending_confirms.clone(),
                     pools.ai.clone(),
+                    pools.config.clone(),
                 ),
             );
 
@@ -536,9 +538,17 @@ fn main() {
             app::commands::rename_chat_conversation,
             app::commands::get_chat_messages,
             app::commands::open_settings_tab,
-app::commands::save_text_file,
-app::commands::generate_conversation_title,
-app::commands::truncate_messages,
+            app::commands::save_text_file,
+            app::commands::generate_conversation_title,
+            app::commands::truncate_messages,
+            app::commands::list_conversation_groups,
+            app::commands::create_conversation_group,
+            app::commands::rename_conversation_group,
+            app::commands::delete_conversation_group,
+            app::commands::update_conversation_group_system_prompt,
+            app::commands::move_conversation_to_group,
+            app::commands::set_group_sort_order,
+            app::commands::set_group_expanded,
             app::commands::list_builtin_actions,
             app::commands::list_context_bindings,
             app::commands::trigger_chord,
@@ -562,6 +572,7 @@ app::commands::truncate_messages,
             app::commands::clear_history,
             app::commands::clear_ai_audit,
             app::commands::open_data_folder,
+            app::commands::retry_migration,
             app::commands::clear_cache_db,
             app::commands::get_app_info,
             app::commands::check_update,
@@ -621,21 +632,21 @@ app::commands::truncate_messages,
             app::commands::list_stt_models,
             app::commands::download_stt_model,
             app::commands::delete_stt_model,
-app::commands::cancel_voice_recording,
-app::commands::is_voice_recording,
-app::commands::list_audio_devices,
-app::commands::start_audio_test,
-app::commands::stop_audio_test,
-app::commands::get_funasr_env,
-app::commands::get_funasr_log_history,
-app::commands::setup_python_env,
-app::commands::start_funasr_server,
-app::commands::stop_funasr_server,
-app::commands::diagnose_stt,
-app::commands::test_cloud_stt,
-app::commands::get_stt_space_usage,
-app::commands::cleanup_stt_space,
-app::commands::open_stt_folder,
+            app::commands::cancel_voice_recording,
+            app::commands::is_voice_recording,
+            app::commands::list_audio_devices,
+            app::commands::start_audio_test,
+            app::commands::stop_audio_test,
+            app::commands::get_funasr_env,
+            app::commands::get_funasr_log_history,
+            app::commands::setup_python_env,
+            app::commands::start_funasr_server,
+            app::commands::stop_funasr_server,
+            app::commands::diagnose_stt,
+            app::commands::test_cloud_stt,
+            app::commands::get_stt_space_usage,
+            app::commands::cleanup_stt_space,
+            app::commands::open_stt_folder,
             app::commands::resize_voice_overlay,
             app::commands::get_default_hotkey,
         ])

@@ -20,16 +20,19 @@ use rig_core::memory::ConversationMemory;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 use crate::app::ai_config::Tier;
 use crate::domain::ai::agent_provider::{AgentProvider, ChatStreamChunk};
-use crate::domain::ai::prompt::chat_system_prompt;
+use crate::domain::ai::prompt::chat_system_prompt_with_group;
 use crate::domain::ai::provider::AIError;
 use crate::domain::ai::registry::{AIProviderRegistry, ResolvedProviderEntries};
 use crate::domain::ai::tool_adapter::{PendingConfirms, build_agent_tools};
 use crate::domain::capability::CapabilityRegistry;
 use crate::domain::execution::ActionRegistry;
 
-type AgentCacheKey = (String, String, String);
+type AgentCacheKey = (String, String, String, u64);
 
 struct CachedAgent {
     key: AgentCacheKey,
@@ -212,6 +215,8 @@ pub struct ChatService {
     start_gate: tokio::sync::Mutex<()>,
     /// 运行时选中的模型（None = 用 Tier::Main 默认）。0.12.2 §4.4。
     selected: RwLock<Option<ChatModelSelection>>,
+    /// 配置库连接池（持久化模型选择到 config 表）。
+    config_pool: sqlx::SqlitePool,
 }
 
 impl ChatService {
@@ -226,7 +231,10 @@ impl ChatService {
         action_registry: Arc<ActionRegistry>,
         pending_confirms: Arc<PendingConfirms>,
         ai_pool: sqlx::SqlitePool,
+        config_pool: sqlx::SqlitePool,
     ) -> Self {
+        // 从配置库加载持久化的模型选择（0.12.7）
+        let selected = tauri::async_runtime::block_on(Self::load_selected_model(&config_pool, &ai_registry));
         Self {
             app,
             ai_registry,
@@ -237,8 +245,55 @@ impl ChatService {
             cached_agent: RwLock::new(None),
             requests: RequestTracker::new(),
             start_gate: tokio::sync::Mutex::new(()),
-            selected: RwLock::new(None),
+            selected: RwLock::new(selected),
+            config_pool,
         }
+    }
+
+    /// 从配置库加载持久化的模型选择（async）。
+    ///
+    /// 读取 `chat:selected_model` config key（格式 `"{provider_id}:{model_id}"`），
+    /// 校验 provider/model 仍存在且有 Chat 能力后恢复选择。失效则返回 None（回落 Main）。
+    async fn load_selected_model(
+        config_pool: &sqlx::SqlitePool,
+        ai_registry: &AIProviderRegistry,
+    ) -> Option<ChatModelSelection> {
+        let selection_id =
+            crate::infra::data::config::get_config(config_pool, "chat:selected_model")
+                .await?;
+
+        let (provider_id, model_id) = selection_id.split_once(':')?;
+        if provider_id.is_empty() || model_id.is_empty() {
+            return None;
+        }
+
+        // 校验 provider/model 仍存在
+        let config = ai_registry.config_snapshot();
+        let provider = config.providers.iter().find(|p| p.id == provider_id)?;
+        let model = provider.models.iter().find(|m| m.id == model_id)?;
+        if !model
+            .capabilities
+            .contains(&crate::app::ai_config::ModelCapability::Chat)
+        {
+            return None;
+        }
+
+        let model_name = if model.display_name.is_empty() {
+            model.id.clone()
+        } else {
+            model.display_name.clone()
+        };
+        tracing::info!(
+            provider = %provider.display_name,
+            model = %model_name,
+            "ChatService: 从配置恢复持久化模型选择"
+        );
+        Some(ChatModelSelection {
+            provider_id: provider_id.to_string(),
+            model_id: model_id.to_string(),
+            provider_display_name: provider.display_name.clone(),
+            model_display_name: model_name,
+        })
     }
 
     /// 解析当前应使用的 Provider+Model entries（0.12.2 §4.4）。
@@ -275,9 +330,13 @@ impl ChatService {
     /// 0.12.2：生效模型由 `resolve_current_entries()` 决定（selected 优先，Main 回落）。
     /// 两次解析用于防止构造期间设置被修改：若 key 已变化，丢弃刚构造的旧实例并重试。
     /// 最多重试 `MAX_PROVIDER_RETRY` 次，防止极端情况下无限循环。
-    pub(crate) fn ensure_provider(&self) -> Result<Arc<AgentProvider>, AIError> {
+    ///
+    /// 0.12.6：`preamble` 参数支持分组级系统提示词——不同分组的 preamble hash
+    /// 不同，cache key 自然失配，触发重建。传空字符串等同默认 `chat_system_prompt()`。
+    pub(crate) fn ensure_provider(&self, preamble: &str) -> Result<Arc<AgentProvider>, AIError> {
         const MAX_PROVIDER_RETRY: usize = 3;
         let mut retry_count = 0;
+        let preamble_hash = hash_preamble(preamble);
         loop {
             if retry_count >= MAX_PROVIDER_RETRY {
                 tracing::warn!("ChatService: ensure_provider 达到最大重试次数，放弃");
@@ -286,7 +345,15 @@ impl ChatService {
             retry_count += 1;
             let resolved = self.resolve_current_entries()?;
 
-            if let Some(provider) = self.cached_provider(&resolved.cache_key) {
+            // cache key = (provider_id, model_id, fingerprint, preamble_hash)
+            let cache_key = (
+                resolved.cache_key.0.clone(),
+                resolved.cache_key.1.clone(),
+                resolved.cache_key.2.clone(),
+                preamble_hash,
+            );
+
+            if let Some(provider) = self.cached_provider(&cache_key) {
                 return Ok(provider);
             }
 
@@ -297,12 +364,11 @@ impl ChatService {
                 &self.app,
                 self.pending_confirms.clone(),
             );
-            let preamble = chat_system_prompt();
             let provider = Arc::new(AgentProvider::new(
                 &resolved.provider,
                 &resolved.model,
                 tools,
-                &preamble,
+                preamble,
                 self.memory.clone(),
             )?);
 
@@ -323,7 +389,7 @@ impl ChatService {
                 .cached_agent
                 .write()
                 .expect("chat agent cache lock poisoned") = Some(CachedAgent {
-                key: resolved.cache_key,
+                key: cache_key,
                 provider: provider.clone(),
             });
             tracing::info!(
@@ -340,6 +406,18 @@ impl ChatService {
     /// `Some` = 用户在模型选择器选了某个 provider+model；`None` = 恢复 Main 档默认。
     /// 写入后清 cached_agent，下次 prompt 按新选择重建 AgentProvider。memory 不动。
     pub fn select_model(&self, selection: Option<ChatModelSelection>) {
+        // 持久化到配置库（0.12.7）
+        let key = selection
+            .as_ref()
+            .map(|s| format!("{}:{}", s.provider_id, s.model_id));
+        let pool = self.config_pool.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Some(id) = key {
+                let _ = crate::infra::data::config::set_config(&pool, "chat:selected_model", &id).await;
+            } else {
+                let _ = crate::infra::data::config::delete_config(&pool, "chat:selected_model").await;
+            }
+        });
         *self.selected.write().expect("selected lock poisoned") = selection.clone();
         *self
             .cached_agent
@@ -377,10 +455,14 @@ impl ChatService {
     ///
     /// `start_gate` 只串行化启动过程，不影响 status/abort；active 安装后才放行 Agent task，
     /// 避免极短请求在安装 active 之前完成而留下僵尸状态。
+    ///
+    /// 0.12.6：`group_system_prompt` 注入分组级系统提示词——构造 preamble 时
+    /// 追加到基础 chat system prompt 之后，影响 Agent 的行为约束。
     pub async fn prompt(
         self: &Arc<Self>,
         conversation_id: String,
         message: String,
+        group_system_prompt: Option<String>,
     ) -> Result<ChatPromptHandle, ChatError> {
         let _start_guard = self.start_gate.lock().await;
         if let Some(active) = self.requests.status() {
@@ -393,6 +475,10 @@ impl ChatService {
         let conversation_for_task = conversation_id.clone();
         let weak_service: Weak<Self> = Arc::downgrade(self);
 
+        // 0.12.6：构建有效 preamble = 基础 prompt + 分组提示词
+        let preamble =
+            chat_system_prompt_with_group(group_system_prompt.as_deref());
+
         let task = tokio::spawn(async move {
             if start_rx.await.is_err() {
                 return;
@@ -402,7 +488,7 @@ impl ChatService {
             };
 
             // Provider 构造也放进可 abort 的 task：窗口在冷构造期间关闭时仍能立即中断。
-            match service.ensure_provider() {
+            match service.ensure_provider(&preamble) {
                 Ok(provider) => {
                     provider
                         .stream_prompt(&conversation_for_task, &message, chunk_tx)
@@ -547,6 +633,19 @@ pub fn current_request_context_from_app(app: &tauri::AppHandle) -> (u64, String)
     } else {
         (0, String::new())
     }
+}
+
+/// 计算 preamble 的 hash 值，用于 AgentProvider 缓存 key 的第四元素（0.12.6）。
+///
+/// 不同分组的 system prompt 产生不同 hash，触发 cache miss 和 Agent 重建。
+///
+/// **注意**：`DefaultHasher` 是 SipHash1-3，稳定性不保证（跨 Rust 版本可能变）。
+/// 当前仅用于进程内 cache key（不持久化），可接受。若未来需跨进程共享 cache，
+/// 应换用稳定 hash（如 `ahash` 或固定 seed 的 `SipHash`）。
+fn hash_preamble(preamble: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    preamble.hash(&mut hasher);
+    hasher.finish()
 }
 
 #[cfg(test)]

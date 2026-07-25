@@ -1,6 +1,6 @@
-//! 对话持久化数据访问层（0.12.3 Phase A）。
+//! 对话持久化数据访问层（0.12.3 Phase A + 0.12.6 分组）。
 //!
-//! `conversations` 和 `messages` 表存于 AI 库（`blink_ai.db`）。
+//! `conversations` / `messages` / `conversation_groups` 表存于 AI 库（`blink_ai.db`）。
 //!
 //! **设计原则**：
 //! - `messages.content` 列存 `serde_json::to_string(&rig_core::completion::Message)`，
@@ -9,6 +9,11 @@
 //! - 删除 conversation 时级联删除 messages（SQLite 默认不启用 FK，手动 DELETE）。
 //! - 滑动窗口策略在 `SqliteConversationMemory::load` 中实现（取最近 N 条），
 //!   持久化层保存完整历史，不删除旧数据。
+//!
+//! **0.12.6 分组**：
+//! - `conversation_groups` 表支持 `parent_id` 多层嵌套。
+//! - `conversations.group_id` 列（NULL = 默认/未分组，无系统提示词）。
+//! - 删除分组时：组内对话移至默认（group_id = NULL），子分组 re-parent 到被删分组的父级。
 
 use sqlx::SqlitePool;
 
@@ -22,9 +27,35 @@ pub struct Conversation {
     /// 消息条数（join 聚合，供列表预览用）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_count: Option<i64>,
+    /// 所属分组 ID（NULL = 默认/未分组）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
 }
 
-/// 初始化 `conversations` + `messages` 表。
+/// 一个对话分组（0.12.6）。
+///
+/// 支持多层嵌套（`parent_id`），每分组可配独立系统提示词。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ConversationGroup {
+    pub id: String,
+    pub name: String,
+    /// 分组级系统提示词（NULL = 无自定义提示词，用默认）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+    /// 父分组 ID（NULL = 顶层）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    /// 同级排序权重（小在前）。
+    pub sort_order: i64,
+    /// 折叠状态（true = 展开，false = 折叠）。
+    pub expanded: bool,
+    pub created_at: i64,
+}
+
+/// 初始化 `conversations` + `messages` + `conversation_groups` 表。
+///
+/// 0.12.6 新增 `conversation_groups` 表 + `conversations.group_id` 列迁移。
+/// 迁移用 `PRAGMA table_info` 检测列是否存在，不存在则 `ALTER TABLE ADD COLUMN`。
 pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS conversations (
@@ -51,6 +82,22 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
 
+    // 0.12.6: conversation_groups 表
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS conversation_groups (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            system_prompt TEXT,
+            parent_id TEXT,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            expanded INTEGER NOT NULL DEFAULT 1,
+            created_at INTEGER NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, id)",
     )
@@ -65,7 +112,40 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
 
-    tracing::debug!("conversations + messages 表已初始化");
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_conv_groups_parent ON conversation_groups(parent_id, sort_order)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // 0.12.6 迁移：conversations 表加 group_id 列（若不存在）
+    migrate_add_group_id_column(pool).await?;
+
+    tracing::debug!("conversations + messages + conversation_groups 表已初始化");
+    Ok(())
+}
+
+/// 检测 `conversations` 表是否有 `group_id` 列，没有则 `ALTER TABLE ADD COLUMN`。
+async fn migrate_add_group_id_column(pool: &SqlitePool) -> Result<(), String> {
+    // PRAGMA table_info 返回 6 列（cid, name, type, notnull, dflt_value, pk），
+    // 用表值函数只取 name 列避免类型不匹配
+    let columns: Vec<(String,)> =
+        sqlx::query_as("SELECT name FROM pragma_table_info('conversations')")
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+    let has_group_id = columns.iter().any(|(name,)| name == "group_id");
+    if !has_group_id {
+        sqlx::query(sqlx::AssertSqlSafe(
+            "ALTER TABLE conversations ADD COLUMN group_id TEXT".to_string(),
+        ))
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        tracing::info!("conversations 表已迁移：新增 group_id 列");
+    }
     Ok(())
 }
 
@@ -117,25 +197,31 @@ pub async fn touch_conversation(pool: &SqlitePool, id: &str) -> Result<(), Strin
     Ok(())
 }
 
-/// 列出所有对话（按 last_active_at 倒序），含消息条数。
+/// 列出所有对话（按 last_active_at 倒序），含消息条数和 group_id。
 pub async fn list_conversations(pool: &SqlitePool) -> Vec<Conversation> {
-    let rows: Vec<(String, Option<String>, i64, i64, i64)> = sqlx::query_as(
-        "SELECT c.id, c.title, c.created_at, c.last_active_at, \
+    let rows: Vec<(String, Option<String>, i64, i64, Option<String>, i64)> = sqlx::query_as(
+        "SELECT c.id, c.title, c.created_at, c.last_active_at, c.group_id, \
          (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS msg_count \
          FROM conversations c ORDER BY c.last_active_at DESC, c.rowid DESC",
     )
     .fetch_all(pool)
     .await
-    .unwrap_or_default();
+    .unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "list_conversations 查询失败，返回空列表");
+        Vec::new()
+    });
 
     rows.into_iter()
-        .map(|(id, title, created_at, last_active_at, msg_count)| Conversation {
-            id,
-            title,
-            created_at,
-            last_active_at,
-            message_count: Some(msg_count),
-        })
+        .map(
+            |(id, title, created_at, last_active_at, group_id, msg_count)| Conversation {
+                id,
+                title,
+                created_at,
+                last_active_at,
+                message_count: Some(msg_count),
+                group_id,
+            },
+        )
         .collect()
 }
 
@@ -274,6 +360,245 @@ pub async fn count_messages(pool: &SqlitePool) -> i64 {
         .fetch_one(pool)
         .await
         .unwrap_or(0)
+}
+
+// ── 分组 CRUD（0.12.6）─────────────────────────────────────────────────────────
+
+/// 创建分组。`parent_id` 为 None 表示顶层分组。
+///
+/// `sort_order` 自动设为同级最大 +1。
+pub async fn create_group(
+    pool: &SqlitePool,
+    id: &str,
+    name: &str,
+    parent_id: Option<&str>,
+) -> Result<(), String> {
+    let now = chrono::Utc::now().timestamp();
+    // 同级最大 sort_order + 1（IS ?1 在绑 NULL 时行为不确定，分支查询更可靠）
+    // 同级最大 sort_order + 1（COALESCE 将空表 NULL 转为 -1，避免 sqlx NULL 解码歧义）
+    let max_order: i64 = match parent_id {
+        Some(pid) => {
+            sqlx::query_scalar(
+                "SELECT COALESCE(MAX(sort_order), -1) FROM conversation_groups WHERE parent_id = ?1",
+            )
+            .bind(pid)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| e.to_string())?
+        }
+        None => {
+            sqlx::query_scalar(
+                "SELECT COALESCE(MAX(sort_order), -1) FROM conversation_groups WHERE parent_id IS NULL",
+            )
+            .fetch_one(pool)
+            .await
+            .map_err(|e| e.to_string())?
+        }
+    };
+    let sort_order = max_order + 1;
+
+    sqlx::query(
+        "INSERT INTO conversation_groups (id, name, system_prompt, parent_id, sort_order, expanded, created_at) \
+         VALUES (?1, ?2, NULL, ?3, ?4, 1, ?5)",
+    )
+    .bind(id)
+    .bind(name)
+    .bind(parent_id)
+    .bind(sort_order)
+    .bind(now)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 重命名分组。
+pub async fn rename_group(
+    pool: &SqlitePool,
+    id: &str,
+    name: &str,
+) -> Result<bool, String> {
+    let result = sqlx::query("UPDATE conversation_groups SET name = ?1 WHERE id = ?2")
+        .bind(name)
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// 删除分组。
+///
+/// **行为**：
+/// 1. 组内对话移至默认（group_id = NULL）
+/// 2. 子分组 re-parent 到被删分组的父级（保留子树结构）
+/// 3. 删除分组记录
+pub async fn delete_group(pool: &SqlitePool, id: &str) -> Result<bool, String> {
+    // 1. 获取被删分组的 parent_id
+    let parent_id: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT parent_id FROM conversation_groups WHERE id = ?1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let Some(parent_id) = parent_id else {
+        return Ok(false); // 分组不存在
+    };
+
+    // 2-4 在事务中执行：任一步骤失败则回滚，防止数据不一致
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+
+    // 2. 组内对话移至默认（group_id = NULL）
+    sqlx::query("UPDATE conversations SET group_id = NULL WHERE group_id = ?1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 3. 子分组 re-parent 到被删分组的父级
+    sqlx::query("UPDATE conversation_groups SET parent_id = ?1 WHERE parent_id = ?2")
+        .bind(parent_id.as_deref()) // 被删分组的父级（可能为 NULL）
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 4. 删除分组记录
+    let result = sqlx::query("DELETE FROM conversation_groups WHERE id = ?1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// 列出所有分组（按 sort_order 升序，含 parent_id 供前端构建树）。
+pub async fn list_groups(pool: &SqlitePool) -> Vec<ConversationGroup> {
+    let rows: Vec<(String, String, Option<String>, Option<String>, i64, i64, i64)> =
+        sqlx::query_as(
+            "SELECT id, name, system_prompt, parent_id, sort_order, expanded, created_at \
+             FROM conversation_groups ORDER BY sort_order ASC, created_at ASC",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+
+    rows.into_iter()
+        .map(
+            |(id, name, system_prompt, parent_id, sort_order, expanded, created_at)| ConversationGroup {
+                id,
+                name,
+                system_prompt,
+                parent_id,
+                sort_order,
+                expanded: expanded != 0,
+                created_at,
+            },
+        )
+        .collect()
+}
+
+/// 更新分组的系统提示词。`prompt` 为 None 时清除。
+pub async fn update_group_system_prompt(
+    pool: &SqlitePool,
+    id: &str,
+    prompt: Option<&str>,
+) -> Result<bool, String> {
+    let result =
+        sqlx::query("UPDATE conversation_groups SET system_prompt = ?1 WHERE id = ?2")
+            .bind(prompt)
+            .bind(id)
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// 设置分组的排序权重。
+pub async fn set_group_sort_order(
+    pool: &SqlitePool,
+    id: &str,
+    sort_order: i64,
+) -> Result<(), String> {
+    sqlx::query("UPDATE conversation_groups SET sort_order = ?1 WHERE id = ?2")
+        .bind(sort_order)
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 设置分组的折叠状态。
+pub async fn set_group_expanded(
+    pool: &SqlitePool,
+    id: &str,
+    expanded: bool,
+) -> Result<(), String> {
+    sqlx::query("UPDATE conversation_groups SET expanded = ?1 WHERE id = ?2")
+        .bind(expanded as i64)
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 设置对话所属分组。`group_id` 为 None 移至默认组。
+///
+/// 同时确保对话记录存在（INSERT OR IGNORE），避免 race condition。
+pub async fn set_conversation_group(
+    pool: &SqlitePool,
+    conversation_id: &str,
+    group_id: Option<&str>,
+) -> Result<(), String> {
+    // 确保对话记录存在（INSERT OR IGNORE，已存在时不报错）
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query(
+        "INSERT OR IGNORE INTO conversations (id, title, created_at, last_active_at) VALUES (?1, '', ?2, ?2)",
+    )
+    .bind(conversation_id)
+    .bind(now)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    sqlx::query("UPDATE conversations SET group_id = ?1 WHERE id = ?2")
+        .bind(group_id)
+        .bind(conversation_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 根据 conversation_id 查询其所属分组的系统提示词。
+///
+/// `group_id = NULL`（默认组）→ 返回 None。
+/// `group_id` 不存在（被删后遗留）→ 返回 None。
+pub async fn get_effective_system_prompt(
+    pool: &SqlitePool,
+    conversation_id: &str,
+) -> Result<Option<String>, String> {
+    let prompt: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT g.system_prompt \
+         FROM conversations c \
+         LEFT JOIN conversation_groups g ON c.group_id = g.id \
+         WHERE c.id = ?1",
+    )
+    .bind(conversation_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // prompt = None: 对话不存在或 group_id 为 NULL
+    // prompt = Some(None): 分组存在但无 system_prompt
+    // prompt = Some(Some(s)): 分组有 system_prompt
+    Ok(prompt.unwrap_or(None))
 }
 
 // ── 单测 ───────────────────────────────────────────────────────────────────────
@@ -440,5 +765,220 @@ mod tests {
 
         let convs = list_conversations(&pool).await;
         assert_eq!(convs[0].message_count, Some(2));
+    }
+
+    // ── 0.12.6 分组 ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn group_create_and_list() {
+        let pool = setup_pool().await;
+        create_group(&pool, "g1", "工作", None).await.unwrap();
+        create_group(&pool, "g2", "学习", None).await.unwrap();
+
+        let groups = list_groups(&pool).await;
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].name, "工作");
+        assert_eq!(groups[1].name, "学习");
+        // sort_order 自动递增
+        assert_eq!(groups[0].sort_order, 0);
+        assert_eq!(groups[1].sort_order, 1);
+    }
+
+    #[tokio::test]
+    async fn group_create_nested() {
+        let pool = setup_pool().await;
+        create_group(&pool, "g1", "工作", None).await.unwrap();
+        create_group(&pool, "g2", "项目A", Some("g1")).await.unwrap();
+
+        let groups = list_groups(&pool).await;
+        assert_eq!(groups.len(), 2);
+        let child = groups.iter().find(|g| g.id == "g2").unwrap();
+        assert_eq!(child.parent_id.as_deref(), Some("g1"));
+    }
+
+    #[tokio::test]
+    async fn group_rename() {
+        let pool = setup_pool().await;
+        create_group(&pool, "g1", "旧名", None).await.unwrap();
+        let ok = rename_group(&pool, "g1", "新名").await.unwrap();
+        assert!(ok);
+
+        let groups = list_groups(&pool).await;
+        assert_eq!(groups[0].name, "新名");
+    }
+
+    #[tokio::test]
+    async fn group_delete_moves_conversations_to_default() {
+        let pool = setup_pool().await;
+        create_group(&pool, "g1", "工作", None).await.unwrap();
+        create_conversation(&pool, "c1", Some("周报")).await.unwrap();
+        set_conversation_group(&pool, "c1", Some("g1")).await.unwrap();
+
+        // 确认对话在 g1 组
+        let convs = list_conversations(&pool).await;
+        assert_eq!(convs[0].group_id.as_deref(), Some("g1"));
+
+        // 删除分组 → 对话移至默认
+        let ok = delete_group(&pool, "g1").await.unwrap();
+        assert!(ok);
+
+        let convs = list_conversations(&pool).await;
+        assert_eq!(convs[0].group_id, None);
+    }
+
+    #[tokio::test]
+    async fn group_delete_reparents_children() {
+        let pool = setup_pool().await;
+        create_group(&pool, "g1", "工作", None).await.unwrap();
+        create_group(&pool, "g2", "子", Some("g1")).await.unwrap();
+
+        // 删除 g1 → g2 re-parent 到顶层
+        delete_group(&pool, "g1").await.unwrap();
+
+        let groups = list_groups(&pool).await;
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].id, "g2");
+        assert_eq!(groups[0].parent_id, None);
+    }
+
+    #[tokio::test]
+    async fn group_system_prompt_update() {
+        let pool = setup_pool().await;
+        create_group(&pool, "g1", "翻译", None).await.unwrap();
+
+        // 设置系统提示词
+        update_group_system_prompt(&pool, "g1", Some("你是翻译助手")).await.unwrap();
+        let groups = list_groups(&pool).await;
+        assert_eq!(groups[0].system_prompt.as_deref(), Some("你是翻译助手"));
+
+        // 清除系统提示词
+        update_group_system_prompt(&pool, "g1", None).await.unwrap();
+        let groups = list_groups(&pool).await;
+        assert_eq!(groups[0].system_prompt, None);
+    }
+
+    #[tokio::test]
+    async fn set_conversation_group_creates_record_if_missing() {
+        let pool = setup_pool().await;
+        create_group(&pool, "g1", "工作", None).await.unwrap();
+
+        // 对话记录不存在时 set_conversation_group 应自动创建
+        set_conversation_group(&pool, "c1", Some("g1")).await.unwrap();
+
+        let convs = list_conversations(&pool).await;
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].id, "c1");
+        assert_eq!(convs[0].group_id.as_deref(), Some("g1"));
+    }
+
+    #[tokio::test]
+    async fn set_conversation_group_updates_existing() {
+        let pool = setup_pool().await;
+        create_group(&pool, "g1", "工作", None).await.unwrap();
+        create_group(&pool, "g2", "学习", None).await.unwrap();
+        create_conversation(&pool, "c1", Some("Test")).await.unwrap();
+        set_conversation_group(&pool, "c1", Some("g1")).await.unwrap();
+
+        // 移到 g2
+        set_conversation_group(&pool, "c1", Some("g2")).await.unwrap();
+        let convs = list_conversations(&pool).await;
+        assert_eq!(convs[0].group_id.as_deref(), Some("g2"));
+
+        // 移到默认
+        set_conversation_group(&pool, "c1", None).await.unwrap();
+        let convs = list_conversations(&pool).await;
+        assert_eq!(convs[0].group_id, None);
+    }
+
+    #[tokio::test]
+    async fn effective_system_prompt_query() {
+        let pool = setup_pool().await;
+        create_group(&pool, "g1", "翻译", None).await.unwrap();
+        update_group_system_prompt(&pool, "g1", Some("你是翻译助手")).await.unwrap();
+        create_conversation(&pool, "c1", Some("Test")).await.unwrap();
+        set_conversation_group(&pool, "c1", Some("g1")).await.unwrap();
+
+        // 有分组的对话 → 返回分组系统提示词
+        let prompt = get_effective_system_prompt(&pool, "c1").await.unwrap();
+        assert_eq!(prompt.as_deref(), Some("你是翻译助手"));
+
+        // 默认组对话 → None
+        create_conversation(&pool, "c2", Some("Default")).await.unwrap();
+        let prompt = get_effective_system_prompt(&pool, "c2").await.unwrap();
+        assert_eq!(prompt, None);
+
+        // 不存在的对话 → None
+        let prompt = get_effective_system_prompt(&pool, "nonexistent").await.unwrap();
+        assert_eq!(prompt, None);
+    }
+
+    #[tokio::test]
+    async fn group_sort_order_auto_increment_per_parent() {
+        let pool = setup_pool().await;
+        create_group(&pool, "g1", "A", None).await.unwrap();
+        create_group(&pool, "g2", "B", None).await.unwrap();
+        create_group(&pool, "g3", "C", None).await.unwrap();
+        create_group(&pool, "g4", "子A", Some("g1")).await.unwrap();
+        create_group(&pool, "g5", "子B", Some("g1")).await.unwrap();
+
+        let groups = list_groups(&pool).await;
+        // 顶层: g1(0), g2(1), g3(2)
+        let top: Vec<_> = groups.iter().filter(|g| g.parent_id.is_none()).collect();
+        assert_eq!(top.len(), 3);
+        assert_eq!(top[0].sort_order, 0);
+        assert_eq!(top[1].sort_order, 1);
+        assert_eq!(top[2].sort_order, 2);
+
+        // g1 子级: g4(0), g5(1)
+        let children: Vec<_> = groups.iter().filter(|g| g.parent_id.as_deref() == Some("g1")).collect();
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].sort_order, 0);
+        assert_eq!(children[1].sort_order, 1);
+    }
+
+    #[tokio::test]
+    async fn group_expanded_persistence() {
+        let pool = setup_pool().await;
+        create_group(&pool, "g1", "工作", None).await.unwrap();
+
+        // 默认展开
+        let groups = list_groups(&pool).await;
+        assert!(groups[0].expanded);
+
+        // 折叠
+        set_group_expanded(&pool, "g1", false).await.unwrap();
+        let groups = list_groups(&pool).await;
+        assert!(!groups[0].expanded);
+
+        // 展开
+        set_group_expanded(&pool, "g1", true).await.unwrap();
+        let groups = list_groups(&pool).await;
+        assert!(groups[0].expanded);
+    }
+
+    #[tokio::test]
+    async fn migrate_group_id_column_idempotent() {
+        let pool = setup_pool().await;
+        // init_db 已运行（setup_pool），group_id 列应已存在
+        // 再次调用迁移函数应无操作、不报错
+        migrate_add_group_id_column(&pool).await.unwrap();
+        // 验证列存在：能设置 group_id 不报错
+        create_conversation(&pool, "c1", Some("Test")).await.unwrap();
+        set_conversation_group(&pool, "c1", None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_conversations_includes_group_id() {
+        let pool = setup_pool().await;
+        create_group(&pool, "g1", "工作", None).await.unwrap();
+        create_conversation(&pool, "c1", Some("A")).await.unwrap();
+        create_conversation(&pool, "c2", Some("B")).await.unwrap();
+        set_conversation_group(&pool, "c1", Some("g1")).await.unwrap();
+
+        let convs = list_conversations(&pool).await;
+        let c1 = convs.iter().find(|c| c.id == "c1").unwrap();
+        let c2 = convs.iter().find(|c| c.id == "c2").unwrap();
+        assert_eq!(c1.group_id.as_deref(), Some("g1"));
+        assert_eq!(c2.group_id, None);
     }
 }

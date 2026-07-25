@@ -54,6 +54,18 @@ export function initStorageTab() {
       console.error("open_data_folder failed:", e);
     }
   });
+
+  document.getElementById("retry-migration")?.addEventListener("click", async () => {
+    try {
+      await invoke("retry_migration");
+      // 清除标记后隐藏警告条，提示用户重启
+      const warnEl = document.getElementById("migration-warning");
+      if (warnEl) warnEl.hidden = true;
+      alert(t("storage.retry_migration.done"));
+    } catch (e) {
+      console.error("retry_migration failed:", e);
+    }
+  });
 }
 
 /**

@@ -13,7 +13,7 @@
 Blink 是一个 Windows 全局快捷入口，定位不只是「启动器」。**目标：做一个极其丝滑的启动器，并且把常用的功能都丝滑融合，使用 Chord 模式来调用各种增强能力，不止是启动器。**
 终极目标：感知用户上下文、主动推荐动作，让任何操作都比原来的路径更快。
 
-当前 **0.12.0-0.12.5 全部完成**（基础设施 → 对话窗口 → 体验优化 → 体验修复 → 功能增强：对话窗口引导泡泡 / 对话标题 LLM 命名 + 设置页对话配置区 / 消息编辑重发 / 导出对话 / 代码块语法高亮 / LLM 报错友好展示 / stack overflow 修复），测试基线 **858 通过**。**0.12.6 规划中**（对话分组 + 分组系统提示词）。详见 [phases/0.12-ai-ecosystem.md](docs/production-design/phases/0.12-ai-ecosystem.md)。
+当前 **0.12.0-0.12.6 全部完成**（基础设施 → 对话窗口 → 体验优化 → 体验修复 → 功能增强 → 对话分组：多层文件夹 + 分组系统提示词 + 拖拽排序 + 折叠持久化 + 内联管理），测试基线 **875 通过**。详见 [phases/0.12-ai-ecosystem.md](docs/production-design/phases/0.12-ai-ecosystem.md)。
 
 - ✅ **0.10 语音输入**：STT + 语音打字（G1 主窗口语音输入 / G2 语音输入法上屏）。工具箱层定 FunASR（SenseVoice 准确率 7.81%，CPU 17× 实时）。详见 [phases/0.10-voice-agent.md](docs/production-design/phases/0.10-voice-agent.md)
   - 0.10.4：伪流式 VAD 切句 + 累积预览 + 移除真流式 + 架构清理
@@ -36,7 +36,8 @@ Blink 是一个 Windows 全局快捷入口，定位不只是「启动器」。**
 - ✅ **0.11.10 图上翻译 + 截图交互重构**：`overlayLayer` 图层引擎（原位嵌原文/译文，背景遮罩三档+字号自适应）+ 选取工具（默认激活，解决鼠标层冲突）+ 预热 OCR（按钮秒响应）+ 双按钮单一路径（[识别]/[翻译]各自清晰，消除中间态）+ 面板抽屉化（默认展开，可拖动）+ 误点保护（点选区外 no-op）+ `translate_batch` 批量翻译 + 命名迁移 OCR→识别。测试基线 **783 通过**。详见 [phases/0.11-plugin-ai-toolchain.md §2.10](docs/production-design/phases/0.11-plugin-ai-toolchain.md#210-图上翻译--截图交互重构01110)
 - ✅ **0.12 AI 能力架构搭建**（0.12.0-0.12.4 全部完成）：基础设施抽取与清账（投影统一 ✅ / **DB 四层拆分** ✅ / **Provider 模型统一管理** ✅ / ollama Provider 接入 ✅ / **Tool 适配层** ✅ / CapabilityRegistry 动态注册 ✅）+ 对话窗口★（独立 Agent 窗口 + **Alt+Q chord** + rig AgentBuilder）+ 对话机制（conversation 隔离 + **SQLite ConversationMemory** + 滑动窗口 20 条 + tool loop 50 turns 触顶）+ Chat 体验（思考块 / 无边框 / 模型选择 / 复制按钮 / Tool 结果折叠 / Token 用量 / 语音输入）+ 多对话管理（侧边栏 / 列表切换 / 删除 / 重命名 / 历史恢复）+ **0.12.4 体验修复**（15 项 bug 修复与优化：侧边栏切换 / 模型下拉 / 语音输入根因 / 对话标题 / 模型选择器移至输入框 / **工具调用渲染修复** / 消息宽度优化）。**产品边界：Blink 不做 AI 运行时，靠外部 ollama/lmstudio**。详见 [phases/0.12-ai-ecosystem.md](docs/production-design/phases/0.12-ai-ecosystem.md)
 - ✅ **0.12.5 功能增强**（全部完成）：对话窗口引导泡泡（空状态展示示例 prompt，点击预填充）/ 对话标题 LLM 自动生成（设置开关 + 模型档位选择）/ 设置页 AI Tab 对话配置区（ChatConfig 子结构）/ 消息编辑重发（truncate_messages + isEdit 跳过标题）/ 导出对话为 Markdown（Tauri dialog.save + save_text_file）/ 代码块语法高亮（highlight.js + Catppuccin 主题）/ LLM 报错友好展示 + stack overflow 修复。测试基线 858 通过。详见 [phases/0.12-ai-ecosystem.md §五](docs/production-design/phases/0.12-ai-ecosystem.md)
-- 📋 **0.12.6 对话分组**（规划中）：参考元宝网页端——侧边栏分组层级 + 每组系统提示词 + 文件夹拖拽排序 + 内联管理。详见 [phases/0.12-ai-ecosystem.md §六](docs/production-design/phases/0.12-ai-ecosystem.md)
+- ✅ **0.12.6 对话分组**：参考元宝网页端——侧边栏多层分组层级 + 每组系统提示词 + 拖拽排序 + 折叠持久化 + 内联管理。详见 [phases/0.12-ai-ecosystem.md §五](docs/production-design/phases/0.12-ai-ecosystem.md)
+- 🔧 **0.12.7 对话窗口布局体系化**（进行中）：面包屑标题✅（文件夹路径+对话标题，仅标题可编辑）+ 悬浮 z-index✅ + Signal 信号消息（IM 式居中提示）+ 时间分隔符 + 系统提示词横幅 + 工具卡片增强 + 消息间距优化。详见 [phases/0.12-ai-ecosystem.md §六](docs/production-design/phases/0.12-ai-ecosystem.md)
 - 🔜 **0.13 AI 调用能力扩展**：MCP client（消费外部 tool，McpTool 进适配层）/ RAG（知识库检索，走 ollama embedding + 暴力 cosine）/ 记忆向量召回（DemotingPolicyMemory 钩子 + 语义召回）/ MCP server（护城河——暴露 Blink 能力）/ Skill 化（CLI → AI 生成 skill，需 PoC 验证）。**砍掉项**：mistral.rs / A2A / sqlite-vec。详见 [phases/0.13-ai-capability-expansion.md](docs/production-design/phases/0.13-ai-capability-expansion.md)
 
 ---

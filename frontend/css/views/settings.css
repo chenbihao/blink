@@ -348,6 +348,29 @@ h2:active {
   color: var(--text);
 }
 
+/* ── 迁移失败警告条 ─────────────────────────────────────────────────────────── */
+
+.migration-warning {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-md) var(--space-lg);
+  background: var(--amber-bg, var(--yellow-bg, rgba(255, 193, 7, 0.1)));
+  border: 1px solid var(--amber-border, var(--yellow-border, rgba(255, 193, 7, 0.3)));
+  border-radius: var(--radius-md);
+  color: var(--amber, var(--yellow, #b8860b));
+}
+
+.migration-warning-icon {
+  font-size: 1.2em;
+  flex-shrink: 0;
+}
+
+.migration-warning .btn-small {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
 /* ── 开关组件 ─────────────────────────────────────────────────────────────── */
 
 .switch {

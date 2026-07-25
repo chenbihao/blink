@@ -84,8 +84,8 @@ async function init() {
   // 模型选择器交互
   bindModelSelector();
 
-  // 0.12.4 §6.4：对话标题点击编辑
-  bindConversationTitleEdit();
+  // 0.12.7 §1：面包屑标题编辑（事件委托）
+  bindBreadcrumbEdit();
 
   // Esc 键：生成中 → abort；空闲 → 隐藏窗口
   document.addEventListener("keydown", handleEsc);
@@ -116,7 +116,7 @@ async function handleSend(message, isEdit = false) {
     const truncatedTitle = message.slice(0, 20) + (message.length > 20 ? "…" : "");
     try {
       await ipc.renameChatConversation(state.conversationId, truncatedTitle);
-      updateConversationTitle(truncatedTitle);
+      await updateBreadcrumb(truncatedTitle);
       // 0.12.5 §5.3：异步触发 LLM 命名（不等待，失败静默降级保持截断标题）
       ipc.generateConversationTitle(state.conversationId, message).catch((e) => {
         console.warn("[chat] LLM 标题生成失败:", e);
@@ -135,7 +135,7 @@ async function handleSend(message, isEdit = false) {
   currentAssistantEl = components.createAssistantMessage();
 
   try {
-    const requestId = await ipc.chatPrompt(state.conversationId, message);
+    const requestId = await ipc.chatPrompt(state.conversationId, message, state.currentGroupId);
     state.setActiveRequestId(requestId);
   } catch (e) {
     console.error("[chat] chatPrompt 失败:", e);
@@ -243,7 +243,11 @@ async function handleRetry() {
 
 async function handleStop() {
   if (state.activeRequestId != null) {
-    await ipc.chatAbort(state.activeRequestId);
+    try {
+      await ipc.chatAbort(state.activeRequestId);
+    } catch (e) {
+      console.warn("[chat] chatAbort 失败:", e);
+    }
   }
   // 立即结束流式状态，不依赖后端兜底 Done chunk。
   // abort 后后端的兜底 Done 会被 request_id 校验过滤（activeRequestId 已清空）。
@@ -456,10 +460,10 @@ function handleConfirmEvent(event) {
  * 对话标题自动更新事件处理（0.12.5 §5.3）。
  * LLM 生成标题后后端 emit `chat-title-updated`，前端更新 header + 刷新侧边栏。
  */
-function handleTitleUpdated(event) {
+async function handleTitleUpdated(event) {
   const { conversation_id, title } = event.payload;
   if (conversation_id === state.conversationId) {
-    updateConversationTitle(title);
+    await updateBreadcrumb(title);
   }
   refreshSidebar();
 }
@@ -540,15 +544,16 @@ function handleVoiceError(event) {
 
 // ── 新对话 ──────────────────────────────────────
 
-function handleNewConversation() {
+async function handleNewConversation(groupId = null) {
   if (state.isStreaming) {
     handleStop();
   }
   state.resetConversation();
+  state.setCurrentGroupId(groupId);
   components.clearMessages();
   components.renderEmptyState(state.providerConfigured, openSettings);
   setActiveConversation(state.conversationId);
-  updateConversationTitle("新对话");
+  await updateBreadcrumb("新对话");
   refreshSidebar();
   focusInput();
 }
@@ -558,13 +563,14 @@ function handleNewConversation() {
  * 停止当前生成 → 设置 conversation_id → 从后端加载历史消息 → 渲染。
  * @param {string} conversationId
  */
-async function handleSwitchConversation(conversationId) {
+async function handleSwitchConversation(conversationId, groupId = null) {
   if (state.isStreaming) {
     handleStop();
   }
 
   // 更新 state（0.12.4 §6.1：用 setter 替代直接赋值，避免 ES module 只读绑定 TypeError）
   state.setConversationId(conversationId);
+  state.setCurrentGroupId(groupId);
   state.messages.length = 0;
   state.setStreaming(false);
   state.setActiveRequestId(null);
@@ -610,10 +616,11 @@ async function handleSwitchConversation(conversationId) {
     components.renderEmptyState(state.providerConfigured, openSettings);
   }
 
-  // 0.12.4 §6.4：切换对话后更新 header 标题
+  // 0.12.7 §1：切换对话后更新面包屑（使用 DB 中的 group_id 更可靠）
   const convs = await ipc.listChatConversations();
   const conv = convs.find((c) => c.id === conversationId);
-  updateConversationTitle(conv?.title || "新对话");
+  state.setCurrentGroupId(conv?.group_id || groupId);
+  await updateBreadcrumb(conv?.title || "新对话");
 
   focusInput();
 }
@@ -625,9 +632,9 @@ async function handleSwitchConversation(conversationId) {
  * @param {string} conversationId
  * @param {string} newTitle
  */
-function handleSidebarRenamed(conversationId, newTitle) {
+async function handleSidebarRenamed(conversationId, newTitle) {
   if (conversationId === state.conversationId) {
-    updateConversationTitle(newTitle);
+    await updateBreadcrumb(newTitle);
   }
 }
 
@@ -647,27 +654,84 @@ async function handleExportConversation(conversationId, title) {
   }
 }
 
-// ── 对话标题（0.12.4 §6.4） ────────────────────────
+// ── 面包屑标题（0.12.7 §1） ────────────────────────
 
 /**
- * 更新 header 中的对话标题显示。
- * @param {string} title
+ * 构建分组路径（从根到当前分组的链路）。
+ * @param {Array} groups 平铺分组列表
+ * @param {string|null} groupId 当前分组 ID
+ * @returns {Array<{id: string, name: string, systemPrompt: string|null}>} 路径段数组（从根到当前）
  */
-function updateConversationTitle(title) {
-  const titleEl = document.getElementById("chat-conversation-title");
-  if (titleEl) {
-    titleEl.textContent = title || "新对话";
+function buildGroupPath(groups, groupId) {
+  if (!groupId) return [];
+  const map = new Map(groups.map(g => [g.id, g]));
+  const path = [];
+  let cur = groupId;
+  while (cur) {
+    const g = map.get(cur);
+    if (!g) break;
+    path.unshift({
+      id: g.id,
+      name: g.name,
+      systemPrompt: g.system_prompt || null,
+    });
+    cur = g.parent_id || null;
   }
+  return path;
 }
 
 /**
- * 绑定对话标题点击 → 内联编辑（等同重命名）。
+ * 更新面包屑标题：文件夹路径 + 对话标题。
+ * 异步获取分组列表，构建从根到当前分组的路径，渲染为面包屑。
+ * 仅对话标题（最后一段）可编辑，文件夹段为静态展示。
+ * 直属分组有系统提示词时，在该段显示 accent 圆点指示器。
+ * @param {string} title 对话标题
  */
-function bindConversationTitleEdit() {
-  const titleEl = document.getElementById("chat-conversation-title");
-  if (!titleEl) return;
+async function updateBreadcrumb(title) {
+  const breadcrumbEl = document.getElementById("chat-breadcrumb");
+  if (!breadcrumbEl) return;
 
-  titleEl.addEventListener("click", async () => {
+  // 编辑中不更新（避免破坏 input）
+  if (breadcrumbEl.querySelector(".chat-title-edit-input")) return;
+
+  // 获取分组列表，构建路径
+  let path = [];
+  if (state.currentGroupId) {
+    try {
+      const groups = await ipc.listConversationGroups();
+      path = buildGroupPath(groups, state.currentGroupId);
+    } catch (e) {
+      console.warn("[chat] 获取分组列表失败:", e);
+    }
+  }
+
+  // 渲染面包屑：文件夹段 + 分隔符 + 对话标题
+  let html = "";
+  for (let i = 0; i < path.length; i++) {
+    const seg = path[i];
+    const isDirectGroup = i === path.length - 1;
+    // 仅直属分组显示系统提示词指示器（ancestor 的提示词不继承）
+    const hasPromptCls = isDirectGroup && seg.systemPrompt ? " has-prompt" : "";
+    const segTitle = seg.systemPrompt ? `${seg.name}（含系统提示词）` : seg.name;
+    html += `<span class="chat-breadcrumb-segment${hasPromptCls}" title="${escapeAttr(segTitle)}">${escapeText(seg.name)}</span>`;
+    html += `<span class="chat-breadcrumb-sep">/</span>`;
+  }
+  html += `<span class="chat-breadcrumb-title" id="chat-conversation-title" title="点击重命名">${escapeText(title || "新对话")}</span>`;
+  breadcrumbEl.innerHTML = html;
+}
+
+/**
+ * 绑定面包屑标题编辑（事件委托，支持 innerHTML 重渲染后仍生效）。
+ * 点击对话标题段 → 内联编辑 → Enter 确认（重命名）/ Esc 取消。
+ */
+function bindBreadcrumbEdit() {
+  const breadcrumbEl = document.getElementById("chat-breadcrumb");
+  if (!breadcrumbEl) return;
+
+  breadcrumbEl.addEventListener("click", (e) => {
+    const titleEl = e.target.closest(".chat-breadcrumb-title");
+    if (!titleEl) return;
+
     const oldTitle = titleEl.textContent;
     const input = document.createElement("input");
     input.type = "text";
@@ -679,10 +743,14 @@ function bindConversationTitleEdit() {
 
     let confirmed = false;
 
-    // 将 input 替换回原始 span 元素（引用在闭包中保持），并更新文本
-    const restoreSpan = (text) => {
-      input.replaceWith(titleEl);
-      titleEl.textContent = text;
+    /** 创建新的标题 span 替换 input */
+    const restoreTitle = (text) => {
+      const span = document.createElement("span");
+      span.className = "chat-breadcrumb-title";
+      span.id = "chat-conversation-title";
+      span.textContent = text;
+      span.title = "点击重命名";
+      input.replaceWith(span);
     };
 
     const finishEdit = async () => {
@@ -692,14 +760,14 @@ function bindConversationTitleEdit() {
       if (newTitle && newTitle !== oldTitle) {
         try {
           await ipc.renameChatConversation(state.conversationId, newTitle);
-          restoreSpan(newTitle);
+          restoreTitle(newTitle);
           refreshSidebar();
         } catch (err) {
           console.error("[chat] 重命名失败:", err);
-          restoreSpan(oldTitle);
+          restoreTitle(oldTitle);
         }
       } else {
-        restoreSpan(oldTitle);
+        restoreTitle(oldTitle);
       }
     };
 
@@ -709,7 +777,7 @@ function bindConversationTitleEdit() {
         finishEdit();
       } else if (ev.key === "Escape") {
         confirmed = true;
-        restoreSpan(oldTitle);
+        restoreTitle(oldTitle);
       }
     });
     input.addEventListener("blur", finishEdit);
@@ -903,6 +971,11 @@ function escapeText(text) {
   const div = document.createElement("div");
   div.textContent = String(text ?? "");
   return div.innerHTML;
+}
+
+/** 属性转义（用于 data-* 和 title 属性，防 XSS）。 */
+function escapeAttr(text) {
+  return String(text ?? "").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 // ── 绑定 header 按钮 ───────────────────────────

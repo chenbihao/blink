@@ -317,18 +317,40 @@ pub fn hide_chat_window(app: tauri::AppHandle) {
 ///
 /// 返回 `request_id`，前端据此过滤已中止请求的尾部 chunk。
 /// 若已有 active request，返回错误。
+///
+/// 0.12.6：`group_id` 参数注入分组级系统提示词——设置对话所属分组后，
+/// 查询分组系统提示词并传给 ChatService，影响 Agent 行为约束。
 #[tauri::command]
 pub async fn chat_prompt(
     app: tauri::AppHandle,
     conversation_id: String,
     message: String,
+    group_id: Option<String>,
 ) -> Result<u64, String> {
     let chat = app
         .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
         .ok_or("ChatService 未注册")?;
 
+    // 0.12.6: 设置对话分组（group_id = Some 时设置；None 时保持现有分组）
+    let pools = app.state::<crate::infra::data::DbPools>();
+    if let Some(ref gid) = group_id {
+        crate::infra::data::conversations::set_conversation_group(
+            &pools.ai,
+            &conversation_id,
+            Some(gid),
+        )
+        .await?;
+    }
+    // 查询有效系统提示词（基于对话当前所属分组的 system_prompt）
+    let group_system_prompt = crate::infra::data::conversations::get_effective_system_prompt(
+        &pools.ai,
+        &conversation_id,
+    )
+    .await
+    .unwrap_or(None);
+
     let handle = chat
-        .prompt(conversation_id, message)
+        .prompt(conversation_id, message, group_system_prompt)
         .await
         .map_err(|e| e.to_string())?;
     let request_id = handle.request_id;
@@ -911,6 +933,112 @@ pub async fn truncate_messages(
         .await?;
     tracing::info!(%conversation_id, keep_count, "truncate_messages: 消息已截断");
     Ok(())
+}
+
+// ── 对话分组管理（0.12.6）──────────────────────────────────────────────────────
+
+/// 列出所有对话分组（按 sort_order 升序，含 parent_id 供前端构建树）。
+#[tauri::command]
+pub async fn list_conversation_groups(
+    app: tauri::AppHandle,
+) -> Result<Vec<crate::infra::data::conversations::ConversationGroup>, String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    Ok(crate::infra::data::conversations::list_groups(&pools.ai).await)
+}
+
+/// 创建对话分组。
+///
+/// `parent_id` 为 None 表示顶层分组。`id` 由前端 `crypto.randomUUID()` 生成。
+#[tauri::command]
+pub async fn create_conversation_group(
+    app: tauri::AppHandle,
+    id: String,
+    name: String,
+    parent_id: Option<String>,
+) -> Result<(), String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    crate::infra::data::conversations::create_group(&pools.ai, &id, &name, parent_id.as_deref())
+        .await?;
+    tracing::info!(%id, %name, "对话分组已创建");
+    Ok(())
+}
+
+/// 重命名对话分组。
+#[tauri::command]
+pub async fn rename_conversation_group(
+    app: tauri::AppHandle,
+    group_id: String,
+    name: String,
+) -> Result<bool, String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    crate::infra::data::conversations::rename_group(&pools.ai, &group_id, &name).await
+}
+
+/// 删除对话分组。
+///
+/// 组内对话移至默认（group_id = NULL），子分组 re-parent 到被删分组的父级。
+#[tauri::command]
+pub async fn delete_conversation_group(
+    app: tauri::AppHandle,
+    group_id: String,
+) -> Result<bool, String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    crate::infra::data::conversations::delete_group(&pools.ai, &group_id).await
+}
+
+/// 更新分组的系统提示词。`prompt` 为 None 时清除。
+#[tauri::command]
+pub async fn update_conversation_group_system_prompt(
+    app: tauri::AppHandle,
+    group_id: String,
+    prompt: Option<String>,
+) -> Result<bool, String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    crate::infra::data::conversations::update_group_system_prompt(
+        &pools.ai,
+        &group_id,
+        prompt.as_deref(),
+    )
+    .await
+}
+
+/// 移动对话到指定分组。`group_id` 为 None 移至默认组。
+#[tauri::command]
+pub async fn move_conversation_to_group(
+    app: tauri::AppHandle,
+    conversation_id: String,
+    group_id: Option<String>,
+) -> Result<(), String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    crate::infra::data::conversations::set_conversation_group(
+        &pools.ai,
+        &conversation_id,
+        group_id.as_deref(),
+    )
+    .await
+}
+
+/// 设置分组排序权重（拖拽排序用）。
+#[tauri::command]
+pub async fn set_group_sort_order(
+    app: tauri::AppHandle,
+    group_id: String,
+    sort_order: i64,
+) -> Result<(), String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    crate::infra::data::conversations::set_group_sort_order(&pools.ai, &group_id, sort_order)
+        .await
+}
+
+/// 设置分组折叠状态。
+#[tauri::command]
+pub async fn set_group_expanded(
+    app: tauri::AppHandle,
+    group_id: String,
+    expanded: bool,
+) -> Result<(), String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    crate::infra::data::conversations::set_group_expanded(&pools.ai, &group_id, expanded).await
 }
 
 /// 列出所有内置动作元数据 + 当前 enabled 状态（0.8.0 §1.3 / 0.8.6 §8.2.4 i18n）。
@@ -1647,7 +1775,7 @@ pub async fn clear_ai_audit(app: tauri::AppHandle) -> Result<(), String> {
 pub fn open_data_folder() -> Result<(), String> {
     let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
     let data_dir = std::path::PathBuf::from(&appdata).join("blink");
-    // 目录不存在时先创建，避免 explorer 打开“文档”等默认位置
+    // 目录不存在时先创建，避免 explorer 打开"文档"等默认位置
     if !data_dir.exists() {
         if let Err(e) = std::fs::create_dir_all(&data_dir) {
             return Err(format!("创建数据目录失败: {e}"));
@@ -1657,6 +1785,23 @@ pub fn open_data_folder() -> Result<(), String> {
         .arg(&data_dir)
         .spawn()
         .map_err(|e| format!("打开文件夹失败: {e}"))?;
+    Ok(())
+}
+
+/// 清除 `migration_failed` 标记，让下次启动重试旧库迁移。
+///
+/// 用户点击"重试迁移"按钮时调用。清除标记后提示用户重启 Blink。
+#[tauri::command]
+pub async fn retry_migration(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    let pools = app
+        .try_state::<std::sync::Arc<crate::infra::data::pools::DbPools>>()
+        .ok_or("DB pools 未初始化")?;
+    sqlx::query("DELETE FROM config WHERE key = 'migration_failed'")
+        .execute(&pools.config)
+        .await
+        .map_err(|e| format!("清除迁移标记失败: {e}"))?;
+    tracing::info!("已清除 migration_failed 标记，用户需重启生效");
     Ok(())
 }
 

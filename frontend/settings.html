@@ -1166,11 +1166,14 @@
           <div class="setting-row">
             <label class="setting-label" data-i18n="storage.data_dir.label">数据目录</label>
             <span id="data-dir" class="value">-</span>
+            <button id="open-data-folder" class="btn-small" data-i18n="storage.open_folder">打开文件夹</button>
           </div>
 
           <!-- P2.7: 迁移失败警告（旧库迁移失败时显示）-->
           <div id="migration-warning" class="setting-row migration-warning" hidden>
+            <span class="migration-warning-icon">⚠</span>
             <span data-i18n="storage.migration_failed">旧数据库迁移失败，部分数据可能未迁移，请重试或检查日志。</span>
+            <button id="retry-migration" class="btn-small" data-i18n="storage.retry_migration">重试迁移</button>
           </div>
 
           <!-- 四库统计卡片 -->
@@ -1249,10 +1252,6 @@
             <label class="setting-label" data-i18n="storage.cache.label">缓存库</label>
             <button id="clear-cache-db" class="btn-danger" data-i18n="storage.clear_cache">清空缓存</button>
           </div>
-          <div class="setting-row">
-            <label class="setting-label" data-i18n="storage.open_folder.label">数据目录</label>
-            <button id="open-data-folder" class="btn-secondary" data-i18n="storage.open_folder">打开文件夹</button>
-          </div>
         </div>
 
         <!-- 调试 -->
@@ -1278,17 +1277,17 @@
           </div>
 
           <div class="setting-row">
+            <label class="setting-label" data-i18n="log.action.label">操作</label>
+            <button id="open-log-file" class="btn-small" data-i18n="log.open_file">打开日志</button>
+            <button id="open-log-dir" class="btn-small" data-i18n="log.open_dir">打开文件夹</button>
+          </div>
+
+          <div class="setting-row">
             <label class="setting-label" data-i18n="log.ai_verbose.label">AI 对话完全打印日志<span class="field-hint-icon" data-i18n-title="log.ai_verbose.hint">ⓘ</span></label>
             <label class="checkbox-wrap">
               <input type="checkbox" id="ai-verbose-log">
               <span class="checkbox-custom"></span>
             </label>
-          </div>
-
-          <div class="setting-row">
-            <label class="setting-label" data-i18n="log.action.label">操作</label>
-            <button id="open-log-file" class="btn-small" data-i18n="log.open_file">打开日志</button>
-            <button id="open-log-dir" class="btn-small" data-i18n="log.open_dir">打开文件夹</button>
           </div>
 
           <!-- 性能统计区 -->

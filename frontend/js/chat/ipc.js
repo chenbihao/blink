@@ -10,12 +10,17 @@ import { invoke, listen } from "../tauri.js";
 
 /**
  * 启动对话 prompt。
+ *
+ * 0.12.6：新增可选 `groupId` 参数——设置对话所属分组并注入分组级系统提示词。
+ * 传 null/undefined 时保持现有分组不变（后端查询对话当前分组的 system_prompt）。
+ *
  * @param {string} conversationId
  * @param {string} message
+ * @param {string|null} [groupId] 分组 ID（0.12.6）
  * @returns {Promise<number>} request_id
  */
-export function chatPrompt(conversationId, message) {
-  return invoke("chat_prompt", { conversationId, message });
+export function chatPrompt(conversationId, message, groupId = null) {
+  return invoke("chat_prompt", { conversationId, message, groupId });
 }
 
 /**
@@ -236,6 +241,86 @@ export function generateConversationTitle(conversationId, firstMessage) {
  */
 export function truncateMessages(conversationId, keepCount) {
   return invoke("truncate_messages", { conversationId, keepCount });
+}
+
+// ── 对话分组（0.12.6）──────────────────────────────────────────
+
+/**
+ * 列出所有对话分组（按 sort_order 升序，含 parent_id 供前端构建树）。
+ * @returns {Promise<Array<{id: string, name: string, system_prompt?: string, parent_id?: string, sort_order: number, expanded: boolean, created_at: number}>>}
+ */
+export function listConversationGroups() {
+  return invoke("list_conversation_groups");
+}
+
+/**
+ * 创建对话分组。`id` 由前端 `crypto.randomUUID()` 生成。
+ * @param {string} id 分组 ID（前端生成）
+ * @param {string} name 分组名
+ * @param {string|null} [parentId] 父分组 ID（null = 顶层）
+ * @returns {Promise<void>}
+ */
+export function createConversationGroup(id, name, parentId = null) {
+  return invoke("create_conversation_group", { id, name, parentId });
+}
+
+/**
+ * 重命名对话分组。
+ * @param {string} groupId
+ * @param {string} name 新名称
+ * @returns {Promise<boolean>}
+ */
+export function renameConversationGroup(groupId, name) {
+  return invoke("rename_conversation_group", { groupId, name });
+}
+
+/**
+ * 删除对话分组。组内对话移至默认（group_id = NULL），子分组 re-parent。
+ * @param {string} groupId
+ * @returns {Promise<boolean>}
+ */
+export function deleteConversationGroup(groupId) {
+  return invoke("delete_conversation_group", { groupId });
+}
+
+/**
+ * 更新分组的系统提示词。`prompt` 为 null 时清除。
+ * @param {string} groupId
+ * @param {string|null} prompt 系统提示词（null = 清除）
+ * @returns {Promise<boolean>}
+ */
+export function updateConversationGroupSystemPrompt(groupId, prompt) {
+  return invoke("update_conversation_group_system_prompt", { groupId, prompt });
+}
+
+/**
+ * 移动对话到指定分组。`groupId` 为 null 移至默认组。
+ * @param {string} conversationId
+ * @param {string|null} groupId 目标分组 ID（null = 默认组）
+ * @returns {Promise<void>}
+ */
+export function moveConversationToGroup(conversationId, groupId) {
+  return invoke("move_conversation_to_group", { conversationId, groupId });
+}
+
+/**
+ * 设置分组排序权重（拖拽排序用）。
+ * @param {string} groupId
+ * @param {number} sortOrder
+ * @returns {Promise<void>}
+ */
+export function setGroupSortOrder(groupId, sortOrder) {
+  return invoke("set_group_sort_order", { groupId, sortOrder });
+}
+
+/**
+ * 设置分组折叠状态。
+ * @param {string} groupId
+ * @param {boolean} expanded true=展开, false=折叠
+ * @returns {Promise<void>}
+ */
+export function setGroupExpanded(groupId, expanded) {
+  return invoke("set_group_expanded", { groupId, expanded });
 }
 
 // ── Events ───────────────────────────────────────

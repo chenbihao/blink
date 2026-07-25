@@ -172,7 +172,8 @@ impl ActionOutcome {
             }
             ActionOutcome::Open { path } => {
                 vec![ToolResultContent::text(
-                    serde_json::json!({ "type": "open", "path": path }).to_string(),
+                    serde_json::json!({ "type": "open", "path": path, "success": true })
+                        .to_string(),
                 )]
             }
             ActionOutcome::Emit { event, payload } => {
@@ -182,8 +183,11 @@ impl ActionOutcome {
                 )]
             }
             ActionOutcome::Nop => {
+                // Nop 表示操作已成功执行但无返回值（如打开设置页/切换主题）。
+                // 必须明确告知 AI 操作成功，避免 AI 将空响应误解为失败而重试。
                 vec![ToolResultContent::text(
-                    serde_json::json!({ "type": "nop" }).to_string(),
+                    serde_json::json!({ "type": "nop", "success": true, "message": "操作已成功执行" })
+                        .to_string(),
                 )]
             }
             ActionOutcome::Items { items } => {

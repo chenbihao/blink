@@ -52,6 +52,117 @@ pub async fn get_all_config(pool: &SqlitePool) -> HashMap<String, String> {
     rows.into_iter().collect()
 }
 
+// ── 配置迁移（0.4→0.5 + camelCase→snake_case，从 history.rs 迁入）────────────
+
+/// 0.4→0.5 自动迁移：为每个插件初始化默认配置（`plugin:{id}` 不存在则写入默认）。
+/// 迁移完成后写 marker，下次不再执行。
+pub async fn migrate_0_4_to_0_5(
+    pool: &SqlitePool,
+    plugins: &[std::sync::Arc<crate::domain::plugin::PluginHandle>],
+) {
+    const MARKER_KEY: &str = "migration_0_5_done";
+
+    if get_config(pool, MARKER_KEY).await.is_some() {
+        return;
+    }
+    tracing::info!("开始执行 0.4→0.5 配置迁移");
+
+    for plugin in plugins {
+        let plugin_id = plugin.id();
+        let key = format!("plugin:{plugin_id}");
+        if get_config(pool, &key).await.is_none() {
+            let mut default_config = crate::app::config::PluginConfig::default();
+            default_config.settings = plugin.manifest().default_settings();
+            match serde_json::to_string(&default_config) {
+                Ok(json) => {
+                    if let Err(e) = set_config(pool, &key, &json).await {
+                        tracing::warn!(plugin = %plugin_id, error = %e, "插件配置写入失败");
+                    } else {
+                        tracing::info!(plugin = %plugin_id, "初始化插件默认配置");
+                    }
+                }
+                Err(e) => tracing::warn!(plugin = %plugin_id, error = %e, "插件配置初始化失败"),
+            }
+        }
+    }
+
+    if let Err(e) = set_config(pool, MARKER_KEY, "1").await {
+        tracing::warn!(error = %e, "迁移标记写入失败");
+    }
+    tracing::info!("0.4→0.5 配置迁移完成");
+}
+
+/// 0.9.5 前端重构把 camelCase 字段名统一为 snake_case。
+/// 存量 DB 中的旧 JSON 仍是 camelCase，此迁移把字段名改写为 snake_case，跑一次后写 marker 跳过。
+pub async fn migrate_camelcase_to_snake(pool: &SqlitePool) {
+    const MARKER_KEY: &str = "migration_camelcase_to_snake_done";
+    if get_config(pool, MARKER_KEY).await.is_some() {
+        return;
+    }
+    tracing::info!("开始执行 camelCase→snake_case 配置迁移");
+
+    let general_map: &[(&str, &str)] = &[
+        ("searchHistoryEnabled", "search_history_enabled"),
+        ("searchHistoryDays", "search_history_days"),
+        ("maxResults", "max_results"),
+        ("pageSize", "page_size"),
+    ];
+    let start_menu_map: &[(&str, &str)] =
+        &[("scanDepth", "scan_depth"), ("includeUwp", "include_uwp")];
+    let file_search_map: &[(&str, &str)] = &[
+        ("dataSource", "data_source"),
+        ("everythingPort", "everything_port"),
+        ("maxResults", "max_results"),
+        ("localDirs", "local_dirs"),
+        ("localMaxDepth", "local_max_depth"),
+        ("localCacheTtlSec", "local_cache_ttl_sec"),
+        ("localMaxResults", "local_max_results"),
+    ];
+
+    let tasks: &[(&str, &[(&str, &str)])] = &[
+        ("general_config", general_map),
+        ("engine:start_menu", start_menu_map),
+        ("engine:file_search", file_search_map),
+    ];
+
+    for &(key, ref map) in tasks {
+        let Some(json_str) = get_config(pool, key).await else {
+            continue;
+        };
+        let Ok(mut obj) = serde_json::from_str::<serde_json::Value>(&json_str) else {
+            tracing::warn!(key, "配置 JSON 解析失败，跳过迁移");
+            continue;
+        };
+        let Some(map_obj) = obj.as_object_mut() else {
+            continue;
+        };
+        let mut changed = false;
+        for &(from, to) in map.iter() {
+            if let Some(val) = map_obj.remove(from) {
+                map_obj.insert(to.to_string(), val);
+                changed = true;
+            }
+        }
+        if changed {
+            match serde_json::to_string(&obj) {
+                Ok(new_json) => {
+                    if let Err(e) = set_config(pool, key, &new_json).await {
+                        tracing::warn!(key, error = %e, "迁移写入失败");
+                    } else {
+                        tracing::info!(key, "camelCase→snake_case 迁移完成");
+                    }
+                }
+                Err(e) => tracing::warn!(key, error = %e, "迁移序列化失败"),
+            }
+        }
+    }
+
+    if let Err(e) = set_config(pool, MARKER_KEY, "1").await {
+        tracing::warn!(error = %e, "迁移标记写入失败");
+    }
+    tracing::info!("camelCase→snake_case 配置迁移完成");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

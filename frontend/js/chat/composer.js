@@ -269,6 +269,8 @@ function autoResize() {
 
 function updateSendButtonState() {
   if (!sendBtn || !textarea) return;
+  // 流式模式（停止按钮）或语音录音期间不受输入框文本影响
+  if (sendBtn.classList.contains("chat-stop-btn")) return;
   if (voiceRecording) {
     sendBtn.disabled = true;
     return;

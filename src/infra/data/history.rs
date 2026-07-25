@@ -1,125 +1,11 @@
 //! 历史记录：SQLite 存储执行次数，用于搜索结果频率加权。
+//!
+//! 配置迁移函数（`migrate_0_4_to_0_5` / `migrate_camelcase_to_snake`）已迁至 `config.rs`，
+//! 此处通过 `pub use` 重导出保持向后兼容。
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use sqlx::SqlitePool;
-
-/// 0.4→0.5 自动迁移：
-/// 1. ~~`app_config.file_search` → `engine:file_search`~~（已移除，未发版不需要）
-/// 2. 为每个插件初始化默认配置（`plugin:{id}` 不存在则写入默认）
-/// 3. 迁移完成后写 marker，下次不再执行
-pub async fn migrate_0_4_to_0_5(
-    pool: &SqlitePool,
-    plugins: &[Arc<crate::domain::plugin::PluginHandle>],
-) {
-    const MARKER_KEY: &str = "migration_0_5_done";
-
-    // 检查是否已迁移过
-    if get_config(pool, MARKER_KEY).await.is_some() {
-        return;
-    }
-    tracing::info!("开始执行 0.4→0.5 配置迁移");
-
-    // ── 1. 初始化插件默认配置 ──
-    for plugin in plugins {
-        let plugin_id = plugin.id();
-        let key = format!("plugin:{plugin_id}");
-        if get_config(pool, &key).await.is_none() {
-            let mut default_config = crate::app::config::PluginConfig::default();
-            default_config.settings = plugin.manifest().default_settings();
-            match serde_json::to_string(&default_config) {
-                Ok(json) => {
-                    if let Err(e) = set_config(pool, &key, &json).await {
-                        tracing::warn!(plugin = %plugin_id, error = %e, "插件配置写入失败");
-                    } else {
-                        tracing::info!(plugin = %plugin_id, "初始化插件默认配置");
-                    }
-                }
-                Err(e) => tracing::warn!(plugin = %plugin_id, error = %e, "插件配置初始化失败"),
-            }
-        }
-    }
-
-    // 标记迁移完成
-    if let Err(e) = set_config(pool, MARKER_KEY, "1").await {
-        tracing::warn!(error = %e, "迁移标记写入失败");
-    }
-    tracing::info!("0.4→0.5 配置迁移完成");
-}
-
-/// 0.9.5 前端重构把 camelCase 字段名统一为 snake_case，同时移除了后端 `serde(rename_all = "camelCase")`。
-/// 存量 DB 中的旧 JSON 仍是 camelCase，直接反序列化会静默 fallback 默认值（用户配置丢失）。
-/// 此迁移把三个 config key 的字段名从 camelCase 改写为 snake_case，跑一次后写 marker 跳过。
-pub async fn migrate_camelcase_to_snake(pool: &SqlitePool) {
-    const MARKER_KEY: &str = "migration_camelcase_to_snake_done";
-    if get_config(pool, MARKER_KEY).await.is_some() {
-        return;
-    }
-    tracing::info!("开始执行 camelCase→snake_case 配置迁移");
-
-    // 字段映射表：camelCase → snake_case
-    let general_map: &[(&str, &str)] = &[
-        ("searchHistoryEnabled", "search_history_enabled"),
-        ("searchHistoryDays", "search_history_days"),
-        ("maxResults", "max_results"),
-        ("pageSize", "page_size"),
-    ];
-    let start_menu_map: &[(&str, &str)] =
-        &[("scanDepth", "scan_depth"), ("includeUwp", "include_uwp")];
-    let file_search_map: &[(&str, &str)] = &[
-        ("dataSource", "data_source"),
-        ("everythingPort", "everything_port"),
-        ("maxResults", "max_results"),
-        ("localDirs", "local_dirs"),
-        ("localMaxDepth", "local_max_depth"),
-        ("localCacheTtlSec", "local_cache_ttl_sec"),
-        ("localMaxResults", "local_max_results"),
-    ];
-
-    let tasks: &[(&str, &[(&str, &str)])] = &[
-        ("general_config", general_map),
-        ("engine:start_menu", start_menu_map),
-        ("engine:file_search", file_search_map),
-    ];
-
-    for &(key, ref map) in tasks {
-        let Some(json_str) = get_config(pool, key).await else {
-            continue;
-        };
-        let Ok(mut obj) = serde_json::from_str::<serde_json::Value>(&json_str) else {
-            tracing::warn!(key, "配置 JSON 解析失败，跳过迁移");
-            continue;
-        };
-        let Some(map_obj) = obj.as_object_mut() else {
-            continue;
-        };
-        let mut changed = false;
-        for &(from, to) in map.iter() {
-            if let Some(val) = map_obj.remove(from) {
-                map_obj.insert(to.to_string(), val);
-                changed = true;
-            }
-        }
-        if changed {
-            match serde_json::to_string(&obj) {
-                Ok(new_json) => {
-                    if let Err(e) = set_config(pool, key, &new_json).await {
-                        tracing::warn!(key, error = %e, "迁移写入失败");
-                    } else {
-                        tracing::info!(key, "camelCase→snake_case 迁移完成");
-                    }
-                }
-                Err(e) => tracing::warn!(key, error = %e, "迁移序列化失败"),
-            }
-        }
-    }
-
-    if let Err(e) = set_config(pool, MARKER_KEY, "1").await {
-        tracing::warn!(error = %e, "迁移标记写入失败");
-    }
-    tracing::info!("camelCase→snake_case 配置迁移完成");
-}
 
 /// 记录一次执行：存在则 hit_count+1，不存在则插入。
 pub async fn record_launch(pool: &SqlitePool, lnk_path: &str) {
@@ -199,7 +85,10 @@ pub async fn cleanup_old(pool: &SqlitePool, days: u32) {
 // ── 配置访问层（0.12.0 §2.2.3 迁移到 infra/data/config.rs）────────────────────
 //
 // 向后兼容重导出——现有调用点 `history::get_config` 等无需改动。
-pub use crate::infra::data::config::{delete_config, get_all_config, get_config, set_config};
+pub use crate::infra::data::config::{
+    delete_config, get_all_config, get_config, set_config, migrate_0_4_to_0_5,
+    migrate_camelcase_to_snake,
+};
 
 #[cfg(test)]
 mod tests {

@@ -7,6 +7,9 @@
 /** @type {string} 当前 conversation_id，新对话时重新生成 */
 export let conversationId = crypto.randomUUID();
 
+/** @type {string|null} 当前对话所属分组 ID（0.12.6，null = 默认/未分组） */
+export let currentGroupId = null;
+
 /** @type {Array<{role: string, content: string, toolName?: string, error?: boolean}>} */
 export let messages = [];
 
@@ -93,6 +96,11 @@ export function setConversationId(id) {
   conversationId = id;
 }
 
+/** 设置当前对话所属分组 ID（0.12.6）。 */
+export function setCurrentGroupId(id) {
+  currentGroupId = id ?? null;
+}
+
 /** 记录一个进行中的 Tool 卡片（按 call_id 索引）。 */
 export function trackToolCall(callId, entry) {
   if (callId) toolCalls.set(callId, entry);
@@ -126,5 +134,6 @@ export function resetConversation() {
   isThinking = false;
   toolCalls.clear();
   lastUsage = null;
+  currentGroupId = null; // 0.12.6：重置分组上下文
   return conversationId;
 }

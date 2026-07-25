@@ -289,9 +289,14 @@ impl AgentProvider {
                         }
                     }
                 }
-                Ok(_) => continue,
+                Ok(_) => {
+                    tracing::trace!("run_stream: unknown MultiTurnStreamItem variant, skipped");
+                    continue;
+                }
                 Err(e) => {
                     // 0.12.3 Phase C: 检测 MaxTurnsError 并 emit MaxTurnsReached
+                    // 注意：这里用字符串匹配检测 MaxTurnsError，如果 rig 升级后错误消息
+                    // 格式变化，此检测会失效。若 rig 后续暴露类型化错误，应改用 downcast_ref。
                     let msg = format!("{e}");
                     if msg.contains("MaxTurnsError") || msg.contains("max turns") {
                         ChatStreamChunk::MaxTurnsReached {

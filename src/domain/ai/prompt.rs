@@ -238,6 +238,22 @@ pub fn chat_system_prompt() -> String {
     )
 }
 
+/// 带分组系统提示词的 chat system prompt（0.12.6）。
+///
+/// 在基础 system prompt 之后追加分组级系统提示词（如果有）。
+/// 分组提示词用于给特定场景下的对话设定角色或行为约束，如"你是翻译助手"。
+///
+/// `group_prompt` 为 None 或空字符串时，退化为 `chat_system_prompt()`。
+pub fn chat_system_prompt_with_group(group_prompt: Option<&str>) -> String {
+    let base = chat_system_prompt();
+    match group_prompt {
+        Some(p) if !p.is_empty() => {
+            format!("{base}\n\n【分组指令】\n{p}")
+        }
+        _ => base,
+    }
+}
+
 /// 工具列表文字段（含 name + description + 参数摘要 + hint）。
 ///
 /// **分层详略**（§3.8）：system prompt 文字段只含 name + 一句话 description + 参数名
@@ -582,6 +598,26 @@ mod tests {
         assert!(prompt.contains("用户确认"));
         assert!(prompt.contains("不要主动退出 Blink"));
         assert!(prompt.contains("跟随用户输入语言"));
+    }
+
+    #[test]
+    fn chat_prompt_with_group_appends_group_prompt() {
+        let prompt = chat_system_prompt_with_group(Some("你是翻译助手"));
+        assert!(prompt.contains("工具"), "基础 prompt 应保留");
+        assert!(prompt.contains("分组指令"));
+        assert!(prompt.contains("你是翻译助手"));
+    }
+
+    #[test]
+    fn chat_prompt_with_group_none_equals_base() {
+        let prompt = chat_system_prompt_with_group(None);
+        assert_eq!(prompt, chat_system_prompt());
+    }
+
+    #[test]
+    fn chat_prompt_with_group_empty_equals_base() {
+        let prompt = chat_system_prompt_with_group(Some(""));
+        assert_eq!(prompt, chat_system_prompt());
     }
 
     /// 辅助：构造单元素 Vec

@@ -243,6 +243,8 @@ export const en = {
   "storage.open_folder.label": "Data folder",
   "storage.open_folder": "Open folder",
   "storage.migration_failed": "Legacy database migration failed. Some data may not have been migrated. Please retry or check the logs.",
+  "storage.retry_migration": "Retry migration",
+  "storage.retry_migration.done": "Migration failure flag cleared. Please restart Blink to retry.",
   "storage.history_count": "{count} records",
   "storage.loading": "Loading…",
 

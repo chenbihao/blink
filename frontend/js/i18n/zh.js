@@ -244,6 +244,8 @@ export const zh = {
   "storage.open_folder.label": "数据目录",
   "storage.open_folder": "打开文件夹",
   "storage.migration_failed": "旧数据库迁移失败，部分数据可能未迁移，请重试或检查日志。",
+  "storage.retry_migration": "重试迁移",
+  "storage.retry_migration.done": "已清除迁移失败标记，请重启 Blink 以重试迁移。",
   "storage.history_count": "{count} 条记录",
   "storage.loading": "加载中…",
 

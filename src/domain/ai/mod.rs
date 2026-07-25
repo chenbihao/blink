@@ -1,7 +1,7 @@
 //! AI 领域层（0.9.1 起）——Provider 抽象 + 意图路由骨架。
 //!
 //! **0.9.1 阶段边界**：
-//! - `spike/` —— Phase 1 抗延迟骨架验证代码（临时；Phase 6 后删除或转正式测试）
+//! - `spike/` —— AI 抗延迟骨架验证测试（`#[cfg(test)]` 门槛，release 零残留）
 //! - `provider.rs` —— `AIProvider` trait（Phase 4 落地，§2.6 类型收窄）
 //! - `message.rs`  —— `ChatMessage` / `Role` / `ToolCall` / `CompletionRequest / Response`
 //! - `registry.rs` —— `AIProviderRegistry` + `ProviderFactory`（Phase 5a 落地，

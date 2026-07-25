@@ -6,10 +6,9 @@
 > 0.9 完成（Agent 地基 + Capability 能力协议层）；
 > 0.10 完成（语音输入）；
 > 0.11 完成（插件 AI toolchain + 截图/OCR/图上翻译）；
-> 0.12.0-0.12.3 完成（DB 四层拆分 / Provider 模型统一 / ollama / Tool 适配层 / 独立 chat 窗口 / Alt+Q chord / 多对话管理 / SQLite 持久化 memory / Tool loop），测试基线 。
-> **0.12.4 进行中**（体验修复与优化：侧边栏 bug 修复 / 模型下拉框修复 / 对话标题与布局优化 / 设置跳转 AI Tab / 语音输入排查与样式复用），**0.12.5 规划中**（功能增强：引导泡泡 / 标题 LLM 命名 / 设置优化 / 消息编辑重发 / 导出 / 代码高亮），**0.12.6 规划中**（对话分组 + 系统提示词）。0.13 扩展 MCP / RAG / Skill。
+> 0.12.0-0.12.6 全部完成（DB 四层拆分 / Provider 模型统一 / ollama / Tool 适配层 / 独立 chat 窗口 / Alt+Q chord / 多对话管理 / SQLite 持久化 memory / Tool loop / 体验修复 / 功能增强 / 对话分组），测试基线 875 passed。0.13 扩展 MCP / RAG / Skill。
 >
-> **更新时间**: 2026-07-25
+> **更新时间**: 2026-07-26
 
 ---
 
@@ -68,7 +67,7 @@
 | **0.10** | [phases/0.10-voice-agent.md](./phases/0.10-voice-agent.md) | 语音输入 —— STT + 语音打字(G1 主窗口输入 / G2 输入法上屏)+ 伪流式 VAD 切句 + FunASR 本地化 + SendInput 文本注入 | ✅ 完成 |
 | **0.11** | [phases/0.11-plugin-ai-toolchain.md](./phases/0.11-plugin-ai-toolchain.md) | 插件通信契约重设计 + AI 调用插件链路完善 + 截图标注增强 + OCR word 级链路 + 阅读模式 + 翻译衔接 + 水印独立图层（0.11.0~0.11.9） | ✅ 完成 |
 | **0.11.10** | [phases/0.11-plugin-ai-toolchain.md](./phases/0.11-plugin-ai-toolchain.md#210-图上翻译--截图交互重构01110) | 图上翻译 + 截图交互重构 —— `overlayLayer` 单例图层（识别/翻译共用一层,`mode` 切换）+ 面板降级为召唤式抽屉 + 工具栏加[选取]默认工具 + 预热 OCR + 误点保护 + 命名 OCR→识别 + line 级批量翻译 + 背景遮罩三档 + 字号自适应 | ✅ 基本完成 |
-| **0.12** | [phases/0.12-ai-ecosystem.md](./phases/0.12-ai-ecosystem.md) | AI 能力架构搭建（0.12.0 基础设施 / 0.12.1 对话窗口 + Alt+Q chord / 0.12.2 Chat 体验优化 / 0.12.3 多对话 + SQLite memory + Tool loop；0.12.4 体验修复与优化；0.12.5 功能增强；0.12.6 对话分组 + 系统提示词） | 0.12.0-0.12.3 完成 / 0.12.4 进行中 |
+| **0.12** | [phases/0.12-ai-ecosystem.md](./phases/0.12-ai-ecosystem.md) | AI 能力架构搭建（0.12.0 基础设施 / 0.12.1 对话窗口 + Alt+Q chord / 0.12.2 Chat 体验优化 / 0.12.3 多对话 + SQLite memory + Tool loop / 0.12.4 体验修复 / 0.12.5 功能增强 / 0.12.6 对话分组 + 系统提示词） | ✅ 完成 |
 | **0.13** | [phases/0.13-ai-capability-expansion.md](./phases/0.13-ai-capability-expansion.md) | AI 调用能力扩展（MCP client 消费外部 tool / RAG 知识库检索 / 记忆向量召回 / MCP server 护城河 / Skill 化 CLI 探索） | 📋 规划中 |
 
 ### 2.3 其他参考
@@ -115,8 +114,9 @@
 | **0.12.1** | 对话窗口骨架（rig Agent spike / AgentProvider / Alt+Q chord / ChatService / chat IPC / 流式 Markdown / 工具可视化 + 危险确认）| ✅ 完成 |
 | **0.12.2** | Chat 体验优化（思考块 / 无边框 / 模型选择 / Provider 标签 / 复制按钮 / Tool 结果 / Token 用量 / Provider 变更响应 / 语音输入）| ✅ 完成 |
 | **0.12.3** | 对话机制（多对话管理 + SQLite 持久化 memory + 滑动窗口 + 重启恢复 + Tool loop 触顶提示）| ✅ 完成 |
-| **0.12.4** | 体验修复与优化（侧边栏 bug 修复 / 模型下拉框 bug 修复 / 对话标题与布局优化 / 设置跳转 AI Tab / 语音输入排查与样式复用）| 🔧 进行中 |
-| **0.12.5** | 功能增强（对话分组 + 分组系统提示词 / 主窗口功能引导泡泡 / 对话标题自动生成）| 📋 规划中 |
+| **0.12.4** | 体验修复与优化（侧边栏 / 模型下拉 / 对话标题 / 设置跳转 / 语音输入 / 工具调用渲染 / 消息宽度）| ✅ 完成 |
+| **0.12.5** | 功能增强（引导泡泡 / LLM 标题命名 / 设置页对话配置 / 消息编辑重发 / 导出 / 代码高亮）| ✅ 完成 |
+| **0.12.6** | 对话分组（多层文件夹 + 分组系统提示词 + 拖拽排序 + 折叠持久化 + 内联管理）| ✅ 完成 |
 | **0.13.x** | AI 调用能力扩展（MCP client / RAG / 记忆向量召回 / MCP server / Skill 化）| 📋 规划中 |
 
 ---
