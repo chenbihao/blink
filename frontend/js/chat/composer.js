@@ -157,6 +157,8 @@ export function showVoiceIndicator() {
     voiceIndicator.querySelector(".voice-wave")?.classList.remove("voice-loading");
   }
   if (sendBtn) sendBtn.disabled = true;
+  // 0.12.4 §6.6：录音期间 textarea 设为 readOnly，防止 Space 穿透
+  if (textarea) textarea.readOnly = true;
 }
 
 /**
@@ -172,6 +174,8 @@ export function hideVoiceIndicator() {
     const label = voiceIndicator.querySelector(".voice-label");
     if (label) label.textContent = "语音输入中";
   }
+  // 0.12.4 §6.6：录音结束恢复 textarea
+  if (textarea) textarea.readOnly = false;
   updateSendButtonState();
   if (textarea) {
     autoResize();

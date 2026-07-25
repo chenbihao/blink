@@ -12,6 +12,7 @@ import { initComposer, setStreamingMode, setInputMode, clearInput, focusInput, s
 import { initSidebar, refreshSidebar, showSidebar, hideSidebar, toggleSidebar, setActiveConversation } from "./sidebar.js";
 import { applyThemeFromConfig } from "../theme.js";
 import { listen, invoke } from "../tauri.js";
+// 0.12.4 §6.5：openSettings 直接用 invoke，不再需要动态 import
 
 /** 流式渲染节流：requestAnimationFrame 句柄 */
 let rafHandle = 0;
@@ -47,6 +48,7 @@ async function init() {
   initSidebar({
     onSwitch: handleSwitchConversation,
     onNew: handleNewConversation,
+    onRenamed: handleSidebarRenamed,
   });
 
   // 注册事件监听
@@ -80,6 +82,9 @@ async function init() {
   // 模型选择器交互
   bindModelSelector();
 
+  // 0.12.4 §6.4：对话标题点击编辑
+  bindConversationTitleEdit();
+
   // Esc 键：生成中 → abort；空闲 → 隐藏窗口
   document.addEventListener("keydown", handleEsc);
 
@@ -100,6 +105,18 @@ async function handleSend(message) {
   components.renderUserMessage(message);
   state.addMessage({ role: "user", content: message });
 
+  // 0.12.4 §6.7：新对话首条消息 → 截断生成标题
+  const isNewConversation = state.messages.length === 1;
+  if (isNewConversation) {
+    const truncatedTitle = message.slice(0, 20) + (message.length > 20 ? "…" : "");
+    try {
+      await ipc.renameChatConversation(state.conversationId, truncatedTitle);
+      updateConversationTitle(truncatedTitle);
+    } catch (e) {
+      console.warn("[chat] 截断标题设置失败:", e);
+    }
+  }
+
   // 切换到流式模式
   setStreamingMode();
   state.setStreaming(true);
@@ -118,7 +135,8 @@ async function handleSend(message) {
   }
 
   clearInput();
-  // 刷新侧边栏（更新 last_active_at）
+  // 刷新侧边栏（更新 last_active_at + 标题）
+  // 注意：对话持久化由 rig memory.append 异步完成，done chunk 到达后再刷新一次
   refreshSidebar();
   setActiveConversation(state.conversationId);
 }
@@ -163,6 +181,10 @@ function handleStreamEvent(event) {
       // 首条 text 到达时标记 thinking 结束（折叠）
       if (state.isThinking) {
         state.setThinking(false);
+      }
+      // tool_call 后 currentAssistantEl 被置 null，新 text 到达时需创建新气泡
+      if (!currentAssistantEl) {
+        currentAssistantEl = components.createAssistantMessage();
       }
       state.appendStreamBuffer(chunk.text);
       scheduleRender();
@@ -273,6 +295,8 @@ function finalizeDone(chunk) {
     });
   }
   finishStreaming();
+  // 持久化已完成（rig memory.append 在 done 前执行），刷新侧边栏更新 last_active_at
+  refreshSidebar();
 }
 
 /**
@@ -390,6 +414,7 @@ function handleNewConversation() {
   components.clearMessages();
   components.renderEmptyState(state.providerConfigured, openSettings);
   setActiveConversation(state.conversationId);
+  updateConversationTitle("新对话");
   refreshSidebar();
   focusInput();
 }
@@ -404,8 +429,8 @@ async function handleSwitchConversation(conversationId) {
     handleStop();
   }
 
-  // 更新 state
-  state.conversationId = conversationId;
+  // 更新 state（0.12.4 §6.1：用 setter 替代直接赋值，避免 ES module 只读绑定 TypeError）
+  state.setConversationId(conversationId);
   state.messages.length = 0;
   state.setStreaming(false);
   state.setActiveRequestId(null);
@@ -426,6 +451,18 @@ async function handleSwitchConversation(conversationId) {
           components.renderUserMessage(msg.text);
           state.addMessage({ role: "user", content: msg.text });
         } else if (msg.role === "assistant") {
+          // 包含 tool_name 的 assistant 消息渲染为工具调用卡片
+          if (msg.tool_name && !msg.text) {
+            const toolEl = components.renderToolStatus(msg.tool_name);
+            if (toolEl) {
+              components.finalizeToolStatus(toolEl, true);
+              // 有结果摘要时追加可折叠详情
+              if (msg.tool_result) {
+                components.appendToolResult(toolEl, msg.tool_result, true);
+              }
+            }
+            continue;
+          }
           const el = components.createAssistantMessage();
           if (el) {
             components.finalizeAssistantMessage(el, msg.text, msg.thinking || "");
@@ -439,16 +476,101 @@ async function handleSwitchConversation(conversationId) {
     components.renderEmptyState(state.providerConfigured, openSettings);
   }
 
+  // 0.12.4 §6.4：切换对话后更新 header 标题
+  const convs = await ipc.listChatConversations();
+  const conv = convs.find((c) => c.id === conversationId);
+  updateConversationTitle(conv?.title || "新对话");
+
   focusInput();
+}
+
+// ── 侧边栏重命名同步 ──────────────────────────
+
+/**
+ * 侧边栏重命名后同步更新 header 标题（仅当前活跃对话）。
+ * @param {string} conversationId
+ * @param {string} newTitle
+ */
+function handleSidebarRenamed(conversationId, newTitle) {
+  if (conversationId === state.conversationId) {
+    updateConversationTitle(newTitle);
+  }
+}
+
+// ── 对话标题（0.12.4 §6.4） ────────────────────────
+
+/**
+ * 更新 header 中的对话标题显示。
+ * @param {string} title
+ */
+function updateConversationTitle(title) {
+  const titleEl = document.getElementById("chat-conversation-title");
+  if (titleEl) {
+    titleEl.textContent = title || "新对话";
+  }
+}
+
+/**
+ * 绑定对话标题点击 → 内联编辑（等同重命名）。
+ */
+function bindConversationTitleEdit() {
+  const titleEl = document.getElementById("chat-conversation-title");
+  if (!titleEl) return;
+
+  titleEl.addEventListener("click", async () => {
+    const oldTitle = titleEl.textContent;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = oldTitle;
+    input.className = "chat-title-edit-input";
+    titleEl.replaceWith(input);
+    input.focus();
+    input.select();
+
+    let confirmed = false;
+
+    // 将 input 替换回原始 span 元素（引用在闭包中保持），并更新文本
+    const restoreSpan = (text) => {
+      input.replaceWith(titleEl);
+      titleEl.textContent = text;
+    };
+
+    const finishEdit = async () => {
+      if (confirmed) return;
+      confirmed = true;
+      const newTitle = input.value.trim();
+      if (newTitle && newTitle !== oldTitle) {
+        try {
+          await ipc.renameChatConversation(state.conversationId, newTitle);
+          restoreSpan(newTitle);
+          refreshSidebar();
+        } catch (err) {
+          console.error("[chat] 重命名失败:", err);
+          restoreSpan(oldTitle);
+        }
+      } else {
+        restoreSpan(oldTitle);
+      }
+    };
+
+    input.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        finishEdit();
+      } else if (ev.key === "Escape") {
+        confirmed = true;
+        restoreSpan(oldTitle);
+      }
+    });
+    input.addEventListener("blur", finishEdit);
+  });
 }
 
 // ── 设置 ────────────────────────────────────────
 
 function openSettings() {
-  // 通过内置动作打开设置页
-  import("../tauri.js").then(({ invoke }) => {
-    invoke("run_builtin_action", { id: "open_settings" });
-  });
+  // 0.12.4 §6.5：跳转到设置页 AI Tab（复用 open_about 的 eval 模式）
+  invoke("open_settings_tab", { tab: "ai" });
 }
 
 // ── 模型选择器（0.12.2 §4.4） ──────────────────
@@ -460,29 +582,13 @@ let modelDropdown = null;
 
 /**
  * 更新 header 的 provider/model 标签。
- * 0.12.2：当选中模型是主档/轻量档时，label 前显示对应 badge。
- * @param {object} status ChatStatus（provider_name/model_name）
- * @param {Array} [models] 模型列表，用于判断当前选中项的档位
+ * 只显示模型 display name，不显示 provider 名和 badge。
+ * @param {object} status ChatStatus（model_name）
  */
-function updateProviderLabel(status, models) {
+function updateProviderLabel(status) {
   const label = document.getElementById("chat-provider-label");
   if (!label) return;
-
-  // 判断当前选中模型是否是主档/轻量档（从 models 的 is_selected 项读）
-  const selected = models?.find((m) => m.is_selected);
-  const tier = selected?.is_main ? "main" : selected?.is_light ? "light" : "";
-  const badgeHtml = tier
-    ? `<span class="chat-model-badge chat-model-badge-${tier}">${tier === "main" ? "主" : "轻"}</span>`
-    : "";
-
-  const providerHtml = status.provider_name
-    ? `<span class="chat-model-provider">${escapeText(status.provider_name)}</span>`
-    : "";
-  const modelHtml = status.model_name
-    ? `<span class="chat-model-name">${escapeText(status.model_name)}</span>`
-    : `<span class="chat-model-name">未配置模型</span>`;
-
-  label.innerHTML = `${badgeHtml}${providerHtml}${modelHtml}`;
+  label.textContent = status.model_name || "未配置模型";
 }
 
 /** 拉取模型列表 + 状态，刷新下拉和标签 */
@@ -494,7 +600,7 @@ async function refreshModelSelector() {
     ]);
     state.setProviderConfigured(status.provider_configured);
     renderModelDropdown(models);
-    updateProviderLabel(status, models);
+    updateProviderLabel(status);
   } catch (e) {
     console.error("[chat] 刷新模型选择器失败:", e);
   }
@@ -600,7 +706,9 @@ function bindModelSelector() {
   });
 
   // 下拉项点击（事件委托，因 innerHTML 重渲染）
+  // 0.12.4 §6.2：加 stopPropagation 阻止事件冒泡到 trigger，避免 hideDropdown 后被 toggle 重开
   modelDropdown.addEventListener("click", async (e) => {
+    e.stopPropagation();
     const opt = e.target.closest(".chat-model-option");
     if (!opt) return;
     const id = opt.dataset.modelId || null;

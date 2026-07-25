@@ -241,34 +241,49 @@ export function appendToolResult(el, summary, success) {
 
 /**
  * 在 assistant 消息底部追加模型名标签（0.12.3）。
+ * 与 token 用量共用 `.chat-msg-footer` 容器（同一行）。
  * @param {HTMLElement} el assistant 消息元素
  * @param {string} modelName 模型显示名
  */
 export function renderModelLabel(el, modelName) {
   if (!el || !modelName) return;
-  const existing = el.querySelector(".chat-msg-model");
-  if (existing) existing.remove();
-  const label = document.createElement("div");
-  label.className = "chat-msg-model";
+  let footer = el.querySelector(".chat-msg-footer");
+  if (!footer) {
+    footer = document.createElement("div");
+    footer.className = "chat-msg-footer";
+    el.appendChild(footer);
+  }
+  let label = footer.querySelector(".chat-msg-model");
+  if (!label) {
+    label = document.createElement("span");
+    label.className = "chat-msg-model";
+    footer.appendChild(label);
+  }
   label.textContent = modelName;
-  el.appendChild(label);
 }
 
 /**
  * 在 assistant 消息底部追加 token 用量（0.12.2 §4.8）。
+ * 与模型名共用 `.chat-msg-footer` 容器（同一行）。
  * @param {HTMLElement} el assistant 消息元素
  * @param {number} inputTokens
  * @param {number} outputTokens
  */
 export function renderTokenUsage(el, inputTokens, outputTokens) {
   if (!el) return;
-  // 移除已有的 token 用量（流式刷新场景）
-  const existing = el.querySelector(".chat-token-usage");
-  if (existing) existing.remove();
-  const usage = document.createElement("div");
-  usage.className = "chat-token-usage";
+  let footer = el.querySelector(".chat-msg-footer");
+  if (!footer) {
+    footer = document.createElement("div");
+    footer.className = "chat-msg-footer";
+    el.appendChild(footer);
+  }
+  let usage = footer.querySelector(".chat-token-usage");
+  if (!usage) {
+    usage = document.createElement("span");
+    usage.className = "chat-token-usage";
+    footer.appendChild(usage);
+  }
   usage.textContent = `↑ ${inputTokens} · ↓ ${outputTokens} tokens`;
-  el.appendChild(usage);
 }
 
 /**

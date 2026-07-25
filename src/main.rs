@@ -533,6 +533,7 @@ fn main() {
             app::commands::delete_chat_conversation,
             app::commands::rename_chat_conversation,
             app::commands::get_chat_messages,
+            app::commands::open_settings_tab,
             app::commands::list_builtin_actions,
             app::commands::list_context_bindings,
             app::commands::trigger_chord,

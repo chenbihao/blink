@@ -626,12 +626,20 @@ pub async fn rename_chat_conversation(
 /// chat 消息历史快照（0.12.3 Phase B `get_chat_messages` 返回用）。
 ///
 /// 从 rig `Message` 提取 role + 文本内容 + thinking（如有）。
-/// tool_call / tool_result 不在历史快照中展示（流式阶段已展示过）。
+/// tool_call 信息通过 `tool_name` 字段传递，前端据此渲染工具调用卡片。
+/// tool_result 消息（rig 存为 `Message::User` + `UserContent::ToolResult`）的摘要
+/// 被提取并附加到前一条 ToolCall 快照的 `tool_result` 字段。
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct ChatMessageSnapshot {
     pub role: String,
     pub text: String,
     pub thinking: Option<String>,
+    /// assistant 消息包含 ToolCall 时的工具名（前端渲染为工具卡片）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    /// 工具执行结果摘要（从 ToolResult 消息提取，附加到前一条 ToolCall 快照）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_result: Option<String>,
 }
 
 /// 加载对话的完整消息历史（0.12.3 Phase B）。
@@ -651,13 +659,41 @@ pub async fn get_chat_messages(
     let rows = crate::infra::data::conversations::load_all_messages(&pools.ai, &conversation_id)
         .await?;
 
-    let mut snapshots = Vec::with_capacity(rows.len());
+    let mut snapshots: Vec<ChatMessageSnapshot> = Vec::with_capacity(rows.len());
     for (role, content_json) in rows {
         let msg: Message = serde_json::from_str(&content_json)
             .map_err(|e| format!("反序列化消息失败: {e}"))?;
 
-        let (text, thinking) = match &msg {
+        match &msg {
             Message::User { content } => {
+                // 检测 ToolResult 消息（rig 存为 User + ToolResult）
+                let tool_result_text = content.iter().find_map(|c| match c {
+                    UserContent::ToolResult(tr) => {
+                        use rig_core::completion::message::ToolResultContent;
+                        let parts: Vec<String> = tr.content.iter().filter_map(|tc| match tc {
+                            ToolResultContent::Text(t) => Some(t.text.clone()),
+                            ToolResultContent::Image(_) => Some("[image]".to_string()),
+                        }).collect();
+                        if parts.is_empty() { None } else { Some(parts.join("\n")) }
+                    }
+                    _ => None,
+                });
+
+                if let Some(summary) = tool_result_text {
+                    // 截断到 200 字符
+                    let truncated = if summary.chars().count() <= 200 {
+                        summary
+                    } else {
+                        let t: String = summary.chars().take(200).collect();
+                        format!("{t}…")
+                    };
+                    // 附加到前一条 ToolCall 快照
+                    if let Some(last_tool) = snapshots.iter_mut().rev().find(|s| s.tool_name.is_some() && s.tool_result.is_none()) {
+                        last_tool.tool_result = Some(truncated);
+                    }
+                    continue;
+                }
+
                 let text = content
                     .iter()
                     .filter_map(|c| match c {
@@ -666,32 +702,67 @@ pub async fn get_chat_messages(
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                (text, None)
+                snapshots.push(ChatMessageSnapshot {
+                    role,
+                    text,
+                    thinking: None,
+                    tool_name: None,
+                    tool_result: None,
+                });
             }
             Message::Assistant { content, .. } => {
                 let mut text = String::new();
                 let mut thinking = String::new();
+                let mut tool = None;
                 for c in content.iter() {
                     match c {
                         AssistantContent::Text(t) => text.push_str(&t.text),
                         AssistantContent::Reasoning(r) => {
                             thinking.push_str(&r.display_text());
                         }
+                        AssistantContent::ToolCall(tc) => {
+                            tool = Some(tc.function.name.clone());
+                        }
                         _ => {}
                     }
                 }
-                (text, if thinking.is_empty() { None } else { Some(thinking) })
+                snapshots.push(ChatMessageSnapshot {
+                    role,
+                    text,
+                    thinking: if thinking.is_empty() { None } else { Some(thinking) },
+                    tool_name: tool,
+                    tool_result: None,
+                });
             }
-            Message::System { content } => (content.clone(), None),
-        };
-
-        snapshots.push(ChatMessageSnapshot {
-            role,
-            text,
-            thinking,
-        });
+            Message::System { content } => {
+                snapshots.push(ChatMessageSnapshot {
+                    role,
+                    text: content.clone(),
+                    thinking: None,
+                    tool_name: None,
+                    tool_result: None,
+                });
+            }
+        }
     }
     Ok(snapshots)
+}
+
+/// 打开设置页并定位到指定 Tab（0.12.4 §6.5）。
+///
+/// 复用 `open_about` 的 eval 模式：打开设置窗口后延迟 300ms 点击对应 Tab。
+/// chat 窗口设置按钮调用此 command 并传 `tab: "ai"`。
+#[tauri::command]
+pub async fn open_settings_tab(app: tauri::AppHandle, tab: String) -> Result<(), String> {
+    crate::infra::platform::window::open_settings(&app);
+    if let Some(w) = app.get_webview_window("settings") {
+        let js = format!(
+            "setTimeout(() => document.querySelector('.tab[data-tab=\"{}\"]')?.click(), 300)",
+            tab
+        );
+        let _ = w.eval(&js);
+    }
+    Ok(())
 }
 
 /// 列出所有内置动作元数据 + 当前 enabled 状态（0.8.0 §1.3 / 0.8.6 §8.2.4 i18n）。

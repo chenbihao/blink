@@ -18,10 +18,10 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallWindowProcW, GWL_STYLE, GWLP_WNDPROC, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW,
-    GetWindowThreadProcessId, HWND_TOP, IsIconic, SET_WINDOW_POS_FLAGS, SW_RESTORE,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, WNDPROC, WS_CAPTION, WS_THICKFRAME,
+    CallWindowProcW, DefWindowProcW, GWL_STYLE, GWLP_WNDPROC, GetCursorPos, GetForegroundWindow,
+    GetWindowLongPtrW, GetWindowThreadProcessId, HWND_TOP, IsIconic, SET_WINDOW_POS_FLAGS,
+    SW_RESTORE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, WNDPROC, WS_CAPTION, WS_THICKFRAME,
 };
 
 const ST_HIDDEN: u8 = 0;
@@ -268,12 +268,16 @@ pub fn is_visible() -> bool {
 const WM_SYSCOMMAND: u32 = 0x0112;
 const SC_KEYMENU: usize = 0xF100;
 
-/// 原始窗口过程（替换后存回，转交原逻辑用）。
-static ORIGINAL_WNDPROC: OnceLock<isize> = OnceLock::new();
+/// 各窗口的原始窗口过程（0.12.4 §6.6：从 OnceLock 改为 HashMap 支持多窗口）。
+/// key = HWND 指针值（isize），value = 原始 WndProc 地址。
+static ORIGINAL_WNDPROCS: std::sync::Mutex<Option<std::collections::HashMap<isize, isize>>> =
+    std::sync::Mutex::new(None);
 
-/// 拦截 Alt+Space 系统菜单（替换窗口过程，吞掉 SC_KEYMENU）。主窗口虽无边框仍响应
-/// Alt+Space 弹出移动/最大化菜单，前端 preventDefault 与去 WS_SYSMENU 都无效，
-/// 只能在窗口过程层拦截 WM_SYSCOMMAND。仅作用于主窗口。
+/// 拦截 Alt+Space 系统菜单（替换窗口过程，吞掉 SC_KEYMENU）。
+/// 主窗口和 chat 窗口虽无边框仍响应 Alt+Space 弹出移动/最大化菜单，
+/// 前端 preventDefault 与去 WS_SYSMENU 都无效，
+/// 只能在窗口过程层拦截 WM_SYSCOMMAND。
+/// 0.12.4 §6.6：支持多窗口安装（HashMap 按 HWND 存储 original wndproc）。
 pub fn install_sysmenu_blocker(hwnd: HWND) {
     unsafe {
         let original = SetWindowLongPtrW(
@@ -281,7 +285,14 @@ pub fn install_sysmenu_blocker(hwnd: HWND) {
             GWLP_WNDPROC,
             sysmenu_block_proc as *const () as usize as isize,
         );
-        let _ = ORIGINAL_WNDPROC.set(original);
+        let mut map = ORIGINAL_WNDPROCS.lock().unwrap();
+        map.get_or_insert_with(std::collections::HashMap::new)
+            .insert(hwnd.0 as isize, original);
+        tracing::debug!(
+            hwnd = hwnd.0 as isize,
+            original_wndproc = original,
+            "install_sysmenu_blocker: 已安装系统菜单拦截器"
+        );
     }
 }
 
@@ -294,11 +305,21 @@ unsafe extern "system" fn sysmenu_block_proc(
     if msg == WM_SYSCOMMAND && (wparam.0 as usize & 0xFFF0) == SC_KEYMENU {
         return LRESULT(0);
     }
-    let original = ORIGINAL_WNDPROC.get().copied().unwrap_or(0);
-    // edition 2024：unsafe fn 内的 unsafe 操作需显式 unsafe block
-    unsafe {
-        let proc: WNDPROC = std::mem::transmute::<isize, WNDPROC>(original);
-        CallWindowProcW(proc, hwnd, msg, wparam, lparam)
+    let original = ORIGINAL_WNDPROCS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|m| m.get(&(hwnd.0 as isize)))
+        .copied()
+        .unwrap_or(0);
+    if original != 0 {
+        // edition 2024：unsafe fn 内的 unsafe 操作需显式 unsafe block
+        unsafe {
+            let proc: WNDPROC = std::mem::transmute::<isize, WNDPROC>(original);
+            CallWindowProcW(proc, hwnd, msg, wparam, lparam)
+        }
+    } else {
+        unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
     }
 }
 
@@ -634,6 +655,14 @@ pub fn show_chat_window(app: &AppHandle) -> Result<(), String> {
         // 复用预热窗口
         app.get_webview_window(LABEL).unwrap()
     };
+
+    // 0.12.4 §6.6：安装系统菜单拦截器 + 圆角（与主窗口一致）
+    // 首次创建和复用都安装（install_sysmenu_blocker 内部按 HWND 存储，重复安装安全）
+    if let Ok(hwnd) = win.hwnd() {
+        let hwnd = windows::Win32::Foundation::HWND(hwnd.0 as _);
+        install_sysmenu_blocker(hwnd);
+        enable_rounded_corners(hwnd);
+    }
 
     // CloseRequested handler：只注册一次（预热窗口复用时不会重复注册）
     if !CHAT_CLOSE_HANDLER_REGISTERED.swap(true, std::sync::atomic::Ordering::Relaxed) {

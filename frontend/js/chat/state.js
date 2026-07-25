@@ -88,6 +88,11 @@ export function setLastUsage(usage) {
   lastUsage = usage;
 }
 
+/** 设置当前 conversation_id（0.12.4 §6.1：ES module namespace import 只读，需 setter）。 */
+export function setConversationId(id) {
+  conversationId = id;
+}
+
 /** 记录一个进行中的 Tool 卡片（按 call_id 索引）。 */
 export function trackToolCall(callId, entry) {
   if (callId) toolCalls.set(callId, entry);

@@ -7,8 +7,9 @@
  * - push 布局（侧边栏推开主区域，非 overlay 覆盖）
  * - CSS class `data-closed` 控制显隐（不用 `hidden` 属性，支持宽度动画）
  * - 切换对话后自动关闭侧边栏
- * - 删除按钮 hover 时才显示（更干净）
- * - 重命名通过双击标题触发（内联编辑）
+ * - 0.12.4 §6.3：删除按钮常驻弱可见 + 内联确认替代 confirm()
+ * - 0.12.4 §6.4：重命名按钮（删除按钮左边）
+ * - 重命名通过双击标题触发（内联编辑，保留为快捷方式）
  */
 
 import * as ipc from "./ipc.js";
@@ -28,15 +29,19 @@ let onSwitch = null;
 /** @type {() => void} 新对话回调 */
 let onNew = null;
 
+/** @type {(conversationId: string, newTitle: string) => void} 重命名回调 */
+let onRenamed = null;
+
 /**
  * 初始化侧边栏。
- * @param {{ onSwitch: (conversationId: string) => void, onNew: () => void }} callbacks
+ * @param {{ onSwitch: (conversationId: string) => void, onNew: () => void, onRenamed: (conversationId: string, newTitle: string) => void }} callbacks
  */
 export function initSidebar(callbacks) {
   sidebarEl = document.getElementById("chat-sidebar");
   listEl = document.getElementById("chat-sidebar-list");
   onSwitch = callbacks.onSwitch;
   onNew = callbacks.onNew;
+  onRenamed = callbacks.onRenamed;
 
   // 新对话按钮
   const newBtn = document.getElementById("chat-sidebar-new");
@@ -126,9 +131,14 @@ function renderConversationItem(conv) {
       <span class="chat-sidebar-item-title">${escapedTitle}</span>
       <span class="chat-sidebar-item-meta">${count} 条 · ${escapeText(time)}</span>
     </div>
-    <button class="chat-sidebar-item-delete" title="删除" data-action="delete">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-    </button>
+    <div class="chat-sidebar-item-actions">
+      <button class="chat-sidebar-item-rename" title="重命名" data-action="rename">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+      </button>
+      <button class="chat-sidebar-item-delete" title="删除" data-action="delete">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+      </button>
+    </div>
   </div>`;
 }
 
@@ -140,23 +150,73 @@ function updateActiveHighlight() {
   });
 }
 
-/** 列表点击事件（切换对话 / 删除）。 */
+/** 列表点击事件（切换对话 / 删除 / 重命名）。 */
 async function handleListClick(e) {
   const item = e.target.closest(".chat-sidebar-item");
   if (!item) return;
   const convId = item.dataset.convId;
   if (!convId) return;
 
-  // 删除按钮
+  // 重命名按钮
+  const renameBtn = e.target.closest('[data-action="rename"]');
+  if (renameBtn) {
+    e.stopPropagation();
+    startInlineRename(item, convId);
+    return;
+  }
+
+  // 删除按钮（0.12.4 §6.3：内联确认替代 confirm()）
   const deleteBtn = e.target.closest('[data-action="delete"]');
   if (deleteBtn) {
     e.stopPropagation();
-    if (!confirm("确定删除此对话？所有消息将被清除。")) return;
+    // 第二次点击 → 真正删除
+    if (item.classList.contains("confirming-delete")) {
+      try {
+        const ok = await ipc.deleteChatConversation(convId);
+        if (ok) {
+          await refreshSidebar();
+          if (convId === activeId && onNew) onNew();
+        }
+      } catch (err) {
+        console.error("[chat] 删除对话失败:", err);
+      }
+      return;
+    }
+    // 第一次点击 → 进入确认态
+    item.classList.add("confirming-delete");
+    const actionsEl = item.querySelector(".chat-sidebar-item-actions");
+    if (actionsEl) {
+      actionsEl.innerHTML = `
+        <button class="chat-sidebar-item-cancel-delete" data-action="cancel-delete">取消</button>
+        <button class="chat-sidebar-item-confirm-delete" data-action="confirm-delete">删除</button>
+      `;
+    }
+    // 3 秒超时自动取消
+    const timeoutId = setTimeout(() => {
+      if (item.classList.contains("confirming-delete")) {
+        cancelDeleteConfirm(item);
+      }
+    }, 3000);
+    item._deleteTimeoutId = timeoutId;
+    return;
+  }
+
+  // 取消删除
+  const cancelBtn = e.target.closest('[data-action="cancel-delete"]');
+  if (cancelBtn) {
+    e.stopPropagation();
+    cancelDeleteConfirm(item);
+    return;
+  }
+
+  // 确认删除
+  const confirmBtn = e.target.closest('[data-action="confirm-delete"]');
+  if (confirmBtn) {
+    e.stopPropagation();
     try {
       const ok = await ipc.deleteChatConversation(convId);
       if (ok) {
         await refreshSidebar();
-        // 如果删的是当前对话，新建一个
         if (convId === activeId && onNew) onNew();
       }
     } catch (err) {
@@ -165,32 +225,44 @@ async function handleListClick(e) {
     return;
   }
 
-  // 切换对话
+  // 切换对话（0.12.4：不自动关闭侧边栏，保持与新建对话行为一致）
   if (onSwitch) onSwitch(convId);
-  // 自动关闭侧边栏
-  hideSidebar();
 }
 
-/** 列表双击事件（重命名）。 */
-async function handleListDblClick(e) {
-  const item = e.target.closest(".chat-sidebar-item");
-  if (!item) return;
-  if (e.target.closest('[data-action="delete"]')) return;
+/** 取消删除确认态，恢复正常的重命名+删除按钮。 */
+function cancelDeleteConfirm(item) {
+  if (item._deleteTimeoutId) {
+    clearTimeout(item._deleteTimeoutId);
+    item._deleteTimeoutId = null;
+  }
+  item.classList.remove("confirming-delete");
+  const actionsEl = item.querySelector(".chat-sidebar-item-actions");
+  if (actionsEl) {
+    actionsEl.innerHTML = `
+      <button class="chat-sidebar-item-rename" title="重命名" data-action="rename">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+      </button>
+      <button class="chat-sidebar-item-delete" title="删除" data-action="delete">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+      </button>
+    `;
+  }
+}
 
-  const convId = item.dataset.convId;
-  if (!convId) return;
-
-  // 获取当前标题
+/** 启动内联重命名（复用双击重命名逻辑）。 */
+function startInlineRename(item, convId) {
   const titleEl = item.querySelector(".chat-sidebar-item-title");
   if (!titleEl) return;
   const oldTitle = titleEl.textContent;
 
-  // 内联编辑
   const input = document.createElement("input");
   input.type = "text";
   input.value = oldTitle;
   input.className = "chat-sidebar-rename-input";
   titleEl.replaceWith(input);
+  // 阻止 click/mousedown 冒泡到 handleListClick，否则会触发对话切换
+  input.addEventListener("click", (e) => e.stopPropagation());
+  input.addEventListener("mousedown", (e) => e.stopPropagation());
   input.focus();
   input.select();
 
@@ -204,16 +276,16 @@ async function handleListDblClick(e) {
       try {
         await ipc.renameChatConversation(convId, newTitle);
         await refreshSidebar();
+        // 同步给主窗口（更新 header 标题）
+        if (onRenamed) onRenamed(convId, newTitle);
       } catch (err) {
         console.error("[chat] 重命名失败:", err);
       }
     } else {
-      // 取消，恢复原 span
       input.replaceWith(titleEl);
     }
   };
 
-  // Enter 确认 / Escape 取消
   input.addEventListener("keydown", (ev) => {
     if (ev.key === "Enter") {
       ev.preventDefault();
@@ -224,8 +296,21 @@ async function handleListDblClick(e) {
     }
   });
 
-  // 失焦确认
   input.addEventListener("blur", finishEdit);
+}
+
+/** 列表双击事件（重命名，保留为快捷方式）。 */
+async function handleListDblClick(e) {
+  const item = e.target.closest(".chat-sidebar-item");
+  if (!item) return;
+  if (e.target.closest('[data-action="delete"]')) return;
+  if (e.target.closest('[data-action="rename"]')) return;
+  if (e.target.closest('.confirming-delete')) return;
+
+  const convId = item.dataset.convId;
+  if (!convId) return;
+
+  startInlineRename(item, convId);
 }
 
 /**

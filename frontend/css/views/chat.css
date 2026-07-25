@@ -233,7 +233,7 @@
   background: transparent;
   color: var(--text-faint);
   cursor: pointer;
-  opacity: 0;
+  opacity: 0.35; /* 0.12.4 §6.3：常驻弱可见，hover 时增强 */
   transition: all 0.12s;
   flex-shrink: 0;
 }
@@ -263,14 +263,88 @@
   outline: none;
 }
 
+/* 0.12.4 §6.4：侧边栏项操作区（重命名 + 删除按钮容器） */
+.chat-sidebar-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+/* 0.12.4 §6.4：重命名按钮 */
+.chat-sidebar-item-rename {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  opacity: 0.35;
+  transition: all 0.12s;
+  flex-shrink: 0;
+}
+
+.chat-sidebar-item:hover .chat-sidebar-item-rename {
+  opacity: 1;
+}
+
+.chat-sidebar-item-rename svg {
+  width: 12px;
+  height: 12px;
+}
+
+.chat-sidebar-item-rename:hover {
+  color: var(--accent);
+  background: var(--accent-bg);
+}
+
+/* 0.12.4 §6.3：删除确认态 */
+.chat-sidebar-item.confirming-delete .chat-sidebar-item-info {
+  opacity: 0.5;
+}
+
+.chat-sidebar-item-cancel-delete,
+.chat-sidebar-item-confirm-delete {
+  border: 0;
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.12s;
+  flex-shrink: 0;
+}
+
+.chat-sidebar-item-cancel-delete {
+  background: var(--surface);
+  color: var(--text-dim);
+}
+
+.chat-sidebar-item-cancel-delete:hover {
+  background: var(--bg);
+  color: var(--text);
+}
+
+.chat-sidebar-item-confirm-delete {
+  background: rgba(229, 72, 77, 0.15);
+  color: var(--red, #e5484d);
+  font-weight: 500;
+}
+
+.chat-sidebar-item-confirm-delete:hover {
+  background: var(--red, #e5484d);
+  color: #fff;
+}
+
 /* ── 语音指示器（0.12.3 对齐主窗口 G1） ──────────── */
 
 /* 与主窗口 index.html 的 #voice-indicator 样式一致 */
 .voice-indicator {
   position: absolute;
   right: var(--space-md);
-  top: 50%;
-  transform: translateY(-50%);
+  top: var(--space-md);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -286,6 +360,39 @@
   font-size: var(--text-xs, 12px);
   color: var(--text-faint);
   white-space: nowrap;
+}
+
+/* 0.12.4 §6.4：对话标题（header 中间区域） */
+.chat-conversation-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: background 0.12s;
+}
+
+.chat-conversation-title:hover {
+  background: var(--surface);
+}
+
+.chat-title-edit-input {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 500;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 2px 6px;
+  background: var(--bg-deep);
+  color: var(--text);
+  outline: none;
 }
 
 /* ── Header ────────────────────────────────────── */
@@ -309,26 +416,22 @@
   white-space: nowrap;
 }
 
-/* 模型选择器触发器（0.12.2 §4.4）。
-   宽度区间与下拉框一致（260-340px），margin-right:auto 把右侧按钮推到 header 末端。
-   position:relative 作为下拉定位的参考系；overflow:visible 允许下拉溢出。 */
+/* 模型选择器触发器（移至 composer bar，与深度思考按钮并排） */
 .chat-model-trigger {
   position: relative;
   display: flex;
   align-items: center;
-  gap: var(--space-xs);
-  min-width: 260px;
-  max-width: 340px;
-  margin-right: auto;
-  padding: 4px 8px;
+  gap: var(--space-2xs);
+  max-width: 200px;
+  padding: var(--space-2xs) var(--space-sm);
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: var(--text-dim);
+  color: var(--text-faint);
   font-size: 12px;
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
-  overflow: visible; /* 允许下拉溢出 */
+  overflow: visible;
 }
 
 .chat-model-trigger:hover,
@@ -377,13 +480,10 @@
   transform: rotate(180deg);
 }
 
-/* 模型选择器下拉（自适应宽度，左对齐贴合触发器）。
-   position 改为相对于触发器（.chat-model-trigger 是定位上下文）。
-   left:0 + top:100% 保证下拉顶部紧贴触发器底部、左边对齐。
-   padding 只保留上下，左右由选项自身 padding 控制对齐。 */
+/* 模型选择器下拉（向上展开，因触发器在窗口底部 composer bar） */
 .chat-model-dropdown {
   position: absolute;
-  top: calc(100% + 4px);
+  bottom: calc(100% + 4px);
   left: 0;
   min-width: 260px;
   max-width: 340px;
@@ -392,9 +492,9 @@
   background: var(--bg-deep);
   border: 1px solid var(--surface-2);
   border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.25);
   z-index: 100;
-  padding: var(--space-xs) 0; /* 左右 padding 由选项控制 */
+  padding: var(--space-xs) 0;
 }
 
 .chat-model-dropdown[hidden] {
@@ -549,7 +649,7 @@
 .chat-messages {
   flex: 1;
   overflow-y: auto;
-  padding: var(--space-xl);
+  padding: var(--space-xl) var(--space-lg);
   display: flex;
   flex-direction: column;
   gap: var(--space-lg);
@@ -572,8 +672,8 @@
 /* ── 消息 bubble ───────────────────────────────── */
 
 .chat-msg {
-  max-width: 85%;
-  padding: var(--space-md) var(--space-xl);
+  max-width: 90%;
+  padding: var(--space-md) var(--space-lg);
   border-radius: 16px;
   line-height: 1.65;
   font-size: 15px;
@@ -901,7 +1001,7 @@
   gap: var(--space-sm);
   padding: var(--space-sm) var(--space-md);
   align-self: flex-start;
-  max-width: 85%;
+  max-width: 90%;
 }
 
 .chat-tool-card-icon {
@@ -968,23 +1068,25 @@
   border-left: 2px solid var(--red);
 }
 
-/* 模型名标签（0.12.3） */
-.chat-msg-model {
+/* 消息底栏：模型名 + token 用量同一行 */
+.chat-msg-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
   margin-top: var(--space-xs);
   font-size: 11px;
   color: var(--text-faint);
-  text-align: left;
+  user-select: none;
+}
+
+.chat-msg-footer .chat-msg-model {
   font-style: italic;
   opacity: 0.7;
 }
 
-/* Token 用量（0.12.2 §4.8） */
-.chat-token-usage {
-  margin-top: var(--space-xs);
-  font-size: 11px;
-  color: var(--text-faint);
-  text-align: right;
-  user-select: none;
+.chat-msg-footer .chat-token-usage {
+  opacity: 0.7;
 }
 
 /* ── 确认卡片 ──────────────────────────────────── */
@@ -1097,6 +1199,12 @@
   align-items: center;
   justify-content: space-between;
   padding: var(--space-xs) var(--space-sm);
+}
+
+.chat-composer-bar-left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
 }
 
 /* ── 深度思考按钮（悬浮在输入框内） ─────────── */
