@@ -651,11 +651,10 @@
               </div>
               <div class="setting-row">
                 <label class="setting-label" data-i18n="ai.model_modal.capabilities">能力</label>
-                <div class="ai-model-cap-checks">
-                  <label class="checkbox-inline"><input type="checkbox" id="ai-model-edit-cap-chat" /><span data-i18n="ai.cap.chat">Chat</span></label>
-                  <label class="checkbox-inline"><input type="checkbox" id="ai-model-edit-cap-embedding" /><span data-i18n="ai.cap.embedding">Embedding</span></label>
-                  <label class="checkbox-inline"><input type="checkbox" id="ai-model-edit-cap-stt" /><span data-i18n="ai.cap.stt">STT</span></label>
-                </div>
+<div class="ai-model-cap-checks">
+<label class="checkbox-inline"><input type="checkbox" id="ai-model-edit-cap-chat" /><span data-i18n="ai.cap.chat">Chat</span></label>
+<label class="checkbox-inline"><input type="checkbox" id="ai-model-edit-cap-embedding" /><span data-i18n="ai.cap.embedding">Embedding</span></label>
+</div>
               </div>
             </div>
 
@@ -766,17 +765,54 @@
             </div>
           </div>
 
-          <!-- 云端配置（0.12 改造：引用 AIConfig 供应商中有 STT 能力的模型）── -->
+          <!-- 云端配置（独立模式：直接配置 kind/base_url/model_id/api_key）── -->
           <div id="voice-cloud-section">
             <h3 class="subsection-title" data-i18n="voice.cloud.title">云端供应商</h3>
-            <p class="setting-hint" data-i18n-html="voice.cloud.hint_unified">在 <a href="#" id="voice-cloud-goto-ai" class="external-link">AI 供应商</a> 页面添加支持语音识别的模型（如 whisper-large-v3），然后在此处选择。密钥与 AI 供应商共用，无需重复配置。</p>
+            <p class="setting-hint" data-i18n-html="voice.cloud.hint_standalone">配置支持 Whisper 接口的云端 STT 供应商。API Key 独立存储，不与 AI 供应商共用。</p>
+            <!-- 供应商预设 -->
             <div class="setting-row">
-              <label class="setting-label" data-i18n="voice.cloud.provider_model.label">供应商 · 模型</label>
-              <select id="voice-cloud-provider-model" class="input-wide">
-                <option value="" data-i18n="voice.cloud.provider_model.empty">— 请先在 AI 供应商页配置 STT 模型 —</option>
+              <label class="setting-label" data-i18n="voice.cloud.preset.label">供应商预设</label>
+              <select id="voice-cloud-preset" class="input-wide">
+                <option value="custom" data-i18n="voice.cloud.preset.custom">自定义</option>
+                <option value="openai" data-i18n="voice.cloud.preset.openai">OpenAI</option>
+                <option value="groq" data-i18n="voice.cloud.preset.groq">Groq</option>
+                <option value="mimo" data-i18n="voice.cloud.preset.mimo">小米 MiMo</option>
               </select>
             </div>
-            <div id="voice-cloud-migration-notice" class="setting-hint" style="display:none;" data-i18n-html="voice.cloud.migration_notice"></div>
+            <!-- 协议类型 -->
+            <div class="setting-row">
+              <label class="setting-label" data-i18n="voice.cloud.kind.label">协议类型</label>
+              <select id="voice-cloud-kind" class="input-wide">
+                <option value="openai" data-i18n="voice.cloud.kind.openai">OpenAI Whisper</option>
+                <option value="groq" data-i18n="voice.cloud.kind.groq">Groq Whisper</option>
+                <option value="mimo" data-i18n="voice.cloud.kind.mimo">MiMo (Chat ASR)</option>
+                <option value="mimo_plan" data-i18n="voice.cloud.kind.mimo_plan">MiMo Plan (Chat ASR)</option>
+                <option value="custom" data-i18n="voice.cloud.kind.custom">自定义</option>
+              </select>
+            </div>
+            <!-- Base URL -->
+            <div class="setting-row">
+              <label class="setting-label" data-i18n="voice.cloud.base_url.label">Base URL</label>
+              <div class="voice-cloud-model-wrap">
+                <input type="text" id="voice-cloud-base-url" placeholder="https://api.openai.com/v1" />
+              </div>
+            </div>
+            <!-- 模型 ID -->
+            <div class="setting-row">
+              <label class="setting-label" data-i18n="voice.cloud.model_id.label">模型 ID</label>
+              <div class="voice-cloud-model-wrap">
+                <input type="text" id="voice-cloud-model-id" placeholder="whisper-large-v3" />
+              </div>
+            </div>
+            <!-- API Key -->
+            <div class="setting-row">
+              <label class="setting-label" data-i18n="voice.cloud.api_key.label">API Key</label>
+              <div class="voice-cloud-key-wrap">
+                <input type="password" id="voice-cloud-api-key" data-i18n-ph="voice.cloud.api_key.ph" placeholder="sk-..." autocomplete="off" />
+                <button type="button" id="voice-cloud-key-save-btn" class="voice-cloud-key-btn" data-i18n="voice.cloud.api_key.save_btn">保存</button>
+                <button type="button" id="voice-cloud-key-clear-btn" class="voice-cloud-key-btn voice-cloud-key-btn-danger" data-i18n="voice.cloud.api_key.clear_btn">清除</button>
+              </div>
+            </div>
             <!-- 云端测试 -->
             <div class="setting-row">
               <label class="setting-label" data-i18n="voice.cloud.test.label">连接测试</label>

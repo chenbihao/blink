@@ -1,6 +1,11 @@
 /**
  * 语音输入 Tab 模块（0.10）
- * STT 配置：总开关 / 模式切换 / 云端供应商 / FunASR 本地服务管理 / 音频设备选择 + 调试
+ * STT 配置：总开关 / 模式切换 / 云端供应商（独立配置）/ FunASR 本地服务管理 / 音频设备选择 + 调试
+ *
+ * 云端 STT 架构（独立模式）：
+ * - 配置完全独立于 AIConfig——用户在语音设置页直接配置 kind/base_url/model_id
+ * - API Key 用 stt:cloud 前缀存在 Credential Manager 里，不与 AI 供应商共用
+ * - 支持预设快捷填充（OpenAI / Groq / MiMo）
  *
  * 本地 STT 架构：
  * - 工具箱：FunASR（modelscope/阿里达摩院，Python 原生）
@@ -110,106 +115,131 @@ export async function initVoiceTab() {
   // 音频调试测试
   initAudioTest(config);
 
-  // 云端供应商（0.12 改造：引用 AIConfig 供应商中有 STT 能力的模型）
-  const providerModelSelect = document.getElementById("voice-cloud-provider-model");
+  // 云端供应商（独立模式：直接配置 kind/base_url/model_id/api_key）
   const testBtn = document.getElementById("voice-cloud-test-btn");
   const testResult = document.getElementById("voice-cloud-test-result");
-  const gotoAiLink = document.getElementById("voice-cloud-goto-ai");
-  const migrationNotice = document.getElementById("voice-cloud-migration-notice");
+  const presetSelect = document.getElementById("voice-cloud-preset");
+  const kindSelect = document.getElementById("voice-cloud-kind");
+  const baseUrlInput = document.getElementById("voice-cloud-base-url");
+  const modelIdInput = document.getElementById("voice-cloud-model-id");
+  const apiKeyInput = document.getElementById("voice-cloud-api-key");
+  const keySaveBtn = document.getElementById("voice-cloud-key-save-btn");
+  const keyClearBtn = document.getElementById("voice-cloud-key-clear-btn");
 
-  // 从 AIConfig 拉取有 STT 能力模型的供应商列表
-  let _sttAiConfig = null;
-  async function loadSttProviderOptions() {
-    try {
-      _sttAiConfig = await invoke("get_config_section", { key: "app.ai" });
-    } catch (e) {
-      console.error("get_config_section app.ai failed:", e);
-      _sttAiConfig = { providers: [] };
-    }
-    const providers = _sttAiConfig.providers || [];
-    const sttOptions = [];
-    providers.forEach((p) => {
-      (p.models || []).forEach((m) => {
-        const caps = m.capabilities || ["chat"];
-        if (caps.includes("stt") && m.enabled !== false) {
-          sttOptions.push({
-            provider_id: p.id,
-            model_id: m.id,
-            provider_name: p.display_name,
-            model_name: m.display_name || m.id,
-          });
-        }
-      });
-    });
+  // 供应商预设 → 默认值映射
+  const STT_PRESETS = {
+    openai: { kind: "openai", base_url: "https://api.openai.com/v1", model_id: "whisper-1" },
+    groq: { kind: "groq", base_url: "https://api.groq.com/openai/v1", model_id: "whisper-large-v3" },
+    mimo: { kind: "mimo", base_url: "https://api.xiaomimimo.com/v1", model_id: "" },
+    custom: { kind: "openai", base_url: "", model_id: "" },
+  };
 
-    if (!providerModelSelect) return;
-    if (sttOptions.length === 0) {
-      providerModelSelect.innerHTML = `<option value="">${t("voice.cloud.provider_model.empty")}</option>`;
-      return;
-    }
-    const options = [`<option value="">${t("voice.cloud.provider_model.select")}</option>`];
-    sttOptions.forEach((opt) => {
-      const val = `${opt.provider_id}::${opt.model_id}`;
-      const label = `${opt.provider_name} / ${opt.model_name}`;
-      options.push(`<option value="${escapeAttr(val)}">${escapeHtml(label)}</option>`);
-    });
-    providerModelSelect.innerHTML = options.join("");
-
-    // 回显当前配置
-    if (config.cloud) {
-      const val = `${config.cloud.provider_id}::${config.cloud.model_id}`;
-      providerModelSelect.value = val;
-      // 如果当前值不在选项中（供应商被删除了），显示提示
-      if (!sttOptions.some((o) => o.provider_id === config.cloud.provider_id && o.model_id === config.cloud.model_id)) {
-        providerModelSelect.value = "";
-      }
-    }
-  }
-
-  await loadSttProviderOptions();
-
-  // 旧配置迁移提示
-  if (config.cloud_provider && !config.cloud) {
+  // 回显当前配置
+  if (config.cloud_provider) {
     const cp = config.cloud_provider;
-    if (migrationNotice) {
-      migrationNotice.style.display = "";
-      migrationNotice.innerHTML = t("voice.cloud.migration_notice", {
-        kind: cp.kind,
-        model: cp.model_id,
-      });
+    if (kindSelect) kindSelect.value = cp.kind || "openai";
+    if (baseUrlInput) baseUrlInput.value = cp.base_url || "";
+    if (modelIdInput) modelIdInput.value = cp.model_id || "";
+    // 自动匹配预设
+    if (presetSelect) {
+      const matchedPreset = Object.entries(STT_PRESETS).find(([_, v]) =>
+        v.kind === cp.kind && (!v.base_url || v.base_url === cp.base_url)
+      );
+      presetSelect.value = matchedPreset ? matchedPreset[0] : "custom";
+    }
+  } else {
+    if (presetSelect) presetSelect.value = "custom";
+    if (kindSelect) kindSelect.value = "openai";
+  }
+
+  // 加载 API Key 掩码 → 回显到输入框 placeholder（与 AI 供应商一致）
+  async function refreshKeyHint() {
+    if (!apiKeyInput) return;
+    try {
+      const hint = await invoke("get_stt_secret_hint");
+      if (hint) {
+        apiKeyInput.placeholder = hint + " — " + t("voice.cloud.api_key.ph.edit");
+        apiKeyInput.classList.add("has-secret-hint");
+      } else {
+        apiKeyInput.placeholder = t("voice.cloud.api_key.ph");
+        apiKeyInput.classList.remove("has-secret-hint");
+      }
+    } catch (e) {
+      console.error("get_stt_secret_hint failed:", e);
     }
   }
+  refreshKeyHint();
 
-  if (providerModelSelect) {
-    providerModelSelect.addEventListener("change", () => {
-      const val = providerModelSelect.value;
-      if (!val) {
-        delete config.cloud;
-      } else {
-        const sep = val.indexOf("::");
-        config.cloud = {
-          provider_id: val.slice(0, sep),
-          model_id: val.slice(sep + 2),
-        };
-        // 清除旧配置
-        delete config.cloud_provider;
-        if (migrationNotice) migrationNotice.style.display = "none";
+  // 保存云端配置（kind/base_url/model_id → cloud_provider）
+  function saveCloudProvider() {
+    const kind = kindSelect?.value || "openai";
+    const base_url = baseUrlInput?.value?.trim() || null;
+    const model_id = modelIdInput?.value?.trim() || "";
+    if (!model_id) {
+      delete config.cloud_provider;
+    } else {
+      config.cloud_provider = { kind, base_url, model_id };
+    }
+    saveSttConfig(config, "cloud");
+  }
+
+  // 预设切换 → 自动填充 kind/base_url/model_id
+  if (presetSelect) {
+    presetSelect.addEventListener("change", () => {
+      const preset = STT_PRESETS[presetSelect.value];
+      if (!preset) return;
+      if (kindSelect) kindSelect.value = preset.kind;
+      if (baseUrlInput) baseUrlInput.value = preset.base_url;
+      if (modelIdInput) modelIdInput.value = preset.model_id;
+      saveCloudProvider();
+    });
+  }
+
+  // 各字段失焦时保存
+  if (kindSelect) kindSelect.addEventListener("change", saveCloudProvider);
+  if (baseUrlInput) baseUrlInput.addEventListener("blur", saveCloudProvider);
+  if (modelIdInput) modelIdInput.addEventListener("blur", saveCloudProvider);
+
+  // API Key 保存
+  if (keySaveBtn) {
+    keySaveBtn.addEventListener("click", async () => {
+      const secret = apiKeyInput?.value;
+      if (!secret) return;
+      keySaveBtn.textContent = t("voice.cloud.api_key.saving");
+      keySaveBtn.disabled = true;
+      try {
+        await invoke("save_stt_secret", { secret });
+        if (apiKeyInput) apiKeyInput.value = "";
+        await refreshKeyHint();
+        keySaveBtn.textContent = t("voice.cloud.api_key.saved");
+        setTimeout(() => { keySaveBtn.textContent = t("voice.cloud.api_key.save_btn"); }, 1500);
+      } catch (e) {
+        console.error("save_stt_secret failed:", e);
+        keySaveBtn.textContent = t("voice.cloud.api_key.save_btn");
+      } finally {
+        keySaveBtn.disabled = false;
       }
-      saveSttConfig(config, "cloud");
     });
   }
 
-  // “前往 AI 供应商”链接
-  if (gotoAiLink) {
-    gotoAiLink.addEventListener("click", (e) => {
-      e.preventDefault();
-      document.querySelector('.tab[data-tab="ai"]')?.click();
+  // API Key 清除
+  if (keyClearBtn) {
+    keyClearBtn.addEventListener("click", async () => {
+      keyClearBtn.disabled = true;
+      try {
+        await invoke("delete_stt_secret");
+        await refreshKeyHint();
+      } catch (e) {
+        console.error("delete_stt_secret failed:", e);
+      } finally {
+        keyClearBtn.disabled = false;
+      }
     });
   }
 
-  // 语言切换时刷新下拉
+  // 语言切换时刷新 placeholder 文案
   onLangChange(() => {
-    loadSttProviderOptions();
+    refreshKeyHint();
   });
 
   // 云端连接测试
@@ -1022,14 +1052,6 @@ function initAudioTest(config) {
 }
 
 // ── helper ────────────────────────────────────────────────────────────
-
-function escapeHtml(s) {
-  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-}
-
-function escapeAttr(s) {
-  return escapeHtml(s);
-}
 
 
 async function initSpaceManagement() {

@@ -1607,6 +1607,15 @@ details.plugin-group .plugin-group-body {
   color: var(--text-faint);
 }
 
+/* ── API Key 掩码 placeholder 绿色高亮 ──────────────────────────────
+   AI 供应商 modal 和 STT 设置页共用：当输入框通过 get_*_secret_hint
+   拉到掩码后，用 .has-secret-hint 类让整个 placeholder 变绿，
+   视觉上提示「已配置密钥」。 */
+input.has-secret-hint::placeholder {
+  color: var(--green, #38a169);
+  opacity: 0.85;
+}
+
 /* ── 存储页：四库统计卡片 ── */
 .db-stats-grid {
   display: grid;

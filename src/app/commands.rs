@@ -1343,7 +1343,7 @@ pub async fn ocr_image(
 ///
 /// **绕过 AI 路径**：翻译是确定性动作(用户主动点按钮),不该经过 AI 意图判断
 /// + 网络往返。直接走 `ActionRegistry` 找 translate 插件的 `translate` tool
-/// (id = `builtin.translate:translate`),用 `ExecArg::UserExplicit(json_args)`
+/// (id = `builtin_translate_translate`),用 `ExecArg::UserExplicit(json_args)`
 /// 执行,拿 `ActionOutcome::Items` 返 `items[0].title` 即译文。
 ///
 /// **参数**：
@@ -1366,8 +1366,8 @@ pub async fn translate_text(
     }
 
     let registry = app.state::<std::sync::Arc<crate::domain::execution::ActionRegistry>>();
-    // translate 插件的 tool 注册 id = "{plugin_id}:{tool_name}" = "builtin.translate:translate"
-    const TRANSLATE_ACTION_ID: &str = "builtin.translate:translate";
+    // translate 插件的 tool 注册 id = plugin_tool_id("builtin.translate", "translate")
+    const TRANSLATE_ACTION_ID: &str = "builtin_translate_translate";
     let Some(action) = registry.get(TRANSLATE_ACTION_ID) else {
         tracing::warn!("translate_text: 翻译插件未注册");
         return Err("翻译插件未安装或未启用".into());
@@ -1482,7 +1482,7 @@ pub async fn translate_lines(
         return Ok(lines);
     }
 
-    const TRANSLATE_BATCH_ACTION_ID: &str = "builtin.translate:translate_batch";
+    const TRANSLATE_BATCH_ACTION_ID: &str = "builtin_translate_translate_batch";
     let registry = app.state::<std::sync::Arc<crate::domain::execution::ActionRegistry>>();
     if let Some(action) = registry.get(TRANSLATE_BATCH_ACTION_ID) {
         let texts: Vec<String> = non_empty.iter().map(|(_, text)| text.clone()).collect();
@@ -2619,6 +2619,63 @@ pub async fn get_ai_secret_hint(provider_id: String) -> Result<Option<String>, S
     }
 }
 
+// ── STT 密钥专用命令（独立模式：stt:cloud 前缀，独立于 AI 供应商密钥）──────────────
+//
+// STT 的 API Key 存在 Credential Manager 里，target_id = "stt:cloud"。
+// 与 AI 供应商的密钥完全隔离——用户可能用 Groq 做 STT 但 DeepSeek 做 chat，
+// 两者的 API Key 不同，不应交叉引用。
+
+/// 保存 STT API Key 到 Windows Credential Manager。
+///
+/// **参数**:
+/// - `secret`:明文密钥——只在本 command 函数内活着,写完 CM 立即 SecretString drop
+#[tauri::command]
+pub async fn save_stt_secret(secret: String) -> Result<(), String> {
+    let secret_wrapped = crate::infra::platform::secret::SecretString::new(secret);
+    crate::infra::platform::secret::save_secret("stt:cloud", "key", &secret_wrapped)
+        .map_err(|e| e.to_string())?;
+    tracing::info!("STT 密钥已保存到 Credential Manager");
+    Ok(())
+}
+
+/// 从 Credential Manager 删除 STT API Key。
+#[tauri::command]
+pub async fn delete_stt_secret() -> Result<(), String> {
+    match crate::infra::platform::secret::delete_secret("stt:cloud", "key") {
+        Ok(()) => {
+            tracing::info!("STT 密钥已从 CM 删除");
+            Ok(())
+        }
+        Err(crate::infra::platform::secret::SecretError::NotFound(_)) => {
+            tracing::debug!("STT 密钥不在 CM 中,跳过删除");
+            Ok(())
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// 检查 STT 是否已配 API Key(不返回明文,只返 true/false)。
+#[tauri::command]
+pub async fn has_stt_secret() -> Result<bool, String> {
+    match crate::infra::platform::secret::load_secret("stt:cloud", "key") {
+        Ok(_) => Ok(true),
+        Err(crate::infra::platform::secret::SecretError::NotFound(_)) => Ok(false),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// 获取 STT 密钥的首尾掩码(如 `"sk-a••••cdef"`),供设置页占位展示。
+#[tauri::command]
+pub async fn get_stt_secret_hint() -> Result<Option<String>, String> {
+    match crate::infra::platform::secret::load_secret("stt:cloud", "key") {
+        Ok(secret) => Ok(Some(crate::infra::platform::secret::format_hint(
+            secret.expose(),
+        ))),
+        Err(crate::infra::platform::secret::SecretError::NotFound(_)) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// 用 CM 里已存的密钥拉取可用模型列表(0.9.4)。
 ///
 /// 获取供应商可用模型列表。
@@ -2959,7 +3016,7 @@ pub async fn get_system_prompt_info(app: tauri::AppHandle) -> Result<serde_json:
     for ph in plugin_engine.all_plugins() {
         let manifest = ph.manifest();
         for td in &manifest.tools {
-            let id = format!("{}:{}", manifest.id, td.name);
+            let id = crate::domain::plugin::plugin_tool_id(&manifest.id, &td.name);
             if let Some(bindings) = &td.setting_bindings {
                 if let Some(pos) = tools.iter().position(|s| s.name == id) {
                     let settings = plugin_engine.get_settings(&manifest.id);
@@ -4129,21 +4186,9 @@ pub async fn get_stt_config(
 #[tauri::command]
 pub async fn set_stt_config(
     app: tauri::AppHandle,
-    mut config: crate::app::stt_config::SttConfig,
+    config: crate::app::stt_config::SttConfig,
     scope: Option<String>,
 ) -> Result<(), String> {
-    // 0.12 §2.7 迁移回写：若老配置 cloud_provider 能在 AIConfig 找到匹配，
-    // 回写 cloud 字段并清空 cloud_provider（兑现 effective_cloud 的 migration_needed 承诺，
-    // 避免老配置永久停留临时态）。用户保存任意区段时触发。
-    if config.cloud.is_none() && config.cloud_provider.is_some() {
-        let ai_config = crate::app::ai_config::get_ai_config();
-        if let Some((cloud, _)) = config.effective_cloud(&ai_config) {
-            tracing::info!("STT 云端配置迁移回写: cloud_provider -> cloud");
-            config.cloud = Some(cloud);
-            config.cloud_provider = None;
-        }
-    }
-
     let pool = &app.state::<crate::infra::data::DbPools>().config;
     crate::app::config::ConfigStore::set(&pool, &config)
         .await
@@ -5132,11 +5177,9 @@ async fn test_audio_via_server(audio_url: &str, port: u16) -> Result<String, Str
 #[tauri::command]
 pub async fn test_cloud_stt() -> Result<serde_json::Value, String> {
     let config = crate::app::stt_config::get_stt_config();
-    let ai_config = crate::app::ai_config::get_ai_config();
 
-    // 0.12 §2.7: 复用 resolve_stt_endpoint，与 finalize 走同一配置解析路径
-    // （支持新结构 cloud 字段 + 老配置自动迁移；旧实现只读 cloud_provider 导致新配置测试必失败）
-    let endpoint = crate::domain::stt::cloud::resolve_stt_endpoint(&config, &ai_config)
+    // 独立模式：直接从 SttCloudProvider 解析，不依赖 AIConfig
+    let endpoint = crate::domain::stt::cloud::resolve_stt_endpoint(&config)
         .map_err(|e| format!("云端 STT 配置解析失败: {e}"))?;
 
     let is_chat_asr = endpoint.uses_chat_completion_asr;

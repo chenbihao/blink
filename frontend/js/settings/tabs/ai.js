@@ -539,10 +539,10 @@ function openAIModelEditModal(providerId, modelId) {
   };
 
   // 能力复选框回显
-  ["chat", "embedding", "stt"].forEach((cap) => {
-    const cb = document.getElementById(`ai-model-edit-cap-${cap}`);
-    if (cb) cb.checked = _modelEditDraft.capabilities.includes(cap);
-  });
+["chat", "embedding"].forEach((cap) => {
+const cb = document.getElementById(`ai-model-edit-cap-${cap}`);
+if (cb) cb.checked = _modelEditDraft.capabilities.includes(cap);
+});
 
   const $ = (id) => document.getElementById(id);
   $("ai-model-edit-title").textContent = t(isEdit ? "ai.model_modal.title.edit" : "ai.model_modal.title.add");
@@ -805,7 +805,7 @@ async function validateAndSaveModel() {
   const cleanedCustom = (_modelEditDraft.custom_parameters || []).filter((cp) => (cp.key || "").trim().length > 0);
 
   // 收集能力复选框
-  const selectedCaps = ["chat", "embedding", "stt"].filter((cap) => {
+  const selectedCaps = ["chat", "embedding"].filter((cap) => {
     const cb = document.getElementById(`ai-model-edit-cap-${cap}`);
     return cb && cb.checked;
   });
@@ -1318,6 +1318,7 @@ const AI_PRESET_CATALOG = {
   "anthropic":         { kind: "anthropic_messages",    base_url: null,                                                 display_name_default: "Anthropic",            monogram: "An",   tint: "amber",  category: "main" },
   "gemini":            { kind: "gemini_generate_content",base_url: null,                                                display_name_default: "Google Gemini",        monogram: "Ge",   tint: "teal",   category: "main" },
   "deepseek":          { kind: "openai_compatible",     base_url: "https://api.deepseek.com/v1",                        display_name_default: "DeepSeek",             monogram: "深度",  tint: "blue",   category: "cn" },
+  "deepseek-anthropic":{ kind: "anthropic_messages",    base_url: "https://api.deepseek.com/anthropic",                display_name_default: "DeepSeek (Anthropic)", monogram: "深度",  tint: "blue",   category: "cn" },
   "siliconflow":       { kind: "openai_compatible",     base_url: "https://api.siliconflow.cn/v1",                      display_name_default: "SiliconFlow",          monogram: "硅基",  tint: "blue",   category: "cn" },
   "moonshot":          { kind: "openai_compatible",     base_url: "https://api.moonshot.cn/v1",                         display_name_default: "Moonshot",             monogram: "Ki",   tint: "purple", category: "cn" },
   "zhipu":             { kind: "openai_compatible",     base_url: "https://open.bigmodel.cn/api/paas/v4",               display_name_default: "Zhipu",                monogram: "智谱",  tint: "indigo", category: "cn" },
@@ -1489,22 +1490,20 @@ function openAIProviderModal(editProviderId) {
     $("ai-modal-base-url").value = p.base_url || "";
     $("ai-modal-api-key").value = "";
     $("ai-modal-api-key").placeholder = t("ai.modal.api_key.ph.edit");
+    $("ai-modal-api-key").classList.remove("has-secret-hint");
     $("ai-modal-api-key-hint").textContent = t("ai.modal.api_key.hint.edit");
-    // 异步拉取首尾掩码更新 placeholder
+    // 异步拉取首尾掩码更新 placeholder（绿色高亮）
     invoke("get_ai_secret_hint", { providerId: editProviderId }).then((masked) => {
       if (masked && $("ai-modal-api-key").value === "") {
         $("ai-modal-api-key").placeholder = masked + " — " + t("ai.modal.api_key.ph.edit");
+        $("ai-modal-api-key").classList.add("has-secret-hint");
       }
     }).catch(() => { /* 拉取失败保持原 placeholder */ });
-    // 品牌 & 协议：显示但只读
+    // 品牌 & 协议：编辑模式下也可修改（用户可能需要切换协议/base_url）
     $("ai-modal-kind-row").style.display = "";
     $("ai-modal-preset-row").style.display = "";
     renderPresetList(guessPresetForProvider(p.kind, p.base_url), true);
-    $("ai-modal-kind").disabled = true;
-    $("ai-preset-list").querySelectorAll(".ai-preset-item").forEach((el) => {
-      el.style.pointerEvents = "none";
-      el.style.opacity = "0.5";
-    });
+    $("ai-modal-kind").disabled = false;
     // 模型段：预填已有模型 tag，可继续追加
     $("ai-modal-model-section").style.display = "";
     clearProviderModelSelect();
@@ -1522,6 +1521,7 @@ function openAIProviderModal(editProviderId) {
     $("ai-modal-base-url").value = "";
     $("ai-modal-api-key").value = "";
     $("ai-modal-api-key").placeholder = t("ai.modal.api_key.ph");
+    $("ai-modal-api-key").classList.remove("has-secret-hint");
     $("ai-modal-api-key-hint").textContent = t("ai.modal.api_key.hint");
     renderPresetList("openai", false);
     applyAIPresetToModal("openai", false);

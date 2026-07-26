@@ -170,6 +170,12 @@
   color: var(--text-faint);
 }
 
+/* 已配置密钥时 placeholder 变绿（覆盖上面的灰色默认值） */
+#voice input.has-secret-hint::placeholder {
+  color: var(--green, #38a169);
+  opacity: 0.85;
+}
+
 /* ── dimmed 状态（云端模式下本地专属字段不生效）────────────────── */
 
 #voice .setting-row-dimmed {
@@ -247,19 +253,6 @@
 .voice-cloud-key-btn.voice-cloud-key-btn-danger:hover {
   background: var(--danger-hover-bg);
   border-color: var(--red);
-}
-
-.voice-cloud-key-status {
-  font-size: var(--text-xs, 11px);
-  white-space: nowrap;
-}
-
-.voice-cloud-key-status.configured {
-  color: var(--green);
-}
-
-.voice-cloud-key-status.not-configured {
-  color: var(--text-faint);
 }
 
 /* 云端测试结果 */

@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use tauri::{AppHandle, Manager};
 
-pub use action::PluginActionAdapter;
+pub use action::{PluginActionAdapter, plugin_tool_id};
 pub use engine::PluginEngine;
 pub use manifest::{
     LocalizableText, ManifestContextWhen, ManifestSurfaceHint, PluginManifest, PluginTrigger,

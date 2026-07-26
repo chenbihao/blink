@@ -828,7 +828,7 @@ impl SearchService {
             for ph in plugin_engine.all_plugins() {
                 let manifest = ph.manifest();
                 for td in &manifest.tools {
-                    let id = format!("{}:{}", manifest.id, td.name);
+                    let id = crate::domain::plugin::plugin_tool_id(&manifest.id, &td.name);
                     if let Some(bindings) = &td.setting_bindings {
                         plugin_bindings.insert(id.clone(), (manifest.id.clone(), bindings.clone()));
                     }
@@ -1431,7 +1431,7 @@ fn empty_arg_hint_entry(plugin_id: &str, display_name: &str, hint: String) -> Ap
 /// 解析 AI tool_call → 具体 Action + 解析后参数。
 ///
 /// **聚合 tool**：name="system_action", arguments={action:"lock"} → (LockAction, {})
-/// **独立 tool**：name="plugin:translate", arguments={text:"hello"} → (PluginAction, {text:"hello"})
+/// **独立 tool**：name="builtin_translate_translate", arguments={text:"hello"} → (PluginAction, {text:"hello"})
 ///
 /// 返回 None 表示未找到对应 Action。
 fn resolve_tool_call(
@@ -1463,7 +1463,7 @@ fn resolve_tool_call(
 /// 解析展示名称（用于日志和前端显示）。
 ///
 /// 聚合 tool: "system_action" + action="lock" → "lock"
-/// 独立 tool: "plugin:translate" → "plugin:translate"
+/// 独立 tool: "builtin_translate_translate" → "builtin_translate_translate"
 fn resolve_display_name(
     tc: &crate::domain::ai::message::ToolCall,
     action: &Arc<dyn crate::domain::execution::Action>,

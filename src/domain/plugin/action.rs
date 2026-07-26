@@ -19,6 +19,21 @@ use crate::domain::plugin::manifest::{DangerClassDef, LocalizableText, ToolDef};
 
 use super::process::PluginHandle;
 
+/// 构造插件 tool 的全局唯一 id。
+///
+/// 格式：`{plugin_id}_{tool_name}`，其中 plugin_id 中的 `.` 也替换为 `_`。
+///
+/// **为什么不用 `:` 分隔**：Anthropic / OpenAI 协议要求 tool name 匹配
+/// `^[a-zA-Z0-9_-]+$`，`:` 和 `.` 均不合法，会导致 400 Bad Request。
+/// 旧格式 `builtin.translate:translate` → 新格式 `builtin_translate_translate`。
+///
+/// 此函数是构造插件 tool id 的**唯一入口**——service.rs / commands.rs 等消费方
+/// 必须调此函数而非自行拼接，保证 id 格式一致。
+pub fn plugin_tool_id(plugin_id: &str, tool_name: &str) -> String {
+    let sanitized = plugin_id.replace('.', "_");
+    format!("{sanitized}_{tool_name}")
+}
+
 /// 插件 tool 的 Action 适配器——桥接 `Action` trait 与插件 JSONL IPC。
 ///
 /// 启动时由 `main.rs` 遍历插件 manifest 的 `tools` 字段创建,
@@ -27,7 +42,8 @@ pub struct PluginActionAdapter {
     plugin: Arc<PluginHandle>,
     /// manifest 中的原始 tool name（如 "translate"）——传给插件子进程用。
     tool_name: String,
-    /// 全局唯一 id = "{plugin_id}:{tool_name}"——注册进 ActionRegistry 的 key。
+    /// 全局唯一 id = `plugin_tool_id(plugin_id, tool_name)`——注册进 ActionRegistry 的 key。
+    /// 仅含 `[a-zA-Z0-9_]`，满足 Anthropic / OpenAI tool name 正则 `^[a-zA-Z0-9_-]+$`。
     id: String,
     schema: ActionSchema,
     danger: DangerClass,
@@ -42,7 +58,7 @@ impl PluginActionAdapter {
         plugin_display_name: &LocalizableText,
     ) -> Self {
         let plugin_id = plugin.id().to_string();
-        let id = format!("{plugin_id}:{}", tool_def.name);
+        let id = plugin_tool_id(&plugin_id, &tool_def.name);
         let schema = ActionSchema {
             name: id.clone(),
             description: tool_def.description.clone(),
@@ -175,13 +191,13 @@ mod tests {
             danger_class: DangerClassDef::Safe,
             ..Default::default()
         };
-        // 验证 schema 映射正确——id 带插件前缀
+        // 验证 schema 映射正确——id 带 plugin_id 前缀（下划线分隔）
         let schema = ActionSchema {
-            name: format!("myplugin:{}", tool_def.name),
+            name: plugin_tool_id("myplugin", &tool_def.name),
             description: tool_def.description.clone(),
             parameters: tool_def.parameters.clone(),
         };
-        assert_eq!(schema.name, "myplugin:translate");
+        assert_eq!(schema.name, "myplugin_translate");
         assert_eq!(schema.description, "翻译文本");
     }
 
@@ -215,11 +231,21 @@ mod tests {
 
     #[test]
     fn id_uses_plugin_prefix_format() {
-        // 验证 id 格式 = "{plugin_id}:{tool_name}"——全局唯一
+        // 验证 id 格式 = plugin_tool_id(plugin_id, tool_name)——全局唯一
+        // 且仅含 [a-zA-Z0-9_]，满足 Anthropic/OpenAI tool name 正则 ^[a-zA-Z0-9_-]+$
         let plugin_id = "my_translator";
         let tool_name = "translate";
-        let id = format!("{plugin_id}:{tool_name}");
-        assert_eq!(id, "my_translator:translate");
+        let id = plugin_tool_id(plugin_id, tool_name);
+        assert_eq!(id, "my_translator_translate");
+    }
+
+    #[test]
+    fn plugin_tool_id_sanitizes_dots() {
+        // builtin.translate:translate → builtin_translate_translate
+        let id = plugin_tool_id("builtin.translate", "translate");
+        assert_eq!(id, "builtin_translate_translate");
+        // 验证满足正则
+        assert!(id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
     }
 
     // ── 0.11.0 改进 1: plugin_item_to_item_result 投影 ────────────────────────

@@ -142,7 +142,7 @@ impl ConfigKey for AIConfig {
     const KEY: &'static str = "app.ai";
 }
 
-// ── 内存缓存（供非 async 上下文读取，如 CloudSttEngine）──────────────────────
+// ── 内存缓存（供非 async 上下文读取）──────────────────────────────────────
 
 use std::sync::{OnceLock, RwLock};
 
@@ -210,7 +210,6 @@ pub struct ProviderEntry {
 /// 模型能力类型（0.12 §2.7 Provider 模型统一管理）。
 ///
 /// 一个模型可同时具备多种能力（如某些 ollama 模型同时支持 chat + embedding）。
-/// 前端根据 capabilities 过滤模型下拉（如 STT 设置页只展示 capabilities 含 Stt 的模型）。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelCapability {
@@ -218,7 +217,8 @@ pub enum ModelCapability {
     Chat,
     /// 嵌入模型——0.13 RAG 向量生产（ollama nomic-embed-text / OpenAI text-embedding-3 等）。
     Embedding,
-    /// 语音转文字模型——云端 STT（OpenAI whisper / Groq whisper 等）。
+    /// 语音转文字模型——**已废弃**，STT 配置已独立（见 SttConfig::cloud_provider）。
+    /// 保留仅为反序列化兼容，前端不再展示此选项。
     Stt,
 }
 
@@ -426,12 +426,11 @@ pub struct ModelEntry {
     #[serde(default)]
     pub custom_parameters: Vec<CustomParam>,
 
-    /// 模型能力列表（0.12 §2.7）。
-    ///
-    /// 一个模型可同时具备多种能力（如某些 ollama 模型同时支持 chat + embedding）。
-    /// 前端根据 capabilities 过滤模型下拉（如 STT 设置页只展示 capabilities 含 Stt 的模型）。
-    ///
-    /// **默认 `[Chat]`**——老配置缺字段时 serde 填充,零迁移成本。
+/// 模型能力列表（0.12 §2.7）。
+///
+/// 一个模型可同时具备多种能力（如某些 ollama 模型同时支持 chat + embedding）。
+///
+/// **默认 `[Chat]`**——老配置缺字段时 serde 填充,零迁移成本。
     #[serde(default = "default_chat_capability")]
     pub capabilities: Vec<ModelCapability>,
 }

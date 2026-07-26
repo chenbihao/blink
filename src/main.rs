@@ -403,8 +403,7 @@ fn main() {
             let mut stt_config = tauri::async_runtime::block_on(
                 app::config::ConfigStore::get::<app::stt_config::SttConfig>(&pools.config),
             );
-            // P2.8: 启动期一次性迁移 STT 云端配置（cloud_provider -> cloud 字段，
-            // 避免每次 STT 调用走 effective_cloud 惰性匹配）
+            // 启动期一次性迁移 STT 云端配置（0.12 cloud 引用模式 → 独立 cloud_provider 模式）
             if stt_config.apply_migration(&ai_config) {
                 let _ = tauri::async_runtime::block_on(
                     app::config::ConfigStore::set::<app::stt_config::SttConfig>(
@@ -645,6 +644,10 @@ fn main() {
             app::commands::stop_funasr_server,
             app::commands::diagnose_stt,
             app::commands::test_cloud_stt,
+            app::commands::save_stt_secret,
+            app::commands::delete_stt_secret,
+            app::commands::has_stt_secret,
+            app::commands::get_stt_secret_hint,
             app::commands::get_stt_space_usage,
             app::commands::cleanup_stt_space,
             app::commands::open_stt_folder,
