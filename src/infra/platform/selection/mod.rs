@@ -3,10 +3,15 @@
 //! 两条路径：
 //! 1. **划词监听**（主）：全局鼠标钩子在「划词瞬间」抓取（焦点未失、选区未退化），
 //!    缓存最近选区，绕开 Electron 应用失焦退化问题。见 `listener.rs`。
-//! 2. **get_selected_text**：纯 UIA 抓取原语（按 HWND），供划词监听调用。见 `windows.rs`。
-//!    三段式策略：`GetFocusedElement`(O(1)) → 祖先链 `FindFirst(Ancestors)`(O(深度))
-//!    → 焦点子树 `FindFirst(Descendants)`(O(焦点子树))。无 FindAll 全树回退。
-//!    带计时日志与阈值告警。
+//! 2. **UIA 抓取原语**：三段式策略，见 `windows.rs`。
+//!    - `get_selected_text(hwnd)`：同步全量抓取（capture + extract），供划词监听调用。
+//!    - `capture_focused_element()` + `extract_selection_from_element()`：拆分模式，
+//!      供 `window::invoke` 使用——show() 前快速捕获焦点元素（<5ms），show() 后异步提取。
+//!      避免慢应用 UIA（100-500ms）阻塞窗口显示。
+//!
+//! 三段式策略：`GetFocusedElement`(O(1)) → 祖先链 `FindFirst(Ancestors)`(O(深度))
+//! → 焦点子树 `FindFirst(Descendants)`(O(焦点子树))。无 FindAll 全树回退。
+//! 带计时日志与阈值告警。
 //!
 //! 缓存独立于 SearchService（避免 infra→domain 反向依赖），由 `window::invoke` 合并进 snapshot。
 
@@ -29,6 +34,38 @@ pub fn get_selected_text(hwnd_raw: isize) -> Option<String> {
 #[cfg(not(target_os = "windows"))]
 #[allow(dead_code)]
 pub fn get_selected_text(_hwnd_raw: isize) -> Option<String> {
+    None
+}
+
+/// 快速捕获当前焦点 UIA 元素（必须在焦点变化前调用，如 `window::show()` 之前）。
+/// 仅做 `GetFocusedElement()`，O(1)，通常 <5ms。
+///
+/// 返回的不透明值可在 `show()` 之后传给 [`extract_selection_from_element`] 做慢速提取。
+/// 这样窗口显示不被 UIA 阻塞。详见 `windows.rs` 的设计说明。
+#[cfg(target_os = "windows")]
+pub fn capture_focused_element() -> Option<self::windows::SendableElement> {
+    self::windows::capture_focused_element()
+}
+
+#[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
+pub fn capture_focused_element() -> Option<()> {
+    None
+}
+
+/// 从已捕获的焦点元素中提取选区文本（慢速，可后台执行）。
+///
+/// 三段式策略与 `get_selected_text` 完全一致。可在 `show()` 之后从任意线程调用。
+#[cfg(target_os = "windows")]
+pub fn extract_selection_from_element(
+    elem: &self::windows::SendableElement,
+) -> Option<String> {
+    self::windows::extract_selection_from_element(elem)
+}
+
+#[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
+pub fn extract_selection_from_element(_elem: &()) -> Option<String> {
     None
 }
 

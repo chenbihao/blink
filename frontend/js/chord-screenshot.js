@@ -1359,6 +1359,7 @@ function doIdentifySelection() {
   }
   ocrBusy = true;
   updateOutputButtonsDisabled();
+  showSelLoading('识别中…');
   const revision = selectionRevision;
   const onResult = (result) => {
     if (revision !== selectionRevision) return;
@@ -1370,6 +1371,7 @@ function doIdentifySelection() {
     });
     ocrBusy = false;
     updateOutputButtonsDisabled();
+    hideSelLoading();
   };
   if (ocrPrewarm) {
     console.debug('[screenshot] doIdentify 走预热缓存');
@@ -1382,6 +1384,7 @@ function doIdentifySelection() {
       console.error('[screenshot] OCR 预热 Promise 异常', err);
       ocrBusy = false;
       updateOutputButtonsDisabled();
+      hideSelLoading();
       showTransientHint('识别失败');
     });
     return;
@@ -1421,6 +1424,7 @@ function doOverlayTranslate() {
   }
   ocrBusy = true;
   updateOutputButtonsDisabled();
+  showSelLoading('识别中…');
   const revision = selectionRevision;
   const onResult = (result) => {
     if (revision !== selectionRevision) return;
@@ -1444,6 +1448,7 @@ function doOverlayTranslate() {
       console.error('[screenshot] OCR 预热 Promise 异常', err);
       ocrBusy = false;
       updateOutputButtonsDisabled();
+      hideSelLoading();
       showTransientHint('识别失败');
     });
     return;
@@ -1460,6 +1465,7 @@ const doTranslateSelection = doOverlayTranslate;
 function _runOcrFresh(opts = {}) {
   const kind = opts.kind || 'identify';
   const revision = opts.revision ?? selectionRevision;
+  showSelLoading('识别中…');
   compositeSelection((pngBytes) => {
     ocrImage(pngBytes)
       .then((result) => {
@@ -1468,6 +1474,7 @@ function _runOcrFresh(opts = {}) {
           return;
         }
         if (kind === 'translate') {
+          showSelLoading('翻译中…');
           activateOverlay(result, {
             showOverlay: true,
             panelTab: 'translated',
@@ -1475,6 +1482,7 @@ function _runOcrFresh(opts = {}) {
             autoTranslate: true,
           });
         } else {
+          hideSelLoading();
           activateOverlay(result, {
             showOverlay: false,
             panelTab: 'source',
@@ -1487,6 +1495,7 @@ function _runOcrFresh(opts = {}) {
         if (revision === selectionRevision) {
           showTransientHint('识别失败');
         }
+        hideSelLoading();
         console.error('[screenshot] ocr 失败', err);
       })
       .finally(() => {
@@ -1561,6 +1570,7 @@ function requestOverlayTranslation(targetLang) {
   const revision = ++translationRevision;
   translationBusy = true;
   updateOutputButtonsDisabled();
+  showSelLoading('翻译中…');
   translateOverlayLines(targetLang, revision)
     .catch((e) => {
       if (revision !== translationRevision) return;
@@ -1571,6 +1581,7 @@ function requestOverlayTranslation(targetLang) {
       if (revision !== translationRevision) return;
       translationBusy = false;
       updateOutputButtonsDisabled();
+      hideSelLoading();
     });
 }
 
@@ -1624,6 +1635,27 @@ let ocrResultCache = null;
 /** 简易临时提示(选区附近,2 秒后自动消失)。
  *  有选区时定位到选区顶部居中(工具栏在右下,顶部不冲突);空间不足翻到底部。
  *  无选区时回退屏幕中心。 */
+/**
+ * 选区中央加载转圈：在选区正中显示 spinner + 文案。
+ * @param {string} text 显示文案（如"识别中…"/"翻译中…"）
+ */
+function showSelLoading(text) {
+  const el = document.getElementById('sel-loading');
+  if (!el || !selCss) return;
+  const label = el.querySelector('.sel-loading-text');
+  if (label) label.textContent = text;
+  // 定位到选区中心
+  el.style.left = (selCss.x + selCss.w / 2) + 'px';
+  el.style.top = (selCss.y + selCss.h / 2) + 'px';
+  el.hidden = false;
+}
+
+/** 隐藏选区加载转圈。 */
+function hideSelLoading() {
+  const el = document.getElementById('sel-loading');
+  if (el) el.hidden = true;
+}
+
 function showTransientHint(msg) {
   errorHint.textContent = msg;
   errorHint.style.display = 'block';
@@ -1719,6 +1751,7 @@ function doCancel() {
   cancelInProgress = true;
   setTimeout(() => { cancelInProgress = false; }, 2000);
   console.info('[screenshot] cancel');
+  hideSelLoading();
   if (isAnnotating) {
     screenshotCancel().catch((e) => console.error('screenshotCancel 失败', e));
   } else {

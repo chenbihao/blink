@@ -71,6 +71,7 @@ async function loadChordActions() {
 
   // Chord id → 副标题（不再用 emoji 图标，标题/副标题足够承载语义）
   const CHORD_SUBTITLE = {
+    chat: t("chord.action.chat.subtitle"),
     screenshot: t("chord.action.screenshot.subtitle"),
     voice_input: t("chord.action.voice_input.subtitle"),
     clipboard_history: t("chord.action.clipboard_history.subtitle"),

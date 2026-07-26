@@ -167,13 +167,24 @@ impl Service for HotkeyService {
                         if crate::infra::platform::window::is_visible() {
                             crate::infra::platform::window::hide(&app, "toggle");
                         } else {
-                            let elapsed = trigger_time.elapsed().as_secs_f64() * 1000.0;
+                            let chan_ms = trigger_time.elapsed().as_secs_f64() * 1000.0;
+                            tracing::debug!(
+                                target: "perf",
+                                chan_ms,
+                                "[perf] Tap→invoke: channel+scheduling delay"
+                            );
                             crate::infra::platform::window::invoke(&app);
+                            let total_ms = trigger_time.elapsed().as_secs_f64() * 1000.0;
+                            tracing::debug!(
+                                target: "perf",
+                                total_ms,
+                                "[perf] Tap→shown: total (key-up to emit blink://shown)"
+                            );
                             // 记录热键唤起耗时（按键 → 窗口 invoke）
                             crate::infra::utils::perf::record(
                                 crate::infra::utils::perf::MetricCategory::Hotkey,
                                 "key_to_show",
-                                elapsed,
+                                total_ms,
                                 None,
                             );
                         }

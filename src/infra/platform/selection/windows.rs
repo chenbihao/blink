@@ -37,6 +37,17 @@ use windows::core::Interface;
 
 use crate::infra::platform::uia;
 
+/// COM 焦点元素的跨线程安全包装。
+///
+/// `IUIAutomationElement` 在 windows crate 0.62 中不实现 `Send`（底层 `NonNull<c_void>`）。
+/// 但在 MTA 公寓下，COM 对象跨线程访问是安全的——所有线程都在同一 MTA 中，
+/// 无需 marshaling。此 newtype 提供 `Send` 实现，允许元素从捕获线程传递到提取线程。
+///
+/// **安全性前提**：捕获和提取线程都必须已调用 `CoInitializeEx(COINIT_MULTITHREADED)`
+/// （由 `uia::ComGuard::init_mta()` 保证）。
+pub(crate) struct SendableElement(pub(crate) IUIAutomationElement);
+unsafe impl Send for SendableElement {}
+
 // 用于 hwnd → 进程名 的 Win32 调用（隐私门控：见 listener.rs on_selection）
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
@@ -53,94 +64,103 @@ const SLOW_THRESHOLD_MS: u128 = 200;
 /// 抓取指定窗口当前的鼠标选区文本。
 ///
 /// 三段式策略（逐级降级），任意环节失败均返回 None，绝不抛错。
+///
+/// **调用方注意**：此函数包含 `GetFocusedElement()` + 三段式提取，全程同步阻塞。
+/// 对 UIA 树复杂的应用可能耗时 100-500ms。若调用方在窗口 show() 之前调用（如
+/// `window::invoke`），应改用 `capture_focused_element()` + `extract_selection_from_element()`
+/// 的拆分模式，让 show() 不被阻塞。
 pub(crate) fn get_selected_text(hwnd_raw: isize) -> Option<String> {
     if hwnd_raw == 0 {
         return None;
     }
-    // COM 初始化 + UIA 实例创建（从公共 uia 模块）
+    let focused = capture_focused_element()?;
+    extract_selection_from_element(&focused)
+}
+
+/// 快速捕获当前焦点 UIA 元素（必须在焦点变化前调用，如 `window::show()` 之前）。
+///
+/// 仅做 COM 初始化 + `GetFocusedElement()`，O(1) 跨进程调用，通常 <5ms。
+/// 返回的 `IUIAutomationElement` 可跨线程使用（MTA 公寓，COM 接口天然 Send）。
+///
+/// 搭配 [`extract_selection_from_element`] 使用：先快速捕获，show 窗口后再慢速提取。
+pub(crate) fn capture_focused_element() -> Option<SendableElement> {
     let _com = uia::ComGuard::init_mta();
-    let automation: IUIAutomation = match unsafe {
+    let automation: IUIAutomation = create_automation()?;
+    unsafe { automation.GetFocusedElement().ok() }.map(SendableElement)
+}
+
+/// 从已捕获的焦点元素中提取选区文本（慢速，可后台执行）。
+///
+/// 三段式策略（逐级降级），与原 `get_selected_text` 的提取逻辑完全一致。
+/// 可在 `show()` 之后从任意 MTA 线程调用——`IUIAutomationElement` 在 MTA 下跨线程安全。
+pub(crate) fn extract_selection_from_element(elem: &SendableElement) -> Option<String> {
+    let focused = &elem.0;
+    let _com = uia::ComGuard::init_mta();
+    let automation: IUIAutomation = match create_automation() {
+        Some(a) => a,
+        None => return None,
+    };
+
+    let start = Instant::now();
+
+    // ── Phase 1a: 焦点元素自身是否支持 TextPattern 且有选区 ──────
+    if let Some(text) = extract_selection(focused) {
+        log_hit(&start, "GetFocusedElement");
+        return Some(text);
+    }
+
+    let cond = create_text_pattern_condition(&automation);
+
+    // ── Phase 2: 祖先链查找 ─────────────────────────────────
+    if let Some(ref cond) = cond {
+        if let Ok(ancestor) = unsafe { focused.FindFirst(TreeScope_Ancestors, cond) } {
+            if let Some(text) = extract_selection(&ancestor) {
+                log_hit(&start, "祖先链");
+                return Some(text);
+            }
+        }
+    }
+
+    // ── Phase 3: 焦点子树后代查找 ───────────────────────────
+    let mut descendant_ct: i32 = 0;
+    if let Some(ref cond) = cond {
+        if let Ok(descendant) = unsafe { focused.FindFirst(TreeScope_Descendants, cond) } {
+            descendant_ct = unsafe { descendant.CurrentControlType() }
+                .map(|t| t.0)
+                .unwrap_or(0);
+            if let Some(text) = extract_selection(&descendant) {
+                log_hit(&start, "焦点子树后代");
+                return Some(text);
+            }
+        }
+    }
+
+    // ── 三段式均未命中 ──────────────────────────────────────
+    let elapsed_ms = start.elapsed().as_millis();
+    if elapsed_ms > SLOW_THRESHOLD_MS {
+        let (ct, class) = element_info(focused);
+        tracing::warn!(
+            elapsed_ms,
+            control_type = ct,
+            class = %class,
+            descendant_control_type = descendant_ct,
+            "选区抓取：三段式未命中（耗时超阈值）"
+        );
+    }
+
+    None
+}
+
+/// 创建 IUIAutomation 实例（COM init 由调用方或 ComGuard 负责）。
+fn create_automation() -> Option<IUIAutomation> {
+    unsafe {
         windows::Win32::System::Com::CoCreateInstance(
             &windows::Win32::UI::Accessibility::CUIAutomation,
             None,
             windows::Win32::System::Com::CLSCTX_ALL,
         )
-    } {
-        Ok(a) => a,
-        Err(e) => {
-            tracing::debug!(error = %e, "选区抓取：CoCreateInstance(CUIAutomation) 失败");
-            return None;
-        }
-    };
-
-    let start = Instant::now();
-
-    // ── Phase 1: GetFocusedElement — 焦点元素直取 ──────────────
-    // 选词瞬间焦点就在用户操作的控件上，选区也在它上面。O(1) 跨进程调用。
-    if let Ok(focused) = unsafe { automation.GetFocusedElement() } {
-        // 1a. 焦点元素自身是否支持 TextPattern 且有选区
-        if let Some(text) = extract_selection(&focused) {
-            log_hit(&start, "GetFocusedElement");
-            return Some(text);
-        }
-
-        let cond = create_text_pattern_condition(&automation);
-
-        // ── Phase 2: 祖先链查找 ─────────────────────────────────
-        // 焦点元素自身无 TextPattern 时，向上找最近的 TextPattern 祖先。
-        // 场景：焦点是 <span> 等子节点，TextPattern 在容器祖先上。O(深度)。
-        if let Some(ref cond) = cond {
-            if let Ok(ancestor) = unsafe { focused.FindFirst(TreeScope_Ancestors, cond) } {
-                if let Some(text) = extract_selection(&ancestor) {
-                    log_hit(&start, "祖先链");
-                    return Some(text);
-                }
-            }
-        }
-
-        // ── Phase 3: 焦点子树后代查找 ───────────────────────────
-        // 祖先链也未命中时，在焦点元素的子树内向下找 TextPattern 元素。
-        // 场景：焦点是 WebView2 宿主 Pane（无 TextPattern），其子 Document 有 TextPattern。
-        // O(焦点子树)，远小于 FindAll(Subtree) 的 O(全窗口子树)。
-        let mut descendant_ct: i32 = 0; // 若找到后代，记录其控件类型供诊断
-        if let Some(ref cond) = cond {
-            if let Ok(descendant) = unsafe { focused.FindFirst(TreeScope_Descendants, cond) } {
-                descendant_ct = unsafe { descendant.CurrentControlType() }
-                    .map(|t| t.0)
-                    .unwrap_or(0);
-                if let Some(text) = extract_selection(&descendant) {
-                    log_hit(&start, "焦点子树后代");
-                    return Some(text);
-                }
-                // 后代有 TextPattern 但无选区——选区可能已退化
-            }
-        }
-
-        // ── 三段式均未命中：合并为单条日志 ─────────────────────
-        // 这是常见情况（用户在非文本区域拖拽/点击，或不支持 UIA 的应用），
-        // 用 trace 而非 debug 避免日志噪音。诊断信息合并到一条。
-        let elapsed_ms = start.elapsed().as_millis();
-        let (ct, class) = element_info(&focused);
-        if elapsed_ms > SLOW_THRESHOLD_MS {
-            tracing::warn!(
-                elapsed_ms,
-                control_type = ct,
-                class = %class,
-                descendant_control_type = descendant_ct,
-                "选区抓取：三段式未命中（耗时超阈值）"
-            );
-        } else {
-            // tracing::trace!(
-            //     elapsed_ms,
-            //     control_type = ct,
-            //     class = %class,
-            //     descendant_control_type = descendant_ct,
-            //     "选区抓取：三段式未命中"
-            // );
-        }
+        .ok()
     }
-
-    None
 }
 
 /// 命中时记录单条 trace（超阈值升级 warn）。

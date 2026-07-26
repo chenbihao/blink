@@ -86,9 +86,13 @@ pub async fn cleanup_old(pool: &SqlitePool, days: u32) {
 //
 // 向后兼容重导出——现有调用点 `history::get_config` 等无需改动。
 pub use crate::infra::data::config::{
-    delete_config, get_all_config, get_config, set_config, migrate_0_4_to_0_5,
-    migrate_camelcase_to_snake,
+    delete_config, get_all_config, get_config, set_config,
 };
+
+// 测试用：migrate_camelcase_to_snake 仅在 history.rs 的单测中调用，
+// 非测试构建不需要导出（避免 unused import 警告）。
+#[cfg(test)]
+use crate::infra::data::config::migrate_camelcase_to_snake;
 
 #[cfg(test)]
 mod tests {

@@ -368,16 +368,18 @@ pub async fn load_all_messages(
     Ok(rows)
 }
 
-/// 对话总数（存储页统计用）。
-pub async fn count_conversations(pool: &SqlitePool) -> i64 {
+/// 对话总数（测试辅助函数）。
+#[cfg(test)]
+async fn count_conversations(pool: &SqlitePool) -> i64 {
     sqlx::query_scalar("SELECT COUNT(*) FROM conversations")
         .fetch_one(pool)
         .await
         .unwrap_or(0)
 }
 
-/// 消息总数（存储页统计用）。
-pub async fn count_messages(pool: &SqlitePool) -> i64 {
+/// 消息总数（测试辅助函数）。
+#[cfg(test)]
+async fn count_messages(pool: &SqlitePool) -> i64 {
     sqlx::query_scalar("SELECT COUNT(*) FROM messages")
         .fetch_one(pool)
         .await

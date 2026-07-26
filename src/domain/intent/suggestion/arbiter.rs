@@ -128,6 +128,7 @@ mod tests {
         }
     }
 
+    #[allow(deprecated)]
     fn make_sug(source: SuggestionSource, confidence: f64) -> Suggestion {
         Suggestion {
             display: format!("{source:?}"),
@@ -140,6 +141,7 @@ mod tests {
         }
     }
 
+    #[allow(deprecated)]
     fn make_sug_with_hint(
         source: SuggestionSource,
         confidence: f64,

@@ -218,12 +218,14 @@ pub struct RunningProcess {
 ///
 /// Windows 实现见 `windows.rs`。
 pub fn collect(cfg: &ContextConfig) -> AwarenessSnapshot {
+    let t0 = std::time::Instant::now();
     // 总开关关闭 → 空快照（完全不采集）
     if !cfg.enabled {
         return AwarenessSnapshot::default();
     }
     // 先采集前台应用（剪贴板可关,但前台用于来源/意图,始终采）
     let foreground_app = collect_foreground_app();
+    let t_fg = t0.elapsed();
     // 前台是敏感应用（如密码管理器）→ 整体放弃采集（隐私保护）
     if let Some(ref fg) = foreground_app {
         if cfg.is_sensitive(&fg.process_name) {
@@ -261,6 +263,14 @@ pub fn collect(cfg: &ContextConfig) -> AwarenessSnapshot {
             }
         }).unwrap_or_else(|| "(空)".into()),
         "上下文采集完成"
+    );
+    let t_clip = t0.elapsed();
+    tracing::debug!(
+        target: "perf",
+        fg_ms = t_fg.as_millis(),
+        clip_ms = (t_clip - t_fg).as_millis(),
+        clipboard_enabled = cfg.clipboard_enabled,
+        "[perf] context::collect breakdown"
     );
     AwarenessSnapshot {
         captured_at: Instant::now(),

@@ -50,6 +50,8 @@ fn elapsed_ms() -> u64 {
 ///
 /// **采集时机很重要**：必须在 show() 之前调用，否则拿到的前台是 Blink 自己。
 pub fn invoke(app: &AppHandle) {
+    let t0 = std::time::Instant::now();
+
     // 1. 先采集上下文快照（show 之前！）
     //    读内存 ContextConfig（零 IO，热键回调不能 await），按配置过滤采集
     let context_cfg = app
@@ -64,61 +66,42 @@ pub fn invoke(app: &AppHandle) {
     );
 
     // 2. 更新 SearchService 中的快照
+    //
+    // 选区抓取采用「快速捕获 + 慢速异步提取」模式：
+    // - show() 之前：capture_focused_element() 仅做 GetFocusedElement()（O(1)，<5ms）
+    // - show() 之后：spawn 线程做三段式 TextPattern 提取（可能 100-500ms）
+    // 这样窗口显示不被 UIA 阻塞——慢应用上用户不再感到"卡一下才出来"。
+    //
+    // 提取完成后通过 update_selected_text 回填 + emit awareness-updated 触发前端 retrigger。
+    let focused_element = if context_cfg.selection_enabled {
+        let t_capture = std::time::Instant::now();
+        let focused = snapshot
+            .foreground_app
+            .as_ref()
+            .filter(|fg| fg.hwnd != 0)
+            .and_then(|_| crate::infra::platform::selection::capture_focused_element());
+        tracing::debug!(
+            target: "perf",
+            capture_ms = t_capture.elapsed().as_millis(),
+            has_element = focused.is_some(),
+            "[perf] invoke: capture_focused_element (before show)"
+        );
+        focused
+    } else {
+        None
+    };
+
     if let Some(search_service) =
         app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
     {
         search_service.update_snapshot(snapshot.clone());
-
-        // 选区回填：优先主动 UIA 抓取（invoke 时前台窗口仍有焦点），其次回退缓存。
-        //
-        // 主动抓取：invoke 发生时原 app 还没失焦，UIA 能拿到当前选区。
-        // 比依赖鼠标钩子缓存（10s TTL、仅鼠标划词触发）更可靠——覆盖键盘选区
-        // （Shift+方向键）和非鼠标选区场景。
-        //
-        // 回退缓存：UIA 抓不到时（app 不支持 TextPattern，如 Scintilla/Java Swing）
-        // 用鼠标钩子在"划词黄金时机"抓到的缓存。
-        if context_cfg.selection_enabled {
-            let grabbed = snapshot
-                .foreground_app
-                .as_ref()
-                .and_then(|fg| {
-                    let text =
-                        crate::infra::platform::selection::get_selected_text(fg.hwnd);
-                    match &text {
-                        Some(t) => tracing::debug!(
-                            app = %fg.process_name,
-                            len = t.chars().count(),
-                            "invoke: UIA 主动抓取选区成功"
-                        ),
-                        None => tracing::debug!(
-                            app = %fg.process_name,
-                            "invoke: UIA 主动抓取选区失败（app 不支持 TextPattern 或无选区）,回退钩子缓存"
-                        ),
-                    }
-                    text
-                })
-                .or_else(|| {
-                    // UIA 未命中，回退鼠标钩子缓存
-                    let cached = crate::infra::platform::selection::get_last_selection();
-                    if cached.is_some() {
-                        tracing::trace!("invoke: 回退到鼠标钩子选区缓存");
-                    } else {
-                        tracing::trace!("invoke: 无选区（UIA 未命中 + 缓存为空/过期）");
-                    }
-                    cached.map(|(text, _)| text)
-                });
-            search_service.update_selected_text(grabbed, None);
-        }
     }
 
     let Some(win) = app.get_webview_window("main") else {
         return;
     };
 
-    // 复位到基准尺寸（逻辑像素）——`launcher_position` 内部按目标屏 DPI 算
-    // 物理尺寸做居中；跨 DPI 屏时 winit 在 set_position 后会响应 WM_DPICHANGED
-    // 自动 rescale 尺寸，与我们算出的位置对齐。前端 syncWindowSize 首帧
-    // 会立即再 resize 到真实内容高度，此步骤零可见成本。
+    let t_show = std::time::Instant::now();
     let _ = win.set_size(tauri::LogicalSize::new(BASE_W_LOGICAL, BASE_H_LOGICAL));
 
     if let Some(pos) = launcher_position(&win) {
@@ -129,12 +112,64 @@ pub fn invoke(app: &AppHandle) {
     INVOKE_AT.store(now, Ordering::SeqCst);
     STATE.store(ST_VISIBLE, Ordering::SeqCst);
     tracing::trace!(grace_ms, "invoke: state → VISIBLE, show + set_focus");
-    // 通知 hotkey：即将调 SetForegroundWindow（Tauri show+set_focus 内部可能触发），
-    // 若 Alt 正按住则设 one-shot flag 跳过合成 Alt keyup，保 ALT_LOGICALLY_HELD 不被毒化。
     crate::infra::platform::hotkey::expect_synthesized_alt_keyup();
     let _ = win.show();
     let _ = win.set_focus();
     let _ = app.emit("blink://shown", ());
+    tracing::debug!(
+        target: "perf",
+        show_ms = t_show.elapsed().as_millis(),
+        total_ms = t0.elapsed().as_millis(),
+        "[perf] invoke: show+focus+emit (TOTAL)"
+    );
+
+    // 3. show 之后：异步提取选区（不阻塞窗口显示）
+    //
+    // focused_element 在 show() 之前通过 GetFocusedElement() 捕获，
+    // 此时焦点还在原应用上。show() 之后焦点已移到 Blink，但捕获的 COM 元素
+    // 仍然指向原应用的焦点控件——MTA 公寓下 COM 接口跨线程安全。
+    //
+    // 提取完成后回填 SearchService 快照 + emit awareness-updated 触发前端 retrigger，
+    // 让翻译 Ghost 等依赖选区的建议在选区就绪后自动出现。
+    if let Some(focused) = focused_element {
+        let search_service = app
+            .try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
+            .map(|s| s.inner().clone());
+        let app_clone = app.clone();
+        std::thread::spawn(move || {
+            let t_extract = std::time::Instant::now();
+            let grabbed = crate::infra::platform::selection::extract_selection_from_element(&focused)
+                .or_else(|| {
+                    // UIA 未命中，回退鼠标钩子缓存
+                    let cached = crate::infra::platform::selection::get_last_selection();
+                    if cached.is_some() {
+                        tracing::trace!("invoke: 回退到鼠标钩子选区缓存");
+                    }
+                    cached.map(|(text, _)| text)
+                });
+            let hit = grabbed.is_some();
+            if let Some(ref text) = grabbed {
+                tracing::debug!(
+                    len = text.chars().count(),
+                    "invoke: UIA 异步抓取选区成功"
+                );
+            }
+            if let Some(ss) = search_service {
+                ss.update_selected_text(grabbed, None);
+                // 通知前端重跑搜索——选区可能刚到，翻译 Ghost 等建议需要更新
+                // 仅在窗口仍可见时 emit（用户可能已 ESC 关闭）
+                if crate::infra::platform::window::is_visible() {
+                    let _ = app_clone.emit("blink://awareness-updated", ());
+                }
+            }
+            tracing::debug!(
+                target: "perf",
+                extract_ms = t_extract.elapsed().as_millis(),
+                hit,
+                "[perf] invoke: async UIA extraction (after show)"
+            );
+        });
+    }
 }
 
 /// 隐藏：ESC / 看门狗 / 单实例重复启动。
@@ -814,6 +849,7 @@ pub fn show_screenshot_overlay(
             );
         }
         let _ = win.show();
+        let _ = win.set_focus();
         return Ok(());
     }
 
@@ -842,6 +878,7 @@ pub fn show_screenshot_overlay(
         );
     }
     let _ = win.eval(&meta_js);
+    let _ = win.set_focus();
 
     Ok(())
 }

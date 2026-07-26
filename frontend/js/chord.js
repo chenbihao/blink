@@ -24,7 +24,6 @@
 
 import { invoke } from "./tauri.js";
 import { listChordActions } from "./api.js";
-import { renderCombo } from "./kbd.js";
 
 let chordActions = [];
 let ghostChordEl = null;
@@ -140,9 +139,11 @@ function render() {
     }
     const item = document.createElement("span");
     item.className = "chord-item";
-    // renderCombo 走项目通用键帽,组合键内 kbd 用 `+` 连接（见 kbd.css 变更）
-    // key=' '（语音输入）→ "Space"，renderCombo("Alt+Space") 正确渲染键帽
-    item.appendChild(renderCombo(`Alt+${chordKeyLabel(a.key)}`));
+    // 紧凑格式：单 kbd 显示键名（Alt 修饰键隐含，省空间）
+    const kbd = document.createElement("kbd");
+    kbd.className = "kbd chord-key";
+    kbd.textContent = chordKeyLabel(a.key);
+    item.appendChild(kbd);
     const label = document.createElement("span");
     label.className = "chord-label";
     label.textContent = a.label;

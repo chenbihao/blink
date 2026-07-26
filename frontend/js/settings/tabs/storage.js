@@ -58,12 +58,12 @@ export function initStorageTab() {
   document.getElementById("retry-migration")?.addEventListener("click", async () => {
     try {
       await invoke("retry_migration");
-      // 清除标记后隐藏警告条，提示用户重启
-      const warnEl = document.getElementById("migration-warning");
-      if (warnEl) warnEl.hidden = true;
-      alert(t("storage.retry_migration.done"));
+      console.info("[storage] retry_migration 成功");
+      // 刷新存储信息（get_storage_info 会再次检查并清除残留标记）
+      await loadStorageInfo();
     } catch (e) {
       console.error("retry_migration failed:", e);
+      alert(t("storage.retry_migration.failed", { err: String(e) }));
     }
   });
 }
@@ -76,6 +76,7 @@ let _cachedInfo = null;
 async function loadStorageInfo() {
   try {
     _cachedInfo = await invoke("get_storage_info");
+    console.info("[storage] migration_failed:", _cachedInfo.migration_failed);
     renderStorageInfo();
   } catch (e) {
     console.error("loadStorageInfo failed:", e);

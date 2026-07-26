@@ -599,7 +599,7 @@ mod tests {
     #[tokio::test]
     async fn pending_confirms_register_and_resolve_approved() {
         let pc = PendingConfirms::new();
-        let (id, mut rx) = pc.register().await;
+        let (id, rx) = pc.register().await;
         // 确认 -> receiver 收 true
         assert!(pc.resolve(id, true).await, "已知 id 应送达");
         assert_eq!(rx.await.unwrap(), true, "确认应收到 true");
@@ -608,7 +608,7 @@ mod tests {
     #[tokio::test]
     async fn pending_confirms_resolve_rejected() {
         let pc = PendingConfirms::new();
-        let (id, mut rx) = pc.register().await;
+        let (id, rx) = pc.register().await;
         assert!(pc.resolve(id, false).await);
         assert_eq!(rx.await.unwrap(), false, "拒绝应收到 false");
     }
@@ -632,7 +632,7 @@ mod tests {
     #[tokio::test]
     async fn pending_confirms_discard_drops_sender() {
         let pc = PendingConfirms::new();
-        let (id, mut rx) = pc.register().await;
+        let (id, rx) = pc.register().await;
         pc.discard(id).await; // 超时清理 -> drop sender
         // receiver 收 Err（sender 被 drop）
         assert!(rx.await.is_err(), "discard 后 receiver 应收 Err");

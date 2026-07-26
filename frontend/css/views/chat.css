@@ -2088,7 +2088,7 @@ body {
   position: relative; /* 复制按钮定位上下文 */
   margin: 0 0 var(--space-xs);
   padding: var(--space-xs) var(--space-sm);
-  max-height: 160px;
+  max-height: 300px;
   overflow: auto;
   background: var(--bg-deep);
   border-radius: 4px;

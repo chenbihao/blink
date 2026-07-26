@@ -457,8 +457,6 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
         // 改为：接受所有 Alt keydown/keyup 事件更新 ALT_LOGICALLY_HELD，仅用
         // `EXPECT_SYNTH_KEYUP_AT` one-shot flag 过滤我们自己 SetForegroundWindow
         // 合成的 keyup（这是原 LLKHF_INJECTED 过滤的真正目标）。
-        let injected = (kb.flags & LLKHF_INJECTED) == LLKHF_INJECTED;
-
         if vk == VK_LMENU.0 as u32 || vk == VK_RMENU.0 as u32 {
             // one-shot flag：Alt keyup 时无条件 swap 清除
             let was_expected = if is_up {
@@ -477,7 +475,6 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
                 false
             };
 
-            let prev_held = ALT_LOGICALLY_HELD.load(Ordering::SeqCst);
             if is_down {
                 ALT_LOGICALLY_HELD.store(true, Ordering::SeqCst);
             } else if is_up && !was_expected {
@@ -547,10 +544,17 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
         //
         // Alt 判定走 `ALT_LOGICALLY_HELD` 而非 GetAsyncKeyState——用户按住 Alt 呼窗时
         // SetForegroundWindow 合成 keyup 污染物理态，若读现查 chord 独占永不激活。
+        //
+        // **主窗可见性检查**（防御纵深）：chord 独占只在主窗可见时有意义。若 CHORD_MODE
+        // 因前端竞态残留为 true（如截图触发时 alt-poll in-flight tick 重新 setChordMode(true)），
+        // 主窗已隐藏后 hook 仍会吞 chord 键 → 桌面按 Alt+A 误触发截图。
+        // 加 is_visible() 门禁确保即使 CHORD_MODE 泄露也不会吞键。is_visible() 只读
+        // 一个 AtomicU8，零开销。
         if is_down
             && is_chord_mode()
             && !is_modifier_key(vk)
             && ALT_LOGICALLY_HELD.load(Ordering::SeqCst)
+            && crate::infra::platform::window::is_visible()
         {
             if let Some(key) = vk_to_key(vk) {
                 if is_chord_key(&key) {

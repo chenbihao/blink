@@ -757,11 +757,12 @@ pub async fn get_chat_messages(
                 });
 
                 if let Some(summary) = tool_result_text {
-                    // 截断到 200 字符
-                    let truncated = if summary.chars().count() <= 200 {
+                    // 截断到 50000 字符（与 summarize_tool_result 保持一致，
+                    // CSS max-height + overflow:auto 处理视觉滚动）
+                    let truncated = if summary.chars().count() <= 50000 {
                         summary
                     } else {
-                        let t: String = summary.chars().take(200).collect();
+                        let t: String = summary.chars().take(50000).collect();
                         format!("{t}…")
                     };
                     // 附加到前一条 ToolCall 快照
@@ -1753,17 +1754,32 @@ pub async fn get_storage_info(app: tauri::AppHandle) -> serde_json::Value {
     let perf_count = crate::infra::data::perf::count(&pools.cache).await;
     let icon_cache_count = crate::infra::data::icon_cache::count(&pools.cache).await;
 
+    // 文件大小
+    let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+    let data_dir = std::path::PathBuf::from(&appdata).join("blink");
+
     // P2.7: 迁移失败标记（若有，前端存储面板显示警告）
-    let migration_failed: Option<String> =
+    // 优化：如果旧 blink.db 已不存在，说明迁移已成功完成，migration_failed 是残留标记 → 清除
+    let legacy_db_path = data_dir.join("blink.db");
+    let legacy_db_exists = legacy_db_path.exists();
+    let mut migration_failed: Option<String> =
         sqlx::query_scalar("SELECT value FROM config WHERE key = 'migration_failed'")
             .fetch_optional(&pools.config)
             .await
             .ok()
             .flatten();
-
-    // 文件大小
-    let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-    let data_dir = std::path::PathBuf::from(&appdata).join("blink");
+    tracing::info!(
+        legacy_db_exists,
+        migration_failed_set = migration_failed.is_some(),
+        "get_storage_info: 迁移标记检查"
+    );
+    if migration_failed.is_some() && !legacy_db_exists {
+        tracing::info!("旧 blink.db 已删除但 migration_failed 标记仍在，清除残留标记");
+        let _ = sqlx::query("DELETE FROM config WHERE key = 'migration_failed'")
+            .execute(&pools.config)
+            .await;
+        migration_failed = None;
+    }
 
     serde_json::json!({
         "databases": {
@@ -1840,20 +1856,50 @@ pub fn open_data_folder() -> Result<(), String> {
     Ok(())
 }
 
-/// 清除 `migration_failed` 标记，让下次启动重试旧库迁移。
+/// 清除 `migration_failed` 标记。
 ///
-/// 用户点击"重试迁移"按钮时调用。清除标记后提示用户重启 Blink。
+/// 用户点击"重试迁移"按钮时调用：
+/// - 若旧 blink.db 已不存在（迁移已成功）→ 仅清除残留标记，无需重启
+/// - 若旧 blink.db 仍存在但 db_split_done=true（迁移成功但旧库未删）→ 删除旧库 + 清标记
+/// - 若旧 blink.db 仍存在且 db_split_done 未设 → 清标记，需重启重试迁移
 #[tauri::command]
 pub async fn retry_migration(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri::Manager;
-    let pools = app
-        .try_state::<std::sync::Arc<crate::infra::data::pools::DbPools>>()
-        .ok_or("DB pools 未初始化")?;
+    let pools = app.state::<crate::infra::data::DbPools>();
+
+    // 清除 migration_failed 标记
     sqlx::query("DELETE FROM config WHERE key = 'migration_failed'")
         .execute(&pools.config)
         .await
         .map_err(|e| format!("清除迁移标记失败: {e}"))?;
-    tracing::info!("已清除 migration_failed 标记，用户需重启生效");
+    tracing::info!("已清除 migration_failed 标记");
+
+    // 检查旧库是否仍存在
+    let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+    let data_dir = std::path::PathBuf::from(&appdata).join("blink");
+    let legacy_path = data_dir.join("blink.db");
+
+    if legacy_path.exists() {
+        // 检查 db_split_done 是否已设
+        let db_split_done: Option<String> =
+            sqlx::query_scalar("SELECT value FROM config WHERE key = 'db_split_done'")
+                .fetch_optional(&pools.config)
+                .await
+                .ok()
+                .flatten();
+
+        if db_split_done.as_deref() == Some("true") {
+            // 迁移已成功，旧库是残留 → 直接删除
+            match std::fs::remove_file(&legacy_path) {
+                Ok(()) => tracing::info!("retry_migration: 旧 blink.db 已删除"),
+                Err(e) => tracing::warn!(error = %e, "retry_migration: 删除旧 blink.db 失败"),
+            }
+        } else {
+            tracing::info!("retry_migration: 旧 blink.db 仍存在且迁移未完成，需重启重试");
+        }
+    } else {
+        tracing::info!("retry_migration: 旧 blink.db 不存在，标记已清除");
+    }
+
     Ok(())
 }
 

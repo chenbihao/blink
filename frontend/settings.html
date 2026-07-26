@@ -15,7 +15,6 @@
         <button class="tab" data-tab="engines" data-i18n="tab.engines">引擎</button>
         <button class="tab" data-tab="plugins" data-i18n="tab.plugins">插件</button>
         <button class="tab" data-tab="ai" data-i18n="tab.ai">AI</button>
-        <button class="tab" data-tab="local-model" data-i18n="tab.local_model">本地模型</button>
         <button class="tab" data-tab="voice" data-i18n="tab.voice">语音输入</button>
         <button class="tab" data-tab="context" data-i18n="tab.context">上下文感知</button>
         <button class="tab" data-tab="chord" data-i18n="tab.chord">Chord 交互</button>
@@ -623,55 +622,6 @@
           <button id="ai-toast-later" class="btn-small" data-i18n="ai.saved.later">稍后</button>
         </div>
 
-        <!-- 本地模型（0.12 §2.7 新增）── -->
-        <div id="local-model" class="panel">
-          <h2 data-i18n="panel.local_model">本地模型</h2>
-          <p class="panel-lede" data-i18n="local_model.lede">连接本地推理服务，无需 API Key，数据不出本机。</p>
-
-          <!-- ollama 探测卡片 -->
-          <div class="extension-card">
-            <div class="extension-header">
-              <div class="extension-icon"><svg class="icon" aria-hidden="true"><use href="#icon-terminal"/></svg></div>
-              <div class="extension-info">
-                <h3>Ollama</h3>
-                <p class="extension-desc" data-i18n="local_model.ollama.desc">本地大模型推理服务，支持 Chat / Embedding</p>
-              </div>
-              <span id="ollama-status-badge" class="status-badge status-unknown" data-i18n="engine.status.probing">探测中…</span>
-            </div>
-            <div class="extension-body">
-              <div class="setting-row">
-                <label class="setting-label" data-i18n="local_model.ollama.base_url.label">服务地址</label>
-                <input type="text" id="ollama-base-url" class="input-wide" value="http://localhost:11434" data-i18n-ph="local_model.ollama.base_url.ph" />
-                <button id="ollama-probe-btn" class="btn-small" data-i18n="engine.probe">重新探测</button>
-              </div>
-              <div id="ollama-models-container">
-                <!-- 由 JS 动态渲染 -->
-              </div>
-            </div>
-          </div>
-
-          <!-- LM Studio 帮助卡片 -->
-          <div class="extension-card">
-            <div class="extension-header">
-              <div class="extension-icon"><svg class="icon" aria-hidden="true"><use href="#icon-terminal"/></svg></div>
-              <div class="extension-info">
-                <h3>LM Studio</h3>
-                <p class="extension-desc" data-i18n="local_model.lmstudio.desc">本地大模型推理服务，兼容 OpenAI API</p>
-              </div>
-            </div>
-            <div class="extension-body">
-              <div class="lmstudio-help">
-                <p class="setting-hint" data-i18n="local_model.lmstudio.step1"><strong>步骤 1：</strong>下载安装 LM Studio（lmstudio.ai）</p>
-                <p class="setting-hint" data-i18n="local_model.lmstudio.step2"><strong>步骤 2：</strong>在 LM Studio 中下载所需模型（如 Llama 3、Qwen 等）</p>
-                <p class="setting-hint" data-i18n="local_model.lmstudio.step3"><strong>步骤 3：</strong>点击「Developer」→「Start Server」启动本地服务</p>
-                <p class="setting-hint" data-i18n="local_model.lmstudio.step4"><strong>步骤 4：</strong>确认服务地址（默认 <code>http://localhost:1234/v1</code>）</p>
-                <p class="setting-hint" data-i18n="local_model.lmstudio.step5"><strong>步骤 5：</strong>在上方「AI 供应商」页面添加供应商，选择 LM Studio 预设即可</p>
-                <button id="lmstudio-goto-ai-btn" class="btn-small" data-i18n="local_model.lmstudio.goto_ai">前往 AI 供应商配置</button>
-              </div>
-            </div>
-          </div>
-        </div>
-
         <!-- 模型编辑 modal（0.9.4 Step 1）───────────────────────────────
              独立于 provider modal:
              - 新增模式(表格底部 +):最小化字段,ID + 显示名 + 保存
@@ -1241,16 +1191,16 @@
           <!-- 操作 -->
           <div class="section-label" data-i18n="storage.section.actions">清理操作</div>
           <div class="setting-row">
+            <label class="setting-label" data-i18n="storage.cache.label">缓存库</label>
+            <button id="clear-cache-db" class="btn-danger" data-i18n="storage.clear_cache">清空缓存</button>
+          </div>
+          <div class="setting-row">
             <label class="setting-label" data-i18n="storage.history.label">历史记录</label>
             <button id="clear-history" class="btn-danger" data-i18n="storage.clear">清空历史记录</button>
           </div>
           <div class="setting-row">
             <label class="setting-label" data-i18n="storage.audit.label">AI 调用记录</label>
             <button id="clear-ai-audit" class="btn-danger" data-i18n="storage.clear_audit">清空 AI 调用记录</button>
-          </div>
-          <div class="setting-row">
-            <label class="setting-label" data-i18n="storage.cache.label">缓存库</label>
-            <button id="clear-cache-db" class="btn-danger" data-i18n="storage.clear_cache">清空缓存</button>
           </div>
         </div>
 

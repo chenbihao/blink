@@ -17,3 +17,9 @@ body {
   background: transparent;
   overflow: hidden;
 }
+
+/* hidden 属性兜底：防止 display:flex/grid 等声明覆盖 [hidden]，
+   导致设置页迁移警告条等元素点击后仍可见。 */
+[hidden] {
+  display: none !important;
+}

@@ -106,6 +106,41 @@ html, body {
   display: none;
 }
 
+/* ── 选区中央加载转圈（OCR/翻译进行中） ────────────────────────── */
+.sel-loading {
+  position: fixed;
+  z-index: var(--z-dropdown);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+}
+
+.sel-loading-spinner {
+  width: 36px;
+  height: 36px;
+  border: 3px solid rgba(255, 255, 255, 0.25);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: sel-loading-spin 0.7s linear infinite;
+}
+
+@keyframes sel-loading-spin {
+  to { transform: rotate(360deg); }
+}
+
+.sel-loading-text {
+  color: #fff;
+  font-size: var(--text-sm);
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  background: rgba(0, 0, 0, 0.6);
+  padding: 2px 10px;
+  border-radius: var(--radius-xs);
+  white-space: nowrap;
+}
+
 /* ── 工具栏（0.11.7-a；0.11.8 尺寸放大 1.5×；0.11.8-a 分组重组 + 圆润化；
       0.11.8-b 尺寸回缩：42→36 单元 / 24→20 图标 / 21→18 字号）──────────────
    放大策略：不用 CSS zoom（会打乱 position:fixed 坐标系统与 offsetWidth 语义），

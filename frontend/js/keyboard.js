@@ -211,6 +211,12 @@ export function startAltPoll() {
     } catch (e) {
       console.warn("[alt] is_alt_down 失败", e);
     }
+    // Guard: stopAltPoll() 可能在 await 期间被调用（如截图触发时 hide_for_screenshot
+    // emit blink://hidden → 前端 stopAltPoll 清了 altLast=false）。若不挡，这个
+    // in-flight tick 会拿到 down=true（Alt 还按着）→ setAlt(true) → setChordMode(true)，
+    // 把 CHORD_MODE 重新打开。此后 alt-poll 已停、没人再清，chord 状态泄露到
+    // 截图退出后——桌面按 Alt+A 会误触发一次截图。
+    if (!altPollTimer) return;
     if (down !== altLast) {
       altLast = down;
       setAlt(down);

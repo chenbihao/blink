@@ -20,7 +20,7 @@ import { t } from "./i18n/index.js";
 import * as ghost from "./ghost.js";
 import * as chord from "./chord.js";
 import * as autosuggestConfig from "./autosuggest-config.js";
-import { renderKey, renderHint, renderCombo } from "./kbd.js";
+import { renderKey, renderHint } from "./kbd.js";
 import { syncWindowSize } from "./window-size.js";
 
 const el = document.getElementById("statusbar");
@@ -138,8 +138,11 @@ function buildSecondary(hasHint) {
       sep.textContent = "│";
       secondary.appendChild(sep);
     }
-    // key=' '（语音输入）→ "Space"，与 chord.js render 统一
-    secondary.appendChild(renderCombo(`Alt+${chord.chordKeyLabel(a.key)}`));
+    // 紧凑格式：单 kbd 显示键名（Alt 修饰键隐含，省空间）
+    const kbd = document.createElement("kbd");
+    kbd.className = "kbd chord-key";
+    kbd.textContent = chord.chordKeyLabel(a.key);
+    secondary.appendChild(kbd);
     const label = document.createElement("span");
     label.className = "chord-label";
     label.textContent = a.label;

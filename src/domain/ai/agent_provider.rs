@@ -51,7 +51,7 @@ use crate::infra::platform::secret;
 ///
 /// 0.12.2 扩展:
 /// - `ToolCall` 加 `call_id`(`rig internal_call_id`),供与 `ToolResult` 配对。
-/// - 新增 `ToolResult`(来自 `StreamUserItem`),携带摘要(前 200 字符,图片转 `[image]`)。
+/// - 新增 `ToolResult`(来自 `StreamUserItem`),携带摘要(前 50000 字符,图片转 `[image]`)。
 /// - `Done` 携带 `input_tokens`/`output_tokens`(从 `FinalResponse.usage()` 提取)。
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -68,7 +68,7 @@ pub enum ChatStreamChunk {
     ToolCall { tool: String, call_id: String, arguments: String },
     /// tool 执行结果(来自 rig `StreamUserItem`)。
     ///
-    /// `call_id` 与 `ToolCall.call_id` 配对。`summary` 为结果文本(前 200 字符);
+    /// `call_id` 与 `ToolCall.call_id` 配对。`summary` 为结果文本(前 50000 字符);
     /// 图片内容以 `[image]` 占位。`success` 由 `content` 是否为空推断。
     ToolResult {
         call_id: String,
@@ -325,7 +325,7 @@ impl AgentProvider {
 }
 
 /// 提取模型显示名（优先 display_name，回退 model id）。
-fn model_display_name(entry: &ProviderEntry, model: &ModelEntry) -> String {
+fn model_display_name(_entry: &ProviderEntry, model: &ModelEntry) -> String {
     if !model.display_name.is_empty() {
         model.display_name.clone()
     } else {
@@ -338,7 +338,7 @@ fn model_display_name(entry: &ProviderEntry, model: &ModelEntry) -> String {
 /// - 文本内容拼接,截前 200 字符。
 /// - 图片内容转 `[image]` 占位(前端暂不展示图片)。
 /// - 多个 content item 用换行分隔。
-const TOOL_RESULT_SUMMARY_MAX: usize = 200;
+const TOOL_RESULT_SUMMARY_MAX: usize = 50000;
 
 fn summarize_tool_result(tool_result: &ToolResult) -> String {
     use rig_core::completion::message::ToolResultContent;
@@ -653,15 +653,15 @@ mod tests {
         };
         assert_eq!(summarize_tool_result(&short), "ok");
 
-        // 长文本截断到 200 字符 + 省略号
-        let long_text = "x".repeat(300);
+        // 长文本截断到 50000 字符 + 省略号
+        let long_text = "x".repeat(60000);
         let long = ToolResult {
             id: "2".into(),
             call_id: None,
             content: OneOrMany::one(ToolResultContent::Text(Text::new(long_text))),
         };
         let summary = summarize_tool_result(&long);
-        assert_eq!(summary.chars().count(), 201, "200 字符 + 1 省略号");
+        assert_eq!(summary.chars().count(), 50001, "50000 字符 + 1 省略号");
         assert!(summary.ends_with('…'));
 
         // 图片转占位
