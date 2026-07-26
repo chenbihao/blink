@@ -152,22 +152,43 @@ async fn migrate_add_group_id_column(pool: &SqlitePool) -> Result<(), String> {
 /// 创建对话记录（INSERT OR IGNORE——已存在时不报错）。
 ///
 /// `title` 为 None 时用空标题（后续可由 rename 更新）。
+///
+/// 0.12.8: 如果 INSERT 被 IGNORE（记录已存在）且新 title 非空而旧 title 为空，
+/// 则额外 UPDATE 补写标题——避免 `set_conversation_group` 先创建空标题记录后，
+/// `memory.append` 的 `extract_title` 被静默丢弃。
 pub async fn create_conversation(
-    pool: &SqlitePool,
-    id: &str,
-    title: Option<&str>,
+pool: &SqlitePool,
+id: &str,
+title: Option<&str>,
 ) -> Result<(), String> {
-    let now = chrono::Utc::now().timestamp();
-    sqlx::query(
-        "INSERT OR IGNORE INTO conversations (id, title, created_at, last_active_at) VALUES (?1, ?2, ?3, ?3)",
-    )
-    .bind(id)
-    .bind(title)
-    .bind(now)
-    .execute(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-    Ok(())
+let now = chrono::Utc::now().timestamp();
+let result = sqlx::query(
+"INSERT OR IGNORE INTO conversations (id, title, created_at, last_active_at) VALUES (?1, ?2, ?3, ?3)",
+)
+.bind(id)
+.bind(title)
+.bind(now)
+.execute(pool)
+.await
+.map_err(|e| e.to_string())?;
+
+// INSERT 被 IGNORE（rows_affected = 0 表示记录已存在）时，
+// 如果新 title 非空，尝试补写到空标题的记录
+if result.rows_affected() == 0 {
+    if let Some(t) = title {
+        if !t.is_empty() {
+            sqlx::query(
+                "UPDATE conversations SET title = ?1 WHERE id = ?2 AND (title IS NULL OR title = '')",
+            )
+            .bind(t)
+            .bind(id)
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        }
+    }
+}
+Ok(())
 }
 
 /// 更新对话标题。
@@ -198,7 +219,7 @@ pub async fn touch_conversation(pool: &SqlitePool, id: &str) -> Result<(), Strin
 }
 
 /// 列出所有对话（按 last_active_at 倒序），含消息条数和 group_id。
-pub async fn list_conversations(pool: &SqlitePool) -> Vec<Conversation> {
+pub async fn list_conversations(pool: &SqlitePool) -> Result<Vec<Conversation>, String> {
     let rows: Vec<(String, Option<String>, i64, i64, Option<String>, i64)> = sqlx::query_as(
         "SELECT c.id, c.title, c.created_at, c.last_active_at, c.group_id, \
          (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS msg_count \
@@ -206,12 +227,12 @@ pub async fn list_conversations(pool: &SqlitePool) -> Vec<Conversation> {
     )
     .fetch_all(pool)
     .await
-    .unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "list_conversations 查询失败，返回空列表");
-        Vec::new()
-    });
+    .map_err(|e| {
+        tracing::warn!(error = %e, "list_conversations 查询失败");
+        e.to_string()
+    })?;
 
-    rows.into_iter()
+    Ok(rows.into_iter()
         .map(
             |(id, title, created_at, last_active_at, group_id, msg_count)| Conversation {
                 id,
@@ -222,7 +243,7 @@ pub async fn list_conversations(pool: &SqlitePool) -> Vec<Conversation> {
                 group_id,
             },
         )
-        .collect()
+        .collect())
 }
 
 /// 删除对话（级联删除 messages——SQLite 默认不启用 FK，手动 DELETE）。
@@ -332,12 +353,13 @@ pub async fn truncate_messages(
 /// 加载对话的**全部**消息（按 id 升序，即时间顺序）。
 ///
 /// 供 `get_chat_messages` IPC 加载历史用——展示用全量，agent context 用滑动窗口。
+/// 0.12.7：返回 `(role, content, created_at)` 三元组，前端据此插入时间分隔符。
 pub async fn load_all_messages(
     pool: &SqlitePool,
     conversation_id: &str,
-) -> Result<Vec<(String, String)>, String> {
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT role, content FROM messages WHERE conversation_id = ?1 ORDER BY id ASC",
+) -> Result<Vec<(String, String, i64)>, String> {
+    let rows: Vec<(String, String, i64)> = sqlx::query_as(
+        "SELECT role, content, created_at FROM messages WHERE conversation_id = ?1 ORDER BY id ASC",
     )
     .bind(conversation_id)
     .fetch_all(pool)
@@ -601,6 +623,33 @@ pub async fn get_effective_system_prompt(
     Ok(prompt.unwrap_or(None))
 }
 
+/// 按 group_id 直接查询分组的系统提示词（0.12.8）。
+///
+/// 与 `get_effective_system_prompt`（按 conversation_id 查）不同，此函数直接按
+/// group_id 查询，供 `chat_prompt` 在持久化分组之前获取系统提示词——避免副作用先于
+/// 校验的问题（set_conversation_group 移到 prompt 成功后才执行）。
+///
+/// `group_id = None` → 返回 None（默认组无系统提示词）。
+/// `group_id` 不存在 → 返回 None。
+pub async fn get_group_system_prompt(
+    pool: &SqlitePool,
+    group_id: Option<&str>,
+) -> Result<Option<String>, String> {
+    let gid = match group_id {
+        Some(g) if !g.is_empty() => g,
+        _ => return Ok(None),
+    };
+    let prompt: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT system_prompt FROM conversation_groups WHERE id = ?1",
+    )
+    .bind(gid)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(prompt.unwrap_or(None))
+}
+
 // ── 单测 ───────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -622,7 +671,7 @@ mod tests {
         create_conversation(&pool, "c1", Some("Hello")).await.unwrap();
         create_conversation(&pool, "c2", Some("World")).await.unwrap();
 
-        let convs = list_conversations(&pool).await;
+        let convs = list_conversations(&pool).await.unwrap();
         assert_eq!(convs.len(), 2);
         // 按 last_active_at 倒序——c2 后创建所以在前
         assert_eq!(convs[0].id, "c2");
@@ -636,10 +685,35 @@ mod tests {
         // 重复创建不报错
         create_conversation(&pool, "c1", Some("Title 2")).await.unwrap();
 
-        let convs = list_conversations(&pool).await;
+        let convs = list_conversations(&pool).await.unwrap();
         assert_eq!(convs.len(), 1);
         // INSERT OR IGNORE 保留原值
         assert_eq!(convs[0].title.as_deref(), Some("Title 1"));
+    }
+
+    #[tokio::test]
+    async fn create_conversation_backfills_empty_title() {
+        // 0.12.8: 如果记录已存在但标题为空，create_conversation 应补写标题
+        let pool = setup_pool().await;
+
+        // 先用空标题创建（模拟 set_conversation_group 的行为）
+        create_conversation(&pool, "c1", None).await.unwrap();
+        let convs = list_conversations(&pool).await.unwrap();
+        assert_eq!(convs[0].title, None);
+
+        // 再用非空标题创建（模拟 memory.append 的 extract_title）
+        create_conversation(&pool, "c1", Some("Real Title")).await.unwrap();
+        let convs = list_conversations(&pool).await.unwrap();
+        assert_eq!(
+            convs[0].title.as_deref(),
+            Some("Real Title"),
+            "空标题应被补写"
+        );
+
+        // 已有非空标题时，不覆盖
+        create_conversation(&pool, "c1", Some("Other Title")).await.unwrap();
+        let convs = list_conversations(&pool).await.unwrap();
+        assert_eq!(convs[0].title.as_deref(), Some("Real Title"), "非空标题不覆盖");
     }
 
     #[tokio::test]
@@ -650,7 +724,7 @@ mod tests {
         let updated = rename_conversation(&pool, "c1", "New").await.unwrap();
         assert!(updated);
 
-        let convs = list_conversations(&pool).await;
+        let convs = list_conversations(&pool).await.unwrap();
         assert_eq!(convs[0].title.as_deref(), Some("New"));
     }
 
@@ -763,7 +837,7 @@ mod tests {
         append_message(&pool, "c1", "user", "content1").await.unwrap();
         append_message(&pool, "c1", "assistant", "content2").await.unwrap();
 
-        let convs = list_conversations(&pool).await;
+        let convs = list_conversations(&pool).await.unwrap();
         assert_eq!(convs[0].message_count, Some(2));
     }
 
@@ -815,14 +889,14 @@ mod tests {
         set_conversation_group(&pool, "c1", Some("g1")).await.unwrap();
 
         // 确认对话在 g1 组
-        let convs = list_conversations(&pool).await;
+        let convs = list_conversations(&pool).await.unwrap();
         assert_eq!(convs[0].group_id.as_deref(), Some("g1"));
 
         // 删除分组 → 对话移至默认
         let ok = delete_group(&pool, "g1").await.unwrap();
         assert!(ok);
 
-        let convs = list_conversations(&pool).await;
+        let convs = list_conversations(&pool).await.unwrap();
         assert_eq!(convs[0].group_id, None);
     }
 
@@ -865,7 +939,7 @@ mod tests {
         // 对话记录不存在时 set_conversation_group 应自动创建
         set_conversation_group(&pool, "c1", Some("g1")).await.unwrap();
 
-        let convs = list_conversations(&pool).await;
+        let convs = list_conversations(&pool).await.unwrap();
         assert_eq!(convs.len(), 1);
         assert_eq!(convs[0].id, "c1");
         assert_eq!(convs[0].group_id.as_deref(), Some("g1"));
@@ -881,12 +955,12 @@ mod tests {
 
         // 移到 g2
         set_conversation_group(&pool, "c1", Some("g2")).await.unwrap();
-        let convs = list_conversations(&pool).await;
+        let convs = list_conversations(&pool).await.unwrap();
         assert_eq!(convs[0].group_id.as_deref(), Some("g2"));
 
         // 移到默认
         set_conversation_group(&pool, "c1", None).await.unwrap();
-        let convs = list_conversations(&pool).await;
+        let convs = list_conversations(&pool).await.unwrap();
         assert_eq!(convs[0].group_id, None);
     }
 
@@ -975,7 +1049,7 @@ mod tests {
         create_conversation(&pool, "c2", Some("B")).await.unwrap();
         set_conversation_group(&pool, "c1", Some("g1")).await.unwrap();
 
-        let convs = list_conversations(&pool).await;
+        let convs = list_conversations(&pool).await.unwrap();
         let c1 = convs.iter().find(|c| c.id == "c1").unwrap();
         let c2 = convs.iter().find(|c| c.id == "c2").unwrap();
         assert_eq!(c1.group_id.as_deref(), Some("g1"));

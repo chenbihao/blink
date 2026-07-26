@@ -331,28 +331,43 @@ pub async fn chat_prompt(
         .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
         .ok_or("ChatService 未注册")?;
 
-    // 0.12.6: 设置对话分组（group_id = Some 时设置；None 时保持现有分组）
+    // 0.12.8: 查询系统提示词 + 调 prompt() 在前，持久化分组在后——
+    // 避免 prompt 失败（如 AlreadyActive）时分组已写入 DB 的副作用先于校验问题。
     let pools = app.state::<crate::infra::data::DbPools>();
-    if let Some(ref gid) = group_id {
-        crate::infra::data::conversations::set_conversation_group(
+
+    // 按新 group_id 直接查系统提示词（Some → 查该分组；None → 查对话现有分组）
+    let group_system_prompt = if let Some(ref gid) = group_id {
+        crate::infra::data::conversations::get_group_system_prompt(&pools.ai, Some(gid))
+            .await
+            .unwrap_or(None)
+    } else {
+        // group_id = None：对话可能在已有分组中，查现有分组的提示词
+        crate::infra::data::conversations::get_effective_system_prompt(
             &pools.ai,
+            &conversation_id,
+        )
+        .await
+        .unwrap_or(None)
+    };
+
+    let handle = chat
+        .prompt(conversation_id.clone(), message, group_system_prompt)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // prompt 成功后才持久化分组（副作用后置）
+    if let Some(ref gid) = group_id {
+        let pools2 = app.state::<crate::infra::data::DbPools>();
+        if let Err(e) = crate::infra::data::conversations::set_conversation_group(
+            &pools2.ai,
             &conversation_id,
             Some(gid),
         )
-        .await?;
-    }
-    // 查询有效系统提示词（基于对话当前所属分组的 system_prompt）
-    let group_system_prompt = crate::infra::data::conversations::get_effective_system_prompt(
-        &pools.ai,
-        &conversation_id,
-    )
-    .await
-    .unwrap_or(None);
-
-    let handle = chat
-        .prompt(conversation_id, message, group_system_prompt)
         .await
-        .map_err(|e| e.to_string())?;
+        {
+            tracing::warn!(%conversation_id, %e, "chat_prompt: 持久化分组失败（不影响对话）");
+        }
+    }
     let request_id = handle.request_id;
     let conv_id = handle.conversation_id.clone();
     let mut chunks = handle.chunks;
@@ -639,7 +654,7 @@ pub async fn list_chat_conversations(
     app: tauri::AppHandle,
 ) -> Result<Vec<crate::infra::data::conversations::Conversation>, String> {
     let pools = app.state::<crate::infra::data::DbPools>();
-    Ok(crate::infra::data::conversations::list_conversations(&pools.ai).await)
+    crate::infra::data::conversations::list_conversations(&pools.ai).await
 }
 
 /// 删除指定对话（级联删除 messages）。
@@ -665,6 +680,20 @@ pub async fn rename_chat_conversation(
         .await
 }
 
+/// 查询对话的有效系统提示词（0.12.7 §6.5）。
+///
+/// 返回对话所属分组的 system_prompt（直属分组，非祖先继承）。
+/// 无分组或分组无提示词时返回 None。
+#[tauri::command]
+pub async fn get_conversation_system_prompt(
+    app: tauri::AppHandle,
+    conversation_id: String,
+) -> Result<Option<String>, String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    crate::infra::data::conversations::get_effective_system_prompt(&pools.ai, &conversation_id)
+        .await
+}
+
 /// chat 消息历史快照（0.12.3 Phase B `get_chat_messages` 返回用）。
 ///
 /// 从 rig `Message` 提取 role + 文本内容 + thinking（如有）。
@@ -679,9 +708,15 @@ pub struct ChatMessageSnapshot {
     /// assistant 消息包含 ToolCall 时的工具名（前端渲染为工具卡片）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
+    /// 0.12.7 §6.6：工具调用参数 JSON 字符串（前端折叠展示）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_arguments: Option<String>,
     /// 工具执行结果摘要（从 ToolResult 消息提取，附加到前一条 ToolCall 快照）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_result: Option<String>,
+    /// 0.12.7 §6.4：消息创建时间戳（Unix 秒），前端据此插入时间分隔符
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<i64>,
 }
 
 /// 加载对话的完整消息历史（0.12.3 Phase B）。
@@ -702,7 +737,7 @@ pub async fn get_chat_messages(
         .await?;
 
     let mut snapshots: Vec<ChatMessageSnapshot> = Vec::with_capacity(rows.len());
-    for (role, content_json) in rows {
+    for (role, content_json, created_at) in rows {
         let msg: Message = serde_json::from_str(&content_json)
             .map_err(|e| format!("反序列化消息失败: {e}"))?;
 
@@ -749,13 +784,16 @@ pub async fn get_chat_messages(
                     text,
                     thinking: None,
                     tool_name: None,
+                    tool_arguments: None,
                     tool_result: None,
+                    created_at: Some(created_at),
                 });
             }
             Message::Assistant { content, .. } => {
                 let mut text = String::new();
                 let mut thinking = String::new();
                 let mut tool = None;
+                let mut tool_args = None;
                 for c in content.iter() {
                     match c {
                         AssistantContent::Text(t) => text.push_str(&t.text),
@@ -764,6 +802,7 @@ pub async fn get_chat_messages(
                         }
                         AssistantContent::ToolCall(tc) => {
                             tool = Some(tc.function.name.clone());
+                            tool_args = Some(tc.function.arguments.to_string());
                         }
                         _ => {}
                     }
@@ -773,7 +812,9 @@ pub async fn get_chat_messages(
                     text,
                     thinking: if thinking.is_empty() { None } else { Some(thinking) },
                     tool_name: tool,
+                    tool_arguments: tool_args,
                     tool_result: None,
+                    created_at: Some(created_at),
                 });
             }
             Message::System { content } => {
@@ -782,7 +823,9 @@ pub async fn get_chat_messages(
                     text: content.clone(),
                     thinking: None,
                     tool_name: None,
+                    tool_arguments: None,
                     tool_result: None,
+                    created_at: Some(created_at),
                 });
             }
         }
@@ -796,6 +839,15 @@ pub async fn get_chat_messages(
 /// chat 窗口设置按钮调用此 command 并传 `tab: "ai"`。
 #[tauri::command]
 pub async fn open_settings_tab(app: tauri::AppHandle, tab: String) -> Result<(), String> {
+    // 0.12.8: 白名单校验——eval 字符串拼接存在注入风险
+    const ALLOWED_TABS: &[&str] = &[
+        "general", "engines", "plugins", "ai", "local-model", "voice",
+        "context", "chord", "hotkey", "network", "storage", "debug", "about",
+    ];
+    if !ALLOWED_TABS.contains(&tab.as_str()) {
+        return Err(format!("无效的设置页 tab: {tab}"));
+    }
+
     crate::infra::platform::window::open_settings(&app);
     if let Some(w) = app.get_webview_window("settings") {
         let js = format!(

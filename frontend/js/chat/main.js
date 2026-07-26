@@ -8,6 +8,8 @@ import * as state from "./state.js";
 import * as ipc from "./ipc.js";
 import { initRenderer } from "./renderer.js";
 import * as components from "./components.js";
+import { escapeText, escapeAttr } from "./utils.js";
+// 0.12.7 §6.3：显式导入 renderSignal，多处场景接入
 import { initComposer, setStreamingMode, setInputMode, clearInput, focusInput, setThinkingEnabled as setComposerThinking, showVoiceIndicator, hideVoiceIndicator, showVoiceStatus, updateVoiceLevel, updateVoicePartial, isVoiceRecording } from "./composer.js";
 import { initSidebar, refreshSidebar, showSidebar, hideSidebar, toggleSidebar, setActiveConversation } from "./sidebar.js";
 import { applyThemeFromConfig } from "../theme.js";
@@ -86,6 +88,9 @@ async function init() {
 
   // 0.12.7 §1：面包屑标题编辑（事件委托）
   bindBreadcrumbEdit();
+
+  // 0.12.7 §6.5：系统提示词横幅交互
+  bindPromptBanner();
 
   // Esc 键：生成中 → abort；空闲 → 隐藏窗口
   document.addEventListener("keydown", handleEsc);
@@ -208,6 +213,9 @@ async function handleEditMessage(msgIndex, newText) {
     }
   }
 
+  // 0.12.7 §6.3：消息已编辑 Signal
+  components.renderSignal("消息已编辑", "info");
+
   // 4. 重新发送编辑后的消息（isEdit=true 跳过截断标题逻辑）
   await handleSend(newText, true);
 }
@@ -262,6 +270,8 @@ async function handleStop() {
     components.finalizeToolStatus(currentToolEl, true);
     currentToolEl = null;
   }
+  // 0.12.7 §6.3：停止生成 Signal
+  components.renderSignal("已停止生成", "info");
   finishStreaming();
 }
 
@@ -320,7 +330,7 @@ function handleStreamEvent(event) {
         currentAssistantEl = null;
       }
       // 显示 Tool 状态卡（0.12.2：按 call_id 跟踪，供 ToolResult 配对）
-      currentToolEl = components.renderToolStatus(chunk.tool);
+      currentToolEl = components.renderToolStatus(chunk.tool, chunk.arguments);
       if (chunk.call_id) {
         state.trackToolCall(chunk.call_id, { el: currentToolEl, tool: chunk.tool });
       }
@@ -343,7 +353,7 @@ function handleStreamEvent(event) {
         components.finalizeAssistantMessage(currentAssistantEl, state.streamBuffer, state.thinkingBuffer);
         state.addMessage({ role: "assistant", content: state.streamBuffer });
       }
-      components.renderErrorMessage(`已达工具调用上限（${chunk.max_turns}轮），请缩减任务或开启新对话`);
+      components.renderSignal(`已达工具调用上限（${chunk.max_turns}轮），请缩减任务或开启新对话`, "warning");
       finishStreaming();
       break;
 
@@ -554,6 +564,8 @@ async function handleNewConversation(groupId = null) {
   components.renderEmptyState(state.providerConfigured, openSettings);
   setActiveConversation(state.conversationId);
   await updateBreadcrumb("新对话");
+  // 0.12.7 §6.5：新对话无提示词，隐藏横幅
+  await updatePromptBanner(state.conversationId);
   refreshSidebar();
   focusInput();
 }
@@ -586,14 +598,24 @@ async function handleSwitchConversation(conversationId, groupId = null) {
     if (messages.length === 0) {
       components.renderEmptyState(state.providerConfigured, openSettings);
     } else {
+      // 0.12.7 §6.4：时间分隔符——首条消息 + 间隔 >5 分钟时插入
+      let lastTs = null;
       for (const msg of messages) {
+        // 插入时间分隔符
+        if (msg.created_at) {
+          if (lastTs === null || Math.abs(msg.created_at - lastTs) > 300) {
+            components.renderTimeSeparator(msg.created_at);
+          }
+          lastTs = msg.created_at;
+        }
+
         if (msg.role === "user") {
           components.renderUserMessage(msg.text);
           state.addMessage({ role: "user", content: msg.text });
         } else if (msg.role === "assistant") {
           // 包含 tool_name 的 assistant 消息渲染为工具调用卡片
           if (msg.tool_name && !msg.text) {
-            const toolEl = components.renderToolStatus(msg.tool_name);
+            const toolEl = components.renderToolStatus(msg.tool_name, msg.tool_arguments, { skipTiming: true });
             if (toolEl) {
               components.finalizeToolStatus(toolEl, true);
               // 有结果摘要时追加可折叠详情
@@ -621,6 +643,8 @@ async function handleSwitchConversation(conversationId, groupId = null) {
   const conv = convs.find((c) => c.id === conversationId);
   state.setCurrentGroupId(conv?.group_id || groupId);
   await updateBreadcrumb(conv?.title || "新对话");
+  // 0.12.7 §6.5：查询并显示分组系统提示词
+  await updatePromptBanner(conversationId);
 
   focusInput();
 }
@@ -782,6 +806,75 @@ function bindBreadcrumbEdit() {
     });
     input.addEventListener("blur", finishEdit);
   });
+}
+
+// ── 系统提示词横幅（0.12.7 §6.5） ──────────────
+
+/**
+ * 绑定提示词横幅交互（折叠/展开 + 关闭）。
+ *
+ * 横幅位置在消息区上方，可随消息区滚动（非 sticky）——用户看一眼即可滚走。
+ * - toggle 按钮：展开/折叠 body
+ * - close 按钮：本会话隐藏（state.dismissedPromptConvs 记录）
+ */
+function bindPromptBanner() {
+  const banner = document.getElementById("chat-prompt-banner");
+  if (!banner) return;
+
+  const toggle = document.getElementById("chat-prompt-banner-toggle");
+  toggle?.addEventListener("click", () => {
+    if (banner.hasAttribute("data-collapsed")) {
+      banner.removeAttribute("data-collapsed");
+    } else {
+      banner.setAttribute("data-collapsed", "");
+    }
+  });
+
+  const close = document.getElementById("chat-prompt-banner-close");
+  close?.addEventListener("click", () => {
+    banner.hidden = true;
+    if (state.conversationId) {
+      state.dismissedPromptConvs.add(state.conversationId);
+    }
+  });
+}
+
+/**
+ * 查询并更新提示词横幅。
+ *
+ * 切换对话时调用——查询 `get_conversation_system_prompt`，
+ * 有提示词且未被本会话关闭则显示，否则隐藏。
+ * @param {string} conversationId
+ */
+async function updatePromptBanner(conversationId) {
+  const banner = document.getElementById("chat-prompt-banner");
+  const body = document.getElementById("chat-prompt-banner-body");
+  if (!banner || !body) return;
+
+  if (!conversationId) {
+    banner.hidden = true;
+    return;
+  }
+
+  // 本会话已关闭
+  if (state.dismissedPromptConvs.has(conversationId)) {
+    banner.hidden = true;
+    return;
+  }
+
+  try {
+    const prompt = await ipc.getConversationSystemPrompt(conversationId);
+    if (prompt && prompt.trim()) {
+      body.textContent = prompt;
+      banner.hidden = false;
+      // 默认展开
+      banner.removeAttribute("data-collapsed");
+    } else {
+      banner.hidden = true;
+    }
+  } catch (e) {
+    banner.hidden = true;
+  }
 }
 
 // ── 设置 ────────────────────────────────────────
@@ -962,20 +1055,6 @@ function hideDropdown() {
   if (!modelDropdown) return;
   modelDropdown.hidden = true;
   if (modelTrigger) modelTrigger.classList.remove("active");
-}
-
-/**
- * 文本转义（防 XSS）。复用 components 的 escapeText 不便（未导出），本地实现。
- */
-function escapeText(text) {
-  const div = document.createElement("div");
-  div.textContent = String(text ?? "");
-  return div.innerHTML;
-}
-
-/** 属性转义（用于 data-* 和 title 属性，防 XSS）。 */
-function escapeAttr(text) {
-  return String(text ?? "").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 // ── 绑定 header 按钮 ───────────────────────────

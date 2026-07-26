@@ -66,6 +66,43 @@ impl SqliteConversationMemory {
     }
 }
 
+/// 丢弃消息列表开头所有孤立的 ToolResult 消息（0.12.8）。
+///
+/// 滑动窗口截断可能导致窗口第一条是 `ToolResult`（rig 存为 `Message::User` +
+/// `UserContent::ToolResult`），但其对应的 `ToolCall`（`Message::Assistant` +
+/// `AssistantContent::ToolCall`）在窗口外。OpenAI 等 API 要求 ToolResult 必须有
+/// 对应的 ToolCall，否则报错。
+///
+/// 此函数从开头扫描，跳过所有 **仅含** ToolResult content 的 User 消息，直到遇到
+/// 第一条非 ToolResult 消息（Assistant text/ToolCall 或纯 User text）。
+fn drop_leading_orphan_tool_results(messages: &mut Vec<Message>) {
+    let mut drop_count = 0;
+    for msg in messages.iter() {
+        match msg {
+            Message::User { content } => {
+                // 检查是否 **全部** 是 ToolResult（纯 ToolResult 消息）
+                let all_tool_results = content
+                    .iter()
+                    .all(|c| matches!(c, UserContent::ToolResult(_)));
+                if all_tool_results && !content.is_empty() {
+                    drop_count += 1;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        break;
+    }
+    if drop_count > 0 {
+        tracing::debug!(
+            dropped = drop_count,
+            remaining = messages.len() - drop_count,
+            "滑动窗口截断：丢弃开头孤立的 ToolResult 消息"
+        );
+        messages.drain(0..drop_count);
+    }
+}
+
 impl ConversationMemory for SqliteConversationMemory {
     fn load<'a>(
         &'a self,
@@ -87,6 +124,13 @@ impl ConversationMemory for SqliteConversationMemory {
                     .map_err(|e| MemoryError::Backend(Box::from(e)))?;
                 messages.push(msg);
             }
+
+            // 0.12.8: 滑动窗口可能截断 ToolCall/ToolResult 配对——
+            // 如果窗口开头是 ToolResult（User 消息含 ToolResult content）但前面没有
+            // 对应的 ToolCall（Assistant 消息含 ToolCall content），LLM API 会报错。
+            // 丢弃开头所有孤立的 ToolResult 消息。
+            drop_leading_orphan_tool_results(&mut messages);
+
             Ok(messages)
         })
     }
@@ -257,7 +301,7 @@ mod tests {
             .await
             .unwrap();
 
-        let convs = crate::infra::data::conversations::list_conversations(&mem.pool).await;
+        let convs = crate::infra::data::conversations::list_conversations(&mem.pool).await.unwrap();
         assert_eq!(convs.len(), 1);
         assert_eq!(convs[0].title.as_deref(), Some("Hello world this is a test"));
     }
@@ -272,7 +316,7 @@ mod tests {
             .await
             .unwrap();
 
-        let convs = crate::infra::data::conversations::list_conversations(&mem.pool).await;
+        let convs = crate::infra::data::conversations::list_conversations(&mem.pool).await.unwrap();
         assert_eq!(convs[0].title.as_deref().unwrap().chars().count(), TITLE_MAX_CHARS);
     }
 
@@ -325,5 +369,74 @@ mod tests {
         assert_eq!(mem.load("c").await.unwrap().len(), 1);
         mem.clear("c").await.unwrap();
         assert!(mem.load("c").await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_drop_leading_orphan_tool_results() {
+        use rig_core::completion::message::{ToolCall, ToolFunction, ToolResult, ToolResultContent};
+
+        // 构造 ToolResult 消息（rig 存为 User + UserContent::ToolResult）
+        fn tool_result_msg(id: &str) -> Message {
+            Message::User {
+                content: OneOrMany::one(UserContent::ToolResult(ToolResult {
+                    id: id.to_string(),
+                    call_id: None,
+                    content: OneOrMany::one(ToolResultContent::text("ok")),
+                })),
+            }
+        }
+
+        // 场景1：开头是孤立 ToolResult → 应被丢弃
+        {
+            let mut msgs = vec![
+                tool_result_msg("r1"),
+                assistant_msg("done"),
+                user_msg("next"),
+            ];
+            drop_leading_orphan_tool_results(&mut msgs);
+            assert_eq!(msgs.len(), 2, "应丢弃开头的孤立 ToolResult");
+            assert!(matches!(msgs[0], Message::Assistant { .. }));
+        }
+
+        // 场景2：开头多条孤立 ToolResult → 全部丢弃
+        {
+            let mut msgs = vec![
+                tool_result_msg("r1"),
+                tool_result_msg("r2"),
+                assistant_msg("done"),
+            ];
+            drop_leading_orphan_tool_results(&mut msgs);
+            assert_eq!(msgs.len(), 1, "应丢弃两条孤立 ToolResult");
+        }
+
+        // 场景3：开头是正常 User text → 不丢弃
+        {
+            let mut msgs = vec![user_msg("hello"), assistant_msg("hi")];
+            drop_leading_orphan_tool_results(&mut msgs);
+            assert_eq!(msgs.len(), 2, "不应丢弃非 ToolResult 消息");
+        }
+
+        // 场景4：空列表 → 不 panic
+        {
+            let mut msgs: Vec<Message> = vec![];
+            drop_leading_orphan_tool_results(&mut msgs);
+            assert!(msgs.is_empty());
+        }
+
+        // 场景5：开头是 Assistant ToolCall → 不丢弃（不是 ToolResult）
+        {
+            let tool_call = Message::Assistant {
+                id: None,
+                content: OneOrMany::one(
+                    rig_core::completion::message::AssistantContent::ToolCall(ToolCall::new(
+                        "call_1".to_string(),
+                        ToolFunction::new("search".to_string(), serde_json::json!({})),
+                    )),
+                ),
+            };
+            let mut msgs = vec![tool_call.clone(), tool_result_msg("r1")];
+            drop_leading_orphan_tool_results(&mut msgs);
+            assert_eq!(msgs.len(), 2, "ToolCall 在前不应被丢弃");
+        }
     }
 }

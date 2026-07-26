@@ -323,6 +323,18 @@ export function setGroupExpanded(groupId, expanded) {
   return invoke("set_group_expanded", { groupId, expanded });
 }
 
+/**
+ * 查询对话的有效系统提示词（0.12.7 §6.5）。
+ *
+ * 返回对话所属分组的 system_prompt（直属分组，非祖先继承）。
+ * 无分组或分组无提示词时返回 null。
+ * @param {string} conversationId
+ * @returns {Promise<string|null>}
+ */
+export function getConversationSystemPrompt(conversationId) {
+  return invoke("get_conversation_system_prompt", { conversationId });
+}
+
 // ── Events ───────────────────────────────────────
 
 /**

@@ -28,6 +28,7 @@
  */
 
 import * as ipc from "./ipc.js";
+import { escapeText, escapeAttr } from "./utils.js";
 
 /** @type {HTMLElement} 侧边栏容器 */
 let sidebarEl = null;
@@ -1263,14 +1264,4 @@ function formatRelativeTime(timestamp) {
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
-/** HTML 转义（防 XSS）。 */
-function escapeText(text) {
-  const div = document.createElement("div");
-  div.textContent = String(text ?? "");
-  return div.innerHTML;
-}
 
-/** 属性转义（用于 data-* 属性）。 */
-function escapeAttr(text) {
-  return String(text ?? "").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-}

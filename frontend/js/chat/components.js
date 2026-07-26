@@ -5,6 +5,7 @@
  */
 
 import { renderMarkdown, highlightCodeBlocks } from "./renderer.js";
+import { escapeText } from "./utils.js";
 
 /** @type {HTMLElement} 消息容器 */
 let messagesEl = null;
@@ -133,10 +134,13 @@ const ICONS = {
   check: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`,
   retry: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>`,
   edit: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`,
+  // 0.12.7：工具卡片完成图标（Lucide wrench / check / x）
+  toolSuccess: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>`,
+  toolFail: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`,
 };
 
 /**
- * 创建操作行容器。hover 时 opacity 0→1。
+ * 创建操作行容器。hover 时 visibility hidden→visible + 淡入动画。
  * AI 消息浮在左下角外侧，用户消息浮在右下角外侧。
  * @returns {HTMLElement}
  */
@@ -376,25 +380,38 @@ function renderThinkingBlock(text, collapsed) {
 }
 
 /**
- * 渲染 Tool 状态卡。
+ * 渲染 Tool 状态卡（0.12.7 §6.6 增强：参数预览 + 耗时追踪）。
  * @param {string} toolName
+ * @param {string} [args] 工具参数 JSON 字符串（可选，折叠展示）
  * @returns {HTMLElement} 卡片元素引用
  */
-export function renderToolStatus(toolName) {
+export function renderToolStatus(toolName, args, opts = {}) {
   if (!messagesEl) return null;
   const el = document.createElement("div");
   el.className = "chat-tool-card";
-  el.innerHTML = `
+  if (!opts.skipTiming) {
+    el.dataset.startTime = Date.now(); // 0.12.7：记录开始时间，finalize 时算耗时
+  }
+  // 0.12.7：暂存参数，finalizeToolStatus 时合入详情区
+  if (args && args.trim() && args.trim() !== "{}") {
+    el.dataset.args = formatJson(args);
+  }
+
+  const header = document.createElement("div");
+  header.className = "chat-tool-card-header";
+  header.innerHTML = `
     <div class="chat-tool-card-spinner"></div>
-    <span>正在调用 ${escapeText(toolName)}...</span>
+    <span class="chat-tool-card-name">${escapeText(toolName)}</span>
   `;
+  el.appendChild(header);
+
   messagesEl.appendChild(el);
   scrollToBottom();
   return el;
 }
 
 /**
- * 更新 Tool 状态卡为完成状态。
+ * 更新 Tool 状态卡为完成状态（0.12.7：图标替换 + 追加耗时）。
  * @param {HTMLElement} el 卡片元素
  * @param {boolean} success
  */
@@ -403,31 +420,92 @@ export function finalizeToolStatus(el, success) {
   const spinner = el.querySelector(".chat-tool-card-spinner");
   if (spinner) {
     spinner.className = "chat-tool-card-icon";
-    spinner.textContent = success ? "✓" : "✗";
+    spinner.innerHTML = success ? ICONS.toolSuccess : ICONS.toolFail;
+    if (!success) {
+      spinner.classList.add("chat-tool-card-icon-error");
+    }
+  }
+
+  // 0.12.7 §6.6：计算并显示耗时（仅对有 startTime 的卡片生效，历史恢复不显示）
+  const startTime = el.dataset.startTime;
+  if (startTime) {
+    const duration = Date.now() - Number(startTime);
+    if (duration >= 0) {
+      const headerEl = el.querySelector(".chat-tool-card-header");
+      if (headerEl && !headerEl.querySelector(".chat-tool-card-duration")) {
+        const durText = duration < 1000
+          ? `${duration}ms`
+          : `${(duration / 1000).toFixed(1)}s`;
+        const durSpan = document.createElement("span");
+        durSpan.className = "chat-tool-card-duration";
+        durSpan.textContent = durText;
+        headerEl.appendChild(durSpan);
+      }
+    }
   }
 }
 
 /**
- * 在 Tool 卡片内追加可折叠的结果摘要（0.12.2 §4.7）。
+ * 在 Tool 卡片内追加可折叠的结果摘要（0.12.2 §4.7，0.12.7 §6.6 合并参数+结果为一区）。
  * @param {HTMLElement} el 卡片元素
  * @param {string} summary 结果摘要文本
  * @param {boolean} success 是否成功
  */
 export function appendToolResult(el, summary, success) {
   if (!el) return;
-  // 若已有结果区，先移除（防重复）
-  const existing = el.querySelector(".chat-tool-result");
+  // 若已有详情区，先移除（防重复）
+  const existing = el.querySelector(".chat-tool-detail");
   if (existing) existing.remove();
 
-  const result = document.createElement("details");
-  result.className = "chat-tool-result" + (success ? "" : " chat-tool-result-error");
+  const detail = document.createElement("details");
+  detail.className = "chat-tool-detail" + (success ? "" : " chat-tool-detail-error");
   const summaryEl = document.createElement("summary");
-  summaryEl.textContent = success ? "结果" : "结果（失败）";
+  summaryEl.textContent = success ? "详情" : "详情（失败）";
+  detail.appendChild(summaryEl);
+
+  // 0.12.7：如果有参数，先显示参数区块
+  const argsText = el.dataset.args;
+  if (argsText) {
+    const argsLabel = document.createElement("div");
+    argsLabel.className = "chat-tool-detail-label";
+    argsLabel.textContent = "参数";
+    detail.appendChild(argsLabel);
+    const argsPre = document.createElement("pre");
+    argsPre.textContent = argsText;
+    injectToolCopyBtn(argsPre);
+    detail.appendChild(argsPre);
+  }
+
+  // 结果区块
+  const resultLabel = document.createElement("div");
+  resultLabel.className = "chat-tool-detail-label";
+  resultLabel.textContent = "结果";
+  detail.appendChild(resultLabel);
   const pre = document.createElement("pre");
-  pre.textContent = summary || "(空结果)";
-  result.appendChild(summaryEl);
-  result.appendChild(pre);
-  el.appendChild(result);
+  pre.textContent = formatJson(summary) || "(空结果)";
+  injectToolCopyBtn(pre);
+  detail.appendChild(pre);
+
+  el.appendChild(detail);
+}
+
+/**
+ * 给工具详情 pre 元素注入复制按钮（复用代码块复制按钮样式）。
+ */
+function injectToolCopyBtn(pre) {
+  const btn = document.createElement("button");
+  btn.className = "chat-code-copy";
+  btn.title = "复制";
+  btn.textContent = "复制";
+  btn.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(pre.textContent || "");
+      flashIconDone(btn);
+    } catch (e) {
+      console.error("[chat] 工具详情复制失败:", e);
+    }
+  });
+  pre.appendChild(btn);
 }
 
 /**
@@ -514,16 +592,93 @@ export function renderConfirmCard(payload, onConfirm) {
 }
 
 /**
- * 渲染错误消息。
+ * 渲染时间分隔符（0.12.7 §6.4）。
+ *
+ * IM 式时间标签——在消息流中居中显示，标记时间跨度。
+ * 前端根据消息 created_at 判断是否需要插入（同日间隔 >5 分钟才插入）。
+ *
+ * @param {number} timestamp Unix 秒
+ * @returns {HTMLElement}
+ */
+export function renderTimeSeparator(timestamp) {
+  if (!messagesEl) return null;
+  const el = document.createElement("div");
+  el.className = "chat-time-sep";
+  el.textContent = formatTimeSeparator(timestamp);
+  messagesEl.appendChild(el);
+  return el;
+}
+
+/**
+ * 格式化时间分隔符文字。
+ *
+ * - 今天：HH:MM
+ * - 昨天：昨天 HH:MM
+ * - 本周内：周X HH:MM
+ * - 更早：MM/DD HH:MM
+ * @param {number} ts Unix 秒
+ * @returns {string}
+ */
+function formatTimeSeparator(ts) {
+  const date = new Date(ts * 1000);
+  const now = new Date();
+  const hh = String(date.getHours()).padStart(2, "0");
+  const mm = String(date.getMinutes()).padStart(2, "0");
+  const timeStr = `${hh}:${mm}`;
+
+  const isSameDay = (a, b) =>
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate();
+
+  if (isSameDay(date, now)) {
+    return timeStr;
+  }
+
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (isSameDay(date, yesterday)) {
+    return `昨天 ${timeStr}`;
+  }
+
+  // 7 天内显示星期
+  const diffDays = Math.floor((now - date) / (24 * 60 * 60 * 1000));
+  if (diffDays < 7) {
+    const weekdays = ["日", "一", "二", "三", "四", "五", "六"];
+    return `周${weekdays[date.getDay()]} ${timeStr}`;
+  }
+
+  const M = String(date.getMonth() + 1).padStart(2, "0");
+  const D = String(date.getDate()).padStart(2, "0");
+  return `${M}/${D} ${timeStr}`;
+}
+
+/**
+ * 渲染 Signal 信号消息（0.12.7 §6.3）。
+ *
+ * IM 式居中系统通知——轻量、无气泡，不干扰对话流但传递重要状态信息。
+ * 参考 Telegram「XX 加入群组」/ Discord「频道已创建」/ 微信「XX 撤回消息」。
+ *
+ * @param {string} text 信号文字
+ * @param {"info"|"warning"|"error"|"success"} [type="info"] 信号类型
+ * @returns {HTMLElement} 信号元素引用
+ */
+export function renderSignal(text, type = "info") {
+  if (!messagesEl) return null;
+  const el = document.createElement("div");
+  el.className = `chat-signal chat-signal-${type}`;
+  el.textContent = text;
+  messagesEl.appendChild(el);
+  scrollToBottom();
+  return el;
+}
+
+/**
+ * 渲染错误消息（0.12.7：重构为 Signal error 的封装，保持调用方兼容）。
  * @param {string} message
  */
 export function renderErrorMessage(message) {
-  if (!messagesEl) return;
-  const el = document.createElement("div");
-  el.className = "chat-msg-error";
-  el.textContent = message;
-  messagesEl.appendChild(el);
-  scrollToBottom();
+  renderSignal(message, "error");
 }
 
 /**
@@ -609,12 +764,19 @@ export function scrollToBottom() {
 }
 
 /**
- * 文本转义（防 XSS）。
- * @param {string} text
+ * 尝试格式化 JSON 字符串（0.12.7 §6.6）。
+ *
+ * 如果输入是合法 JSON，则美化输出（2 空格缩进）；
+ * 否则原样返回（可能是纯文本结果）。
+ * @param {string} str
  * @returns {string}
  */
-function escapeText(text) {
-  const div = document.createElement("div");
-  div.textContent = text;
-  return div.innerHTML;
+function formatJson(str) {
+  if (!str) return str;
+  try {
+    const parsed = JSON.parse(str);
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return str;
+  }
 }

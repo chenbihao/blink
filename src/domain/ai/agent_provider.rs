@@ -64,7 +64,8 @@ pub enum ChatStreamChunk {
     ///
     /// `call_id` 是 rig 生成的 `internal_call_id`,用于与后续 `ToolResult` 配对,
     /// 前端据此把结果摘要挂到对应 ToolCall 卡片。
-    ToolCall { tool: String, call_id: String },
+    /// 0.12.7：`arguments` 携带工具参数 JSON 字符串，前端折叠展示。
+    ToolCall { tool: String, call_id: String, arguments: String },
     /// tool 执行结果(来自 rig `StreamUserItem`)。
     ///
     /// `call_id` 与 `ToolCall.call_id` 配对。`summary` 为结果文本(前 200 字符);
@@ -245,6 +246,7 @@ impl AgentProvider {
                         ChatStreamChunk::ToolCall {
                             tool: tool_call.function.name.clone(),
                             call_id: internal_call_id,
+                            arguments: tool_call.function.arguments.to_string(),
                         }
                     }
                     _ => continue,
@@ -481,7 +483,7 @@ mod tests {
 
         // 应同时存在 ToolCall 和 ToolResult,且 call_id 可配对
         let tool_call_id = chunks.iter().find_map(|c| match c {
-            ChatStreamChunk::ToolCall { tool, call_id } if tool == "add" => Some(call_id.clone()),
+            ChatStreamChunk::ToolCall { tool, call_id, .. } if tool == "add" => Some(call_id.clone()),
             _ => None,
         });
         assert!(tool_call_id.is_some(), "应有 ToolCall(add): {chunks:?}");
@@ -718,6 +720,7 @@ mod tests {
         let tool_call = ChatStreamChunk::ToolCall {
             tool: "search_apps".into(),
             call_id: "cid_1".into(),
+            arguments: "{\"query\":\"test\"}".into(),
         };
         let v = serde_json::to_value(&tool_call).unwrap();
         assert_eq!(v["kind"], "tool_call");

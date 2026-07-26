@@ -1,5 +1,13 @@
 /* chat 视图样式（0.12.1 Phase 5, 0.12.2 主题 token 迁移 + 一体化 composer） */
 
+/* 0.12.8：覆盖 reset.css 的 body { background: transparent }。
+   透明背景导致 GPU 光栅化时跨层 alpha 混合，在分数 DPI（125%/150%）下
+   产生从左上到右下的锯齿像素线（tile seam）。全链路不透明背景可消除此伪影。 */
+html,
+body {
+  background: var(--bg);
+}
+
 /* ── 布局 ──────────────────────────────────────── */
 
 .chat-root {
@@ -7,7 +15,7 @@
   flex-direction: column;
   height: 100vh;
   overflow: hidden;
-  background: var(--bg-deep);
+  background: var(--bg);
   color: var(--text);
   position: relative; /* 模型选择器下拉的定位上下文 */
 }
@@ -82,6 +90,7 @@
   flex-direction: column;
   flex: 1;
   overflow: hidden;
+  background: var(--bg); /* 0.12.8：不透明背景，消除 alpha 混合 tile seam */
 }
 
 /* ── 侧边栏（0.12.3 push 布局，非 overlay） ────── */
@@ -89,8 +98,8 @@
 .chat-sidebar {
   width: 240px;
   flex-shrink: 0;
-  background: var(--surface);
-  border-right: 1px solid var(--border);
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--surface);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -110,7 +119,7 @@
   align-items: center;
   justify-content: space-between;
   padding: var(--space-sm) var(--space-md);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--surface);
   flex-shrink: 0;
 }
 
@@ -140,7 +149,7 @@
 
 .chat-sidebar-new:hover {
   color: var(--text);
-  background: var(--bg);
+  background: var(--surface);
 }
 
 .chat-sidebar-list {
@@ -174,8 +183,9 @@
   position: relative;
 }
 
+/* 对话项 hover：用 --surface 亮色，比分组的 --bg-deep 更突出，体现可操作性 */
 .chat-sidebar-item:hover {
-  background: var(--bg);
+  background: var(--surface);
 }
 
 .chat-sidebar-item.active {
@@ -242,8 +252,8 @@
 }
 
 .chat-sidebar-item-delete:hover {
-  color: var(--red, #e5484d);
-  background: rgba(229, 72, 77, 0.1);
+  color: var(--red);
+  background: var(--danger-hover-bg);
 }
 
 .chat-sidebar-rename-input {
@@ -252,31 +262,34 @@
   border-radius: 4px;
   padding: 2px 6px;
   font-size: 13px;
-  background: var(--bg-deep);
+  background: var(--bg);
   color: var(--text);
   outline: none;
 }
 
 /* 0.12.4 §6.4：侧边栏项操作区（悬浮浮层覆盖，不占布局空间） */
 /* 透明背景：靠 hover 时文本 mask-image 渐隐避免视觉冲突，不限 active/hover 配色 */
+/* 0.12.8：opacity:0 + transform:translateY(-50%) → visibility:hidden + top:0;bottom:0 */
 .chat-sidebar-item-actions {
   position: absolute;
   right: 4px;
-  top: 50%;
-  transform: translateY(-50%);
+  top: 0;
+  bottom: 0; /* 替代 top:50% + transform:translateY(-50%)，用拉伸+flex居中 */
   display: flex;
   align-items: center;
   gap: 2px;
-  opacity: 0;
+  visibility: hidden;
   pointer-events: none;
-  transition: opacity 0.12s;
+  transition: visibility 0s linear 0.12s;
   padding-left: 2px;
   border-radius: 0 8px 8px 0;
 }
 
 .chat-sidebar-item:hover .chat-sidebar-item-actions {
-  opacity: 1;
+  visibility: visible;
   pointer-events: auto;
+  transition: visibility 0s;
+  animation: blink-fade-in 0.12s ease-out;
 }
 
 /* 悬浮时文本渐隐（mask-image），避免长标题与透明操作区按钮视觉冲突 */
@@ -364,19 +377,19 @@
 }
 
 .chat-sidebar-item-cancel-delete:hover {
-  background: var(--bg);
+  background: var(--surface);
   color: var(--text);
 }
 
 .chat-sidebar-item-confirm-delete {
-  background: rgba(229, 72, 77, 0.15);
-  color: var(--red, #e5484d);
+  background: var(--danger-hover-bg);
+  color: var(--red);
   font-weight: 500;
 }
 
 .chat-sidebar-item-confirm-delete:hover {
-  background: var(--red, #e5484d);
-  color: #fff;
+  background: var(--red);
+  color: var(--on-accent);
 }
 
 /* ── 对话分组树（0.12.6） ────────────────────────── */
@@ -408,7 +421,7 @@
 
 .chat-sidebar-new-group:hover {
   color: var(--text);
-  background: var(--bg);
+  background: var(--surface);
 }
 
 /* 分组节点容器 */
@@ -430,8 +443,9 @@
   position: relative;
 }
 
+/* 分组 hover：用 --bg-deep 暗色，比对话项的 --surface 更弱，体现结构性层级 */
 .chat-sidebar-group-header:hover {
-  background: var(--bg);
+  background: var(--bg-deep);
 }
 
 /* 折叠状态：隐藏子内容 */
@@ -464,7 +478,7 @@
   width: 14px;
   height: 14px;
   flex-shrink: 0;
-  color: var(--text-faint);
+  color: var(--text-dim);
 }
 
 .chat-sidebar-folder-icon svg {
@@ -474,14 +488,15 @@
 
 /* 分组名 */
 .chat-sidebar-group-name {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   flex: 1;
   min-width: 0;
+  letter-spacing: 0.2px;
 }
 
 /* 系统提示词指示器：文件夹图标右下角小圆点（始终可见，不与悬浮操作区冲突） */
@@ -504,24 +519,27 @@
 
 /* 分组操作按钮区 — 悬浮时浮层覆盖右侧，不占布局空间 */
 /* 透明背景：靠 hover 时文本 mask-image 渐隐避免视觉冲突 */
+/* 0.12.8：同 .chat-sidebar-item-actions，移除 opacity+transform 合成层提升 */
 .chat-sidebar-group-actions {
   position: absolute;
   right: 4px;
-  top: 50%;
-  transform: translateY(-50%);
+  top: 0;
+  bottom: 0; /* 替代 top:50% + transform:translateY(-50%)，用拉伸+flex居中 */
   display: flex;
   align-items: center;
   gap: 2px;
-  opacity: 0;
+  visibility: hidden;
   pointer-events: none;
-  transition: opacity 0.12s;
+  transition: visibility 0s linear 0.12s;
   padding-left: 2px;
   border-radius: 0 6px 6px 0;
 }
 
 .chat-sidebar-group-header:hover .chat-sidebar-group-actions {
-  opacity: 1;
+  visibility: visible;
   pointer-events: auto;
+  transition: visibility 0s;
+  animation: blink-fade-in 0.12s ease-out;
 }
 
 /* 悬浮时分组名渐隐（mask-image），编辑态排除 */
@@ -562,8 +580,8 @@
 }
 
 .chat-sidebar-group-btn-danger:hover {
-  color: var(--red, #e5484d);
-  background: rgba(229, 72, 77, 0.1);
+  color: var(--red);
+  background: var(--danger-hover-bg);
 }
 
 /* 提示词按钮已设置态：accent 色提示用户该分组有系统提示词 */
@@ -573,7 +591,7 @@
 
 /* 分组删除确认态 */
 .chat-sidebar-group.confirming-delete .chat-sidebar-group-header {
-  background: rgba(229, 72, 77, 0.08);
+  background: var(--danger-hover-bg);
 }
 
 /* 子内容区 */
@@ -609,7 +627,7 @@
   padding: 2px 6px;
   font-size: 13px;
   font-weight: 500;
-  background: var(--bg-deep);
+  background: var(--bg);
   color: var(--text);
   outline: none;
 }
@@ -625,7 +643,7 @@
 
 .chat-sidebar-prompt-textarea {
   width: 100%;
-  border: 1px solid var(--border);
+  border: 1px solid var(--surface);
   border-radius: 6px;
   padding: var(--space-xs) var(--space-sm);
   font-size: 12px;
@@ -661,7 +679,7 @@
 
 .chat-sidebar-prompt-save {
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 .chat-sidebar-prompt-save:hover {
@@ -674,7 +692,7 @@
 }
 
 .chat-sidebar-prompt-cancel:hover {
-  background: var(--bg);
+  background: var(--surface);
   color: var(--text);
 }
 
@@ -699,7 +717,7 @@
 .chat-sidebar-default-section.has-folders-above {
   margin-top: var(--space-sm);
   padding-top: var(--space-xs);
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--surface);
 }
 
 .chat-sidebar-default-header {
@@ -719,16 +737,19 @@
   letter-spacing: 0.5px;
 }
 
+/* 0.12.8：opacity:0 → visibility:hidden，避免合成层提升 */
 .chat-sidebar-default-actions {
   display: flex;
   align-items: center;
   gap: 2px;
-  opacity: 0;
-  transition: opacity 0.12s;
+  visibility: hidden;
+  transition: visibility 0s linear 0.12s;
 }
 
 .chat-sidebar-default-header:hover .chat-sidebar-default-actions {
-  opacity: 1;
+  visibility: visible;
+  transition: visibility 0s;
+  animation: blink-fade-in 0.12s ease-out;
 }
 
 .chat-sidebar-default-empty {
@@ -785,7 +806,7 @@
   border-radius: 1px;
   pointer-events: none;
   z-index: 99998;
-  box-shadow: 0 0 6px rgba(var(--accent-rgb, 99, 102, 241), 0.5);
+  box-shadow: 0 0 6px var(--accent-bg);
 }
 .chat-sidebar-drop-indicator::before {
   content: '';
@@ -893,7 +914,7 @@
   border: 1px solid var(--accent);
   border-radius: 4px;
   padding: 2px 6px;
-  background: var(--bg-deep);
+  background: var(--bg);
   color: var(--text);
   outline: none;
 }
@@ -905,7 +926,7 @@
   align-items: center;
   gap: var(--space-md);
   padding: var(--space-sm) var(--space-lg);
-  border-bottom: 1px solid var(--surface-2);
+  border-bottom: 1px solid var(--surface);
   background: var(--bg);
   flex-shrink: 0;
 }
@@ -992,8 +1013,8 @@
   max-width: 340px;
   max-height: 320px;
   overflow-y: auto;
-  background: var(--bg-deep);
-  border: 1px solid var(--surface-2);
+  background: var(--bg);
+  border: 1px solid var(--surface);
   border-radius: 8px;
   box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.25);
   z-index: 100;
@@ -1149,14 +1170,146 @@
 
 /* ── Messages ──────────────────────────────────── */
 
+/* 系统提示词横幅（0.12.7 §6.5：分组有提示词时显示，在消息流上方，可滚动） */
+.chat-prompt-banner {
+  flex-shrink: 0;
+  margin: 0 var(--space-lg);
+  margin-top: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--surface);
+  border-radius: 8px;
+  background: var(--bg-sidebar);
+  overflow: hidden;
+}
+
+.chat-prompt-banner[hidden] {
+  display: none;
+}
+
+.chat-prompt-banner-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  user-select: none;
+}
+
+.chat-prompt-banner-icon {
+  width: 14px;
+  height: 14px;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.chat-prompt-banner-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-prompt-banner-toggle,
+.chat-prompt-banner-close {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: all 0.12s;
+  flex-shrink: 0;
+}
+
+.chat-prompt-banner-toggle svg,
+.chat-prompt-banner-close svg {
+  width: 13px;
+  height: 13px;
+}
+
+.chat-prompt-banner-toggle:hover,
+.chat-prompt-banner-close:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+
+.chat-prompt-banner-toggle {
+  transition: transform 0.15s;
+}
+
+/* 折叠态：箭头朝右 + 隐藏 body */
+.chat-prompt-banner[data-collapsed] .chat-prompt-banner-toggle {
+  transform: rotate(-90deg);
+}
+
+.chat-prompt-banner[data-collapsed] .chat-prompt-banner-body {
+  display: none;
+}
+
+.chat-prompt-banner-body {
+  margin-top: var(--space-xs);
+  padding: var(--space-xs) var(--space-sm);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-sub);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 120px;
+  overflow-y: auto;
+  background: var(--bg-deep);
+  border-radius: 4px;
+}
+
+.chat-prompt-banner-body::-webkit-scrollbar {
+  width: 4px;
+}
+
+.chat-prompt-banner-body::-webkit-scrollbar-thumb {
+  background: var(--surface-2);
+  border-radius: 2px;
+}
+
 .chat-messages {
   flex: 1;
   overflow-y: auto;
   padding: var(--space-xl) var(--space-lg);
   display: flex;
   flex-direction: column;
-  gap: var(--space-lg);
+  /* 0.12.7 §6.7：取消统一 gap，改用按元素类型的 margin-top 实现轮次间距分级 */
   scroll-behavior: smooth;
+  background: var(--bg); /* 0.12.8：不透明背景，消除透明容器导致的 GPU tile seam 锯齿线 */
+}
+
+/* 0.12.7 §6.7：轮次间距分级
+   - 用户消息：新轮次开始，大间距
+   - 助手消息/工具卡：同轮内，小间距
+   - Signal/时间分隔符：独立元素，中间距
+   - 首个子元素无 margin */
+.chat-messages > :first-child {
+  margin-top: 0;
+}
+
+.chat-messages > .chat-msg-user {
+  margin-top: var(--space-xl);
+}
+
+.chat-messages > .chat-msg-assistant,
+.chat-messages > .chat-tool-card {
+  margin-top: var(--space-xs);
+}
+
+/* 用户消息后的第一条助手消息不需要额外间距（已在 user 的 margin-top 中） */
+.chat-messages > .chat-msg-user + .chat-msg-assistant,
+.chat-messages > .chat-msg-user + .chat-tool-card {
+  margin-top: var(--space-sm);
+}
+
+.chat-messages > .chat-signal,
+.chat-messages > .chat-time-sep {
+  margin-top: var(--space-md);
+  margin-bottom: var(--space-xs);
 }
 
 .chat-messages::-webkit-scrollbar {
@@ -1197,7 +1350,8 @@
 .chat-msg-assistant {
   align-self: flex-start;
   position: relative; /* 复制按钮绝对定位的上下文（0.12.2 §4.6） */
-  background: var(--surface);
+  background: var(--bg); /* 0.12.7：与 tool-card 互换，tool 卡片更醒目 */
+  border: 1px solid var(--surface);
   color: var(--text);
   border-bottom-left-radius: 4px;
   max-width: 100%;
@@ -1256,6 +1410,13 @@
 }
 
 /* ── Markdown 渲染 ─────────────────────────────── */
+/* 0.12.7：禁用所有斜体（em / i / hljs 注释等），保持视觉统一 */
+.chat-msg-assistant em,
+.chat-msg-assistant i,
+.chat-msg-user em,
+.chat-msg-user i {
+  font-style: normal;
+}
 
 .chat-msg-assistant p {
   margin: 0 0 8px;
@@ -1315,7 +1476,7 @@
 :root .hljs-doctag,
 [data-theme="dark"] .hljs-doctag {
   color: #cba6f7;
-  font-style: italic;
+  font-style: normal;
 }
 :root .hljs-built_in,
 [data-theme="dark"] .hljs-built_in,
@@ -1370,7 +1531,7 @@
 :root .hljs-comment,
 [data-theme="dark"] .hljs-comment {
   color: #6c7086;
-  font-style: italic;
+  font-style: normal;
 }
 :root .hljs-symbol,
 [data-theme="dark"] .hljs-symbol,
@@ -1400,7 +1561,7 @@
 }
 :root .hljs-emphasis,
 [data-theme="dark"] .hljs-emphasis {
-  font-style: italic;
+  font-style: normal;
 }
 :root .hljs-strong,
 [data-theme="dark"] .hljs-strong {
@@ -1415,7 +1576,7 @@
 [data-theme="light"] .hljs-selector-tag,
 [data-theme="light"] .hljs-doctag {
   color: #8839ef;
-  font-style: italic;
+  font-style: normal;
 }
 [data-theme="light"] .hljs-built_in,
 [data-theme="light"] .hljs-operator {
@@ -1452,7 +1613,7 @@
 }
 [data-theme="light"] .hljs-comment {
   color: #9ca0b0;
-  font-style: italic;
+  font-style: normal;
 }
 [data-theme="light"] .hljs-symbol,
 [data-theme="light"] .hljs-bullet {
@@ -1474,26 +1635,28 @@
   background: rgba(64, 160, 43, 0.12);
 }
 [data-theme="light"] .hljs-emphasis {
-  font-style: italic;
+  font-style: normal;
 }
 [data-theme="light"] .hljs-strong {
   font-weight: 700;
 }
 
 /* ── hover 操作行（0.12.6：绝对定位浮在消息下方外侧，不占文档流空间） ──── */
-
+/* 0.12.7：按钮加实底背景，避免与下方文本混淆 */
+/* 0.12.8：移除 opacity:0 + transform:translateY(100%) 合成层提升，
+   改用 visibility:hidden + top:100%。opacity+transform 会为每条消息创建独立
+   合成层，在分数 DPI（125%/150%）下产生从左上到右下的锯齿像素线。 */
 .chat-msg-actions {
   position: absolute;
-  bottom: 0;
-  z-index: 10; /* 置顶：避免被下方消息气泡盖住（DOM 顺序在后的元素默认paint在上层） */
+  top: 100%; /* 替代 bottom:0 + transform:translateY(100%)，无合成层提升 */
+  z-index: 10; /* 置顶：避免被下方消息气泡盖住（DOM 顺序在后的元素默认 paint 在上层） */
   display: flex;
   align-items: center;
   gap: 2px;
-  opacity: 0;
+  visibility: hidden; /* 替代 opacity:0，不触发合成层提升 */
   pointer-events: none; /* 不可见时不拦截鼠标，避免误触 */
-  transition: opacity 0.2s ease-out;
+  transition: visibility 0s linear 0.2s; /* 延迟隐藏，配合 animation 淡入 */
   user-select: none;
-  transform: translateY(100%); /* 整行下移到气泡边界外 */
   /* 透明桥接区：从气泡底部到按钮行的 gap，鼠标经过时不会离开 hover 区域 */
   padding-top: 6px;
 }
@@ -1512,11 +1675,14 @@
 
 .chat-msg-assistant:hover .chat-msg-actions,
 .chat-msg-user:hover .chat-msg-actions {
-  opacity: 1;
+  visibility: visible;
   pointer-events: auto; /* 可见时恢复交互 */
+  transition: visibility 0s; /* 立即显示，配合 animation 淡入 */
+  animation: blink-fade-in 0.2s ease-out;
 }
 
 /* 图标按钮基础样式 */
+/* 0.12.7：加实底背景，避免悬浮时与下方文本混淆 */
 .chat-action-btn {
   display: grid;
   place-items: center;
@@ -1524,7 +1690,7 @@
   height: 28px;
   border: 0;
   border-radius: 6px;
-  background: transparent;
+  background: var(--bg);
   color: var(--text-faint);
   cursor: pointer;
   transition: background 0.12s, color 0.12s;
@@ -1540,8 +1706,9 @@
   color: var(--text);
 }
 
-/* 用户消息的按钮颜色统一为弱色 + hover 增强（与 AI 消息视觉一致） */
+/* 用户消息的按钮：与 AI 侧统一使用 --bg 实底 */
 .chat-msg-user .chat-action-btn {
+  background: var(--bg);
   color: var(--text-faint);
 }
 
@@ -1556,11 +1723,12 @@
 }
 
 /* 代码块复制按钮（保持旧风格，绝对定位在代码块右上角） */
+/* 0.12.8：opacity:0 → visibility:hidden，避免合成层提升导致锯齿像素线 */
 .chat-code-copy {
   position: absolute;
   top: 6px;
   right: 6px;
-  opacity: 0;
+  visibility: hidden;
   padding: 2px 8px;
   border: 1px solid var(--surface-2);
   border-radius: 4px;
@@ -1568,11 +1736,15 @@
   color: var(--text-dim);
   font-size: 11px;
   cursor: pointer;
-  transition: background 0.15s, color 0.15s, opacity 0.15s;
+  transition: background 0.15s, color 0.15s, visibility 0s linear 0.15s;
 }
 
-.chat-msg-assistant pre:hover .chat-code-copy {
-  opacity: 1;
+/* 0.12.8：补充 .chat-tool-detail pre 的 hover 选择器（原仅 .chat-msg-assistant pre） */
+.chat-msg-assistant pre:hover .chat-code-copy,
+.chat-tool-detail pre:hover .chat-code-copy {
+  visibility: visible;
+  transition: background 0.15s, color 0.15s, visibility 0s;
+  animation: blink-fade-in 0.15s ease-out;
 }
 
 .chat-code-copy:hover {
@@ -1697,37 +1869,45 @@
 /* ── Thinking / Tool 卡片（统一卡片风格） ────────── */
 
 /* 通用卡片骨架：thinking 块和 tool 卡片共用视觉语言 */
-.chat-card,
-.chat-tool-card {
+/* 0.12.7：tool 卡片背景跟页面同色，靠边框区分 */
+.chat-card {
   background: var(--surface);
   border-radius: 8px;
   font-size: 13px;
   color: var(--text-sub);
 }
 
-/* 统一滚动条样式（thinking 内容 / tool 结果 / 模型下拉共用） */
+.chat-tool-card {
+  background: var(--surface); /* 0.12.7：与 AI 消息体互换，工具卡片更醒目 */
+  border: 1px solid var(--surface-2);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--text-sub);
+}
+
+/* 统一滚动条样式（thinking 内容 / tool 详情 / 模型下拉共用） */
 .thinking-content::-webkit-scrollbar,
-.chat-tool-result pre::-webkit-scrollbar,
+.chat-tool-detail pre::-webkit-scrollbar,
 .chat-model-dropdown::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 
 .thinking-content::-webkit-scrollbar-track,
-.chat-tool-result pre::-webkit-scrollbar-track,
+.chat-tool-detail pre::-webkit-scrollbar-track,
 .chat-model-dropdown::-webkit-scrollbar-track {
   background: transparent;
 }
 
 .thinking-content::-webkit-scrollbar-thumb,
-.chat-tool-result pre::-webkit-scrollbar-thumb,
+.chat-tool-detail pre::-webkit-scrollbar-thumb,
 .chat-model-dropdown::-webkit-scrollbar-thumb {
   background: var(--surface-2);
   border-radius: 3px;
 }
 
 .thinking-content::-webkit-scrollbar-thumb:hover,
-.chat-tool-result pre::-webkit-scrollbar-thumb:hover,
+.chat-tool-detail pre::-webkit-scrollbar-thumb:hover,
 .chat-model-dropdown::-webkit-scrollbar-thumb:hover {
   background: var(--text-faint);
 }
@@ -1807,21 +1987,54 @@
   background: transparent;
 }
 
-/* ── Tool 状态卡 ───────────────────────────────── */
+/* ── Tool 状态卡（0.12.7 §6.6 增强） ─────────── */
 
 .chat-tool-card {
   display: flex;
-  align-items: center;
-  gap: var(--space-sm);
+  flex-direction: column;
+  gap: var(--space-xs);
   padding: var(--space-sm) var(--space-md);
   align-self: flex-start;
   max-width: 90%;
+  min-width: 40%;
+}
+
+.chat-tool-card-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+.chat-tool-card-name {
+  font-size: 13px;
+  color: var(--text-sub);
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-tool-card-duration {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--text-faint);
+  flex-shrink: 0;
 }
 
 .chat-tool-card-icon {
   width: 16px;
   height: 16px;
   opacity: 0.7;
+  flex-shrink: 0;
+}
+
+.chat-tool-card-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.chat-tool-card-icon-error {
+  color: var(--red);
+  opacity: 1;
 }
 
 .chat-tool-card-spinner {
@@ -1837,31 +2050,43 @@
   to { transform: rotate(360deg); }
 }
 
-/* Tool 结果折叠区（0.12.2 §4.7） */
-.chat-tool-card {
-  flex-wrap: wrap;
+/* 0.12.8：通用淡入动画（替代 opacity transition，避免合成层提升）
+   animation 仅在播放期间临时创建合成层，结束后自动释放，不会产生持久锯齿线。 */
+@keyframes blink-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
-.chat-tool-result {
-  flex-basis: 100%;
+/* Tool 详情折叠区（0.12.7 §6.6：参数+结果合并为一区） */
+
+.chat-tool-detail {
   margin-top: var(--space-xs);
   border-top: 1px solid var(--surface-2);
   padding-top: var(--space-xs);
 }
 
-.chat-tool-result summary {
+.chat-tool-detail summary {
   cursor: pointer;
   font-size: 12px;
   color: var(--text-faint);
   user-select: none;
 }
 
-.chat-tool-result summary:hover {
+.chat-tool-detail summary:hover {
   color: var(--text-sub);
 }
 
-.chat-tool-result pre {
-  margin: var(--space-xs) 0 0;
+.chat-tool-detail-label {
+  margin: var(--space-xs) 0 2px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  user-select: none;
+}
+
+.chat-tool-detail pre {
+  position: relative; /* 复制按钮定位上下文 */
+  margin: 0 0 var(--space-xs);
   padding: var(--space-xs) var(--space-sm);
   max-height: 160px;
   overflow: auto;
@@ -1872,14 +2097,31 @@
   color: var(--text-sub);
   white-space: pre-wrap;
   word-break: break-word;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
-.chat-tool-result-error summary {
+.chat-tool-detail pre:last-child {
+  margin-bottom: 0;
+}
+
+.chat-tool-detail-error summary {
   color: var(--red);
 }
 
-.chat-tool-result-error pre {
+.chat-tool-detail-error pre {
   border-left: 2px solid var(--red);
+}
+
+/* 详情区滚动条 */
+.chat-tool-detail pre::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.chat-tool-detail pre::-webkit-scrollbar-thumb {
+  background: var(--surface-2);
+  border-radius: 3px;
 }
 
 /* 消息底栏：模型名 + token 用量同一行 */
@@ -1895,7 +2137,6 @@
 }
 
 .chat-msg-footer .chat-msg-model {
-  font-style: italic;
   opacity: 0.7;
 }
 
@@ -1952,19 +2193,79 @@
 
 .chat-confirm-btn-approve {
   background: var(--green);
-  color: var(--bg-deep);
+  color: var(--on-accent);
 }
 
-/* ── 错误消息 ──────────────────────────────────── */
+/* ── Signal 信号消息（0.12.7 §6.3：IM 式居中系统通知） ──── */
+
+.chat-signal {
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 14px;
+  border-radius: 12px;
+  font-size: 12px;
+  line-height: 1.4;
+  user-select: none;
+  max-width: 80%;
+  text-align: center;
+}
+
+.chat-signal-icon {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+}
+
+/* info：弱色，不打扰 */
+.chat-signal-info {
+  color: var(--text-faint);
+  background: var(--surface);
+}
+
+/* warning：橙色系（复用 text-dim + accent-bg 区分） */
+.chat-signal-warning {
+  color: var(--text-sub);
+  background: var(--accent-bg);
+}
+
+/* error：红色系 */
+.chat-signal-error {
+  color: var(--red);
+  background: var(--red-bg);
+  border: 1px solid var(--red-border);
+}
+
+/* success：绿色系 */
+.chat-signal-success {
+  color: var(--green);
+  background: var(--green-bg);
+}
+
+/* ── 时间分隔符（0.12.7 §6.4：IM 式居中时间标签） ──── */
+
+.chat-time-sep {
+  align-self: center;
+  padding: 2px 12px;
+  margin: var(--space-xs) 0;
+  border-radius: 10px;
+  font-size: 11px;
+  color: var(--text-faint);
+  background: var(--surface);
+  user-select: none;
+}
+
+/* ── 错误消息（0.12.7：重构为 Signal error 的别名，保持向后兼容） ── */
 
 .chat-msg-error {
   align-self: center;
-  padding: var(--space-sm) var(--space-lg);
-  border-radius: 8px;
+  padding: 4px 14px;
+  border-radius: 12px;
   background: var(--red-bg);
   border: 1px solid var(--red-border);
   color: var(--red);
-  font-size: 13px;
+  font-size: 12px;
 }
 
 /* ── Composer（一体化） ────────────────────────── */
@@ -1976,9 +2277,9 @@
 
 .chat-composer-input-wrap {
   position: relative;
-  border: 1px solid var(--surface-2);
+  border: 1px solid var(--surface);
   border-radius: 14px;
-  background: var(--bg);
+  background: var(--bg-sidebar);
   transition: border-color 0.15s;
 }
 

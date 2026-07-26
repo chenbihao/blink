@@ -8,6 +8,8 @@
 
 /* global marked, DOMPurify */
 
+import { escapeText } from "./utils.js";
+
 /** @type {boolean} marked 和 DOMPurify 是否可用 */
 let ready = false;
 
@@ -89,12 +91,10 @@ export function renderMarkdown(text) {
 }
 
 /**
- * 纯文本转义（降级用）。
+ * 纯文本转义（降级用）。复用 utils.escapeText + 保留换行→<br>。
  * @param {string} text
  * @returns {string}
  */
 function escapeHtml(text) {
-  const div = document.createElement("div");
-  div.textContent = text;
-  return div.innerHTML.replace(/\n/g, "<br>");
+  return escapeText(text).replace(/\n/g, "<br>");
 }

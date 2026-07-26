@@ -537,6 +537,7 @@ fn main() {
             app::commands::delete_chat_conversation,
             app::commands::rename_chat_conversation,
             app::commands::get_chat_messages,
+            app::commands::get_conversation_system_prompt, // 0.12.7 §6.5
             app::commands::open_settings_tab,
             app::commands::save_text_file,
             app::commands::generate_conversation_title,
