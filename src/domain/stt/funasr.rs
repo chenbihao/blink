@@ -41,10 +41,7 @@ static SERVER_RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// 获取 `%APPDATA%\blink\python\` 目录路径。
 fn python_dir() -> PathBuf {
-    dirs_next::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("blink")
-        .join("python")
+    crate::infra::utils::paths::python_dir()
 }
 
 /// 获取 blink_stt_server.py 的目标路径。

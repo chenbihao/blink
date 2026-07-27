@@ -1,25 +1,32 @@
-//! MCP client 模块（0.13.0）——消费外部 MCP server 提供的 tool。
-//!
-//! Blink 作为 MCP client，拉起外部 server 子进程（stdio JSON-RPC），握手后拉 tool 列表，
-//! 包装成 `rig_core::tool::rmcp::McpTool`（已 impl `ToolDyn`）进对话窗口 tool 池。
+//! MCP 模块——Blink 与 MCP 协议的双向交互。
 //!
 //! ## 架构
 //!
-//! - `config` — server 配置（name / command / args / env / enabled / tool 可见性），存配置库
-//! - `client` — client 编排：拉起子进程 + 握手 + 拉 tool + 故障降级 + 手动重连
+//! - `config` — MCP client 配置（name / command / args / env / enabled / tool 可见性）
+//! - `client` — MCP client 编排：拉起外部 server 子进程 + 握手 + 拉 tool 列表
+//! - `server_config` — MCP server 配置（总开关 + 暴露能力清单）
+//! - `server` — MCP server 编排：暴露 Blink 能力给外部 client（正向投影 + 授权 + 审计）
+//! - `projection` — 正向投影（CapabilitySchema → rmcp::model::Tool）
 //!
-//! ## 与 rig 的关系
+//! ## 双向对称
 //!
-//! rig-core 已内置 `McpTool`（impl `ToolDyn`）和 `From<rmcp::model::Tool> for ToolDefinition`
-//! 投影，本模块**不重复造轮子**——直接用 rig 的 McpTool，只负责编排和配置管理。
+//! - MCP **client**（0.13.0）：Blink 消费外部 tool（让 Blink 的 AI 更强）
+//! - MCP **server**（0.13.4）：Blink 暴露自身能力（让外部 AI 能用 Blink）
 //!
-//! ## tool 可见性控制
-//!
-//! 用户可在设置页勾选/取消具体 tool，控制喂给 AI 的 tool 子集。
-//! `disabled_tools` 记录被用户取消的 tool 名称，`collect_tools()` 时过滤。
+//! 两者共用 rmcp 投影基础设施，是一对对称的开放能力。
 
 pub mod client;
 pub mod config;
+pub mod import;
+pub mod projection;
+pub mod server;
+pub mod server_config;
 
 pub use client::{McpClientManager, McpServerStatus, McpToolInfo};
 pub use config::{McpServerConfig, McpServerConfigStore};
+#[allow(unused_imports)]
+pub use config::McpTransport;
+pub use import::{McpImportSource, ImportResult};
+#[allow(unused_imports)]
+pub use server::{BlinkMcpServer, run_stdio_server};
+pub use server_config::{McpServerModeConfig, McpServerModeConfigStore};

@@ -91,6 +91,15 @@ ICON_LIST = [
 
     # AI 确认徽章
     "triangle-alert",   # AI 需确认 ⚠  （Lucide 1.x 从 alert-triangle 重命名）
+
+    # AI 对话能力 tab 图标
+    "copy",             # 复制 MCP 配置
+    "plus",             # 添加 Server 按钮
+    "server",           # MCP Server 暴露能力 section
+    "plug",             # MCP 外部工具 section
+    "puzzle",           # Skill 约定式 section
+    "message-square",   # 对话 section
+    "database",         # 记忆策略 section
 ]
 
 # ── 路径 ───────────────────────────────────────────────────────────────────────

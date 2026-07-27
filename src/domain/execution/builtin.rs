@@ -337,14 +337,10 @@ impl Action for OpenDataDirAction {
     }
     async fn execute(&self, _cx: &ActionContext<'_>) -> Result<ActionOutcome, ExecError> {
         tracing::debug!("执行内置动作：打开数据目录");
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            let dir = std::path::PathBuf::from(appdata).join("Blink");
-            tracing::debug!(dir = %dir.display(), "数据目录路径");
-            if let Err(e) = open::that(&dir) {
-                tracing::error!(error = %e, dir = %dir.display(), "打开数据目录失败");
-            }
-        } else {
-            tracing::error!("APPDATA 环境变量未找到");
+        let dir = crate::infra::utils::paths::app_data_dir();
+        tracing::debug!(dir = %dir.display(), "数据目录路径");
+        if let Err(e) = open::that(&dir) {
+            tracing::error!(error = %e, dir = %dir.display(), "打开数据目录失败");
         }
         Ok(ActionOutcome::Nop)
     }

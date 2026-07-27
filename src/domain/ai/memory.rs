@@ -55,6 +55,21 @@ const TITLE_MAX_CHARS: usize = 50;
 /// 保守默认 context limit（ModelEntry.context_window 缺失时使用）。
 const DEFAULT_CONTEXT_LIMIT: usize = 8192;
 
+// ── MemoryLoadResult（0.13.6）──────────────────────────────────────────────────
+
+/// `load_with_stats()` 返回值——消息 + 压缩/召回统计（0.13.6）。
+///
+/// 供 `ChatService::compute_context_status()` 计算上下文窗口占用指示器数据。
+#[derive(Debug, Clone)]
+pub struct MemoryLoadResult {
+    /// 加载的消息列表（已裁剪 + 已召回注入）。
+    pub messages: Vec<Message>,
+    /// 本次 load 被裁剪移出的消息数（token_aware_truncate）。
+    pub dropped_count: usize,
+    /// 本次 load FTS5 召回的消息数。
+    pub recall_count: usize,
+}
+
 // ── MemoryConfig（0.13.1）──────────────────────────────────────────────────────
 
 /// 记忆窗口模式。
@@ -219,6 +234,7 @@ fn extract_message_text(msg: &Message) -> String {
 }
 
 /// 估算消息列表的总 token 数。
+#[allow(dead_code)] // 测试中使用；token_aware_truncate 优化后已内联预计算
 pub fn estimate_messages_tokens(messages: &[Message]) -> usize {
     messages
         .iter()
@@ -241,26 +257,37 @@ pub fn token_aware_truncate(
     let trigger_threshold = (context_limit as f64 * trigger_ratio) as usize;
     let compress_target = (context_limit as f64 * compress_ratio) as usize;
 
-    let total_tokens = estimate_messages_tokens(messages);
+    // 预计算每条消息的 token 数（O(n)），避免循环内重复估算（原 O(n²)）
+    let per_message_tokens: Vec<usize> = messages
+        .iter()
+        .map(|m| estimate_tokens(&extract_message_text(m)))
+        .collect();
+    let total_tokens: usize = per_message_tokens.iter().sum();
+
     if total_tokens <= trigger_threshold {
         return Vec::new();
     }
 
-    let mut dropped = Vec::new();
-    while !messages.is_empty() {
-        let current_tokens = estimate_messages_tokens(messages);
-        if current_tokens <= compress_target {
+    // 从旧端逐条计算需要移出的数量（累减 token，直到剩余 ≤ compress_target）
+    let mut dropped_tokens = 0usize;
+    let mut drop_count = 0;
+    for &tokens in &per_message_tokens {
+        if total_tokens - dropped_tokens <= compress_target {
             break;
         }
-        dropped.push(messages.remove(0));
+        dropped_tokens += tokens;
+        drop_count += 1;
     }
+
+    // 一次性 drain，比逐条 remove(0) 高效（O(drop_count) vs O(n*drop_count)）
+    let dropped: Vec<Message> = messages.drain(0..drop_count).collect();
 
     if !dropped.is_empty() {
         tracing::debug!(
             dropped_count = dropped.len(),
             remaining = messages.len(),
             total_tokens_before = total_tokens,
-            total_tokens_after = estimate_messages_tokens(messages),
+            total_tokens_after = total_tokens - dropped_tokens,
             context_limit,
             "token-aware 裁剪：从旧端移出消息"
         );
@@ -310,6 +337,135 @@ impl SqliteConversationMemory {
     pub async fn update_context_limit(&self, limit: Option<usize>) {
         let mut cfg = self.config.write().await;
         cfg.context_limit = limit.or(Some(DEFAULT_CONTEXT_LIMIT));
+    }
+
+    /// 0.13.6: 带统计的 load——返回消息 + 压缩/召回统计。
+    ///
+    /// 与 `ConversationMemory::load()` 逻辑一致，额外返回 dropped_count / recall_count。
+    /// 供 `ChatService::compute_context_status()` 计算上下文窗口占用指示器。
+    ///
+    /// **注意**：此方法与 rig Agent 内部调用的 `load()` 不会冲突——
+    /// `load()` 的裁剪是 in-memory 的（DB 保留完整历史），FTS5 归档幂等（content hash 去重）。
+    pub async fn load_with_stats(&self, conversation_id: &str) -> Result<MemoryLoadResult, MemoryError> {
+        self.load_inner(conversation_id).await
+    }
+
+    /// load 核心逻辑——加载 + 裁剪 + 归档 + 召回，返回消息 + 统计（0.13.6）。
+    ///
+    /// `ConversationMemory::load()` 和 `load_with_stats()` 的共用底层。
+    async fn load_inner(&self, conversation_id: &str) -> Result<MemoryLoadResult, MemoryError> {
+        let pool = self.pool.clone();
+        let config = self.config.clone();
+        let cfg = config.read().await;
+
+        let load_limit = match cfg.mode {
+            WindowMode::FixedCount => cfg.window_size,
+            WindowMode::TokenAware => TOKEN_AWARE_LOAD_BATCH,
+        };
+
+        let rows = crate::infra::data::conversations::load_recent_messages(
+            &pool,
+            conversation_id,
+            load_limit,
+        )
+        .await
+        .map_err(|e| MemoryError::Backend(Box::from(e)))?;
+
+        let mut messages = Vec::with_capacity(rows.len());
+        for (_role, content) in rows {
+            let msg: Message = serde_json::from_str(&content)
+                .map_err(|e| MemoryError::Backend(Box::from(e)))?;
+            messages.push(msg);
+        }
+
+        let mut dropped_count = 0usize;
+
+        // 0.13.1: token-aware 裁剪（仅 TokenAware 模式）
+        // 0.13.2: 裁剪出的消息归档到 FTS5
+        if cfg.mode == WindowMode::TokenAware {
+            let context_limit = cfg.context_limit.unwrap_or(DEFAULT_CONTEXT_LIMIT);
+            let dropped_msgs = token_aware_truncate(
+                &mut messages,
+                context_limit,
+                cfg.trigger_ratio,
+                cfg.compress_ratio,
+            );
+            dropped_count = dropped_msgs.len();
+
+            if !dropped_msgs.is_empty() {
+                // 0.13.2: 归档被挤出的消息到 FTS5（幂等）
+                for msg in &dropped_msgs {
+                    let text = extract_message_text(msg);
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let role = Self::message_role(msg);
+                    let hash = Self::content_hash(&text);
+                    if let Err(e) = crate::infra::data::conversations::archive_to_fts(
+                        &pool,
+                        conversation_id,
+                        role,
+                        &text,
+                        &hash,
+                    ).await {
+                        tracing::warn!(error = %e, "FTS5 归档失败（非致命）");
+                    }
+                }
+                tracing::info!(
+                    conversation_id,
+                    dropped = dropped_msgs.len(),
+                    context_limit,
+                    "归档钩子：{} 条消息已归档到 FTS5",
+                    dropped_msgs.len()
+                );
+            }
+        }
+
+        // 0.12.8: 滑动窗口/token 裁剪可能截断 ToolCall/ToolResult 配对——
+        // 丢弃开头所有孤立的 ToolResult 消息。
+        drop_leading_orphan_tool_results(&mut messages);
+
+        let mut recall_count = 0usize;
+
+        // 0.13.2: FTS5 召回——从最后一条 User 消息提取 query，BM25 检索旧上下文
+        if cfg.recall_enabled && cfg.recall_top_k > 0 {
+            let query = Self::extract_last_user_text(&messages);
+            if !query.is_empty() {
+                match crate::infra::data::conversations::search_memory_fts(
+                    &pool,
+                    conversation_id,
+                    &query,
+                    cfg.recall_top_k,
+                ).await {
+                    Ok(recalls) if !recalls.is_empty() => {
+                        recall_count = recalls.len();
+                        let memory_block = Self::format_recall_block(&recalls);
+                        tracing::debug!(
+                            conversation_id,
+                            recall_count,
+                            query = %query,
+                            "FTS5 召回：注入 {} 条历史上下文",
+                            recall_count
+                        );
+                        // 在窗口最前方插入 <memory> 系统消息
+                        messages.insert(0, Message::System { content: memory_block });
+                    }
+                    Ok(_) => {} // 无召回结果
+                    Err(e) => {
+                        tracing::warn!(error = %e, "FTS5 召回失败（非致命）");
+                    }
+                }
+            }
+        }
+
+        // drop cfg guard before returning
+        drop(cfg);
+
+        Ok(MemoryLoadResult {
+            messages,
+            dropped_count,
+            recall_count,
+        })
     }
 
     /// 应用用户从设置页修改的记忆策略配置（0.13.1 §3.7）。
@@ -461,107 +617,9 @@ impl ConversationMemory for SqliteConversationMemory {
         &'a self,
         conversation_id: &'a str,
     ) -> rig_core::wasm_compat::WasmBoxedFuture<'a, Result<Vec<Message>, MemoryError>> {
-        let pool = self.pool.clone();
-        let config = self.config.clone();
-
         Box::pin(async move {
-            let cfg = config.read().await;
-
-            let load_limit = match cfg.mode {
-                WindowMode::FixedCount => cfg.window_size,
-                WindowMode::TokenAware => TOKEN_AWARE_LOAD_BATCH,
-            };
-
-            let rows = crate::infra::data::conversations::load_recent_messages(
-                &pool,
-                conversation_id,
-                load_limit,
-            )
-            .await
-            .map_err(|e| MemoryError::Backend(Box::from(e)))?;
-
-            let mut messages = Vec::with_capacity(rows.len());
-            for (_role, content) in rows {
-                let msg: Message = serde_json::from_str(&content)
-                    .map_err(|e| MemoryError::Backend(Box::from(e)))?;
-                messages.push(msg);
-            }
-
-            // 0.13.1: token-aware 裁剪（仅 TokenAware 模式）
-            // 0.13.2: 裁剪出的消息归档到 FTS5
-            if cfg.mode == WindowMode::TokenAware {
-                let context_limit = cfg.context_limit.unwrap_or(DEFAULT_CONTEXT_LIMIT);
-                let dropped_msgs = token_aware_truncate(
-                    &mut messages,
-                    context_limit,
-                    cfg.trigger_ratio,
-                    cfg.compress_ratio,
-                );
-
-                if !dropped_msgs.is_empty() {
-                    // 0.13.2: 归档被挤出的消息到 FTS5（幂等）
-                    for msg in &dropped_msgs {
-                        let text = extract_message_text(msg);
-                        if text.is_empty() {
-                            continue;
-                        }
-                        let role = Self::message_role(msg);
-                        let hash = Self::content_hash(&text);
-                        if let Err(e) = crate::infra::data::conversations::archive_to_fts(
-                            &pool,
-                            conversation_id,
-                            role,
-                            &text,
-                            &hash,
-                        ).await {
-                            tracing::warn!(error = %e, "FTS5 归档失败（非致命）");
-                        }
-                    }
-                    tracing::info!(
-                        conversation_id,
-                        dropped = dropped_msgs.len(),
-                        context_limit,
-                        "归档钩子：{} 条消息已归档到 FTS5",
-                        dropped_msgs.len()
-                    );
-                }
-            }
-
-            // 0.12.8: 滑动窗口/token 裁剪可能截断 ToolCall/ToolResult 配对——
-            // 丢弃开头所有孤立的 ToolResult 消息。
-            drop_leading_orphan_tool_results(&mut messages);
-
-            // 0.13.2: FTS5 召回——从最后一条 User 消息提取 query，BM25 检索旧上下文
-            if cfg.recall_enabled && cfg.recall_top_k > 0 {
-                let query = Self::extract_last_user_text(&messages);
-                if !query.is_empty() {
-                    match crate::infra::data::conversations::search_memory_fts(
-                        &pool,
-                        conversation_id,
-                        &query,
-                        cfg.recall_top_k,
-                    ).await {
-                        Ok(recalls) if !recalls.is_empty() => {
-                            let memory_block = Self::format_recall_block(&recalls);
-                            tracing::debug!(
-                                conversation_id,
-                                recall_count = recalls.len(),
-                                query = %query,
-                                "FTS5 召回：注入 {} 条历史上下文",
-                                recalls.len()
-                            );
-                            // 在窗口最前方插入 <memory> 系统消息
-                            messages.insert(0, Message::System { content: memory_block });
-                        }
-                        Ok(_) => {} // 无召回结果
-                        Err(e) => {
-                            tracing::warn!(error = %e, "FTS5 召回失败（非致命）");
-                        }
-                    }
-                }
-            }
-
-            Ok(messages)
+            let result = self.load_inner(conversation_id).await?;
+            Ok(result.messages)
         })
     }
 
@@ -1193,7 +1251,7 @@ mod tests {
         // 第一次 load 触发归档
         let _ = mem.load("c1").await.unwrap();
 
-        // 再追加一条关于 Rust 的消息（只用归档中已有的关键词，避免 FTS5 AND 不命中）
+        // 再追加一条关于 Rust 的消息（OR 语义下，任一关键词命中即召回）
         mem.append("c1", vec![user_msg("Rust async runtime")]).await.unwrap();
 
         // 第二次 load 应召回相关的旧消息并注入 <memory> 块
@@ -1242,5 +1300,82 @@ mod tests {
             }
         });
         assert!(!has_memory, "关闭召回后不应注入 <memory> 块");
+    }
+
+    // ── 0.13.6 load_with_stats 测试 ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn load_with_stats_returns_compression_stats() {
+        let pool = setup_pool().await;
+        let config = Arc::new(RwLock::new(MemoryConfig {
+            mode: WindowMode::TokenAware,
+            window_size: SLIDING_WINDOW_SIZE,
+            context_limit: None,
+            trigger_ratio: 0.8,
+            compress_ratio: 0.7,
+            recall_enabled: false,
+            recall_top_k: 3,
+        }));
+        config.write().await.context_limit = Some(50);
+        let mem = SqliteConversationMemory::with_config(pool.clone(), config);
+
+        // 写入大量消息触发压缩
+        for i in 0..20 {
+            let long_text = format!("message {i:03} with enough content to exceed the very small token limit we set");
+            mem.append("c1", vec![user_msg(&long_text)]).await.unwrap();
+        }
+
+        let result = mem.load_with_stats("c1").await.unwrap();
+        assert!(result.dropped_count > 0, "Should have dropped messages");
+        assert!(result.messages.len() < 20, "Should be truncated");
+    }
+
+    #[tokio::test]
+    async fn load_with_stats_returns_recall_stats() {
+        let pool = setup_pool().await;
+        let config = Arc::new(RwLock::new(MemoryConfig {
+            mode: WindowMode::TokenAware,
+            window_size: SLIDING_WINDOW_SIZE,
+            context_limit: None,
+            trigger_ratio: 0.8,
+            compress_ratio: 0.7,
+            recall_enabled: true,
+            recall_top_k: 3,
+        }));
+        config.write().await.context_limit = Some(50);
+        let mem = SqliteConversationMemory::with_config(pool.clone(), config);
+
+        // 写入消息触发归档
+        for i in 0..15 {
+            let text = format!("讨论 Rust topic_{i:03} with details");
+            mem.append("c1", vec![user_msg(&text)]).await.unwrap();
+        }
+        let _ = mem.load("c1").await.unwrap(); // 第一次 load 归档
+        mem.append("c1", vec![user_msg("Rust details")]).await.unwrap();
+
+        let result = mem.load_with_stats("c1").await.unwrap();
+        assert!(result.recall_count > 0, "Should have recalled messages");
+    }
+
+    #[tokio::test]
+    async fn load_with_stats_no_compression_when_under_limit() {
+        let pool = setup_pool().await;
+        let config = Arc::new(RwLock::new(MemoryConfig {
+            mode: WindowMode::TokenAware,
+            window_size: SLIDING_WINDOW_SIZE,
+            context_limit: None,
+            trigger_ratio: 0.8,
+            compress_ratio: 0.7,
+            recall_enabled: false,
+            recall_top_k: 3,
+        }));
+        config.write().await.context_limit = Some(100_000);
+        let mem = SqliteConversationMemory::with_config(pool.clone(), config);
+
+        mem.append("c1", vec![user_msg("short message")]).await.unwrap();
+
+        let result = mem.load_with_stats("c1").await.unwrap();
+        assert_eq!(result.dropped_count, 0, "Should not drop any messages");
+        assert_eq!(result.messages.len(), 1);
     }
 }

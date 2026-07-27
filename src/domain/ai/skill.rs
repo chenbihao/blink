@@ -68,7 +68,7 @@ impl SkillSource {
     /// 目录不存在时仍返回路径（调用方自行 `exists()` 判断）。
     pub fn directory(&self) -> Option<PathBuf> {
         match self {
-            Self::Blink => dirs_next::data_dir().map(|d| d.join("blink").join("skills")),
+            Self::Blink => Some(crate::infra::utils::paths::skills_global_dir()),
             Self::Claude => dirs_next::home_dir().map(|h| h.join(".claude").join("skills")),
             Self::Zcode => dirs_next::home_dir().map(|h| h.join(".zcode").join("skills")),
         }
@@ -115,6 +115,10 @@ pub struct SkillEntry {
     /// Blink 扩展字段，可选。缺失时只能靠 `/skill` 显式激活。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub triggers: Option<SkillTriggers>,
+    /// 预编译的正则模式（从 `triggers.patterns` 编译，scan 时一次性完成）。
+    /// 无 triggers 或 patterns 为空时为空 Vec。避免 match_triggers 每次调用重新编译。
+    #[serde(skip)]
+    pub compiled_patterns: Vec<Regex>,
     /// SKILL.md body（frontmatter 之后的 Markdown 全文）。
     #[serde(skip)]
     pub full_content: String,
@@ -133,12 +137,15 @@ pub struct SkillEntry {
 /// 不进 DB——SKILL.md 是文件系统约定（各 agent 共享），进 DB 反而破坏"复用生态"语义。
 pub struct SkillRegistry {
     skills: RwLock<Vec<SkillEntry>>,
+    /// 0.13.6: 被用户禁用的 Skill 标识列表（格式：`name@source`）。
+    disabled_skills: RwLock<std::collections::HashSet<String>>,
 }
 
 impl SkillRegistry {
     pub fn new() -> Self {
         Self {
             skills: RwLock::new(Vec::new()),
+            disabled_skills: RwLock::new(std::collections::HashSet::new()),
         }
     }
 
@@ -195,11 +202,15 @@ impl SkillRegistry {
     }
 
     /// 返回所有已发现的 Skill 摘要（阶段 1 preamble 注入用）。
+    ///
+    /// 0.13.6: 过滤被用户禁用的 Skill。
     pub fn summaries(&self) -> Vec<SkillSummary> {
+        let disabled = self.disabled_skills.read().expect("lock poisoned");
         self.skills
             .read()
             .expect("skill registry lock poisoned")
             .iter()
+            .filter(|s| !disabled.contains(&skill_id(&s.name, s.source)))
             .map(|s| SkillSummary {
                 name: s.name.clone(),
                 description: s.description.clone(),
@@ -210,6 +221,7 @@ impl SkillRegistry {
     }
 
     /// 返回所有已发现的 Skill 条目（设置页展示用）。
+    #[allow(dead_code)] // 已被 all_with_status() 替代，保留供未来可能使用
     pub fn all(&self) -> Vec<SkillEntry> {
         self.skills
             .read()
@@ -222,16 +234,23 @@ impl SkillRegistry {
     /// 匹配规则：
     /// - 关键词匹配：用户消息含 `triggers.keywords` 任一关键词（不区分大小写）
     /// - 正则匹配：用户消息匹配 `triggers.patterns`
+    ///
+    /// 0.13.6: 过滤被用户禁用的 Skill。
     pub fn match_triggers(&self, message: &str) -> Vec<SkillEntry> {
         let skills = self
             .skills
             .read()
             .expect("skill registry lock poisoned");
+        let disabled = self.disabled_skills.read().expect("lock poisoned");
         let msg_lower = message.to_lowercase();
 
         skills
             .iter()
             .filter(|s| {
+                // 0.13.6: 被禁用的 Skill 不触发
+                if disabled.contains(&skill_id(&s.name, s.source)) {
+                    return false;
+                }
                 let Some(triggers) = &s.triggers else {
                     return false;
                 };
@@ -243,16 +262,8 @@ impl SkillRegistry {
                 {
                     return true;
                 }
-                // 正则匹配
-                triggers.patterns.iter().any(|pat| {
-                    match Regex::new(pat) {
-                        Ok(re) => re.is_match(message),
-                        Err(e) => {
-                            tracing::warn!(pattern = %pat, %e, "Skill 正则编译失败，跳过");
-                            false
-                        }
-                    }
-                })
+                // 正则匹配（使用预编译的模式）
+                s.compiled_patterns.iter().any(|re| re.is_match(message))
             })
             .cloned()
             .collect()
@@ -281,12 +292,61 @@ impl SkillRegistry {
             .expect("skill registry lock poisoned")
             .len()
     }
+
+    /// 0.13.6: 设置被禁用的 Skill 列表。
+    ///
+    /// `ids` 格式为 `name@source`（如 `"rust-debug@claude"`）。
+    pub fn set_disabled_skills(&self, ids: Vec<String>) {
+        *self.disabled_skills.write().expect("lock poisoned") =
+            ids.into_iter().collect();
+    }
+
+    /// 0.13.6: 检查指定 Skill 是否被禁用。
+    #[allow(dead_code)] // 目前仅测试使用，保留供未来可能需要
+    pub fn is_disabled(&self, name: &str, source: SkillSource) -> bool {
+        self.disabled_skills
+            .read()
+            .expect("lock poisoned")
+            .contains(&skill_id(name, source))
+    }
+
+    /// 0.13.6: 返回所有 Skill 条目，附带 `disabled` 标记。
+    ///
+    /// 设置页展示用——前端用此标记渲染复选框状态。
+    pub fn all_with_status(&self) -> Vec<SkillEntryWithStatus> {
+        let disabled = self.disabled_skills.read().expect("lock poisoned");
+        self.skills
+            .read()
+            .expect("skill registry lock poisoned")
+            .iter()
+            .map(|s| SkillEntryWithStatus {
+                dir: s.dir_path.display().to_string(),
+                entry: s.clone(),
+                disabled: disabled.contains(&skill_id(&s.name, s.source)),
+            })
+            .collect()
+    }
 }
 
 impl Default for SkillRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// 0.13.6: Skill 标识——`name@source` 格式。
+pub fn skill_id(name: &str, source: SkillSource) -> String {
+    format!("{}@{}", name, source.display_name())
+}
+
+/// 0.13.6: 带 disabled 标记的 Skill 条目（设置页展示用）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SkillEntryWithStatus {
+    #[serde(flatten)]
+    pub entry: SkillEntry,
+    pub disabled: bool,
+    /// SKILL.md 所在目录路径（序列化为字符串，供前端展示/导入/打开目录用）。
+    pub dir: String,
 }
 
 // ── 目录扫描 ──────────────────────────────────────────────────────────────────
@@ -347,10 +407,28 @@ fn parse_skill_md(content: &str, source: SkillSource, dir_path: PathBuf) -> Opti
 
     let triggers = parse_triggers(&frontmatter);
 
+    // 预编译正则模式（避免 match_triggers 每次调用重新编译）
+    let compiled_patterns = triggers
+        .as_ref()
+        .map(|t| {
+            t.patterns
+                .iter()
+                .filter_map(|pat| match Regex::new(pat) {
+                    Ok(re) => Some(re),
+                    Err(e) => {
+                        tracing::warn!(pattern = %pat, %e, "Skill 正则编译失败，跳过");
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     Some(SkillEntry {
         name,
         description,
         triggers,
+        compiled_patterns,
         full_content: body,
         source,
         dir_path,
@@ -792,6 +870,7 @@ mod tests {
                 keywords: vec!["cargo".to_string(), "rustc".to_string()],
                 patterns: vec![],
             }),
+            compiled_patterns: Vec::new(),
             full_content: "# Rust Debug".to_string(),
             source: SkillSource::Blink,
             dir_path: PathBuf::from("/tmp"),
@@ -813,6 +892,7 @@ mod tests {
                 keywords: vec!["Cargo".to_string()],
                 patterns: vec![],
             }),
+            compiled_patterns: Vec::new(),
             full_content: String::new(),
             source: SkillSource::Blink,
             dir_path: PathBuf::from("/tmp"),
@@ -832,6 +912,7 @@ mod tests {
                 keywords: vec![],
                 patterns: vec![r"error\[E\d+\]".to_string()],
             }),
+            compiled_patterns: vec![Regex::new(r"error\[E\d+\]").unwrap()],
             full_content: String::new(),
             source: SkillSource::Claude,
             dir_path: PathBuf::from("/tmp"),
@@ -851,6 +932,7 @@ mod tests {
             name: "manual-only".to_string(),
             description: "Manual activation only".to_string(),
             triggers: None,
+            compiled_patterns: Vec::new(),
             full_content: String::new(),
             source: SkillSource::Blink,
             dir_path: PathBuf::from("/tmp"),
@@ -864,28 +946,30 @@ mod tests {
     fn registry_multiple_matches() {
         let registry = SkillRegistry::new();
         *registry.skills.write().unwrap() = vec![
-            SkillEntry {
-                name: "skill-a".to_string(),
-                description: "A".to_string(),
-                triggers: Some(SkillTriggers {
-                    keywords: vec!["cargo".to_string()],
-                    patterns: vec![],
-                }),
-                full_content: String::new(),
-                source: SkillSource::Blink,
-                dir_path: PathBuf::from("/tmp"),
-            },
-            SkillEntry {
-                name: "skill-b".to_string(),
-                description: "B".to_string(),
-                triggers: Some(SkillTriggers {
-                    keywords: vec![],
-                    patterns: vec![r"error\[E".to_string()],
-                }),
-                full_content: String::new(),
-                source: SkillSource::Claude,
-                dir_path: PathBuf::from("/tmp"),
-            },
+        SkillEntry {
+            name: "skill-a".to_string(),
+            description: "A".to_string(),
+            triggers: Some(SkillTriggers {
+                keywords: vec!["cargo".to_string()],
+                patterns: vec![],
+            }),
+            compiled_patterns: Vec::new(),
+            full_content: String::new(),
+            source: SkillSource::Blink,
+            dir_path: PathBuf::from("/tmp"),
+        },
+        SkillEntry {
+            name: "skill-b".to_string(),
+            description: "B".to_string(),
+            triggers: Some(SkillTriggers {
+                keywords: vec![],
+                patterns: vec![r"error\[E".to_string()],
+            }),
+            compiled_patterns: vec![Regex::new(r"error\[E").unwrap()],
+            full_content: String::new(),
+            source: SkillSource::Claude,
+            dir_path: PathBuf::from("/tmp"),
+        },
         ];
 
         // 消息同时命中两个 skill
@@ -902,6 +986,7 @@ mod tests {
             name: "rust-debug".to_string(),
             description: "Debug".to_string(),
             triggers: None,
+            compiled_patterns: Vec::new(),
             full_content: String::new(),
             source: SkillSource::Blink,
             dir_path: PathBuf::from("/tmp"),
@@ -915,22 +1000,24 @@ mod tests {
     fn find_by_name_with_source_filter() {
         let registry = SkillRegistry::new();
         *registry.skills.write().unwrap() = vec![
-            SkillEntry {
-                name: "same-name".to_string(),
-                description: "Blink version".to_string(),
-                triggers: None,
-                full_content: String::new(),
-                source: SkillSource::Blink,
-                dir_path: PathBuf::from("/tmp"),
-            },
-            SkillEntry {
-                name: "same-name".to_string(),
-                description: "Claude version".to_string(),
-                triggers: None,
-                full_content: String::new(),
-                source: SkillSource::Claude,
-                dir_path: PathBuf::from("/tmp"),
-            },
+        SkillEntry {
+            name: "same-name".to_string(),
+            description: "Blink version".to_string(),
+            triggers: None,
+            compiled_patterns: Vec::new(),
+            full_content: String::new(),
+            source: SkillSource::Blink,
+            dir_path: PathBuf::from("/tmp"),
+        },
+        SkillEntry {
+            name: "same-name".to_string(),
+            description: "Claude version".to_string(),
+            triggers: None,
+            compiled_patterns: Vec::new(),
+            full_content: String::new(),
+            source: SkillSource::Claude,
+            dir_path: PathBuf::from("/tmp"),
+        },
         ];
 
         // 不带 source → 返回第一个匹配
@@ -1009,5 +1096,150 @@ mod tests {
         assert_eq!(sources[0], SkillSource::Blink);
         assert_eq!(sources[1], SkillSource::Claude);
         assert_eq!(sources[2], SkillSource::Zcode);
+    }
+
+    // ── 0.13.6: disabled_skills 过滤 ──
+
+    #[test]
+    fn disabled_skills_excluded_from_summaries() {
+        let registry = SkillRegistry::new();
+        *registry.skills.write().unwrap() = vec![
+            SkillEntry {
+                name: "active".to_string(),
+                description: "Active skill".to_string(),
+                triggers: Some(SkillTriggers {
+                    keywords: vec!["cargo".to_string()],
+                    patterns: vec![],
+                }),
+                compiled_patterns: Vec::new(),
+                full_content: String::new(),
+                source: SkillSource::Blink,
+                dir_path: PathBuf::from("/tmp/active"),
+            },
+            SkillEntry {
+                name: "disabled".to_string(),
+                description: "Disabled skill".to_string(),
+                triggers: Some(SkillTriggers {
+                    keywords: vec!["cargo".to_string()],
+                    patterns: vec![],
+                }),
+                compiled_patterns: Vec::new(),
+                full_content: String::new(),
+                source: SkillSource::Claude,
+                dir_path: PathBuf::from("/tmp/disabled"),
+            },
+        ];
+        registry.set_disabled_skills(vec!["disabled@claude".to_string()]);
+
+        let summaries = registry.summaries();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].name, "active");
+    }
+
+    #[test]
+    fn disabled_skills_excluded_from_match_triggers() {
+        let registry = SkillRegistry::new();
+        *registry.skills.write().unwrap() = vec![
+            SkillEntry {
+                name: "skill-a".to_string(),
+                description: "A".to_string(),
+                triggers: Some(SkillTriggers {
+                    keywords: vec!["cargo".to_string()],
+                    patterns: vec![],
+                }),
+                compiled_patterns: Vec::new(),
+                full_content: String::new(),
+                source: SkillSource::Blink,
+                dir_path: PathBuf::from("/tmp/a"),
+            },
+            SkillEntry {
+                name: "skill-b".to_string(),
+                description: "B".to_string(),
+                triggers: Some(SkillTriggers {
+                    keywords: vec!["cargo".to_string()],
+                    patterns: vec![],
+                }),
+                compiled_patterns: Vec::new(),
+                full_content: String::new(),
+                source: SkillSource::Claude,
+                dir_path: PathBuf::from("/tmp/b"),
+            },
+        ];
+        registry.set_disabled_skills(vec!["skill-b@claude".to_string()]);
+
+        let matched = registry.match_triggers("cargo build");
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].name, "skill-a");
+    }
+
+    #[test]
+    fn disabled_skills_re_enable() {
+        let registry = SkillRegistry::new();
+        *registry.skills.write().unwrap() = vec![SkillEntry {
+            name: "test".to_string(),
+            description: "Test".to_string(),
+            triggers: Some(SkillTriggers {
+                keywords: vec!["cargo".to_string()],
+                patterns: vec![],
+            }),
+            compiled_patterns: Vec::new(),
+            full_content: String::new(),
+            source: SkillSource::Blink,
+            dir_path: PathBuf::from("/tmp"),
+        }];
+
+        // Disable
+        registry.set_disabled_skills(vec!["test@blink".to_string()]);
+        assert!(registry.is_disabled("test", SkillSource::Blink));
+        assert!(registry.match_triggers("cargo").is_empty());
+
+        // Re-enable
+        registry.set_disabled_skills(vec![]);
+        assert!(!registry.is_disabled("test", SkillSource::Blink));
+        assert_eq!(registry.match_triggers("cargo").len(), 1);
+    }
+
+    #[test]
+    fn all_with_status_includes_disabled_flag_and_dir() {
+        let registry = SkillRegistry::new();
+        *registry.skills.write().unwrap() = vec![
+            SkillEntry {
+                name: "active".to_string(),
+                description: "Active".to_string(),
+                triggers: None,
+                compiled_patterns: Vec::new(),
+                full_content: String::new(),
+                source: SkillSource::Blink,
+                dir_path: PathBuf::from("/tmp/active"),
+            },
+            SkillEntry {
+                name: "inactive".to_string(),
+                description: "Inactive".to_string(),
+                triggers: None,
+                compiled_patterns: Vec::new(),
+                full_content: String::new(),
+                source: SkillSource::Claude,
+                dir_path: PathBuf::from("/tmp/inactive"),
+            },
+        ];
+        registry.set_disabled_skills(vec!["inactive@claude".to_string()]);
+
+        let entries = registry.all_with_status();
+        assert_eq!(entries.len(), 2);
+
+        let active = entries.iter().find(|e| e.entry.name == "active").unwrap();
+        assert!(!active.disabled);
+        assert_eq!(active.dir, "/tmp/active");
+
+        let inactive = entries.iter().find(|e| e.entry.name == "inactive").unwrap();
+        assert!(inactive.disabled);
+        assert_eq!(inactive.dir, "/tmp/inactive");
+    }
+
+    #[test]
+    fn skill_id_format() {
+        assert_eq!(skill_id("test", SkillSource::Blink), "test@blink");
+        assert_eq!(skill_id("rust", SkillSource::Claude), "rust@claude");
+        assert_eq!(skill_id("z", SkillSource::Zcode), "z@zcode");
     }
 }

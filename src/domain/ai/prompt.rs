@@ -719,6 +719,7 @@ mod tests {
             name: "rust-debug".to_string(),
             description: "Debug".to_string(),
             triggers: None,
+            compiled_patterns: Vec::new(),
             full_content: "# Rust Debug Workflow\n\n1. Read error\n2. Fix".to_string(),
             source: SkillSource::Blink,
             dir_path: std::path::PathBuf::from("/tmp"),

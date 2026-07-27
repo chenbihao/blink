@@ -63,6 +63,14 @@ struct ConnectedServer {
 }
 
 /// MCP client 管理器——管理所有外部 MCP server 的连接生命周期。
+/// MCP tool 来源信息（0.13.6——供前端工具卡片增强）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct McpToolSource {
+    pub tool_name: String,
+    pub server_name: String,
+    pub transport: String,
+}
+
 pub struct McpClientManager {
     /// 已连接的 server（name → ConnectedServer）。
     connected: Arc<RwLock<HashMap<String, ConnectedServer>>>,
@@ -168,8 +176,22 @@ impl McpClientManager {
         Err(last_err)
     }
 
-    /// 尝试连接单个 server（拉起子进程 + 握手 + 拉 tool 列表）。
+    /// 尝试连接单个 server（根据 transport 类型分派 stdio / HTTP）。
     async fn try_connect(&self, config: &McpServerConfig) -> Result<Vec<McpToolInfo>, String> {
+        use crate::domain::mcp::config::McpTransport;
+        match &config.transport {
+            McpTransport::Stdio => self.try_connect_stdio(config).await,
+            McpTransport::Http { url, headers } => {
+                self.try_connect_http(config, url, headers).await
+            }
+        }
+    }
+
+    /// stdio 模式连接——拉起子进程 + 握手 + 拉 tool 列表。
+    async fn try_connect_stdio(
+        &self,
+        config: &McpServerConfig,
+    ) -> Result<Vec<McpToolInfo>, String> {
         // 构造子进程命令
         let mut cmd = tokio::process::Command::new(&config.command);
         cmd.args(&config.args);
@@ -188,6 +210,67 @@ impl McpClientManager {
             .await
             .map_err(|e| format!("MCP 握手失败: {e}"))?;
 
+        self.finalize_connection(config, service).await
+    }
+
+    /// HTTP 模式连接——Streamable HTTP transport + 握手 + 拉 tool 列表（0.13.6）。
+    async fn try_connect_http(
+        &self,
+        config: &McpServerConfig,
+        url: &str,
+        headers: &std::collections::HashMap<String, String>,
+    ) -> Result<Vec<McpToolInfo>, String> {
+        tracing::info!(
+            server = %config.name,
+            url = %url,
+            "MCP: 尝试 HTTP 连接"
+        );
+
+        // rmcp Streamable HTTP client transport
+        // 统一用 from_config：支持 custom_headers（含 Authorization 等任意 header）
+        use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+        let mut cfg = StreamableHttpClientTransportConfig::with_uri(url);
+
+        if !headers.is_empty() {
+            let mut custom_headers = std::collections::HashMap::new();
+            for (k, v) in headers {
+                // rmcp 保留 header（accept / mcp-session-id / last-event-id）跳过
+                let lower = k.to_lowercase();
+                if matches!(lower.as_str(), "accept" | "mcp-session-id" | "last-event-id") {
+                    tracing::warn!(header = %k, "MCP: 保留 header 已跳过");
+                    continue;
+                }
+                if let (Ok(name), Ok(val)) = (
+                    http::HeaderName::try_from(k.as_str()),
+                    http::HeaderValue::try_from(v.as_str()),
+                ) {
+                    custom_headers.insert(name, val);
+                } else {
+                    tracing::warn!(header = %k, "MCP: 无效的 HTTP header，已跳过");
+                }
+            }
+            if !custom_headers.is_empty() {
+                cfg = cfg.custom_headers(custom_headers);
+            }
+        }
+
+        let transport = rmcp::transport::StreamableHttpClientTransport::from_config(cfg);
+
+        let client_info = ClientInfo::default();
+        let service = client_info
+            .serve(transport)
+            .await
+            .map_err(|e| format!("HTTP MCP 握手失败: {e}"))?;
+
+        self.finalize_connection(config, service).await
+    }
+
+    /// 连接后通用逻辑——拉 tool 列表 + 转换 + 存入连接表。
+    async fn finalize_connection(
+        &self,
+        config: &McpServerConfig,
+        service: RunningService<rmcp::service::RoleClient, ClientInfo>,
+    ) -> Result<Vec<McpToolInfo>, String> {
         // 拉 tool 列表
         let rmcp_tools = service
             .peer()
@@ -319,6 +402,31 @@ impl McpClientManager {
             }
         }
         names
+    }
+
+    /// 0.13.6: 获取所有 MCP tool 的来源信息（server 名 + transport 类型）。
+    ///
+    /// 供前端工具卡片增强——显示 MCP 工具来自哪个 server、用哪种协议。
+    pub async fn get_tool_sources(&self) -> Vec<McpToolSource> {
+        let connected = self.connected.read().await;
+        let mut sources = Vec::new();
+        for (server_name, server) in connected.iter() {
+            let transport = match &server.config.transport {
+                crate::domain::mcp::config::McpTransport::Stdio => "stdio",
+                crate::domain::mcp::config::McpTransport::Http { .. } => "http",
+            };
+            for tool in &server.rmcp_tools {
+                let tool_name = tool.name.to_string();
+                if !server.config.disabled_tools.contains(&tool_name) {
+                    sources.push(McpToolSource {
+                        tool_name,
+                        server_name: server_name.clone(),
+                        transport: transport.to_string(),
+                    });
+                }
+            }
+        }
+        sources
     }
 
     /// 更新单个 server 的 disabled_tools 并刷新 tool 列表缓存。

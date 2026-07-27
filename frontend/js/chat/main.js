@@ -62,6 +62,8 @@ async function init() {
   await ipc.listenChatStream(handleStreamEvent);
   await ipc.listenChatConfirm(handleConfirmEvent);
   await ipc.listenChatTitleUpdated(handleTitleUpdated);
+  await ipc.listenContextStatus(handleContextStatus);
+  await ipc.listenSkillActivated(handleSkillActivated);
   await ipc.listenVoicePartial(handleVoicePartial);
   await ipc.listenVoiceRecordingStart(handleVoiceRecordingStart);
   await ipc.listenVoiceRecordingEnd(handleVoiceRecordingEnd);
@@ -73,6 +75,17 @@ async function init() {
   try {
     const status = await ipc.getChatStatus();
     state.setProviderConfigured(status.provider_configured);
+
+    // 0.13.6: 加载初始上下文窗口状态
+    try {
+      const ctxStatus = await ipc.getContextWindowStatus();
+      if (ctxStatus) {
+        components.updateContextIndicator(ctxStatus);
+        components.renderContextWarning(ctxStatus.usage_percent, handleContextWarningAction);
+      }
+    } catch (e) {
+      console.warn("[chat] 加载上下文窗口状态失败:", e);
+    }
     updateProviderLabel(status);
     components.renderEmptyState(status.provider_configured, openSettings);
   } catch (e) {
@@ -438,6 +451,13 @@ function finalizeDone(chunk) {
       output_tokens: chunk.output_tokens,
     });
   }
+  // 0.13.6: 记忆召回 badge
+  if (state.lastRecallCount > 0) {
+    const targetEl = currentAssistantEl || components.getLastAssistantEl?.();
+    if (targetEl) {
+      components.renderRecallBadge(targetEl, state.lastRecallCount);
+    }
+  }
   finishStreaming();
   // 持久化已完成（rig memory.append 在 done 前执行），刷新侧边栏更新 last_active_at
   refreshSidebar();
@@ -477,15 +497,75 @@ function handleConfirmEvent(event) {
 // ── 标题自动更新（0.12.5 §5.3） ────────────────
 
 /**
- * 对话标题自动更新事件处理（0.12.5 §5.3）。
- * LLM 生成标题后后端 emit `chat-title-updated`，前端更新 header + 刷新侧边栏。
- */
+* 对话标题自动更新事件处理（0.12.5 §5.3）。
+* LLM 生成标题后后端 emit `chat-title-updated`，前端更新 header + 刷新侧边栏。
+*/
 async function handleTitleUpdated(event) {
   const { conversation_id, title } = event.payload;
   if (conversation_id === state.conversationId) {
     await updateBreadcrumb(title);
   }
   refreshSidebar();
+}
+
+// ── 上下文窗口状态（0.13.6） ───────────────────
+
+/**
+ * 上下文窗口状态更新事件处理（0.13.6）。
+ * 后端在每次 prompt 前计算 token 估算 + 压缩/召回统计并推送。
+ */
+function handleContextStatus(event) {
+  const status = event.payload;
+  components.updateContextIndicator(status);
+  components.renderContextWarning(status.usage_percent, handleContextWarningAction);
+  // 0.13.6: 保存 recall_count 供 finalizeDone 渲染
+  state.setLastRecallCount(status.last_recall_count || 0);
+}
+
+/**
+ * 压缩提示条操作回调（0.13.6）。
+ * - compress: 调后端 compress_context_now 强制走一遍 token_aware_truncate
+ * - clear: 清空当前对话历史
+ */
+async function handleContextWarningAction(action) {
+  if (action === "compress") {
+    try {
+      await ipc.compressContextNow(state.conversationId);
+      components.removeContextWarning();
+    } catch (e) {
+      console.error("[chat] 压缩失败:", e);
+    }
+  } else if (action === "clear") {
+    // 复用 truncate_messages 清空所有消息（保留 0 条）
+    try {
+      await ipc.truncateMessages(state.conversationId, 0);
+      components.removeContextWarning();
+      components.clearMessages();
+      components.renderEmptyState(state.providerConfigured, () => ipc.hideChatWindow());
+      state.resetConversation();
+    } catch (e) {
+      console.error("[chat] 清除对话失败:", e);
+    }
+  }
+}
+
+// ── Skill 激活 Signal（0.13.6） ───────────────────
+
+/**
+ * Skill 激活事件处理（0.13.6）。
+ * 后端在 resolve_skill_triggers 完成后推送，前端渲染 Signal 消息。
+ */
+function handleSkillActivated(event) {
+  const { request_id, skills } = event.payload;
+  // 忽略不属于当前请求的事件
+  if (request_id !== state.activeRequestId) return;
+  for (const skill of skills) {
+    const icon = skill.trigger_type === "explicit" ? "🎯" : "🔍";
+    components.renderSignal(
+      `${icon} Skill 已激活: ${skill.name} (${skill.source})`,
+      "info"
+    );
+  }
 }
 
 // ── Alt 系统菜单抑制 ──────────────────────────────
@@ -921,11 +1001,13 @@ function updateProviderLabel(status) {
 async function refreshToolPool() {
   const el = document.getElementById("chat-tool-pool");
   try {
-    const [size, names] = await Promise.all([
+    const [size, names, sources] = await Promise.all([
       ipc.getMcpToolPoolSize(),
       ipc.getMcpToolNames(),
+      ipc.getMcpToolSources(),
     ]);
     state.setMcpToolNames(names);
+    state.setMcpToolSources(sources);
 
     if (el) {
       const parts = [];

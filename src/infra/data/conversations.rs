@@ -735,6 +735,10 @@ pub async fn archive_to_fts(
 /// `conversation_id` 限定检索范围（只召回当前对话的归档消息）。
 ///
 /// **trigram 分词器**：中文友好，支持子串模糊匹配（如搜"搜索"命中含"搜索词"的文本）。
+///
+/// **OR 语义**（0.13 优化）：将用户消息拆词后以 `OR` 连接，
+/// 任一关键词命中即召回——避免长消息 AND 全命中率低的问题。
+/// trigram 要求 ≥3 字符，短于 3 的词自动跳过。
 pub async fn search_memory_fts(
     pool: &SqlitePool,
     conversation_id: &str,
@@ -745,21 +749,26 @@ pub async fn search_memory_fts(
         return Ok(Vec::new());
     }
 
+    // 将 query 转为 OR 语义：拆词 → 过滤 <3 字符 → 双引号转义 → OR 连接
+    let fts_query = build_fts_or_query(query);
+    if fts_query.is_empty() {
+        return Ok(Vec::new());
+    }
+
     // BM25：分数越低越相关（FTS5 的 bm25() 返回负值，越负越相关）
-    // 排除当前窗口中的消息——通过 conversation_id 限定范围即可
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT content, role FROM memory_fts
          WHERE memory_fts MATCH ?1 AND conversation_id = ?2
          ORDER BY bm25(memory_fts)
          LIMIT ?3",
     )
-    .bind(query)
+    .bind(&fts_query)
     .bind(conversation_id)
     .bind(limit)
     .fetch_all(pool)
     .await
     .map_err(|e| {
-        tracing::warn!(error = %e, %query, "FTS5 检索失败");
+        tracing::warn!(error = %e, %fts_query, "FTS5 检索失败");
         e.to_string()
     })?;
 
@@ -767,6 +776,24 @@ pub async fn search_memory_fts(
         .into_iter()
         .map(|(content, role)| MemoryRecall { content, role })
         .collect())
+}
+
+/// 将用户消息转为 FTS5 OR 查询字符串。
+///
+/// 1. 按空白拆词
+/// 2. 过滤掉 <3 字符的词（trigram 最低 3 字符）
+/// 3. 每个词用双引号包裹（转义 FTS5 运算符如 `-`、`*`、`(`）
+/// 4. 以 ` OR ` 连接
+///
+/// 例：`"tell me about Rust"` → `"tell" OR "about" OR "Rust"`
+/// （`me` 被 <3 过滤掉）
+fn build_fts_or_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .filter(|w| w.chars().count() >= 3)
+        .map(|w| format!("\"{}\"", w.replace('"', "")))
+        .collect::<Vec<_>>()
+        .join(" OR ")
 }
 
 /// 清理指定对话的 FTS5 归档（删除对话 / 清空消息时调用）。
@@ -1298,5 +1325,35 @@ mod tests {
 
         let recalls = search_memory_fts(&pool, "c1", "   ", 10).await.unwrap();
         assert!(recalls.is_empty(), "纯空格 query 应返回空结果");
+    }
+
+    #[tokio::test]
+    async fn fts_search_or_semantics() {
+        let pool = setup_pool().await;
+
+        // 归档两条消息：一条含 Rust，一条含 Python
+        archive_to_fts(&pool, "c1", "user", "如何用 Rust 写 HTTP 服务器", "h1").await.unwrap();
+        archive_to_fts(&pool, "c1", "user", "Python 数据分析入门", "h2").await.unwrap();
+
+        // 多词 query：AND 语义会要求全部命中，OR 语义只需任一命中
+        // “Rust 和 Python 区别” — AND 下无命中（无消息同时含两者），OR 下命中两条
+        let recalls = search_memory_fts(&pool, "c1", "Rust 和 Python 区别", 10).await.unwrap();
+        assert_eq!(recalls.len(), 2, "OR 语义：含 Rust 或 Python 的消息都应被召回");
+    }
+
+    #[tokio::test]
+    async fn fts_search_short_words_filtered() {
+        // trigram 要求 ≥3 字符，短词自动跳过
+        let pool = setup_pool().await;
+        archive_to_fts(&pool, "c1", "user", "Go 语言并发模型", "h1").await.unwrap();
+
+        // “Go” 只有 2 字符，被过滤；“语言” 只有 2 字符也被过滤
+        // 但 “并发模型” 4 字符可命中
+        let recalls = search_memory_fts(&pool, "c1", "Go 语言 并发模型", 10).await.unwrap();
+        assert!(!recalls.is_empty(), "短词过滤后仍有有效词可命中");
+
+        // 全是短词 → 无有效 query → 空结果
+        let recalls = search_memory_fts(&pool, "c1", "Go 语言", 10).await.unwrap();
+        assert!(recalls.is_empty(), "全部短于 3 字符的词应返回空结果");
     }
 }

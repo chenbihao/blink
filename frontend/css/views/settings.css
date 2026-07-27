@@ -581,6 +581,24 @@ input[type="number"]::-webkit-outer-spin-button {
   box-shadow: 0 0 0 3px var(--accent-bg);
 }
 
+/* 0.13.6: 只读数值显示框（与 number-input-wrapper 等宽） */
+.number-input-readonly {
+  background: var(--bg-elevated, var(--surface));
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius-md);
+  padding: 0 8px;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  min-width: 120px;
+}
+
+.number-input-readonly .ai-prompt-tokens {
+  color: var(--text);
+  font-size: var(--text-md);
+  font-family: ui-monospace, Consolas, monospace;
+}
+
 .number-input-wrapper input[type="number"] {
   width: 60px;
   background: transparent;

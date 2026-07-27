@@ -6,12 +6,42 @@
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
+/// MCP 传输协议类型（0.13.6）。
+///
+/// 决定 MCP client 如何连接到外部 server——
+/// - `Stdio`：拉起子进程，通过 stdin/stdout 通信（当前唯一支持的类型）
+/// - `Http`：通过 HTTP 请求连接远程 server（Streamable HTTP transport）
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum McpTransport {
+    /// stdio 子进程。
+    Stdio,
+    /// Streamable HTTP（远程 server）。
+    /// `url` 字段必填，`headers` 可选（如 Authorization）。
+    Http {
+        url: String,
+        #[serde(default)]
+        headers: std::collections::HashMap<String, String>,
+    },
+}
+
+impl Default for McpTransport {
+    fn default() -> Self {
+        Self::Stdio
+    }
+}
+
 /// 单个 MCP server 的配置。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct McpServerConfig {
     /// 唯一标识（用户自定义名称，如 `"filesystem"`）。
     pub name: String,
+    /// 传输协议类型（0.13.6，默认 stdio）。
+    #[serde(default)]
+    pub transport: McpTransport,
     /// 可执行文件路径或命令（如 `"npx"` / `"node"` / `"C:\\path\\to\\server.exe"`）。
+    /// HTTP 模式下可为空字符串。
+    #[serde(default)]
     pub command: String,
     /// 命令行参数（如 `["-y", "@modelcontextprotocol/server-filesystem", "C:\\Users"]`）。
     #[serde(default)]
@@ -158,6 +188,7 @@ mod tests {
     fn make_config(name: &str) -> McpServerConfig {
         McpServerConfig {
             name: name.to_string(),
+            transport: McpTransport::Stdio,
             command: "npx".to_string(),
             args: vec!["-y".to_string(), "@modelcontextprotocol/server-filesystem".to_string()],
             env: std::collections::HashMap::new(),
@@ -275,5 +306,60 @@ mod tests {
         assert!(config.env.is_empty());
         assert!(config.enabled); // default true
         assert!(config.disabled_tools.is_empty());
+    }
+
+    #[test]
+    fn mcp_transport_stdio_roundtrip() {
+        let transport = McpTransport::Stdio;
+        let json = serde_json::to_string(&transport).unwrap();
+        assert_eq!(json, r#"{"type":"stdio"}"#);
+        let de: McpTransport = serde_json::from_str(&json).unwrap();
+        assert_eq!(transport, de);
+    }
+
+    #[test]
+    fn mcp_transport_http_roundtrip() {
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("Authorization".to_string(), "Bearer token123".to_string());
+        let transport = McpTransport::Http {
+            url: "http://localhost:8000/mcp".to_string(),
+            headers,
+        };
+        let json = serde_json::to_string(&transport).unwrap();
+        let de: McpTransport = serde_json::from_str(&json).unwrap();
+        assert_eq!(transport, de);
+    }
+
+    #[test]
+    fn mcp_transport_default_is_stdio() {
+        assert_eq!(McpTransport::default(), McpTransport::Stdio);
+    }
+
+    #[test]
+    fn mcp_server_config_with_http_transport_roundtrip() {
+        let config = McpServerConfig {
+            name: "remote-api".to_string(),
+            transport: McpTransport::Http {
+                url: "http://example.com/mcp".to_string(),
+                headers: std::collections::HashMap::new(),
+            },
+            command: String::new(),
+            args: Vec::new(),
+            env: std::collections::HashMap::new(),
+            enabled: true,
+            disabled_tools: Vec::new(),
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let de: McpServerConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, de);
+        assert!(de.command.is_empty()); // HTTP 模式 command 可为空
+    }
+
+    #[test]
+    fn mcp_server_config_without_transport_defaults_to_stdio() {
+        // 旧配置（无 transport 字段）应默认为 Stdio
+        let json = r#"{"name":"legacy","command":"npx"}"#;
+        let config: McpServerConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.transport, McpTransport::Stdio);
     }
 }

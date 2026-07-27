@@ -24,6 +24,7 @@ import { initAITab } from "./tabs/ai.js";
 import { initVoiceTab } from "./tabs/voice.js";
 import { initChordTab } from "./tabs/chord.js";
 import { initMcPTab } from "./tabs/mcp.js";
+import { initMcpServerSection } from "./tabs/mcp-server.js";
 
 // ── Tab 切换 ─────────────────────────────────────────────────────────────────
 
@@ -83,6 +84,7 @@ async function init() {
   initVoiceTab();
     initChordTab();
     initMcPTab();
+initMcpServerSection();
 
     console.log("Settings initialized");
   } catch (e) {

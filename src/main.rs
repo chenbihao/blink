@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod cli;
 mod domain;
 mod infra;
 
@@ -8,6 +9,12 @@ use domain::execution::Action;
 use tauri::{Emitter, Manager, WindowEvent, tray::TrayIconBuilder};
 
 fn main() {
+    // 0.13.5: CLI 模式检测——如果命令行参数匹配 CLI 子命令，执行 CLI 逻辑后退出。
+    // 必须在任何 Tauri 初始化之前检测，避免创建不必要的 GUI 资源。
+    if let Some(exit_code) = cli::try_run_cli() {
+        std::process::exit(exit_code);
+    }
+
     // 开启 Per-Monitor V2 DPI 感知：混合 DPI（例如主屏 100% + 副屏 150%）跨屏时
     // 由系统按目标显示器的 scale 自动重算尺寸，避免文字虚化 / 位置漂移。
     // 必须在任何窗口创建前调用；调用失败静默忽略（Win10 早期版本走 System DPI 也可用）。
@@ -704,10 +711,31 @@ fn main() {
             app::commands::set_mcp_server_disabled_tools,
             app::commands::get_mcp_tool_pool_size,
             app::commands::get_mcp_tool_names,
+            // 0.13.6 MCP 导入增强
+            app::commands::detect_mcp_config_file,
+            app::commands::import_mcp_from_agent,
+            app::commands::import_mcp_from_json,
+            app::commands::batch_import_mcp_servers,
+            app::commands::batch_set_mcp_enabled,
+            // 0.13.6 上下文窗口状态
+            app::commands::get_context_window_status,
+            app::commands::compress_context_now,
+            // 0.13.4 MCP server（暴露 Blink 能力）
+            app::commands::get_mcp_server_config,
+            app::commands::set_mcp_server_config,
+            app::commands::list_exposable_capabilities,
             // 0.13.3 Skill 约定式
             app::commands::list_skills,
             app::commands::refresh_skills,
             app::commands::open_skill_dir,
+            // 0.13.6 Skill 导入 + 粒度开关
+            app::commands::import_skill,
+            app::commands::set_skill_enabled,
+            app::commands::open_dir_in_explorer,
+            // 0.13.6 聊天窗口展现优化
+            app::commands::get_mcp_tool_sources,
+            // 0.13.6 CLI 能力识别
+            app::commands::recognize_cli_tool,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

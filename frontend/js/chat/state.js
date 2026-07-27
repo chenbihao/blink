@@ -50,6 +50,13 @@ export let lastUsage = null;
  */
 export let mcpToolNames = null;
 
+/**
+ * MCP tool 来源信息 Map（0.13.6）。
+ * key = tool_name, value = { server_name, transport }。
+ * `null` = 尚未加载。
+ */
+let mcpToolSourcesMap = null;
+
 // ── 状态变更 ─────────────────────────────────────
 
 export function setStreaming(value) {
@@ -98,6 +105,12 @@ export function setLastUsage(usage) {
   lastUsage = usage;
 }
 
+/** 0.13.6: 设置上次 FTS5 召回的消息条数。 */
+let lastRecallCount = 0;
+export function setLastRecallCount(count) {
+  lastRecallCount = count;
+}
+
 /** 设置 MCP tool 名称集合（0.13.0）。 */
 export function setMcpToolNames(names) {
   mcpToolNames = names ? new Set(names) : null;
@@ -106,6 +119,16 @@ export function setMcpToolNames(names) {
 /** 判断 tool 名称是否来自 MCP server（0.13.0）。 */
 export function isMcpTool(name) {
   return mcpToolNames != null && mcpToolNames.has(name);
+}
+
+/** 0.13.6: 设置 MCP tool 来源信息。 */
+export function setMcpToolSources(sources) {
+  mcpToolSourcesMap = sources ? new Map(sources.map((s) => [s.tool_name, s])) : null;
+}
+
+/** 0.13.6: 获取 tool 的 MCP 来源信息。返回 null 表示不是 MCP tool。 */
+export function getMcpToolSource(name) {
+  return mcpToolSourcesMap?.get(name) || null;
 }
 
 /** 设置当前 conversation_id（0.12.4 §6.1：ES module namespace import 只读，需 setter）。 */

@@ -16,7 +16,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
-use crate::domain::ai::memory::SqliteConversationMemory;
+use crate::domain::ai::memory::{SqliteConversationMemory, estimate_messages_tokens, MemoryLoadResult};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
 
@@ -33,6 +33,7 @@ use crate::domain::ai::tool_adapter::{PendingConfirms, build_agent_tools};
 use crate::domain::capability::CapabilityRegistry;
 use crate::domain::execution::ActionRegistry;
 use crate::domain::mcp::McpClientManager;
+use tauri::Emitter;
 
 type AgentCacheKey = (String, String, String, u64);
 
@@ -52,6 +53,46 @@ struct ActiveChatRequest {
 pub struct ActiveChatStatus {
     pub request_id: u64,
     pub conversation_id: String,
+}
+
+// ── 0.13.6: 上下文窗口状态 ──────────────────────────────────────────────────────
+
+/// 聊天窗口上下文窗口状态（0.13.6）。
+///
+/// 每次 prompt 前通过 `blink://chat-context-status` 事件推送到前端，
+/// 驱动 composer bar 上的环形进度条指示器。
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ContextWindowStatus {
+    /// 估算的当前窗口 token 数。
+    pub estimated_tokens: usize,
+    /// 模型 context window 上限。
+    pub context_limit: usize,
+    /// 占用百分比（0-100）。
+    pub usage_percent: u8,
+    /// 上次 load() 是否触发了压缩。
+    pub last_compressed: bool,
+    /// 上次压缩移出的消息数。
+    pub last_compressed_count: usize,
+    /// FTS5 召回的消息数（上次 load()）。
+    pub last_recall_count: usize,
+}
+
+// ── 0.13.6: Skill 激活 Signal ──────────────────────────────────────────────────
+
+/// Skill 激活事件（推送 `blink://chat-skill-activated`）。
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SkillActivationSignal {
+    pub request_id: u64,
+    pub skills: Vec<SkillActivationInfo>,
+}
+
+/// 单个 Skill 激活信息。
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SkillActivationInfo {
+    pub name: String,
+    pub source: String,
+    /// "explicit" = /skill 指令激活, "auto" = 关键词/正则自动触发。
+    pub trigger_type: &'static str,
 }
 
 /// ChatService 状态快照。
@@ -223,6 +264,8 @@ pub struct ChatService {
     selected: RwLock<Option<ChatModelSelection>>,
     /// 配置库连接池（持久化模型选择到 config 表）。
     config_pool: sqlx::SqlitePool,
+    /// 0.13.6: 上次计算的上下文窗口状态（供 `get_context_window_status` command 查询）。
+    last_context_status: RwLock<Option<ContextWindowStatus>>,
 }
 
 impl ChatService {
@@ -254,6 +297,7 @@ impl ChatService {
             memory: Arc::new(crate::domain::ai::memory::SqliteConversationMemory::new(ai_pool)),
             skill_registry: SkillRegistry::new(),
             cached_agent: RwLock::new(None),
+            last_context_status: RwLock::new(None),
             requests: RequestTracker::new(),
             start_gate: tokio::sync::Mutex::new(()),
             selected: RwLock::new(selected),
@@ -513,6 +557,23 @@ impl ChatService {
                 skills = ?triggered_skills.iter().map(|s| format!("{}({})", s.name, s.source.display_name())).collect::<Vec<_>>(),
                 "ChatService: Skill 已激活"
             );
+            // 0.13.6: 推送 Skill 激活事件到前端，渲染 Signal 消息
+            let signal = SkillActivationSignal {
+                request_id,
+                skills: triggered_skills
+                    .iter()
+                    .map(|s| SkillActivationInfo {
+                        name: s.name.clone(),
+                        source: s.source.display_name().to_string(),
+                        trigger_type: if message.starts_with("/skill") || message.starts_with("/SKILL") {
+                            "explicit"
+                        } else {
+                            "auto"
+                        },
+                    })
+                    .collect(),
+            };
+            let _ = self.app.emit_to("chat", "blink://chat-skill-activated", &signal);
         }
 
         let task = tokio::spawn(async move {
@@ -526,6 +587,16 @@ impl ChatService {
             // Provider 构造也放进可 abort 的 task：窗口在冷构造期间关闭时仍能立即中断。
             match service.ensure_provider(&preamble).await {
                 Ok(provider) => {
+                    // 0.13.6: 在 stream_prompt 前计算上下文窗口状态并推送前端
+                    let context_status = service
+                        .compute_context_status(&conversation_for_task)
+                        .await;
+                    let _ = service.app.emit_to(
+                        "chat",
+                        "blink://chat-context-status",
+                        context_status,
+                    );
+
                     provider
                         .stream_prompt(&conversation_for_task, &effective_message, chunk_tx)
                         .await;
@@ -669,6 +740,68 @@ impl ChatService {
         self.memory.apply_config(config).await;
     }
 
+    // ── 0.13.6: 上下文窗口状态 ──────────────────────────────────────────
+
+    /// 计算当前对话的上下文窗口状态（0.13.6）。
+    ///
+    /// 调用 `memory.load_with_stats()` 获取窗口消息 + 压缩/召回统计，
+    /// 估算 token 数并计算占用百分比。结果缓存在 `last_context_status` 供前端查询。
+    pub async fn compute_context_status(&self, conversation_id: &str) -> ContextWindowStatus {
+        let result = match self.memory.load_with_stats(conversation_id).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "compute_context_status: load_with_stats 失败");
+                MemoryLoadResult {
+                    messages: Vec::new(),
+                    dropped_count: 0,
+                    recall_count: 0,
+                }
+            }
+        };
+
+        let config_handle = self.memory.config_handle();
+        let cfg = config_handle.read().await;
+        let context_limit = cfg.context_limit.unwrap_or(8192);
+        let estimated_tokens = estimate_messages_tokens(&result.messages);
+        let usage_percent = ((estimated_tokens * 100) / context_limit.max(1)).min(100) as u8;
+
+        let status = ContextWindowStatus {
+            estimated_tokens,
+            context_limit,
+            usage_percent,
+            last_compressed: result.dropped_count > 0,
+            last_compressed_count: result.dropped_count,
+            last_recall_count: result.recall_count,
+        };
+
+        // 缓存供 get_context_window_status command 查询
+        *self
+            .last_context_status
+            .write()
+            .expect("last_context_status lock poisoned") = Some(status.clone());
+
+        tracing::debug!(
+            conversation_id,
+            estimated_tokens,
+            context_limit,
+            usage_percent,
+            dropped = result.dropped_count,
+            recalled = result.recall_count,
+            "compute_context_status: 上下文窗口状态已计算"
+        );
+
+        status
+    }
+
+    /// 返回上次计算的上下文窗口状态（供 `get_context_window_status` command）。
+    /// 若从未计算过则返回 None。
+    pub fn last_context_status(&self) -> Option<ContextWindowStatus> {
+        self.last_context_status
+            .read()
+            .expect("last_context_status lock poisoned")
+            .clone()
+    }
+
     // ── 0.13.3 Skill 集成 ──────────────────────────────────────────────────
 
     /// 解析用户消息中的 Skill 触发，返回（实际发送给 AI 的消息, 触发的 Skill 列表）。
@@ -732,6 +865,13 @@ impl ChatService {
     /// 供设置页「刷新」按钮和配置变更后调用。
     pub fn refresh_skills(&self, enabled_sources: &[crate::domain::ai::skill::SkillSource]) {
         self.skill_registry.scan(enabled_sources);
+    }
+
+    /// 0.13.6: 更新被禁用的 Skill 列表。
+    ///
+    /// 供 `set_skill_enabled` command 调用——前端切换 Skill 复选框后立即生效。
+    pub fn update_skill_disabled(&self, disabled_skills: Vec<String>) {
+        self.skill_registry.set_disabled_skills(disabled_skills);
     }
 
     /// 返回 SkillRegistry 的引用（供 command 层 list_skills 调用）。

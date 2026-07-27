@@ -353,6 +353,35 @@ export function getMcpToolNames() {
   return invoke("get_mcp_tool_names");
 }
 
+// ── 0.13.6 上下文窗口状态 ──────────────────────────────────────────
+
+/**
+ * 获取当前上下文窗口状态（前端初始化时调用）。
+ * @returns {Promise<{estimated_tokens: number, context_limit: number, usage_percent: number, last_compressed: boolean, last_compressed_count: number, last_recall_count: number}|null>}
+ */
+export function getContextWindowStatus() {
+  return invoke("get_context_window_status");
+}
+
+/**
+ * 强制压缩当前对话的上下文窗口。
+ * @param {string} conversationId
+ * @returns {Promise<{estimated_tokens: number, context_limit: number, usage_percent: number, last_compressed: boolean, last_compressed_count: number, last_recall_count: number}>}
+ */
+export function compressContextNow(conversationId) {
+  return invoke("compress_context_now", { conversationId });
+}
+
+// ── 0.13.6 MCP tool 来源信息 ──────────────────────────────────────
+
+/**
+ * 获取 MCP tool 来源信息（含 server 名 + transport 类型）。
+ * @returns {Promise<Array<{tool_name: string, server_name: string, transport: string}>|null>}
+ */
+export function getMcpToolSources() {
+  return invoke("get_mcp_tool_sources");
+}
+
 // ── Events ───────────────────────────────────────
 
 /**
@@ -380,6 +409,24 @@ export function listenChatConfirm(handler) {
  */
 export function listenChatTitleUpdated(handler) {
   return listen("blink://chat-title-updated", handler);
+}
+
+/**
+ * 监听上下文窗口状态更新事件（0.13.6）。
+ * @param {(event: {payload: {estimated_tokens: number, context_limit: number, usage_percent: number, last_compressed: boolean, last_compressed_count: number, last_recall_count: number}}) => void} handler
+ * @returns {Promise<() => void>} unsubscribe
+ */
+export function listenContextStatus(handler) {
+  return listen("blink://chat-context-status", handler);
+}
+
+/**
+ * 监听 Skill 激活事件（0.13.6）。
+ * @param {(event: {payload: {request_id: number, skills: Array<{name: string, source: string, trigger_type: string}>}}) => void} handler
+ * @returns {Promise<() => void>} unsubscribe
+ */
+export function listenSkillActivated(handler) {
+  return listen("blink://chat-skill-activated", handler);
 }
 
 // ── Voice Events（0.12.2 §4.3）─────────────────

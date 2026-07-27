@@ -38,6 +38,8 @@ chrono = "0.4.45"
 dirs-next = "2.0"
 evalexpr = "13.1.0"
 futures = "0.3"
+# http: HeaderName/HeaderValue 类型（rmcp Streamable HTTP transport 需要，已作为传递依赖在树中）
+http = "1"
 # 链接期自动注册（0.9.7 Capability 层）——新增能力只需 `inventory::submit!`，注册表零改动
 inventory = "0.3"
 nucleo = "0.5.0"
@@ -49,9 +51,13 @@ regex = "1.11"
 # default features 已含 derive+reqwest+rustls;额外加 rmcp 让 0.11 MCP schema 投影零适配。
 # test-utils 供 0.12.1 spike 验证 rig Agent API(Phase 6 后随 spike 移除)。
 rig-core = { version = "0.39", features = ["rmcp", "test-utils"] }
-# rmcp: MCP 协议 Rust 实现（rig-core 已开 client feature，这里补 transport-child-process
-# 让 0.13.0 MCP client 能拉起外部 server 子进程走 stdio JSON-RPC）。
-rmcp = { version = "1.8", features = ["client", "transport-child-process"] }
+# rmcp: MCP 协议 Rust 实现。
+# - client + transport-child-process: 0.13.0 MCP client 拉起外部 server 子进程走 stdio JSON-RPC
+# - server + transport-io: 0.13.4 MCP server 暴露 Blink 能力给外部 client（stdio 传输）
+# - transport-streamable-http-client-reqwest: 0.13.6 MCP client 支持 Streamable HTTP 远程 server
+rmcp = { version = "1.8", features = ["client", "server", "transport-child-process", "transport-io", "transport-streamable-http-client-reqwest"] }
+# clap: 命令行参数解析（0.13.5 CLI 化——blink chat/search/screenshot/mcp-server）
+clap = { version = "4.5", features = ["derive"] }
 # semver: 语义化版本比较（检查更新用），支持 pre-release / build metadata
 semver = "1.0"
 serde = { version = "1.0.228", features = ["derive"] }

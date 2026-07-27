@@ -16,6 +16,7 @@
 
 pub mod agent_provider;
 pub mod chat_service;
+pub mod cli_recognizer;
 pub mod factory;
 pub mod gating;
 pub mod memory;

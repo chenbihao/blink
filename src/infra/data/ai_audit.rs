@@ -36,6 +36,8 @@ pub struct AuditLog {
     pub model_id: String,
     /// 轮次：1 = Turn 1（首次调用），2 = Turn 2（回流后的链式调用）。
     pub turn: u8,
+    /// 调用来源（0.13.4）：`internal` = AI tool call / 用户确认执行；`mcp_external` = 外部 MCP client 调用。
+    pub caller: String,
     /// UTC 时间戳（秒）。
     pub created_at: i64,
 }
@@ -59,12 +61,35 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
             provider_kind TEXT NOT NULL DEFAULT '',
             model_id TEXT NOT NULL DEFAULT '',
             turn INTEGER NOT NULL DEFAULT 1,
+            caller TEXT NOT NULL DEFAULT 'internal',
             created_at INTEGER NOT NULL DEFAULT 0
         )",
     )
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
+
+    // 0.13.4 迁移：为已有数据库添加 caller 列
+    // SQLite 不支持 IF NOT EXISTS，"duplicate column" 错误是正常的幂等行为，其他错误需记录
+    match sqlx::query(
+        "ALTER TABLE ai_tool_audit ADD COLUMN caller TEXT NOT NULL DEFAULT 'internal'",
+    )
+    .execute(pool)
+    .await
+    {
+        Ok(_) => tracing::debug!("ai_tool_audit: caller 列迁移完成"),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("duplicate column") {
+                tracing::debug!("ai_tool_audit: caller 列已存在，跳过迁移");
+            } else {
+                tracing::warn!(
+                    error = %msg,
+                    "ai_tool_audit: caller 列迁移失败（非幂等错误，后续 INSERT 可能失败）"
+                );
+            }
+        }
+    }
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_audit_created ON ai_tool_audit(created_at)")
         .execute(pool)
@@ -79,6 +104,8 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
 ///
 /// **写入失败不返回 Err**——审计是观测层，失败只 `tracing::warn!`，不阻塞主流程。
 /// 调用方无需处理错误。
+///
+/// `caller` 参数（0.13.4）：`"internal"` = AI tool call / 用户确认执行；`"mcp_external"` = 外部 MCP client 调用。
 pub async fn save_audit_log(
     pool: &SqlitePool,
     tool_name: &str,
@@ -87,14 +114,15 @@ pub async fn save_audit_log(
     provider_kind: &str,
     model_id: &str,
     turn: u8,
+    caller: &str,
 ) {
     let arguments_str = arguments.to_string();
     let summary = truncate_summary(result_summary);
     let now = chrono::Utc::now().timestamp();
 
     let result = sqlx::query(
-        "INSERT INTO ai_tool_audit (tool_name, arguments, result_summary, provider_kind, model_id, turn, created_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO ai_tool_audit (tool_name, arguments, result_summary, provider_kind, model_id, turn, caller, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
     )
     .bind(tool_name)
     .bind(&arguments_str)
@@ -102,6 +130,7 @@ pub async fn save_audit_log(
     .bind(provider_kind)
     .bind(model_id)
     .bind(turn as i64)
+    .bind(caller)
     .bind(now)
     .execute(pool)
     .await;
@@ -131,8 +160,8 @@ pub async fn save_audit_log(
 /// 供设置页"AI 调用历史"展示。`limit` 建议 50-200，避免一次性拉太多。
 #[allow(dead_code)] // 0.12.x 设置页"AI 调用历史"面板消费
 pub async fn query_recent(pool: &SqlitePool, limit: i64) -> Vec<AuditLog> {
-    sqlx::query_as::<_, (i64, String, String, String, String, String, i64, i64)>(
-        "SELECT id, tool_name, arguments, result_summary, provider_kind, model_id, turn, created_at \
+    sqlx::query_as::<_, (i64, String, String, String, String, String, i64, String, i64)>(
+        "SELECT id, tool_name, arguments, result_summary, provider_kind, model_id, turn, caller, created_at \
          FROM ai_tool_audit ORDER BY created_at DESC LIMIT ?1",
     )
     .bind(limit)
@@ -141,7 +170,7 @@ pub async fn query_recent(pool: &SqlitePool, limit: i64) -> Vec<AuditLog> {
     .unwrap_or_default()
     .into_iter()
     .map(
-        |(id, tool_name, arguments, result_summary, provider_kind, model_id, turn, created_at)| {
+        |(id, tool_name, arguments, result_summary, provider_kind, model_id, turn, caller, created_at)| {
             AuditLog {
                 id,
                 tool_name,
@@ -150,6 +179,7 @@ pub async fn query_recent(pool: &SqlitePool, limit: i64) -> Vec<AuditLog> {
                 provider_kind,
                 model_id,
                 turn: turn as u8,
+                caller,
                 created_at,
             }
         },
@@ -286,6 +316,7 @@ mod tests {
             "openai_compatible",
             "gpt-4o-mini",
             1,
+            "internal",
         )
         .await;
 
@@ -297,6 +328,7 @@ mod tests {
             "openai_compatible",
             "gpt-4o-mini",
             2,
+            "internal",
         )
         .await;
 
@@ -328,6 +360,7 @@ mod tests {
             "openai_compatible",
             "gpt-4o-mini",
             1,
+            "internal",
         )
         .await;
 
@@ -357,6 +390,7 @@ mod tests {
                 "openai_compatible",
                 "m",
                 1,
+                "internal",
             )
             .await;
         }
@@ -393,6 +427,7 @@ mod tests {
             "openai_compatible",
             "m",
             1,
+            "internal",
         )
         .await;
         // 手动把 created_at 改到 31 天前
@@ -412,6 +447,7 @@ mod tests {
             "openai_compatible",
             "m",
             1,
+            "internal",
         )
         .await;
 
@@ -436,6 +472,7 @@ mod tests {
                 "openai_compatible",
                 "m",
                 1,
+                "internal",
             )
             .await;
         }
@@ -461,6 +498,7 @@ mod tests {
                 "openai_compatible",
                 "m",
                 1,
+                "internal",
             )
             .await;
         }
@@ -474,5 +512,106 @@ mod tests {
         let pool = setup_pool().await;
         cleanup_old(&pool).await;
         assert_eq!(count(&pool).await, 0);
+    }
+
+    // ── caller 字段测试（0.13.4）─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn caller_field_stored_and_queried() {
+        let pool = setup_pool().await;
+
+        // 写入 internal 调用
+        save_audit_log(
+            &pool,
+            "search_files",
+            &serde_json::json!({"query": "test"}),
+            "found 3 files",
+            "openai_compatible",
+            "gpt-4o-mini",
+            1,
+            "internal",
+        )
+        .await;
+
+        // 写入 mcp_external 调用
+        save_audit_log(
+            &pool,
+            "read_clipboard",
+            &serde_json::json!({}),
+            "clipboard text",
+            "",
+            "",
+            1,
+            "mcp_external",
+        )
+        .await;
+
+        let logs = query_recent(&pool, 10).await;
+        assert_eq!(logs.len(), 2);
+
+        // 倒序：后写入的在前（mcp_external）
+        assert_eq!(logs[0].tool_name, "read_clipboard");
+        assert_eq!(logs[0].caller, "mcp_external");
+
+        assert_eq!(logs[1].tool_name, "search_files");
+        assert_eq!(logs[1].caller, "internal");
+    }
+
+    #[tokio::test]
+    async fn init_db_migration_adds_caller_to_existing_table() {
+        // 模拟已有数据库（无 caller 列）
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("failed to create in-memory db");
+
+        // 创建旧版表结构（无 caller 列）
+        sqlx::query(
+            "CREATE TABLE ai_tool_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tool_name TEXT NOT NULL,
+                arguments TEXT NOT NULL DEFAULT '{}',
+                result_summary TEXT NOT NULL DEFAULT '',
+                provider_kind TEXT NOT NULL DEFAULT '',
+                model_id TEXT NOT NULL DEFAULT '',
+                turn INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create old schema table");
+
+        // 插入一条旧记录
+        sqlx::query("INSERT INTO ai_tool_audit (tool_name, arguments, result_summary, provider_kind, model_id, turn, created_at) VALUES ('old_tool', '{}', 'old', '', '', 1, 0)")
+            .execute(&pool)
+            .await
+            .expect("failed to insert old record");
+
+        // 运行 init_db（应自动迁移添加 caller 列）
+        init_db(&pool).await.expect("init_db migration failed");
+
+        // 验证旧记录的 caller 默认值
+        let logs = query_recent(&pool, 10).await;
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].tool_name, "old_tool");
+        assert_eq!(logs[0].caller, "internal");
+
+        // 验证新写入也能正常工作
+        save_audit_log(
+            &pool,
+            "new_tool",
+            &serde_json::json!({}),
+            "new",
+            "",
+            "",
+            1,
+            "mcp_external",
+        )
+        .await;
+
+        let logs = query_recent(&pool, 10).await;
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0].caller, "mcp_external");
+        assert_eq!(logs[1].caller, "internal");
     }
 }

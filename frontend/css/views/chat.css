@@ -2103,6 +2103,24 @@ body {
   color: var(--accent, #6cb6ff);
 }
 
+/* 0.13.6: MCP 工具卡片——左边框紫色 + server 名标签 */
+.chat-tool-card-mcp {
+  border-left: 3px solid color-mix(in srgb, var(--accent, #6cb6ff) 60%, transparent);
+}
+
+.chat-tool-card-server {
+  font-size: 10px;
+  color: var(--text-dim);
+  padding: 1px 4px;
+  background: var(--surface-2);
+  border-radius: 3px;
+  flex-shrink: 0;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .chat-tool-card-icon {
   width: 16px;
   height: 16px;
@@ -2225,6 +2243,13 @@ body {
 
 .chat-msg-footer .chat-token-usage {
   opacity: 0.7;
+}
+
+/* 0.13.6: 记忆召回 badge */
+.chat-recall-badge {
+  opacity: 0.7;
+  font-size: 11px;
+  flex-shrink: 0;
 }
 
 /* ── 确认卡片 ──────────────────────────────────── */
@@ -2418,6 +2443,96 @@ body {
   color: var(--text-faint);
   white-space: nowrap;
   user-select: none;
+}
+
+/* ── 0.13.6: 上下文窗口占用指示器 ─────────── */
+
+.chat-context-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  cursor: default;
+  user-select: none;
+}
+
+.context-ring {
+  width: 20px;
+  height: 20px;
+  vertical-align: middle;
+}
+
+.context-ring circle {
+  transition: stroke-dashoffset 0.3s ease, stroke 0.3s ease;
+}
+
+.context-ring-percent {
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--text-faint);
+  font-family: ui-monospace, Consolas, monospace;
+}
+
+.context-compressed {
+  font-size: 10px;
+  color: var(--warning);
+  margin-left: 1px;
+}
+
+/* 0.13.6: 主动压缩提示条 */
+.chat-context-warning {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-2xs) var(--space-sm);
+  margin-bottom: var(--space-2xs);
+  background: var(--warning-bg, rgba(255, 193, 7, 0.1));
+  border: 1px solid var(--warning, #ffc107);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text);
+}
+
+.chat-context-warning-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.chat-context-warning-text {
+  flex: 1;
+}
+
+.chat-context-warning-actions {
+  display: flex;
+  gap: var(--space-2xs);
+}
+
+.chat-context-warning-btn {
+  padding: 2px 8px;
+  font-size: 11px;
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  transition: background var(--transition-base);
+}
+
+.chat-context-warning-btn:hover {
+  background: var(--surface-2);
+}
+
+.chat-context-warning-close {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  padding: 2px;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.chat-context-warning-close:hover {
+  color: var(--text);
 }
 
 /* ── 深度思考按钮（悬浮在输入框内） ─────────── */

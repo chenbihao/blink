@@ -259,6 +259,7 @@ pub async fn confirm_ai_action(
                 &provider_kind_str,
                 &model_id_str,
                 0,
+                "internal",
             )
             .await;
         }
@@ -1755,8 +1756,7 @@ pub async fn get_storage_info(app: tauri::AppHandle) -> serde_json::Value {
     let icon_cache_count = crate::infra::data::icon_cache::count(&pools.cache).await;
 
     // 文件大小
-    let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-    let data_dir = std::path::PathBuf::from(&appdata).join("blink");
+    let data_dir = crate::infra::utils::paths::app_data_dir();
 
     // P2.7: 迁移失败标记（若有，前端存储面板显示警告）
     // 优化：如果旧 blink.db 已不存在，说明迁移已成功完成，migration_failed 是残留标记 → 清除
@@ -1841,8 +1841,7 @@ pub async fn clear_ai_audit(app: tauri::AppHandle) -> Result<(), String> {
 /// 调 `ShellExecuteW("explorer", %APPDATA%\blink)` 打开数据目录。
 #[tauri::command]
 pub fn open_data_folder() -> Result<(), String> {
-    let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-    let data_dir = std::path::PathBuf::from(&appdata).join("blink");
+    let data_dir = crate::infra::utils::paths::app_data_dir();
     // 目录不存在时先创建，避免 explorer 打开"文档"等默认位置
     if !data_dir.exists() {
         if let Err(e) = std::fs::create_dir_all(&data_dir) {
@@ -1874,8 +1873,7 @@ pub async fn retry_migration(app: tauri::AppHandle) -> Result<(), String> {
     tracing::info!("已清除 migration_failed 标记");
 
     // 检查旧库是否仍存在
-    let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-    let data_dir = std::path::PathBuf::from(&appdata).join("blink");
+    let data_dir = crate::infra::utils::paths::app_data_dir();
     let legacy_path = data_dir.join("blink.db");
 
     if legacy_path.exists() {
@@ -5623,6 +5621,105 @@ pub async fn set_mcp_server_disabled_tools(
     Ok(())
 }
 
+/// 探测指定 agent 的 MCP 配置文件路径（0.13.6）。
+///
+/// 返回 None 表示文件不存在（该 agent 可能未安装）。
+#[tauri::command]
+pub async fn detect_mcp_config_file(
+    source: crate::domain::mcp::McpImportSource,
+) -> Result<Option<String>, String> {
+    Ok(crate::domain::mcp::import::detect_config_file_path(source))
+}
+
+/// 从指定 agent 的配置文件读取并解析 MCP 配置（0.13.6）。
+///
+/// 返回待导入的 server 列表（不含去重——前端展示时标注「已存在」）。
+#[tauri::command]
+pub async fn import_mcp_from_agent(
+    source: crate::domain::mcp::McpImportSource,
+) -> Result<Vec<crate::domain::mcp::McpServerConfig>, String> {
+    let path = crate::domain::mcp::import::detect_config_file_path(source)
+        .ok_or_else(|| format!("未找到 {} 的配置文件", source.display_name()))?;
+    let json = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| format!("读取配置文件失败: {e}"))?;
+    crate::domain::mcp::import::parse_external_mcp_config(source, &json)
+}
+
+/// 解析用户粘贴的 JSON 配置（0.13.6）。
+#[tauri::command]
+pub async fn import_mcp_from_json(
+    json: String,
+) -> Result<Vec<crate::domain::mcp::McpServerConfig>, String> {
+    crate::domain::mcp::import::parse_external_mcp_config(crate::domain::mcp::McpImportSource::Json, &json)
+}
+
+/// 批量导入 server 配置（0.13.6）。
+///
+/// `overwrite=true` 覆盖同名，`false` 跳过同名。
+/// 只写配置，不拉起子进程——用户在列表页手动「启动」。
+#[tauri::command]
+pub async fn batch_import_mcp_servers(
+    app: tauri::AppHandle,
+    configs: Vec<crate::domain::mcp::McpServerConfig>,
+    overwrite: bool,
+) -> Result<crate::domain::mcp::ImportResult, String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    let existing = crate::domain::mcp::McpServerConfigStore::load_all(&pools.config)
+        .await
+        .map_err(|e| e.to_string())?;
+    let existing_names: std::collections::HashSet<&str> =
+        existing.iter().map(|c| c.name.as_str()).collect();
+
+    let mut imported = 0usize;
+    let mut skipped = 0usize;
+    let mut overwritten = 0usize;
+    let mut names = Vec::new();
+
+    for config in configs {
+        let is_existing = existing_names.contains(config.name.as_str());
+        if is_existing && !overwrite {
+            skipped += 1;
+            continue;
+        }
+        if is_existing {
+            overwritten += 1;
+        } else {
+            imported += 1;
+        }
+        names.push(config.name.clone());
+        crate::domain::mcp::McpServerConfigStore::upsert(&pools.config, config)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(crate::domain::mcp::ImportResult {
+        imported,
+        skipped,
+        overwritten,
+        names,
+    })
+}
+
+/// 批量设置 MCP server 的 enabled 状态（0.13.6）。
+#[tauri::command]
+pub async fn batch_set_mcp_enabled(
+    app: tauri::AppHandle,
+    names: Vec<String>,
+    enabled: bool,
+) -> Result<(), String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    for name in &names {
+        let _ = crate::domain::mcp::McpServerConfigStore::set_enabled(
+            &pools.config,
+            name,
+            enabled,
+        )
+        .await;
+    }
+    Ok(())
+}
+
 /// 获取对话窗口 tool 池规模（内置 + MCP，供前端显示）。
 #[tauri::command]
 pub async fn get_mcp_tool_pool_size(
@@ -5657,21 +5754,111 @@ pub async fn get_mcp_tool_names(
     manager.get_all_tool_names().await
 }
 
+/// 0.13.6: 获取 MCP tool 来源信息（含 server 名 + transport 类型）。
+///
+/// 供前端工具卡片增强——显示 MCP 工具来自哪个 server、用哪种协议。
+#[tauri::command]
+pub async fn get_mcp_tool_sources(
+    app: tauri::AppHandle,
+) -> Vec<crate::domain::mcp::client::McpToolSource> {
+    let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
+    manager.get_tool_sources().await
+}
+
+// ── 0.13.6 上下文窗口状态 ──────────────────────────────────────────────────
+
+/// 获取当前上下文窗口状态（0.13.6）。
+///
+/// 返回上次 `compute_context_status()` 计算的缓存结果。若从未计算过则返回 null。
+/// 前端在聊天窗口加载时调用此 command 获取初始状态。
+#[tauri::command]
+pub async fn get_context_window_status(
+    app: tauri::AppHandle,
+) -> Result<Option<crate::domain::ai::chat_service::ContextWindowStatus>, String> {
+    use tauri::Manager;
+    let chat = app
+        .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
+        .ok_or("ChatService 未注册")?;
+    Ok(chat.last_context_status())
+}
+
+/// 强制压缩当前对话的上下文窗口（0.13.6）。
+///
+/// 调用 `memory.load_with_stats()` 走一遍 token_aware_truncate 流程，
+/// 然后返回更新后的上下文窗口状态。
+#[tauri::command]
+pub async fn compress_context_now(
+    app: tauri::AppHandle,
+    conversation_id: String,
+) -> Result<crate::domain::ai::chat_service::ContextWindowStatus, String> {
+    use tauri::Manager;
+    let chat = app
+        .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
+        .ok_or("ChatService 未注册")?;
+    let status = chat.compute_context_status(&conversation_id).await;
+    let _ = app.emit_to("chat", "blink://chat-context-status", &status);
+    Ok(status)
+}
+
+// ── 0.13.4 MCP server（暴露 Blink 能力）─────────────────────────────────
+
+/// 加载 MCP server 配置（总开关 + 暴露能力清单）。
+#[tauri::command]
+pub async fn get_mcp_server_config(
+    app: tauri::AppHandle,
+) -> Result<crate::domain::mcp::McpServerModeConfig, String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    crate::domain::mcp::McpServerModeConfigStore::load(&pools.config)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// 保存 MCP server 配置。
+#[tauri::command]
+pub async fn set_mcp_server_config(
+    app: tauri::AppHandle,
+    config: crate::domain::mcp::McpServerModeConfig,
+) -> Result<(), String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    crate::domain::mcp::McpServerModeConfigStore::save(&pools.config, &config)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// 列出所有可暴露的 Capability（设置页勾选用）。
+/// 返回 (id, description, sensitive) 三元组。
+#[tauri::command]
+pub async fn list_exposable_capabilities(
+    app: tauri::AppHandle,
+) -> Vec<serde_json::Value> {
+    let cap_registry = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
+    cap_registry
+        .list()
+        .into_iter()
+        .map(|s| {
+            serde_json::json!({
+                "id": s.name,
+                "description": s.description,
+                "sensitive": s.sensitive,
+            })
+        })
+        .collect()
+}
+
 // ── 0.13.3 Skill 约定式 ──────────────────────────────────────────────────────
 
 /// 列出所有已发现的 Skill 条目（设置页展示用）。
 ///
-/// 返回 `Vec<SkillEntry>` 的序列化 JSON（含 name / description / source / triggers，
-/// 不含 `full_content` 和 `dir_path`——`#[serde(skip)]` 字段不序列化）。
+/// 0.13.6: 返回带 `disabled` 标记的 SkillEntryWithStatus，前端用此渲染复选框。
 #[tauri::command]
 pub async fn list_skills(
     app: tauri::AppHandle,
-) -> Vec<crate::domain::ai::skill::SkillEntry> {
+) -> Vec<crate::domain::ai::skill::SkillEntryWithStatus> {
     use tauri::Manager;
     let chat = app
         .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>();
     match chat {
-        Some(cs) => cs.skill_registry().all(),
+        Some(cs) => cs.skill_registry().all_with_status(),
         None => Vec::new(),
     }
 }
@@ -5700,6 +5887,8 @@ pub async fn refresh_skills(
         .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
         .ok_or("ChatService 未初始化")?;
     chat.refresh_skills(&sources);
+    // 0.13.6: 同步 disabled_skills
+    chat.update_skill_disabled(ai_config.chat_config.skill_config.disabled_skills.clone());
     let count = cs_count_skills(&chat);
     tracing::info!(count, "Skill 注册表已手动刷新");
     Ok(count)
@@ -5739,6 +5928,180 @@ pub async fn open_skill_dir(source: String) -> Result<(), String> {
         .spawn()
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// 0.13.6: 在资源管理器中打开指定目录路径。
+///
+/// 供设置页 Skill 卡片「打开目录」按钮调用——打开单个 Skill 所在的目录。
+#[tauri::command]
+pub async fn open_dir_in_explorer(path: String) -> Result<(), String> {
+    let dir = std::path::Path::new(&path);
+    if !dir.exists() {
+        return Err(format!("目录不存在: {path}"));
+    }
+    std::process::Command::new("explorer.exe")
+        .arg(dir)
+        .spawn()
+        .map_err(|e| format!("打开资源管理器失败: {e}"))?;
+    Ok(())
+}
+
+/// 0.13.6: 导入 Skill 到 Blink 目录。
+///
+/// `source_path` = 源 SKILL.md 所在目录
+/// `mode` = "symlink" | "copy"
+/// 导入后在 `%APPDATA%\blink\skills\<name>\` 创建软链接或副本。
+/// 软链接失败时自动降级为 Copy + 提示。
+#[tauri::command]
+pub async fn import_skill(
+    source_path: String,
+    mode: String,
+) -> Result<String, String> {
+    use crate::domain::ai::skill::SkillSource;
+
+    let source_dir = std::path::Path::new(&source_path);
+    if !source_dir.is_dir() {
+        return Err(format!("源目录不存在: {source_path}"));
+    }
+
+    // 从目录名提取 Skill 名称
+    let skill_name = source_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("无法从路径提取 Skill 名称")?;
+
+    // 目标目录：%APPDATA%\blink\skills\<name>\
+    let target_dir = SkillSource::Blink
+        .directory()
+        .ok_or("无法解析 Blink Skill 目录路径")?
+        .join(skill_name);
+
+    // 如果目标已存在，返回错误
+    if target_dir.exists() {
+        return Err(format!(
+            "目标目录已存在: {}（请先删除或重命名）",
+            target_dir.display()
+        ));
+    }
+
+    // 确保父目录存在
+    if let Some(parent) = target_dir.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建父目录失败: {e}"))?;
+    }
+
+    match mode.as_str() {
+        "symlink" => {
+            // 尝试创建符号链接
+            match std::os::windows::fs::symlink_dir(&source_dir, &target_dir) {
+                Ok(()) => {
+                    tracing::info!(
+                        skill = %skill_name,
+                        source = %source_dir.display(),
+                        target = %target_dir.display(),
+                        "Skill 已通过软链接导入"
+                    );
+                    Ok(format!(
+                        "Skill '{skill_name}' 已通过软链接导入到 Blink 目录。\n双向同步：源目录变更自动反映。"
+                    ))
+                }
+                Err(e) => {
+                    // 降级为 Copy
+                    tracing::warn!(
+                        error = %e,
+                        "软链接创建失败，降级为 Copy"
+                    );
+                    copy_dir_recursive(source_dir, &target_dir)?;
+                    Ok(format!(
+                        "软链接创建失败（{e}）。已降级为复制。\n如需软链接，请在 Windows 设置 → 隐私和安全性 → 开发者选项 中开启开发者模式。\nSkill '{skill_name}' 已通过复制导入到 Blink 目录。"
+                    ))
+                }
+            }
+        }
+        "copy" | _ => {
+            copy_dir_recursive(source_dir, &target_dir)?;
+            tracing::info!(
+                skill = %skill_name,
+                source = %source_dir.display(),
+                target = %target_dir.display(),
+                "Skill 已通过复制导入"
+            );
+            Ok(format!(
+                "Skill '{skill_name}' 已通过复制导入到 Blink 目录。"
+            ))
+        }
+    }
+}
+
+/// 递归复制目录。
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(dst).map_err(|e| format!("创建目录失败: {e}"))?;
+    for entry in std::fs::read_dir(src).map_err(|e| format!("读取源目录失败: {e}"))? {
+        let entry = entry.map_err(|e| format!("读取目录条目失败: {e}"))?;
+        let path = entry.path();
+        let target = dst.join(entry.file_name());
+        if path.is_dir() {
+            copy_dir_recursive(&path, &target)?;
+        } else {
+            std::fs::copy(&path, &target).map_err(|e| format!("复制文件失败: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// 0.13.6: 设置单个 Skill 的启用/禁用状态。
+///
+/// `skill_id` 格式：`name@source`（如 `"rust-debug@claude"`）。
+/// 更新 AIConfig.skill_config.disabled_skills 并同步到运行时 SkillRegistry。
+#[tauri::command]
+pub async fn set_skill_enabled(
+    app: tauri::AppHandle,
+    skill_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    use tauri::Manager;
+    let pools = app.state::<crate::infra::data::DbPools>();
+    let mut ai_config = crate::app::config::ConfigStore::get::<crate::app::ai_config::AIConfig>(
+        &pools.config,
+    )
+    .await;
+
+    // 更新 disabled_skills
+    let mut disabled = ai_config.chat_config.skill_config.disabled_skills.clone();
+    if enabled {
+        disabled.retain(|id| id != &skill_id);
+    } else if !disabled.contains(&skill_id) {
+        disabled.push(skill_id);
+    }
+    ai_config.chat_config.skill_config.disabled_skills = disabled;
+
+    // 持久化
+    crate::app::config::ConfigStore::set(&pools.config, &ai_config)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 同步到运行时
+    if let Some(chat) =
+        app.try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
+    {
+        chat.update_skill_disabled(
+            ai_config.chat_config.skill_config.disabled_skills.clone(),
+        );
+    }
+
+    Ok(())
+}
+
+// ── 0.13.6: CLI 能力识别 ──────────────────────────────────────────────────────
+
+/// 0.13.6: CLI 能力识别——从 `--help` 输出生成 SKILL.md 模板。
+///
+/// 纯文本解析，零 LLM 依赖。生成的模板供用户 review 编辑。
+/// 识别后保存到 `%APPDATA%\blink\skills\<tool-name>\SKILL.md`。
+#[tauri::command]
+pub async fn recognize_cli_tool(
+    cli_path: String,
+) -> Result<crate::domain::ai::cli_recognizer::CliRecognitionResult, String> {
+    crate::domain::ai::cli_recognizer::recognize_cli(&cli_path).await
 }
 
 #[cfg(test)]

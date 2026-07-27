@@ -16,6 +16,7 @@
 import { invoke, confirmDialog } from "../../tauri.js";
 import { t, onLangChange } from "../../i18n/index.js";
 import { saveConfig } from "../../config-keys.js";
+import { iconHTML } from "../../icon.js";
 
 /** AI 提供商类型标签 */
 const AI_KIND_LABEL = {
@@ -256,8 +257,8 @@ function renderAIProviders() {
                   </label>
                 </td>
                 <td class="ai-models-table-actions">
-                  <button class="ai-model-edit-btn" data-model-id="${escapeAttr(m.id)}" data-provider-id="${escapeAttr(p.id)}" title="${escapeAttr(t("ai.model.edit"))}">✎</button>
-                  <button class="ai-model-delete" data-model-id="${escapeAttr(m.id)}" data-provider-id="${escapeAttr(p.id)}" title="${escapeAttr(t("ai.model.delete"))}">✕</button>
+                  <button class="ai-model-edit-btn" data-model-id="${escapeAttr(m.id)}" data-provider-id="${escapeAttr(p.id)}" title="${escapeAttr(t("ai.model.edit"))}">${iconHTML("pencil")}</button>
+                  <button class="ai-model-delete" data-model-id="${escapeAttr(m.id)}" data-provider-id="${escapeAttr(p.id)}" title="${escapeAttr(t("ai.model.delete"))}">${iconHTML("x")}</button>
                 </td>
               </tr>`;
             }).join("")}</tbody>
@@ -276,8 +277,8 @@ function renderAIProviders() {
               <div class="ai-provider-meta">${escapeHtml(kindLabel)} · ${escapeHtml(modelSummary || "(no model)")}</div>
             </div>
             <span class="ai-provider-status ${statusCls}">${escapeHtml(statusText)}</span>
-            <button class="ai-provider-edit" data-provider-id="${escapeAttr(p.id)}" title="${escapeAttr(t("ai.provider.edit"))}">✎</button>
-            <button class="ai-provider-delete" data-provider-id="${escapeAttr(p.id)}" title="${escapeAttr(t("ai.provider.delete"))}">✕</button>
+<button class="ai-provider-edit" data-provider-id="${escapeAttr(p.id)}" title="${escapeAttr(t("ai.provider.edit"))}">${iconHTML("pencil")}</button>
+<button class="ai-provider-delete" data-provider-id="${escapeAttr(p.id)}" title="${escapeAttr(t("ai.provider.delete"))}">${iconHTML("x")}</button>
           </div>
           <div class="ai-provider-models" style="display:none;">${modelsTable}</div>
         </div>`;
@@ -648,7 +649,7 @@ function renderCustomParams() {
     return `<div class="ai-model-custom-param-row" data-idx="${idx}">
       <input type="text" class="ai-model-custom-param-key" data-idx="${idx}" value="${escapeAttr(p.key || "")}" placeholder="${escapeAttr(t("ai.model_modal.custom_params.key.ph"))}" />
       <input type="text" class="ai-model-custom-param-val" data-idx="${idx}" value="${escapeAttr(valDisplay)}" placeholder="${escapeAttr(t("ai.model_modal.custom_params.val.ph"))}" />
-      <button type="button" class="ai-model-custom-param-del" data-idx="${idx}" title="${escapeAttr(t("common.delete"))}">✕</button>
+      <button type="button" class="ai-model-custom-param-del" data-idx="${idx}" title="${escapeAttr(t("common.delete"))}">${iconHTML("x")}</button>
     </div>`;
   }).join("");
   container.querySelectorAll(".ai-model-custom-param-key").forEach((el) => {
@@ -1342,7 +1343,21 @@ $("ai-skill-refresh")?.addEventListener("click", async () => {
   btn && (btn.disabled = false);
 });
 
-// 0.13.2: FTS5 召回配置事件绑定
+// 0.13.6: Skill 导入 modal 事件绑定
+$("skill-import-cancel")?.addEventListener("click", () => {
+  const overlay = $("skill-import-overlay");
+  if (overlay) overlay.style.display = "none";
+  const errorEl = $("skill-import-error");
+  if (errorEl) errorEl.textContent = "";
+});
+$("skill-import-symlink")?.addEventListener("click", () => doSkillImport("symlink"));
+$("skill-import-copy")?.addEventListener("click", () => doSkillImport("copy"));
+// 点击 overlay 背景关闭
+$("skill-import-overlay")?.addEventListener("click", (e) => {
+  if (e.target.id === "skill-import-overlay") {
+    e.target.style.display = "none";
+  }
+});
 $("ai-memory-recall-enabled")?.addEventListener("change", (e) => {
     currentAIConfig.chat_config = currentAIConfig.chat_config || {};
     currentAIConfig.chat_config.memory_config = currentAIConfig.chat_config.memory_config || {};
@@ -2155,7 +2170,7 @@ function renderProviderModelTags() {
   container.innerHTML = _providerSelectedModels.map((m) =>
     `<span class="ai-provider-model-tag">
       ${escapeHtml(m)}
-      <button type="button" class="ai-provider-model-tag-remove" data-model-id="${escapeAttr(m)}">✕</button>
+      <button type="button" class="ai-provider-model-tag-remove" data-model-id="${escapeAttr(m)}">${iconHTML("x")}</button>
     </span>`
   ).join("");
   container.querySelectorAll(".ai-provider-model-tag-remove").forEach((btn) => {
@@ -2183,10 +2198,13 @@ function escapeAttr(s) {
 // ── 0.13.3 Skill 列表加载 ─────────────────────────────────────────────────────
 
 /**
- * 加载并渲染已发现的 Skill 列表。
+ * 加载并渲染已发现的 Skill 列表（0.13.6 增强版）。
  *
- * 调用 `list_skills` 命令获取后端 SkillRegistry 中所有条目，渲染为卡片列表。
- * 每个 Skill 卡片展示：名称、来源徽章、描述、触发标签。
+ * 每个 Skill 卡片展示：
+ * - 复选框（启用/禁用单个 Skill）
+ * - 名称、来源徽章、触发标签
+ * - 描述、关键词
+ * - 操作按钮：[导入到 Blink]（非 Blink 来源）/ [打开目录]
  */
 async function loadSkillList() {
   const container = document.getElementById("ai-skill-list");
@@ -2207,19 +2225,187 @@ async function loadSkillList() {
       const kwList = s.triggers?.keywords?.length
         ? `<span class="skill-keywords">${s.triggers.keywords.map((k) => escapeHtml(k)).join(", ")}</span>`
         : "";
+      const skillId = `${s.name}@${s.source}`;
+      const isChecked = !s.disabled ? "checked" : "";
+      // 非 Blink 来源显示导入按钮
+      const importBtn = s.source !== "blink"
+        ? `<button class="btn btn-icon-sm skill-import-btn" data-dir="${escapeAttr(s.dir)}" data-name="${escapeAttr(s.name)}" title="导入到 Blink 目录">${iconHTML("copy")}</button>`
+        : "";
       return `
-        <div class="skill-item">
+        <div class="skill-item${s.disabled ? " skill-item-disabled" : ""}">
           <div class="skill-item-header">
+            <label class="checkbox skill-toggle" title="启用/禁用此 Skill">
+              <input type="checkbox" class="skill-toggle-input" data-skill-id="${escapeAttr(skillId)}" ${isChecked} />
+              <span class="checkmark"></span>
+            </label>
             <span class="skill-item-name">${escapeHtml(s.name)}</span>
             <span class="skill-badge skill-badge-source">${sourceLabel}</span>
             ${triggerBadge}
+            <div class="skill-item-actions">
+              ${importBtn}
+              <button class="btn btn-icon-sm skill-open-skill-dir" data-dir="${escapeAttr(s.dir)}" title="打开目录">${iconHTML("folder-open")}</button>
+            </div>
           </div>
           <div class="skill-item-desc">${escapeHtml(s.description)}</div>
           ${kwList ? `<div class="skill-item-keywords">${kwList}</div>` : ""}
         </div>`;
     }).join("");
+
+    // 0.13.6: 事件绑定——复选框切换
+    container.querySelectorAll(".skill-toggle-input").forEach((cb) => {
+      cb.addEventListener("change", async (e) => {
+        const skillId = e.target.dataset.skillId;
+        const enabled = e.target.checked;
+        try {
+          await invoke("set_skill_enabled", { skillId, enabled });
+          // 更新 UI 状态
+          const item = e.target.closest(".skill-item");
+          if (item) item.classList.toggle("skill-item-disabled", !enabled);
+        } catch (err) {
+          console.error("set_skill_enabled failed:", err);
+          // 回滚
+          e.target.checked = !enabled;
+          const item = e.target.closest(".skill-item");
+          if (item) item.classList.toggle("skill-item-disabled", enabled);
+        }
+      });
+    });
+
+    // 0.13.6: 事件绑定——导入到 Blink
+    container.querySelectorAll(".skill-import-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        showSkillImportModal(btn.dataset.dir, btn.dataset.name);
+      });
+    });
+
+    // 0.13.6: 事件绑定——打开 Skill 目录
+    container.querySelectorAll(".skill-open-skill-dir").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const dir = btn.dataset.dir;
+        if (!dir) return;
+        try {
+          // 用 explorer.exe 打开指定目录
+          await invoke("open_dir_in_explorer", { path: dir });
+        } catch (e) {
+          console.error("open skill dir failed:", e);
+        }
+      });
+    });
   } catch (e) {
     container.innerHTML = `<span class="skill-empty-hint">${escapeHtml(e)}</span>`;
     console.error("loadSkillList failed:", e);
   }
 }
+
+/**
+ * 0.13.6: 显示 Skill 导入模式选择 modal。
+ */
+function showSkillImportModal(dir, name) {
+  const overlay = document.getElementById("skill-import-overlay");
+  if (!overlay) return;
+  const nameEl = document.getElementById("skill-import-name");
+  if (nameEl) nameEl.textContent = name;
+  overlay.dataset.dir = dir;
+  overlay.style.display = "flex";
+}
+
+/**
+ * 0.13.6: 执行 Skill 导入。
+ */
+async function doSkillImport(mode) {
+  const overlay = document.getElementById("skill-import-overlay");
+  if (!overlay) return;
+  const dir = overlay.dataset.dir;
+  if (!dir) return;
+  const errorEl = document.getElementById("skill-import-error");
+  if (errorEl) errorEl.textContent = "";
+  try {
+    const msg = await invoke("import_skill", { sourcePath: dir, mode });
+    // 导入成功
+    overlay.style.display = "none";
+    // 刷新 Skill 列表
+    await invoke("refresh_skills");
+    await loadSkillList();
+    // 显示成功消息
+    const hint = document.getElementById("skill-import-hint");
+    if (hint) {
+      hint.textContent = msg;
+      hint.style.display = "block";
+      setTimeout(() => { hint.style.display = "none"; }, 5000);
+    }
+  } catch (e) {
+    if (errorEl) errorEl.textContent = String(e);
+    console.error("import_skill failed:", e);
+  }
+}
+
+// ── 0.13.6: CLI 能力识别 ───────────────────────────────────────────────────
+
+/**
+ * CLI 能力识别事件绑定。
+ * 点击「识别」→ 调后端 recognize_cli_tool → 展示结果预览。
+ */
+(() => {
+  const $ = (id) => document.getElementById(id);
+
+$("cli-recognizer-btn")?.addEventListener("click", async () => {
+  const input = $("cli-recognizer-input");
+  if (!input) return;
+  const cliPath = input.value.trim();
+  if (!cliPath) {
+    input.focus();
+    return;
+  }
+
+  const errorEl = $("cli-recognizer-error");
+  const resultEl = $("cli-recognizer-result");
+  const btn = $("cli-recognizer-btn");
+  if (errorEl) errorEl.textContent = "";
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "识别中…";
+  }
+
+  try {
+    const result = await invoke("recognize_cli_tool", { cliPath });
+
+    // 展示结果
+    if (resultEl) resultEl.style.display = "";
+    const nameEl = $("cli-recognizer-tool-name");
+    if (nameEl) nameEl.textContent = `${result.tool_name}（${result.subcommands.length} 子命令, ${result.options.length} 选项）`;
+
+    const previewEl = $("cli-recognizer-preview");
+    if (previewEl) {
+      // 展示生成的 SKILL.md 全文 + 保存路径
+      previewEl.textContent = result.skill_md_content;
+    }
+
+    // 自动刷新 Skill 列表（新 Skill 已保存到 blink 目录）
+    await invoke("refresh_skills").catch(() => {});
+    await loadSkillList();
+  } catch (e) {
+    if (errorEl) errorEl.textContent = String(e);
+    if (resultEl) resultEl.style.display = "none";
+    console.error("recognize_cli_tool failed:", e);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "识别";
+    }
+  }
+});
+
+// 关闭结果
+$("cli-recognizer-dismiss")?.addEventListener("click", () => {
+  const resultEl = $("cli-recognizer-result");
+  if (resultEl) resultEl.style.display = "none";
+});
+
+// Enter 键触发识别
+$("cli-recognizer-input")?.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    $("cli-recognizer-btn")?.click();
+  }
+});
+})();

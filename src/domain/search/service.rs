@@ -2146,6 +2146,9 @@ fn truncate_summary_for_audit(s: &str) -> String {
 }
 
 /// 写审计日志（封装 `ai_audit::save_audit_log`，不阻塞主流程）。
+///
+/// `caller` 固定为 `"internal"`——此函数仅用于 AI tool call / 用户确认执行的审计。
+/// 外部 MCP client 调用的审计走 `BlinkMcpServer` 直接调 `save_audit_log`（caller = "mcp_external"）。
 async fn write_audit(
     pool: &SqlitePool,
     tool_name: &str,
@@ -2163,6 +2166,7 @@ async fn write_audit(
         provider_kind,
         model_id,
         turn,
+        "internal",
     )
     .await;
 }

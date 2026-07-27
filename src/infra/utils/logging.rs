@@ -110,8 +110,7 @@ pub fn update_ai_verbose_log(verbose: bool) {
 
 /// 日志目录：%APPDATA%\blink\logs
 pub fn log_dir() -> PathBuf {
-    let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(appdata).join("blink").join("logs")
+    crate::infra::utils::paths::logs_dir()
 }
 
 /// 当天日志文件路径（tracing-appender daily 格式：blink.log.YYYY-MM-DD）。

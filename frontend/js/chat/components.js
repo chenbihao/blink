@@ -6,7 +6,7 @@
 
 import { renderMarkdown, highlightCodeBlocks } from "./renderer.js";
 import { escapeText } from "./utils.js";
-import { isMcpTool } from "./state.js";
+import { isMcpTool, getMcpToolSource } from "./state.js";
 
 /** @type {HTMLElement} 消息容器 */
 let messagesEl = null;
@@ -389,7 +389,9 @@ function renderThinkingBlock(text, collapsed) {
 export function renderToolStatus(toolName, args, opts = {}) {
   if (!messagesEl) return null;
   const el = document.createElement("div");
-  el.className = "chat-tool-card";
+  // 0.13.6: MCP 工具卡片左边框着色
+  const mcpSource = getMcpToolSource(toolName);
+  el.className = mcpSource ? "chat-tool-card chat-tool-card-mcp" : "chat-tool-card";
   if (!opts.skipTiming) {
     el.dataset.startTime = Date.now(); // 0.12.7：记录开始时间，finalize 时算耗时
   }
@@ -401,7 +403,15 @@ export function renderToolStatus(toolName, args, opts = {}) {
   const header = document.createElement("div");
   header.className = "chat-tool-card-header";
   // 0.13.0：MCP 来源标记——tool 名在 MCP tool 名称集合中时显示 (MCP) 徽章
-  const sourceBadge = isMcpTool(toolName) ? '<span class="chat-tool-card-source mcp">MCP</span>' : "";
+  // 0.13.6: 增强——追加 server 名 + transport tooltip
+  let sourceBadge = "";
+  if (mcpSource) {
+    const transportTitle = mcpSource.transport === "http" ? "HTTP" : "stdio";
+    sourceBadge = `<span class="chat-tool-card-source mcp">MCP</span>`
+      + `<span class="chat-tool-card-server" title="${transportTitle}">${escapeText(mcpSource.server_name)}</span>`;
+  } else if (isMcpTool(toolName)) {
+    sourceBadge = '<span class="chat-tool-card-source mcp">MCP</span>';
+  }
   header.innerHTML = `
     <div class="chat-tool-card-spinner"></div>
     <span class="chat-tool-card-name">${escapeText(toolName)}</span>
@@ -557,6 +567,31 @@ export function renderTokenUsage(el, inputTokens, outputTokens) {
     footer.appendChild(usage);
   }
   usage.textContent = `↑ ${inputTokens} · ↓ ${outputTokens} tokens`;
+}
+
+/**
+ * 0.13.6: 在 assistant 消息底部追加记忆召回 badge。
+ *
+ * 与模型名 + token 用量共用 `.chat-msg-footer` 容器（同一行）。
+ * @param {HTMLElement} el assistant 消息元素
+ * @param {number} recallCount FTS5 召回的消息条数
+ */
+export function renderRecallBadge(el, recallCount) {
+  if (!el || !recallCount) return;
+  let footer = el.querySelector(".chat-msg-footer");
+  if (!footer) {
+    footer = document.createElement("div");
+    footer.className = "chat-msg-footer";
+    el.appendChild(footer);
+  }
+  let badge = footer.querySelector(".chat-recall-badge");
+  if (!badge) {
+    badge = document.createElement("span");
+    badge.className = "chat-recall-badge";
+    badge.title = "从历史对话中召回的相关上下文";
+    footer.appendChild(badge);
+  }
+  badge.textContent = `🧠 ${recallCount} 条记忆`;
 }
 
 /**
@@ -783,4 +818,93 @@ function formatJson(str) {
   } catch {
     return str;
   }
+}
+
+// ── 0.13.6: 上下文窗口占用指示器 ───────────────────────────────────────────
+
+/**
+ * 更新上下文窗口占用指示器（composer bar 右侧 SVG 环形进度条）。
+ *
+ * @param {{estimated_tokens: number, context_limit: number, usage_percent: number, last_compressed: boolean, last_compressed_count: number, last_recall_count: number}|null} status
+ */
+export function updateContextIndicator(status) {
+  const el = document.getElementById("chat-context-indicator");
+  if (!el) return;
+
+  if (!status || status.context_limit === 0) {
+    el.innerHTML = "";
+    el.style.display = "none";
+    return;
+  }
+
+  el.style.display = "";
+  const percent = Math.min(status.usage_percent, 100);
+
+  // 颜色随占比变化
+  const color = percent < 60 ? "var(--text-faint)"
+    : percent < 80 ? "var(--warning, #ffc107)"
+    : "var(--danger, #f44336)";
+
+  // SVG 环形进度条
+  const r = 8;
+  const circumference = 2 * Math.PI * r;
+  const offset = circumference * (1 - percent / 100);
+  const tooltip = `${percent}% · ~${status.estimated_tokens.toLocaleString()} / ${status.context_limit.toLocaleString()} tokens`;
+
+  el.title = tooltip;
+  el.innerHTML = `
+    <svg class="context-ring" viewBox="0 0 20 20">
+      <circle cx="10" cy="10" r="${r}" fill="none" stroke="var(--surface-2, #333)" stroke-width="2"/>
+      <circle cx="10" cy="10" r="${r}" fill="none" stroke="${color}" stroke-width="2"
+        stroke-dasharray="${circumference}" stroke-dashoffset="${offset}"
+        transform="rotate(-90 10 10)"/>
+      <text x="10" y="13" text-anchor="middle" class="context-ring-percent">${percent}</text>
+    </svg>
+    ${status.last_compressed ? '<span class="context-compressed" title="已自动压缩 ' + status.last_compressed_count + ' 条旧消息">⚡</span>' : ''}
+  `;
+}
+
+/**
+ * 渲染主动压缩提示条（当 token 占用超 80% 时显示）。
+ *
+ * @param {number} usagePercent
+ * @param {(action: 'compress' | 'clear') => void} onAction
+ */
+export function renderContextWarning(usagePercent, onAction) {
+  // 移除已有提示条
+  const existing = document.querySelector(".chat-context-warning");
+  if (existing) existing.remove();
+
+  // 占用 < 80% 不显示
+  if (usagePercent < 80) return;
+
+  const composerBar = document.querySelector(".chat-composer-bar");
+  if (!composerBar) return;
+
+  const warning = document.createElement("div");
+  warning.className = "chat-context-warning";
+  warning.innerHTML = `
+    <span class="chat-context-warning-icon">⚡</span>
+    <span class="chat-context-warning-text">上下文窗口已使用 ${usagePercent}%，旧消息将被自动压缩。</span>
+    <div class="chat-context-warning-actions">
+      <button class="chat-context-warning-btn" data-action="compress">立即压缩</button>
+      <button class="chat-context-warning-btn" data-action="clear">清除对话</button>
+    </div>
+    <button class="chat-context-warning-close" title="关闭">×</button>
+  `;
+
+  warning.querySelector('[data-action="compress"]').addEventListener("click", () => onAction("compress"));
+  warning.querySelector('[data-action="clear"]').addEventListener("click", () => onAction("clear"));
+  warning.querySelector(".chat-context-warning-close").addEventListener("click", () => warning.remove());
+
+  // 插入到 composer bar 上方
+  composerBar.parentElement.insertBefore(warning, composerBar);
+}
+
+/**
+ * 移除压缩提示条。
+ */
+export function removeContextWarning() {
+  const existing = document.querySelector(".chat-context-warning");
+  if (existing) existing.remove();
 }

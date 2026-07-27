@@ -419,6 +419,11 @@ pub struct SkillConfig {
     /// 启用 ZCode 目录 `~/.zcode/skills/`。默认关——ZCode 用户较少。
     #[serde(default)]
     pub source_zcode: bool,
+
+    /// 0.13.6: 单个 Skill 禁用列表。
+    /// 存储被用户禁用的 Skill 标识（格式：`name@source`，如 `"rust-debug@claude"`）。
+    #[serde(default)]
+    pub disabled_skills: Vec<String>,
 }
 
 impl Default for SkillConfig {
@@ -428,6 +433,7 @@ impl Default for SkillConfig {
             source_blink: true,
             source_claude: true,
             source_zcode: false,
+            disabled_skills: Vec::new(),
         }
     }
 }

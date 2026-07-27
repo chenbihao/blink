@@ -110,10 +110,7 @@ pub struct PythonEnvStatus {
 
 /// 获取 blink python 根目录（`%APPDATA%\blink\python\`）。
 fn python_dir() -> PathBuf {
-    dirs_next::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("blink")
-        .join("python")
+    crate::infra::utils::paths::python_dir()
 }
 
 /// uv 本地安装目录（`%APPDATA%\blink\python\uv\`）。

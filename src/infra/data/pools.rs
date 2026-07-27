@@ -13,9 +13,9 @@
 //! **迁移**：启动时检测旧 `blink.db`，用 SQL `ATTACH` + `INSERT INTO ... SELECT` 一次性迁移，
 //! 迁移完成后删除旧库。版本标记写入配置库 `config` 表（`db_split_done`），避免重复迁移。
 
-use std::path::PathBuf;
-
+use crate::infra::utils::paths;
 use sqlx::SqlitePool;
+use std::path::PathBuf;
 use sqlx::sqlite::SqlitePoolOptions;
 
 /// 四库连接池集合——作为单一 Tauri State 注册。
@@ -90,9 +90,9 @@ impl DbPools {
 }
 
 /// 数据目录：%APPDATA%\blink\
+/// 统一走 `paths::app_data_dir()`，见 `infra::utils::paths`。
 fn data_dir() -> PathBuf {
-    let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(appdata).join("blink")
+    paths::app_data_dir()
 }
 
 /// 创建并初始化四库连接池。
@@ -112,10 +112,10 @@ pub async fn init_all() -> Result<DbPools, String> {
     migrate_legacy_db(&dir).await?;
 
     // 创建四个独立 pool
-    let config = create_pool(&dir.join("blink_config.db")).await?;
-    let history = create_pool(&dir.join("blink_history.db")).await?;
-    let ai = create_pool(&dir.join("blink_ai.db")).await?;
-    let cache = create_pool(&dir.join("blink_cache.db")).await?;
+    let config = create_pool(&paths::db_path("blink_config.db")).await?;
+    let history = create_pool(&paths::db_path("blink_history.db")).await?;
+    let ai = create_pool(&paths::db_path("blink_ai.db")).await?;
+    let cache = create_pool(&paths::db_path("blink_cache.db")).await?;
 
     // 各库建表
     init_config_schema(&config).await?;
