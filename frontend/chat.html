@@ -83,6 +83,8 @@
         <!-- Composer（语音指示器放在 input-wrap 内部，position:absolute 相对于 input-wrap） -->
         <div class="chat-composer">
           <div class="chat-composer-input-wrap">
+            <!-- 0.13.3: /skill 命令提示 -->
+            <div id="skill-hint" class="skill-hint" hidden></div>
             <!-- 语音指示器（同主窗口风格：5 条波形 + 标签） -->
             <div id="voice-indicator" class="voice-indicator hidden">
               <div class="voice-wave">
@@ -107,6 +109,9 @@
                   <svg class="chat-model-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
                   <div class="chat-model-dropdown" id="chat-model-dropdown" hidden></div>
                 </button>
+              </div>
+              <div class="chat-composer-bar-right">
+                <span class="chat-tool-pool" id="chat-tool-pool" title="当前可用工具池"></span>
               </div>
               <button class="chat-send-btn" id="chat-send-btn" disabled>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>

@@ -36,6 +36,18 @@
 /* ── AI Tab 专用（0.9.1 Phase 6）─────────────────────────────────────────── */
 
 /* 独立 modal 变体（供 AI 添加供应商弹窗用；不复用 .modal 因为它绑了列表布局） */
+
+/* setting-row-column：纵向布局变体（extension-card 内使用，非 modal 专属） */
+.setting-row-column {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-xs, 6px);
+}
+
+.setting-row-column .setting-label {
+  margin-bottom: var(--space-2xs, 4px);
+}
+
 .modal-card {
   background: var(--bg);
   border: 1px solid var(--surface-2);
@@ -1122,4 +1134,188 @@
 .lmstudio-help .btn-small {
   margin-top: 8px;
   align-self: flex-start;
+}
+
+/* ── 0.13.3 Skill 约定式 ──────────────────────────────────────────────── */
+
+/* 来源目录卡片网格 */
+.skill-source-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm, 8px);
+}
+
+.skill-source-card {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm, 8px);
+  padding: var(--space-xs, 6px) var(--space-md, 12px);
+  background: var(--surface);
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius-md, 6px);
+  transition: border-color var(--transition-fast, 0.1s);
+}
+
+.skill-source-card:hover {
+  border-color: var(--text-faint);
+}
+
+.skill-source-name {
+  font-size: var(--text-sm, 13px);
+  color: var(--text);
+  font-weight: var(--weight-medium, 500);
+}
+
+.skill-source-card .skill-open-dir {
+  margin-left: auto;
+  opacity: 0.5;
+  transition: opacity 0.15s;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 4px;
+}
+
+.skill-source-card .skill-open-dir:hover {
+  opacity: 1;
+}
+
+/* 技能列表 header（label + 刷新按钮同一行） */
+.skill-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-xs, 6px);
+}
+
+.skill-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm, 8px);
+  max-height: 280px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.skill-empty-hint {
+  color: var(--text-faint);
+  font-size: var(--text-sm, 13px);
+  font-style: italic;
+  padding: var(--space-md, 12px) 0;
+  text-align: center;
+}
+
+.skill-item {
+  padding: var(--space-sm, 10px) var(--space-md, 12px);
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius-md, 8px);
+  background: var(--surface);
+  transition: border-color var(--transition-fast, 0.1s);
+}
+
+.skill-item:hover {
+  border-color: var(--text-faint);
+}
+
+.skill-item-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs, 6px);
+  margin-bottom: var(--space-2xs, 4px);
+}
+
+.skill-item-name {
+  font-weight: var(--weight-medium, 500);
+  font-size: var(--text-sm, 13px);
+  color: var(--text);
+  font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+}
+
+.skill-item-desc {
+  font-size: var(--text-xs, 12px);
+  color: var(--text-dim);
+  line-height: var(--leading-normal, 1.5);
+}
+
+.skill-item-keywords {
+  margin-top: var(--space-2xs, 4px);
+  font-size: var(--text-xs, 12px);
+  color: var(--text-faint);
+}
+
+.skill-keywords {
+  font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+}
+
+.skill-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px var(--space-xs, 6px);
+  border-radius: var(--radius-xs, 3px);
+  font-size: var(--text-2xs, 10px);
+  font-weight: var(--weight-semibold, 600);
+  letter-spacing: 0.3px;
+}
+
+.skill-badge-source {
+  background: var(--surface-2);
+  color: var(--text-dim);
+}
+
+.skill-badge-trigger {
+  background: var(--green-bg);
+  color: var(--green);
+}
+
+.skill-badge-manual {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+.skill-refresh-btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.btn-icon-sm {
+  padding: 2px 6px;
+  font-size: 12px;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+
+/* ── AI 能力扩展 panel 共享样式 ─────────────────────────────────────────── */
+
+/* 描述性提示文字（MCP section 等用到） */
+.panel-hint {
+  margin: 0 0 12px 0;
+  font-size: var(--text-sm, 13px);
+  color: var(--text-dim, #999);
+  line-height: 1.5;
+}
+
+/* MCP 添加按钮——虚线框，与 provider add 视觉一致 */
+.mcp-add-btn {
+  align-self: flex-start;
+  background: none;
+  border: 1px dashed var(--surface-2);
+  color: var(--text-dim);
+  padding: var(--space-sm, 8px) var(--space-md, 14px);
+  border-radius: var(--radius-md, 6px);
+  cursor: pointer;
+  font-size: var(--text-sm, 13px);
+  transition: color var(--transition-fast, 0.1s), border-color var(--transition-fast, 0.1s);
+}
+
+.mcp-add-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* 记忆策略区域：召回相关行的缩进优化 */
+#ai-memory-recall-top-k-row,
+#ai-memory-context-display-row {
+  padding-left: 20px;
 }

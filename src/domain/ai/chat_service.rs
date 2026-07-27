@@ -16,7 +16,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
-use rig_core::memory::ConversationMemory;
+use crate::domain::ai::memory::SqliteConversationMemory;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
 
@@ -25,12 +25,14 @@ use std::hash::{Hash, Hasher};
 
 use crate::app::ai_config::Tier;
 use crate::domain::ai::agent_provider::{AgentProvider, ChatStreamChunk};
-use crate::domain::ai::prompt::chat_system_prompt_with_group;
+use crate::domain::ai::prompt::chat_system_prompt_with_skills;
 use crate::domain::ai::provider::AIError;
 use crate::domain::ai::registry::{AIProviderRegistry, ResolvedProviderEntries};
+use crate::domain::ai::skill::{SkillRegistry, parse_skill_command};
 use crate::domain::ai::tool_adapter::{PendingConfirms, build_agent_tools};
 use crate::domain::capability::CapabilityRegistry;
 use crate::domain::execution::ActionRegistry;
+use crate::domain::mcp::McpClientManager;
 
 type AgentCacheKey = (String, String, String, u64);
 
@@ -208,7 +210,11 @@ pub struct ChatService {
     capability_registry: Arc<CapabilityRegistry>,
     action_registry: Arc<ActionRegistry>,
     pending_confirms: Arc<PendingConfirms>,
-    memory: Arc<dyn ConversationMemory>,
+    /// 0.13.0: MCP client 管理器——collect_tools() 拉 MCP tool 进对话窗口 tool 池。
+    mcp_client: Arc<McpClientManager>,
+    memory: Arc<SqliteConversationMemory>,
+    /// 0.13.3: Skill 注册表——启动时扫描，可手动刷新。
+    skill_registry: SkillRegistry,
     cached_agent: RwLock<Option<CachedAgent>>,
     requests: RequestTracker,
     /// 串行化 prompt 启动过程，防止两个并发 IPC 同时通过 active 检查。
@@ -223,13 +229,16 @@ impl ChatService {
     /// 构造 ChatService。AgentProvider 首次 prompt 时才懒构造，不增加启动路径耗时。
     ///
     /// 0.12.3：memory 从 `InMemoryConversationMemory` 换为 `SqliteConversationMemory`，
-    /// 持久化到 AI 库，重启不丢历史。滑动窗口在 memory 层实现（最近 20 条）。
+    /// 持久化到 AI 库，重启不丢历史。
+    /// 0.13.1：memory 持有具体类型 `Arc<SqliteConversationMemory>`（不再是 trait object），
+    /// 供 `AgentProvider::new` 注入 `model.context_window` 驱动 token-aware 裁剪。
     pub fn new(
         app: tauri::AppHandle,
         ai_registry: Arc<AIProviderRegistry>,
         capability_registry: Arc<CapabilityRegistry>,
         action_registry: Arc<ActionRegistry>,
         pending_confirms: Arc<PendingConfirms>,
+        mcp_client: Arc<McpClientManager>,
         ai_pool: sqlx::SqlitePool,
         config_pool: sqlx::SqlitePool,
     ) -> Self {
@@ -241,7 +250,9 @@ impl ChatService {
             capability_registry,
             action_registry,
             pending_confirms,
+            mcp_client,
             memory: Arc::new(crate::domain::ai::memory::SqliteConversationMemory::new(ai_pool)),
+            skill_registry: SkillRegistry::new(),
             cached_agent: RwLock::new(None),
             requests: RequestTracker::new(),
             start_gate: tokio::sync::Mutex::new(()),
@@ -333,7 +344,7 @@ impl ChatService {
     ///
     /// 0.12.6：`preamble` 参数支持分组级系统提示词——不同分组的 preamble hash
     /// 不同，cache key 自然失配，触发重建。传空字符串等同默认 `chat_system_prompt()`。
-    pub(crate) fn ensure_provider(&self, preamble: &str) -> Result<Arc<AgentProvider>, AIError> {
+    pub(crate) async fn ensure_provider(&self, preamble: &str) -> Result<Arc<AgentProvider>, AIError> {
         const MAX_PROVIDER_RETRY: usize = 3;
         let mut retry_count = 0;
         let preamble_hash = hash_preamble(preamble);
@@ -358,9 +369,13 @@ impl ChatService {
             }
 
             // Client/Agent 构造可能读取 Credential Manager，必须在 ChatService 锁外进行。
+            // 0.13.0: MCP tool 通过 external_tools 入口进池——collect_tools() 从已连接的
+            // MCP server 拉 tool（过滤 disabled_tools），与内置 Capability/Action 并列。
+            let external_tools = self.mcp_client.collect_tools().await;
             let tools = build_agent_tools(
                 &self.capability_registry,
                 &self.action_registry,
+                external_tools,
                 &self.app,
                 self.pending_confirms.clone(),
             );
@@ -370,7 +385,7 @@ impl ChatService {
                 tools,
                 preamble,
                 self.memory.clone(),
-            )?);
+            ).await?);
 
             // 构造期间配置可能已更新。只提交仍对应当前 key 的实例。
             let latest = self.resolve_current_entries()?;
@@ -458,6 +473,8 @@ impl ChatService {
     ///
     /// 0.12.6：`group_system_prompt` 注入分组级系统提示词——构造 preamble 时
     /// 追加到基础 chat system prompt 之后，影响 Agent 的行为约束。
+    /// 0.13.3：preamble 集成 Skill 渐进式披露——阶段 1 摘要常驻 + 阶段 2 触发全文注入。
+    /// 支持 `/skill <name>` 显式激活指令。
     pub async fn prompt(
         self: &Arc<Self>,
         conversation_id: String,
@@ -475,9 +492,28 @@ impl ChatService {
         let conversation_for_task = conversation_id.clone();
         let weak_service: Weak<Self> = Arc::downgrade(self);
 
-        // 0.12.6：构建有效 preamble = 基础 prompt + 分组提示词
-        let preamble =
-            chat_system_prompt_with_group(group_system_prompt.as_deref());
+        // 0.13.3：构建 skill-aware preamble
+        // 1. 检查 /skill 显式激活指令
+        // 2. 阶段 1：所有 Skill 摘要常驻
+        // 3. 阶段 2：触发匹配（关键词/正则）或显式激活的 Skill 全文注入
+        let (effective_message, triggered_skills) =
+            self.resolve_skill_triggers(&message);
+
+        let skill_summaries = self.skill_registry.summaries();
+        let preamble = chat_system_prompt_with_skills(
+            group_system_prompt.as_deref(),
+            &skill_summaries,
+            &triggered_skills,
+        );
+
+        if !triggered_skills.is_empty() {
+            tracing::info!(
+                request_id,
+                triggered = triggered_skills.len(),
+                skills = ?triggered_skills.iter().map(|s| format!("{}({})", s.name, s.source.display_name())).collect::<Vec<_>>(),
+                "ChatService: Skill 已激活"
+            );
+        }
 
         let task = tokio::spawn(async move {
             if start_rx.await.is_err() {
@@ -488,10 +524,10 @@ impl ChatService {
             };
 
             // Provider 构造也放进可 abort 的 task：窗口在冷构造期间关闭时仍能立即中断。
-            match service.ensure_provider(&preamble) {
+            match service.ensure_provider(&preamble).await {
                 Ok(provider) => {
                     provider
-                        .stream_prompt(&conversation_for_task, &message, chunk_tx)
+                        .stream_prompt(&conversation_for_task, &effective_message, chunk_tx)
                         .await;
                 }
                 Err(error) => {
@@ -619,6 +655,88 @@ impl ChatService {
             }
         }
         tracing::debug!("ChatService: 配置变化，AgentProvider 缓存已失效");
+    }
+
+    /// 应用用户从设置页修改的记忆策略配置（0.13.1 §3.7）。
+    ///
+    /// 在 `set_config('ai_config')` 命令处理中调用——保存 DB 后、`notify_config_changed`
+    /// 之前。保留运行时注入的 `context_limit`（来自 `ModelEntry.context_window`），
+    /// 只更新 `mode / window_size / trigger_ratio / compress_ratio`。
+    pub async fn update_memory_config(
+        &self,
+        config: crate::domain::ai::memory::MemoryConfig,
+    ) {
+        self.memory.apply_config(config).await;
+    }
+
+    // ── 0.13.3 Skill 集成 ──────────────────────────────────────────────────
+
+    /// 解析用户消息中的 Skill 触发，返回（实际发送给 AI 的消息, 触发的 Skill 列表）。
+    ///
+    /// 触发来源（合并去重）：
+    /// 1. `/skill <name>` 显式激活——解析指令，查找 Skill，剩余消息作为实际消息
+    /// 2. 关键词/正则自动触发——`SkillRegistry::match_triggers`
+    ///
+    /// `/skill` 指令的剩余消息为空时，实际消息保留原文（让 AI 看到 /skill 指令并回应）。
+    fn resolve_skill_triggers(
+        &self,
+        message: &str,
+    ) -> (String, Vec<crate::domain::ai::skill::SkillEntry>) {
+        use crate::domain::ai::skill::SkillEntry;
+        use std::collections::HashSet;
+
+        let mut triggered: Vec<SkillEntry> = Vec::new();
+        let mut effective_message = message.to_string();
+
+        // 1. 检查 /skill 显式激活
+        if let Some(cmd) = parse_skill_command(message) {
+            if let Some(skill) = self.skill_registry.find_by_name(&cmd.name, cmd.source) {
+                triggered.push(skill);
+                // 剩余消息作为实际消息；为空时用原文（让 AI 看到指令并回应）
+                if !cmd.remaining_message.is_empty() {
+                    effective_message = cmd.remaining_message;
+                }
+                tracing::debug!(
+                    skill = %cmd.name,
+                    source = ?cmd.source,
+                    "ChatService: /skill 显式激活"
+                );
+            } else {
+                tracing::warn!(
+                    skill = %cmd.name,
+                    source = ?cmd.source,
+                    "ChatService: /skill 未找到匹配的 Skill"
+                );
+                // 未找到时保留原文，让 AI 自然回应
+            }
+        }
+
+        // 2. 关键词/正则自动触发（与显式激活合并去重）
+        let auto_triggered = self.skill_registry.match_triggers(message);
+        let existing_names: HashSet<String> = triggered
+            .iter()
+            .map(|s| format!("{}@{}", s.name, s.source.display_name()))
+            .collect();
+        for skill in auto_triggered {
+            let key = format!("{}@{}", skill.name, skill.source.display_name());
+            if !existing_names.contains(&key) {
+                triggered.push(skill);
+            }
+        }
+
+        (effective_message, triggered)
+    }
+
+    /// 刷新 Skill 注册表——重新扫描所有启用的来源目录。
+    ///
+    /// 供设置页「刷新」按钮和配置变更后调用。
+    pub fn refresh_skills(&self, enabled_sources: &[crate::domain::ai::skill::SkillSource]) {
+        self.skill_registry.scan(enabled_sources);
+    }
+
+    /// 返回 SkillRegistry 的引用（供 command 层 list_skills 调用）。
+    pub fn skill_registry(&self) -> &SkillRegistry {
+        &self.skill_registry
     }
 }
 

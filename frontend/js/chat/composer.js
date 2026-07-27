@@ -41,6 +41,15 @@ let voiceRecording = false;
 /** @type {string} 录音开始前的 textarea 文本（用作 base，识别结果追加其后） */
 let voiceBaseText = "";
 
+/** @type {HTMLElement} /skill 命令提示弹层 */
+let skillHintEl = null;
+
+/** @type {Array} 缓存的 skill 列表（避免每次输入都请求） */
+let cachedSkills = null;
+
+/** @type {number} skill 缓存过期时间戳 */
+let skillCacheExpiry = 0;
+
 /**
  * 初始化 composer。
  * @param {{ onSend: (message: string) => void, onStop: () => void, onThinkingToggle: (enabled: boolean) => void }} callbacks
@@ -57,17 +66,21 @@ export function initComposer(callbacks) {
 
   if (!textarea || !sendBtn) return;
 
-  // textarea 自增高 + 更新发送按钮状态
+  // textarea 自增高 + 更新发送按钮状态 + /skill 检测
   textarea.addEventListener("input", () => {
     autoResize();
     updateSendButtonState();
+    checkSkillHint();
   });
 
-  // Enter 发送 / Shift+Enter 换行
+  // Enter 发送 / Shift+Enter 换行 / Escape 关闭 skill hint
   textarea.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
+    } else if (e.key === "Escape" && skillHintEl && !skillHintEl.hidden) {
+      skillHintEl.hidden = true;
+      e.stopPropagation();
     }
   });
 
@@ -79,6 +92,9 @@ export function initComposer(callbacks) {
       handleSend();
     }
   });
+
+  // 0.13.3: /skill 命令提示初始化
+  skillHintEl = document.getElementById("skill-hint");
 
   // 深度思考开关
   if (thinkingBtn) {
@@ -284,3 +300,97 @@ function updateSendButtonState() {
 const sendIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>`;
 
 const stopIcon = `<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>`;
+
+// ── 0.13.3 /skill 命令提示 ────────────────────────────────────────────────────
+
+/**
+ * 检测 textarea 内容是否以 /skill 开头，若是则显示可用技能列表。
+ *
+ * 提示弹层出现在 textarea 上方，列出匹配的 skill 名称 + 来源 + 描述。
+ * 点击 skill 条目自动填充 `/skill <name> ` 到 textarea 并隐藏提示。
+ * 按 Escape 隐藏提示。
+ */
+async function checkSkillHint() {
+  if (!skillHintEl || !textarea) return;
+
+  const value = textarea.value.trim();
+  if (!value.toLowerCase().startsWith("/skill")) {
+    skillHintEl.hidden = true;
+    return;
+  }
+
+  // 加载 skill 列表（缓存 30s）
+  const now = Date.now();
+  if (!cachedSkills || now > skillCacheExpiry) {
+    try {
+      const { invoke } = await import("../tauri.js");
+      cachedSkills = await invoke("list_skills");
+      skillCacheExpiry = now + 30000; // 30s 缓存
+    } catch (e) {
+      console.error("[skill-hint] list_skills failed:", e);
+      skillHintEl.hidden = true;
+      return;
+    }
+  }
+
+  if (!cachedSkills || cachedSkills.length === 0) {
+    skillHintEl.innerHTML = `<div class="skill-hint-empty">未发现 Skill。请在设置页 AI tab 配置来源目录并刷新。</div>`;
+    skillHintEl.hidden = false;
+    return;
+  }
+
+  // 提取 /skill 后面的输入（用于过滤）
+  const query = value.slice(6).trim().toLowerCase(); // 去掉 "/skill"
+  const filtered = query
+    ? cachedSkills.filter((s) => s.name.toLowerCase().includes(query))
+    : cachedSkills;
+
+  if (filtered.length === 0) {
+    skillHintEl.innerHTML = `<div class="skill-hint-empty">未匹配到 "${escapeHtml(query)}" 的 Skill</div>`;
+    skillHintEl.hidden = false;
+    return;
+  }
+
+  // 渲染提示列表
+  skillHintEl.innerHTML = filtered
+    .slice(0, 8) // 最多 8 条
+    .map((s) => {
+      const sourceLabel = { blink: "Blink", claude: "Claude", zcode: "ZCode" }[s.source] || s.source;
+      return `<div class="skill-hint-item" data-skill-name="${escapeAttr(s.name)}">
+        <span class="skill-hint-name">${escapeHtml(s.name)}</span>
+        <span class="skill-hint-source">${sourceLabel}</span>
+        <span class="skill-hint-desc">${escapeHtml(s.description)}</span>
+      </div>`;
+    })
+    .join("");
+
+  skillHintEl.hidden = false;
+
+  // 绑定点击事件
+  skillHintEl.querySelectorAll(".skill-hint-item").forEach((item) => {
+    item.addEventListener("click", () => {
+      const name = item.dataset.skillName;
+      textarea.value = `/skill ${name} `;
+      textarea.focus();
+      // 光标移到末尾
+      const len = textarea.value.length;
+      textarea.setSelectionRange(len, len);
+      skillHintEl.hidden = true;
+      autoResize();
+      updateSendButtonState();
+    });
+  });
+}
+
+function escapeHtml(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function escapeAttr(s) {
+  return escapeHtml(s);
+}

@@ -329,9 +329,13 @@ impl CapabilityTool {
         }
     }
 
-    /// 检查是否是危险操作。
+    /// 检查是否是危险操作（0.13.0 §9.2 修复：同时读 `sensitive` 字段）。
+    ///
+    /// `danger_class == Dangerous` 或 `schema.sensitive == true` 均触发确认弹窗。
+    /// `sensitive` 标记的是读隐私数据的能力（如 `search_apps` / `search_clipboard_history`），
+    /// 虽非"危险操作"但涉及隐私，AI 调用时同样需用户确认。
     fn is_dangerous(&self) -> bool {
-        matches!(self.cap.danger_class(), DangerClass::Dangerous)
+        matches!(self.cap.danger_class(), DangerClass::Dangerous) || self.schema.sensitive
     }
 }
 
@@ -540,10 +544,12 @@ fn exec_error_to_string(e: ExecError) -> String {
 /// **参数**：
 /// - `cap_registry`: Capability 注册表
 /// - `action_registry`: Action 注册表（可通过 `AppContext` 获取）
+/// - `external_tools`: 外部 tool（如 MCP tool），直接进 tool 池，不经过 CapabilityRegistry
+///   （0.13.0 §9.3：统一外部 tool 入口，为 MCP tool 留对称性）
 /// - `app_handle`: Tauri AppHandle，用于构造 InvokeContext / ActionContext + emit 确认事件
 /// - `pending`: 危险确认注册表（`Arc<PendingConfirms>`，由 main.rs manage，对话窗口共享）
 ///
-/// **返回**：所有可用的 tool（CapabilityTool + ActionTool）
+/// **返回**：所有可用的 tool（CapabilityTool + ActionTool + external_tools）
 ///
 /// **tool 池粒度**（§2.4）：`ai_eligible() == false` 的 Action 不进池（如 `exit_blink`）。
 /// **危险操作**：危险 Capability/Action 仍会被包装进 tool 池，但调用时挂起等用户确认。
@@ -551,6 +557,7 @@ fn exec_error_to_string(e: ExecError) -> String {
 pub fn build_agent_tools(
     cap_registry: &CapabilityRegistry,
     action_registry: &ActionRegistry,
+    external_tools: Vec<Box<dyn ToolDyn>>,
     app_handle: &tauri::AppHandle,
     pending: Arc<PendingConfirms>,
 ) -> Vec<Box<dyn ToolDyn>> {
@@ -577,10 +584,15 @@ pub fn build_agent_tools(
         tools.push(Box::new(tool));
     }
 
+    // 3. 追加外部 tool（MCP tool 等，已包装为 ToolDyn，直接进池）
+    let external_count = external_tools.len();
+    tools.extend(external_tools);
+
     tracing::info!(
         capabilities = cap_registry.len(),
         actions = action_registry.len() - skipped,
         skipped_actions = skipped,
+        external_tools = external_count,
         total_tools = tools.len(),
         "build_agent_tools: tool 池构建完成"
     );

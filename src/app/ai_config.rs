@@ -362,6 +362,20 @@ pub struct ChatConfig {
     /// "main" / "light" / "router"，默认 "light"（日常命名不需要强模型）。
     #[serde(default = "default_title_tier")]
     pub title_tier: String,
+
+    /// 记忆策略配置（0.13.1 §3.7）。
+    ///
+    /// 控制对话历史窗口模式（固定条数 / token-aware）及压缩参数。
+    /// `context_limit` 字段 `#[serde(skip)]`，运行时从 `ModelEntry.context_window` 注入，
+    /// 不持久化——serde 反序列化时自动为 None，`apply_config` 时保留运行时值。
+    #[serde(default)]
+    pub memory_config: crate::domain::ai::memory::MemoryConfig,
+
+    /// Skill 配置（0.13.3）。
+    ///
+    /// 控制是否启用 Skill 约定式发现及哪些来源目录被扫描。
+    #[serde(default)]
+    pub skill_config: SkillConfig,
 }
 
 /// `ChatConfig` 的 Default 实现——`title_tier` 走 `default_title_tier()` 而非空字符串。
@@ -371,6 +385,8 @@ impl Default for ChatConfig {
         Self {
             auto_title: false,
             title_tier: default_title_tier(),
+            memory_config: crate::domain::ai::memory::MemoryConfig::default(),
+            skill_config: SkillConfig::default(),
         }
     }
 }
@@ -378,6 +394,60 @@ impl Default for ChatConfig {
 /// `ChatConfig.title_tier` 的 serde 默认值——"light"。
 fn default_title_tier() -> String {
     "light".to_string()
+}
+
+// ── SkillConfig（0.13.3）──────────────────────────────────────────────────────
+
+/// Skill 配置——控制 Skill 约定式发现与来源开关。
+///
+/// 存于 `ChatConfig.skill_config` 子字段，随 AIConfig 第 7 分片持久化。
+/// 老配置缺此字段时 serde default 填充——零迁移成本。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SkillConfig {
+    /// Skill 功能总开关。默认 true——Skill 是增强性能力，无安全风险，默认开启。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// 启用 Blink 自身目录 `%APPDATA%\blink\skills\`。
+    #[serde(default = "default_true")]
+    pub source_blink: bool,
+
+    /// 启用 Claude Code 目录 `~/.claude/skills/`。
+    #[serde(default = "default_true")]
+    pub source_claude: bool,
+
+    /// 启用 ZCode 目录 `~/.zcode/skills/`。默认关——ZCode 用户较少。
+    #[serde(default)]
+    pub source_zcode: bool,
+}
+
+impl Default for SkillConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            source_blink: true,
+            source_claude: true,
+            source_zcode: false,
+        }
+    }
+}
+
+impl SkillConfig {
+    /// 返回当前启用的来源列表（按 SkillSource 优先级排序）。
+    pub fn enabled_sources(&self) -> Vec<crate::domain::ai::skill::SkillSource> {
+        use crate::domain::ai::skill::SkillSource;
+        let mut sources = Vec::new();
+        if self.source_blink {
+            sources.push(SkillSource::Blink);
+        }
+        if self.source_claude {
+            sources.push(SkillSource::Claude);
+        }
+        if self.source_zcode {
+            sources.push(SkillSource::Zcode);
+        }
+        sources
+    }
 }
 
 /// 一个模型的元数据 + 调用参数默认值。
@@ -953,7 +1023,12 @@ mod tests {
             direct_execute_safe_actions: true,
         streaming: false,
         slo_hard_timeout_ms: Some(3000),
-        chat_config: ChatConfig { auto_title: true, title_tier: "router".to_string() },
+        chat_config: ChatConfig {
+            auto_title: true,
+            title_tier: "router".to_string(),
+            memory_config: crate::domain::ai::memory::MemoryConfig::default(),
+            skill_config: SkillConfig::default(),
+        },
         ai_tool_result_feedback: ToolResultFeedback::On,
     };
         let s = serde_json::to_string(&original).unwrap();
@@ -1043,6 +1118,44 @@ mod tests {
         let c: AIConfig = serde_json::from_str(json).unwrap();
         assert!(!c.chat_config.auto_title, "auto_title 默认 false");
         assert_eq!(c.chat_config.title_tier, "light", "title_tier 默认 light");
+        // 0.13.1: memory_config 默认 TokenAware 模式
+        assert_eq!(
+            c.chat_config.memory_config.mode,
+            crate::domain::ai::memory::WindowMode::TokenAware,
+            "memory_config.mode 默认 TokenAware"
+        );
+    }
+
+    // ── 0.13.1: MemoryConfig 向后兼容 ───────────────────────────────
+
+    #[test]
+    fn memory_config_roundtrip() {
+        let original = AIConfig {
+            enabled: true,
+            chat_config: ChatConfig {
+                auto_title: false,
+                title_tier: "light".to_string(),
+                memory_config: crate::domain::ai::memory::MemoryConfig {
+                    mode: crate::domain::ai::memory::WindowMode::FixedCount,
+                    window_size: 30,
+                    context_limit: None,
+                    trigger_ratio: 0.85,
+                    compress_ratio: 0.65,
+                    recall_enabled: false,
+                    recall_top_k: 5,
+                },
+                skill_config: SkillConfig::default(),
+            },
+            ..Default::default()
+        };
+        let s = serde_json::to_string(&original).unwrap();
+        let restored: AIConfig = serde_json::from_str(&s).unwrap();
+        assert_eq!(restored.chat_config.memory_config.mode, crate::domain::ai::memory::WindowMode::FixedCount);
+        assert_eq!(restored.chat_config.memory_config.window_size, 30);
+        assert!((restored.chat_config.memory_config.trigger_ratio - 0.85).abs() < 0.001);
+        assert!((restored.chat_config.memory_config.compress_ratio - 0.65).abs() < 0.001);
+        // context_limit 不持久化（#[serde(skip)]）
+        assert_eq!(restored.chat_config.memory_config.context_limit, None);
     }
 
     #[test]

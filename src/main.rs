@@ -460,9 +460,12 @@ fn main() {
             ));
 
             // 0.12.1 Phase 3B-1: chat AgentProvider 懒构造；memory 归 ChatService 所有。
+            // 0.13.0: McpClientManager 管理 MCP server 子进程生命周期，传入 ChatService
+            // 供 ensure_provider() 拉 MCP tool 进对话窗口 tool 池。
             let pending_confirms = std::sync::Arc::new(
                 domain::ai::tool_adapter::PendingConfirms::new(),
             );
+            let mcp_client = std::sync::Arc::new(domain::mcp::McpClientManager::new());
             let chat_service = std::sync::Arc::new(
                 domain::ai::chat_service::ChatService::new(
                     app.handle().clone(),
@@ -470,6 +473,7 @@ fn main() {
                     capability_registry.clone(),
                     action_registry.clone(),
                     pending_confirms.clone(),
+                    mcp_client.clone(),
                     pools.ai.clone(),
                     pools.config.clone(),
                 ),
@@ -488,6 +492,29 @@ fn main() {
             // 0.12.0 §2.4: 对话窗口危险确认闭环（tool_adapter call 挂起 + confirm_chat_action 唤醒）
             app.manage(pending_confirms);
             app.manage(chat_service);
+            // 0.13.0: MCP client 管理器（command 层 app.state 取用）
+            app.manage(mcp_client.clone());
+
+            // 0.13.3: 启动时扫描 Skill 目录（非阻塞，后台执行）
+            {
+                let ai_config = app::ai_config::get_ai_config();
+                if ai_config.chat_config.skill_config.enabled {
+                    let sources = ai_config.chat_config.skill_config.enabled_sources();
+                    let app_clone = app.handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        use tauri::Manager;
+                        if let Some(cs) = app_clone
+                            .try_state::<std::sync::Arc<domain::ai::chat_service::ChatService>>()
+                        {
+                            cs.refresh_skills(&sources);
+                            let count = cs.skill_registry().count();
+                            if count > 0 {
+                                tracing::info!(count, "启动时 Skill 扫描完成");
+                            }
+                        }
+                    });
+                }
+            }
 
             // 后台预热次级窗口（3s 延迟，不阻塞启动；WebView2 冷启动 300~400ms → 预热后 show <50ms）
             infra::platform::window::preheat_secondary_windows(app.handle().clone());
@@ -507,6 +534,18 @@ fn main() {
                         let _ = app::commands::start_funasr_server(app_clone).await;
                     });
                 }
+            }
+
+            // 0.13.0: 启动已配置且 enabled 的 MCP server（后台异步，不阻塞启动）
+            {
+                let mcp_client_clone = mcp_client.clone();
+                let config_pool = pools.config.clone();
+                tauri::async_runtime::spawn(async move {
+                    // 延迟 2s 避免与启动竞争资源
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    tracing::info!("MCP: 开始启动已配置的外部 server");
+                    mcp_client_clone.start_all(&config_pool).await;
+                });
             }
 
             // 持有服务列表,保证其生命周期与 app 一致。
@@ -653,6 +692,22 @@ fn main() {
             app::commands::open_stt_folder,
             app::commands::resize_voice_overlay,
             app::commands::get_default_hotkey,
+            // 0.13.0 MCP client
+            app::commands::list_mcp_servers,
+            app::commands::upsert_mcp_server,
+            app::commands::delete_mcp_server,
+            app::commands::set_mcp_server_enabled,
+            app::commands::start_mcp_server,
+            app::commands::stop_mcp_server,
+            app::commands::reconnect_mcp_server,
+            app::commands::get_mcp_server_tools,
+            app::commands::set_mcp_server_disabled_tools,
+            app::commands::get_mcp_tool_pool_size,
+            app::commands::get_mcp_tool_names,
+            // 0.13.3 Skill 约定式
+            app::commands::list_skills,
+            app::commands::refresh_skills,
+            app::commands::open_skill_dir,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -660,6 +715,11 @@ fn main() {
             if let tauri::RunEvent::Exit = event {
                 // Blink 退出时 kill funasr-server 子进程，避免孤儿进程
                 crate::app::commands::shutdown_funasr_server_blocking();
+                // 0.13.0: 停止所有 MCP server 子进程
+                if let Some(mcp) = _app.try_state::<std::sync::Arc<domain::mcp::McpClientManager>>() {
+                    // block_on 确保退出前清理完成
+                    tauri::async_runtime::block_on(mcp.stop_all());
+                }
             }
         });
 }

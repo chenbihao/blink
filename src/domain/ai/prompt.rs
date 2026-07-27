@@ -16,6 +16,7 @@
 //! 工具描述段——插件作者一句话告诉 AI 这个工具的用法窍门。
 
 use crate::domain::execution::ActionSchema;
+use crate::domain::ai::skill::{SkillEntry, SkillSummary};
 use std::collections::HashMap;
 
 /// system prompt token 告警阈值（§3.8：超 1500 token warn）。
@@ -254,6 +255,70 @@ pub fn chat_system_prompt_with_group(group_prompt: Option<&str>) -> String {
     }
 }
 
+/// 带分组系统提示词 + Skill 注入的完整 chat system prompt（0.13.3）。
+///
+/// 在 `chat_system_prompt_with_group` 基础上追加 Skill 内容（渐进式披露）：
+/// - 阶段 1（常驻）：所有 Skill 的 `name + description` 摘要，标注来源
+/// - 阶段 2（按需）：命中触发条件的 Skill 的完整 SKILL.md 全文
+///
+/// preamble 字符串变化 → `hash_preamble()` 变 → AgentProvider cache miss → 重建。
+/// 无需手工失效缓存（0.12.6 hash 机制已覆盖）。
+///
+/// `group_prompt` 为 None 或空时不追加分组指令。
+/// `skill_summaries` 为空时不追加【可用技能】段。
+/// `triggered_skills` 为空时不追加【已激活技能详情】段。
+pub fn chat_system_prompt_with_skills(
+    group_prompt: Option<&str>,
+    skill_summaries: &[SkillSummary],
+    triggered_skills: &[SkillEntry],
+) -> String {
+    let mut prompt = chat_system_prompt_with_group(group_prompt);
+
+    // 阶段 1：所有 Skill 摘要（常驻，~50 token/skill）
+    if !skill_summaries.is_empty() {
+        prompt.push_str("\n\n【可用技能】\n");
+        for s in skill_summaries {
+            let trigger_hint = if s.has_triggers { " (自动触发)" } else { "" };
+            prompt.push_str(&format!(
+                "- [{}] {}{}: {}\n",
+                s.source.display_name(),
+                s.name,
+                trigger_hint,
+                s.description
+            ));
+        }
+        prompt.push_str("提示：输入 /skill <名称> 可手动激活技能。可用 /skill <名称>@<来源> 消歧同名技能。");
+    }
+
+    // 阶段 2：触发的 Skill 全文（按需注入）
+    if !triggered_skills.is_empty() {
+        prompt.push_str("\n\n【已激活技能详情】\n");
+        for skill in triggered_skills {
+            prompt.push_str(&format!(
+                "--- {} ({}) ---\n{}\n",
+                skill.name,
+                skill.source.display_name(),
+                skill.full_content
+            ));
+        }
+    }
+
+    // token 监控
+    let tokens = estimate_tokens(&prompt);
+    if tokens > TOKEN_WARN_THRESHOLD {
+        tracing::warn!(
+            tokens = tokens,
+            threshold = TOKEN_WARN_THRESHOLD,
+            skill_count = skill_summaries.len(),
+            triggered_count = triggered_skills.len(),
+            "chat system prompt (with skills) 超过 {} token",
+            TOKEN_WARN_THRESHOLD,
+        );
+    }
+
+    prompt
+}
+
 /// 工具列表文字段（含 name + description + 参数摘要 + hint）。
 ///
 /// **分层详略**（§3.8）：system prompt 文字段只含 name + 一句话 description + 参数名
@@ -338,6 +403,7 @@ fn truncate_chars(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::ai::skill::SkillSource;
     use serde_json::json;
 
     fn make_tool(name: &str, desc: &str, params: serde_json::Value) -> ToolPromptInfo {
@@ -618,6 +684,70 @@ mod tests {
     fn chat_prompt_with_group_empty_equals_base() {
         let prompt = chat_system_prompt_with_group(Some(""));
         assert_eq!(prompt, chat_system_prompt());
+    }
+
+    // ── chat_system_prompt_with_skills ──
+
+    fn make_summary(name: &str, desc: &str, source: SkillSource, has_triggers: bool) -> SkillSummary {
+        SkillSummary {
+            name: name.to_string(),
+            description: desc.to_string(),
+            source,
+            has_triggers,
+        }
+    }
+
+    #[test]
+    fn chat_prompt_with_skills_includes_summaries() {
+        let summaries = vec![
+            make_summary("rust-debug", "Debug Rust errors", SkillSource::Blink, true),
+            make_summary("translator", "Translate text", SkillSource::Claude, false),
+        ];
+        let prompt = chat_system_prompt_with_skills(None, &summaries, &[]);
+        assert!(prompt.contains("可用技能"));
+        assert!(prompt.contains("[blink] rust-debug"));
+        assert!(prompt.contains("Debug Rust errors"));
+        assert!(prompt.contains("[claude] translator"));
+        assert!(prompt.contains("(自动触发)"), "有 triggers 的 skill 应标注");
+        assert!(prompt.contains("/skill"), "应提示 /skill 指令");
+    }
+
+    #[test]
+    fn chat_prompt_with_skills_includes_triggered_full_content() {
+        let summaries = vec![make_summary("rust-debug", "Debug", SkillSource::Blink, true)];
+        let triggered = vec![SkillEntry {
+            name: "rust-debug".to_string(),
+            description: "Debug".to_string(),
+            triggers: None,
+            full_content: "# Rust Debug Workflow\n\n1. Read error\n2. Fix".to_string(),
+            source: SkillSource::Blink,
+            dir_path: std::path::PathBuf::from("/tmp"),
+        }];
+        let prompt = chat_system_prompt_with_skills(None, &summaries, &triggered);
+        assert!(prompt.contains("已激活技能详情"));
+        assert!(prompt.contains("Rust Debug Workflow"));
+        assert!(prompt.contains("Read error"));
+    }
+
+    #[test]
+    fn chat_prompt_with_skills_empty_equals_group_prompt() {
+        let prompt = chat_system_prompt_with_skills(None, &[], &[]);
+        assert_eq!(prompt, chat_system_prompt());
+    }
+
+    #[test]
+    fn chat_prompt_with_skills_preserves_group_prompt() {
+        let prompt = chat_system_prompt_with_skills(Some("你是翻译助手"), &[], &[]);
+        assert!(prompt.contains("分组指令"));
+        assert!(prompt.contains("你是翻译助手"));
+    }
+
+    #[test]
+    fn chat_prompt_with_skills_combines_group_and_skills() {
+        let summaries = vec![make_summary("test", "Test skill", SkillSource::Blink, false)];
+        let prompt = chat_system_prompt_with_skills(Some("你是助手"), &summaries, &[]);
+        assert!(prompt.contains("分组指令"), "分组指令应保留");
+        assert!(prompt.contains("可用技能"), "技能摘要应追加");
     }
 
     /// 辅助：构造单元素 Vec

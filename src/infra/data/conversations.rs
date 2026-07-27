@@ -122,7 +122,22 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
     // 0.12.6 迁移：conversations 表加 group_id 列（若不存在）
     migrate_add_group_id_column(pool).await?;
 
-    tracing::debug!("conversations + messages + conversation_groups 表已初始化");
+    // 0.13.2: memory_fts 全文检索虚拟表（trigram 分词器，中文友好）
+    // 归档滑动窗口截断的旧消息，供 BM25 检索召回
+    sqlx::query(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+            content,
+            conversation_id UNINDEXED,
+            role UNINDEXED,
+            content_hash UNINDEXED,
+            tokenize = 'trigram'
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    tracing::debug!("conversations + messages + conversation_groups + memory_fts 表已初始化");
     Ok(())
 }
 
@@ -246,14 +261,17 @@ pub async fn list_conversations(pool: &SqlitePool) -> Result<Vec<Conversation>, 
         .collect())
 }
 
-/// 删除对话（级联删除 messages——SQLite 默认不启用 FK，手动 DELETE）。
+/// 删除对话（级联删除 messages + memory_fts——SQLite 默认不启用 FK，手动 DELETE）。
 pub async fn delete_conversation(pool: &SqlitePool, id: &str) -> Result<bool, String> {
-    // 先删 messages，再删 conversation
+    // 先删 messages，再删 memory_fts，最后删 conversation
     sqlx::query("DELETE FROM messages WHERE conversation_id = ?1")
         .bind(id)
         .execute(pool)
         .await
         .map_err(|e| e.to_string())?;
+
+    // 0.13.2: 级联删除 FTS5 归档
+    let _ = clear_memory_fts(pool, id).await;
 
     let result = sqlx::query("DELETE FROM conversations WHERE id = ?1")
         .bind(id)
@@ -308,12 +326,18 @@ pub async fn load_recent_messages(
 }
 
 /// 清空对话的所有消息（不删 conversation 记录本身）。
+///
+/// 0.13.2: 同时清理 memory_fts 中该对话的归档。
 pub async fn clear_messages(pool: &SqlitePool, conversation_id: &str) -> Result<(), String> {
     sqlx::query("DELETE FROM messages WHERE conversation_id = ?1")
         .bind(conversation_id)
         .execute(pool)
         .await
         .map_err(|e| e.to_string())?;
+
+    // 0.13.2: 同步清理 FTS5 归档
+    let _ = clear_memory_fts(pool, conversation_id).await;
+
     Ok(())
 }
 
@@ -650,6 +674,109 @@ pub async fn get_group_system_prompt(
     .map_err(|e| e.to_string())?;
 
     Ok(prompt.unwrap_or(None))
+}
+
+// ── 0.13.2 FTS5 记忆归档与召回 ──────────────────────────────────────────────────
+
+/// FTS5 召回结果。
+#[derive(Debug, Clone)]
+pub struct MemoryRecall {
+    /// 消息文本内容。
+    pub content: String,
+    /// 消息角色（user/assistant）。
+    pub role: String,
+}
+
+/// 将被挤出窗口的消息归档到 FTS5（幂等：content_hash 去重）。
+///
+/// 0.13.2：滑动窗口/token-aware 裁剪挤出的消息归档到 `memory_fts` 虚拟表，
+/// 供后续 BM25 全文检索召回。`content_hash` 用于幂等去重——
+/// 同一消息文本不重复归档（INSERT OR IGNORE 语义通过先查再插实现）。
+///
+/// **注意**：FTS5 虚拟表不支持 UNIQUE 约束，需手动查重。
+pub async fn archive_to_fts(
+    pool: &SqlitePool,
+    conversation_id: &str,
+    role: &str,
+    content: &str,
+    content_hash: &str,
+) -> Result<(), String> {
+    // 幂等检查：同 hash 已存在则跳过
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM memory_fts WHERE conversation_id = ?1 AND content_hash = ?2",
+    )
+    .bind(conversation_id)
+    .bind(content_hash)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if exists > 0 {
+        return Ok(());
+    }
+
+    sqlx::query(
+        "INSERT INTO memory_fts (content, conversation_id, role, content_hash) VALUES (?1, ?2, ?3, ?4)",
+    )
+    .bind(content)
+    .bind(conversation_id)
+    .bind(role)
+    .bind(content_hash)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+/// FTS5 BM25 全文检索召回。
+///
+/// 从 `memory_fts` 中检索与 `query` 相关的旧消息，按 BM25 相关度排序，返回 Top-K。
+/// `conversation_id` 限定检索范围（只召回当前对话的归档消息）。
+///
+/// **trigram 分词器**：中文友好，支持子串模糊匹配（如搜"搜索"命中含"搜索词"的文本）。
+pub async fn search_memory_fts(
+    pool: &SqlitePool,
+    conversation_id: &str,
+    query: &str,
+    limit: i64,
+) -> Result<Vec<MemoryRecall>, String> {
+    if query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // BM25：分数越低越相关（FTS5 的 bm25() 返回负值，越负越相关）
+    // 排除当前窗口中的消息——通过 conversation_id 限定范围即可
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT content, role FROM memory_fts
+         WHERE memory_fts MATCH ?1 AND conversation_id = ?2
+         ORDER BY bm25(memory_fts)
+         LIMIT ?3",
+    )
+    .bind(query)
+    .bind(conversation_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        tracing::warn!(error = %e, %query, "FTS5 检索失败");
+        e.to_string()
+    })?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(content, role)| MemoryRecall { content, role })
+        .collect())
+}
+
+/// 清理指定对话的 FTS5 归档（删除对话 / 清空消息时调用）。
+pub async fn clear_memory_fts(pool: &SqlitePool, conversation_id: &str) -> Result<(), String> {
+    sqlx::query("DELETE FROM memory_fts WHERE conversation_id = ?1")
+        .bind(conversation_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 // ── 单测 ───────────────────────────────────────────────────────────────────────
@@ -1056,5 +1183,120 @@ mod tests {
         let c2 = convs.iter().find(|c| c.id == "c2").unwrap();
         assert_eq!(c1.group_id.as_deref(), Some("g1"));
         assert_eq!(c2.group_id, None);
+    }
+
+    // ── 0.13.2 FTS5 记忆归档与召回 ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn fts_archive_and_search() {
+        let pool = setup_pool().await;
+
+        // 归档几条消息
+        archive_to_fts(&pool, "c1", "user", "如何用 Rust 写一个 HTTP 服务器", "hash1").await.unwrap();
+        archive_to_fts(&pool, "c1", "assistant", "可以使用 axum 或 actix-web 框架", "hash2").await.unwrap();
+        archive_to_fts(&pool, "c1", "user", "Rust 的所有权机制是什么", "hash3").await.unwrap();
+
+        // 搜索 "Rust" 应返回相关消息
+        let recalls = search_memory_fts(&pool, "c1", "Rust", 3).await.unwrap();
+        assert!(!recalls.is_empty(), "应能搜到包含 Rust 的消息");
+        assert!(recalls.iter().any(|r| r.content.contains("Rust")));
+    }
+
+    #[tokio::test]
+    async fn fts_archive_is_idempotent() {
+        let pool = setup_pool().await;
+
+        // 同一 content_hash 归档两次应幂等
+        archive_to_fts(&pool, "c1", "user", "重复的消息内容", "hash_dup").await.unwrap();
+        archive_to_fts(&pool, "c1", "user", "重复的消息内容", "hash_dup").await.unwrap();
+
+        // 搜索应只返回一条（trigram 需要 3+ 字符，用「重复的」搜索）
+        let recalls = search_memory_fts(&pool, "c1", "重复的", 10).await.unwrap();
+        assert_eq!(recalls.len(), 1, "幂等归档：同 hash 不重复插入");
+    }
+
+    #[tokio::test]
+    async fn fts_search_isolation_between_conversations() {
+        let pool = setup_pool().await;
+
+        archive_to_fts(&pool, "c1", "user", "对话一的话题是 Rust", "h1").await.unwrap();
+        archive_to_fts(&pool, "c2", "user", "对话二的话题是 Python", "h2").await.unwrap();
+
+        // c1 搜索只返回 c1 的归档
+        let recalls = search_memory_fts(&pool, "c1", "Rust", 10).await.unwrap();
+        assert_eq!(recalls.len(), 1);
+        assert!(recalls[0].content.contains("Rust"));
+
+        // c2 搜索只返回 c2 的归档
+        let recalls = search_memory_fts(&pool, "c2", "Python", 10).await.unwrap();
+        assert_eq!(recalls.len(), 1);
+        assert!(recalls[0].content.contains("Python"));
+
+        // c1 搜索 Python 应无结果
+        let recalls = search_memory_fts(&pool, "c1", "Python", 10).await.unwrap();
+        assert!(recalls.is_empty(), "对话隔离：c1 不应搜到 c2 的归档");
+    }
+
+    #[tokio::test]
+    async fn fts_search_chinese_trigram() {
+        let pool = setup_pool().await;
+
+        archive_to_fts(&pool, "c1", "user", "我想学习 Rust 异步编程", "h1").await.unwrap();
+        archive_to_fts(&pool, "c1", "assistant", "异步编程推荐使用 tokio 运行时", "h2").await.unwrap();
+
+        // trigram 分词器：搜 "异步编程" 应命中含 "异步编程" 的消息
+        let recalls = search_memory_fts(&pool, "c1", "异步编程", 10).await.unwrap();
+        assert!(!recalls.is_empty(), "trigram 中文子串匹配应生效");
+
+        // 搜 "tokio" 应命中 assistant 消息
+        let recalls = search_memory_fts(&pool, "c1", "tokio", 10).await.unwrap();
+        assert!(!recalls.is_empty(), "英文关键词也应可搜到");
+    }
+
+    #[tokio::test]
+    async fn fts_clear_removes_entries() {
+        let pool = setup_pool().await;
+
+        archive_to_fts(&pool, "c1", "user", "待清理的消息内容", "h1").await.unwrap();
+        assert!(!search_memory_fts(&pool, "c1", "清理的", 10).await.unwrap().is_empty());
+
+        clear_memory_fts(&pool, "c1").await.unwrap();
+        assert!(search_memory_fts(&pool, "c1", "清理的", 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn fts_delete_conversation_cascades() {
+        let pool = setup_pool().await;
+        create_conversation(&pool, "c1", Some("Test")).await.unwrap();
+        archive_to_fts(&pool, "c1", "user", "级联删除测试", "h1").await.unwrap();
+        assert!(!search_memory_fts(&pool, "c1", "级联删除", 10).await.unwrap().is_empty());
+
+        delete_conversation(&pool, "c1").await.unwrap();
+        assert!(search_memory_fts(&pool, "c1", "级联删除", 10).await.unwrap().is_empty(),
+            "删除对话应级联清理 FTS5 归档");
+    }
+
+    #[tokio::test]
+    async fn fts_clear_messages_cleans_fts() {
+        let pool = setup_pool().await;
+        create_conversation(&pool, "c1", Some("Test")).await.unwrap();
+        archive_to_fts(&pool, "c1", "user", "清空消息时清理FTS归档", "h1").await.unwrap();
+        assert!(!search_memory_fts(&pool, "c1", "清空消息", 10).await.unwrap().is_empty());
+
+        clear_messages(&pool, "c1").await.unwrap();
+        assert!(search_memory_fts(&pool, "c1", "清空消息", 10).await.unwrap().is_empty(),
+            "清空消息应同步清理 FTS5 归档");
+    }
+
+    #[tokio::test]
+    async fn fts_search_empty_query_returns_empty() {
+        let pool = setup_pool().await;
+        archive_to_fts(&pool, "c1", "user", "一些内容", "h1").await.unwrap();
+
+        let recalls = search_memory_fts(&pool, "c1", "", 10).await.unwrap();
+        assert!(recalls.is_empty(), "空 query 应返回空结果");
+
+        let recalls = search_memory_fts(&pool, "c1", "   ", 10).await.unwrap();
+        assert!(recalls.is_empty(), "纯空格 query 应返回空结果");
     }
 }

@@ -15,6 +15,8 @@
 //!
 //! 0.12.1 用 `InMemoryConversationMemory`(进程内,重启丢),agent 自动 load/append
 //! per `conversation_id`。0.12.2 换 `SqliteConversationMemory`(impl `ConversationMemory`)。
+//! 0.13.1: `new()` 接收 `Arc<SqliteConversationMemory>`（具体类型），构造时注入
+//! `ModelEntry.context_window` 到 memory 配置，驱动 token-aware 窗口裁剪。
 //!
 //! ## tool 池
 //!
@@ -38,9 +40,14 @@ use rig_core::wasm_compat::WasmCompatSend;
 use crate::app::ai_config::{ModelEntry, ProviderEntry, ProviderKind};
 use std::sync::Arc;
 
+/// Anthropic API 要求 max_tokens 必填，若 model 层未配置则使用此默认值。
+/// 与 `rig_provider::build_rig_request` 中的 `ANTHROPIC_DEFAULT_MAX_TOKENS` 保持一致。
+const ANTHROPIC_DEFAULT_MAX_TOKENS: u64 = 4096;
+
 use crate::domain::ai::factory::{
     build_anthropic_client, build_gemini_client, build_ollama_client, build_openai_client,
 };
+use crate::domain::ai::memory::SqliteConversationMemory;
 use crate::domain::ai::provider::AIError;
 use crate::domain::ai::rig_provider::expose_for_rig;
 use crate::infra::platform::secret;
@@ -116,18 +123,28 @@ impl AgentProvider {
     /// 从 `ProviderEntry`+`ModelEntry` 构造 Agent。
     ///
     /// - `memory` 由 ChatService 持有，切换 Provider/Model 时复用同一份 memory。
+    /// - 0.13.1: 构造时注入 `model.context_window` 到 memory 配置，驱动 token-aware 裁剪。
     /// - 读密钥(本地 ollama 跳过,与 `RigFactory::build` 一致)
     /// - 按 `entry.kind` 构造 rig client + `completion_model` 得裸 model(复用 factory 的 `build_*_client`)
     /// - `AgentBuilder` 挂 preamble + tools + memory + `default_max_turns` -> `Agent<M>` -> `ChatAgent`
     ///
     /// **tools 被 move 进唯一命中的 match arm**(match 只走一个 arm,无需 Clone)。
-    pub fn new(
+    pub async fn new(
         entry: &ProviderEntry,
         model: &ModelEntry,
         tools: Vec<Box<dyn ToolDyn>>,
         preamble: &str,
-        memory: Arc<dyn ConversationMemory>,
+        memory: Arc<SqliteConversationMemory>,
     ) -> Result<Self, AIError> {
+        // 0.13.1: 注入模型 context_window 到 memory 配置
+        let context_limit = model.context_window.map(|u| u as usize);
+        memory.update_context_limit(context_limit).await;
+        tracing::debug!(
+            model = %model.id,
+            context_limit = ?context_limit,
+            "AgentProvider: 已注入 context_limit 到 memory"
+        );
+
         // 读密钥--与 RigFactory::build 一致(本地 provider 跳过)
         let key_str: String = if entry.kind.requires_secret() {
             let key = secret::load_secret(&entry.id, "key").map_err(|e| {
@@ -143,26 +160,72 @@ impl AgentProvider {
             String::new()
         };
 
+        // SqliteConversationMemory -> Arc<dyn ConversationMemory>（rig AgentBuilder 需要 trait object）
+        let memory_dyn: Arc<dyn ConversationMemory> = memory;
+
+        // 0.13.x: 将 model 层的 temperature / max_tokens 传入 build_agent，
+        // 让 rig AgentBuilder 在构造时固化默认值。Anthropic 的 max_tokens 是必填字段，
+        // 若 model 层未配置则使用 ANTHROPIC_DEFAULT_MAX_TOKENS 兜底。
+        let default_temperature = model.temperature.map(|f| f as f64);
+        let default_max_tokens = model.max_tokens.map(|n| n as u64);
+
         let agent = match entry.kind {
             ProviderKind::OpenAICompatible => {
                 let client = build_openai_client(&key_str, entry.base_url.as_deref())?;
                 let m = client.completion_model(&model.id);
-                ChatAgent::OpenAI(build_agent(m, preamble, tools, memory))
+                ChatAgent::OpenAI(build_agent(
+                    m,
+                    preamble,
+                    tools,
+                    memory_dyn,
+                    default_temperature,
+                    default_max_tokens,
+                ))
             }
             ProviderKind::AnthropicMessages => {
                 let client = build_anthropic_client(&key_str, entry.base_url.as_deref())?;
                 let m = client.completion_model(&model.id);
-                ChatAgent::Anthropic(build_agent(m, preamble, tools, memory))
+                // Anthropic max_tokens 必填，兜底 4096
+                let anthropic_max_tokens =
+                    default_max_tokens.unwrap_or(ANTHROPIC_DEFAULT_MAX_TOKENS);
+                if default_max_tokens.is_none() {
+                    tracing::debug!(
+                        "AgentProvider: Anthropic max_tokens 未配置，使用默认值 {}",
+                        ANTHROPIC_DEFAULT_MAX_TOKENS
+                    );
+                }
+                ChatAgent::Anthropic(build_agent(
+                    m,
+                    preamble,
+                    tools,
+                    memory_dyn,
+                    default_temperature,
+                    Some(anthropic_max_tokens),
+                ))
             }
             ProviderKind::GeminiGenerateContent => {
                 let client = build_gemini_client(&key_str, entry.base_url.as_deref())?;
                 let m = client.completion_model(&model.id);
-                ChatAgent::Gemini(build_agent(m, preamble, tools, memory))
+                ChatAgent::Gemini(build_agent(
+                    m,
+                    preamble,
+                    tools,
+                    memory_dyn,
+                    default_temperature,
+                    default_max_tokens,
+                ))
             }
             ProviderKind::OllamaHttp => {
                 let client = build_ollama_client(entry.base_url.as_deref())?;
                 let m = client.completion_model(&model.id);
-                ChatAgent::Ollama(build_agent(m, preamble, tools, memory))
+                ChatAgent::Ollama(build_agent(
+                    m,
+                    preamble,
+                    tools,
+                    memory_dyn,
+                    default_temperature,
+                    default_max_tokens,
+                ))
             }
         };
         Ok(Self { agent, model_name: model_display_name(entry, model) })
@@ -360,21 +423,36 @@ fn summarize_tool_result(tool_result: &ToolResult) -> String {
 }
 
 /// 构造 `Agent<M>`(4 arm 共用,泛型 M 由各 arm 具体化)。
+///
+/// `default_temperature` / `default_max_tokens` 从 `ModelEntry` 来，
+/// 构造时固化到 `AgentBuilder`，rig Agent 内部生成 `CompletionRequest` 时使用。
+/// `None` 表示不覆盖（rig 让 provider 自己决定），但 Anthropic 的 `max_tokens` 是
+/// 必填字段，调用方需确保传入 `Some`（见 `AgentProvider::new` 中的兜底逻辑）。
 fn build_agent<M>(
     model: M,
     preamble: &str,
     tools: Vec<Box<dyn ToolDyn>>,
     memory: Arc<dyn ConversationMemory>,
+    default_temperature: Option<f64>,
+    default_max_tokens: Option<u64>,
 ) -> Agent<M>
 where
     M: CompletionModel + 'static,
 {
-    AgentBuilder::new(model)
+    let mut builder = AgentBuilder::new(model)
         .preamble(preamble)
         .tools(tools)
         .memory(memory)
-        .default_max_turns(MAX_TURNS)
-        .build()
+        .default_max_turns(MAX_TURNS);
+
+    if let Some(temp) = default_temperature {
+        builder = builder.temperature(temp);
+    }
+    if let Some(max_tok) = default_max_tokens {
+        builder = builder.max_tokens(max_tok);
+    }
+
+    builder.build()
 }
 
 #[cfg(test)]

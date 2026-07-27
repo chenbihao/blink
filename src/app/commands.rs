@@ -2471,9 +2471,15 @@ pub async fn set_config(
                 reg.reload(&ai);
             }
             // 对话 Agent 按需重建；memory 归 ChatService 所有，不随配置失效。
+            // 0.13.1: 先同步 memory 策略配置（保留运行时 context_limit），再失效缓存。
             if let Some(chat) =
                 app.try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
             {
+                chat.update_memory_config(ai.chat_config.memory_config.clone()).await;
+                // 0.13.3: Skill 配置变更后刷新 Skill 注册表
+                if ai.chat_config.skill_config.enabled {
+                    chat.refresh_skills(&ai.chat_config.skill_config.enabled_sources());
+                }
                 chat.notify_config_changed();
             }
 
@@ -5453,6 +5459,285 @@ pub fn open_stt_folder() -> Result<(), String> {
         .arg(&python_dir)
         .spawn()
         .map_err(|e| format!("打开文件夹失败: {e}"))?;
+    Ok(())
+}
+
+// ─── MCP client 命令（0.13.0）─────────────────────────────────────────────────
+
+/// MCP server 列表项（含配置 + 运行时状态 + tool 数量）。
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct McpServerListItem {
+    #[serde(flatten)]
+    pub config: crate::domain::mcp::McpServerConfig,
+    /// 运行时状态（online / offline / connecting）。
+    pub status: crate::domain::mcp::McpServerStatus,
+}
+
+/// 列出所有已配置的 MCP server（含状态）。
+#[tauri::command]
+pub async fn list_mcp_servers(
+    app: tauri::AppHandle,
+) -> Result<Vec<McpServerListItem>, String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    let configs = crate::domain::mcp::McpServerConfigStore::load_all(&pools.config)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
+    let statuses = manager.get_statuses().await;
+
+    let items = configs
+        .into_iter()
+        .map(|config| {
+            let status = statuses
+                .get(&config.name)
+                .cloned()
+                .unwrap_or(crate::domain::mcp::McpServerStatus::Offline {
+                    reason: "未启动".to_string(),
+                });
+            McpServerListItem { config, status }
+        })
+        .collect();
+
+    Ok(items)
+}
+
+/// 添加或更新 MCP server 配置（按 name 去重）。
+#[tauri::command]
+pub async fn upsert_mcp_server(
+    app: tauri::AppHandle,
+    config: crate::domain::mcp::McpServerConfig,
+) -> Result<(), String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    crate::domain::mcp::McpServerConfigStore::upsert(&pools.config, config)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// 删除 MCP server 配置（同时停止已连接的 server）。
+#[tauri::command]
+pub async fn delete_mcp_server(
+    app: tauri::AppHandle,
+    name: String,
+) -> Result<(), String> {
+    // 先停止 server（如果有连接）
+    let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
+    manager.stop_server(&name).await;
+
+    let pools = app.state::<crate::infra::data::DbPools>();
+    crate::domain::mcp::McpServerConfigStore::delete(&pools.config, &name)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// 设置 MCP server 的 enabled 状态。
+#[tauri::command]
+pub async fn set_mcp_server_enabled(
+    app: tauri::AppHandle,
+    name: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    crate::domain::mcp::McpServerConfigStore::set_enabled(&pools.config, &name, enabled)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// 手动启动 MCP server。
+#[tauri::command]
+pub async fn start_mcp_server(
+    app: tauri::AppHandle,
+    name: String,
+) -> Result<(), String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    let configs = crate::domain::mcp::McpServerConfigStore::load_all(&pools.config)
+        .await
+        .map_err(|e| e.to_string())?;
+    let config = configs
+        .into_iter()
+        .find(|c| c.name == name)
+        .ok_or_else(|| format!("未找到 server 配置: {name}"))?;
+
+    let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
+    manager.start_server(&config).await
+}
+
+/// 手动停止 MCP server。
+#[tauri::command]
+pub async fn stop_mcp_server(
+    app: tauri::AppHandle,
+    name: String,
+) -> Result<(), String> {
+    let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
+    manager.stop_server(&name).await;
+    Ok(())
+}
+
+/// 重连 MCP server（先停再启）。
+#[tauri::command]
+pub async fn reconnect_mcp_server(
+    app: tauri::AppHandle,
+    name: String,
+) -> Result<(), String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
+    manager.reconnect_server(&name, &pools.config).await
+}
+
+/// 获取单个 MCP server 的 tool 列表（供前端预览）。
+#[tauri::command]
+pub async fn get_mcp_server_tools(
+    app: tauri::AppHandle,
+    name: String,
+) -> Result<Vec<crate::domain::mcp::McpToolInfo>, String> {
+    let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
+    manager
+        .get_server_tools(&name)
+        .await
+        .ok_or_else(|| format!("server {name} 未连接或不存在"))
+}
+
+/// 更新 MCP server 的 disabled_tools（tool 粒度开关）。
+#[tauri::command]
+pub async fn set_mcp_server_disabled_tools(
+    app: tauri::AppHandle,
+    name: String,
+    disabled_tools: Vec<String>,
+) -> Result<(), String> {
+    // 更新配置库
+    let pools = app.state::<crate::infra::data::DbPools>();
+    crate::domain::mcp::McpServerConfigStore::set_disabled_tools(
+        &pools.config,
+        &name,
+        disabled_tools.clone(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // 更新运行时缓存
+    let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
+    manager
+        .update_disabled_tools(&name, disabled_tools)
+        .await;
+
+    Ok(())
+}
+
+/// 获取对话窗口 tool 池规模（内置 + MCP，供前端显示）。
+#[tauri::command]
+pub async fn get_mcp_tool_pool_size(
+    app: tauri::AppHandle,
+) -> serde_json::Value {
+    let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
+    let mcp_tools = manager.collect_tools().await.len();
+
+    // 内置 tool 数 = Capability 数 + ai_eligible Action 数
+    let cap_registry = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
+    let action_registry = app.state::<std::sync::Arc<crate::domain::execution::ActionRegistry>>();
+    let builtin_tools = cap_registry.len()
+        + action_registry
+            .entries()
+            .iter()
+            .filter(|(_, a)| a.ai_eligible())
+            .count();
+
+    serde_json::json!({
+        "builtin": builtin_tools,
+        "mcp": mcp_tools,
+        "total": builtin_tools + mcp_tools,
+    })
+}
+
+/// 获取所有已连接 MCP server 的 tool 名称列表（供前端区分工具来源）。
+#[tauri::command]
+pub async fn get_mcp_tool_names(
+    app: tauri::AppHandle,
+) -> Vec<String> {
+    let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
+    manager.get_all_tool_names().await
+}
+
+// ── 0.13.3 Skill 约定式 ──────────────────────────────────────────────────────
+
+/// 列出所有已发现的 Skill 条目（设置页展示用）。
+///
+/// 返回 `Vec<SkillEntry>` 的序列化 JSON（含 name / description / source / triggers，
+/// 不含 `full_content` 和 `dir_path`——`#[serde(skip)]` 字段不序列化）。
+#[tauri::command]
+pub async fn list_skills(
+    app: tauri::AppHandle,
+) -> Vec<crate::domain::ai::skill::SkillEntry> {
+    use tauri::Manager;
+    let chat = app
+        .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>();
+    match chat {
+        Some(cs) => cs.skill_registry().all(),
+        None => Vec::new(),
+    }
+}
+
+/// 手动刷新 Skill 注册表——重新扫描所有启用的来源目录。
+///
+/// 从当前 AIConfig 读取 `skill_config.enabled_sources()`，调用 `ChatService::refresh_skills`。
+/// 设置页「刷新」按钮调用。
+#[tauri::command]
+pub async fn refresh_skills(
+    app: tauri::AppHandle,
+) -> Result<usize, String> {
+    use tauri::Manager;
+    let pools = app.state::<crate::infra::data::DbPools>();
+    let ai_config = crate::app::config::ConfigStore::get::<crate::app::ai_config::AIConfig>(
+        &pools.config,
+    )
+    .await;
+
+    if !ai_config.chat_config.skill_config.enabled {
+        return Ok(0);
+    }
+
+    let sources = ai_config.chat_config.skill_config.enabled_sources();
+    let chat = app
+        .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
+        .ok_or("ChatService 未初始化")?;
+    chat.refresh_skills(&sources);
+    let count = cs_count_skills(&chat);
+    tracing::info!(count, "Skill 注册表已手动刷新");
+    Ok(count)
+}
+
+/// 辅助：从 ChatService 获取 skill 数量（不暴露 SkillRegistry 细节）。
+fn cs_count_skills(
+    chat: &std::sync::Arc<crate::domain::ai::chat_service::ChatService>,
+) -> usize {
+    chat.skill_registry().count()
+}
+
+/// 打开指定来源的 Skill 目录（Explorer）。
+///
+/// 目录不存在时自动创建（方便用户放入 SKILL.md）。
+/// `source` 参数："blink" / "claude" / "zcode"。
+#[tauri::command]
+pub async fn open_skill_dir(source: String) -> Result<(), String> {
+    let skill_source = match source.as_str() {
+        "blink" => crate::domain::ai::skill::SkillSource::Blink,
+        "claude" => crate::domain::ai::skill::SkillSource::Claude,
+        "zcode" => crate::domain::ai::skill::SkillSource::Zcode,
+        _ => return Err(format!("未知的 Skill 来源: {source}")),
+    };
+
+    let dir = skill_source
+        .directory()
+        .ok_or_else(|| "无法解析 Skill 目录路径".to_string())?;
+
+    // 目录不存在时先创建，避免 explorer 打开默认位置
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir).map_err(|e| format!("创建 Skill 目录失败: {e}"))?;
+    }
+
+    std::process::Command::new("explorer.exe")
+        .arg(&dir)
+        .spawn()
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 

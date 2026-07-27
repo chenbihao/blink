@@ -843,6 +843,74 @@ body {
   white-space: nowrap;
 }
 
+/* ── 0.13.3 /skill 命令提示 ──────────────────────────────────────────── */
+
+.skill-hint {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  max-height: 280px;
+  overflow-y: auto;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border-color, #e0e0e0);
+  border-radius: 8px 8px 0 0;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.08);
+  z-index: 20;
+  padding: 4px 0;
+}
+
+.skill-hint[hidden] {
+  display: none;
+}
+
+.skill-hint-empty {
+  padding: 10px 14px;
+  font-size: var(--text-sm, 13px);
+  color: var(--text-tertiary, #999);
+  font-style: italic;
+}
+
+.skill-hint-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.skill-hint-item:hover {
+  background: var(--accent-bg, #f0f7ff);
+}
+
+.skill-hint-name {
+  font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+  font-size: var(--text-sm, 13px);
+  font-weight: var(--weight-medium, 500);
+  color: var(--text-primary, #333);
+  flex-shrink: 0;
+}
+
+.skill-hint-source {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--bg-tertiary, #f0f0f0);
+  color: var(--text-secondary, #666);
+  font-weight: var(--weight-semibold, 600);
+  flex-shrink: 0;
+}
+
+.skill-hint-desc {
+  font-size: var(--text-xs, 12px);
+  color: var(--text-tertiary, #999);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
 /* 0.12.7 §1：面包屑标题（文件夹路径 + 对话标题） */
 .chat-breadcrumb {
   flex: 1;
@@ -2020,6 +2088,21 @@ body {
   flex-shrink: 0;
 }
 
+/* 0.13.0：MCP 来源标记 */
+.chat-tool-card-source {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  letter-spacing: 0.3px;
+}
+
+.chat-tool-card-source.mcp {
+  background: color-mix(in srgb, var(--accent, #6cb6ff) 20%, transparent);
+  color: var(--accent, #6cb6ff);
+}
+
 .chat-tool-card-icon {
   width: 16px;
   height: 16px;
@@ -2320,6 +2403,21 @@ body {
   display: flex;
   align-items: center;
   gap: var(--space-xs);
+}
+
+/* 0.13.0：composer bar 右侧（tool 池指示器） */
+.chat-composer-bar-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  margin-right: var(--space-xs);
+}
+
+.chat-tool-pool {
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  user-select: none;
 }
 
 /* ── 深度思考按钮（悬浮在输入框内） ─────────── */

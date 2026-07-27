@@ -335,6 +335,24 @@ export function getConversationSystemPrompt(conversationId) {
   return invoke("get_conversation_system_prompt", { conversationId });
 }
 
+// ── MCP tool 池（0.13.0）──────────────────────────────────────────
+
+/**
+ * 获取对话窗口 tool 池规模（内置 + MCP，供前端显示）。
+ * @returns {Promise<{builtin: number, mcp: number, total: number}>}
+ */
+export function getMcpToolPoolSize() {
+  return invoke("get_mcp_tool_pool_size");
+}
+
+/**
+ * 获取所有已连接 MCP server 的 tool 名称列表（供前端区分工具来源）。
+ * @returns {Promise<string[]>}
+ */
+export function getMcpToolNames() {
+  return invoke("get_mcp_tool_names");
+}
+
 // ── Events ───────────────────────────────────────
 
 /**

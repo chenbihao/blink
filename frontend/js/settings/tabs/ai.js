@@ -50,9 +50,12 @@ export function initAITab() {
   // 0.11.4 §3.5: 语言切换时刷新工具回流描述文字（动态文本不走 data-i18n）
   onLangChange(() => {
     const container = document.getElementById("ai-tool-feedback");
-    if (!container) return;
-    const activeBtn = container.querySelector(".seg-btn.active");
-    updateToolFeedbackDesc(activeBtn ? activeBtn.dataset.value : "auto");
+    if (container) {
+      const activeBtn = container.querySelector(".seg-btn.active");
+      updateToolFeedbackDesc(activeBtn ? activeBtn.dataset.value : "auto");
+    }
+    // 0.13.1: 语言切换时刷新记忆策略动态文本（如「未配置」）
+    updateMemoryContextSizeDisplay();
   });
 }
 
@@ -102,7 +105,7 @@ function defaultAIConfig() {
     direct_execute_safe_actions: false,
     streaming: true,
     slo_hard_timeout_ms: null,
-    chat_config: { auto_title: false, title_tier: "light" },
+    chat_config: { auto_title: false, title_tier: "light", memory_config: { mode: "token_aware", window_size: 20, trigger_ratio: 0.8, compress_ratio: 0.7, recall_enabled: true, recall_top_k: 3 }, skill_config: { enabled: true, source_blink: true, source_claude: true, source_zcode: false } },
     ai_tool_result_feedback: "on",
   };
 }
@@ -126,6 +129,29 @@ function applyAIConfigToUI() {
   const chatCfg = c.chat_config || { auto_title: false, title_tier: "light" };
   if ($("ai-chat-auto-title")) $("ai-chat-auto-title").checked = !!chatCfg.auto_title;
   if ($("ai-chat-title-tier")) $("ai-chat-title-tier").value = chatCfg.title_tier || "light";
+  // 0.13.1 §3.7：记忆策略配置
+  const memCfg = chatCfg.memory_config || { mode: "token_aware", window_size: 20, trigger_ratio: 0.8, compress_ratio: 0.7, recall_enabled: true, recall_top_k: 3 };
+  if ($("ai-memory-mode")) $("ai-memory-mode").value = memCfg.mode || "token_aware";
+  if ($("ai-memory-window-size")) $("ai-memory-window-size").value = memCfg.window_size ?? 20;
+  if ($("ai-memory-trigger-ratio")) {
+    $("ai-memory-trigger-ratio").value = Math.round((memCfg.trigger_ratio ?? 0.8) * 100);
+  }
+  if ($("ai-memory-compress-ratio")) {
+    $("ai-memory-compress-ratio").value = Math.round((memCfg.compress_ratio ?? 0.7) * 100);
+  }
+  // 0.13.2: FTS5 召回配置
+  if ($("ai-memory-recall-enabled")) $("ai-memory-recall-enabled").checked = memCfg.recall_enabled !== false;
+  if ($("ai-memory-recall-top-k")) $("ai-memory-recall-top-k").value = memCfg.recall_top_k ?? 3;
+  updateMemoryConfigVisibility(memCfg.mode || "token_aware");
+  updateMemoryContextSizeDisplay();
+  // 0.13.3: Skill 配置
+  const skillCfg = chatCfg.skill_config || { enabled: true, source_blink: true, source_claude: true, source_zcode: false };
+  if ($("ai-skill-enabled")) $("ai-skill-enabled").checked = skillCfg.enabled !== false;
+  if ($("ai-skill-source-blink")) $("ai-skill-source-blink").checked = skillCfg.source_blink !== false;
+  if ($("ai-skill-source-claude")) $("ai-skill-source-claude").checked = skillCfg.source_claude !== false;
+  if ($("ai-skill-source-zcode")) $("ai-skill-source-zcode").checked = !!skillCfg.source_zcode;
+  // 加载已发现的 Skill 列表
+  loadSkillList();
   // 0.11.4 §3.5: 工具结果回流 AI 三态分段按钮
   const feedbackValue = c.ai_tool_result_feedback ?? "on";
   setSegControlValue("ai-tool-feedback", feedbackValue);
@@ -1116,16 +1142,70 @@ function setSegControlValue(id, value) {
  * 更新工具结果回流 AI 的描述文字（根据当前选择值切换）
  */
 function updateToolFeedbackDesc(value) {
-  const descEl = document.getElementById("ai-tool-feedback-desc");
-  if (!descEl) return;
-  const key = `ai.advanced.tool_feedback.desc.${value || "auto"}`;
-  descEl.textContent = t(key);
+const descEl = document.getElementById("ai-tool-feedback-desc");
+if (!descEl) return;
+const key = `ai.advanced.tool_feedback.desc.${value || "auto"}`;
+descEl.textContent = t(key);
+}
+
+/**
+ * 0.13.1 §3.7：根据窗口模式切换记忆策略 UI 元素的可见性。
+ *
+ * - token_aware：隐藏窗口大小行，显示触发压缩/压缩目标行
+ * - fixed_count：显示窗口大小行，隐藏触发压缩/压缩目标行
+ */
+function updateMemoryConfigVisibility(mode) {
+const isFixed = mode === "fixed_count";
+const windowSizeRow = document.getElementById("ai-memory-window-size-row");
+const triggerRow = document.getElementById("ai-memory-trigger-row");
+const compressRow = document.getElementById("ai-memory-compress-row");
+if (windowSizeRow) windowSizeRow.style.display = isFixed ? "" : "none";
+if (triggerRow) triggerRow.style.display = isFixed ? "none" : "";
+if (compressRow) compressRow.style.display = isFixed ? "none" : "";
+}
+
+/**
+ * 0.13.1 §3.7：展示当前主档模型的 context_window 大小。
+ *
+ * 从 currentAIConfig 查找 tier_main 引用的模型的 context_window。
+ * 缺失则标注「未配置」。
+ */
+function updateMemoryContextSizeDisplay() {
+const el = document.getElementById("ai-memory-context-size");
+if (!el || !currentAIConfig) return;
+
+const tier = currentAIConfig.tier_main;
+if (!tier) {
+el.textContent = t("ai.memory.context_size.unconfigured");
+el.className = "ai-prompt-tokens ai-prompt-tokens--warn";
+return;
+}
+
+const provider = (currentAIConfig.providers || []).find((p) => p.id === tier.provider_id);
+if (!provider) {
+el.textContent = t("ai.memory.context_size.unconfigured");
+el.className = "ai-prompt-tokens ai-prompt-tokens--warn";
+return;
+}
+
+const model = (provider.models || []).find((m) => m.id === tier.model_id);
+if (!model || !model.context_window) {
+el.textContent = t("ai.memory.context_size.unconfigured");
+el.className = "ai-prompt-tokens ai-prompt-tokens--warn";
+return;
+}
+
+// 格式化为可读形式（如 32K / 128K）
+const cw = model.context_window;
+const display = cw >= 1000 ? `${Math.round(cw / 1000)}K` : `${cw}`;
+el.textContent = `${display} tokens`;
+el.className = "ai-prompt-tokens";
 }
 
 // ── AI 事件绑定（幂等）──────────────────────────────────────────────────────
 
 function bindAIEvents() {
-  const root = document.getElementById("ai");
+  const root = document.getElementById("ai-providers");
   if (!root || root.dataset.eventsBound === "1") return;
   root.dataset.eventsBound = "1";
 
@@ -1177,6 +1257,106 @@ function bindAIEvents() {
     currentAIConfig.chat_config.title_tier = e.target.value;
     saveAIConfig();
   });
+  // 0.13.1 §3.7：记忆策略配置事件绑定
+  $("ai-memory-mode")?.addEventListener("change", (e) => {
+    currentAIConfig.chat_config = currentAIConfig.chat_config || {};
+    currentAIConfig.chat_config.memory_config = currentAIConfig.chat_config.memory_config || {};
+    currentAIConfig.chat_config.memory_config.mode = e.target.value;
+    updateMemoryConfigVisibility(e.target.value);
+    saveAIConfig();
+  });
+  $("ai-memory-window-size")?.addEventListener("change", (e) => {
+    const v = parseInt(e.target.value, 10);
+    currentAIConfig.chat_config = currentAIConfig.chat_config || {};
+    currentAIConfig.chat_config.memory_config = currentAIConfig.chat_config.memory_config || {};
+    currentAIConfig.chat_config.memory_config.window_size = isNaN(v) ? 20 : Math.max(5, Math.min(100, v));
+    e.target.value = currentAIConfig.chat_config.memory_config.window_size;
+    saveAIConfig();
+  });
+  $("ai-memory-trigger-ratio")?.addEventListener("change", (e) => {
+    const v = parseInt(e.target.value, 10);
+    const clamped = isNaN(v) ? 80 : Math.max(50, Math.min(95, v));
+    e.target.value = clamped;
+    currentAIConfig.chat_config = currentAIConfig.chat_config || {};
+    currentAIConfig.chat_config.memory_config = currentAIConfig.chat_config.memory_config || {};
+    currentAIConfig.chat_config.memory_config.trigger_ratio = clamped / 100;
+    saveAIConfig();
+  });
+  $("ai-memory-compress-ratio")?.addEventListener("change", (e) => {
+    const v = parseInt(e.target.value, 10);
+    const clamped = isNaN(v) ? 70 : Math.max(30, Math.min(90, v));
+    e.target.value = clamped;
+    currentAIConfig.chat_config = currentAIConfig.chat_config || {};
+    currentAIConfig.chat_config.memory_config = currentAIConfig.chat_config.memory_config || {};
+    currentAIConfig.chat_config.memory_config.compress_ratio = clamped / 100;
+    saveAIConfig();
+  });
+// 0.13.3: Skill 配置事件绑定
+$("ai-skill-enabled")?.addEventListener("change", (e) => {
+  currentAIConfig.chat_config = currentAIConfig.chat_config || {};
+  currentAIConfig.chat_config.skill_config = currentAIConfig.chat_config.skill_config || {};
+  currentAIConfig.chat_config.skill_config.enabled = e.target.checked;
+  saveAIConfig();
+});
+$("ai-skill-source-blink")?.addEventListener("change", (e) => {
+  currentAIConfig.chat_config = currentAIConfig.chat_config || {};
+  currentAIConfig.chat_config.skill_config = currentAIConfig.chat_config.skill_config || {};
+  currentAIConfig.chat_config.skill_config.source_blink = e.target.checked;
+  saveAIConfig();
+});
+$("ai-skill-source-claude")?.addEventListener("change", (e) => {
+  currentAIConfig.chat_config = currentAIConfig.chat_config || {};
+  currentAIConfig.chat_config.skill_config = currentAIConfig.chat_config.skill_config || {};
+  currentAIConfig.chat_config.skill_config.source_claude = e.target.checked;
+  saveAIConfig();
+});
+$("ai-skill-source-zcode")?.addEventListener("change", (e) => {
+  currentAIConfig.chat_config = currentAIConfig.chat_config || {};
+  currentAIConfig.chat_config.skill_config = currentAIConfig.chat_config.skill_config || {};
+  currentAIConfig.chat_config.skill_config.source_zcode = e.target.checked;
+  saveAIConfig();
+});
+// 打开 Skill 目录按钮
+document.querySelectorAll(".skill-open-dir").forEach((btn) => {
+  btn.addEventListener("click", async () => {
+    const source = btn.dataset.source;
+    try {
+      await invoke("open_skill_dir", { source });
+    } catch (e) {
+      console.error("open_skill_dir failed:", e);
+    }
+  });
+});
+// 刷新 Skill 列表按钮
+$("ai-skill-refresh")?.addEventListener("click", async () => {
+  const btn = $("ai-skill-refresh");
+  if (btn) { btn.disabled = true; btn.textContent = "..."; }
+  try {
+    const count = await invoke("refresh_skills");
+    await loadSkillList();
+    if (btn) btn.textContent = t("ai.skill.refresh") || "刷新";
+  } catch (e) {
+    console.error("refresh_skills failed:", e);
+    if (btn) btn.textContent = t("ai.skill.refresh") || "刷新";
+  }
+  btn && (btn.disabled = false);
+});
+
+// 0.13.2: FTS5 召回配置事件绑定
+$("ai-memory-recall-enabled")?.addEventListener("change", (e) => {
+    currentAIConfig.chat_config = currentAIConfig.chat_config || {};
+    currentAIConfig.chat_config.memory_config = currentAIConfig.chat_config.memory_config || {};
+    currentAIConfig.chat_config.memory_config.recall_enabled = e.target.checked;
+    saveAIConfig();
+  });
+  $("ai-memory-recall-top-k")?.addEventListener("change", (e) => {
+    const v = parseInt(e.target.value, 10);
+    currentAIConfig.chat_config = currentAIConfig.chat_config || {};
+    currentAIConfig.chat_config.memory_config = currentAIConfig.chat_config.memory_config || {};
+    currentAIConfig.chat_config.memory_config.recall_top_k = isNaN(v) ? 3 : Math.max(1, Math.min(10, v));
+    e.target.value = currentAIConfig.chat_config.memory_config.recall_top_k;
+    saveAIConfig();
+  });
   // 0.11.4 §3.5: 工具结果回流 AI 三态分段按钮
   $("ai-tool-feedback")?.addEventListener("click", (e) => {
     const btn = e.target.closest(".seg-btn");
@@ -1207,6 +1387,8 @@ function bindAIEvents() {
       }
       renderAITierDegrade();
       renderAITierBanner();
+      // 0.13.1: 主档变更时刷新 context window 显示
+      if (tier === "main") updateMemoryContextSizeDisplay();
       saveAIConfig();
     });
   });
@@ -1996,4 +2178,48 @@ function escapeHtml(s) {
 /** 属性转义 */
 function escapeAttr(s) {
   return escapeHtml(s);
+}
+
+// ── 0.13.3 Skill 列表加载 ─────────────────────────────────────────────────────
+
+/**
+ * 加载并渲染已发现的 Skill 列表。
+ *
+ * 调用 `list_skills` 命令获取后端 SkillRegistry 中所有条目，渲染为卡片列表。
+ * 每个 Skill 卡片展示：名称、来源徽章、描述、触发标签。
+ */
+async function loadSkillList() {
+  const container = document.getElementById("ai-skill-list");
+  if (!container) return;
+
+  try {
+    const skills = await invoke("list_skills");
+    if (!skills || skills.length === 0) {
+      container.innerHTML = `<span class="skill-empty-hint">${t("ai.skill.list.empty") || "点击刷新扫描 Skill 目录"}</span>`;
+      return;
+    }
+
+    container.innerHTML = skills.map((s) => {
+      const sourceLabel = { blink: "Blink", claude: "Claude", zcode: "ZCode" }[s.source] || s.source;
+      const triggerBadge = s.triggers
+        ? `<span class="skill-badge skill-badge-trigger">${t("ai.skill.badge.auto") || "自动触发"}</span>`
+        : `<span class="skill-badge skill-badge-manual">${t("ai.skill.badge.manual") || "手动"}</span>`;
+      const kwList = s.triggers?.keywords?.length
+        ? `<span class="skill-keywords">${s.triggers.keywords.map((k) => escapeHtml(k)).join(", ")}</span>`
+        : "";
+      return `
+        <div class="skill-item">
+          <div class="skill-item-header">
+            <span class="skill-item-name">${escapeHtml(s.name)}</span>
+            <span class="skill-badge skill-badge-source">${sourceLabel}</span>
+            ${triggerBadge}
+          </div>
+          <div class="skill-item-desc">${escapeHtml(s.description)}</div>
+          ${kwList ? `<div class="skill-item-keywords">${kwList}</div>` : ""}
+        </div>`;
+    }).join("");
+  } catch (e) {
+    container.innerHTML = `<span class="skill-empty-hint">${escapeHtml(e)}</span>`;
+    console.error("loadSkillList failed:", e);
+  }
 }

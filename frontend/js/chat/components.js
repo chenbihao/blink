@@ -6,6 +6,7 @@
 
 import { renderMarkdown, highlightCodeBlocks } from "./renderer.js";
 import { escapeText } from "./utils.js";
+import { isMcpTool } from "./state.js";
 
 /** @type {HTMLElement} 消息容器 */
 let messagesEl = null;
@@ -399,9 +400,12 @@ export function renderToolStatus(toolName, args, opts = {}) {
 
   const header = document.createElement("div");
   header.className = "chat-tool-card-header";
+  // 0.13.0：MCP 来源标记——tool 名在 MCP tool 名称集合中时显示 (MCP) 徽章
+  const sourceBadge = isMcpTool(toolName) ? '<span class="chat-tool-card-source mcp">MCP</span>' : "";
   header.innerHTML = `
     <div class="chat-tool-card-spinner"></div>
     <span class="chat-tool-card-name">${escapeText(toolName)}</span>
+    ${sourceBadge}
   `;
   el.appendChild(header);
 

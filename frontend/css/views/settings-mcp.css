@@ -1,0 +1,202 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   views/settings-mcp.css — 设置页·MCP 视图（0.13.0）
+   MCP server 配置管理：列表 / 添加编辑删除 / 启停 / 重连 / tool 预览 / 粒度开关
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Server 列表容器 ─────────────────────────────────────────────────────── */
+
+.mcp-server-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.mcp-empty-hint {
+  color: var(--text-dim);
+  font-size: var(--text-base);
+  padding: 24px 0;
+  text-align: center;
+}
+
+.mcp-error {
+  color: var(--red);
+  font-size: var(--text-base);
+  padding: 8px 0;
+}
+
+/* ── Server 卡片 ─────────────────────────────────────────────────────────── */
+
+.mcp-server-card {
+  background: var(--bg-sidebar);
+  border: 1px solid var(--surface);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  transition: border-color 0.15s;
+}
+
+.mcp-server-card:hover {
+  border-color: var(--accent);
+}
+
+.mcp-server-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-sm, 10px) var(--space-md, 14px);
+  cursor: pointer;
+  gap: var(--space-sm, 8px);
+  transition: background 0.15s;
+}
+
+.mcp-server-header:hover {
+  background: var(--surface);
+}
+
+.mcp-server-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.mcp-server-name {
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-md, 14px);
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mcp-server-command {
+  font-size: var(--text-sm, 12px);
+  color: var(--text-dim);
+  font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mcp-server-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+/* ── 状态徽章 ────────────────────────────────────────────────────────────── */
+
+.mcp-status {
+  font-size: var(--text-sm);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+  font-weight: var(--weight-medium);
+}
+
+.mcp-status-online {
+  background: color-mix(in srgb, var(--green) 20%, transparent);
+  color: var(--green);
+}
+
+.mcp-status-offline {
+  background: color-mix(in srgb, var(--red) 15%, transparent);
+  color: var(--text-dim);
+}
+
+.mcp-status-connecting {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  color: var(--accent);
+}
+
+/* ── 启用开关 ────────────────────────────────────────────────────────────── */
+
+.mcp-enabled-toggle {
+  margin: 0 4px;
+}
+
+/* ── 操作按钮 ────────────────────────────────────────────────────────────── */
+
+.mcp-server-actions .btn-sm {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  font-size: var(--text-sm, 12px);
+  border: 1px solid var(--surface);
+  background: var(--surface);
+  color: var(--text-dim);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.mcp-server-actions .btn-sm:hover {
+  background: var(--surface-2);
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.mcp-delete-btn:hover {
+  color: var(--red);
+  border-color: var(--red);
+}
+
+/* ── Tool 列表（展开/折叠） ──────────────────────────────────────────────── */
+
+.mcp-server-tools {
+  border-top: 1px solid var(--surface);
+  padding: var(--space-sm, 8px) var(--space-md, 14px);
+  background: var(--bg);
+}
+
+.mcp-tools-loading,
+.mcp-tools-empty {
+  color: var(--text-dim);
+  font-size: var(--text-base);
+  padding: 8px 0;
+  text-align: center;
+}
+
+.mcp-tool-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 0;
+}
+
+.mcp-tool-item:not(:last-child) {
+  border-bottom: 1px solid color-mix(in srgb, var(--surface-2) 50%, transparent);
+}
+
+.mcp-tool-item .checkbox {
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
+.mcp-tool-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.mcp-tool-name {
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
+  color: var(--text);
+  font-family: "Cascadia Code", "Consolas", monospace;
+}
+
+.mcp-tool-desc {
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
+/* ── 添加/编辑 modal（复用 .modal-card + .ai-modal-section 通用样式）────── */

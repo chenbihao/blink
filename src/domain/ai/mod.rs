@@ -24,6 +24,7 @@ pub mod prompt;
 pub mod provider;
 pub mod registry;
 pub mod rig_provider;
+pub mod skill;
 pub mod spike;
 pub mod tool_adapter;
 

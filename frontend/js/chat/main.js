@@ -36,6 +36,10 @@ async function init() {
     if (e?.payload?.key === "ai_config") {
       refreshModelSelector();
     }
+    // 0.13.0：MCP 配置变更时刷新 tool 池
+    if (e?.payload?.key === "mcp:servers") {
+      refreshToolPool();
+    }
   });
 
   initRenderer();
@@ -77,6 +81,9 @@ async function init() {
   }
   refreshModelSelector();
 
+  // 0.13.0：加载 tool 池规模 + MCP tool 名称（供工具卡片来源标记）
+  refreshToolPool();
+
   // 侧边栏 toggle
   const sidebarToggle = document.getElementById("chat-sidebar-toggle");
   if (sidebarToggle) {
@@ -98,8 +105,11 @@ async function init() {
   // 0.12.6：重试按钮（assistant 消息的 retry action）
   document.addEventListener("chat:retry", handleRetry);
 
-  // 窗口获得焦点时自动聚焦输入框
-  window.addEventListener("focus", () => focusInput());
+  // 窗口获得焦点时自动聚焦输入框 + 刷新 tool 池（MCP server 可能在设置页被启停）
+  window.addEventListener("focus", () => {
+    focusInput();
+    refreshToolPool();
+  });
 
   // 初始聚焦
   focusInput();
@@ -900,6 +910,34 @@ function updateProviderLabel(status) {
   const label = document.getElementById("chat-provider-label");
   if (!label) return;
   label.textContent = status.model_name || "未配置模型";
+}
+
+/**
+ * 刷新 tool 池规模指示 + MCP tool 名称集合（0.13.0）。
+ *
+ * 加载内置 + MCP tool 数量，在 composer bar 显示「内置 N + MCP M = K tools」。
+ * 同时加载 MCP tool 名称集合，供工具卡片渲染时标记来源。
+ */
+async function refreshToolPool() {
+  const el = document.getElementById("chat-tool-pool");
+  try {
+    const [size, names] = await Promise.all([
+      ipc.getMcpToolPoolSize(),
+      ipc.getMcpToolNames(),
+    ]);
+    state.setMcpToolNames(names);
+
+    if (el) {
+      const parts = [];
+      if (size.builtin > 0) parts.push(`内置 ${size.builtin}`);
+      if (size.mcp > 0) parts.push(`MCP ${size.mcp}`);
+      el.textContent = parts.length > 0 ? `${parts.join(" + ")} = ${size.total} tools` : "";
+      el.style.display = parts.length > 0 ? "" : "none";
+    }
+  } catch (e) {
+    console.error("[chat] refreshToolPool 失败:", e);
+    if (el) el.style.display = "none";
+  }
 }
 
 /** 拉取模型列表 + 状态，刷新下拉和标签 */

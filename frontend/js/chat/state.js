@@ -43,6 +43,13 @@ export const toolCalls = new Map();
 /** @type {{input_tokens: number, output_tokens: number}|null} 最近一次 Done 的 token 用量 */
 export let lastUsage = null;
 
+/**
+ * MCP tool 名称集合（0.13.0）。
+ * 存储所有已连接 MCP server 提供的 tool 名称，用于在工具卡片上标记来源。
+ * `null` = 尚未加载，`Set<string>` = 已加载。
+ */
+export let mcpToolNames = null;
+
 // ── 状态变更 ─────────────────────────────────────
 
 export function setStreaming(value) {
@@ -89,6 +96,16 @@ export function setProviderConfigured(value) {
 
 export function setLastUsage(usage) {
   lastUsage = usage;
+}
+
+/** 设置 MCP tool 名称集合（0.13.0）。 */
+export function setMcpToolNames(names) {
+  mcpToolNames = names ? new Set(names) : null;
+}
+
+/** 判断 tool 名称是否来自 MCP server（0.13.0）。 */
+export function isMcpTool(name) {
+  return mcpToolNames != null && mcpToolNames.has(name);
 }
 
 /** 设置当前 conversation_id（0.12.4 §6.1：ES module namespace import 只读，需 setter）。 */
