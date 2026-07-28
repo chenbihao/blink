@@ -15,6 +15,7 @@
 //! - `blink config get <key>` / `blink config set <key> <value>` — 读写配置
 //! - `blink capabilities` — 列出所有可用 Capability
 //! - `blink chat [--model <id>]` — 终端对话模式（基础实现）
+//! - `blink help` / `blink --help` — 显示帮助（clap 自动生成）
 
 pub mod commands;
 
@@ -109,7 +110,21 @@ pub fn try_run_cli() -> Option<i32> {
     let first = &args[1];
     let known_commands = [
         "mcp-server", "search", "run", "capabilities", "config", "chat",
+        "help", // 0.13.7: 支持 blink help / blink --help
     ];
+    // --help / -h 也走 CLI 路径（clap 自动处理）
+    if first == "--help" || first == "-h" || first == "--version" || first == "-V" {
+        // 让 clap 处理——必须显式打印 help/version 文本到 stdout，
+        // 否则 subprocess 捕获不到输出（`try_parse` 返回 Err 但不自动打印）
+        match Cli::try_parse() {
+            Ok(_) => return Some(0),
+            Err(e) => {
+                // clap 的 DisplayHelp/DisplayVersion 写 stdout，其他错误写 stderr
+                let _ = e.print();
+                return Some(0);
+            }
+        }
+    }
     if !known_commands.contains(&first.as_str()) {
         return None;
     }

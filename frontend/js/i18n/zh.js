@@ -322,6 +322,8 @@ export const zh = {
     "chord.binding.invalid": "必须是 Alt+字母",
     "chord.binding.reset": "恢复默认",
     "chord.binding.voice_input.locked": "语音输入键位由热键配置决定，暂不支持在此修改",
+    "chord.clipboard.display_count.label": "单次展示条数",
+    "chord.clipboard.display_count.hint": "Alt+C 或搜索\"剪贴板\"时一次显示多少条（1-200，默认 30）",
     "chord.clipboard.max_items.label": "最大历史条数",
     "chord.clipboard.max_items.hint": "超过此数量自动淘汰最旧记录（建议 50-500）",
     "chord.clipboard.retention_days.label": "保留天数",

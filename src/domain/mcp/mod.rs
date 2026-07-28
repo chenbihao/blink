@@ -21,9 +21,11 @@ pub mod import;
 pub mod projection;
 pub mod server;
 pub mod server_config;
+pub mod sse_transport;
 
 pub use client::{McpClientManager, McpServerStatus, McpToolInfo};
 pub use config::{McpServerConfig, McpServerConfigStore};
+pub use sse_transport::SseClientTransport;
 #[allow(unused_imports)]
 pub use config::McpTransport;
 pub use import::{McpImportSource, ImportResult};

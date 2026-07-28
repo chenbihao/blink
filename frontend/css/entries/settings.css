@@ -32,6 +32,7 @@
 @import '../components/card.css';
 @import '../components/kbd.css';
 @import '../components/icon.css';
+@import '../components/tooltip.css';
 
 /* views（设置页视图：布局+通用组件+插件 / 调试 / AI modal） */
 @import '../views/settings.css';

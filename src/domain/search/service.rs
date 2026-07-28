@@ -300,6 +300,20 @@ impl SearchService {
         tracing::debug!("SearchService 界面语言已热更新");
     }
 
+    /// 更新 ClipboardEngine 的单次展示条数（设置页 `clipboard_config` 保存时转发）。
+    /// downcast 模式同 `update_language`。
+    pub fn update_clipboard_display_count(&self, count: u32) {
+        for engine in &self.sync_engines {
+            if let Some(clip) = engine
+                .as_any()
+                .downcast_ref::<super::clipboard_engine::ClipboardEngine>()
+            {
+                clip.update_display_count(count);
+            }
+        }
+        tracing::debug!(count, "ClipboardEngine 展示条数已热更新");
+    }
+
     /// 启动所有引擎的后台任务(如 StartMenuEngine 预扫)。
     pub fn start(&self) {
         for e in self.sync_engines.iter().chain(self.async_engines.iter()) {

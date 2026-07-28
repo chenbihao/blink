@@ -415,6 +415,8 @@ impl ChatService {
             // Client/Agent 构造可能读取 Credential Manager，必须在 ChatService 锁外进行。
             // 0.13.0: MCP tool 通过 external_tools 入口进池——collect_tools() 从已连接的
             // MCP server 拉 tool（过滤 disabled_tools），与内置 Capability/Action 并列。
+            // 0.13.7: lazy connect——首次需要 tool 时才连接 enabled 但未连接的 server。
+            self.mcp_client.ensure_connected(&self.config_pool).await;
             let external_tools = self.mcp_client.collect_tools().await;
             let tools = build_agent_tools(
                 &self.capability_registry,

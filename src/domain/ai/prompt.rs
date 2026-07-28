@@ -715,15 +715,16 @@ mod tests {
     #[test]
     fn chat_prompt_with_skills_includes_triggered_full_content() {
         let summaries = vec![make_summary("rust-debug", "Debug", SkillSource::Blink, true)];
-        let triggered = vec![SkillEntry {
-            name: "rust-debug".to_string(),
-            description: "Debug".to_string(),
-            triggers: None,
-            compiled_patterns: Vec::new(),
-            full_content: "# Rust Debug Workflow\n\n1. Read error\n2. Fix".to_string(),
-            source: SkillSource::Blink,
-            dir_path: std::path::PathBuf::from("/tmp"),
-        }];
+    let triggered = vec![SkillEntry {
+        name: "rust-debug".to_string(),
+        description: "Debug".to_string(),
+        triggers: None,
+        compiled_patterns: Vec::new(),
+        full_content: "# Rust Debug Workflow\n\n1. Read error\n2. Fix".to_string(),
+        source: SkillSource::Blink,
+        dir_path: std::path::PathBuf::from("/tmp"),
+        source_cli_path: None,
+    }];
         let prompt = chat_system_prompt_with_skills(None, &summaries, &triggered);
         assert!(prompt.contains("已激活技能详情"));
         assert!(prompt.contains("Rust Debug Workflow"));

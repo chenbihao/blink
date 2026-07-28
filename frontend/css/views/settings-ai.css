@@ -42,6 +42,10 @@
   flex-direction: column;
   align-items: stretch;
   gap: var(--space-xs, 6px);
+  /* column 行内容较高（label + hint + 控件 + error 多行），padding:0 会让内容顶到
+     border-bottom 分隔线上显得拥挤。给垂直 padding 与 :has(.hint-line) 的 8px 对齐，
+     保持多行 row 与单行 row 视觉呼吸一致。modal 内有更具体的覆盖不受影响。 */
+  padding: var(--space-sm, 8px) 0;
 }
 
 .setting-row-column .setting-label {
@@ -1138,50 +1142,7 @@
 
 /* ── 0.13.3 Skill 约定式 ──────────────────────────────────────────────── */
 
-/* 来源目录卡片网格 */
-.skill-source-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-sm, 8px);
-}
-
-.skill-source-card {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm, 8px);
-  padding: var(--space-xs, 6px) var(--space-md, 12px);
-  background: var(--surface);
-  border: 1px solid var(--surface-2);
-  border-radius: var(--radius-md, 6px);
-  transition: border-color var(--transition-fast, 0.1s);
-}
-
-.skill-source-card:hover {
-  border-color: var(--text-faint);
-}
-
-.skill-source-name {
-  font-size: var(--text-sm, 13px);
-  color: var(--text);
-  font-weight: var(--weight-medium, 500);
-}
-
-.skill-source-card .skill-open-dir {
-  margin-left: auto;
-  opacity: 0.5;
-  transition: opacity 0.15s;
-  border: none;
-  background: none;
-  cursor: pointer;
-  font-size: 14px;
-  padding: 2px 4px;
-}
-
-.skill-source-card .skill-open-dir:hover {
-  opacity: 1;
-}
-
-/* 技能列表 header（label + 刷新按钮同一行） */
+/* 技能列表 header（label + 操作按钮同一行） */
 .skill-list-header {
   display: flex;
   align-items: center;
@@ -1189,13 +1150,61 @@
   margin-bottom: var(--space-xs, 6px);
 }
 
+.skill-list-actions {
+  display: flex;
+  gap: var(--space-xs, 6px);
+  align-items: center;
+}
+
+/* Skill 编辑 modal */
+.skill-edit-modal {
+  width: 680px;
+  max-width: 90vw;
+}
+
+.skill-edit-modal .panel-hint {
+  margin-bottom: var(--space-sm, 8px);
+}
+
+.skill-edit-meta {
+  font-size: var(--text-xs, 11px);
+  color: var(--text-dim);
+  font-family: var(--font-mono, "Cascadia Code", "Fira Code", monospace);
+  margin-bottom: var(--space-xs, 6px);
+  word-break: break-all;
+}
+
+.skill-edit-textarea {
+  width: 100%;
+  min-height: 360px;
+  max-height: 50vh;
+  resize: vertical;
+  background: var(--bg-elevated, var(--surface-1, #1e1e1e));
+  border: 1px solid var(--surface-2, #333);
+  border-radius: var(--radius-md, 6px);
+  padding: var(--space-sm, 8px) var(--space-md, 12px);
+  font-family: var(--font-mono, "Cascadia Code", "Fira Code", monospace);
+  font-size: var(--text-xs, 12px);
+  line-height: 1.6;
+  color: var(--text);
+  tab-size: 2;
+}
+
+.skill-edit-textarea:focus {
+  outline: none;
+  border-color: var(--accent, var(--blue, #3b82f6));
+}
+
 .skill-list {
   display: flex;
   flex-direction: column;
   gap: var(--space-sm, 8px);
-  max-height: 280px;
+  max-height: 480px;
   overflow-y: auto;
   padding-right: 4px;
+  /* 底部呼吸空间由 extension-body 的 padding 统一提供（8px 16px），
+     不再单独加 margin-bottom——它是 setting-row-column 内末元素，
+     自带 margin 会把列表推离卡片底边，造成「悬空 + 底部留白过大」的错位感。 */
 }
 
 .skill-empty-hint {
@@ -1221,8 +1230,9 @@
 .skill-item-header {
   display: flex;
   align-items: center;
-  gap: var(--space-xs, 6px);
+  gap: var(--space-xs, 8px);
   margin-bottom: var(--space-2xs, 4px);
+  flex-wrap: nowrap;
 }
 
 .skill-item-name {
@@ -1230,22 +1240,40 @@
   font-size: var(--text-sm, 13px);
   color: var(--text);
   font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+  /* 名称过长时省略，保证徽章和按钮不被挤出可视区 */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .skill-item-desc {
   font-size: var(--text-xs, 12px);
   color: var(--text-dim);
   line-height: var(--leading-normal, 1.5);
+  /* 固定 2 行省略——保证所有卡片描述区高度一致，整体等高 */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
-.skill-item-keywords {
-  margin-top: var(--space-2xs, 4px);
-  font-size: var(--text-xs, 12px);
+/* 0.13.7: 关键词作为 header 内 name 后的灰色次要文本（不再独占行），
+   保证卡片等高。过长时优先省略（flex-shrink 因子大于 name），
+   hover 显示完整列表。 */
+.skill-keywords-inline {
+  font-size: var(--text-2xs, 10px);
   color: var(--text-faint);
-}
-
-.skill-keywords {
   font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+  flex: 1 1 auto;
+  flex-shrink: 2;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-left: var(--space-2xs, 2px);
 }
 
 .skill-badge {
@@ -1256,6 +1284,8 @@
   font-size: var(--text-2xs, 10px);
   font-weight: var(--weight-semibold, 600);
   letter-spacing: 0.3px;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .skill-badge-source {
@@ -1273,6 +1303,14 @@
   color: var(--accent);
 }
 
+/* 0.13.7: CLI 来源徽章——替代冗长的整行路径文本，hover 显示完整路径。
+   用紫色调区分于来源/触发徽章，呼应「AI 生成」语义。 */
+.skill-badge-cli {
+  background: var(--purple-bg, rgba(168, 85, 247, 0.12));
+  color: var(--purple, #a855f7);
+  cursor: help;
+}
+
 .skill-refresh-btn {
   flex-shrink: 0;
   white-space: nowrap;
@@ -1283,6 +1321,7 @@
   display: inline-flex;
   align-items: center;
   margin-right: var(--space-2xs, 4px);
+  flex-shrink: 0;
 }
 
 .skill-item-actions {
@@ -1290,6 +1329,7 @@
   display: flex;
   align-items: center;
   gap: 2px;
+  flex-shrink: 0;
 }
 
 .skill-item-disabled {
@@ -1300,26 +1340,10 @@
   text-decoration: line-through;
 }
 
-.skill-import-btn {
-  opacity: 0.5;
-  transition: opacity 0.15s;
-}
-
-.skill-import-btn:hover {
-  opacity: 1;
-}
-
-.skill-open-skill-dir {
-  opacity: 0.5;
-  transition: opacity 0.15s;
-}
-
-.skill-open-skill-dir:hover {
-  opacity: 1;
-}
-
+/* 0.13.7: 导入结果反馈条——位于「已发现技能」header 与列表之间，
+   紧贴导入操作上下文。header 已提供 margin-bottom，此处不再加 margin-top。 */
 .skill-import-hint {
-  margin-top: var(--space-sm, 8px);
+  margin-bottom: var(--space-xs, 6px);
   padding: var(--space-sm, 8px) var(--space-md, 12px);
   background: var(--green-bg, rgba(34, 197, 94, 0.1));
   color: var(--green, #22c55e);
@@ -1329,10 +1353,136 @@
 }
 
 .btn-icon-sm {
-  padding: 2px 6px;
-  font-size: 12px;
+  padding: 4px 7px;
+  font-size: 13px;
   border: none;
   background: none;
+  cursor: pointer;
+  border-radius: var(--radius-xs, 4px);
+  color: var(--text-dim);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--transition-fast, 0.1s), color var(--transition-fast, 0.1s);
+}
+
+.btn-icon-sm:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+/* ── 0.13.7: Skill 导入面板样式 ──────────────────────────────────────────── */
+
+.skill-import-modal {
+  width: min(560px, 92vw);
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.skill-import-field {
+  margin-bottom: var(--space-md, 12px);
+}
+
+.skill-import-field > .setting-label {
+  display: block;
+  margin-bottom: var(--space-xs, 6px);
+}
+
+.skill-import-source-row {
+  display: flex;
+  gap: var(--space-xs, 6px);
+  align-items: center;
+}
+
+.skill-import-source-row .input-wide {
+  flex: 1;
+}
+
+.skill-import-source-info {
+  margin: var(--space-xs, 6px) 0 0 0;
+  font-size: var(--text-xs, 12px);
+  color: var(--text-faint);
+  font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+  word-break: break-all;
+}
+
+.skill-import-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-xs, 6px);
+}
+
+.skill-import-list-actions {
+  display: flex;
+  gap: var(--space-xs, 6px);
+}
+
+.skill-import-skill-list {
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius-md, 8px);
+  padding: var(--space-xs, 6px);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.skill-import-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs, 6px);
+  padding: var(--space-xs, 6px) var(--space-sm, 8px);
+  border-radius: var(--radius-xs, 4px);
+  cursor: pointer;
+  transition: background var(--transition-fast, 0.1s);
+}
+
+.skill-import-item:hover {
+  background: var(--surface-2);
+}
+
+.skill-import-item input[type="checkbox"] {
+  flex-shrink: 0;
+}
+
+.skill-import-item-name {
+  font-weight: var(--weight-medium, 500);
+  font-size: var(--text-sm, 13px);
+  color: var(--text);
+  font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+  flex-shrink: 0;
+}
+
+.skill-import-item-desc {
+  font-size: var(--text-xs, 12px);
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-import-mode-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md, 12px);
+  flex-wrap: wrap;
+}
+
+.skill-import-mode-row > .setting-label {
+  margin-bottom: 0;
+  margin-right: var(--space-xs, 6px);
+}
+
+.radio-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2xs, 4px);
+  font-size: var(--text-sm, 13px);
+  color: var(--text-dim);
   cursor: pointer;
 }
 
@@ -1471,19 +1621,4 @@
 .cli-recognizer-row .input-wide {
   flex: 1;
   min-width: 0;
-}
-
-.cli-recognizer-preview {
-  margin-top: var(--space-sm, 8px);
-  max-height: 320px;
-  overflow: auto;
-  background: var(--bg-elevated, var(--surface-1, #1e1e1e));
-  border: 1px solid var(--surface-2, #333);
-  border-radius: var(--radius-md, 6px);
-  padding: var(--space-sm, 8px) var(--space-md, 12px);
-  font-family: var(--font-mono, "Cascadia Code", "Fira Code", monospace);
-  font-size: var(--text-xs, 12px);
-  line-height: 1.6;
-  white-space: pre-wrap;
-  word-break: break-word;
 }

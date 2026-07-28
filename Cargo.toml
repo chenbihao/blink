@@ -40,6 +40,10 @@ evalexpr = "13.1.0"
 futures = "0.3"
 # http: HeaderName/HeaderValue 类型（rmcp Streamable HTTP transport 需要，已作为传递依赖在树中）
 http = "1"
+# sse-stream: SSE 事件流解析（rmcp 依赖，0.13.8 直接用——旧版 SSE transport 实现）
+sse-stream = "0.2.5"
+# thiserror: 错误类型 derive（rmcp 依赖树中已有，0.13.8 直接用——SSE transport 错误类型）
+thiserror = "1"
 # 链接期自动注册（0.9.7 Capability 层）——新增能力只需 `inventory::submit!`，注册表零改动
 inventory = "0.3"
 nucleo = "0.5.0"
@@ -51,6 +55,10 @@ regex = "1.11"
 # default features 已含 derive+reqwest+rustls;额外加 rmcp 让 0.11 MCP schema 投影零适配。
 # test-utils 供 0.12.1 spike 验证 rig Agent API(Phase 6 后随 spike 移除)。
 rig-core = { version = "0.39", features = ["rmcp", "test-utils"] }
+# rmcp: MCP 协议 Rust 实现。
+# - client + transport-child-process: 0.13.0 MCP client 拉起外部 server 子进程走 stdio JSON-RPC
+# - server + transport-io: 0.13.4 MCP server 暴露 Blink 能力给外部 client（stdio 传输）
+# - transport-streamable-http-client-reqwest: 0.13.6 MCP client 支持 Streamable HTTP 远程 server
 # rmcp: MCP 协议 Rust 实现。
 # - client + transport-child-process: 0.13.0 MCP client 拉起外部 server 子进程走 stdio JSON-RPC
 # - server + transport-io: 0.13.4 MCP server 暴露 Blink 能力给外部 client（stdio 传输）

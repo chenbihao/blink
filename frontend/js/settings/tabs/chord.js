@@ -152,11 +152,17 @@ function renderActionRow(a, subtitle, clipboardCfg, screenshotCfg) {
  * 故 data-i18n-title 在此处无效，必须用 title=。
  */
 function renderClipboardDetail(cfg) {
-  cfg = cfg || { max_items: 200, retention_days: 30, search_enabled: true, blacklist_keywords: [] };
+  cfg = cfg || { display_count: 30, max_items: 200, retention_days: 30, search_enabled: true, blacklist_keywords: [] };
   const blacklist = Array.isArray(cfg.blacklist_keywords)
     ? cfg.blacklist_keywords.join(", ")
     : "";
   return `<div class="chord-clipboard-detail">
+    <div class="chord-field">
+      <label class="setting-label chord-field-label">${t("chord.clipboard.display_count.label")}
+        <span class="field-hint-icon" title="${escapeAttr(t("chord.clipboard.display_count.hint"))}">ⓘ</span>
+      </label>
+      <input type="number" class="clip-field" data-field="display_count" min="1" max="200" value="${cfg.display_count ?? 30}" />
+    </div>
     <div class="chord-field">
       <label class="setting-label chord-field-label">${t("chord.clipboard.max_items.label")}
         <span class="field-hint-icon" title="${escapeAttr(t("chord.clipboard.max_items.hint"))}">ⓘ</span>
@@ -417,6 +423,7 @@ async function saveClipboardDetail(container) {
   try {
     const fullCfg = await invoke("get_config");
     const clip = fullCfg?.clipboard || {};
+    const displayCount = parseInt(detail.querySelector('[data-field="display_count"]')?.value, 10);
     const maxItems = parseInt(detail.querySelector('[data-field="max_items"]')?.value, 10);
     const retentionDays = parseInt(detail.querySelector('[data-field="retention_days"]')?.value, 10);
     const searchEnabled = detail.querySelector('[data-field="search_enabled"]')?.checked !== false;
@@ -428,6 +435,7 @@ async function saveClipboardDetail(container) {
 
     const newCfg = {
       enabled: clip.enabled !== false,
+      display_count: isNaN(displayCount) ? 30 : displayCount,
       max_items: isNaN(maxItems) ? 200 : maxItems,
       retention_days: isNaN(retentionDays) ? 30 : retentionDays,
       search_enabled: searchEnabled,

@@ -60,6 +60,8 @@ pub struct CliRecognitionResult {
     pub skill_md_content: String,
     /// 保存路径。
     pub saved_path: String,
+    /// 来源 CLI 可执行文件路径（用于后续重新生成）。
+    pub source_cli_path: String,
 }
 
 // ── 核心解析 ──────────────────────────────────────────────────────────────────
@@ -234,9 +236,11 @@ fn parse_option_line(line: &str) -> Option<CliOption> {
 
 /// 从解析结果生成 SKILL.md 模板。
 ///
-/// 生成的内容含 YAML frontmatter（name / description / triggers / priority）
+/// 生成的内容含 YAML frontmatter（name / description / source_cli_path / triggers / priority）
 /// + Markdown body（用法 / 子命令表 / 选项表）。
-pub fn generate_skill_md(parsed: &ParsedHelp, tool_name: &str) -> String {
+///
+/// `source_cli_path` 非空时写入 frontmatter，用于后续重新生成。
+pub fn generate_skill_md(parsed: &ParsedHelp, tool_name: &str, source_cli_path: Option<&str>) -> String {
     let mut md = String::new();
 
     // frontmatter
@@ -246,6 +250,9 @@ pub fn generate_skill_md(parsed: &ParsedHelp, tool_name: &str) -> String {
         "description: {}\n",
         parsed.description.replace('\n', " ")
     ));
+    if let Some(path) = source_cli_path {
+        md.push_str(&format!("source_cli_path: \"{}\"\n", path));
+    }
     md.push_str("triggers:\n");
     // 关键词 = 子命令名 + 工具名
     let keywords: Vec<&str> = std::iter::once(tool_name)
@@ -317,18 +324,57 @@ fn capitalize(s: &str) -> String {
 
 // ── 完整识别流程 ──────────────────────────────────────────────────────────────
 
+/// 构建运行 CLI 命令的 `tokio::process::Command`。
+///
+/// `.cmd`/`.bat` 文件需要通过 `cmd.exe /C` 执行（CreateProcessW 不直接支持）。
+fn build_cli_command(cli_path: &str) -> tokio::process::Command {
+    let path = Path::new(cli_path);
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if ext == "cmd" || ext == "bat" {
+        let mut cmd = tokio::process::Command::new("cmd.exe");
+        cmd.arg("/C").arg(cli_path);
+        cmd
+    } else {
+        tokio::process::Command::new(cli_path)
+    }
+}
+
 /// 执行 CLI 能力识别完整流程。
 ///
 /// 1. 运行 `<cli> --help`，捕获 stdout + stderr
 /// 2. 解析输出
-/// 3. 生成 SKILL.md
+/// 3. 生成 SKILL.md（含 `source_cli_path` frontmatter 字段）
 /// 4. 保存到 `%APPDATA%\blink\skills\<tool-name>\SKILL.md`
 ///
-/// 返回识别结果（含生成内容 + 保存路径）。
+/// 返回识别结果（含生成内容 + 保存路径 + 来源 CLI 路径）。
 pub async fn recognize_cli(cli_path: &str) -> Result<CliRecognitionResult, String> {
     let path = Path::new(cli_path);
     if !path.exists() {
         return Err(format!("CLI 路径不存在: {cli_path}"));
+    }
+
+    // 0.13.7: 排除识别 Blink 自身。
+    // Blink 启用了单实例（tauri_plugin_single_instance），当 GUI 已在运行时，
+    // 再次启动 blink.exe（即使带 --help）的子进程会被单实例插件拦截并转交给
+    // 已运行实例（从而唤起主窗口），子进程自身无 stdout 输出，
+    // 导致「未能获取 --help 输出」的误导性错误。
+    // 直接拒绝，给出清晰提示，避免唤起主窗口。
+    let self_exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| std::fs::canonicalize(p).ok());
+    let target_canon = std::fs::canonicalize(path).ok();
+    if let (Some(self_e), Some(tgt)) = (self_exe.as_ref(), target_canon.as_ref()) {
+        if self_e == tgt {
+            return Err(
+                "不支持识别 Blink 自身（会触发单实例冲突并唤起主窗口）。请选择其他 CLI 工具。"
+                    .to_string(),
+            );
+        }
     }
 
     // 从文件名提取工具名
@@ -337,8 +383,8 @@ pub async fn recognize_cli(cli_path: &str) -> Result<CliRecognitionResult, Strin
         .and_then(|n| n.to_str())
         .ok_or("无法从路径提取工具名")?;
 
-    // 运行 --help
-    let output = tokio::process::Command::new(path)
+    // 运行 --help（.cmd/.bat 通过 cmd.exe /C 执行）
+    let output = build_cli_command(cli_path)
         .arg("--help")
         .output()
         .await
@@ -352,7 +398,7 @@ pub async fn recognize_cli(cli_path: &str) -> Result<CliRecognitionResult, Strin
 
     // 如果 --help 退出码非 0 且输出为空，尝试 help 子命令
     if help_text.trim().is_empty() {
-        let alt_output = tokio::process::Command::new(path)
+        let alt_output = build_cli_command(cli_path)
             .arg("help")
             .output()
             .await
@@ -368,8 +414,8 @@ pub async fn recognize_cli(cli_path: &str) -> Result<CliRecognitionResult, Strin
     // 解析
     let parsed = parse_help_output(&help_text);
 
-    // 生成 SKILL.md
-    let skill_md_content = generate_skill_md(&parsed, tool_name);
+    // 生成 SKILL.md（含 source_cli_path）
+    let skill_md_content = generate_skill_md(&parsed, tool_name, Some(cli_path));
 
     // 保存
     let skill_dir = crate::infra::utils::paths::skills_global_dir().join(tool_name);
@@ -384,6 +430,7 @@ pub async fn recognize_cli(cli_path: &str) -> Result<CliRecognitionResult, Strin
         subcommands = parsed.subcommands.len(),
         options = parsed.options.len(),
         saved = %skill_md_path.display(),
+        source_cli = %cli_path,
         "CLI 能力识别完成"
     );
 
@@ -395,6 +442,7 @@ pub async fn recognize_cli(cli_path: &str) -> Result<CliRecognitionResult, Strin
         usage_line: parsed.usage_line.clone(),
         skill_md_content,
         saved_path: skill_md_path.display().to_string(),
+        source_cli_path: cli_path.to_string(),
     })
 }
 
@@ -563,7 +611,7 @@ Options:
             }],
             usage_line: Some("Usage: git [options]".to_string()),
         };
-        let md = generate_skill_md(&parsed, "git");
+        let md = generate_skill_md(&parsed, "git", None);
         assert!(md.starts_with("---\n"));
         assert!(md.contains("name: git-cli"));
         assert!(md.contains("description: Git version control"));
@@ -586,7 +634,7 @@ Options:
             options: vec![],
             usage_line: None,
         };
-        let md = generate_skill_md(&parsed, "simple");
+        let md = generate_skill_md(&parsed, "simple", None);
         assert!(md.contains("name: simple-cli"));
         assert!(!md.contains("## 子命令"));
         assert!(!md.contains("## 全局选项"));
@@ -604,7 +652,7 @@ Options:
             options: vec![],
             usage_line: None,
         };
-        let md = generate_skill_md(&parsed, "test");
+        let md = generate_skill_md(&parsed, "test", None);
         assert!(md.contains("Add \\| remove files"));
     }
 
@@ -613,5 +661,28 @@ Options:
         assert_eq!(capitalize("git"), "Git");
         assert_eq!(capitalize("docker"), "Docker");
         assert_eq!(capitalize(""), "");
+    }
+
+    // ── recognize_cli 自检（排除 Blink 自身）──
+
+    #[tokio::test]
+    async fn recognize_cli_rejects_blink_itself() {
+        // 传入当前进程自身的 exe 路径，应被自检拦截，返回明确错误而非启动子进程。
+        // 这避免了「识别 blink.exe 时被单实例插件拦截 → 唤起主窗口 + 无 stdout」的问题。
+        let self_exe = std::env::current_exe().expect("无法获取当前 exe 路径");
+        let result = recognize_cli(&self_exe.to_string_lossy()).await;
+        assert!(result.is_err(), "识别 Blink 自身应返回错误");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Blink 自身") || err.contains("单实例"),
+            "错误信息应说明是 Blink 自身/单实例冲突，实际: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn recognize_cli_nonexistent_path() {
+        let result = recognize_cli("Z:\\nonexistent\\path\\notreal.exe").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("不存在"));
     }
 }

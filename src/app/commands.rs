@@ -37,6 +37,22 @@ pub async fn open_file_dialog(
     })
 }
 
+/// 打开目录选择对话框，返回选中的目录路径（取消时返回 null）。
+#[tauri::command]
+pub async fn pick_directory_dialog(
+    app: tauri::AppHandle,
+    title: String,
+) -> Option<String> {
+    let mut dialog = app.dialog().file();
+    if !title.is_empty() {
+        dialog = dialog.set_title(title);
+    }
+    dialog.blocking_pick_folder().and_then(|p| match p {
+        tauri_plugin_dialog::FilePath::Path(path) => path.to_str().map(|s| s.to_string()),
+        tauri_plugin_dialog::FilePath::Url(url) => Some(url.to_string()),
+    })
+}
+
 /// 主窗口 ESC 调用：隐藏主窗口。
 #[tauri::command]
 pub fn hide_window(app: tauri::AppHandle) {
@@ -2279,15 +2295,22 @@ pub async fn set_config(
             tracing::info!("Chord 键位绑定已更新");
         }
         "clipboard_config" => {
-            // 0.10.7：剪贴板历史详细配置（retention_days / max_items / blacklist_keywords）
+            // 0.10.7：剪贴板历史详细配置（retention_days / max_items / blacklist_keywords / display_count）
             let cfg: crate::infra::data::clipboard::ClipboardConfig =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
             crate::app::config::ConfigStore::set(&pool, &cfg).await?;
+            // 热更新：display_count 转发到 ClipboardEngine（downcast 模式，同 update_language）。
+            if let Some(ss) =
+                app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
+            {
+                ss.update_clipboard_display_count(cfg.display_count);
+            }
             let _ = app.emit("blink://config-changed", ());
             tracing::info!(
                 enabled = cfg.enabled,
                 max_items = cfg.max_items,
                 retention_days = cfg.retention_days,
+                display_count = cfg.display_count,
                 "剪贴板配置已更新"
             );
         }
@@ -5529,6 +5552,10 @@ pub async fn delete_mcp_server(
 }
 
 /// 设置 MCP server 的 enabled 状态。
+///
+/// 禁用时同时停止已连接的 server（杀子进程 / 断开 HTTP 连接），
+/// 避免禁用后子进程仍在后台运行。启用时不自动拉起（lazy connect 在对话时处理），
+/// 前端会调用 test_mcp_connection 探测可用性。
 #[tauri::command]
 pub async fn set_mcp_server_enabled(
     app: tauri::AppHandle,
@@ -5538,7 +5565,16 @@ pub async fn set_mcp_server_enabled(
     let pools = app.state::<crate::infra::data::DbPools>();
     crate::domain::mcp::McpServerConfigStore::set_enabled(&pools.config, &name, enabled)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    if !enabled {
+        // 禁用时停止 server（如果有连接）
+        let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
+        manager.stop_server(&name).await;
+        tracing::info!(server = %name, "MCP: server 已禁用并停止");
+    }
+
+    Ok(())
 }
 
 /// 手动启动 MCP server。
@@ -5580,6 +5616,28 @@ pub async fn reconnect_mcp_server(
     let pools = app.state::<crate::infra::data::DbPools>();
     let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
     manager.reconnect_server(&name, &pools.config).await
+}
+
+/// 0.13.7: 测试 MCP server 连接——连接 + 拉 tool 列表 + 立即断开。
+///
+/// 用于设置页的「测试连接」按钮——验证 server 是否可用，不保持子进程。
+/// 返回 tool 列表供前端预览。
+#[tauri::command]
+pub async fn test_mcp_connection(
+    app: tauri::AppHandle,
+    name: String,
+) -> Result<Vec<crate::domain::mcp::McpToolInfo>, String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    let configs = crate::domain::mcp::McpServerConfigStore::load_all(&pools.config)
+        .await
+        .map_err(|e| e.to_string())?;
+    let config = configs
+        .into_iter()
+        .find(|c| c.name == name)
+        .ok_or_else(|| format!("未找到 server 配置: {name}"))?;
+
+    let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
+    manager.test_connection(&config).await
 }
 
 /// 获取单个 MCP server 的 tool 列表（供前端预览）。
@@ -5946,6 +6004,15 @@ pub async fn open_dir_in_explorer(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// 0.13.7: 枚举外部 Skill 来源（Claude / Codex / OpenCode / ZCode）。
+///
+/// 供设置页「导入 Skill」面板：下拉选应用 → 展示该应用目录下可导入的 skill 列表。
+/// 返回每个来源的目录路径、是否存在、及其下已发现的 skill 概要（name/dir/description）。
+#[tauri::command]
+pub async fn list_external_skill_sources() -> Vec<crate::domain::ai::skill::ExternalSkillSourceInfo> {
+    crate::domain::ai::skill::list_external_sources()
+}
+
 /// 0.13.6: 导入 Skill 到 Blink 目录。
 ///
 /// `source_path` = 源 SKILL.md 所在目录
@@ -6102,6 +6169,45 @@ pub async fn recognize_cli_tool(
     cli_path: String,
 ) -> Result<crate::domain::ai::cli_recognizer::CliRecognitionResult, String> {
     crate::domain::ai::cli_recognizer::recognize_cli(&cli_path).await
+}
+
+/// 保存编辑后的 SKILL.md 内容到指定 skill 目录。
+#[tauri::command]
+pub async fn save_skill_md(skill_dir: String, content: String) -> Result<(), String> {
+    let dir = std::path::Path::new(&skill_dir);
+    if !dir.exists() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("创建 Skill 目录失败: {e}"))?;
+    }
+    let skill_md_path = dir.join("SKILL.md");
+    std::fs::write(&skill_md_path, &content)
+        .map_err(|e| format!("写入 SKILL.md 失败: {e}"))?;
+    tracing::info!(path = %skill_md_path.display(), "SKILL.md 已保存");
+    Ok(())
+}
+
+/// 读取指定 skill 目录中的 SKILL.md 内容（编辑用）。
+#[tauri::command]
+pub async fn get_skill_content(skill_dir: String) -> Result<String, String> {
+    let skill_md_path = std::path::Path::new(&skill_dir).join("SKILL.md");
+    if !skill_md_path.exists() {
+        return Err("SKILL.md 不存在".to_string());
+    }
+    std::fs::read_to_string(&skill_md_path)
+        .map_err(|e| format!("读取 SKILL.md 失败: {e}"))
+}
+
+/// 删除指定 skill 目录（包含 SKILL.md 及同目录资源）。
+#[tauri::command]
+pub async fn delete_skill(skill_dir: String) -> Result<(), String> {
+    let dir = std::path::Path::new(&skill_dir);
+    if !dir.exists() {
+        return Ok(()); // 已删除，幂等
+    }
+    std::fs::remove_dir_all(dir)
+        .map_err(|e| format!("删除 Skill 目录失败: {e}"))?;
+    tracing::info!(dir = %dir.display(), "Skill 目录已删除");
+    Ok(())
 }
 
 #[cfg(test)]

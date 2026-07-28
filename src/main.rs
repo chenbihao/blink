@@ -274,6 +274,8 @@ fn main() {
             );
             // 初始化界面语言快照（0.8.1）— 供 empty_arg_hint 等 LocalizableText 解析用
             search_service.update_language(app_config.language.clone());
+            // 初始化 ClipboardEngine 展示条数快照（0.13.x：display_count 配置项）
+            search_service.update_clipboard_display_count(app_config.clipboard.display_count);
             // 启动后台清理（0.12.0 §2.2.4）：搜索历史 + 剪贴板历史 + AI 审计日志
             // 缓存库（performance_metrics / icon_cache）的清理在各自 init 时已 spawn。
             pools.spawn_startup_cleanup(infra::data::CleanupParams {
@@ -543,17 +545,9 @@ fn main() {
                 }
             }
 
-            // 0.13.0: 启动已配置且 enabled 的 MCP server（后台异步，不阻塞启动）
-            {
-                let mcp_client_clone = mcp_client.clone();
-                let config_pool = pools.config.clone();
-                tauri::async_runtime::spawn(async move {
-                    // 延迟 2s 避免与启动竞争资源
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    tracing::info!("MCP: 开始启动已配置的外部 server");
-                    mcp_client_clone.start_all(&config_pool).await;
-                });
-            }
+            // 0.13.7: MCP server 不在启动时自动拉起——改为 lazy connect。
+            // 对话窗口首次需要 tool 时由 ChatService.ensure_provider → ensure_connected 拉起。
+            // 设置页的「测试连接」按钮也可手动探测。
 
             // 持有服务列表,保证其生命周期与 app 一致。
             app.manage(services);
@@ -647,6 +641,7 @@ fn main() {
             app::commands::probe_interpreters,
             app::commands::get_interpreter_paths,
             app::commands::open_file_dialog,
+            app::commands::pick_directory_dialog,
             app::commands::get_clipboard_history,
             app::commands::search_clipboard_history,
             app::commands::record_clipboard_hit,
@@ -707,6 +702,7 @@ fn main() {
             app::commands::start_mcp_server,
             app::commands::stop_mcp_server,
             app::commands::reconnect_mcp_server,
+            app::commands::test_mcp_connection,
             app::commands::get_mcp_server_tools,
             app::commands::set_mcp_server_disabled_tools,
             app::commands::get_mcp_tool_pool_size,
@@ -730,12 +726,18 @@ fn main() {
             app::commands::open_skill_dir,
             // 0.13.6 Skill 导入 + 粒度开关
             app::commands::import_skill,
+            // 0.13.7 外部来源枚举（导入面板用）
+            app::commands::list_external_skill_sources,
             app::commands::set_skill_enabled,
             app::commands::open_dir_in_explorer,
             // 0.13.6 聊天窗口展现优化
             app::commands::get_mcp_tool_sources,
             // 0.13.6 CLI 能力识别
             app::commands::recognize_cli_tool,
+            // Skill 编辑/删除
+            app::commands::save_skill_md,
+            app::commands::get_skill_content,
+            app::commands::delete_skill,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

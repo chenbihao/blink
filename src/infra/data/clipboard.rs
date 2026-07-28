@@ -43,12 +43,16 @@ pub struct ClipboardConfig {
     /// 是否启用剪贴板历史
     #[serde(default)]
     pub enabled: bool,
-    /// 最大保留条数
+    /// 最大保留条数（存储上限）
     #[serde(default = "default_max_items")]
     pub max_items: u32,
     /// 保留天数（0=永久）
     #[serde(default = "default_retention_days")]
     pub retention_days: u32,
+    /// 单次展示条数（Alt+C / 搜索"剪贴板"时一次显示多少条）。
+    /// 与 `max_items`（存储上限）语义不同：这只控制一次召回展示多少。
+    #[serde(default = "default_display_count")]
+    pub display_count: u32,
     /// 是否允许搜索剪贴板内容
     #[serde(default = "default_true")]
     pub search_enabled: bool,
@@ -61,6 +65,10 @@ fn default_max_items() -> u32 {
     10000 // 兜底防无限增长；主要靠 retention_days 按天清理
 }
 fn default_retention_days() -> u32 {
+    30
+}
+/// 单次展示条数默认值。30 对齐 AI Capability `search_clipboard_history` 默认值。
+fn default_display_count() -> u32 {
     30
 }
 fn default_true() -> bool {
@@ -82,6 +90,7 @@ impl Default for ClipboardConfig {
             enabled: true,
             max_items: 10000, // 兜底；主要靠 retention_days=30 按天清理
             retention_days: 30,
+            display_count: 30,
             search_enabled: true,
             blacklist_keywords: default_blacklist(),
         }

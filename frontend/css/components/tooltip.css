@@ -1,0 +1,74 @@
+/* ── Tooltip 气泡组件 ──────────────────────────────────────────────────────
+ *
+ * 可复用的纯 CSS 悬浮提示。给元素加 `.tip` 类 + `data-tip` 属性即可：
+ *   <button class="seg-btn tip" data-tip="提示文案">按钮</button>
+ *
+ * 文案来自 i18n：`data-tip` 存 i18n key，applyI18n 会翻译成当前语言文本。
+ *
+ * 设计要点：
+ * - 纯 CSS（::after 气泡 + ::before 三角），零 JS、零 DOM 污染
+ * - hover/focus-within 触发，带 fade-in 过渡
+ * - 气泡默认翻到元素上方居中（bottom:100%），避开下方紧邻的控件
+ * - extension-card overflow:visible，不会被卡片裁剪
+ */
+
+.tip {
+  position: relative;
+}
+
+/* 气泡主体 */
+.tip::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%) translateY(2px);
+
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--surface);
+  border-radius: var(--radius-sm);
+  padding: 5px 9px;
+  font-size: var(--text-xs, 12px);
+  font-weight: var(--weight-normal, 400);
+  line-height: var(--leading-snug, 1.4);
+  white-space: nowrap;
+  max-width: 280px;
+
+  box-shadow: 0 4px 12px var(--shadow);
+  z-index: 1000;
+  pointer-events: none;
+
+  opacity: 0;
+  transition: opacity var(--transition-base, 0.15s) var(--ease-out, ease-out),
+              transform var(--transition-base, 0.15s) var(--ease-out, ease-out);
+}
+
+/* 小三角箭头（指向触发元素） */
+.tip::before {
+  content: "";
+  position: absolute;
+  bottom: calc(100% + 1px);
+  left: 50%;
+  transform: translateX(-50%) translateY(2px);
+
+  border: 5px solid transparent;
+  border-top-color: var(--surface-2);
+  border-bottom: 0;
+
+  z-index: 1001;
+  pointer-events: none;
+
+  opacity: 0;
+  transition: opacity var(--transition-base, 0.15s) var(--ease-out, ease-out),
+              transform var(--transition-base, 0.15s) var(--ease-out, ease-out);
+}
+
+/* hover / 键盘聚焦时显现 */
+.tip:hover::after,
+.tip:hover::before,
+.tip:focus-within::after,
+.tip:focus-within::before {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}

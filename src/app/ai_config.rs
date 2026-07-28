@@ -439,20 +439,14 @@ impl Default for SkillConfig {
 }
 
 impl SkillConfig {
-    /// 返回当前启用的来源列表（按 SkillSource 优先级排序）。
+    /// 返回当前启用的来源列表。
+    ///
+    /// 0.13.7 起统一为唯一来源（Blink 目录）——外部 Skill 通过导入功能复制到 Blink 目录。
+    /// `source_claude` / `source_zcode` 字段保留向后兼容，但不再影响扫描行为。
     pub fn enabled_sources(&self) -> Vec<crate::domain::ai::skill::SkillSource> {
         use crate::domain::ai::skill::SkillSource;
-        let mut sources = Vec::new();
-        if self.source_blink {
-            sources.push(SkillSource::Blink);
-        }
-        if self.source_claude {
-            sources.push(SkillSource::Claude);
-        }
-        if self.source_zcode {
-            sources.push(SkillSource::Zcode);
-        }
-        sources
+        // 唯一来源：Blink 目录
+        vec![SkillSource::Blink]
     }
 }
 

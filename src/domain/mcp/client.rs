@@ -5,9 +5,16 @@
 //! `McpClientManager` 持有所有已连接的 MCP server。每个 server 是一个 stdio 子进程，
 //! 通过 `rmcp::ServiceExt::serve()` 建立连接，`peer().list_all_tools()` 拉 tool 列表。
 //!
+//! ## 生命周期（lazy connect）
+//!
+//! - **不在 Blink 启动时自动拉起**——避免 npx 下载等慢操作拖慢启动
+//! - `ensure_connected()` 在对话窗口首次需要 tool 时 lazy 连接所有 enabled server
+//! - 手动「测试连接」/「连接」/「断开」按钮供用户在设置页控制
+//!
 //! ## 故障降级
 //!
-//! - server 启动失败 → 重试 3 次（间隔 2s），仍失败则跳过，不阻塞其他 server
+//! - server 连接失败 → 重试 1 次（间隔 1s），仍失败则跳过，不阻塞其他 server
+//! - 确定性错误（空 command / URL 格式错误）→ 不重试，立即返回
 //! - server 崩溃 → 标灰，从 tool 池剔除，UI 提示
 //! - 手动重连：`reconnect_server()` 重新拉起子进程
 //!
@@ -78,10 +85,10 @@ pub struct McpClientManager {
     statuses: Arc<RwLock<HashMap<String, McpServerStatus>>>,
 }
 
-/// 启动重试次数。
-const MAX_START_RETRIES: usize = 3;
+/// 连接重试次数（确定性错误不重试，只对网络/握手类错误重试）。
+const MAX_START_RETRIES: usize = 2;
 /// 重试间隔（秒）。
-const RETRY_INTERVAL_SECS: u64 = 2;
+const RETRY_INTERVAL_SECS: u64 = 1;
 
 impl McpClientManager {
     /// 构造空管理器。
@@ -92,38 +99,77 @@ impl McpClientManager {
         }
     }
 
-    /// 启动所有已配置且 enabled 的 MCP server。
+    /// 0.13.7: lazy connect——连接所有 enabled 但尚未连接的 server。
     ///
-    /// 从配置库加载 server 列表，逐个拉起子进程并握手。
-    /// 单个 server 失败不阻塞其他——记 Offline 状态，继续下一个。
-    pub async fn start_all(&self, config_pool: &sqlx::SqlitePool) {
+    /// 在对话窗口首次需要 tool 时调用（`ensure_provider` → `ensure_connected` → `collect_tools`）。
+    /// 已连接的 server 跳过，不在每次对话都重新连接。
+    ///
+    /// 与旧的 `start_all` 不同：不在 Blink 启动时调用，避免 npx 下载等慢操作拖慢启动。
+    pub async fn ensure_connected(&self, config_pool: &sqlx::SqlitePool) {
         let configs = match McpServerConfigStore::load_all(config_pool).await {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!(error = %e, "MCP: 加载 server 配置失败，跳过全部 MCP server");
+                tracing::warn!(error = %e, "MCP: 加载 server 配置失败，跳过 lazy connect");
                 return;
             }
         };
 
-        let enabled: Vec<_> = configs.into_iter().filter(|c| c.enabled).collect();
+        // 过滤出 enabled 且尚未连接的 server
+        let connected = self.connected.read().await;
+        let to_connect: Vec<_> = configs
+            .into_iter()
+            .filter(|c| c.enabled && !connected.contains_key(&c.name))
+            .collect();
+        drop(connected); // 释放读锁
+
+        if to_connect.is_empty() {
+            return;
+        }
+
         tracing::info!(
-            total = enabled.len(),
-            "MCP: 开始启动已配置的外部 server"
+            count = to_connect.len(),
+            "MCP: lazy connect——连接尚未连接的 enabled server"
         );
 
-        for config in enabled {
-            // 不阻塞——单个 server 启动失败只记状态
+        for config in to_connect {
+            // 不阻塞——单个 server 连接失败只记状态
             if let Err(e) = self.start_server(&config).await {
                 tracing::warn!(
                     server = %config.name,
                     error = %e,
-                    "MCP: server 启动失败（已重试 {MAX_START_RETRIES} 次）"
+                    "MCP: server lazy connect 失败"
                 );
             }
         }
     }
 
+    /// 0.13.7: 「测试连接」——连接 + 拉 tool 列表 + 立即断开。
+    ///
+    /// 用于设置页的「测试连接」按钮——验证 server 是否可用，不保持子进程。
+    /// 返回 tool 列表供前端预览，断开后状态回到 Offline。
+    pub async fn test_connection(
+        &self,
+        config: &McpServerConfig,
+    ) -> Result<Vec<McpToolInfo>, String> {
+        let tools = self.try_connect_once(config).await?;
+        // 立即断开——测试连接不保持子进程
+        let mut connected = self.connected.write().await;
+        connected.remove(&config.name);
+        drop(connected);
+        self.set_status(
+            &config.name,
+            McpServerStatus::Offline {
+                reason: "测试连接完成".to_string(),
+            },
+        )
+        .await;
+        Ok(tools)
+    }
+
     /// 启动单个 MCP server（含重试）。
+    ///
+    /// 确定性错误（空 command / URL 格式错误）不重试，立即返回。
+    /// 网络类错误（握手超时 / 连接拒绝）重试 MAX_START_RETRIES 次。
     pub async fn start_server(&self, config: &McpServerConfig) -> Result<(), String> {
         self.set_status(&config.name, McpServerStatus::Connecting)
             .await;
@@ -134,9 +180,9 @@ impl McpClientManager {
                 server = %config.name,
                 attempt,
                 max = MAX_START_RETRIES,
-                "MCP: 尝试启动 server"
+                "MCP: 尝试连接 server"
             );
-            match self.try_connect(config).await {
+            match self.try_connect_once(config).await {
                 Ok(tools) => {
                     let tool_count = tools.len();
                     tracing::info!(
@@ -152,12 +198,21 @@ impl McpClientManager {
                     return Ok(());
                 }
                 Err(e) => {
-                    last_err = e;
+                    last_err = e.clone();
+                    // 确定性错误不重试
+                    if Self::is_deterministic_error(&e) {
+                        tracing::debug!(
+                            server = %config.name,
+                            error = %last_err,
+                            "MCP: 确定性错误，不重试"
+                        );
+                        break;
+                    }
                     tracing::debug!(
                         server = %config.name,
                         attempt,
                         error = %last_err,
-                        "MCP: 启动失败，等待重试"
+                        "MCP: 连接失败，等待重试"
                     );
                     if attempt < MAX_START_RETRIES {
                         tokio::time::sleep(std::time::Duration::from_secs(RETRY_INTERVAL_SECS))
@@ -176,11 +231,35 @@ impl McpClientManager {
         Err(last_err)
     }
 
-    /// 尝试连接单个 server（根据 transport 类型分派 stdio / HTTP）。
+    /// 判断错误是否为确定性错误（重试也不会成功）。
+    ///
+    /// 确定性错误包括：
+    /// - 空命令 / 空URL
+    /// - 程序不存在
+    /// - 无效的 HTTP header
+    fn is_deterministic_error(err: &str) -> bool {
+        err.contains("command 不能为空")
+            || err.contains("URL 不能为空")
+            || err.contains("program path has no file name")
+            || err.contains("系统找不到指定的文件")
+            || err.contains("No such file or directory")
+    }
+
+    /// 单次连接尝试（不含重试逻辑）。
+    ///
+    /// 供 `start_server`（含重试）和 `test_connection`（不重试）共用。
+    async fn try_connect_once(&self, config: &McpServerConfig) -> Result<Vec<McpToolInfo>, String> {
+        self.try_connect(config).await
+    }
+
+    /// 尝试连接单个 server（根据 transport 类型分派 stdio / SSE / HTTP）。
     async fn try_connect(&self, config: &McpServerConfig) -> Result<Vec<McpToolInfo>, String> {
         use crate::domain::mcp::config::McpTransport;
         match &config.transport {
             McpTransport::Stdio => self.try_connect_stdio(config).await,
+            McpTransport::Sse { url, headers } => {
+                self.try_connect_sse(config, url, headers).await
+            }
             McpTransport::Http { url, headers } => {
                 self.try_connect_http(config, url, headers).await
             }
@@ -192,9 +271,21 @@ impl McpClientManager {
         &self,
         config: &McpServerConfig,
     ) -> Result<Vec<McpToolInfo>, String> {
+        // 前置校验——空 command 是确定性错误，不重试
+        if config.command.is_empty() {
+            return Err(format!(
+                "stdio 模式 command 不能为空（server: {}）",
+                config.name
+            ));
+        }
+
         // 构造子进程命令
-        let mut cmd = tokio::process::Command::new(&config.command);
-        cmd.args(&config.args);
+        // Windows 上，CreateProcess 只查找 .exe 文件。
+        // 命令如 `codegraph` 实际是 `codegraph.cmd`，需要 `cmd /c` 包裹。
+        let (program, program_args) =
+            resolve_windows_command(&config.command, &config.args);
+        let mut cmd = tokio::process::Command::new(&program);
+        cmd.args(&program_args);
         for (k, v) in &config.env {
             cmd.env(k, v);
         }
@@ -220,6 +311,14 @@ impl McpClientManager {
         url: &str,
         headers: &std::collections::HashMap<String, String>,
     ) -> Result<Vec<McpToolInfo>, String> {
+        // 前置校验——空 URL 是确定性错误
+        if url.is_empty() {
+            return Err(format!(
+                "HTTP 模式 URL 不能为空（server: {}）",
+                config.name
+            ));
+        }
+
         tracing::info!(
             server = %config.name,
             url = %url,
@@ -261,6 +360,46 @@ impl McpClientManager {
             .serve(transport)
             .await
             .map_err(|e| format!("HTTP MCP 握手失败: {e}"))?;
+
+        self.finalize_connection(config, service).await
+    }
+
+    /// SSE 模式连接——旧版 SSE transport + 握手 + 拉 tool 列表（0.13.8）。
+    ///
+    /// SSE 协议：GET `/sse` → SSE 长连接 → `endpoint` 事件带 POST URL →
+    /// POST JSON-RPC 到 POST URL → 响应通过 SSE 流返回。
+    ///
+    /// 使用自建 `SseClientTransport`（实现 `rmcp::Transport<RoleClient>`），
+    /// 因为 rmcp 的 `StreamableHttpClientTransport` 用 POST 到单一端点，
+    /// 对 SSE server 的 `/sse` 端点发 POST 会得到 405 Method Not Allowed。
+    async fn try_connect_sse(
+        &self,
+        config: &McpServerConfig,
+        url: &str,
+        headers: &std::collections::HashMap<String, String>,
+    ) -> Result<Vec<McpToolInfo>, String> {
+        if url.is_empty() {
+            return Err(format!(
+                "SSE 模式 URL 不能为空（server: {}）",
+                config.name
+            ));
+        }
+
+        tracing::info!(
+            server = %config.name,
+            url = %url,
+            "MCP: 尝试 SSE 连接"
+        );
+
+        let transport = crate::domain::mcp::sse_transport::SseClientTransport::new(url, headers)
+            .await
+            .map_err(|e| format!("SSE 连接失败: {e}"))?;
+
+        let client_info = ClientInfo::default();
+        let service = client_info
+            .serve(transport)
+            .await
+            .map_err(|e| format!("SSE MCP 握手失败: {e}"))?;
 
         self.finalize_connection(config, service).await
     }
@@ -413,6 +552,7 @@ impl McpClientManager {
         for (server_name, server) in connected.iter() {
             let transport = match &server.config.transport {
                 crate::domain::mcp::config::McpTransport::Stdio => "stdio",
+                crate::domain::mcp::config::McpTransport::Sse { .. } => "sse",
                 crate::domain::mcp::config::McpTransport::Http { .. } => "http",
             };
             for tool in &server.rmcp_tools {
@@ -467,6 +607,50 @@ impl Default for McpClientManager {
     }
 }
 
+/// Windows 命令解析：处理 `.cmd`/`.bat` 文件。
+///
+/// `CreateProcess`（Rust `Command::new` 底层）只搜索 `.exe` 文件。
+/// 命令如 `codegraph` 实际是 `codegraph.cmd`，直接传给 `Command::new`
+/// 会报 "program not found"。
+///
+/// 策略：
+/// 1. 命令已有扩展名 → 原样使用
+/// 2. 在 PATH 中找到 `command.exe` → 用完整路径
+/// 3. 否则用 `cmd /c` 包裹（cmd.exe 能正确解析 .cmd/.bat）
+fn resolve_windows_command(command: &str, args: &[String]) -> (String, Vec<String>) {
+    // 命令已有扩展名 → 原样使用
+    if std::path::Path::new(command).extension().is_some() {
+        return (command.to_string(), args.to_vec());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // 在 PATH 中查找 command.exe
+        if let Ok(path) = std::env::var("PATH") {
+            for dir in path.split(';') {
+                let exe_path =
+                    std::path::Path::new(dir).join(format!("{command}.exe"));
+                if exe_path.exists() {
+                    return (
+                        exe_path.to_string_lossy().to_string(),
+                        args.to_vec(),
+                    );
+                }
+            }
+        }
+
+        // 未找到 .exe → 用 cmd /c 包裹（处理 .cmd/.bat）
+        let mut all_args = vec!["/c".to_string(), command.to_string()];
+        all_args.extend_from_slice(args);
+        return ("cmd".to_string(), all_args);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        (command.to_string(), args.to_vec())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -501,5 +685,155 @@ mod tests {
         let manager = McpClientManager::new();
         let names = manager.get_all_tool_names().await;
         assert!(names.is_empty());
+    }
+
+    // ── 0.13.7: 空命令校验 + 确定性错误 ──
+
+    #[tokio::test]
+    async fn try_connect_stdio_empty_command_returns_error() {
+        let manager = McpClientManager::new();
+        let config = McpServerConfig {
+            name: "empty-test".to_string(),
+            transport: crate::domain::mcp::config::McpTransport::Stdio,
+            command: String::new(), // 空 command
+            args: vec![],
+            env: std::collections::HashMap::new(),
+            enabled: true,
+            disabled_tools: vec![],
+        };
+        let result = manager.try_connect_stdio(&config).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("command 不能为空"), "error was: {err}");
+    }
+
+    #[tokio::test]
+    async fn try_connect_http_empty_url_returns_error() {
+        let manager = McpClientManager::new();
+        let config = McpServerConfig {
+            name: "empty-url-test".to_string(),
+            transport: crate::domain::mcp::config::McpTransport::Http {
+                url: String::new(),
+                headers: std::collections::HashMap::new(),
+            },
+            command: String::new(),
+            args: vec![],
+            env: std::collections::HashMap::new(),
+            enabled: true,
+            disabled_tools: vec![],
+        };
+        let result = manager.try_connect_http(&config, "", &std::collections::HashMap::new()).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("URL 不能为空"), "error was: {err}");
+    }
+
+    #[test]
+    fn is_deterministic_error_detects_empty_command() {
+        assert!(McpClientManager::is_deterministic_error(
+            "stdio 模式 command 不能为空（server: test）"
+        ));
+    }
+
+    #[test]
+    fn is_deterministic_error_detects_missing_program() {
+        assert!(McpClientManager::is_deterministic_error(
+            "program path has no file name"
+        ));
+    }
+
+    #[test]
+    fn is_deterministic_error_rejects_network_error() {
+        // 网络错误应该重试，不算确定性错误
+        assert!(!McpClientManager::is_deterministic_error(
+            "MCP 握手失败: connection refused"
+        ));
+    }
+
+    #[tokio::test]
+    async fn start_server_empty_command_does_not_retry() {
+        // 空命令是确定性错误，start_server 应立即返回，不重试
+        let manager = McpClientManager::new();
+        let config = McpServerConfig {
+            name: "no-retry-test".to_string(),
+            transport: crate::domain::mcp::config::McpTransport::Stdio,
+            command: String::new(),
+            args: vec![],
+            env: std::collections::HashMap::new(),
+            enabled: true,
+            disabled_tools: vec![],
+        };
+        let start = std::time::Instant::now();
+        let result = manager.start_server(&config).await;
+        let elapsed = start.elapsed();
+        assert!(result.is_err());
+        // 确定性错误不重试，应该几乎不耗时（< 1s，重试会有 1s sleep）
+        assert!(elapsed < std::time::Duration::from_secs(1), "elapsed: {elapsed:?}");
+    }
+
+    // ── P3: MCP 双向投影闭环（Capability → MCP Tool → Capability schema 一致性）──
+
+    /// 验证 MCP 双向投影闭环：
+    /// CapabilitySchema → 正向投影 → rmcp::Tool → （再验证 name/description/input_schema 一致）
+    ///
+    /// 这模拟了 Blink 作为 MCP server 暴露能力，Blink 作为 MCP client 消费的全链路。
+    /// 实际 stdio 子进程拉起需要编译后的 blink.exe，在单测中用投影一致性验证闭环。
+    #[test]
+    fn mcp_projection_roundtrip_preserves_schema() {
+        use crate::domain::capability::CapabilitySchema;
+        use crate::domain::mcp::projection::capability_schema_to_mcp_tool;
+        use serde_json::json;
+
+        // 模拟 Blink 暴露的 Capability
+        let schema = CapabilitySchema {
+            name: "search_files".to_string(),
+            description: "搜索文件系统".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "搜索关键词" }
+                },
+                "required": ["query"]
+            }),
+            sensitive: false,
+        };
+
+        // 正向投影：Capability → MCP Tool（Blink 作为 server 暴露）
+        let mcp_tool = capability_schema_to_mcp_tool(&schema);
+
+        // 验证投影后字段一致（Blink 作为 client 消费时看到的）
+        assert_eq!(mcp_tool.name, "search_files");
+        assert_eq!(
+            mcp_tool.description.as_deref(),
+            Some("搜索文件系统")
+        );
+        assert_eq!(mcp_tool.input_schema["type"], "object");
+        assert_eq!(mcp_tool.input_schema["properties"]["query"]["type"], "string");
+        assert_eq!(mcp_tool.input_schema["required"][0], "query");
+    }
+
+    /// 验证批量投影 + sensitive 不暴露 annotations 的安全策略。
+    #[test]
+    fn mcp_batch_projection_and_sensitive_handling() {
+        use crate::domain::capability::CapabilitySchema;
+        use crate::domain::mcp::projection::capability_schemas_to_mcp_tools;
+
+        let schemas = vec![
+            CapabilitySchema::empty("read_clipboard", "读剪贴板"),
+            CapabilitySchema {
+                name: "search_apps".to_string(),
+                description: "搜索应用".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+                sensitive: true, // sensitive 不应映射到 MCP annotations
+            },
+            CapabilitySchema::empty("capture_screen", "截屏"),
+        ];
+
+        let tools = capability_schemas_to_mcp_tools(&schemas);
+        assert_eq!(tools.len(), 3);
+        // sensitive 的 tool 也不应有 annotations（授权由 BlinkMcpServer 在 call_tool 检查）
+        for tool in &tools {
+            assert!(tool.annotations.is_none(), "tool {} should not have annotations", tool.name);
+        }
     }
 }

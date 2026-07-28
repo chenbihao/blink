@@ -537,11 +537,10 @@
               <div class="setting-row">
                 <label class="setting-label" data-i18n="ai.advanced.tool_feedback">工具结果回流 AI<span class="field-hint-icon" data-i18n-title="ai.advanced.tool_feedback.hint">ⓘ</span></label>
                 <div class="seg-control" id="ai-tool-feedback">
-                  <button type="button" class="seg-btn" data-value="auto" data-i18n="ai.advanced.tool_feedback.auto">自动</button>
-                  <button type="button" class="seg-btn" data-value="on" data-i18n="ai.advanced.tool_feedback.on">开启</button>
-                  <button type="button" class="seg-btn" data-value="off" data-i18n="ai.advanced.tool_feedback.off">关闭</button>
+                  <button type="button" class="seg-btn tip" data-value="auto" data-tip="ai.advanced.tool_feedback.desc.auto" data-i18n="ai.advanced.tool_feedback.auto">自动</button>
+                  <button type="button" class="seg-btn tip" data-value="on" data-tip="ai.advanced.tool_feedback.desc.on" data-i18n="ai.advanced.tool_feedback.on">开启</button>
+                  <button type="button" class="seg-btn tip" data-value="off" data-tip="ai.advanced.tool_feedback.desc.off" data-i18n="ai.advanced.tool_feedback.off">关闭</button>
                 </div>
-                <div class="hint-line" id="ai-tool-feedback-desc">本地模型自动开启 Turn 2 回流，云端模型关闭以节省 token</div>
               </div>
               <div class="setting-row">
                 <label class="setting-label" data-i18n="ai.advanced.timeout">硬超时（毫秒）<span class="field-hint-icon" data-i18n-title="ai.advanced.timeout.hint">ⓘ</span></label>
@@ -646,6 +645,7 @@
               </div>
             </div>
             <div class="extension-body">
+              <!-- 1. 启用 Skill 发现 -->
               <div class="setting-row">
                 <label class="setting-label" data-i18n="ai.skill.enabled.label">启用 Skill 发现<span class="field-hint-icon" data-i18n-title="ai.skill.enabled.hint">ⓘ</span></label>
                 <label class="switch switch-sm">
@@ -653,79 +653,99 @@
                   <span class="slider"></span>
                 </label>
               </div>
+
+              <!-- 2. CLI 能力识别 -->
               <div class="setting-row setting-row-column">
-                <label class="setting-label" data-i18n="ai.skill.sources.label">来源目录<span class="field-hint-icon" data-i18n-title="ai.skill.sources.hint">ⓘ</span></label>
-                <div class="skill-source-grid">
-                  <div class="skill-source-card">
-                    <label class="checkbox">
-                      <input type="checkbox" id="ai-skill-source-blink" />
-                      <span class="checkmark"></span>
-                    </label>
-                    <span class="skill-source-name">Blink</span>
-                    <button class="btn btn-icon-sm skill-open-dir" data-source="blink" data-i18n-title="ai.skill.open_dir" title="打开目录"><svg class="icon" aria-hidden="true"><use href="#icon-folder-open"/></svg></button>
-                  </div>
-                  <div class="skill-source-card">
-                    <label class="checkbox">
-                      <input type="checkbox" id="ai-skill-source-claude" />
-                      <span class="checkmark"></span>
-                    </label>
-                    <span class="skill-source-name">Claude Code</span>
-                    <button class="btn btn-icon-sm skill-open-dir" data-source="claude" data-i18n-title="ai.skill.open_dir" title="打开目录"><svg class="icon" aria-hidden="true"><use href="#icon-folder-open"/></svg></button>
-                  </div>
-                  <div class="skill-source-card">
-                    <label class="checkbox">
-                      <input type="checkbox" id="ai-skill-source-zcode" />
-                      <span class="checkmark"></span>
-                    </label>
-                    <span class="skill-source-name">ZCode</span>
-                    <button class="btn btn-icon-sm skill-open-dir" data-source="zcode" data-i18n-title="ai.skill.open_dir" title="打开目录"><svg class="icon" aria-hidden="true"><use href="#icon-folder-open"/></svg></button>
-                  </div>
-                </div>
-              </div>
-              <div class="setting-row setting-row-column">
-                <div class="skill-list-header">
-                  <label class="setting-label" data-i18n="ai.skill.list.label">已发现技能</label>
-                  <button class="btn btn-sm skill-refresh-btn" id="ai-skill-refresh" data-i18n="ai.skill.refresh">刷新</button>
-                </div>
-                <div id="ai-skill-list" class="skill-list">
-                  <span class="skill-empty-hint" data-i18n="ai.skill.list.empty">点击刷新扫描 Skill 目录</span>
-                </div>
-              </div>
-              <!-- 0.13.6: CLI 能力识别 ─────────────────────────── -->
-              <div class="setting-row setting-row-column">
-                <label class="setting-label">CLI 能力识别<span class="field-hint-icon" title="指定一个 CLI 工具路径，自动运行 --help 并生成 SKILL.md 模板">ⓘ</span></label>
-                <p class="panel-hint">运行 CLI 的 --help，自动解析子命令和选项，生成 SKILL.md 模板供编辑。</p>
+                <label class="setting-label">CLI 能力识别<span class="field-hint-icon" title="选择可执行文件（.exe/.cmd/.bat），运行 --help 自动生成 SKILL.md">ⓘ</span></label>
+                <p class="panel-hint">选择 CLI 工具，自动运行 --help 解析子命令和选项，生成 SKILL.md 供编辑后保存。</p>
                 <div class="cli-recognizer-row">
                   <input type="text" id="cli-recognizer-input" class="input-wide" placeholder="C:\Program Files\Git\bin\git.exe" />
+                  <button class="btn btn-sm" id="cli-recognizer-browse" title="浏览文件"><svg class="icon" aria-hidden="true"><use href="#icon-folder-open"/></svg></button>
                   <button class="btn btn-sm" id="cli-recognizer-btn">识别</button>
                 </div>
                 <p id="cli-recognizer-error" class="modal-error"></p>
-                <div id="cli-recognizer-result" style="display:none;">
-                  <div class="setting-row">
-                    <label class="setting-label">识别结果: <span id="cli-recognizer-tool-name"></span></div>
-                  <div id="cli-recognizer-preview" class="cli-recognizer-preview"></div>
-                  <div class="modal-actions">
-                    <button class="btn-small" id="cli-recognizer-dismiss">关闭</button>
+              </div>
+
+              <!-- 3. 管理技能 -->
+              <div class="setting-row setting-row-column">
+                <div class="skill-list-header">
+                  <label class="setting-label" data-i18n="ai.skill.list.label">已发现技能</label>
+                  <div class="skill-list-actions">
+                    <button class="btn btn-sm" id="ai-skill-import-btn"><svg class="icon" aria-hidden="true"><use href="#icon-copy"/></svg> 导入</button>
+                    <button class="btn btn-sm" id="ai-skill-refresh" data-i18n="ai.skill.refresh">刷新</button>
                   </div>
+                </div>
+                <div id="skill-import-hint" class="skill-import-hint" style="display:none;"></div>
+                <div id="ai-skill-list" class="skill-list">
+                  <span class="skill-empty-hint" data-i18n="ai.skill.list.empty">点击刷新扫描 Skill 目录</span>
                 </div>
               </div>
             </div>
           </div>
 
-          <!-- Skill 导入 modal（0.13.6） ────────────────────────── -->
-          <div id="skill-import-overlay" class="modal-overlay" style="display:none;">
-            <div class="modal-card">
-              <h3>导入 Skill: <span id="skill-import-name"></span></h3>
-              <p class="panel-hint">选择导入方式将此 Skill 复制到 Blink 目录。</p>
-              <p id="skill-import-error" class="modal-error"></p>
+          <!-- Skill 编辑 modal ────────────────────────────────────── -->
+          <div id="skill-edit-overlay" class="modal-overlay" style="display:none;">
+            <div class="modal-card skill-edit-modal">
+              <h3 id="skill-edit-title">编辑 Skill</h3>
+              <p class="panel-hint">识别结果已生成，请检查并编辑后保存。</p>
+              <div id="skill-edit-meta" class="skill-edit-meta"></div>
+              <textarea id="skill-edit-textarea" class="skill-edit-textarea" spellcheck="false" placeholder="SKILL.md 内容..."></textarea>
+              <p id="skill-edit-error" class="modal-error"></p>
               <div class="modal-actions">
-                <button class="btn-small" id="skill-import-cancel">取消</button>
-                <button class="btn-small" id="skill-import-symlink" title="创建符号链接（需开发者模式）">软链接</button>
-                <button class="btn-primary" id="skill-import-copy">复制</button>
+                <button class="btn-small" id="skill-edit-cancel">取消</button>
+                <button class="btn-primary" id="skill-edit-save">保存</button>
               </div>
             </div>
           </div>
-          <div id="skill-import-hint" class="skill-import-hint" style="display:none;"></div>
+
+          <!-- Skill 导入 modal（0.13.7 重构：来源下拉 + 勾选导入） ─── -->
+          <div id="skill-import-overlay" class="modal-overlay" style="display:none;">
+            <div class="modal-card skill-import-modal">
+              <h3>导入 Skill</h3>
+              <p class="panel-hint">从其他应用的 Skill 目录或自定义文件夹导入到 Blink 目录。</p>
+
+              <!-- 来源选择 -->
+              <div class="skill-import-field">
+                <label class="setting-label" for="skill-import-source-app">来源应用</label>
+                <div class="skill-import-source-row">
+                  <select id="skill-import-source-app" class="input-wide">
+                    <option value="">— 选择来源 —</option>
+                    <!-- 选项由 JS 动态填充（Claude/Codex/OpenCode/ZCode + 自定义） -->
+                  </select>
+                  <button class="btn btn-sm" id="skill-import-open-source-dir" title="打开该来源目录（不存在则创建）"><svg class="icon" aria-hidden="true"><use href="#icon-folder-open"/></svg></button>
+                </div>
+                <p id="skill-import-source-info" class="skill-import-source-info"></p>
+              </div>
+
+              <!-- 该来源下可导入的 Skill 列表 -->
+              <div class="skill-import-field">
+                <div class="skill-import-list-header">
+                  <label class="setting-label">可导入的 Skill</label>
+                  <div class="skill-import-list-actions">
+                    <button class="btn btn-sm" id="skill-import-select-all" type="button">全选</button>
+                    <button class="btn btn-sm" id="skill-import-select-none" type="button">清空</button>
+                  </div>
+                </div>
+                <div id="skill-import-skill-list" class="skill-import-skill-list">
+                  <span class="skill-empty-hint">请先选择来源</span>
+                </div>
+              </div>
+
+              <p id="skill-import-error" class="modal-error"></p>
+
+              <!-- 导入模式（软链接/复制），默认复制 -->
+              <div class="skill-import-field skill-import-mode-row">
+                <label class="setting-label">导入方式</label>
+                <label class="radio-inline"><input type="radio" name="skill-import-mode" value="copy" checked /> 复制</label>
+                <label class="radio-inline" title="创建符号链接（需 Windows 开发者模式）"><input type="radio" name="skill-import-mode" value="symlink" /> 软链接</label>
+              </div>
+
+              <div class="modal-actions">
+                <button class="btn-small" id="skill-import-cancel">取消</button>
+                <button class="btn-primary" id="skill-import-confirm" disabled>导入选中</button>
+              </div>
+            </div>
+          </div>
 
           <!-- MCP 外部工具 ─────────────────────────────────────── -->
           <div class="extension-card">
@@ -749,46 +769,48 @@
 
           <!-- MCP 导入 modal ───────────────────────────────────────── -->
           <div id="mcp-import-overlay" class="modal-overlay" style="display:none;">
-            <div class="modal-card">
+            <div class="modal-card mcp-import-modal">
               <h3>导入 MCP 配置</h3>
               <div class="ai-modal-section">
                 <div class="setting-row">
-                  <label class="setting-label">导入方式</label>
+                  <label class="setting-label">导入来源</label>
                   <select id="mcp-import-source" class="input-wide">
                     <option value="">— 选择来源 —</option>
-                    <option value="claude_desktop">Claude Desktop</option>
+                    <option value="open_code">OpenCode</option>
+                    <option value="codex">Codex</option>
                     <option value="claude_code">Claude Code</option>
+                    <option value="claude_desktop">Claude Desktop</option>
                     <option value="cursor">Cursor</option>
                     <option value="windsurf">Windsurf</option>
                     <option value="vscode">VS Code</option>
-                    <option value="json">粘贴 JSON</option>
                   </select>
                 </div>
-                <div id="mcp-import-json-row" class="setting-row" style="display:none;">
-                  <label class="setting-label">JSON 配置</label>
-                  <textarea id="mcp-import-json-text" class="input-wide" rows="6" placeholder='{"mcpServers": {"name": {"command": "...", "args": [...]}}}'></textarea>
+                <div class="setting-row">
+                  <label class="setting-label">导入选项</label>
+                  <label class="checkbox mcp-import-overwrite-label">
+                    <input type="checkbox" id="mcp-import-overwrite" />
+                    <span class="checkmark"></span>
+                    <span>覆盖同名 server</span>
+                  </label>
                 </div>
-                <div id="mcp-import-status" class="setting-row" style="display:none;">
-                  <p id="mcp-import-status-text" class="panel-hint"></p>
+              </div>
+              <!-- 列表区域（固定高度） -->
+              <div class="mcp-import-list-area">
+                <div class="mcp-import-list-header">
+                  <label class="checkbox mcp-import-select-all-label">
+                    <input type="checkbox" id="mcp-import-select-all" checked />
+                    <span class="checkmark"></span>
+                    <span>全选</span>
+                  </label>
+                  <span class="mcp-import-count" id="mcp-import-count"></span>
                 </div>
-                <div id="mcp-import-preview" style="display:none;">
-                  <div class="setting-row">
-                    <label class="setting-label">待导入列表</label>
-                  </div>
-                  <div id="mcp-import-preview-list" class="mcp-import-list"></div>
-                  <div class="setting-row">
-                    <label class="checkbox">
-                      <input type="checkbox" id="mcp-import-overwrite" />
-                      <span class="checkmark"></span>
-                      <span>覆盖同名 server</span>
-                    </label>
-                  </div>
+                <div id="mcp-import-preview-list" class="mcp-import-list">
+                  <div class="mcp-import-empty" id="mcp-import-empty">选择导入来源后将自动读取配置</div>
                 </div>
               </div>
               <p id="mcp-import-error" class="modal-error"></p>
               <div class="modal-actions">
                 <button class="btn-small" id="mcp-import-cancel">取消</button>
-                <button class="btn-small" id="mcp-import-load">读取</button>
                 <button class="btn-primary" id="mcp-import-confirm" disabled>确认导入</button>
               </div>
             </div>
@@ -840,18 +862,19 @@
         <!-- MCP Server 添加/编辑 modal ────────────────────────── -->
         <div id="mcp-modal-overlay" class="modal-overlay" style="display:none;">
           <div class="modal-card">
-            <h3 id="mcp-form-title">添加 MCP Server</h3>
+            <h3 id="mcp-form-title">编辑 MCP 服务器</h3>
+            <p class="mcp-form-hint">修改当前 MCP 配置，保存后返回列表。编辑表单或 JSON 均可，双方实时同步。</p>
             <div class="ai-modal-section">
-              <div class="ai-modal-section-label" data-i18n="ai.mcp.form.section.connection">连接配置</div>
               <div class="setting-row">
                 <label class="setting-label" data-i18n="ai.mcp.form.name">名称</label>
                 <input type="text" id="mcp-form-name" class="input-wide" />
               </div>
               <div class="setting-row">
-                <label class="setting-label">传输协议</label>
+                <label class="setting-label">类型</label>
                 <select id="mcp-form-transport" class="input-wide">
                   <option value="stdio">stdio（子进程）</option>
-                  <option value="http">HTTP（远程 server）</option>
+                  <option value="sse">SSE（远程 server）</option>
+                  <option value="http">Streamable HTTP（远程 server）</option>
                 </select>
               </div>
               <!-- stdio 模式字段 -->
@@ -861,32 +884,38 @@
                   <input type="text" id="mcp-form-command" class="input-wide" />
                 </div>
                 <div class="setting-row">
-                  <label class="setting-label" data-i18n="ai.mcp.form.args">参数（空格分隔）</label>
-                  <input type="text" id="mcp-form-args" class="input-wide" />
-                </div>
-                <div class="setting-row">
-                  <label class="setting-label" data-i18n="ai.mcp.form.env">环境变量（KEY=value 逗号分隔）</label>
-                  <input type="text" id="mcp-form-env" class="input-wide" />
-                </div>
+                    <label class="setting-label" data-i18n="ai.mcp.form.args">参数</label>
+                    <input type="text" id="mcp-form-args" class="input-wide" placeholder="空格分隔，如 -y @modelcontextprotocol/server-filesystem" />
+                  </div>
+                  <div class="setting-row">
+                    <label class="setting-label" data-i18n="ai.mcp.form.env">环境变量</label>
+                    <input type="text" id="mcp-form-env" class="input-wide" placeholder="KEY=value, 逗号分隔，如 API_KEY=xxx, DEBUG=true" />
+                  </div>
               </div>
-              <!-- HTTP 模式字段 -->
+              <!-- HTTP/SSE 模式字段 -->
               <div id="mcp-form-http-fields" style="display:none;">
                 <div class="setting-row">
                   <label class="setting-label">URL</label>
                   <input type="text" id="mcp-form-url" class="input-wide" placeholder="http://localhost:8000/mcp" />
                 </div>
                 <div class="setting-row">
-                  <label class="setting-label">Headers（KEY: value 每行一个）</label>
-                  <textarea id="mcp-form-headers" class="input-wide" rows="3" placeholder="Authorization: Bearer token&#10;X-Custom: value"></textarea>
+                  <label class="setting-label">请求头（可选）</label>
+                  <textarea id="mcp-form-headers" class="input-wide" rows="4" placeholder="Authorization: Bearer token&#10;X-Custom: value"></textarea>
                 </div>
               </div>
               <div class="setting-row">
-                <label class="setting-label" data-i18n="ai.mcp.form.enabled">自动启动</label>
+                <label class="setting-label" data-i18n="ai.mcp.form.enabled">启用</label>
                 <label class="switch switch-sm">
                   <input type="checkbox" id="mcp-form-enabled" checked />
                   <span class="slider"></span>
                 </label>
+                <span class="mcp-form-field-hint">启用后，对话窗口需要工具时自动连接此 server</span>
               </div>
+            </div>
+            <!-- JSON 配置（实时双向同步） -->
+            <div class="mcp-form-json-section">
+              <label class="setting-label">JSON 配置</label>
+              <textarea id="mcp-form-json" class="input-wide" rows="8" placeholder='{"mcpServers": {"my-server": {"command": "npx", "args": ["-y", "server"]}}}'></textarea>
             </div>
             <p id="mcp-form-error" class="modal-error"></p>
             <div class="modal-actions">

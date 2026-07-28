@@ -6,16 +6,26 @@
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
-/// MCP 传输协议类型（0.13.6）。
+/// MCP 传输协议类型（0.13.6 → 0.13.8）。
 ///
 /// 决定 MCP client 如何连接到外部 server——
-/// - `Stdio`：拉起子进程，通过 stdin/stdout 通信（当前唯一支持的类型）
-/// - `Http`：通过 HTTP 请求连接远程 server（Streamable HTTP transport）
+/// - `Stdio`：拉起子进程，通过 stdin/stdout 通信
+/// - `Sse`：旧版 SSE transport（MCP 2024-11-05 规范）
+///   GET `/sse` 建立 SSE 长连接 + POST 到 endpoint URL 发消息
+/// - `Http`：Streamable HTTP（MCP 2025-03-26 规范）
+///   POST 到单个端点，响应可为 JSON 或 SSE
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum McpTransport {
     /// stdio 子进程。
     Stdio,
+    /// 旧版 SSE transport。
+    /// `url` 字段必填（SSE 端点），`headers` 可选。
+    Sse {
+        url: String,
+        #[serde(default)]
+        headers: std::collections::HashMap<String, String>,
+    },
     /// Streamable HTTP（远程 server）。
     /// `url` 字段必填，`headers` 可选（如 Authorization）。
     Http {

@@ -51,6 +51,10 @@ pub enum SkillSource {
     Claude,
     /// ZCode 目录 `~/.zcode/skills/`
     Zcode,
+    /// OpenCode 目录 `~/.opencode/skills/`
+    Opencode,
+    /// Codex 目录 `~/.codex/skills/`
+    Codex,
 }
 
 impl SkillSource {
@@ -60,6 +64,8 @@ impl SkillSource {
             Self::Blink => "blink",
             Self::Claude => "claude",
             Self::Zcode => "zcode",
+            Self::Opencode => "opencode",
+            Self::Codex => "codex",
         }
     }
 
@@ -71,13 +77,32 @@ impl SkillSource {
             Self::Blink => Some(crate::infra::utils::paths::skills_global_dir()),
             Self::Claude => dirs_next::home_dir().map(|h| h.join(".claude").join("skills")),
             Self::Zcode => dirs_next::home_dir().map(|h| h.join(".zcode").join("skills")),
+            Self::Opencode => dirs_next::home_dir().map(|h| h.join(".opencode").join("skills")),
+            Self::Codex => dirs_next::home_dir().map(|h| h.join(".codex").join("skills")),
         }
     }
 
-    /// 所有来源（按优先级排序：Blink → Claude → ZCode）。
+    /// 外部来源（除 Blink 外，供「从其他应用导入」功能枚举）。
+    /// 按 id 字母序，与前端下拉保持一致。
+    pub fn external_sources() -> &'static [SkillSource] {
+        &[
+            Self::Claude,
+            Self::Codex,
+            Self::Opencode,
+            Self::Zcode,
+        ]
+    }
+
+    /// 所有来源（按优先级排序：Blink → 其余）。
     #[allow(dead_code)] // 供未来扩展使用
     pub fn all() -> &'static [SkillSource] {
-        &[Self::Blink, Self::Claude, Self::Zcode]
+        &[
+            Self::Blink,
+            Self::Claude,
+            Self::Codex,
+            Self::Opencode,
+            Self::Zcode,
+        ]
     }
 }
 
@@ -128,6 +153,9 @@ pub struct SkillEntry {
     #[allow(dead_code)] // 供未来扩展（如打开 skill 文件编辑）
     #[serde(skip)]
     pub dir_path: PathBuf,
+    /// 来源 CLI 可执行文件路径（CLI 识别生成的 Skill 才有此字段）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_cli_path: Option<String>,
 }
 
 // ── SkillRegistry ────────────────────────────────────────────────────────────
@@ -349,6 +377,97 @@ pub struct SkillEntryWithStatus {
     pub dir: String,
 }
 
+// ── 外部来源导入（0.13.7）─────────────────────────────────────────────────────
+
+/// 外部来源的概要信息（供「从其他应用导入 Skill」面板展示）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ExternalSkillSourceInfo {
+    /// 来源标识（claude / codex / opencode / zcode）。
+    pub id: String,
+    /// 显示名（Claude / Codex / OpenCode / ZCode）。
+    pub label: String,
+    /// 该来源的 skill 目录绝对路径（目录不存在时仍返回字符串）。
+    pub dir: String,
+    /// 目录是否存在。
+    pub exists: bool,
+    /// 该目录下已发现的 skill 概要列表。
+    pub skills: Vec<ExternalSkillSummary>,
+}
+
+/// 外部来源下单个 skill 的概要（导入面板勾选用，只需 name + dir + description）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ExternalSkillSummary {
+    pub name: String,
+    pub description: String,
+    /// SKILL.md 所在目录绝对路径——前端选中后作为 `import_skill` 的 `source_path`。
+    pub dir: String,
+}
+
+/// 枚举所有外部来源（Claude / Codex / OpenCode / ZCode）的概要信息。
+///
+/// 供设置页「导入 Skill」面板：下拉选应用 → 展示该应用目录下可导入的 skill。
+/// 目录不存在或读取失败时返回空 skills 列表，`exists=false`。
+pub fn list_external_sources() -> Vec<ExternalSkillSourceInfo> {
+    SkillSource::external_sources()
+        .iter()
+        .map(|&src| external_source_info(src))
+        .collect()
+}
+
+/// 构建单个外部来源的概要信息。
+fn external_source_info(source: SkillSource) -> ExternalSkillSourceInfo {
+    let dir = match source.directory() {
+        Some(d) => d,
+        None => {
+            return ExternalSkillSourceInfo {
+                id: source.display_name().to_string(),
+                label: source_label(source),
+                dir: String::new(),
+                exists: false,
+                skills: Vec::new(),
+            };
+        }
+    };
+    let dir_str = dir.display().to_string();
+    let exists = dir.exists();
+    let skills = if exists {
+        match scan_directory(&dir, source) {
+            Ok(entries) => entries
+                .into_iter()
+                .map(|e| ExternalSkillSummary {
+                    name: e.name,
+                    description: e.description,
+                    dir: e.dir_path.display().to_string(),
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!(source = source.display_name(), %e, "扫描外部来源目录失败");
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    ExternalSkillSourceInfo {
+        id: source.display_name().to_string(),
+        label: source_label(source),
+        dir: dir_str,
+        exists,
+        skills,
+    }
+}
+
+/// 来源显示名（首字母大写形式，用于 UI 展示）。
+fn source_label(source: SkillSource) -> String {
+    match source {
+        SkillSource::Blink => "Blink".to_string(),
+        SkillSource::Claude => "Claude".to_string(),
+        SkillSource::Zcode => "ZCode".to_string(),
+        SkillSource::Opencode => "OpenCode".to_string(),
+        SkillSource::Codex => "Codex".to_string(),
+    }
+}
+
 // ── 目录扫描 ──────────────────────────────────────────────────────────────────
 
 /// 扫描单个目录下的所有 skill 子目录。
@@ -432,6 +551,7 @@ fn parse_skill_md(content: &str, source: SkillSource, dir_path: PathBuf) -> Opti
         full_content: body,
         source,
         dir_path,
+        source_cli_path: frontmatter.get("source_cli_path").map(|s| s.to_string()),
     })
 }
 
@@ -874,6 +994,7 @@ mod tests {
             full_content: "# Rust Debug".to_string(),
             source: SkillSource::Blink,
             dir_path: PathBuf::from("/tmp"),
+            source_cli_path: None,
         };
         *registry.skills.write().unwrap() = vec![skill];
 
@@ -896,6 +1017,7 @@ mod tests {
             full_content: String::new(),
             source: SkillSource::Blink,
             dir_path: PathBuf::from("/tmp"),
+            source_cli_path: None,
         }];
 
         let matched = registry.match_triggers("running cargo build");
@@ -916,6 +1038,7 @@ mod tests {
             full_content: String::new(),
             source: SkillSource::Claude,
             dir_path: PathBuf::from("/tmp"),
+            source_cli_path: None,
         }];
 
         let matched = registry.match_triggers("error[E0308]: mismatched types");
@@ -936,6 +1059,7 @@ mod tests {
             full_content: String::new(),
             source: SkillSource::Blink,
             dir_path: PathBuf::from("/tmp"),
+            source_cli_path: None,
         }];
 
         let matched = registry.match_triggers("anything");
@@ -957,6 +1081,7 @@ mod tests {
             full_content: String::new(),
             source: SkillSource::Blink,
             dir_path: PathBuf::from("/tmp"),
+            source_cli_path: None,
         },
         SkillEntry {
             name: "skill-b".to_string(),
@@ -969,6 +1094,7 @@ mod tests {
             full_content: String::new(),
             source: SkillSource::Claude,
             dir_path: PathBuf::from("/tmp"),
+            source_cli_path: None,
         },
         ];
 
@@ -990,6 +1116,7 @@ mod tests {
             full_content: String::new(),
             source: SkillSource::Blink,
             dir_path: PathBuf::from("/tmp"),
+            source_cli_path: None,
         }];
 
         assert!(registry.find_by_name("rust-debug", None).is_some());
@@ -1008,6 +1135,7 @@ mod tests {
             full_content: String::new(),
             source: SkillSource::Blink,
             dir_path: PathBuf::from("/tmp"),
+            source_cli_path: None,
         },
         SkillEntry {
             name: "same-name".to_string(),
@@ -1017,6 +1145,7 @@ mod tests {
             full_content: String::new(),
             source: SkillSource::Claude,
             dir_path: PathBuf::from("/tmp"),
+            source_cli_path: None,
         },
         ];
 
@@ -1088,14 +1217,50 @@ mod tests {
         assert_eq!(SkillSource::Blink.display_name(), "blink");
         assert_eq!(SkillSource::Claude.display_name(), "claude");
         assert_eq!(SkillSource::Zcode.display_name(), "zcode");
+        assert_eq!(SkillSource::Opencode.display_name(), "opencode");
+        assert_eq!(SkillSource::Codex.display_name(), "codex");
     }
 
     #[test]
     fn skill_source_all_returns_ordered() {
+        // all() 按 Blink 优先 + 其余字母序
         let sources = SkillSource::all();
         assert_eq!(sources[0], SkillSource::Blink);
         assert_eq!(sources[1], SkillSource::Claude);
-        assert_eq!(sources[2], SkillSource::Zcode);
+        assert_eq!(sources[2], SkillSource::Codex);
+        assert_eq!(sources[3], SkillSource::Opencode);
+        assert_eq!(sources[4], SkillSource::Zcode);
+    }
+
+    #[test]
+    fn skill_source_external_sources_excludes_blink() {
+        // external_sources() 不含 Blink，供「从其他应用导入」面板枚举
+        let sources = SkillSource::external_sources();
+        assert!(!sources.contains(&SkillSource::Blink));
+        assert!(sources.contains(&SkillSource::Claude));
+        assert!(sources.contains(&SkillSource::Codex));
+        assert!(sources.contains(&SkillSource::Opencode));
+        assert!(sources.contains(&SkillSource::Zcode));
+    }
+
+    #[test]
+    fn skill_source_directory_maps_to_expected_path() {
+        // 外部来源目录都在 home 下（Claude/Codex/OpenCode/ZCode）
+        for &src in SkillSource::external_sources() {
+            let dir = src.directory().expect("外部来源应有目录");
+            let parent_name = dir
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            // 父目录应为 ~/.claude / ~/.codex / ~/.opencode / ~/.zcode
+            assert!(
+                parent_name.starts_with('.'),
+                "外部来源 {} 的父目录应为隐藏目录，实际: {}",
+                src.display_name(),
+                parent_name
+            );
+        }
     }
 
     // ── 0.13.6: disabled_skills 过滤 ──
@@ -1114,8 +1279,9 @@ mod tests {
                 compiled_patterns: Vec::new(),
                 full_content: String::new(),
                 source: SkillSource::Blink,
-                dir_path: PathBuf::from("/tmp/active"),
-            },
+            dir_path: PathBuf::from("/tmp/active"),
+            source_cli_path: None,
+        },
             SkillEntry {
                 name: "disabled".to_string(),
                 description: "Disabled skill".to_string(),
@@ -1126,8 +1292,9 @@ mod tests {
                 compiled_patterns: Vec::new(),
                 full_content: String::new(),
                 source: SkillSource::Claude,
-                dir_path: PathBuf::from("/tmp/disabled"),
-            },
+            dir_path: PathBuf::from("/tmp/disabled"),
+            source_cli_path: None,
+        },
         ];
         registry.set_disabled_skills(vec!["disabled@claude".to_string()]);
 
@@ -1150,8 +1317,9 @@ mod tests {
                 compiled_patterns: Vec::new(),
                 full_content: String::new(),
                 source: SkillSource::Blink,
-                dir_path: PathBuf::from("/tmp/a"),
-            },
+            dir_path: PathBuf::from("/tmp/a"),
+            source_cli_path: None,
+        },
             SkillEntry {
                 name: "skill-b".to_string(),
                 description: "B".to_string(),
@@ -1162,8 +1330,9 @@ mod tests {
                 compiled_patterns: Vec::new(),
                 full_content: String::new(),
                 source: SkillSource::Claude,
-                dir_path: PathBuf::from("/tmp/b"),
-            },
+            dir_path: PathBuf::from("/tmp/b"),
+            source_cli_path: None,
+        },
         ];
         registry.set_disabled_skills(vec!["skill-b@claude".to_string()]);
 
@@ -1186,6 +1355,7 @@ mod tests {
             full_content: String::new(),
             source: SkillSource::Blink,
             dir_path: PathBuf::from("/tmp"),
+            source_cli_path: None,
         }];
 
         // Disable
@@ -1210,8 +1380,9 @@ mod tests {
                 compiled_patterns: Vec::new(),
                 full_content: String::new(),
                 source: SkillSource::Blink,
-                dir_path: PathBuf::from("/tmp/active"),
-            },
+            dir_path: PathBuf::from("/tmp/active"),
+            source_cli_path: None,
+        },
             SkillEntry {
                 name: "inactive".to_string(),
                 description: "Inactive".to_string(),
@@ -1219,8 +1390,9 @@ mod tests {
                 compiled_patterns: Vec::new(),
                 full_content: String::new(),
                 source: SkillSource::Claude,
-                dir_path: PathBuf::from("/tmp/inactive"),
-            },
+            dir_path: PathBuf::from("/tmp/inactive"),
+            source_cli_path: None,
+        },
         ];
         registry.set_disabled_skills(vec!["inactive@claude".to_string()]);
 
@@ -1241,5 +1413,205 @@ mod tests {
         assert_eq!(skill_id("test", SkillSource::Blink), "test@blink");
         assert_eq!(skill_id("rust", SkillSource::Claude), "rust@claude");
         assert_eq!(skill_id("z", SkillSource::Zcode), "z@zcode");
+    }
+
+    // ── P4: Skill 从 --help 输出到 preamble 注入闭环 ──
+
+    /// 验证完整链路：
+    /// 1. blink --help 输出 → parse_help_output() → ParsedHelp
+    /// 2. generate_skill_md() → SKILL.md 文本
+    /// 3. parse_skill_md() → SkillEntry（能解析回来）
+    /// 4. SkillRegistry → summaries() / match_triggers() 可用
+    #[test]
+    fn skill_help_to_preamble_full_roundtrip() {
+        use crate::domain::ai::cli_recognizer::{parse_help_output, generate_skill_md};
+
+        // 1. 模拟 blink --help 输出（clap 生成格式）
+        let help_text = r#"Blink — Windows 全局快捷入口 (CLI 模式)
+
+Usage: blink [COMMAND]
+
+Commands:
+  mcp-server    作为 MCP server 运行（stdio 模式，供外部 MCP client 连接）
+  search        搜索应用
+  run           调用任意 Capability
+  capabilities  列出所有可用 Capability
+  config        读写配置
+  chat          终端对话模式（基础实现）
+  help          Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+"#;
+
+        // 2. 解析 help 输出
+        let parsed = parse_help_output(help_text);
+        assert!(!parsed.subcommands.is_empty(), "应解析出子命令");
+        assert!(parsed.subcommands.iter().any(|c| c.name == "mcp-server"));
+        assert!(parsed.subcommands.iter().any(|c| c.name == "search"));
+        assert!(parsed.subcommands.iter().any(|c| c.name == "chat"));
+
+        // 3. 生成 SKILL.md
+        let skill_md = generate_skill_md(&parsed, "blink", None);
+        assert!(skill_md.contains("name: blink-cli"));
+        assert!(skill_md.contains("keywords: [blink, mcp-server, search"));
+        assert!(skill_md.contains("# Blink 命令行工具"));
+        assert!(skill_md.contains("mcp-server"));
+
+        // 4. 解析回 SkillEntry
+        let skill = parse_skill_md(
+            &skill_md,
+            SkillSource::Blink,
+            std::path::PathBuf::from("/tmp/blink"),
+        )
+        .expect("生成的 SKILL.md 应能被解析回来");
+
+        assert_eq!(skill.name, "blink-cli");
+        assert!(skill.triggers.is_some(), "应有 triggers（keywords 来自子命令名）");
+        let triggers = skill.triggers.as_ref().unwrap();
+        assert!(triggers.keywords.contains(&"blink".to_string()));
+        assert!(triggers.keywords.contains(&"mcp-server".to_string()));
+
+        // 5. 注入 SkillRegistry → 验证 summaries() 和 match_triggers()
+        let registry = SkillRegistry::new();
+        *registry.skills.write().unwrap() = vec![skill.clone()];
+
+        let summaries = registry.summaries();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].name, "blink-cli");
+        assert!(summaries[0].has_triggers);
+
+        // 发消息包含 "blink" 关键词 → 应触发
+        let matched = registry.match_triggers("帮我用 blink 搜索应用");
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].name, "blink-cli");
+    }
+
+    /// 验证 SKILL.md 的 disabled 过滤在闭环中也生效。
+    #[test]
+    fn skill_help_roundtrip_with_disabled_filter() {
+        use crate::domain::ai::cli_recognizer::{parse_help_output, generate_skill_md};
+
+        let help = "A tool\nUsage: mytool\n  run    Run something";
+        let parsed = parse_help_output(help);
+        let skill_md = generate_skill_md(&parsed, "mytool", None);
+
+        let skill = parse_skill_md(&skill_md, SkillSource::Blink, std::path::PathBuf::from("/tmp"))
+            .expect("should parse");
+
+        let registry = SkillRegistry::new();
+        *registry.skills.write().unwrap() = vec![skill];
+
+        // 禁用后 summaries 不包含
+        registry.set_disabled_skills(vec![skill_id("mytool-cli", SkillSource::Blink)]);
+        assert!(registry.summaries().is_empty());
+        assert!(registry.match_triggers("mytool run").is_empty());
+    }
+
+    // ── 真正的 blink --help → SKILL.md → SkillRegistry → preamble 闭环 ──
+
+    /// 用 **实际的** clap Cli::command().render_help() 输出（而非模拟文本），
+    /// 走完整链路：help 文本 → parse_help_output → generate_skill_md →
+    /// parse_skill_md → SkillRegistry → summaries + match_triggers。
+    ///
+    /// 这是用户要求的闭环：blink 自己的 help 命令 → skill 探测 → 转化为 skill。
+    #[test]
+    fn skill_e2e_real_blink_help_to_preamble() {
+        use crate::cli::Cli;
+        use clap::CommandFactory;
+        use crate::domain::ai::cli_recognizer::{parse_help_output, generate_skill_md};
+
+        // 1. 获取真正的 blink --help 输出（clap 生成，不是模拟文本）
+        let help_text = Cli::command().render_help().to_string();
+        assert!(
+            !help_text.is_empty(),
+            "blink --help 应有输出"
+        );
+        // clap 生成的 help 应包含 blink 自身的描述
+        assert!(
+            help_text.contains("blink") || help_text.contains("Blink"),
+            "help 文本应包含 blink 名称: {help_text}"
+        );
+
+        // 2. 解析 help 输出
+        let parsed = parse_help_output(&help_text);
+        // clap 的 help 格式应该能解析出子命令（mcp-server / search / run 等）
+        assert!(
+            !parsed.subcommands.is_empty(),
+            "应从 blink --help 解析出子命令, got: {:?}",
+            parsed.subcommands
+        );
+        // 确认关键子命令被解析出来
+        let sub_names: Vec<&str> = parsed.subcommands.iter().map(|c| c.name.as_str()).collect();
+        assert!(
+            sub_names.contains(&"mcp-server"),
+            "应包含 mcp-server 子命令, got: {sub_names:?}"
+        );
+        assert!(
+            sub_names.contains(&"search"),
+            "应包含 search 子命令, got: {sub_names:?}"
+        );
+        assert!(
+            sub_names.contains(&"capabilities"),
+            "应包含 capabilities 子命令, got: {sub_names:?}"
+        );
+
+        // 3. 生成 SKILL.md
+        let skill_md = generate_skill_md(&parsed, "blink", None);
+        assert!(skill_md.contains("name: blink-cli"));
+        assert!(skill_md.contains("# Blink 命令行工具"));
+        // keywords 应包含子命令名
+        assert!(skill_md.contains("mcp-server"));
+        assert!(skill_md.contains("search"));
+
+        // 4. 解析回 SkillEntry（验证生成的 SKILL.md 格式正确）
+        let skill = parse_skill_md(
+            &skill_md,
+            SkillSource::Blink,
+            std::path::PathBuf::from("/tmp/blink"),
+        )
+        .expect("生成的 SKILL.md 应能被 parse_skill_md 解析回来");
+
+        assert_eq!(skill.name, "blink-cli");
+        assert!(
+            skill.triggers.is_some(),
+            "应有 triggers（keywords 来自子命令名）"
+        );
+        let triggers = skill.triggers.as_ref().unwrap();
+        assert!(triggers.keywords.contains(&"blink".to_string()));
+        assert!(triggers.keywords.contains(&"mcp-server".to_string()));
+        assert!(triggers.keywords.contains(&"search".to_string()));
+
+        // 5. 注入 SkillRegistry → 验证 preamble 链路可用
+        let registry = SkillRegistry::new();
+        *registry.skills.write().unwrap() = vec![skill.clone()];
+
+        let summaries = registry.summaries();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].name, "blink-cli");
+        assert!(summaries[0].has_triggers);
+
+        // 6. 用用户消息触发——消息包含 "blink" 关键词
+        let matched = registry.match_triggers("帮我用 blink 搜索应用");
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].name, "blink-cli");
+        assert_eq!(matched[0].source, SkillSource::Blink);
+
+        // 7. 验证触发的 skill 可注入 preamble
+        use crate::domain::ai::prompt::chat_system_prompt_with_skills;
+        let prompt = chat_system_prompt_with_skills(None, &summaries, &matched);
+        assert!(prompt.contains("blink-cli"), "preamble 应包含 skill name");
+        assert!(prompt.contains("可用技能"), "应有技能摘要段");
+        assert!(
+            prompt.contains("已激活技能详情"),
+            "应有已激活技能详情段（触发的 skill 全文）"
+        );
+
+        tracing::info!(
+            keywords = ?triggers.keywords,
+            subcommands = parsed.subcommands.len(),
+            "Skill e2e: blink --help → SKILL.md → preamble 闭环验证通过"
+        );
     }
 }

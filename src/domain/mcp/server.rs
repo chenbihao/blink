@@ -389,4 +389,258 @@ mod tests {
         let text = projected.content[0].as_text().map(|t| t.text.as_str()).unwrap_or("");
         assert!(text.contains("file.txt"));
     }
+
+    /// P3: 验证 CapabilityResult → CallToolResult 全变体投影闭环。
+    ///
+    /// 模拟 Blink 作为 MCP server 被 client 调用 call_tool 后返回的格式。
+    #[test]
+    fn mcp_result_projection_all_variants_roundtrip() {
+        use crate::domain::capability::{CapabilityResult, ItemResult};
+
+        // Text → Content::text
+        let result = CapabilityResult::Text { content: "hello".into() };
+        let projected = BlinkMcpServer::result_to_call_tool_result(result);
+        assert_eq!(projected.is_error, Some(false));
+        assert_eq!(projected.content.len(), 1);
+        let text = projected.content[0].as_text().unwrap().text.clone();
+        assert_eq!(text, "hello");
+
+        // Done → Content::text(summary)
+        let result = CapabilityResult::Done { summary: "已完成".into() };
+        let projected = BlinkMcpServer::result_to_call_tool_result(result);
+        assert_eq!(projected.content.len(), 1);
+        let text = projected.content[0].as_text().unwrap().text.clone();
+        assert!(text.contains("已完成"));
+
+        // Items → JSON
+        let result = CapabilityResult::Items {
+            items: vec![ItemResult {
+                title: "test.txt".into(),
+                subtitle: None,
+                payload: serde_json::json!({"path": "C:\\test.txt"}),
+                score: Some(0.95),
+            }],
+        };
+        let projected = BlinkMcpServer::result_to_call_tool_result(result);
+        let text = projected.content[0].as_text().unwrap().text.clone();
+        assert!(text.contains("test.txt"));
+        assert!(text.contains("0.95"));
+
+        // Blob → 文本摘要
+        let result = CapabilityResult::Blob {
+            mime: "image/png".into(),
+            bytes: vec![0u8; 4096],
+        };
+        let projected = BlinkMcpServer::result_to_call_tool_result(result);
+        let text = projected.content[0].as_text().unwrap().text.clone();
+        assert!(text.contains("image/png"));
+        assert!(text.contains("KB"));
+
+        // Error → is_error = true
+        let err = BlinkMcpServer::error_to_call_tool_result("something failed");
+        assert_eq!(err.is_error, Some(true));
+    }
+
+    // ── 真正的 MCP 协议端到端闭环测试 ──────────────────────────────────────
+    //
+    // 用 tokio::io::duplex() 创建 in-memory 双向管道，一端跑 server（实现
+    // ServerHandler），一端跑 rmcp client。client 发 JSON-RPC：initialize →
+    // list_tools → call_tool，验证 MCP 协议完整闭环。
+    //
+    // 这不是投影测试——是真正的 JSON-RPC 协议在线上的往返。
+
+    /// 测试用 MCP server——模拟 BlinkMcpServer 的行为，但不需要 AppHandle。
+    ///
+    /// 暴露一个 `echo` tool：收到什么参数就回什么。
+    struct TestMcpServer {
+        tools: Vec<Tool>,
+    }
+
+    impl TestMcpServer {
+        fn new() -> Self {
+            let tool = Tool::new(
+                "echo".to_string(),
+                "Echo back the input".to_string(),
+                std::sync::Arc::new(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "message": { "type": "string", "description": "Message to echo" }
+                    },
+                    "required": ["message"]
+                }).as_object().cloned().unwrap_or_default()),
+            );
+            Self { tools: vec![tool] }
+        }
+    }
+
+    impl rmcp::handler::server::ServerHandler for TestMcpServer {
+        fn get_info(&self) -> ServerInfo {
+            let mut caps = ServerCapabilities::default();
+            caps.tools = Some(Default::default());
+            let mut info = InitializeResult::new(caps);
+            info.server_info = Implementation::new("blink-test-server".to_string(), "0.0.0-test".to_string());
+            info
+        }
+
+        fn list_tools(
+            &self,
+            _request: Option<PaginatedRequestParams>,
+            _context: RequestContext<RoleServer>,
+        ) -> impl Future<Output = Result<ListToolsResult, rmcp::ErrorData>> + Send + '_ {
+            let tools = self.tools.clone();
+            std::future::ready(Ok(ListToolsResult::with_all_items(tools)))
+        }
+
+        fn get_tool(&self, name: &str) -> Option<Tool> {
+            self.tools.iter().find(|t| t.name == name).cloned()
+        }
+
+        fn call_tool(
+            &self,
+            request: CallToolRequestParams,
+            _context: RequestContext<RoleServer>,
+        ) -> impl Future<Output = Result<CallToolResult, rmcp::ErrorData>> + Send + '_ {
+            let tool_name = request.name.to_string();
+            let args = request
+                .arguments
+                .map(|m| Value::Object(m))
+                .unwrap_or(Value::Null);
+
+            async move {
+                if tool_name == "echo" {
+                    let msg = args
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("(no message)");
+                    Ok(CallToolResult::success(vec![Content::text(
+                        msg.to_string(),
+                    )]))
+                } else {
+                    Ok(BlinkMcpServer::error_to_call_tool_result(&format!(
+                        "Unknown tool: {tool_name}"
+                    )))
+                }
+            }
+        }
+    }
+
+    /// 真正的 MCP 协议端到端闭环：
+    /// 1. 用 `tokio::io::duplex()` 创建 in-memory 管道
+    /// 2. 一端启动 TestMcpServer（实现 ServerHandler）
+    /// 3. 另一端启动 rmcp client（ClientInfo::default()）
+    /// 4. client 调 `list_all_tools()` → 验证返回 `echo` tool
+    /// 5. client 调 `call_tool("echo", {message: "hello"})` → 验证返回 "hello"
+    ///
+    /// 这验证了 JSON-RPC 消息在线上的完整往返：
+    /// initialize → tools/list → tools/call
+    #[tokio::test]
+    async fn mcp_protocol_e2e_client_server_loop() {
+        use rmcp::ServiceExt;
+        use rmcp::model::ClientInfo;
+
+        // 创建双向管道
+        let (client_stream, server_stream) = tokio::io::duplex(8192);
+
+        // 分割为 read/write 两半
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (server_read, server_write) = tokio::io::split(server_stream);
+
+        // 启动 server（在后台 task 中）
+        let server = TestMcpServer::new();
+        let server_handle = tokio::spawn(async move {
+            let transport = (server_read, server_write);
+            let service = server.serve(transport).await;
+            // 等待 client 断开后退出
+            if let Ok(svc) = service {
+                let _ = svc.waiting().await;
+            }
+        });
+
+        // 启动 client
+        let client_transport = (client_read, client_write);
+        let client_info = ClientInfo::default();
+        let service = client_info
+            .serve(client_transport)
+            .await
+            .expect("client 握手失败");
+
+        // 1. list_tools → 验证返回 echo tool
+        let tools = service
+            .peer()
+            .list_all_tools()
+            .await
+            .expect("list_all_tools 失败");
+
+        assert_eq!(tools.len(), 1, "应返回 1 个 tool");
+        assert_eq!(tools[0].name, "echo");
+        assert_eq!(
+            tools[0].description.as_deref(),
+            Some("Echo back the input")
+        );
+
+        // 2. call_tool("echo", {message: "hello blink"}) → 验证返回 "hello blink"
+        // 用 rig McpTool 封装（与生产代码 collect_tools() 同路径）
+        use rig_core::tool::ToolDyn;
+        let mcp_tool = rig_core::tool::rmcp::McpTool::from_mcp_server(
+            tools[0].clone(),
+            service.peer().clone(),
+        );
+        let result = mcp_tool
+            .call(serde_json::json!({"message": "hello blink"}).to_string())
+            .await
+            .expect("McpTool call 失败");
+        assert!(result.contains("hello blink"), "result was: {result}");
+
+        // 断开 client → server 应自动退出
+        drop(service);
+        let _ = server_handle.await;
+
+        tracing::info!("MCP e2e: client→server 协议闭环验证通过");
+    }
+
+    /// 验证 client 调用不存在的 tool 时，server 返回 error result。
+    #[tokio::test]
+    async fn mcp_protocol_e2e_unknown_tool_returns_error() {
+        use rmcp::ServiceExt;
+        use rmcp::model::ClientInfo;
+
+        let (client_stream, server_stream) = tokio::io::duplex(8192);
+        let (client_read, client_write) = tokio::io::split(client_stream);
+        let (server_read, server_write) = tokio::io::split(server_stream);
+
+        let server = TestMcpServer::new();
+        let server_handle = tokio::spawn(async move {
+            let transport = (server_read, server_write);
+            let service = server.serve(transport).await;
+            if let Ok(svc) = service {
+                let _ = svc.waiting().await;
+            }
+        });
+
+        let client_info = ClientInfo::default();
+        let service = client_info
+            .serve((client_read, client_write))
+            .await
+            .expect("client 握手失败");
+
+        // 调用不存在的 tool（用 McpTool 封装一个 fake tool）
+        use rig_core::tool::ToolDyn;
+        let fake_tool = rmcp::model::Tool::new(
+            "nonexistent".to_string(),
+            "Does not exist".to_string(),
+            std::sync::Arc::new(serde_json::Map::new()),
+        );
+        let mcp_tool = rig_core::tool::rmcp::McpTool::from_mcp_server(
+            fake_tool,
+            service.peer().clone(),
+        );
+        let result = mcp_tool
+            .call(serde_json::Value::Null.to_string())
+            .await;
+        // server 返回错误，McpTool 应转为 ToolError
+        assert!(result.is_err(), "调用不存在的 tool 应失败");
+
+        drop(service);
+        let _ = server_handle.await;
+    }
 }

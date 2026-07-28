@@ -64,6 +64,9 @@ const ATTRS = [
   ["data-i18n-ph", "placeholder"],
   ["data-i18n-title", "title"],
   ["data-i18n-aria-label", "ariaLabel"],
+  // data-tip 存的是 i18n key，翻译后写入 dataset.tip（CSS tooltip::attr(data-tip) 读它）。
+  // 特殊：不能用 el[prop] 直接映射，dataset 是只读对象，需走 setAttribute。
+  ["data-tip", "__dataset_tip__"],
 ];
 
 /**
@@ -90,6 +93,9 @@ export function applyI18n(lang) {
         } else {
           el.insertBefore(document.createTextNode(text), el.firstChild);
         }
+      } else if (prop === "__dataset_tip__") {
+        // data-tip 翻译后写回 data-tip 属性（CSS ::after content:attr(data-tip) 读它）
+        el.setAttribute("data-tip", t(el.getAttribute(attr)));
       } else {
         el[prop] = t(el.getAttribute(attr));
       }

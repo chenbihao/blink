@@ -164,7 +164,7 @@ fn on_clipboard_change() {
     let max_items = s.max_items;
     tauri::async_runtime::spawn(async move {
         match clipboard::save_item(&pool, &item).await {
-            Ok(_) => tracing::debug!(id = %item.id, preview = %preview, "剪贴板：已入库"),
+            Ok(_) => tracing::trace!(id = %item.id, preview = %preview, "剪贴板：已入库"),
             Err(e) => {
                 tracing::warn!(?e, "剪贴板 save_item 失败");
                 return;

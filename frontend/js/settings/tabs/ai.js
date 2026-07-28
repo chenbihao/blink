@@ -48,14 +48,9 @@ let _editOriginalModelIds = [];       // 编辑模式：打开时已有的 model
  */
 export function initAITab() {
   loadAIConfig();
-  // 0.11.4 §3.5: 语言切换时刷新工具回流描述文字（动态文本不走 data-i18n）
+  // 0.13.1: 语言切换时刷新记忆策略动态文本（如「未配置」）
+  // （工具回流描述已改为 seg-btn 的 data-tip 气泡，由 applyI18n 自动刷新，无需此处手动处理）
   onLangChange(() => {
-    const container = document.getElementById("ai-tool-feedback");
-    if (container) {
-      const activeBtn = container.querySelector(".seg-btn.active");
-      updateToolFeedbackDesc(activeBtn ? activeBtn.dataset.value : "auto");
-    }
-    // 0.13.1: 语言切换时刷新记忆策略动态文本（如「未配置」）
     updateMemoryContextSizeDisplay();
   });
 }
@@ -145,18 +140,14 @@ function applyAIConfigToUI() {
   if ($("ai-memory-recall-top-k")) $("ai-memory-recall-top-k").value = memCfg.recall_top_k ?? 3;
   updateMemoryConfigVisibility(memCfg.mode || "token_aware");
   updateMemoryContextSizeDisplay();
-  // 0.13.3: Skill 配置
-  const skillCfg = chatCfg.skill_config || { enabled: true, source_blink: true, source_claude: true, source_zcode: false };
+  // 0.13.3: Skill 配置（仅启用开关，来源统一为 Blink 目录）
+  const skillCfg = chatCfg.skill_config || { enabled: true };
   if ($("ai-skill-enabled")) $("ai-skill-enabled").checked = skillCfg.enabled !== false;
-  if ($("ai-skill-source-blink")) $("ai-skill-source-blink").checked = skillCfg.source_blink !== false;
-  if ($("ai-skill-source-claude")) $("ai-skill-source-claude").checked = skillCfg.source_claude !== false;
-  if ($("ai-skill-source-zcode")) $("ai-skill-source-zcode").checked = !!skillCfg.source_zcode;
   // 加载已发现的 Skill 列表
   loadSkillList();
   // 0.11.4 §3.5: 工具结果回流 AI 三态分段按钮
   const feedbackValue = c.ai_tool_result_feedback ?? "on";
   setSegControlValue("ai-tool-feedback", feedbackValue);
-  updateToolFeedbackDesc(feedbackValue);
 
   renderAIProviders();
   renderAITierSelects();
@@ -1140,16 +1131,6 @@ function setSegControlValue(id, value) {
 }
 
 /**
- * 更新工具结果回流 AI 的描述文字（根据当前选择值切换）
- */
-function updateToolFeedbackDesc(value) {
-const descEl = document.getElementById("ai-tool-feedback-desc");
-if (!descEl) return;
-const key = `ai.advanced.tool_feedback.desc.${value || "auto"}`;
-descEl.textContent = t(key);
-}
-
-/**
  * 0.13.1 §3.7：根据窗口模式切换记忆策略 UI 元素的可见性。
  *
  * - token_aware：隐藏窗口大小行，显示触发压缩/压缩目标行
@@ -1292,72 +1273,64 @@ function bindAIEvents() {
     currentAIConfig.chat_config.memory_config.compress_ratio = clamped / 100;
     saveAIConfig();
   });
-// 0.13.3: Skill 配置事件绑定
-$("ai-skill-enabled")?.addEventListener("change", (e) => {
-  currentAIConfig.chat_config = currentAIConfig.chat_config || {};
-  currentAIConfig.chat_config.skill_config = currentAIConfig.chat_config.skill_config || {};
-  currentAIConfig.chat_config.skill_config.enabled = e.target.checked;
-  saveAIConfig();
-});
-$("ai-skill-source-blink")?.addEventListener("change", (e) => {
-  currentAIConfig.chat_config = currentAIConfig.chat_config || {};
-  currentAIConfig.chat_config.skill_config = currentAIConfig.chat_config.skill_config || {};
-  currentAIConfig.chat_config.skill_config.source_blink = e.target.checked;
-  saveAIConfig();
-});
-$("ai-skill-source-claude")?.addEventListener("change", (e) => {
-  currentAIConfig.chat_config = currentAIConfig.chat_config || {};
-  currentAIConfig.chat_config.skill_config = currentAIConfig.chat_config.skill_config || {};
-  currentAIConfig.chat_config.skill_config.source_claude = e.target.checked;
-  saveAIConfig();
-});
-$("ai-skill-source-zcode")?.addEventListener("change", (e) => {
-  currentAIConfig.chat_config = currentAIConfig.chat_config || {};
-  currentAIConfig.chat_config.skill_config = currentAIConfig.chat_config.skill_config || {};
-  currentAIConfig.chat_config.skill_config.source_zcode = e.target.checked;
-  saveAIConfig();
-});
-// 打开 Skill 目录按钮
-document.querySelectorAll(".skill-open-dir").forEach((btn) => {
-  btn.addEventListener("click", async () => {
-    const source = btn.dataset.source;
+  // 0.13.3: Skill 配置事件绑定
+  $("ai-skill-enabled")?.addEventListener("change", (e) => {
+    currentAIConfig.chat_config = currentAIConfig.chat_config || {};
+    currentAIConfig.chat_config.skill_config = currentAIConfig.chat_config.skill_config || {};
+    currentAIConfig.chat_config.skill_config.enabled = e.target.checked;
+    saveAIConfig();
+  });
+  // 刷新 Skill 列表按钮
+  $("ai-skill-refresh")?.addEventListener("click", async () => {
+    const btn = $("ai-skill-refresh");
+    if (btn) { btn.disabled = true; btn.textContent = "..."; }
     try {
-      await invoke("open_skill_dir", { source });
+      const count = await invoke("refresh_skills");
+      await loadSkillList();
+      if (btn) btn.textContent = t("ai.skill.refresh") || "刷新";
     } catch (e) {
-      console.error("open_skill_dir failed:", e);
+      console.error("refresh_skills failed:", e);
+      if (btn) btn.textContent = t("ai.skill.refresh") || "刷新";
+    }
+    btn && (btn.disabled = false);
+  });
+
+  // 0.13.7: Skill 导入按钮——打开导入面板（来源下拉 + 勾选导入）
+  $("ai-skill-import-btn")?.addEventListener("click", () => showSkillImportPanel());
+
+  // 0.13.7: Skill 导入面板事件绑定
+  initSkillImportHandlers();
+
+  // Skill 编辑 modal 事件
+  $("skill-edit-cancel")?.addEventListener("click", () => {
+    const overlay = $("skill-edit-overlay");
+    if (overlay) overlay.style.display = "none";
+    const errorEl = $("skill-edit-error");
+    if (errorEl) errorEl.textContent = "";
+  });
+  $("skill-edit-overlay")?.addEventListener("click", (e) => {
+    if (e.target.id === "skill-edit-overlay") {
+      e.target.style.display = "none";
     }
   });
-});
-// 刷新 Skill 列表按钮
-$("ai-skill-refresh")?.addEventListener("click", async () => {
-  const btn = $("ai-skill-refresh");
-  if (btn) { btn.disabled = true; btn.textContent = "..."; }
-  try {
-    const count = await invoke("refresh_skills");
-    await loadSkillList();
-    if (btn) btn.textContent = t("ai.skill.refresh") || "刷新";
-  } catch (e) {
-    console.error("refresh_skills failed:", e);
-    if (btn) btn.textContent = t("ai.skill.refresh") || "刷新";
-  }
-  btn && (btn.disabled = false);
-});
-
-// 0.13.6: Skill 导入 modal 事件绑定
-$("skill-import-cancel")?.addEventListener("click", () => {
-  const overlay = $("skill-import-overlay");
-  if (overlay) overlay.style.display = "none";
-  const errorEl = $("skill-import-error");
-  if (errorEl) errorEl.textContent = "";
-});
-$("skill-import-symlink")?.addEventListener("click", () => doSkillImport("symlink"));
-$("skill-import-copy")?.addEventListener("click", () => doSkillImport("copy"));
-// 点击 overlay 背景关闭
-$("skill-import-overlay")?.addEventListener("click", (e) => {
-  if (e.target.id === "skill-import-overlay") {
-    e.target.style.display = "none";
-  }
-});
+  $("skill-edit-save")?.addEventListener("click", async () => {
+    const overlay = $("skill-edit-overlay");
+    if (!overlay) return;
+    const content = $("skill-edit-textarea")?.value || "";
+    const skillDir = overlay.dataset.skillDir;
+    const errorEl = $("skill-edit-error");
+    if (errorEl) errorEl.textContent = "";
+    if (!skillDir) return;
+    try {
+      await invoke("save_skill_md", { skillDir, content });
+      overlay.style.display = "none";
+      await invoke("refresh_skills");
+      await loadSkillList();
+    } catch (e) {
+      if (errorEl) errorEl.textContent = String(e);
+      console.error("save_skill_md failed:", e);
+    }
+  });
 $("ai-memory-recall-enabled")?.addEventListener("change", (e) => {
     currentAIConfig.chat_config = currentAIConfig.chat_config || {};
     currentAIConfig.chat_config.memory_config = currentAIConfig.chat_config.memory_config || {};
@@ -1379,7 +1352,6 @@ $("ai-memory-recall-enabled")?.addEventListener("change", (e) => {
     const val = btn.dataset.value;
     setSegControlValue("ai-tool-feedback", val);
     currentAIConfig.ai_tool_result_feedback = val;
-    updateToolFeedbackDesc(val);
     saveAIConfig();
   });
   $("ai-timeout-ms")?.addEventListener("change", (e) => {
@@ -2218,18 +2190,20 @@ async function loadSkillList() {
     }
 
     container.innerHTML = skills.map((s) => {
-      const sourceLabel = { blink: "Blink", claude: "Claude", zcode: "ZCode" }[s.source] || s.source;
+      const sourceLabel = { blink: "Blink", claude: "Claude", zcode: "ZCode", opencode: "OpenCode", codex: "Codex" }[s.source] || s.source;
       const triggerBadge = s.triggers
         ? `<span class="skill-badge skill-badge-trigger">${t("ai.skill.badge.auto") || "自动触发"}</span>`
         : `<span class="skill-badge skill-badge-manual">${t("ai.skill.badge.manual") || "手动"}</span>`;
-      const kwList = s.triggers?.keywords?.length
-        ? `<span class="skill-keywords">${s.triggers.keywords.map((k) => escapeHtml(k)).join(", ")}</span>`
-        : "";
       const skillId = `${s.name}@${s.source}`;
       const isChecked = !s.disabled ? "checked" : "";
-      // 非 Blink 来源显示导入按钮
-      const importBtn = s.source !== "blink"
-        ? `<button class="btn btn-icon-sm skill-import-btn" data-dir="${escapeAttr(s.dir)}" data-name="${escapeAttr(s.name)}" title="导入到 Blink 目录">${iconHTML("copy")}</button>`
+      // CLI 生成的 Skill：header 内加一个紧凑的 CLI 徽章（hover 显示完整路径），
+      // 不再独占整行——保证所有卡片等高。完整路径放 title tooltip。
+      const cliBadge = s.source_cli_path
+        ? `<span class="skill-badge skill-badge-cli" title="来源 CLI: ${escapeAttr(s.source_cli_path)}">CLI</span>`
+        : "";
+      // 关键词并入 header，作为名称后的灰色次要文本（不再独占行）
+      const kwInline = s.triggers?.keywords?.length
+        ? `<span class="skill-keywords-inline" title="触发关键词: ${escapeAttr(s.triggers.keywords.join(", "))}">${s.triggers.keywords.map((k) => escapeHtml(k)).map((k) => `#${k}`).join(" ")}</span>`
         : "";
       return `
         <div class="skill-item${s.disabled ? " skill-item-disabled" : ""}">
@@ -2240,14 +2214,17 @@ async function loadSkillList() {
             </label>
             <span class="skill-item-name">${escapeHtml(s.name)}</span>
             <span class="skill-badge skill-badge-source">${sourceLabel}</span>
+            ${cliBadge}
             ${triggerBadge}
+            ${kwInline}
             <div class="skill-item-actions">
-              ${importBtn}
+              <button class="btn btn-icon-sm skill-edit-btn" data-dir="${escapeAttr(s.dir)}" title="编辑">${iconHTML("pencil")}</button>
+              ${s.source_cli_path ? `<button class="btn btn-icon-sm skill-regenerate-btn" data-cli-path="${escapeAttr(s.source_cli_path)}" data-skill-dir="${escapeAttr(s.dir)}" title="重新识别">${iconHTML("refresh-cw")}</button>` : ""}
               <button class="btn btn-icon-sm skill-open-skill-dir" data-dir="${escapeAttr(s.dir)}" title="打开目录">${iconHTML("folder-open")}</button>
+              <button class="btn btn-icon-sm skill-delete-btn" data-dir="${escapeAttr(s.dir)}" title="删除">${iconHTML("x")}</button>
             </div>
           </div>
           <div class="skill-item-desc">${escapeHtml(s.description)}</div>
-          ${kwList ? `<div class="skill-item-keywords">${kwList}</div>` : ""}
         </div>`;
     }).join("");
 
@@ -2258,12 +2235,10 @@ async function loadSkillList() {
         const enabled = e.target.checked;
         try {
           await invoke("set_skill_enabled", { skillId, enabled });
-          // 更新 UI 状态
           const item = e.target.closest(".skill-item");
           if (item) item.classList.toggle("skill-item-disabled", !enabled);
         } catch (err) {
           console.error("set_skill_enabled failed:", err);
-          // 回滚
           e.target.checked = !enabled;
           const item = e.target.closest(".skill-item");
           if (item) item.classList.toggle("skill-item-disabled", enabled);
@@ -2271,20 +2246,58 @@ async function loadSkillList() {
       });
     });
 
-    // 0.13.6: 事件绑定——导入到 Blink
-    container.querySelectorAll(".skill-import-btn").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        showSkillImportModal(btn.dataset.dir, btn.dataset.name);
+    // 编辑 Skill
+    container.querySelectorAll(".skill-edit-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const skillDir = btn.dataset.dir;
+        if (!skillDir) return;
+        try {
+          const content = await invoke("get_skill_content", { skillDir });
+          showSkillEditModal(skillDir, content, null);
+        } catch (e) {
+          console.error("get_skill_content failed:", e);
+        }
       });
     });
 
-    // 0.13.6: 事件绑定——打开 Skill 目录
+    // 重新生成 CLI Skill
+    container.querySelectorAll(".skill-regenerate-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const cliPath = btn.dataset.cliPath;
+        if (!cliPath) return;
+        try {
+          const result = await invoke("recognize_cli_tool", { cliPath });
+          // 用新生成的内容填充编辑 modal
+          showSkillEditModal(result.saved_path.replace(/SKILL\.md$/, ""), result.skill_md_content, cliPath);
+        } catch (e) {
+          console.error("regenerate skill failed:", e);
+        }
+      });
+    });
+
+    // 删除 Skill
+    container.querySelectorAll(".skill-delete-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const skillDir = btn.dataset.dir;
+        if (!skillDir) return;
+        const ok = await confirmDialog(`确认删除此 Skill？`, { title: "确认", kind: "warning" });
+        if (!ok) return;
+        try {
+          await invoke("delete_skill", { skillDir });
+          await invoke("refresh_skills");
+          await loadSkillList();
+        } catch (e) {
+          console.error("delete_skill failed:", e);
+        }
+      });
+    });
+
+    // 打开 Skill 目录
     container.querySelectorAll(".skill-open-skill-dir").forEach((btn) => {
       btn.addEventListener("click", async () => {
         const dir = btn.dataset.dir;
         if (!dir) return;
         try {
-          // 用 explorer.exe 打开指定目录
           await invoke("open_dir_in_explorer", { path: dir });
         } catch (e) {
           console.error("open skill dir failed:", e);
@@ -2298,55 +2311,346 @@ async function loadSkillList() {
 }
 
 /**
- * 0.13.6: 显示 Skill 导入模式选择 modal。
+ * 0.13.7: Skill 导入面板逻辑。
+ *
+ * 流程：
+ * 1. 打开面板时拉取外部来源列表（list_external_skill_sources），填充来源下拉；
+ * 2. 选择来源 → 渲染该来源下可导入的 Skill 勾选列表；
+ * 3. 「自定义文件夹...」→ 走 pick_directory_dialog 选目录，把该目录作为单一来源展示；
+ * 4. 「导入选中」→ 对每个勾选的 skill 调 import_skill(dir, mode)，逐个导入。
  */
-function showSkillImportModal(dir, name) {
+
+// 缓存最近一次拉取的外部来源数据，避免重复请求
+let skillImportSourcesCache = null;
+// 自定义文件夹场景下用户选择的目录路径（select value === "__custom__" 时有效）
+let customImportDir = null;
+
+/** 打开导入面板并加载来源数据。 */
+async function showSkillImportPanel() {
   const overlay = document.getElementById("skill-import-overlay");
   if (!overlay) return;
-  const nameEl = document.getElementById("skill-import-name");
-  if (nameEl) nameEl.textContent = name;
-  overlay.dataset.dir = dir;
+  // 重置状态
+  const errorEl = document.getElementById("skill-import-error");
+  if (errorEl) errorEl.textContent = "";
+  const listEl = document.getElementById("skill-import-skill-list");
+  if (listEl) listEl.innerHTML = '<span class="skill-empty-hint">加载中...</span>';
+  customImportDir = null;
   overlay.style.display = "flex";
+
+  // 拉取外部来源
+  try {
+    skillImportSourcesCache = await invoke("list_external_skill_sources");
+  } catch (e) {
+    skillImportSourcesCache = [];
+    if (listEl) listEl.innerHTML = `<span class="skill-empty-hint">加载失败: ${escapeHtml(String(e))}</span>`;
+    console.error("list_external_skill_sources failed:", e);
+  }
+  populateSkillImportSourceSelect();
+  // 默认清空 skill 列表
+  renderSkillImportList(null);
+}
+
+/** 填充来源下拉选项。 */
+function populateSkillImportSourceSelect() {
+  const select = document.getElementById("skill-import-source-app");
+  if (!select) return;
+  const sources = skillImportSourcesCache || [];
+  // 保留第一个占位 option
+  select.innerHTML = '<option value="">— 选择来源 —</option>';
+  for (const s of sources) {
+    const opt = document.createElement("option");
+    opt.value = s.id;
+    const existsTag = s.exists ? `（${s.skills.length} 个）` : "（目录不存在）";
+    opt.textContent = `${s.label} ${existsTag}`;
+    opt.dataset.sourceId = s.id;
+    if (!s.exists) opt.disabled = true;
+    select.appendChild(opt);
+  }
+  // 自定义文件夹入口
+  const customOpt = document.createElement("option");
+  customOpt.value = "__custom__";
+  customOpt.textContent = "自定义文件夹...";
+  select.appendChild(customOpt);
+  select.value = "";
+}
+
+/** 绑定导入面板内的事件（只绑定一次）。 */
+function initSkillImportHandlers() {
+  const select = document.getElementById("skill-import-source-app");
+  select?.addEventListener("change", async () => {
+    const val = select.value;
+    if (val === "__custom__") {
+      // 自定义文件夹：弹目录选择对话框
+      try {
+        const dir = await invoke("pick_directory_dialog", { title: "选择 Skill 所在目录" });
+        if (!dir) {
+          select.value = "";
+          customImportDir = null;
+          renderSkillImportList(null);
+          updateSkillImportSourceInfo(null);
+          return;
+        }
+        customImportDir = dir;
+        // 把自定义目录构造成一个临时来源
+        const customSource = {
+          id: "__custom__",
+          label: "自定义",
+          dir,
+          exists: true,
+          skills: await scanCustomDirForSkills(dir),
+        };
+        renderSkillImportList(customSource);
+        updateSkillImportSourceInfo(customSource);
+      } catch (e) {
+        console.error("pick custom skill dir failed:", e);
+        select.value = "";
+        customImportDir = null;
+      }
+      return;
+    }
+    // 切换到非自定义来源时清空自定义目录
+    customImportDir = null;
+    // 预设来源
+    const src = (skillImportSourcesCache || []).find((s) => s.id === val) || null;
+    renderSkillImportList(src);
+    updateSkillImportSourceInfo(src);
+  });
+
+  // 打开来源目录
+  document.getElementById("skill-import-open-source-dir")?.addEventListener("click", () => {
+    const src = currentImportSourceDir();
+    if (!src) return;
+    invoke("open_dir_in_explorer", { path: src }).catch((e) =>
+      console.error("open source dir failed:", e)
+    );
+  });
+
+  // 全选/清空
+  document.getElementById("skill-import-select-all")?.addEventListener("click", () => {
+    document.querySelectorAll(".skill-import-select").forEach((cb) => (cb.checked = true));
+    updateImportConfirmState();
+  });
+  document.getElementById("skill-import-select-none")?.addEventListener("click", () => {
+    document.querySelectorAll(".skill-import-select").forEach((cb) => (cb.checked = false));
+    updateImportConfirmState();
+  });
+
+  // 勾选变化 → 更新导入按钮状态
+  document.getElementById("skill-import-skill-list")?.addEventListener("change", () => {
+    updateImportConfirmState();
+  });
+
+  // 导入选中
+  document.getElementById("skill-import-confirm")?.addEventListener("click", () => doSkillImportSelected());
+
+  // 取消 + 背景关闭
+  document.getElementById("skill-import-cancel")?.addEventListener("click", closeSkillImportPanel);
+  document.getElementById("skill-import-overlay")?.addEventListener("click", (e) => {
+    if (e.target.id === "skill-import-overlay") closeSkillImportPanel();
+  });
+}
+
+/** 关闭导入面板并清理状态。 */
+function closeSkillImportPanel() {
+  const overlay = document.getElementById("skill-import-overlay");
+  if (overlay) overlay.style.display = "none";
+  const errorEl = document.getElementById("skill-import-error");
+  if (errorEl) errorEl.textContent = "";
+}
+
+/** 渲染当前来源下的 skill 勾选列表。source 为 null 时显示空提示。 */
+function renderSkillImportList(source) {
+  const listEl = document.getElementById("skill-import-skill-list");
+  if (!listEl) return;
+  if (!source || !source.skills || source.skills.length === 0) {
+    listEl.innerHTML = source && source.exists
+      ? '<span class="skill-empty-hint">该目录下未发现 SKILL.md（每个子目录需含 SKILL.md）</span>'
+      : '<span class="skill-empty-hint">请先选择来源</span>';
+    updateImportConfirmState();
+    return;
+  }
+  listEl.innerHTML = source.skills
+    .map(
+      (s, i) => `
+      <label class="skill-import-item" title="${escapeAttr(s.dir)}">
+        <input type="checkbox" class="skill-import-select" data-index="${i}" checked />
+        <span class="skill-import-item-name">${escapeHtml(s.name)}</span>
+        <span class="skill-import-item-desc">${escapeHtml(s.description)}</span>
+      </label>`
+    )
+    .join("");
+  updateImportConfirmState();
+}
+
+/** 更新来源目录信息提示。 */
+function updateSkillImportSourceInfo(source) {
+  const infoEl = document.getElementById("skill-import-source-info");
+  if (!infoEl) return;
+  if (!source) {
+    infoEl.textContent = "";
+    return;
+  }
+  infoEl.textContent = source.exists
+    ? `目录: ${source.dir}`
+    : `目录不存在: ${source.dir}（可点击右侧按钮创建）`;
+}
+
+/** 返回当前选中来源的目录路径（供「打开目录」用）。 */
+function currentImportSourceDir() {
+  const select = document.getElementById("skill-import-source-app");
+  if (!select) return null;
+  const val = select.value;
+  if (val === "__custom__") {
+    return customImportDir;
+  }
+  const src = (skillImportSourcesCache || []).find((s) => s.id === val);
+  return src ? src.dir : null;
+}
+
+/** 根据勾选数量启用/禁用「导入选中」按钮。 */
+function updateImportConfirmState() {
+  const btn = document.getElementById("skill-import-confirm");
+  if (!btn) return;
+  const checked = document.querySelectorAll(".skill-import-select:checked").length;
+  btn.disabled = checked === 0;
+  btn.textContent = checked > 0 ? `导入选中 (${checked})` : "导入选中";
+}
+
+/** 执行导入：遍历勾选的 skill，逐个调 import_skill。 */
+async function doSkillImportSelected() {
+  const errorEl = document.getElementById("skill-import-error");
+  if (errorEl) errorEl.textContent = "";
+  const select = document.getElementById("skill-import-source-app");
+  const val = select && select.value;
+  // 收集当前来源对象
+  let source = null;
+  if (val === "__custom__") {
+    // 重建自定义来源（从 DOM 读勾选项的 title/dir）
+    // 自定义文件夹：用户选的目录本身就是一个 skill 目录，单条导入
+    source = {
+      id: "__custom__",
+      label: "自定义",
+      dir: customImportDir || "",
+      exists: true,
+      skills: customImportDir
+        ? [{
+            name: (customImportDir.split(/[\\/]/).pop() || customImportDir),
+            description: "（自定义目录）",
+            dir: customImportDir,
+          }]
+        : [],
+    };
+  } else {
+    source = (skillImportSourcesCache || []).find((s) => s.id === val) || null;
+  }
+  if (!source) return;
+
+  const selectedIndices = Array.from(
+    document.querySelectorAll(".skill-import-select:checked")
+  ).map((cb) => parseInt(cb.dataset.index, 10));
+  const targets = selectedIndices.map((i) => source.skills[i]).filter(Boolean);
+  if (targets.length === 0) return;
+
+  const modeEl = document.querySelector('input[name="skill-import-mode"]:checked');
+  const mode = modeEl ? modeEl.value : "copy";
+
+  const btn = document.getElementById("skill-import-confirm");
+  if (btn) { btn.disabled = true; btn.textContent = "导入中..."; }
+
+  const ok = [];
+  const fail = [];
+  for (const s of targets) {
+    try {
+      await invoke("import_skill", { sourcePath: s.dir, mode });
+      ok.push(s.name);
+    } catch (e) {
+      fail.push(`${s.name}: ${e}`);
+      console.error("import_skill failed:", s.name, e);
+    }
+  }
+
+  // 刷新 Skill 列表
+  try {
+    await invoke("refresh_skills");
+    await loadSkillList();
+  } catch (e) {
+    console.error("refresh after import failed:", e);
+  }
+
+  closeSkillImportPanel();
+
+  // 结果提示
+  const hint = document.getElementById("skill-import-hint");
+  if (hint) {
+    let msg = `导入完成：成功 ${ok.length} 个`;
+    if (fail.length) msg += `，失败 ${fail.length} 个（${fail.join("; ")}）`;
+    hint.textContent = msg;
+    hint.style.display = "block";
+    setTimeout(() => { hint.style.display = "none"; }, 6000);
+  }
 }
 
 /**
- * 0.13.6: 执行 Skill 导入。
+ * 扫描自定义目录下的 skill 子目录（前端轻量实现，仅展示用）。
+ * 后端 import_skill 会再次校验。返回 [{name, description, dir}]。
  */
-async function doSkillImport(mode) {
-  const overlay = document.getElementById("skill-import-overlay");
-  if (!overlay) return;
-  const dir = overlay.dataset.dir;
-  if (!dir) return;
-  const errorEl = document.getElementById("skill-import-error");
-  if (errorEl) errorEl.textContent = "";
-  try {
-    const msg = await invoke("import_skill", { sourcePath: dir, mode });
-    // 导入成功
-    overlay.style.display = "none";
-    // 刷新 Skill 列表
-    await invoke("refresh_skills");
-    await loadSkillList();
-    // 显示成功消息
-    const hint = document.getElementById("skill-import-hint");
-    if (hint) {
-      hint.textContent = msg;
-      hint.style.display = "block";
-      setTimeout(() => { hint.style.display = "none"; }, 5000);
-    }
-  } catch (e) {
-    if (errorEl) errorEl.textContent = String(e);
-    console.error("import_skill failed:", e);
-  }
+async function scanCustomDirForSkills(dir) {
+  // 后端没有专门的「扫描任意目录」command，复用 list_external_skill_sources 不适用。
+  // 这里用 import_skill 不可行；改用一个简单方案：通过 open_dir 不够。
+  // 实际上后端 import_skill 只接受单个目录，自定义文件夹场景下我们直接把选中的目录
+  // 作为单个 skill 导入（即该目录本身就是一个 skill 目录）。
+  // 所以自定义模式只展示「该目录本身」一项。
+  const name = dir.split(/[\\/]/).pop() || dir;
+  return [{ name, description: "（自定义目录）", dir }];
 }
 
 // ── 0.13.6: CLI 能力识别 ───────────────────────────────────────────────────
 
 /**
+ * 显示 Skill 编辑 modal。
+ *
+ * @param skillDir SKILL.md 所在目录路径
+ * @param content SKILL.md 全文
+ * @param cliPath 来源 CLI 路径（用于标题展示，可为 null）
+ */
+function showSkillEditModal(skillDir, content, cliPath) {
+  const overlay = document.getElementById("skill-edit-overlay");
+  if (!overlay) return;
+  overlay.dataset.skillDir = skillDir;
+  const textarea = document.getElementById("skill-edit-textarea");
+  if (textarea) textarea.value = content;
+  const titleEl = document.getElementById("skill-edit-title");
+  if (titleEl) titleEl.textContent = cliPath ? `编辑 Skill（来自 ${cliPath}）` : "编辑 Skill";
+  const metaEl = document.getElementById("skill-edit-meta");
+  if (metaEl) metaEl.textContent = `目录: ${skillDir}`;
+  const errorEl = document.getElementById("skill-edit-error");
+  if (errorEl) errorEl.textContent = "";
+  overlay.style.display = "flex";
+}
+
+/**
  * CLI 能力识别事件绑定。
- * 点击「识别」→ 调后端 recognize_cli_tool → 展示结果预览。
+ * 点击「识别」→ 调后端 recognize_cli_tool → 弹出编辑 modal 供二次确认。
+ * 点击「浏览」→ 打开文件选择器选取可执行文件（.exe/.cmd/.bat）。
  */
 (() => {
   const $ = (id) => document.getElementById(id);
+
+// 浏览文件按钮
+$("cli-recognizer-browse")?.addEventListener("click", async () => {
+  try {
+    const selected = await invoke("open_file_dialog", {
+      title: "选择 CLI 可执行文件",
+      filters: [{ name: "可执行文件", extensions: ["exe", "cmd", "bat"] }],
+    });
+    if (selected) {
+      const input = $("cli-recognizer-input");
+      if (input) input.value = selected;
+    }
+  } catch (e) {
+    console.error("browse cli file failed:", e);
+  }
+});
 
 $("cli-recognizer-btn")?.addEventListener("click", async () => {
   const input = $("cli-recognizer-input");
@@ -2358,7 +2662,6 @@ $("cli-recognizer-btn")?.addEventListener("click", async () => {
   }
 
   const errorEl = $("cli-recognizer-error");
-  const resultEl = $("cli-recognizer-result");
   const btn = $("cli-recognizer-btn");
   if (errorEl) errorEl.textContent = "";
   if (btn) {
@@ -2368,24 +2671,14 @@ $("cli-recognizer-btn")?.addEventListener("click", async () => {
 
   try {
     const result = await invoke("recognize_cli_tool", { cliPath });
-
-    // 展示结果
-    if (resultEl) resultEl.style.display = "";
-    const nameEl = $("cli-recognizer-tool-name");
-    if (nameEl) nameEl.textContent = `${result.tool_name}（${result.subcommands.length} 子命令, ${result.options.length} 选项）`;
-
-    const previewEl = $("cli-recognizer-preview");
-    if (previewEl) {
-      // 展示生成的 SKILL.md 全文 + 保存路径
-      previewEl.textContent = result.skill_md_content;
-    }
-
-    // 自动刷新 Skill 列表（新 Skill 已保存到 blink 目录）
+    // 弹出编辑 modal，让用户二次确认编辑后再保存
+    const skillDir = result.saved_path.replace(/SKILL\.md$/, "").replace(/[/\\]$/, "");
+    showSkillEditModal(skillDir, result.skill_md_content, result.source_cli_path || cliPath);
+    // 自动刷新 Skill 列表（识别时已保存，但可能用户会编辑后再次保存）
     await invoke("refresh_skills").catch(() => {});
     await loadSkillList();
   } catch (e) {
     if (errorEl) errorEl.textContent = String(e);
-    if (resultEl) resultEl.style.display = "none";
     console.error("recognize_cli_tool failed:", e);
   } finally {
     if (btn) {
@@ -2393,12 +2686,6 @@ $("cli-recognizer-btn")?.addEventListener("click", async () => {
       btn.textContent = "识别";
     }
   }
-});
-
-// 关闭结果
-$("cli-recognizer-dismiss")?.addEventListener("click", () => {
-  const resultEl = $("cli-recognizer-result");
-  if (resultEl) resultEl.style.display = "none";
 });
 
 // Enter 键触发识别

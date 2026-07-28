@@ -1,6 +1,6 @@
 /* ═══════════════════════════════════════════════════════════════════════════
-   views/settings-mcp.css — 设置页·MCP 视图（0.13.0）
-   MCP server 配置管理：列表 / 添加编辑删除 / 启停 / 重连 / tool 预览 / 粒度开关
+   views/settings-mcp.css — 设置页·MCP 视图（0.13.0 → 0.13.7 重构）
+   参照 ZCode 设计：绿灯/红灯 + 工具数 + 精简按钮（开关/编辑/删除）
    ═══════════════════════════════════════════════════════════════════════════ */
 
 /* ── Server 列表容器 ─────────────────────────────────────────────────────── */
@@ -8,8 +8,15 @@
 .mcp-server-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   margin-bottom: 12px;
+}
+
+.mcp-list-summary {
+  font-size: var(--text-sm, 13px);
+  color: var(--text-dim);
+  margin: 0 0 4px 0;
+  padding: 0;
 }
 
 .mcp-empty-hint {
@@ -19,34 +26,34 @@
   text-align: center;
 }
 
+/* 通用错误提示（列表加载失败） */
 .mcp-error {
   color: var(--red);
   font-size: var(--text-base);
   padding: 8px 0;
 }
 
-/* ── Server 卡片 ─────────────────────────────────────────────────────────── */
+/* ── Server 卡片（列表行）────────────────────────────────────────────────── */
 
 .mcp-server-card {
   background: var(--bg-sidebar);
   border: 1px solid var(--surface);
-  border-left: 3px solid var(--accent);
   border-radius: var(--radius-md);
   overflow: hidden;
   transition: border-color 0.15s;
 }
 
 .mcp-server-card:hover {
-  border-color: var(--accent);
+  border-color: var(--surface-2);
 }
 
 .mcp-server-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  padding: var(--space-sm, 10px) var(--space-md, 14px);
+  padding: 10px 14px;
   cursor: pointer;
-  gap: var(--space-sm, 8px);
+  gap: 8px;
   transition: background 0.15s;
 }
 
@@ -57,38 +64,87 @@
 .mcp-server-info {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
   min-width: 0;
   flex: 1;
+}
+
+.mcp-server-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .mcp-server-name {
   font-weight: var(--weight-semibold);
   font-size: var(--text-md, 14px);
   color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
-.mcp-transport-badge {
-  display: inline-block;
+.mcp-server-scope {
   font-size: 10px;
-  font-weight: var(--weight-semibold);
-  padding: 1px 6px;
-  border-radius: var(--radius-sm, 4px);
-  vertical-align: middle;
-  margin-left: 4px;
+  color: var(--text-dim);
+  background: var(--surface);
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
 }
 
-.mcp-transport-stdio {
-  background: var(--surface);
+.mcp-tool-count {
+  font-size: var(--text-sm, 12px);
   color: var(--text-dim);
 }
 
-.mcp-transport-http {
-  background: rgba(168, 85, 247, 0.15);
-  color: #a855f7;
+/* ── 状态指示灯 ──────────────────────────────────────────────────────────── */
+
+.mcp-status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.mcp-dot-online {
+  background: #22c55e;
+  box-shadow: 0 0 4px rgba(34, 197, 94, 0.4);
+}
+
+.mcp-dot-offline {
+  background: #ef4444;
+  box-shadow: 0 0 4px rgba(239, 68, 68, 0.3);
+}
+
+.mcp-dot-probing {
+  background: #f59e0b;
+  animation: mcp-dot-pulse 1s ease-in-out infinite;
+}
+
+.mcp-dot-disabled {
+  background: var(--text-dim);
+  opacity: 0.4;
+}
+
+@keyframes mcp-dot-pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+/* ── 传输类型 + 命令显示 ───────────────────────────────────────────────────── */
+
+.mcp-server-transport {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mcp-transport-badge {
+  font-size: 10px;
+  font-weight: var(--weight-semibold);
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-dim);
+  flex-shrink: 0;
 }
 
 .mcp-server-command {
@@ -100,45 +156,29 @@
   text-overflow: ellipsis;
 }
 
+/* ── 错误信息 ─────────────────────────────────────────────────────────────── */
+
+/* 短错误信息——默认展示，点击可展开/折叠详细报错 */
+.mcp-error-msg {
+  font-size: var(--text-sm, 12px);
+  color: var(--red);
+  padding: 2px 0;
+  word-break: break-all;
+  user-select: none;
+}
+
+.mcp-error-msg:hover {
+  text-decoration: underline;
+}
+
+/* ── 操作区 ───────────────────────────────────────────────────────────────── */
+
 .mcp-server-actions {
   display: flex;
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
 }
-
-/* ── 状态徽章 ────────────────────────────────────────────────────────────── */
-
-.mcp-status {
-  font-size: var(--text-sm);
-  padding: 2px 8px;
-  border-radius: var(--radius-sm);
-  white-space: nowrap;
-  font-weight: var(--weight-medium);
-}
-
-.mcp-status-online {
-  background: color-mix(in srgb, var(--green) 20%, transparent);
-  color: var(--green);
-}
-
-.mcp-status-offline {
-  background: color-mix(in srgb, var(--red) 15%, transparent);
-  color: var(--text-dim);
-}
-
-.mcp-status-connecting {
-  background: color-mix(in srgb, var(--accent) 20%, transparent);
-  color: var(--accent);
-}
-
-/* ── 启用开关 ────────────────────────────────────────────────────────────── */
-
-.mcp-enabled-toggle {
-  margin: 0 4px;
-}
-
-/* ── 操作按钮 ────────────────────────────────────────────────────────────── */
 
 .mcp-server-actions .btn-sm {
   width: 28px;
@@ -147,9 +187,8 @@
   align-items: center;
   justify-content: center;
   padding: 0;
-  font-size: var(--text-sm, 12px);
   border: 1px solid var(--surface);
-  background: var(--surface);
+  background: transparent;
   color: var(--text-dim);
   border-radius: var(--radius-sm);
   cursor: pointer;
@@ -162,7 +201,7 @@
 }
 
 .mcp-server-actions .btn-sm:hover {
-  background: var(--surface-2);
+  background: var(--surface);
   color: var(--text);
   border-color: var(--accent);
 }
@@ -172,20 +211,40 @@
   border-color: var(--red);
 }
 
+/* ── 开关样式 ─────────────────────────────────────────────────────────────── */
+
+.mcp-server-actions .switch {
+  margin-right: 2px;
+}
+
 /* ── Tool 列表（展开/折叠） ──────────────────────────────────────────────── */
 
 .mcp-server-tools {
   border-top: 1px solid var(--surface);
-  padding: var(--space-sm, 8px) var(--space-md, 14px);
+  padding: 8px 14px;
   background: var(--bg);
 }
 
 .mcp-tools-loading,
 .mcp-tools-empty {
-  color: var(--text-dim);
-  font-size: var(--text-base);
-  padding: 8px 0;
-  text-align: center;
+color: var(--text-dim);
+font-size: var(--text-base);
+padding: 8px 0;
+text-align: center;
+}
+
+/* 详细报错——在展开的 tools 区域内显示（可选中复制） */
+.mcp-error-detail {
+font-size: 11px;
+padding: 4px 8px;
+background: var(--surface);
+border-radius: var(--radius-sm);
+word-break: break-all;
+font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+margin: 0;
+user-select: text;
+-webkit-user-select: text;
+cursor: text;
 }
 
 .mcp-tool-item {
@@ -215,7 +274,7 @@
   font-size: var(--text-base);
   font-weight: var(--weight-medium);
   color: var(--text);
-  font-family: "Cascadia Code", "Consolas", monospace;
+  font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
 }
 
 .mcp-tool-desc {
@@ -224,7 +283,89 @@
   line-height: 1.4;
 }
 
-/* ── 添加/编辑 modal（复用 .modal-card + .ai-modal-section 通用样式）────── */
+/* ── 表单 + JSON 合并面板 ─────────────────────────────────────────────────── */
+
+/* JSON 配置区域 */
+.mcp-form-json-section {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--surface);
+}
+
+.mcp-form-json-section textarea {
+  width: 100%;
+  min-height: 180px;
+  font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+  font-size: var(--text-sm, 12px);
+  resize: vertical;
+}
+
+/* 表单字段提示文字 */
+.mcp-form-field-hint {
+  font-size: var(--text-sm, 12px);
+  color: var(--text-dim);
+  margin-left: 8px;
+}
+
+/* ── 旧版 tab 样式（已弃用，保留以防其他引用）───────────────────────────────── */
+
+.mcp-form-tabs {
+  display: flex;
+  gap: 0;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--surface);
+}
+
+.mcp-form-tab-btn {
+  padding: 6px 16px;
+  font-size: var(--text-base);
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.mcp-form-tab-btn:hover {
+  color: var(--text);
+}
+
+.mcp-form-tab-btn.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: var(--weight-medium);
+}
+
+.mcp-form-tab-panel {
+  display: none;
+}
+
+/* 表单/JSON 两个 panel 统一最小高度 */
+.mcp-form-tab-panel[data-tab="form"],
+.mcp-form-tab-panel[data-tab="json"] {
+  min-height: 0;
+}
+
+.mcp-form-tab-panel[data-tab="json"] textarea {
+  width: 100%;
+  min-height: 180px;
+  font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+  font-size: var(--text-sm, 12px);
+  resize: vertical;
+}
+
+/* 请求头 textarea——保证最小高度，不被全局样式压缩 */
+#mcp-form-headers {
+  min-height: 120px;
+  resize: vertical;
+}
+
+.mcp-form-hint {
+  font-size: var(--text-sm, 12px);
+  color: var(--text-dim);
+  margin: 4px 0 8px;
+}
 
 /* ── MCP Server 配置区（0.13.4 — 暴露 Blink 能力）────────────────────── */
 
@@ -271,7 +412,7 @@
   font-size: var(--text-base);
   font-weight: var(--weight-medium);
   color: var(--text);
-  font-family: "Cascadia Code", "Consolas", monospace;
+  font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -296,7 +437,7 @@
   white-space: nowrap;
 }
 
-/* ── MCP 导入（0.13.6）─────────────────────────────────────────────────── */
+/* ── MCP 导入（0.13.6 → 0.13.9 重构）─────────────────────────────────────────────────── */
 
 .mcp-list-actions {
   display: flex;
@@ -304,23 +445,93 @@
   margin-bottom: 12px;
 }
 
-/* .mcp-import-btn 样式在 settings-ai.css 中定义（与 mcp-add-btn 统一虚线框风格） */
+/* 固定宽高，防止内容变化导致窗口跳动 */
+.mcp-import-modal {
+  width: 540px;
+  max-width: 90vw;
+}
+
+/* 列表区域 */
+.mcp-import-list-area {
+  margin-top: 4px;
+}
+
+/* 列表 header（全选 + 计数） */
+.mcp-import-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: var(--surface);
+  border: 1px solid var(--surface);
+  border-bottom: none;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+}
+
+.mcp-import-count {
+  font-size: var(--text-sm, 12px);
+  color: var(--text-dim);
+}
 
 .mcp-import-list {
-  max-height: 280px;
+  /* 固定高度（而非 min/max-height 范围）：内容少时 empty 居中、多时内部滚动，
+     列表区域占位恒定，避免选择来源渲染后高度跳变驱动 modal 垂直居中重算 → 窗口抖动 */
+  height: 260px;
   overflow-y: auto;
   border: 1px solid var(--surface);
-  border-radius: var(--radius-md);
-  margin-bottom: 8px;
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+  transition: opacity 0.15s ease;
+}
+
+/* 加载状态：半透明 + 过渡，避免内容替换时布局抖动 */
+.mcp-import-list.loading {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+/* 空状态 */
+.mcp-import-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 100px;
+  color: var(--text-dim);
+  font-size: var(--text-sm, 13px);
 }
 
 .mcp-import-item {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
   border-bottom: 1px solid var(--surface);
   font-size: var(--text-sm, 13px);
+  transition: background 0.15s;
+}
+
+.mcp-import-item:hover {
+  background: var(--surface);
+}
+
+.mcp-import-item .checkbox {
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
+.mcp-import-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
+  min-width: 0;
+}
+
+.mcp-import-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
 .mcp-import-item:last-child {
@@ -331,6 +542,20 @@
   font-weight: var(--weight-semibold);
   color: var(--text);
   min-width: 80px;
+}
+
+/* 导入选项 label */
+.mcp-import-select-all-label,
+.mcp-import-overwrite-label {
+  font-size: var(--text-sm, 13px);
+  color: var(--text-dim);
+  gap: 6px;
+}
+
+/* 全选在列表 header 里时颜色稍亮 */
+.mcp-import-list-header .mcp-import-select-all-label {
+  color: var(--text);
+  font-weight: var(--weight-medium);
 }
 
 .mcp-import-badge {

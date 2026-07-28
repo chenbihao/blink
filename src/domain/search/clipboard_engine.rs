@@ -37,8 +37,11 @@ pub const ENGINE_ID: &str = "clipboard";
 /// engine 场景不做首拼弱信号派生（本体数据信号天然强，"剪贴板" 不会误命中）。
 pub const TRIGGERS: &[&str] = &["剪贴板", "clip", "jtb", "jiantieban"];
 
-/// 展开条数——对齐 Alt+1~9 单页容量，一屏一次到位。
-const RESULT_LIMIT: usize = 9;
+/// 单次展示条数默认值（与 `ClipboardConfig::display_count` 默认值一致）。
+const DEFAULT_DISPLAY_COUNT: usize = 30;
+/// 单次展示条数下限/上限。下限 1 防"啥也不显示"，上限 200 防一次拉太多拖慢 UI。
+const DISPLAY_COUNT_MIN: usize = 1;
+const DISPLAY_COUNT_MAX: usize = 200;
 
 /// 副行预览截断字符数（避免长文本挤爆 UI；前端本身也会截）。
 const PREVIEW_MAX_CHARS: usize = 60;
@@ -48,6 +51,9 @@ pub struct ClipboardEngine {
     /// UI 语言快照,用于 subtitle 时间描述 zh/en 切换（0.8.5.1 §6.6）。
     /// 与 SearchService.language 联动:`SearchService::update_language` 转发到本 engine。
     language: Arc<RwLock<String>>,
+    /// 单次展示条数快照（`display_count` 配置项）。
+    /// 与 `SearchService` 联动：`set_config("clipboard_config")` 时 downcast 转发到本 engine。
+    display_count: Arc<RwLock<usize>>,
 }
 
 impl ClipboardEngine {
@@ -55,12 +61,24 @@ impl ClipboardEngine {
         Self {
             pool,
             language: Arc::new(RwLock::new("zh".to_string())),
+            display_count: Arc::new(RwLock::new(DEFAULT_DISPLAY_COUNT)),
         }
     }
 
     /// 更新 UI 语言快照（SearchService::update_language 转发）。
     pub fn update_language(&self, lang: String) {
         *self.language.write().unwrap() = lang;
+    }
+
+    /// 更新单次展示条数（设置页 `clipboard_config` 保存时转发）。
+    /// 自动 clamp 到 `[DISPLAY_COUNT_MIN, DISPLAY_COUNT_MAX]`，非法值兜底默认值。
+    pub fn update_display_count(&self, count: u32) {
+        let clamped = if (DISPLAY_COUNT_MIN..=DISPLAY_COUNT_MAX).contains(&(count as usize)) {
+            count as usize
+        } else {
+            DEFAULT_DISPLAY_COUNT
+        };
+        *self.display_count.write().unwrap() = clamped;
     }
 }
 
@@ -92,10 +110,11 @@ impl SearchEngine for ClipboardEngine {
     /// route 层保证 Mixed 分支不会调到本 engine。
     async fn search(&self, query: &str, _ctx: &QueryContext<'_>) -> Vec<SearchItem> {
         let arg = query.trim();
+        let limit = *self.display_count.read().unwrap() as i64;
         let items = if arg.is_empty() {
-            query_recent(&self.pool, RESULT_LIMIT as i64).await
+            query_recent(&self.pool, limit).await
         } else {
-            search_history(&self.pool, arg, RESULT_LIMIT as i64).await
+            search_history(&self.pool, arg, limit).await
         };
         let lang = self.language.read().unwrap().clone();
 
@@ -319,5 +338,43 @@ mod tests {
             hit_count: 0,
         };
         assert!(format_subtitle(&item, "en").contains("min ago"));
+    }
+
+    #[test]
+    fn display_count_defaults_to_30() {
+        // 无 pool 也能构造——display_count 是内存快照，构造时不读 DB。
+        // connect_lazy 需要 Tokio runtime，测试里用阻塞 runtime 兜底。
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let pool = rt
+            .block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
+        let engine = ClipboardEngine::new(pool);
+        assert_eq!(*engine.display_count.read().unwrap(), DEFAULT_DISPLAY_COUNT);
+        assert_eq!(DEFAULT_DISPLAY_COUNT, 30);
+    }
+
+    #[test]
+    fn update_display_count_accepts_valid_range() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let pool = rt
+            .block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
+        let engine = ClipboardEngine::new(pool);
+        engine.update_display_count(5);
+        assert_eq!(*engine.display_count.read().unwrap(), 5);
+        engine.update_display_count(200);
+        assert_eq!(*engine.display_count.read().unwrap(), 200);
+    }
+
+    #[test]
+    fn update_display_count_clamps_out_of_range_to_default() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let pool = rt
+            .block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
+        let engine = ClipboardEngine::new(pool);
+        // 0 = 下限外 → 兜底默认值
+        engine.update_display_count(0);
+        assert_eq!(*engine.display_count.read().unwrap(), DEFAULT_DISPLAY_COUNT);
+        // 超上限 → 兜底默认值
+        engine.update_display_count(9999);
+        assert_eq!(*engine.display_count.read().unwrap(), DEFAULT_DISPLAY_COUNT);
     }
 }

@@ -62,3 +62,23 @@
   background: var(--surface-2);
   color: var(--text);
 }
+
+/* btn-sm：紧凑型按钮变体（与 .btn 同色系，仅缩小尺寸）
+   修 Skill/MCP 区「btn btn-sm」无 .btn-sm 定义导致按钮大小不一的问题。
+   用 .btn.btn-sm 双类选择器（优先级 0,2,0）确保盖过 views/settings.css 里
+   重复定义的单类 .btn（0,1,0）——后者后加载会覆盖单类 .btn-sm 的尺寸。
+   inline-flex + justify-center 保证纯图标 / 纯文字 / 图标+文字按钮等高居中。 */
+.btn.btn-sm {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 4px 10px;
+  font-size: var(--text-sm, 13px);
+  line-height: 1.4;
+  min-height: 26px;
+}
+.btn.btn-sm .icon {
+  width: 14px;
+  height: 14px;
+}
