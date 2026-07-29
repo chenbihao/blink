@@ -1,4 +1,4 @@
-//! 插件协议(JSONL,见 production-design/phases/0.2-core-plugin-design.md §3.2)。
+//! 插件协议(JSONL,见 phases/0.2-core-plugin-design.md §3.2)。
 //!
 //! newline-delimited JSON,每行一个完整 JSON。本切片实现:
 //! - `query`→`response`(单行查询)
@@ -120,6 +120,12 @@ pub enum PluginUpstreamMessage {
     /// tool-call 执行结果(插件→core,0.9.3)。
     #[serde(rename = "tool_result")]
     ToolResult(ToolResultPayload),
+    /// 轨道 A 纯数据 tool 结果(插件→core,0.14.3)。
+    ///
+    /// manifest 配了 `projection` 的插件走轨道 A:只返回纯 `data`，
+    /// core 的 `PluginCapabilityAdapter` 用 `ProjectionRule` 投影成 `CapabilityResult`。
+    #[serde(rename = "raw_result")]
+    RawResult(RawToolResult),
 }
 
 /// 插件返回的 tool-call 执行结果(0.9.3)。
@@ -137,6 +143,49 @@ pub struct ToolResultPayload {
     /// 执行错误(成功时为 None)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<PluginErrorPayload>,
+}
+
+/// 轨道 A 纯数据 tool 结果（0.14.3）——插件只吐纯 `data`，投影规则在 manifest。
+///
+/// 与 `ToolResultPayload`（旧协议，返回 `Vec<PluginItem>`）对应：
+/// manifest 配了 `projection` 的插件走轨道 A，返回本结构。
+/// core 的 `PluginCapabilityAdapter` 收到后用 `ProjectionRule` 投影成 `CapabilityResult`。
+///
+/// **wire 格式**：`{"type":"raw_result","id":"...","data":<任意 JSON>}`
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RawToolResult {
+    /// 关联的请求 id（与 `PluginRequest::ToolCall.id` 对应）。
+    pub id: String,
+    /// 纯数据，零展示逻辑。翻译插件: `"你好"`。IP 插件: `[{ip, type}, ...]`。
+    pub data: serde_json::Value,
+    /// 执行错误（成功时为 None）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<PluginErrorPayload>,
+}
+
+impl RawToolResult {
+    /// 构造一个成功的纯数据结果。
+    #[allow(dead_code)] // 主 crate 通过反序列化构造；插件示例 crate 有各自副本
+    pub fn ok(id: impl Into<String>, data: serde_json::Value) -> Self {
+        RawToolResult {
+            id: id.into(),
+            data,
+            error: None,
+        }
+    }
+
+    /// 构造一个错误结果。
+    #[allow(dead_code)] // 同 ok
+    pub fn err(id: impl Into<String>, code: impl Into<String>, message: impl Into<String>) -> Self {
+        RawToolResult {
+            id: id.into(),
+            data: serde_json::Value::Null,
+            error: Some(PluginErrorPayload {
+                code: code.into(),
+                message: message.into(),
+            }),
+        }
+    }
 }
 
 /// 插件 → core 响应(一行 = 一个完整 JSON)。
@@ -170,10 +219,51 @@ fn default_http_timeout() -> u64 {
 }
 
 /// 插件返回的错误。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PluginErrorPayload {
     pub code: String,
     pub message: String,
+}
+
+/// 插件运行时纯数据输出（0.14 轨道 A）——插件只吐纯 data，投影规则在 manifest。
+///
+/// **核心思想**（§3.1）：插件开发者只关心"返回正确的数据"。
+/// 翻译插件: `data = "你好"`。IP 插件: `data = [{ip, type}, ...]`。
+/// 怎么展示 / 怎么投影由 manifest 的 `ProjectionRule` 配置决定。
+///
+/// **与旧 `PluginResponse` 的关系**：`PluginRawResult` 是新协议（轨道 A），
+/// `PluginResponse` 是旧协议（`{items: Vec<PluginItem>}`）。0.14.3 插件迁移后
+/// 旧协议废弃。0.14.0 只定义结构，`PluginCapabilityAdapter` 的迁移在 0.14.3。
+#[allow(dead_code)] // 0.14.0 定义结构，0.14.3 插件迁移时消费
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PluginRawResult {
+    /// 纯数据，零展示逻辑。翻译插件: `"你好"`。IP 插件: `[{ip, type}, ...]`。
+    pub data: serde_json::Value,
+    /// 执行错误（成功时为 None）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<PluginErrorPayload>,
+}
+
+#[allow(dead_code)] // 0.14.0 定义结构，0.14.3 插件迁移时消费
+impl PluginRawResult {
+    /// 构造一个成功的纯数据结果。
+    pub fn ok(data: serde_json::Value) -> Self {
+        PluginRawResult {
+            data,
+            error: None,
+        }
+    }
+
+    /// 构造一个错误结果。
+    pub fn err(code: impl Into<String>, message: impl Into<String>) -> Self {
+        PluginRawResult {
+            data: serde_json::Value::Null,
+            error: Some(PluginErrorPayload {
+                code: code.into(),
+                message: message.into(),
+            }),
+        }
+    }
 }
 
 /// 插件结果项。
@@ -184,6 +274,9 @@ pub struct PluginErrorPayload {
 ///
 /// 向后兼容：老插件不填 payload 时为 `None`，消费方从 `action` 提取兜底
 /// （Copy→`{text}`，Open→`{path}`）。
+///
+/// **0.14 注**：此结构在 0.14.3 插件迁移后将由 `PluginRawResult`（轨道 A）取代。
+/// 0.14.0 仅定义新结构，不删除旧结构。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginItem {
     pub title: String,
@@ -529,5 +622,147 @@ mod tests {
         };
         let json = serde_json::to_string(&item).unwrap();
         assert!(!json.contains("payload"), "payload=None 时不应序列化");
+    }
+
+    // ── 0.14 PluginRawResult（轨道 A 纯数据输出）─────────────────────────
+
+    #[test]
+    fn plugin_raw_result_ok_constructs() {
+        let r = PluginRawResult::ok(serde_json::json!("你好"));
+        assert_eq!(r.data, "你好");
+        assert!(r.error.is_none());
+    }
+
+    #[test]
+    fn plugin_raw_result_err_constructs() {
+        let r = PluginRawResult::err("TIMEOUT", "查询超时");
+        assert!(r.data.is_null());
+        assert_eq!(r.error.as_ref().unwrap().code, "TIMEOUT");
+        assert_eq!(r.error.as_ref().unwrap().message, "查询超时");
+    }
+
+    #[test]
+    fn plugin_raw_result_serializes_with_data() {
+        let r = PluginRawResult::ok(serde_json::json!({ "translated": "你好" }));
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"data\""));
+        assert!(json.contains("\"translated\""));
+        assert!(json.contains("\"你好\""));
+        // error=None 时 skip_serializing_if 生效
+        assert!(!json.contains("\"error\""));
+    }
+
+    #[test]
+    fn plugin_raw_result_serializes_with_error() {
+        let r = PluginRawResult::err("FAIL", "服务不可用");
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"error\""));
+        assert!(json.contains("\"FAIL\""));
+        assert!(json.contains("\"服务不可用\""));
+    }
+
+    #[test]
+    fn plugin_raw_result_parses_from_json() {
+        let json = r#"{"data":"你好世界"}"#;
+        let r: PluginRawResult = serde_json::from_str(json).unwrap();
+        assert_eq!(r.data, "你好世界");
+        assert!(r.error.is_none());
+    }
+
+    #[test]
+    fn plugin_raw_result_parses_array_data() {
+        // IP 插件场景：data 是数组
+        let json = r#"{"data":[{"ip":"192.168.1.1","type":"本地"},{"ip":"8.8.8.8","type":"公网"}]}"#;
+        let r: PluginRawResult = serde_json::from_str(json).unwrap();
+        assert!(r.data.is_array());
+        assert_eq!(r.data.as_array().unwrap().len(), 2);
+        assert_eq!(r.data[0]["ip"], "192.168.1.1");
+    }
+
+    #[test]
+    fn plugin_raw_result_roundtrip() {
+        let r = PluginRawResult::ok(serde_json::json!({
+            "city": "北京",
+            "temp": 25,
+            "condition": "晴"
+        }));
+        let json = serde_json::to_string(&r).unwrap();
+        let restored: PluginRawResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(r.data, restored.data);
+        assert_eq!(r.error, restored.error);
+    }
+
+    // ── 0.14.3 RawToolResult（轨道 A 纯数据 tool 结果）─────────────────────
+
+    #[test]
+    fn raw_tool_result_ok_constructs() {
+        let r = RawToolResult::ok("tc_1", serde_json::json!("你好"));
+        assert_eq!(r.id, "tc_1");
+        assert_eq!(r.data, "你好");
+        assert!(r.error.is_none());
+    }
+
+    #[test]
+    fn raw_tool_result_err_constructs() {
+        let r = RawToolResult::err("tc_1", "FAIL", "翻译失败");
+        assert_eq!(r.id, "tc_1");
+        assert!(r.data.is_null());
+        assert_eq!(r.error.as_ref().unwrap().code, "FAIL");
+        assert_eq!(r.error.as_ref().unwrap().message, "翻译失败");
+    }
+
+    #[test]
+    fn raw_tool_result_serializes_with_type_tag() {
+        let r = RawToolResult::ok("tc_1", serde_json::json!("你好"));
+        let wrapped = PluginUpstreamMessage::RawResult(r);
+        let json = serde_json::to_string(&wrapped).unwrap();
+        assert!(json.contains("\"type\":\"raw_result\""));
+        assert!(json.contains("\"id\":\"tc_1\""));
+        assert!(json.contains("\"data\""));
+        assert!(json.contains("\"你好\""));
+        // error=None 时 skip_serializing_if 生效
+        assert!(!json.contains("\"error\""));
+    }
+
+    #[test]
+    fn raw_tool_result_parses_from_json() {
+        let json = r#"{"type":"raw_result","id":"tc_1","data":{"ip":"192.168.1.1","type":"本地"}}"#;
+        let msg: PluginUpstreamMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            PluginUpstreamMessage::RawResult(r) => {
+                assert_eq!(r.id, "tc_1");
+                assert_eq!(r.data["ip"], "192.168.1.1");
+                assert!(r.error.is_none());
+            }
+            _ => panic!("应是 RawResult"),
+        }
+    }
+
+    #[test]
+    fn raw_tool_result_with_error_parses() {
+        let json = r#"{"type":"raw_result","id":"tc_2","data":null,"error":{"code":"FAIL","message":"错误"}}"#;
+        let msg: PluginUpstreamMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            PluginUpstreamMessage::RawResult(r) => {
+                assert_eq!(r.id, "tc_2");
+                assert!(r.data.is_null());
+                assert_eq!(r.error.as_ref().unwrap().code, "FAIL");
+            }
+            _ => panic!("应是 RawResult"),
+        }
+    }
+
+    #[test]
+    fn raw_tool_result_array_data_parses() {
+        // IP 插件场景：data 是数组
+        let json = r#"{"type":"raw_result","id":"tc_3","data":[{"ip":"192.168.1.1","type":"本地"},{"ip":"8.8.8.8","type":"公网"}]}"#;
+        let msg: PluginUpstreamMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            PluginUpstreamMessage::RawResult(r) => {
+                assert!(r.data.is_array());
+                assert_eq!(r.data.as_array().unwrap().len(), 2);
+            }
+            _ => panic!("应是 RawResult"),
+        }
     }
 }

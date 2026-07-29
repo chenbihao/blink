@@ -1,10 +1,10 @@
-# 灵感卷 · 外部 agent 作为 subagent 调用
+# 前瞻路线图 · 候选方向调研
 
-> **状态**：🔮 灵感 / 调研留档（非承诺规划）。候选落地版本：**0.21+**。
+> **状态**：🔮 前瞻调研（非承诺规划）。候选落地版本：**0.21+**。
 >
 > **来源**：讨论「Blink 自动整理下载文件夹」类长任务场景时启发。结论：Blink 自身的 tool 体系（读为主 + 可逆写）不足以支撑「AI 自主操作文件系统的长任务」，但**不必自己造完整的编码 agent 运行时**——可把 opencode / pi agent / Claude Code 等现成 agent **作为 subagent 调用**，借力生态而不外包架构主权。
 >
-> **关联**：[ADR-001](_adr-001-agent-backend-strategy.md)（为何不当后端）· [0.13 §七 CLI 化](0.13-ai-capability-expansion.md)
+> **关联**：[spec-architecture §A10](./specs/spec-architecture.md)（ADR-001 为何不当后端）· [phases/0.13 §七 CLI 化](./phases/0.13-ai-capability-expansion.md)
 
 ---
 
@@ -30,7 +30,7 @@
 | `open_path` | `src/domain/execution/builtin.rs:401` Action | 无副作用（调系统打开） |
 | `reveal_in_explorer` | `src/domain/execution/builtin.rs:444` Action | 无副作用（资源管理器定位） |
 
-**结论**：Blink **没有任何文件系统写 capability**（move/rename/delete/mkdir 全无）。这是 ADR-001 §2.3 所述的有意为之的产品边界——Blink 的 tool 是「读为主 + 可逆写（剪贴板）」，不是「让 AI 改用户文件」。
+**结论**：Blink **没有任何文件系统写 capability**（move/rename/delete/mkdir 全无）。这是 [spec-architecture §A10](./specs/spec-architecture.md)（ADR-001）所述的有意为之的产品边界——Blink 的 tool 是「读为主 + 可逆写（剪贴板）」，不是「让 AI 改用户文件」。
 
 ### 1.3 两条路
 
@@ -41,7 +41,7 @@
 | **A. 自己造文件操作 capability + 事务/回滚** | 新增 `move_file`/`rename_file`/`delete_file` capability + 全局快照回滚体系（对标 opencode） | **高**——快照/回滚/权限/事务化是编码 agent 的重包袱，Blink 守「不做 AI 运行时」边界 | 偏离产品定位，背 opencode 式重机制 |
 | **B. 把外部 agent 当 subagent 调用** | Blink 的 supervisor agent 通过 subagent tool，调起 opencode/pi/claude-code 处理「文件长任务」，结果回流 | **中**——复用生态，Blink 只做编排 + 结果呈现 | 依赖外部 agent 安装；但架构主权完整 |
 
-**本卷主张路径 B**。理由：符合 ADR-001 的「Blink 不做 AI 运行时」边界，借力而非重造。
+**本卷主张路径 B**。理由：符合 [ADR-001（§A10）](./specs/spec-architecture.md) 的「Blink 不做 AI 运行时」边界，借力而非重造。
 
 ---
 
@@ -125,7 +125,7 @@ pub trait ExternalAgentSubagent: Send + Sync {
 0.21（候选，未定案）
   ├─ 外部 agent 作为 subagent（本卷）          P1
   ├─ 事实记忆（tool-based，ChatGPT 式 memory）  P2（0.20 砍掉项）
-  ├─ proactivity 主动建议深化（../product-context-future-感知.md §7.3）  P2
+  ├─ proactivity 主动建议深化（../product.md §五 感知与隐私）  P2
   └─ ...（其他）
 ```
 
@@ -161,4 +161,4 @@ PoC 通过 → 0.15 立项；PoC 发现外部 agent 接口不稳/委托判断不
 - [opencode Server 架构](https://opencode.ai/docs/server/) · [opencode SDK](https://opencode.ai/docs/sdk/)
 - [pi agent (earendil-works)](https://github.com/earendil-works/pi)
 - [Implementing Design Patterns for Agentic AI with Rig & Rust](https://dev.to/joshmo_dev/implementing-design-patterns-for-agentic-ai-with-rig-rust-1o71)
-- [ADR-001：Agent 后端策略](_adr-001-agent-backend-strategy.md)
+- [ADR-001：Agent 后端策略（并入 spec-architecture §A10）](./specs/spec-architecture.md)

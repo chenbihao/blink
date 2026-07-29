@@ -43,11 +43,16 @@
         "required": ["text"]
       },
       "danger_class": "Safe",
-      "result_type": "items",
-      "hint": "返回译文（item[0]）+ 拆分版（仅命名风格预处理改变文本时）+ 原文，AI 读 item[0] 即可",
+      "result_type": "text",
+      "hint": "返回译文字符串，AI 直接使用",
       "progress_hint": "翻译文本",
       "setting_bindings": {
         "target_lang": "target_lang"
+      },
+      "projection": {
+        "result_shape": "text",
+        "pointer": "$",
+        "desc": "译文"
       }
     },
     {
@@ -72,10 +77,15 @@
       },
       "danger_class": "Safe",
       "result_type": "items",
-      "hint": "返回 payload.results，顺序与 texts 一一对应",
+      "hint": "返回译文数组，顺序与 texts 一一对应",
       "progress_hint": "批量翻译文本",
       "setting_bindings": {
         "target_lang": "target_lang"
+      },
+      "projection": {
+        "result_shape": "items",
+        "items_pointer": "$",
+        "item_actions": [{"type": "copy"}]
       }
     }
   ],

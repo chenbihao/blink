@@ -1,4 +1,4 @@
-//! Tool 适配层（0.12.0 §2.4）--把 Capability/Action 包装成 `rig::tool::Tool`。
+//! Tool 适配层（0.12.0 §2.4）--把 Capability 包装成 `rig::tool::Tool`。
 //!
 //! ## 动机
 //!
@@ -11,16 +11,26 @@
 //!
 //! ## 解决方案
 //!
-//! 抽出 `ToolAdapter` 层，把 Capability / Action 包装成 `impl rig::tool::Tool`：
+//! 抽出 `ToolAdapter` 层，把 Capability 包装成 `impl rig::tool::Tool`：
 //! - `CapabilityTool` 包装 `Arc<dyn Capability>`
-//! - `ActionTool` 包装 `Arc<dyn Action>`
 //! - `ToolDyn` 动态分发--Args 用 `serde_json::Value`，避免给每个 Capability 写强类型 Args
+//!
+//! ## 0.14.2 边界钉死
+//!
+//! **删除 `ActionTool`**——AI tool 池只含 `CapabilityTool`。这把"AI 该不该调这个能力"
+//! 的决策从"运行时每个 Action 自己标 danger_class"前置成"编译期只有 Capability 才能进
+//! tool 池"。9 个保留 Action（lock/shutdown/restart/sleep/clear_history/exit_blink/
+//! open_logs/open_data_dir/open_settings）不再出现在 AI tool 池。
+//!
+//! `open_url` / `open_path` / `reveal_in_explorer` 从 Action 提升为 Capability，
+//! AI 通过 CapabilityTool 调用。Action 版本保留在 `ActionRegistry` 供主窗口搜索流使用。
 //!
 //! ## 四域墙（危险操作确认 + 闭环）
 //!
-//! **危险操作**（`danger_class == Dangerous`）不直接执行，也不返回"假消息"让 AI 误以为
-//! 已执行（那样 AI 会基于错误假设继续生成）。**对话窗口 rig agent loop 是无限轮**，
-//! 正确的闭环是 `call` 内部 emit 确认事件后**挂起 await 用户确认信号**：
+//! **危险操作**（`danger_class == Dangerous` 或 `schema.sensitive == true`）不直接执行，
+//! 也不返回"假消息"让 AI 误以为已执行（那样 AI 会基于错误假设继续生成）。
+//! **对话窗口 rig agent loop 是无限轮**，正确的闭环是 `call` 内部 emit 确认事件后
+//! **挂起 await 用户确认信号**：
 //! - 用户确认 -> 继续执行，返回真实结果
 //! - 用户拒绝 -> 返回"用户拒绝"消息，AI 可换路径
 //! - 超时（60s）-> 返回"超时未执行"消息，不卡死 agent loop
@@ -31,14 +41,9 @@
 //! **事件名 `blink://chat-confirm-action`** 与主窗口 `blink://ai-confirm-action` 分流--
 //! 主窗口 payload 含 `seq`（强校验），对话窗口用 `confirm_id`，共用会导致主窗 listener 吞事件。
 //!
-//! ## tool 池粒度（§2.4）
-//!
-//! `build_agent_tools()` 过滤 `ai_eligible() == false` 的 Action（如 `exit_blink`--
-//! AI 不该让 Blink 自杀）。Capability 全部暴露（只读居多）；Dangerous 的靠确认闭环挡。
-//!
 //! ## 工厂函数
 //!
-//! `build_agent_tools()` 从 `CapabilityRegistry` 和 `ActionRegistry` 收集所有可用能力，
+//! `build_agent_tools()` 从 `CapabilityRegistry` 收集所有可用能力，
 //! 返回 `Vec<Box<dyn ToolDyn>>` 供对话窗口 Agent 使用。
 
 use std::collections::{HashMap, HashSet};
@@ -53,7 +58,7 @@ use tauri::Emitter;
 use tokio::sync::{Mutex, oneshot};
 
 use crate::domain::capability::{Capability, CapabilityError, CapabilityRegistry, InvokeContext};
-use crate::domain::execution::{Action, ActionContext, ActionRegistry, DangerClass, ExecError};
+use crate::domain::execution::DangerClass;
 
 // ── 常量 ─────────────────────────────────────────────────────────────────────
 
@@ -163,7 +168,7 @@ enum ConfirmOutcome {
     Dropped,
 }
 
-/// 挂起等待用户确认危险操作（CapabilityTool / ActionTool 共用）。
+/// 挂起等待用户确认危险操作（CapabilityTool 用）。
 ///
 /// 生成 confirm_id -> emit `chat-confirm-action` 事件（含 confirm_id）->
 /// `tokio::time::timeout` 等 receiver，超时 `DANGEROUS_CONFIRM_TIMEOUT_SECS` 秒。
@@ -202,7 +207,7 @@ async fn await_dangerous_confirm(
     }
 }
 
-/// 危险操作确认+执行的公共逻辑（CapabilityTool / ActionTool 共用）。
+/// 危险操作确认+执行的公共逻辑（CapabilityTool 用）。
 ///
 /// 如果 `is_dangerous` 为 true：注册确认 -> emit 事件 -> 挂起等待 ->
 /// - Approved: 继续执行（返回 None）
@@ -449,111 +454,6 @@ impl ToolDyn for CapabilityTool {
     }
 }
 
-// ── ActionTool ───────────────────────────────────────────────────────────────
-
-/// Action 的 Tool 包装器。
-///
-/// 持有 `Arc<dyn Action>`，实现 `ToolDyn` 以供 rig Agent 使用。
-///
-/// **设计要点**：
-/// - `definition()` -> `schema.to_rig_tool()`（纯 schema 投影）
-/// - `call()` -> 危险操作先挂起确认 -> `action.execute()` -> `ActionOutcome` -> `to_rig_tool_result()`
-/// - 无 deadline（`ActionContext` 无 deadline 字段；Action execute 多为短耗时副作用，
-///   长耗时超时留待 Action trait 演进时补）
-pub struct ActionTool {
-    action: Arc<dyn Action>,
-    schema: crate::domain::execution::ActionSchema,
-    app_handle: tauri::AppHandle,
-    pending: Arc<PendingConfirms>,
-}
-
-impl ActionTool {
-    /// 构造 ActionTool。
-    pub fn new(
-        action: Arc<dyn Action>,
-        app_handle: tauri::AppHandle,
-        pending: Arc<PendingConfirms>,
-    ) -> Self {
-        let schema = action.schema();
-        Self {
-            action,
-            schema,
-            app_handle,
-            pending,
-        }
-    }
-
-    /// 检查是否是危险操作。
-    fn is_dangerous(&self) -> bool {
-        matches!(self.action.danger_class(), DangerClass::Dangerous)
-    }
-}
-
-impl ToolDyn for ActionTool {
-    fn name(&self) -> String {
-        self.action.id().to_string()
-    }
-
-    fn definition<'a>(
-        &'a self,
-        // rig 传入的 prompt 是运行时上下文提示，用于动态调整 schema 描述。
-        // Action 的 schema 是静态投影，不随 prompt 变化，故故意忽略。
-        _prompt: String,
-    ) -> WasmBoxedFuture<'a, rig_core::completion::ToolDefinition> {
-        Box::pin(async move { self.schema.to_rig_tool() })
-    }
-
-    fn call<'a>(
-        &'a self,
-        args: String,
-    ) -> WasmBoxedFuture<'a, Result<String, rig_core::tool::ToolError>> {
-        Box::pin(async move {
-            // 解析 JSON args
-            let args_value: Value = match serde_json::from_str(&args) {
-                Ok(v) => v,
-                Err(e) => return Err(rig_core::tool::ToolError::JsonError(e)),
-            };
-
-            // 危险操作确认（四域墙 + 闭环）
-            if let Some(result) = check_dangerous_confirm(
-                self.is_dangerous(),
-                &self.pending,
-                &self.app_handle,
-                self.action.id(),
-                "action",
-                &args_value,
-            )
-            .await
-            {
-                return result;
-            }
-
-            // 构造 ActionContext
-            let cx = ActionContext {
-                app_handle: &self.app_handle,
-                arguments: args_value,
-            };
-
-            // 调用 Action
-            match self.action.execute(&cx).await {
-                Ok(outcome) => {
-                    let contents = outcome.to_rig_tool_result();
-                    Ok(crate::domain::capability::rig_tool_result_to_text(
-                        &contents,
-                    ))
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, action = %self.action.id(), "action execute 失败");
-                    let msg = exec_error_to_string(e);
-                    Err(rig_core::tool::ToolError::ToolCallError(Box::new(
-                        ToolErrMsg(msg),
-                    )))
-                }
-            }
-        })
-    }
-}
-
 // ── 错误转换 ─────────────────────────────────────────────────────────────────
 
 /// `CapabilityError` -> 用户可读字符串。
@@ -570,37 +470,29 @@ fn capability_error_to_string(e: CapabilityError) -> String {
     }
 }
 
-/// `ExecError` -> 用户可读字符串（对称 `capability_error_to_string`，分变体中文化）。
-fn exec_error_to_string(e: ExecError) -> String {
-    match e {
-        ExecError::MissingArg(action) => format!("{action}: 缺少字符串参数"),
-        ExecError::Runtime(msg) => format!("执行失败: {msg}"),
-    }
-}
-
 // ── 工厂函数 ─────────────────────────────────────────────────────────────────
 
-/// 构建对话窗口 Agent 使用的 tool 池。
+/// 构建对话窗口 Agent 使用的 tool 池（0.14.2：只含 Capability + 外部 tool）。
 ///
-/// 从 `CapabilityRegistry` 和 `ActionRegistry` 收集所有可用能力，返回
-/// `Vec<Box<dyn ToolDyn>>` 供 rig `AgentBuilder` 使用。
+/// 从 `CapabilityRegistry` 收集所有可用能力，返回 `Vec<Box<dyn ToolDyn>>`
+/// 供 rig `AgentBuilder` 使用。
 ///
 /// **参数**：
 /// - `cap_registry`: Capability 注册表
-/// - `action_registry`: Action 注册表（可通过 `AppContext` 获取）
 /// - `external_tools`: 外部 tool（如 MCP tool），直接进 tool 池，不经过 CapabilityRegistry
 ///   （0.13.0 §9.3：统一外部 tool 入口，为 MCP tool 留对称性）
-/// - `app_handle`: Tauri AppHandle，用于构造 InvokeContext / ActionContext + emit 确认事件
+/// - `app_handle`: Tauri AppHandle，用于构造 InvokeContext + emit 确认事件
 /// - `pending`: 危险确认注册表（`Arc<PendingConfirms>`，由 main.rs manage，对话窗口共享）
 ///
-/// **返回**：所有可用的 tool（CapabilityTool + ActionTool + external_tools）
+/// **返回**：所有可用的 tool（CapabilityTool + external_tools）
 ///
-/// **tool 池粒度**（§2.4）：`ai_eligible() == false` 的 Action 不进池（如 `exit_blink`）。
-/// **危险操作**：危险 Capability/Action 仍会被包装进 tool 池，但调用时挂起等用户确认。
+/// **0.14.2 变化**：删除了 `action_registry` 参数和 ActionTool 包装。AI tool 池
+/// 只含 Capability。9 个保留 Action（lock/shutdown/...）不再出现在 tool 池——
+/// 这把"AI 该不该调这个能力"从运行时过滤前置成编译期类型约束。
+/// **危险操作**：危险 Capability 仍会被包装进 tool 池，但调用时挂起等用户确认。
 #[allow(dead_code)] // 0.12.1 对话窗口 AgentBuilder 消费
 pub fn build_agent_tools(
     cap_registry: &CapabilityRegistry,
-    action_registry: &ActionRegistry,
     external_tools: Vec<Box<dyn ToolDyn>>,
     app_handle: &tauri::AppHandle,
     pending: Arc<PendingConfirms>,
@@ -613,32 +505,15 @@ pub fn build_agent_tools(
         tools.push(Box::new(tool));
     }
 
-    // 2. 包装所有 Action（过滤 ai_eligible=false 的，如 exit_blink）
-    let mut skipped = 0usize;
-    for (_id, action) in action_registry.entries() {
-        if !action.ai_eligible() {
-            tracing::debug!(
-                action = %action.id(),
-                "build_agent_tools: 跳过 ai_eligible=false 的动作"
-            );
-            skipped += 1;
-            continue;
-        }
-        let tool = ActionTool::new(action, app_handle.clone(), pending.clone());
-        tools.push(Box::new(tool));
-    }
-
-    // 3. 追加外部 tool（MCP tool 等，已包装为 ToolDyn，直接进池）
+    // 2. 追加外部 tool（MCP tool 等，已包装为 ToolDyn，直接进池）
     let external_count = external_tools.len();
     tools.extend(external_tools);
 
     tracing::info!(
         capabilities = cap_registry.len(),
-        actions = action_registry.len() - skipped,
-        skipped_actions = skipped,
         external_tools = external_count,
         total_tools = tools.len(),
-        "build_agent_tools: tool 池构建完成"
+        "build_agent_tools: tool 池构建完成（0.14.2: AI tool 池只含 Capability）"
     );
 
     tools
@@ -649,6 +524,8 @@ mod tests {
     use super::*;
     use crate::domain::capability::{CapabilityResult, CapabilitySchema, ItemResult};
     use serde_json::json;
+
+    // 0.14.2: ActionTool 已删除，以下测试验证 AI tool 池只含 Capability。
 
     // ── PendingConfirms 单测（纯逻辑，0.12.0 §2.4 闭环骨架）──────────────────
 
@@ -813,24 +690,6 @@ mod tests {
         }
     }
 
-    // ── exec_error_to_string 测试 ─────────────────────────────────────────
-
-    #[test]
-    fn exec_error_missing_arg_to_string() {
-        let e = ExecError::MissingArg("open".into());
-        let msg = exec_error_to_string(e);
-        assert!(msg.contains("open"));
-        assert!(msg.contains("缺少字符串参数"));
-    }
-
-    #[test]
-    fn exec_error_runtime_to_string() {
-        let e = ExecError::Runtime("找不到文件".into());
-        let msg = exec_error_to_string(e);
-        assert!(msg.contains("找不到文件"));
-        assert!(msg.contains("执行失败"));
-    }
-
     // ── is_dangerous 逻辑测试（不需要 AppHandle）──────────────────────────
 
     /// 测试 `DangerClass` 匹配逻辑--`is_dangerous` 纯粹基于 `danger_class()` 返回值。
@@ -886,49 +745,48 @@ mod tests {
         let _ = reg.entries();
     }
 
-    // ── ActionRegistry::entries 测试 ──────────────────────────────────────
+    // ── 0.14.2: AI tool 池只含 Capability 验证 ──────────────────────────────
 
-    #[test]
-    fn action_registry_entries_returns_all_builtins() {
-        let reg = ActionRegistry::new();
-        let entries = reg.entries();
-        assert_eq!(entries.len(), 12, "应返回 12 个内置动作");
-    }
-
-    #[test]
-    fn action_registry_entries_ids_match() {
-        let reg = ActionRegistry::new();
-        let entries = reg.entries();
-        let ids: Vec<&str> = entries.iter().map(|(id, _)| id.as_str()).collect();
-        assert!(ids.contains(&"open_settings"));
-        assert!(ids.contains(&"shutdown"));
-    }
-
-    // ── build_agent_tools 计数测试 ────────────────────────────────────────
-
-    /// `build_agent_tools` 需要 `&tauri::AppHandle` + `Arc<PendingConfirms>`，遵循
-    /// AGENTS.md §7"Tauri 集成层免自动化"--这里只验证 registry 层面的数据一致性
-    /// （含 ai_eligible 过滤预期：12 builtin - 1 exit_blink = 11 可用 action）。
+    /// 0.14.2 验收点：AI tool 池只含 Capability，不含 Action。
     ///
-    /// 实际的 tool 包装 + 调用测试靠 `cargo run` 手动验证（0.12.1 对话窗口落地后）。
+    /// `build_agent_tools` 签名已删除 `action_registry` 参数——编译期保证
+    /// AI tool 池无法包含 Action。这里验证 CapabilityRegistry 包含
+    /// open_url/open_path/reveal_in_explorer（从 Action 提升的新 Capability）。
     #[test]
-    fn build_agent_tools_count_matches_registries() {
-        // 无法直接测试 build_agent_tools（需 AppHandle），但可以验证过滤逻辑：
-        // 12 个内置动作中 exit_blink 的 ai_eligible=false -> 应被过滤。
-        let action_reg = ActionRegistry::new();
-        let eligible = action_reg
-            .entries()
-            .iter()
-            .filter(|(_, a)| a.ai_eligible())
-            .count();
-        assert_eq!(
-            eligible, 11,
-            "12 builtin - 1 exit_blink(ai_eligible=false) = 11 个可暴露给 AI"
-        );
-        // Capability 数 + 11 = 预期 tool 数
+    fn ai_tool_pool_only_contains_capabilities() {
         let cap_reg = CapabilityRegistry::default();
-        let expected_total = cap_reg.len() + eligible;
-        assert!(expected_total >= 11, "至少应有 11 个可暴露动作");
+        // 0.14.2 新增的 3 个 Capability 应在注册表中
+        assert!(cap_reg.get("open_url").is_some(), "open_url 应注册为 Capability");
+        assert!(cap_reg.get("open_path").is_some(), "open_path 应注册为 Capability");
+        assert!(cap_reg.get("reveal_in_explorer").is_some(), "reveal_in_explorer 应注册为 Capability");
+    }
+
+    /// 0.14.2 验收点：9 个保留 Action 不出现在 AI tool 池。
+    ///
+    /// 由于 `build_agent_tools` 签名不再接受 `ActionRegistry`，
+    /// lock/shutdown/restart/sleep/clear_history/exit_blink/open_logs/open_data_dir/open_settings
+    /// 编译期就无法进入 AI tool 池。这里验证它们不在 CapabilityRegistry 中
+    /// （即不会被 CapabilityTool 包装进 tool 池）。
+    #[test]
+    fn retained_actions_not_in_capability_registry() {
+        let cap_reg = CapabilityRegistry::default();
+        // 9 个保留 Action 不应在 CapabilityRegistry 中
+        for action_id in [
+            "lock",
+            "shutdown",
+            "restart",
+            "sleep",
+            "clear_history",
+            "exit_blink",
+            "open_logs",
+            "open_data_dir",
+            "open_settings",
+        ] {
+            assert!(
+                cap_reg.get(action_id).is_none(),
+                "{action_id} 不应在 CapabilityRegistry 中（保留为 Action）"
+            );
+        }
     }
 
     // ── CapabilityTool round-trip 测试（0.12.0 §2.8 验收点）──────────────
@@ -957,6 +815,7 @@ mod tests {
         ) -> Result<CapabilityResult, CapabilityError> {
             Ok(CapabilityResult::Text {
                 content: "hello from mock".into(),
+                desc: None,
             })
         }
     }
@@ -981,10 +840,9 @@ mod tests {
         ) -> Result<CapabilityResult, CapabilityError> {
             Ok(CapabilityResult::Items {
                 items: vec![ItemResult {
-                    title: "result1".into(),
-                    subtitle: None,
-                    payload: json!({ "path": "/test" }),
-                    score: Some(0.9),
+                    data: json!({ "name": "result1", "path": "/test" }),
+                    desc: None,
+                    actions: vec![],
                 }],
             })
         }
@@ -1005,6 +863,7 @@ mod tests {
         // （invoke 的 MockCap 逻辑在 registry::register 测试中已覆盖）
         let result = CapabilityResult::Text {
             content: "hello from mock".into(),
+            desc: None,
         };
 
         // 3. to_rig_tool_result 产生 ToolResultContent
@@ -1027,10 +886,9 @@ mod tests {
         // 2. 模拟 invoke 返回 Items
         let result = CapabilityResult::Items {
             items: vec![ItemResult {
-                title: "result1".into(),
-                subtitle: None,
-                payload: json!({ "path": "/test" }),
-                score: Some(0.9),
+                data: json!({ "name": "result1", "path": "/test" }),
+                desc: None,
+                actions: vec![],
             }],
         };
 
@@ -1044,35 +902,4 @@ mod tests {
         assert!(text.contains("/test"));
     }
 
-    #[tokio::test]
-    async fn roundtrip_action_outcome_projection() {
-        // ActionOutcome -> to_rig_tool_result 链路验证
-        use crate::domain::execution::ActionOutcome;
-
-        // Copy -> JSON 文本
-        let outcome = ActionOutcome::Copy {
-            text: "copied".into(),
-            hit_id: None,
-        };
-        let contents = outcome.to_rig_tool_result();
-        assert_eq!(contents.len(), 1);
-        let text = crate::domain::capability::rig_tool_result_to_text(&contents);
-        assert!(text.contains("copied"));
-        assert!(text.contains("\"type\":\"copy\""));
-
-        // Open -> JSON 文本
-        let outcome = ActionOutcome::Open {
-            path: "C:\\test".into(),
-        };
-        let contents = outcome.to_rig_tool_result();
-        let text = crate::domain::capability::rig_tool_result_to_text(&contents);
-        assert!(text.contains("C:\\\\test"));
-        assert!(text.contains("\"type\":\"open\""));
-
-        // Nop -> JSON 文本
-        let outcome = ActionOutcome::Nop;
-        let contents = outcome.to_rig_tool_result();
-        let text = crate::domain::capability::rig_tool_result_to_text(&contents);
-        assert!(text.contains("\"type\":\"nop\""));
-    }
 }

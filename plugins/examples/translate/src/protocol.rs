@@ -48,6 +48,9 @@ pub enum PluginToCore {
     HttpRequest(HttpRequest),
     #[serde(rename = "tool_result")]
     ToolResult(ToolResultPayload),
+    /// 轨道 A 纯数据 tool 结果（0.14.3）——manifest 配了 projection 的 tool 走此路径。
+    #[serde(rename = "raw_result")]
+    RawResult(RawToolResult),
 }
 
 #[derive(Debug, Serialize)]
@@ -84,6 +87,15 @@ pub struct PluginResponse {
 pub struct ToolResultPayload {
     pub id: String,
     pub items: Vec<PluginItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<PluginError>,
+}
+
+/// 轨道 A 纯数据 tool 结果（0.14.3）——插件只吐纯 data，投影规则在 manifest。
+#[derive(Debug, Serialize)]
+pub struct RawToolResult {
+    pub id: String,
+    pub data: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<PluginError>,
 }

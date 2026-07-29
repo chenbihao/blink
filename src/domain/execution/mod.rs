@@ -40,6 +40,7 @@ pub struct ActionContext<'a> {
     /// **key 约定**：
     /// - 参数化动作用**语义键**（`url` / `path` / `text` 等，见 0.9.0 §3.3）
     /// - 旧字符串路径走 `_legacy_arg`（`arg_as_str` 读的就是它，兼容层，0.9.2 起可删）
+    #[allow(dead_code)] // 0.14.2 后参数化 Action 已迁入 Capability，剩余 9 个 Action 不读此字段；保留供未来 Action 使用
     pub arguments: Value,
 }
 
@@ -85,6 +86,10 @@ impl<'a> ActionContext<'a> {
     /// 从 `arguments` 按语义键抽字符串（0.9.0 起推荐入口）。
     ///
     /// 例：`cx.arg_str("url", "open_url")?` → 从 `arguments["url"]` 取字符串。
+    ///
+    /// 0.14.2 后参数化 Action 已迁入 Capability，当前 9 个 Action 不调用此方法；
+    /// 保留供未来参数化 Action 使用。
+    #[allow(dead_code)]
     pub fn arg_str(&self, key: &str, action_name: &str) -> Result<String, ExecError> {
         self.arguments
             .get(key)
@@ -101,6 +106,7 @@ impl<'a> ActionContext<'a> {
     /// 但 `_legacy_arg` fallback 保留一整个版本用于前端渐进迁移。
     /// **不加 deprecated**：0.9.0 前端契约不变，`ExecArg::UserExplicit(String)`
     /// 装配路径继续调这个方法，deprecation 会污染编译输出。
+    #[allow(dead_code)]
     pub fn arg_as_str(&self, action_name: &str) -> Result<String, ExecError> {
         // 优先走 _legacy_arg（老装配路径）；若已迁到语义键，参数化 builtin 会自己覆盖
         self.arg_str("_legacy_arg", action_name)
@@ -186,6 +192,7 @@ impl ActionOutcome {
 #[derive(Debug)]
 pub enum ExecError {
     /// 参数化动作缺少参数。
+    #[allow(dead_code)] // 0.14.2 后仅 arg_str 构造，arg_str 已标 dead_code
     MissingArg(String),
     /// 执行过程中的错误（打开失败、系统调用失败等）。
     Runtime(String),
@@ -255,15 +262,14 @@ pub trait Action: Send + Sync {
 
     /// 是否暴露给 AI agent 作为 tool（0.12.0 §2.4 tool 池粒度控制）。
     ///
-    /// **default = true**--绝大多数 Action 都该让 AI 可调（`open_url` / `open_path`
-    /// 是 agent 核心能力--帮用户打开东西）。少数"自毁类"动作覆写为 false--
-    /// AI 调它们无意义且危险（如 `exit_blink`：AI 让 Blink 退出 = 自杀，即使有
-    /// 确认卡片也不该由 AI 提议）。
+    /// **0.14.2 变化**：`ActionTool` 已删除，`build_agent_tools` 不再包装 Action——
+    /// 此方法不再被 `build_agent_tools` 消费。`exit_blink` 的 `ai_eligible=false`
+    /// 语义保留为文档性质（Action 不进 AI tool 池是编译期保证的，不靠运行时过滤）。
     ///
     /// **与 `danger_class` 的区别**：`danger_class` 控制"是否需确认"，
     /// `ai_eligible` 控制"是否暴露给 AI"。Dangerous + ai_eligible=true = 暴露但需确认；
     /// ai_eligible=false = 根本不进 tool 池。
-    #[allow(dead_code)] // 0.12.0 由 build_agent_tools 消费
+    #[allow(dead_code)] // 0.14.2: build_agent_tools 不再消费；保留供文档/未来使用
     fn ai_eligible(&self) -> bool {
         true
     }

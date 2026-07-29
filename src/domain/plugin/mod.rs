@@ -1,4 +1,4 @@
-//! 插件系统(0.3,见 production-design/phases/0.2-core-plugin-design.md §3)。
+//! 插件系统(0.3,见 phases/0.2-core-plugin-design.md §3)。
 //!
 //! 本切片:builtin 插件加载(扫描 manifest)+ 进程拉起(JSONL stdio)+ PluginEngine
 //! 接 async lane。第三方插件目录(%APPDATA%\blink\plugins)、permissions、热重载等后续。
@@ -20,7 +20,8 @@ pub use manifest::{
     LocalizableText, ManifestContextWhen, ManifestSurfaceHint, PluginManifest, PluginTrigger,
 };
 pub use process::{InterpretersStatus, PluginHandle, probe_interpreters};
-pub use protocol::PluginQueryContext;
+#[allow(unused_imports)]
+pub use protocol::{PluginQueryContext, PluginRawResult, RawToolResult};
 
 /// 插件配置读取抽象（0.8.2 §3.4.1 + 0.8.3 §4.13 扩展）。
 ///

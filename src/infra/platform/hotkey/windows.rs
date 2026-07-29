@@ -39,7 +39,7 @@ pub fn set_voice_recording(active: bool) {
     VOICE_RECORDING.store(active, Ordering::SeqCst);
 }
 
-/// Alt 键的**逻辑** hold 态：由所有 LMENU/RMENU keydown/keyup 驱动（含远程控制软件
+/// Alt 键的**逻辑** hold 态：由所有 LMENU/RMENU/MENU keydown/keyup 驱动（含远程控制软件
 /// 注入的事件），仅用 [`EXPECT_SYNTH_KEYUP_AT`] one-shot flag 跳过我们自己
 /// `SetForegroundWindow` 合成的 keyup。
 ///
@@ -56,6 +56,10 @@ pub fn set_voice_recording(active: bool) {
 ///   keyup"——`SM_REMOTESESSION` 只检测 Windows 原生 RDP，对第三方工具返回 false，
 ///   导致远程控制下 Alt 事件被全量过滤。改为：接受所有 Alt 事件，仅用 one-shot
 ///   flag 过滤我们自己 `SetForegroundWindow` 合成的 keyup（这是原过滤的真正目标）。
+/// - 0.14：ALT_LOGICALLY_HELD 维护块加入 VK_MENU（0x12，通用 Alt 键）。SetForegroundWindow
+///   合成的 keyup 可能以 VK_MENU 发出（系统不分左右），旧代码只检查 VK_LMENU/VK_RMENU
+///   导致合成 keyup 跳过维护块 → one-shot flag 未被消费 → 下一个真实 keyup 被误吞 →
+///   ALT_LOGICALLY_HELD 卡在 true → chord 模式不退出。
 ///
 /// **例外声明（与顶部"不做累积镜像"铁则的关系）**：
 /// - 铁则针对**组合键 arm/keyup 边界一次性判定**——那种场景瞬时读物理态最稳，累积镜像会被
@@ -457,7 +461,16 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
         // 改为：接受所有 Alt keydown/keyup 事件更新 ALT_LOGICALLY_HELD，仅用
         // `EXPECT_SYNTH_KEYUP_AT` one-shot flag 过滤我们自己 SetForegroundWindow
         // 合成的 keyup（这是原 LLKHF_INJECTED 过滤的真正目标）。
-        if vk == VK_LMENU.0 as u32 || vk == VK_RMENU.0 as u32 {
+        // **0.14 修复**：加入 VK_MENU（0x12，通用 Alt 键）。
+        // SetForegroundWindow 合成的 Alt keyup 可能以 VK_MENU 发出（系统不知道
+        // 用户按的是左还是右 Alt，用通用码）。旧代码只检查 VK_LMENU/VK_RMENU，
+        // 导致合成 keyup 跳过此块 → EXPECT_SYNTH_KEYUP_AT 标志未被消费 → 下一个
+        // 真实 Alt keyup 被误认为合成 keyup 而跳过 → ALT_LOGICALLY_HELD 卡在 true
+        // → 用户松开 Alt 后 chord 模式不退出。
+        if vk == VK_LMENU.0 as u32
+            || vk == VK_RMENU.0 as u32
+            || vk == VK_MENU.0 as u32
+        {
             // one-shot flag：Alt keyup 时无条件 swap 清除
             let was_expected = if is_up {
                 let expected_at = EXPECT_SYNTH_KEYUP_AT.load(Ordering::SeqCst);
@@ -479,27 +492,20 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
                 ALT_LOGICALLY_HELD.store(true, Ordering::SeqCst);
             } else if is_up && !was_expected {
                 // 真实 keyup——一侧松开时若另一侧仍按着，逻辑态保持 true。
-                let other_vk = if vk == VK_LMENU.0 as u32 {
-                    VK_RMENU
+                // VK_MENU 是通用码（不分左右），需检查两侧物理态。
+                let other_alt_down = if vk == VK_LMENU.0 as u32 {
+                    key_down(VK_RMENU)
+                } else if vk == VK_RMENU.0 as u32 {
+                    key_down(VK_LMENU)
                 } else {
-                    VK_LMENU
+                    // VK_MENU：检查左右 Alt 是否任一仍按下
+                    key_down(VK_LMENU) || key_down(VK_RMENU)
                 };
-                if !key_down(other_vk) {
+                if !other_alt_down {
                     ALT_LOGICALLY_HELD.store(false, Ordering::SeqCst);
                 }
             }
             // was_expected=true → 跳过（我们自己 SetForegroundWindow 合成的 keyup）
-
-            // tracing::trace!(
-            //     side = if vk == VK_LMENU.0 as u32 { "L" } else { "R" },
-            //     is_down,
-            //     is_up,
-            //     injected,
-            //     was_expected,
-            //     prev_held,
-            //     now_held = ALT_LOGICALLY_HELD.load(Ordering::SeqCst),
-            //     "alt-event"
-            // );
         }
 
         // 录制短路：录制期间把事件喂给 recorder，且不碰触发的 thread_local STATE。

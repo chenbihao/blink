@@ -211,33 +211,8 @@ fn run_capability(
 
     match result {
         Ok(result) => {
-            match &result {
-                crate::domain::capability::CapabilityResult::Text { content } => {
-                    println!("{content}");
-                }
-                crate::domain::capability::CapabilityResult::Done { summary } => {
-                    println!("✓ {summary}");
-                }
-                crate::domain::capability::CapabilityResult::Items { items } => {
-                    if items.is_empty() {
-                        println!("（无结果）");
-                    } else {
-                        for (i, item) in items.iter().enumerate() {
-                            println!("{}. {} — {}", i + 1, item.title,
-                                item.subtitle.as_deref().unwrap_or(""));
-                        }
-                    }
-                }
-                crate::domain::capability::CapabilityResult::Blob { mime, bytes } => {
-                    let size_kb = bytes.len() as f64 / 1024.0;
-                    let size_text = if size_kb >= 1024.0 {
-                        format!("{:.1} MB", size_kb / 1024.0)
-                    } else {
-                        format!("{:.1} KB", size_kb)
-                    };
-                    println!("Blob: {} ({})", mime, size_text);
-                }
-            }
+            // 0.14.1: 改调 canonical 文本投影（to_display_text），消除内联 match + Blob 摘要重复
+            println!("{}", result.to_display_text());
             0
         }
         Err(e) => {

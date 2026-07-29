@@ -416,7 +416,15 @@ fn model_display_name(_entry: &ProviderEntry, model: &ModelEntry) -> String {
 /// - 多个 content item 用换行分隔。
 const TOOL_RESULT_SUMMARY_MAX: usize = 50000;
 
-fn summarize_tool_result(tool_result: &ToolResult) -> String {
+/// 从 rig `ToolResult` 提取前端展示摘要(0.12.2 §4.7)。
+///
+/// - 文本内容拼接,截前 50000 字符。
+/// - 图片内容转 `[image]` 占位(前端暂不展示图片)。
+/// - 多个 content item 用换行分隔。
+///
+/// 0.14.1: 提升为 `pub(crate)`，供 `app/commands.rs` 对话历史加载复用，
+/// 消除内联 match 重复。
+pub(crate) fn summarize_tool_result(tool_result: &ToolResult) -> String {
     use rig_core::completion::message::ToolResultContent;
     let mut parts: Vec<String> = Vec::new();
     for content in tool_result.content.iter() {

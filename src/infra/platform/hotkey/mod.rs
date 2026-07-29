@@ -74,7 +74,7 @@ static RUNTIME: OnceLock<HotkeyRuntime> = OnceLock::new();
 // **与"不吞键"铁则的关系**：0.10.5.2 回滚的是"吞 Alt keyup"（破坏 GetKeyState，
 // 导致 Alt+Tab 异常）。0.10.7 吞的是"chord 键的 keydown"（字母键，非修饰键），
 // 且仅在 chord mode 窗口内，Alt 本身全程放行。两者本质不同，详见
-// docs/production-design/phases/0.10-voice-agent.md §10.5。
+// docs/phases/0.10-voice-agent.md §10.5。
 
 /// Chord 独占模式是否激活。LL hook 读此标志决定是否吞 chord keydown。
 static CHORD_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

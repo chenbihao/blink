@@ -39,12 +39,17 @@
         }
       },
       "danger_class": "Safe",
-      "result_type": "items",
+      "result_type": "text",
       "hint": "返回城市名、温度、天气状况、风速等结构化数据，AI 可据此总结提醒（如带伞）",
       "progress_hint": "查询天气",
       "setting_bindings": {
         "city": "default_city",
         "unit": "temperature_unit"
+      },
+      "projection": {
+        "result_shape": "text",
+        "pointer": "$.temp",
+        "desc_pointer": "$.city"
       }
     }
   ],

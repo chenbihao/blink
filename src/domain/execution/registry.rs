@@ -20,7 +20,10 @@ pub struct ActionRegistry {
 }
 
 impl ActionRegistry {
-    /// 构建默认注册表（12 个内置动作）。
+    /// 构建默认注册表（9 个内置动作）。
+    ///
+    /// 0.14.4: open_url / open_path / reveal_in_explorer 的 Action 版本已删除，
+    /// 由 Capability 版本承担（CapabilityRegistry）。
     pub fn new() -> Self {
         let mut actions: HashMap<String, Arc<dyn Action>> = HashMap::new();
 
@@ -35,10 +38,6 @@ impl ActionRegistry {
             Arc::new(ExitBlinkAction),
             Arc::new(OpenLogsAction),
             Arc::new(OpenDataDirAction),
-            // 参数化动作（0.8.0 §1.3）
-            Arc::new(OpenUrlAction),
-            Arc::new(OpenPathAction),
-            Arc::new(RevealInExplorerAction),
         ];
 
         for action in builtins {
@@ -80,13 +79,16 @@ impl ActionRegistry {
     }
 
     /// 已注册动作数量。
+    #[allow(dead_code)] // 0.14.2: build_agent_tools 不再消费 ActionRegistry；保留供测试/调试
     pub fn len(&self) -> usize {
         self.actions.read().unwrap().len()
     }
 
-    /// 返回所有已注册动作的 `(id, Arc<dyn Action>)` 对（0.12.0 §2.4）。
+    /// 返回所有已注册动作的 `(id, Arc<dyn Action>)` 对。
     ///
-    /// 供 `build_agent_tools()` 工厂函数遍历所有动作，包装成 `ToolDyn`。
+    /// 0.14.2 前：供 `build_agent_tools()` 工厂函数遍历所有动作，包装成 `ToolDyn`。
+    /// 0.14.2 后：`build_agent_tools` 不再消费 ActionRegistry（ActionTool 已删），
+    /// 此方法保留供主窗口搜索流和测试使用。
     /// 读锁内一次性 clone 所有 Arc，避免多次锁获取。
     pub fn entries(&self) -> Vec<(String, Arc<dyn Action>)> {
         self.actions
@@ -109,9 +111,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_has_12_builtin_actions() {
+    fn registry_has_9_builtin_actions() {
         let reg = ActionRegistry::new();
-        assert_eq!(reg.len(), 12);
+        assert_eq!(reg.len(), 9);
     }
 
     #[test]
@@ -127,12 +129,13 @@ mod tests {
             "exit_blink",
             "open_logs",
             "open_data_dir",
-            "open_url",
-            "open_path",
-            "reveal_in_explorer",
         ];
         for id in &expected {
             assert!(reg.get(id).is_some(), "缺少动作: {id}");
+        }
+        // 0.14.4: open_url / open_path / reveal_in_explorer 已从 ActionRegistry 删除
+        for id in ["open_url", "open_path", "reveal_in_explorer"] {
+            assert!(reg.get(id).is_none(), "{id} 应已从 ActionRegistry 删除");
         }
     }
 
@@ -156,9 +159,6 @@ mod tests {
             "exit_blink",
             "open_logs",
             "open_data_dir",
-            "open_url",
-            "open_path",
-            "reveal_in_explorer",
         ];
         for id in &expected_ids {
             let action = reg.get(id).expect(id);
@@ -182,9 +182,6 @@ mod tests {
             "exit_blink",
             "open_logs",
             "open_data_dir",
-            "open_url",
-            "open_path",
-            "reveal_in_explorer",
         ] {
             let action = reg.get(id).expect(id);
             let schema = action.schema();
@@ -203,14 +200,11 @@ mod tests {
         use crate::domain::execution::DangerClass;
         let reg = ActionRegistry::new();
 
-        // Safe:只读打开 UI + 参数化动作(参数走 UserExplicit 类型墙)
+        // Safe:只读打开 UI
         for id in [
             "open_settings",
             "open_logs",
             "open_data_dir",
-            "open_url",
-            "open_path",
-            "reveal_in_explorer",
         ] {
             let action = reg.get(id).expect(id);
             assert_eq!(action.danger_class(), DangerClass::Safe, "{id} 应为 Safe");
@@ -234,7 +228,6 @@ mod tests {
         }
     }
 
-    /// 0.12.0 §2.4: ai_eligible 粒度控制--exit_blink 不暴露给 AI，其余默认 true。
     #[test]
     fn ai_eligible_excludes_self_destruct_actions() {
         let reg = ActionRegistry::new();
@@ -246,7 +239,6 @@ mod tests {
         // 其余动作默认 true（含 Dangerous 的 shutdown/lock 等--有确认卡片挡）
         for id in [
             "open_settings",
-            "open_url",
             "shutdown",
             "lock",
             "clear_history",
@@ -255,13 +247,12 @@ mod tests {
         }
     }
 
-    /// 0.9.3:register(&self) 支持启动后动态注册。
     #[test]
     fn register_with_ref_self_works() {
         let reg = ActionRegistry::new();
-        assert_eq!(reg.len(), 12);
+        assert_eq!(reg.len(), 9);
         // 注册一个新动作
         reg.register(Arc::new(OpenSettingsAction)); // 重复 id,应跳过
-        assert_eq!(reg.len(), 12, "重复 id 不应增加数量");
+        assert_eq!(reg.len(), 9, "重复 id 不应增加数量");
     }
 }

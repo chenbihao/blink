@@ -23,7 +23,7 @@
 
 ## More Than a Launcher
 
-**Build an incredibly smooth launcher that seamlessly integrates common features, using Chord mode to invoke various enhanced capabilities — it's more than just a launcher.**
+**Build an elegant, smooth launcher that seamlessly integrates common features, using Chord mode to invoke various enhanced capabilities — it's more than just a launcher.**
 
 Blink transforms multi-step operations like "select English text → translate", "copy URL → open link", "screenshot → OCR extract text" into a single shortcut or one Tab press. The entire experience revolves around being **smooth** — fast summoning, fast response, short interaction paths.
 
@@ -40,8 +40,8 @@ Under the hood is a **capability architecture**: every feature (search, screensh
 </p>
 
 - **App Search** — Fuzzy matching + Pinyin initials + full Pinyin (`wx` → WeChat, `dksz` → Settings)
-- **File Search** — Integrates Everything, falls back to local directory scan when not installed
-- **Live Calculator** — `sqrt(144)` / `0.75*360`, press Enter to copy
+- **File Search** — Integrates local app scan and Everything extension
+- **Live Calculator** — Calculation formulas, press Enter to copy
 - **Clipboard History** — Background recording, supports fuzzy search
 - **Tab Quick Accept** — Type `fy`, press Tab to auto-complete to `fanyi `, then start typing what you want to translate
 - **Lightning Fast** — Summon < 50ms, first result < 20ms
@@ -73,13 +73,13 @@ While the main window is open, hold Alt and letter keys become quick action shor
 
 | Combo | Action |
 |---|---|
-| `Alt + Q` | Open AI chat window (coming soon) |
-| `Alt + A` | Region screenshot → OCR / translate / pin / save |
+| `Alt + Q` | Open AI chat window for conversation |
+| `Alt + A` | Region screenshot → OCR / translate / pin / copy / save |
 | `Alt + C` | Clipboard history |
 | `Alt + Space` | Voice input (supports input in the main window or as a separate voice input method) |
 | `Alt + 1~9` | Quick launch item by position in results |
 
-Screenshots support annotation (rectangle, arrow, text, mosaic, etc.), OCR text recognition, on-image translation, and pin-to-top. Hold `Alt + Space` for voice input — supports cloud (OpenAI / Groq) and local (FunASR) dual engines, words appear as you speak with VAD auto-sentence-splitting.
+Screenshots support annotation (rectangle, arrow, text, brush, blur, mosaic, etc.), OCR text recognition, on-image translation, and pin-to-top. Hold `Alt + Space` for voice input — supports cloud (OpenAI / Groq) and local (FunASR) dual engines, words appear as you speak with VAD auto-sentence-splitting.
 
 ---
 
@@ -91,11 +91,11 @@ Screenshots support annotation (rectangle, arrow, text, mosaic, etc.), OCR text 
 
 Plugins run in isolated processes — crashes don't affect Blink's core. Supports Python, Node.js, Rust, or any executable.
 
-- **Translation** — Youdao / Baidu / DeepL / Alibaba / Tencent, five engines built-in
+- **Translation** — Multi-engine built-in
 - **Weather** — Clean weather card
 - **IP Lookup** — Quick network info check
 - **More Possibilities** — Write plugins in your favorite language, JSONL protocol communication, just a few lines of code to integrate
-- **Coming Soon** — One-click discovery of CLI tools on your system, auto-configure them as Blink plugins
+- **Coming Soon** — One-click discovery of CLI tools on your system, auto-configure them as Blink plugins/skills
 
 ---
 
@@ -112,12 +112,11 @@ Plugins run in isolated processes — crashes don't affect Blink's core. Support
 
 Every feature in Blink is wrapped as a standard Capability that can be called by AI:
 
-- **Action Invocation** — AI can trigger Blink's built-in actions (search, open apps, execute commands...)
-- **Plugin Invocation** — AI can call any installed plugin
-- **Multi-provider Support** — Built-in presets for OpenAI, DeepSeek, Groq, etc. Configure any compatible provider or local LLM (ollama / lmstudio)
-- **Future Openness** — These capabilities will gradually be available to external AI tools as CLI tools or Skills
-
-The AI chat window is currently in development (`Alt + Q`), enabling natural language commands for complex operations.
+- **Capability Invocation** — AI can call Blink's built-in capabilities (search, open apps, execute commands...)
+- **Plugin Invocation** — AI can call any installed plugin's features
+- **Multi-provider Support** — Built-in presets for OpenAI, DeepSeek, etc. Configure any compatible provider or local LLM (ollama / lmstudio)
+- **Chat Window** — Independent Agent window, natural language command
+- **Future Openness** — These capabilities will gradually be available to external AI tools as CLI, MCP, or Skills
 
 ---
 
@@ -127,8 +126,7 @@ The AI chat window is currently in development (`Alt + Q`), enabling natural lan
 
 **Next:**
 
-- **Chat Window** — Independent Agent window, natural language commands
-- **Bidirectional MCP** — Let Blink's capabilities be called by external AI tools
+- **Feature Completion** — Improve screenshot capability, clipboard capability, add preview capability, etc.
 - **Memory** — Let AI remember your preferences and history, getting smarter over time
 
 ---
@@ -228,8 +226,10 @@ cargo test --bin blink
 
 ### Want to dive deeper?
 
-- [`docs/production-design/00-overview.md`](docs/production-design/00-overview.md) — Product vision and milestones
-- [`docs/production-design/phases/`](docs/production-design/phases/) — Design decisions and pitfalls per version
+- [`docs/README.md`](docs/README.md) — Documentation hub (product vision, milestones, navigation)
+- [`docs/product.md`](docs/product.md) — Product decisions (why it's designed this way)
+- [`docs/specs/`](docs/specs/) — Cross-cutting specs (how · hard rules)
+- [`docs/phases/`](docs/phases/) — Design decisions and pitfalls per version
 
 ---
 
@@ -238,10 +238,13 @@ cargo test --bin blink
 - [Wox](https://github.com/Wox-launcher/Wox) — The pioneer launcher on Windows
 - [Alfred](https://www.alfredapp.com/) — Proved that a global input box can be the first entry for human-computer interaction
 - [Raycast](https://www.raycast.com/) — Modern launcher experience, gold standard for plugin ecosystems
-- [uTools](https://u.tools/) — Local efficiency tool, reference for localized experience
-- [Flow Launcher](https://www.flowlauncher.com/) — Community-driven open-source launcher on Windows
+- [Flow Launcher](https://www.flowlauncher.com/) — Open-source launcher on Windows, a model of community-driven development
+- [uTools](https://u.tools/) — Homegrown efficiency tool, reference for localized experience
+- [Quicker](https://getquicker.net/) — A feature-rich all-in-one, a source of inspiration
 - [Everything](https://www.voidtools.com/) — Lightning-fast file search, Blink's file search integration
-- [Quicker](https://getquicker.net/) — Inspiration for the Chord interaction pattern
+- [Ditto](https://github.com/sabrogden/Ditto) — A super handy clipboard management tool
+- [QuickLook](https://github.com/QL-Win/QuickLook) — Quick file preview
+- [PixPin](https://pixpin.com/) — I'd call it the most powerful screenshot app
 
 ---
 

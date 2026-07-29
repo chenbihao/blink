@@ -20,7 +20,7 @@ use tokio::sync::{Mutex, oneshot};
 use super::manifest::{PluginManifest, RuntimeType};
 use super::protocol::{
     PluginAction, PluginItem, PluginRequest, PluginResponse, PluginUpstreamMessage,
-    ToolResultPayload,
+    RawToolResult, ToolResultPayload,
 };
 
 /// 查询错误。
@@ -56,6 +56,8 @@ impl std::fmt::Display for PluginError {
 
 type PendingMap = Arc<Mutex<HashMap<String, oneshot::Sender<PluginResponse>>>>;
 type PendingToolMap = Arc<Mutex<HashMap<String, oneshot::Sender<ToolResultPayload>>>>;
+/// 轨道 A 纯数据 tool-call 的 pending map（0.14.3）。
+type PendingRawToolMap = Arc<Mutex<HashMap<String, oneshot::Sender<RawToolResult>>>>;
 
 /// 已拉起的插件进程。
 struct PluginProcess {
@@ -66,6 +68,8 @@ struct PluginProcess {
     pending: PendingMap,
     /// tool-call 请求的 pending map(0.9.3)。
     pending_tools: PendingToolMap,
+    /// 轨道 A 纯数据 tool-call 的 pending map（0.14.3）。
+    pending_raw_tools: PendingRawToolMap,
     /// 单调递增的请求 id 计数。
     next_id: std::sync::atomic::AtomicU64,
 }
@@ -253,12 +257,14 @@ impl PluginProcess {
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let pending_tools: PendingToolMap = Arc::new(Mutex::new(HashMap::new()));
+        let pending_raw_tools: PendingRawToolMap = Arc::new(Mutex::new(HashMap::new()));
         let stdin = Arc::new(Mutex::new(stdin));
 
         // stdout reader:区分普通查询响应、HTTP 请求、tool-call 结果。
         {
             let pending = Arc::clone(&pending);
             let pending_tools = Arc::clone(&pending_tools);
+            let pending_raw_tools = Arc::clone(&pending_raw_tools);
             let stdin = Arc::clone(&stdin);
             let id = plugin_id.to_string();
             tauri::async_runtime::spawn(async move {
@@ -314,6 +320,16 @@ impl PluginProcess {
                                         tracing::debug!(plugin = %id, id = %payload.id, "孤儿 tool_result(无 pending)");
                                     }
                                 }
+                                Ok(PluginUpstreamMessage::RawResult(payload)) => {
+                                    // 0.14.3:轨道 A 纯数据结果路由到 pending_raw_tools
+                                    if let Some(tx) =
+                                        pending_raw_tools.lock().await.remove(&payload.id)
+                                    {
+                                        let _ = tx.send(payload);
+                                    } else {
+                                        tracing::debug!(plugin = %id, id = %payload.id, "孤儿 raw_result(无 pending)");
+                                    }
+                                }
                                 Err(_) => {
                                     // 向后兼容：尝试旧格式（直接 PluginResponse struct）
                                     match serde_json::from_str::<PluginResponse>(&line) {
@@ -361,6 +377,7 @@ impl PluginProcess {
             stdin,
             pending,
             pending_tools,
+            pending_raw_tools,
             next_id: std::sync::atomic::AtomicU64::new(1),
         })
     }
@@ -506,6 +523,66 @@ impl PluginProcess {
             Ok(Err(_)) => Err(PluginError::ProcessClosed),
             Err(_) => {
                 self.pending_tools.lock().await.remove(&req_id);
+                self.send_cancel(&req_id).await;
+                Err(PluginError::Timeout)
+            }
+        }
+    }
+
+    /// 轨道 A 纯数据 tool-call（0.14.3）——与 `execute_tool` 相同的 IPC 流程，
+    /// 但等待 `RawResult` 消息而非 `ToolResult`，返回 `RawToolResult`（纯 data）。
+    ///
+    /// 调用方（`PluginCapabilityAdapter`）在 manifest 配了 `projection` 时走此路径，
+    /// 收到 `RawToolResult` 后用 `project()` 投影成 `CapabilityResult`。
+    async fn execute_tool_raw(
+        &self,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+        settings: Option<&serde_json::Value>,
+        timeout_ms: u64,
+    ) -> Result<RawToolResult, PluginError> {
+        let seq = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let req_id = format!("tc_{seq}");
+        let (tx, rx) = oneshot::channel();
+        self.pending_raw_tools
+            .lock()
+            .await
+            .insert(req_id.clone(), tx);
+
+        let req = PluginRequest::ToolCall {
+            id: req_id.clone(),
+            tool_name: tool_name.to_string(),
+            arguments: arguments.clone(),
+            settings: settings.cloned(),
+        };
+        let line = serde_json::to_string(&req)
+            .map_err(|e| PluginError::Io(format!("请求序列化失败: {e}")))?;
+
+        {
+            let mut stdin = self.stdin.lock().await;
+            stdin
+                .write_all((line + "\n").as_bytes())
+                .await
+                .map_err(|_| PluginError::ProcessClosed)?;
+            stdin
+                .flush()
+                .await
+                .map_err(|_| PluginError::ProcessClosed)?;
+        }
+
+        match tokio::time::timeout(Duration::from_millis(timeout_ms), rx).await {
+            Ok(Ok(payload)) => {
+                if let Some(err) = payload.error {
+                    Err(PluginError::PluginReturned(err.message))
+                } else {
+                    Ok(payload)
+                }
+            }
+            Ok(Err(_)) => Err(PluginError::ProcessClosed),
+            Err(_) => {
+                self.pending_raw_tools.lock().await.remove(&req_id);
                 self.send_cancel(&req_id).await;
                 Err(PluginError::Timeout)
             }
@@ -701,6 +778,67 @@ impl PluginHandle {
 
         let result = proc
             .execute_tool(tool_name, arguments, settings, timeout_ms)
+            .await;
+
+        // 进程关闭类错误:清理句柄,下次重启。
+        if matches!(result, Err(PluginError::ProcessClosed)) {
+            let mut guard = self.process.lock().await;
+            if guard
+                .as_ref()
+                .map(|p| Arc::ptr_eq(p, &proc))
+                .unwrap_or(false)
+            {
+                *guard = None;
+            }
+        }
+
+        result
+    }
+
+    /// 轨道 A 纯数据 tool-call（0.14.3）——与 `execute_tool` 相同的进程管理逻辑，
+    /// 但调 `execute_tool_raw()` 返回 `RawToolResult`（纯 data）。
+    ///
+    /// 调用方（`PluginCapabilityAdapter`）在 manifest 配了 `projection` 时走此路径。
+    pub async fn execute_tool_raw(
+        &self,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+        settings: Option<&serde_json::Value>,
+    ) -> Result<RawToolResult, PluginError> {
+        let timeout_ms = self.manifest.timeout_ms();
+
+        let proc = {
+            let mut guard = self.process.lock().await;
+            let need_spawn = match guard.as_ref() {
+                None => true,
+                Some(p) => !p.is_alive().await,
+            };
+            if need_spawn {
+                let exec = self.manifest.exec_path(&self.dir);
+                let runtime_type = self.manifest.runtime.r#type;
+                tracing::info!(plugin = %self.manifest.id, ?runtime_type, exec = %exec.display(), "拉起插件进程(raw tool-call)");
+                let proxy = self.proxy.lock().unwrap().clone();
+                match PluginProcess::spawn(&exec, &self.dir, &self.manifest.id, runtime_type, proxy)
+                {
+                    Ok(proc) => *guard = Some(Arc::new(proc)),
+                    Err(e) => {
+                        let msg = match e {
+                            PluginError::InterpreterNotFound(name) => {
+                                format!("未找到解释器：{name}，请在设置页配置")
+                            }
+                            PluginError::Spawn(e) => format!("进程启动失败：{e}"),
+                            _ => e.to_string(),
+                        };
+                        tracing::warn!(plugin = %self.manifest.id, error = %msg, "插件拉起失败(raw tool-call)");
+                        return Err(PluginError::Spawn(msg));
+                    }
+                }
+            }
+            Arc::clone(guard.as_ref().unwrap())
+        };
+
+        let result = proc
+            .execute_tool_raw(tool_name, arguments, settings, timeout_ms)
             .await;
 
         // 进程关闭类错误:清理句柄,下次重启。

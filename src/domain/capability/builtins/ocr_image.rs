@@ -75,6 +75,7 @@ impl Capability for OcrImage {
         Ok(CapabilityResult::Text {
             content: serde_json::to_string(&result as &OcrResult)
                 .unwrap_or_else(|_| result.text.clone()),
+            desc: None,
         })
     }
 }

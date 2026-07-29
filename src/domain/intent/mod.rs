@@ -1,6 +1,6 @@
 //! 意图路由层 —— 从 query 到呈现调度的转换(0.4)。
 //!
-//! 核心模型:触发(match)与呈现(surface)正交(见 `product-platform-平台.md` §4.3)。
+//! 核心模型:触发(match)与呈现(surface)正交(见 `docs/product.md` §四 呈现权模型)。
 //! RuleRouter 持 keyword/regex/context 规则表,`route()` 判定命中后解出 surface(takeover/priority/inline),
 //! 返回 `Route` 供 SearchService 调度。
 //!

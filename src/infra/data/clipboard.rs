@@ -1,6 +1,6 @@
 //! 剪贴板历史（0.7.3）：SQLite 持久化，模糊搜索。
 //!
-//! 设计（见 production-design/phases/0.7-plugin-ecosystem-local-search.md §三）：
+//! 设计（见 phases/0.7-plugin-ecosystem-local-search.md §三）：
 //! - 默认关闭，用户手动启用后才生效
 //! - 去重（相同内容 10 秒内不重复记录）
 //! - SQLite 持久化存储，可配置保留天数

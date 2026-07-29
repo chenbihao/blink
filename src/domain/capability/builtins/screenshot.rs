@@ -120,7 +120,7 @@ pub(super) async fn op_list_displays() -> Result<CapabilityResult, CapabilityErr
     let json = serde_json::to_string(&displays).map_err(|e| CapabilityError::Internal {
         detail: format!("序列化 displays 失败: {e}"),
     })?;
-    Ok(CapabilityResult::Text { content: json })
+    Ok(CapabilityResult::Text { content: json, desc: None })
 }
 
 /// capture：截取指定显示器或虚拟屏幕，返回 `Blob{png}`。
@@ -154,6 +154,7 @@ pub(super) async fn op_capture(
         return Ok(CapabilityResult::Blob {
             mime: "image/png".into(),
             bytes: png,
+            desc: None,
         });
     }
 
@@ -166,6 +167,7 @@ pub(super) async fn op_capture(
         return Ok(CapabilityResult::Blob {
             mime: "image/png".into(),
             bytes: png,
+            desc: None,
         });
     }
 
@@ -183,6 +185,7 @@ pub(super) async fn op_capture(
             Ok(CapabilityResult::Blob {
                 mime: "image/png".into(),
                 bytes: png,
+                desc: None,
             })
         }
         None => Err(CapabilityError::Internal {
@@ -216,6 +219,7 @@ pub(super) async fn op_crop(
     Ok(CapabilityResult::Blob {
         mime: "image/png".into(),
         bytes: png,
+        desc: None,
     })
 }
 
@@ -270,7 +274,7 @@ mod tests {
         crate::infra::platform::screenshot::install_backend(fake);
 
         let result = op_list_displays().await.unwrap();
-        let CapabilityResult::Text { content } = result else {
+        let CapabilityResult::Text { content, .. } = result else {
             panic!("期望 Text 结果");
         };
         let list: Vec<serde_json::Value> = serde_json::from_str(&content).unwrap();
@@ -288,7 +292,7 @@ mod tests {
         crate::infra::platform::screenshot::end_session();
 
         let result = op_capture(None).await.unwrap();
-        let CapabilityResult::Blob { mime, bytes } = result else {
+        let CapabilityResult::Blob { mime, bytes, .. } = result else {
             panic!("期望 Blob 结果");
         };
         assert_eq!(mime, "image/png");

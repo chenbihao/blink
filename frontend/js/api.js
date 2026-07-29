@@ -72,9 +72,10 @@ export function isAltDown() {
 }
 
 /** 0.10.7：设置 Chord 独占模式。主窗 Alt hold + chordEligible 时进 true，退出时 false。
- *  后端 LL hook 在 chord mode 下吞掉 chord 键 keydown，独占触发。 */
-export function setChordMode(on) {
-  return invoke("set_chord_mode", { on });
+ *  后端 LL hook 在 chord mode 下吞掉 chord 键 keydown，独占触发。
+ *  0.14：tapKeys 参数让前端直接传入已派生的 tap 键集合，跳过后端 DB 查询。 */
+export function setChordMode(on, tapKeys) {
+  return invoke("set_chord_mode", { on, tapKeys: tapKeys ?? null });
 }
 
 /** 拉取剪贴板历史（Alt+C 面板渲染用）。 */

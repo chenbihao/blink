@@ -116,18 +116,16 @@ impl Capability for SearchApps {
                     SearchAction::Open { path } => Some(path.clone()),
                     _ => None,
                 };
-                let mut payload = json!({});
+                let mut data = json!({ "name": item.title });
                 if let Some(ref p) = path {
-                    payload["path"] = json!(p);
+                    data["path"] = json!(p);
                 }
-                payload["name"] = json!(item.title);
-                payload["score"] = json!(item.score);
+                data["score"] = json!(item.score);
 
                 crate::domain::capability::ItemResult {
-                    title: item.title,
-                    subtitle: item.subtitle,
-                    payload,
-                    score: Some(item.score),
+                    data,
+                    desc: item.subtitle,
+                    actions: path.map(|_| crate::domain::capability::ItemAction::OpenFile { pointer: Some("$.path".into()) }).into_iter().collect(),
                 }
             })
             .collect();

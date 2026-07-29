@@ -83,6 +83,8 @@ once_cell = "1.21"
 # reqwest 0.13 与 tauri 2.11 内部对齐,默认 TLS 后端 rustls+aws-lc-rs;项目内 4 处调用只用基础 API(builder/get/send/json),零代码破坏面。
 reqwest = { version = "0.13", features = ["json", "stream"] }
 urlencoding = "2.1"
+# jsonpath-rust: JSONPath 取值（0.14 Cap 协议分层——manifest 投影规则用 JSONPath 从插件 data 取值）
+jsonpath-rust = "0.7"
 # 密钥内存清零(0.9.1 Phase 2):SecretString 落存前从内存抹掉,防止 core dump / 内存快照泄漏
 zeroize = { version = "1.9", features = ["derive"] }
 winreg = "0.55"

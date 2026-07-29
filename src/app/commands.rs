@@ -182,11 +182,11 @@ pub async fn launch_app(app: tauri::AppHandle, lnk_path: String) -> Result<(), S
 /// 运行内置动作（0.8.0 §1.3 / 0.8.6 §8.1.1 重构）。
 ///
 /// 前端 `Action.kind === "run"` → `invoke("run_builtin_action", { id, arg })`。
-/// `id` 为内置动作注册表 key（如 `"open_settings"`），后端按 id 从 `ActionRegistry` 查找
-/// 对应的 `Action` 实现并执行。
+/// `id` 为内置动作注册表 key（如 `"open_settings"`），后端按 id 查找执行。
 ///
-/// 0.8.6 重构：原 `BuiltinActionKind` match 分支迁移到 `domain::execution` 的
-/// 各 `Action` struct 实现，本函数变为薄委托层。
+/// **0.14.4**：查找顺序改为 ActionRegistry → CapabilityRegistry。
+/// `open_url` / `open_path` / `reveal_in_explorer` 的 Action 版本已删除（0.14.4），
+/// 关键词触发的 `run_builtin_action` 会命中 Capability 版本。
 ///
 /// 未知 id → 返回 `Err`；前端会打印到控制台，不弹窗。
 #[tauri::command]
@@ -197,27 +197,47 @@ pub async fn run_builtin_action(
 ) -> Result<(), String> {
     tracing::debug!(%id, ?arg, "run_builtin_action: 收到请求");
 
+    // 0.14.4: 先查 ActionRegistry，未命中再查 CapabilityRegistry
     let registry = app.state::<std::sync::Arc<crate::domain::execution::ActionRegistry>>();
-    let Some(action) = registry.get(&id) else {
-        let msg = format!("未知内置动作 id: {id}");
-        tracing::warn!(%id, "run_builtin_action: 未知 id");
-        return Err(msg);
-    };
-
-    let cx = crate::domain::execution::ActionContext::new(&app, arg);
-    match action.execute(&cx).await {
-        Ok(_outcome) => {
-            // 内置动作全部返回 Nop；outcome 为未来扩展预留
+    if let Some(action) = registry.get(&id) {
+        let cx = crate::domain::execution::ActionContext::new(&app, arg);
+        match action.execute(&cx).await {
+            Ok(_outcome) => {}
+            Err(e) => {
+                tracing::error!(%id, error = %e, "内置动作执行失败");
+                return Err(e.to_string());
+            }
         }
-        Err(e) => {
-            tracing::error!(%id, error = %e, "内置动作执行失败");
-            return Err(e.to_string());
-        }
+        crate::infra::platform::window::hide(&app, "run_builtin_action");
+        return Ok(());
     }
 
-    // 所有内置动作都隐藏主窗口；设置窗口在 OpenSettings 分支里已单独显示。
-    crate::infra::platform::window::hide(&app, "run_builtin_action");
-    Ok(())
+    // 0.14.4: Action 未命中 → 查 CapabilityRegistry（open_url / open_path / reveal_in_explorer）
+    let cap_reg = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
+    if let Some(cap) = cap_reg.get(&id) {
+        // BuiltinEngine 传的 arg 是 Option<Value>（String 或 None），
+        // Capability invoke 需要 { "url"/"path": value } 格式
+        let args = convert_legacy_arg_to_capability_args(&id, arg);
+        let ctx = crate::domain::capability::InvokeContext {
+            app_handle: &app,
+            deadline: None,
+        };
+        match cap.invoke(args, &ctx).await {
+            Ok(result) => {
+                tracing::info!(%id, summary = %result.to_display_text(), "run_builtin_action: Capability 执行成功");
+            }
+            Err(e) => {
+                tracing::error!(%id, error = %e, "run_builtin_action: Capability 执行失败");
+                return Err(e.to_string());
+            }
+        }
+        crate::infra::platform::window::hide(&app, "run_builtin_action");
+        return Ok(());
+    }
+
+    let msg = format!("未知内置动作 id: {id}");
+    tracing::warn!(%id, "run_builtin_action: 未知 id");
+    Err(msg)
 }
 
 /// AI Dangerous 动作确认执行（0.9.2 第二步）。
@@ -225,9 +245,9 @@ pub async fn run_builtin_action(
 /// 前端收到 `blink://ai-confirm-action` 事件后展示确认卡片,
 /// 用户按 Enter 确认 → invoke 此 command → 后端执行动作。
 ///
-/// **安全**:与 `run_builtin_action` 同样的查找 + 执行路径,
-/// 但 arguments 来自 AI 的 `ToolCall.arguments`(结构化 JSON Object),
-/// 走 `ActionContext::from_arguments` 而非 `ActionContext::new`。
+/// **0.14.4**：查找顺序改为 ActionRegistry → CapabilityRegistry。
+/// `open_url` 的 Action 版本已删除（0.14.4），Turn 2 的 `open_url` 确认流
+/// 会命中 Capability 版本执行。
 ///
 /// **审计**（0.11.4 补）:用户确认执行后写入 `ai_tool_audit` 表,
 /// turn=0 标记"用户确认执行"路径（区别于 Turn 1/Turn 2 自动执行）。
@@ -239,54 +259,106 @@ pub async fn confirm_ai_action(
 ) -> Result<(), String> {
     tracing::debug!(%action_name, ?arguments, "confirm_ai_action: 用户确认 AI 动作");
 
+    // 0.14.4: 先查 ActionRegistry，未命中再查 CapabilityRegistry
     let registry = app.state::<std::sync::Arc<crate::domain::execution::ActionRegistry>>();
-    let Some(action) = registry.get(&action_name) else {
-        let msg = format!("未知动作 id: {action_name}");
-        tracing::warn!(%action_name, "confirm_ai_action: 未知 id");
-        return Err(msg);
-    };
-
-    let cx = crate::domain::execution::ActionContext::from_arguments(&app, arguments.clone());
-    match action.execute(&cx).await {
-        Ok(outcome) => {
-            tracing::info!(%action_name, "confirm_ai_action: 执行成功");
-
-            let pool = &app.state::<crate::infra::data::DbPools>().ai;
-            let (provider_kind_str, model_id_str) =
-                match app.try_state::<std::sync::Arc<crate::domain::ai::AIProviderRegistry>>() {
-                    Some(reg) => match reg.resolve(crate::app::ai_config::Tier::Router) {
-                        Ok((provider, _tier)) => (
-                            provider.kind().as_serde_str().to_string(),
-                            provider.model_id().to_string(),
-                        ),
-                        Err(_) => (String::new(), String::new()),
-                    },
-                    None => (String::new(), String::new()),
-                };
-            let summary = format!(
-                "用户确认执行: {}",
-                crate::domain::search::outcome_to_summary(&outcome)
-            );
-            crate::infra::data::ai_audit::save_audit_log(
-                &pool,
-                &action_name,
-                &arguments,
-                &summary,
-                &provider_kind_str,
-                &model_id_str,
-                0,
-                "internal",
-            )
-            .await;
+    if let Some(action) = registry.get(&action_name) {
+        let cx = crate::domain::execution::ActionContext::from_arguments(&app, arguments.clone());
+        match action.execute(&cx).await {
+            Ok(outcome) => {
+                tracing::info!(%action_name, "confirm_ai_action: Action 执行成功");
+                write_confirm_audit(&app, &action_name, &arguments, &crate::domain::search::outcome_to_summary(&outcome)).await;
+            }
+            Err(e) => {
+                tracing::error!(%action_name, error = %e, "confirm_ai_action: Action 执行失败");
+                return Err(e.to_string());
+            }
         }
-        Err(e) => {
-            tracing::error!(%action_name, error = %e, "confirm_ai_action: 执行失败");
-            return Err(e.to_string());
-        }
+        crate::infra::platform::window::hide(&app, "confirm_ai_action");
+        return Ok(());
     }
 
-    crate::infra::platform::window::hide(&app, "confirm_ai_action");
-    Ok(())
+    // 0.14.4: Action 未命中 → 查 CapabilityRegistry（open_url）
+    let cap_reg = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
+    if let Some(cap) = cap_reg.get(&action_name) {
+        let ctx = crate::domain::capability::InvokeContext {
+            app_handle: &app,
+            deadline: None,
+        };
+        match cap.invoke(arguments.clone(), &ctx).await {
+            Ok(result) => {
+                let summary = result.to_display_text();
+                tracing::info!(%action_name, %summary, "confirm_ai_action: Capability 执行成功");
+                write_confirm_audit(&app, &action_name, &arguments, &summary).await;
+            }
+            Err(e) => {
+                tracing::error!(%action_name, error = %e, "confirm_ai_action: Capability 执行失败");
+                return Err(e.to_string());
+            }
+        }
+        crate::infra::platform::window::hide(&app, "confirm_ai_action");
+        return Ok(());
+    }
+
+    let msg = format!("未知动作 id: {action_name}");
+    tracing::warn!(%action_name, "confirm_ai_action: 未知 id");
+    Err(msg)
+}
+
+/// 把 BuiltinEngine 的 legacy arg（`Option<Value>`，String 或 None）转为 Capability invoke 需要的格式。
+///
+/// - `open_url` → `{ "url": <string> }`
+/// - `open_path` / `reveal_in_explorer` → `{ "path": <string> }`
+/// - 其他 → 原样传（已经是 object 就透传）
+fn convert_legacy_arg_to_capability_args(
+    id: &str,
+    arg: Option<serde_json::Value>,
+) -> serde_json::Value {
+    // 如果已经是 object，直接透传
+    if let Some(v) = &arg {
+        if v.is_object() {
+            return v.clone();
+        }
+    }
+    // 从 String 提取值（as_ref 避免移动）
+    let s = arg.as_ref().and_then(|v| v.as_str().map(str::to_string));
+    match id {
+        "open_url" => serde_json::json!({ "url": s.unwrap_or_default() }),
+        "open_path" | "reveal_in_explorer" => serde_json::json!({ "path": s.unwrap_or_default() }),
+        _ => arg.unwrap_or(serde_json::json!({})),
+    }
+}
+
+/// 写用户确认执行的审计日志（0.14.4 从 confirm_ai_action 抽出共用）。
+async fn write_confirm_audit(
+    app: &tauri::AppHandle,
+    action_name: &str,
+    arguments: &serde_json::Value,
+    summary: &str,
+) {
+    let pool = &app.state::<crate::infra::data::DbPools>().ai;
+    let (provider_kind_str, model_id_str) =
+        match app.try_state::<std::sync::Arc<crate::domain::ai::AIProviderRegistry>>() {
+            Some(reg) => match reg.resolve(crate::app::ai_config::Tier::Router) {
+                Ok((provider, _tier)) => (
+                    provider.kind().as_serde_str().to_string(),
+                    provider.model_id().to_string(),
+                ),
+                Err(_) => (String::new(), String::new()),
+            },
+            None => (String::new(), String::new()),
+        };
+    let audit_summary = format!("用户确认执行: {summary}");
+    crate::infra::data::ai_audit::save_audit_log(
+        pool,
+        action_name,
+        arguments,
+        &audit_summary,
+        &provider_kind_str,
+        &model_id_str,
+        0,
+        "internal",
+    )
+    .await;
 }
 
 /// 对话窗口危险操作确认（0.12.0 §2.4 闭环骨架）。
@@ -763,28 +835,18 @@ pub async fn get_chat_messages(
                 // 检测 ToolResult 消息（rig 存为 User + ToolResult）
                 let tool_result_text = content.iter().find_map(|c| match c {
                     UserContent::ToolResult(tr) => {
-                        use rig_core::completion::message::ToolResultContent;
-                        let parts: Vec<String> = tr.content.iter().filter_map(|tc| match tc {
-                            ToolResultContent::Text(t) => Some(t.text.clone()),
-                            ToolResultContent::Image(_) => Some("[image]".to_string()),
-                        }).collect();
-                        if parts.is_empty() { None } else { Some(parts.join("\n")) }
+                        // 0.14.1: 复用 summarize_tool_result（含截断 + 图片占位）
+                        let summary = crate::domain::ai::agent_provider::summarize_tool_result(tr);
+                        if summary.is_empty() { None } else { Some(summary) }
                     }
                     _ => None,
                 });
 
                 if let Some(summary) = tool_result_text {
-                    // 截断到 50000 字符（与 summarize_tool_result 保持一致，
-                    // CSS max-height + overflow:auto 处理视觉滚动）
-                    let truncated = if summary.chars().count() <= 50000 {
-                        summary
-                    } else {
-                        let t: String = summary.chars().take(50000).collect();
-                        format!("{t}…")
-                    };
+                    // summarize_tool_result 已处理截断（50000 字符 + 省略号）
                     // 附加到前一条 ToolCall 快照
                     if let Some(last_tool) = snapshots.iter_mut().rev().find(|s| s.tool_name.is_some() && s.tool_result.is_none()) {
-                        last_tool.tool_result = Some(truncated);
+                        last_tool.tool_result = Some(summary);
                     }
                     continue;
                 }
@@ -1367,7 +1429,7 @@ pub async fn ocr_image(
 /// **绕过 AI 路径**：翻译是确定性动作(用户主动点按钮),不该经过 AI 意图判断
 /// + 网络往返。直接走 `CapabilityRegistry` 找 translate 插件的 `translate` tool
 /// (id = `builtin_translate_translate`),调 `invoke()` 拿 `CapabilityResult::Items`，
-/// 读 `items[0].payload.translated` 即译文。
+/// 读 `items[0].data.translated` 即译文。
 ///
 /// **0.13.7 迁移**：从 ActionRegistry 迁到 CapabilityRegistry（插件体系收敛）。
 ///
@@ -1434,12 +1496,11 @@ pub async fn translate_text(
 
     match result {
         crate::domain::capability::CapabilityResult::Items { items } => {
-            // 优先读 payload.translated（干净译文）；title 是 UI 展示用的，
-            // 插件会给它加前缀 emoji（如 "📝 {result}"），不能当数据用。
+            // 0.14: 优先读 data.translated（干净译文）
             let translated = items
                 .first()
                 .and_then(|it| {
-                    it.payload
+                    it.data
                         .get("translated")
                         .and_then(|v| v.as_str())
                         .map(str::to_string)
@@ -1453,7 +1514,7 @@ pub async fn translate_text(
             );
             Ok(translated)
         }
-        crate::domain::capability::CapabilityResult::Text { content } => {
+        crate::domain::capability::CapabilityResult::Text { content, .. } => {
             // 兼容:如果插件未来改走 Text 结果,也取到译文
             Ok(content)
         }
@@ -1472,7 +1533,7 @@ fn parse_translate_batch_payload(
     let crate::domain::capability::CapabilityResult::Items { items } = result else {
         return None;
     };
-    let results = items.first()?.payload.get("results")?.as_array()?;
+    let results = items.first()?.data.get("results")?.as_array()?;
     if results.len() != expected {
         return None;
     }
@@ -1675,36 +1736,45 @@ pub fn is_alt_down() -> bool {
 /// 后端读 chord 配置派生 tap 键集合（只含 semantic=tap，排除 hold 的 voice_input），
 /// 传给 hotkey 模块。LL hook 在 chord mode 下吞掉这些键的 keydown，独占 chord 触发。
 ///
-/// **非阻塞**：配置读取走 blocking（hotkey 全局状态是同步的，命令本身只需一次读）。
-/// 命令在 Tauri 命令线程执行，不阻塞 hook 线程。
+/// **0.14 优化**：`tap_keys` 参数允许前端直接传入已派生的 tap 键集合（前端
+/// `chord.refresh()` 完成后已持有 chord actions 列表，`chord.getTapKeys()` 可
+/// 派生出与后端一致的集合）。传入时跳过 3 次 DB 查询，将 `setChordMode(true)`
+/// 的延迟从 ~20ms 降到 ~1ms。不传时回退到 DB 派生（向后兼容）。
 #[tauri::command]
-pub async fn set_chord_mode(app: tauri::AppHandle, on: bool) -> Result<(), String> {
+pub async fn set_chord_mode(
+    app: tauri::AppHandle,
+    on: bool,
+    tap_keys: Option<Vec<String>>,
+) -> Result<(), String> {
     if !on {
         crate::infra::platform::hotkey::set_chord_mode(false, std::collections::HashSet::new());
         return Ok(());
     }
-    // 派生 tap 键集合
-    let pool = &app.state::<crate::infra::data::DbPools>().config;
-    let chord_cfg = crate::app::config::get_chord_config(&pool).await;
-    let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
-    let language = crate::app::config::get_config(&pool).await.language;
-    let stt_enabled = crate::app::stt_config::get_stt_config().enabled;
-    let Some(registry) = app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
-    else {
-        return Err("chord registry 未就绪".into());
-    };
-    let actions = registry.list(&disabled, &chord_cfg.bindings, &language);
-    let mut tap_keys = std::collections::HashSet::new();
-    for a in actions {
-        // voice_input 在 STT 未启用时已被 list 过滤；此处再按 semantic=tap 收集
-        if a["semantic"] == "tap" {
-            if let Some(key) = a["key"].as_str() {
-                tap_keys.insert(key.to_lowercase());
+    // 0.14：前端传入 tap_keys 时直接使用，跳过 DB 查询
+    let tap_keys_set: std::collections::HashSet<String> = if let Some(keys) = tap_keys {
+        keys.into_iter().map(|k| k.to_lowercase()).collect()
+    } else {
+        // 回退：从 DB 派生（向后兼容，如旧前端或 CLI 调用）
+        let pool = &app.state::<crate::infra::data::DbPools>().config;
+        let chord_cfg = crate::app::config::get_chord_config(&pool).await;
+        let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
+        let language = crate::app::config::get_config(&pool).await.language;
+        let Some(registry) = app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
+        else {
+            return Err("chord registry 未就绪".into());
+        };
+        let actions = registry.list(&disabled, &chord_cfg.bindings, &language);
+        let mut set = std::collections::HashSet::new();
+        for a in actions {
+            if a["semantic"] == "tap" {
+                if let Some(key) = a["key"].as_str() {
+                    set.insert(key.to_lowercase());
+                }
             }
         }
-    }
-    let _ = stt_enabled; // voice_input 是 hold 语义，不会被收进 tap_keys
-    crate::infra::platform::hotkey::set_chord_mode(true, tap_keys);
+        set
+    };
+    crate::infra::platform::hotkey::set_chord_mode(true, tap_keys_set);
     Ok(())
 }
 
@@ -6423,10 +6493,9 @@ mod tests {
     fn translate_batch_payload_requires_matching_string_array() {
         let result = CapabilityResult::Items {
             items: vec![ItemResult {
-                title: "批量翻译".into(),
-                subtitle: None,
-                payload: serde_json::json!({ "results": ["你好", "世界"] }),
-                score: Some(1.0),
+                data: serde_json::json!({ "results": ["你好", "世界"] }),
+                desc: None,
+                actions: vec![],
             }],
         };
         assert_eq!(
@@ -6437,10 +6506,9 @@ mod tests {
 
         let malformed = CapabilityResult::Items {
             items: vec![ItemResult {
-                title: "批量翻译".into(),
-                subtitle: None,
-                payload: serde_json::json!({ "results": ["你好", 2] }),
-                score: Some(1.0),
+                data: serde_json::json!({ "results": ["你好", 2] }),
+                desc: None,
+                actions: vec![],
             }],
         };
         assert!(parse_translate_batch_payload(&malformed, 2).is_none());

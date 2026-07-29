@@ -68,16 +68,28 @@ enum PluginToCore {
     /// HTTP 请求（请求 core 代理）
     #[serde(rename = "http_request")]
     HttpRequest(HttpRequest),
-    /// tool-call 结果（0.9.3）
+    /// tool-call 结果（0.9.3，轨道 B 旧协议）
     #[serde(rename = "tool_result")]
     ToolResult(ToolResultPayload),
+    /// 轨道 A 纯数据 tool 结果（0.14.3）——manifest 配了 projection 的 tool 走此路径。
+    #[serde(rename = "raw_result")]
+    RawResult(RawToolResult),
 }
 
-/// tool-call 结果（与 PluginResponse 统一格式）
+/// tool-call 结果（与 PluginResponse 统一格式，轨道 B 旧协议）
 #[derive(Debug, Serialize)]
 struct ToolResultPayload {
     id: String,
     items: Vec<PluginItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<PluginError>,
+}
+
+/// 轨道 A 纯数据 tool 结果（0.14.3）——插件只吐纯 data，投影规则在 manifest。
+#[derive(Debug, Serialize)]
+struct RawToolResult {
+    id: String,
+    data: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<PluginError>,
 }
@@ -207,6 +219,7 @@ fn main() {
                 };
 
                 let mut items = Vec::new();
+                let mut raw_ips: Vec<serde_json::Value> = Vec::new();
 
                 // 本地 IPv6
                 if let Some(ip) = ctx.local_ipv6 {
@@ -214,8 +227,9 @@ fn main() {
                         title: format!("本地 IPv6: {ip}"),
                         subtitle: Some("按 Enter 复制".to_string()),
                         score: 0.8,
-                        action: PluginAction::Copy { text: ip },
+                        action: PluginAction::Copy { text: ip.clone() },
                     });
+                    raw_ips.push(serde_json::json!({ "ip": ip, "type": "本地 IPv6" }));
                 }
 
                 // 本地 IPv4
@@ -224,8 +238,9 @@ fn main() {
                         title: format!("本地 IP: {ip}"),
                         subtitle: Some("按 Enter 复制".to_string()),
                         score: 1.0,
-                        action: PluginAction::Copy { text: ip },
+                        action: PluginAction::Copy { text: ip.clone() },
                     });
+                    raw_ips.push(serde_json::json!({ "ip": ip, "type": "本地 IP" }));
                 }
 
                 // 公网 IP 结果
@@ -242,18 +257,22 @@ fn main() {
                                     title: format!("公网 IP: {}", info.query),
                                     subtitle: Some(format!("{location} | 按 Enter 复制")),
                                     score: 0.9,
-                                    action: PluginAction::Copy { text: info.query },
+                                    action: PluginAction::Copy { text: info.query.clone() },
                                 });
+                                raw_ips.push(serde_json::json!({
+                                    "ip": info.query,
+                                    "type": format!("公网 IP · {location}")
+                                }));
                             }
                         }
                     }
                 }
 
-                // tool_call 和 query 共用结果路径
+                // 0.14.3: tool-call 走轨道 A（返回纯 data），query 走旧协议（返回 items）
                 if ctx.is_tool_call {
-                    let resp = PluginToCore::ToolResult(ToolResultPayload {
+                    let resp = PluginToCore::RawResult(RawToolResult {
                         id: ctx.query_id,
-                        items,
+                        data: serde_json::Value::Array(raw_ips),
                         error: None,
                     });
                     send_message(&mut stdout, &resp);

@@ -177,7 +177,8 @@ function setAlt(on) {
   document.body.classList.toggle("chord-visible", showChord);
   // 0.10.7：chord 独占模式联动——showChord 时进独占（LL hook 吞 chord keydown），
   // 退出时还原。异步调用，失败仅告警（不影响主流程）。
-  setChordMode(showChord).catch((e) =>
+  // 0.14：showChord=true 时传入前端已派生的 tapKeys，跳过后端 3 次 DB 查询。
+  setChordMode(showChord, showChord ? [...chord.getTapKeys()] : null).catch((e) =>
     console.warn("[chord] set_chord_mode 失败", e),
   );
   // Chord 提示在 ghost overlay（无 Ghost 时）或 statusbar（有 Ghost 时），
@@ -194,11 +195,12 @@ export function clearAlt() {
 
 // alt-active 轮询（0.8.5 §6.1）：WebView2 不转发 Alt 键自身的 keydown 到 JS
 // （系统键被 Windows 用于菜单激活），keydown 监听不可靠。改由 lifecycle shown 启动
-// 轮询、hidden 停止，每 100ms 查逻辑 hold 态，状态变化才 setAlt（避免无谓 resize）。
+// 轮询、hidden 停止，每 50ms 查逻辑 hold 态，状态变化才 setAlt（避免无谓 resize）。
 //
 // 0.11.10：后端 `is_alt_down()` 改读 `ALT_LOGICALLY_HELD`（LL hook 过滤 injected 事件的
 // 逻辑态），已免疫 SetForegroundWindow 合成 keyup 污染。故前端原来的宽限期兜底
 // （altPollGraceUntil / 首次 tick 前 altLast=true）不再需要，poll 直接跟随后端读数。
+// 0.14：轮询间隔从 100ms 降到 50ms——Alt 松开后最多 50ms 内检测到并退出 chord 模式。
 let altPollTimer = null;
 let altLast = false;
 
@@ -223,7 +225,7 @@ export function startAltPoll() {
     }
   };
   tick();
-  altPollTimer = window.setInterval(tick, 100);
+  altPollTimer = window.setInterval(tick, 50);
 }
 
 export function stopAltPoll() {

@@ -1,6 +1,6 @@
 //! 服务骨架(0.2.1):统一生命周期 + 显式依赖。
 //!
-//! 设计(见 production-design/phases/0.2-core-plugin-design.md §1):
+//! 设计(见 phases/0.2-core-plugin-design.md §1):
 //! - `Service` 只是「有统一 start/stop 生命周期 + 显式依赖」的模块,**不是** actor、
 //!   不跑在独立调度器上,也不引入 DI 容器 / 全局 Event Bus(§1.6)。
 //! - 0.2.1 走「薄包装」:Service 是空壳,`start` 里调用现有模块函数,内部逻辑零改动。

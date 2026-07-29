@@ -43,15 +43,11 @@ pub const BLINK_GROUP: ToolGroup = ToolGroup {
     action_ids: &["open_settings", "open_logs", "open_data_dir", "exit_blink"],
 };
 
-/// 文件/URL 操作类（全部参数化，Safe）。
-pub const FILE_GROUP: ToolGroup = ToolGroup {
-    name: "file_action",
-    description: "打开目标：URL(open_url)、文件/目录(open_path)、在资源管理器显示(reveal_in_explorer)",
-    action_ids: &["open_url", "open_path", "reveal_in_explorer"],
-};
+// 0.14.4: FILE_GROUP 已删除——open_url / open_path / reveal_in_explorer
+// 的 Action 版本已删除，AI tool 池只走 Capability 版本（独立 tool，不参与分组聚合）。
 
 /// 所有内置分组（顺序影响 system prompt 中的工具列表顺序）。
-pub const BUILTIN_GROUPS: &[&ToolGroup] = &[&SYSTEM_GROUP, &BLINK_GROUP, &FILE_GROUP];
+pub const BUILTIN_GROUPS: &[&ToolGroup] = &[&SYSTEM_GROUP, &BLINK_GROUP];
 
 impl ToolGroup {
     /// 从分组构造聚合 ActionSchema。
@@ -321,19 +317,16 @@ mod tests {
         assert!(!BLINK_GROUP.contains("lock"));
     }
 
-    #[test]
-    fn file_group_contains_expected_actions() {
-        assert!(FILE_GROUP.contains("open_url"));
-        assert!(FILE_GROUP.contains("open_path"));
-        assert!(FILE_GROUP.contains("reveal_in_explorer"));
-        assert!(!FILE_GROUP.contains("open_settings"));
-    }
+// 0.14.4: FILE_GROUP 已删除，不再测试
+// #[test]
+// fn file_group_contains_expected_actions() { ... }
 
     #[test]
     fn is_grouped_action_returns_true_for_builtin() {
         assert!(is_grouped_action("lock"));
         assert!(is_grouped_action("open_settings"));
-        assert!(is_grouped_action("open_url"));
+        // 0.14.4: open_url 不再属于任何分组（FILE_GROUP 已删除）
+        assert!(!is_grouped_action("open_url"));
     }
 
     #[test]
@@ -350,8 +343,8 @@ mod tests {
         let g = find_group("blink_action").unwrap();
         assert_eq!(g.name, "blink_action");
 
-        let g = find_group("file_action").unwrap();
-        assert_eq!(g.name, "file_action");
+        // 0.14.4: FILE_GROUP 已删除
+        assert!(find_group("file_action").is_none());
 
         assert!(find_group("unknown").is_none());
     }

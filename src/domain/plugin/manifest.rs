@@ -1,4 +1,4 @@
-//! 插件 manifest(JSON,见 production-design/phases/0.2-core-plugin-design.md §3.3)。
+//! 插件 manifest(JSON,见 phases/0.2-core-plugin-design.md §3.3)。
 //!
 //! 本切片解析必要字段;permissions/resources/icon 等未列字段由 serde 默认忽略
 //! (不建字段)。permissions 自用阶段完全不解析(§3.6)。
@@ -117,6 +117,23 @@ pub struct ToolDef {
     /// 下次构建 tools 时自动生效（每次 AI 请求都重建）。
     #[serde(default)]
     pub setting_bindings: Option<std::collections::HashMap<String, String>>,
+
+    /// manifest 投影规则（0.14 §三 Cap 协议分层）——轨道 A 的配置。
+    ///
+    /// 告诉投影引擎"怎么把插件返回的纯 data 投影成 CapabilityResult"。
+    /// 缺失时（老插件 / 轨道 B）走旧路径——插件直接返回 `PluginItem` 列表。
+    ///
+    /// manifest 示例:
+    /// ```jsonc
+    /// "projection": {
+    ///   "result_shape": "text",
+    ///   "pointer": "$",
+    ///   "desc": "译文",
+    ///   "item_actions": [{"type": "copy"}]
+    /// }
+    /// ```
+    #[serde(default)]
+    pub projection: Option<crate::domain::capability::ProjectionRule>,
 }
 
 /// 工具返回类型声明（0.11.1 §2.3a）。
@@ -149,6 +166,7 @@ impl Default for ToolDef {
             sensitive: false,
             progress_hint: None,
             setting_bindings: None,
+            projection: None,
         }
     }
 }
@@ -1130,6 +1148,93 @@ mod tests {
         assert_eq!(
             t2.setting_bindings.as_ref().unwrap().get("target_lang"),
             Some(&"target_lang".to_string())
+        );
+    }
+
+    // ── 0.14: ToolDef.projection 投影规则 ────────────────────────────────
+
+    #[test]
+    fn tools_projection_defaults_to_none() {
+        // 老 manifest 无 projection 字段 → None，向后兼容
+        let json = r#"{
+            "schema_version": 1, "id": "x", "name": "X", "version": "0",
+            "runtime": {"exec": "x.exe"},
+            "tools": [{ "name": "foo", "description": "bar", "danger_class": "Safe" }]
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(m.tools[0].projection.is_none());
+    }
+
+    #[test]
+    fn tools_projection_text_shape_parses() {
+        // 翻译插件 manifest 投影配置示例
+        let json = r#"{
+            "schema_version": 1, "id": "translate", "name": "翻译", "version": "0",
+            "runtime": {"exec": "main.py", "type": "python"},
+            "tools": [{
+                "name": "translate",
+                "description": "翻译文本",
+                "projection": {
+                    "result_shape": "text",
+                    "pointer": "$",
+                    "desc": "译文",
+                    "item_actions": [{"type": "copy"}]
+                }
+            }]
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        let proj = m.tools[0].projection.as_ref().unwrap();
+        assert!(proj.result_shape.is_some());
+        assert_eq!(proj.pointer.as_deref(), Some("$"));
+        assert_eq!(proj.desc.as_deref(), Some("译文"));
+        assert_eq!(proj.item_actions.len(), 1);
+    }
+
+    #[test]
+    fn tools_projection_items_shape_parses() {
+        // IP 插件 manifest 投影配置示例
+        let json = r#"{
+            "schema_version": 1, "id": "ip", "name": "IP", "version": "0",
+            "runtime": {"exec": "main.py", "type": "python"},
+            "tools": [{
+                "name": "get_ip",
+                "description": "查询 IP",
+                "projection": {
+                    "result_shape": "items",
+                    "items_pointer": "$",
+                    "item_pointer": "$.ip",
+                    "item_desc_pointer": "$.type",
+                    "item_actions": [{"type": "copy"}]
+                }
+            }]
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        let proj = m.tools[0].projection.as_ref().unwrap();
+        assert_eq!(proj.items_pointer.as_deref(), Some("$"));
+        assert_eq!(proj.item_pointer.as_deref(), Some("$.ip"));
+        assert_eq!(proj.item_desc_pointer.as_deref(), Some("$.type"));
+    }
+
+    #[test]
+    fn tools_projection_serializes_roundtrip() {
+        let json = r#"{
+            "schema_version": 1, "id": "x", "name": "X", "version": "0",
+            "runtime": {"exec": "x.exe"},
+            "tools": [{
+                "name": "translate",
+                "projection": {
+                    "result_shape": "text",
+                    "desc": "译文"
+                }
+            }]
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        let s = serde_json::to_string(&m.tools[0]).unwrap();
+        let t2: ToolDef = serde_json::from_str(&s).unwrap();
+        assert!(t2.projection.is_some());
+        assert_eq!(
+            t2.projection.as_ref().unwrap().desc.as_deref(),
+            Some("译文")
         );
     }
 }

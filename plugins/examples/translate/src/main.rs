@@ -25,8 +25,8 @@ use serde_json::Value;
 use engine::{EngineRequest, TranslateEngine};
 use engines::{AliEngine, BaiduEngine, DeeplEngine, TencentEngine, YoudaoEngine};
 use protocol::{
-    CoreToPlugin, HttpRequest, PluginAction, PluginError, PluginItem, PluginResponse, PluginToCore,
-    ToolResultPayload,
+    CoreToPlugin, HttpRequest, PluginAction, PluginError, PluginItem, PluginResponse,
+    PluginToCore, RawToolResult,
 };
 
 /// HTTP 请求 id 全局计数器。
@@ -405,9 +405,9 @@ fn handle_tool_call<W: Write>(
         .to_string();
 
     if tool_name != "translate" && tool_name != "translate_batch" {
-        let resp = PluginToCore::ToolResult(ToolResultPayload {
+        let resp = PluginToCore::RawResult(RawToolResult {
             id,
-            items: vec![],
+            data: serde_json::Value::Null,
             error: Some(PluginError {
                 code: "UNKNOWN_TOOL".into(),
                 message: format!("未知 tool: {tool_name}"),
@@ -433,9 +433,9 @@ fn handle_tool_call<W: Write>(
 
     if tool_name == "translate_batch" {
         let Some(raw_texts) = arguments.get("texts").and_then(Value::as_array) else {
-            let resp = PluginToCore::ToolResult(ToolResultPayload {
+            let resp = PluginToCore::RawResult(RawToolResult {
                 id,
-                items: vec![],
+                data: serde_json::Value::Null,
                 error: Some(PluginError {
                     code: "MISSING_ARG".into(),
                     message: "缺少 texts 参数".into(),
@@ -451,9 +451,9 @@ fn handle_tool_call<W: Write>(
             .map(strip_private_use_chars)
             .collect();
         if texts.is_empty() || texts.iter().any(String::is_empty) {
-            let resp = PluginToCore::ToolResult(ToolResultPayload {
+            let resp = PluginToCore::RawResult(RawToolResult {
                 id,
-                items: vec![],
+                data: serde_json::Value::Null,
                 error: Some(PluginError {
                     code: "MISSING_ARG".into(),
                     message: "texts 必须是非空字符串数组".into(),
@@ -491,9 +491,9 @@ fn handle_tool_call<W: Write>(
             .trim(),
     );
     if text.is_empty() {
-        let resp = PluginToCore::ToolResult(ToolResultPayload {
+        let resp = PluginToCore::RawResult(RawToolResult {
             id,
-            items: vec![],
+            data: serde_json::Value::Null,
             error: Some(PluginError {
                 code: "MISSING_ARG".into(),
                 message: "缺少 text 参数".into(),
@@ -699,9 +699,10 @@ fn dispatch_single_line_fallback<W: Write>(
     );
     // 单行并发在 core 端的 translate_lines command 已实装(每行 spawn 一个 task)。
     // 插件层这里直接返回 BATCH_TAG_POISONED 错误,让 core 触发它的单行降级路径。
-    let resp = PluginToCore::ToolResult(ToolResultPayload {
+    // 0.14.3: tool-call 走轨道 A，返回 RawResult（纯 data + error）
+    let resp = PluginToCore::RawResult(RawToolResult {
         id: ctx.query_id,
-        items: vec![],
+        data: serde_json::Value::Null,
         error: Some(PluginError {
             code: "BATCH_TAG_POISONED".into(),
             message: format!(
@@ -802,14 +803,15 @@ fn try_next_fallback<W: Write>(
                 return;
             }
             // 真正失败 → 返回错误
+            // 0.14.3: tool-call 走轨道 A（RawResult），query 走旧协议（Response）
             let error = PluginError {
                 code: "TRANSLATE_FAILED".into(),
                 message: "翻译失败，请检查 API 配置或网络连接".into(),
             };
             let resp = if ctx.is_tool_call {
-                PluginToCore::ToolResult(ToolResultPayload {
+                PluginToCore::RawResult(RawToolResult {
                     id: ctx.query_id,
-                    items: vec![],
+                    data: serde_json::Value::Null,
                     error: Some(error),
                 })
             } else {
@@ -860,17 +862,13 @@ fn handle_http_response<W: Write>(
                 .as_ref()
                 .and_then(|e| e.parse_batch_response(&body, expected))
             {
-                let items = vec![PluginItem {
-                    title: format!("已翻译 {} 行", results.len()),
-                    subtitle: Some("批量翻译完成".into()),
-                    score: 1.0,
-                    action: PluginAction::None,
-                    payload: Some(serde_json::json!({ "results": results })),
-                    ..Default::default()
-                }];
-                let resp = PluginToCore::ToolResult(ToolResultPayload {
+                // 0.14.3: tool-call 走轨道 A，返回纯 data（译文数组）
+                let data = serde_json::Value::Array(
+                    results.into_iter().map(serde_json::Value::String).collect(),
+                );
+                let resp = PluginToCore::RawResult(RawToolResult {
                     id: ctx.query_id,
-                    items,
+                    data,
                     error: None,
                 });
                 send_message(writer, &resp);
@@ -907,44 +905,64 @@ fn handle_http_response<W: Write>(
         return;
     };
 
-    // 成功 → 返回翻译结果。批量 tool 用结构化 payload 回传保序数组。
-    let items = if let Some(originals) = ctx.batch_originals.as_ref() {
-        let Some(results) = parse_tagged_batch(&result, originals.len()) else {
-            // tag 被引擎破坏 → 标记 poisoned,后续不再尝试 tag,直接单行并发。
-            // 不立即返回错误,而是走降级让 dispatch_single_line_fallback 兜底。
-            eprintln!(
-                "[translate] {} tag 解析失败,标记 tag_poisoned,降级单行并发",
-                ctx.engine_id
-            );
-            ctx.tag_poisoned = true;
-            try_next_fallback(writer, pending, ctx);
-            return;
+    // 成功 → 返回翻译结果。
+    // 0.14.3: tool-call 走轨道 A（返回纯 data），query 走旧协议（返回 items）。
+    if ctx.is_tool_call {
+        // 轨道 A: tool-call 返回纯 data
+        let data = if let Some(originals) = ctx.batch_originals.as_ref() {
+            let Some(results) = parse_tagged_batch(&result, originals.len()) else {
+                // tag 被引擎破坏 → 标记 poisoned,后续不再尝试 tag,直接单行并发。
+                eprintln!(
+                    "[translate] {} tag 解析失败,标记 tag_poisoned,降级单行并发",
+                    ctx.engine_id
+                );
+                ctx.tag_poisoned = true;
+                try_next_fallback(writer, pending, ctx);
+                return;
+            };
+            serde_json::Value::Array(
+                results.into_iter().map(serde_json::Value::String).collect(),
+            )
+        } else {
+            // 单次翻译：data = 译文字符串
+            serde_json::Value::String(result.to_string())
         };
-        vec![PluginItem {
-            title: format!("已翻译 {} 行", results.len()),
-            subtitle: Some("批量翻译完成".into()),
-            score: 1.0,
-            action: PluginAction::None,
-            payload: Some(serde_json::json!({ "results": results })),
-            ..Default::default()
-        }]
+        let resp = PluginToCore::RawResult(RawToolResult {
+            id: ctx.query_id,
+            data,
+            error: None,
+        });
+        send_message(writer, &resp);
     } else {
-        build_result_items(&result, &ctx.text, &ctx.original_text, &ctx.target_lang)
-    };
-    let resp = if ctx.is_tool_call {
-        PluginToCore::ToolResult(ToolResultPayload {
+        // query 路径：旧协议，返回 PluginItem 列表给主窗口展示
+        let items = if let Some(originals) = ctx.batch_originals.as_ref() {
+            let Some(results) = parse_tagged_batch(&result, originals.len()) else {
+                eprintln!(
+                    "[translate] {} tag 解析失败,标记 tag_poisoned,降级单行并发",
+                    ctx.engine_id
+                );
+                ctx.tag_poisoned = true;
+                try_next_fallback(writer, pending, ctx);
+                return;
+            };
+            vec![PluginItem {
+                title: format!("已翻译 {} 行", results.len()),
+                subtitle: Some("批量翻译完成".into()),
+                score: 1.0,
+                action: PluginAction::None,
+                payload: Some(serde_json::json!({ "results": results })),
+                ..Default::default()
+            }]
+        } else {
+            build_result_items(&result, &ctx.text, &ctx.original_text, &ctx.target_lang)
+        };
+        let resp = PluginToCore::Response(PluginResponse {
             id: ctx.query_id,
             items,
             error: None,
-        })
-    } else {
-        PluginToCore::Response(PluginResponse {
-            id: ctx.query_id,
-            items,
-            error: None,
-        })
-    };
-    send_message(writer, &resp);
+        });
+        send_message(writer, &resp);
+    }
 }
 
 /// 构造翻译结果 items（1:1 对齐 Python：译文 + 原文，预处理变化时加拆分版）。

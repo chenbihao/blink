@@ -32,7 +32,6 @@ use crate::domain::ai::registry::{AIProviderRegistry, ResolvedProviderEntries};
 use crate::domain::ai::skill::{SkillRegistry, parse_skill_command};
 use crate::domain::ai::tool_adapter::{PendingConfirms, build_agent_tools};
 use crate::domain::capability::CapabilityRegistry;
-use crate::domain::execution::ActionRegistry;
 use crate::domain::mcp::McpClientManager;
 use tauri::Emitter;
 
@@ -263,7 +262,6 @@ pub struct ChatService {
     app: tauri::AppHandle,
     ai_registry: Arc<AIProviderRegistry>,
     capability_registry: Arc<CapabilityRegistry>,
-    action_registry: Arc<ActionRegistry>,
     pending_confirms: Arc<PendingConfirms>,
     /// 0.13.0: MCP client 管理器——collect_tools() 拉 MCP tool 进对话窗口 tool 池。
     mcp_client: Arc<McpClientManager>,
@@ -293,7 +291,6 @@ impl ChatService {
         app: tauri::AppHandle,
         ai_registry: Arc<AIProviderRegistry>,
         capability_registry: Arc<CapabilityRegistry>,
-        action_registry: Arc<ActionRegistry>,
         pending_confirms: Arc<PendingConfirms>,
         mcp_client: Arc<McpClientManager>,
         ai_pool: sqlx::SqlitePool,
@@ -305,7 +302,6 @@ impl ChatService {
             app,
             ai_registry,
             capability_registry,
-            action_registry,
             pending_confirms,
             mcp_client,
             memory: Arc::new(crate::domain::ai::memory::SqliteConversationMemory::new(ai_pool)),
@@ -438,7 +434,6 @@ impl ChatService {
             let external_tools = self.mcp_client.collect_tools().await;
             let tools = build_agent_tools(
                 &self.capability_registry,
-                &self.action_registry,
                 external_tools,
                 &self.app,
                 self.pending_confirms.clone(),

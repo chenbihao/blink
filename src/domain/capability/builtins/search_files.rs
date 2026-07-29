@@ -141,10 +141,15 @@ impl Capability for SearchFiles {
                     _ => None,
                 };
                 crate::domain::capability::ItemResult {
-                    title: item.title,
-                    subtitle: item.subtitle,
-                    payload: path.map(|p| json!({ "path": p })).unwrap_or(json!({})),
-                    score: Some(item.score),
+                    data: {
+                        let mut d = serde_json::json!({ "name": item.title });
+                        if let Some(ref p) = path {
+                            d["path"] = serde_json::json!(p);
+                        }
+                        d
+                    },
+                    desc: item.subtitle,
+                    actions: path.map(|_| crate::domain::capability::ItemAction::OpenFile { pointer: Some("$.path".into()) }).into_iter().collect(),
                 }
             })
             .collect();

@@ -97,34 +97,18 @@ impl BlinkMcpServer {
 
     /// 把 CapabilityResult 投影为 MCP CallToolResult。
     ///
+    /// 0.14.1: 改调 canonical 投影（`to_rig_tool_result()` + `rig_tool_result_to_text()`），
+    /// 消除内联 match + Blob 摘要重复 + Items score 漂移。
+    ///
     /// - `Text` → MCP TextContent
-    /// - `Items` → 序列化 JSON 文本
+    /// - `Items` → 序列化 data JSON（不含 desc/actions/score）
     /// - `Blob` → 文本摘要（不传原始字节，与 rig 投影策略一致）
     /// - `Done` → summary 文本
     fn result_to_call_tool_result(result: CapabilityResult) -> CallToolResult {
-        let content = match result {
-            CapabilityResult::Text { content } => {
-                vec![Content::text(content)]
-            }
-            CapabilityResult::Items { items } => {
-                let json = serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string());
-                vec![Content::text(json)]
-            }
-            CapabilityResult::Blob { mime, bytes } => {
-                let size_kb = bytes.len() as f64 / 1024.0;
-                let size_text = if size_kb >= 1024.0 {
-                    format!("{:.1} MB", size_kb / 1024.0)
-                } else {
-                    format!("{:.1} KB", size_kb)
-                };
-                vec![Content::text(format!("已获取 {} ({})", mime, size_text))]
-            }
-            CapabilityResult::Done { summary } => {
-                vec![Content::text(summary)]
-            }
-        };
-
-        CallToolResult::success(content)
+        let text = crate::domain::capability::rig_tool_result_to_text(
+            &result.to_rig_tool_result(),
+        );
+        CallToolResult::success(vec![Content::text(text)])
     }
 
     /// 把错误投影为 MCP CallToolResult（is_error = true）。
@@ -208,17 +192,10 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
 
             let call_tool_result = match result {
                 Ok(cap_result) => {
-                    // 审计日志（caller = mcp_external）
-                    let summary = match &cap_result {
-                        CapabilityResult::Text { content } => content.clone(),
-                        CapabilityResult::Done { summary } => summary.clone(),
-                        CapabilityResult::Items { items } => {
-                            serde_json::to_string(items).unwrap_or_default()
-                        }
-                        CapabilityResult::Blob { mime, bytes } => {
-                            format!("{} ({} bytes)", mime, bytes.len())
-                        }
-                    };
+                    // 审计日志（caller = mcp_external）——0.14.1 改调 canonical 投影
+                    let summary = crate::domain::capability::rig_tool_result_to_text(
+                        &cap_result.to_rig_tool_result(),
+                    );
                     ai_audit::save_audit_log(
                         &ai_pool,
                         &tool_name_for_audit,
@@ -342,6 +319,7 @@ mod tests {
     fn text_result_projects_to_content() {
         let result = CapabilityResult::Text {
             content: "hello world".into(),
+            desc: None,
         };
         let projected = BlinkMcpServer::result_to_call_tool_result(result);
         assert_eq!(projected.content.len(), 1);
@@ -364,6 +342,7 @@ mod tests {
         let result = CapabilityResult::Blob {
             mime: "image/png".into(),
             bytes: vec![0u8; 2048],
+            desc: None,
         };
         let projected = BlinkMcpServer::result_to_call_tool_result(result);
         assert_eq!(projected.content.len(), 1);
@@ -378,10 +357,9 @@ mod tests {
         use crate::domain::capability::ItemResult;
         let result = CapabilityResult::Items {
             items: vec![ItemResult {
-                title: "file.txt".into(),
-                subtitle: None,
-                payload: serde_json::json!({"path": "C:\\file.txt"}),
-                score: Some(0.9),
+                data: serde_json::json!({"name": "file.txt", "path": "C:\\file.txt"}),
+                desc: None,
+                actions: vec![],
             }],
         };
         let projected = BlinkMcpServer::result_to_call_tool_result(result);
@@ -398,7 +376,7 @@ mod tests {
         use crate::domain::capability::{CapabilityResult, ItemResult};
 
         // Text → Content::text
-        let result = CapabilityResult::Text { content: "hello".into() };
+        let result = CapabilityResult::Text { content: "hello".into(), desc: None };
         let projected = BlinkMcpServer::result_to_call_tool_result(result);
         assert_eq!(projected.is_error, Some(false));
         assert_eq!(projected.content.len(), 1);
@@ -412,24 +390,23 @@ mod tests {
         let text = projected.content[0].as_text().unwrap().text.clone();
         assert!(text.contains("已完成"));
 
-        // Items → JSON
+        // Items → JSON（0.14：只序列化 data，不含 score/desc/actions）
         let result = CapabilityResult::Items {
             items: vec![ItemResult {
-                title: "test.txt".into(),
-                subtitle: None,
-                payload: serde_json::json!({"path": "C:\\test.txt"}),
-                score: Some(0.95),
+                data: serde_json::json!({"name": "test.txt", "path": "C:\\test.txt"}),
+                desc: None,
+                actions: vec![],
             }],
         };
         let projected = BlinkMcpServer::result_to_call_tool_result(result);
         let text = projected.content[0].as_text().unwrap().text.clone();
         assert!(text.contains("test.txt"));
-        assert!(text.contains("0.95"));
 
         // Blob → 文本摘要
         let result = CapabilityResult::Blob {
             mime: "image/png".into(),
             bytes: vec![0u8; 4096],
+            desc: None,
         };
         let projected = BlinkMcpServer::result_to_call_tool_result(result);
         let text = projected.content[0].as_text().unwrap().text.clone();

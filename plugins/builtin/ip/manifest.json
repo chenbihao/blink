@@ -33,7 +33,14 @@
       "danger_class": "Safe",
       "result_type": "items",
       "hint": "返回多个 IP（本地 IPv4/IPv6 + 公网 IP），公网 IP 通常最有价值",
-      "progress_hint": "获取 IP"
+      "progress_hint": "获取 IP",
+      "projection": {
+        "result_shape": "items",
+        "items_pointer": "$",
+        "item_pointer": "$.ip",
+        "item_desc_pointer": "$.type",
+        "item_actions": [{"type": "copy"}]
+      }
     }
   ],
   "settings_schema": [

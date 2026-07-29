@@ -105,20 +105,19 @@ impl Capability for SearchClipboardHistory {
         })?;
 
         // ClipboardItem → ItemResult
-        // payload: {id, text, kind} —— AI 读 id+text，用户回车复制（Copy 动作，items_to_entries 从 text 提取）
+        // data: {id, text, kind} —— AI 读 id+text，用户回车复制（Copy 动作）
         let results: Vec<_> = items
             .into_iter()
             .map(|item| {
-                let payload = json!({
+                let data = json!({
                     "id": item.id,
                     "text": item.text,
                     "kind": "text" // 当前 clipboard 表只存 text；0.12 扩展 image/file 时补 kind 分类
                 });
                 crate::domain::capability::ItemResult {
-                    title: item.preview,
-                    subtitle: Some(format_relative_time(item.created_at)),
-                    payload,
-                    score: None, // 剪贴板历史无评分概念，前端按序展示
+                    data,
+                    desc: Some(format_relative_time(item.created_at)),
+                    actions: vec![crate::domain::capability::ItemAction::Copy { pointer: Some("$.text".into()) }],
                 }
             })
             .collect();

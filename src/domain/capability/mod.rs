@@ -21,15 +21,19 @@
 
 pub(crate) mod builtins; // Step 2 填真实能力（capture_screen 等）
 mod error;
+mod projection;
 mod registry;
 mod result;
 mod schema;
 
 pub use error::CapabilityError;
+#[allow(unused_imports)]
+pub use projection::{ActionDef, ActionKindDef, ProjectionRule, ResultShape, project};
 pub use registry::CapabilityRegistry;
-pub use result::{CapabilityResult, ItemResult, rig_tool_result_to_text};
-// items_to_llm_json 仅供 result.rs 内部（CapabilityResult::to_rig_tool_result）使用，
-// 0.13.7 删除 ActionOutcome::Items 后无跨模块调用者，不再 re-export。
+pub use result::{
+    CapabilityResult, ItemAction, ItemResult, derive_title,
+    rig_tool_result_to_text,
+};
 pub use schema::CapabilitySchema;
 
 use serde_json::Value;

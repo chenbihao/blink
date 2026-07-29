@@ -42,6 +42,7 @@ pub enum SseTransportError {
     Sse(String),
     #[error("HTTP 请求错误: {0}")]
     Http(String),
+    #[allow(dead_code)] // 预留变体：receive 关闭时目前返回 None 而非构造此错误
     #[error("Transport channel closed")]
     TransportChannelClosed,
     #[error("反序列化错误: {0}")]
@@ -143,7 +144,7 @@ impl SseClientTransport {
 
         // HTTP response body → SSE 事件流
         let byte_stream = response.bytes_stream();
-        let sse_stream = SseStream::from_byte_stream(byte_stream);
+        let sse_stream = SseStream::from_bytes_stream(byte_stream);
 
         // 创建 channel + shutdown flag
         let (tx, rx) =

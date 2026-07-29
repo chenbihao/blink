@@ -1803,20 +1803,14 @@ async fn handle_ai_tool_calls(
 /// CLI 走 stdout（0.11）。Capability 层零分支。
 fn capability_result_to_entries(result: &CapabilityResult) -> Vec<AppEntry> {
     match result {
-        CapabilityResult::Text { content } => {
+        CapabilityResult::Text { content, .. } => {
             vec![ai_result_entry(content.clone())]
         }
         CapabilityResult::Items { items } => items_to_entries(items),
-        CapabilityResult::Blob { mime, bytes } => {
-            // Blob → 展示摘要信息（0.10 多模态才把图片喂回 AI）
-            let size_kb = bytes.len() as f64 / 1024.0;
-            let size_text = if size_kb >= 1024.0 {
-                format!("{:.1} MB", size_kb / 1024.0)
-            } else {
-                format!("{:.1} KB", size_kb)
-            };
+        CapabilityResult::Blob { .. } => {
+            // Blob → 展示摘要信息（0.14.1: 改调 blob_summary()，消除重复）
             vec![AppEntry {
-                name: format!("✓ 已获取 {} ({})", mime, size_text),
+                name: format!("✓ {}", result.blob_summary()),
                 pinyin_name: String::new(),
                 pinyin_full: String::new(),
                 lnk_path: String::new(),
@@ -1862,10 +1856,12 @@ const AI_TOOL_ITEMS_LIMIT: usize = 5;
 /// **标记位**（§3.1）：每个 item 标 `is_ai_tool_result = true`——前端 nowrap 单行 +
 /// 12px 小号 AI 图标，与查询路径结果视觉可区分。
 ///
-/// **payload → action 投影**：
-/// - 有 `path` → `ActionKind::Open`（打开应用/文件）
-/// - 有 `text` → `ActionKind::Copy`（复制文本）
-/// - 都没有 → `Action::default()`（纯展示，回车无操作）
+/// **0.14.4 action 投影**（§4.4 + §8.2 + §8.3）：
+/// - 优先从 `actions[0]` 派生 action（回车执行首个）
+/// - `ItemAction` 的 `pointer` 指定从 `data` 取哪个值（JSONPath 简化：`$.field`）
+/// - 无 actions 时 fallback：有 `data.path` → Open；有 `data.text` → Copy
+/// - **隐式 copy 兜底**（§8.2）：无 actions + 纯标量 data（string/number）→ Copy
+/// - `Reveal` → `ActionKind::Run`（走 `run_builtin_action` → explorer /select）
 ///
 /// **上限截断**（§3.3 D5）：最多 5 条，超出追加文字项 `还有 N 条，按 ↓ 查看全部`。
 /// AI 总结项（item[0]）不计入上限——调用方在调用前单独构造 summary entry。
@@ -1879,31 +1875,82 @@ fn items_to_entries(items: &[crate::domain::capability::ItemResult]) -> Vec<AppE
         .iter()
         .take(limit)
         .map(|item| {
-            // 从 payload 提取 path（如果有）→ Open 动作；否则尝试 text → Copy
-            let path = item.payload.get("path").and_then(|v| v.as_str());
-            let text = item.payload.get("text").and_then(|v| v.as_str());
+            use crate::domain::capability::ItemAction;
+
+            // 0.14: 从 data 派生主标题 + 从 data 提取 path/text/url 推导 action
+            let name = crate::domain::capability::derive_title(&item.data);
+            let path = item.data.get("path").and_then(|v| v.as_str()).map(str::to_string);
+            let url = item.data.get("url").and_then(|v| v.as_str()).map(str::to_string);
+            let text = item.data.get("text").and_then(|v| v.as_str()).map(str::to_string);
+
+            // §4.4: pointer 提取——从 data 按 JSONPath 简化（$.field）取值
+            let extract_pointer = |ptr: &Option<String>| -> Option<String> {
+                ptr.as_ref().and_then(|p| {
+                    let field = p.strip_prefix("$.").unwrap_or(p);
+                    item.data.get(field).and_then(|v| v.as_str()).map(str::to_string)
+                })
+            };
+
+            // 优先从 actions[0] 派生 action + lnk_path；否则 fallback 链
+            let (action, lnk_path) = if let Some(first) = item.actions.first() {
+                match first {
+                    ItemAction::OpenFile { pointer } => {
+                        let p = extract_pointer(pointer).or(path.clone()).unwrap_or_default();
+                        (Action { kind: ActionKind::Open, ..Default::default() }, p)
+                    }
+                    ItemAction::OpenUrl { pointer } => {
+                        let u = extract_pointer(pointer).or(url.clone()).or(path.clone()).unwrap_or_default();
+                        (Action { kind: ActionKind::Open, ..Default::default() }, u)
+                    }
+                    ItemAction::Reveal { pointer } => {
+                        let p = extract_pointer(pointer).or(path.clone()).unwrap_or_default();
+                        (Action {
+                            kind: ActionKind::Run,
+                            run_id: Some("reveal_in_explorer".into()),
+                            run_arg: Some(serde_json::Value::String(p)),
+                            ..Default::default()
+                        }, String::new())
+                    }
+                    ItemAction::Copy { pointer } => {
+                        let copy_text = extract_pointer(pointer).or(text.clone()).unwrap_or_else(|| name.clone());
+                        (Action {
+                            kind: ActionKind::Copy,
+                            payload: Some(copy_text),
+                            ..Default::default()
+                        }, String::new())
+                    }
+                }
+            } else if let Some(p) = path.clone() {
+                (Action { kind: ActionKind::Open, ..Default::default() }, p)
+            } else if let Some(t) = text.clone() {
+                (Action {
+                    kind: ActionKind::Copy,
+                    payload: Some(t),
+                    ..Default::default()
+                }, String::new())
+            } else {
+                // §8.2: 隐式 copy 兜底——无 actions + 纯标量 data（string/number）→ Copy
+                match &item.data {
+                    serde_json::Value::String(_) | serde_json::Value::Number(_) => {
+                        (Action {
+                            kind: ActionKind::Copy,
+                            payload: Some(name.clone()),
+                            ..Default::default()
+                        }, String::new())
+                    }
+                    _ => (Action::default(), String::new()),
+                }
+            };
+
             AppEntry {
-                name: item.title.clone(),
-                lnk_path: path.unwrap_or("").to_string(),
-                score: item.score.unwrap_or(0.5),
+                name,
+                lnk_path,
+                score: 0.5, // 0.14: score 已从协议层删除，用默认值
                 is_placeholder: false,
                 is_error: false,
                 source: AI_SOURCE.into(),
-                description: item.subtitle.clone(),
-                action: if path.is_some() {
-                    Action {
-                        kind: ActionKind::Open,
-                        ..Default::default()
-                    }
-                } else if let Some(t) = text {
-                    Action {
-                        kind: ActionKind::Copy,
-                        payload: Some(t.to_string()),
-                        ..Default::default()
-                    }
-                } else {
-                    Action::default()
-                },
+                description: item.desc.clone(),
+                action,
                 is_ai_tool_result: true,
                 ..Default::default()
             }
@@ -2131,11 +2178,11 @@ pub(crate) fn outcome_to_summary(outcome: &ActionOutcome) -> String {
 /// 投影 `CapabilityResult` → 结果摘要（审计日志用）。
 fn capability_result_to_summary(result: &CapabilityResult) -> String {
     match result {
-        CapabilityResult::Text { content } => {
+        CapabilityResult::Text { content, .. } => {
             format!("Text: {}", truncate_summary_for_audit(content))
         }
         CapabilityResult::Items { items } => format!("Items({} 项)", items.len()),
-        CapabilityResult::Blob { mime, bytes } => {
+        CapabilityResult::Blob { mime, bytes, .. } => {
             format!("Blob: {} ({} bytes)", mime, bytes.len())
         }
         CapabilityResult::Done { summary } => format!("Done: {summary}"),
@@ -2777,6 +2824,18 @@ async fn handle_turn2_tool_call(
 
     // Capability 优先
     if cap_reg.get(&tc.name).is_some() {
+        // §2.2.6: open_url 在 Turn 2 降级为需确认（0.14.2 从 Action 迁移到 Capability，
+        // 行为保持——防止 AI 打开恶意网址。open_path / reveal_in_explorer 保持自动执行）
+        if tc.name == "open_url" {
+            tracing::info!(
+                target: ai_slo::TARGET,
+                tool = %tc.name,
+                "Turn 2 tool_call 需确认 (open_url Capability 降级)"
+            );
+            emit_ai_confirm(app, seq, &tc.name, &tc.arguments, "打开链接");
+            return;
+        }
+
         let result =
             execute_capability_for_turn1(app, seq, tc, &cap_reg, latest_seq, ctx.deadline).await;
         match result {
@@ -3021,6 +3080,7 @@ mod tests {
     fn cap_text_projects_to_copy_entry() {
         let r = CapabilityResult::Text {
             content: "hello world".into(),
+            desc: None,
         };
         let entries = capability_result_to_entries(&r);
         assert_eq!(entries.len(), 1);
@@ -3036,16 +3096,14 @@ mod tests {
         let r = CapabilityResult::Items {
             items: vec![
                 crate::domain::capability::ItemResult {
-                    title: "report.pdf".into(),
-                    subtitle: Some("C:\\docs".into()),
-                    payload: json!({ "path": "C:\\docs\\report.pdf" }),
-                    score: Some(0.9),
+                    data: json!({ "name": "report.pdf", "path": "C:\\docs\\report.pdf" }),
+                    desc: Some("C:\\docs".into()),
+                    actions: vec![crate::domain::capability::ItemAction::OpenFile { pointer: None }],
                 },
                 crate::domain::capability::ItemResult {
-                    title: "notes.txt".into(),
-                    subtitle: None,
-                    payload: json!({ "path": "D:\\notes.txt" }),
-                    score: Some(0.5),
+                    data: json!({ "name": "notes.txt", "path": "D:\\notes.txt" }),
+                    desc: None,
+                    actions: vec![crate::domain::capability::ItemAction::OpenFile { pointer: None }],
                 },
             ],
         };
@@ -3055,7 +3113,6 @@ mod tests {
         assert_eq!(entries[0].name, "report.pdf");
         assert_eq!(entries[0].lnk_path, "C:\\docs\\report.pdf");
         assert!(matches!(entries[0].action.kind, ActionKind::Open));
-        assert_eq!(entries[0].score, 0.9);
         // 第二项
         assert_eq!(entries[1].name, "notes.txt");
         assert_eq!(entries[1].lnk_path, "D:\\notes.txt");
@@ -3073,6 +3130,7 @@ mod tests {
         let r = CapabilityResult::Blob {
             mime: "image/png".into(),
             bytes: vec![0x89; 1024], // 1KB
+            desc: None,
         };
         let entries = capability_result_to_entries(&r);
         assert_eq!(entries.len(), 1);
@@ -3094,14 +3152,13 @@ mod tests {
 
     #[test]
     fn cap_items_without_path_uses_default_action() {
-        // Items 的 payload 不含 path → lnk_path 空、action 走 Default（Open kind）
+        // Items 的 data 不含 path → lnk_path 空、action 走 Default（Open kind）
         use serde_json::json;
         let r = CapabilityResult::Items {
             items: vec![crate::domain::capability::ItemResult {
-                title: "进程信息".into(),
-                subtitle: Some("PID: 1234".into()),
-                payload: json!({ "pid": 1234 }), // 无 path 字段
-                score: None,
+                data: json!({ "name": "进程信息", "pid": 1234 }), // 无 path 字段
+                desc: Some("PID: 1234".into()),
+                actions: vec![],
             }],
         };
         let entries = capability_result_to_entries(&r);
@@ -3118,6 +3175,7 @@ mod tests {
         let r = CapabilityResult::Blob {
             mime: "image/png".into(),
             bytes: vec![0x00; 2 * 1024 * 1024], // 2MB
+            desc: None,
         };
         let entries = capability_result_to_entries(&r);
         assert_eq!(entries.len(), 1);
@@ -3127,14 +3185,13 @@ mod tests {
 
     #[test]
     fn cap_items_none_subtitle_yields_none_description() {
-        // subtitle = None → AppEntry.description = None
+        // desc = None → AppEntry.description = None
         use serde_json::json;
         let r = CapabilityResult::Items {
             items: vec![crate::domain::capability::ItemResult {
-                title: "file.txt".into(),
-                subtitle: None,
-                payload: json!({ "path": "C:\\file.txt" }),
-                score: Some(0.5),
+                data: json!({ "name": "file.txt", "path": "C:\\file.txt" }),
+                desc: None,
+                actions: vec![crate::domain::capability::ItemAction::OpenFile { pointer: None }],
             }],
         };
         let entries = capability_result_to_entries(&r);

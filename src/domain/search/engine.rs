@@ -1,4 +1,4 @@
-//! 多路搜索引擎抽象(0.2.2,见 production-design/phases/0.2-core-plugin-design.md §2)。
+//! 多路搜索引擎抽象(0.2.2,见 phases/0.2-core-plugin-design.md §2)。
 //!
 //! - `SearchEngine`:统一召回接口。引擎按 `Lane` 分两条通道——sync(本地、紧 budget、
 //!   同步返回首批)与 async(慢引擎,完成后增量 emit)。0.2.2 sync = Calc/StartMenu,

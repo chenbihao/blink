@@ -1,6 +1,6 @@
 //! 性能统计与监控（0.7.0）：量化核心链路耗时，便于发现瓶颈。
 //!
-//! 设计（见 production-design/phases/0.7-plugin-ecosystem-local-search.md §七）：
+//! 设计（见 phases/0.7-plugin-ecosystem-local-search.md §七）：
 //! - SQLite `performance_metrics` 表持久化，保留 30 天，自动清理
 //! - 全局 `once_cell` 持有 pool，各埋点零参数传递
 //! - `record()` 异步写入，不阻塞调用方（spawn 到 tokio runtime）

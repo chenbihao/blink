@@ -68,16 +68,28 @@ enum PluginToCore {
     /// HTTP 请求（请求 core 代理）
     #[serde(rename = "http_request")]
     HttpRequest(HttpRequest),
-    /// tool-call 结果（0.9.3）
+    /// tool-call 结果（0.9.3，轨道 B 旧协议）
     #[serde(rename = "tool_result")]
     ToolResult(ToolResultPayload),
+    /// 轨道 A 纯数据 tool 结果（0.14.3）——manifest 配了 projection 的 tool 走此路径。
+    #[serde(rename = "raw_result")]
+    RawResult(RawToolResult),
 }
 
-/// tool-call 结果（与 PluginResponse 统一格式）
+/// tool-call 结果（与 PluginResponse 统一格式，轨道 B 旧协议）
 #[derive(Debug, Serialize)]
 struct ToolResultPayload {
     id: String,
     items: Vec<PluginItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<PluginError>,
+}
+
+/// 轨道 A 纯数据 tool 结果（0.14.3）——插件只吐纯 data，投影规则在 manifest。
+#[derive(Debug, Serialize)]
+struct RawToolResult {
+    id: String,
+    data: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<PluginError>,
 }
@@ -271,9 +283,10 @@ fn main() {
                 };
 
                 if city.is_empty() {
-                    let resp = PluginToCore::ToolResult(ToolResultPayload {
+                    // 0.14.3: tool-call 走轨道 A（RawResult）
+                    let resp = PluginToCore::RawResult(RawToolResult {
                         id,
-                        items: vec![],
+                        data: serde_json::Value::Null,
                         error: Some(PluginError {
                             code: "no_city".into(),
                             message: "请在 arguments 中指定 city 参数".into(),
@@ -453,7 +466,7 @@ fn main() {
                             format!("{:.0}°C", cur.temperature_2m)
                         };
                         let desc = wmo_description(cur.weather_code);
-                        let region = if admin1.is_empty() { country } else { admin1 };
+                        let region = if admin1.is_empty() { country.clone() } else { admin1.clone() };
 
                         let title = format!("{city_name} {temp_str} {desc}");
                         let subtitle = format!(
@@ -465,10 +478,19 @@ fn main() {
                             title,
                             subtitle: Some(subtitle),
                             score: 1.0,
-                            action: PluginAction::Copy { text: city_name },
+                            action: PluginAction::Copy { text: city_name.clone() },
                         }];
 
-                        let resp = make_success_response(query_id, is_tool_call, items);
+                        // 0.14.3: tool-call 走轨道 A，返回纯 data（结构化天气数据）
+                        let raw_data = serde_json::json!({
+                            "city": city_name,
+                            "temp": temp_str,
+                            "condition": desc,
+                            "wind_speed": format!("{:.0}km/h", cur.wind_speed_10m),
+                            "region": region,
+                        });
+
+                        let resp = make_success_response(query_id, is_tool_call, items, raw_data);
                         send_message(&mut stdout, &resp);
                     }
                 }
@@ -480,16 +502,17 @@ fn main() {
     }
 }
 
-/// 根据 is_tool_call 创建错误响应（Response 或 ToolResult）
+/// 根据 is_tool_call 创建错误响应（Response / ToolResult / RawResult）
+/// 0.14.3: tool-call 走轨道 A（RawResult），query 走旧协议（Response）
 fn make_error_response(id: String, is_tool_call: bool, code: &str, message: &str) -> PluginToCore {
     let error = Some(PluginError {
         code: code.into(),
         message: message.into(),
     });
     if is_tool_call {
-        PluginToCore::ToolResult(ToolResultPayload {
+        PluginToCore::RawResult(RawToolResult {
             id,
-            items: vec![],
+            data: serde_json::Value::Null,
             error,
         })
     } else {
@@ -501,12 +524,18 @@ fn make_error_response(id: String, is_tool_call: bool, code: &str, message: &str
     }
 }
 
-/// 根据 is_tool_call 创建成功响应（Response 或 ToolResult）
-fn make_success_response(id: String, is_tool_call: bool, items: Vec<PluginItem>) -> PluginToCore {
+/// 根据 is_tool_call 创建成功响应（tool-call 走轨道 A 返回纯 data，query 走旧协议返回 items）
+/// 0.14.3: tool-call 走轨道 A（RawResult），query 走旧协议（Response）
+fn make_success_response(
+    id: String,
+    is_tool_call: bool,
+    items: Vec<PluginItem>,
+    raw_data: serde_json::Value,
+) -> PluginToCore {
     if is_tool_call {
-        PluginToCore::ToolResult(ToolResultPayload {
+        PluginToCore::RawResult(RawToolResult {
             id,
-            items,
+            data: raw_data,
             error: None,
         })
     } else {

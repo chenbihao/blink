@@ -22,6 +22,7 @@ use tauri::Manager;
 
 use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
+    ItemAction, ProjectionRule,
 };
 use crate::domain::execution::DangerClass;
 use crate::domain::plugin::manifest::{DangerClassDef, ToolDef};
@@ -57,6 +58,9 @@ pub struct PluginCapabilityAdapter {
     id: String,
     schema: CapabilitySchema,
     danger: DangerClass,
+    /// manifest 投影规则（0.14.3）。Some → 轨道 A（插件返回纯 data，core 投影）；
+    /// None → 轨道 B（插件返回 PluginItem，core 用 `plugin_item_to_item_result` 映射）。
+    projection: Option<ProjectionRule>,
 }
 
 impl PluginCapabilityAdapter {
@@ -81,6 +85,7 @@ impl PluginCapabilityAdapter {
             id,
             schema,
             danger,
+            projection: tool_def.projection.clone(),
         }
     }
 }
@@ -124,6 +129,26 @@ impl Capability for PluginCapabilityAdapter {
             });
         }
 
+        // 0.14.3: manifest 配了 projection → 轨道 A（纯 data + 投影引擎）
+        if let Some(projection) = &self.projection {
+            let raw = self
+                .plugin
+                .execute_tool_raw(&self.tool_name, &args, settings.as_ref())
+                .await
+                .map_err(|e| CapabilityError::Internal {
+                    detail: format!("插件 tool 执行失败: {e}"),
+                })?;
+
+            tracing::info!(
+                plugin = %plugin_id,
+                tool = %self.tool_name,
+                "插件 tool-call 完成（轨道 A 纯数据）"
+            );
+
+            return Ok(crate::domain::capability::project(&raw.data, projection));
+        }
+
+        // 轨道 B（旧协议）：插件返回 PluginItem 列表，用 plugin_item_to_item_result 映射
         let items = self
             .plugin
             .execute_tool(&self.tool_name, &args, settings.as_ref())
@@ -153,29 +178,35 @@ impl Capability for PluginCapabilityAdapter {
     }
 }
 
-/// PluginItem → ItemResult 投影（0.11.0 改进 1，0.13.7 从 action.rs 迁入）。
+/// PluginItem → ItemResult 投影（0.11.0 改进 1，0.13.7 从 action.rs 迁入，0.14 适配新结构）。
 ///
-/// **投影规则**（文档 §2.1）：
-/// - `payload` 优先取 `PluginItem.payload`（新字段，结构化数据给 AI）；
-///   缺失时（老插件）从 `action` 提取兜底——`Copy→{"text":...}`, `Open→{"path":...}`, `None→{}`
-/// - `title`/`subtitle`/`score` 直接映射
+/// **0.14 变化**：`ItemResult` 从 `{ title, subtitle, payload, score }` 改为
+/// `{ data, desc, actions }`。此函数做过渡映射：
+/// - `data` ← `payload`（优先取 `PluginItem.payload`；缺失时从 `action` 提取兜底）
+/// - `desc` ← `subtitle`
+/// - `actions` ← 从 `PluginAction` 派生（Copy→Copy, Open→OpenFile, None→空）
 ///
-/// 兜底逻辑保证老插件（不填 payload）也能正常工作——AI 从 payload 读到结构化数据，
-/// 而非从展示文本反推。新插件应在 tool-call 路径下主动填 payload。
+/// **0.14.3 插件迁移后**：此函数将被投影引擎（`project()`）取代——
+/// 插件返回 `PluginRawResult { data }`，manifest 配 `ProjectionRule` 投影。
 pub(crate) fn plugin_item_to_item_result(
     item: &PluginItem,
 ) -> crate::domain::capability::ItemResult {
-    let payload = item.payload.clone().unwrap_or_else(|| match &item.action {
+    let data = item.payload.clone().unwrap_or_else(|| match &item.action {
         PluginAction::Copy { text } => serde_json::json!({ "text": text }),
         PluginAction::Open { path } => serde_json::json!({ "path": path }),
         PluginAction::None => serde_json::json!({}),
     });
 
+    let actions = match &item.action {
+        PluginAction::Copy { .. } => vec![ItemAction::Copy { pointer: None }],
+        PluginAction::Open { .. } => vec![ItemAction::OpenFile { pointer: None }],
+        PluginAction::None => vec![],
+    };
+
     crate::domain::capability::ItemResult {
-        title: item.title.clone(),
-        subtitle: item.subtitle.clone(),
-        payload,
-        score: Some(item.score),
+        data,
+        desc: item.subtitle.clone(),
+        actions,
     }
 }
 
@@ -238,7 +269,7 @@ mod tests {
 
     #[test]
     fn projection_uses_payload_when_present() {
-        // 插件填了 payload → 优先用，忽略 action 兜底
+        // 插件填了 payload → data 优先用，忽略 action 兜底
         let item = PluginItem {
             title: "公网 IP: 1.2.3.4".into(),
             subtitle: Some("北京".into()),
@@ -250,12 +281,14 @@ mod tests {
             ..Default::default()
         };
         let r = plugin_item_to_item_result(&item);
-        assert_eq!(r.title, "公网 IP: 1.2.3.4");
-        assert_eq!(r.subtitle.as_deref(), Some("北京"));
-        assert_eq!(r.score, Some(0.9));
-        // payload 优先用插件填的，不从 action 兜底
-        assert_eq!(r.payload["ip"], "1.2.3.4");
-        assert_eq!(r.payload["type"], "public");
+        // data 优先用插件填的 payload
+        assert_eq!(r.data["ip"], "1.2.3.4");
+        assert_eq!(r.data["type"], "public");
+        // desc ← subtitle
+        assert_eq!(r.desc.as_deref(), Some("北京"));
+        // Copy action → Copy ItemAction
+        assert_eq!(r.actions.len(), 1);
+        assert!(matches!(r.actions[0], ItemAction::Copy { .. }));
     }
 
     #[test]
@@ -270,7 +303,8 @@ mod tests {
             ..Default::default()
         };
         let r = plugin_item_to_item_result(&item);
-        assert_eq!(r.payload["text"], "192.168.1.5");
+        assert_eq!(r.data["text"], "192.168.1.5");
+        assert!(matches!(r.actions[0], ItemAction::Copy { .. }));
     }
 
     #[test]
@@ -285,12 +319,13 @@ mod tests {
             ..Default::default()
         };
         let r = plugin_item_to_item_result(&item);
-        assert_eq!(r.payload["path"], "C:\\code.lnk");
+        assert_eq!(r.data["path"], "C:\\code.lnk");
+        assert!(matches!(r.actions[0], ItemAction::OpenFile { .. }));
     }
 
     #[test]
     fn projection_none_action_yields_empty_payload() {
-        // 无 payload + None action → 兜底 {}
+        // 无 payload + None action → 兜底 {}，空 actions
         let item = PluginItem {
             title: "提示项".into(),
             score: 0.5,
@@ -298,6 +333,7 @@ mod tests {
             ..Default::default()
         };
         let r = plugin_item_to_item_result(&item);
-        assert!(r.payload.as_object().unwrap().is_empty());
+        assert!(r.data.as_object().unwrap().is_empty());
+        assert!(r.actions.is_empty());
     }
 }

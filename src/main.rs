@@ -480,7 +480,6 @@ fn main() {
                     app.handle().clone(),
                     ai_registry.clone(),
                     capability_registry.clone(),
-                    action_registry.clone(),
                     pending_confirms.clone(),
                     mcp_client.clone(),
                     pools.ai.clone(),
