@@ -2,7 +2,7 @@
 
 > 扩展与智能化层：插件系统（含 surface 呈现权）、四域架构、意图路由、内部架构骨架、AI 能力方向。
 >
-> 配套：`product-interaction.md`（交互/搜索）· `product-context-future.md`（Context/隐私）· `product-principles.md`（横切原则）· `phases/` 技术实现。
+> 配套：`product-interaction-交互.md`（交互/搜索）· `product-context-future-感知.md`（Context/隐私）· `product-principles-原则.md`（横切原则）· `phases/` 技术实现。
 
 ---
 
@@ -72,7 +72,7 @@ Route 与前端协议已预留 view 字段——0.9 接 AI 对话时不改路由
 ```
 
 - 全局总闸：`surface_takeover_enabled=false` 时所有 takeover 降级 priority
-- 首拼命中（弱信号）恒不独占（详见 [interaction §3.2](./product-interaction.md#32-匹配策略)）
+- 首拼命中（弱信号）恒不独占（详见 [interaction §3.2](./product-interaction-交互.md#32-匹配策略)）
 
 ### 4.4 动作系统
 
@@ -133,7 +133,7 @@ Route 与前端协议已预留 view 字段——0.9 接 AI 对话时不改路由
 
 当前只实现 `RuleRouter`（keyword/regex），0.9 接入 AI 路由（轻量模型做意图分类 + 抽参）。**AI 是回退决策者，不是默认路径**——确定性命中永远走快速通道（不过 AI），保护 P0（详见 §6.4）。
 
-> VectorRouter（向量语义匹配）原计划在 0.9，现已移出——LLM 路由更强，向量的归宿是后期 RAG / 记忆（0.11+）。
+> VectorRouter（向量语义匹配）原计划在 0.9，现已移出——LLM 路由更强，向量的归宿是后期 RAG / 记忆（0.20）。
 
 ### 5.2 Route 不是 Intent（意图分类推迟）
 
@@ -189,13 +189,24 @@ Blink 不是「内置 AI 的启动器」，是**「本地 AI 的感知与执行�
 
 **产品铁则**：任何让 Blink 变成「纯对话壳子」的设计都要拒绝。AI 是消费者（调 Blink 的 tool）兼生产者（产 Suggestion），Blink 是身体。大脑可换，身体不可换。
 
-### 6.2 一切皆 tool（统一架构）
+### 6.2 能力体系：Capability（开放）+ Action（本地执行）
 
-builtin / 插件 /（未来）MCP server / skill 归一为 **tool 模型**，走同一份能力描述 schema（向 MCP tool schema / OpenAI function calling 靠拢）。`Action` trait 进化为 tool-call 兼容入口。
+> **0.14 能力协议重构后的边界**。旧版「一切皆 tool」已被推翻——详见 [phases/0.14](./phases/0.14-capability-protocol-refactor.md)。
 
-- **统一描述层，保留执行分层**：builtin 同进程的性能不为了「统一」牺牲成 IPC
-- **顺带解决**：builtin（Rust 枚举）与插件（JSON manifest）描述风格 / 调用方式不一致的两个老问题——「主窗口命令式参数如何转 CLI/IPC 参数」的统一中间表示，就是 schema 的 `parameters`
-- 细节见 [phases/0.9 §三](./phases/0.9-ai-layer.md)
+Blink 的能力分两层，**边界用类型系统钉死**：
+
+| | **Capability**（开放能力） | **Action**（本地执行） |
+|---|---|---|
+| 定位 | 面向所有调用方（AI / CLI / MCP / 主窗口） | 主窗口 / chord 本地执行域 |
+| 进 AI tool 池 | ✅ **唯一合法形态**（经 `CapabilityTool` 适配）| ❌ 永不（0.14 删 `ActionTool` 适配器）|
+| 语义 | 纯数据能力（取数/计算/翻译/打开），返回 `CapabilityResult` | 已执行副作用描述（Copy/Open/Emit/Nop）|
+| 例子 | search_files / translate / capture_screen / open_url | lock / shutdown / open_settings / chord 动作 |
+
+**核心铁则**：AI 永远只通过 `CapabilityTool` 调能力。`open_url` / `open_path` / `reveal_in_explorer` 这三个 AI 常用的从 Action 提升为 Capability；`lock` / `shutdown` 等不可逆操作留在 Action，AI 看不到，避免安全隐患。
+
+**Capability 协议分层**（0.14）：插件只吐纯 `data`，投影规则（pointer / desc / actions）上移到 manifest 做代理——翻译插件返回 `data: "你好"` + manifest 配 `desc: "译文"` 即可，零 UI 代码。四出口（主窗口 AI / 对话窗口 AI / CLI / MCP）共用一套 canonical 投影引擎。
+
+- 细节见 [phases/0.14-capability-protocol-refactor.md](./phases/0.14-capability-protocol-refactor.md)
 
 ### 6.3 Provider 多档（能力供应商）
 
@@ -211,34 +222,38 @@ Provider 不只是聊天 API，是**能力供应商**：LLM（`chat`/`chat_strea
 - **模糊意图路径**：未命中才走 AI 路由（AI 永远是**回退决策者**，不是默认路径）
 - **AI 反馈铁则**：AI 调用期间主窗口必有 loading / 过渡，**不能让用户死等**——不能把延迟从「唤起」挪到「路由」，那是体验等价退化
 
-### 6.5 三步走演进
+### 6.5 演进时间线
 
 | 版本 | 主题 |
 |---|---|
 | **0.9** | Agent 地基：统一 tool 架构 + Provider + **纯文本**闭环（零语音） |
 | **0.10** | 语音输入：STT + 语音打字（G1/G2）+ 伪流式 VAD 切句 + FunASR 本地化 + 文本注入（架构不变，只加感知层） |
 | **0.11** | 插件通信契约重设计 + AI 调用插件链路完善 + 截图标注增强 + OCR word 级链路 + 阅读模式 + 翻译衔接 + 水印独立图层 + 图上翻译 |
-| **0.12** | AI 能力架构搭建：对话窗口 / 对话机制 / MCP client / RAG 记忆 / DB 拆分 / ollama+lmstudio Provider |
+| **0.12** | AI 能力架构搭建：对话窗口 / 对话机制 / DB 四层拆分 / Provider 模型统一管理 / ollama+lmstudio |
+| **0.13** | 能力扩展基础版 + 开放：MCP client / MCP server（护城河）/ CLI 化 / token-aware context 压缩 / 记忆 FTS5 召回 / Skill 约定式 |
+| **0.14** | **能力协议重构**：Capability/Action 边界钉死 + Cap 协议分层（插件只吐 data + manifest 投影）+ 四出口投影引擎收敛 |
+| **0.20** | 能力扩展向量版：zvec 向量基础设施 / 记忆向量召回（混合检索）/ RAG 知识库 |
 
-**解耦智慧**：先验证大脑（0.9 文本闭环），再加感官（0.10 语音）。如果 0.9 就发现「AI 路由调本地能力」有坑，能在投语音之前止损。
+**解耦智慧**：先验证大脑（0.9 文本闭环），再加感官（0.10 语音）。0.12-0.14 是 AI 能力架构的「搭骨架 → 扩展 → 收敛重构」三步。
 
-### 6.6 AI 对话 = takeover view（0.12 规划）
+### 6.6 AI 对话 = takeover view（0.12 已完成）
 
-AI 对话不是 item 列表，而是 `view: chat` 的 takeover 区域——下方展开对话界面，走流式 JSONL。这是 §4.3 view 字段预留的目的。Agent 窗口在 0.12 规划（Alt+Q），展开需用户确认，不自动抢焦点。
+AI 对话不是 item 列表，而是 `view: chat` 的 takeover 区域——独立对话窗口（Alt+Q chord 唤起），走流式 JSONL。这是 §4.3 view 字段预留的目的。0.12 已落地：独立 chat 窗口 + 流式 Markdown + 多对话管理 + SQLite 持久化 memory + Tool loop。
 
 ---
 
-## 7. 内部架构骨架（三个统一入口 · 0.9 AI 的物理骨架）
+## 7. 内部架构骨架（三个统一入口）
 
-四域是**逻辑规范**，三个统一入口 trait 让四域成为**物理骨架**，也是 0.9 AI 能力接入的三个接入点。
+四域是**逻辑规范**，三个统一入口 trait 让四域成为**物理骨架**。0.14 后 AI 能力的接入点从 Action 迁到 Capability。
 
-| 域 | 统一入口 | 0.9 AI 如何接入 |
+| 域 | 统一入口 | AI 如何接入 |
 |---|---|---|
-| **Execution** | `Action` trait + `ActionOutcome` | AI 产 tool-call 候选，经 `Action` 执行（0.9 tool-call 进化） |
+| **Execution（本地）** | `Action` trait + `ActionOutcome` | **AI 不接入**（0.14 后 AI 走 Capability，Action 退回纯本地执行） |
+| **Capability（开放）** | `Capability` trait + `CapabilityResult` + `CapabilityTool` 适配 | AI 产 tool-call → `CapabilityTool::call()` → `cap.invoke()` → `CapabilityResult` |
 | **Suggestion** | `SuggestionProducer` trait + `SuggestionArbiter` | `AIProducer` register 到 arbiter，三源竞争 |
 | **配置** | `ConfigStore<T>` 泛型 + `blink://config-changed` 广播 | AI Provider 配置 `impl ConfigKey for AIConfig`，前端零脚手架 |
 
-### 7.1 Action trait —— 一切副作用只从这一处出
+### 7.1 Action trait —— 本地副作用的统一入口（0.14 后不再接 AI）
 
 ```rust
 pub trait Action: Send + Sync {
@@ -246,6 +261,7 @@ pub trait Action: Send + Sync {
     async fn execute(&self, cx: &ActionContext) -> Result<ActionOutcome, ExecError>;
 }
 
+// 0.13.7 后 ActionOutcome 只剩副作用描述（Items 变体已删，迁入 Capability）
 pub enum ActionOutcome {
     Copy { text: String, hit_id: Option<String> },
     Open { path: String },
@@ -254,13 +270,32 @@ pub enum ActionOutcome {
 }
 ```
 
-四种来源投影：
-- **BuiltinAction** → 每个 kind 一个 struct，各自 `impl Action`
-- **PluginBackedAction** → SearchService 拿到 PluginItem 时包装
+三种来源（0.14 后移除了"AI Action"来源）：
+- **BuiltinAction** → 每个 kind 一个 struct，各自 `impl Action`（lock/shutdown/open_settings 等 9 个，服务主窗口/chord）
 - **ChordAction** → 直接实现 `Action`（副作用走 `Emit`）
-- **（0.9）AI Action** → AI 产 tool-call 候选，经统一 `Action` 执行
 
-前端契约 `Action { kind, payload }` 保持不变——只是"投影"。
+> **注意**：`open_url` / `open_path` / `reveal_in_explorer` 在 0.14 已从 Action 提升为 Capability，AI 可调用。其余 9 个 Action 永不进 AI tool 池。
+
+### 7.1b Capability trait —— 开放能力的统一入口（AI 唯一调用形态）
+
+```rust
+pub trait Capability: Send + Sync {
+    fn id(&self) -> &str;
+    fn schema(&self) -> CapabilitySchema;        // 送 LLM 的 tool schema
+    fn danger_class(&self) -> DangerClass;        // Safe / Dangerous
+    async fn invoke(&self, args: Value, ctx: &InvokeContext) -> Result<CapabilityResult, CapabilityError>;
+}
+
+// 四变体覆盖所有能力返回（0.14 重定义字段语义）
+pub enum CapabilityResult {
+    Text { content: String, desc: Option<String> },
+    Items { items: Vec<ItemResult> },
+    Blob { mime: String, bytes: Vec<u8>, desc: Option<String> },
+    Done { summary: String },
+}
+```
+
+AI 进 tool 池的唯一适配器是 `CapabilityTool`（impl rig `ToolDyn`）。0.14 删除了 `ActionTool`——AI 永远无法直接调 Action。详见 [§6.2](#62-能力体系capability开放--action本地执行) 和 [phases/0.14](./phases/0.14-capability-protocol-refactor.md)。
 
 ### 7.2 SuggestionProducer + Arbiter —— 一切建议只从这一处出
 
@@ -295,11 +330,11 @@ pub struct SuggestionArbiter {
 
 **前端 API**：泛型 `get_config(key) / set_config(key, value)` 命令 + `frontend/js/config-keys.js` 维护 key 常量表 + `blink://config-changed` 广播（各模块按 key 订阅）。取代散落 20+ 个 `update_*` 专用命令。
 
-### 7.4 与 0.9 AI 的对齐
+### 7.4 与 AI 的对齐（0.14 后）
 
-三个 trait 就是 0.9 AI 的三个入口：
-- AI 产的 **tool-call 候选 / 动作** → `Action`
+四个入口就是 AI 的接入点：
+- AI 产的 **tool-call** → `CapabilityTool` → `Capability::invoke()`（**唯一调用形态**，0.14 后 Action 不再接 AI）
 - AI 判定的 **建议** → `SuggestionProducer`
 - AI 的 **配置** → `ConfigStore`
 
-**四域信任边界依旧成立**：AI 只能产 Suggestion / tool-call 候选，不能构造 `ExecArg::UserExplicit`。用户 Tab 采纳后才穿过 Suggestion → Execution 边界。
+**四域信任边界依旧成立**：AI 只能产 Suggestion / tool-call 候选，不能构造 `ExecArg::UserExplicit`。用户 Tab 采纳后才穿过 Suggestion → Execution 边界。危险 Capability（如读隐私数据）AI 调用时需用户确认（`DangerClass::Dangerous` 或 `sensitive` 标记）。

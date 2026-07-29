@@ -1,10 +1,10 @@
 # 灵感卷 · 外部 agent 作为 subagent 调用
 
-> **状态**：🔮 灵感 / 调研留档（非承诺规划）。候选落地版本：**0.15+**。
+> **状态**：🔮 灵感 / 调研留档（非承诺规划）。候选落地版本：**0.21+**。
 >
 > **来源**：讨论「Blink 自动整理下载文件夹」类长任务场景时启发。结论：Blink 自身的 tool 体系（读为主 + 可逆写）不足以支撑「AI 自主操作文件系统的长任务」，但**不必自己造完整的编码 agent 运行时**——可把 opencode / pi agent / Claude Code 等现成 agent **作为 subagent 调用**，借力生态而不外包架构主权。
 >
-> **关联**：[ADR-001](adr-001-agent-backend-strategy.md)（为何不当后端）· [0.13 §七 CLI 化](phases/0.13-ai-capability-expansion.md)
+> **关联**：[ADR-001](_adr-001-agent-backend-strategy.md)（为何不当后端）· [0.13 §七 CLI 化](0.13-ai-capability-expansion.md)
 
 ---
 
@@ -115,17 +115,17 @@ pub trait ExternalAgentSubagent: Send + Sync {
 
 1. **前置依赖**：subagent 要有用，得先有「supervisor agent 能自主判断何时委托」——这依赖 0.13.1 token-aware 窗口（supervisor 自己的 context 要健康）+ 0.13.3 Skill（教 supervisor 何时该委托）。
 2. **生态成熟度**：外部 agent 的 headless 接口仍在演进（opencode serve、claude `-p` 都是近期才稳定），早做易踩 API 变更。
-3. **优先级**：0.13（MCP 双向 / CLI / 记忆召回 / Skill）/ 0.14（向量召回 / RAG）是「所有用户受益」的基础设施；subagent 是「进阶用户借力生态」的增强，优先级靠后合理。
+3. **优先级**：0.13（MCP 双向 / CLI / 记忆召回 / Skill）/ 0.14（能力协议重构）/ 0.20（向量召回 / RAG）是「所有用户受益」的基础设施；subagent 是「进阶用户借力生态」的增强，优先级靠后合理。
 
-### 3.3 0.15 候选范围（若启动）
+### 3.3 0.21 候选范围（若启动）
 
-如果 0.15 立项，subagent 可能是其中一环，与其他候选并列：
+如果 0.21 立项，subagent 可能是其中一环，与其他候选并列：
 
 ```
-0.15（候选，未定案）
+0.21（候选，未定案）
   ├─ 外部 agent 作为 subagent（本卷）          P1
-  ├─ 事实记忆（tool-based，ChatGPT 式 memory）  P2（0.14 砍掉项）
-  ├─ proactivity 主动建议深化（product-context-future.md §7.3）  P2
+  ├─ 事实记忆（tool-based，ChatGPT 式 memory）  P2（0.20 砍掉项）
+  ├─ proactivity 主动建议深化（../product-context-future-感知.md §7.3）  P2
   └─ ...（其他）
 ```
 
@@ -161,4 +161,4 @@ PoC 通过 → 0.15 立项；PoC 发现外部 agent 接口不稳/委托判断不
 - [opencode Server 架构](https://opencode.ai/docs/server/) · [opencode SDK](https://opencode.ai/docs/sdk/)
 - [pi agent (earendil-works)](https://github.com/earendil-works/pi)
 - [Implementing Design Patterns for Agentic AI with Rig & Rust](https://dev.to/joshmo_dev/implementing-design-patterns-for-agentic-ai-with-rig-rust-1o71)
-- [ADR-001：Agent 后端策略](adr-001-agent-backend-strategy.md)
+- [ADR-001：Agent 后端策略](_adr-001-agent-backend-strategy.md)

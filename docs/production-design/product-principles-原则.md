@@ -2,7 +2,7 @@
 
 > 跨版本通用约束：产品取舍、工程规范、演进时间线、横切设计准则。
 >
-> 配套：`product-interaction.md`（交互/搜索）· `product-platform.md`（插件/意图/AI）· `product-context-future.md`（Context/隐私）· `phases/` 技术实现。
+> 配套：`product-interaction-交互.md`（交互/搜索）· `product-platform-平台.md`（插件/意图/AI）· `product-context-future-感知.md`（Context/隐私）· `phases/` 技术实现。
 
 ---
 
@@ -58,7 +58,10 @@
 | **0.9** | **Agent 地基**：统一 tool 架构（builtin/插件/MCP/skill 归一）+ Provider 多档 + 主窗口纯文本闭环（零语音） |
 | **0.10** | **语音输入**：STT + 语音打字（G1 主窗口输入 / G2 输入法上屏）+ 伪流式 VAD 切句 + FunASR 本地化 + SendInput 文本注入 |
 | **0.11** | **插件通信契约重设计 + AI 调用插件链路完善 + 截图标注增强**：统一结果模型 + 工具元信息 + 应用搜索/剪贴板历史 Capability + 翻译插件 Rust 化 + 截图标注增强（选区停留 + 7 种标注 + OCR + 钉图 + 保存）+ OCR word 级链路 + 原图阅读模式 + 翻译衔接 + 水印独立图层 + 图上翻译 |
-| **0.12** | **AI 能力架构搭建**：对话窗口 / 对话机制 / MCP client / RAG 记忆 / DB 拆分 / ollama+lmstudio Provider（按需增强） |
+| **0.12** | **AI 能力架构搭建**：对话窗口 / 对话机制 / DB 四层拆分 / ollama+lmstudio Provider 统一（按需增强） |
+| **0.13** | **AI 调用能力扩展**：MCP client（消费外部 tool）+ MCP server（护城河）+ 自身 CLI 化 + token-aware context 压缩 + 记忆 FTS5 召回（零嵌入模型依赖）+ Skill 约定式（SKILL.md） |
+| **0.14** | **能力协议重构**（规划中）：Capability/Action 边界钉死（删 `ActionTool` 适配器，AI 永不直接调 Action）+ Cap 协议分层（插件吐纯 data，投影 pointer/desc/actions 上移 manifest）+ 四出口投影引擎收敛（主窗口 AI / 对话窗口 AI / CLI / MCP 共用 canonical 投影） |
+| **0.20** | **向量版**（规划中）：zvec 向量库（BM25 + 向量）+ embedding 模型管理 + 记忆向量召回（混合检索升级）+ RAG 知识库 |
 
 ---
 
@@ -101,8 +104,8 @@
 | **两条路径分离** | 确定性命中走快速通道（&lt; 1s，不过 AI）；未命中才走 AI 路由。AI 是回退决策者，不是默认路径 |
 | **AI 调用必有感知反馈** | 路由思考时主窗 loading，结果回流有过渡；不能把延迟从「唤起」挪到「路由」（体验等价退化） |
 | **危险动作必确认（独立于交互模式）** | 轻量路由「能直接执行」仅限可逆 / 安全动作；删除 / 发送 / 移动哪怕高置信也必须 Tab / 确认。**主窗口 / Agent 窗口都适用**——即使 Agent 窗口的 `AgentBuilder` tool loop 里 AI 自主决定要调，Dangerous 动作依然要人机确认（走内嵌卡片，不用 Modal） |
-| **授权粒度按交互模式分层** | **主窗口模式**：用户在"搜索"未授权 tool loop，AI 只产 Suggestion / tool-call 候选，`ExecArg::UserExplicit` 类型墙每次工具都检查；**Agent 窗口模式**（0.10 Alt+1 展开）：用户显式授权，粒度扩为"整个会话"，允许 `AgentBuilder` 自主循环——但 Dangerous 独立于粒度扩展一律确认。详见 [0.9-ai-layer.md §4.3](./phases/0.9-ai-layer.md#43-provider-落地形态2026-07-定型) |
-| **统一 tool，保留执行分层** | builtin/插件/MCP/skill 统一描述 schema；但同进程 vs IPC 执行分层不牺牲 |
+| **授权粒度按交互模式分层** | **主窗口模式**：用户在"搜索"未授权 tool loop，AI 只产 Suggestion / tool-call 候选，`ExecArg::UserExplicit` 类型墙每次工具都检查；**对话窗口模式**（0.12.1 Alt+Q 展开）：用户显式授权，粒度扩为"整个会话"，允许 `AgentBuilder` 自主循环——但 Dangerous 独立于粒度扩展一律确认。详见 [0.9-ai-layer.md §4.3](./phases/0.9-ai-layer.md#43-provider-落地形态2026-07-定型) |
+| **Capability 是 AI 唯一入口，Action 回归纯副作用** | builtin/插件/MCP/skill 统一描述 schema；0.14 起删 `ActionTool` 适配器，AI 永不直接调 Action——Capability 投影给 AI，Action 只由前端/Capability 显式触发。同进程 vs IPC 执行分层不牺牲（详见 [0.14-capability-protocol-refactor.md](./phases/0.14-capability-protocol-refactor.md)） |
 | **本地一切按需下载** | 本地 LLM/STT/embedding 模型不捆绑，安装包 &lt; 100MB 是硬约束 |
 | **AI / 语音上云强告知** | 第一次启用必须有强告知门（发给谁/发什么/能关什么）；语音含声纹默认本地 |
 

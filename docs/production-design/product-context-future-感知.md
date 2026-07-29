@@ -2,7 +2,7 @@
 
 > 环境感知与隐私层：Context 感知、主动建议、隐私安全。
 >
-> 配套：`product-interaction.md`（交互/搜索）· `product-platform.md`（插件/意图/AI）· `product-principles.md`（横切原则）· `phases/` 技术实现。
+> 配套：`product-interaction-交互.md`（交互/搜索）· `product-platform-平台.md`（插件/意图/AI）· `product-principles-原则.md`（横切原则）· `phases/` 技术实现。
 
 ---
 
@@ -29,7 +29,7 @@
 - 敏感应用（银行、密码管理器）默认关闭感知
 - Awareness 数据带 `origin` 一等标签（Selection / Clipboard），下游层零推断
 
-**四域信任边界**：Awareness 是唯一被 Suggestion 域读的数据源。Routing 域**不能**读 Awareness（详见 [platform §5.0](./product-platform.md#50-四域架构084-起产品设计基座)）。
+**四域信任边界**：Awareness 是唯一被 Suggestion 域读的数据源。Routing 域**不能**读 Awareness（详见 [platform §5.0](./product-platform-平台.md#50-四域架构084-起产品设计基座)）。
 
 ### 7.2 选中文本感知（UIA 划词）
 
@@ -67,9 +67,14 @@
 | 剪贴板是 URL | `打开链接` |
 | 剪贴板是文件路径 | `打开路径` / `在资源管理器定位` |
 
-**扩展方向**（后续）：
-- 选中代码 → 解释 / 重构 / 查文档
-- 剪贴板是报错日志 → 分析原因 / 搜解决方案
+**扩展方向**（部分已落地，部分仍后续）：
+
+0.12 落地独立对话窗口 + 0.13 落地 MCP client / Skill / 记忆召回 / AI 调用能力后，下列场景在**对话窗口**里已可用——选中或粘贴内容后直接对话即可，AI 能调能力、能查记忆，不再需要 Suggestion 层逐条预埋 Ghost：
+
+- 选中代码 → 解释 / 重构 / 查文档（对话窗口 + AI 能力，已可用）
+- 剪贴板是报错日志 → 分析原因 / 搜解决方案（同上，已可用）
+
+仍在 Suggestion 层后续计划内的（弱意图 Ghost，未落地）：
 - 终端前台且输入框空 → 最近命令 / 补全
 
 **设计要点**：
@@ -90,15 +95,19 @@
 
 ### 8.2 AI / 语音上云的强告知门（0.9+ 产品铁则）
 
-0.9 接云端 Provider、0.10 接云端 STT 后，Context（选区 / 剪贴板 / 前台）和语音录音会发往外部。这是比 0.8 本地感知**敏感一个量级**的隐私变化——语音含声纹（生物特征）。
+0.9 接云端 Provider、0.10 接云端 STT、0.13 接 MCP client 后，Context（选区 / 剪贴板 / 前台）、语音录音、以及**外部 MCP tool 读到的数据**都会发往外部。这是比 0.8 本地感知**敏感一个量级**的隐私变化——语音含声纹（生物特征），MCP tool 返回的数据可能比本机 Context 更敏感（如接了数据库 / 邮件 / 企业 API 后，AI 能间接读到的内容越过本机边界）。
 
 - **第一次启用 AI / 语音必须有强告知门**：发给谁、发什么（文本 / 录音）、存不存、能关什么
 - 发 AI 前 Context 字段需用户开关 + 可脱敏；语音默认本地 STT，云端 STT 需显式开启
 - 录音不持久化、不入 SQLite；成功只记时长
 - 敏感应用黑名单（银行、密码管理器）生效时跳过
-- 详见 [phases/0.9 §4.4](./phases/0.9-ai-layer.md)（密钥安全）+ [phases/0.10 §八](./phases/0.10-voice-agent.md)（语音隐私升级）
+- 详见 [phases/0.9 §4.4](./phases/0.9-ai-layer.md)（密钥安全）+ [phases/0.10 §八](./phases/0.10-voice-agent.md)（语音隐私升级）+ [phases/0.13](./phases/0.13-ai-capability-expansion.md)（MCP client 起外部 tool 数据也走上云链路）
 
-### 8.3 代码签名
+### 8.3 RAG 本地文档向量化的隐私含义（0.20 规划）
+
+0.20 接 RAG 后，用户本地文档会被切片 + embedding 入向量库。embedding 默认走本地（ollama `nomic-embed-text`，文档不上云）；但若用户切到云端 embedding Provider，文档片段会上云做向量化。属于 §8.2「数据上云」性质的延伸，沿用同一套强告知门（切云端 embedding 前显式提示文档片段出本机）。
+
+### 8.4 代码签名
 
 - 开发期可忽略（但需预判杀软误报）
 - 分发前必须代码签名（OV/EV），否则 SmartScreen 拦截 + 杀软误报对常驻 + 全局热键应用是致命的

@@ -4,7 +4,7 @@
 
 > 📖 **产品设计与文档导航**：请先阅读 [docs/production-design/00-overview.md](docs/production-design/00-overview.md) 了解产品定位、里程碑与完整文档体系。改核心前必读对应 phases 文档。
 
-更新时间 20260727
+更新时间 20260729
 
 ---
 
@@ -39,9 +39,11 @@ Blink 是一个 Windows 全局快捷入口，定位不只是「启动器」。**
 - ✅ **0.12.6 对话分组**：参考元宝网页端——侧边栏多层分组层级 + 每组系统提示词 + 拖拽排序 + 折叠持久化 + 内联管理。详见 [phases/0.12-ai-ecosystem.md §五](docs/production-design/phases/0.12-ai-ecosystem.md)
 - ✅ **0.12.7 对话窗口布局体系化**：面包屑标题✅（文件夹路径+对话标题，仅标题可编辑）+ 悬浮 z-index✅ + Signal 信号消息✅（IM 式居中提示：renderSignal + 停止/编辑/上限/错误场景）+ 时间分隔符✅（后端 created_at 透传 + >5min 插入 + 智能日期格式）+ 系统提示词横幅✅（新 IPC + 可滚动非 sticky + 折叠/关闭）+ 工具卡片增强✅（参数预览 + 耗时显示 + JSON 格式化 + header 布局）+ 消息间距优化✅（轮次间距分级：用户消息大间距 / 助手小间距 / Signal 中间距）。测试基线 **875 通过**。
 - ✅ **0.13 AI 调用能力扩展（基础版 + 开放，零嵌入模型依赖）**：MCP client（消费外部 tool，McpTool 进适配层 + tool 可见性控制 + 外部 tool 统一入口）/ ✅ **MCP server（0.13.4 已完成——正向投影 + 暴露 Blink 能力 + 审计日志 caller 字段 + stdio 传输 + 设置页暴露配置，与 client 对称）** / ✅ **自身 CLI 化（0.13.5 已完成——blink mcp-server/search/run/capabilities/config/chat，clap + 最小化 Tauri app 无 GUI）** / ✅ **token-aware context 压缩（0.13.1 已完成——条数窗口 → token 估算 + 接近上限压缩，自建策略不接 rig hook）** / ✅ **记忆 FTS5 召回（0.13.2 已完成——SQLite FTS5 全文检索，load() 裁剪时归档 + BM25 排序 + trigram 中文分词 + `<memory>` 标签注入，零嵌入模型依赖）** / ✅ **Skill 约定式（0.13.3 已完成——SKILL.md 三层目录发现 [Blink `%APPDATA%\blink\skills\` / Claude `~/.claude/skills/` / ZCode `~/.zcode/skills/`] + preamble 渐进式披露 [阶段1摘要常驻 + 阶段2触发全文注入] + `/skill` 显式激活 + `@source` 消歧 + 关键词/正则自动触发 + 设置页来源开关 + 刷新 + 列表展示 + 对话窗口 /skill 提示弹层）** / ✅ **0.13.6 体验增强（MCP 导入 + Skill 粒度开关 + 记忆可视化 + CLI 能力识别）** / ✅ **0.13.7 能力体系收敛（P3 Items 投影剔除 score 噪音 + P2 插件 Action → Capability 迁移：`PluginCapabilityAdapter` 取代 `PluginActionAdapter`，删除 `ActionOutcome::Items` 变体，Action 回归纯副作用语义）**。**核心原则：零嵌入模型依赖——所有功能在用户只有 chat 模型时也完整可用。Skill ≠ Tool：Skill 注入 preamble（教 AI 怎么做），Tool 进 tool 池（让 AI 能做什么）。**测试基线 **1045 通过**。详见 [phases/0.13-ai-capability-expansion.md](docs/production-design/phases/0.13-ai-capability-expansion.md)
-- 🔜 **0.14 AI 调用能力扩展（向量版）**：向量基础设施（zvec 阿里轻量向量库 + embedding 模型管理 + 统一存储/检索）/ 记忆向量召回（混合检索 FTS5 BM25 + zvec cosine，升级 0.13.2）/ RAG 知识库（文档处理流水线 + 混合检索 + search_knowledge_base Capability）/ AI 生成 Skill（LLM 从 --help 生成 SKILL.md）。详见 [phases/0.14-ai-vector-moat.md](docs/production-design/phases/0.14-ai-vector-moat.md)
-- 🔮 **0.15+ 候选（未定案）**：**外部 agent 作 subagent**（把 opencode/pi/claude-code 当 subagent 调用，支持「整理下载文件夹」类文件长任务——rig 支持 agent-as-tool 模式，复用 0.12.0 ToolDyn 适配层零新概念，详见 [灵感卷](docs/production-design/inspiration-external-agent-subagent.md)）/ 事实记忆（tool-based，ChatGPT 式 memory）/ proactivity 主动建议深化。
-- 🧭 **架构决策**：**Agent 后端坚持 rig-core 自建，不用 opencode/pi 当执行端**——opencode/pi 是和 Blink 同层的 agent 产品（非依赖），外包执行端会违反「不做 AI 运行时」边界、报废 0.12-0.14 架构投入。现成 agent 的正确用法是当 subagent/MCP server，不当后端。详见 [ADR-001](docs/production-design/adr-001-agent-backend-strategy.md)。
+- 🔜 **0.14 能力协议重构**：Capability/Action 边界钉死（删 `ActionTool` 适配器，AI 永不直接调 Action；open_url/open_path/reveal 提升为 Capability）/ Cap 协议分层（插件只吐纯 `data`，投影规则 pointer/desc/actions 上移 manifest 做代理——简单插件返回 data + manifest 一行 desc 即可）/ 四出口投影引擎收敛（主窗口 AI / 对话窗口 AI / CLI / MCP server 共用一套 canonical 投影，消除 Blob 摘要逐字重复 4 份 + 修 MCP Items 投影 score 漂移）。详见 [phases/0.14-capability-protocol-refactor.md](docs/production-design/phases/0.14-capability-protocol-refactor.md)
+- 🔮 **0.15-0.19 候选（未定案，中间优化与重构空间）**：待规划。
+- 🔜 **0.20 AI 调用能力扩展（向量版，原 0.14 顺移）**：向量基础设施（zvec 阿里轻量向量库 + embedding 模型管理 + 统一存储/检索）/ 记忆向量召回（混合检索 FTS5 BM25 + zvec cosine，升级 0.13.2）/ RAG 知识库（文档处理流水线 + 混合检索 + search_knowledge_base Capability，依赖 0.14 重构后的干净协议）/ AI 生成 Skill（LLM 从 --help 生成 SKILL.md）。详见 [phases/0.20-ai-vector-moat.md](docs/production-design/phases/0.20-ai-vector-moat.md)
+- 🔮 **0.21+ 候选（未定案）**：**外部 agent 作 subagent**（把 opencode/pi/claude-code 当 subagent 调用，支持「整理下载文件夹」类文件长任务——rig 支持 agent-as-tool 模式，复用 0.12.0 ToolDyn 适配层零新概念，详见 [灵感卷](docs/production-design/phases/_inspiration-external-agent-subagent.md)）/ 事实记忆（tool-based，ChatGPT 式 memory）/ proactivity 主动建议深化。
+- 🧭 **架构决策**：**Agent 后端坚持 rig-core 自建，不用 opencode/pi 当执行端**——opencode/pi 是和 Blink 同层的 agent 产品（非依赖），外包执行端会违反「不做 AI 运行时」边界、报废 0.12-0.20 架构投入。现成 agent 的正确用法是当 subagent/MCP server，不当后端。详见 [ADR-001](docs/production-design/phases/_adr-001-agent-backend-strategy.md)。
 
 ---
 
@@ -128,16 +130,17 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 
 ## 6. 编码约定
 
-| 规则                | 说明                                                                          |
-|-------------------|-----------------------------------------------------------------------------|
-| **配置化优先**         | 可选行为（默认值用户可能想改的）做成配置项 + 合理默认；纯内部参数不暴露。                                      |
-| **关键节点打印日志**     | 关键的节点需要打日志，量要适中且等级合适，开发流程也可以打一些临时日志用来排查问题，但在收尾时要注意清理                        |
+| 规则                | 说明                                                                        |
+|-------------------|---------------------------------------------------------------------------|
+| **配置化优先**         | 可选行为（默认值用户可能想改的）做成配置项 + 合理默认；纯内部参数不暴露。                                    |
+| **关键节点打印日志**      | 关键的节点需要打日志，量要适中且等级合适，开发流程也可以打一些临时日志用来排查问题，但在收尾时要注意清理                      |
 | **统一 tracing 日志** | 禁止散落 `println!/eprintln!`；error=异常、warn=潜在问题、info=状态变化、debug=主流程、trace=诊断细节 |
-| **结构化日志**         | `tracing::debug!(%query, "搜索")` 而非字符串拼接；错误必带上下文 `(%path, %e)`               |
-| **改完自审**          | 每次完成改动后自己 review（diff / 编译 / 副作用）再报告                                        |
-| **平台抽象预留**        | 平台相关逻辑走 `mod.rs` 接口 + `windows.rs` 实现                                       |
-| **不过度工程**         | 0.x 阶段不对外发布，产品化基础设施（manifest 升级/权限强制/插件市场）1.0 前不做                           |
-| **架构要有前瞻性**       | 精心设计持续演进，不过早腐败，不随便堆砌坏味道与技术债，持续收敛，Clean Architecture                         |
+| **结构化日志**         | `tracing::debug!(%query, "搜索")` 而非字符串拼接；错误必带上下文 `(%path, %e)`             |
+| **改完自审**          | 每次完成改动后自己 review（diff / 编译 / 副作用）再报告                                      |
+| **平台抽象预留**        | 平台相关逻辑走 `mod.rs` 接口 + `windows.rs` 实现                                     |
+| **不过度工程**         | 0.x 阶段不对外发布，产品化基础设施（manifest 升级/权限强制/插件市场）1.0 前不做                         |
+| **架构要有前瞻性**       | 精心设计持续演进，不过早腐败，不随便堆砌坏味道与技术债，持续收敛，Clean Architecture                       |
+| **产品UIUX交互**      | tauri的设计中，                                                                |
 
 ---
 

@@ -4,13 +4,13 @@
 >
 > **状态**：✅ 已采纳（2026-07-27）
 >
-> **关联**：[0.13-ai-capability-expansion.md](phases/0.13-ai-capability-expansion.md) / [0.14-ai-vector-moat.md](phases/0.14-ai-vector-moat.md) / [inspiration-external-agent-subagent.md](inspiration-external-agent-subagent.md)
+> **关联**：[0.13-ai-capability-expansion.md](0.13-ai-capability-expansion.md) / [0.14-capability-protocol-refactor.md](0.14-capability-protocol-refactor.md) / [0.20-ai-vector-moat.md](0.20-ai-vector-moat.md) / [_inspiration-external-agent-subagent.md](_inspiration-external-agent-subagent.md)
 
 ---
 
 ## 一、背景
 
-0.13 / 0.14 的规划逐步铺开 MCP client、记忆召回、RAG、Skill、MCP server 等能力。一个自然的疑问被提出：
+0.13 / 0.14（能力协议重构）/ 0.20（向量版）的规划逐步铺开 MCP client、记忆召回、RAG、Skill、MCP server 等能力。一个自然的疑问被提出：
 
 > 我们是不是在朝一个「完整的 agentic 运行时」演进？如果是，为何不用 opencode / pi agent / Claude Code 这类已经做得很完善的现成 agent 作为执行端，而不是基于 rig-core 自己造？
 
@@ -71,9 +71,9 @@ Blink 的对话场景**不碰这个层**。当前 tool 全是读为主或可逆�
 
 1. **场景错配**：opencode/pi 绑定 cwd、为代码仓库设计（LSP/bash/快照）。Blink 是全局快捷入口 + 上下文感知助手，对话场景是「翻译这段」「上次聊的方案」「截图识别」，不是「在仓库里编码」。重机制是死重甚至干扰。
 
-2. **违反产品边界**：0.13/0.14 文档反复写了铁则——**「Blink 不做 AI 运行时」**。opencode 自带完整 AI 运行时（管 session/context/快照）。把它当后端 = Blink 降级成 opencode 的一个前端壳，0.12-0.14 在 agent 能力上的差异化投入全部作废。
+2. **违反产品边界**：0.13/0.14/0.20 文档反复写了铁则——**「Blink 不做 AI 运行时」**。opencode 自带完整 AI 运行时（管 session/context/快照）。把它当后端 = Blink 降级成 opencode 的一个前端壳，0.12-0.20 在 agent 能力上的差异化投入全部作废。
 
-3. **报废护城河**：0.13.4 MCP server 是 Blink 的护城河（暴露 Blink 能力给生态），0.14 RAG 是 Blink 的知识护城河。这些是 Blink 要构建的独特价值。外包 agent 端后，Blink 自己的 Capability（截图/OCR/剪贴板/搜索）反而要反向给 opencode 写 MCP server 才能被其 agent 用——绕一大圈，且与 Blink 自己的 MCP server 护城河功能重叠。
+3. **报废护城河**：0.13.4 MCP server 是 Blink 的护城河（暴露 Blink 能力给生态），0.20 RAG 是 Blink 的知识护城河。这些是 Blink 要构建的独特价值。外包 agent 端后，Blink 自己的 Capability（截图/OCR/剪贴板/搜索）反而要反向给 opencode 写 MCP server 才能被其 agent 用——绕一大圈，且与 Blink 自己的 MCP server 护城河功能重叠。
 
 ## 三、决策
 
@@ -82,20 +82,20 @@ Blink 的对话场景**不碰这个层**。当前 tool 全是读为主或可逆�
 1. **抽象层正确**：rig 在「框架层」，Blink 在「产品层」，二者是地基与建筑的关系。opencode/pi 是「同层不同场景的整机」，是**竞品**而非依赖。
 2. **产品边界守得住**：rig 不假设上层在改文件，Blink 因此不必背「快照/LSP/bash」这些编码 agent 的重包袱，符合「全局快捷入口 + 助手」定位和「常驻内存 < 300MB」指标。
 3. **架构主权完整**：Tool 适配层、SqliteConversationMemory、preamble 组装、gating 四筛子、未来 MCP server 护城河——全部在 Blink 自己手里，演进路径不被外部进程绑架。
-4. **0.13/0.14 投入不白费**：MCP/Skill/记忆召回/RAG 都在「Blink 自己掌控 agent loop」前提下成立。
+4. **0.13/0.14/0.20 投入不白费**：MCP/Skill/记忆召回/RAG 都在「Blink 自己掌控 agent loop」前提下成立。
 
 ### 3.1 唯一缺口：context 压缩
 
 「管 context 压缩」是真实缺口——rig 只给原语（hook）不给策略，opencode/pi 这块**也是各自自建**（这是行业常态，非 Blink 劣势）。Blink 已经规划好更优的路径：
 - **0.13.1 FTS5 召回**（关键词，零嵌入依赖）
 - **0.13.3 token-aware 窗口**（见 0.13 文档新增章节）——补「接近上限时触发压缩」的中间机制
-- **0.14.1 向量召回**（语义）
+- **0.20.1 向量召回**（语义）
 
 Blink 的「窗口 + 召回」路径**比 opencode 的「超限粗暴截断 + LLM 摘要」更精细**，更接近 ChatGPT 的记忆体感。
 
 ### 3.2 现成 agent 的正确用法：当 subagent / MCP server，不当后端
 
-ADR-001 不否定「利用现成 agent 的能力」，只是否定「把执行端交给它们」。正确的利用方式见 [灵感文档](inspiration-external-agent-subagent.md)：通过 **`claude -p` / `opencode serve` 等单次任务接口，把外部 agent 包装成 subagent（agent-as-tool）**，让 Blink 的 supervisor 在需要「复杂文件操作 / 长任务编排」时调用。这条路保留 Blink 架构主权，又借力现成生态——是 0.15+ 候选方向。
+ADR-001 不否定「利用现成 agent 的能力」，只是否定「把执行端交给它们」。正确的利用方式见 [灵感文档](_inspiration-external-agent-subagent.md)：通过 **`claude -p` / `opencode serve` 等单次任务接口，把外部 agent 包装成 subagent（agent-as-tool）**，让 Blink 的 supervisor 在需要「复杂文件操作 / 长任务编排」时调用。这条路保留 Blink 架构主权，又借力现成生态——是 0.21+ 候选方向。
 
 ## 四、何时重新评估此决策
 

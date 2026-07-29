@@ -9,7 +9,7 @@
 //!
 //! **渲染**：走 `kbd.js::renderCombo` 工具生成键帽（与 statusbar / 设置页同源），
 //! 组合键内嵌 `+` 让"Alt+A 是一组"的心智清晰；不同 chord 之间用竖线加大间距的分隔符。
-//! 详见 product-principles §14.7 键盘提示样式统一。
+//! 详见 product-principles-原则 §14.7 键盘提示样式统一。
 //!
 //! **开关**（0.8.5.1 §6.6）：
 //! - `chord_enabled=false` → refresh 直接清空 actions,不 render;keyboard.js 的

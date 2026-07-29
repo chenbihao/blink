@@ -6,9 +6,9 @@
 > 0.9 完成（Agent 地基 + Capability 能力协议层）；
 > 0.10 完成（语音输入）；
 > 0.11 完成（插件 AI toolchain + 截图/OCR/图上翻译）；
-> 0.12.0-0.12.7 全部完成（DB 四层拆分 / Provider 模型统一 / ollama / Tool 适配层 / 独立 chat 窗口 / Alt+Q chord / 多对话管理 / SQLite 持久化 memory / Tool loop / 体验修复 / 功能增强 / 对话分组 / 布局体系化），测试基线 875 passed。0.13 扩展 MCP 双向（client + server）+ CLI 化 + token-aware context 压缩 + 记忆 FTS5 召回 + Skill 约定式（SKILL.md，零嵌入模型依赖）；0.14 升级向量召回 + RAG + AI 生成 Skill；0.15 候选含外部 agent 作 subagent（见灵感卷）。
+> 0.12.0-0.12.7 全部完成（DB 四层拆分 / Provider 模型统一 / ollama / Tool 适配层 / 独立 chat 窗口 / Alt+Q chord / 多对话管理 / SQLite 持久化 memory / Tool loop / 体验修复 / 功能增强 / 对话分组 / 布局体系化），测试基线 875 passed。0.13 扩展 MCP 双向（client + server）+ CLI 化 + token-aware context 压缩 + 记忆 FTS5 召回 + Skill 约定式（SKILL.md，零嵌入模型依赖），测试基线 1045 passed；**0.14 能力协议重构**（Capability/Action 边界钉死 + Cap 协议分层：插件只吐纯 data，投影规则上移 manifest + 四出口投影引擎收敛）；0.20 升级向量召回 + RAG（原 0.14 顺移）；0.15-0.19 留作中间优化与重构空间；0.21+ 候选含外部 agent 作 subagent（见灵感卷）。
 >
-> **更新时间**: 2026-07-27
+> **更新时间**: 2026-07-29
 
 ---
 
@@ -44,12 +44,12 @@
 
 | 文档 | 内容 |
 |---|---|
-| **[product-interaction.md](./product-interaction.md)** | ✅ **交互体验层** —— 产品定位、唤起/焦点/IME、搜索双 lane、右键菜单、Chord 模式、i18n |
-| **[product-platform.md](./product-platform.md)** | 🔧 **平台扩展层** —— 插件系统 + 呈现权 surface 模型、**四域架构 + ExecArg 类型墙**、意图路由、**0.8.6 三个统一入口 trait**、AI 能力方向 |
-| **[product-context-future.md](./product-context-future.md)** | 🔮 **感知与未来** —— Awareness 环境感知（UIA 划词/剪贴板/前台）、主动建议、隐私安全 |
-| **[product-principles.md](./product-principles.md)** | 📋 **横切原则** —— 已知取舍、日志规范、演进时间线、**最小操作路径准则、可辨识度与视觉一致性** |
-| **[inspiration-external-agent-subagent.md](./inspiration-external-agent-subagent.md)** | 💡 **灵感卷** —— 外部 agent（opencode/pi/claude-code）作 subagent 调用的可行性调研与 0.15+ 候选方向 |
-| **[adr-001-agent-backend-strategy.md](./adr-001-agent-backend-strategy.md)** | 🧭 **ADR-001** —— Agent 后端策略：为何坚持 rig-core 自建，不用 opencode/pi 当执行端 |
+| **[product-interaction-交互.md](./product-interaction-交互.md)** | ✅ **交互体验层** —— 产品定位、唤起/焦点/IME、搜索双 lane、右键菜单、Chord 模式、i18n |
+| **[product-platform-平台.md](./product-platform-平台.md)** | 🔧 **平台扩展层** —— 插件系统 + 呈现权 surface 模型、**四域架构 + ExecArg 类型墙**、意图路由、**三个统一入口 trait**、AI 能力方向（Capability/Action 边界）|
+| **[product-context-future-感知.md](./product-context-future-感知.md)** | 🔮 **感知与未来** —— Awareness 环境感知（UIA 划词/剪贴板/前台）、主动建议、隐私安全 |
+| **[product-principles-原则.md](./product-principles-原则.md)** | 📋 **横切原则** —— 已知取舍、日志规范、演进时间线、**最小操作路径准则、可辨识度与视觉一致性** |
+| **[_inspiration-external-agent-subagent.md](./phases/_inspiration-external-agent-subagent.md)** | 💡 **灵感卷** —— 外部 agent（opencode/pi/claude-code）作 subagent 调用的可行性调研与 0.21+ 候选方向 |
+| **[_adr-001-agent-backend-strategy.md](./phases/_adr-001-agent-backend-strategy.md)** | 🧭 **ADR-001** —— Agent 后端策略：为何坚持 rig-core 自建，不用 opencode/pi 当执行端 |
 
 ### 2.2 各阶段技术实现文档
 
@@ -70,8 +70,9 @@
 | **0.11** | [phases/0.11-plugin-ai-toolchain.md](./phases/0.11-plugin-ai-toolchain.md) | 插件通信契约重设计 + AI 调用插件链路完善 + 截图标注增强 + OCR word 级链路 + 阅读模式 + 翻译衔接 + 水印独立图层（0.11.0~0.11.9） | ✅ 完成 |
 | **0.11.10** | [phases/0.11-plugin-ai-toolchain.md](./phases/0.11-plugin-ai-toolchain.md#210-图上翻译--截图交互重构01110) | 图上翻译 + 截图交互重构 —— `overlayLayer` 单例图层（识别/翻译共用一层,`mode` 切换）+ 面板降级为召唤式抽屉 + 工具栏加[选取]默认工具 + 预热 OCR + 误点保护 + 命名 OCR→识别 + line 级批量翻译 + 背景遮罩三档 + 字号自适应 | ✅ 基本完成 |
 | **0.12** | [phases/0.12-ai-ecosystem.md](./phases/0.12-ai-ecosystem.md) | AI 能力架构搭建（0.12.0 基础设施 / 0.12.1 对话窗口 + Alt+Q chord / 0.12.2 Chat 体验优化 / 0.12.3 多对话 + SQLite memory + Tool loop / 0.12.4 体验修复 / 0.12.5 功能增强 / 0.12.6 对话分组 + 系统提示词） | ✅ 完成 |
-| **0.13** | [phases/0.13-ai-capability-expansion.md](./phases/0.13-ai-capability-expansion.md) | AI 调用能力扩展基础版 + 开放（MCP client 消费外部 tool / MCP server 暴露 Blink 能力护城河 / 自身 CLI 化 / token-aware context 压缩补 0.12.3 滑动窗口缺口 / 记忆 FTS5 召回 SQLite 全文检索零嵌入模型依赖 / Skill 约定式复用 ~/.claude/skills 等通用目录+preamble 注入） | 📋 规划中 |
-| **0.14** | [phases/0.14-ai-vector-moat.md](./phases/0.14-ai-vector-moat.md) | AI 调用能力扩展向量版（zvec 向量基础设施 / 记忆向量召回混合检索 / RAG 知识库 / AI 生成 Skill） | 📋 规划中 |
+| **0.13** | [phases/0.13-ai-capability-expansion.md](./phases/0.13-ai-capability-expansion.md) | AI 调用能力扩展基础版 + 开放（MCP client 消费外部 tool / MCP server 暴露 Blink 能力护城河 / 自身 CLI 化 / token-aware context 压缩补 0.12.3 滑动窗口缺口 / 记忆 FTS5 召回 SQLite 全文检索零嵌入模型依赖 / Skill 约定式复用 ~/.claude/skills 等通用目录+preamble 注入） | ✅ 完成 |
+| **0.14** | [phases/0.14-capability-protocol-refactor.md](./phases/0.14-capability-protocol-refactor.md) | **能力协议重构** —— Capability/Action 边界钉死（删 ActionTool，AI 永不直接调 Action）+ Cap 协议分层（插件只吐纯 data，投影规则 pointer/desc/actions 上移 manifest 做代理）+ 四出口投影引擎收敛（主窗口 AI / 对话窗口 AI / CLI / MCP 共用 canonical） | 📋 规划中 |
+| **0.20** | [phases/0.20-ai-vector-moat.md](./phases/0.20-ai-vector-moat.md) | AI 调用能力扩展向量版（zvec 向量基础设施 / 记忆向量召回混合检索 / RAG 知识库 / AI 生成 Skill） | 📋 规划中 |
 
 ### 2.3 其他参考
 
@@ -120,9 +121,11 @@
 | **0.12.4** | 体验修复与优化（侧边栏 / 模型下拉 / 对话标题 / 设置跳转 / 语音输入 / 工具调用渲染 / 消息宽度）| ✅ 完成 |
 | **0.12.5** | 功能增强（引导泡泡 / LLM 标题命名 / 设置页对话配置 / 消息编辑重发 / 导出 / 代码高亮）| ✅ 完成 |
 | **0.12.6** | 对话分组（多层文件夹 + 分组系统提示词 + 拖拽排序 + 折叠持久化 + 内联管理）| ✅ 完成 |
-| **0.13.x** | AI 调用能力扩展基础版 + 开放（MCP client / MCP server 护城河 / CLI 化 / token-aware context 压缩 / 记忆 FTS5 召回 / Skill 约定式 SKILL.md）| 📋 规划中 |
-| **0.14.x** | AI 调用能力扩展向量版（zvec 向量基础设施 / 记忆向量召回 / RAG 知识库 / AI 生成 Skill）| 📋 规划中 |
-| **0.15+** | 候选：外部 agent（opencode/pi/claude-code）作 subagent 调用 / 事实记忆（tool-based）/ proactivity 深化（见灵感卷）| 🔮 候选 |
+| **0.13.x** | AI 调用能力扩展基础版 + 开放（MCP client / MCP server 护城河 / CLI 化 / token-aware context 压缩 / 记忆 FTS5 召回 / Skill 约定式 SKILL.md）| ✅ 完成 |
+| **0.14.x** | **能力协议重构**（Capability/Action 边界钉死 / Cap 协议分层：插件只吐纯 data + manifest 投影规则 / 四出口投影引擎收敛）| 📋 规划中 |
+| **0.15-0.19** | 中间优化与重构空间（候选未定案）| 🔮 候选 |
+| **0.20.x** | AI 调用能力扩展向量版（zvec 向量基础设施 / 记忆向量召回 / RAG 知识库 / AI 生成 Skill）| 📋 规划中 |
+| **0.21+** | 候选：外部 agent（opencode/pi/claude-code）作 subagent 调用 / 事实记忆（tool-based）/ proactivity 深化（见灵感卷）| 🔮 候选 |
 
 ---
 
@@ -132,12 +135,12 @@
 
 | 你想了解 | 看这里 |
 |---|---|
-| 热键为什么是 Alt+Space? Chord 模式怎么工作? | [product-interaction.md §2](./product-interaction.md) |
-| 插件系统怎么设计的? 意图路由怎么实现? | [product-platform.md §4-5](./product-platform.md) |
-| 四域架构（Awareness/Suggestion/Routing/Execution）铁则? | [product-platform.md §5.0](./product-platform.md) |
-| 0.8.6 架构骨架（Action trait / SuggestionProducer / ConfigStore）? | [product-platform.md §7](./product-platform.md) + [phases/0.8 §八](./phases/0.8-context-interaction.md) |
-| 选中文本/剪贴板感知怎么做?隐私如何保证? | [product-context-future.md](./product-context-future.md) |
-| 最小操作路径准则 / 中文不斜体 / 键盘提示统一 | [product-principles.md §13-14](./product-principles.md) |
+| 热键为什么是 Alt+Space? Chord 模式怎么工作? | [product-interaction-交互.md §2](./product-interaction-交互.md) |
+| 插件系统怎么设计的? 意图路由怎么实现? | [product-platform-平台.md §4-5](./product-platform-平台.md) |
+| 四域架构（Awareness/Suggestion/Routing/Execution）铁则? | [product-platform-平台.md §5.0](./product-platform-平台.md) |
+| 三个统一入口（Capability/Action / SuggestionProducer / ConfigStore）? | [product-platform-平台.md §7](./product-platform-平台.md) + [phases/0.8 §八](./phases/0.8-context-interaction.md) |
+| 选中文本/剪贴板感知怎么做?隐私如何保证? | [product-context-future-感知.md](./product-context-future-感知.md) |
+| 最小操作路径准则 / 中文不斜体 / 键盘提示统一 | [product-principles-原则.md §13-14](./product-principles-原则.md) |
 | 0.8 感知与操作层在做什么? | [phases/0.8-context-interaction.md](./phases/0.8-context-interaction.md) |
 | 0.9 Agent 地基 + Capability 能力协议层怎么落? | [phases/0.9-ai-layer.md](./phases/0.9-ai-layer.md) |
 | 0.10 语音输入(STT + 语音打字)? | [phases/0.10-voice-agent.md](./phases/0.10-voice-agent.md) |
@@ -145,8 +148,9 @@
 | 0.11.10 图上翻译 + 截图交互重构? | [phases/0.11-plugin-ai-toolchain.md §2.10](./phases/0.11-plugin-ai-toolchain.md#210-图上翻译--截图交互重构01110) |
 | 0.12 AI 能力架构搭建（对话窗口 + Alt+Q chord / 对话机制 / DB 四层拆分 / Provider 模型统一管理 / ollama+lmstudio）? | [phases/0.12-ai-ecosystem.md](./phases/0.12-ai-ecosystem.md) |
 | 0.13 AI 调用能力扩展基础版 + 开放（MCP client / MCP server / CLI 化 / token-aware context 压缩 / 记忆 FTS5 召回 / Skill 约定式 SKILL.md）? | [phases/0.13-ai-capability-expansion.md](./phases/0.13-ai-capability-expansion.md) |
-| 0.14 AI 调用能力扩展向量版（zvec / 记忆向量召回 / RAG / AI 生成 Skill）? | [phases/0.14-ai-vector-moat.md](./phases/0.14-ai-vector-moat.md) |
-| 为何坚持 rig-core 自建 agent，不用 opencode/pi 当执行端? | [adr-001-agent-backend-strategy.md](./adr-001-agent-backend-strategy.md) |
-| 外部 agent 能否作为 subagent 调用（整理下载文件夹类场景）? | [inspiration-external-agent-subagent.md](./inspiration-external-agent-subagent.md) |
+| 0.14 能力协议重构（Capability/Action 边界钉死 / Cap 协议分层：插件只吐纯 data + manifest 投影 / 四出口投影引擎收敛）? | [phases/0.14-capability-protocol-refactor.md](./phases/0.14-capability-protocol-refactor.md) |
+| 0.20 AI 调用能力扩展向量版（zvec / 记忆向量召回 / RAG / AI 生成 Skill）? | [phases/0.20-ai-vector-moat.md](./phases/0.20-ai-vector-moat.md) |
+| 为何坚持 rig-core 自建 agent，不用 opencode/pi 当执行端? | [_adr-001-agent-backend-strategy.md](./phases/_adr-001-agent-backend-strategy.md) |
+| 外部 agent 能否作为 subagent 调用（整理下载文件夹类场景）? | [_inspiration-external-agent-subagent.md](./phases/_inspiration-external-agent-subagent.md) |
 | 开发规范、模块拆分、Tauri Commands | [CLAUDE.md](../../CLAUDE.md) |
  

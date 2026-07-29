@@ -20,10 +20,10 @@ production-design/
 ├── README.md                      ← 本文件:目录导航 + 运作规则
 ├── 00-overview.md                 ← ⭐️ 入口必读:产品愿景 + 文档导航 + 里程碑总览
 │
-├── product-interaction.md         ← 产品卷①:交互体验(定位/唤起/焦点/搜索/右键/Chord/i18n)
-├── product-platform.md            ← 产品卷②:插件+呈现权/四域架构/意图路由/统一入口trait/AI方向
-├── product-context-future.md      ← 产品卷③:Awareness环境感知/主动建议/隐私安全
-├── product-principles.md          ← 产品卷④:已知取舍/日志规范/时间线/最小操作路径/视觉一致性
+├── product-interaction-交互.md         ← 产品卷①:交互体验(定位/唤起/焦点/搜索/右键/Chord/i18n)
+├── product-platform-平台.md            ← 产品卷②:插件+呈现权/四域架构/意图路由/统一入口trait/AI方向
+├── product-context-future-感知.md      ← 产品卷③:Awareness环境感知/主动建议/隐私安全
+├── product-principles-原则.md          ← 产品卷④:已知取舍/日志规范/时间线/最小操作路径/视觉一致性
 │
 └── phases/                        ← 版本档案:每个版本的架构设计 + 实现总结
     ├── 0.1-base.md                     ← MVP基础交互
@@ -33,12 +33,16 @@ production-design/
     ├── 0.5-config-search-extension.md  ← 配置架构 + 文件搜索 + 扩展系统
     ├── 0.6-plugin-packaging-scripting.md ← 插件打包 + Python/Node.js脚本支持
     ├── 0.7-plugin-ecosystem-local-search.md ← 插件生态 + 本地搜索Fallback + 性能统计
-    ├── 0.8-context-interaction.md      ← 感知与操作层:UIA划词+Autosuggestion+四域架构+Chord+0.8.6架构固化
-    ├── 0.9-ai-layer.md                 ← 📋 Agent 地基:统一 tool 架构+Provider 多档+主窗口文本闭环(零语音)
+    ├── 0.8-context-interaction.md      ← ✅ 感知与操作层:UIA划词+Autosuggestion+四域架构+Chord+0.8.6架构固化
+    ├── 0.9-ai-layer.md                 ← ✅ Agent 地基:统一 tool 架构+Provider 多档+主窗口文本闭环+Capability 能力协议层
     ├── 0.10-voice-agent.md             ← ✅ 语音输入:STT+语音打字+伪流式 VAD 切句+FunASR 本地化
-    ├── 0.11-plugin-ai-toolchain.md    ← ✅ 插件通信契约重设计+AI 调用插件链路完善+截图标注增强+OCR word 级+翻译衔接+图上翻译
-    ├── 0.12-ai-ecosystem.md           ← 🔧 AI 能力架构搭建（0.12.0 完成 / 0.12.1 进行中）:对话窗口+Alt+Q chord+DB 四层拆分+Provider 统一+ollama+Tool 适配层
-    └── 0.13-ai-capability-expansion.md ← 📋 AI 调用能力扩展:MCP client+RAG+记忆向量召回+MCP server+Skill
+    ├── 0.11-plugin-ai-toolchain.md     ← ✅ 插件通信契约重设计+AI 调用插件链路+截图标注增强+OCR word 级+图上翻译
+    ├── 0.12-ai-ecosystem.md            ← ✅ AI 能力架构搭建:对话窗口+Alt+Q chord+DB 四层拆分+Provider 统一+ollama+多对话+分组
+    ├── 0.13-ai-capability-expansion.md ← ✅ 能力扩展基础版+开放:MCP client/server+CLI 化+token-aware 压缩+记忆 FTS5 召回+Skill
+    ├── 0.14-capability-protocol-refactor.md ← 📋 能力协议重构:Capability/Action 边界钉死+Cap 协议分层+投影引擎收敛
+    ├── 0.20-ai-vector-moat.md          ← 📋 能力扩展向量版:zvec+记忆向量召回+RAG 知识库
+    ├── _adr-001-agent-backend-strategy.md ← 🧭 ADR:为何坚持 rig-core 自建 agent
+    └── _inspiration-external-agent-subagent.md ← 💡 灵感卷:外部 agent 作 subagent 调研
 ```
 
 ---
@@ -58,10 +62,10 @@ production-design/
 ### 新增产品决策时
 
 1. 判断属于哪个域 → 写进对应 `product-*.md`
-    - 交互/热键/搜索体验 → `product-interaction.md`
-    - 插件/意图/AI/架构骨架 → `product-platform.md`
-    - Context/隐私/未来演进 → `product-context-future.md`
-    - 横切取舍/工程规范/时间线/横切设计准则 → `product-principles.md`
+    - 交互/热键/搜索体验 → `product-interaction-交互.md`
+    - 插件/意图/AI/架构骨架 → `product-platform-平台.md`
+    - Context/隐私/未来演进 → `product-context-future-感知.md`
+    - 横切取舍/工程规范/时间线/横切设计准则 → `product-principles-原则.md`
 2. 若该决策当期落地，同步进 `phases/{version}-*.md`
 
 **留档原则**（2026-07-05 起精简后）：
@@ -86,14 +90,14 @@ production-design/
 
 ### 文档间引用
 
-- **纯文件名 + §号**（如 `0.2-core-plugin-design.md §3`、`product-platform.md §5.0`）
+- **纯文件名 + §号**（如 `0.2-core-plugin-design.md §3`、`product-platform-平台.md §5.0`）
 - **改文件名/移动时**，全局搜旧引用并同步更新（CLAUDE.md、src 代码注释、文档间都会引用）
 
 ### 与代码的关系
 
 - `CLAUDE.md` = **给 Claude Code 的工作指引**（怎么改代码）
 - 本目录 = **产品设计留档**（为什么这么设计）
-- 代码注释里"见 product-platform.md §5.0 / phases/0.8 §五"即指回此目录
+- 代码注释里"见 product-platform-平台.md §5.0 / phases/0.8 §五"即指回此目录
 
 ---
 

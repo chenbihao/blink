@@ -10,7 +10,7 @@
    主窗口 statusbar / 设置页快捷键 / Chord 提示 UI 复用同一套。
    尺寸随父级 font-size（em 单位），line-height 不撑高父行——适合内联。
    本文件被 index.html + settings.html 同时引用。
-   设计准则：docs/production-design/product-principles.md §14.7 键盘提示样式统一。 */
+   设计准则：docs/production-design/product-principles-原则.md §14.7 键盘提示样式统一。 */
 
 .kbd {
   display: inline-block;

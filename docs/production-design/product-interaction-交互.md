@@ -2,7 +2,7 @@
 
 > 用户直接感知的体验层：产品定位、唤起/焦点/IME、搜索、右键菜单、Chord、i18n。
 >
-> 配套：`product-platform.md`（插件/意图/AI）· `product-context-future.md`（Context/隐私）· `product-principles.md`（横切原则）· `phases/` 技术实现。
+> 配套：`product-platform-平台.md`（插件/意图/AI）· `product-context-future-感知.md`（Context/隐私）· `product-principles-原则.md`（横切原则）· `phases/` 技术实现。
 
 ---
 
@@ -14,15 +14,15 @@
 
 Blink 把"选中英文 → 翻译"、"复制 URL → 打开"、"截图 → OCR 提取文字"这类多步骤操作，变成一次快捷键或一个 Tab。整个体验围绕**丝滑**展开——唤起快、响应快、操作路径短。
 
-通过 **Chord 模式**（主窗口按住 Alt + 字母键）可以快速调用截图、翻译、语音输入等增强能力。底层是**能力化架构**：每个功能都封装为标准 Capability，可供 AI 调用（详见 [platform §6.1](./product-platform.md)）。
+通过 **Chord 模式**（主窗口按住 Alt + 字母键）可以快速调用截图、翻译、语音输入等增强能力。底层是**能力化架构**：数据型能力封装为 **Capability**（AI 可调用），副作用型动作用 **Action**（本地执行，AI 不直接调）。0.14 后边界用类型系统钉死（详见 [platform §6.1](./product-platform-平台.md)）。
 
 ### 1.2 核心原则
 
 | 原则 | 含义 |
 |---|---|
 | **任何操作都比原来快** | 唤起 → 输入 → 执行，全程 &lt; 1 秒，比鼠标/菜单快 |
-| **最小操作路径** | 优先更快 → 再更丝滑 → 最后更智能；弱意图信号 pull 不 push；永远保留 escape hatch（见 [principles §13](./product-principles.md#13-最小操作路径横切设计准则)） |
-| **可辨识度优先** | UI 是功能面不是装饰面；中文不用斜体；对比度过 AA；弱信号不撑布局（见 [principles §14](./product-principles.md#14-可辨识度与视觉一致性横切设计准则)） |
+| **最小操作路径** | 优先更快 → 再更丝滑 → 最后更智能；弱意图信号 pull 不 push；永远保留 escape hatch（见 [principles §13](./product-principles-原则.md#13-最小操作路径横切设计准则)） |
+| **可辨识度优先** | UI 是功能面不是装饰面；中文不用斜体；对比度过 AA；弱信号不撑布局（见 [principles §14](./product-principles-原则.md#14-可辨识度与视觉一致性横切设计准则)） |
 | **P0 至上** | 用户按快捷键后不能立即输入，其他一切没有意义 |
 | **配置化优先** | 用户可能想改的行为做成配置项 + 合理默认；纯内部参数不暴露 |
 
@@ -62,13 +62,16 @@ Blink 把"选中英文 → 翻译"、"复制 URL → 打开"、"截图 → OCR �
 
 **交互**：主窗可见 + Alt hold 状态驱动。前端 `chordEligible` 门禁 = 主窗 shown + query 空 + 结果空 + `chord_enabled=true`，同时驱动触发与 Ghost overlay 提示条显示。
 
-**Chord 三剑客**：
+**Chord 四件套**（当前注册表 `build_default_registry`）：
 
 | 组合键 | 动作 | Surface |
 |---|---|---|
-| `Alt+A` | 区域截图（0.8.7） | 全屏截图覆盖 |
-| `Alt+Q` | 划词翻译 | 独立悬浮球（不抢焦点，用户去原应用选文本后 confirm） |
+| `Alt+A` | 区域截图（0.8.7 → 0.11.7/0.11.10 重构） | 全屏截图覆盖（选区 + 7 种标注 + OCR + 钉图；0.11.10 加 `overlayLayer` 单例图层支持图上翻译） |
+| `Alt+Q` | AI 对话窗口（0.12.1） | 独立 chat 窗口（不抢主窗焦点，见 §2.5） |
 | `Alt+C` | 剪贴板历史 | Default（填 "剪贴板 " → `ClipboardEngine` 独占返回） |
+| `Alt+Space` hold | 语音输入（0.10） | 主窗 `#query` 或前台应用光标 |
+
+截图交互 0.11.10 大改（`overlayLayer` 单例图层、面板抽屉化、选取工具、预热 OCR），详见 [phases/0.11 §2.7-2.10](./phases/0.11-plugin-ai-toolchain.md)。
 
 **产品价值**：跳过搜索步骤直触发；差异化竞争（Wox/Listary/Flow Launcher 都没有）；扩展性强（新高频动作可接入）。
 
@@ -83,14 +86,17 @@ Blink 把"选中英文 → 翻译"、"复制 URL → 打开"、"截图 → OCR �
 
 支持云端（OpenAI Whisper / Groq）和本地（FunASR SenseVoice，离线免费）双引擎，伪流式 VAD 切句 + 累积预览实现边说边出字。
 
-### 2.5 Agent 对话窗口（0.12 规划）
+### 2.5 Agent 对话窗口（0.12 已完成）
 
-> Chord 模式下 `Alt+Q` 唤起独立 AI 对话窗口（0.12 规划）。
+> Chord 模式下 `Alt+Q` 唤起独立 AI 对话窗口（0.12.1+ 已落地，0.12.0-0.12.7 全部完成）。
 
 轻量路由判定「需要多轮 / 主窗口不够展示」时，**不自动展开**——产 Suggestion 供用户确认才展开。自动展开会抢焦点、打断心流。
 
-- 独立 Agent 窗口，流式 MD 渲染（打字机 + 代码高亮 + 复制）
-- 对话机制：conversation 隔离 + 持久化 memory + tool loop 无限轮
+- **独立 chat 窗口** + **Alt+Q chord** 唤起，与主窗口单轮 AI 严格隔离（`AgentProvider` vs `AIProvider`）
+- **流式 Markdown**（打字机 + highlight.js 代码高亮 + 复制按钮 + thinking 块渲染）
+- **多对话管理**：conversation 隔离 + 分组（多层文件夹 + 每分组系统提示词 + 拖拽排序 + 折叠持久化）
+- **SQLite memory**（`SqliteConversationMemory` impl rig，滑动窗口 20 条 + 完整历史 + 重启恢复）
+- **Tool loop**：`CapabilityTool` 适配层接入 Capability，`default_max_turns(50)`，dangerous tool emit 确认事件后挂起 await 用户确认
 - Context 可注入（选区 / 剪贴板 / 前台，可逐项关）
 - 详见 [phases/0.12-ai-ecosystem.md](./phases/0.12-ai-ecosystem.md)
 
@@ -164,4 +170,4 @@ Blink 把"选中英文 → 翻译"、"复制 URL → 打开"、"截图 → OCR �
 - **UI 文案**：统一走 i18n key（后端 `LocalizableText` + 前端 i18n 库），插件 manifest 支持 zh/en 双语字段
 - **Intent 触发关键词**：多语言支持（中文用户期望 `翻译`/`查IP`，英文用户期望 `translate`/`ip`），Router 反查按 UI 语言字符集偏好选 keyword
 - **本地化格式**：日期/数字/计算结果按 locale 格式化
-- **键盘提示**：全项目统一走 `kbd.js::renderKey/renderCombo`，不用 macOS 符号（详见 [principles §14.7](./product-principles.md#147-键盘提示样式统一强制规则)）
+- **键盘提示**：全项目统一走 `kbd.js::renderKey/renderCombo`，不用 macOS 符号（详见 [principles §14.7](./product-principles-原则.md#147-键盘提示样式统一强制规则)）
