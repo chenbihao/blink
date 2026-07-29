@@ -146,6 +146,11 @@ fn parse_level(level: &str) -> String {
     // 污染——blink 自身的 chat_service / agent_provider / tool_adapter 日志足以覆盖
     // 诊断需求。
     //
+    // **rmcp 压到 warn**（0.13.9 修复）:rmcp 的 `serve_inner` span 在 TRACE 下打印
+    // 每条 JSON-RPC 消息的完整内容（含 tool 列表 schema，单条数千行），与 rig 同类噪音。
+    // MCP 连接/握手/工具调用结果由 blink 自身的 mcp::client 日志覆盖，rmcp 内部协议
+    // 细节无诊断价值。压到 warn 后 ERROR（连接失败）和 WARN 仍可见。
+    //
     // **AI 详细日志开关**（0.12.6）:设置页可开启临时解除 rig/rig_core 压制,
     // 打印完整 AI 对话上下文（system prompt、tool 列表、SSE 帧等），用于深度排查。
     let ai_verbose = AI_VERBOSE.load(Ordering::Relaxed);
@@ -158,10 +163,10 @@ fn parse_level(level: &str) -> String {
     };
     match level {
         "trace" => {
-            format!("trace,sqlx=warn,tauri=warn,tao=warn,hyper=warn,reqwest=warn,{ai_noise}")
+            format!("trace,sqlx=warn,tauri=warn,tao=warn,hyper=warn,reqwest=warn,rmcp=warn,{ai_noise}")
         }
-        "debug" => format!("debug,sqlx=warn,tauri=warn,{ai_noise}"),
-        "info" => format!("info,sqlx=warn,tauri=warn,{ai_noise}"),
+        "debug" => format!("debug,sqlx=warn,tauri=warn,rmcp=warn,{ai_noise}"),
+        "info" => format!("info,sqlx=warn,tauri=warn,rmcp=warn,{ai_noise}"),
         _ => "error".to_string(),
     }
 }

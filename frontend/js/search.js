@@ -71,9 +71,32 @@ export function getSeq() {
   return seq;
 }
 
-/** 用当前输入重新触发一次搜索（右键菜单重置记录后刷新结果用）。 */
+/**
+ * 用当前输入重新触发一次搜索。
+ *
+ * - 非空 query：走 onInput（debounce + render，不 clear）
+ * - 空 query：直接 fetchContextSuggestions（不 clear 旧结果，避免闪烁）
+ *
+ * **与 onInput 空 query 路径的关键区别**：
+ * onInput 在用户退格清空时会 `results.clear()` + `ghost.clear()` 再
+ * `fetchContextSuggestions()`——因为用户主动清空意味着旧结果已不相关。
+ * 而 retrigger 用于 awareness-updated（选区就绪 / 剪贴板变化）和右键菜单
+ * 重置后刷新——此时旧结果仍相关，应等新响应到达后由 results.render
+ * 自动替换（ensureSeq seq 变化 → allItems 重置 → renderPage 重建），
+ * 而非先清空再重绘，避免「旧结果消失 → 新结果到达」之间的视觉闪烁。
+ *
+ * 用于：
+ * - lifecycle `blink://awareness-updated` → retrigger
+ * - contextmenu `resetItemHistory` 后 retrigger
+ */
 export function retrigger() {
-  onInput();
+  if (queryEl.value.trim()) {
+    onInput();
+  } else {
+    // 不走 onInput 的 clear 路径——fetchContextSuggestions 内部 ++seq
+    // 会作废在途请求，新响应到达后 results.render 自动替换旧结果。
+    fetchContextSuggestions();
+  }
 }
 
 /**
@@ -118,9 +141,10 @@ function onInput() {
   clearTimeout(timer);
   const q = queryEl.value.trim();
   if (!q) {
-    // 空 query：作废在途请求 + 清结果，Ghost 交给 lifecycle 的 fetchContextSuggestions
-    // 兜底（shown 时已调过）。若用户从"输入 → 全部退格清空"到这一步,
-    // 单独跑一次 fetchContextSuggestions 保证 Ghost 与状态同步。
+    // 空 query（用户退格清空）：作废在途请求 + 清结果 + 重新拉 Context 建议。
+    // 此处 clear 是正确的——用户主动清空意味着旧结果已不相关。
+    // 注意：awareness-updated 走 retrigger() 而非 onInput()，不会经过此
+    // clear 路径，避免「旧结果消失 → 新结果到达」的闪烁（见 retrigger 注释）。
     seq++;
     results.clear();
     ghost.clear();

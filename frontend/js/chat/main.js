@@ -25,6 +25,11 @@ let rafHandle = 0;
 /** 当前 assistant 消息 DOM 引用 */
 let currentAssistantEl = null;
 
+/** 对话窗口是否已被用户实际打开（区分预热 vs 真正显示）。
+ *  preheat 在启动 3s 后创建隐藏的 chat 窗口，JS init() 会执行但窗口不可见。
+ *  此标记用于阻止预热阶段触发 MCP 连接——只在窗口首次获得焦点（真正显示）后才连接。 */
+let windowActivated = false;
+
 /** 当前 Tool 状态卡 DOM 引用 */
 let currentToolEl = null;
 
@@ -41,6 +46,8 @@ async function init() {
     }
     // 0.13.0：MCP 配置变更时刷新 tool 池
     if (e?.payload?.key === "mcp:servers") {
+      // 预热阶段（windowActivated=false）跳过——窗口未真正打开，不触发 MCP 连接
+      if (!windowActivated) return;
       // 0.13.8: 设置页切换 MCP server 开关后，对话窗口需要重连 + 刷新 popup
       ipc.ensureMcpConnected().then(() => {
         refreshToolPool(true);
@@ -112,18 +119,9 @@ bindLinkOpener();
   }
   refreshModelSelector();
 
-  // 0.13.8: 对话窗口打开时触发 MCP lazy connect——持久连接所有 enabled server。
-  // 之前只等用户发消息时才 ensure_connected，导致 popup 读 runtime status 全是 Offline。
-  // 现在打开窗口即后台连接，连接完成后刷新 tool 池 + 清 popup 缓存。
-  ipc.ensureMcpConnected().then(() => {
-    refreshToolPool(true);
-    invalidateComposerBarCache();
-    refreshPopupIfVisible();
-  }).catch((e) => {
-    console.warn("[chat] ensureMcpConnected 失败:", e);
-  });
-
   // 0.13.0：加载 tool 池规模 + MCP tool 名称（供工具卡片来源标记）
+  // 注意：此处不触发 MCP 连接——预热阶段窗口不可见，无需拉起 MCP server 子进程。
+  // MCP lazy connect 在窗口首次获得焦点（真正显示给用户）时由 focus 事件触发。
   refreshToolPool(true);
 
   // Composer bar 悬浮预览 popup 初始化
@@ -152,8 +150,11 @@ bindLinkOpener();
 
   // 窗口获得焦点时自动聚焦输入框 + 刷新 tool 池（MCP server 可能在设置页被启停）
   // 0.13.8: focus 时也触发 ensure_mcp_connected，让掉线的 server 重新连接
+  // 0.13.9: 首次 focus 标记窗口已激活——preheat 创建的隐藏窗口不会收到 focus 事件，
+  //         只有 show_chat_window → set_focus() 真正显示时才触发，避免预热阶段拉起 MCP。
   window.addEventListener("focus", () => {
     focusInput();
+    windowActivated = true;
     ipc.ensureMcpConnected().then(() => {
       refreshToolPool(true);
       invalidateComposerBarCache();

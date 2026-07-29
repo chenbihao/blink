@@ -44,9 +44,9 @@ let onChangeCallback = null;
 // ── 冻结机制（0.10 语音预览独占 overlay）──────────────────────────────────────
 // 语音录音期间 voice-partial 直接写 ghostSuggest 显示 preview 文本。
 // 0.10.7 起 voice-partial 不再 dispatch input（避免录音期间触发无意义空 query 搜索），
-// 但 awareness-updated（剪贴板变化等）→ search.retrigger() → onInput → ghost.update()
-// 仍可能在录音期间发生并覆写 overlay → 闪屏。freeze 后 update/clear 只更新内部状态
-// + notify，不碰 DOM；unfreeze 时恢复当前 suggestion 到 DOM。
+// 但 awareness-updated（剪贴板变化等）→ search.retrigger() → fetchContextSuggestions
+// → ghost.update() 仍可能在录音期间发生并覆写 overlay → 闪屏。freeze 后 update/clear
+// 只更新内部状态 + notify，不碰 DOM；unfreeze 时恢复当前 suggestion 到 DOM。
 let frozen = false;
 let lastQuery = "";
 
