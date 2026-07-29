@@ -797,6 +797,12 @@ pub async fn get_chat_messages(
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
+                // 剥离 chat_service 注入的时间后缀（\n\n[当前时间：...]），不展示给用户
+                let text = if let Some(idx) = text.rfind("\n\n[当前时间：") {
+                    text[..idx].to_string()
+                } else {
+                    text
+                };
                 snapshots.push(ChatMessageSnapshot {
                     role,
                     text,
@@ -859,7 +865,7 @@ pub async fn get_chat_messages(
 pub async fn open_settings_tab(app: tauri::AppHandle, tab: String) -> Result<(), String> {
     // 0.12.8: 白名单校验——eval 字符串拼接存在注入风险
     const ALLOWED_TABS: &[&str] = &[
-        "general", "engines", "plugins", "ai", "local-model", "voice",
+        "general", "engines", "plugins", "ai-providers", "ai-chat", "voice",
         "context", "chord", "hotkey", "network", "storage", "debug", "about",
     ];
     if !ALLOWED_TABS.contains(&tab.as_str()) {
@@ -1359,9 +1365,11 @@ pub async fn ocr_image(
 /// 0.11.9-d：翻译文本命令——OCR 面板/工具栏"翻译"按钮的后端入口。
 ///
 /// **绕过 AI 路径**：翻译是确定性动作(用户主动点按钮),不该经过 AI 意图判断
-/// + 网络往返。直接走 `ActionRegistry` 找 translate 插件的 `translate` tool
-/// (id = `builtin_translate_translate`),用 `ExecArg::UserExplicit(json_args)`
-/// 执行,拿 `ActionOutcome::Items` 返 `items[0].title` 即译文。
+/// + 网络往返。直接走 `CapabilityRegistry` 找 translate 插件的 `translate` tool
+/// (id = `builtin_translate_translate`),调 `invoke()` 拿 `CapabilityResult::Items`，
+/// 读 `items[0].payload.translated` 即译文。
+///
+/// **0.13.7 迁移**：从 ActionRegistry 迁到 CapabilityRegistry（插件体系收敛）。
 ///
 /// **参数**：
 /// - `text`: 待翻译文本（必填）
@@ -1370,7 +1378,7 @@ pub async fn ocr_image(
 /// **失败模式**：
 /// - 插件未启用 / manifest 未加载 → 返 `"翻译插件未安装或未启用"`
 /// - 插件返回空/错误 → 传递原错误信息
-/// - 插件返回非 Items outcome → `"翻译插件返回意外的结果类型"`(理论不会,防御)
+/// - 插件返回非 Items 结果 → `"翻译插件返回意外的结果类型"`(理论不会,防御)
 #[tauri::command]
 pub async fn translate_text(
     app: tauri::AppHandle,
@@ -1382,13 +1390,13 @@ pub async fn translate_text(
         return Err("翻译文本不能为空".into());
     }
 
-    let registry = app.state::<std::sync::Arc<crate::domain::execution::ActionRegistry>>();
+    let registry = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
     // translate 插件的 tool 注册 id = plugin_tool_id("builtin.translate", "translate")
-    const TRANSLATE_ACTION_ID: &str = "builtin_translate_translate";
-    let Some(action) = registry.get(TRANSLATE_ACTION_ID) else {
+    const TRANSLATE_CAPABILITY_ID: &str = "builtin_translate_translate";
+    if registry.get(TRANSLATE_CAPABILITY_ID).is_none() {
         tracing::warn!("translate_text: 翻译插件未注册");
         return Err("翻译插件未安装或未启用".into());
-    };
+    }
 
     // 构造插件 tool arguments —— text 必填,target_lang 有值才传(None 让插件读 setting)
     let mut args = serde_json::Map::new();
@@ -1414,14 +1422,18 @@ pub async fn translate_text(
         "translate_text: 调翻译插件"
     );
 
-    let cx = crate::domain::execution::ActionContext::from_arguments(&app, arguments);
-    let outcome = action
-        .execute(&cx)
+    // 构造 InvokeContext（确定性调用，无超时——翻译插件内部已有 manifest timeout_ms）
+    let ctx = crate::domain::capability::InvokeContext {
+        app_handle: &app,
+        deadline: None,
+    };
+    let result = registry
+        .invoke(TRANSLATE_CAPABILITY_ID, arguments, &ctx)
         .await
         .map_err(|e| format!("翻译执行失败: {e}"))?;
 
-    match outcome {
-        crate::domain::execution::ActionOutcome::Items { items } => {
+    match result {
+        crate::domain::capability::CapabilityResult::Items { items } => {
             // 优先读 payload.translated（干净译文）；title 是 UI 展示用的，
             // 插件会给它加前缀 emoji（如 "📝 {result}"），不能当数据用。
             let translated = items
@@ -1441,12 +1453,12 @@ pub async fn translate_text(
             );
             Ok(translated)
         }
-        crate::domain::execution::ActionOutcome::Copy { text, .. } => {
-            // 兼容:如果插件未来改走 Copy outcome,也取到译文
-            Ok(text)
+        crate::domain::capability::CapabilityResult::Text { content } => {
+            // 兼容:如果插件未来改走 Text 结果,也取到译文
+            Ok(content)
         }
         other => {
-            tracing::warn!(?other, "translate_text: 翻译插件返回意外的 outcome");
+            tracing::warn!(?other, "translate_text: 翻译插件返回意外的结果");
             Err("翻译插件返回意外的结果类型".into())
         }
     }
@@ -1454,10 +1466,10 @@ pub async fn translate_text(
 
 /// 从 translate_batch 的首项 payload 读取保序结果。
 fn parse_translate_batch_payload(
-    outcome: &crate::domain::execution::ActionOutcome,
+    result: &crate::domain::capability::CapabilityResult,
     expected: usize,
 ) -> Option<Vec<String>> {
-    let crate::domain::execution::ActionOutcome::Items { items } = outcome else {
+    let crate::domain::capability::CapabilityResult::Items { items } = result else {
         return None;
     };
     let results = items.first()?.payload.get("results")?.as_array()?;
@@ -1499,9 +1511,9 @@ pub async fn translate_lines(
         return Ok(lines);
     }
 
-    const TRANSLATE_BATCH_ACTION_ID: &str = "builtin_translate_translate_batch";
-    let registry = app.state::<std::sync::Arc<crate::domain::execution::ActionRegistry>>();
-    if let Some(action) = registry.get(TRANSLATE_BATCH_ACTION_ID) {
+    const TRANSLATE_BATCH_CAPABILITY_ID: &str = "builtin_translate_translate_batch";
+    let registry = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
+    if registry.get(TRANSLATE_BATCH_CAPABILITY_ID).is_some() {
         let texts: Vec<String> = non_empty.iter().map(|(_, text)| text.clone()).collect();
         let mut args = serde_json::Map::new();
         args.insert("texts".into(), serde_json::json!(texts));
@@ -1515,14 +1527,21 @@ pub async fn translate_lines(
                 serde_json::Value::String(lang.to_string()),
             );
         }
-        let cx = crate::domain::execution::ActionContext::from_arguments(
-            &app,
-            serde_json::Value::Object(args),
-        );
-        match action.execute(&cx).await {
-            Ok(outcome) => {
+        let ctx = crate::domain::capability::InvokeContext {
+            app_handle: &app,
+            deadline: None,
+        };
+        match registry
+            .invoke(
+                TRANSLATE_BATCH_CAPABILITY_ID,
+                serde_json::Value::Object(args),
+                &ctx,
+            )
+            .await
+        {
+            Ok(result) => {
                 if let Some(batch_results) =
-                    parse_translate_batch_payload(&outcome, non_empty.len())
+                    parse_translate_batch_payload(&result, non_empty.len())
                 {
                     let mut results = lines.clone();
                     for ((idx, _), translated) in non_empty.iter().zip(batch_results) {
@@ -5532,7 +5551,12 @@ pub async fn upsert_mcp_server(
     let pools = app.state::<crate::infra::data::DbPools>();
     crate::domain::mcp::McpServerConfigStore::upsert(&pools.config, config)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // 0.13.8: 广播配置变更事件
+    let _ = app.emit("blink://config-changed", serde_json::json!({ "key": "mcp:servers" }));
+
+    Ok(())
 }
 
 /// 删除 MCP server 配置（同时停止已连接的 server）。
@@ -5548,7 +5572,12 @@ pub async fn delete_mcp_server(
     let pools = app.state::<crate::infra::data::DbPools>();
     crate::domain::mcp::McpServerConfigStore::delete(&pools.config, &name)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // 0.13.8: 广播配置变更事件
+    let _ = app.emit("blink://config-changed", serde_json::json!({ "key": "mcp:servers" }));
+
+    Ok(())
 }
 
 /// 设置 MCP server 的 enabled 状态。
@@ -5573,6 +5602,9 @@ pub async fn set_mcp_server_enabled(
         manager.stop_server(&name).await;
         tracing::info!(server = %name, "MCP: server 已禁用并停止");
     }
+
+    // 0.13.8: 广播配置变更事件，让对话窗口 popup 刷新
+    let _ = app.emit("blink://config-changed", serde_json::json!({ "key": "mcp:servers" }));
 
     Ok(())
 }
@@ -5676,6 +5708,9 @@ pub async fn set_mcp_server_disabled_tools(
         .update_disabled_tools(&name, disabled_tools)
         .await;
 
+    // 0.13.8: 广播配置变更事件
+    let _ = app.emit("blink://config-changed", serde_json::json!({ "key": "mcp:servers" }));
+
     Ok(())
 }
 
@@ -5778,13 +5813,31 @@ pub async fn batch_set_mcp_enabled(
     Ok(())
 }
 
+/// 0.13.8: 触发 MCP lazy connect——持久连接所有 enabled 但尚未连接的 server。
+///
+/// 供对话窗口打开时调用，让 popup 能显示正确的在线状态。
+/// 与 `ensure_provider` 中的 `ensure_connected` 调用相同，但此处不依赖 ChatService——
+/// 对话窗口 init 时即可调用，不需要等用户发消息。
+/// 单个 server 连接失败只记状态（Offline），不影响其他 server。
+#[tauri::command]
+pub async fn ensure_mcp_connected(
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
+    manager.ensure_connected(&pools.config).await;
+    Ok(())
+}
+
 /// 获取对话窗口 tool 池规模（内置 + MCP，供前端显示）。
 #[tauri::command]
 pub async fn get_mcp_tool_pool_size(
     app: tauri::AppHandle,
 ) -> serde_json::Value {
     let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
-    let mcp_tools = manager.collect_tools().await.len();
+    // 0.13.8: 用轻量 count_tools() 替代 collect_tools().len()，
+    // 避免仅为取一个数字就构造完整的 McpTool（clone + Box 分配）
+    let mcp_tools = manager.count_tools().await;
 
     // 内置 tool 数 = Capability 数 + ai_eligible Action 数
     let cap_registry = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
@@ -5853,9 +5906,160 @@ pub async fn compress_context_now(
     let chat = app
         .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
         .ok_or("ChatService 未注册")?;
-    let status = chat.compute_context_status(&conversation_id).await;
+    let status = chat.compute_context_status(&conversation_id, None, None).await;
     let _ = app.emit_to("chat", "blink://chat-context-status", &status);
     Ok(status)
+}
+
+// ── Composer bar 悬浮预览快照 ──────────────────────────────────────────────
+
+/// Composer bar 悬浮预览中单个内置工具的摘要。
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct BuiltinToolSummary {
+    pub name: String,
+    pub description: String,
+}
+
+/// Composer bar 悬浮预览中单个 MCP server 的摘要。
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct McpServerSummary {
+    pub name: String,
+    pub transport: String,
+    pub online: bool,
+    pub tool_count: usize,
+    /// 该 server 提供的 tool 名称列表（非 disabled 的）。
+    pub tool_names: Vec<String>,
+}
+
+/// Composer bar 悬浮预览快照——一次 IPC 聚合所有 popup 数据。
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ComposerBarSnapshot {
+    // ── 上：上下文容量 ──
+    pub estimated_tokens: usize,
+    pub context_limit: usize,
+    pub usage_percent: u8,
+    pub last_compressed: bool,
+    pub last_compressed_count: usize,
+    pub last_recall_count: usize,
+    /// 系统提示词（preamble）估算 token 数。
+    pub preamble_tokens: usize,
+    /// 当前待发消息估算 token 数。
+    pub pending_message_tokens: usize,
+    // ── 中：内置工具 ──
+    pub builtin_tools: Vec<BuiltinToolSummary>,
+    // ── 下：MCP 服务 ──
+    pub mcp_servers: Vec<McpServerSummary>,
+    // ── 汇总 ──
+    pub builtin_count: usize,
+    pub mcp_count: usize,
+    pub total_count: usize,
+}
+
+/// 获取 composer bar 悬浮预览快照（一次 IPC 聚合上下文 + 内置 tool + MCP 服务）。
+///
+/// 供前端 composer bar hover popup 使用——避免前端发 4 个 IPC 请求拼装。
+#[tauri::command]
+pub async fn get_composer_bar_snapshot(
+    app: tauri::AppHandle,
+) -> Result<ComposerBarSnapshot, String> {
+    use tauri::Manager;
+
+    // ── 上：上下文容量（从 ChatService 缓存读）──
+    let (estimated_tokens, context_limit, usage_percent, last_compressed, last_compressed_count, last_recall_count, preamble_tokens, pending_message_tokens) =
+        if let Some(chat) = app.try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>() {
+            let cs = chat.last_context_status();
+            if let Some(s) = cs {
+                (s.estimated_tokens, s.context_limit, s.usage_percent, s.last_compressed, s.last_compressed_count, s.last_recall_count, s.preamble_tokens, s.pending_message_tokens)
+            } else {
+                (0, 0, 0, false, 0, 0, 0, 0)
+            }
+        } else {
+            (0, 0, 0, false, 0, 0, 0, 0)
+        };
+
+    // ── 中：内置工具（Capability + ai_eligible Action）──
+    let cap_registry = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
+    let action_registry = app.state::<std::sync::Arc<crate::domain::execution::ActionRegistry>>();
+
+    let mut builtin_tools: Vec<BuiltinToolSummary> = cap_registry
+        .list()
+        .into_iter()
+        .map(|s| BuiltinToolSummary {
+            name: s.name,
+            description: s.description,
+        })
+        .collect();
+
+    // Action 中 ai_eligible 的也加入
+    for (_, action) in action_registry.entries() {
+        if action.ai_eligible() {
+            let schema = action.schema();
+            builtin_tools.push(BuiltinToolSummary {
+                name: schema.name,
+                description: schema.description,
+            });
+        }
+    }
+
+    let builtin_count = builtin_tools.len();
+
+    // ── 下：MCP 服务（含 online/offline + tool 列表）──
+    let pools = app.state::<crate::infra::data::DbPools>();
+    let configs = crate::domain::mcp::McpServerConfigStore::load_all(&pools.config)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
+
+    let mut mcp_servers: Vec<McpServerSummary> = Vec::new();
+    let mut mcp_count = 0;
+
+    for config in configs {
+        let transport = match &config.transport {
+            crate::domain::mcp::config::McpTransport::Stdio => "stdio",
+            crate::domain::mcp::config::McpTransport::Sse { .. } => "sse",
+            crate::domain::mcp::config::McpTransport::Http { .. } => "http",
+        };
+
+        // 用 connected map 作为 online 的真相源——statuses 可能被 test_connection
+        // 的 transient 探测覆盖成 Offline，但持久连接仍在 connected map 中。
+        let server_tools = manager.get_server_tools(&config.name).await;
+        let online = server_tools.is_some();
+        let tool_names: Vec<String> = if let Some(tools) = server_tools {
+            tools.into_iter()
+                .filter(|t| !t.disabled)
+                .map(|t| t.name)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let tool_count = tool_names.len();
+
+        mcp_count += tool_count;
+        mcp_servers.push(McpServerSummary {
+            name: config.name,
+            transport: transport.to_string(),
+            online,
+            tool_count,
+            tool_names,
+        });
+    }
+
+    Ok(ComposerBarSnapshot {
+        estimated_tokens,
+        context_limit,
+        usage_percent,
+        last_compressed,
+        last_compressed_count,
+        last_recall_count,
+        preamble_tokens,
+        pending_message_tokens,
+        builtin_tools,
+        mcp_servers,
+        builtin_count,
+        mcp_count,
+        total_count: builtin_count + mcp_count,
+    })
 }
 
 // ── 0.13.4 MCP server（暴露 Blink 能力）─────────────────────────────────
@@ -6213,12 +6417,11 @@ pub async fn delete_skill(skill_dir: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{parse_translate_batch_payload, version_gt};
-    use crate::domain::capability::ItemResult;
-    use crate::domain::execution::ActionOutcome;
+    use crate::domain::capability::{CapabilityResult, ItemResult};
 
     #[test]
     fn translate_batch_payload_requires_matching_string_array() {
-        let outcome = ActionOutcome::Items {
+        let result = CapabilityResult::Items {
             items: vec![ItemResult {
                 title: "批量翻译".into(),
                 subtitle: None,
@@ -6227,12 +6430,12 @@ mod tests {
             }],
         };
         assert_eq!(
-            parse_translate_batch_payload(&outcome, 2).unwrap(),
+            parse_translate_batch_payload(&result, 2).unwrap(),
             vec!["你好".to_string(), "世界".to_string()]
         );
-        assert!(parse_translate_batch_payload(&outcome, 1).is_none());
+        assert!(parse_translate_batch_payload(&result, 1).is_none());
 
-        let malformed = ActionOutcome::Items {
+        let malformed = CapabilityResult::Items {
             items: vec![ItemResult {
                 title: "批量翻译".into(),
                 subtitle: None,

@@ -1,23 +1,33 @@
-//! 插件 tool 的 Action 适配器(0.9.3)——让插件能力注册进 ActionRegistry。
+//! 插件 tool 的 Capability 适配器（0.13.7）——让插件能力注册进 CapabilityRegistry。
 //!
-//! AI 路由层通过 `ActionRegistry::get(id)` 拿到 `PluginActionAdapter`,
-//! 调 `execute()` 时走 JSONL ToolCall IPC 到插件子进程。
+//! **演进背景**：0.9.3 起，插件 tool 通过 `PluginActionAdapter`（impl `Action`）注册进
+//! `ActionRegistry`，靠 `ActionOutcome::Items` 借用 Capability 的 Items 模型。0.13.7
+//! 收敛双体系——插件 tool 的语义本就是「纯计算→返回结果」（入参→出参，不碰 UI），
+//! 天然属于 Capability 范畴。迁移后：
+//! - 插件进 `CapabilityRegistry`，与 `search_files` / `read_clipboard` 等并列
+//! - `ActionOutcome::Items` 变体删除，Action 回归纯粹（Copy/Open/Emit/Nop 副作用意图）
+//! - 插件 `ToolDef.sensitive` 字段有处安放（`CapabilitySchema.sensitive`）
 //!
-//! **设计决策**:
-//! - 复用 `ActionKind::Copy` + payload 模式展示结果(与 0.9.2 AI 文本回答一致)
-//! - `danger_class` 从 manifest `ToolDef` 读取,默认 Safe
-//! - `title` 用插件 manifest 的 `name` + tool 的 `name` 组合
+//! AI 路由层通过 `CapabilityRegistry::get(id)` 拿到本 adapter，调 `invoke()` 时走
+//! JSONL ToolCall IPC 到插件子进程，返回 `CapabilityResult::Items`。
+//!
+//! **危险操作**：`danger_class == Dangerous` 的插件 tool 仍可被 AI 调用，但
+//! `CapabilityTool::call`（tool_adapter.rs）的 `check_dangerous_confirm` 会挂起等用户
+//! 确认——弹窗在 ToolDyn 适配层，不进 `cap.invoke()`，不破坏 Capability「不碰 UI」铁则。
 
 use std::sync::Arc;
 
+use serde_json::Value;
 use tauri::Manager;
 
-use crate::domain::execution::{
-    Action, ActionContext, ActionOutcome, ActionSchema, DangerClass, ExecError,
+use crate::domain::capability::{
+    Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
 };
-use crate::domain::plugin::manifest::{DangerClassDef, LocalizableText, ToolDef};
+use crate::domain::execution::DangerClass;
+use crate::domain::plugin::manifest::{DangerClassDef, ToolDef};
 
 use super::process::PluginHandle;
+use super::protocol::{PluginAction, PluginItem};
 
 /// 构造插件 tool 的全局唯一 id。
 ///
@@ -34,43 +44,36 @@ pub fn plugin_tool_id(plugin_id: &str, tool_name: &str) -> String {
     format!("{sanitized}_{tool_name}")
 }
 
-/// 插件 tool 的 Action 适配器——桥接 `Action` trait 与插件 JSONL IPC。
+/// 插件 tool 的 Capability 适配器——桥接 `Capability` trait 与插件 JSONL IPC。
 ///
-/// 启动时由 `main.rs` 遍历插件 manifest 的 `tools` 字段创建,
-/// 注册进 `ActionRegistry` 与 builtin 动作并列。
-pub struct PluginActionAdapter {
+/// 启动时由 `main.rs` 遍历插件 manifest 的 `tools` 字段创建，
+/// 注册进 `CapabilityRegistry` 与 builtin 能力（search_files 等）并列。
+pub struct PluginCapabilityAdapter {
     plugin: Arc<PluginHandle>,
     /// manifest 中的原始 tool name（如 "translate"）——传给插件子进程用。
     tool_name: String,
-    /// 全局唯一 id = `plugin_tool_id(plugin_id, tool_name)`——注册进 ActionRegistry 的 key。
+    /// 全局唯一 id = `plugin_tool_id(plugin_id, tool_name)`——注册进 CapabilityRegistry 的 key。
     /// 仅含 `[a-zA-Z0-9_]`，满足 Anthropic / OpenAI tool name 正则 `^[a-zA-Z0-9_-]+$`。
     id: String,
-    schema: ActionSchema,
+    schema: CapabilitySchema,
     danger: DangerClass,
-    title: LocalizableText,
 }
 
-impl PluginActionAdapter {
+impl PluginCapabilityAdapter {
     /// 从 manifest `ToolDef` + 插件句柄构造。
-    pub fn new(
-        plugin: Arc<PluginHandle>,
-        tool_def: &ToolDef,
-        plugin_display_name: &LocalizableText,
-    ) -> Self {
+    pub fn new(plugin: Arc<PluginHandle>, tool_def: &ToolDef) -> Self {
         let plugin_id = plugin.id().to_string();
         let id = plugin_tool_id(&plugin_id, &tool_def.name);
-        let schema = ActionSchema {
+        let schema = CapabilitySchema {
             name: id.clone(),
             description: tool_def.description.clone(),
             parameters: tool_def.parameters.clone(),
+            sensitive: tool_def.sensitive,
         };
         let danger = match tool_def.danger_class {
             DangerClassDef::Safe => DangerClass::Safe,
             DangerClassDef::Dangerous => DangerClass::Dangerous,
         };
-        // title = "{插件名}：{tool名}" 例如 "翻译：translate"
-        let plugin_name = plugin_display_name.resolve("zh");
-        let title = LocalizableText::Plain(format!("{plugin_name}：{}", tool_def.name));
 
         Self {
             plugin,
@@ -78,27 +81,17 @@ impl PluginActionAdapter {
             id,
             schema,
             danger,
-            title,
         }
     }
 }
 
 #[async_trait::async_trait]
-impl Action for PluginActionAdapter {
+impl Capability for PluginCapabilityAdapter {
     fn id(&self) -> &str {
         &self.id
     }
 
-    fn title(&self) -> &LocalizableText {
-        &self.title
-    }
-
-    fn subtitle(&self) -> &LocalizableText {
-        // 插件 tool 没有独立 subtitle,用 title 代替
-        &self.title
-    }
-
-    fn schema(&self) -> ActionSchema {
+    fn schema(&self) -> CapabilitySchema {
         self.schema.clone()
     }
 
@@ -106,9 +99,13 @@ impl Action for PluginActionAdapter {
         self.danger
     }
 
-    async fn execute(&self, cx: &ActionContext<'_>) -> Result<ActionOutcome, ExecError> {
+    async fn invoke(
+        &self,
+        args: Value,
+        ctx: &InvokeContext<'_>,
+    ) -> Result<CapabilityResult, CapabilityError> {
         let plugin_id = self.plugin.id();
-        let settings = cx
+        let settings = ctx
             .app_handle
             .state::<std::sync::Arc<super::engine::PluginEngine>>()
             .get_settings(plugin_id);
@@ -116,23 +113,32 @@ impl Action for PluginActionAdapter {
         tracing::debug!(
             plugin = %plugin_id,
             tool = %self.tool_name,
-            args = %cx.arguments,
-            "插件 tool-call 执行"
+            args = %args,
+            "插件 tool-call 执行（Capability 路径）"
         );
+
+        // 铁则 1 前置检查：deadline 已过则不启动插件进程
+        if ctx.is_expired() {
+            return Err(CapabilityError::Timeout {
+                detail: format!("插件 tool {} 截止时刻已过，不启动", self.tool_name),
+            });
+        }
 
         let items = self
             .plugin
-            .execute_tool(&self.tool_name, &cx.arguments, settings.as_ref())
+            .execute_tool(&self.tool_name, &args, settings.as_ref())
             .await
-            .map_err(|e| ExecError::Runtime(format!("插件 tool 执行失败: {e}")))?;
+            .map_err(|e| CapabilityError::Internal {
+                detail: format!("插件 tool 执行失败: {e}"),
+            })?;
 
         if items.is_empty() {
-            return Err(ExecError::Runtime("插件返回空结果".into()));
+            return Err(CapabilityError::Internal {
+                detail: "插件返回空结果".into(),
+            });
         }
 
-        // 0.11.0 改进 1: 不截断——投影全量 PluginItem → ItemResult，返回 ActionOutcome::Items。
-        // 老实现只取 items[0] 导致"查 IP 只拿到局域网值"；现全量保留，
-        // 消费方（handle_ai_tool_calls）走统一投影路径（items_to_entries）。
+        // 投影全量 PluginItem → ItemResult（不截断，保留全量结果给 AI/前端）
         let results: Vec<crate::domain::capability::ItemResult> =
             items.iter().map(plugin_item_to_item_result).collect();
 
@@ -143,11 +149,11 @@ impl Action for PluginActionAdapter {
             "插件 tool-call 完成（全量结果）"
         );
 
-        Ok(ActionOutcome::Items { items: results })
+        Ok(CapabilityResult::Items { items: results })
     }
 }
 
-/// PluginItem → ItemResult 投影（0.11.0 改进 1）。
+/// PluginItem → ItemResult 投影（0.11.0 改进 1，0.13.7 从 action.rs 迁入）。
 ///
 /// **投影规则**（文档 §2.1）：
 /// - `payload` 优先取 `PluginItem.payload`（新字段，结构化数据给 AI）；
@@ -156,11 +162,9 @@ impl Action for PluginActionAdapter {
 ///
 /// 兜底逻辑保证老插件（不填 payload）也能正常工作——AI 从 payload 读到结构化数据，
 /// 而非从展示文本反推。新插件应在 tool-call 路径下主动填 payload。
-fn plugin_item_to_item_result(
-    item: &super::protocol::PluginItem,
+pub(crate) fn plugin_item_to_item_result(
+    item: &PluginItem,
 ) -> crate::domain::capability::ItemResult {
-    use super::protocol::PluginAction;
-
     let payload = item.payload.clone().unwrap_or_else(|| match &item.action {
         PluginAction::Copy { text } => serde_json::json!({ "text": text }),
         PluginAction::Open { path } => serde_json::json!({ "path": path }),
@@ -183,7 +187,7 @@ mod tests {
 
     #[test]
     fn adapter_id_matches_tool_name() {
-        // 构造一个假的 PluginHandle 需要 manifest + dir,这里只测字段映射
+        // 验证 schema 映射正确——id 带 plugin_id 前缀（下划线分隔）
         let tool_def = ToolDef {
             name: "translate".into(),
             description: "翻译文本".into(),
@@ -191,29 +195,22 @@ mod tests {
             danger_class: DangerClassDef::Safe,
             ..Default::default()
         };
-        // 验证 schema 映射正确——id 带 plugin_id 前缀（下划线分隔）
-        let schema = ActionSchema {
-            name: plugin_tool_id("myplugin", &tool_def.name),
-            description: tool_def.description.clone(),
-            parameters: tool_def.parameters.clone(),
-        };
-        assert_eq!(schema.name, "myplugin_translate");
-        assert_eq!(schema.description, "翻译文本");
+        let id = plugin_tool_id("myplugin", &tool_def.name);
+        assert_eq!(id, "myplugin_translate");
+        assert_eq!(tool_def.description, "翻译文本");
     }
 
     #[test]
     fn danger_class_maps_correctly() {
-        let safe = DangerClassDef::Safe;
-        let dangerous = DangerClassDef::Dangerous;
         assert_eq!(
-            match safe {
+            match DangerClassDef::Safe {
                 DangerClassDef::Safe => DangerClass::Safe,
                 DangerClassDef::Dangerous => DangerClass::Dangerous,
             },
             DangerClass::Safe
         );
         assert_eq!(
-            match dangerous {
+            match DangerClassDef::Dangerous {
                 DangerClassDef::Safe => DangerClass::Safe,
                 DangerClassDef::Dangerous => DangerClass::Dangerous,
             },
@@ -222,20 +219,10 @@ mod tests {
     }
 
     #[test]
-    fn title_format_is_plugin_colon_tool() {
-        let plugin_name = LocalizableText::Plain("翻译".into());
-        let tool_name = "translate";
-        let title = LocalizableText::Plain(format!("{}：{}", plugin_name.resolve("zh"), tool_name));
-        assert_eq!(title.resolve("zh"), "翻译：translate");
-    }
-
-    #[test]
     fn id_uses_plugin_prefix_format() {
         // 验证 id 格式 = plugin_tool_id(plugin_id, tool_name)——全局唯一
         // 且仅含 [a-zA-Z0-9_]，满足 Anthropic/OpenAI tool name 正则 ^[a-zA-Z0-9_-]+$
-        let plugin_id = "my_translator";
-        let tool_name = "translate";
-        let id = plugin_tool_id(plugin_id, tool_name);
+        let id = plugin_tool_id("my_translator", "translate");
         assert_eq!(id, "my_translator_translate");
     }
 
@@ -244,11 +231,10 @@ mod tests {
         // builtin.translate:translate → builtin_translate_translate
         let id = plugin_tool_id("builtin.translate", "translate");
         assert_eq!(id, "builtin_translate_translate");
-        // 验证满足正则
         assert!(id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
     }
 
-    // ── 0.11.0 改进 1: plugin_item_to_item_result 投影 ────────────────────────
+    // ── plugin_item_to_item_result 投影（从 action.rs 迁移）──────────────────
 
     #[test]
     fn projection_uses_payload_when_present() {

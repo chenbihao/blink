@@ -14,6 +14,58 @@ let messagesEl = null;
 /** @type {((msgIndex: number, newText: string) => void)|null} 编辑消息回调（0.12.5 §5.5） */
 let onEditMessage = null;
 
+/** 用户是否手动上滚（不在底部）——为 true 时暂停自动滚到底部 */
+let userScrolledUp = false;
+
+/** @type {HTMLElement|null} "回到底部" 浮动按钮 */
+let scrollBottomBtn = null;
+
+/** 判断消息容器是否在底部（允许 80px 阈值） */
+function isAtBottom() {
+  if (!messagesEl) return true;
+  const threshold = 80;
+  return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < threshold;
+}
+
+/** 创建「回到底部」浮动按钮 */
+function ensureScrollBottomBtn() {
+  if (scrollBottomBtn) return;
+  scrollBottomBtn = document.createElement("button");
+  scrollBottomBtn.className = "chat-scroll-bottom-btn";
+  scrollBottomBtn.title = "回到底部";
+  scrollBottomBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`;
+  scrollBottomBtn.addEventListener("click", () => {
+    forceScrollToBottom();
+  });
+  // 插入到 chat-messages 的父容器（chat-main）中，absolute 定位
+  const chatMain = messagesEl?.parentElement;
+  if (chatMain) chatMain.appendChild(scrollBottomBtn);
+}
+
+/** 强制滚动到底部并重置用户上滚标记 */
+export function forceScrollToBottom() {
+  userScrolledUp = false;
+  if (scrollBottomBtn) scrollBottomBtn.classList.remove("visible");
+  if (messagesEl) {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+}
+
+/** 绑定 scroll 事件监听用户手动滚动 */
+function bindScrollListener() {
+  if (!messagesEl) return;
+  messagesEl.addEventListener("scroll", () => {
+    if (isAtBottom()) {
+      userScrolledUp = false;
+      if (scrollBottomBtn) scrollBottomBtn.classList.remove("visible");
+    } else {
+      userScrolledUp = true;
+      ensureScrollBottomBtn();
+      if (scrollBottomBtn) scrollBottomBtn.classList.add("visible");
+    }
+  });
+}
+
 /**
  * 初始化组件模块，绑定 DOM 引用。
  * @param {{onEditMessage?: (msgIndex: number, newText: string) => void}} [callbacks]
@@ -21,6 +73,7 @@ let onEditMessage = null;
 export function initComponents(callbacks = {}) {
   messagesEl = document.getElementById("chat-messages");
   onEditMessage = callbacks.onEditMessage || null;
+  bindScrollListener();
 }
 
 /**
@@ -37,6 +90,9 @@ export function getLastAssistantEl() {
  */
 export function clearMessages() {
   if (messagesEl) messagesEl.innerHTML = "";
+  // 重置滚动状态
+  userScrolledUp = false;
+  if (scrollBottomBtn) scrollBottomBtn.classList.remove("visible");
 }
 
 /**
@@ -50,12 +106,14 @@ export function renderUserMessage(text) {
   el.className = "chat-msg chat-msg-user";
   el.textContent = text;
   el.dataset.rawText = text;
-  // 0.12.6：hover 操作行（复制 + 编辑）
+  // 0.12.6：hover 操作行（复制 + 编辑 + 重试）
   const actions = createActionsRow();
   actions.appendChild(createCopyAction(rawText => el.dataset.rawText || rawText));
   if (onEditMessage) {
     actions.appendChild(createEditAction(() => startEditMessage(el, el.dataset.rawText || text)));
   }
+  // 重试 = 重新发送此用户消息（与 assistant 的 retry 对称）
+  actions.appendChild(createRetryAction());
   el.appendChild(actions);
   messagesEl.appendChild(el);
   scrollToBottom();
@@ -248,101 +306,85 @@ function injectCodeCopyButtons(el) {
   });
 }
 
-// ── 消息编辑重发（0.12.5 §5.5 → 0.12.6 样式重构）───────────────────────────────
+// ── 消息编辑重发（0.12.5 §5.5 → 原地编辑重构）────────────────────────────────
 
 /**
- * 启动消息编辑——将消息气泡变为内联编辑区。
- * Enter 重发，Esc 取消。Shift+Enter 换行。底部有确认/取消按钮。
- * @param {HTMLElement} el 用户消息元素
+ * 启动消息编辑——在原泡泡上原地切换为编辑态。
+ *
+ * 设计：不清空泡泡、不自建容器。直接把 textContent 换成 textarea，
+ * textarea 继承泡泡的背景色/字体/圆角。自动拉伸高度（无滚动条）。
+ * 泡泡左侧外浮一个 ✓ 确认按钮。Enter 确认、Esc 取消。
+ *
+ * @param {HTMLElement} el 用户消息元素（.chat-msg-user）
  * @param {string} originalText 原始文本
  */
 function startEditMessage(el, originalText) {
-  // 计算消息索引（在 state.messages 中的位置）
   const allMsgs = messagesEl.querySelectorAll(".chat-msg");
   const msgIndex = Array.from(allMsgs).indexOf(el);
   if (msgIndex < 0) return;
 
-  // 移除操作行
-  const actions = el.querySelector(".chat-msg-actions");
-  if (actions) actions.remove();
+  // 切换到编辑态（CSS 控制：隐藏 actions、调整 padding）
+  el.classList.add("editing");
 
-  // 构建编辑容器
-  const editWrap = document.createElement("div");
-  editWrap.className = "chat-edit-wrap";
-
+  // 创建 textarea，替换文本内容
   const textarea = document.createElement("textarea");
-  textarea.className = "chat-edit-textarea";
+  textarea.className = "chat-edit-input";
   textarea.value = originalText;
   textarea.rows = 1;
-  editWrap.appendChild(textarea);
+  textarea.setAttribute("placeholder", "编辑消息…");
 
-  // 底部操作行：取消 + 发送
-  const editBar = document.createElement("div");
-  editBar.className = "chat-edit-bar";
+  // 创建左侧确认按钮
+  const confirmBtn = document.createElement("button");
+  confirmBtn.className = "chat-edit-confirm";
+  confirmBtn.title = "Enter 发送 · Esc 取消";
+  confirmBtn.innerHTML = ICONS.check;
 
-  const hint = document.createElement("span");
-  hint.className = "chat-edit-hint";
-  hint.textContent = "Enter 发送 · Esc 取消";
-
-  const cancelBtn = document.createElement("button");
-  cancelBtn.className = "chat-edit-cancel";
-  cancelBtn.textContent = "取消";
-
-  const sendBtn = document.createElement("button");
-  sendBtn.className = "chat-edit-send";
-  sendBtn.textContent = "发送";
-
-  editBar.appendChild(hint);
-  editBar.appendChild(cancelBtn);
-  editBar.appendChild(sendBtn);
-  editWrap.appendChild(editBar);
-
+  // 保存原始 text 并清空泡泡内容，放入 textarea
+  el.dataset.rawText = originalText;
   el.textContent = "";
-  el.appendChild(editWrap);
+  el.appendChild(textarea);
+  el.appendChild(confirmBtn);
 
-  // 自适应高度
+  // 自动拉伸：根据 scrollHeight 调整高度，不设 max-height 限制（最多靠 CSS 兜底）
   const autoResize = () => {
     textarea.style.height = "auto";
-    textarea.style.height = Math.min(textarea.scrollHeight, 200) + "px";
+    textarea.style.height = textarea.scrollHeight + "px";
   };
   textarea.addEventListener("input", autoResize);
-  autoResize();
+  // 延迟一帧计算，确保 DOM 已渲染
+  requestAnimationFrame(() => {
+    autoResize();
+    textarea.focus();
+    textarea.select();
+  });
 
-  textarea.focus();
-  textarea.select();
+  let done = false;
 
-  let confirmed = false;
-
-  /** 取消编辑，恢复原消息显示 */
-  const restoreMessage = (text) => {
-    el.textContent = text;
-    el.dataset.rawText = text;
-    // 重新注入操作行
-    const row = createActionsRow();
-    row.appendChild(createCopyAction(() => el.dataset.rawText || ""));
-    if (onEditMessage) {
-      row.appendChild(createEditAction(() => startEditMessage(el, el.dataset.rawText || text)));
-    }
-    el.appendChild(row);
-  };
-
-  /** 确认编辑 → 调回调 */
+  /** 确认编辑 → 调回调或无变化时还原 */
   const finishEdit = () => {
-    if (confirmed) return;
-    confirmed = true;
+    if (done) return;
+    done = true;
     const newText = textarea.value.trim();
     if (newText && newText !== originalText) {
       onEditMessage(msgIndex, newText);
     } else {
-      restoreMessage(originalText);
+      restoreMessage();
     }
   };
 
-  /** 取消编辑 */
-  const cancelEdit = () => {
-    if (confirmed) return;
-    confirmed = true;
-    restoreMessage(originalText);
+  /** 取消编辑，恢复原消息 */
+  const restoreMessage = () => {
+    el.classList.remove("editing");
+    el.textContent = originalText;
+    el.dataset.rawText = originalText;
+    // 重新注入操作行
+    const row = createActionsRow();
+    row.appendChild(createCopyAction(() => el.dataset.rawText || ""));
+    if (onEditMessage) {
+      row.appendChild(createEditAction(() => startEditMessage(el, el.dataset.rawText || originalText)));
+    }
+    row.appendChild(createRetryAction());
+    el.appendChild(row);
   };
 
   textarea.addEventListener("keydown", (e) => {
@@ -351,18 +393,20 @@ function startEditMessage(el, originalText) {
       finishEdit();
     } else if (e.key === "Escape") {
       e.preventDefault();
-      cancelEdit();
+      restoreMessage();
     }
   });
-  sendBtn.addEventListener("click", finishEdit);
-  cancelBtn.addEventListener("click", cancelEdit);
-  // blur 时延迟检测，避免点按钮时 textarea 先 blur 导致提前取消
+
+  confirmBtn.addEventListener("click", finishEdit);
+
+  // blur 延迟检测：点击 ✓ 时 textarea 先 blur，等一帧再判断
+  // 点击 ✓ → 确认发送；点击其他地方（blur）→ 取消编辑
   textarea.addEventListener("blur", () => {
     setTimeout(() => {
-      if (!confirmed && document.activeElement !== sendBtn && document.activeElement !== cancelBtn) {
-        finishEdit();
+      if (!done && document.activeElement !== confirmBtn) {
+        restoreMessage();
       }
-    }, 100);
+    }, 150);
   });
 }
 
@@ -618,12 +662,12 @@ export function renderConfirmCard(payload, onConfirm) {
   el.querySelector("[data-action='reject']").addEventListener("click", () => {
     onConfirm(payload.confirm_id, false);
     el.querySelector(".chat-confirm-card-actions").innerHTML =
-      '<span style="color: var(--text-muted); font-size: 13px;">已拒绝</span>';
+      '<span class="chat-confirm-status chat-confirm-status-rejected">✕ 已拒绝</span>';
   });
   el.querySelector("[data-action='approve']").addEventListener("click", () => {
     onConfirm(payload.confirm_id, true);
     el.querySelector(".chat-confirm-card-actions").innerHTML =
-      '<span style="color: var(--warning); font-size: 13px;">执行中...</span>';
+      '<span class="chat-confirm-status chat-confirm-status-approved">✓ 已确认</span>';
   });
   messagesEl.appendChild(el);
   scrollToBottom();
@@ -739,9 +783,10 @@ export function renderEmptyState(providerConfigured, onOpenSettings) {
     // 0.12.5 §5.2：引导泡泡——点击预填充到输入框
     const GUIDE_PROMPTS = [
       { text: "帮我打开微信", hint: "应用" },
-      { text: "翻译 hello world", hint: "翻译" },
+      { text: "翻译 components", hint: "翻译" },
       { text: "截取屏幕", hint: "截图" },
       { text: "今天天气怎么样", hint: "问答" },
+      { text: "现在能调用哪些MCP服务", hint: "问答" },
     ];
     const bubblesEl = document.createElement("div");
     bubblesEl.className = "chat-guide-bubbles";
@@ -793,12 +838,16 @@ export function removeEmptyState() {
 }
 
 /**
- * 自动滚动到底部。
+ * 自动滚动到底部（用户上滚时不强制）。
+ * 流式渲染期间每帧调用——若用户已上滚浏览历史，不夺滚动权。
  */
 export function scrollToBottom() {
   if (!messagesEl) return;
+  if (userScrolledUp) return;
   requestAnimationFrame(() => {
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    if (!userScrolledUp && messagesEl) {
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
   });
 }
 
@@ -831,9 +880,16 @@ export function updateContextIndicator(status) {
   const el = document.getElementById("chat-context-indicator");
   if (!el) return;
 
+  // 即使没有 status 也显示一个 0% 的空环，让用户知道这里有进度条
   if (!status || status.context_limit === 0) {
-    el.innerHTML = "";
-    el.style.display = "none";
+    el.style.display = "";
+    el.title = "上下文窗口——发送消息后显示用量";
+    el.innerHTML = `
+      <svg class="context-ring" viewBox="0 0 20 20">
+        <circle cx="10" cy="10" r="8" fill="none" stroke="var(--surface-2, #333)" stroke-width="2"/>
+        <text x="10" y="13" text-anchor="middle" class="context-ring-percent">·</text>
+      </svg>
+    `;
     return;
   }
 

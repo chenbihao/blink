@@ -63,6 +63,10 @@ export function highlightCodeBlocks(container) {
 
 /**
  * 安全渲染 Markdown 文本为 HTML。
+ *
+ * 所有 `<a>` 标签自动添加 `target="_blank" rel="noopener noreferrer"`，
+ * 并通过全局点击委托在外部浏览器打开（Tauri WebView 内部导航会导致应用崩溃）。
+ *
  * @param {string} text 原始 Markdown 文本
  * @returns {string} 安全的 HTML 字符串
  */
@@ -73,7 +77,7 @@ export function renderMarkdown(text) {
   try {
     const rawHtml = window.marked.parse(text);
     // DOMPurify sanitize：禁 script/img/on*，link 协议白名单
-    return window.DOMPurify.sanitize(rawHtml, {
+    let html = window.DOMPurify.sanitize(rawHtml, {
       ALLOWED_TAGS: [
         "p", "br", "strong", "em", "del", "code", "pre", "blockquote",
         "ul", "ol", "li", "a", "table", "thead", "tbody", "tr", "th", "td",
@@ -84,10 +88,43 @@ export function renderMarkdown(text) {
       // 协议白名单
       ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto):)/i,
     });
+    // 确保所有 <a> 在外部打开（Tauri WebView 内部导航会崩溃）
+    html = html.replace(/<a\s/g, '<a target="_blank" rel="noopener noreferrer" ');
+    return html;
   } catch (e) {
     console.error("[chat/renderer] Markdown 渲染失败，降级纯文本:", e);
     return escapeHtml(text);
   }
+}
+
+/**
+ * 绑定全局链接点击委托——拦截 chat-messages 内的 <a> 点击，
+ * 通过后端 `open_url` command 在外部浏览器打开，防止 WebView 内部导航导致应用崩溃。
+ *
+ * 在 main.js init() 中调用一次。
+ */
+export function bindLinkOpener() {
+  const messagesEl = document.getElementById("chat-messages");
+  if (!messagesEl) return;
+  messagesEl.addEventListener("click", (e) => {
+    const link = e.target.closest("a[href]");
+    if (!link) return;
+    const href = link.getAttribute("href") || "";
+    // 只拦截 http/https/mailto（与 DOMPurify 白名单一致）
+    if (!/^(?:https?|mailto):/i.test(href)) return;
+    e.preventDefault();
+    // 用后端 open_url command（与设置页 openExternalUrl 一致）
+    const invoke = window.__TAURI__?.core?.invoke ?? window.__TAURI__?.invoke;
+    if (invoke) {
+      invoke("open_url", { url: href }).catch((err) => {
+        console.error("[chat] open_url 失败:", err);
+        // 降级：window.open（在 Tauri 中可能无效，但不会崩溃）
+        window.open(href, "_blank");
+      });
+    } else {
+      window.open(href, "_blank");
+    }
+  });
 }
 
 /**

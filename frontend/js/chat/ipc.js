@@ -338,6 +338,15 @@ export function getConversationSystemPrompt(conversationId) {
 // ── MCP tool 池（0.13.0）──────────────────────────────────────────
 
 /**
+ * 0.13.8: 触发 MCP lazy connect——持久连接所有 enabled 但尚未连接的 server。
+ * 供对话窗口打开时调用，让 popup 能显示正确的在线状态。
+ * @returns {Promise<void>}
+ */
+export function ensureMcpConnected() {
+  return invoke("ensure_mcp_connected");
+}
+
+/**
  * 获取对话窗口 tool 池规模（内置 + MCP，供前端显示）。
  * @returns {Promise<{builtin: number, mcp: number, total: number}>}
  */
@@ -380,6 +389,16 @@ export function compressContextNow(conversationId) {
  */
 export function getMcpToolSources() {
   return invoke("get_mcp_tool_sources");
+}
+
+// ── Composer bar 悬浮预览快照 ──────────────────────────────────────
+
+/**
+ * 获取 composer bar 悬浮预览快照（一次 IPC 聚合上下文 + 内置 tool + MCP 服务）。
+ * @returns {Promise<{estimated_tokens: number, context_limit: number, usage_percent: number, last_compressed: boolean, last_compressed_count: number, last_recall_count: number, builtin_tools: Array<{name: string, description: string}>, mcp_servers: Array<{name: string, transport: string, online: boolean, tool_count: number, tool_names: string[]}>, builtin_count: number, mcp_count: number, total_count: number}>}
+ */
+export function getComposerBarSnapshot() {
+  return invoke("get_composer_bar_snapshot");
 }
 
 // ── Events ───────────────────────────────────────

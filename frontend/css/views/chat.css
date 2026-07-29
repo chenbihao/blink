@@ -1393,6 +1393,46 @@ body {
   border-radius: 3px;
 }
 
+/* ── 「回到底部」浮动按钮 ─────────────────────────── */
+
+.chat-scroll-bottom-btn {
+  position: absolute;
+  bottom: 140px;
+  right: 24px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  border: 1px solid var(--surface-3, var(--surface-2));
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(8px);
+  transition: opacity 0.2s, transform 0.2s, visibility 0.2s;
+  z-index: 10;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+.chat-scroll-bottom-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+.chat-scroll-bottom-btn.visible {
+  opacity: 0.85;
+  visibility: visible;
+  transform: translateY(0);
+}
+
+.chat-scroll-bottom-btn:hover {
+  opacity: 1;
+  background: var(--surface-3, var(--surface-2));
+}
+
 /* ── 消息 bubble ───────────────────────────────── */
 
 .chat-msg {
@@ -1450,11 +1490,12 @@ body {
   height: 20px;
 }
 
+/* 0.12.9：text-faint → text-dim 提升对比度 */
 .chat-typing span {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--text-faint);
+  background: var(--text-dim);
   animation: chat-typing-bounce 1.2s ease-in-out infinite;
 }
 
@@ -1820,78 +1861,69 @@ body {
   color: var(--text);
 }
 
-/* ── 编辑态（0.12.6 重构：内联编辑区 + 确认/取消按钮） ───────────── */
+/* ── 原地编辑态 ────────────────────────────────────────────────
+ * 泡泡本身不动（背景/圆角/对齐全保持），textContent 换成 textarea，
+ * textarea 透明背景继承泡泡配色，自动拉伸无滚动条。
+ * 左侧外浮 ✓ 确认按钮。
+ */
 
-.chat-edit-wrap {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+/* 编辑态：隐藏 hover 操作行 */
+.chat-msg-user.editing .chat-msg-actions {
+visibility: hidden !important;
+pointer-events: none !important;
 }
 
-.chat-edit-textarea {
-  width: 100%;
-  min-height: 44px;
-  max-height: 200px;
-  padding: 8px 12px;
-  border: 1px solid var(--accent);
-  border-radius: 8px;
-  background: var(--bg-deep);
-  color: var(--text);
-  font-family: inherit;
-  font-size: 14px;
-  line-height: 1.5;
-  resize: none;
-  outline: none;
-  box-sizing: border-box;
-  transition: border-color 0.15s, box-shadow 0.15s;
+/* 编辑态 textarea：无缝融入泡泡 */
+.chat-edit-input {
+width: 100%;
+min-height: 1.5em;
+padding: 0;
+border: 0;
+background: transparent;
+color: inherit;
+font-family: inherit;
+font-size: inherit;
+line-height: inherit;
+resize: none;
+outline: none;
+box-sizing: border-box;
+appearance: none;
+-webkit-appearance: none;
+overflow: hidden; /* 隐藏滚动条，靠 JS autoResize */
 }
 
-.chat-edit-textarea:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-bg);
+.chat-edit-input::placeholder {
+color: var(--on-accent);
+opacity: 0.5;
 }
 
-.chat-edit-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  justify-content: flex-end;
+/* 左侧外浮确认按钮 */
+.chat-edit-confirm {
+position: absolute;
+left: -38px;
+top: 50%;
+transform: translateY(-50%);
+display: grid;
+place-items: center;
+width: 28px;
+height: 28px;
+border: 0;
+border-radius: 50%;
+background: var(--green, #4caf50);
+color: #fff;
+cursor: pointer;
+opacity: 0;
+animation: blink-fade-in 0.15s ease-out 0.05s forwards;
+z-index: 10;
 }
 
-.chat-edit-hint {
-  font-size: 11px;
-  color: var(--text-faint);
-  margin-right: auto;
+.chat-edit-confirm svg {
+width: 16px;
+height: 16px;
 }
 
-.chat-edit-cancel,
-.chat-edit-send {
-  padding: 5px 14px;
-  border: 0;
-  border-radius: 6px;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.12s, opacity 0.12s;
-}
-
-.chat-edit-cancel {
-  background: var(--surface-2);
-  color: var(--text-dim);
-}
-
-.chat-edit-cancel:hover {
-  background: var(--surface);
-  color: var(--text);
-}
-
-.chat-edit-send {
-  background: var(--accent);
-  color: var(--on-accent);
-}
-
-.chat-edit-send:hover {
-  opacity: 0.85;
+.chat-edit-confirm:hover {
+opacity: 0.85;
 }
 
 .chat-msg-assistant blockquote {
@@ -2081,10 +2113,11 @@ body {
   min-width: 0;
 }
 
+/* 0.12.9：text-faint → text-dim 提升对比度 */
 .chat-tool-card-duration {
   margin-left: 6px;
   font-size: 11px;
-  color: var(--text-faint);
+  color: var(--text-dim);
   flex-shrink: 0;
 }
 
@@ -2166,10 +2199,11 @@ body {
   padding-top: var(--space-xs);
 }
 
+/* 0.12.9：text-faint → text-dim 提升对比度 */
 .chat-tool-detail summary {
   cursor: pointer;
   font-size: 12px;
-  color: var(--text-faint);
+  color: var(--text-dim);
   user-select: none;
 }
 
@@ -2177,14 +2211,16 @@ body {
   color: var(--text-sub);
 }
 
+/* 0.12.9：text-dim → text-sub 提升对比度 */
 .chat-tool-detail-label {
   margin: var(--space-xs) 0 2px;
   font-size: 11px;
   font-weight: 600;
-  color: var(--text-dim);
+  color: var(--text-sub);
   user-select: none;
 }
 
+/* 0.12.9：text-sub → text 提升对比度 */
 .chat-tool-detail pre {
   position: relative; /* 复制按钮定位上下文 */
   margin: 0 0 var(--space-xs);
@@ -2195,7 +2231,7 @@ body {
   border-radius: 4px;
   font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
   font-size: 12px;
-  color: var(--text-sub);
+  color: var(--text);
   white-space: pre-wrap;
   word-break: break-word;
   user-select: text;
@@ -2225,7 +2261,7 @@ body {
   border-radius: 3px;
 }
 
-/* 消息底栏：模型名 + token 用量同一行 */
+/* 消息底栏：模型名 + token 用量同一行。0.12.9：text-faint → text-dim 提升对比度；user-select text 允许选中 */
 .chat-msg-footer {
   display: flex;
   align-items: center;
@@ -2233,21 +2269,20 @@ body {
   gap: var(--space-md);
   margin-top: var(--space-xs);
   font-size: 11px;
-  color: var(--text-faint);
-  user-select: none;
+  color: var(--text-dim);
+  user-select: text;
+  -webkit-user-select: text;
 }
 
+/* 0.12.9：移除 opacity 0.7，配合 text-dim 提升可读性 */
 .chat-msg-footer .chat-msg-model {
-  opacity: 0.7;
 }
 
 .chat-msg-footer .chat-token-usage {
-  opacity: 0.7;
 }
 
-/* 0.13.6: 记忆召回 badge */
+/* 0.13.6: 记忆召回 badge。0.12.9：移除 opacity 0.7 提升可读性 */
 .chat-recall-badge {
-  opacity: 0.7;
   font-size: 11px;
   flex-shrink: 0;
 }
@@ -2300,12 +2335,27 @@ body {
 }
 
 .chat-confirm-btn-approve {
-  background: var(--green);
-  color: var(--on-accent);
+background: var(--green);
+color: var(--on-accent);
+}
+
+.chat-confirm-status {
+font-size: 13px;
+padding: var(--space-xs) var(--space-sm);
+}
+
+.chat-confirm-status-approved {
+color: var(--green);
+font-weight: 500;
+}
+
+.chat-confirm-status-rejected {
+color: var(--text-muted);
 }
 
 /* ── Signal 信号消息（0.12.7 §6.3：IM 式居中系统通知） ──── */
 
+/* 0.12.9：user-select text——用户应可选中复制信号消息（如错误详情） */
 .chat-signal {
   align-self: center;
   display: inline-flex;
@@ -2315,7 +2365,8 @@ body {
   border-radius: 12px;
   font-size: 12px;
   line-height: 1.4;
-  user-select: none;
+  user-select: text;
+  -webkit-user-select: text;
   max-width: 80%;
   text-align: center;
 }
@@ -2326,15 +2377,15 @@ body {
   height: 14px;
 }
 
-/* info：弱色，不打扰 */
+/* info：弱色，不打扰。0.12.9：text-faint → text-dim 提升对比度 */
 .chat-signal-info {
-  color: var(--text-faint);
+  color: var(--text-dim);
   background: var(--surface);
 }
 
-/* warning：橙色系（复用 text-dim + accent-bg 区分） */
+/* warning：橙色系（复用 text-dim + accent-bg 区分）。0.12.9：text-sub → text 提升对比度 */
 .chat-signal-warning {
-  color: var(--text-sub);
+  color: var(--text);
   background: var(--accent-bg);
 }
 
@@ -2353,15 +2404,17 @@ body {
 
 /* ── 时间分隔符（0.12.7 §6.4：IM 式居中时间标签） ──── */
 
+/* 0.12.9：text-faint → text-dim 提升对比度；user-select text 允许选中复制时间 */
 .chat-time-sep {
   align-self: center;
   padding: 2px 12px;
   margin: var(--space-xs) 0;
   border-radius: 10px;
   font-size: 11px;
-  color: var(--text-faint);
+  color: var(--text-dim);
   background: var(--surface);
-  user-select: none;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 /* ── 错误消息（0.12.7：重构为 Signal error 的别名，保持向后兼容） ── */
@@ -2418,40 +2471,28 @@ body {
 }
 
 .chat-composer-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--space-xs) var(--space-sm);
+display: flex;
+align-items: center;
+justify-content: flex-end;
+padding: var(--space-xs) var(--space-sm);
+gap: var(--space-xs);
+user-select: text;
+-webkit-user-select: text;
 }
 
 .chat-composer-bar-left {
   display: flex;
   align-items: center;
   gap: var(--space-xs);
+  margin-right: auto;
 }
 
-/* 0.13.0：composer bar 右侧（tool 池指示器） */
-.chat-composer-bar-right {
-  display: flex;
-  align-items: center;
-  gap: var(--space-xs);
-  margin-right: var(--space-xs);
-}
-
-.chat-tool-pool {
-  font-size: 11px;
-  color: var(--text-faint);
-  white-space: nowrap;
-  user-select: none;
-}
-
-/* ── 0.13.6: 上下文窗口占用指示器 ─────────── */
-
+/* 上下文窗口指示器（发送按钮左边） */
 .chat-context-indicator {
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  cursor: default;
+  cursor: pointer;
   user-select: none;
 }
 
@@ -2715,4 +2756,284 @@ body {
 
 .chat-hidden {
   display: none !important;
+}
+
+/* ── Composer bar 悬浮预览 popup ─────────────────────────────────── */
+
+.composer-bar-popup {
+  position: fixed;
+  z-index: 10000;
+  width: 360px;
+  max-height: 420px;
+  overflow-y: auto;
+background: var(--surface, #313244);
+border: 1px solid var(--surface-2, #45475a);
+border-radius: 10px;
+box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+font-size: 12px;
+color: var(--text, #cdd6f4);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  animation: cbp-fade-in 0.15s ease;
+  /* 自定义滚动条 */
+  scrollbar-width: thin;
+  scrollbar-color: var(--surface-2, #333344) transparent;
+}
+
+.composer-bar-popup::-webkit-scrollbar {
+  width: 6px;
+}
+
+.composer-bar-popup::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.composer-bar-popup::-webkit-scrollbar-thumb {
+  background: var(--surface-2, #333344);
+  border-radius: 3px;
+}
+
+.composer-bar-popup::-webkit-scrollbar-thumb:hover {
+  background: var(--surface-3, #45475a);
+}
+
+@keyframes cbp-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.composer-bar-popup[hidden] {
+  display: none;
+}
+
+.composer-bar-popup-loading,
+.composer-bar-popup-error {
+  padding: 20px;
+  text-align: center;
+  color: var(--text-faint, #6c7086);
+}
+
+/* ── 通用 section 结构 ── */
+
+.cbp-section {
+  padding: 10px 14px;
+}
+
+.cbp-divider {
+  height: 1px;
+  background: var(--surface-2, #333344);
+  margin: 0 14px;
+}
+
+.cbp-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.cbp-section-title {
+  font-weight: 600;
+  font-size: 10px;
+  color: var(--text-sub, #a6adc8);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.cbp-section-count {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-faint, #6c7086);
+  font-family: ui-monospace, Consolas, monospace;
+}
+
+.cbp-empty {
+  font-size: 11px;
+  color: var(--text-faint, #6c7086);
+  padding: 2px 0;
+}
+
+/* ── 折叠区域 ── */
+
+.cbp-collapsible-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  padding: 4px 0;
+}
+
+.cbp-collapsible-header:hover {
+  background: var(--surface-0, #181825);
+  border-radius: 4px;
+  padding: 4px 6px;
+  margin: 0 -6px;
+}
+
+.cbp-collapsible-header .cbp-section-title {
+  flex: 1;
+}
+
+.cbp-collapse-arrow {
+  font-size: 10px;
+  color: var(--text-faint, #6c7086);
+  transition: transform 0.2s ease;
+}
+
+.cbp-section[data-collapsed] .cbp-collapse-arrow {
+  transform: rotate(0deg);
+}
+
+.cbp-section:not([data-collapsed]) .cbp-collapse-arrow {
+  transform: rotate(90deg);
+}
+
+.cbp-section[data-collapsed] .cbp-collapsible-body {
+  display: none;
+}
+
+.cbp-collapsible-body {
+  margin-top: 6px;
+}
+
+/* ── 上：上下文容量 ── */
+
+.cbp-context-bar {
+  width: 100%;
+  height: 6px;
+  background: var(--surface-2, #333344);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+
+.cbp-context-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s ease, background 0.3s ease;
+}
+
+.cbp-context-detail {
+  font-size: 10px;
+  color: var(--text-faint, #6c7086);
+  font-family: ui-monospace, Consolas, monospace;
+  margin-bottom: 6px;
+}
+
+.cbp-context-breakdown {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.cbp-breakdown-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 10px;
+}
+
+.cbp-breakdown-label {
+color: var(--text-dim, #6c7086);
+}
+
+.cbp-breakdown-value {
+color: var(--text-sub, #a6adc8);
+font-family: ui-monospace, Consolas, monospace;
+}
+
+.cbp-context-empty {
+font-size: 11px;
+color: var(--text-dim, #6c7086);
+padding: 4px 0;
+}
+
+/* ── 中：内置工具 ── */
+
+.cbp-tool-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.cbp-tool-chip {
+display: inline-block;
+padding: 2px 6px;
+border-radius: 4px;
+background: var(--surface-2, #45475a);
+font-size: 11px;
+color: var(--text-sub, #a6adc8);
+white-space: nowrap;
+cursor: default;
+}
+
+/* ── 下：MCP 服务 ── */
+
+/* MCP server 一行布局 */
+.cbp-mcp-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cbp-mcp-row {
+display: flex;
+align-items: center;
+gap: 6px;
+padding: 4px 8px;
+border-radius: 4px;
+background: var(--bg-deep, #11111b);
+}
+
+.cbp-mcp-row[data-online="false"] {
+opacity: 0.6;
+}
+
+.cbp-mcp-dot {
+display: inline-block;
+width: 7px;
+height: 7px;
+border-radius: 50%;
+flex-shrink: 0;
+}
+
+.cbp-mcp-online {
+background: var(--green, #a6e3a1);
+box-shadow: 0 0 4px rgba(166, 227, 161, 0.5);
+}
+
+.cbp-mcp-offline {
+background: var(--text-dim, #6c7086);
+}
+
+.cbp-mcp-name {
+font-size: 12px;
+font-weight: 500;
+color: var(--text, #cdd6f4);
+flex: 1;
+overflow: hidden;
+text-overflow: ellipsis;
+white-space: nowrap;
+}
+
+.cbp-mcp-transport {
+font-size: 10px;
+color: var(--text-sub, #a6adc8);
+padding: 1px 5px;
+border-radius: 3px;
+background: var(--surface-2, #45475a);
+border: 1px solid var(--surface-2, #45475a);
+font-family: ui-monospace, Consolas, monospace;
+text-transform: uppercase;
+flex-shrink: 0;
+font-weight: 600;
+}
+
+.cbp-mcp-count {
+font-size: 11px;
+color: var(--text-sub, #a6adc8);
+font-family: ui-monospace, Consolas, monospace;
+min-width: 20px;
+text-align: right;
+flex-shrink: 0;
 }

@@ -16,7 +16,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
-use crate::domain::ai::memory::{SqliteConversationMemory, estimate_messages_tokens, MemoryLoadResult};
+
+use crate::domain::ai::memory::{SqliteConversationMemory, estimate_messages_tokens, estimate_tokens, MemoryLoadResult};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
 
@@ -35,7 +36,16 @@ use crate::domain::execution::ActionRegistry;
 use crate::domain::mcp::McpClientManager;
 use tauri::Emitter;
 
-type AgentCacheKey = (String, String, String, u64);
+/// Agent 缓存 key——provider/model/fingerprint/preamble_hash/MCP epoch 任一变化即 cache miss。
+#[derive(PartialEq)]
+struct AgentCacheKey {
+    provider_id: String,
+    model_id: String,
+    fingerprint: String,
+    preamble_hash: u64,
+    /// MCP tool 池版本号——拓扑变化时 bump，触发 Agent 重建。
+    mcp_epoch: u64,
+}
 
 struct CachedAgent {
     key: AgentCacheKey,
@@ -63,7 +73,7 @@ pub struct ActiveChatStatus {
 /// 驱动 composer bar 上的环形进度条指示器。
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct ContextWindowStatus {
-    /// 估算的当前窗口 token 数。
+    /// 估算的当前窗口 token 数（含历史消息 + 当前待发消息 + 系统提示词）。
     pub estimated_tokens: usize,
     /// 模型 context window 上限。
     pub context_limit: usize,
@@ -75,6 +85,10 @@ pub struct ContextWindowStatus {
     pub last_compressed_count: usize,
     /// FTS5 召回的消息数（上次 load()）。
     pub last_recall_count: usize,
+    /// 系统提示词（preamble）估算 token 数。
+    pub preamble_tokens: usize,
+    /// 当前待发消息估算 token 数。
+    pub pending_message_tokens: usize,
 }
 
 // ── 0.13.6: Skill 激活 Signal ──────────────────────────────────────────────────
@@ -400,13 +414,19 @@ impl ChatService {
             retry_count += 1;
             let resolved = self.resolve_current_entries()?;
 
-            // cache key = (provider_id, model_id, fingerprint, preamble_hash)
-            let cache_key = (
-                resolved.cache_key.0.clone(),
-                resolved.cache_key.1.clone(),
-                resolved.cache_key.2.clone(),
+            // 0.13.7: lazy connect——确保 MCP server 已连接后再读 epoch，拿到最新 tool 池版本。
+            // MCP 拓扑变化（server 连接/断开/disabled_tools 变化）会 bump epoch，
+            // 使 AgentCacheKey 失配，触发 Agent 重建——修「首次连接慢的 server 未进 agent 缓存」。
+            self.mcp_client.ensure_connected(&self.config_pool).await;
+            let mcp_epoch = self.mcp_client.tool_pool_epoch();
+
+            let cache_key = AgentCacheKey {
+                provider_id: resolved.cache_key.0.clone(),
+                model_id: resolved.cache_key.1.clone(),
+                fingerprint: resolved.cache_key.2.clone(),
                 preamble_hash,
-            );
+                mcp_epoch,
+            };
 
             if let Some(provider) = self.cached_provider(&cache_key) {
                 return Ok(provider);
@@ -415,8 +435,6 @@ impl ChatService {
             // Client/Agent 构造可能读取 Credential Manager，必须在 ChatService 锁外进行。
             // 0.13.0: MCP tool 通过 external_tools 入口进池——collect_tools() 从已连接的
             // MCP server 拉 tool（过滤 disabled_tools），与内置 Capability/Action 并列。
-            // 0.13.7: lazy connect——首次需要 tool 时才连接 enabled 但未连接的 server。
-            self.mcp_client.ensure_connected(&self.config_pool).await;
             let external_tools = self.mcp_client.collect_tools().await;
             let tools = build_agent_tools(
                 &self.capability_registry,
@@ -590,8 +608,14 @@ impl ChatService {
             match service.ensure_provider(&preamble).await {
                 Ok(provider) => {
                     // 0.13.6: 在 stream_prompt 前计算上下文窗口状态并推送前端
+                    // 传入 pending message + preamble，因为此时消息尚未写入 DB，
+                    // 纯靠 load_with_stats 读 DB 会得到空列表 → token=0（修「永远是 0%」bug）
                     let context_status = service
-                        .compute_context_status(&conversation_for_task)
+                        .compute_context_status(
+                            &conversation_for_task,
+                            Some(&effective_message),
+                            Some(&preamble),
+                        )
                         .await;
                     let _ = service.app.emit_to(
                         "chat",
@@ -599,11 +623,29 @@ impl ChatService {
                         context_status,
                     );
 
+                    // 0.12.9：移除时间注入到 user message 末尾——之前将
+                    // [当前时间：...] 追加到 user msg 后被 rig memory 持久化到 DB，
+                    // 导致：
+                    // 1. 切换对话重新加载时用户消息气泡显示时间后缀
+                    // 2. 标题生成 LLM 可能看到时间文本，生成 [当前时间：...] 作为标题
+                    // 
+                    // 时间上下文如未来需要，应通过 non-persistent 机制注入（如
+                    // rig agent 的 runtime preamble 或独立 system message），
+                    // 不能污染 conversation memory。
+                    //
+                    // 当前发送干净的用户消息给 agent：
                     provider
                         .stream_prompt(&conversation_for_task, &effective_message, chunk_tx)
                         .await;
                 }
                 Err(error) => {
+                    // 0.12.9：provider 构造失败时记录日志，便于排查配置/密钥问题
+                    tracing::warn!(
+                        target: crate::infra::utils::perf::ai_slo::TARGET,
+                        conversation_id = %conversation_for_task,
+                        error = %error,
+                        "ChatService: provider 构造失败，流式请求无法启动"
+                    );
                     let _ = chunk_tx.send(ChatStreamChunk::Error {
                         message: error.to_string(),
                     });
@@ -748,7 +790,16 @@ impl ChatService {
     ///
     /// 调用 `memory.load_with_stats()` 获取窗口消息 + 压缩/召回统计，
     /// 估算 token 数并计算占用百分比。结果缓存在 `last_context_status` 供前端查询。
-    pub async fn compute_context_status(&self, conversation_id: &str) -> ContextWindowStatus {
+    ///
+    /// `pending_message` 和 `preamble` 参数：在 stream_prompt 前调用时，
+    /// 当前用户消息尚未写入 DB，系统提示词也不在消息列表中。
+    /// 传入这两个参数可将它们的 token 纳入估算，避免首次对话显示 0%。
+    pub async fn compute_context_status(
+        &self,
+        conversation_id: &str,
+        pending_message: Option<&str>,
+        preamble: Option<&str>,
+    ) -> ContextWindowStatus {
         let result = match self.memory.load_with_stats(conversation_id).await {
             Ok(r) => r,
             Err(e) => {
@@ -764,7 +815,11 @@ impl ChatService {
         let config_handle = self.memory.config_handle();
         let cfg = config_handle.read().await;
         let context_limit = cfg.context_limit.unwrap_or(8192);
-        let estimated_tokens = estimate_messages_tokens(&result.messages);
+
+        let preamble_tokens = preamble.map(estimate_tokens).unwrap_or(0);
+        let pending_message_tokens = pending_message.map(estimate_tokens).unwrap_or(0);
+        let history_tokens = estimate_messages_tokens(&result.messages);
+        let estimated_tokens = history_tokens + preamble_tokens + pending_message_tokens;
         let usage_percent = ((estimated_tokens * 100) / context_limit.max(1)).min(100) as u8;
 
         let status = ContextWindowStatus {
@@ -774,6 +829,8 @@ impl ChatService {
             last_compressed: result.dropped_count > 0,
             last_compressed_count: result.dropped_count,
             last_recall_count: result.recall_count,
+            preamble_tokens,
+            pending_message_tokens,
         };
 
         // 缓存供 get_context_window_status command 查询
@@ -787,6 +844,8 @@ impl ChatService {
             estimated_tokens,
             context_limit,
             usage_percent,
+            preamble_tokens,
+            pending_message_tokens,
             dropped = result.dropped_count,
             recalled = result.recall_count,
             "compute_context_status: 上下文窗口状态已计算"

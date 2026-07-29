@@ -28,6 +28,8 @@ mod schema;
 pub use error::CapabilityError;
 pub use registry::CapabilityRegistry;
 pub use result::{CapabilityResult, ItemResult, rig_tool_result_to_text};
+// items_to_llm_json 仅供 result.rs 内部（CapabilityResult::to_rig_tool_result）使用，
+// 0.13.7 删除 ActionOutcome::Items 后无跨模块调用者，不再 re-export。
 pub use schema::CapabilitySchema;
 
 use serde_json::Value;

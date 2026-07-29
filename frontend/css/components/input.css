@@ -33,6 +33,15 @@
   max-width: 500px;
 }
 
+/* select 不适用 flex:1 拉伸——下拉框内容通常较短，应按内容自适应宽度。
+   text input 仍保持 flex:1 填充行为。 */
+select.input-wide {
+  flex: 0 1 auto;
+  width: auto;
+  min-width: 120px;
+  max-width: 300px;
+}
+
 /* 数字输入框：隐藏原生 spinner，使用自定义样式 */
 input[type="number"] {
   -moz-appearance: textfield;

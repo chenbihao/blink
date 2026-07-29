@@ -114,14 +114,11 @@ impl<'a> ActionContext<'a> {
 /// - `Copy` → 写剪贴板 + 可选 hit 回写
 /// - `Emit` → `app.emit(event, payload)`
 /// - `Nop` → 无操作
-/// - `Items` → 结构化列表（0.11.0 改进 1）——插件全量结果 / 未来 Action 产列表
 ///
 /// 设计为 enum 而非 `Box<dyn FnOnce>` 的原因：可序列化、可日志、command 层分派清晰。
 ///
-/// **0.11.0 改进 1**：新增 `Items { items: Vec<ItemResult> }` 变体。
-/// `PluginActionAdapter` 不再截断插件返回的 `Vec<PluginItem>` 只取第一项——
-/// 投影全量 PluginItem → ItemResult，返回 `ActionOutcome::Items`。
-/// 与 `CapabilityResult::Items` 对齐，消费方（`items_to_entries`）走统一投影路径。
+/// **0.13.7**：`Items` 变体已删除——插件从 Action 迁入 Capability，
+/// 结构化列表统一由 `CapabilityResult::Items` 承载。Action 回归纯粹副作用语义。
 #[derive(Debug, Clone)]
 pub enum ActionOutcome {
     /// 复制到剪贴板（计算结果 / 插件 Copy / 剪贴板历史）。
@@ -141,17 +138,8 @@ pub enum ActionOutcome {
     },
     /// 纯展示项，无副作用。
     Nop,
-    /// 结构化列表（0.11.0 改进 1）——插件全量结果投影成 ItemResult 列表。
-    ///
-    /// **与 `CapabilityResult::Items` 同构**：消费方（`items_to_entries`）走统一投影路径，
-    /// 避免插件 Items 走 A 路径、Capability Items 走 B 路径的分叉。
-    ///
-    /// **来源**：`PluginActionAdapter::execute()` 投影 `Vec<PluginItem>` → `Vec<ItemResult>`。
-    /// 未来其他 Action（如 chord 产列表）也可用此变体。
-    #[allow(dead_code)] // 0.11.0 由 PluginActionAdapter 消费
-    Items {
-        items: Vec<crate::domain::capability::ItemResult>,
-    },
+    // 0.13.7：`Items` 变体已删除——插件从 Action 迁入 Capability，
+    // 结构化列表统一由 `CapabilityResult::Items` 承载。Action 回归纯粹副作用语义。
 }
 
 // ── rig 投影层（0.12.0 统一投影入口）──────────────────────────────────────
@@ -189,10 +177,6 @@ impl ActionOutcome {
                     serde_json::json!({ "type": "nop", "success": true, "message": "操作已成功执行" })
                         .to_string(),
                 )]
-            }
-            ActionOutcome::Items { items } => {
-                let json = serde_json::to_string(items).unwrap_or_else(|_| "[]".to_string());
-                vec![ToolResultContent::text(json)]
             }
         }
     }

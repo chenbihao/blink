@@ -27,30 +27,140 @@ export function listen(event, handler) {
   return Promise.resolve(() => {});
 }
 
+// ── 自定义弹窗（替代 Tauri dialog.ask / dialog.message）──────────────────────
+// 系统原生弹框样式与应用主题不搭，改为自绘 HTML 弹框，统一视觉风格。
+// 复用 .modal-overlay 基础样式 + .confirm-dialog 专属样式。
+
+/** kind → 图标 SVG */
+const DIALOG_ICONS = {
+  warning: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`,
+  error: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`,
+  info: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>`,
+};
+
+/**
+ * 创建并显示自定义弹框。
+ * @param {{ title?: string, kind?: "info"|"warning"|"error", message: string,
+ *           okLabel?: string, cancelLabel?: string|null, dismissable?: boolean }} opts
+ * @returns {Promise<boolean>} 用户点击 OK → true，取消 → false
+ */
+function showCustomDialog(opts) {
+  return new Promise((resolve) => {
+    const kind = opts.kind || "info";
+    const icon = DIALOG_ICONS[kind] || DIALOG_ICONS.info;
+    const title = opts.title || (kind === "error" ? "错误" : kind === "warning" ? "警告" : "提示");
+    const okLabel = opts.okLabel || "确定";
+    const hasCancel = opts.cancelLabel !== null;
+    const cancelLabel = opts.cancelLabel || "取消";
+    const dismissable = opts.dismissable !== false; // 默认可取消
+
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay confirm-dialog-overlay";
+
+    const card = document.createElement("div");
+    card.className = `confirm-dialog confirm-dialog-${kind}`;
+
+    const iconEl = document.createElement("div");
+    iconEl.className = "confirm-dialog-icon";
+    iconEl.innerHTML = icon;
+
+    const contentEl = document.createElement("div");
+    contentEl.className = "confirm-dialog-content";
+    const titleEl = document.createElement("div");
+    titleEl.className = "confirm-dialog-title";
+    titleEl.textContent = title;
+    const msgEl = document.createElement("div");
+    msgEl.className = "confirm-dialog-message";
+    msgEl.textContent = opts.message;
+    contentEl.appendChild(titleEl);
+    contentEl.appendChild(msgEl);
+
+    const headerEl = document.createElement("div");
+    headerEl.className = "confirm-dialog-header";
+    headerEl.appendChild(iconEl);
+    headerEl.appendChild(contentEl);
+
+    const actionsEl = document.createElement("div");
+    actionsEl.className = "confirm-dialog-actions";
+
+    let resolved = false;
+    const finish = (result) => {
+      if (resolved) return;
+      resolved = true;
+      overlay.classList.add("confirm-dialog-closing");
+      setTimeout(() => overlay.remove(), 150);
+      resolve(result);
+    };
+
+    if (hasCancel) {
+      const cancelBtn = document.createElement("button");
+      cancelBtn.className = "btn btn-small";
+      cancelBtn.textContent = cancelLabel;
+      cancelBtn.addEventListener("click", () => finish(false));
+      actionsEl.appendChild(cancelBtn);
+    }
+
+    const okBtn = document.createElement("button");
+    okBtn.className = kind === "error" || kind === "warning" ? "btn btn-danger" : "btn-primary";
+    okBtn.textContent = okLabel;
+    okBtn.addEventListener("click", () => finish(true));
+    actionsEl.appendChild(okBtn);
+
+    card.appendChild(headerEl);
+    card.appendChild(actionsEl);
+    overlay.appendChild(card);
+
+    // 点击 overlay 空白处取消（仅 dismissable 时）
+    if (dismissable && hasCancel) {
+      overlay.addEventListener("click", (e) => {
+        if (e.target === overlay) finish(false);
+      });
+    }
+
+    // Escape 取消
+    const onKey = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        finish(hasCancel ? false : true);
+        document.removeEventListener("keydown", onKey, true);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        e.stopPropagation();
+        finish(true);
+        document.removeEventListener("keydown", onKey, true);
+      }
+    };
+    document.addEventListener("keydown", onKey, true);
+
+    document.body.appendChild(overlay);
+    // 聚焦 OK 按钮，方便 Enter 确认
+    requestAnimationFrame(() => okBtn.focus());
+  });
+}
+
 /**
  * 二次确认对话框。
  *
- * **背景**：Tauri 2 + WebView2 下 `window.confirm()` 不会弹框、直接返回 truthy，
- * 导致「危险操作 confirm 后」的逻辑形同虚设（点 ✕ 秒删）。统一走 plugin-dialog
- * 的 `ask()` 才是真弹框。
+ * 自绘 HTML 弹框，替代 Tauri `dialog.ask()` 系统原生弹框。
  *
- * **签名**：`ask(message, options?) → Promise<boolean>`
+ * **签名**：`confirmDialog(message, options?) → Promise<boolean>`
  * - `options.title`：标题；`options.kind`：`"info" | "warning" | "error"`；
  * - `options.okLabel` / `options.cancelLabel`：按钮文案。
  *
- * **兜底**：dialog plugin 不可用时（capability 缺失或环境异常），返回 `false`
- * ——**默认拒绝**是危险操作的正确 fallback，宁可让用户重试也不误删。
+ * **兜底**：返回 `false`——**默认拒绝**是危险操作的正确 fallback。
  */
 export async function confirmDialog(message, options = {}) {
-  const ask = TAU?.dialog?.ask;
-  if (typeof ask !== "function") {
-    console.error("[tauri] dialog.ask unavailable, refusing dangerous action:", message);
-    return false;
-  }
   try {
-    return await ask(message, options);
+    return await showCustomDialog({
+      title: options.title,
+      kind: options.kind,
+      message,
+      okLabel: options.okLabel,
+      cancelLabel: options.cancelLabel,
+    });
   } catch (e) {
-    console.error("[tauri] dialog.ask threw:", e);
+    console.error("[tauri] confirmDialog threw:", e);
     return false;
   }
 }
@@ -58,23 +168,22 @@ export async function confirmDialog(message, options = {}) {
 /**
  * 单按钮消息对话框（替代 `window.alert`）。
  *
- * **背景**：与 [[confirmDialog]] 同因——Tauri 2 + WebView2 下 `window.alert()`
- * 不弹框，用户看不到「保存失败」等错误提示，只能翻控制台。
+ * 自绘 HTML 弹框，替代 Tauri `dialog.message()` 系统原生弹框。
  *
- * **签名**：`message(message, options?) → Promise<void>`
- * - `options.title` / `options.kind`（同 ask）/ `options.okLabel`。
- *
- * **兜底**：dialog plugin 不可用时走 console.error，不阻塞流程。
+ * **签名**：`messageDialog(message, options?) → Promise<void>`
+ * - `options.title` / `options.kind`（同 confirmDialog）/ `options.okLabel`。
  */
 export async function messageDialog(message, options = {}) {
-  const msg = TAU?.dialog?.message;
-  if (typeof msg !== "function") {
-    console.error("[tauri] dialog.message unavailable:", message);
-    return;
-  }
   try {
-    await msg(message, options);
+    await showCustomDialog({
+      title: options.title,
+      kind: options.kind,
+      message,
+      okLabel: options.okLabel,
+      cancelLabel: null, // 无取消按钮
+      dismissable: false,
+    });
   } catch (e) {
-    console.error("[tauri] dialog.message threw:", e);
+    console.error("[tauri] messageDialog threw:", e);
   }
 }

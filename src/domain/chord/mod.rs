@@ -344,11 +344,6 @@ impl ChordRegistry {
                 }
             }
             crate::domain::execution::ActionOutcome::Nop => {}
-            // 0.11.0 改进 1: Items 变体——Chord action 当前不产此变体（仅 PluginActionAdapter 产）。
-            // 加此分支满足 match 穷尽性；若未来 Chord action 产 Items，需在此分派。
-            crate::domain::execution::ActionOutcome::Items { .. } => {
-                tracing::debug!("chord action Items outcome（当前未消费）");
-            }
         }
         Ok(surface)
     }

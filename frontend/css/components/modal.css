@@ -172,3 +172,109 @@
   padding: var(--space-md) var(--space-lg);
   border-bottom: none;
 }
+
+/* ── 自定义确认/消息弹框（替代 Tauri dialog.ask / dialog.message）────────────── */
+
+.confirm-dialog {
+  background: var(--bg);
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius-lg);
+  width: 400px;
+  max-width: 90vw;
+  box-shadow: var(--shadow-modal);
+  overflow: hidden;
+  animation: confirm-dialog-in 0.15s ease-out;
+}
+
+.confirm-dialog-overlay {
+  animation: confirm-overlay-in 0.15s ease-out;
+}
+
+.confirm-dialog-overlay.confirm-dialog-closing {
+  animation: confirm-overlay-out 0.15s ease-out forwards;
+}
+
+.confirm-dialog.confirm-dialog-closing {
+  animation: confirm-dialog-out 0.15s ease-out forwards;
+}
+
+@keyframes confirm-overlay-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes confirm-overlay-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes confirm-dialog-in {
+  from { opacity: 0; transform: scale(0.96) translateY(-8px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+@keyframes confirm-dialog-out {
+  from { opacity: 1; transform: scale(1) translateY(0); }
+  to { opacity: 0; transform: scale(0.96) translateY(-8px); }
+}
+
+.confirm-dialog-header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-md);
+  padding: var(--space-lg) var(--space-lg) var(--space-md);
+}
+
+.confirm-dialog-icon {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.confirm-dialog-icon svg {
+  width: 24px;
+  height: 24px;
+}
+
+.confirm-dialog-warning .confirm-dialog-icon {
+  color: var(--warning, #ffc107);
+}
+
+.confirm-dialog-error .confirm-dialog-icon {
+  color: var(--red);
+}
+
+.confirm-dialog-info .confirm-dialog-icon {
+  color: var(--accent);
+}
+
+.confirm-dialog-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.confirm-dialog-title {
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  color: var(--text);
+  margin-bottom: var(--space-xs);
+}
+
+.confirm-dialog-message {
+  font-size: var(--text-md);
+  color: var(--text-sub);
+  line-height: 1.6;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.confirm-dialog-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+  padding: var(--space-md) var(--space-lg) var(--space-lg);
+}

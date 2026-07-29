@@ -6,14 +6,17 @@
 
 import * as state from "./state.js";
 import * as ipc from "./ipc.js";
-import { initRenderer } from "./renderer.js";
+import { initRenderer, bindLinkOpener } from "./renderer.js";
 import * as components from "./components.js";
+import { forceScrollToBottom } from "./components.js";
 import { escapeText, escapeAttr } from "./utils.js";
 // 0.12.7 §6.3：显式导入 renderSignal，多处场景接入
 import { initComposer, setStreamingMode, setInputMode, clearInput, focusInput, setThinkingEnabled as setComposerThinking, showVoiceIndicator, hideVoiceIndicator, showVoiceStatus, updateVoiceLevel, updateVoicePartial, isVoiceRecording } from "./composer.js";
 import { initSidebar, refreshSidebar, showSidebar, hideSidebar, toggleSidebar, setActiveConversation } from "./sidebar.js";
 import { applyThemeFromConfig } from "../theme.js";
 import { listen, invoke } from "../tauri.js";
+import { initComposerBarPopup, invalidateComposerBarCache, refreshPopupIfVisible } from "./composer-bar-popup.js";
+// invalidateComposerBarCache 仍在 handleContextStatus 中使用
 // 0.12.4 §6.5：openSettings 直接用 invoke，不再需要动态 import
 
 /** 流式渲染节流：requestAnimationFrame 句柄 */
@@ -38,11 +41,24 @@ async function init() {
     }
     // 0.13.0：MCP 配置变更时刷新 tool 池
     if (e?.payload?.key === "mcp:servers") {
-      refreshToolPool();
+      // 0.13.8: 设置页切换 MCP server 开关后，对话窗口需要重连 + 刷新 popup
+      ipc.ensureMcpConnected().then(() => {
+        refreshToolPool(true);
+        invalidateComposerBarCache();
+        refreshPopupIfVisible();
+      }).catch(() => {
+        // 即使 ensure_connected 失败，也要清缓存 + 刷新 popup，
+        // 否则 popup 会显示过期的 online 状态
+        refreshToolPool(true);
+        invalidateComposerBarCache();
+        refreshPopupIfVisible();
+      });
     }
   });
 
   initRenderer();
+// 拦截对话消息内的链接点击，通过外部浏览器打开（防止 Tauri WebView 内部导航崩溃）
+bindLinkOpener();
   components.initComponents({ onEditMessage: handleEditMessage });
 
   initComposer({
@@ -76,14 +92,16 @@ async function init() {
     const status = await ipc.getChatStatus();
     state.setProviderConfigured(status.provider_configured);
 
-    // 0.13.6: 加载初始上下文窗口状态
+    // 0.13.6: 加载初始上下文窗口状态（即使为 null 也显示空环）
     try {
       const ctxStatus = await ipc.getContextWindowStatus();
+      components.updateContextIndicator(ctxStatus || null);
       if (ctxStatus) {
-        components.updateContextIndicator(ctxStatus);
         components.renderContextWarning(ctxStatus.usage_percent, handleContextWarningAction);
       }
     } catch (e) {
+      // 即使获取失败也显示空环
+      components.updateContextIndicator(null);
       console.warn("[chat] 加载上下文窗口状态失败:", e);
     }
     updateProviderLabel(status);
@@ -94,8 +112,22 @@ async function init() {
   }
   refreshModelSelector();
 
+  // 0.13.8: 对话窗口打开时触发 MCP lazy connect——持久连接所有 enabled server。
+  // 之前只等用户发消息时才 ensure_connected，导致 popup 读 runtime status 全是 Offline。
+  // 现在打开窗口即后台连接，连接完成后刷新 tool 池 + 清 popup 缓存。
+  ipc.ensureMcpConnected().then(() => {
+    refreshToolPool(true);
+    invalidateComposerBarCache();
+    refreshPopupIfVisible();
+  }).catch((e) => {
+    console.warn("[chat] ensureMcpConnected 失败:", e);
+  });
+
   // 0.13.0：加载 tool 池规模 + MCP tool 名称（供工具卡片来源标记）
-  refreshToolPool();
+  refreshToolPool(true);
+
+  // Composer bar 悬浮预览 popup 初始化
+  initComposerBarPopup();
 
   // 侧边栏 toggle
   const sidebarToggle = document.getElementById("chat-sidebar-toggle");
@@ -119,9 +151,14 @@ async function init() {
   document.addEventListener("chat:retry", handleRetry);
 
   // 窗口获得焦点时自动聚焦输入框 + 刷新 tool 池（MCP server 可能在设置页被启停）
+  // 0.13.8: focus 时也触发 ensure_mcp_connected，让掉线的 server 重新连接
   window.addEventListener("focus", () => {
     focusInput();
-    refreshToolPool();
+    ipc.ensureMcpConnected().then(() => {
+      refreshToolPool(true);
+      invalidateComposerBarCache();
+      refreshPopupIfVisible();
+    }).catch(() => {});
   });
 
   // 初始聚焦
@@ -136,6 +173,8 @@ async function handleSend(message, isEdit = false) {
 
   // 添加用户消息
   components.renderUserMessage(message);
+  // 用户发消息 → 强制滚到底部（重置上滚标记）
+  forceScrollToBottom();
   state.addMessage({ role: "user", content: message });
 
   // 0.12.4 §6.7：新对话首条消息 → 截断生成标题（编辑重发不触发）
@@ -520,6 +559,12 @@ function handleContextStatus(event) {
   components.renderContextWarning(status.usage_percent, handleContextWarningAction);
   // 0.13.6: 保存 recall_count 供 finalizeDone 渲染
   state.setLastRecallCount(status.last_recall_count || 0);
+  // MCP 拓扑可能在 ensure_connected 时变化（lazy connect 重连成功），
+  // context-status 事件在 ensure_provider 之后推送，此时 tool 池可能已变，
+  // 刷新 composer bar 文本 + 清除 popup 缓存。
+  refreshToolPool(true);
+  invalidateComposerBarCache();
+  refreshPopupIfVisible();
 }
 
 /**
@@ -970,8 +1015,8 @@ async function updatePromptBanner(conversationId) {
 // ── 设置 ────────────────────────────────────────
 
 function openSettings() {
-  // 0.12.4 §6.5：跳转到设置页 AI Tab（复用 open_about 的 eval 模式）
-  invoke("open_settings_tab", { tab: "ai" });
+  // 跳转到设置页「AI 对话能力」tab
+  invoke("open_settings_tab", { tab: "ai-chat" });
 }
 
 // ── 模型选择器（0.12.2 §4.4） ──────────────────
@@ -997,8 +1042,20 @@ function updateProviderLabel(status) {
  *
  * 加载内置 + MCP tool 数量，在 composer bar 显示「内置 N + MCP M = K tools」。
  * 同时加载 MCP tool 名称集合，供工具卡片渲染时标记来源。
+ *
+ * 0.13.8: 加 5 秒节流——窗口 focus 时无脑刷新会导致 3 个 IPC 频繁调用
+ * （其中 get_mcp_tool_pool_size 内部还遍历所有 server），节流后只在
+ * 首次 focus 或距上次刷新 >5s 时才发 IPC。
  */
-async function refreshToolPool() {
+let _refreshToolPoolLastTs = 0;
+const _REFRESH_TOOL_POOL_THROTTLE_MS = 5000;
+
+async function refreshToolPool(force = false) {
+  // 节流：5 秒内不重复刷新（force=true 时跳过节流，供事件驱动的关键刷新用）
+  const now = Date.now();
+  if (!force && now - _refreshToolPoolLastTs < _REFRESH_TOOL_POOL_THROTTLE_MS) return;
+  _refreshToolPoolLastTs = now;
+
   const el = document.getElementById("chat-tool-pool");
   try {
     const [size, names, sources] = await Promise.all([
@@ -1009,13 +1066,9 @@ async function refreshToolPool() {
     state.setMcpToolNames(names);
     state.setMcpToolSources(sources);
 
-    if (el) {
-      const parts = [];
-      if (size.builtin > 0) parts.push(`内置 ${size.builtin}`);
-      if (size.mcp > 0) parts.push(`MCP ${size.mcp}`);
-      el.textContent = parts.length > 0 ? `${parts.join(" + ")} = ${size.total} tools` : "";
-      el.style.display = parts.length > 0 ? "" : "none";
-    }
+    // 隐藏 tool pool 文本——composer bar 只显示圆圈进度条
+    // tool 数量信息已聚合到 hover popup 中展示
+    if (el) el.style.display = "none";
   } catch (e) {
     console.error("[chat] refreshToolPool 失败:", e);
     if (el) el.style.display = "none";

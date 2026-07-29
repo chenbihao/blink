@@ -64,6 +64,11 @@ impl ActionRegistry {
     ///
     /// `&self` 而非 `&mut self` —— 内部 `RwLock` 允许启动后动态注册。
     /// 若 id 已存在，warn + 跳过（不覆盖 builtin）。
+    ///
+    /// **0.13.7**：插件 tool 迁入 CapabilityRegistry 后，本方法暂无调用者，
+    /// 保留作为 ActionRegistry 的对称接口（与 CapabilityRegistry::register 一致），
+    /// 未来运行期动态注册 Action 时消费。
+    #[allow(dead_code)]
     pub fn register(&self, action: Arc<dyn Action>) {
         let id = action.id().to_string();
         let mut actions = self.actions.write().unwrap();

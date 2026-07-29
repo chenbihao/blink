@@ -5,7 +5,7 @@ mod cli;
 mod domain;
 mod infra;
 
-use domain::execution::Action;
+use domain::capability::Capability;
 use tauri::{Emitter, Manager, WindowEvent, tray::TrayIconBuilder};
 
 fn main() {
@@ -339,8 +339,9 @@ fn main() {
             // 0.9.7 Capability 能力协议层（inventory 自动收集 5 个样板能力）
             let capability_registry = std::sync::Arc::new(crate::domain::capability::CapabilityRegistry::new());
 
-            // 0.9.3:注册插件 tool 到 ActionRegistry——让 AI 路由能调用插件能力。
-            // 遍历所有已加载插件的 manifest.tools，为每个 tool 创建 PluginActionAdapter 并注册。
+            // 0.13.7:注册插件 tool 到 CapabilityRegistry——插件语义是「纯计算→返回结果」，
+            // 天然属于 Capability 范畴（入参→出参，不碰 UI）。迁移自 ActionRegistry。
+            // 遍历所有已加载插件的 manifest.tools，为每个 tool 创建 PluginCapabilityAdapter 并注册。
             {
                 let mut plugin_tool_count = 0usize;
                 for plugin_handle in plugin_engine.all_plugins() {
@@ -349,16 +350,15 @@ fn main() {
                         continue;
                     }
                     for tool_def in &manifest.tools {
-                        let adapter = crate::domain::plugin::PluginActionAdapter::new(
+                        let adapter = crate::domain::plugin::PluginCapabilityAdapter::new(
                             plugin_handle.clone(),
                             tool_def,
-                            &manifest.name,
                         );
-                        if action_registry.get(adapter.id()).is_some() {
+                        if capability_registry.get(adapter.id()).is_some() {
                             tracing::warn!(
                                 plugin = %manifest.id,
                                 tool = %adapter.id(),
-                                "插件 tool id 与已有 Action 冲突,跳过"
+                                "插件 tool id 与已有 Capability 冲突,跳过"
                             );
                             continue;
                         }
@@ -366,17 +366,17 @@ fn main() {
                             plugin = %manifest.id,
                             tool = %adapter.id(),
                             danger = ?tool_def.danger_class,
-                            "注册插件 tool"
+                            "注册插件 tool（Capability）"
                         );
-                        action_registry.register(std::sync::Arc::new(adapter));
+                        capability_registry.register(std::sync::Arc::new(adapter));
                         plugin_tool_count += 1;
                     }
                 }
                 if plugin_tool_count > 0 {
                     tracing::info!(
                         count = plugin_tool_count,
-                        total = action_registry.len(),
-                        "插件 tool 注册完成"
+                        total = capability_registry.len(),
+                        "插件 tool 注册完成（CapabilityRegistry）"
                     );
                 }
             }
@@ -703,6 +703,7 @@ fn main() {
             app::commands::stop_mcp_server,
             app::commands::reconnect_mcp_server,
             app::commands::test_mcp_connection,
+app::commands::ensure_mcp_connected,
             app::commands::get_mcp_server_tools,
             app::commands::set_mcp_server_disabled_tools,
             app::commands::get_mcp_tool_pool_size,
@@ -732,6 +733,8 @@ fn main() {
             app::commands::open_dir_in_explorer,
             // 0.13.6 聊天窗口展现优化
             app::commands::get_mcp_tool_sources,
+            // Composer bar 悬浮预览快照
+            app::commands::get_composer_bar_snapshot,
             // 0.13.6 CLI 能力识别
             app::commands::recognize_cli_tool,
             // Skill 编辑/删除

@@ -41,7 +41,7 @@
 //! `build_agent_tools()` 从 `CapabilityRegistry` 和 `ActionRegistry` 收集所有可用能力，
 //! 返回 `Vec<Box<dyn ToolDyn>>` 供对话窗口 Agent 使用。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -77,10 +77,16 @@ const DEFAULT_TOOL_TIMEOUT_MS: u32 = 20_000;
 ///
 /// **confirm_id**：`AtomicU64` 全局递增，不引入 uuid 依赖。
 /// **不持久化**：进程重启即丢（pending 确认本就是瞬时状态，重启后 AI 重新发起即可）。
+///
+/// **对话级信任列表**（`trusted`）：用户确认一次后，同对话内同一 tool 不再弹窗。
+/// 键为 `(conversation_id, tool_name)`，不同对话/不同 tool 不共享信任。
+/// 进程重启清空（内存态，不持久化）。
 #[derive(Default)]
 pub struct PendingConfirms {
     next_id: AtomicU64,
     pending: Mutex<HashMap<u64, oneshot::Sender<bool>>>,
+    /// 对话级信任列表——`(conversation_id, tool_name)`。
+    trusted: Mutex<HashSet<(String, String)>>,
 }
 
 impl PendingConfirms {
@@ -118,6 +124,30 @@ impl PendingConfirms {
     /// 超时清理--await 超时后调，移除并 drop sender（receiver 收 `Err`）。
     async fn discard(&self, confirm_id: u64) {
         self.pending.lock().await.remove(&confirm_id);
+    }
+
+    /// 检查指定对话 + tool 是否已获用户信任（本次对话内确认过）。
+    /// 信任后同对话内再次调用同一 tool 时跳过确认弹窗，直接执行。
+    pub async fn is_trusted(&self, conversation_id: &str, tool_name: &str) -> bool {
+        self.trusted
+            .lock()
+            .await
+            .contains(&(conversation_id.to_string(), tool_name.to_string()))
+    }
+
+    /// 将指定对话 + tool 加入信任列表（用户确认后调）。
+    async fn trust(&self, conversation_id: &str, tool_name: &str) {
+        self.trusted
+            .lock()
+            .await
+            .insert((conversation_id.to_string(), tool_name.to_string()));
+    }
+
+    /// 清除指定对话的所有信任记录（对话删除时调）。
+    #[allow(dead_code)] // 供未来对话删除 command 调用
+    pub async fn clear_trust(&self, conversation_id: &str) {
+        let mut trusted = self.trusted.lock().await;
+        trusted.retain(|(conv_id, _)| conv_id != conversation_id);
     }
 }
 
@@ -190,10 +220,22 @@ async fn check_dangerous_confirm(
     if !is_dangerous {
         return None;
     }
-    tracing::warn!(%tool_name, "危险操作被 AI 调用，挂起等待用户确认");
-    let (confirm_id, rx) = pending.register().await;
+
     let (req_id, conv_id) =
         crate::domain::ai::chat_service::current_request_context_from_app(app);
+
+    // 对话级信任：用户已确认过的危险操作自动放行，不再弹窗
+    if pending.is_trusted(&conv_id, tool_name).await {
+        tracing::debug!(
+            %tool_name,
+            conversation_id = %conv_id,
+            "危险操作已在本次对话内获用户信任，跳过确认"
+        );
+        return None;
+    }
+
+    tracing::warn!(%tool_name, "危险操作被 AI 调用，挂起等待用户确认");
+    let (confirm_id, rx) = pending.register().await;
     match await_dangerous_confirm(
         pending,
         app,
@@ -209,6 +251,8 @@ async fn check_dangerous_confirm(
     {
         ConfirmOutcome::Approved => {
             tracing::info!(%tool_name, "用户确认执行危险 {tool_type}");
+            // 加入对话级信任列表，后续同对话内不再弹窗
+            pending.trust(&conv_id, tool_name).await;
             None
         }
         ConfirmOutcome::Rejected => Some(Ok(format!(
@@ -658,6 +702,52 @@ mod tests {
         let (id3, _rx3) = pc.register().await;
         assert!(id2 > id1, "id 应单调递增");
         assert!(id3 > id2);
+    }
+
+    // ── 对话级信任列表单测 ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn trust_after_confirm_skips_subsequent_confirmation() {
+        let pc = PendingConfirms::new();
+        // 初始不信任
+        assert!(!pc.is_trusted("conv1", "shutdown").await);
+        // 模拟用户确认后加入信任
+        pc.trust("conv1", "shutdown").await;
+        // 再次检查应已信任
+        assert!(pc.is_trusted("conv1", "shutdown").await);
+    }
+
+    #[tokio::test]
+    async fn trust_is_per_conversation() {
+        let pc = PendingConfirms::new();
+        pc.trust("conv1", "shutdown").await;
+        // 同一 tool 在不同对话不应共享信任
+        assert!(pc.is_trusted("conv1", "shutdown").await);
+        assert!(!pc.is_trusted("conv2", "shutdown").await);
+    }
+
+    #[tokio::test]
+    async fn trust_is_per_tool() {
+        let pc = PendingConfirms::new();
+        pc.trust("conv1", "shutdown").await;
+        // 同一对话内不同 tool 不共享信任
+        assert!(pc.is_trusted("conv1", "shutdown").await);
+        assert!(!pc.is_trusted("conv1", "lock").await);
+    }
+
+    #[tokio::test]
+    async fn clear_trust_removes_only_target_conversation() {
+        let pc = PendingConfirms::new();
+        pc.trust("conv1", "shutdown").await;
+        pc.trust("conv1", "lock").await;
+        pc.trust("conv2", "sleep").await;
+        // 清除 conv1 的信任
+        pc.clear_trust("conv1").await;
+        // conv1 的都清了
+        assert!(!pc.is_trusted("conv1", "shutdown").await);
+        assert!(!pc.is_trusted("conv1", "lock").await);
+        // conv2 的不受影响
+        assert!(pc.is_trusted("conv2", "sleep").await);
     }
 
     // ── derive_tool_deadline 单测 ──────────────────────────────────────────

@@ -181,8 +181,14 @@ body.chord-visible #ghost-overlay:has(.ghost-suggest:empty) .ghost-chord:not(:em
 /* ── 0.10 G1 录音指示器 ──────────────────────────────────────────── */
 
 /* 语音录音中：隐藏 Chord 提示，避免与语音指示器并存造成视觉混乱。
-   ghost-suggest 不隐藏——语音预览文本（voice-preview-text）会复用它显示 preview。 */
+ghost-suggest 不隐藏——语音预览文本（voice-preview-text）会复用它显示 preview。 */
 body.voice-active #ghost-overlay .ghost-chord {
+  display: none !important;
+}
+
+/* 语音错误提示期间：隐藏 Chord 提示，避免错误文案（placeholder）与 chord 键帽重叠。
+   voice-error 由 lifecycle.js voice-error handler 添加，3s 后移除。 */
+body.voice-error #ghost-overlay .ghost-chord {
   display: none !important;
 }
 

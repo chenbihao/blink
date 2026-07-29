@@ -44,6 +44,12 @@ export const toolCalls = new Map();
 export let lastUsage = null;
 
 /**
+ * 已关闭提示词横幅的对话集合（0.12.7 §6.5）。
+ * key = conversation_id，value = true。仅在会话内有效，刷新后重置。
+ */
+export const dismissedPromptConvs = new Set();
+
+/**
  * MCP tool 名称集合（0.13.0）。
  * 存储所有已连接 MCP server 提供的 tool 名称，用于在工具卡片上标记来源。
  * `null` = 尚未加载，`Set<string>` = 已加载。

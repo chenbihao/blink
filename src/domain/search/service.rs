@@ -1948,9 +1948,6 @@ fn ai_action_done_entry(
         ActionOutcome::Open { path } => Some(format!("已打开: {path}")),
         ActionOutcome::Emit { .. } => None, // 副作用型,无文本结果
         ActionOutcome::Nop => None,
-        // 0.11.0 改进 1: Items 变体在 handle_ai_tool_calls 走 items_to_entries,
-        // 不走到这里。加此分支满足 match 穷尽性；若误传则走"已执行"兜底。
-        ActionOutcome::Items { .. } => None,
     };
 
     match result_text {
@@ -2128,9 +2125,6 @@ pub(crate) fn outcome_to_summary(outcome: &ActionOutcome) -> String {
         ActionOutcome::Open { path } => format!("Open: {path}"),
         ActionOutcome::Emit { event, .. } => format!("Emit: {event}"),
         ActionOutcome::Nop => "Nop".to_string(),
-        ActionOutcome::Items { items } => {
-            format!("Items({} 项)", items.len())
-        }
     }
 }
 
@@ -2351,14 +2345,8 @@ async fn execute_action_for_turn1(
                 crate::domain::capability::rig_tool_result_to_text(&outcome.to_rig_tool_result());
             let summary = outcome_to_summary(&outcome);
 
-            // 构造前端 entries
-            let entries = match &outcome {
-                ActionOutcome::Items { items } => {
-                    let e = items_to_entries(items);
-                    if e.is_empty() { vec![] } else { e }
-                }
-                _ => vec![ai_action_done_entry(action.as_ref(), &outcome, lang)],
-            };
+            // 构造前端 entries（0.13.7：Items 变体已删，Action 路径统一走 done entry）
+            let entries = vec![ai_action_done_entry(action.as_ref(), &outcome, lang)];
 
             ToolExecutionResult {
                 tool_name: tc.name.clone(),

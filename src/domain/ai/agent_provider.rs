@@ -368,6 +368,14 @@ impl AgentProvider {
                             max_turns: MAX_TURNS,
                         }
                     } else {
+                        // 0.12.9：后端日志记录 SSE / provider 错误详情，便于排查 400 等问题
+                        tracing::warn!(
+                            target: crate::infra::utils::perf::ai_slo::TARGET,
+                            conversation = %conversation_id,
+                            error = %msg,
+                            error_debug = ?e,
+                            "run_stream: 流式生成错误"
+                        );
                         ChatStreamChunk::Error { message: msg }
                     }
                 }
@@ -380,6 +388,11 @@ impl AgentProvider {
         // 0.12.5：stream 结束但未发送 Done（rig-core 跳过了 SSE 解析错误后连接关闭）
         // → 发送 Error chunk，避免前端永远收不到结束事件而卡死
         if !done_sent {
+            tracing::warn!(
+                target: crate::infra::utils::perf::ai_slo::TARGET,
+                conversation = %conversation_id,
+                "run_stream: 流结束但未收到 Done chunk（SSE 解析异常 / 连接被服务端关闭）"
+            );
             let _ = tx.send(ChatStreamChunk::Error {
                 message: "AI 返回了无效响应，可能是服务过载或配额耗尽，请稍后重试".to_string(),
             });

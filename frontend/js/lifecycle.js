@@ -184,6 +184,8 @@ export function init() {
     const { message, target } = event.payload ?? {};
     if (target !== "g1" || !message) return;
     document.body.classList.remove("voice-active");
+    // 添加 voice-error 标记——隐藏 chord 提示，避免错误文案与 chord 键帽重叠
+    document.body.classList.add("voice-error");
     ghost.unfreeze(); // 确保解冻（错误可能发生在录音中）
     if (voiceIndicator) {
       voiceIndicator.classList.add("hidden");
@@ -192,9 +194,10 @@ export function init() {
     queryEl.value = "";
     queryEl.placeholder = message;
     queryEl.dispatchEvent(new Event("input", { bubbles: true }));
-    // 3s 后恢复原 placeholder
+    // 3s 后恢复原 placeholder + 移除 voice-error 标记
     setTimeout(() => {
       queryEl.placeholder = "";
+      document.body.classList.remove("voice-error");
     }, 3000);
   });
 

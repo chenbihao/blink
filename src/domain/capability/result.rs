@@ -37,8 +37,7 @@ impl CapabilityResult {
             }
             CapabilityResult::Items { items } => {
                 // Items → 序列化 JSON 文本喂 LLM（模型读 JSON 上下文）
-                let json = serde_json::to_string(items).unwrap_or_else(|_| "[]".to_string());
-                vec![ToolResultContent::text(json)]
+                vec![ToolResultContent::text(items_to_llm_json(items))]
             }
             CapabilityResult::Blob { mime, bytes } => {
                 // Blob → 文本摘要（不喂原始字节省 token）
@@ -76,6 +75,36 @@ pub fn rig_tool_result_to_text(
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// 把 `ItemResult` 列表投影成喂 LLM 的 JSON 文本（0.13.7）。
+///
+/// **为何不用 `serde_json::to_string(items)`**：`ItemResult.score` 是给主窗口排序用的
+/// 归一化分数（0.0..=1.0），对 LLM 是纯噪音——模型不需要知道某个文件匹配分是 0.87，
+/// 反而可能误导（如"分低的更相关？"）。投影到 AI 时剔除该字段，只保留
+/// `title` / `subtitle` / `payload`（语义信息）。
+///
+/// `subtitle` 为 None 时通过 `skip_serializing_if` 自然省略。
+/// 失败兜底返回 `"[]"`（与旧行为一致）。
+pub fn items_to_llm_json(items: &[ItemResult]) -> String {
+    // 手动投影成 JSON 数组（剔除 score），避免为 LLM 投影单独定义一个 SkipScoreItem 类型。
+    #[derive(serde::Serialize)]
+    struct LlmItem<'a> {
+        title: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        subtitle: &'a Option<String>,
+        /// payload 原样透传——它是语义载体（path/text/任意 JSON），AI 读它做推理。
+        payload: &'a Value,
+    }
+    let llm_items: Vec<_> = items
+        .iter()
+        .map(|i| LlmItem {
+            title: &i.title,
+            subtitle: &i.subtitle,
+            payload: &i.payload,
+        })
+        .collect();
+    serde_json::to_string(&llm_items).unwrap_or_else(|_| "[]".to_string())
 }
 
 /// 原子能力的统一返回——四种形态覆盖所有场景。
@@ -255,6 +284,41 @@ mod tests {
         } else {
             panic!("Items should project to Text");
         }
+    }
+
+    /// 0.13.7: score 是主窗口排序用的归一化分数，对 LLM 是噪音，投影到 AI 时剔除。
+    #[test]
+    fn items_to_llm_json_strips_score_field() {
+        let items = vec![
+            ItemResult {
+                title: "file_a.txt".into(),
+                subtitle: Some("C:\\dir".into()),
+                payload: json!({ "path": "C:\\dir\\file_a.txt" }),
+                score: Some(0.9),
+            },
+            ItemResult {
+                title: "file_b.txt".into(),
+                subtitle: None,
+                payload: json!({}),
+                score: None,
+            },
+        ];
+        let json_text = super::items_to_llm_json(&items);
+        // score 必须不出现
+        assert!(
+            !json_text.contains("score"),
+            "items_to_llm_json 不应包含 score 字段: {json_text}"
+        );
+        // 语义字段保留
+        assert!(json_text.contains("file_a.txt"));
+        assert!(json_text.contains("file_b.txt"));
+        assert!(json_text.contains("C:\\\\dir"));
+    }
+
+    #[test]
+    fn items_to_llm_json_empty_returns_empty_array() {
+        let json_text = super::items_to_llm_json(&[]);
+        assert_eq!(json_text, "[]");
     }
 
     #[test]

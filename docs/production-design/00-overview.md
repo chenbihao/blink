@@ -149,3 +149,4 @@
 | 为何坚持 rig-core 自建 agent，不用 opencode/pi 当执行端? | [adr-001-agent-backend-strategy.md](./adr-001-agent-backend-strategy.md) |
 | 外部 agent 能否作为 subagent 调用（整理下载文件夹类场景）? | [inspiration-external-agent-subagent.md](./inspiration-external-agent-subagent.md) |
 | 开发规范、模块拆分、Tauri Commands | [CLAUDE.md](../../CLAUDE.md) |
+ 

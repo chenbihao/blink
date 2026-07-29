@@ -155,10 +155,12 @@ pub fn find_group(name: &str) -> Option<&'static ToolGroup> {
 
 /// 构建聚合后的 tools 列表（供 AI 路由使用）。
 ///
-/// 三源归一（0.9.7 Step 4）：
-/// 1. 内置动作 → 按分组聚合为 3 个 tool
-/// 2. 插件 tool → 保持独立（跳过已分组的内置动作）
-/// 3. Capability → 独立 tool（不参与分组，schema 直接投影为 ActionSchema）
+/// 两源归一（0.13.7 起插件迁入 Capability，三源→两源）：
+/// 1. 内置 Action → 按分组聚合为 3 个 tool（system/blink/file）
+/// 2. Capability → 独立 tool（含 builtin 能力 + 插件 tool，schema 直接投影为 ActionSchema）
+///
+/// **历史**：0.9.3-0.13.6 插件走 ActionRegistry（独立 tool），0.13.7 迁入 CapabilityRegistry，
+/// 消除 ActionOutcome::Items / CapabilityResult::Items 双体系重叠。
 ///
 /// **Capability 与 Action 的 name 冲突策略**：Capability 优先——
 /// AI tool_call 命中时 `handle_ai_tool_calls` 先查 CapabilityRegistry。
@@ -185,7 +187,7 @@ pub fn build_aggregated_tools(
         }
     }
 
-    // 2. 插件 tool → 保持独立（跳过已分组的内置动作）
+    // 2. 未分组的 Action → 独立 tool（防御性：未来若有未分组 builtin 不漏）
     for id in registry.ids() {
         if is_grouped_action(&id) {
             continue;
@@ -195,7 +197,7 @@ pub fn build_aggregated_tools(
         }
     }
 
-    // 3. Capability → 独立 tool（不参与分组，schema 直接投影为 ActionSchema）
+    // 3. Capability → 独立 tool（含 builtin 能力 + 插件 tool，不参与分组）
     // CapabilitySchema 与 ActionSchema 结构相同（name/description/parameters），
     // 直接字段拷贝投影——零适配，0.11 MCP 派生也从这份 schema 出。
     for cap_schema in cap_registry.list() {

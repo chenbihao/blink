@@ -24,6 +24,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rig_core::tool::ToolDyn;
 use rmcp::ServiceExt;
@@ -83,6 +84,9 @@ pub struct McpClientManager {
     connected: Arc<RwLock<HashMap<String, ConnectedServer>>>,
     /// 各 server 的状态（供前端查询）。
     statuses: Arc<RwLock<HashMap<String, McpServerStatus>>>,
+    /// tool 池版本号（单调递增）。任何改变会喂给 AI 的 tool 池的操作都 bump，
+    /// ChatService 的 AgentCacheKey 含此 epoch，拓扑变化自然触发 cache miss。
+    epoch: AtomicU64,
 }
 
 /// 连接重试次数（确定性错误不重试，只对网络/握手类错误重试）。
@@ -96,7 +100,21 @@ impl McpClientManager {
         Self {
             connected: Arc::new(RwLock::new(HashMap::new())),
             statuses: Arc::new(RwLock::new(HashMap::new())),
+            epoch: AtomicU64::new(0),
         }
+    }
+
+    /// 返回当前 tool 池的版本号（单调递增）。
+    ///
+    /// 供 ChatService 构造 AgentCacheKey——MCP 拓扑变化时 epoch 不同，触发 cache miss。
+    pub fn tool_pool_epoch(&self) -> u64 {
+        self.epoch.load(Ordering::SeqCst)
+    }
+
+    /// bump tool 池版本号，使其与之前所有缓存的 AgentCacheKey 失配。
+    fn bump_epoch(&self) {
+        let new_epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        tracing::debug!(epoch = new_epoch, "MCP: tool 池变化，bump epoch");
     }
 
     /// 0.13.7: lazy connect——连接所有 enabled 但尚未连接的 server。
@@ -147,22 +165,39 @@ impl McpClientManager {
     ///
     /// 用于设置页的「测试连接」按钮——验证 server 是否可用，不保持子进程。
     /// 返回 tool 列表供前端预览，断开后状态回到 Offline。
+    ///
+    /// 0.13.8: 不再经过 `try_connect_once` → `finalize_connection`（会写入 connected 表），
+    /// 改用 `try_connect_transient`——连接 + 拉 tool 列表但不存入 connected 表，
+    /// 从根源消除测试连接期间临时 entry 被并发的 `collect_tools` 拾取的竞态。
     pub async fn test_connection(
         &self,
         config: &McpServerConfig,
     ) -> Result<Vec<McpToolInfo>, String> {
-        let tools = self.try_connect_once(config).await?;
-        // 立即断开——测试连接不保持子进程
-        let mut connected = self.connected.write().await;
-        connected.remove(&config.name);
-        drop(connected);
-        self.set_status(
-            &config.name,
-            McpServerStatus::Offline {
-                reason: "测试连接完成".to_string(),
-            },
-        )
-        .await;
+        let tools = self.try_connect_transient(config).await?;
+        // service 在 try_connect_transient 中已 drop（子进程被 kill），无需手动 remove
+
+        // 恢复运行时状态：如果 server 已有持久连接（在 connected map 中），
+        // 恢复其 Online 状态——test_connection 的 transient 连接不应影响持久连接的状态。
+        // 只有原本就没有持久连接的 server 才设为 Offline。
+        let connected = self.connected.read().await;
+        if let Some(server) = connected.get(&config.name) {
+            let tool_count = server.tools.len();
+            drop(connected);
+            self.set_status(
+                &config.name,
+                McpServerStatus::Online { tool_count },
+            )
+            .await;
+        } else {
+            drop(connected);
+            self.set_status(
+                &config.name,
+                McpServerStatus::Offline {
+                    reason: "测试连接完成".to_string(),
+                },
+            )
+            .await;
+        }
         Ok(tools)
     }
 
@@ -195,6 +230,8 @@ impl McpClientManager {
                         McpServerStatus::Online { tool_count },
                     )
                     .await;
+                    // server 进入 tool 池，bump epoch 使旧 AgentCacheKey 失配
+                    self.bump_epoch();
                     return Ok(());
                 }
                 Err(e) => {
@@ -266,11 +303,49 @@ impl McpClientManager {
         }
     }
 
+    /// 0.13.8: 临时连接——连接 + 拉 tool 列表，不写入 connected 表。
+    ///
+    /// 供 `test_connection` 使用——与 `try_connect_once` 不同，不调用
+    /// `finalize_connection`（不存入 connected 表），避免测试连接期间的临时 entry
+    /// 被并发的 `collect_tools` 拾取。
+    ///
+    /// service 在方法返回时 drop → 子进程被 kill，不保持连接。
+    async fn try_connect_transient(
+        &self,
+        config: &McpServerConfig,
+    ) -> Result<Vec<McpToolInfo>, String> {
+        use crate::domain::mcp::config::McpTransport;
+        let service = match &config.transport {
+            McpTransport::Stdio => self.build_stdio_service(config).await?,
+            McpTransport::Sse { url, headers } => {
+                self.build_sse_service(config, url, headers).await?
+            }
+            McpTransport::Http { url, headers } => {
+                self.build_http_service(config, url, headers).await?
+            }
+        };
+        // 只拉 tool 列表，不存入 connected 表
+        let (_rmcp_tools, tools) = Self::pull_tools_from_service(&service, config).await?;
+        // service 在此 drop → 子进程被 kill
+        Ok(tools)
+    }
+
     /// stdio 模式连接——拉起子进程 + 握手 + 拉 tool 列表。
     async fn try_connect_stdio(
         &self,
         config: &McpServerConfig,
     ) -> Result<Vec<McpToolInfo>, String> {
+        let service = self.build_stdio_service(config).await?;
+        self.finalize_connection(config, service).await
+    }
+
+    /// 构建 stdio 模式的 rmcp service（拉起子进程 + 握手），不含存储逻辑。
+    ///
+    /// 供 `try_connect_stdio`（持久连接）和 `try_connect_transient`（临时探测）共用。
+    async fn build_stdio_service(
+        &self,
+        config: &McpServerConfig,
+    ) -> Result<RunningService<rmcp::service::RoleClient, ClientInfo>, String> {
         // 前置校验——空 command 是确定性错误，不重试
         if config.command.is_empty() {
             return Err(format!(
@@ -296,12 +371,10 @@ impl McpClientManager {
 
         // 用 rmcp 默认 ClientInfo 建立 client 连接
         let client_info = ClientInfo::default();
-        let service = client_info
+        client_info
             .serve(transport)
             .await
-            .map_err(|e| format!("MCP 握手失败: {e}"))?;
-
-        self.finalize_connection(config, service).await
+            .map_err(|e| format!("MCP 握手失败: {e}"))
     }
 
     /// HTTP 模式连接——Streamable HTTP transport + 握手 + 拉 tool 列表（0.13.6）。
@@ -311,6 +384,19 @@ impl McpClientManager {
         url: &str,
         headers: &std::collections::HashMap<String, String>,
     ) -> Result<Vec<McpToolInfo>, String> {
+        let service = self.build_http_service(config, url, headers).await?;
+        self.finalize_connection(config, service).await
+    }
+
+    /// 构建 HTTP 模式的 rmcp service（Streamable HTTP transport + 握手），不含存储逻辑。
+    ///
+    /// 供 `try_connect_http`（持久连接）和 `try_connect_transient`（临时探测）共用。
+    async fn build_http_service(
+        &self,
+        config: &McpServerConfig,
+        url: &str,
+        headers: &std::collections::HashMap<String, String>,
+    ) -> Result<RunningService<rmcp::service::RoleClient, ClientInfo>, String> {
         // 前置校验——空 URL 是确定性错误
         if url.is_empty() {
             return Err(format!(
@@ -356,12 +442,10 @@ impl McpClientManager {
         let transport = rmcp::transport::StreamableHttpClientTransport::from_config(cfg);
 
         let client_info = ClientInfo::default();
-        let service = client_info
+        client_info
             .serve(transport)
             .await
-            .map_err(|e| format!("HTTP MCP 握手失败: {e}"))?;
-
-        self.finalize_connection(config, service).await
+            .map_err(|e| format!("HTTP MCP 握手失败: {e}"))
     }
 
     /// SSE 模式连接——旧版 SSE transport + 握手 + 拉 tool 列表（0.13.8）。
@@ -378,6 +462,19 @@ impl McpClientManager {
         url: &str,
         headers: &std::collections::HashMap<String, String>,
     ) -> Result<Vec<McpToolInfo>, String> {
+        let service = self.build_sse_service(config, url, headers).await?;
+        self.finalize_connection(config, service).await
+    }
+
+    /// 构建 SSE 模式的 rmcp service（旧版 SSE transport + 握手），不含存储逻辑。
+    ///
+    /// 供 `try_connect_sse`（持久连接）和 `try_connect_transient`（临时探测）共用。
+    async fn build_sse_service(
+        &self,
+        config: &McpServerConfig,
+        url: &str,
+        headers: &std::collections::HashMap<String, String>,
+    ) -> Result<RunningService<rmcp::service::RoleClient, ClientInfo>, String> {
         if url.is_empty() {
             return Err(format!(
                 "SSE 模式 URL 不能为空（server: {}）",
@@ -396,12 +493,10 @@ impl McpClientManager {
             .map_err(|e| format!("SSE 连接失败: {e}"))?;
 
         let client_info = ClientInfo::default();
-        let service = client_info
+        client_info
             .serve(transport)
             .await
-            .map_err(|e| format!("SSE MCP 握手失败: {e}"))?;
-
-        self.finalize_connection(config, service).await
+            .map_err(|e| format!("SSE MCP 握手失败: {e}"))
     }
 
     /// 连接后通用逻辑——拉 tool 列表 + 转换 + 存入连接表。
@@ -410,6 +505,31 @@ impl McpClientManager {
         config: &McpServerConfig,
         service: RunningService<rmcp::service::RoleClient, ClientInfo>,
     ) -> Result<Vec<McpToolInfo>, String> {
+        let (rmcp_tools, tools) = Self::pull_tools_from_service(&service, config).await?;
+
+        // 存入连接表（同时缓存原始 rmcp tool 列表，collect_tools 时直接用，不重新拉取）
+        let mut connected = self.connected.write().await;
+        connected.insert(
+            config.name.clone(),
+            ConnectedServer {
+                service,
+                rmcp_tools,
+                tools: tools.clone(),
+                config: config.clone(),
+            },
+        );
+
+        Ok(tools)
+    }
+
+    /// 0.13.8: 从已建立的 service 拉 tool 列表 + 转换为 McpToolInfo（不含存储逻辑）。
+    ///
+    /// 供 `finalize_connection`（持久连接 → 存入 connected 表）和
+    /// `try_connect_transient`（临时探测 → 不存入）共用。
+    async fn pull_tools_from_service(
+        service: &RunningService<rmcp::service::RoleClient, ClientInfo>,
+        config: &McpServerConfig,
+    ) -> Result<(Vec<rmcp::model::Tool>, Vec<McpToolInfo>), String> {
         // 拉 tool 列表
         let rmcp_tools = service
             .peer()
@@ -431,19 +551,7 @@ impl McpClientManager {
             })
             .collect();
 
-        // 存入连接表（同时缓存原始 rmcp tool 列表，collect_tools 时直接用，不重新拉取）
-        let mut connected = self.connected.write().await;
-        connected.insert(
-            config.name.clone(),
-            ConnectedServer {
-                service,
-                rmcp_tools,
-                tools: tools.clone(),
-                config: config.clone(),
-            },
-        );
-
-        Ok(tools)
+        Ok((rmcp_tools, tools))
     }
 
     /// 停止单个 server（断开连接 + 杀子进程）。
@@ -453,6 +561,8 @@ impl McpClientManager {
             // Drop service 会触发子进程清理（TokioChildProcess 的 Drop impl 会 kill）
             drop(server);
             tracing::info!(server = %name, "MCP: server 已停止");
+            // 仅当实际 remove 了才 bump——没移除则池子没变，bump 会无谓触发重建
+            self.bump_epoch();
         }
         self.set_status(
             name,
@@ -512,6 +622,24 @@ impl McpClientManager {
             "MCP: tool 池收集完成"
         );
         tools
+    }
+
+    /// 轻量计数——只统计已连接 server 提供的非 disabled tool 数量。
+    ///
+    /// 与 `collect_tools()` 不同：不构造 `McpTool`（不做 `rmcp_tool.clone()` +
+    /// `peer.clone()` + `Box::new`），只遍历计数，供前端 tool 池规模展示用。
+    pub async fn count_tools(&self) -> usize {
+        let connected = self.connected.read().await;
+        let mut count = 0;
+        for server in connected.values() {
+            for rmcp_tool in &server.rmcp_tools {
+                let tool_name = rmcp_tool.name.to_string();
+                if !server.config.disabled_tools.contains(&tool_name) {
+                    count += 1;
+                }
+            }
+        }
+        count
     }
 
     /// 获取所有 server 的状态（供前端查询）。
@@ -582,6 +710,15 @@ impl McpClientManager {
             for tool in &mut server.tools {
                 tool.disabled = disabled_tools.contains(&tool.name);
             }
+            // disabled_tools 变化改变了喂给 AI 的 tool 池，bump epoch
+            self.bump_epoch();
+        } else {
+            // server 未连接——DB 已更新，运行时缓存无此 server。
+            // 下次 ensure_connected 时会从 DB 加载最新配置，最终一致。
+            tracing::debug!(
+                server = %name,
+                "MCP: update_disabled_tools 时 server 未连接，运行时缓存未更新（下次连接时从 DB 加载）"
+            );
         }
     }
 
@@ -591,6 +728,7 @@ impl McpClientManager {
         let names: Vec<String> = connected.keys().cloned().collect();
         connected.clear();
         drop(connected);
+        self.bump_epoch();
         // Drop 所有 service（触发子进程清理）
         tracing::info!(count = names.len(), "MCP: 所有 server 已停止");
     }
@@ -835,5 +973,49 @@ mod tests {
         for tool in &tools {
             assert!(tool.annotations.is_none(), "tool {} should not have annotations", tool.name);
         }
+    }
+
+    // ── MCP tool 池 epoch 测试 ──
+
+    #[test]
+    fn tool_pool_epoch_starts_at_zero() {
+        let manager = McpClientManager::new();
+        assert_eq!(manager.tool_pool_epoch(), 0);
+    }
+
+    #[tokio::test]
+    async fn start_server_failure_does_not_bump_epoch() {
+        // 空命令是确定性错误，连接失败不应 bump epoch
+        let manager = McpClientManager::new();
+        let config = McpServerConfig {
+            name: "fail-test".to_string(),
+            transport: crate::domain::mcp::config::McpTransport::Stdio,
+            command: String::new(),
+            args: vec![],
+            env: std::collections::HashMap::new(),
+            enabled: true,
+            disabled_tools: vec![],
+        };
+        let epoch_before = manager.tool_pool_epoch();
+        let result = manager.start_server(&config).await;
+        assert!(result.is_err());
+        assert_eq!(
+            manager.tool_pool_epoch(),
+            epoch_before,
+            "连接失败不应 bump epoch"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_server_on_unknown_name_does_not_bump_epoch() {
+        // 对不存在的 server name 调 stop_server，epoch 不应变
+        let manager = McpClientManager::new();
+        let epoch_before = manager.tool_pool_epoch();
+        manager.stop_server("nonexistent").await;
+        assert_eq!(
+            manager.tool_pool_epoch(),
+            epoch_before,
+            "stop_server 未实际移除 server 时不应 bump epoch"
+        );
     }
 }

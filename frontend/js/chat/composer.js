@@ -74,8 +74,10 @@ export function initComposer(callbacks) {
   });
 
   // Enter 发送 / Shift+Enter 换行 / Escape 关闭 skill hint
+  // 流式模式（stop 按钮）下 Enter 不发送——避免用户预输入时误触发
   textarea.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
+      if (sendBtn.classList.contains("chat-stop-btn")) return;
       e.preventDefault();
       handleSend();
     } else if (e.key === "Escape" && skillHintEl && !skillHintEl.hidden) {
@@ -110,14 +112,16 @@ export function initComposer(callbacks) {
 }
 
 /**
- * 设置 composer 为流式模式（显示停止按钮，禁用输入）。
+ * 设置 composer 为流式模式（显示停止按钮，保留输入能力）。
+ * 不再禁用 textarea——用户可在 AI 生成期间预先输入下一条消息，
+ * Enter 在流式模式下不会发送（仅 Shift+Enter 换行），需点击停止按钮后再 Enter 发送。
  */
 export function setStreamingMode() {
   if (!sendBtn || !textarea) return;
   sendBtn.classList.add("chat-stop-btn");
   sendBtn.innerHTML = stopIcon;
   sendBtn.disabled = false;
-  textarea.disabled = true;
+  // 不禁用 textarea——用户可继续输入
   if (thinkingBtn) thinkingBtn.disabled = true;
 }
 
