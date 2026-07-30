@@ -3,7 +3,7 @@
 //! ## 架构
 //!
 //! CLI 模式创建一个最小化的 Tauri app（无窗口、无托盘），仅初始化必要 state
-//! （DbPools / CapabilityRegistry / ActionRegistry），然后执行 CLI 命令。
+//! （DbPools / CapabilityRegistry），然后执行 CLI 命令。
 //!
 //! 与 GUI 模式共享 `src/domain/` 和 `src/app/` 的全部后端逻辑。
 
@@ -60,10 +60,17 @@ pub fn dispatch(cli: Cli) -> i32 {
 
     // 初始化注册表
     let cap_registry = Arc::new(crate::domain::capability::CapabilityRegistry::new());
-    let action_registry = Arc::new(crate::domain::execution::ActionRegistry::new());
-    app.manage(cap_registry.clone());
-    app.manage(action_registry.clone());
 
+    // 0.14.6 §2.2：创建 DomainEnv 桥接器（CLI 模式最小化，仅注入 Capability）。
+    let pools = app.state::<crate::infra::data::DbPools>().inner().clone();
+    let domain_env = Arc::new(crate::app::domain_env::TauriDomainEnv::new(
+        app.handle().clone(),
+        pools,
+    ));
+    domain_env.set_cap_registry(cap_registry.clone());
+    app.manage(domain_env);
+
+    app.manage(cap_registry.clone());
     let handle = app.handle().clone();
 
     // 执行 CLI 命令
@@ -91,10 +98,14 @@ fn run_mcp_server(
     use tauri::Manager;
 
     let pools = handle.state::<crate::infra::data::DbPools>();
+    let env_arc = handle
+        .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
+        .inner()
+        .clone();
     let result = tauri::async_runtime::block_on(
         crate::domain::mcp::run_stdio_server(
             cap_registry.clone(),
-            handle.clone(),
+            env_arc,
             pools.ai.clone(),
             pools.config.clone(),
         ),
@@ -200,8 +211,12 @@ fn run_capability(
     };
 
     // 构造 InvokeContext
+    let env_arc = handle
+        .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
+        .inner()
+        .clone();
     let ctx = crate::domain::capability::InvokeContext {
-        app_handle: handle,
+        env: env_arc.as_ref(),
         deadline: None,
     };
 

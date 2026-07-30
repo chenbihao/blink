@@ -60,7 +60,7 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 
 ## 四、错误处理规范
 
-> 0.14.6 §3.2 确立的目标态。当前代码尚在手写样板阶段，新代码按本节写，存量按 0.14.6 收敛。
+> 0.14 §8.2 确立并开始落地。新代码按本节写，剩余存量随自然演进收敛。
 
 ### 4.1 thiserror 强制（目标态）
 
@@ -93,7 +93,7 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 
 ## 五、事件名常量化（强制）
 
-> 0.14.6 §3.3 确立的目标态。
+> 0.14 §8.2 确立并落地。
 
 **铁则**：`blink://*` 事件名**禁止前后端各自硬编码字面量**。
 
@@ -102,19 +102,19 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 - **同步**：可考虑 codegen 从 Rust 常量生成前端常量，消除手动同步
 - **校验**：拼错事件名目前无编译期保护，常量化后由"引用不存在的常量"触发编译错误
 
-当前散落的 24 种 `blink://*` 事件（`config-changed` 后端 emit 19 次等）是待收敛的存量。
+当前 Rust 与前端均已建立集中事件名清单；新增或修改事件时必须同步两端，并通过字面量核对防止漂移。
 
 ---
 
 ## 六、invoke 路径收敛（强制）
 
-> 0.14.6 §3.4 确立。
+> 0.14 §8.2 确立并落地。
 
 **铁则**：前端 invoke **单一 import 来源** = `frontend/js/tauri.js`。
 
 - **禁止**绕过桥接直接戳 `window.__TAURI__`
 - **禁止**各文件重复 `window.__TAURI__?.core?.invoke ?? ...` 兼容逻辑
-- 当前存量 3 处 `__TAURI__` 绕过（renderer.js / chat/ipc.js / chat/main.js / contextmenu-popup.html）待清理
+- 业务模块不得恢复历史上的 `__TAURI__` 绕过；需要新增原生 API 时先扩展 `tauri.js` 桥接
 
 ---
 

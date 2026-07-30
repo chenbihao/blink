@@ -25,7 +25,7 @@ use std::time::Instant;
 
 use tokio::sync::mpsc;
 
-use crate::app::config::HotkeyConfig;
+use crate::domain::config::HotkeyConfig;
 
 /// 热键事件（由 hook 线程发往主线程）。
 #[derive(Debug, Clone)]

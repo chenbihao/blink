@@ -32,19 +32,23 @@ use rmcp::ServiceExt;
 use serde_json::Value;
 
 use crate::domain::capability::{CapabilityRegistry, CapabilityResult, InvokeContext};
+use crate::domain::event::DomainEnv;
 use crate::domain::mcp::projection::capability_schemas_to_mcp_tools;
 use crate::domain::mcp::server_config::{McpServerModeConfig, McpServerModeConfigStore};
 use crate::infra::data::ai_audit;
 
 /// Blink MCP server——实现 rmcp ServerHandler，暴露 Capability 给外部 client。
 ///
-/// 持有 CapabilityRegistry + AppHandle + AI DB pool + 配置，
+/// 持有 CapabilityRegistry + DomainEnv + AI DB pool + 配置，
 /// 在 `list_tools` / `call_tool` 时按配置过滤和执行。
+///
+/// **0.14.6 §2.2**：`app_handle: tauri::AppHandle` 替换为 `env: Arc<dyn DomainEnv>`，
+/// domain 层不再直接依赖 tauri。
 pub struct BlinkMcpServer {
     /// 能力注册表——list_tools 和 call_tool 的数据源。
     cap_registry: Arc<CapabilityRegistry>,
-    /// Tauri AppHandle——构造 InvokeContext 用（能力通过它访问 managed state）。
-    app_handle: tauri::AppHandle,
+    /// 领域环境——构造 InvokeContext 用（能力通过它访问 managed state）。
+    env: Arc<dyn DomainEnv>,
     /// AI 库连接池——审计日志写入。
     ai_pool: sqlx::SqlitePool,
     /// server 配置——控制哪些 capability 暴露。
@@ -59,7 +63,7 @@ impl BlinkMcpServer {
     /// 构造时立即按配置过滤 + 投影 Capability schema → rmcp Tool，缓存结果。
     pub fn new(
         cap_registry: Arc<CapabilityRegistry>,
-        app_handle: tauri::AppHandle,
+        env: Arc<dyn DomainEnv>,
         ai_pool: sqlx::SqlitePool,
         config: McpServerModeConfig,
     ) -> Self {
@@ -80,7 +84,7 @@ impl BlinkMcpServer {
 
         Self {
             cap_registry,
-            app_handle,
+            env,
             ai_pool,
             config,
             cached_tools,
@@ -159,7 +163,7 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
         // Clone 所有需要的值到 async block 中（避免借用 self）
         let cap_registry = self.cap_registry.clone();
         let ai_pool = self.ai_pool.clone();
-        let app_handle = self.app_handle.clone();
+        let env = self.env.clone();
         let exposed = self.config.exposed_capabilities.clone();
         let available = self.config.exposed_capabilities.join(", ");
         let tool_name_for_audit = tool_name.clone();
@@ -180,9 +184,9 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
 
             let start = std::time::Instant::now();
 
-            // 构造 InvokeContext（app_handle 在 async block 内 owned，取引用）
+            // 构造 InvokeContext（env 在 async block 内 owned，取引用）
             let ctx = InvokeContext {
-                app_handle: &app_handle,
+                env: env.capability_env(),
                 deadline: None,
             };
 
@@ -259,12 +263,12 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
 ///
 /// # 参数
 /// - `cap_registry`：能力注册表
-/// - `app_handle`：Tauri AppHandle（能力通过它访问 managed state）
+/// - `env`：领域环境（能力通过它访问 managed state）
 /// - `ai_pool`：AI 库连接池（审计日志）
 /// - `config_pool`：配置库连接池（读取 MCP server 配置）
 pub async fn run_stdio_server(
     cap_registry: Arc<CapabilityRegistry>,
-    app_handle: tauri::AppHandle,
+    env: Arc<dyn DomainEnv>,
     ai_pool: sqlx::SqlitePool,
     config_pool: sqlx::SqlitePool,
 ) -> Result<(), String> {
@@ -283,7 +287,7 @@ pub async fn run_stdio_server(
         );
     }
 
-    let server = BlinkMcpServer::new(cap_registry, app_handle, ai_pool, config);
+    let server = BlinkMcpServer::new(cap_registry, env, ai_pool, config);
 
     tracing::info!("MCP server: 启动 stdio 模式");
 

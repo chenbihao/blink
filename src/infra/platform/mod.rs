@@ -1,18 +1,24 @@
 //! 平台抽象层：热键、窗口、本地化、上下文采集、选区抓取、剪贴板监听、截图、密钥、音频采集、文本注入、Python 环境
+//!
+//! 0.14.6 §2.3：收纳从 domain 泄漏的 Win32 调用——icon 提取 / shell 枚举 / lock。
 
 pub mod audio;
 pub mod clipboard;
 pub mod context;
 #[cfg(windows)]
 pub mod dpi;
+#[cfg(windows)]
+pub mod icon; // 0.14.6 §2.3：从 domain/search/icon.rs 迁入
 pub mod hotkey;
 pub mod inject;
 pub mod locale;
+pub mod lock; // 0.14.6 §2.3：从 domain/execution/builtin.rs 迁入
 pub mod process;
 pub mod python;
 pub mod screenshot;
 pub mod secret;
 pub mod selection;
+pub mod shell; // 0.14.6 §2.3：从 domain/search/windows.rs 迁入
 #[cfg(windows)]
 pub mod uia;
 pub mod window;

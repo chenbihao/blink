@@ -1,6 +1,7 @@
 //! 窗口生命周期：响应后端 blink://shown / blink://hidden，复位输入与列表。
 
 import { listen } from "./tauri.js";
+import { EVENTS } from "./event-names.js";
 import { queryEl } from "./dom.js";
 import * as results from "./results.js";
 import * as search from "./search.js";
@@ -12,7 +13,7 @@ import { applyI18nFromConfig, t } from "./i18n/index.js";
 
 /** 注册生命周期事件监听。 */
 export function init() {
-  listen("blink://shown", () => {
+  listen(EVENTS.SHOWN, () => {
     queryEl.value = "";
     // 先解冻 ghost（上次录音可能残留 frozen），再 reset 让 ghost.clear 正常清 DOM
     ghost.unfreeze();
@@ -42,7 +43,7 @@ export function init() {
     startAltPoll(); // 0.8.5：轮询 Alt 物理态驱动 alt-active（WebView2 不转发 Alt keydown）
   });
 
-  listen("blink://hidden", () => {
+  listen(EVENTS.HIDDEN, () => {
     stopAltPoll(); // 0.8.5：停 Alt 轮询
     queryEl.value = "";
     search.reset();
@@ -51,7 +52,7 @@ export function init() {
   });
 
   // 配置变更即时响应（设置页切换主题/语言等，无需关闭再打开主窗口）
-  listen("blink://config-changed", () => {
+  listen(EVENTS.CONFIG_CHANGED, () => {
     applyThemeFromConfig();
     applyGlassOpacityFromConfig(); // 毛玻璃透明度即时生效
     applyI18nFromConfig();
@@ -61,7 +62,7 @@ export function init() {
 
   // 0.8.5 §6.4：Chord Alt+C 剪贴板改走 fill-query——后端 ClipboardHistoryAction
   // execute 里 window::invoke + emit "剪贴板 " → 前端填搜索框 + 触发 ClipboardEngine 召回。
-  listen("blink://chord-fill-query", (event) => {
+  listen(EVENTS.CHORD_FILL_QUERY, (event) => {
     queryEl.value = String(event.payload ?? "");
     queryEl.dispatchEvent(new Event("input", { bubbles: true }));
   });
@@ -70,7 +71,7 @@ export function init() {
   // 注意：不清空 ghost-chord 文本内容——CSS body.voice-active 已隐藏它，
   // 录音结束后移除 voice-active 即可恢复显示。清空 textContent 会导致
   // chord.refresh() 未重新渲染前 :not(:empty) 不匹配，chord 提示永久消失。
-  listen("blink://voice-recording-start", (event) => {
+  listen(EVENTS.VOICE_RECORDING_START, (event) => {
     const { target } = event.payload ?? {};
     if (target !== "g1") return;
     document.body.classList.add("voice-active");
@@ -86,7 +87,7 @@ export function init() {
   // 0.10 语音状态提示（模型加载中等，非错误性质）
   // 注意：不设 voice-active——只有真正录音（voice-recording-start）才设，
   // 避免模型加载中隐藏 Chord 提示。
-  listen("blink://voice-status", (event) => {
+  listen(EVENTS.VOICE_STATUS, (event) => {
     const { message, target } = event.payload ?? {};
     if (target !== "g1" || !message) return;
     if (voiceIndicator) {
@@ -110,7 +111,7 @@ export function init() {
   //         搜索结果在 freeze 期间 ghost.update 不写 DOM，纯无用功。
   //         录音结束后由 chord-fill-query（正常结束）填入 final_text 并 dispatch input
   //         触发一次完整搜索，取消时 ESC 隐藏窗口自动清空，无需录音中触发。
-  listen("blink://voice-partial", (event) => {
+  listen(EVENTS.VOICE_PARTIAL, (event) => {
     const payload = event.payload ?? {};
     if (payload.target !== "g1") return;
 
@@ -149,7 +150,7 @@ export function init() {
   // 0.10 G1 录音音量波动条
   const voiceIndicator = document.getElementById("voice-indicator");
   const vwBars = voiceIndicator?.querySelectorAll(".vw-bar") ?? [];
-  listen("blink://voice-level", (event) => {
+  listen(EVENTS.VOICE_LEVEL, (event) => {
     const { level, target } = event.payload ?? {};
     if (target !== "g1") return;
     if (voiceIndicator?.classList.contains("hidden")) {
@@ -166,7 +167,7 @@ export function init() {
   });
 
   // 0.10 录音结束 → 隐藏 G1 指示器 + 解冻 Ghost overlay（恢复 search 建议）
-  listen("blink://voice-recording-end", () => {
+  listen(EVENTS.VOICE_RECORDING_END, () => {
     document.body.classList.remove("voice-active");
     ghost.unfreeze(); // 恢复 ghost.update DOM 写入 + 清除 voice-preview-text + 重绘当前 suggestion
     if (voiceIndicator) {
@@ -180,7 +181,7 @@ export function init() {
   });
 
   // 0.10 语音错误提示（服务未启动等）
-  listen("blink://voice-error", (event) => {
+  listen(EVENTS.VOICE_ERROR, (event) => {
     const { message, target } = event.payload ?? {};
     if (target !== "g1" || !message) return;
     document.body.classList.remove("voice-active");
@@ -207,7 +208,7 @@ export function init() {
   // **0.x 闪烁修复**：retrigger 在空 query 时直接调 fetchContextSuggestions，
   // 不先 clear results/ghost——避免「旧结果消失 → 新结果到达」的视觉闪烁。
   // 后端只在主窗口可见时才 emit，前端无需再判可见。
-  listen("blink://awareness-updated", () => {
+  listen(EVENTS.AWARENESS_UPDATED, () => {
     search.retrigger();
   });
 }

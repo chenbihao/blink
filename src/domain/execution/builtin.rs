@@ -11,8 +11,6 @@
 //! `OpenPath` / `RevealInExplorer`）声明语义键（`url` / `path`）+ 保留 `_legacy_arg`
 //! 兼容层直到 0.9.2 前端契约演进。
 
-use tauri::Manager;
-
 use crate::domain::plugin::LocalizableText;
 
 use super::{Action, ActionContext, ActionOutcome, ActionSchema, DangerClass, ExecError};
@@ -73,8 +71,8 @@ impl Action for OpenSettingsAction {
     }
     async fn execute(&self, cx: &ActionContext<'_>) -> Result<ActionOutcome, ExecError> {
         tracing::debug!("执行内置动作：打开设置");
-        crate::infra::platform::window::hide(cx.app_handle, "open_settings");
-        crate::infra::platform::window::open_settings(cx.app_handle);
+        cx.env.hide_main_window("open_settings");
+        cx.env.open_settings();
         Ok(ActionOutcome::Nop)
     }
 }
@@ -101,11 +99,8 @@ impl Action for LockWorkstationAction {
         DangerClass::Dangerous
     }
     async fn execute(&self, _cx: &ActionContext<'_>) -> Result<ActionOutcome, ExecError> {
-        #[cfg(target_os = "windows")]
-        unsafe {
-            use windows::Win32::System::Shutdown::LockWorkStation;
-            let _ = LockWorkStation();
-        }
+        // 0.14.6 §2.3：Win32 LockWorkStation 迁至 infra/platform/lock.rs
+        let _ = crate::infra::platform::lock::lock_workstation();
         Ok(ActionOutcome::Nop)
     }
 }
@@ -231,7 +226,7 @@ impl Action for ClearHistoryAction {
         DangerClass::Dangerous
     }
     async fn execute(&self, cx: &ActionContext<'_>) -> Result<ActionOutcome, ExecError> {
-        let pool = &cx.app_handle.state::<crate::infra::data::DbPools>().history;
+        let pool = &cx.env.db_pools().history;
         crate::infra::data::history::clear(&pool).await;
         tracing::info!("搜索历史已清空");
         Ok(ActionOutcome::Nop)
@@ -259,12 +254,8 @@ impl Action for ExitBlinkAction {
     fn danger_class(&self) -> DangerClass {
         DangerClass::Dangerous
     }
-    /// AI 不该让 Blink 自杀--不暴露给对话窗口 tool 池（0.12.0 §2.4）。
-    fn ai_eligible(&self) -> bool {
-        false
-    }
     async fn execute(&self, cx: &ActionContext<'_>) -> Result<ActionOutcome, ExecError> {
-        cx.app_handle.exit(0);
+        cx.env.exit_app();
         Ok(ActionOutcome::Nop)
     }
 }

@@ -43,7 +43,7 @@ use serde_json::Value;
 /// inventory 收集项——每个 Capability 文件 submit 一行，Registry 启动时自动收集。
 ///
 /// `factory` 是零参函数指针（满足 inventory 的 `'static` 约束）。
-/// 有状态能力的运行时依赖通过 `ctx.app_handle` 获取——不在构造时注入。
+/// 有状态能力的运行时依赖通过 `ctx.env` 获取——不在构造时注入。
 pub struct CapabilityEntry {
     pub factory: fn() -> std::sync::Arc<dyn Capability>,
 }
@@ -65,20 +65,30 @@ pub trait Capability: Send + Sync {
     fn id(&self) -> &str;
 
     /// 能力自述——送 LLM 的 tool schema（纯 JSON Schema）。
-    /// 被 `CapabilityRegistry::list()` → `build_aggregated_tools()` 消费。
+    /// 被 `CapabilityRegistry::list()` → `build_capability_tools()` 消费。
     fn schema(&self) -> CapabilitySchema;
 
     /// 危险等级（复用 `execution::DangerClass`，保持单一安全枚举）。
     /// default `Safe`——危险动作（如 delete_file）显式 override。
-    /// **当前未被消费**——0.10 Agent 窗口授权模型将检查此字段。
-    #[allow(dead_code)] // 0.10 Agent 窗口授权模型消费
+    /// AI 入口通过 `requires_ai_confirmation()` 统一消费此字段。
     fn danger_class(&self) -> crate::domain::execution::DangerClass {
         crate::domain::execution::DangerClass::Safe
     }
 
+    /// AI 调用前是否必须经过用户确认。
+    ///
+    /// 危险副作用与敏感数据读取共用同一条硬边界。所有 AI 入口必须调用本方法，
+    /// 避免主窗口与对话窗口分别实现后产生策略漂移。
+    fn requires_ai_confirmation(&self) -> bool {
+        matches!(
+            self.danger_class(),
+            crate::domain::execution::DangerClass::Dangerous
+        ) || self.schema().sensitive
+    }
+
     /// 纯能力执行：入参 → 出参。不碰 UI、不 emit、不弹窗。
     ///
-    /// 运行时依赖通过 `ctx.app_handle` 获取（满足 inventory 零参构造）。
+    /// 运行时依赖通过 `ctx.env` 获取（满足 inventory 零参构造）。
     /// **硬超时铁则**（§3.5）：长耗时实现方必须在关键 await 点检查 `ctx.is_expired()`
     /// 或用 `tokio::time::timeout_at(ctx.deadline_or_far_future(), ...)` 包裹。
     async fn invoke(
@@ -90,7 +100,7 @@ pub trait Capability: Send + Sync {
 
 // ── InvokeContext ────────────────────────────────────────────────────────────
 
-/// invoke 时的运行时上下文——运行时依赖通过 `app_handle` 获取（满足 inventory 零参构造）。
+/// invoke 时的运行时上下文——运行时依赖通过 `env` 获取（满足 inventory 零参构造）。
 ///
 /// 协议层（0.11 CLI/MCP）投影时，ctx 从环境变量/连接读取，不影响实现方。
 ///
@@ -98,10 +108,14 @@ pub trait Capability: Send + Sync {
 /// `deadline` 为绝对截止时刻。Capability `invoke` 实现方**必须**在长耗时操作前
 /// 检查 `is_expired()`，或用 `timeout_at(deadline_or_far_future())` 包裹。
 /// 调用方负责传入合理 deadline（AI lane 从 `slo_hard_timeout_ms` 派生）。
+///
+/// **0.14.6 §2.2**：`app_handle: &tauri::AppHandle` 替换为最小化的
+/// `env: &dyn CapabilityEnv`，domain 层不再直接依赖 tauri，且 Capability
+/// 在类型层面拿不到事件、窗口或进程控制权限。
 pub struct InvokeContext<'a> {
-    /// Tauri AppHandle——能力通过它访问 managed state（如 `SqlitePool`、`AIProviderRegistry`）。
-    /// 满足 inventory 零参构造：config 不在构造时注入，在调用时通过 app_handle 自取。
-    pub app_handle: &'a tauri::AppHandle,
+    /// 领域环境——能力通过它访问 managed state（如 `DbPools`、`SearchService`）。
+    /// 满足 inventory 零参构造：config 不在构造时注入，在调用时通过 env 自取。
+    pub env: &'a dyn crate::domain::event::CapabilityEnv,
     /// 绝对截止时刻。`None` = 无超时（仅本地同步编排，如 Alt+A 截图）。
     /// AI lane / 异步编排路径**必须**传 `Some`。
     pub deadline: Option<std::time::Instant>,

@@ -11,12 +11,10 @@
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use tauri::Manager;
 
 use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
 };
-use crate::domain::search::SearchService;
 use crate::domain::search::engine::SearchAction;
 
 /// `search_apps` — 按关键词搜索本机应用（开始菜单）。
@@ -94,8 +92,13 @@ impl Capability for SearchApps {
             .map(|n| n as usize)
             .unwrap_or(5);
 
-        // 通过 AppHandle 拿 SearchService（共享 StartMenuEngine 实例）
-        let search_service = ctx.app_handle.state::<Arc<SearchService>>();
+        // 通过 DomainEnv 拿 SearchService（共享 StartMenuEngine 实例）
+        let search_service =
+            ctx.env
+                .search_service()
+                .ok_or_else(|| CapabilityError::Internal {
+                    detail: "当前运行模式未初始化应用搜索服务".into(),
+                })?;
 
         // 铁则 1：用 deadline 包裹 search
         let items = tokio::time::timeout_at(

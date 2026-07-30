@@ -154,8 +154,7 @@ pub use windows::{
     launch, parse_lnk_entry, roots_modified, scan_apps_folder, scan_start_menu, start_menu_roots,
 };
 
-#[cfg(target_os = "windows")]
-pub mod icon;
+// 0.14.6 §2.3：icon 模块已迁至 infra/platform/icon.rs
 
 // 多路搜索引擎抽象(0.2.2,见 0.2 设计 §2)
 pub(crate) mod engine;
@@ -190,14 +189,13 @@ use start_menu_engine::StartMenuEngine;
 
 // 多路搜索服务:路由 + 融合 + 渐进式调度
 mod service;
-pub(crate) use service::outcome_to_summary;
 pub use service::{EngineConfigUpdate, SearchResponse, SearchService};
 
 /// 引擎配置集合（三层独立控制）。
 pub struct EngineConfigs {
-    pub start_menu: crate::app::config::StartMenuConfig,
-    pub file: crate::app::config::FileSearchConfig,
-    pub calc: crate::app::config::CalcConfig,
+    pub start_menu: crate::domain::config::StartMenuConfig,
+    pub file: crate::domain::config::FileSearchConfig,
+    pub calc: crate::domain::config::CalcConfig,
 }
 
 /// 构造引擎列表(sync: builtin + calc + clipboard + start_menu;async: file)。

@@ -112,7 +112,7 @@ pub struct ToolDef {
     /// - 注入 `"default": <setting_value>`
     /// - description 自动追加"（默认: {value}）"
     ///
-    /// **投影层改动**：不动 manifest 的 `parameters` 原文，只在 `build_aggregated_tools`
+    /// **投影层改动**：不动 manifest 的 `parameters` 原文，只在 `build_capability_tools`
     /// 时通过 `inject_plugin_settings` 生成新的 ActionSchema。运行时 setting 变更
     /// 下次构建 tools 时自动生效（每次 AI 请求都重建）。
     #[serde(default)]

@@ -6,7 +6,7 @@
 use std::sync::{Arc, RwLock};
 
 use super::calc;
-use crate::app::config::CalcConfig;
+use crate::domain::config::CalcConfig;
 
 use super::engine::{Lane, QueryContext, SearchAction, SearchEngine, SearchItem};
 

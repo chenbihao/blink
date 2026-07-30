@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::app::config::StartMenuConfig;
+use crate::domain::config::StartMenuConfig;
 
 use super::AppEntry;
 use super::engine::{Lane, QueryContext, SearchAction, SearchEngine, SearchItem};

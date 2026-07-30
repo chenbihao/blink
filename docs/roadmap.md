@@ -71,7 +71,7 @@
 **统一抽象**：Blink 可定义 `ExternalAgentSubagent` trait，把三种调用方式收敛到同一接口：
 
 ```rust
-/// 外部 agent 作为 subagent 的统一接口（规划，0.15+ 候选；架构清理已挪至 0.14.6，0.15 号段留给此类大主题）。
+/// 外部 agent 作为 subagent 的统一接口（规划，0.15+ 候选；架构清理已并入 0.14，0.15 号段留给此类大主题）。
 #[async_trait]
 pub trait ExternalAgentSubagent: Send + Sync {
     /// 单次任务执行：给 prompt，返回结构化结果。
@@ -96,7 +96,7 @@ pub trait ExternalAgentSubagent: Send + Sync {
 | **依赖管理**（外部 agent 是否安装） | ⭐⭐⭐ 中高 | 需检测 PATH 里是否有 claude/opencode/pi，缺失则 tool 标灰；不能强依赖 |
 | **权限/审批**（subagent 能改文件） | ⭐⭐⭐ 中高 | 复用 0.12 `PendingConfirms` 危险确认闭环，subagent tool 标 `Dangerous` |
 
-**总体判断**：路径 B 难度中等，且**大部分基础设施 Blink 已有**（ToolDyn 适配层、插件子进程经验、危险确认闭环、tool result 投影）。放 0.15+ 做是合理的，**不需要大重构**（架构清理已在 0.14.6 收敛）。
+**总体判断**：路径 B 难度中等，且**大部分基础设施 Blink 已有**（ToolDyn 适配层、插件子进程经验、危险确认闭环、tool result 投影）。放 0.15+ 做是合理的，**不需要大重构**（架构清理已在 0.14 收敛）。
 
 ---
 
@@ -115,7 +115,7 @@ pub trait ExternalAgentSubagent: Send + Sync {
 
 1. **前置依赖**：subagent 要有用，得先有「supervisor agent 能自主判断何时委托」——这依赖 0.13.1 token-aware 窗口（supervisor 自己的 context 要健康）+ 0.13.3 Skill（教 supervisor 何时该委托）。
 2. **生态成熟度**：外部 agent 的 headless 接口仍在演进（opencode serve、claude `-p` 都是近期才稳定），早做易踩 API 变更。
-3. **优先级**：0.13（MCP 双向 / CLI / 记忆召回 / Skill）/ 0.14（能力协议重构）/ 0.14.6（架构清理与工程债收敛）/ 0.20（向量召回 / RAG）是「所有用户受益」的基础设施；subagent 是「进阶用户借力生态」的增强，优先级靠后合理。
+3. **优先级**：0.13（MCP 双向 / CLI / 记忆召回 / Skill）/ 0.14（能力协议与架构收敛）/ 0.20（向量召回 / RAG）是「所有用户受益」的基础设施；subagent 是「进阶用户借力生态」的增强，优先级靠后合理。
 
 ### 3.3 0.21 候选范围（若启动）
 

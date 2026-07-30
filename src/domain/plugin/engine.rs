@@ -24,7 +24,7 @@ use super::protocol::{PluginAction, PluginItem, PluginQueryContext};
 pub struct PluginEngine {
     plugins: Vec<Arc<PluginHandle>>,
     /// plugin_id → 配置。启动时 `init_configs` 从 DB 加载;`update_config` 时更新。
-    configs: Arc<RwLock<HashMap<String, crate::app::config::PluginConfig>>>,
+    configs: Arc<RwLock<HashMap<String, crate::domain::config::PluginConfig>>>,
     pool: SqlitePool,
     /// 全局代理(HTTP,HTTPS),进程启动时 env 注入;插件 ure/reqwest 原生读取。
     #[allow(dead_code)] // 保留用于未来插件代理配置
@@ -207,7 +207,7 @@ impl PluginEngine {
         let mut configs = self.configs.write().unwrap();
         for plugin in &self.plugins {
             let id = plugin.id();
-            match crate::app::config::get_plugin_config(&self.pool, id).await {
+            match crate::domain::config::get_plugin_config(&self.pool, id).await {
                 Some(cfg) => {
                     configs.insert(id.to_string(), cfg);
                 }
@@ -217,10 +217,10 @@ impl PluginEngine {
                     // - enabled 走 manifest.default_enabled（缺省 true；需配置密钥
                     //   才能用的插件如翻译声明为 false，避免装完就撞到无法工作的入口）
                     let manifest = plugin.manifest();
-                    let mut default = crate::app::config::PluginConfig::default();
+                    let mut default = crate::domain::config::PluginConfig::default();
                     default.settings = manifest.default_settings();
                     default.enabled = manifest.default_enabled;
-                    match crate::app::config::set_plugin_config(&self.pool, id, &default).await {
+                    match crate::domain::config::set_plugin_config(&self.pool, id, &default).await {
                         Ok(()) => tracing::info!(
                             plugin = %id,
                             enabled = default.enabled,
@@ -238,10 +238,10 @@ impl PluginEngine {
     pub async fn update_config(
         &self,
         plugin_id: &str,
-        config: crate::app::config::PluginConfig,
+        config: crate::domain::config::PluginConfig,
         router: Option<&crate::domain::intent::RuleRouter>,
     ) -> Result<(), String> {
-        crate::app::config::set_plugin_config(&self.pool, plugin_id, &config).await?;
+        crate::domain::config::set_plugin_config(&self.pool, plugin_id, &config).await?;
         self.configs
             .write()
             .unwrap()
@@ -270,7 +270,7 @@ impl PluginEngine {
     }
 
     /// 获取插件完整配置（含自定义 triggers）。
-    pub fn get_config(&self, id: &str) -> Option<crate::app::config::PluginConfig> {
+    pub fn get_config(&self, id: &str) -> Option<crate::domain::config::PluginConfig> {
         self.configs.read().unwrap().get(id).cloned()
     }
 

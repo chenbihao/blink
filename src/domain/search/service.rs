@@ -4,17 +4,17 @@
 //! - Takeover:跳过本地引擎,只查命中插件,独占返回区。
 //! - Mixed:本地引擎(sync lane)照常召回;命中插件按 surface(Priority/Inline)参与排序。
 //!
-//! 由 `commands::search_apps` 经 `app.state::<Arc<SearchService>>()` 调用。
+//! 由 `commands::search_apps` 经 `app.state::<Arc<SearchService>>()` 调用（0.14.6 后通过 DomainEnv）。
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
+use crate::domain::event::DomainEnv;
 use serde::Serialize;
 use sqlx::SqlitePool;
-use tauri::{AppHandle, Emitter, Manager};
 
-use crate::app::ai_config::{Tier, ToolResultFeedback};
+use crate::domain::config::ai_config::{Tier, ToolResultFeedback};
 use crate::domain::ai::gating::{AiGate, GateOutcome, should_invoke_ai};
 use crate::domain::ai::message::{ChatMessage, CompletionRequest};
 use crate::domain::ai::provider::{AIError, AIProvider, StreamChunk};
@@ -22,9 +22,8 @@ use crate::domain::ai::registry::AIProviderRegistry;
 use crate::domain::capability::{
     CapabilityError, CapabilityRegistry, CapabilityResult, InvokeContext,
 };
-use crate::domain::execution::{
-    ActionContext, ActionOutcome, ActionRegistry, ActionSchema, DangerClass,
-};
+use crate::domain::event_names::EventNames;
+use crate::domain::execution::ActionSchema;
 use crate::domain::intent::{Candidate, IntentRouter, RankingHint, Route, Suggestion, Surface};
 use crate::domain::plugin::PluginEngine;
 use crate::infra::platform::context::ContextSnapshot;
@@ -83,13 +82,13 @@ struct ResultsPayload {
 
 /// 引擎配置更新枚举（用于运行时热更新）。
 pub enum EngineConfigUpdate {
-    StartMenu(crate::app::config::StartMenuConfig),
-    Calc(crate::app::config::CalcConfig),
-    File(crate::app::config::FileSearchConfig),
+    StartMenu(crate::domain::config::StartMenuConfig),
+    Calc(crate::domain::config::CalcConfig),
+    File(crate::domain::config::FileSearchConfig),
 }
 
 pub struct SearchService {
-    app: AppHandle,
+    env: Arc<dyn DomainEnv>,
     pool: SqlitePool,
     sync_engines: Vec<Arc<dyn SearchEngine>>,
     async_engines: Vec<Arc<dyn SearchEngine>>,
@@ -132,12 +131,37 @@ pub struct SearchService {
     /// `:308` 后建 ai_registry —— 构造顺序倒挂,setter 规避不动 wiring 顺序。
     /// setup 早期(setter 未调)读到 None → 跳过 AI lane → fallback fuzzy,无害。
     ai_registry: Arc<RwLock<Option<Arc<AIProviderRegistry>>>>,
+    /// 主窗口当前待确认的 AI Capability。
+    ///
+    /// 主窗口同一时刻只接受一条 AI 请求，单槽即可；新请求覆盖旧请求。
+    /// command 确认时必须 name + args 完整匹配，防止绕过确认卡片调用任意 Capability。
+    pending_ai_confirmation: Arc<Mutex<Option<PendingAiConfirmation>>>,
 }
 
 #[derive(Clone, Copy)]
 struct AutosuggestState {
     enabled: bool,
     min_score: f64,
+}
+
+#[derive(Clone)]
+struct PendingAiConfirmation {
+    seq: u64,
+    capability_name: String,
+    arguments: serde_json::Value,
+}
+
+impl PendingAiConfirmation {
+    fn matches(
+        &self,
+        latest_seq: u64,
+        capability_name: &str,
+        arguments: &serde_json::Value,
+    ) -> bool {
+        self.seq == latest_seq
+            && self.capability_name == capability_name
+            && self.arguments == *arguments
+    }
 }
 
 impl Default for AutosuggestState {
@@ -151,7 +175,7 @@ impl Default for AutosuggestState {
 
 impl SearchService {
     pub fn new(
-        app: AppHandle,
+        env: Arc<dyn DomainEnv>,
         pool: SqlitePool,
         engines: Vec<Arc<dyn SearchEngine>>,
         plugin_engine: Arc<PluginEngine>,
@@ -167,7 +191,7 @@ impl SearchService {
             }
         }
         SearchService {
-            app,
+            env,
             pool,
             sync_engines,
             async_engines,
@@ -183,6 +207,7 @@ impl SearchService {
             last_ranking_hint: Arc::new(Mutex::new(None)),
             min_score_shared,
             ai_registry: Arc::new(RwLock::new(None)),
+            pending_ai_confirmation: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -196,6 +221,53 @@ impl SearchService {
     pub fn set_ai_registry(&self, registry: Arc<AIProviderRegistry>) {
         *self.ai_registry.write().expect("ai_registry lock poisoned") = Some(registry);
         tracing::info!(target: ai_slo::TARGET, "AI registry 已注入 SearchService");
+    }
+
+    /// 注册主窗口待确认 Capability。新 AI 请求会覆盖旧卡片。
+    pub fn register_ai_confirmation(
+        &self,
+        seq: u64,
+        capability_name: &str,
+        arguments: &serde_json::Value,
+    ) {
+        *self.pending_ai_confirmation.lock().unwrap() = Some(PendingAiConfirmation {
+            seq,
+            capability_name: capability_name.to_string(),
+            arguments: arguments.clone(),
+        });
+    }
+
+    /// 消费与确认 command 完整匹配的待确认项，返回原始查询序号。
+    pub fn take_ai_confirmation(
+        &self,
+        capability_name: &str,
+        arguments: &serde_json::Value,
+    ) -> Option<u64> {
+        let mut guard = self.pending_ai_confirmation.lock().unwrap();
+        let latest_seq = self.latest_seq.load(Ordering::SeqCst);
+        let matches = guard
+            .as_ref()
+            .is_some_and(|pending| pending.matches(latest_seq, capability_name, arguments));
+        matches.then(|| guard.take().expect("pending confirmation checked").seq)
+    }
+
+    /// 将用户确认后的数据型 Capability 结果送回原主窗口查询。
+    pub fn emit_confirmed_capability_result(&self, seq: u64, result: &CapabilityResult) {
+        if seq != self.latest_seq.load(Ordering::SeqCst) {
+            tracing::trace!(
+                target: ai_slo::TARGET,
+                seq,
+                "确认完成时查询已过期，丢弃 Capability 展示结果"
+            );
+            return;
+        }
+        let entries = capability_result_to_entries(result);
+        if entries.is_empty() {
+            emit_ai_clear(self.env.as_ref(), seq, Some("工具返回空结果"));
+        } else {
+            emit_ai_clear(self.env.as_ref(), seq, None);
+            emit_ai_result_multi(self.env.as_ref(), seq, entries);
+        }
     }
 
     /// 更新上下文快照（window::invoke 时调用）。
@@ -756,9 +828,11 @@ impl SearchService {
         };
         // 记住这次 seq 作为最新——后续 emit 用此校验(避免和 search_apps 的 seq 混串)
         self.latest_seq.store(seq, Ordering::SeqCst);
+        // 新查询使旧确认卡失效；即使前端残留旧卡，command 也无法再执行。
+        *self.pending_ai_confirmation.lock().unwrap() = None;
 
         // 立即 emit 占位:让 UI 在 Tab 按下瞬间就有反馈
-        emit_ai_result(&self.app, seq, ai_placeholder_entry());
+        emit_ai_result(self.env.as_ref(), seq, ai_placeholder_entry());
 
         self.spawn_ai_lane(query, registry, seq);
     }
@@ -778,7 +852,7 @@ impl SearchService {
     /// - 结束 1 条 `info`(成功)或 `warn`(失败)——包含 elapsed/first_token_ms/结果
     /// 不再逐字段拆散、不打"发起 → 收到 → 映射"三条,让 grep 出的日志一目了然。
     fn spawn_ai_lane(&self, query: String, registry: Arc<AIProviderRegistry>, seq: u64) {
-        let app = self.app.clone();
+        let app = self.env.clone();
         let pool = self.pool.clone();
         let latest_seq = Arc::clone(&self.latest_seq);
         let lang = self
@@ -796,12 +870,12 @@ impl SearchService {
                         target: ai_slo::TARGET,
                         "AI: 未配置或档位悬空,清占位"
                     );
-                    emit_ai_clear(&app, seq, Some("AI 未配置或档位悬空"));
+                    emit_ai_clear(app.as_ref(), seq, Some("AI 未配置或档位悬空"));
                     return;
                 }
                 Err(e) => {
                     tracing::warn!(target: ai_slo::TARGET, "AI resolve 失败: {e}");
-                    emit_ai_clear(&app, seq, Some(&format!("AI 错误: {e}")));
+                    emit_ai_clear(app.as_ref(), seq, Some(&format!("AI 错误: {e}")));
                     return;
                 }
             };
@@ -814,11 +888,9 @@ impl SearchService {
                 .slo_hard_timeout_ms
                 .unwrap_or(AI_DEFAULT_HARD_TIMEOUT_MS);
 
-            // 0.9.7 Step 4: 聚合 tools 列表 = Action 分组 + 插件独立 + Capability 独立
-            let action_reg = app.state::<Arc<ActionRegistry>>();
-            let cap_reg = app.state::<Arc<CapabilityRegistry>>();
-            let tools =
-                crate::domain::execution::group::build_aggregated_tools(&action_reg, &cap_reg);
+            // 0.14: AI tool 池只含 Capability（builtin + 插件）。
+            let cap_reg = app.cap_registry();
+            let tools = crate::domain::execution::group::build_capability_tools(&cap_reg);
 
             // 0.11.1 §2.3b: 参数 schema 动态注入插件 settings——
             // 插件 tool 的 schema 根据用户已配置的 settings 动态调整：
@@ -830,7 +902,14 @@ impl SearchService {
             //
             // 0.11.4 改进 2 §3.2: 同时收集 manifest `tools[].progress_hint` 字段，
             // 供 Turn 2 回流占位文案动态化（"AI 正在{progress_hint}…"）。
-            let plugin_engine = app.state::<Arc<PluginEngine>>();
+            let Some(plugin_engine) = app.plugin_engine() else {
+                tracing::error!(
+                    target: ai_slo::TARGET,
+                    "AI tool schema 构建失败: PluginEngine 未初始化"
+                );
+                emit_ai_clear(app.as_ref(), seq, Some("插件引擎未初始化"));
+                return;
+            };
             let mut plugin_bindings: std::collections::HashMap<
                 String,
                 (String, std::collections::HashMap<String, String>),
@@ -952,7 +1031,7 @@ impl SearchService {
                     match chunk {
                         StreamChunk::Text(text) => {
                             accumulated.push_str(&text);
-                            emit_ai_stream(&app, seq, &text, &accumulated, false);
+                            emit_ai_stream(app.as_ref(), seq, &text, &accumulated, false);
                         }
                         StreamChunk::Done { tool_calls, .. } => {
                             let elapsed = start.elapsed().as_millis() as u32;
@@ -974,7 +1053,7 @@ impl SearchService {
                             //   否则 Dangerous 确认卡片会插入新卡而非替换占位。
                             if !tool_calls.is_empty() {
                                 handle_ai_tool_calls(
-                                    &app,
+                                    app.as_ref(),
                                     seq,
                                     &tool_calls,
                                     &accumulated,
@@ -986,9 +1065,9 @@ impl SearchService {
                                 .await;
                             } else {
                                 // 纯文本回答——先发 done=true 再发可复制结果
-                                emit_ai_stream(&app, seq, "", &accumulated, true);
+                                emit_ai_stream(app.as_ref(), seq, "", &accumulated, true);
                                 if !accumulated.trim().is_empty() {
-                                    emit_ai_result(&app, seq, ai_result_entry(accumulated));
+                                    emit_ai_result(app.as_ref(), seq, ai_result_entry(accumulated));
                                 }
                             }
                             return;
@@ -1004,10 +1083,10 @@ impl SearchService {
                         // 不该走到这里(正常应收到 Done),兜底发结果
                         tracing::warn!(target: ai_slo::TARGET, "AI stream 结束但未收到 Done");
                         if !accumulated.trim().is_empty() {
-                            emit_ai_stream(&app, seq, "", &accumulated, true);
-                            emit_ai_result(&app, seq, ai_result_entry(accumulated));
+                            emit_ai_stream(app.as_ref(), seq, "", &accumulated, true);
+                            emit_ai_result(app.as_ref(), seq, ai_result_entry(accumulated));
                         } else {
-                            emit_ai_clear(&app, seq, None);
+                            emit_ai_clear(app.as_ref(), seq, None);
                         }
                     }
                     Ok(Err(e)) => {
@@ -1016,7 +1095,7 @@ impl SearchService {
                             "AI ← {:?}/{} stream ERR elapsed={}ms: {}",
                             provider_kind, provider_model, elapsed, e,
                         );
-                        emit_ai_clear(&app, seq, Some(&format!("{e}")));
+                        emit_ai_clear(app.as_ref(), seq, Some(&format!("{e}")));
                     }
                     Err(join_err) => {
                         tracing::warn!(
@@ -1024,7 +1103,7 @@ impl SearchService {
                             "AI stream task panic: {}",
                             join_err,
                         );
-                        emit_ai_clear(&app, seq, Some("AI 内部错误"));
+                        emit_ai_clear(app.as_ref(), seq, Some("AI 内部错误"));
                     }
                 }
             } else {
@@ -1057,7 +1136,7 @@ impl SearchService {
                         // 0.9.3:处理 tool_call（支持分组解析）
                         if !resp.tool_calls.is_empty() {
                             handle_ai_tool_calls(
-                                &app,
+                                app.as_ref(),
                                 seq,
                                 &resp.tool_calls,
                                 resp.text.as_deref().unwrap_or(""),
@@ -1072,8 +1151,8 @@ impl SearchService {
 
                         // 纯文本回答(无 tool_call)
                         match resp.text.filter(|t| !t.trim().is_empty()) {
-                            Some(text) => emit_ai_result(&app, seq, ai_result_entry(text)),
-                            None => emit_ai_clear(&app, seq, None),
+                            Some(text) => emit_ai_result(app.as_ref(), seq, ai_result_entry(text)),
+                            None => emit_ai_clear(app.as_ref(), seq, None),
                         }
                     }
                     Err(AIError::Timeout) => {
@@ -1084,7 +1163,7 @@ impl SearchService {
                             provider_model,
                             elapsed,
                         );
-                        emit_ai_clear(&app, seq, Some("AI 调用超时"));
+                        emit_ai_clear(app.as_ref(), seq, Some("AI 调用超时"));
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -1095,7 +1174,7 @@ impl SearchService {
                             elapsed,
                             e,
                         );
-                        emit_ai_clear(&app, seq, Some(&format!("{e}")));
+                        emit_ai_clear(app.as_ref(), seq, Some(&format!("{e}")));
                     }
                 }
             }
@@ -1169,7 +1248,7 @@ impl SearchService {
     fn spawn_takeover(&self, plugin_id: String, arg: String, seq: u64) {
         let plugin_engine = self.plugin_engine.clone();
         let debounce_ms = plugin_engine.get_debounce_ms(&plugin_id);
-        let app = self.app.clone();
+        let app = self.env.clone();
         let latest_seq = Arc::clone(&self.latest_seq);
         let snapshot = Arc::clone(&self.snapshot);
         let max_results = Arc::clone(&self.max_results);
@@ -1192,7 +1271,7 @@ impl SearchService {
             }
             // Takeover:即使空结果也要 emit,让前端清除占位符
             let limit = max_results.load(Ordering::SeqCst);
-            emit_results(&app, seq, items, limit, Some(&plugin_id));
+            emit_results(app.as_ref(), seq, items, limit, Some(&plugin_id));
         });
     }
 
@@ -1207,7 +1286,7 @@ impl SearchService {
     ) {
         let plugin_engine = self.plugin_engine.clone();
         let async_engines = self.async_engines.clone();
-        let app = self.app.clone();
+        let app = self.env.clone();
         let pool = self.pool.clone();
         let latest_seq = Arc::clone(&self.latest_seq);
         let snapshot = Arc::clone(&self.snapshot);
@@ -1259,7 +1338,7 @@ impl SearchService {
                         tracing::trace!(count = items.len(), "插件查询返回");
                         // 插件查询：空结果时用第一个 plugin_id 作为来源
                         let empty_source = plugin_ids.first().map(|(id, _)| id.as_str());
-                        emit_results(&app, seq, items, limit, empty_source);
+                        emit_results(app.as_ref(), seq, items, limit, empty_source);
                     }
                 });
             }
@@ -1293,7 +1372,7 @@ impl SearchService {
                             count = items.len(),
                             "async lane 引擎返回"
                         );
-                        emit_results(&app, seq, items, limit, None);
+                        emit_results(app.as_ref(), seq, items, limit, None);
                     }
                 });
             }
@@ -1330,7 +1409,7 @@ fn fuse_items(items: Vec<SearchItem>, limit: usize) -> Vec<SearchItem> {
 /// 即使 items 为空也会 emit（空结果需要通知前端清除占位符）。
 /// empty_source: 空结果时携带的来源 plugin_id，用于前端只清除对应占位符。
 fn emit_results(
-    app: &AppHandle,
+    env: &dyn DomainEnv,
     seq: u64,
     items: Vec<SearchItem>,
     limit: usize,
@@ -1381,9 +1460,10 @@ fn emit_results(
             );
         }
     }
-    if let Err(e) = app.emit(
-        "blink://results",
-        ResultsPayload {
+    if let Err(e) = crate::domain::event::emit_serialized(
+        env,
+        EventNames::RESULTS,
+        &ResultsPayload {
             seq,
             items: entries,
         },
@@ -1441,57 +1521,6 @@ fn empty_arg_hint_entry(plugin_id: &str, display_name: &str, hint: String) -> Ap
 
 // 0.11.3 改进 4: build_routing_prompt 已迁移到 crate::domain::ai::prompt::routing_system_prompt。
 // 工具列表增强（含参数摘要 + 插件 hint）+ token 监控（超 1500 warn）均在 prompt 模块内。
-
-/// 解析 AI tool_call → 具体 Action + 解析后参数。
-///
-/// **聚合 tool**：name="system_action", arguments={action:"lock"} → (LockAction, {})
-/// **独立 tool**：name="builtin_translate_translate", arguments={text:"hello"} → (PluginAction, {text:"hello"})
-///
-/// 返回 None 表示未找到对应 Action。
-fn resolve_tool_call(
-    tc: &crate::domain::ai::message::ToolCall,
-    registry: &Arc<ActionRegistry>,
-) -> Option<(Arc<dyn crate::domain::execution::Action>, serde_json::Value)> {
-    use crate::domain::execution::group;
-
-    // 检查是否命中分组
-    if group::find_group(&tc.name).is_some() {
-        // 从 arguments 中提取 action 字段
-        let action_id = tc.arguments.get("action")?.as_str()?;
-        let action = registry.get(action_id)?;
-
-        // 移除 action 字段，剩余参数透传
-        let mut args = tc.arguments.clone();
-        if let Some(obj) = args.as_object_mut() {
-            obj.remove("action");
-        }
-
-        Some((action, args))
-    } else {
-        // 独立 tool，直接查找
-        let action = registry.get(&tc.name)?;
-        Some((action, tc.arguments.clone()))
-    }
-}
-
-/// 解析展示名称（用于日志和前端显示）。
-///
-/// 聚合 tool: "system_action" + action="lock" → "lock"
-/// 独立 tool: "builtin_translate_translate" → "builtin_translate_translate"
-fn resolve_display_name(
-    tc: &crate::domain::ai::message::ToolCall,
-    action: &Arc<dyn crate::domain::execution::Action>,
-) -> String {
-    use crate::domain::execution::group;
-
-    if group::find_group(&tc.name).is_some() {
-        // 聚合 tool，用具体 action id
-        action.id().to_string()
-    } else {
-        // 独立 tool，用原始 name
-        tc.name.clone()
-    }
-}
 
 /// AI source 标记——占位与结果统一用此值,前端 `results.js` 现有 merge 按 source
 /// 匹配替换占位(与 plugin placeholder 同机制,零前端改动)。
@@ -1560,10 +1589,11 @@ pub(crate) fn ai_result_entry(text: String) -> AppEntry {
 ///
 /// 不复用 `emit_results`:那个吃 `Vec<SearchItem>` 走 fuse_items(会重排序),
 /// AI 只有一条,直接构造 payload emit 更直白。
-fn emit_ai_result(app: &AppHandle, seq: u64, entry: AppEntry) {
-    if let Err(e) = app.emit(
-        "blink://results",
-        ResultsPayload {
+fn emit_ai_result(env: &dyn DomainEnv, seq: u64, entry: AppEntry) {
+    if let Err(e) = crate::domain::event::emit_serialized(
+        env,
+        EventNames::RESULTS,
+        &ResultsPayload {
             seq,
             items: vec![entry],
         },
@@ -1576,10 +1606,11 @@ fn emit_ai_result(app: &AppHandle, seq: u64, entry: AppEntry) {
 ///
 /// 前端 merge 按 `source="ai"` 整体替换 placeholder——多条结果
 /// 在前端渲染为可选列表，Alt+1 打开第一条。
-fn emit_ai_result_multi(app: &AppHandle, seq: u64, entries: Vec<AppEntry>) {
-    if let Err(e) = app.emit(
-        "blink://results",
-        ResultsPayload {
+fn emit_ai_result_multi(env: &dyn DomainEnv, seq: u64, entries: Vec<AppEntry>) {
+    if let Err(e) = crate::domain::event::emit_serialized(
+        env,
+        EventNames::RESULTS,
+        &ResultsPayload {
             seq,
             items: entries,
         },
@@ -1601,10 +1632,11 @@ struct AiStreamPayload {
 }
 
 /// emit AI 流式 chunk —— `blink://ai-stream` 事件。
-fn emit_ai_stream(app: &AppHandle, seq: u64, delta: &str, accumulated: &str, done: bool) {
-    if let Err(e) = app.emit(
-        "blink://ai-stream",
-        AiStreamPayload {
+fn emit_ai_stream(env: &dyn DomainEnv, seq: u64, delta: &str, accumulated: &str, done: bool) {
+    if let Err(e) = crate::domain::event::emit_serialized(
+        env,
+        EventNames::AI_STREAM,
+        &AiStreamPayload {
             seq,
             delta: delta.to_string(),
             accumulated: accumulated.to_string(),
@@ -1621,7 +1653,7 @@ fn emit_ai_stream(app: &AppHandle, seq: u64, delta: &str, accumulated: &str, don
 /// 避免"AI 思考中…"永久转圈。
 ///
 /// 若传 `error_msg`,前端展示为橙色错误项(不可点击),用户能看到失败原因。
-fn emit_ai_clear(app: &AppHandle, seq: u64, error_msg: Option<&str>) {
+fn emit_ai_clear(env: &dyn DomainEnv, seq: u64, error_msg: Option<&str>) {
     if let Some(msg) = error_msg {
         // 错误项:is_error=true,前端渲染为橙色警告(复用插件 error-item 样式)
         let error_entry = AppEntry {
@@ -1638,9 +1670,10 @@ fn emit_ai_clear(app: &AppHandle, seq: u64, error_msg: Option<&str>) {
             action: Action::default(),
             ..Default::default()
         };
-        if let Err(e) = app.emit(
-            "blink://results",
-            ResultsPayload {
+        if let Err(e) = crate::domain::event::emit_serialized(
+            env,
+            EventNames::RESULTS,
+            &ResultsPayload {
                 seq,
                 items: vec![error_entry],
             },
@@ -1663,9 +1696,10 @@ fn emit_ai_clear(app: &AppHandle, seq: u64, error_msg: Option<&str>) {
             action: Action::default(),
             ..Default::default()
         };
-        if let Err(e) = app.emit(
-            "blink://results",
-            ResultsPayload {
+        if let Err(e) = crate::domain::event::emit_serialized(
+            env,
+            EventNames::RESULTS,
+            &ResultsPayload {
                 seq,
                 items: vec![clear_marker],
             },
@@ -1677,20 +1711,12 @@ fn emit_ai_clear(app: &AppHandle, seq: u64, error_msg: Option<&str>) {
 
 /// 处理 AI tool_calls —— 流式/非流式共用的执行逻辑。
 ///
-/// **0.9.7 Step 4**: 先查 CapabilityRegistry,命中则走 Capability 分支;
-/// 未命中再走 Action 解析。
-///
 /// **0.11.4 改进 2**: 接收 Turn2Context,使用 Turn 1 结果→Turn 2 回流机制。
-/// - Capability/Safe Action: execute_*_for_turn1 → write_audit(turn=1) → dispatch_turn1_result
-/// - Dangerous: emit_ai_confirm (不执行,无审计)
-/// - 未知: fallback_text (不执行,无审计)
 ///
-/// Action 路径: 解析 tool_call → (Action, 参数),按 DangerClass 分支:
-/// - Safe:执行并返回 ToolExecutionResult → dispatch_turn1_result 决定直通或 Turn 2
-/// - Dangerous:emit 确认卡片,等用户 Enter/Esc
-/// - 未知 action:回退到文本回答(若有)
+/// **0.14 Capability-only**：模型只能调用 Capability。危险/敏感能力发确认卡片，
+/// 未知 tool 回退文本；不存在 ActionRegistry fallback。
 async fn handle_ai_tool_calls(
-    app: &AppHandle,
+    env: &dyn DomainEnv,
     seq: u64,
     tool_calls: &[crate::domain::ai::message::ToolCall],
     fallback_text: &str,
@@ -1705,16 +1731,45 @@ async fn handle_ai_tool_calls(
     // 与 Turn 2 (handle_turn2_tool_call) 对齐——用户在工具执行期间看到阶段文案变化
     let progress_hint = derive_progress_hint(&tc.name, "", &turn2_ctx.progress_hints);
     emit_ai_result(
-        app,
+        env,
         seq,
         ai_progress_placeholder(format!("AI 正在{progress_hint}…")),
     );
 
-    // 0.9.7 Step 4: 先查 Capability——Capability 优先于 Action
-    let cap_reg = app.state::<Arc<CapabilityRegistry>>();
-    if cap_reg.get(&tc.name).is_some() {
+    // 0.14: AI tool_call 只允许命中 CapabilityRegistry。
+    let cap_reg = env.cap_registry();
+    if let Some(cap) = cap_reg.get(&tc.name) {
+        if cap.requires_ai_confirmation() {
+            let schema = cap.schema();
+            let title = if schema.description.trim().is_empty() {
+                tc.name.as_str()
+            } else {
+                schema.description.as_str()
+            };
+            tracing::info!(
+                target: ai_slo::TARGET,
+                capability = %tc.name,
+                sensitive = schema.sensitive,
+                danger = ?cap.danger_class(),
+                "AI Capability 调用需用户确认"
+            );
+            if let Some(service) = env.search_service() {
+                service.register_ai_confirmation(seq, &tc.name, &tc.arguments);
+            } else {
+                tracing::error!(
+                    target: ai_slo::TARGET,
+                    capability = %tc.name,
+                    "无法注册 AI Capability 确认: SearchService 未初始化"
+                );
+                emit_ai_clear(env, seq, Some("确认服务未初始化"));
+                return;
+            }
+            emit_ai_confirm(env, seq, &tc.name, &tc.arguments, title);
+            return;
+        }
+
         if let Some(result) =
-            execute_capability_for_turn1(app, seq, tc, &cap_reg, latest_seq, deadline).await
+            execute_capability_for_turn1(env, seq, tc, &cap_reg, latest_seq, deadline).await
         {
             // 写审计日志 (turn=1)
             write_audit(
@@ -1728,69 +1783,25 @@ async fn handle_ai_tool_calls(
             )
             .await;
             // 分发结果（直通或 Turn 2）
-            dispatch_turn1_result(app, seq, result, Some(turn2_ctx), latest_seq).await;
+            dispatch_turn1_result(env, seq, result, Some(turn2_ctx), latest_seq).await;
         }
         return;
     }
 
-    // Action 路径
-    let action_reg = app.state::<Arc<ActionRegistry>>();
-    let resolved = resolve_tool_call(tc, &action_reg);
-
-    match resolved {
-        Some((action, args)) => match action.danger_class() {
-            DangerClass::Safe => {
-                // 执行 Safe Action → ToolExecutionResult
-                let result = execute_action_for_turn1(
-                    app,
-                    seq,
-                    tc,
-                    &action,
-                    args,
-                    &turn2_ctx.lang,
-                    latest_seq,
-                )
-                .await;
-
-                // 写审计日志 (turn=1)
-                write_audit(
-                    &turn2_ctx.pool,
-                    &result.tool_name,
-                    &result.arguments,
-                    &result.result_summary,
-                    turn2_ctx.provider_kind.as_serde_str(),
-                    &turn2_ctx.provider_model,
-                    1,
-                )
-                .await;
-
-                // 分发结果（直通或 Turn 2）
-                dispatch_turn1_result(app, seq, result, Some(turn2_ctx), latest_seq).await;
-            }
-            DangerClass::Dangerous => {
-                tracing::info!(
-                    target: ai_slo::TARGET,
-                    "AI tool_call 需确认: {} (Dangerous)",
-                    tc.name,
-                );
-                let title = action.title().resolve(&turn2_ctx.lang).to_string();
-                let display_name = resolve_display_name(tc, &action);
-                emit_ai_confirm(app, seq, &display_name, &args, &title);
-            }
-        },
-        None => {
-            tracing::warn!(
-                target: ai_slo::TARGET,
-                "AI tool_call 未知动作: {},回退文本",
-                tc.name,
-            );
-            match fallback_text.trim() {
-                t if !t.is_empty() => {
-                    emit_ai_result(app, seq, ai_result_entry(t.to_string()));
-                }
-                _ => emit_ai_clear(app, seq, Some(&format!("AI 调用了未知动作: {}", tc.name))),
-            }
+    tracing::warn!(
+        target: ai_slo::TARGET,
+        "AI tool_call 未知 Capability: {},回退文本",
+        tc.name,
+    );
+    match fallback_text.trim() {
+        t if !t.is_empty() => {
+            emit_ai_result(env, seq, ai_result_entry(t.to_string()));
         }
+        _ => emit_ai_clear(
+            env,
+            seq,
+            Some(&format!("AI 调用了未知能力: {}", tc.name)),
+        ),
     }
 }
 
@@ -1849,9 +1860,8 @@ const AI_TOOL_ITEMS_LIMIT: usize = 5;
 
 /// `ItemResult` 列表 → 前端 `AppEntry` 列表（0.11.0 改进 1 统一投影）。
 ///
-/// **统一投影路径**：Action 路径（`PluginActionAdapter` → `ActionOutcome::Items`）与
-/// Capability 路径（`CapabilityResult::Items`）共用此函数，避免"插件 Items 走 A 路径、
-/// Capability Items 走 B 路径"的分叉（文档 §2.1 ★ 投影路径统一）。
+/// **统一投影路径**：builtin 与 plugin 的 `CapabilityResult::Items` 共用此函数，
+/// 避免不同能力来源产生前端投影分叉。
 ///
 /// **标记位**（§3.1）：每个 item 标 `is_ai_tool_result = true`——前端 nowrap 单行 +
 /// 12px 小号 AI 图标，与查询路径结果视觉可区分。
@@ -1972,80 +1982,12 @@ fn items_to_entries(items: &[crate::domain::capability::ItemResult]) -> Vec<AppE
     entries
 }
 
-/// AI tool_call 执行成功项——展示执行结果。
-///
-/// 与 `ai_result_entry` 类似但语义不同:
-/// - 有执行结果(如 get_ip 返回 IP 地址)→ 展示结果文本,回车可复制
-/// - 无执行结果(如 open_url)→ 展示"已执行 {动作名}"
-///
-/// `lang` 透传自 Turn2Context.lang,让英文界面用户看到英文动作名（0.11 review B4 修复）。
-fn ai_action_done_entry(
-    action: &dyn crate::domain::execution::Action,
-    outcome: &crate::domain::execution::ActionOutcome,
-    lang: &str,
-) -> AppEntry {
-    use crate::domain::execution::ActionOutcome;
-    use crate::domain::search::ActionKind;
-
-    let title = action.title().resolve(lang);
-
-    // 从 ActionOutcome 提取结果文本
-    let result_text = match outcome {
-        ActionOutcome::Copy { text, .. } => Some(text.clone()),
-        ActionOutcome::Open { path } => Some(format!("已打开: {path}")),
-        ActionOutcome::Emit { .. } => None, // 副作用型,无文本结果
-        ActionOutcome::Nop => None,
-    };
-
-    match result_text {
-        Some(text) if !text.is_empty() => {
-            // 有结果文本 → 展示结果,回车可复制(与 ai_result_entry 一致)
-            AppEntry {
-                name: text.clone(),
-                pinyin_name: String::new(),
-                pinyin_full: String::new(),
-                lnk_path: String::new(),
-                is_calc: false,
-                score: 0.7,
-                is_placeholder: false,
-                is_error: false,
-                source: AI_SOURCE.into(),
-                description: Some(format!("✓ {title} · 回车复制")),
-                action: Action {
-                    kind: ActionKind::Copy,
-                    payload: Some(text),
-                    hint: Some("复制结果".into()),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }
-        }
-        _ => {
-            // 无结果文本 → 展示"已执行"
-            AppEntry {
-                name: format!("✓ 已执行：{title}"),
-                pinyin_name: String::new(),
-                pinyin_full: String::new(),
-                lnk_path: String::new(),
-                is_calc: false,
-                score: 0.7,
-                is_placeholder: false,
-                is_error: false,
-                source: AI_SOURCE.into(),
-                description: Some("AI 已执行此动作".into()),
-                action: Action::default(),
-                ..Default::default()
-            }
-        }
-    }
-}
-
 /// AI Dangerous 动作确认请求——emit 到前端,展示确认卡片等用户 Enter/Esc。
 ///
 /// **事件**: `blink://ai-confirm-action`
 /// **payload**: `{ seq, actionName, actionTitle, arguments, dangerClass }`
 fn emit_ai_confirm(
-    app: &AppHandle,
+    env: &dyn DomainEnv,
     seq: u64,
     action_name: &str,
     arguments: &serde_json::Value,
@@ -2066,7 +2008,7 @@ fn emit_ai_confirm(
         arguments: arguments.clone(),
         danger_class: "Dangerous".to_string(),
     };
-    if let Err(e) = app.emit("blink://ai-confirm-action", payload) {
+    if let Err(e) = crate::domain::event::emit_serialized(env, EventNames::AI_CONFIRM_ACTION, &payload) {
         tracing::debug!(error = %e, "emit AI confirm failed");
     }
 }
@@ -2114,7 +2056,7 @@ struct ToolExecutionResult {
 /// 若为 true，Turn 1 执行后进入 Turn 2 回流。
 struct Turn2Context {
     provider: Arc<dyn AIProvider>,
-    provider_kind: crate::app::ai_config::ProviderKind,
+    provider_kind: crate::domain::config::ai_config::ProviderKind,
     provider_model: String,
     /// 是否实际运行 Turn 2（`ToolResultFeedback::should_run(provider_kind)`）。
     should_run: bool,
@@ -2159,19 +2101,6 @@ fn derive_progress_hint(
         format!("{prefix}…")
     } else {
         prefix
-    }
-}
-
-/// 投影 `ActionOutcome` → 结果摘要（审计日志用）。
-pub(crate) fn outcome_to_summary(outcome: &ActionOutcome) -> String {
-    match outcome {
-        ActionOutcome::Copy { text, .. } => {
-            let truncated = truncate_summary_for_audit(text);
-            format!("Copy: {truncated}")
-        }
-        ActionOutcome::Open { path } => format!("Open: {path}"),
-        ActionOutcome::Emit { event, .. } => format!("Emit: {event}"),
-        ActionOutcome::Nop => "Nop".to_string(),
     }
 }
 
@@ -2231,7 +2160,7 @@ async fn write_audit(
 /// 返回 `None` = seq 过期 / Cancelled（不 emit，不回流）。
 /// 返回 `Some(result)` = 执行完成（成功或失败），由调用方决定 emit 或回流。
 async fn execute_capability_for_turn1(
-    app: &AppHandle,
+    env: &dyn DomainEnv,
     seq: u64,
     tc: &crate::domain::ai::message::ToolCall,
     cap_registry: &Arc<CapabilityRegistry>,
@@ -2256,7 +2185,7 @@ async fn execute_capability_for_turn1(
     );
 
     let ctx = InvokeContext {
-        app_handle: app,
+        env: env.capability_env(),
         deadline,
     };
 
@@ -2347,106 +2276,12 @@ async fn execute_capability_for_turn1(
     }
 }
 
-/// 执行 Safe Action 并返回 `ToolExecutionResult`。
-///
-/// **before-seq 校验**（0.11 review W1）：Action 路径含 `open_path` 这类有副作用的动作，
-/// 不能像 Capability（只读）那样靠下游 `dispatch_turn1_result` 兜底——执行前先校验 seq，
-/// 过期 query 直接放弃执行，避免对已切走的 query 触发副作用（如打开文件）。
-async fn execute_action_for_turn1(
-    app: &AppHandle,
-    seq: u64,
-    tc: &crate::domain::ai::message::ToolCall,
-    action: &Arc<dyn crate::domain::execution::Action>,
-    args: serde_json::Value,
-    lang: &str,
-    latest_seq: &AtomicU64,
-) -> ToolExecutionResult {
-    // before-seq 校验：用户已切到新 query → 不执行（副作用动作尤其重要）
-    if seq != latest_seq.load(Ordering::SeqCst) {
-        tracing::trace!(
-            target: ai_slo::TARGET,
-            tool = %tc.name,
-            "Turn 1 Action 执行前 seq 过期,跳过（避免对过期 query 执行副作用）"
-        );
-        return ToolExecutionResult {
-            tool_name: tc.name.clone(),
-            tool_call_id: tc.id.clone(),
-            arguments: args,
-            tool_message_content: "查询已过期,跳过执行".to_string(),
-            entries: vec![],
-            result_summary: "查询已过期,跳过执行".to_string(),
-            success: false,
-        };
-    }
-
-    let cx = ActionContext::from_arguments(app, args.clone());
-    match action.execute(&cx).await {
-        Ok(outcome) => {
-            tracing::info!(
-                target: ai_slo::TARGET,
-                tool_call_id = %tc.id,
-                "AI tool_call 执行成功: {} args={}",
-                tc.name, args,
-            );
-            let tool_message =
-                crate::domain::capability::rig_tool_result_to_text(&outcome.to_rig_tool_result());
-            let summary = outcome_to_summary(&outcome);
-
-            // 构造前端 entries（0.13.7：Items 变体已删，Action 路径统一走 done entry）
-            let entries = vec![ai_action_done_entry(action.as_ref(), &outcome, lang)];
-
-            ToolExecutionResult {
-                tool_name: tc.name.clone(),
-                tool_call_id: tc.id.clone(),
-                arguments: args,
-                tool_message_content: tool_message,
-                entries,
-                result_summary: summary,
-                success: true,
-            }
-        }
-        Err(e) => {
-            tracing::warn!(
-                target: ai_slo::TARGET,
-                "AI tool_call 执行失败: {} err={}",
-                tc.name, e,
-            );
-            let error_msg = format!("动作执行失败: {e}");
-            let error_entry = AppEntry {
-                name: error_msg.clone(),
-                pinyin_name: String::new(),
-                pinyin_full: String::new(),
-                lnk_path: String::new(),
-                is_calc: false,
-                score: 0.5,
-                is_placeholder: false,
-                is_error: true,
-                source: AI_SOURCE.into(),
-                description: None,
-                action: Action::default(),
-                ..Default::default()
-            };
-            // seq 已在函数入口的 before-seq 校验中消费（review W1）；
-            // 此处 action.execute 已发生但失败，构造错误 entry 供下游 emit。
-            ToolExecutionResult {
-                tool_name: tc.name.clone(),
-                tool_call_id: tc.id.clone(),
-                arguments: args,
-                tool_message_content: format!("错误: {e}"),
-                entries: vec![error_entry],
-                result_summary: format!("错误: {error_msg}"),
-                success: false,
-            }
-        }
-    }
-}
-
 /// 分发 Turn 1 结果——回流开启则进 Turn 2，否则直接 emit。
 ///
 /// **回流关闭** (§3.7): 若 `feedback_config == Auto`（用户未显式选择），
 /// 工具 items 的 description 追加 `(原始数据,可开启回流获得 AI 总结)`。
 async fn dispatch_turn1_result(
-    app: &AppHandle,
+    env: &dyn DomainEnv,
     seq: u64,
     result: ToolExecutionResult,
     turn2_ctx: Option<&Turn2Context>,
@@ -2461,7 +2296,7 @@ async fn dispatch_turn1_result(
     );
 
     // 先清流式占位/残留
-    emit_ai_clear(app, seq, None);
+    emit_ai_clear(env, seq, None);
 
     // seq 校验——用户可能已切走
     if seq != latest_seq.load(Ordering::SeqCst) {
@@ -2471,7 +2306,7 @@ async fn dispatch_turn1_result(
 
     let Some(ctx) = turn2_ctx else {
         // 无 Turn 2 上下文 → 直接 emit（0.11.3 之前的现状）
-        emit_turn1_result(app, seq, &result);
+        emit_turn1_result(env, seq, &result);
         return;
     };
 
@@ -2479,30 +2314,30 @@ async fn dispatch_turn1_result(
         // 回流关闭 → 直接 emit Turn 1 结果
         // §3.7: Auto + 云端时追加提示文案（用户未显式关闭，告知可开启回流）
         if ctx.feedback_config == ToolResultFeedback::Auto {
-            emit_turn1_result_with_hint(app, seq, &result);
+            emit_turn1_result_with_hint(env, seq, &result);
         } else {
-            emit_turn1_result(app, seq, &result);
+            emit_turn1_result(env, seq, &result);
         }
         return;
     }
 
     // 回流开启 → 进入 Turn 2
-    run_turn2_feedback(app, seq, result, ctx, latest_seq).await;
+    run_turn2_feedback(env, seq, result, ctx, latest_seq).await;
 }
 
 /// 直接 emit Turn 1 结果（现状逻辑）。
-fn emit_turn1_result(app: &AppHandle, seq: u64, result: &ToolExecutionResult) {
+fn emit_turn1_result(env: &dyn DomainEnv, seq: u64, result: &ToolExecutionResult) {
     if result.entries.is_empty() {
-        emit_ai_clear(app, seq, Some("工具返回空结果"));
+        emit_ai_clear(env, seq, Some("工具返回空结果"));
     } else {
-        emit_ai_result_multi(app, seq, result.entries.clone());
+        emit_ai_result_multi(env, seq, result.entries.clone());
     }
 }
 
 /// emit Turn 1 结果 + 追加回流提示文案（§3.7）。
-fn emit_turn1_result_with_hint(app: &AppHandle, seq: u64, result: &ToolExecutionResult) {
+fn emit_turn1_result_with_hint(env: &dyn DomainEnv, seq: u64, result: &ToolExecutionResult) {
     if result.entries.is_empty() {
-        emit_ai_clear(app, seq, Some("工具返回空结果"));
+        emit_ai_clear(env, seq, Some("工具返回空结果"));
         return;
     }
 
@@ -2521,7 +2356,7 @@ fn emit_turn1_result_with_hint(app: &AppHandle, seq: u64, result: &ToolExecution
             e
         })
         .collect();
-    emit_ai_result_multi(app, seq, entries);
+    emit_ai_result_multi(env, seq, entries);
 }
 
 /// 运行 Turn 2 回流（§2.2.1 两轮 complete 协议）。
@@ -2529,19 +2364,19 @@ fn emit_turn1_result_with_hint(app: &AppHandle, seq: u64, result: &ToolExecution
 /// 流程:
 /// 1. emit 占位 "AI 正在思考…"
 /// 2. 构造 Turn 2 messages: [system(feedback_prompt), user, assistant(tool_call_1), tool(result_1)]
-/// 3. tools = safe_only（过滤 DangerClass::Safe）
+/// 3. tools = safe_only（过滤需确认的 Capability）
 /// 4. 调用 provider.complete() 或 stream
 /// 5. 处理三种情况: text / safe tool_call / dangerous tool_call
 /// 6. 超时降级: emit "AI 回答较慢,已展示原始结果" + Turn 1 结果
 async fn run_turn2_feedback(
-    app: &AppHandle,
+    env: &dyn DomainEnv,
     seq: u64,
     turn1_result: ToolExecutionResult,
     ctx: &Turn2Context,
     latest_seq: &AtomicU64,
 ) {
     // §3.4: Turn 1 结果不提前 emit，用户全程看占位文案变化
-    emit_ai_result(app, seq, ai_progress_placeholder("AI 正在思考…".into()));
+    emit_ai_result(env, seq, ai_progress_placeholder("AI 正在思考…".into()));
 
     // seq 校验
     if seq != latest_seq.load(Ordering::SeqCst) {
@@ -2549,42 +2384,21 @@ async fn run_turn2_feedback(
         return;
     }
 
-    // Turn 2 tools = safe_only（过滤出 DangerClass::Safe 的 tool）
+    // Turn 2 tools = 无强制确认的 Capability。
     // §2.2.1: Turn 2 允许 AI 再调一次 Safe tool（如 file_action → open_path），实现 tool chain
-    let action_reg = app.state::<Arc<ActionRegistry>>();
-    let cap_reg = app.state::<Arc<CapabilityRegistry>>();
+    let cap_reg = env.cap_registry();
 
-    use crate::domain::execution::group;
-
-    // 过滤 safe_tools 的同时收集对应的 safe tool name 集合
+    // tool 池在 Turn 1 已是 Capability-only；这里再剔除 Dangerous / sensitive，
+    // 防止有限二轮链路绕过主窗口确认边界。open_url 保持既有特殊策略：
+    // 允许模型选择，但在 handle_turn2_tool_call 中降级为确认卡片。
     let safe_tool_names: std::collections::HashSet<String> = ctx
         .tools
         .iter()
         .filter(|schema| {
-            // Capability 的 tool 默认 Safe（只读数据）
-            if cap_reg.get(&schema.name).is_some() {
-                return true;
-            }
-
-            // 分组 tool（如 file_action / system_action / blink_action）：
-            // 检查分组内**所有** action 是否都是 Safe。
-            // resolve_tool_call 传空 arguments 无法解析分组（缺 action 字段），
-            // 所以对分组 tool 直接遍历其 action_ids 查 danger_class。
-            if let Some(g) = group::find_group(&schema.name) {
-                return g.action_ids.iter().all(|action_id| {
-                    action_reg
-                        .get(action_id)
-                        .map(|a| a.danger_class() == DangerClass::Safe)
-                        .unwrap_or(false)
-                });
-            }
-
-            // 独立 Action tool（非分组）直接查 danger_class
-            if let Some(action) = action_reg.get(&schema.name) {
-                return action.danger_class() == DangerClass::Safe;
-            }
-
-            false
+            cap_reg
+                .get(&schema.name)
+                .map(|cap| !cap.requires_ai_confirmation())
+                .unwrap_or(false)
         })
         .map(|s| s.name.clone())
         .collect();
@@ -2671,7 +2485,7 @@ async fn run_turn2_feedback(
         match chunk {
             StreamChunk::Text(text) => {
                 accumulated.push_str(&text);
-                emit_ai_stream(app, seq, &text, &accumulated, false);
+                emit_ai_stream(env, seq, &text, &accumulated, false);
             }
             StreamChunk::Done { tool_calls, .. } => {
                 let elapsed = turn2_start.elapsed().as_millis() as u32;
@@ -2687,9 +2501,9 @@ async fn run_turn2_feedback(
 
                 if !tool_calls.is_empty() {
                     // 情况 B/C: tool_call_2 → 先清流式占位,再处理 tool chain
-                    emit_ai_stream(app, seq, "", &accumulated, true);
+                    emit_ai_stream(env, seq, "", &accumulated, true);
                     let tc2 = &tool_calls[0];
-                    handle_turn2_tool_call(app, seq, tc2, ctx, latest_seq).await;
+                    handle_turn2_tool_call(env, seq, tc2, ctx, latest_seq).await;
                 } else {
                     // 情况 A: text answer → 流式结束,发 done=true + 可复制结果
                     if accumulated.trim().is_empty() {
@@ -2698,11 +2512,11 @@ async fn run_turn2_feedback(
                             target: ai_slo::TARGET,
                             "Turn 2 返回空文本,降级展示 Turn 1 结果"
                         );
-                        emit_ai_clear(app, seq, None);
-                        emit_turn1_result(app, seq, &turn1_result);
+                        emit_ai_clear(env, seq, None);
+                        emit_turn1_result(env, seq, &turn1_result);
                     } else {
-                        emit_ai_stream(app, seq, "", &accumulated, true);
-                        emit_ai_result(app, seq, ai_result_entry(accumulated));
+                        emit_ai_stream(env, seq, "", &accumulated, true);
+                        emit_ai_result(env, seq, ai_result_entry(accumulated));
                     }
                 }
                 return;
@@ -2729,12 +2543,12 @@ async fn run_turn2_feedback(
                     accumulated.chars().count()
                 )
             };
-            emit_ai_clear(app, seq, None);
+            emit_ai_clear(env, seq, None);
             if !accumulated.trim().is_empty() {
-                emit_ai_stream(app, seq, "", &accumulated, true);
-                emit_ai_result(app, seq, ai_result_entry(accumulated));
+                emit_ai_stream(env, seq, "", &accumulated, true);
+                emit_ai_result(env, seq, ai_result_entry(accumulated));
             } else {
-                emit_turn1_result(app, seq, &turn1_result);
+                emit_turn1_result(env, seq, &turn1_result);
             }
             Some(summary)
         }
@@ -2746,15 +2560,15 @@ async fn run_turn2_feedback(
                 elapsed_ms = elapsed,
                 "Turn 2 回流超时,降级展示 Turn 1 结果"
             );
-            emit_ai_clear(app, seq, None);
+            emit_ai_clear(env, seq, None);
             emit_ai_result(
-                app,
+                env,
                 seq,
                 ai_progress_placeholder("AI 回答较慢,已展示原始结果".into()),
             );
             // 短暂延迟后展示 Turn 1 结果
             tokio::time::sleep(std::time::Duration::from_millis(TURN2_FALLBACK_DELAY_MS)).await;
-            emit_turn1_result(app, seq, &turn1_result);
+            emit_turn1_result(env, seq, &turn1_result);
             Some(format!("Turn 2 超时（{elapsed}ms）"))
         }
         Ok(Err(e)) => {
@@ -2765,8 +2579,8 @@ async fn run_turn2_feedback(
                 error = %e,
                 "Turn 2 回流失败,降级展示 Turn 1 结果"
             );
-            emit_ai_clear(app, seq, None);
-            emit_turn1_result(app, seq, &turn1_result);
+            emit_ai_clear(env, seq, None);
+            emit_turn1_result(env, seq, &turn1_result);
             Some(format!("Turn 2 失败: {e}"))
         }
         Err(e) => {
@@ -2778,8 +2592,8 @@ async fn run_turn2_feedback(
                 error = %e,
                 "Turn 2 回流 producer task 异常,降级展示 Turn 1 结果"
             );
-            emit_ai_clear(app, seq, None);
-            emit_turn1_result(app, seq, &turn1_result);
+            emit_ai_clear(env, seq, None);
+            emit_turn1_result(env, seq, &turn1_result);
             Some(format!("Turn 2 producer task 异常: {e}"))
         }
     };
@@ -2806,38 +2620,56 @@ async fn run_turn2_feedback(
 /// - `open_url` 在 Turn 2 降级为需确认（防止打开恶意网址）
 /// - Dangerous tool → emit 确认卡片
 async fn handle_turn2_tool_call(
-    app: &AppHandle,
+    env: &dyn DomainEnv,
     seq: u64,
     tc: &crate::domain::ai::message::ToolCall,
     ctx: &Turn2Context,
     latest_seq: &AtomicU64,
 ) {
-    let cap_reg = app.state::<Arc<CapabilityRegistry>>();
+    let cap_reg = env.cap_registry();
 
     // §3.2: 更新占位文案为 Turn 2 工具的 progress_hint
     let progress_hint = derive_progress_hint(&tc.name, "", &ctx.progress_hints);
     emit_ai_result(
-        app,
+        env,
         seq,
         ai_progress_placeholder(format!("AI 正在{progress_hint}…")),
     );
 
-    // Capability 优先
-    if cap_reg.get(&tc.name).is_some() {
-        // §2.2.6: open_url 在 Turn 2 降级为需确认（0.14.2 从 Action 迁移到 Capability，
-        // 行为保持——防止 AI 打开恶意网址。open_path / reveal_in_explorer 保持自动执行）
-        if tc.name == "open_url" {
+    if let Some(cap) = cap_reg.get(&tc.name) {
+        // §2.2.6: open_url 在 Turn 2 降级为需确认（防止 AI 根据工具结果打开恶意网址）。
+        // Dangerous / sensitive 使用 Capability 统一确认策略。
+        if tc.name == "open_url" || cap.requires_ai_confirmation() {
+            let schema = cap.schema();
+            let title = if schema.description.trim().is_empty() {
+                tc.name.as_str()
+            } else {
+                schema.description.as_str()
+            };
             tracing::info!(
                 target: ai_slo::TARGET,
                 tool = %tc.name,
-                "Turn 2 tool_call 需确认 (open_url Capability 降级)"
+                sensitive = schema.sensitive,
+                danger = ?cap.danger_class(),
+                "Turn 2 Capability 调用需用户确认"
             );
-            emit_ai_confirm(app, seq, &tc.name, &tc.arguments, "打开链接");
+            if let Some(service) = env.search_service() {
+                service.register_ai_confirmation(seq, &tc.name, &tc.arguments);
+            } else {
+                tracing::error!(
+                    target: ai_slo::TARGET,
+                    capability = %tc.name,
+                    "无法注册 Turn 2 Capability 确认: SearchService 未初始化"
+                );
+                emit_ai_clear(env, seq, Some("确认服务未初始化"));
+                return;
+            }
+            emit_ai_confirm(env, seq, &tc.name, &tc.arguments, title);
             return;
         }
 
         let result =
-            execute_capability_for_turn1(app, seq, tc, &cap_reg, latest_seq, ctx.deadline).await;
+            execute_capability_for_turn1(env, seq, tc, &cap_reg, latest_seq, ctx.deadline).await;
         match result {
             Some(r) => {
                 // 写审计日志 (turn=2)
@@ -2854,10 +2686,10 @@ async fn handle_turn2_tool_call(
                 // emit 执行结果（review L4：空 entries 不先 emit clear 再 emit error，
                 // 直接根据是否有 entries 选 clear-with-msg 或 result_multi——避免双 emit 抖动）
                 if r.entries.is_empty() {
-                    emit_ai_clear(app, seq, Some("工具返回空结果"));
+                    emit_ai_clear(env, seq, Some("工具返回空结果"));
                 } else {
-                    emit_ai_clear(app, seq, None);
-                    emit_ai_result_multi(app, seq, r.entries);
+                    emit_ai_clear(env, seq, None);
+                    emit_ai_result_multi(env, seq, r.entries);
                 }
             }
             None => {
@@ -2867,105 +2699,16 @@ async fn handle_turn2_tool_call(
         return;
     }
 
-    // Action 路径
-    let action_reg = app.state::<Arc<ActionRegistry>>();
-    let resolved = resolve_tool_call(tc, &action_reg);
-
-    match resolved {
-        Some((action, args)) => {
-            // §2.2.6: open_url 在 Turn 2 降级为需确认
-            let is_open_url = action.id() == "open_url";
-
-            match action.danger_class() {
-                DangerClass::Safe if !is_open_url => {
-                    // 自动执行（D4: open_path 保持自动）
-                    let result = execute_action_for_turn1(
-                        app, seq, tc, &action, args, &ctx.lang, latest_seq,
-                    )
-                    .await;
-
-                    // 写审计日志 (turn=2)
-                    write_audit(
-                        &ctx.pool,
-                        &tc.name,
-                        &tc.arguments,
-                        &result.result_summary,
-                        ctx.provider_kind.as_serde_str(),
-                        &ctx.provider_model,
-                        2,
-                    )
-                    .await;
-
-                    // §3.6: 自动执行反馈规范
-                    emit_ai_clear(app, seq, None);
-                    emit_turn2_action_result(app, seq, &result, action.as_ref(), &ctx.lang);
-                }
-                _ => {
-                    // Dangerous 或 open_url → emit 确认卡片
-                    tracing::info!(
-                        target: ai_slo::TARGET,
-                        tool = %tc.name,
-                        "Turn 2 tool_call 需确认 (Dangerous 或 open_url 降级)"
-                    );
-                    let title = action.title().resolve(&ctx.lang).to_string();
-                    let display_name = resolve_display_name(tc, &action);
-                    emit_ai_confirm(app, seq, &display_name, &args, &title);
-                }
-            }
-        }
-        None => {
-            // 未知 action → 降级展示 Turn 1 结果
-            tracing::warn!(
-                target: ai_slo::TARGET,
-                tool = %tc.name,
-                "Turn 2 tool_call 未知动作,降级"
-            );
-            emit_ai_clear(app, seq, Some(&format!("AI 调用了未知动作: {}", tc.name)));
-        }
-    }
-}
-
-/// Turn 2 自动执行 safe tool 后的 emit（§3.6 自动执行反馈规范）。
-///
-/// - 有结果文本: item[0] = 执行结果（如 "已打开 VSCode"），description 告知"AI 自动打开"
-/// - 无结果文本: item[0] = "已执行：{action}"
-fn emit_turn2_action_result(
-    app: &AppHandle,
-    seq: u64,
-    result: &ToolExecutionResult,
-    action: &dyn crate::domain::execution::Action,
-    lang: &str,
-) {
-    let title = action.title().resolve(lang).to_string();
-
-    if result.entries.is_empty() {
-        // 无结果 → "已执行"
-        let entry = AppEntry {
-            name: format!("✓ 已执行：{title}"),
-            pinyin_name: String::new(),
-            pinyin_full: String::new(),
-            lnk_path: String::new(),
-            is_calc: false,
-            score: 0.7,
-            is_placeholder: false,
-            is_error: false,
-            source: AI_SOURCE.into(),
-            description: Some("AI 自动执行 · 如非预期可手动撤销".into()),
-            action: Action::default(),
-            ..Default::default()
-        };
-        emit_ai_result(app, seq, entry);
-    } else {
-        // 有结果 → 第一项加"AI 自动执行"描述
-        let mut entries = result.entries.clone();
-        if let Some(first) = entries.first_mut() {
-            first.description = match &first.description {
-                Some(d) => Some(format!("{d} · AI 自动执行")),
-                None => Some("AI 自动执行 · 如非预期可手动关闭".into()),
-            };
-        }
-        emit_ai_result_multi(app, seq, entries);
-    }
+    tracing::warn!(
+        target: ai_slo::TARGET,
+        tool = %tc.name,
+        "Turn 2 tool_call 未知 Capability,降级"
+    );
+    emit_ai_clear(
+        env,
+        seq,
+        Some(&format!("AI 调用了未知能力: {}", tc.name)),
+    );
 }
 
 /// 构造进度占位项（§3.2 占位文案规范）。
@@ -2990,6 +2733,36 @@ fn ai_progress_placeholder(text: String) -> AppEntry {
 mod tests {
     use super::*;
     use crate::domain::search::engine::SearchAction;
+
+    #[test]
+    fn pending_ai_confirmation_requires_current_seq_name_and_args() {
+        let pending = PendingAiConfirmation {
+            seq: 42,
+            capability_name: "search_apps".into(),
+            arguments: serde_json::json!({ "query": "code" }),
+        };
+
+        assert!(pending.matches(
+            42,
+            "search_apps",
+            &serde_json::json!({ "query": "code" })
+        ));
+        assert!(!pending.matches(
+            43,
+            "search_apps",
+            &serde_json::json!({ "query": "code" })
+        ));
+        assert!(!pending.matches(
+            42,
+            "search_clipboard_history",
+            &serde_json::json!({ "query": "code" })
+        ));
+        assert!(!pending.matches(
+            42,
+            "search_apps",
+            &serde_json::json!({ "query": "other" })
+        ));
+    }
 
     fn item(id: &str, score: f32, source: &str) -> SearchItem {
         SearchItem {

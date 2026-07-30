@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use walkdir::WalkDir;
 
-use crate::app::config::FileSearchConfig;
+use crate::domain::config::FileSearchConfig;
 
 use super::engine::{Lane, QueryContext, SearchAction, SearchEngine, SearchItem};
 

@@ -9,10 +9,8 @@
 <body>
   <div id="menu" class="context-menu"></div>
 
-  <script>
-    const TAU = window.__TAURI__;
-    const invoke = TAU?.core?.invoke ?? TAU?.invoke;
-    const listen = TAU?.event?.listen;
+  <script type="module">
+    import { invoke, listen } from "./js/tauri.js";
 
     /** 应用主题（后端已 resolve auto → light/dark，此处只设属性）。 */
     function applyTheme(theme) {
@@ -64,17 +62,17 @@
     }
 
     // ── 复用窗口：后端 hide → emit 新数据 → show，此处监听并重新渲染 ──
-    if (listen) {
-      listen("blink://context-menu-data", (event) => {
-        const { items, theme } = event.payload;
-        if (theme) applyTheme(theme);
-        try {
-          renderMenu(JSON.parse(items || '[]'));
-        } catch (e) {
-          console.error('context-menu-data JSON 解析失败:', e, items);
-        }
-      });
-    }
+    // 注意：此事件目前未被后端 emit（后端改用 eval 调 __renderContextMenu），
+    // 保留 listener 作为未来 emit 方案的预留。
+    listen("blink://context-menu-data", (event) => {
+      const { items, theme } = event.payload;
+      if (theme) applyTheme(theme);
+      try {
+        renderMenu(JSON.parse(items || '[]'));
+      } catch (e) {
+        console.error('context-menu-data JSON 解析失败:', e, items);
+      }
+    });
 
     // ESC 关闭
     document.addEventListener('keydown', (e) => {

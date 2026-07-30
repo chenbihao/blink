@@ -24,7 +24,7 @@ use tokio::task::AbortHandle;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use crate::app::ai_config::Tier;
+use crate::domain::config::ai_config::Tier;
 use crate::domain::ai::agent_provider::{AgentProvider, ChatStreamChunk};
 use crate::domain::ai::prompt::chat_system_prompt_with_skills;
 use crate::domain::ai::provider::AIError;
@@ -32,8 +32,9 @@ use crate::domain::ai::registry::{AIProviderRegistry, ResolvedProviderEntries};
 use crate::domain::ai::skill::{SkillRegistry, parse_skill_command};
 use crate::domain::ai::tool_adapter::{PendingConfirms, build_agent_tools};
 use crate::domain::capability::CapabilityRegistry;
+use crate::domain::event::DomainEnv;
+use crate::domain::event_names::EventNames;
 use crate::domain::mcp::McpClientManager;
-use tauri::Emitter;
 
 /// Agent 缓存 key——provider/model/fingerprint/preamble_hash/MCP epoch 任一变化即 cache miss。
 #[derive(PartialEq)]
@@ -153,31 +154,12 @@ pub struct ChatStreamEvent {
 }
 
 /// ChatService 请求错误。
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ChatError {
+    #[error("已有对话请求正在生成（request_id={}）", .0.request_id)]
     AlreadyActive(ActiveChatStatus),
-    Provider(AIError),
-}
-
-impl std::fmt::Display for ChatError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::AlreadyActive(active) => write!(
-                f,
-                "已有对话请求正在生成（request_id={}）",
-                active.request_id
-            ),
-            Self::Provider(error) => write!(f, "{error}"),
-        }
-    }
-}
-
-impl std::error::Error for ChatError {}
-
-impl From<AIError> for ChatError {
-    fn from(value: AIError) -> Self {
-        Self::Provider(value)
-    }
+    #[error(transparent)]
+    Provider(#[from] AIError),
 }
 
 /// active request 的并发状态，独立封装以便纯逻辑测试。
@@ -259,7 +241,7 @@ impl RequestTracker {
 
 /// 对话服务。
 pub struct ChatService {
-    app: tauri::AppHandle,
+    emitter: Arc<dyn DomainEnv>,
     ai_registry: Arc<AIProviderRegistry>,
     capability_registry: Arc<CapabilityRegistry>,
     pending_confirms: Arc<PendingConfirms>,
@@ -288,7 +270,7 @@ impl ChatService {
     /// 0.13.1：memory 持有具体类型 `Arc<SqliteConversationMemory>`（不再是 trait object），
     /// 供 `AgentProvider::new` 注入 `model.context_window` 驱动 token-aware 裁剪。
     pub fn new(
-        app: tauri::AppHandle,
+        emitter: Arc<dyn DomainEnv>,
         ai_registry: Arc<AIProviderRegistry>,
         capability_registry: Arc<CapabilityRegistry>,
         pending_confirms: Arc<PendingConfirms>,
@@ -299,7 +281,7 @@ impl ChatService {
         // 从配置库加载持久化的模型选择（0.12.7）
         let selected = tauri::async_runtime::block_on(Self::load_selected_model(&config_pool, &ai_registry));
         Self {
-            app,
+            emitter,
             ai_registry,
             capability_registry,
             pending_confirms,
@@ -338,7 +320,7 @@ impl ChatService {
         let model = provider.models.iter().find(|m| m.id == model_id)?;
         if !model
             .capabilities
-            .contains(&crate::app::ai_config::ModelCapability::Chat)
+            .contains(&crate::domain::config::ai_config::ModelCapability::Chat)
         {
             return None;
         }
@@ -435,7 +417,7 @@ impl ChatService {
             let tools = build_agent_tools(
                 &self.capability_registry,
                 external_tools,
-                &self.app,
+                self.emitter.clone(),
                 self.pending_confirms.clone(),
             );
             let provider = Arc::new(AgentProvider::new(
@@ -588,7 +570,7 @@ impl ChatService {
                     })
                     .collect(),
             };
-            let _ = self.app.emit_to("chat", "blink://chat-skill-activated", &signal);
+            let _ = self.emitter.emit_to("chat", EventNames::CHAT_SKILL_ACTIVATED, serde_json::to_value(&signal).unwrap_or_default());
         }
 
         let task = tokio::spawn(async move {
@@ -612,10 +594,10 @@ impl ChatService {
                             Some(&preamble),
                         )
                         .await;
-                    let _ = service.app.emit_to(
-                        "chat",
-                        "blink://chat-context-status",
-                        context_status,
+let _ = service.emitter.emit_to(
+"chat",
+EventNames::CHAT_CONTEXT_STATUS,
+serde_json::to_value(&context_status).unwrap_or_default(),
                     );
 
                     // 0.12.9：移除时间注入到 user message 末尾——之前将
@@ -940,10 +922,9 @@ impl ChatService {
 ///
 /// 供 `tool_adapter` 在 emit dangerous confirm 时注入，前端按 request_id 校验事件归属。
 /// ChatService 未注册时返回 `(0, String::new())`——confirm 仍可工作，只是前端无法校验归属。
-pub fn current_request_context_from_app(app: &tauri::AppHandle) -> (u64, String) {
-    use tauri::Manager;
-    if let Some(cs) = app.try_state::<Arc<ChatService>>() {
-        cs.current_request_context().unwrap_or((0, String::new()))
+pub fn current_request_context_from_env(env: &dyn DomainEnv) -> (u64, String) {
+if let Some(cs) = env.chat_service() {
+cs.current_request_context().unwrap_or((0, String::new()))
     } else {
         (0, String::new())
     }

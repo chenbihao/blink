@@ -1,5 +1,8 @@
 //! 图标提取：从 .lnk / .exe 提取应用图标，编码为 PNG 字节。
 //!
+//! 0.14.6 §2.3：从 domain/search/icon.rs 迁入 infra/platform/——
+//! 整个文件本质属 infra（Win32 Shell/GDI 调用 + 缓存），不依赖 domain 类型。
+//!
 //! 用 `IShellItemImageFactory::GetImage` 取图标（原生支持高 DPI、lnk 目标失效兜底），
 //! 再经 GDI `GetDIBits` 拿 32 位 BGRA 像素，转 RGBA 后用 `png` crate 编码成标准 PNG。
 //!

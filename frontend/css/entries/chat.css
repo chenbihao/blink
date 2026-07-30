@@ -12,4 +12,12 @@
 @import '../components/button.css';
 @import '../components/spinner.css';
 @import '../components/voice-wave.css';
-@import '../views/chat.css';
+@import '../views/chat/layout.css';
+@import '../views/chat/sidebar.css';
+@import '../views/chat/header.css';
+@import '../views/chat/messages.css';
+@import '../views/chat/bubble.css';
+@import '../views/chat/tool-card.css';
+@import '../views/chat/signal.css';
+@import '../views/chat/composer.css';
+@import '../views/chat/popup.css';

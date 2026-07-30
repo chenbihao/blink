@@ -68,7 +68,7 @@ impl LocalSttEngine {
     ///
     /// 从 SttConfig 读取端口配置，检查 funasr-server 是否就绪。
     /// 如果服务未就绪，返回错误（提示用户在设置页启动服务）。
-    pub fn new(config: &crate::app::stt_config::SttConfig) -> Result<Self, String> {
+    pub fn new(config: &crate::domain::config::stt_config::SttConfig) -> Result<Self, String> {
         let port = config.local_engine.server_port;
         let model = config.local_engine.funasr_model.clone();
 

@@ -18,7 +18,6 @@
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use tauri::Manager;
 
 use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
@@ -86,10 +85,7 @@ impl Capability for SearchClipboardHistory {
             .map(|n| n as i64)
             .unwrap_or(30);
 
-        let pool = &ctx
-            .app_handle
-            .state::<crate::infra::data::DbPools>()
-            .history;
+        let pool = &ctx.env.db_pools().history;
 
         // 铁则 1：用 deadline 包裹 DB 查询
         let items = tokio::time::timeout_at(ctx.deadline_or_far_future(), async {

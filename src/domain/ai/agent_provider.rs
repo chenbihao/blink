@@ -37,7 +37,7 @@ use rig_core::streaming::{StreamedAssistantContent, StreamedUserContent, Streami
 use rig_core::tool::ToolDyn;
 use rig_core::wasm_compat::WasmCompatSend;
 
-use crate::app::ai_config::{ModelEntry, ProviderEntry, ProviderKind};
+use crate::domain::config::ai_config::{ModelEntry, ProviderEntry, ProviderKind};
 use std::sync::Arc;
 
 /// Anthropic API 要求 max_tokens 必填，若 model 层未配置则使用此默认值。

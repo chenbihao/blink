@@ -18,7 +18,6 @@
 use std::sync::Arc;
 
 use serde_json::Value;
-use tauri::Manager;
 
 use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
@@ -109,10 +108,13 @@ impl Capability for PluginCapabilityAdapter {
         ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError> {
         let plugin_id = self.plugin.id();
-        let settings = ctx
-            .app_handle
-            .state::<std::sync::Arc<super::engine::PluginEngine>>()
-            .get_settings(plugin_id);
+        let plugin_engine =
+            ctx.env
+                .plugin_engine()
+                .ok_or_else(|| CapabilityError::Internal {
+                    detail: "当前运行模式未初始化插件引擎".into(),
+                })?;
+        let settings = plugin_engine.get_settings(plugin_id);
 
         tracing::debug!(
             plugin = %plugin_id,

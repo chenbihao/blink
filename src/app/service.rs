@@ -43,7 +43,7 @@ pub struct AppContext {
     #[allow(dead_code)]
     pub action_registry: std::sync::Arc<crate::domain::execution::ActionRegistry>,
     /// 0.9.7 Capability 能力协议层（inventory 自动收集）。
-    /// Step 4 起 `build_aggregated_tools` 消费，AI tool_call 命中 Capability。
+    /// `build_capability_tools` 消费，AI tool_call 只命中 Capability。
     /// **运行时通过 `app.state::<Arc<CapabilityRegistry>>()` 访问**，AppContext 仅服务于 setup 期。
     #[allow(dead_code)]
     pub capability_registry: std::sync::Arc<crate::domain::capability::CapabilityRegistry>,
@@ -237,7 +237,11 @@ impl Service for HotkeyService {
                                 continue;
                             }
                         }
-                        if let Err(e) = registry.trigger(&key, &chord_cfg.bindings, &app).await {
+                        let env_arc = app
+                            .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
+                            .inner()
+                            .clone();
+                        if let Err(e) = registry.trigger(&key, &chord_cfg.bindings, env_arc.as_ref()).await {
                             tracing::warn!(%key, %e, "chord trigger 失败");
                         }
                     }

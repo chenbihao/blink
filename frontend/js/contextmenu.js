@@ -8,6 +8,7 @@ import { activateItem } from "./actions.js";
 import { openContainingFolder, openLnkTarget, resetItemHistory, runBuiltinAction, copyToClipboard, invoke, triggerChord, listChordActions } from "./api.js";
 import { retrigger } from "./search.js";
 import { t } from "./i18n/index.js";
+import { EVENTS } from "./event-names.js";
 
 /** 当前菜单数据（用于 Popup 点击时回调执行）。 */
 let currentItems = [];
@@ -68,7 +69,7 @@ export function init() {
 
   // 监听来自 Popup 窗口的菜单项点击事件
   import("./tauri.js").then(({ listen }) => {
-    listen("blink://context-menu-action", (event) => {
+    listen(EVENTS.CONTEXT_MENU_ACTION, (event) => {
       const actionId = event.payload;
       const item = currentItems[actionId];
       if (item && item.run && !item.separator) {
@@ -77,7 +78,7 @@ export function init() {
     });
 
     // 主窗 shown 时预拉取 chord 动作，右键时同步读缓存（无延迟）
-    listen("blink://shown", refreshChordActions);
+    listen(EVENTS.SHOWN, refreshChordActions);
   });
 }
 

@@ -54,11 +54,11 @@ use std::time::Duration;
 use rig_core::tool::ToolDyn;
 use rig_core::wasm_compat::WasmBoxedFuture;
 use serde_json::Value;
-use tauri::Emitter;
 use tokio::sync::{Mutex, oneshot};
 
 use crate::domain::capability::{Capability, CapabilityError, CapabilityRegistry, InvokeContext};
-use crate::domain::execution::DangerClass;
+use crate::domain::event::DomainEnv;
+use crate::domain::event_names::EventNames;
 
 // ── 常量 ─────────────────────────────────────────────────────────────────────
 
@@ -177,7 +177,7 @@ enum ConfirmOutcome {
 /// 闭环的正确性靠 `PendingConfirms` 的 register/resolve/discard 纯逻辑单测保证。
 async fn await_dangerous_confirm(
     pending: &PendingConfirms,
-    app: &tauri::AppHandle,
+    env: &dyn DomainEnv,
     confirm_id: u64,
     rx: oneshot::Receiver<bool>,
     tool_name: &str,
@@ -186,8 +186,8 @@ async fn await_dangerous_confirm(
     request_id: u64,
     conversation_id: &str,
 ) -> ConfirmOutcome {
-    emit_dangerous_confirm(
-        app,
+        emit_dangerous_confirm(
+            env,
         confirm_id,
         tool_name,
         tool_type,
@@ -217,7 +217,7 @@ async fn await_dangerous_confirm(
 async fn check_dangerous_confirm(
     is_dangerous: bool,
     pending: &PendingConfirms,
-    app: &tauri::AppHandle,
+    env: &dyn DomainEnv,
     tool_name: &str,
     tool_type: &'static str,
     args_value: &Value,
@@ -227,7 +227,7 @@ async fn check_dangerous_confirm(
     }
 
     let (req_id, conv_id) =
-        crate::domain::ai::chat_service::current_request_context_from_app(app);
+        crate::domain::ai::chat_service::current_request_context_from_env(env);
 
     // 对话级信任：用户已确认过的危险操作自动放行，不再弹窗
     if pending.is_trusted(&conv_id, tool_name).await {
@@ -243,7 +243,7 @@ async fn check_dangerous_confirm(
     let (confirm_id, rx) = pending.register().await;
     match await_dangerous_confirm(
         pending,
-        app,
+        env,
         confirm_id,
         rx,
         tool_name,
@@ -278,14 +278,9 @@ async fn check_dangerous_confirm(
 ///
 /// 避免滥用 `std::io::Error` 包装纯文本消息（io::Error 语义是 IO 失败，此处只是给 AI 的可读字符串）。
 /// 原始错误类型在 `tracing::warn!` 中已通过 `Display` 记录，AI 侧只需可读消息。
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
 struct ToolErrMsg(String);
-impl std::fmt::Display for ToolErrMsg {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-impl std::error::Error for ToolErrMsg {}
 
 /// 危险操作确认事件 payload。
 #[derive(serde::Serialize, Clone)]
@@ -309,7 +304,7 @@ struct ConfirmPayload {
 ///
 /// Phase 4：改用 `emit_to("chat")` 定向发送，不向主窗口和其他次级窗口广播。
 fn emit_dangerous_confirm(
-    app: &tauri::AppHandle,
+    env: &dyn DomainEnv,
     confirm_id: u64,
     tool_name: &str,
     tool_type: &'static str,
@@ -326,10 +321,10 @@ fn emit_dangerous_confirm(
         request_id,
         conversation_id: conversation_id.to_string(),
     };
-    if let Err(e) = app.emit_to(
-        tauri::EventTarget::window("chat"),
-        "blink://chat-confirm-action",
-        payload,
+    if let Err(e) = env.emit_to(
+        "chat",
+        EventNames::CHAT_CONFIRM_ACTION,
+        serde_json::to_value(&payload).unwrap_or_default(),
     ) {
         tracing::debug!(error = %e, "emit chat-confirm-action failed");
     }
@@ -340,7 +335,7 @@ fn emit_dangerous_confirm(
 /// 对话窗口 Capability invoke 的硬超时，对齐主窗口 `service.rs` 的 `slo_hard_timeout_ms`。
 /// `None` -> 用 `DEFAULT_TOOL_TIMEOUT_MS` 兜底（20s）。
 fn derive_tool_deadline() -> Option<std::time::Instant> {
-    let cfg = crate::app::ai_config::get_ai_config();
+    let cfg = crate::domain::config::ai_config::get_ai_config();
     let timeout_ms = cfg.slo_hard_timeout_ms.unwrap_or(DEFAULT_TOOL_TIMEOUT_MS);
     Some(std::time::Instant::now() + Duration::from_millis(timeout_ms as u64))
 }
@@ -358,7 +353,7 @@ fn derive_tool_deadline() -> Option<std::time::Instant> {
 pub struct CapabilityTool {
     cap: Arc<dyn Capability>,
     schema: crate::domain::capability::CapabilitySchema,
-    app_handle: tauri::AppHandle,
+    emitter: Arc<dyn DomainEnv>,
     pending: Arc<PendingConfirms>,
 }
 
@@ -366,14 +361,14 @@ impl CapabilityTool {
     /// 构造 CapabilityTool。
     pub fn new(
         cap: Arc<dyn Capability>,
-        app_handle: tauri::AppHandle,
+        emitter: Arc<dyn DomainEnv>,
         pending: Arc<PendingConfirms>,
     ) -> Self {
         let schema = cap.schema();
         Self {
             cap,
             schema,
-            app_handle,
+            emitter,
             pending,
         }
     }
@@ -383,8 +378,8 @@ impl CapabilityTool {
     /// `danger_class == Dangerous` 或 `schema.sensitive == true` 均触发确认弹窗。
     /// `sensitive` 标记的是读隐私数据的能力（如 `search_apps` / `search_clipboard_history`），
     /// 虽非"危险操作"但涉及隐私，AI 调用时同样需用户确认。
-    fn is_dangerous(&self) -> bool {
-        matches!(self.cap.danger_class(), DangerClass::Dangerous) || self.schema.sensitive
+    fn requires_confirmation(&self) -> bool {
+        self.cap.requires_ai_confirmation()
     }
 }
 
@@ -415,9 +410,9 @@ impl ToolDyn for CapabilityTool {
 
             // 危险操作确认（四域墙 + 闭环）
             if let Some(result) = check_dangerous_confirm(
-                self.is_dangerous(),
+                self.requires_confirmation(),
                 &self.pending,
-                &self.app_handle,
+                self.emitter.as_ref(),
                 self.cap.id(),
                 "capability",
                 &args_value,
@@ -429,7 +424,7 @@ impl ToolDyn for CapabilityTool {
 
             // 构造 InvokeContext（P1.3: 从 slo_hard_timeout_ms 派生 deadline）
             let ctx = InvokeContext {
-                app_handle: &self.app_handle,
+                env: self.emitter.capability_env(),
                 deadline: derive_tool_deadline(),
             };
 
@@ -481,7 +476,7 @@ fn capability_error_to_string(e: CapabilityError) -> String {
 /// - `cap_registry`: Capability 注册表
 /// - `external_tools`: 外部 tool（如 MCP tool），直接进 tool 池，不经过 CapabilityRegistry
 ///   （0.13.0 §9.3：统一外部 tool 入口，为 MCP tool 留对称性）
-/// - `app_handle`: Tauri AppHandle，用于构造 InvokeContext + emit 确认事件
+/// - `emitter`: DomainEnv，用于构造 InvokeContext + emit 确认事件
 /// - `pending`: 危险确认注册表（`Arc<PendingConfirms>`，由 main.rs manage，对话窗口共享）
 ///
 /// **返回**：所有可用的 tool（CapabilityTool + external_tools）
@@ -494,14 +489,14 @@ fn capability_error_to_string(e: CapabilityError) -> String {
 pub fn build_agent_tools(
     cap_registry: &CapabilityRegistry,
     external_tools: Vec<Box<dyn ToolDyn>>,
-    app_handle: &tauri::AppHandle,
+    emitter: Arc<dyn DomainEnv>,
     pending: Arc<PendingConfirms>,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
 
     // 1. 包装所有 Capability
     for (_id, cap) in cap_registry.entries() {
-        let tool = CapabilityTool::new(cap, app_handle.clone(), pending.clone());
+        let tool = CapabilityTool::new(cap, emitter.clone(), pending.clone());
         tools.push(Box::new(tool));
     }
 
@@ -690,14 +685,59 @@ mod tests {
         }
     }
 
-    // ── is_dangerous 逻辑测试（不需要 AppHandle）──────────────────────────
+    // ── Capability 统一确认策略（不需要 AppHandle）──────────────────────
 
-    /// 测试 `DangerClass` 匹配逻辑--`is_dangerous` 纯粹基于 `danger_class()` 返回值。
-    /// 这里直接测 `DangerClass` 的匹配，不需要构造 CapabilityTool（避 AppHandle）。
+    struct ConfirmationCap {
+        sensitive: bool,
+        danger: crate::domain::execution::DangerClass,
+    }
+
+    #[async_trait::async_trait]
+    impl Capability for ConfirmationCap {
+        fn id(&self) -> &str {
+            "confirmation_test"
+        }
+
+        fn schema(&self) -> CapabilitySchema {
+            CapabilitySchema {
+                sensitive: self.sensitive,
+                ..CapabilitySchema::empty("confirmation_test", "test")
+            }
+        }
+
+        fn danger_class(&self) -> crate::domain::execution::DangerClass {
+            self.danger
+        }
+
+        async fn invoke(
+            &self,
+            _args: Value,
+            _ctx: &InvokeContext<'_>,
+        ) -> Result<CapabilityResult, CapabilityError> {
+            unreachable!("确认策略测试不执行 capability")
+        }
+    }
+
     #[test]
-    fn dangerous_class_matches_dangerous() {
-        assert!(matches!(DangerClass::Dangerous, DangerClass::Dangerous));
-        assert!(!matches!(DangerClass::Safe, DangerClass::Dangerous));
+    fn capability_confirmation_covers_dangerous_and_sensitive() {
+        use crate::domain::execution::DangerClass;
+
+        let safe = ConfirmationCap {
+            sensitive: false,
+            danger: DangerClass::Safe,
+        };
+        let sensitive = ConfirmationCap {
+            sensitive: true,
+            danger: DangerClass::Safe,
+        };
+        let dangerous = ConfirmationCap {
+            sensitive: false,
+            danger: DangerClass::Dangerous,
+        };
+
+        assert!(!safe.requires_ai_confirmation());
+        assert!(sensitive.requires_ai_confirmation());
+        assert!(dangerous.requires_ai_confirmation());
     }
 
     // ── CapabilityRegistry::entries 测试 ──────────────────────────────────

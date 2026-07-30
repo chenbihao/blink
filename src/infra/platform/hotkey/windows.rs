@@ -230,7 +230,7 @@ fn apply_altgr_correction(mask: u16) -> u16 {
 }
 
 /// 是否「单独修饰键」配置(modifiers 空 + key 是单修饰键,如右 Alt 单击)。纯函数,可单测。
-fn is_standalone_config(config: &crate::app::config::HotkeyConfig) -> bool {
+fn is_standalone_config(config: &crate::domain::config::HotkeyConfig) -> bool {
     config.modifiers.is_empty() && super::recorder::is_standalone_modifier_key(&config.key)
 }
 
@@ -301,7 +301,7 @@ fn current_modifier_mask() -> u16 {
 
 /// 当前修饰键物理态是否满足配置(在主键 down/up 边界调用)。
 /// standalone 配置无需额外修饰键(主键本身即修饰键),直接 true。
-fn modifiers_satisfied(config: &crate::app::config::HotkeyConfig) -> bool {
+fn modifiers_satisfied(config: &crate::domain::config::HotkeyConfig) -> bool {
     if is_standalone_config(config) {
         return true;
     }
@@ -694,7 +694,7 @@ fn feed_recorder(vk: u32, wparam: WPARAM) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::config::HotkeyConfig;
+    use crate::domain::config::HotkeyConfig;
 
     fn cfg(modifiers: &[&str], key: &str) -> HotkeyConfig {
         HotkeyConfig {

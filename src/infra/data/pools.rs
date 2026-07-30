@@ -200,7 +200,7 @@ async fn init_cache_schema(pool: &SqlitePool) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     // icon_cache 由 icon::init 创建
-    crate::domain::search::icon::init(pool)
+    crate::infra::platform::icon::init(pool)
         .await
         .map_err(|e| e.to_string())?;
 

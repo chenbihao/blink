@@ -9,10 +9,8 @@ mod manifest;
 mod process;
 mod protocol;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-
-use tauri::{AppHandle, Manager};
 
 pub use capability::{PluginCapabilityAdapter, plugin_tool_id};
 pub use engine::PluginEngine;
@@ -62,27 +60,28 @@ pub trait PluginSettingResolver: Send + Sync {
 /// builtin 插件根目录。
 /// - debug:仓库内 `plugins/builtin`(开发期直接用 target 下编译出的插件 exe)。
 /// - release:app 资源目录下的 `plugins/builtin`。
-fn builtin_plugins_dir(app: &AppHandle) -> PathBuf {
+///
+/// 0.14.6 §2.2：`AppHandle` 参数移除，由调用方（main.rs）解析路径后传入。
+pub fn builtin_plugins_dir() -> PathBuf {
     if cfg!(debug_assertions) {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("plugins")
             .join("builtin")
     } else {
-        app.path()
-            .resource_dir()
-            .map(|d| d.join("plugins").join("builtin"))
-            .unwrap_or_else(|_| PathBuf::from("plugins").join("builtin"))
+        PathBuf::from("plugins").join("builtin")
     }
 }
 
 /// 加载所有 builtin 插件:扫描 `<dir>/*/manifest.json` → 解析 → 过滤 query 能力。
 /// 失败的单个插件跳过(降级,不影响其余),记日志。返回懒启动的 PluginHandle。
 /// proxy=(http_proxy, https_proxy)，进程启动时 env 注入，ureq/reqwest 原生读取。
+///
+/// 0.14.6 §2.2：不再接收 `&AppHandle`，改为接收 `plugins_dir: &Path`。
 pub fn load_builtin_plugins(
-    app: &AppHandle,
+    plugins_dir: &Path,
     proxy: Option<(String, String)>,
 ) -> Vec<Arc<PluginHandle>> {
-    let dir = builtin_plugins_dir(app);
+    let dir = plugins_dir.to_path_buf();
     let Ok(read_dir) = std::fs::read_dir(&dir) else {
         tracing::debug!(dir = %dir.display(), "无 builtin 插件目录,跳过");
         return Vec::new();

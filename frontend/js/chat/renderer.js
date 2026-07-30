@@ -9,6 +9,7 @@
 /* global marked, DOMPurify */
 
 import { escapeText } from "./utils.js";
+import { invoke } from "../tauri.js";
 
 /** @type {boolean} marked 和 DOMPurify 是否可用 */
 let ready = false;
@@ -114,7 +115,6 @@ export function bindLinkOpener() {
     if (!/^(?:https?|mailto):/i.test(href)) return;
     e.preventDefault();
     // 用后端 open_url command（与设置页 openExternalUrl 一致）
-    const invoke = window.__TAURI__?.core?.invoke ?? window.__TAURI__?.invoke;
     if (invoke) {
       invoke("open_url", { url: href }).catch((err) => {
         console.error("[chat] open_url 失败:", err);

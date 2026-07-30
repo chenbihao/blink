@@ -23,7 +23,7 @@ use std::time::Instant;
 
 use serde::Serialize;
 
-use crate::app::config::ContextConfig;
+use crate::domain::config::ContextConfig;
 
 /// 文本类环境项的来源标签（0.8.3 收尾 · 一等公民）。
 ///

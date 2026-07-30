@@ -399,7 +399,7 @@ pub struct ServerStartParams {
 impl ServerStartParams {
     /// 从 SttConfig 构建（读取配置 + 写热词文件）。
     pub fn from_config() -> Result<Self, String> {
-        let config = crate::app::stt_config::get_stt_config();
+        let config = crate::domain::config::stt_config::get_stt_config();
         let local = &config.local_engine;
 
         // 释放 Python 脚本

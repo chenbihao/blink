@@ -93,18 +93,18 @@ impl ChatMessage {
     }
 }
 
-/// Provider 返回的工具调用——直接喂给 `ActionContext::from_arguments()`。
+/// Provider 返回的工具调用——参数交给对应 Capability 解析。
 ///
 /// `arguments` 是 `serde_json::Value` 而不是 struct——因为不同 tool 的参数结构
-/// 不同,由 `Action::from_arguments` 各自解析。
+/// 不同，由 `Capability::invoke` 各自解析。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[allow(dead_code)]
 pub struct ToolCall {
     /// Provider 生成的调用 id(用于 Tool 消息关联)
     pub id: String,
-    /// 对应的 `Action::id()`——直接查 `ActionRegistry`
+    /// 对应的 `Capability::id()`——只查 `CapabilityRegistry`
     pub name: String,
-    /// JSON Object,直接 `ActionContext { arguments: this.into() }`
+    /// JSON Object，直接作为 `Capability::invoke` 的 args。
     pub arguments: serde_json::Value,
 }
 

@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use tauri::Manager;
 
 use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
@@ -98,8 +97,8 @@ impl Capability for SearchFiles {
 
         // 从 SQLite 加载用户真实 FileSearchConfig（而非默认值）。
         // 每次 invoke 都加载——SQLite KV 查询快（<1ms），且保证配置热更新生效。
-        let pool = &ctx.app_handle.state::<crate::infra::data::DbPools>().config;
-        let mut fs_config = crate::app::config::get_file_search_config(&pool).await;
+        let pool = &ctx.env.db_pools().config;
+        let mut fs_config = crate::domain::config::get_file_search_config(&pool).await;
         // AI 可通过 args 覆盖 max_results
         if let Some(max) = args.get("max_results").and_then(Value::as_u64) {
             fs_config.max_results = max as u32;

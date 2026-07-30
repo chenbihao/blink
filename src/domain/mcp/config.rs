@@ -157,26 +157,17 @@ impl McpServerConfigStore {
 }
 
 /// 配置操作错误。
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum McpConfigError {
+    #[error("MCP 配置反序列化失败: {0}")]
     Deserialize(String),
+    #[error("MCP 配置序列化失败: {0}")]
     Serialize(String),
+    #[error("MCP 配置数据库错误: {0}")]
     Db(String),
+    #[error("未找到 MCP server: {0}")]
     NotFound(String),
 }
-
-impl std::fmt::Display for McpConfigError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Deserialize(msg) => write!(f, "MCP 配置反序列化失败: {msg}"),
-            Self::Serialize(msg) => write!(f, "MCP 配置序列化失败: {msg}"),
-            Self::Db(msg) => write!(f, "MCP 配置数据库错误: {msg}"),
-            Self::NotFound(name) => write!(f, "未找到 MCP server: {name}"),
-        }
-    }
-}
-
-impl std::error::Error for McpConfigError {}
 
 // ── 单测 ───────────────────────────────────────────────────────────────────────
 

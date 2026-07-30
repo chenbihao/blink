@@ -53,7 +53,7 @@ use rig_core::message::{ToolCall as RigToolCall, ToolFunction as RigToolFunc};
 use rig_core::streaming::StreamedAssistantContent as RigStreamChunk;
 use tokio::sync::mpsc;
 
-use crate::app::ai_config::{CustomParam, ProviderKind};
+use crate::domain::config::ai_config::{CustomParam, ProviderKind};
 use crate::domain::ai::message::{CompletionRequest, CompletionResponse, Role, ToolCall, Usage};
 use crate::domain::ai::provider::{AIError, AIProvider, StreamChunk};
 use crate::infra::platform::secret::SecretString;

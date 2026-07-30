@@ -48,8 +48,7 @@
 | **0.11** | [0.11-plugin-ai-toolchain.md](./phases/0.11-plugin-ai-toolchain.md) | 插件通信契约重设计 + AI toolchain + 截图标注 + OCR word 级 + 图上翻译 | ✅ |
 | **0.12** | [0.12-ai-ecosystem.md](./phases/0.12-ai-ecosystem.md) | AI 能力架构(对话窗口 + Alt+Q + DB 四层 + Provider 统一 + 多对话 + 分组) | ✅ |
 | **0.13** | [0.13-ai-capability-expansion.md](./phases/0.13-ai-capability-expansion.md) | 能力扩展(MCP 双向 + CLI + token 压缩 + 记忆 FTS5 + Skill) | ✅ |
-| **0.14** | [0.14-capability-protocol-refactor.md](./phases/0.14-capability-protocol-refactor.md) | 能力协议重构(Capability/Action 边界钉死 + Cap 协议分层 + 投影引擎收敛) | 📋 规划中 |
-| **0.14.6** | [0.14.6-architecture-cleanup.md](./phases/0.14.6-architecture-cleanup.md) | 架构清理与工程债收敛(分层剥离 + Schema/Error/事件收敛 + 文件拆分)——0.14 延续子版本 | 📋 规划中 |
+| **0.14** | [0.14-capability-protocol-refactor.md](./phases/0.14-capability-protocol-refactor.md) | 能力协议与架构收敛(Capability/Action 边界 + Cap 协议/投影 + 分层与工程债清理) | ✅ |
 | **0.20** | [0.20-ai-vector-moat.md](./phases/0.20-ai-vector-moat.md) | 能力扩展向量版(zvec + 记忆向量召回 + RAG + AI 生成 Skill) | 📋 规划中 |
 
 > **非版本档案**：[roadmap.md](./roadmap.md)（0.21+ 前瞻方向调研）；ADR-001（Agent 后端策略）已并入 [spec-architecture §A10](./specs/spec-architecture.md)。
@@ -69,7 +68,7 @@
 | 0.11.x | 插件 AI toolchain + 截图标注 + OCR + 图上翻译 | ✅ |
 | 0.12.x | AI 能力架构(对话窗口 + DB 四层 + 多对话 + 分组) | ✅ |
 | 0.13.x | 能力扩展(MCP 双向 + CLI + 记忆召回 + Skill) | ✅ |
-| 0.14.x | 能力协议重构(Capability/Action 边界 + Cap 协议分层 + 投影收敛) + 0.14.6 架构清理与工程债收敛 | 📋 规划中 |
+| 0.14.x | 能力协议重构(Capability/Action 边界 + Cap 协议分层 + 投影收敛) + 架构清理与工程债收敛 | ✅ |
 | 0.16-0.19 | 待规划空间 | 🔮 候选 |
 | 0.20.x | 能力扩展向量版(zvec + 记忆向量召回 + RAG) | 📋 规划中 |
 | 0.21+ | 候选：外部 agent subagent / 事实记忆 / proactivity | 🔮 候选 |

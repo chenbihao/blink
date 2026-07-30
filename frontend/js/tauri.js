@@ -27,6 +27,28 @@ export function listen(event, handler) {
   return Promise.resolve(() => {});
 }
 
+// ── Tauri 原生 API 桥接（0.14.6 §3.4：收敛 __TAURI__ 绕过）────────────────────
+
+/**
+ * 打开保存文件对话框（Tauri `dialog.save()`）。
+ * 返回选中的文件路径，用户取消时返回 null。
+ */
+export async function saveDialog(opts) {
+  const save = TAU?.dialog?.save;
+  if (typeof save !== "function") {
+    throw new Error("保存对话框不可用");
+  }
+  return save(opts);
+}
+
+/**
+ * 获取当前 Tauri 窗口对象（Tauri v2 `window.getCurrentWindow()`）。
+ * 用于 minimize / maximize / close 等窗口操作。
+ */
+export function getCurrentWindow() {
+  return TAU?.window?.getCurrentWindow?.();
+}
+
 // ── 自定义弹窗（替代 Tauri dialog.ask / dialog.message）──────────────────────
 // 系统原生弹框样式与应用主题不搭，改为自绘 HTML 弹框，统一视觉风格。
 // 复用 .modal-overlay 基础样式 + .confirm-dialog 专属样式。

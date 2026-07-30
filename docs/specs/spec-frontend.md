@@ -195,10 +195,12 @@
 ### 6.2 单文件行数阈值
 
 - 目标：单文件不超过 **~1000 行**
-- 当前臃肿文件（待拆，见 phases/0.14.6 §四）：
-  - `frontend/js/chord-screenshot.js`（3088 行）→ 按职责拆：选区绘制/标注模式/OCR 预热/overlay 翻译/工具栏/钉图保存
-  - `frontend/js/settings/tabs/ai.js`（2698 行）→ 按 sub-domain 拆：provider 渲染/模型编辑 modal/tier 路由/preset 目录/拉模型 popover
-  - `frontend/css/views/chat.css`（3039 行）→ 按组件拆：消息气泡/sidebar/composer/工具卡片/信号消息
+- 0.14 已形成的拆分范式（见 `phases/0.14 §九`）：
+  - 截图 overlay：`chord-screenshot.js` 作为入口，职责下沉到 `ss-*` 模块
+  - AI 设置：`settings/tabs/ai.js` 作为入口，子域下沉到 `settings/tabs/ai/*`
+  - 对话样式：`css/entries/chat.css` 作为入口，组件样式下沉到 `css/views/chat/*`
+- 入口文件只负责装配、初始化与稳定导出；拆分时必须保留自定义协议、IPC、事件名和加载顺序，不得臆造新的后端 command
+- 历史 `style.display` 存量尚未清零；拆分完成不等于样式债清零，后续按触达范围迁移为 class
 
 ### 6.3 落地检查清单（每次写前端代码自问）
 

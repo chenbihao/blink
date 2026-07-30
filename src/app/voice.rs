@@ -10,9 +10,9 @@
 //! HoldRelease 事件 → stop_recording()
 //!   → stop AudioCapture
 //!   → SttEngine::finalize() → 最终文本
-//!   → G1: emit "blink://chord-fill-query"(文本)
+//!   → G1: emit EventNames::CHORD_FILL_QUERY(文本)
 //!     G2: inject_text(文本)
-//!     G3: emit "blink://voice-partial"(target="chat", 文本)
+//!     G3: emit EventNames::VOICE_PARTIAL(target="chat", 文本)
 //! ```
 //!
 //! ## G1/G2/G3 区分
@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex};
 
 use tauri::{Emitter, Manager};
 
+use crate::domain::event_names::EventNames;
 use crate::domain::stt::SttEngine;
 use crate::infra::platform;
 use crate::infra::platform::audio::{AudioCapture, AudioFormat};
@@ -333,7 +334,7 @@ impl VoiceService {
                 // 通知前端录音已开始（G1 隐藏 Ghost overlay / G2 overlay 已显示 / G3 chat 麦克风按钮切换态）
                 let target_str = session.target.as_str();
                 let _ = self.app.emit(
-                    "blink://voice-recording-start",
+                    EventNames::VOICE_RECORDING_START,
                     serde_json::json!({ "target": target_str }),
                 );
 
@@ -349,7 +350,7 @@ impl VoiceService {
                         let level = compute_rms(&chunk.samples);
                         let target_str = target.as_str();
                         let _ = app.emit(
-                            "blink://voice-level",
+                            EventNames::VOICE_LEVEL,
                             serde_json::json!({
                                 "level": level,
                                 "target": target_str,
@@ -371,7 +372,7 @@ impl VoiceService {
                                         // 只在有内容时 emit
                                         if !confirmed.is_empty() || !preview.is_empty() {
                                             let _ = app.emit(
-                                                "blink://voice-partial",
+                                                EventNames::VOICE_PARTIAL,
                                                 serde_json::json!({
                                                     "confirmed": confirmed,
                                                     "preview": preview,
@@ -382,7 +383,7 @@ impl VoiceService {
                                     } else {
                                         // 纯文本（真流式 / 非流式引擎的兼容路径）
                                         let _ = app.emit(
-                                            "blink://voice-partial",
+                                            EventNames::VOICE_PARTIAL,
                                             serde_json::json!({
                                                 "text": text,
                                                 "target": target_str,
@@ -430,7 +431,7 @@ impl VoiceService {
                 // 仍需清除标志 + 清理 UI 状态。
                 crate::infra::platform::hotkey::set_voice_recording(false);
                 platform::window::hide_voice_overlay(&self.app);
-                let _ = self.app.emit("blink://voice-recording-end", ());
+                let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
                 return;
             }
 
@@ -490,7 +491,7 @@ impl VoiceService {
             if target == VoiceTarget::ForegroundApp {
                 platform::window::hide_voice_overlay(&self.app);
             }
-            let _ = self.app.emit("blink://voice-recording-end", ());
+            let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
             return;
         }
 
@@ -499,11 +500,11 @@ impl VoiceService {
                 // G1: 填进 #query(复用 chord-fill-query 链路)
                 // payload 必须是 serde_json::Value::String,与 chord 模块 pattern 一致
                 let _ = self.app.emit(
-                    "blink://chord-fill-query",
+                    EventNames::CHORD_FILL_QUERY,
                     serde_json::Value::String(final_text.clone()),
                 );
                 tracing::info!(text = %final_text, "G1: 文字已 emit chord-fill-query");
-                let _ = self.app.emit("blink://voice-recording-end", ());
+                let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
             }
             VoiceTarget::ForegroundApp => {
                 // G2: 注入前台应用
@@ -524,20 +525,20 @@ impl VoiceService {
                     }
                     // 注入完成后隐藏 overlay + emit end
                     platform::window::hide_voice_overlay(&app);
-                    let _ = app.emit("blink://voice-recording-end", ());
+                    let _ = app.emit(EventNames::VOICE_RECORDING_END, ());
                 });
             }
             VoiceTarget::ChatWindow => {
                 // G3: 识别结果 emit 到 chat 窗口（前端监听 voice-partial target="chat"）
                 let _ = self.app.emit(
-                    "blink://voice-partial",
+                    EventNames::VOICE_PARTIAL,
                     serde_json::json!({
                         "text": final_text.clone(),
                         "target": "chat",
                     }),
                 );
                 tracing::info!(text = %final_text, "G3: 文字已 emit voice-partial(chat)");
-                let _ = self.app.emit("blink://voice-recording-end", ());
+                let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
             }
         }
     }
@@ -579,7 +580,7 @@ impl VoiceService {
         platform::window::hide_voice_overlay(&self.app);
 
         // 通知前端录音已结束（G1 隐藏语音指示器 + 恢复 Ghost overlay / G3 chat 麦克风恢复）
-        let _ = self.app.emit("blink://voice-recording-end", ());
+        let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
     }
 
     /// 向用户反馈语音状态（如"模型加载中"），非错误性质。
@@ -596,7 +597,7 @@ impl VoiceService {
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 let _ = app_clone.emit(
-                    "blink://voice-status",
+                    EventNames::VOICE_STATUS,
                     serde_json::json!({
                         "message": msg_clone,
                         "target": target.as_str(),
@@ -606,7 +607,7 @@ impl VoiceService {
         } else {
             // G1/G3: 直接 emit
             let _ = self.app.emit(
-                "blink://voice-status",
+                EventNames::VOICE_STATUS,
                 serde_json::json!({
                     "message": message,
                     "target": target.as_str(),
@@ -628,7 +629,7 @@ impl VoiceService {
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 let _ = app_clone.emit(
-                    "blink://voice-error",
+                    EventNames::VOICE_ERROR,
                     serde_json::json!({
                         "message": msg_clone,
                         "target": target.as_str(),
@@ -641,7 +642,7 @@ impl VoiceService {
         } else {
             // G1/G3: 直接 emit（窗口已可见，事件就绪）
             let _ = self.app.emit(
-                "blink://voice-error",
+                EventNames::VOICE_ERROR,
                 serde_json::json!({
                     "message": message,
                     "target": target.as_str(),

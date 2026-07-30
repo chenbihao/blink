@@ -23,8 +23,8 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tauri::Emitter;
 
+use crate::domain::event_names::EventNames;
 use crate::domain::plugin::LocalizableText;
 
 // ── 0.10.7：chord 键位配置类型（域层定义，app/config 引用）────────────────────
@@ -315,7 +315,7 @@ impl ChordRegistry {
         &self,
         key: &str,
         bindings: &ChordBindings,
-        app: &tauri::AppHandle,
+        env: &dyn crate::domain::event::DomainEnv,
     ) -> Result<ChordSurface, String> {
         let lower = key.to_lowercase();
         let action = self
@@ -326,7 +326,7 @@ impl ChordRegistry {
         let surface = action.surface();
         tracing::info!(id = action.id(), key = %lower, surface = ?surface, "chord trigger");
 
-        let cx = crate::domain::execution::ActionContext::new(app, None);
+        let cx = crate::domain::execution::ActionContext::new(env, None);
         let outcome = action.execute(&cx).await.map_err(|e| e.to_string())?;
         // 按 outcome 分派副作用
         match outcome {
@@ -336,7 +336,7 @@ impl ChordRegistry {
                 tracing::debug!(len = text.len(), "chord action Copy outcome（当前未消费）");
             }
             crate::domain::execution::ActionOutcome::Emit { event, payload } => {
-                app.emit(&event, payload).map_err(|e| e.to_string())?;
+                env.emit(&event, payload).map_err(|e| e.to_string())?;
             }
             crate::domain::execution::ActionOutcome::Open { path } => {
                 if let Err(e) = open::that(&path) {
@@ -493,20 +493,15 @@ impl crate::domain::execution::Action for ChatAction {
         crate::domain::execution::DangerClass::Safe
     }
 
-    /// 打开 UI 入口不是给 AI 自主调用的 tool--避免对话 Agent 递归打开自己。
-    fn ai_eligible(&self) -> bool {
-        false
-    }
-
     async fn execute(
         &self,
         cx: &crate::domain::execution::ActionContext<'_>,
     ) -> Result<crate::domain::execution::ActionOutcome, crate::domain::execution::ExecError> {
         // 看门狗按 PID 判前台；chat 与主窗同进程，不能指望失焦自动隐藏主窗。
         // 先确认 chat 已创建并聚焦，再隐藏主窗；创建失败时保留主窗，避免用户失去入口。
-        crate::infra::platform::window::show_chat_window(cx.app_handle)
+        cx.env.show_chat_window()
             .map_err(crate::domain::execution::ExecError::Runtime)?;
-        crate::infra::platform::window::hide(cx.app_handle, "chat_chord");
+        cx.env.hide_main_window("chat_chord");
         Ok(crate::domain::execution::ActionOutcome::Nop)
     }
 }
@@ -566,15 +561,10 @@ impl crate::domain::execution::Action for ScreenshotAction {
         let t0 = std::time::Instant::now();
 
         // 1. 隐藏主窗——走 cloak 路径（无 Win11 fade 动画，瞬间从桌面消失）
-        crate::infra::platform::window::hide_for_screenshot(cx.app_handle);
+        cx.env.hide_for_screenshot();
 
         // 2. 等 DWM 完成一次不含主窗的新合成（DwmFlush + IsVisible 轮询，通常 <20ms）
-        let app_handle = cx.app_handle.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::infra::platform::window::wait_frame_after_hide(&app_handle);
-        })
-        .await
-        .ok();
+        cx.env.wait_frame_after_hide().await;
 
         // 3. 截屏存 SESSION（此刻桌面上没有 blink，BitBlt 不会拍到自己）。
         //    Win32 阻塞调用（BitBlt + GetDIBits 合计 ~50-100ms 全屏）—— 走 spawn_blocking
@@ -586,16 +576,16 @@ impl crate::domain::execution::Action for ScreenshotAction {
             })?
             .map_err(|e| {
                 // 截屏失败也要撤销 cloak,避免主窗永远隐形
-                crate::infra::platform::window::unhide_after_screenshot(cx.app_handle);
+                cx.env.unhide_after_screenshot();
                 crate::domain::execution::ExecError::Runtime(e)
             })?;
 
         // 4. 撤销 cloak（主窗保持 hidden 状态，只是解除 DWM 雾化标志）——放在建 overlay
         //    之前：万一建 overlay 失败也不会残留 cloak；主窗不 show 用户看不到差别
-        crate::infra::platform::window::unhide_after_screenshot(cx.app_handle);
+        cx.env.unhide_after_screenshot();
 
         // 5. 建 overlay + 按 meta 精确定位（物理像素）
-        crate::infra::platform::window::show_screenshot_overlay(cx.app_handle, meta).map_err(
+        cx.env.show_screenshot_overlay(&meta).map_err(
             |e| {
                 crate::infra::platform::screenshot::end_session();
                 crate::domain::execution::ExecError::Runtime(e)
@@ -661,10 +651,10 @@ impl crate::domain::execution::Action for ClipboardHistoryAction {
         cx: &crate::domain::execution::ActionContext<'_>,
     ) -> Result<crate::domain::execution::ActionOutcome, crate::domain::execution::ExecError> {
         // 主窗 show + 焦点（同步）
-        crate::infra::platform::window::invoke(cx.app_handle);
+        cx.env.invoke_main_window();
         // 返回 Emit outcome，由 ChordRegistry::trigger 负责实际 emit
         Ok(crate::domain::execution::ActionOutcome::Emit {
-            event: "blink://chord-fill-query".to_string(),
+            event: EventNames::CHORD_FILL_QUERY.to_string(),
             payload: serde_json::Value::String("剪贴板 ".to_string()),
         })
     }
@@ -727,14 +717,4 @@ mod tests {
         assert_eq!(chat["surface"], "default");
     }
 
-    #[test]
-    fn chat_action_is_not_exposed_to_agent_tool_pool() {
-        let registry = build_default_registry();
-        let chat = registry
-            .actions
-            .iter()
-            .find(|action| action.id() == "chat")
-            .unwrap();
-        assert!(!chat.ai_eligible());
-    }
 }

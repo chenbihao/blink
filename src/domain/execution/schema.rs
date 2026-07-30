@@ -1,63 +1,17 @@
-//! 统一能力描述 Schema（0.9.0 §3.2）。
+//! Execution 域 Schema（0.14.6 §3.1 收敛后）。
 //!
-//! 把 builtin / 插件 /(0.11) MCP / skill 四种能力源投影到同一份 tool 描述。
-//! 对齐 **OpenAI function calling / MCP tool schema / rig `ToolDefinition`**。
+//! `ActionSchema` 已收敛为 `ToolSchema` 的 type alias——三字段 + `to_rig_tool()`
+//! 统一在 `domain::schema::ToolSchema`，rig 触点从 2 处收敛到 1 处。
 //!
-//! **中间层的目的**：Action trait 不直接依赖 rig 类型——rig 每月 breaking，
-//! 中间层能把冲击面框在 `to_rig_tool()` 一个方法里。
-//!
-//! **danger_class 的位置**：不放在 schema 里，放在 `Action::danger_class()`。
-//! 理由：danger 是"执行时是否弹确认"的属性，不是"传给模型的描述"的属性——
-//! 送到 LLM 的 schema 不需要暴露内部安全等级。
-//!
-//! **0.9.0 定型，0.9.2 才真被 AI 路由消费**——现在只作为 Action trait 的能力自述。
+//! `DangerClass` 保留在此（安全枚举只有一份，Capability 复用它）。
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 
-/// 动作参数 JSON Schema（对齐 OpenAI function calling / MCP tool schema）。
+/// 动作参数 Schema = `ToolSchema`（0.14.6 §3.1 合并）。
 ///
-/// 三字段严格对齐 `rig::completion::ToolDefinition`——投影通过 `to_rig_tool()`
-/// 完成，不引入任何解释层。
-///
-/// **`allow(dead_code)`**:0.9.0 Phase 2 定义,通过 `Action::schema()` 由 12 个 builtin
-/// 各自返回。0.9.1 起被 AI 路径消费(`to_rig_tool()` 送入 LLM)。
-/// 中间态标记不影响运行时行为,0.9.2 移除。
-#[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ActionSchema {
-    /// 唯一标识（与 `Action::id()` 一致）。传给模型时作为 tool name。
-    pub name: String,
-    /// 人类可读描述，直接送入 LLM。空字符串合法（无参无描述动作，如系统命令）。
-    pub description: String,
-    /// JSON Schema Object，遵循 draft-07。无参动作是 `{"type":"object","properties":{}}`。
-    pub parameters: Value,
-}
-
-impl ActionSchema {
-    /// 构造无参 schema（12 个内置无参动作 / 未声明 parameters 的插件的 default）。
-    #[allow(dead_code)]
-    pub fn empty(name: impl Into<String>, description: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            description: description.into(),
-            parameters: json!({ "type": "object", "properties": {} }),
-        }
-    }
-
-    /// 投影到 rig 的 `ToolDefinition`——0.9.2 AI 路由消费入口。
-    ///
-    /// 本方法是**唯一**触碰 rig 类型的地方；rig 若破坏 `ToolDefinition` 结构，
-    /// 只需要改这里，Action trait 及全体实现零波及。
-    #[allow(dead_code)]
-    pub fn to_rig_tool(&self) -> rig_core::completion::ToolDefinition {
-        rig_core::completion::ToolDefinition {
-            name: self.name.clone(),
-            description: self.description.clone(),
-            parameters: self.parameters.clone(),
-        }
-    }
-}
+/// type alias 让所有 `ActionSchema { name, description, parameters }` 构造点零改动。
+/// `to_rig_tool()` / `empty()` / `Default` 全部来自 `ToolSchema`。
+pub type ActionSchema = crate::domain::schema::ToolSchema;
 
 /// 危险等级（0.9.0 §5.4 白名单铁则）。
 ///
@@ -66,9 +20,6 @@ impl ActionSchema {
 /// - `Dangerous`：不可逆 / 危险，**任何模式下都必须人机二次确认**（哪怕 Agent 窗口 tool loop）
 ///
 /// **默认 `Safe`**——`Action` trait default impl 返回它；Dangerous 动作必须显式 override。
-///
-/// **`allow(dead_code)`**:0.9.0 Phase 2 定义,通过 `Action::danger_class()` 由 12 个 builtin
-/// 显式返回。0.9.1 起被 AI 路径消费(§5.4 白名单铁则),0.9.2 移除 allow。
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DangerClass {
@@ -87,6 +38,7 @@ impl Default for DangerClass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn empty_schema_serializes_to_object_shape() {
@@ -95,7 +47,6 @@ mod tests {
 
         assert_eq!(json["name"], "open_settings");
         assert_eq!(json["description"], "打开设置");
-        // OpenAI function calling / MCP 都要求 parameters 是一个 JSON Schema Object
         assert_eq!(json["parameters"]["type"], "object");
         assert!(json["parameters"]["properties"].is_object());
     }
@@ -115,7 +66,6 @@ mod tests {
         };
         let rig_def = s.to_rig_tool();
 
-        // rig::completion::ToolDefinition 字段与 ActionSchema 一一对应
         assert_eq!(rig_def.name, "open_url");
         assert_eq!(rig_def.description, "用默认浏览器打开一个 URL");
         assert_eq!(rig_def.parameters["properties"]["url"]["type"], "string");
@@ -124,14 +74,11 @@ mod tests {
 
     #[test]
     fn danger_class_defaults_to_safe() {
-        // Action trait default impl 依赖此语义；改了 default 会破坏 §5.4 白名单铁则
         assert_eq!(DangerClass::default(), DangerClass::Safe);
     }
 
     #[test]
     fn danger_class_serializes_stable() {
-        // 用 externally tagged 的默认 serde 形式（"Safe" / "Dangerous"），
-        // 配置文件 / IPC 消息里的 danger_class 字段稳定
         assert_eq!(
             serde_json::to_string(&DangerClass::Safe).unwrap(),
             "\"Safe\""
@@ -144,7 +91,6 @@ mod tests {
 
     #[test]
     fn schema_roundtrip_through_json() {
-        // 用于跨 IPC 边界（0.9.2 前端渲染 tool call 候选面板会用到）
         let original = ActionSchema::empty("lock", "锁定电脑");
         let s = serde_json::to_string(&original).unwrap();
         let restored: ActionSchema = serde_json::from_str(&s).unwrap();

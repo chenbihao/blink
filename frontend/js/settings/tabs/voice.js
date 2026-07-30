@@ -13,6 +13,7 @@
  * - 模型：FunASR 自动管理（首次启动时从 ModelScope 自动下载）
  */
 import { invoke, listen, confirmDialog } from "../../tauri.js";
+import { EVENTS } from "../../event-names.js";
 import { t, onLangChange, getLang } from "../../i18n/index.js";
 
 /**
@@ -787,7 +788,7 @@ async function initFunasrEnv(config) {
   }
 
   // ── 监听 Python 环境安装进度 ──
-  listen("blink://python-env-progress", (event) => {
+  listen(EVENTS.PYTHON_ENV_PROGRESS, (event) => {
     const p = event.payload;
     if (!p) return;
 
@@ -838,13 +839,13 @@ async function initFunasrEnv(config) {
   }
 
   // ── 监听 funasr-server 日志输出 ──
-  listen("blink://funasr-server-log", (event) => {
+  listen(EVENTS.FUNASR_SERVER_LOG, (event) => {
     const line = event.payload?.line;
     if (line) appendLog(line);
   });
 
   // ── 监听服务状态事件 ──
-  listen("blink://funasr-server-status", (event) => {
+  listen(EVENTS.FUNASR_SERVER_STATUS, (event) => {
     const p = event.payload;
     if (!p) return;
 
@@ -1036,7 +1037,7 @@ function initAudioTest(config) {
     btn.textContent = audioTestActive ? t("voice.audio_test.stop") : t("voice.audio_test.start");
   });
 
-  listen("blink://audio-test-level", (event) => {
+  listen(EVENTS.AUDIO_TEST_LEVEL, (event) => {
     if (!audioTestActive) return;
     const level = event.payload?.level ?? 0;
     const pct = Math.max(0, Math.min(100, level * 100));

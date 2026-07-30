@@ -129,7 +129,7 @@ impl PseudoStreamingSttEngine {
     /// 创建伪流式 STT 引擎。
     ///
     /// 从 SttConfig 读取端口和模型配置，检查 funasr-server 是否就绪。
-    pub fn new(config: &crate::app::stt_config::SttConfig) -> Result<Self, String> {
+    pub fn new(config: &crate::domain::config::stt_config::SttConfig) -> Result<Self, String> {
         let port = config.local_engine.server_port;
         let model = config.local_engine.funasr_model.clone();
 

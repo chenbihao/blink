@@ -6,6 +6,7 @@
 import { queryEl } from "./dom.js";
 import { searchApps } from "./api.js";
 import { listen } from "./tauri.js";
+import { EVENTS } from "./event-names.js";
 import * as results from "./results.js";
 import * as ghost from "./ghost.js";
 
@@ -35,7 +36,7 @@ export function init() {
   // async lane 慢引擎完成后推送增量；校验 seq（防过期）。
   // 0.8.2：不再拦"空 query"——Context 触发（选区/剪贴板感知）会在空 query 下产生
   // 合法的插件增量结果（如翻译）。原护栏靠 seq/reset 已足够防隐藏后回填。
-  listen("blink://results", (event) => {
+  listen(EVENTS.RESULTS, (event) => {
     const payload = event.payload;
     if (!payload || payload.seq !== seq) return;
     results.merge(payload.items, payload.seq);
@@ -43,14 +44,14 @@ export function init() {
   });
 
   // 0.9.2 第二步:AI Dangerous 动作确认——后端 emit 确认请求,前端替换占位为确认卡片。
-  listen("blink://ai-confirm-action", (event) => {
+  listen(EVENTS.AI_CONFIRM_ACTION, (event) => {
     const p = event.payload;
     if (!p || p.seq !== seq) return;
     results.showAiConfirm(p);
   });
 
   // AI 流式 chunk——后端逐文本片段推送,前端增量更新 AI 结果项。
-  listen("blink://ai-stream", (event) => {
+  listen(EVENTS.AI_STREAM, (event) => {
     const p = event.payload;
     if (!p || p.seq !== seq) return;
     results.updateAiStream(p);

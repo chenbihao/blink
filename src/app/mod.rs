@@ -3,6 +3,7 @@
 pub mod ai_config;
 pub mod commands;
 pub mod config;
+pub mod domain_env; // 0.14.6 §2.2：TauriDomainEnv——DomainEnv trait 的 Tauri 实现
 pub mod service;
 pub mod stt_config;
 pub mod tray; // 系统托盘菜单构建 + 文案 i18n（运行时热切换）

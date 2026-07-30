@@ -30,33 +30,22 @@
 //! 0.10.4 起，真流式（WebSocket + Paraformer-streaming）已移除——
 //! 伪流式在准确率、标点、体积、CPU 友好度上全面优于真流式，且 Python 侧零改动。
 
-use std::fmt;
-
 // ── 错误类型 ─────────────────────────────────────────────────────────────
 
 /// STT 识别错误。
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 #[allow(dead_code)]
 pub enum SttError {
     /// 引擎未初始化
+    #[error("STT engine not initialized")]
     NotInitialized,
     /// 识别过程中出错
+    #[error("STT engine error: {0}")]
     Engine(String),
     /// 音频格式不匹配
+    #[error("audio format mismatch: {0}")]
     FormatMismatch(String),
 }
-
-impl fmt::Display for SttError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SttError::NotInitialized => write!(f, "STT engine not initialized"),
-            SttError::Engine(msg) => write!(f, "STT engine error: {msg}"),
-            SttError::FormatMismatch(msg) => write!(f, "audio format mismatch: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for SttError {}
 
 // ── STT Engine trait ─────────────────────────────────────────────────────
 
@@ -171,14 +160,14 @@ pub(crate) mod wav;
 /// **不会回退到 Mock 引擎**——未启用 / 未配置 / 服务未就绪时返回 Err，
 /// 由调用方（VoiceService）决定如何向用户反馈错误。
 pub fn create_engine() -> Result<Box<dyn SttEngine>, String> {
-    let config = crate::app::stt_config::get_stt_config();
+    let config = crate::domain::config::stt_config::get_stt_config();
 
     if !config.enabled {
         return Err("STT 未启用，请在设置页开启语音输入".to_string());
     }
 
     match config.mode {
-        crate::app::stt_config::SttMode::Cloud => {
+        crate::domain::config::stt_config::SttMode::Cloud => {
             if config.is_cloud_configured() {
                 tracing::info!("STT 引擎: cloud");
                 Ok(Box::new(cloud::CloudSttEngine::new()))
@@ -186,8 +175,8 @@ pub fn create_engine() -> Result<Box<dyn SttEngine>, String> {
                 Err("云端 STT 未配置供应商，请在设置页中配置".to_string())
             }
         }
-        crate::app::stt_config::SttMode::Local => match config.streaming_mode {
-            crate::app::stt_config::StreamingMode::Pseudo => {
+        crate::domain::config::stt_config::SttMode::Local => match config.streaming_mode {
+            crate::domain::config::stt_config::StreamingMode::Pseudo => {
                 match pseudo_streaming::PseudoStreamingSttEngine::new(&config) {
                     Ok(engine) => {
                         tracing::info!("STT 引擎: pseudo-streaming (VAD + HTTP 轮询)");
@@ -205,7 +194,7 @@ pub fn create_engine() -> Result<Box<dyn SttEngine>, String> {
                     }
                 }
             }
-            crate::app::stt_config::StreamingMode::Off => {
+            crate::domain::config::stt_config::StreamingMode::Off => {
                 match local::LocalSttEngine::new(&config) {
                     Ok(engine) => {
                         tracing::info!("STT 引擎: local (FunASR)");

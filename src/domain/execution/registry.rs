@@ -54,11 +54,6 @@ impl ActionRegistry {
         self.actions.read().unwrap().get(id).cloned()
     }
 
-    /// 列出所有已注册的动作 id。
-    pub fn ids(&self) -> Vec<String> {
-        self.actions.read().unwrap().keys().cloned().collect()
-    }
-
     /// 注册一个自定义动作（0.9.3 插件 tool 注册）。
     ///
     /// `&self` 而非 `&mut self` —— 内部 `RwLock` 允许启动后动态注册。
@@ -84,20 +79,6 @@ impl ActionRegistry {
         self.actions.read().unwrap().len()
     }
 
-    /// 返回所有已注册动作的 `(id, Arc<dyn Action>)` 对。
-    ///
-    /// 0.14.2 前：供 `build_agent_tools()` 工厂函数遍历所有动作，包装成 `ToolDyn`。
-    /// 0.14.2 后：`build_agent_tools` 不再消费 ActionRegistry（ActionTool 已删），
-    /// 此方法保留供主窗口搜索流和测试使用。
-    /// 读锁内一次性 clone 所有 Arc，避免多次锁获取。
-    pub fn entries(&self) -> Vec<(String, Arc<dyn Action>)> {
-        self.actions
-            .read()
-            .unwrap()
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
-    }
 }
 
 impl Default for ActionRegistry {
@@ -225,25 +206,6 @@ mod tests {
                 DangerClass::Dangerous,
                 "{id} 应为 Dangerous"
             );
-        }
-    }
-
-    #[test]
-    fn ai_eligible_excludes_self_destruct_actions() {
-        let reg = ActionRegistry::new();
-        // exit_blink 覆写为 false（AI 不该让 Blink 自杀）
-        assert!(
-            !reg.get("exit_blink").unwrap().ai_eligible(),
-            "exit_blink 不该暴露给 AI"
-        );
-        // 其余动作默认 true（含 Dangerous 的 shutdown/lock 等--有确认卡片挡）
-        for id in [
-            "open_settings",
-            "shutdown",
-            "lock",
-            "clear_history",
-        ] {
-            assert!(reg.get(id).unwrap().ai_eligible(), "{id} 默认应暴露给 AI");
         }
     }
 

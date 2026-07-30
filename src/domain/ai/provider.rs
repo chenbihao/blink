@@ -15,9 +15,9 @@
 //!
 //! ## Dangerous 独立于交互模式(§3.4)
 //!
-//! Provider 只负责"跑 LLM 返回 tool_calls",**不执行**。执行由 `ActionRegistry`
-//! 走,`Action::danger_class() == Dangerous` 无论主窗口还是 Agent 窗口都必须
-//! Tab 确认——这条铁则**不在 Provider 层**,在 execution 层。
+//! Provider 只负责"跑 LLM 返回 tool_calls",**不执行**。AI tool_call 只由
+//! `CapabilityRegistry` 分派；`Dangerous` / `sensitive` 的确认铁则位于
+//! Capability 调度层，不在 Provider 层。
 //!
 //! ## 0.9.1 阶段状态
 //!
@@ -29,40 +29,31 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use super::message::{CompletionRequest, CompletionResponse, ToolCall, Usage};
-use crate::app::ai_config::ProviderKind;
+use crate::domain::config::ai_config::ProviderKind;
 
 /// AI 调用错误——**故意不含供应商原始错误明细**(避免密钥/内网 URL 泄漏到日志)。
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 #[allow(dead_code)] // 0.9.1 Phase 4 定义,Phase 5 起 dispatch 消费
 pub enum AIError {
     /// 硬超时(§3.3 骨架层)——`AIConfig::slo_hard_timeout_ms` 或 default 20000ms 到期
+    #[error("AI 调用超时")]
     Timeout,
     /// 用户中断(ESC / 换 query)——`tokio::select!` 或 `AbortHandle` 触发
+    #[error("AI 调用已取消")]
     Cancelled,
     /// 未配置——`AIConfig::resolve_tier` 返 None(所有档空 或 全悬空)
+    #[error("AI 未配置或档位悬空")]
     NotConfigured,
     /// 网络错误——rig / reqwest 返回,只含 stage 描述,不含 URL/密钥
+    #[error("AI 网络错误: {0}")]
     Network(String),
     /// 供应商错误——4xx/5xx,只含 stage 描述
+    #[error("AI 供应商错误: {0}")]
     Provider(String),
     /// 序列化 / 解析错误
+    #[error("AI 数据解析错误: {0}")]
     Serialization(String),
 }
-
-impl std::fmt::Display for AIError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Timeout => write!(f, "AI 调用超时"),
-            Self::Cancelled => write!(f, "AI 调用已取消"),
-            Self::NotConfigured => write!(f, "AI 未配置或档位悬空"),
-            Self::Network(msg) => write!(f, "AI 网络错误: {msg}"),
-            Self::Provider(msg) => write!(f, "AI 供应商错误: {msg}"),
-            Self::Serialization(msg) => write!(f, "AI 数据解析错误: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for AIError {}
 
 /// 流式 chunk —— provider 通过 channel 逐条发送,消费方(SearchService)逐条 emit 前端。
 #[derive(Debug, Clone)]

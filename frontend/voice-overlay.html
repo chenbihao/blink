@@ -20,6 +20,7 @@
     </div>
     <script type="module">
       import { listen, invoke } from "./js/tauri.js";
+      import { EVENTS } from "./js/event-names.js";
       import { t, applyI18nFromConfig, onLangChange } from "./js/i18n/index.js";
       import { applyThemeFromConfig } from "./js/theme.js";
 
@@ -66,7 +67,7 @@
       });
 
       // 监听音量级别 → 驱动波形条高度
-      listen("blink://voice-level", (event) => {
+      listen(EVENTS.VOICE_LEVEL, (event) => {
         const { level, target } = event.payload ?? {};
         if (target !== "g2") return;
         const lv = Math.max(0, Math.min(1, level || 0));
@@ -81,7 +82,7 @@
 
       // 监听流式 partial 文本
       // 0.10.4: 支持 confirmed/preview 双字段（伪流式引擎）
-      listen("blink://voice-partial", (event) => {
+      listen(EVENTS.VOICE_PARTIAL, (event) => {
         const payload = event.payload ?? {};
         if (payload.target !== "g2") return;
 
@@ -108,7 +109,7 @@
       });
 
       // 录音结束 → 重置
-      listen("blink://voice-recording-end", () => {
+      listen(EVENTS.VOICE_RECORDING_END, () => {
         textEl.textContent = t("voice.overlay.recording");
         isDefaultText = true;
         bars.forEach((bar) => (bar.style.height = "4px"));
@@ -117,7 +118,7 @@
       });
 
       // 录音开始 → 重置文案（覆盖 voice-status 的加载中文案）
-      listen("blink://voice-recording-start", (event) => {
+      listen(EVENTS.VOICE_RECORDING_START, (event) => {
         const { target } = event.payload ?? {};
         if (target !== "g2") return;
         textEl.textContent = t("voice.overlay.recording");
@@ -128,7 +129,7 @@
       });
 
       // 语音状态提示（模型加载中等）
-      listen("blink://voice-status", (event) => {
+      listen(EVENTS.VOICE_STATUS, (event) => {
         const { message, target } = event.payload ?? {};
         if (target !== "g2" || !message) return;
         textEl.textContent = message;
@@ -139,7 +140,7 @@
       });
 
       // 语音错误提示（服务未启动等）
-      listen("blink://voice-error", (event) => {
+      listen(EVENTS.VOICE_ERROR, (event) => {
         const { message, target } = event.payload ?? {};
         if (target !== "g2" || !message) return;
         textEl.textContent = message;

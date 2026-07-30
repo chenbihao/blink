@@ -4,7 +4,8 @@
  * 封装 invoke + listen，业务层只调语义化函数。
  */
 
-import { invoke, listen } from "../tauri.js";
+import { invoke, listen, saveDialog } from "../tauri.js";
+import { EVENTS } from "../event-names.js";
 
 // ── Commands ─────────────────────────────────────
 
@@ -158,15 +159,11 @@ export async function exportConversation(conversationId, title) {
   const markdown = formatConversationMarkdown(title, messages);
 
   // 3. 打开保存对话框获取路径
-  const save = window.__TAURI__?.dialog?.save;
-  if (typeof save !== "function") {
-    throw new Error("保存对话框不可用");
-  }
   const safeName = (title || "对话")
     .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
     .trim()
     .slice(0, 50) || "对话";
-  const path = await save({
+  const path = await saveDialog({
     defaultPath: `${safeName}.md`,
     filters: [{ name: "Markdown", extensions: ["md"] }],
   });
@@ -409,7 +406,7 @@ export function getComposerBarSnapshot() {
  * @returns {Promise<() => void>} unsubscribe
  */
 export function listenChatStream(handler) {
-  return listen("blink://chat-stream", handler);
+  return listen(EVENTS.CHAT_STREAM, handler);
 }
 
 /**
@@ -418,7 +415,7 @@ export function listenChatStream(handler) {
  * @returns {Promise<() => void>} unsubscribe
  */
 export function listenChatConfirm(handler) {
-  return listen("blink://chat-confirm-action", handler);
+  return listen(EVENTS.CHAT_CONFIRM_ACTION, handler);
 }
 
 /**
@@ -427,7 +424,7 @@ export function listenChatConfirm(handler) {
  * @returns {Promise<() => void>} unsubscribe
  */
 export function listenChatTitleUpdated(handler) {
-  return listen("blink://chat-title-updated", handler);
+  return listen(EVENTS.CHAT_TITLE_UPDATED, handler);
 }
 
 /**
@@ -436,7 +433,7 @@ export function listenChatTitleUpdated(handler) {
  * @returns {Promise<() => void>} unsubscribe
  */
 export function listenContextStatus(handler) {
-  return listen("blink://chat-context-status", handler);
+  return listen(EVENTS.CHAT_CONTEXT_STATUS, handler);
 }
 
 /**
@@ -445,7 +442,7 @@ export function listenContextStatus(handler) {
  * @returns {Promise<() => void>} unsubscribe
  */
 export function listenSkillActivated(handler) {
-  return listen("blink://chat-skill-activated", handler);
+  return listen(EVENTS.CHAT_SKILL_ACTIVATED, handler);
 }
 
 // ── Voice Events（0.12.2 §4.3）─────────────────
@@ -454,40 +451,40 @@ export function listenSkillActivated(handler) {
  * 监听录音开始事件（target="chat" 时进入录音模式）。
  */
 export function listenVoiceRecordingStart(handler) {
-  return listen("blink://voice-recording-start", handler);
+  return listen(EVENTS.VOICE_RECORDING_START, handler);
 }
 
 /**
  * 监听语音识别 partial 文本（实时更新 textarea）。
  */
 export function listenVoicePartial(handler) {
-  return listen("blink://voice-partial", handler);
+  return listen(EVENTS.VOICE_PARTIAL, handler);
 }
 
 /**
  * 监听录音结束事件（退出录音模式）。
  */
 export function listenVoiceRecordingEnd(handler) {
-  return listen("blink://voice-recording-end", handler);
+  return listen(EVENTS.VOICE_RECORDING_END, handler);
 }
 
 /**
  * 监听语音错误事件。
  */
 export function listenVoiceError(handler) {
-  return listen("blink://voice-error", handler);
+  return listen(EVENTS.VOICE_ERROR, handler);
 }
 
 /**
  * 监听语音音量事件（波形动画）。
  */
 export function listenVoiceLevel(handler) {
-  return listen("blink://voice-level", handler);
+  return listen(EVENTS.VOICE_LEVEL, handler);
 }
 
 /**
  * 监听语音状态事件（模型加载中等）。
  */
 export function listenVoiceStatus(handler) {
-  return listen("blink://voice-status", handler);
+  return listen(EVENTS.VOICE_STATUS, handler);
 }

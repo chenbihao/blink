@@ -14,7 +14,8 @@ import { escapeText, escapeAttr } from "./utils.js";
 import { initComposer, setStreamingMode, setInputMode, clearInput, focusInput, setThinkingEnabled as setComposerThinking, showVoiceIndicator, hideVoiceIndicator, showVoiceStatus, updateVoiceLevel, updateVoicePartial, isVoiceRecording } from "./composer.js";
 import { initSidebar, refreshSidebar, showSidebar, hideSidebar, toggleSidebar, setActiveConversation } from "./sidebar.js";
 import { applyThemeFromConfig } from "../theme.js";
-import { listen, invoke } from "../tauri.js";
+import { listen, invoke, getCurrentWindow } from "../tauri.js";
+import { EVENTS } from "../event-names.js";
 import { initComposerBarPopup, invalidateComposerBarCache, refreshPopupIfVisible } from "./composer-bar-popup.js";
 // invalidateComposerBarCache 仍在 handleContextStatus 中使用
 // 0.12.4 §6.5：openSettings 直接用 invoke，不再需要动态 import
@@ -39,7 +40,7 @@ async function init() {
   // 主题初始化 + 实时跟随
   applyThemeFromConfig();
   // 0.12.2 §4.9: ai_config 变更时刷新模型选择器（复用 config-changed 事件）
-  listen("blink://config-changed", (e) => {
+  listen(EVENTS.CONFIG_CHANGED, (e) => {
     applyThemeFromConfig();
     if (e?.payload?.key === "ai_config") {
       refreshModelSelector();
@@ -524,6 +525,9 @@ function handleConfirmEvent(event) {
   // 忽略不属于当前请求的确认
   // request_id=0 是 ChatService 未注册或无 active 请求时的降级值，仍处理以确保用户可操作
   if (payload.request_id !== 0 && payload.request_id !== state.activeRequestId) return;
+  // 切换对话时 abort 与状态更新存在极短竞态窗口；同时校验 conversation_id，
+  // 防止旧请求的确认卡片落入刚切换的新对话。
+  if (payload.conversation_id && payload.conversation_id !== state.conversationId) return;
 
   components.renderConfirmCard(payload, async (confirmId, approved) => {
     try {
@@ -1256,11 +1260,6 @@ function bindHeaderButtons() {
   if (closeBtn) closeBtn.addEventListener("click", () => {
     ipc.hideChatWindow();
   });
-}
-
-/** 获取当前窗口对象（Tauri v2 Window） */
-function getCurrentWindow() {
-  return window.__TAURI__?.window?.getCurrentWindow?.();
 }
 
 // ── 启动 ────────────────────────────────────────

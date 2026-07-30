@@ -73,7 +73,7 @@ impl SttEngine for CloudSttEngine {
             return Ok(String::new());
         }
 
-        let config = crate::app::stt_config::get_stt_config();
+        let config = crate::domain::config::stt_config::get_stt_config();
         let endpoint = resolve_stt_endpoint(&config)?;
 
         let wav_bytes = super::wav::pcm_to_wav(&samples, self.sample_rate, 1);
@@ -114,7 +114,7 @@ pub(crate) struct ResolvedSttEndpoint {
 ///
 /// `finalize` 与 `test_cloud_stt` 共用此函数。
 pub(crate) fn resolve_stt_endpoint(
-    config: &crate::app::stt_config::SttConfig,
+    config: &crate::domain::config::stt_config::SttConfig,
 ) -> Result<ResolvedSttEndpoint, SttError> {
     let provider = config.cloud_provider.as_ref().ok_or(SttError::NotInitialized)?;
 
@@ -215,7 +215,7 @@ mod tests {
     /// resolve_stt_endpoint 在 cloud_provider 为 None 时返回 NotInitialized。
     #[test]
     fn resolve_stt_endpoint_returns_err_when_not_configured() {
-        let cfg = crate::app::stt_config::SttConfig::default();
+        let cfg = crate::domain::config::stt_config::SttConfig::default();
         let r = resolve_stt_endpoint(&cfg);
         assert!(r.is_err());
     }

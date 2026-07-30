@@ -6,6 +6,7 @@ mod domain;
 mod infra;
 
 use domain::capability::Capability;
+use domain::event_names::EventNames;
 use tauri::{Emitter, Manager, WindowEvent, tray::TrayIconBuilder};
 
 fn main() {
@@ -48,7 +49,7 @@ fn main() {
             tauri::async_runtime::spawn(async move {
                 let path_for_log = path.clone();
                 let icon = tauri::async_runtime::spawn_blocking(move || {
-                    crate::domain::search::icon::get_icon_png(&path)
+                    crate::infra::platform::icon::get_icon_png(&path)
                 })
                 .await
                 .ok()
@@ -138,6 +139,13 @@ fn main() {
             // pools 交给 Tauri 管理(command 层用 app.state::<DbPools>() 取)
             app.manage(pools.clone());
 
+            // 0.14.6 §2.2：创建 DomainEnv 桥接器（TauriDomainEnv）
+            // 各 service 构造后通过 set_* 注入（OnceLock 解决构造顺序倒挂）
+            let domain_env = std::sync::Arc::new(app::domain_env::TauriDomainEnv::new(
+                app.handle().clone(),
+                pools.clone(),
+            ));
+
             // 同步开机自启（确保注册表 Run 项与配置一致，覆盖用户在 app 外改动的情况）
             {
                 use tauri_plugin_autostart::ManagerExt;
@@ -189,7 +197,15 @@ fn main() {
                 if http.is_some() || https.is_some() { Some((http.unwrap_or_default(), https.unwrap_or_default())) }
                 else { None }
             });
-            let plugins = domain::plugin::load_builtin_plugins(app.handle(), proxy.clone());
+            let plugins_dir = if cfg!(debug_assertions) {
+                domain::plugin::builtin_plugins_dir()
+            } else {
+                app.path()
+                    .resource_dir()
+                    .map(|d| d.join("plugins").join("builtin"))
+                    .unwrap_or_else(|_| domain::plugin::builtin_plugins_dir())
+            };
+            let plugins = domain::plugin::load_builtin_plugins(&plugins_dir, proxy.clone());
             // 构造意图路由 RuleRouter,从插件 manifest 注入规则(合并用户自定义 triggers)。
             let router = std::sync::Arc::new(domain::intent::RuleRouter::new(app_config.surface_takeover_enabled));
             // 0.8.6 §8.1.2：共享 min_score 引用（SearchService ↔ KeywordProducer）
@@ -203,6 +219,7 @@ fn main() {
             // PluginEngine::new 无必须条件，plugins=vec![] 时各方法均安全（空迭代 / find_plugin 返 None）。
             tracing::info!(count = plugins.len(), "PluginEngine 已构造");
             let plugin_engine = std::sync::Arc::new(domain::plugin::PluginEngine::new(plugins.clone(), pools.config.clone(), proxy));
+            domain_env.set_plugin_engine(plugin_engine.clone());
             // 0.4→0.5 配置迁移（首次运行时执行一次，后续 marker 跳过；空 plugins 时循环空转）
             tauri::async_runtime::block_on(infra::data::config::migrate_0_4_to_0_5(&pools.config, &plugins));
             // 0.9.5 camelCase→snake_case 迁移（前端重构统一字段命名，存量 DB 需改写）
@@ -251,13 +268,14 @@ fn main() {
                 calc: calc_config,
             };
             let search_service = std::sync::Arc::new(domain::search::SearchService::new(
-                app.handle().clone(),
+                domain_env.clone(),
                 pools.history.clone(),
                 domain::search::build_engines(engine_configs, pools.history.clone()),
                 plugin_engine.clone(),
                 router.clone(),
                 min_score_shared,
             ));
+            domain_env.set_search_service(search_service.clone());
             app.manage(search_service.clone());
             // 初始化 SearchService 的 max_results 内存值（来自 AppConfig，搜索热路径零 IO）
             search_service.update_max_results(app_config.max_results as usize);
@@ -323,7 +341,7 @@ fn main() {
                     // drop event,见 [[tauri-hidden-webview-emit-dropped]]）,而且下一次
                     // invoke 会 collect() 重拍快照,不需要 push。
                     if infra::platform::window::is_visible() {
-                        if let Err(e) = app_handle.emit("blink://awareness-updated", ()) {
+                        if let Err(e) = app_handle.emit(EventNames::AWARENESS_UPDATED, ()) {
                             tracing::debug!(?e, "emit blink://awareness-updated 失败");
                         }
                     }
@@ -338,6 +356,7 @@ fn main() {
             let action_registry = std::sync::Arc::new(crate::domain::execution::ActionRegistry::new());
             // 0.9.7 Capability 能力协议层（inventory 自动收集 5 个样板能力）
             let capability_registry = std::sync::Arc::new(crate::domain::capability::CapabilityRegistry::new());
+            domain_env.set_cap_registry(capability_registry.clone());
 
             // 0.13.7:注册插件 tool 到 CapabilityRegistry——插件语义是「纯计算→返回结果」，
             // 天然属于 Capability 范畴（入参→出参，不碰 UI）。迁移自 ActionRegistry。
@@ -477,7 +496,7 @@ fn main() {
             let mcp_client = std::sync::Arc::new(domain::mcp::McpClientManager::new());
             let chat_service = std::sync::Arc::new(
                 domain::ai::chat_service::ChatService::new(
-                    app.handle().clone(),
+                    domain_env.clone(),
                     ai_registry.clone(),
                     capability_registry.clone(),
                     pending_confirms.clone(),
@@ -486,6 +505,7 @@ fn main() {
                     pools.config.clone(),
                 ),
             );
+            domain_env.set_chat_service(chat_service.clone());
 
             // 注册到 Tauri state（command 层 app.state 取用）
             app.manage(plugin_engine);
@@ -502,6 +522,8 @@ fn main() {
             app.manage(chat_service);
             // 0.13.0: MCP client 管理器（command 层 app.state 取用）
             app.manage(mcp_client.clone());
+            // 0.14.6 §2.2：DomainEnv 注册为 managed state（command 层 app.state 取用）
+            app.manage(domain_env);
 
             // 0.13.3: 启动时扫描 Skill 目录（非阻塞，后台执行）
             {

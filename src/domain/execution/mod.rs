@@ -23,18 +23,22 @@ pub use schema::{ActionSchema, DangerClass};
 #[allow(unused_imports)]
 pub(crate) use builtin::*;
 
+use crate::domain::event::DomainEnv;
 use serde_json::Value;
 
-/// 动作执行上下文（0.8.6 §8.1.1；0.9.0 §3.3 tool-call 进化）。
+/// 动作执行上下文（0.8.6 §8.1.1；0.9.0 §3.3 tool-call 进化；0.14.6 §2.2 去 tauri）。
 ///
 /// 包含执行所需的所有环境信息。不是所有字段都被所有动作消费——
-/// `app_handle` 仅 `Emit` / 需要 Tauri 运行时的动作使用；`arguments` 仅参数化动作使用。
+/// `env` 仅 `Emit` / 需要 Tauri 运行时的动作使用；`arguments` 仅参数化动作使用。
 ///
 /// **0.9.0 演进**：从单一 `arg: Option<Value>` 升级为结构化 `arguments: Value`
 /// （保证是 JSON Object）。旧字符串参数走 `_legacy_arg` 键做兼容层，
 /// 0.9.1 AI 路径下 `ToolCall.arguments` 可直接注入。
+///
+/// **0.14.6 §2.2**：`app_handle: &tauri::AppHandle` 替换为 `env: &dyn DomainEnv`，
+/// domain 层不再直接依赖 tauri。
 pub struct ActionContext<'a> {
-    pub app_handle: &'a tauri::AppHandle,
+    pub env: &'a dyn DomainEnv,
     /// 动作参数（JSON Object）。无参动作为 `{}`。
     ///
     /// **key 约定**：
@@ -51,13 +55,13 @@ impl<'a> ActionContext<'a> {
     /// `arg: None`        → `arguments = {}`
     ///
     /// 保留此签名让 `command` 层和 `chord` 层调用点零改动。
-    pub fn new(app_handle: &'a tauri::AppHandle, arg: Option<Value>) -> Self {
+    pub fn new(env: &'a dyn DomainEnv, arg: Option<Value>) -> Self {
         let arguments = match arg {
             Some(v) => serde_json::json!({ "_legacy_arg": v }),
             None => serde_json::json!({}),
         };
         Self {
-            app_handle,
+            env,
             arguments,
         }
     }
@@ -67,7 +71,7 @@ impl<'a> ActionContext<'a> {
     /// 若传入的不是 Object，会被规范化为 `{}` + 一条 warn 日志——
     /// 防御性设计，AI 可能产出畸形 JSON。
     #[allow(dead_code)] // 0.9.1 起消费
-    pub fn from_arguments(app_handle: &'a tauri::AppHandle, arguments: Value) -> Self {
+    pub fn from_arguments(env: &'a dyn DomainEnv, arguments: Value) -> Self {
         let arguments = if arguments.is_object() {
             arguments
         } else {
@@ -78,7 +82,7 @@ impl<'a> ActionContext<'a> {
             serde_json::json!({})
         };
         Self {
-            app_handle,
+            env,
             arguments,
         }
     }
@@ -148,66 +152,24 @@ pub enum ActionOutcome {
     // 结构化列表统一由 `CapabilityResult::Items` 承载。Action 回归纯粹副作用语义。
 }
 
-// ── rig 投影层（0.12.0 统一投影入口）──────────────────────────────────────
-
-impl ActionOutcome {
-    /// 投影成 rig `ToolResultContent`——与 `CapabilityResult::to_rig_tool_result()` 同一份契约。
-    ///
-    /// **0.12.0 新增**：消除 service.rs 旧的 `project_outcome_to_tool_message`，
-    /// Turn 2 回流改调本函数 + `rig_tool_result_to_text()` 提取文本。
-    pub fn to_rig_tool_result(&self) -> Vec<rig_core::completion::message::ToolResultContent> {
-        use rig_core::completion::message::ToolResultContent;
-
-        match self {
-            ActionOutcome::Copy { text, .. } => {
-                vec![ToolResultContent::text(
-                    serde_json::json!({ "type": "copy", "text": text }).to_string(),
-                )]
-            }
-            ActionOutcome::Open { path } => {
-                vec![ToolResultContent::text(
-                    serde_json::json!({ "type": "open", "path": path, "success": true })
-                        .to_string(),
-                )]
-            }
-            ActionOutcome::Emit { event, payload } => {
-                vec![ToolResultContent::text(
-                    serde_json::json!({ "type": "emit", "event": event, "payload": payload })
-                        .to_string(),
-                )]
-            }
-            ActionOutcome::Nop => {
-                // Nop 表示操作已成功执行但无返回值（如打开设置页/切换主题）。
-                // 必须明确告知 AI 操作成功，避免 AI 将空响应误解为失败而重试。
-                vec![ToolResultContent::text(
-                    serde_json::json!({ "type": "nop", "success": true, "message": "操作已成功执行" })
-                        .to_string(),
-                )]
-            }
-        }
-    }
-}
-
 /// 动作执行错误。
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ExecError {
     /// 参数化动作缺少参数。
     #[allow(dead_code)] // 0.14.2 后仅 arg_str 构造，arg_str 已标 dead_code
+    #[error("{0}: 缺少字符串参数")]
     MissingArg(String),
     /// 执行过程中的错误（打开失败、系统调用失败等）。
+    #[error("{0}")]
     Runtime(String),
 }
 
-impl std::fmt::Display for ExecError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ExecError::MissingArg(action) => write!(f, "{action}: 缺少字符串参数"),
-            ExecError::Runtime(msg) => write!(f, "{msg}"),
-        }
+/// 跨域转换：Capability 错误 → ExecError（Action 编排 Capability 失败时用）。
+impl From<crate::domain::capability::CapabilityError> for ExecError {
+    fn from(e: crate::domain::capability::CapabilityError) -> Self {
+        ExecError::Runtime(e.to_string())
     }
 }
-
-impl std::error::Error for ExecError {}
 
 /// 统一动作 trait（0.8.6 §8.1.1 / §8.2.4；0.9.0 §3.3 tool-call 进化）。
 ///
@@ -235,14 +197,14 @@ pub trait Action: Send + Sync {
     /// 副显示名。
     fn subtitle(&self) -> &crate::domain::plugin::LocalizableText;
 
-    /// 动作能力自述（0.9.0 §3.2）——用于 AI tool-call schema 投影。
+    /// 动作元数据（0.9.0 §3.2 遗留）。
     ///
     /// **default**：无参 schema,name = `self.id()`,description 空字符串。
     /// 12 个内置动作会在 Phase 3c 显式覆盖为「语义键 + i18n 描述」。
     ///
-    /// **AI 路径消费**：`ActionSchema::to_rig_tool()` 投影到 `rig::completion::ToolDefinition`
-    /// 后送入 LLM。0.9.2 起被 SuggestionArbiter 的 AI producer 使用。
-    #[allow(dead_code)] // 0.9.0 由 12 个 builtin 显式实现,消费方 0.9.1 起接入
+    /// **0.14 Capability-only**：Action schema 不进入 AI tool 池；当前仅保留作本地
+    /// 注册表自检与未来交互元数据收敛，不得重新投影给 LLM。
+    #[allow(dead_code)]
     fn schema(&self) -> ActionSchema {
         ActionSchema::empty(self.id(), "")
     }
@@ -252,26 +214,11 @@ pub trait Action: Send + Sync {
     /// **default = Safe**——但项目铁则要求所有 Action **显式覆盖**（哪怕都返回 Safe）,
     /// 让新增动作的开发者被迫思考是否危险。default 只作漏网保底。
     ///
-    /// **Agent 窗口（0.10）注册规则**:
-    /// - `Safe` → 允许进 `AgentBuilder` tools 池,AI 可自主循环调用
-    /// - `Dangerous` → 不进 tools 池,或走带 pre-exec hook 的封装 tool,弹人机确认
-    #[allow(dead_code)] // 0.9.0 由 12 个 builtin 显式实现,消费方 0.9.1 起接入
+    /// **0.14 Capability-only**：此等级只描述本地交互 Action，不参与 AI 注册；
+    /// AI 安全策略只读取 `Capability::requires_ai_confirmation()`。
+    #[allow(dead_code)]
     fn danger_class(&self) -> DangerClass {
         DangerClass::Safe
-    }
-
-    /// 是否暴露给 AI agent 作为 tool（0.12.0 §2.4 tool 池粒度控制）。
-    ///
-    /// **0.14.2 变化**：`ActionTool` 已删除，`build_agent_tools` 不再包装 Action——
-    /// 此方法不再被 `build_agent_tools` 消费。`exit_blink` 的 `ai_eligible=false`
-    /// 语义保留为文档性质（Action 不进 AI tool 池是编译期保证的，不靠运行时过滤）。
-    ///
-    /// **与 `danger_class` 的区别**：`danger_class` 控制"是否需确认"，
-    /// `ai_eligible` 控制"是否暴露给 AI"。Dangerous + ai_eligible=true = 暴露但需确认；
-    /// ai_eligible=false = 根本不进 tool 池。
-    #[allow(dead_code)] // 0.14.2: build_agent_tools 不再消费；保留供文档/未来使用
-    fn ai_eligible(&self) -> bool {
-        true
     }
 
     /// 执行动作，返回副作用意图。
@@ -283,8 +230,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // ActionContext 需要 &AppHandle,但 arg_str / arg_as_str 只读 arguments 字段——
-    // 我们直接测抽取字符串的纯逻辑(镜像 arg_str 实现),避免造假 AppHandle 引用(UB)。
+    // ActionContext 需要 &dyn DomainEnv,但 arg_str / arg_as_str 只读 arguments 字段——
+    // 我们直接测抽取字符串的纯逻辑(镜像 arg_str 实现),避免造假 DomainEnv 引用(UB)。
     fn extract(arguments: &Value, key: &str, action_name: &str) -> Result<String, ExecError> {
         arguments
             .get(key)

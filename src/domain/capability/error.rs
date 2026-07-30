@@ -12,40 +12,40 @@
 use serde::Serialize;
 
 /// 能力调用错误——六变体覆盖所有失败场景。
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, thiserror::Error)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[allow(dead_code)]
 pub enum CapabilityError {
     /// 参数缺失/类型错（args 不符 schema）。
+    #[error("参数错误: {detail}")]
     InvalidArgs { detail: String },
     /// 权限不足（剪贴板被锁/无截图权限）。
+    #[error("权限不足: {detail}")]
     Permission { detail: String },
     /// 超时——`invoke` 检查 `ctx.is_expired()` 返回 true，或 `timeout_at` 触发。
     /// 投影到 AI："工具超时，可重试或换路径"。
+    #[error("超时: {detail}")]
     Timeout { detail: String },
     /// 调用方取消——用户 ESC / seq 过期 / future drop。
     /// **不报错给 LLM**（直接 abort 整条 tool_call 链，与 AI stream abort 语义一致）。
+    #[error("已取消")]
     Cancelled,
     /// 能力不存在（id 未注册——AI 幻觉调了不存在的 tool）。
+    #[error("能力不存在: {id}")]
     NotFound { id: String },
     /// 内部错误（Win32 失败/IO 错误）。
+    #[error("内部错误: {detail}")]
     Internal { detail: String },
 }
 
-impl std::fmt::Display for CapabilityError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidArgs { detail } => write!(f, "参数错误: {detail}"),
-            Self::Permission { detail } => write!(f, "权限不足: {detail}"),
-            Self::Timeout { detail } => write!(f, "超时: {detail}"),
-            Self::Cancelled => write!(f, "已取消"),
-            Self::NotFound { id } => write!(f, "能力不存在: {id}"),
-            Self::Internal { detail } => write!(f, "内部错误: {detail}"),
+/// 跨域转换：ExecError → CapabilityError（Capability 编排 Action 失败时用）。
+impl From<crate::domain::execution::ExecError> for CapabilityError {
+    fn from(e: crate::domain::execution::ExecError) -> Self {
+        CapabilityError::Internal {
+            detail: e.to_string(),
         }
     }
 }
-
-impl std::error::Error for CapabilityError {}
 
 impl CapabilityError {
     /// 投影到 rig `ToolResultContent::Text`——让 AI 知道失败原因（可重试或换路径）。

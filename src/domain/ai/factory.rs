@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use rig_core::client::CompletionClient;
 
-use crate::app::ai_config::{ModelEntry, ProviderEntry, ProviderKind};
+use crate::domain::config::ai_config::{ModelEntry, ProviderEntry, ProviderKind};
 use crate::domain::ai::provider::{AIError, AIProvider};
 use crate::domain::ai::registry::ProviderFactory;
 use crate::domain::ai::rig_provider::{RigProvider, expose_for_rig};
@@ -288,7 +288,7 @@ fn build_ollama(
     if !model
         .capabilities
         .iter()
-        .any(|c| matches!(c, crate::app::ai_config::ModelCapability::Chat))
+        .any(|c| matches!(c, crate::domain::config::ai_config::ModelCapability::Chat))
     {
         tracing::warn!(
             model_id = %model.id,
@@ -322,7 +322,7 @@ pub fn default_factory() -> Arc<dyn ProviderFactory> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::ai_config::{ModelCapability, ProviderKind};
+    use crate::domain::config::ai_config::{ModelCapability, ProviderKind};
 
     fn sample_entry(kind: ProviderKind, base_url: Option<String>) -> ProviderEntry {
         ProviderEntry {

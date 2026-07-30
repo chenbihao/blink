@@ -32,11 +32,11 @@ Blink 源码分四层目录,依赖**只准向下**:
 │  cli/        ← 自身 CLI 化(mcp-server / search / run / chat)  │  最薄,可调 domain + infra
 ├──────────────────────────────────────────────────────────────┤
 │  app/        ← 应用层:Tauri IPC 入口 + 各服务 wiring + 配置    │  依赖 domain + infra
-│              · commands(Tauri command 入口,0.14.6 按域拆分)    │
-│              · config / ai_config / stt_config(0.14.6 下沉)    │
+│              · commands(Tauri command 入口,0.14 按域拆分)      │
+│              · config / ai_config / stt_config(兼容门面)       │
 │              · voice(语音管线编排)                            │
 ├──────────────────────────────────────────────────────────────┤
-│  domain/     ← 业务域:四域逻辑 + 能力协议(框架无关)           │  依赖 infra,不依赖 tauri(0.14.6 收敛)
+│  domain/     ← 业务域:四域逻辑 + 能力协议(框架无关)           │  依赖 infra,不依赖 tauri(0.14 收敛)
 │              · context/  intent/  search/  execution/         │
 │              · plugin/  chord/  ai/  stt/  capability/        │
 ├──────────────────────────────────────────────────────────────┤
@@ -49,14 +49,14 @@ Blink 源码分四层目录,依赖**只准向下**:
 
 **各层职责**:
 
-| 层 | 职责 | 0.14.6 收敛目标 |
+| 层 | 职责 | 0.14 收敛结果 / 遗留 |
 |---|---|---|
 | `cli` | `blink mcp-server/search/run/capabilities/config/chat`,clap + 最小 Tauri app 无 GUI(0.13.5) | 已达标 |
 | `app` | Tauri IPC 入口 + 服务 wiring + 配置门面 | 配置类型下沉 domain/`config` 域;commands 巨石按域拆分 |
-| `domain` | 四域业务逻辑 + 能力协议,**框架无关** | 去 `use tauri`(领域事件 + 依赖注入);Win32 调用收进 infra |
-| `infra` | 平台抽象(`mod.rs` 接口 + `windows.rs` 实现)+ SQLite 四库 + 工具 | 收纳从 domain 泄漏的 Win32 调用(icon/shell/lock/OCR) |
+| `domain` | 四域业务逻辑 + 能力协议,**目标框架无关** | 已去 AppHandle/Emitter/managed state 直连；仍有 `tauri::async_runtime` 存量 |
+| `infra` | 平台抽象(`mod.rs` 接口 + `windows.rs` 实现)+ SQLite 四库 + 工具 | 已收纳 icon/shell/lock；WinRT OCR 仍待迁移 |
 
-**关键约束**(0.14.6 正在收敛,详见 [phases/0.14.6](../phases/0.14.6-architecture-cleanup.md)):
+**关键约束**（0.14 已建立边界并完成主体迁移，遗留见 [phases/0.14 §七~§九](../phases/0.14-capability-protocol-refactor.md)）：
 
 - `domain/` **不 `use tauri::`**——发领域事件,app 层桥接成 `app_handle.emit()`;取状态走依赖注入而非 `app_handle.state::<T>()`
 - `domain/` **不 `use windows::`**——所有 Win32 走 `infra/platform/` 的 trait 抽象
@@ -71,7 +71,7 @@ Blink 源码分四层目录,依赖**只准向下**:
 | `blink_ai.db` | AI 工具审计(30天清理 + 上限 10000)+ conversations/messages(对话记忆) |
 | `blink_cache.db` | 性能统计(高频写)+ 图标缓存(BLOB) |
 
-> 实现细节见 [phases/0.14.6](../phases/0.14.6-architecture-cleanup.md)(分层清理目标态)与 [phases/0.12 §基础设施](../phases/0.12-ai-ecosystem.md)(DB 四层拆分落地)。
+> 实现细节见 [phases/0.14 §七~§九](../phases/0.14-capability-protocol-refactor.md)（架构审查、分层清理与前端拆分）与 [phases/0.12 §基础设施](../phases/0.12-ai-ecosystem.md)（DB 四层拆分落地）。
 
 ---
 
@@ -287,7 +287,7 @@ manifest 里 `actions` 数组**顺序即优先级**:
 
 插件作者把最常用动作放第一个。空 `actions` + 纯标量 data 时,主窗口隐式提供 copy(**展示层 fallback,非协议层派生**)。
 
-> 完整协议结构、迁移策略(一次性切换,0.x 插件全自研无兼容层)、选型理由见 [phases/0.14 §三/§四/§八](../phases/0.14-capability-protocol-refactor.md)。
+> 完整协议结构、迁移策略(一次性切换,0.x 插件全自研无兼容层)、选型理由见 [phases/0.14 §三/§四/§十一](../phases/0.14-capability-protocol-refactor.md)。
 
 ---
 
@@ -396,8 +396,7 @@ Provider 不只是聊天 API,是**能力供应商**:LLM(`chat`/`chat_stream`)/ S
 | **0.9.7** | Capability 能力协议层诞生 | 原子能力 + 统一声明/返回 + inventory 注册 + 截图/剪贴板拆解 + 接 AI tool 池 |
 | **0.12** | AI 能力架构搭骨架 | 对话窗口 / DB 四层拆分 / Provider 模型统一 / Tool 适配层 / CapabilityRegistry 动态注册 |
 | **0.13** | 能力扩展(基础版 + 开放) | MCP client/server / CLI 化 / token-aware 压缩 / 记忆 FTS5 召回 / Skill 约定式 / 0.13.7 收敛(P3 投影剔 score + 插件 Action→Capability 迁移,删 `ActionOutcome::Items`) |
-| **0.14** | 能力协议重构(收敛) | Capability/Action 边界钉死(删 `ActionTool`) + Cap 协议分层(§A5) + 四出口投影引擎收敛(§A6) |
-| **0.14.6** | 架构清理与工程债(0.14 延续子版本) | 分层剥离(§A1 目标态:config 域下沉 / domain 去 tauri / Win32 收 infra / 拆 commands)+ Schema 合并 + 错误统一 + 事件名常量化 |
+| **0.14** | 能力协议与架构收敛 | Capability/Action 边界钉死(删 `ActionTool`) + Cap 协议分层(§A5) + 四出口投影引擎(§A6) + 延续子版本完成 config 下沉、AppHandle/Emitter 隔离、主要 Win32 归 infra、commands 与前端巨石拆分、Schema/事件/invoke 收敛；残余框架依赖与工程债见 phase §9.3 |
 | **0.20** | 能力扩展向量版 | zvec 向量基础设施 / 记忆向量召回(混合检索升级 FTS5)/ RAG 知识库 / AI 生成 Skill |
 
 **解耦智慧**:先验证大脑(0.9 文本闭环),再加感官(0.10 语音)。0.12-0.14 是 AI 能力架构的「搭骨架 → 扩展 → 收敛重构」三步。**核心原则:零嵌入模型依赖——0.13 所有功能在用户只有 chat 模型时也完整可用,向量版留 0.20**。

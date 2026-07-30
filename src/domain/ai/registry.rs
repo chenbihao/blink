@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
-use crate::app::ai_config::{AIConfig, ModelEntry, ProviderEntry, ProviderKind, Tier};
+use crate::domain::config::ai_config::{AIConfig, ModelEntry, ProviderEntry, ProviderKind, Tier};
 use crate::domain::ai::provider::{AIError, AIProvider};
 
 /// Provider 构造工厂——把 `ProviderEntry` + `ModelEntry` 变成 `Arc<dyn AIProvider>`。
@@ -357,7 +357,7 @@ impl AIProviderRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::ai_config::{
+    use crate::domain::config::ai_config::{
         ModelCapability, ModelEntry, ProviderEntry, ProviderKind, TierAssignment,
     };
     use crate::domain::ai::provider::tests::MockProvider;

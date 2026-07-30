@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
+use crate::domain::event_names::EventNames;
 use tokio::time::sleep;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
@@ -55,7 +56,7 @@ pub fn invoke(app: &AppHandle) {
     // 1. 先采集上下文快照（show 之前！）
     //    读内存 ContextConfig（零 IO，热键回调不能 await），按配置过滤采集
     let context_cfg = app
-        .try_state::<std::sync::Arc<std::sync::RwLock<crate::app::config::ContextConfig>>>()
+        .try_state::<std::sync::Arc<std::sync::RwLock<crate::domain::config::ContextConfig>>>()
         .map(|c| c.read().unwrap().clone())
         .unwrap_or_default();
     let snapshot = crate::infra::platform::context::collect(&context_cfg);
@@ -115,7 +116,7 @@ pub fn invoke(app: &AppHandle) {
     crate::infra::platform::hotkey::expect_synthesized_alt_keyup();
     let _ = win.show();
     let _ = win.set_focus();
-    let _ = app.emit("blink://shown", ());
+    let _ = app.emit(EventNames::SHOWN, ());
     tracing::debug!(
         target: "perf",
         show_ms = t_show.elapsed().as_millis(),
@@ -159,7 +160,7 @@ pub fn invoke(app: &AppHandle) {
                 // 通知前端重跑搜索——选区可能刚到，翻译 Ghost 等建议需要更新
                 // 仅在窗口仍可见时 emit（用户可能已 ESC 关闭）
                 if crate::infra::platform::window::is_visible() {
-                    let _ = app_clone.emit("blink://awareness-updated", ());
+                    let _ = app_clone.emit(EventNames::AWARENESS_UPDATED, ());
                 }
             }
             tracing::debug!(
@@ -179,7 +180,7 @@ pub fn hide(app: &AppHandle, reason: &str) {
         STATE.store(ST_HIDDEN, Ordering::SeqCst);
         tracing::debug!(reason, "hide: state → HIDDEN");
         let _ = win.hide();
-        let _ = app.emit("blink://hidden", ());
+        let _ = app.emit(EventNames::HIDDEN, ());
     }
     // 主窗口隐藏时联动隐藏右键菜单（保留窗口供下次复用）
     if let Some(menu_win) = app.get_webview_window("context-menu") {
@@ -1082,7 +1083,7 @@ pub fn hide_for_screenshot(app: &AppHandle) {
             apply_cloak(HWND(hwnd.0 as _), true);
         }
         let _ = win.hide();
-        let _ = app.emit("blink://hidden", ());
+        let _ = app.emit(EventNames::HIDDEN, ());
     }
     // 联动隐藏右键菜单（保留窗口供下次复用）
     if let Some(menu_win) = app.get_webview_window("context-menu") {

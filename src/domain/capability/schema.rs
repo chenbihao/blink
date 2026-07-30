@@ -1,21 +1,23 @@
-//! Capability Schema（0.9.7 §3.2）——能力描述的"身份证"。
+//! Capability Schema（0.9.7 §3.2 / 0.14.6 §3.1 收敛）——能力描述的"身份证"。
 //!
 //! **纯 JSON Schema**（不绑 Rust 类型），让 0.11 派生 CLI（schema → clap 参数）
 //! 和 MCP（schema → rmcp tool）零摩擦。
 //!
-//! 与 `ActionSchema` 结构相同但独立类型——Action 是交互动作的描述，
-//! Capability 是纯能力的描述，语义不同不混用。
-//!
-//! `to_rig_tool()` 是唯一触碰 rig 类型的触点（与 `ActionSchema::to_rig_tool` 同模式），
-//! rig breaking 只改这里，Capability trait 及全体实现零波及。
+//! **0.14.6 §3.1 变化**：`to_rig_tool()` 不再自己实现，委托 `ToolSchema::to_rig_tool()`。
+//! rig 触点从 2 处（ActionSchema + CapabilitySchema）收敛到 1 处（ToolSchema）。
+//! 三字段（name / description / parameters）保持扁平——所有构造点和字段访问零改动。
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+use crate::domain::schema::ToolSchema;
 
 /// 能力描述 schema——纯 JSON Schema，是协议的"身份证"。
 ///
 /// 三字段严格对齐 `rig::completion::ToolDefinition`——投影通过 `to_rig_tool()` 完成。
 /// `to_rig_tool()` / （0.11）`to_mcp_tool()` / `to_clap()` 都从这份 schema 派生。
+///
+/// **0.14.6 §3.1**：`to_rig_tool()` 委托 `ToolSchema`，rig 触点收敛到一处。
 ///
 /// **0.11.2 §2.3**：新增 `sensitive: bool` 字段（default false）——声明敏感
 /// （读隐私数据如应用列表/剪贴板历史），0.12 MCP server 暴露时需用户显式授权。
@@ -48,7 +50,7 @@ impl Default for CapabilitySchema {
 
 impl CapabilitySchema {
     /// 构造无参 schema（无参能力的 default）。
-    #[allow(dead_code)] // Step 2 能力实现消费
+    #[allow(dead_code)]
     pub fn empty(name: impl Into<String>, description: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -60,15 +62,16 @@ impl CapabilitySchema {
 
     /// 投影到 rig 的 `ToolDefinition`——AI 路由消费入口。
     ///
-    /// 本方法是**唯一**触碰 rig 类型的地方（与 `ActionSchema::to_rig_tool` 同模式）；
-    /// rig 若破坏 `ToolDefinition` 结构，只需要改这里。
-    #[allow(dead_code)] // Step 4 接 AI tool 池时消费
+    /// **0.14.6 §3.1**：委托 `ToolSchema::to_rig_tool()`，不再自己实现。
+    /// rig 触点全项目唯一在 `ToolSchema::to_rig_tool()`。
+    #[allow(dead_code)]
     pub fn to_rig_tool(&self) -> rig_core::completion::ToolDefinition {
-        rig_core::completion::ToolDefinition {
+        ToolSchema {
             name: self.name.clone(),
             description: self.description.clone(),
             parameters: self.parameters.clone(),
         }
+        .to_rig_tool()
     }
 }
 

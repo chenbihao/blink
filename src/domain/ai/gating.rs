@@ -32,7 +32,7 @@
 //! 选区里有 URL 是"翻译这段"场景常见组合,拦掉 AI 反而不合理;
 //! 而 query 本身就是 URL 说明用户想"打开链接"(内置动作已命中),AI 不必再插一脚。
 
-use crate::app::ai_config::AIConfig;
+use crate::domain::config::ai_config::AIConfig;
 use crate::domain::context::probe;
 
 /// 决策树输入——从 `AIConfig` 采出的最小闭包,不依赖 registry。
