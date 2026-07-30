@@ -83,7 +83,7 @@ export function renderAITierBanner() {
   if (!banner) return;
   const cfg = aiState.currentAIConfig;
   if (!cfg.enabled) {
-    banner.style.display = "none";
+    banner.classList.add('hidden');
     return;
   }
   const hasIssue = ["router", "light", "main"].some((tier) => {
@@ -99,10 +99,10 @@ export function renderAITierBanner() {
     (p.models || []).some((m) => m.id === mainAssign.model_id && m.enabled !== false),
   );
   if (!hasIssue && !mainMissing) {
-    banner.style.display = "none";
+    banner.classList.add('hidden');
     return;
   }
-  banner.style.display = "block";
+  banner.classList.remove('hidden');
   banner.textContent = mainMissing
     ? t("ai.tier.no_provider").replace(/^→\s*/, "")
     : t("ai.tier.degrade_to", { tier: t("ai.tier.main") });

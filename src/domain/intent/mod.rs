@@ -178,8 +178,8 @@ pub struct RankingHint {
 mod exec_arg_tests {
     use super::*;
 
-    #[test]
-    fn none_is_not_explicit() {
+    #[tokio::test]
+    async fn none_is_not_explicit() {
         let a = ExecArg::None;
         assert!(a.is_none());
         assert!(!a.is_explicit());
@@ -188,8 +188,8 @@ mod exec_arg_tests {
         assert_eq!(a.char_len(), 0);
     }
 
-    #[test]
-    fn user_explicit_roundtrip() {
+    #[tokio::test]
+    async fn user_explicit_roundtrip() {
         let a = ExecArg::UserExplicit("hello".to_string());
         assert!(!a.is_none());
         assert!(a.is_explicit());
@@ -202,21 +202,21 @@ mod exec_arg_tests {
         assert_eq!(a.char_len(), 5);
     }
 
-    #[test]
-    fn char_len_counts_chars_not_bytes() {
+    #[tokio::test]
+    async fn char_len_counts_chars_not_bytes() {
         // 「北京」= 2 chars / 6 bytes；filter_route 参数过短判定按字符数
         let a = ExecArg::UserExplicit("北京".to_string());
         assert_eq!(a.char_len(), 2);
     }
 
-    #[test]
-    fn default_is_none() {
+    #[tokio::test]
+    async fn default_is_none() {
         // 显式「无参数」语义，而非空字符串空值
         assert_eq!(ExecArg::default(), ExecArg::None);
     }
 
-    #[test]
-    fn ranking_hint_carries_plugin_id() {
+    #[tokio::test]
+    async fn ranking_hint_carries_plugin_id() {
         let h = RankingHint {
             boost_plugin_id: "builtin.translate".to_string(),
         };
@@ -1532,19 +1532,19 @@ mod tests {
         r
     }
 
-    fn run_route(r: &RuleRouter, q: &str) -> Route {
+    async fn run_route(r: &RuleRouter, q: &str) -> Route {
         let h = std::collections::HashMap::new();
         // 0.8.4 §5.3.1：route 断 Awareness 依赖,不再传 snapshot；hint=None
-        tauri::async_runtime::block_on(r.route(q, &h, None))
+        r.route(q, &h, None).await
     }
 
     // ── 0.8.5 §6.4 EngineTakeover 分派 ──────────────────────────
 
-    #[test]
-    fn engine_keyword_exact_produces_engine_takeover_no_arg() {
+    #[tokio::test]
+    async fn engine_keyword_exact_produces_engine_takeover_no_arg() {
         let r = router_with_rules(true);
         r.add_engine_rule("clipboard".into(), vec!["剪贴板".into(), "clip".into()]);
-        let route = run_route(&r, "剪贴板");
+        let route = run_route(&r, "剪贴板").await;
         assert!(matches!(
             &route,
             Route::EngineTakeover { engine_id, arg }
@@ -1552,11 +1552,11 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn engine_keyword_prefix_produces_engine_takeover_with_arg() {
+    #[tokio::test]
+    async fn engine_keyword_prefix_produces_engine_takeover_with_arg() {
         let r = router_with_rules(true);
         r.add_engine_rule("clipboard".into(), vec!["剪贴板".into(), "clip".into()]);
-        let route = run_route(&r, "剪贴板 hello");
+        let route = run_route(&r, "剪贴板 hello").await;
         assert!(matches!(
             &route,
             Route::EngineTakeover { engine_id, arg }
@@ -1565,11 +1565,11 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn engine_keyword_case_insensitive_english() {
+    #[tokio::test]
+    async fn engine_keyword_case_insensitive_english() {
         let r = router_with_rules(true);
         r.add_engine_rule("clipboard".into(), vec!["剪贴板".into(), "clip".into()]);
-        let route = run_route(&r, "CLIP world");
+        let route = run_route(&r, "CLIP world").await;
         assert!(matches!(
             &route,
             Route::EngineTakeover { engine_id, arg }
@@ -1578,82 +1578,82 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn engine_keyword_no_match_falls_through_to_plugin_rules() {
+    #[tokio::test]
+    async fn engine_keyword_no_match_falls_through_to_plugin_rules() {
         // 无 engine 命中时，plugin rules 正常生效（不因 engine 检查阻断）
         let r = router_with_rules(true);
         r.add_engine_rule("clipboard".into(), vec!["剪贴板".into(), "clip".into()]);
-        let route = run_route(&r, "echo hi");
+        let route = run_route(&r, "echo hi").await;
         assert!(matches!(
             route,
             Route::Takeover { plugin_id, .. } if plugin_id == "builtin.echo"
         ));
     }
 
-    #[test]
-    fn engine_keyword_disabled_when_takeover_off() {
+    #[tokio::test]
+    async fn engine_keyword_disabled_when_takeover_off() {
         // takeover_enabled=false 时 engine 也不独占（跟 plugin Takeover 降级同心智）
         let r = router_with_rules(false);
         r.add_engine_rule("clipboard".into(), vec!["剪贴板".into()]);
-        let route = run_route(&r, "剪贴板");
+        let route = run_route(&r, "剪贴板").await;
         // 应该走 Mixed（plugin echo 也匹配不到"剪贴板"，candidates 空）
         assert!(matches!(route, Route::Mixed { .. }));
     }
 
-    #[test]
-    fn auto_exact_is_priority() {
+    #[tokio::test]
+    async fn auto_exact_is_priority() {
         let r = router_with_rules(true);
-        let route = run_route(&r, "echo");
+        let route = run_route(&r, "echo").await;
         assert!(
             matches!(route, Route::Mixed { candidates } if candidates.len() == 1 && candidates[0].plugin_id == "builtin.echo" && matches!(candidates[0].surface, Surface::Priority))
         );
     }
 
-    #[test]
-    fn auto_prefix_is_takeover() {
+    #[tokio::test]
+    async fn auto_prefix_is_takeover() {
         let r = router_with_rules(true);
-        let route = run_route(&r, "echo hello");
+        let route = run_route(&r, "echo hello").await;
         assert!(
             matches!(route, Route::Takeover { plugin_id, arg, .. } if plugin_id == "builtin.echo" && arg == ExecArg::UserExplicit("hello".to_string()))
         );
     }
 
-    #[test]
-    fn explicit_takeover_always() {
+    #[tokio::test]
+    async fn explicit_takeover_always() {
         let r = router_with_rules(true);
-        let route = run_route(&r, "ip");
+        let route = run_route(&r, "ip").await;
         assert!(matches!(route, Route::Takeover { plugin_id, .. } if plugin_id == "builtin.ip"));
     }
 
-    #[test]
-    fn explicit_inline_always() {
+    #[tokio::test]
+    async fn explicit_inline_always() {
         let r = router_with_rules(true);
-        let route = run_route(&r, "dict hello");
+        let route = run_route(&r, "dict hello").await;
         assert!(
             matches!(route, Route::Mixed { candidates } if candidates.len() == 1 && candidates[0].plugin_id == "builtin.dict" && matches!(candidates[0].surface, Surface::Inline))
         );
     }
 
-    #[test]
-    fn global_switch_downgrades_takeover() {
+    #[tokio::test]
+    async fn global_switch_downgrades_takeover() {
         let r = router_with_rules(true);
         r.set_takeover_enabled(false);
-        let route = run_route(&r, "ip");
+        let route = run_route(&r, "ip").await;
         // ip 显式 takeover,但全局开关关闭 → 降级 priority
         assert!(
             matches!(route, Route::Mixed { candidates } if candidates.len() == 1 && candidates[0].plugin_id == "builtin.ip" && matches!(candidates[0].surface, Surface::Priority))
         );
     }
 
-    #[test]
-    fn no_hit_returns_empty_mixed() {
+    #[tokio::test]
+    async fn no_hit_returns_empty_mixed() {
         let r = router_with_rules(true);
-        let route = run_route(&r, "chrome");
+        let route = run_route(&r, "chrome").await;
         assert!(matches!(route, Route::Mixed { candidates } if candidates.is_empty()));
     }
 
-    #[test]
-    fn pinyin_initials_keyword_downgrades_to_inline() {
+    #[tokio::test]
+    async fn pinyin_initials_keyword_downgrades_to_inline() {
         // 0.8.1 §2.3 核心行为变更：首拼带参从 Takeover 降级 Inline（弱信号不独占）。
         let r = RuleRouter::new(true);
         r.add_keyword_rule(
@@ -1662,7 +1662,7 @@ mod tests {
             Surface::Auto,
             SurfaceView::List,
         );
-        let route = run_route(&r, "tq 北京");
+        let route = run_route(&r, "tq 北京").await;
         // 首拼带参 → Inline，而不是 Takeover
         assert!(matches!(
             route,
@@ -1674,8 +1674,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn pinyin_initials_keyword_no_arg_is_priority() {
+    #[tokio::test]
+    async fn pinyin_initials_keyword_no_arg_is_priority() {
         // 首拼无参 → Priority（不独占其他候选），带 hint。
         let r = RuleRouter::new(true);
         r.add_keyword_rule(
@@ -1684,7 +1684,7 @@ mod tests {
             Surface::Auto,
             SurfaceView::List,
         );
-        let route = run_route(&r, "tq");
+        let route = run_route(&r, "tq").await;
         assert!(matches!(
             route,
             Route::Mixed { candidates } if candidates.len() == 1
@@ -1695,8 +1695,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn pinyin_full_keyword_is_takeover() {
+    #[tokio::test]
+    async fn pinyin_full_keyword_is_takeover() {
         // 完整拼音 == 原文的等价强信号（0.8.1 §2.2）
         // 用户输入 "fanyi hello" 应该像输入 "翻译 hello" 一样直接 Takeover。
         let r = RuleRouter::new(true);
@@ -1706,15 +1706,15 @@ mod tests {
             Surface::Auto,
             SurfaceView::List,
         );
-        let route = run_route(&r, "fanyi hello");
+        let route = run_route(&r, "fanyi hello").await;
         assert!(matches!(
             route,
             Route::Takeover { plugin_id, arg, .. } if plugin_id == "builtin.translate" && arg == ExecArg::UserExplicit("hello".to_string())
         ));
     }
 
-    #[test]
-    fn pinyin_full_keyword_exact_is_priority() {
+    #[tokio::test]
+    async fn pinyin_full_keyword_exact_is_priority() {
         // 完整拼音无参 → Priority（等价原文精确命中）
         let r = RuleRouter::new(true);
         r.add_keyword_rule(
@@ -1723,7 +1723,7 @@ mod tests {
             Surface::Auto,
             SurfaceView::List,
         );
-        let route = run_route(&r, "fanyi");
+        let route = run_route(&r, "fanyi").await;
         assert!(matches!(
             route,
             Route::Mixed { candidates } if candidates.len() == 1
@@ -1732,8 +1732,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn latin_keyword_prefix_is_takeover() {
+    #[tokio::test]
+    async fn latin_keyword_prefix_is_takeover() {
         // 纯 ASCII keyword（三候选合一）→ Prefix Takeover，行为不变
         let r = RuleRouter::new(true);
         r.add_keyword_rule(
@@ -1742,15 +1742,15 @@ mod tests {
             Surface::Auto,
             SurfaceView::List,
         );
-        let route = run_route(&r, "translate hello");
+        let route = run_route(&r, "translate hello").await;
         assert!(matches!(
             route,
             Route::Takeover { plugin_id, arg, .. } if plugin_id == "builtin.translate" && arg == ExecArg::UserExplicit("hello".to_string())
         ));
     }
 
-    #[test]
-    fn multiple_takeovers_first_wins() {
+    #[tokio::test]
+    async fn multiple_takeovers_first_wins() {
         let r = RuleRouter::new(true);
         r.add_keyword_rule(
             "a".into(),
@@ -1764,12 +1764,12 @@ mod tests {
             Surface::Takeover,
             SurfaceView::List,
         );
-        let route = run_route(&r, "foo");
+        let route = run_route(&r, "foo").await;
         assert!(matches!(route, Route::Takeover { plugin_id, .. } if plugin_id == "a"));
     }
 
-    #[test]
-    fn regex_trigger_hit() {
+    #[tokio::test]
+    async fn regex_trigger_hit() {
         let r = RuleRouter::new(true);
         r.add_regex_rule(
             "builtin.hex".into(),
@@ -1778,12 +1778,12 @@ mod tests {
             SurfaceView::List,
         )
         .unwrap();
-        let route = run_route(&r, "0xFF");
+        let route = run_route(&r, "0xFF").await;
         assert!(matches!(route, Route::Takeover { plugin_id, .. } if plugin_id == "builtin.hex"));
     }
 
-    #[test]
-    fn regex_trigger_miss() {
+    #[tokio::test]
+    async fn regex_trigger_miss() {
         let r = RuleRouter::new(true);
         r.add_regex_rule(
             "builtin.hex".into(),
@@ -1792,12 +1792,12 @@ mod tests {
             SurfaceView::List,
         )
         .unwrap();
-        let route = run_route(&r, "123");
+        let route = run_route(&r, "123").await;
         assert!(matches!(route, Route::Mixed { candidates } if candidates.is_empty()));
     }
 
-    #[test]
-    fn regex_invalid_pattern_skipped() {
+    #[tokio::test]
+    async fn regex_invalid_pattern_skipped() {
         let r = RuleRouter::new(true);
         assert!(
             r.add_regex_rule("x".into(), "[", Surface::Auto, SurfaceView::List)
@@ -1805,8 +1805,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn regex_priority_when_takeover_disabled() {
+    #[tokio::test]
+    async fn regex_priority_when_takeover_disabled() {
         let r = RuleRouter::new(false); // 全局开关关闭
         r.add_regex_rule(
             "builtin.hex".into(),
@@ -1815,15 +1815,15 @@ mod tests {
             SurfaceView::List,
         )
         .unwrap();
-        let route = run_route(&r, "0xFF");
+        let route = run_route(&r, "0xFF").await;
         // 显式 takeover,但全局开关关闭 → 降级 priority
         assert!(
             matches!(route, Route::Mixed { candidates } if candidates.len() == 1 && candidates[0].plugin_id == "builtin.hex" && matches!(candidates[0].surface, Surface::Priority))
         );
     }
 
-    #[test]
-    fn suggest_completion_via_router() {
+    #[tokio::test]
+    async fn suggest_completion_via_router() {
         // suggest_completion 出口贯通：keyword 表收集 + compute_hint 联动
         let r = RuleRouter::new(true);
         r.add_keyword_rule(
@@ -1882,13 +1882,13 @@ mod tests {
         }
     }
 
-    fn run_route_with_snapshot(r: &RuleRouter, q: &str, _snapshot: ContextSnapshot) -> Route {
+    async fn run_route_with_snapshot(r: &RuleRouter, q: &str, _snapshot: ContextSnapshot) -> Route {
         let h = std::collections::HashMap::new();
         // 0.8.4 §5.3.1：route 断 Awareness 依赖,snapshot 不再被读；hint=None。
         // 函数签名保留(收 snapshot)以最小化调用点改动,但 snapshot 被忽略——
         // 这些测试验的是 kw 行为(route 基于 kw resolve surface),不依赖 context 进 route。
         // Surface Booster(hint boost)由 Task 7 单独加 run_route_with_hint 测试。
-        tauri::async_runtime::block_on(r.route(q, &h, None))
+        r.route(q, &h, None).await
     }
 
     /// 0.8.3 §4.4：空 query 场景验 best_suggestion（Context 走 Ghost 不产 candidate）。
@@ -1927,31 +1927,31 @@ mod tests {
         r
     }
 
-    #[test]
-    fn context_hit_empty_query_selection_english_triggers_translate() {
+    #[tokio::test]
+    async fn context_hit_empty_query_selection_english_triggers_translate() {
         // 0.8.3：空 query 时 route() 不产 candidate（Context 走 Ghost），
         // best_suggestion() 产 Context Suggestion。
         let r = translate_router_with_target("zh");
         let snapshot = snap_selection("hello world foo");
-        let route = run_route_with_snapshot(&r, "", snapshot.clone());
+        let route = run_route_with_snapshot(&r, "", snapshot.clone()).await;
         assert!(matches!(&route, Route::Mixed { candidates } if candidates.is_empty()));
         let sug = run_best_suggestion(&r, "", &snapshot).expect("expected context suggestion");
         assert_eq!(sug.source, SuggestionSource::Context);
         assert!(sug.replacement.contains("hello world foo"));
     }
 
-    #[test]
-    fn context_hit_clipboard_english_triggers_translate() {
+    #[tokio::test]
+    async fn context_hit_clipboard_english_triggers_translate() {
         let r = translate_router_with_target("zh");
         let snapshot = snap_clipboard("hello world foo");
-        let route = run_route_with_snapshot(&r, "", snapshot.clone());
+        let route = run_route_with_snapshot(&r, "", snapshot.clone()).await;
         assert!(matches!(&route, Route::Mixed { candidates } if candidates.is_empty()));
         let sug = run_best_suggestion(&r, "", &snapshot).expect("expected context suggestion");
         assert_eq!(sug.source, SuggestionSource::Context);
     }
 
-    #[test]
-    fn context_hit_selection_always_wins() {
+    #[tokio::test]
+    async fn context_hit_selection_always_wins() {
         // Selection 恒压 Clipboard——划词是显式有意识的用户行为，优先级最高。
         // 无论 Clipboard 何时更新，只要有 Selection 就选 Selection。
         let r = translate_router_with_target("zh");
@@ -1991,40 +1991,40 @@ mod tests {
         );
     }
 
-    #[test]
-    fn context_hit_url_guard_no_translation() {
+    #[tokio::test]
+    async fn context_hit_url_guard_no_translation() {
         // P0-2 关键回归：剪贴板是 URL → 翻译**不**触发（route 与 best_suggestion 一致）
         let r = translate_router_with_target("zh");
         let snapshot = snap_clipboard("https://github.com/anthropics/foo");
-        let route = run_route_with_snapshot(&r, "", snapshot.clone());
+        let route = run_route_with_snapshot(&r, "", snapshot.clone()).await;
         assert!(matches!(&route, Route::Mixed { candidates } if candidates.is_empty()));
         assert!(run_best_suggestion(&r, "", &snapshot).is_none());
     }
 
-    #[test]
-    fn context_hit_file_path_guard_no_translation() {
+    #[tokio::test]
+    async fn context_hit_file_path_guard_no_translation() {
         let r = translate_router_with_target("zh");
         let snapshot = snap_clipboard(r"C:\Users\a\file.txt");
         assert!(run_best_suggestion(&r, "", &snapshot).is_none());
     }
 
-    #[test]
-    fn context_hit_short_text_no_translation() {
+    #[tokio::test]
+    async fn context_hit_short_text_no_translation() {
         let r = translate_router_with_target("zh");
         let snapshot = snap_selection("hi");
         assert!(run_best_suggestion(&r, "", &snapshot).is_none());
     }
 
-    #[test]
-    fn context_hit_same_family_no_translation() {
+    #[tokio::test]
+    async fn context_hit_same_family_no_translation() {
         // target=zh + selection 是中文 → 不触发
         let r = translate_router_with_target("zh");
         let snapshot = snap_selection("你好世界");
         assert!(run_best_suggestion(&r, "", &snapshot).is_none());
     }
 
-    #[test]
-    fn context_target_auto_falls_back_to_app_language() {
+    #[tokio::test]
+    async fn context_target_auto_falls_back_to_app_language() {
         // target_lang="auto" → 回退 app_language="en"
         let r = RuleRouter::new(true);
         r.add_context_rule(
@@ -2046,8 +2046,8 @@ mod tests {
         assert_eq!(sug.source, SuggestionSource::Context);
     }
 
-    #[test]
-    fn context_target_missing_falls_back_to_app_language() {
+    #[tokio::test]
+    async fn context_target_missing_falls_back_to_app_language() {
         // resolver 里没配 target_lang → 回退 app_language="zh"
         let r = RuleRouter::new(true);
         r.add_context_rule(
@@ -2063,8 +2063,8 @@ mod tests {
         assert!(run_best_suggestion(&r, "", &snapshot).is_some());
     }
 
-    #[test]
-    fn context_hit_arg_truncated_at_2000_chars() {
+    #[tokio::test]
+    async fn context_hit_arg_truncated_at_2000_chars() {
         let r = translate_router_with_target("zh");
         let long_text = "a".repeat(3000);
         let snapshot = snap_selection(&long_text);
@@ -2074,8 +2074,8 @@ mod tests {
         assert!(sug.replacement.contains('…'));
     }
 
-    #[test]
-    fn context_hit_keyword_takeover_beats_context() {
+    #[tokio::test]
+    async fn context_hit_keyword_takeover_beats_context() {
         // keyword: "翻译" Takeover + Context 命中同 plugin → surface = Takeover(kw 强信号)，arg 用 kw
         let r = RuleRouter::new(true);
         r.add_keyword_rule(
@@ -2097,7 +2097,7 @@ mod tests {
             "zh",
         )));
         let route =
-            run_route_with_snapshot(&r, "翻译 hello", snap_clipboard("some other english text"));
+            run_route_with_snapshot(&r, "翻译 hello", snap_clipboard("some other english text")).await;
         // 走 Takeover 且 arg 用 keyword_arg="hello"
         assert!(matches!(
             route,
@@ -2106,8 +2106,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn context_hit_two_plugins_coexist() {
+    #[tokio::test]
+    async fn context_hit_two_plugins_coexist() {
         // 0.8.3：两个 plugin 都声明 TextIsNonTargetLang,空 query 时 best_suggestion 取 top-1
         // （不产多 candidate；具体谁赢由 confidence 决定,两者相同则按注册顺序）。
         let r = RuleRouter::new(true);
@@ -2131,7 +2131,7 @@ mod tests {
                 .with("builtin.search_selection", "target_lang", "zh"),
         ));
         // route() 空 query 不产 candidate
-        let route = run_route_with_snapshot(&r, "", snap_selection("hello world foo"));
+        let route = run_route_with_snapshot(&r, "", snap_selection("hello world foo")).await;
         assert!(matches!(&route, Route::Mixed { candidates } if candidates.is_empty()));
         // best_suggestion 只产 top-1
         let sug = run_best_suggestion(&r, "", &snap_selection("hello world foo"))
@@ -2139,8 +2139,8 @@ mod tests {
         assert_eq!(sug.source, SuggestionSource::Context);
     }
 
-    #[test]
-    fn context_hit_no_resolver_translate_silent_miss() {
+    #[tokio::test]
+    async fn context_hit_no_resolver_translate_silent_miss() {
         // 没 set_setting_resolver → target 恒 app_language(默认 zh) → 英文选区仍能触发翻译
         // （这里检验默认 language 兜底不至于让路由完全瘫痪；生产环境总是有 resolver）
         let r = RuleRouter::new(true);
@@ -2156,8 +2156,8 @@ mod tests {
         assert!(run_best_suggestion(&r, "", &snapshot).is_some());
     }
 
-    #[test]
-    fn context_hit_reload_clears_context_rules() {
+    #[tokio::test]
+    async fn context_hit_reload_clears_context_rules() {
         // reload_plugin_triggers 应清掉旧 context 规则
         let r = translate_router_with_target("zh");
         let snapshot = snap_selection("hello world foo");
@@ -2169,8 +2169,8 @@ mod tests {
         assert!(run_best_suggestion(&r, "", &snapshot).is_none());
     }
 
-    #[test]
-    fn context_hit_inline_declared_downgrades_to_priority() {
+    #[tokio::test]
+    async fn context_hit_inline_declared_downgrades_to_priority() {
         // manifest 侧 surface=inline → warn+降级 Priority（0.8.2 收窄）。
         // 0.8.3：空 query 不再产 candidate → 用「双源 merge_hits」验降级效果:
         // keyword 命中 Priority + context 命中（Inline→Priority）同 plugin → merge surface = Priority
@@ -2194,7 +2194,7 @@ mod tests {
             "zh",
         )));
         // 非空 query: `翻译` 无参 → Priority；ctx 补 Inline → merge_hits surface_max = Priority
-        let route = run_route_with_snapshot(&r, "翻译", snap_selection("hello world foo"));
+        let route = run_route_with_snapshot(&r, "翻译", snap_selection("hello world foo")).await;
         if let Route::Mixed { candidates } = route {
             assert_eq!(candidates.len(), 1);
             // ctx 侧 Inline 声明已被 add_context_rule warn+降级为 Priority；merge 后依然 Priority
@@ -2204,28 +2204,28 @@ mod tests {
         }
     }
 
-    #[test]
-    fn truncate_arg_short_unchanged() {
+    #[tokio::test]
+    async fn truncate_arg_short_unchanged() {
         assert_eq!(truncate_arg("hello"), "hello");
         assert_eq!(truncate_arg(""), "");
     }
 
-    #[test]
-    fn truncate_arg_exact_boundary() {
+    #[tokio::test]
+    async fn truncate_arg_exact_boundary() {
         let s: String = "a".repeat(2000);
         assert_eq!(truncate_arg(&s), s); // 恰好 2000 不加省略号
     }
 
-    #[test]
-    fn truncate_arg_long_cuts_with_ellipsis() {
+    #[tokio::test]
+    async fn truncate_arg_long_cuts_with_ellipsis() {
         let s: String = "a".repeat(2500);
         let out = truncate_arg(&s);
         assert_eq!(out.chars().count(), 2001);
         assert!(out.ends_with('…'));
     }
 
-    #[test]
-    fn truncate_arg_multibyte_correct_boundary() {
+    #[tokio::test]
+    async fn truncate_arg_multibyte_correct_boundary() {
         // 3000 个中文字符 → 截到 2000 个 + '…'
         let s: String = "你".repeat(3000);
         let out = truncate_arg(&s);
@@ -2234,8 +2234,8 @@ mod tests {
 
     // ── 0.8.3 §4.4 Suggestion 通道单测 ────────────────────────────
 
-    #[test]
-    fn suggestion_keyword_first_letters_returns_keyword_source() {
+    #[tokio::test]
+    async fn suggestion_keyword_first_letters_returns_keyword_source() {
         // Keyword 分支：非空 query "fy" 命中"翻译"首拼 → Suggestion { source=Keyword }
         let r = RuleRouter::new(true);
         r.add_keyword_rule(
@@ -2253,8 +2253,8 @@ mod tests {
         assert!((0.0..=1.0).contains(&sug.confidence));
     }
 
-    #[test]
-    fn suggestion_keyword_exact_confidence_is_one() {
+    #[tokio::test]
+    async fn suggestion_keyword_exact_confidence_is_one() {
         // Keyword exact 命中 → confidence 恒 1.0（f64::INFINITY 归一 min(_,1.0)）
         let r = RuleRouter::new(true);
         r.add_keyword_rule(
@@ -2271,8 +2271,8 @@ mod tests {
         assert_eq!(sug.confidence, 1.0);
     }
 
-    #[test]
-    fn suggestion_context_only_on_empty_query() {
+    #[tokio::test]
+    async fn suggestion_context_only_on_empty_query() {
         // 非空 query 不显示 Context Ghost——用户已输入内容即意图表达，环境感知会干扰
         let r = translate_router_with_target("zh");
         let snap = snap_selection("hello world foo");
@@ -2284,16 +2284,16 @@ mod tests {
         assert!(sug.is_none(), "非空 query 不应显示 Context Ghost");
     }
 
-    #[test]
-    fn suggestion_context_url_no_translate() {
+    #[tokio::test]
+    async fn suggestion_context_url_no_translate() {
         // URL 护栏：即使空 query,剪贴板是 URL 不触发翻译 Ghost
         let r = translate_router_with_target("zh");
         let snap = snap_clipboard("https://github.com/x/y");
         assert!(r.best_suggestion("", &snap, 0.7).is_none());
     }
 
-    #[test]
-    fn suggestion_disabled_binding_skipped() {
+    #[tokio::test]
+    async fn suggestion_disabled_binding_skipped() {
         // 0.8.6：用户 disable 该 binding → Ghost 不出
         let r = translate_router_with_target("zh");
         // 空 query 时能命中
@@ -2310,8 +2310,8 @@ mod tests {
         assert!(r.best_suggestion("", &snap, 0.7).is_some());
     }
 
-    #[test]
-    fn suggestion_target_plugin_disabled_skipped() {
+    #[tokio::test]
+    async fn suggestion_target_plugin_disabled_skipped() {
         // 插件被 disable → resolver.is_enabled=false → context binding 跳过
         struct DisabledResolver;
         impl crate::domain::plugin::PluginSettingResolver for DisabledResolver {
@@ -2335,8 +2335,8 @@ mod tests {
         assert!(r.best_suggestion("", &snap, 0.7).is_none());
     }
 
-    #[test]
-    fn suggestion_none_on_empty_query_no_context_hit() {
+    #[tokio::test]
+    async fn suggestion_none_on_empty_query_no_context_hit() {
         // 空 query + 无 Context 命中 → None（不兜底历史，§4.12 备忘）
         let r = RuleRouter::new(true);
         r.add_keyword_rule(
@@ -2349,8 +2349,8 @@ mod tests {
         assert!(r.best_suggestion("", &snap, 0.7).is_none());
     }
 
-    #[test]
-    fn suggestion_multi_context_hits_takes_top_confidence() {
+    #[tokio::test]
+    async fn suggestion_multi_context_hits_takes_top_confidence() {
         // 多命中：URL(0.90) > TextIsNonTargetLang(0.75) → Ghost 只显 URL 那一条
         //
         // 构造：两条 Context binding 都指向"翻译"（避免额外插件依赖）；实际情况一般是
@@ -2383,8 +2383,8 @@ mod tests {
         assert!(sug.replacement.contains("open_url"));
     }
 
-    #[test]
-    fn suggestion_context_confidence_url_higher_than_lang() {
+    #[tokio::test]
+    async fn suggestion_context_confidence_url_higher_than_lang() {
         // 纯函数级验证 confidence 排序（不依赖 route 全流程）。
         // 0.8.3 收尾：context_confidence 签名从 (&when, &snapshot) 改为 (&when, Option<AwarenessSource>),
         // origin 从 Hit 带来而非 snapshot 推断。
@@ -2401,8 +2401,8 @@ mod tests {
         assert!(c_url > c_lang, "URL(0.90) 应 > NonTargetLang(0.75)");
     }
 
-    #[test]
-    fn suggestion_context_selection_weight_higher_than_clipboard() {
+    #[tokio::test]
+    async fn suggestion_context_selection_weight_higher_than_clipboard() {
         // 有选区 → src_w=1.0；无选区 fallback clipboard → src_w=0.85
         // 0.8.3 收尾：直接传 origin,不再靠 snapshot 反推。
         let when = ContextTrigger::TextIsNonTargetLang {
@@ -2413,8 +2413,8 @@ mod tests {
         assert!(c_sel > c_clip);
     }
 
-    #[test]
-    fn suggestion_disabled_by_autosuggest_returns_none_upstream() {
+    #[tokio::test]
+    async fn suggestion_disabled_by_autosuggest_returns_none_upstream() {
         // best_suggestion 本身不查 autosuggest_enabled（那是 SearchService 层）,
         // 但走 keyword 分支时 min_score 过高会返回 None。等效验证。
         let r = RuleRouter::new(true);
@@ -2429,8 +2429,8 @@ mod tests {
         assert!(r.best_suggestion("fan", &snap, 1.5).is_none());
     }
 
-    #[test]
-    fn suggestion_binding_key_format_double_colon() {
+    #[tokio::test]
+    async fn suggestion_binding_key_format_double_colon() {
         // §4.6 决策：双冒号避开 target_id 内部点/冒号
         assert_eq!(
             binding_key("builtin.translate", "text_is_non_target_lang"),
@@ -2442,8 +2442,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn suggestion_trigger_key_snake_case() {
+    #[tokio::test]
+    async fn suggestion_trigger_key_snake_case() {
         // 对齐 manifest 侧 snake_case
         assert_eq!(
             trigger_key(&ContextTrigger::ClipboardIsUrl),
@@ -2465,8 +2465,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn suggestion_replacement_falls_back_to_id_tail_when_no_keyword_rule() {
+    #[tokio::test]
+    async fn suggestion_replacement_falls_back_to_id_tail_when_no_keyword_rule() {
         // 无 keyword rule 时 replacement fallback 到 id 末段（保历史行为）
         let r = translate_router_with_target("zh");
         let snap = snap_selection("hello world foo");
@@ -2481,8 +2481,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn suggestion_replacement_prefers_cjk_keyword_in_zh_ui() {
+    #[tokio::test]
+    async fn suggestion_replacement_prefers_cjk_keyword_in_zh_ui() {
         // 0.8.3 §4.13 P0 修订：zh UI 下 replacement 应用中文 keyword「翻译」而非 `translate`,
         // 保证 Tab 采纳后能命中 keyword 表 → 走 Takeover。**这是产品闭环关键**。
         let r = RuleRouter::new(true);
@@ -2523,8 +2523,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn suggestion_replacement_prefers_ascii_keyword_in_en_ui() {
+    #[tokio::test]
+    async fn suggestion_replacement_prefers_ascii_keyword_in_en_ui() {
         // en UI 下 replacement 应用英文 keyword `translate`
         let r = RuleRouter::new(true);
         r.add_keyword_rule(
@@ -2564,8 +2564,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn suggestion_display_uses_localized_manifest_name() {
+    #[tokio::test]
+    async fn suggestion_display_uses_localized_manifest_name() {
         // 0.8.3 §4.13 P0 修订：display 应用 resolver.get_display_name（本地化 manifest.name）
         // 而非 id 末段。zh UI 显「翻译 "hello..."」,en UI 显「Translate "hello..."」。
         struct NamedResolver {
@@ -2628,8 +2628,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn suggestion_ghost_replacement_hits_takeover_via_route() {
+    #[tokio::test]
+    async fn suggestion_ghost_replacement_hits_takeover_via_route() {
         // 0.8.3 §4.13 P0 闭环单测：Ghost.replacement 喂回 route() 必须能命中 keyword Takeover。
         // 这条闭环旧实现（fallback 到 id 末段 `translate`）+ 无 keyword rule 会断链;
         // 新实现从 rules 反查偏好字符集的 keyword,确保能命中。
@@ -2663,7 +2663,7 @@ mod tests {
 
         // 2. 用 replacement 走 route(),期待 Takeover 命中 builtin.translate
         //    （keyword「翻译」+ arg 触发 Prefix 分支 → resolve_surface = Takeover）
-        let route = run_route_with_snapshot(&r, &replacement, snap);
+        let route = run_route_with_snapshot(&r, &replacement, snap).await;
         match route {
             Route::Takeover { plugin_id, arg, .. } => {
                 assert_eq!(plugin_id, "builtin.translate");
@@ -2680,8 +2680,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn suggestion_context_arg_truncated_in_display() {
+    #[tokio::test]
+    async fn suggestion_context_arg_truncated_in_display() {
         // 长文本：display 截 40 字符 + `…` + 引号收尾（build_context_suggestion_text 内部）
         let r = translate_router_with_target("zh");
         let long_text = "hello ".repeat(200); // > 40 字符
@@ -2696,8 +2696,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn suggestion_non_empty_query_no_context_ghost() {
+    #[tokio::test]
+    async fn suggestion_non_empty_query_no_context_ghost() {
         // 非空 query 不显示 Context Ghost——用户已输入内容即意图表达，环境感知会干扰
         let r = translate_router_with_target("zh");
         let snap = snap_selection("hello world foo");
@@ -2710,8 +2710,8 @@ mod tests {
     // 根因：merge_hits_keyword_only 里 `existing.arg = ctx_hit.arg` 隐式代参。
     // 修复：删掉这行,Context 只加 surface,不代参。
 
-    #[test]
-    fn merge_hits_does_not_inject_ctx_arg_when_kw_arg_empty() {
+    #[tokio::test]
+    async fn merge_hits_does_not_inject_ctx_arg_when_kw_arg_empty() {
         // 首拼 `fy` 命中「翻译」keyword（arg=""）,剪贴板有英文 context 命中 → merge
         // 后 arg 仍应为空,不应被 ctx.arg 代填。
         let r = RuleRouter::new(true);
@@ -2734,7 +2734,7 @@ mod tests {
             "zh",
         )));
         let snap = snap_clipboard("hello world foo bar");
-        let route = run_route_with_snapshot(&r, "fy", snap);
+        let route = run_route_with_snapshot(&r, "fy", snap).await;
         // 首拼弱信号 + 无参 → Priority（不 Takeover）,arg 保持空
         if let Route::Mixed { candidates } = route {
             let translate = candidates
@@ -2747,8 +2747,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn merge_hits_context_surface_boost_still_works() {
+    #[tokio::test]
+    async fn merge_hits_context_surface_boost_still_works() {
         // Context 加 surface 的功能保留 —— 用户打 `翻译`（无参 Priority）+ 剪贴板英文,
         // Context 命中同 plugin 应把 Priority 保住（surface_max 不会降级）,
         // 但 arg 仍应保持空（用户没给参数）。
@@ -2772,7 +2772,7 @@ mod tests {
             "zh",
         )));
         let snap = snap_clipboard("hello world foo bar");
-        let route = run_route_with_snapshot(&r, "翻译", snap);
+        let route = run_route_with_snapshot(&r, "翻译", snap).await;
         if let Route::Mixed { candidates } = route {
             let translate = candidates
                 .iter()
@@ -2789,8 +2789,8 @@ mod tests {
 
     // ── 0.8.4 §5.3.1 Surface Booster（RankingHint）──────────────────
 
-    #[test]
-    fn ranking_hint_boosts_surface_without_touching_arg() {
+    #[tokio::test]
+    async fn ranking_hint_boosts_surface_without_touching_arg() {
         // 0.8.4 §5.4 边界回归：RankingHint 只升 surface（排序）,不动 arg、不召回新候选。
         // 构造首拼带参 kw hit（InitialsPrefix → Inline）,验 hint 把它 boost 到 Priority,
         // 同时 arg 保持用户显式输入不变。
@@ -2804,7 +2804,7 @@ mod tests {
         let h = std::collections::HashMap::new();
 
         // 无 hint：tq 北京 → InitialsPrefix（首拼带参,弱信号）→ Inline,arg=北京
-        let candidates = match tauri::async_runtime::block_on(r.route("tq 北京", &h, None)) {
+        let candidates = match r.route("tq 北京", &h, None).await {
             Route::Mixed { candidates } => candidates,
             other => panic!("无 hint 应 Mixed,got {:?}", other),
         };
@@ -2819,7 +2819,7 @@ mod tests {
         let hint = RankingHint {
             boost_plugin_id: "builtin.weather".into(),
         };
-        let candidates = match tauri::async_runtime::block_on(r.route("tq 北京", &h, Some(&hint)))
+        let candidates = match r.route("tq 北京", &h, Some(&hint)).await
         {
             Route::Mixed { candidates } => candidates,
             other => panic!("有 hint 应 Mixed,got {:?}", other),
@@ -2838,8 +2838,8 @@ mod tests {
 
     // ── 0.8.3 §4.9 origin 单测 ────────────────────────────────────
 
-    #[test]
-    fn suggestion_origin_selection_when_selected_text_present() {
+    #[tokio::test]
+    async fn suggestion_origin_selection_when_selected_text_present() {
         // 选中英文 → origin = Selection
         let r = translate_router_with_target("zh");
         let snap = snap_selection("hello world foo");
@@ -2849,8 +2849,8 @@ mod tests {
         assert_eq!(sug.origin, Some(SuggestionOrigin::Selection));
     }
 
-    #[test]
-    fn suggestion_origin_clipboard_when_only_clipboard() {
+    #[tokio::test]
+    async fn suggestion_origin_clipboard_when_only_clipboard() {
         // 只剪贴板有内容 → origin = Clipboard
         let r = translate_router_with_target("zh");
         let snap = snap_clipboard("hello world foo");
@@ -2860,8 +2860,8 @@ mod tests {
         assert_eq!(sug.origin, Some(SuggestionOrigin::Clipboard));
     }
 
-    #[test]
-    fn suggestion_origin_clipboard_for_url_trigger() {
+    #[tokio::test]
+    async fn suggestion_origin_clipboard_for_url_trigger() {
         // ClipboardIsUrl trigger 恒 Clipboard,不管选区是否有内容
         let r = RuleRouter::new(true);
         r.add_context_rule(
@@ -2884,8 +2884,8 @@ mod tests {
         assert_eq!(sug.origin, Some(SuggestionOrigin::Clipboard));
     }
 
-    #[test]
-    fn suggestion_origin_none_for_keyword_branch() {
+    #[tokio::test]
+    async fn suggestion_origin_none_for_keyword_branch() {
         // Keyword 分支恒 origin=None
         let r = RuleRouter::new(true);
         r.add_keyword_rule(
@@ -2902,8 +2902,8 @@ mod tests {
         assert!(sug.origin.is_none());
     }
 
-    #[test]
-    fn suggestion_origin_matches_confidence_source() {
+    #[tokio::test]
+    async fn suggestion_origin_matches_confidence_source() {
         // 端到端 origin 传导（0.8.3 收尾 · awareness 重构验收）：
         // - snap.selection 非空 → Hit.origin=Selection → confidence 用 selection 权重(1.0),
         //   Suggestion.origin=Selection。
@@ -2944,8 +2944,8 @@ mod tests {
     // 死角 case：query="翻译 tab"，keyword 表里"翻译"因为带空格 fuzzy 不达分数阈值 →
     // Keyword 分支返回 None → 落到 Context fallback → 未加护栏时会产同一 Suggestion。
 
-    #[test]
-    fn context_suggestion_silenced_after_keyword_accepted() {
+    #[tokio::test]
+    async fn context_suggestion_silenced_after_keyword_accepted() {
         // 核心回归：Tab 采纳 Context Ghost `翻译 "tab"` 后 query 变 `翻译 tab`，
         // 此时 keyword fuzzy 因带空格不达阈值 → 走 Context fallback → 护栏必须静默。
         let r = translate_router_with_target("zh");
@@ -2974,8 +2974,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn context_suggestion_silenced_with_pinyin_keyword_forms() {
+    #[tokio::test]
+    async fn context_suggestion_silenced_with_pinyin_keyword_forms() {
         // 拼音三形式同 plugin 采纳后一样要静默。直接测 `context_suggestion` 避开
         // `best_suggestion` 里 Keyword-first fuzzy 分支的干扰——因为拼音短 query
         // 有可能被 Keyword 分支先接住返回 Keyword Suggestion，测不到 Context 护栏。
@@ -3025,8 +3025,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn query_hits_plugin_keyword_matches_all_forms() {
+    #[tokio::test]
+    async fn query_hits_plugin_keyword_matches_all_forms() {
         // helper 单测：三种 keyword 形式（原文/pinyin_full/pinyin_initials）都算命中。
         let r = RuleRouter::new(true);
         r.add_keyword_rule(

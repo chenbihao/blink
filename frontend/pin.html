@@ -24,7 +24,7 @@
     </div>
 
     <!-- 右键菜单（0.11.9-f：加 OCR / 翻译 项） -->
-    <div id="ctx-menu" style="display:none">
+    <div id="ctx-menu" class="hidden">
       <button id="ctx-ocr">识别文字</button>
       <button id="ctx-translate">翻译文字</button>
       <div class="ctx-sep"></div>
@@ -32,7 +32,7 @@
     </div>
 
     <!-- OCR 结果浮层（0.11.9-f：pin 窗口内 OCR 后展示） -->
-    <div id="pin-ocr-panel" style="display:none">
+    <div id="pin-ocr-panel" class="hidden">
       <div class="pin-ocr-header">
         <div class="pin-ocr-tabs">
           <button class="pin-ocr-tab active" data-tab="source">原文</button>
@@ -50,6 +50,7 @@
 
     <script type="module">
       import { invoke, screenshotPinTransform, ocrImage, translateText } from "./js/api.js";
+import { normalizeError } from "./js/tauri.js";
       import { applyThemeFromConfig } from "./js/theme.js";
 
       // 应用主题（右键菜单 / OCR 面板的 token 引用随用户主题切换）
@@ -273,14 +274,14 @@
       });
 
       function showCtxMenu(x, y) {
-        ctxMenu.style.display = 'flex';
+        ctxMenu.classList.remove('hidden');
         ctxMenu.style.left = x + 'px';
         ctxMenu.style.top = y + 'px';
         isCtxOpen = true;
       }
 
       function hideCtxMenu() {
-        ctxMenu.style.display = 'none';
+        ctxMenu.classList.add('hidden');
         isCtxOpen = false;
       }
 
@@ -335,7 +336,7 @@
         pinOcrTabTranslated.removeAttribute('data-stale');
         pinOcrTranslated.removeAttribute('data-stale');
         showPinOcrTab('source');
-        pinOcrPanel.style.display = 'flex';
+        pinOcrPanel.classList.remove('hidden');
       }
 
       function showPinOcrTab(name) {
@@ -357,7 +358,7 @@
       });
 
       document.getElementById('pin-ocr-close').addEventListener('click', () => {
-        pinOcrPanel.style.display = 'none';
+        pinOcrPanel.classList.add('hidden');
       });
 
       async function doPinTranslate() {
@@ -373,7 +374,8 @@
           pinOcrTabTranslated.removeAttribute('data-stale');
           pinOcrTranslated.removeAttribute('data-stale');
         } catch (e) {
-          pinOcrTranslated.value = `翻译失败：${e}`;
+          const err = normalizeError(e);
+          pinOcrTranslated.value = `翻译失败：${err.message}`;
         } finally {
           pinOcrTranslateBtn.disabled = false;
           pinOcrTranslateBtn.textContent = '翻译';
@@ -388,7 +390,7 @@
         if (value) {
           navigator.clipboard.writeText(value).catch((e) => console.error('复制失败', e));
         }
-        pinOcrPanel.style.display = 'none';
+        pinOcrPanel.classList.add('hidden');
       });
 
       async function runPinOcr(autoTranslate) {
@@ -402,8 +404,9 @@
             setTimeout(doPinTranslate, 0);
           }
         } catch (e) {
-          console.error('pin OCR 失败', e);
-          showPinOcrPanel(`识别失败：${e}`);
+          const err = normalizeError(e);
+          console.error(`[pin OCR] [${err.code}] ${err.message}`);
+          showPinOcrPanel(`识别失败：${err.message}`);
         } finally {
           ocrBusy = false;
         }

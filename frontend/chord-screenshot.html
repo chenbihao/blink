@@ -10,16 +10,16 @@
     <canvas id="canvas"></canvas>
 
     <!-- 标注 canvas：覆盖在裁剪区上，显示标注内容（0.11.7-b） -->
-    <canvas id="annot-canvas"></canvas>
+    <canvas id="annot-canvas" class="hidden"></canvas>
 
     <!-- OCR 命中 canvas（0.11.9-c）：阅读模式下画 word 高亮层 -->
     <canvas id="ocr-hit-canvas" aria-hidden="true"></canvas>
 
     <!-- 选区尺寸提示 -->
-    <div id="size-hint"></div>
+    <div id="size-hint" class="hidden"></div>
 
     <!-- 错误提示 -->
-    <div id="error-hint"></div>
+    <div id="error-hint" class="hidden"></div>
 
     <!-- 选区中央加载转圈（OCR/翻译进行中） -->
     <div id="sel-loading" class="sel-loading" hidden>
@@ -31,7 +31,7 @@
     <div id="stroke-cursor" class="stroke-cursor" aria-hidden="true"></div>
 
     <!-- 工具栏（0.11.7-a/b，0.11.8-a 分组重组 + 圆润化 + 拖动 handle） -->
-    <div id="toolbar" role="toolbar" aria-label="截图工具栏">
+    <div id="toolbar" class="hidden" role="toolbar" aria-label="截图工具栏">
       <!-- 拖动 handle（左侧）：mousedown 拖动整条工具栏 -->
       <div class="toolbar-drag-handle" id="toolbar-drag" title="拖动工具栏">
         <span class="drag-dots"></span>

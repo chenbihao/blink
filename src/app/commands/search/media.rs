@@ -165,18 +165,26 @@ pub fn screenshot_pin_transform(
 /// 0.11.7-c：OCR 识别图片中的文字，返回 `{text, lines}`。
 ///
 /// 0.11.7-f：改走 `ocr_engine::backend()` 注入的后端（测试可替换）。
+///
+/// **0.14.7 W3**：返回 `CommandError`（结构化错误协议）。
 #[tauri::command]
 pub async fn ocr_image(
     _app: tauri::AppHandle,
     png_data: Vec<u8>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, crate::app::command_error::CommandError> {
     let backend = crate::domain::capability::builtins::ocr_engine::backend();
     let result = backend
         .recognize(&png_data)
         .await
-        .map_err(|e| format!("OCR 识别失败: {e}"))?;
+        .map_err(crate::app::command_error::CommandError::from)?;
 
-    let json = serde_json::to_value(&result).map_err(|e| format!("序列化 OCR 结果失败: {e}"))?;
+    let json = serde_json::to_value(&result).map_err(|e| {
+        crate::app::command_error::CommandError::new(
+            "internal_error",
+            &format!("序列化 OCR 结果失败: {e}"),
+            false,
+        )
+    })?;
     tracing::debug!(text_len = result.text.len(), "OCR 识别完成");
     Ok(json)
 }
@@ -195,18 +203,22 @@ pub async fn ocr_image(
 /// - `target_lang`: 目标语言代码(zh/en/ja/ko);`None` 时插件读 setting 默认值
 ///
 /// **失败模式**：
-/// - 插件未启用 / manifest 未加载 → 返 `"翻译插件未安装或未启用"`
+/// - 插件未启用 / manifest 未加载 → 返 `not_found` code
 /// - 插件返回空/错误 → 传递原错误信息
-/// - 插件返回非 Items 结果 → `"翻译插件返回意外的结果类型"`(理论不会,防御)
+/// - 插件返回非 Items 结果 → `internal_error` code (理论不会,防御)
+///
+/// **0.14.7 W3**：返回 `CommandError`（结构化错误协议）。
 #[tauri::command]
 pub async fn translate_text(
     app: tauri::AppHandle,
     text: String,
     target_lang: Option<String>,
-) -> Result<String, String> {
+) -> Result<String, crate::app::command_error::CommandError> {
+    use crate::app::command_error::CommandError;
+
     let trimmed = text.trim();
     if trimmed.is_empty() {
-        return Err("翻译文本不能为空".into());
+        return Err(CommandError::new("invalid_args", "翻译文本不能为空", false));
     }
 
     let registry = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
@@ -214,7 +226,11 @@ pub async fn translate_text(
     const TRANSLATE_CAPABILITY_ID: &str = "builtin_translate_translate";
     if registry.get(TRANSLATE_CAPABILITY_ID).is_none() {
         tracing::warn!("translate_text: 翻译插件未注册");
-        return Err("翻译插件未安装或未启用".into());
+        return Err(CommandError::new(
+            "not_found",
+            "翻译插件未安装或未启用",
+            false,
+        ));
     }
 
     // 构造插件 tool arguments —— text 必填,target_lang 有值才传(None 让插件读 setting)
@@ -253,7 +269,7 @@ pub async fn translate_text(
     let result = registry
         .invoke(TRANSLATE_CAPABILITY_ID, arguments, &ctx)
         .await
-        .map_err(|e| format!("翻译执行失败: {e}"))?;
+        .map_err(CommandError::from)?;
 
     match result {
         crate::domain::capability::CapabilityResult::Items { items } => {
@@ -267,7 +283,11 @@ pub async fn translate_text(
                         .map(str::to_string)
                 })
                 .filter(|s| !s.is_empty())
-                .ok_or_else(|| "翻译插件返回空结果".to_string())?;
+                .ok_or_else(|| CommandError::new(
+                    "internal_error",
+                    "翻译插件返回空结果",
+                    false,
+                ))?;
             tracing::info!(
                 src_len = trimmed.chars().count(),
                 dst_len = translated.chars().count(),
@@ -281,7 +301,11 @@ pub async fn translate_text(
         }
         other => {
             tracing::warn!(?other, "translate_text: 翻译插件返回意外的结果");
-            Err("翻译插件返回意外的结果类型".into())
+            Err(CommandError::new(
+                "internal_error",
+                "翻译插件返回意外的结果类型",
+                false,
+            ))
         }
     }
 }
@@ -291,12 +315,14 @@ pub async fn translate_text(
 /// 首选一次调用插件 `translate_batch` tool，由插件加 tag 后单次请求翻译引擎并保序拆回。
 /// 插件版本不匹配、tag 被引擎破坏或结构化结果异常时，降级为并发单行 `translate_text`，
 /// 保证截图翻译功能不因批量优化失败而不可用。
+///
+/// **0.14.7 W3**：返回 `CommandError`（结构化错误协议）。
 #[tauri::command]
 pub async fn translate_lines(
     app: tauri::AppHandle,
     lines: Vec<String>,
     target_lang: Option<String>,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, crate::app::command_error::CommandError> {
     if lines.is_empty() {
         return Ok(Vec::new());
     }

@@ -46,23 +46,39 @@ impl TauriDomainEnv {
     }
 
     /// 注入 CapabilityRegistry（构造后调用）。
+    ///
+    /// 重复注入不会覆盖首次值，仅记录 `warn`。
     pub fn set_cap_registry(&self, reg: Arc<CapabilityRegistry>) {
-        let _ = self.cap_registry.set(reg);
+        if self.cap_registry.set(reg).is_err() {
+            tracing::warn!(slot = "cap_registry", "重复注入 CapabilityRegistry，已忽略（首次注入优先）");
+        }
     }
 
     /// 注入 PluginEngine（构造后调用）。
+    ///
+    /// 重复注入不会覆盖首次值，仅记录 `warn`。
     pub fn set_plugin_engine(&self, engine: Arc<PluginEngine>) {
-        let _ = self.plugin_engine.set(engine);
+        if self.plugin_engine.set(engine).is_err() {
+            tracing::warn!(slot = "plugin_engine", "重复注入 PluginEngine，已忽略（首次注入优先）");
+        }
     }
 
     /// 注入 SearchService（构造后调用）。
+    ///
+    /// 重复注入不会覆盖首次值，仅记录 `warn`。
     pub fn set_search_service(&self, svc: Arc<SearchService>) {
-        let _ = self.search_service.set(svc);
+        if self.search_service.set(svc).is_err() {
+            tracing::warn!(slot = "search_service", "重复注入 SearchService，已忽略（首次注入优先）");
+        }
     }
 
     /// 注入 ChatService（构造后调用）。
+    ///
+    /// 重复注入不会覆盖首次值，仅记录 `warn`。
     pub fn set_chat_service(&self, svc: Arc<ChatService>) {
-        let _ = self.chat_service.set(svc);
+        if self.chat_service.set(svc).is_err() {
+            tracing::warn!(slot = "chat_service", "重复注入 ChatService，已忽略（首次注入优先）");
+        }
     }
 }
 
@@ -100,10 +116,8 @@ impl DomainEnv for TauriDomainEnv {
 
     // ── 状态访问 ──────────────────────────────────────────────────────────
 
-    fn cap_registry(&self) -> &Arc<CapabilityRegistry> {
-        self.cap_registry
-            .get()
-            .expect("CapabilityRegistry not set — call set_cap_registry() after construction")
+    fn cap_registry(&self) -> Option<&Arc<CapabilityRegistry>> {
+        self.cap_registry.get()
     }
 
     fn chat_service(&self) -> Option<&Arc<ChatService>> {
@@ -151,5 +165,106 @@ impl DomainEnv for TauriDomainEnv {
         })
         .await
         .ok();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    /// 最小运行时 fake env——不注入 CapabilityRegistry，
+    /// 验证 `cap_registry()` 返回 `None` 且不 panic。
+    struct FakeDomainEnv {
+        pools: DbPools,
+    }
+
+    impl CapabilityEnv for FakeDomainEnv {
+        fn db_pools(&self) -> &DbPools {
+            &self.pools
+        }
+        fn plugin_engine(&self) -> Option<&Arc<PluginEngine>> {
+            None
+        }
+        fn search_service(&self) -> Option<&Arc<SearchService>> {
+            None
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DomainEnv for FakeDomainEnv {
+        fn capability_env(&self) -> &dyn CapabilityEnv {
+            self
+        }
+        fn emit(&self, _event: &str, _payload: serde_json::Value) -> Result<(), String> {
+            Ok(())
+        }
+        fn emit_to(
+            &self,
+            _target: &str,
+            _event: &str,
+            _payload: serde_json::Value,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        fn cap_registry(&self) -> Option<&Arc<CapabilityRegistry>> {
+            None // 关键：最小运行时不构造 CapabilityRegistry
+        }
+        fn chat_service(&self) -> Option<&Arc<ChatService>> {
+            None
+        }
+        fn show_chat_window(&self) -> Result<(), String> {
+            Ok(())
+        }
+        fn hide_main_window(&self, _reason: &str) {}
+        fn hide_for_screenshot(&self) {}
+        fn unhide_after_screenshot(&self) {}
+        fn show_screenshot_overlay(
+            &self,
+            _meta: &ScreenCaptureMeta,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        fn invoke_main_window(&self) {}
+        fn open_settings(&self) {}
+        fn exit_app(&self) {}
+        async fn wait_frame_after_hide(&self) {}
+    }
+
+    async fn make_in_memory_pools() -> DbPools {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory pool");
+        DbPools {
+            config: pool.clone(),
+            history: pool.clone(),
+            ai: pool.clone(),
+            cache: pool,
+        }
+    }
+
+    /// 无 CapabilityRegistry 的最小运行时——所有 Option getter 返回 None，不 panic。
+    #[tokio::test]
+    async fn minimal_env_without_cap_registry() {
+        let pools = make_in_memory_pools().await;
+        let env = FakeDomainEnv { pools };
+        assert!(
+            env.cap_registry().is_none(),
+            "最小运行时 cap_registry 应返回 None"
+        );
+        assert!(env.plugin_engine().is_none());
+        assert!(env.search_service().is_none());
+        assert!(env.chat_service().is_none());
+    }
+
+    /// 验证 set_* 方法的 OnceLock 语义：首次注入成功，二次注入不覆盖。
+    #[test]
+    fn once_lock_set_does_not_overwrite() {
+        let lock: OnceLock<i32> = OnceLock::new();
+        assert!(lock.set(1).is_ok());
+        assert!(lock.set(2).is_err(), "二次 set 应失败");
+        assert_eq!(*lock.get().unwrap(), 1, "首次注入的值应保留");
     }
 }

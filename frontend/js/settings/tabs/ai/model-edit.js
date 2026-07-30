@@ -50,8 +50,8 @@ export function openAIModelEditModal(providerId, modelId) {
   if (paramsSection) {
     const allSections = paramsSection.parentElement?.querySelectorAll(".ai-modal-section");
     if (allSections && allSections.length >= 3) {
-      allSections[1].style.display = isEdit ? "" : "none";
-      allSections[2].style.display = isEdit ? "" : "none";
+      allSections[1].classList.toggle('hidden', !isEdit);
+      allSections[2].classList.toggle('hidden', !isEdit);
     }
   }
   // 按钮：新增显示"保存并继续"+"完成"，编辑显示"保存"+"取消"
@@ -59,7 +59,7 @@ export function openAIModelEditModal(providerId, modelId) {
   const saveBtn = document.getElementById("ai-model-edit-save");
   const cancelBtn = document.getElementById("ai-model-edit-cancel");
   if (continueBtn) {
-    continueBtn.style.display = isEdit ? "none" : "";
+    continueBtn.classList.toggle('hidden', isEdit);
     continueBtn.textContent = t("ai.model_modal.save_continue");
   }
   if (saveBtn) {
@@ -83,7 +83,7 @@ export function openAIModelEditModal(providerId, modelId) {
 
   $("ai-model-edit-error").textContent = "";
   const overlay = $("ai-model-edit-overlay");
-  overlay.style.display = "flex";
+  overlay.classList.remove('hidden');
   setTimeout(() => idInput.focus(), 40);
 }
 
@@ -96,7 +96,7 @@ function setupModelParamRow(key, currentValue, fallbackValue) {
   const num = $(`ai-model-edit-${key}-num`);
   const enabled = currentValue != null;
   toggle.checked = enabled;
-  body.style.display = enabled ? "" : "none";
+  body.classList.toggle('hidden', !enabled);
   const shown = enabled ? currentValue : fallbackValue;
   range.value = shown;
   num.value = shown;
@@ -167,7 +167,7 @@ function coerceCustomParamValue(raw) {
 /** 关闭模型编辑 modal */
 export function closeAIModelEditModal() {
   const overlay = document.getElementById("ai-model-edit-overlay");
-  if (overlay) overlay.style.display = "none";
+  if (overlay) overlay.classList.add('hidden');
   closeModelFetchDropdown();
   aiState._modelEditProviderId = null;
   aiState._modelEditOriginalId = null;
@@ -181,7 +181,7 @@ export function closeAIModelEditModal() {
 async function openModelFetchDropdown() {
   const dropdown = document.getElementById("ai-model-edit-fetch-dropdown");
   if (!dropdown) return;
-  dropdown.style.display = "";
+  dropdown.classList.remove('hidden');
   if (!aiState._modelFetchCache) {
     await performModelFetch();
   }
@@ -191,7 +191,7 @@ async function openModelFetchDropdown() {
 /** 关闭下拉但保留缓存（下次打开秒开） */
 function closeModelFetchDropdown() {
   const dropdown = document.getElementById("ai-model-edit-fetch-dropdown");
-  if (dropdown) dropdown.style.display = "none";
+  if (dropdown) dropdown.classList.add('hidden');
 }
 
 /** 执行拉取——从当前 modal 关联的 provider 抓 model 列表 */
@@ -420,9 +420,9 @@ async function saveAndContinueModelEdit() {
 function showModelSavedToast() {
   const toast = document.getElementById("ai-model-saved-toast");
   if (!toast) return;
-  toast.style.display = "flex";
+  toast.classList.remove('hidden');
   clearTimeout(aiState._modelSavedToastTimer);
-  aiState._modelSavedToastTimer = setTimeout(() => { toast.style.display = "none"; }, 2500);
+  aiState._modelSavedToastTimer = setTimeout(() => { toast.classList.add('hidden'); }, 2500);
 }
 
 /** 模型 modal 事件绑定——由 core.js 的 bindAIEvents 调一次 */
@@ -438,7 +438,7 @@ export function bindAIModelEditModalEvents() {
     const num = $(`ai-model-edit-${key}-num`);
     if (!toggle || !body || !range || !num) return;
     toggle.addEventListener("change", () => {
-      body.style.display = toggle.checked ? "" : "none";
+      body.classList.toggle('hidden', !toggle.checked);
     });
     range.addEventListener("input", () => { num.value = range.value; });
     num.addEventListener("input", () => {
@@ -470,14 +470,14 @@ export function bindAIModelEditModalEvents() {
     });
     idInput.addEventListener("input", () => {
       const dropdown = $("ai-model-edit-fetch-dropdown");
-      if (dropdown && dropdown.style.display !== "none") {
+      if (dropdown && !dropdown.classList.contains('hidden')) {
         renderModelFetchList(idInput.value);
       }
     });
     idInput.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
         const dropdown = $("ai-model-edit-fetch-dropdown");
-        if (dropdown && dropdown.style.display !== "none") {
+        if (dropdown && !dropdown.classList.contains('hidden')) {
           e.stopPropagation();
           closeModelFetchDropdown();
         }
@@ -489,7 +489,7 @@ export function bindAIModelEditModalEvents() {
   if (idWrap) {
     document.addEventListener("click", (e) => {
       const dropdown = $("ai-model-edit-fetch-dropdown");
-      if (!dropdown || dropdown.style.display === "none") return;
+      if (!dropdown || dropdown.classList.contains('hidden')) return;
       if (e.target.closest("#ai-model-edit-id-wrap")) return;
       if (e.target.closest("#ai-model-edit-fetch-dropdown")) return;
       if (e.target.closest("#ai-model-edit-overlay") && !e.target.closest("#ai-model-edit-id-wrap")) {

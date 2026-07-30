@@ -495,7 +495,7 @@ fn main() {
             );
             let mcp_client = std::sync::Arc::new(domain::mcp::McpClientManager::new());
             let chat_service = std::sync::Arc::new(
-                domain::ai::chat_service::ChatService::new(
+                tauri::async_runtime::block_on(domain::ai::chat_service::ChatService::new(
                     domain_env.clone(),
                     ai_registry.clone(),
                     capability_registry.clone(),
@@ -503,7 +503,7 @@ fn main() {
                     mcp_client.clone(),
                     pools.ai.clone(),
                     pools.config.clone(),
-                ),
+                )),
             );
             domain_env.set_chat_service(chat_service.clone());
 

@@ -57,7 +57,10 @@ pub trait DomainEnv: CapabilityEnv {
     // ── 状态访问（替代 tauri::Manager state::<T>()）────────────────────
 
     /// Capability 注册表（开放能力，AI tool 池来源）。
-    fn cap_registry(&self) -> &Arc<CapabilityRegistry>;
+    ///
+    /// CLI/MCP 的最小运行时可能不构造完整 Capability 栈，因此显式返回 `Option`，
+    /// 由调用方转成可恢复错误或降级为空 tool 池，禁止在环境 getter 内 panic。
+    fn cap_registry(&self) -> Option<&Arc<CapabilityRegistry>>;
 
     /// 对话窗口服务（可能尚未构造，返回 Option）。
     fn chat_service(&self) -> Option<&Arc<ChatService>>;
@@ -105,16 +108,4 @@ pub fn emit_serialized(
 ) -> Result<(), String> {
     let value = serde_json::to_value(payload).map_err(|e| e.to_string())?;
     env.emit(event, value)
-}
-
-/// 将任意 `Serialize` payload 序列化为 `Value` 后定向 emit。
-#[allow(dead_code)]
-pub fn emit_to_serialized(
-    env: &dyn DomainEnv,
-    target: &str,
-    event: &str,
-    payload: &impl serde::Serialize,
-) -> Result<(), String> {
-    let value = serde_json::to_value(payload).map_err(|e| e.to_string())?;
-    env.emit_to(target, event, value)
 }

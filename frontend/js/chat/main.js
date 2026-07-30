@@ -1073,10 +1073,10 @@ async function refreshToolPool(force = false) {
 
     // 隐藏 tool pool 文本——composer bar 只显示圆圈进度条
     // tool 数量信息已聚合到 hover popup 中展示
-    if (el) el.style.display = "none";
+    if (el) el.classList.add('hidden');
   } catch (e) {
     console.error("[chat] refreshToolPool 失败:", e);
-    if (el) el.style.display = "none";
+    if (el) el.classList.add('hidden');
   }
 }
 

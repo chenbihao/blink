@@ -106,7 +106,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   // 有 modal 打开：让 modal 内部的 Escape 处理器负责关闭
   const modalOpen = Array.from(document.querySelectorAll(".modal-overlay")).some(
-    (el) => el.style.display !== "none",
+    (el) => !el.classList.contains("hidden"),
   );
   if (modalOpen) return;
   // 正在录制热键：交给录制流程

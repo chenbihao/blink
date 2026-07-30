@@ -882,7 +882,7 @@ export function updateContextIndicator(status) {
 
   // 即使没有 status 也显示一个 0% 的空环，让用户知道这里有进度条
   if (!status || status.context_limit === 0) {
-    el.style.display = "";
+    el.classList.remove('hidden');
     el.title = "上下文窗口——发送消息后显示用量";
     el.innerHTML = `
       <svg class="context-ring" viewBox="0 0 20 20">
@@ -893,7 +893,7 @@ export function updateContextIndicator(status) {
     return;
   }
 
-  el.style.display = "";
+  el.classList.remove('hidden');
   const percent = Math.min(status.usage_percent, 100);
 
   // 颜色随占比变化

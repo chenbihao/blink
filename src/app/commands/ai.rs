@@ -237,12 +237,14 @@ pub async fn trigger_ai(query: String, seq: u64, app: tauri::AppHandle) -> Resul
 ///
 /// **审计**（0.11.4 补）:用户确认执行后写入 `ai_tool_audit` 表,
 /// turn=0 标记"用户确认执行"路径（区别于 Turn 1/Turn 2 自动执行）。
+///
+/// **0.14.7 W3**：返回 `CommandError`（结构化错误协议）。
 #[tauri::command]
 pub async fn confirm_ai_action(
     app: tauri::AppHandle,
     action_name: String,
     arguments: serde_json::Value,
-) -> Result<(), String> {
+) -> Result<(), crate::app::command_error::CommandError> {
     tracing::debug!(%action_name, ?arguments, "confirm_ai_action: 用户确认 AI 动作");
 
     // 0.14.6 §2.2：从 state 获取 DomainEnv 桥接器
@@ -256,7 +258,11 @@ pub async fn confirm_ai_action(
     let search_service = app.state::<std::sync::Arc<crate::domain::search::SearchService>>();
     let seq = search_service
         .take_ai_confirmation(&action_name, &arguments)
-        .ok_or_else(|| format!("没有匹配的待确认 Capability: {action_name}"))?;
+        .ok_or_else(|| crate::app::command_error::CommandError::new(
+            "not_found",
+            &format!("没有匹配的待确认 Capability: {action_name}"),
+            false,
+        ))?;
 
     let cap_reg = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
     if let Some(cap) = cap_reg.get(&action_name) {
@@ -280,15 +286,18 @@ pub async fn confirm_ai_action(
             }
             Err(e) => {
                 tracing::error!(%action_name, error = %e, "confirm_ai_action: Capability 执行失败");
-                return Err(e.to_string());
+                return Err(crate::app::command_error::CommandError::from(e));
             }
         }
         return Ok(());
     }
 
-    let msg = format!("未知 Capability id: {action_name}");
     tracing::warn!(%action_name, "confirm_ai_action: 未知 id");
-    Err(msg)
+    Err(crate::app::command_error::CommandError::new(
+        "not_found",
+        &format!("未知 Capability id: {action_name}"),
+        false,
+    ))
 }
 
 /// 隐藏独立 chat 窗口（0.12.1 Phase 3A）。

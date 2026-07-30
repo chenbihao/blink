@@ -610,8 +610,8 @@ pub async fn set_context_config(pool: &SqlitePool, config: &ContextConfig) -> Re
 mod tests {
     use super::*;
 
-    #[test]
-    fn app_config_default_serde_roundtrip() {
+    #[tokio::test]
+    async fn app_config_default_serde_roundtrip() {
         let config = AppConfig::default();
         let json = serde_json::to_string(&config).unwrap();
         let parsed: AppConfig = serde_json::from_str(&json).unwrap();
@@ -620,8 +620,8 @@ mod tests {
         assert_eq!(parsed.hotkey.key, config.hotkey.key);
     }
 
-    #[test]
-    fn app_config_from_default_json() {
+    #[tokio::test]
+    async fn app_config_from_default_json() {
         let config = AppConfig::default();
         let json = serde_json::to_string(&config).unwrap();
         let parsed: AppConfig = serde_json::from_str(&json).unwrap();
@@ -632,8 +632,8 @@ mod tests {
         assert_eq!(parsed.autosuggest_tab_key, "Tab");
     }
 
-    #[test]
-    fn shard_defaults_match_appconfig_default() {
+    #[tokio::test]
+    async fn shard_defaults_match_appconfig_default() {
         let app = AppConfig::default();
         let hotkey = HotkeyConfig::default();
         let app_shard = AppearanceConfig::default();
@@ -684,22 +684,19 @@ mod tests {
         pool
     }
 
-    #[test]
-    fn get_config_on_empty_db_returns_defaults() {
-        tauri::async_runtime::block_on(async {
-            let pool = in_memory_pool().await;
+    #[tokio::test]
+    async fn get_config_on_empty_db_returns_defaults() {
+                    let pool = in_memory_pool().await;
             let cfg = get_config(&pool).await;
             assert_eq!(cfg.theme, AppConfig::default().theme);
             assert_eq!(cfg.hotkey.key, AppConfig::default().hotkey.key);
             assert_eq!(cfg.tap_threshold, 300);
             assert_eq!(cfg.grace_period, 500);
-        });
     }
 
-    #[test]
-    fn save_and_get_config_roundtrip() {
-        tauri::async_runtime::block_on(async {
-            let pool = in_memory_pool().await;
+    #[tokio::test]
+    async fn save_and_get_config_roundtrip() {
+                    let pool = in_memory_pool().await;
             let mut cfg = AppConfig::default();
             cfg.theme = "light".to_string();
             cfg.language = "en".to_string();
@@ -721,13 +718,11 @@ mod tests {
             assert_eq!(loaded.tap_threshold, 250);
             assert_eq!(loaded.hotkey.key, "F1");
             assert_eq!(loaded.hotkey.tap_threshold, 250);
-        });
     }
 
-    #[test]
-    fn shards_persist_to_distinct_kv_keys() {
-        tauri::async_runtime::block_on(async {
-            let pool = in_memory_pool().await;
+    #[tokio::test]
+    async fn shards_persist_to_distinct_kv_keys() {
+                    let pool = in_memory_pool().await;
             save_config(&pool, &AppConfig::default()).await.unwrap();
 
             let all = crate::infra::data::history::get_all_config(&pool).await;
@@ -748,13 +743,11 @@ mod tests {
                 "clipboard 独立 KV 应存在"
             );
             assert!(!all.contains_key("app_config"), "旧单 key 不应重现");
-        });
     }
 
-    #[test]
-    fn legacy_app_config_migrates_to_shards() {
-        tauri::async_runtime::block_on(async {
-            let pool = in_memory_pool().await;
+    #[tokio::test]
+    async fn legacy_app_config_migrates_to_shards() {
+                    let pool = in_memory_pool().await;
             let legacy_json = r#"{
                 "hotkey": {"modifiers": ["ctrl", "alt"], "key": "k", "display": "Ctrl+Alt+K"},
                 "tap_threshold": 250,
@@ -824,13 +817,11 @@ mod tests {
             assert!(cfg.chord_enabled);
             assert!(!cfg.chord_hint_visible);
             assert_eq!(cfg.disabled_chord_actions, vec!["screenshot"]);
-        });
     }
 
-    #[test]
-    fn update_hotkey_preserves_tap_grace() {
-        tauri::async_runtime::block_on(async {
-            let pool = in_memory_pool().await;
+    #[tokio::test]
+    async fn update_hotkey_preserves_tap_grace() {
+                    let pool = in_memory_pool().await;
             let mut cfg = AppConfig::default();
             cfg.tap_threshold = 250;
             cfg.grace_period = 700;
@@ -854,6 +845,5 @@ mod tests {
                 loaded.grace_period, 700,
                 "update_hotkey 不该覆盖 grace_period"
             );
-        });
     }
 }

@@ -1,6 +1,6 @@
 //! 图标渲染工具（0.10.8 §11.2 方案 3）。
 //!
-//! **来源**：Lucide 图标包，通过 `scripts/fetch-lucide-icons.py` 一次性打包成
+//! **来源**：Lucide 图标包，通过 `cargo xtask icons` 一次性打包成
 //! `frontend/assets/icons/sprite.svg`，运行期零网络依赖。
 //!
 //! **消费**：

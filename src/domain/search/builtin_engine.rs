@@ -546,132 +546,132 @@ mod tests {
 
     // ── 原 keyword 匹配路径（0.7 行为兼容） ───────────────────────────────────
 
-    #[test]
-    fn search_settings() {
+    #[tokio::test]
+    async fn search_settings() {
         let engine = BuiltinEngine;
         let history = HashMap::new();
         let snapshot = ContextSnapshot::default();
         let ctx = make_ctx(&history, &snapshot);
 
-        let items = tauri::async_runtime::block_on(engine.search("设置", &ctx));
+        let items = engine.search("设置", &ctx).await;
         assert!(!items.is_empty());
         assert_eq!(items[0].title, "打开设置");
         assert!(items[0].score > 0.0);
     }
 
-    #[test]
-    fn search_lock() {
+    #[tokio::test]
+    async fn search_lock() {
         let engine = BuiltinEngine;
         let history = HashMap::new();
         let snapshot = ContextSnapshot::default();
         let ctx = make_ctx(&history, &snapshot);
 
-        let items = tauri::async_runtime::block_on(engine.search("锁定", &ctx));
+        let items = engine.search("锁定", &ctx).await;
         assert!(!items.is_empty());
         assert_eq!(items[0].title, "锁定电脑");
     }
 
-    #[test]
-    fn search_pinyin_initial() {
+    #[tokio::test]
+    async fn search_pinyin_initial() {
         let engine = BuiltinEngine;
         let history = HashMap::new();
         let snapshot = ContextSnapshot::default();
         let ctx = make_ctx(&history, &snapshot);
 
         // 首字母 "sz" 匹配 "设置"
-        let items = tauri::async_runtime::block_on(engine.search("sz", &ctx));
+        let items = engine.search("sz", &ctx).await;
         assert!(!items.is_empty());
         assert_eq!(items[0].title, "打开设置");
     }
 
     // ── 0.8.0 §1.3 拼音派生匹配 ───────────────────────────────────────────────
 
-    #[test]
-    fn search_pinyin_full() {
+    #[tokio::test]
+    async fn search_pinyin_full() {
         // 全拼 "shezhi" 应命中 keyword "设置"
         let engine = BuiltinEngine;
         let history = HashMap::new();
         let snapshot = ContextSnapshot::default();
         let ctx = make_ctx(&history, &snapshot);
 
-        let items = tauri::async_runtime::block_on(engine.search("shezhi", &ctx));
+        let items = engine.search("shezhi", &ctx).await;
         assert!(
             items.iter().any(|it| it.id == "builtin:open_settings"),
             "全拼 shezhi 应召回 open_settings"
         );
     }
 
-    #[test]
-    fn search_pinyin_full_title() {
+    #[tokio::test]
+    async fn search_pinyin_full_title() {
         // 全拼 "dakaishezhi" 应命中 title "打开设置"
         let engine = BuiltinEngine;
         let history = HashMap::new();
         let snapshot = ContextSnapshot::default();
         let ctx = make_ctx(&history, &snapshot);
 
-        let items = tauri::async_runtime::block_on(engine.search("dakaishezhi", &ctx));
+        let items = engine.search("dakaishezhi", &ctx).await;
         assert!(
             items.iter().any(|it| it.id == "builtin:open_settings"),
             "全拼 dakaishezhi 应召回 open_settings"
         );
     }
 
-    #[test]
-    fn search_pinyin_full_prefix() {
+    #[tokio::test]
+    async fn search_pinyin_full_prefix() {
         // 全拼前缀 "guanj" 应命中 title "关机"（guanji）
         let engine = BuiltinEngine;
         let history = HashMap::new();
         let snapshot = ContextSnapshot::default();
         let ctx = make_ctx(&history, &snapshot);
 
-        let items = tauri::async_runtime::block_on(engine.search("guanj", &ctx));
+        let items = engine.search("guanj", &ctx).await;
         assert!(
             items.iter().any(|it| it.id == "builtin:shutdown"),
             "全拼前缀 guanj 应召回 shutdown"
         );
     }
 
-    #[test]
-    fn search_pinyin_does_not_over_match() {
+    #[tokio::test]
+    async fn search_pinyin_does_not_over_match() {
         // 保护：随机 ASCII 串不应误命中——确认拼音派生没让 match_query 变成万能通配
         let engine = BuiltinEngine;
         let history = HashMap::new();
         let snapshot = ContextSnapshot::default();
         let ctx = make_ctx(&history, &snapshot);
 
-        let items = tauri::async_runtime::block_on(engine.search("xyzabc123", &ctx));
+        let items = engine.search("xyzabc123", &ctx).await;
         assert!(items.is_empty());
     }
 
-    #[test]
-    fn search_no_match() {
+    #[tokio::test]
+    async fn search_no_match() {
         let engine = BuiltinEngine;
         let history = HashMap::new();
         let snapshot = ContextSnapshot::default();
         let ctx = make_ctx(&history, &snapshot);
 
-        let items = tauri::async_runtime::block_on(engine.search("xyzabc123", &ctx));
+        let items = engine.search("xyzabc123", &ctx).await;
         assert!(items.is_empty());
     }
 
     // ── 空 query 路径（0.8.0 §1.3 新行为） ────────────────────────────────────
 
-    #[test]
-    fn empty_query_no_context_returns_nothing() {
+    #[tokio::test]
+    async fn empty_query_no_context_returns_nothing() {
         // 空 query + 无 Context 命中 → 无召回（现有 9 个动作 context 均为空）
         let engine = BuiltinEngine;
         let history = HashMap::new();
         let snapshot = ContextSnapshot::default();
         let ctx = make_ctx(&history, &snapshot);
 
-        let items = tauri::async_runtime::block_on(engine.search("", &ctx));
+        let items = engine.search("", &ctx).await;
         assert!(items.is_empty());
     }
 
     // ── disable 路径 ──────────────────────────────────────────────────────────
 
-    #[test]
-    fn disabled_action_not_recalled() {
+    #[tokio::test]
+    async fn disabled_action_not_recalled() {
         let engine = BuiltinEngine;
         let history = HashMap::new();
         let snapshot = ContextSnapshot::default();
@@ -684,7 +684,7 @@ mod tests {
         };
 
         // "设置" 原本匹配 open_settings；被 disable 后不召回
-        let items = tauri::async_runtime::block_on(engine.search("设置", &ctx));
+        let items = engine.search("设置", &ctx).await;
         assert!(items.iter().all(|it| it.id != "builtin:open_settings"));
     }
 
@@ -695,15 +695,15 @@ mod tests {
         ContextSnapshot::with_clipboard(text)
     }
 
-    #[test]
-    fn empty_query_context_url_hits_open_url() {
+    #[tokio::test]
+    async fn empty_query_context_url_hits_open_url() {
         // 空 query + 剪贴板是 URL → 只召回 open_url，base_score=1.0
         let engine = BuiltinEngine;
         let history = HashMap::new();
         let snapshot = snapshot_with_clipboard("https://example.com");
         let ctx = make_ctx(&history, &snapshot);
 
-        let items = tauri::async_runtime::block_on(engine.search("", &ctx));
+        let items = engine.search("", &ctx).await;
         let open_url = items.iter().find(|it| it.id == "builtin:open_url");
         assert!(open_url.is_some(), "剪贴板是 URL 应召回 open_url");
         assert_eq!(
@@ -725,23 +725,23 @@ mod tests {
         assert!(items.iter().all(|it| it.id != "builtin:reveal_in_explorer"));
     }
 
-    #[test]
-    fn empty_query_context_path_hits_open_path_and_reveal() {
+    #[tokio::test]
+    async fn empty_query_context_path_hits_open_path_and_reveal() {
         // 空 query + 剪贴板是文件路径 → open_path / reveal_in_explorer 都召回
         let engine = BuiltinEngine;
         let history = HashMap::new();
         let snapshot = snapshot_with_clipboard("C:\\Users\\test.txt");
         let ctx = make_ctx(&history, &snapshot);
 
-        let items = tauri::async_runtime::block_on(engine.search("", &ctx));
+        let items = engine.search("", &ctx).await;
         assert!(items.iter().any(|it| it.id == "builtin:open_path"));
         assert!(items.iter().any(|it| it.id == "builtin:reveal_in_explorer"));
         // 不是 URL → open_url 不召回
         assert!(items.iter().all(|it| it.id != "builtin:open_url"));
     }
 
-    #[test]
-    fn param_missing_action_not_recalled() {
+    #[tokio::test]
+    async fn param_missing_action_not_recalled() {
         // 参数化 Action 声明 param_source=Clipboard，但剪贴板为空 → 即使 keyword 命中也不召回
         let engine = BuiltinEngine;
         let history = HashMap::new();
@@ -749,12 +749,12 @@ mod tests {
         let ctx = make_ctx(&history, &snapshot);
 
         // 输入"打开链接"能匹配 open_url 的 keyword，但缺参 → 不召回
-        let items = tauri::async_runtime::block_on(engine.search("打开链接", &ctx));
+        let items = engine.search("打开链接", &ctx).await;
         assert!(items.iter().all(|it| it.id != "builtin:open_url"));
     }
 
-    #[test]
-    fn keyword_matches_but_clipboard_not_url_no_recall() {
+    #[tokio::test]
+    async fn keyword_matches_but_clipboard_not_url_no_recall() {
         // 修复回归：0.8.0 §1.3 早期版本会误召回。
         // 输入 "打开链接" keyword 命中 open_url，但剪贴板是普通文本"缺"——
         // Context 门禁应挡下，避免 "找不到文件'缺'" 之类的运行期错误。
@@ -763,19 +763,19 @@ mod tests {
         let snapshot = snapshot_with_clipboard("缺");
         let ctx = make_ctx(&history, &snapshot);
 
-        let items = tauri::async_runtime::block_on(engine.search("打开链接", &ctx));
+        let items = engine.search("打开链接", &ctx).await;
         assert!(
             items.iter().all(|it| it.id != "builtin:open_url"),
             "Context 未命中时，keyword 命中不该绕过闸门召回参数化 Action"
         );
 
         // 同理：keyword 命中 open_path，但剪贴板是"缺"（既非 URL 也非路径）→ 不召回
-        let items = tauri::async_runtime::block_on(engine.search("打开路径", &ctx));
+        let items = engine.search("打开路径", &ctx).await;
         assert!(items.iter().all(|it| it.id != "builtin:open_path"));
     }
 
-    #[test]
-    fn keyword_and_context_both_hit_dedup() {
+    #[tokio::test]
+    async fn keyword_and_context_both_hit_dedup() {
         // query "打开链接" 匹配 open_url keyword，同时 clipboard 是 URL 触发 Context
         // 应只产出一条 open_url，且分数 = max(keyword, 0.3) + 0.3
         let engine = BuiltinEngine;
@@ -783,7 +783,7 @@ mod tests {
         let snapshot = snapshot_with_clipboard("https://example.com");
         let ctx = make_ctx(&history, &snapshot);
 
-        let items = tauri::async_runtime::block_on(engine.search("打开链接", &ctx));
+        let items = engine.search("打开链接", &ctx).await;
         let open_url_items: Vec<_> = items
             .iter()
             .filter(|it| it.id == "builtin:open_url")
@@ -799,8 +799,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn empty_query_disabled_context_action_not_recalled() {
+    #[tokio::test]
+    async fn empty_query_disabled_context_action_not_recalled() {
         // 剪贴板是 URL，但 open_url 被 disable → 不召回
         let engine = BuiltinEngine;
         let history = HashMap::new();
@@ -813,14 +813,14 @@ mod tests {
             disabled_context_bindings: &[],
         };
 
-        let items = tauri::async_runtime::block_on(engine.search("", &ctx));
+        let items = engine.search("", &ctx).await;
         assert!(items.iter().all(|it| it.id != "builtin:open_url"));
     }
 
     // ── 0.11.8：context binding 黑名单（disabled_context_bindings） ─────────
 
-    #[test]
-    fn context_binding_disabled_blocks_empty_query_recall() {
+    #[tokio::test]
+    async fn context_binding_disabled_blocks_empty_query_recall() {
         // 剪贴板是 URL，但 `builtin:open_url::clipboard_is_url` 被 binding 粒度禁用
         // → 空 query 时 open_url 不召回（与整条禁用等价，但能仅禁 context 不禁 keyword）
         let engine = BuiltinEngine;
@@ -834,15 +834,15 @@ mod tests {
             disabled_context_bindings: &disabled_ctx,
         };
 
-        let items = tauri::async_runtime::block_on(engine.search("", &ctx));
+        let items = engine.search("", &ctx).await;
         assert!(
             items.iter().all(|it| it.id != "builtin:open_url"),
             "binding 黑名单禁用后，空 query Context 召回应被挡下"
         );
     }
 
-    #[test]
-    fn context_binding_disabled_keeps_keyword_recall_when_context_still_hits() {
+    #[tokio::test]
+    async fn context_binding_disabled_keeps_keyword_recall_when_context_still_hits() {
         // 反向验证：binding 禁用了 context 触发，但 keyword 路径应也不召回——
         // 因为 builtin_engine 的 Context 门禁要求「参数化 Action 必须 context 命中」，
         // context 被禁 = context 未命中 = keyword 也不能绕过（与 disabled_builtin_actions
@@ -859,15 +859,15 @@ mod tests {
         };
 
         // keyword "打开链接" 本会命中 open_url，但 context 被 binding 禁用 → 门禁挡下
-        let items = tauri::async_runtime::block_on(engine.search("打开链接", &ctx));
+        let items = engine.search("打开链接", &ctx).await;
         assert!(
             items.iter().all(|it| it.id != "builtin:open_url"),
             "binding 禁用 context 后，keyword 路径也应被 Context 门禁挡下"
         );
     }
 
-    #[test]
-    fn context_binding_unrelated_key_does_not_block() {
+    #[tokio::test]
+    async fn context_binding_unrelated_key_does_not_block() {
         // 保护：黑名单里是无关 key（其他 action 的 binding）不应误伤本 action。
         // 剪贴板是 URL，黑名单含 `builtin:open_path::clipboard_is_file_path`（无关）→
         // open_url 应正常召回。
@@ -882,7 +882,7 @@ mod tests {
             disabled_context_bindings: &disabled_ctx,
         };
 
-        let items = tauri::async_runtime::block_on(engine.search("", &ctx));
+        let items = engine.search("", &ctx).await;
         assert!(
             items.iter().any(|it| it.id == "builtin:open_url"),
             "无关 binding key 不应影响 open_url 召回"
@@ -891,8 +891,8 @@ mod tests {
 
     // ── 0.10.8 §11.2 方案 1：context_aware 标记 ──────────────────────────────
 
-    #[test]
-    fn empty_query_context_only_marks_context_aware() {
+    #[tokio::test]
+    async fn empty_query_context_only_marks_context_aware() {
         // 空 query + 剪贴板是 URL → open_url 标 context_aware=true
         // （前端 chordEligible 据此跳过，允许 chord 提示条与 Context Ghost 共存）
         let engine = BuiltinEngine;
@@ -900,7 +900,7 @@ mod tests {
         let snapshot = snapshot_with_clipboard("https://example.com");
         let ctx = make_ctx(&history, &snapshot);
 
-        let items = tauri::async_runtime::block_on(engine.search("", &ctx));
+        let items = engine.search("", &ctx).await;
         let open_url = items
             .iter()
             .find(|it| it.id == "builtin:open_url")
@@ -911,8 +911,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn keyword_hit_not_marked_context_aware() {
+    #[tokio::test]
+    async fn keyword_hit_not_marked_context_aware() {
         // 非空 query + keyword 命中 + Context 命中 → context_aware=false
         // 用户已表达意图（"打开链接"），不是环境自动填充。
         let engine = BuiltinEngine;
@@ -920,7 +920,7 @@ mod tests {
         let snapshot = snapshot_with_clipboard("https://example.com");
         let ctx = make_ctx(&history, &snapshot);
 
-        let items = tauri::async_runtime::block_on(engine.search("打开链接", &ctx));
+        let items = engine.search("打开链接", &ctx).await;
         let open_url = items
             .iter()
             .find(|it| it.id == "builtin:open_url")
@@ -933,7 +933,7 @@ mod tests {
         // 空 query 但无 Context 命中的对照——搜索"设置"应召回 open_settings 且非 context_aware
         let empty_snap = ContextSnapshot::default();
         let ctx2 = make_ctx(&history, &empty_snap);
-        let items2 = tauri::async_runtime::block_on(engine.search("设置", &ctx2));
+        let items2 = engine.search("设置", &ctx2).await;
         let open_settings = items2
             .iter()
             .find(|it| it.id == "builtin:open_settings")
@@ -944,8 +944,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn non_empty_context_bonus_not_marked_context_aware() {
+    #[tokio::test]
+    async fn non_empty_context_bonus_not_marked_context_aware() {
         // 非空 query + Context-only 命中（kw_match=None, ctx_hit=true）
         // 用户已开始输入，即使无 keyword 命中也不算"环境自动填充"。
         // 构造：query="xyz" 不命中任何 keyword，剪贴板是 URL 触发 Context。
@@ -954,7 +954,7 @@ mod tests {
         let snapshot = snapshot_with_clipboard("https://example.com");
         let ctx = make_ctx(&history, &snapshot);
 
-        let items = tauri::async_runtime::block_on(engine.search("xyz", &ctx));
+        let items = engine.search("xyz", &ctx).await;
         // 若召回（走 (None, true) 分支 base_score=0.3），context_aware 必须为 false
         if let Some(open_url) = items.iter().find(|it| it.id == "builtin:open_url") {
             assert!(

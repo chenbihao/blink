@@ -1,0 +1,284 @@
+//! IPC 错误协议（0.14.7 W3）。
+//!
+//! **职责**：app/IPC 边界的稳定、可序列化错误 wire schema。
+//! 前端能按错误类别展示（code/message/detail/retryable），同时兼容尚未迁移的字符串错误。
+//!
+//! **设计原则**：
+//! - code 使用稳定的 snake_case 值，不把 Rust 类型名或 Debug 文本当协议
+//! - message 是用户可读的简短说明（前端可直接展示）
+//! - detail 是可选的结构化数据，用于调试或前端特殊处理
+//! - retryable 标识错误是否可重试（如超时可重试、参数错误不可重试）
+
+use serde::{Deserialize, Serialize};
+
+/// IPC 错误类型（app/IPC 边界 wire schema）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct CommandError {
+    /// 稳定的 snake_case 错误码，前端可据此分类展示（如 `permission_denied`、`timeout`）。
+    pub code: String,
+    /// 用户可读的简短说明，前端可直接展示。
+    pub message: String,
+    /// 可选的结构化详情，用于调试或前端特殊处理（如缺失的参数名）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<serde_json::Value>,
+    /// 错误是否可重试（如超时可重试、参数错误不可重试）。
+    pub retryable: bool,
+}
+
+impl CommandError {
+    /// 创建新的 CommandError（最小形式）。
+    pub fn new(code: &str, message: impl AsRef<str>, retryable: bool) -> Self {
+        Self {
+            code: code.to_string(),
+            message: message.as_ref().to_string(),
+            detail: None,
+            retryable,
+        }
+    }
+
+    /// 创建带 detail 的 CommandError。
+    pub fn with_detail(
+        code: &str,
+        message: impl AsRef<str>,
+        retryable: bool,
+        detail: serde_json::Value,
+    ) -> Self {
+        Self {
+            code: code.to_string(),
+            message: message.as_ref().to_string(),
+            detail: Some(detail),
+            retryable,
+        }
+    }
+
+    /// 兼容层：从旧字符串错误创建 fallback CommandError。
+    ///
+    /// 用于尚未迁移的 Result<_, String> commands。
+    #[allow(dead_code)]
+    pub fn from_string(message: impl Into<String>) -> Self {
+        Self {
+            code: "unknown_error".into(),
+            message: message.into(),
+            detail: None,
+            retryable: false,
+        }
+    }
+}
+
+impl std::fmt::Display for CommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}] {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for CommandError {}
+
+// ── CapabilityError 映射 ─────────────────────────────────────────────────────
+
+/// CapabilityError → CommandError 映射（0.14.7 W3）。
+impl From<crate::domain::capability::CapabilityError> for CommandError {
+    fn from(e: crate::domain::capability::CapabilityError) -> Self {
+        use crate::domain::capability::CapabilityError::*;
+
+        match e {
+            InvalidArgs { detail } => Self::new(
+                "invalid_args",
+                format!("参数错误: {detail}"),
+                false,
+            ),
+            Permission { detail } => Self::new(
+                "permission_denied",
+                format!("权限不足: {detail}"),
+                false,
+            ),
+            Timeout { detail } => Self::new(
+                "timeout",
+                format!("操作超时: {detail}"),
+                true,
+            ),
+            Cancelled => Self::new(
+                "cancelled",
+                "操作已取消",
+                false,
+            ),
+            NotFound { id } => Self::with_detail(
+                "not_found",
+                &format!("能力不存在: {id}"),
+                false,
+                serde_json::json!({ "id": id }),
+            ),
+            Internal { detail } => Self::new(
+                "internal_error",
+                &format!("内部错误: {detail}"),
+                false,
+            ),
+        }
+    }
+}
+
+// ── ExecError 映射（run_builtin_action 的 Action 路径）────────────────────
+
+/// ExecError → CommandError 映射（0.14.7 W3）。
+impl From<crate::domain::execution::ExecError> for CommandError {
+    fn from(e: crate::domain::execution::ExecError) -> Self {
+        use crate::domain::execution::ExecError::*;
+
+        match e {
+            MissingArg(name) => Self::with_detail(
+                "missing_arg",
+                format!("缺少参数: {name}"),
+                false,
+                serde_json::json!({ "arg_name": name }),
+            ),
+            Runtime(msg) => Self::new(
+                "runtime_error",
+                msg,
+                false,
+            ),
+        }
+    }
+}
+
+// ── OcrError 映射（ocr_image command）──────────────────────────────────────
+
+/// OcrError → CommandError 映射（0.14.7 W3）。
+impl From<crate::domain::capability::builtins::ocr_engine::OcrError> for CommandError {
+    fn from(e: crate::domain::capability::builtins::ocr_engine::OcrError) -> Self {
+        use crate::domain::capability::builtins::ocr_engine::OcrError::*;
+
+        match e {
+            Engine(msg) => Self::new(
+                "ocr_engine_error",
+                format!("OCR 引擎错误: {msg}"),
+                false,
+            ),
+            Decode(msg) => Self::new(
+                "image_decode_error",
+                format!("图片解码错误: {msg}"),
+                false,
+            ),
+            Unsupported => Self::new(
+                "ocr_unsupported",
+                "当前平台不支持 OCR",
+                false,
+            ),
+        }
+    }
+}
+
+// ── 测试 ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_error_serializes_stably() {
+        let e = CommandError::new("invalid_args", "参数错误", false);
+        let json = serde_json::to_value(&e).unwrap();
+        assert_eq!(json["code"], "invalid_args");
+        assert_eq!(json["message"], "参数错误");
+        assert_eq!(json["retryable"], false);
+        assert!(json.get("detail").is_none());
+    }
+
+    #[test]
+    fn command_error_with_detail_serializes() {
+        let e = CommandError::with_detail(
+            "not_found",
+            "能力不存在",
+            false,
+            serde_json::json!({ "id": "test_cap" }),
+        );
+        let json = serde_json::to_value(&e).unwrap();
+        assert_eq!(json["code"], "not_found");
+        assert_eq!(json["detail"]["id"], "test_cap");
+    }
+
+    #[test]
+    fn command_error_from_string_creates_fallback() {
+        let e = CommandError::from_string("some old error");
+        assert_eq!(e.code, "unknown_error");
+        assert_eq!(e.message, "some old error");
+        assert_eq!(e.retryable, false);
+    }
+
+    #[test]
+    fn capability_error_invalid_args_maps_correctly() {
+        use crate::domain::capability::CapabilityError;
+        let e = CapabilityError::InvalidArgs {
+            detail: "缺少 query 参数".into(),
+        };
+        let ce: CommandError = e.into();
+        assert_eq!(ce.code, "invalid_args");
+        assert!(ce.message.contains("参数错误"));
+        assert!(!ce.retryable);
+    }
+
+    #[test]
+    fn capability_error_timeout_is_retryable() {
+        use crate::domain::capability::CapabilityError;
+        let e = CapabilityError::Timeout {
+            detail: "5s".into(),
+        };
+        let ce: CommandError = e.into();
+        assert_eq!(ce.code, "timeout");
+        assert!(ce.retryable);
+    }
+
+    #[test]
+    fn capability_error_not_found_includes_id_in_detail() {
+        use crate::domain::capability::CapabilityError;
+        let e = CapabilityError::NotFound {
+            id: "nonexistent".into(),
+        };
+        let ce: CommandError = e.into();
+        assert_eq!(ce.code, "not_found");
+        assert_eq!(ce.detail.unwrap()["id"], "nonexistent");
+    }
+
+    #[test]
+    fn exec_error_missing_arg_maps_correctly() {
+        use crate::domain::execution::ExecError;
+        let e = ExecError::MissingArg("path".into());
+        let ce: CommandError = e.into();
+        assert_eq!(ce.code, "missing_arg");
+        assert_eq!(ce.detail.unwrap()["arg_name"], "path");
+        assert!(!ce.retryable);
+    }
+
+    #[test]
+    fn ocr_error_engine_maps_correctly() {
+        use crate::domain::capability::builtins::ocr_engine::OcrError;
+        let e = OcrError::Engine("OCR 引擎初始化失败".into());
+        let ce: CommandError = e.into();
+        assert_eq!(ce.code, "ocr_engine_error");
+        assert!(ce.message.contains("OCR 引擎错误"));
+        assert!(!ce.retryable);
+    }
+
+    #[test]
+    fn ocr_error_unsupported_maps_correctly() {
+        use crate::domain::capability::builtins::ocr_engine::OcrError;
+        let ce: CommandError = OcrError::Unsupported.into();
+        assert_eq!(ce.code, "ocr_unsupported");
+        assert!(!ce.retryable);
+    }
+
+    #[test]
+    fn command_error_round_trip() {
+        let e = CommandError::with_detail(
+            "not_found",
+            "能力不存在",
+            false,
+            serde_json::json!({ "id": "test" }),
+        );
+        let json = serde_json::to_value(&e).unwrap();
+        let e2: CommandError = serde_json::from_value(json).unwrap();
+        assert_eq!(e.code, e2.code);
+        assert_eq!(e.message, e2.message);
+        assert_eq!(e.detail, e2.detail);
+        assert_eq!(e.retryable, e2.retryable);
+    }
+}

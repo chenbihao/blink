@@ -281,7 +281,6 @@ async function openProcessPicker(existing) {
   return new Promise((resolve) => {
     const overlay = document.createElement("div");
     overlay.className = "modal-overlay";
-    overlay.style.display = "flex";
     overlay.innerHTML = `
       <div class="modal">
         <div class="modal-header">

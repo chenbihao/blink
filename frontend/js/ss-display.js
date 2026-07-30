@@ -50,7 +50,7 @@ export function findDisplayCssAt(cssX, cssY) {
  *  按"选区所在屏"clamp——副屏左边缘做选区时工具栏不会被推到另一块屏去。 */
 export function positionToolbar(rect) {
   const { toolbar } = ss;
-  toolbar.style.display = 'flex';
+  toolbar.classList.remove('hidden');
   if (toolbar.dataset.userMoved === 'true' && toolbar.style.left && toolbar.style.top) {
     return;
   }

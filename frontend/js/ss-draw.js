@@ -49,7 +49,7 @@ export function drawSelection() {
 
   // size-hint 显示物理像素尺寸
   sizeHint.textContent = `${Math.round(pw)} × ${Math.round(ph)}`;
-  sizeHint.style.display = 'block';
+  sizeHint.classList.remove('hidden');
   sizeHint.style.left = (r.x + 4) + 'px';
   sizeHint.style.top = (r.y > 24 ? r.y - 22 : r.y + 4) + 'px';
 }

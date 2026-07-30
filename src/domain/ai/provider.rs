@@ -223,10 +223,9 @@ pub mod tests {
         assert_eq!(p.model_id(), "mock-echo");
     }
 
-    #[test]
-    fn mock_provider_returns_tool_call() {
-        tauri::async_runtime::block_on(async {
-            let p = MockProvider::echo_tool_call(
+    #[tokio::test]
+    async fn mock_provider_returns_tool_call() {
+        let p = MockProvider::echo_tool_call(
                 "open_url",
                 serde_json::json!({ "url": "https://example.com" }),
             );
@@ -249,13 +248,11 @@ pub mod tests {
             );
             assert!(resp.first_token_ms > 0, "first_token_ms 必须由 provider 填");
             assert!(resp.total_ms > 0);
-        });
     }
 
-    #[test]
-    fn mock_provider_honors_timeout() {
-        tauri::async_runtime::block_on(async {
-            let p = MockProvider::slow(200);
+    #[tokio::test]
+    async fn mock_provider_honors_timeout() {
+        let p = MockProvider::slow(200);
             let req = CompletionRequest {
                 messages: vec![ChatMessage::user("q")],
                 tools: Vec::new(),
@@ -277,7 +274,6 @@ pub mod tests {
                 "超时时机偏差:实际 {}ms",
                 elapsed.as_millis()
             );
-        });
     }
 
     #[test]

@@ -142,12 +142,14 @@ pub async fn launch_app(app: tauri::AppHandle, lnk_path: String) -> Result<(), S
 /// 关键词触发的 `run_builtin_action` 会命中 Capability 版本。
 ///
 /// 未知 id → 返回 `Err`；前端会打印到控制台，不弹窗。
+///
+/// **0.14.7 W3**：返回 `CommandError`（结构化错误协议），前端按 code/message 展示。
 #[tauri::command]
 pub async fn run_builtin_action(
     app: tauri::AppHandle,
     id: String,
     arg: Option<serde_json::Value>,
-) -> Result<(), String> {
+) -> Result<(), crate::app::command_error::CommandError> {
     tracing::debug!(%id, ?arg, "run_builtin_action: 收到请求");
 
     // 0.14.6 §2.2：从 state 获取 DomainEnv 桥接器
@@ -164,7 +166,7 @@ pub async fn run_builtin_action(
             Ok(_outcome) => {}
             Err(e) => {
                 tracing::error!(%id, error = %e, "内置动作执行失败");
-                return Err(e.to_string());
+                return Err(crate::app::command_error::CommandError::from(e));
             }
         }
         crate::infra::platform::window::hide(&app, "run_builtin_action");
@@ -187,16 +189,19 @@ pub async fn run_builtin_action(
             }
             Err(e) => {
                 tracing::error!(%id, error = %e, "run_builtin_action: Capability 执行失败");
-                return Err(e.to_string());
+                return Err(crate::app::command_error::CommandError::from(e));
             }
         }
         crate::infra::platform::window::hide(&app, "run_builtin_action");
         return Ok(());
     }
 
-    let msg = format!("未知内置动作 id: {id}");
     tracing::warn!(%id, "run_builtin_action: 未知 id");
-    Err(msg)
+    Err(crate::app::command_error::CommandError::new(
+        "not_found",
+        &format!("未知内置动作 id: {id}"),
+        false,
+    ))
 }
 
 /// 对话窗口危险操作确认（0.12.0 §2.4 闭环骨架）。

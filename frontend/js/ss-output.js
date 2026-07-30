@@ -35,7 +35,7 @@ export function doCopySelection() {
       .catch((err) => {
         console.error('[screenshot] copy 失败（快路径）', err);
         ss.errorHint.textContent = '截图保存失败：' + err;
-        ss.errorHint.style.display = 'block';
+        ss.errorHint.classList.remove('hidden');
         ss.sent = false;
       });
     return;
@@ -47,7 +47,7 @@ export function doCopySelection() {
       .catch((err) => {
         console.error('[screenshot] copy 失败', err);
         ss.errorHint.textContent = '截图保存失败：' + err;
-        ss.errorHint.style.display = 'block';
+        ss.errorHint.classList.remove('hidden');
         ss.sent = false;
       });
   });
@@ -62,7 +62,7 @@ export function doCopyFullScreen() {
     .catch((err) => {
       console.error('[screenshot] fullscreen copy 失败', err);
       ss.errorHint.textContent = '截图保存失败：' + err;
-      ss.errorHint.style.display = 'block';
+      ss.errorHint.classList.remove('hidden');
       ss.sent = false;
     });
 }

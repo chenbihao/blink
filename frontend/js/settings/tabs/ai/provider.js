@@ -99,7 +99,7 @@ export function renderAIProviders() {
 <button class="ai-provider-edit" data-provider-id="${escapeAttr(p.id)}" title="${escapeAttr(t("ai.provider.edit"))}">${iconHTML("pencil")}</button>
 <button class="ai-provider-delete" data-provider-id="${escapeAttr(p.id)}" title="${escapeAttr(t("ai.provider.delete"))}">${iconHTML("x")}</button>
           </div>
-          <div class="ai-provider-models" style="display:none;">${modelsTable}</div>
+          <div class="ai-provider-models hidden">${modelsTable}</div>
         </div>`;
     })
     .join("");
@@ -114,8 +114,8 @@ export function renderAIProviders() {
       const card = header.closest(".ai-provider-card");
       const modelsDiv = card.querySelector(".ai-provider-models");
       const chevron = header.querySelector(".ai-provider-chevron");
-      const isOpen = modelsDiv.style.display !== "none";
-      modelsDiv.style.display = isOpen ? "none" : "";
+      const isOpen = !modelsDiv.classList.contains('hidden');
+      modelsDiv.classList.toggle('hidden', isOpen);
       chevron.textContent = isOpen ? "▸" : "▾";
     });
   });
@@ -246,7 +246,7 @@ export function restoreExpandedProviderIds(ids) {
       const modelsDiv = card.querySelector(".ai-provider-models");
       const chevron = card.querySelector(".ai-provider-chevron");
       if (modelsDiv && chevron) {
-        modelsDiv.style.display = "";
+        modelsDiv.classList.remove('hidden');
         chevron.textContent = "▾";
       }
     }
@@ -272,7 +272,7 @@ function guideAddModelForProvider(providerId) {
   const card = document.querySelector(`.ai-provider-card[data-provider-id="${CSS.escape(providerId)}"]`);
   if (card) {
     const modelsDiv = card.querySelector(".ai-provider-models");
-    if (modelsDiv) modelsDiv.style.display = "";
+    if (modelsDiv) modelsDiv.classList.remove('hidden');
     const chevron = card.querySelector(".ai-provider-chevron");
     if (chevron) chevron.textContent = "▾";
   }
@@ -440,7 +440,7 @@ export function applyAIPresetToModal(presetKey, isEdit) {
     $("ai-modal-display-name").value = uniqueDisplayName(preset.display_name_default);
   }
   const testResult = $("ai-modal-test-result");
-  if (testResult) { testResult.style.display = "none"; testResult.textContent = ""; }
+  if (testResult) { testResult.classList.add('hidden'); testResult.textContent = ""; }
   clearProviderModelSelect();
 }
 
@@ -490,11 +490,11 @@ export function openAIProviderModal(editProviderId) {
         $("ai-modal-api-key").classList.add("has-secret-hint");
       }
     }).catch(() => { });
-    $("ai-modal-kind-row").style.display = "";
-    $("ai-modal-preset-row").style.display = "";
+    $("ai-modal-kind-row").classList.remove('hidden');
+    $("ai-modal-preset-row").classList.remove('hidden');
     renderPresetList(guessPresetForProvider(p.kind, p.base_url), true);
     $("ai-modal-kind").disabled = false;
-    $("ai-modal-model-section").style.display = "";
+    $("ai-modal-model-section").classList.remove('hidden');
     clearProviderModelSelect();
     aiState._providerSelectedModels = (p.models || []).map((m) => m.id);
     aiState._editOriginalModelIds = [...aiState._providerSelectedModels];
@@ -502,8 +502,8 @@ export function openAIProviderModal(editProviderId) {
   } else {
     delete overlay.dataset.editProviderId;
     $("ai-modal-title").textContent = t("ai.modal.title");
-    $("ai-modal-kind-row").style.display = "";
-    $("ai-modal-preset-row").style.display = "";
+    $("ai-modal-kind-row").classList.remove('hidden');
+    $("ai-modal-preset-row").classList.remove('hidden');
     $("ai-modal-preset").value = "openai";
     $("ai-modal-kind").value = "openai_compatible";
     $("ai-modal-display-name").value = "";
@@ -513,23 +513,23 @@ export function openAIProviderModal(editProviderId) {
     $("ai-modal-api-key").classList.remove("has-secret-hint");
     $("ai-modal-api-key-hint").textContent = t("ai.modal.api_key.hint");
     $("ai-modal-kind").disabled = false;
-    $("ai-modal-model-section").style.display = "";
+    $("ai-modal-model-section").classList.remove('hidden');
     renderPresetList("openai", false);
     applyAIPresetToModal("openai", false);
     clearProviderModelSelect();
   }
   const testResult = $("ai-modal-test-result");
-  if (testResult) { testResult.style.display = "none"; testResult.textContent = ""; }
+  if (testResult) { testResult.classList.add('hidden'); testResult.textContent = ""; }
   const errEl = $("ai-modal-error");
   if (errEl) errEl.textContent = "";
-  overlay.style.display = "flex";
+  overlay.classList.remove('hidden');
   setTimeout(() => $("ai-modal-display-name")?.focus(), 40);
 }
 
 export function closeAIProviderModal() {
   const overlay = document.getElementById("ai-modal-overlay");
   if (!overlay) return;
-  overlay.style.display = "none";
+  overlay.classList.add('hidden');
   const keyInput = document.getElementById("ai-modal-api-key");
   if (keyInput) keyInput.value = "";
   delete overlay.dataset.editProviderId;
@@ -733,7 +733,7 @@ export function clearProviderModelSelect() {
   const input = document.getElementById("ai-provider-model-input");
   if (input) input.value = "";
   const dropdown = document.getElementById("ai-provider-model-dropdown");
-  if (dropdown) { dropdown.style.display = "none"; dropdown.innerHTML = ""; }
+  if (dropdown) { dropdown.classList.add('hidden'); dropdown.innerHTML = ""; }
   renderProviderModelTags();
 }
 
@@ -745,7 +745,7 @@ export async function triggerProviderModelFetch() {
   }
   const dropdown = document.getElementById("ai-provider-model-dropdown");
   if (!dropdown) return;
-  dropdown.style.display = "";
+  dropdown.classList.remove('hidden');
   aiState._providerModelCache = { models: [], error: null, loading: true };
   filterProviderModels("");
 
@@ -775,7 +775,7 @@ export async function triggerProviderModelFetch() {
 export function filterProviderModels(filter) {
   const dropdown = document.getElementById("ai-provider-model-dropdown");
   if (!dropdown) return;
-  dropdown.style.display = "";
+  dropdown.classList.remove('hidden');
 
   const cache = aiState._providerModelCache;
   if (!cache || cache.loading) {

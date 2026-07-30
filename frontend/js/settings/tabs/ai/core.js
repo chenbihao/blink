@@ -145,7 +145,7 @@ function setSegControlValue(id, value) {
 function updateMemoryConfigVisibility(mode) {
   const body = document.getElementById("ai-memory-config-body");
   if (!body) return;
-  body.style.display = mode === "off" ? "none" : "";
+  body.classList.toggle('hidden', mode === "off");
 }
 
 function updateMemoryContextSizeDisplay() {
@@ -176,7 +176,7 @@ function updateMemoryContextSizeDisplay() {
 function showAIEnableToast() {
   const toast = document.getElementById("ai-enable-toast");
   if (!toast) return;
-  toast.style.display = "flex";
+  toast.classList.remove('hidden');
   clearTimeout(showAIEnableToast._t);
   showAIEnableToast._t = setTimeout(hideAIEnableToast, 8000);
 }
@@ -184,7 +184,7 @@ function showAIEnableToast() {
 function hideAIEnableToast() {
   const toast = document.getElementById("ai-enable-toast");
   if (!toast) return;
-  toast.style.display = "none";
+  toast.classList.add('hidden');
   clearTimeout(showAIEnableToast._t);
 }
 
@@ -302,13 +302,13 @@ function bindAIEvents() {
   // Skill 编辑 modal 事件
   $("skill-edit-cancel")?.addEventListener("click", () => {
     const overlay = $("skill-edit-overlay");
-    if (overlay) overlay.style.display = "none";
+    if (overlay) overlay.classList.add('hidden');
     const errorEl = $("skill-edit-error");
     if (errorEl) errorEl.textContent = "";
   });
   $("skill-edit-overlay")?.addEventListener("click", (e) => {
     if (e.target.id === "skill-edit-overlay") {
-      e.target.style.display = "none";
+      e.target.classList.add('hidden');
     }
   });
   $("skill-edit-save")?.addEventListener("click", async () => {
@@ -321,7 +321,7 @@ function bindAIEvents() {
     if (!skillDir) return;
     try {
       await invoke("save_skill_md", { skillDir, content });
-      overlay.style.display = "none";
+      overlay.classList.add('hidden');
       await invoke("refresh_skills");
       await loadSkillList();
     } catch (e) {
@@ -405,16 +405,16 @@ function bindAIEvents() {
   });
   $("ai-modal-overlay")?.addEventListener("click", (e) => {
     const dropdown = $("ai-provider-model-dropdown");
-    if (!dropdown || dropdown.style.display === "none") return;
+    if (!dropdown || dropdown.classList.contains('hidden')) return;
     if (e.target.closest("#ai-provider-model-select")) return;
-    dropdown.style.display = "none";
+    dropdown.classList.add('hidden');
   });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       const modelOverlay = $("ai-model-edit-overlay");
-      if (modelOverlay && modelOverlay.style.display !== "none") return;
+      if (modelOverlay && !modelOverlay.classList.contains('hidden')) return;
       const overlay = $("ai-modal-overlay");
-      if (overlay && overlay.style.display !== "none") {
+      if (overlay && !overlay.classList.contains('hidden')) {
         closeAIProviderModal();
       }
     }
@@ -432,24 +432,24 @@ function bindAIEvents() {
     if (!apiKey && !providerId) {
       resultEl.textContent = t("ai.modal.test.empty_key");
       resultEl.className = "ai-test-result error";
-      resultEl.style.display = "";
+      resultEl.classList.remove('hidden');
       return;
     }
 
     btn.classList.add("testing");
     btn.textContent = t("ai.modal.test.testing");
-    resultEl.style.display = "none";
+    resultEl.classList.add('hidden');
     try {
       const msg = await invoke("test_ai_provider", {
         kind, baseUrl, apiKey: apiKey || "", providerId: providerId || null,
       });
       resultEl.textContent = msg;
       resultEl.className = "ai-test-result success";
-      resultEl.style.display = "";
+      resultEl.classList.remove('hidden');
     } catch (e) {
       resultEl.textContent = String(e);
       resultEl.className = "ai-test-result error";
-      resultEl.style.display = "";
+      resultEl.classList.remove('hidden');
     } finally {
       btn.classList.remove("testing");
       btn.textContent = t("ai.modal.test");

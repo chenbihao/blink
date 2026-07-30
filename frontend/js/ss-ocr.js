@@ -14,6 +14,7 @@ import * as annot from './annotation-engine.js';
 import {
   ocrImage, translateText, translateLines, copyToClipboard,
 } from './api.js';
+import { normalizeError } from './tauri.js';
 
 // ════════════════════════════════════════════════════════════
 //  UI Helpers
@@ -43,7 +44,7 @@ export function hideSelLoading() {
 export function showTransientHint(msg) {
   const { errorHint, selCss } = ss;
   errorHint.textContent = msg;
-  errorHint.style.display = 'block';
+  errorHint.classList.remove('hidden');
   errorHint.style.background = 'rgba(50,50,50,0.85)';
   errorHint.style.left = '-9999px';
   errorHint.style.top = '-9999px';
@@ -71,7 +72,7 @@ export function showTransientHint(msg) {
   });
 
   setTimeout(() => {
-    errorHint.style.display = 'none';
+    errorHint.classList.add('hidden');
     errorHint.style.background = '';
     errorHint.style.transform = '';
   }, 2000);
@@ -150,7 +151,7 @@ export function doIdentifySelection() {
       annot.setOverlayMode(null);
       redrawAnnotFull();
       const adv = existingPanel.querySelector('.ocr-panel-adv');
-      if (adv) adv.style.display = 'none';
+      if (adv) adv.classList.add('hidden');
       if (tabSource) tabSource.click();
     }
     return;
@@ -209,7 +210,7 @@ export function doOverlayTranslate() {
         redrawAnnotFull();
       }
       const adv = existingPanel.querySelector('.ocr-panel-adv');
-      if (adv) adv.style.display = '';
+      if (adv) adv.classList.remove('hidden');
       if (tabTranslated) tabTranslated.click();
     }
     return;
@@ -302,12 +303,13 @@ function _runOcrFresh(opts = {}) {
           });
         }
       })
-      .catch((err) => {
+      .catch((rawErr) => {
+        const err = normalizeError(rawErr);
         if (revision === ss.selectionRevision) {
-          showTransientHint('识别失败');
+          showTransientHint(err.retryable ? '识别失败，可重试' : '识别失败');
         }
         hideSelLoading();
-        console.error('[screenshot] ocr 失败', err);
+        console.error(`[screenshot] ocr 失败 [${err.code}] ${err.message}`);
       })
       .finally(() => {
         if (revision === ss.selectionRevision) {
@@ -381,7 +383,8 @@ async function translateOverlayLines(targetLang, revision = ++ss.translationRevi
   try {
     dsts = await translateLines(srcs, targetLang || null);
   } catch (e) {
-    console.warn('[screenshot] translateLines 失败,降级到逐行单调', e);
+    const err = normalizeError(e);
+    console.warn(`[screenshot] translateLines 失败 [${err.code}],降级到逐行单调`);
     dsts = [];
     for (let i = 0; i < srcs.length; i++) {
       if (!hasText(srcs[i])) { dsts.push(''); continue; }
@@ -458,7 +461,7 @@ export function showOcrResult(result, options = {}) {
 
   if (initialTab !== 'translated') {
     const advSection = panel.querySelector('.ocr-panel-adv');
-    if (advSection) advSection.style.display = 'none';
+    if (advSection) advSection.classList.add('hidden');
   }
 
   const sourceTa = panel.querySelector('#ocr-textarea-source');
@@ -721,7 +724,7 @@ export function showOcrResult(result, options = {}) {
   translateBtn.addEventListener('click', () => {
     showTab('translated');
     const advSection = panel.querySelector('.ocr-panel-adv');
-    if (advSection) advSection.style.display = '';
+    if (advSection) advSection.classList.remove('hidden');
     const overlay = annot.getOverlay();
     if (overlay && overlay.mode !== 'translated') {
       annot.setOverlayMode('translated');

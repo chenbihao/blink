@@ -889,8 +889,17 @@ impl SearchService {
                 .unwrap_or(AI_DEFAULT_HARD_TIMEOUT_MS);
 
             // 0.14: AI tool 池只含 Capability（builtin + 插件）。
-            let cap_reg = app.cap_registry();
-            let tools = crate::domain::execution::group::build_capability_tools(&cap_reg);
+            // 0.14.7 W5: 缺失 registry 时降级为空 tool 池，普通 fuzzy 搜索继续工作。
+            let tools = match app.cap_registry() {
+                Some(cap_reg) => crate::domain::execution::group::build_capability_tools(cap_reg),
+                None => {
+                    tracing::warn!(
+                        target: ai_slo::TARGET,
+                        "CapabilityRegistry 未初始化，AI tool 池为空，仅 fuzzy 搜索可用"
+                    );
+                    Vec::new()
+                }
+            };
 
             // 0.11.1 §2.3b: 参数 schema 动态注入插件 settings——
             // 插件 tool 的 schema 根据用户已配置的 settings 动态调整：
@@ -1737,7 +1746,16 @@ async fn handle_ai_tool_calls(
     );
 
     // 0.14: AI tool_call 只允许命中 CapabilityRegistry。
-    let cap_reg = env.cap_registry();
+    // 0.14.7 W5: 缺失 registry 时返回可恢复错误，不 panic、不伪装成未知 tool。
+    let Some(cap_reg) = env.cap_registry() else {
+        tracing::error!(
+            target: ai_slo::TARGET,
+            capability = %tc.name,
+            "AI tool_call 执行失败: CapabilityRegistry 未初始化"
+        );
+        emit_ai_clear(env, seq, Some("运行时能力未初始化"));
+        return;
+    };
     if let Some(cap) = cap_reg.get(&tc.name) {
         if cap.requires_ai_confirmation() {
             let schema = cap.schema();
@@ -2436,22 +2454,27 @@ async fn run_turn2_feedback(
 
     // Turn 2 tools = 无强制确认的 Capability。
     // §2.2.1: Turn 2 允许 AI 再调一次 Safe tool（如 file_action → open_path），实现 tool chain
-    let cap_reg = env.cap_registry();
-
-    // tool 池在 Turn 1 已是 Capability-only；这里再剔除 Dangerous / sensitive，
-    // 防止有限二轮链路绕过主窗口确认边界。open_url 保持既有特殊策略：
-    // 允许模型选择，但在 handle_turn2_tool_call 中降级为确认卡片。
-    let safe_tool_names: std::collections::HashSet<String> = ctx
-        .tools
-        .iter()
-        .filter(|schema| {
-            cap_reg
-                .get(&schema.name)
-                .map(|cap| !cap.requires_ai_confirmation())
-                .unwrap_or(false)
-        })
-        .map(|s| s.name.clone())
-        .collect();
+    // 0.14.7 W5: 缺失 registry 时降级为空 safe tool 集合。
+    let safe_tool_names: std::collections::HashSet<String> = match env.cap_registry() {
+        Some(cap_reg) => ctx
+            .tools
+            .iter()
+            .filter(|schema| {
+                cap_reg
+                    .get(&schema.name)
+                    .map(|cap| !cap.requires_ai_confirmation())
+                    .unwrap_or(false)
+            })
+            .map(|s| s.name.clone())
+            .collect(),
+        None => {
+            tracing::warn!(
+                target: ai_slo::TARGET,
+                "Turn 2: CapabilityRegistry 未初始化，无 safe tool 可用"
+            );
+            std::collections::HashSet::new()
+        }
+    };
 
     let safe_tools: Vec<ActionSchema> = ctx
         .tools
@@ -2676,7 +2699,16 @@ async fn handle_turn2_tool_call(
     ctx: &Turn2Context,
     latest_seq: &AtomicU64,
 ) {
-    let cap_reg = env.cap_registry();
+    // 0.14.7 W5: 缺失 registry 时返回可恢复错误，不 panic。
+    let Some(cap_reg) = env.cap_registry() else {
+        tracing::error!(
+            target: ai_slo::TARGET,
+            capability = %tc.name,
+            "Turn 2 tool_call 执行失败: CapabilityRegistry 未初始化"
+        );
+        emit_ai_clear(env, seq, Some("运行时能力未初始化"));
+        return;
+    };
 
     // §3.2: 更新占位文案为 Turn 2 工具的 progress_hint
     let progress_hint = derive_progress_hint(&tc.name, "", &ctx.progress_hints);

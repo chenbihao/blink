@@ -270,7 +270,7 @@ impl ChatService {
     /// 持久化到 AI 库，重启不丢历史。
     /// 0.13.1：memory 持有具体类型 `Arc<SqliteConversationMemory>`（不再是 trait object），
     /// 供 `AgentProvider::new` 注入 `model.context_window` 驱动 token-aware 裁剪。
-    pub fn new(
+    pub async fn new(
         emitter: Arc<dyn DomainEnv>,
         ai_registry: Arc<AIProviderRegistry>,
         capability_registry: Arc<CapabilityRegistry>,
@@ -280,8 +280,8 @@ impl ChatService {
         config_pool: sqlx::SqlitePool,
     ) -> Self {
         // 从配置库加载持久化的模型选择（0.12.7）
-        let selected =
-            tauri::async_runtime::block_on(Self::load_selected_model(&config_pool, &ai_registry));
+        // 0.14.7 W1: async 边界收敛在调用方（wiring），domain 内不再嵌套 runtime
+        let selected = Self::load_selected_model(&config_pool, &ai_registry).await;
         Self {
             emitter,
             ai_registry,

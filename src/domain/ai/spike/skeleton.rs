@@ -15,10 +15,9 @@ use super::mock_server::MockServer;
 ///
 /// **为什么关键**：SSE 长连接场景下，若不主动 abort in-flight request，
 /// tokio task 会一直挂着,占用 slot;硬超时是「静默 fallback」的兜底基石。
-#[test]
-fn hard_timeout_aborts_precisely_at_configured_ms() {
-    tauri::async_runtime::block_on(async {
-        // mock server 故意慢 5s
+#[tokio::test]
+async fn hard_timeout_aborts_precisely_at_configured_ms() {
+    // mock server 故意慢 5s
         let server = MockServer::start(Duration::from_secs(5)).await.unwrap();
 
         let client = reqwest::Client::builder()
@@ -43,7 +42,6 @@ fn hard_timeout_aborts_precisely_at_configured_ms() {
             elapsed >= Duration::from_millis(280) && elapsed <= Duration::from_millis(380),
             "硬超时时机偏差过大：实际 {elapsed:?}，期望 300ms±80ms"
         );
-    });
 }
 
 /// 验收 2：**用户中断 100ms 内取消 in-flight**
@@ -54,9 +52,8 @@ fn hard_timeout_aborts_precisely_at_configured_ms() {
 /// **具体做法**：起一个 sleep 5s 的 mock server，主 task 用 `tokio::select!` 让
 /// 「HTTP 请求」和「中断信号」赛跑；50ms 后发中断信号，验证请求 task 在总耗时 <150ms
 /// 内退出（含调度抖动）。
-#[test]
-fn user_interrupt_cancels_inflight_within_100ms() {
-    tauri::async_runtime::block_on(async {
+#[tokio::test]
+async fn user_interrupt_cancels_inflight_within_100ms() {
         let server = MockServer::start(Duration::from_secs(5)).await.unwrap();
 
         let client = reqwest::Client::builder()
@@ -91,7 +88,6 @@ fn user_interrupt_cancels_inflight_within_100ms() {
             elapsed < Duration::from_millis(150),
             "中断响应过慢：实际 {elapsed:?}，期望 <150ms"
         );
-    });
 }
 
 /// 验收 3：**tokio task drop 传播** —— 中断验证的补充断言
@@ -99,9 +95,8 @@ fn user_interrupt_cancels_inflight_within_100ms() {
 /// 上面 `user_interrupt_cancels_inflight_within_100ms` 用 `select!` 内部取消,
 /// 这里验证外部 `AbortHandle::abort()` 也能立即取消 in-flight（用于设置页
 /// "换 Provider 时取消所有 in-flight" 场景）。
-#[test]
-fn abort_handle_cancels_inflight_task() {
-    tauri::async_runtime::block_on(async {
+#[tokio::test]
+async fn abort_handle_cancels_inflight_task() {
         let server = MockServer::start(Duration::from_secs(5)).await.unwrap();
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
@@ -131,7 +126,6 @@ fn abort_handle_cancels_inflight_task() {
             elapsed < Duration::from_millis(50),
             "abort 响应过慢：实际 {elapsed:?}，期望 <50ms"
         );
-    });
 }
 
 /// 验收 4：**loading 反闪烁定时器逻辑**（后端时机侧）
@@ -140,9 +134,8 @@ fn abort_handle_cancels_inflight_task() {
 /// 后端职责是精确计时并在阈值处发信号；这里模拟三档响应：
 /// - 80ms 完成 → 不应触发 loading 显示
 /// - 300ms 完成 → 应触发 loading 显示（因为超过 150ms 阈值）
-#[test]
-fn loading_indicator_respects_150ms_debounce() {
-    tauri::async_runtime::block_on(async {
+#[tokio::test]
+async fn loading_indicator_respects_150ms_debounce() {
         // 场景 A：快速响应（80ms），loading 不应触发
         {
             let server = MockServer::start(Duration::from_millis(80)).await.unwrap();
@@ -170,7 +163,6 @@ fn loading_indicator_respects_150ms_debounce() {
                 "300ms 响应应触发 loading（超过 150ms 阈值）"
             );
         }
-    });
 }
 
 /// 后端"loading 反闪烁"参考实现：

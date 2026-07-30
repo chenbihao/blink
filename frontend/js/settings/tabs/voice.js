@@ -314,8 +314,8 @@ export async function initVoiceTab() {
     const localSection = document.getElementById("voice-local-section");
     const isLocal = localRadio?.checked;
     if (cloudSection && localSection) {
-      cloudSection.style.display = isLocal ? "none" : "";
-      localSection.style.display = isLocal ? "" : "none";
+      cloudSection.classList.toggle('hidden', isLocal);
+      localSection.classList.toggle('hidden', !isLocal);
     }
     // 高级选项卡内的流式识别字段：仅本地模式生效
     const streamingField = document.getElementById("voice-streaming-field");

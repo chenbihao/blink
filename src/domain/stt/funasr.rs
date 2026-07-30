@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// 嵌入的 blink_stt_server.py 脚本（随 Rust 二进制发布）。
-const BLINK_STT_SERVER_PY: &str = include_str!("../../../resources/python/blink_stt_server.py");
+const BLINK_STT_SERVER_PY: &str = include_str!("../../../resources/stt/funasr/blink_stt_server.py");
 
 /// server 启动超时（秒）。
 /// 首次启动需要从 ModelScope 下载模型（~234MB），加上 PyTorch 加载，

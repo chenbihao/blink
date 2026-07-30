@@ -1,6 +1,7 @@
 //! 应用层：命令编排、配置管理、服务生命周期
 
 pub mod ai_config;
+pub mod command_error; // 0.14.7 W3：IPC 边界的结构化错误协议
 pub mod commands;
 pub mod config;
 pub mod domain_env; // 0.14.6 §2.2：TauriDomainEnv——DomainEnv trait 的 Tauri 实现

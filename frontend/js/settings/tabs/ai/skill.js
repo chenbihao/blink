@@ -155,7 +155,7 @@ export async function showSkillImportPanel() {
   const listEl = document.getElementById("skill-import-skill-list");
   if (listEl) listEl.innerHTML = '<span class="skill-empty-hint">加载中...</span>';
   aiState._customImportDir = null;
-  overlay.style.display = "flex";
+  overlay.classList.remove('hidden');
 
   try {
     aiState._skillImportSourcesCache = await invoke("list_external_skill_sources");
@@ -260,7 +260,7 @@ export function initSkillImportHandlers() {
 /** 关闭导入面板并清理状态。 */
 function closeSkillImportPanel() {
   const overlay = document.getElementById("skill-import-overlay");
-  if (overlay) overlay.style.display = "none";
+  if (overlay) overlay.classList.add('hidden');
   const errorEl = document.getElementById("skill-import-error");
   if (errorEl) errorEl.textContent = "";
 }
@@ -387,8 +387,8 @@ async function doSkillImportSelected() {
     let msg = `导入完成：成功 ${ok.length} 个`;
     if (fail.length) msg += `，失败 ${fail.length} 个（${fail.join("; ")}）`;
     hint.textContent = msg;
-    hint.style.display = "block";
-    setTimeout(() => { hint.style.display = "none"; }, 6000);
+    hint.classList.remove('hidden');
+    setTimeout(() => { hint.classList.add('hidden'); }, 6000);
   }
 }
 
@@ -417,7 +417,7 @@ export function showSkillEditModal(skillDir, content, cliPath) {
   if (metaEl) metaEl.textContent = `目录: ${skillDir}`;
   const errorEl = document.getElementById("skill-edit-error");
   if (errorEl) errorEl.textContent = "";
-  overlay.style.display = "flex";
+  overlay.classList.remove('hidden');
 }
 
 // ── CLI 能力识别（IIFE，模块加载时绑定）────────────────────

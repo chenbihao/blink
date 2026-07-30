@@ -76,7 +76,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    fn run(q: &str) -> Vec<SearchItem> {
+    async fn run(q: &str) -> Vec<SearchItem> {
         let engine = CalcEngine::with_config(CalcConfig::default());
         let h = HashMap::new();
         let snapshot = crate::infra::platform::context::ContextSnapshot::default();
@@ -86,13 +86,13 @@ mod tests {
             disabled_builtin_actions: &[],
             disabled_context_bindings: &[],
         };
-        // 引擎 search 是 async,但 CalcEngine 内部纯同步,用 block_on 跑测试
-        tauri::async_runtime::block_on(engine.search(q, &ctx))
+        // 0.14.7 W1: 改用 #[tokio::test]，domain 不再依赖 tauri runtime
+        engine.search(q, &ctx).await
     }
 
-    #[test]
-    fn hit_produces_copy_item() {
-        let items = run("1+1");
+    #[tokio::test]
+    async fn hit_produces_copy_item() {
+        let items = run("1+1").await;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "= 2");
         assert!(
@@ -101,9 +101,9 @@ mod tests {
         assert_eq!(items[0].source, "calc");
     }
 
-    #[test]
-    fn miss_returns_empty() {
-        assert!(run("hello").is_empty());
-        assert!(run("123").is_empty()); // 纯数字不算计算
+    #[tokio::test]
+    async fn miss_returns_empty() {
+        assert!(run("hello").await.is_empty());
+        assert!(run("123").await.is_empty()); // 纯数字不算计算
     }
 }

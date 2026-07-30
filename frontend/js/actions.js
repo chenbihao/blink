@@ -5,6 +5,7 @@
 //! 行为由后端提供的 action.kind 驱动，与提示栏（hints.js）同源，语义一致。
 
 import { launchApp, runBuiltinAction, confirmAiAction, hideWindow, recordClipboardHit } from "./api.js";
+import { normalizeError } from "./tauri.js";
 
 /**
  * 激活一个结果项。
@@ -20,7 +21,8 @@ export async function activateItem(data) {
     try {
       await confirmAiAction(data.aiConfirm.actionName, data.aiConfirm.arguments);
     } catch (e) {
-      console.error("confirm_ai_action failed:", e);
+      const err = normalizeError(e);
+      console.error(`[confirm_ai_action] [${err.code}] ${err.message}`);
     }
     return;
   }
@@ -62,7 +64,8 @@ export async function activateItem(data) {
     try {
       await runBuiltinAction(id, data.action.runArg ?? null);
     } catch (e) {
-      console.error("run_builtin_action failed:", e);
+      const err = normalizeError(e);
+      console.error(`[run_builtin_action] [${err.code}] ${err.message}`);
     }
     return;
   }

@@ -3,6 +3,7 @@
 //! 用法：
 //!   cargo xtask plugins   编译 Rust 插件（仅编译到 target/release，不复制到 bin）
 //!   cargo xtask release   编译插件 + 复制到 bin + cargo tauri build（本地一键打包）
+//!   cargo xtask icons     拉取 Lucide 图标并生成 SVG sprite（调用 Python 脚本）
 //!
 //! 设计动机：原方案把插件编译挂在 Tauri 的 beforeBuildCommand 钩子（其 cwd
 //! 不可控）并用相对路径定位 ps1，在 CI 的 tauri-action 上下文里找不到脚本。
@@ -128,10 +129,48 @@ fn copy_plugins() {
     println!("✅ 插件拷贝完成");
 }
 
+/// 拉取 Lucide 图标并生成 SVG sprite（调用 Python 脚本）。
+///
+/// Python 脚本仅用标准库（urllib），由 xtask 锚定 workspace 根路径并传入，
+/// 避免为一次性下载器引入 Rust HTTP 依赖。
+fn fetch_icons() {
+    let root = workspace_root();
+    let script = root.join("xtask").join("scripts").join("fetch-lucide-icons.py");
+    if !script.exists() {
+        panic!("找不到图标拉取脚本: {}", script.display());
+    }
+    println!("🎨 拉取 Lucide 图标并生成 SVG sprite ...");
+    // 优先使用 python3，回退到 python
+    let py = which_python();
+    run(
+        py.as_str(),
+        &[script.to_str().unwrap(), root.to_str().unwrap()],
+        &root,
+    );
+    println!("✅ 图标 sprite 生成完成");
+}
+
+/// 查找可用的 Python 解释器（python3 优先，回退 python）。
+fn which_python() -> String {
+    for cmd in &["python3", "python"] {
+        if Command::new(cmd)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok()
+        {
+            return cmd.to_string();
+        }
+    }
+    panic!("找不到 Python 解释器，请安装 Python 3.8+ 并确保 python/python3 在 PATH 中");
+}
+
 fn main() {
     let task = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| panic!("用法: cargo xtask <plugins|copy|release>"));
+        .unwrap_or_else(|| panic!("用法: cargo xtask <plugins|copy|release|icons>"));
 
     match task.as_str() {
         "plugins" => build_plugins(false), // 开发期：仅编译，不复制到 bin
@@ -142,6 +181,7 @@ fn main() {
             println!("📦 cargo tauri build ...");
             run("cargo", &["tauri", "build"], &root);
         }
-        other => panic!("未知子命令: {other}\n用法: cargo xtask <plugins|copy|release>"),
+        "icons" => fetch_icons(), // 拉取 Lucide 图标生成 sprite
+        other => panic!("未知子命令: {other}\n用法: cargo xtask <plugins|copy|release|icons>"),
     }
 }

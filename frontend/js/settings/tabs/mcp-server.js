@@ -119,7 +119,7 @@ function updateToggle() {
 function updateDetailVisibility() {
   const detail = document.getElementById("mcp-server-detail");
   if (detail) {
-    detail.style.display = currentConfig.enabled ? "" : "none";
+    detail.classList.toggle('hidden', !currentConfig.enabled);
   }
 }
 

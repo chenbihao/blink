@@ -19,6 +19,35 @@ const TAU = window.__TAURI__;
 /** 调用 Rust command。 */
 export const invoke = TAU?.core?.invoke ?? TAU?.invoke;
 
+// ── IPC 错误归一化（0.14.7 W3）──────────────────────────────────────────────
+
+/**
+ * 将 invoke 抛出的错误归一化为结构化对象。
+ *
+ * 兼容两种形态：
+ * - **结构化 CommandError**（0.14.7 W3 起）：`{ code, message, detail?, retryable }`
+ * - **旧字符串错误**（尚未迁移的 command）：包装为 `{ code: "unknown_error", message, retryable: false }`
+ *
+ * 前端所有 invoke catch 块都应通过此函数归一化后再展示/日志，
+ * 禁止直接把 catch 到的值当字符串拼接（会得到 `[object Object]`）。
+ *
+ * @param {string|object} err - invoke promise rejection 值
+ * @returns {{ code: string, message: string, detail?: *, retryable: boolean }}
+ */
+export function normalizeError(err) {
+  if (err && typeof err === "object" && typeof err.code === "string" && typeof err.message === "string") {
+    return {
+      code: err.code,
+      message: err.message,
+      detail: err.detail,
+      retryable: !!err.retryable,
+    };
+  }
+  // 旧字符串错误 → fallback
+  const message = typeof err === "string" ? err : String(err ?? "");
+  return { code: "unknown_error", message, retryable: false };
+}
+
 /** 监听后端事件（返回 unlisten promise）。事件系统不可用时返回 no-op。 */
 export function listen(event, handler) {
   if (TAU?.event?.listen) {

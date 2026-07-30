@@ -173,22 +173,22 @@ function updateServerRowStatus(name, status, toolCount, errorMsg, tools) {
   if (status === "probing") {
     if (dot) { dot.className = "mcp-status-dot mcp-dot-probing"; }
     if (toolInfo) { toolInfo.textContent = "探测中..."; }
-    if (errEl) { errEl.textContent = ""; errEl.style.display = "none"; errEl.onclick = null; }
-    if (toolsDiv) { toolsDiv.style.display = "none"; }
+    if (errEl) { errEl.textContent = ""; errEl.classList.add('hidden'); errEl.onclick = null; }
+    if (toolsDiv) { toolsDiv.classList.add('hidden'); }
     row._cachedTools = null;
     row._errorMsg = null;
   } else if (status === "online") {
     if (dot) { dot.className = "mcp-status-dot mcp-dot-online"; }
     if (toolInfo) { toolInfo.textContent = `${toolCount} 个工具`; }
-    if (errEl) { errEl.textContent = ""; errEl.style.display = "none"; errEl.onclick = null; }
-    if (toolsDiv) { toolsDiv.style.display = "none"; }
+    if (errEl) { errEl.textContent = ""; errEl.classList.add('hidden'); errEl.onclick = null; }
+    if (toolsDiv) { toolsDiv.classList.add('hidden'); }
     row._cachedTools = tools;
     row._errorMsg = null;
   } else if (status === "disabled") {
     if (dot) { dot.className = "mcp-status-dot mcp-dot-disabled"; }
     if (toolInfo) { toolInfo.textContent = "已禁用"; }
-    if (errEl) { errEl.textContent = ""; errEl.style.display = "none"; errEl.onclick = null; }
-    if (toolsDiv) { toolsDiv.style.display = "none"; }
+    if (errEl) { errEl.textContent = ""; errEl.classList.add('hidden'); errEl.onclick = null; }
+    if (toolsDiv) { toolsDiv.classList.add('hidden'); }
     row._cachedTools = null;
     row._errorMsg = null;
   } else {
@@ -198,7 +198,7 @@ function updateServerRowStatus(name, status, toolCount, errorMsg, tools) {
     if (errEl && errorMsg) {
       // 短错误信息在 header 中默认展示，点击展开下方 tools 区域显示详细报错
       errEl.textContent = `加载失败: server ${name} 未连接或不存在`;
-      errEl.style.display = "block";
+      errEl.classList.remove('hidden');
       errEl.style.cursor = "pointer";
       // 缓存详细报错，供 toggleTools 渲染
       row._errorMsg = errorMsg;
@@ -256,7 +256,7 @@ function renderServerRow(server, probing) {
             <span class="mcp-transport-badge">${transportLabel}</span>
             <span class="mcp-server-command">${commandDisplay}</span>
           </div>
-          <div class="mcp-error-msg" style="display:none;"></div>
+          <div class="mcp-error-msg hidden"></div>
         </div>
         <div class="mcp-server-actions">
           <label class="switch switch-sm" title="启用/禁用">
@@ -267,7 +267,7 @@ function renderServerRow(server, probing) {
           <button class="btn btn-sm mcp-delete-btn" title="删除">${iconHTML("x")}</button>
         </div>
       </div>
-      <div class="mcp-server-tools" style="display:none;"></div>
+      <div class="mcp-server-tools hidden"></div>
     </div>
   `;
 }
@@ -356,12 +356,12 @@ async function toggleTools(card, name) {
   const toolsDiv = card.querySelector(".mcp-server-tools");
   if (!toolsDiv) return;
 
-  if (toolsDiv.style.display !== "none") {
-    toolsDiv.style.display = "none";
+  if (!toolsDiv.classList.contains('hidden')) {
+    toolsDiv.classList.add('hidden');
     return;
   }
 
-  toolsDiv.style.display = "block";
+  toolsDiv.classList.remove('hidden');
 
   // 如果有缓存的错误信息，优先渲染详细报错
   if (card._errorMsg) {
@@ -457,7 +457,7 @@ function initFormHandlers() {
   // 不点击遮罩关闭（防止丢失编辑内容）
   // ESC 关闭
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && overlay && overlay.style.display !== "none") {
+    if (e.key === "Escape" && overlay && !overlay.classList.contains('hidden')) {
       hideForm();
     }
   });
@@ -468,11 +468,11 @@ function toggleTransportFields(transport) {
   const httpFields = document.getElementById("mcp-form-http-fields");
   // SSE 和 HTTP 都使用 URL + headers 字段
   if (transport === "sse" || transport === "http") {
-    if (stdioFields) stdioFields.style.display = "none";
-    if (httpFields) httpFields.style.display = "";
+    if (stdioFields) stdioFields.classList.add('hidden');
+    if (httpFields) httpFields.classList.remove('hidden');
   } else {
-    if (stdioFields) stdioFields.style.display = "";
-    if (httpFields) httpFields.style.display = "none";
+    if (stdioFields) stdioFields.classList.remove('hidden');
+    if (httpFields) httpFields.classList.add('hidden');
   }
 }
 
@@ -496,7 +496,7 @@ function showAddForm() {
   toggleTransportFields("stdio");
   if (errorEl) errorEl.textContent = "";
   overlay.dataset.mode = "add";
-  overlay.style.display = "";
+  overlay.classList.remove('hidden');
 }
 
 async function showEditForm(name) {
@@ -535,7 +535,7 @@ async function showEditForm(name) {
     if (errorEl) errorEl.textContent = "";
     overlay.dataset.mode = "edit";
     overlay.dataset.originalName = name;
-    overlay.style.display = "";
+    overlay.classList.remove('hidden');
   } catch (e) {
     console.error("showEditForm failed:", e);
   }
@@ -543,7 +543,7 @@ async function showEditForm(name) {
 
 function hideForm() {
   const overlay = document.getElementById("mcp-modal-overlay");
-  if (overlay) overlay.style.display = "none";
+  if (overlay) overlay.classList.add('hidden');
 }
 
 /**
@@ -843,12 +843,12 @@ async function showImportForm() {
     existingServerNames = new Set();
   }
 
-  overlay.style.display = "";
+  overlay.classList.remove('hidden');
 }
 
 function hideImportForm() {
   const overlay = document.getElementById("mcp-import-overlay");
-  if (overlay) overlay.style.display = "none";
+  if (overlay) overlay.classList.add('hidden');
   importPreviewData = null;
 }
 

@@ -109,6 +109,17 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 - `src/cli/` — 自身 CLI 化（mcp-server / search / run / chat）
 - `frontend/` — 纯静态前端（主窗口 / 设置页 / 对话窗口 / 截图 overlay / 语音 overlay / 悬浮球 / 右键菜单）
 
+**根目录**（非源码，勿与源码模块混淆）：
+
+| 目录 | 用途 | 易混淆点 |
+|---|---|---|
+| `capabilities/` | Tauri ACL 权限真源（`*.json`） | ≠ `src/domain/capability/`（业务域能力抽象） |
+| `gen/schemas/` | Tauri 自动生成的 IPC Schema | 勿手改，由 `tauri build` / IDE 插件生成 |
+| `icons/` | 安装包图标（`.ico` / `.png`） | ≠ `frontend/assets/icons/`（前端 SVG sprite，由 `cargo xtask icons` 生成） |
+| `xtask/` | Rust workspace 构建编排入口（`cargo xtask <plugins\|copy\|release\|icons>`） | 脚本如 `xtask/scripts/fetch-lucide-icons.py` 归此管理 |
+| `resources/` | 随 Rust 二进制发布的运行时资源（`include_str!` 嵌入） | 只存产物级资源，不接纳开发脚本或生成文件 |
+| `plugins/` | 插件源码与 manifest（builtin + examples） | 编译产物 `bin/` 仅 release 时生成 |
+
 前端用 `invoke()` 调 Rust commands，用 `TAU.event.listen()` 监听后端事件（`blink://*`）。
 
 ---

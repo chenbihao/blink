@@ -108,7 +108,7 @@ export function updateSelectionInteraction(e) {
   drawFinalSelection();
   const dpr = window.devicePixelRatio || 1;
   ss.sizeHint.textContent = `${Math.round(ss.selCss.w * dpr)} × ${Math.round(ss.selCss.h * dpr)}`;
-  ss.sizeHint.style.display = 'block';
+  ss.sizeHint.classList.remove('hidden');
   ss.sizeHint.style.left = (ss.selCss.x + 4) + 'px';
   ss.sizeHint.style.top = (ss.selCss.y > 24 ? ss.selCss.y - 22 : ss.selCss.y + 4) + 'px';
 }
@@ -176,6 +176,9 @@ export function refreshShapePreviewOnShift(e) {
 export function updateStrokeCursor(clientX, clientY) {
   const { strokeCursor } = ss;
   if (!strokeCursor) return;
+  // W4 例外：strokeCursor 是高频逐帧更新的画笔预览光标，
+  // 每次鼠标移动都需重设 display + width/height/left/top/borderColor。
+  // 用 class 切换会引入额外 reflow，且此处不存在「读 style.display 推断状态」的需求。
   if (!ss.isAnnotating || !ss.selCss) { strokeCursor.style.display = 'none'; return; }
   if (ss.isAnnotDragging) { strokeCursor.style.display = 'none'; return; }
   if (clientX < ss.selCss.x || clientX > ss.selCss.x + ss.selCss.w ||

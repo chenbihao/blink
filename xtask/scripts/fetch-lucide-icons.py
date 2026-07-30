@@ -4,7 +4,8 @@
 Fetch Lucide icons and build a local SVG sprite.
 
 Usage:
-    python scripts/fetch-lucide-icons.py
+    cargo xtask icons
+    # 或直接：python xtask/scripts/fetch-lucide-icons.py <repo-root>
 
 Output:
     frontend/assets/icons/sprite.svg      SVG <symbol> collection, one per icon
@@ -104,7 +105,8 @@ ICON_LIST = [
 
 # ── 路径 ───────────────────────────────────────────────────────────────────────
 
-ROOT = Path(__file__).resolve().parent.parent  # scripts/ 的上级 = repo root
+# 由 xtask 传入 repo root，或从 __file__ 上溯三级（xtask/scripts/ → xtask/ → root）
+ROOT = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent.parent
 OUT_DIR = ROOT / "frontend" / "assets" / "icons"
 SPRITE_FILE = OUT_DIR / "sprite.svg"
 MANIFEST_FILE = OUT_DIR / "manifest.json"

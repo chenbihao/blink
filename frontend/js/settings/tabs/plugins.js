@@ -228,7 +228,7 @@ function renderTriggersTags(plugin) {
       <button class="trigger-add-inline-btn" title="${t("plugin.trigger_add")}">
         ${t("plugin.trigger_add_label")}
       </button>
-      <input type="text" class="trigger-add-inline-input" style="display:none;" placeholder="${t("plugin.trigger_placeholder")}" />
+      <input type="text" class="trigger-add-inline-input hidden" placeholder="${t("plugin.trigger_placeholder")}" />
     </span>`;
   }
 
@@ -250,7 +250,7 @@ function renderTriggersTags(plugin) {
       </button>
     </span>`),
     `<button class="trigger-add-tag-btn" title="${t("plugin.trigger_add")}">+</button>
-    <input type="text" class="trigger-add-inline-input" style="display:none;" placeholder="${t("plugin.trigger_placeholder")}" />`,
+    <input type="text" class="trigger-add-inline-input hidden" placeholder="${t("plugin.trigger_placeholder")}" />`,
   ].join("");
 
   return `<span class="plugin-triggers-row">${triggersHtml}</span>`;
@@ -692,9 +692,9 @@ function bindPluginCardEvents(plugin) {
   [addBtnInline, addBtnText].filter(Boolean).forEach((btn) => {
     btn.addEventListener("click", () => {
       if (addInputInline) {
-        addInputInline.style.display = "inline-block";
+        addInputInline.classList.remove('hidden');
         addInputInline.focus();
-        btn.style.display = "none";
+        btn.classList.add('hidden');
       }
     });
   });
@@ -723,9 +723,9 @@ function bindPluginCardEvents(plugin) {
   async function commitAdd(inputEl) {
     const kw = (inputEl.value || "").trim();
     if (!kw) {
-      inputEl.style.display = "none";
-      if (addBtnInline) addBtnInline.style.display = "inline-flex";
-      if (addBtnText) addBtnText.style.display = "inline-block";
+      inputEl.classList.add('hidden');
+      if (addBtnInline) addBtnInline.classList.remove('hidden');
+      if (addBtnText) addBtnText.classList.remove('hidden');
       return;
     }
     try {
@@ -735,9 +735,9 @@ function bindPluginCardEvents(plugin) {
       console.error("add_custom_trigger failed:", err);
     }
     inputEl.value = "";
-    inputEl.style.display = "none";
-    if (addBtnInline) addBtnInline.style.display = "inline-flex";
-    if (addBtnText) addBtnText.style.display = "inline-block";
+    inputEl.classList.add('hidden');
+    if (addBtnInline) addBtnInline.classList.remove('hidden');
+    if (addBtnText) addBtnText.classList.remove('hidden');
   }
 
   addInputInline?.addEventListener("keydown", async (e) => {

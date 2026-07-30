@@ -144,7 +144,7 @@
 | 操作 | 步骤 |
 |---|---|
 | 换一个已在 sprite 里的图标 | HTML 改 `<use href="#icon-{name}"/>`；或 JS 改 `iconHTML("xxx")` / `BUILTIN_ACTION_ICONS` map 的 value。可用图标见 `frontend/assets/icons/manifest.json` |
-| 新增图标（sprite 里没有） | ① [lucide.dev/icons](https://lucide.dev/icons) 取 kebab-case 名 → ② 追加到 `scripts/fetch-lucide-icons.py` 的 `ICON_LIST` → ③ 跑 `python scripts/fetch-lucide-icons.py` 重新生成 sprite（本地打包，运行期零网络）→ ④ 引用 |
+| 新增图标（sprite 里没有） | ① [lucide.dev/icons](https://lucide.dev/icons) 取 kebab-case 名 → ② 追加到 `xtask/scripts/fetch-lucide-icons.py` 的 `ICON_LIST` → ③ 跑 `cargo xtask icons` 重新生成 sprite（本地打包，运行期零网络）→ ④ 引用 |
 | 升级 Lucide 版本 | 改 `LUCIDE_VERSION` 常量重跑脚本。注意 1.x 起 tag 无 `v` 前缀；跨大版本可能有图标改名（如 `alert-triangle` → `triangle-alert`） |
 
 **视觉配色**：所有 icon 走 `stroke: currentColor`，父容器 `color: var(--accent)` 让图标跟随主题主色自动变色。尺寸特例（chord-screenshot `.tool-btn .icon` 16px、ai-icon-badge 14px）按需 override，不破坏默认 1em。

@@ -33,6 +33,7 @@ import {
   screenshotSetAnnotationMode, hideScreenshotOverlay,
   ocrImage, frontendLog, invoke,
 } from "./api.js";
+import { normalizeError } from "./tauri.js";
 import * as annot from "./annotation-engine.js";
 import { ensureSpriteLoaded } from "./icon.js";
 import { applyThemeFromConfig } from "./theme.js";
@@ -151,10 +152,10 @@ function resetState() {
   canvas.setAttribute('data-tool', 'select');
   ss.screenshot = null;
   if (ss.singleClickTimeout) { clearTimeout(ss.singleClickTimeout); ss.singleClickTimeout = null; }
-  sizeHint.style.display = 'none';
-  toolbar.style.display = 'none';
-  annotCanvas.style.display = 'none';
-  errorHint.style.display = 'none';
+  sizeHint.classList.add('hidden');
+  toolbar.classList.add('hidden');
+  annotCanvas.classList.add('hidden');
+  errorHint.classList.add('hidden');
   errorHint.textContent = '';
   if (canvas.width > 0) {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -189,7 +190,7 @@ function resetState() {
 }
 
 function loadScreenshot() {
-  ss.errorHint.style.display = 'none';
+  ss.errorHint.classList.add('hidden');
 
   // 配置读取与图像加载并行；失败时保留默认值。
   invoke('get_config_section', { key: 'screenshot:config' })
@@ -215,7 +216,7 @@ function loadScreenshot() {
   img.onerror = (e) => {
     console.error('[screenshot] Image load failed', e);
     ss.errorHint.textContent = '截图加载失败，按 ESC 关闭';
-    ss.errorHint.style.display = 'block';
+    ss.errorHint.classList.remove('hidden');
   };
   img.src = 'http://blink-screenshot.localhost/capture?t=' + Date.now();
 }
@@ -230,7 +231,7 @@ function enterAnnotationMode(rect) {
   ss.sent = false;
 
   const dpr = window.devicePixelRatio || 1;
-  annotCanvas.style.display = 'block';
+  annotCanvas.classList.remove('hidden');
   annotCanvas.style.left = rect.x + 'px';
   annotCanvas.style.top = rect.y + 'px';
   annotCanvas.style.width = rect.w + 'px';
@@ -285,8 +286,9 @@ function triggerOcrPrewarm(pw, ph) {
           console.info('[screenshot] OCR 预热完成', { ms: elapsed, textLen: result?.text?.length ?? 0 });
           resolve(result);
         })
-        .catch((err) => {
-          console.warn('[screenshot] OCR 预热失败(用户点识别时会重试)', err);
+        .catch((rawErr) => {
+          const err = normalizeError(rawErr);
+          console.warn(`[screenshot] OCR 预热失败 [${err.code}] (用户点识别时会重试)`);
           resolve(null);
         });
     });
@@ -303,11 +305,11 @@ function exitAnnotationMode() {
   ss.selectionRevision++;
   ss.translationRevision++;
   canvas.style.cursor = 'crosshair';
-  annotCanvas.style.display = 'none';
+  annotCanvas.classList.add('hidden');
   annotCanvas.width = 0;
   annotCanvas.height = 0;
-  toolbar.style.display = 'none';
-  sizeHint.style.display = 'none';
+  toolbar.classList.add('hidden');
+  sizeHint.classList.add('hidden');
   ss.ocrPrewarm = null;
   ss.ocrBusy = false;
   ss.translationBusy = false;
@@ -338,9 +340,9 @@ function invalidateSelectionContent() {
   exitReadingMode();
   annot.clearOverlay();
   updateOverlayButtonsActive();
-  annotCanvas.style.display = 'none';
-  toolbar.style.display = 'none';
-  sizeHint.style.display = 'none';
+  annotCanvas.classList.add('hidden');
+  toolbar.classList.add('hidden');
+  sizeHint.classList.add('hidden');
   toolbar.removeAttribute('data-user-moved');
   toolbar.style.left = '';
   toolbar.style.top = '';
@@ -430,6 +432,7 @@ canvas.addEventListener('mousemove', (e) => {
 });
 
 canvas.addEventListener('mouseleave', () => {
+  // W4 例外：strokeCursor 是高频逐帧更新的画笔预览光标，直接写 style.display 性能更好
   if (ss.strokeCursor) ss.strokeCursor.style.display = 'none';
   if (!ss.selectionInteraction) ss.canvas.style.cursor = annot.getTool() === 'select' ? 'default' : 'crosshair';
 });

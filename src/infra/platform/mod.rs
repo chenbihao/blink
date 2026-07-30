@@ -13,6 +13,7 @@ pub mod icon; // 0.14.6 §2.3：从 domain/search/icon.rs 迁入
 pub mod inject;
 pub mod locale;
 pub mod lock; // 0.14.6 §2.3：从 domain/execution/builtin.rs 迁入
+pub mod ocr; // 0.14.7 W2：从 domain/capability/builtins/ocr_engine.rs 迁入
 pub mod process;
 pub mod python;
 pub mod screenshot;

@@ -43,7 +43,7 @@ html, body {
 /* 标注 canvas：位置和尺寸由 JS 动态设置（覆盖在裁剪区上） */
 #annot-canvas {
   position: absolute;
-  display: none;
+  display: block;    /* 0.14.7 W4：默认可见，由 .hidden class 控制隐藏 */
   pointer-events: none; /* 让主 canvas 处理鼠标事件；标注绘制通过转发实现 */
   z-index: 2;
 }
@@ -86,7 +86,7 @@ html, body {
   padding: 2px 8px;
   border-radius: var(--radius-xs);
   pointer-events: none;
-  display: none;
+  display: block;    /* 0.14.7 W4：默认可见，由 .hidden class 控制隐藏 */
   z-index: var(--z-dropdown);
   white-space: nowrap;
 }
@@ -103,7 +103,7 @@ html, body {
   font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
   font-size: var(--text-lg);
   pointer-events: none; /* 不能拦截 canvas mousedown（否则拖选失效） */
-  display: none;
+  display: block;    /* 0.14.7 W4：默认可见，由 .hidden class 控制隐藏 */
 }
 
 /* ── 选区中央加载转圈（OCR/翻译进行中） ────────────────────────── */
@@ -149,7 +149,7 @@ html, body {
 
 #toolbar {
   position: fixed;
-  display: none;
+  display: flex;       /* 0.14.7 W4：默认 flex，由 .hidden class 控制隐藏 */
   align-items: center;
   gap: 4px;              /* 0.11.8-b：6 → 4 */
   padding: 5px 7px;      /* 0.11.8-b：6/9 → 5/7 */

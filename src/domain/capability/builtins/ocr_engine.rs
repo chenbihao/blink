@@ -1,14 +1,13 @@
 //! OCR Backend 抽象（0.11.7-c 引入，0.11.7-f 能力化，0.11.9-b word 级链路）。
 //!
-//! **命名注**：文件仍叫 `ocr_engine.rs`（避免大重命名），但**语义已改**——`OcrEngine`
-//! trait → `OcrBackend` trait（对齐 `ScreenshotBackend` 命名）。旧名 `OcrEngine`
-//! 作为类型别名保留避免破坏面。
-//!
 //! **架构**：
-//! - `OcrBackend` trait — 可 mock 的 OCR 平台抽象
-//! - `WindowsOcrBackend` — 生产实现（`Windows.Media.Ocr` WinRT API）
+//! - `OcrBackend` trait — domain 侧 OCR 抽象（返回领域类型 `OcrResult`）
+//! - `WindowsOcrBackendAdapter` — 包装 infra `PlatformOcrBackend`，做 raw → domain 映射
 //! - `FakeOcrBackend` — 测试实现（返回预定义文本）
 //! - `install_backend()` / `backend()` — 全局单例注入（对齐 ScreenshotBackend 模式）
+//!
+//! **0.14.7 W2**：WinRT 调用和原始 DTO 提取已迁至 `infra/platform/ocr/`。
+//! 本文件只保留领域类型、智能拼接和 raw → domain 映射。
 //!
 //! **Windows.Media.Ocr 要求**：Windows 10 1809+，中文语言包已安装时自动识别中文。
 //! 无中文语言包时仍可识别英文。
@@ -18,7 +17,7 @@
 //! - `OcrLine.bounding_rect` 真填（原为固定 `{0,0,0,0}`），用该行 words 的 union
 //! - `OcrLine.word_indices` 指回 `OcrResult.words` flat 数组的 index 段
 //! - `OcrResult.text` 走 `join_words_smart` 智能拼接（CJK↔CJK 无空格 / Latin↔Latin 有空格）
-//!   替代 SDK `Text()` 的"每字夹空格"输出。前端"移除空格"按钮退化为兜底。
+//!   替代 SDK `Text()` 的“每字夹空格”输出。前端“移除空格”按钮退化为兜底。
 
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -227,16 +226,12 @@ impl std::fmt::Display for OcrError {
     }
 }
 
-/// OCR 后端 trait（0.11.7-f 重命名自 `OcrEngine`）。
+/// OCR 后端 trait（domain 侧抽象，返回领域类型）。
 #[async_trait::async_trait]
 pub trait OcrBackend: Send + Sync {
     /// 识别 PNG 图片中的文字
     async fn recognize(&self, png_data: &[u8]) -> Result<OcrResult, OcrError>;
 }
-
-/// 旧类型别名（供 0.11.7-c 遗留代码使用；新代码用 `OcrBackend`）。
-#[allow(dead_code)]
-pub type OcrEngine = dyn OcrBackend;
 
 // ── 全局注入 ───────────────────────────────────────────────────────────────
 
@@ -259,187 +254,115 @@ pub fn install_backend(backend: Arc<dyn OcrBackend>) {
     }
 }
 
-/// 获取当前 OCR backend（0.11.7-f）。
+/// 获取当前 OCR backend。
 ///
-/// **首次调用兜底**：Windows 平台自动装 `WindowsOcrBackend`。
+/// **首次调用兜底**：自动包装 infra `PlatformOcrBackend` 为 domain `OcrBackend`。
 pub fn backend() -> Arc<dyn OcrBackend> {
     let lock = BACKEND.get_or_init(|| {
-        #[cfg(target_os = "windows")]
-        let default: Arc<dyn OcrBackend> = Arc::new(WindowsOcrBackend);
-        #[cfg(not(target_os = "windows"))]
-        let default: Arc<dyn OcrBackend> = Arc::new(WindowsOcrBackend); // fallback 也是 stub
+        let default: Arc<dyn OcrBackend> = Arc::new(WindowsOcrBackendAdapter::new());
         RwLock::new(default)
     });
     lock.read().expect("OCR backend RwLock 中毒").clone()
 }
 
-/// **兼容层**：旧调用者拿全局单例（0.11.7-c）。
+// ── WindowsOcrBackendAdapter（0.14.7 W2）──────────────────────────────────
+
+/// 包装 infra `PlatformOcrBackend`，将原始 DTO 映射为领域类型。
 ///
-/// 新代码走 `backend()` 拿 `Arc<dyn OcrBackend>`。
-#[allow(dead_code)]
-pub fn get_ocr_engine() -> Arc<dyn OcrBackend> {
-    backend()
+/// 智能拼接（`join_words_smart`）和 rect union 在此完成，不下沉到 infra。
+pub struct WindowsOcrBackendAdapter {
+    inner: Box<dyn crate::infra::platform::ocr::PlatformOcrBackend>,
 }
 
-// ── WindowsOcrBackend 实现 ──────────────────────────────────
-
-/// Windows.Media.Ocr 实现的 OCR 后端。
-///
-/// 内部使用 WinRT API，通过 `windows-rs` 绑定调用。
-#[cfg(target_os = "windows")]
-pub struct WindowsOcrBackend;
-
-#[cfg(target_os = "windows")]
-#[async_trait::async_trait]
-impl OcrBackend for WindowsOcrBackend {
-    #[allow(unused_qualifications)]
-    async fn recognize(&self, png_data: &[u8]) -> Result<OcrResult, OcrError> {
-        use windows::Graphics::Imaging::{BitmapDecoder, BitmapPixelFormat, SoftwareBitmap};
-        use windows::Media::Ocr::OcrEngine as WinRtOcrEngine;
-        use windows::Storage::Streams::{DataWriter, InMemoryRandomAccessStream};
-
-        // 1. 创建 InMemoryRandomAccessStream 并写入 PNG 字节
-        let stream = InMemoryRandomAccessStream::new()
-            .map_err(|e| OcrError::Engine(format!("创建流失败: {e}")))?;
-
-        let writer = DataWriter::CreateDataWriter(&stream)
-            .map_err(|e| OcrError::Engine(format!("创建 DataWriter 失败: {e}")))?;
-
-        writer
-            .WriteBytes(png_data)
-            .map_err(|e| OcrError::Engine(format!("写入流失败: {e}")))?;
-
-        let _store_result = writer
-            .StoreAsync()
-            .map_err(|e| OcrError::Engine(format!("StoreAsync 失败: {e}")))?
-            .await
-            .map_err(|e| OcrError::Engine(format!("StoreAsync await 失败: {e}")))?;
-
-        stream
-            .Seek(0)
-            .map_err(|e| OcrError::Engine(format!("Seek 失败: {e}")))?;
-
-        let decoder = BitmapDecoder::CreateAsync(&stream)
-            .map_err(|e| OcrError::Engine(format!("创建 BitmapDecoder 失败: {e}")))?
-            .await
-            .map_err(|e| OcrError::Engine(format!("BitmapDecoder await 失败: {e}")))?;
-
-        let software_bitmap = decoder
-            .GetSoftwareBitmapAsync()
-            .map_err(|e| OcrError::Engine(format!("GetSoftwareBitmap 失败: {e}")))?
-            .await
-            .map_err(|e| OcrError::Engine(format!("GetSoftwareBitmap await 失败: {e}")))?;
-
-        let bgra_bitmap = SoftwareBitmap::Convert(&software_bitmap, BitmapPixelFormat::Bgra8)
-            .map_err(|e| OcrError::Engine(format!("转换 BGRA8 失败: {e}")))?;
-
-        let ocr_engine = WinRtOcrEngine::TryCreateFromUserProfileLanguages()
-            .map_err(|e| OcrError::Engine(format!("创建 OcrEngine 失败: {e}")))?;
-
-        let ocr_result = ocr_engine
-            .RecognizeAsync(&bgra_bitmap)
-            .map_err(|e| OcrError::Engine(format!("RecognizeAsync 失败: {e}")))?
-            .await
-            .map_err(|e| OcrError::Engine(format!("等待识别完成失败: {e}")))?;
-
-        // 0.11.9-b：读 word 级数据代替直接拿 Text()。
-        // SDK Text() 会在 CJK 字符之间插空格,前端只能靠正则强清(副作用:英文也丢词间空格)。
-        // 走 words + join_words_smart 从根上拼对。
-        let text_angle: Option<f64> = ocr_result
-            .TextAngle()
-            .ok()
-            .and_then(|opt| opt.Value().ok())
-            .map(|d| d as f64);
-
-        let mut words: Vec<OcrWord> = Vec::new();
-        let mut lines: Vec<OcrLine> = Vec::new();
-
-        if let Ok(lines_raw) = ocr_result.Lines() {
-            let line_count = lines_raw.Size().unwrap_or(0);
-            for i in 0..line_count {
-                let Ok(line) = lines_raw.GetAt(i) else {
-                    continue;
-                };
-                let line_text = line.Text().unwrap_or_default().to_string();
-                let mut line_word_indices: Vec<usize> = Vec::new();
-
-                if let Ok(words_raw) = line.Words() {
-                    let word_count = words_raw.Size().unwrap_or(0);
-                    for j in 0..word_count {
-                        let Ok(w) = words_raw.GetAt(j) else {
-                            continue;
-                        };
-                        let text = w.Text().unwrap_or_default().to_string();
-                        if text.is_empty() {
-                            continue;
-                        }
-                        let rect = w
-                            .BoundingRect()
-                            .map(|r| OcrRect {
-                                x: r.X.round() as i32,
-                                y: r.Y.round() as i32,
-                                w: r.Width.round().max(0.0) as u32,
-                                h: r.Height.round().max(0.0) as u32,
-                            })
-                            .unwrap_or(OcrRect {
-                                x: 0,
-                                y: 0,
-                                w: 0,
-                                h: 0,
-                            });
-                        let idx = words.len();
-                        words.push(OcrWord {
-                            text,
-                            bounding_rect: rect,
-                            line_index: i as usize,
-                        });
-                        line_word_indices.push(idx);
-                    }
-                }
-
-                let line_rect = rect_union(
-                    line_word_indices
-                        .iter()
-                        .map(|&idx| words[idx].bounding_rect),
-                )
-                .unwrap_or(OcrRect {
-                    x: 0,
-                    y: 0,
-                    w: 0,
-                    h: 0,
-                });
-
-                // 跳过空行(SDK 偶尔给空 Line + 空 Words),不进 lines
-                if !line_text.is_empty() || !line_word_indices.is_empty() {
-                    lines.push(OcrLine {
-                        text: line_text,
-                        bounding_rect: line_rect,
-                        word_indices: line_word_indices,
-                    });
-                }
-            }
+impl WindowsOcrBackendAdapter {
+    pub fn new() -> Self {
+        Self {
+            inner: crate::infra::platform::ocr::default_backend(),
         }
-
-        let text = join_words_smart(&words, &lines);
-
-        Ok(OcrResult {
-            text,
-            lines,
-            words,
-            text_angle,
-        })
     }
 }
 
-/// 非 Windows 平台回退
-#[cfg(not(target_os = "windows"))]
-pub struct WindowsOcrBackend;
+impl Default for WindowsOcrBackendAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-#[cfg(not(target_os = "windows"))]
 #[async_trait::async_trait]
-impl OcrBackend for WindowsOcrBackend {
-    async fn recognize(&self, _png_data: &[u8]) -> Result<OcrResult, OcrError> {
-        Err(OcrError::Unsupported)
+impl OcrBackend for WindowsOcrBackendAdapter {
+    async fn recognize(&self, png_data: &[u8]) -> Result<OcrResult, OcrError> {
+        use crate::infra::platform::ocr::PlatformOcrError;
+
+        let raw = self
+            .inner
+            .recognize_raw(png_data)
+            .await
+            .map_err(|e| match e {
+                PlatformOcrError::Engine(msg) => OcrError::Engine(msg),
+                PlatformOcrError::Decode(msg) => OcrError::Decode(msg),
+                PlatformOcrError::Unsupported => OcrError::Unsupported,
+            })?;
+
+        Ok(map_raw_to_domain(raw))
+    }
+}
+
+/// 将 infra 原始 DTO 映射为领域类型。
+///
+/// 负责：
+/// - 浮点 rect → 整数 rect（四舍五入）
+/// - word flat 数组构建 + line_index 回填
+/// - line bounding_rect = 该行 words 的 union
+/// - `join_words_smart` 智能拼接全文
+fn map_raw_to_domain(raw: crate::infra::platform::ocr::RawOcrResult) -> OcrResult {
+    let mut words: Vec<OcrWord> = Vec::new();
+    let mut lines: Vec<OcrLine> = Vec::new();
+
+    for (line_idx, raw_line) in raw.lines.iter().enumerate() {
+        let mut line_word_indices: Vec<usize> = Vec::new();
+
+        for raw_word in &raw_line.words {
+            let rect = OcrRect {
+                x: raw_word.rect.x.round() as i32,
+                y: raw_word.rect.y.round() as i32,
+                w: raw_word.rect.width.round().max(0.0) as u32,
+                h: raw_word.rect.height.round().max(0.0) as u32,
+            };
+            let idx = words.len();
+            words.push(OcrWord {
+                text: raw_word.text.clone(),
+                bounding_rect: rect,
+                line_index: line_idx,
+            });
+            line_word_indices.push(idx);
+        }
+
+        let line_rect = rect_union(
+            line_word_indices
+                .iter()
+                .map(|&idx| words[idx].bounding_rect),
+        )
+        .unwrap_or(OcrRect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        });
+
+        lines.push(OcrLine {
+            text: raw_line.text.clone(),
+            bounding_rect: line_rect,
+            word_indices: line_word_indices,
+        });
+    }
+
+    let text = join_words_smart(&words, &lines);
+
+    OcrResult {
+        text,
+        lines,
+        words,
+        text_angle: raw.text_angle,
     }
 }
 
@@ -687,5 +610,70 @@ mod tests {
         let u = rect_union(rects.into_iter()).unwrap();
         assert_eq!(u.x, 10);
         assert_eq!(u.w, 20);
+    }
+
+    // ── map_raw_to_domain（0.14.7 W2）──────────────────────────────
+
+    #[test]
+    fn map_raw_to_domain_converts_rects_and_joins_words() {
+        use crate::infra::platform::ocr::{RawOcrLine, RawOcrRect, RawOcrResult, RawOcrWord};
+
+        let raw = RawOcrResult {
+            lines: vec![RawOcrLine {
+                text: "你好 world".into(),
+                words: vec![
+                    RawOcrWord {
+                        text: "你".into(),
+                        rect: RawOcrRect {
+                            x: 10.4,
+                            y: 20.6,
+                            width: 30.0,
+                            height: 40.0,
+                        },
+                    },
+                    RawOcrWord {
+                        text: "好".into(),
+                        rect: RawOcrRect {
+                            x: 50.0,
+                            y: 20.0,
+                            width: 30.0,
+                            height: 40.0,
+                        },
+                    },
+                    RawOcrWord {
+                        text: "world".into(),
+                        rect: RawOcrRect {
+                            x: 90.0,
+                            y: 20.0,
+                            width: 50.0,
+                            height: 40.0,
+                        },
+                    },
+                ],
+            }],
+            text_angle: Some(90.0),
+        };
+
+        let result = map_raw_to_domain(raw);
+
+        // 智能拼接：CJK↔CJK 无空格，CJK↔Latin 无空格
+        assert_eq!(result.text, "你好world");
+        assert_eq!(result.words.len(), 3);
+        assert_eq!(result.lines.len(), 1);
+
+        // rect 四舍五入
+        assert_eq!(result.words[0].bounding_rect.x, 10);
+        assert_eq!(result.words[0].bounding_rect.y, 21);
+
+        // line rect = words union
+        let line_rect = result.lines[0].bounding_rect;
+        assert_eq!(line_rect.x, 10);
+        assert_eq!(line_rect.w, 130); // 90+50 - 10
+
+        // text_angle 透传
+        assert_eq!(result.text_angle, Some(90.0));
+
+        // word_indices 指回 flat 数组
+        assert_eq!(result.lines[0].word_indices, vec![0, 1, 2]);
     }
 }

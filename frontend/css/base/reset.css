@@ -23,3 +23,9 @@ body {
 [hidden] {
   display: none !important;
 }
+
+/* 0.14.7 W4：显隐状态类——替代 inline style.display 写入。
+   读状态用 classList.contains('hidden')，不再读 style.display。 */
+.hidden {
+  display: none !important;
+}
