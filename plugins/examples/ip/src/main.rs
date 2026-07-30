@@ -68,21 +68,9 @@ enum PluginToCore {
     /// HTTP 请求（请求 core 代理）
     #[serde(rename = "http_request")]
     HttpRequest(HttpRequest),
-    /// tool-call 结果（0.9.3，轨道 B 旧协议）
-    #[serde(rename = "tool_result")]
-    ToolResult(ToolResultPayload),
     /// 轨道 A 纯数据 tool 结果（0.14.3）——manifest 配了 projection 的 tool 走此路径。
     #[serde(rename = "raw_result")]
     RawResult(RawToolResult),
-}
-
-/// tool-call 结果（与 PluginResponse 统一格式，轨道 B 旧协议）
-#[derive(Debug, Serialize)]
-struct ToolResultPayload {
-    id: String,
-    items: Vec<PluginItem>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<PluginError>,
 }
 
 /// 轨道 A 纯数据 tool 结果（0.14.3）——插件只吐纯 data，投影规则在 manifest。
@@ -144,7 +132,7 @@ struct PendingQuery {
     use_ipv6: bool,
     local_ip: Option<String>,
     local_ipv6: Option<String>,
-    /// 是否来自 tool-call（决定返回 Response 还是 ToolResult）
+    /// 是否来自 tool-call（决定返回 Response 还是 RawResult）
     is_tool_call: bool,
 }
 
@@ -290,7 +278,7 @@ fn main() {
                 arguments,
                 settings,
             } => {
-                // 0.9.3: tool-call 与 query 共用逻辑，只是返回 ToolResult 格式
+                // tool-call 与 query 共用逻辑，只是返回 RawResult 格式
                 let use_ipv6 = settings
                     .as_ref()
                     .and_then(|s| s.get("use_ipv6"))

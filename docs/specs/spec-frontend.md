@@ -195,7 +195,7 @@
 ### 6.2 单文件行数阈值
 
 - 目标：单文件不超过 **~1000 行**
-- 当前臃肿文件（待拆，见 phases/0.15 §四）：
+- 当前臃肿文件（待拆，见 phases/0.14.6 §四）：
   - `frontend/js/chord-screenshot.js`（3088 行）→ 按职责拆：选区绘制/标注模式/OCR 预热/overlay 翻译/工具栏/钉图保存
   - `frontend/js/settings/tabs/ai.js`（2698 行）→ 按 sub-domain 拆：provider 渲染/模型编辑 modal/tier 路由/preset 目录/拉模型 popover
   - `frontend/css/views/chat.css`（3039 行）→ 按组件拆：消息气泡/sidebar/composer/工具卡片/信号消息

@@ -46,8 +46,6 @@ pub enum PluginToCore {
     Response(PluginResponse),
     #[serde(rename = "http_request")]
     HttpRequest(HttpRequest),
-    #[serde(rename = "tool_result")]
-    ToolResult(ToolResultPayload),
     /// 轨道 A 纯数据 tool 结果（0.14.3）——manifest 配了 projection 的 tool 走此路径。
     #[serde(rename = "raw_result")]
     RawResult(RawToolResult),
@@ -77,14 +75,6 @@ pub struct HttpResponse {
 
 #[derive(Debug, Serialize)]
 pub struct PluginResponse {
-    pub id: String,
-    pub items: Vec<PluginItem>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<PluginError>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ToolResultPayload {
     pub id: String,
     pub items: Vec<PluginItem>,
     #[serde(skip_serializing_if = "Option::is_none")]

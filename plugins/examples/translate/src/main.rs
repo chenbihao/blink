@@ -681,7 +681,7 @@ fn dispatch_batch_by_engine<W: Write>(
 }
 
 /// tag 彻底失败后的单行并发兜底。
-/// 把 N 行 originals 拆成 N 个独立的 translate tool 调用,通过 ToolResult 返回保序数组。
+/// 把 N 行 originals 拆成 N 个独立的 translate tool 调用,通过 RawResult 返回保序数组。
 /// 这条路径**不依赖任何 tag**,对所有引擎都可靠(代价是 N 次 API 往返)。
 fn dispatch_single_line_fallback<W: Write>(
     writer: &mut W,
