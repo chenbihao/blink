@@ -53,9 +53,9 @@ use rig_core::message::{ToolCall as RigToolCall, ToolFunction as RigToolFunc};
 use rig_core::streaming::StreamedAssistantContent as RigStreamChunk;
 use tokio::sync::mpsc;
 
-use crate::domain::config::ai_config::{CustomParam, ProviderKind};
 use crate::domain::ai::message::{CompletionRequest, CompletionResponse, Role, ToolCall, Usage};
 use crate::domain::ai::provider::{AIError, AIProvider, StreamChunk};
+use crate::domain::config::ai_config::{CustomParam, ProviderKind};
 use crate::infra::platform::secret::SecretString;
 
 /// 默认硬超时(§3.3 骨架层)——用户未在 `CompletionRequest.timeout_ms` 覆盖时的兜底。

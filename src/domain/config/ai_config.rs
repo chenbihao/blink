@@ -496,11 +496,11 @@ pub struct ModelEntry {
     #[serde(default)]
     pub custom_parameters: Vec<CustomParam>,
 
-/// 模型能力列表（0.12 §2.7）。
-///
-/// 一个模型可同时具备多种能力（如某些 ollama 模型同时支持 chat + embedding）。
-///
-/// **默认 `[Chat]`**——老配置缺字段时 serde 填充,零迁移成本。
+    /// 模型能力列表（0.12 §2.7）。
+    ///
+    /// 一个模型可同时具备多种能力（如某些 ollama 模型同时支持 chat + embedding）。
+    ///
+    /// **默认 `[Chat]`**——老配置缺字段时 serde 填充,零迁移成本。
     #[serde(default = "default_chat_capability")]
     pub capabilities: Vec<ModelCapability>,
 }
@@ -1021,16 +1021,16 @@ mod tests {
             tier_light: None,
             tier_main: None,
             direct_execute_safe_actions: true,
-        streaming: false,
-        slo_hard_timeout_ms: Some(3000),
-        chat_config: ChatConfig {
-            auto_title: true,
-            title_tier: "router".to_string(),
-            memory_config: crate::domain::ai::memory::MemoryConfig::default(),
-            skill_config: SkillConfig::default(),
-        },
-        ai_tool_result_feedback: ToolResultFeedback::On,
-    };
+            streaming: false,
+            slo_hard_timeout_ms: Some(3000),
+            chat_config: ChatConfig {
+                auto_title: true,
+                title_tier: "router".to_string(),
+                memory_config: crate::domain::ai::memory::MemoryConfig::default(),
+                skill_config: SkillConfig::default(),
+            },
+            ai_tool_result_feedback: ToolResultFeedback::On,
+        };
         let s = serde_json::to_string(&original).unwrap();
         let restored: AIConfig = serde_json::from_str(&s).unwrap();
 
@@ -1150,7 +1150,10 @@ mod tests {
         };
         let s = serde_json::to_string(&original).unwrap();
         let restored: AIConfig = serde_json::from_str(&s).unwrap();
-        assert_eq!(restored.chat_config.memory_config.mode, crate::domain::ai::memory::WindowMode::FixedCount);
+        assert_eq!(
+            restored.chat_config.memory_config.mode,
+            crate::domain::ai::memory::WindowMode::FixedCount
+        );
         assert_eq!(restored.chat_config.memory_config.window_size, 30);
         assert!((restored.chat_config.memory_config.trigger_ratio - 0.85).abs() < 0.001);
         assert!((restored.chat_config.memory_config.compress_ratio - 0.65).abs() < 0.001);

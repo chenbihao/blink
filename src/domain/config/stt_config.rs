@@ -371,7 +371,10 @@ impl SttConfig {
         };
 
         // 在 AIConfig 中找匹配的 provider
-        let provider = ai_config.providers.iter().find(|p| p.id == legacy.provider_id);
+        let provider = ai_config
+            .providers
+            .iter()
+            .find(|p| p.id == legacy.provider_id);
         let Some(provider) = provider else {
             tracing::warn!(
                 provider_id = %legacy.provider_id,
@@ -735,10 +738,7 @@ mod tests {
         let cp = cfg.cloud_provider.as_ref().unwrap();
         assert_eq!(cp.kind, "openai");
         assert_eq!(cp.model_id, "whisper-1");
-        assert_eq!(
-            cp.base_url.as_deref(),
-            Some("https://api.openai.com/v1")
-        );
+        assert_eq!(cp.base_url.as_deref(), Some("https://api.openai.com/v1"));
     }
 
     #[test]

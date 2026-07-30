@@ -82,9 +82,10 @@ pub fn dispatch(cli: Cli) -> i32 {
         }
         Commands::Capabilities { json } => list_capabilities(&cap_registry, json),
         Commands::Config { action } => run_config(&handle, action),
-        Commands::Chat { model, conversation } => {
-            run_chat(&handle, model, conversation)
-        }
+        Commands::Chat {
+            model,
+            conversation,
+        } => run_chat(&handle, model, conversation),
     };
 
     exit_code
@@ -102,14 +103,12 @@ fn run_mcp_server(
         .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
         .inner()
         .clone();
-    let result = tauri::async_runtime::block_on(
-        crate::domain::mcp::run_stdio_server(
-            cap_registry.clone(),
-            env_arc,
-            pools.ai.clone(),
-            pools.config.clone(),
-        ),
-    );
+    let result = tauri::async_runtime::block_on(crate::domain::mcp::run_stdio_server(
+        cap_registry.clone(),
+        env_arc,
+        pools.ai.clone(),
+        pools.config.clone(),
+    ));
 
     match result {
         Ok(()) => 0,
@@ -126,8 +125,8 @@ fn run_mcp_server(
 /// （`SearchService` 需要完整的路由 / 插件引擎初始化，CLI 场景太重）。
 /// `StartMenuEngine::search` 内部会在缓存空时触发全量扫描，保证首次搜索也有结果。
 fn run_search(handle: &tauri::AppHandle, query: &str, json: bool) -> i32 {
-    use tauri::Manager;
     use std::collections::HashMap;
+    use tauri::Manager;
 
     use crate::domain::search::{EngineConfigs, QueryContext, build_engines};
     use crate::infra::platform::context::ContextSnapshot;
@@ -183,7 +182,12 @@ fn run_search(handle: &tauri::AppHandle, query: &str, json: bool) -> i32 {
             println!("未找到匹配「{query}」的应用");
         } else {
             for (i, item) in results.iter().enumerate() {
-                println!("{}. {} — {}", i + 1, item.title, item.subtitle.as_deref().unwrap_or(""));
+                println!(
+                    "{}. {} — {}",
+                    i + 1,
+                    item.title,
+                    item.subtitle.as_deref().unwrap_or("")
+                );
             }
         }
     }
@@ -220,9 +224,7 @@ fn run_capability(
         deadline: None,
     };
 
-    let result = tauri::async_runtime::block_on(
-        cap_registry.invoke(capability, args_value, &ctx),
-    );
+    let result = tauri::async_runtime::block_on(cap_registry.invoke(capability, args_value, &ctx));
 
     match result {
         Ok(result) => {
@@ -245,8 +247,8 @@ fn list_capabilities(
     let schemas = cap_registry.list();
 
     if json {
-        let json = serde_json::to_string_pretty(&schemas)
-            .unwrap_or_else(|e| format!("序列化失败: {e}"));
+        let json =
+            serde_json::to_string_pretty(&schemas).unwrap_or_else(|e| format!("序列化失败: {e}"));
         println!("{json}");
     } else {
         if schemas.is_empty() {

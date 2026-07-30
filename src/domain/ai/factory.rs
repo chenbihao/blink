@@ -26,10 +26,10 @@ use std::sync::Arc;
 
 use rig_core::client::CompletionClient;
 
-use crate::domain::config::ai_config::{ModelEntry, ProviderEntry, ProviderKind};
 use crate::domain::ai::provider::{AIError, AIProvider};
 use crate::domain::ai::registry::ProviderFactory;
 use crate::domain::ai::rig_provider::{RigProvider, expose_for_rig};
+use crate::domain::config::ai_config::{ModelEntry, ProviderEntry, ProviderKind};
 use crate::infra::platform::secret;
 
 /// **占位 factory** —— 所有 `build` 请求返 `NotConfigured`。

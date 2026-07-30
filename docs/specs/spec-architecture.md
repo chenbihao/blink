@@ -53,7 +53,7 @@ Blink 源码分四层目录,依赖**只准向下**:
 |---|---|---|
 | `cli` | `blink mcp-server/search/run/capabilities/config/chat`,clap + 最小 Tauri app 无 GUI(0.13.5) | 已达标 |
 | `app` | Tauri IPC 入口 + 服务 wiring + 配置门面 | 配置类型下沉 domain/`config` 域;commands 巨石按域拆分 |
-| `domain` | 四域业务逻辑 + 能力协议,**目标框架无关** | 已去 AppHandle/Emitter/managed state 直连；仍有 `tauri::async_runtime` 存量 |
+| `domain` | 四域业务逻辑 + 能力协议,**目标框架无关** | 已去 AppHandle/Emitter/managed state 直连，生产任务已改 `tokio::spawn`；0.14.7 处理构造期 `block_on` 与测试/Spike 存量 |
 | `infra` | 平台抽象(`mod.rs` 接口 + `windows.rs` 实现)+ SQLite 四库 + 工具 | 已收纳 icon/shell/lock；WinRT OCR 仍待迁移 |
 
 **关键约束**（0.14 已建立边界并完成主体迁移，遗留见 [phases/0.14 §七~§九](../phases/0.14-capability-protocol-refactor.md)）：
@@ -396,7 +396,7 @@ Provider 不只是聊天 API,是**能力供应商**:LLM(`chat`/`chat_stream`)/ S
 | **0.9.7** | Capability 能力协议层诞生 | 原子能力 + 统一声明/返回 + inventory 注册 + 截图/剪贴板拆解 + 接 AI tool 池 |
 | **0.12** | AI 能力架构搭骨架 | 对话窗口 / DB 四层拆分 / Provider 模型统一 / Tool 适配层 / CapabilityRegistry 动态注册 |
 | **0.13** | 能力扩展(基础版 + 开放) | MCP client/server / CLI 化 / token-aware 压缩 / 记忆 FTS5 召回 / Skill 约定式 / 0.13.7 收敛(P3 投影剔 score + 插件 Action→Capability 迁移,删 `ActionOutcome::Items`) |
-| **0.14** | 能力协议与架构收敛 | Capability/Action 边界钉死(删 `ActionTool`) + Cap 协议分层(§A5) + 四出口投影引擎(§A6) + 延续子版本完成 config 下沉、AppHandle/Emitter 隔离、主要 Win32 归 infra、commands 与前端巨石拆分、Schema/事件/invoke 收敛；残余框架依赖与工程债见 phase §9.3 |
+| **0.14** | 能力协议与架构收敛 | Capability/Action 边界钉死(删 `ActionTool`) + Cap 协议分层(§A5) + 四出口投影引擎(§A6) + config 下沉、AppHandle/Emitter 隔离、主要 Win32 归 infra、commands 与前端巨石拆分、Schema/事件/invoke 收敛；0.14.7 深层工程债见 phase §9.3 |
 | **0.20** | 能力扩展向量版 | zvec 向量基础设施 / 记忆向量召回(混合检索升级 FTS5)/ RAG 知识库 / AI 生成 Skill |
 
 **解耦智慧**:先验证大脑(0.9 文本闭环),再加感官(0.10 语音)。0.12-0.14 是 AI 能力架构的「搭骨架 → 扩展 → 收敛重构」三步。**核心原则:零嵌入模型依赖——0.13 所有功能在用户只有 chat 模型时也完整可用,向量版留 0.20**。

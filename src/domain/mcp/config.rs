@@ -96,8 +96,8 @@ impl McpServerConfigStore {
         pool: &SqlitePool,
         servers: &[McpServerConfig],
     ) -> Result<(), McpConfigError> {
-        let json = serde_json::to_string(servers)
-            .map_err(|e| McpConfigError::Serialize(e.to_string()))?;
+        let json =
+            serde_json::to_string(servers).map_err(|e| McpConfigError::Serialize(e.to_string()))?;
         crate::infra::data::config::set_config(pool, Self::KEY, &json)
             .await
             .map_err(|e| McpConfigError::Db(e.to_string()))?;
@@ -105,10 +105,7 @@ impl McpServerConfigStore {
     }
 
     /// 添加或更新单个 server（按 name 去重）。
-    pub async fn upsert(
-        pool: &SqlitePool,
-        config: McpServerConfig,
-    ) -> Result<(), McpConfigError> {
+    pub async fn upsert(pool: &SqlitePool, config: McpServerConfig) -> Result<(), McpConfigError> {
         let mut servers = Self::load_all(pool).await?;
         if let Some(existing) = servers.iter_mut().find(|s| s.name == config.name) {
             *existing = config;
@@ -191,7 +188,10 @@ mod tests {
             name: name.to_string(),
             transport: McpTransport::Stdio,
             command: "npx".to_string(),
-            args: vec!["-y".to_string(), "@modelcontextprotocol/server-filesystem".to_string()],
+            args: vec![
+                "-y".to_string(),
+                "@modelcontextprotocol/server-filesystem".to_string(),
+            ],
             env: std::collections::HashMap::new(),
             enabled: true,
             disabled_tools: Vec::new(),
@@ -274,13 +274,9 @@ mod tests {
             .await
             .unwrap();
 
-        McpServerConfigStore::set_disabled_tools(
-            &pool,
-            "fs",
-            vec!["dangerous_tool".to_string()],
-        )
-        .await
-        .unwrap();
+        McpServerConfigStore::set_disabled_tools(&pool, "fs", vec!["dangerous_tool".to_string()])
+            .await
+            .unwrap();
 
         let loaded = McpServerConfigStore::load_all(&pool).await.unwrap();
         assert_eq!(loaded[0].disabled_tools, vec!["dangerous_tool".to_string()]);
@@ -291,10 +287,7 @@ mod tests {
         let pool = setup_pool().await;
         let result = McpServerConfigStore::set_enabled(&pool, "nonexistent", true).await;
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            McpConfigError::NotFound(_)
-        ));
+        assert!(matches!(result.unwrap_err(), McpConfigError::NotFound(_)));
     }
 
     #[test]

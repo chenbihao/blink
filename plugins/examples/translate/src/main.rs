@@ -25,8 +25,8 @@ use serde_json::Value;
 use engine::{EngineRequest, TranslateEngine};
 use engines::{AliEngine, BaiduEngine, DeeplEngine, TencentEngine, YoudaoEngine};
 use protocol::{
-    CoreToPlugin, HttpRequest, PluginAction, PluginError, PluginItem, PluginResponse,
-    PluginToCore, RawToolResult,
+    CoreToPlugin, HttpRequest, PluginAction, PluginError, PluginItem, PluginResponse, PluginToCore,
+    RawToolResult,
 };
 
 /// HTTP 请求 id 全局计数器。
@@ -920,9 +920,7 @@ fn handle_http_response<W: Write>(
                 try_next_fallback(writer, pending, ctx);
                 return;
             };
-            serde_json::Value::Array(
-                results.into_iter().map(serde_json::Value::String).collect(),
-            )
+            serde_json::Value::Array(results.into_iter().map(serde_json::Value::String).collect())
         } else {
             // 单次翻译：data = 译文字符串
             serde_json::Value::String(result.to_string())

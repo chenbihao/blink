@@ -454,7 +454,11 @@ fn main() {
                             format!("{:.0}°C", cur.temperature_2m)
                         };
                         let desc = wmo_description(cur.weather_code);
-                        let region = if admin1.is_empty() { country.clone() } else { admin1.clone() };
+                        let region = if admin1.is_empty() {
+                            country.clone()
+                        } else {
+                            admin1.clone()
+                        };
 
                         let title = format!("{city_name} {temp_str} {desc}");
                         let subtitle = format!(
@@ -466,7 +470,9 @@ fn main() {
                             title,
                             subtitle: Some(subtitle),
                             score: 1.0,
-                            action: PluginAction::Copy { text: city_name.clone() },
+                            action: PluginAction::Copy {
+                                text: city_name.clone(),
+                            },
                         }];
 
                         // 0.14.3: tool-call 走轨道 A，返回纯 data（结构化天气数据）

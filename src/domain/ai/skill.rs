@@ -85,12 +85,7 @@ impl SkillSource {
     /// 外部来源（除 Blink 外，供「从其他应用导入」功能枚举）。
     /// 按 id 字母序，与前端下拉保持一致。
     pub fn external_sources() -> &'static [SkillSource] {
-        &[
-            Self::Claude,
-            Self::Codex,
-            Self::Opencode,
-            Self::Zcode,
-        ]
+        &[Self::Claude, Self::Codex, Self::Opencode, Self::Zcode]
     }
 
     /// 所有来源（按优先级排序：Blink → 其余）。
@@ -222,10 +217,7 @@ impl SkillRegistry {
         }
 
         let total = entries.len();
-        *self
-            .skills
-            .write()
-            .expect("skill registry lock poisoned") = entries;
+        *self.skills.write().expect("skill registry lock poisoned") = entries;
         tracing::info!(total, "SkillRegistry: 扫描完成");
     }
 
@@ -265,10 +257,7 @@ impl SkillRegistry {
     ///
     /// 0.13.6: 过滤被用户禁用的 Skill。
     pub fn match_triggers(&self, message: &str) -> Vec<SkillEntry> {
-        let skills = self
-            .skills
-            .read()
-            .expect("skill registry lock poisoned");
+        let skills = self.skills.read().expect("skill registry lock poisoned");
         let disabled = self.disabled_skills.read().expect("lock poisoned");
         let msg_lower = message.to_lowercase();
 
@@ -325,8 +314,7 @@ impl SkillRegistry {
     ///
     /// `ids` 格式为 `name@source`（如 `"rust-debug@claude"`）。
     pub fn set_disabled_skills(&self, ids: Vec<String>) {
-        *self.disabled_skills.write().expect("lock poisoned") =
-            ids.into_iter().collect();
+        *self.disabled_skills.write().expect("lock poisoned") = ids.into_iter().collect();
     }
 
     /// 0.13.6: 检查指定 Skill 是否被禁用。
@@ -694,7 +682,10 @@ fn clean_yaml_value(value: &str) -> String {
 /// 从 frontmatter 解析 triggers 结构。
 fn parse_triggers(map: &HashMap<String, String>) -> Option<SkillTriggers> {
     let keywords_str = map.get("triggers.keywords")?;
-    let patterns_str = map.get("triggers.patterns").map(String::as_str).unwrap_or("");
+    let patterns_str = map
+        .get("triggers.patterns")
+        .map(String::as_str)
+        .unwrap_or("");
 
     let keywords = parse_yaml_list(keywords_str);
     let patterns = parse_yaml_list(patterns_str);
@@ -906,7 +897,10 @@ mod tests {
     #[test]
     fn parse_triggers_both_keywords_and_patterns() {
         let mut map = HashMap::new();
-        map.insert("triggers.keywords".to_string(), "[cargo, rustc]".to_string());
+        map.insert(
+            "triggers.keywords".to_string(),
+            "[cargo, rustc]".to_string(),
+        );
         map.insert("triggers.patterns".to_string(), r"error\[\d+\]".to_string());
         let triggers = parse_triggers(&map).unwrap();
         assert_eq!(triggers.keywords, vec!["cargo", "rustc"]);
@@ -945,7 +939,10 @@ mod tests {
         assert_eq!(skill.name, "rust-debug");
         assert_eq!(skill.description, "Debug Rust errors");
         assert!(skill.triggers.is_some());
-        assert_eq!(skill.triggers.as_ref().unwrap().keywords, vec!["cargo", "E0"]);
+        assert_eq!(
+            skill.triggers.as_ref().unwrap().keywords,
+            vec!["cargo", "E0"]
+        );
         assert!(skill.full_content.contains("Step 1"));
         assert_eq!(skill.source, SkillSource::Blink);
     }
@@ -1070,32 +1067,32 @@ mod tests {
     fn registry_multiple_matches() {
         let registry = SkillRegistry::new();
         *registry.skills.write().unwrap() = vec![
-        SkillEntry {
-            name: "skill-a".to_string(),
-            description: "A".to_string(),
-            triggers: Some(SkillTriggers {
-                keywords: vec!["cargo".to_string()],
-                patterns: vec![],
-            }),
-            compiled_patterns: Vec::new(),
-            full_content: String::new(),
-            source: SkillSource::Blink,
-            dir_path: PathBuf::from("/tmp"),
-            source_cli_path: None,
-        },
-        SkillEntry {
-            name: "skill-b".to_string(),
-            description: "B".to_string(),
-            triggers: Some(SkillTriggers {
-                keywords: vec![],
-                patterns: vec![r"error\[E".to_string()],
-            }),
-            compiled_patterns: vec![Regex::new(r"error\[E").unwrap()],
-            full_content: String::new(),
-            source: SkillSource::Claude,
-            dir_path: PathBuf::from("/tmp"),
-            source_cli_path: None,
-        },
+            SkillEntry {
+                name: "skill-a".to_string(),
+                description: "A".to_string(),
+                triggers: Some(SkillTriggers {
+                    keywords: vec!["cargo".to_string()],
+                    patterns: vec![],
+                }),
+                compiled_patterns: Vec::new(),
+                full_content: String::new(),
+                source: SkillSource::Blink,
+                dir_path: PathBuf::from("/tmp"),
+                source_cli_path: None,
+            },
+            SkillEntry {
+                name: "skill-b".to_string(),
+                description: "B".to_string(),
+                triggers: Some(SkillTriggers {
+                    keywords: vec![],
+                    patterns: vec![r"error\[E".to_string()],
+                }),
+                compiled_patterns: vec![Regex::new(r"error\[E").unwrap()],
+                full_content: String::new(),
+                source: SkillSource::Claude,
+                dir_path: PathBuf::from("/tmp"),
+                source_cli_path: None,
+            },
         ];
 
         // 消息同时命中两个 skill
@@ -1127,26 +1124,26 @@ mod tests {
     fn find_by_name_with_source_filter() {
         let registry = SkillRegistry::new();
         *registry.skills.write().unwrap() = vec![
-        SkillEntry {
-            name: "same-name".to_string(),
-            description: "Blink version".to_string(),
-            triggers: None,
-            compiled_patterns: Vec::new(),
-            full_content: String::new(),
-            source: SkillSource::Blink,
-            dir_path: PathBuf::from("/tmp"),
-            source_cli_path: None,
-        },
-        SkillEntry {
-            name: "same-name".to_string(),
-            description: "Claude version".to_string(),
-            triggers: None,
-            compiled_patterns: Vec::new(),
-            full_content: String::new(),
-            source: SkillSource::Claude,
-            dir_path: PathBuf::from("/tmp"),
-            source_cli_path: None,
-        },
+            SkillEntry {
+                name: "same-name".to_string(),
+                description: "Blink version".to_string(),
+                triggers: None,
+                compiled_patterns: Vec::new(),
+                full_content: String::new(),
+                source: SkillSource::Blink,
+                dir_path: PathBuf::from("/tmp"),
+                source_cli_path: None,
+            },
+            SkillEntry {
+                name: "same-name".to_string(),
+                description: "Claude version".to_string(),
+                triggers: None,
+                compiled_patterns: Vec::new(),
+                full_content: String::new(),
+                source: SkillSource::Claude,
+                dir_path: PathBuf::from("/tmp"),
+                source_cli_path: None,
+            },
         ];
 
         // 不带 source → 返回第一个匹配
@@ -1279,9 +1276,9 @@ mod tests {
                 compiled_patterns: Vec::new(),
                 full_content: String::new(),
                 source: SkillSource::Blink,
-            dir_path: PathBuf::from("/tmp/active"),
-            source_cli_path: None,
-        },
+                dir_path: PathBuf::from("/tmp/active"),
+                source_cli_path: None,
+            },
             SkillEntry {
                 name: "disabled".to_string(),
                 description: "Disabled skill".to_string(),
@@ -1292,9 +1289,9 @@ mod tests {
                 compiled_patterns: Vec::new(),
                 full_content: String::new(),
                 source: SkillSource::Claude,
-            dir_path: PathBuf::from("/tmp/disabled"),
-            source_cli_path: None,
-        },
+                dir_path: PathBuf::from("/tmp/disabled"),
+                source_cli_path: None,
+            },
         ];
         registry.set_disabled_skills(vec!["disabled@claude".to_string()]);
 
@@ -1317,9 +1314,9 @@ mod tests {
                 compiled_patterns: Vec::new(),
                 full_content: String::new(),
                 source: SkillSource::Blink,
-            dir_path: PathBuf::from("/tmp/a"),
-            source_cli_path: None,
-        },
+                dir_path: PathBuf::from("/tmp/a"),
+                source_cli_path: None,
+            },
             SkillEntry {
                 name: "skill-b".to_string(),
                 description: "B".to_string(),
@@ -1330,9 +1327,9 @@ mod tests {
                 compiled_patterns: Vec::new(),
                 full_content: String::new(),
                 source: SkillSource::Claude,
-            dir_path: PathBuf::from("/tmp/b"),
-            source_cli_path: None,
-        },
+                dir_path: PathBuf::from("/tmp/b"),
+                source_cli_path: None,
+            },
         ];
         registry.set_disabled_skills(vec!["skill-b@claude".to_string()]);
 
@@ -1380,9 +1377,9 @@ mod tests {
                 compiled_patterns: Vec::new(),
                 full_content: String::new(),
                 source: SkillSource::Blink,
-            dir_path: PathBuf::from("/tmp/active"),
-            source_cli_path: None,
-        },
+                dir_path: PathBuf::from("/tmp/active"),
+                source_cli_path: None,
+            },
             SkillEntry {
                 name: "inactive".to_string(),
                 description: "Inactive".to_string(),
@@ -1390,9 +1387,9 @@ mod tests {
                 compiled_patterns: Vec::new(),
                 full_content: String::new(),
                 source: SkillSource::Claude,
-            dir_path: PathBuf::from("/tmp/inactive"),
-            source_cli_path: None,
-        },
+                dir_path: PathBuf::from("/tmp/inactive"),
+                source_cli_path: None,
+            },
         ];
         registry.set_disabled_skills(vec!["inactive@claude".to_string()]);
 
@@ -1424,7 +1421,7 @@ mod tests {
     /// 4. SkillRegistry → summaries() / match_triggers() 可用
     #[test]
     fn skill_help_to_preamble_full_roundtrip() {
-        use crate::domain::ai::cli_recognizer::{parse_help_output, generate_skill_md};
+        use crate::domain::ai::cli_recognizer::{generate_skill_md, parse_help_output};
 
         // 1. 模拟 blink --help 输出（clap 生成格式）
         let help_text = r#"Blink — Windows 全局快捷入口 (CLI 模式)
@@ -1468,7 +1465,10 @@ Options:
         .expect("生成的 SKILL.md 应能被解析回来");
 
         assert_eq!(skill.name, "blink-cli");
-        assert!(skill.triggers.is_some(), "应有 triggers（keywords 来自子命令名）");
+        assert!(
+            skill.triggers.is_some(),
+            "应有 triggers（keywords 来自子命令名）"
+        );
         let triggers = skill.triggers.as_ref().unwrap();
         assert!(triggers.keywords.contains(&"blink".to_string()));
         assert!(triggers.keywords.contains(&"mcp-server".to_string()));
@@ -1491,14 +1491,18 @@ Options:
     /// 验证 SKILL.md 的 disabled 过滤在闭环中也生效。
     #[test]
     fn skill_help_roundtrip_with_disabled_filter() {
-        use crate::domain::ai::cli_recognizer::{parse_help_output, generate_skill_md};
+        use crate::domain::ai::cli_recognizer::{generate_skill_md, parse_help_output};
 
         let help = "A tool\nUsage: mytool\n  run    Run something";
         let parsed = parse_help_output(help);
         let skill_md = generate_skill_md(&parsed, "mytool", None);
 
-        let skill = parse_skill_md(&skill_md, SkillSource::Blink, std::path::PathBuf::from("/tmp"))
-            .expect("should parse");
+        let skill = parse_skill_md(
+            &skill_md,
+            SkillSource::Blink,
+            std::path::PathBuf::from("/tmp"),
+        )
+        .expect("should parse");
 
         let registry = SkillRegistry::new();
         *registry.skills.write().unwrap() = vec![skill];
@@ -1519,15 +1523,12 @@ Options:
     #[test]
     fn skill_e2e_real_blink_help_to_preamble() {
         use crate::cli::Cli;
+        use crate::domain::ai::cli_recognizer::{generate_skill_md, parse_help_output};
         use clap::CommandFactory;
-        use crate::domain::ai::cli_recognizer::{parse_help_output, generate_skill_md};
 
         // 1. 获取真正的 blink --help 输出（clap 生成，不是模拟文本）
         let help_text = Cli::command().render_help().to_string();
-        assert!(
-            !help_text.is_empty(),
-            "blink --help 应有输出"
-        );
+        assert!(!help_text.is_empty(), "blink --help 应有输出");
         // clap 生成的 help 应包含 blink 自身的描述
         assert!(
             help_text.contains("blink") || help_text.contains("Blink"),

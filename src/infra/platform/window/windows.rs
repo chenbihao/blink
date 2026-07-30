@@ -4,8 +4,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
 use crate::domain::event_names::EventNames;
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
 use tokio::time::sleep;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
@@ -139,21 +139,19 @@ pub fn invoke(app: &AppHandle) {
         let app_clone = app.clone();
         std::thread::spawn(move || {
             let t_extract = std::time::Instant::now();
-            let grabbed = crate::infra::platform::selection::extract_selection_from_element(&focused)
-                .or_else(|| {
-                    // UIA 未命中，回退鼠标钩子缓存
-                    let cached = crate::infra::platform::selection::get_last_selection();
-                    if cached.is_some() {
-                        tracing::trace!("invoke: 回退到鼠标钩子选区缓存");
-                    }
-                    cached.map(|(text, _)| text)
-                });
+            let grabbed =
+                crate::infra::platform::selection::extract_selection_from_element(&focused)
+                    .or_else(|| {
+                        // UIA 未命中，回退鼠标钩子缓存
+                        let cached = crate::infra::platform::selection::get_last_selection();
+                        if cached.is_some() {
+                            tracing::trace!("invoke: 回退到鼠标钩子选区缓存");
+                        }
+                        cached.map(|(text, _)| text)
+                    });
             let hit = grabbed.is_some();
             if let Some(ref text) = grabbed {
-                tracing::debug!(
-                    len = text.chars().count(),
-                    "invoke: UIA 异步抓取选区成功"
-                );
+                tracing::debug!(len = text.chars().count(), "invoke: UIA 异步抓取选区成功");
             }
             if let Some(ss) = search_service {
                 ss.update_selected_text(grabbed, None);

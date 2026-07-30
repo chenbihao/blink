@@ -23,8 +23,8 @@
 //! - `close`：设置 shutdown flag，后台 task 退出
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -95,36 +95,25 @@ impl SseClientTransport {
     /// 3. 后台 task 持续解析 SSE 事件 → JSON-RPC 消息 → channel
     ///
     /// 返回 `Err` 表示 SSE 连接/握手失败。
-    pub async fn new(
-        sse_url: &str,
-        headers: &HashMap<String, String>,
-    ) -> Result<Self, String> {
+    pub async fn new(sse_url: &str, headers: &HashMap<String, String>) -> Result<Self, String> {
         let client = reqwest::Client::builder()
             .build()
             .map_err(|e| format!("HTTP client 创建失败: {e}"))?;
 
         // 构建 GET 请求
-        let mut req = client
-            .get(sse_url)
-            .header("Accept", "text/event-stream");
+        let mut req = client.get(sse_url).header("Accept", "text/event-stream");
         for (k, v) in headers {
             req = req.header(k, v);
         }
 
         // 发送 GET 请求
-        let response = req
-            .send()
-            .await
-            .map_err(|e| format!("SSE 连接失败: {e}"))?;
+        let response = req.send().await.map_err(|e| format!("SSE 连接失败: {e}"))?;
 
         if !response.status().is_success() {
             return Err(format!(
                 "SSE 连接失败：HTTP {} {}",
                 response.status().as_u16(),
-                response
-                    .status()
-                    .canonical_reason()
-                    .unwrap_or("")
+                response.status().canonical_reason().unwrap_or("")
             ));
         }
 
@@ -257,10 +246,7 @@ impl Transport<RoleClient> for SseClientTransport {
                 return Err(SseTransportError::PostFailed(format!(
                     "HTTP {} {}",
                     response.status().as_u16(),
-                    response
-                        .status()
-                        .canonical_reason()
-                        .unwrap_or("")
+                    response.status().canonical_reason().unwrap_or("")
                 )));
             }
             Ok(())
@@ -269,9 +255,8 @@ impl Transport<RoleClient> for SseClientTransport {
 
     fn receive(
         &mut self,
-    ) -> impl std::future::Future<
-        Output = Option<rmcp::service::RxJsonRpcMessage<RoleClient>>,
-    > + Send {
+    ) -> impl std::future::Future<Output = Option<rmcp::service::RxJsonRpcMessage<RoleClient>>> + Send
+    {
         // 从 channel 读取下一条 server 消息
         async move {
             match self.rx.recv().await {
@@ -281,9 +266,7 @@ impl Transport<RoleClient> for SseClientTransport {
         }
     }
 
-    fn close(
-        &mut self,
-    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
+    fn close(&mut self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
         self.shutdown.store(true, Ordering::Relaxed);
         async { Ok(()) }
     }
@@ -316,7 +299,10 @@ mod tests {
     #[test]
     fn resolve_url_absolute() {
         assert_eq!(
-            resolve_url("http://127.0.0.1:64342/sse", "http://127.0.0.1:64342/message"),
+            resolve_url(
+                "http://127.0.0.1:64342/sse",
+                "http://127.0.0.1:64342/message"
+            ),
             "http://127.0.0.1:64342/message"
         );
     }

@@ -242,9 +242,7 @@ impl VoiceService {
                         )
                     }
                 }
-                SttMode::Cloud => {
-                    (false, "云端 STT 未配置供应商，请在设置页中配置".to_string())
-                }
+                SttMode::Cloud => (false, "云端 STT 未配置供应商，请在设置页中配置".to_string()),
             };
             if !ready {
                 tracing::warn!(target = ?target, %msg, "语音录音中止：服务未就绪");

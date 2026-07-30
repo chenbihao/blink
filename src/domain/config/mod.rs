@@ -15,8 +15,8 @@ pub mod ai_config;
 pub mod app_config;
 pub mod plugin_config;
 pub mod shards;
-pub mod stt_config;
 pub mod store;
+pub mod stt_config;
 
 // ── 扁平 re-exports（方便 `crate::domain::config::*` 直接引用）─────────────────
 #[allow(unused_imports)]

@@ -7,9 +7,9 @@ pub mod clipboard;
 pub mod context;
 #[cfg(windows)]
 pub mod dpi;
+pub mod hotkey;
 #[cfg(windows)]
 pub mod icon; // 0.14.6 §2.3：从 domain/search/icon.rs 迁入
-pub mod hotkey;
 pub mod inject;
 pub mod locale;
 pub mod lock; // 0.14.6 §2.3：从 domain/execution/builtin.rs 迁入

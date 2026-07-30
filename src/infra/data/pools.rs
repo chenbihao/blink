@@ -15,8 +15,8 @@
 
 use crate::infra::utils::paths;
 use sqlx::SqlitePool;
-use std::path::PathBuf;
 use sqlx::sqlite::SqlitePoolOptions;
+use std::path::PathBuf;
 
 /// 四库连接池集合——作为单一 Tauri State 注册。
 ///

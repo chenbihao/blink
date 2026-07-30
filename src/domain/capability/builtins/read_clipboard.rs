@@ -55,7 +55,10 @@ impl Capability for ReadClipboard {
         } else {
             tracing::debug!(len = content.chars().count(), "read_clipboard: 读到文本");
         }
-        Ok(CapabilityResult::Text { content, desc: None })
+        Ok(CapabilityResult::Text {
+            content,
+            desc: None,
+        })
     }
 }
 

@@ -81,7 +81,7 @@ impl StartMenuEngine {
         // 配置变更后立即触发全量扫描（后台异步，不阻塞）
         let cache = Arc::clone(&self.cache);
         let config = Arc::clone(&self.config);
-        tauri::async_runtime::spawn(async move {
+        tokio::spawn(async move {
             let (depth, include_uwp) = {
                 let cfg = config.read().unwrap();
                 (cfg.scan_depth, cfg.include_uwp)
@@ -97,7 +97,7 @@ impl StartMenuEngine {
     fn start_background(&self) {
         let cache = Arc::clone(&self.cache);
         let config = Arc::clone(&self.config);
-        tauri::async_runtime::spawn(async move {
+        tokio::spawn(async move {
             // 立即预扫(后台，全量)
             let (depth, include_uwp) = {
                 let cfg = config.read().unwrap();

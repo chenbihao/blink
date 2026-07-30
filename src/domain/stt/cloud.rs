@@ -116,7 +116,10 @@ pub(crate) struct ResolvedSttEndpoint {
 pub(crate) fn resolve_stt_endpoint(
     config: &crate::domain::config::stt_config::SttConfig,
 ) -> Result<ResolvedSttEndpoint, SttError> {
-    let provider = config.cloud_provider.as_ref().ok_or(SttError::NotInitialized)?;
+    let provider = config
+        .cloud_provider
+        .as_ref()
+        .ok_or(SttError::NotInitialized)?;
 
     let api_key = Some(
         secret::load_secret(STT_SECRET_ID, "key")

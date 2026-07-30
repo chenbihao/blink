@@ -16,15 +16,15 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
-
-use crate::domain::ai::memory::{SqliteConversationMemory, estimate_messages_tokens, estimate_tokens, MemoryLoadResult};
+use crate::domain::ai::memory::{
+    MemoryLoadResult, SqliteConversationMemory, estimate_messages_tokens, estimate_tokens,
+};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use crate::domain::config::ai_config::Tier;
 use crate::domain::ai::agent_provider::{AgentProvider, ChatStreamChunk};
 use crate::domain::ai::prompt::chat_system_prompt_with_skills;
 use crate::domain::ai::provider::AIError;
@@ -32,6 +32,7 @@ use crate::domain::ai::registry::{AIProviderRegistry, ResolvedProviderEntries};
 use crate::domain::ai::skill::{SkillRegistry, parse_skill_command};
 use crate::domain::ai::tool_adapter::{PendingConfirms, build_agent_tools};
 use crate::domain::capability::CapabilityRegistry;
+use crate::domain::config::ai_config::Tier;
 use crate::domain::event::DomainEnv;
 use crate::domain::event_names::EventNames;
 use crate::domain::mcp::McpClientManager;
@@ -279,14 +280,17 @@ impl ChatService {
         config_pool: sqlx::SqlitePool,
     ) -> Self {
         // 从配置库加载持久化的模型选择（0.12.7）
-        let selected = tauri::async_runtime::block_on(Self::load_selected_model(&config_pool, &ai_registry));
+        let selected =
+            tauri::async_runtime::block_on(Self::load_selected_model(&config_pool, &ai_registry));
         Self {
             emitter,
             ai_registry,
             capability_registry,
             pending_confirms,
             mcp_client,
-            memory: Arc::new(crate::domain::ai::memory::SqliteConversationMemory::new(ai_pool)),
+            memory: Arc::new(crate::domain::ai::memory::SqliteConversationMemory::new(
+                ai_pool,
+            )),
             skill_registry: SkillRegistry::new(),
             cached_agent: RwLock::new(None),
             last_context_status: RwLock::new(None),
@@ -306,8 +310,7 @@ impl ChatService {
         ai_registry: &AIProviderRegistry,
     ) -> Option<ChatModelSelection> {
         let selection_id =
-            crate::infra::data::config::get_config(config_pool, "chat:selected_model")
-                .await?;
+            crate::infra::data::config::get_config(config_pool, "chat:selected_model").await?;
 
         let (provider_id, model_id) = selection_id.split_once(':')?;
         if provider_id.is_empty() || model_id.is_empty() {
@@ -350,7 +353,11 @@ impl ChatService {
     ///
     /// 返回 `ResolvedProviderEntries`（含 cache_key，供缓存命中判断）。
     fn resolve_current_entries(&self) -> Result<ResolvedProviderEntries, AIError> {
-        let selected = self.selected.read().expect("selected lock poisoned").clone();
+        let selected = self
+            .selected
+            .read()
+            .expect("selected lock poisoned")
+            .clone();
         if let Some(sel) = selected {
             match self
                 .ai_registry
@@ -380,7 +387,10 @@ impl ChatService {
     ///
     /// 0.12.6：`preamble` 参数支持分组级系统提示词——不同分组的 preamble hash
     /// 不同，cache key 自然失配，触发重建。传空字符串等同默认 `chat_system_prompt()`。
-    pub(crate) async fn ensure_provider(&self, preamble: &str) -> Result<Arc<AgentProvider>, AIError> {
+    pub(crate) async fn ensure_provider(
+        &self,
+        preamble: &str,
+    ) -> Result<Arc<AgentProvider>, AIError> {
         const MAX_PROVIDER_RETRY: usize = 3;
         let mut retry_count = 0;
         let preamble_hash = hash_preamble(preamble);
@@ -420,13 +430,16 @@ impl ChatService {
                 self.emitter.clone(),
                 self.pending_confirms.clone(),
             );
-            let provider = Arc::new(AgentProvider::new(
-                &resolved.provider,
-                &resolved.model,
-                tools,
-                preamble,
-                self.memory.clone(),
-            ).await?);
+            let provider = Arc::new(
+                AgentProvider::new(
+                    &resolved.provider,
+                    &resolved.model,
+                    tools,
+                    preamble,
+                    self.memory.clone(),
+                )
+                .await?,
+            );
 
             // 构造期间配置可能已更新。只提交仍对应当前 key 的实例。
             let latest = self.resolve_current_entries()?;
@@ -467,11 +480,13 @@ impl ChatService {
             .as_ref()
             .map(|s| format!("{}:{}", s.provider_id, s.model_id));
         let pool = self.config_pool.clone();
-        tauri::async_runtime::spawn(async move {
+        tokio::spawn(async move {
             if let Some(id) = key {
-                let _ = crate::infra::data::config::set_config(&pool, "chat:selected_model", &id).await;
+                let _ =
+                    crate::infra::data::config::set_config(&pool, "chat:selected_model", &id).await;
             } else {
-                let _ = crate::infra::data::config::delete_config(&pool, "chat:selected_model").await;
+                let _ =
+                    crate::infra::data::config::delete_config(&pool, "chat:selected_model").await;
             }
         });
         *self.selected.write().expect("selected lock poisoned") = selection.clone();
@@ -537,8 +552,7 @@ impl ChatService {
         // 1. 检查 /skill 显式激活指令
         // 2. 阶段 1：所有 Skill 摘要常驻
         // 3. 阶段 2：触发匹配（关键词/正则）或显式激活的 Skill 全文注入
-        let (effective_message, triggered_skills) =
-            self.resolve_skill_triggers(&message);
+        let (effective_message, triggered_skills) = self.resolve_skill_triggers(&message);
 
         let skill_summaries = self.skill_registry.summaries();
         let preamble = chat_system_prompt_with_skills(
@@ -562,7 +576,9 @@ impl ChatService {
                     .map(|s| SkillActivationInfo {
                         name: s.name.clone(),
                         source: s.source.display_name().to_string(),
-                        trigger_type: if message.starts_with("/skill") || message.starts_with("/SKILL") {
+                        trigger_type: if message.starts_with("/skill")
+                            || message.starts_with("/SKILL")
+                        {
                             "explicit"
                         } else {
                             "auto"
@@ -570,7 +586,11 @@ impl ChatService {
                     })
                     .collect(),
             };
-            let _ = self.emitter.emit_to("chat", EventNames::CHAT_SKILL_ACTIVATED, serde_json::to_value(&signal).unwrap_or_default());
+            let _ = self.emitter.emit_to(
+                "chat",
+                EventNames::CHAT_SKILL_ACTIVATED,
+                serde_json::to_value(&signal).unwrap_or_default(),
+            );
         }
 
         let task = tokio::spawn(async move {
@@ -594,10 +614,10 @@ impl ChatService {
                             Some(&preamble),
                         )
                         .await;
-let _ = service.emitter.emit_to(
-"chat",
-EventNames::CHAT_CONTEXT_STATUS,
-serde_json::to_value(&context_status).unwrap_or_default(),
+                    let _ = service.emitter.emit_to(
+                        "chat",
+                        EventNames::CHAT_CONTEXT_STATUS,
+                        serde_json::to_value(&context_status).unwrap_or_default(),
                     );
 
                     // 0.12.9：移除时间注入到 user message 末尾——之前将
@@ -605,7 +625,7 @@ serde_json::to_value(&context_status).unwrap_or_default(),
                     // 导致：
                     // 1. 切换对话重新加载时用户消息气泡显示时间后缀
                     // 2. 标题生成 LLM 可能看到时间文本，生成 [当前时间：...] 作为标题
-                    // 
+                    //
                     // 时间上下文如未来需要，应通过 non-persistent 机制注入（如
                     // rig agent 的 runtime preamble 或独立 system message），
                     // 不能污染 conversation memory。
@@ -754,10 +774,7 @@ serde_json::to_value(&context_status).unwrap_or_default(),
     /// 在 `set_config('ai_config')` 命令处理中调用——保存 DB 后、`notify_config_changed`
     /// 之前。保留运行时注入的 `context_limit`（来自 `ModelEntry.context_window`），
     /// 只更新 `mode / window_size / trigger_ratio / compress_ratio`。
-    pub async fn update_memory_config(
-        &self,
-        config: crate::domain::ai::memory::MemoryConfig,
-    ) {
+    pub async fn update_memory_config(&self, config: crate::domain::ai::memory::MemoryConfig) {
         self.memory.apply_config(config).await;
     }
 
@@ -923,8 +940,8 @@ serde_json::to_value(&context_status).unwrap_or_default(),
 /// 供 `tool_adapter` 在 emit dangerous confirm 时注入，前端按 request_id 校验事件归属。
 /// ChatService 未注册时返回 `(0, String::new())`——confirm 仍可工作，只是前端无法校验归属。
 pub fn current_request_context_from_env(env: &dyn DomainEnv) -> (u64, String) {
-if let Some(cs) = env.chat_service() {
-cs.current_request_context().unwrap_or((0, String::new()))
+    if let Some(cs) = env.chat_service() {
+        cs.current_request_context().unwrap_or((0, String::new()))
     } else {
         (0, String::new())
     }

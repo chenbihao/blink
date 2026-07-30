@@ -41,9 +41,7 @@ impl McpServerModeConfigStore {
     pub async fn load(pool: &SqlitePool) -> Result<McpServerModeConfig, String> {
         let json = crate::infra::data::config::get_config(pool, Self::KEY).await;
         match json {
-            Some(s) if !s.is_empty() => {
-                serde_json::from_str(&s).map_err(|e| e.to_string())
-            }
+            Some(s) if !s.is_empty() => serde_json::from_str(&s).map_err(|e| e.to_string()),
             _ => Ok(McpServerModeConfig::default()),
         }
     }

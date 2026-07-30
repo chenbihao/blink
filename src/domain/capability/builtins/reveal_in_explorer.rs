@@ -28,8 +28,7 @@ impl Capability for RevealInExplorer {
     fn schema(&self) -> CapabilitySchema {
         CapabilitySchema {
             name: "reveal_in_explorer".into(),
-            description:
-                "Reveal a file in Windows Explorer (highlight it in its folder)".into(),
+            description: "Reveal a file in Windows Explorer (highlight it in its folder)".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {

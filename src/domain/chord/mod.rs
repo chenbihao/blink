@@ -499,7 +499,8 @@ impl crate::domain::execution::Action for ChatAction {
     ) -> Result<crate::domain::execution::ActionOutcome, crate::domain::execution::ExecError> {
         // 看门狗按 PID 判前台；chat 与主窗同进程，不能指望失焦自动隐藏主窗。
         // 先确认 chat 已创建并聚焦，再隐藏主窗；创建失败时保留主窗，避免用户失去入口。
-        cx.env.show_chat_window()
+        cx.env
+            .show_chat_window()
             .map_err(crate::domain::execution::ExecError::Runtime)?;
         cx.env.hide_main_window("chat_chord");
         Ok(crate::domain::execution::ActionOutcome::Nop)
@@ -585,12 +586,10 @@ impl crate::domain::execution::Action for ScreenshotAction {
         cx.env.unhide_after_screenshot();
 
         // 5. 建 overlay + 按 meta 精确定位（物理像素）
-        cx.env.show_screenshot_overlay(&meta).map_err(
-            |e| {
-                crate::infra::platform::screenshot::end_session();
-                crate::domain::execution::ExecError::Runtime(e)
-            },
-        )?;
+        cx.env.show_screenshot_overlay(&meta).map_err(|e| {
+            crate::infra::platform::screenshot::end_session();
+            crate::domain::execution::ExecError::Runtime(e)
+        })?;
         tracing::info!(
             total_ms = t0.elapsed().as_millis() as u64,
             "screenshot overlay 已就绪"
@@ -716,5 +715,4 @@ mod tests {
         assert_eq!(chat["label"], "AI 对话");
         assert_eq!(chat["surface"], "default");
     }
-
 }

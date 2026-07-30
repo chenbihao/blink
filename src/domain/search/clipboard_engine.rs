@@ -345,8 +345,8 @@ mod tests {
         // 无 pool 也能构造——display_count 是内存快照，构造时不读 DB。
         // connect_lazy 需要 Tokio runtime，测试里用阻塞 runtime 兜底。
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let pool = rt
-            .block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
+        let pool =
+            rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
         let engine = ClipboardEngine::new(pool);
         assert_eq!(*engine.display_count.read().unwrap(), DEFAULT_DISPLAY_COUNT);
         assert_eq!(DEFAULT_DISPLAY_COUNT, 30);
@@ -355,8 +355,8 @@ mod tests {
     #[test]
     fn update_display_count_accepts_valid_range() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let pool = rt
-            .block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
+        let pool =
+            rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
         let engine = ClipboardEngine::new(pool);
         engine.update_display_count(5);
         assert_eq!(*engine.display_count.read().unwrap(), 5);
@@ -367,8 +367,8 @@ mod tests {
     #[test]
     fn update_display_count_clamps_out_of_range_to_default() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let pool = rt
-            .block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
+        let pool =
+            rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
         let engine = ClipboardEngine::new(pool);
         // 0 = 下限外 → 兜底默认值
         engine.update_display_count(0);

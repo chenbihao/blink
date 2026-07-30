@@ -8,7 +8,7 @@ use sqlx::SqlitePool;
 
 use super::shards::{
     AppearanceConfig, CalcConfig, ChordConfig, ContextConfig, DisableConfig, FileSearchConfig,
-    HotkeyConfig, SearchConfig, SuggestionConfig, StartMenuConfig,
+    HotkeyConfig, SearchConfig, StartMenuConfig, SuggestionConfig,
 };
 use super::store::ConfigStore;
 
@@ -732,12 +732,21 @@ mod tests {
 
             let all = crate::infra::data::history::get_all_config(&pool).await;
             assert!(all.contains_key("app.hotkey"), "app.hotkey 分片应存在");
-            assert!(all.contains_key("app.appearance"), "app.appearance 分片应存在");
+            assert!(
+                all.contains_key("app.appearance"),
+                "app.appearance 分片应存在"
+            );
             assert!(all.contains_key("app.search"), "app.search 分片应存在");
-            assert!(all.contains_key("app.suggestion"), "app.suggestion 分片应存在");
+            assert!(
+                all.contains_key("app.suggestion"),
+                "app.suggestion 分片应存在"
+            );
             assert!(all.contains_key("app.chord"), "app.chord 分片应存在");
             assert!(all.contains_key("app.disable"), "app.disable 分片应存在");
-            assert!(all.contains_key("clipboard:config"), "clipboard 独立 KV 应存在");
+            assert!(
+                all.contains_key("clipboard:config"),
+                "clipboard 独立 KV 应存在"
+            );
             assert!(!all.contains_key("app_config"), "旧单 key 不应重现");
         });
     }

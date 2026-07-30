@@ -467,10 +467,7 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
         // 导致合成 keyup 跳过此块 → EXPECT_SYNTH_KEYUP_AT 标志未被消费 → 下一个
         // 真实 Alt keyup 被误认为合成 keyup 而跳过 → ALT_LOGICALLY_HELD 卡在 true
         // → 用户松开 Alt 后 chord 模式不退出。
-        if vk == VK_LMENU.0 as u32
-            || vk == VK_RMENU.0 as u32
-            || vk == VK_MENU.0 as u32
-        {
+        if vk == VK_LMENU.0 as u32 || vk == VK_RMENU.0 as u32 || vk == VK_MENU.0 as u32 {
             // one-shot flag：Alt keyup 时无条件 swap 清除
             let was_expected = if is_up {
                 let expected_at = EXPECT_SYNTH_KEYUP_AT.load(Ordering::SeqCst);

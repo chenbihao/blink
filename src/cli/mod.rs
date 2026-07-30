@@ -109,7 +109,12 @@ pub fn try_run_cli() -> Option<i32> {
     // 第一个参数是子命令（不是 flag）
     let first = &args[1];
     let known_commands = [
-        "mcp-server", "search", "run", "capabilities", "config", "chat",
+        "mcp-server",
+        "search",
+        "run",
+        "capabilities",
+        "config",
+        "chat",
         "help", // 0.13.7: 支持 blink help / blink --help
     ];
     // --help / -h 也走 CLI 路径（clap 自动处理）

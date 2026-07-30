@@ -113,7 +113,9 @@ impl Capability for SearchClipboardHistory {
                 crate::domain::capability::ItemResult {
                     data,
                     desc: Some(format_relative_time(item.created_at)),
-                    actions: vec![crate::domain::capability::ItemAction::Copy { pointer: Some("$.text".into()) }],
+                    actions: vec![crate::domain::capability::ItemAction::Copy {
+                        pointer: Some("$.text".into()),
+                    }],
                 }
             })
             .collect();

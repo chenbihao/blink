@@ -20,8 +20,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::domain::capability::{
-    Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
-    ProjectionRule,
+    Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext, ProjectionRule,
 };
 use crate::domain::execution::DangerClass;
 use crate::domain::plugin::manifest::{DangerClassDef, ToolDef};
@@ -108,12 +107,12 @@ impl Capability for PluginCapabilityAdapter {
         ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError> {
         let plugin_id = self.plugin.id();
-        let plugin_engine =
-            ctx.env
-                .plugin_engine()
-                .ok_or_else(|| CapabilityError::Internal {
-                    detail: "当前运行模式未初始化插件引擎".into(),
-                })?;
+        let plugin_engine = ctx
+            .env
+            .plugin_engine()
+            .ok_or_else(|| CapabilityError::Internal {
+                detail: "当前运行模式未初始化插件引擎".into(),
+            })?;
         let settings = plugin_engine.get_settings(plugin_id);
 
         tracing::debug!(
@@ -131,9 +130,12 @@ impl Capability for PluginCapabilityAdapter {
         }
 
         // 0.14.3: 轨道 A（纯 data + 投影引擎）——所有插件 tool 均配 projection
-        let projection = self.projection.as_ref().ok_or_else(|| CapabilityError::Internal {
-            detail: format!("插件 tool {} 未配置 projection", self.tool_name),
-        })?;
+        let projection = self
+            .projection
+            .as_ref()
+            .ok_or_else(|| CapabilityError::Internal {
+                detail: format!("插件 tool {} 未配置 projection", self.tool_name),
+            })?;
 
         let raw = self
             .plugin
@@ -204,7 +206,9 @@ mod tests {
         // builtin.translate:translate → builtin_translate_translate
         let id = plugin_tool_id("builtin.translate", "translate");
         assert_eq!(id, "builtin_translate_translate");
-        assert!(id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
+        assert!(
+            id.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        );
     }
-
 }

@@ -1,8 +1,8 @@
 //! search 域命令（0.14.6 §2.4 从 commands.rs 拆分）。
 
+use crate::domain::event_names::EventNames;
 use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
-use crate::domain::event_names::EventNames;
 /// 打开文件选择对话框，返回选中的文件路径（取消时返回 null）。
 #[tauri::command]
 pub async fn open_file_dialog(
@@ -34,10 +34,7 @@ pub async fn open_file_dialog(
 
 /// 打开目录选择对话框，返回选中的目录路径（取消时返回 null）。
 #[tauri::command]
-pub async fn pick_directory_dialog(
-    app: tauri::AppHandle,
-    title: String,
-) -> Option<String> {
+pub async fn pick_directory_dialog(app: tauri::AppHandle, title: String) -> Option<String> {
     let mut dialog = app.dialog().file();
     if !title.is_empty() {
         dialog = dialog.set_title(title);
@@ -154,7 +151,10 @@ pub async fn run_builtin_action(
     tracing::debug!(%id, ?arg, "run_builtin_action: 收到请求");
 
     // 0.14.6 §2.2：从 state 获取 DomainEnv 桥接器
-    let env_arc = app.state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>().inner().clone();
+    let env_arc = app
+        .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
+        .inner()
+        .clone();
 
     // 0.14.4: 先查 ActionRegistry，未命中再查 CapabilityRegistry
     let registry = app.state::<std::sync::Arc<crate::domain::execution::ActionRegistry>>();
@@ -237,8 +237,19 @@ pub async fn confirm_chat_action(
 pub async fn open_settings_tab(app: tauri::AppHandle, tab: String) -> Result<(), String> {
     // 0.12.8: 白名单校验——eval 字符串拼接存在注入风险
     const ALLOWED_TABS: &[&str] = &[
-        "general", "engines", "plugins", "ai-providers", "ai-chat", "voice",
-        "context", "chord", "hotkey", "network", "storage", "debug", "about",
+        "general",
+        "engines",
+        "plugins",
+        "ai-providers",
+        "ai-chat",
+        "voice",
+        "context",
+        "chord",
+        "hotkey",
+        "network",
+        "storage",
+        "debug",
+        "about",
     ];
     if !ALLOWED_TABS.contains(&tab.as_str()) {
         return Err(format!("无效的设置页 tab: {tab}"));
@@ -261,8 +272,7 @@ pub async fn open_settings_tab(app: tauri::AppHandle, tab: String) -> Result<(),
 /// 仅写 UTF-8 文本文件，不做任何特权操作（无路径穿越风险——路径来自用户主动选择）。
 #[tauri::command]
 pub async fn save_text_file(path: String, content: String) -> Result<(), String> {
-    std::fs::write(&path, content.as_bytes())
-        .map_err(|e| format!("写入文件失败: {e}"))?;
+    std::fs::write(&path, content.as_bytes()).map_err(|e| format!("写入文件失败: {e}"))?;
     tracing::info!(%path, bytes = content.len(), "save_text_file: 文件已保存");
     Ok(())
 }
@@ -321,417 +331,14 @@ pub async fn trigger_chord(app: tauri::AppHandle, key: String) -> Result<(), Str
     }
     // surface 现已无 command 层消费者（MiniBall 划词已移除，各 action 自管 UI），
     // 保留 trigger 返回值以备未来扩展。
-    let env_arc = app.state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>().inner().clone();
-    let _surface = registry.trigger(&key, &chord_cfg.bindings, env_arc.as_ref()).await?;
+    let env_arc = app
+        .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
+        .inner()
+        .clone();
+    let _surface = registry
+        .trigger(&key, &chord_cfg.bindings, env_arc.as_ref())
+        .await?;
     Ok(())
-}
-
-/// 0.11.7-f：接收前端合成后的 PNG（裁剪区 + 标注），写入剪贴板，结束会话。
-///
-/// **替代** 0.8.7 `capture_region`（后端从 SESSION 裁剪）——现在前端一份合成路径
-/// 走通所有输出（复制/保存/钉图），双击全屏也走这里。
-///
-/// **异步执行**（0.11.7 review 修）：PNG 解码 + BGRA swap + Win32 剪贴板写入都是
-/// 同步 CPU/syscall 密集操作，全屏 2560x1440 约 50-100ms。放在异步命令直接跑会
-/// 阻塞 tokio 工作线程，影响其他并发任务。用 `spawn_blocking` 挪到阻塞线程池。
-///
-/// **快路径**：如果只需要复制选区（无标注、无全屏合成），前端应走 `screenshot_copy_region`
-/// 直接传坐标——避开前端 toBlob PNG 编码 + 后端 PNG 解码的双重开销，全屏路径
-/// 快 ~150-250ms。有标注 / 全屏合成时才走本命令。
-#[tauri::command]
-pub async fn screenshot_copy(app: tauri::AppHandle, png_data: Vec<u8>) -> Result<(), String> {
-    let bytes_len = png_data.len();
-    tokio::task::spawn_blocking(move || {
-        crate::infra::platform::clipboard::write_png_to_clipboard(&png_data)
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking join 失败: {e}"))??;
-    finish_screenshot_session(&app);
-    tracing::info!(bytes = bytes_len, "截图已保存到剪贴板");
-    Ok(())
-}
-
-/// 0.11.7 快路径：直接从 SESSION 裁剪 BGRA → 写剪贴板，跳过 PNG 编解码往返。
-///
-/// **适用场景**：无标注（前端 `annot.hasAnnotations() == false`）+ 有选区。
-///
-/// 相比 `screenshot_copy(png_data)` 的收益：
-/// - 前端省 `canvas.toBlob('image/png')`（2560x1440 ~150ms）
-/// - 后端省 `image::load_from_memory` PNG 解码（~50-100ms）
-/// - IPC payload 从 PNG (~几 MB) 变成 16 字节坐标
-///
-/// 坐标是物理像素、SESSION 坐标系（虚拟屏幕原点为 (0,0)）——前端 mouseup 时
-/// 已按 DPR 转换过。裁剪越界会被 `crop()` 自身 clamp。
-#[tauri::command]
-pub async fn screenshot_copy_region(
-    app: tauri::AppHandle,
-    x: i32,
-    y: i32,
-    w: u32,
-    h: u32,
-) -> Result<(), String> {
-    // BGRA 裁剪 + 剪贴板写入都同步，挪到阻塞线程池
-    tokio::task::spawn_blocking(move || -> Result<(u32, u32), String> {
-        let (bgra, cw, ch) = crate::infra::platform::screenshot::crop(x, y, w, h)
-            .ok_or_else(|| "SESSION 为空或选区越界".to_string())?;
-        crate::infra::platform::clipboard::write_bgra_to_clipboard(&bgra, cw, ch)?;
-        Ok((cw, ch))
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking join 失败: {e}"))?
-    .map(|(cw, ch)| tracing::info!(w = cw, h = ch, "截图选区已直传剪贴板（快路径）"))?;
-    finish_screenshot_session(&app);
-    Ok(())
-}
-
-/// 0.11.7-f：取消截图，结束会话，不保存。
-#[tauri::command]
-pub fn screenshot_cancel(app: tauri::AppHandle) {
-    finish_screenshot_session(&app);
-    tracing::info!("截图已取消");
-}
-
-/// 0.11.7-f：钉图——接收前端合成后的 PNG，创建钉图窗口。
-///
-/// `screen_x`/`screen_y` 为选区左上角的**虚拟屏幕物理坐标**，
-/// 让钉图窗口定位到截图原位（"就地贴住"）。
-#[tauri::command]
-pub fn screenshot_pin(
-    app: tauri::AppHandle,
-    png_data: Vec<u8>,
-    screen_x: i32,
-    screen_y: i32,
-) -> Result<(), String> {
-    crate::infra::platform::window::show_pin_window(&app, png_data, screen_x, screen_y)?;
-    finish_screenshot_session(&app);
-    tracing::info!(screen_x, screen_y, "截图已钉到屏幕");
-    Ok(())
-}
-
-/// 0.11.7-f：保存截图选区为文件（PNG/JPEG）。
-///
-/// `path=None` 弹出保存对话框；用户取消时返回 Err，前端应识别 "用户取消了保存"
-/// 字符串以避免噪音。
-#[tauri::command]
-pub async fn screenshot_save(
-    app: tauri::AppHandle,
-    png_data: Vec<u8>,
-    path: Option<String>,
-) -> Result<String, String> {
-    use std::io::Write;
-
-    let file_path = match path {
-        Some(p) => p,
-        None => {
-            let timestamp = chrono::Local::now().format("截图_%Y%m%d_%H%M%S");
-            let default_name = format!("{}.png", timestamp);
-            let dialog = app.dialog().file();
-            let picked = dialog
-                .add_filter("PNG 图片", &["png"])
-                .add_filter("JPEG 图片", &["jpg", "jpeg"])
-                .set_file_name(&default_name)
-                .blocking_save_file();
-            match picked {
-                Some(path) => path.to_string(),
-                None => return Err("用户取消了保存".to_string()),
-            }
-        }
-    };
-
-    let mut file = std::fs::File::create(&file_path).map_err(|e| format!("创建文件失败: {e}"))?;
-    file.write_all(&png_data)
-        .map_err(|e| format!("写入文件失败: {e}"))?;
-
-    finish_screenshot_session(&app);
-    tracing::info!(path = %file_path, "截图已保存到文件");
-    Ok(file_path)
-}
-
-/// 0.11.7-d：隐藏钉图窗口（hide 而非 close，保留窗口实例供下次钉图复用）。
-#[tauri::command]
-pub fn screenshot_pin_hide(app: tauri::AppHandle) {
-    if let Some(win) = app.get_webview_window("chord-pin") {
-        let _ = win.hide();
-    }
-}
-
-/// 0.11.8：钉图窗口一次性设置位置 + 尺寸（缩放/拖动/onload 跟随共用）。
-///
-/// 走 Win32 `SetWindowPos` 原子地设位置+尺寸，绕开 Tauri 逻辑像素 DPI 竞态。
-/// 参数均为**屏幕物理像素**：
-/// - `win_x`/`win_y`：窗口左上角屏幕坐标（= 图片左上 - PIN_PAD）
-/// - `win_w`/`win_h`：窗口尺寸（= 图片显示尺寸 + 2×PIN_PAD，含发光区）
-///
-/// 前端在缩放/拖动时算好这 4 个值一次性传入，避免多次 set_position/set_size 竞态。
-#[tauri::command]
-pub fn screenshot_pin_transform(
-    app: tauri::AppHandle,
-    win_x: i32,
-    win_y: i32,
-    win_w: u32,
-    win_h: u32,
-) -> Result<(), String> {
-    use windows::Win32::Foundation::HWND;
-    if let Some(win) = app.get_webview_window("chord-pin") {
-        if let Ok(hwnd) = win.hwnd() {
-            crate::infra::platform::window::place_at_physical(
-                HWND(hwnd.0 as _),
-                win_x,
-                win_y,
-                win_w,
-                win_h,
-            );
-        }
-    }
-    Ok(())
-}
-
-/// 0.11.7-c：OCR 识别图片中的文字，返回 `{text, lines}`。
-///
-/// 0.11.7-f：改走 `ocr_engine::backend()` 注入的后端（测试可替换）。
-#[tauri::command]
-pub async fn ocr_image(
-    _app: tauri::AppHandle,
-    png_data: Vec<u8>,
-) -> Result<serde_json::Value, String> {
-    let backend = crate::domain::capability::builtins::ocr_engine::backend();
-    let result = backend
-        .recognize(&png_data)
-        .await
-        .map_err(|e| format!("OCR 识别失败: {e}"))?;
-
-    let json = serde_json::to_value(&result).map_err(|e| format!("序列化 OCR 结果失败: {e}"))?;
-    tracing::debug!(text_len = result.text.len(), "OCR 识别完成");
-    Ok(json)
-}
-
-/// 0.11.9-d：翻译文本命令——OCR 面板/工具栏"翻译"按钮的后端入口。
-///
-/// **绕过 AI 路径**：翻译是确定性动作(用户主动点按钮),不该经过 AI 意图判断
-/// + 网络往返。直接走 `CapabilityRegistry` 找 translate 插件的 `translate` tool
-/// (id = `builtin_translate_translate`),调 `invoke()` 拿 `CapabilityResult::Items`，
-/// 读 `items[0].data.translated` 即译文。
-///
-/// **0.13.7 迁移**：从 ActionRegistry 迁到 CapabilityRegistry（插件体系收敛）。
-///
-/// **参数**：
-/// - `text`: 待翻译文本（必填）
-/// - `target_lang`: 目标语言代码(zh/en/ja/ko);`None` 时插件读 setting 默认值
-///
-/// **失败模式**：
-/// - 插件未启用 / manifest 未加载 → 返 `"翻译插件未安装或未启用"`
-/// - 插件返回空/错误 → 传递原错误信息
-/// - 插件返回非 Items 结果 → `"翻译插件返回意外的结果类型"`(理论不会,防御)
-#[tauri::command]
-pub async fn translate_text(
-    app: tauri::AppHandle,
-    text: String,
-    target_lang: Option<String>,
-) -> Result<String, String> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return Err("翻译文本不能为空".into());
-    }
-
-    let registry = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
-    // translate 插件的 tool 注册 id = plugin_tool_id("builtin.translate", "translate")
-    const TRANSLATE_CAPABILITY_ID: &str = "builtin_translate_translate";
-    if registry.get(TRANSLATE_CAPABILITY_ID).is_none() {
-        tracing::warn!("translate_text: 翻译插件未注册");
-        return Err("翻译插件未安装或未启用".into());
-    }
-
-    // 构造插件 tool arguments —— text 必填,target_lang 有值才传(None 让插件读 setting)
-    let mut args = serde_json::Map::new();
-    args.insert(
-        "text".into(),
-        serde_json::Value::String(trimmed.to_string()),
-    );
-    if let Some(lang) = target_lang
-        .as_ref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-    {
-        args.insert(
-            "target_lang".into(),
-            serde_json::Value::String(lang.to_string()),
-        );
-    }
-    let arguments = serde_json::Value::Object(args);
-
-    tracing::debug!(
-        text_len = trimmed.chars().count(),
-        ?target_lang,
-        "translate_text: 调翻译插件"
-    );
-
-    // 构造 InvokeContext（确定性调用，无超时——翻译插件内部已有 manifest timeout_ms）
-    let env_arc = app.state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>().inner().clone();
-    let ctx = crate::domain::capability::InvokeContext {
-        env: env_arc.as_ref(),
-        deadline: None,
-    };
-    let result = registry
-        .invoke(TRANSLATE_CAPABILITY_ID, arguments, &ctx)
-        .await
-        .map_err(|e| format!("翻译执行失败: {e}"))?;
-
-    match result {
-        crate::domain::capability::CapabilityResult::Items { items } => {
-            // 0.14: 优先读 data.translated（干净译文）
-            let translated = items
-                .first()
-                .and_then(|it| {
-                    it.data
-                        .get("translated")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string)
-                })
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| "翻译插件返回空结果".to_string())?;
-            tracing::info!(
-                src_len = trimmed.chars().count(),
-                dst_len = translated.chars().count(),
-                "translate_text 完成"
-            );
-            Ok(translated)
-        }
-        crate::domain::capability::CapabilityResult::Text { content, .. } => {
-            // 兼容:如果插件未来改走 Text 结果,也取到译文
-            Ok(content)
-        }
-        other => {
-            tracing::warn!(?other, "translate_text: 翻译插件返回意外的结果");
-            Err("翻译插件返回意外的结果类型".into())
-        }
-    }
-}
-
-/// 0.11.10-g:批量翻译多行文本。
-///
-/// 首选一次调用插件 `translate_batch` tool，由插件加 tag 后单次请求翻译引擎并保序拆回。
-/// 插件版本不匹配、tag 被引擎破坏或结构化结果异常时，降级为并发单行 `translate_text`，
-/// 保证截图翻译功能不因批量优化失败而不可用。
-#[tauri::command]
-pub async fn translate_lines(
-    app: tauri::AppHandle,
-    lines: Vec<String>,
-    target_lang: Option<String>,
-) -> Result<Vec<String>, String> {
-    if lines.is_empty() {
-        return Ok(Vec::new());
-    }
-    let n = lines.len();
-    tracing::debug!(count = n, ?target_lang, "translate_lines: 批量翻译开始");
-    let started = std::time::Instant::now();
-
-    // 空行不送插件，保留原索引；插件契约只接收非空文本。
-    let non_empty: Vec<(usize, String)> = lines
-        .iter()
-        .enumerate()
-        .filter(|(_, text)| !text.trim().is_empty())
-        .map(|(idx, text)| (idx, text.clone()))
-        .collect();
-    if non_empty.is_empty() {
-        return Ok(lines);
-    }
-
-    const TRANSLATE_BATCH_CAPABILITY_ID: &str = "builtin_translate_translate_batch";
-    let registry = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
-    if registry.get(TRANSLATE_BATCH_CAPABILITY_ID).is_some() {
-        let texts: Vec<String> = non_empty.iter().map(|(_, text)| text.clone()).collect();
-        let mut args = serde_json::Map::new();
-        args.insert("texts".into(), serde_json::json!(texts));
-        if let Some(lang) = target_lang
-            .as_ref()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-        {
-            args.insert(
-                "target_lang".into(),
-                serde_json::Value::String(lang.to_string()),
-            );
-        }
-        let env_arc = app.state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>().inner().clone();
-        let ctx = crate::domain::capability::InvokeContext {
-            env: env_arc.as_ref(),
-            deadline: None,
-        };
-        match registry
-            .invoke(
-                TRANSLATE_BATCH_CAPABILITY_ID,
-                serde_json::Value::Object(args),
-                &ctx,
-            )
-            .await
-        {
-            Ok(result) => {
-                if let Some(batch_results) =
-                    parse_translate_batch_payload(&result, non_empty.len())
-                {
-                    let mut results = lines.clone();
-                    for ((idx, _), translated) in non_empty.iter().zip(batch_results) {
-                        results[*idx] = translated;
-                    }
-                    tracing::info!(
-                        count = n,
-                        elapsed_ms = started.elapsed().as_millis() as u64,
-                        "translate_lines 完成（单次批量 tool）"
-                    );
-                    return Ok(results);
-                }
-                tracing::warn!("translate_lines: 批量 tool 返回结构异常，降级为单行并发");
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "translate_lines: 批量 tool 失败，降级为单行并发");
-            }
-        }
-    } else {
-        tracing::warn!("translate_lines: translate_batch 未注册，降级为单行并发");
-    }
-
-    let mut handles = Vec::with_capacity(non_empty.len());
-    for (idx, text) in non_empty {
-        let app_clone = app.clone();
-        let tl = target_lang.clone();
-        let src_for_fallback = text.clone();
-        handles.push(tokio::spawn(async move {
-            let result = translate_text(app_clone, text, tl).await;
-            match result {
-                Ok(dst) => (idx, dst),
-                Err(e) => {
-                    tracing::warn!(line = idx, error = %e, "translate_lines: 单行翻译失败，降级到原文");
-                    (idx, src_for_fallback)
-                }
-            }
-        }));
-    }
-
-    let mut results = lines;
-    for handle in handles {
-        match handle.await {
-            Ok((idx, dst)) => results[idx] = dst,
-            Err(e) => tracing::warn!(error = %e, "translate_lines: 任务 join 失败"),
-        }
-    }
-    tracing::info!(
-        count = n,
-        elapsed_ms = started.elapsed().as_millis() as u64,
-        "translate_lines 完成（单行并发降级）"
-    );
-    Ok(results)
-}
-
-/// 0.11.7：设置/清除标注模式（前端通知后端）。
-#[tauri::command]
-pub fn screenshot_set_annotation_mode(active: bool) {
-    crate::infra::platform::screenshot::set_annotation_mode(active);
-}
-
-/// 隐藏截图覆盖窗（ESC / 失焦 / 选区过小时调）。
-#[tauri::command]
-pub fn hide_screenshot_overlay(app: tauri::AppHandle) {
-    crate::infra::platform::window::hide_screenshot_overlay(&app);
 }
 
 /// 列出所有已注册的 Chord 动作元数据（0.8.5 §六 Ghost overlay 提示层渲染用）。
@@ -1254,178 +861,6 @@ pub async fn record_hotkey() -> Result<serde_json::Value, String> {
     }
 }
 
-/// 显示右键菜单独立窗口（突破主窗口边界裁剪）。
-/// 复用已有窗口：首次创建，后续 hide → 更新数据 → show，避免重复创建 WebView2 的开销。
-///
-/// `width/height` 是菜单的 **CSS 像素**尺寸；光标物理坐标由后端 `GetCursorPos` 直接读取，
-/// 不接受前端传入的 `screenX/Y`（WebView2 里那是 CSS 像素，高 DPI 屏会偏 1/3+）。
-/// 定位/缩放/边界翻转全部走 `clamp_context_menu`。
-#[tauri::command]
-pub async fn show_context_menu(
-    app: tauri::AppHandle,
-    width: f64,
-    height: f64,
-    items: String,
-) -> Result<(), String> {
-    use tauri::{WebviewUrl, WebviewWindowBuilder};
-
-    // 主题 resolve（auto → dark/light）
-    let theme = {
-        let pool = &app.state::<crate::infra::data::DbPools>().config;
-        let raw = crate::app::config::get_config(&pool).await.theme;
-        if raw == "auto" {
-            let is_light = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
-                .open_subkey("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize")
-                .and_then(|k| k.get_value::<u32, _>("AppsUseLightTheme"))
-                .map(|v| v == 1)
-                .unwrap_or(false);
-            if is_light {
-                "light".to_string()
-            } else {
-                "dark".to_string()
-            }
-        } else {
-            raw
-        }
-    };
-
-    // 多屏感知定位：Win32 直接拿光标物理坐标 + 目标屏 DPI 缩放 + 智能翻转
-    let (fx, fy, fw, fh) = crate::infra::platform::window::clamp_context_menu(width, height);
-
-    // 复用已有窗口：resize → reposition → show → eval 渲染新数据 → force_topmost
-    // ⚠️ 不能在隐藏态用 emit 传数据：WebView2 在 IsVisible=false 时会丢弃事件
-    // （曾导致「窗口尺寸已撑开、内容却没更新」）。改用 eval（走 ExecuteScript 注入
-    // 脚本到 webview 队列，show 之后必执行），比事件系统更可靠地更新菜单内容。
-    if let Some(win) = app.get_webview_window("context-menu") {
-        // ⚠️ 不能用 set_size + set_position：窗口在主屏预热、跨到 DPI 不同的屏时，
-        // set_position 会触发 WM_DPICHANGED，tao 据此重设尺寸（不动位置），
-        // 与刚排队的 set_size 竞态，导致多屏不同 DPI 下菜单尺寸/位置偏（Tauri #3610）。
-        // 改用 SetWindowPos 一次原子设定位置+尺寸，绕开 tao 的 DPI 重设逻辑。
-        //
-        // 但即使走 SetWindowPos，跨 DPI 屏时 Windows 仍会给 hwnd 发 WM_DPICHANGED，
-        // tao 的 wndproc 收到后会按建议 rect 再改一次尺寸——把我们刚设的物理尺寸推翻，
-        // 症状是「切屏首次右键宽高错，第二次才对」。破法：show 之后再补一次
-        // place_at_physical，让 WM_DPICHANGED 的抢跑跑完后再纠正一次。
-        let hwnd_opt = win
-            .hwnd()
-            .ok()
-            .map(|h| windows::Win32::Foundation::HWND(h.0 as _));
-        if let Some(hwnd) = hwnd_opt {
-            crate::infra::platform::window::place_at_physical(hwnd, fx, fy, fw, fh);
-            // 撤销上次 hide_context_menu 设的 DWM Cloak，否则 show 后窗口仍不可见
-            crate::infra::platform::window::apply_cloak(hwnd, false);
-        } else {
-            // hwnd 拿不到时的兜底（理论上不会到这）
-            let _ = win.set_size(tauri::PhysicalSize::new(fw, fh));
-            let _ = win.set_position(tauri::PhysicalPosition::new(fx, fy));
-        }
-        let _ = win.show();
-        // 补一次：show 触发的 WM_DPICHANGED 若把尺寸改回去了，这里覆盖回来
-        if let Some(hwnd) = hwnd_opt {
-            crate::infra::platform::window::place_at_physical(hwnd, fx, fy, fw, fh);
-        }
-        let theme_js = serde_json::to_string(&theme).unwrap_or_else(|_| "\"dark\"".to_string());
-        let js = format!(
-            "window.__renderContextMenu && window.__renderContextMenu({items}, {theme})",
-            items = items,
-            theme = theme_js,
-        );
-        let _ = win.eval(&js);
-        // Win32 直接设 TOPMOST，比 Tauri 的 set_always_on_top 更可靠
-        if let Some(hwnd) = hwnd_opt {
-            crate::infra::platform::window::force_topmost(hwnd);
-        }
-        tracing::trace!(fx, fy, fw, fh, items_len = items.len(), "右键菜单窗口复用");
-        return Ok(());
-    }
-
-    // 首次创建：通过 URL 参数传递初始数据
-    // ⚠️ builder 的 inner_size / position 是**逻辑像素**（tao 内部按 LogicalSize 处理），
-    // 但 fw/fh/fx/fy 是物理像素——直接塞给 builder 会被 Tauri 按主屏 DPI 再放大一遍。
-    // 这里传 CSS 尺寸（逻辑像素）让 builder 别炸，位置随便给个占位；build 完立刻
-    // place_at_physical 强制矫正到目标物理坐标 + 尺寸，跟截图 overlay 同套路。
-    let encoded_items = urlencoding::encode(&items).to_string();
-    let url = format!("contextmenu-popup.html?items={encoded_items}&theme={theme}");
-    tracing::debug!(fx, fy, fw, fh, "创建右键菜单窗口");
-    let _win = WebviewWindowBuilder::new(&app, "context-menu", WebviewUrl::App(url.into()))
-        .title("")
-        .inner_size(width, height) // 逻辑像素占位，稍后 place_at_physical 覆盖
-        .position(0.0, 0.0)
-        .decorations(false)
-        .transparent(false)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .visible(false) // 先隐藏建，place 后再 show，避免闪一下错位窗口
-        .focused(false)
-        .resizable(false)
-        .build()
-        .map_err(|e| format!("创建右键菜单窗口失败: {e}"))?;
-
-    if let Ok(hwnd) = _win.hwnd() {
-        let hwnd = windows::Win32::Foundation::HWND(hwnd.0 as _);
-        crate::infra::platform::window::place_at_physical(hwnd, fx, fy, fw, fh);
-        let _ = _win.show();
-        // 首次创建同样补一次：show 若触发 WM_DPICHANGED 会撞乱刚设的尺寸
-        crate::infra::platform::window::place_at_physical(hwnd, fx, fy, fw, fh);
-        crate::infra::platform::window::force_topmost(hwnd);
-    } else {
-        // hwnd 拿不到的兜底路径
-        let _ = _win.set_size(tauri::PhysicalSize::new(fw, fh));
-        let _ = _win.set_position(tauri::PhysicalPosition::new(fx, fy));
-        let _ = _win.show();
-    }
-
-    tracing::trace!(
-        fx,
-        fy,
-        fw,
-        fh,
-        items_len = items.len(),
-        "右键菜单窗口已创建"
-    );
-    Ok(())
-}
-
-/// 隐藏右键菜单窗口（hide 而非 close，保留窗口供下次复用）。
-#[tauri::command]
-pub async fn hide_context_menu(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(win) = app.get_webview_window("context-menu") {
-        // DWM Cloak 先行：瞬间消失无 fade 动画，避免截图时拍到右键窗口残影
-        if let Ok(hwnd) = win.hwnd() {
-            crate::infra::platform::window::apply_cloak(
-                windows::Win32::Foundation::HWND(hwnd.0 as _),
-                true,
-            );
-        }
-        let _ = win.hide();
-        tracing::trace!("hide_context_menu: 已隐藏右键菜单窗口");
-    }
-    Ok(())
-}
-
-/// Popup 窗口菜单项被点击 → 通知主窗口执行动作。
-/// action_id 是菜单项的唯一标识（JSON 数组索引）。
-///
-/// **顺序很重要**：先隐藏 Popup + 主窗口获焦，再 emit 事件。
-/// 否则前端收到事件时 Popup 仍是前台窗口，`document.hasFocus() === false`，
-/// `navigator.clipboard.readText()` 会被 Chromium 以「document 未获焦」为由拒绝，
-/// `execCommand("paste")` 同样失效——症状就是「点粘贴，输入框仍空」（右键在
-/// 主窗口边框时尤其容易复现，此时主窗口本就不是前台）。
-#[tauri::command]
-pub async fn context_menu_action(app: tauri::AppHandle, action_id: u32) -> Result<(), String> {
-    // 1. 先隐藏 Popup 窗口，让主窗口有机会重回前台
-    hide_context_menu(app.clone()).await?;
-    // 2. 显式把主窗口置为前台并聚焦，保证 clipboard/execCommand 可用
-    if let Some(main) = app.get_webview_window("main") {
-        let _ = main.show();
-        let _ = main.set_focus();
-    }
-    // 3. 最后再通知前端执行动作
-    app.emit(EventNames::CONTEXT_MENU_ACTION, action_id)
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 /// 记录剪贴板命中（用户选择粘贴某条历史）。
 #[tauri::command]
 pub async fn record_clipboard_hit(app: tauri::AppHandle, id: String) -> Result<(), String> {
@@ -1474,9 +909,7 @@ pub async fn open_url(url: String) -> Result<(), String> {
 /// 列出所有可暴露的 Capability（设置页勾选用）。
 /// 返回 (id, description, sensitive) 三元组。
 #[tauri::command]
-pub async fn list_exposable_capabilities(
-    app: tauri::AppHandle,
-) -> Vec<serde_json::Value> {
+pub async fn list_exposable_capabilities(app: tauri::AppHandle) -> Vec<serde_json::Value> {
     let cap_registry = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
     cap_registry
         .list()
@@ -1534,25 +967,7 @@ fn convert_legacy_arg_to_capability_args(
 /// 结束一个截图会话（0.11.7-f helper）：清标注模式 + 隐藏 overlay + 清 SESSION。
 ///
 /// `screenshot_copy/pin/save/cancel` 都以此收尾，一处修改多处受益。
-fn finish_screenshot_session(app: &tauri::AppHandle) {
-    crate::infra::platform::screenshot::set_annotation_mode(false);
-    crate::infra::platform::window::hide_screenshot_overlay(app);
-}
-
-/// 从 translate_batch 的首项 payload 读取保序结果。
-fn parse_translate_batch_payload(
-    result: &crate::domain::capability::CapabilityResult,
-    expected: usize,
-) -> Option<Vec<String>> {
-    let crate::domain::capability::CapabilityResult::Items { items } = result else {
-        return None;
-    };
-    let results = items.first()?.data.get("results")?.as_array()?;
-    if results.len() != expected {
-        return None;
-    }
-    results
-        .iter()
-        .map(|value| value.as_str().map(str::to_string))
-        .collect()
-}
+mod context_menu;
+mod media;
+pub use context_menu::*;
+pub use media::*;

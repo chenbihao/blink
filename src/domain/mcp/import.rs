@@ -76,10 +76,7 @@ fn config_file_path(source: McpImportSource) -> Option<String> {
     match source {
         McpImportSource::ClaudeDesktop => {
             let appdata = std::env::var("APPDATA").ok()?;
-            Some(format!(
-                "{}\\Claude\\claude_desktop_config.json",
-                appdata
-            ))
+            Some(format!("{}\\Claude\\claude_desktop_config.json", appdata))
         }
         McpImportSource::ClaudeCode => {
             let userprofile = std::env::var("USERPROFILE").ok()?;
@@ -130,8 +127,8 @@ pub fn parse_external_mcp_config(
     source: McpImportSource,
     json: &str,
 ) -> Result<Vec<McpServerConfig>, String> {
-    let v: serde_json::Value = serde_json::from_str(json)
-        .map_err(|e| format!("JSON 解析失败: {e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| format!("JSON 解析失败: {e}"))?;
 
     // 1. 尝试标准 mcpServers 格式
     // VS Code 用 `mcp.servers`，其他 agent 用 `mcpServers`
@@ -139,7 +136,8 @@ pub fn parse_external_mcp_config(
     let servers = match source {
         McpImportSource::Vscode => {
             // VS Code 优先尝试 mcp.servers，fallback 到 mcpServers
-            v["mcp"]["servers"].as_object()
+            v["mcp"]["servers"]
+                .as_object()
                 .or_else(|| v["mcpServers"].as_object())
         }
         _ => v["mcpServers"].as_object(),
@@ -178,10 +176,14 @@ pub fn parse_external_mcp_config(
 
     // VS Code 特殊提示：settings.json 中未配置 MCP server
     let hint = match source {
-        McpImportSource::Vscode => "（VS Code settings.json 中未找到 mcp.servers 字段，可能未配置 MCP server，或使用 .vscode/mcp.json 工作区级配置）",
+        McpImportSource::Vscode => {
+            "（VS Code settings.json 中未找到 mcp.servers 字段，可能未配置 MCP server，或使用 .vscode/mcp.json 工作区级配置）"
+        }
         _ => "",
     };
-    Err(format!("配置格式不匹配：未找到 mcpServers 字段，也不是有效的裸配置或数组格式{hint}"))
+    Err(format!(
+        "配置格式不匹配：未找到 mcpServers 字段，也不是有效的裸配置或数组格式{hint}"
+    ))
 }
 
 /// 解析单个 server 配置。
@@ -190,10 +192,7 @@ pub fn parse_external_mcp_config(
 /// `"sse"` / `"streamable-http"` 统一映射为 `McpTransport::Http`（Blink 内部不区分 HTTP 子类型）。
 fn parse_single_server(name: &str, cfg: &serde_json::Value) -> Result<McpServerConfig, String> {
     // Claude Code 格式：type: "stdio" | "sse" | "http" | "streamable-http"
-    let transport_type = cfg
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("stdio");
+    let transport_type = cfg.get("type").and_then(|v| v.as_str()).unwrap_or("stdio");
 
     let transport = match transport_type {
         "sse" => {
@@ -208,9 +207,7 @@ fn parse_single_server(name: &str, cfg: &serde_json::Value) -> Result<McpServerC
                 .and_then(|v| v.as_object())
                 .map(|m| {
                     m.iter()
-                        .filter_map(|(k, v)| {
-                            v.as_str().map(|s| (k.clone(), s.to_string()))
-                        })
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                         .collect::<HashMap<String, String>>()
                 })
                 .unwrap_or_default();
@@ -228,9 +225,7 @@ fn parse_single_server(name: &str, cfg: &serde_json::Value) -> Result<McpServerC
                 .and_then(|v| v.as_object())
                 .map(|m| {
                     m.iter()
-                        .filter_map(|(k, v)| {
-                            v.as_str().map(|s| (k.clone(), s.to_string()))
-                        })
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                         .collect::<HashMap<String, String>>()
                 })
                 .unwrap_or_default();
@@ -279,12 +274,14 @@ fn parse_single_server(name: &str, cfg: &serde_json::Value) -> Result<McpServerC
 /// 裸配置的特征：顶层有 `type`、`command`、`url` 或 `transport` 字段。
 fn is_bare_server_config(v: &serde_json::Value) -> bool {
     v.is_object()
-        && v.as_object().map(|obj| {
-            obj.contains_key("type")
-                || obj.contains_key("command")
-                || obj.contains_key("url")
-                || obj.contains_key("transport")
-        }).unwrap_or(false)
+        && v.as_object()
+            .map(|obj| {
+                obj.contains_key("type")
+                    || obj.contains_key("command")
+                    || obj.contains_key("url")
+                    || obj.contains_key("transport")
+            })
+            .unwrap_or(false)
 }
 
 /// 为裸配置自动生成名称。
@@ -349,7 +346,10 @@ mod tests {
 
         let fs = configs.iter().find(|c| c.name == "filesystem").unwrap();
         assert_eq!(fs.command, "npx");
-        assert_eq!(fs.args, vec!["-y", "@modelcontextprotocol/server-filesystem", "C:\\Users"]);
+        assert_eq!(
+            fs.args,
+            vec!["-y", "@modelcontextprotocol/server-filesystem", "C:\\Users"]
+        );
         assert_eq!(fs.transport, McpTransport::Stdio);
         assert!(fs.enabled);
 
@@ -474,7 +474,10 @@ mod tests {
 
     #[test]
     fn import_source_display_names() {
-        assert_eq!(McpImportSource::ClaudeDesktop.display_name(), "Claude Desktop");
+        assert_eq!(
+            McpImportSource::ClaudeDesktop.display_name(),
+            "Claude Desktop"
+        );
         assert_eq!(McpImportSource::ClaudeCode.display_name(), "Claude Code");
         assert_eq!(McpImportSource::Cursor.display_name(), "Cursor");
         assert_eq!(McpImportSource::Windsurf.display_name(), "Windsurf");
@@ -509,7 +512,9 @@ mod tests {
             McpTransport::Http { url, .. } => {
                 assert_eq!(url, "http://127.0.0.1:64342/stream");
             }
-            McpTransport::Stdio | McpTransport::Sse { .. } => panic!("expected Http transport for streamable-http"),
+            McpTransport::Stdio | McpTransport::Sse { .. } => {
+                panic!("expected Http transport for streamable-http")
+            }
         }
     }
 
@@ -520,8 +525,14 @@ mod tests {
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].name, "java");
         assert_eq!(configs[0].transport, McpTransport::Stdio);
-        assert_eq!(configs[0].command, "D:\\DevTools\\JetBrains\\RustRover\\jbr\\bin\\java");
-        assert_eq!(configs[0].env.get("IJ_MCP_SERVER_PORT"), Some(&"64342".to_string()));
+        assert_eq!(
+            configs[0].command,
+            "D:\\DevTools\\JetBrains\\RustRover\\jbr\\bin\\java"
+        );
+        assert_eq!(
+            configs[0].env.get("IJ_MCP_SERVER_PORT"),
+            Some(&"64342".to_string())
+        );
     }
 
     #[test]
@@ -564,7 +575,10 @@ mod tests {
 
     #[test]
     fn extract_host_port_from_url() {
-        assert_eq!(extract_host_port("http://127.0.0.1:64342/sse"), "127.0.0.1:64342");
+        assert_eq!(
+            extract_host_port("http://127.0.0.1:64342/sse"),
+            "127.0.0.1:64342"
+        );
         assert_eq!(extract_host_port("https://example.com/mcp"), "example.com");
         assert_eq!(extract_host_port("http://localhost:8080"), "localhost:8080");
     }

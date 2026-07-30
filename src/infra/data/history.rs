@@ -85,9 +85,7 @@ pub async fn cleanup_old(pool: &SqlitePool, days: u32) {
 // ── 配置访问层（0.12.0 §2.2.3 迁移到 infra/data/config.rs）────────────────────
 //
 // 向后兼容重导出——现有调用点 `history::get_config` 等无需改动。
-pub use crate::infra::data::config::{
-    delete_config, get_all_config, get_config, set_config,
-};
+pub use crate::infra::data::config::{delete_config, get_all_config, get_config, set_config};
 
 // 测试用：migrate_camelcase_to_snake 仅在 history.rs 的单测中调用，
 // 非测试构建不需要导出（避免 unused import 警告）。

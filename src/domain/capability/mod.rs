@@ -30,10 +30,7 @@ pub use error::CapabilityError;
 #[allow(unused_imports)]
 pub use projection::{ActionDef, ActionKindDef, ProjectionRule, ResultShape, project};
 pub use registry::CapabilityRegistry;
-pub use result::{
-    CapabilityResult, ItemAction, ItemResult, derive_title,
-    rig_tool_result_to_text,
-};
+pub use result::{CapabilityResult, ItemAction, ItemResult, derive_title, rig_tool_result_to_text};
 pub use schema::CapabilitySchema;
 
 use serde_json::Value;

@@ -14,7 +14,6 @@ use crate::domain::event::DomainEnv;
 use serde::Serialize;
 use sqlx::SqlitePool;
 
-use crate::domain::config::ai_config::{Tier, ToolResultFeedback};
 use crate::domain::ai::gating::{AiGate, GateOutcome, should_invoke_ai};
 use crate::domain::ai::message::{ChatMessage, CompletionRequest};
 use crate::domain::ai::provider::{AIError, AIProvider, StreamChunk};
@@ -22,6 +21,7 @@ use crate::domain::ai::registry::AIProviderRegistry;
 use crate::domain::capability::{
     CapabilityError, CapabilityRegistry, CapabilityResult, InvokeContext,
 };
+use crate::domain::config::ai_config::{Tier, ToolResultFeedback};
 use crate::domain::event_names::EventNames;
 use crate::domain::execution::ActionSchema;
 use crate::domain::intent::{Candidate, IntentRouter, RankingHint, Route, Suggestion, Surface};
@@ -810,7 +810,7 @@ impl SearchService {
     /// 显式触发 AI(0.9.2 Phase 5b Tab 显式触发)——由 `trigger_ai` command 调用。
     ///
     /// 单次 spawn,复用 `spawn_mixed_lane` 模式:
-    /// - `tauri::async_runtime::spawn` 独立 task
+    /// - `tokio::spawn` 独立 task
     /// - **同步 emit AI placeholder** 走 `blink://results`,让 UI <100ms 见到"AI 思考中…"
     /// - AI 完成后 emit 真结果替换占位
     ///
@@ -840,7 +840,7 @@ impl SearchService {
     /// AI lane(0.9.2 Phase 5b)——独立 spawn,不阻塞主链路。
     ///
     /// 复用 `spawn_mixed_lane` 模式:
-    /// - `tauri::async_runtime::spawn` 独立 task
+    /// - `tokio::spawn` 独立 task
     /// - seq 校验丢弃过期结果
     /// - `emit_results` 前端自动 merge 替换占位(`source="ai"` 一致)
     ///
@@ -860,7 +860,7 @@ impl SearchService {
             .read()
             .expect("language lock poisoned")
             .clone();
-        tauri::async_runtime::spawn(async move {
+        tokio::spawn(async move {
             // resolve(Tier::Router) —— 空档降级链在 registry.resolve 内部走
             let (provider, actual_tier) = match registry.resolve(Tier::Router) {
                 Ok(t) => t,
@@ -1014,7 +1014,7 @@ impl SearchService {
                 let stream_future = async move { provider_clone.stream(req, tx).await };
 
                 // spawn 流式 producer;主 task 做 consumer + emit
-                let producer_handle = tauri::async_runtime::spawn(stream_future);
+                let producer_handle = tokio::spawn(stream_future);
 
                 let mut accumulated = String::new();
 
@@ -1252,7 +1252,7 @@ impl SearchService {
         let latest_seq = Arc::clone(&self.latest_seq);
         let snapshot = Arc::clone(&self.snapshot);
         let max_results = Arc::clone(&self.max_results);
-        tauri::async_runtime::spawn(async move {
+        tokio::spawn(async move {
             // 防抖:等待连续输入停止后再查询
             if debounce_ms > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(debounce_ms)).await;
@@ -1292,7 +1292,7 @@ impl SearchService {
         let snapshot = Arc::clone(&self.snapshot);
         let max_results = Arc::clone(&self.max_results);
 
-        tauri::async_runtime::spawn(async move {
+        tokio::spawn(async move {
             let history = crate::infra::data::history::get_weights(&pool).await;
             let snapshot = snapshot.read().unwrap().clone();
             let limit = max_results.load(Ordering::SeqCst);
@@ -1317,7 +1317,7 @@ impl SearchService {
                     .map(|(id, _)| pe.get_debounce_ms(id))
                     .max()
                     .unwrap_or(0);
-                tauri::async_runtime::spawn(async move {
+                tokio::spawn(async move {
                     // 防抖:等待连续输入停止后再查询,避免每次按键都触发网络请求
                     if max_debounce > 0 {
                         tokio::time::sleep(std::time::Duration::from_millis(max_debounce)).await;
@@ -1355,7 +1355,7 @@ impl SearchService {
                 let latest_seq = latest_seq.clone();
                 let history = history.clone(); // history 是 Arc<HashMap> 内部 move clone
                 let snapshot = snapshot.clone();
-                tauri::async_runtime::spawn(async move {
+                tokio::spawn(async move {
                     // async lane 引擎（file/mock）不消费 disabled_builtin_actions /
                     // disabled_context_bindings；这两个字段仅 BuiltinEngine（sync lane）读，
                     // 此处传空 slice 满足契约。
@@ -1797,11 +1797,7 @@ async fn handle_ai_tool_calls(
         t if !t.is_empty() => {
             emit_ai_result(env, seq, ai_result_entry(t.to_string()));
         }
-        _ => emit_ai_clear(
-            env,
-            seq,
-            Some(&format!("AI 调用了未知能力: {}", tc.name)),
-        ),
+        _ => emit_ai_clear(env, seq, Some(&format!("AI 调用了未知能力: {}", tc.name))),
     }
 }
 
@@ -1889,15 +1885,30 @@ fn items_to_entries(items: &[crate::domain::capability::ItemResult]) -> Vec<AppE
 
             // 0.14: 从 data 派生主标题 + 从 data 提取 path/text/url 推导 action
             let name = crate::domain::capability::derive_title(&item.data);
-            let path = item.data.get("path").and_then(|v| v.as_str()).map(str::to_string);
-            let url = item.data.get("url").and_then(|v| v.as_str()).map(str::to_string);
-            let text = item.data.get("text").and_then(|v| v.as_str()).map(str::to_string);
+            let path = item
+                .data
+                .get("path")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let url = item
+                .data
+                .get("url")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let text = item
+                .data
+                .get("text")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
 
             // §4.4: pointer 提取——从 data 按 JSONPath 简化（$.field）取值
             let extract_pointer = |ptr: &Option<String>| -> Option<String> {
                 ptr.as_ref().and_then(|p| {
                     let field = p.strip_prefix("$.").unwrap_or(p);
-                    item.data.get(field).and_then(|v| v.as_str()).map(str::to_string)
+                    item.data
+                        .get(field)
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
                 })
             };
 
@@ -1905,49 +1916,86 @@ fn items_to_entries(items: &[crate::domain::capability::ItemResult]) -> Vec<AppE
             let (action, lnk_path) = if let Some(first) = item.actions.first() {
                 match first {
                     ItemAction::OpenFile { pointer } => {
-                        let p = extract_pointer(pointer).or(path.clone()).unwrap_or_default();
-                        (Action { kind: ActionKind::Open, ..Default::default() }, p)
+                        let p = extract_pointer(pointer)
+                            .or(path.clone())
+                            .unwrap_or_default();
+                        (
+                            Action {
+                                kind: ActionKind::Open,
+                                ..Default::default()
+                            },
+                            p,
+                        )
                     }
                     ItemAction::OpenUrl { pointer } => {
-                        let u = extract_pointer(pointer).or(url.clone()).or(path.clone()).unwrap_or_default();
-                        (Action { kind: ActionKind::Open, ..Default::default() }, u)
+                        let u = extract_pointer(pointer)
+                            .or(url.clone())
+                            .or(path.clone())
+                            .unwrap_or_default();
+                        (
+                            Action {
+                                kind: ActionKind::Open,
+                                ..Default::default()
+                            },
+                            u,
+                        )
                     }
                     ItemAction::Reveal { pointer } => {
-                        let p = extract_pointer(pointer).or(path.clone()).unwrap_or_default();
-                        (Action {
-                            kind: ActionKind::Run,
-                            run_id: Some("reveal_in_explorer".into()),
-                            run_arg: Some(serde_json::Value::String(p)),
-                            ..Default::default()
-                        }, String::new())
+                        let p = extract_pointer(pointer)
+                            .or(path.clone())
+                            .unwrap_or_default();
+                        (
+                            Action {
+                                kind: ActionKind::Run,
+                                run_id: Some("reveal_in_explorer".into()),
+                                run_arg: Some(serde_json::Value::String(p)),
+                                ..Default::default()
+                            },
+                            String::new(),
+                        )
                     }
                     ItemAction::Copy { pointer } => {
-                        let copy_text = extract_pointer(pointer).or(text.clone()).unwrap_or_else(|| name.clone());
-                        (Action {
-                            kind: ActionKind::Copy,
-                            payload: Some(copy_text),
-                            ..Default::default()
-                        }, String::new())
+                        let copy_text = extract_pointer(pointer)
+                            .or(text.clone())
+                            .unwrap_or_else(|| name.clone());
+                        (
+                            Action {
+                                kind: ActionKind::Copy,
+                                payload: Some(copy_text),
+                                ..Default::default()
+                            },
+                            String::new(),
+                        )
                     }
                 }
             } else if let Some(p) = path.clone() {
-                (Action { kind: ActionKind::Open, ..Default::default() }, p)
+                (
+                    Action {
+                        kind: ActionKind::Open,
+                        ..Default::default()
+                    },
+                    p,
+                )
             } else if let Some(t) = text.clone() {
-                (Action {
-                    kind: ActionKind::Copy,
-                    payload: Some(t),
-                    ..Default::default()
-                }, String::new())
+                (
+                    Action {
+                        kind: ActionKind::Copy,
+                        payload: Some(t),
+                        ..Default::default()
+                    },
+                    String::new(),
+                )
             } else {
                 // §8.2: 隐式 copy 兜底——无 actions + 纯标量 data（string/number）→ Copy
                 match &item.data {
-                    serde_json::Value::String(_) | serde_json::Value::Number(_) => {
-                        (Action {
+                    serde_json::Value::String(_) | serde_json::Value::Number(_) => (
+                        Action {
                             kind: ActionKind::Copy,
                             payload: Some(name.clone()),
                             ..Default::default()
-                        }, String::new())
-                    }
+                        },
+                        String::new(),
+                    ),
                     _ => (Action::default(), String::new()),
                 }
             };
@@ -2008,7 +2056,9 @@ fn emit_ai_confirm(
         arguments: arguments.clone(),
         danger_class: "Dangerous".to_string(),
     };
-    if let Err(e) = crate::domain::event::emit_serialized(env, EventNames::AI_CONFIRM_ACTION, &payload) {
+    if let Err(e) =
+        crate::domain::event::emit_serialized(env, EventNames::AI_CONFIRM_ACTION, &payload)
+    {
         tracing::debug!(error = %e, "emit AI confirm failed");
     }
 }
@@ -2468,7 +2518,7 @@ async fn run_turn2_feedback(
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let provider_clone = Arc::clone(&ctx.provider);
     let stream_future = async move { provider_clone.stream(req, tx).await };
-    let producer_handle = tauri::async_runtime::spawn(stream_future);
+    let producer_handle = tokio::spawn(stream_future);
 
     let turn2_start = Instant::now();
     let mut accumulated = String::new();
@@ -2704,11 +2754,7 @@ async fn handle_turn2_tool_call(
         tool = %tc.name,
         "Turn 2 tool_call 未知 Capability,降级"
     );
-    emit_ai_clear(
-        env,
-        seq,
-        Some(&format!("AI 调用了未知能力: {}", tc.name)),
-    );
+    emit_ai_clear(env, seq, Some(&format!("AI 调用了未知能力: {}", tc.name)));
 }
 
 /// 构造进度占位项（§3.2 占位文案规范）。
@@ -2742,26 +2788,14 @@ mod tests {
             arguments: serde_json::json!({ "query": "code" }),
         };
 
-        assert!(pending.matches(
-            42,
-            "search_apps",
-            &serde_json::json!({ "query": "code" })
-        ));
-        assert!(!pending.matches(
-            43,
-            "search_apps",
-            &serde_json::json!({ "query": "code" })
-        ));
+        assert!(pending.matches(42, "search_apps", &serde_json::json!({ "query": "code" })));
+        assert!(!pending.matches(43, "search_apps", &serde_json::json!({ "query": "code" })));
         assert!(!pending.matches(
             42,
             "search_clipboard_history",
             &serde_json::json!({ "query": "code" })
         ));
-        assert!(!pending.matches(
-            42,
-            "search_apps",
-            &serde_json::json!({ "query": "other" })
-        ));
+        assert!(!pending.matches(42, "search_apps", &serde_json::json!({ "query": "other" })));
     }
 
     fn item(id: &str, score: f32, source: &str) -> SearchItem {
@@ -2871,12 +2905,16 @@ mod tests {
                 crate::domain::capability::ItemResult {
                     data: json!({ "name": "report.pdf", "path": "C:\\docs\\report.pdf" }),
                     desc: Some("C:\\docs".into()),
-                    actions: vec![crate::domain::capability::ItemAction::OpenFile { pointer: None }],
+                    actions: vec![crate::domain::capability::ItemAction::OpenFile {
+                        pointer: None,
+                    }],
                 },
                 crate::domain::capability::ItemResult {
                     data: json!({ "name": "notes.txt", "path": "D:\\notes.txt" }),
                     desc: None,
-                    actions: vec![crate::domain::capability::ItemAction::OpenFile { pointer: None }],
+                    actions: vec![crate::domain::capability::ItemAction::OpenFile {
+                        pointer: None,
+                    }],
                 },
             ],
         };

@@ -183,11 +183,8 @@ impl McpClientManager {
         if let Some(server) = connected.get(&config.name) {
             let tool_count = server.tools.len();
             drop(connected);
-            self.set_status(
-                &config.name,
-                McpServerStatus::Online { tool_count },
-            )
-            .await;
+            self.set_status(&config.name, McpServerStatus::Online { tool_count })
+                .await;
         } else {
             drop(connected);
             self.set_status(
@@ -225,11 +222,8 @@ impl McpClientManager {
                         tools = tool_count,
                         "MCP: server 已连接"
                     );
-                    self.set_status(
-                        &config.name,
-                        McpServerStatus::Online { tool_count },
-                    )
-                    .await;
+                    self.set_status(&config.name, McpServerStatus::Online { tool_count })
+                        .await;
                     // server 进入 tool 池，bump epoch 使旧 AgentCacheKey 失配
                     self.bump_epoch();
                     return Ok(());
@@ -294,9 +288,7 @@ impl McpClientManager {
         use crate::domain::mcp::config::McpTransport;
         match &config.transport {
             McpTransport::Stdio => self.try_connect_stdio(config).await,
-            McpTransport::Sse { url, headers } => {
-                self.try_connect_sse(config, url, headers).await
-            }
+            McpTransport::Sse { url, headers } => self.try_connect_sse(config, url, headers).await,
             McpTransport::Http { url, headers } => {
                 self.try_connect_http(config, url, headers).await
             }
@@ -357,8 +349,7 @@ impl McpClientManager {
         // 构造子进程命令
         // Windows 上，CreateProcess 只查找 .exe 文件。
         // 命令如 `codegraph` 实际是 `codegraph.cmd`，需要 `cmd /c` 包裹。
-        let (program, program_args) =
-            resolve_windows_command(&config.command, &config.args);
+        let (program, program_args) = resolve_windows_command(&config.command, &config.args);
         let mut cmd = tokio::process::Command::new(&program);
         cmd.args(&program_args);
         for (k, v) in &config.env {
@@ -399,10 +390,7 @@ impl McpClientManager {
     ) -> Result<RunningService<rmcp::service::RoleClient, ClientInfo>, String> {
         // 前置校验——空 URL 是确定性错误
         if url.is_empty() {
-            return Err(format!(
-                "HTTP 模式 URL 不能为空（server: {}）",
-                config.name
-            ));
+            return Err(format!("HTTP 模式 URL 不能为空（server: {}）", config.name));
         }
 
         tracing::info!(
@@ -421,7 +409,10 @@ impl McpClientManager {
             for (k, v) in headers {
                 // rmcp 保留 header（accept / mcp-session-id / last-event-id）跳过
                 let lower = k.to_lowercase();
-                if matches!(lower.as_str(), "accept" | "mcp-session-id" | "last-event-id") {
+                if matches!(
+                    lower.as_str(),
+                    "accept" | "mcp-session-id" | "last-event-id"
+                ) {
                     tracing::warn!(header = %k, "MCP: 保留 header 已跳过");
                     continue;
                 }
@@ -476,10 +467,7 @@ impl McpClientManager {
         headers: &std::collections::HashMap<String, String>,
     ) -> Result<RunningService<rmcp::service::RoleClient, ClientInfo>, String> {
         if url.is_empty() {
-            return Err(format!(
-                "SSE 模式 URL 不能为空（server: {}）",
-                config.name
-            ));
+            return Err(format!("SSE 模式 URL 不能为空（server: {}）", config.name));
         }
 
         tracing::info!(
@@ -617,10 +605,7 @@ impl McpClientManager {
             }
         }
 
-        tracing::info!(
-            total_tools = tools.len(),
-            "MCP: tool 池收集完成"
-        );
+        tracing::info!(total_tools = tools.len(), "MCP: tool 池收集完成");
         tools
     }
 
@@ -698,11 +683,7 @@ impl McpClientManager {
     }
 
     /// 更新单个 server 的 disabled_tools 并刷新 tool 列表缓存。
-    pub async fn update_disabled_tools(
-        &self,
-        name: &str,
-        disabled_tools: Vec<String>,
-    ) {
+    pub async fn update_disabled_tools(&self, name: &str, disabled_tools: Vec<String>) {
         let mut connected = self.connected.write().await;
         if let Some(server) = connected.get_mut(name) {
             server.config.disabled_tools = disabled_tools.clone();
@@ -766,13 +747,9 @@ fn resolve_windows_command(command: &str, args: &[String]) -> (String, Vec<Strin
         // 在 PATH 中查找 command.exe
         if let Ok(path) = std::env::var("PATH") {
             for dir in path.split(';') {
-                let exe_path =
-                    std::path::Path::new(dir).join(format!("{command}.exe"));
+                let exe_path = std::path::Path::new(dir).join(format!("{command}.exe"));
                 if exe_path.exists() {
-                    return (
-                        exe_path.to_string_lossy().to_string(),
-                        args.to_vec(),
-                    );
+                    return (exe_path.to_string_lossy().to_string(), args.to_vec());
                 }
             }
         }
@@ -860,7 +837,9 @@ mod tests {
             enabled: true,
             disabled_tools: vec![],
         };
-        let result = manager.try_connect_http(&config, "", &std::collections::HashMap::new()).await;
+        let result = manager
+            .try_connect_http(&config, "", &std::collections::HashMap::new())
+            .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("URL 不能为空"), "error was: {err}");
@@ -906,7 +885,10 @@ mod tests {
         let elapsed = start.elapsed();
         assert!(result.is_err());
         // 确定性错误不重试，应该几乎不耗时（< 1s，重试会有 1s sleep）
-        assert!(elapsed < std::time::Duration::from_secs(1), "elapsed: {elapsed:?}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "elapsed: {elapsed:?}"
+        );
     }
 
     // ── P3: MCP 双向投影闭环（Capability → MCP Tool → Capability schema 一致性）──
@@ -941,12 +923,12 @@ mod tests {
 
         // 验证投影后字段一致（Blink 作为 client 消费时看到的）
         assert_eq!(mcp_tool.name, "search_files");
-        assert_eq!(
-            mcp_tool.description.as_deref(),
-            Some("搜索文件系统")
-        );
+        assert_eq!(mcp_tool.description.as_deref(), Some("搜索文件系统"));
         assert_eq!(mcp_tool.input_schema["type"], "object");
-        assert_eq!(mcp_tool.input_schema["properties"]["query"]["type"], "string");
+        assert_eq!(
+            mcp_tool.input_schema["properties"]["query"]["type"],
+            "string"
+        );
         assert_eq!(mcp_tool.input_schema["required"][0], "query");
     }
 
@@ -971,7 +953,11 @@ mod tests {
         assert_eq!(tools.len(), 3);
         // sensitive 的 tool 也不应有 annotations（授权由 BlinkMcpServer 在 call_tool 检查）
         for tool in &tools {
-            assert!(tool.annotations.is_none(), "tool {} should not have annotations", tool.name);
+            assert!(
+                tool.annotations.is_none(),
+                "tool {} should not have annotations",
+                tool.name
+            );
         }
     }
 

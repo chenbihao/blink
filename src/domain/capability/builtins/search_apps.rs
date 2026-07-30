@@ -93,12 +93,12 @@ impl Capability for SearchApps {
             .unwrap_or(5);
 
         // 通过 DomainEnv 拿 SearchService（共享 StartMenuEngine 实例）
-        let search_service =
-            ctx.env
-                .search_service()
-                .ok_or_else(|| CapabilityError::Internal {
-                    detail: "当前运行模式未初始化应用搜索服务".into(),
-                })?;
+        let search_service = ctx
+            .env
+            .search_service()
+            .ok_or_else(|| CapabilityError::Internal {
+                detail: "当前运行模式未初始化应用搜索服务".into(),
+            })?;
 
         // 铁则 1：用 deadline 包裹 search
         let items = tokio::time::timeout_at(
@@ -128,7 +128,12 @@ impl Capability for SearchApps {
                 crate::domain::capability::ItemResult {
                     data,
                     desc: item.subtitle,
-                    actions: path.map(|_| crate::domain::capability::ItemAction::OpenFile { pointer: Some("$.path".into()) }).into_iter().collect(),
+                    actions: path
+                        .map(|_| crate::domain::capability::ItemAction::OpenFile {
+                            pointer: Some("$.path".into()),
+                        })
+                        .into_iter()
+                        .collect(),
                 }
             })
             .collect();

@@ -98,12 +98,10 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
 
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, id)",
-    )
-    .execute(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, id)")
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
 
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_conversations_last_active ON conversations(last_active_at DESC)",
@@ -172,12 +170,12 @@ async fn migrate_add_group_id_column(pool: &SqlitePool) -> Result<(), String> {
 /// 则额外 UPDATE 补写标题——避免 `set_conversation_group` 先创建空标题记录后，
 /// `memory.append` 的 `extract_title` 被静默丢弃。
 pub async fn create_conversation(
-pool: &SqlitePool,
-id: &str,
-title: Option<&str>,
+    pool: &SqlitePool,
+    id: &str,
+    title: Option<&str>,
 ) -> Result<(), String> {
-let now = chrono::Utc::now().timestamp();
-let result = sqlx::query(
+    let now = chrono::Utc::now().timestamp();
+    let result = sqlx::query(
 "INSERT OR IGNORE INTO conversations (id, title, created_at, last_active_at) VALUES (?1, ?2, ?3, ?3)",
 )
 .bind(id)
@@ -187,12 +185,12 @@ let result = sqlx::query(
 .await
 .map_err(|e| e.to_string())?;
 
-// INSERT 被 IGNORE（rows_affected = 0 表示记录已存在）时，
-// 如果新 title 非空，尝试补写到空标题的记录
-if result.rows_affected() == 0 {
-    if let Some(t) = title {
-        if !t.is_empty() {
-            sqlx::query(
+    // INSERT 被 IGNORE（rows_affected = 0 表示记录已存在）时，
+    // 如果新 title 非空，尝试补写到空标题的记录
+    if result.rows_affected() == 0 {
+        if let Some(t) = title {
+            if !t.is_empty() {
+                sqlx::query(
                 "UPDATE conversations SET title = ?1 WHERE id = ?2 AND (title IS NULL OR title = '')",
             )
             .bind(t)
@@ -200,18 +198,14 @@ if result.rows_affected() == 0 {
             .execute(pool)
             .await
             .map_err(|e| e.to_string())?;
+            }
         }
     }
-}
-Ok(())
+    Ok(())
 }
 
 /// 更新对话标题。
-pub async fn rename_conversation(
-    pool: &SqlitePool,
-    id: &str,
-    title: &str,
-) -> Result<bool, String> {
+pub async fn rename_conversation(pool: &SqlitePool, id: &str, title: &str) -> Result<bool, String> {
     let result = sqlx::query("UPDATE conversations SET title = ?1 WHERE id = ?2")
         .bind(title)
         .bind(id)
@@ -247,7 +241,8 @@ pub async fn list_conversations(pool: &SqlitePool) -> Result<Vec<Conversation>, 
         e.to_string()
     })?;
 
-    Ok(rows.into_iter()
+    Ok(rows
+        .into_iter()
         .map(
             |(id, title, created_at, last_active_at, group_id, msg_count)| Conversation {
                 id,
@@ -350,13 +345,12 @@ pub async fn truncate_messages(
     conversation_id: &str,
     keep_count: i64,
 ) -> Result<(), String> {
-    let ids: Vec<i64> = sqlx::query_scalar(
-        "SELECT id FROM messages WHERE conversation_id = ?1 ORDER BY id ASC",
-    )
-    .bind(conversation_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+    let ids: Vec<i64> =
+        sqlx::query_scalar("SELECT id FROM messages WHERE conversation_id = ?1 ORDER BY id ASC")
+            .bind(conversation_id)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
 
     if keep_count >= ids.len() as i64 {
         return Ok(()); // 无需截断
@@ -425,23 +419,19 @@ pub async fn create_group(
     // 同级最大 sort_order + 1（IS ?1 在绑 NULL 时行为不确定，分支查询更可靠）
     // 同级最大 sort_order + 1（COALESCE 将空表 NULL 转为 -1，避免 sqlx NULL 解码歧义）
     let max_order: i64 = match parent_id {
-        Some(pid) => {
-            sqlx::query_scalar(
-                "SELECT COALESCE(MAX(sort_order), -1) FROM conversation_groups WHERE parent_id = ?1",
-            )
-            .bind(pid)
-            .fetch_one(pool)
-            .await
-            .map_err(|e| e.to_string())?
-        }
-        None => {
-            sqlx::query_scalar(
-                "SELECT COALESCE(MAX(sort_order), -1) FROM conversation_groups WHERE parent_id IS NULL",
-            )
-            .fetch_one(pool)
-            .await
-            .map_err(|e| e.to_string())?
-        }
+        Some(pid) => sqlx::query_scalar(
+            "SELECT COALESCE(MAX(sort_order), -1) FROM conversation_groups WHERE parent_id = ?1",
+        )
+        .bind(pid)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?,
+        None => sqlx::query_scalar(
+            "SELECT COALESCE(MAX(sort_order), -1) FROM conversation_groups WHERE parent_id IS NULL",
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?,
     };
     let sort_order = max_order + 1;
 
@@ -461,11 +451,7 @@ pub async fn create_group(
 }
 
 /// 重命名分组。
-pub async fn rename_group(
-    pool: &SqlitePool,
-    id: &str,
-    name: &str,
-) -> Result<bool, String> {
+pub async fn rename_group(pool: &SqlitePool, id: &str, name: &str) -> Result<bool, String> {
     let result = sqlx::query("UPDATE conversation_groups SET name = ?1 WHERE id = ?2")
         .bind(name)
         .bind(id)
@@ -483,13 +469,12 @@ pub async fn rename_group(
 /// 3. 删除分组记录
 pub async fn delete_group(pool: &SqlitePool, id: &str) -> Result<bool, String> {
     // 1. 获取被删分组的 parent_id
-    let parent_id: Option<Option<String>> = sqlx::query_scalar(
-        "SELECT parent_id FROM conversation_groups WHERE id = ?1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+    let parent_id: Option<Option<String>> =
+        sqlx::query_scalar("SELECT parent_id FROM conversation_groups WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?;
 
     let Some(parent_id) = parent_id else {
         return Ok(false); // 分组不存在
@@ -526,25 +511,34 @@ pub async fn delete_group(pool: &SqlitePool, id: &str) -> Result<bool, String> {
 
 /// 列出所有分组（按 sort_order 升序，含 parent_id 供前端构建树）。
 pub async fn list_groups(pool: &SqlitePool) -> Vec<ConversationGroup> {
-    let rows: Vec<(String, String, Option<String>, Option<String>, i64, i64, i64)> =
-        sqlx::query_as(
-            "SELECT id, name, system_prompt, parent_id, sort_order, expanded, created_at \
+    let rows: Vec<(
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        i64,
+        i64,
+        i64,
+    )> = sqlx::query_as(
+        "SELECT id, name, system_prompt, parent_id, sort_order, expanded, created_at \
              FROM conversation_groups ORDER BY sort_order ASC, created_at ASC",
-        )
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
 
     rows.into_iter()
         .map(
-            |(id, name, system_prompt, parent_id, sort_order, expanded, created_at)| ConversationGroup {
-                id,
-                name,
-                system_prompt,
-                parent_id,
-                sort_order,
-                expanded: expanded != 0,
-                created_at,
+            |(id, name, system_prompt, parent_id, sort_order, expanded, created_at)| {
+                ConversationGroup {
+                    id,
+                    name,
+                    system_prompt,
+                    parent_id,
+                    sort_order,
+                    expanded: expanded != 0,
+                    created_at,
+                }
             },
         )
         .collect()
@@ -556,13 +550,12 @@ pub async fn update_group_system_prompt(
     id: &str,
     prompt: Option<&str>,
 ) -> Result<bool, String> {
-    let result =
-        sqlx::query("UPDATE conversation_groups SET system_prompt = ?1 WHERE id = ?2")
-            .bind(prompt)
-            .bind(id)
-            .execute(pool)
-            .await
-            .map_err(|e| e.to_string())?;
+    let result = sqlx::query("UPDATE conversation_groups SET system_prompt = ?1 WHERE id = ?2")
+        .bind(prompt)
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -582,11 +575,7 @@ pub async fn set_group_sort_order(
 }
 
 /// 设置分组的折叠状态。
-pub async fn set_group_expanded(
-    pool: &SqlitePool,
-    id: &str,
-    expanded: bool,
-) -> Result<(), String> {
+pub async fn set_group_expanded(pool: &SqlitePool, id: &str, expanded: bool) -> Result<(), String> {
     sqlx::query("UPDATE conversation_groups SET expanded = ?1 WHERE id = ?2")
         .bind(expanded as i64)
         .bind(id)
@@ -665,13 +654,12 @@ pub async fn get_group_system_prompt(
         Some(g) if !g.is_empty() => g,
         _ => return Ok(None),
     };
-    let prompt: Option<Option<String>> = sqlx::query_scalar(
-        "SELECT system_prompt FROM conversation_groups WHERE id = ?1",
-    )
-    .bind(gid)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+    let prompt: Option<Option<String>> =
+        sqlx::query_scalar("SELECT system_prompt FROM conversation_groups WHERE id = ?1")
+            .bind(gid)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?;
 
     Ok(prompt.unwrap_or(None))
 }
@@ -824,8 +812,12 @@ mod tests {
     async fn create_and_list_conversation() {
         let pool = setup_pool().await;
 
-        create_conversation(&pool, "c1", Some("Hello")).await.unwrap();
-        create_conversation(&pool, "c2", Some("World")).await.unwrap();
+        create_conversation(&pool, "c1", Some("Hello"))
+            .await
+            .unwrap();
+        create_conversation(&pool, "c2", Some("World"))
+            .await
+            .unwrap();
 
         let convs = list_conversations(&pool).await.unwrap();
         assert_eq!(convs.len(), 2);
@@ -837,9 +829,13 @@ mod tests {
     #[tokio::test]
     async fn create_conversation_is_idempotent() {
         let pool = setup_pool().await;
-        create_conversation(&pool, "c1", Some("Title 1")).await.unwrap();
+        create_conversation(&pool, "c1", Some("Title 1"))
+            .await
+            .unwrap();
         // 重复创建不报错
-        create_conversation(&pool, "c1", Some("Title 2")).await.unwrap();
+        create_conversation(&pool, "c1", Some("Title 2"))
+            .await
+            .unwrap();
 
         let convs = list_conversations(&pool).await.unwrap();
         assert_eq!(convs.len(), 1);
@@ -858,7 +854,9 @@ mod tests {
         assert_eq!(convs[0].title, None);
 
         // 再用非空标题创建（模拟 memory.append 的 extract_title）
-        create_conversation(&pool, "c1", Some("Real Title")).await.unwrap();
+        create_conversation(&pool, "c1", Some("Real Title"))
+            .await
+            .unwrap();
         let convs = list_conversations(&pool).await.unwrap();
         assert_eq!(
             convs[0].title.as_deref(),
@@ -867,9 +865,15 @@ mod tests {
         );
 
         // 已有非空标题时，不覆盖
-        create_conversation(&pool, "c1", Some("Other Title")).await.unwrap();
+        create_conversation(&pool, "c1", Some("Other Title"))
+            .await
+            .unwrap();
         let convs = list_conversations(&pool).await.unwrap();
-        assert_eq!(convs[0].title.as_deref(), Some("Real Title"), "非空标题不覆盖");
+        assert_eq!(
+            convs[0].title.as_deref(),
+            Some("Real Title"),
+            "非空标题不覆盖"
+        );
     }
 
     #[tokio::test]
@@ -887,9 +891,25 @@ mod tests {
     #[tokio::test]
     async fn delete_conversation_cascades_messages() {
         let pool = setup_pool().await;
-        create_conversation(&pool, "c1", Some("Test")).await.unwrap();
-        append_message(&pool, "c1", "user", r#"{"role":"user","content":[{"type":"text","text":"hi"}]}"#).await.unwrap();
-        append_message(&pool, "c1", "assistant", r#"{"role":"assistant","content":[{"type":"text","text":"hello"}]}"#).await.unwrap();
+        create_conversation(&pool, "c1", Some("Test"))
+            .await
+            .unwrap();
+        append_message(
+            &pool,
+            "c1",
+            "user",
+            r#"{"role":"user","content":[{"type":"text","text":"hi"}]}"#,
+        )
+        .await
+        .unwrap();
+        append_message(
+            &pool,
+            "c1",
+            "assistant",
+            r#"{"role":"assistant","content":[{"type":"text","text":"hello"}]}"#,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(count_messages(&pool).await, 2);
 
@@ -903,10 +923,19 @@ mod tests {
     #[tokio::test]
     async fn append_and_load_messages() {
         let pool = setup_pool().await;
-        create_conversation(&pool, "c1", Some("Test")).await.unwrap();
+        create_conversation(&pool, "c1", Some("Test"))
+            .await
+            .unwrap();
 
         for i in 0..5 {
-            append_message(&pool, "c1", "user", &format!("{{\"role\":\"user\",\"content\":{i}}}")).await.unwrap();
+            append_message(
+                &pool,
+                "c1",
+                "user",
+                &format!("{{\"role\":\"user\",\"content\":{i}}}"),
+            )
+            .await
+            .unwrap();
         }
 
         let msgs = load_recent_messages(&pool, "c1", 3).await.unwrap();
@@ -919,8 +948,12 @@ mod tests {
     #[tokio::test]
     async fn clear_messages_keeps_conversation() {
         let pool = setup_pool().await;
-        create_conversation(&pool, "c1", Some("Test")).await.unwrap();
-        append_message(&pool, "c1", "user", "content").await.unwrap();
+        create_conversation(&pool, "c1", Some("Test"))
+            .await
+            .unwrap();
+        append_message(&pool, "c1", "user", "content")
+            .await
+            .unwrap();
 
         clear_messages(&pool, "c1").await.unwrap();
         assert_eq!(count_messages(&pool).await, 0);
@@ -933,9 +966,13 @@ mod tests {
     #[tokio::test]
     async fn truncate_messages_keeps_first_n() {
         let pool = setup_pool().await;
-        create_conversation(&pool, "c1", Some("Test")).await.unwrap();
+        create_conversation(&pool, "c1", Some("Test"))
+            .await
+            .unwrap();
         for i in 0..5 {
-            append_message(&pool, "c1", "user", &format!("msg{i}")).await.unwrap();
+            append_message(&pool, "c1", "user", &format!("msg{i}"))
+                .await
+                .unwrap();
         }
         assert_eq!(count_messages(&pool).await, 5);
 
@@ -953,7 +990,9 @@ mod tests {
     #[tokio::test]
     async fn truncate_messages_noop_when_keep_exceeds() {
         let pool = setup_pool().await;
-        create_conversation(&pool, "c1", Some("Test")).await.unwrap();
+        create_conversation(&pool, "c1", Some("Test"))
+            .await
+            .unwrap();
         append_message(&pool, "c1", "user", "msg0").await.unwrap();
         append_message(&pool, "c1", "user", "msg1").await.unwrap();
 
@@ -965,7 +1004,9 @@ mod tests {
     #[tokio::test]
     async fn load_empty_conversation_returns_empty() {
         let pool = setup_pool().await;
-        create_conversation(&pool, "c1", Some("Empty")).await.unwrap();
+        create_conversation(&pool, "c1", Some("Empty"))
+            .await
+            .unwrap();
         let msgs = load_recent_messages(&pool, "c1", 20).await.unwrap();
         assert!(msgs.is_empty());
     }
@@ -973,7 +1014,9 @@ mod tests {
     #[tokio::test]
     async fn load_nonexistent_conversation_returns_empty() {
         let pool = setup_pool().await;
-        let msgs = load_recent_messages(&pool, "nonexistent", 20).await.unwrap();
+        let msgs = load_recent_messages(&pool, "nonexistent", 20)
+            .await
+            .unwrap();
         assert!(msgs.is_empty());
     }
 
@@ -989,9 +1032,15 @@ mod tests {
     #[tokio::test]
     async fn message_count_in_list() {
         let pool = setup_pool().await;
-        create_conversation(&pool, "c1", Some("Test")).await.unwrap();
-        append_message(&pool, "c1", "user", "content1").await.unwrap();
-        append_message(&pool, "c1", "assistant", "content2").await.unwrap();
+        create_conversation(&pool, "c1", Some("Test"))
+            .await
+            .unwrap();
+        append_message(&pool, "c1", "user", "content1")
+            .await
+            .unwrap();
+        append_message(&pool, "c1", "assistant", "content2")
+            .await
+            .unwrap();
 
         let convs = list_conversations(&pool).await.unwrap();
         assert_eq!(convs[0].message_count, Some(2));
@@ -1018,7 +1067,9 @@ mod tests {
     async fn group_create_nested() {
         let pool = setup_pool().await;
         create_group(&pool, "g1", "工作", None).await.unwrap();
-        create_group(&pool, "g2", "项目A", Some("g1")).await.unwrap();
+        create_group(&pool, "g2", "项目A", Some("g1"))
+            .await
+            .unwrap();
 
         let groups = list_groups(&pool).await;
         assert_eq!(groups.len(), 2);
@@ -1041,8 +1092,12 @@ mod tests {
     async fn group_delete_moves_conversations_to_default() {
         let pool = setup_pool().await;
         create_group(&pool, "g1", "工作", None).await.unwrap();
-        create_conversation(&pool, "c1", Some("周报")).await.unwrap();
-        set_conversation_group(&pool, "c1", Some("g1")).await.unwrap();
+        create_conversation(&pool, "c1", Some("周报"))
+            .await
+            .unwrap();
+        set_conversation_group(&pool, "c1", Some("g1"))
+            .await
+            .unwrap();
 
         // 确认对话在 g1 组
         let convs = list_conversations(&pool).await.unwrap();
@@ -1077,7 +1132,9 @@ mod tests {
         create_group(&pool, "g1", "翻译", None).await.unwrap();
 
         // 设置系统提示词
-        update_group_system_prompt(&pool, "g1", Some("你是翻译助手")).await.unwrap();
+        update_group_system_prompt(&pool, "g1", Some("你是翻译助手"))
+            .await
+            .unwrap();
         let groups = list_groups(&pool).await;
         assert_eq!(groups[0].system_prompt.as_deref(), Some("你是翻译助手"));
 
@@ -1093,7 +1150,9 @@ mod tests {
         create_group(&pool, "g1", "工作", None).await.unwrap();
 
         // 对话记录不存在时 set_conversation_group 应自动创建
-        set_conversation_group(&pool, "c1", Some("g1")).await.unwrap();
+        set_conversation_group(&pool, "c1", Some("g1"))
+            .await
+            .unwrap();
 
         let convs = list_conversations(&pool).await.unwrap();
         assert_eq!(convs.len(), 1);
@@ -1106,11 +1165,17 @@ mod tests {
         let pool = setup_pool().await;
         create_group(&pool, "g1", "工作", None).await.unwrap();
         create_group(&pool, "g2", "学习", None).await.unwrap();
-        create_conversation(&pool, "c1", Some("Test")).await.unwrap();
-        set_conversation_group(&pool, "c1", Some("g1")).await.unwrap();
+        create_conversation(&pool, "c1", Some("Test"))
+            .await
+            .unwrap();
+        set_conversation_group(&pool, "c1", Some("g1"))
+            .await
+            .unwrap();
 
         // 移到 g2
-        set_conversation_group(&pool, "c1", Some("g2")).await.unwrap();
+        set_conversation_group(&pool, "c1", Some("g2"))
+            .await
+            .unwrap();
         let convs = list_conversations(&pool).await.unwrap();
         assert_eq!(convs[0].group_id.as_deref(), Some("g2"));
 
@@ -1124,21 +1189,31 @@ mod tests {
     async fn effective_system_prompt_query() {
         let pool = setup_pool().await;
         create_group(&pool, "g1", "翻译", None).await.unwrap();
-        update_group_system_prompt(&pool, "g1", Some("你是翻译助手")).await.unwrap();
-        create_conversation(&pool, "c1", Some("Test")).await.unwrap();
-        set_conversation_group(&pool, "c1", Some("g1")).await.unwrap();
+        update_group_system_prompt(&pool, "g1", Some("你是翻译助手"))
+            .await
+            .unwrap();
+        create_conversation(&pool, "c1", Some("Test"))
+            .await
+            .unwrap();
+        set_conversation_group(&pool, "c1", Some("g1"))
+            .await
+            .unwrap();
 
         // 有分组的对话 → 返回分组系统提示词
         let prompt = get_effective_system_prompt(&pool, "c1").await.unwrap();
         assert_eq!(prompt.as_deref(), Some("你是翻译助手"));
 
         // 默认组对话 → None
-        create_conversation(&pool, "c2", Some("Default")).await.unwrap();
+        create_conversation(&pool, "c2", Some("Default"))
+            .await
+            .unwrap();
         let prompt = get_effective_system_prompt(&pool, "c2").await.unwrap();
         assert_eq!(prompt, None);
 
         // 不存在的对话 → None
-        let prompt = get_effective_system_prompt(&pool, "nonexistent").await.unwrap();
+        let prompt = get_effective_system_prompt(&pool, "nonexistent")
+            .await
+            .unwrap();
         assert_eq!(prompt, None);
     }
 
@@ -1160,7 +1235,10 @@ mod tests {
         assert_eq!(top[2].sort_order, 2);
 
         // g1 子级: g4(0), g5(1)
-        let children: Vec<_> = groups.iter().filter(|g| g.parent_id.as_deref() == Some("g1")).collect();
+        let children: Vec<_> = groups
+            .iter()
+            .filter(|g| g.parent_id.as_deref() == Some("g1"))
+            .collect();
         assert_eq!(children.len(), 2);
         assert_eq!(children[0].sort_order, 0);
         assert_eq!(children[1].sort_order, 1);
@@ -1193,7 +1271,9 @@ mod tests {
         // 再次调用迁移函数应无操作、不报错
         migrate_add_group_id_column(&pool).await.unwrap();
         // 验证列存在：能设置 group_id 不报错
-        create_conversation(&pool, "c1", Some("Test")).await.unwrap();
+        create_conversation(&pool, "c1", Some("Test"))
+            .await
+            .unwrap();
         set_conversation_group(&pool, "c1", None).await.unwrap();
     }
 
@@ -1203,7 +1283,9 @@ mod tests {
         create_group(&pool, "g1", "工作", None).await.unwrap();
         create_conversation(&pool, "c1", Some("A")).await.unwrap();
         create_conversation(&pool, "c2", Some("B")).await.unwrap();
-        set_conversation_group(&pool, "c1", Some("g1")).await.unwrap();
+        set_conversation_group(&pool, "c1", Some("g1"))
+            .await
+            .unwrap();
 
         let convs = list_conversations(&pool).await.unwrap();
         let c1 = convs.iter().find(|c| c.id == "c1").unwrap();
@@ -1219,9 +1301,27 @@ mod tests {
         let pool = setup_pool().await;
 
         // 归档几条消息
-        archive_to_fts(&pool, "c1", "user", "如何用 Rust 写一个 HTTP 服务器", "hash1").await.unwrap();
-        archive_to_fts(&pool, "c1", "assistant", "可以使用 axum 或 actix-web 框架", "hash2").await.unwrap();
-        archive_to_fts(&pool, "c1", "user", "Rust 的所有权机制是什么", "hash3").await.unwrap();
+        archive_to_fts(
+            &pool,
+            "c1",
+            "user",
+            "如何用 Rust 写一个 HTTP 服务器",
+            "hash1",
+        )
+        .await
+        .unwrap();
+        archive_to_fts(
+            &pool,
+            "c1",
+            "assistant",
+            "可以使用 axum 或 actix-web 框架",
+            "hash2",
+        )
+        .await
+        .unwrap();
+        archive_to_fts(&pool, "c1", "user", "Rust 的所有权机制是什么", "hash3")
+            .await
+            .unwrap();
 
         // 搜索 "Rust" 应返回相关消息
         let recalls = search_memory_fts(&pool, "c1", "Rust", 3).await.unwrap();
@@ -1234,8 +1334,12 @@ mod tests {
         let pool = setup_pool().await;
 
         // 同一 content_hash 归档两次应幂等
-        archive_to_fts(&pool, "c1", "user", "重复的消息内容", "hash_dup").await.unwrap();
-        archive_to_fts(&pool, "c1", "user", "重复的消息内容", "hash_dup").await.unwrap();
+        archive_to_fts(&pool, "c1", "user", "重复的消息内容", "hash_dup")
+            .await
+            .unwrap();
+        archive_to_fts(&pool, "c1", "user", "重复的消息内容", "hash_dup")
+            .await
+            .unwrap();
 
         // 搜索应只返回一条（trigram 需要 3+ 字符，用「重复的」搜索）
         let recalls = search_memory_fts(&pool, "c1", "重复的", 10).await.unwrap();
@@ -1246,8 +1350,12 @@ mod tests {
     async fn fts_search_isolation_between_conversations() {
         let pool = setup_pool().await;
 
-        archive_to_fts(&pool, "c1", "user", "对话一的话题是 Rust", "h1").await.unwrap();
-        archive_to_fts(&pool, "c2", "user", "对话二的话题是 Python", "h2").await.unwrap();
+        archive_to_fts(&pool, "c1", "user", "对话一的话题是 Rust", "h1")
+            .await
+            .unwrap();
+        archive_to_fts(&pool, "c2", "user", "对话二的话题是 Python", "h2")
+            .await
+            .unwrap();
 
         // c1 搜索只返回 c1 的归档
         let recalls = search_memory_fts(&pool, "c1", "Rust", 10).await.unwrap();
@@ -1268,11 +1376,23 @@ mod tests {
     async fn fts_search_chinese_trigram() {
         let pool = setup_pool().await;
 
-        archive_to_fts(&pool, "c1", "user", "我想学习 Rust 异步编程", "h1").await.unwrap();
-        archive_to_fts(&pool, "c1", "assistant", "异步编程推荐使用 tokio 运行时", "h2").await.unwrap();
+        archive_to_fts(&pool, "c1", "user", "我想学习 Rust 异步编程", "h1")
+            .await
+            .unwrap();
+        archive_to_fts(
+            &pool,
+            "c1",
+            "assistant",
+            "异步编程推荐使用 tokio 运行时",
+            "h2",
+        )
+        .await
+        .unwrap();
 
         // trigram 分词器：搜 "异步编程" 应命中含 "异步编程" 的消息
-        let recalls = search_memory_fts(&pool, "c1", "异步编程", 10).await.unwrap();
+        let recalls = search_memory_fts(&pool, "c1", "异步编程", 10)
+            .await
+            .unwrap();
         assert!(!recalls.is_empty(), "trigram 中文子串匹配应生效");
 
         // 搜 "tokio" 应命中 assistant 消息
@@ -1284,41 +1404,83 @@ mod tests {
     async fn fts_clear_removes_entries() {
         let pool = setup_pool().await;
 
-        archive_to_fts(&pool, "c1", "user", "待清理的消息内容", "h1").await.unwrap();
-        assert!(!search_memory_fts(&pool, "c1", "清理的", 10).await.unwrap().is_empty());
+        archive_to_fts(&pool, "c1", "user", "待清理的消息内容", "h1")
+            .await
+            .unwrap();
+        assert!(
+            !search_memory_fts(&pool, "c1", "清理的", 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         clear_memory_fts(&pool, "c1").await.unwrap();
-        assert!(search_memory_fts(&pool, "c1", "清理的", 10).await.unwrap().is_empty());
+        assert!(
+            search_memory_fts(&pool, "c1", "清理的", 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
     async fn fts_delete_conversation_cascades() {
         let pool = setup_pool().await;
-        create_conversation(&pool, "c1", Some("Test")).await.unwrap();
-        archive_to_fts(&pool, "c1", "user", "级联删除测试", "h1").await.unwrap();
-        assert!(!search_memory_fts(&pool, "c1", "级联删除", 10).await.unwrap().is_empty());
+        create_conversation(&pool, "c1", Some("Test"))
+            .await
+            .unwrap();
+        archive_to_fts(&pool, "c1", "user", "级联删除测试", "h1")
+            .await
+            .unwrap();
+        assert!(
+            !search_memory_fts(&pool, "c1", "级联删除", 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         delete_conversation(&pool, "c1").await.unwrap();
-        assert!(search_memory_fts(&pool, "c1", "级联删除", 10).await.unwrap().is_empty(),
-            "删除对话应级联清理 FTS5 归档");
+        assert!(
+            search_memory_fts(&pool, "c1", "级联删除", 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "删除对话应级联清理 FTS5 归档"
+        );
     }
 
     #[tokio::test]
     async fn fts_clear_messages_cleans_fts() {
         let pool = setup_pool().await;
-        create_conversation(&pool, "c1", Some("Test")).await.unwrap();
-        archive_to_fts(&pool, "c1", "user", "清空消息时清理FTS归档", "h1").await.unwrap();
-        assert!(!search_memory_fts(&pool, "c1", "清空消息", 10).await.unwrap().is_empty());
+        create_conversation(&pool, "c1", Some("Test"))
+            .await
+            .unwrap();
+        archive_to_fts(&pool, "c1", "user", "清空消息时清理FTS归档", "h1")
+            .await
+            .unwrap();
+        assert!(
+            !search_memory_fts(&pool, "c1", "清空消息", 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         clear_messages(&pool, "c1").await.unwrap();
-        assert!(search_memory_fts(&pool, "c1", "清空消息", 10).await.unwrap().is_empty(),
-            "清空消息应同步清理 FTS5 归档");
+        assert!(
+            search_memory_fts(&pool, "c1", "清空消息", 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "清空消息应同步清理 FTS5 归档"
+        );
     }
 
     #[tokio::test]
     async fn fts_search_empty_query_returns_empty() {
         let pool = setup_pool().await;
-        archive_to_fts(&pool, "c1", "user", "一些内容", "h1").await.unwrap();
+        archive_to_fts(&pool, "c1", "user", "一些内容", "h1")
+            .await
+            .unwrap();
 
         let recalls = search_memory_fts(&pool, "c1", "", 10).await.unwrap();
         assert!(recalls.is_empty(), "空 query 应返回空结果");
@@ -1332,24 +1494,38 @@ mod tests {
         let pool = setup_pool().await;
 
         // 归档两条消息：一条含 Rust，一条含 Python
-        archive_to_fts(&pool, "c1", "user", "如何用 Rust 写 HTTP 服务器", "h1").await.unwrap();
-        archive_to_fts(&pool, "c1", "user", "Python 数据分析入门", "h2").await.unwrap();
+        archive_to_fts(&pool, "c1", "user", "如何用 Rust 写 HTTP 服务器", "h1")
+            .await
+            .unwrap();
+        archive_to_fts(&pool, "c1", "user", "Python 数据分析入门", "h2")
+            .await
+            .unwrap();
 
         // 多词 query：AND 语义会要求全部命中，OR 语义只需任一命中
         // “Rust 和 Python 区别” — AND 下无命中（无消息同时含两者），OR 下命中两条
-        let recalls = search_memory_fts(&pool, "c1", "Rust 和 Python 区别", 10).await.unwrap();
-        assert_eq!(recalls.len(), 2, "OR 语义：含 Rust 或 Python 的消息都应被召回");
+        let recalls = search_memory_fts(&pool, "c1", "Rust 和 Python 区别", 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            recalls.len(),
+            2,
+            "OR 语义：含 Rust 或 Python 的消息都应被召回"
+        );
     }
 
     #[tokio::test]
     async fn fts_search_short_words_filtered() {
         // trigram 要求 ≥3 字符，短词自动跳过
         let pool = setup_pool().await;
-        archive_to_fts(&pool, "c1", "user", "Go 语言并发模型", "h1").await.unwrap();
+        archive_to_fts(&pool, "c1", "user", "Go 语言并发模型", "h1")
+            .await
+            .unwrap();
 
         // “Go” 只有 2 字符，被过滤；“语言” 只有 2 字符也被过滤
         // 但 “并发模型” 4 字符可命中
-        let recalls = search_memory_fts(&pool, "c1", "Go 语言 并发模型", 10).await.unwrap();
+        let recalls = search_memory_fts(&pool, "c1", "Go 语言 并发模型", 10)
+            .await
+            .unwrap();
         assert!(!recalls.is_empty(), "短词过滤后仍有有效词可命中");
 
         // 全是短词 → 无有效 query → 空结果

@@ -72,7 +72,11 @@ pub enum ChatStreamChunk {
     /// `call_id` 是 rig 生成的 `internal_call_id`,用于与后续 `ToolResult` 配对,
     /// 前端据此把结果摘要挂到对应 ToolCall 卡片。
     /// 0.12.7：`arguments` 携带工具参数 JSON 字符串，前端折叠展示。
-    ToolCall { tool: String, call_id: String, arguments: String },
+    ToolCall {
+        tool: String,
+        call_id: String,
+        arguments: String,
+    },
     /// tool 执行结果(来自 rig `StreamUserItem`)。
     ///
     /// `call_id` 与 `ToolCall.call_id` 配对。`summary` 为结果文本(前 50000 字符);
@@ -228,7 +232,10 @@ impl AgentProvider {
                 ))
             }
         };
-        Ok(Self { agent, model_name: model_display_name(entry, model) })
+        Ok(Self {
+            agent,
+            model_name: model_display_name(entry, model),
+        })
     }
 
     /// 流式 prompt--驱动 agent loop,chunk 经 `tx` emit 前端。
@@ -242,12 +249,24 @@ impl AgentProvider {
         user_msg: &str,
         tx: mpsc::UnboundedSender<ChatStreamChunk>,
     ) {
-        let model_name = if self.model_name.is_empty() { None } else { Some(self.model_name.clone()) };
+        let model_name = if self.model_name.is_empty() {
+            None
+        } else {
+            Some(self.model_name.clone())
+        };
         match &self.agent {
-            ChatAgent::OpenAI(a) => Self::run_stream(a, conversation_id, user_msg, tx, model_name).await,
-            ChatAgent::Anthropic(a) => Self::run_stream(a, conversation_id, user_msg, tx, model_name).await,
-            ChatAgent::Gemini(a) => Self::run_stream(a, conversation_id, user_msg, tx, model_name).await,
-            ChatAgent::Ollama(a) => Self::run_stream(a, conversation_id, user_msg, tx, model_name).await,
+            ChatAgent::OpenAI(a) => {
+                Self::run_stream(a, conversation_id, user_msg, tx, model_name).await
+            }
+            ChatAgent::Anthropic(a) => {
+                Self::run_stream(a, conversation_id, user_msg, tx, model_name).await
+            }
+            ChatAgent::Gemini(a) => {
+                Self::run_stream(a, conversation_id, user_msg, tx, model_name).await
+            }
+            ChatAgent::Ollama(a) => {
+                Self::run_stream(a, conversation_id, user_msg, tx, model_name).await
+            }
         }
     }
 
@@ -295,7 +314,9 @@ impl AgentProvider {
                     }
                     StreamedAssistantContent::Reasoning(r) => {
                         has_content = true;
-                        ChatStreamChunk::Thinking { text: r.display_text() }
+                        ChatStreamChunk::Thinking {
+                            text: r.display_text(),
+                        }
                     }
                     StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
                         has_content = true;
@@ -341,9 +362,8 @@ impl AgentProvider {
                              可能是服务过载 / SSE 解析失败 / 配额耗尽"
                         );
                         ChatStreamChunk::Error {
-                            message:
-                                "AI 返回了无效响应，可能是服务过载或配额耗尽，请稍后重试"
-                                    .to_string(),
+                            message: "AI 返回了无效响应，可能是服务过载或配额耗尽，请稍后重试"
+                                .to_string(),
                         }
                     } else {
                         ChatStreamChunk::Done {
@@ -582,7 +602,9 @@ mod tests {
 
         // 应同时存在 ToolCall 和 ToolResult,且 call_id 可配对
         let tool_call_id = chunks.iter().find_map(|c| match c {
-            ChatStreamChunk::ToolCall { tool, call_id, .. } if tool == "add" => Some(call_id.clone()),
+            ChatStreamChunk::ToolCall { tool, call_id, .. } if tool == "add" => {
+                Some(call_id.clone())
+            }
             _ => None,
         });
         assert!(tool_call_id.is_some(), "应有 ToolCall(add): {chunks:?}");
@@ -603,10 +625,7 @@ mod tests {
         );
         let (success, summary) = paired_result.unwrap();
         assert!(success, "成功 tool 的 success 应为 true");
-        assert!(
-            summary.contains('3'),
-            "摘要应包含 tool 结果 3: {summary}"
-        );
+        assert!(summary.contains('3'), "摘要应包含 tool 结果 3: {summary}");
     }
 
     /// 验证 `Done` chunk 携带从 `FinalResponse.usage()` 提取的 token 用量(0.12.2 §4.8)。
@@ -642,8 +661,7 @@ mod tests {
             } => Some((*input_tokens, *output_tokens)),
             _ => None,
         });
-        let (input_tokens, output_tokens) =
-            done.expect("应 emit Done chunk: {chunks:?}");
+        let (input_tokens, output_tokens) = done.expect("应 emit Done chunk: {chunks:?}");
         assert_eq!(input_tokens, 150, "Done.input_tokens 应为 150");
         assert_eq!(output_tokens, 80, "Done.output_tokens 应为 80");
     }
@@ -685,7 +703,8 @@ mod tests {
             })
             .expect("应 emit Done");
         assert_eq!(
-            input_tokens, u32::MAX,
+            input_tokens,
+            u32::MAX,
             "超 u32 的 input_tokens 应截断到 u32::MAX"
         );
     }
@@ -698,9 +717,10 @@ mod tests {
     async fn run_stream_empty_final_response_becomes_error() {
         use rig_core::completion::Usage as RigUsage;
         let zero_usage = RigUsage::default();
-        let model = MockCompletionModel::from_stream_turns(vec![vec![
-            MockStreamEvent::final_response(zero_usage),
-        ]]);
+        let model =
+            MockCompletionModel::from_stream_turns(vec![vec![MockStreamEvent::final_response(
+                zero_usage,
+            )]]);
         let agent = AgentBuilder::new(model)
             .memory(InMemoryConversationMemory::new())
             .default_max_turns(5)
@@ -739,9 +759,7 @@ mod tests {
     /// 验证 `summarize_tool_result` 文本截断与图片占位(纯函数测试)。
     #[test]
     fn summarize_tool_result_truncates_and_handles_image() {
-        use rig_core::completion::message::{
-            DocumentSourceKind, Image, Text, ToolResultContent,
-        };
+        use rig_core::completion::message::{DocumentSourceKind, Image, Text, ToolResultContent};
         use rig_core::one_or_many::OneOrMany;
 
         // 短文本不截断

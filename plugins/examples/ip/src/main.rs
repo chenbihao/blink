@@ -245,7 +245,9 @@ fn main() {
                                     title: format!("公网 IP: {}", info.query),
                                     subtitle: Some(format!("{location} | 按 Enter 复制")),
                                     score: 0.9,
-                                    action: PluginAction::Copy { text: info.query.clone() },
+                                    action: PluginAction::Copy {
+                                        text: info.query.clone(),
+                                    },
                                 });
                                 raw_ips.push(serde_json::json!({
                                     "ip": info.query,

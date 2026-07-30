@@ -148,7 +148,12 @@ impl Capability for SearchFiles {
                         d
                     },
                     desc: item.subtitle,
-                    actions: path.map(|_| crate::domain::capability::ItemAction::OpenFile { pointer: Some("$.path".into()) }).into_iter().collect(),
+                    actions: path
+                        .map(|_| crate::domain::capability::ItemAction::OpenFile {
+                            pointer: Some("$.path".into()),
+                        })
+                        .into_iter()
+                        .collect(),
                 }
             })
             .collect();

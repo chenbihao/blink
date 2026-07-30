@@ -241,7 +241,10 @@ impl Service for HotkeyService {
                             .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
                             .inner()
                             .clone();
-                        if let Err(e) = registry.trigger(&key, &chord_cfg.bindings, env_arc.as_ref()).await {
+                        if let Err(e) = registry
+                            .trigger(&key, &chord_cfg.bindings, env_arc.as_ref())
+                            .await
+                        {
                             tracing::warn!(%key, %e, "chord trigger 失败");
                         }
                     }

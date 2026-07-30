@@ -89,17 +89,10 @@ impl DomainEnv for TauriDomainEnv {
     // ── 事件发射 ──────────────────────────────────────────────────────────
 
     fn emit(&self, event: &str, payload: serde_json::Value) -> Result<(), String> {
-        self.app
-            .emit(event, payload)
-            .map_err(|e| e.to_string())
+        self.app.emit(event, payload).map_err(|e| e.to_string())
     }
 
-    fn emit_to(
-        &self,
-        target: &str,
-        event: &str,
-        payload: serde_json::Value,
-    ) -> Result<(), String> {
+    fn emit_to(&self, target: &str, event: &str, payload: serde_json::Value) -> Result<(), String> {
         self.app
             .emit_to(target, event, payload)
             .map_err(|e| e.to_string())

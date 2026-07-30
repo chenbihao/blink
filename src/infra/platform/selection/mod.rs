@@ -57,9 +57,7 @@ pub fn capture_focused_element() -> Option<()> {
 ///
 /// 三段式策略与 `get_selected_text` 完全一致。可在 `show()` 之后从任意线程调用。
 #[cfg(target_os = "windows")]
-pub fn extract_selection_from_element(
-    elem: &self::windows::SendableElement,
-) -> Option<String> {
+pub fn extract_selection_from_element(elem: &self::windows::SendableElement) -> Option<String> {
     self::windows::extract_selection_from_element(elem)
 }
 

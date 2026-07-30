@@ -154,7 +154,9 @@ fn parse_subcommand_line(line: &str) -> Option<CliCommand> {
 
     // 跳过 name 后的空格，找描述
     let after_name = &rest[name_end..];
-    let desc_start = after_name.find(|c: char| c != ' ').unwrap_or(after_name.len());
+    let desc_start = after_name
+        .find(|c: char| c != ' ')
+        .unwrap_or(after_name.len());
     if desc_start == after_name.len() {
         // 只有 name 没有描述——跳过
         return None;
@@ -226,10 +228,7 @@ fn parse_option_line(line: &str) -> Option<CliOption> {
     let desc_part = &rest[flags_end..];
     let description = desc_part.trim().to_string();
 
-    Some(CliOption {
-        flags,
-        description,
-    })
+    Some(CliOption { flags, description })
 }
 
 // ── SKILL.md 生成 ────────────────────────────────────────────────────────────
@@ -240,7 +239,11 @@ fn parse_option_line(line: &str) -> Option<CliOption> {
 /// + Markdown body（用法 / 子命令表 / 选项表）。
 ///
 /// `source_cli_path` 非空时写入 frontmatter，用于后续重新生成。
-pub fn generate_skill_md(parsed: &ParsedHelp, tool_name: &str, source_cli_path: Option<&str>) -> String {
+pub fn generate_skill_md(
+    parsed: &ParsedHelp,
+    tool_name: &str,
+    source_cli_path: Option<&str>,
+) -> String {
     let mut md = String::new();
 
     // frontmatter
@@ -419,8 +422,7 @@ pub async fn recognize_cli(cli_path: &str) -> Result<CliRecognitionResult, Strin
 
     // 保存
     let skill_dir = crate::infra::utils::paths::skills_global_dir().join(tool_name);
-    std::fs::create_dir_all(&skill_dir)
-        .map_err(|e| format!("创建 Skill 目录失败: {e}"))?;
+    std::fs::create_dir_all(&skill_dir).map_err(|e| format!("创建 Skill 目录失败: {e}"))?;
     let skill_md_path = skill_dir.join("SKILL.md");
     std::fs::write(&skill_md_path, &skill_md_content)
         .map_err(|e| format!("写入 SKILL.md 失败: {e}"))?;
@@ -469,13 +471,19 @@ These are common Git commands used in various situations:
   init       Create an empty Git repository or reinitialize an existing one
 "#;
         let parsed = parse_help_output(help);
-        assert_eq!(parsed.description, "git is a DevOps tool used for source code management.");
+        assert_eq!(
+            parsed.description,
+            "git is a DevOps tool used for source code management."
+        );
         assert!(parsed.usage_line.is_some());
         assert!(parsed.usage_line.as_ref().unwrap().contains("Usage: git"));
 
         assert_eq!(parsed.subcommands.len(), 5);
         assert_eq!(parsed.subcommands[0].name, "add");
-        assert_eq!(parsed.subcommands[0].description, "Add file contents to the index");
+        assert_eq!(
+            parsed.subcommands[0].description,
+            "Add file contents to the index"
+        );
         assert_eq!(parsed.subcommands[1].name, "commit");
         assert_eq!(parsed.subcommands[2].name, "push");
         assert_eq!(parsed.subcommands[3].name, "clone");
@@ -502,17 +510,32 @@ Options:
 "#;
         let parsed = parse_help_output(help);
         assert!(parsed.usage_line.is_some());
-        assert!(parsed.usage_line.as_ref().unwrap().contains("Usage:  docker"));
+        assert!(
+            parsed
+                .usage_line
+                .as_ref()
+                .unwrap()
+                .contains("Usage:  docker")
+        );
 
         assert!(parsed.subcommands.len() >= 5);
         assert_eq!(parsed.subcommands[0].name, "run");
-        assert_eq!(parsed.subcommands[0].description, "Create and run a new container from an image");
+        assert_eq!(
+            parsed.subcommands[0].description,
+            "Create and run a new container from an image"
+        );
 
         assert!(parsed.options.len() >= 3);
         assert_eq!(parsed.options[0].flags, "-v, --version");
-        assert_eq!(parsed.options[0].description, "Print version information and quit");
+        assert_eq!(
+            parsed.options[0].description,
+            "Print version information and quit"
+        );
         assert_eq!(parsed.options[2].flags, "--config string");
-        assert_eq!(parsed.options[2].description, "Location of client config files (default \"~/.docker\")");
+        assert_eq!(
+            parsed.options[2].description,
+            "Location of client config files (default \"~/.docker\")"
+        );
     }
 
     #[test]
@@ -537,7 +560,10 @@ Options:
     fn parse_case_insensitive_usage() {
         let help = "usage: mytool [options]\nMy tool description";
         let parsed = parse_help_output(help);
-        assert_eq!(parsed.usage_line.as_deref(), Some("usage: mytool [options]"));
+        assert_eq!(
+            parsed.usage_line.as_deref(),
+            Some("usage: mytool [options]")
+        );
     }
 
     // ── parse_subcommand_line ──

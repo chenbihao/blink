@@ -37,8 +37,8 @@
 
 use std::sync::Arc;
 
-use rig_core::completion::message::{AssistantContent, UserContent};
 use rig_core::completion::Message;
+use rig_core::completion::message::{AssistantContent, UserContent};
 use rig_core::memory::{ConversationMemory, MemoryError};
 use sqlx::SqlitePool;
 use tokio::sync::RwLock;
@@ -346,7 +346,10 @@ impl SqliteConversationMemory {
     ///
     /// **注意**：此方法与 rig Agent 内部调用的 `load()` 不会冲突——
     /// `load()` 的裁剪是 in-memory 的（DB 保留完整历史），FTS5 归档幂等（content hash 去重）。
-    pub async fn load_with_stats(&self, conversation_id: &str) -> Result<MemoryLoadResult, MemoryError> {
+    pub async fn load_with_stats(
+        &self,
+        conversation_id: &str,
+    ) -> Result<MemoryLoadResult, MemoryError> {
         self.load_inner(conversation_id).await
     }
 
@@ -373,8 +376,8 @@ impl SqliteConversationMemory {
 
         let mut messages = Vec::with_capacity(rows.len());
         for (_role, content) in rows {
-            let msg: Message = serde_json::from_str(&content)
-                .map_err(|e| MemoryError::Backend(Box::from(e)))?;
+            let msg: Message =
+                serde_json::from_str(&content).map_err(|e| MemoryError::Backend(Box::from(e)))?;
             messages.push(msg);
         }
 
@@ -407,7 +410,9 @@ impl SqliteConversationMemory {
                         role,
                         &text,
                         &hash,
-                    ).await {
+                    )
+                    .await
+                    {
                         tracing::warn!(error = %e, "FTS5 归档失败（非致命）");
                     }
                 }
@@ -436,7 +441,9 @@ impl SqliteConversationMemory {
                     conversation_id,
                     &query,
                     cfg.recall_top_k,
-                ).await {
+                )
+                .await
+                {
                     Ok(recalls) if !recalls.is_empty() => {
                         recall_count = recalls.len();
                         let memory_block = Self::format_recall_block(&recalls);
@@ -448,7 +455,12 @@ impl SqliteConversationMemory {
                             recall_count
                         );
                         // 在窗口最前方插入 <memory> 系统消息
-                        messages.insert(0, Message::System { content: memory_block });
+                        messages.insert(
+                            0,
+                            Message::System {
+                                content: memory_block,
+                            },
+                        );
                     }
                     Ok(_) => {} // 无召回结果
                     Err(e) => {
@@ -644,8 +656,8 @@ impl ConversationMemory for SqliteConversationMemory {
             // 逐条插入消息
             for msg in &messages {
                 let role = Self::message_role(msg);
-                let content = serde_json::to_string(msg)
-                    .map_err(|e| MemoryError::Backend(Box::from(e)))?;
+                let content =
+                    serde_json::to_string(msg).map_err(|e| MemoryError::Backend(Box::from(e)))?;
                 crate::infra::data::conversations::append_message(
                     &pool,
                     conversation_id,
@@ -781,15 +793,16 @@ mod tests {
 
         // 最近 20 条是 msg 10 ~ msg 29
         let first = match &loaded[0] {
-            Message::User { content } => {
-                match &content.first() {
-                    UserContent::Text(t) => t.text.clone(),
-                    _ => String::new(),
-                }
-            }
+            Message::User { content } => match &content.first() {
+                UserContent::Text(t) => t.text.clone(),
+                _ => String::new(),
+            },
             _ => String::new(),
         };
-        assert!(first.contains("msg 10"), "first should be msg 10, got: {first}");
+        assert!(
+            first.contains("msg 10"),
+            "first should be msg 10, got: {first}"
+        );
     }
 
     #[tokio::test]
@@ -801,9 +814,14 @@ mod tests {
             .await
             .unwrap();
 
-        let convs = crate::infra::data::conversations::list_conversations(&mem.pool).await.unwrap();
+        let convs = crate::infra::data::conversations::list_conversations(&mem.pool)
+            .await
+            .unwrap();
         assert_eq!(convs.len(), 1);
-        assert_eq!(convs[0].title.as_deref(), Some("Hello world this is a test"));
+        assert_eq!(
+            convs[0].title.as_deref(),
+            Some("Hello world this is a test")
+        );
     }
 
     #[tokio::test]
@@ -812,12 +830,15 @@ mod tests {
         let mem = SqliteConversationMemory::new(pool);
 
         let long_text = "x".repeat(100);
-        mem.append("c1", vec![user_msg(&long_text)])
+        mem.append("c1", vec![user_msg(&long_text)]).await.unwrap();
+
+        let convs = crate::infra::data::conversations::list_conversations(&mem.pool)
             .await
             .unwrap();
-
-        let convs = crate::infra::data::conversations::list_conversations(&mem.pool).await.unwrap();
-        assert_eq!(convs[0].title.as_deref().unwrap().chars().count(), TITLE_MAX_CHARS);
+        assert_eq!(
+            convs[0].title.as_deref().unwrap().chars().count(),
+            TITLE_MAX_CHARS
+        );
     }
 
     #[tokio::test]
@@ -830,12 +851,12 @@ mod tests {
         // 写入带 tool_call 的 assistant 消息
         let assistant_with_tool = Message::Assistant {
             id: None,
-            content: OneOrMany::one(
-                rig_core::completion::message::AssistantContent::ToolCall(ToolCall::new(
+            content: OneOrMany::one(rig_core::completion::message::AssistantContent::ToolCall(
+                ToolCall::new(
                     "call_1".to_string(),
                     ToolFunction::new("search".to_string(), serde_json::json!({"q": "test"})),
-                )),
-            ),
+                ),
+            )),
         };
 
         mem.append("c1", vec![user_msg("search for test"), assistant_with_tool])
@@ -847,14 +868,12 @@ mod tests {
 
         // 第二条是 assistant 消息，应包含 ToolCall
         match &loaded[1] {
-            Message::Assistant { content, .. } => {
-                match &content.first() {
-                    rig_core::completion::message::AssistantContent::ToolCall(tc) => {
-                        assert_eq!(tc.function.name, "search");
-                    }
-                    _ => panic!("expected ToolCall in assistant message"),
+            Message::Assistant { content, .. } => match &content.first() {
+                rig_core::completion::message::AssistantContent::ToolCall(tc) => {
+                    assert_eq!(tc.function.name, "search");
                 }
-            }
+                _ => panic!("expected ToolCall in assistant message"),
+            },
             _ => panic!("expected Assistant message"),
         }
     }
@@ -873,7 +892,9 @@ mod tests {
 
     #[test]
     fn test_drop_leading_orphan_tool_results() {
-        use rig_core::completion::message::{ToolCall, ToolFunction, ToolResult, ToolResultContent};
+        use rig_core::completion::message::{
+            ToolCall, ToolFunction, ToolResult, ToolResultContent,
+        };
 
         // 构造 ToolResult 消息（rig 存为 User + UserContent::ToolResult）
         fn tool_result_msg(id: &str) -> Message {
@@ -927,12 +948,12 @@ mod tests {
         {
             let tool_call = Message::Assistant {
                 id: None,
-                content: OneOrMany::one(
-                    rig_core::completion::message::AssistantContent::ToolCall(ToolCall::new(
+                content: OneOrMany::one(rig_core::completion::message::AssistantContent::ToolCall(
+                    ToolCall::new(
                         "call_1".to_string(),
                         ToolFunction::new("search".to_string(), serde_json::json!({})),
-                    )),
-                ),
+                    ),
+                )),
             };
             let mut msgs = vec![tool_call.clone(), tool_result_msg("r1")];
             drop_leading_orphan_tool_results(&mut msgs);
@@ -946,14 +967,20 @@ mod tests {
     fn estimate_tokens_english() {
         // "hello world" = 11 chars, 11/4 ≈ 2 tokens
         let tokens = estimate_tokens("hello world");
-        assert!(tokens >= 2 && tokens <= 3, "English estimate should be ~2-3, got {tokens}");
+        assert!(
+            tokens >= 2 && tokens <= 3,
+            "English estimate should be ~2-3, got {tokens}"
+        );
     }
 
     #[test]
     fn estimate_tokens_chinese() {
         // "你好世界测试" = 6 CJK chars, 6/1.5 = 4 tokens
         let tokens = estimate_tokens("你好世界测试");
-        assert!(tokens >= 3 && tokens <= 6, "Chinese estimate should be ~3-6, got {tokens}");
+        assert!(
+            tokens >= 3 && tokens <= 6,
+            "Chinese estimate should be ~3-6, got {tokens}"
+        );
     }
 
     #[test]
@@ -973,8 +1000,8 @@ mod tests {
     #[test]
     fn estimate_messages_tokens_sums_all() {
         let msgs = vec![
-            user_msg("hello"),      // ~1 token
-            assistant_msg("hi"),    // ~1 token
+            user_msg("hello"),   // ~1 token
+            assistant_msg("hi"), // ~1 token
         ];
         let total = estimate_messages_tokens(&msgs);
         assert!(total >= 2, "Total should be >= 2, got {total}");
@@ -982,10 +1009,7 @@ mod tests {
 
     #[test]
     fn token_aware_truncate_no_action_when_under_limit() {
-        let mut msgs = vec![
-            user_msg("short"),
-            assistant_msg("reply"),
-        ];
+        let mut msgs = vec![user_msg("short"), assistant_msg("reply")];
         let dropped = token_aware_truncate(&mut msgs, 8192, 0.8, 0.7);
         assert!(dropped.is_empty(), "Should not truncate when under limit");
         assert_eq!(msgs.len(), 2);
@@ -996,17 +1020,27 @@ mod tests {
         // 构造超限消息：每条约 100 chars → ~25 tokens
         // 10 条 → ~250 tokens，limit=100, trigger=80, compress=70
         let mut msgs: Vec<Message> = (0..10)
-            .map(|i| user_msg(&format!("message number {i:03} with some padding text to make it longer")))
+            .map(|i| {
+                user_msg(&format!(
+                    "message number {i:03} with some padding text to make it longer"
+                ))
+            })
             .collect();
         let dropped = token_aware_truncate(&mut msgs, 100, 0.8, 0.7);
         assert!(!dropped.is_empty(), "Should have dropped some messages");
-        assert!(msgs.len() < 10, "Should have fewer messages after truncation");
+        assert!(
+            msgs.len() < 10,
+            "Should have fewer messages after truncation"
+        );
 
         // 剩余消息应该是最新的（编号较大的）
         if let Message::User { content } = &msgs[0] {
             if let Some(UserContent::Text(t)) = content.iter().next() {
                 // 第一条剩余消息的编号应该 > 0（旧消息被移出）
-                assert!(t.text.contains("message number"), "First message should be a user message");
+                assert!(
+                    t.text.contains("message number"),
+                    "First message should be a user message"
+                );
             }
         }
     }
@@ -1046,7 +1080,9 @@ mod tests {
 
         // 写入大量长消息
         for i in 0..30 {
-            let long_text = format!("message {i:03} with substantial content to increase token count significantly");
+            let long_text = format!(
+                "message {i:03} with substantial content to increase token count significantly"
+            );
             mem.append("c1", vec![user_msg(&long_text)]).await.unwrap();
         }
 
@@ -1081,7 +1117,11 @@ mod tests {
 
         let loaded = mem.load("c1").await.unwrap();
         // FixedCount 模式应严格返回 window_size 条
-        assert_eq!(loaded.len(), 5, "FixedCount mode should return exactly window_size messages");
+        assert_eq!(
+            loaded.len(),
+            5,
+            "FixedCount mode should return exactly window_size messages"
+        );
     }
 
     #[tokio::test]
@@ -1100,7 +1140,9 @@ mod tests {
         let mem = SqliteConversationMemory::with_config(pool, config);
 
         for i in 0..20 {
-            let long_text = format!("message {i:03} with enough content to exceed the very small token limit we set");
+            let long_text = format!(
+                "message {i:03} with enough content to exceed the very small token limit we set"
+            );
             mem.append("c1", vec![user_msg(&long_text)]).await.unwrap();
         }
 
@@ -1109,18 +1151,11 @@ mod tests {
         assert!(loaded.len() < 20, "Should be truncated");
 
         // DB 应保留完整历史
-        let all_rows = crate::infra::data::conversations::load_recent_messages(
-            &mem.pool,
-            "c1",
-            1000,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            all_rows.len(),
-            20,
-            "DB should retain all 20 messages"
-        );
+        let all_rows =
+            crate::infra::data::conversations::load_recent_messages(&mem.pool, "c1", 1000)
+                .await
+                .unwrap();
+        assert_eq!(all_rows.len(), 20, "DB should retain all 20 messages");
     }
 
     #[tokio::test]
@@ -1139,9 +1174,12 @@ mod tests {
 
         // 写入 10 条中等长度消息
         for i in 0..10 {
-            mem.append("c1", vec![user_msg(&format!("message {i:03} with moderate content"))])
-                .await
-                .unwrap();
+            mem.append(
+                "c1",
+                vec![user_msg(&format!("message {i:03} with moderate content"))],
+            )
+            .await
+            .unwrap();
         }
 
         // 大 limit → 不裁剪
@@ -1176,7 +1214,9 @@ mod tests {
     #[test]
     fn extract_message_text_handles_all_variants() {
         // System
-        let sys = Message::System { content: "system prompt".into() };
+        let sys = Message::System {
+            content: "system prompt".into(),
+        };
         assert!(extract_message_text(&sys).contains("system prompt"));
 
         // User text
@@ -1221,9 +1261,10 @@ mod tests {
         assert!(loaded.len() < 20, "应被裁剪");
 
         // 验证 FTS5 中有归档记录——搜索一个早期消息的关键词
-        let recalls = crate::infra::data::conversations::search_memory_fts(
-            &pool, "c1", "topic_0", 10,
-        ).await.unwrap();
+        let recalls =
+            crate::infra::data::conversations::search_memory_fts(&pool, "c1", "topic_0", 10)
+                .await
+                .unwrap();
         assert!(!recalls.is_empty(), "被裁剪的消息应已归档到 FTS5");
     }
 
@@ -1252,7 +1293,9 @@ mod tests {
         let _ = mem.load("c1").await.unwrap();
 
         // 再追加一条关于 Rust 的消息（OR 语义下，任一关键词命中即召回）
-        mem.append("c1", vec![user_msg("Rust async runtime")]).await.unwrap();
+        mem.append("c1", vec![user_msg("Rust async runtime")])
+            .await
+            .unwrap();
 
         // 第二次 load 应召回相关的旧消息并注入 <memory> 块
         let loaded = mem.load("c1").await.unwrap();
@@ -1289,7 +1332,9 @@ mod tests {
         }
 
         let _ = mem.load("c1").await.unwrap();
-        mem.append("c1", vec![user_msg("Rust details")]).await.unwrap();
+        mem.append("c1", vec![user_msg("Rust details")])
+            .await
+            .unwrap();
 
         let loaded = mem.load("c1").await.unwrap();
         let has_memory = loaded.iter().any(|m| {
@@ -1321,7 +1366,9 @@ mod tests {
 
         // 写入大量消息触发压缩
         for i in 0..20 {
-            let long_text = format!("message {i:03} with enough content to exceed the very small token limit we set");
+            let long_text = format!(
+                "message {i:03} with enough content to exceed the very small token limit we set"
+            );
             mem.append("c1", vec![user_msg(&long_text)]).await.unwrap();
         }
 
@@ -1351,7 +1398,9 @@ mod tests {
             mem.append("c1", vec![user_msg(&text)]).await.unwrap();
         }
         let _ = mem.load("c1").await.unwrap(); // 第一次 load 归档
-        mem.append("c1", vec![user_msg("Rust details")]).await.unwrap();
+        mem.append("c1", vec![user_msg("Rust details")])
+            .await
+            .unwrap();
 
         let result = mem.load_with_stats("c1").await.unwrap();
         assert!(result.recall_count > 0, "Should have recalled messages");
@@ -1372,7 +1421,9 @@ mod tests {
         config.write().await.context_limit = Some(100_000);
         let mem = SqliteConversationMemory::with_config(pool.clone(), config);
 
-        mem.append("c1", vec![user_msg("short message")]).await.unwrap();
+        mem.append("c1", vec![user_msg("short message")])
+            .await
+            .unwrap();
 
         let result = mem.load_with_stats("c1").await.unwrap();
         assert_eq!(result.dropped_count, 0, "Should not drop any messages");

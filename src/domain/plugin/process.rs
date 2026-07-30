@@ -19,8 +19,7 @@ use tokio::sync::{Mutex, oneshot};
 
 use super::manifest::{PluginManifest, RuntimeType};
 use super::protocol::{
-    PluginAction, PluginItem, PluginRequest, PluginResponse, PluginUpstreamMessage,
-    RawToolResult,
+    PluginAction, PluginItem, PluginRequest, PluginResponse, PluginUpstreamMessage, RawToolResult,
 };
 
 /// 查询错误。
@@ -262,7 +261,7 @@ impl PluginProcess {
             let pending_raw_tools = Arc::clone(&pending_raw_tools);
             let stdin = Arc::clone(&stdin);
             let id = plugin_id.to_string();
-            tauri::async_runtime::spawn(async move {
+            tokio::spawn(async move {
                 let mut lines = BufReader::new(stdout).lines();
                 loop {
                     match lines.next_line().await {
@@ -283,7 +282,7 @@ impl PluginProcess {
                                     // 插件发起 HTTP 请求 → core 代为执行
                                     tracing::debug!(plugin = %id, url = %req.url.chars().take(80).collect::<String>(), "插件发起 HTTP 请求");
                                     let stdin = Arc::clone(&stdin);
-                                    tauri::async_runtime::spawn(async move {
+                                    tokio::spawn(async move {
                                         let (status, body, error) = execute_http_request(
                                             &req.method,
                                             &req.url,
@@ -350,7 +349,7 @@ impl PluginProcess {
         // stderr reader:逐行汇入 tracing。
         {
             let id = plugin_id.to_string();
-            tauri::async_runtime::spawn(async move {
+            tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     tracing::debug!(plugin = %id, "stderr: {}", line);

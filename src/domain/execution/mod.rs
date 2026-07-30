@@ -44,7 +44,8 @@ pub struct ActionContext<'a> {
     /// **key 约定**：
     /// - 参数化动作用**语义键**（`url` / `path` / `text` 等，见 0.9.0 §3.3）
     /// - 旧字符串路径走 `_legacy_arg`（`arg_as_str` 读的就是它，兼容层，0.9.2 起可删）
-    #[allow(dead_code)] // 0.14.2 后参数化 Action 已迁入 Capability，剩余 9 个 Action 不读此字段；保留供未来 Action 使用
+    #[allow(dead_code)]
+    // 0.14.2 后参数化 Action 已迁入 Capability，剩余 9 个 Action 不读此字段；保留供未来 Action 使用
     pub arguments: Value,
 }
 
@@ -60,10 +61,7 @@ impl<'a> ActionContext<'a> {
             Some(v) => serde_json::json!({ "_legacy_arg": v }),
             None => serde_json::json!({}),
         };
-        Self {
-            env,
-            arguments,
-        }
+        Self { env, arguments }
     }
 
     /// 从结构化 arguments 构造（0.9.1 AI 路径 `ToolCall.arguments` 入口）。
@@ -81,10 +79,7 @@ impl<'a> ActionContext<'a> {
             );
             serde_json::json!({})
         };
-        Self {
-            env,
-            arguments,
-        }
+        Self { env, arguments }
     }
 
     /// 从 `arguments` 按语义键抽字符串（0.9.0 起推荐入口）。

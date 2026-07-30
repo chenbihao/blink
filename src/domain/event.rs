@@ -52,8 +52,7 @@ pub trait DomainEnv: CapabilityEnv {
     fn emit(&self, event: &str, payload: serde_json::Value) -> Result<(), String>;
 
     /// 定向发送事件到指定 label 的窗口（如 `"chat"`）。
-    fn emit_to(&self, target: &str, event: &str, payload: serde_json::Value)
-        -> Result<(), String>;
+    fn emit_to(&self, target: &str, event: &str, payload: serde_json::Value) -> Result<(), String>;
 
     // ── 状态访问（替代 tauri::Manager state::<T>()）────────────────────
 

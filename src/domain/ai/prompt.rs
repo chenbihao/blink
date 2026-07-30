@@ -15,8 +15,8 @@
 //! **插件贡献 prompt hint**：manifest 的 `tools[].hint` 字段自动拼入 system prompt
 //! 工具描述段——插件作者一句话告诉 AI 这个工具的用法窍门。
 
-use crate::domain::execution::ActionSchema;
 use crate::domain::ai::skill::{SkillEntry, SkillSummary};
+use crate::domain::execution::ActionSchema;
 use std::collections::HashMap;
 
 /// system prompt token 告警阈值（§3.8：超 1500 token warn）。
@@ -278,7 +278,11 @@ pub fn chat_system_prompt_with_skills(
     if !skill_summaries.is_empty() {
         prompt.push_str("\n\n【可用技能】\n");
         for s in skill_summaries {
-            let trigger_hint = if s.has_triggers { " (自动触发)" } else { "" };
+            let trigger_hint = if s.has_triggers {
+                " (自动触发)"
+            } else {
+                ""
+            };
             prompt.push_str(&format!(
                 "- [{}] {}{}: {}\n",
                 s.source.display_name(),
@@ -287,7 +291,9 @@ pub fn chat_system_prompt_with_skills(
                 s.description
             ));
         }
-        prompt.push_str("提示：输入 /skill <名称> 可手动激活技能。可用 /skill <名称>@<来源> 消歧同名技能。");
+        prompt.push_str(
+            "提示：输入 /skill <名称> 可手动激活技能。可用 /skill <名称>@<来源> 消歧同名技能。",
+        );
     }
 
     // 阶段 2：触发的 Skill 全文（按需注入）
@@ -688,7 +694,12 @@ mod tests {
 
     // ── chat_system_prompt_with_skills ──
 
-    fn make_summary(name: &str, desc: &str, source: SkillSource, has_triggers: bool) -> SkillSummary {
+    fn make_summary(
+        name: &str,
+        desc: &str,
+        source: SkillSource,
+        has_triggers: bool,
+    ) -> SkillSummary {
         SkillSummary {
             name: name.to_string(),
             description: desc.to_string(),
@@ -714,17 +725,22 @@ mod tests {
 
     #[test]
     fn chat_prompt_with_skills_includes_triggered_full_content() {
-        let summaries = vec![make_summary("rust-debug", "Debug", SkillSource::Blink, true)];
-    let triggered = vec![SkillEntry {
-        name: "rust-debug".to_string(),
-        description: "Debug".to_string(),
-        triggers: None,
-        compiled_patterns: Vec::new(),
-        full_content: "# Rust Debug Workflow\n\n1. Read error\n2. Fix".to_string(),
-        source: SkillSource::Blink,
-        dir_path: std::path::PathBuf::from("/tmp"),
-        source_cli_path: None,
-    }];
+        let summaries = vec![make_summary(
+            "rust-debug",
+            "Debug",
+            SkillSource::Blink,
+            true,
+        )];
+        let triggered = vec![SkillEntry {
+            name: "rust-debug".to_string(),
+            description: "Debug".to_string(),
+            triggers: None,
+            compiled_patterns: Vec::new(),
+            full_content: "# Rust Debug Workflow\n\n1. Read error\n2. Fix".to_string(),
+            source: SkillSource::Blink,
+            dir_path: std::path::PathBuf::from("/tmp"),
+            source_cli_path: None,
+        }];
         let prompt = chat_system_prompt_with_skills(None, &summaries, &triggered);
         assert!(prompt.contains("已激活技能详情"));
         assert!(prompt.contains("Rust Debug Workflow"));
@@ -746,7 +762,12 @@ mod tests {
 
     #[test]
     fn chat_prompt_with_skills_combines_group_and_skills() {
-        let summaries = vec![make_summary("test", "Test skill", SkillSource::Blink, false)];
+        let summaries = vec![make_summary(
+            "test",
+            "Test skill",
+            SkillSource::Blink,
+            false,
+        )];
         let prompt = chat_system_prompt_with_skills(Some("你是助手"), &summaries, &[]);
         assert!(prompt.contains("分组指令"), "分组指令应保留");
         assert!(prompt.contains("可用技能"), "技能摘要应追加");

@@ -1,12 +1,10 @@
 //! mcp 域命令（0.14.6 §2.4 从 commands.rs 拆分）。
 
-use tauri::{Emitter, Manager};
 use crate::domain::event_names::EventNames;
+use tauri::{Emitter, Manager};
 /// 列出所有已配置的 MCP server（含状态）。
 #[tauri::command]
-pub async fn list_mcp_servers(
-    app: tauri::AppHandle,
-) -> Result<Vec<McpServerListItem>, String> {
+pub async fn list_mcp_servers(app: tauri::AppHandle) -> Result<Vec<McpServerListItem>, String> {
     let pools = app.state::<crate::infra::data::DbPools>();
     let configs = crate::domain::mcp::McpServerConfigStore::load_all(&pools.config)
         .await
@@ -18,12 +16,11 @@ pub async fn list_mcp_servers(
     let items = configs
         .into_iter()
         .map(|config| {
-            let status = statuses
-                .get(&config.name)
-                .cloned()
-                .unwrap_or(crate::domain::mcp::McpServerStatus::Offline {
+            let status = statuses.get(&config.name).cloned().unwrap_or(
+                crate::domain::mcp::McpServerStatus::Offline {
                     reason: "未启动".to_string(),
-                });
+                },
+            );
             McpServerListItem { config, status }
         })
         .collect();
@@ -43,17 +40,17 @@ pub async fn upsert_mcp_server(
         .map_err(|e| e.to_string())?;
 
     // 0.13.8: 广播配置变更事件
-    let _ = app.emit(EventNames::CONFIG_CHANGED, serde_json::json!({ "key": "mcp:servers" }));
+    let _ = app.emit(
+        EventNames::CONFIG_CHANGED,
+        serde_json::json!({ "key": "mcp:servers" }),
+    );
 
     Ok(())
 }
 
 /// 删除 MCP server 配置（同时停止已连接的 server）。
 #[tauri::command]
-pub async fn delete_mcp_server(
-    app: tauri::AppHandle,
-    name: String,
-) -> Result<(), String> {
+pub async fn delete_mcp_server(app: tauri::AppHandle, name: String) -> Result<(), String> {
     // 先停止 server（如果有连接）
     let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
     manager.stop_server(&name).await;
@@ -64,7 +61,10 @@ pub async fn delete_mcp_server(
         .map_err(|e| e.to_string())?;
 
     // 0.13.8: 广播配置变更事件
-    let _ = app.emit(EventNames::CONFIG_CHANGED, serde_json::json!({ "key": "mcp:servers" }));
+    let _ = app.emit(
+        EventNames::CONFIG_CHANGED,
+        serde_json::json!({ "key": "mcp:servers" }),
+    );
 
     Ok(())
 }
@@ -93,17 +93,17 @@ pub async fn set_mcp_server_enabled(
     }
 
     // 0.13.8: 广播配置变更事件，让对话窗口 popup 刷新
-    let _ = app.emit(EventNames::CONFIG_CHANGED, serde_json::json!({ "key": "mcp:servers" }));
+    let _ = app.emit(
+        EventNames::CONFIG_CHANGED,
+        serde_json::json!({ "key": "mcp:servers" }),
+    );
 
     Ok(())
 }
 
 /// 手动启动 MCP server。
 #[tauri::command]
-pub async fn start_mcp_server(
-    app: tauri::AppHandle,
-    name: String,
-) -> Result<(), String> {
+pub async fn start_mcp_server(app: tauri::AppHandle, name: String) -> Result<(), String> {
     let pools = app.state::<crate::infra::data::DbPools>();
     let configs = crate::domain::mcp::McpServerConfigStore::load_all(&pools.config)
         .await
@@ -119,10 +119,7 @@ pub async fn start_mcp_server(
 
 /// 手动停止 MCP server。
 #[tauri::command]
-pub async fn stop_mcp_server(
-    app: tauri::AppHandle,
-    name: String,
-) -> Result<(), String> {
+pub async fn stop_mcp_server(app: tauri::AppHandle, name: String) -> Result<(), String> {
     let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
     manager.stop_server(&name).await;
     Ok(())
@@ -130,10 +127,7 @@ pub async fn stop_mcp_server(
 
 /// 重连 MCP server（先停再启）。
 #[tauri::command]
-pub async fn reconnect_mcp_server(
-    app: tauri::AppHandle,
-    name: String,
-) -> Result<(), String> {
+pub async fn reconnect_mcp_server(app: tauri::AppHandle, name: String) -> Result<(), String> {
     let pools = app.state::<crate::infra::data::DbPools>();
     let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
     manager.reconnect_server(&name, &pools.config).await
@@ -193,12 +187,13 @@ pub async fn set_mcp_server_disabled_tools(
 
     // 更新运行时缓存
     let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
-    manager
-        .update_disabled_tools(&name, disabled_tools)
-        .await;
+    manager.update_disabled_tools(&name, disabled_tools).await;
 
     // 0.13.8: 广播配置变更事件
-    let _ = app.emit(EventNames::CONFIG_CHANGED, serde_json::json!({ "key": "mcp:servers" }));
+    let _ = app.emit(
+        EventNames::CONFIG_CHANGED,
+        serde_json::json!({ "key": "mcp:servers" }),
+    );
 
     Ok(())
 }
@@ -233,7 +228,10 @@ pub async fn import_mcp_from_agent(
 pub async fn import_mcp_from_json(
     json: String,
 ) -> Result<Vec<crate::domain::mcp::McpServerConfig>, String> {
-    crate::domain::mcp::import::parse_external_mcp_config(crate::domain::mcp::McpImportSource::Json, &json)
+    crate::domain::mcp::import::parse_external_mcp_config(
+        crate::domain::mcp::McpImportSource::Json,
+        &json,
+    )
 }
 
 /// 批量导入 server 配置（0.13.6）。
@@ -292,12 +290,8 @@ pub async fn batch_set_mcp_enabled(
 ) -> Result<(), String> {
     let pools = app.state::<crate::infra::data::DbPools>();
     for name in &names {
-        let _ = crate::domain::mcp::McpServerConfigStore::set_enabled(
-            &pools.config,
-            name,
-            enabled,
-        )
-        .await;
+        let _ = crate::domain::mcp::McpServerConfigStore::set_enabled(&pools.config, name, enabled)
+            .await;
     }
     Ok(())
 }
@@ -309,9 +303,7 @@ pub async fn batch_set_mcp_enabled(
 /// 对话窗口 init 时即可调用，不需要等用户发消息。
 /// 单个 server 连接失败只记状态（Offline），不影响其他 server。
 #[tauri::command]
-pub async fn ensure_mcp_connected(
-    app: tauri::AppHandle,
-) -> Result<(), String> {
+pub async fn ensure_mcp_connected(app: tauri::AppHandle) -> Result<(), String> {
     let pools = app.state::<crate::infra::data::DbPools>();
     let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
     manager.ensure_connected(&pools.config).await;
@@ -320,9 +312,7 @@ pub async fn ensure_mcp_connected(
 
 /// 获取对话窗口 tool 池规模（内置 + MCP，供前端显示）。
 #[tauri::command]
-pub async fn get_mcp_tool_pool_size(
-    app: tauri::AppHandle,
-) -> serde_json::Value {
+pub async fn get_mcp_tool_pool_size(app: tauri::AppHandle) -> serde_json::Value {
     let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
     // 0.13.8: 用轻量 count_tools() 替代 collect_tools().len()，
     // 避免仅为取一个数字就构造完整的 McpTool（clone + Box 分配）
@@ -341,9 +331,7 @@ pub async fn get_mcp_tool_pool_size(
 
 /// 获取所有已连接 MCP server 的 tool 名称列表（供前端区分工具来源）。
 #[tauri::command]
-pub async fn get_mcp_tool_names(
-    app: tauri::AppHandle,
-) -> Vec<String> {
+pub async fn get_mcp_tool_names(app: tauri::AppHandle) -> Vec<String> {
     let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
     manager.get_all_tool_names().await
 }
@@ -382,7 +370,6 @@ pub async fn set_mcp_server_config(
         .map_err(|e| e.to_string())
 }
 
-
 // ── 辅助类型（从 commands.rs 迁移）──
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -392,4 +379,3 @@ pub struct McpServerListItem {
     /// 运行时状态（online / offline / connecting）。
     pub status: crate::domain::mcp::McpServerStatus,
 }
-

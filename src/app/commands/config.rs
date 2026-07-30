@@ -1,7 +1,7 @@
 //! config 域命令（0.14.6 §2.4 从 commands.rs 拆分）。
 
-use tauri::{Emitter, Manager};
 use crate::domain::event_names::EventNames;
+use tauri::{Emitter, Manager};
 
 /// 获取完整配置。
 #[tauri::command]
@@ -367,7 +367,8 @@ pub async fn set_config(
             if let Some(chat) =
                 app.try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
             {
-                chat.update_memory_config(ai.chat_config.memory_config.clone()).await;
+                chat.update_memory_config(ai.chat_config.memory_config.clone())
+                    .await;
                 // 0.13.3: Skill 配置变更后刷新 Skill 注册表
                 if ai.chat_config.skill_config.enabled {
                     chat.refresh_skills(&ai.chat_config.skill_config.enabled_sources());
@@ -465,7 +466,10 @@ pub async fn set_config_section(
         .map_err(|e| format!("配置写入失败: {e}"))?;
 
     // 广播配置变更事件（前端各模块按 key 订阅）
-    if let Err(e) = app.emit(EventNames::CONFIG_CHANGED, serde_json::json!({ "key": key })) {
+    if let Err(e) = app.emit(
+        EventNames::CONFIG_CHANGED,
+        serde_json::json!({ "key": key }),
+    ) {
         tracing::debug!(error = %e, "emit blink://config-changed failed");
     }
 

@@ -186,8 +186,8 @@ async fn await_dangerous_confirm(
     request_id: u64,
     conversation_id: &str,
 ) -> ConfirmOutcome {
-        emit_dangerous_confirm(
-            env,
+    emit_dangerous_confirm(
+        env,
         confirm_id,
         tool_name,
         tool_type,
@@ -226,8 +226,7 @@ async fn check_dangerous_confirm(
         return None;
     }
 
-    let (req_id, conv_id) =
-        crate::domain::ai::chat_service::current_request_context_from_env(env);
+    let (req_id, conv_id) = crate::domain::ai::chat_service::current_request_context_from_env(env);
 
     // 对话级信任：用户已确认过的危险操作自动放行，不再弹窗
     if pending.is_trusted(&conv_id, tool_name).await {
@@ -242,15 +241,7 @@ async fn check_dangerous_confirm(
     tracing::warn!(%tool_name, "危险操作被 AI 调用，挂起等待用户确认");
     let (confirm_id, rx) = pending.register().await;
     match await_dangerous_confirm(
-        pending,
-        env,
-        confirm_id,
-        rx,
-        tool_name,
-        tool_type,
-        args_value,
-        req_id,
-        &conv_id,
+        pending, env, confirm_id, rx, tool_name, tool_type, args_value, req_id, &conv_id,
     )
     .await
     {
@@ -260,15 +251,11 @@ async fn check_dangerous_confirm(
             pending.trust(&conv_id, tool_name).await;
             None
         }
-        ConfirmOutcome::Rejected => Some(Ok(format!(
-            "用户拒绝了操作: {tool_name}（未执行）"
-        ))),
+        ConfirmOutcome::Rejected => Some(Ok(format!("用户拒绝了操作: {tool_name}（未执行）"))),
         ConfirmOutcome::Timeout => Some(Ok(format!(
             "确认超时（{DANGEROUS_CONFIRM_TIMEOUT_SECS}秒未响应），未执行: {tool_name}"
         ))),
-        ConfirmOutcome::Dropped => Some(Ok(format!(
-            "确认信号异常，未执行: {tool_name}"
-        ))),
+        ConfirmOutcome::Dropped => Some(Ok(format!("确认信号异常，未执行: {tool_name}"))),
     }
 }
 
@@ -796,9 +783,18 @@ mod tests {
     fn ai_tool_pool_only_contains_capabilities() {
         let cap_reg = CapabilityRegistry::default();
         // 0.14.2 新增的 3 个 Capability 应在注册表中
-        assert!(cap_reg.get("open_url").is_some(), "open_url 应注册为 Capability");
-        assert!(cap_reg.get("open_path").is_some(), "open_path 应注册为 Capability");
-        assert!(cap_reg.get("reveal_in_explorer").is_some(), "reveal_in_explorer 应注册为 Capability");
+        assert!(
+            cap_reg.get("open_url").is_some(),
+            "open_url 应注册为 Capability"
+        );
+        assert!(
+            cap_reg.get("open_path").is_some(),
+            "open_path 应注册为 Capability"
+        );
+        assert!(
+            cap_reg.get("reveal_in_explorer").is_some(),
+            "reveal_in_explorer 应注册为 Capability"
+        );
     }
 
     /// 0.14.2 验收点：9 个保留 Action 不出现在 AI tool 池。
@@ -941,5 +937,4 @@ mod tests {
         assert!(text.contains("result1"));
         assert!(text.contains("/test"));
     }
-
 }

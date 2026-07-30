@@ -294,7 +294,9 @@ mod tests {
             items: vec![ItemResult {
                 data: json!({ "path": "C:\\docs\\report.pdf", "name": "report.pdf" }),
                 desc: Some("C:\\docs".into()),
-                actions: vec![ItemAction::OpenFile { pointer: Some("$.path".into()) }],
+                actions: vec![ItemAction::OpenFile {
+                    pointer: Some("$.path".into()),
+                }],
             }],
         };
         let v = serde_json::to_value(&r).unwrap();

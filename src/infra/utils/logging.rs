@@ -5,9 +5,9 @@
 //! - 级别：EnvFilter + reload，默认 error，update_level 运行时切换（设置页触发）。
 
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 use tracing_appender::non_blocking::WorkerGuard;
@@ -163,7 +163,9 @@ fn parse_level(level: &str) -> String {
     };
     match level {
         "trace" => {
-            format!("trace,sqlx=warn,tauri=warn,tao=warn,hyper=warn,reqwest=warn,rmcp=warn,{ai_noise}")
+            format!(
+                "trace,sqlx=warn,tauri=warn,tao=warn,hyper=warn,reqwest=warn,rmcp=warn,{ai_noise}"
+            )
         }
         "debug" => format!("debug,sqlx=warn,tauri=warn,rmcp=warn,{ai_noise}"),
         "info" => format!("info,sqlx=warn,tauri=warn,rmcp=warn,{ai_noise}"),

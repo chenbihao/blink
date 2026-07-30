@@ -24,8 +24,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
-use crate::domain::config::ai_config::{AIConfig, ModelEntry, ProviderEntry, ProviderKind, Tier};
 use crate::domain::ai::provider::{AIError, AIProvider};
+use crate::domain::config::ai_config::{AIConfig, ModelEntry, ProviderEntry, ProviderKind, Tier};
 
 /// Provider 构造工厂——把 `ProviderEntry` + `ModelEntry` 变成 `Arc<dyn AIProvider>`。
 ///
@@ -357,10 +357,10 @@ impl AIProviderRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::ai::provider::tests::MockProvider;
     use crate::domain::config::ai_config::{
         ModelCapability, ModelEntry, ProviderEntry, ProviderKind, TierAssignment,
     };
-    use crate::domain::ai::provider::tests::MockProvider;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// 计数每次 build 被调多少次——验证热更新的"复用未变动实例"能力。
@@ -656,7 +656,10 @@ mod tests {
         let f = Arc::new(CountingFactory::new());
         let reg = AIProviderRegistry::new(f);
         // tier_router 指向 m1,便于对比 cache_key
-        reg.reload(&make_config(vec![("p1", vec!["m1", "m2"])], Some(("p1", "m1"))));
+        reg.reload(&make_config(
+            vec![("p1", vec!["m1", "m2"])],
+            Some(("p1", "m1")),
+        ));
 
         let entries = reg.resolve_explicit_entries("p1", "m2").unwrap();
         assert_eq!(entries.provider.id, "p1");
@@ -664,8 +667,14 @@ mod tests {
         // 显式解析的 cache_key 与 tier 解析的 cache_key 第三段(fingerprint)应一致,
         // 因为同一 provider 的 fingerprint 不变;前两段按各自 (pid, mid) 不同。
         let tier_entries = reg.resolve_entries(Tier::Router).unwrap();
-        assert_eq!(entries.cache_key.0, tier_entries.cache_key.0, "provider id 应同");
-        assert_eq!(entries.cache_key.2, tier_entries.cache_key.2, "fingerprint 应同");
+        assert_eq!(
+            entries.cache_key.0, tier_entries.cache_key.0,
+            "provider id 应同"
+        );
+        assert_eq!(
+            entries.cache_key.2, tier_entries.cache_key.2,
+            "fingerprint 应同"
+        );
         assert_eq!(tier_entries.cache_key.1, "m1");
         assert_eq!(entries.cache_key.1, "m2");
     }

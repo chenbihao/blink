@@ -23,12 +23,12 @@
 
 use std::sync::Arc;
 
+use rmcp::ServiceExt;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, Content, Implementation, InitializeResult,
     ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer};
-use rmcp::ServiceExt;
 use serde_json::Value;
 
 use crate::domain::capability::{CapabilityRegistry, CapabilityResult, InvokeContext};
@@ -93,10 +93,7 @@ impl BlinkMcpServer {
 
     /// 按 name 查找 tool 定义（供 `get_tool` 用）。
     fn find_tool(&self, name: &str) -> Option<Tool> {
-        self.cached_tools
-            .iter()
-            .find(|t| t.name == name)
-            .cloned()
+        self.cached_tools.iter().find(|t| t.name == name).cloned()
     }
 
     /// 把 CapabilityResult 投影为 MCP CallToolResult。
@@ -109,9 +106,7 @@ impl BlinkMcpServer {
     /// - `Blob` → 文本摘要（不传原始字节，与 rig 投影策略一致）
     /// - `Done` → summary 文本
     fn result_to_call_tool_result(result: CapabilityResult) -> CallToolResult {
-        let text = crate::domain::capability::rig_tool_result_to_text(
-            &result.to_rig_tool_result(),
-        );
+        let text = crate::domain::capability::rig_tool_result_to_text(&result.to_rig_tool_result());
         CallToolResult::success(vec![Content::text(text)])
     }
 
@@ -205,9 +200,9 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
                         &tool_name_for_audit,
                         &args_for_audit,
                         &summary,
-                        "", // provider_kind — MCP 外部调用无 provider
-                        "", // model_id — MCP 外部调用无模型
-                        1,  // turn
+                        "",             // provider_kind — MCP 外部调用无 provider
+                        "",             // model_id — MCP 外部调用无模型
+                        1,              // turn
                         "mcp_external", // caller — 外部 MCP client 调用
                     )
                     .await;
@@ -351,7 +346,10 @@ mod tests {
         let projected = BlinkMcpServer::result_to_call_tool_result(result);
         assert_eq!(projected.content.len(), 1);
         // 文本摘要应包含 mime 类型和大小
-        let text = projected.content[0].as_text().map(|t| t.text.as_str()).unwrap_or("");
+        let text = projected.content[0]
+            .as_text()
+            .map(|t| t.text.as_str())
+            .unwrap_or("");
         assert!(text.contains("image/png"));
         assert!(text.contains("KB"));
     }
@@ -368,7 +366,10 @@ mod tests {
         };
         let projected = BlinkMcpServer::result_to_call_tool_result(result);
         assert_eq!(projected.content.len(), 1);
-        let text = projected.content[0].as_text().map(|t| t.text.as_str()).unwrap_or("");
+        let text = projected.content[0]
+            .as_text()
+            .map(|t| t.text.as_str())
+            .unwrap_or("");
         assert!(text.contains("file.txt"));
     }
 
@@ -380,7 +381,10 @@ mod tests {
         use crate::domain::capability::{CapabilityResult, ItemResult};
 
         // Text → Content::text
-        let result = CapabilityResult::Text { content: "hello".into(), desc: None };
+        let result = CapabilityResult::Text {
+            content: "hello".into(),
+            desc: None,
+        };
         let projected = BlinkMcpServer::result_to_call_tool_result(result);
         assert_eq!(projected.is_error, Some(false));
         assert_eq!(projected.content.len(), 1);
@@ -388,7 +392,9 @@ mod tests {
         assert_eq!(text, "hello");
 
         // Done → Content::text(summary)
-        let result = CapabilityResult::Done { summary: "已完成".into() };
+        let result = CapabilityResult::Done {
+            summary: "已完成".into(),
+        };
         let projected = BlinkMcpServer::result_to_call_tool_result(result);
         assert_eq!(projected.content.len(), 1);
         let text = projected.content[0].as_text().unwrap().text.clone();
@@ -442,13 +448,18 @@ mod tests {
             let tool = Tool::new(
                 "echo".to_string(),
                 "Echo back the input".to_string(),
-                std::sync::Arc::new(serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "message": { "type": "string", "description": "Message to echo" }
-                    },
-                    "required": ["message"]
-                }).as_object().cloned().unwrap_or_default()),
+                std::sync::Arc::new(
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "message": { "type": "string", "description": "Message to echo" }
+                        },
+                        "required": ["message"]
+                    })
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default(),
+                ),
             );
             Self { tools: vec![tool] }
         }
@@ -459,7 +470,8 @@ mod tests {
             let mut caps = ServerCapabilities::default();
             caps.tools = Some(Default::default());
             let mut info = InitializeResult::new(caps);
-            info.server_info = Implementation::new("blink-test-server".to_string(), "0.0.0-test".to_string());
+            info.server_info =
+                Implementation::new("blink-test-server".to_string(), "0.0.0-test".to_string());
             info
         }
 
@@ -554,10 +566,7 @@ mod tests {
 
         assert_eq!(tools.len(), 1, "应返回 1 个 tool");
         assert_eq!(tools[0].name, "echo");
-        assert_eq!(
-            tools[0].description.as_deref(),
-            Some("Echo back the input")
-        );
+        assert_eq!(tools[0].description.as_deref(), Some("Echo back the input"));
 
         // 2. call_tool("echo", {message: "hello blink"}) → 验证返回 "hello blink"
         // 用 rig McpTool 封装（与生产代码 collect_tools() 同路径）
@@ -611,13 +620,9 @@ mod tests {
             "Does not exist".to_string(),
             std::sync::Arc::new(serde_json::Map::new()),
         );
-        let mcp_tool = rig_core::tool::rmcp::McpTool::from_mcp_server(
-            fake_tool,
-            service.peer().clone(),
-        );
-        let result = mcp_tool
-            .call(serde_json::Value::Null.to_string())
-            .await;
+        let mcp_tool =
+            rig_core::tool::rmcp::McpTool::from_mcp_server(fake_tool, service.peer().clone());
+        let result = mcp_tool.call(serde_json::Value::Null.to_string()).await;
         // server 返回错误，McpTool 应转为 ToolError
         assert!(result.is_err(), "调用不存在的 tool 应失败");
 

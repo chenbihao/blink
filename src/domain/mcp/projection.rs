@@ -48,10 +48,7 @@ pub fn capability_schema_to_mcp_tool(schema: &CapabilitySchema) -> Tool {
 
 /// 批量正向投影：`Vec<CapabilitySchema> → Vec<rmcp::model::Tool>`。
 pub fn capability_schemas_to_mcp_tools(schemas: &[CapabilitySchema]) -> Vec<Tool> {
-    schemas
-        .iter()
-        .map(capability_schema_to_mcp_tool)
-        .collect()
+    schemas.iter().map(capability_schema_to_mcp_tool).collect()
 }
 
 // ── 单测 ───────────────────────────────────────────────────────────────────────

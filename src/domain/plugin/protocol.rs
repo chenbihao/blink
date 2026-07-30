@@ -227,10 +227,7 @@ pub struct PluginRawResult {
 impl PluginRawResult {
     /// 构造一个成功的纯数据结果。
     pub fn ok(data: serde_json::Value) -> Self {
-        PluginRawResult {
-            data,
-            error: None,
-        }
+        PluginRawResult { data, error: None }
     }
 
     /// 构造一个错误结果。
@@ -580,7 +577,8 @@ mod tests {
     #[test]
     fn plugin_raw_result_parses_array_data() {
         // IP 插件场景：data 是数组
-        let json = r#"{"data":[{"ip":"192.168.1.1","type":"本地"},{"ip":"8.8.8.8","type":"公网"}]}"#;
+        let json =
+            r#"{"data":[{"ip":"192.168.1.1","type":"本地"},{"ip":"8.8.8.8","type":"公网"}]}"#;
         let r: PluginRawResult = serde_json::from_str(json).unwrap();
         assert!(r.data.is_array());
         assert_eq!(r.data.as_array().unwrap().len(), 2);
