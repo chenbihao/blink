@@ -3,8 +3,8 @@
  * 包含：四库统计（config / history / ai / cache）+ 清理操作 + 打开文件夹
  */
 
-import { invoke } from "../../tauri.js";
-import { confirmDialog } from "../../tauri.js";
+import { invoke } from "../../shared/tauri.js";
+import { confirmDialog } from "../../shared/tauri.js";
 import { t, onLangChange } from "../../i18n/index.js";
 
 /**

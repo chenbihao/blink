@@ -9,7 +9,7 @@
 /* global marked, DOMPurify */
 
 import { escapeText } from "./utils.js";
-import { invoke } from "../tauri.js";
+import { invoke } from "../shared/tauri.js";
 
 /** @type {boolean} marked 和 DOMPurify 是否可用 */
 let ready = false;

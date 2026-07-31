@@ -110,7 +110,7 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 
 > 0.14 §8.2 确立并落地。
 
-**铁则**：前端 invoke **单一 import 来源** = `frontend/js/tauri.js`。
+**铁则**：前端 invoke **单一 import 来源** = `frontend/js/shared/tauri.js`。
 
 - **禁止**绕过桥接直接戳 `window.__TAURI__`
 - **禁止**各文件重复 `window.__TAURI__?.core?.invoke ?? ...` 兼容逻辑

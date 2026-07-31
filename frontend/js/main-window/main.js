@@ -8,9 +8,9 @@ import * as ghost from "./ghost.js";
 import * as statusbar from "./statusbar.js";
 import * as autosuggestConfig from "./autosuggest-config.js";
 import * as chord from "./chord.js";
-import { applyThemeFromConfig, applyGlassOpacityFromConfig } from "./theme.js";
-import { applyI18nFromConfig } from "./i18n/index.js";
-import { ensureSpriteLoaded } from "./icon.js";
+import { applyThemeFromConfig, applyGlassOpacityFromConfig } from "../shared/theme.js";
+import { applyI18nFromConfig } from "../i18n/index.js";
+import { ensureSpriteLoaded } from "../shared/icon.js";
 
 // 图标 sprite：早注入，让后续 init() 拼 DOM 时 <use href> 可解析
 // （fire-and-forget，失败降级为无图标，不阻塞主流程 —— 见 icon.js catch 分支）

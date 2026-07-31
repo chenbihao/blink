@@ -10,7 +10,7 @@
 import { aiState, saveAIConfig, fetchAvailableModelsFor, escapeHtml, escapeAttr } from "./state.js";
 import { renderAITierSelects, renderAITierBanner } from "./tier.js";
 import { t } from "../../../i18n/index.js";
-import { iconHTML } from "../../../icon.js";
+import { iconHTML } from "../../../shared/icon.js";
 
 /**
  * 打开模型编辑 modal。modelId 为 null 时是"新增"模式。

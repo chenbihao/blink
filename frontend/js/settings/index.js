@@ -5,10 +5,10 @@
  * 0.9.5 前端架构重整：从 settings.js（4169行）拆分为模块化结构
  */
 
-import { invoke } from "../tauri.js";
-import { applyTheme } from "../theme.js";
+import { invoke } from "../shared/tauri.js";
+import { applyTheme } from "../shared/theme.js";
 import { t, applyI18n, setLang } from "../i18n/index.js";
-import { ensureSpriteLoaded } from "../icon.js";
+import { ensureSpriteLoaded } from "../shared/icon.js";
 import { loadConfig, hideSettingsWindow } from "./shared/ipc.js";
 import { setCurrentConfig } from "./shared/state.js";
 import { initGeneralTab } from "./tabs/general.js";

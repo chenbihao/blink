@@ -4,7 +4,7 @@
 //! 返回 `{ template, params }` 二元组供 `renderHint` 走键帽渲染——
 //! template 里的 `{{key:Enter}}` 会被替换成 <kbd> Element，`{label}` 走参数注入。
 
-import { t } from "./i18n/index.js";
+import { t } from "../i18n/index.js";
 
 /** 各 action.kind 默认动作名的 i18n key（Enter 后接）。 */
 const KIND_KEY = {

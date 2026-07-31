@@ -7,7 +7,7 @@
 //! 语言来源：AppConfig.language（"zh" | "en"），由 applyI18nFromConfig() 异步读取。
 //! 降级：t() 找不到 key → 回退 zh → 再回退到 key 本身，永不抛异常。
 
-import { invoke } from "../tauri.js";
+import { invoke } from "../shared/tauri.js";
 import { zh } from "./zh.js";
 import { en } from "./en.js";
 

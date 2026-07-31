@@ -1,15 +1,15 @@
 //! 窗口生命周期：响应后端 blink://shown / blink://hidden，复位输入与列表。
 
-import { listen } from "./tauri.js";
-import { EVENTS } from "./event-names.js";
+import { listen } from "../shared/tauri.js";
+import { EVENTS } from "../shared/event-names.js";
 import { queryEl } from "./dom.js";
 import * as results from "./results.js";
 import * as search from "./search.js";
 import * as chord from "./chord.js";
 import * as ghost from "./ghost.js";
 import { clearAlt, startAltPoll, stopAltPoll, recheckAlt } from "./keyboard.js";
-import { applyThemeFromConfig, applyGlassOpacityFromConfig } from "./theme.js";
-import { applyI18nFromConfig, t } from "./i18n/index.js";
+import { applyThemeFromConfig, applyGlassOpacityFromConfig } from "../shared/theme.js";
+import { applyI18nFromConfig, t } from "../i18n/index.js";
 
 /** 注册生命周期事件监听。 */
 export function init() {

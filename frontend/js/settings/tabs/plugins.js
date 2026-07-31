@@ -6,10 +6,10 @@
  * 命令名 list_plugins 与容器 plugins-list 均不存在导致页面空白；0.9.5.1 还原原版
  * get_plugins + plugins-container + 整套 schema/触发词/拖拽）。
  */
-import { invoke } from "../../tauri.js";
+import { invoke } from "../../shared/tauri.js";
 import { t, onLangChange } from "../../i18n/index.js";
-import { iconHTML } from "../../icon.js";
-import { saveConfig } from "../../config-keys.js";
+import { iconHTML } from "../../shared/icon.js";
+import { saveConfig } from "../../shared/config-keys.js";
 
 /** 内置动作图标映射（0.10.8：emoji → Lucide 图标名） */
 const BUILTIN_ACTION_ICONS = {

@@ -13,9 +13,9 @@ import { escapeText, escapeAttr } from "./utils.js";
 // 0.12.7 §6.3：显式导入 renderSignal，多处场景接入
 import { initComposer, setStreamingMode, setInputMode, clearInput, focusInput, setThinkingEnabled as setComposerThinking, showVoiceIndicator, hideVoiceIndicator, showVoiceStatus, updateVoiceLevel, updateVoicePartial, isVoiceRecording } from "./composer.js";
 import { initSidebar, refreshSidebar, showSidebar, hideSidebar, toggleSidebar, setActiveConversation } from "./sidebar.js";
-import { applyThemeFromConfig } from "../theme.js";
-import { listen, invoke, getCurrentWindow } from "../tauri.js";
-import { EVENTS } from "../event-names.js";
+import { applyThemeFromConfig } from "../shared/theme.js";
+import { listen, invoke, getCurrentWindow } from "../shared/tauri.js";
+import { EVENTS } from "../shared/event-names.js";
 import { initComposerBarPopup, invalidateComposerBarCache, refreshPopupIfVisible } from "./composer-bar-popup.js";
 // invalidateComposerBarCache 仍在 handleContextStatus 中使用
 // 0.12.4 §6.5：openSettings 直接用 invoke，不再需要动态 import

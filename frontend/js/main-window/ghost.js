@@ -28,7 +28,7 @@
 //! - 0.8.3 Context 类同理：Context 命中不进 route()（不产 candidate），只出 Ghost。
 
 import { queryEl } from "./dom.js";
-import { invoke } from "./api.js";
+import { invoke } from "../shared/api.js";
 import * as search from "./search.js";
 
 // 当前 suggestion，形如 { display, replacement, source, confidence, prefixLen }

@@ -6,9 +6,9 @@
  * 与其它自动保存卡片（context / general / chord）一致。
  */
 
-import { invoke, messageDialog } from "../../tauri.js";
+import { invoke, messageDialog } from "../../shared/tauri.js";
 import { t, onLangChange } from "../../i18n/index.js";
-import { saveConfig } from "../../config-keys.js";
+import { saveConfig } from "../../shared/config-keys.js";
 
 /**
  * 初始化搜索引擎 Tab

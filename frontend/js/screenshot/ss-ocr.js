@@ -13,8 +13,8 @@ import { enterReadingMode } from './ss-reading.js';
 import * as annot from './annotation-engine.js';
 import {
   ocrImage, translateText, translateLines, copyToClipboard,
-} from './api.js';
-import { normalizeError } from './tauri.js';
+} from '../shared/api.js';
+import { normalizeError } from '../shared/tauri.js';
 
 // ════════════════════════════════════════════════════════════
 //  UI Helpers

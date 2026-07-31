@@ -7,7 +7,7 @@ import * as annot from './annotation-engine.js';
 import {
   screenshotCopy, screenshotCopyRegion, screenshotPin, screenshotSave,
   screenshotCancel, hideScreenshotOverlay,
-} from './api.js';
+} from '../shared/api.js';
 import { showTransientHint, hideSelLoading } from './ss-ocr.js';
 
 export function ensureOutputReady() {

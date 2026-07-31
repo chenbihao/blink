@@ -189,7 +189,7 @@ pub struct SuggestionArbiter { producers: Vec<Arc<dyn SuggestionProducer>> }
 
 `DisableConfig` 单独一片:后续加新黑名单类型(如 `disabled_ai_providers`)有归宿,不用穿透到其他片。
 
-**前端 API**:泛型 `get_config(key) / set_config(key, value)` 命令 + `frontend/js/config-keys.js` 维护 key 常量表 + `blink://config-changed` 广播(各模块按 key 订阅)。取代散落 20+ 个 `update_*` 专用命令。
+**前端 API**:泛型 `get_config(key) / set_config(key, value)` 命令 + `frontend/js/shared/config-keys.js` 维护 key 常量表 + `blink://config-changed` 广播(各模块按 key 订阅)。取代散落 20+ 个 `update_*` 专用命令。
 
 > 三个入口的落地(0.8.6 架构固化)见 [phases/0.8 §八](../phases/0.8-context-interaction.md)。
 

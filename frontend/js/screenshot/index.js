@@ -32,11 +32,11 @@
 import {
   screenshotSetAnnotationMode, hideScreenshotOverlay,
   ocrImage, frontendLog, invoke,
-} from "./api.js";
-import { normalizeError } from "./tauri.js";
+} from "../shared/api.js";
+import { normalizeError } from "../shared/tauri.js";
 import * as annot from "./annotation-engine.js";
-import { ensureSpriteLoaded } from "./icon.js";
-import { applyThemeFromConfig } from "./theme.js";
+import { ensureSpriteLoaded } from "../shared/icon.js";
+import { applyThemeFromConfig } from "../shared/theme.js";
 
 // ── 子模块 ──────────────────────────────────────────────
 import { ss, initDOM, PREWARM_MIN_WIDTH, PREWARM_MIN_HEIGHT } from "./ss-state.js";

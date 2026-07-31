@@ -3,10 +3,10 @@
  * 包含：HTTP/HTTPS 代理配置
  */
 
-import { invoke } from "../../tauri.js";
+import { invoke } from "../../shared/tauri.js";
 import { t, onLangChange } from "../../i18n/index.js";
-import { iconHTML } from "../../icon.js";
-import { saveConfig } from "../../config-keys.js";
+import { iconHTML } from "../../shared/icon.js";
+import { saveConfig } from "../../shared/config-keys.js";
 
 /**
  * 初始化网络设置 Tab

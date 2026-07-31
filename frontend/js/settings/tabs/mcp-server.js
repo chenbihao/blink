@@ -8,7 +8,7 @@
  * - set_mcp_server_config — 保存配置
  * - list_exposable_capabilities — 列出所有可暴露的 Capability
  */
-import { invoke } from "../../tauri.js";
+import { invoke } from "../../shared/tauri.js";
 import { t } from "../../i18n/index.js";
 
 /**

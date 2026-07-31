@@ -4,8 +4,8 @@
 //! 且未来动作类型会增多（插件动作、文件打开等）——集中在此便于扩展。
 //! 行为由后端提供的 action.kind 驱动，与提示栏（hints.js）同源，语义一致。
 
-import { launchApp, runBuiltinAction, confirmAiAction, hideWindow, recordClipboardHit } from "./api.js";
-import { normalizeError } from "./tauri.js";
+import { launchApp, runBuiltinAction, confirmAiAction, hideWindow, recordClipboardHit } from "../shared/api.js";
+import { normalizeError } from "../shared/tauri.js";
 
 /**
  * 激活一个结果项。

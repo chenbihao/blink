@@ -14,9 +14,9 @@
  *   后端录制期间 `is_recording()` 短路在 chord 吞键之前，能正常录到 Alt+字母。
  * - tooltip 直接用 t() 渲染 title 属性（动态生成 HTML 不走 applyI18n）。
  */
-import { invoke } from "../../tauri.js";
+import { invoke } from "../../shared/tauri.js";
 import { t, onLangChange } from "../../i18n/index.js";
-import { saveConfig } from "../../config-keys.js";
+import { saveConfig } from "../../shared/config-keys.js";
 
 /**
  * 初始化 Chord 动作 Tab

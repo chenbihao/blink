@@ -116,7 +116,7 @@
 
 ### 4.1 键盘提示样式统一（强制）
 
-**唯一真源**：`frontend/css/kbd.css` + `frontend/js/kbd.js`。修改键位视觉只改这两个文件，业务模块不允许再造轮子。
+**唯一真源**：`frontend/css/kbd.css` + `frontend/js/shared/kbd.js`。修改键位视觉只改这两个文件，业务模块不允许再造轮子。
 
 | 场景 | 生成路径 | 反面 |
 |---|---|---|
@@ -131,7 +131,7 @@
 
 **铁则**：UI 占位一律走 **Lucide sprite**，禁用 emoji 字符。这条是防回退铁则——图标包已落地，但需文档钉死防止新代码重新引入 emoji。
 
-**API**（`frontend/js/icon.js`）：
+**API**（`frontend/js/shared/icon.js`）：
 - `renderIcon(name, opts)` / `iconHTML(name)` / `ensureSpriteLoaded()`
 - 样式（`frontend/css/components/icon.css`）：`.icon { width/height: 1em; stroke: currentColor; fill: none; stroke-width: 1.75 }`——尺寸跟 `font-size`、颜色跟主题 `currentColor`，零主题适配
 - 引用：`<svg class="icon"><use href="#icon-{name}"/></svg>`
@@ -181,7 +181,7 @@
 
 - 实现模式：`mouseleave` 启动关闭 timer → `mouseenter` clear timer。**不裸绑即时隐藏**
 - 典型场景：截图工具栏、OCR 面板、钉图窗口、误点保护（点选区外 `setTimeout(…,0)` 延迟绑定关闭监听）
-- 参考实现：`frontend/js/chord-screenshot.js` 的 `singleClickTimeout` / `mouseleave` 状态清理模式
+- 参考实现：`frontend/js/screenshot/index.js` 的 `singleClickTimeout` / `mouseleave` 状态清理模式
 
 ---
 

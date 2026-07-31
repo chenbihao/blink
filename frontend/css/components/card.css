@@ -1,7 +1,7 @@
 /* ── 卡片组件 ──────────────────────────────────────────────────────────────
    只保留跨窗口可复用的扩展卡片骨架。
    AI 供应商卡片(.ai-provider-card)、调试卡片(.debug-card)、设置行(.setting-row)
-   均为页面级样式，分别见 views/settings-ai.css、views/settings-debug.css、views/settings.css。
+   均为页面级样式，分别见 views/settings/settings-ai.css、views/settings/settings-debug.css、views/settings/settings.css。
    页面级 views 后加载，可对本组件做特化覆盖（如 radius）。 */
 
 /* 扩展卡片 */

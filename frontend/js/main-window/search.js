@@ -4,9 +4,9 @@
 //! Context Suggestion 走 Ghost + Tab 采纳,不再抢首屏。
 
 import { queryEl } from "./dom.js";
-import { searchApps } from "./api.js";
-import { listen } from "./tauri.js";
-import { EVENTS } from "./event-names.js";
+import { searchApps } from "../shared/api.js";
+import { listen } from "../shared/tauri.js";
+import { EVENTS } from "../shared/event-names.js";
 import * as results from "./results.js";
 import * as ghost from "./ghost.js";
 

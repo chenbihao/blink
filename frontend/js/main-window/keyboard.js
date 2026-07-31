@@ -1,7 +1,7 @@
 //! 键盘交互：结果导航、激活、ESC 隐藏、修饰键默认行为屏蔽。
 //! 0.8.1：Tab / ArrowRight 拦截接受 ghost text 补全（视配置 autosuggest_tab_key）。
 
-import { hideWindow, triggerChord, isAltDown, setChordMode } from "./api.js";
+import { hideWindow, triggerChord, isAltDown, setChordMode } from "../shared/api.js";
 import { activateItem } from "./actions.js";
 import * as results from "./results.js";
 import * as ghost from "./ghost.js";

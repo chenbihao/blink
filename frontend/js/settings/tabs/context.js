@@ -3,10 +3,10 @@
  * 包含：剪贴板、选中文本、敏感应用配置、Context 触发规则
  */
 
-import { invoke } from "../../tauri.js";
+import { invoke } from "../../shared/tauri.js";
 import { t, onLangChange } from "../../i18n/index.js";
-import { iconHTML } from "../../icon.js";
-import { saveConfig } from "../../config-keys.js";
+import { iconHTML } from "../../shared/icon.js";
+import { saveConfig } from "../../shared/config-keys.js";
 import { getCurrentConfig } from "../shared/state.js";
 
 /** 防止重复注册 onLangChange（initContextTab 可能被多次调用） */

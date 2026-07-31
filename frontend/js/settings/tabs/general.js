@@ -3,9 +3,9 @@
  * 包含：主题、语言、自动启动、搜索历史、结果数等
  */
 
-import { applyTheme } from "../../theme.js";
+import { applyTheme } from "../../shared/theme.js";
 import { t, applyI18n, setLang } from "../../i18n/index.js";
-import { saveConfig } from "../../config-keys.js";
+import { saveConfig } from "../../shared/config-keys.js";
 import { getCurrentConfig } from "../shared/state.js";
 import { loadConfig } from "../shared/ipc.js";
 

@@ -17,9 +17,9 @@
  * - set_mcp_server_disabled_tools — 更新 tool 可见性
  * - get_mcp_tool_pool_size — 获取 tool 池规模
  */
-import { invoke, confirmDialog, messageDialog } from "../../tauri.js";
+import { invoke, confirmDialog, messageDialog } from "../../shared/tauri.js";
 import { t } from "../../i18n/index.js";
-import { iconHTML } from "../../icon.js";
+import { iconHTML } from "../../shared/icon.js";
 
 /**
  * 初始化 MCP Tab

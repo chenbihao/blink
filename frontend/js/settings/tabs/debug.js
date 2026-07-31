@@ -4,8 +4,8 @@
  *
  * perf 部分搬自原 settings.js loadPerfStats/renderPerfStats 等（0.9.5 拆分时被残缺重写，0.9.5.1 还原）。
  */
-import { invoke, confirmDialog } from "../../tauri.js";
-import { saveConfig } from "../../config-keys.js";
+import { invoke, confirmDialog } from "../../shared/tauri.js";
+import { saveConfig } from "../../shared/config-keys.js";
 import { t, onLangChange } from "../../i18n/index.js";
 import { getCurrentConfig } from "../shared/state.js";
 

@@ -9,8 +9,8 @@ import { resultsEl } from "./dom.js";
 import { syncWindowSize } from "./window-size.js";
 import { activateItem } from "./actions.js";
 import * as statusbar from "./statusbar.js";
-import { invoke } from "./tauri.js";
-import { renderIcon } from "./icon.js";
+import { invoke } from "../shared/tauri.js";
+import { renderIcon } from "../shared/icon.js";
 
 /** 每页条数（对齐 Alt+1~9：每页都能用数字键选中）。 */
 let PAGE_SIZE = 9;

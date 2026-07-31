@@ -31,6 +31,6 @@
 @import '../components/voice-wave.css';
 
 /* views（Step 5 拆分 style.css） */
-@import '../views/main-window.css';
-@import '../views/result-item.css';
-@import '../views/statusbar.css';
+@import '../views/main-window/main-window.css';
+@import '../views/main-window/result-item.css';
+@import '../views/main-window/statusbar.css';

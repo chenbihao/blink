@@ -4,7 +4,7 @@
 //! 缓存到内存供 keyboard.js 判断"接受补全键"。设置页保存后可主动调 `refresh()`
 //! 更新（也可以直接 setKey()——设置页知道用户选了什么）。
 
-import { invoke } from "./tauri.js";
+import { invoke } from "../shared/tauri.js";
 
 let tabKey = "Tab"; // 默认
 

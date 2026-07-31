@@ -12,8 +12,8 @@
  * - 服务：funasr-server（OpenAI 兼容 API, localhost:8000）
  * - 模型：FunASR 自动管理（首次启动时从 ModelScope 自动下载）
  */
-import { invoke, listen, confirmDialog } from "../../tauri.js";
-import { EVENTS } from "../../event-names.js";
+import { invoke, listen, confirmDialog } from "../../shared/tauri.js";
+import { EVENTS } from "../../shared/event-names.js";
 import { t, onLangChange, getLang } from "../../i18n/index.js";
 
 /**

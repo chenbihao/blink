@@ -327,7 +327,7 @@ async function checkSkillHint() {
   const now = Date.now();
   if (!cachedSkills || now > skillCacheExpiry) {
     try {
-      const { invoke } = await import("../tauri.js");
+      const { invoke } = await import("../shared/tauri.js");
       cachedSkills = await invoke("list_skills");
       skillCacheExpiry = now + 30000; // 30s 缓存
     } catch (e) {

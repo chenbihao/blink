@@ -35,8 +35,8 @@
 @import '../components/tooltip.css';
 
 /* views（设置页视图：布局+通用组件+插件 / 调试 / AI modal） */
-@import '../views/settings.css';
-@import '../views/settings-debug.css';
-@import '../views/settings-ai.css';
-@import '../views/settings-voice.css';
-@import '../views/settings-mcp.css';
+@import '../views/settings/settings.css';
+@import '../views/settings/settings-debug.css';
+@import '../views/settings/settings-ai.css';
+@import '../views/settings/settings-voice.css';
+@import '../views/settings/settings-mcp.css';

@@ -12,7 +12,7 @@
 import { ss } from './ss-state.js';
 import { findDisplayCssAt } from './ss-display.js';
 import { getSelectionHandle, beginSelectionInteraction, updateSelectionInteraction, finishSelectionInteraction } from './ss-interaction.js';
-import { copyToClipboard } from './api.js';
+import { copyToClipboard } from '../shared/api.js';
 
 /** 从 result 构造 charRanges —— 用与后端 join_words_smart 相同的规则复算字符偏移。 */
 function computeCharRanges(words) {

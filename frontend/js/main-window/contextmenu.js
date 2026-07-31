@@ -5,10 +5,10 @@
 
 import { queryEl, resultsEl } from "./dom.js";
 import { activateItem } from "./actions.js";
-import { openContainingFolder, openLnkTarget, resetItemHistory, runBuiltinAction, copyToClipboard, invoke, triggerChord, listChordActions } from "./api.js";
+import { openContainingFolder, openLnkTarget, resetItemHistory, runBuiltinAction, copyToClipboard, invoke, triggerChord, listChordActions } from "../shared/api.js";
 import { retrigger } from "./search.js";
-import { t } from "./i18n/index.js";
-import { EVENTS } from "./event-names.js";
+import { t } from "../i18n/index.js";
+import { EVENTS } from "../shared/event-names.js";
 
 /** 当前菜单数据（用于 Popup 点击时回调执行）。 */
 let currentItems = [];
@@ -68,7 +68,7 @@ export function init() {
   // Popup 窗口自己有关闭逻辑（点击菜单项/外部/ESC），主窗口被看门狗隐藏时也会联动关闭菜单
 
   // 监听来自 Popup 窗口的菜单项点击事件
-  import("./tauri.js").then(({ listen }) => {
+  import("../shared/tauri.js").then(({ listen }) => {
     listen(EVENTS.CONTEXT_MENU_ACTION, (event) => {
       const actionId = event.payload;
       const item = currentItems[actionId];

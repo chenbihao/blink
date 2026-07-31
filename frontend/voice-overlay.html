@@ -19,10 +19,10 @@
       <div class="hint" data-i18n="voice.overlay.hint">松开结束 · ESC 取消</div>
     </div>
     <script type="module">
-      import { listen, invoke } from "./js/tauri.js";
-      import { EVENTS } from "./js/event-names.js";
+      import { listen, invoke } from "./js/shared/tauri.js";
+      import { EVENTS } from "./js/shared/event-names.js";
       import { t, applyI18nFromConfig, onLangChange } from "./js/i18n/index.js";
-      import { applyThemeFromConfig } from "./js/theme.js";
+      import { applyThemeFromConfig } from "./js/shared/theme.js";
 
       // 应用主题（与主窗口/设置页统一）
       applyThemeFromConfig();

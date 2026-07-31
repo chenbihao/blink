@@ -12,9 +12,9 @@
 import { aiState, AI_KIND_LABEL, saveAIConfig, fetchAvailableModelsFor, escapeHtml, escapeAttr } from "./state.js";
 import { renderAITierSelects, renderAITierBanner } from "./tier.js";
 import { openAIModelEditModal } from "./model-edit.js";
-import { invoke, confirmDialog } from "../../../tauri.js";
+import { invoke, confirmDialog } from "../../../shared/tauri.js";
 import { t } from "../../../i18n/index.js";
-import { iconHTML } from "../../../icon.js";
+import { iconHTML } from "../../../shared/icon.js";
 
 // ════════════════════════════════════════════════════════════
 //  供应商列表渲染

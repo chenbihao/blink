@@ -16,11 +16,11 @@
 //! `#statusbar { min-height }` 稳定基线高度，避免双行切换时窗口抖动。
 
 import { actionHint } from "./hints.js";
-import { t } from "./i18n/index.js";
+import { t } from "../i18n/index.js";
 import * as ghost from "./ghost.js";
 import * as chord from "./chord.js";
 import * as autosuggestConfig from "./autosuggest-config.js";
-import { renderKey, renderHint } from "./kbd.js";
+import { renderKey, renderHint } from "../shared/kbd.js";
 import { syncWindowSize } from "./window-size.js";
 
 const el = document.getElementById("statusbar");

@@ -4,8 +4,8 @@
  * 封装 invoke + listen，业务层只调语义化函数。
  */
 
-import { invoke, listen, saveDialog } from "../tauri.js";
-import { EVENTS } from "../event-names.js";
+import { invoke, listen, saveDialog } from "../shared/tauri.js";
+import { EVENTS } from "../shared/event-names.js";
 
 // ── Commands ─────────────────────────────────────
 

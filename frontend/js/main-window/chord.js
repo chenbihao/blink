@@ -22,8 +22,8 @@
 //! 0.11: Alt+Q 划词翻译 chord 已移除，chord-ball 悬浮球已删除。Alt+Space 语音输入
 //! 作为 display-only chord 条目加入提示条（触发仍走 native hotkey hold，不走 trigger_chord）。
 
-import { invoke } from "./tauri.js";
-import { listChordActions } from "./api.js";
+import { invoke } from "../shared/tauri.js";
+import { listChordActions } from "../shared/api.js";
 
 let chordActions = [];
 let ghostChordEl = null;

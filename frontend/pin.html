@@ -49,9 +49,9 @@
     </div>
 
     <script type="module">
-      import { invoke, screenshotPinTransform, ocrImage, translateText } from "./js/api.js";
-import { normalizeError } from "./js/tauri.js";
-      import { applyThemeFromConfig } from "./js/theme.js";
+      import { invoke, screenshotPinTransform, ocrImage, translateText } from "./js/shared/api.js";
+import { normalizeError } from "./js/shared/tauri.js";
+      import { applyThemeFromConfig } from "./js/shared/theme.js";
 
       // 应用主题（右键菜单 / OCR 面板的 token 引用随用户主题切换）
       applyThemeFromConfig();

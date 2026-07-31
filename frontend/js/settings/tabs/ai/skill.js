@@ -9,9 +9,9 @@
 //! - CLI 识别 IIFE — 浏览文件 + 识别按钮 + Enter 触发
 
 import { aiState, escapeHtml, escapeAttr } from "./state.js";
-import { invoke, confirmDialog } from "../../../tauri.js";
+import { invoke, confirmDialog } from "../../../shared/tauri.js";
 import { t } from "../../../i18n/index.js";
-import { iconHTML } from "../../../icon.js";
+import { iconHTML } from "../../../shared/icon.js";
 
 /**
  * 加载并渲染已发现的 Skill 列表（0.13.6 增强版）。

@@ -13,7 +13,7 @@ import { renderAITierSelects, renderAITierDegrade, renderAITierBanner } from "./
 import { renderAIProviders, closeAIProviderModal, saveNewProviderFromModal, guessPresetForProvider, clearProviderModelSelect, triggerProviderModelFetch, filterProviderModels, renderProviderModelTags } from "./provider.js";
 import { bindAIModelEditModalEvents } from "./model-edit.js";
 import { loadSkillList, showSkillImportPanel, initSkillImportHandlers } from "./skill.js";
-import { invoke } from "../../../tauri.js";
+import { invoke } from "../../../shared/tauri.js";
 import { t, onLangChange } from "../../../i18n/index.js";
 
 /**

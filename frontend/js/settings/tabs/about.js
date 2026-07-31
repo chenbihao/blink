@@ -5,7 +5,7 @@
  * 0.9.5 拆分时误用 get_about_info（后端无此命令，报 not found）+ 字段名
  * (tauri_version/webview_version) 与后端 get_app_info 返回不匹配；0.9.5.1 还原原版。
  */
-import { invoke } from "../../tauri.js";
+import { invoke } from "../../shared/tauri.js";
 
 /**
  * 初始化关于 Tab

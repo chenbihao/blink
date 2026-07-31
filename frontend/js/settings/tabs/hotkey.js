@@ -3,10 +3,10 @@
  * 包含：快捷键录制、热键配置、滑块配置（tap阈值、grace期）
  */
 
-import { invoke } from "../../tauri.js";
+import { invoke } from "../../shared/tauri.js";
 import { t, onLangChange } from "../../i18n/index.js";
-import { renderKey } from "../../kbd.js";
-import { saveConfig } from "../../config-keys.js";
+import { renderKey } from "../../shared/kbd.js";
+import { saveConfig } from "../../shared/config-keys.js";
 import { getCurrentConfig } from "../shared/state.js";
 
 /**

@@ -6,7 +6,7 @@
 //! 放在 domain 层（而非 app 层）：domain 子模块（search / chord / ai 等）需要引用这些常量，
 //! 而 domain 不能反向依赖 app，所以常量必须定义在 domain。
 //!
-//! 前端对应文件：`frontend/js/event-names.js`（手动同步，后续可考虑 codegen）。
+//! 前端对应文件：`frontend/js/shared/event-names.js`（手动同步，后续可考虑 codegen）。
 
 /// 所有 `blink://*` 事件名常量。
 ///

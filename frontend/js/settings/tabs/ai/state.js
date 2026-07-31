@@ -3,8 +3,8 @@
 //! ai.js 拆分为多个子模块后，所有共享状态统一存在此对象中。
 //! 各子模块通过 `import { aiState } from './state.js'` 访问和修改状态。
 
-import { saveConfig } from "../../../config-keys.js";
-import { invoke } from "../../../tauri.js";
+import { saveConfig } from "../../../shared/config-keys.js";
+import { invoke } from "../../../shared/tauri.js";
 
 /** AI 提供商类型标签 */
 export const AI_KIND_LABEL = {

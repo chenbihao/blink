@@ -3,7 +3,7 @@
  * 封装 Tauri invoke 调用，提供统一的错误处理
  */
 
-import { invoke } from "../../tauri.js";
+import { invoke } from "../../shared/tauri.js";
 import { setCurrentConfig } from "./state.js";
 
 /**

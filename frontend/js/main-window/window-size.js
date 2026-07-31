@@ -4,7 +4,7 @@
 //! 圆角/间距随便调，窗口都自动贴合内容——改样式不必再回头改 JS。
 
 import { appEl } from "./dom.js";
-import { resizeWindow } from "./api.js";
+import { resizeWindow } from "../shared/api.js";
 
 /** 窗口宽度（暂固定，未来可配置）。 */
 const WIDTH = 700;
