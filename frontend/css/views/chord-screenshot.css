@@ -1464,3 +1464,27 @@ html, body {
 .scroll-preview.hidden {
   display: none;
 }
+
+/* 长截图采集范围。独立于截图 canvas，清除蒙版后仍保留范围参照。 */
+.scroll-capture-frame {
+  position: fixed;
+  z-index: calc(var(--z-dropdown, 100) - 1);
+  box-sizing: border-box;
+  border: 2px solid #4a9eff;
+  border-radius: 2px;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.5),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.28);
+  pointer-events: none;
+}
+
+.scroll-capture-frame.hidden {
+  display: none;
+}
+
+/* 长图编辑边界：选取工具拖动时始终能看到图片范围。 */
+#canvas.long-image-editing {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  box-shadow: var(--shadow-modal);
+}

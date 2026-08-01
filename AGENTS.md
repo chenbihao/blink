@@ -126,6 +126,6 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 
 ## 6. 文档变更回写约定
 
-**任何文档变更回写需用户确认。** 文档是决策的 single source of truth，改动影响后续所有人，不能静默修改。
+**任何文档变更回写需用户确认（除了单纯的状态更新）** 文档是决策的 single source of truth，改动影响后续所有人，不能静默修改。
 
 文档运作规则（三层分工 / 新增决策怎么分流 / phase 生命周期 / 引用约定）见 [docs/README.md §五](docs/README.md)。

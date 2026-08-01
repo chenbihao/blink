@@ -24,7 +24,7 @@ export function doCopySelection() {
   console.info('[screenshot] copy selection', { hasAnnot: annot.hasAnnotations() });
 
   // 快路径：无标注 → 后端直接从 SESSION 裁剪 BGRA 写剪贴板
-  if (!annot.hasAnnotations()) {
+  if (!annot.hasAnnotations() && !ss._longImageBaseCanvas) {
     const dpr = window.devicePixelRatio || 1;
     const px = Math.round(ss.selCss.x * dpr);
     const py = Math.round(ss.selCss.y * dpr);
@@ -42,8 +42,11 @@ export function doCopySelection() {
   }
 
   compositeSelection((pngBytes) => {
-    screenshotCopy(pngBytes)
-      .then(() => console.info('[screenshot] copy 成功'))
+    outputScreenshotPng('copy', pngBytes)
+      .then(() => {
+        console.info('[screenshot] copy 成功');
+        cleanupLongCapture();
+      })
       .catch((err) => {
         console.error('[screenshot] copy 失败', err);
         ss.errorHint.textContent = '截图保存失败：' + err;
@@ -72,13 +75,19 @@ export function doPinSelection() {
   ss.sent = true;
   const dpr = window.devicePixelRatio || 1;
   const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
-  const screenX = Math.round(meta.vx + ss.selCss.x * dpr);
-  const screenY = Math.round(meta.vy + ss.selCss.y * dpr);
+  const screenX = ss._longImageBaseCanvas
+    ? ss.scrollBandX
+    : Math.round(meta.vx + ss.selCss.x * dpr);
+  const screenY = ss._longImageBaseCanvas
+    ? ss.scrollBandY
+    : Math.round(meta.vy + ss.selCss.y * dpr);
   compositeSelection((pngBytes) => {
-    screenshotPin(pngBytes, screenX, screenY).catch((err) => {
-      console.error('[screenshot] pin 失败', err);
-      ss.sent = false;
-    });
+    outputScreenshotPng('pin', pngBytes, screenX, screenY)
+      .then(() => cleanupLongCapture())
+      .catch((err) => {
+        console.error('[screenshot] pin 失败', err);
+        ss.sent = false;
+      });
   });
 }
 
@@ -86,48 +95,100 @@ export function doSaveSelection() {
   if (!ss.selCss || ss.sent || !ensureOutputReady()) return;
   ss.sent = true;
   compositeSelection((pngBytes) => {
-    screenshotSave(pngBytes, null).catch((err) => {
-      if (err !== '用户取消了保存') {
-        console.error('[screenshot] save 失败', err);
-      }
-      ss.sent = false;
-    });
+    outputScreenshotPng('save', pngBytes)
+      .then(() => cleanupLongCapture())
+      .catch((err) => {
+        if (err !== '用户取消了保存') {
+          console.error('[screenshot] save 失败', err);
+        }
+        ss.sent = false;
+      });
   });
 }
 
-/** 合成选区（裁剪区 + 标注）为 PNG bytes */
+/**
+ * 合成选区（裁剪区 + 标注）为 PNG bytes。
+ * 同时兼容旧 callback 调用和 Promise 调用；长图编辑时底图来自 `_longImageBaseCanvas`。
+ */
 export function compositeSelection(callback) {
-  if (!ss.selCss || !ss.screenshot) {
+  const promise = compositeSelectionBytes();
+  if (typeof callback === 'function') {
+    promise.then((bytes) => {
+      if (bytes) callback(bytes);
+    });
+  }
+  return promise;
+}
+
+/** 将 ImageData 编码为后端输出接口统一接收的 PNG 字节。 */
+export async function encodeImageDataPng(imageData) {
+  if (!imageData) return null;
+  const canvas = document.createElement('canvas');
+  canvas.width = imageData.width;
+  canvas.height = imageData.height;
+  canvas.getContext('2d').putImageData(imageData, 0, 0);
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+  return blob ? new Uint8Array(await blob.arrayBuffer()) : null;
+}
+
+/** 统一分发已经编码好的截图输出，供普通截图和长截图复用。 */
+export async function outputScreenshotPng(action, pngBytes, screenX = 0, screenY = 0) {
+  switch (action) {
+    case 'pin':
+      return screenshotPin(pngBytes, screenX, screenY);
+    case 'save':
+      return screenshotSave(pngBytes, null);
+    case 'copy':
+      return screenshotCopy(pngBytes);
+    default:
+      return undefined;
+  }
+}
+
+async function compositeSelectionBytes() {
+  if (!ss.selCss || (!ss.screenshot && !ss._longImageBaseCanvas)) {
     console.error('[screenshot] compositeSelection: no selection or screenshot');
     ss.sent = false;
-    return;
+    return null;
   }
   try {
+    const longBase = ss._longImageBaseCanvas;
     const dpr = window.devicePixelRatio || 1;
-    const pw = Math.round(ss.selCss.w * dpr);
-    const ph = Math.round(ss.selCss.h * dpr);
-    const px = Math.round(ss.selCss.x * dpr);
-    const py = Math.round(ss.selCss.y * dpr);
+    const pw = longBase?.width ?? Math.round(ss.selCss.w * dpr);
+    const ph = longBase?.height ?? Math.round(ss.selCss.h * dpr);
+    const px = longBase ? 0 : Math.round(ss.selCss.x * dpr);
+    const py = longBase ? 0 : Math.round(ss.selCss.y * dpr);
 
     const off = document.createElement('canvas');
     off.width = pw;
     off.height = ph;
     const offCtx = off.getContext('2d');
-    offCtx.drawImage(ss.screenshot, px, py, pw, ph, 0, 0, pw, ph);
+    if (longBase) {
+      offCtx.drawImage(longBase, 0, 0);
+    } else {
+      offCtx.drawImage(ss.screenshot, px, py, pw, ph, 0, 0, pw, ph);
+    }
     if (annot.hasAnnotations()) {
       offCtx.drawImage(ss.annotCanvas, 0, 0);
     }
-    off.toBlob((blob) => {
-      if (!blob) { console.error('[screenshot] PNG 合成失败（blob=null）'); ss.sent = false; return; }
-      blob.arrayBuffer().then((buf) => callback(new Uint8Array(buf))).catch((err) => {
-        console.error('[screenshot] blob.arrayBuffer 失败', err);
-        ss.sent = false;
-      });
-    }, 'image/png');
+    const blob = await new Promise((resolve) => off.toBlob(resolve, 'image/png'));
+    if (!blob) {
+      console.error('[screenshot] PNG 合成失败（blob=null）');
+      ss.sent = false;
+      return null;
+    }
+    return new Uint8Array(await blob.arrayBuffer());
   } catch (e) {
     console.error('[screenshot] compositeSelection threw', e);
     ss.sent = false;
+    return null;
   }
+}
+
+function cleanupLongCapture() {
+  if (!ss.scrollSession.active && !ss._longImagePan) return;
+  Promise.resolve(ss.scrollSession.exit(false))
+    .catch((e) => console.warn('[screenshot] long capture cleanup failed', e));
 }
 
 export function doCancel() {
@@ -139,6 +200,11 @@ export function doCancel() {
   setTimeout(() => { ss.cancelInProgress = false; }, 2000);
   console.info('[screenshot] cancel');
   try { hideSelLoading(); } catch (e) { console.warn('[screenshot] hideSelLoading failed', e); }
+  // 0.15.7：长截图状态清理
+  if (ss.scrollSession.active || ss._longImagePan) {
+    // 异步清理，不阻塞 cancel；入口由长截图 session 唯一提供。
+    Promise.resolve(ss.scrollSession.exit(false)).catch(() => {});
+  }
   if (ss.isAnnotating) {
     screenshotCancel().catch((e) => console.error('[screenshot] screenshotCancel 失败', e));
   } else {

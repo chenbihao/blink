@@ -53,6 +53,10 @@ impl ScreenshotBackend for WindowsScreenshotBackend {
         let pixels = capture_region_bgra(target.x, target.y, target.w, target.h)?;
         Ok((pixels, target))
     }
+
+    fn capture_region(&self, x: i32, y: i32, w: u32, h: u32) -> Result<Vec<u8>, String> {
+        capture_region_bgra(x, y, w, h)
+    }
 }
 
 // ── 显示器枚举 ────────────────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 //! Windows 平台特定的窗口控制实现：Win32 API。
 
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::domain::event_names::EventNames;
@@ -41,6 +41,8 @@ static STATE: AtomicU8 = AtomicU8::new(ST_HIDDEN);
 static START: OnceLock<Instant> = OnceLock::new();
 static INVOKE_AT: AtomicU64 = AtomicU64::new(0);
 static GRACE_MS: AtomicU64 = AtomicU64::new(DEFAULT_GRACE_MS);
+/// Blink 主窗口抢焦点前的外部前台窗口，截图/chord 后续需要恢复或驱动原应用时使用。
+static LAST_EXTERNAL_HWND: AtomicIsize = AtomicIsize::new(0);
 
 /// 程序启动以来的毫秒数（单调时钟，用于 grace period 计算）。
 fn elapsed_ms() -> u64 {
@@ -60,6 +62,14 @@ pub fn invoke(app: &AppHandle) {
         .map(|c| c.read().unwrap().clone())
         .unwrap_or_default();
     let snapshot = crate::infra::platform::context::collect(&context_cfg);
+    if let Some(hwnd) = snapshot
+        .foreground_app
+        .as_ref()
+        .map(|foreground| foreground.hwnd)
+        .filter(|hwnd| *hwnd != 0)
+    {
+        LAST_EXTERNAL_HWND.store(hwnd, Ordering::SeqCst);
+    }
     tracing::debug!(
         foreground_app = ?snapshot.foreground_app.as_ref().map(|f| &f.process_name),
         window_title = ?snapshot.foreground_app.as_ref().map(|f| &f.window_title),
@@ -604,6 +614,12 @@ pub fn get_foreground_hwnd() -> Option<isize> {
     }
 }
 
+/// 返回 Blink 最近一次唤起、尚未抢焦点时记录的外部前台窗口。
+pub fn last_external_foreground_hwnd() -> Option<isize> {
+    let hwnd = LAST_EXTERNAL_HWND.load(Ordering::SeqCst);
+    (hwnd != 0).then_some(hwnd)
+}
+
 /// 恢复前台窗口焦点（G2 注入文本前调用）。
 ///
 /// Alt+Space 唤起 Blink 时，组合键到达前台应用会弹出系统菜单（Alt+Space 的系统行为），
@@ -848,9 +864,10 @@ pub fn show_screenshot_overlay(
     // 不再以整个虚拟屏幕为基准——副屏左边缘做选区时工具栏不会被推到主屏）。
     // x/y/w/h 是物理像素，前端用 devicePixelRatio 折算回 CSS 像素与 selCss 对齐。
     let displays_json = build_displays_json();
+    let fg_hwnd = crate::infra::platform::screenshot::session_fg_hwnd().unwrap_or(0);
     let meta_js = format!(
-        "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {}, displays: {} }};",
-        meta.virtual_x, meta.virtual_y, meta.width, meta.height, displays_json
+        "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {}, fgHwnd: {}, displays: {} }};",
+        meta.virtual_x, meta.virtual_y, meta.width, meta.height, fg_hwnd, displays_json
     );
 
     // 复用已存在的窗口：先 eval 清屏 + 重定位 → show → 触发重新加载

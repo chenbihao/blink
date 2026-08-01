@@ -67,7 +67,8 @@ import { loadPickableWindows, clearPickableWindows, updateWindowHover, getHovere
 // 0.15.7：长截图
 import {
   enterScrollCapture, exitScrollCapture, onScrollWheel,
-  bindScrollToolbar, enterScrollEdit, outputLongImage,
+  bindScrollToolbar, enterScrollEdit, isScrollCaptureActive,
+  outputLongImage, resetScrollCaptureSession,
 } from "./ss-scroll.js";
 
 // ── **临时**（0.11.7-f 调试用）：console 转发到后端 tracing ────────────
@@ -104,6 +105,9 @@ import {
 // ════════════════════════════════════════════════════════════
 //  初始化
 // ════════════════════════════════════════════════════════════
+
+// 0.15.7：长图编辑——Space 或中键拖拽平移超长图
+let _spaceDown = false;
 
 initDOM();
 
@@ -180,6 +184,7 @@ window.__blinkReloadScreenshot = function () {
 /** 完全重置前端状态——每次 overlay 显示时都要走一遍 */
 function resetState() {
   console.info('[screenshot] resetState start');
+  resetScrollCaptureSession();
   const { canvas, ctx, annotCanvas, annotCtx, sizeHint, toolbar, errorHint } = ss;
   ss._loadGen++;  // BUG1 fix: 使待处理的旧 img.onload 回调失效
   // 0.15.9：取消待执行的标注预览 rAF
@@ -249,10 +254,18 @@ function resetState() {
   } catch (e) { console.warn('[screenshot] resetState: toolbar reset failed', e); }
   try { clearPickableWindows(); } catch (e) { console.warn('[screenshot] resetState: clearPickableWindows failed', e); }
   if (ss.magnifierRaf) { cancelAnimationFrame(ss.magnifierRaf); ss.magnifierRaf = 0; }
-  ss.scrollCapturePhase = 'idle';
-  ss.scrollFrames = [];
-  ss.autoScroll = false;
-  ss.scrollHwnd = null;
+  // 长截图状态、在途任务与 DOM 统一由 resetScrollCaptureSession 清理。
+  _spaceDown = false;
+  try {
+    if (ss.canvas) ss.canvas.style.pointerEvents = '';
+    if (ss.canvas) {
+      ss.canvas.style.left = '';
+      ss.canvas.style.top = '';
+      ss.canvas.style.width = '';
+      ss.canvas.style.height = '';
+    }
+    if (ss.hitCanvas) ss.hitCanvas.style.pointerEvents = '';
+  } catch (e) { console.warn('[screenshot] resetState: pointer-events restore failed', e); }
   console.info('[screenshot] resetState done');
 }
 
@@ -378,15 +391,41 @@ function enterAnnotationWithCropData(cropData, pw, ph) {
   const cssW = pw / dpr;
   const cssH = ph / dpr;
 
-  // 长图选区占满 overlay 的可视区域
-  ss.selCss = { x: 0, y: 0, w: cssW, h: cssH };
+  // 水平默认展示长图中央；竖向超出视口时从顶部开始编辑。
+  const initialX = Math.round((window.innerWidth - cssW) / 2);
+  const initialY = cssH <= window.innerHeight
+    ? Math.round((window.innerHeight - cssH) / 2)
+    : 48;
+  ss.selCss = { x: initialX, y: initialY, w: cssW, h: cssH };
   ss.isAnnotating = true;
   ss.sent = false;
+  ss._longImagePan = {
+    x: initialX, y: initialY, dragging: false, lastX: 0, lastY: 0,
+  };
   hidePixelMagnifier();
 
+  const baseCanvas = document.createElement('canvas');
+  baseCanvas.width = pw;
+  baseCanvas.height = ph;
+  baseCanvas.getContext('2d').putImageData(cropData, 0, 0);
+  ss._longImageBaseCanvas = baseCanvas;
+
+  // 主 canvas 作为长图可见底图；annotCanvas 只承载透明标注层。
+  ss.canvas.width = pw;
+  ss.canvas.height = ph;
+  ss.canvas.style.left = initialX + 'px';
+  ss.canvas.style.top = initialY + 'px';
+  ss.canvas.style.width = cssW + 'px';
+  ss.canvas.style.height = cssH + 'px';
+  ss.canvas.style.pointerEvents = '';
+  ss.canvas.style.cursor = 'grab';
+  ss.canvas.classList.add('long-image-editing');
+  ss.ctx.clearRect(0, 0, pw, ph);
+  ss.ctx.drawImage(baseCanvas, 0, 0);
+
   annotCanvas.classList.remove('hidden');
-  annotCanvas.style.left = '0px';
-  annotCanvas.style.top = '0px';
+  annotCanvas.style.left = initialX + 'px';
+  annotCanvas.style.top = initialY + 'px';
   annotCanvas.style.width = cssW + 'px';
   annotCanvas.style.height = cssH + 'px';
   annotCanvas.width = pw;
@@ -396,10 +435,12 @@ function enterAnnotationWithCropData(cropData, pw, ph) {
   updateUndoRedoButtons();
   screenshotSetAnnotationMode(true).catch((e) => console.error('setAnnotationMode(true) 失败', e));
 
-  // 显示工具栏
+  // 工具栏固定在视口顶部中间，不随长图移动。
   toolbar.classList.remove('hidden');
-  toolbar.style.left = '8px';
-  toolbar.style.top = (cssH + 8) + 'px';
+  toolbar.style.top = '8px';
+  requestAnimationFrame(() => {
+    toolbar.style.left = Math.max(8, Math.round((window.innerWidth - toolbar.offsetWidth) / 2)) + 'px';
+  });
 }
 
 /** 后台预热 OCR */
@@ -496,10 +537,83 @@ function invalidateSelectionContent() {
 
 const { canvas } = ss;
 
+/** 长图画布移动后，offsetX/Y 已经是图片局部坐标，不能再减 selCss 偏移。 */
+function annotationPoint(e) {
+  const dpr = window.devicePixelRatio || 1;
+  if (ss._longImagePan) return { x: e.offsetX * dpr, y: e.offsetY * dpr };
+  return {
+    x: (e.offsetX - ss.selCss.x) * dpr,
+    y: (e.offsetY - ss.selCss.y) * dpr,
+  };
+}
+
+function pointInEditableImage(e) {
+  if (!ss.selCss) return false;
+  if (!ss._longImagePan) return pointInRect(e.offsetX, e.offsetY, ss.selCss);
+  return e.offsetX >= 0 && e.offsetY >= 0
+    && e.offsetX <= ss.selCss.w && e.offsetY <= ss.selCss.h;
+}
+
+function beginLongImagePan(e) {
+  ss._longImagePan.dragging = true;
+  ss._longImagePan.lastX = e.clientX;
+  ss._longImagePan.lastY = e.clientY;
+  ss.canvas.style.cursor = 'grabbing';
+  e.preventDefault();
+}
+
+function longImagePanBounds() {
+  const w = ss.selCss?.w || 0;
+  const h = ss.selCss?.h || 0;
+  const margin = 48;
+  return {
+    minX: w <= window.innerWidth ? 0 : window.innerWidth - w - margin,
+    maxX: w <= window.innerWidth ? window.innerWidth - w : margin,
+    minY: h <= window.innerHeight ? 0 : window.innerHeight - h - margin,
+    maxY: h <= window.innerHeight ? window.innerHeight - h : margin,
+  };
+}
+
+function moveLongImagePan(e) {
+  if (!ss._longImagePan?.dragging) return false;
+  const dx = e.clientX - ss._longImagePan.lastX;
+  const dy = e.clientY - ss._longImagePan.lastY;
+  const bounds = longImagePanBounds();
+  ss._longImagePan.x = Math.max(bounds.minX, Math.min(bounds.maxX, ss._longImagePan.x + dx));
+  ss._longImagePan.y = Math.max(bounds.minY, Math.min(bounds.maxY, ss._longImagePan.y + dy));
+  ss._longImagePan.lastX = e.clientX;
+  ss._longImagePan.lastY = e.clientY;
+  const { annotCanvas, selCss } = ss;
+  ss.canvas.style.left = ss._longImagePan.x + 'px';
+  ss.canvas.style.top = ss._longImagePan.y + 'px';
+  annotCanvas.style.left = ss._longImagePan.x + 'px';
+  annotCanvas.style.top = ss._longImagePan.y + 'px';
+  if (selCss) {
+    selCss.x = ss._longImagePan.x;
+    selCss.y = ss._longImagePan.y;
+  }
+  return true;
+}
+
+function endLongImagePan() {
+  if (!ss._longImagePan?.dragging) return false;
+  ss._longImagePan.dragging = false;
+  ss.canvas.style.cursor = (_spaceDown || annot.getTool() === 'select') ? 'grab' : 'crosshair';
+  return true;
+}
+
 canvas.addEventListener('mousedown', (e) => {
-  if (!ss.screenshot || e.button !== 0) return;
+  if (!ss.screenshot && !ss._longImagePan) return;
 
   const tool = annot.getTool();
+
+  // 默认选取工具左键即可平移；其它工具仍可用 Space/中键临时平移。
+  if (ss._longImagePan && (_spaceDown || e.button === 1 || (e.button === 0 && tool === 'select'))) {
+    beginLongImagePan(e);
+    return;
+  }
+
+  if (e.button !== 0) return;
 
   // 0.15.8：窗口吸附——选区拖拽阶段单击窗口区域直接吸附
   if (!ss.isAnnotating && !ss.selectionInteraction) {
@@ -530,11 +644,11 @@ canvas.addEventListener('mousedown', (e) => {
     return;
   }
 
-  if (ss.isAnnotating && ss.selCss && pointInRect(e.offsetX, e.offsetY, ss.selCss)) {
+  if (ss.isAnnotating && ss.selCss && pointInEditableImage(e)) {
     if (tool === 'watermark') return;
-    const dpr = window.devicePixelRatio || 1;
-    ss.annotStartX = (e.offsetX - ss.selCss.x) * dpr;
-    ss.annotStartY = (e.offsetY - ss.selCss.y) * dpr;
+    const point = annotationPoint(e);
+    ss.annotStartX = point.x;
+    ss.annotStartY = point.y;
     ss.annotCurrentX = ss.annotStartX;
     ss.annotCurrentY = ss.annotStartY;
     annot.startDraw(ss.annotStartX, ss.annotStartY);
@@ -566,9 +680,12 @@ canvas.addEventListener('mousedown', (e) => {
 });
 
 canvas.addEventListener('mousemove', (e) => {
+  // 0.15.7：长图平移拖拽
+  if (moveLongImagePan(e)) return;
+
   if (!ss.screenshot) return;
 
-  updateSelectionCursor(e.offsetX, e.offsetY);
+  if (!ss._longImagePan) updateSelectionCursor(e.offsetX, e.offsetY);
 
   // 0.15.8：选区拖拽阶段智能窗口吸附
   if (!ss.isAnnotating && !ss.selectionInteraction) {
@@ -592,9 +709,9 @@ canvas.addEventListener('mousemove', (e) => {
   updateStrokeCursor(e.clientX, e.clientY);
 
   if (ss.isAnnotDragging && ss.selCss) {
-    const dpr = window.devicePixelRatio || 1;
-    ss.annotCurrentX = (e.offsetX - ss.selCss.x) * dpr;
-    ss.annotCurrentY = (e.offsetY - ss.selCss.y) * dpr;
+    const point = annotationPoint(e);
+    ss.annotCurrentX = point.x;
+    ss.annotCurrentY = point.y;
     if (e.shiftKey) {
       const constrained = applySquareConstraint(
         ss.annotStartX, ss.annotStartY, ss.annotCurrentX, ss.annotCurrentY, annot.getTool()
@@ -622,10 +739,17 @@ canvas.addEventListener('mousemove', (e) => {
 canvas.addEventListener('mouseleave', () => {
   // W4 例外：strokeCursor 是高频逐帧更新的画笔预览光标，直接写 style.display 性能更好
   if (ss.strokeCursor) ss.strokeCursor.style.display = 'none';
-  if (!ss.selectionInteraction) ss.canvas.style.cursor = annot.getTool() === 'select' ? 'default' : 'crosshair';
+  if (!ss.selectionInteraction) {
+    ss.canvas.style.cursor = ss._longImagePan && annot.getTool() === 'select'
+      ? 'grab'
+      : (annot.getTool() === 'select' ? 'default' : 'crosshair');
+  }
 });
 
 canvas.addEventListener('mouseup', (e) => {
+  // 0.15.7：长图平移结束
+  if (endLongImagePan()) return;
+
   if (!ss.screenshot) return;
 
   if (finishSelectionInteraction(e)) return;
@@ -636,9 +760,9 @@ canvas.addEventListener('mouseup', (e) => {
     if (ss._annotRaf) { cancelAnimationFrame(ss._annotRaf); ss._annotRaf = 0; }
     // 0.15.10：清除快照
     ss._committedSnapshot = null;
-    const dpr = window.devicePixelRatio || 1;
-    ss.annotCurrentX = (e.offsetX - ss.selCss.x) * dpr;
-    ss.annotCurrentY = (e.offsetY - ss.selCss.y) * dpr;
+    const point = annotationPoint(e);
+    ss.annotCurrentX = point.x;
+    ss.annotCurrentY = point.y;
     if (e.shiftKey) {
       const constrained = applySquareConstraint(
         ss.annotStartX, ss.annotStartY, ss.annotCurrentX, ss.annotCurrentY, annot.getTool()
@@ -700,7 +824,7 @@ canvas.addEventListener('dblclick', (e) => {
   if (ss.singleClickTimeout) { clearTimeout(ss.singleClickTimeout); ss.singleClickTimeout = null; }
 
   if (ss.isAnnotating && ss.selCss) {
-    if (pointInRect(e.offsetX, e.offsetY, ss.selCss)) {
+    if (pointInEditableImage(e)) {
       doCopySelection();
     }
     return;
@@ -758,6 +882,11 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Escape') {
     e.preventDefault();
+    // 0.15.7：长截图采集阶段——ESC 先退出长截图模式
+    if (isScrollCaptureActive()) {
+      exitScrollCapture().catch(() => {});
+      return;
+    }
     const ocrPanel = document.getElementById('ocr-panel');
     if (ocrPanel) {
       ocrPanel.remove();
@@ -791,6 +920,31 @@ window.addEventListener('keydown', refreshShapePreviewOnShift);
 // 0.15.7：长截图手动滚动检测——capturing 阶段 wheel 触发截帧
 window.addEventListener('wheel', onScrollWheel, { passive: true });
 
+// 鼠标在窄图边缘外松开时 canvas 收不到 mouseup，需在 window 层兜底结束平移。
+window.addEventListener('mouseup', endLongImagePan);
+window.addEventListener('mousemove', (e) => {
+  if (e.target !== canvas) moveLongImagePan(e);
+});
+
+// 0.15.7：长图编辑——Space 或中键拖拽平移超长图（_spaceDown 已在文件顶部声明）
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Space' && ss._longImagePan && !ss._longImagePan.dragging) {
+    const tgt = e.target;
+    if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
+    _spaceDown = true;
+    if (ss.canvas) ss.canvas.style.cursor = 'grab';
+    e.preventDefault();
+  }
+});
+window.addEventListener('keyup', (e) => {
+  if (e.code === 'Space') {
+    _spaceDown = false;
+    if (ss.canvas && !ss.isAnnotDragging) {
+      ss.canvas.style.cursor = ss._longImagePan && annot.getTool() === 'select' ? 'grab' : '';
+    }
+  }
+});
+
 window.addEventListener('blur', () => {
   if (ss.blurGuard) return;
   ss.blurGuard = true;
@@ -802,7 +956,13 @@ window.addEventListener('blur', () => {
   }
 
   console.debug('[screenshot] window blur, hiding overlay');
-  hideScreenshotOverlay().catch((e) => console.error('hideScreenshotOverlay 失败', e));
+  if (isScrollCaptureActive()) {
+    exitScrollCapture(false)
+      .catch((e) => console.warn('[screenshot] blur: scroll cleanup failed', e))
+      .finally(() => hideScreenshotOverlay().catch((e) => console.error('hideScreenshotOverlay 失败', e)));
+  } else {
+    hideScreenshotOverlay().catch((e) => console.error('hideScreenshotOverlay 失败', e));
+  }
 });
 
 // ════════════════════════════════════════════════════════════

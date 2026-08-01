@@ -96,6 +96,10 @@ impl ScreenshotBackend for FakeScreenshotBackend {
         let pixels = fill_bgra(display.w, display.h, self.fill_bgra);
         Ok((pixels, display))
     }
+
+    fn capture_region(&self, _x: i32, _y: i32, w: u32, h: u32) -> Result<Vec<u8>, String> {
+        Ok(fill_bgra(w, h, self.fill_bgra))
+    }
 }
 
 fn fill_bgra(w: u32, h: u32, color: [u8; 4]) -> Vec<u8> {

@@ -2,6 +2,44 @@
 
 use super::*;
 
+static WHEEL_INJECT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+const WHEEL_PASSTHROUGH_MS: u64 = 260;
+const MAX_WHEEL_PASSTHROUGH_MS: u64 = 500;
+const SCROLL_PROBE_MAX_W: u32 = 96;
+const SCROLL_PROBE_MAX_H: u32 = 64;
+
+fn downsample_luma_bgra(pixels: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String> {
+    if w == 0 || h == 0 {
+        return Err("稳定性探针区域不能为空".into());
+    }
+    let expected = (w as usize)
+        .checked_mul(h as usize)
+        .and_then(|size| size.checked_mul(4))
+        .ok_or_else(|| "稳定性探针尺寸溢出".to_string())?;
+    if pixels.len() < expected {
+        return Err(format!(
+            "稳定性探针像素不足: expected={expected}, got={}",
+            pixels.len()
+        ));
+    }
+
+    let probe_w = w.min(SCROLL_PROBE_MAX_W);
+    let probe_h = h.min(SCROLL_PROBE_MAX_H);
+    let mut probe = Vec::with_capacity((probe_w * probe_h) as usize);
+    for py in 0..probe_h {
+        let source_y = ((py as u64 * h as u64) / probe_h as u64) as u32;
+        for px in 0..probe_w {
+            let source_x = ((px as u64 * w as u64) / probe_w as u64) as u32;
+            let index = ((source_y as usize * w as usize) + source_x as usize) * 4;
+            let b = pixels[index] as u32;
+            let g = pixels[index + 1] as u32;
+            let r = pixels[index + 2] as u32;
+            probe.push(((r * 77 + g * 150 + b * 29) >> 8) as u8);
+        }
+    }
+    Ok(probe)
+}
+
 /// 0.11.7-f：接收前端合成后的 PNG（裁剪区 + 标注），写入剪贴板，结束会话。
 ///
 /// **替代** 0.8.7 `capture_region`（后端从 SESSION 裁剪）——现在前端一份合成路径
@@ -454,85 +492,247 @@ pub async fn screenshot_window_list() -> Result<Vec<crate::infra::platform::wind
         .map_err(|e| format!("spawn_blocking join 失败: {e}"))
 }
 
-/// 0.15.7：长截图——自动滚动驱动。
+/// 0.15.7：长截图——设置/清除 overlay 捕获排除（WDA_EXCLUDEFROMCAPTURE）。
 ///
-/// 通过 `PostMessageW` 向锁定 HWND 发送 `WM_VSCROLL`/`WM_MOUSEWHEEL`，
-/// 不抢前台焦点，比 `SendInput` 更稳定。
-///
-/// **异步**：在独立线程中循环发送（间隔 80ms），前端通过 `screenshot_stop_scroll` 停止。
-/// 驱动失败（窗口关闭/无响应）时 emit 事件通知前端降级。
+/// 设为 true 时，overlay 窗口在 BitBlt 屏幕采集中不可见（但用户仍能看到）。
+/// 进入长截图采集阶段时设 true，退出时设 false。
 #[tauri::command]
-pub async fn screenshot_auto_scroll(
+pub fn screenshot_set_capture_exclusion(app: tauri::AppHandle, exclude: bool) -> Result<(), String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE};
+
+    let win = app.get_webview_window("chord-screenshot")
+        .ok_or_else(|| "截图 overlay 窗口未找到".to_string())?;
+    let hwnd = win.hwnd().map_err(|e| format!("获取 HWND 失败: {e}"))?;
+    let target = HWND(hwnd.0 as _);
+
+    let affinity = if exclude { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
+    let ok = unsafe { SetWindowDisplayAffinity(target, affinity) };
+    if ok.is_err() {
+        return Err(format!("SetWindowDisplayAffinity 失败"));
+    }
+    tracing::debug!(exclude, "overlay 捕获排除已设置");
+    Ok(())
+}
+
+/// 0.15.7：长截图——截取屏幕区域为 RGBA bytes。
+///
+/// 调用 `screenshot::capture_region` 截取指定虚拟屏幕坐标区域的 BGRA 像素，
+/// 转为 RGBA（前端 ImageData 需 RGBA 格式）后返回。
+///
+/// **必须在 `screenshot_set_capture_exclusion(true)` 之后调用**，
+/// 否则 BitBlt 会拍到 overlay 自身。
+#[tauri::command]
+pub async fn screenshot_capture_band(
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+) -> Result<tauri::ipc::Response, String> {
+    let bytes = tokio::task::spawn_blocking(move || {
+        let bgra = crate::infra::platform::screenshot::capture_region(x, y, w, h)?;
+        // BGRA → RGBA（swap R and B per pixel）
+        let mut rgba = bgra;
+        for chunk in rgba.chunks_exact_mut(4) {
+            chunk.swap(0, 2);
+        }
+        Ok::<Vec<u8>, String>(rgba)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking join 失败: {e}"))??;
+
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// 0.15.7-R1：截取长截图采集带的低分辨率灰度探针。
+///
+/// BitBlt 仍在 Rust 侧完成，但跨 IPC 只返回至多 96×64 字节；前端用相邻探针
+/// 判断滚动动画是否已经稳定，稳定后才请求完整 RGBA 帧。
+#[tauri::command]
+pub async fn screenshot_capture_probe(
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+) -> Result<tauri::ipc::Response, String> {
+    let bytes = tokio::task::spawn_blocking(move || {
+        let bgra = crate::infra::platform::screenshot::capture_region(x, y, w, h)?;
+        downsample_luma_bgra(&bgra, w, h)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking join 失败: {e}"))??;
+
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// 0.15.7：长截图——转发滚轮事件给目标窗口。
+///
+/// 手动滚动模式下，overlay 接收 wheel 事件后调用本命令，
+/// 通过 `PostMessageW(hwnd, WM_MOUSEWHEEL, ...)` 转发给目标窗口。
+///
+/// `delta` 为 wheel delta（正值向上滚，负值向下滚），标准 120 为一格。
+#[tauri::command]
+pub fn screenshot_forward_wheel(
     app: tauri::AppHandle,
     hwnd: Option<isize>,
-    direction: Option<String>,
+    delta: i32,
+    screen_x: i32,
+    screen_y: i32,
+    passthrough_ms: Option<u64>,
+    position_cursor: Option<bool>,
 ) -> Result<(), String> {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        PostMessageW, WM_VSCROLL, WM_MOUSEWHEEL,
-    };
-    use windows::Win32::UI::WindowsAndMessaging::SB_PAGEDOWN;
-
-    let hwnd_val = match hwnd {
-        Some(h) if h != 0 => h,
-        _ => return Err("未提供有效窗口 HWND".into()),
-    };
-    let _direction = direction.unwrap_or_else(|| "vertical".into());
-    // HWND 是 *mut c_void，不能跨线程 Send。转 isize 传入线程。
-    let hwnd_raw = hwnd_val;
-
-    // 用全局 AtomicBool 控制循环（stop_scroll 设 true 即退出）
-    static SCROLL_ACTIVE: AtomicBool = AtomicBool::new(false);
-    if SCROLL_ACTIVE.load(Ordering::SeqCst) {
-        return Ok(()); // 已在运行
+    let hwnd_val = hwnd
+        .filter(|value| *value != 0)
+        .ok_or("未提供有效窗口 HWND")?;
+    let passthrough_ms = passthrough_ms
+        .unwrap_or(WHEEL_PASSTHROUGH_MS)
+        .min(MAX_WHEEL_PASSTHROUGH_MS);
+    if position_cursor.unwrap_or(false) {
+        unsafe { windows::Win32::UI::WindowsAndMessaging::SetCursorPos(screen_x, screen_y) }
+            .map_err(|e| format!("定位自动滚动光标失败: {e}"))?;
     }
-    SCROLL_ACTIVE.store(true, Ordering::SeqCst);
+    if let Err(inject_error) = inject_wheel_through_overlay(&app, delta, passthrough_ms) {
+        tracing::warn!(error = %inject_error, "真实滚轮注入失败，回退到窗口消息转发");
+        return post_wheel_to_target(hwnd_val, delta, screen_x, screen_y);
+    }
+    Ok(())
+}
 
-    let stop_flag = Arc::new(AtomicBool::new(true));
-    let stop_clone = stop_flag.clone();
+/// overlay 会截获首个滚轮事件。开启一个短时连续穿透窗口并用
+/// SendInput 补发首个事件，后续真实滚轮可直达底层应用。这避免每一格
+/// 都切换 overlay hit-test 并阻塞线程，同时兼容忽略 WM_MOUSEWHEEL 的自绘窗口。
+fn inject_wheel_through_overlay(
+    app: &tauri::AppHandle,
+    delta: i32,
+    passthrough_ms: u64,
+) -> Result<(), String> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput,
+    };
 
-    // 存储 stop_flag 到 app state 供 stop_scroll 用
-    app.manage(ScrollStopFlag(stop_clone));
+    let _guard = WHEEL_INJECT_LOCK
+        .lock()
+        .map_err(|_| "滚轮注入状态锁中毒".to_string())?;
+    let overlay = app
+        .get_webview_window("chord-screenshot")
+        .ok_or_else(|| "截图 overlay 窗口未找到".to_string())?;
+    overlay
+        .set_ignore_cursor_events(true)
+        .map_err(|e| format!("开启 overlay 鼠标穿透失败: {e}"))?;
 
-    tokio::task::spawn_blocking(move || {
-        let target = HWND(hwnd_raw as _);
-        while stop_flag.load(Ordering::SeqCst) {
-            // 尝试 WM_VSCROLL（适用于有滚动条的窗口）
-            unsafe {
-                // WM_VSCROLL（适用于有滚动条的窗口）
-                let _ = PostMessageW(Some(target), WM_VSCROLL, windows::Win32::Foundation::WPARAM(SB_PAGEDOWN.0 as usize), windows::Win32::Foundation::LPARAM(0));
-                // WM_MOUSEWHEEL（适用于 Chromium/Electron 等自绘滚动窗口）
-                let _ = PostMessageW(Some(target), WM_MOUSEWHEEL, windows::Win32::Foundation::WPARAM(0), windows::Win32::Foundation::LPARAM(0));
-            }
-            std::thread::sleep(std::time::Duration::from_millis(80));
+    let wheel_delta = delta.clamp(i16::MIN as i32, i16::MAX as i32);
+    let input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: wheel_delta as u32,
+                dwFlags: MOUSEEVENTF_WHEEL,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
+
+    if sent != 1 {
+        let _ = overlay.set_ignore_cursor_events(false);
+        return Err("SendInput 未能注入滚轮事件".to_string());
+    }
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(passthrough_ms));
+        if let Err(error) = overlay.set_ignore_cursor_events(false) {
+            tracing::warn!(%error, "恢复截图 overlay 鼠标交互失败");
         }
-        SCROLL_ACTIVE.store(false, Ordering::SeqCst);
     });
-
-    tracing::info!(hwnd = hwnd_val, "长截图自动滚动已启动");
+    tracing::debug!(delta, passthrough_ms, "已开启连续滚轮穿透");
     Ok(())
 }
 
-/// 0.15.7：停止自动滚动。
-#[tauri::command]
-pub fn screenshot_stop_scroll(
-    app: tauri::AppHandle,
+fn post_wheel_to_target(
+    hwnd_val: isize,
+    delta: i32,
+    screen_x: i32,
+    screen_y: i32,
 ) -> Result<(), String> {
-    if let Some(flag) = app.try_state::<ScrollStopFlag>() {
-        flag.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
+    use windows::Win32::Graphics::Gdi::ScreenToClient;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CWP_SKIPDISABLED, CWP_SKIPINVISIBLE, CWP_SKIPTRANSPARENT, ChildWindowFromPointEx, IsWindow,
+        PostMessageW, WM_MOUSEWHEEL,
+    };
+
+    let root = HWND(hwnd_val as _);
+    if !unsafe { IsWindow(Some(root)) }.as_bool() {
+        return Err(format!("滚动目标窗口已失效: hwnd={hwnd_val}"));
     }
-    tracing::info!("长截图自动滚动已停止");
+
+    // WM_MOUSEWHEEL 正常会发给光标所在控件。overlay 截获输入后需显式沿选区中心
+    // 找到最深子 HWND；只投顶层窗口对 Chromium/Electron/自绘控件通常无效。
+    let mut target = root;
+    for _ in 0..8 {
+        let mut client_point = POINT {
+            x: screen_x,
+            y: screen_y,
+        };
+        if !unsafe { ScreenToClient(target, &mut client_point) }.as_bool() {
+            break;
+        }
+        let child = unsafe {
+            ChildWindowFromPointEx(
+                target,
+                client_point,
+                CWP_SKIPINVISIBLE | CWP_SKIPDISABLED | CWP_SKIPTRANSPARENT,
+            )
+        };
+        if child.is_invalid() || child == target {
+            break;
+        }
+        target = child;
+    }
+
+    let wheel_delta = delta.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+    let wparam = WPARAM(((wheel_delta as u16 as usize) & 0xFFFF) << 16);
+    let packed_point = ((screen_x as u16 as u32) | ((screen_y as u16 as u32) << 16)) as isize;
+    unsafe { PostMessageW(Some(target), WM_MOUSEWHEEL, wparam, LPARAM(packed_point)) }
+        .map_err(|e| format!("投递 WM_MOUSEWHEEL 失败: {e}"))?;
+    tracing::debug!(
+        hwnd = hwnd_val,
+        child_hwnd = target.0 as isize,
+        delta,
+        screen_x,
+        screen_y,
+        "已转发滚轮事件"
+    );
     Ok(())
 }
-
-/// 0.15.7：自动滚动的停止信号包装（Tauri state）
-struct ScrollStopFlag(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
 fn finish_screenshot_session(app: &tauri::AppHandle) {
     crate::infra::platform::screenshot::set_annotation_mode(false);
     crate::infra::platform::window::hide_screenshot_overlay(app);
+}
+
+#[cfg(test)]
+mod scroll_probe_tests {
+    use super::*;
+
+    #[test]
+    fn probe_converts_bgra_to_luma() {
+        let pixels = [0_u8, 0, 255, 255, 255, 255, 255, 255];
+        let probe = downsample_luma_bgra(&pixels, 2, 1).unwrap();
+        assert_eq!(probe, vec![76, 255]);
+    }
+
+    #[test]
+    fn probe_is_bounded_for_large_capture_band() {
+        let pixels = vec![128_u8; 200 * 100 * 4];
+        let probe = downsample_luma_bgra(&pixels, 200, 100).unwrap();
+        assert_eq!(
+            probe.len(),
+            (SCROLL_PROBE_MAX_W * SCROLL_PROBE_MAX_H) as usize
+        );
+    }
 }
 
 /// 从 translate_batch 的首项 payload 读取保序结果。

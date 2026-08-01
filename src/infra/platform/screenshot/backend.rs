@@ -62,4 +62,13 @@ pub trait ScreenshotBackend: Send + Sync {
     /// `display_id` 必须是 `list_displays()` 返回过的 id；否则返回 Err。
     /// 返回 `(BGRA 像素, geometry)`。
     fn capture_display(&self, display_id: u32) -> Result<(Vec<u8>, DisplayGeometry), String>;
+
+    /// 截取虚拟屏幕坐标系下的矩形区域（0.15.7 长截图）。
+    ///
+    /// `src_x/src_y` 是虚拟屏幕坐标；`w/h` 是目标像素尺寸。
+    /// **像素格式**：BGRA、top-down、每行 `w*4` 字节。
+    ///
+    /// 与 `capture_virtual_screen` 的区别：只截取指定区域而非全屏，
+    /// 适用于长截图逐帧采集——每次 BitBlt 一个采集带而非整屏。
+    fn capture_region(&self, x: i32, y: i32, w: u32, h: u32) -> Result<Vec<u8>, String>;
 }

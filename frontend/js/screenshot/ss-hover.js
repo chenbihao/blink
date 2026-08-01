@@ -109,6 +109,36 @@ export function getHoveredWindowRect() {
   return { x: w.x, y: w.y, w: w.w, h: w.h };
 }
 
+/**
+ * 根据框选区域选择滚动目标窗口。
+ * 优先取与选区交叠面积最大的外部顶层窗口；相同面积时保留枚举顺序靠前者。
+ */
+export function findWindowForRect(rect) {
+  if (!rect || pickableWindows.length === 0) return null;
+  let best = null;
+  let bestArea = 0;
+  let bestTarget = null;
+  for (const candidate of pickableWindows) {
+    const left = Math.max(rect.x, candidate.x);
+    const top = Math.max(rect.y, candidate.y);
+    const right = Math.min(rect.x + rect.w, candidate.x + candidate.w);
+    const bottom = Math.min(rect.y + rect.h, candidate.y + candidate.h);
+    const area = Math.max(0, right - left) * Math.max(0, bottom - top);
+    if (area > bestArea) {
+      best = candidate;
+      bestArea = area;
+      bestTarget = { x: (left + right) / 2, y: (top + bottom) / 2 };
+    }
+  }
+  return best ? {
+    hwnd: best.hwnd,
+    title: best.title,
+    processName: best.processName,
+    targetX: bestTarget.x,
+    targetY: bestTarget.y,
+  } : null;
+}
+
 /** 显示窗口虚线框 */
 function showWindowHint(w) {
   if (!hintEl) {

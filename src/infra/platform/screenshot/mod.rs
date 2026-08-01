@@ -93,6 +93,27 @@ static SESSION: RwLock<Option<Session>> = RwLock::new(None);
 /// AI 调用 `capture_screen` 时检测此标志，活跃则新截一帧而非复用 SESSION。
 static ANNOTATION_MODE: AtomicBool = AtomicBool::new(false);
 
+/// 0.15.7：截图会话开始时的前台窗口 HWND（供长截图 PostMessage 滚轮用）。
+/// 在 `record_fg_hwnd()` 时记录（`hide_for_screenshot` 之前），`show_screenshot_overlay` 时注入 `__blinkScreenMeta.fgHwnd`。
+static FG_HWND: std::sync::RwLock<Option<isize>> = std::sync::RwLock::new(None);
+
+/// 0.15.7：记录当前前台窗口 HWND（截图会话开始前调用）。
+pub fn record_fg_hwnd() {
+    // ScreenshotAction 从 Blink 主窗口内触发，此时 GetForegroundWindow 通常就是 Blink。
+    // 使用 invoke() 抢焦点前保存的外部窗口，才是截图下方真正需要滚动的应用。
+    let hwnd = crate::infra::platform::window::last_external_foreground_hwnd()
+        .or_else(crate::infra::platform::window::get_foreground_hwnd);
+    if let Ok(mut w) = FG_HWND.write() {
+        *w = hwnd;
+    }
+    tracing::debug!(?hwnd, "已记录前台窗口 HWND（长截图用）");
+}
+
+/// 0.15.7：读取截图会话开始时记录的前台窗口 HWND。
+pub fn session_fg_hwnd() -> Option<isize> {
+    FG_HWND.read().ok()?.as_ref().copied()
+}
+
 /// 全局注入的 ScreenshotBackend（0.11.7-f）。
 ///
 /// **默认**：`WindowsScreenshotBackend`（生产），也可以在测试或平台无关代码里替换。
@@ -147,6 +168,14 @@ pub fn list_displays() -> Vec<DisplayGeometry> {
 #[allow(dead_code)] // Step 2 Capability 消费
 pub fn capture_display(display_id: u32) -> Result<(Vec<u8>, DisplayGeometry), String> {
     backend().capture_display(display_id)
+}
+
+/// 截取虚拟屏幕坐标系下的矩形区域（0.15.7 长截图逐帧采集）。
+///
+/// **像素格式**：BGRA、top-down、每行 `w*4` 字节（BitBlt 原生输出，不做 swap）。
+/// 调用方（`screenshot_capture_band` command）负责 BGRA→RGBA 转换。
+pub fn capture_region(x: i32, y: i32, w: u32, h: u32) -> Result<Vec<u8>, String> {
+    backend().capture_region(x, y, w, h)
 }
 
 /// 启动截图会话：截取整个虚拟屏幕，**立即编码 PNG**，存进 SESSION，返回元数据。

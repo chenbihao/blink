@@ -43,9 +43,9 @@
 
     <!-- 0.15.7：长截图专属工具栏（拼接中阶段显示，默认隐藏） -->
     <div id="scroll-toolbar" class="scroll-toolbar hidden" role="toolbar" aria-label="长截图工具栏">
-      <button class="tool-btn" id="scroll-direction" title="滚动方向（纵向/横向）"><svg class="icon" aria-hidden="true"><use href="#icon-arrow-down"/></svg></button>
-      <button class="tool-btn" id="scroll-auto" title="自动滚动"><svg class="icon" aria-hidden="true"><use href="#icon-chevrons-down"/></svg></button>
-      <button class="tool-btn" id="scroll-edit" title="编辑长图"><svg class="icon" aria-hidden="true"><use href="#icon-edit-3"/></svg></button>
+      <button class="tool-btn hidden" id="scroll-direction" title="当前仅支持纵向长截图"><svg class="icon" aria-hidden="true"><use href="#icon-rectangle-vertical"/></svg></button>
+      <button class="tool-btn" id="scroll-auto" title="自动滚动"><svg class="icon" aria-hidden="true"><use href="#icon-hand-grab"/></svg></button>
+      <button class="tool-btn" id="scroll-edit" title="编辑长图"><svg class="icon" aria-hidden="true"><use href="#icon-pencil-sparkles"/></svg></button>
       <div class="toolbar-divider"></div>
       <button class="tool-btn" id="scroll-pin" title="钉图"><svg class="icon" aria-hidden="true"><use href="#icon-pin"/></svg></button>
       <button class="tool-btn" id="scroll-save" title="保存为文件"><svg class="icon" aria-hidden="true"><use href="#icon-save"/></svg></button>
@@ -55,6 +55,9 @@
 
     <!-- 0.15.7：长截图实时预览缩略图（右侧 fixed 定位） -->
     <canvas id="scroll-preview" class="scroll-preview hidden" aria-hidden="true" width="120" height="200"></canvas>
+
+    <!-- 长截图采集边界：overlay 已从 BitBlt 排除，仅用于范围提示。 -->
+    <div id="scroll-capture-frame" class="scroll-capture-frame hidden" aria-hidden="true"></div>
 
     <!-- 工具栏（0.11.7-a/b，0.11.8-a 分组重组 + 圆润化 + 拖动 handle） -->
     <div id="toolbar" class="hidden" role="toolbar" aria-label="截图工具栏">
@@ -140,7 +143,7 @@
           </div>
           <div class="dropdown-separator"></div>
           <button class="dropdown-item active" data-tool="pixelate"><span class="item-icon"><span class="icon-mask icon-mask-mosaic" aria-hidden="true"></span></span><span class="item-label">马赛克</span></button>
-          <button class="dropdown-item" data-tool="blur"><span class="item-icon"><svg class="icon" aria-hidden="true"><use href="#icon-aperture"/></svg></span><span class="item-label">高斯模糊</span></button>
+          <button class="dropdown-item" data-tool="blur"><span class="item-icon"><svg class="icon" aria-hidden="true"><use href="#icon-paintbrush"/></svg></span><span class="item-label">高斯模糊</span></button>
           <div class="dropdown-separator"></div>
           <label class="wm-row" title="效果强度（马赛克块大小/模糊半径）">
             <span class="wm-label">强度</span>
@@ -271,11 +274,11 @@
 
       <!-- 输出区 -->
       <div class="toolbar-group" data-group="output">
+        <button class="tool-btn" id="btn-scroll" title="长截图"><svg class="icon" aria-hidden="true"><use href="#icon-gallery-vertical"/></svg></button>
         <button class="tool-btn" id="btn-ocr" title="识别 (OCR + 面板)"><svg class="icon" aria-hidden="true"><use href="#icon-scan-text"/></svg></button>
         <button class="tool-btn" id="btn-translate" title="翻译 (OCR + 翻译 + 图上嵌译文)"><svg class="icon" aria-hidden="true"><use href="#icon-languages"/></svg></button>
         <button class="tool-btn" id="btn-save" title="保存为文件"><svg class="icon" aria-hidden="true"><use href="#icon-save"/></svg></button>
         <button class="tool-btn" id="btn-pin" title="钉图"><svg class="icon" aria-hidden="true"><use href="#icon-pin"/></svg></button>
-        <button class="tool-btn" id="btn-scroll" title="长截图" disabled><svg class="icon" aria-hidden="true"><use href="#icon-file-text"/></svg></button>
         <button class="tool-btn tool-btn-primary" id="btn-copy" title="复制截图 (双击选区)"><svg class="icon" aria-hidden="true"><use href="#icon-check"/></svg></button>
         <button class="tool-btn" id="btn-cancel" title="取消 (ESC)"><svg class="icon" aria-hidden="true"><use href="#icon-x"/></svg></button>
       </div>

@@ -3,6 +3,8 @@
 //! chord-screenshot.js 拆分为多个子模块后，所有共享状态统一存在此对象中。
 //! 各子模块通过 `import { ss } from './ss-state.js'` 访问和修改状态。
 
+import { attachScrollSessionFacade } from './ss-scroll-session.js';
+
 export const ss = {
   // ── DOM 引用（initDOM() 填充）─────────────────────────────
   canvas: null,
@@ -62,15 +64,7 @@ export const ss = {
   magnifierRaf: 0,             // rAF ID
   magnifierFormat: 0,          // 0=HEX, 1=RGB, 2=HSL（Shift 切换）
 
-  // ── 0.15.7：长截图状态 ──────────────────────
-  scrollCapturePhase: 'idle',  // 'idle' | 'capturing' | 'editing'
-  scrollFrames: [],             // ImageData[] 已截取的帧
-  scrollDirection: 'vertical', // 'vertical' | 'horizontal'
-  autoScroll: false,            // 是否自动滚动模式
-  scrollHwnd: null,             // 长截图锁定的前台窗口 HWND（Rust 端 PostMessage 用）
-  scrollBandW: 0,               // 采集带宽度（物理像素，=框选矩形宽）
-  scrollBandX: 0,               // 采集带 X 起点（物理像素）
-  scrollBandY: 0,               // 采集带 Y 起点（物理像素）
+  // ── 0.15.7：长截图 DOM（会话数据由 ScrollCaptureSession 唯一持有）──
   scrollPreviewCanvas: null,    // 预览缩略图 canvas
   scrollPreviewCtx: null,       // 预览缩略图 ctx
 
@@ -97,7 +91,10 @@ export const ss = {
   _showTransientHint: null,           // 临时提示
   _doCancel: null,                    // 取消截图
   _compositeSelection: null,          // 合成选区 PNG
+  _longImageBaseCanvas: null,         // 长图编辑底图（不随视口平移改变像素坐标）
 };
+
+attachScrollSessionFacade(ss);
 
 // ── 常量 ──────────────────────────────────────────────────────
 export const SELECTION_HANDLE_SIZE = 8;

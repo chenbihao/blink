@@ -35,8 +35,13 @@ function selectTool(tool) {
   }
   annot.setTool(tool);
   canvas.setAttribute('data-tool', tool);
-  updateSelectionCursor(-1, -1);
-  if (ss.selCss) drawFinalSelection();
+  if (ss._longImageBaseCanvas) {
+    // 长图底图由独立 canvas 保存；普通选区重绘会把它覆盖回初始全屏截图。
+    canvas.style.cursor = tool === 'select' ? 'grab' : 'crosshair';
+  } else {
+    updateSelectionCursor(-1, -1);
+    if (ss.selCss) drawFinalSelection();
+  }
   hitCanvas.setAttribute('data-tool', tool);
   document.querySelectorAll('.split-main, .tool-direct').forEach((b) => b.classList.remove('active'));
   document.querySelectorAll('.dropdown-item[data-tool]').forEach((b) => b.classList.remove('active'));
@@ -465,7 +470,7 @@ export function bindToolbar() {
       annot.setMagnifierZoom(zoom);
       document.querySelectorAll('.zoom-btn').forEach((b) => b.classList.remove('active'));
       btn.classList.add('active');
-      if (ss.selCss) drawFinalSelection();
+      if (ss.selCss && !ss._longImageBaseCanvas) drawFinalSelection();
     });
     btn.addEventListener('mousedown', (e) => e.stopPropagation());
   });
@@ -507,7 +512,7 @@ export function bindToolbar() {
           switcher.querySelectorAll('.mode-btn').forEach((b) => b.classList.remove('active'));
           btn.classList.add('active');
         }
-        if (ss.selCss) drawFinalSelection();
+        if (ss.selCss && !ss._longImageBaseCanvas) drawFinalSelection();
       }
       // 0.15.8-fix：hover 模式下重新展开（模式切换后面板保持打开）
       const hoveredWrap = document.querySelector('.dropdown-wrap:hover');

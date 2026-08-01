@@ -561,6 +561,9 @@ impl crate::domain::execution::Action for ScreenshotAction {
     ) -> Result<crate::domain::execution::ActionOutcome, crate::domain::execution::ExecError> {
         let t0 = std::time::Instant::now();
 
+        // 0.15.7：记录前台窗口 HWND（长截图 PostMessage 滚轮用）——必须在 hide_for_screenshot 之前
+        crate::infra::platform::screenshot::record_fg_hwnd();
+
         // 1. 隐藏主窗——走 cloak 路径（无 Win11 fade 动画，瞬间从桌面消失）
         cx.env.hide_for_screenshot();
 
