@@ -43,8 +43,9 @@ html, body {
 
 #zoom-level {
   position: fixed;
-  bottom: 12px;
-  right: 12px;
+  /* 0.15.13：固定左上角，不随窗口缩放变动，丝滑 */
+  left: 8px;
+  top: 8px;
   background: rgba(0, 0, 0, 0.6);
   color: #fff;
   font-size: 12px;

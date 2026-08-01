@@ -151,8 +151,8 @@ html, body {
   position: fixed;
   display: flex;       /* 0.14.7 W4：默认 flex，由 .hidden class 控制隐藏 */
   align-items: center;
-  gap: 4px;              /* 0.11.8-b：6 → 4 */
-  padding: 5px 7px;      /* 0.11.8-b：6/9 → 5/7 */
+  gap: 2px;              /* 0.15.8-fix：3 → 2 紧凑化 */
+  padding: 3px 5px;      /* 0.15.8-fix：4/6 → 3/5 紧凑化 */
   background: rgba(30, 30, 30, 0.92);
   border: 1px solid rgba(255, 255, 255, 0.15);
   /* 0.11.8-a：整体圆润化（PixPin 风格）——外壳 12→10 圆角随尺寸缩 */
@@ -169,8 +169,8 @@ html, body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 28px;          /* 0.11.8-b：34 → 28 */
+  width: 14px;
+  height: 26px;          /* 0.15.8-fix：28 → 26 */
   cursor: grab;
   user-select: none;
   border-radius: 5px;
@@ -192,7 +192,7 @@ html, body {
    background-image 用两组 radial-gradient 定位左右两列点，size 决定行距。 */
 .drag-dots {
   width: 5px;
-  height: 18px;          /* 0.11.8-b：22 → 18 */
+  height: 16px;          /* 0.15.8-fix：18 → 16 */
   background-image:
     radial-gradient(circle, currentColor 1.3px, transparent 1.6px),
     radial-gradient(circle, currentColor 1.3px, transparent 1.6px);
@@ -204,23 +204,23 @@ html, body {
 .toolbar-group {
   display: flex;
   align-items: center;
-  gap: 2px;              /* 0.11.8-b：3 → 2 */
+  gap: 2px;
 }
 
 .toolbar-divider {
   width: 1px;
-  height: 24px;          /* 0.11.8-b：30 → 24 */
+  height: 20px;          /* 0.15.8-fix：22 → 20 紧凑化 */
   background: rgba(255, 255, 255, 0.15);
-  margin: 0 4px;         /* 0.11.8-b：6 → 4 */
+  margin: 0 2px;         /* 0.15.8-fix：3 → 2 紧凑化 */
 }
 
 .tool-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 36px;       /* 0.11.8-b：42 → 36 */
-  height: 36px;          /* 0.11.8-b：42 → 36 */
-  padding: 0 7px;        /* 0.11.8-b：9 → 7 */
+  min-width: 32px;       /* 0.15.8-fix：34 → 32 紧凑化 */
+  height: 32px;          /* 0.15.8-fix：34 → 32 紧凑化 */
+  padding: 0 5px;        /* 0.15.8-fix：6 → 5 紧凑化 */
   background: transparent;
   border: 1px solid transparent;
   /* 0.11.8-a：PixPin 风格圆润化；0.11.8-b 随按钮缩小 10 → 9 */
@@ -232,18 +232,17 @@ html, body {
   user-select: none;
 }
 
-/* 0.10.8：Lucide 图标略大于文本字号以匹配原 emoji 视觉重量。
-   0.11.8-b：随工具栏回缩，24 → 20。 */
+/* 0.15.8-fix：图标随工具栏缩小 20 → 18 */
 .tool-btn .icon {
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
   vertical-align: middle;
 }
 
-/* 0.11.8-a：PNG mask 图标（如 WeUI 马赛克）与 sprite Lucide 图标视觉重量一致 */
+/* 0.15.8-fix：图标随工具栏缩小 20 → 18 */
 .tool-btn .icon-mask {
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
   vertical-align: middle;
 }
 
@@ -587,7 +586,7 @@ html, body {
   height: 18px;
   padding: 0;
   border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 50%;
+  border-radius: 3px;
   cursor: pointer;
   /* button 默认 background: transparent，被内联 style 的 background:#xxx 覆盖 */
 }
@@ -642,13 +641,6 @@ html, body {
 .dropdown-trigger {
   display: inline-flex;
   align-items: center;
-  gap: 3px;              /* 0.11.8：随工具栏放大，2 → 3 */
-}
-
-.dropdown-trigger .caret {
-  font-size: 11px;       /* 0.11.8-b：13 → 11 与 split-caret 对齐 */
-  opacity: 0.6;
-  margin-left: 2px;
 }
 
 /* 颜色触发器里的圆点（0.11.8-b：改实心圆，与 .color-swatch 视觉统一） */
@@ -661,52 +653,18 @@ html, body {
   line-height: 1;
 }
 
-/* ── Split button（0.11.8-a；0.11.8-b 去分隔线）─────────────────────────
-   主按钮直接使用当前分组记住的工具（点击 = 应用），
-   三角按钮仅展开 dropdown 供切换工具。视觉上贴合成一颗"胶囊"，
-   0.11.8-b 去掉中间竖线，让整个 split 看起来是一颗更整体的按钮。 */
-.split-btn {
-  display: inline-flex;
-  align-items: stretch;
-  gap: 0;
-}
-
-.split-btn .split-main {
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
-  /* 主按钮包住图标；0.11.8-b 随按钮缩小 36→32 padding 6→5 */
-  padding: 0 5px;
-  min-width: 32px;
-}
-
-.split-btn .split-caret {
-  border-top-left-radius: 0;
-  border-bottom-left-radius: 0;
-  /* caret 按钮窄一档，视觉主次分明 */
-  min-width: 16px;
-  padding: 0 3px;
-  /* 0.11.8-b：去掉中间竖线（原 border-left + margin-left:-1px），
-     直接紧贴主按钮，视觉更整体；hover/active 时两半各自反馈依然清晰 */
-  margin-left: 0;
-}
-
-.split-btn .split-caret .caret {
-  font-size: 11px;       /* 0.11.8-b：13 → 11 */
-  opacity: 0.6;
-  line-height: 1;
-}
-
-/* active 时两半共同高亮（无论用户点主按钮还是从 dropdown 选中，
-   都保证 split 整体呈现"当前选中"状态） */
-.split-btn .split-main.active + .split-caret {
-  background: rgba(74, 158, 255, 0.25);
-  border-color: rgba(74, 158, 255, 0.6);
-  color: #fff;
+/* ── 0.15.8-fix：split-btn 已移除，split-main 作为独立按钮 ────────────
+   原 split-button 设计（主按钮 + caret 按钮）已改为 hover 自动展开。
+   split-main 保留 class 名以兼容 JS 选择器，但样式上等同普通 tool-btn。 */
+.split-main {
+  /* 保持略紧凑的 padding（原 split 时代的遗留值） */
+  padding: 0 4px;
+  min-width: 30px;
 }
 
 .dropdown {
   position: absolute;
-  top: calc(100% + 4px);
+  top: calc(100% + 2px);  /* 0.15.8-fix：4 → 2 减少 hover 间隙 */
   left: 0;
   display: none;
   flex-direction: column;
@@ -728,7 +686,7 @@ html, body {
 /* 工具栏位于屏幕底部时，JS 给 dropdown 标记 data-placement="top"。 */
 .dropdown[data-placement="top"] {
   top: auto;
-  bottom: calc(100% + 4px);
+  bottom: calc(100% + 2px);  /* 0.15.8-fix：4 → 2 */
 }
 
 .dropdown-item {
@@ -800,58 +758,289 @@ html, body {
 .width-bar-medium { height: 2px; }
 .width-bar-thick  { height: 4px; }
 
-/* 颜色下拉特殊布局：8 色网格 + 自定义行 */
+/* 颜色下拉特殊布局：0.15.4 完整色盘 */
 .dropdown-color {
   padding: 6px;
-  min-width: 140px;
+  min-width: 220px;
 }
 
-.color-grid {
+/* 预设色阵列 */
+.color-presets {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(6, 1fr);
   gap: 4px;
-  margin-bottom: 6px;
+  margin-bottom: 2px;
 }
 
-.dropdown-color .color-swatch {
-  width: 22px;
-  height: 22px;
-  min-width: 22px;
+.color-presets .color-swatch {
+  width: 100%;
+  aspect-ratio: 1;
+  min-width: 0;
 }
 
-.custom-color-row {
+/* SV 色盘 */
+.sv-canvas {
+  width: 100%;
+  height: 120px;
+  border-radius: var(--radius-xs);
+  cursor: crosshair;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  display: block;
+}
+
+/* 色相条 + 透明度条 + 取色按钮布局 */
+.color-bars {
+  display: flex;
+  gap: 4px;
+  margin: 4px 0;
+  align-items: stretch;
+}
+
+.bars-right {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+}
+
+/* 0.15.12：取色按钮/色彩格式/提取个数宽度统一对齐，加宽到 56px */
+.eyedropper-btn {
+  width: 56px;
+  min-width: 56px;
+  height: 28px;  /* 等于 2 条色条高度 + gap (12 + 4 + 12 = 28) */
+  font-size: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: var(--radius-xs);
+  background: rgba(255, 255, 255, 0.06);
+  color: #ccc;
+  cursor: pointer;
+  transition: background 0.1s ease;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 0.15.12：取色按钮里的图标 */
+.eyedropper-btn .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.eyedropper-btn:hover {
+  background: rgba(74, 158, 255, 0.15);
+  color: #fff;
+}
+
+/* 色相条 */
+.hue-bar {
+  width: 100%;
+  height: 12px;
+  border-radius: var(--radius-xs);
+  cursor: ew-resize;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  display: block;
+}
+
+/* 0.15.8-fix：透明度条 */
+.alpha-bar {
+  width: 100%;
+  height: 12px;
+  border-radius: var(--radius-xs);
+  cursor: ew-resize;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  display: block;
+}
+
+/* HEX/RGB/HSL 输入行 */
+.color-input-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 4px 4px 2px;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
-  margin-top: 2px;
-  font-size: 11px;
-  color: #aaa;
+  gap: 4px;
+  margin-top: 4px;
 }
 
-.custom-color-row .color-input {
-  width: 28px;
+/* 0.15.12：宽度与取色按钮/提取个数对齐 */
+.color-format {
+  width: 56px;
+  min-width: 56px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #ccc;
+  font-size: 11px;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  padding: 3px 4px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  outline: none;
+}
+
+.color-format option {
+  background: #2a2a2a;
+  color: #eee;
+}
+
+.color-value {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  padding: 0 6px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: var(--radius-xs);
+  color: #eee;
+  font-size: 12px;
+  font-family: "Cascadia Code", "Consolas", monospace;
+  outline: none;
+  text-align: center;
+}
+
+.color-value:focus {
+  border-color: rgba(74, 158, 255, 0.7);
+  box-shadow: 0 0 0 2px rgba(74, 158, 255, 0.15);
+}
+
+/* ── 0.15.6：配色提取（median cut + harmony）────────────── */
+
+.palette-divider {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.1);
+  margin: 6px 0;
+}
+
+.palette-extract-btn {
+  flex: 1;
+  height: 26px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: var(--radius-xs);
+  color: #ccc;
+  font-size: 12px;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  cursor: pointer;
+  transition: background 0.1s ease;
+}
+
+.palette-extract-btn:hover {
+  background: rgba(74, 158, 255, 0.15);
+  color: #fff;
+}
+
+/* 主色板 + harmony 色板共用 swatch 样式 */
+.palette-extract-row {
+  display: flex;
+  gap: 4px;
+  margin-top: 0;
+}
+
+/* 0.15.12：宽度与取色按钮/色彩格式对齐 */
+.palette-count {
+  width: 56px;
+  min-width: 56px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #ccc;
+  font-size: 11px;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  padding: 3px 4px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  outline: none;
+}
+
+.palette-count option {
+  background: #2a2a2a;
+  color: #eee;
+}
+
+.palette-extracted,
+.harmony-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin-top: 4px;
+}
+
+.palette-swatch {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-xs);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  cursor: pointer;
+  transition: transform 0.1s ease, border-color 0.1s ease;
+  padding: 0;
+}
+
+.palette-swatch:hover {
+  transform: scale(1.12);
+  border-color: rgba(255, 255, 255, 0.5);
+}
+
+/* 复制反馈 */
+.palette-swatch.copied {
+  border-color: #4a9eff;
+  box-shadow: 0 0 0 2px rgba(74, 158, 255, 0.4);
+}
+
+/* harmony 区域 */
+.palette-harmony {
+  margin-top: 4px;
+}
+
+.harmony-label {
+  font-size: 11px;
+  color: #888;
+  margin-bottom: 3px;
+}
+
+.harmony-schemes {
+  display: flex;
+  gap: 3px;
+  margin-bottom: 4px;
+}
+
+.harmony-scheme-btn {
+  flex: 1;
   height: 22px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--radius-xs);
+  color: #aaa;
+  font-size: 11px;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  cursor: pointer;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+
+.harmony-scheme-btn:hover {
+  background: rgba(74, 158, 255, 0.12);
+  color: #fff;
 }
 
 /* ── 水印表单（0.11.8-c：内嵌 text-dropdown 视图切换）─────────────
    text-dropdown 有两个视图：`list`（默认，选文本/水印）和 `watermark`（表单）。
    点"水印" item 后视图切表单，跟颜色下拉一致——就地展开，不再弹独立面板。 */
 
+/* 0.15.13：text dropdown 尺寸与其他 dropdown 对齐（水印表单已移至 sub-panel） */
 .dropdown-text {
-  min-width: 210px;
+  min-width: 90px;
 }
 
-.dropdown-view {
-  display: none;
-  flex-direction: column;
-  gap: 6px;
+/* 0.15.14：dropdown-view 规则已废弃（text dropdown 移除包裹层，直接放 dropdown-item） */
+
+/* 0.15.2：文字配置视图 */
+.text-style-toggles .tool-btn {
+  min-width: 28px;
+  height: 24px;
+  font-size: 12px;
+  padding: 0 6px;
 }
 
-#text-dropdown[data-view="list"] .dropdown-view-list { display: flex; }
-#text-dropdown[data-view="watermark"] .dropdown-view-watermark { display: flex; }
+.text-style-toggles .tool-btn.active {
+  background: rgba(74, 158, 255, 0.25);
+  border-color: rgba(74, 158, 255, 0.6);
+  color: #fff;
+}
 
 .wm-form-header {
   display: flex;
@@ -956,6 +1145,113 @@ html, body {
   cursor: not-allowed;
 }
 
+/* ── 0.15.1：模式切换器 ──────────────────────────────── */
+
+.mode-switcher {
+  display: flex;
+  gap: 2px;
+  padding: 2px 4px;
+}
+
+.mode-btn {
+  flex: 1;
+  padding: 4px 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: #aaa;
+  font-size: 11px;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  cursor: pointer;
+  text-align: center;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+
+.mode-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.mode-btn.active {
+  background: rgba(74, 158, 255, 0.2);
+  border-color: rgba(74, 158, 255, 0.6);
+  color: #fff;
+}
+
+/* ── 0.15.9：操作组 undo/redo/reset 三键一组，始终可见 ── */
+
+.undo-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* 0.15.9：redo 不再 hover 展开，始终可见 */
+.undo-group .btn-redo {
+  display: inline-flex;
+}
+
+/* ── 0.15.0：dropdown 内分隔线 ─────────────────────────── */
+
+.dropdown-separator {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.1);
+  margin: 3px 4px;
+}
+
+/* ── 0.15.9：放大镜倍率子菜单行 ─────────────────────── */
+
+.magnifier-zoom-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+}
+
+.magnifier-zoom-row .wm-label {
+  width: 42px;
+  color: #aaa;
+  flex-shrink: 0;
+  font-size: 12px;
+}
+
+.magnifier-zoom-row .zoom-btn {
+  flex: 1;
+  padding: 4px 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: #aaa;
+  font-size: 11px;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  cursor: pointer;
+  text-align: center;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+
+.magnifier-zoom-row .zoom-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.magnifier-zoom-row .zoom-btn.active {
+  background: rgba(74, 158, 255, 0.2);
+  border-color: rgba(74, 158, 255, 0.6);
+  color: #fff;
+}
+
+/* ── 0.15.0：虚线样式指示器（笔画样式选择） ──────────────── */
+
+.width-bar.dashed {
+  background: repeating-linear-gradient(
+    to right,
+    currentColor 0,
+    currentColor 4px,
+    transparent 4px,
+    transparent 7px
+  );
+}
+
 /* ── 笔画预览虚圈（0.11.8-c）─────────────────────────────
    铅笔/荧光笔/橡皮擦 hover 选区时显示笔尖大小的虚线圆，
    用户不用真下笔就知道现在会画多粗。JS 更新 width/height/left/top/borderColor。 */
@@ -968,4 +1264,203 @@ html, body {
   z-index: calc(var(--z-dropdown) + 5);
   box-sizing: border-box;
   transition: width 0.06s linear, height 0.06s linear;
+}
+
+/* ── 0.15.8：像素放大镜 ───────────────────────────────
+   选区拖拽阶段跟随鼠标，显示 9×16 像素网格 + 坐标 + 色值。
+   Shift 切换 HEX/RGB/HSL，C 复制色值。 */
+.pixel-magnifier {
+  position: fixed;
+  z-index: calc(var(--z-dropdown, 100) + 10);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  border-radius: 8px;
+  background: var(--color-bg-elevated, rgba(30, 30, 35, 0.95));
+  border: 1px solid var(--color-border, rgba(255, 255, 255, 0.12));
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--color-text, rgba(255, 255, 255, 0.9));
+}
+
+.pixel-magnifier.hidden {
+  display: none;
+}
+
+.pixel-magnifier .pm-grid {
+  display: block;
+  border-radius: 4px;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+.pixel-magnifier .pm-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 2px;
+}
+
+.pixel-magnifier .pm-coord {
+  color: var(--color-text-secondary, rgba(255, 255, 255, 0.6));
+  white-space: nowrap;
+}
+
+.pixel-magnifier .pm-color {
+  color: var(--color-text, rgba(255, 255, 255, 0.95));
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.pixel-magnifier .pm-hint {
+  color: var(--color-text-secondary, rgba(255, 255, 255, 0.4));
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+/* ── 0.15.8：窗口吸附虚线框 ─────────────────────────
+   鼠标悬停在桌面窗口上时显示的虚线边框。 */
+.window-hint {
+  position: fixed;
+  z-index: calc(var(--z-dropdown, 100) + 3);
+  display: none;
+  border: 2px dashed rgba(74, 158, 255, 0.8);
+  border-radius: 2px;
+  background: rgba(74, 158, 255, 0.08);
+  pointer-events: none;
+  box-sizing: border-box;
+}
+
+/* ── 0.15.11：二级面板（水印/文字配置）───────────────
+   显示在工具栏下方，不随 hover 展开/关闭。
+   水印/文字配置内容不再藏在 dropdown 里，而是直接可见可操作。 */
+.sub-panel {
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 8px;
+  /* 0.15.13：顶部留 24px 给关闭按钮，避免与首行重叠 */
+  padding-top: 24px;
+  background: rgba(30, 30, 30, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 10px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  /* 0.15.12：z-index 低于悬浮菜单（window-hint +3）和 dropdown（+10） */
+  z-index: calc(var(--z-dropdown) - 1);
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  min-width: 210px;
+}
+
+.sub-panel.hidden {
+  display: none;
+}
+
+/* 0.15.12：二级面板关闭按钮 */
+.sub-panel-close {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.5);
+  cursor: pointer;
+  border-radius: 4px;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0;
+}
+
+.sub-panel-close:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.sub-panel-close .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.sub-panel-view {
+  display: none;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sub-panel[data-view="text-config"] .sub-panel-text-config { display: flex; }
+.sub-panel[data-view="watermark"] .sub-panel-watermark { display: flex; }
+
+/* ── 0.15.7：长截图专属工具栏 ─────────────────────── */
+.scroll-toolbar {
+  position: fixed;
+  z-index: calc(var(--z-dropdown, 100) + 1);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border-radius: 10px;
+  background: var(--color-bg-elevated, rgba(30, 30, 35, 0.95));
+  border: 1px solid var(--color-border, rgba(255, 255, 255, 0.12));
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(8px);
+  font-family: var(--font-ui, system-ui, sans-serif);
+  font-size: 12px;
+}
+
+.scroll-toolbar.hidden {
+  display: none;
+}
+
+.scroll-toolbar .tool-btn {
+  background: transparent;
+  border: none;
+  color: var(--color-text, rgba(255, 255, 255, 0.85));
+  cursor: pointer;
+  padding: 6px 8px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.12s ease;
+}
+
+.scroll-toolbar .tool-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.scroll-toolbar .tool-btn.active {
+  background: rgba(74, 158, 255, 0.2);
+  color: #4a9eff;
+}
+
+.scroll-toolbar .toolbar-divider {
+  width: 1px;
+  height: 20px;
+  background: rgba(255, 255, 255, 0.12);
+  margin: 0 2px;
+}
+
+/* ── 0.15.7：长截图预览缩略图 ─────────────────────── */
+.scroll-preview {
+  position: fixed;
+  z-index: calc(var(--z-dropdown, 100) + 2);
+  border-radius: 8px;
+  border: 1px solid var(--color-border, rgba(255, 255, 255, 0.12));
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  background: rgba(0, 0, 0, 0.3);
+  pointer-events: none;
+  image-rendering: auto;
+}
+
+.scroll-preview.hidden {
+  display: none;
 }

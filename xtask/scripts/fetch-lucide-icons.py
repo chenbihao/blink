@@ -77,6 +77,9 @@ ICON_LIST = [
     "save",             # 保存为文件 💾
     "grid-3x3",         # 马赛克（0.11.8：从 emoji 🗯 迁移，格子点阵最像马赛克视觉）
     "spray-can",        # 涂抹（0.11.8：从 emoji ▦ 迁移，喷罐涂抹感）
+    "paintbrush",       # 涂抹（0.15.11：从 spray-can 换成 paintbrush，画笔涂抹感更直观）
+    "aperture",          # 高斯模糊（0.15.11：光圈图标，暗示模糊/聚焦语义）
+    "pipette",            # 取色按钮（0.15.12：吸管图标）
     "stamp",            # 水印（0.11.8-c）——印章语义
     "ticket-slash",     # 荧光笔（0.11.8-c）——斜线穿越条状代表笔画
     "move-up-right",    # 箭头（0.11.8-d）——替代 emoji ➘

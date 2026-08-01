@@ -18,6 +18,7 @@ export const ss = {
 
   // ── 选区状态 ──────────────────────────────────────────────
   screenshot: null,          // 全屏截图 Image
+  screenshotOffscreen: null, // 0.15.8-fix：纯截图离屏 canvas（无遮罩），供放大镜/取色器读取原始像素
   startX: 0, startY: 0,     // 拖拽起点（CSS 像素）
   endX: 0, endY: 0,         // 拖拽终点（CSS 像素）
   isDragging: false,         // 是否正在选区拖拽
@@ -52,6 +53,41 @@ export const ss = {
   // ── 水印表单状态 ──────────────────────────────────────────
   watermarkFormBound: false,
 
+  // ── 0.15.8：像素放大镜状态 ──────────────────────
+  magnifierEl: null,           // #pixel-magnifier DOM
+  magnifierCanvas: null,      // .pm-grid canvas
+  magnifierCtx: null,          // .pm-grid ctx
+  magnifierCoord: null,        // .pm-coord span
+  magnifierColor: null,        // .pm-color span
+  magnifierRaf: 0,             // rAF ID
+  magnifierFormat: 0,          // 0=HEX, 1=RGB, 2=HSL（Shift 切换）
+
+  // ── 0.15.7：长截图状态 ──────────────────────
+  scrollCapturePhase: 'idle',  // 'idle' | 'capturing' | 'editing'
+  scrollFrames: [],             // ImageData[] 已截取的帧
+  scrollDirection: 'vertical', // 'vertical' | 'horizontal'
+  autoScroll: false,            // 是否自动滚动模式
+  scrollHwnd: null,             // 长截图锁定的前台窗口 HWND（Rust 端 PostMessage 用）
+  scrollBandW: 0,               // 采集带宽度（物理像素，=框选矩形宽）
+  scrollBandX: 0,               // 采集带 X 起点（物理像素）
+  scrollBandY: 0,               // 采集带 Y 起点（物理像素）
+  scrollPreviewCanvas: null,    // 预览缩略图 canvas
+  scrollPreviewCtx: null,       // 预览缩略图 ctx
+
+  // ── 加载代际守卫（BUG1 fix）──────────────────────────────
+  _loadGen: 0,                  // 每次调用 loadScreenshot 递增；onload 校验防过期回调
+
+  // ── 0.15.9：标注预览 rAF 节流 ──────────────────────────
+  _annotRaf: 0,                 // requestAnimationFrame ID（0 = 无待执行帧）
+
+  // ── 0.15.10：已提交命令快照（避免预览时全量重绘）──────────
+  // startDraw 时拍快照，redrawAnnotPreview 直接 drawImage 恢复，
+  // 不再每帧调 redrawAnnotFull() 重放全部命令。
+  _committedSnapshot: null,     // HTMLCanvasElement | null
+
+  // ── 0.15.10：取色器活跃标志（eyedropper 模式时显示像素放大镜）──
+  eyedropperActive: false,
+
   // ── 跨模块回调（主文件注册，避免循环依赖）──────────────────
   _invalidateSelectionContent: null,  // 选区内容失效（清 OCR/阅读/overlay）
   _enterAnnotationMode: null,         // 进入标注模式
@@ -69,16 +105,60 @@ export const MIN_SELECTION_SIZE = 5;
 export const PREWARM_MIN_WIDTH = 100;
 export const PREWARM_MIN_HEIGHT = 50;
 
+// ── 0.15.1：TOOL_CAPS 工具能力表 ──────────────────────────────
+//
+// 每个工具的能力描述，消除此前 brush-family 列表重复 5 次的问题。
+// 所有 switch/if 改读此表。
+//
+// 字段说明：
+// - points:       'box'（start+end 两点）/ 'stream'（完整点序列）/ null（非绘制工具）
+// - widthCat:     决定读 config 哪一层（stroke/brush/text/effect/null）
+// - widthMul:     旧的魔法乘数（高亮×4 等迁入 config 层后此字段可废弃，过渡期保留）
+// - hasCursor:    是否有笔画预览虚圈
+// - minDrag:      最小拖拽阈值（0 = 单击也生效，3 = 需明显拖拽）
+// - supportMode:  是否支持框选/画笔模式切换
+// modeGroup: supportMode=true 的工具按组共享模式（画笔/框选）。
+// 同组工具切换时模式保持一致，不会「同组切换就变回去」。
+// 'blur' 组：mosaic/pixelate/blur；'eraser' 组：eraser；'highlight' 组：两种荧光笔。
+export const TOOL_CAPS = {
+  select:                   { points: null,     widthCat: null,    widthMul: 0, hasCursor: false, minDrag: 0, supportMode: false, modeGroup: null },
+  rect:                     { points: 'box',   widthCat: 'stroke', widthMul: 1, hasCursor: false, minDrag: 3, supportMode: false, modeGroup: null },
+  ellipse:                  { points: 'box',   widthCat: 'stroke', widthMul: 1, hasCursor: false, minDrag: 3, supportMode: false, modeGroup: null },
+  arrow:                    { points: 'box',   widthCat: 'stroke', widthMul: 1, hasCursor: false, minDrag: 3, supportMode: false, modeGroup: null },
+  pencil:                   { points: 'stream',widthCat: 'stroke', widthMul: 1, hasCursor: true,  minDrag: 0, supportMode: false, modeGroup: null },
+  'highlight-multiply':     { points: 'stream', widthCat: 'brush',  widthMul: 1, hasCursor: true,  minDrag: 0, supportMode: true,  modeGroup: 'highlight' },
+  'highlight-translucent':  { points: 'stream', widthCat: 'brush',  widthMul: 1, hasCursor: true,  minDrag: 0, supportMode: true,  modeGroup: 'highlight' },
+  mosaic:                    { points: 'stream',widthCat: 'brush',  widthMul: 1, hasCursor: true,  minDrag: 0, supportMode: true,  modeGroup: 'blur' },
+  pixelate:                  { points: 'stream',widthCat: 'brush',  widthMul: 1, hasCursor: true,  minDrag: 0, supportMode: true,  modeGroup: 'blur' },  // 0.15.13：画笔=涂抹，框选=马赛克，widthCat=brush 有画笔粗细
+  blur:                      { points: 'stream',widthCat: 'brush',  widthMul: 1, hasCursor: true,  minDrag: 0, supportMode: true,  modeGroup: 'blur' },  // 0.15.13：blur 也支持画笔模式 + 画笔粗细
+  eraser:                    { points: 'stream',widthCat: 'brush',  widthMul: 1, hasCursor: true,  minDrag: 0, supportMode: true,  modeGroup: 'eraser' },
+  text:                      { points: 'box',   widthCat: 'text',   widthMul: 0, hasCursor: false, minDrag: 0, supportMode: false, modeGroup: null },
+  number:                    { points: 'box',   widthCat: 'brush',  widthMul: 0, hasCursor: true,  minDrag: 0, supportMode: false, modeGroup: null },
+  spotlight:                 { points: 'box',   widthCat: null,     widthMul: 0, hasCursor: false, minDrag: 3, supportMode: false, modeGroup: null },
+  'spotlight-multi':         { points: 'box',   widthCat: null,     widthMul: 0, hasCursor: false, minDrag: 3, supportMode: false, modeGroup: null },
+  magnifier:                 { points: 'box',   widthCat: null,     widthMul: 0, hasCursor: false, minDrag: 3, supportMode: false, modeGroup: null },
+};
+
 /** 初始化 DOM 引用（在模块加载后、使用前调用一次） */
 export function initDOM() {
   ss.canvas = document.getElementById('canvas');
-  ss.ctx = ss.canvas.getContext('2d');
+  ss.ctx = ss.canvas.getContext('2d', { willReadFrequently: true });
   ss.annotCanvas = document.getElementById('annot-canvas');
   ss.annotCtx = ss.annotCanvas.getContext('2d');
   ss.toolbar = document.getElementById('toolbar');
   ss.sizeHint = document.getElementById('size-hint');
   ss.errorHint = document.getElementById('error-hint');
   ss.strokeCursor = document.getElementById('stroke-cursor');
+  ss.magnifierEl = document.getElementById('pixel-magnifier');
+  if (ss.magnifierEl) {
+    ss.magnifierCanvas = ss.magnifierEl.querySelector('.pm-grid');
+    ss.magnifierCtx = ss.magnifierCanvas ? ss.magnifierCanvas.getContext('2d') : null;
+    ss.magnifierCoord = ss.magnifierEl.querySelector('.pm-coord');
+    ss.magnifierColor = ss.magnifierEl.querySelector('.pm-color');
+  }
   ss.hitCanvas = document.getElementById('ocr-hit-canvas');
   ss.hitCtx = ss.hitCanvas ? ss.hitCanvas.getContext('2d') : null;
+  // 0.15.7：长截图预览缩略图
+  ss.scrollPreviewCanvas = document.getElementById('scroll-preview');
+  ss.scrollPreviewCtx = ss.scrollPreviewCanvas ? ss.scrollPreviewCanvas.getContext('2d') : null;
 }

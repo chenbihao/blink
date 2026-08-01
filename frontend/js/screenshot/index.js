@@ -31,7 +31,7 @@
 
 import {
   screenshotSetAnnotationMode, hideScreenshotOverlay,
-  ocrImage, frontendLog, invoke,
+  ocrImage, frontendLog, invoke, copyToClipboard,
 } from "../shared/api.js";
 import { normalizeError } from "../shared/tauri.js";
 import * as annot from "./annotation-engine.js";
@@ -39,7 +39,7 @@ import { ensureSpriteLoaded } from "../shared/icon.js";
 import { applyThemeFromConfig } from "../shared/theme.js";
 
 // ── 子模块 ──────────────────────────────────────────────
-import { ss, initDOM, PREWARM_MIN_WIDTH, PREWARM_MIN_HEIGHT } from "./ss-state.js";
+import { ss, initDOM, PREWARM_MIN_WIDTH, PREWARM_MIN_HEIGHT, TOOL_CAPS } from "./ss-state.js";
 import { norm, pointInRect, applySquareConstraint } from "./ss-utils.js";
 import { drawDimmed, drawSelection, drawFinalSelection, redrawAnnotPreview, redrawAnnotFull } from "./ss-draw.js";
 import { positionToolbar } from "./ss-display.js";
@@ -47,6 +47,7 @@ import {
   getSelectionHandle, beginSelectionInteraction, updateSelectionInteraction,
   finishSelectionInteraction, updateSelectionCursor, refreshShapePreviewOnShift,
   updateStrokeCursor,
+  updatePixelMagnifier, hidePixelMagnifier, cycleMagnifierFormat, getMagnifierColorText,
 } from "./ss-interaction.js";
 import {
   exitReadingMode, getReadingSelectionText, showReadingContextMenu, copyReadingSelection,
@@ -61,6 +62,13 @@ import {
   compositeSelection, doCancel, hasActivePanel,
 } from "./ss-output.js";
 import { bindToolbar, showTextInput, updateUndoRedoButtons } from "./ss-toolbar.js";
+// 0.15.8：智能窗口吸附 + 像素放大镜
+import { loadPickableWindows, clearPickableWindows, updateWindowHover, getHoveredWindowRect } from "./ss-hover.js";
+// 0.15.7：长截图
+import {
+  enterScrollCapture, exitScrollCapture, onScrollWheel,
+  bindScrollToolbar, enterScrollEdit, outputLongImage,
+} from "./ss-scroll.js";
 
 // ── **临时**（0.11.7-f 调试用）：console 转发到后端 tracing ────────────
 // TODO(0.11.7 收尾)：0.11.7 稳定后移除此块 + api.js 的 frontendLog + Rust 端 frontend_log command
@@ -108,6 +116,8 @@ ss._showOcrResult = showOcrResult;
 ss._showTransientHint = showTransientHint;
 ss._doCancel = doCancel;
 ss._compositeSelection = compositeSelection;
+// 0.15.7：长截图回调
+ss._enterAnnotationWithCropData = enterAnnotationWithCropData;
 
 // 图标 sprite
 ensureSpriteLoaded();
@@ -120,15 +130,47 @@ annot.setTool('select');
   if (_hc) _hc.setAttribute('data-tool', 'select');
 }
 
+// 0.15.9：每次模块加载时清除上一轮残留状态
+// 防止页面未重载时上一轮的 OCR 面板/文本输入/标注命令残留导致交互异常
+{
+  const staleOcr = document.getElementById('ocr-panel');
+  if (staleOcr) staleOcr.remove();
+  const staleText = document.querySelector('.text-annot-input');
+  if (staleText) staleText.remove();
+  annot.clearOverlay();
+  // 清除标注引擎内部状态（commands/cropImageData/watermark 等）
+  annot.reset(0, 0, null);
+  // 清除主 canvas 上一轮的截图内容
+  if (ss.canvas.width > 0) {
+    ss.ctx.clearRect(0, 0, ss.canvas.width, ss.canvas.height);
+  }
+}
+
 // 预热窗口跳过 loadScreenshot
 const isPreheat = new URLSearchParams(window.location.search).get('preheat') === '1';
 if (!isPreheat) {
   loadScreenshot();
+  // 0.15.8：加载可吸附窗口列表（异步，不阻塞截图加载）
+  loadPickableWindows();
 }
+// 0.15.7：绑定长截图专属工具栏
+bindScrollToolbar();
 
 window.__blinkReloadScreenshot = function () {
-  resetState();
-  loadScreenshot();
+  console.info('[screenshot] __blinkReloadScreenshot called');
+  try {
+    resetState();
+    console.info('[screenshot] resetState done');
+  } catch (e) {
+    console.error('[screenshot] resetState threw, attempting to continue', e);
+  }
+  try {
+    loadScreenshot();
+  } catch (e) {
+    console.error('[screenshot] loadScreenshot threw', e);
+    ss.errorHint.textContent = '截图初始化失败，按 ESC 重试';
+    ss.errorHint.classList.remove('hidden');
+  }
 };
 
 // ════════════════════════════════════════════════════════════
@@ -137,13 +179,23 @@ window.__blinkReloadScreenshot = function () {
 
 /** 完全重置前端状态——每次 overlay 显示时都要走一遍 */
 function resetState() {
+  console.info('[screenshot] resetState start');
   const { canvas, ctx, annotCanvas, annotCtx, sizeHint, toolbar, errorHint } = ss;
+  ss._loadGen++;  // BUG1 fix: 使待处理的旧 img.onload 回调失效
+  // 0.15.9：取消待执行的标注预览 rAF
+  if (ss._annotRaf) { cancelAnimationFrame(ss._annotRaf); ss._annotRaf = 0; }
+  // 0.15.10：清除快照
+  ss._committedSnapshot = null;
   ss.isDragging = false;
   ss.isAnnotDragging = false;
   ss.isAnnotating = false;
   ss.sent = false;
   ss.ocrBusy = false;
   ss.translationBusy = false;
+  // 0.15.9：清除防抖标志——快速连续截图时上一轮的 cancelInProgress/blurGuard
+  // 可能仍在生效期，导致新一轮的 cancel/blur 被静默忽略（用户被困在 overlay 里）
+  ss.cancelInProgress = false;
+  ss.blurGuard = false;
   ss.selCss = null;
   ss.selectionInteraction = null;
   ss.selectionRevision++;
@@ -151,6 +203,7 @@ function resetState() {
   canvas.style.cursor = 'crosshair';
   canvas.setAttribute('data-tool', 'select');
   ss.screenshot = null;
+  ss.screenshotOffscreen = null;
   if (ss.singleClickTimeout) { clearTimeout(ss.singleClickTimeout); ss.singleClickTimeout = null; }
   sizeHint.classList.add('hidden');
   toolbar.classList.add('hidden');
@@ -165,31 +218,46 @@ function resetState() {
   }
   annotCanvas.width = 0;
   annotCanvas.height = 0;
-  exitReadingMode();
-  screenshotSetAnnotationMode(false).catch((e) => console.error('setAnnotationMode(false) 失败', e));
-  const oldOcr = document.getElementById('ocr-panel');
-  if (oldOcr) oldOcr.remove();
-  // 水印表单已内嵌进 text-dropdown（视图切回列表即可）
-  const wmDropdown = document.getElementById('text-dropdown');
-  if (wmDropdown) {
-    wmDropdown.setAttribute('data-view', 'list');
-    wmDropdown.setAttribute('data-open', 'false');
-  }
-  // 清 OCR 预热 + 缓存
+
+  // 0.15.9：以下操作分组 try-catch——任何一个失败不应阻塞后续重置 + loadScreenshot
+  try { exitReadingMode(); } catch (e) { console.warn('[screenshot] resetState: exitReadingMode failed', e); }
+  try {
+    screenshotSetAnnotationMode(false).catch((e) => console.error('[screenshot] setAnnotationMode(false) 失败', e));
+  } catch (e) { console.warn('[screenshot] resetState: screenshotSetAnnotationMode threw', e); }
+  try {
+    const oldOcr = document.getElementById('ocr-panel');
+    if (oldOcr) oldOcr.remove();
+  } catch (e) { console.warn('[screenshot] resetState: remove ocr-panel failed', e); }
+  try {
+    const wmDropdown = document.getElementById('text-dropdown');
+    if (wmDropdown) {
+      wmDropdown.setAttribute('data-view', 'list');
+      wmDropdown.setAttribute('data-open', 'false');
+    }
+  } catch (e) { console.warn('[screenshot] resetState: text-dropdown reset failed', e); }
   ss.ocrPrewarm = null;
   ss.ocrResultCache = null;
   ss.ocrBusy = false;
   ss.translationBusy = false;
-  updateOutputButtonsDisabled();
-  annot.clearOverlay();
-  updateOverlayButtonsActive();
-  // 清工具栏用户拖动位置
-  toolbar.removeAttribute('data-user-moved');
-  toolbar.style.left = '';
-  toolbar.style.top = '';
+  try { updateOutputButtonsDisabled(); } catch (e) { console.warn('[screenshot] resetState: updateOutputButtonsDisabled failed', e); }
+  try { annot.clearOverlay(); } catch (e) { console.warn('[screenshot] resetState: annot.clearOverlay failed', e); }
+  try { updateOverlayButtonsActive(); } catch (e) { console.warn('[screenshot] resetState: updateOverlayButtonsActive failed', e); }
+  try {
+    toolbar.removeAttribute('data-user-moved');
+    toolbar.style.left = '';
+    toolbar.style.top = '';
+  } catch (e) { console.warn('[screenshot] resetState: toolbar reset failed', e); }
+  try { clearPickableWindows(); } catch (e) { console.warn('[screenshot] resetState: clearPickableWindows failed', e); }
+  if (ss.magnifierRaf) { cancelAnimationFrame(ss.magnifierRaf); ss.magnifierRaf = 0; }
+  ss.scrollCapturePhase = 'idle';
+  ss.scrollFrames = [];
+  ss.autoScroll = false;
+  ss.scrollHwnd = null;
+  console.info('[screenshot] resetState done');
 }
 
 function loadScreenshot() {
+  console.info('[screenshot] loadScreenshot start');
   ss.errorHint.classList.add('hidden');
 
   // 配置读取与图像加载并行；失败时保留默认值。
@@ -199,36 +267,65 @@ function loadScreenshot() {
         ss.screenshotConfig.prewarmOcr = val.prewarmOcr !== false;
       }
     })
-    .catch((e) => console.debug('[screenshot] 读 screenshot:config 失败,用默认值', e));
+    .catch((e) => console.warn('[screenshot] 读 screenshot:config 失败,用默认值', e));
 
+  // 加载代际守卫
+  const gen = ++ss._loadGen;
   const img = new Image();
-  // Tauri v2 在 Windows 上把自定义协议映射为 localhost URL；必须声明 CORS，
-  // 否则后续 getImageData/toBlob 会因 canvas 污染而失败。
   img.crossOrigin = 'anonymous';
+
+  // 0.15.9：加载超时检测——5 秒未完成则提示错误（防止协议请求静默失败）
+  const timeoutId = setTimeout(() => {
+    if (gen !== ss._loadGen) return;
+    if (ss.screenshot) return;
+    console.error('[screenshot] 加载超时（5s），协议请求可能失败', { gen });
+    ss.errorHint.textContent = '截图加载超时，按 ESC 重试';
+    ss.errorHint.classList.remove('hidden');
+  }, 5000);
+
   img.onload = () => {
-    const { canvas } = ss;
-    ss.screenshot = img;
-    canvas.width = img.width;
-    canvas.height = img.height;
-    drawDimmed();
-    console.debug('[screenshot] screenshot loaded', { w: img.width, h: img.height });
+    clearTimeout(timeoutId);
+    if (gen !== ss._loadGen) {
+      console.info('[screenshot] 丢弃过期截图加载回调', { gen, cur: ss._loadGen });
+      return;
+    }
+    try {
+      const { canvas } = ss;
+      ss.screenshot = img;
+      canvas.width = img.width;
+      canvas.height = img.height;
+      ss.screenshotOffscreen = document.createElement('canvas');
+      ss.screenshotOffscreen.width = img.width;
+      ss.screenshotOffscreen.height = img.height;
+      ss.screenshotOffscreen.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0);
+      drawDimmed();
+      console.info('[screenshot] screenshot loaded', { w: img.width, h: img.height, gen });
+    } catch (e) {
+      console.error('[screenshot] img.onload 处理异常', e, { gen });
+      ss.errorHint.textContent = '截图渲染失败，按 ESC 重试';
+      ss.errorHint.classList.remove('hidden');
+    }
   };
   img.onerror = (e) => {
-    console.error('[screenshot] Image load failed', e);
+    clearTimeout(timeoutId);
+    if (gen !== ss._loadGen) return;
+    console.error('[screenshot] Image load failed (onerror)', { gen, error: e, src: img.src });
     ss.errorHint.textContent = '截图加载失败，按 ESC 关闭';
     ss.errorHint.classList.remove('hidden');
   };
+  console.info('[screenshot] requesting screenshot image', { gen });
   img.src = 'http://blink-screenshot.localhost/capture?t=' + Date.now();
 }
 
 /** 进入标注模式：显示工具栏 + 定位标注 canvas + 通知后端 */
 function enterAnnotationMode(rect) {
-  console.debug('[screenshot] enterAnnotationMode', rect);
+  console.info('[screenshot] enterAnnotationMode', rect);
   const { annotCanvas, screenshot } = ss;
 
   ss.selCss = rect;
   ss.isAnnotating = true;
   ss.sent = false;
+  hidePixelMagnifier();
 
   const dpr = window.devicePixelRatio || 1;
   annotCanvas.classList.remove('hidden');
@@ -257,10 +354,52 @@ function enterAnnotationMode(rect) {
 
   annot.reset(pw, ph, cropData);
   updateUndoRedoButtons();
-  screenshotSetAnnotationMode(true).catch((e) => console.error('setAnnotationMode(true) 失败', e));
+  screenshotSetAnnotationMode(true).catch((e) => console.error('[screenshot] setAnnotationMode(true) 失败', e));
   drawFinalSelection();
   positionToolbar(rect);
   triggerOcrPrewarm(pw, ph);
+}
+
+/**
+ * 0.15.7 长图编辑入口：跳过从屏幕抓 cropData 的步骤，
+ * 直接用传入的合成 ImageData 调 annot.reset + 设置标注 canvas。
+ *
+ * 这是 enterAnnotationMode 的变体——长图的 cropData 是自己合成的、
+ * 不对应屏幕任何位置，不能走 enterAnnotationMode 内部的 getImageData 路径。
+ *
+ * @param {ImageData} cropData - 合成的长图 ImageData
+ * @param {number} pw - 物理像素宽
+ * @param {number} ph - 物理像素高
+ */
+function enterAnnotationWithCropData(cropData, pw, ph) {
+  console.debug('[screenshot] enterAnnotationWithCropData', { pw, ph });
+  const { annotCanvas, toolbar } = ss;
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = pw / dpr;
+  const cssH = ph / dpr;
+
+  // 长图选区占满 overlay 的可视区域
+  ss.selCss = { x: 0, y: 0, w: cssW, h: cssH };
+  ss.isAnnotating = true;
+  ss.sent = false;
+  hidePixelMagnifier();
+
+  annotCanvas.classList.remove('hidden');
+  annotCanvas.style.left = '0px';
+  annotCanvas.style.top = '0px';
+  annotCanvas.style.width = cssW + 'px';
+  annotCanvas.style.height = cssH + 'px';
+  annotCanvas.width = pw;
+  annotCanvas.height = ph;
+
+  annot.reset(pw, ph, cropData);
+  updateUndoRedoButtons();
+  screenshotSetAnnotationMode(true).catch((e) => console.error('setAnnotationMode(true) 失败', e));
+
+  // 显示工具栏
+  toolbar.classList.remove('hidden');
+  toolbar.style.left = '8px';
+  toolbar.style.top = (cssH + 8) + 'px';
 }
 
 /** 后台预热 OCR */
@@ -297,7 +436,10 @@ function triggerOcrPrewarm(pw, ph) {
 
 /** 退出标注模式（清除选区，回到可拖选状态） */
 function exitAnnotationMode() {
-  console.debug('[screenshot] exitAnnotationMode');
+  console.info('[screenshot] exitAnnotationMode');
+  if (ss._annotRaf) { cancelAnimationFrame(ss._annotRaf); ss._annotRaf = 0; }
+  // 0.15.10：清除快照
+  ss._committedSnapshot = null;
   const { canvas, annotCanvas, toolbar, sizeHint } = ss;
   ss.isAnnotating = false;
   ss.selCss = null;
@@ -358,6 +500,22 @@ canvas.addEventListener('mousedown', (e) => {
   if (!ss.screenshot || e.button !== 0) return;
 
   const tool = annot.getTool();
+
+  // 0.15.8：窗口吸附——选区拖拽阶段单击窗口区域直接吸附
+  if (!ss.isAnnotating && !ss.selectionInteraction) {
+    const winRect = getHoveredWindowRect();
+    if (winRect) {
+      ss.startX = winRect.x;
+      ss.startY = winRect.y;
+      ss.endX = winRect.x + winRect.w;
+      ss.endY = winRect.y + winRect.h;
+      ss.isDragging = false;
+      console.info('[screenshot] window snap', winRect);
+      enterAnnotationMode(winRect);
+      return;
+    }
+  }
+
   if (ss.isAnnotating && ss.selCss && tool === 'select') {
     const handle = getSelectionHandle(e.offsetX, e.offsetY, ss.selCss);
     if (handle) {
@@ -381,6 +539,16 @@ canvas.addEventListener('mousedown', (e) => {
     ss.annotCurrentY = ss.annotStartY;
     annot.startDraw(ss.annotStartX, ss.annotStartY);
     ss.isAnnotDragging = true;
+    // 0.15.10：拍快照——预览时用 drawImage 恢复，避免每帧全量重放命令
+    try {
+      const snap = document.createElement('canvas');
+      snap.width = ss.annotCanvas.width;
+      snap.height = ss.annotCanvas.height;
+      snap.getContext('2d').drawImage(ss.annotCanvas, 0, 0);
+      ss._committedSnapshot = snap;
+    } catch (e) {
+      ss._committedSnapshot = null;
+    }
     return;
   }
 
@@ -402,6 +570,20 @@ canvas.addEventListener('mousemove', (e) => {
 
   updateSelectionCursor(e.offsetX, e.offsetY);
 
+  // 0.15.8：选区拖拽阶段智能窗口吸附
+  if (!ss.isAnnotating && !ss.selectionInteraction) {
+    updateWindowHover(e.offsetX, e.offsetY);
+    updatePixelMagnifier(e.offsetX, e.offsetY);
+    // 0.15.12：存储最新位置供 Shift 切格式时强制刷新
+    ss._lastMagnifierPos = { x: e.offsetX, y: e.offsetY };
+  } else if (ss.eyedropperActive) {
+    // 0.15.10：取色器模式下显示像素放大镜预览
+    updatePixelMagnifier(e.offsetX, e.offsetY);
+    ss._lastMagnifierPos = { x: e.offsetX, y: e.offsetY };
+  } else if (ss.magnifierEl) {
+    hidePixelMagnifier();
+  }
+
   if (ss.selectionInteraction) {
     updateSelectionInteraction(e);
     return;
@@ -420,7 +602,13 @@ canvas.addEventListener('mousemove', (e) => {
       if (constrained) { ss.annotCurrentX = constrained.x; ss.annotCurrentY = constrained.y; }
     }
     annot.moveDraw(ss.annotCurrentX, ss.annotCurrentY);
-    redrawAnnotPreview();
+    // 0.15.9：rAF 节流——每帧最多重绘一次，避免高频 mousemove 导致掉帧
+    if (!ss._annotRaf) {
+      ss._annotRaf = requestAnimationFrame(() => {
+        ss._annotRaf = 0;
+        redrawAnnotPreview();
+      });
+    }
     return;
   }
 
@@ -444,6 +632,10 @@ canvas.addEventListener('mouseup', (e) => {
 
   if (ss.isAnnotDragging) {
     ss.isAnnotDragging = false;
+    // 0.15.9：取消待执行的 rAF，确保最终重绘是最新的
+    if (ss._annotRaf) { cancelAnimationFrame(ss._annotRaf); ss._annotRaf = 0; }
+    // 0.15.10：清除快照
+    ss._committedSnapshot = null;
     const dpr = window.devicePixelRatio || 1;
     ss.annotCurrentX = (e.offsetX - ss.selCss.x) * dpr;
     ss.annotCurrentY = (e.offsetY - ss.selCss.y) * dpr;
@@ -457,9 +649,11 @@ canvas.addEventListener('mouseup', (e) => {
     const tool = annot.getTool();
     const dx = ss.annotCurrentX - ss.annotStartX;
     const dy = ss.annotCurrentY - ss.annotStartY;
-    const minDrag = (tool === 'text' || tool === 'eraser' || tool === 'pencil' || tool === 'mosaic') ? 0 : 3;
+    // 0.15.1：用 TOOL_CAPS 替代硬编码 minDrag 列表
+    const minDrag = (TOOL_CAPS[tool] || TOOL_CAPS.select).minDrag;
     if (Math.abs(dx) < minDrag && Math.abs(dy) < minDrag) {
       console.debug('[screenshot] annotation drag too small, skip', { tool, dx, dy });
+      ss._committedSnapshot = null;
       redrawAnnotFull();
       return;
     }
@@ -493,7 +687,11 @@ canvas.addEventListener('mouseup', (e) => {
   }
 
   console.info('[screenshot] selection confirmed', rect);
-  enterAnnotationMode(rect);
+  try {
+    enterAnnotationMode(rect);
+  } catch (e) {
+    console.error('[screenshot] enterAnnotationMode threw', e);
+  }
 });
 
 canvas.addEventListener('dblclick', (e) => {
@@ -534,6 +732,30 @@ document.addEventListener('keydown', (e) => {
       return;
     }
   }
+  // 0.15.12：Shift 切换放大镜色值格式（选区拖拽阶段 或 取色器模式）
+  if (e.key === 'Shift' && !e.ctrlKey && !e.metaKey && !e.altKey && (!ss.isAnnotating || ss.eyedropperActive)) {
+    const tgt = e.target;
+    if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
+    cycleMagnifierFormat();
+    // 0.15.12：立即强制刷新放大镜显示（不等到下一帧 mousemove）
+    if (ss._lastMagnifierPos) {
+      updatePixelMagnifier(ss._lastMagnifierPos.x, ss._lastMagnifierPos.y);
+    }
+    return;
+  }
+  // 0.15.12：C 键复制放大镜色值（选区拖拽阶段 或 取色器模式，非 Ctrl+C）
+  if ((e.key === 'c' || e.key === 'C') && !e.ctrlKey && !e.metaKey && !e.altKey && (!ss.isAnnotating || ss.eyedropperActive)) {
+    const tgt = e.target;
+    if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
+    const colorText = getMagnifierColorText();
+    if (colorText) {
+      e.preventDefault();
+      copyToClipboard(colorText).then(() => {
+        if (ss._showTransientHint) ss._showTransientHint(`已复制 ${colorText}`);
+      });
+    }
+    return;
+  }
   if (e.key === 'Escape') {
     e.preventDefault();
     const ocrPanel = document.getElementById('ocr-panel');
@@ -541,10 +763,10 @@ document.addEventListener('keydown', (e) => {
       ocrPanel.remove();
       return;
     }
-    const wmDropdown = document.getElementById('text-dropdown');
-    if (wmDropdown && wmDropdown.getAttribute('data-view') === 'watermark' && wmDropdown.getAttribute('data-open') === 'true') {
-      wmDropdown.setAttribute('data-view', 'list');
-      wmDropdown.setAttribute('data-open', 'false');
+    // 0.15.11：水印表单移至 sub-panel，关闭 sub-panel 即可
+    const subPanel = document.getElementById('sub-panel');
+    if (subPanel && !subPanel.classList.contains('hidden')) {
+      subPanel.classList.add('hidden');
       return;
     }
     const openDropdown = document.querySelector('.dropdown[data-open="true"]');
@@ -565,6 +787,9 @@ document.addEventListener('keydown', (e) => {
 
 // 0.11.8-e：矩形/椭圆拖动期间按/松 Shift 实时更新预览
 window.addEventListener('keydown', refreshShapePreviewOnShift);
+
+// 0.15.7：长截图手动滚动检测——capturing 阶段 wheel 触发截帧
+window.addEventListener('wheel', onScrollWheel, { passive: true });
 
 window.addEventListener('blur', () => {
   if (ss.blurGuard) return;

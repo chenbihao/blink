@@ -24,6 +24,10 @@
 #[cfg(target_os = "windows")]
 mod windows;
 
+// 0.15.8：窗口枚举（智能吸附）
+#[cfg(target_os = "windows")]
+mod list;
+
 #[cfg(target_os = "windows")]
 pub use windows::{
     apply_cloak, clamp_context_menu, clamp_to_work_area, enable_rounded_corners, force_topmost,
@@ -33,3 +37,7 @@ pub use windows::{
     show_pin_window, show_screenshot_overlay, show_voice_overlay, start_watchdog,
     unhide_after_screenshot, update_grace_period, wait_frame_after_hide,
 };
+
+// 0.15.8：智能窗口吸附——枚举可吸附窗口
+#[cfg(target_os = "windows")]
+pub use list::{enumerate_pickable_windows, PickableWindow};

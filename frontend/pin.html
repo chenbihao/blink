@@ -128,12 +128,22 @@ import { normalizeError } from "./js/shared/tauri.js";
 
       function showZoomLabel() {
         zoomLabel.textContent = Math.round(scale * 100) + '%';
+        // 0.15.5：贴图视觉右下角定位（不贴窗口右下角）
+        updateZoomLabelPosition();
         zoomLabel.style.opacity = '1';
         clearTimeout(zoomLabel._hideTimer);
         zoomLabel._hideTimer = setTimeout(() => {
           zoomLabel.style.opacity = '0';
         }, 1200);
       }
+
+  /** 0.15.13：zoom label 固定左上角——不随窗口缩放变动，丝滑 */
+  function updateZoomLabelPosition() {
+    zoomLabel.style.left = '8px';
+    zoomLabel.style.top = '8px';
+    zoomLabel.style.right = 'auto';
+    zoomLabel.style.bottom = 'auto';
+  }
 
       // 后端复用窗口时通过 eval 调用此函数重置状态
       window.__blinkResetPin = function(dataUrl, pngW, pngH, screenX, screenY) {
@@ -145,6 +155,7 @@ import { normalizeError } from "./js/shared/tauri.js";
         imgScreenY = screenY || 0;
         zoomLabel.textContent = '100%';
         zoomLabel.style.opacity = '0';
+        updateZoomLabelPosition(); // 0.15.5：初始化 label 位置，防止 hover 闪位
         // img 固定为原始物理尺寸对应的 CSS 尺寸（physW/dpr），保证 1:1 像素清晰。
         // transform: scale 承载所有缩放（GPU 合成层，丝滑）。
         const dpr = window.devicePixelRatio || 1;

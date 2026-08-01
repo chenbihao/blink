@@ -7,17 +7,27 @@
 //! - redrawAnnotPreview：标注实时预览
 //! - redrawAnnotFull：全量重绘标注层
 
-import { ss } from './ss-state.js';
+import { ss, TOOL_CAPS } from './ss-state.js';
 import { norm } from './ss-utils.js';
 import * as annot from './annotation-engine.js';
 
 /** 暗色蒙版（初始态 + 无选区时） */
 export function drawDimmed() {
-  const { ctx, canvas, screenshot } = ss;
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(screenshot, 0, 0);
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  try {
+    const { ctx, canvas, screenshot } = ss;
+    if (!screenshot || !ctx || !canvas) {
+      console.warn('[screenshot] drawDimmed: missing prerequisites', {
+        hasScreenshot: !!screenshot, hasCtx: !!ctx, canvasW: canvas?.width,
+      });
+      return;
+    }
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(screenshot, 0, 0);
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  } catch (e) {
+    console.error('[screenshot] drawDimmed threw', e);
+  }
 }
 
 /** 选区绘制：选区外暗 + 选区内亮 */
@@ -47,8 +57,11 @@ export function drawSelection() {
   ctx.strokeRect(px, py, pw, ph);
   ctx.setLineDash([]);
 
-  // size-hint 显示物理像素尺寸
-  sizeHint.textContent = `${Math.round(pw)} × ${Math.round(ph)}`;
+  // size-hint 显示物理像素尺寸 + 坐标（0.15.8）
+  const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+  const sx = Math.round(meta.vx + px);
+  const sy = Math.round(meta.vy + py);
+  sizeHint.textContent = `(${sx}, ${sy}) ${Math.round(pw)} × ${Math.round(ph)} px`;
   sizeHint.classList.remove('hidden');
   sizeHint.style.left = (r.x + 4) + 'px';
   sizeHint.style.top = (r.y > 24 ? r.y - 22 : r.y + 4) + 'px';
@@ -97,13 +110,21 @@ export function drawFinalSelection() {
   }
 }
 
-/** 标注实时预览：重绘已提交的 + 当前绘制中的预览 */
+/** 标注实时预览：重绘已提交的 + 当前绘制中的预览
+ *  0.15.10：用 _committedSnapshot 快速恢复已提交内容，避免每帧全量重放。 */
 export function redrawAnnotPreview() {
-  const { isAnnotDragging, selCss, annotCtx, annotStartX, annotStartY, annotCurrentX, annotCurrentY } = ss;
+  const { isAnnotDragging, selCss, annotCtx, annotStartX, annotStartY, annotCurrentX, annotCurrentY, annotCanvas } = ss;
   if (!isAnnotDragging || !selCss) return;
-  redrawAnnotFull();
 
   const tool = annot.getTool();
+  // 0.15.11：聚光灯支持多次框选——预览新聚光灯时保留已提交的旧聚光灯
+  if (ss._committedSnapshot) {
+    // 0.15.10：快照恢复——O(1) drawImage 替代 O(n) 全量重放
+    annotCtx.clearRect(0, 0, annotCanvas.width, annotCanvas.height);
+    annotCtx.drawImage(ss._committedSnapshot, 0, 0);
+  } else {
+    redrawAnnotFull();
+  }
   annotCtx.save();
   switch (tool) {
     case 'rect': {
@@ -112,8 +133,10 @@ export function redrawAnnotPreview() {
       const w = Math.abs(annotCurrentX - annotStartX);
       const h = Math.abs(annotCurrentY - annotStartY);
       annotCtx.strokeStyle = annot.getColor();
-      annotCtx.lineWidth = annot.getWidth();
+      annotCtx.lineWidth = annot.getWidthForTool('rect');
+      if (annot.getStrokeStyle() === 'dashed') annotCtx.setLineDash([8, 4]);
       annotCtx.strokeRect(x, y, w, h);
+      annotCtx.setLineDash([]);
       break;
     }
     case 'ellipse': {
@@ -122,21 +145,25 @@ export function redrawAnnotPreview() {
       const rx = Math.abs(annotCurrentX - annotStartX) / 2;
       const ry = Math.abs(annotCurrentY - annotStartY) / 2;
       annotCtx.strokeStyle = annot.getColor();
-      annotCtx.lineWidth = annot.getWidth();
+      annotCtx.lineWidth = annot.getWidthForTool('ellipse');
+      if (annot.getStrokeStyle() === 'dashed') annotCtx.setLineDash([8, 4]);
       annotCtx.beginPath();
       annotCtx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
       annotCtx.stroke();
+      annotCtx.setLineDash([]);
       break;
     }
     case 'arrow': {
       const angle = Math.atan2(annotCurrentY - annotStartY, annotCurrentX - annotStartX);
-      const headLen = 12 * annot.getWidth() / 2;
+      const headLen = 12 * annot.getWidthForTool('arrow') / 2;
       annotCtx.strokeStyle = annot.getColor();
-      annotCtx.lineWidth = annot.getWidth();
+      annotCtx.lineWidth = annot.getWidthForTool('arrow');
+      if (annot.getStrokeStyle() === 'dashed') annotCtx.setLineDash([8, 4]);
       annotCtx.beginPath();
       annotCtx.moveTo(annotStartX, annotStartY);
       annotCtx.lineTo(annotCurrentX, annotCurrentY);
       annotCtx.stroke();
+      annotCtx.setLineDash([]);
       annotCtx.beginPath();
       annotCtx.moveTo(annotCurrentX, annotCurrentY);
       annotCtx.lineTo(annotCurrentX - headLen * Math.cos(angle - 0.4), annotCurrentY - headLen * Math.sin(angle - 0.4));
@@ -149,23 +176,42 @@ export function redrawAnnotPreview() {
       const pts = annot.getCurrentPoints();
       if (pts.length >= 2) {
         annotCtx.strokeStyle = annot.getColor();
-        annotCtx.lineWidth = annot.getWidth();
+        annotCtx.lineWidth = annot.getWidthForTool('pencil');
         annotCtx.lineCap = 'round';
         annotCtx.lineJoin = 'round';
+        if (annot.getStrokeStyle() === 'dashed') annotCtx.setLineDash([8, 4]);
         annotCtx.beginPath();
         annotCtx.moveTo(pts[0].x, pts[0].y);
         for (let i = 1; i < pts.length; i++) {
           annotCtx.lineTo(pts[i].x, pts[i].y);
         }
         annotCtx.stroke();
+        annotCtx.setLineDash([]);
       }
       break;
     }
     case 'highlight-multiply':
     case 'highlight-translucent': {
+      // 0.15.8-fix：根据模式切换预览风格
+      const hlMode = annot.getToolMode(tool);
+      if (hlMode === 'box') {
+        const bx = Math.min(annotStartX, annotCurrentX);
+        const by = Math.min(annotStartY, annotCurrentY);
+        const bw = Math.abs(annotCurrentX - annotStartX);
+        const bh = Math.abs(annotCurrentY - annotStartY);
+        const alpha = tool === 'highlight-multiply' ? 0.55 : 0.30;
+        annotCtx.fillStyle = annot.withAlpha(annot.getColor(), alpha);
+        annotCtx.fillRect(bx, by, bw, bh);
+        annotCtx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+        annotCtx.lineWidth = 1;
+        annotCtx.setLineDash([4, 3]);
+        annotCtx.strokeRect(bx, by, bw, bh);
+        annotCtx.setLineDash([]);
+        break;
+      }
       const pts = annot.getCurrentPoints();
       if (pts.length >= 2) {
-        const w = annot.getWidth();
+        const w = annot.getWidthForTool(tool);
         const alpha = tool === 'highlight-multiply' ? 0.55 : 0.30;
         annotCtx.strokeStyle = annot.withAlpha(annot.getColor(), alpha);
         annotCtx.lineWidth = w * 4;
@@ -181,9 +227,25 @@ export function redrawAnnotPreview() {
       break;
     }
     case 'eraser': {
+      // 0.15.8-fix：根据模式切换预览风格
+      const erMode = annot.getToolMode('eraser');
+      if (erMode === 'box') {
+        const bx = Math.min(annotStartX, annotCurrentX);
+        const by = Math.min(annotStartY, annotCurrentY);
+        const bw = Math.abs(annotCurrentX - annotStartX);
+        const bh = Math.abs(annotCurrentY - annotStartY);
+        annotCtx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+        annotCtx.fillRect(bx, by, bw, bh);
+        annotCtx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+        annotCtx.lineWidth = 1;
+        annotCtx.setLineDash([4, 3]);
+        annotCtx.strokeRect(bx, by, bw, bh);
+        annotCtx.setLineDash([]);
+        break;
+      }
       const pts = annot.getCurrentPoints();
       if (pts.length >= 1) {
-        const w = annot.getWidth();
+        const w = annot.getWidthForTool('eraser');
         const r = Math.max(6, w * 3);
         annotCtx.globalCompositeOperation = 'destination-out';
         for (let i = 0; i < pts.length; i++) {
@@ -206,20 +268,37 @@ export function redrawAnnotPreview() {
       break;
     }
     case 'mosaic': {
+      // 0.15.10：预览改用半透明灰色笔画（与 pixelate/blur 画笔预览统一），
+      // 不再每点调用 sampleMosaicColor（O(n·r²) 像素读取是卡顿主因）。
+      // 最终渲染时 executeCommand 仍会做真实取色。
+      const mosMode = annot.getToolMode('mosaic');
+      if (mosMode === 'box') {
+        const bx = Math.min(annotStartX, annotCurrentX);
+        const by = Math.min(annotStartY, annotCurrentY);
+        const bw = Math.abs(annotCurrentX - annotStartX);
+        const bh = Math.abs(annotCurrentY - annotStartY);
+        annotCtx.fillStyle = 'rgba(150, 150, 150, 0.4)';
+        annotCtx.fillRect(bx, by, bw, bh);
+        annotCtx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+        annotCtx.lineWidth = 1;
+        annotCtx.setLineDash([4, 3]);
+        annotCtx.strokeRect(bx, by, bw, bh);
+        annotCtx.setLineDash([]);
+        break;
+      }
+      // brush 模式预览：半透明灰色笔画
       const pts = annot.getCurrentPoints();
       if (pts.length >= 1) {
-        const r = 16;
-        annotCtx.imageSmoothingEnabled = true;
+        const r = Math.max(8, annot.getBrushSize() / 2 + 8);
+        annotCtx.fillStyle = 'rgba(150, 150, 150, 0.3)';
         for (let i = 0; i < pts.length; i++) {
           const p = pts[i];
-          const avg = annot.sampleMosaicColor(p.x, p.y, r);
-          annotCtx.fillStyle = avg;
           annotCtx.beginPath();
           annotCtx.arc(p.x, p.y, r, 0, Math.PI * 2);
           annotCtx.fill();
           if (i > 0) {
             const prev = pts[i - 1];
-            annotCtx.strokeStyle = avg;
+            annotCtx.strokeStyle = 'rgba(150, 150, 150, 0.3)';
             annotCtx.lineWidth = r * 2;
             annotCtx.lineCap = 'round';
             annotCtx.beginPath();
@@ -232,6 +311,34 @@ export function redrawAnnotPreview() {
       break;
     }
     case 'pixelate': {
+      // 0.15.8-fix→fix：根据模式切换预览风格
+      const pixMode = annot.getToolMode('pixelate');
+      if (pixMode === 'brush') {
+        // 画笔模式预览：半透明灰色笔画（与 blur 画笔预览统一，不再用 sampleMosaicColor 与涂抹混浠）
+        const pts = annot.getCurrentPoints();
+        if (pts.length >= 1) {
+          const r = Math.max(8, annot.getBrushSize() / 2 + 8);
+          annotCtx.fillStyle = 'rgba(150, 150, 150, 0.3)';
+          for (let i = 0; i < pts.length; i++) {
+            const p = pts[i];
+            annotCtx.beginPath();
+            annotCtx.arc(p.x, p.y, r, 0, Math.PI * 2);
+            annotCtx.fill();
+            if (i > 0) {
+              const prev = pts[i - 1];
+              annotCtx.strokeStyle = 'rgba(150, 150, 150, 0.3)';
+              annotCtx.lineWidth = r * 2;
+              annotCtx.lineCap = 'round';
+              annotCtx.beginPath();
+              annotCtx.moveTo(prev.x, prev.y);
+              annotCtx.lineTo(p.x, p.y);
+              annotCtx.stroke();
+            }
+          }
+        }
+        break;
+      }
+      // box 模式（默认）
       const x = Math.min(annotStartX, annotCurrentX);
       const y = Math.min(annotStartY, annotCurrentY);
       const w = Math.abs(annotCurrentX - annotStartX);
@@ -243,6 +350,85 @@ export function redrawAnnotPreview() {
       annotCtx.setLineDash([4, 3]);
       annotCtx.strokeRect(x, y, w, h);
       annotCtx.setLineDash([]);
+      break;
+    }
+    case 'blur': {
+      // 0.15.3：高斯模糊预览。brush 模式 = 笔刷圆点；box 模式 = 半透明灰框。
+      const blurMode = annot.getToolMode('blur');
+      if (blurMode === 'brush') {
+        const pts = annot.getCurrentPoints();
+        if (pts.length >= 1) {
+          const r = Math.max(8, annot.getBrushSize() / 2 + 8);
+          annotCtx.fillStyle = 'rgba(150, 150, 150, 0.3)';
+          for (let i = 0; i < pts.length; i++) {
+            const p = pts[i];
+            annotCtx.beginPath();
+            annotCtx.arc(p.x, p.y, r, 0, Math.PI * 2);
+            annotCtx.fill();
+            if (i > 0) {
+              const prev = pts[i - 1];
+              annotCtx.strokeStyle = 'rgba(150, 150, 150, 0.3)';
+              annotCtx.lineWidth = r * 2;
+              annotCtx.lineCap = 'round';
+              annotCtx.beginPath();
+              annotCtx.moveTo(prev.x, prev.y);
+              annotCtx.lineTo(p.x, p.y);
+              annotCtx.stroke();
+            }
+          }
+        }
+      } else {
+        const bx = Math.min(annotStartX, annotCurrentX);
+        const by = Math.min(annotStartY, annotCurrentY);
+        const bw = Math.abs(annotCurrentX - annotStartX);
+        const bh = Math.abs(annotCurrentY - annotStartY);
+        annotCtx.fillStyle = 'rgba(150, 150, 150, 0.4)';
+        annotCtx.fillRect(bx, by, bw, bh);
+        annotCtx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+        annotCtx.lineWidth = 1;
+        annotCtx.setLineDash([4, 3]);
+        annotCtx.strokeRect(bx, by, bw, bh);
+        annotCtx.setLineDash([]);
+      }
+      break;
+    }
+    case 'spotlight':
+    case 'spotlight-multi': {
+      // 0.15.12：聚光灯预览——四条遮罩条（与最终渲染一致）
+      const sx = Math.min(annotStartX, annotCurrentX);
+      const sy = Math.min(annotStartY, annotCurrentY);
+      const sw = Math.abs(annotCurrentX - annotStartX);
+      const sh = Math.abs(annotCurrentY - annotStartY);
+      annotCtx.save();
+      annotCtx.fillStyle = 'rgba(0,0,0,0.6)';
+      annotCtx.fillRect(0, 0, ss.annotCanvas.width, sy);
+      annotCtx.fillRect(0, sy + sh, ss.annotCanvas.width, ss.annotCanvas.height - sy - sh);
+      annotCtx.fillRect(0, sy, sx, sh);
+      annotCtx.fillRect(sx + sw, sy, ss.annotCanvas.width - sx - sw, sh);
+      annotCtx.restore();
+      break;
+    }
+    case 'magnifier': {
+      // 0.15.9：放大镜预览——半透明矩形 + 虚线框 + 倍率提示。
+      const mx = Math.min(annotStartX, annotCurrentX);
+      const my = Math.min(annotStartY, annotCurrentY);
+      const mw = Math.abs(annotCurrentX - annotStartX);
+      const mh = Math.abs(annotCurrentY - annotStartY);
+      if (mw > 4 && mh > 4) {
+        const zoom = annot.getMagnifierZoom();
+        annotCtx.fillStyle = 'rgba(74, 158, 255, 0.15)';
+        annotCtx.fillRect(mx, my, mw, mh);
+        annotCtx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
+        annotCtx.lineWidth = 2;
+        annotCtx.setLineDash([4, 3]);
+        annotCtx.strokeRect(mx, my, mw, mh);
+        annotCtx.setLineDash([]);
+        annotCtx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+        annotCtx.font = '12px sans-serif';
+        annotCtx.textAlign = 'center';
+        annotCtx.textBaseline = 'middle';
+        annotCtx.fillText(`${zoom}×`, mx + mw / 2, my + mh / 2);
+      }
       break;
     }
   }

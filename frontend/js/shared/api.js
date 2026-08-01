@@ -132,6 +132,21 @@ export function screenshotSetAnnotationMode(active) {
   return invoke("screenshot_set_annotation_mode", { active });
 }
 
+/** 0.15.8：列出可吸附窗口（智能窗口吸附用）。返回 PickableWindow 数组。 */
+export function screenshotWindowList() {
+  return invoke("screenshot_window_list");
+}
+
+/** 0.15.7：长截图自动滚动驱动。 */
+export function screenshotAutoScroll(hwnd, direction) {
+  return invoke("screenshot_auto_scroll", { hwnd, direction });
+}
+
+/** 0.15.7：停止自动滚动。 */
+export function screenshotStopScroll() {
+  return invoke("screenshot_stop_scroll");
+}
+
 /** 0.11.7-c：OCR 识别图片中的文字，返回 `{text, lines, words, text_angle?}`（0.11.9-b word 级）。 */
 export function ocrImage(pngData) {
   return invoke("ocr_image", { pngData });

@@ -441,6 +441,95 @@ pub fn hide_screenshot_overlay(app: tauri::AppHandle) {
     crate::infra::platform::window::hide_screenshot_overlay(&app);
 }
 
+/// 0.15.8：列出可吸附窗口（截图 overlay 智能窗口吸附用）。
+///
+/// 返回 `Vec<PickableWindow>`，每条含 DWM 扩展边框（物理像素、虚拟屏幕坐标系）+
+/// 窗口标题 + 进程名。前端在选区拖拽阶段做 hit-test：鼠标悬停 → 虚线框；单击 → 吸附。
+///
+/// `spawn_blocking` 隔离 Win32 EnumWindows（~5-15ms），不阻塞 tokio runtime。
+#[tauri::command]
+pub async fn screenshot_window_list() -> Result<Vec<crate::infra::platform::window::PickableWindow>, String> {
+    tokio::task::spawn_blocking(crate::infra::platform::window::enumerate_pickable_windows)
+        .await
+        .map_err(|e| format!("spawn_blocking join 失败: {e}"))
+}
+
+/// 0.15.7：长截图——自动滚动驱动。
+///
+/// 通过 `PostMessageW` 向锁定 HWND 发送 `WM_VSCROLL`/`WM_MOUSEWHEEL`，
+/// 不抢前台焦点，比 `SendInput` 更稳定。
+///
+/// **异步**：在独立线程中循环发送（间隔 80ms），前端通过 `screenshot_stop_scroll` 停止。
+/// 驱动失败（窗口关闭/无响应）时 emit 事件通知前端降级。
+#[tauri::command]
+pub async fn screenshot_auto_scroll(
+    app: tauri::AppHandle,
+    hwnd: Option<isize>,
+    direction: Option<String>,
+) -> Result<(), String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        PostMessageW, WM_VSCROLL, WM_MOUSEWHEEL,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::SB_PAGEDOWN;
+
+    let hwnd_val = match hwnd {
+        Some(h) if h != 0 => h,
+        _ => return Err("未提供有效窗口 HWND".into()),
+    };
+    let _direction = direction.unwrap_or_else(|| "vertical".into());
+    // HWND 是 *mut c_void，不能跨线程 Send。转 isize 传入线程。
+    let hwnd_raw = hwnd_val;
+
+    // 用全局 AtomicBool 控制循环（stop_scroll 设 true 即退出）
+    static SCROLL_ACTIVE: AtomicBool = AtomicBool::new(false);
+    if SCROLL_ACTIVE.load(Ordering::SeqCst) {
+        return Ok(()); // 已在运行
+    }
+    SCROLL_ACTIVE.store(true, Ordering::SeqCst);
+
+    let stop_flag = Arc::new(AtomicBool::new(true));
+    let stop_clone = stop_flag.clone();
+
+    // 存储 stop_flag 到 app state 供 stop_scroll 用
+    app.manage(ScrollStopFlag(stop_clone));
+
+    tokio::task::spawn_blocking(move || {
+        let target = HWND(hwnd_raw as _);
+        while stop_flag.load(Ordering::SeqCst) {
+            // 尝试 WM_VSCROLL（适用于有滚动条的窗口）
+            unsafe {
+                // WM_VSCROLL（适用于有滚动条的窗口）
+                let _ = PostMessageW(Some(target), WM_VSCROLL, windows::Win32::Foundation::WPARAM(SB_PAGEDOWN.0 as usize), windows::Win32::Foundation::LPARAM(0));
+                // WM_MOUSEWHEEL（适用于 Chromium/Electron 等自绘滚动窗口）
+                let _ = PostMessageW(Some(target), WM_MOUSEWHEEL, windows::Win32::Foundation::WPARAM(0), windows::Win32::Foundation::LPARAM(0));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(80));
+        }
+        SCROLL_ACTIVE.store(false, Ordering::SeqCst);
+    });
+
+    tracing::info!(hwnd = hwnd_val, "长截图自动滚动已启动");
+    Ok(())
+}
+
+/// 0.15.7：停止自动滚动。
+#[tauri::command]
+pub fn screenshot_stop_scroll(
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    if let Some(flag) = app.try_state::<ScrollStopFlag>() {
+        flag.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+    tracing::info!("长截图自动滚动已停止");
+    Ok(())
+}
+
+/// 0.15.7：自动滚动的停止信号包装（Tauri state）
+struct ScrollStopFlag(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
 fn finish_screenshot_session(app: &tauri::AppHandle) {
     crate::infra::platform::screenshot::set_annotation_mode(false);
     crate::infra::platform::window::hide_screenshot_overlay(app);

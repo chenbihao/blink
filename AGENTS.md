@@ -4,7 +4,7 @@
 
 > 📖 **文档入口**：[docs/README.md](docs/README.md)（文档体系总览）→ [docs/product.md](docs/product.md)（产品是什么、为什么）→ [docs/specs/](docs/specs/)（怎么做·铁则）→ [docs/phases/](docs/phases/)（各版做了什么）。
 
-更新时间 20260730
+更新时间 20260801
 
 ---
 

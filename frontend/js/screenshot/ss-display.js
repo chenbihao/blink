@@ -77,6 +77,19 @@ export function positionToolbar(rect) {
 
     toolbar.style.left = left + 'px';
     toolbar.style.top = top + 'px';
+    // 0.15.12：工具栏自动定位后同步 sub-panel 位置（相对 text-main 按钮）
+    const subP = document.getElementById('sub-panel');
+    if (subP && !subP.classList.contains('hidden')) {
+      const textMain = document.getElementById('text-main');
+      if (textMain) {
+        const tmRect = textMain.getBoundingClientRect();
+        subP.style.left = tmRect.left + 'px';
+        subP.style.top = (tmRect.bottom + 4) + 'px';
+      } else {
+        subP.style.left = left + 'px';
+        subP.style.top = (top + th + 4) + 'px';
+      }
+    }
     console.debug('[screenshot] toolbar 定位', { left, top, tw, th, rect, mon });
   });
 }

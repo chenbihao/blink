@@ -97,42 +97,52 @@ export function doSaveSelection() {
 
 /** 合成选区（裁剪区 + 标注）为 PNG bytes */
 export function compositeSelection(callback) {
-  if (!ss.selCss || !ss.screenshot) { console.error('[screenshot] compositeSelection: no selection'); return; }
-  const dpr = window.devicePixelRatio || 1;
-  const pw = Math.round(ss.selCss.w * dpr);
-  const ph = Math.round(ss.selCss.h * dpr);
-  const px = Math.round(ss.selCss.x * dpr);
-  const py = Math.round(ss.selCss.y * dpr);
-
-  const off = document.createElement('canvas');
-  off.width = pw;
-  off.height = ph;
-  const offCtx = off.getContext('2d');
-  offCtx.drawImage(ss.screenshot, px, py, pw, ph, 0, 0, pw, ph);
-  if (annot.hasAnnotations()) {
-    offCtx.drawImage(ss.annotCanvas, 0, 0);
+  if (!ss.selCss || !ss.screenshot) {
+    console.error('[screenshot] compositeSelection: no selection or screenshot');
+    ss.sent = false;
+    return;
   }
   try {
+    const dpr = window.devicePixelRatio || 1;
+    const pw = Math.round(ss.selCss.w * dpr);
+    const ph = Math.round(ss.selCss.h * dpr);
+    const px = Math.round(ss.selCss.x * dpr);
+    const py = Math.round(ss.selCss.y * dpr);
+
+    const off = document.createElement('canvas');
+    off.width = pw;
+    off.height = ph;
+    const offCtx = off.getContext('2d');
+    offCtx.drawImage(ss.screenshot, px, py, pw, ph, 0, 0, pw, ph);
+    if (annot.hasAnnotations()) {
+      offCtx.drawImage(ss.annotCanvas, 0, 0);
+    }
     off.toBlob((blob) => {
-      if (!blob) { console.error('PNG 合成失败'); ss.sent = false; return; }
-      blob.arrayBuffer().then((buf) => callback(new Uint8Array(buf))).catch(() => { ss.sent = false; });
+      if (!blob) { console.error('[screenshot] PNG 合成失败（blob=null）'); ss.sent = false; return; }
+      blob.arrayBuffer().then((buf) => callback(new Uint8Array(buf))).catch((err) => {
+        console.error('[screenshot] blob.arrayBuffer 失败', err);
+        ss.sent = false;
+      });
     }, 'image/png');
   } catch (e) {
-    console.error('toBlob 异常', e);
+    console.error('[screenshot] compositeSelection threw', e);
     ss.sent = false;
   }
 }
 
 export function doCancel() {
-  if (ss.cancelInProgress) return;
+  if (ss.cancelInProgress) {
+    console.warn('[screenshot] doCancel: cancelInProgress still true, ignoring');
+    return;
+  }
   ss.cancelInProgress = true;
   setTimeout(() => { ss.cancelInProgress = false; }, 2000);
   console.info('[screenshot] cancel');
-  hideSelLoading();
+  try { hideSelLoading(); } catch (e) { console.warn('[screenshot] hideSelLoading failed', e); }
   if (ss.isAnnotating) {
-    screenshotCancel().catch((e) => console.error('screenshotCancel 失败', e));
+    screenshotCancel().catch((e) => console.error('[screenshot] screenshotCancel 失败', e));
   } else {
-    hideScreenshotOverlay().catch((e) => console.error('hideScreenshotOverlay 失败', e));
+    hideScreenshotOverlay().catch((e) => console.error('[screenshot] hideScreenshotOverlay 失败', e));
   }
 }
 
@@ -140,8 +150,9 @@ export function doCancel() {
 export function hasActivePanel() {
   if (document.getElementById('ocr-panel')) return true;
   if (document.querySelector('.text-annot-input')) return true;
-  const wm = document.getElementById('text-dropdown');
-  if (wm && wm.getAttribute('data-view') === 'watermark' && wm.getAttribute('data-open') === 'true') return true;
+  // 0.15.11：水印/文字配置移至 sub-panel，检查 sub-panel 是否可见
+  const subPanel = document.getElementById('sub-panel');
+  if (subPanel && !subPanel.classList.contains('hidden')) return true;
   const overlay = annot.getOverlay();
   if (overlay && overlay.mode !== null) return true;
   return false;

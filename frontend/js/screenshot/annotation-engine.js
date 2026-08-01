@@ -1,15 +1,23 @@
-//! 标注引擎（0.11.7-b，0.11.8 加 pixelate，0.11.8-b 加 watermark，0.11.9-a 水印独立图层）：多种标注 + 撤销 + 颜色/粗细。
+//! 标注引擎（0.11.7-b，0.11.8 加 pixelate，0.11.8-b 加 watermark，0.11.9-a 水印独立图层，0.15.1 配置 store 重构 + TOOL_CAPS + 模式切换）：多种标注 + 撤销 + 颜色/粗细。
 //!
 //! 标注数据模型：
 //! ```typescript
 //! interface AnnotationCommand {
-//!   type: 'rect' | 'ellipse' | 'arrow' | 'pencil' | 'text'
-//!       | 'mosaic' | 'pixelate' | 'eraser';
+//!   type: 'rect' | 'ellipse' | 'arrow' | 'pencil' | 'text' | 'number'
+//!       | 'mosaic' | 'pixelate' | 'eraser' | 'blur'
+//!       | 'highlight-multiply' | 'highlight-translucent'
+//!       | 'spotlight' | 'magnifier';
 //!   points: {x: number, y: number}[];  // 物理像素坐标，相对裁剪区左上角
 //!   color?: string;
 //!   width?: number;
 //!   fill?: boolean;
 //!   text?: string;
+//!   style?: 'solid' | 'dashed';         // 0.15.0：笔画样式
+//!   mode?: 'box' | 'brush';            // 0.15.1：框选/画笔模式（supportMode 工具）
+//!   textConfig?: {                     // 0.15.2：文字配置（text/number 工具）
+//!     fontSize: number, fontFamily: string,
+//!     bold: boolean, italic: boolean, shadow: boolean
+//!   };
 //! }
 //! ```
 //!
@@ -26,12 +34,30 @@
 //! 标注坐标使用**物理像素**（canvas 内部像素）坐标系，与裁剪区像素对齐。
 //! 前端鼠标事件 `offsetX/Y` 为 CSS 像素，需乘 `devicePixelRatio` 转物理像素。
 
+import { TOOL_CAPS } from './ss-state.js';
+
 /** 当前工具类型 */
 let currentTool = 'rect';
 /** 当前颜色 */
 let currentColor = '#ff0000';
-/** 当前粗细 */
-let currentWidth = 4;
+/** 0.15.1：分类配置 store（替代单一 currentWidth）
+ *  按工具语义分类——笔画（stroke）/ 画笔（brush）/ 文字（text）/ 效果（effect）
+ *  颜色全局共享。 */
+const config = {
+  color: '#ff0000',
+  stroke: { width: 4, style: 'solid' },           // 笔画类：形状/箭头/铅笔
+  brush:  { size: 16 },                             // 画笔类：涂抹/橡皮/高亮
+  text:   { fontSize: 24, fontFamily: 'sans-serif', bold: false, italic: false, shadow: false },
+  effect: { pixelateBlock: 10, blurIntensity: 8 },  // 效果类
+};
+/** 0.15.1→fix：per-group 模式记忆（'box' | 'brush'），写入 command。
+ *  同组工具（如 mosaic/pixelate/blur 共享 'blur' 组）切换时模式保持一致，
+ *  不会「同组切换就变回去」。组名来自 TOOL_CAPS[tool].modeGroup。 */
+const groupMode = {
+  blur: 'brush',
+  eraser: 'brush',
+  highlight: 'brush',
+};
 /** 是否填充（矩形/椭圆） */
 let currentFill = false;
 /** 标注历史栈 */
@@ -55,6 +81,8 @@ let cropSourceCanvas = null;
 /** 水印配置（0.11.9-a 起独立于 commands 栈；null = 无水印）
  *  形状: { text, layout, color, opacity } | null */
 let watermarkConfig = null;
+/** 0.15.9：放大镜倍率（默认 1.3，可由工具栏子菜单切换） */
+let magnifierZoom = 1.3;
 /**
  * OCR/翻译嵌图图层（0.11.10-h：与水印同为"配置型独立图层"）。
  *
@@ -130,16 +158,55 @@ export function getColor() {
   return currentColor;
 }
 
-export function setWidth(width) {
-  currentWidth = width;
+// 0.15.1：分类配置 getter/setter
+
+/** 按工具的 widthCat 返回对应配置层的数值 */
+export function getWidthForTool(tool) {
+  const caps = TOOL_CAPS[tool];
+  if (!caps || !caps.widthCat) return 0;
+  switch (caps.widthCat) {
+    case 'stroke': return config.stroke.width;
+    case 'brush':  return config.brush.size;
+    case 'text':   return config.text.fontSize;
+    case 'effect': return config.effect.blurIntensity;  // 0.15.11：统一用 blurIntensity
+    default: return 0;
+  }
 }
 
-export function getWidth() {
-  return currentWidth;
+export function setStrokeWidth(w) { config.stroke.width = w; }
+export function getStrokeWidth() { return config.stroke.width; }
+export function setBrushSize(s)   { config.brush.size = s; }
+export function getBrushSize()    { return config.brush.size; }
+export function setTextConfig(partial) { Object.assign(config.text, partial); }
+export function getTextConfig() { return { ...config.text }; }
+export function setEffectConfig(partial) { Object.assign(config.effect, partial); }
+export function getEffectConfig() { return { ...config.effect }; }
+
+/** 0.15.1→fix：per-group 模式。同组工具共享模式记忆。 */
+export function getToolMode(tool) {
+  const mg = TOOL_CAPS[tool]?.modeGroup;
+  return mg ? (groupMode[mg] || 'brush') : 'brush';
 }
+export function setToolMode(tool, mode) {
+  const mg = TOOL_CAPS[tool]?.modeGroup;
+  if (mg) groupMode[mg] = mode;
+}
+
+// 0.15.1 兼容包装：旧 setWidth/getWidth
+export function setWidth(w) { config.stroke.width = w; }
+export function getWidth() { return getWidthForTool(currentTool); }
 
 export function setFill(fill) {
   currentFill = fill;
+}
+
+// 0.15.0/0.15.1：笔画样式（实线/虚线），存入 config.stroke.style
+export function setStrokeStyle(style) {
+  config.stroke.style = style === 'dashed' ? 'dashed' : 'solid';
+}
+
+export function getStrokeStyle() {
+  return config.stroke.style;
 }
 
 export function getFill() {
@@ -150,6 +217,13 @@ export function getFill() {
 
 /** 开始绘制（工具按下时调） */
 export function startDraw(x, y) {
+  // 0.15.13：单次聚光灯——开始新框选时立即清理上一轮聚光灯
+  // 这样预览时不会同时显示新旧两个聚光灯的遮罩
+  if (currentTool === 'spotlight') {
+    commands = commands.filter(c => c.type !== 'spotlight');
+    undoIndex = Math.min(undoIndex, commands.length - 1);
+    redrawAll();
+  }
   drawStartX = x;
   drawStartY = y;
   currentPoints = [{ x, y }];
@@ -158,8 +232,13 @@ export function startDraw(x, y) {
 
 /** 拖拽绘制中 */
 export function moveDraw(x, y) {
-  if (currentTool === 'pencil' || currentTool === 'eraser' || currentTool === 'mosaic'
-      || currentTool === 'highlight-multiply' || currentTool === 'highlight-translucent') {
+  // 0.15.1→fix：用 TOOL_CAPS + getToolMode 决定点序列 vs 起点终点
+  const caps = TOOL_CAPS[currentTool];
+  if (!caps) return;
+  const useStream = caps.supportMode
+    ? (getToolMode(currentTool) === 'brush')
+    : (caps.points === 'stream');
+  if (useStream) {
     currentPoints.push({ x, y });
   }
 }
@@ -173,33 +252,51 @@ export function getCurrentPoints() {
 export function endDraw(x, y) {
   const points = [...currentPoints];
   const lastPoint = { x, y };
-  // 铅笔/橡皮擦/涂抹/荧光笔使用完整点序列；其他工具用起点+终点
-  let cmdPoints;
-  if (currentTool === 'pencil' || currentTool === 'eraser' || currentTool === 'mosaic'
-      || currentTool === 'highlight-multiply' || currentTool === 'highlight-translucent') {
-    cmdPoints = points;
-  } else {
-    cmdPoints = [{ x: drawStartX, y: drawStartY }, lastPoint];
-  }
+  // 0.15.1→fix：用 TOOL_CAPS + getToolMode 决定点序列 vs 起点终点
+  const caps = TOOL_CAPS[currentTool] || TOOL_CAPS.select;
+  const useStream = caps.supportMode
+    ? (getToolMode(currentTool) === 'brush')
+    : (caps.points === 'stream');
+  const cmdPoints = useStream ? points : [{ x: drawStartX, y: drawStartY }, lastPoint];
 
   const cmd = {
     type: currentTool,
     points: cmdPoints,
     color: currentColor,
-    width: currentWidth,
+    width: getWidthForTool(currentTool),
     fill: currentFill,
+    style: config.stroke.style,  // 0.15.0：笔画样式写入 command
+    mode: caps.supportMode ? getToolMode(currentTool) : undefined,  // 0.15.1→fix：模式写入 command
   };
 
   // 如果是文本工具，需要用户输入文字；通过回调交给主脚本处理
   if (currentTool === 'text') {
     // 保存临时命令，等待文本输入完成
     pendingTextCmd = cmd;
+    pendingTextCmd.textConfig = { ...config.text };
     currentPoints = [];
     return { needsText: true, x: drawStartX, y: drawStartY };
   }
 
+  // 0.15.2：数字标号——counter 从 undo 栈实时推算，不单独维护
+  if (currentTool === 'number') {
+    const counter = commands.slice(0, undoIndex + 1).filter((c) => c.type === 'number').length + 1;
+    cmd.text = String(counter);
+    cmd.textConfig = { ...config.text };
+    commands = commands.slice(0, undoIndex + 1);
+    commands.push(cmd);
+    undoIndex = commands.length - 1;
+    redrawAll();
+    currentPoints = [];
+    return { needsText: false };
+  }
+
   // 裁剪掉 undoIndex 之后的命令（新命令覆盖重做历史）
   commands = commands.slice(0, undoIndex + 1);
+  // 0.15.12：聚光灯（单次）替换旧的；多次聚光灯允许叠加
+  if (currentTool === 'spotlight') {
+    commands = commands.filter(c => c.type !== 'spotlight');
+  }
   commands.push(cmd);
   undoIndex = commands.length - 1;
 
@@ -242,9 +339,11 @@ export function executeCommand(cmd, targetCtx) {
         const y = Math.min(p1.y, p2.y);
         const w = Math.abs(p2.x - p1.x);
         const h = Math.abs(p2.y - p1.y);
-        c.strokeStyle = cmd.color || currentColor;
-        c.lineWidth = cmd.width || currentWidth;
-        c.strokeRect(x, y, w, h);
+      c.strokeStyle = cmd.color || currentColor;
+      c.lineWidth = cmd.width || getWidthForTool(cmd.type);
+      if (cmd.style === 'dashed' || (cmd.style === undefined && config.stroke.style === 'dashed')) c.setLineDash([8, 4]);
+      c.strokeRect(x, y, w, h);
+      c.setLineDash([]);
         if (cmd.fill) {
           c.fillStyle = cmd.color || currentColor;
           c.globalAlpha = 0.2;
@@ -260,10 +359,12 @@ export function executeCommand(cmd, targetCtx) {
         const rx = Math.abs(p2.x - p1.x) / 2;
         const ry = Math.abs(p2.y - p1.y) / 2;
         c.strokeStyle = cmd.color || currentColor;
-        c.lineWidth = cmd.width || currentWidth;
+        c.lineWidth = cmd.width || getWidthForTool(cmd.type);
+        if (cmd.style === 'dashed' || (cmd.style === undefined && config.stroke.style === 'dashed')) c.setLineDash([8, 4]);
         c.beginPath();
         c.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
         c.stroke();
+        c.setLineDash([]);
         if (cmd.fill) {
           c.fillStyle = cmd.color || currentColor;
           c.globalAlpha = 0.2;
@@ -275,14 +376,16 @@ export function executeCommand(cmd, targetCtx) {
       if (cmd.points.length >= 2) {
         const [p1, p2] = cmd.points;
         const angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
-        const headLen = 12 * (cmd.width || currentWidth) / 2;
-        c.strokeStyle = cmd.color || currentColor;
-        c.lineWidth = cmd.width || currentWidth;
-        c.beginPath();
-        c.moveTo(p1.x, p1.y);
-        c.lineTo(p2.x, p2.y);
-        c.stroke();
-        // 箭头头部
+        const headLen = 12 * (cmd.width || getWidthForTool(cmd.type)) / 2;
+      c.strokeStyle = cmd.color || currentColor;
+      c.lineWidth = cmd.width || getWidthForTool(cmd.type);
+      if (cmd.style === 'dashed' || (cmd.style === undefined && config.stroke.style === 'dashed')) c.setLineDash([8, 4]);
+      c.beginPath();
+      c.moveTo(p1.x, p1.y);
+      c.lineTo(p2.x, p2.y);
+      c.stroke();
+      c.setLineDash([]);
+      // 箭头头部
         c.beginPath();
         c.moveTo(p2.x, p2.y);
         c.lineTo(p2.x - headLen * Math.cos(angle - 0.4), p2.y - headLen * Math.sin(angle - 0.4));
@@ -294,19 +397,36 @@ export function executeCommand(cmd, targetCtx) {
     case 'pencil':
       if (cmd.points.length >= 2) {
         c.strokeStyle = cmd.color || currentColor;
-        c.lineWidth = cmd.width || currentWidth;
+        c.lineWidth = cmd.width || getWidthForTool(cmd.type);
         c.lineCap = 'round';
         c.lineJoin = 'round';
+        if (cmd.style === 'dashed' || (cmd.style === undefined && config.stroke.style === 'dashed')) c.setLineDash([8, 4]);
         c.beginPath();
         c.moveTo(cmd.points[0].x, cmd.points[0].y);
         for (let i = 1; i < cmd.points.length; i++) {
           c.lineTo(cmd.points[i].x, cmd.points[i].y);
         }
         c.stroke();
+        c.setLineDash([]);
       }
       break;
     case 'highlight-multiply':
     case 'highlight-translucent':
+      // 0.15.1：box 模式 = 半透明矩形填充；brush 模式 = 现有离屏 stroke 逻辑
+      if (cmd.mode === 'box' && cmd.points.length >= 2) {
+        const [p1, p2] = cmd.points;
+        const x = Math.min(p1.x, p2.x);
+        const y = Math.min(p1.y, p2.y);
+        const w = Math.abs(p2.x - p1.x);
+        const h = Math.abs(p2.y - p1.y);
+        const alpha = cmd.type === 'highlight-multiply' ? 0.55 : 0.30;
+        c.save();
+        c.globalAlpha = alpha;
+        c.fillStyle = cmd.color || currentColor;
+        c.fillRect(x, y, w, h);
+        c.restore();
+        break;
+      }
       // 荧光笔（0.11.8-c；0.11.8-d 实现"重叠不加深"）：粗线 + 半透明色沿轨迹。
       //
       // 关键难点：单条命令内轨迹自交（例如画 O 或 8）时不能加深。
@@ -321,7 +441,7 @@ export function executeCommand(cmd, targetCtx) {
       // 粗细 = width × 4。
       if (cmd.points.length >= 2 && canvas) {
         const alpha = cmd.type === 'highlight-multiply' ? 0.55 : 0.30;
-        const lineW = (cmd.width || currentWidth) * 4;
+        const lineW = (cmd.width || config.brush.size) * 4;
         const off = document.createElement('canvas');
         off.width = canvas.width;
         off.height = canvas.height;
@@ -344,23 +464,76 @@ export function executeCommand(cmd, targetCtx) {
       }
       break;
     case 'text':
+      // 0.15.2：文字渲染改读 config.text（字号/字体/粗斜阴影）
       if (cmd.text && cmd.points.length >= 1) {
         const p = cmd.points[0];
-        // 0.11.8-b：与前端 input 预览严格对齐——textBaseline='top' 让 p 即左上角
-        // （原默认 'alphabetic' 让 p 是基线，input 用 top 定位视觉会偏移半个字号）
-        c.font = `${(cmd.width || currentWidth) * 6}px sans-serif`;
+        const tc = cmd.textConfig || config.text;
+        const fontStyle = tc.italic ? 'italic ' : '';
+        const fontWeight = tc.bold ? 'bold ' : '';
+        c.font = `${fontStyle}${fontWeight}${tc.fontSize}px ${tc.fontFamily}`;
         c.fillStyle = cmd.color || currentColor;
         c.textBaseline = 'top';
+        if (tc.shadow) {
+          c.shadowColor = 'rgba(0,0,0,0.5)';
+          c.shadowBlur = 4;
+        }
         c.fillText(cmd.text, p.x, p.y);
+        if (tc.shadow) {
+          c.shadowColor = 'transparent';
+          c.shadowBlur = 0;
+        }
+      }
+      break;
+    case 'number':
+      // 0.15.12：数字标号——圆形实心底 + 镂空数字，居中对齐鼠标点击位置。
+      // 圆形大小跟随 brushSize，数字以反色（白色）居中绘制。
+      if (cmd.text && cmd.points.length >= 1 && canvas) {
+        const p = cmd.points[0];
+        const tc = cmd.textConfig || config.text;
+        // 圆形半径基于 brush.size（物理像素）
+        const radius = Math.max(10, config.brush.size * 1.2);
+        // 0.15.12：圆心 = 点击位置（之前是 p.y + radius 偏下）
+        const cx = p.x;
+        const cy = p.y;
+        // 画实心圆
+        c.save();
+        c.fillStyle = cmd.color || currentColor;
+        c.beginPath();
+        c.arc(cx, cy, radius, 0, Math.PI * 2);
+        c.fill();
+        // 镂空数字：白色文字居中
+        const fontSize = Math.max(10, Math.round(radius * 1.1));
+        const fontStyle = tc.italic ? 'italic ' : '';
+        const fontWeight = tc.bold ? 'bold ' : 'bold ';
+        c.font = `${fontStyle}${fontWeight}${fontSize}px ${tc.fontFamily}`;
+        c.fillStyle = '#ffffff';
+        c.textAlign = 'center';
+        c.textBaseline = 'middle';
+        c.fillText(cmd.text, cx, cy);
+        c.restore();
       }
       break;
     // 注：'watermark' 分支已于 0.11.9-a 移除。水印现走独立 `watermarkConfig`
     // 单例配置,在 renderCommandsTo 末尾统一绘制,不进 commands 栈。
     case 'mosaic':
-      // 涂抹（PixPin 风格）：沿轨迹画圆形笔刷 + 连线，每点取周围平均色。
-      // 固定笔刷半径 16px（物理像素），平均色让信息不可辨认 + 笔触有方向性。
+      // 0.15.11：强度滑块统一控制三种效果——mosaic box 模式用 intensity 作为马赛克块大小
+      if (cmd.mode === 'box' && cmd.points.length >= 2 && cropImageData) {
+        const [p1, p2] = cmd.points;
+        const x = Math.min(p1.x, p2.x);
+        const y = Math.min(p1.y, p2.y);
+        const w = Math.abs(p2.x - p1.x);
+        const h = Math.abs(p2.y - p1.y);
+        if (w > 2 && h > 2) {
+          const block = Math.max(2, config.effect.blurIntensity);
+          drawPixelate(c, cropImageData, x, y, w, h, block);
+        }
+        break;
+      }
+      // brush 模式（默认）：涂抹（PixPin 风格）：沿轨迹画圆形笔刷 + 连线，每点取周围平均色。
+      // 0.15.11：涂抹半径受强度影响——半径 = max(8, intensity + brush.size/2)
       if (cmd.points.length >= 1 && cropImageData) {
-        const r = 16;
+        const intensity = config.effect.blurIntensity;
+        const r = Math.max(8, (cmd.width || config.brush.size) / 2 + intensity);
         c.imageSmoothingEnabled = true;
         for (let i = 0; i < cmd.points.length; i++) {
           const p = cmd.points[i];
@@ -381,11 +554,40 @@ export function executeCommand(cmd, targetCtx) {
             c.stroke();
           }
         }
+      } else if (!cropImageData) {
+        console.warn('[annot] mosaic: cropImageData 为空，马赛克不可用');
       }
       break;
     case 'pixelate':
-      // 经典像素化马赛克（矩形框选）：整个区域分块，每块用平均色填充。
-      // blockSize=10，比涂抹更"硬"的遮挡，适合整片打码。
+      // 0.15.12：马赛克工具合并——画笔=涂抹（沿轨迹取平均色），框选=马赛克（整片像素化）
+      // brush 模式：复用 mosaic 涂抹逻辑
+      if (cmd.mode === 'brush' && cmd.points.length >= 1 && cropImageData) {
+        const intensity = config.effect.blurIntensity;
+        const r = Math.max(8, (cmd.width || config.brush.size) / 2 + intensity);
+        c.imageSmoothingEnabled = true;
+        c.imageSmoothingQuality = 'high';
+        c.lineCap = 'round';
+        c.lineJoin = 'round';
+        for (let i = 0; i < cmd.points.length; i++) {
+          const p = cmd.points[i];
+          const avg = sampleAverageColor(cropImageData, p.x, p.y, r);
+          c.fillStyle = avg;
+          c.beginPath();
+          c.arc(p.x, p.y, r, 0, Math.PI * 2);
+          c.fill();
+          if (i > 0) {
+            const prev = cmd.points[i - 1];
+            c.strokeStyle = avg;
+            c.lineWidth = r * 2;
+            c.beginPath();
+            c.moveTo(prev.x, prev.y);
+            c.lineTo(p.x, p.y);
+            c.stroke();
+          }
+        }
+        break;
+      }
+      // box 模式：经典像素化马赛克（矩形框选）
       if (cmd.points.length >= 2 && cropImageData) {
         const [p1, p2] = cmd.points;
         const x = Math.min(p1.x, p2.x);
@@ -393,17 +595,126 @@ export function executeCommand(cmd, targetCtx) {
         const w = Math.abs(p2.x - p1.x);
         const h = Math.abs(p2.y - p1.y);
         if (w > 2 && h > 2) {
-          drawPixelate(c, cropImageData, x, y, w, h, 10);
+          const block = Math.max(2, config.effect.blurIntensity);
+          drawPixelate(c, cropImageData, x, y, w, h, block);
+        }
+      }
+      break;
+    case 'blur':
+      // 0.15.3：高斯模糊。box 模式 = 框选区域模糊；brush 模式 = 沿笔画路径模糊。
+      // 数据源用 cropSourceCanvas（reset() 缓存的原始裁剪图）。
+      if (cmd.mode === 'box' && cmd.points.length >= 2 && cropSourceCanvas) {
+        const [p1, p2] = cmd.points;
+        const x = Math.min(p1.x, p2.x);
+        const y = Math.min(p1.y, p2.y);
+        const w = Math.abs(p2.x - p1.x);
+        const h = Math.abs(p2.y - p1.y);
+        if (w > 2 && h > 2) {
+          const intensity = config.effect.blurIntensity;
+          c.save();
+          c.beginPath();
+          c.rect(x, y, w, h);
+          c.clip();
+          c.filter = `blur(${intensity}px)`;
+          c.drawImage(cropSourceCanvas, 0, 0);
+          c.filter = 'none';
+          c.restore();
+        }
+        break;
+      }
+      // brush 模式：离屏 stroke mask + source-in 模糊图。
+      if (cmd.points.length >= 1 && cropSourceCanvas && canvas) {
+        const intensity = config.effect.blurIntensity;
+        const brushW = config.brush.size * 2;
+        const off = document.createElement('canvas');
+        off.width = canvas.width;
+        off.height = canvas.height;
+        const offCtx = off.getContext('2d');
+        // 1) 画 stroke mask
+        offCtx.strokeStyle = '#fff';
+        offCtx.lineWidth = brushW;
+        offCtx.lineCap = 'round';
+        offCtx.lineJoin = 'round';
+        offCtx.beginPath();
+        offCtx.moveTo(cmd.points[0].x, cmd.points[0].y);
+        for (let i = 1; i < cmd.points.length; i++) {
+          offCtx.lineTo(cmd.points[i].x, cmd.points[i].y);
+        }
+        offCtx.stroke();
+        // 2) source-in 保留 mask 区域，贴模糊原图
+        offCtx.globalCompositeOperation = 'source-in';
+        offCtx.filter = `blur(${intensity}px)`;
+        offCtx.drawImage(cropSourceCanvas, 0, 0);
+        offCtx.filter = 'none';
+        c.drawImage(off, 0, 0);
+        break;
+      }
+      break;
+    case 'spotlight':
+      // 0.15.3：聚光灯——半透明遮罩 + 镂空选中区。
+      // 0.15.11：支持多次聚光灯——改为填充选区外的四条矩形（非 even-odd 全屏），
+      // 避免第二个聚光灯的遮罩覆盖第一个聚光灯的镂空区。
+      if (cmd.points.length >= 2 && canvas) {
+        const [p1, p2] = cmd.points;
+        const x = Math.min(p1.x, p2.x);
+        const y = Math.min(p1.y, p2.y);
+        const w = Math.abs(p2.x - p1.x);
+        const h = Math.abs(p2.y - p1.y);
+        c.save();
+        c.fillStyle = 'rgba(0,0,0,0.6)';
+        // 四条遮罩条（选区外的上下左右），不覆盖选区本身
+        c.fillRect(0, 0, canvas.width, y);                    // 上
+        c.fillRect(0, y + h, canvas.width, canvas.height - y - h); // 下
+        c.fillRect(0, y, x, h);                                 // 左
+        c.fillRect(x + w, y, canvas.width - x - w, h);        // 右
+        c.restore();
+      }
+      break;
+    case 'magnifier':
+      // 0.15.12：局部放大——框选区域整体膨胀到 zoom 倍。
+      // 选取的 100x100 区域 → 放大为 130x130（zoom=1.3），从框选中心向外膨胀，不裁剪。
+      // 数据源用 cropSourceCanvas。
+      if (cmd.points.length >= 2 && cropSourceCanvas) {
+        const [p1, p2] = cmd.points;
+        const x = Math.min(p1.x, p2.x);
+        const y = Math.min(p1.y, p2.y);
+        const w = Math.abs(p2.x - p1.x);
+        const h = Math.abs(p2.y - p1.y);
+      if (w > 4 && h > 4) {
+        const zoom = magnifierZoom;
+        const dw = w * zoom;
+        const dh = h * zoom;
+        // 从框选中心向外膨胀
+        const dx = x + (w - dw) / 2;
+        const dy = y + (h - dh) / 2;
+        // 绘制放大后的图像（不裁剪，允许溢出框选区域）
+          c.save();
+          c.drawImage(cropSourceCanvas, x, y, w, h, dx, dy, dw, dh);
+          // 边框画在膨胀后的区域
+          c.strokeStyle = cmd.color || currentColor;
+          c.lineWidth = 2;
+          c.strokeRect(dx, dy, dw, dh);
+          c.restore();
         }
       }
       break;
     case 'eraser':
-      // 橡皮擦（0.11.8-a 改沿轨迹）：走点序列，用圆形笔刷沿路径 clearRect。
-      // 原实现取"起点+终点"矩形 clearRect，单击/短距离 → 矩形为 0 → 视觉上"无效"。
-      // 现改成 pencil 语义：moveDraw 累积点、endDraw 存整个 points 序列，
-      // 用 destination-out composite 沿路径画半径 = cmd.width * 3 的圆形擦除。
+      // 0.15.1：box 模式 = 整片 clearRect；brush = 现有沿路径擦除
+      if (cmd.mode === 'box' && cmd.points.length >= 2 && c) {
+        const [p1, p2] = cmd.points;
+        const x = Math.min(p1.x, p2.x);
+        const y = Math.min(p1.y, p2.y);
+        const w = Math.abs(p2.x - p1.x);
+        const h = Math.abs(p2.y - p1.y);
+        c.save();
+        c.globalCompositeOperation = 'destination-out';
+        c.fillRect(x, y, w, h);
+        c.restore();
+        break;
+      }
+      // brush 模式（默认）：沿路径圆形擦除
       if (cmd.points.length >= 1 && c) {
-        const r = Math.max(6, (cmd.width || currentWidth) * 3);
+        const r = Math.max(6, (cmd.width || config.brush.size) * 3);
         c.save();
         c.globalCompositeOperation = 'destination-out';
         for (let i = 0; i < cmd.points.length; i++) {
@@ -447,6 +758,8 @@ function drawWatermark(c, cmd, cw, ch) {
   const fontSize = Math.max(12, Math.round(short * 0.06));
   const layout = cmd.layout || 'diagonal';
   const opacity = typeof cmd.opacity === 'number' ? cmd.opacity : 0.35;
+  // 0.15.12：密度（50-300%，100% = 默认间距，越大越稀疏）
+  const density = typeof cmd.density === 'number' ? cmd.density : 1.0;
   const color = withAlpha(cmd.color || '#000000', opacity);
   const text = cmd.text;
 
@@ -461,7 +774,8 @@ function drawWatermark(c, cmd, cw, ch) {
     const angle = -Math.PI / 6; // -30°
     const metrics = c.measureText(text);
     const tw = metrics.width;
-    const step = Math.max(tw + fontSize * 3, fontSize * 6);
+    // 0.15.12：密度影响步长——density 越大间距越大（越稀疏）
+    const step = Math.max(tw + fontSize * 3, fontSize * 6) * density;
     // 旋转后需要覆盖的 bbox（对角线长度即可保证不留空）
     const diag = Math.sqrt(cw * cw + ch * ch);
     c.translate(cw / 2, ch / 2);
@@ -506,11 +820,13 @@ export function withAlpha(color, alpha) {
     }
   }
   // rgb(a) — 用正则拆分，追加 alpha
+  // 0.15.8-fix：如果输入已有 alpha，则与目标 alpha 相乘
   const m = s.match(/rgba?\(([^)]+)\)/i);
   if (m) {
     const parts = m[1].split(',').map((p) => p.trim());
     if (parts.length >= 3) {
-      return `rgba(${parts[0]},${parts[1]},${parts[2]},${alpha})`;
+      const originalAlpha = parts[3] !== undefined ? parseFloat(parts[3]) : 1;
+      return `rgba(${parts[0]},${parts[1]},${parts[2]},${(alpha * originalAlpha).toFixed(4)})`;
     }
   }
   return `rgba(0,0,0,${alpha})`;
@@ -527,7 +843,7 @@ export function withAlpha(color, alpha) {
  *
  * 参数缺 text 时视为清除（表单里清空文字再应用 = 清除）。
  */
-export function commitWatermark({ text, layout, color, width: _width, opacity } = {}) {
+export function commitWatermark({ text, layout, color, width: _width, opacity, density } = {}) {
   const trimmed = typeof text === 'string' ? text.trim() : '';
   if (!trimmed) {
     watermarkConfig = null;
@@ -539,6 +855,8 @@ export function commitWatermark({ text, layout, color, width: _width, opacity } 
     layout: layout || 'diagonal',
     color: color || currentColor,
     opacity: typeof opacity === 'number' ? opacity : 0.35,
+    // 0.15.12：密度 50-300% → 0.5-3.0
+    density: typeof density === 'number' ? density : 1.0,
   };
   redrawAll();
 }
@@ -547,6 +865,27 @@ export function commitWatermark({ text, layout, color, width: _width, opacity } 
 export function clearWatermark() {
   watermarkConfig = null;
   redrawAll();
+}
+
+/** 0.15.9：重置所有标注——清空命令栈 + 水印 + 嵌图，不重置 canvas 尺寸/cropData。 */
+export function clearAll() {
+  commands = [];
+  undoIndex = -1;
+  watermarkConfig = null;
+  overlayLayer = null;
+  currentPoints = [];
+  pendingTextCmd = null;
+  redrawAll();
+}
+
+/** 0.15.14：清除所有聚光灯命令（单次↔多次切换时调用） */
+export function clearSpotlights() {
+  const before = commands.length;
+  commands = commands.filter(c => c.type !== 'spotlight' && c.type !== 'spotlight-multi');
+  if (commands.length !== before) {
+    undoIndex = Math.min(undoIndex, commands.length - 1);
+    redrawAll();
+  }
 }
 
 /** 读取当前水印配置（供 UI 打开表单时回填）。 */
@@ -726,6 +1065,15 @@ export function sampleMosaicColor(x, y, r) {
   return sampleAverageColor(cropImageData, x, y, r);
 }
 
+/** 0.15.6：获取裁剪区原始 canvas（供配色提取等模块复用） */
+export function getCropSourceCanvas() {
+  return cropSourceCanvas;
+}
+
+/** 0.15.9：放大镜倍率 getter/setter */
+export function getMagnifierZoom() { return magnifierZoom; }
+export function setMagnifierZoom(z) { magnifierZoom = Math.max(1.1, Math.min(4.0, z)); }
+
 /**
  * 经典像素化马赛克绘制：把 (x,y,w,h) 矩形区域分成 blockSize×blockSize 的网格，
  * 每个网格用该区域内所有像素的 RGB 平均色填充。
@@ -819,15 +1167,23 @@ function redrawAll() {
  */
 export function renderCommandsTo(cmds, targetCtx, w, h) {
   const highlightMultiplyCmds = [];
+  const spotlightMultiCmds = [];
   for (const cmd of cmds) {
     if (cmd.type === 'highlight-multiply') {
       highlightMultiplyCmds.push(cmd);
+    } else if (cmd.type === 'spotlight-multi') {
+      // 0.15.12：多次聚光灯收集到组，统一渲染为单层遮罩（叠底只应用一次）
+      spotlightMultiCmds.push(cmd);
     } else {
       executeCommand(cmd, targetCtx);
     }
   }
   if (highlightMultiplyCmds.length > 0) {
     renderHighlightMultiplyLayer(highlightMultiplyCmds, targetCtx, w, h);
+  }
+  // 0.15.12：多次聚光灯——单层遮罩，重叠区域暗度不叠加
+  if (spotlightMultiCmds.length > 0 && w > 0 && h > 0) {
+    renderSpotlightMultiLayer(spotlightMultiCmds, targetCtx, w, h);
   }
   // 0.11.10-h：OCR/翻译嵌图在水印之前（水印永远最上层）
   if (overlayLayer && overlayLayer.mode) {
@@ -859,7 +1215,7 @@ function renderHighlightMultiplyLayer(cmds, targetCtx, w, h) {
     }
     const lc = layer.getContext('2d');
     lc.strokeStyle = color;
-    lc.lineWidth = (cmd.width || currentWidth) * 4;
+    lc.lineWidth = (cmd.width || config.brush.size) * 4;
     lc.lineCap = 'round';
     lc.lineJoin = 'round';
     lc.beginPath();
@@ -876,6 +1232,33 @@ function renderHighlightMultiplyLayer(cmds, targetCtx, w, h) {
     targetCtx.drawImage(layers.get(color), 0, 0);
     targetCtx.restore();
   }
+}
+
+/** 0.15.12：多次聚光灯——单层遮罩渲染。
+ *  离屏 canvas：先填满 rgba(0,0,0,0.6)，然后 clearRect 所有聚光灯区域，
+ *  最后一次性 drawImage 到目标 ctx。重叠聚光灯的暗度不叠加（叠底只应用一次）。
+ *  0.15.13：clearRect 替代 destination-out+fillRect，更可靠地镂空区域。 */
+function renderSpotlightMultiLayer(cmds, targetCtx, w, h) {
+  const off = document.createElement('canvas');
+  off.width = w;
+  off.height = h;
+  const offCtx = off.getContext('2d');
+  // 填满遮罩
+  offCtx.fillStyle = 'rgba(0,0,0,0.6)';
+  offCtx.fillRect(0, 0, w, h);
+  // 镂空所有聚光灯区域（clearRect 更可靠——destination-out 对半透明像素可能残留）
+  for (const cmd of cmds) {
+    if (cmd.points.length >= 2) {
+      const [p1, p2] = cmd.points;
+      const x = Math.min(p1.x, p2.x);
+      const y = Math.min(p1.y, p2.y);
+      const rw = Math.abs(p2.x - p1.x);
+      const rh = Math.abs(p2.y - p1.y);
+      offCtx.clearRect(x, y, rw, rh);
+    }
+  }
+  // 绘制到目标
+  targetCtx.drawImage(off, 0, 0);
 }
 
 // ── 输出 ──────────────────────────────────────────────

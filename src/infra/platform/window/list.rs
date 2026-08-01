@@ -1,0 +1,197 @@
+//! 0.15.8 选区体验增强：智能窗口吸附后端。
+//!
+//! `enumerate_pickable_windows()` 枚举桌面上可见、有标题、非工具窗口的顶层窗口，
+//! 返回它们的 DWM 扩展边框（`DWMWA_EXTENDED_FRAME_BOUNDS`）物理矩形 + 标题 + 进程名。
+//!
+//! 前端截图 overlay 在选区拖拽阶段调用此接口，拿到窗口列表后做 hit-test：
+//! 鼠标悬停某窗口区域 → 显示虚线框；单击 → 自动吸附选区到该窗口矩形。
+//!
+//! **过滤规则**：
+//! - 跳过不可见窗口（`IsWindowVisible = false`）
+//! - 跳过被 DWM Cloak 的窗口（UWP 最小化后的"鬼影"、Cloaked 的工具窗口）
+//! - 跳过工具窗口（`WS_EX_TOOLWINDOW`）——保留在任务栏/Alt-Tab 的才算"可吸附"
+//! - 跳过空标题窗口（无标题的浮层/overlay，不具可辨识性）
+//! - 跳过自身进程窗口（截图 overlay 自身不该被吸附）
+//!
+//! **为什么用 `DWMWA_EXTENDED_FRAME_BOUNDS` 而非 `GetWindowRect`**：
+//! Windows 10/11 的无边框窗口（如 Edge Chromium、Explorer）的实际可视边框
+//! 比 `GetWindowRect` 返回的"Windows 7 兼容阴影框"小 7-8px。
+//! `DWMWA_EXTENDED_FRAME_BOUNDS` 返回 DWM 合成后的真实可视边框，
+//! 与用户看到的窗口边框一致，吸附精度更高。
+
+use windows::core::BOOL;
+use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+    GWL_EXSTYLE, GetWindowLongPtrW, IsWindowVisible, WS_EX_TOOLWINDOW,
+};
+use windows::Win32::System::Threading::GetCurrentProcessId;
+
+/// 可吸附窗口的几何信息（物理像素，虚拟屏幕坐标系）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PickableWindow {
+    /// 窗口句柄（isize，供前端唯一标识）
+    pub hwnd: isize,
+    /// DWM 扩展边框左上角 X（虚拟屏幕物理像素）
+    pub x: i32,
+    /// Y
+    pub y: i32,
+    /// 宽
+    pub w: i32,
+    /// 高
+    pub h: i32,
+    /// 窗口标题
+    pub title: String,
+    /// 进程名（不含扩展名）
+    pub process_name: String,
+}
+
+thread_local! {
+    /// EnumWindows 回调收集器
+    static ENUM_BUF: std::cell::RefCell<Vec<PickableWindow>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// 枚举所有可吸附的桌面窗口。
+///
+/// **调用时机**：截图 overlay 加载时调一次（`screenshot_window_list` command），
+/// 前端缓存结果供 mousemove hit-test 用。不在 mousemove 里逐帧调用，避免 Win32
+/// 枚举的 ~5-15ms 延迟。
+pub fn enumerate_pickable_windows() -> Vec<PickableWindow> {
+    ENUM_BUF.with(|buf| buf.borrow_mut().clear());
+
+    unsafe {
+        let _ = EnumWindows(Some(enum_proc), LPARAM(0));
+    }
+
+    ENUM_BUF.with(|buf| buf.borrow_mut().drain(..).collect())
+}
+
+unsafe extern "system" fn enum_proc(hwnd: HWND, _lparam: LPARAM) -> BOOL {
+    // ── 可见性过滤 ──
+    if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+        return BOOL(1);
+    }
+
+    // ── 窗口样式过滤：WS_VISIBLE 不够（被其他窗口完全遮挡的也 WS_VISIBLE），
+    //    但 IsWindowVisible 已过滤了 SW_HIDE 的。这里再查 WS_EX_TOOLWINDOW。
+    let ex_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
+    if ex_style & (WS_EX_TOOLWINDOW.0 as isize) != 0 {
+        return BOOL(1);
+    }
+
+    // ── DWM Cloak 过滤 ──
+    // 被 Cloak 的窗口（UWP 挂起、虚拟桌面隐藏等）WS_VISIBLE 仍为 true 但实际不可见。
+    let mut cloaked: i32 = 0;
+    let hr = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            &mut cloaked as *mut i32 as *mut _,
+            std::mem::size_of::<i32>() as u32,
+        )
+    };
+    if hr.is_ok() && cloaked != 0 {
+        return BOOL(1);
+    }
+
+    // ── 标题过滤：无标题的窗口不具可辨识性 ──
+    let title_len = unsafe { GetWindowTextLengthW(hwnd) };
+    if title_len == 0 {
+        return BOOL(1);
+    }
+
+    // ── DWM 扩展边框 ──
+    let mut rect: RECT = unsafe { std::mem::zeroed() };
+    let hr = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut rect as *mut RECT as *mut _,
+            std::mem::size_of::<RECT>() as u32,
+        )
+    };
+    if !hr.is_ok() {
+        // DWM 不可用时回退到 GetWindowRect（含阴影边框，精度差但总比没有强）
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut rect);
+        }
+    }
+
+    // 零尺寸窗口跳过
+    if rect.right <= rect.left || rect.bottom <= rect.top {
+        return BOOL(1);
+    }
+
+    // ── 自身进程过滤 ──
+    let mut pid: u32 = 0;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    if pid == 0 {
+        return BOOL(1);
+    }
+    let self_pid = unsafe { GetCurrentProcessId() };
+    if pid == self_pid {
+        return BOOL(1);
+    }
+
+    // ── 读取标题 ──
+    let mut title_buf = [0u16; 512];
+    let len = unsafe { GetWindowTextW(hwnd, &mut title_buf) };
+    let title = if len > 0 {
+        String::from_utf16_lossy(&title_buf[..len as usize])
+    } else {
+        return BOOL(1);
+    };
+
+    // ── 进程名 ──
+    let process_name = get_process_name(pid).unwrap_or_else(|| String::new());
+
+    ENUM_BUF.with(|buf| {
+        buf.borrow_mut().push(PickableWindow {
+            hwnd: hwnd.0 as isize,
+            x: rect.left,
+            y: rect.top,
+            w: rect.right - rect.left,
+            h: rect.bottom - rect.top,
+            title,
+            process_name,
+        });
+    });
+
+    BOOL(1) // 继续枚举
+}
+
+/// 通过 PID 获取进程名（不含扩展名）。
+///
+/// 用 `OpenProcess + QueryFullProcessImageNameW` 取路径，再提取文件名。
+/// 失败时返回 None（调用方跳过该窗口的进程名显示）。
+fn get_process_name(pid: u32) -> Option<String> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use windows::Win32::Foundation::{HANDLE, MAX_PATH};
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
+    };
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = vec![0u16; MAX_PATH as usize];
+        let mut len = buf.len() as u32;
+        QueryFullProcessImageNameW(
+            HANDLE(handle.0),
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+        .ok()?;
+        let path = OsString::from_wide(&buf[..len as usize])
+            .to_string_lossy()
+            .into_owned();
+        let name = std::path::Path::new(&path)
+            .file_stem()?
+            .to_str()?
+            .to_string();
+        Some(name)
+    }
+}

@@ -263,27 +263,48 @@ pub fn strip_window_border(hwnd: HWND) {
 
 /// 常驻看门狗：窗口 Visible 时每 150ms 检查前台窗口是否仍为自身，否则隐藏。
 /// invoke 后 GRACE_MS 内不触发隐藏，覆盖 show → 获焦 → 立即丢焦 的焦点抖动。
+///
+/// **0.15 hotfix**：扩展为同时监视 `chord-screenshot` overlay 窗口。
+/// 截图 overlay 是 `always_on_top` 全屏透明窗，前端 JS 失败/卡住时用户无法 ESC 退出、
+/// 无法唤起任务管理器（被 overlay 遮挡）。watchdog 在 overlay 可见且前台非本进程时
+/// 自动隐藏 overlay，提供后端兜底逃生通道。
 pub fn start_watchdog(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
             sleep(Duration::from_millis(150)).await;
-            if STATE.load(Ordering::SeqCst) != ST_VISIBLE {
-                continue;
+
+            // ── 主窗口失焦检测（原有逻辑）──────────────────────────
+            if STATE.load(Ordering::SeqCst) == ST_VISIBLE {
+                let grace_ms = GRACE_MS.load(Ordering::SeqCst);
+                let since_invoke = elapsed_ms() - INVOKE_AT.load(Ordering::SeqCst);
+                if since_invoke >= grace_ms {
+                    let fg = unsafe { GetForegroundWindow() };
+                    // fg == NULL:焦点真空(系统正在切换前台窗口的瞬态,如刚拉起子进程时)。
+                    // 这不代表用户切到了别的窗口,据此隐藏会误伤——跳过本轮,等下次轮询。
+                    if !fg.0.is_null() && !is_self_foreground(&app, fg) {
+                        tracing::info!(since_invoke, "watchdog: hide! fg=0x{:x}", fg.0 as isize);
+                        hide(&app, "watchdog");
+                    }
+                }
             }
-            let grace_ms = GRACE_MS.load(Ordering::SeqCst);
-            let since_invoke = elapsed_ms() - INVOKE_AT.load(Ordering::SeqCst);
-            if since_invoke < grace_ms {
-                continue;
-            }
-            let fg = unsafe { GetForegroundWindow() };
-            // fg == NULL:焦点真空(系统正在切换前台窗口的瞬态,如刚拉起子进程时)。
-            // 这不代表用户切到了别的窗口,据此隐藏会误伤——跳过本轮,等下次轮询。
-            if fg.0.is_null() {
-                continue;
-            }
-            if !is_self_foreground(&app, fg) {
-                tracing::info!(since_invoke, "watchdog: hide! fg=0x{:x}", fg.0 as isize);
-                hide(&app, "watchdog");
+
+            // ── 截图 overlay 失焦检测（0.15 hotfix）─────────────────
+            // overlay 可见 + 前台非本进程 → 自动隐藏。
+            // 覆盖场景：用户 Ctrl+Shift+Esc 唤起任务管理器、Alt+Tab 切窗口、
+            // 或前端 JS 模块加载失败导致 blur handler 未注册。
+            if let Some(ss_win) = app.get_webview_window("chord-screenshot") {
+                if ss_win.is_visible().unwrap_or(false) {
+                    let fg = unsafe { GetForegroundWindow() };
+                    if !fg.0.is_null() && !is_self_foreground(&app, fg) {
+                        tracing::info!(
+                            "watchdog: screenshot overlay hide! fg=0x{:x}",
+                            fg.0 as isize
+                        );
+                        // 用 hide_screenshot_overlay 而非 win.hide()，
+                        // 确保同时清空 SESSION 释放位图内存
+                        hide_screenshot_overlay(&app);
+                    }
+                }
             }
         }
     });

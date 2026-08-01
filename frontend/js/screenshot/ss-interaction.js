@@ -7,7 +7,7 @@
 //!
 //! 注意：invalidateSelectionContent 留在主文件（协调多模块）。
 
-import { ss, SELECTION_HANDLE_SIZE, MIN_SELECTION_SIZE } from './ss-state.js';
+import { ss, SELECTION_HANDLE_SIZE, MIN_SELECTION_SIZE, TOOL_CAPS } from './ss-state.js';
 import { norm, applySquareConstraint } from './ss-utils.js';
 import { drawSelection, drawFinalSelection } from './ss-draw.js';
 import { findDisplayCssAt } from './ss-display.js';
@@ -107,7 +107,10 @@ export function updateSelectionInteraction(e) {
   }
   drawFinalSelection();
   const dpr = window.devicePixelRatio || 1;
-  ss.sizeHint.textContent = `${Math.round(ss.selCss.w * dpr)} × ${Math.round(ss.selCss.h * dpr)}`;
+  const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+  const sx = Math.round(meta.vx + ss.selCss.x * dpr);
+  const sy = Math.round(meta.vy + ss.selCss.y * dpr);
+  ss.sizeHint.textContent = `(${sx}, ${sy}) ${Math.round(ss.selCss.w * dpr)} × ${Math.round(ss.selCss.h * dpr)} px`;
   ss.sizeHint.classList.remove('hidden');
   ss.sizeHint.style.left = (ss.selCss.x + 4) + 'px';
   ss.sizeHint.style.top = (ss.selCss.y > 24 ? ss.selCss.y - 22 : ss.selCss.y + 4) + 'px';
@@ -156,6 +159,151 @@ export function updateSelectionCursor(x, y) {
   }
 }
 
+// ── 0.15.8：像素放大镜 ──────────────────────────────────
+
+/** 像素放大镜网格参数：9行×16列，每格 9px（画布 144×81）
+ *  对应物理像素 9×16 区域，以鼠标为中心。 */
+const PM_ROWS = 9;
+const PM_COLS = 16;
+const PM_CELL = 9;
+
+/**
+ * 更新像素放大镜（在 mousemove 中调，rAF 节流）。
+ * 只在选区拖拽阶段（!isAnnotating）生效。
+ */
+export function updatePixelMagnifier(cssX, cssY) {
+  // 0.15.10：取色器模式下也显示放大镜（复用选区阶段的取色预览逻辑）
+  if (!ss.magnifierEl || (ss.isAnnotating && !ss.eyedropperActive)) {
+    if (ss.magnifierEl) ss.magnifierEl.classList.add('hidden');
+    return;
+  }
+  const dpr = window.devicePixelRatio || 1;
+  const px = Math.round(cssX * dpr);
+  const py = Math.round(cssY * dpr);
+  const halfR = Math.floor(PM_ROWS / 2);
+  const halfC = Math.floor(PM_COLS / 2);
+
+  // 从主 canvas 取像素（willReadFrequently 已设）
+  // 注意：必须从原始截图读取，而非遮罩后的 canvas——否则取到的是暗化后的色值。
+  // 使用 ss.screenshotOffscreen（loadScreenshot 时创建的纯截图离屏 canvas）。
+  if (!ss.screenshotOffscreen) return;
+  const offCtx = ss.screenshotOffscreen.getContext('2d');
+  let imgData = null;
+  try {
+    imgData = offCtx.getImageData(
+      Math.max(0, px - halfC),
+      Math.max(0, py - halfR),
+      PM_COLS,
+      PM_ROWS
+    );
+    drawMagnifierGrid(imgData);
+  } catch (e) {
+    // getImageData 可能因跨域 taint 失败（理论上不会，图来自本地）
+    return;
+  }
+  if (!imgData) return;
+
+  // 定位放大镜：鼠标右下方，偏移 16px
+  const el = ss.magnifierEl;
+  const elW = el.offsetWidth || 160;
+  const elH = el.offsetHeight || 120;
+  let left = cssX + 16;
+  let top = cssY + 16;
+  // 不超出视口
+  if (left + elW > window.innerWidth) left = cssX - elW - 16;
+  if (top + elH > window.innerHeight) top = cssY - elH - 16;
+  el.style.left = left + 'px';
+  el.style.top = top + 'px';
+  el.classList.remove('hidden');
+
+  // 坐标显示（虚拟屏幕物理坐标）
+  const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+  const screenX = meta.vx + px;
+  const screenY = meta.vy + py;
+  if (ss.magnifierCoord) {
+    ss.magnifierCoord.textContent = `${screenX}, ${screenY}`;
+  }
+
+  // 中心像素色值
+  if (ss.magnifierColor) {
+    const midIdx = ((halfR * PM_COLS) + halfC) * 4;
+    const data = imgData.data;
+    const r = data[midIdx];
+    const g = data[midIdx + 1];
+    const b = data[midIdx + 2];
+    ss.magnifierColor.textContent = formatColor(r, g, b, ss.magnifierFormat);
+  }
+}
+
+/** 隐藏像素放大镜 */
+export function hidePixelMagnifier() {
+  if (ss.magnifierEl) ss.magnifierEl.classList.add('hidden');
+}
+
+/** 切换色值格式（Shift 键） */
+export function cycleMagnifierFormat() {
+  ss.magnifierFormat = (ss.magnifierFormat + 1) % 3;
+}
+
+/** 获取当前色值文本（C 键复制用） */
+export function getMagnifierColorText() {
+  if (!ss.magnifierColor) return null;
+  const text = ss.magnifierColor.textContent;
+  return text || null;
+}
+
+/** 在放大镜画布上绘制 9×16 像素网格 */
+function drawMagnifierGrid(imgData) {
+  const ctx = ss.magnifierCtx;
+  if (!ctx) return;
+  const { data } = imgData;
+  ctx.clearRect(0, 0, PM_COLS * PM_CELL, PM_ROWS * PM_CELL);
+  for (let row = 0; row < PM_ROWS; row++) {
+    for (let col = 0; col < PM_COLS; col++) {
+      const idx = (row * PM_COLS + col) * 4;
+      const r = data[idx];
+      const g = data[idx + 1];
+      const b = data[idx + 2];
+      ctx.fillStyle = `rgb(${r},${g},${b})`;
+      ctx.fillRect(col * PM_CELL, row * PM_CELL, PM_CELL, PM_CELL);
+    }
+  }
+  // 中心格高亮边框
+  const halfR = Math.floor(PM_ROWS / 2);
+  const halfC = Math.floor(PM_COLS / 2);
+  ctx.strokeStyle = '#4a9eff';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(halfC * PM_CELL, halfR * PM_CELL, PM_CELL, PM_CELL);
+}
+
+/** 格式化色值：0=HEX, 1=RGB, 2=HSL */
+function formatColor(r, g, b, fmt) {
+  if (fmt === 1) {
+    return `RGB(${r}, ${g}, ${b})`;
+  }
+  if (fmt === 2) {
+    const [h, s, l] = rgbToHsl(r, g, b);
+    return `HSL(${h}, ${s}%, ${l}%)`;
+  }
+  return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`.toUpperCase();
+}
+
+/** RGB → HSL */
+function rgbToHsl(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  if (max === min) return [0, 0, Math.round(l * 100)];
+  const d = max - min;
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h;
+  if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+  else if (max === g) h = ((b - r) / d + 2) / 6;
+  else h = ((r - g) / d + 4) / 6;
+  return [Math.round(h * 360), Math.round(s * 100), Math.round(l * 100)];
+}
+
 /** 0.11.8-e：矩形/椭圆拖动期间按/松 Shift 实时更新预览 */
 export function refreshShapePreviewOnShift(e) {
   if (!ss.isAnnotDragging || !ss.selCss) return;
@@ -187,7 +335,24 @@ export function updateStrokeCursor(clientX, clientY) {
     return;
   }
   const tool = annot.getTool();
-  const w = annot.getWidth();
+  const caps = TOOL_CAPS[tool];
+  if (!caps) {
+    strokeCursor.style.display = 'none';
+    return;
+  }
+  // 0.15.8-fix：支持模式切换的工具，只在画笔模式下显示光标
+  // 不支持模式切换的工具，按 hasCursor 判断
+  let effectiveHasCursor;
+  if (caps.supportMode) {
+    effectiveHasCursor = annot.getToolMode(tool) === 'brush';
+  } else {
+    effectiveHasCursor = caps.hasCursor;
+  }
+  if (!effectiveHasCursor) {
+    strokeCursor.style.display = 'none';
+    return;
+  }
+  const w = annot.getWidthForTool(tool);
   const dpr = window.devicePixelRatio || 1;
   let cssPxDiameter = 0;
   if (tool === 'pencil') {
@@ -196,6 +361,22 @@ export function updateStrokeCursor(clientX, clientY) {
     cssPxDiameter = (w * 4) / dpr;
   } else if (tool === 'eraser') {
     cssPxDiameter = (Math.max(6, w * 3) * 2) / dpr;
+  } else if (tool === 'mosaic' || tool === 'pixelate' || tool === 'blur') {
+    // 0.15.8-fix→fix：统一画笔模式工具的光标大小计算。
+    // 0.15.11：pixelate/blur 的 widthCat='effect'，getWidthForTool 返回 blurIntensity（统一强度）
+    // 而非 brush.size。画笔光标应基于 brush.size。
+    const brushSize = annot.getBrushSize();
+    if (tool === 'blur') {
+      // blur brush 模式的笔画宽度 = brush.size * 2
+      cssPxDiameter = (brushSize * 2) / dpr;
+    } else {
+      // mosaic/pixelate brush 模式的半径 = max(8, brush.size / 2 + 8)，直径 = 半径 * 2
+      cssPxDiameter = (Math.max(8, brushSize / 2 + 8) * 2) / dpr;
+    }
+  } else if (tool === 'number') {
+    // 0.15.11：数字标号光标——圆形虚线圈，大小跟随 brushSize
+    const brushSize = annot.getBrushSize();
+    cssPxDiameter = (Math.max(10, brushSize * 1.2) * 2) / dpr;
   } else {
     strokeCursor.style.display = 'none';
     return;
@@ -206,9 +387,6 @@ export function updateStrokeCursor(clientX, clientY) {
   strokeCursor.style.height = cssPxDiameter + 'px';
   strokeCursor.style.left = (clientX - cssPxDiameter / 2) + 'px';
   strokeCursor.style.top = (clientY - cssPxDiameter / 2) + 'px';
-  if (tool === 'eraser') {
-    strokeCursor.style.borderColor = 'rgba(255,255,255,0.9)';
-  } else {
-    strokeCursor.style.borderColor = annot.getColor();
-  }
+  // 0.15.13：所有笔触预览统一使用当前选择的颜色（包括橡皮擦）
+  strokeCursor.style.borderColor = annot.getColor();
 }
