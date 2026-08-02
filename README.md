@@ -63,11 +63,39 @@ Blink 会在后台静默感知你的上下文，但不会打扰你——看到�
 
 ---
 
-## Chord 增强
+## 插件生态
 
 <p align="center">
-  <img src="docs/images/feature-chord.gif" width="680" alt="Chord 模式"/>
+  <img src="docs/images/feature-plugin.gif" width="680" alt="插件生态"/>
 </p>
+
+插件运行在独立进程，崩溃不影响 Blink 核心。支持 Python、Node.js、Rust 或任何可执行文件。
+
+- **翻译** — 多引擎内置
+- **天气查询** — 简洁的天气卡片
+- **IP 查询** — 快速查看当前网络信息
+- **更多可能** — 用你熟悉的语言写插件，JSONL 协议通信，几行代码就能接入
+- **未来** — 一键探索系统中的 CLI 工具，自动配置为 Blink 插件/skill
+
+---
+
+## Chord 增强
+
+截图功能：
+<p align="center">
+  <img src="docs/images/feature-chord-screenshot.gif" width="680" alt="Chord 模式"/>
+</p>
+
+AI 功能：
+<p align="center">
+  <img src="docs/images/feature-chord-ai.gif" width="680" alt="Chord 模式"/>
+</p>
+
+其他功能：
+<p align="center">
+  <img src="docs/images/feature-chord-other.gif" width="680" alt="Chord 模式"/>
+</p>
+
 
 主窗口打开时按住 Alt，字母键变成快捷动作入口。不用记全局快捷键，用的时候看一眼提示就行。
 
@@ -85,23 +113,7 @@ Blink 会在后台静默感知你的上下文，但不会打扰你——看到�
 
 ---
 
-## 插件生态
-
-<p align="center">
-  <img src="docs/images/feature-plugin.gif" width="680" alt="插件生态"/>
-</p>
-
-插件运行在独立进程，崩溃不影响 Blink 核心。支持 Python、Node.js、Rust 或任何可执行文件。
-
-- **翻译** — 多引擎内置
-- **天气查询** — 简洁的天气卡片
-- **IP 查询** — 快速查看当前网络信息
-- **更多可能** — 用你熟悉的语言写插件，JSONL 协议通信，几行代码就能接入
-- **未来** — 一键探索系统中的 CLI 工具，自动配置为 Blink 插件/skill
-
----
-
-## AI 就绪
+## AI 与 语音输入 就绪
 
 <p align="center">
   <img src="docs/images/feature-ai.gif" width="680" alt="AI 能力"/>

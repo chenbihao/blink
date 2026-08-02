@@ -859,6 +859,7 @@ export const en = {
     "statusbar.paging": "{{key:PageUp}}{{key:PageDown}} page · {page}/{pageCount}",
     "statusbar.autosuggest_accept": "Press {key} to accept → {target}",
     "statusbar.autosuggest_enter": "Press {key} to enter parameters",
+    "statusbar.context_accept": "Press {key} {target}",
     "suggestion.origin.selection": "from selection",
     "suggestion.origin.clipboard": "from clipboard",
 

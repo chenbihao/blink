@@ -126,8 +126,8 @@ impl DomainEnv for TauriDomainEnv {
 
     // ── 窗口操作 ──────────────────────────────────────────────────────────
 
-    fn show_chat_window(&self) -> Result<(), String> {
-        crate::infra::platform::window::show_chat_window(&self.app)
+    fn show_chat_window(&self, initial_text: Option<&str>) -> Result<(), String> {
+        crate::infra::platform::window::show_chat_window(&self.app, initial_text)
     }
 
     fn hide_main_window(&self, reason: &str) {
@@ -213,7 +213,7 @@ mod tests {
         fn chat_service(&self) -> Option<&Arc<ChatService>> {
             None
         }
-        fn show_chat_window(&self) -> Result<(), String> {
+        fn show_chat_window(&self, _initial_text: Option<&str>) -> Result<(), String> {
             Ok(())
         }
         fn hide_main_window(&self, _reason: &str) {}

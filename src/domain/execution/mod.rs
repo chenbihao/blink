@@ -64,11 +64,11 @@ impl<'a> ActionContext<'a> {
         Self { env, arguments }
     }
 
-    /// 从结构化 arguments 构造（0.9.1 AI 路径 `ToolCall.arguments` 入口）。
+    /// 从结构化 arguments 构造（0.9.1 AI 路径 `ToolCall.arguments` 入口；
+    /// 0.16.2 chord `requires_input` 路径也消费）。
     ///
-    /// 若传入的不是 Object，会被规范化为 `{}` + 一条 warn 日志——
+    /// 若传入的不是 Object，会被规范化为 `{}` + 一条 warn 日志--
     /// 防御性设计，AI 可能产出畸形 JSON。
-    #[allow(dead_code)] // 0.9.1 起消费
     pub fn from_arguments(env: &'a dyn DomainEnv, arguments: Value) -> Self {
         let arguments = if arguments.is_object() {
             arguments

@@ -710,8 +710,8 @@ pub fn restore_foreground(hwnd: isize) {
 static CHAT_CLOSE_HANDLER_REGISTERED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-pub fn show_chat_window(app: &AppHandle) -> Result<(), String> {
-    use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+pub fn show_chat_window(app: &AppHandle, initial_text: Option<&str>) -> Result<(), String> {
+    use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
     const LABEL: &str = "chat";
     let is_new = app.get_webview_window(LABEL).is_none();
@@ -773,6 +773,16 @@ pub fn show_chat_window(app: &AppHandle) -> Result<(), String> {
     let _ = win.unminimize();
     win.set_focus()
         .map_err(|e| format!("聚焦 chat 窗口失败: {e}"))?;
+
+    // 0.16.2：带初始文本时 emit chat-prefill 事件，前端监听后填充输入框（仅填充不发送）。
+    // 预热窗口（常见路径）JS init 已完成，listener 在线，emit 立即收到。
+    // 新建窗口（冷启动 fallback）JS init 有延迟，emit 可能在 listener 注册前发出 --
+    // 前端 main.js 在 init 时额外检查 window.__chatPendingPrefill 兜底（由 emit_to 写入）。
+    if let Some(text) = initial_text.filter(|s| !s.is_empty()) {
+        if let Err(e) = app.emit_to(LABEL, crate::domain::event_names::EventNames::CHAT_PREFILL, text) {
+            tracing::warn!(error = %e, "chat-prefill emit 失败");
+        }
+    }
 
     tracing::info!("chat window: 已显示");
     Ok(())

@@ -3,7 +3,7 @@
 
 /* ── 底部提示栏 ───────────────────────────────────────────────────────────────
    无结果时 .visible 移除 → display:none，不占窗口高度。
-   0.10.8 §11.2：min-height 稳定基线,避免双行 stack 切换时窗口抖动。
+   0.16.1：min-height 改为单行紧凑基线（24px），双行时自然撑高。
    0.11.8：align-items 从 center 改 flex-start——让主行位置永远与右侧翻页对齐，
    副行插入时主行不再被向上挤（原 center 布局下 hint-left 长高会推主行上移）。 */
 #statusbar {
@@ -15,7 +15,8 @@
   border-top: 1px solid var(--surface);
   font-size: var(--text-sm);
   color: var(--text-dim);
-  min-height: 32px; /* 单/双行切换稳态 —— 单行 statusbar 也占同高，不抖窗口 */
+  min-height: 24px; /* 0.16.1：单行紧凑基线（padding-top 8px + line-height 17px ≈ 25px）。
+     双行（chord 副行）时自然撑高，不固定 32px 以免单行底部空白过多。 */
 }
 
 #statusbar.visible {

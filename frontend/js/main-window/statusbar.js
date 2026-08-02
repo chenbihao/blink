@@ -22,6 +22,7 @@ import * as chord from "./chord.js";
 import * as autosuggestConfig from "./autosuggest-config.js";
 import { renderKey, renderHint } from "../shared/kbd.js";
 import { syncWindowSize } from "./window-size.js";
+import { queryEl } from "./dom.js";
 
 const el = document.getElementById("statusbar");
 
@@ -74,9 +75,9 @@ function buildLeft(active, hasHint) {
   fillPrimary(primary, active, hasHint);
   left.appendChild(primary);
 
-  // 副行：hasHint + chord-visible + 有 chord 动作 → 追加 chord 键帽副行
-  // 无 hint（常规态）时不追加副行——常规态导航提示自身已足够，副行会成噪声。
-  const secondary = buildSecondary(hasHint);
+  // 副行：输入框有文本 + chord-visible + chord 有动作 -> 追加 chord 键帽副行
+  // 0.16.1：显示条件从 hasHint 改为"输入框有文本"--chord overlay 与 statusbar 副行互斥。
+  const secondary = buildSecondary();
   if (secondary) left.appendChild(secondary);
 
   return left;
@@ -85,10 +86,20 @@ function buildLeft(active, hasHint) {
 /** 主行内容填充：hasHint → ghost 提示；否则 → 常规态导航。 */
 function fillPrimary(primary, active, hasHint) {
   if (hasHint) {
-    // {key} 传入 kbd Element，模板里 "按 {key} 接受补全 → {target}" 会自动内嵌。
     const display = ghost.currentDisplay();
     const params = { key: renderKey(autosuggestConfig.getTabKey()) };
-    if (display) {
+    const source = ghost.currentSource();
+
+    // 0.16.1：context 类走独立文案（环境感知不是"补全"，措辞要区分）。
+    // keyword/ai 类仍走 autosuggest_accept / autosuggest_enter。
+    if (source === "context") {
+      if (display) {
+        primary.appendChild(renderHint(t("statusbar.context_accept"),
+          { ...params, target: display }));
+      } else {
+        primary.appendChild(renderHint(t("statusbar.autosuggest_enter"), params));
+      }
+    } else if (display) {
       primary.appendChild(renderHint(t("statusbar.autosuggest_accept"),
         { ...params, target: display }));
     } else {
@@ -123,9 +134,14 @@ function fillPrimary(primary, active, hasHint) {
   }
 }
 
-/** 副行：hasHint + chord-visible + chord 有动作 → 返回 chord 键帽行，否则 null。 */
-function buildSecondary(hasHint) {
-  if (!hasHint) return null;
+/** 副行：输入框有文本 + chord-visible + chord 有动作 → 返回 chord 键帽行，否则 null。
+ *
+ *  0.16.1：chord 提示 overlay 与 statusbar 副行互斥显示。输入框无文本时 chord 走 overlay
+ *  （chord.js render 条件），有文本时走 statusbar 副行（此处）。有 ghost hint 但输入框为空
+ *  （context 类）时不显示副行--overlay 的 chord 提示已足够。
+ */
+function buildSecondary() {
+  if (!queryEl.value.trim()) return null;
   const actions = chord.getActions();
   if (!document.body.classList.contains("chord-visible") || !actions.length) return null;
 

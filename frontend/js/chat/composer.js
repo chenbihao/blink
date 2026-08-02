@@ -149,6 +149,20 @@ export function clearInput() {
 }
 
 /**
+ * 设置输入框文本（0.16.2：chord Alt+Q 带文本触发时填充用）。
+ * 仅填充，不自动发送。光标移到末尾，触发 autoResize + sendButton 状态更新。
+ * @param {string} text
+ */
+export function setInputValue(text) {
+  if (!textarea) return;
+  textarea.value = text;
+  // 光标移到末尾
+  textarea.setSelectionRange(text.length, text.length);
+  autoResize();
+  updateSendButtonState();
+}
+
+/**
  * 聚焦输入框。
  */
 export function focusInput() {

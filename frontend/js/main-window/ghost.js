@@ -138,23 +138,34 @@ function renderToDom(query) {
   ghostTypedEl.textContent = query;
 
   // 只在补全场景（display 非空）画影子文字；已完整场景（display 为空）
-  // overlay 保持空——用户已看到自己的完整输入，加任何影子都是冗余；提示交给 statusbar。
+  // overlay 保持空--用户已看到自己的完整输入，加任何影子都是冗余；提示交给 statusbar。
   //
-  // 0.8.3：Context 类的 display 已是完整独立文本（"翻译 \"the...\""）,不需要 `→` 前缀。
-  // Keyword 类保留 `→` 前缀（表达"补全为..."的语义）。
-  // 0.9.2:AI 类 display 是 "按 Tab 问 AI",不属于补全语义,也不用 `→` 前缀。
+  // 0.8.3：Context 类的 display 已是完整独立文本（"翻译 \"the...\""）,不需要 `->` 前缀。
+  // Keyword 类保留 `->` 前缀（表达"补全为..."的语义）。
+  // 0.9.2:AI 类 display 是 "按 Tab 问 AI",不属于补全语义,也不用 `->` 前缀。
+  //
+  // 0.16.1：Context 类不再画影子文字（环境感知是弱信号，不应占输入框影子位打扰
+  // 用户）。overlay 保持空，采纳提示只走 statusbar。currentSuggestion 状态仍正常
+  // 持有--hasHint()/currentDisplay()/currentOrigin() 供 statusbar 读取。
   if (!currentSuggestion.display) {
     ghostSuggestEl.textContent = "";
-  } else if (currentSuggestion.source === "context" || currentSuggestion.source === "ai") {
+  } else if (currentSuggestion.source === "context") {
+    // 0.16.1：context 不画影子，只设 data-ghost-active 让 statusbar 知道有 hint
+    ghostSuggestEl.textContent = "";
+  } else if (currentSuggestion.source === "ai") {
     ghostSuggestEl.textContent = ` ${currentSuggestion.display}`;
   } else {
-    ghostSuggestEl.textContent = ` → ${currentSuggestion.display}`;
+    ghostSuggestEl.textContent = ` -> ${currentSuggestion.display}`;
   }
   ghostSuggestEl.classList.toggle(
     "ghost-context",
-    currentSuggestion.source === "context" || currentSuggestion.source === "ai",
+    currentSuggestion.source === "ai",
   );
-  if (currentSuggestion.display) {
+  // 0.16.1：context 类不再画影子，也不需要 ghost-context 样式（影子为空）
+  if (currentSuggestion.display && currentSuggestion.source !== "context") {
+    // 0.16.1：context 类不画影子，不设 data-ghost-active（overlay 无视觉变化），
+    // 也不需要 scrollWithMargin（没有影子要留空间）。但 currentSuggestion 仍持有，
+    // hasHint() 返回 true，statusbar 会展示采纳提示。
     queryEl.setAttribute("data-ghost-active", "");
     // 0.10.6: 有影子时调整滚动留出右侧空间给 preview 文本
     scrollWithMargin();

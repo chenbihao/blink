@@ -4,6 +4,8 @@ use crate::domain::event_names::EventNames;
 use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 /// 打开文件选择对话框，返回选中的文件路径（取消时返回 null）。
+/// 0.16.2: `input_text` 参数用于 `requires_input=true` 的 chord（如 chat），
+/// 把主窗口输入框文本带入 action 执行。None 或空字符串表示无入参。
 #[tauri::command]
 pub async fn open_file_dialog(
     app: tauri::AppHandle,
@@ -310,9 +312,16 @@ pub async fn list_builtin_actions(
 /// **注意**：Alt+Space 语音输入不走此 command——它由 native hotkey hook 的 hold
 /// 状态机直接处理（`HotkeyEvent::Hold` → `VoiceService::start_recording`），
 /// chord registry 里的 `voice_input` 条目仅用于提示条显示（display-only）。
+/// 0.16.2: `input_text` 参数用于 `requires_input=true` 的 chord（如 chat），
+/// 把主窗口输入框文本带入 action 执行。None 或空字符串表示无入参。
+///
 #[tauri::command]
-pub async fn trigger_chord(app: tauri::AppHandle, key: String) -> Result<(), String> {
-    tracing::debug!(%key, "trigger_chord");
+pub async fn trigger_chord(
+    app: tauri::AppHandle,
+    key: String,
+    input_text: Option<String>,
+) -> Result<(), String> {
+    tracing::debug!(%key, input_len = input_text.as_deref().map(|s| s.len()), "trigger_chord");
     let Some(registry) = app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
     else {
         return Err("chord registry 未就绪".into());
@@ -341,7 +350,7 @@ pub async fn trigger_chord(app: tauri::AppHandle, key: String) -> Result<(), Str
         .inner()
         .clone();
     let _surface = registry
-        .trigger(&key, &chord_cfg.bindings, env_arc.as_ref())
+        .trigger(&key, &chord_cfg.bindings, env_arc.as_ref(), input_text.as_deref())
         .await?;
     Ok(())
 }

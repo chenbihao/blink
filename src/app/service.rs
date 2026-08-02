@@ -242,7 +242,7 @@ impl Service for HotkeyService {
                             .inner()
                             .clone();
                         if let Err(e) = registry
-                            .trigger(&key, &chord_cfg.bindings, env_arc.as_ref())
+                            .trigger(&key, &chord_cfg.bindings, env_arc.as_ref(), None)
                             .await
                         {
                             tracing::warn!(%key, %e, "chord trigger 失败");

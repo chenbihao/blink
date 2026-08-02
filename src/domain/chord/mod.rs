@@ -201,7 +201,18 @@ pub trait ChordAction: crate::domain::execution::Action {
     fn default_semantic(&self) -> ChordSemantic {
         ChordSemantic::Tap
     }
-    /// 显示名（走 `LocalizableText`——registry 声明 zh/en，list() 按 language 解析）。
+    /// 是否需要输入框文本作为入参（0.16.2）。
+    ///
+    /// `false`（默认）：仅空 query 时可触发，无入参。
+    /// `true`：非空 query 时也可触发，输入框文本通过 `trigger_chord` 的 `input_text`
+    /// 参数传入 `ActionContext.arguments["input"]`。
+    ///
+    /// 前端 `getTapKeys()` 据此动态过滤：空 query 返回全部 tap 键，
+    /// 非空 query 只返回 `requires_input=true` 的键。
+    fn requires_input(&self) -> bool {
+        false
+    }
+    /// 显示名（走 `LocalizableText`--registry 声明 zh/en，list() 按 language 解析）。
     fn label(&self) -> &LocalizableText;
     /// 触发后的窗口形态。
     fn surface(&self) -> ChordSurface;
@@ -256,6 +267,7 @@ impl ChordRegistry {
                     },
                     "label": a.label().resolve(language),
                     "surface": a.surface().as_str(),
+                    "requires_input": a.requires_input(),
                 })
             })
             .collect()
@@ -311,11 +323,15 @@ impl ChordRegistry {
     /// registry 层按 outcome 分派副作用（Emit → emit 事件）。
     ///
     /// 0.10.7：键位由 binding 覆盖，匹配时用 effective_key。
+    ///
+    /// 0.16.2：增加 `input` 参数。`requires_input=true` 的 action 通过
+    /// `ActionContext.arguments["input"]` 拿到输入框文本；其他 action 忽略。
     pub async fn trigger(
         &self,
         key: &str,
         bindings: &ChordBindings,
         env: &dyn crate::domain::event::DomainEnv,
+        input: Option<&str>,
     ) -> Result<ChordSurface, String> {
         let lower = key.to_lowercase();
         let action = self
@@ -324,9 +340,15 @@ impl ChordRegistry {
             .find(|a| bindings.effective_key(a.id(), a.default_key()) == lower)
             .ok_or_else(|| format!("未注册的 chord 键: {lower}"))?;
         let surface = action.surface();
-        tracing::info!(id = action.id(), key = %lower, surface = ?surface, "chord trigger");
+        tracing::info!(id = action.id(), key = %lower, surface = ?surface, has_input = input.is_some(), "chord trigger");
 
-        let cx = crate::domain::execution::ActionContext::new(env, None);
+        // 0.16.2：requires_input 的 action 把 input 塞进 arguments；其他 action 传空。
+        let arguments = if action.requires_input() {
+            serde_json::json!({ "input": input.unwrap_or("") })
+        } else {
+            serde_json::json!({})
+        };
+        let cx = crate::domain::execution::ActionContext::from_arguments(env, arguments);
         let outcome = action.execute(&cx).await.map_err(|e| e.to_string())?;
         // 按 outcome 分派副作用
         match outcome {
@@ -485,7 +507,7 @@ impl crate::domain::execution::Action for ChatAction {
     fn schema(&self) -> crate::domain::execution::ActionSchema {
         crate::domain::execution::ActionSchema::empty(
             "chat",
-            "Open the independent AI chat window (Alt+Q chord). No arguments.",
+            "Open the independent AI chat window (Alt+Q chord). Optional input_text to prefill.",
         )
     }
 
@@ -497,10 +519,17 @@ impl crate::domain::execution::Action for ChatAction {
         &self,
         cx: &crate::domain::execution::ActionContext<'_>,
     ) -> Result<crate::domain::execution::ActionOutcome, crate::domain::execution::ExecError> {
+        // 0.16.2：读 input 参数（requires_input 的 chord 把输入框文本带来）。
+        // 仅填充到 chat 输入框，不自动发送--用户可检查/修改后手动回车。
+        let initial_text: Option<&str> = cx
+            .arguments
+            .get("input")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
         // 看门狗按 PID 判前台；chat 与主窗同进程，不能指望失焦自动隐藏主窗。
         // 先确认 chat 已创建并聚焦，再隐藏主窗；创建失败时保留主窗，避免用户失去入口。
         cx.env
-            .show_chat_window()
+            .show_chat_window(initial_text)
             .map_err(crate::domain::execution::ExecError::Runtime)?;
         cx.env.hide_main_window("chat_chord");
         Ok(crate::domain::execution::ActionOutcome::Nop)
@@ -511,6 +540,12 @@ impl crate::domain::execution::Action for ChatAction {
 impl ChordAction for ChatAction {
     fn default_key(&self) -> char {
         'q'
+    }
+
+    /// 0.16.2：chat 需要输入框文本作为入参--非空 query 时 Alt+Q 仍可触发，
+    /// 把文本带入 chat 窗口输入框（仅填充不发送）。
+    fn requires_input(&self) -> bool {
+        true
     }
 
     fn label(&self) -> &LocalizableText {

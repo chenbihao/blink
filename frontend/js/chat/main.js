@@ -11,7 +11,7 @@ import * as components from "./components.js";
 import { forceScrollToBottom } from "./components.js";
 import { escapeText, escapeAttr } from "./utils.js";
 // 0.12.7 §6.3：显式导入 renderSignal，多处场景接入
-import { initComposer, setStreamingMode, setInputMode, clearInput, focusInput, setThinkingEnabled as setComposerThinking, showVoiceIndicator, hideVoiceIndicator, showVoiceStatus, updateVoiceLevel, updateVoicePartial, isVoiceRecording } from "./composer.js";
+import { initComposer, setStreamingMode, setInputMode, clearInput, setInputValue, focusInput, setThinkingEnabled as setComposerThinking, showVoiceIndicator, hideVoiceIndicator, showVoiceStatus, updateVoiceLevel, updateVoicePartial, isVoiceRecording } from "./composer.js";
 import { initSidebar, refreshSidebar, showSidebar, hideSidebar, toggleSidebar, setActiveConversation } from "./sidebar.js";
 import { applyThemeFromConfig } from "../shared/theme.js";
 import { listen, invoke, getCurrentWindow } from "../shared/tauri.js";
@@ -73,6 +73,16 @@ bindLinkOpener();
     onSend: handleSend,
     onStop: handleStop,
     onThinkingToggle: handleThinkingToggle,
+  });
+
+  // 0.16.2：chord Alt+Q 带文本触发时，后端 emit CHAT_PREFILL 把文本推过来。
+  // 仅填充输入框，不自动发送--用户可检查/修改后手动回车。
+  listen(EVENTS.CHAT_PREFILL, (event) => {
+    const text = event?.payload;
+    if (typeof text === "string" && text) {
+      setInputValue(text);
+      focusInput();
+    }
   });
 
   initSidebar({

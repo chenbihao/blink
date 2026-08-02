@@ -24,6 +24,7 @@
 
 import { invoke } from "../shared/tauri.js";
 import { listChordActions } from "../shared/api.js";
+import { queryEl } from "./dom.js";
 
 let chordActions = [];
 let ghostChordEl = null;
@@ -36,6 +37,9 @@ let hintVisible = true;
 /** 初始化：绑定 overlay DOM。main.js 启动时调一次。 */
 export function init() {
   ghostChordEl = document.querySelector("#ghost-overlay .ghost-chord");
+  // 0.16.1：输入框文本变化时重新 render overlay--有文本时清空 chord 提示（让位
+  // keyword 影子），无文本时恢复。chord-visible 由 setAlt 控制，此处只管内容。
+  queryEl.addEventListener("input", render);
 }
 
 /** 是否启用 Chord（keyboard.js chordEligible 读此值,统一门禁）。 */
@@ -43,27 +47,41 @@ export function isEnabled() {
   return chordEnabled;
 }
 
-/** 当前 Chord 动作列表（statusbar 降级渲染用）。 */
+/**
+ * 当前 Chord 动作列表（statusbar 降级渲染用）。
+ *
+ * 0.16.2：输入框有文本时只返回 requires_input=true 的动作（chord 副行只显示
+ * 这些）；无文本时返回全部（overlay 显示全部 chord 提示）。
+ */
 export function getActions() {
-  return chordEnabled && hintVisible ? chordActions : [];
+  if (!chordEnabled || !hintVisible) return [];
+  const hasText = !!queryEl.value.trim();
+  return hasText
+    ? chordActions.filter((a) => a.requires_input)
+    : chordActions;
 }
 
 /**
  * 当前生效的 tap 语义 chord 键集合（0.10.7）。
  *
  * keyboard.js 的 `onChordTrigger` 用此集合判断 Alt+字母是否触发 chord。
- * 只含 `semantic === "tap"` 的动作——hold 语义（如语音输入 Alt+Space）
+ * 只含 `semantic === "tap"` 的动作--hold 语义（如语音输入 Alt+Space）
  * 由 native hotkey hook 的 hold 状态机处理，不走前端 keydown 路径。
  *
  * 键已 toLowerCase，与 `e.key.toLowerCase()` 直接比对。
+ *
+ * 0.16.2：输入框有文本时只返回 requires_input=true 的键（如 chat 的 Q）；
+ * 无文本时返回全部 tap 键。这样非空 query 时 Alt+A（screenshot）不会触发，
+ * Alt+Q（chat）仍可触发并把文本带入对话窗口。
  */
 export function getTapKeys() {
   const set = new Set();
   if (!chordEnabled) return set;
+  const hasText = !!queryEl.value.trim();
   for (const a of chordActions) {
-    if (a.semantic === "tap") {
-      set.add(String(a.key).toLowerCase());
-    }
+    if (a.semantic !== "tap") continue;
+    if (hasText && !a.requires_input) continue;
+    set.add(String(a.key).toLowerCase());
   }
   return set;
 }
@@ -126,6 +144,9 @@ function render() {
   // hint_visible=false 时不 render 提示条（触发仍生效）
   if (!hintVisible) return;
   if (!chordActions.length) return;
+  // 0.16.1：输入框有文本时不渲染 overlay 提示--此时 chord 提示走 statusbar 副行。
+  // overlay 空间要给 keyword 补全影子让位。互斥显示，不重叠不撑布局。
+  if (queryEl.value.trim()) return;
 
   // 前导两个非断行空格避免紧贴用户光标位（overlay whitespace: pre 保留）
   ghostChordEl.appendChild(document.createTextNode("  "));

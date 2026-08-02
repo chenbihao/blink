@@ -56,9 +56,10 @@ export function copyToClipboard(text) {
 }
 
 /** 触发 Chord 动作（0.8.5 §六）——key 为字母（a/c），后端按 key 分派到 ChordRegistry。
- *  注意：Alt+Space 语音输入不走此路径，由 native hotkey hold 状态机直接处理。 */
-export function triggerChord(key) {
-  return invoke("trigger_chord", { key });
+ *  注意：Alt+Space 语音输入不走此路径，由 native hotkey hold 状态机直接处理。
+ *  0.16.2：inputText 用于 requires_input=true 的 chord（如 chat），把主窗口输入框文本带入。 */
+export function triggerChord(key, inputText) {
+  return invoke("trigger_chord", { key, inputText: inputText ?? null });
 }
 
 /** 列出已注册的 Chord 动作（0.8.5 §六 增强菜单渲染用）。每条：{ id, key, label, surface }。 */

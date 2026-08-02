@@ -118,7 +118,7 @@ function onBlockModifiers(e) {
 // 0.10.7：触发键集合从 chord.getTapKeys() 动态获取（用户可配置），不再硬编码。
 function fireChord(key) {
   console.log(`[chord] Alt+${key.toUpperCase()} triggered`);
-  triggerChord(key).catch((e) => console.warn("[chord] trigger_chord 失败", e));
+  triggerChord(key, queryEl.value).catch((e) => console.warn("[chord] trigger_chord 失败", e));
 }
 
 // chord 独占模式（0.10.7）下的兜底触发路径。
@@ -135,32 +135,20 @@ function onChordTrigger(e) {
   const key = e.key.toLowerCase();
   // 0.10.7：用动态 tap 键集合（从 chord 配置派生），不再用硬编码 CHORD_KEYS
   if (!chord.getTapKeys().has(key)) return;
-  // 门禁：query 空 + 结果为空才触发（用户还没开始交互）。
-  // trim 是防"只有空格"也被判非空。同 setAlt 里的可见性门禁一致——
-  // 触发与显示门禁共用同一条件，避免"菜单不该显示但按 Alt+C 生效"或反之。
-  if (!chordEligible()) return;
+  // 0.16.2：门禁不再检查 queryEmpty--getTapKeys() 已按 query 是否为空动态过滤。
+  // 非空 query 时 getTapKeys 只返回 requires_input=true 的键，此处的 key 已通过过滤。
   e.preventDefault(); // 不进输入框
   e.stopPropagation();
   fireChord(key);
 }
 
 /** Chord 触发/显示的统一门禁条件。
- *  三重与门:
- *  - Chord 总开关未关(chord_enabled,读自 chord.js 快照)
- *  - query 空
- *  - **用户主动交互的**结果列表空（0.10.8 §11.2 方案 1：允许 context_aware 项存在）
- *
- *  0.10.8 之前用 `results.hasItems()`——只要有任何结果就挡 chord。剪贴板 URL 时
- *  BuiltinEngine 空 query 会产 open_url 候选（Context-only 命中，`context_aware=true`），
- *  导致 chord 被挡。现改用 `hasUserItems()`：只统计非 context_aware 项，让"环境自动
- *  填充候选"与 chord 共存（Ghost + Context item + Chord 都在，用户三选一）。
+ *  0.16.2：只检查总开关。query 是否为空由 getTapKeys() 动态过滤（空 query 全部 tap 键，
+ *  非空 query 只返回 requires_input 的键），结果列表是否为空不再阻断 chord 显示--
+ *  有搜索结果时用户仍可能想用 Alt+Q 把文本带入对话。
  */
 function chordEligible() {
-  const enabled = chord.isEnabled();
-  const queryEmpty = queryEl.value.trim() === "";
-  const noUserResults = !results.hasUserItems();
-  const eligible = enabled && queryEmpty && noUserResults;
-  return eligible;
+  return chord.isEnabled();
 }
 
 // ── 按住 Alt 显示数字角标 ─────────────────────────────────────────────────────
@@ -168,8 +156,8 @@ function chordEligible() {
 
 function setAlt(on) {
   // 0.8.5 §6.4：菜单可见性与触发资格同源——只有 chordEligible() 满足才允许展示。
-  // 用户输入后按 Alt 不该弹出菜单遮 Ghost / results（触发路径也会被 onChordTrigger 门禁挡住，
-  // 双闸保一致）。alt-active 仍标记物理 Alt 态供其他 UI（如 results 上的 Alt+1~9 角标）用。
+  // 0.16.2：chordEligible 不再检查 queryEmpty--非空 query 时 chord 仍可显示
+  // （chord 提示走 statusbar 副行，不遮 Ghost / results）。
   const eligible = chordEligible();
   const showChord = on && eligible;
   const prevChordVisible = document.body.classList.contains("chord-visible");
@@ -178,7 +166,10 @@ function setAlt(on) {
   // 0.10.7：chord 独占模式联动——showChord 时进独占（LL hook 吞 chord keydown），
   // 退出时还原。异步调用，失败仅告警（不影响主流程）。
   // 0.14：showChord=true 时传入前端已派生的 tapKeys，跳过后端 3 次 DB 查询。
-  setChordMode(showChord, showChord ? [...chord.getTapKeys()] : null).catch((e) =>
+  // 0.16.2：hook 独占模式只在空 query 时进--非空 query 时 chord 触发走前端 keydown
+  // 兜底路径（fireChord 带 inputText），hook 不吞键以避免后端拿不到输入框文本。
+  const hookExclusive = showChord && !queryEl.value.trim();
+  setChordMode(hookExclusive, hookExclusive ? [...chord.getTapKeys()] : null).catch((e) =>
     console.warn("[chord] set_chord_mode 失败", e),
   );
   // Chord 提示在 ghost overlay（无 Ghost 时）或 statusbar（有 Ghost 时），

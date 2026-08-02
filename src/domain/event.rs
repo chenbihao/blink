@@ -68,7 +68,10 @@ pub trait DomainEnv: CapabilityEnv {
     // ── 窗口操作（chord action 专用）──────────────────────────────────
 
     /// 显示对话窗口。
-    fn show_chat_window(&self) -> Result<(), String>;
+    ///
+    /// 0.16.2：`initial_text` 非空时，窗口显示后通过 `blink://chat-prefill` 事件
+    /// 把文本推给 chat 前端填充输入框（仅填充不自动发送）。
+    fn show_chat_window(&self, initial_text: Option<&str>) -> Result<(), String>;
 
     /// 隐藏主窗口。
     fn hide_main_window(&self, reason: &str);

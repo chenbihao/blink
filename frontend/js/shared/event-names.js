@@ -28,6 +28,7 @@ export const EVENTS = Object.freeze({
     CHAT_SKILL_ACTIVATED: 'blink://chat-skill-activated',
     CHAT_CONTEXT_STATUS: 'blink://chat-context-status',
     CHAT_TITLE_UPDATED: 'blink://chat-title-updated',
+    CHAT_PREFILL: 'blink://chat-prefill',
 
     // ── 语音 ──
     VOICE_RECORDING_START: 'blink://voice-recording-start',

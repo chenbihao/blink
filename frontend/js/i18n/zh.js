@@ -860,6 +860,7 @@ export const zh = {
     "statusbar.paging": "{{key:PageUp}}{{key:PageDown}} 翻页 · {page}/{pageCount}",
     "statusbar.autosuggest_accept": "按 {key} 接受补全 → {target}",
     "statusbar.autosuggest_enter": "按 {key} 进入参数模式",
+    "statusbar.context_accept": "按 {key} {target}",
     "suggestion.origin.selection": "来自划词",
     "suggestion.origin.clipboard": "来自剪贴板",
 

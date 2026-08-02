@@ -63,26 +63,6 @@ Blink silently senses your context in the background, but never intrudes — use
 
 ---
 
-## Chord Enhancements
-
-<p align="center">
-  <img src="docs/images/feature-chord.gif" width="680" alt="Chord Mode"/>
-</p>
-
-While the main window is open, hold Alt and letter keys become quick action shortcuts. No need to memorize global hotkeys — just glance at the hints when you need them.
-
-| Combo | Action |
-|---|---|
-| `Alt + Q` | Open AI chat window for conversation |
-| `Alt + A` | Region screenshot → OCR / translate / pin / copy / save |
-| `Alt + C` | Clipboard history |
-| `Alt + Space` | Voice input (supports input in the main window or as a separate voice input method) |
-| `Alt + 1~9` | Quick launch item by position in results |
-
-Screenshots support annotation (rectangle, arrow, text, brush, blur, mosaic, etc.), OCR text recognition, on-image translation, and pin-to-top. Hold `Alt + Space` for voice input — supports cloud (OpenAI / Groq) and local (FunASR) dual engines, words appear as you speak with VAD auto-sentence-splitting.
-
----
-
 ## Plugin Ecosystem
 
 <p align="center">
@@ -99,16 +79,44 @@ Plugins run in isolated processes — crashes don't affect Blink's core. Support
 
 ---
 
-## AI Ready
+## Chord Enhancements
+
+screenshot:
+<p align="center">
+  <img src="docs/images/feature-chord-screenshot.gif" width="680" alt="Chord 模式"/>
+</p>
+
+AI:
+<p align="center">
+  <img src="docs/images/feature-chord-ai.gif" width="680" alt="Chord 模式"/>
+</p>
+
+other:
+<p align="center">
+  <img src="docs/images/feature-chord-other.gif" width="680" alt="Chord 模式"/>
+</p>
+
+
+
+While the main window is open, hold Alt and letter keys become quick action shortcuts. No need to memorize global hotkeys — just glance at the hints when you need them.
+
+| Combo | Action |
+|---|---|
+| `Alt + Q` | Open AI chat window for conversation |
+| `Alt + A` | Region screenshot → OCR / translate / pin / copy / save |
+| `Alt + C` | Clipboard history |
+| `Alt + Space` | Voice input (supports input in the main window or as a separate voice input method) |
+| `Alt + 1~9` | Quick launch item by position in results |
+
+Screenshots support annotation (rectangle, arrow, text, brush, blur, mosaic, etc.), OCR text recognition, on-image translation, and pin-to-top. Hold `Alt + Space` for voice input — supports cloud (OpenAI / Groq) and local (FunASR) dual engines, words appear as you speak with VAD auto-sentence-splitting.
+
+---
+
+## AI and VoiceInput Ready
 
 <p align="center">
   <img src="docs/images/feature-ai.gif" width="680" alt="AI Capabilities"/>
 </p>
-
-<p align="center">
-  <img src="docs/images/feature-ai-config.png" width="680" alt="AI 能力"/>
-</p>
-
 
 Every feature in Blink is wrapped as a standard Capability that can be called by AI:
 

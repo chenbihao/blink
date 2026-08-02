@@ -32,6 +32,8 @@ impl EventNames {
     pub const CHAT_SKILL_ACTIVATED: &str = "blink://chat-skill-activated";
     pub const CHAT_CONTEXT_STATUS: &str = "blink://chat-context-status";
     pub const CHAT_TITLE_UPDATED: &str = "blink://chat-title-updated";
+    /// 0.16.2：chord Alt+Q 带文本触发时，把初始文本推给 chat 窗口前端填充输入框。
+    pub const CHAT_PREFILL: &str = "blink://chat-prefill";
 
     // ── 语音 ──
     pub const VOICE_RECORDING_START: &str = "blink://voice-recording-start";
