@@ -1,6 +1,6 @@
 //! 长截图自动滚动速度反馈。纯函数，不负责注入滚轮或会话生命周期。
 
-const AUTO_UNCHANGED_LIMIT = 3;
+const AUTO_UNCHANGED_LIMIT = 5;
 
 function quantizeWheelMagnitude(value) {
   return Math.max(60, Math.min(240, Math.round(value / 30) * 30));
@@ -67,7 +67,11 @@ export async function runAutoScrollController(options) {
   while (isActive(generation, true)) {
     session._scrollCapturing = true;
     try {
-      await forwardWheel(positionCursor);
+      // SendInput 成功只表示事件已注入，不表示目标滚动容器消费了它。连续无变化时
+      // 先重新定位光标，再绕过 SendInput 直接向已识别的目标 HWND 发消息。
+      positionCursor = positionCursor || unchangedCount >= 1;
+      const forceMessage = unchangedCount >= 2;
+      await forwardWheel(positionCursor, forceMessage);
       positionCursor = false;
       const settled = await waitForSettle(generation, true);
       if (settled.aborted || !isActive(generation, true)) return;

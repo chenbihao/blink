@@ -7,6 +7,32 @@ const WHEEL_PASSTHROUGH_MS: u64 = 260;
 const MAX_WHEEL_PASSTHROUGH_MS: u64 = 500;
 const SCROLL_PROBE_MAX_W: u32 = 96;
 const SCROLL_PROBE_MAX_H: u32 = 64;
+const SCROLL_REPLAY_MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
+
+fn scroll_replay_export_path(
+    directory_name: &str,
+    file_name: &str,
+) -> Result<std::path::PathBuf, String> {
+    let valid_directory = directory_name.starts_with("blink-scroll-")
+        && directory_name.len() <= 96
+        && directory_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+    if !valid_directory {
+        return Err("回放目录名无效".into());
+    }
+    let valid_frame = file_name
+        .strip_prefix("frame-")
+        .and_then(|value| value.strip_suffix(".png"))
+        .is_some_and(|index| index.len() == 4 && index.bytes().all(|byte| byte.is_ascii_digit()));
+    if file_name != "manifest.json" && !valid_frame {
+        return Err("回放文件名无效".into());
+    }
+    Ok(crate::infra::utils::paths::logs_dir()
+        .join("scroll-replays")
+        .join(directory_name)
+        .join(file_name))
+}
 
 fn downsample_luma_bgra(pixels: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String> {
     if w == 0 || h == 0 {
@@ -159,6 +185,41 @@ pub async fn screenshot_save(
     finish_screenshot_session(&app);
     tracing::info!(path = %file_path, "截图已保存到文件");
     Ok(file_path)
+}
+
+/// 把显式开启的长截图诊断回放写入 `%APPDATA%\blink\logs\scroll-replays`。
+///
+/// 目录名和文件名只接受固定格式，前端不能借此写入日志目录之外的任意路径。
+/// manifest 最后写入；因此只有包含 manifest 的目录才是一段完整回放。
+#[tauri::command]
+pub async fn screenshot_save_replay_file(
+    directory_name: String,
+    file_name: String,
+    data: Vec<u8>,
+) -> Result<String, String> {
+    if data.is_empty() || data.len() > SCROLL_REPLAY_MAX_FILE_BYTES {
+        return Err(format!(
+            "回放文件大小无效: bytes={}, max={SCROLL_REPLAY_MAX_FILE_BYTES}",
+            data.len()
+        ));
+    }
+    let path = scroll_replay_export_path(&directory_name, &file_name)?;
+    let directory = path
+        .parent()
+        .ok_or_else(|| "无法解析回放目录".to_string())?
+        .to_path_buf();
+    let result_directory = directory.clone();
+    let is_manifest = file_name == "manifest.json";
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        std::fs::create_dir_all(&directory).map_err(|e| format!("创建回放目录失败: {e}"))?;
+        std::fs::write(&path, data).map_err(|e| format!("写入回放文件失败: {e}"))
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking join 失败: {e}"))??;
+    if is_manifest {
+        tracing::info!(directory = %result_directory.display(), "长截图诊断回放已导出");
+    }
+    Ok(result_directory.to_string_lossy().into_owned())
 }
 
 /// 0.11.7-d：隐藏钉图窗口（hide 而非 close，保留窗口实例供下次钉图复用）。
@@ -580,6 +641,7 @@ pub fn screenshot_forward_wheel(
     screen_y: i32,
     passthrough_ms: Option<u64>,
     position_cursor: Option<bool>,
+    force_message: Option<bool>,
 ) -> Result<(), String> {
     let hwnd_val = hwnd
         .filter(|value| *value != 0)
@@ -590,6 +652,10 @@ pub fn screenshot_forward_wheel(
     if position_cursor.unwrap_or(false) {
         unsafe { windows::Win32::UI::WindowsAndMessaging::SetCursorPos(screen_x, screen_y) }
             .map_err(|e| format!("定位自动滚动光标失败: {e}"))?;
+    }
+    if force_message.unwrap_or(false) {
+        tracing::debug!(hwnd = hwnd_val, delta, "自动滚动切换到窗口消息兜底");
+        return post_wheel_to_target(hwnd_val, delta, screen_x, screen_y);
     }
     if let Err(inject_error) = inject_wheel_through_overlay(&app, delta, passthrough_ms) {
         tracing::warn!(error = %inject_error, "真实滚轮注入失败，回退到窗口消息转发");
@@ -646,7 +712,7 @@ fn inject_wheel_through_overlay(
             tracing::warn!(%error, "恢复截图 overlay 鼠标交互失败");
         }
     });
-    tracing::debug!(delta, passthrough_ms, "已开启连续滚轮穿透");
+    // tracing::debug!(delta, passthrough_ms, "已开启连续滚轮穿透");
     Ok(())
 }
 
@@ -803,6 +869,21 @@ mod scroll_probe_tests {
             probe.len(),
             (SCROLL_PROBE_MAX_W * SCROLL_PROBE_MAX_H) as usize
         );
+    }
+
+    #[test]
+    fn replay_export_path_accepts_only_owned_file_shapes() {
+        let path = scroll_replay_export_path(
+            "blink-scroll-2026-08-02T10-20-30-000Z",
+            "frame-0042.png",
+        )
+        .unwrap();
+        assert!(path.ends_with(
+            "scroll-replays/blink-scroll-2026-08-02T10-20-30-000Z/frame-0042.png"
+        ));
+        assert!(scroll_replay_export_path("../escape", "manifest.json").is_err());
+        assert!(scroll_replay_export_path("blink-scroll-valid", "../blink.log").is_err());
+        assert!(scroll_replay_export_path("blink-scroll-valid", "frame-42.png").is_err());
     }
 }
 

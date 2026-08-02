@@ -119,12 +119,25 @@ const lostState = {
   lastFrame: documentFrame(900),
   currentTop: 900,
   trackingState: 'lost',
+  lostFrameCount: 7,
   pendingJump: null,
 };
 const pending = trackScrollFrame(lostState, documentFrame(400), { expectedDirection: -1 });
 assert.equal(pending.decision.reason, 'pending-confirmation');
 assert.equal(pending.decision.candidateTop, 400);
 assert.equal(pending.decision.accepted, false, '内容分区大跨度召回首帧不得直接推进坐标');
+const mismatchedConfirmation = trackScrollFrame(
+  { ...lostState, trackingState: 'tracking', pendingJump: pending.pendingJump },
+  documentFrame(500),
+  { expectedDirection: 0 },
+);
+assert.equal(mismatchedConfirmation.decision.accepted, false);
+assert.equal(mismatchedConfirmation.decision.reason, 'ambiguous');
+assert.equal(
+  mismatchedConfirmation.nextTop,
+  lostState.currentTop,
+  '确认帧通过另一条匹配路径得到不同位置时不得绕过 pending 门禁',
+);
 const confirmed = trackScrollFrame(
   { ...lostState, pendingJump: pending.pendingJump },
   documentFrame(400),

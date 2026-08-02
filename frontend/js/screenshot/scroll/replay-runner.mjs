@@ -1,4 +1,4 @@
-//! 用法：node replay-runner.mjs <blink-scroll-* 目录>
+//! 用法：node replay-runner.mjs <blink-scroll-* 目录> [--report-diff]
 
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -36,7 +36,7 @@ async function loadReplayModule() {
   return import(dataUrl(replaySource));
 }
 
-export async function replayExportedDirectory(directory) {
+export async function replayExportedDirectory(directory, options = {}) {
   const manifest = JSON.parse(await readFile(resolve(directory, 'manifest.json'), 'utf8'));
   if (manifest.format !== 'blink-scroll-replay' || manifest.version !== 1) {
     throw new Error('不支持的长截图回放 manifest');
@@ -53,18 +53,42 @@ export async function replayExportedDirectory(directory) {
   const { replayScrollSequence } = await loadReplayModule();
   const result = replayScrollSequence(sequence);
   const expected = manifest.frames.map((captured) => captured.expectedDecision);
-  assert.deepEqual(result.decisions, expected, '离线重放结果与录制时决策不一致');
-  return result;
+  if (!options.reportDiff) {
+    assert.deepEqual(result.decisions, expected, '离线重放结果与录制时决策不一致');
+  }
+  const mismatches = result.decisions.flatMap((actual, index) => {
+    const recorded = expected[index];
+    return JSON.stringify(actual) === JSON.stringify(recorded) ? [] : [{
+      index,
+      recorded: {
+        accepted: recorded?.accepted,
+        reason: recorded?.reason,
+        candidateTop: recorded?.candidateTop,
+        confidence: recorded?.confidence,
+      },
+      actual: {
+        accepted: actual?.accepted,
+        reason: actual?.reason,
+        candidateTop: actual?.candidateTop,
+        confidence: actual?.confidence,
+      },
+    }];
+  });
+  return { ...result, mismatches };
 }
 
 const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : '';
 if (import.meta.url === invokedPath) {
   const directory = process.argv[2];
   if (!directory) throw new Error('请传入 blink-scroll-* 回放目录');
-  const result = await replayExportedDirectory(directory);
+  const result = await replayExportedDirectory(directory, {
+    reportDiff: process.argv.includes('--report-diff'),
+  });
   console.log(JSON.stringify({
     frameCount: result.decisions.length,
     confirmedTop: result.confirmedTop,
+    mismatchCount: result.mismatches.length,
+    mismatches: result.mismatches,
     decisions: result.decisions.map((decision, index) => ({ index, ...decision })),
   }, null, 2));
 }

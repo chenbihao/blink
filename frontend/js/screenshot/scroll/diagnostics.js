@@ -1,6 +1,7 @@
 //! 长截图开发诊断与显式回放导出。默认关闭，不写日志、不持久化截图像素。
 
 import { SCROLL_DECISION_SCHEMA_VERSION } from './tracker.js';
+import { screenshotSaveReplayFile } from '../../shared/api.js';
 
 const MAX_REPLAY_FRAMES = 256;
 const MAX_REPLAY_BYTES = 256 * 1024 * 1024;
@@ -64,29 +65,17 @@ async function imageDataToPngBlob(image) {
   ));
 }
 
-async function writeFile(directory, name, data) {
-  const handle = await directory.getFileHandle(name, { create: true });
-  const writable = await handle.createWritable();
-  try {
-    await writable.write(data);
-  } finally {
-    await writable.close();
-  }
-}
-
-/** 只有开发者主动点击并选择本地目录后，才导出可能含敏感信息的帧。 */
+/** 只有开发者主动点击后，才把可能含敏感信息的帧写入 Blink 本地日志目录。 */
 export async function exportScrollReplay(session) {
   if (!scrollDiagnosticsEnabled()) throw new Error('长截图诊断未开启');
-  if (!window.showDirectoryPicker) throw new Error('当前 WebView 不支持目录选择');
   if (!session.scrollReplayFrames.length) throw new Error('当前没有可导出的采集帧');
-  const selectedDirectory = await window.showDirectoryPicker({ mode: 'readwrite' });
   const directoryName = `blink-scroll-${new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-')}`;
-  const directory = await selectedDirectory.getDirectoryHandle(directoryName, { create: true });
   const frames = [];
   for (let index = 0; index < session.scrollReplayFrames.length; index++) {
     const captured = session.scrollReplayFrames[index];
     const file = `frame-${String(index).padStart(4, '0')}.png`;
-    await writeFile(directory, file, await imageDataToPngBlob(captured.frame));
+    const png = new Uint8Array(await (await imageDataToPngBlob(captured.frame)).arrayBuffer());
+    await screenshotSaveReplayFile(directoryName, file, png);
     frames.push({
       file,
       capturedAtMs: captured.capturedAtMs,
@@ -103,8 +92,13 @@ export async function exportScrollReplay(session) {
     frameCount: frames.length,
     frames,
   };
-  await writeFile(directory, 'manifest.json', JSON.stringify(manifest, null, 2));
-  return frames.length;
+  const manifestBytes = new TextEncoder().encode(JSON.stringify(manifest, null, 2));
+  const directory = await screenshotSaveReplayFile(
+    directoryName,
+    'manifest.json',
+    manifestBytes,
+  );
+  return { count: frames.length, directory };
 }
 
 export function bindScrollDiagnostics(session, showHint) {
@@ -114,8 +108,8 @@ export function bindScrollDiagnostics(session, showHint) {
   button.dataset.bound = '1';
   button.addEventListener('click', async () => {
     try {
-      const count = await exportScrollReplay(session);
-      showHint?.(`已导出 ${count} 帧长截图回放`);
+      const result = await exportScrollReplay(session);
+      showHint?.(`已导出 ${result.count} 帧到日志目录 scroll-replays`);
     } catch (error) {
       if (error?.name !== 'AbortError') showHint?.(error?.message || '回放导出失败');
     }

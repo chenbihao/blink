@@ -127,6 +127,11 @@ export function screenshotSave(pngData, path) {
   return invoke("screenshot_save", { pngData, path });
 }
 
+/** 0.15.7-R4：把诊断回放文件写入 Blink 日志目录下的受控子目录。 */
+export function screenshotSaveReplayFile(directoryName, fileName, data) {
+  return invoke("screenshot_save_replay_file", { directoryName, fileName, data });
+}
+
 /** 0.11.7-f：通知后端标注模式状态。 */
 export function screenshotSetAnnotationMode(active) {
   return invoke("screenshot_set_annotation_mode", { active });
@@ -160,10 +165,11 @@ export function screenshotForwardWheel(
   screenY,
   passthroughMs = null,
   positionCursor = false,
+  forceMessage = false,
 ) {
   return invoke("screenshot_forward_wheel", {
-    hwnd, delta, screenX, screenY, passthroughMs, positionCursor,
-    });
+    hwnd, delta, screenX, screenY, passthroughMs, positionCursor, forceMessage,
+  });
 }
 
 /** 列出系统已安装的字体名称列表。 */

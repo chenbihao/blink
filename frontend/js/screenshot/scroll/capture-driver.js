@@ -128,7 +128,7 @@ async function pumpManualWheel(session) {
   }
 }
 
-export function forwardAutoWheel(session, positionCursor) {
+export function forwardAutoWheel(session, positionCursor, forceMessage = false) {
   return screenshotForwardWheel(
     session.scrollHwnd,
     session.autoWheelDelta,
@@ -136,5 +136,6 @@ export function forwardAutoWheel(session, positionCursor) {
     session.scrollTargetY,
     AUTO_WHEEL_PASSTHROUGH_MS,
     positionCursor,
+    forceMessage,
   );
 }

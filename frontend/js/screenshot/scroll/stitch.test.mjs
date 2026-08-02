@@ -16,6 +16,7 @@ globalThis.ImageData = class ImageData {
 };
 
 const {
+  commitTrackedFrame,
   compositePositionedFrames,
   createGrayFingerprint,
   createPositionedProbe,
@@ -30,6 +31,23 @@ const {
   'data:text/javascript;base64,'
   + Buffer.from(await readFile(new URL('./stitch.js', import.meta.url))).toString('base64')
 );
+
+function withFixedBlocks(frame) {
+  const result = new ImageData(new Uint8ClampedArray(frame.data), frame.width, frame.height);
+  for (const y of [0, 72]) {
+    for (let dy = 0; dy < 8; dy++) {
+      for (let x = 8; x < 16; x++) {
+        const index = ((y + dy) * result.width + x) * 4;
+        const bright = (x + dy) % 2 === 0 ? 250 : 20;
+        result.data[index] = bright;
+        result.data[index + 1] = 40;
+        result.data[index + 2] = 255 - bright;
+        result.data[index + 3] = 255;
+      }
+    }
+  }
+  return result;
+}
 
 function documentFrame(top, width = 36, height = 90) {
   const image = new ImageData(width, height);
@@ -287,6 +305,42 @@ assert.equal(
   ], 90)?.top,
   42,
   '同一位置的微小抖动候选应合并而不是误判为歧义',
+);
+
+const fixedPrevious = withFixedBlocks(documentFrame(0));
+const fixedCurrent = withFixedBlocks(documentFrame(20));
+const fixedCommit = commitTrackedFrame(
+  [{ image: fixedPrevious, top: 0 }],
+  fixedPrevious,
+  fixedCurrent,
+  {
+    decision: { accepted: true },
+    placement: { edge: 'bottom', startRow: 70, rowCount: 20, targetTop: 90 },
+    nextTop: 20,
+    match: { status: 'matched', shift: 20 },
+    relocalized: null,
+  },
+);
+assert.ok(fixedCommit.fixedTileCount >= 2, '应识别顶部和底部的视口固定块');
+const fixedComposite = compositePositionedFrames(fixedCommit.frames);
+assert.equal(fixedComposite.height, 110);
+const rgbAt = (image, x, y) => Array.from(
+  image.data.subarray((y * image.width + x) * 4, (y * image.width + x) * 4 + 3),
+);
+assert.deepEqual(
+  rgbAt(fixedComposite.image, 8, 20),
+  rgbAt(documentFrame(0), 8, 20),
+  '吸顶元素的新副本应由上一帧的真实文档像素擦除',
+);
+assert.deepEqual(
+  rgbAt(fixedComposite.image, 8, 72),
+  rgbAt(documentFrame(0), 8, 72),
+  '底部悬浮元素的旧副本应由新版重叠区覆盖',
+);
+assert.notDeepEqual(
+  rgbAt(fixedComposite.image, 8, 92),
+  rgbAt(documentFrame(20), 8, 72),
+  '最终视口只保留一个最新的底部悬浮元素',
 );
 
 console.log('scroll stitch tests passed');

@@ -49,7 +49,7 @@
 | **0.12** | [0.12-ai-ecosystem.md](./phases/0.12-ai-ecosystem.md) | AI 能力架构(对话窗口 + Alt+Q + DB 四层 + Provider 统一 + 多对话 + 分组) | ✅ |
 | **0.13** | [0.13-ai-capability-expansion.md](./phases/0.13-ai-capability-expansion.md) | 能力扩展(MCP 双向 + CLI + token 压缩 + 记忆 FTS5 + Skill) | ✅ |
 | **0.14** | [0.14-capability-protocol-refactor.md](./phases/0.14-capability-protocol-refactor.md) | 能力协议与架构收敛(Capability/Action 边界 + Cap 协议/投影 + 分层与工程债清理；0.14.7 收尾中) | 🚧 |
-| **0.15** | [0.15-screenshot-redesign.md](./phases/0.15-screenshot-redesign.md) | 截图体验重做（标注能力已完成；长截图可靠性与选区增强验收收尾中） | 🚧 |
+| **0.15** | [0.15-screenshot-redesign.md](./phases/0.15-screenshot-redesign.md) | 截图体验重做（标注工具 + 长截图闭环采集 + 窗口吸附与像素检查） | ✅ |
 | **0.16** | [0.16-clipboard-polish.md](./phases/0.16-clipboard-polish.md) | 剪贴板增强 + actions 数组 + 共享 Markdown + 通用编辑器基础 + 图片/pin + 杂项打磨 | 📋 规划中 |
 | **0.17** | [0.17-sticky-content-flow.md](./phases/0.17-sticky-content-flow.md) | 内容流转 + chord-E/chord-S + 可持久化桌面便签 + 便签管理与崩溃恢复 | 📋 规划中 |
 | **0.20** | [0.20-ai-vector-moat.md](./phases/0.20-ai-vector-moat.md) | 能力扩展向量版(zvec + 记忆向量召回 + RAG + AI 生成 Skill) | 📋 规划中 |
@@ -72,7 +72,7 @@
 | 0.12.x | AI 能力架构(对话窗口 + DB 四层 + 多对话 + 分组) | ✅ |
 | 0.13.x | 能力扩展(MCP 双向 + CLI + 记忆召回 + Skill) | ✅ |
 | 0.14.x | 能力协议重构(Capability/Action 边界 + Cap 协议分层 + 投影收敛) + 架构清理与工程债收敛 | 🚧 0.14.7 |
-| 0.15.x | 截图体验重做（标注能力已完成；0.15.7 长截图、0.15.8 选区增强收尾） | 🚧 0.15.7 / 0.15.8 |
+| 0.15.x | 截图体验重做（标注工具 + 长截图闭环采集 + 窗口吸附与像素检查） | ✅ |
 | 0.16.x | 剪贴板增强 + actions 数组 + 共享 Markdown + 通用编辑器基础 + 图片/pin + 杂项打磨 | 📋 规划中 |
 | 0.17.x | 内容流转 + chord-E/chord-S + 持久化桌面便签 + 管理与恢复 | 📋 规划中 |
 | 0.20.x | 能力扩展向量版(zvec + 记忆向量召回 + RAG) | 📋 规划中 |

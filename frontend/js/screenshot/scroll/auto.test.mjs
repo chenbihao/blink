@@ -38,6 +38,7 @@ assert.deepEqual(
 
 let active = true;
 let forwarded = 0;
+const forwardModes = [];
 let stopReason = null;
 await runAutoScrollController({
   generation: 1,
@@ -48,11 +49,19 @@ await runAutoScrollController({
   isActive: () => active,
   waitForSettle: async () => ({ stable: true }),
   captureFrame: async () => ({ moved: false, reason: 'unchanged' }),
-  forwardWheel: async () => { forwarded++; },
+  forwardWheel: async (positionCursor, forceMessage) => {
+    forwarded++;
+    forwardModes.push({ positionCursor, forceMessage });
+  },
   stop: async (reason) => { stopReason = reason; active = false; },
   delay: async () => {},
 });
-assert.equal(forwarded, 3, '连续三帧不变后应判定到底并停止注入滚轮');
+assert.equal(forwarded, 5, '分级重试五次后才判定到底并停止注入滚轮');
+assert.deepEqual(forwardModes.slice(0, 3), [
+  { positionCursor: true, forceMessage: false },
+  { positionCursor: true, forceMessage: false },
+  { positionCursor: true, forceMessage: true },
+]);
 assert.match(stopReason, /滚动到底/);
 
 active = true;

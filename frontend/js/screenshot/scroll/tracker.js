@@ -102,6 +102,21 @@ export function trackScrollFrame(state, frame, options = {}) {
   }
 
   const wasLost = state.trackingState === 'lost';
+  const lostFrameCount = Math.max(0, state.lostFrameCount ?? (wasLost ? 1 : 0));
+  const recoveryDistanceLimit = frame.height * 0.75 * Math.min(8, lostFrameCount + 1);
+  const rejectImplausibleRecovery = (candidate) => {
+    if (!candidate || Math.abs(candidate.top - state.currentTop) <= recoveryDistanceLimit) {
+      return candidate;
+    }
+    match = {
+      ...candidate.match,
+      status: 'no-match',
+      reason: 'recovery-distance',
+      shift: 0,
+      candidateShift: candidate.top - state.currentTop,
+    };
+    return null;
+  };
   let match = wasLost
     ? { status: 'no-match', shift: 0, score: Infinity, reason: 'tracking-lost' }
     : estimateVerticalShift(state.lastFrame, frame, {
@@ -122,6 +137,7 @@ export function trackScrollFrame(state, frame, options = {}) {
       expectedDirection,
       { trackingLost: wasLost },
     );
+    relocalized = rejectImplausibleRecovery(relocalized);
     if (relocalized) {
       match = relocalized.match;
       nextTop = relocalized.top;
@@ -135,6 +151,7 @@ export function trackScrollFrame(state, frame, options = {}) {
       expectedDirection,
       { trackingLost: wasLost },
     );
+    relocalized = rejectImplausibleRecovery(relocalized);
     if (relocalized) {
       match = relocalized.match;
       nextTop = relocalized.top;
@@ -163,20 +180,66 @@ export function trackScrollFrame(state, frame, options = {}) {
     confidence: matchConfidence(match, frame.height),
     motionTimedOut,
   };
-  const largeContentJump = relocalized?.scope === 'content'
-    && Math.abs(nextTop - state.currentTop) >= frame.height * 0.75;
-  const pendingTolerance = Math.max(8, frame.height * 0.35);
-  const pendingConfirmed = largeContentJump
-    && state.pendingJump?.source === 'content-partition'
+  // 重定位没有相邻帧的连续性兜底；低于此底线时二次看到同一张嵌套截图
+  // 也不能证明它是页面真实位置，因此直接拒绝而不是让重复内容“确认自己”。
+  if (relocalized && common.confidence < 0.35) {
+    return {
+      placement: null,
+      nextTop: state.currentTop,
+      match,
+      relocalized: null,
+      pendingJump: null,
+      decision: makeDecision({
+        ...common,
+        accepted: false,
+        reason: 'low-confidence',
+        positionDelta: 0,
+        appendRange: null,
+      }),
+    };
+  }
+  // 重复截图、嵌套浏览器画面等内容会产生“分数很好但位置完全错误”的单帧锚点。
+  // 对低置信匹配、较大跳转以及 lost 后的无方向重定位统一要求独立第二帧确认。
+  // 不能直接用 wheel 方向否决：tracking lost 时 currentTop 已经过期。
+  const positionDelta = Math.abs(nextTop - state.currentTop);
+  const riskyRelocalization = Boolean(relocalized) && (
+    common.confidence < 0.55
+    || positionDelta >= frame.height * 0.5
+    || (expectedDirection === 0 && positionDelta >= frame.height * 0.25)
+  );
+  const riskyAdjacentMatch = !relocalized && accepted && common.confidence < 0.42;
+  const requiresConfirmation = riskyRelocalization || riskyAdjacentMatch;
+  const pendingTolerance = Math.max(8, frame.height * 0.08);
+  const pendingConfirmed = accepted
+    && state.pendingJump
     && Math.abs(state.pendingJump.top - nextTop) <= pendingTolerance;
-  if (largeContentJump && !pendingConfirmed) {
+  // 一旦上一帧进入确认态，本帧不得换一条路径接受相距很远的候选。
+  // 否则 content 候选等待确认时，adjacent 匹配可以绕过门禁并直接写入错误位置。
+  if (accepted && state.pendingJump && !pendingConfirmed) {
+    return {
+      placement: null,
+      nextTop: state.currentTop,
+      match,
+      relocalized: null,
+      pendingJump: null,
+      decision: makeDecision({
+        ...common,
+        accepted: false,
+        reason: 'ambiguous',
+        positionDelta: 0,
+        appendRange: null,
+        confirmation: 'rejected',
+      }),
+    };
+  }
+  if (requiresConfirmation && !pendingConfirmed) {
     return {
       placement: null,
       nextTop: state.currentTop,
       match,
       relocalized: null,
       pendingJump: {
-        source: 'content-partition',
+        source,
         top: Math.round(nextTop),
         confidence: common.confidence,
       },

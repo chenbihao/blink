@@ -336,6 +336,8 @@ export const en = {
     // ── Screenshot config (0.11.10-b) ──
     "chord.screenshot.prewarm_ocr.label": "Prewarm OCR",
     "chord.screenshot.prewarm_ocr.hint": "Run OCR in the background right after selection so [Identify]/[Translate] respond instantly; turn off on battery",
+    "chord.screenshot.scroll_debug.label": "Long screenshot diagnostics",
+    "chord.screenshot.scroll_debug.hint": "Show matching diagnostics and retain replay frames for the current session; files are written to Blink logs only when exported",
 
     // ── AI panel (0.9.1 Phase 6) ──
     "tab.ai": "AI",

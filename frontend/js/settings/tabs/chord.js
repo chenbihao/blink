@@ -17,6 +17,9 @@
 import { invoke } from "../../shared/tauri.js";
 import { t, onLangChange } from "../../i18n/index.js";
 import { saveConfig } from "../../shared/config-keys.js";
+import {
+  readScrollDebugSetting, writeScrollDebugSetting,
+} from "./scroll-debug-setting.js";
 
 /**
  * 初始化 Chord 动作 Tab
@@ -63,10 +66,13 @@ async function loadChordActions() {
   try {
     const sc = await invoke("get_config_section", { key: "screenshot:config" });
     // 与后端 ScreenshotConfig 的 serde camelCase 对齐;字段缺失走默认
-    screenshotCfg = { prewarmOcr: sc?.prewarmOcr !== false };
+    screenshotCfg = {
+      prewarmOcr: sc?.prewarmOcr !== false,
+      scrollDebug: readScrollDebugSetting(),
+    };
   } catch (e) {
     console.warn("load screenshot config failed:", e);
-    screenshotCfg = { prewarmOcr: true };
+    screenshotCfg = { prewarmOcr: true, scrollDebug: readScrollDebugSetting() };
   }
 
   // Chord id → 副标题（不再用 emoji 图标，标题/副标题足够承载语义）
@@ -200,7 +206,7 @@ function renderClipboardDetail(cfg) {
  * 后续 0.11.10-i/j 的背景遮罩策略等也归到此区。
  */
 function renderScreenshotDetail(cfg) {
-  cfg = cfg || { prewarmOcr: true };
+  cfg = cfg || { prewarmOcr: true, scrollDebug: false };
   return `<div class="chord-screenshot-detail">
     <div class="chord-field">
       <label class="setting-label chord-field-label">${t("chord.screenshot.prewarm_ocr.label")}
@@ -208,6 +214,15 @@ function renderScreenshotDetail(cfg) {
       </label>
       <label class="switch switch-sm">
         <input type="checkbox" class="screenshot-field" data-field="prewarm_ocr" ${cfg.prewarmOcr !== false ? "checked" : ""} />
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div class="chord-field">
+      <label class="setting-label chord-field-label">${t("chord.screenshot.scroll_debug.label")}
+        <span class="field-hint-icon" title="${escapeAttr(t("chord.screenshot.scroll_debug.hint"))}">ⓘ</span>
+      </label>
+      <label class="switch switch-sm">
+        <input type="checkbox" class="screenshot-field" data-field="scroll_debug" ${cfg.scrollDebug === true ? "checked" : ""} />
         <span class="slider"></span>
       </label>
     </div>
@@ -454,6 +469,12 @@ async function saveClipboardDetail(container) {
 async function saveScreenshotDetail(container) {
   const detail = container.querySelector(".chord-screenshot-detail");
   if (!detail) return;
+  const scrollDebug = detail.querySelector('[data-field="scroll_debug"]')?.checked === true;
+  try {
+    writeScrollDebugSetting(scrollDebug);
+  } catch (e) {
+    console.error("save scroll debug setting failed:", e);
+  }
   try {
     const prewarmOcr = detail.querySelector('[data-field="prewarm_ocr"]')?.checked !== false;
     await saveConfig("screenshot_config", { prewarmOcr });

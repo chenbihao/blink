@@ -556,6 +556,135 @@ export function extractRows(frame, startRow, rowCount) {
   return new ImageData(new Uint8ClampedArray(data), frame.width, count);
 }
 
+function tileRgbSad(first, firstY, second, secondY, x, width, height) {
+  let total = 0;
+  let samples = 0;
+  for (let dy = 0; dy < height; dy++) {
+    for (let dx = 0; dx < width; dx++) {
+      const ai = ((firstY + dy) * first.width + x + dx) * 4;
+      const bi = ((secondY + dy) * second.width + x + dx) * 4;
+      total += Math.abs(first.data[ai] - second.data[bi]);
+      total += Math.abs(first.data[ai + 1] - second.data[bi + 1]);
+      total += Math.abs(first.data[ai + 2] - second.data[bi + 2]);
+      samples += 3;
+    }
+  }
+  return samples ? total / samples : Infinity;
+}
+
+function tileLumaRange(frame, y, x, width, height) {
+  let minimum = 255;
+  let maximum = 0;
+  for (let dy = 0; dy < height; dy++) {
+    for (let dx = 0; dx < width; dx++) {
+      const index = ((y + dy) * frame.width + x + dx) * 4;
+      const luma = frame.data[index] * 0.299
+        + frame.data[index + 1] * 0.587
+        + frame.data[index + 2] * 0.114;
+      minimum = Math.min(minimum, luma);
+      maximum = Math.max(maximum, luma);
+    }
+  }
+  return maximum - minimum;
+}
+
+/**
+ * 识别随视口固定的高细节小块。能从上一帧取到真实文档像素时，用它擦除本帧
+ * 的固定层；底部新露出的固定层暂时保留，下一帧刷新重叠区时会自然覆盖旧副本。
+ */
+export function suppressFixedViewportLayers(previous, current, shift, options = {}) {
+  if (!previous || !current || shift <= 0
+      || previous.width !== current.width || previous.height !== current.height) {
+    return { frame: current, fixedTileCount: 0 };
+  }
+  const tileSize = options.tileSize ?? 8;
+  const sameThreshold = options.sameThreshold ?? 1.5;
+  const alignedThreshold = options.alignedThreshold ?? 8;
+  const detailThreshold = options.detailThreshold ?? 12;
+  const result = new ImageData(new Uint8ClampedArray(current.data), current.width, current.height);
+  let fixedTileCount = 0;
+  for (let y = 0; y < current.height; y += tileSize) {
+    const tileHeight = Math.min(tileSize, current.height - y);
+    for (let x = 0; x < current.width; x += tileSize) {
+      const tileWidth = Math.min(tileSize, current.width - x);
+      if (tileLumaRange(current, y, x, tileWidth, tileHeight) < detailThreshold) continue;
+      const same = tileRgbSad(previous, y, current, y, x, tileWidth, tileHeight);
+      if (same > sameThreshold) continue;
+      const alignedY = y + shift;
+      const hasAlignedSource = alignedY + tileHeight <= previous.height;
+      if (hasAlignedSource) {
+        const aligned = tileRgbSad(previous, alignedY, current, y, x, tileWidth, tileHeight);
+        if (aligned < alignedThreshold || aligned < same * 3 + 4) continue;
+        const rowBytes = tileWidth * 4;
+        for (let dy = 0; dy < tileHeight; dy++) {
+          const sourceStart = ((alignedY + dy) * previous.width + x) * 4;
+          const targetStart = ((y + dy) * current.width + x) * 4;
+          result.data.set(previous.data.subarray(sourceStart, sourceStart + rowBytes), targetStart);
+        }
+      }
+      fixedTileCount++;
+    }
+  }
+  return { frame: result, fixedTileCount };
+}
+
+/** 用一个已确认的完整视口替换对应文档范围，并保留范围外的旧片段。 */
+export function replacePositionedViewport(frames, frame, top) {
+  const next = [];
+  const bottom = top + frame.height;
+  for (const item of frames || []) {
+    if (!item?.image) continue;
+    const itemBottom = item.top + item.image.height;
+    if (itemBottom <= top || item.top >= bottom) {
+      next.push(item);
+      continue;
+    }
+    if (item.top < top) {
+      const rows = extractRows(item.image, 0, top - item.top);
+      if (rows) next.push({ image: rows, top: item.top });
+    }
+    if (itemBottom > bottom) {
+      const rows = extractRows(item.image, bottom - item.top, itemBottom - bottom);
+      if (rows) next.push({ image: rows, top: bottom });
+    }
+  }
+  next.push({ image: frame, top });
+  return next.sort((a, b) => a.top - b.top);
+}
+
+/** 生产采集与离线回放共用的提交策略。 */
+export function commitTrackedFrame(frames, previousFrame, currentFrame, tracked) {
+  const placement = tracked?.placement;
+  if (!tracked?.decision?.accepted || !placement) {
+    return { frames, committedFrame: currentFrame, addedRows: 0, fixedTileCount: 0 };
+  }
+  const canRefresh = previousFrame
+    && !tracked.relocalized
+    && tracked.match?.status === 'matched'
+    && tracked.match.shift > 0;
+  if (canRefresh) {
+    const fixed = suppressFixedViewportLayers(previousFrame, currentFrame, tracked.match.shift);
+    if (fixed.fixedTileCount > 0) {
+      return {
+        frames: replacePositionedViewport(frames, fixed.frame, tracked.nextTop),
+        committedFrame: fixed.frame,
+        addedRows: placement.rowCount,
+        fixedTileCount: fixed.fixedTileCount,
+      };
+    }
+  }
+  if (placement.rowCount <= 0) {
+    return { frames, committedFrame: currentFrame, addedRows: 0, fixedTileCount: 0 };
+  }
+  const increment = extractRows(currentFrame, placement.startRow, placement.rowCount);
+  return {
+    frames: increment ? [...frames, { image: increment, top: placement.targetTop }] : frames,
+    committedFrame: currentFrame,
+    addedRows: increment?.height || 0,
+    fixedTileCount: 0,
+  };
+}
+
 /** 把“首帧 + 后续增量行”合成为完整长图。 */
 export function compositeVerticalSegments(segments) {
   if (!segments || segments.length === 0) return null;

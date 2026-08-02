@@ -624,6 +624,7 @@ fn main() {
             app::commands::screenshot_pin_hide,
             app::commands::screenshot_pin_transform,
             app::commands::screenshot_save,
+            app::commands::screenshot_save_replay_file,
             app::commands::screenshot_set_annotation_mode,
             app::commands::screenshot_window_list,
             app::commands::screenshot_set_capture_exclusion,

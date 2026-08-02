@@ -2,6 +2,7 @@
 
 import { ss } from '../ss-state.js';
 import { positionedFrameBounds } from './stitch.js';
+import { computePreviewPosition } from './preview-layout.js';
 
 const PREVIEW_W = 120;
 export const SCROLL_PREVIEW_GAP = 8;
@@ -26,14 +27,17 @@ export function positionPreview(rect) {
   if (!preview) return;
   preview.classList.remove('hidden');
   preview.style.transform = '';
-
-  if (ss.scrollDirection === 'vertical') {
-    preview.style.left = rect.x + rect.w + SCROLL_PREVIEW_GAP + 'px';
-    preview.style.top = rect.y + 'px';
-  } else {
-    preview.style.left = rect.x + 'px';
-    preview.style.top = rect.y + rect.h + SCROLL_PREVIEW_GAP + 'px';
-  }
+  const position = computePreviewPosition({
+    rect,
+    direction: ss.scrollDirection,
+    viewportWidth: window.innerWidth,
+    viewportHeight: window.innerHeight,
+    previewWidth: preview.width || PREVIEW_W,
+    previewHeight: preview.height || 200,
+    gap: SCROLL_PREVIEW_GAP,
+  });
+  preview.style.left = position.left + 'px';
+  preview.style.top = position.top + 'px';
   preview.style.right = '';
   preview.style.bottom = '';
 }
@@ -53,6 +57,8 @@ export function updatePreview() {
   canvas.width = PREVIEW_W;
   canvas.height = Math.min(previewH, 600);
   canvas.style.height = canvas.height + 'px';
+  // canvas 会随长图增长；每次按新高度重新避让屏幕边缘，不能沿用首帧 200px 的位置。
+  if (ss.scrollSourceRect) positionPreview(ss.scrollSourceRect);
 
   const locatorTop = (ss.scrollCurrentTop - bounds.top) * scale;
   const locatorH = ss.scrollBandH * scale;

@@ -29,7 +29,7 @@ import {
 } from '../../shared/api.js';
 import { findWindowForRect } from '../ss-hover.js';
 import {
-  compositePositionedFrames, extractRows,
+  commitTrackedFrame, compositePositionedFrames,
 } from './stitch.js';
 import { rememberScrollKeyframe as retainScrollKeyframe, trackScrollFrame } from './tracker.js';
 import { runAutoScrollController } from './auto.js';
@@ -81,7 +81,9 @@ export async function enterScrollCapture(rect) {
   session.scrollLastFrame = null;
   session.scrollKeyframes = [];
   session.scrollTrackingState = 'tracking';
+  session.scrollLostFrameCount = 0;
   session.scrollCurrentTop = 0;
+  session.scrollPendingJump = null;
   session.scrollPendingDirection = 0;
   session.scrollUnchangedCount = 0;
   session.scrollCapturePhase = 'capturing';
@@ -194,6 +196,7 @@ async function captureFrameOnce(expectedDirection = 0, generation = session.capt
       currentTop: session.scrollCurrentTop,
       trackingState: session.scrollTrackingState,
       pendingJump: session.scrollPendingJump,
+      lostFrameCount: session.scrollLostFrameCount,
     }, frame, {
       expectedDirection,
       motionTimedOut: metadata.settle?.timedOut === true,
@@ -202,7 +205,15 @@ async function captureFrameOnce(expectedDirection = 0, generation = session.capt
     session.scrollPendingJump = tracked.pendingJump;
     recordScrollDiagnostic(session, frame, decision, metadata);
     if (!decision.accepted) {
-      if (match.status === 'no-match') session.scrollTrackingState = 'lost';
+      const rejectedRecovery = decision.reason === 'low-confidence'
+        && decision.source !== 'adjacent';
+      if (match.status === 'no-match' || rejectedRecovery) {
+        session.scrollTrackingState = 'lost';
+      }
+      if (match.status === 'no-match' || rejectedRecovery
+          || decision.reason === 'pending-confirmation') {
+        session.scrollLostFrameCount = (session.scrollLostFrameCount || 0) + 1;
+      }
       session.scrollUnchangedCount++;
       updatePreview();
       console.debug('[scroll] frame ignored', {
@@ -216,18 +227,19 @@ async function captureFrameOnce(expectedDirection = 0, generation = session.capt
 
     const previousTop = session.scrollCurrentTop;
     session.scrollCurrentTop = tracked.nextTop;
-    let addedRows = 0;
-    if (placement.rowCount > 0) {
-      const increment = extractRows(frame, placement.startRow, placement.rowCount);
-      if (increment) {
-        session.scrollFrames.push({ image: increment, top: placement.targetTop });
-        addedRows = increment.height;
-      }
-    }
+    const committed = commitTrackedFrame(
+      session.scrollFrames,
+      session.scrollLastFrame,
+      frame,
+      tracked,
+    );
+    session.scrollFrames = committed.frames;
+    const addedRows = committed.addedRows;
     const extendsRange = addedRows > 0;
     session.scrollTrackingState = 'tracking';
+    session.scrollLostFrameCount = 0;
     session.scrollLastFrame = frame;
-    rememberScrollKeyframe(frame, session.scrollCurrentTop);
+    rememberScrollKeyframe(committed.committedFrame, session.scrollCurrentTop);
     session.scrollUnchangedCount = 0;
     updatePreview();
     console.debug('[scroll] movement captured', {
@@ -239,6 +251,7 @@ async function captureFrameOnce(expectedDirection = 0, generation = session.capt
       score: decision.bestScore,
       relocalized: relocalized?.scope || false,
       placement: placement.edge,
+      fixedTiles: committed.fixedTileCount,
     });
     return {
       appended: extendsRange,
@@ -509,7 +522,9 @@ export async function toggleAutoScroll() {
     isActive: captureStillActive,
     waitForSettle: (gen, requireAuto) => waitForVisualSettle(session, gen, requireAuto),
     captureFrame,
-    forwardWheel: (positionCursor) => forwardAutoWheel(session, positionCursor),
+    forwardWheel: (positionCursor, forceMessage) => (
+      forwardAutoWheel(session, positionCursor, forceMessage)
+    ),
     stop: stopAutoScroll,
     delay,
   });
