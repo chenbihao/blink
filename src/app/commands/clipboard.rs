@@ -90,12 +90,86 @@ pub async fn delete_clipboard_item(app: tauri::AppHandle, id: String) -> Result<
 pub async fn clear_clipboard_history(app: tauri::AppHandle) -> Result<(), String> {
     let pool = &app.state::<crate::infra::data::DbPools>().history;
     crate::infra::data::clipboard::clear_all(&pool).await;
+    crate::infra::data::vacuum(&pool).await; // 0.16.0: 收缩数据库文件
     Ok(())
 }
 
 /// 获取剪贴板统计信息。
 #[tauri::command]
 pub async fn get_clipboard_stats(app: tauri::AppHandle) -> serde_json::Value {
-    let pool = &app.state::<crate::infra::data::DbPools>().history;
-    crate::infra::data::clipboard::get_stats(&pool).await
+    let pools = app.state::<crate::infra::data::DbPools>();
+    let text_stats = crate::infra::data::clipboard::get_stats(&pools.history).await;
+    let image_stats = crate::infra::data::clipboard_images::get_image_stats(&pools.cache).await;
+    // 合并文本和图片统计
+    let mut stats = text_stats;
+    if let serde_json::Value::Object(ref mut map) = stats {
+        if let serde_json::Value::Object(img_map) = image_stats {
+            for (k, v) in img_map {
+                map.insert(k, v);
+            }
+        }
+    }
+    stats
+}
+
+/// 0.16.4：将剪贴板图片写回系统剪贴板。
+///
+/// 前端图片 item 的 action.runId = "copy_clipboard_image" 时调此命令。
+/// 从 cache 库 clipboard_images 表加载完整 PNG，通过 `write_png_to_clipboard` 写回。
+#[tauri::command]
+pub async fn copy_clipboard_image(app: tauri::AppHandle, image_id: String) -> Result<(), String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    let png_data = crate::infra::data::clipboard_images::get_png_by_id(&pools.cache, &image_id)
+        .await
+        .ok_or_else(|| format!("图片不存在: {image_id}"))?;
+
+    tracing::debug!(id = %image_id, bytes = png_data.len(), "copy_clipboard_image: 开始写入");
+
+    let bytes_len = png_data.len();
+    tokio::task::spawn_blocking(move || {
+        crate::infra::platform::clipboard::write_png_to_clipboard(&png_data)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking join 失败: {e}"))??;
+
+    tracing::info!(id = %image_id, bytes = bytes_len, "剪贴板图片已写回系统剪贴板");
+    Ok(())
+}
+
+/// 0.16.5：将剪贴板图片钉到桌面（pin 窗口）。
+///
+/// 前端图片 item 右键"钉图"调此命令。从 cache 库加载完整 PNG，
+/// 调 `show_pin_window` 创建/复用钉图窗口。位置居中于主显示器。
+#[tauri::command]
+pub async fn pin_clipboard_image(app: tauri::AppHandle, image_id: String) -> Result<(), String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    let png_data = crate::infra::data::clipboard_images::get_png_by_id(&pools.cache, &image_id)
+        .await
+        .ok_or_else(|| format!("图片不存在: {image_id}"))?;
+
+    // 解析图片尺寸用于定位（居中于主显示器工作区）
+    let (w, h) = crate::infra::platform::screenshot::parse_png_size(&png_data)
+        .map(|(pw, ph)| (pw as i32, ph as i32))
+        .unwrap_or((400, 300));
+
+    // 获取主显示器工作区，居中放置
+    let (screen_x, screen_y) = get_primary_monitor_center(w, h);
+
+    tracing::debug!(id = %image_id, w, h, screen_x, screen_y, "pin_clipboard_image");
+
+    crate::infra::platform::window::show_pin_window(&app, png_data, screen_x, screen_y)?;
+    tracing::info!(id = %image_id, "剪贴板图片已钉到桌面");
+    Ok(())
+}
+
+/// 获取主显示器工作区中心，让图片居中放置。
+fn get_primary_monitor_center(img_w: i32, img_h: i32) -> (i32, i32) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
+    };
+    let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
+    let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
+    let x = (screen_w - img_w) / 2;
+    let y = (screen_h - img_h) / 2;
+    (x.max(0), y.max(0))
 }

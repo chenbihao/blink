@@ -23,8 +23,12 @@ mod windows;
 
 pub(super) struct State {
     pool: SqlitePool,
+    /// cache 库——clipboard_images 表所在（0.16.4 图片历史）。
+    cache_pool: SqlitePool,
     blacklist: RwLock<Vec<String>>,
     max_items: u32,
+    /// 图片上限（0.16.4）。
+    max_image_items: u32,
 }
 
 static STATE: OnceLock<State> = OnceLock::new();
@@ -53,11 +57,13 @@ pub fn last_changed_at() -> Option<Instant> {
 
 /// 启动剪贴板监听（幂等）。监听线程持有 pool + cfg，WM_CLIPBOARDUPDATE 时存。
 /// 仿 selection：监听窗口一旦创建不卸，关闭态靠 ACTIVE 短路（跨线程卸载不安全）。
-pub fn start_listener(pool: SqlitePool, cfg: ClipboardConfig) {
+pub fn start_listener(pool: SqlitePool, cache_pool: SqlitePool, cfg: ClipboardConfig) {
     let _ = STATE.set(State {
         pool,
+        cache_pool,
         blacklist: RwLock::new(cfg.blacklist_keywords.clone()),
         max_items: cfg.max_items,
+        max_image_items: crate::infra::data::clipboard_images::DEFAULT_MAX_IMAGE_ITEMS,
     });
     ACTIVE.store(cfg.enabled, Ordering::Relaxed);
     #[cfg(target_os = "windows")]

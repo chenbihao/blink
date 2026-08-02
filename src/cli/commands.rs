@@ -141,6 +141,7 @@ fn run_search(handle: &tauri::AppHandle, query: &str, json: bool) -> i32 {
                 calc: Default::default(),
             },
             pools.history.clone(),
+            pools.cache.clone(),
         );
 
         // 找到 start_menu 引擎并搜索

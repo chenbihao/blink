@@ -208,3 +208,32 @@ export function translateLines(lines, targetLang) {
 export function frontendLog(level, message) {
   return invoke("frontend_log", { level, message }).catch(() => {});
 }
+
+// ── 0.16.3 内容编辑器 ──
+
+/** 打开内容编辑器窗口。payload 为 EditableContentPayload（camelCase）。 */
+export function openContentEditor(payload) {
+  return invoke("open_content_editor", { payload });
+}
+
+/** 前端 init 时拉取待编辑 payload（取出后清空）。 */
+export function getContentEditorPayload() {
+  return invoke("get_content_editor_payload");
+}
+
+/** 保存编辑后的内容。返回新记录 id。 */
+export function saveContentEditor(body, originRef) {
+  return invoke("save_content_editor", { body, originRef: originRef ?? null });
+}
+
+// ── 0.16.4-0.16.5 剪贴板图片 ──
+
+/** 0.16.4：将剪贴板图片写回系统剪贴板。imageId 为 clipboard_images 表 id。 */
+export function copyClipboardImage(imageId) {
+  return invoke("copy_clipboard_image", { imageId });
+}
+
+/** 0.16.5：将剪贴板图片钉到桌面（pin 窗口）。imageId 为 clipboard_images 表 id。 */
+export function pinClipboardImage(imageId) {
+  return invoke("pin_clipboard_image", { imageId });
+}

@@ -1477,14 +1477,7 @@
   margin-right: var(--space-xs, 6px);
 }
 
-.radio-inline {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2xs, 4px);
-  font-size: var(--text-sm, 13px);
-  color: var(--text-dim);
-  cursor: pointer;
-}
+/* 0.16.0: .radio-inline 已收编到 components/radio.css 的 .radio.radio-inline */
 
 /* ── AI 能力扩展 panel 共享样式 ─────────────────────────────────────────── */
 

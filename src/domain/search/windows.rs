@@ -28,7 +28,7 @@ pub fn scan_apps_folder() -> Vec<AppEntry> {
                 is_placeholder: false,
                 is_error: false,
                 source: "start_menu".to_string(),
-                action: super::Action::default(),
+                actions: vec![super::Action::default()],
                 ..Default::default()
             }
         })
@@ -90,7 +90,7 @@ fn scan_dir(dir: &PathBuf, entries: &mut Vec<AppEntry>, max_depth: u32, current_
                     is_placeholder: false,
                     is_error: false,
                     source: "start_menu".to_string(),
-                    action: super::Action::default(),
+                    actions: vec![super::Action::default()],
                     ..Default::default()
                 });
             }
@@ -150,7 +150,7 @@ pub fn parse_lnk_entry(lnk_path: &str) -> Option<AppEntry> {
         is_placeholder: false,
         is_error: false,
         source: "start_menu".to_string(),
-        action: super::Action::default(),
+        actions: vec![super::Action::default()],
         ..Default::default()
     })
 }

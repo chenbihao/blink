@@ -247,6 +247,19 @@ export const zh = {
     "storage.retry_migration.failed": "重试迁移失败：{err}",
     "storage.history_count": "{count} 条记录",
     "storage.loading": "加载中…",
+"storage.section.full_cleanup": "完整清理（卸载前）",
+"storage.cleanup.data_dir": "数据目录总量",
+"storage.cleanup.db": "数据库",
+"storage.cleanup.logs": "日志",
+"storage.cleanup.python": "Python/STT 环境",
+"storage.cleanup.skills": "Skills",
+"storage.cleanup.secrets": "API 密钥",
+"storage.cleanup.secret_count": "{count} 条",
+"storage.cleanup.all": "全部数据",
+"storage.cleanup.button": "一键清理",
+"storage.cleanup.confirm": "确定清理全部 Blink 数据？\n\n这将删除：\n• 数据库、配置、日志（%APPDATA%\\blink）\n• Python 环境与模型缓存\n• Skills\n• Credential Manager 中的 API 密钥\n\n此操作不可恢复，清理后需重启 Blink。",
+"storage.cleanup.failed": "清理失败：{err}",
+"storage.cleanup.summary": "成功 {success} 项，失败 {failed} 项",
 
     // ── 关于 Tab ──
     "about.version.label": "版本",
@@ -574,6 +587,7 @@ export const zh = {
     "ai.provider.delete": "删除",
     "ai.provider.delete.confirm": "确认删除供应商「{name}」？\n\n• 关联的 {models} 个模型配置将一并丢失\n• API Key 会从系统凭据管理器移除\n\n此操作不可撤销。",
     "ai.provider.edit": "编辑",
+    "ai.provider.enable_toggle": "启用/禁用供应商",
     "ai.provider.referenced": "此供应商被以下档位引用：{tiers}，删除后档位将回退",
     "ai.tiers.section": "档位指派 · 未指派档位自动降级到主档",
     "ai.tier.router": "路由档",
@@ -849,6 +863,8 @@ export const zh = {
     "menu.copyId": "复制应用 ID",
     "menu.resetHistory": "重置该项记录",
     "menu.copyResult": "复制结果",
+    "menu.edit": "编辑",
+"menu.pin": "钉图",
 
     // ── 主窗口：提示栏 ──
     "hint.open": "打开",
@@ -863,6 +879,20 @@ export const zh = {
     "statusbar.context_accept": "按 {key} {target}",
     "suggestion.origin.selection": "来自划词",
     "suggestion.origin.clipboard": "来自剪贴板",
+
+    // ── 内容编辑器（0.16.3）──
+    "editor.title.default": "编辑剪贴板内容",
+    "editor.mode.edit": "编辑",
+    "editor.mode.preview": "预览",
+    "editor.save": "保存",
+    "editor.cancel": "取消",
+    "editor.saved": "已保存",
+    "editor.saving": "保存中...",
+    "editor.placeholder": "输入或编辑内容...",
+    "editor.unsavedWarning": "有未保存的更改，确定要放弃吗？",
+    "editor.discard": "放弃更改",
+    "editor.continueEdit": "继续编辑",
+    "editor.saveFailed": "保存失败: {message}",
 
     // ── Toast / 通用 ──
     "toast.file_search_saved": "文件搜索配置已保存",

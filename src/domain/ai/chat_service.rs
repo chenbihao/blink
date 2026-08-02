@@ -319,7 +319,7 @@ impl ChatService {
 
         // 校验 provider/model 仍存在
         let config = ai_registry.config_snapshot();
-        let provider = config.providers.iter().find(|p| p.id == provider_id)?;
+        let provider = config.providers.iter().find(|p| p.id == provider_id && p.enabled)?;
         let model = provider.models.iter().find(|m| m.id == model_id)?;
         if !model
             .capabilities

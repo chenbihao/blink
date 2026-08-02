@@ -246,6 +246,19 @@ export const en = {
     "storage.retry_migration.failed": "Retry migration failed: {err}",
     "storage.history_count": "{count} records",
     "storage.loading": "Loading…",
+"storage.section.full_cleanup": "Full cleanup (before uninstall)",
+"storage.cleanup.data_dir": "Data directory total",
+"storage.cleanup.db": "Databases",
+"storage.cleanup.logs": "Logs",
+"storage.cleanup.python": "Python/STT environment",
+"storage.cleanup.skills": "Skills",
+"storage.cleanup.secrets": "API keys",
+"storage.cleanup.secret_count": "{count} entries",
+"storage.cleanup.all": "All data",
+"storage.cleanup.button": "Clean up all",
+"storage.cleanup.confirm": "Clean up all Blink data?\n\nThis will delete:\n• Databases, config, logs (%APPDATA%\\blink)\n• Python environment and model cache\n• Skills\n• API keys in Credential Manager\n\nThis cannot be undone. Blink must be restarted after cleanup.",
+"storage.cleanup.failed": "Cleanup failed: {err}",
+"storage.cleanup.summary": "{success} succeeded, {failed} failed",
 
     // ── About tab ──
     "about.version.label": "Version",
@@ -573,6 +586,7 @@ export const en = {
     "ai.provider.delete": "Delete",
     "ai.provider.delete.confirm": "Delete provider \"{name}\"?\n\n• {models} model config(s) will be lost\n• API Key will be removed from the system credential manager\n\nThis cannot be undone.",
     "ai.provider.edit": "Edit",
+    "ai.provider.enable_toggle": "Enable/disable provider",
     "ai.provider.referenced": "This provider is referenced by tiers: {tiers}. Deleting will roll back those tiers.",
     "ai.tiers.section": "Tier assignments · Unassigned tiers degrade to Main",
     "ai.tier.router": "Router",
@@ -848,6 +862,8 @@ export const en = {
     "menu.copyId": "Copy app ID",
     "menu.resetHistory": "Reset this item's history",
     "menu.copyResult": "Copy result",
+    "menu.edit": "Edit",
+"menu.pin": "Pin",
 
     // ── Main window: status bar ──
     "hint.open": "Open",
@@ -862,6 +878,20 @@ export const en = {
     "statusbar.context_accept": "Press {key} {target}",
     "suggestion.origin.selection": "from selection",
     "suggestion.origin.clipboard": "from clipboard",
+
+    // ── Content editor (0.16.3) ──
+    "editor.title.default": "Edit Clipboard Content",
+    "editor.mode.edit": "Edit",
+    "editor.mode.preview": "Preview",
+    "editor.save": "Save",
+    "editor.cancel": "Cancel",
+    "editor.saved": "Saved",
+    "editor.saving": "Saving...",
+    "editor.placeholder": "Type or edit content...",
+    "editor.unsavedWarning": "You have unsaved changes. Discard them?",
+    "editor.discard": "Discard",
+    "editor.continueEdit": "Keep Editing",
+    "editor.saveFailed": "Save failed: {message}",
 
     // ── Toast / common ──
     "toast.file_search_saved": "File search settings saved",

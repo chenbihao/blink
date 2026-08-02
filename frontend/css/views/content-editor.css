@@ -1,0 +1,309 @@
+/* content-editor view — 编辑器窗口布局与样式 */
+
+/* ── 根布局 ── */
+.editor-root {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* ── Titlebar ── */
+.editor-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 36px;
+  padding: 0 8px 0 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--surface-2);
+  user-select: none;
+  flex-shrink: 0;
+  -webkit-app-region: drag;
+}
+
+.editor-titlebar-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.editor-titlebar-btns {
+  display: flex;
+  gap: 2px;
+  -webkit-app-region: no-drag;
+}
+
+.editor-titlebar-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  color: var(--text-sub);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.editor-titlebar-btn:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.editor-titlebar-btn:active {
+  background: var(--text-faint);
+}
+
+.editor-titlebar-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+.editor-titlebar-btn-close:hover {
+  background: #e53935;
+  color: #fff;
+}
+
+/* ── Toolbar ── */
+.editor-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--surface-2);
+  flex-shrink: 0;
+  gap: 8px;
+}
+
+.editor-toolbar-left {
+  display: flex;
+  gap: 4px;
+}
+
+.editor-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.editor-mode-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border: 1px solid var(--overlay-0);
+  background: transparent;
+  color: var(--text-sub);
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: var(--radius-md);
+  transition: all var(--transition-fast);
+}
+
+.editor-mode-btn:hover {
+  border-color: var(--text-dim);
+  color: var(--text);
+}
+
+.editor-mode-btn.active {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+
+.editor-mode-btn .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.editor-status {
+  font-size: 11px;
+  color: var(--text-sub);
+  opacity: 0.7;
+}
+
+.editor-save-btn {
+  padding: 5px 16px;
+  border: none;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  border-radius: var(--radius-md);
+  transition: opacity var(--transition-fast);
+}
+
+.editor-save-btn:hover {
+  opacity: 0.85;
+}
+
+.editor-save-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.editor-cancel-btn {
+  padding: 5px 12px;
+  border: 1px solid var(--surface-2);
+  background: transparent;
+  color: var(--text-sub);
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: var(--radius-md);
+  transition: all var(--transition-fast);
+}
+
+.editor-cancel-btn:hover {
+  border-color: var(--text-dim);
+  color: var(--text);
+}
+
+/* ── 编辑区 ── */
+.editor-body {
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+}
+
+.editor-textarea {
+  width: 100%;
+  height: 100%;
+  padding: 16px 20px;
+  border: none;
+  outline: none;
+  resize: none;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Cascadia Code", "JetBrains Mono", "Consolas", "Microsoft YaHei", monospace;
+  font-size: 14px;
+  line-height: 1.6;
+  tab-size: 4;
+}
+
+.editor-textarea::placeholder {
+  color: var(--text-sub);
+  opacity: 0.5;
+}
+
+/* ── 预览区 ── */
+.editor-preview {
+  width: 100%;
+  height: 100%;
+  padding: 16px 20px;
+  overflow-y: auto;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+/* Markdown 渲染样式（复用 chat 窗口的 markdown-body 语义 class） */
+.editor-preview markdown-body,
+.editor-preview.markdown-body {
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.editor-preview h1,
+.editor-preview h2,
+.editor-preview h3 {
+  margin-top: 16px;
+  margin-bottom: 8px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.editor-preview h1 { font-size: 1.4em; }
+.editor-preview h2 { font-size: 1.25em; }
+.editor-preview h3 { font-size: 1.1em; }
+
+.editor-preview p {
+  margin: 8px 0;
+}
+
+.editor-preview ul,
+.editor-preview ol {
+  margin: 8px 0;
+  padding-left: 24px;
+}
+
+.editor-preview li {
+  margin: 4px 0;
+}
+
+.editor-preview code {
+  padding: 2px 6px;
+  background: var(--surface);
+  border-radius: var(--radius-sm);
+  font-family: "Cascadia Code", "JetBrains Mono", "Consolas", monospace;
+  font-size: 0.9em;
+  color: var(--accent);
+}
+
+.editor-preview pre {
+  padding: 12px 16px;
+  background: var(--surface);
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+  margin: 8px 0;
+}
+
+.editor-preview pre code {
+  padding: 0;
+  background: none;
+  color: var(--text);
+  font-size: 0.9em;
+}
+
+.editor-preview blockquote {
+  margin: 8px 0;
+  padding: 8px 16px;
+  border-left: 3px solid var(--accent);
+  background: var(--surface);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  color: var(--text-sub);
+}
+
+.editor-preview a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.editor-preview a:hover {
+  text-decoration: underline;
+}
+
+.editor-preview table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  width: 100%;
+}
+
+.editor-preview th,
+.editor-preview td {
+  border: 1px solid var(--surface-2);
+  padding: 6px 12px;
+  text-align: left;
+}
+
+.editor-preview th {
+  background: var(--surface);
+  font-weight: 600;
+}
+
+.editor-preview hr {
+  border: none;
+  border-top: 1px solid var(--surface-2);
+  margin: 12px 0;
+}

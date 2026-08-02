@@ -71,6 +71,31 @@ fn main() {
                 responder.respond(response);
             });
         })
+        // 自定义协议：http://blink-clipimg.localhost/<image-id>（0.16.4）——
+        // 按需懒加载剪贴板图片缩略图 PNG。前端 <img src> 直接引用。
+        .register_asynchronous_uri_scheme_protocol("blink-clipimg", |_ctx, request, responder| {
+            let raw = request.uri().path().trim_start_matches('/').to_string();
+            let image_id = percent_decode(&raw);
+            tauri::async_runtime::spawn(async move {
+                let thumb = crate::infra::data::clipboard_images::get_thumb_by_id_global(&image_id).await;
+                let response = match thumb {
+                    Some(bytes) => tauri::http::Response::builder()
+                        .status(200)
+                        .header("Content-Type", "image/png")
+                        .header("Cache-Control", "no-store")
+                        .body(bytes)
+                        .unwrap(),
+                    None => {
+                        tracing::debug!(id = %image_id, "blink-clipimg: 未找到缩略图，返回 404");
+                        tauri::http::Response::builder()
+                            .status(404)
+                            .body(Vec::new())
+                            .unwrap()
+                    }
+                };
+                responder.respond(response);
+            });
+        })
         // 自定义协议：http://blink-screenshot.localhost/capture（Windows 上 Tauri v2 会把
         // `blink-screenshot://` 重写成 `http://blink-screenshot.localhost/`，与 blink-icon 同）
         // —— 返回当前 SESSION 的 PNG bytes。
@@ -113,6 +138,9 @@ fn main() {
             // 初始化 DB 四层拆分（0.12.0 §2.2）——config/history/ai/cache 各独立 pool
             let pools = tauri::async_runtime::block_on(infra::data::pools::init_all())
                 .expect("failed to init db pools");
+
+            // 0.16.4：注册全局 cache pool（blink-clipimg 协议懒加载缩略图用）
+            infra::data::clipboard_images::set_pool(pools.cache.clone());
 
             // 初始化配置（配置库）
             let config_start = std::time::Instant::now();
@@ -270,7 +298,7 @@ fn main() {
             let search_service = std::sync::Arc::new(domain::search::SearchService::new(
                 domain_env.clone(),
                 pools.history.clone(),
-                domain::search::build_engines(engine_configs, pools.history.clone()),
+                domain::search::build_engines(engine_configs, pools.history.clone(), pools.cache.clone()),
                 plugin_engine.clone(),
                 router.clone(),
                 min_score_shared,
@@ -573,6 +601,9 @@ fn main() {
             // 持有服务列表,保证其生命周期与 app 一致。
             app.manage(services);
 
+            // 0.16.3：内容编辑器 payload 暂存（open → get 中转）
+            app.manage(app::commands::PendingEditorPayload::default());
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -642,6 +673,8 @@ fn main() {
             app::commands::open_data_folder,
             app::commands::retry_migration,
             app::commands::clear_cache_db,
+            app::commands::get_cleanup_info,
+            app::commands::cleanup_all_data,
             app::commands::get_app_info,
             app::commands::check_update,
             app::commands::resize_window,
@@ -676,6 +709,14 @@ fn main() {
             app::commands::delete_clipboard_item,
             app::commands::clear_clipboard_history,
             app::commands::get_clipboard_stats,
+            // 0.16.4 剪贴板图片
+            app::commands::copy_clipboard_image,
+            // 0.16.5 剪贴板图片 pin
+            app::commands::pin_clipboard_image,
+            // 0.16.3 内容编辑器
+            app::commands::open_content_editor,
+            app::commands::get_content_editor_payload,
+            app::commands::save_content_editor,
             app::commands::get_perf_overview,
             app::commands::get_perf_percentiles,
             app::commands::get_perf_slow_queries,

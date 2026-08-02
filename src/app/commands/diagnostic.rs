@@ -185,6 +185,8 @@ pub async fn clear_cache_db(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| format!("清空 performance_metrics 失败: {e}"))?;
     // 清空 icon_cache
     crate::infra::data::icon_cache::clear_all(&pools.cache).await;
+    // 0.16.0: VACUUM 收缩数据库文件
+    crate::infra::data::vacuum(&pools.cache).await;
     tracing::info!("缓存库已清空（performance_metrics + icon_cache）");
     Ok(())
 }
@@ -456,7 +458,9 @@ pub async fn export_perf_report(app: tauri::AppHandle) -> Result<Option<String>,
 #[tauri::command]
 pub async fn clear_perf_data(app: tauri::AppHandle) -> Result<u64, String> {
     let pool = &app.state::<crate::infra::data::DbPools>().cache;
-    crate::infra::data::perf::clear_all(&pool).await
+    let rows = crate::infra::data::perf::clear_all(&pool).await?;
+    crate::infra::data::vacuum(&pool).await; // 0.16.0: 收缩数据库文件
+    Ok(rows)
 }
 
 /// 0.13.6: CLI 能力识别——从 `--help` 输出生成 SKILL.md 模板。
@@ -516,4 +520,183 @@ pub(crate) fn dir_size_bytes(path: &std::path::Path) -> u64 {
 /// 字节 → MB（保留两位小数）。
 pub(crate) fn bytes_to_mb(bytes: u64) -> f64 {
     ((bytes as f64 / (1024.0 * 1024.0)) * 100.0).round() / 100.0
+}
+
+// ── 0.16.6 卸载清理能力 ──────────────────────────────────────────────────────
+
+/// 设置页-存储：获取完整清理信息（0.16.6）。
+///
+/// 探测 Blink 在系统中占用的全部数据，供用户在"一键清理"前确认范围：
+/// - 四库 SQLite 文件总大小
+/// - 日志目录大小
+/// - Python/STT 环境目录大小
+/// - Skills 目录大小
+/// - Credential Manager 中 `blink/*` 密钥条数
+#[tauri::command]
+pub async fn get_cleanup_info() -> serde_json::Value {
+    let data_dir = crate::infra::utils::paths::app_data_dir();
+
+    // 数据目录总大小
+    let data_dir_size = if data_dir.exists() {
+        dir_size_bytes(&data_dir)
+    } else {
+        0
+    };
+
+    // 四库文件大小
+    let db_files = ["blink_config.db", "blink_history.db", "blink_ai.db", "blink_cache.db"];
+    let db_total: u64 = db_files
+        .iter()
+        .map(|f| file_size(&data_dir.join(f)))
+        .sum();
+
+    // 日志目录
+    let logs_dir = crate::infra::utils::paths::logs_dir();
+    let logs_size = if logs_dir.exists() {
+        dir_size_bytes(&logs_dir)
+    } else {
+        0
+    };
+
+    // Python/STT 环境
+    let python_dir = crate::infra::utils::paths::python_dir();
+    let python_size = if python_dir.exists() {
+        dir_size_bytes(&python_dir)
+    } else {
+        0
+    };
+
+    // Skills 目录
+    let skills_dir = crate::infra::utils::paths::skills_global_dir();
+    let skills_size = if skills_dir.exists() {
+        dir_size_bytes(&skills_dir)
+    } else {
+        0
+    };
+
+    // Credential Manager 中 blink/* 密钥条数
+    #[cfg(target_os = "windows")]
+    let secret_count = {
+        match crate::infra::platform::secret::enumerate_blink_secrets() {
+            Ok(secrets) => secrets.len(),
+            Err(e) => {
+                tracing::warn!(error = %e, "get_cleanup_info: 枚举密钥失败");
+                0
+            }
+        }
+    };
+    #[cfg(not(target_os = "windows"))]
+    let secret_count = 0usize;
+
+    serde_json::json!({
+        "data_dir": data_dir.display().to_string(),
+        "data_dir_size_mb": bytes_to_mb(data_dir_size),
+        "db_total_mb": bytes_to_mb(db_total),
+        "logs_size_mb": bytes_to_mb(logs_size),
+        "python_size_mb": bytes_to_mb(python_size),
+        "skills_size_mb": bytes_to_mb(skills_size),
+        "secret_count": secret_count,
+    })
+}
+
+/// 设置页-存储：一键清理全部 Blink 数据（0.16.6）。
+///
+/// 清理范围：
+/// 1. 关闭 DB 连接池
+/// 2. 删除 `%APPDATA%\blink` 整个数据目录（含四库、日志、Python 环境、Skills 等）
+/// 3. 批量删除 Credential Manager 中 `blink/*` 密钥
+///
+/// **默认拒绝**——前端必须弹确认对话框（默认选否），用户明确点确认后才调用。
+/// 返回每个清理目标的 `Result`，前端按项展示成功/失败。
+#[tauri::command]
+pub async fn cleanup_all_data(app: tauri::AppHandle) -> serde_json::Value {
+    let mut results: Vec<(String, Result<(), String>)> = Vec::new();
+
+    // 1. 关闭 DB 连接池（释放文件占用，否则 remove_dir_all 会失败）
+    {
+        let pools = app.state::<crate::infra::data::DbPools>();
+        let db_names = ["config", "history", "ai", "cache"];
+        let pools_vec = vec![
+            pools.config.clone(),
+            pools.history.clone(),
+            pools.ai.clone(),
+            pools.cache.clone(),
+        ];
+        for (name, pool) in db_names.iter().zip(pools_vec.iter()) {
+            tracing::info!("cleanup_all_data: 关闭 {name} 库连接池");
+            pool.close().await;
+        }
+    }
+
+    // 2. 删除数据目录
+    let data_dir = crate::infra::utils::paths::app_data_dir();
+    if data_dir.exists() {
+        tracing::info!(path = %data_dir.display(), "cleanup_all_data: 删除数据目录");
+        match std::fs::remove_dir_all(&data_dir) {
+            Ok(()) => {
+                tracing::info!("cleanup_all_data: 数据目录已删除");
+                results.push(("数据目录".to_string(), Ok(())));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "cleanup_all_data: 删除数据目录失败");
+                results.push((
+                    "数据目录".to_string(),
+                    Err(format!("删除数据目录失败: {e}")),
+                ));
+            }
+        }
+    } else {
+        results.push(("数据目录".to_string(), Ok(()))); // 目录不存在视为成功
+    }
+
+    // 3. 清理 Credential Manager 中 blink/* 密钥
+    #[cfg(target_os = "windows")]
+    {
+        let delete_results = crate::infra::platform::secret::delete_all_blink_secrets();
+        let mut secret_ok = true;
+        let mut secret_errors = Vec::new();
+        for (target, result) in delete_results {
+            match result {
+                Ok(()) => {}
+                Err(e) => {
+                    secret_ok = false;
+                    secret_errors.push(format!("{target}: {e}"));
+                }
+            }
+        }
+        if secret_ok {
+            results.push(("密钥清理".to_string(), Ok(())));
+        } else {
+            results.push((
+                "密钥清理".to_string(),
+                Err(secret_errors.join("; ")),
+            ));
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        results.push(("密钥清理".to_string(), Ok(())));
+    }
+
+    // 汇总
+    let success_count = results.iter().filter(|(_, r)| r.is_ok()).count();
+    let failed_count = results.len() - success_count;
+
+    tracing::info!(
+        success_count,
+        failed_count,
+        "cleanup_all_data: 清理完成"
+    );
+
+    serde_json::json!({
+        "results": results.iter().map(|(target, result)| {
+            serde_json::json!({
+                "target": target,
+                "success": result.is_ok(),
+                "error": result.as_ref().err(),
+            })
+        }).collect::<Vec<_>>(),
+        "success_count": success_count,
+        "failed_count": failed_count,
+    })
 }

@@ -221,6 +221,8 @@
   flex: 1;
   overflow: hidden;
   justify-content: flex-start; /* 文本靠左 */
+  white-space: nowrap; /* 0.16.0: 强制单行，避免长模型名撑高 header */
+  text-overflow: ellipsis;
 }
 
 /* 触发器内的 badge（紧凑尺寸） */
@@ -238,7 +240,11 @@
 
 /* 模型名称 */
 .chat-model-name {
-  flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
 }
 
 .chat-model-caret {

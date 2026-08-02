@@ -728,6 +728,7 @@ mod tests {
                     custom_parameters: Vec::new(),
                     capabilities: vec![crate::domain::config::ai_config::ModelCapability::Stt],
                 }],
+                enabled: true,
                 created_at: 0,
             }],
             ..Default::default()
@@ -770,6 +771,7 @@ mod tests {
                     custom_parameters: Vec::new(),
                     capabilities: vec![crate::domain::config::ai_config::ModelCapability::Stt],
                 }],
+                enabled: true,
                 created_at: 0,
             }],
             ..Default::default()

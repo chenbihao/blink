@@ -1440,7 +1440,7 @@ fn emit_results(
             is_error: false,
             source: source.into(),
             description: None,
-            action: Action::default(),
+            actions: vec![],
             ..Default::default()
         }]
     } else {
@@ -1496,7 +1496,7 @@ fn placeholder_entry(plugin_id: &str, display_name: &str) -> AppEntry {
         is_error: false,
         source: plugin_id.to_string(),
         description: Some("请稍候".into()),
-        action: Action::default(),
+        actions: vec![],
         ..Default::default()
     }
 }
@@ -1521,7 +1521,7 @@ fn empty_arg_hint_entry(plugin_id: &str, display_name: &str, hint: String) -> Ap
         is_error: false,
         source: plugin_id.to_string(),
         description: Some(display_name.to_string()),
-        action: Action::default(),
+        actions: vec![],
         ..Default::default()
     }
 }
@@ -1554,7 +1554,7 @@ pub(crate) fn ai_placeholder_entry() -> AppEntry {
         // 占位状态**只保留一个信号源**——name 已足够表达"AI 在想",
         // 再叠一行 "请稍候" 是冗余。真结果时才用 description 承载"回车复制"提示。
         description: None,
-        action: Action::default(),
+        actions: vec![],
         ..Default::default()
     }
 }
@@ -1582,12 +1582,12 @@ pub(crate) fn ai_result_entry(text: String) -> AppEntry {
         is_error: false,
         source: AI_SOURCE.into(),
         description: Some("回车复制回答".into()),
-        action: Action {
+        actions: vec![Action {
             kind: ActionKind::Copy,
             payload: Some(text),
             hint: Some("复制回答".into()),
             ..Default::default()
-        },
+        }],
         is_ai_summary: true, // §3.1 AI 总结项——前端 pre-wrap 撑开 + 24px 徽章
         ..Default::default()
     }
@@ -1676,7 +1676,7 @@ fn emit_ai_clear(env: &dyn DomainEnv, seq: u64, error_msg: Option<&str>) {
             is_error: true,
             source: AI_SOURCE.into(),
             description: None,
-            action: Action::default(),
+            actions: vec![],
             ..Default::default()
         };
         if let Err(e) = crate::domain::event::emit_serialized(
@@ -1702,7 +1702,7 @@ fn emit_ai_clear(env: &dyn DomainEnv, seq: u64, error_msg: Option<&str>) {
             is_error: false,
             source: AI_SOURCE.into(),
             description: None,
-            action: Action::default(),
+            actions: vec![],
             ..Default::default()
         };
         if let Err(e) = crate::domain::event::emit_serialized(
@@ -1845,7 +1845,7 @@ fn capability_result_to_entries(result: &CapabilityResult) -> Vec<AppEntry> {
                 is_error: false,
                 source: AI_SOURCE.into(),
                 description: Some("AI 已获取数据".into()),
-                action: Action::default(),
+                actions: vec![],
                 ..Default::default()
             }]
         }
@@ -1861,7 +1861,7 @@ fn capability_result_to_entries(result: &CapabilityResult) -> Vec<AppEntry> {
                 is_error: false,
                 source: AI_SOURCE.into(),
                 description: Some("AI 已执行此能力".into()),
-                action: Action::default(),
+                actions: vec![],
                 ..Default::default()
             }]
         }
@@ -1930,91 +1930,102 @@ fn items_to_entries(items: &[crate::domain::capability::ItemResult]) -> Vec<AppE
                 })
             };
 
-            // 优先从 actions[0] 派生 action + lnk_path；否则 fallback 链
-            let (action, lnk_path) = if let Some(first) = item.actions.first() {
-                match first {
-                    ItemAction::OpenFile { pointer } => {
-                        let p = extract_pointer(pointer)
-                            .or(path.clone())
-                            .unwrap_or_default();
-                        (
-                            Action {
-                                kind: ActionKind::Open,
-                                ..Default::default()
-                            },
-                            p,
-                        )
-                    }
-                    ItemAction::OpenUrl { pointer } => {
-                        let u = extract_pointer(pointer)
-                            .or(url.clone())
-                            .or(path.clone())
-                            .unwrap_or_default();
-                        (
-                            Action {
-                                kind: ActionKind::Open,
-                                ..Default::default()
-                            },
-                            u,
-                        )
-                    }
-                    ItemAction::Reveal { pointer } => {
-                        let p = extract_pointer(pointer)
-                            .or(path.clone())
-                            .unwrap_or_default();
-                        (
-                            Action {
-                                kind: ActionKind::Run,
-                                run_id: Some("reveal_in_explorer".into()),
-                                run_arg: Some(serde_json::Value::String(p)),
-                                ..Default::default()
-                            },
-                            String::new(),
-                        )
-                    }
-                    ItemAction::Copy { pointer } => {
-                        let copy_text = extract_pointer(pointer)
-                            .or(text.clone())
-                            .unwrap_or_else(|| name.clone());
-                        (
-                            Action {
-                                kind: ActionKind::Copy,
-                                payload: Some(copy_text),
-                                ..Default::default()
-                            },
-                            String::new(),
-                        )
-                    }
-                }
+            // 0.16.1: 全量 actions 投影——遍历全部 ItemAction，不再只取首个压扁。
+            // lnk_path 从首个 action 派生（回车执行 actions[0] 时需要）。
+            let (actions, lnk_path) = if !item.actions.is_empty() {
+                let mapped: Vec<(Action, String)> = item
+                    .actions
+                    .iter()
+                    .map(|ia| match ia {
+                        ItemAction::OpenFile { pointer } => {
+                            let p = extract_pointer(pointer)
+                                .or(path.clone())
+                                .unwrap_or_default();
+                            (
+                                Action {
+                                    kind: ActionKind::Open,
+                                    ..Default::default()
+                                },
+                                p,
+                            )
+                        }
+                        ItemAction::OpenUrl { pointer } => {
+                            let u = extract_pointer(pointer)
+                                .or(url.clone())
+                                .or(path.clone())
+                                .unwrap_or_default();
+                            (
+                                Action {
+                                    kind: ActionKind::Open,
+                                    ..Default::default()
+                                },
+                                u,
+                            )
+                        }
+                        ItemAction::Reveal { pointer } => {
+                            let p = extract_pointer(pointer)
+                                .or(path.clone())
+                                .unwrap_or_default();
+                            (
+                                Action {
+                                    kind: ActionKind::Run,
+                                    run_id: Some("reveal_in_explorer".into()),
+                                    run_arg: Some(serde_json::Value::String(p)),
+                                    ..Default::default()
+                                },
+                                String::new(),
+                            )
+                        }
+                        ItemAction::Copy { pointer } => {
+                            let copy_text = extract_pointer(pointer)
+                                .or(text.clone())
+                                .unwrap_or_else(|| name.clone());
+                            (
+                                Action {
+                                    kind: ActionKind::Copy,
+                                    payload: Some(copy_text),
+                                    ..Default::default()
+                                },
+                                String::new(),
+                            )
+                        }
+                    })
+                    .collect();
+                let lnk = mapped
+                    .first()
+                    .map(|(_, p)| p.clone())
+                    .unwrap_or_default();
+                let acts: Vec<Action> = mapped.into_iter().map(|(a, _)| a).collect();
+                (acts, lnk)
             } else if let Some(p) = path.clone() {
                 (
-                    Action {
+                    vec![Action {
                         kind: ActionKind::Open,
                         ..Default::default()
-                    },
+                    }],
                     p,
                 )
             } else if let Some(t) = text.clone() {
                 (
-                    Action {
+                    vec![Action {
                         kind: ActionKind::Copy,
                         payload: Some(t),
                         ..Default::default()
-                    },
+                    }],
                     String::new(),
                 )
             } else {
                 // §8.2: 隐式 copy 兜底——无 actions + 纯标量 data（string/number）→ Copy
                 match &item.data {
                     serde_json::Value::String(_) | serde_json::Value::Number(_) => (
-                        Action {
+                        vec![Action {
                             kind: ActionKind::Copy,
                             payload: Some(name.clone()),
                             ..Default::default()
-                        },
+                        }],
                         String::new(),
                     ),
-                    _ => (Action::default(), String::new()),
+                    _ => (vec![], String::new()),
                 }
             };
 
@@ -2026,7 +2037,7 @@ fn items_to_entries(items: &[crate::domain::capability::ItemResult]) -> Vec<AppE
                 is_error: false,
                 source: AI_SOURCE.into(),
                 description: item.desc.clone(),
-                action,
+                actions,
                 is_ai_tool_result: true,
                 ..Default::default()
             }
@@ -2328,7 +2339,7 @@ async fn execute_capability_for_turn1(
                 is_error: true,
                 source: AI_SOURCE.into(),
                 description: None,
-                action: Action::default(),
+                actions: vec![],
                 ..Default::default()
             };
             Some(ToolExecutionResult {
@@ -2802,7 +2813,7 @@ fn ai_progress_placeholder(text: String) -> AppEntry {
         is_error: false,
         source: AI_SOURCE.into(),
         description: None,
-        action: Action::default(),
+        actions: vec![],
         ..Default::default()
     }
 }
@@ -2859,7 +2870,7 @@ mod tests {
         assert_eq!(e.source, AI_SOURCE);
         assert!(e.is_placeholder);
         assert!(!e.name.is_empty(), "占位应显示提示文案");
-        assert_eq!(e.action.kind as u8, Action::default().kind as u8);
+        assert!(e.actions.is_empty(), "占位项不应有可执行动作");
         // placeholder score 中位:比真结果 0.7 低,比 -2.0 清标记高
         assert!(e.score > -1.0 && e.score < 0.7);
     }
@@ -2871,8 +2882,8 @@ mod tests {
         let e = ai_result_entry(text.clone());
         assert_eq!(e.source, AI_SOURCE);
         assert!(!e.is_placeholder);
-        assert!(matches!(e.action.kind, ActionKind::Copy));
-        assert_eq!(e.action.payload.as_deref(), Some(text.as_str()));
+        assert!(matches!(e.actions[0].kind, ActionKind::Copy));
+        assert_eq!(e.actions[0].payload.as_deref(), Some(text.as_str()));
         assert_eq!(e.name, text, "短文本 name 应完整");
     }
 
@@ -2883,7 +2894,7 @@ mod tests {
         let long = "a".repeat(500);
         let e = ai_result_entry(long.clone());
         assert_eq!(e.name, long, "name 应保留完整文本供前端多行渲染");
-        assert_eq!(e.action.payload.as_deref(), Some(long.as_str()));
+        assert_eq!(e.actions[0].payload.as_deref(), Some(long.as_str()));
     }
 
     #[test]
@@ -2926,7 +2937,7 @@ mod tests {
         assert!(!entries[0].is_placeholder);
         assert_eq!(entries[0].source, AI_SOURCE);
         // Text → Copy 动作（复用 ai_result_entry）
-        assert!(matches!(entries[0].action.kind, ActionKind::Copy));
+        assert!(matches!(entries[0].actions[0].kind, ActionKind::Copy));
     }
 
     #[test]
@@ -2955,7 +2966,7 @@ mod tests {
         // 第一项：有 path → Open 动作
         assert_eq!(entries[0].name, "report.pdf");
         assert_eq!(entries[0].lnk_path, "C:\\docs\\report.pdf");
-        assert!(matches!(entries[0].action.kind, ActionKind::Open));
+        assert!(matches!(entries[0].actions[0].kind, ActionKind::Open));
         // 第二项
         assert_eq!(entries[1].name, "notes.txt");
         assert_eq!(entries[1].lnk_path, "D:\\notes.txt");
@@ -2994,8 +3005,8 @@ mod tests {
     // ── 边界测试 ──────────────────────────────────────────────────────────
 
     #[test]
-    fn cap_items_without_path_uses_default_action() {
-        // Items 的 data 不含 path → lnk_path 空、action 走 Default（Open kind）
+    fn cap_items_without_path_is_display_only() {
+        // 0.16.1: Items 的 data 不含 path/text、actions 为空 → 纯展示项（actions=vec![]）
         use serde_json::json;
         let r = CapabilityResult::Items {
             items: vec![crate::domain::capability::ItemResult {
@@ -3007,9 +3018,7 @@ mod tests {
         let entries = capability_result_to_entries(&r);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].lnk_path, ""); // 无 path → 空 lnk_path
-        assert!(entries[0].action.payload.is_none()); // 无 payload
-        // Action::default() kind = Open，但 lnk_path 空 → 前端 open 空路径走 no-op
-        assert!(matches!(entries[0].action.kind, ActionKind::Open));
+        assert!(entries[0].actions.is_empty(), "无 actions + 非标量 data → 纯展示项");
     }
 
     #[test]

@@ -5,7 +5,7 @@
 
 import { queryEl, resultsEl } from "./dom.js";
 import { activateItem } from "./actions.js";
-import { openContainingFolder, openLnkTarget, resetItemHistory, runBuiltinAction, copyToClipboard, invoke, triggerChord, listChordActions } from "../shared/api.js";
+import { openContainingFolder, openLnkTarget, resetItemHistory, runBuiltinAction, copyToClipboard, openContentEditor, hideWindow, invoke, triggerChord, listChordActions, pinClipboardImage } from "../shared/api.js";
 import { retrigger } from "./search.js";
 import { t } from "../i18n/index.js";
 import { EVENTS } from "../shared/event-names.js";
@@ -159,14 +159,18 @@ function unifiedMenu() {
   };
 
   const hasSelection = queryEl && queryEl.selectionStart !== queryEl.selectionEnd;
+  const hasText = queryEl && queryEl.value && queryEl.value.length > 0;
   const items = [];
   if (hasSelection) {
     items.push({ label: t("menu.cut"), run: exec("cut") });
     items.push({ label: t("menu.copy"), run: exec("copy") });
   }
   items.push({ label: t("menu.paste"), run: paste });
-  items.push({ separator: true });
-  items.push({ label: t("menu.selectAll"), run: exec("selectAll") });
+  // 全选门控（0.16.0）：无文本时不显示全选——select all 空输入无意义
+  if (hasText) {
+    items.push({ separator: true });
+    items.push({ label: t("menu.selectAll"), run: exec("selectAll") });
+  }
 
   // Chord 快捷入口（tap 语义——截图/剪贴板等，排除 hold 语义的语音输入）
   if (cachedChordActions.length) {
@@ -188,15 +192,77 @@ function unifiedMenu() {
 
 // ── 结果项菜单 ──────────────────────────────────────────────────────────────
 
+/** action.kind → 默认菜单文案的 i18n key 映射。有 hint 时优先用 hint。 */
+const KIND_LABELS = {
+  copy: () => t("menu.copy"),
+  open: () => t("menu.open"),
+};
+
+/**
+ * 0.16.1: 右键菜单按 actions 数组组装。
+ * (a) 先展开 actions 全部动作（label 由 kind 派生，有 hint 用 hint）
+ * (b) 若 lnkPath 存在且为真实路径（首个 action 非 run），追加文件管理附加项
+ * (c) 0.16.0 止血分支删除，由 actions 派生取代
+ */
 function itemMenu(li) {
   const source = li.dataset.source || "";
   const lnkPath = li.dataset.lnkPath || "";
+  let actions = [];
+  try {
+    actions = JSON.parse(li.dataset.actions || "[]");
+  } catch (e) {
+    console.error("actions parse failed:", e);
+  }
+  const firstKind = actions[0]?.kind || "";
   // 内置动作（kind=run）不是真实文件路径，隐藏"打开文件夹/复制路径"等文件相关菜单
-  const isRealPath = lnkPath && li.dataset.actionKind !== "run";
+  const isRealPath = lnkPath && firstKind !== "run";
   const items = [];
 
-  items.push({ label: t("menu.open"), run: () => activateItem(readData(li)) });
+  // (a) 展开 actions 全部动作
+  for (const action of actions) {
+    const label = action.hint || (KIND_LABELS[action.kind]?.() ?? null);
+    if (!label) continue; // 无标签的动作（如无 hint 的 run）跳过
+    items.push({
+      label,
+      run: () => activateItem({ ...readData(li), actions: [action] }),
+    });
+  }
 
+  // 0.16.3：剪贴板项追加"编辑"动作
+  if (source === "clipboard") {
+    const firstAction = actions[0];
+    if (firstAction?.kind === "copy") {
+      items.push({ separator: true });
+      items.push({
+        label: t("menu.edit"),
+        run: () => {
+          openContentEditor({
+            body: firstAction.payload || "",
+            format: "plain",
+            origin: "clipboard",
+            originRef: firstAction.hitId || null,
+            savePolicy: "clipboard_new",
+          }).catch((e) => console.error("openContentEditor failed:", e));
+          hideWindow();
+        },
+      });
+    }
+    // 0.16.5：剪贴板图片项追加"钉图"动作
+    // 图片项的 lnkPath 存的是 image_id，调 pin_clipboard_image 后端命令
+    const isImage = li.dataset.isImage === "true";
+    if (isImage && lnkPath) {
+      items.push({ separator: true });
+      items.push({
+        label: t("menu.pin"),
+        run: () => {
+          pinClipboardImage(lnkPath).catch((e) => console.error("pinClipboardImage failed:", e));
+          hideWindow();
+        },
+      });
+    }
+  }
+
+  // (b) 文件管理附加项（不混入 capability actions，仍由前端按 lnkPath 追加）
   if (isRealPath && (source === "file" || source === "start_menu")) {
     const isShellPath = lnkPath.toLowerCase().startsWith("shell:");
     const fileName = lnkPath.split(/[\\/]/).pop() || lnkPath;
@@ -204,9 +270,9 @@ function itemMenu(li) {
     const dirPath = lnkPath.replace(/[\\/][^\\/]*$/, "");
     const isLnk = lnkPath.toLowerCase().endsWith(".lnk");
 
+    items.push({ separator: true });
     if (isShellPath) {
       // UWP/MSIX 应用：无文件路径，隐藏文件相关菜单项
-      items.push({ separator: true });
       items.push({ label: t("menu.copyId"), run: () => copyText(lnkPath) });
     } else {
       // 传统桌面应用：完整菜单
@@ -224,18 +290,6 @@ function itemMenu(li) {
     items.push({ label: t("menu.resetHistory"), run: () => { resetItemHistory(lnkPath).then(() => retrigger()).catch((e) => console.error(e)); }, danger: true });
   }
 
-  const isResultLike =
-    source === "calc" || li.classList.contains("calc-result") || source.startsWith("builtin.");
-  if (isResultLike) {
-    const result =
-      li.dataset.actionPayload ||
-      li.dataset.calcValue ||
-      li.querySelector(".item-name")?.textContent;
-    if (result) {
-      items.push({ label: t("menu.copyResult"), run: () => copyText(result) });
-    }
-  }
-
   return items;
 }
 
@@ -247,25 +301,18 @@ async function copyText(text) {
   }
 }
 
+/** 0.16.1: 从 <li> 读出激活所需数据，返回 actions 数组。 */
 function readData(li) {
-  const runArgRaw = li.dataset.actionRunArg;
-  let runArg = null;
-  if (runArgRaw != null) {
-    try {
-      runArg = JSON.parse(runArgRaw);
-    } catch (e) {
-      console.error("actionRunArg parse failed:", e, runArgRaw);
-    }
+  let actions = [];
+  try {
+    actions = JSON.parse(li.dataset.actions || "[]");
+  } catch (e) {
+    console.error("actions parse failed:", e);
   }
   return {
     lnkPath: li.dataset.lnkPath,
     calcValue: li.dataset.calcValue,
-    payload: li.dataset.actionPayload,
-    action: {
-      kind: li.dataset.actionKind,
-      hint: li.dataset.actionHint,
-      runId: li.dataset.actionRunId,
-      runArg,
-    },
+    isError: li.dataset.isError === "true",
+    actions,
   };
 }

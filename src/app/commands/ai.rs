@@ -490,6 +490,10 @@ pub fn get_chat_models(app: tauri::AppHandle) -> Vec<ChatModelOption> {
 
     let mut options = Vec::new();
     for provider in &config.providers {
+        // 0.16.0: 跳过禁用的 provider——不进入模型选择列表
+        if !provider.enabled {
+            continue;
+        }
         for model in &provider.models {
             // 只列 Chat 能力 + enabled 的模型
             if !model.enabled || !model.capabilities.contains(&ModelCapability::Chat) {

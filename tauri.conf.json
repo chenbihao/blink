@@ -36,6 +36,11 @@
     "active": true,
     "targets": "all",
     "icon": ["icons/icon.ico", "icons/icon.png"],
-    "resources": ["plugins/builtin/**/*"]
+    "resources": ["plugins/builtin/**/*"],
+    "windows": {
+      "nsis": {
+        "installerHooks": "nsis/uninstall-cleanup.nsh"
+      }
+    }
   }
 }

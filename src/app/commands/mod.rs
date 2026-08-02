@@ -6,6 +6,7 @@
 mod ai;
 mod clipboard;
 mod config;
+mod content_editor;
 mod diagnostic;
 mod mcp;
 mod plugin;
@@ -16,6 +17,7 @@ mod stt;
 pub use ai::*;
 pub use clipboard::*;
 pub use config::*;
+pub use content_editor::*;
 pub use diagnostic::*;
 pub use mcp::*;
 pub use plugin::*;

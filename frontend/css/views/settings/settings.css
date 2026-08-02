@@ -1707,3 +1707,43 @@ input.has-secret-hint::placeholder {
   word-break: break-all;
   line-height: var(--leading-tight);
 }
+
+/* ── 0.16.6 完整清理 ───────────────────────────────────────────────────────── */
+
+.cleanup-info-grid {
+  margin: 8px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--surface);
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised, var(--surface));
+}
+
+.cleanup-info-grid .setting-row {
+  margin: 4px 0;
+}
+
+.cleanup-info-grid .value {
+  margin-left: auto;
+  font-weight: var(--weight-medium);
+  color: var(--text-secondary);
+}
+
+.cleanup-results {
+  margin: 8px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--surface);
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised, var(--surface));
+}
+
+.cleanup-summary {
+  font-weight: var(--weight-medium);
+  margin-bottom: 6px;
+  color: var(--text-primary);
+}
+
+.cleanup-detail {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  line-height: var(--leading-relaxed);
+}

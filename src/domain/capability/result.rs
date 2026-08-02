@@ -232,7 +232,6 @@ pub struct ItemResult {
 ///
 /// `pointer` 为 None 时默认取 item 的主值（由 manifest 的 `item_pointer` 指定）。
 /// 主窗口交互约定：`actions[0]` = 回车行为，右键展开全部。
-#[allow(dead_code)] // ItemAction 变体由 ItemResult.actions 消费（主窗口前端渲染用，0.14.4 适配）
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ItemAction {

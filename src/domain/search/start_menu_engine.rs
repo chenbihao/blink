@@ -443,7 +443,7 @@ mod tests {
             is_error: false,
             source: String::new(),
             description: Some(lnk.into()),
-            action: Action::default(),
+            actions: vec![Action::default()],
             ..Default::default()
         }
     }

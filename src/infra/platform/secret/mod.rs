@@ -16,6 +16,9 @@
 //! 4. tracing/log/Debug 三通路都不能出现原文
 //! 5. serde 序列化 Provider 类型必须 `#[serde(skip)]` secret 字段
 //!
+//! **0.16.6 扩展**：新增 `enumerate_blink_secrets` / `delete_all_blink_secrets`，
+//! 支持卸载清理与设置页一键清理 `blink/*` 命名空间下的全部密钥。
+//!
 //! **纯逻辑抽出**：`build_target_name` / `format_masked` 是纯函数，跨平台单测覆盖；
 //! 平台相关 CM 调用走 `windows.rs`（尚未落地平台后端时,mod 层仍能编译/测试）。
 
@@ -27,7 +30,17 @@ mod windows;
 
 #[cfg(target_os = "windows")]
 #[allow(unused_imports)] // 0.9.1 Phase 2 定义,Phase 5 AI Provider dispatch 起消费
-pub use windows::{delete_secret, load_secret, save_secret};
+pub use windows::{delete_all_blink_secrets, delete_secret, enumerate_blink_secrets, load_secret, save_secret};
+
+/// 密钥元信息——枚举 CM 中 `blink/*` 条目时返回。
+///
+/// **不含密钥内容**，只有 target name（如 `"blink/openai/key1"`），
+/// 供设置页 / 卸载清理展示与确认。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SecretInfo {
+    /// CM TargetName，形如 `"blink/{provider_id}/{purpose}"`
+    pub target_name: String,
+}
 
 /// 内存中的密钥容器。**唯一**允许持有明文 Key 的类型。
 ///

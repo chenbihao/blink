@@ -203,6 +203,11 @@ pub struct ProviderEntry {
     #[serde(default)]
     pub models: Vec<ModelEntry>,
 
+    /// 是否启用（0.16.0）。默认 true——老配置缺字段时 serde 填充，零迁移成本。
+    /// 禁用的 Provider 不参与 tier resolve、不进入对话窗口模型选择列表。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
     /// UTC 时间戳(秒),用于设置页展示"添加于"。
     pub created_at: i64,
 }
@@ -600,7 +605,7 @@ impl AIConfig {
     /// **0.9.4:enabled=false 视同悬空**——用户在前端关掉 model 开关的语义就是
     /// "从可选池里剔除"。resolve_tier 上层看到 None 会 warn + 降级到下一档。
     fn find_provider_model(&self, a: &TierAssignment) -> Option<(&ProviderEntry, &ModelEntry)> {
-        let provider = self.providers.iter().find(|p| p.id == a.provider_id)?;
+        let provider = self.providers.iter().find(|p| p.id == a.provider_id && p.enabled)?;
         let model = provider
             .models
             .iter()
@@ -683,6 +688,7 @@ mod tests {
                 custom_parameters: Vec::new(),
                 capabilities: vec![ModelCapability::Chat],
             }],
+            enabled: true,
             created_at: 1_700_000_000,
         }
     }
@@ -867,6 +873,57 @@ mod tests {
             c.resolve_tier(Tier::Main).is_none(),
             "全禁用时应返回 None,SearchService fallback fuzzy"
         );
+    }
+
+    #[test]
+    fn resolve_tier_skips_disabled_provider() {
+        // 0.16.0: provider.enabled=false 时，resolve_tier 应跳过并降级
+        let c = AIConfig {
+            providers: vec![
+                {
+                    let mut p = sample_provider("p1", "gpt-4");
+                    p.enabled = false; // 禁用 p1
+                    p
+                },
+                sample_provider("p2", "claude"),
+            ],
+            tier_main: Some(TierAssignment {
+                provider_id: "p1".to_string(), // 指向禁用的 provider
+                model_id: "gpt-4".to_string(),
+            }),
+            ..Default::default()
+        };
+        // p1 被禁用 → tier_main 悬空 → 降级失败
+        assert!(
+            c.resolve_tier(Tier::Main).is_none(),
+            "禁用的 provider 应被跳过"
+        );
+        // 换一个指向 p2 的 tier
+        let c2 = AIConfig {
+            providers: vec![
+                {
+                    let mut p = sample_provider("p1", "gpt-4");
+                    p.enabled = false;
+                    p
+                },
+                sample_provider("p2", "claude"),
+            ],
+            tier_main: Some(TierAssignment {
+                provider_id: "p2".to_string(),
+                model_id: "claude".to_string(),
+            }),
+            ..Default::default()
+        };
+        let (_p, m, _) = c2.resolve_tier(Tier::Main).unwrap();
+        assert_eq!(m.id, "claude");
+    }
+
+    #[test]
+    fn provider_entry_default_enabled_is_true() {
+        // 0.16.0: 老配置缺 enabled 字段 → serde default 填 true
+        let json = r#"{"id":"p1","display_name":"P1","kind":"openai_compatible","secret_ref":"blink/p1/key","models":[],"created_at":0}"#;
+        let p: ProviderEntry = serde_json::from_str(json).unwrap();
+        assert!(p.enabled, "老配置缺 enabled 字段应默认 true");
     }
 
     #[test]

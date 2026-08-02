@@ -805,6 +805,58 @@ pub fn hide_chat_window(app: &AppHandle) {
     }
 }
 
+/// 显示内容编辑器窗口（0.16.3）。
+///
+/// 独立 Tauri 窗口，按需创建（不预热）。窗口关闭即销毁，不 prevent_close。
+/// 看门狗按 PID 判定，前台切到编辑器时主窗不会被误隐藏。
+/// payload 经 PendingEditorPayload State 中转，前端 init 时调 get_content_editor_payload 拉取。
+pub fn show_content_editor_window(app: &AppHandle) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    const LABEL: &str = "content-editor";
+    let is_new = app.get_webview_window(LABEL).is_none();
+
+    let win = if is_new {
+        WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("content-editor.html".into()))
+            .title("编辑内容")
+            .inner_size(720.0, 560.0)
+            .min_inner_size(400.0, 300.0)
+            .decorations(false)
+            .transparent(false)
+            .always_on_top(false)
+            .skip_taskbar(false)
+            .resizable(true)
+            .focused(true)
+            .visible(true)
+            .center()
+            .build()
+            .map_err(|e| {
+                tracing::warn!(error = %e, "content-editor window: 创建失败");
+                format!("创建编辑器窗口失败: {e}")
+            })?
+    } else {
+        // 复用已有窗口——前端需重新拉取 payload
+        let win = app.get_webview_window(LABEL).unwrap();
+        let _ = win.eval("window.__contentEditorReload && window.__contentEditorReload()");
+        win
+    };
+
+    // 系统菜单拦截 + 圆角（与 chat 窗口一致）
+    if let Ok(hwnd) = win.hwnd() {
+        let hwnd = HWND(hwnd.0 as _);
+        install_sysmenu_blocker(hwnd);
+        enable_rounded_corners(hwnd);
+    }
+
+    win.show().map_err(|e| format!("显示编辑器窗口失败: {e}"))?;
+    let _ = win.unminimize();
+    win.set_focus()
+        .map_err(|e| format!("聚焦编辑器窗口失败: {e}"))?;
+
+    tracing::info!("content-editor window: 已显示");
+    Ok(())
+}
+
 /// 显示语音录音 mini overlay（0.10 G2）。
 /// 独立 webview 窗口，不抢焦点（WS_EX_NOACTIVATE），显示在光标附近。
 /// 录音结束后由 voice::VoiceService::stop_recording 发 voice-recording-end → 前端隐藏。

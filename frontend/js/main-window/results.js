@@ -253,7 +253,7 @@ function itemKey(item) {
   if (item.lnk_path) return "open:" + item.lnk_path.toLowerCase();
   if (item.is_calc) return "calc:" + item.name;
   if (item.is_placeholder) return "placeholder:" + item.name;
-  return (item.action?.kind || "x") + ":" + item.name + ":" + (item.description || "");
+  return (item.actions?.[0]?.kind || "x") + ":" + item.name + ":" + (item.description || "");
 }
 
 /** 当前选中项（数据，从 allItems 全局索引取）的去重键；无则 null。 */
@@ -340,27 +340,19 @@ function createItem(app, i) {
   const li = document.createElement("li");
   li.dataset.lnkPath = app.lnk_path;
   li.dataset.source = app.source || "";
-  // 动作信息存入 dataset，激活与提示栏共用（action 由后端提供）
-  if (app.action) {
-    li.dataset.actionKind = app.action.kind;
-    if (app.action.hint) li.dataset.actionHint = app.action.hint;
-    if (app.action.payload != null) li.dataset.actionPayload = app.action.payload;
-    // 0.8.0 §1.3 内置动作：run_id / run_arg 走 Run kind
-    if (app.action.run_id) li.dataset.actionRunId = app.action.run_id;
-    if (app.action.run_arg != null) {
-      // arg 可能是任意 JSON——存字符串化后的形式，激活时 parse 回去
-      li.dataset.actionRunArg = JSON.stringify(app.action.run_arg);
-    }
-    // 0.8.5 §6.4：Copy 命中回写通道——ClipboardEngine 展开的历史条目带 hitId,
-    // actions.js 复制成功后调 record_clipboard_hit 频率加权。camelCase 与后端 rename 对齐。
-    if (app.action.hitId) li.dataset.actionHitId = app.action.hitId;
+  // 0.16.4：图片项标记（右键菜单钉图用）
+  if (app.is_image) {
+    li.dataset.isImage = "true";
   }
+  // 0.16.1: actions 数组整体存入 dataset（JSON），激活/提示栏/右键菜单共用
+  li.dataset.actions = JSON.stringify(app.actions || []);
   // 0.8.0 §1.3 智能感知：内置动作 + Run + 携带 Context 参数 → 加 .context-aware
   //   CSS 挂左侧强调条 + badge 显示"来自剪贴板 · <预览>"
+  const firstAction = app.actions?.[0];
   const isContextAware =
     app.source === "builtin" &&
-    app.action?.kind === "run" &&
-    app.action?.run_arg != null;
+    firstAction?.kind === "run" &&
+    firstAction?.run_arg != null;
   if (isContextAware) {
     li.classList.add("context-aware");
   }
@@ -434,7 +426,15 @@ function createItem(app, i) {
 
   // 图标：自定义协议按需懒加载（calc 无 lnk_path 不显示）。
   // Windows/WebView2 下 scheme 映射为 http://<scheme>.localhost/<path>
-  if (!app.is_calc && app.lnk_path) {
+  // 0.16.4：剪贴板图片项 is_image=true 时用 blink-clipimg 协议加载缩略图。
+  if (app.is_image && app.lnk_path) {
+    const img = document.createElement("img");
+    img.src = "http://blink-clipimg.localhost/" + encodeURIComponent(app.lnk_path);
+    img.className = "app-icon clip-thumb";
+    img.alt = app.name;
+    img.onerror = () => img.remove();
+    li.appendChild(img);
+  } else if (!app.is_calc && app.lnk_path) {
     const img = document.createElement("img");
     img.src = "http://blink-icon.localhost/" + encodeURIComponent(app.lnk_path);
     img.className = "app-icon";
@@ -458,8 +458,8 @@ function createItem(app, i) {
     // 智能感知候选（0.8.0 §1.3）：副行改成参数预览
     //   原 subtitle "用默认浏览器打开剪贴板中的 URL" 在用户复制了 URL 时反而冗余；
     //   直接展示会执行的目标（URL/路径）+ 左侧强调条 + monospace 字体，视觉更清晰。
-    if (isContextAware && typeof app.action?.run_arg === "string") {
-      const raw = app.action.run_arg;
+    if (isContextAware && typeof firstAction?.run_arg === "string") {
+      const raw = firstAction.run_arg;
       const preview = raw.replace(/\s+/g, " ").trim();
       desc.textContent = preview.length > 80 ? preview.slice(0, 80) + "…" : preview;
       desc.title = preview; // 悬浮看完整值
@@ -487,16 +487,13 @@ function createItem(app, i) {
   return li;
 }
 
-/** 从 <li> 读出激活/提示所需数据。 */
+/** 从 <li> 读出激活/提示所需数据。0.16.1: 返回 actions 数组，消费方取 actions[0]。 */
 function itemData(li) {
-  const runArgRaw = li.dataset.actionRunArg;
-  let runArg = null;
-  if (runArgRaw != null) {
-    try {
-      runArg = JSON.parse(runArgRaw);
-    } catch (e) {
-      console.error("actionRunArg parse failed:", e, runArgRaw);
-    }
+  let actions = [];
+  try {
+    actions = JSON.parse(li.dataset.actions || "[]");
+  } catch (e) {
+    console.error("actions parse failed:", e);
   }
   // AI 确认卡片数据
   let aiConfirm = null;
@@ -513,16 +510,9 @@ function itemData(li) {
   return {
     lnkPath: li.dataset.lnkPath,
     calcValue: li.dataset.calcValue,
-    payload: li.dataset.actionPayload,
     isError: li.dataset.isError === "true",
     aiConfirm,
-    action: {
-      kind: li.dataset.actionKind,
-      hint: li.dataset.actionHint,
-      runId: li.dataset.actionRunId,
-      runArg,
-      hitId: li.dataset.actionHitId, // 0.8.5 §6.4 Clipboard Copy 回写通道
-    },
+    actions,
   };
 }
 
@@ -549,7 +539,7 @@ export function showAiConfirm(payload) {
     isError: false,
     source: "ai",
     description: "Enter 确认执行 · Esc 取消",
-    action: { kind: "default" },
+    actions: [],
     // 确认卡片专用字段(不进后端,纯前端)
     _aiConfirm: {
       actionName: payload.action_name,
@@ -600,11 +590,11 @@ export function updateAiStream(payload) {
       isError: false,
       source: "ai",
       description: "回车复制回答",
-      action: {
+      actions: [{
         kind: "copy",
         payload: payload.accumulated,
         hint: "复制回答",
-      },
+      }],
     };
   } else {
     // 增量更新——只改 name,保持 placeholder 状态(前端样式靠 .is-loading 控制)

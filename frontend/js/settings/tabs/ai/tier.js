@@ -10,6 +10,8 @@ export function renderAITierSelects() {
   const providers = cfg.providers || [];
   const options = [`<option value="">${escapeHtml(t("ai.tier.unassigned"))}</option>`];
   providers.forEach((p) => {
+    // 0.16.0: 禁用的 provider 不进入 tier 下拉
+    if (p.enabled === false) return;
     (p.models || []).filter((m) => m.enabled !== false).forEach((m) => {
       const val = `${p.id}::${m.id}`;
       const label = `${p.display_name} / ${m.display_name || m.id}`;
@@ -33,7 +35,7 @@ export function renderAITierDegrade() {
   const isUsable = (a) => {
     if (!a) return false;
     const provider = (cfg.providers || []).find((p) => p.id === a.provider_id);
-    if (!provider) return false;
+    if (!provider || provider.enabled === false) return false;
     const model = (provider.models || []).find((m) => m.id === a.model_id);
     return !!model && model.enabled !== false;
   };
@@ -50,6 +52,9 @@ export function renderAITierDegrade() {
       const { provider, model } = findAssignmentDetail(assign);
       if (!provider || !model) {
         el.textContent = t("ai.tier.no_provider");
+        el.className = "ai-tier-degrade error";
+      } else if (provider.enabled === false) {
+        el.textContent = t("ai.tier.model_disabled_warn", { model: provider.display_name });
         el.className = "ai-tier-degrade error";
       } else if (model.enabled === false) {
         el.textContent = t("ai.tier.model_disabled_warn", { model: model.id });
@@ -91,11 +96,12 @@ export function renderAITierBanner() {
     if (!assign) return tier !== "main";
     const provider = (cfg.providers || []).find((p) => p.id === assign.provider_id);
     const model = provider && (provider.models || []).find((m) => m.id === assign.model_id);
-    return !provider || !model || model.enabled === false;
+    return !provider || provider.enabled === false || !model || model.enabled === false;
   });
   const mainAssign = cfg.tier_main;
   const mainMissing = !mainAssign || !(cfg.providers || []).some((p) =>
     p.id === mainAssign.provider_id &&
+    p.enabled !== false &&
     (p.models || []).some((m) => m.id === mainAssign.model_id && m.enabled !== false),
   );
   if (!hasIssue && !mainMissing) {

@@ -2,7 +2,7 @@
 //!
 //! 设计（见 phases/0.7-plugin-ecosystem-local-search.md §三）：
 //! - 默认关闭，用户手动启用后才生效
-//! - 去重（相同内容 10 秒内不重复记录）
+//! - 去重：10s 防连发 + 跨时段内容去重删旧留新（0.16.4）
 //! - SQLite 持久化存储，可配置保留天数
 //! - 敏感应用黑名单（密码管理器等）
 //!
@@ -123,8 +123,20 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
 }
 
 /// 保存剪贴板条目到数据库。
+///
+/// **去重语义**（0.16.4）：入库前按文本内容删除旧记录（删旧留新），
+/// 再 INSERT 新记录。保证跨时段重复复制同一文本只保留最新一条。
+/// 短窗口去重（10s 防连发）在监听器侧已处理，此处做跨时段内容去重。
 #[allow(dead_code)] // 预留给剪贴板监听器
 pub async fn save_item(pool: &SqlitePool, item: &ClipboardItem) -> Result<(), String> {
+    // 删旧留新：先按文本内容删除同内容旧记录
+    sqlx::query("DELETE FROM clipboard_history WHERE text = ?1 AND id != ?2")
+        .bind(&item.text)
+        .bind(&item.id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
     sqlx::query(
         "INSERT OR REPLACE INTO clipboard_history (id, text, preview, created_at, source_app, hit_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
     )
@@ -226,6 +238,26 @@ pub async fn search(pool: &SqlitePool, query: &str, limit: i64) -> Vec<Clipboard
         .take(limit as usize)
         .map(|(_, item)| item)
         .collect()
+}
+
+/// 按 id 查询单条剪贴板记录（0.16.3：编辑器保存时继承 hit_count 用）。
+pub async fn query_by_id(pool: &SqlitePool, id: &str) -> Option<ClipboardItem> {
+    sqlx::query_as::<_, (String, String, String, i64, Option<String>, u32)>(
+        "SELECT id, text, preview, created_at, source_app, hit_count FROM clipboard_history WHERE id = ?1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .map(|(id, text, preview, created_at, source_app, hit_count)| ClipboardItem {
+        id,
+        text,
+        preview,
+        created_at,
+        source_app,
+        hit_count,
+    })
 }
 
 /// 记录剪贴板命中（用户选择粘贴某条历史）。

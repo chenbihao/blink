@@ -736,8 +736,8 @@
               <!-- 导入模式（软链接/复制），默认复制 -->
               <div class="skill-import-field skill-import-mode-row">
                 <label class="setting-label">导入方式</label>
-                <label class="radio-inline"><input type="radio" name="skill-import-mode" value="copy" checked /> 复制</label>
-                <label class="radio-inline" title="创建符号链接（需 Windows 开发者模式）"><input type="radio" name="skill-import-mode" value="symlink" /> 软链接</label>
+<label class="radio radio-inline"><input type="radio" name="skill-import-mode" value="copy" checked /> <span class="radio-dot"></span><span class="label-text">复制</span></label>
+<label class="radio radio-inline" title="创建符号链接（需 Windows 开发者模式）"><input type="radio" name="skill-import-mode" value="symlink" /> <span class="radio-dot"></span><span class="label-text">软链接</span></label>
               </div>
 
               <div class="modal-actions">
@@ -1138,8 +1138,8 @@
               <div class="setting-row">
                 <label class="setting-label" data-i18n="voice.mode.label">STT 模式</label>
                 <div class="radio-group">
-                  <label class="radio"><input type="radio" name="voice-mode" id="voice-mode-cloud" value="cloud" checked /> <span data-i18n="voice.mode.cloud">云端</span></label>
-                  <label class="radio"><input type="radio" name="voice-mode" id="voice-mode-local" value="local" /> <span data-i18n="voice.mode.local">本地</span></label>
+                  <label class="radio"><input type="radio" name="voice-mode" id="voice-mode-cloud" value="cloud" checked /> <span class="radio-dot"></span><span class="label-text" data-i18n="voice.mode.cloud">云端</span></label>
+                  <label class="radio"><input type="radio" name="voice-mode" id="voice-mode-local" value="local" /> <span class="radio-dot"></span><span class="label-text" data-i18n="voice.mode.local">本地</span></label>
                 </div>
               </div>
             </div>
@@ -1625,6 +1625,40 @@
             <label class="setting-label" data-i18n="storage.audit.label">AI 调用记录</label>
             <button id="clear-ai-audit" class="btn-danger" data-i18n="storage.clear_audit">清空 AI 调用记录</button>
           </div>
+
+          <!-- 0.16.6 完整清理（卸载前清理） -->
+          <div class="section-label" data-i18n="storage.section.full_cleanup">完整清理（卸载前）</div>
+          <div id="cleanup-info-grid" class="cleanup-info-grid">
+            <div class="setting-row">
+              <span class="setting-label" data-i18n="storage.cleanup.data_dir">数据目录总量</span>
+              <span id="cleanup-data-dir-size" class="value">-</span>
+            </div>
+            <div class="setting-row">
+              <span class="setting-label" data-i18n="storage.cleanup.db">数据库</span>
+              <span id="cleanup-db-size" class="value">-</span>
+            </div>
+            <div class="setting-row">
+              <span class="setting-label" data-i18n="storage.cleanup.logs">日志</span>
+              <span id="cleanup-logs-size" class="value">-</span>
+            </div>
+            <div class="setting-row">
+              <span class="setting-label" data-i18n="storage.cleanup.python">Python/STT 环境</span>
+              <span id="cleanup-python-size" class="value">-</span>
+            </div>
+            <div class="setting-row">
+              <span class="setting-label" data-i18n="storage.cleanup.skills">Skills</span>
+              <span id="cleanup-skills-size" class="value">-</span>
+            </div>
+            <div class="setting-row">
+              <span class="setting-label" data-i18n="storage.cleanup.secrets">API 密钥</span>
+              <span id="cleanup-secret-count" class="value">-</span>
+            </div>
+          </div>
+          <div id="cleanup-results" class="cleanup-results" hidden></div>
+          <div class="setting-row">
+            <label class="setting-label" data-i18n="storage.cleanup.all">全部数据</label>
+            <button id="cleanup-all-data" class="btn-danger" data-i18n="storage.cleanup.button">一键清理</button>
+          </div>
         </div>
 
         <!-- 调试 -->
@@ -1657,9 +1691,9 @@
 
           <div class="setting-row">
             <label class="setting-label" data-i18n="log.ai_verbose.label">AI 对话完全打印日志<span class="field-hint-icon" data-i18n-title="log.ai_verbose.hint">ⓘ</span></label>
-            <label class="checkbox-wrap">
+            <label class="checkbox">
               <input type="checkbox" id="ai-verbose-log">
-              <span class="checkbox-custom"></span>
+              <span class="checkmark"></span>
             </label>
           </div>
 

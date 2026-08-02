@@ -39,7 +39,8 @@ export function init() {
 
 /**
  * 刷新提示栏。
- * @param {{action?: {kind: string, hint?: string}}|null} active 当前选中项
+ * 0.16.1: active.actions 数组，取 actions[0] 的 kind/hint 生成提示。
+ * @param {{actions?: Array<{kind: string, hint?: string}>}|null} active 当前选中项
  * @param {{page: number, pageCount: number}} paging 翻页信息
  */
 export function update(active, paging) {
@@ -129,7 +130,7 @@ function fillPrimary(primary, active, hasHint) {
     primary.appendChild(document.createTextNode(" · "));
     primary.appendChild(renderHint(t("hint.alt_number")));
     primary.appendChild(document.createTextNode(" · "));
-    const { template, params } = actionHint(active.action);
+    const { template, params } = actionHint(active.actions?.[0]);
     primary.appendChild(renderHint(template, params));
   }
 }

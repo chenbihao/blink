@@ -6,21 +6,7 @@
   gap: var(--space-lg, 16px);
 }
 
-#voice .radio {
-  display: flex;
-  align-items: center;
-  gap: var(--space-xs, 4px);
-  cursor: pointer;
-  font-size: var(--text-sm, 12px);
-  color: var(--text);
-}
-
-#voice .radio input[type="radio"] {
-  accent-color: var(--accent);
-  width: 14px;
-  height: 14px;
-  cursor: pointer;
-}
+/* 0.16.0: radio 组件样式已收编到 components/radio.css，此处不再覆写 */
 
 #voice .subsection-title {
   font-size: var(--text-base, 13px);

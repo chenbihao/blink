@@ -332,6 +332,7 @@ mod tests {
             base_url,
             secret_ref: "blink/test-provider-uuid/key".into(),
             models: Vec::new(),
+            enabled: true,
             created_at: 0,
         }
     }

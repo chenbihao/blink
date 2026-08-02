@@ -54,6 +54,14 @@
   flex-shrink: 0;
 }
 
+/* 0.16.4：剪贴板图片缩略图——比应用图标大一圈，object-fit 保持比例 */
+#results li .app-icon.clip-thumb {
+  width: 36px;
+  height: 36px;
+  object-fit: cover;
+  border-radius: var(--radius-sm, 4px);
+}
+
 /* 插件查询中占位动画 - 明确用户命令已被识别 */
 #results li.is-loading {
   color: var(--text-dim);

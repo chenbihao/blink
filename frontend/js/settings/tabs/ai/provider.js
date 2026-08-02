@@ -96,6 +96,10 @@ export function renderAIProviders() {
               <div class="ai-provider-meta">${escapeHtml(kindLabel)} · ${escapeHtml(modelSummary || "(no model)")}</div>
             </div>
             <span class="ai-provider-status ${statusCls}">${escapeHtml(statusText)}</span>
+<label class="switch switch-sm" title="${escapeAttr(t("ai.provider.enable_toggle"))}">
+  <input type="checkbox" class="ai-provider-toggle" data-provider-id="${escapeAttr(p.id)}" ${p.enabled !== false ? "checked" : ""} />
+  <span class="slider"></span>
+</label>
 <button class="ai-provider-edit" data-provider-id="${escapeAttr(p.id)}" title="${escapeAttr(t("ai.provider.edit"))}">${iconHTML("pencil")}</button>
 <button class="ai-provider-delete" data-provider-id="${escapeAttr(p.id)}" title="${escapeAttr(t("ai.provider.delete"))}">${iconHTML("x")}</button>
           </div>
@@ -110,7 +114,7 @@ export function renderAIProviders() {
   // accordion 展开/折叠
   container.querySelectorAll(".ai-provider-header").forEach((header) => {
     header.addEventListener("click", (e) => {
-      if (e.target.closest(".ai-provider-edit") || e.target.closest(".ai-provider-delete") || e.target.closest(".ai-provider-drag-handle")) return;
+      if (e.target.closest(".ai-provider-edit") || e.target.closest(".ai-provider-delete") || e.target.closest(".ai-provider-drag-handle") || e.target.closest(".ai-provider-toggle")) return;
       const card = header.closest(".ai-provider-card");
       const modelsDiv = card.querySelector(".ai-provider-models");
       const chevron = header.querySelector(".ai-provider-chevron");
@@ -136,6 +140,13 @@ export function renderAIProviders() {
       e.stopPropagation();
       const { providerId, modelId } = toggle.dataset;
       toggleModelEnabled(providerId, modelId, toggle.checked);
+    });
+  });
+  // 0.16.0: Provider 启用/禁用开关
+  container.querySelectorAll(".ai-provider-toggle").forEach((toggle) => {
+    toggle.addEventListener("change", (e) => {
+      e.stopPropagation();
+      toggleProviderEnabled(toggle.dataset.providerId, toggle.checked);
     });
   });
   container.querySelectorAll(".ai-model-delete").forEach((btn) => {
@@ -266,6 +277,20 @@ function toggleModelEnabled(providerId, modelId, enabled) {
       renderAITierBanner();
     })
     .catch((e) => console.error("[ai] toggle model enabled failed:", e));
+}
+
+// 0.16.0: Provider 启用/禁用
+function toggleProviderEnabled(providerId, enabled) {
+  const cfg = aiState.currentAIConfig;
+  const provider = (cfg.providers || []).find((p) => p.id === providerId);
+  if (!provider) return;
+  provider.enabled = enabled;
+  saveAIConfig()
+    .then(() => {
+      renderAITierSelects();
+      renderAITierBanner();
+    })
+    .catch((e) => console.error("[ai] toggle provider enabled failed:", e));
 }
 
 function guideAddModelForProvider(providerId) {
@@ -596,6 +621,7 @@ async function saveNewProvider({ kind, displayName, baseUrl, apiKey, errEl, sele
     display_name: displayName,
     base_url: baseUrl || null,
     models: newModels,
+    enabled: true, // 0.16.0: 新建 provider 默认启用
   };
   cfg.providers = [...(cfg.providers || []), newProvider];
   aiState.hasSecretMap.set(providerId, !!apiKey || kind === "ollama_http");

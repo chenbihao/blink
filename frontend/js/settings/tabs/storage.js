@@ -12,6 +12,7 @@ import { t, onLangChange } from "../../i18n/index.js";
  */
 export function initStorageTab() {
   loadStorageInfo();
+  loadCleanupInfo();
 
   document.getElementById("clear-history")?.addEventListener("click", async () => {
     const ok = await confirmDialog(t("storage.clear.confirm"), {
@@ -64,6 +65,30 @@ export function initStorageTab() {
     } catch (e) {
       console.error("retry_migration failed:", e);
       alert(t("storage.retry_migration.failed", { err: String(e) }));
+    }
+  });
+
+  // 0.16.6: 一键清理全部数据
+  document.getElementById("cleanup-all-data")?.addEventListener("click", async () => {
+    const ok = await confirmDialog(t("storage.cleanup.confirm"), {
+      title: t("common.confirm"),
+      kind: "danger",
+    });
+    if (!ok) return;
+
+    const btn = document.getElementById("cleanup-all-data");
+    if (btn) btn.disabled = true;
+
+    try {
+      const result = await invoke("cleanup_all_data");
+      renderCleanupResults(result);
+      // 清理后刷新清理信息（大部分数据应已清空）
+      await loadCleanupInfo();
+    } catch (e) {
+      console.error("cleanup_all_data failed:", e);
+      alert(t("storage.cleanup.failed", { err: String(e) }));
+    } finally {
+      if (btn) btn.disabled = false;
     }
   });
 }
@@ -152,6 +177,54 @@ function renderStorageInfo() {
 function setText(id, text) {
   const el = document.getElementById(id);
   if (el) el.textContent = text;
+}
+
+// ── 0.16.6 完整清理 ──────────────────────────────────────────────────────
+
+let _cachedCleanupInfo = null;
+
+async function loadCleanupInfo() {
+  try {
+    _cachedCleanupInfo = await invoke("get_cleanup_info");
+    renderCleanupInfo();
+  } catch (e) {
+    console.error("loadCleanupInfo failed:", e);
+  }
+}
+
+function renderCleanupInfo() {
+  if (!_cachedCleanupInfo) return;
+  const info = _cachedCleanupInfo;
+
+  setText("cleanup-data-dir-size", `${info.data_dir_size_mb?.toFixed(1) ?? "0"} MB`);
+  setText("cleanup-db-size", `${info.db_total_mb?.toFixed(1) ?? "0"} MB`);
+  setText("cleanup-logs-size", `${info.logs_size_mb?.toFixed(1) ?? "0"} MB`);
+  setText("cleanup-python-size", `${info.python_size_mb?.toFixed(1) ?? "0"} MB`);
+  setText("cleanup-skills-size", `${info.skills_size_mb?.toFixed(1) ?? "0"} MB`);
+  setText(
+    "cleanup-secret-count",
+    t("storage.cleanup.secret_count", { count: info.secret_count ?? 0 })
+  );
+}
+
+function renderCleanupResults(result) {
+  const el = document.getElementById("cleanup-results");
+  if (!el || !result) return;
+
+  const results = result.results || [];
+  const parts = results.map((r) => {
+    const icon = r.success ? "✅" : "❌";
+    const detail = r.success ? "" : ` (${r.error})`;
+    return `${icon} ${r.target}${detail}`;
+  });
+
+  const summary = t("storage.cleanup.summary", {
+    success: result.success_count ?? 0,
+    failed: result.failed_count ?? 0,
+  });
+
+  el.innerHTML = `<div class="cleanup-summary">${summary}</div><div class="cleanup-detail">${parts.join("<br>")}</div>`;
+  el.hidden = false;
 }
 
 // 语言切换时重新渲染文本（带参数的 i18n 需要手动重渲染）

@@ -302,7 +302,7 @@ impl Service for ClipboardService {
             tracing::info!("剪贴板监听器: cfg.enabled=false, 跳过启动");
             return Ok(());
         }
-        crate::infra::platform::clipboard::start_listener(ctx.pools.history.clone(), cfg);
+        crate::infra::platform::clipboard::start_listener(ctx.pools.history.clone(), ctx.pools.cache.clone(), cfg);
         Ok(())
     }
 }

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>编辑内容</title>
+  <link rel="stylesheet" href="css/entries/content-editor.css" />
+</head>
+<body>
+  <div class="editor-root">
+    <!-- Titlebar（无边框窗口自绘标题栏） -->
+    <div class="editor-titlebar" data-tauri-drag-region>
+      <span class="editor-titlebar-title" id="editor-title" data-tauri-drag-region>编辑内容</span>
+      <div class="editor-titlebar-btns">
+        <button class="editor-titlebar-btn" id="titlebar-minimize" title="最小化">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        </button>
+        <button class="editor-titlebar-btn" id="titlebar-maximize" title="最大化">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
+        </button>
+        <button class="editor-titlebar-btn editor-titlebar-btn-close" id="titlebar-close" title="关闭">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Toolbar -->
+    <div class="editor-toolbar">
+      <div class="editor-toolbar-left">
+        <button class="editor-mode-btn active" id="mode-edit" data-i18n-title="editor.mode.edit">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
+          <span data-i18n="editor.mode.edit">编辑</span>
+        </button>
+        <button class="editor-mode-btn" id="mode-preview" data-i18n-title="editor.mode.preview">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+          <span data-i18n="editor.mode.preview">预览</span>
+        </button>
+      </div>
+      <div class="editor-toolbar-right">
+        <span class="editor-status" id="editor-status"></span>
+        <button class="editor-save-btn" id="btn-save" data-i18n="editor.save">保存</button>
+        <button class="editor-cancel-btn" id="btn-cancel" data-i18n="editor.cancel">取消</button>
+      </div>
+    </div>
+
+    <!-- Editor body -->
+    <div class="editor-body">
+      <!-- 编辑区 -->
+      <textarea class="editor-textarea" id="editor-textarea" data-i18n-ph="editor.placeholder" placeholder="输入或编辑内容..." spellcheck="false"></textarea>
+      <!-- 预览区 -->
+      <div class="editor-preview markdown-body" id="editor-preview" hidden></div>
+    </div>
+  </div>
+
+  <!-- Vendor（Markdown 渲染依赖，通过 window.* 访问） -->
+  <script src="vendor/marked.min.js"></script>
+  <script src="vendor/purify.min.js"></script>
+  <script src="vendor/highlight.min.js"></script>
+
+  <!-- 入口 -->
+  <script type="module" src="js/content-editor/main.js"></script>
+</body>
+</html>

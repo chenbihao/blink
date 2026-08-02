@@ -145,14 +145,17 @@ impl AIProviderRegistry {
         let epoch = self.secret_epoch.load(Ordering::SeqCst);
 
         // 1. 目标 key 集合(HashSet——O(1) 查,retain 不退化成 O(n²))
+        //    0.16.0: 跳过 enabled=false 的 provider——不构造实例、不占池空间
         let fp_by_pid: HashMap<String, String> = config
             .providers
             .iter()
+            .filter(|p| p.enabled)
             .map(|p| (p.id.clone(), compute_provider_fingerprint(p, epoch)))
             .collect();
         let target_keys: HashSet<CacheKey> = config
             .providers
             .iter()
+            .filter(|p| p.enabled)
             .flat_map(|p| {
                 let fp = fp_by_pid.get(&p.id).cloned().unwrap_or_default();
                 p.models
@@ -168,6 +171,7 @@ impl AIProviderRegistry {
             config
                 .providers
                 .iter()
+                .filter(|p| p.enabled)
                 .flat_map(|p| p.models.iter().map(move |m| (p, m)))
                 .filter(|(p, m)| {
                     let fp = fp_by_pid.get(&p.id).cloned().unwrap_or_default();
@@ -327,7 +331,7 @@ impl AIProviderRegistry {
         model_id: &str,
     ) -> Option<(String, String)> {
         let config = self.config.read().expect("config lock poisoned");
-        let provider = config.providers.iter().find(|p| p.id == provider_id)?;
+        let provider = config.providers.iter().find(|p| p.id == provider_id && p.enabled)?;
         let model = provider
             .models
             .iter()
@@ -434,6 +438,7 @@ mod tests {
                             capabilities: vec![ModelCapability::Chat],
                         })
                         .collect(),
+                    enabled: true,
                     created_at: 0,
                 })
                 .collect(),

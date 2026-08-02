@@ -119,8 +119,11 @@ pub struct AppEntry {
     /// - AI 结果："ai"（AI_SOURCE）
     #[serde(default)]
     pub source: String,
-    /// 可执行动作（决定 Enter 行为 + 提示栏文案）。与 description 正交。
-    pub action: Action,
+    /// 可执行动作列表（决定 Enter 行为 + 右键菜单展开）。与 description 正交。
+    /// 回车执行 `actions[0]`，右键展开全部。空 vec = 纯展示项。
+    /// 0.16.1：从单值 `action: Action` 升级为数组，打通 capability 多 actions 全链路。
+    #[serde(default)]
+    pub actions: Vec<Action>,
     /// 分数构成详情（可选，debug 日志用，前端不显示）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score_detail: Option<String>,
@@ -133,6 +136,10 @@ pub struct AppEntry {
     /// 由 `items_to_entries` 投影工具结果时为 true。
     #[serde(default)]
     pub is_ai_tool_result: bool,
+    /// 剪贴板图片项标记（0.16.4）——source="clipboard" 且 is_image=true 时，
+    /// 前端渲染缩略图而非文本预览；lnk_path 存图片 id（`clipimg_xxx`）。
+    #[serde(default)]
+    pub is_image: bool,
     /// 环境自动填充标记（0.10.8 §11.2 方案 1）——空 query + Context-only 命中的候选。
     ///
     /// 前端 `chordEligible` 通过 `results.hasUserItems()`（过滤掉 context_aware=true
@@ -206,6 +213,7 @@ pub struct EngineConfigs {
 pub fn build_engines(
     configs: EngineConfigs,
     pool: sqlx::SqlitePool,
+    cache_pool: sqlx::SqlitePool,
 ) -> Vec<std::sync::Arc<dyn SearchEngine>> {
     let mut engines: Vec<std::sync::Arc<dyn SearchEngine>> = vec![
         // BuiltinEngine（始终启用，本体功能）
@@ -213,7 +221,7 @@ pub fn build_engines(
         // CalcEngine（可配置）
         std::sync::Arc::new(CalcEngine::with_config(configs.calc)),
         // ClipboardEngine（0.8.5 §6.4，keyword 剪贴板/clip 触发展开历史）
-        std::sync::Arc::new(ClipboardEngine::new(pool)),
+        std::sync::Arc::new(ClipboardEngine::new(pool, cache_pool)),
         // StartMenuEngine（可配置）
         std::sync::Arc::new(StartMenuEngine::with_config(configs.start_menu)),
     ];
@@ -332,7 +340,7 @@ mod tests {
             is_error: false,
             source: String::new(),
             description: Some(lnk.into()),
-            action: Action::default(),
+            actions: vec![Action::default()],
             ..Default::default()
         }
     }

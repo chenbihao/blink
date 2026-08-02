@@ -29,6 +29,9 @@ use sqlx::SqlitePool;
 
 use super::engine::{Lane, QueryContext, SearchAction, SearchEngine, SearchItem};
 use crate::infra::data::clipboard::{ClipboardItem, query_recent, search as search_history};
+use crate::infra::data::clipboard_images::{
+    ClipboardImageMeta, query_recent_images,
+};
 
 /// Engine id — 对应 `SearchEngine::id()` 与 `Route::EngineTakeover.engine_id`。
 pub const ENGINE_ID: &str = "clipboard";
@@ -48,6 +51,8 @@ const PREVIEW_MAX_CHARS: usize = 60;
 
 pub struct ClipboardEngine {
     pool: SqlitePool,
+    /// cache 库——clipboard_images 表所在（0.16.4 图片历史）。
+    cache_pool: SqlitePool,
     /// UI 语言快照,用于 subtitle 时间描述 zh/en 切换（0.8.5.1 §6.6）。
     /// 与 SearchService.language 联动:`SearchService::update_language` 转发到本 engine。
     language: Arc<RwLock<String>>,
@@ -57,9 +62,10 @@ pub struct ClipboardEngine {
 }
 
 impl ClipboardEngine {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub fn new(pool: SqlitePool, cache_pool: SqlitePool) -> Self {
         Self {
             pool,
+            cache_pool,
             language: Arc::new(RwLock::new("zh".to_string())),
             display_count: Arc::new(RwLock::new(DEFAULT_DISPLAY_COUNT)),
         }
@@ -111,17 +117,41 @@ impl SearchEngine for ClipboardEngine {
     async fn search(&self, query: &str, _ctx: &QueryContext<'_>) -> Vec<SearchItem> {
         let arg = query.trim();
         let limit = *self.display_count.read().unwrap() as i64;
-        let items = if arg.is_empty() {
+        let lang = self.language.read().unwrap().clone();
+
+        // 查文本历史
+        let text_items = if arg.is_empty() {
             query_recent(&self.pool, limit).await
         } else {
             search_history(&self.pool, arg, limit).await
         };
-        let lang = self.language.read().unwrap().clone();
 
-        items
+        // 查图片历史（0.16.4）——图片不做 fuzzy 搜索，空 arg 时拉最近
+        let image_items = if arg.is_empty() {
+            query_recent_images(&self.cache_pool, limit).await
+        } else {
+            // 图片无可搜索文本，空 arg 时才展示
+            Vec::new()
+        };
+
+        // 合并文本 + 图片，按 created_at 倒序
+        let mut combined: Vec<(i64, ClipboardEntry)> = Vec::new();
+        for item in text_items {
+            combined.push((item.created_at, ClipboardEntry::Text(item)));
+        }
+        for item in image_items {
+            combined.push((item.created_at, ClipboardEntry::Image(item)));
+        }
+        combined.sort_by(|a, b| b.0.cmp(&a.0));
+
+        combined
             .into_iter()
             .enumerate()
-            .map(|(i, item)| to_search_item(item, i, &lang))
+            .map(|(i, (_, entry))| match entry {
+                ClipboardEntry::Text(item) => to_search_item(item, i, &lang),
+                ClipboardEntry::Image(meta) => to_image_search_item(meta, i, &lang),
+            })
+            .take(limit as usize)
             .collect()
     }
 }
@@ -149,6 +179,89 @@ fn to_search_item(item: ClipboardItem, index: usize, lang: &str) -> SearchItem {
         source: "clipboard".into(),
         score_detail: Some(format!("clip=0.9-{:.2}", index as f32 * 0.02)),
         context_aware: false,
+    }
+}
+
+/// 文本/图片条目的统一容器（合并排序用）。
+enum ClipboardEntry {
+    Text(ClipboardItem),
+    Image(ClipboardImageMeta),
+}
+
+/// ClipboardImageMeta → SearchItem（0.16.4）。
+///
+/// - `title` = "图片 {W}x{H} ({source_app或"未知"})"
+/// - `subtitle` 时间描述
+/// - `action` = `RunAction { id: "copy_clipboard_image", arg: image_id }`
+///   前端 actions.js 识别此 id，调 `copy_clipboard_image` 后端命令写回系统剪贴板
+/// - `source` = "clipboard"（与文本项同 source，前端白名单已含）
+fn to_image_search_item(meta: ClipboardImageMeta, index: usize, lang: &str) -> SearchItem {
+    let is_zh = lang == "zh";
+    let source_desc = meta
+        .source_app
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(if is_zh { "未知" } else { "unknown" });
+    let title = if is_zh {
+        format!("图片 {}x{} ({})", meta.width, meta.height, source_desc)
+    } else {
+        format!("Image {}x{} ({})", meta.width, meta.height, source_desc)
+    };
+    let subtitle = format_image_subtitle(&meta, lang);
+    let score = (0.9 - index as f32 * 0.02).max(0.5);
+
+    SearchItem {
+        id: format!("clipboard:{}", meta.id),
+        title,
+        subtitle: Some(subtitle),
+        score,
+        action: SearchAction::RunAction {
+            id: "copy_clipboard_image".into(),
+            arg: Some(serde_json::Value::String(meta.id.clone())),
+        },
+        source: "clipboard".into(),
+        score_detail: Some(format!("clipimg=0.9-{:.2}", index as f32 * 0.02)),
+        context_aware: false,
+    }
+}
+
+/// 生成图片副行时间描述。
+fn format_image_subtitle(meta: &ClipboardImageMeta, lang: &str) -> String {
+    let now = chrono::Utc::now().timestamp();
+    let elapsed = (now - meta.created_at).max(0);
+    let is_zh = lang == "zh";
+    let time_desc = if elapsed < 60 {
+        if is_zh {
+            "刚刚".to_string()
+        } else {
+            "just now".to_string()
+        }
+    } else if elapsed < 3600 {
+        let n = elapsed / 60;
+        if is_zh {
+            format!("{n} 分钟前")
+        } else {
+            format!("{n} min ago")
+        }
+    } else if elapsed < 86400 {
+        let n = elapsed / 3600;
+        if is_zh {
+            format!("{n} 小时前")
+        } else {
+            format!("{n} h ago")
+        }
+    } else {
+        let n = elapsed / 86400;
+        if is_zh {
+            format!("{n} 天前")
+        } else {
+            format!("{n} d ago")
+        }
+    };
+    if is_zh {
+        format!("{time_desc} · {}x{}", meta.width, meta.height)
+    } else {
+        format!("{time_desc} · {}x{}", meta.width, meta.height)
     }
 }
 
@@ -347,7 +460,9 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let pool =
             rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
-        let engine = ClipboardEngine::new(pool);
+        let cache_pool =
+            rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
+        let engine = ClipboardEngine::new(pool, cache_pool);
         assert_eq!(*engine.display_count.read().unwrap(), DEFAULT_DISPLAY_COUNT);
         assert_eq!(DEFAULT_DISPLAY_COUNT, 30);
     }
@@ -357,7 +472,9 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let pool =
             rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
-        let engine = ClipboardEngine::new(pool);
+        let cache_pool =
+            rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
+        let engine = ClipboardEngine::new(pool, cache_pool);
         engine.update_display_count(5);
         assert_eq!(*engine.display_count.read().unwrap(), 5);
         engine.update_display_count(200);
@@ -369,7 +486,9 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let pool =
             rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
-        let engine = ClipboardEngine::new(pool);
+        let cache_pool =
+            rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
+        let engine = ClipboardEngine::new(pool, cache_pool);
         // 0 = 下限外 → 兜底默认值
         engine.update_display_count(0);
         assert_eq!(*engine.display_count.read().unwrap(), DEFAULT_DISPLAY_COUNT);

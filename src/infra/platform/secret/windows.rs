@@ -18,12 +18,12 @@ use std::ptr;
 
 use windows::Win32::Foundation::{ERROR_NOT_FOUND, FILETIME};
 use windows::Win32::Security::Credentials::{
-    CRED_FLAGS, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree,
-    CredReadW, CredWriteW,
+    CRED_ENUMERATE_FLAGS, CRED_FLAGS, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW,
+    CredDeleteW, CredEnumerateW, CredFree, CredReadW, CredWriteW,
 };
 use windows::core::PWSTR;
 
-use super::{SecretError, SecretString, build_target_name};
+use super::{SecretError, SecretInfo, SecretString, build_target_name};
 
 /// 把 Rust `&str` 转成 CM API 需要的 null-terminated wide string。
 fn to_wide(s: &str) -> Vec<u16> {
@@ -191,6 +191,134 @@ pub fn delete_secret(provider_id: &str, purpose: &str) -> Result<(), SecretError
     Ok(())
 }
 
+// ── 批量枚举与清理（0.16.6）──────────────────────────────────────────────────
+
+/// 枚举 Credential Manager 中所有 `blink/*` 命名空间的密钥元信息。
+///
+/// 使用 `CredEnumerateW` 的通配符过滤（`"blink*"`），返回 target name 列表。
+/// **不返回密钥内容**——只供清理展示与确认。
+///
+/// # 错误
+/// - `Platform`:`CredEnumerateW` 系统 API 返回失败
+pub fn enumerate_blink_secrets() -> Result<Vec<SecretInfo>, SecretError> {
+    let filter = to_wide("blink*");
+    let mut count: u32 = 0;
+    let mut creds_ptr: *mut *mut CREDENTIALW = ptr::null_mut();
+
+    // Safety: filter 指向有效的 wide string;count/creds_ptr 是栈上合法输出参数
+    let result = unsafe {
+        CredEnumerateW(
+            windows::core::PCWSTR(filter.as_ptr()),
+            Some(CRED_ENUMERATE_FLAGS(0)),
+            &mut count,
+            &mut creds_ptr,
+        )
+    };
+
+    if let Err(e) = result {
+        // ERROR_NOT_FOUND 表示没有匹配的凭据——返回空列表而非报错
+        if e.code() == windows::core::HRESULT::from_win32(ERROR_NOT_FOUND.0) {
+            return Ok(Vec::new());
+        }
+        return Err(SecretError::Platform(format!(
+            "CredEnumerateW 失败: {}",
+            e.code()
+        )));
+    }
+
+    if creds_ptr.is_null() || count == 0 {
+        return Ok(Vec::new());
+    }
+
+    // Safety: creds_ptr 非空且指向 CM 分配的 count 个指针数组。
+    // 每个 *mut CREDENTIALW 指向 CM 分配的合法结构体。
+    // 只读取 TargetName 字段（PWSTR），拷贝为 String 后立即 CredFree 整个数组。
+    let mut secrets = Vec::with_capacity(count as usize);
+    for i in 0..count as usize {
+        let cred_ptr = unsafe { *creds_ptr.add(i) };
+        if cred_ptr.is_null() {
+            continue;
+        }
+        let cred = unsafe { &*cred_ptr };
+        // TargetName 是 PWSTR，指向 CM 分配的 wide string
+        let target_name = if cred.TargetName.is_null() {
+            String::new()
+        } else {
+            unsafe { cred.TargetName.to_string().unwrap_or_default() }
+        };
+        if !target_name.is_empty() {
+            secrets.push(SecretInfo { target_name });
+        }
+    }
+
+    // 释放 CM 分配的凭据数组
+    unsafe { CredFree(creds_ptr as _) };
+
+    tracing::debug!(count = secrets.len(), "枚举到 blink/* 密钥条目");
+    Ok(secrets)
+}
+
+/// 批量删除 Credential Manager 中所有 `blink/*` 命名空间的密钥。
+///
+/// 返回每个 target 的删除结果，调用方可按项展示成功/失败。
+/// `NotFound` 视为成功（幂等——可能被其他途径已删）。
+///
+/// # 返回
+/// `Vec<(target_name, Result<(), SecretError>)>`
+pub fn delete_all_blink_secrets() -> Vec<(String, Result<(), SecretError>)> {
+    let secrets = match enumerate_blink_secrets() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "delete_all_blink_secrets: 枚举失败，无法批量删除");
+            return vec![("<enumerate_failed>".to_string(), Err(e))];
+        }
+    };
+
+    let mut results = Vec::with_capacity(secrets.len());
+    for info in &secrets {
+        let target = &info.target_name;
+        let target_w = to_wide(target);
+
+        // Safety: PCWSTR 指向 target_w 有效切片
+        let result = unsafe {
+            CredDeleteW(
+                windows::core::PCWSTR(target_w.as_ptr()),
+                CRED_TYPE_GENERIC,
+                None,
+            )
+        };
+
+        match result {
+            Ok(()) => {
+                tracing::debug!(target = %target, "批量删除密钥成功");
+                results.push((target.clone(), Ok(())));
+            }
+            Err(e) => {
+                if e.code() == windows::core::HRESULT::from_win32(ERROR_NOT_FOUND.0) {
+                    // NotFound 视为成功（幂等）
+                    results.push((target.clone(), Ok(())));
+                } else {
+                    tracing::warn!(target = %target, error = %e, "批量删除密钥失败");
+                    results.push((
+                        target.clone(),
+                        Err(SecretError::Platform(format!(
+                            "CredDeleteW 失败(target={target}): {}",
+                            e.code()
+                        ))),
+                    ));
+                }
+            }
+        }
+    }
+
+    tracing::info!(
+        total = results.len(),
+        failed = results.iter().filter(|(_, r)| r.is_err()).count(),
+        "批量删除 blink/* 密钥完成"
+    );
+    results
+}
+
 // ── 单测:三链路(写→读→删),依赖真实 Windows Credential Manager ────────────
 //
 // **可跳过守卫**:CI 无桌面 session 时 CM API 会失败;`Path::exists` 惯用法在
@@ -306,5 +434,58 @@ mod tests {
             }
             other => panic!("超长密钥应被拒绝,实际:{other:?}"),
         }
+    }
+
+    #[test]
+    fn enumerate_and_delete_all_blink_secrets() {
+        if !cm_available() {
+            eprintln!("跳过:当前环境不可用 Credential Manager");
+            return;
+        }
+
+        // 写入两条 blink/* 密钥
+        let p1 = format!("test-enum-{}", std::process::id());
+        let p2 = format!("test-enum2-{}", std::process::id());
+        let s1 = SecretString::new("sk-enum-test-1".to_string());
+        let s2 = SecretString::new("sk-enum-test-2".to_string());
+        save_secret(&p1, "key", &s1).expect("写 secret 1 应成功");
+        save_secret(&p2, "key", &s2).expect("写 secret 2 应成功");
+
+        // 枚举——应该包含我们刚写的两条（至少）
+        let secrets = enumerate_blink_secrets().expect("枚举应成功");
+        let has_p1 = secrets.iter().any(|s| s.target_name.contains(&p1));
+        let has_p2 = secrets.iter().any(|s| s.target_name.contains(&p2));
+        assert!(has_p1, "枚举结果应包含刚写入的 secret 1");
+        assert!(has_p2, "枚举结果应包含刚写入的 secret 2");
+
+        // 批量删除
+        let results = delete_all_blink_secrets();
+        // 每条结果应该都是 Ok（NotFound 也视为成功）
+        for (target, result) in &results {
+            assert!(result.is_ok(), "删除 {target} 应成功");
+        }
+        // 验证刚写的两条已被删除
+        assert!(
+            results.iter().any(|(t, _)| t.contains(&p1)),
+            "删除结果应包含 secret 1"
+        );
+        assert!(
+            results.iter().any(|(t, _)| t.contains(&p2)),
+            "删除结果应包含 secret 2"
+        );
+
+        // 再次枚举——不应包含测试密钥
+        let after = enumerate_blink_secrets().expect("二次枚举应成功");
+        assert!(
+            !after.iter().any(|s| s.target_name.contains(&p1)),
+            "删除后不应再枚举到 secret 1"
+        );
+        assert!(
+            !after.iter().any(|s| s.target_name.contains(&p2)),
+            "删除后不应再枚举到 secret 2"
+        );
+
+        // 二次删除——幂等，不应报错
+        let _ = delete_all_blink_secrets();
     }
 }

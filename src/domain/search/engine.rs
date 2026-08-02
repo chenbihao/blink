@@ -117,7 +117,7 @@ impl SearchItem {
                 is_placeholder: false,
                 is_error,
                 source: self.source.clone(),
-                action: Action::default(),
+                actions: vec![],
                 score_detail,
                 context_aware,
                 ..Default::default()
@@ -133,7 +133,7 @@ impl SearchItem {
                 is_placeholder: false,
                 is_error,
                 source: self.source.clone(),
-                action: Action::default(),
+                actions: vec![Action::default()], // Open 动作
                 score_detail,
                 context_aware,
                 ..Default::default()
@@ -151,37 +151,52 @@ impl SearchItem {
                 is_placeholder: false,
                 is_error,
                 source: self.source.clone(),
-                action: Action {
+                actions: vec![Action {
                     kind: ActionKind::Copy,
                     payload: Some(text),
                     hit_id,
                     ..Action::default()
-                },
+                }],
                 score_detail,
                 context_aware,
                 ..Default::default()
             },
-            SearchAction::RunAction { id, arg } => AppEntry {
+            SearchAction::RunAction { id, arg } => {
+                // 0.16.4：剪贴板图片项的 run_id = "copy_clipboard_image"，
+                // arg = image_id。前端据此渲染缩略图。
+                let is_image = id == "copy_clipboard_image";
+                let lnk_path = if is_image {
+                    arg.as_ref()
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_default()
+                } else {
+                    String::new() // Run 不使用 lnk_path
+                };
+                AppEntry {
                 name: self.title,
                 pinyin_name: String::new(),
                 pinyin_full: String::new(),
                 description: self.subtitle,
-                lnk_path: String::new(), // Run 不使用 lnk_path
+                lnk_path,
                 is_calc: false,
                 score,
                 is_placeholder: false,
                 is_error,
                 source: self.source.clone(),
-                action: Action {
+                actions: vec![Action {
                     kind: ActionKind::Run,
                     run_id: Some(id),
                     run_arg: arg,
+                    hint: if is_image { Some("复制".into()) } else { None },
                     ..Action::default()
-                },
+                }],
                 score_detail,
                 context_aware,
+                is_image,
                 ..Default::default()
-            },
+            }
+            }
         }
     }
 }
@@ -254,8 +269,8 @@ mod tests {
         assert_eq!(e.name, "App");
         assert_eq!(e.lnk_path, "C:\\a.lnk");
         assert!(!e.is_calc);
-        assert!(matches!(e.action.kind, ActionKind::Open));
-        assert!(e.action.payload.is_none());
+        assert!(matches!(e.actions[0].kind, ActionKind::Open));
+        assert!(e.actions[0].payload.is_none());
         assert_eq!(e.description.as_deref(), Some("C:\\a.lnk"));
     }
 
@@ -278,8 +293,8 @@ mod tests {
         assert_eq!(e.name, "= 2");
         assert!(e.lnk_path.is_empty());
         assert!(e.is_calc);
-        assert!(matches!(e.action.kind, ActionKind::Copy));
+        assert!(matches!(e.actions[0].kind, ActionKind::Copy));
         // text 透传到 payload(前端复制优先取 payload)
-        assert_eq!(e.action.payload.as_deref(), Some("2"));
+        assert_eq!(e.actions[0].payload.as_deref(), Some("2"));
     }
 }

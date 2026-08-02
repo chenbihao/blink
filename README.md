@@ -23,7 +23,7 @@
 
 ## 不只是启动器
 
-**做一个**优雅**、**丝滑**的启动器，并且把常用的功能都丝滑融合，使用 Chord 模式来调用各种增强能力，不止是启动器。**
+**做一个优雅、丝滑的启动器，并且把常用的功能都丝滑融合，使用 Chord 模式来调用各种增强能力，不止是启动器。**
 
 Blink 把"选中英文 → 翻译"、"复制了 URL → 打开"、"截图 → OCR 提取文字"这类多步骤操作，变成一次快捷键或一个 Tab。整个体验围绕**丝滑**展开——唤起快、响应快、操作路径短。
 
@@ -117,10 +117,6 @@ AI 功能：
 
 <p align="center">
   <img src="docs/images/feature-ai.gif" width="680" alt="AI 能力"/>
-</p>
-
-<p align="center">
-  <img src="docs/images/feature-ai-config.png" width="680" alt="AI 能力"/>
 </p>
 
 

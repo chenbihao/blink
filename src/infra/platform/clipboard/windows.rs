@@ -10,8 +10,8 @@ use windows::Win32::System::DataExchange::{
     AddClipboardFormatListener, CloseClipboard, GetClipboardData, OpenClipboard,
     RemoveClipboardFormatListener,
 };
-use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
-use windows::Win32::System::Ole::CF_UNICODETEXT;
+use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+use windows::Win32::System::Ole::{CF_DIB, CF_UNICODETEXT};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetForegroundWindow, GetMessageW,
     GetWindowTextW, MSG, RegisterClassW, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE,
@@ -20,8 +20,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{PCWSTR, w};
 
 use crate::infra::data::clipboard::{self, ClipboardItem};
+use crate::infra::data::clipboard_images::{self, ClipboardImage};
 
 use super::{is_active, state};
+
+/// 缩略图最大边长（像素）。采集时生成，不延后到展示——避免列表滚动时重复解码。
+const THUMB_MAX_EDGE: u32 = 256;
 
 /// 短窗口去重（0.8.7 修复：有些应用 Ctrl+C 会连发多次 WM_CLIPBOARDUPDATE）。
 /// 记录最近一次入库的 (text_hash, ts_ms)；10 秒内同文本再来直接跳过。
@@ -100,78 +104,367 @@ unsafe extern "system" fn wnd_proc(
 
 fn on_clipboard_change() {
     // 黑名单：前台窗口标题命中则不记（密码管理器等）
-    if let Some(title) = foreground_title()
+    let title_opt = foreground_title();
+    if let Some(ref title) = title_opt
         && let Some(s) = state()
     {
         let bl = s.blacklist.read().unwrap();
-        if clipboard::is_blacklisted(&title, &bl) {
+        if clipboard::is_blacklisted(title, &bl) {
             tracing::debug!(title = %title, "剪贴板：前台黑名单，跳过");
             return;
         }
     }
-    // read_clipboard_text 返回 None 的常见原因：
-    //   1) 写入方（外部应用）刚 SetClipboardData 后 CloseClipboard,我们 OpenClipboard 竞争失败
-    //   2) 剪贴板内容不是 CF_UNICODETEXT（图片、文件列表等）
-    //   3) GlobalLock 失败
-    // 静默失败会让"为啥这次没记"变成黑盒——降到 trace 但至少有痕迹。
-    let text = match read_clipboard_text() {
-        Some(t) => t,
-        None => {
-            tracing::trace!("剪贴板：读取无文本内容或竞争失败,跳过");
+    // 先尝试读文本；文本失败则尝试读图片（CF_DIB）
+    let text = read_clipboard_text();
+    if let Some(ref text) = text {
+        if text.trim().is_empty() {
+            tracing::trace!("剪贴板：文本仅空白,跳过");
             return;
         }
-    };
-    if text.trim().is_empty() {
-        tracing::trace!("剪贴板：文本仅空白,跳过");
+        // 短窗口去重（0.8.7）：10 秒内同文本不重复记录。
+        // Ctrl+C 在部分应用（浏览器/编辑器）会连发多次 WM_CLIPBOARDUPDATE,不去重会看到
+        // 历史里同一条塞了 3~4 遍,后续 cleanup_excess 反而挤掉真正的旧条目。
+        let text_hash = fx_hash(text);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        if let Ok(mut guard) = DEDUP_STATE.lock() {
+            if let Some((last_hash, last_ms)) = *guard
+                && last_hash == text_hash
+                && now_ms.saturating_sub(last_ms) < DEDUP_WINDOW_MS
+            {
+                tracing::debug!(
+                    len = text.chars().count(),
+                    "剪贴板：10s 内同文本重复,跳过入库"
+                );
+                return;
+            }
+            *guard = Some((text_hash, now_ms));
+        }
+        // 0.9.2.1：入库前先触发 hook,让 SearchService.snapshot 局部刷新 Clipboard 项
+        //（过滤 + 去重后触发,与真实入库同步;hook 侧再做 ContextConfig 门控与敏感应用
+        // 过滤,避免密码管理器 Ctrl+C 悄悄进 snapshot）。
+        super::notify_change(text);
+        let Some(s) = state() else { return };
+        let preview = clipboard::make_preview(text);
+        let source_app = title_opt.clone();
+        let item = ClipboardItem {
+            id: clipboard::generate_id(),
+            preview: preview.clone(),
+            text: text.clone(),
+            created_at: now_ts(),
+            source_app,
+            hit_count: 0,
+        };
+        let pool = s.pool.clone();
+        let max_items = s.max_items;
+        tauri::async_runtime::spawn(async move {
+            match clipboard::save_item(&pool, &item).await {
+                Ok(_) => tracing::trace!(id = %item.id, preview = %preview, "剪贴板：已入库"),
+                Err(e) => {
+                    tracing::warn!(?e, "剪贴板 save_item 失败");
+                    return;
+                }
+            }
+            let _ = clipboard::cleanup_excess(&pool, max_items).await;
+        });
         return;
     }
-    // 短窗口去重（0.8.7）：10 秒内同文本不重复记录。
-    // Ctrl+C 在部分应用（浏览器/编辑器）会连发多次 WM_CLIPBOARDUPDATE,不去重会看到
-    // 历史里同一条塞了 3~4 遍,后续 cleanup_excess 反而挤掉真正的旧条目。
-    let text_hash = fx_hash(&text);
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    if let Ok(mut guard) = DEDUP_STATE.lock() {
-        if let Some((last_hash, last_ms)) = *guard
-            && last_hash == text_hash
-            && now_ms.saturating_sub(last_ms) < DEDUP_WINDOW_MS
-        {
-            tracing::debug!(
-                len = text.chars().count(),
-                "剪贴板：10s 内同文本重复,跳过入库"
-            );
+
+    // ── 图片采集（0.16.4）──
+    // 文本读取失败 → 尝试 CF_DIB（截图、画图、浏览器复制图片等）
+    tracing::trace!("剪贴板：无文本,尝试读取图片 CF_DIB");
+    let Some(s) = state() else { return };
+    let dib_data = read_clipboard_dib();
+    let Some(dib) = dib_data else {
+        tracing::trace!("剪贴板：无文本也无图片,跳过");
+        return;
+    };
+    // 解码 DIB → BGRA 像素 + 尺寸
+    let Some((bgra, width, height)) = decode_dib(&dib) else {
+        tracing::debug!("剪贴板：CF_DIB 解码失败,跳过");
+        return;
+    };
+    // 编码为完整 PNG
+    let png_data = match bgra_to_png(&bgra, width, height) {
+        Ok(png) => png,
+        Err(e) => {
+            tracing::warn!(?e, "剪贴板：BGRA→PNG 编码失败");
             return;
         }
-        *guard = Some((text_hash, now_ms));
-    }
-    // 0.9.2.1：入库前先触发 hook,让 SearchService.snapshot 局部刷新 Clipboard 项
-    //（过滤 + 去重后触发,与真实入库同步;hook 侧再做 ContextConfig 门控与敏感应用
-    // 过滤,避免密码管理器 Ctrl+C 悄悄进 snapshot）。
-    super::notify_change(&text);
-    let Some(s) = state() else { return };
-    let preview = clipboard::make_preview(&text);
-    let item = ClipboardItem {
-        id: clipboard::generate_id(),
-        preview: preview.clone(),
-        text,
-        created_at: now_ts(),
-        source_app: None,
-        hit_count: 0,
     };
-    let pool = s.pool.clone();
-    let max_items = s.max_items;
+    // 生成缩略图
+    let thumb_data = match make_thumbnail_png(&bgra, width, height) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(?e, "剪贴板：缩略图生成失败");
+            // 缩略图失败不阻塞入库——用完整 PNG 兜底
+            png_data.clone()
+        }
+    };
+    // 计算 sha256 用于内容去重
+    let sha256 = compute_sha256(&png_data);
+    let image_id = clipboard_images::generate_image_id();
+    let source_app = title_opt.clone();
+    let image_item = ClipboardImage {
+        id: image_id.clone(),
+        png_blob: png_data,
+        thumb_blob: thumb_data,
+        width,
+        height,
+        sha256,
+        created_at: now_ts(),
+        source_app: source_app.clone(),
+    };
+    let cache_pool = s.cache_pool.clone();
+    let max_image_items = s.max_image_items;
     tauri::async_runtime::spawn(async move {
-        match clipboard::save_item(&pool, &item).await {
-            Ok(_) => tracing::trace!(id = %item.id, preview = %preview, "剪贴板：已入库"),
+        match clipboard_images::save_image(&cache_pool, &image_item).await {
+            Ok(_) => tracing::trace!(
+                id = %image_item.id,
+                w = image_item.width,
+                h = image_item.height,
+                "剪贴板：图片已入库"
+            ),
             Err(e) => {
-                tracing::warn!(?e, "剪贴板 save_item 失败");
+                tracing::warn!(?e, "剪贴板 save_image 失败");
                 return;
             }
         }
-        let _ = clipboard::cleanup_excess(&pool, max_items).await;
+        let _ = clipboard_images::cleanup_excess_images(&cache_pool, max_image_items).await;
     });
+}
+
+// ── 图片采集辅助函数（0.16.4）─────────────────────────────────────────────
+
+/// 读取剪贴板 CF_DIB 数据。返回 DIB 原始字节（BITMAPINFOHEADER + 像素）。
+///
+/// 与 `read_clipboard_text` 同模式：短重试 + 微退避，解决 OpenClipboard 竞争。
+fn read_clipboard_dib() -> Option<Vec<u8>> {
+    const MAX_ATTEMPTS: u32 = 5;
+    const BACKOFF_MS: u64 = 8;
+    for attempt in 0..MAX_ATTEMPTS {
+        unsafe {
+            if OpenClipboard(None).is_ok() {
+                let res = read_dib_inner();
+                let _ = CloseClipboard();
+                if res.is_some() {
+                    if attempt > 0 {
+                        tracing::debug!(attempt, "剪贴板图片读取重试成功");
+                    }
+                    return res;
+                }
+                return None;
+            }
+        }
+        if attempt + 1 < MAX_ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(BACKOFF_MS));
+        }
+    }
+    tracing::debug!("剪贴板图片 OpenClipboard 重试仍失败,放弃");
+    None
+}
+
+unsafe fn read_dib_inner() -> Option<Vec<u8>> {
+    unsafe {
+        let handle = GetClipboardData(CF_DIB.0.into()).ok()?;
+        let hg = HGLOBAL(handle.0);
+        let size = GlobalSize(hg);
+        if size == 0 {
+            return None;
+        }
+        let ptr = GlobalLock(hg);
+        if ptr.is_null() {
+            let _ = GlobalUnlock(hg);
+            return None;
+        }
+        let slice = std::slice::from_raw_parts(ptr as *const u8, size as usize);
+        let data = slice.to_vec();
+        let _ = GlobalUnlock(hg);
+        Some(data)
+    }
+}
+
+/// 解码 DIB（BITMAPINFOHEADER + 像素）为 BGRA 像素 + 宽高。
+///
+/// CF_DIB 格式：BITMAPINFOHEADER 后紧跟像素数据。
+/// - biHeight 正值 = bottom-up（最常见），负值 = top-down（罕见）
+/// - biBitCount 32 = BGRA（每像素 4 字节）；24 = BGR（每像素 3 字节）
+///
+/// 返回 top-down BGRA（与截图 `write_bgra_to_clipboard` 输入格式一致）。
+fn decode_dib(dib: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+    use windows::Win32::Graphics::Gdi::BITMAPINFOHEADER;
+
+    let header_size = std::mem::size_of::<BITMAPINFOHEADER>();
+    if dib.len() < header_size {
+        tracing::debug!("DIB 数据过短: {} < {header_size}", dib.len());
+        return None;
+    }
+
+    // 安全读取 BITMAPINFOHEADER
+    let header: BITMAPINFOHEADER = unsafe { std::ptr::read_unaligned(dib.as_ptr() as *const _) };
+    let width = header.biWidth as u32;
+    let raw_height = header.biHeight;
+    let height = raw_height.unsigned_abs() as u32;
+    let bit_count = header.biBitCount;
+    let compression = header.biCompression; // 0 = BI_RGB
+
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    let bpp = (bit_count / 8) as usize; // bytes per pixel
+    if bpp != 4 && bpp != 3 {
+        tracing::debug!("不支持的 DIB 位深: {bit_count}");
+        return None;
+    }
+    if compression != 0 {
+        tracing::debug!("不支持的 DIB 压缩格式: {compression}");
+        return None;
+    }
+
+    let row_bytes = width as usize * bpp;
+    // BMP 行对齐到 4 字节
+    let row_stride = (row_bytes + 3) & !3;
+    let expected_pixel_size = row_stride * height as usize;
+    if dib.len() < header_size + expected_pixel_size {
+        tracing::debug!(
+            "DIB 像素数据不足: {} < {}",
+            dib.len(),
+            header_size + expected_pixel_size
+        );
+        return None;
+    }
+
+    let pixel_data = &dib[header_size..];
+
+    // 统一输出为 top-down BGRA
+    let mut bgra = vec![0u8; (width * height * 4) as usize];
+    let out_row_bytes = width as usize * 4;
+    let is_bottom_up = raw_height > 0;
+
+    for y in 0..height as usize {
+        // bottom-up: 第一行是图片底部；翻转行序
+        let src_y = if is_bottom_up {
+            height as usize - 1 - y
+        } else {
+            y
+        };
+        let src_offset = src_y * row_stride;
+        let dst_offset = y * out_row_bytes;
+
+        if bpp == 4 {
+            // BGRA → BGRA（直接拷贝）
+            bgra[dst_offset..dst_offset + row_bytes]
+                .copy_from_slice(&pixel_data[src_offset..src_offset + row_bytes]);
+        } else {
+            // BGR → BGRA（补 A=255）
+            for x in 0..width as usize {
+                let si = src_offset + x * 3;
+                let di = dst_offset + x * 4;
+                bgra[di] = pixel_data[si]; // B
+                bgra[di + 1] = pixel_data[si + 1]; // G
+                bgra[di + 2] = pixel_data[si + 2]; // R
+                bgra[di + 3] = 255; // A
+            }
+        }
+    }
+
+    Some((bgra, width, height))
+}
+
+/// BGRA 像素 → PNG 字节。输入为 top-down BGRA。
+fn bgra_to_png(bgra: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    use png::ColorType;
+
+    let mut buf = Vec::new();
+    // BGRA → RGBA：swap R↔B
+    let mut rgba = bgra.to_vec();
+    for px in rgba.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
+    {
+        let mut encoder = png::Encoder::new(&mut buf, width, height);
+        encoder.set_color(ColorType::Rgba);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|e| format!("PNG 写 header 失败: {e}"))?;
+        writer
+            .write_image_data(&rgba)
+            .map_err(|e| format!("PNG 写像素失败: {e}"))?;
+    }
+    Ok(buf)
+}
+
+/// 生成缩略图 PNG（max 边 256px）。输入为 top-down BGRA。
+///
+/// 使用 nearest-neighbor 采样——缩略图只用于列表预览，不需要高质量缩放。
+fn make_thumbnail_png(bgra: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    use png::ColorType;
+
+    // 计算缩略图尺寸
+    let max_edge = width.max(height);
+    if max_edge <= THUMB_MAX_EDGE {
+        // 图片已经够小，直接用原图
+        return bgra_to_png(bgra, width, height);
+    }
+    let scale = THUMB_MAX_EDGE as f64 / max_edge as f64;
+    let tw = (width as f64 * scale).round() as u32;
+    let th = (height as f64 * scale).round() as u32;
+    if tw == 0 || th == 0 {
+        return Err("缩略图尺寸为 0".into());
+    }
+
+    let src_row_bytes = width as usize * 4;
+    let dst_row_bytes = tw as usize * 4;
+    let mut thumb = vec![0u8; dst_row_bytes * th as usize];
+
+    // nearest-neighbor 采样
+    for dy in 0..th as usize {
+        let sy = ((dy as f64 / scale).round() as usize).min(height as usize - 1);
+        for dx in 0..tw as usize {
+            let sx = ((dx as f64 / scale).round() as usize).min(width as usize - 1);
+            let src = sy * src_row_bytes + sx * 4;
+            let dst = dy * dst_row_bytes + dx * 4;
+            thumb[dst..dst + 4].copy_from_slice(&bgra[src..src + 4]);
+        }
+    }
+
+    // BGRA → RGBA → PNG
+    for px in thumb.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
+    let mut buf = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut buf, tw, th);
+        encoder.set_color(ColorType::Rgba);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|e| format!("缩略图 PNG header 失败: {e}"))?;
+        writer
+            .write_image_data(&thumb)
+            .map_err(|e| format!("缩略图 PNG 像素失败: {e}"))?;
+    }
+    Ok(buf)
+}
+
+/// 计算 SHA-256 哈希（十六进制字符串）。
+fn compute_sha256(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let result = hasher.finalize();
+    hex_encode(&result)
+}
+
+/// 十六进制编码（不依赖 hex crate）。
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
 }
 
 /// 快哈希（FxHash 简化版）:去重仅用于短窗口冲突判断,不追求密码学强度。

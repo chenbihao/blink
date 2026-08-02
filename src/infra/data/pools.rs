@@ -192,7 +192,7 @@ async fn init_ai_schema(pool: &SqlitePool) -> Result<(), String> {
     Ok(())
 }
 
-/// 缓存库：performance_metrics + icon_cache 表
+/// 缓存库：performance_metrics + icon_cache + clipboard_images 表
 async fn init_cache_schema(pool: &SqlitePool) -> Result<(), String> {
     // performance_metrics 由 perf::init 创建
     crate::infra::utils::perf::init(pool)
@@ -204,14 +204,20 @@ async fn init_cache_schema(pool: &SqlitePool) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
 
+    // clipboard_images 由 clipboard_images::init_db 创建（0.16.4）
+    crate::infra::data::clipboard_images::init_db(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
     Ok(())
 }
 
-/// 缓存库纯建表（迁移路径用）--只建 performance_metrics + icon_cache 表，
+/// 缓存库纯建表（迁移路径用）--只建 performance_metrics + icon_cache + clipboard_images 表，
 /// 不注册全局 pool、不 spawn 清理（迁移 pool 临时使用后即 close）。
 async fn init_cache_schema_only(pool: &SqlitePool) -> Result<(), String> {
     crate::infra::data::perf::init_schema(pool).await?;
     crate::infra::data::icon_cache::init_schema(pool).await?;
+    crate::infra::data::clipboard_images::init_db(pool).await?;
     Ok(())
 }
 

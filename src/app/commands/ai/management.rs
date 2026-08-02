@@ -7,6 +7,7 @@ use super::*;
 pub async fn clear_ai_audit(app: tauri::AppHandle) -> Result<(), String> {
     let pool = &app.state::<crate::infra::data::DbPools>().ai;
     crate::infra::data::ai_audit::clear_all(&pool).await;
+    crate::infra::data::vacuum(&pool).await; // 0.16.0: 收缩数据库文件
     tracing::info!("AI 审计日志已清空");
     Ok(())
 }
