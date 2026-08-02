@@ -23,27 +23,27 @@
 //! 2. 记录当前视口在长图中的绝对 top
 //! 3. 仅保存新暴露的顶部/底部行；回滚到已有区域不重复追加
 
-import { ss } from './ss-state.js';
+import { ss } from '../ss-state.js';
 import {
   screenshotCancel, screenshotSetCaptureExclusion,
-} from '../shared/api.js';
-import { findWindowForRect } from './ss-hover.js';
+} from '../../shared/api.js';
+import { findWindowForRect } from '../ss-hover.js';
 import {
   compositePositionedFrames, extractRows,
-} from './ss-scroll-stitch.js';
-import { rememberScrollKeyframe as retainScrollKeyframe, trackScrollFrame } from './ss-scroll-tracker.js';
-import { runAutoScrollController } from './ss-scroll-auto.js';
+} from './stitch.js';
+import { rememberScrollKeyframe as retainScrollKeyframe, trackScrollFrame } from './tracker.js';
+import { runAutoScrollController } from './auto.js';
 import {
   captureBandFrame, delay, forwardAutoWheel, MANUAL_WHEEL_DEBOUNCE_MS,
   queueManualWheel, waitForVisualSettle,
-} from './ss-scroll-capture-driver.js';
+} from './capture-driver.js';
 import {
   bindScrollDiagnostics, recordScrollDiagnostic, resetScrollDiagnostics,
-} from './ss-scroll-diagnostics.js';
-import { encodeImageDataPng, outputScreenshotPng } from './ss-output.js';
+} from './diagnostics.js';
+import { encodeImageDataPng, outputScreenshotPng } from '../ss-output.js';
 import {
   hideCaptureFrame, positionPreview, SCROLL_PREVIEW_GAP, showCaptureFrame, updatePreview,
-} from './ss-scroll-preview.js';
+} from './preview.js';
 
 const session = ss.scrollSession;
 

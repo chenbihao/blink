@@ -2,8 +2,8 @@
 
 import {
   screenshotCaptureBand, screenshotCaptureProbe, screenshotForwardWheel,
-} from '../shared/api.js';
-import { isProbeStable } from './ss-scroll-stability.js';
+} from '../../shared/api.js';
+import { isProbeStable } from './stability.js';
 
 const SETTLE_PROBE_INTERVAL_MS = 45;
 const SETTLE_MAX_WAIT_MS = 900;

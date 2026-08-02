@@ -28,7 +28,7 @@ const {
   selectRelocalizationCandidate,
 } = await import(
   'data:text/javascript;base64,'
-  + Buffer.from(await readFile(new URL('./ss-scroll-stitch.js', import.meta.url))).toString('base64')
+  + Buffer.from(await readFile(new URL('./stitch.js', import.meta.url))).toString('base64')
 );
 
 function documentFrame(top, width = 36, height = 90) {
@@ -289,4 +289,4 @@ assert.equal(
   '同一位置的微小抖动候选应合并而不是误判为歧义',
 );
 
-console.log('ss-scroll-stitch tests passed');
+console.log('scroll stitch tests passed');

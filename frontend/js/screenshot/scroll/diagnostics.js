@@ -1,6 +1,6 @@
 //! 长截图开发诊断与显式回放导出。默认关闭，不写日志、不持久化截图像素。
 
-import { SCROLL_DECISION_SCHEMA_VERSION } from './ss-scroll-tracker.js';
+import { SCROLL_DECISION_SCHEMA_VERSION } from './tracker.js';
 
 const MAX_REPLAY_FRAMES = 256;
 const MAX_REPLAY_BYTES = 256 * 1024 * 1024;

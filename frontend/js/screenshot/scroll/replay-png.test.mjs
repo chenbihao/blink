@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { deflateSync } from 'node:zlib';
-import { decodeReplayPng } from './ss-scroll-replay-png.mjs';
+import { decodeReplayPng } from './replay-png.mjs';
 
 function chunk(type, data) {
   const result = Buffer.alloc(data.length + 12);
@@ -28,4 +28,4 @@ assert.equal(decoded.width, 2);
 assert.equal(decoded.height, 1);
 assert.deepEqual([...decoded.data], [255, 0, 128, 255, 10, 20, 30, 40]);
 
-console.log('ss-scroll-replay-png tests passed');
+console.log('scroll replay PNG tests passed');

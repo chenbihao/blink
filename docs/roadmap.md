@@ -162,3 +162,35 @@ PoC 通过 → 0.15+ 立项；PoC 发现外部 agent 接口不稳/委托判断�
 - [pi agent (earendil-works)](https://github.com/earendil-works/pi)
 - [Implementing Design Patterns for Agentic AI with Rig & Rust](https://dev.to/joshmo_dev/implementing-design-patterns-for-agentic-ai-with-rig-rust-1o71)
 - [ADR-001：Agent 后端策略（并入 spec-architecture §A10）](./specs/spec-architecture.md)
+
+---
+
+## 七、从原 0.17 迁出的候选留档
+
+> 0.17 已定案为“内容流转与持久化桌面便签”，原候选文档中的正交方向迁到此处，避免混入已立项 phase，也避免讨论结论丢失。
+
+### 7.1 配置同步（WebDAV）
+
+- **价值**：多设备用户收益高；单设备自用阶段可后置。
+- **成本**：需 WebDAV client、增量同步、加密、冲突检测与解决策略。
+- **边界**：配置同步风险较低；历史、剪贴板图片、便签内容是否同步必须另行定案，不能默认扩大范围。
+- **建议**：进入多设备分发阶段前再单独立项，不占 0.17。
+
+### 7.2 快速预览（QuickLook 式）
+
+- **判断**：完整版文件预览成本和安装体积过高，偏离“感知 + 执行 + 速度”核心。
+- **建议**：不做完整版；若未来确有需求，只评估文本/图片等极轻量类型并复用已有解码能力。
+
+### 7.3 CAP 闭环：AI 感知屏幕（原 0.18 候选）
+
+现状缺口：`capture_screen` 可返回 `Blob`，但当前投影只给模型文本摘要，像素不会到达模型；`ocr_image` 也无法直接消费上一步 bytes。
+
+候选分档：
+
+| 档位 | 内容 | 判断 |
+|---|---|---|
+| 轻量闭环 | AI 获取显示器/光标/前台窗口信息，调用截图并写入剪贴板 | 优先；大部分基础设施已存在 |
+| OCR 内部直链 | Rust 内部将截图 bytes 交给 OCR，不经过 LLM channel | 低成本且架构清晰 |
+| 完整多模态 | Blob→Image 投影并喂给多模态模型 | 成本较高，后置 |
+
+**架构原则**：优先增加类似 `screenshot{op:capture_to_clipboard}` 的内部复合操作，让 Rust 直接完成截图→剪贴板，AI 只下指令并接收文本确认。不得让 megabytes 图片无必要地经过 LLM channel。

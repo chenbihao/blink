@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 
 const { ScrollCaptureSession, attachScrollSessionFacade } = await import(
   'data:text/javascript;base64,'
-  + Buffer.from(await readFile(new URL('./ss-scroll-session.js', import.meta.url))).toString('base64')
+  + Buffer.from(await readFile(new URL('./session.js', import.meta.url))).toString('base64')
 );
 
 const session = new ScrollCaptureSession();
@@ -36,4 +36,4 @@ attached.exitHandler = (restore) => { restoreSelection = restore; };
 attached.exit(false);
 assert.equal(restoreSelection, false, '跨模块退出应经过 session 的唯一生命周期入口');
 
-console.log('ss-scroll-session tests passed');
+console.log('scroll session tests passed');

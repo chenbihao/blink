@@ -1,10 +1,10 @@
-//! 用法：node ss-scroll-replay-runner.mjs <blink-scroll-* 目录>
+//! 用法：node replay-runner.mjs <blink-scroll-* 目录>
 
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { decodeReplayPng } from './ss-scroll-replay-png.mjs';
+import { decodeReplayPng } from './replay-png.mjs';
 
 globalThis.ImageData ??= class ImageData {
   constructor(dataOrWidth, widthOrHeight, maybeHeight) {
@@ -26,13 +26,13 @@ function dataUrl(source) {
 
 async function loadReplayModule() {
   const base = new URL('./', import.meta.url);
-  const stitchUrl = dataUrl(await readFile(new URL('ss-scroll-stitch.js', base), 'utf8'));
-  const trackerSource = (await readFile(new URL('ss-scroll-tracker.js', base), 'utf8'))
-    .replace("'./ss-scroll-stitch.js'", JSON.stringify(stitchUrl));
+  const stitchUrl = dataUrl(await readFile(new URL('stitch.js', base), 'utf8'));
+  const trackerSource = (await readFile(new URL('tracker.js', base), 'utf8'))
+    .replace("'./stitch.js'", JSON.stringify(stitchUrl));
   const trackerUrl = dataUrl(trackerSource);
-  const replaySource = (await readFile(new URL('ss-scroll-replay.js', base), 'utf8'))
-    .replace("'./ss-scroll-stitch.js'", JSON.stringify(stitchUrl))
-    .replace("'./ss-scroll-tracker.js'", JSON.stringify(trackerUrl));
+  const replaySource = (await readFile(new URL('replay.js', base), 'utf8'))
+    .replace("'./stitch.js'", JSON.stringify(stitchUrl))
+    .replace("'./tracker.js'", JSON.stringify(trackerUrl));
   return import(dataUrl(replaySource));
 }
 

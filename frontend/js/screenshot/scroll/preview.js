@@ -1,7 +1,7 @@
 //! 长截图采集框与缩略预览。只负责 DOM / Canvas 呈现，不参与采集和配准决策。
 
-import { ss } from './ss-state.js';
-import { positionedFrameBounds } from './ss-scroll-stitch.js';
+import { ss } from '../ss-state.js';
+import { positionedFrameBounds } from './stitch.js';
 
 const PREVIEW_W = 120;
 export const SCROLL_PREVIEW_GAP = 8;

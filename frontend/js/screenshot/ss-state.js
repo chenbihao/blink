@@ -3,7 +3,7 @@
 //! chord-screenshot.js 拆分为多个子模块后，所有共享状态统一存在此对象中。
 //! 各子模块通过 `import { ss } from './ss-state.js'` 访问和修改状态。
 
-import { attachScrollSessionFacade } from './ss-scroll-session.js';
+import { attachScrollSessionFacade } from './scroll/session.js';
 
 export const ss = {
   // ── DOM 引用（initDOM() 填充）─────────────────────────────

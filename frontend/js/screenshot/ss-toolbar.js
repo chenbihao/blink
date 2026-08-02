@@ -13,7 +13,7 @@ import { drawFinalSelection, redrawAnnotFull } from './ss-draw.js';
 import { updateSelectionCursor } from './ss-interaction.js';
 import { doCancel, doPinSelection, doSaveSelection, doCopySelection } from './ss-output.js';
 // 0.15.7：长截图
-import { enterScrollCapture } from './ss-scroll.js';
+import { enterScrollCapture } from './scroll/index.js';
 import { doOcrSelection, doTranslateSelection } from './ss-ocr.js';
 import * as annot from './annotation-engine.js';
 import { initColorPicker, syncFromAnnot } from './ss-color-picker.js';

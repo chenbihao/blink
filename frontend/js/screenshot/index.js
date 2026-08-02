@@ -70,7 +70,7 @@ import {
   enterScrollCapture, exitScrollCapture, onScrollWheel,
   bindScrollToolbar, enterScrollEdit, isScrollCaptureActive,
   outputLongImage, resetScrollCaptureSession,
-} from "./ss-scroll.js";
+} from "./scroll/index.js";
 
 // ── **临时**（0.11.7-f 调试用）：console 转发到后端 tracing ────────────
 // TODO(0.11.7 收尾)：0.11.7 稳定后移除此块 + api.js 的 frontendLog + Rust 端 frontend_log command
@@ -918,6 +918,8 @@ canvas.addEventListener('contextmenu', (e) => {
   if (ss.reading) {
     const selText = getReadingSelectionText();
     showReadingContextMenu(selText || null, e);
+  } else if (ss.isAnnotating && ss.selCss) {
+    doCopySelection();
   } else {
     doCancel();
   }

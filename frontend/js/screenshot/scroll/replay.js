@@ -1,7 +1,7 @@
 //! 长截图离线回放执行器。输入已解码的完整帧，复用生产追踪决策并返回确定性摘要。
 
-import { extractRows } from './ss-scroll-stitch.js';
-import { rememberScrollKeyframe, trackScrollFrame } from './ss-scroll-tracker.js';
+import { extractRows } from './stitch.js';
+import { rememberScrollKeyframe, trackScrollFrame } from './tracker.js';
 
 export function replayScrollSequence(sequence) {
   const state = {

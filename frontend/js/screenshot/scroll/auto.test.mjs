@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-const source = await readFile(new URL('./ss-scroll-auto.js', import.meta.url), 'utf8');
+const source = await readFile(new URL('./auto.js', import.meta.url), 'utf8');
 const { nextAutoWheelState, runAutoScrollController } = await import(
   'data:text/javascript;base64,' + Buffer.from(source).toString('base64')
 );
@@ -79,4 +79,4 @@ await runAutoScrollController({
 });
 assert.deepEqual(order.slice(0, 2), ['capture:0', 'forward'], 'lost 状态必须先恢复定位再注入滚轮');
 
-console.log('ss-scroll-auto tests passed');
+console.log('scroll auto tests passed');

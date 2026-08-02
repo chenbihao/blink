@@ -4,7 +4,7 @@ import {
   createGrayFingerprint, createVerticalReference,
   estimateVerticalShift, planPositionedIncrement, positionedFrameBounds,
   relocalizeFromKeyframes, relocalizeFromPositionedContent,
-} from './ss-scroll-stitch.js';
+} from './stitch.js';
 
 export const SCROLL_DECISION_SCHEMA_VERSION = 1;
 export const MAX_SCROLL_KEYFRAMES = 64;

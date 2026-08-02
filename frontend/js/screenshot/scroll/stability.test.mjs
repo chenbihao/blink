@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 
 const { isProbeStable, probeMotionScore } = await import(
   'data:text/javascript;base64,'
-  + Buffer.from(await readFile(new URL('./ss-scroll-stability.js', import.meta.url))).toString('base64')
+  + Buffer.from(await readFile(new URL('./stability.js', import.meta.url))).toString('base64')
 );
 
 const stillA = new Uint8Array(100).fill(80);
@@ -25,4 +25,4 @@ assert.ok(probeMotionScore(stillA, scrolling) > 3);
 
 assert.equal(probeMotionScore(new Uint8Array(1), new Uint8Array(2)), Infinity);
 
-console.log('ss-scroll-stability tests passed');
+console.log('scroll stability tests passed');

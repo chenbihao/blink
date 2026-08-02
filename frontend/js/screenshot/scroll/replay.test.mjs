@@ -19,15 +19,15 @@ function dataUrl(source) {
   return 'data:text/javascript;base64,' + Buffer.from(source).toString('base64');
 }
 
-const stitchSource = await readFile(new URL('./ss-scroll-stitch.js', import.meta.url), 'utf8');
+const stitchSource = await readFile(new URL('./stitch.js', import.meta.url), 'utf8');
 const stitchUrl = dataUrl(stitchSource);
-const trackerSource = (await readFile(new URL('./ss-scroll-tracker.js', import.meta.url), 'utf8'))
-  .replace("'./ss-scroll-stitch.js'", JSON.stringify(stitchUrl));
+const trackerSource = (await readFile(new URL('./tracker.js', import.meta.url), 'utf8'))
+  .replace("'./stitch.js'", JSON.stringify(stitchUrl));
 const trackerUrl = dataUrl(trackerSource);
 const { rememberScrollKeyframe, trackScrollFrame } = await import(trackerUrl);
-const replaySource = (await readFile(new URL('./ss-scroll-replay.js', import.meta.url), 'utf8'))
-  .replace("'./ss-scroll-stitch.js'", JSON.stringify(stitchUrl))
-  .replace("'./ss-scroll-tracker.js'", JSON.stringify(trackerUrl));
+const replaySource = (await readFile(new URL('./replay.js', import.meta.url), 'utf8'))
+  .replace("'./stitch.js'", JSON.stringify(stitchUrl))
+  .replace("'./tracker.js'", JSON.stringify(trackerUrl));
 const { replayScrollSequence } = await import(dataUrl(replaySource));
 
 function documentFrame(top, variant = null, width = 36, height = 90) {
@@ -134,4 +134,4 @@ assert.equal(confirmed.decision.accepted, true, '同一区域连续确认后才�
 assert.equal(confirmed.decision.confirmation, 'confirmed');
 assert.equal(confirmed.nextTop, 400);
 
-console.log('ss-scroll-replay tests passed');
+console.log('scroll replay tests passed');
