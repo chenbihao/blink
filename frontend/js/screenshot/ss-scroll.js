@@ -25,16 +25,21 @@
 
 import { ss } from './ss-state.js';
 import {
-  screenshotCancel, screenshotSetCaptureExclusion, screenshotCaptureBand, screenshotCaptureProbe,
-  screenshotForwardWheel,
+  screenshotCancel, screenshotSetCaptureExclusion,
 } from '../shared/api.js';
 import { findWindowForRect } from './ss-hover.js';
 import {
-  compositePositionedFrames, createGrayFingerprint, createVerticalReference,
-  estimateVerticalShift, extractRows, planPositionedIncrement, positionedFrameBounds,
-  relocalizeFromKeyframes,
+  compositePositionedFrames, extractRows,
 } from './ss-scroll-stitch.js';
-import { isProbeStable } from './ss-scroll-stability.js';
+import { rememberScrollKeyframe as retainScrollKeyframe, trackScrollFrame } from './ss-scroll-tracker.js';
+import { runAutoScrollController } from './ss-scroll-auto.js';
+import {
+  captureBandFrame, delay, forwardAutoWheel, MANUAL_WHEEL_DEBOUNCE_MS,
+  queueManualWheel, waitForVisualSettle,
+} from './ss-scroll-capture-driver.js';
+import {
+  bindScrollDiagnostics, recordScrollDiagnostic, resetScrollDiagnostics,
+} from './ss-scroll-diagnostics.js';
 import { encodeImageDataPng, outputScreenshotPng } from './ss-output.js';
 import {
   hideCaptureFrame, positionPreview, SCROLL_PREVIEW_GAP, showCaptureFrame, updatePreview,
@@ -42,123 +47,12 @@ import {
 
 const session = ss.scrollSession;
 
-/** 稳定探针采样间隔与最长等待时间（ms）。 */
-const SETTLE_PROBE_INTERVAL_MS = 45;
-const SETTLE_MAX_WAIT_MS = 900;
-const SETTLE_MIN_WAIT_MS = 180;
-const SETTLE_STABLE_SAMPLE_COUNT = 2;
-/** wheel 后让首个画面变化发生，再开始比较相邻探针。 */
-const SETTLE_INITIAL_DELAY_MS = 35;
-/** 手动滚轮事件合并窗口；真正的等待由稳定探针决定。 */
-const MANUAL_WHEEL_DEBOUNCE_MS = 45;
-/** 手动滚轮穿透窗口。保持较短，避免页面在前端不可观测时连续滑过多个视口。 */
-const MANUAL_WHEEL_PASSTHROUGH_MS = 72;
-/** 自动滚动只需短时穿透；下一轮必须等本轮采集确认。 */
-const AUTO_WHEEL_PASSTHROUGH_MS = 24;
-/** 自动滚动连续多少帧不变后判定到底或驱动失败。 */
-const AUTO_UNCHANGED_LIMIT = 3;
-/** 关键帧包含纵向逐像素参考，设硬上限控制极长页面内存。 */
-const MAX_SCROLL_KEYFRAMES = 64;
-
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function captureStillActive(generation, requireAuto = false) {
   return generation === session.captureGeneration
-    && ss.scrollCapturePhase === 'capturing'
-    && (!requireAuto || ss.autoScroll);
+    && session.scrollCapturePhase === 'capturing'
+    && (!requireAuto || session.autoScroll);
 }
 
-async function captureProbe() {
-  const buffer = await screenshotCaptureProbe(
-    ss.scrollBandX,
-    ss.scrollBandY,
-    ss.scrollBandW,
-    ss.scrollBandH,
-  );
-  return buffer ? new Uint8Array(buffer) : null;
-}
-
-async function waitForVisualSettle(generation, requireAuto = false) {
-  await delay(SETTLE_INITIAL_DELAY_MS);
-  if (!captureStillActive(generation, requireAuto)) return { aborted: true };
-
-  let previous;
-  try {
-    previous = await captureProbe();
-  } catch (error) {
-    console.warn('[scroll] 稳定探针首次采集失败，使用短延时兜底', error);
-    await delay(180);
-    return { stable: false, fallback: true };
-  }
-
-  const startedAt = performance.now();
-  let stableSamples = 0;
-  let lastScore = Infinity;
-  while (performance.now() - startedAt < SETTLE_MAX_WAIT_MS) {
-    await delay(SETTLE_PROBE_INTERVAL_MS);
-    if (!captureStillActive(generation, requireAuto)) return { aborted: true };
-
-    let current;
-    try {
-      current = await captureProbe();
-    } catch (error) {
-      console.warn('[scroll] 稳定探针采集失败，继续等待', error);
-      stableSamples = 0;
-      continue;
-    }
-    const motion = isProbeStable(previous, current);
-    lastScore = motion.score;
-    stableSamples = motion.stable ? stableSamples + 1 : 0;
-    previous = current;
-    if (stableSamples >= SETTLE_STABLE_SAMPLE_COUNT
-        && performance.now() - startedAt >= SETTLE_MIN_WAIT_MS) {
-      return { stable: true, score: lastScore };
-    }
-  }
-  console.debug('[scroll] 稳定等待超时，交由全帧匹配确认', { score: lastScore });
-  return { stable: false, timedOut: true, score: lastScore };
-}
-
-function queueManualWheel(delta, screenX, screenY) {
-  if (session.queuedManualWheel) {
-    session.queuedManualWheel.delta = Math.max(
-      -480,
-      Math.min(480, session.queuedManualWheel.delta + delta),
-    );
-    session.queuedManualWheel.screenX = screenX;
-    session.queuedManualWheel.screenY = screenY;
-  } else {
-    session.queuedManualWheel = { delta, screenX, screenY };
-  }
-  if (!session.wheelForwardPending) void pumpManualWheel();
-}
-
-async function pumpManualWheel() {
-  if (session.wheelForwardPending) return;
-  session.wheelForwardPending = true;
-  try {
-    while (session.queuedManualWheel && ss.scrollCapturePhase === 'capturing' && !ss.autoScroll) {
-      const wheel = session.queuedManualWheel;
-      session.queuedManualWheel = null;
-      await screenshotForwardWheel(
-        ss.scrollHwnd,
-        wheel.delta,
-        wheel.screenX,
-        wheel.screenY,
-        MANUAL_WHEEL_PASSTHROUGH_MS,
-      );
-    }
-  } catch (error) {
-    console.warn('[scroll] wheel 转发失败', error);
-  } finally {
-    session.wheelForwardPending = false;
-    if (session.queuedManualWheel && ss.scrollCapturePhase === 'capturing' && !ss.autoScroll) {
-      void pumpManualWheel();
-    }
-  }
-}
 
 /**
  * 进入长截图采集阶段（capturing）。
@@ -170,37 +64,39 @@ export async function enterScrollCapture(rect) {
   const generation = session.invalidate();
   session.manualWheelVersion = 0;
   session.autoWheelDelta = -120;
+  session.autoLowConfidenceCount = 0;
   session.queuedManualWheel = null;
   session.captureFinalizing = false;
   const dpr = window.devicePixelRatio || 1;
   const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
 
   // 记录采集带几何（物理像素，虚拟屏幕坐标系）
-  ss.scrollBandX = meta.vx + Math.round(rect.x * dpr);
-  ss.scrollBandY = meta.vy + Math.round(rect.y * dpr);
-  ss.scrollBandW = Math.round(rect.w * dpr);
-  ss.scrollBandH = Math.round(rect.h * dpr);
-  ss.scrollDirection = 'vertical';
-  ss.autoScroll = false;
-  ss.scrollFrames = [];
-  ss.scrollLastFrame = null;
-  ss.scrollKeyframes = [];
-  ss.scrollTrackingState = 'tracking';
-  ss.scrollCurrentTop = 0;
-  ss.scrollPendingDirection = 0;
-  ss.scrollUnchangedCount = 0;
-  ss.scrollCapturePhase = 'capturing';
+  session.scrollBandX = meta.vx + Math.round(rect.x * dpr);
+  session.scrollBandY = meta.vy + Math.round(rect.y * dpr);
+  session.scrollBandW = Math.round(rect.w * dpr);
+  session.scrollBandH = Math.round(rect.h * dpr);
+  session.scrollDirection = 'vertical';
+  session.autoScroll = false;
+  session.scrollFrames = [];
+  session.scrollLastFrame = null;
+  session.scrollKeyframes = [];
+  session.scrollTrackingState = 'tracking';
+  session.scrollCurrentTop = 0;
+  session.scrollPendingDirection = 0;
+  session.scrollUnchangedCount = 0;
+  session.scrollCapturePhase = 'capturing';
+  resetScrollDiagnostics(session);
 
   // 优先锁定框选区域实际覆盖的外部窗口；兜底使用 Blink 唤起前保存的前台窗口。
   const pickedWindow = findWindowForRect(rect);
-  ss.scrollHwnd = pickedWindow?.hwnd || meta.fgHwnd || null;
-  ss.scrollTargetX = pickedWindow
+  session.scrollHwnd = pickedWindow?.hwnd || meta.fgHwnd || null;
+  session.scrollTargetX = pickedWindow
     ? meta.vx + Math.round(pickedWindow.targetX * dpr)
-    : ss.scrollBandX + Math.floor(ss.scrollBandW / 2);
-  ss.scrollTargetY = pickedWindow
+    : session.scrollBandX + Math.floor(session.scrollBandW / 2);
+  session.scrollTargetY = pickedWindow
     ? meta.vy + Math.round(pickedWindow.targetY * dpr)
-    : ss.scrollBandY + Math.floor(ss.scrollBandH / 2);
-  ss.scrollSourceRect = { ...rect };
+    : session.scrollBandY + Math.floor(session.scrollBandH / 2);
+  session.scrollSourceRect = { ...rect };
 
   // 设置 WDA_EXCLUDEFROMCAPTURE：overlay 在 BitBlt 中不可见
   try {
@@ -246,13 +142,13 @@ export async function enterScrollCapture(rect) {
   // 截取第一帧
   await captureFrame(0, generation);
   if (!captureStillActive(generation)) return false;
-  if (!ss.scrollHwnd) {
+  if (!session.scrollHwnd) {
     ss._showTransientHint?.('未找到可滚动窗口，请重新框选目标窗口内的区域');
   }
   console.info('[scroll] enter capturing', {
-    bandW: ss.scrollBandW,
-    bandH: ss.scrollBandH,
-    hwnd: ss.scrollHwnd,
+    bandW: session.scrollBandW,
+    bandH: session.scrollBandH,
+    hwnd: session.scrollHwnd,
     target: pickedWindow?.processName || pickedWindow?.title || 'fallback',
   });
   return true;
@@ -262,8 +158,8 @@ export async function enterScrollCapture(rect) {
  * 截取当前帧并拼接到 scrollFrames。
  * 每次滚动后调用（手动 wheel 或自动滚动回调）。
  */
-async function captureFrame(expectedDirection = 0, generation = session.captureGeneration) {
-  const task = captureFrameOnce(expectedDirection, generation);
+async function captureFrame(expectedDirection = 0, generation = session.captureGeneration, metadata = {}) {
+  const task = captureFrameOnce(expectedDirection, generation, metadata);
   session.captureInFlight = task;
   try {
     return await task;
@@ -272,101 +168,86 @@ async function captureFrame(expectedDirection = 0, generation = session.captureG
   }
 }
 
-async function captureFrameOnce(expectedDirection = 0, generation = session.captureGeneration) {
+async function captureFrameOnce(expectedDirection = 0, generation = session.captureGeneration, metadata = {}) {
   if (!captureStillActive(generation)) return { appended: false, reason: 'inactive' };
 
-  const w = ss.scrollBandW;
-  const h = ss.scrollBandH;
+  const w = session.scrollBandW;
+  const h = session.scrollBandH;
   if (w <= 0 || h <= 0) return { appended: false, reason: 'invalid-band' };
 
   try {
     // 调用 Rust 端 fresh BitBlt 采集（WDA_EXCLUDEFROMCAPTURE 已设，overlay 不可见）
-    const buffer = await screenshotCaptureBand(ss.scrollBandX, ss.scrollBandY, w, h);
+    const captured = await captureBandFrame(session);
     if (!captureStillActive(generation)) return { appended: false, reason: 'aborted' };
-    if (!buffer || buffer.byteLength < w * h * 4) {
-      console.warn('[scroll] captureBand 返回数据不足', { expected: w * h * 4, got: buffer?.byteLength });
-      return { appended: false, reason: 'short-buffer' };
-    }
-    const rgba = new Uint8ClampedArray(buffer);
-    const frame = new ImageData(rgba, w, h);
-    if (!ss.scrollLastFrame) {
-      ss.scrollFrames.push({ image: frame, top: 0 });
-      ss.scrollLastFrame = frame;
-      ss.scrollCurrentTop = 0;
-      rememberScrollKeyframe(frame, 0);
-      ss.scrollUnchangedCount = 0;
-      updatePreview();
-      console.debug('[scroll] first frame captured', { w, h });
-      return { appended: true, addedRows: h, first: true };
-    }
-
-    const wasLost = ss.scrollTrackingState === 'lost';
-    let match = wasLost
-      ? { status: 'no-match', shift: 0, score: Infinity, reason: 'tracking-lost' }
-      : estimateVerticalShift(ss.scrollLastFrame, frame, {
-        expectedDirection,
-        strictDirection: expectedDirection !== 0,
-        rejectAmbiguous: true,
+    if (!captured.frame) {
+      console.warn('[scroll] captureBand 返回数据不足', {
+        expected: captured.expected,
+        got: captured.got,
       });
-    let nextTop = ss.scrollCurrentTop + match.shift;
-    let relocalized = null;
-    if (match.status === 'no-match') {
-      relocalized = relocalizeFromKeyframes(
-        ss.scrollFrames,
-        ss.scrollKeyframes,
-        frame,
-        ss.scrollCurrentTop,
-        expectedDirection,
-        { trackingLost: wasLost },
-      );
-      if (relocalized) {
-        match = relocalized.match;
-        nextTop = relocalized.top;
-      }
+      return { appended: false, reason: captured.reason };
     }
-    if ((match.status !== 'matched' && match.status !== 'unchanged')
-        || (!relocalized && match.shift === 0)) {
-      if (match.status === 'no-match') ss.scrollTrackingState = 'lost';
-      ss.scrollUnchangedCount++;
+    const frame = captured.frame;
+    const tracked = trackScrollFrame({
+      frames: session.scrollFrames,
+      keyframes: session.scrollKeyframes,
+      lastFrame: session.scrollLastFrame,
+      currentTop: session.scrollCurrentTop,
+      trackingState: session.scrollTrackingState,
+      pendingJump: session.scrollPendingJump,
+    }, frame, {
+      expectedDirection,
+      motionTimedOut: metadata.settle?.timedOut === true,
+    });
+    const { decision, match, relocalized, placement } = tracked;
+    session.scrollPendingJump = tracked.pendingJump;
+    recordScrollDiagnostic(session, frame, decision, metadata);
+    if (!decision.accepted) {
+      if (match.status === 'no-match') session.scrollTrackingState = 'lost';
+      session.scrollUnchangedCount++;
       updatePreview();
-      console.debug('[scroll] frame ignored', { ...match, unchangedCount: ss.scrollUnchangedCount });
-      return { appended: false, reason: match.status, match };
+      console.debug('[scroll] frame ignored', {
+        reason: decision.reason,
+        source: decision.source,
+        score: decision.bestScore,
+        unchangedCount: session.scrollUnchangedCount,
+      });
+      return { appended: false, reason: decision.reason, match, decision };
     }
 
-    const oldBounds = positionedFrameBounds(ss.scrollFrames);
-    const previousTop = ss.scrollCurrentTop;
-    ss.scrollCurrentTop = nextTop;
-    const placement = planPositionedIncrement(oldBounds, ss.scrollCurrentTop, h);
+    const previousTop = session.scrollCurrentTop;
+    session.scrollCurrentTop = tracked.nextTop;
     let addedRows = 0;
     if (placement.rowCount > 0) {
       const increment = extractRows(frame, placement.startRow, placement.rowCount);
       if (increment) {
-        ss.scrollFrames.push({ image: increment, top: placement.targetTop });
+        session.scrollFrames.push({ image: increment, top: placement.targetTop });
         addedRows = increment.height;
       }
     }
     const extendsRange = addedRows > 0;
-    ss.scrollTrackingState = 'tracking';
-    ss.scrollLastFrame = frame;
-    rememberScrollKeyframe(frame, ss.scrollCurrentTop);
-    ss.scrollUnchangedCount = 0;
+    session.scrollTrackingState = 'tracking';
+    session.scrollLastFrame = frame;
+    rememberScrollKeyframe(frame, session.scrollCurrentTop);
+    session.scrollUnchangedCount = 0;
     updatePreview();
     console.debug('[scroll] movement captured', {
-      frameCount: ss.scrollFrames.length,
-      shift: ss.scrollCurrentTop - previousTop,
-      matchShift: match.shift,
-      currentTop: ss.scrollCurrentTop,
+      frameCount: session.scrollFrames.length,
+      shift: session.scrollCurrentTop - previousTop,
+      matchShift: match?.shift ?? 0,
+      currentTop: session.scrollCurrentTop,
       extendsRange,
-      score: match.score,
+      score: decision.bestScore,
       relocalized: relocalized?.scope || false,
       placement: placement.edge,
     });
     return {
       appended: extendsRange,
       moved: true,
+      first: decision.reason === 'first-frame',
       addedRows,
       match,
-      positionShift: ss.scrollCurrentTop - previousTop,
+      decision,
+      positionShift: session.scrollCurrentTop - previousTop,
       relocalized: relocalized?.scope,
     };
   } catch (e) {
@@ -376,26 +257,7 @@ async function captureFrameOnce(expectedDirection = 0, generation = session.capt
 }
 
 function rememberScrollKeyframe(frame, top) {
-  const existing = ss.scrollKeyframes.find((keyframe) => Math.abs(keyframe.top - top) <= 3);
-  // 已有锚点的 probe 与当时写入 scrollFrames 的像素一致；回滚重访时不覆盖，
-  // 否则动态内容可能让灰度召回和后续“已存原图复核”引用不同版本。
-  if (existing) return;
-  const probe = createGrayFingerprint(frame);
-  const reference = createVerticalReference(frame);
-  if (!probe || !reference) return;
-  ss.scrollKeyframes.push({ top, probe, reference });
-  if (ss.scrollKeyframes.length > MAX_SCROLL_KEYFRAMES) {
-    // 按空间位置均匀抽样，而不是按滚动历史的插入顺序抽样。反复回滚时，插入
-    // 顺序会聚集在局部，按其奇偶裁剪会意外丢掉远端锚点。
-    const ordered = [...ss.scrollKeyframes].sort((a, b) => a.top - b.top);
-    const thinned = [];
-    for (let index = 0; index < MAX_SCROLL_KEYFRAMES; index++) {
-      const sourceIndex = Math.round(index * (ordered.length - 1) / (MAX_SCROLL_KEYFRAMES - 1));
-      const keyframe = ordered[sourceIndex];
-      if (thinned.at(-1) !== keyframe) thinned.push(keyframe);
-    }
-    ss.scrollKeyframes = thinned;
-  }
+  session.scrollKeyframes = retainScrollKeyframe(session.scrollKeyframes, frame, top);
 }
 
 /**
@@ -405,7 +267,7 @@ function rememberScrollKeyframe(frame, top) {
  * @returns {ImageData|null} 合成后的长图
  */
 function compositeLongImage() {
-  return compositePositionedFrames(ss.scrollFrames)?.image || null;
+  return compositePositionedFrames(session.scrollFrames)?.image || null;
 }
 
 /**
@@ -415,27 +277,27 @@ function compositeLongImage() {
  * 需要调用 `enterAnnotationWithCropData`（index.js 提供）。
  */
 export async function enterScrollEdit() {
-  if (ss.scrollCapturePhase !== 'capturing') return;
-  if (ss.scrollFrames.length === 0) return;
+  if (session.scrollCapturePhase !== 'capturing') return;
+  if (session.scrollFrames.length === 0) return;
 
   // 先停止自动滚动（如果在运行）
-  if (ss.autoScroll) {
+  if (session.autoScroll) {
     await stopAutoScroll();
   }
   // 先阻止新 wheel。若已经进入最终 BitBlt，则让该帧完整提交；尚在防抖/稳定
   // 等待的任务随后通过代际失效，避免编辑快照与预览确认交叉。
   session.captureFinalizing = true;
-  if (ss._scrollCaptureTimer) {
-    clearTimeout(ss._scrollCaptureTimer);
-    ss._scrollCaptureTimer = 0;
+  if (session._scrollCaptureTimer) {
+    clearTimeout(session._scrollCaptureTimer);
+    session._scrollCaptureTimer = 0;
   }
   session.queuedManualWheel = null;
   const inFlight = session.captureInFlight;
   if (inFlight) await inFlight.catch(() => {});
   session.invalidate();
-  ss.scrollCapturePhase = 'finalizing';
+  session.scrollCapturePhase = 'finalizing';
 
-  ss.scrollCapturePhase = 'editing';
+  session.scrollCapturePhase = 'editing';
   session.captureFinalizing = false;
   hideCaptureFrame();
   const longImage = compositeLongImage();
@@ -472,7 +334,7 @@ export async function enterScrollEdit() {
  * 清理状态，隐藏专属工具栏和预览。
  */
 export async function exitScrollCapture(restoreSelection = true) {
-  const sourceRect = ss.scrollSourceRect ? { ...ss.scrollSourceRect } : null;
+  const sourceRect = session.scrollSourceRect ? { ...session.scrollSourceRect } : null;
   resetScrollCaptureState();
   const cleanupGeneration = session.captureGeneration;
 
@@ -531,70 +393,79 @@ export function isScrollCaptureActive() {
  * @param {WheelEvent} e
  */
 export function onScrollWheel(e) {
-  if (ss.scrollCapturePhase !== 'capturing' || session.captureFinalizing) return;
+  if (session.scrollCapturePhase !== 'capturing' || session.captureFinalizing) return;
   // 自动滚动模式下忽略手动 wheel
-  if (ss.autoScroll) return;
-  if (!ss.scrollHwnd) {
+  if (session.autoScroll) return;
+  if (!session.scrollHwnd) {
     ss._showTransientHint?.('未找到可滚动窗口');
     return;
   }
 
-  const modeScale = e.deltaMode === 1 ? 40 : (e.deltaMode === 2 ? ss.scrollBandH : 1);
+  const modeScale = e.deltaMode === 1 ? 40 : (e.deltaMode === 2 ? session.scrollBandH : 1);
   const rawDelta = e.deltaY * modeScale;
   if (rawDelta === 0) return;
   // 首个滚轮由 SendInput 补发，随后的真实输入在短时窗口穿透期内直达底层应用。
   const forwardedMagnitude = Math.max(1, Math.min(480, Math.round(Math.abs(rawDelta))));
   const delta = rawDelta > 0 ? -forwardedMagnitude : forwardedMagnitude;
-  ss.scrollPendingDirection = rawDelta > 0 ? 1 : -1;
+  session.scrollPendingDirection = rawDelta > 0 ? 1 : -1;
   session.manualWheelVersion++;
   const dpr = window.devicePixelRatio || 1;
   const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
   const cursorScreenX = Math.round(meta.vx + e.clientX * dpr);
   const cursorScreenY = Math.round(meta.vy + e.clientY * dpr);
 
-  queueManualWheel(delta, cursorScreenX, cursorScreenY);
+  queueManualWheel(session, delta, cursorScreenX, cursorScreenY);
 
   scheduleManualCapture();
 }
 
 function scheduleManualCapture() {
-  if (ss._scrollCaptureTimer) clearTimeout(ss._scrollCaptureTimer);
-  ss._scrollCaptureTimer = setTimeout(runSettledManualCapture, MANUAL_WHEEL_DEBOUNCE_MS);
+  if (session._scrollCaptureTimer) clearTimeout(session._scrollCaptureTimer);
+  session._scrollCaptureTimer = setTimeout(runSettledManualCapture, MANUAL_WHEEL_DEBOUNCE_MS);
 }
 
 async function runSettledManualCapture() {
-  ss._scrollCaptureTimer = 0;
-  if (ss.scrollCapturePhase !== 'capturing' || ss.autoScroll) return;
-  if (ss._scrollCapturing) {
+  session._scrollCaptureTimer = 0;
+  if (session.scrollCapturePhase !== 'capturing' || session.autoScroll) return;
+  if (session._scrollCapturing) {
     scheduleManualCapture();
     return;
   }
   const generation = session.captureGeneration;
-  ss._scrollCapturing = true;
+  session._scrollCapturing = true;
   let capturedWheelVersion = session.manualWheelVersion;
+  let settled = null;
   try {
     do {
       capturedWheelVersion = session.manualWheelVersion;
-      const settled = await waitForVisualSettle(generation);
+      settled = await waitForVisualSettle(session, generation);
       if (settled.aborted) return;
     } while (capturedWheelVersion !== session.manualWheelVersion);
-    if (!captureStillActive(generation) || ss.autoScroll) return;
-    const direction = ss.scrollPendingDirection;
-    const result = await captureFrame(direction);
-    ss.scrollPendingDirection = 0;
-    if (result.reason === 'no-match') {
-      const ambiguous = result.match?.reason === 'ambiguous';
-      ss._showTransientHint?.(ambiguous
+    if (!captureStillActive(generation) || session.autoScroll) return;
+    const direction = session.scrollPendingDirection;
+    let result = await captureFrame(direction, generation, { settle: settled });
+    if (result.reason === 'pending-confirmation'
+        && capturedWheelVersion === session.manualWheelVersion
+        && captureStillActive(generation)) {
+      const confirmationSettle = await waitForVisualSettle(session, generation);
+      if (confirmationSettle.aborted) return;
+      result = await captureFrame(0, generation, { settle: confirmationSettle });
+    }
+    session.scrollPendingDirection = 0;
+    if (['ambiguous', 'low-confidence', 'no-overlap', 'motion-timeout'].includes(result.reason)) {
+      ss._showTransientHint?.(result.reason === 'ambiguous'
         ? '页面存在重复内容，暂时无法唯一定位；请缓慢滚回最近已捕获区域'
         : '暂未找到可靠重叠；请缓慢滚回最近已捕获区域后继续');
+    } else if (result.reason === 'pending-confirmation') {
+      ss._showTransientHint?.('远距离定位尚未通过连续确认，请保持画面稳定后重试');
     } else if (result.relocalized && !result.appended) {
       ss._showTransientHint?.('已恢复到已捕获区域；越过长图边界后才会新增内容');
-    } else if (!result.moved && ss.scrollUnchangedCount >= 2) {
+    } else if (!result.moved && session.scrollUnchangedCount >= 2) {
       ss._showTransientHint?.('画面没有发生变化，请确认框选中心位于可滚动内容区域');
     }
   } finally {
-    ss._scrollCapturing = false;
-    if (captureStillActive(generation) && !ss.autoScroll
+    session._scrollCapturing = false;
+    if (captureStillActive(generation) && !session.autoScroll
         && capturedWheelVersion !== session.manualWheelVersion) {
       scheduleManualCapture();
     }
@@ -605,7 +476,7 @@ async function runSettledManualCapture() {
  * 切换滚动方向（纵向/横向）。
  */
 export function toggleScrollDirection() {
-  ss.scrollDirection = 'vertical';
+  session.scrollDirection = 'vertical';
   ss._showTransientHint?.('当前版本先保障纵向长截图，横向滚动暂未开放');
 }
 
@@ -614,28 +485,38 @@ export function toggleScrollDirection() {
  * 开启时调 Rust 端 PostMessage 驱动滚动 + 监听 tick 事件。
  */
 export async function toggleAutoScroll() {
-  if (ss.autoScroll) {
+  if (session.autoScroll) {
     await stopAutoScroll();
     return;
   }
-  if (!ss.scrollHwnd) {
+  if (!session.scrollHwnd) {
     ss._showTransientHint?.('未找到可滚动窗口');
     return;
   }
-  ss.autoScroll = true;
+  session.autoScroll = true;
   const generation = ++session.captureGeneration;
   session.autoWheelDelta = -120;
+  session.autoLowConfidenceCount = 0;
   const btn = document.getElementById('scroll-auto');
   if (btn) {
-    btn.classList.toggle('active', ss.autoScroll);
-    btn.title = ss.autoScroll ? '自动滚动中（点击停止）' : '自动滚动';
+    btn.classList.toggle('active', session.autoScroll);
+    btn.title = session.autoScroll ? '自动滚动中（点击停止）' : '自动滚动';
   }
 
-  void runAutoScrollLoop(generation);
+  void runAutoScrollController({
+    generation,
+    session,
+    isActive: captureStillActive,
+    waitForSettle: (gen, requireAuto) => waitForVisualSettle(session, gen, requireAuto),
+    captureFrame,
+    forwardWheel: (positionCursor) => forwardAutoWheel(session, positionCursor),
+    stop: stopAutoScroll,
+    delay,
+  });
 }
 
 async function stopAutoScroll(reason = null) {
-  ss.autoScroll = false;
+  session.autoScroll = false;
   session.invalidate();
   const btn = document.getElementById('scroll-auto');
   if (btn) {
@@ -645,58 +526,6 @@ async function stopAutoScroll(reason = null) {
   if (reason) ss._showTransientHint?.(reason);
 }
 
-function adaptAutoWheelDelta(result) {
-  const shift = Math.abs(result?.positionShift ?? result?.match?.shift ?? 0);
-  if (shift <= 0 || ss.scrollBandH <= 0) return;
-  const targetShift = ss.scrollBandH * 0.45;
-  const ratio = Math.max(0.65, Math.min(1.45, targetShift / shift));
-  const magnitude = Math.max(60, Math.min(240, Math.round(Math.abs(session.autoWheelDelta) * ratio)));
-  session.autoWheelDelta = -Math.max(30, Math.round(magnitude / 30) * 30);
-}
-
-async function runAutoScrollLoop(generation) {
-  let positionCursor = true;
-  let unchangedCount = 0;
-  while (captureStillActive(generation, true)) {
-    ss._scrollCapturing = true;
-    try {
-      await screenshotForwardWheel(
-        ss.scrollHwnd,
-        session.autoWheelDelta,
-        ss.scrollTargetX,
-        ss.scrollTargetY,
-        AUTO_WHEEL_PASSTHROUGH_MS,
-        positionCursor,
-      );
-      positionCursor = false;
-
-      const settled = await waitForVisualSettle(generation, true);
-      if (settled.aborted || !captureStillActive(generation, true)) return;
-      const result = await captureFrame(1);
-      if (result.moved) {
-        unchangedCount = 0;
-        adaptAutoWheelDelta(result);
-      } else if (result.reason === 'unchanged') {
-        unchangedCount++;
-        if (unchangedCount >= AUTO_UNCHANGED_LIMIT) {
-          await stopAutoScroll('已滚动到底，或目标窗口未响应滚轮');
-          return;
-        }
-      } else {
-        await stopAutoScroll('当前画面无法可靠配准，已暂停并保留已捕获内容');
-        return;
-      }
-    } catch (error) {
-      console.warn('[scroll] auto scroll failed', error);
-      await stopAutoScroll('自动滚动失败，已保留当前长图');
-      return;
-    } finally {
-      ss._scrollCapturing = false;
-    }
-    await delay(16);
-  }
-}
-
 /**
  * 输出长图（pin/保存/复制）。
  * 如果在 editing 阶段，先合成最终图。
@@ -704,29 +533,29 @@ async function runAutoScrollLoop(generation) {
  * @param {string} action - 'pin' | 'save' | 'copy'
  */
 export async function outputLongImage(action) {
-  if (ss.scrollCapturePhase === 'capturing') {
-    if (ss.autoScroll) await stopAutoScroll();
+  if (session.scrollCapturePhase === 'capturing') {
+    if (session.autoScroll) await stopAutoScroll();
     session.captureFinalizing = true;
-    if (ss._scrollCaptureTimer) {
-      clearTimeout(ss._scrollCaptureTimer);
-      ss._scrollCaptureTimer = 0;
+    if (session._scrollCaptureTimer) {
+      clearTimeout(session._scrollCaptureTimer);
+      session._scrollCaptureTimer = 0;
     }
     session.queuedManualWheel = null;
     const inFlight = session.captureInFlight;
     if (inFlight) await inFlight.catch(() => {});
     session.invalidate();
-    ss.scrollCapturePhase = 'finalizing';
+    session.scrollCapturePhase = 'finalizing';
   }
   // 从标注引擎获取编辑后的图（如果在 editing 阶段）
   // 否则直接合成 scrollFrames
   let pngData = null;
 
-  if (ss.scrollCapturePhase === 'editing' && ss._compositeSelection) {
+  if (session.scrollCapturePhase === 'editing' && ss._compositeSelection) {
     pngData = await ss._compositeSelection();
   } else {
     const longImage = compositeLongImage();
     if (!longImage) {
-      if (ss.scrollCapturePhase === 'finalizing') ss.scrollCapturePhase = 'capturing';
+      if (session.scrollCapturePhase === 'finalizing') session.scrollCapturePhase = 'capturing';
       session.captureFinalizing = false;
       return;
     }
@@ -734,18 +563,18 @@ export async function outputLongImage(action) {
   }
 
   if (!pngData) {
-    if (ss.scrollCapturePhase === 'finalizing') ss.scrollCapturePhase = 'capturing';
+    if (session.scrollCapturePhase === 'finalizing') session.scrollCapturePhase = 'capturing';
     session.captureFinalizing = false;
     return;
   }
 
-  const screenX = ss.scrollBandX;
-  const screenY = ss.scrollBandY;
+  const screenX = session.scrollBandX;
+  const screenY = session.scrollBandY;
 
   try {
     await outputScreenshotPng(action, pngData, screenX, screenY);
   } catch (error) {
-    if (ss.scrollCapturePhase === 'finalizing') ss.scrollCapturePhase = 'capturing';
+    if (session.scrollCapturePhase === 'finalizing') session.scrollCapturePhase = 'capturing';
     session.captureFinalizing = false;
     throw error;
   }
@@ -757,6 +586,7 @@ export async function outputLongImage(action) {
  * 在 index.js initDOM 后调用。
  */
 export function bindScrollToolbar() {
+  bindScrollDiagnostics(session, ss._showTransientHint);
   document.getElementById('scroll-direction')?.addEventListener('click', toggleScrollDirection);
   document.getElementById('scroll-auto')?.addEventListener('click', () => toggleAutoScroll());
   document.getElementById('scroll-edit')?.addEventListener('click', () => enterScrollEdit());

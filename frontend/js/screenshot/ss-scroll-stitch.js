@@ -96,9 +96,19 @@ export function estimateVerticalShift(prevFrame, currFrame, options = {}) {
 
   const matchThreshold = options.matchThreshold ?? DEFAULT_MATCH_THRESHOLD;
   const improvementRatio = options.improvementRatio ?? 0.8;
+  const rankedCandidates = [...candidates].sort((a, b) => a.score - b.score);
+  const second = rankedCandidates.find((candidate) => candidate.shift !== bestShift);
   // 必须既达到绝对阈值，又明显优于“没滚动”的对齐，避免动画/光标闪烁误判为滚动。
   if (bestScore > matchThreshold || bestScore >= sameScore * improvementRatio) {
-    return { status: 'no-match', shift: 0, score: bestScore, sameScore };
+    return {
+      status: 'no-match',
+      reason: bestScore > matchThreshold ? 'low-confidence' : 'no-overlap',
+      shift: 0,
+      candidateShift: bestShift,
+      score: bestScore,
+      secondScore: second?.score,
+      sameScore,
+    };
   }
   if (options.rejectAmbiguous) {
     const ambiguityDistance = options.ambiguityDistance ?? Math.max(12, h * 0.12);
@@ -113,14 +123,18 @@ export function estimateVerticalShift(prevFrame, currFrame, options = {}) {
         status: 'no-match',
         reason: 'ambiguous',
         shift: 0,
+        candidateShift: bestShift,
         score: bestScore,
+        secondScore: rival.score,
         sameScore,
         rivalShift: rival.shift,
         rivalScore: rival.score,
       };
     }
   }
-  return { status: 'matched', shift: bestShift, score: bestScore, sameScore };
+  return {
+    status: 'matched', shift: bestShift, score: bestScore, secondScore: second?.score, sameScore,
+  };
 }
 
 /**
@@ -208,6 +222,55 @@ export function extractPositionedViewport(frames, top, height) {
     }
   }
   return filledRows.every((filled) => filled === 1) ? result : null;
+}
+
+/**
+ * 直接从已提交的非重叠片段采样视口指纹，避免为了粗召回反复重建整张 RGBA 视口。
+ * 任一采样行缺失时拒绝返回，防止空洞被误当作黑色纹理参与匹配。
+ */
+function createPositionedProbeFromOrdered(ordered, top, height, maxWidth, maxHeight) {
+  if (!ordered?.length || !Number.isFinite(top) || height <= 0) return null;
+  const first = ordered[0];
+  if (!first) return null;
+  const sourceWidth = first.image.width;
+  const scale = Math.min(1, maxWidth / sourceWidth, maxHeight / height);
+  const width = Math.max(1, Math.round(sourceWidth * scale));
+  const probeHeight = Math.max(1, Math.round(height * scale));
+  const result = new ImageData(width, probeHeight);
+  let segmentIndex = 0;
+  for (let y = 0; y < probeHeight; y++) {
+    const documentY = top + Math.min(height - 1, Math.floor((y + 0.5) * height / probeHeight));
+    while (segmentIndex < ordered.length
+        && documentY >= ordered[segmentIndex].top + ordered[segmentIndex].image.height) {
+      segmentIndex++;
+    }
+    const resolved = ordered[segmentIndex];
+    if (!resolved || documentY < resolved.top
+        || documentY >= resolved.top + resolved.image.height
+        || resolved.image.width !== sourceWidth) return null;
+    const sourceY = Math.floor(documentY - resolved.top);
+    for (let x = 0; x < width; x++) {
+      const sourceX = Math.min(sourceWidth - 1, Math.floor((x + 0.5) * sourceWidth / width));
+      const sourceIndex = (sourceY * sourceWidth + sourceX) * 4;
+      const gray = Math.round(
+        resolved.image.data[sourceIndex] * 0.299
+        + resolved.image.data[sourceIndex + 1] * 0.587
+        + resolved.image.data[sourceIndex + 2] * 0.114,
+      );
+      const targetIndex = (y * width + x) * 4;
+      result.data[targetIndex] = gray;
+      result.data[targetIndex + 1] = gray;
+      result.data[targetIndex + 2] = gray;
+      result.data[targetIndex + 3] = 255;
+    }
+  }
+  return result;
+}
+
+export function createPositionedProbe(frames, top, height,
+  maxWidth = DEFAULT_PROBE_WIDTH, maxHeight = DEFAULT_PROBE_HEIGHT) {
+  const ordered = frames?.filter((item) => item?.image).sort((a, b) => a.top - b.top);
+  return createPositionedProbeFromOrdered(ordered, top, height, maxWidth, maxHeight);
 }
 
 /**
@@ -320,6 +383,94 @@ export function relocalizeFromKeyframes(frames, keyframes, currFrame, currentTop
     ? 'nearby'
     : 'global';
   return { ...selected, scope };
+}
+
+/**
+ * 关键帧召回失败后的有界内容分区召回。粗阶段只采样少量视口指纹，精阶段才
+ * 重建原分辨率候选；候选唯一性仍复用 selectRelocalizationCandidate 守门。
+ */
+export function relocalizeFromPositionedContent(frames, currFrame, currentTop,
+  expectedDirection = 0, options = {}) {
+  if (!currFrame) return null;
+  const bounds = positionedFrameBounds(frames);
+  const currentProbe = createGrayFingerprint(currFrame);
+  const currentReference = createVerticalReference(currFrame);
+  if (!bounds || !currentProbe || !currentReference || bounds.height < currFrame.height) return null;
+  const minTop = bounds.top;
+  const maxTop = bounds.bottom - currFrame.height;
+  const direction = options.trackingLost ? 0 : Math.sign(expectedDirection);
+  const orderedFrames = frames.filter((item) => item?.image).sort((a, b) => a.top - b.top);
+  const step = Math.max(12, Math.floor(currFrame.height * (options.partitionStepRatio ?? 0.45)));
+  const anchors = new Set([minTop, maxTop, Math.max(minTop, Math.min(maxTop, currentTop))]);
+  for (let top = minTop; top <= maxTop; top += step) anchors.add(top);
+  const prioritized = [...anchors].sort((a, b) => {
+    if (direction > 0) {
+      const ap = a >= currentTop ? 0 : 1;
+      const bp = b >= currentTop ? 0 : 1;
+      if (ap !== bp) return ap - bp;
+    } else if (direction < 0) {
+      const ap = a <= currentTop ? 0 : 1;
+      const bp = b <= currentTop ? 0 : 1;
+      if (ap !== bp) return ap - bp;
+    }
+    return Math.abs(a - currentTop) - Math.abs(b - currentTop);
+  }).slice(0, options.maxPartitions ?? 256);
+
+  const coarse = [];
+  for (const anchorTop of prioritized) {
+    const anchorProbe = createPositionedProbeFromOrdered(
+      orderedFrames,
+      anchorTop,
+      currFrame.height,
+      DEFAULT_PROBE_WIDTH,
+      DEFAULT_PROBE_HEIGHT,
+    );
+    if (!anchorProbe) continue;
+    const probeMatch = estimateVerticalShift(anchorProbe, currentProbe, {
+      maxShift: currentProbe.height - 9,
+      matchThreshold: options.probeMatchThreshold ?? 26,
+      sampleRows: options.probeSampleRows ?? 10,
+      sampleCols: options.probeSampleCols ?? 12,
+      rejectAmbiguous: true,
+    });
+    if (probeMatch.status !== 'matched' && probeMatch.status !== 'unchanged') continue;
+    const scaledShift = probeMatch.shift * currFrame.height / currentProbe.height;
+    const top = Math.round(anchorTop + scaledShift);
+    if (top < minTop || top > maxTop) continue;
+    coarse.push({ anchorTop, top, score: probeMatch.score });
+  }
+
+  const coarseTolerance = Math.max(4, Math.floor(step * 0.35));
+  const distinct = [];
+  for (const candidate of coarse.sort((a, b) => a.score - b.score)) {
+    if (!distinct.some((item) => Math.abs(item.top - candidate.top) <= coarseTolerance)) {
+      distinct.push(candidate);
+    }
+  }
+  const confirmed = [];
+  for (const candidate of distinct.slice(0, options.maxFullCandidates ?? 8)) {
+    const viewport = extractPositionedViewport(frames, candidate.top, currFrame.height);
+    const reference = createVerticalReference(viewport);
+    if (!reference) continue;
+    const match = estimateVerticalShift(reference, currentReference, {
+      maxShift: Math.max(1, Math.floor(currFrame.height * 0.2)),
+      matchThreshold: options.referenceMatchThreshold ?? 18,
+      improvementRatio: options.referenceImprovementRatio ?? 0.72,
+      rejectAmbiguous: true,
+    });
+    if (match.status !== 'matched' && match.status !== 'unchanged') continue;
+    const top = Math.round(candidate.top + match.shift);
+    if (top < minTop || top > maxTop) continue;
+    confirmed.push({
+      top,
+      score: match.score,
+      match,
+      anchorTop: candidate.anchorTop,
+      partitionTop: candidate.top,
+    });
+  }
+  const selected = selectRelocalizationCandidate(confirmed, currFrame.height, options);
+  return selected ? { ...selected, scope: 'content' } : null;
 }
 
 /** 返回带绝对 top 的完整帧覆盖范围。 */

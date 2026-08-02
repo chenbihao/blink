@@ -22,6 +22,11 @@ const SESSION_DEFAULTS = Object.freeze({
   scrollCurrentTop: 0,
   scrollPendingDirection: 0,
   scrollUnchangedCount: 0,
+  scrollLastDecision: null,
+  scrollDecisions: null,
+  scrollReplayFrames: null,
+  scrollReplayBytes: 0,
+  scrollPendingJump: null,
   _scrollCapturing: false,
   _scrollCaptureTimer: 0,
 });
@@ -33,6 +38,7 @@ export class ScrollCaptureSession {
     this.captureGeneration = 0;
     this.manualWheelVersion = 0;
     this.autoWheelDelta = -120;
+    this.autoLowConfidenceCount = 0;
     this.wheelForwardPending = false;
     this.queuedManualWheel = null;
     this.captureInFlight = null;
@@ -58,12 +64,15 @@ export class ScrollCaptureSession {
     this.invalidate();
     if (this._scrollCaptureTimer) clearTimeout(this._scrollCaptureTimer);
     for (const [key, value] of Object.entries(SESSION_DEFAULTS)) {
-      this[key] = value === null && (key === 'scrollFrames' || key === 'scrollKeyframes')
+      this[key] = value === null && [
+        'scrollFrames', 'scrollKeyframes', 'scrollDecisions', 'scrollReplayFrames',
+      ].includes(key)
         ? []
         : value;
     }
     this.manualWheelVersion = 0;
     this.autoWheelDelta = -120;
+    this.autoLowConfidenceCount = 0;
     this.queuedManualWheel = null;
     this.captureFinalizing = false;
   }

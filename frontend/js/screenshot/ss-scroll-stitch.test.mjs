@@ -18,11 +18,13 @@ globalThis.ImageData = class ImageData {
 const {
   compositePositionedFrames,
   createGrayFingerprint,
+  createPositionedProbe,
   createVerticalReference,
   estimateVerticalShift,
   extractPositionedViewport,
   planPositionedIncrement,
   relocalizeFromKeyframes,
+  relocalizeFromPositionedContent,
   selectRelocalizationCandidate,
 } = await import(
   'data:text/javascript;base64,'
@@ -143,6 +145,11 @@ for (let top = 0; top <= 900; top += 45) {
 const rebuilt = extractPositionedViewport(longCaptures, 135, 90);
 assert.ok(rebuilt, '应能从定位片段按需重建完整视口');
 assert.deepEqual(rebuilt.data, documentFrame(135).data);
+assert.deepEqual(
+  createPositionedProbe(longCaptures, 135, 90).data,
+  createGrayFingerprint(documentFrame(135)).data,
+  '分区粗召回应直接从已提交片段采样出等价指纹',
+);
 
 const boundedReference = createVerticalReference(documentFrame(0, 240, 180));
 assert.equal(boundedReference.width, 96, '精配参考必须限制横向内存');
@@ -221,6 +228,48 @@ assert.equal(
   relocalizeFromKeyframes(longCaptures, keyframes, unrelatedFrame(20260802), 450, 1),
   null,
   '完全无视觉重叠时不得凭空推断新位置',
+);
+
+const contentRecovered = relocalizeFromPositionedContent(
+  longCaptures,
+  documentFrame(400),
+  900,
+  -1,
+  { trackingLost: true },
+);
+assert.equal(contentRecovered?.top, 400, '关键帧缺失时应能从已拼接内容分区恢复位置');
+assert.equal(contentRecovered?.scope, 'content');
+
+const veryLongCaptures = [];
+for (let top = 0; top <= 7200; top += 45) {
+  veryLongCaptures.push({ image: documentFrame(top), top });
+}
+assert.equal(
+  relocalizeFromPositionedContent(
+    veryLongCaptures,
+    documentFrame(400),
+    7200,
+    -1,
+    { trackingLost: true },
+  )?.top,
+  400,
+  '有界分区召回仍应覆盖超过 48 个视口锚点的超长内容',
+);
+
+const repeatingCaptures = [];
+for (let top = 0; top <= 300; top += 30) {
+  repeatingCaptures.push({ image: repeatingFrame(top), top });
+}
+assert.equal(
+  relocalizeFromPositionedContent(
+    repeatingCaptures,
+    repeatingFrame(10),
+    150,
+    0,
+    { trackingLost: true },
+  ),
+  null,
+  '重复分区存在多个近似位置时不得强行恢复',
 );
 
 assert.equal(

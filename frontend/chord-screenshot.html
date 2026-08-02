@@ -56,6 +56,11 @@
     <!-- 0.15.7：长截图实时预览缩略图（右侧 fixed 定位） -->
     <canvas id="scroll-preview" class="scroll-preview hidden" aria-hidden="true" width="120" height="200"></canvas>
 
+    <div id="scroll-diagnostics" class="scroll-diagnostics hidden" aria-live="polite">
+      <span id="scroll-diagnostics-text">等待首帧</span>
+      <button id="scroll-diagnostics-export" type="button">导出回放</button>
+    </div>
+
     <!-- 长截图采集边界：overlay 已从 BitBlt 排除，仅用于范围提示。 -->
     <div id="scroll-capture-frame" class="scroll-capture-frame hidden" aria-hidden="true"></div>
 

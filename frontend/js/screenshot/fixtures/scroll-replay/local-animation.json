@@ -1,0 +1,9 @@
+{
+  "name": "local-animation",
+  "generator": "animated-document",
+  "frames": [
+    { "top": 0, "direction": 0, "variant": 0, "accepted": true, "reason": "first-frame", "confirmedTop": 0 },
+    { "top": 18, "direction": 1, "variant": 1, "accepted": true, "reason": "matched", "confirmedTop": 18 },
+    { "top": 36, "direction": 1, "variant": 2, "accepted": true, "reason": "matched", "confirmedTop": 36 }
+  ]
+}

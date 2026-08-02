@@ -1562,6 +1562,38 @@ html, body {
   display: none;
 }
 
+/* 仅 ?scrollDebug=1 显示的长截图开发诊断。 */
+.scroll-diagnostics {
+  position: fixed;
+  left: var(--space-md);
+  bottom: var(--space-md);
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  max-width: calc(100vw - var(--space-lg) * 2);
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+}
+
+.scroll-diagnostics.hidden {
+  display: none;
+}
+
+.scroll-diagnostics button {
+  flex: 0 0 auto;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: var(--space-xs) var(--space-sm);
+  background: transparent;
+  color: var(--accent);
+}
+
 /* 长截图采集范围。独立于截图 canvas，清除蒙版后仍保留范围参照。 */
 .scroll-capture-frame {
   position: fixed;
