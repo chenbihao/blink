@@ -1,6 +1,7 @@
 //! 长截图自动滚动速度反馈。纯函数，不负责注入滚轮或会话生命周期。
 
 const AUTO_UNCHANGED_LIMIT = 5;
+const AUTO_DELAYED_MOTION_RECHECK_MS = 90;
 
 function quantizeWheelMagnitude(value) {
   return Math.max(60, Math.min(240, Math.round(value / 30) * 30));
@@ -39,7 +40,7 @@ export function nextAutoWheelState(state, result, bandHeight, settle = {}) {
 export async function runAutoScrollController(options) {
   const {
     generation, session, isActive, waitForSettle, captureFrame,
-    forwardWheel, stop, delay,
+    forwardWheel, previewWheel, stop, delay,
   } = options;
 
   const recoverTracking = async () => {
@@ -56,7 +57,7 @@ export async function runAutoScrollController(options) {
 
   let positionCursor = true;
   let unchangedCount = 0;
-  if (session.scrollTrackingState === 'lost') {
+  if (session.scrollTrackingState !== 'tracking') {
     const recovered = await recoverTracking();
     if (!recovered?.moved) {
       await stop('当前位置仍无法恢复定位；请手动滚回已捕获区域');
@@ -71,11 +72,22 @@ export async function runAutoScrollController(options) {
       // 先重新定位光标，再绕过 SendInput 直接向已识别的目标 HWND 发消息。
       positionCursor = positionCursor || unchangedCount >= 1;
       const forceMessage = unchangedCount >= 2;
+      const wheelStartedAtMs = performance.now();
+      previewWheel?.(1);
       await forwardWheel(positionCursor, forceMessage);
       positionCursor = false;
-      const settled = await waitForSettle(generation, true);
+      let settled = await waitForSettle(generation, true);
       if (settled.aborted || !isActive(generation, true)) return;
-      let result = await captureFrame(1, generation, { settle: settled });
+      let result = await captureFrame(1, generation, { settle: settled, wheelStartedAtMs });
+      // 目标窗口繁忙时，快路径可能在滚轮真正生效前得到 unchanged。复用同一次
+      // wheel 做一次延迟采集，避免继续注入滚轮并造成后续大跨度跳转。
+      if (result.reason === 'unchanged') {
+        await delay(AUTO_DELAYED_MOTION_RECHECK_MS);
+        if (!isActive(generation, true)) return;
+        settled = await waitForSettle(generation, true);
+        if (settled.aborted || !isActive(generation, true)) return;
+        result = await captureFrame(1, generation, { settle: settled, wheelStartedAtMs });
+      }
       if (result.reason === 'pending-confirmation') {
         result = await recoverTracking();
         if (!result) return;

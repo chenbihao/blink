@@ -5,6 +5,10 @@ import { screenshotSaveReplayFile } from '../../shared/api.js';
 
 const MAX_REPLAY_FRAMES = 256;
 const MAX_REPLAY_BYTES = 256 * 1024 * 1024;
+const CALIBRATION_SCHEMA_VERSION = 3;
+const TIMING_KEYS = [
+  'settleMs', 'captureMs', 'trackMs', 'commitMs', 'previewMs', 'totalLatencyMs',
+];
 
 export function scrollDiagnosticsEnabled() {
   if (new URLSearchParams(window.location.search).get('scrollDebug') === '1') return true;
@@ -42,7 +46,10 @@ export function recordScrollDiagnostic(session, frame, decision, metadata = {}) 
       capturedAtMs: Math.round(performance.now()),
       expectedDirection: decision.expectedDirection,
       settle: metadata.settle || null,
+      timing: metadata.timing || null,
+      tracking: metadata.tracking || null,
       decision,
+      calibration: decision.calibration || null,
     });
     session.scrollReplayBytes += frameBytes;
   }
@@ -50,8 +57,88 @@ export function recordScrollDiagnostic(session, frame, decision, metadata = {}) 
   if (text) {
     const score = decision.bestScore == null ? '—' : decision.bestScore.toFixed(2);
     const confidence = Math.round(decision.confidence * 100);
-    text.textContent = `top ${decision.candidateTop ?? '—'} · ${decision.source} · ${decision.reason} · ${confidence}% · score ${score}`;
+    const latency = metadata.timing?.totalLatencyMs;
+    const timingText = Number.isFinite(latency) ? ` · ${Math.round(latency)}ms` : '';
+    text.textContent = `top ${decision.candidateTop ?? '—'} · ${decision.source} · ${decision.reason} · ${confidence}% · score ${score}${timingText}`;
   }
+}
+
+function incrementCounter(target, key) {
+  const normalized = key || 'unknown';
+  target[normalized] = (target[normalized] || 0) + 1;
+}
+
+export function buildCalibrationSummary(frames) {
+  const summary = {
+    schemaVersion: CALIBRATION_SCHEMA_VERSION,
+    frameCount: frames.length,
+    acceptedCount: 0,
+    rejectedCount: 0,
+    reasons: {},
+    sources: {},
+    tracking: { transitions: {}, becameLostCount: 0 },
+    positionedOverlap: {
+      checkedCount: 0,
+      consistentCount: 0,
+      conflictCount: 0,
+      insufficientCount: 0,
+      insufficientDetailCount: 0,
+      unavailableCount: 0,
+    },
+    confidence: { count: 0, min: null, max: null, average: null },
+    timing: Object.fromEntries(TIMING_KEYS.map((key) => [key, {
+      count: 0, min: null, max: null, average: null,
+    }])),
+  };
+  let confidenceTotal = 0;
+  const timingTotals = Object.fromEntries(TIMING_KEYS.map((key) => [key, 0]));
+  for (const captured of frames) {
+    const decision = captured.decision || {};
+    if (decision.accepted) summary.acceptedCount++;
+    else summary.rejectedCount++;
+    incrementCounter(summary.reasons, decision.reason);
+    incrementCounter(summary.sources, decision.source);
+    const before = captured.tracking?.before;
+    const after = captured.tracking?.after;
+    if (before && after) incrementCounter(summary.tracking.transitions, `${before}->${after}`);
+    if (captured.tracking?.becameLost) summary.tracking.becameLostCount++;
+    if (Number.isFinite(decision.confidence)) {
+      summary.confidence.count++;
+      confidenceTotal += decision.confidence;
+      summary.confidence.min = summary.confidence.min == null
+        ? decision.confidence : Math.min(summary.confidence.min, decision.confidence);
+      summary.confidence.max = summary.confidence.max == null
+        ? decision.confidence : Math.max(summary.confidence.max, decision.confidence);
+    }
+    const status = captured.calibration?.positionedOverlap?.status;
+    const statusCounter = status === 'insufficient-detail'
+      ? 'insufficientDetailCount' : `${status}Count`;
+    if (status && statusCounter in summary.positionedOverlap) {
+      summary.positionedOverlap[statusCounter]++;
+    }
+    if (status === 'consistent' || status === 'conflict') {
+      summary.positionedOverlap.checkedCount++;
+    }
+    for (const key of TIMING_KEYS) {
+      const value = captured.timing?.[key];
+      if (!Number.isFinite(value)) continue;
+      const stats = summary.timing[key];
+      stats.count++;
+      stats.min = stats.min == null ? value : Math.min(stats.min, value);
+      stats.max = stats.max == null ? value : Math.max(stats.max, value);
+      timingTotals[key] += value;
+    }
+  }
+  if (summary.confidence.count) {
+    summary.confidence.average = Math.round(
+      confidenceTotal / summary.confidence.count * 1000,
+    ) / 1000;
+  }
+  for (const key of TIMING_KEYS) {
+    const stats = summary.timing[key];
+    if (stats.count) stats.average = Math.round(timingTotals[key] / stats.count * 10) / 10;
+  }
+  return summary;
 }
 
 async function imageDataToPngBlob(image) {
@@ -81,7 +168,10 @@ export async function exportScrollReplay(session) {
       capturedAtMs: captured.capturedAtMs,
       expectedDirection: captured.expectedDirection,
       settle: captured.settle,
+      timing: captured.timing || null,
+      tracking: captured.tracking || null,
       expectedDecision: captured.decision,
+      calibration: captured.calibration || null,
     });
   }
   const manifest = {
@@ -90,6 +180,7 @@ export async function exportScrollReplay(session) {
     decisionSchemaVersion: SCROLL_DECISION_SCHEMA_VERSION,
     createdAt: new Date().toISOString(),
     frameCount: frames.length,
+    calibrationSummary: buildCalibrationSummary(session.scrollReplayFrames),
     frames,
   };
   const manifestBytes = new TextEncoder().encode(JSON.stringify(manifest, null, 2));

@@ -1,7 +1,9 @@
 //! 长截图离线回放执行器。输入已解码的完整帧，复用生产追踪决策并返回确定性摘要。
 
 import { commitTrackedFrame } from './stitch.js';
-import { rememberScrollKeyframe, trackScrollFrame } from './tracker.js';
+import {
+  rememberScrollKeyframe, trackScrollFrame, transitionScrollTracking,
+} from './tracker.js';
 
 export function replayScrollSequence(sequence) {
   const state = {
@@ -21,24 +23,16 @@ export function replayScrollSequence(sequence) {
     });
     decisions.push(tracked.decision);
     state.pendingJump = tracked.pendingJump;
+    const tracking = transitionScrollTracking(state, tracked);
+    state.trackingState = tracking.trackingState;
+    state.lostFrameCount = tracking.lostFrameCount;
     if (!tracked.decision.accepted) {
-      const rejectedRecovery = tracked.decision.reason === 'low-confidence'
-        && tracked.decision.source !== 'adjacent';
-      if (tracked.match?.status === 'no-match' || rejectedRecovery) {
-        state.trackingState = 'lost';
-      }
-      if (tracked.match?.status === 'no-match' || rejectedRecovery
-          || tracked.decision.reason === 'pending-confirmation') {
-        state.lostFrameCount++;
-      }
       continue;
     }
     const committed = commitTrackedFrame(state.frames, state.lastFrame, captured.frame, tracked);
     state.frames = committed.frames;
     state.currentTop = tracked.nextTop;
     state.lastFrame = captured.frame;
-    state.trackingState = 'tracking';
-    state.lostFrameCount = 0;
     state.keyframes = rememberScrollKeyframe(
       state.keyframes,
       committed.committedFrame,

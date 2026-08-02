@@ -21,6 +21,8 @@ const SESSION_DEFAULTS = Object.freeze({
   scrollTrackingState: 'tracking',
   scrollLostFrameCount: 0,
   scrollCurrentTop: 0,
+  scrollLastAcceptedShift: 0,
+  scrollWheelStartedAtMs: null,
   scrollPendingDirection: 0,
   scrollUnchangedCount: 0,
   scrollLastDecision: null,

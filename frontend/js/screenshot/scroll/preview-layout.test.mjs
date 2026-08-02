@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { computePreviewPosition } from './preview-layout.js';
+import { computePredictedLocatorTop, computePreviewPosition } from './preview-layout.js';
 
 assert.deepEqual(computePreviewPosition({
   rect: { x: 100, y: 80, w: 500, h: 300 },
@@ -18,5 +18,18 @@ assert.deepEqual(computePreviewPosition({
   direction: 'horizontal', viewportWidth: 1000, viewportHeight: 700,
   previewWidth: 120, previewHeight: 200, gap: 8,
 }), { left: 20, top: 292 }, '下方不足时移到选区上方');
+
+assert.equal(computePredictedLocatorTop({
+  currentTop: 300, pendingTop: null, direction: 1,
+  lastAcceptedShift: 120, viewportHeight: 300,
+}), 420, '优先沿用最近一次已确认位移');
+assert.equal(computePredictedLocatorTop({
+  currentTop: 300, pendingTop: 420, direction: 1,
+  lastAcceptedShift: 120, viewportHeight: 300,
+}), 540, '连续滚轮应累积预测但不修改真实坐标');
+assert.equal(computePredictedLocatorTop({
+  currentTop: 300, pendingTop: 540, direction: 1,
+  lastAcceptedShift: 300, viewportHeight: 300,
+}), 540, '预测范围必须限制在当前视口的 80% 内');
 
 console.log('scroll preview layout tests passed');

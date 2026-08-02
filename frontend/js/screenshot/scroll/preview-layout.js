@@ -31,3 +31,26 @@ export function computePreviewPosition(options) {
     top: clamp(preferredTop, gap, viewportHeight - previewHeight - gap),
   };
 }
+
+/** 滚轮发生后、真实定位完成前，仅供预览框使用的有界预测坐标。 */
+export function computePredictedLocatorTop(options) {
+  const {
+    currentTop, pendingTop, direction, lastAcceptedShift, viewportHeight,
+  } = options;
+  const normalizedDirection = Math.sign(direction || 0);
+  if (!normalizedDirection || !Number.isFinite(currentTop) || viewportHeight <= 0) {
+    return currentTop;
+  }
+  const previousMagnitude = Math.abs(lastAcceptedShift || 0);
+  const magnitude = clamp(
+    previousMagnitude || viewportHeight * 0.35,
+    viewportHeight * 0.15,
+    viewportHeight * 0.65,
+  );
+  const base = Number.isFinite(pendingTop) ? pendingTop : currentTop;
+  return Math.round(clamp(
+    base + normalizedDirection * magnitude,
+    currentTop - viewportHeight * 0.8,
+    currentTop + viewportHeight * 0.8,
+  ));
+}

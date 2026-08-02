@@ -82,9 +82,10 @@ ICON_LIST = [
     "pipette",            # 取色按钮（0.15.12：吸管图标）
     "gallery-horizontal", # 长截图（旧，保留兼容）
     "gallery-vertical",   # 长截图（0.15.7：纵向画廊图标）
+    "gallery-vertical-end", # 长截图自动滚动
     "rectangle-vertical",   # 长截图方向-纵向
     "rectangle-horizontal", # 长截图方向-横向
-    "hand-grab",             # 长截图自动滚动
+    "hand-grab",             # 拖拽语义（保留兼容）
     "pencil-sparkles",       # 长截图编辑长图
     "stamp",            # 水印（0.11.8-c）——印章语义
     "ticket-slash",     # 荧光笔（0.11.8-c）——斜线穿越条状代表笔画

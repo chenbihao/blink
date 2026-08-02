@@ -131,7 +131,7 @@ const TOOL_GROUPS = {
   text: 'text', watermark: 'text',
   number: 'text',
   pixelate: 'blur', blur: 'blur',
-  // 0.15.12：mosaic 合并到 pixelate（画笔模式自动走涂抹逻辑），保留映射以防旧数据
+  // 0.15.12：mosaic 合并到 pixelate，保留映射以兼容旧命令数据
   eraser: 'eraser',
 };
 

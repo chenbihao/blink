@@ -44,7 +44,7 @@
     <!-- 0.15.7：长截图专属工具栏（拼接中阶段显示，默认隐藏） -->
     <div id="scroll-toolbar" class="scroll-toolbar hidden" role="toolbar" aria-label="长截图工具栏">
       <button class="tool-btn hidden" id="scroll-direction" title="当前仅支持纵向长截图"><svg class="icon" aria-hidden="true"><use href="#icon-rectangle-vertical"/></svg></button>
-      <button class="tool-btn" id="scroll-auto" title="自动滚动"><svg class="icon" aria-hidden="true"><use href="#icon-hand-grab"/></svg></button>
+      <button class="tool-btn" id="scroll-auto" title="自动滚动"><svg class="icon" aria-hidden="true"><use href="#icon-gallery-vertical-end"/></svg></button>
       <button class="tool-btn" id="scroll-edit" title="编辑长图"><svg class="icon" aria-hidden="true"><use href="#icon-pencil-sparkles"/></svg></button>
       <div class="toolbar-divider"></div>
       <button class="tool-btn" id="scroll-pin" title="钉图"><svg class="icon" aria-hidden="true"><use href="#icon-pin"/></svg></button>
@@ -135,7 +135,7 @@
         </div>
       </div>
 
-      <!-- 马赛克分组：马赛克/高斯模糊（0.15.12：涂抹合并到马赛克，框选=马赛克，画笔=涂抹）
+      <!-- 马赛克分组：马赛克/高斯模糊（框选与画笔均使用像素块马赛克，覆盖形状不同）
            0.15.8-fix：hover 自动展开 -->
       <div class="dropdown-wrap">
         <button class="tool-btn split-main" id="blur-main" data-tool="pixelate" title="马赛克">

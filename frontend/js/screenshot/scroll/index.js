@@ -31,7 +31,11 @@ import { findWindowForRect } from '../ss-hover.js';
 import {
   commitTrackedFrame, compositePositionedFrames,
 } from './stitch.js';
-import { rememberScrollKeyframe as retainScrollKeyframe, trackScrollFrame } from './tracker.js';
+import {
+  rememberScrollKeyframe as retainScrollKeyframe,
+  trackScrollFrame,
+  transitionScrollTracking,
+} from './tracker.js';
 import { runAutoScrollController } from './auto.js';
 import {
   captureBandFrame, delay, forwardAutoWheel, MANUAL_WHEEL_DEBOUNCE_MS,
@@ -42,10 +46,16 @@ import {
 } from './diagnostics.js';
 import { encodeImageDataPng, outputScreenshotPng } from '../ss-output.js';
 import {
-  hideCaptureFrame, positionPreview, SCROLL_PREVIEW_GAP, showCaptureFrame, updatePreview,
+  hideCaptureFrame, positionPreview, resetPreviewRendering, SCROLL_PREVIEW_GAP,
+  showCaptureFrame, showPredictedPreview, updatePreview,
 } from './preview.js';
 
 const session = ss.scrollSession;
+const DELAYED_MOTION_RECHECK_MS = 90;
+
+function roundedMs(value) {
+  return Number.isFinite(value) ? Math.round(value * 10) / 10 : null;
+}
 
 function captureStillActive(generation, requireAuto = false) {
   return generation === session.captureGeneration
@@ -87,6 +97,7 @@ export async function enterScrollCapture(rect) {
   session.scrollPendingDirection = 0;
   session.scrollUnchangedCount = 0;
   session.scrollCapturePhase = 'capturing';
+  resetPreviewRendering();
   resetScrollDiagnostics(session);
 
   // 优先锁定框选区域实际覆盖的外部窗口；兜底使用 Blink 唤起前保存的前台窗口。
@@ -178,9 +189,17 @@ async function captureFrameOnce(expectedDirection = 0, generation = session.capt
   if (w <= 0 || h <= 0) return { appended: false, reason: 'invalid-band' };
 
   try {
+    const captureStartedAt = performance.now();
     // 调用 Rust 端 fresh BitBlt 采集（WDA_EXCLUDEFROMCAPTURE 已设，overlay 不可见）
     const captured = await captureBandFrame(session);
+    const captureFinishedAt = performance.now();
     if (!captureStillActive(generation)) return { appended: false, reason: 'aborted' };
+    // BitBlt 等待期间可能又收到滚轮。旧帧不得推进定位、pendingJump 或 lost 状态；
+    // 新版本会由手动采集调度器重新等待稳定后统一处理。
+    if (Number.isInteger(metadata.wheelVersion)
+        && metadata.wheelVersion !== session.manualWheelVersion) {
+      return { appended: false, reason: 'superseded' };
+    }
     if (!captured.frame) {
       console.warn('[scroll] captureBand 返回数据不足', {
         expected: captured.expected,
@@ -189,6 +208,8 @@ async function captureFrameOnce(expectedDirection = 0, generation = session.capt
       return { appended: false, reason: captured.reason };
     }
     const frame = captured.frame;
+    const trackStartedAt = performance.now();
+    const trackingStateBefore = session.scrollTrackingState;
     const tracked = trackScrollFrame({
       frames: session.scrollFrames,
       keyframes: session.scrollKeyframes,
@@ -201,50 +222,95 @@ async function captureFrameOnce(expectedDirection = 0, generation = session.capt
       expectedDirection,
       motionTimedOut: metadata.settle?.timedOut === true,
     });
+    const trackFinishedAt = performance.now();
     const { decision, match, relocalized, placement } = tracked;
     session.scrollPendingJump = tracked.pendingJump;
-    recordScrollDiagnostic(session, frame, decision, metadata);
+    const tracking = transitionScrollTracking(session, tracked);
+    session.scrollTrackingState = tracking.trackingState;
+    session.scrollLostFrameCount = tracking.lostFrameCount;
+    const trackingDiagnostic = {
+      before: trackingStateBefore,
+      after: tracking.trackingState,
+      failureCount: tracking.lostFrameCount,
+      becameLost: tracking.becameLost,
+    };
     if (!decision.accepted) {
-      const rejectedRecovery = decision.reason === 'low-confidence'
-        && decision.source !== 'adjacent';
-      if (match.status === 'no-match' || rejectedRecovery) {
-        session.scrollTrackingState = 'lost';
-      }
-      if (match.status === 'no-match' || rejectedRecovery
-          || decision.reason === 'pending-confirmation') {
-        session.scrollLostFrameCount = (session.scrollLostFrameCount || 0) + 1;
-      }
       session.scrollUnchangedCount++;
-      updatePreview();
+      const preservePrediction = Number.isInteger(metadata.wheelVersion)
+        && metadata.wheelVersion !== session.manualWheelVersion;
+      const candidateTop = decision.reason === 'pending-confirmation'
+        && Number.isFinite(decision.candidateTop)
+        ? decision.candidateTop
+        : null;
+      const previewMs = updatePreview({ preservePrediction, candidateTop });
+      const completedAt = performance.now();
+      recordScrollDiagnostic(session, frame, decision, {
+        ...metadata,
+        tracking: trackingDiagnostic,
+        timing: {
+          settleMs: metadata.settle?.elapsedMs ?? null,
+          captureMs: roundedMs(captureFinishedAt - captureStartedAt),
+          trackMs: roundedMs(trackFinishedAt - trackStartedAt),
+          commitMs: 0,
+          previewMs: roundedMs(previewMs),
+          totalLatencyMs: roundedMs(completedAt
+            - (metadata.wheelStartedAtMs ?? captureStartedAt)),
+        },
+      });
       console.debug('[scroll] frame ignored', {
         reason: decision.reason,
         source: decision.source,
         score: decision.bestScore,
         unchangedCount: session.scrollUnchangedCount,
       });
-      return { appended: false, reason: decision.reason, match, decision };
+      return {
+        appended: false,
+        reason: decision.reason,
+        match,
+        decision,
+        trackingState: tracking.trackingState,
+        becameLost: tracking.becameLost,
+      };
     }
 
     const previousTop = session.scrollCurrentTop;
     session.scrollCurrentTop = tracked.nextTop;
+    const commitStartedAt = performance.now();
     const committed = commitTrackedFrame(
       session.scrollFrames,
       session.scrollLastFrame,
       frame,
       tracked,
     );
+    const commitFinishedAt = performance.now();
     session.scrollFrames = committed.frames;
     const addedRows = committed.addedRows;
     const extendsRange = addedRows > 0;
-    session.scrollTrackingState = 'tracking';
-    session.scrollLostFrameCount = 0;
     session.scrollLastFrame = frame;
     rememberScrollKeyframe(committed.committedFrame, session.scrollCurrentTop);
     session.scrollUnchangedCount = 0;
-    updatePreview();
+    const positionShift = session.scrollCurrentTop - previousTop;
+    if (positionShift) session.scrollLastAcceptedShift = positionShift;
+    const preservePrediction = Number.isInteger(metadata.wheelVersion)
+      && metadata.wheelVersion !== session.manualWheelVersion;
+    const previewMs = updatePreview({ preservePrediction });
+    const completedAt = performance.now();
+    recordScrollDiagnostic(session, frame, decision, {
+      ...metadata,
+      tracking: trackingDiagnostic,
+      timing: {
+        settleMs: metadata.settle?.elapsedMs ?? null,
+        captureMs: roundedMs(captureFinishedAt - captureStartedAt),
+        trackMs: roundedMs(trackFinishedAt - trackStartedAt),
+        commitMs: roundedMs(commitFinishedAt - commitStartedAt),
+        previewMs: roundedMs(previewMs),
+        totalLatencyMs: roundedMs(completedAt
+          - (metadata.wheelStartedAtMs ?? captureStartedAt)),
+      },
+    });
     console.debug('[scroll] movement captured', {
       frameCount: session.scrollFrames.length,
-      shift: session.scrollCurrentTop - previousTop,
+      shift: positionShift,
       matchShift: match?.shift ?? 0,
       currentTop: session.scrollCurrentTop,
       extendsRange,
@@ -260,8 +326,10 @@ async function captureFrameOnce(expectedDirection = 0, generation = session.capt
       addedRows,
       match,
       decision,
-      positionShift: session.scrollCurrentTop - previousTop,
+      positionShift,
       relocalized: relocalized?.scope,
+      trackingState: tracking.trackingState,
+      becameLost: false,
     };
   } catch (e) {
     console.warn('[scroll] captureFrame 失败', e);
@@ -374,6 +442,7 @@ export async function exitScrollCapture(restoreSelection = true) {
 
 function resetScrollCaptureState() {
   session.reset();
+  resetPreviewRendering();
   ss._longImageBaseCanvas = null;
   ss._longImagePan = null;
   ss.canvas?.classList.remove('long-image-editing');
@@ -421,6 +490,7 @@ export function onScrollWheel(e) {
   const forwardedMagnitude = Math.max(1, Math.min(480, Math.round(Math.abs(rawDelta))));
   const delta = rawDelta > 0 ? -forwardedMagnitude : forwardedMagnitude;
   session.scrollPendingDirection = rawDelta > 0 ? 1 : -1;
+  session.scrollWheelStartedAtMs = performance.now();
   session.manualWheelVersion++;
   const dpr = window.devicePixelRatio || 1;
   const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
@@ -428,6 +498,7 @@ export function onScrollWheel(e) {
   const cursorScreenY = Math.round(meta.vy + e.clientY * dpr);
 
   queueManualWheel(session, delta, cursorScreenX, cursorScreenY);
+  showPredictedPreview(session.scrollPendingDirection);
 
   scheduleManualCapture();
 }
@@ -456,19 +527,61 @@ async function runSettledManualCapture() {
     } while (capturedWheelVersion !== session.manualWheelVersion);
     if (!captureStillActive(generation) || session.autoScroll) return;
     const direction = session.scrollPendingDirection;
-    let result = await captureFrame(direction, generation, { settle: settled });
+    const wheelStartedAtMs = session.scrollWheelStartedAtMs;
+    let result = await captureFrame(direction, generation, {
+      settle: settled,
+      wheelStartedAtMs,
+      wheelVersion: capturedWheelVersion,
+    });
+    if (capturedWheelVersion !== session.manualWheelVersion) return;
+    // 快路径可能发生在目标窗口尚未消费滚轮消息时。只有首帧仍完全不变时才做
+    // 一次延迟复核，不增加正常滚动的确认延迟。
+    if (result.reason === 'unchanged'
+        && capturedWheelVersion === session.manualWheelVersion
+        && captureStillActive(generation)) {
+      await delay(DELAYED_MOTION_RECHECK_MS);
+      if (capturedWheelVersion !== session.manualWheelVersion) return;
+      const delayedSettle = await waitForVisualSettle(session, generation);
+      if (delayedSettle.aborted) return;
+      if (capturedWheelVersion !== session.manualWheelVersion) return;
+      result = await captureFrame(direction, generation, {
+        settle: delayedSettle,
+        wheelStartedAtMs,
+        wheelVersion: capturedWheelVersion,
+      });
+      if (capturedWheelVersion !== session.manualWheelVersion) return;
+    }
     if (result.reason === 'pending-confirmation'
         && capturedWheelVersion === session.manualWheelVersion
         && captureStillActive(generation)) {
       const confirmationSettle = await waitForVisualSettle(session, generation);
       if (confirmationSettle.aborted) return;
-      result = await captureFrame(0, generation, { settle: confirmationSettle });
+      if (capturedWheelVersion !== session.manualWheelVersion) return;
+      result = await captureFrame(0, generation, {
+        settle: confirmationSettle,
+        wheelStartedAtMs,
+        wheelVersion: capturedWheelVersion,
+      });
+      if (capturedWheelVersion !== session.manualWheelVersion) return;
     }
-    session.scrollPendingDirection = 0;
-    if (['ambiguous', 'low-confidence', 'no-overlap', 'motion-timeout'].includes(result.reason)) {
-      ss._showTransientHint?.(result.reason === 'ambiguous'
-        ? '页面存在重复内容，暂时无法唯一定位；请缓慢滚回最近已捕获区域'
-        : '暂未找到可靠重叠；请缓慢滚回最近已捕获区域后继续');
+    if (capturedWheelVersion === session.manualWheelVersion) {
+      session.scrollPendingDirection = 0;
+      session.scrollWheelStartedAtMs = null;
+    }
+    const unreliableReasons = ['ambiguous', 'low-confidence', 'no-overlap', 'motion-timeout',
+      'position-conflict', 'insufficient-detail', 'insufficient-overlap'];
+    if (unreliableReasons.includes(result.reason)) {
+      // 第一次失配只是 recovering；连续失败真正转入 lost 时提示一次。lost 后的
+      // 后续拒绝保持安静，不能再落入“画面没有变化”的错误提示。
+      if (result.becameLost) {
+        let hint = '暂未找到可靠重叠；请缓慢滚回最近已捕获区域后继续';
+        if (result.reason === 'ambiguous') {
+          hint = '页面存在重复内容，暂时无法唯一定位；请缓慢滚回最近已捕获区域';
+        } else if (result.reason === 'insufficient-overlap') {
+          hint = '本次滚动跨度过大，保留的重叠不足；请减小滚动幅度后继续';
+        }
+        ss._showTransientHint?.(hint);
+      }
     } else if (result.reason === 'pending-confirmation') {
       ss._showTransientHint?.('远距离定位尚未通过连续确认，请保持画面稳定后重试');
     } else if (result.relocalized && !result.appended) {
@@ -525,6 +638,7 @@ export async function toggleAutoScroll() {
     forwardWheel: (positionCursor, forceMessage) => (
       forwardAutoWheel(session, positionCursor, forceMessage)
     ),
+    previewWheel: showPredictedPreview,
     stop: stopAutoScroll,
     delay,
   });

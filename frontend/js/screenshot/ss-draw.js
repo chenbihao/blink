@@ -109,6 +109,35 @@ export function drawFinalSelection() {
   }
 }
 
+/**
+ * 绘制流式画笔的连续圆角预览。
+ *
+ * 整条轨迹只提交一次 stroke，避免半透明笔刷逐点画圆、逐段描边时在采样点
+ * 重复叠色，形成一串可见的圆圈。单点点击仍显示一个圆形笔触。
+ */
+function drawContinuousBrushPreview(c, points, width, color) {
+  if (points.length === 0) return;
+  c.fillStyle = color;
+  c.strokeStyle = color;
+  c.lineWidth = width;
+  c.lineCap = 'round';
+  c.lineJoin = 'round';
+
+  if (points.length === 1) {
+    c.beginPath();
+    c.arc(points[0].x, points[0].y, width / 2, 0, Math.PI * 2);
+    c.fill();
+    return;
+  }
+
+  c.beginPath();
+  c.moveTo(points[0].x, points[0].y);
+  for (let i = 1; i < points.length; i++) {
+    c.lineTo(points[i].x, points[i].y);
+  }
+  c.stroke();
+}
+
 /** 标注实时预览：重绘已提交的 + 当前绘制中的预览
  *  0.15.10：用 _committedSnapshot 快速恢复已提交内容，避免每帧全量重放。 */
 export function redrawAnnotPreview() {
@@ -247,29 +276,12 @@ export function redrawAnnotPreview() {
         const w = annot.getWidthForTool('eraser');
         const r = Math.max(6, w * 3);
         annotCtx.globalCompositeOperation = 'destination-out';
-        for (let i = 0; i < pts.length; i++) {
-          const p = pts[i];
-          annotCtx.beginPath();
-          annotCtx.arc(p.x, p.y, r, 0, Math.PI * 2);
-          annotCtx.fill();
-          if (i > 0) {
-            const prev = pts[i - 1];
-            annotCtx.strokeStyle = '#000';
-            annotCtx.lineWidth = r * 2;
-            annotCtx.lineCap = 'round';
-            annotCtx.beginPath();
-            annotCtx.moveTo(prev.x, prev.y);
-            annotCtx.lineTo(p.x, p.y);
-            annotCtx.stroke();
-          }
-        }
+        drawContinuousBrushPreview(annotCtx, pts, r * 2, '#000');
       }
       break;
     }
     case 'mosaic': {
-      // 0.15.10：预览改用半透明灰色笔画（与 pixelate/blur 画笔预览统一），
-      // 不再每点调用 sampleMosaicColor（O(n·r²) 像素读取是卡顿主因）。
-      // 最终渲染时 executeCommand 仍会做真实取色。
+      // 预览使用半透明连续笔画；最终渲染以同一轨迹裁剪经典像素块马赛克。
       const mosMode = annot.getToolMode('mosaic');
       if (mosMode === 'box') {
         const bx = Math.min(annotStartX, annotCurrentX);
@@ -288,24 +300,8 @@ export function redrawAnnotPreview() {
       // brush 模式预览：半透明灰色笔画
       const pts = annot.getCurrentPoints();
       if (pts.length >= 1) {
-        const r = Math.max(8, annot.getBrushSize() / 2 + 8);
-        annotCtx.fillStyle = 'rgba(150, 150, 150, 0.3)';
-        for (let i = 0; i < pts.length; i++) {
-          const p = pts[i];
-          annotCtx.beginPath();
-          annotCtx.arc(p.x, p.y, r, 0, Math.PI * 2);
-          annotCtx.fill();
-          if (i > 0) {
-            const prev = pts[i - 1];
-            annotCtx.strokeStyle = 'rgba(150, 150, 150, 0.3)';
-            annotCtx.lineWidth = r * 2;
-            annotCtx.lineCap = 'round';
-            annotCtx.beginPath();
-            annotCtx.moveTo(prev.x, prev.y);
-            annotCtx.lineTo(p.x, p.y);
-            annotCtx.stroke();
-          }
-        }
+        const r = Math.max(8, annot.getBrushSize());
+        drawContinuousBrushPreview(annotCtx, pts, r * 2, 'rgba(150, 150, 150, 0.3)');
       }
       break;
     }
@@ -313,27 +309,11 @@ export function redrawAnnotPreview() {
       // 0.15.8-fix→fix：根据模式切换预览风格
       const pixMode = annot.getToolMode('pixelate');
       if (pixMode === 'brush') {
-        // 画笔模式预览：半透明灰色笔画（与 blur 画笔预览统一，不再用 sampleMosaicColor 与涂抹混浠）
+        // 画笔模式预览：半透明连续笔画，宽度与最终马赛克遮罩一致。
         const pts = annot.getCurrentPoints();
         if (pts.length >= 1) {
-          const r = Math.max(8, annot.getBrushSize() / 2 + 8);
-          annotCtx.fillStyle = 'rgba(150, 150, 150, 0.3)';
-          for (let i = 0; i < pts.length; i++) {
-            const p = pts[i];
-            annotCtx.beginPath();
-            annotCtx.arc(p.x, p.y, r, 0, Math.PI * 2);
-            annotCtx.fill();
-            if (i > 0) {
-              const prev = pts[i - 1];
-              annotCtx.strokeStyle = 'rgba(150, 150, 150, 0.3)';
-              annotCtx.lineWidth = r * 2;
-              annotCtx.lineCap = 'round';
-              annotCtx.beginPath();
-              annotCtx.moveTo(prev.x, prev.y);
-              annotCtx.lineTo(p.x, p.y);
-              annotCtx.stroke();
-            }
-          }
+          const r = Math.max(8, annot.getBrushSize());
+          drawContinuousBrushPreview(annotCtx, pts, r * 2, 'rgba(150, 150, 150, 0.3)');
         }
         break;
       }
@@ -352,29 +332,13 @@ export function redrawAnnotPreview() {
       break;
     }
     case 'blur': {
-      // 0.15.3：高斯模糊预览。brush 模式 = 笔刷圆点；box 模式 = 半透明灰框。
+      // 0.15.3：高斯模糊预览。brush 模式 = 连续圆角笔画；box 模式 = 半透明灰框。
       const blurMode = annot.getToolMode('blur');
       if (blurMode === 'brush') {
         const pts = annot.getCurrentPoints();
         if (pts.length >= 1) {
-          const r = Math.max(8, annot.getBrushSize() / 2 + 8);
-          annotCtx.fillStyle = 'rgba(150, 150, 150, 0.3)';
-          for (let i = 0; i < pts.length; i++) {
-            const p = pts[i];
-            annotCtx.beginPath();
-            annotCtx.arc(p.x, p.y, r, 0, Math.PI * 2);
-            annotCtx.fill();
-            if (i > 0) {
-              const prev = pts[i - 1];
-              annotCtx.strokeStyle = 'rgba(150, 150, 150, 0.3)';
-              annotCtx.lineWidth = r * 2;
-              annotCtx.lineCap = 'round';
-              annotCtx.beginPath();
-              annotCtx.moveTo(prev.x, prev.y);
-              annotCtx.lineTo(p.x, p.y);
-              annotCtx.stroke();
-            }
-          }
+          const r = Math.max(8, annot.getBrushSize());
+          drawContinuousBrushPreview(annotCtx, pts, r * 2, 'rgba(150, 150, 150, 0.3)');
         }
       } else {
         const bx = Math.min(annotStartX, annotCurrentX);

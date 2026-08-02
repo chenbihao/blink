@@ -24,7 +24,9 @@ const stitchUrl = dataUrl(stitchSource);
 const trackerSource = (await readFile(new URL('./tracker.js', import.meta.url), 'utf8'))
   .replace("'./stitch.js'", JSON.stringify(stitchUrl));
 const trackerUrl = dataUrl(trackerSource);
-const { rememberScrollKeyframe, trackScrollFrame } = await import(trackerUrl);
+const {
+  rememberScrollKeyframe, trackScrollFrame, transitionScrollTracking,
+} = await import(trackerUrl);
 const replaySource = (await readFile(new URL('./replay.js', import.meta.url), 'utf8'))
   .replace("'./stitch.js'", JSON.stringify(stitchUrl))
   .replace("'./tracker.js'", JSON.stringify(trackerUrl));
@@ -146,5 +148,160 @@ const confirmed = trackScrollFrame(
 assert.equal(confirmed.decision.accepted, true, '同一区域连续确认后才接受大跨度召回');
 assert.equal(confirmed.decision.confirmation, 'confirmed');
 assert.equal(confirmed.nextTop, 400);
+
+const trackingFailure = {
+  decision: { accepted: false, reason: 'no-overlap', source: 'adjacent', confirmation: 'none' },
+  match: { status: 'no-match' },
+};
+const recovering = transitionScrollTracking({
+  trackingState: 'tracking', lostFrameCount: 0,
+}, trackingFailure);
+assert.deepEqual(recovering, {
+  trackingState: 'recovering', lostFrameCount: 1, becameLost: false,
+}, '单帧失配只进入 recovering，不应立刻显示 lost');
+const lost = transitionScrollTracking(recovering, trackingFailure);
+assert.deepEqual(lost, {
+  trackingState: 'lost', lostFrameCount: 2, becameLost: true,
+}, '连续失配才进入 lost，并且只在转换瞬间触发提示');
+const productionSessionLost = transitionScrollTracking({
+  scrollTrackingState: 'recovering', scrollLostFrameCount: 1,
+}, trackingFailure);
+assert.deepEqual(productionSessionLost, {
+  trackingState: 'lost', lostFrameCount: 2, becameLost: true,
+}, '生产 session 的 scroll* 字段必须与离线回放状态得到同一转换结果');
+const waitingConfirmation = transitionScrollTracking(lost, {
+  decision: {
+    accepted: false, reason: 'pending-confirmation', source: 'keyframe-global',
+    confirmation: 'required',
+  },
+  match: { status: 'unchanged' },
+});
+assert.deepEqual(waitingConfirmation, {
+  trackingState: 'lost', lostFrameCount: 2, becameLost: false,
+}, '可靠候选等待确认不应继续累计失败次数');
+
+const farFrames = [];
+for (let top = 0; top <= 3960; top += 90) {
+  farFrames.push({ image: documentFrame(top), top });
+}
+let farKeyframes = rememberScrollKeyframe([], farFrames[0].image, 0);
+farKeyframes = rememberScrollKeyframe(farKeyframes, documentFrame(3900), 3900);
+const farLostState = {
+  frames: farFrames,
+  keyframes: farKeyframes,
+  lastFrame: documentFrame(3900),
+  currentTop: 3900,
+  trackingState: 'lost',
+  lostFrameCount: 8,
+  pendingJump: null,
+};
+const farReturnPending = trackScrollFrame(
+  farLostState,
+  documentFrame(0),
+  { expectedDirection: 1 },
+);
+assert.equal(farReturnPending.decision.reason, 'pending-confirmation');
+assert.equal(farReturnPending.decision.candidateTop, 0);
+assert.equal(
+  farReturnPending.decision.calibration.relocalizedOverlap.status,
+  'consistent',
+  '跨越整张长图回到起点时，应以已确认像素复核候选而不是按距离拒绝',
+);
+const farReturnConfirmed = trackScrollFrame(
+  { ...farLostState, pendingJump: farReturnPending.pendingJump },
+  documentFrame(0),
+  { expectedDirection: 0 },
+);
+assert.equal(farReturnConfirmed.decision.accepted, true);
+assert.equal(farReturnConfirmed.decision.confirmation, 'confirmed');
+assert.equal(farReturnConfirmed.nextTop, 0);
+
+const confirmedFrame = documentFrame(0);
+const falseAdjacentState = {
+  frames: [{ image: confirmedFrame, top: 0 }],
+  keyframes: rememberScrollKeyframe([], confirmedFrame, 0),
+  // 像素上像 -10，坐标却仍是 0：模拟重复纹理产生的可信相邻伪匹配。
+  lastFrame: documentFrame(-10),
+  currentTop: 0,
+  trackingState: 'tracking',
+  lostFrameCount: 0,
+  pendingJump: null,
+};
+const overlapRecovered = trackScrollFrame(
+  falseAdjacentState,
+  documentFrame(-20),
+  { expectedDirection: -1 },
+);
+assert.equal(overlapRecovered.decision.accepted, true);
+assert.equal(overlapRecovered.decision.reason, 'relocalized');
+assert.equal(overlapRecovered.decision.candidateTop, -20);
+assert.equal(overlapRecovered.decision.calibration.adjacent.shift, -10);
+assert.equal(overlapRecovered.decision.calibration.positionedOverlap.status, 'conflict');
+assert.equal(overlapRecovered.decision.calibration.relocalizedOverlap.status, 'consistent');
+
+const poisonedKeyframeState = {
+  ...falseAdjacentState,
+  keyframes: rememberScrollKeyframe([], documentFrame(-10), 0),
+};
+const poisonedKeyframeRecovered = trackScrollFrame(
+  poisonedKeyframeState,
+  documentFrame(-20),
+  { expectedDirection: -1 },
+);
+assert.equal(
+  poisonedKeyframeRecovered.decision.accepted,
+  false,
+  '与确认内容冲突的关键帧候选不得绕过门禁接受同一伪位置',
+);
+assert.equal(poisonedKeyframeRecovered.decision.reason, 'position-conflict');
+assert.equal(poisonedKeyframeRecovered.decision.calibration.positionedOverlap.status, 'conflict');
+
+const lostPoisonedKeyframeState = {
+  frames: [{ image: documentFrame(0), top: 0 }],
+  keyframes: rememberScrollKeyframe([], documentFrame(30), 0),
+  lastFrame: documentFrame(0),
+  currentTop: 0,
+  trackingState: 'lost',
+  lostFrameCount: 2,
+  pendingJump: null,
+};
+const lostPoisonedRecovery = trackScrollFrame(
+  lostPoisonedKeyframeState,
+  documentFrame(40),
+  { expectedDirection: 0 },
+);
+assert.equal(
+  lostPoisonedRecovery.decision.accepted,
+  false,
+  'lost 后的重定位候选与已确认像素冲突时，连续确认也不得接受',
+);
+assert.equal(lostPoisonedRecovery.decision.reason, 'position-conflict');
+assert.equal(lostPoisonedRecovery.decision.calibration.relocalizedOverlap.status, 'conflict');
+
+const farFalseAdjacentState = {
+  ...falseAdjacentState,
+  frames: [
+    { image: documentFrame(0), top: 0 },
+    { image: documentFrame(90), top: 90 },
+  ],
+  currentTop: 90,
+};
+const farPending = trackScrollFrame(
+  farFalseAdjacentState,
+  documentFrame(-20),
+  { expectedDirection: -1 },
+);
+assert.equal(farPending.decision.accepted, false);
+assert.equal(farPending.decision.reason, 'pending-confirmation');
+assert.equal(farPending.decision.candidateTop, -20);
+const farConfirmed = trackScrollFrame(
+  { ...farFalseAdjacentState, pendingJump: farPending.pendingJump },
+  documentFrame(-20),
+  { expectedDirection: 0 },
+);
+assert.equal(farConfirmed.decision.accepted, true);
+assert.equal(farConfirmed.decision.reason, 'relocalized');
+assert.equal(farConfirmed.decision.confirmation, 'confirmed');
+assert.equal(farConfirmed.decision.candidateTop, -20);
 
 console.log('scroll replay tests passed');

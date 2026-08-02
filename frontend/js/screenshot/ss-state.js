@@ -133,7 +133,7 @@ export const TOOL_CAPS = {
   'highlight-multiply':     { points: 'stream', widthCat: 'brush',  widthMul: 1, hasCursor: true,  minDrag: 0, supportMode: true,  modeGroup: 'highlight' },
   'highlight-translucent':  { points: 'stream', widthCat: 'brush',  widthMul: 1, hasCursor: true,  minDrag: 0, supportMode: true,  modeGroup: 'highlight' },
   mosaic:                    { points: 'stream',widthCat: 'brush',  widthMul: 1, hasCursor: true,  minDrag: 0, supportMode: true,  modeGroup: 'blur' },
-  pixelate:                  { points: 'stream',widthCat: 'brush',  widthMul: 1, hasCursor: true,  minDrag: 0, supportMode: true,  modeGroup: 'blur' },  // 0.15.13：画笔=涂抹，框选=马赛克，widthCat=brush 有画笔粗细
+  pixelate:                  { points: 'stream',widthCat: 'brush',  widthMul: 1, hasCursor: true,  minDrag: 0, supportMode: true,  modeGroup: 'blur' },  // 画笔=轨迹遮罩马赛克，框选=矩形马赛克
   blur:                      { points: 'stream',widthCat: 'brush',  widthMul: 1, hasCursor: true,  minDrag: 0, supportMode: true,  modeGroup: 'blur' },  // 0.15.13：blur 也支持画笔模式 + 画笔粗细
   eraser:                    { points: 'stream',widthCat: 'brush',  widthMul: 1, hasCursor: true,  minDrag: 0, supportMode: true,  modeGroup: 'eraser' },
   text:                      { points: 'box',   widthCat: 'text',   widthMul: 0, hasCursor: false, minDrag: 0, supportMode: false, modeGroup: null },

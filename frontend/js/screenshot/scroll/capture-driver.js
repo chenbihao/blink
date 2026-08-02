@@ -7,7 +7,8 @@ import { isProbeStable } from './stability.js';
 
 const SETTLE_PROBE_INTERVAL_MS = 45;
 const SETTLE_MAX_WAIT_MS = 900;
-const SETTLE_MIN_WAIT_MS = 180;
+const SETTLE_FAST_MIN_WAIT_MS = 90;
+const SETTLE_ANIMATED_MIN_WAIT_MS = 180;
 const SETTLE_STABLE_SAMPLE_COUNT = 2;
 const SETTLE_INITIAL_DELAY_MS = 35;
 const MANUAL_WHEEL_PASSTHROUGH_MS = 72;
@@ -17,6 +18,12 @@ export const AUTO_WHEEL_PASSTHROUGH_MS = 24;
 
 export function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** 静止页面走 90ms 快路径；一旦观察到运动，恢复 180ms 安全等待。 */
+export function shouldCompleteVisualSettle(elapsedMs, stableSamples, sawMotion) {
+  const minimum = sawMotion ? SETTLE_ANIMATED_MIN_WAIT_MS : SETTLE_FAST_MIN_WAIT_MS;
+  return stableSamples >= SETTLE_STABLE_SAMPLE_COUNT && elapsedMs >= minimum;
 }
 
 function active(session, generation, requireAuto) {
@@ -36,6 +43,7 @@ async function captureProbe(state) {
 }
 
 export async function waitForVisualSettle(session, generation, requireAuto = false) {
+  const overallStartedAt = performance.now();
   await delay(SETTLE_INITIAL_DELAY_MS);
   if (!active(session, generation, requireAuto)) return { aborted: true };
   let previous;
@@ -44,12 +52,18 @@ export async function waitForVisualSettle(session, generation, requireAuto = fal
   } catch (error) {
     console.warn('[scroll] 稳定探针首次采集失败，使用短延时兜底', error);
     await delay(180);
-    return { stable: false, fallback: true };
+    return {
+      stable: false,
+      fallback: true,
+      mode: 'fallback',
+      elapsedMs: Math.round(performance.now() - overallStartedAt),
+    };
   }
 
   const startedAt = performance.now();
   let stableSamples = 0;
   let lastScore = Infinity;
+  let sawMotion = false;
   while (performance.now() - startedAt < SETTLE_MAX_WAIT_MS) {
     await delay(SETTLE_PROBE_INTERVAL_MS);
     if (!active(session, generation, requireAuto)) return { aborted: true };
@@ -63,15 +77,28 @@ export async function waitForVisualSettle(session, generation, requireAuto = fal
     }
     const motion = isProbeStable(previous, current);
     lastScore = motion.score;
+    if (!motion.stable) sawMotion = true;
     stableSamples = motion.stable ? stableSamples + 1 : 0;
     previous = current;
-    if (stableSamples >= SETTLE_STABLE_SAMPLE_COUNT
-        && performance.now() - startedAt >= SETTLE_MIN_WAIT_MS) {
-      return { stable: true, score: lastScore };
+    const elapsed = performance.now() - startedAt;
+    if (shouldCompleteVisualSettle(elapsed, stableSamples, sawMotion)) {
+      return {
+        stable: true,
+        score: lastScore,
+        mode: sawMotion ? 'animated' : 'fast',
+        elapsedMs: Math.round(performance.now() - overallStartedAt),
+        probeElapsedMs: Math.round(elapsed),
+      };
     }
   }
   console.debug('[scroll] 稳定等待超时，交由全帧匹配确认', { score: lastScore });
-  return { stable: false, timedOut: true, score: lastScore };
+  return {
+    stable: false,
+    timedOut: true,
+    score: lastScore,
+    mode: 'timeout',
+    elapsedMs: Math.round(performance.now() - overallStartedAt),
+  };
 }
 
 export async function captureBandFrame(state) {

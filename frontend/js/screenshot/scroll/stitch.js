@@ -9,6 +9,14 @@ const DEFAULT_MATCH_THRESHOLD = 22;
 const DEFAULT_UNCHANGED_THRESHOLD = 2.5;
 const DEFAULT_PROBE_WIDTH = 48;
 const DEFAULT_PROBE_HEIGHT = 64;
+const DEFAULT_POSITIONED_OVERLAP_THRESHOLD = 8;
+// 真实录制中 198 / 283px 的常见手动步进仍保留约 30% 重叠；20% 足以让细节
+// tile 复核工作，同时会拒绝只剩一两行、无法可靠辨别重复纹理的极端跳转。
+const DEFAULT_MIN_POSITIONED_OVERLAP_RATIO = 0.2;
+const DEFAULT_DETAIL_TILE_SIZE = 12;
+const DEFAULT_DETAIL_LUMA_RANGE = 10;
+const DEFAULT_DETAIL_TILE_MISMATCH_THRESHOLD = 8;
+const DEFAULT_DETAIL_MISMATCH_RATIO = 0.32;
 
 function sampledSad(prevFrame, currFrame, shift, sampleRows = 24, sampleCols = 28) {
   const w = Math.min(prevFrame.width, currFrame.width);
@@ -222,6 +230,214 @@ export function extractPositionedViewport(frames, top, height) {
     }
   }
   return filledRows.every((filled) => filled === 1) ? result : null;
+}
+
+function sampledPositionedOverlapSad(frames, currFrame, candidateTop,
+  overlapTop, overlapRows, sampleRows = 24, sampleCols = 28) {
+  const ordered = frames.filter((item) => item?.image).sort((a, b) => a.top - b.top);
+  if (!ordered.length || overlapRows <= 8) return Infinity;
+  const width = Math.min(currFrame.width, ordered[0].image.width);
+  if (width <= 0) return Infinity;
+  const marginY = Math.min(
+    Math.floor(overlapRows / 4),
+    Math.max(16, Math.floor(overlapRows * 0.18)),
+  );
+  const usableHeight = Math.max(1, overlapRows - marginY * 2);
+  let total = 0;
+  let samples = 0;
+  let segmentIndex = 0;
+  for (let sy = 0; sy < sampleRows; sy++) {
+    const offsetY = marginY + Math.min(
+      usableHeight - 1,
+      Math.floor((sy + 0.5) * usableHeight / sampleRows),
+    );
+    const documentY = overlapTop + offsetY;
+    while (segmentIndex < ordered.length
+        && documentY >= ordered[segmentIndex].top + ordered[segmentIndex].image.height) {
+      segmentIndex++;
+    }
+    const confirmed = ordered[segmentIndex];
+    const confirmedY = Math.floor(documentY - (confirmed?.top ?? 0));
+    const capturedY = Math.floor(documentY - candidateTop);
+    if (!confirmed || documentY < confirmed.top
+        || confirmedY < 0 || confirmedY >= confirmed.image.height
+        || capturedY < 0 || capturedY >= currFrame.height) return Infinity;
+    for (let sx = 0; sx < sampleCols; sx++) {
+      const x = Math.min(width - 1, Math.floor((sx + 0.5) * width / sampleCols));
+      const confirmedIndex = (confirmedY * confirmed.image.width + x) * 4;
+      const capturedIndex = (capturedY * currFrame.width + x) * 4;
+      total += Math.abs(confirmed.image.data[confirmedIndex] - currFrame.data[capturedIndex]);
+      total += Math.abs(confirmed.image.data[confirmedIndex + 1] - currFrame.data[capturedIndex + 1]);
+      total += Math.abs(confirmed.image.data[confirmedIndex + 2] - currFrame.data[capturedIndex + 2]);
+      samples += 3;
+    }
+  }
+  return samples ? total / samples : Infinity;
+}
+
+function measureDetailedPositionedOverlap(frames, currFrame, candidateTop,
+  overlapTop, overlapRows, options = {}) {
+  const ordered = frames.filter((item) => item?.image).sort((a, b) => a.top - b.top);
+  if (!ordered.length || overlapRows <= 0) return null;
+  const width = Math.min(currFrame.width, ordered[0].image.width);
+  const tileSize = options.tileSize ?? DEFAULT_DETAIL_TILE_SIZE;
+  const detailLumaRange = options.detailLumaRange ?? DEFAULT_DETAIL_LUMA_RANGE;
+  const tileMismatchThreshold = options.tileMismatchThreshold
+    ?? DEFAULT_DETAIL_TILE_MISMATCH_THRESHOLD;
+  const rowSources = [];
+  let sourceIndex = 0;
+  for (let offsetY = 0; offsetY < overlapRows; offsetY++) {
+    const documentY = overlapTop + offsetY;
+    while (sourceIndex < ordered.length
+        && documentY >= ordered[sourceIndex].top + ordered[sourceIndex].image.height) {
+      sourceIndex++;
+    }
+    const source = ordered[sourceIndex];
+    const sourceY = Math.floor(documentY - (source?.top ?? 0));
+    if (!source || documentY < source.top || sourceY < 0 || sourceY >= source.image.height) {
+      return null;
+    }
+    rowSources.push({ image: source.image, sourceY });
+  }
+  let totalTileCount = 0;
+  let detailTileCount = 0;
+  let mismatchedTileCount = 0;
+  let detailScoreTotal = 0;
+  for (let tileY = 0; tileY < overlapRows; tileY += tileSize) {
+    const tileHeight = Math.min(tileSize, overlapRows - tileY);
+    for (let tileX = 0; tileX < width; tileX += tileSize) {
+      const tileWidth = Math.min(tileSize, width - tileX);
+      let confirmedMin = 255;
+      let confirmedMax = 0;
+      let capturedMin = 255;
+      let capturedMax = 0;
+      let sad = 0;
+      let samples = 0;
+      for (let dy = 0; dy < tileHeight; dy++) {
+        const documentY = overlapTop + tileY + dy;
+        const confirmed = rowSources[tileY + dy];
+        const capturedY = Math.floor(documentY - candidateTop);
+        if (!confirmed || capturedY < 0 || capturedY >= currFrame.height) return null;
+        for (let dx = 0; dx < tileWidth; dx++) {
+          const x = tileX + dx;
+          const confirmedIndex = (confirmed.sourceY * confirmed.image.width + x) * 4;
+          const capturedIndex = (capturedY * currFrame.width + x) * 4;
+          const confirmedLuma = confirmed.image.data[confirmedIndex] * 0.299
+            + confirmed.image.data[confirmedIndex + 1] * 0.587
+            + confirmed.image.data[confirmedIndex + 2] * 0.114;
+          const capturedLuma = currFrame.data[capturedIndex] * 0.299
+            + currFrame.data[capturedIndex + 1] * 0.587
+            + currFrame.data[capturedIndex + 2] * 0.114;
+          confirmedMin = Math.min(confirmedMin, confirmedLuma);
+          confirmedMax = Math.max(confirmedMax, confirmedLuma);
+          capturedMin = Math.min(capturedMin, capturedLuma);
+          capturedMax = Math.max(capturedMax, capturedLuma);
+          sad += Math.abs(confirmed.image.data[confirmedIndex] - currFrame.data[capturedIndex]);
+          sad += Math.abs(
+            confirmed.image.data[confirmedIndex + 1] - currFrame.data[capturedIndex + 1],
+          );
+          sad += Math.abs(
+            confirmed.image.data[confirmedIndex + 2] - currFrame.data[capturedIndex + 2],
+          );
+          samples += 3;
+        }
+      }
+      totalTileCount++;
+      const informative = Math.max(
+        confirmedMax - confirmedMin,
+        capturedMax - capturedMin,
+      ) >= detailLumaRange;
+      if (!informative || samples === 0) continue;
+      const tileScore = sad / samples;
+      detailTileCount++;
+      detailScoreTotal += tileScore;
+      if (tileScore > tileMismatchThreshold) mismatchedTileCount++;
+    }
+  }
+  return {
+    totalTileCount,
+    detailTileCount,
+    detailCoverage: totalTileCount
+      ? Math.round(detailTileCount / totalTileCount * 1000) / 1000 : 0,
+    detailScore: detailTileCount
+      ? Math.round(detailScoreTotal / detailTileCount * 1000) / 1000 : null,
+    mismatchedTileCount,
+    mismatchRatio: detailTileCount
+      ? Math.round(mismatchedTileCount / detailTileCount * 1000) / 1000 : null,
+    tileSize,
+    detailLumaRange,
+    tileMismatchThreshold,
+  };
+}
+
+/**
+ * 用已确认的长图像素复核一个候选绝对位置。
+ *
+ * 相邻帧匹配只能证明“两张截图的某些纹理相似”；候选与已确认范围有足够重叠时，
+ * 这里再验证“这些像素在同一文档坐标上也一致”。后者冲突时不得提交候选。
+ */
+export function validatePositionedOverlap(frames, currFrame, candidateTop, options = {}) {
+  const bounds = positionedFrameBounds(frames);
+  if (!bounds || !currFrame?.data || !Number.isFinite(candidateTop)) {
+    return { status: 'unavailable', score: null, threshold: null, overlapRows: 0, overlapRatio: 0 };
+  }
+  const overlapTop = Math.max(bounds.top, candidateTop);
+  const overlapBottom = Math.min(bounds.bottom, candidateTop + currFrame.height);
+  const overlapRows = Math.max(0, Math.round(overlapBottom - overlapTop));
+  const overlapRatio = overlapRows / Math.max(1, currFrame.height);
+  const minOverlapRatio = options.minOverlapRatio ?? DEFAULT_MIN_POSITIONED_OVERLAP_RATIO;
+  const threshold = options.threshold ?? DEFAULT_POSITIONED_OVERLAP_THRESHOLD;
+  if (overlapRows < 9 || overlapRatio < minOverlapRatio) {
+    return {
+      status: 'insufficient', score: null, threshold, overlapRows,
+      overlapRatio: Math.round(overlapRatio * 1000) / 1000,
+    };
+  }
+  const score = sampledPositionedOverlapSad(
+    frames,
+    currFrame,
+    candidateTop,
+    overlapTop,
+    overlapRows,
+  );
+  if (!Number.isFinite(score)) {
+    return {
+      status: 'unavailable', score: null, threshold, overlapRows,
+      overlapRatio: Math.round(overlapRatio * 1000) / 1000,
+    };
+  }
+  const detail = measureDetailedPositionedOverlap(
+    frames,
+    currFrame,
+    candidateTop,
+    overlapTop,
+    overlapRows,
+    options,
+  );
+  if (!detail) {
+    return {
+      status: 'unavailable', score: null, threshold, overlapRows,
+      overlapRatio: Math.round(overlapRatio * 1000) / 1000,
+    };
+  }
+  const minimumDetailTiles = options.minimumDetailTiles
+    ?? Math.max(8, Math.ceil(detail.totalTileCount * 0.02));
+  const detailMismatchRatio = options.detailMismatchRatio ?? DEFAULT_DETAIL_MISMATCH_RATIO;
+  const enoughDetail = detail.detailTileCount >= minimumDetailTiles;
+  const detailConflict = enoughDetail
+    && detail.mismatchRatio > detailMismatchRatio;
+  return {
+    status: !enoughDetail
+      ? 'insufficient-detail'
+      : (score <= threshold && !detailConflict ? 'consistent' : 'conflict'),
+    score: Number.isFinite(score) ? score : null,
+    threshold,
+    overlapRows,
+    overlapRatio: Math.round(overlapRatio * 1000) / 1000,
+    ...detail,
+    minimumDetailTiles,
+    detailMismatchRatio,
+  };
 }
 
 /**
@@ -593,7 +809,7 @@ function tileLumaRange(frame, y, x, width, height) {
  * 的固定层；底部新露出的固定层暂时保留，下一帧刷新重叠区时会自然覆盖旧副本。
  */
 export function suppressFixedViewportLayers(previous, current, shift, options = {}) {
-  if (!previous || !current || shift <= 0
+  if (!previous || !current || shift === 0
       || previous.width !== current.width || previous.height !== current.height) {
     return { frame: current, fixedTileCount: 0 };
   }
@@ -611,7 +827,8 @@ export function suppressFixedViewportLayers(previous, current, shift, options = 
       const same = tileRgbSad(previous, y, current, y, x, tileWidth, tileHeight);
       if (same > sameThreshold) continue;
       const alignedY = y + shift;
-      const hasAlignedSource = alignedY + tileHeight <= previous.height;
+      const hasAlignedSource = alignedY >= 0
+        && alignedY + tileHeight <= previous.height;
       if (hasAlignedSource) {
         const aligned = tileRgbSad(previous, alignedY, current, y, x, tileWidth, tileHeight);
         if (aligned < alignedThreshold || aligned < same * 3 + 4) continue;
@@ -661,7 +878,7 @@ export function commitTrackedFrame(frames, previousFrame, currentFrame, tracked)
   const canRefresh = previousFrame
     && !tracked.relocalized
     && tracked.match?.status === 'matched'
-    && tracked.match.shift > 0;
+    && tracked.match.shift !== 0;
   if (canRefresh) {
     const fixed = suppressFixedViewportLayers(previousFrame, currentFrame, tracked.match.shift);
     if (fixed.fixedTileCount > 0) {

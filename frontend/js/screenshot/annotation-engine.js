@@ -21,7 +21,7 @@
 //! }
 //! ```
 //!
-//! - `mosaic`（涂抹，PixPin 风格）：点序列，圆形笔刷沿轨迹取局部平均色
+//! - `mosaic` / `pixelate`：框选与连续画笔共用经典像素块马赛克算法
 //! - `pixelate`（经典像素化马赛克）：矩形框选 [起点, 终点]，整个区域分块平均色填充
 //!
 //! **水印**（0.11.9-a 起独立于 commands 栈）：
@@ -46,7 +46,7 @@ let currentColor = '#ff0000';
 const config = {
   color: '#ff0000',
   stroke: { width: 4, style: 'solid' },           // 笔画类：形状/箭头/铅笔
-  brush:  { size: 16 },                             // 画笔类：涂抹/橡皮/高亮
+  brush:  { size: 16 },                             // 画笔类：马赛克/模糊/橡皮/高亮
   text:   { fontSize: 24, fontFamily: 'sans-serif', bold: false, italic: false, shadow: false },
   effect: { pixelateBlock: 10, blurIntensity: 8 },  // 效果类
 };
@@ -529,62 +529,21 @@ export function executeCommand(cmd, targetCtx) {
         }
         break;
       }
-      // brush 模式（默认）：涂抹（PixPin 风格）：沿轨迹画圆形笔刷 + 连线，每点取周围平均色。
-      // 0.15.11：涂抹半径受强度影响——半径 = max(8, intensity + brush.size/2)
+      // brush 模式（默认）：复用框选模式的经典像素块算法，再以连续笔迹裁剪。
       if (cmd.points.length >= 1 && cropImageData) {
-        const intensity = config.effect.blurIntensity;
-        const r = Math.max(8, (cmd.width || config.brush.size) / 2 + intensity);
-        c.imageSmoothingEnabled = true;
-        for (let i = 0; i < cmd.points.length; i++) {
-          const p = cmd.points[i];
-          const avg = sampleAverageColor(cropImageData, p.x, p.y, r);
-          c.fillStyle = avg;
-          c.beginPath();
-          c.arc(p.x, p.y, r, 0, Math.PI * 2);
-          c.fill();
-          // 相邻点之间用线段连接（避免离散圆点留缝）
-          if (i > 0) {
-            const prev = cmd.points[i - 1];
-            c.strokeStyle = avg;
-            c.lineWidth = r * 2;
-            c.lineCap = 'round';
-            c.beginPath();
-            c.moveTo(prev.x, prev.y);
-            c.lineTo(p.x, p.y);
-            c.stroke();
-          }
-        }
+        const block = Math.max(2, config.effect.blurIntensity);
+        const brushW = (cmd.width || config.brush.size) * 2;
+        drawPixelateBrush(c, cropImageData, cmd.points, brushW, block);
       } else if (!cropImageData) {
         console.warn('[annot] mosaic: cropImageData 为空，马赛克不可用');
       }
       break;
     case 'pixelate':
-      // 0.15.12：马赛克工具合并——画笔=涂抹（沿轨迹取平均色），框选=马赛克（整片像素化）
-      // brush 模式：复用 mosaic 涂抹逻辑
+      // 0.15.12：马赛克工具合并——画笔与框选共用经典像素块算法，区别仅在覆盖区域。
       if (cmd.mode === 'brush' && cmd.points.length >= 1 && cropImageData) {
-        const intensity = config.effect.blurIntensity;
-        const r = Math.max(8, (cmd.width || config.brush.size) / 2 + intensity);
-        c.imageSmoothingEnabled = true;
-        c.imageSmoothingQuality = 'high';
-        c.lineCap = 'round';
-        c.lineJoin = 'round';
-        for (let i = 0; i < cmd.points.length; i++) {
-          const p = cmd.points[i];
-          const avg = sampleAverageColor(cropImageData, p.x, p.y, r);
-          c.fillStyle = avg;
-          c.beginPath();
-          c.arc(p.x, p.y, r, 0, Math.PI * 2);
-          c.fill();
-          if (i > 0) {
-            const prev = cmd.points[i - 1];
-            c.strokeStyle = avg;
-            c.lineWidth = r * 2;
-            c.beginPath();
-            c.moveTo(prev.x, prev.y);
-            c.lineTo(p.x, p.y);
-            c.stroke();
-          }
-        }
+        const block = Math.max(2, config.effect.blurIntensity);
+        const brushW = (cmd.width || config.brush.size) * 2;
+        drawPixelateBrush(c, cropImageData, cmd.points, brushW, block);
         break;
       }
       // box 模式：经典像素化马赛克（矩形框选）
@@ -1022,49 +981,6 @@ export function isOverlayLoading() {
   return overlayLayer !== null && !!overlayLayer.loading;
 }
 
-// ── 涂抹采样辅助 ──────────────────────────────────────
-
-/**
- * 在 ImageData 上采样 (x,y) 周围 r 半径内所有像素的 RGB 平均色。
- * 用于涂抹工具（mosaic）：笔刷点局部平均化让原图信息不可辨认。
- * 坐标系为 ImageData 的像素坐标（物理像素，相对裁剪区左上角）。
- * 返回 `rgba(r,g,b,1)` 字符串。越界像素自动 clamp。
- */
-function sampleAverageColor(imageData, x, y, r) {
-  const { data, width: iw, height: ih } = imageData;
-  let sumR = 0, sumG = 0, sumB = 0, count = 0;
-  const x0 = Math.max(0, Math.floor(x - r));
-  const x1 = Math.min(iw - 1, Math.ceil(x + r));
-  const y0 = Math.max(0, Math.floor(y - r));
-  const y1 = Math.min(ih - 1, Math.ceil(y + r));
-  const r2 = r * r;
-  for (let py = y0; py <= y1; py++) {
-    for (let px = x0; px <= x1; px++) {
-      // 圆形 mask：只累加圆内像素
-      const dx = px - x;
-      const dy = py - y;
-      if (dx * dx + dy * dy <= r2) {
-        const idx = (py * iw + px) * 4;
-        sumR += data[idx];
-        sumG += data[idx + 1];
-        sumB += data[idx + 2];
-        count++;
-      }
-    }
-  }
-  if (count === 0) return 'rgba(0,0,0,1)';
-  return `rgba(${Math.round(sumR / count)},${Math.round(sumG / count)},${Math.round(sumB / count)},1)`;
-}
-
-/**
- * 对外暴露的涂抹采样：使用当前 cropImageData（由 reset() 注入）。
- * 供预览阶段调用，与 executeCommand 内的采样逻辑共用一份 ImageData。
- */
-export function sampleMosaicColor(x, y, r) {
-  if (!cropImageData) return 'rgba(0,0,0,1)';
-  return sampleAverageColor(cropImageData, x, y, r);
-}
-
 /** 0.15.6：获取裁剪区原始 canvas（供配色提取等模块复用） */
 export function getCropSourceCanvas() {
   return cropSourceCanvas;
@@ -1116,6 +1032,69 @@ function drawPixelate(c, imageData, x, y, w, h, blockSize) {
     }
   }
   c.imageSmoothingEnabled = true;
+}
+
+/** 在当前上下文绘制一条不透明、连续、圆角的画笔遮罩。 */
+function drawBrushMask(c, points, width) {
+  c.fillStyle = '#fff';
+  c.strokeStyle = '#fff';
+  c.lineWidth = width;
+  c.lineCap = 'round';
+  c.lineJoin = 'round';
+  if (points.length === 1) {
+    c.beginPath();
+    c.arc(points[0].x, points[0].y, width / 2, 0, Math.PI * 2);
+    c.fill();
+    return;
+  }
+  c.beginPath();
+  c.moveTo(points[0].x, points[0].y);
+  for (let i = 1; i < points.length; i++) {
+    c.lineTo(points[i].x, points[i].y);
+  }
+  c.stroke();
+}
+
+/**
+ * 用连续笔迹裁剪经典像素块马赛克。
+ * 画笔宽度只决定覆盖范围；blockSize 只决定方块大小，二者互不耦合。
+ */
+function drawPixelateBrush(c, imageData, points, brushWidth, blockSize) {
+  if (points.length === 0 || !c.canvas) return;
+  const block = Math.max(2, Math.round(blockSize));
+  const radius = brushWidth / 2;
+  let minX = points[0].x;
+  let maxX = points[0].x;
+  let minY = points[0].y;
+  let maxY = points[0].y;
+  for (let i = 1; i < points.length; i++) {
+    minX = Math.min(minX, points[i].x);
+    maxX = Math.max(maxX, points[i].x);
+    minY = Math.min(minY, points[i].y);
+    maxY = Math.max(maxY, points[i].y);
+  }
+  // 边界对齐到全图网格，保证同一笔和相邻多笔的马赛克块不会随采样点漂移。
+  const x0 = Math.max(0, Math.floor((minX - radius - 1) / block) * block);
+  const y0 = Math.max(0, Math.floor((minY - radius - 1) / block) * block);
+  const x1 = Math.min(imageData.width, Math.ceil((maxX + radius + 1) / block) * block);
+  const y1 = Math.min(imageData.height, Math.ceil((maxY + radius + 1) / block) * block);
+  if (x1 <= x0 || y1 <= y0) return;
+
+  const off = document.createElement('canvas');
+  off.width = c.canvas.width;
+  off.height = c.canvas.height;
+  const offCtx = off.getContext('2d');
+  const pixelated = document.createElement('canvas');
+  pixelated.width = c.canvas.width;
+  pixelated.height = c.canvas.height;
+  const pixelatedCtx = pixelated.getContext('2d');
+  if (!offCtx || !pixelatedCtx) return;
+
+  drawBrushMask(offCtx, points, brushWidth);
+  drawPixelate(pixelatedCtx, imageData, x0, y0, x1 - x0, y1 - y0, block);
+  offCtx.globalCompositeOperation = 'source-in';
+  offCtx.drawImage(pixelated, 0, 0);
+  c.drawImage(off, 0, 0);
 }
 
 // ── 撤销/重做 ──────────────────────────────────────────

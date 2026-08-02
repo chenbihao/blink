@@ -1,6 +1,6 @@
 {
   "lucideVersion": "1.25.0",
-  "generatedAt": "2026-08-01T15:40:28Z",
+  "generatedAt": "2026-08-02T15:29:55Z",
   "icons": [
     "aperture",
     "audio-lines",
@@ -20,6 +20,7 @@
     "folder-search",
     "gallery-horizontal",
     "gallery-vertical",
+    "gallery-vertical-end",
     "ghost",
     "globe",
     "grid-3x3",

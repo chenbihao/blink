@@ -27,6 +27,7 @@ const {
   relocalizeFromKeyframes,
   relocalizeFromPositionedContent,
   selectRelocalizationCandidate,
+  validatePositionedOverlap,
 } = await import(
   'data:text/javascript;base64,'
   + Buffer.from(await readFile(new URL('./stitch.js', import.meta.url))).toString('base64')
@@ -58,6 +59,25 @@ function documentFrame(top, width = 36, height = 90) {
       image.data[i] = (documentY * 17 + Math.floor(documentY / 7) * 29 + x * 3) & 255;
       image.data[i + 1] = (documentY * 7 + Math.floor(documentY / 11) * 43 + x * 11) & 255;
       image.data[i + 2] = (documentY * 13 + Math.floor(documentY / 17) * 61 + x * 5) & 255;
+      image.data[i + 3] = 255;
+    }
+  }
+  return image;
+}
+
+function sparseTextFrame(top, width = 120, height = 90) {
+  const image = new ImageData(width, height);
+  for (let y = 0; y < height; y++) {
+    const documentY = top + y;
+    const line = Math.floor(documentY / 12);
+    const row = ((documentY % 12) + 12) % 12;
+    const textEnd = 12 + ((line % 3) + 3) % 3 * 3;
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      const textPixel = (row === 2 || row === 3) && x >= 4 && x < textEnd;
+      image.data[i] = textPixel ? 185 : 20;
+      image.data[i + 1] = textPixel ? 155 : 20;
+      image.data[i + 2] = textPixel ? 210 : 20;
       image.data[i + 3] = 255;
     }
   }
@@ -168,6 +188,59 @@ assert.deepEqual(
   createGrayFingerprint(documentFrame(135)).data,
   '分区粗召回应直接从已提交片段采样出等价指纹',
 );
+
+const confirmedDocument = [{ image: documentFrame(0), top: 0 }];
+const overlapConsistent = validatePositionedOverlap(
+  confirmedDocument,
+  documentFrame(-20),
+  -20,
+);
+assert.equal(overlapConsistent.status, 'consistent', '真实绝对位置应通过已确认内容复核');
+const overlapConflict = validatePositionedOverlap(
+  confirmedDocument,
+  documentFrame(-20),
+  -10,
+);
+assert.equal(overlapConflict.status, 'conflict', '伪相邻位置不得与已确认内容矛盾');
+assert.ok(overlapConflict.score > overlapConflict.threshold);
+const narrowOverlapConsistent = validatePositionedOverlap(
+  [{ image: documentFrame(0, 36, 120), top: 0 }],
+  documentFrame(90, 36, 120),
+  90,
+  { tileSize: 6 },
+);
+assert.equal(
+  narrowOverlapConsistent.status,
+  'consistent',
+  '约 25% 的真实重叠仍应进入细节复核，覆盖常见手动滚轮步进',
+);
+const tooNarrowOverlap = validatePositionedOverlap(
+  [{ image: documentFrame(0, 36, 120), top: 0 }],
+  documentFrame(100, 36, 120),
+  100,
+);
+assert.equal(tooNarrowOverlap.status, 'insufficient', '低于 20% 的重叠不得作为绝对证据');
+const sparseBackgroundConflict = validatePositionedOverlap(
+  [{ image: sparseTextFrame(0), top: 0 }],
+  sparseTextFrame(-20),
+  -10,
+);
+assert.ok(
+  sparseBackgroundConflict.score <= sparseBackgroundConflict.threshold,
+  '暗色稀疏文本用均匀 RGB 平均时应能复现假阴性前提',
+);
+assert.equal(
+  sparseBackgroundConflict.status,
+  'conflict',
+  '细节 tile 必须识别被大面积暗色背景稀释的文本错位',
+);
+assert.ok(sparseBackgroundConflict.mismatchRatio > sparseBackgroundConflict.detailMismatchRatio);
+const fixedOverlap = validatePositionedOverlap(
+  [{ image: withFixedBlocks(documentFrame(0)), top: 0 }],
+  withFixedBlocks(documentFrame(20)),
+  20,
+);
+assert.equal(fixedOverlap.status, 'consistent', '少量视口固定块不得误伤正确文档位置');
 
 const boundedReference = createVerticalReference(documentFrame(0, 240, 180));
 assert.equal(boundedReference.width, 96, '精配参考必须限制横向内存');
@@ -341,6 +414,33 @@ assert.notDeepEqual(
   rgbAt(fixedComposite.image, 8, 92),
   rgbAt(documentFrame(20), 8, 72),
   '最终视口只保留一个最新的底部悬浮元素',
+);
+
+const upwardFixedCurrent = withFixedBlocks(documentFrame(-20));
+const upwardFixedCommit = commitTrackedFrame(
+  [{ image: fixedPrevious, top: 0 }],
+  fixedPrevious,
+  upwardFixedCurrent,
+  {
+    decision: { accepted: true },
+    placement: { edge: 'top', startRow: 0, rowCount: 20, targetTop: -20 },
+    nextTop: -20,
+    match: { status: 'matched', shift: -20 },
+    relocalized: null,
+  },
+);
+assert.ok(upwardFixedCommit.fixedTileCount >= 2, '向上滚动也应识别视口固定块');
+const upwardFixedComposite = compositePositionedFrames(upwardFixedCommit.frames);
+assert.equal(upwardFixedComposite.height, 110);
+assert.deepEqual(
+  rgbAt(upwardFixedComposite.image, 8, 20),
+  rgbAt(documentFrame(0), 8, 0),
+  '向上扩展后，上一帧吸顶元素的旧副本应由真实文档像素覆盖',
+);
+assert.deepEqual(
+  rgbAt(upwardFixedComposite.image, 8, 72),
+  rgbAt(documentFrame(-20), 8, 72),
+  '向上滚动时当前帧底部悬浮元素应由上一帧对齐内容擦除',
 );
 
 console.log('scroll stitch tests passed');

@@ -38,6 +38,8 @@ assert.deepEqual(
 
 let active = true;
 let forwarded = 0;
+let predicted = 0;
+let unchangedCaptures = 0;
 const forwardModes = [];
 let stopReason = null;
 await runAutoScrollController({
@@ -48,15 +50,21 @@ await runAutoScrollController({
   },
   isActive: () => active,
   waitForSettle: async () => ({ stable: true }),
-  captureFrame: async () => ({ moved: false, reason: 'unchanged' }),
+  captureFrame: async () => {
+    unchangedCaptures++;
+    return { moved: false, reason: 'unchanged' };
+  },
   forwardWheel: async (positionCursor, forceMessage) => {
     forwarded++;
     forwardModes.push({ positionCursor, forceMessage });
   },
+  previewWheel: () => { predicted++; },
   stop: async (reason) => { stopReason = reason; active = false; },
   delay: async () => {},
 });
 assert.equal(forwarded, 5, '分级重试五次后才判定到底并停止注入滚轮');
+assert.equal(unchangedCaptures, 10, '每次注入后 unchanged 应延迟复核一次再决定继续滚动');
+assert.equal(predicted, 5, '每次自动滚轮都应先给预览预测反馈');
 assert.deepEqual(forwardModes.slice(0, 3), [
   { positionCursor: true, forceMessage: false },
   { positionCursor: true, forceMessage: false },
@@ -70,7 +78,7 @@ let captures = 0;
 await runAutoScrollController({
   generation: 2,
   session: {
-    scrollTrackingState: 'lost', scrollBandH: 300, _scrollCapturing: false,
+    scrollTrackingState: 'recovering', scrollBandH: 300, _scrollCapturing: false,
     autoWheelDelta: -120, autoLowConfidenceCount: 0,
   },
   isActive: () => active,
@@ -86,6 +94,10 @@ await runAutoScrollController({
   stop: async () => { active = false; },
   delay: async () => {},
 });
-assert.deepEqual(order.slice(0, 2), ['capture:0', 'forward'], 'lost 状态必须先恢复定位再注入滚轮');
+assert.deepEqual(
+  order.slice(0, 2),
+  ['capture:0', 'forward'],
+  'recovering / lost 状态必须先恢复定位再注入滚轮',
+);
 
 console.log('scroll auto tests passed');
