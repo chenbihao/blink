@@ -9,9 +9,14 @@
 //! **过滤规则**：
 //! - 跳过不可见窗口（`IsWindowVisible = false`）
 //! - 跳过被 DWM Cloak 的窗口（UWP 最小化后的"鬼影"、Cloaked 的工具窗口）
-//! - 跳过工具窗口（`WS_EX_TOOLWINDOW`）——保留在任务栏/Alt-Tab 的才算"可吸附"
+//! - 跳过工具窗口（`WS_EX_TOOLWINDOW`）与不激活窗口（`WS_EX_NOACTIVATE`）
 //! - 跳过空标题窗口（无标题的浮层/overlay，不具可辨识性）
+//! - 跳过系统桌面（标题为 `Program Manager` 的 Progman 窗口）
+//! - 跳过完全在虚拟屏幕之外的窗口
 //! - 跳过自身进程窗口（截图 overlay 自身不该被吸附）
+//!
+//! **返回顺序**：`EnumWindows` 按 Z-order 从前景到背景枚举，结果数组索引 0 = 最前景窗口。
+//! 前端从索引 0 开始正序遍历，第一个命中即为最前景匹配。
 //!
 //! **为什么用 `DWMWA_EXTENDED_FRAME_BOUNDS` 而非 `GetWindowRect`**：
 //! Windows 10/11 的无边框窗口（如 Edge Chromium、Explorer）的实际可视边框
@@ -19,14 +24,17 @@
 //! `DWMWA_EXTENDED_FRAME_BOUNDS` 返回 DWM 合成后的真实可视边框，
 //! 与用户看到的窗口边框一致，吸附精度更高。
 
-use windows::core::BOOL;
 use windows::Win32::Foundation::{HWND, LPARAM, RECT};
-use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
-use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
-    GWL_EXSTYLE, GetWindowLongPtrW, IsWindowVisible, WS_EX_TOOLWINDOW,
+use windows::Win32::Graphics::Dwm::{
+    DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
 };
 use windows::Win32::System::Threading::GetCurrentProcessId;
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GWL_EXSTYLE, GetSystemMetrics, GetWindowLongPtrW, GetWindowTextLengthW,
+    GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, SM_CXVIRTUALSCREEN,
+    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+};
+use windows::core::BOOL;
 
 /// 可吸附窗口的几何信息（物理像素，虚拟屏幕坐标系）。
 #[derive(Debug, Clone, serde::Serialize)]
@@ -79,6 +87,10 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, _lparam: LPARAM) -> BOOL {
     if ex_style & (WS_EX_TOOLWINDOW.0 as isize) != 0 {
         return BOOL(1);
     }
+    // 0.15.8 R1：跳过不激活窗口（WS_EX_NOACTIVATE）——悬浮球等不参与激活的窗口不应吸附
+    if ex_style & (WS_EX_NOACTIVATE.0 as isize) != 0 {
+        return BOOL(1);
+    }
 
     // ── DWM Cloak 过滤 ──
     // 被 Cloak 的窗口（UWP 挂起、虚拟桌面隐藏等）WS_VISIBLE 仍为 true 但实际不可见。
@@ -123,6 +135,19 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, _lparam: LPARAM) -> BOOL {
         return BOOL(1);
     }
 
+    // 0.15.8 R1：跳过完全在虚拟屏幕之外的窗口
+    let vs_left = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+    let vs_top = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+    let vs_right = vs_left + unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+    let vs_bottom = vs_top + unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
+    if rect.right <= vs_left
+        || rect.left >= vs_right
+        || rect.bottom <= vs_top
+        || rect.top >= vs_bottom
+    {
+        return BOOL(1);
+    }
+
     // ── 自身进程过滤 ──
     let mut pid: u32 = 0;
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
@@ -142,6 +167,11 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, _lparam: LPARAM) -> BOOL {
     } else {
         return BOOL(1);
     };
+
+    // 0.15.8 R1：排除系统桌面（Progman，标题固定为 "Program Manager"）
+    if title == "Program Manager" {
+        return BOOL(1);
+    }
 
     // ── 进程名 ──
     let process_name = get_process_name(pid).unwrap_or_else(|| String::new());
@@ -168,7 +198,7 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, _lparam: LPARAM) -> BOOL {
 fn get_process_name(pid: u32) -> Option<String> {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
-    use windows::Win32::Foundation::{HANDLE, MAX_PATH};
+    use windows::Win32::Foundation::{CloseHandle, MAX_PATH};
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
         QueryFullProcessImageNameW,
@@ -176,22 +206,26 @@ fn get_process_name(pid: u32) -> Option<String> {
 
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
-        let mut buf = vec![0u16; MAX_PATH as usize];
-        let mut len = buf.len() as u32;
-        QueryFullProcessImageNameW(
-            HANDLE(handle.0),
-            PROCESS_NAME_WIN32,
-            windows::core::PWSTR(buf.as_mut_ptr()),
-            &mut len,
-        )
-        .ok()?;
-        let path = OsString::from_wide(&buf[..len as usize])
-            .to_string_lossy()
-            .into_owned();
-        let name = std::path::Path::new(&path)
-            .file_stem()?
-            .to_str()?
-            .to_string();
-        Some(name)
+        // HANDLE 是裸 Win32 资源；把所有可能失败的步骤包进闭包，确保最后统一关闭。
+        let result = (|| {
+            let mut buf = vec![0u16; MAX_PATH as usize];
+            let mut len = buf.len() as u32;
+            QueryFullProcessImageNameW(
+                handle,
+                PROCESS_NAME_WIN32,
+                windows::core::PWSTR(buf.as_mut_ptr()),
+                &mut len,
+            )
+            .ok()?;
+            let path = OsString::from_wide(&buf[..len as usize])
+                .to_string_lossy()
+                .into_owned();
+            std::path::Path::new(&path)
+                .file_stem()?
+                .to_str()
+                .map(str::to_string)
+        })();
+        let _ = CloseHandle(handle);
+        result
     }
 }

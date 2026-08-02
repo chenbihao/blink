@@ -35,7 +35,7 @@
       <canvas class="pm-grid" width="144" height="81"></canvas>
       <div class="pm-info">
         <span class="pm-coord"></span>
-        <span class="pm-color"></span>
+        <span class="pm-color"><span class="pm-color-swatch" aria-hidden="true"></span><span class="pm-color-text"></span></span>
         <span class="pm-hint">Shift 切换格式</span>
         <span class="pm-hint">C 复制颜色</span>
       </div>
@@ -296,12 +296,10 @@
         </label>
         <label class="wm-row">
           <span class="wm-label">字体</span>
-          <select class="text-font-family">
-            <option value="sans-serif">无衬线</option>
-            <option value="serif">衬线</option>
-            <option value="monospace">等宽</option>
-            <option value='system-ui, "Microsoft YaHei", sans-serif'>系统</option>
-          </select>
+          <div class="font-picker" id="font-picker">
+            <input type="text" class="font-search" placeholder="搜索字体…" autocomplete="off" />
+            <div class="font-dropdown hidden" id="font-dropdown"></div>
+          </div>
         </label>
         <div class="wm-row text-style-toggles">
           <span class="wm-label">样式</span>

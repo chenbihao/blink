@@ -42,11 +42,17 @@ export const ss = {
   screenshotConfig: { prewarmOcr: true },
   selectionRevision: 0,
   translationRevision: 0,
+  windowListGen: 0,
   ocrResultCache: null,      // OCR 结果缓存
 
   // ── 选区交互状态 ──────────────────────────────────────────
   selectionInteraction: null, // move/resize/new
   cancelInProgress: false,
+  // 0.15.8 R2：pending-snap 状态——mousedown 在候选窗口上时不立即吸附，
+  // 等到 mouseup 且总位移 < 3px 才采用窗口矩形；达到阈值则转 free-selecting。
+  pendingSnap: null, // null | { startX, startY, winRect, pointerId }
+  // 0.15.8 R2：吸附窗口的 HWND，供长截图优先使用
+  snappedHwnd: null,
 
   // ── OCR 阅读模式状态 ──────────────────────────────────────
   reading: null,             // 阅读模式数据 { words, lines, charRanges }
@@ -60,7 +66,8 @@ export const ss = {
   magnifierCanvas: null,      // .pm-grid canvas
   magnifierCtx: null,          // .pm-grid ctx
   magnifierCoord: null,        // .pm-coord span
-  magnifierColor: null,        // .pm-color span
+  magnifierColor: null,        // .pm-color-text span
+  magnifierColorSwatch: null,  // .pm-color-swatch (色块预览)
   magnifierRaf: 0,             // rAF ID
   magnifierFormat: 0,          // 0=HEX, 1=RGB, 2=HSL（Shift 切换）
 
@@ -151,7 +158,8 @@ export function initDOM() {
     ss.magnifierCanvas = ss.magnifierEl.querySelector('.pm-grid');
     ss.magnifierCtx = ss.magnifierCanvas ? ss.magnifierCanvas.getContext('2d') : null;
     ss.magnifierCoord = ss.magnifierEl.querySelector('.pm-coord');
-    ss.magnifierColor = ss.magnifierEl.querySelector('.pm-color');
+    ss.magnifierColor = ss.magnifierEl.querySelector('.pm-color-text');
+    ss.magnifierColorSwatch = ss.magnifierEl.querySelector('.pm-color-swatch');
   }
   ss.hitCanvas = document.getElementById('ocr-hit-canvas');
   ss.hitCtx = ss.hitCanvas ? ss.hitCanvas.getContext('2d') : null;

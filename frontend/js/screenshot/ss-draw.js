@@ -10,6 +10,7 @@
 import { ss, TOOL_CAPS } from './ss-state.js';
 import { norm } from './ss-utils.js';
 import * as annot from './annotation-engine.js';
+import { cssToScreen, formatSelectionInfo } from './ss-selection-geometry.js';
 
 /** 暗色蒙版（初始态 + 无选区时） */
 export function drawDimmed() {
@@ -50,18 +51,16 @@ export function drawSelection() {
   ctx.fillRect(0, py, px, ph);
   ctx.fillRect(px + pw, py, canvas.width - px - pw, ph);
 
-  // 选区边框
+  // 选区边框（拖拽预览：实线，与智能预选的虚线区分）
   ctx.strokeStyle = '#4a9eff';
   ctx.lineWidth = 2 * dpr;
-  ctx.setLineDash([6 * dpr, 3 * dpr]);
   ctx.strokeRect(px, py, pw, ph);
-  ctx.setLineDash([]);
 
-  // size-hint 显示物理像素尺寸 + 坐标（0.15.8）
+  // size-hint 显示物理像素尺寸 + 坐标（0.15.8 R0：统一用 formatSelectionInfo）
   const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
-  const sx = Math.round(meta.vx + px);
-  const sy = Math.round(meta.vy + py);
-  sizeHint.textContent = `(${sx}, ${sy}) ${Math.round(pw)} × ${Math.round(ph)} px`;
+  const dpr2 = window.devicePixelRatio || 1;
+  const screenPos = cssToScreen(r.x, r.y, meta, dpr2);
+  sizeHint.textContent = formatSelectionInfo(screenPos.x, screenPos.y, pw, ph);
   sizeHint.classList.remove('hidden');
   sizeHint.style.left = (r.x + 4) + 'px';
   sizeHint.style.top = (r.y > 24 ? r.y - 22 : r.y + 4) + 'px';

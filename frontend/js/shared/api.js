@@ -163,7 +163,12 @@ export function screenshotForwardWheel(
 ) {
   return invoke("screenshot_forward_wheel", {
     hwnd, delta, screenX, screenY, passthroughMs, positionCursor,
-  });
+    });
+}
+
+/** 列出系统已安装的字体名称列表。 */
+export function listSystemFonts() {
+  return invoke("list_system_fonts");
 }
 
 /** 0.11.7-c：OCR 识别图片中的文字，返回 `{text, lines, words, text_angle?}`（0.11.9-b word 级）。 */

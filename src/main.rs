@@ -630,6 +630,7 @@ fn main() {
             app::commands::screenshot_capture_band,
             app::commands::screenshot_capture_probe,
             app::commands::screenshot_forward_wheel,
+            app::commands::list_system_fonts,
             app::commands::ocr_image,
             app::commands::translate_text,
             app::commands::translate_lines,

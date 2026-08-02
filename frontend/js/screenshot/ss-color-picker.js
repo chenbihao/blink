@@ -359,6 +359,7 @@ function enterPickMode() {
       const sourceCtx = source.getContext('2d');
       const pixel = sourceCtx.getImageData(px, py, 1, 1).data;
       hsv = rgbToHsv(pixel[0], pixel[1], pixel[2]);
+      alpha = 1;  // 取色后重置透明度，避免半透明导致用户以为没取色成功
       updateAll();
     } catch (err) {
       console.warn('[color-picker] 取色失败', err);
@@ -510,13 +511,28 @@ export function initColorPicker() {
     }, { passive: false });
   }
 
-  // 0.15.8-fix：透明度条滚轮
+  // 0.15.8-fix：透明度条滚轮（与色相条方向一致： deltaY > 0 = 增大）
   if (alphaCanvas) {
     alphaCanvas.addEventListener('wheel', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      alpha = Math.max(0, Math.min(1, alpha + (e.deltaY > 0 ? -0.05 : 0.05)));
+      alpha = Math.max(0, Math.min(1, alpha + (e.deltaY > 0 ? 0.05 : -0.05)));
       updateAll();
+    }, { passive: false });
+  }
+
+  // 色彩预设滚轮切换
+  const presetsContainer = dropdown ? dropdown.querySelector('.color-presets') : null;
+  if (presetsContainer) {
+    presetsContainer.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const swatches = Array.from(presetsContainer.querySelectorAll('.color-swatch'));
+      if (swatches.length < 2) return;
+      let curIdx = swatches.findIndex((s) => s.classList.contains('active'));
+      if (curIdx < 0) curIdx = 0;
+      const newIdx = Math.max(0, Math.min(swatches.length - 1, curIdx + (e.deltaY > 0 ? 1 : -1)));
+      if (newIdx !== curIdx) swatches[newIdx].click();
     }, { passive: false });
   }
 

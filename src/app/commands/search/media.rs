@@ -713,6 +713,77 @@ fn finish_screenshot_session(app: &tauri::AppHandle) {
     crate::infra::platform::window::hide_screenshot_overlay(app);
 }
 
+/// 列出系统已安装的字体名称列表，供截图文字工具选择字体用。
+///
+/// 使用 GDI `EnumFontFamiliesExW` 枚举所有可用的 TrueType/OpenType 字体，
+/// 返回去重后的字体 family 名称列表（按字母序排序）。
+#[tauri::command]
+pub async fn list_system_fonts() -> Result<Vec<String>, String> {
+    tokio::task::spawn_blocking(enum_system_fonts)
+        .await
+        .map_err(|e| format!("spawn_blocking join 失败: {e}"))?
+}
+
+/// 使用 GDI 枚举系统已安装的字体 family 名称（去重 + 排序）。
+fn enum_system_fonts() -> Result<Vec<String>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::collections::BTreeSet;
+        use windows::Win32::Foundation::LPARAM;
+        use windows::Win32::Graphics::Gdi::{
+            CreateCompatibleDC, DeleteDC, EnumFontFamiliesExW, LOGFONTW, TEXTMETRICW,
+        };
+
+        static FONT_NAMES: std::sync::Mutex<Option<BTreeSet<String>>> = std::sync::Mutex::new(None);
+
+        unsafe extern "system" fn font_enum_proc(
+            lf: *const LOGFONTW,
+            _tm: *const TEXTMETRICW,
+            _lparam: u32,
+            _data: LPARAM,
+        ) -> i32 {
+            if lf.is_null() { return 1; }
+            let lf = unsafe { &*lf };
+            // 读取 face name（UTF-16，LF_FACESIZE=32）
+            let mut end = 0;
+            for i in 0..32 {
+                if lf.lfFaceName[i] == 0 { end = i; break; }
+            }
+            if end == 0 { end = 32; }
+            let name = String::from_utf16_lossy(&lf.lfFaceName[..end]);
+            // 跳过以 @ 开头的竖排字体
+            if name.starts_with('@') { return 1; }
+            if let Ok(mut guard) = FONT_NAMES.lock() {
+                if guard.is_none() { *guard = Some(BTreeSet::new()); }
+                if let Some(set) = guard.as_mut() { set.insert(name); }
+            }
+            1
+        }
+
+        {
+            let mut guard = FONT_NAMES.lock().map_err(|e| format!("锁失败: {e}"))?;
+            *guard = Some(BTreeSet::new());
+        }
+
+        let hdc = unsafe { CreateCompatibleDC(None) };
+        if hdc.is_invalid() { return Err("CreateCompatibleDC 失败".to_string()); }
+
+        let lf: LOGFONTW = unsafe { std::mem::zeroed() };
+        let _ = unsafe { EnumFontFamiliesExW(hdc, &lf, Some(font_enum_proc), LPARAM(0), 0) };
+
+        let _ = unsafe { DeleteDC(hdc) };
+
+        let mut guard = FONT_NAMES.lock().map_err(|e| format!("锁失败: {e}"))?;
+        let names = guard.take().unwrap_or_default();
+        Ok(names.into_iter().collect())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(vec!["sans-serif".to_string(), "serif".to_string(), "monospace".to_string()])
+    }
+}
+
 #[cfg(test)]
 mod scroll_probe_tests {
     use super::*;

@@ -12,6 +12,9 @@ import { norm, applySquareConstraint } from './ss-utils.js';
 import { drawSelection, drawFinalSelection } from './ss-draw.js';
 import { findDisplayCssAt } from './ss-display.js';
 import * as annot from './annotation-engine.js';
+import {
+  cssToScreen, formatSelectionInfo, formatColor, magnifierSampleRegion,
+} from './ss-selection-geometry.js';
 
 export function selectionCursor(handle) {
   if (handle === 'n' || handle === 's') return 'ns-resize';
@@ -106,11 +109,11 @@ export function updateSelectionInteraction(e) {
     ss.selCss = { x: left, y: top, w: right - left, h: bottom - top };
   }
   drawFinalSelection();
+  // 0.15.8 R0：统一用 formatSelectionInfo 显示选区信息
   const dpr = window.devicePixelRatio || 1;
   const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
-  const sx = Math.round(meta.vx + ss.selCss.x * dpr);
-  const sy = Math.round(meta.vy + ss.selCss.y * dpr);
-  ss.sizeHint.textContent = `(${sx}, ${sy}) ${Math.round(ss.selCss.w * dpr)} × ${Math.round(ss.selCss.h * dpr)} px`;
+  const screenPos = cssToScreen(ss.selCss.x, ss.selCss.y, meta, dpr);
+  ss.sizeHint.textContent = formatSelectionInfo(screenPos.x, screenPos.y, ss.selCss.w * dpr, ss.selCss.h * dpr);
   ss.sizeHint.classList.remove('hidden');
   ss.sizeHint.style.left = (ss.selCss.x + 4) + 'px';
   ss.sizeHint.style.top = (ss.selCss.y > 24 ? ss.selCss.y - 22 : ss.selCss.y + 4) + 'px';
@@ -169,7 +172,9 @@ const PM_CELL = 9;
 
 /**
  * 更新像素放大镜（在 mousemove 中调，rAF 节流）。
- * 只在选区拖拽阶段（!isAnnotating）生效。
+ * 0.15.8 R3：mousemove 只记录 pending 坐标，getImageData / 网格绘制 / DOM 定位
+ * 全部放进 rAF 回调，一帧最多执行一次。
+ * 只在选区拖拽阶段（!isAnnotating）或取色器模式生效。
  */
 export function updatePixelMagnifier(cssX, cssY) {
   // 0.15.10：取色器模式下也显示放大镜（复用选区阶段的取色预览逻辑）
@@ -177,66 +182,95 @@ export function updatePixelMagnifier(cssX, cssY) {
     if (ss.magnifierEl) ss.magnifierEl.classList.add('hidden');
     return;
   }
+  // R3：只记录 pending 坐标，由 rAF 回调执行实际工作
+  ss._pendingMagnifierPos = { x: cssX, y: cssY };
+  if (!ss.magnifierRaf) {
+    ss.magnifierRaf = requestAnimationFrame(renderPixelMagnifier);
+  }
+}
+
+/** 0.15.8 R3：rAF 回调——一帧最多执行一次 getImageData + 绘制 + DOM 更新 */
+function renderPixelMagnifier() {
+  ss.magnifierRaf = 0;
+  if (!ss._pendingMagnifierPos || !ss.magnifierEl) return;
+  if (ss.isAnnotating && !ss.eyedropperActive) {
+    ss.magnifierEl.classList.add('hidden');
+    return;
+  }
+
+  const { x: cssX, y: cssY } = ss._pendingMagnifierPos;
   const dpr = window.devicePixelRatio || 1;
   const px = Math.round(cssX * dpr);
   const py = Math.round(cssY * dpr);
   const halfR = Math.floor(PM_ROWS / 2);
   const halfC = Math.floor(PM_COLS / 2);
 
-  // 从主 canvas 取像素（willReadFrequently 已设）
-  // 注意：必须从原始截图读取，而非遮罩后的 canvas——否则取到的是暗化后的色值。
-  // 使用 ss.screenshotOffscreen（loadScreenshot 时创建的纯截图离屏 canvas）。
+  // 从无蒙版的离屏 canvas 取原始像素
   if (!ss.screenshotOffscreen) return;
   const offCtx = ss.screenshotOffscreen.getContext('2d');
+  const canvasW = ss.screenshotOffscreen.width;
+  const canvasH = ss.screenshotOffscreen.height;
+
+  // R3：边缘采样——计算有界读取区域和网格偏移，
+  // 确保中心格始终对应鼠标下的物理像素。
+  const sample = magnifierSampleRegion(px, py, canvasW, canvasH, PM_COLS, PM_ROWS);
+  const readX = sample.readX;
+  const readY = sample.readY;
+  const gridOffX = sample.gridOffsetX;
+  const gridOffY = sample.gridOffsetY;
+  const colsToRead = sample.width;
+  const rowsToRead = sample.height;
+
   let imgData = null;
   try {
-    imgData = offCtx.getImageData(
-      Math.max(0, px - halfC),
-      Math.max(0, py - halfR),
-      PM_COLS,
-      PM_ROWS
-    );
-    drawMagnifierGrid(imgData);
+    imgData = offCtx.getImageData(readX, readY, colsToRead, rowsToRead);
   } catch (e) {
-    // getImageData 可能因跨域 taint 失败（理论上不会，图来自本地）
     return;
   }
   if (!imgData) return;
 
-  // 定位放大镜：鼠标右下方，偏移 16px
+  drawMagnifierGrid(imgData, gridOffX, gridOffY, colsToRead, rowsToRead);
+
+  // 定位放大镜：鼠标右下方，偏移 16px；空间不足时向左/上翻转
   const el = ss.magnifierEl;
   const elW = el.offsetWidth || 160;
   const elH = el.offsetHeight || 120;
   let left = cssX + 16;
   let top = cssY + 16;
-  // 不超出视口
   if (left + elW > window.innerWidth) left = cssX - elW - 16;
   if (top + elH > window.innerHeight) top = cssY - elH - 16;
+  // R3：最终 clamp 到 overlay 视口，不遮住目标像素也不越界
+  left = Math.max(0, Math.min(left, window.innerWidth - elW));
+  top = Math.max(0, Math.min(top, window.innerHeight - elH));
   el.style.left = left + 'px';
   el.style.top = top + 'px';
   el.classList.remove('hidden');
 
   // 坐标显示（虚拟屏幕物理坐标）
   const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
-  const screenX = meta.vx + px;
-  const screenY = meta.vy + py;
   if (ss.magnifierCoord) {
-    ss.magnifierCoord.textContent = `${screenX}, ${screenY}`;
+    ss.magnifierCoord.textContent = `${meta.vx + px}, ${meta.vy + py}`;
   }
 
-  // 中心像素色值
+  // 中心像素色值——中心格在 imgData 中的局部坐标
   if (ss.magnifierColor) {
-    const midIdx = ((halfR * PM_COLS) + halfC) * 4;
-    const data = imgData.data;
-    const r = data[midIdx];
-    const g = data[midIdx + 1];
-    const b = data[midIdx + 2];
-    ss.magnifierColor.textContent = formatColor(r, g, b, ss.magnifierFormat);
+    const localCX = halfC - gridOffX;
+    const localCY = halfR - gridOffY;
+    if (localCX >= 0 && localCX < colsToRead && localCY >= 0 && localCY < rowsToRead) {
+      const midIdx = (localCY * colsToRead + localCX) * 4;
+      const d = imgData.data;
+      const r = d[midIdx], g = d[midIdx + 1], b = d[midIdx + 2];
+      ss.magnifierColor.textContent = formatColor(r, g, b, ss.magnifierFormat);
+      if (ss.magnifierColorSwatch) {
+        ss.magnifierColorSwatch.style.background = `rgb(${r},${g},${b})`;
+      }
+    }
   }
 }
 
 /** 隐藏像素放大镜 */
 export function hidePixelMagnifier() {
+  if (ss.magnifierRaf) { cancelAnimationFrame(ss.magnifierRaf); ss.magnifierRaf = 0; }
   if (ss.magnifierEl) ss.magnifierEl.classList.add('hidden');
 }
 
@@ -252,23 +286,30 @@ export function getMagnifierColorText() {
   return text || null;
 }
 
-/** 在放大镜画布上绘制 9×16 像素网格 */
-function drawMagnifierGrid(imgData) {
+/** 在放大镜画布上绘制像素网格
+ *  0.15.8 R3：支持网格偏移，确保边缘采样时中心格对应鼠标像素。
+ * @param {ImageData} imgData - 实际读取的像素数据（可能小于 PM_COLS×PM_ROWS）
+ * @param {number} gridOffX - 网格 X 偏移（网格中跳过的列数）
+ * @param {number} gridOffY - 网格 Y 偏移
+ * @param {number} dataCols - imgData 的实际列数
+ * @param {number} dataRows - imgData 的实际行数
+ */
+function drawMagnifierGrid(imgData, gridOffX, gridOffY, dataCols, dataRows) {
   const ctx = ss.magnifierCtx;
   if (!ctx) return;
   const { data } = imgData;
   ctx.clearRect(0, 0, PM_COLS * PM_CELL, PM_ROWS * PM_CELL);
-  for (let row = 0; row < PM_ROWS; row++) {
-    for (let col = 0; col < PM_COLS; col++) {
-      const idx = (row * PM_COLS + col) * 4;
+  for (let row = 0; row < dataRows; row++) {
+    for (let col = 0; col < dataCols; col++) {
+      const idx = (row * dataCols + col) * 4;
       const r = data[idx];
       const g = data[idx + 1];
       const b = data[idx + 2];
       ctx.fillStyle = `rgb(${r},${g},${b})`;
-      ctx.fillRect(col * PM_CELL, row * PM_CELL, PM_CELL, PM_CELL);
+      ctx.fillRect((gridOffX + col) * PM_CELL, (gridOffY + row) * PM_CELL, PM_CELL, PM_CELL);
     }
   }
-  // 中心格高亮边框
+  // 中心格高亮边框（固定位置，不随偏移移动）
   const halfR = Math.floor(PM_ROWS / 2);
   const halfC = Math.floor(PM_COLS / 2);
   ctx.strokeStyle = '#4a9eff';
@@ -276,33 +317,7 @@ function drawMagnifierGrid(imgData) {
   ctx.strokeRect(halfC * PM_CELL, halfR * PM_CELL, PM_CELL, PM_CELL);
 }
 
-/** 格式化色值：0=HEX, 1=RGB, 2=HSL */
-function formatColor(r, g, b, fmt) {
-  if (fmt === 1) {
-    return `RGB(${r}, ${g}, ${b})`;
-  }
-  if (fmt === 2) {
-    const [h, s, l] = rgbToHsl(r, g, b);
-    return `HSL(${h}, ${s}%, ${l}%)`;
-  }
-  return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`.toUpperCase();
-}
-
-/** RGB → HSL */
-function rgbToHsl(r, g, b) {
-  r /= 255; g /= 255; b /= 255;
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  const l = (max + min) / 2;
-  if (max === min) return [0, 0, Math.round(l * 100)];
-  const d = max - min;
-  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-  let h;
-  if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
-  else if (max === g) h = ((b - r) / d + 2) / 6;
-  else h = ((r - g) / d + 4) / 6;
-  return [Math.round(h * 360), Math.round(s * 100), Math.round(l * 100)];
-}
+// 0.15.8 R0：formatColor / rgbToHsl 已统一到 ss-selection-geometry.js，此处不再重复定义
 
 /** 0.11.8-e：矩形/椭圆拖动期间按/松 Shift 实时更新预览 */
 export function refreshShapePreviewOnShift(e) {
@@ -328,7 +343,7 @@ export function updateStrokeCursor(clientX, clientY) {
   // 每次鼠标移动都需重设 display + width/height/left/top/borderColor。
   // 用 class 切换会引入额外 reflow，且此处不存在「读 style.display 推断状态」的需求。
   if (!ss.isAnnotating || !ss.selCss) { strokeCursor.style.display = 'none'; return; }
-  if (ss.isAnnotDragging) { strokeCursor.style.display = 'none'; return; }
+  // Bug-fix: 拖拽时仍显示笔触预览，让用户看到作用区域；只在离开选区时隐藏
   if (clientX < ss.selCss.x || clientX > ss.selCss.x + ss.selCss.w ||
       clientY < ss.selCss.y || clientY > ss.selCss.y + ss.selCss.h) {
     strokeCursor.style.display = 'none';

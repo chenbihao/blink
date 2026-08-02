@@ -41,6 +41,7 @@ import { applyThemeFromConfig } from "../shared/theme.js";
 // ── 子模块 ──────────────────────────────────────────────
 import { ss, initDOM, PREWARM_MIN_WIDTH, PREWARM_MIN_HEIGHT, TOOL_CAPS } from "./ss-state.js";
 import { norm, pointInRect, applySquareConstraint } from "./ss-utils.js";
+import { shouldStartFreeSelection } from "./ss-selection-geometry.js";
 import { drawDimmed, drawSelection, drawFinalSelection, redrawAnnotPreview, redrawAnnotFull } from "./ss-draw.js";
 import { positionToolbar } from "./ss-display.js";
 import {
@@ -63,7 +64,7 @@ import {
 } from "./ss-output.js";
 import { bindToolbar, showTextInput, updateUndoRedoButtons } from "./ss-toolbar.js";
 // 0.15.8：智能窗口吸附 + 像素放大镜
-import { loadPickableWindows, clearPickableWindows, updateWindowHover, getHoveredWindowRect } from "./ss-hover.js";
+import { loadPickableWindows, clearPickableWindows, updateWindowHover, getHoveredWindowRect, clearHover } from "./ss-hover.js";
 // 0.15.7：长截图
 import {
   enterScrollCapture, exitScrollCapture, onScrollWheel,
@@ -154,8 +155,8 @@ annot.setTool('select');
 const isPreheat = new URLSearchParams(window.location.search).get('preheat') === '1';
 if (!isPreheat) {
   loadScreenshot();
-  // 0.15.8：加载可吸附窗口列表（异步，不阻塞截图加载）
-  loadPickableWindows();
+  // 0.15.8 R1：加载可吸附窗口列表（异步，不阻塞截图加载），传 generation 防过期回流
+  loadPickableWindows(ss.windowListGen);
 }
 // 0.15.7：绑定长截图专属工具栏
 bindScrollToolbar();
@@ -174,6 +175,12 @@ window.__blinkReloadScreenshot = function () {
     console.error('[screenshot] loadScreenshot threw', e);
     ss.errorHint.textContent = '截图初始化失败，按 ESC 重试';
     ss.errorHint.classList.remove('hidden');
+  }
+  // 0.15.8 R1：重载截图时同步刷新窗口列表（在新 meta 生效后）
+  try {
+    loadPickableWindows(ss.windowListGen);
+  } catch (e) {
+    console.warn('[screenshot] reload loadPickableWindows threw', e);
   }
 };
 
@@ -203,6 +210,9 @@ function resetState() {
   ss.blurGuard = false;
   ss.selCss = null;
   ss.selectionInteraction = null;
+  // 0.15.8 R2：清除 pending-snap 状态
+  ss.pendingSnap = null;
+  ss.snappedHwnd = null;
   ss.selectionRevision++;
   ss.translationRevision++;
   canvas.style.cursor = 'crosshair';
@@ -339,6 +349,8 @@ function enterAnnotationMode(rect) {
   ss.isAnnotating = true;
   ss.sent = false;
   hidePixelMagnifier();
+  // Bug-fix: 进入标注模式时隐藏窗口吸附虚线框
+  clearHover();
 
   const dpr = window.devicePixelRatio || 1;
   annotCanvas.classList.remove('hidden');
@@ -391,16 +403,18 @@ function enterAnnotationWithCropData(cropData, pw, ph) {
   const cssW = pw / dpr;
   const cssH = ph / dpr;
 
-  // 水平默认展示长图中央；竖向超出视口时从顶部开始编辑。
+  // 水平默认展示长图中央；竖向超出视口时从底部开始编辑。
   const initialX = Math.round((window.innerWidth - cssW) / 2);
   const initialY = cssH <= window.innerHeight
     ? Math.round((window.innerHeight - cssH) / 2)
-    : 48;
-  ss.selCss = { x: initialX, y: initialY, w: cssW, h: cssH };
+    : Math.round(window.innerHeight - cssH);
+  // 顶部至少留 12px 边距
+  const clampedY = Math.max(12, initialY);
+  ss.selCss = { x: initialX, y: clampedY, w: cssW, h: cssH };
   ss.isAnnotating = true;
   ss.sent = false;
   ss._longImagePan = {
-    x: initialX, y: initialY, dragging: false, lastX: 0, lastY: 0,
+    x: initialX, y: clampedY, dragging: false, lastX: 0, lastY: 0,
   };
   hidePixelMagnifier();
 
@@ -414,7 +428,7 @@ function enterAnnotationWithCropData(cropData, pw, ph) {
   ss.canvas.width = pw;
   ss.canvas.height = ph;
   ss.canvas.style.left = initialX + 'px';
-  ss.canvas.style.top = initialY + 'px';
+  ss.canvas.style.top = clampedY + 'px';
   ss.canvas.style.width = cssW + 'px';
   ss.canvas.style.height = cssH + 'px';
   ss.canvas.style.pointerEvents = '';
@@ -425,7 +439,7 @@ function enterAnnotationWithCropData(cropData, pw, ph) {
 
   annotCanvas.classList.remove('hidden');
   annotCanvas.style.left = initialX + 'px';
-  annotCanvas.style.top = initialY + 'px';
+  annotCanvas.style.top = clampedY + 'px';
   annotCanvas.style.width = cssW + 'px';
   annotCanvas.style.height = cssH + 'px';
   annotCanvas.width = pw;
@@ -435,9 +449,15 @@ function enterAnnotationWithCropData(cropData, pw, ph) {
   updateUndoRedoButtons();
   screenshotSetAnnotationMode(true).catch((e) => console.error('setAnnotationMode(true) 失败', e));
 
-  // 工具栏固定在视口顶部中间，不随长图移动。
+  // 工具栏定位：选区未超出屏幕时贴选区下方，超出时贴屏幕底部。
   toolbar.classList.remove('hidden');
-  toolbar.style.top = '8px';
+  const selectionBottom = clampedY + cssH;
+  const toolbarH = toolbar.offsetHeight || 48;
+  const placeBelow = selectionBottom + toolbarH + 8 <= window.innerHeight;
+  const toolbarTop = placeBelow
+    ? (selectionBottom + 8)
+    : Math.max(8, window.innerHeight - toolbarH - 8);
+  toolbar.style.top = toolbarTop + 'px';
   requestAnimationFrame(() => {
     toolbar.style.left = Math.max(8, Math.round((window.innerWidth - toolbar.offsetWidth) / 2)) + 'px';
   });
@@ -615,17 +635,22 @@ canvas.addEventListener('mousedown', (e) => {
 
   if (e.button !== 0) return;
 
-  // 0.15.8：窗口吸附——选区拖拽阶段单击窗口区域直接吸附
+  // 0.15.8 R2：窗口吸附——pending-snap 状态机
+  // mousedown 只记录候选窗口和起点，不立即吸附；
+  // mouseup 时若总位移 < 3px 才采用窗口矩形；mousemove 达到阈值转 free-selecting。
   if (!ss.isAnnotating && !ss.selectionInteraction) {
     const winRect = getHoveredWindowRect();
     if (winRect) {
-      ss.startX = winRect.x;
-      ss.startY = winRect.y;
-      ss.endX = winRect.x + winRect.w;
-      ss.endY = winRect.y + winRect.h;
-      ss.isDragging = false;
-      console.info('[screenshot] window snap', winRect);
-      enterAnnotationMode(winRect);
+      ss.pendingSnap = {
+        startX: e.offsetX,
+        startY: e.offsetY,
+        winRect: winRect,
+        pointerId: e.pointerId,
+      };
+      // pointer capture 保证快速拖出 canvas 后仍能收到 mouseup
+      if (e.pointerId !== undefined && canvas.setPointerCapture) {
+        try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+      }
       return;
     }
   }
@@ -701,6 +726,29 @@ canvas.addEventListener('mousemove', (e) => {
     hidePixelMagnifier();
   }
 
+  // 0.15.8 R2：pending-snap 阈值检测——达到 3px 转为自由框选
+  if (ss.pendingSnap) {
+    if (shouldStartFreeSelection(
+      ss.pendingSnap.startX,
+      ss.pendingSnap.startY,
+      e.offsetX,
+      e.offsetY,
+    )) {
+      // 达到阈值，清除窗口候选并从原始按下点开始自由框选
+      clearHover();
+      ss.startX = ss.pendingSnap.startX;
+      ss.startY = ss.pendingSnap.startY;
+      ss.endX = e.offsetX;
+      ss.endY = e.offsetY;
+      ss.pendingSnap = null;
+      ss.isDragging = true;
+      ss.sent = false;
+      ss.snappedHwnd = null;
+      drawSelection();
+    }
+    return;
+  }
+
   if (ss.selectionInteraction) {
     updateSelectionInteraction(e);
     return;
@@ -739,6 +787,11 @@ canvas.addEventListener('mousemove', (e) => {
 canvas.addEventListener('mouseleave', () => {
   // W4 例外：strokeCursor 是高频逐帧更新的画笔预览光标，直接写 style.display 性能更好
   if (ss.strokeCursor) ss.strokeCursor.style.display = 'none';
+  // 0.15.8 R2：离开 canvas 时清除 pending-snap 状态
+  if (ss.pendingSnap) {
+    ss.pendingSnap = null;
+    clearHover();
+  }
   if (!ss.selectionInteraction) {
     ss.canvas.style.cursor = ss._longImagePan && annot.getTool() === 'select'
       ? 'grab'
@@ -751,6 +804,31 @@ canvas.addEventListener('mouseup', (e) => {
   if (endLongImagePan()) return;
 
   if (!ss.screenshot) return;
+
+  // 0.15.8 R2：pending-snap 完成——未达阈值，采用窗口矩形
+  if (ss.pendingSnap) {
+    const winRect = ss.pendingSnap.winRect;
+    ss.pendingSnap = null;
+    // 释放 pointer capture
+    if (e.pointerId !== undefined && canvas.releasePointerCapture) {
+      try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+    }
+    if (winRect.w >= 5 && winRect.h >= 5) {
+      ss.snappedHwnd = winRect.hwnd || null;
+      ss.startX = winRect.x;
+      ss.startY = winRect.y;
+      ss.endX = winRect.x + winRect.w;
+      ss.endY = winRect.y + winRect.h;
+      ss.isDragging = false;
+      console.info('[screenshot] window snap (pending-snap confirmed)', winRect);
+      try {
+        enterAnnotationMode({ x: winRect.x, y: winRect.y, w: winRect.w, h: winRect.h });
+      } catch (err) {
+        console.error('[screenshot] window snap enterAnnotationMode threw', err);
+      }
+    }
+    return;
+  }
 
   if (finishSelectionInteraction(e)) return;
 
@@ -811,6 +889,8 @@ canvas.addEventListener('mouseup', (e) => {
   }
 
   console.info('[screenshot] selection confirmed', rect);
+  // 0.15.8 R2：自由框选不关联窗口 HWND
+  ss.snappedHwnd = null;
   try {
     enterAnnotationMode(rect);
   } catch (e) {
@@ -857,7 +937,8 @@ document.addEventListener('keydown', (e) => {
     }
   }
   // 0.15.12：Shift 切换放大镜色值格式（选区拖拽阶段 或 取色器模式）
-  if (e.key === 'Shift' && !e.ctrlKey && !e.metaKey && !e.altKey && (!ss.isAnnotating || ss.eyedropperActive)) {
+  // 0.15.8 R3：忽略 keydown.repeat，防止按住 Shift 时连续切换
+  if (e.key === 'Shift' && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey && (!ss.isAnnotating || ss.eyedropperActive)) {
     const tgt = e.target;
     if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
     cycleMagnifierFormat();

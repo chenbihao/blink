@@ -167,7 +167,7 @@ async function pumpManualWheel() {
  * @param {object} rect - 框选矩形 CSS 坐标 {x, y, w, h}
  */
 export async function enterScrollCapture(rect) {
-  session.invalidate();
+  const generation = session.invalidate();
   session.manualWheelVersion = 0;
   session.autoWheelDelta = -120;
   session.queuedManualWheel = null;
@@ -206,8 +206,17 @@ export async function enterScrollCapture(rect) {
   try {
     await screenshotSetCaptureExclusion(true);
   } catch (e) {
-    console.warn('[scroll] 设置捕获排除失败，BitBlt 可能拍到 overlay', e);
+    if (!captureStillActive(generation)) return false;
+    console.warn('[scroll] 设置捕获排除失败，已中止长截图', e);
+    resetScrollCaptureState();
+    ss._showTransientHint?.('当前系统无法排除截图工具界面，长截图已取消');
+    screenshotSetCaptureExclusion(false)
+      .catch((cleanupError) => console.warn('[scroll] 捕获排除失败后的清理失败', cleanupError));
+    return false;
   }
+  // ESC、失焦、overlay 重载或新会话都可能发生在上面的 IPC 等待期间。
+  // 旧入口不得继续修改新一代 canvas / toolbar 状态。
+  if (!captureStillActive(generation)) return false;
 
   // 清除暗色蒙版，让用户看到真实背景。DOM pointer-events 不等于 Win32 窗口穿透；
   // wheel 仍由 overlay window listener 接收，再显式投递给目标 HWND。
@@ -235,7 +244,8 @@ export async function enterScrollCapture(rect) {
   positionPreview(rect);
 
   // 截取第一帧
-  await captureFrame();
+  await captureFrame(0, generation);
+  if (!captureStillActive(generation)) return false;
   if (!ss.scrollHwnd) {
     ss._showTransientHint?.('未找到可滚动窗口，请重新框选目标窗口内的区域');
   }
@@ -245,6 +255,7 @@ export async function enterScrollCapture(rect) {
     hwnd: ss.scrollHwnd,
     target: pickedWindow?.processName || pickedWindow?.title || 'fallback',
   });
+  return true;
 }
 
 /**

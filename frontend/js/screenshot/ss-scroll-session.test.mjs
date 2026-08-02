@@ -18,6 +18,7 @@ session.manualWheelVersion = 4;
 const oldGeneration = session.captureGeneration;
 session.reset();
 assert.ok(session.captureGeneration > oldGeneration, 'reset 应使旧异步任务失效');
+assert.equal(session.invalidate(), session.captureGeneration, 'invalidate 应返回新代际供异步入口捕获');
 assert.equal(session.scrollCapturePhase, 'idle');
 assert.deepEqual(session.scrollFrames, []);
 assert.equal(session.queuedManualWheel, null);

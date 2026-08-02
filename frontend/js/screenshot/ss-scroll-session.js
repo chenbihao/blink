@@ -47,6 +47,7 @@ export class ScrollCaptureSession {
 
   invalidate() {
     this.captureGeneration++;
+    return this.captureGeneration;
   }
 
   exit(restoreSelection = true) {

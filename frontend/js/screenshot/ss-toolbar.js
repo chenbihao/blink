@@ -454,7 +454,7 @@ export function bindToolbar() {
       let idx = Array.from(items).findIndex((it) => it.dataset.tool === currentTool);
       if (idx < 0) idx = 0;
       idx += e.deltaY > 0 ? 1 : -1;  // 0.15.14：恢复正常方向（下滚=下一个）
-      idx = (idx + items.length) % items.length;
+      idx = Math.max(0, Math.min(items.length - 1, idx));  // 边界 clamp 不循环
       selectTool(items[idx].dataset.tool);
     }, { passive: false });
   });
@@ -536,9 +536,9 @@ export function bindToolbar() {
       // 找当前激活的模式
       let curIdx = Array.from(btns).findIndex((b) => b.classList.contains('active'));
       if (curIdx < 0) curIdx = 0;
-      // 下滚 = 下一个模式，上滚 = 上一个（与列表类一致）
-      const newIdx = (curIdx + (e.deltaY > 0 ? 1 : -1) + btns.length) % btns.length;
-      btns[newIdx].click();
+      // 下滚 = 下一个模式，上滚 = 上一个；边界 clamp 不循环
+      const newIdx = Math.max(0, Math.min(btns.length - 1, curIdx + (e.deltaY > 0 ? 1 : -1)));
+      if (newIdx !== curIdx) btns[newIdx].click();
     }, { passive: false });
   });
   // selectTool 只在用户切换工具时调，首次进入时不会被触发，需在此同步初始状态。
@@ -599,12 +599,93 @@ export function bindToolbar() {
     annot.setTextConfig({ fontSize: v });
     if (fontSizeVal) fontSizeVal.textContent = String(v);
   }, { passive: false });
-  // 字体下拉
-  const fontFamilySelect = subPanel ? subPanel.querySelector('.text-font-family') : null;
-  if (fontFamilySelect) fontFamilySelect.addEventListener('change', (e) => {
-    e.stopPropagation();
-    annot.setTextConfig({ fontFamily: e.target.value });
-  });
+  // 字体下拉——改为可搜索的系统字体列表
+  const fontPicker = subPanel ? subPanel.querySelector('#font-picker') : null;
+  const fontSearch = subPanel ? subPanel.querySelector('.font-search') : null;
+  const fontDropdown = subPanel ? subPanel.querySelector('#font-dropdown') : null;
+  let systemFonts = [];
+  let currentFontFamily = annot.getTextConfig().fontFamily;
+
+  if (fontSearch) {
+    // 初始 placeholder 显示当前字体
+    fontSearch.value = currentFontFamily;
+
+    // 异步加载系统字体列表
+    import('../shared/api.js')
+      .then(({ listSystemFonts }) => listSystemFonts())
+      .then((fonts) => {
+        systemFonts = fonts || [];
+        // 确保通用 fallback 在列表中
+        if (!systemFonts.includes('sans-serif')) systemFonts.unshift('sans-serif');
+        if (!systemFonts.includes('serif')) systemFonts.unshift('serif');
+        if (!systemFonts.includes('monospace')) systemFonts.unshift('monospace');
+      })
+      .catch((e) => console.warn('[screenshot] 加载系统字体列表失败', e));
+
+    // 输入时模糊匹配
+    fontSearch.addEventListener('input', () => {
+      const q = fontSearch.value.trim().toLowerCase();
+      if (!fontDropdown || systemFonts.length === 0) return;
+      const matches = q
+        ? systemFonts.filter((f) => f.toLowerCase().includes(q)).slice(0, 100)
+        : systemFonts.slice(0, 100);
+      renderFontDropdown(matches);
+      fontDropdown.classList.remove('hidden');
+    });
+
+    // 聚焦时展开
+    fontSearch.addEventListener('focus', () => {
+      if (!fontDropdown || systemFonts.length === 0) return;
+      const q = fontSearch.value.trim().toLowerCase();
+      const matches = q
+        ? systemFonts.filter((f) => f.toLowerCase().includes(q)).slice(0, 100)
+        : systemFonts.slice(0, 100);
+      renderFontDropdown(matches);
+      fontDropdown.classList.remove('hidden');
+    });
+
+    // 失焦时延迟关闭（允许点击选项）
+    fontSearch.addEventListener('blur', () => {
+      setTimeout(() => { if (fontDropdown) fontDropdown.classList.add('hidden'); }, 200);
+    });
+
+    // 键盘：Enter 选第一个匹配项
+    fontSearch.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && fontDropdown && !fontDropdown.classList.contains('hidden')) {
+        const first = fontDropdown.querySelector('.font-item');
+        if (first) {
+          first.click();
+          e.preventDefault();
+        }
+      }
+    });
+  }
+
+  function renderFontDropdown(fonts) {
+    if (!fontDropdown) return;
+    fontDropdown.innerHTML = '';
+    for (const font of fonts) {
+      const item = document.createElement('button');
+      item.className = 'font-item' + (font === currentFontFamily ? ' active' : '');
+      item.textContent = font;
+      item.style.fontFamily = `"${font}", sans-serif`;
+      item.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        currentFontFamily = font;
+        if (fontSearch) fontSearch.value = font;
+        annot.setTextConfig({ fontFamily: font });
+        fontDropdown.querySelectorAll('.font-item').forEach((b) => b.classList.remove('active'));
+        item.classList.add('active');
+        fontDropdown.classList.add('hidden');
+      });
+      fontDropdown.appendChild(item);
+    }
+  }
+
+  // 阻止字体选择器的事件穿透
+  if (fontPicker) fontPicker.querySelectorAll('input, button').forEach((el) =>
+    el.addEventListener('mousedown', (e) => e.stopPropagation()));
   // 粗/斜/阴影 toggle
   const boldBtn = subPanel ? subPanel.querySelector('.text-bold-btn') : null;
   const italicBtn = subPanel ? subPanel.querySelector('.text-italic-btn') : null;
