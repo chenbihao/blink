@@ -176,7 +176,6 @@ pub async fn get_thumb_by_id(pool: &SqlitePool, id: &str) -> Option<Vec<u8>> {
 }
 
 /// 删除指定图片条目。
-#[allow(dead_code)]
 pub async fn delete_image(pool: &SqlitePool, id: &str) {
     let _ = sqlx::query("DELETE FROM clipboard_images WHERE id = ?1")
         .bind(id)
@@ -185,7 +184,6 @@ pub async fn delete_image(pool: &SqlitePool, id: &str) {
 }
 
 /// 清空所有剪贴板图片历史。
-#[allow(dead_code)]
 pub async fn clear_all_images(pool: &SqlitePool) {
     let _ = sqlx::query("DELETE FROM clipboard_images")
         .execute(pool)
@@ -193,7 +191,6 @@ pub async fn clear_all_images(pool: &SqlitePool) {
 }
 
 /// 清理过期图片（按天）。
-#[allow(dead_code)]
 pub async fn cleanup_old_images(pool: &SqlitePool, days: u32) {
     if days == 0 {
         return;
@@ -242,15 +239,29 @@ pub fn generate_image_id() -> String {
 }
 
 /// 获取剪贴板图片统计信息。
+///
+/// 返回图片数量和总 BLOB 大小（png_blob + thumb_blob 字节数）。
 pub async fn get_image_stats(pool: &SqlitePool) -> serde_json::Value {
-    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM clipboard_images")
+    let row: (i64, Option<i64>) = sqlx::query_as(
+        "SELECT COUNT(*), COALESCE(SUM(LENGTH(png_blob) + LENGTH(thumb_blob)), 0) FROM clipboard_images",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or((0, Some(0)));
+
+    serde_json::json!({
+        "image_count": row.0,
+        "total_size_bytes": row.1.unwrap_or(0),
+    })
+}
+
+/// 获取剪贴板图片数量。
+pub async fn count(pool: &SqlitePool) -> i64 {
+    let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM clipboard_images")
         .fetch_one(pool)
         .await
         .unwrap_or((0,));
-
-    serde_json::json!({
-        "image_count": count.0,
-    })
+    row.0
 }
 
 #[cfg(test)]

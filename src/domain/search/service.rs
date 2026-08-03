@@ -134,8 +134,11 @@ pub struct SearchService {
     /// 主窗口当前待确认的 AI Capability。
     ///
     /// 主窗口同一时刻只接受一条 AI 请求，单槽即可；新请求覆盖旧请求。
-    /// command 确认时必须 name + args 完整匹配，防止绕过确认卡片调用任意 Capability。
+    /// 0.17.0：匹配键从 `seq + name + args` 三重比对改为 `confirm_id` 严格匹配，
+    /// 消除 `arguments` 深比较的顺序敏感问题。`seq` 降为 result-routing tag。
     pending_ai_confirmation: Arc<Mutex<Option<PendingAiConfirmation>>>,
+    /// 0.17.0：confirm_id 递增计数器，每次 register 加 1。
+    next_confirm_id: Arc<AtomicU64>,
 }
 
 #[derive(Clone, Copy)]
@@ -146,21 +149,17 @@ struct AutosuggestState {
 
 #[derive(Clone)]
 struct PendingAiConfirmation {
+    /// 0.17.0：严格匹配键，由 `next_confirm_id` 递增生成。
+    confirm_id: u64,
+    /// 原始查询序号，确认后用 result routing（emit_confirmed_capability_result 路由结果到正确查询）。
     seq: u64,
     capability_name: String,
     arguments: serde_json::Value,
 }
 
 impl PendingAiConfirmation {
-    fn matches(
-        &self,
-        latest_seq: u64,
-        capability_name: &str,
-        arguments: &serde_json::Value,
-    ) -> bool {
-        self.seq == latest_seq
-            && self.capability_name == capability_name
-            && self.arguments == *arguments
+    fn matches(&self, confirm_id: u64) -> bool {
+        self.confirm_id == confirm_id
     }
 }
 
@@ -208,6 +207,7 @@ impl SearchService {
             min_score_shared,
             ai_registry: Arc::new(RwLock::new(None)),
             pending_ai_confirmation: Arc::new(Mutex::new(None)),
+            next_confirm_id: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -224,31 +224,37 @@ impl SearchService {
     }
 
     /// 注册主窗口待确认 Capability。新 AI 请求会覆盖旧卡片。
+    /// 0.17.0：返回 `confirm_id` 供前端匹配。
     pub fn register_ai_confirmation(
         &self,
         seq: u64,
         capability_name: &str,
         arguments: &serde_json::Value,
-    ) {
+    ) -> u64 {
+        let confirm_id = self.next_confirm_id.fetch_add(1, Ordering::Relaxed);
         *self.pending_ai_confirmation.lock().unwrap() = Some(PendingAiConfirmation {
+            confirm_id,
             seq,
             capability_name: capability_name.to_string(),
             arguments: arguments.clone(),
         });
+        confirm_id
     }
 
-    /// 消费与确认 command 完整匹配的待确认项，返回原始查询序号。
+    /// 消费与 confirm_id 匹配的待确认项，返回 (seq, capability_name, arguments)。
+    /// 0.17.0：匹配键从 seq+name+args 改为 confirm_id 严格匹配。
     pub fn take_ai_confirmation(
         &self,
-        capability_name: &str,
-        arguments: &serde_json::Value,
-    ) -> Option<u64> {
+        confirm_id: u64,
+    ) -> Option<(u64, String, serde_json::Value)> {
         let mut guard = self.pending_ai_confirmation.lock().unwrap();
-        let latest_seq = self.latest_seq.load(Ordering::SeqCst);
         let matches = guard
             .as_ref()
-            .is_some_and(|pending| pending.matches(latest_seq, capability_name, arguments));
-        matches.then(|| guard.take().expect("pending confirmation checked").seq)
+            .is_some_and(|pending| pending.matches(confirm_id));
+        matches.then(|| {
+            let p = guard.take().expect("pending confirmation checked");
+            (p.seq, p.capability_name, p.arguments)
+        })
     }
 
     /// 将用户确认后的数据型 Capability 结果送回原主窗口查询。
@@ -1784,7 +1790,8 @@ async fn handle_ai_tool_calls(
                 "AI Capability 调用需用户确认"
             );
             if let Some(service) = env.search_service() {
-                service.register_ai_confirmation(seq, &tc.name, &tc.arguments);
+                let confirm_id = service.register_ai_confirmation(seq, &tc.name, &tc.arguments);
+                emit_ai_confirm(env, seq, confirm_id, &tc.name, &tc.arguments, title);
             } else {
                 tracing::error!(
                     target: ai_slo::TARGET,
@@ -1794,7 +1801,6 @@ async fn handle_ai_tool_calls(
                 emit_ai_clear(env, seq, Some("确认服务未初始化"));
                 return;
             }
-            emit_ai_confirm(env, seq, &tc.name, &tc.arguments, title);
             return;
         }
 
@@ -2074,10 +2080,11 @@ fn items_to_entries(items: &[crate::domain::capability::ItemResult]) -> Vec<AppE
 /// AI Dangerous 动作确认请求——emit 到前端,展示确认卡片等用户 Enter/Esc。
 ///
 /// **事件**: `blink://ai-confirm-action`
-/// **payload**: `{ seq, actionName, actionTitle, arguments, dangerClass }`
+/// **payload**: `{ seq, confirmId, actionName, actionTitle, arguments, dangerClass }`
 fn emit_ai_confirm(
     env: &dyn DomainEnv,
     seq: u64,
+    confirm_id: u64,
     action_name: &str,
     arguments: &serde_json::Value,
     title: &str,
@@ -2085,6 +2092,7 @@ fn emit_ai_confirm(
     #[derive(serde::Serialize, Clone)]
     struct ConfirmPayload {
         seq: u64,
+        confirm_id: u64,
         action_name: String,
         action_title: String,
         arguments: serde_json::Value,
@@ -2092,6 +2100,7 @@ fn emit_ai_confirm(
     }
     let payload = ConfirmPayload {
         seq,
+        confirm_id,
         action_name: action_name.to_string(),
         action_title: title.to_string(),
         arguments: arguments.clone(),
@@ -2759,7 +2768,8 @@ async fn handle_turn2_tool_call(
                 "Turn 2 Capability 调用需用户确认"
             );
             if let Some(service) = env.search_service() {
-                service.register_ai_confirmation(seq, &tc.name, &tc.arguments);
+                let confirm_id = service.register_ai_confirmation(seq, &tc.name, &tc.arguments);
+                emit_ai_confirm(env, seq, confirm_id, &tc.name, &tc.arguments, title);
             } else {
                 tracing::error!(
                     target: ai_slo::TARGET,
@@ -2769,7 +2779,6 @@ async fn handle_turn2_tool_call(
                 emit_ai_clear(env, seq, Some("确认服务未初始化"));
                 return;
             }
-            emit_ai_confirm(env, seq, &tc.name, &tc.arguments, title);
             return;
         }
 
@@ -2836,21 +2845,19 @@ mod tests {
     use crate::domain::search::engine::SearchAction;
 
     #[test]
-    fn pending_ai_confirmation_requires_current_seq_name_and_args() {
+    fn pending_ai_confirmation_matches_by_confirm_id() {
         let pending = PendingAiConfirmation {
+            confirm_id: 1,
             seq: 42,
             capability_name: "search_apps".into(),
             arguments: serde_json::json!({ "query": "code" }),
         };
 
-        assert!(pending.matches(42, "search_apps", &serde_json::json!({ "query": "code" })));
-        assert!(!pending.matches(43, "search_apps", &serde_json::json!({ "query": "code" })));
-        assert!(!pending.matches(
-            42,
-            "search_clipboard_history",
-            &serde_json::json!({ "query": "code" })
-        ));
-        assert!(!pending.matches(42, "search_apps", &serde_json::json!({ "query": "other" })));
+        // confirm_id 匹配
+        assert!(pending.matches(1));
+        // 不匹配的 confirm_id
+        assert!(!pending.matches(2));
+        assert!(!pending.matches(0));
     }
 
     fn item(id: &str, score: f32, source: &str) -> SearchItem {

@@ -5,7 +5,7 @@
 
 import { queryEl, resultsEl } from "./dom.js";
 import { activateItem } from "./actions.js";
-import { openContainingFolder, openLnkTarget, resetItemHistory, runBuiltinAction, copyToClipboard, deleteClipboardItem, hideWindow, invoke, triggerChord, listChordActions, pinClipboardImage } from "../shared/api.js";
+import { openContainingFolder, openLnkTarget, resetItemHistory, runBuiltinAction, copyToClipboard, deleteClipboardItem, deleteClipboardImage, hideWindow, invoke, triggerChord, listChordActions, pinClipboardImage } from "../shared/api.js";
 import { retrigger } from "./search.js";
 import { t } from "../i18n/index.js";
 import { EVENTS } from "../shared/event-names.js";
@@ -245,20 +245,36 @@ function itemMenu(li) {
     });
   }
 
-  // 0.16.13：剪贴板文本项追加"删除"动作
-  // hitId 在首个 action（Copy）上，为 clipboard_history 表主键
+  // 0.16.13：剪贴板文本项追加“删除”动作
+  // 0.17.0：图片项也追加“删除”，按 isImage 分发到不同后端命令
+  // hitId 在首个 action（Copy）上，为 clipboard_history 表主键（仅文本项）
   const clipboardId = actions[0]?.hitId;
-  if (source === "clipboard" && clipboardId) {
-    items.push({ separator: true });
-    items.push({
-      label: t("menu.delete"),
-      run: () => {
-        deleteClipboardItem(clipboardId)
-          .then(() => retrigger())
-          .catch((e) => console.error("deleteClipboardItem failed:", e));
-      },
-      danger: true,
-    });
+  if (source === "clipboard") {
+    if (isImage && lnkPath) {
+      // 图片项：lnkPath 持有 image_id（engine.rs image 分支投影）
+      items.push({ separator: true });
+      items.push({
+        label: t("menu.delete"),
+        run: () => {
+          deleteClipboardImage(lnkPath)
+            .then(() => retrigger())
+            .catch((e) => console.error("deleteClipboardImage failed:", e));
+        },
+        danger: true,
+      });
+    } else if (clipboardId) {
+      // 文本项：clipboardId 为 clipboard_history 表主键
+      items.push({ separator: true });
+      items.push({
+        label: t("menu.delete"),
+        run: () => {
+          deleteClipboardItem(clipboardId)
+            .then(() => retrigger())
+            .catch((e) => console.error("deleteClipboardItem failed:", e));
+        },
+        danger: true,
+      });
+    }
   }
 
   // (b) 文件管理附加项（不混入 capability actions，仍由前端按 lnkPath 追加）

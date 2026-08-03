@@ -404,8 +404,9 @@ function createItem(app, i) {
     if (isConfirm) {
       li.classList.add("ai-confirm");
       // 存储确认数据供 Enter 处理
-      li.dataset.aiConfirmActionName = app._aiConfirm.actionName;
-      li.dataset.aiConfirmArguments = JSON.stringify(app._aiConfirm.arguments);
+li.dataset.aiConfirmActionName = app._aiConfirm.actionName;
+li.dataset.aiConfirmArguments = JSON.stringify(app._aiConfirm.arguments);
+li.dataset.aiConfirmId = app._aiConfirm.confirmId;
     }
     if (app.is_placeholder) li.classList.add("is-loading");
     const badge = document.createElement("span");
@@ -497,12 +498,13 @@ function itemData(li) {
   }
   // AI 确认卡片数据
   let aiConfirm = null;
-  if (li.dataset.aiConfirmActionName) {
-    try {
-      aiConfirm = {
-        actionName: li.dataset.aiConfirmActionName,
-        arguments: JSON.parse(li.dataset.aiConfirmArguments || "{}"),
-      };
+if (li.dataset.aiConfirmActionName) {
+try {
+aiConfirm = {
+confirmId: parseInt(li.dataset.aiConfirmId, 10),
+actionName: li.dataset.aiConfirmActionName,
+arguments: JSON.parse(li.dataset.aiConfirmArguments || "{}"),
+};
     } catch (e) {
       console.error("aiConfirmArguments parse failed:", e);
     }
@@ -542,6 +544,7 @@ export function showAiConfirm(payload) {
     actions: [],
     // 确认卡片专用字段(不进后端,纯前端)
     _aiConfirm: {
+      confirmId: payload.confirm_id,
       actionName: payload.action_name,
       arguments: payload.arguments,
     },
@@ -551,6 +554,10 @@ export function showAiConfirm(payload) {
   } else {
     allItems.unshift(confirmItem);
   }
+  // 0.17.0 根因 1 修复：renderPage 前重置 selected 指向确认卡片，
+  // 确保 Enter 激活的是确认卡片而非其他搜索结果。
+  selected = idx >= 0 ? idx : 0;
+  page = 0;
   renderPage();
 }
 
@@ -558,8 +565,9 @@ export function showAiConfirm(payload) {
 export function getAiConfirmData() {
   const li = pageLis[selected];
   if (!li) return null;
-  return li.dataset.aiConfirmActionName
+  return li.dataset.aiConfirmId
     ? {
+        confirmId: parseInt(li.dataset.aiConfirmId, 10),
         actionName: li.dataset.aiConfirmActionName,
         arguments: li.dataset.aiConfirmArguments,
       }

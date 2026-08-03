@@ -85,7 +85,28 @@ impl DbPools {
                 crate::infra::data::ai_audit::cleanup_old(&pool).await;
             });
         }
+        // ── 缓存库：剪贴板图片清理（7 天，与文本剪贴板默认保留天数对齐） ──
+        // 0.17.0：cleanup_old_images 之前是 dead code，现在接通。
+        {
+            let pool = self.cache.clone();
+            tauri::async_runtime::spawn(async move {
+                crate::infra::data::clipboard_images::cleanup_old_images(&pool, 7).await;
+            });
+        }
         // 缓存库（performance_metrics / icon_cache）的清理已在各自 init_db 时 spawn，此处不重复。
+
+        // ── 0.17.0: 按需 VACUUM（freelist 占比超 20% 则收缩） ──
+        // 在所有清理之后执行，启动时无用户交互查询，VACUUM 独占连接影响可忽略。
+        {
+            let history = self.history.clone();
+            let ai = self.ai.clone();
+            let cache = self.cache.clone();
+            tauri::async_runtime::spawn(async move {
+                crate::infra::data::vacuum_if_needed(&history, 0.2).await;
+                crate::infra::data::vacuum_if_needed(&ai, 0.2).await;
+                crate::infra::data::vacuum_if_needed(&cache, 0.2).await;
+            });
+        }
     }
 }
 

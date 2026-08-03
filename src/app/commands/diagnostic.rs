@@ -41,6 +41,14 @@ pub async fn get_storage_info(app: tauri::AppHandle) -> serde_json::Value {
     let perf_count = crate::infra::data::perf::count(&pools.cache).await;
     let icon_cache_count = crate::infra::data::icon_cache::count(&pools.cache).await;
 
+    // 0.17.0: 剪贴板图片统计
+    let clipboard_image_count = crate::infra::data::clipboard_images::count(&pools.cache).await;
+    let clipboard_image_stats =
+        crate::infra::data::clipboard_images::get_image_stats(&pools.cache).await;
+    let clipboard_image_size_bytes = clipboard_image_stats["total_size_bytes"]
+        .as_i64()
+        .unwrap_or(0);
+
     // 文件大小
     let data_dir = crate::infra::utils::paths::app_data_dir();
 
@@ -97,6 +105,8 @@ pub async fn get_storage_info(app: tauri::AppHandle) -> serde_json::Value {
                 "path": data_dir.join("blink_cache.db").display().to_string(),
                 "perf_count": perf_count,
                 "icon_cache_count": icon_cache_count,
+                "clipboard_image_count": clipboard_image_count,
+                "clipboard_image_size_bytes": clipboard_image_size_bytes,
             },
         },
         "data_dir": data_dir.display().to_string(),
@@ -175,7 +185,7 @@ pub async fn retry_migration(app: tauri::AppHandle) -> Result<(), String> {
 
 /// 设置页-存储：清空缓存库（0.12.0 §2.2.7）。
 ///
-/// 清空 performance_metrics + icon_cache 两表。缓存可重建，清空无风险。
+/// 清空 performance_metrics + icon_cache + clipboard_images 三表。缓存可重建，清空无风险。
 #[tauri::command]
 pub async fn clear_cache_db(app: tauri::AppHandle) -> Result<(), String> {
     let pools = app.state::<crate::infra::data::DbPools>();
@@ -185,10 +195,46 @@ pub async fn clear_cache_db(app: tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| format!("清空 performance_metrics 失败: {e}"))?;
     // 清空 icon_cache
     crate::infra::data::icon_cache::clear_all(&pools.cache).await;
+    // 0.17.0: 清空 clipboard_images（图片 BLOB 也是缓存性质）
+    crate::infra::data::clipboard_images::clear_all_images(&pools.cache).await;
     // 0.16.0: VACUUM 收缩数据库文件
     crate::infra::data::vacuum(&pools.cache).await;
-    tracing::info!("缓存库已清空（performance_metrics + icon_cache）");
+    tracing::info!("缓存库已清空（performance_metrics + icon_cache + clipboard_images）");
     Ok(())
+}
+
+/// 设置页-存储：手动优化存储（0.17.0）。
+///
+/// 对三个数据库（history / ai / cache）无条件执行 VACUUM，回收磁盘空间。
+/// 返回各库的 VACUUM 前后 freelist 信息供前端展示。
+#[tauri::command]
+pub async fn optimize_storage(app: tauri::AppHandle) -> serde_json::Value {
+    let pools = app.state::<crate::infra::data::DbPools>();
+
+    let mut results = Vec::new();
+    for (name, pool) in [
+        ("history", &pools.history),
+        ("ai", &pools.ai),
+        ("cache", &pools.cache),
+    ] {
+        let before: (i64,) = sqlx::query_as("PRAGMA freelist_count")
+            .fetch_one(pool)
+            .await
+            .unwrap_or((0,));
+        crate::infra::data::vacuum(pool).await;
+        let after: (i64,) = sqlx::query_as("PRAGMA freelist_count")
+            .fetch_one(pool)
+            .await
+            .unwrap_or((0,));
+        tracing::info!(db = name, before = before.0, after = after.0, "optimize_storage: VACUUM 完成");
+        results.push(serde_json::json!({
+            "db": name,
+            "freelist_before": before.0,
+            "freelist_after": after.0,
+        }));
+    }
+
+    serde_json::json!({ "results": results })
 }
 
 /// 设置页-关于：应用元信息（版本/名称/描述/仓库）。

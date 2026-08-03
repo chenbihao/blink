@@ -239,30 +239,31 @@ pub async fn trigger_ai(query: String, seq: u64, app: tauri::AppHandle) -> Resul
 /// turn=0 标记"用户确认执行"路径（区别于 Turn 1/Turn 2 自动执行）。
 ///
 /// **0.14.7 W3**：返回 `CommandError`（结构化错误协议）。
+/// **0.17.0**：匹配键从 `action_name + arguments` 改为 `confirm_id`。
 #[tauri::command]
 pub async fn confirm_ai_action(
-    app: tauri::AppHandle,
-    action_name: String,
-    arguments: serde_json::Value,
+app: tauri::AppHandle,
+confirm_id: u64,
 ) -> Result<(), crate::app::command_error::CommandError> {
-    tracing::debug!(%action_name, ?arguments, "confirm_ai_action: 用户确认 AI 动作");
+tracing::debug!(confirm_id, "confirm_ai_action: 用户确认 AI 动作");
 
-    // 0.14.6 §2.2：从 state 获取 DomainEnv 桥接器
-    let env_arc = app
-        .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
-        .inner()
-        .clone();
+// 0.14.6 §2.2：从 state 获取 DomainEnv 桥接器
+let env_arc = app
+.state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
+.inner()
+.clone();
 
-    // 0.14 Capability-only：确认卡片只允许执行 Capability。
-    // command 名保留以兼容现有前端 IPC，但不再提供 ActionRegistry fallback。
-    let search_service = app.state::<std::sync::Arc<crate::domain::search::SearchService>>();
-    let seq = search_service
-        .take_ai_confirmation(&action_name, &arguments)
-        .ok_or_else(|| crate::app::command_error::CommandError::new(
-            "not_found",
-            &format!("没有匹配的待确认 Capability: {action_name}"),
-            false,
-        ))?;
+// 0.17.0：用 confirm_id 严格匹配，取回 (seq, action_name, arguments)
+let search_service = app.state::<std::sync::Arc<crate::domain::search::SearchService>>();
+let (seq, action_name, arguments) = search_service
+.take_ai_confirmation(confirm_id)
+.ok_or_else(|| crate::app::command_error::CommandError::new(
+"not_found",
+&format!("没有匹配的待确认 Capability: confirm_id={confirm_id}"),
+false,
+))?;
+
+tracing::debug!(%action_name, ?arguments, "confirm_ai_action: 匹配到待确认 Capability");
 
     let cap_reg = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
     if let Some(cap) = cap_reg.get(&action_name) {

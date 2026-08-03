@@ -686,6 +686,7 @@ fn main() {
             app::commands::open_data_folder,
             app::commands::retry_migration,
             app::commands::clear_cache_db,
+            app::commands::optimize_storage,
             app::commands::get_cleanup_info,
             app::commands::cleanup_all_data,
             app::commands::get_app_info,
@@ -720,7 +721,9 @@ fn main() {
             app::commands::search_clipboard_history,
             app::commands::record_clipboard_hit,
             app::commands::delete_clipboard_item,
+            app::commands::delete_clipboard_image,
             app::commands::clear_clipboard_history,
+            app::commands::clear_clipboard_images,
             app::commands::get_clipboard_stats,
             // 0.16.4 剪贴板图片
             app::commands::copy_clipboard_image,

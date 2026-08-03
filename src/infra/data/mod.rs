@@ -25,3 +25,54 @@ pub async fn vacuum(pool: &sqlx::SqlitePool) {
         tracing::warn!(error = %e, "VACUUM 失败（数据库可能被占用）");
     }
 }
+
+/// 按需 VACUUM：检测 freelist 占比超阈值时执行 VACUUM（0.17.0）。
+///
+/// SQLite 的 DELETE 只把页标记为空闲页加入 freelist，文件不缩。
+/// 此函数查 `PRAGMA freelist_count` / `PRAGMA page_count`，比值超 threshold
+/// 则调 `vacuum()` 实际回收磁盘空间。返回是否执行了 VACUUM。
+///
+/// **调用时机**：启动后台清理之后（`spawn_startup_cleanup` 末尾）。
+/// `max_connections(1)` 的连接池在 VACUUM 期间独占连接，启动时无用户交互查询，影响可忽略。
+pub async fn vacuum_if_needed(pool: &sqlx::SqlitePool, threshold: f64) -> bool {
+    let freelist: (i64,) = match sqlx::query_as("PRAGMA freelist_count")
+        .fetch_one(pool)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "查 freelist_count 失败，跳过 VACUUM");
+            return false;
+        }
+    };
+    let page_count: (i64,) = match sqlx::query_as("PRAGMA page_count")
+        .fetch_one(pool)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "查 page_count 失败，跳过 VACUUM");
+            return false;
+        }
+    };
+
+    let free = freelist.0;
+    let total = page_count.0;
+    if total == 0 {
+        return false;
+    }
+    let ratio = free as f64 / total as f64;
+    if ratio < threshold {
+        tracing::debug!(
+            free, total, ratio, threshold,
+            "freelist 占比低于阈值，跳过 VACUUM"
+        );
+        return false;
+    }
+
+    let started = std::time::Instant::now();
+    tracing::info!(free, total, ratio, "freelist 占比超阈值，执行 VACUUM");
+    vacuum(pool).await;
+    tracing::info!(elapsed_ms = started.elapsed().as_millis(), "VACUUM 完成");
+    true
+}

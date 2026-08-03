@@ -7,6 +7,7 @@ import { invoke } from "../../shared/tauri.js";
 import { confirmDialog, messageDialog } from "../../shared/tauri.js";
 import { t, onLangChange } from "../../i18n/index.js";
 import { iconHTML } from "../../shared/icon.js";
+import { clearClipboardImages, optimizeStorage } from "../../shared/api.js";
 
 /**
  * 初始化存储设置 Tab
@@ -56,6 +57,40 @@ export function initStorageTab() {
       loadStorageInfo();
     } catch (e) {
       console.error("clear_cache_db failed:", e);
+    }
+  });
+
+  document.getElementById("clear-clipboard-images")?.addEventListener("click", async () => {
+    const ok = await confirmDialog(t("storage.clear_clipboard_images.confirm"), {
+      title: t("common.confirm"),
+      kind: "warning",
+    });
+    if (!ok) return;
+    try {
+      await clearClipboardImages();
+      loadStorageInfo();
+    } catch (e) {
+      console.error("clear_clipboard_images failed:", e);
+    }
+  });
+
+  document.getElementById("optimize-storage")?.addEventListener("click", async () => {
+    const ok = await confirmDialog(t("storage.optimize.confirm"), {
+      title: t("common.confirm"),
+      kind: "warning",
+    });
+    if (!ok) return;
+    const btn = document.getElementById("optimize-storage");
+    if (btn) btn.disabled = true;
+    try {
+      await optimizeStorage();
+      await loadStorageInfo();
+      await messageDialog(t("storage.optimize.success"), { kind: "info" });
+    } catch (e) {
+      console.error("optimize_storage failed:", e);
+      await messageDialog(t("storage.optimize.failed", { err: String(e) }), { kind: "error" });
+    } finally {
+      if (btn) btn.disabled = false;
     }
   });
 
@@ -182,6 +217,15 @@ function renderStorageInfo() {
   setText(
     "db-icon-cache-count",
     dbs.cache ? t("storage.stat.icon_cache", { count: dbs.cache.icon_cache_count ?? 0 }) : "-"
+  );
+  // 0.17.0: 剪贴板图片统计
+  setText(
+    "db-clipboard-image-count",
+    dbs.cache ? t("storage.stat.clipboard_images", { count: dbs.cache.clipboard_image_count ?? 0 }) : "-"
+  );
+  setText(
+    "db-clipboard-image-size",
+    dbs.cache ? formatSize(dbs.cache.clipboard_image_size_bytes ?? 0) : "-"
   );
 }
 

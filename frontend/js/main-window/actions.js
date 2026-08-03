@@ -19,9 +19,10 @@ export async function activateItem(data) {
   if (data.isError) return;
 
   // 0.9.2 第二步:AI Dangerous 动作确认卡片——Enter 确认执行
+  // 0.17.0：用 confirm_id 匹配（替代 action_name + arguments 三重比对）
   if (data.aiConfirm) {
     try {
-      await confirmAiAction(data.aiConfirm.actionName, data.aiConfirm.arguments);
+      await confirmAiAction(data.aiConfirm.confirmId);
     } catch (e) {
       const err = normalizeError(e);
       console.error(`[confirm_ai_action] [${err.code}] ${err.message}`);

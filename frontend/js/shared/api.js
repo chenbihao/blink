@@ -20,9 +20,10 @@ export function runBuiltinAction(id, arg) {
   return invoke("run_builtin_action", { id, arg: arg ?? null });
 }
 
-/** AI Dangerous 动作确认执行（0.9.2 第二步）——用户在确认卡片上按 Enter 后调用。 */
-export function confirmAiAction(actionName, arguments_) {
-  return invoke("confirm_ai_action", { action_name: actionName, arguments: arguments_ });
+/** AI Dangerous 动作确认执行（0.9.2 第二步）——用户在确认卡片上按 Enter 后调用。
+ *  0.17.0：改用 confirm_id 匹配（替代 action_name + arguments）。 */
+export function confirmAiAction(confirmId) {
+  return invoke("confirm_ai_action", { confirmId });
 }
 
 /** 隐藏主窗口。 */
@@ -58,6 +59,21 @@ export function copyToClipboard(text) {
 /** 删除指定剪贴板历史记录（右键菜单用）。id 为 clipboard_history 表主键。 */
 export function deleteClipboardItem(id) {
   return invoke("delete_clipboard_item", { id });
+}
+
+/** 0.17.0：删除指定剪贴板图片条目。imageId 为 clipboard_images 表 id。 */
+export function deleteClipboardImage(imageId) {
+  return invoke("delete_clipboard_image", { imageId });
+}
+
+/** 0.17.0：清空所有剪贴板图片历史。 */
+export function clearClipboardImages() {
+  return invoke("clear_clipboard_images");
+}
+
+/** 0.17.0：手动优化存储（三库 VACUUM）。 */
+export function optimizeStorage() {
+  return invoke("optimize_storage");
 }
 
 /** 触发 Chord 动作（0.8.5 §六）——key 为字母（a/c），后端按 key 分派到 ChordRegistry。

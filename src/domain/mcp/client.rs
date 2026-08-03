@@ -350,7 +350,9 @@ impl McpClientManager {
         // Windows 上，CreateProcess 只查找 .exe 文件。
         // 命令如 `codegraph` 实际是 `codegraph.cmd`，需要 `cmd /c` 包裹。
         let (program, program_args) = resolve_windows_command(&config.command, &config.args);
-        let mut cmd = tokio::process::Command::new(&program);
+        let mut cmd = crate::infra::platform::no_window_tokio(
+            tokio::process::Command::new(&program),
+        );
         cmd.args(&program_args);
         for (k, v) in &config.env {
             cmd.env(k, v);

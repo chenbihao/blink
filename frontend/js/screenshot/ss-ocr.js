@@ -355,7 +355,10 @@ function requestOverlayTranslation(targetLang) {
   const revision = ++ss.translationRevision;
   ss.translationBusy = true;
   updateOutputButtonsDisabled();
-  showSelLoading('翻译中…');
+  // 互斥：doTranslate 路径已激活 canvas loading (Loading B) 时，
+  // 跳过 DOM spinner (Loading A)；仅 0.15 redo 路径（无 canvas loading）才用 DOM spinner。
+  const useOverlayLoading = annot.isOverlayLoading();
+  if (!useOverlayLoading) showSelLoading('翻译中…');
   translateOverlayLines(targetLang, revision)
     .catch((e) => {
       if (revision !== ss.translationRevision) return;
@@ -366,7 +369,7 @@ function requestOverlayTranslation(targetLang) {
       if (revision !== ss.translationRevision) return;
       ss.translationBusy = false;
       updateOutputButtonsDisabled();
-      hideSelLoading();
+      if (!useOverlayLoading) hideSelLoading();
     });
 }
 

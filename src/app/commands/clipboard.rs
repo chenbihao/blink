@@ -85,6 +85,28 @@ pub async fn delete_clipboard_item(app: tauri::AppHandle, id: String) -> Result<
     Ok(())
 }
 
+/// 0.17.0：删除指定剪贴板图片条目。
+///
+/// 图片项的 `lnkPath` 实际持有 image_id（`engine.rs` image 分支投影），
+/// 前端 `contextmenu.js` 按 `isImage` 分发到此命令。
+#[tauri::command]
+pub async fn delete_clipboard_image(app: tauri::AppHandle, image_id: String) -> Result<(), String> {
+    let pool = &app.state::<crate::infra::data::DbPools>().cache;
+    crate::infra::data::clipboard_images::delete_image(pool, &image_id).await;
+    tracing::info!(id = %image_id, "剪贴板图片已删除");
+    Ok(())
+}
+
+/// 0.17.0：清空所有剪贴板图片历史。
+#[tauri::command]
+pub async fn clear_clipboard_images(app: tauri::AppHandle) -> Result<(), String> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    crate::infra::data::clipboard_images::clear_all_images(&pools.cache).await;
+    crate::infra::data::vacuum(&pools.cache).await;
+    tracing::info!("剪贴板图片历史已清空");
+    Ok(())
+}
+
 /// 清空所有剪贴板历史。
 #[tauri::command]
 pub async fn clear_clipboard_history(app: tauri::AppHandle) -> Result<(), String> {
