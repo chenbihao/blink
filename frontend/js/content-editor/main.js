@@ -20,6 +20,9 @@ let originalBody = "";
 /** 当前 originRef（保存时传给后端继承 hit_count） */
 let originRef = null;
 
+/** 当前 savePolicy（0.16.9：clipboard_new | sticky_update） */
+let savePolicy = "clipboard_new";
+
 /** 当前模式："edit" | "preview" */
 let currentMode = "edit";
 
@@ -28,6 +31,9 @@ let saving = false;
 
 /** 已确认关闭——跳过 onCloseRequested 拦截 */
 let allowClose = false;
+
+/** 保存成功后延迟关闭的计时器——loadPayload 时清除，防止复用窗口被误关 */
+let closeTimeout = null;
 
 // ── DOM 引用 ──────────────────────────────────────────
 
@@ -62,6 +68,18 @@ async function init() {
   // 注册窗口复用回调（后端 eval 调用）
   window.__contentEditorReload = loadPayload;
 
+  // 0.16.11：新窗口由后端以 visible(false) 创建，前端 init 完成后自行 show——
+  // 消除白屏闪烁。复用窗口由后端直接 show，无需前端再调。
+  const win = getCurrentWindow();
+  if (win) {
+    try {
+      await win.show();
+      await win.setFocus();
+    } catch (e) {
+      console.error("[content-editor] show window 失败:", e);
+    }
+  }
+
   tracing("editor window: init 完成");
 }
 
@@ -79,6 +97,7 @@ async function loadPayload() {
 
     originalBody = payload.body || "";
     originRef = payload.originRef || null;
+    savePolicy = payload.savePolicy || "clipboard_new";
 
     // 填充编辑器
     textareaEl.value = originalBody;
@@ -86,7 +105,11 @@ async function loadPayload() {
     // 设置标题
     titleEl.textContent = payload.title || t("editor.title.default");
 
-    // 重置状态
+    // 重置状态——清除可能残留的 close 计时器，防止复用时误关
+    if (closeTimeout) {
+      clearTimeout(closeTimeout);
+      closeTimeout = null;
+    }
     saving = false;
     allowClose = false;
     statusEl.textContent = "";
@@ -148,7 +171,7 @@ async function handleSave() {
 
   try {
     const body = textareaEl.value;
-    await saveContentEditor(body, originRef);
+    await saveContentEditor(body, originRef, savePolicy);
 
     // 保存成功
     originalBody = body;
@@ -156,7 +179,10 @@ async function handleSave() {
     statusEl.textContent = t("editor.saved");
 
     // 短暂延迟后关闭窗口
-    setTimeout(() => closeWindow(), 500);
+    closeTimeout = setTimeout(() => {
+      closeWindow();
+      closeTimeout = null;
+    }, 500);
   } catch (e) {
     console.error("[content-editor] 保存失败:", e);
     const msg = typeof e === "string" ? e : String(e?.message || e);
@@ -186,11 +212,11 @@ function hasUnsavedChanges() {
   return textareaEl.value !== originalBody;
 }
 
-/** 关闭窗口 */
+/** 关闭窗口（0.16.12：改为 hide 复用模式，不再销毁窗口） */
 function closeWindow() {
   const win = getCurrentWindow();
   if (win) {
-    win.close();
+    win.hide();
   }
 }
 
@@ -224,16 +250,18 @@ function bindWindowControls() {
     closeBtn.addEventListener("click", handleCancel);
   }
 
-  // 系统级关闭请求（Alt+F4 等）——拦截未保存改动
+  // 系统级关闭请求（Alt+F4 等）
+  // 0.16.12：改为 hide-on-close 模式——始终 prevent_close + hide，
+  // 窗口复用而非销毁重建，消除"每两次有1次点不开"的竞态。
   const win = getCurrentWindow();
   if (win?.onCloseRequested) {
     win.onCloseRequested(async (event) => {
-      if (allowClose) return; // 已确认，放行
-      if (hasUnsavedChanges()) {
-        event.preventDefault();
-        handleCancel();
+      event.preventDefault(); // 始终阻止销毁
+      if (allowClose || !hasUnsavedChanges()) {
+        closeWindow(); // win.hide()
+      } else {
+        handleCancel(); // 显示未保存确认对话框
       }
-      // 无未保存改动则放行，窗口正常关闭
     });
   }
 }

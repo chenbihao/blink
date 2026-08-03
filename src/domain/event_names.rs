@@ -55,4 +55,14 @@ impl EventNames {
     pub const FUNASR_SERVER_LOG: &str = "blink://funasr-server-log";
     pub const FUNASR_SERVER_STATUS: &str = "blink://funasr-server-status";
     pub const AUDIO_TEST_LEVEL: &str = "blink://audio-test-level";
+
+    // ── 便签（0.16.7）──
+    /// 便签被创建。payload: `{ stickyId }`
+    pub const STICKY_CREATED: &str = "blink://sticky-created";
+    /// 便签被删除。payload: `{ stickyId }`
+    pub const STICKY_DELETED: &str = "blink://sticky-deleted";
+    /// 便签可见性变化。payload: `{ stickyId, visible }`
+    pub const STICKY_VISIBILITY_CHANGED: &str = "blink://sticky-visibility-changed";
+    /// 便签外观变化（颜色）。payload: `{ stickyId, color }`
+    pub const STICKY_APPEARANCE_CHANGED: &str = "blink://sticky-appearance-changed";
 }

@@ -53,6 +53,15 @@ const ACTIONS: &[BuiltinAction] = &[
         default_enabled: true,
     },
     BuiltinAction {
+        id: "sticky_manager",
+        title: "便签管理",
+        subtitle: "管理桌面便签",
+        keywords: &["便签", "sticky", "bj", "管理", "笔记", "notes"],
+        context: &[],
+        param_source: ParamSource::None,
+        default_enabled: true,
+    },
+    BuiltinAction {
         id: "lock",
         title: "锁定电脑",
         subtitle: "Lock Workstation",

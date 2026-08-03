@@ -72,6 +72,11 @@ export function isAltDown() {
   return invoke("is_alt_down");
 }
 
+/** 0.16.9：获取当前 awareness 选区文本（chord E/S 空闲态上下文解析用）。 */
+export function getAwarenessText() {
+  return invoke("get_awareness_text");
+}
+
 /** 0.10.7：设置 Chord 独占模式。主窗 Alt hold + chordEligible 时进 true，退出时 false。
  *  后端 LL hook 在 chord mode 下吞掉 chord 键 keydown，独占触发。
  *  0.14：tapKeys 参数让前端直接传入已派生的 tap 键集合，跳过后端 DB 查询。 */
@@ -221,9 +226,14 @@ export function getContentEditorPayload() {
   return invoke("get_content_editor_payload");
 }
 
-/** 保存编辑后的内容。返回新记录 id。 */
-export function saveContentEditor(body, originRef) {
-  return invoke("save_content_editor", { body, originRef: originRef ?? null });
+/** 保存编辑后的内容。返回新记录 id（clipboard_new）或原 sticky id（sticky_update）。
+ *  0.16.9：savePolicy 为 "clipboard_new"（默认）或 "sticky_update"（回写便签）。 */
+export function saveContentEditor(body, originRef, savePolicy) {
+  return invoke("save_content_editor", {
+    body,
+    originRef: originRef ?? null,
+    savePolicy: savePolicy ?? null,
+  });
 }
 
 // ── 0.16.4-0.16.5 剪贴板图片 ──
@@ -236,4 +246,71 @@ export function copyClipboardImage(imageId) {
 /** 0.16.5：将剪贴板图片钉到桌面（pin 窗口）。imageId 为 clipboard_images 表 id。 */
 export function pinClipboardImage(imageId) {
   return invoke("pin_clipboard_image", { imageId });
+}
+
+// ── 0.16.7-0.16.8 桌面便签 ──
+
+/** 0.16.7：创建便签。返回 StickyNote（含 id）。前端拿到 id 后调 showStickyWindow 打开窗口。 */
+export function createStickyNote(content, color) {
+  return invoke("create_sticky_note", { content: content ?? "", color: color ?? null });
+}
+
+/** 0.16.7：获取单条便签。 */
+export function getStickyNote(id) {
+  return invoke("get_sticky_note", { id });
+}
+
+/** 0.16.7：列出全部便签（按 updated_at 倒序）。 */
+export function listStickyNotes() {
+  return invoke("list_sticky_notes");
+}
+
+/** 0.16.7：更新便签内容（前端防抖 500ms 后调用）。 */
+export function updateStickyContent(id, content) {
+  return invoke("update_sticky_content", { id, content });
+}
+
+/** 0.16.7：更新便签外观（颜色 + 可选格式）。 */
+export function updateStickyAppearance(id, color, format) {
+  return invoke("update_sticky_appearance", { id, color, format: format ?? null });
+}
+
+/** 0.16.7：更新便签窗口几何（位置 + 尺寸，物理像素）。 */
+export function updateStickyGeometry(id, x, y, width, height) {
+  return invoke("update_sticky_geometry", { id, x, y, width, height });
+}
+
+/** 0.16.7：设置便签可见性（关闭 = 隐藏）。 */
+export function setStickyVisible(id, visible) {
+  return invoke("set_sticky_visible", { id, visible });
+}
+
+/** 0.16.7：设置便签置顶。 */
+export function setStickyAlwaysOnTop(id, alwaysOnTop) {
+  return invoke("set_sticky_always_on_top", { id, alwaysOnTop });
+}
+
+/** 0.16.7：删除便签（永久）。 */
+export function deleteStickyNote(id) {
+  return invoke("delete_sticky_note", { id });
+}
+
+/** 0.16.7：获取便签统计 { count, visible }。 */
+export function getStickyStats() {
+  return invoke("get_sticky_stats");
+}
+
+/** 0.16.8：显示便签窗口（后端创建/复用 Tauri 窗口）。 */
+export function showStickyWindow(stickyId) {
+  return invoke("show_sticky_window_cmd", { stickyId });
+}
+
+/** 0.16.8：销毁便签窗口（删除数据后调用）。 */
+export function destroyStickyWindow(stickyId) {
+  return invoke("destroy_sticky_window_cmd", { stickyId });
+}
+
+/** 0.16.10：显示便签管理窗口。 */
+export function showStickyManager() {
+  return invoke("show_sticky_manager_cmd");
 }

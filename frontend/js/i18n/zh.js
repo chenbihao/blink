@@ -865,6 +865,7 @@ export const zh = {
     "menu.copyResult": "复制结果",
     "menu.edit": "编辑",
 "menu.pin": "钉图",
+    "menu.sticky": "钉为便签",
 
     // ── 主窗口：提示栏 ──
     "hint.open": "打开",

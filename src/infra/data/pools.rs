@@ -178,6 +178,11 @@ async fn init_history_schema(pool: &SqlitePool) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
 
+    // sticky_notes 表（0.16.7：桌面便签持久化）
+    crate::infra::data::sticky::init_db(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
     Ok(())
 }
 

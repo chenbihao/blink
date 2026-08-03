@@ -77,6 +77,37 @@ impl Action for OpenSettingsAction {
     }
 }
 
+/// 便签管理（0.16.10）——打开便签管理窗口。
+pub struct ShowStickyManagerAction;
+#[async_trait::async_trait]
+impl Action for ShowStickyManagerAction {
+    fn id(&self) -> &str {
+        "sticky_manager"
+    }
+    fn title(&self) -> &LocalizableText {
+        static T: std::sync::OnceLock<LocalizableText> = std::sync::OnceLock::new();
+        T.get_or_init(|| bilingual("便签管理", "Sticky Manager"))
+    }
+    fn subtitle(&self) -> &LocalizableText {
+        static T: std::sync::OnceLock<LocalizableText> = std::sync::OnceLock::new();
+        T.get_or_init(|| bilingual("管理桌面便签", "Manage desktop sticky notes"))
+    }
+    fn schema(&self) -> ActionSchema {
+        ActionSchema::empty("sticky_manager", "Open the sticky notes manager window")
+    }
+    fn danger_class(&self) -> DangerClass {
+        DangerClass::Safe
+    }
+    async fn execute(&self, cx: &ActionContext<'_>) -> Result<ActionOutcome, ExecError> {
+        tracing::debug!("执行内置动作：便签管理");
+        cx.env.hide_main_window("sticky_manager");
+        cx.env
+            .show_sticky_manager()
+            .map_err(ExecError::Runtime)?;
+        Ok(ActionOutcome::Nop)
+    }
+}
+
 pub struct LockWorkstationAction;
 #[async_trait::async_trait]
 impl Action for LockWorkstationAction {

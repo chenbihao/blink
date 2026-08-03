@@ -30,6 +30,7 @@ impl ActionRegistry {
         // 无参动作
         let builtins: Vec<Arc<dyn Action>> = vec![
             Arc::new(OpenSettingsAction),
+            Arc::new(ShowStickyManagerAction),
             Arc::new(LockWorkstationAction),
             Arc::new(ShutdownAction),
             Arc::new(RestartAction),
@@ -93,7 +94,7 @@ mod tests {
     #[test]
     fn registry_has_9_builtin_actions() {
         let reg = ActionRegistry::new();
-        assert_eq!(reg.len(), 9);
+        assert_eq!(reg.len(), 10);
     }
 
     #[test]
@@ -154,6 +155,7 @@ mod tests {
         let reg = ActionRegistry::new();
         for id in [
             "open_settings",
+            "sticky_manager",
             "lock",
             "shutdown",
             "restart",
@@ -181,7 +183,7 @@ mod tests {
         let reg = ActionRegistry::new();
 
         // Safe:只读打开 UI
-        for id in ["open_settings", "open_logs", "open_data_dir"] {
+        for id in ["open_settings", "sticky_manager", "open_logs", "open_data_dir"] {
             let action = reg.get(id).expect(id);
             assert_eq!(action.danger_class(), DangerClass::Safe, "{id} 应为 Safe");
         }
@@ -207,9 +209,9 @@ mod tests {
     #[test]
     fn register_with_ref_self_works() {
         let reg = ActionRegistry::new();
-        assert_eq!(reg.len(), 9);
+        assert_eq!(reg.len(), 10);
         // 注册一个新动作
         reg.register(Arc::new(OpenSettingsAction)); // 重复 id,应跳过
-        assert_eq!(reg.len(), 9, "重复 id 不应增加数量");
+        assert_eq!(reg.len(), 10, "重复 id 不应增加数量");
     }
 }

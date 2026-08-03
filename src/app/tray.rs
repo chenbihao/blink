@@ -16,6 +16,7 @@ use tauri::menu::{Menu, MenuItem};
 #[derive(Clone, Copy)]
 pub enum TrayText {
     Settings,
+    StickyManager,
     About,
     Quit,
 }
@@ -27,9 +28,11 @@ pub enum TrayText {
 pub fn text(lang: &str, key: TrayText) -> &'static str {
     match (lang.starts_with("zh"), key) {
         (true, TrayText::Settings) => "设置",
+        (true, TrayText::StickyManager) => "便签管理",
         (true, TrayText::About) => "关于 Blink",
         (true, TrayText::Quit) => "退出 Blink",
         (false, TrayText::Settings) => "Settings",
+        (false, TrayText::StickyManager) => "Sticky Manager",
         (false, TrayText::About) => "About Blink",
         (false, TrayText::Quit) => "Quit Blink",
     }
@@ -47,6 +50,13 @@ pub fn build_menu(app: &impl Manager<tauri::Wry>, lang: &str) -> tauri::Result<M
         true,
         None::<&str>,
     )?;
+    let sticky_manager = MenuItem::with_id(
+        app,
+        "sticky_manager",
+        text(lang, TrayText::StickyManager),
+        true,
+        None::<&str>,
+    )?;
     let about = MenuItem::with_id(
         app,
         "about",
@@ -56,7 +66,7 @@ pub fn build_menu(app: &impl Manager<tauri::Wry>, lang: &str) -> tauri::Result<M
     )?;
     let sep = tauri::menu::PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", text(lang, TrayText::Quit), true, None::<&str>)?;
-    Menu::with_items(app, &[&settings, &about, &sep, &quit])
+    Menu::with_items(app, &[&settings, &sticky_manager, &sep, &about, &sep, &quit])
 }
 
 /// 重建托盘菜单（运行时语言切换时调用）。

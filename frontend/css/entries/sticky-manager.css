@@ -1,0 +1,16 @@
+/* sticky-manager entry — reset → tokens → themes → base → components → views */
+
+@import '../base/reset.css';
+@import '../tokens/index.css';
+@import '../themes/dark.css';
+@import '../themes/light.css';
+@import '../themes/gruvbox.css';
+@import '../themes/neutral.css';
+@import '../themes/nvchad.css';
+@import '../themes/genshin.css';
+@import '../base/typography.css';
+@import '../components/button.css';
+@import '../components/icon.css';
+@import '../components/tooltip.css';
+@import '../components/modal.css';
+@import '../views/sticky-manager.css';

@@ -276,6 +276,18 @@ impl SearchService {
         *guard = snapshot;
     }
 
+    /// 读取当前 awareness 快照中的选区文本（0.16.9）。
+    ///
+    /// 供 chord E/S 在空闲态（空 query、无结果）解析上下文用。
+    /// 返回 trim 后的选区文本，无选区时返回 None。
+    pub fn get_selection_text(&self) -> Option<String> {
+        use crate::infra::platform::context::AwarenessSource;
+        let guard = self.snapshot.read().unwrap();
+        guard
+            .find_text(AwarenessSource::Selection)
+            .map(|v| v.text.to_string())
+    }
+
     /// 写回选中文本（后台 UIA 抓取完成后调用，0.8.0 §1.1）。
     ///
     /// 与 update_snapshot 分离：选区抓取是异步的（spawn_blocking），晚于快照写入，

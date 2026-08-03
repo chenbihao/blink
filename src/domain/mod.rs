@@ -14,3 +14,4 @@ pub mod plugin;
 pub mod schema; // 0.14.6：ToolSchema 公共基（ActionSchema / CapabilitySchema 共享）
 pub mod search;
 pub mod stt; // 0.10：语音转文字（STT engine trait + mock + 模型注册表）
+pub mod sticky; // 0.16.7：桌面便签域（模型、服务、恢复）

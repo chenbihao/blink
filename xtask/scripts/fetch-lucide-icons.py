@@ -99,6 +99,7 @@ ICON_LIST = [
     "x",                # 取消（0.11.8-f，红色 #btn-cancel）——替代 ✕
     "mouse-pointer-2",  # 选取工具（0.11.10-a）——工具栏默认工具
     "menu",             # 面板召唤（0.11.10-e）——工具栏右侧[≡]按钮
+    "eye-off",          # 便签管理隐藏（0.16.10）——隐藏便签动作
 
     # AI 确认徽章
     "triangle-alert",   # AI 需确认 ⚠  （Lucide 1.x 从 alert-triangle 重命名）

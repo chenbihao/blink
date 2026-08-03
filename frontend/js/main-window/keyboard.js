@@ -1,7 +1,7 @@
 //! 键盘交互：结果导航、激活、ESC 隐藏、修饰键默认行为屏蔽。
 //! 0.8.1：Tab / ArrowRight 拦截接受 ghost text 补全（视配置 autosuggest_tab_key）。
 
-import { hideWindow, triggerChord, isAltDown, setChordMode } from "../shared/api.js";
+import { hideWindow, triggerChord, isAltDown, setChordMode, getAwarenessText } from "../shared/api.js";
 import { activateItem } from "./actions.js";
 import * as results from "./results.js";
 import * as ghost from "./ghost.js";
@@ -116,9 +116,58 @@ function onBlockModifiers(e) {
 // 触发后端 trigger_chord（Alt+A 截图 / Alt+C 剪贴板等 tap 语义动作）。
 // 注意：Alt+Space 语音输入（hold 语义）不走此路径——由 native hotkey hold 状态机直接处理。
 // 0.10.7：触发键集合从 chord.getTapKeys() 动态获取（用户可配置），不再硬编码。
-function fireChord(key) {
+// 0.16.9：E/S 键做 contextual 解析——active item 文本 payload > 非空 query > Awareness 选区 > 空白。
+async function fireChord(key) {
   console.log(`[chord] Alt+${key.toUpperCase()} triggered`);
-  triggerChord(key, queryEl.value).catch((e) => console.warn("[chord] trigger_chord 失败", e));
+  let inputText = queryEl.value;
+
+  // 0.16.9：E/S 需要 contextual 解析
+  if (key === "e" || key === "s") {
+    inputText = await resolveContextualContent();
+  }
+
+  triggerChord(key, inputText).catch((e) => console.warn("[chord] trigger_chord 失败", e));
+}
+
+/**
+ * 0.16.9：为 chord E/S 解析上下文内容。
+ *
+ * 解析顺序（§3.13）：
+ * 1. active item 的文本 payload（copy action 的 payload）
+ * 2. 非空 query
+ * 3. 空闲态 Awareness 选区（仅当 query 为空且无结果时）
+ * 4. 空白
+ */
+async function resolveContextualContent() {
+  // 1. active item 的文本 payload
+  const active = results.getActive();
+  if (active && !active.isError) {
+    const firstAction = active.actions?.[0];
+    if (firstAction?.kind === "copy" && firstAction.payload) {
+      return firstAction.payload;
+    }
+  }
+
+  // 2. 非空 query
+  const queryText = queryEl.value.trim();
+  if (queryText) {
+    return queryEl.value;
+  }
+
+  // 3. 空闲态 Awareness 选区（仅当 query 为空且无结果时）
+  if (!results.hasItems()) {
+    try {
+      const selectionText = await getAwarenessText();
+      if (selectionText && selectionText.trim()) {
+        return selectionText;
+      }
+    } catch (e) {
+      // 后端未就绪或无选区——静默降级到空白
+    }
+  }
+
+  // 4. 空白
+  return "";
 }
 
 // chord 独占模式（0.10.7）下的兜底触发路径。

@@ -415,6 +415,17 @@ pub fn is_alt_down() -> bool {
     crate::infra::platform::hotkey::is_alt_down()
 }
 
+/// 0.16.9：获取当前 awareness 快照中的选区文本。
+///
+/// 供 chord E/S 在空闲态（空 query、无结果）解析上下文用。
+/// 无选区时返回 null。
+#[tauri::command]
+pub async fn get_awareness_text(app: tauri::AppHandle) -> Option<String> {
+    use tauri::Manager;
+    let svc = app.state::<std::sync::Arc<crate::domain::search::SearchService>>();
+    svc.get_selection_text()
+}
+
 /// 0.10.7：设置 Chord 独占模式。前端在「主窗 focused + Alt hold + chordEligible」
 /// 满足时调 `set_chord_mode(true)`，Alt 松开 / 失焦 / 不再 eligible 时调
 /// `set_chord_mode(false)`。

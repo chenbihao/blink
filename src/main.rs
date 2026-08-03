@@ -210,6 +210,9 @@ fn main() {
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "settings" => open_settings(app),
+                    "sticky_manager" => {
+                        let _ = crate::infra::platform::window::show_sticky_manager_window(app);
+                    }
                     "about" => open_about(app),
                     "quit" => app.exit(0),
                     _ => {}
@@ -604,6 +607,85 @@ fn main() {
             // 0.16.3：内容编辑器 payload 暂存（open → get 中转）
             app.manage(app::commands::PendingEditorPayload::default());
 
+            // 0.16.7：便签服务（domain 层，框架无关；command 层经 app.state 取用）
+            let sticky_service = std::sync::Arc::new(
+                domain::sticky::StickyService::new(pools.history.clone()),
+            );
+            app.manage(sticky_service.clone());
+
+            // 0.16.7-0.16.8：便签恢复服务——异步加载，不阻塞 P0 唤起链路
+            // visible=true 的便签恢复桌面窗口；visible=false 只在管理界面
+            //
+            // 0.16.11 可靠性收尾：
+            // - 恢复时不抢焦点（focus=false），不影响主窗口 Alt+Space
+            // - 每条间隔 50ms，避免大量便签同时创建窗口抢占资源
+            // - 对损坏记录（空 id / 非法尺寸）隔离并记录日志
+            {
+                let svc = sticky_service.clone();
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    // 延迟 2s 避免与启动竞争资源
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    let visible = svc.load_for_recovery().await;
+                    let total = visible.len();
+                    let mut restored = 0usize;
+                    let mut skipped = 0usize;
+                    for note in &visible {
+                        // 0.16.11：数据验证——隔离损坏记录
+                        if note.id.is_empty() {
+                            tracing::warn!("便签恢复：跳过空 id 记录");
+                            skipped += 1;
+                            continue;
+                        }
+                        if note.width < 120 || note.height < 80 {
+                            tracing::warn!(
+                                sticky_id = %note.id,
+                                width = note.width,
+                                height = note.height,
+                                "便签恢复：尺寸非法，跳过"
+                            );
+                            skipped += 1;
+                            continue;
+                        }
+
+                        // 逐条恢复窗口，单条失败隔离
+                        // focus=false：恢复路径不抢主窗口焦点
+                        match crate::infra::platform::window::show_sticky_window(
+                            &app_handle,
+                            &note.id,
+                            note.x,
+                            note.y,
+                            note.width,
+                            note.height,
+                            note.always_on_top,
+                            false, // 0.16.11：恢复不抢焦点
+                        ) {
+                            Ok(()) => restored += 1,
+                            Err(e) => {
+                                tracing::warn!(sticky_id = %note.id, error = %e, "便签窗口恢复失败，跳过");
+                                skipped += 1;
+                            }
+                        }
+
+                        // 0.16.11：节流——每条间隔 50ms，不抢占 tokio runtime
+                        if visible.len() > 1 {
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        }
+                    }
+                    if total > 0 {
+                        tracing::info!(
+                            total,
+                            restored,
+                            skipped,
+                            "便签恢复完成：共 {} 条，恢复 {} 条，跳过 {} 条",
+                            total,
+                            restored,
+                            skipped
+                        );
+                    }
+                });
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -647,6 +729,7 @@ fn main() {
             app::commands::list_chord_actions,
             app::commands::list_all_chord_actions,
             app::commands::is_alt_down,
+            app::commands::get_awareness_text,
             app::commands::set_chord_mode,
             app::commands::screenshot_copy,
             app::commands::screenshot_copy_region,
@@ -810,11 +893,36 @@ app::commands::ensure_mcp_connected,
             app::commands::save_skill_md,
             app::commands::get_skill_content,
             app::commands::delete_skill,
+            // 0.16.7 便签
+            app::commands::create_sticky_note,
+            app::commands::get_sticky_note,
+            app::commands::list_sticky_notes,
+            app::commands::update_sticky_content,
+            app::commands::update_sticky_appearance,
+            app::commands::update_sticky_geometry,
+            app::commands::set_sticky_visible,
+            app::commands::set_sticky_always_on_top,
+            app::commands::delete_sticky_note,
+            app::commands::get_sticky_stats,
+            app::commands::show_sticky_window_cmd,
+            app::commands::destroy_sticky_window_cmd,
+            app::commands::show_sticky_manager_cmd,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, event| {
             if let tauri::RunEvent::Exit = event {
+                // 0.16.11：标记应用正在退出——便签窗口的 CloseRequested handler
+                // 据此跳过 set_visible(false)，保证退出不把所有便签写成 hidden
+                crate::infra::platform::window::set_app_exiting();
+
+                // 0.16.11：退出前 flush 所有便签窗口的未保存内容（防抖 500ms 内的编辑）
+                let flushed = crate::infra::platform::window::flush_all_sticky_windows(_app);
+                if flushed > 0 {
+                    // 短暂等待让前端 flush JS 执行完成（eval 是异步的）
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                }
+
                 // Blink 退出时 kill funasr-server 子进程，避免孤儿进程
                 crate::app::commands::shutdown_funasr_server_blocking();
                 // 0.13.0: 停止所有 MCP server 子进程

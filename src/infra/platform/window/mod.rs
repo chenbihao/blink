@@ -30,11 +30,11 @@ mod list;
 
 #[cfg(target_os = "windows")]
 pub use windows::{
-    apply_cloak, clamp_context_menu, clamp_to_work_area, enable_rounded_corners, force_topmost,
+    apply_cloak, center_of_active_monitor, clamp_context_menu, clamp_to_work_area, destroy_sticky_window, enable_rounded_corners, flush_all_sticky_windows, force_topmost,
     get_foreground_hwnd, hide, hide_chat_window, hide_for_screenshot, hide_screenshot_overlay,
     hide_voice_overlay, install_sysmenu_blocker, invoke, is_visible, on_focused, open_settings,
-    place_at_physical, preheat_secondary_windows, restore_foreground, show_chat_window,
-    show_content_editor_window, show_pin_window, show_screenshot_overlay, show_voice_overlay,
+    place_at_physical, preheat_secondary_windows, restore_foreground, set_app_exiting, show_chat_window,
+    show_content_editor_window, show_pin_window, show_screenshot_overlay, show_sticky_window, show_sticky_manager_window, show_voice_overlay,
     start_watchdog, last_external_foreground_hwnd,
     unhide_after_screenshot, update_grace_period, wait_frame_after_hide,
 };

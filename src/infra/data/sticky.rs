@@ -1,0 +1,439 @@
+//! 桌面便签持久化（0.16.7）。
+//!
+//! 独立表 `sticky_notes`，放在 `blink_history.db`（与 history / clipboard_history 同库不同表）。
+//! "清除历史"只 DELETE history / clipboard_history，不触碰 sticky_notes——
+//! 只有便签删除和卸载全量清理可以移除。
+//!
+//! 设计见 phases/0.16-clipboard-polish.md §3.8/§3.9。
+
+use sqlx::SqlitePool;
+
+/// 便签颜色（有限色板，§3.11）。
+///
+/// 序列化值与前端 CSS class 后缀对应：`sticky-color-yellow` 等。
+/// 默认主题色（Theme），跟随 Blink 当前主题的 accent 色。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum StickyColor {
+    Theme,
+    Yellow,
+    Pink,
+    Purple,
+    Blue,
+    Green,
+    Gray,
+}
+
+impl Default for StickyColor {
+    fn default() -> Self {
+        Self::Theme
+    }
+}
+
+impl StickyColor {
+    /// 数据库存储用字符串。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Theme => "theme",
+            Self::Yellow => "yellow",
+            Self::Pink => "pink",
+            Self::Purple => "purple",
+            Self::Blue => "blue",
+            Self::Green => "green",
+            Self::Gray => "gray",
+        }
+    }
+
+    /// 从数据库字符串解析。
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "yellow" => Self::Yellow,
+            "pink" => Self::Pink,
+            "purple" => Self::Purple,
+            "blue" => Self::Blue,
+            "green" => Self::Green,
+            "gray" => Self::Gray,
+            "theme" => Self::Theme,
+            _ => Self::Theme, // 兜底
+        }
+    }
+}
+
+/// 内容格式（§3.8）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum StickyFormat {
+    Plain,
+    Markdown,
+}
+
+impl Default for StickyFormat {
+    fn default() -> Self {
+        Self::Plain
+    }
+}
+
+impl StickyFormat {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Plain => "plain",
+            Self::Markdown => "markdown",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "markdown" => Self::Markdown,
+            _ => Self::Plain,
+        }
+    }
+}
+
+/// 便签实体（§3.8 字段定义）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StickyNote {
+    /// 唯一 id（`sticky_{timestamp_nanos}`）
+    pub id: String,
+    /// 正文内容
+    pub content: String,
+    /// 格式：plain | markdown
+    #[serde(default)]
+    pub format: StickyFormat,
+    /// 颜色
+    #[serde(default)]
+    pub color: StickyColor,
+    /// 是否桌面可见
+    #[serde(default = "default_true")]
+    pub visible: bool,
+    /// 窗口 x（物理像素）
+    #[serde(default)]
+    pub x: i32,
+    /// 窗口 y（物理像素）
+    #[serde(default)]
+    pub y: i32,
+    /// 窗口宽度（物理像素）
+    #[serde(default = "default_width")]
+    pub width: i32,
+    /// 窗口高度（物理像素）
+    #[serde(default = "default_height")]
+    pub height: i32,
+    /// 是否置顶
+    #[serde(default = "default_true")]
+    pub always_on_top: bool,
+    /// 创建时间（Unix 秒）
+    pub created_at: i64,
+    /// 更新时间（Unix 秒）
+    pub updated_at: i64,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_width() -> i32 {
+    240
+}
+fn default_height() -> i32 {
+    200
+}
+
+/// 默认窗口尺寸（逻辑像素，前端创建时用）。
+pub const DEFAULT_WIDTH: i32 = 240;
+pub const DEFAULT_HEIGHT: i32 = 200;
+
+/// 初始化 sticky_notes 表。
+pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS sticky_notes (
+            id TEXT PRIMARY KEY,
+            content TEXT NOT NULL DEFAULT '',
+            format TEXT NOT NULL DEFAULT 'plain',
+            color TEXT NOT NULL DEFAULT 'theme',
+            visible INTEGER NOT NULL DEFAULT 1,
+            x INTEGER NOT NULL DEFAULT 0,
+            y INTEGER NOT NULL DEFAULT 0,
+            width INTEGER NOT NULL DEFAULT 240,
+            height INTEGER NOT NULL DEFAULT 200,
+            always_on_top INTEGER NOT NULL DEFAULT 1,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_sticky_updated ON sticky_notes(updated_at)")
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    tracing::debug!("sticky_notes 表已初始化");
+    Ok(())
+}
+
+/// 生成唯一便签 ID。
+pub fn generate_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("sticky_{timestamp}")
+}
+
+/// 从数据库行构造 StickyNote。
+fn row_to_note(
+    id: String,
+    content: String,
+    format: String,
+    color: String,
+    visible: i64,
+    x: i64,
+    y: i64,
+    width: i64,
+    height: i64,
+    always_on_top: i64,
+    created_at: i64,
+    updated_at: i64,
+) -> StickyNote {
+    StickyNote {
+        id,
+        content,
+        format: StickyFormat::from_str(&format),
+        color: StickyColor::from_str(&color),
+        visible: visible != 0,
+        x: x as i32,
+        y: y as i32,
+        width: width as i32,
+        height: height as i32,
+        always_on_top: always_on_top != 0,
+        created_at,
+        updated_at,
+    }
+}
+
+/// 创建新便签。
+pub async fn create(pool: &SqlitePool, note: &StickyNote) -> Result<(), String> {
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query(
+        "INSERT INTO sticky_notes (id, content, format, color, visible, x, y, width, height, always_on_top, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+    )
+    .bind(&note.id)
+    .bind(&note.content)
+    .bind(note.format.as_str())
+    .bind(note.color.as_str())
+    .bind(note.visible as i64)
+    .bind(note.x as i64)
+    .bind(note.y as i64)
+    .bind(note.width as i64)
+    .bind(note.height as i64)
+    .bind(note.always_on_top as i64)
+    .bind(if note.created_at != 0 { note.created_at } else { now })
+    .bind(now)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 按 id 查询单条便签。
+pub async fn get(pool: &SqlitePool, id: &str) -> Option<StickyNote> {
+    let row = sqlx::query_as::<_, (String, String, String, String, i64, i64, i64, i64, i64, i64, i64, i64)>(
+        "SELECT id, content, format, color, visible, x, y, width, height, always_on_top, created_at, updated_at FROM sticky_notes WHERE id = ?1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()?;
+
+    Some(row_to_note(
+        row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10, row.11,
+    ))
+}
+
+/// 列出全部便签（按 updated_at 倒序）。
+pub async fn list(pool: &SqlitePool) -> Vec<StickyNote> {
+    sqlx::query_as::<_, (String, String, String, String, i64, i64, i64, i64, i64, i64, i64, i64)>(
+        "SELECT id, content, format, color, visible, x, y, width, height, always_on_top, created_at, updated_at FROM sticky_notes ORDER BY updated_at DESC",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|r| {
+        row_to_note(
+            r.0, r.1, r.2, r.3, r.4, r.5, r.6, r.7, r.8, r.9, r.10, r.11,
+        )
+    })
+    .collect()
+}
+
+/// 更新便签正文内容（自动更新 updated_at）。
+pub async fn update_content(pool: &SqlitePool, id: &str, content: &str) -> Result<(), String> {
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query("UPDATE sticky_notes SET content = ?1, updated_at = ?2 WHERE id = ?3")
+        .bind(content)
+        .bind(now)
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 更新便签外观（颜色 + 格式）。
+pub async fn update_appearance(
+    pool: &SqlitePool,
+    id: &str,
+    color: &StickyColor,
+    format: Option<&StickyFormat>,
+) -> Result<(), String> {
+    let now = chrono::Utc::now().timestamp();
+    if let Some(fmt) = format {
+        sqlx::query("UPDATE sticky_notes SET color = ?1, format = ?2, updated_at = ?3 WHERE id = ?4")
+            .bind(color.as_str())
+            .bind(fmt.as_str())
+            .bind(now)
+            .bind(id)
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    } else {
+        sqlx::query("UPDATE sticky_notes SET color = ?1, updated_at = ?2 WHERE id = ?3")
+            .bind(color.as_str())
+            .bind(now)
+            .bind(id)
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 更新便签窗口几何（位置 + 尺寸）。
+pub async fn update_geometry(
+    pool: &SqlitePool,
+    id: &str,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> Result<(), String> {
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query("UPDATE sticky_notes SET x = ?1, y = ?2, width = ?3, height = ?4, updated_at = ?5 WHERE id = ?6")
+        .bind(x as i64)
+        .bind(y as i64)
+        .bind(width as i64)
+        .bind(height as i64)
+        .bind(now)
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 设置便签可见性（关闭 = 隐藏，不删除）。
+pub async fn set_visible(pool: &SqlitePool, id: &str, visible: bool) -> Result<(), String> {
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query("UPDATE sticky_notes SET visible = ?1, updated_at = ?2 WHERE id = ?3")
+        .bind(visible as i64)
+        .bind(now)
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 设置便签置顶状态。
+pub async fn set_always_on_top(
+    pool: &SqlitePool,
+    id: &str,
+    always_on_top: bool,
+) -> Result<(), String> {
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query("UPDATE sticky_notes SET always_on_top = ?1, updated_at = ?2 WHERE id = ?3")
+        .bind(always_on_top as i64)
+        .bind(now)
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 删除便签（永久删除，不可恢复）。
+pub async fn delete(pool: &SqlitePool, id: &str) -> Result<(), String> {
+    sqlx::query("DELETE FROM sticky_notes WHERE id = ?1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 获取便签统计信息。
+pub async fn get_stats(pool: &SqlitePool) -> serde_json::Value {
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sticky_notes")
+        .fetch_one(pool)
+        .await
+        .unwrap_or((0,));
+
+    let visible_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM sticky_notes WHERE visible = 1")
+            .fetch_one(pool)
+            .await
+            .unwrap_or((0,));
+
+    serde_json::json!({
+        "count": count.0,
+        "visible": visible_count.0,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn color_roundtrip() {
+        for c in [
+            StickyColor::Theme,
+            StickyColor::Yellow,
+            StickyColor::Pink,
+            StickyColor::Purple,
+            StickyColor::Blue,
+            StickyColor::Green,
+            StickyColor::Gray,
+        ] {
+            assert_eq!(StickyColor::from_str(c.as_str()), c);
+        }
+    }
+
+    #[test]
+    fn color_default_is_theme() {
+        assert_eq!(StickyColor::default(), StickyColor::Theme);
+    }
+
+    #[test]
+    fn format_roundtrip() {
+        assert_eq!(
+            StickyFormat::from_str(StickyFormat::Plain.as_str()),
+            StickyFormat::Plain
+        );
+        assert_eq!(
+            StickyFormat::from_str(StickyFormat::Markdown.as_str()),
+            StickyFormat::Markdown
+        );
+    }
+
+    #[test]
+    fn generate_id_has_prefix() {
+        let id = generate_id();
+        assert!(id.starts_with("sticky_"));
+    }
+}

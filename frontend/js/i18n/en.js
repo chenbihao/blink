@@ -864,6 +864,7 @@ export const en = {
     "menu.copyResult": "Copy result",
     "menu.edit": "Edit",
 "menu.pin": "Pin",
+    "menu.sticky": "Sticky",
 
     // ── Main window: status bar ──
     "hint.open": "Open",

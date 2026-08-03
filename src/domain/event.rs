@@ -91,6 +91,28 @@ pub trait DomainEnv: CapabilityEnv {
     /// 打开设置窗口。
     fn open_settings(&self);
 
+    /// 显示便签管理窗口（0.16.10）。
+    fn show_sticky_manager(&self) -> Result<(), String>;
+
+    /// 打开内容编辑器窗口（0.16.9）。
+    ///
+    /// `body` 为编辑器初始文本，`origin` 标识来源（"chord" / "clipboard" / "sticky"），
+    /// `origin_ref` 为原实体 id（剪贴板记录 id 或便签 id），`save_policy` 为保存策略
+    /// （"clipboard_new" / "sticky_update"）。实现负责存入 PendingEditorPayload 并创建窗口。
+    fn show_content_editor(
+        &self,
+        body: &str,
+        title: Option<&str>,
+        origin: &str,
+        origin_ref: Option<&str>,
+        save_policy: &str,
+    ) -> Result<(), String>;
+
+    /// 创建便签并显示窗口（0.16.9）。
+    ///
+    /// 返回创建的便签 id。实现负责持久化 + 创建桌面窗口。
+    async fn create_sticky_and_show(&self, content: &str) -> Result<String, String>;
+
     /// 退出应用进程。
     fn exit_app(&self);
 

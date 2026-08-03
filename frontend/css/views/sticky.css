@@ -1,0 +1,255 @@
+/* sticky view — 便签窗口布局与样式 */
+
+/* ── 根布局 ── */
+.sticky-root {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+  /* 默认背景由 JS 按 color class 设置，fallback 用 --bg */
+  background: var(--sticky-bg, var(--bg));
+  color: var(--sticky-text, #333);
+}
+
+/* ── 颜色色板（§3.11）── */
+/* 每种颜色定义背景和文字色配对 */
+.sticky-root.color-theme {
+  --sticky-bg: var(--surface);
+  --sticky-text: var(--text);
+  --sticky-border: var(--surface-2);
+  --sticky-btn-hover: var(--accent-bg);
+}
+
+.sticky-root.color-yellow {
+  --sticky-bg: #fff9c4;
+  --sticky-text: #5d4037;
+  --sticky-border: #fdd835;
+  --sticky-btn-hover: rgba(0, 0, 0, 0.08);
+}
+
+.sticky-root.color-pink {
+  --sticky-bg: #fce4ec;
+  --sticky-text: #5d4037;
+  --sticky-border: #f48fb1;
+  --sticky-btn-hover: rgba(0, 0, 0, 0.08);
+}
+
+.sticky-root.color-purple {
+  --sticky-bg: #f3e5f5;
+  --sticky-text: #4a148c;
+  --sticky-border: #ce93d8;
+  --sticky-btn-hover: rgba(0, 0, 0, 0.08);
+}
+
+.sticky-root.color-blue {
+  --sticky-bg: #e3f2fd;
+  --sticky-text: #0d47a1;
+  --sticky-border: #90caf9;
+  --sticky-btn-hover: rgba(0, 0, 0, 0.08);
+}
+
+.sticky-root.color-green {
+  --sticky-bg: #e8f5e9;
+  --sticky-text: #1b5e20;
+  --sticky-border: #a5d6a7;
+  --sticky-btn-hover: rgba(0, 0, 0, 0.08);
+}
+
+.sticky-root.color-gray {
+  --sticky-bg: #f5f5f5;
+  --sticky-text: #424242;
+  --sticky-border: #bdbdbd;
+  --sticky-btn-hover: rgba(0, 0, 0, 0.08);
+}
+
+/* ── 标题栏 ── */
+.sticky-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 32px;
+  padding: 0 4px 0 4px;
+  background: var(--sticky-border, transparent);
+  user-select: none;
+  flex-shrink: 0;
+  -webkit-app-region: drag;
+}
+
+.sticky-titlebar-left {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  -webkit-app-region: no-drag;
+}
+
+.sticky-titlebar-right {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  -webkit-app-region: no-drag;
+}
+
+/* ── 图标按钮 ── */
+.sticky-icon-btn,
+.sticky-color-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--sticky-text);
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background var(--transition-fast, 0.15s);
+  position: relative;
+}
+
+.sticky-icon-btn:hover,
+.sticky-color-btn:hover {
+  background: var(--sticky-btn-hover, rgba(0, 0, 0, 0.1));
+}
+
+.sticky-icon-btn:active,
+.sticky-color-btn:active {
+  background: rgba(0, 0, 0, 0.15);
+}
+
+.sticky-icon-btn svg,
+.sticky-color-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+.sticky-icon-btn-close:hover {
+  background: #e53935;
+  color: #fff;
+}
+
+/* 置顶激活态 */
+.sticky-icon-btn.active {
+  color: var(--sticky-text);
+  background: var(--sticky-btn-hover, rgba(0, 0, 0, 0.12));
+}
+
+/* ── 颜色面板 ── */
+.sticky-color-palette {
+  position: absolute;
+  top: 30px;
+  left: 0;
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px;
+  background: var(--surface, #fff);
+  border: 1px solid var(--surface-2, #ddd);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  z-index: 100;
+}
+
+.color-swatch {
+  width: 18px;
+  height: 18px;
+  border: 2px solid transparent;
+  border-radius: 50%;
+  cursor: pointer;
+  padding: 0;
+  transition: border-color 0.15s;
+}
+
+.color-swatch:hover {
+  border-color: var(--text-sub, #999);
+}
+
+.color-swatch.selected {
+  border-color: var(--text, #333);
+}
+
+.color-swatch.color-theme { background: var(--accent); }
+.color-swatch.color-yellow { background: #fdd835; }
+.color-swatch.color-pink { background: #f48fb1; }
+.color-swatch.color-purple { background: #ce93d8; }
+.color-swatch.color-blue { background: #90caf9; }
+.color-swatch.color-green { background: #a5d6a7; }
+.color-swatch.color-gray { background: #bdbdbd; }
+
+/* ── 更多菜单 ── */
+.sticky-more-menu {
+  position: absolute;
+  top: 30px;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  min-width: 140px;
+  background: var(--surface, #fff);
+  border: 1px solid var(--surface-2, #ddd);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  z-index: 100;
+}
+
+.more-menu-item {
+  padding: 6px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text, #333);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background 0.15s;
+}
+
+.more-menu-item:hover {
+  background: var(--accent-bg, rgba(0, 0, 0, 0.06));
+}
+
+.more-menu-danger {
+  color: var(--red, #e53935);
+}
+
+.more-menu-danger:hover {
+  background: var(--danger-hover-bg, rgba(229, 57, 53, 0.1));
+}
+
+/* ── 编辑区 ── */
+.sticky-textarea {
+  flex: 1;
+  width: 100%;
+  padding: 12px 14px;
+  border: none;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--sticky-text);
+  font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  /* 中文不斜体铁则 */
+  font-style: normal;
+}
+
+.sticky-textarea::placeholder {
+  color: var(--sticky-text);
+  opacity: 0.4;
+}
+
+.sticky-textarea::-webkit-scrollbar {
+  width: 6px;
+}
+
+.sticky-textarea::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sticky-textarea::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--sticky-text) 30%, transparent);
+  border-radius: 3px;
+}
+
+.sticky-textarea::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--sticky-text) 50%, transparent);
+}

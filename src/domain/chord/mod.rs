@@ -212,6 +212,17 @@ pub trait ChordAction: crate::domain::execution::Action {
     fn requires_input(&self) -> bool {
         false
     }
+    /// 空文本时是否在提示条隐藏此动作（0.16.11）。
+    ///
+    /// `false`（默认）：空文本时正常显示提示。
+    /// `true`：空文本时 overlay 不显示，但触发仍可用（保留 awareness 选区等兜底场景）。
+    /// 仅影响提示可见性，不影响 `getTapKeys()` 触发集合。
+    ///
+    /// 典型：contextual 动作（edit/sticky）覆盖为 true——它们对"当前内容"做动作，
+    /// 空文本时提示价值低；idle 入口（screenshot/clipboard）和明确入口（chat）保持 false。
+    fn hint_hidden_when_empty(&self) -> bool {
+        false
+    }
     /// 显示名（走 `LocalizableText`--registry 声明 zh/en，list() 按 language 解析）。
     fn label(&self) -> &LocalizableText;
     /// 触发后的窗口形态。
@@ -268,6 +279,7 @@ impl ChordRegistry {
                     "label": a.label().resolve(language),
                     "surface": a.surface().as_str(),
                     "requires_input": a.requires_input(),
+                    "hint_hidden_when_empty": a.hint_hidden_when_empty(),
                 })
             })
             .collect()
@@ -475,6 +487,12 @@ pub fn build_default_registry() -> ChordRegistry {
     }));
     reg.register(Arc::new(ClipboardHistoryAction {
         label: bilingual("剪贴板历史", "Clipboard history"),
+    }));
+    reg.register(Arc::new(EditAction {
+        label: bilingual("编辑", "Edit"),
+    }));
+    reg.register(Arc::new(StickyAction {
+        label: bilingual("钉为便签", "Sticky"),
     }));
     reg
 }
@@ -710,6 +728,155 @@ impl ChordAction for ClipboardHistoryAction {
     }
 }
 
+/// Alt+E 编辑当前内容（0.16.9）。
+///
+/// 从 `requires_input` 获得输入文本（前端 contextual 解析后传入），
+/// 打交通用编辑器。无内容时打开空白编辑器。
+///
+/// **上下文解析**（前端侧）：
+/// 1. active item 的文本 payload
+/// 2. 非空 query
+/// 3. 空闲态 Awareness 选区
+/// 4. 空白
+///
+/// 前端解析后把内容作为 `inputText` 传入 `trigger_chord`，
+/// 后端通过 `ActionContext.arguments["input"]` 读到。
+struct EditAction {
+    label: LocalizableText,
+}
+
+#[async_trait::async_trait]
+impl crate::domain::execution::Action for EditAction {
+    fn id(&self) -> &str {
+        "edit"
+    }
+    fn title(&self) -> &LocalizableText {
+        &self.label
+    }
+    fn subtitle(&self) -> &LocalizableText {
+        &self.label
+    }
+    fn schema(&self) -> crate::domain::execution::ActionSchema {
+        crate::domain::execution::ActionSchema::empty(
+            "edit",
+            "Open the content editor with the current text (Alt+E chord). Optional input_text to prefill.",
+        )
+    }
+    fn danger_class(&self) -> crate::domain::execution::DangerClass {
+        crate::domain::execution::DangerClass::Safe
+    }
+    async fn execute(
+        &self,
+        cx: &crate::domain::execution::ActionContext<'_>,
+    ) -> Result<crate::domain::execution::ActionOutcome, crate::domain::execution::ExecError> {
+        let input: &str = cx
+            .arguments
+            .get("input")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        cx.env
+            .show_content_editor(
+                input,
+                Some("编辑内容"),
+                "chord",
+                None,
+                "clipboard_new",
+            )
+            .map_err(crate::domain::execution::ExecError::Runtime)?;
+        cx.env.hide_main_window("edit_chord");
+        Ok(crate::domain::execution::ActionOutcome::Nop)
+    }
+}
+
+#[async_trait::async_trait]
+impl ChordAction for EditAction {
+    fn default_key(&self) -> char {
+        'e'
+    }
+    /// 非空 query 时仍可触发——前端解析后把内容传入。
+    fn requires_input(&self) -> bool {
+        true
+    }
+    /// 空文本时提示隐藏——edit 是 contextual 动作，空文本时主用途不明确（依赖
+    /// awareness 选区兜底），提示价值低。触发仍保留（Alt+E 打开空白编辑器）。
+    fn hint_hidden_when_empty(&self) -> bool {
+        true
+    }
+    fn label(&self) -> &LocalizableText {
+        &self.label
+    }
+    fn surface(&self) -> ChordSurface {
+        ChordSurface::Default
+    }
+}
+
+/// Alt+S 将当前内容创建为便签（0.16.9）。
+///
+/// 与 EditAction 同源获取输入文本，但不进编辑器——直接创建便签并显示桌面窗口。
+/// 无内容时创建空白便签。
+struct StickyAction {
+    label: LocalizableText,
+}
+
+#[async_trait::async_trait]
+impl crate::domain::execution::Action for StickyAction {
+    fn id(&self) -> &str {
+        "sticky"
+    }
+    fn title(&self) -> &LocalizableText {
+        &self.label
+    }
+    fn subtitle(&self) -> &LocalizableText {
+        &self.label
+    }
+    fn schema(&self) -> crate::domain::execution::ActionSchema {
+        crate::domain::execution::ActionSchema::empty(
+            "sticky",
+            "Create a sticky note from the current text (Alt+S chord). Optional input_text to prefill.",
+        )
+    }
+    fn danger_class(&self) -> crate::domain::execution::DangerClass {
+        crate::domain::execution::DangerClass::Safe
+    }
+    async fn execute(
+        &self,
+        cx: &crate::domain::execution::ActionContext<'_>,
+    ) -> Result<crate::domain::execution::ActionOutcome, crate::domain::execution::ExecError> {
+        let input: &str = cx
+            .arguments
+            .get("input")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        cx.env
+            .create_sticky_and_show(input)
+            .await
+            .map_err(crate::domain::execution::ExecError::Runtime)?;
+        cx.env.hide_main_window("sticky_chord");
+        Ok(crate::domain::execution::ActionOutcome::Nop)
+    }
+}
+
+#[async_trait::async_trait]
+impl ChordAction for StickyAction {
+    fn default_key(&self) -> char {
+        's'
+    }
+    fn requires_input(&self) -> bool {
+        true
+    }
+    /// 空文本时提示隐藏——sticky 是 contextual 动作，空文本时主用途不明确（依赖
+    /// awareness 选区兜底），提示价值低。触发仍保留（Alt+S 创建空白便签）。
+    fn hint_hidden_when_empty(&self) -> bool {
+        true
+    }
+    fn label(&self) -> &LocalizableText {
+        &self.label
+    }
+    fn surface(&self) -> ChordSurface {
+        ChordSurface::Default
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -752,5 +919,29 @@ mod tests {
         assert_eq!(chat["semantic"], "tap");
         assert_eq!(chat["label"], "AI 对话");
         assert_eq!(chat["surface"], "default");
+    }
+
+    #[test]
+    fn edit_action_registered_on_e() {
+        let registry = build_default_registry();
+        let bindings = ChordBindings::default();
+        assert_eq!(registry.action_id_for_key("e", &bindings), Some("edit"));
+        let listed = registry.list(&[], &bindings, "zh");
+        let edit = listed.iter().find(|item| item["id"] == "edit").unwrap();
+        assert_eq!(edit["key"], "e");
+        assert_eq!(edit["requires_input"], true);
+        assert_eq!(edit["label"], "编辑");
+    }
+
+    #[test]
+    fn sticky_action_registered_on_s() {
+        let registry = build_default_registry();
+        let bindings = ChordBindings::default();
+        assert_eq!(registry.action_id_for_key("s", &bindings), Some("sticky"));
+        let listed = registry.list(&[], &bindings, "en");
+        let sticky = listed.iter().find(|item| item["id"] == "sticky").unwrap();
+        assert_eq!(sticky["key"], "s");
+        assert_eq!(sticky["requires_input"], true);
+        assert_eq!(sticky["label"], "Sticky");
     }
 }

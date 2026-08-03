@@ -10,7 +10,7 @@
 
 use std::sync::Mutex;
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 /// 待编辑内容 payload（前端 → 后端 → 前端，经 Tauri State 中转避免事件竞态）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -85,67 +85,92 @@ pub async fn get_content_editor_payload(
     pending.0.lock().ok().and_then(|mut guard| guard.take())
 }
 
-/// 保存编辑后的内容（savePolicy=clipboard_new）。
+/// 保存编辑后的内容。
 ///
-/// 链路：
-/// 1. 新建一条 ClipboardItem（新 id、新 created_at），hit_count 从 originRef 继承
-/// 2. 写入 clipboard_history 表（save_item，INSERT OR REPLACE）
-/// 3. 写回系统剪贴板
-/// 4. 原项不删除、不覆盖——保留可恢复路径
-/// 5. 返回新记录 id
+/// 按 `save_policy` 分派保存链路：
+/// - `clipboard_new`：新建一条 ClipboardItem + 写回系统剪贴板（0.16.3 默认）
+/// - `sticky_update`：更新原便签内容（0.16.9），originRef = sticky id
+///
+/// 返回新记录 id（clipboard_new）或原 sticky id（sticky_update）。
 #[tauri::command]
 pub async fn save_content_editor(
     app: tauri::AppHandle,
     body: String,
     origin_ref: Option<String>,
+    save_policy: Option<String>,
 ) -> Result<String, String> {
+    let policy = save_policy.as_deref().unwrap_or("clipboard_new");
     tracing::info!(
         has_origin_ref = origin_ref.is_some(),
         body_len = body.len(),
+        policy,
         "save_content_editor"
     );
 
-    let pool = &app.state::<crate::infra::data::DbPools>().history;
-
-    // 1. 查询原项 hit_count（如有 originRef）
-    let hit_count = if let Some(ref id) = origin_ref {
-        match crate::infra::data::clipboard::query_by_id(pool, id).await {
-            Some(item) => item.hit_count,
-            None => {
-                tracing::warn!(origin_ref = %id, "原剪贴板记录不存在，hit_count 从 0 开始");
-                0
-            }
+    match policy {
+        "sticky_update" => {
+            // 0.16.9：编辑器从便签打开时，保存回写同一便签（不复制新实体）
+            let sticky_id = origin_ref
+                .as_deref()
+                .ok_or_else(|| "sticky_update 需要 origin_ref".to_string())?;
+            let svc = app
+                .state::<std::sync::Arc<crate::domain::sticky::StickyService>>()
+            .inner()
+                .clone();
+            svc.update_content_debounced(sticky_id, &body).await;
+            // emit 事件让管理界面和其它监听者更新
+            let _ = app.emit(
+                crate::domain::event_names::EventNames::STICKY_APPEARANCE_CHANGED,
+                serde_json::json!({ "stickyId": sticky_id }),
+            );
+            tracing::info!(sticky_id = %sticky_id, "save_content_editor: sticky_update 完成");
+            Ok(sticky_id.to_string())
         }
-    } else {
-        0
-    };
+        _ => {
+            // clipboard_new（默认）：新建剪贴板记录 + 写回系统剪贴板
+            let pool = &app.state::<crate::infra::data::DbPools>().history;
 
-    // 2. 新建 ClipboardItem
-    let new_item = crate::infra::data::clipboard::ClipboardItem {
-        id: crate::infra::data::clipboard::generate_id(),
-        text: body.clone(),
-        preview: crate::infra::data::clipboard::make_preview(&body),
-        created_at: chrono::Utc::now().timestamp(),
-        source_app: None,
-        hit_count,
-    };
+            // 1. 查询原项 hit_count（如有 originRef）
+            let hit_count = if let Some(ref id) = origin_ref {
+                match crate::infra::data::clipboard::query_by_id(pool, id).await {
+                    Some(item) => item.hit_count,
+                    None => {
+                        tracing::warn!(origin_ref = %id, "原剪贴板记录不存在，hit_count 从 0 开始");
+                        0
+                    }
+                }
+            } else {
+                0
+            };
 
-    // 3. 写入数据库
-    crate::infra::data::clipboard::save_item(pool, &new_item)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "保存剪贴板记录失败");
-            format!("保存失败: {e}")
-        })?;
+            // 2. 新建 ClipboardItem
+            let new_item = crate::infra::data::clipboard::ClipboardItem {
+                id: crate::infra::data::clipboard::generate_id(),
+                text: body.clone(),
+                preview: crate::infra::data::clipboard::make_preview(&body),
+                created_at: chrono::Utc::now().timestamp(),
+                source_app: None,
+                hit_count,
+            };
 
-    // 4. 写回系统剪贴板（复用 copy_to_clipboard 命令的 Win32 逻辑）
-    crate::app::commands::copy_to_clipboard(body)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "写回系统剪贴板失败");
-            format!("写回剪贴板失败: {e}")
-        })?;
+            // 3. 写入数据库
+            crate::infra::data::clipboard::save_item(pool, &new_item)
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, "保存剪贴板记录失败");
+                    format!("保存失败: {e}")
+                })?;
 
-    tracing::info!(new_id = %new_item.id, "save_content_editor 完成");
-    Ok(new_item.id)
+            // 4. 写回系统剪贴板
+            crate::app::commands::copy_to_clipboard(body)
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, "写回系统剪贴板失败");
+                    format!("写回剪贴板失败: {e}")
+                })?;
+
+            tracing::info!(new_id = %new_item.id, "save_content_editor: clipboard_new 完成");
+            Ok(new_item.id)
+        }
+    }
 }

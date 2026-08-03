@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>便签</title>
+  <link rel="stylesheet" href="css/entries/sticky.css" />
+</head>
+<body>
+  <div class="sticky-root" id="sticky-root">
+    <!-- 标题栏（无边框窗口自绘，可拖动） -->
+    <div class="sticky-titlebar" data-tauri-drag-region>
+      <div class="sticky-titlebar-left" data-tauri-drag-region>
+        <!-- 颜色选择器 -->
+        <button class="sticky-color-btn" id="btn-color" title="颜色">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></svg>
+        </button>
+        <!-- 颜色面板（展开式） -->
+        <div class="sticky-color-palette" id="color-palette" hidden>
+          <button class="color-swatch color-theme" data-color="theme" title="主题色"></button>
+          <button class="color-swatch color-yellow" data-color="yellow" title="黄色"></button>
+          <button class="color-swatch color-pink" data-color="pink" title="粉色"></button>
+          <button class="color-swatch color-purple" data-color="purple" title="紫色"></button>
+          <button class="color-swatch color-blue" data-color="blue" title="蓝色"></button>
+          <button class="color-swatch color-green" data-color="green" title="绿色"></button>
+          <button class="color-swatch color-gray" data-color="gray" title="灰色"></button>
+        </div>
+      </div>
+      <div class="sticky-titlebar-right">
+        <!-- 置顶切换 -->
+        <button class="sticky-icon-btn" id="btn-pin" title="置顶">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>
+        </button>
+        <!-- 更多菜单 -->
+        <button class="sticky-icon-btn" id="btn-more" title="更多">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"/><circle cx="12" cy="5" r="1"/><circle cx="12" cy="19" r="1"/></svg>
+        </button>
+        <!-- 更多菜单（展开式） -->
+        <div class="sticky-more-menu" id="more-menu" hidden>
+          <button class="more-menu-item" id="more-open-editor">在编辑器中打开</button>
+          <button class="more-menu-item" id="more-hide">隐藏</button>
+          <button class="more-menu-item more-menu-danger" id="more-delete">删除</button>
+        </div>
+        <!-- 关闭 -->
+        <button class="sticky-icon-btn sticky-icon-btn-close" id="btn-close" title="关闭">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- 编辑区（直接编辑，自动保存） -->
+    <textarea class="sticky-textarea" id="sticky-textarea" placeholder="输入内容..." spellcheck="false"></textarea>
+  </div>
+
+  <!-- 入口 -->
+  <script type="module" src="js/sticky/main.js"></script>
+</body>
+</html>

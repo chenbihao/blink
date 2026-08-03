@@ -11,6 +11,7 @@ pub mod history;
 pub mod icon_cache;
 pub mod perf;
 pub mod pools;
+pub mod sticky;
 
 pub use pools::{CleanupParams, DbPools};
 

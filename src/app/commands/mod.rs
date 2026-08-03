@@ -13,6 +13,7 @@ mod plugin;
 mod search;
 mod shared;
 mod stt;
+mod sticky;
 
 pub use ai::*;
 pub use clipboard::*;
@@ -23,3 +24,4 @@ pub use mcp::*;
 pub use plugin::*;
 pub use search::*;
 pub use stt::*;
+pub use sticky::*;

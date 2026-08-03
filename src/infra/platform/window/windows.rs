@@ -1,7 +1,7 @@
 //! Windows 平台特定的窗口控制实现：Win32 API。
 
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicIsize, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::domain::event_names::EventNames;
@@ -43,6 +43,13 @@ static INVOKE_AT: AtomicU64 = AtomicU64::new(0);
 static GRACE_MS: AtomicU64 = AtomicU64::new(DEFAULT_GRACE_MS);
 /// Blink 主窗口抢焦点前的外部前台窗口，截图/chord 后续需要恢复或驱动原应用时使用。
 static LAST_EXTERNAL_HWND: AtomicIsize = AtomicIsize::new(0);
+
+/// 0.16.11：应用退出标志。
+///
+/// 在 `RunEvent::Exit` 时设为 true，便签窗口的 `CloseRequested` handler 据此区分
+/// 「用户关闭单条便签」与「应用整体退出」——退出时不把 visible 改成 false，
+/// 只隐藏窗口，保证下次启动按原 visible 状态恢复。
+static IS_APP_EXITING: AtomicBool = AtomicBool::new(false);
 
 /// 程序启动以来的毫秒数（单调时钟，用于 grace period 计算）。
 fn elapsed_ms() -> u64 {
@@ -817,6 +824,8 @@ pub fn show_content_editor_window(app: &AppHandle) -> Result<(), String> {
     let is_new = app.get_webview_window(LABEL).is_none();
 
     let win = if is_new {
+        // 0.16.11：新窗口先 hidden 创建，前端 init 完成后自行 show——消除白屏闪烁。
+        // 复用窗口 JS 已加载，后端直接 show 即可。
         WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("content-editor.html".into()))
             .title("编辑内容")
             .inner_size(720.0, 560.0)
@@ -827,7 +836,7 @@ pub fn show_content_editor_window(app: &AppHandle) -> Result<(), String> {
             .skip_taskbar(false)
             .resizable(true)
             .focused(true)
-            .visible(true)
+            .visible(false)
             .center()
             .build()
             .map_err(|e| {
@@ -848,13 +857,352 @@ pub fn show_content_editor_window(app: &AppHandle) -> Result<(), String> {
         enable_rounded_corners(hwnd);
     }
 
-    win.show().map_err(|e| format!("显示编辑器窗口失败: {e}"))?;
+    if is_new {
+        // 新窗口不在此处 show——前端 init 完成后调用 getCurrentWindow().show() 消除白屏
+    } else {
+        // 复用窗口 JS 已加载，直接 show
+        win.show().map_err(|e| format!("显示编辑器窗口失败: {e}"))?;
+    }
     let _ = win.unminimize();
     win.set_focus()
         .map_err(|e| format!("聚焦编辑器窗口失败: {e}"))?;
 
     tracing::info!("content-editor window: 已显示");
     Ok(())
+}
+
+/// 显示便签管理窗口（0.16.10）。
+///
+/// 独立 Tauri 窗口，label 为 `sticky-manager`。按需创建（不预热）。
+/// 窗口关闭即销毁，不 prevent_close。
+/// 看门狗按 PID 判定，前台切到管理窗口时主窗不会被误隐藏。
+pub fn show_sticky_manager_window(app: &AppHandle) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    const LABEL: &str = "sticky-manager";
+    let is_new = app.get_webview_window(LABEL).is_none();
+
+    let win = if is_new {
+        // 0.16.12：新窗口先 hidden 创建，前端 init 完成后自行 show——消除白屏闪烁。
+        // 同时注册 prevent_close + hide，窗口复用而非销毁重建。
+        let w = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("sticky-manager.html".into()))
+            .title("便签管理")
+            .inner_size(560.0, 640.0)
+            .min_inner_size(360.0, 400.0)
+            .decorations(false)
+            .transparent(false)
+            .always_on_top(false)
+            .skip_taskbar(false)
+            .resizable(true)
+            .focused(true)
+            .visible(false)
+            .center()
+            .build()
+            .map_err(|e| {
+                tracing::warn!(error = %e, "sticky-manager window: 创建失败");
+                format!("创建便签管理窗口失败: {e}")
+            })?;
+
+        // prevent_close + hide——与 chat/content-editor 一致的复用模式
+        let app_clone = app.clone();
+        w.on_window_event(move |event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if IS_APP_EXITING.load(Ordering::SeqCst) {
+                    return; // 应用退出：不 prevent_close
+                }
+                api.prevent_close();
+                if let Some(w) = app_clone.get_webview_window(LABEL) {
+                    let _ = w.hide();
+                }
+                tracing::debug!("sticky-manager window: CloseRequested → prevent_close + hide");
+            }
+        });
+        w
+    } else {
+        let win = app.get_webview_window(LABEL).unwrap();
+        let _ = win.eval("window.__stickyManagerReload && window.__stickyManagerReload()");
+        win
+    };
+
+    if let Ok(hwnd) = win.hwnd() {
+        let hwnd = HWND(hwnd.0 as _);
+        install_sysmenu_blocker(hwnd);
+        enable_rounded_corners(hwnd);
+    }
+
+    if is_new {
+        // 新窗口不在此处 show——前端 init 完成后调用 getCurrentWindow().show() 消除白屏
+    } else {
+        // 复用窗口 JS 已加载，直接 show
+        win.show().map_err(|e| format!("显示便签管理窗口失败: {e}"))?;
+    }
+    let _ = win.unminimize();
+    win.set_focus()
+        .map_err(|e| format!("聚焦便签管理窗口失败: {e}"))?;
+
+    tracing::info!("sticky-manager window: 已显示");
+    Ok(())
+}
+
+/// 显示便签窗口（0.16.8）。
+///
+/// 每条便签一个独立 Tauri 窗口，label 为 `sticky-{id}`（id 截断到 60 字符防止超长）。
+/// 窗口位置、尺寸、置顶状态从 StickyNote 数据恢复。
+/// 关闭按钮 = 隐藏（prevent_close），不销毁窗口——下次显示复用同一 webview。
+///
+/// **看门狗安全**：看门狗按 PID 判定，前台切到便签时 `fg_pid == self_pid`，主窗不会被误隐藏。
+pub fn show_sticky_window(
+    app: &AppHandle,
+    sticky_id: &str,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    always_on_top: bool,
+    focus: bool,
+) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    // 0.16.11：安全截断——按字符而非字节切片，避免非 ASCII ID 截断 panic。
+    // sticky_id 实际都是 ASCII（generate_id 产 sticky_{nanos}），但做防御性编程。
+    let truncated_id: String = sticky_id.chars().take(64).collect();
+    let label = format!("sticky-{truncated_id}");
+
+    let is_new = app.get_webview_window(&label).is_none();
+
+    let win = if is_new {
+        // URL 带 sticky_id 参数，前端 init 时读取
+        let url = format!("sticky.html?id={sticky_id}");
+        // 0.16.11：几何钳制——显示器拔插/分辨率变化后保证窗口至少部分可见
+        let (cx, cy, cw, ch) = clamp_sticky_geometry(x, y, width, height);
+
+        let w = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
+            .title("便签")
+            .inner_size(cw as f64, ch as f64)
+            .min_inner_size(120.0, 80.0)
+            .position(cx as f64, cy as f64)
+            .decorations(false)
+            .transparent(false)
+            .always_on_top(always_on_top)
+            .skip_taskbar(true)
+            .resizable(true)
+            .focused(focus)
+            .visible(true)
+            .build()
+            .map_err(|e| {
+                tracing::warn!(error = %e, "sticky window: 创建失败");
+                format!("创建便签窗口失败: {e}")
+            })?;
+
+        // 注册 CloseRequested handler：仅新窗口注册一次，避免复用时重复绑定
+        //
+        // 0.16.11：区分「用户关闭便签」与「应用整体退出」：
+        // - 用户关闭：prevent_close + set_visible(false) + hide（保持数据，只隐藏桌面窗口）
+        // - 应用退出：不 prevent_close，让窗口正常关闭，**不修改 visible**——
+        //   下次启动按 DB 中的 visible 状态恢复，退出不等于全部隐藏
+        let label_owned = label.clone();
+        let app_clone = app.clone();
+        let sid = sticky_id.to_string();
+        w.on_window_event(move |event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if IS_APP_EXITING.load(Ordering::SeqCst) {
+                    // 应用退出：不 prevent_close，不修改 visible
+                    tracing::debug!(
+                        sticky_id = %sid,
+                        "sticky window: CloseRequested during app exit → 不修改 visible"
+                    );
+                    return;
+                }
+                api.prevent_close();
+                // 异步设置 visible=false 并隐藏窗口
+                let app_c = app_clone.clone();
+                let sid_owned = sid.clone();
+                tauri::async_runtime::spawn(async move {
+                    let svc = app_c
+                        .state::<std::sync::Arc<crate::domain::sticky::StickyService>>();
+                    if let Err(e) = svc.set_visible(&sid_owned, false).await {
+                        tracing::warn!(error = %e, "便签关闭时设置 visible=false 失败");
+                    }
+                });
+                if let Some(w) = app_clone.get_webview_window(&label_owned) {
+                    let _ = w.hide();
+                }
+                tracing::debug!(sticky_id = %sid, "sticky window: CloseRequested → prevent_close + hide");
+            }
+        });
+        w
+    } else {
+        // 复用已有窗口——重新定位 + 重新加载便签数据
+        // 0.16.11：复用路径也做几何钳制，防止显示器变化后窗口不可见
+        let (cx, cy, cw, ch) = clamp_sticky_geometry(x, y, width, height);
+        let win = app.get_webview_window(&label).unwrap();
+        let _ = win.set_size(tauri::LogicalSize::new(cw as f64, ch as f64));
+        let _ = win.set_position(tauri::PhysicalPosition::new(cx, cy));
+        let _ = win.set_always_on_top(always_on_top);
+        // 通知前端重新加载便签数据
+        let js = format!(
+            "if (window.__stickyReload) window.__stickyReload('{sticky_id}')"
+        );
+        let _ = win.eval(&js);
+        win
+    };
+
+    // 系统菜单拦截 + 圆角
+    if let Ok(hwnd) = win.hwnd() {
+        let hwnd = HWND(hwnd.0 as _);
+        install_sysmenu_blocker(hwnd);
+        enable_rounded_corners(hwnd);
+    }
+
+    win.show().map_err(|e| format!("显示便签窗口失败: {e}"))?;
+    let _ = win.unminimize();
+    // 0.16.11：恢复路径（focus=false）不抢焦点，不影响主窗口 Alt+Space
+    if focus {
+        win.set_focus()
+            .map_err(|e| format!("聚焦便签窗口失败: {e}"))?;
+    }
+
+    tracing::info!(sticky_id, focus, "sticky window: 已显示");
+    Ok(())
+}
+
+/// 0.16.11：标记应用正在退出。
+///
+/// 在 `RunEvent::Exit` 时调用，让便签窗口的 CloseRequested handler 知道
+/// 这是应用整体退出而非用户关闭单条便签。
+pub fn set_app_exiting() {
+    IS_APP_EXITING.store(true, Ordering::SeqCst);
+    tracing::debug!("set_app_exiting: IS_APP_EXITING → true");
+}
+
+/// 0.16.11：退出前 flush 所有便签窗口的未保存内容。
+///
+/// 前端有 500ms 内容防抖和 300ms 几何防抖。退出时 eval flush JS，
+/// 让前端立即写入后端，避免丢失最近 500ms 的编辑。
+/// 返回 flush 的窗口数量。
+pub fn flush_all_sticky_windows(app: &AppHandle) -> usize {
+    let mut count = 0usize;
+    for (label, win) in app.webview_windows() {
+        if !label.starts_with("sticky-") || label == "sticky-manager" {
+            continue;
+        }
+        // eval flush——前端 __stickyFlush 立即调用后端保存
+        let _ = win.eval("if (window.__stickyFlush) window.__stickyFlush();");
+        count += 1;
+    }
+    if count > 0 {
+        tracing::debug!(count, "flush_all_sticky_windows: 已向 {} 个便签窗口发送 flush", count);
+    }
+    count
+}
+
+/// 计算便签在当前前台窗口所在显示器工作区的居中坐标（0.16.11）。
+///
+/// 新建便签时调用，让便签出现在用户当前关注的屏幕中心而非 (0,0) 角落。
+/// 返回 (x, y) 物理像素。
+pub fn center_of_active_monitor(width: i32, height: i32) -> (i32, i32) {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        let hmon = if hwnd.is_invalid() {
+            MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY)
+        } else {
+            MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+        };
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if !GetMonitorInfoW(hmon, &mut mi).as_bool() {
+            return (0, 0);
+        }
+        let work = mi.rcWork;
+        let x = work.left + (work.right - work.left - width) / 2;
+        let y = work.top + (work.bottom - work.top - height) / 2;
+        (x, y)
+    }
+}
+
+/// 0.16.11：钳制便签窗口几何到可见工作区。
+///
+/// 显示器拔插、分辨率/DPI 变化后，存储的 (x, y) 可能指向不存在的显示器。
+/// 使用 `MonitorFromPoint` 查找位置所在显示器，找不到时 fallback 到主屏，
+/// 然后钳制到工作区内，确保窗口至少部分可见。
+///
+/// 返回值 `(x, y, width, height)` 为钳制后的物理像素。
+fn clamp_sticky_geometry(x: i32, y: i32, width: i32, height: i32) -> (i32, i32, i32, i32) {
+    // 保证尺寸合理
+    let w = width.max(120).min(4096);
+    let h = height.max(80).min(4096);
+
+    unsafe {
+        let pt = POINT { x, y };
+        // 先尝试指定位置所在显示器，找不到则取主屏
+        let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if !GetMonitorInfoW(hmon, &mut mi).as_bool() {
+            // 极端 fallback：拿不到显示器信息，原样返回（尺寸已 clamp）
+            return (x, y, w, h);
+        }
+        let work = mi.rcWork; // 工作区（排除任务栏）
+
+        // 钳制到工作区：确保窗口至少 80x60 像素可见
+        let min_visible_w = 80i32;
+        let min_visible_h = 60i32;
+
+        // X：如果窗口完全在 Work 区左侧，移到 work.left；
+        //     完全在右侧，移到 work.right - min_visible_w；
+        //     部分可见且可见部分 >= min_visible_w，保持不动；
+        //     部分可见但可见部分 < min_visible_w，调整使其至少 min_visible_w 可见
+        let cx = if x + w <= work.left + min_visible_w {
+            // 窗口在左边界外或几乎不可见
+            work.left
+        } else if x >= work.right - min_visible_w {
+            // 窗口在右边界外或几乎不可见
+            (work.right - w).max(work.left)
+        } else {
+            // 至少部分可见，保持
+            x
+        };
+
+        let cy = if y + h <= work.top + min_visible_h {
+            work.top
+        } else if y >= work.bottom - min_visible_h {
+            (work.bottom - h).max(work.top)
+        } else {
+            y
+        };
+
+        tracing::trace!(
+            orig_x = x, orig_y = y, orig_w = width, orig_h = height,
+            clamped_x = cx, clamped_y = cy, clamped_w = w, clamped_h = h,
+            work_left = work.left, work_top = work.top,
+            work_right = work.right, work_bottom = work.bottom,
+            "clamp_sticky_geometry: 钳制完成"
+        );
+
+        (cx, cy, w, h)
+    }
+}
+
+/// 隐藏便签窗口（不删除数据）。
+#[allow(dead_code)] // 0.16.10 管理界面将使用
+pub fn hide_sticky_window(app: &AppHandle, sticky_id: &str) {
+    let truncated_id: String = sticky_id.chars().take(64).collect();
+    let label = format!("sticky-{truncated_id}");
+    if let Some(win) = app.get_webview_window(&label) {
+        let _ = win.hide();
+        tracing::debug!(sticky_id, "sticky window: 已隐藏");
+    }
+}
+
+/// 销毁便签窗口（删除数据后调用）。
+pub fn destroy_sticky_window(app: &AppHandle, sticky_id: &str) {
+    let truncated_id: String = sticky_id.chars().take(64).collect();
+    let label = format!("sticky-{truncated_id}");
+    if let Some(win) = app.get_webview_window(&label) {
+        // 用 destroy() 而非 close()——close() 会触发 CloseRequested 被 prevent_close 拦截
+        let _ = win.destroy();
+        tracing::debug!(sticky_id, "sticky window: 已销毁");
+    }
 }
 
 /// 显示语音录音 mini overlay（0.10 G2）。

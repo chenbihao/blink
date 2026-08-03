@@ -5,7 +5,7 @@
 
 import { queryEl, resultsEl } from "./dom.js";
 import { activateItem } from "./actions.js";
-import { openContainingFolder, openLnkTarget, resetItemHistory, runBuiltinAction, copyToClipboard, openContentEditor, hideWindow, invoke, triggerChord, listChordActions, pinClipboardImage } from "../shared/api.js";
+import { openContainingFolder, openLnkTarget, resetItemHistory, runBuiltinAction, copyToClipboard, openContentEditor, hideWindow, invoke, triggerChord, listChordActions, pinClipboardImage, createStickyNote, showStickyWindow } from "../shared/api.js";
 import { retrigger } from "./search.js";
 import { t } from "../i18n/index.js";
 import { EVENTS } from "../shared/event-names.js";
@@ -229,37 +229,53 @@ function itemMenu(li) {
   }
 
   // 0.16.3：剪贴板项追加"编辑"动作
-  if (source === "clipboard") {
-    const firstAction = actions[0];
-    if (firstAction?.kind === "copy") {
-      items.push({ separator: true });
-      items.push({
-        label: t("menu.edit"),
-        run: () => {
-          openContentEditor({
-            body: firstAction.payload || "",
-            format: "plain",
-            origin: "clipboard",
-            originRef: firstAction.hitId || null,
-            savePolicy: "clipboard_new",
-          }).catch((e) => console.error("openContentEditor failed:", e));
-          hideWindow();
-        },
-      });
-    }
-    // 0.16.5：剪贴板图片项追加"钉图"动作
-    // 图片项的 lnkPath 存的是 image_id，调 pin_clipboard_image 后端命令
-    const isImage = li.dataset.isImage === "true";
-    if (isImage && lnkPath) {
-      items.push({ separator: true });
-      items.push({
-        label: t("menu.pin"),
-        run: () => {
-          pinClipboardImage(lnkPath).catch((e) => console.error("pinClipboardImage failed:", e));
-          hideWindow();
-        },
-      });
-    }
+  // 0.16.9：扩展到所有有文本 payload 的 item（剪贴板文本、AI 结果）
+  const firstAction = actions[0];
+  const hasTextPayload = firstAction?.kind === "copy" && firstAction.payload;
+  if (hasTextPayload) {
+    const isClipboard = source === "clipboard";
+    items.push({ separator: true });
+    items.push({
+      label: t("menu.edit"),
+      run: () => {
+        openContentEditor({
+          body: firstAction.payload || "",
+          format: "plain",
+          title: isClipboard ? "编辑剪贴板内容" : "编辑内容",
+          origin: isClipboard ? "clipboard" : "item",
+          originRef: firstAction.hitId || null,
+          savePolicy: "clipboard_new",
+        }).catch((e) => console.error("openContentEditor failed:", e));
+        hideWindow();
+      },
+    });
+    // 0.16.9：追加"钉为便签"动作
+    items.push({
+      label: t("menu.sticky"),
+      run: async () => {
+        try {
+          const note = await createStickyNote(firstAction.payload || "");
+          await showStickyWindow(note.id);
+        } catch (e) {
+          console.error("createStickyNote failed:", e);
+        }
+        hideWindow();
+      },
+    });
+  }
+
+  // 0.16.5：剪贴板图片项追加"钉图"动作
+  // 图片项的 lnkPath 存的是 image_id，调 pin_clipboard_image 后端命令
+  const isImage = li.dataset.isImage === "true";
+  if (isImage && lnkPath) {
+    items.push({ separator: true });
+    items.push({
+      label: t("menu.pin"),
+      run: () => {
+        pinClipboardImage(lnkPath).catch((e) => console.error("pinClipboardImage failed:", e));
+        hideWindow();
+      },
+    });
   }
 
   // (b) 文件管理附加项（不混入 capability actions，仍由前端按 lnkPath 追加）

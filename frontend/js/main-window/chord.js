@@ -148,10 +148,15 @@ function render() {
   // overlay 空间要给 keyword 补全影子让位。互斥显示，不重叠不撑布局。
   if (queryEl.value.trim()) return;
 
+  // 0.16.11：空文本时过滤 hint_hidden_when_empty 的动作（E/S 是 contextual 动作，
+  // 空文本时提示价值低）。触发不受影响——getTapKeys() 仍包含全部 tap 键。
+  const visibleActions = chordActions.filter((a) => !a.hint_hidden_when_empty);
+  if (!visibleActions.length) return;
+
   // 前导两个非断行空格避免紧贴用户光标位（overlay whitespace: pre 保留）
   ghostChordEl.appendChild(document.createTextNode("  "));
 
-  chordActions.forEach((a, i) => {
+  visibleActions.forEach((a, i) => {
     if (i > 0) {
       const sep = document.createElement("span");
       sep.className = "chord-sep";

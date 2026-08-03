@@ -1,6 +1,6 @@
 {
   "lucideVersion": "1.25.0",
-  "generatedAt": "2026-08-02T15:29:55Z",
+  "generatedAt": "2026-08-03T12:05:02Z",
   "icons": [
     "aperture",
     "audio-lines",
@@ -14,6 +14,7 @@
     "database",
     "eraser",
     "external-link",
+    "eye-off",
     "file-text",
     "folder",
     "folder-open",

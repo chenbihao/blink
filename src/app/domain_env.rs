@@ -154,6 +154,71 @@ impl DomainEnv for TauriDomainEnv {
         crate::infra::platform::window::open_settings(&self.app);
     }
 
+    fn show_sticky_manager(&self) -> Result<(), String> {
+        crate::infra::platform::window::show_sticky_manager_window(&self.app)
+    }
+
+    fn show_content_editor(
+        &self,
+        body: &str,
+        title: Option<&str>,
+        origin: &str,
+        origin_ref: Option<&str>,
+        save_policy: &str,
+    ) -> Result<(), String> {
+        use tauri::Manager;
+        let payload = crate::app::commands::EditableContentPayload {
+            body: body.to_string(),
+            format: "plain".to_string(),
+            title: title.map(|s| s.to_string()),
+            origin: origin.to_string(),
+            origin_ref: origin_ref.map(|s| s.to_string()),
+            save_policy: save_policy.to_string(),
+        };
+        let pending = self
+            .app
+            .state::<crate::app::commands::PendingEditorPayload>();
+        *pending.0.lock().map_err(|e| format!("锁失败: {e}"))? = Some(payload);
+        crate::infra::platform::window::show_content_editor_window(&self.app)
+    }
+
+    async fn create_sticky_and_show(&self, content: &str) -> Result<String, String> {
+        use tauri::{Emitter, Manager};
+        let svc = self
+            .app
+            .state::<std::sync::Arc<crate::domain::sticky::StickyService>>()
+            .inner()
+            .clone();
+        // 创建便签（默认主题色、visible=true）
+        let note = svc
+            .create_note(content, crate::domain::sticky::StickyColor::default())
+            .await?;
+        // 0.16.11：新建便签居中到当前前台窗口所在显示器的工作区
+        let (cx, cy) = crate::infra::platform::window::center_of_active_monitor(
+            note.width,
+            note.height,
+        );
+        svc.update_geometry(&note.id, cx, cy, note.width, note.height)
+            .await?;
+        // 显示桌面窗口（用户操作需要聚焦）
+        crate::infra::platform::window::show_sticky_window(
+            &self.app,
+            &note.id,
+            cx,
+            cy,
+            note.width,
+            note.height,
+            note.always_on_top,
+            true, // 0.16.11：用户操作需要聚焦
+        )?;
+        // emit 事件让管理界面和其它监听者更新
+        let _ = self.app.emit(
+            crate::domain::event_names::EventNames::STICKY_CREATED,
+            serde_json::json!({ "stickyId": note.id }),
+        );
+        Ok(note.id)
+    }
+
     fn exit_app(&self) {
         self.app.exit(0);
     }
@@ -227,6 +292,22 @@ mod tests {
         }
         fn invoke_main_window(&self) {}
         fn open_settings(&self) {}
+        fn show_sticky_manager(&self) -> Result<(), String> {
+            Ok(())
+        }
+        fn show_content_editor(
+            &self,
+            _body: &str,
+            _title: Option<&str>,
+            _origin: &str,
+            _origin_ref: Option<&str>,
+            _save_policy: &str,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn create_sticky_and_show(&self, _content: &str) -> Result<String, String> {
+            Ok("fake_sticky_id".to_string())
+        }
         fn exit_app(&self) {}
         async fn wait_frame_after_hide(&self) {}
     }

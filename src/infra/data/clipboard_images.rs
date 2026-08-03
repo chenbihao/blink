@@ -25,6 +25,7 @@ pub async fn get_thumb_by_id_global(id: &str) -> Option<Vec<u8>> {
 
 /// 剪贴板图片条目。
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ClipboardImage {
     pub id: String,
     /// 完整 PNG 字节（写回系统剪贴板用）。
@@ -147,6 +148,7 @@ pub async fn query_recent_images(pool: &SqlitePool, limit: i64) -> Vec<Clipboard
 }
 
 /// 查询近 N 天的剪贴板图片（按时间倒序，最多 limit 条）。
+#[allow(dead_code)]
 pub async fn query_recent_days_images(
     pool: &SqlitePool,
     days: u32,
@@ -166,6 +168,7 @@ pub async fn query_recent_days_images(
 
 /// 图片元数据（不含完整 PNG，用于列表展示）。
 #[derive(Debug, Clone, sqlx::FromRow)]
+#[allow(dead_code)]
 pub struct ClipboardImageMeta {
     pub id: String,
     pub thumb_blob: Vec<u8>,
@@ -196,6 +199,7 @@ pub async fn get_thumb_by_id(pool: &SqlitePool, id: &str) -> Option<Vec<u8>> {
 }
 
 /// 删除指定图片条目。
+#[allow(dead_code)]
 pub async fn delete_image(pool: &SqlitePool, id: &str) {
     let _ = sqlx::query("DELETE FROM clipboard_images WHERE id = ?1")
         .bind(id)
@@ -204,6 +208,7 @@ pub async fn delete_image(pool: &SqlitePool, id: &str) {
 }
 
 /// 清空所有剪贴板图片历史。
+#[allow(dead_code)]
 pub async fn clear_all_images(pool: &SqlitePool) {
     let _ = sqlx::query("DELETE FROM clipboard_images")
         .execute(pool)
@@ -211,6 +216,7 @@ pub async fn clear_all_images(pool: &SqlitePool) {
 }
 
 /// 清理过期图片（按天）。
+#[allow(dead_code)]
 pub async fn cleanup_old_images(pool: &SqlitePool, days: u32) {
     if days == 0 {
         return;
