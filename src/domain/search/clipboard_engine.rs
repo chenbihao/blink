@@ -126,12 +126,25 @@ impl SearchEngine for ClipboardEngine {
             search_history(&self.pool, arg, limit).await
         };
 
-        // 查图片历史（0.16.4）——图片不做 fuzzy 搜索，空 arg 时拉最近
+        // 查图片历史（0.16.4）——空 arg 拉最近；非空 arg 对 source_app 和稳定标题做包含匹配
         let image_items = if arg.is_empty() {
             query_recent_images(&self.cache_pool, limit).await
         } else {
-            // 图片无可搜索文本，空 arg 时才展示
-            Vec::new()
+            // 对图片的 source_app 和稳定标题做包含匹配
+            let all_images = query_recent_images(&self.cache_pool, 200).await;
+            let arg_lower = arg.to_lowercase();
+            all_images
+                .into_iter()
+                .filter(|meta| {
+                    let title = format!("图片 {}x{}", meta.width, meta.height);
+                    let haystack = match &meta.source_app {
+                        Some(app) => format!("{} {}", title, app),
+                        None => title,
+                    };
+                    haystack.to_lowercase().contains(&arg_lower)
+                })
+                .take(limit as usize)
+                .collect()
         };
 
         // 合并文本 + 图片，按 created_at 倒序
@@ -258,11 +271,8 @@ fn format_image_subtitle(meta: &ClipboardImageMeta, lang: &str) -> String {
             format!("{n} d ago")
         }
     };
-    if is_zh {
-        format!("{time_desc} · {}x{}", meta.width, meta.height)
-    } else {
-        format!("{time_desc} · {}x{}", meta.width, meta.height)
-    }
+    // P3-#27 fix: zh/en 分支格式完全一样，消除死代码 if
+    format!("{time_desc} · {}x{}", meta.width, meta.height)
 }
 
 /// 生成单行预览：去换行 + 压缩连续空白 + 字符数截断。

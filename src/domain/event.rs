@@ -94,6 +94,12 @@ pub trait DomainEnv: CapabilityEnv {
     /// 显示便签管理窗口（0.16.10）。
     fn show_sticky_manager(&self) -> Result<(), String>;
 
+    /// 便签服务（P1-#10：统一 chord/command 两路径对 StickyService 的访问方式）。
+    ///
+    /// 返回 `Option`——CLI/MCP 最小运行时可能不构造完整服务栈。
+    #[allow(dead_code)]
+    fn sticky_service(&self) -> Option<&std::sync::Arc<crate::domain::sticky::StickyService>>;
+
     /// 打开内容编辑器窗口（0.16.9）。
     ///
     /// `body` 为编辑器初始文本，`origin` 标识来源（"chord" / "clipboard" / "sticky"），

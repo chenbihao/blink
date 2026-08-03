@@ -818,14 +818,16 @@ pub fn hide_chat_window(app: &AppHandle) {
 /// 看门狗按 PID 判定，前台切到编辑器时主窗不会被误隐藏。
 /// payload 经 PendingEditorPayload State 中转，前端 init 时调 get_content_editor_payload 拉取。
 pub fn show_content_editor_window(app: &AppHandle) -> Result<(), String> {
-    use tauri::{WebviewUrl, WebviewWindowBuilder};
+    use tauri::{WebviewUrl, WebviewWindowBuilder, window::Color};
 
     const LABEL: &str = "content-editor";
     let is_new = app.get_webview_window(LABEL).is_none();
 
     let win = if is_new {
-        // 0.16.11：新窗口先 hidden 创建，前端 init 完成后自行 show——消除白屏闪烁。
-        // 复用窗口 JS 已加载，后端直接 show 即可。
+        // 0.16.13 fix：改回 .visible(true) + background_color 消除白屏闪烁。
+        // 之前的 .visible(false) + 前端 init 调 win.show() 方案在首次点击时
+        // 因 WebView2 冷启动加载 JS 模块耗时，窗口长时间不可见，用户感知为「没反应」。
+        // background_color 设为 dark 主题底色 #1e1e2e，CSS 加载前不闪白。
         WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("content-editor.html".into()))
             .title("编辑内容")
             .inner_size(720.0, 560.0)
@@ -836,7 +838,8 @@ pub fn show_content_editor_window(app: &AppHandle) -> Result<(), String> {
             .skip_taskbar(false)
             .resizable(true)
             .focused(true)
-            .visible(false)
+            .visible(true)
+            .background_color(Color(30, 30, 46, 255))
             .center()
             .build()
             .map_err(|e| {
@@ -857,10 +860,8 @@ pub fn show_content_editor_window(app: &AppHandle) -> Result<(), String> {
         enable_rounded_corners(hwnd);
     }
 
-    if is_new {
-        // 新窗口不在此处 show——前端 init 完成后调用 getCurrentWindow().show() 消除白屏
-    } else {
-        // 复用窗口 JS 已加载，直接 show
+    // 复用窗口可能被 hide 了，需要重新 show；新窗口已 visible(true) 创建
+    if !is_new {
         win.show().map_err(|e| format!("显示编辑器窗口失败: {e}"))?;
     }
     let _ = win.unminimize();
@@ -877,13 +878,16 @@ pub fn show_content_editor_window(app: &AppHandle) -> Result<(), String> {
 /// 窗口关闭即销毁，不 prevent_close。
 /// 看门狗按 PID 判定，前台切到管理窗口时主窗不会被误隐藏。
 pub fn show_sticky_manager_window(app: &AppHandle) -> Result<(), String> {
-    use tauri::{WebviewUrl, WebviewWindowBuilder};
+    use tauri::{WebviewUrl, WebviewWindowBuilder, window::Color};
 
     const LABEL: &str = "sticky-manager";
     let is_new = app.get_webview_window(LABEL).is_none();
 
     let win = if is_new {
-        // 0.16.12：新窗口先 hidden 创建，前端 init 完成后自行 show——消除白屏闪烁。
+        // 0.16.13 fix：改回 .visible(true) + background_color 消除白屏闪烁。
+        // 之前的 .visible(false) + 前端 init 调 win.show() 方案在首次点击时
+        // 因 WebView2 冷启动加载 JS 模块耗时，窗口长时间不可见，用户感知为「没反应」。
+        // background_color 设为 dark 主题底色 #1e1e2e，CSS 加载前不闪白。
         // 同时注册 prevent_close + hide，窗口复用而非销毁重建。
         let w = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("sticky-manager.html".into()))
             .title("便签管理")
@@ -895,7 +899,8 @@ pub fn show_sticky_manager_window(app: &AppHandle) -> Result<(), String> {
             .skip_taskbar(false)
             .resizable(true)
             .focused(true)
-            .visible(false)
+            .visible(true)
+            .background_color(Color(30, 30, 46, 255))
             .center()
             .build()
             .map_err(|e| {
@@ -930,10 +935,8 @@ pub fn show_sticky_manager_window(app: &AppHandle) -> Result<(), String> {
         enable_rounded_corners(hwnd);
     }
 
-    if is_new {
-        // 新窗口不在此处 show——前端 init 完成后调用 getCurrentWindow().show() 消除白屏
-    } else {
-        // 复用窗口 JS 已加载，直接 show
+    // 复用窗口可能被 hide 了，需要重新 show；新窗口已 visible(true) 创建
+    if !is_new {
         win.show().map_err(|e| format!("显示便签管理窗口失败: {e}"))?;
     }
     let _ = win.unminimize();
@@ -972,13 +975,35 @@ pub fn show_sticky_window(
 
     let win = if is_new {
         // URL 带 sticky_id 参数，前端 init 时读取
-        let url = format!("sticky.html?id={sticky_id}");
+        // P3-#22 fix: URL 编码防注入——sticky_id 来自前端任意字符串
+        let encoded_id = sticky_id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                    c.to_string()
+                } else {
+                    format!("%{:02X}", c as u32)
+                }
+            })
+            .collect::<String>();
+        let url = format!("sticky.html?id={encoded_id}");
         // 0.16.11：几何钳制——显示器拔插/分辨率变化后保证窗口至少部分可见
         let (cx, cy, cw, ch) = clamp_sticky_geometry(x, y, width, height);
 
+        // 0.16.10 fix P0-#7: inner_size 接受逻辑像素，需将物理像素转换为逻辑
+        let scale = unsafe {
+            let pt = POINT { x: cx, y: cy };
+            let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+            crate::infra::platform::dpi::scale_factor(
+                crate::infra::platform::dpi::get_dpi_for_hmonitor(hmon),
+            )
+        };
+        let logical_w = cw as f64 / scale;
+        let logical_h = ch as f64 / scale;
+
         let w = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
             .title("便签")
-            .inner_size(cw as f64, ch as f64)
+            .inner_size(logical_w, logical_h)
             .min_inner_size(120.0, 80.0)
             .position(cx as f64, cy as f64)
             .decorations(false)
@@ -1014,20 +1039,30 @@ pub fn show_sticky_window(
                     return;
                 }
                 api.prevent_close();
+                // P1-#12 fix: 关闭前 flush 未保存内容（前端有 500ms 防抖）
+                if let Some(w) = app_clone.get_webview_window(&label_owned) {
+                    let _ = w.eval("if (window.__stickyFlush) window.__stickyFlush();");
+                }
                 // 异步设置 visible=false 并隐藏窗口
+                // P1-#9 fix: 用 try_state() 而非 state() 避免 panic；
+                //   infra → domain 依赖是已知架构债，后续应改为 emit 事件由 app 层处理
                 let app_c = app_clone.clone();
                 let sid_owned = sid.clone();
                 tauri::async_runtime::spawn(async move {
-                    let svc = app_c
-                        .state::<std::sync::Arc<crate::domain::sticky::StickyService>>();
-                    if let Err(e) = svc.set_visible(&sid_owned, false).await {
-                        tracing::warn!(error = %e, "便签关闭时设置 visible=false 失败");
+                    if let Some(svc) = app_c
+                        .try_state::<std::sync::Arc<crate::domain::sticky::StickyService>>()
+                    {
+                        if let Err(e) = svc.set_visible(&sid_owned, false).await {
+                            tracing::warn!(error = %e, "便签关闭时设置 visible=false 失败");
+                        }
+                    } else {
+                        tracing::warn!("便签关闭时 StickyService 不可用，跳过 set_visible");
                     }
                 });
                 if let Some(w) = app_clone.get_webview_window(&label_owned) {
                     let _ = w.hide();
                 }
-                tracing::debug!(sticky_id = %sid, "sticky window: CloseRequested → prevent_close + hide");
+                tracing::debug!(sticky_id = %sid, "sticky window: CloseRequested → prevent_close + flush + hide");
             }
         });
         w
@@ -1035,13 +1070,27 @@ pub fn show_sticky_window(
         // 复用已有窗口——重新定位 + 重新加载便签数据
         // 0.16.11：复用路径也做几何钳制，防止显示器变化后窗口不可见
         let (cx, cy, cw, ch) = clamp_sticky_geometry(x, y, width, height);
-        let win = app.get_webview_window(&label).unwrap();
-        let _ = win.set_size(tauri::LogicalSize::new(cw as f64, ch as f64));
+        // P3-#23 fix: 用 ok_or_else 替代 unwrap，窗口在判定存在后可能被并发销毁
+        let win = app.get_webview_window(&label).ok_or_else(|| {
+            tracing::warn!(label = %label, "复用便签窗口时发现窗口已不存在");
+            "便签窗口在复用时已不存在".to_string()
+        })?;
+        // 0.16.10 fix P0-#7: 复用路径也用逻辑像素（与新建路径一致）
+        let scale = unsafe {
+            let pt = POINT { x: cx, y: cy };
+            let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+            crate::infra::platform::dpi::scale_factor(
+                crate::infra::platform::dpi::get_dpi_for_hmonitor(hmon),
+            )
+        };
+        let _ = win.set_size(tauri::LogicalSize::new(cw as f64 / scale, ch as f64 / scale));
         let _ = win.set_position(tauri::PhysicalPosition::new(cx, cy));
         let _ = win.set_always_on_top(always_on_top);
         // 通知前端重新加载便签数据
+        // P3-#22 fix: JS 字符串转义防注入
+        let escaped_id = sticky_id.replace('\\', "\\\\").replace('\'', "\\'").replace('\n', "\\n").replace('\r', "\\r");
         let js = format!(
-            "if (window.__stickyReload) window.__stickyReload('{sticky_id}')"
+            "if (window.__stickyReload) window.__stickyReload('{escaped_id}')"
         );
         let _ = win.eval(&js);
         win

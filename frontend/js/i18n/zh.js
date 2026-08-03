@@ -227,8 +227,11 @@ export const zh = {
     "storage.db.cache": "缓存库",
     "storage.history.label": "历史记录",
     "storage.audit.label": "AI 调用记录",
-    "storage.clear": "清空历史记录",
-    "storage.clear.confirm": "确定清空所有历史记录？",
+"storage.clear": "清空历史记录",
+"storage.clear.confirm": "确定清空所有历史记录？",
+"storage.clipboard.label": "剪贴板记录",
+"storage.clear_clipboard": "清空剪贴板记录",
+"storage.clear_clipboard.confirm": "确定清空所有剪贴板记录？",
     "storage.clear_audit": "清空 AI 调用记录",
     "storage.clear_audit.confirm": "确定清空所有 AI 工具调用审计记录？",
     "storage.stat.history": "历史 {count} 条",
@@ -866,6 +869,7 @@ export const zh = {
     "menu.edit": "编辑",
 "menu.pin": "钉图",
     "menu.sticky": "钉为便签",
+    "menu.delete": "删除记录",
 
     // ── 主窗口：提示栏 ──
     "hint.open": "打开",

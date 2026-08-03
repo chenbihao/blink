@@ -226,8 +226,11 @@ export const en = {
     "storage.db.cache": "Cache DB",
     "storage.history.label": "History",
     "storage.audit.label": "AI audit log",
-    "storage.clear": "Clear history",
-    "storage.clear.confirm": "Clear all history?",
+"storage.clear": "Clear history",
+"storage.clear.confirm": "Clear all history?",
+"storage.clipboard.label": "Clipboard",
+"storage.clear_clipboard": "Clear clipboard",
+"storage.clear_clipboard.confirm": "Clear all clipboard history?",
     "storage.clear_audit": "Clear AI audit log",
     "storage.clear_audit.confirm": "Clear all AI tool call audit logs?",
     "storage.stat.history": "History {count}",
@@ -865,6 +868,7 @@ export const en = {
     "menu.edit": "Edit",
 "menu.pin": "Pin",
     "menu.sticky": "Sticky",
+    "menu.delete": "Delete",
 
     // ── Main window: status bar ──
     "hint.open": "Open",

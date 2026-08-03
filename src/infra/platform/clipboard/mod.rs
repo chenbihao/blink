@@ -27,8 +27,10 @@ pub(super) struct State {
     cache_pool: SqlitePool,
     blacklist: RwLock<Vec<String>>,
     max_items: u32,
-    /// 图片上限（0.16.4）。
+    /// 图片上限（0.16.4）。独立配置，§5.5「独立配置」。
     max_image_items: u32,
+    /// 是否采集剪贴板图片（0.16.4）。false 时跳过 CF_DIB 采集。
+    capture_images: bool,
 }
 
 static STATE: OnceLock<State> = OnceLock::new();
@@ -63,7 +65,8 @@ pub fn start_listener(pool: SqlitePool, cache_pool: SqlitePool, cfg: ClipboardCo
         cache_pool,
         blacklist: RwLock::new(cfg.blacklist_keywords.clone()),
         max_items: cfg.max_items,
-        max_image_items: crate::infra::data::clipboard_images::DEFAULT_MAX_IMAGE_ITEMS,
+        max_image_items: cfg.max_image_items,
+        capture_images: cfg.capture_images,
     });
     ACTIVE.store(cfg.enabled, Ordering::Relaxed);
     #[cfg(target_os = "windows")]

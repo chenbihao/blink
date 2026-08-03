@@ -1711,25 +1711,39 @@ input.has-secret-hint::placeholder {
 /* ── 0.16.6 完整清理 ───────────────────────────────────────────────────────── */
 
 .cleanup-info-grid {
-  margin: 8px 0 12px;
-  padding: 10px 12px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 1px;
+  margin: 12px 0;
+  padding: 0;
   border: 1px solid var(--surface);
   border-radius: var(--radius-lg);
-  background: var(--surface-raised, var(--surface));
+  background: var(--surface);
+  overflow: hidden;
 }
 
-.cleanup-info-grid .setting-row {
-  margin: 4px 0;
+.cleanup-info-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-elevated, var(--bg));
 }
 
-.cleanup-info-grid .value {
-  margin-left: auto;
+.cleanup-info-label {
+  font-size: var(--text-base);
+  color: var(--text-sub);
+}
+
+.cleanup-info-value {
   font-weight: var(--weight-medium);
-  color: var(--text-secondary);
+  color: var(--text);
+  font-family: ui-monospace, Consolas, monospace;
 }
 
 .cleanup-results {
-  margin: 8px 0 12px;
+  margin: 8px 0;
   padding: 10px 12px;
   border: 1px solid var(--surface);
   border-radius: var(--radius-lg);
@@ -1739,11 +1753,17 @@ input.has-secret-hint::placeholder {
 .cleanup-summary {
   font-weight: var(--weight-medium);
   margin-bottom: 6px;
-  color: var(--text-primary);
+  color: var(--text);
 }
 
 .cleanup-detail {
   font-size: var(--text-xs);
-  color: var(--text-secondary);
+  color: var(--text-sub);
   line-height: var(--leading-relaxed);
+}
+
+.cleanup-action-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
 }

@@ -138,28 +138,53 @@ impl SearchItem {
                 context_aware,
                 ..Default::default()
             },
-            SearchAction::Copy { text, hit_id } => AppEntry {
-                name: self.title,
-                pinyin_name: String::new(),
-                pinyin_full: String::new(),
-                description: self.subtitle,
-                lnk_path: String::new(),
-                // is_calc 仅标记计算结果(驱动前端 calc 样式 + calcValue);插件 Copy
-                // 不该套计算样式,故按来源判定(CalcEngine 的 source == "calc")。
-                is_calc: self.source == "calc",
-                score,
-                is_placeholder: false,
-                is_error,
-                source: self.source.clone(),
-                actions: vec![Action {
-                    kind: ActionKind::Copy,
-                    payload: Some(text),
-                    hit_id,
-                    ..Action::default()
-                }],
-                score_detail,
-                context_aware,
-                ..Default::default()
+            SearchAction::Copy { text, hit_id } => {
+                // P2-#18: 文本型 item 声明 edit/pin actions（§4.1）。
+                // hint 存 i18n key，前端 contextmenu.js (a) 段用 t(hint) 渲染。
+                // actions.js 按 run_id 分派到 openContentEditor / createStickyNote。
+                AppEntry {
+                    name: self.title,
+                    pinyin_name: String::new(),
+                    pinyin_full: String::new(),
+                    description: self.subtitle,
+                    lnk_path: String::new(),
+                    // is_calc 仅标记计算结果(驱动前端 calc 样式 + calcValue);插件 Copy
+                    // 不该套计算样式,故按来源判定(CalcEngine 的 source == "calc")。
+                    is_calc: self.source == "calc",
+                    score,
+                    is_placeholder: false,
+                    is_error,
+                    source: self.source.clone(),
+                    actions: vec![
+                        Action {
+                            kind: ActionKind::Copy,
+                            payload: Some(text.clone()),
+                            hit_id: hit_id.clone(),
+                            ..Action::default()
+                        },
+                        Action {
+                            kind: ActionKind::Run,
+                            run_id: Some("edit_text_item".to_string()),
+                            run_arg: Some(serde_json::json!({
+                                "text": text,
+                                "originRef": hit_id,
+                                "source": self.source,
+                            })),
+                            hint: Some("menu.edit".to_string()),
+                            ..Action::default()
+                        },
+                        Action {
+                            kind: ActionKind::Run,
+                            run_id: Some("pin_text_item".to_string()),
+                            run_arg: Some(serde_json::Value::String(text)),
+                            hint: Some("menu.sticky".to_string()),
+                            ..Action::default()
+                        },
+                    ],
+                    score_detail,
+                    context_aware,
+                    ..Default::default()
+                }
             },
             SearchAction::RunAction { id, arg } => {
                 // 0.16.4：剪贴板图片项的 run_id = "copy_clipboard_image"，

@@ -10,6 +10,7 @@
 import { applyThemeFromConfig } from "../shared/theme.js";
 import { ensureSpriteLoaded } from "../shared/icon.js";
 import { getCurrentWindow, confirmDialog, listen } from "../shared/tauri.js";
+import { EVENTS } from "../shared/event-names.js";
 import {
   getStickyNote,
   updateStickyContent,
@@ -81,12 +82,22 @@ async function init() {
   bindGeometryTracking();
   bindKeyboard();
 
-  // 0.16.11：监听内容编辑器保存回写事件——编辑器 save_policy=sticky_update 后
-  // emit STICKY_APPEARANCE_CHANGED，便签窗口需刷新 textarea 内容
-  listen("blink://sticky-appearance-changed", (event) => {
+  // 内容变更：只在用户未在编辑时刷新，避免打断输入
+  listen(EVENTS.STICKY_CONTENT_CHANGED, (event) => {
     const payload = event.payload;
     if (payload && payload.stickyId === stickyId) {
-      loadStickyData();
+      // 用户正在编辑 textarea 时不 reload，避免覆盖输入
+      if (document.activeElement !== textareaEl) {
+        loadStickyData();
+      }
+    }
+  });
+
+  // 外观变更：只刷新颜色，不 reload content
+  listen(EVENTS.STICKY_APPEARANCE_CHANGED, (event) => {
+    const payload = event.payload;
+    if (payload && payload.stickyId === stickyId && payload.color) {
+      applyColor(payload.color);
     }
   });
 

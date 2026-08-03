@@ -242,7 +242,7 @@ impl Service for HotkeyService {
                             .inner()
                             .clone();
                         if let Err(e) = registry
-                            .trigger(&key, &chord_cfg.bindings, env_arc.as_ref(), None)
+                            .trigger(&key, &chord_cfg.bindings, env_arc.as_ref(), None, None)
                             .await
                         {
                             tracing::warn!(%key, %e, "chord trigger 失败");
@@ -307,6 +307,99 @@ impl Service for ClipboardService {
     }
 }
 
+/// 便签恢复服务（0.16.13）：启动时异步恢复 visible=true 的便签窗口。
+///
+/// 从 main.rs 内联 spawn 提取为 Service，纳入统一生命周期编排。
+/// 恢复逻辑：延迟 2s -> 读取所有便签 -> visible=true 的恢复窗口 -> 每条间隔 50ms -> 不抢焦点。
+///
+/// **时序安全**：StickyService 在 main.rs setup 中 `app.manage()` 注册，
+/// 晚于 Service 启动。但恢复任务延迟 2s 才执行，届时 StickyService 已就绪。
+pub struct StickyRecoveryService;
+
+#[async_trait::async_trait]
+impl Service for StickyRecoveryService {
+    fn name(&self) -> &'static str {
+        "sticky_recovery"
+    }
+    fn deps(&self) -> &'static [&'static str] {
+        &["config", "history"]
+    }
+    async fn start(&self, ctx: &AppContext) -> Result<(), String> {
+        let app = ctx.app.clone();
+        tauri::async_runtime::spawn(async move {
+            // 延迟 2s 避免与启动竞争资源
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+            // StickyService 在 main.rs setup 后半段 manage，此时应已就绪
+            let Some(svc) = app.try_state::<std::sync::Arc<crate::domain::sticky::StickyService>>()
+            else {
+                tracing::warn!("便签恢复：StickyService 未就绪，跳过");
+                return;
+            };
+            let svc = svc.inner().clone();
+
+            let visible = svc.load_for_recovery().await;
+            let total = visible.len();
+            let mut restored = 0usize;
+            let mut skipped = 0usize;
+            for note in &visible {
+                // 数据验证——隔离损坏记录
+                if note.id.is_empty() {
+                    tracing::warn!("便签恢复：跳过空 id 记录");
+                    skipped += 1;
+                    continue;
+                }
+                if note.width < 120 || note.height < 80 {
+                    tracing::warn!(
+                        sticky_id = %note.id,
+                        width = note.width,
+                        height = note.height,
+                        "便签恢复：尺寸非法，跳过"
+                    );
+                    skipped += 1;
+                    continue;
+                }
+
+                // 逐条恢复窗口，单条失败隔离
+                // focus=false：恢复路径不抢主窗口焦点
+                match crate::infra::platform::window::show_sticky_window(
+                    &app,
+                    &note.id,
+                    note.x,
+                    note.y,
+                    note.width,
+                    note.height,
+                    note.always_on_top,
+                    false,
+                ) {
+                    Ok(()) => restored += 1,
+                    Err(e) => {
+                        tracing::warn!(sticky_id = %note.id, error = %e, "便签窗口恢复失败，跳过");
+                        skipped += 1;
+                    }
+                }
+
+                // 节流——每条间隔 50ms，不抢占 tokio runtime
+                if visible.len() > 1 {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+            if total > 0 {
+                tracing::info!(
+                    total,
+                    restored,
+                    skipped,
+                    "便签恢复完成：共 {} 条，恢复 {} 条，跳过 {} 条",
+                    total,
+                    restored,
+                    skipped
+                );
+            }
+        });
+        Ok(())
+    }
+}
+
 /// 按依赖拓扑顺序构造服务列表。
 ///
 /// 0.8.6 §8.2.3：SearchService 从 AppContext 取，不再作为参数传入。
@@ -319,5 +412,6 @@ pub fn all_services() -> Vec<Box<dyn Service>> {
         Box::new(HotkeyService),
         Box::new(SelectionService),
         Box::new(ClipboardService),
+        Box::new(StickyRecoveryService),
     ]
 }

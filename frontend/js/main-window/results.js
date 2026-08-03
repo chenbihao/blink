@@ -352,7 +352,7 @@ function createItem(app, i) {
   const isContextAware =
     app.source === "builtin" &&
     firstAction?.kind === "run" &&
-    firstAction?.run_arg != null;
+    firstAction?.runArg != null;
   if (isContextAware) {
     li.classList.add("context-aware");
   }
@@ -458,8 +458,8 @@ function createItem(app, i) {
     // 智能感知候选（0.8.0 §1.3）：副行改成参数预览
     //   原 subtitle "用默认浏览器打开剪贴板中的 URL" 在用户复制了 URL 时反而冗余；
     //   直接展示会执行的目标（URL/路径）+ 左侧强调条 + monospace 字体，视觉更清晰。
-    if (isContextAware && typeof firstAction?.run_arg === "string") {
-      const raw = firstAction.run_arg;
+    if (isContextAware && typeof firstAction?.runArg === "string") {
+      const raw = firstAction.runArg;
       const preview = raw.replace(/\s+/g, " ").trim();
       desc.textContent = preview.length > 80 ? preview.slice(0, 80) + "…" : preview;
       desc.title = preview; // 悬浮看完整值

@@ -59,6 +59,12 @@ pub struct ClipboardConfig {
     /// 敏感窗口标题黑名单
     #[serde(default = "default_blacklist")]
     pub blacklist_keywords: Vec<String>,
+    /// 是否采集剪贴板图片（0.16.4）。false 时跳过 CF_DIB 采集。
+    #[serde(default = "default_true")]
+    pub capture_images: bool,
+    /// 图片最大保留条数（0.16.4）。独立于文本 max_items。
+    #[serde(default = "default_max_image_items")]
+    pub max_image_items: u32,
 }
 
 fn default_max_items() -> u32 {
@@ -83,6 +89,9 @@ fn default_blacklist() -> Vec<String> {
         "KeePass".to_string(),
     ]
 }
+fn default_max_image_items() -> u32 {
+    200
+}
 
 impl Default for ClipboardConfig {
     fn default() -> Self {
@@ -93,6 +102,8 @@ impl Default for ClipboardConfig {
             display_count: 30,
             search_enabled: true,
             blacklist_keywords: default_blacklist(),
+            capture_images: true,
+            max_image_items: 200,
         }
     }
 }
@@ -129,11 +140,14 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
 /// 短窗口去重（10s 防连发）在监听器侧已处理，此处做跨时段内容去重。
 #[allow(dead_code)] // 预留给剪贴板监听器
 pub async fn save_item(pool: &SqlitePool, item: &ClipboardItem) -> Result<(), String> {
+    // P1-#15 fix: 删旧留新包在事务里，防止 DELETE 成功 INSERT 失败导致数据丢失
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+
     // 删旧留新：先按文本内容删除同内容旧记录
     sqlx::query("DELETE FROM clipboard_history WHERE text = ?1 AND id != ?2")
         .bind(&item.text)
         .bind(&item.id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -146,9 +160,11 @@ pub async fn save_item(pool: &SqlitePool, item: &ClipboardItem) -> Result<(), St
     .bind(item.created_at)
     .bind(&item.source_app)
     .bind(item.hit_count)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
+
+    tx.commit().await.map_err(|e| e.to_string())?;
     Ok(())
 }
 

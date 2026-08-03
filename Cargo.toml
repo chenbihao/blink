@@ -1,6 +1,6 @@
 [package]
 name = "blink"
-version = "0.14.6"
+version = "0.16.10"
 edition = "2024"
 description = "Blink — Windows Universal Action Layer"
 license = "MIT"
@@ -55,10 +55,6 @@ regex = "1.11"
 # default features 已含 derive+reqwest+rustls;额外加 rmcp 让 0.11 MCP schema 投影零适配。
 # test-utils 供 0.12.1 spike 验证 rig Agent API(Phase 6 后随 spike 移除)。
 rig-core = { version = "0.39", features = ["rmcp", "test-utils"] }
-# rmcp: MCP 协议 Rust 实现。
-# - client + transport-child-process: 0.13.0 MCP client 拉起外部 server 子进程走 stdio JSON-RPC
-# - server + transport-io: 0.13.4 MCP server 暴露 Blink 能力给外部 client（stdio 传输）
-# - transport-streamable-http-client-reqwest: 0.13.6 MCP client 支持 Streamable HTTP 远程 server
 # rmcp: MCP 协议 Rust 实现。
 # - client + transport-child-process: 0.13.0 MCP client 拉起外部 server 子进程走 stdio JSON-RPC
 # - server + transport-io: 0.13.4 MCP server 暴露 Blink 能力给外部 client（stdio 传输）

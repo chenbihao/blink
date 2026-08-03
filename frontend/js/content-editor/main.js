@@ -68,8 +68,8 @@ async function init() {
   // 注册窗口复用回调（后端 eval 调用）
   window.__contentEditorReload = loadPayload;
 
-  // 0.16.11：新窗口由后端以 visible(false) 创建，前端 init 完成后自行 show——
-  // 消除白屏闪烁。复用窗口由后端直接 show，无需前端再调。
+  // 0.16.13：后端已改为 visible(true) + background_color 创建窗口，不再依赖前端 show。
+  // 此处 win.show()/setFocus() 保留为 harmless no-op（窗口已由后端 show）。
   const win = getCurrentWindow();
   if (win) {
     try {
@@ -95,7 +95,10 @@ async function loadPayload() {
       return;
     }
 
-    originalBody = payload.body || "";
+    // 0.16.13: 归一化 \r\n → \n。<textarea>.value 会把 \r\n 规范化为 \n，
+    // 若 originalBody 保留 \r\n，hasUnsavedChanges() 会误判为"已改动"，
+    // 导致未编辑也弹"放弃更改"确认框。来源为剪贴板/便签时尤为常见（Windows 文本含 \r\n）。
+    originalBody = (payload.body || "").replace(/\r\n/g, "\n");
     originRef = payload.originRef || null;
     savePolicy = payload.savePolicy || "clipboard_new";
 
@@ -212,7 +215,7 @@ function hasUnsavedChanges() {
   return textareaEl.value !== originalBody;
 }
 
-/** 关闭窗口（0.16.12：改为 hide 复用模式，不再销毁窗口） */
+/** 关闭窗口（改为 hide 复用模式，不再销毁窗口） */
 function closeWindow() {
   const win = getCurrentWindow();
   if (win) {
@@ -234,14 +237,14 @@ function bindWindowControls() {
   }
 
   if (maxBtn) {
-    maxBtn.addEventListener("click", () => {
+    maxBtn.addEventListener("click", async () => {
       const win = getCurrentWindow();
       if (!win) return;
-      // 切换最大化/还原
-      if (win.isMaximized()) {
-        win.unmaximize();
+      const isMax = await win.isMaximized();
+      if (isMax) {
+        await win.unmaximize();
       } else {
-        win.maximize();
+        await win.maximize();
       }
     });
   }
@@ -251,7 +254,7 @@ function bindWindowControls() {
   }
 
   // 系统级关闭请求（Alt+F4 等）
-  // 0.16.12：改为 hide-on-close 模式——始终 prevent_close + hide，
+  // hide-on-close 模式——始终 prevent_close + hide，
   // 窗口复用而非销毁重建，消除"每两次有1次点不开"的竞态。
   const win = getCurrentWindow();
   if (win?.onCloseRequested) {

@@ -46,8 +46,8 @@
   background: transparent;
   color: var(--text-dim);
   cursor: pointer;
-  border-radius: 4px;
-  transition: background 0.15s;
+  border-radius: var(--radius-sm);
+  transition: background var(--transition-base);
 }
 
 .manager-titlebar-btn:hover {
@@ -61,7 +61,7 @@
 
 .manager-titlebar-btn-close:hover {
   background: var(--red);
-  color: #fff;
+  color: var(--surface);
 }
 
 /* ── Toolbar ── */
@@ -81,11 +81,11 @@
   border: 1px solid var(--surface-2);
   background: var(--surface);
   color: var(--text);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   font-size: var(--text-xs);
   font-weight: var(--weight-medium);
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all var(--transition-base);
 }
 
 .manager-new-btn:hover {
@@ -116,10 +116,10 @@
   gap: 10px;
   padding: 10px 12px;
   margin-bottom: 4px;
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   background: var(--surface);
   border: 1px solid var(--border-glow);
-  transition: all 0.15s;
+  transition: all var(--transition-base);
   cursor: default;
 }
 
@@ -195,8 +195,8 @@
   background: transparent;
   color: var(--text-dim);
   cursor: pointer;
-  border-radius: 4px;
-  transition: all 0.15s;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-base);
 }
 
 .sticky-action-btn:hover {
@@ -206,7 +206,7 @@
 
 .sticky-action-btn.danger:hover {
   background: var(--red);
-  color: #fff;
+  color: var(--surface);
 }
 
 .sticky-action-btn svg {
@@ -241,11 +241,11 @@
   border: 1px solid var(--surface-2);
   background: var(--surface);
   color: var(--text);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   font-size: var(--text-xs);
   font-weight: var(--weight-medium);
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all var(--transition-base);
 }
 
 .manager-empty-btn:hover {
@@ -261,7 +261,7 @@
   padding: 6px;
   background: var(--surface);
   border: 1px solid var(--surface-2);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   box-shadow: 0 4px 12px var(--shadow);
   z-index: 9999;
 }
@@ -269,11 +269,11 @@
 .color-picker-swatch {
   width: 20px;
   height: 20px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   border: 2px solid transparent;
   cursor: pointer;
   padding: 0;
-  transition: border-color 0.15s;
+  transition: border-color var(--transition-base);
 }
 
 .color-picker-swatch.selected {

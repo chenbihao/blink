@@ -4,8 +4,9 @@
  */
 
 import { invoke } from "../../shared/tauri.js";
-import { confirmDialog } from "../../shared/tauri.js";
+import { confirmDialog, messageDialog } from "../../shared/tauri.js";
 import { t, onLangChange } from "../../i18n/index.js";
+import { iconHTML } from "../../shared/icon.js";
 
 /**
  * 初始化存储设置 Tab
@@ -21,6 +22,16 @@ export function initStorageTab() {
     });
     if (!ok) return;
     await invoke("clear_history");
+    loadStorageInfo();
+  });
+
+  document.getElementById("clear-clipboard")?.addEventListener("click", async () => {
+    const ok = await confirmDialog(t("storage.clear_clipboard.confirm"), {
+      title: t("common.confirm"),
+      kind: "warning",
+    });
+    if (!ok) return;
+    await invoke("clear_clipboard_history");
     loadStorageInfo();
   });
 
@@ -64,7 +75,7 @@ export function initStorageTab() {
       await loadStorageInfo();
     } catch (e) {
       console.error("retry_migration failed:", e);
-      alert(t("storage.retry_migration.failed", { err: String(e) }));
+      await messageDialog(t("storage.retry_migration.failed", { err: String(e) }), { kind: "error" });
     }
   });
 
@@ -72,7 +83,7 @@ export function initStorageTab() {
   document.getElementById("cleanup-all-data")?.addEventListener("click", async () => {
     const ok = await confirmDialog(t("storage.cleanup.confirm"), {
       title: t("common.confirm"),
-      kind: "danger",
+      kind: "warning",
     });
     if (!ok) return;
 
@@ -86,7 +97,7 @@ export function initStorageTab() {
       await loadCleanupInfo();
     } catch (e) {
       console.error("cleanup_all_data failed:", e);
-      alert(t("storage.cleanup.failed", { err: String(e) }));
+      await messageDialog(t("storage.cleanup.failed", { err: String(e) }), { kind: "error" });
     } finally {
       if (btn) btn.disabled = false;
     }
@@ -213,9 +224,11 @@ function renderCleanupResults(result) {
 
   const results = result.results || [];
   const parts = results.map((r) => {
-    const icon = r.success ? "✅" : "❌";
-    const detail = r.success ? "" : ` (${r.error})`;
-    return `${icon} ${r.target}${detail}`;
+    // P3-#25 fix: 用 Lucide SVG 图标替代 emoji（铁则：图标用包禁 emoji）
+    const icon = r.success ? iconHTML("check") : iconHTML("x");
+    // P3-#25 fix: 转义 r.error 和 r.target 防 XSS
+    const detail = r.success ? "" : ` (${escapeHtml(r.error)})`;
+    return `${icon} ${escapeHtml(r.target)}${detail}`;
   });
 
   const summary = t("storage.cleanup.summary", {
@@ -223,8 +236,19 @@ function renderCleanupResults(result) {
     failed: result.failed_count ?? 0,
   });
 
-  el.innerHTML = `<div class="cleanup-summary">${summary}</div><div class="cleanup-detail">${parts.join("<br>")}</div>`;
+  el.innerHTML = `<div class="cleanup-summary">${escapeHtml(summary)}</div><div class="cleanup-detail">${parts.join("<br>")}</div>`;
   el.hidden = false;
+}
+
+/** HTML 转义工具，防止 innerHTML XSS。 */
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  })[c]);
 }
 
 // 语言切换时重新渲染文本（带参数的 i18n 需要手动重渲染）

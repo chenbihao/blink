@@ -4,7 +4,7 @@
 //! 且未来动作类型会增多（插件动作、文件打开等）——集中在此便于扩展。
 //! 行为由后端提供的 action.kind 驱动，与提示栏（hints.js）同源，语义一致。
 
-import { launchApp, runBuiltinAction, confirmAiAction, hideWindow, recordClipboardHit, copyClipboardImage, pinClipboardImage } from "../shared/api.js";
+import { launchApp, runBuiltinAction, confirmAiAction, hideWindow, recordClipboardHit, copyClipboardImage, pinClipboardImage, openContentEditor, createStickyNote, showStickyWindow } from "../shared/api.js";
 import { normalizeError } from "../shared/tauri.js";
 
 /**
@@ -94,6 +94,42 @@ export async function activateItem(data) {
         const err = normalizeError(e);
         console.error(`[pin_clipboard_image] ${err.message}`);
         return;
+      }
+      hideWindow();
+      return;
+    }
+
+    // P2-#18: 文本型 item 的编辑动作——打开内容编辑器
+    if (id === "edit_text_item") {
+      const arg = action.runArg;
+      const text = arg?.text ?? "";
+      const originRef = arg?.originRef ?? null;
+      const source = arg?.source ?? "item";
+      const isClipboard = source === "clipboard";
+      try {
+        await openContentEditor({
+          body: text,
+          format: "plain",
+          title: isClipboard ? "编辑剪贴板内容" : "编辑内容",
+          origin: isClipboard ? "clipboard" : "item",
+          originRef,
+          savePolicy: "clipboard_new",
+        });
+      } catch (e) {
+        console.error("openContentEditor failed:", e);
+      }
+      hideWindow();
+      return;
+    }
+
+    // P2-#18: 文本型 item 的钉为便签动作
+    if (id === "pin_text_item") {
+      const text = typeof action.runArg === "string" ? action.runArg : "";
+      try {
+        const note = await createStickyNote(text);
+        await showStickyWindow(note.id);
+      } catch (e) {
+        console.error("createStickyNote failed:", e);
       }
       hideWindow();
       return;

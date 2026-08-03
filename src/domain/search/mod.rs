@@ -38,10 +38,15 @@ pub enum ActionKind {
 }
 
 /// 结果项的动作描述。
+///
+/// `rename_all = "camelCase"` 让 `run_id` → `runId`、`run_arg` → `runArg`、
+/// `hit_id` → `hitId`，与前端 JS 的 camelCase 访问一致。
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Action {
     pub kind: ActionKind,
     /// 可选自定义动作名（插件用，如「安装」），覆盖默认文案；None 用 kind 默认文案。
+    /// hint 也可以存 i18n key（如 `"menu.edit"`），前端用 `t(hint)` 渲染。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
     /// 动作 payload:Copy 携带待复制文本;Open 的路径仍在 `AppEntry.lnk_path`
@@ -59,8 +64,8 @@ pub struct Action {
     pub run_arg: Option<serde_json::Value>,
     /// `Copy` 动作的命中回写 id（0.8.5 §6.4）。仅 ClipboardEngine 展开的历史条目非空;
     /// 前端复制成功后 `invoke("record_clipboard_hit", { id })` 频率加权。
-    /// CalcEngine / Plugin Copy 恒为 None。序列化 `hitId`(camelCase 前端一致)。
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "hitId")]
+    /// CalcEngine / Plugin Copy 恒为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hit_id: Option<String>,
 }
 

@@ -50,4 +50,11 @@ export const EVENTS = Object.freeze({
     FUNASR_SERVER_LOG: 'blink://funasr-server-log',
     FUNASR_SERVER_STATUS: 'blink://funasr-server-status',
     AUDIO_TEST_LEVEL: 'blink://audio-test-level',
+
+    // ── 便签（0.16.7）──
+    STICKY_CREATED: 'blink://sticky-created',
+    STICKY_DELETED: 'blink://sticky-deleted',
+    STICKY_VISIBILITY_CHANGED: 'blink://sticky-visibility-changed',
+    STICKY_APPEARANCE_CHANGED: 'blink://sticky-appearance-changed',
+    STICKY_CONTENT_CHANGED: 'blink://sticky-content-changed',
 });

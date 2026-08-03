@@ -120,13 +120,16 @@ function onBlockModifiers(e) {
 async function fireChord(key) {
   console.log(`[chord] Alt+${key.toUpperCase()} triggered`);
   let inputText = queryEl.value;
+  let originRef = null;
 
   // 0.16.9：E/S 需要 contextual 解析
   if (key === "e" || key === "s") {
-    inputText = await resolveContextualContent();
+    const ctx = await resolveContextualContent();
+    inputText = ctx.text;
+    originRef = ctx.hitId;
   }
 
-  triggerChord(key, inputText).catch((e) => console.warn("[chord] trigger_chord 失败", e));
+  triggerChord(key, inputText, originRef).catch((e) => console.warn("[chord] trigger_chord 失败", e));
 }
 
 /**
@@ -144,14 +147,14 @@ async function resolveContextualContent() {
   if (active && !active.isError) {
     const firstAction = active.actions?.[0];
     if (firstAction?.kind === "copy" && firstAction.payload) {
-      return firstAction.payload;
+      return { text: firstAction.payload, hitId: firstAction.hitId || null };
     }
   }
 
   // 2. 非空 query
   const queryText = queryEl.value.trim();
   if (queryText) {
-    return queryEl.value;
+    return { text: queryEl.value, hitId: null };
   }
 
   // 3. 空闲态 Awareness 选区（仅当 query 为空且无结果时）
@@ -159,7 +162,7 @@ async function resolveContextualContent() {
     try {
       const selectionText = await getAwarenessText();
       if (selectionText && selectionText.trim()) {
-        return selectionText;
+        return { text: selectionText, hitId: null };
       }
     } catch (e) {
       // 后端未就绪或无选区——静默降级到空白
@@ -167,7 +170,7 @@ async function resolveContextualContent() {
   }
 
   // 4. 空白
-  return "";
+  return { text: "", hitId: null };
 }
 
 // chord 独占模式（0.10.7）下的兜底触发路径。

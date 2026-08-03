@@ -11,7 +11,7 @@ use sqlx::SqlitePool;
 /// 便签颜色（有限色板，§3.11）。
 ///
 /// 序列化值与前端 CSS class 后缀对应：`sticky-color-yellow` 等。
-/// 默认主题色（Theme），跟随 Blink 当前主题的 accent 色。
+/// 默认黄色（§3.11「默认黄色」）。Theme 变体跟随 accent 色供用户选择，但不作默认。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum StickyColor {
@@ -26,7 +26,7 @@ pub enum StickyColor {
 
 impl Default for StickyColor {
     fn default() -> Self {
-        Self::Theme
+        Self::Yellow
     }
 }
 
@@ -54,7 +54,7 @@ impl StickyColor {
             "green" => Self::Green,
             "gray" => Self::Gray,
             "theme" => Self::Theme,
-            _ => Self::Theme, // 兜底
+            _ => Self::Yellow, // 兜底：未知值回退默认黄色
         }
     }
 }
@@ -148,7 +148,7 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
             id TEXT PRIMARY KEY,
             content TEXT NOT NULL DEFAULT '',
             format TEXT NOT NULL DEFAULT 'plain',
-            color TEXT NOT NULL DEFAULT 'theme',
+            color TEXT NOT NULL DEFAULT 'yellow',
             visible INTEGER NOT NULL DEFAULT 1,
             x INTEGER NOT NULL DEFAULT 0,
             y INTEGER NOT NULL DEFAULT 0,
@@ -239,6 +239,8 @@ pub async fn create(pool: &SqlitePool, note: &StickyNote) -> Result<(), String> 
 }
 
 /// 按 id 查询单条便签。
+///
+/// DB 错误时记录 warn 并返回 None（与空结果不可区分，但至少有日志可查）。
 pub async fn get(pool: &SqlitePool, id: &str) -> Option<StickyNote> {
     let row = sqlx::query_as::<_, (String, String, String, String, i64, i64, i64, i64, i64, i64, i64, i64)>(
         "SELECT id, content, format, color, visible, x, y, width, height, always_on_top, created_at, updated_at FROM sticky_notes WHERE id = ?1",
@@ -246,6 +248,10 @@ pub async fn get(pool: &SqlitePool, id: &str) -> Option<StickyNote> {
     .bind(id)
     .fetch_optional(pool)
     .await
+    .map_err(|e| {
+        tracing::warn!(sticky_id = %id, error = %e, "sticky get 查询失败");
+        e
+    })
     .ok()
     .flatten()?;
 
@@ -255,12 +261,18 @@ pub async fn get(pool: &SqlitePool, id: &str) -> Option<StickyNote> {
 }
 
 /// 列出全部便签（按 updated_at 倒序）。
+///
+/// DB 错误时记录 warn 并返回空 Vec（启动恢复时一条都不恢复且无告警的问题已修）。
 pub async fn list(pool: &SqlitePool) -> Vec<StickyNote> {
     sqlx::query_as::<_, (String, String, String, String, i64, i64, i64, i64, i64, i64, i64, i64)>(
         "SELECT id, content, format, color, visible, x, y, width, height, always_on_top, created_at, updated_at FROM sticky_notes ORDER BY updated_at DESC",
     )
     .fetch_all(pool)
     .await
+    .map_err(|e| {
+        tracing::warn!(error = %e, "sticky list 查询失败，返回空列表");
+        e
+    })
     .unwrap_or_default()
     .into_iter()
     .map(|r| {
@@ -377,16 +389,26 @@ pub async fn delete(pool: &SqlitePool, id: &str) -> Result<(), String> {
 }
 
 /// 获取便签统计信息。
+///
+/// DB 错误时记录 warn 并返回 0。
 pub async fn get_stats(pool: &SqlitePool) -> serde_json::Value {
     let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sticky_notes")
         .fetch_one(pool)
         .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "sticky get_stats count 查询失败");
+            e
+        })
         .unwrap_or((0,));
 
     let visible_count: (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM sticky_notes WHERE visible = 1")
             .fetch_one(pool)
             .await
+            .map_err(|e| {
+                tracing::warn!(error = %e, "sticky get_stats visible_count 查询失败");
+                e
+            })
             .unwrap_or((0,));
 
     serde_json::json!({
@@ -415,8 +437,8 @@ mod tests {
     }
 
     #[test]
-    fn color_default_is_theme() {
-        assert_eq!(StickyColor::default(), StickyColor::Theme);
+    fn color_default_is_yellow() {
+        assert_eq!(StickyColor::default(), StickyColor::Yellow);
     }
 
     #[test]

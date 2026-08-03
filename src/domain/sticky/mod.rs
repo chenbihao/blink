@@ -12,6 +12,27 @@ pub use crate::infra::data::sticky::{StickyColor, StickyFormat, StickyNote};
 
 use sqlx::SqlitePool;
 
+/// 便签错误——可序列化，IPC 边界保留 `kind` 字段供前端分类展示（spec §4.1）。
+///
+/// domain 层用此类型替代 `Result<_, String>`，command 层在 IPC 边界 `.to_string()` 拍平。
+#[derive(Debug, serde::Serialize, thiserror::Error)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(dead_code)]
+pub enum StickyError {
+    /// 数据库错误（连接失败 / 约束冲突 / 序列化失败等）。
+    #[error("数据库错误: {detail}")]
+    Db { detail: String },
+    /// 便签不存在（id 无效或已被删除）。
+    #[error("便签不存在: {id}")]
+    NotFound { id: String },
+}
+
+impl From<String> for StickyError {
+    fn from(s: String) -> Self {
+        StickyError::Db { detail: s }
+    }
+}
+
 /// 便签服务：封装保存和恢复策略。
 ///
 /// **防抖**（§3.9）：前端做输入防抖，500ms 停顿后调后端写库。
@@ -35,7 +56,7 @@ impl StickyService {
         &self,
         content: &str,
         color: StickyColor,
-    ) -> Result<StickyNote, String> {
+    ) -> Result<StickyNote, StickyError> {
         let color_str = color.as_str().to_string();
         let note = StickyNote {
             id: crate::infra::data::sticky::generate_id(),
@@ -51,7 +72,9 @@ impl StickyService {
             created_at: 0,
             updated_at: 0,
         };
-        crate::infra::data::sticky::create(&self.history_pool, &note).await?;
+        crate::infra::data::sticky::create(&self.history_pool, &note)
+            .await
+            .map_err(|e| StickyError::Db { detail: e })?;
         tracing::info!(sticky_id = %note.id, color = %color_str, "便签已创建");
         Ok(note)
     }
@@ -69,14 +92,13 @@ impl StickyService {
     /// 更新便签内容。
     ///
     /// 前端 JS 做防抖（500ms 停顿后调用），后端即时写库。
-    pub async fn update_content_debounced(&self, id: &str, content: &str) {
-        // 简化实现：直接写库（防抖在前端做更合适，后端提供即时写库能力）
-        // 前端 JS 做防抖，500ms 停顿后调 update_sticky_content
-        if let Err(e) =
-            crate::infra::data::sticky::update_content(&self.history_pool, id, content).await
-        {
-            tracing::warn!(sticky_id = %id, error = %e, "便签内容保存失败");
-        }
+    /// P1-#13 fix: 返回 Result 传播错误，不再吞错——前端需知道保存是否成功。
+    pub async fn update_content_debounced(&self, id: &str, content: &str) -> Result<(), StickyError> {
+        crate::infra::data::sticky::update_content(&self.history_pool, id, content)
+            .await
+            .map_err(|e| StickyError::Db { detail: e })?;
+        tracing::trace!(sticky_id = %id, "便签内容已保存");
+        Ok(())
     }
 
     /// 更新便签外观（颜色 + 可选格式）。
@@ -85,14 +107,15 @@ impl StickyService {
         id: &str,
         color: StickyColor,
         format: Option<StickyFormat>,
-    ) -> Result<(), String> {
+    ) -> Result<(), StickyError> {
         crate::infra::data::sticky::update_appearance(
             &self.history_pool,
             id,
             &color,
             format.as_ref(),
         )
-        .await?;
+        .await
+        .map_err(|e| StickyError::Db { detail: e })?;
         tracing::debug!(sticky_id = %id, color = %color.as_str(), "便签外观已更新");
         Ok(())
     }
@@ -105,16 +128,19 @@ impl StickyService {
         y: i32,
         width: i32,
         height: i32,
-    ) -> Result<(), String> {
+    ) -> Result<(), StickyError> {
         crate::infra::data::sticky::update_geometry(
             &self.history_pool, id, x, y, width, height,
         )
         .await
+        .map_err(|e| StickyError::Db { detail: e })
     }
 
     /// 设置便签可见性。
-    pub async fn set_visible(&self, id: &str, visible: bool) -> Result<(), String> {
-        crate::infra::data::sticky::set_visible(&self.history_pool, id, visible).await?;
+    pub async fn set_visible(&self, id: &str, visible: bool) -> Result<(), StickyError> {
+        crate::infra::data::sticky::set_visible(&self.history_pool, id, visible)
+            .await
+            .map_err(|e| StickyError::Db { detail: e })?;
         tracing::info!(sticky_id = %id, visible, "便签可见性已变更");
         Ok(())
     }
@@ -124,14 +150,18 @@ impl StickyService {
         &self,
         id: &str,
         always_on_top: bool,
-    ) -> Result<(), String> {
-        crate::infra::data::sticky::set_always_on_top(&self.history_pool, id, always_on_top).await?;
+    ) -> Result<(), StickyError> {
+        crate::infra::data::sticky::set_always_on_top(&self.history_pool, id, always_on_top)
+            .await
+            .map_err(|e| StickyError::Db { detail: e })?;
         Ok(())
     }
 
     /// 删除便签（永久）。
-    pub async fn delete_note(&self, id: &str) -> Result<(), String> {
-        crate::infra::data::sticky::delete(&self.history_pool, id).await?;
+    pub async fn delete_note(&self, id: &str) -> Result<(), StickyError> {
+        crate::infra::data::sticky::delete(&self.history_pool, id)
+            .await
+            .map_err(|e| StickyError::Db { detail: e })?;
         tracing::info!(sticky_id = %id, "便签已删除");
         Ok(())
     }

@@ -344,6 +344,7 @@ impl ChordRegistry {
         bindings: &ChordBindings,
         env: &dyn crate::domain::event::DomainEnv,
         input: Option<&str>,
+        origin_ref: Option<&str>,
     ) -> Result<ChordSurface, String> {
         let lower = key.to_lowercase();
         let action = self
@@ -355,11 +356,15 @@ impl ChordRegistry {
         tracing::info!(id = action.id(), key = %lower, surface = ?surface, has_input = input.is_some(), "chord trigger");
 
         // 0.16.2：requires_input 的 action 把 input 塞进 arguments；其他 action 传空。
-        let arguments = if action.requires_input() {
+        // 0.16.13：origin_ref 也塞进 arguments（chord-E 编辑已有项时继承 hit_count）
+        let mut arguments = if action.requires_input() {
             serde_json::json!({ "input": input.unwrap_or("") })
         } else {
             serde_json::json!({})
         };
+        if let Some(ref_id) = origin_ref {
+            arguments["origin_ref"] = serde_json::Value::String(ref_id.to_string());
+        }
         let cx = crate::domain::execution::ActionContext::from_arguments(env, arguments);
         let outcome = action.execute(&cx).await.map_err(|e| e.to_string())?;
         // 按 outcome 分派副作用
@@ -774,12 +779,17 @@ impl crate::domain::execution::Action for EditAction {
             .get("input")
             .and_then(|v| v.as_str())
             .unwrap_or("");
+        let origin_ref: Option<&str> = cx
+            .arguments
+            .get("origin_ref")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
         cx.env
             .show_content_editor(
                 input,
                 Some("编辑内容"),
                 "chord",
-                None,
+                origin_ref,
                 "clipboard_new",
             )
             .map_err(crate::domain::execution::ExecError::Runtime)?;

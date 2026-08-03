@@ -117,10 +117,12 @@ pub async fn save_content_editor(
                 .state::<std::sync::Arc<crate::domain::sticky::StickyService>>()
             .inner()
                 .clone();
-            svc.update_content_debounced(sticky_id, &body).await;
-            // emit 事件让管理界面和其它监听者更新
+            svc.update_content_debounced(sticky_id, &body)
+                .await
+                .map_err(|e: crate::domain::sticky::StickyError| e.to_string())?;
+            // emit 内容变更事件让管理界面和其它监听者更新
             let _ = app.emit(
-                crate::domain::event_names::EventNames::STICKY_APPEARANCE_CHANGED,
+                crate::domain::event_names::EventNames::STICKY_CONTENT_CHANGED,
                 serde_json::json!({ "stickyId": sticky_id }),
             );
             tracing::info!(sticky_id = %sticky_id, "save_content_editor: sticky_update 完成");

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "secondary-windows",
-  "description": "次级窗口（voice-overlay / chord-screenshot / chord-pin / context-menu-popup / chat / content-editor / sticky-* / sticky-manager）的 capability。core:default 接收事件和 invoke；dialog:allow-save 截图保存；chat / content-editor / sticky / sticky-manager 窗口额外授予窗口操作权限（无边框自绘标题栏需要 minimize/maximize/hide/close）。",
+  "description": "次级窗口（voice-overlay / chord-screenshot / chord-pin / context-menu-popup / chat / content-editor / sticky-* / sticky-manager）的 capability。core:default 接收事件和 invoke；dialog:allow-save 截图保存；chat / content-editor / sticky / sticky-manager 窗口额外授予窗口操作权限（无边框自绘标题栏需要 minimize/maximize/hide/close/dragging/set-size）。",
   "windows": ["voice-overlay", "chord-screenshot", "chord-pin", "contextmenu-popup", "chat", "content-editor", "sticky-*", "sticky-manager"],
   "permissions": [
     "core:default",
@@ -13,6 +13,8 @@
     "core:window:allow-is-maximized",
     "core:window:allow-close",
     "core:window:allow-destroy",
-    "core:window:allow-set-always-on-top"
+    "core:window:allow-set-always-on-top",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-size"
   ]
 }

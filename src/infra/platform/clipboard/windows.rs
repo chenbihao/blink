@@ -174,8 +174,13 @@ fn on_clipboard_change() {
 
     // ── 图片采集（0.16.4）──
     // 文本读取失败 → 尝试 CF_DIB（截图、画图、浏览器复制图片等）
-    tracing::trace!("剪贴板：无文本,尝试读取图片 CF_DIB");
+    // P2-#20 fix: 检查 capture_images 配置，false 时跳过图片采集
     let Some(s) = state() else { return };
+    if !s.capture_images {
+        tracing::trace!("剪贴板：capture_images=false, 跳过图片采集");
+        return;
+    }
+    tracing::trace!("剪贴板：无文本,尝试读取图片 CF_DIB");
     let dib_data = read_clipboard_dib();
     let Some(dib) = dib_data else {
         tracing::trace!("剪贴板：无文本也无图片,跳过");
@@ -314,6 +319,12 @@ fn decode_dib(dib: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
         return None;
     }
 
+    // P1-#14 fix: 尺寸上界检查——防止恶意/损坏 DIB 导致分配过大或乘法溢出 panic
+    if width > 65535 || height > 65535 {
+        tracing::warn!(width, height, "DIB 尺寸过大，拒绝解码");
+        return None;
+    }
+
     let bpp = (bit_count / 8) as usize; // bytes per pixel
     if bpp != 4 && bpp != 3 {
         tracing::debug!("不支持的 DIB 位深: {bit_count}");
@@ -339,8 +350,11 @@ fn decode_dib(dib: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
 
     let pixel_data = &dib[header_size..];
 
-    // 统一输出为 top-down BGRA
-    let mut bgra = vec![0u8; (width * height * 4) as usize];
+    // 统一输出为 top-down BGRA（P1-#14 fix: checked_mul 防溢出）
+    let bgra_size = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|p| p.checked_mul(4))?;
+    let mut bgra = vec![0u8; bgra_size];
     let out_row_bytes = width as usize * 4;
     let is_bottom_up = raw_height > 0;
 

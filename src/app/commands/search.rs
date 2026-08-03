@@ -320,6 +320,7 @@ pub async fn trigger_chord(
     app: tauri::AppHandle,
     key: String,
     input_text: Option<String>,
+    origin_ref: Option<String>,
 ) -> Result<(), String> {
     tracing::debug!(%key, input_len = input_text.as_deref().map(|s| s.len()), "trigger_chord");
     let Some(registry) = app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
@@ -350,7 +351,7 @@ pub async fn trigger_chord(
         .inner()
         .clone();
     let _surface = registry
-        .trigger(&key, &chord_cfg.bindings, env_arc.as_ref(), input_text.as_deref())
+        .trigger(&key, &chord_cfg.bindings, env_arc.as_ref(), input_text.as_deref(), origin_ref.as_deref())
         .await?;
     Ok(())
 }

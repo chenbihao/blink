@@ -20,10 +20,11 @@ pub struct ActionRegistry {
 }
 
 impl ActionRegistry {
-    /// 构建默认注册表（9 个内置动作）。
+    /// 构建默认注册表（10 个内置动作）。
     ///
     /// 0.14.4: open_url / open_path / reveal_in_explorer 的 Action 版本已删除，
     /// 由 Capability 版本承担（CapabilityRegistry）。
+    /// 0.16.10: 新增 ShowStickyManagerAction，共 10 个。
     pub fn new() -> Self {
         let mut actions: HashMap<String, Arc<dyn Action>> = HashMap::new();
 
@@ -92,7 +93,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_has_9_builtin_actions() {
+    fn registry_has_10_builtin_actions() {
         let reg = ActionRegistry::new();
         assert_eq!(reg.len(), 10);
     }
@@ -102,6 +103,7 @@ mod tests {
         let reg = ActionRegistry::new();
         let expected = [
             "open_settings",
+            "sticky_manager",
             "lock",
             "shutdown",
             "restart",

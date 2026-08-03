@@ -47,8 +47,8 @@ async function init() {
   // 注册窗口复用回调
   window.__stickyManagerReload = loadList;
 
-  // 0.16.12：新窗口由后端以 visible(false) 创建，前端 init 完成后自行 show——消除白屏闪烁。
-  // 复用窗口由后端直接 show，无需前端再调。
+  // 0.16.13：后端已改为 visible(true) + background_color 创建窗口，不再依赖前端 show。
+  // 此处 win.show()/setFocus() 保留为 harmless no-op（窗口已由后端 show）。
   const win = getCurrentWindow();
   if (win) {
     try {
@@ -259,6 +259,7 @@ function bindEvents() {
   listen(EVENTS.STICKY_DELETED, () => loadList());
   listen(EVENTS.STICKY_VISIBILITY_CHANGED, () => loadList());
   listen(EVENTS.STICKY_APPEARANCE_CHANGED, () => loadList());
+  listen(EVENTS.STICKY_CONTENT_CHANGED, () => loadList());
 }
 
 // ── 按钮绑定 ──────────────────────────────────────────
@@ -291,13 +292,14 @@ function bindWindowControls() {
   }
 
   if (maxBtn) {
-    maxBtn.addEventListener("click", () => {
+    maxBtn.addEventListener("click", async () => {
       const win = getCurrentWindow();
       if (!win) return;
-      if (win.isMaximized()) {
-        win.unmaximize();
+      const isMax = await win.isMaximized();
+      if (isMax) {
+        await win.unmaximize();
       } else {
-        win.maximize();
+        await win.maximize();
       }
     });
   }

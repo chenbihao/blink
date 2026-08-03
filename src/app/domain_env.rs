@@ -158,6 +158,13 @@ impl DomainEnv for TauriDomainEnv {
         crate::infra::platform::window::show_sticky_manager_window(&self.app)
     }
 
+    fn sticky_service(&self) -> Option<&std::sync::Arc<crate::domain::sticky::StickyService>> {
+        use tauri::Manager;
+        self.app
+            .try_state::<std::sync::Arc<crate::domain::sticky::StickyService>>()
+            .map(|s| s.inner())
+    }
+
     fn show_content_editor(
         &self,
         body: &str,
@@ -183,23 +190,25 @@ impl DomainEnv for TauriDomainEnv {
     }
 
     async fn create_sticky_and_show(&self, content: &str) -> Result<String, String> {
-        use tauri::{Emitter, Manager};
+        use tauri::Emitter;
+        // P1-#10: 通过 DomainEnv::sticky_service() 统一访问，与 chord 路径一致
         let svc = self
-            .app
-            .state::<std::sync::Arc<crate::domain::sticky::StickyService>>()
-            .inner()
+            .sticky_service()
+            .ok_or("StickyService 不可用")?
             .clone();
         // 创建便签（默认主题色、visible=true）
         let note = svc
             .create_note(content, crate::domain::sticky::StickyColor::default())
-            .await?;
+            .await
+            .map_err(|e| e.to_string())?;
         // 0.16.11：新建便签居中到当前前台窗口所在显示器的工作区
         let (cx, cy) = crate::infra::platform::window::center_of_active_monitor(
             note.width,
             note.height,
         );
         svc.update_geometry(&note.id, cx, cy, note.width, note.height)
-            .await?;
+            .await
+            .map_err(|e| e.to_string())?;
         // 显示桌面窗口（用户操作需要聚焦）
         crate::infra::platform::window::show_sticky_window(
             &self.app,
@@ -276,6 +285,9 @@ mod tests {
             None // 关键：最小运行时不构造 CapabilityRegistry
         }
         fn chat_service(&self) -> Option<&Arc<ChatService>> {
+            None
+        }
+        fn sticky_service(&self) -> Option<&std::sync::Arc<crate::domain::sticky::StickyService>> {
             None
         }
         fn show_chat_window(&self, _initial_text: Option<&str>) -> Result<(), String> {

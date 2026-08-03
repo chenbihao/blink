@@ -5,7 +5,7 @@
 
 import { queryEl, resultsEl } from "./dom.js";
 import { activateItem } from "./actions.js";
-import { openContainingFolder, openLnkTarget, resetItemHistory, runBuiltinAction, copyToClipboard, openContentEditor, hideWindow, invoke, triggerChord, listChordActions, pinClipboardImage, createStickyNote, showStickyWindow } from "../shared/api.js";
+import { openContainingFolder, openLnkTarget, resetItemHistory, runBuiltinAction, copyToClipboard, deleteClipboardItem, hideWindow, invoke, triggerChord, listChordActions, pinClipboardImage } from "../shared/api.js";
 import { retrigger } from "./search.js";
 import { t } from "../i18n/index.js";
 import { EVENTS } from "../shared/event-names.js";
@@ -192,7 +192,7 @@ function unifiedMenu() {
 
 // ── 结果项菜单 ──────────────────────────────────────────────────────────────
 
-/** action.kind → 默认菜单文案的 i18n key 映射。有 hint 时优先用 hint。 */
+/** action.kind → 默认菜单文案的 i18n key 映射。有 hint 时优先用 t(hint)。 */
 const KIND_LABELS = {
   copy: () => t("menu.copy"),
   open: () => t("menu.open"),
@@ -218,9 +218,9 @@ function itemMenu(li) {
   const isRealPath = lnkPath && firstKind !== "run";
   const items = [];
 
-  // (a) 展开 actions 全部动作
+  // (a) 展开 actions 全部动作（hint 存 i18n key，用 t() 渲染）
   for (const action of actions) {
-    const label = action.hint || (KIND_LABELS[action.kind]?.() ?? null);
+    const label = action.hint ? t(action.hint) : (KIND_LABELS[action.kind]?.() ?? null);
     if (!label) continue; // 无标签的动作（如无 hint 的 run）跳过
     items.push({
       label,
@@ -228,41 +228,8 @@ function itemMenu(li) {
     });
   }
 
-  // 0.16.3：剪贴板项追加"编辑"动作
-  // 0.16.9：扩展到所有有文本 payload 的 item（剪贴板文本、AI 结果）
-  const firstAction = actions[0];
-  const hasTextPayload = firstAction?.kind === "copy" && firstAction.payload;
-  if (hasTextPayload) {
-    const isClipboard = source === "clipboard";
-    items.push({ separator: true });
-    items.push({
-      label: t("menu.edit"),
-      run: () => {
-        openContentEditor({
-          body: firstAction.payload || "",
-          format: "plain",
-          title: isClipboard ? "编辑剪贴板内容" : "编辑内容",
-          origin: isClipboard ? "clipboard" : "item",
-          originRef: firstAction.hitId || null,
-          savePolicy: "clipboard_new",
-        }).catch((e) => console.error("openContentEditor failed:", e));
-        hideWindow();
-      },
-    });
-    // 0.16.9：追加"钉为便签"动作
-    items.push({
-      label: t("menu.sticky"),
-      run: async () => {
-        try {
-          const note = await createStickyNote(firstAction.payload || "");
-          await showStickyWindow(note.id);
-        } catch (e) {
-          console.error("createStickyNote failed:", e);
-        }
-        hideWindow();
-      },
-    });
-  }
+  // P2-#18: edit/pin 已由后端 actions 声明（edit_text_item / pin_text_item），
+  // (a) 段从 actions 数组派生即可，不再在此硬编码追加。
 
   // 0.16.5：剪贴板图片项追加"钉图"动作
   // 图片项的 lnkPath 存的是 image_id，调 pin_clipboard_image 后端命令
@@ -275,6 +242,22 @@ function itemMenu(li) {
         pinClipboardImage(lnkPath).catch((e) => console.error("pinClipboardImage failed:", e));
         hideWindow();
       },
+    });
+  }
+
+  // 0.16.13：剪贴板文本项追加"删除"动作
+  // hitId 在首个 action（Copy）上，为 clipboard_history 表主键
+  const clipboardId = actions[0]?.hitId;
+  if (source === "clipboard" && clipboardId) {
+    items.push({ separator: true });
+    items.push({
+      label: t("menu.delete"),
+      run: () => {
+        deleteClipboardItem(clipboardId)
+          .then(() => retrigger())
+          .catch((e) => console.error("deleteClipboardItem failed:", e));
+      },
+      danger: true,
     });
   }
 

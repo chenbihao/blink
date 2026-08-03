@@ -55,11 +55,20 @@ export function copyToClipboard(text) {
   return invoke("copy_to_clipboard", { text });
 }
 
+/** 删除指定剪贴板历史记录（右键菜单用）。id 为 clipboard_history 表主键。 */
+export function deleteClipboardItem(id) {
+  return invoke("delete_clipboard_item", { id });
+}
+
 /** 触发 Chord 动作（0.8.5 §六）——key 为字母（a/c），后端按 key 分派到 ChordRegistry。
  *  注意：Alt+Space 语音输入不走此路径，由 native hotkey hold 状态机直接处理。
  *  0.16.2：inputText 用于 requires_input=true 的 chord（如 chat），把主窗口输入框文本带入。 */
-export function triggerChord(key, inputText) {
-  return invoke("trigger_chord", { key, inputText: inputText ?? null });
+export function triggerChord(key, inputText, originRef) {
+  return invoke("trigger_chord", {
+    key,
+    inputText: inputText ?? null,
+    originRef: originRef ?? null,
+  });
 }
 
 /** 列出已注册的 Chord 动作（0.8.5 §六 增强菜单渲染用）。每条：{ id, key, label, surface }。 */

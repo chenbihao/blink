@@ -306,7 +306,7 @@ impl AIProviderRegistry {
         let provider = config
             .providers
             .iter()
-            .find(|p| p.id == provider_id)
+            .find(|p| p.id == provider_id && p.enabled)
             .ok_or(AIError::NotConfigured)?;
         let model = provider
             .models

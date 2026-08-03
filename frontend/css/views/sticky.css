@@ -101,8 +101,8 @@
   background: transparent;
   color: var(--sticky-text);
   cursor: pointer;
-  border-radius: 4px;
-  transition: background var(--transition-fast, 0.15s);
+  border-radius: var(--radius-sm);
+  transition: background var(--transition-base);
   position: relative;
 }
 
@@ -123,8 +123,8 @@
 }
 
 .sticky-icon-btn-close:hover {
-  background: #e53935;
-  color: #fff;
+  background: var(--red);
+  color: var(--surface, #fff);
 }
 
 /* 置顶激活态 */
@@ -143,8 +143,8 @@
   padding: 6px 8px;
   background: var(--surface, #fff);
   border: 1px solid var(--surface-2, #ddd);
-  border-radius: 6px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 12px var(--shadow);
   z-index: 100;
 }
 
@@ -155,7 +155,7 @@
   border-radius: 50%;
   cursor: pointer;
   padding: 0;
-  transition: border-color 0.15s;
+  transition: border-color var(--transition-base);
 }
 
 .color-swatch:hover {
@@ -186,8 +186,8 @@
   min-width: 140px;
   background: var(--surface, #fff);
   border: 1px solid var(--surface-2, #ddd);
-  border-radius: 6px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 12px var(--shadow);
   z-index: 100;
 }
 
@@ -196,11 +196,11 @@
   border: none;
   background: transparent;
   color: var(--text, #333);
-  font-size: 12px;
+  font-size: var(--text-xs);
   text-align: left;
   cursor: pointer;
-  border-radius: 4px;
-  transition: background 0.15s;
+  border-radius: var(--radius-sm);
+  transition: background var(--transition-base);
 }
 
 .more-menu-item:hover {
@@ -226,7 +226,7 @@
   background: transparent;
   color: var(--sticky-text);
   font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
-  font-size: 14px;
+  font-size: var(--text-sm);
   line-height: 1.6;
   /* 中文不斜体铁则 */
   font-style: normal;

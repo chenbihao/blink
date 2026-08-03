@@ -7,7 +7,7 @@
 
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::domain::sticky::{StickyColor, StickyFormat, StickyService};
+use crate::domain::sticky::{StickyColor, StickyFormat, StickyService, StickyError};
 use crate::domain::event_names::EventNames;
 
 /// 创建便签。
@@ -32,7 +32,8 @@ pub async fn create_sticky_note(
 
     let note = svc
         .create_note(content.as_deref().unwrap_or(""), c)
-        .await?;
+        .await
+        .map_err(|e: StickyError| e.to_string())?;
 
     // emit 事件（不传正文）
     let _ = app.emit(
@@ -63,6 +64,8 @@ pub async fn list_sticky_notes(
 }
 
 /// 更新便签内容（前端防抖后调用）。
+///
+/// emit `STICKY_CONTENT_CHANGED` 让管理界面和其他便签窗口感知内容变更。
 #[tauri::command]
 pub async fn update_sticky_content(
     app: AppHandle,
@@ -70,7 +73,13 @@ pub async fn update_sticky_content(
     content: String,
 ) -> Result<(), String> {
     let svc = app.state::<std::sync::Arc<StickyService>>();
-    svc.update_content_debounced(&id, &content).await;
+    svc.update_content_debounced(&id, &content)
+        .await
+        .map_err(|e: StickyError| e.to_string())?;
+    let _ = app.emit(
+        EventNames::STICKY_CONTENT_CHANGED,
+        serde_json::json!({ "stickyId": id }),
+    );
     Ok(())
 }
 
@@ -86,7 +95,9 @@ pub async fn update_sticky_appearance(
     let c = StickyColor::from_str(&color);
     let color_str = c.as_str().to_string();
     let f = format.map(|s| StickyFormat::from_str(&s));
-    svc.update_appearance(&id, c, f).await?;
+    svc.update_appearance(&id, c, f)
+        .await
+        .map_err(|e: StickyError| e.to_string())?;
 
     let _ = app.emit(
         EventNames::STICKY_APPEARANCE_CHANGED,
@@ -107,7 +118,9 @@ pub async fn update_sticky_geometry(
     height: i32,
 ) -> Result<(), String> {
     let svc = app.state::<std::sync::Arc<StickyService>>();
-    svc.update_geometry(&id, x, y, width, height).await
+    svc.update_geometry(&id, x, y, width, height)
+        .await
+        .map_err(|e: StickyError| e.to_string())
 }
 
 /// 设置便签可见性。
@@ -118,7 +131,9 @@ pub async fn set_sticky_visible(
     visible: bool,
 ) -> Result<(), String> {
     let svc = app.state::<std::sync::Arc<StickyService>>();
-    svc.set_visible(&id, visible).await?;
+    svc.set_visible(&id, visible)
+        .await
+        .map_err(|e: StickyError| e.to_string())?;
 
     let _ = app.emit(
         EventNames::STICKY_VISIBILITY_CHANGED,
@@ -136,7 +151,9 @@ pub async fn set_sticky_always_on_top(
     always_on_top: bool,
 ) -> Result<(), String> {
     let svc = app.state::<std::sync::Arc<StickyService>>();
-    svc.set_always_on_top(&id, always_on_top).await
+    svc.set_always_on_top(&id, always_on_top)
+        .await
+        .map_err(|e: StickyError| e.to_string())
 }
 
 /// 删除便签（永久）。
@@ -146,7 +163,9 @@ pub async fn delete_sticky_note(
     id: String,
 ) -> Result<(), String> {
     let svc = app.state::<std::sync::Arc<StickyService>>();
-    svc.delete_note(&id).await?;
+    svc.delete_note(&id)
+        .await
+        .map_err(|e: StickyError| e.to_string())?;
 
     let _ = app.emit(
         EventNames::STICKY_DELETED,
@@ -179,7 +198,13 @@ pub async fn show_sticky_window_cmd(
         .ok_or_else(|| format!("便签不存在: {sticky_id}"))?;
 
     // 设置 visible=true
-    svc.set_visible(&sticky_id, true).await?;
+    svc.set_visible(&sticky_id, true)
+        .await
+        .map_err(|e: StickyError| e.to_string())?;
+    let _ = app.emit(
+        EventNames::STICKY_VISIBILITY_CHANGED,
+        serde_json::json!({ "stickyId": sticky_id, "visible": true }),
+    );
 
     // 创建/显示窗口（用户主动操作，需要聚焦）
     crate::infra::platform::window::show_sticky_window(

@@ -40,36 +40,8 @@ pub struct ClipboardImage {
     pub source_app: Option<String>,
 }
 
-/// 剪贴板图片配置。
-#[allow(dead_code)]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ClipboardImageConfig {
-    /// 最大保留图片条数。
-    #[serde(default = "default_max_image_items")]
-    pub max_image_items: u32,
-    /// 是否采集剪贴板图片。
-    #[serde(default = "default_true")]
-    pub capture_images: bool,
-}
-
-fn default_max_image_items() -> u32 {
-    200
-}
-
-fn default_true() -> bool {
-    true
-}
-
-impl Default for ClipboardImageConfig {
-    fn default() -> Self {
-        Self {
-            max_image_items: 200,
-            capture_images: true,
-        }
-    }
-}
-
 /// 默认图片上限。
+#[allow(dead_code)]
 pub const DEFAULT_MAX_IMAGE_ITEMS: u32 = 200;
 
 /// 初始化 clipboard_images 表（放 cache 库）。
@@ -109,10 +81,13 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
 /// **去重语义**（0.16.4）：入库前按 sha256 删除旧记录（删旧留新），
 /// 再 INSERT 新记录。保证跨时段重复复制同一图片只保留最新一条。
 pub async fn save_image(pool: &SqlitePool, item: &ClipboardImage) -> Result<(), String> {
+    // P1-#15 fix: 删旧留新包在事务里，防止 DELETE 成功 INSERT 失败导致数据丢失
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+
     // 删旧留新：先按 sha256 删除同内容旧记录
     sqlx::query("DELETE FROM clipboard_images WHERE sha256 = ?1")
         .bind(&item.sha256)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -129,9 +104,11 @@ pub async fn save_image(pool: &SqlitePool, item: &ClipboardImage) -> Result<(), 
     .bind(&item.sha256)
     .bind(item.created_at)
     .bind(&item.source_app)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
+
+    tx.commit().await.map_err(|e| e.to_string())?;
     Ok(())
 }
 
