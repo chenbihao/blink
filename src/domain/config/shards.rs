@@ -49,7 +49,7 @@ fn default_grace_period() -> u64 {
 
 // ── AppearanceConfig ──────────────────────────────────────────────────────────
 
-/// 外观配置分片。theme / language / auto_start + log_level + window_opacity + ai_verbose_log。
+/// 外观配置分片。theme / language / auto_start + log_level + window_opacity + ai_verbose_log + first_run。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppearanceConfig {
     #[serde(default = "default_theme")]
@@ -64,6 +64,10 @@ pub struct AppearanceConfig {
     pub window_opacity: f64,
     #[serde(default = "default_false")]
     pub ai_verbose_log: bool,
+    /// 0.17.3：首次启动标记，default true。老用户升级时 serde 取 default true，
+    /// 会看到一次引导窗口——可接受（看一次快捷键速查也有价值）。
+    #[serde(default = "default_true")]
+    pub first_run: bool,
 }
 
 impl Default for AppearanceConfig {
@@ -75,6 +79,7 @@ impl Default for AppearanceConfig {
             log_level: default_log_level(),
             window_opacity: default_window_opacity(),
             ai_verbose_log: false,
+            first_run: true,
         }
     }
 }

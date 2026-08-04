@@ -947,6 +947,60 @@ pub fn show_sticky_manager_window(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// 0.17.3：显示首次启动引导窗口。
+///
+/// 独立窗口（label "welcome"），480×440 居中，有标题栏（decorations: true），
+/// 不可调整大小。关闭时自动标记 `first_run = false`（防止用户点 X 不点"开始使用"）。
+/// 与主窗口独立——watchdog 只 hide "main" 窗口，不影响引导窗口。
+pub fn show_welcome_window(app: &AppHandle) {
+    const LABEL: &str = "welcome";
+
+    // 已存在则直接 show + focus（安全兜底，正常不会走到——first_run=false 后不再弹）
+    if let Some(win) = app.get_webview_window(LABEL) {
+        let _ = win.show();
+        let _ = win.set_focus();
+        return;
+    }
+
+    use tauri::{WebviewUrl, WebviewWindowBuilder, window::Color};
+
+    let win = match WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("welcome.html".into()))
+        .title("Blink")
+        .inner_size(480.0, 440.0)
+        .resizable(false)
+        .decorations(true)
+        .transparent(false)
+        .always_on_top(false)
+        .skip_taskbar(false)
+        .focused(true)
+        .visible(true)
+        .background_color(Color(30, 30, 46, 255))
+        .center()
+        .build()
+    {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!(error = %e, "welcome window: 创建失败");
+            return;
+        }
+    };
+
+    // 关闭时标记 first_run = false（防用户点 X 不点"开始使用"按钮）
+    let app_clone = app.clone();
+    win.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { .. } = event {
+            let app = app_clone.clone();
+            tauri::async_runtime::spawn(async move {
+                let pools = app.state::<crate::infra::data::DbPools>();
+                let _ = crate::app::config::update_first_run(&pools.config, false).await;
+                tracing::info!("welcome window: CloseRequested -> first_run = false");
+            });
+        }
+    });
+
+    tracing::info!("welcome window: 已显示");
+}
+
 /// 显示便签窗口（0.16.8）。
 ///
 /// 每条便签一个独立 Tauri 窗口，label 为 `sticky-{id}`（id 截断到 60 字符防止超长）。

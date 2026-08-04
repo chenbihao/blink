@@ -911,4 +911,30 @@ export const en = {
     // ── Toast / common ──
     "toast.file_search_saved": "File search settings saved",
     "common.save_failed_msg": "Save failed: {err}",
+
+    // ── First-run welcome (0.17.3) ──
+    "welcome.title": "Welcome to Blink",
+    "welcome.subtitle": "Your desktop productivity hub",
+    "welcome.start": "Get Started",
+    "welcome.shortcut.voice_input": "Voice input / Summon",
+    "welcome.shortcut.chat": "AI chat",
+    "welcome.shortcut.screenshot": "Screenshot",
+    "welcome.shortcut.clipboard_history": "Clipboard history",
+    "welcome.shortcut.edit": "Edit",
+    "welcome.shortcut.sticky": "Sticky note",
+
+    // ── Hotkey cheatsheet (0.17.3) ──
+    "hotkey.cheatsheet.title": "Current shortcuts",
+    "hotkey.cheatsheet.action": "Action",
+    "hotkey.cheatsheet.key": "Shortcut",
+    "hotkey.cheatsheet.status": "Status",
+    "hotkey.cheatsheet.editable": "Customizable",
+    "hotkey.cheatsheet.locked": "Locked",
+    "hotkey.cheatsheet.modify": "Modify",
+    "hotkey.cheatsheet.voice_input": "Voice input / Summon",
+    "hotkey.cheatsheet.chat": "AI chat",
+    "hotkey.cheatsheet.screenshot": "Screenshot",
+    "hotkey.cheatsheet.clipboard_history": "Clipboard history",
+    "hotkey.cheatsheet.edit": "Edit",
+    "hotkey.cheatsheet.sticky": "Sticky note",
 };

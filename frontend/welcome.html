@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Blink</title>
+  <link rel="stylesheet" href="css/entries/welcome.css" />
+</head>
+<body>
+  <div class="welcome-root">
+    <!-- Logo + 标题 -->
+    <div class="welcome-header">
+      <div class="welcome-logo">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="welcome-logo-icon">
+          <path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z"/>
+        </svg>
+      </div>
+      <h1 class="welcome-title" data-i18n="welcome.title">欢迎使用 Blink</h1>
+      <p class="welcome-subtitle" data-i18n="welcome.subtitle">你的桌面效率中枢</p>
+    </div>
+
+    <!-- 快捷键列表 -->
+    <div class="welcome-shortcuts" id="shortcut-list">
+      <!-- 由 JS 动态渲染 -->
+    </div>
+
+    <!-- 开始使用按钮 -->
+    <div class="welcome-footer">
+      <button class="welcome-start-btn" id="start-btn" data-i18n="welcome.start">开始使用</button>
+    </div>
+  </div>
+
+  <script type="module" src="js/welcome.js"></script>
+</body>
+</html>

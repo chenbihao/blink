@@ -17,7 +17,7 @@ pub async fn get_config(app: tauri::AppHandle) -> crate::app::config::AppConfig 
 ///
 /// # 支持的 key
 ///
-/// **AppConfig 分片**：`language` / `log_level` / `auto_start` / `hotkey` /
+/// **AppConfig 分片**：`language` / `log_level` / `auto_start` / `first_run` / `hotkey` /
 /// `tap_threshold` / `grace_period` / `general_config` / `autosuggest` /
 /// `chord_toggles` / `clipboard_enabled` / `disabled_builtin_actions` /
 /// `disabled_context_bindings` / `disabled_chord_actions` / `window_opacity`
@@ -76,6 +76,12 @@ pub async fn set_config(
                 manager.disable().map_err(|e| e.to_string())?;
             }
             tracing::info!(auto_start, "开机自启配置已更新");
+        }
+        // 0.17.3：首次启动标记（引导窗口"开始使用"或关闭时设为 false）
+        "first_run" => {
+            let first_run: bool = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            crate::app::config::update_first_run(&pool, first_run).await?;
+            tracing::info!(first_run, "首次启动标记已更新");
         }
         "tap_threshold" => {
             let threshold: u64 = serde_json::from_value(value).map_err(|e| e.to_string())?;

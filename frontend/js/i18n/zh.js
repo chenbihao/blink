@@ -912,4 +912,30 @@ export const zh = {
     // ── Toast / 通用 ──
     "toast.file_search_saved": "文件搜索配置已保存",
     "common.save_failed_msg": "保存失败: {err}",
+
+    // ── 首次启动引导（0.17.3）──
+    "welcome.title": "欢迎使用 Blink",
+    "welcome.subtitle": "你的桌面效率中枢",
+    "welcome.start": "开始使用",
+    "welcome.shortcut.voice_input": "语音输入 / 唤起",
+    "welcome.shortcut.chat": "AI 对话",
+    "welcome.shortcut.screenshot": "区域截图",
+    "welcome.shortcut.clipboard_history": "剪贴板历史",
+    "welcome.shortcut.edit": "编辑",
+    "welcome.shortcut.sticky": "钉为便签",
+
+    // ── 快捷键速查表（0.17.3）──
+    "hotkey.cheatsheet.title": "当前快捷键",
+    "hotkey.cheatsheet.action": "功能",
+    "hotkey.cheatsheet.key": "快捷键",
+    "hotkey.cheatsheet.status": "状态",
+    "hotkey.cheatsheet.editable": "可改绑",
+    "hotkey.cheatsheet.locked": "固定",
+    "hotkey.cheatsheet.modify": "修改",
+    "hotkey.cheatsheet.voice_input": "语音输入 / 唤起",
+    "hotkey.cheatsheet.chat": "AI 对话",
+    "hotkey.cheatsheet.screenshot": "区域截图",
+    "hotkey.cheatsheet.clipboard_history": "剪贴板历史",
+    "hotkey.cheatsheet.edit": "编辑",
+    "hotkey.cheatsheet.sticky": "钉为便签",
 };

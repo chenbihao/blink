@@ -1,0 +1,25 @@
+/* ── 引导窗口 entry ────────────────────────────────────────────────────────────
+   加载顺序铁则：reset → tokens → themes → base → components → views
+   welcome.html 只需 <link href="css/entries/welcome.css"> */
+
+/* reset */
+@import '../base/reset.css';
+
+/* token 层（含 vendor/open-props） */
+@import '../tokens/index.css';
+
+/* 主题变量（默认 dark） */
+@import '../themes/dark.css';
+@import '../themes/light.css';
+
+/* base 排版 */
+@import '../base/typography.css';
+
+/* 组件 */
+@import '../components/button.css';
+
+/* 键帽 */
+@import '../components/kbd.css';
+
+/* 视图级 */
+@import '../views/welcome.css';

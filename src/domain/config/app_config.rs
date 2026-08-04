@@ -64,6 +64,8 @@ pub struct AppConfig {
     pub window_opacity: f64,
     #[serde(default = "default_false")]
     pub ai_verbose_log: bool,
+    #[serde(default = "default_true")]
+    pub first_run: bool,
 }
 
 impl Default for AppConfig {
@@ -95,6 +97,7 @@ impl Default for AppConfig {
             disabled_chord_actions: Vec::new(),
             window_opacity: default_window_opacity(),
             ai_verbose_log: false,
+            first_run: true,
         }
     }
 }
@@ -261,6 +264,7 @@ pub async fn get_config(pool: &SqlitePool) -> AppConfig {
         log_level: appearance.log_level,
         window_opacity: appearance.window_opacity,
         ai_verbose_log: appearance.ai_verbose_log,
+        first_run: appearance.first_run,
         surface_takeover_enabled: search.surface_takeover_enabled,
         search_history_enabled: search.search_history_enabled,
         search_history_days: search.search_history_days,
@@ -301,6 +305,7 @@ pub async fn save_config(pool: &SqlitePool, config: &AppConfig) -> Result<(), St
             log_level: config.log_level.clone(),
             window_opacity: config.window_opacity,
             ai_verbose_log: config.ai_verbose_log,
+            first_run: config.first_run,
         },
     )
     .await?;
@@ -379,6 +384,13 @@ pub async fn update_grace_period(pool: &SqlitePool, period: u64) -> Result<(), S
 pub async fn update_auto_start(pool: &SqlitePool, auto_start: bool) -> Result<(), String> {
     let mut config = get_config(pool).await;
     config.auto_start = auto_start;
+    save_config(pool, &config).await
+}
+
+/// 0.17.3：更新首次启动标记。镜像 update_auto_start 模式。
+pub async fn update_first_run(pool: &SqlitePool, first_run: bool) -> Result<(), String> {
+    let mut config = get_config(pool).await;
+    config.first_run = first_run;
     save_config(pool, &config).await
 }
 

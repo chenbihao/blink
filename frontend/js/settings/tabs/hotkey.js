@@ -5,7 +5,7 @@
 
 import { invoke } from "../../shared/tauri.js";
 import { t, onLangChange } from "../../i18n/index.js";
-import { renderKey } from "../../shared/kbd.js";
+import { renderKey, renderCombo } from "../../shared/kbd.js";
 import { saveConfig } from "../../shared/config-keys.js";
 import { getCurrentConfig } from "../shared/state.js";
 
@@ -19,6 +19,9 @@ export function initHotkeyTab(cfg) {
   initHotkeyRecording();
   initSliders();
 
+  // 0.17.3：渲染 chord 快捷键速查表
+  renderCheatsheet(cfg);
+
   // 语言切换时刷新滑块值标签（带参数的 {value}ms 无法用 data-i18n 处理）
   onLangChange(() => {
     const tapSlider = document.getElementById("tap-threshold");
@@ -31,6 +34,9 @@ export function initHotkeyTab(cfg) {
     if (graceSlider && graceValue) {
       graceValue.textContent = t("hotkey.unit.ms", { value: graceSlider.value });
     }
+    // 语言切换时刷新速查表标签
+    const currentConfig = getCurrentConfig();
+    if (currentConfig) renderCheatsheet(currentConfig);
   });
 }
 
@@ -186,6 +192,97 @@ function initSliders() {
         console.error("update_grace_period failed:", err);
       }
     });
+  }
+}
+
+// ── 0.17.3：Chord 快捷键速查表 ─────────────────────────────────────────────
+
+/**
+ * 6 个 chord action 的元数据。
+ * - id：action 标识符，对应 ChordBindings 的字段名
+ * - labelKey：i18n key，功能名
+ * - defaultKey：默认触发字母
+ * - customizable：是否可在设置页改绑
+ */
+const CHEATSHEET_ACTIONS = [
+  { id: "voice_input", labelKey: "hotkey.cheatsheet.voice_input", defaultKey: " ", customizable: false },
+  { id: "chat", labelKey: "hotkey.cheatsheet.chat", defaultKey: "q", customizable: true },
+  { id: "screenshot", labelKey: "hotkey.cheatsheet.screenshot", defaultKey: "a", customizable: true },
+  { id: "clipboard_history", labelKey: "hotkey.cheatsheet.clipboard_history", defaultKey: "c", customizable: true },
+  { id: "edit", labelKey: "hotkey.cheatsheet.edit", defaultKey: "e", customizable: false },
+  { id: "sticky", labelKey: "hotkey.cheatsheet.sticky", defaultKey: "s", customizable: false },
+];
+
+/**
+ * 计算 action 的生效组合键字符串。
+ * - voice_input：使用全局 hotkey.display（如 "Alt+Space"）
+ * - 其他："Alt+" + effective_key（binding.key 非空用 binding，否则用 defaultKey）
+ */
+function getEffectiveCombo(cfg, action) {
+  if (action.id === "voice_input") {
+    return cfg?.hotkey?.display || "Alt+Space";
+  }
+  const binding = cfg?.chord_bindings?.[action.id];
+  const key = binding?.key && binding.key.length > 0 ? binding.key : action.defaultKey;
+  // key 是单字符（如 "q"），转成组合键显示（如 "Alt+Q"）
+  const upperKey = key.length === 1 ? key.toUpperCase() : key;
+  return `Alt+${upperKey}`;
+}
+
+/**
+ * 渲染 chord 快捷键速查表。
+ * @param {Object} cfg - get_config 返回的配置对象
+ */
+function renderCheatsheet(cfg) {
+  const tbody = document.getElementById("cheatsheet-body");
+  if (!tbody) return;
+
+  tbody.innerHTML = "";
+  for (const action of CHEATSHEET_ACTIONS) {
+    const tr = document.createElement("tr");
+
+    // 功能名
+    const nameTd = document.createElement("td");
+    nameTd.className = "cheatsheet-name";
+    nameTd.textContent = t(action.labelKey);
+    tr.appendChild(nameTd);
+
+    // 快捷键（用 renderCombo 渲染键帽）
+    const keyTd = document.createElement("td");
+    keyTd.className = "cheatsheet-key";
+    const combo = getEffectiveCombo(cfg, action);
+    keyTd.appendChild(renderCombo(combo));
+    tr.appendChild(keyTd);
+
+    // 状态（可改绑 + 修改链接 / 固定）
+    const statusTd = document.createElement("td");
+    statusTd.className = "cheatsheet-status";
+    if (action.customizable) {
+      const badge = document.createElement("span");
+      badge.className = "cheatsheet-badge editable";
+      badge.textContent = t("hotkey.cheatsheet.editable");
+      statusTd.appendChild(badge);
+
+      const modifyLink = document.createElement("a");
+      modifyLink.className = "cheatsheet-modify";
+      modifyLink.textContent = t("hotkey.cheatsheet.modify");
+      modifyLink.href = "#";
+      modifyLink.addEventListener("click", (e) => {
+        e.preventDefault();
+        // 在 settings 窗口内切到 chord tab
+        const chordTab = document.querySelector('.tab[data-tab="chord"]');
+        if (chordTab) chordTab.click();
+      });
+      statusTd.appendChild(modifyLink);
+    } else {
+      const badge = document.createElement("span");
+      badge.className = "cheatsheet-badge locked";
+      badge.textContent = t("hotkey.cheatsheet.locked");
+      statusTd.appendChild(badge);
+    }
+    tr.appendChild(statusTd);
+
+    tbody.appendChild(tr);
   }
 }
 

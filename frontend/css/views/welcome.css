@@ -1,0 +1,129 @@
+/* ── 引导窗口视图样式 ──────────────────────────────────────────────────────────
+   0.17.3：首次启动引导窗口。480×440 居中，圆角，与 app 主题一致。 */
+
+.welcome-root {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  height: 100vh;
+  padding: 24px 20px 16px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans, "Segoe UI", system-ui, sans-serif);
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+/* ── Header：Logo + 标题 ─────────────────────────────────────────────────────── */
+
+.welcome-header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.welcome-logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-lg, 8px);
+  background: var(--accent, #89b4fa);
+  margin-bottom: 2px;
+}
+
+.welcome-logo-icon {
+  width: 26px;
+  height: 26px;
+  stroke: var(--bg, #1e1e2e);
+  stroke-width: 2.5;
+  fill: none;
+}
+
+.welcome-title {
+  font-size: 18px;
+  font-weight: 700;
+  margin: 0;
+  color: var(--text);
+  font-style: normal;
+}
+
+.welcome-subtitle {
+  font-size: 12px;
+  margin: 0;
+  color: var(--text-sub, var(--subtext0, #a6adc8));
+  opacity: 0.75;
+  font-style: normal;
+}
+
+/* ── 快捷键列表 ─────────────────────────────────────────────────────────────── */
+
+.welcome-shortcuts {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  max-width: 320px;
+}
+
+.welcome-shortcut-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  border-radius: var(--radius-md, 6px);
+  background: var(--surface, var(--surface0, #313244));
+  transition: background var(--transition-fast, 0.1s);
+}
+
+.welcome-shortcut-row:hover {
+  background: var(--surface-hover, var(--surface1, #45475a));
+}
+
+.welcome-shortcut-label {
+  font-size: 13px;
+  color: var(--text);
+  font-style: normal;
+}
+
+.welcome-shortcut-keys {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* ── Footer：开始使用按钮 ───────────────────────────────────────────────────── */
+
+.welcome-footer {
+  display: flex;
+  justify-content: center;
+  margin-top: 12px;
+}
+
+.welcome-start-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 32px;
+  font-size: 14px;
+  font-weight: 600;
+  border: none;
+  border-radius: var(--radius-md, 6px);
+  background: var(--accent, #89b4fa);
+  color: var(--bg, #1e1e2e);
+  cursor: pointer;
+  transition: opacity var(--transition-fast, 0.1s), transform var(--transition-fast, 0.1s);
+  font-style: normal;
+}
+
+.welcome-start-btn:hover {
+  opacity: 0.85;
+}
+
+.welcome-start-btn:active {
+  transform: scale(0.97);
+}

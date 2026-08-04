@@ -212,6 +212,11 @@ fn main() {
                 });
             }
 
+            // 0.17.3：首次启动弹出独立引导窗口（主窗口照常 hide）
+            if app_config.first_run {
+                infra::platform::window::show_welcome_window(app.handle());
+            }
+
             // 托盘菜单：显示主窗口 + 设置 + 便签管理 + 关于 + 退出（按当前语言构建，运行时切语言会重建）
             let menu = app::tray::build_menu(app, &app_config.language)?;
             TrayIconBuilder::new()

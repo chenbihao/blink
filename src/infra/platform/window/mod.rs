@@ -34,7 +34,7 @@ pub use windows::{
     get_foreground_hwnd, hide, hide_chat_window, hide_for_screenshot, hide_screenshot_overlay,
     hide_voice_overlay, install_sysmenu_blocker, invoke, is_visible, on_focused, open_settings,
     place_at_physical, preheat_secondary_windows, restore_foreground, set_app_exiting, show_chat_window,
-    show_content_editor_window, show_pin_window, show_screenshot_overlay, show_sticky_window, show_sticky_manager_window, show_voice_overlay,
+    show_content_editor_window, show_pin_window, show_screenshot_overlay, show_sticky_window, show_sticky_manager_window, show_voice_overlay, show_welcome_window,
     start_watchdog, last_external_foreground_hwnd,
     unhide_after_screenshot, update_grace_period, wait_frame_after_hide,
 };
