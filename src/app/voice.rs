@@ -201,7 +201,10 @@ impl VoiceService {
         }
 
         // ── 共享录音启动逻辑（不设置 hotkey flag） ──
-        self.begin_recording(&config, false).await;
+        if self.begin_recording(&config, false).await {
+            // 0.17.2：chat 录音开始 → 托盘呼吸动画
+            crate::app::tray::start_breathing(&self.app);
+        }
     }
 
     /// 共享录音启动逻辑：服务就绪检查 + 模型加载检查 + 引擎创建 + 音频采集 + 采集 task。
@@ -547,6 +550,8 @@ impl VoiceService {
     /// 设为 `ChatWindow`，`stop_recording` 按 target 分支到 G3 路径。
     pub async fn stop_chat_recording(&self) {
         self.stop_recording().await;
+        // 0.17.2：chat 录音结束 → 停止托盘呼吸动画
+        crate::app::tray::stop_breathing(&self.app);
     }
 
     pub fn cancel_recording(&self) {

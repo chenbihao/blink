@@ -199,6 +199,8 @@ impl Service for HotkeyService {
                         let voice_disabled = disabled.iter().any(|d| d == "voice_input");
                         if chord_cfg.chord_enabled && !voice_disabled {
                             voice_service.start_recording().await;
+                            // 0.17.2：语音录音开始 → 托盘呼吸动画
+                            crate::app::tray::start_breathing(&app);
                         } else {
                             tracing::debug!(
                                 chord_enabled = chord_cfg.chord_enabled,
@@ -210,10 +212,14 @@ impl Service for HotkeyService {
                     crate::infra::platform::hotkey::HotkeyEvent::HoldRelease(_) => {
                         // 长按结束 → 停止录音 → STT → 注入/fill-query
                         voice_service.stop_recording().await;
+                        // 0.17.2：语音录音结束 → 停止托盘呼吸动画
+                        crate::app::tray::stop_breathing(&app);
                     }
                     crate::infra::platform::hotkey::HotkeyEvent::VoiceCancel(_) => {
                         // ESC 取消录音
                         voice_service.cancel_recording();
+                        // 0.17.2：取消录音 → 停止托盘呼吸动画
+                        crate::app::tray::stop_breathing(&app);
                     }
                     crate::infra::platform::hotkey::HotkeyEvent::Chord(key) => {
                         // 0.10.7.2：chord 独占模式吞键后,前端收不到 keydown,

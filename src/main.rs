@@ -7,7 +7,10 @@ mod infra;
 
 use domain::capability::Capability;
 use domain::event_names::EventNames;
-use tauri::{Emitter, Manager, WindowEvent, tray::TrayIconBuilder};
+use tauri::{
+    Emitter, Manager, WindowEvent,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+};
 
 fn main() {
     // 0.13.5: CLI 模式检测——如果命令行参数匹配 CLI 子命令，执行 CLI 逻辑后退出。
@@ -209,13 +212,15 @@ fn main() {
                 });
             }
 
-            // 托盘菜单：设置 + 关于 + 分隔线 + 退出（按当前语言构建文案，运行时切语言会重建）
+            // 托盘菜单：显示主窗口 + 设置 + 便签管理 + 关于 + 退出（按当前语言构建，运行时切语言会重建）
             let menu = app::tray::build_menu(app, &app_config.language)?;
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .tooltip("Blink")
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id().as_ref() {
+                    // 0.17.2：托盘菜单第一项"显示主窗口"，走 invoke 全流程拉起搜索框
+                    "show_main" => infra::platform::window::invoke(app),
                     "settings" => open_settings(app),
                     "sticky_manager" => {
                         let _ = crate::infra::platform::window::show_sticky_manager_window(app);
@@ -223,6 +228,17 @@ fn main() {
                     "about" => open_about(app),
                     "quit" => app.exit(0),
                     _ => {}
+                })
+                // 0.17.2：托盘图标左键单击拉起主窗口（符合 Windows 惯例）
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        infra::platform::window::invoke(tray.app_handle());
+                    }
                 })
                 .build(app)?;
 

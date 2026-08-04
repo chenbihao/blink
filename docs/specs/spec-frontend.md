@@ -38,6 +38,18 @@
 - 业务代码只引用 `tokens/` 的语义变量，**禁止**直接引用 `--size-3` / `--blue-500` 这类 OP 原始命名
 - 这样去掉 OP 只需改 `tokens/` 映射，业务代码零改动
 
+### 1.4 窗口预热复用（强制）
+
+> **铁则**：所有窗口在启动后异步预创建并隐藏（`visible:false`），首次 show 直接复用预创建的 webview，不按需创建。
+
+- **预热范围**：`chord-screenshot` / `context-menu` / `voice-overlay` / `chord-pin` / `chat` / `settings` / `content-editor` / `sticky-manager` — 8 个静态 label 窗口全部预热
+- **例外**：动态数量的窗口（`sticky-{id}`）按需创建，但窗口外壳复用机制已有（prevent_close + hide）
+- **时序**：预热在启动 3s 后异步执行（`preheat_secondary_windows`），不阻塞 Alt+Space 主链路
+- **容错**：预热失败打 `warn!` 日志但不阻断，show 函数的 fallback 创建逻辑兜底（`get_webview_window` 不存在则 build）
+- **预热窗口的事件注册**：需在预热时注册 `on_window_event`（如 sticky-manager 的 prevent_close + hide），因为 show 函数的复用路径（`is_new=false`）不注册事件
+- **settings 预热特殊处理**：预热时补 `strip_window_border` + `enable_rounded_corners`，因为 `open_settings` 的复用路径不调这两个（只在首次创建路径调）
+- **内存预算**：8 个预热窗口 + 动态便签，常驻内存 < 300MB（WebView2 每窗口 ~10-20MB）
+
 ---
 
 ## 第二层：设计 token 与主题

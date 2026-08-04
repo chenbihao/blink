@@ -1645,10 +1645,15 @@ pub fn wait_frame_after_hide(app: &AppHandle) {
     );
 }
 
-/// 后台预热次级窗口：延迟创建 chord-screenshot / context-menu 并立即隐藏。
+/// 后台预热次级窗口：延迟创建 chord-screenshot / context-menu / voice-overlay /
+/// chord-pin / chat / settings / content-editor / sticky-manager 并立即隐藏。
 ///
 /// WebView2 首次建实例 300~400ms，预热后 show 只是切可见性 (<50ms)。
-/// 代价：常驻内存 +10~20MB × 2；收益：Alt+A 截图 / 右键菜单首次触发无感。
+/// 代价：常驻内存 +10~20MB × N（8 窗口 + 动态便签，实测 < 300MB 预算内）；
+/// 收益：所有次级窗口首次触发无感。
+///
+/// 0.17.2：追加 settings / content-editor / sticky-manager 三个窗口预热。
+/// sticky-manager 预热时注册 prevent_close + hide（show 函数复用路径不注册）。
 ///
 /// chord-ball 悬浮球预热已随划词翻译 chord 移除而删除。
 pub fn preheat_secondary_windows(app: AppHandle) {
@@ -1779,6 +1784,114 @@ pub fn preheat_secondary_windows(app: AppHandle) {
             {
                 Ok(_) => tracing::debug!("preheat: chat ✓"),
                 Err(e) => tracing::warn!(error = %e, "preheat: chat 失败"),
+            }
+        }
+
+        // --- settings（设置窗口，0.17.2 加入预热） ---
+        // 静态 URL 无参数，open_settings 已有复用路径（get_webview_window → 重新定位 + show）。
+        // 预热时补 strip_window_border + enable_rounded_corners，
+        // 因为 open_settings 的复用路径不调这两个（只在首次创建路径调）。
+        if app.get_webview_window("settings").is_none() {
+            use tauri::{WebviewUrl, WebviewWindowBuilder};
+            match WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("settings.html".into()))
+                .title("Blink Settings")
+                .inner_size(960.0, 680.0)
+                .min_inner_size(760.0, 520.0)
+                .position(0.0, 0.0)
+                .visible(false)
+                .decorations(false)
+                .transparent(true)
+                .shadow(false)
+                .background_color(tauri::window::Color(0, 0, 0, 0))
+                .build()
+            {
+                Ok(win) => {
+                    if let Ok(hwnd) = win.hwnd() {
+                        let hwnd = HWND(hwnd.0 as _);
+                        strip_window_border(hwnd);
+                        enable_rounded_corners(hwnd);
+                    }
+                    tracing::debug!("preheat: settings ✓");
+                }
+                Err(e) => tracing::warn!(error = %e, "preheat: settings 失败"),
+            }
+        }
+
+        // --- content-editor（内容编辑器，0.17.2 加入预热） ---
+        // 静态 URL，payload 走 Tauri State（PendingEditorPayload）。
+        // show_content_editor_window 的复用路径会 eval __contentEditorReload + show，
+        // install_sysmenu_blocker / enable_rounded_corners 在 show 函数中对新旧窗口都调。
+        if app.get_webview_window("content-editor").is_none() {
+            use tauri::{WebviewUrl, WebviewWindowBuilder, window::Color};
+            match WebviewWindowBuilder::new(
+                &app,
+                "content-editor",
+                WebviewUrl::App("content-editor.html".into()),
+            )
+            .title("编辑内容")
+            .inner_size(720.0, 560.0)
+            .min_inner_size(400.0, 300.0)
+            .decorations(false)
+            .transparent(false)
+            .always_on_top(false)
+            .skip_taskbar(false)
+            .resizable(true)
+            .focused(false)
+            .visible(false)
+            .background_color(Color(30, 30, 46, 255))
+            .center()
+            .build()
+            {
+                Ok(_) => tracing::debug!("preheat: content-editor ✓"),
+                Err(e) => tracing::warn!(error = %e, "preheat: content-editor 失败"),
+            }
+        }
+
+        // --- sticky-manager（便签管理，0.17.2 加入预热） ---
+        // 静态 URL，自取列表（listStickyNotes）。
+        // 预热时注册 prevent_close + hide（与 show_sticky_manager_window 创建路径一致），
+        // 因为 show 函数的复用路径（is_new=false）不注册 on_window_event。
+        if app.get_webview_window("sticky-manager").is_none() {
+            use tauri::{WebviewUrl, WebviewWindowBuilder, window::Color};
+            match WebviewWindowBuilder::new(
+                &app,
+                "sticky-manager",
+                WebviewUrl::App("sticky-manager.html".into()),
+            )
+            .title("便签管理")
+            .inner_size(560.0, 640.0)
+            .min_inner_size(360.0, 400.0)
+            .decorations(false)
+            .transparent(false)
+            .always_on_top(false)
+            .skip_taskbar(false)
+            .resizable(true)
+            .focused(false)
+            .visible(false)
+            .background_color(Color(30, 30, 46, 255))
+            .center()
+            .build()
+            {
+                Ok(w) => {
+                    // 注册 prevent_close + hide（复用模式）
+                    let app_clone = app.clone();
+                    w.on_window_event(move |event| {
+                        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                            if IS_APP_EXITING.load(Ordering::SeqCst) {
+                                return; // 应用退出：不 prevent_close
+                            }
+                            api.prevent_close();
+                            if let Some(w) = app_clone.get_webview_window("sticky-manager") {
+                                let _ = w.hide();
+                            }
+                            tracing::debug!(
+                                "preheat sticky-manager: CloseRequested → prevent_close + hide"
+                            );
+                        }
+                    });
+                    tracing::debug!("preheat: sticky-manager ✓");
+                }
+                Err(e) => tracing::warn!(error = %e, "preheat: sticky-manager 失败"),
             }
         }
 
