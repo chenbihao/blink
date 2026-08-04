@@ -72,6 +72,7 @@ import {
   outputLongImage, resetScrollCaptureSession,
 } from "./scroll/index.js";
 import { refreshDiagnosticsVisibility } from "./scroll/diagnostics.js";
+import { refreshOcrDiagnosticsVisibility } from "./ss-ocr-diagnostics.js";
 
 // ── **临时**（0.11.7-f 调试用）：console 转发到后端 tracing ────────────
 // TODO(0.11.7 收尾)：0.11.7 稳定后移除此块 + api.js 的 frontendLog + Rust 端 frontend_log command
@@ -161,6 +162,7 @@ if (!isPreheat) {
 }
 // 0.15.7：绑定长截图专属工具栏
 bindScrollToolbar();
+refreshOcrDiagnosticsVisibility();
 
 window.__blinkReloadScreenshot = function () {
   console.info('[screenshot] __blinkReloadScreenshot called');
@@ -290,7 +292,9 @@ function loadScreenshot() {
       if (val && typeof val === 'object') {
         ss.screenshotConfig.prewarmOcr = val.prewarmOcr !== false;
         ss.screenshotConfig.scrollDebug = val.scrollDebug === true;
+        ss.screenshotConfig.ocrDebug = val.ocrDebug === true;
         refreshDiagnosticsVisibility();
+        refreshOcrDiagnosticsVisibility();
       }
     })
     .catch((e) => console.warn('[screenshot] 读 screenshot:config 失败,用默认值', e));

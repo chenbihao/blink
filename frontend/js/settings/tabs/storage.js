@@ -147,8 +147,10 @@ export function initStorageTab() {
     });
     if (!ok) return;
     try {
-      // 重置 scroll_debug 为默认值 false（prewarmOcr 保持默认 true）
-      await saveConfig("screenshot_config", { prewarmOcr: true, scrollDebug: false });
+      // 重置 scroll_debug / ocr_debug 为默认值 false（prewarmOcr 保持默认 true）
+      await saveConfig("screenshot_config", { prewarmOcr: true, scrollDebug: false, ocrDebug: false });
+      // 通知 chord tab 刷新截图开关状态（跨 tab 通知，避免 stale DOM）
+      document.dispatchEvent(new CustomEvent("blink:config-changed", { detail: { key: "screenshot_config" } }));
       await messageDialog(t("storage.clear_debug_flags.done"), { kind: "info" });
     } catch (e) {
       console.error("clear_debug_flags failed:", e);

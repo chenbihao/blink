@@ -288,6 +288,25 @@ pub async fn ocr_image(
     Ok(json)
 }
 
+/// 0.17.5：OCR 诊断——返回设备已安装的 OCR 语言列表、当前引擎语言、中文包状态。
+///
+/// 供截图 overlay 诊断面板调用，帮助用户排查"中文截图识别不出"问题。
+#[tauri::command]
+pub async fn ocr_diagnose(
+    _app: tauri::AppHandle,
+) -> Result<serde_json::Value, crate::app::command_error::CommandError> {
+    let backend = crate::domain::capability::builtins::ocr_engine::backend();
+    let available = backend.available_languages().await;
+    let engine_lang = backend.engine_language().await;
+    let has_chinese = available.iter().any(|tag| tag.starts_with("zh"));
+
+    Ok(serde_json::json!({
+        "available_languages": available,
+        "engine_language": engine_lang,
+        "has_chinese": has_chinese,
+    }))
+}
+
 /// 0.11.9-d：翻译文本命令——OCR 面板/工具栏"翻译"按钮的后端入口。
 ///
 /// **绕过 AI 路径**：翻译是确定性动作(用户主动点按钮),不该经过 AI 意图判断

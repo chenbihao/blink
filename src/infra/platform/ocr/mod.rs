@@ -68,13 +68,23 @@ impl std::fmt::Display for PlatformOcrError {
 pub trait PlatformOcrBackend: Send + Sync {
     /// 识别 PNG 图片中的文字，返回原始 DTO。
     async fn recognize_raw(&self, png_data: &[u8]) -> Result<RawOcrResult, PlatformOcrError>;
+
+    /// 返回设备已安装的 OCR 语言 BCP-47 tag 列表（0.17.5 诊断用）。
+    async fn available_languages(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// 返回当前引擎使用的语言 tag（None = fallback 到用户配置文件语言；0.17.5 诊断用）。
+    async fn engine_language(&self) -> Option<String> {
+        None
+    }
 }
 
 /// 获取默认平台 OCR 后端。
 pub fn default_backend() -> Box<dyn PlatformOcrBackend> {
     #[cfg(target_os = "windows")]
     {
-        Box::new(backend_windows::WindowsOcrBackend)
+        Box::new(backend_windows::WindowsOcrBackend::default())
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -92,4 +102,6 @@ impl PlatformOcrBackend for UnsupportedOcrBackend {
     async fn recognize_raw(&self, _png_data: &[u8]) -> Result<RawOcrResult, PlatformOcrError> {
         Err(PlatformOcrError::Unsupported)
     }
+
+    // available_languages / engine_language 使用 trait 默认实现（空 Vec / None）
 }

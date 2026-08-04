@@ -63,6 +63,22 @@
   color: var(--text);
 }
 
+/* btn-small + btn-danger 组合：保持小尺寸 + 警告色
+   双类选择器（0,2,0）优先级高于单类 .btn-small / .btn-danger（0,1,0），
+   确保尺寸走 btn-small、配色走 btn-danger。 */
+.btn-small.btn-danger {
+  background: var(--red-bg);
+  color: var(--red);
+  border: 1px solid var(--red-border);
+  font-size: var(--text-base);
+  transition: all var(--transition-base);
+}
+
+.btn-small.btn-danger:hover {
+  background: var(--red-border);
+  color: var(--red);
+}
+
 /* btn-sm：紧凑型按钮变体（与 .btn 同色系，仅缩小尺寸）
    修 Skill/MCP 区「btn btn-sm」无 .btn-sm 定义导致按钮大小不一的问题。
    用 .btn.btn-sm 双类选择器（优先级 0,2,0）确保盖过 views/settings.css 里

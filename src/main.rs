@@ -705,6 +705,7 @@ fn main() {
             app::commands::screenshot_forward_wheel,
             app::commands::list_system_fonts,
             app::commands::ocr_image,
+            app::commands::ocr_diagnose,
             app::commands::translate_text,
             app::commands::translate_lines,
             app::commands::hide_screenshot_overlay,

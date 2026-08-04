@@ -1594,6 +1594,100 @@ html, body {
   color: var(--accent);
 }
 
+/* 仅 ?ocrDebug=1 显示的 OCR 诊断面板（0.17.5）。 */
+.ocr-diagnostics-panel {
+  position: fixed;
+  left: var(--space-md);
+  bottom: var(--space-md);
+  z-index: 120;
+  max-width: 480px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--surface-2);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+}
+
+.ocr-diagnostics-panel.hidden,
+.ocr-diag-install-guide.hidden {
+  display: none;
+}
+
+.ocr-diag-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-sm);
+  font-weight: var(--weight-semibold, 600);
+}
+
+.ocr-diag-close {
+  flex: 0 0 auto;
+  border: none;
+  background: transparent;
+  color: var(--text-dim, var(--text));
+  cursor: pointer;
+  padding: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.ocr-diag-close:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.ocr-diag-close .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.ocr-diag-section {
+  display: flex;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-xs);
+  align-items: flex-start;
+}
+
+.ocr-diag-label {
+  flex: 0 0 auto;
+  color: var(--text-dim, var(--text));
+  min-width: 5em;
+}
+
+.ocr-diag-value {
+  flex: 1 1 auto;
+  word-break: break-all;
+}
+
+.ocr-diag-preview {
+  color: var(--text-dim, var(--text));
+  font-style: normal;
+}
+
+.ocr-diag-hint {
+  margin: var(--space-xs) 0;
+  color: var(--text-dim, var(--text));
+}
+
+.ocr-diag-open-settings {
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: var(--space-xs) var(--space-sm);
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.ocr-diag-open-settings:hover {
+  background: var(--accent);
+  color: var(--surface);
+}
+
 /* 长截图采集范围。独立于截图 canvas，清除蒙版后仍保留范围参照。 */
 .scroll-capture-frame {
   position: fixed;

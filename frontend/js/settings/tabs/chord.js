@@ -26,6 +26,15 @@ export function initChordTab() {
 
   // 语言切换时重新渲染（toggle 状态已自动保存，重新加载不会丢失）
   onLangChange(loadChordActions);
+
+  // 跨 tab 配置变更通知：其他 tab（如存储页清理调试标记）修改了 screenshot_config
+  // 后会 dispatch 此事件，chord tab 需重新加载以刷新开关状态。
+  document.addEventListener("blink:config-changed", (e) => {
+    const key = e.detail?.key;
+    if (key === "screenshot_config" || key === "clipboard_config" || key === "chord_bindings") {
+      loadChordActions();
+    }
+  });
 }
 
 /**
@@ -63,13 +72,14 @@ async function loadChordActions() {
   try {
     const sc = await invoke("get_config_section", { key: "screenshot:config" });
     // 与后端 ScreenshotConfig 的 serde camelCase 对齐;字段缺失走默认
-    screenshotCfg = {
-      prewarmOcr: sc?.prewarmOcr !== false,
-      scrollDebug: sc?.scrollDebug === true,
-    };
+screenshotCfg = {
+prewarmOcr: sc?.prewarmOcr !== false,
+scrollDebug: sc?.scrollDebug === true,
+ocrDebug: sc?.ocrDebug === true,
+};
   } catch (e) {
     console.warn("load screenshot config failed:", e);
-    screenshotCfg = { prewarmOcr: true, scrollDebug: false };
+    screenshotCfg = { prewarmOcr: true, scrollDebug: false, ocrDebug: false };
   }
 
   // Chord id → 副标题（不再用 emoji 图标，标题/副标题足够承载语义）
@@ -78,6 +88,8 @@ async function loadChordActions() {
     screenshot: t("chord.action.screenshot.subtitle"),
     voice_input: t("chord.action.voice_input.subtitle"),
     clipboard_history: t("chord.action.clipboard_history.subtitle"),
+    edit: t("chord.action.edit.subtitle"),
+    sticky: t("chord.action.sticky.subtitle"),
   };
 
   container.innerHTML = actions
@@ -97,8 +109,12 @@ function renderActionRow(a, subtitle, clipboardCfg, screenshotCfg) {
   const combo = `Alt + ${keyLabel}`;
   const rowClass = a.enabled ? "" : "is-disabled";
 
-  // voice_input 锁定（键位由 hotkey 配置决定，0.10.7 暂不支持改配）
-  const keyLocked = a.id === "voice_input";
+  // voice_input 锁定（键位由 hotkey 配置决定）
+  // edit / sticky 锁定（后端 ChordBindings 无对应字段，暂不支持改绑）
+  const keyLocked = a.id === "voice_input" || a.id === "edit" || a.id === "sticky";
+  const lockedMsg = a.id === "voice_input"
+    ? t("chord.binding.voice_input.locked")
+    : t("chord.binding.fixed.locked");
 
   // 整行可点击展开；voice_input 锁定时展开体只有 locked 说明，意义不大但保留以维持一致交互
   const subtitleHtml = subtitle
@@ -114,7 +130,7 @@ function renderActionRow(a, subtitle, clipboardCfg, screenshotCfg) {
 
   // 展开体内容（用 .chord-field 紧凑布局，label 用 --settings-label-width 对齐）
   const bodyInnerHtml = keyLocked
-    ? `<div class="chord-locked-note">${t("chord.binding.voice_input.locked")}</div>`
+    ? `<div class="chord-locked-note">${lockedMsg}</div>`
     : `<div class="chord-field">
          <label class="setting-label chord-field-label">${t("chord.binding.key.label")}
            <span class="field-hint-icon" title="${escapeAttr(t("chord.binding.key.hint"))}">ⓘ</span>
@@ -203,27 +219,36 @@ function renderClipboardDetail(cfg) {
  * 后续 0.11.10-i/j 的背景遮罩策略等也归到此区。
  */
 function renderScreenshotDetail(cfg) {
-  cfg = cfg || { prewarmOcr: true, scrollDebug: false };
-  return `<div class="chord-screenshot-detail">
-    <div class="chord-field">
-      <label class="setting-label chord-field-label">${t("chord.screenshot.prewarm_ocr.label")}
-        <span class="field-hint-icon" title="${escapeAttr(t("chord.screenshot.prewarm_ocr.hint"))}">ⓘ</span>
-      </label>
-      <label class="switch switch-sm">
-        <input type="checkbox" class="screenshot-field" data-field="prewarm_ocr" ${cfg.prewarmOcr !== false ? "checked" : ""} />
-        <span class="slider"></span>
-      </label>
-    </div>
-    <div class="chord-field">
-      <label class="setting-label chord-field-label">${t("chord.screenshot.scroll_debug.label")}
-        <span class="field-hint-icon" title="${escapeAttr(t("chord.screenshot.scroll_debug.hint"))}">ⓘ</span>
-      </label>
-      <label class="switch switch-sm">
-        <input type="checkbox" class="screenshot-field" data-field="scroll_debug" ${cfg.scrollDebug === true ? "checked" : ""} />
-        <span class="slider"></span>
-      </label>
-    </div>
-  </div>`;
+cfg = cfg || { prewarmOcr: true, scrollDebug: false, ocrDebug: false };
+return `<div class="chord-screenshot-detail">
+<div class="chord-field">
+<label class="setting-label chord-field-label">${t("chord.screenshot.prewarm_ocr.label")}
+<span class="field-hint-icon" title="${escapeAttr(t("chord.screenshot.prewarm_ocr.hint"))}">ⓘ</span>
+</label>
+<label class="switch switch-sm">
+<input type="checkbox" class="screenshot-field" data-field="prewarm_ocr" ${cfg.prewarmOcr !== false ? "checked" : ""} />
+<span class="slider"></span>
+</label>
+</div>
+<div class="chord-field">
+<label class="setting-label chord-field-label">${t("chord.screenshot.ocr_debug.label")}
+<span class="field-hint-icon" title="${escapeAttr(t("chord.screenshot.ocr_debug.hint"))}">ⓘ</span>
+</label>
+<label class="switch switch-sm">
+<input type="checkbox" class="screenshot-field" data-field="ocr_debug" ${cfg.ocrDebug === true ? "checked" : ""} />
+<span class="slider"></span>
+</label>
+</div>
+<div class="chord-field">
+<label class="setting-label chord-field-label">${t("chord.screenshot.scroll_debug.label")}
+<span class="field-hint-icon" title="${escapeAttr(t("chord.screenshot.scroll_debug.hint"))}">ⓘ</span>
+</label>
+<label class="switch switch-sm">
+<input type="checkbox" class="screenshot-field" data-field="scroll_debug" ${cfg.scrollDebug === true ? "checked" : ""} />
+<span class="slider"></span>
+</label>
+</div>
+</div>`;
 }
 
 /**
@@ -467,9 +492,10 @@ async function saveScreenshotDetail(container) {
   const detail = container.querySelector(".chord-screenshot-detail");
   if (!detail) return;
   try {
-    const prewarmOcr = detail.querySelector('[data-field="prewarm_ocr"]')?.checked !== false;
-    const scrollDebug = detail.querySelector('[data-field="scroll_debug"]')?.checked === true;
-    await saveConfig("screenshot_config", { prewarmOcr, scrollDebug });
+const prewarmOcr = detail.querySelector('[data-field="prewarm_ocr"]')?.checked !== false;
+const scrollDebug = detail.querySelector('[data-field="scroll_debug"]')?.checked === true;
+const ocrDebug = detail.querySelector('[data-field="ocr_debug"]')?.checked === true;
+await saveConfig("screenshot_config", { prewarmOcr, scrollDebug, ocrDebug });
   } catch (e) {
     console.error("save screenshot detail failed:", e);
   }

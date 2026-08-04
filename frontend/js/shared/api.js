@@ -213,6 +213,11 @@ export function ocrImage(pngData) {
   return invoke("ocr_image", { pngData });
 }
 
+/** 0.17.5：OCR 诊断——返回已安装语言列表、引擎语言、中文包状态。 */
+export function ocrDiagnose() {
+  return invoke("ocr_diagnose");
+}
+
 /**
  * 0.11.9-d：翻译文本——直调 translate 插件的 tool（绕过 AI 路径）。
  * @param {string} text 待翻译文本

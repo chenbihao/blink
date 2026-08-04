@@ -334,16 +334,19 @@ impl ContextConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScreenshotConfig {
-    #[serde(default = "default_true")]
-    pub prewarm_ocr: bool,
-    /// 长截图诊断开关（0.17.x 从 localStorage 迁移到 SQLite 配置库）。
-    #[serde(default)]
-    pub scroll_debug: bool,
+#[serde(default = "default_true")]
+pub prewarm_ocr: bool,
+/// 长截图诊断开关（0.17.x 从 localStorage 迁移到 SQLite 配置库）。
+#[serde(default)]
+pub scroll_debug: bool,
+/// OCR 诊断开关（0.17.5：开启后截图工具栏显示 OCR 诊断按钮）。
+#[serde(default)]
+pub ocr_debug: bool,
 }
 
 impl Default for ScreenshotConfig {
     fn default() -> Self {
-        Self { prewarm_ocr: true, scroll_debug: false }
+        Self { prewarm_ocr: true, scroll_debug: false, ocr_debug: false }
     }
 }
 

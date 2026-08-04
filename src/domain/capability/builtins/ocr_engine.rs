@@ -231,6 +231,16 @@ impl std::fmt::Display for OcrError {
 pub trait OcrBackend: Send + Sync {
     /// 识别 PNG 图片中的文字
     async fn recognize(&self, png_data: &[u8]) -> Result<OcrResult, OcrError>;
+
+    /// 返回设备已安装的 OCR 语言 BCP-47 tag 列表（0.17.5 诊断用）。
+    async fn available_languages(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// 返回当前引擎使用的语言 tag（None = fallback；0.17.5 诊断用）。
+    async fn engine_language(&self) -> Option<String> {
+        None
+    }
 }
 
 // ── 全局注入 ───────────────────────────────────────────────────────────────
@@ -305,6 +315,14 @@ impl OcrBackend for WindowsOcrBackendAdapter {
 
         Ok(map_raw_to_domain(raw))
     }
+
+    async fn available_languages(&self) -> Vec<String> {
+        self.inner.available_languages().await
+    }
+
+    async fn engine_language(&self) -> Option<String> {
+        self.inner.engine_language().await
+    }
 }
 
 /// 将 infra 原始 DTO 映射为领域类型。
@@ -371,6 +389,7 @@ fn map_raw_to_domain(raw: crate::infra::platform::ocr::RawOcrResult) -> OcrResul
 /// 测试用假 OCR 后端。构造时配置固定返回值。
 ///
 /// 0.11.9-b：支持配置 `words` 让 Capability 层测试 word 级链路。
+/// 0.17.5：支持配置 `available_langs` / `engine_lang` 测试诊断面板。
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct FakeOcrBackend {
@@ -378,6 +397,8 @@ pub struct FakeOcrBackend {
     lines: Vec<OcrLine>,
     words: Vec<OcrWord>,
     err: Option<String>,
+    available_langs: Vec<String>,
+    engine_lang: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -388,6 +409,8 @@ impl FakeOcrBackend {
             lines: Vec::new(),
             words: Vec::new(),
             err: None,
+            available_langs: Vec::new(),
+            engine_lang: None,
         }
     }
 
@@ -407,7 +430,20 @@ impl FakeOcrBackend {
             lines: Vec::new(),
             words: Vec::new(),
             err: Some(msg.into()),
+            available_langs: Vec::new(),
+            engine_lang: None,
         }
+    }
+
+    /// 配置诊断返回值（0.17.5）。
+    pub fn with_available_langs(mut self, langs: Vec<String>) -> Self {
+        self.available_langs = langs;
+        self
+    }
+
+    pub fn with_engine_lang(mut self, lang: Option<String>) -> Self {
+        self.engine_lang = lang;
+        self
     }
 }
 
@@ -423,6 +459,14 @@ impl OcrBackend for FakeOcrBackend {
             words: self.words.clone(),
             text_angle: None,
         })
+    }
+
+    async fn available_languages(&self) -> Vec<String> {
+        self.available_langs.clone()
+    }
+
+    async fn engine_language(&self) -> Option<String> {
+        self.engine_lang.clone()
     }
 }
 
