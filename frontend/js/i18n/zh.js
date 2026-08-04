@@ -284,6 +284,7 @@ export const zh = {
     "about.update.download": "前往下载",
     "about.update.latest": "已是最新版本",
     "about.update.failed": "检查失败，请稍后重试",
+    "about.update.no_notes": "此版本无更新日志",
 
     // ── 网络 Tab（动态渲染）──
     "network.title": "全局网络代理",

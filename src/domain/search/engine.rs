@@ -241,6 +241,9 @@ pub struct QueryContext<'a> {
     /// 0.11.8 起 `BuiltinEngine` 也消费此字段——内置参数化动作（如 `open_url`）的
     /// context 触发可按 binding 粒度 disable，不再只能整条禁用。其他引擎不消费。
     pub disabled_context_bindings: &'a [String],
+    /// 界面语言（BCP-47 tag，如 "zh-CN" / "en-US"）。0.17.1：`SystemShortcutEngine`
+    /// 按此选择中/英文显示名。其他引擎不消费此字段。
+    pub language: &'a str,
 }
 
 /// 搜索引擎:一路召回源。

@@ -475,14 +475,15 @@ impl SearchService {
                 let snapshot = ContextSnapshot::default();
                 let disabled: Vec<String> = Vec::new();
                 let disabled_ctx: Vec<String> = Vec::new();
-                let search_ctx = QueryContext {
-                    history: &history,
-                    snapshot: &snapshot,
-                    disabled_builtin_actions: &disabled,
-                    disabled_context_bindings: &disabled_ctx,
-                };
-                let items = engine.search(query, &search_ctx).await;
-                return items.into_iter().take(max_results).collect();
+let search_ctx = QueryContext {
+history: &history,
+snapshot: &snapshot,
+disabled_builtin_actions: &disabled,
+disabled_context_bindings: &disabled_ctx,
+language: "zh",
+};
+let items = engine.search(query, &search_ctx).await;
+return items.into_iter().take(max_results).collect();
             }
         }
         Vec::new()
@@ -512,14 +513,16 @@ impl SearchService {
         let snapshot = self.snapshot.read().unwrap().clone();
         let disabled = self.disabled_builtin_actions.read().unwrap().clone();
         let disabled_ctx = self.disabled_context_bindings.read().unwrap().clone();
-        let search_ctx = QueryContext {
-            history: &history,
-            snapshot: &snapshot,
-            disabled_builtin_actions: &disabled,
-            disabled_context_bindings: &disabled_ctx,
-        };
+let language = self.language.read().unwrap().clone();
+let search_ctx = QueryContext {
+history: &history,
+snapshot: &snapshot,
+disabled_builtin_actions: &disabled,
+disabled_context_bindings: &disabled_ctx,
+language: &language,
+};
 
-        // 路由决策（0.8.4：route 断 Awareness 依赖）
+// 路由决策
         let ranking_hint = self.last_ranking_hint.lock().unwrap().clone();
         let route = self.router.route(q, &history, ranking_hint.as_ref()).await;
         let route = self.filter_route(route);
@@ -1386,13 +1389,14 @@ impl SearchService {
                     // async lane 引擎（file/mock）不消费 disabled_builtin_actions /
                     // disabled_context_bindings；这两个字段仅 BuiltinEngine（sync lane）读，
                     // 此处传空 slice 满足契约。
-                    let ctx = QueryContext {
-                        history: &history,
-                        snapshot: &snapshot,
-                        disabled_builtin_actions: &[],
-                        disabled_context_bindings: &[],
-                    };
-                    let items = engine.search(&q, &ctx).await;
+let ctx = QueryContext {
+history: &history,
+snapshot: &snapshot,
+disabled_builtin_actions: &[],
+disabled_context_bindings: &[],
+language: "zh",
+};
+let items = engine.search(&q, &ctx).await;
                     if seq == latest_seq.load(Ordering::SeqCst) && !items.is_empty() {
                         tracing::trace!(
                             engine = engine.id(),

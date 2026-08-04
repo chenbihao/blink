@@ -17,12 +17,15 @@ use std::time::Instant;
 
 use windows::Win32::Foundation::SIZE;
 use windows::Win32::Graphics::Gdi::{
-    BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, GetDC, GetDIBits, GetObjectW, ReleaseDC,
+    BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC, GetDIBits,
+    GetObjectW, ReleaseDC,
 };
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows::Win32::UI::Shell::{
-    IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
+    IShellItemImageFactory, SHCreateItemFromParsingName, SHGSI_ICON, SHGSI_SMALLICON,
+    SHGetStockIconInfo, SHSTOCKICONID, SHSTOCKICONINFO, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
 };
+use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, ICONINFO};
 use windows::core::PCWSTR;
 
 // 0.12.0 §2.2.3 分层修复：DB schema + CRUD 迁到 infra/data/icon_cache.rs。
@@ -135,6 +138,173 @@ pub fn get_icon_png(path: &str) -> Option<Vec<u8>> {
     result
 }
 
+/// 获取 stock icon PNG 字节（带两层缓存）。
+/// 供 `blink-icon` 协议 handler `stock:` 前缀分支调用。
+/// 0.17.1 §3.7：系统快捷方式图标（回收站、控制面板等）。
+pub fn get_stock_icon_png(stock_id: u32) -> Option<Vec<u8>> {
+    let cache_key = format!("stock:{stock_id}");
+
+    // Layer 1: 内存 LRU 缓存
+    {
+        if let Ok(mut cache) = ICON_CACHE.lock() {
+            if let Some(map) = cache.as_mut() {
+                if let Some(entry) = map.get_mut(&cache_key) {
+                    entry.last_access = Instant::now();
+                    return entry.data.clone();
+                }
+            }
+        }
+    }
+
+    // Layer 2: SQLite 持久化缓存
+    if let Some(Some(blob)) = crate::infra::data::icon_cache::load(&cache_key) {
+        if let Ok(mut cache) = ICON_CACHE.lock() {
+            let map = cache.get_or_insert_with(HashMap::new);
+            map.insert(
+                cache_key.clone(),
+                CacheEntry {
+                    data: Some(blob.clone()),
+                    last_access: Instant::now(),
+                },
+            );
+        }
+        return Some(blob);
+    }
+
+    // 缓存未命中：提取 stock icon
+    let result = extract_stock_icon(stock_id);
+
+    if let Some(ref png) = result {
+        crate::infra::data::icon_cache::save(&cache_key, png);
+    }
+
+    if let Ok(mut cache) = ICON_CACHE.lock() {
+        let map = cache.get_or_insert_with(HashMap::new);
+        if map.len() >= MEMORY_CACHE_CAPACITY {
+            if let Some(oldest_key) = map
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_access)
+                .map(|(k, _)| k.clone())
+            {
+                map.remove(&oldest_key);
+            }
+        }
+        map.insert(
+            cache_key,
+            CacheEntry {
+                data: result.clone(),
+                last_access: Instant::now(),
+            },
+        );
+    }
+
+    result
+}
+
+/// 用 Win32 `SHGetStockIconInfo` 提取系统 stock icon，编码为 PNG 字节。
+///
+/// stock_id 值来自 SHSTOCKICONID 枚举（如 0x1F = SIID_RECYCLER 回收站）。
+/// 失败返回 None。
+fn extract_stock_icon(stock_id: u32) -> Option<Vec<u8>> {
+    let _com_guard = ComGuard::init();
+
+    unsafe {
+        let mut sii = SHSTOCKICONINFO {
+            cbSize: std::mem::size_of::<SHSTOCKICONINFO>() as u32,
+            ..Default::default()
+        };
+
+        // SHGSI_ICON = 获取 HICON；SHGSI_SMALLICON = 16px 小图标
+        let flags = SHGSI_ICON | SHGSI_SMALLICON;
+
+        // 将 u32 转为 SHSTOCKICONID（windows crate 中是 repr(i32) enum）
+        let siid = SHSTOCKICONID(stock_id as i32);
+
+        SHGetStockIconInfo(siid, flags, &mut sii).ok()?;
+
+        let hicon = sii.hIcon;
+        if hicon.is_invalid() {
+            return None;
+        }
+
+        // HICON -> ICONINFO -> HBITMAP -> BGRA pixels -> PNG
+        let mut icon_info = ICONINFO::default();
+        GetIconInfo(hicon, &mut icon_info).ok()?;
+
+        let hbitmap = if !icon_info.hbmColor.is_invalid() {
+            icon_info.hbmColor
+        } else {
+            icon_info.hbmMask
+        };
+
+        // 读取位图尺寸
+        let mut bmp = BITMAP::default();
+        let got = GetObjectW(
+            hbitmap.into(),
+            std::mem::size_of::<BITMAP>() as i32,
+            Some(&mut bmp as *mut BITMAP as *mut _),
+        );
+        if got == 0 {
+            let _ = DeleteObject(hbitmap.into());
+            let _ = DestroyIcon(hicon);
+            return None;
+        }
+
+        let width = bmp.bmWidth;
+        let height = bmp.bmHeight;
+        if width <= 0 || height <= 0 {
+            let _ = DeleteObject(hbitmap.into());
+            let _ = DestroyIcon(hicon);
+            return None;
+        }
+
+        // GetDIBits 取 top-down 32 位 BGRA 像素
+        let mut bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                biHeight: -height, // 负 = top-down
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let pixel_count = (width * height) as usize;
+        let mut buf = vec![0u8; pixel_count * 4];
+
+        let hdc = GetDC(None);
+        let scanlines = GetDIBits(
+            hdc,
+            hbitmap,
+            0,
+            height as u32,
+            Some(buf.as_mut_ptr() as *mut _),
+            &mut bmi,
+            DIB_RGB_COLORS,
+        );
+        ReleaseDC(None, hdc);
+
+        // 清理 GDI 资源
+        let _ = DeleteObject(icon_info.hbmColor.into());
+        let _ = DeleteObject(icon_info.hbmMask.into());
+        let _ = DestroyIcon(hicon);
+
+        if scanlines != height as i32 {
+            return None;
+        }
+
+        // BGRA -> RGBA
+        for px in buf.chunks_exact_mut(4) {
+            px.swap(0, 2);
+        }
+
+        encode_rgba_to_png(&buf, width as u32, height as u32)
+    }
+}
+
 /// COM 初始化 RAII guard：仅在本次确实初始化成功时负责 `CoUninitialize`。
 struct ComGuard {
     should_uninit: bool,
@@ -229,9 +399,14 @@ fn extract_icon_png(path: &str, size: i32) -> Option<Vec<u8>> {
     let _com_guard = ComGuard::init();
 
     // shell:AppsFolder 路径（UWP/MSIX 应用，由 scan_apps_folder 生成）
+    // 0.17.1：shell: 前缀的命名空间路径（shell:RecycleBinFolder 等）也跳过 exists() 检查
     let shell_path =
         if path.starts_with("shell:AppsFolder\\") || path.starts_with("shell:AppsFolder/") {
             // 已经是 shell 路径，直接使用（归一化为反斜杠）
+            path.replace('/', "\\")
+        } else if path.starts_with("shell:") {
+            // Shell 命名空间路径（shell:RecycleBinFolder / shell:ControlPanelFolder 等）
+            // SHCreateItemFromParsingName 能解析这些路径，跳过 exists() 检查
             path.replace('/', "\\")
         } else if is_uwp_package_path(path) {
             // UWP/MSIX 包路径（权限受限，Path::exists() 可能返回 false）

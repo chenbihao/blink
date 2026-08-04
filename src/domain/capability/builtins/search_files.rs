@@ -115,6 +115,7 @@ impl Capability for SearchFiles {
             snapshot: &snapshot,
             disabled_builtin_actions: &disabled,
             disabled_context_bindings: &[],
+            language: "zh",
         };
 
         // 铁则 1：用 ctx.deadline 包裹 search——Everything 不响应时不在 deadline 上挂死。

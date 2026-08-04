@@ -1758,6 +1758,7 @@
             <button id="about-check-update" class="about-check-btn" data-i18n="about.update.check">检查更新</button>
             <span id="about-update" class="about-update" hidden></span>
           </div>
+          <div id="about-release-notes" class="release-notes" hidden></div>
           <div class="setting-row">
             <label class="setting-label" data-i18n="about.stack.label">技术栈</label>
             <span class="value">Rust 2024 + Tauri 2 + WebView2</span>
@@ -1773,6 +1774,9 @@
         </div>
       </main>
     </div>
+    <!-- Vendor（Markdown 渲染依赖，about tab release notes 用） -->
+    <script src="vendor/marked.min.js"></script>
+    <script src="vendor/purify.min.js"></script>
     <script type="module" src="js/settings/index.js"></script>
   </body>
 </html>

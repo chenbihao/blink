@@ -48,8 +48,15 @@ fn main() {
             // tracing::debug!(%path, "blink-icon: 收到图标请求");
             tauri::async_runtime::spawn(async move {
                 let path_for_log = path.clone();
+                // 0.17.1：stock: 前缀走 SHGetStockIconInfo 路径（系统文件夹图标）
                 let icon = tauri::async_runtime::spawn_blocking(move || {
-                    crate::infra::platform::icon::get_icon_png(&path)
+                    if let Some(rest) = path.strip_prefix("stock:") {
+                        rest.parse::<u32>()
+                            .ok()
+                            .and_then(crate::infra::platform::icon::get_stock_icon_png)
+                    } else {
+                        crate::infra::platform::icon::get_icon_png(&path)
+                    }
                 })
                 .await
                 .ok()

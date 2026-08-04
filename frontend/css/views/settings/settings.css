@@ -204,11 +204,76 @@ h2:active {
 }
 
 .about-update-link:hover {
-  text-decoration: underline;
+text-decoration: underline;
+}
+
+/* 0.17.1：release notes 展示区 */
+.release-notes {
+margin-top: var(--space-sm, 8px);
+margin-bottom: var(--space-sm, 8px);
+max-height: 300px;
+overflow-y: auto;
+border: 1px solid var(--border);
+border-radius: var(--radius, 6px);
+padding: var(--space-md, 12px);
+font-size: var(--text-sm, 13px);
+line-height: 1.6;
+color: var(--text-secondary, var(--text-base));
+}
+
+.release-notes :is(h1, h2, h3, h4, h5, h6) {
+margin: 0.5em 0 0.3em;
+font-size: var(--text-base, 14px);
+font-weight: 600;
+color: var(--text-primary, var(--text));
+}
+
+.release-notes p {
+margin: 0.3em 0;
+}
+
+.release-notes ul,
+.release-notes ol {
+margin: 0.3em 0;
+padding-left: 1.5em;
+}
+
+.release-notes li {
+margin: 0.15em 0;
+}
+
+.release-notes code {
+font-family: var(--font-mono, monospace);
+font-size: 0.9em;
+background: var(--bg-elevated, rgba(128, 128, 128, 0.1));
+padding: 1px 4px;
+border-radius: 3px;
+}
+
+.release-notes pre {
+margin: 0.5em 0;
+padding: var(--space-sm, 8px);
+background: var(--bg-elevated, rgba(128, 128, 128, 0.1));
+border-radius: var(--radius, 6px);
+overflow-x: auto;
+}
+
+.release-notes pre code {
+background: none;
+padding: 0;
+}
+
+.release-notes a {
+color: var(--accent);
+text-decoration: none;
+}
+
+.release-notes a:hover {
+text-decoration: underline;
 }
 /* ═══════════════════════════════════════════════════════════════════════════
-   settings-components.css — 通用 UI 组件：setting-row、按钮、表单控件、开关
-   ═══════════════════════════════════════════════════════════════════════════ */
+settings-components.css — 通用 UI 组件：setting-row、按钮、表单控件、开关
+═══════════════════════════════════════════════════════════════════════════ */
 
 /* ── 设置行 ───────────────────────────────────────────────────────────────── */
 

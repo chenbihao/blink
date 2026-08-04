@@ -4,13 +4,18 @@
  *
  * 0.9.5 拆分时误用 get_about_info（后端无此命令，报 not found）+ 字段名
  * (tauri_version/webview_version) 与后端 get_app_info 返回不匹配；0.9.5.1 还原原版。
+ * 0.17.1：新增 release notes 展示（Markdown 渲染）
  */
 import { invoke } from "../../shared/tauri.js";
+import { initMarkdown, renderMarkdown } from "../../shared/markdown.js";
+import { t } from "../../i18n/index.js";
 
 /**
  * 初始化关于 Tab
  */
 export function initAboutTab() {
+  // 初始化 Markdown 渲染器（vendor 脚本在 settings.html 底部加载）
+  initMarkdown();
   loadAboutInfo();
   initCheckUpdate();
 }
@@ -43,12 +48,18 @@ async function loadAboutInfo() {
 function initCheckUpdate() {
   const btn = document.getElementById("about-check-update");
   const updateEl = document.getElementById("about-update");
+  const notesEl = document.getElementById("about-release-notes");
   if (!btn || !updateEl) return;
 
   btn.addEventListener("click", async () => {
     btn.disabled = true;
     updateEl.hidden = false;
     updateEl.textContent = "…";
+    // 重置 release notes 区域
+    if (notesEl) {
+      notesEl.hidden = true;
+      notesEl.innerHTML = "";
+    }
     try {
       const r = await invoke("check_update");
       if (r.error) {
@@ -62,6 +73,17 @@ function initCheckUpdate() {
           ? ` · <a href="#" class="external-link about-update-link" data-url="${r.release_url}">查看</a>`
           : "";
         updateEl.innerHTML = `新版本 ${r.latest_version} 可用${link}`;
+        // 0.17.1：展示 release notes（Markdown 渲染）
+        if (notesEl) {
+          const notes = r.release_notes || "";
+          if (notes.trim()) {
+            renderMarkdown(notes, { container: notesEl });
+            notesEl.hidden = false;
+          } else {
+            notesEl.textContent = t("about.update.no_notes");
+            notesEl.hidden = false;
+          }
+        }
       } else {
         updateEl.textContent = `已是最新版本（${r.current_version}）`;
       }

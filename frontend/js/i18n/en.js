@@ -283,6 +283,7 @@ export const en = {
     "about.update.download": "Download",
     "about.update.latest": "Already up to date",
     "about.update.failed": "Check failed, please try later",
+    "about.update.no_notes": "No release notes for this version",
 
     // ── Network tab (dynamic) ──
     "network.title": "Global Network Proxy",

@@ -156,6 +156,7 @@ fn run_search(handle: &tauri::AppHandle, query: &str, json: bool) -> i32 {
                     snapshot: &snapshot,
                     disabled_builtin_actions: &disabled,
                     disabled_context_bindings: &[],
+                    language: "zh",
                 };
                 engine.search(query, &ctx).await
             }

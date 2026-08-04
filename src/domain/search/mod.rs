@@ -189,6 +189,7 @@ pub(crate) mod clipboard_engine;
 pub mod file_engine;
 mod mock_slow_engine;
 mod start_menu_engine;
+mod system_shortcuts;
 use builtin_engine::BuiltinEngine;
 // BuiltinActionInfo + list_builtin_actions 由 commands::list_builtin_actions 用（设置页）。
 // list_builtin_context_bindings 由 commands::list_context_bindings 合并 builtin 一路用（0.11.8）。
@@ -198,6 +199,7 @@ use clipboard_engine::ClipboardEngine;
 use file_engine::FileEngine;
 use mock_slow_engine::MockSlowEngine;
 use start_menu_engine::StartMenuEngine;
+use system_shortcuts::SystemShortcutEngine;
 
 // 多路搜索服务:路由 + 融合 + 渐进式调度
 mod service;
@@ -229,6 +231,8 @@ pub fn build_engines(
         std::sync::Arc::new(ClipboardEngine::new(pool, cache_pool)),
         // StartMenuEngine（可配置）
         std::sync::Arc::new(StartMenuEngine::with_config(configs.start_menu)),
+        // SystemShortcutEngine（0.17.1：系统快捷方式，始终启用）
+        std::sync::Arc::new(SystemShortcutEngine),
     ];
 
     // FileEngine（可配置，始终创建以支持热更新；search 内部检查 enabled）

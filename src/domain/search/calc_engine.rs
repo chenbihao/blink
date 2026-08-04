@@ -85,6 +85,7 @@ mod tests {
             snapshot: &snapshot,
             disabled_builtin_actions: &[],
             disabled_context_bindings: &[],
+            language: "zh",
         };
         // 0.14.7 W1: 改用 #[tokio::test]，domain 不再依赖 tauri runtime
         engine.search(q, &ctx).await

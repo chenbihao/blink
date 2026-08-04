@@ -342,6 +342,8 @@ pub async fn check_update(app: tauri::AppHandle) -> serde_json::Value {
         .as_str()
         .unwrap_or(&format!("https://github.com/{repo_path}/releases/latest"))
         .to_string();
+    // 0.17.1 §3.8：提取 release notes（GitHub API release body 字段）
+    let release_notes = body["body"].as_str().unwrap_or("").to_string();
 
     let has_update = version_gt(latest, current);
     if has_update {
@@ -355,6 +357,7 @@ pub async fn check_update(app: tauri::AppHandle) -> serde_json::Value {
         "current_version": current,
         "latest_version": latest,
         "release_url": release_url,
+        "release_notes": release_notes,
     })
 }
 
