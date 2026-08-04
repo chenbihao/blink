@@ -12,6 +12,9 @@ import * as statusbar from "./statusbar.js";
 import { invoke } from "../shared/tauri.js";
 import { renderIcon } from "../shared/icon.js";
 
+// 0.17.6: showAiConfirm / getAiConfirmData / updateAiStream 已删除。
+// 主窗口 AI 改走 ChatService，流式渲染由 ai-mode.js 负责。
+
 /** 每页条数（对齐 Alt+1~9：每页都能用数字键选中）。 */
 let PAGE_SIZE = 9;
 
@@ -496,125 +499,13 @@ function itemData(li) {
   } catch (e) {
     console.error("actions parse failed:", e);
   }
-  // AI 确认卡片数据
-  let aiConfirm = null;
-if (li.dataset.aiConfirmActionName) {
-try {
-aiConfirm = {
-confirmId: parseInt(li.dataset.aiConfirmId, 10),
-actionName: li.dataset.aiConfirmActionName,
-arguments: JSON.parse(li.dataset.aiConfirmArguments || "{}"),
-};
-    } catch (e) {
-      console.error("aiConfirmArguments parse failed:", e);
-    }
-  }
+  // 0.17.6: AI 确认卡片相关代码已删除（主窗口 AI 改走 ai-mode.js）
   return {
     lnkPath: li.dataset.lnkPath,
     calcValue: li.dataset.calcValue,
     isError: li.dataset.isError === "true",
-    aiConfirm,
     actions,
   };
-}
-
-/**
- * AI Dangerous 动作确认卡片(0.9.2 第二步)。
- * 后端 emit `blink://ai-confirm-action` → 前端替换 AI 占位为确认卡片,
- * 用户 Enter 确认执行 / Esc 取消。
- *
- * @param {{seq: number, action_name: string, action_title: string, arguments: object, danger_class: string}} payload
- */
-export function showAiConfirm(payload) {
-  // 替换 allItems 中的 AI 占位为确认卡片
-  const idx = allItems.findIndex(
-    (it) => it.source === "ai" && it.is_placeholder
-  );
-  const confirmItem = {
-    name: payload.action_title,
-    pinyinName: "",
-    pinyinFull: "",
-    lnkPath: "",
-    isCalc: false,
-    score: 0.8,
-    isPlaceholder: false,
-    isError: false,
-    source: "ai",
-    description: "Enter 确认执行 · Esc 取消",
-    actions: [],
-    // 确认卡片专用字段(不进后端,纯前端)
-    _aiConfirm: {
-      confirmId: payload.confirm_id,
-      actionName: payload.action_name,
-      arguments: payload.arguments,
-    },
-  };
-  if (idx >= 0) {
-    allItems[idx] = confirmItem;
-  } else {
-    allItems.unshift(confirmItem);
-  }
-  // 0.17.0 根因 1 修复：renderPage 前重置 selected 指向确认卡片，
-  // 确保 Enter 激活的是确认卡片而非其他搜索结果。
-  selected = idx >= 0 ? idx : 0;
-  page = 0;
-  renderPage();
-}
-
-/** 获取当前 AI 确认卡片的数据(供 actions.js 调用)。 */
-export function getAiConfirmData() {
-  const li = pageLis[selected];
-  if (!li) return null;
-  return li.dataset.aiConfirmId
-    ? {
-        confirmId: parseInt(li.dataset.aiConfirmId, 10),
-        actionName: li.dataset.aiConfirmActionName,
-        arguments: li.dataset.aiConfirmArguments,
-      }
-    : null;
-}
-
-/**
- * AI 流式 chunk 更新——后端逐段推送文本,前端增量替换 AI 结果项的 name。
- * @param {{seq: number, delta: string, accumulated: string, done: boolean}} payload
- */
-export function updateAiStream(payload) {
-  // 找 AI 占位或已有的 AI 结果项
-  const idx = allItems.findIndex(
-    (it) => it.source === "ai" && (it.is_placeholder || !it.is_error)
-  );
-  if (idx < 0) return;
-
-  if (payload.done) {
-    // 流结束——替换为完整结果项(与 ai_result_entry 对齐,支持 Copy action)
-    allItems[idx] = {
-      name: payload.accumulated,
-      pinyinName: "",
-      pinyinFull: "",
-      lnkPath: "",
-      isCalc: false,
-      score: 0.7,
-      isPlaceholder: false,
-      isError: false,
-      source: "ai",
-      description: "回车复制回答",
-      actions: [{
-        kind: "copy",
-        payload: payload.accumulated,
-        hint: "复制回答",
-      }],
-    };
-  } else {
-    // 增量更新——只改 name,保持 placeholder 状态(前端样式靠 .is-loading 控制)
-    allItems[idx].name = payload.accumulated;
-    // 首次有内容时去掉 placeholder 标记(让 AI 文本样式生效)
-    if (allItems[idx].is_placeholder && payload.accumulated.length > 0) {
-      allItems[idx].is_placeholder = false;
-      allItems[idx]._isStreaming = true; // 标记流式进行中——clear 机制依赖此标记
-      allItems[idx].score = 0.7;
-    }
-  }
-  renderPage();
 }
 
 function updateSelection() {

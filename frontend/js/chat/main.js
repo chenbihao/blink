@@ -16,9 +16,11 @@ import { initSidebar, refreshSidebar, showSidebar, hideSidebar, toggleSidebar, s
 import { applyThemeFromConfig } from "../shared/theme.js";
 import { listen, invoke, getCurrentWindow } from "../shared/tauri.js";
 import { EVENTS } from "../shared/event-names.js";
+import { promoteEphemeralConversation } from "../shared/api.js";
 import { initComposerBarPopup, invalidateComposerBarCache, refreshPopupIfVisible } from "./composer-bar-popup.js";
 // invalidateComposerBarCache 仍在 handleContextStatus 中使用
 // 0.12.4 §6.5：openSettings 直接用 invoke，不再需要动态 import
+import { t } from "../i18n/index.js";
 
 /** 流式渲染节流：requestAnimationFrame 句柄 */
 let rafHandle = 0;
@@ -92,6 +94,18 @@ bindLinkOpener();
     onExport: handleExportConversation,
   });
 
+  // 0.17.6a: 临时对话按钮
+  const ephemeralBtn = document.getElementById("chat-sidebar-ephemeral");
+  if (ephemeralBtn) {
+    ephemeralBtn.addEventListener("click", () => handleNewEphemeralConversation());
+  }
+
+  // 0.17.6a: "转为持久"按钮
+  const promoteBtn = document.getElementById("chat-promote-ephemeral");
+  if (promoteBtn) {
+    promoteBtn.addEventListener("click", () => handlePromoteEphemeral());
+  }
+
   // 注册事件监听
   await ipc.listenChatStream(handleStreamEvent);
   await ipc.listenChatConfirm(handleConfirmEvent);
@@ -104,6 +118,14 @@ bindLinkOpener();
   await ipc.listenVoiceError(handleVoiceError);
   await ipc.listenVoiceLevel(handleVoiceLevel);
   await ipc.listenVoiceStatus(handleVoiceStatus);
+
+  // 0.17.6a: promote 临时对话后，后端 emit CHAT_LOAD_CONVERSATION 通知切换
+  listen(EVENTS.CHAT_LOAD_CONVERSATION, async (event) => {
+    const convId = event?.payload;
+    if (typeof convId === "string" && convId) {
+      await handleSwitchConversation(convId);
+    }
+  });
 
   // 初始状态：检查 provider 配置 + 加载模型选择器
   try {
@@ -190,8 +212,9 @@ async function handleSend(message, isEdit = false) {
   state.addMessage({ role: "user", content: message });
 
   // 0.12.4 §6.7：新对话首条消息 → 截断生成标题（编辑重发不触发）
+  // 0.17.6a: 临时对话跳过标题生成（不写 SQLite，promote 后由主窗口负责）
   const isNewConversation = !isEdit && state.messages.length === 1;
-  if (isNewConversation) {
+  if (isNewConversation && !state.ephemeralMode) {
     const truncatedTitle = message.slice(0, 20) + (message.length > 20 ? "…" : "");
     try {
       await ipc.renameChatConversation(state.conversationId, truncatedTitle);
@@ -214,7 +237,11 @@ async function handleSend(message, isEdit = false) {
   currentAssistantEl = components.createAssistantMessage();
 
   try {
-    const requestId = await ipc.chatPrompt(state.conversationId, message, state.currentGroupId);
+    // 0.17.6a: 临时对话模式传 ephemeral:true
+    const opts = state.ephemeralMode
+      ? { ephemeral: true, targetWindow: "chat" }
+      : {};
+    const requestId = await ipc.chatPrompt(state.conversationId, message, state.currentGroupId, opts);
     state.setActiveRequestId(requestId);
   } catch (e) {
     console.error("[chat] chatPrompt 失败:", e);
@@ -716,8 +743,60 @@ async function handleNewConversation(groupId = null) {
   await updateBreadcrumb("新对话");
   // 0.12.7 §6.5：新对话无提示词，隐藏横幅
   await updatePromptBanner(state.conversationId);
+  updateEphemeralBadge();
   refreshSidebar();
   focusInput();
+}
+
+// ── 临时对话（0.17.6a）──────────────────────────
+
+/**
+ * 新建临时对话。
+ * resetConversation + 标记 ephemeralMode=true + 显示"临时"badge。
+ * 不刷新侧边栏（临时对话不出现在持久化列表中）。
+ */
+async function handleNewEphemeralConversation() {
+  if (state.isStreaming) {
+    handleStop();
+  }
+  state.resetConversation();
+  state.setEphemeralMode(true);
+  components.clearMessages();
+  components.renderEmptyState(state.providerConfigured, openSettings);
+  await updateBreadcrumb(t("ai.ephemeral_title"));
+  await updatePromptBanner(state.conversationId);
+  updateEphemeralBadge();
+  // 不刷新侧边栏——临时对话不在列表中
+  focusInput();
+}
+
+/**
+ * 将当前临时对话提升为持久对话。
+ * 调用后端 promote_ephemeral_conversation 后退出临时模式。
+ */
+async function handlePromoteEphemeral() {
+  if (!state.ephemeralMode) return;
+  try {
+    await promoteEphemeralConversation(state.conversationId);
+    // promote 成功：后端已写入 SQLite + 打开对话窗口（已是当前窗口）
+    // 切换到持久模式（handleSwitchConversation 会被 CHAT_LOAD_CONVERSATION 事件触发）
+    state.setEphemeralMode(false);
+    updateEphemeralBadge();
+    refreshSidebar();
+  } catch (e) {
+    console.error("[chat] promote 临时对话失败:", e);
+    components.renderErrorMessage(String(e));
+  }
+}
+
+/**
+ * 更新标题栏"临时"badge + "转为持久"按钮显隐。
+ */
+function updateEphemeralBadge() {
+  const badge = document.getElementById("chat-ephemeral-badge");
+  const promoteBtn = document.getElementById("chat-promote-ephemeral");
+  if (badge) badge.hidden = !state.ephemeralMode;
+  if (promoteBtn) promoteBtn.hidden = !state.ephemeralMode;
 }
 
 /**
@@ -733,6 +812,7 @@ async function handleSwitchConversation(conversationId, groupId = null) {
   // 更新 state（0.12.4 §6.1：用 setter 替代直接赋值，避免 ES module 只读绑定 TypeError）
   state.setConversationId(conversationId);
   state.setCurrentGroupId(groupId);
+  state.setEphemeralMode(false); // 0.17.6a: 切换到持久对话，退出临时模式
   state.messages.length = 0;
   state.setStreaming(false);
   state.setActiveRequestId(null);
@@ -795,6 +875,7 @@ async function handleSwitchConversation(conversationId, groupId = null) {
   await updateBreadcrumb(conv?.title || "新对话");
   // 0.12.7 §6.5：查询并显示分组系统提示词
   await updatePromptBanner(conversationId);
+  updateEphemeralBadge(); // 0.17.6a: 确保 badge 状态正确
 
   focusInput();
 }

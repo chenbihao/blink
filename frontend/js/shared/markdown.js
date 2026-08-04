@@ -1,49 +1,35 @@
 /**
- * 共享 Markdown 渲染模块（0.16.2）。
+ * 共享 Markdown 渲染模块（0.17.6）。
  *
  * 从 chat/renderer.js 抽取，统一 Markdown 解析、净化与渲染。
  * 对话窗口、内容编辑器（0.16.3）和 0.16.8 便签窗口使用同一入口。
  *
+ * 0.17.6: marked + DOMPurify + highlight.js 替换为 Cherry Markdown Stream。
+ *
  * 依赖全局对象（各窗口 HTML 中通过 <script> 加载 vendor 脚本）：
- * - marked：GFM Markdown 解析
- * - DOMPurify：HTML 净化（XSS 防护）
- * - highlight.js（可选）：代码块语法高亮
+ * - Cherry Markdown Stream 版：`window.Cherry`（renderMarkdown / createStreamRenderer / createMarkdownEditor）
+ * - Cherry CSS：cherry-markdown.min.css（样式）
  *
  * 无 bundler 铁则：不 import vendor 脚本，通过 window.* 访问。
- * 主题适配：只产语义 class（hljs-* / markdown-body），不硬编码颜色。
  */
 
-/** @type {boolean} marked 和 DOMPurify 是否可用 */
+/** @type {boolean} Cherry Markdown 是否可用 */
 let ready = false;
 
-/** @type {boolean} highlight.js 是否可用 */
-let hljsReady = false;
-
 /**
- * 初始化渲染器。检查 vendor 全局对象是否存在，配置 marked。
+ * 初始化渲染器。检查 Cherry vendor 全局对象是否存在。
  * 各窗口入口在 DOM ready 后调用一次。
  */
 export function initMarkdown() {
-  ready = typeof window.marked !== "undefined" && typeof window.DOMPurify !== "undefined";
+  ready = typeof window.Cherry !== "undefined";
   if (!ready) {
-    console.warn("[shared/markdown] marked 或 DOMPurify 未加载，降级为纯文本渲染");
+    console.warn("[shared/markdown] Cherry Markdown 未加载，降级为纯文本渲染");
     return;
   }
-  hljsReady = typeof window.hljs !== "undefined";
-  if (!hljsReady) {
-    console.warn("[shared/markdown] highlight.js 未加载，代码块不语法高亮");
-  }
-  // 配置 marked：启用 GFM，禁用 header IDs
-  window.marked.setOptions({
-    gfm: true,
-    breaks: true,
-    headerIds: false,
-    mangle: false,
-  });
 }
 
 /**
- * 检查渲染器是否就绪（marked/DOMPurify 可用）。
+ * 检查渲染器是否就绪（Cherry 可用）。
  * @returns {boolean}
  */
 export function isReady() {
@@ -53,8 +39,8 @@ export function isReady() {
 /**
  * 安全渲染 Markdown 文本为 HTML。
  *
- * 所有 `<a>` 标签自动添加 `target="_blank" rel="noopener noreferrer"`，
- * 防止 Tauri WebView 内部导航导致应用崩溃。
+ * 使用 Cherry Markdown Stream 版的 `renderMarkdown` 方法。
+ * Cherry 已内置 XSS 防护 + 代码高亮，无需额外处理。
  *
  * @param {string} text 原始 Markdown 文本
  * @param {{ container?: HTMLElement }} [opts] 可选配置
@@ -71,28 +57,16 @@ export function renderMarkdown(text, opts) {
     return html;
   }
   try {
-    const rawHtml = window.marked.parse(text);
-    // DOMPurify sanitize：禁 script/img/on*，link 协议白名单
-    let html = window.DOMPurify.sanitize(rawHtml, {
-      ALLOWED_TAGS: [
-        "p", "br", "strong", "em", "del", "code", "pre", "blockquote",
-        "ul", "ol", "li", "a", "table", "thead", "tbody", "tr", "th", "td",
-        "hr", "h1", "h2", "h3", "h4", "h5", "h6", "details", "summary",
-      ],
-      ALLOWED_ATTR: ["href", "title", "target", "rel"],
-      ALLOW_DATA_ATTR: false,
-      // 协议白名单
-      ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto):)/i,
-    });
-    // 确保所有 <a> 在外部打开（Tauri WebView 内部导航会崩溃）
-    html = html.replace(/<a\s/g, '<a target="_blank" rel="noopener noreferrer" ');
+    const html = window.Cherry.renderMarkdown(text);
+    // Cherry 已内置 link target="_blank" 处理，但为确保兼容性，仍添加
+    const withBlankTarget = html.replace(/<a\s+href=/g, '<a target="_blank" href=');
     if (opts?.container) {
-      opts.container.innerHTML = html;
+      opts.container.innerHTML = withBlankTarget;
       return;
     }
-    return html;
+    return withBlankTarget;
   } catch (e) {
-    console.error("[shared/markdown] Markdown 渲染失败，降级纯文本:", e);
+    console.error("[shared/markdown] Cherry Markdown 渲染失败，降级纯文本:", e);
     const html = escapeHtml(text);
     if (opts?.container) {
       opts.container.innerHTML = html;
@@ -103,30 +77,80 @@ export function renderMarkdown(text, opts) {
 }
 
 /**
- * 对容器内所有 `pre code` 执行语法高亮。
+ * 创建流式渲染实例（0.17.6）。
  *
- * 在 finalizeAssistantMessage 后调用——流式渲染中不高亮（代码不完整，性能开销大）。
- * highlight.js 直接操作 DOM（添加 span.hljs-* class），不经过 DOMPurify——
- * hljs 只在已 sanitize 的 DOM 上添加语义 class，安全。
+ * Cherry Stream 版的 `createStreamRenderer` 返回带 `write(text)` 方法的实例，
+ * 自动补全未闭合 MD 片段，解决 marked 全量解析导致的闪烁问题。
  *
- * @param {HTMLElement} container 包含 pre code 的容器元素
+ * @param {HTMLElement} container 容器元素
+ * @returns {{ write(text: string): void }} 流式渲染实例
  */
-export function highlightCodeBlocks(container) {
-  if (!hljsReady || !container) return;
-  container.querySelectorAll("pre code").forEach((code) => {
-    // 避免重复高亮（流式 finalize + 历史消息复用同一 DOM 可能多次调）
-    if (code.dataset.highlighted) return;
-    try {
-      window.hljs.highlightElement(code);
-      code.dataset.highlighted = "yes";
-    } catch {
-      // 忽略单块高亮失败（语言未注册等）
-    }
-  });
+export function renderMarkdownStream(container) {
+  if (!ready || !container) {
+    console.warn("[shared/markdown] Cherry Markdown 未就绪，流式渲染降级");
+    // 返回一个简单的流式渲染器（回退到纯文本）
+    let accumulated = "";
+    return {
+      write(text) {
+        accumulated += text;
+        container.innerHTML = escapeHtml(accumulated);
+      },
+    };
+  }
+  try {
+    return window.Cherry.createStreamRenderer(container);
+  } catch (e) {
+    console.error("[shared/markdown] Cherry 流式渲染器创建失败:", e);
+    return {
+      write(text) {
+        // 降级：直接显示为纯文本
+        const textNode = document.createTextNode(text);
+        container.appendChild(textNode);
+        container.appendChild(document.createElement("br"));
+      },
+    };
+  }
 }
 
 /**
- * 纯文本转义（降级用）。转义 HTML 特殊字符 + 保留换行→<br>。
+ * 创建 Markdown 编辑器（Live Preview）（0.17.7a 预留）。
+ *
+ * Cherry 提供 `edit&preview` 模式：左侧编辑 MD 源文本 + 右侧实时渲染预览。
+ * 此方法为 0.17.7a Live Preview 编辑器预留，0.17.6 暂不使用。
+ *
+ * @param {HTMLElement} element 编辑器容器元素
+ * @param {{ theme?: string, defaultText?: string }} [opts] 可选配置
+ * @returns {{ getMarkdown(): string, destroy(): void }} 编辑器实例
+ */
+export function createMarkdownEditor(element, opts = {}) {
+  if (!ready) {
+    console.warn("[shared/markdown] Cherry Markdown 未就绪，无法创建编辑器");
+    return null;
+  }
+  try {
+    return window.Cherry.createMarkdownEditor(element, opts);
+  } catch (e) {
+    console.error("[shared/markdown] Cherry 编辑器创建失败:", e);
+    return null;
+  }
+}
+
+/**
+ * 对容器内所有 `pre code` 执行语法高亮（0.17.6：Cherry 内置高亮，此函数废弃）。
+ *
+ * Cherry Markdown 内置代码高亮，无需手动调用。
+ * 保留此函数仅为兼容性（现有调用点不会崩溃）。
+ *
+ * @param {HTMLElement} container 包含 pre code 的容器元素
+ * @deprecated Cherry Markdown 内置代码高亮，无需手动调用
+ */
+export function highlightCodeBlocks(container) {
+  // Cherry Markdown 已内置代码高亮，此函数废弃但保留以兼容
+  console.debug("[shared/markdown] highlightCodeBlocks: Cherry Markdown 内置高亮，无需手动调用");
+}
+
+/**
+ * 纯文本转义（降级用）。转义 HTML 特殊字符 + 保留换行 + <br>。
  * @param {string} text
  * @returns {string}
  */

@@ -39,7 +39,7 @@ pub enum SuggestionSource {
     /// 空 query 独占（非空 query 时 keyword 意图更强，Context 让位）。
     Context,
     /// 0.9.2 AI 触发提示 —— gate 过筛子且无 Keyword/Context 命中时产,
-    /// display="按 Tab 问 AI",replacement=原 query(采纳时前端走独立路径 invoke `trigger_ai`,
+    /// display="按 Tab 问 AI",replacement=原 query(采纳时前端走独立路径 invoke `chat_prompt`,
     /// **不** 触发新一轮 search)。避免打字过程连续触发 AI 调用。
     Ai,
 }

@@ -50,6 +50,8 @@ pub async fn pick_directory_dialog(app: tauri::AppHandle, title: String) -> Opti
 /// 主窗口 ESC 调用：隐藏主窗口。
 #[tauri::command]
 pub fn hide_window(app: tauri::AppHandle) {
+    // 0.17.6: 隐藏窗口时清除 AI 活跃标志，防止标志残留导致下次唤起时 watchdog 不工作
+    crate::infra::platform::window::set_main_ai_active(false);
     crate::infra::platform::window::hide(&app, "ESC");
 }
 
@@ -211,10 +213,8 @@ pub async fn run_builtin_action(
 /// 对话窗口前端收到 `blink://chat-confirm-action` 事件后展示确认卡片，
 /// 用户确认/拒绝 -> invoke 此 command -> 唤醒 tool_adapter 挂起的 `call`。
 ///
-/// **与 `confirm_ai_action` 的区别**：主窗口的 `confirm_ai_action` 重新执行 action
-/// （外部调度，service.rs 的 tool loop 不阻塞）；对话窗口的 `confirm_chat_action`
-/// 只送信号（rig agent loop 内部 `call` 挂起等待，确认后由 `call` 自己执行）。
-/// 两者事件名 / payload / 闭环路径都不同，故分离。
+/// 0.17.6 后主窗口 + 对话窗口共用此 command（旧 `confirm_ai_action` 已删除）。
+/// `confirm_chat_action` 只送信号（rig agent loop 内部 `call` 挂起等待，确认后由 `call` 自己执行）。
 ///
 /// 返回 `true` = 信号已送达（confirm_id 有效）；`false` = confirm_id 不存在（超时/过期）。
 #[tauri::command]

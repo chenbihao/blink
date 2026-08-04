@@ -59,6 +59,48 @@
   background: var(--surface);
 }
 
+/* 0.17.6a: 临时对话按钮 */
+.chat-sidebar-ephemeral {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.chat-sidebar-ephemeral svg {
+  width: 14px;
+  height: 14px;
+}
+
+.chat-sidebar-ephemeral:hover {
+  color: var(--accent);
+  background: var(--surface);
+}
+
+/* 0.17.6a: 临时对话 badge */
+.chat-ephemeral-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-bg);
+  border-radius: 4px;
+  margin-left: var(--space-xs);
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.chat-ephemeral-badge[hidden] {
+  display: none;
+}
+
 .chat-sidebar-list {
   flex: 1;
   overflow-y: auto;

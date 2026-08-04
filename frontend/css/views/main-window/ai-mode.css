@@ -1,0 +1,427 @@
+/* ── AI 模式样式（0.17.6 B2.7）───────────────────────────────────────────
+   #ai-mode 独立容器，与 #search-mode 通过 display 切换。
+   展示区用 Cherry Markdown 渲染，max-height 限制 + overflow 滚动。 */
+
+/* 搜索模式 / AI 模式切换 */
+#search-mode[hidden],
+#ai-mode[hidden] {
+  display: none !important;
+}
+
+#ai-mode {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  -webkit-app-region: no-drag;
+}
+
+/* ── AI 输入栏 ── */
+#ai-input-bar {
+  flex-shrink: 0;
+}
+
+#ai-query {
+  width: 100%;
+  padding: var(--space-sm) var(--space-md);
+  font-size: var(--text-lg);
+  background: transparent;
+  color: var(--text);
+  border: none;
+  outline: none;
+  user-select: text;
+  caret-color: var(--accent);
+  line-height: var(--leading-snug);
+  border-radius: var(--radius-md);
+  -webkit-app-region: no-drag;
+}
+
+#ai-query::placeholder {
+  color: var(--text-faint);
+  font-weight: var(--weight-light);
+}
+
+#ai-query:focus {
+  background: var(--accent-bg);
+  transition: background var(--transition-base) ease;
+}
+
+/* ── AI 展示区 ── */
+/* 0.17.6: 用固定像素值而非 vh，避免动态窗口高度循环依赖。
+   窗口高度由 syncWindowSize 测 #app.offsetHeight 决定，
+   若用 vh 则 max-height 依赖窗口高度 → 窗口高度依赖 max-height → 循环。 */
+#ai-display {
+  max-height: 400px;
+  overflow-y: auto;
+  padding: 0 var(--space-md);
+  scrollbar-width: thin;
+  scrollbar-color: var(--text-faint) transparent;
+}
+
+#ai-display::-webkit-scrollbar {
+  width: 4px;
+}
+
+#ai-display::-webkit-scrollbar-thumb {
+  background: var(--text-faint);
+  border-radius: 2px;
+}
+
+/* ── 工具行（单行替换式）── */
+#ai-tool-line {
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+  padding: var(--space-xs) 0;
+  min-height: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+#ai-tool-line:empty {
+  display: none;
+}
+
+.ai-tool-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid var(--text-faint);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: ai-tool-spin 0.6s linear infinite;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+@keyframes ai-tool-spin {
+  to { transform: rotate(360deg); }
+}
+
+.ai-tool-name {
+  font-weight: var(--weight-medium);
+  color: var(--text);
+}
+
+.ai-tool-args {
+  color: var(--text-dim);
+  opacity: 0.7;
+}
+
+.ai-tool-done {
+  color: var(--green, #4ade80);
+  margin-right: 6px;
+}
+
+.ai-tool-fail {
+  color: var(--red, #f87171);
+  margin-right: 6px;
+}
+
+.ai-tool-summary {
+  color: var(--text-dim);
+  opacity: 0.6;
+}
+
+/* ── AI 内容区（Cherry 渲染）── */
+#ai-rounds {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+#ai-content {
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--text);
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+/* Cherry 渲染容器内样式微调 */
+#ai-content .cherry {
+  background: transparent !important;
+  color: var(--text) !important;
+}
+
+#ai-content pre {
+  background: var(--surface) !important;
+  border-radius: var(--radius-sm);
+  padding: var(--space-sm);
+  overflow-x: auto;
+}
+
+#ai-content code {
+  font-family: var(--font-mono, 'Cascadia Code', 'Consolas', monospace);
+  font-size: 0.9em;
+}
+
+#ai-content p {
+  margin: var(--space-xs) 0;
+}
+
+#ai-content ul,
+#ai-content ol {
+  margin: var(--space-xs) 0;
+  padding-left: 1.5em;
+}
+
+#ai-content h1,
+#ai-content h2,
+#ai-content h3 {
+  margin: var(--space-sm) 0 var(--space-xs);
+  font-weight: var(--weight-semibold);
+}
+
+#ai-content a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+#ai-content a:hover {
+  text-decoration: underline;
+}
+
+#ai-content blockquote {
+  border-left: 3px solid var(--accent);
+  padding-left: var(--space-sm);
+  margin: var(--space-xs) 0;
+  color: var(--text-dim);
+}
+
+#ai-content table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: var(--space-sm) 0;
+}
+
+#ai-content th,
+#ai-content td {
+  border: 1px solid var(--border, var(--text-faint));
+  padding: var(--space-xs) var(--space-sm);
+  text-align: left;
+}
+
+#ai-content img {
+  max-width: 100%;
+  border-radius: var(--radius-sm);
+}
+
+/* ── Typing 三点动画 ── */
+.ai-typing {
+  display: flex;
+  gap: 4px;
+  padding: var(--space-sm) 0;
+}
+
+.ai-typing span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  animation: ai-typing-bounce 1.2s ease-in-out infinite;
+}
+
+.ai-typing span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.ai-typing span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes ai-typing-bounce {
+  0%, 60%, 100% {
+    transform: translateY(0);
+    opacity: 0.4;
+  }
+  30% {
+    transform: translateY(-6px);
+    opacity: 1;
+  }
+}
+
+/* ── 确认卡片 ── */
+.ai-confirm-card {
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-md);
+  padding: var(--space-sm) var(--space-md);
+  margin: var(--space-sm) 0;
+}
+
+.ai-confirm-card-title {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--accent);
+  margin-bottom: var(--space-xs);
+}
+
+.ai-confirm-card-tool {
+  font-size: var(--text-sm);
+  color: var(--text);
+  margin-bottom: var(--space-sm);
+}
+
+.ai-confirm-card-actions {
+  display: flex;
+  gap: var(--space-sm);
+}
+
+.ai-confirm-btn {
+  padding: var(--space-xs) var(--space-md);
+  border: 1px solid var(--text-faint);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast) ease;
+}
+
+.ai-confirm-btn:hover {
+  background: var(--accent-bg);
+}
+
+.ai-confirm-btn-approve {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.ai-confirm-btn-approve:hover {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+.ai-confirm-status {
+  font-size: var(--text-sm);
+  padding: var(--space-xs) var(--space-md);
+}
+
+.ai-confirm-status-approved {
+  color: var(--green, #4ade80);
+}
+
+.ai-confirm-status-rejected {
+  color: var(--text-dim);
+}
+
+/* ── AI 错误提示 ── */
+.ai-error-message {
+  color: var(--red, #f87171);
+  font-size: var(--text-sm);
+  padding: var(--space-sm) 0;
+}
+
+/* ── AI 最大轮次提示 ── */
+.ai-max-turns-warning {
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+  padding: var(--space-sm) 0;
+  font-style: normal;
+}
+
+/* ── 多轮追问折叠摘要（0.17.6a）── */
+.ai-round-summary {
+  border-left: 2px solid var(--border, var(--text-faint));
+  padding-left: var(--space-sm);
+  margin-bottom: var(--space-xs);
+  opacity: 0.85;
+  transition: opacity var(--transition-fast) ease;
+}
+
+.ai-round-summary:hover {
+  opacity: 1;
+}
+
+.ai-round-summary-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  cursor: pointer;
+}
+
+.ai-round-summary-q {
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  font-style: normal;
+}
+
+.ai-round-summary-toggle {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  padding: 0 var(--space-xs);
+  transition: color var(--transition-fast) ease;
+}
+
+.ai-round-summary-toggle:hover {
+  color: var(--text);
+}
+
+.ai-round-summary-body {
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--text);
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  margin-top: var(--space-xs);
+  max-height: 300px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--text-faint) transparent;
+}
+
+.ai-round-summary-body::-webkit-scrollbar {
+  width: 4px;
+}
+
+.ai-round-summary-body::-webkit-scrollbar-thumb {
+  background: var(--text-faint);
+  border-radius: 2px;
+}
+
+/* 折叠态：隐藏摘要体 */
+.ai-round-summary[data-collapsed] .ai-round-summary-body {
+  display: none;
+}
+
+/* 折叠态：摘要头不显示展开按钮（通过 toggle 按钮控制） */
+.ai-round-summary[data-collapsed] .ai-round-summary-q {
+  font-style: normal;
+}
+
+/* Cherry 渲染容器内样式微调（摘要体） */
+.ai-round-summary-body .cherry {
+  background: transparent !important;
+  color: var(--text) !important;
+}
+
+.ai-round-summary-body pre {
+  background: var(--surface) !important;
+  border-radius: var(--radius-sm);
+  padding: var(--space-sm);
+  overflow-x: auto;
+}
+
+.ai-round-summary-body code {
+  font-family: var(--font-mono, 'Cascadia Code', 'Consolas', monospace);
+  font-size: 0.9em;
+}
+
+.ai-round-summary-body p {
+  margin: var(--space-xs) 0;
+}
+
+.ai-round-summary-body ul,
+.ai-round-summary-body ol {
+  margin: var(--space-xs) 0;
+  padding-left: 1.5em;
+}

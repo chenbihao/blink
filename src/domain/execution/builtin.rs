@@ -370,4 +370,5 @@ impl Action for OpenDataDirAction {
 
 // 0.14.4: OpenUrlAction / OpenPathAction / RevealInExplorerAction 已删除。
 // 它们的功能由 Capability 版本承担（src/domain/capability/builtins/open_url.rs 等）。
-// run_builtin_action / confirm_ai_action 命令在 ActionRegistry 未命中时 fallback 到 CapabilityRegistry。
+// run_builtin_action 命令在 ActionRegistry 未命中时 fallback 到 CapabilityRegistry。
+// 0.17.6: confirm_ai_action 已删除（主窗口 AI 改走 ChatService + confirm_chat_action）。

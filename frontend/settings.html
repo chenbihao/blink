@@ -1800,8 +1800,9 @@
       </main>
     </div>
     <!-- Vendor（Markdown 渲染依赖，about tab release notes 用） -->
-    <script src="vendor/marked.min.js"></script>
-    <script src="vendor/purify.min.js"></script>
+    <!-- 0.17.6: Cherry Markdown Stream 版 + CSS 替换 marked + purify -->
+    <script src="vendor/cherry-markdown.stream.min.js"></script>
+    <link href="vendor/cherry-markdown.min.css" rel="stylesheet">
     <script type="module" src="js/settings/index.js"></script>
   </body>
 </html>

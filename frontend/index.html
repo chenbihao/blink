@@ -5,33 +5,56 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Blink</title>
     <link rel="stylesheet" href="css/entries/main.css" />
+    <!-- 0.17.6: Cherry Markdown Stream 版（主窗口 AI 展示区渲染） -->
+    <link rel="stylesheet" href="vendor/cherry-markdown.min.css" />
+    <script src="vendor/cherry-markdown.stream.min.js"></script>
   </head>
   <body>
     <!-- #app 整张卡片：只有容器本身可拖动，可点击元素（input/结果项）明确排除。
          不用 deep 模式，避免第一次点击被拖动检测吞掉导致"需要双击" -->
     <div id="app" data-tauri-drag-region>
-      <div id="search-bar">
-        <div class="input-wrap">
-          <!-- Ghost overlay：0.8.1 §2.6 双层 DOM + 0.8.5 §6.4 三层。
-               .ghost-typed 与用户输入等宽同字体但透明（占位对齐），
-               .ghost-suggest 灰色半透明显示 "→ fanyi" 类补全后缀，
-               .ghost-chord 单行小字提示 Alt+A/Q/C（仅 chord-visible + 无 ghost-suggest 时显示）。 -->
-          <div id="ghost-overlay" aria-hidden="true"><span class="ghost-typed"></span><span class="ghost-suggest"></span><span class="ghost-chord"></span></div>
-          <input id="query" type="text" autocomplete="off" spellcheck="false" />
-          <!-- 0.10 G1 录音指示器：录音中显示音量波动条 + "语音输入中" -->
-          <div id="voice-indicator" class="voice-indicator hidden">
-            <div class="voice-wave">
-              <div class="vw-bar"></div>
-              <div class="vw-bar"></div>
-              <div class="vw-bar"></div>
-              <div class="vw-bar"></div>
-              <div class="vw-bar"></div>
+      <!-- 搜索模式（0.17.6: 独立容器，与 AI 模式 display 切换） -->
+      <div id="search-mode">
+        <div id="search-bar">
+          <div class="input-wrap">
+            <!-- Ghost overlay：0.8.1 §2.6 双层 DOM + 0.8.5 §6.4 三层。
+                 .ghost-typed 与用户输入等宽同字体但透明（占位对齐），
+                 .ghost-suggest 灰色半透明显示 "→ fanyi" 类补全后缀，
+                 .ghost-chord 单行小字提示 Alt+A/Q/C（仅 chord-visible + 无 ghost-suggest 时显示）。 -->
+            <div id="ghost-overlay" aria-hidden="true"><span class="ghost-typed"></span><span class="ghost-suggest"></span><span class="ghost-chord"></span></div>
+            <input id="query" type="text" autocomplete="off" spellcheck="false" />
+            <!-- 0.10 G1 录音指示器：录音中显示音量波动条 + "语音输入中" -->
+            <div id="voice-indicator" class="voice-indicator hidden">
+              <div class="voice-wave">
+                <div class="vw-bar"></div>
+                <div class="vw-bar"></div>
+                <div class="vw-bar"></div>
+                <div class="vw-bar"></div>
+                <div class="vw-bar"></div>
+              </div>
+              <span class="voice-label" data-i18n="voice.indicator.recording">语音输入中</span>
             </div>
-            <span class="voice-label" data-i18n="voice.indicator.recording">语音输入中</span>
+          </div>
+        </div>
+        <ul id="results"></ul>
+      </div>
+
+      <!-- AI 模式（0.17.6: 独立容器，Tab on AI Ghost 进入，ESC 退出） -->
+      <div id="ai-mode" hidden>
+        <div id="ai-input-bar">
+          <input id="ai-query" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="追问…" data-i18n-placeholder="ai.followup_placeholder" />
+        </div>
+        <div id="ai-display">
+          <div id="ai-tool-line"></div>
+          <div id="ai-rounds">
+            <!-- 上一轮折叠摘要条（多个，旧的在上） -->
+            <!-- 当前轮正文 -->
+            <div id="ai-content"></div>
           </div>
         </div>
       </div>
-      <ul id="results"></ul>
+
       <div id="statusbar"></div>
     </div>
     <script type="module" src="js/main-window/main.js"></script>

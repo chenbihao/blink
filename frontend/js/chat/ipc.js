@@ -20,8 +20,14 @@ import { EVENTS } from "../shared/event-names.js";
  * @param {string|null} [groupId] 分组 ID（0.12.6）
  * @returns {Promise<number>} request_id
  */
-export function chatPrompt(conversationId, message, groupId = null) {
-  return invoke("chat_prompt", { conversationId, message, groupId });
+export function chatPrompt(conversationId, message, groupId = null, opts = {}) {
+  return invoke("chat_prompt", {
+    conversationId,
+    message,
+    groupId,
+    targetWindow: opts.targetWindow ?? null,
+    ephemeral: opts.ephemeral ?? null,
+  });
 }
 
 /**

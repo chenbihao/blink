@@ -20,10 +20,50 @@ export function runBuiltinAction(id, arg) {
   return invoke("run_builtin_action", { id, arg: arg ?? null });
 }
 
-/** AI Dangerous 动作确认执行（0.9.2 第二步）——用户在确认卡片上按 Enter 后调用。
- *  0.17.0：改用 confirm_id 匹配（替代 action_name + arguments）。 */
-export function confirmAiAction(confirmId) {
-  return invoke("confirm_ai_action", { confirmId });
+// 0.17.6: trigger_ai / confirm_ai_action 已删除，主窗口 AI 改走 ChatService。
+// 以下 chat_* 命令与对话窗口共用同一套 ChatService。
+
+/** 0.17.6: 发送 AI 对话消息（主窗口 + 对话窗口共用）。
+ *  主窗口传 targetWindow="main" + ephemeral=true，使用临时对话记忆。
+ *  @param {string} conversationId 对话 ID（主窗口用 crypto.randomUUID() 生成）
+ *  @param {string} message 用户消息
+ *  @param {object} [opts] 可选参数
+ *  @param {string} [opts.groupId] 分组 ID
+ *  @param {string} [opts.targetWindow] 目标窗口（默认 "chat"，主窗口传 "main"）
+ *  @param {boolean} [opts.ephemeral] 是否临时对话（默认 false）
+ *  @returns {Promise<number>} request_id */
+export function chatPrompt(conversationId, message, opts = {}) {
+  return invoke("chat_prompt", {
+    conversationId,
+    message,
+    groupId: opts.groupId ?? null,
+    targetWindow: opts.targetWindow ?? null,
+    ephemeral: opts.ephemeral ?? null,
+  });
+}
+
+/** 0.17.6: 中止 AI 对话请求。
+ *  @param {number} requestId
+ *  @returns {Promise<boolean>} */
+export function chatAbort(requestId) {
+  return invoke("chat_abort", { requestId });
+}
+
+/** 0.17.6: 确认/拒绝危险操作（主窗口 + 对话窗口共用）。
+ *  @param {number} confirmId
+ *  @param {boolean} approved
+ *  @returns {Promise<boolean>} */
+export function confirmChatAction(confirmId, approved) {
+  return invoke("confirm_chat_action", { confirmId, approved });
+}
+
+/** 0.17.6a: 将主窗口临时对话提升为持久对话。
+ *  后端 abort 当前请求 -> 导出临时消息 -> 写入 SQLite -> 清空临时记忆 -> 打开对话窗口。
+ *  主窗口前端调用后自行 exitAiMode。
+ *  @param {string} conversationId 临时对话 ID
+ *  @returns {Promise<void>} */
+export function promoteEphemeralConversation(conversationId) {
+  return invoke("promote_ephemeral_conversation", { conversationId });
 }
 
 /** 隐藏主窗口。 */

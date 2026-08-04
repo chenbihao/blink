@@ -121,7 +121,7 @@ pub struct AppEntry {
     /// - 引擎结果："start_menu"、"file"、"calc"
     /// - 插件结果：plugin_id（如 "builtin.weather"）
     /// - 插件占位：同 plugin_id（与插件结果匹配实现自动替换）
-    /// - AI 结果："ai"（AI_SOURCE）
+    /// - AI 结果："ai"（0.17.6 前由 AI_SOURCE 常量提供，AI lane 删除后前端不再收到此 source）
     #[serde(default)]
     pub source: String,
     /// 可执行动作列表（决定 Enter 行为 + 右键菜单展开）。与 description 正交。
@@ -133,12 +133,12 @@ pub struct AppEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score_detail: Option<String>,
     /// AI 总结项标记（0.11.0 §3.1）——item[0] 的 AI 文本回答，pre-wrap 撑开 + 24px 徽章。
-    /// 回车复制总结文本。仅 `ai_result_entry` / `ai_action_done_entry` 产 text 时为 true。
+    /// 回车复制总结文本。仅 AI 文本回答项产 text 时为 true（0.17.6 后 AI 走 ChatService，此字段不再由 SearchService 设置）。
     #[serde(default)]
     pub is_ai_summary: bool,
     /// AI 工具结果项标记（0.11.0 §3.1）——item[1..] 的工具返回 items，nowrap 单行 +
     /// 12px 小号 AI 图标。回车执行各自 action（打开/复制）。
-    /// 由 `items_to_entries` 投影工具结果时为 true。
+    /// 由工具结果投影时为 true（0.17.6 后 AI 走 ChatService，此字段不再由 SearchService 设置）。
     #[serde(default)]
     pub is_ai_tool_result: bool,
     /// 剪贴板图片项标记（0.16.4）——source="clipboard" 且 is_image=true 时，

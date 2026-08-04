@@ -38,8 +38,8 @@
 //! 信号回传：0.12.1 对话窗口前端监听 `blink://chat-confirm-action` 事件 -> 弹确认 UI ->
 //! 调 `confirm_chat_action` command -> `PendingConfirms::resolve` 唤醒挂起的 `call`。
 //!
-//! **事件名 `blink://chat-confirm-action`** 与主窗口 `blink://ai-confirm-action` 分流--
-//! 主窗口 payload 含 `seq`（强校验），对话窗口用 `confirm_id`，共用会导致主窗 listener 吞事件。
+//! **事件名 `blink://chat-confirm-action`** 统一用于对话窗口和主窗口 AI 模式--
+//! 0.17.6 起，主窗口 AI 也走 ChatService，按 `conversation_id` 过滤区分。
 //!
 //! ## 工厂函数
 //!
@@ -185,6 +185,7 @@ async fn await_dangerous_confirm(
     arguments: &Value,
     request_id: u64,
     conversation_id: &str,
+    target_window: &str,
 ) -> ConfirmOutcome {
     emit_dangerous_confirm(
         env,
@@ -194,6 +195,7 @@ async fn await_dangerous_confirm(
         arguments,
         request_id,
         conversation_id,
+        target_window,
     );
     // 挂起等用户确认信号（confirm_chat_action command -> resolve -> rx 收到）
     match tokio::time::timeout(Duration::from_secs(DANGEROUS_CONFIRM_TIMEOUT_SECS), rx).await {
@@ -226,24 +228,24 @@ async fn check_dangerous_confirm(
         return None;
     }
 
-    let (req_id, conv_id) = crate::domain::ai::chat_service::current_request_context_from_env(env);
+let (req_id, conv_id, target_win) = crate::domain::ai::chat_service::current_request_context_from_env(env);
 
-    // 对话级信任：用户已确认过的危险操作自动放行，不再弹窗
-    if pending.is_trusted(&conv_id, tool_name).await {
-        tracing::debug!(
-            %tool_name,
-            conversation_id = %conv_id,
-            "危险操作已在本次对话内获用户信任，跳过确认"
-        );
-        return None;
-    }
+// 对话级信任：用户已确认过的危险操作自动放行，不再弹窗
+if pending.is_trusted(&conv_id, tool_name).await {
+tracing::debug!(
+%tool_name,
+conversation_id = %conv_id,
+"危险操作已在本次对话内获用户信任，跳过确认"
+);
+return None;
+}
 
-    tracing::warn!(%tool_name, "危险操作被 AI 调用，挂起等待用户确认");
-    let (confirm_id, rx) = pending.register().await;
-    match await_dangerous_confirm(
-        pending, env, confirm_id, rx, tool_name, tool_type, args_value, req_id, &conv_id,
-    )
-    .await
+tracing::warn!(%tool_name, "危险操作被 AI 调用，挂起等待用户确认");
+let (confirm_id, rx) = pending.register().await;
+match await_dangerous_confirm(
+pending, env, confirm_id, rx, tool_name, tool_type, args_value, req_id, &conv_id, &target_win,
+)
+.await
     {
         ConfirmOutcome::Approved => {
             tracing::info!(%tool_name, "用户确认执行危险 {tool_type}");
@@ -285,9 +287,9 @@ struct ConfirmPayload {
 
 /// emit 危险操作确认事件到对话窗口前端（定向发送）。
 ///
-/// **事件名 `blink://chat-confirm-action`**--与主窗口 `blink://ai-confirm-action` 分流：
-/// 主窗口 payload 含 `seq`（强校验），对话窗口 payload 用 `confirm_id`（无 seq）。
-/// 共用事件名会导致主窗口 listener 吞掉对话窗口事件，故分离。
+/// **事件名 `blink://chat-confirm-action`** 统一用于对话窗口和主窗口 AI 模式：
+/// 0.17.6 起，主窗口 AI 也走 ChatService，按 `conversation_id` 过滤区分，
+/// 不再有独立的 `ai-confirm-action` 事件。
 ///
 /// Phase 4：改用 `emit_to("chat")` 定向发送，不向主窗口和其他次级窗口广播。
 fn emit_dangerous_confirm(
@@ -298,6 +300,7 @@ fn emit_dangerous_confirm(
     arguments: &Value,
     request_id: u64,
     conversation_id: &str,
+    target_window: &str,
 ) {
     let payload = ConfirmPayload {
         confirm_id,
@@ -308,8 +311,11 @@ fn emit_dangerous_confirm(
         request_id,
         conversation_id: conversation_id.to_string(),
     };
+    // 0.17.6: 按 target_window 定向 emit（主窗口 AI / 对话窗口共用）。
+    // target_window 为空时回落到 "chat"（兼容未注入场景）。
+    let win = if target_window.is_empty() { "chat" } else { target_window };
     if let Err(e) = env.emit_to(
-        "chat",
+        win,
         EventNames::CHAT_CONFIRM_ACTION,
         serde_json::to_value(&payload).unwrap_or_default(),
     ) {

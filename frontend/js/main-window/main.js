@@ -8,6 +8,7 @@ import * as ghost from "./ghost.js";
 import * as statusbar from "./statusbar.js";
 import * as autosuggestConfig from "./autosuggest-config.js";
 import * as chord from "./chord.js";
+import * as aiMode from "./ai-mode.js";
 import { applyThemeFromConfig, applyGlassOpacityFromConfig } from "../shared/theme.js";
 import { applyI18nFromConfig } from "../i18n/index.js";
 import { ensureSpriteLoaded } from "../shared/icon.js";
@@ -30,3 +31,4 @@ keyboard.init();
 lifecycle.init();
 contextmenu.init();
 chord.init();
+aiMode.init(); // 0.17.6: AI 模式初始化（注册 CHAT_STREAM / CHAT_CONFIRM_ACTION 监听）

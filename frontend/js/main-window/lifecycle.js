@@ -2,11 +2,12 @@
 
 import { listen } from "../shared/tauri.js";
 import { EVENTS } from "../shared/event-names.js";
-import { queryEl } from "./dom.js";
+import { queryEl, aiQueryEl } from "./dom.js";
 import * as results from "./results.js";
 import * as search from "./search.js";
 import * as chord from "./chord.js";
 import * as ghost from "./ghost.js";
+import * as aiMode from "./ai-mode.js";
 import { clearAlt, startAltPoll, stopAltPoll, recheckAlt } from "./keyboard.js";
 import { applyThemeFromConfig, applyGlassOpacityFromConfig } from "../shared/theme.js";
 import { applyI18nFromConfig, t } from "../i18n/index.js";
@@ -14,6 +15,12 @@ import { applyI18nFromConfig, t } from "../i18n/index.js";
 /** 注册生命周期事件监听。 */
 export function init() {
   listen(EVENTS.SHOWN, () => {
+    // 0.17.6: AiMode 下 SHOWN 只 focus AI 输入框，不重置搜索状态
+    if (aiMode.isActive()) {
+      aiQueryEl.focus();
+      startAltPoll();
+      return;
+    }
     queryEl.value = "";
     // 先解冻 ghost（上次录音可能残留 frozen），再 reset 让 ghost.clear 正常清 DOM
     ghost.unfreeze();
@@ -45,6 +52,10 @@ export function init() {
 
   listen(EVENTS.HIDDEN, () => {
     stopAltPoll(); // 0.8.5：停 Alt 轮询
+    // 0.17.6: AiMode 下 HIDDEN 也清理 AI 状态
+    if (aiMode.isActive()) {
+      aiMode.exitAiMode();
+    }
     queryEl.value = "";
     search.reset();
     results.clear();

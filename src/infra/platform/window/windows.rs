@@ -51,6 +51,12 @@ static LAST_EXTERNAL_HWND: AtomicIsize = AtomicIsize::new(0);
 /// 只隐藏窗口，保证下次启动按原 visible 状态恢复。
 static IS_APP_EXITING: AtomicBool = AtomicBool::new(false);
 
+/// 0.17.6: 主窗口 AI 活跃标志。
+///
+/// 主窗口 AI（AiMode）激活时设为 true，watchdog 据此跳过失焦隐藏，
+/// 防止 AI 生成过程中窗口被意外隐藏。Done/Error/abort 时设回 false。
+static MAIN_WINDOW_AI_ACTIVE: AtomicBool = AtomicBool::new(false);
+
 /// 程序启动以来的毫秒数（单调时钟，用于 grace period 计算）。
 fn elapsed_ms() -> u64 {
     START.get_or_init(Instant::now).elapsed().as_millis() as u64
@@ -292,15 +298,18 @@ pub fn start_watchdog(app: AppHandle) {
 
             // ── 主窗口失焦检测（原有逻辑）──────────────────────────
             if STATE.load(Ordering::SeqCst) == ST_VISIBLE {
-                let grace_ms = GRACE_MS.load(Ordering::SeqCst);
-                let since_invoke = elapsed_ms() - INVOKE_AT.load(Ordering::SeqCst);
-                if since_invoke >= grace_ms {
-                    let fg = unsafe { GetForegroundWindow() };
-                    // fg == NULL:焦点真空(系统正在切换前台窗口的瞬态,如刚拉起子进程时)。
-                    // 这不代表用户切到了别的窗口,据此隐藏会误伤——跳过本轮,等下次轮询。
-                    if !fg.0.is_null() && !is_self_foreground(&app, fg) {
-                        tracing::info!(since_invoke, "watchdog: hide! fg=0x{:x}", fg.0 as isize);
-                        hide(&app, "watchdog");
+                // 0.17.6: AI 活跃时跳过失焦隐藏——主窗口 AI 生成过程中不应被隐藏
+                if !MAIN_WINDOW_AI_ACTIVE.load(Ordering::Relaxed) {
+                    let grace_ms = GRACE_MS.load(Ordering::SeqCst);
+                    let since_invoke = elapsed_ms() - INVOKE_AT.load(Ordering::SeqCst);
+                    if since_invoke >= grace_ms {
+                        let fg = unsafe { GetForegroundWindow() };
+                        // fg == NULL:焦点真空(系统正在切换前台窗口的瞬态,如刚拉起子进程时)。
+                        // 这不代表用户切到了别的窗口,据此隐藏会误伤——跳过本轮,等下次轮询。
+                        if !fg.0.is_null() && !is_self_foreground(&app, fg) {
+                            tracing::info!(since_invoke, "watchdog: hide! fg=0x{:x}", fg.0 as isize);
+                            hide(&app, "watchdog");
+                        }
                     }
                 }
             }
@@ -1176,6 +1185,23 @@ pub fn show_sticky_window(
 pub fn set_app_exiting() {
     IS_APP_EXITING.store(true, Ordering::SeqCst);
     tracing::debug!("set_app_exiting: IS_APP_EXITING → true");
+}
+
+/// 0.17.6：设置主窗口 AI 活跃标志。
+///
+/// `active = true`：watchdog 跳过失焦隐藏，主窗口 AI 生成过程中不会被意外隐藏。
+/// `active = false`：恢复正常 watchdog 行为。
+///
+/// 调用时机：`chat_prompt(target="main")` 成功后设 true；
+/// Done/Error/abort/hide_window 时设 false。
+pub fn set_main_ai_active(active: bool) {
+    MAIN_WINDOW_AI_ACTIVE.store(active, Ordering::SeqCst);
+    tracing::debug!(active, "set_main_ai_active: MAIN_WINDOW_AI_ACTIVE");
+}
+
+/// 0.17.6：查询主窗口 AI 是否活跃。
+pub fn is_main_ai_active() -> bool {
+    MAIN_WINDOW_AI_ACTIVE.load(Ordering::Relaxed)
 }
 
 /// 0.16.11：退出前 flush 所有便签窗口的未保存内容。

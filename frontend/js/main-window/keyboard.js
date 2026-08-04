@@ -7,7 +7,8 @@ import * as results from "./results.js";
 import * as ghost from "./ghost.js";
 import * as chord from "./chord.js";
 import * as autosuggestConfig from "./autosuggest-config.js";
-import { queryEl, resultsEl } from "./dom.js";
+import * as aiMode from "./ai-mode.js";
+import { queryEl, resultsEl, aiQueryEl } from "./dom.js";
 
 /** 绑定全部键盘监听 + 滚轮翻页。 */
 export function init() {
@@ -36,8 +37,11 @@ export function init() {
  * Tab / ArrowRight（视配置）+ 有活跃 ghost → 接受补全。
  * 捕获阶段拦截，抢在 onNavigation 之前——ArrowRight 场景下必须先处理，
  * 否则会被 results 的方向键导航吞掉（虽然当前 ArrowRight 无导航语义，仍为将来预留）。
+ * 0.17.6: AiMode 下抑制 Tab Ghost 接受（AI 模式无 ghost）。
  */
 function onAutosuggestAccept(e) {
+  // AiMode 下抑制 Tab Ghost 接受
+  if (aiMode.isActive()) return;
   // IME 组字期间放行——部分中日韩输入法用 Tab 切候选词，不能被 ghost 吞掉。
   // `isComposing` 是现代 DOM 标准，`keyCode === 229` 是老浏览器兜底。
   if (e.isComposing || e.keyCode === 229) return;
@@ -53,6 +57,24 @@ function onAutosuggestAccept(e) {
 // ── 导航 / 激活 ───────────────────────────────────────────────────────────────
 
 function onNavigation(e) {
+  // 0.17.6: AiMode 下 Enter 发送追问（或确认卡片），不触发结果导航
+  if (aiMode.isActive()) {
+    if (e.key === "Enter" && !e.isComposing) {
+      e.preventDefault();
+      // 确认卡片显示时，Enter 确认操作（不触发追问）
+      if (aiMode.isAwaitingConfirm()) {
+        aiMode.confirmCurrentAction();
+      } else {
+        const text = aiQueryEl.value.trim();
+        if (text) {
+          aiQueryEl.value = "";
+          aiMode.askFollowup(text);
+        }
+      }
+    }
+    return;
+  }
+
   if (!results.hasItems()) return;
 
   if (e.key === "ArrowDown") {
@@ -82,6 +104,11 @@ function onNavigation(e) {
 function onEscape(e) {
   if (e.key === "Escape") {
     e.preventDefault();
+    // 0.17.6: AiMode 下 ESC 退出 AI 模式（不 hide 窗口）
+    if (aiMode.isActive()) {
+      aiMode.exitAiMode();
+      return;
+    }
     ghost.clear();
     hideWindow();
   }
@@ -191,6 +218,11 @@ function onChordTrigger(e) {
   // 非空 query 时 getTapKeys 只返回 requires_input=true 的键，此处的 key 已通过过滤。
   e.preventDefault(); // 不进输入框
   e.stopPropagation();
+  // 0.17.6a: AiMode 下 Alt+Q 触发临时对话提升，不走常规 chord 路径
+  if (aiMode.isActive() && key === "q") {
+    aiMode.promoteToChat();
+    return;
+  }
   fireChord(key);
 }
 

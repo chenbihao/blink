@@ -12,7 +12,7 @@
 //! 依赖收拢显式化。它**不替换** Tauri 的 `app.manage` / `app.state`——command 层继续
 //! 用 `app.state::<DbPools>()`,AppContext 仅服务于 setup 期的 Service 编排。
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::app::ai_config::AIConfig;
 use crate::app::config::AppConfig;
@@ -165,7 +165,19 @@ impl Service for HotkeyService {
                     crate::infra::platform::hotkey::HotkeyEvent::Tap(trigger_time) => {
                         // toggle:已可见则隐藏(仅快捷键;单实例重复运行仍走 invoke 总是显示)
                         if crate::infra::platform::window::is_visible() {
-                            crate::infra::platform::window::hide(&app, "toggle");
+                            // 0.17.6: AI 活跃时不隐藏，而是 set_focus + emit SHOWN
+                            // 防止用户在 AI 生成过程中误按热键导致窗口消失
+                            if crate::infra::platform::window::is_main_ai_active() {
+                                if let Some(win) = app.get_webview_window("main") {
+                                    let _ = win.set_focus();
+                                }
+                                let _ = app.emit(
+                                    crate::domain::event_names::EventNames::SHOWN,
+                                    (),
+                                );
+                            } else {
+                                crate::infra::platform::window::hide(&app, "toggle");
+                            }
                         } else {
                             let chan_ms = trigger_time.elapsed().as_secs_f64() * 1000.0;
                             tracing::debug!(

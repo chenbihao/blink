@@ -28,8 +28,7 @@
 //! - 0.8.3 Context 类同理：Context 命中不进 route()（不产 candidate），只出 Ghost。
 
 import { queryEl } from "./dom.js";
-import { invoke } from "../shared/api.js";
-import * as search from "./search.js";
+import * as aiMode from "./ai-mode.js";
 
 // 当前 suggestion，形如 { display, replacement, source, confidence, prefixLen }
 let currentSuggestion = null;
@@ -213,11 +212,8 @@ export function clear() {
  *
  * - `keyword` / `context`:把输入替换为 `suggestion.replacement` 并触发一次 input
  *   事件走搜索路径。触发下一轮 search_apps。
- * - `ai`(0.9.2 Phase 5b):**不改输入框**,直接 invoke `trigger_ai` command 让后端
- *   显式发起一次 completion(前端占位由后端 emit blink://results 补)。
- *   不复用 input 事件是为了避免"采纳 AI Ghost → 输入不变 → 又产 AI Ghost →
- *   再采纳..."的空转;AI 靠 Tab 一次触发 + 后端 spawn 单次调用。
- *   **seq 必须与 search.js 的 seq 同源**(见下方实现注释)。
+ * - `ai`(0.9.2 Phase 5b, 0.17.6 重构):**不改输入框**,直接进入 AI 模式
+ *   (aiMode.enterAiMode)，由 ChatService 接管对话流。
  *
  * 接受后立即 `clear()` 而不是等新一轮 search 返回覆盖——search 有 40ms debounce，
  * 期间旧 hint 若保留：输入框已是 `fanyi `（尾空格），statusbar 却还显示"按 Tab → fanyi"
@@ -229,18 +225,11 @@ export function clear() {
 export function acceptCurrent() {
   if (!currentSuggestion) return false;
 
-  // AI 类:走独立触发路径(不改 input,不触发新搜索)
+  // AI 类:进入 AI 模式（0.17.6: 改走 ChatService，不再调 trigger_ai）
   if (currentSuggestion.source === "ai") {
     const query = currentSuggestion.replacement;
-    // seq 必须与 search.js 的 seq 同源——`blink://results` listener 校验的是它。
-    // 若这里自造 Date.now() 会撞不上,导致后端 emit 的占位/真结果**全部被前端丢弃**
-    // (用户看到的现象:按 Tab 后 ghost 清空、statusbar 因 ghost.onChange 重绘退回
-    //  常规态或整条 remove('visible') 隐藏,结果列表毫无反应)。
-    const seq = search.getSeq();
     clear();
-    invoke("trigger_ai", { query, seq }).catch((e) =>
-      console.warn("[ghost] trigger_ai failed", e),
-    );
+    aiMode.enterAiMode(query);
     return true;
   }
 

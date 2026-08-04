@@ -18,10 +18,8 @@ impl EventNames {
     pub const SHOWN: &str = "blink://shown";
     pub const HIDDEN: &str = "blink://hidden";
 
-    // ── 搜索 / AI ──
+    // ── 搜索 ──
     pub const RESULTS: &str = "blink://results";
-    pub const AI_STREAM: &str = "blink://ai-stream";
-    pub const AI_CONFIRM_ACTION: &str = "blink://ai-confirm-action";
 
     // ── Chord ──
     pub const CHORD_FILL_QUERY: &str = "blink://chord-fill-query";
@@ -34,6 +32,8 @@ impl EventNames {
     pub const CHAT_TITLE_UPDATED: &str = "blink://chat-title-updated";
     /// 0.16.2：chord Alt+Q 带文本触发时，把初始文本推给 chat 窗口前端填充输入框。
     pub const CHAT_PREFILL: &str = "blink://chat-prefill";
+    /// 0.17.6a: promote 临时对话后，通知 chat 窗口切换到该 conversation。payload: conversation_id
+    pub const CHAT_LOAD_CONVERSATION: &str = "blink://chat-load-conversation";
 
     // ── 语音 ──
     pub const VOICE_RECORDING_START: &str = "blink://voice-recording-start";

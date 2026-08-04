@@ -53,9 +53,9 @@
   </div>
 
   <!-- Vendor（Markdown 渲染依赖，通过 window.* 访问） -->
-  <script src="vendor/marked.min.js"></script>
-  <script src="vendor/purify.min.js"></script>
-  <script src="vendor/highlight.min.js"></script>
+  <!-- 0.17.6: Cherry Markdown Stream 版 + CSS 替换 marked + purify + highlight -->
+  <script src="vendor/cherry-markdown.stream.min.js"></script>
+  <link href="vendor/cherry-markdown.min.css" rel="stylesheet">
 
   <!-- 入口 -->
   <script type="module" src="js/content-editor/main.js"></script>

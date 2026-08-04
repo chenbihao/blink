@@ -43,19 +43,8 @@ export function init() {
     // 增量事件不带 suggestion（同步首次返回已给过），此处不动 ghost。
   });
 
-  // 0.9.2 第二步:AI Dangerous 动作确认——后端 emit 确认请求,前端替换占位为确认卡片。
-  listen(EVENTS.AI_CONFIRM_ACTION, (event) => {
-    const p = event.payload;
-    if (!p || p.seq !== seq) return;
-    results.showAiConfirm(p);
-  });
-
-  // AI 流式 chunk——后端逐文本片段推送,前端增量更新 AI 结果项。
-  listen(EVENTS.AI_STREAM, (event) => {
-    const p = event.payload;
-    if (!p || p.seq !== seq) return;
-    results.updateAiStream(p);
-  });
+  // 0.17.6: 主窗口 AI 改走 ChatService（CHAT_STREAM / CHAT_CONFIRM_ACTION），
+  // 由 ai-mode.js 负责监听和处理，search.js 不再参与 AI 事件。
 }
 
 /** 复位：取消防抖 + 作废在途请求（生命周期 shown/hidden 调用）。 */
@@ -66,8 +55,7 @@ export function reset() {
   ghost.clear();
 }
 
-/** 取当前 seq(供 ghost 采纳 AI Ghost 时复用,让 trigger_ai emit 的占位/结果能过
- *  `blink://results` listener 的 seq 校验;若 ghost 自造 Date.now() seq 会撞不上)。 */
+/** 取当前 seq(0.17.6: trigger_ai 已删除，此函数保留供未来扩展复用)。 */
 export function getSeq() {
   return seq;
 }

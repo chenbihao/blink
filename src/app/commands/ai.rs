@@ -207,99 +207,9 @@ async fn test_gemini_endpoint(client: &reqwest::Client, url: &str) -> Result<Str
     }
 }
 
-/// 前端按 Tab 采纳 AI Ghost Suggestion 时调用(0.9.2 Phase 5b)。
-///
-/// **为什么单独命令而非走 search_apps 的 debounce 路径**:
-/// - AI 调用相对昂贵(几百 ms 到几秒)且消耗 token,不能因打字过程反复触发
-/// - 用户显式按 Tab 才走 → 单次调用充分执行,避免 h2 stream 堆积/自 cancel
-///
-/// 参数:
-/// - `query`:要问 AI 的原文(前端保存的 `suggestion.replacement`)
-/// - `seq`:与 search 复用同一自增计数,让后续 emit 的结果能被 results.js 正确匹配
-#[tauri::command]
-pub async fn trigger_ai(query: String, seq: u64, app: tauri::AppHandle) -> Result<(), String> {
-    tracing::debug!(
-        target: crate::infra::utils::perf::ai_slo::TARGET,
-        "AI trigger: seq={seq} qlen={}",
-        query.chars().count(),
-    );
-    let service = app.state::<std::sync::Arc<crate::domain::search::SearchService>>();
-    service.trigger_ai(query, seq);
-    Ok(())
-}
-
-/// AI Capability 确认执行（command 名沿用旧 IPC 契约）。
-///
-/// 前端收到 `blink://ai-confirm-action` 事件后展示确认卡片,
-/// 用户按 Enter 确认 → invoke 此 command → 后端执行能力。
-///
-/// **0.14 Capability-only**：只查 CapabilityRegistry，不提供 Action fallback。
-///
-/// **审计**（0.11.4 补）:用户确认执行后写入 `ai_tool_audit` 表,
-/// turn=0 标记"用户确认执行"路径（区别于 Turn 1/Turn 2 自动执行）。
-///
-/// **0.14.7 W3**：返回 `CommandError`（结构化错误协议）。
-/// **0.17.0**：匹配键从 `action_name + arguments` 改为 `confirm_id`。
-#[tauri::command]
-pub async fn confirm_ai_action(
-app: tauri::AppHandle,
-confirm_id: u64,
-) -> Result<(), crate::app::command_error::CommandError> {
-tracing::debug!(confirm_id, "confirm_ai_action: 用户确认 AI 动作");
-
-// 0.14.6 §2.2：从 state 获取 DomainEnv 桥接器
-let env_arc = app
-.state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
-.inner()
-.clone();
-
-// 0.17.0：用 confirm_id 严格匹配，取回 (seq, action_name, arguments)
-let search_service = app.state::<std::sync::Arc<crate::domain::search::SearchService>>();
-let (seq, action_name, arguments) = search_service
-.take_ai_confirmation(confirm_id)
-.ok_or_else(|| crate::app::command_error::CommandError::new(
-"not_found",
-&format!("没有匹配的待确认 Capability: confirm_id={confirm_id}"),
-false,
-))?;
-
-tracing::debug!(%action_name, ?arguments, "confirm_ai_action: 匹配到待确认 Capability");
-
-    let cap_reg = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
-    if let Some(cap) = cap_reg.get(&action_name) {
-        let ctx = crate::domain::capability::InvokeContext {
-            env: env_arc.as_ref(),
-            deadline: None,
-        };
-        match cap.invoke(arguments.clone(), &ctx).await {
-            Ok(result) => {
-                let summary = result.to_display_text();
-                tracing::info!(%action_name, %summary, "confirm_ai_action: Capability 执行成功");
-                write_confirm_audit(&app, &action_name, &arguments, &summary).await;
-                if matches!(
-                    &result,
-                    crate::domain::capability::CapabilityResult::Done { .. }
-                ) {
-                    crate::infra::platform::window::hide(&app, "confirm_ai_action");
-                } else {
-                    search_service.emit_confirmed_capability_result(seq, &result);
-                }
-            }
-            Err(e) => {
-                tracing::error!(%action_name, error = %e, "confirm_ai_action: Capability 执行失败");
-                return Err(crate::app::command_error::CommandError::from(e));
-            }
-        }
-        return Ok(());
-    }
-
-    tracing::warn!(%action_name, "confirm_ai_action: 未知 id");
-    Err(crate::app::command_error::CommandError::new(
-        "not_found",
-        &format!("未知 Capability id: {action_name}"),
-        false,
-    ))
-}
+// 0.17.6: trigger_ai / confirm_ai_action 命令已删除。
+// 主窗口 AI 改走 ChatService（chat_prompt + confirm_chat_action），
+// 旧的 SearchService AI 路径（PendingAiConfirmation / emit_ai_*）已整体移除。
 
 /// 隐藏独立 chat 窗口（0.12.1 Phase 3A）。
 ///
@@ -312,44 +222,62 @@ pub fn hide_chat_window(app: tauri::AppHandle) {
 /// 启动对话 prompt（Phase 4）。
 ///
 /// 调用 `ChatService::prompt()` 获取流式 chunk receiver，spawn 后台 task 逐 chunk
-/// 包装成 `ChatStreamEvent` 后定向 emit 到 chat 窗口（`blink://chat-stream`）。
+/// 包装成 `ChatStreamEvent` 后定向 emit 到目标窗口（`blink://chat-stream`）。
 ///
 /// 返回 `request_id`，前端据此过滤已中止请求的尾部 chunk。
 /// 若已有 active request，返回错误。
 ///
-/// 0.12.6：`group_id` 参数注入分组级系统提示词——设置对话所属分组后，
-/// 查询分组系统提示词并传给 ChatService，影响 Agent 行为约束。
+/// 0.12.6：`group_id` 参数注入分组级系统提示词。
+/// 0.17.6：`target_window`（默认 "chat"）+ `ephemeral`（默认 false）参数。
+/// 主窗口 AI 传 `target_window="main"` + `ephemeral=true`，使用临时对话记忆。
 #[tauri::command]
 pub async fn chat_prompt(
     app: tauri::AppHandle,
     conversation_id: String,
     message: String,
     group_id: Option<String>,
+    target_window: Option<String>,
+    ephemeral: Option<bool>,
 ) -> Result<u64, String> {
     let chat = app
         .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
         .ok_or("ChatService 未注册")?;
 
-    // 0.12.8: 查询系统提示词 + 调 prompt() 在前，持久化分组在后——
-    // 避免 prompt 失败（如 AlreadyActive）时分组已写入 DB 的副作用先于校验问题。
+    let target = target_window.unwrap_or_else(|| "chat".to_string());
+    let kind = if ephemeral.unwrap_or(false) {
+        crate::domain::ai::chat_service::ConversationKind::Ephemeral
+    } else {
+        crate::domain::ai::chat_service::ConversationKind::Persistent
+    };
+
+    // 0.17.6: 主窗口 AI 激活时设 watchdog 标志，防止失焦隐藏
+    if target == "main" {
+        crate::infra::platform::window::set_main_ai_active(true);
+    }
+
+    // 0.12.8: 查询系统提示词 + 调 prompt() 在前，持久化分组在后
     let pools = app.state::<crate::infra::data::DbPools>();
 
-    // 按新 group_id 直接查系统提示词（Some → 查该分组；None → 查对话现有分组）
     let group_system_prompt = if let Some(ref gid) = group_id {
         crate::infra::data::conversations::get_group_system_prompt(&pools.ai, Some(gid))
             .await
             .unwrap_or(None)
     } else {
-        // group_id = None：对话可能在已有分组中，查现有分组的提示词
         crate::infra::data::conversations::get_effective_system_prompt(&pools.ai, &conversation_id)
             .await
             .unwrap_or(None)
     };
 
     let handle = chat
-        .prompt(conversation_id.clone(), message, group_system_prompt)
+        .prompt(conversation_id.clone(), message, group_system_prompt, kind, target.clone())
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| match e {
+            crate::domain::ai::chat_service::ChatError::AlreadyActive(active) => {
+                let win = active.target_window.unwrap_or_else(|| "chat".to_string());
+                format!("AlreadyActive:{}", win)
+            }
+            other => other.to_string(),
+        })?;
 
     // prompt 成功后才持久化分组（副作用后置）
     if let Some(ref gid) = group_id {
@@ -368,9 +296,10 @@ pub async fn chat_prompt(
     let conv_id = handle.conversation_id.clone();
     let mut chunks = handle.chunks;
 
-    // spawn 后台 task 消费 chunk 流并定向 emit 到 chat 窗口
+    // spawn 后台 task 消费 chunk 流并定向 emit 到目标窗口
     let app_clone = app.clone();
     let conv_id_clone = conv_id.clone();
+    let target_win = handle.target_window.clone();
     tokio::spawn(async move {
         let mut done_sent = false;
         while let Some(chunk) = chunks.recv().await {
@@ -389,7 +318,7 @@ pub async fn chat_prompt(
                 chunk,
             };
             let _ = app_clone.emit_to(
-                tauri::EventTarget::window("chat"),
+                tauri::EventTarget::window(&target_win),
                 EventNames::CHAT_STREAM,
                 &event,
             );
@@ -397,8 +326,10 @@ pub async fn chat_prompt(
                 break;
             }
         }
-        // 0.12.5：chunk 流意外结束（recv 返回 None）且未发送 Done/Error/MaxTurns
-        // → 发送兜底 Done 事件，避免前端永远收不到结束事件而卡在流式模式
+        // 0.17.6: Done/Error 后清除 watchdog AI 标志（主窗口 AI 可失焦隐藏了）
+        if target_win == "main" {
+            crate::infra::platform::window::set_main_ai_active(false);
+        }
         if !done_sent {
             let event = crate::domain::ai::chat_service::ChatStreamEvent {
                 request_id,
@@ -410,10 +341,14 @@ pub async fn chat_prompt(
                 },
             };
             let _ = app_clone.emit_to(
-                tauri::EventTarget::window("chat"),
+                tauri::EventTarget::window(&target_win),
                 EventNames::CHAT_STREAM,
                 &event,
             );
+            // 兜底 Done 也清标志
+            if target_win == "main" {
+                crate::infra::platform::window::set_main_ai_active(false);
+            }
         }
     });
 
@@ -433,10 +368,77 @@ pub fn chat_abort(app: tauri::AppHandle, request_id: u64) -> bool {
     if let Some(chat) =
         app.try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
     {
-        chat.abort(request_id)
+        let aborted = chat.abort(request_id);
+        // 0.17.6: abort 后清除 watchdog AI 标志（单活跃请求，abort 即意味着主窗口 AI 结束）
+        if aborted {
+            crate::infra::platform::window::set_main_ai_active(false);
+        }
+        aborted
     } else {
         false
     }
+}
+
+/// 0.17.6a: 将主窗口临时对话提升为持久对话。
+///
+/// 流程：
+/// 1. abort 当前请求（如有活跃）
+/// 2. 从 `EphemeralConversationMemory` 导出当前对话全部消息
+/// 3. 写入 `SqliteConversationMemory`（同一 conversation_id，INSERT OR IGNORE + 逐条 append）
+/// 4. 清空 `EphemeralConversationMemory` 的该 conversation
+/// 5. 打开对话窗口，加载该 conversation_id
+///
+/// 主窗口前端调用后自行 exitAiMode → SearchMode。
+#[tauri::command]
+pub async fn promote_ephemeral_conversation(
+    app: tauri::AppHandle,
+    conversation_id: String,
+) -> Result<(), String> {
+    let chat = app
+        .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
+        .ok_or("ChatService 未注册")?;
+
+    // 1. abort active request
+    chat.abort_active();
+
+    // 2. export ephemeral messages
+    let messages = chat.export_ephemeral_messages(&conversation_id).await;
+
+    if messages.is_empty() {
+        tracing::warn!(%conversation_id, "promote_ephemeral_conversation: 临时对话无消息");
+        return Err("临时对话无消息，无法提升".to_string());
+    }
+
+    // 3. write to persistent memory (SqliteConversationMemory)
+    //    ConversationMemory::append 内部自动 create_conversation (INSERT OR IGNORE) + 逐条 append
+    let persistent = chat.persistent_memory().clone();
+    use rig_core::memory::ConversationMemory;
+    persistent
+        .append(&conversation_id, messages)
+        .await
+        .map_err(|e| format!("写入持久对话失败: {e}"))?;
+
+    tracing::info!(
+        %conversation_id,
+        "promote_ephemeral_conversation: 临时对话已提升为持久对话"
+    );
+
+    // 4. clear ephemeral memory
+    chat.remove_ephemeral_conversation(&conversation_id).await;
+
+    // 5. open chat window with the conversation
+    crate::infra::platform::window::show_chat_window(&app, None)
+        .map_err(|e| format!("打开对话窗口失败: {e}"))?;
+
+    // 6. emit chat-load-conversation event so chat window switches to this conversation
+    use tauri::Emitter;
+    let _ = app.emit_to(
+        "chat",
+        crate::domain::event_names::EventNames::CHAT_LOAD_CONVERSATION,
+        &conversation_id,
+    );
+
+    Ok(())
 }
 
 /// 获取对话服务状态（Phase 4）。
@@ -606,39 +608,6 @@ pub async fn select_chat_model(
 }
 
 // ── 辅助函数与类型（从 commands.rs 迁移）──
-
-/// 写用户确认执行的审计日志（0.14.4 从 confirm_ai_action 抽出共用）。
-async fn write_confirm_audit(
-    app: &tauri::AppHandle,
-    action_name: &str,
-    arguments: &serde_json::Value,
-    summary: &str,
-) {
-    let pool = &app.state::<crate::infra::data::DbPools>().ai;
-    let (provider_kind_str, model_id_str) =
-        match app.try_state::<std::sync::Arc<crate::domain::ai::AIProviderRegistry>>() {
-            Some(reg) => match reg.resolve(crate::app::ai_config::Tier::Router) {
-                Ok((provider, _tier)) => (
-                    provider.kind().as_serde_str().to_string(),
-                    provider.model_id().to_string(),
-                ),
-                Err(_) => (String::new(), String::new()),
-            },
-            None => (String::new(), String::new()),
-        };
-    let audit_summary = format!("用户确认执行: {summary}");
-    crate::infra::data::ai_audit::save_audit_log(
-        pool,
-        action_name,
-        arguments,
-        &audit_summary,
-        &provider_kind_str,
-        &model_id_str,
-        0,
-        "internal",
-    )
-    .await;
-}
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct ChatModelOption {

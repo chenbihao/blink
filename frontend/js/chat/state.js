@@ -34,6 +34,9 @@ export let thinkingEnabled = false;
 /** @type {boolean} Provider 是否已配置 */
 export let providerConfigured = true;
 
+/** 0.17.6a: 临时对话模式（不写入 SQLite，promote 后转持久） */
+export let ephemeralMode = false;
+
 /**
  * 进行中的 Tool 卡片索引（0.12.2 §4.7）。
  * key = call_id，value = { el, tool }。ToolResult 到来时按 call_id 配对更新。
@@ -105,6 +108,11 @@ export function toggleThinkingEnabled() {
 
 export function setProviderConfigured(value) {
   providerConfigured = value;
+}
+
+/** 0.17.6a: 设置临时对话模式。 */
+export function setEphemeralMode(value) {
+  ephemeralMode = value;
 }
 
 export function setLastUsage(usage) {
@@ -181,5 +189,6 @@ export function resetConversation() {
   toolCalls.clear();
   lastUsage = null;
   currentGroupId = null; // 0.12.6：重置分组上下文
+  ephemeralMode = false; // 0.17.6a：重置临时模式
   return conversationId;
 }

@@ -14,10 +14,8 @@ export const EVENTS = Object.freeze({
     SHOWN: 'blink://shown',
     HIDDEN: 'blink://hidden',
 
-    // ── 搜索 / AI ──
+    // ── 搜索 ──
     RESULTS: 'blink://results',
-    AI_STREAM: 'blink://ai-stream',
-    AI_CONFIRM_ACTION: 'blink://ai-confirm-action',
 
     // ── Chord ──
     CHORD_FILL_QUERY: 'blink://chord-fill-query',
@@ -29,6 +27,7 @@ export const EVENTS = Object.freeze({
     CHAT_CONTEXT_STATUS: 'blink://chat-context-status',
     CHAT_TITLE_UPDATED: 'blink://chat-title-updated',
     CHAT_PREFILL: 'blink://chat-prefill',
+    CHAT_LOAD_CONVERSATION: 'blink://chat-load-conversation',
 
     // ── 语音 ──
     VOICE_RECORDING_START: 'blink://voice-recording-start',

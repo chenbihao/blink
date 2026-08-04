@@ -47,7 +47,7 @@ const ANTHROPIC_DEFAULT_MAX_TOKENS: u64 = 4096;
 use crate::domain::ai::factory::{
     build_anthropic_client, build_gemini_client, build_ollama_client, build_openai_client,
 };
-use crate::domain::ai::memory::SqliteConversationMemory;
+// 0.17.6: memory 改为 trait object，不再需要具体类型 import
 use crate::domain::ai::provider::AIError;
 use crate::domain::ai::rig_provider::expose_for_rig;
 use crate::infra::platform::secret;
@@ -138,16 +138,11 @@ impl AgentProvider {
         model: &ModelEntry,
         tools: Vec<Box<dyn ToolDyn>>,
         preamble: &str,
-        memory: Arc<SqliteConversationMemory>,
+        memory: Arc<dyn ConversationMemory>,
     ) -> Result<Self, AIError> {
-        // 0.13.1: 注入模型 context_window 到 memory 配置
-        let context_limit = model.context_window.map(|u| u as usize);
-        memory.update_context_limit(context_limit).await;
-        tracing::debug!(
-            model = %model.id,
-            context_limit = ?context_limit,
-            "AgentProvider: 已注入 context_limit 到 memory"
-        );
+        // 0.13.1: context_limit 注入已移至 ChatService::ensure_provider（0.17.6：
+        // memory 现在是 trait object，SqliteConversationMemory 的 update_context_limit
+        // 在 ChatService 侧调用）。
 
         // 读密钥--与 RigFactory::build 一致(本地 provider 跳过)
         let key_str: String = if entry.kind.requires_secret() {
@@ -164,8 +159,8 @@ impl AgentProvider {
             String::new()
         };
 
-        // SqliteConversationMemory -> Arc<dyn ConversationMemory>（rig AgentBuilder 需要 trait object）
-        let memory_dyn: Arc<dyn ConversationMemory> = memory;
+        // memory 已是 Arc<dyn ConversationMemory>，直接用于 rig AgentBuilder
+        let memory_dyn = memory;
 
         // 0.13.x: 将 model 层的 temperature / max_tokens 传入 build_agent，
         // 让 rig AgentBuilder 在构造时固化默认值。Anthropic 的 max_tokens 是必填字段，

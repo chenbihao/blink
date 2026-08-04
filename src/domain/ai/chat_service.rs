@@ -17,7 +17,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use crate::domain::ai::memory::{
-    MemoryLoadResult, SqliteConversationMemory, estimate_messages_tokens, estimate_tokens,
+    EphemeralConversationMemory, MemoryLoadResult, SqliteConversationMemory, estimate_messages_tokens,
+    estimate_tokens,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
@@ -37,15 +38,30 @@ use crate::domain::event::DomainEnv;
 use crate::domain::event_names::EventNames;
 use crate::domain::mcp::McpClientManager;
 
-/// Agent 缓存 key——provider/model/fingerprint/preamble_hash/MCP epoch 任一变化即 cache miss。
-#[derive(PartialEq)]
+/// Agent 缓存 key——provider/model/fingerprint/preamble_hash/MCP epoch/kind 任一变化即 cache miss。
+// ── 0.17.6: 对话类型 ────────────────────────────────────────────────────────
+
+/// 对话类型（0.17.6）。
+///
+/// 决定 `ChatService` 使用哪种 memory：
+/// - `Persistent`：`SqliteConversationMemory`，写入 `blink_ai.db`（对话窗口）
+/// - `Ephemeral`：`EphemeralConversationMemory`，进程内不持久化（主窗口 AI）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConversationKind {
+    Persistent,
+    Ephemeral,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct AgentCacheKey {
-    provider_id: String,
-    model_id: String,
-    fingerprint: String,
-    preamble_hash: u64,
-    /// MCP tool 池版本号——拓扑变化时 bump，触发 Agent 重建。
-    mcp_epoch: u64,
+provider_id: String,
+model_id: String,
+fingerprint: String,
+preamble_hash: u64,
+/// MCP tool 池版本号——拓扑变化时 bump，触发 Agent 重建。
+mcp_epoch: u64,
+/// 0.17.6: 对话类型——Persistent / Ephemeral 使用不同 memory，需独立缓存。
+kind: ConversationKind,
 }
 
 struct CachedAgent {
@@ -54,16 +70,21 @@ struct CachedAgent {
 }
 
 struct ActiveChatRequest {
-    request_id: u64,
-    conversation_id: String,
-    abort_handle: AbortHandle,
+request_id: u64,
+conversation_id: String,
+/// 0.17.6: 活跃请求所在窗口（"chat" / "main"），供 AlreadyActive 错误提示。
+target_window: String,
+abort_handle: AbortHandle,
 }
 
 /// 可序列化的 active request 快照，供 Phase 4 `get_chat_status` 使用。
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct ActiveChatStatus {
-    pub request_id: u64,
-    pub conversation_id: String,
+pub request_id: u64,
+pub conversation_id: String,
+/// 0.17.6: 活跃请求所在窗口标签。
+#[serde(skip_serializing_if = "Option::is_none")]
+pub target_window: Option<String>,
 }
 
 // ── 0.13.6: 上下文窗口状态 ──────────────────────────────────────────────────────
@@ -138,9 +159,11 @@ pub struct ChatModelSelection {
 ///
 /// IPC 层持有 `chunks` 并逐项包装 request_id / conversation_id 后 `emit_to("chat", ...)`。
 pub struct ChatPromptHandle {
-    pub request_id: u64,
-    pub conversation_id: String,
-    pub chunks: mpsc::UnboundedReceiver<ChatStreamChunk>,
+pub request_id: u64,
+pub conversation_id: String,
+pub chunks: mpsc::UnboundedReceiver<ChatStreamChunk>,
+/// 0.17.6: 目标窗口标签（IPC 层据此 emit_to 正确窗口）。
+pub target_window: String,
 }
 
 /// 定向发送到 chat 窗口的流式事件包装（Phase 4）。
@@ -190,6 +213,7 @@ impl RequestTracker {
             .map(|active| ActiveChatStatus {
                 request_id: active.request_id,
                 conversation_id: active.conversation_id.clone(),
+                target_window: Some(active.target_window.clone()),
             })
     }
 
@@ -199,6 +223,7 @@ impl RequestTracker {
             return Err(ActiveChatStatus {
                 request_id: current.request_id,
                 conversation_id: current.conversation_id.clone(),
+                target_window: Some(current.target_window.clone()),
             });
         }
         *active = Some(request);
@@ -248,7 +273,10 @@ pub struct ChatService {
     pending_confirms: Arc<PendingConfirms>,
     /// 0.13.0: MCP client 管理器——collect_tools() 拉 MCP tool 进对话窗口 tool 池。
     mcp_client: Arc<McpClientManager>,
-    memory: Arc<SqliteConversationMemory>,
+    /// 0.17.6: 持久化对话记忆（对话窗口使用，写入 SQLite）。
+    persistent_memory: Arc<SqliteConversationMemory>,
+    /// 0.17.6: 临时对话记忆（主窗口 AI 使用，进程内不持久化）。
+    ephemeral_memory: Arc<EphemeralConversationMemory>,
     /// 0.13.3: Skill 注册表——启动时扫描，可手动刷新。
     skill_registry: SkillRegistry,
     cached_agent: RwLock<Option<CachedAgent>>,
@@ -288,9 +316,12 @@ impl ChatService {
             capability_registry,
             pending_confirms,
             mcp_client,
-            memory: Arc::new(crate::domain::ai::memory::SqliteConversationMemory::new(
+            persistent_memory: Arc::new(crate::domain::ai::memory::SqliteConversationMemory::new(
                 ai_pool,
             )),
+            ephemeral_memory: Arc::new(
+                crate::domain::ai::memory::EphemeralConversationMemory::new(),
+            ),
             skill_registry: SkillRegistry::new(),
             cached_agent: RwLock::new(None),
             last_context_status: RwLock::new(None),
@@ -390,6 +421,7 @@ impl ChatService {
     pub(crate) async fn ensure_provider(
         &self,
         preamble: &str,
+        kind: ConversationKind,
     ) -> Result<Arc<AgentProvider>, AIError> {
         const MAX_PROVIDER_RETRY: usize = 3;
         let mut retry_count = 0;
@@ -414,6 +446,7 @@ impl ChatService {
                 fingerprint: resolved.cache_key.2.clone(),
                 preamble_hash,
                 mcp_epoch,
+                kind,
             };
 
             if let Some(provider) = self.cached_provider(&cache_key) {
@@ -430,13 +463,28 @@ impl ChatService {
                 self.emitter.clone(),
                 self.pending_confirms.clone(),
             );
+            // 0.17.6: 按 kind 选撞 memory——Persistent 用 SQLite，Ephemeral 用进程内。
+            // 0.13.1: context_limit 注入仅对 Persistent 有意义（Ephemeral 不做压缩）。
+            let memory: Arc<dyn rig_core::memory::ConversationMemory> = match kind {
+                ConversationKind::Persistent => {
+                    let context_limit = resolved.model.context_window.map(|u| u as usize);
+                    self.persistent_memory.update_context_limit(context_limit).await;
+                    tracing::debug!(
+                        model = %resolved.model.id,
+                        context_limit = ?context_limit,
+                        "ChatService: 已注入 context_limit 到 persistent_memory"
+                    );
+                    self.persistent_memory.clone()
+                }
+                ConversationKind::Ephemeral => self.ephemeral_memory.clone(),
+            };
             let provider = Arc::new(
                 AgentProvider::new(
                     &resolved.provider,
                     &resolved.model,
                     tools,
                     preamble,
-                    self.memory.clone(),
+                    memory,
                 )
                 .await?,
             );
@@ -536,6 +584,8 @@ impl ChatService {
         conversation_id: String,
         message: String,
         group_system_prompt: Option<String>,
+        kind: ConversationKind,
+        target_window: String,
     ) -> Result<ChatPromptHandle, ChatError> {
         let _start_guard = self.start_gate.lock().await;
         if let Some(active) = self.requests.status() {
@@ -587,12 +637,14 @@ impl ChatService {
                     .collect(),
             };
             let _ = self.emitter.emit_to(
-                "chat",
+                &target_window,
                 EventNames::CHAT_SKILL_ACTIVATED,
                 serde_json::to_value(&signal).unwrap_or_default(),
             );
         }
 
+        let target_window_for_task = target_window.clone();
+        let kind_for_task = kind;
         let task = tokio::spawn(async move {
             if start_rx.await.is_err() {
                 return;
@@ -602,7 +654,7 @@ impl ChatService {
             };
 
             // Provider 构造也放进可 abort 的 task：窗口在冷构造期间关闭时仍能立即中断。
-            match service.ensure_provider(&preamble).await {
+            match service.ensure_provider(&preamble, kind_for_task).await {
                 Ok(provider) => {
                     // 0.13.6: 在 stream_prompt 前计算上下文窗口状态并推送前端
                     // 传入 pending message + preamble，因为此时消息尚未写入 DB，
@@ -615,7 +667,7 @@ impl ChatService {
                         )
                         .await;
                     let _ = service.emitter.emit_to(
-                        "chat",
+                        &target_window_for_task,
                         EventNames::CHAT_CONTEXT_STATUS,
                         serde_json::to_value(&context_status).unwrap_or_default(),
                     );
@@ -660,6 +712,7 @@ impl ChatService {
             .install(ActiveChatRequest {
                 request_id,
                 conversation_id: conversation_id.clone(),
+                target_window: target_window.clone(),
                 abort_handle,
             })
             .map_err(ChatError::AlreadyActive)?;
@@ -678,6 +731,7 @@ impl ChatService {
             request_id,
             conversation_id,
             chunks: chunk_rx,
+            target_window,
         })
     }
 
@@ -703,12 +757,27 @@ impl ChatService {
         aborted
     }
 
-    /// 当前 active request 上下文；Phase 4 注入 Dangerous confirm payload。
-    pub fn current_request_context(&self) -> Option<(u64, String)> {
-        self.requests
-            .status()
-            .map(|active| (active.request_id, active.conversation_id))
+    /// 0.17.6a: 导出临时对话的全部消息（供 promote 为持久对话用）。
+    pub async fn export_ephemeral_messages(&self, conversation_id: &str) -> Vec<rig_core::completion::Message> {
+        self.ephemeral_memory.export_messages(conversation_id).await
     }
+
+    /// 0.17.6a: 清空临时对话记忆（promote 后清理）。
+    pub async fn remove_ephemeral_conversation(&self, conversation_id: &str) {
+        self.ephemeral_memory.remove(conversation_id).await;
+    }
+
+    /// 0.17.6a: 获取持久化对话记忆的引用（供 promote 写入消息用）。
+    pub fn persistent_memory(&self) -> &Arc<SqliteConversationMemory> {
+        &self.persistent_memory
+    }
+
+    /// 当前 active request 上下文；Phase 4 注入 Dangerous confirm payload。
+pub fn current_request_context(&self) -> Option<(u64, String, String)> {
+self.requests
+.status()
+.map(|active| (active.request_id, active.conversation_id, active.target_window.unwrap_or_default()))
+}
 
     /// 返回 chat 状态快照。
     ///
@@ -775,7 +844,7 @@ impl ChatService {
     /// 之前。保留运行时注入的 `context_limit`（来自 `ModelEntry.context_window`），
     /// 只更新 `mode / window_size / trigger_ratio / compress_ratio`。
     pub async fn update_memory_config(&self, config: crate::domain::ai::memory::MemoryConfig) {
-        self.memory.apply_config(config).await;
+        self.persistent_memory.apply_config(config).await;
     }
 
     // ── 0.13.6: 上下文窗口状态 ──────────────────────────────────────────
@@ -794,7 +863,7 @@ impl ChatService {
         pending_message: Option<&str>,
         preamble: Option<&str>,
     ) -> ContextWindowStatus {
-        let result = match self.memory.load_with_stats(conversation_id).await {
+        let result = match self.persistent_memory.load_with_stats(conversation_id).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(error = %e, "compute_context_status: load_with_stats 失败");
@@ -806,7 +875,7 @@ impl ChatService {
             }
         };
 
-        let config_handle = self.memory.config_handle();
+        let config_handle = self.persistent_memory.config_handle();
         let cfg = config_handle.read().await;
         let context_limit = cfg.context_limit.unwrap_or(8192);
 
@@ -939,12 +1008,12 @@ impl ChatService {
 ///
 /// 供 `tool_adapter` 在 emit dangerous confirm 时注入，前端按 request_id 校验事件归属。
 /// ChatService 未注册时返回 `(0, String::new())`——confirm 仍可工作，只是前端无法校验归属。
-pub fn current_request_context_from_env(env: &dyn DomainEnv) -> (u64, String) {
-    if let Some(cs) = env.chat_service() {
-        cs.current_request_context().unwrap_or((0, String::new()))
-    } else {
-        (0, String::new())
-    }
+pub fn current_request_context_from_env(env: &dyn DomainEnv) -> (u64, String, String) {
+if let Some(cs) = env.chat_service() {
+cs.current_request_context().unwrap_or((0, String::new(), String::new()))
+} else {
+(0, String::new(), String::new())
+}
 }
 
 /// 计算 preamble 的 hash 值，用于 AgentProvider 缓存 key 的第四元素（0.12.6）。
@@ -971,6 +1040,7 @@ mod tests {
         ActiveChatRequest {
             request_id,
             conversation_id: conversation_id.to_string(),
+            target_window: "chat".to_string(),
             abort_handle,
         }
     }
@@ -1030,6 +1100,7 @@ mod tests {
             .install(ActiveChatRequest {
                 request_id: 9,
                 conversation_id: "c9".into(),
+                target_window: "chat".to_string(),
                 abort_handle,
             })
             .unwrap();
@@ -1044,6 +1115,7 @@ mod tests {
         let error = ChatError::AlreadyActive(ActiveChatStatus {
             request_id: 42,
             conversation_id: "c1".into(),
+            target_window: Some("chat".to_string()),
         });
         assert!(error.to_string().contains("42"));
     }

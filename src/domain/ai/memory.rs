@@ -35,6 +35,7 @@
 //! `messages.content` 列存 `serde_json::to_string(&Message)`，完整保留
 //! text / tool_call / tool_result。`Message` 有 `Serialize/Deserialize`。
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use rig_core::completion::Message;
@@ -686,6 +687,97 @@ impl ConversationMemory for SqliteConversationMemory {
             crate::infra::data::conversations::clear_messages(&pool, conversation_id)
                 .await
                 .map_err(|e| MemoryError::Backend(Box::from(e)))?;
+            Ok(())
+        })
+    }
+}
+
+// ── EphemeralConversationMemory（0.17.6）─────────────────────────────────────
+
+/// 进程内临时对话记忆（不持久化）。
+///
+/// 主窗口 AI 模式使用此 memory——对话不写入 SQLite，进程重启即丢。
+/// 供 `ChatService` 在 `ConversationKind::Ephemeral` 时注入 rig agent。
+///
+/// 设计依据：0.12.3 前的 `InMemoryConversationMemory`（已废弃）同思路，复用。
+/// 临时对话不做压缩——通常短轮次，全量留内存。超长后续迭代加 sliding window。
+///
+/// `export_messages` + `remove` 供 Chord-Q 提升流程使用：
+/// 导出消息 → 写入 `SqliteConversationMemory` → 清空临时记忆。
+pub struct EphemeralConversationMemory {
+    conversations: tokio::sync::RwLock<HashMap<String, Vec<Message>>>,
+}
+
+impl EphemeralConversationMemory {
+    /// 构造空临时记忆。
+    pub fn new() -> Self {
+        Self {
+            conversations: tokio::sync::RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// 导出指定对话的全部消息（供 promote 为持久对话用）。
+    ///
+    /// 返回消息 Vec 的克隆。对话不存在时返回空 Vec。
+    pub async fn export_messages(&self, conversation_id: &str) -> Vec<Message> {
+        self.conversations
+            .read()
+            .await
+            .get(conversation_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// 删除指定对话的全部消息（promote 后清理临时记忆）。
+    pub async fn remove(&self, conversation_id: &str) {
+        self.conversations.write().await.remove(conversation_id);
+    }
+}
+
+impl Default for EphemeralConversationMemory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ConversationMemory for EphemeralConversationMemory {
+    fn load<'a>(
+        &'a self,
+        conversation_id: &'a str,
+    ) -> rig_core::wasm_compat::WasmBoxedFuture<'a, Result<Vec<Message>, MemoryError>> {
+        Box::pin(async move {
+            Ok(self
+                .conversations
+                .read()
+                .await
+                .get(conversation_id)
+                .cloned()
+                .unwrap_or_default())
+        })
+    }
+
+    fn append<'a>(
+        &'a self,
+        conversation_id: &'a str,
+        messages: Vec<Message>,
+    ) -> rig_core::wasm_compat::WasmBoxedFuture<'a, Result<(), MemoryError>> {
+        Box::pin(async move {
+            self.conversations
+                .write()
+                .await
+                .entry(conversation_id.to_string())
+                .or_default()
+                .extend(messages);
+            Ok(())
+        })
+    }
+
+    fn clear<'a>(
+        &'a self,
+        conversation_id: &'a str,
+    ) -> rig_core::wasm_compat::WasmBoxedFuture<'a, Result<(), MemoryError>> {
+        Box::pin(async move {
+            self.conversations.write().await.remove(conversation_id);
             Ok(())
         })
     }
@@ -1428,5 +1520,93 @@ mod tests {
         let result = mem.load_with_stats("c1").await.unwrap();
         assert_eq!(result.dropped_count, 0, "Should not drop any messages");
         assert_eq!(result.messages.len(), 1);
+    }
+
+    // ── EphemeralConversationMemory 测试（0.17.6）──────────────────────────────
+
+    #[tokio::test]
+    async fn ephemeral_append_and_load_roundtrip() {
+        let mem = EphemeralConversationMemory::new();
+
+        // 空对话 load 返回空
+        assert!(mem.load("c1").await.unwrap().is_empty());
+
+        // append 两条消息
+        mem.append("c1", vec![user_msg("hello"), assistant_msg("hi")])
+            .await
+            .unwrap();
+
+        let loaded = mem.load("c1").await.unwrap();
+        assert_eq!(loaded.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn ephemeral_isolation_between_conversations() {
+        let mem = EphemeralConversationMemory::new();
+
+        mem.append("a", vec![user_msg("hi a")]).await.unwrap();
+        mem.append("b", vec![user_msg("hi b")]).await.unwrap();
+
+        assert_eq!(mem.load("a").await.unwrap().len(), 1);
+        assert_eq!(mem.load("b").await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ephemeral_clear_removes_history() {
+        let mem = EphemeralConversationMemory::new();
+
+        mem.append("c", vec![user_msg("x")]).await.unwrap();
+        mem.clear("c").await.unwrap();
+        assert!(mem.load("c").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ephemeral_export_messages_returns_clone() {
+        let mem = EphemeralConversationMemory::new();
+
+        mem.append("c1", vec![user_msg("hello"), assistant_msg("world")])
+            .await
+            .unwrap();
+
+        // export 返回克隆，不影响内部状态
+        let exported = mem.export_messages("c1").await;
+        assert_eq!(exported.len(), 2);
+
+        // 内部状态不变
+        assert_eq!(mem.load("c1").await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn ephemeral_export_nonexistent_returns_empty() {
+        let mem = EphemeralConversationMemory::new();
+        assert!(mem.export_messages("nonexistent").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ephemeral_remove_deletes_conversation() {
+        let mem = EphemeralConversationMemory::new();
+
+        mem.append("c1", vec![user_msg("hello")]).await.unwrap();
+        assert_eq!(mem.load("c1").await.unwrap().len(), 1);
+
+        mem.remove("c1").await;
+        assert!(mem.load("c1").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ephemeral_does_not_persist_to_db() {
+        // EphemeralConversationMemory 是纯内存实现，不写入 SQLite。
+        // 验证：临时记忆 append 后，同 conversation_id 在 SqliteConversationMemory 中仍为空。
+        let pool = setup_pool().await;
+        let sqlite_mem = SqliteConversationMemory::new(pool);
+        let ephemeral_mem = EphemeralConversationMemory::new();
+
+        ephemeral_mem
+            .append("ephemeral-1", vec![user_msg("temp message")])
+            .await
+            .unwrap();
+
+        // SQLite 中同 ID 对话仍为空
+        assert!(sqlite_mem.load("ephemeral-1").await.unwrap().is_empty());
     }
 }

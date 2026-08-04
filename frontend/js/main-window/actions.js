@@ -4,31 +4,20 @@
 //! 且未来动作类型会增多（插件动作、文件打开等）——集中在此便于扩展。
 //! 行为由后端提供的 action.kind 驱动，与提示栏（hints.js）同源，语义一致。
 
-import { launchApp, runBuiltinAction, confirmAiAction, hideWindow, recordClipboardHit, copyClipboardImage, pinClipboardImage, openContentEditor, createStickyNote, showStickyWindow } from "../shared/api.js";
+import { launchApp, runBuiltinAction, hideWindow, recordClipboardHit, copyClipboardImage, pinClipboardImage, openContentEditor, createStickyNote, showStickyWindow } from "../shared/api.js";
 import { normalizeError } from "../shared/tauri.js";
 
 /**
  * 激活一个结果项。
  * 0.16.1: 从 data.actions[0] 取首个动作执行（回车/左键点击场景）。
  * 右键菜单点击特定动作时，调用方传 { ...readData(li), actions: [specificAction] }。
- * @param {{lnkPath?: string, calcValue?: string, actions?: Array<{kind: string, hint?: string, payload?: string, runId?: string, runArg?: any, hitId?: string}>, isError?: boolean, aiConfirm?: object}} data
+ * 0.17.6: AI 确认卡片已移至 ai-mode.js，此函数不再处理 aiConfirm。
+ * @param {{lnkPath?: string, calcValue?: string, actions?: Array<{kind: string, hint?: string, payload?: string, runId?: string, runArg?: any, hitId?: string}>, isError?: boolean}} data
  */
 export async function activateItem(data) {
   if (!data) return;
   // 错误信息项不可执行
   if (data.isError) return;
-
-  // 0.9.2 第二步:AI Dangerous 动作确认卡片——Enter 确认执行
-  // 0.17.0：用 confirm_id 匹配（替代 action_name + arguments 三重比对）
-  if (data.aiConfirm) {
-    try {
-      await confirmAiAction(data.aiConfirm.confirmId);
-    } catch (e) {
-      const err = normalizeError(e);
-      console.error(`[confirm_ai_action] [${err.code}] ${err.message}`);
-    }
-    return;
-  }
 
   const action = data.actions?.[0];
   const kind = action?.kind;
