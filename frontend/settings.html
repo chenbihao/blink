@@ -11,19 +11,34 @@
       <!-- 侧边 Tab 导航 -->
       <nav class="sidebar">
         <div class="logo">Blink</div>
-        <button class="tab active" data-tab="general" data-i18n="tab.general">通用</button>
-        <button class="tab" data-tab="engines" data-i18n="tab.engines">引擎</button>
-        <button class="tab" data-tab="plugins" data-i18n="tab.plugins">插件</button>
-        <button class="tab" data-tab="ai-providers" data-i18n="tab.ai_providers">AI 供应商</button>
+        <div class="sidebar-group">
+          <span class="group-title" data-i18n="sidebar.group.general">通用</span>
+          <button class="tab active" data-tab="general" data-i18n="tab.general">通用</button>
+          <button class="tab" data-tab="hotkey" data-i18n="tab.hotkey">快捷键</button>
+        </div>
+        <div class="sidebar-group">
+          <span class="group-title" data-i18n="sidebar.group.search">搜索</span>
+          <button class="tab" data-tab="engines" data-i18n="tab.engines">引擎</button>
+          <button class="tab" data-tab="plugins" data-i18n="tab.plugins">插件</button>
+        </div>
+        <div class="sidebar-group">
+          <span class="group-title" data-i18n="sidebar.group.ai">AI</span>
+          <button class="tab" data-tab="ai-providers" data-i18n="tab.ai_providers">AI 供应商</button>
           <button class="tab" data-tab="ai-chat" data-i18n="tab.ai_chat">AI 对话能力</button>
-        <button class="tab" data-tab="voice" data-i18n="tab.voice">语音输入</button>
-        <button class="tab" data-tab="context" data-i18n="tab.context">上下文感知</button>
-        <button class="tab" data-tab="chord" data-i18n="tab.chord">Chord 交互</button>
-        <button class="tab" data-tab="hotkey" data-i18n="tab.hotkey">快捷键</button>
-        <button class="tab" data-tab="network" data-i18n="tab.network">网络</button>
-        <button class="tab" data-tab="storage" data-i18n="tab.storage">存储</button>
-        <button class="tab" data-tab="debug" data-i18n="tab.debug">调试</button>
-        <button class="tab" data-tab="about" data-i18n="tab.about">关于</button>
+        </div>
+        <div class="sidebar-group">
+          <span class="group-title" data-i18n="sidebar.group.interaction">感知与交互</span>
+          <button class="tab" data-tab="voice" data-i18n="tab.voice">语音输入</button>
+          <button class="tab" data-tab="context" data-i18n="tab.context">上下文感知</button>
+          <button class="tab" data-tab="chord" data-i18n="tab.chord">Chord 交互</button>
+        </div>
+        <div class="sidebar-group">
+          <span class="group-title" data-i18n="sidebar.group.other">其他</span>
+          <button class="tab" data-tab="network" data-i18n="tab.network">网络</button>
+          <button class="tab" data-tab="storage" data-i18n="tab.storage">存储</button>
+          <button class="tab" data-tab="debug" data-i18n="tab.debug">调试</button>
+          <button class="tab" data-tab="about" data-i18n="tab.about">关于</button>
+        </div>
       </nav>
 
       <!-- Tab 内容 -->
@@ -1561,22 +1576,26 @@
 
           <!-- P2.7: 迁移失败警告（旧库迁移失败时显示）-->
           <div id="migration-warning" class="setting-row migration-warning" hidden>
-            <span class="migration-warning-icon">⚠</span>
+            <svg class="icon migration-warning-icon" aria-hidden="true"><use href="#icon-triangle-alert"/></svg>
             <span data-i18n="storage.migration_failed">旧数据库迁移失败，部分数据可能未迁移，请重试或检查日志。</span>
             <button id="retry-migration" class="btn-small" data-i18n="storage.retry_migration">重试迁移</button>
           </div>
 
-          <!-- 四库统计卡片 -->
+          <!-- 四库统计卡片（统计 + 清理一体） -->
           <div id="db-stats-grid" class="db-stats-grid">
-            <!-- 配置库 -->
+            <!-- 配置库（可重置一次性标记） -->
             <div class="db-card">
               <div class="db-card-header">
                 <span class="db-card-name" data-i18n="storage.db.config">配置库</span>
+                <span class="db-card-size" id="db-config-size">-</span>
                 <span class="db-card-file">blink_config.db</span>
               </div>
               <div class="db-card-body">
-                <div class="db-card-size" id="db-config-size">-</div>
-                <div class="db-card-path" id="db-config-path">-</div>
+                <div class="db-card-stats"><!-- 配置库无条目统计，留空保持等高 --></div>
+              </div>
+              <div class="db-card-footer">
+                <button id="reset-first-run" class="btn-small" data-i18n="storage.reset_first_run">重置欢迎提示</button>
+                <button id="clear-debug-flags" class="btn-small" data-i18n="storage.clear_debug_flags">清理调试标记</button>
               </div>
             </div>
 
@@ -1584,6 +1603,7 @@
             <div class="db-card">
               <div class="db-card-header">
                 <span class="db-card-name" data-i18n="storage.db.history">历史库</span>
+                <span class="db-card-size" id="db-history-size">-</span>
                 <span class="db-card-file">blink_history.db</span>
               </div>
               <div class="db-card-body">
@@ -1591,8 +1611,10 @@
                   <span id="db-history-count" class="db-stat">-</span>
                   <span id="db-clipboard-count" class="db-stat">-</span>
                 </div>
-                <div class="db-card-size" id="db-history-size">-</div>
-                <div class="db-card-path" id="db-history-path">-</div>
+              </div>
+              <div class="db-card-footer">
+                <button id="clear-history" class="btn-small" data-i18n="storage.clear">清空历史记录</button>
+                <button id="clear-clipboard" class="btn-small" data-i18n="storage.clear_clipboard">清空剪贴板</button>
               </div>
             </div>
 
@@ -1600,14 +1622,19 @@
             <div class="db-card">
               <div class="db-card-header">
                 <span class="db-card-name" data-i18n="storage.db.ai">AI 库</span>
+                <span class="db-card-size" id="db-ai-size">-</span>
                 <span class="db-card-file">blink_ai.db</span>
               </div>
               <div class="db-card-body">
                 <div class="db-card-stats">
                   <span id="db-audit-count" class="db-stat">-</span>
+                  <span id="db-conversation-count" class="db-stat">-</span>
+                  <span id="db-message-count" class="db-stat">-</span>
                 </div>
-                <div class="db-card-size" id="db-ai-size">-</div>
-                <div class="db-card-path" id="db-ai-path">-</div>
+              </div>
+              <div class="db-card-footer">
+                <button id="clear-ai-audit" class="btn-small" data-i18n="storage.clear_audit">清空调用记录</button>
+                <button id="clear-all-conversations" class="btn-small" data-i18n="storage.clear_conversations">清空对话</button>
               </div>
             </div>
 
@@ -1615,6 +1642,7 @@
             <div class="db-card">
               <div class="db-card-header">
                 <span class="db-card-name" data-i18n="storage.db.cache">缓存库</span>
+                <span class="db-card-size" id="db-cache-size">-</span>
                 <span class="db-card-file">blink_cache.db</span>
               </div>
               <div class="db-card-body">
@@ -1622,42 +1650,22 @@
                   <span id="db-perf-count" class="db-stat">-</span>
                   <span id="db-icon-cache-count" class="db-stat">-</span>
                   <span id="db-clipboard-image-count" class="db-stat">-</span>
-                  <span id="db-clipboard-image-size" class="db-stat">-</span>
                 </div>
-                <div class="db-card-size" id="db-cache-size">-</div>
-                <div class="db-card-path" id="db-cache-path">-</div>
+              </div>
+              <div class="db-card-footer">
+                <button id="clear-cache-db" class="btn-small" data-i18n="storage.clear_cache">清空缓存</button>
+                <button id="clear-clipboard-images" class="btn-small" data-i18n="storage.clear_clipboard_images">清空图片</button>
               </div>
             </div>
           </div>
 
-          <!-- 操作 -->
-          <div class="section-label" data-i18n="storage.section.actions">清理操作</div>
-          <div class="setting-row">
-            <label class="setting-label" data-i18n="storage.cache.label">缓存库</label>
-            <button id="clear-cache-db" class="btn-danger" data-i18n="storage.clear_cache">清空缓存</button>
-          </div>
-          <div class="setting-row">
-            <label class="setting-label" data-i18n="storage.clipboard_images.label">剪贴板图片</label>
-            <button id="clear-clipboard-images" class="btn-danger" data-i18n="storage.clear_clipboard_images">清空剪贴板图片</button>
-          </div>
+          <!-- 维护：优化存储（VACUUM 全部四库） -->
           <div class="setting-row">
             <label class="setting-label" data-i18n="storage.optimize.label">优化存储</label>
-            <button id="optimize-storage" class="btn-secondary" data-i18n="storage.optimize">优化存储</button>
-          </div>
-          <div class="setting-row">
-            <label class="setting-label" data-i18n="storage.history.label">历史记录</label>
-            <button id="clear-history" class="btn-danger" data-i18n="storage.clear">清空历史记录</button>
-          </div>
-          <div class="setting-row">
-            <label class="setting-label" data-i18n="storage.clipboard.label">剪贴板记录</label>
-            <button id="clear-clipboard" class="btn-danger" data-i18n="storage.clear_clipboard">清空剪贴板记录</button>
-          </div>
-          <div class="setting-row">
-            <label class="setting-label" data-i18n="storage.audit.label">AI 调用记录</label>
-            <button id="clear-ai-audit" class="btn-danger" data-i18n="storage.clear_audit">清空 AI 调用记录</button>
+            <button id="optimize-storage" class="btn-small" data-i18n="storage.optimize">优化存储</button>
           </div>
 
-          <!-- 0.16.6 完整清理（卸载前清理） -->
+          <!-- 完整清理（卸载前清理，运行时禁用） -->
           <div class="section-label" data-i18n="storage.section.full_cleanup">完整清理（卸载前）</div>
           <div id="cleanup-info-grid" class="cleanup-info-grid">
             <div class="cleanup-info-item">
@@ -1687,7 +1695,7 @@
           </div>
           <div id="cleanup-results" class="cleanup-results" hidden></div>
           <div class="cleanup-action-row">
-            <button id="cleanup-all-data" class="btn-danger" data-i18n="storage.cleanup.button">一键清理</button>
+            <span class="setting-hint" data-i18n="storage.cleanup.disabled_hint">运行时不可用，请卸载前使用或手动删除数据目录</span>
           </div>
         </div>
 

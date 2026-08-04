@@ -8,6 +8,7 @@ import { confirmDialog, messageDialog } from "../../shared/tauri.js";
 import { t, onLangChange } from "../../i18n/index.js";
 import { iconHTML } from "../../shared/icon.js";
 import { clearClipboardImages, optimizeStorage } from "../../shared/api.js";
+import { saveConfig } from "../../shared/config-keys.js";
 
 /**
  * 初始化存储设置 Tab
@@ -43,6 +44,16 @@ export function initStorageTab() {
     });
     if (!ok) return;
     await invoke("clear_ai_audit");
+    loadStorageInfo();
+  });
+
+  document.getElementById("clear-all-conversations")?.addEventListener("click", async () => {
+    const ok = await confirmDialog(t("storage.clear_conversations.confirm"), {
+      title: t("common.confirm"),
+      kind: "warning",
+    });
+    if (!ok) return;
+    await invoke("clear_all_conversations");
     loadStorageInfo();
   });
 
@@ -114,29 +125,39 @@ export function initStorageTab() {
     }
   });
 
-  // 0.16.6: 一键清理全部数据
-  document.getElementById("cleanup-all-data")?.addEventListener("click", async () => {
-    const ok = await confirmDialog(t("storage.cleanup.confirm"), {
+  document.getElementById("reset-first-run")?.addEventListener("click", async () => {
+    const ok = await confirmDialog(t("storage.reset_first_run.confirm"), {
       title: t("common.confirm"),
       kind: "warning",
     });
     if (!ok) return;
-
-    const btn = document.getElementById("cleanup-all-data");
-    if (btn) btn.disabled = true;
-
     try {
-      const result = await invoke("cleanup_all_data");
-      renderCleanupResults(result);
-      // 清理后刷新清理信息（大部分数据应已清空）
-      await loadCleanupInfo();
+      await invoke("set_config", { key: "first_run", value: true });
+      await messageDialog(t("storage.reset_first_run.done"), { kind: "info" });
     } catch (e) {
-      console.error("cleanup_all_data failed:", e);
-      await messageDialog(t("storage.cleanup.failed", { err: String(e) }), { kind: "error" });
-    } finally {
-      if (btn) btn.disabled = false;
+      console.error("reset_first_run failed:", e);
+      await messageDialog(t("storage.reset_first_run.failed", { err: String(e) }), { kind: "error" });
     }
   });
+
+  document.getElementById("clear-debug-flags")?.addEventListener("click", async () => {
+    const ok = await confirmDialog(t("storage.clear_debug_flags.confirm"), {
+      title: t("common.confirm"),
+      kind: "warning",
+    });
+    if (!ok) return;
+    try {
+      // 重置 scroll_debug 为默认值 false（prewarmOcr 保持默认 true）
+      await saveConfig("screenshot_config", { prewarmOcr: true, scrollDebug: false });
+      await messageDialog(t("storage.clear_debug_flags.done"), { kind: "info" });
+    } catch (e) {
+      console.error("clear_debug_flags failed:", e);
+      await messageDialog(t("storage.clear_debug_flags.failed", { err: String(e) }), { kind: "error" });
+    }
+  });
+
+  // 0.16.6: 一键清理全部数据（运行时禁用，仅卸载前手动启用）
+  // 按钮已从 HTML 中移除，如需恢复请见 git history 的 cleanup-all-data 实现。
 }
 
 /**
@@ -185,11 +206,9 @@ function renderStorageInfo() {
 
   // 配置库
   setText("db-config-size", dbs.config ? formatSize(dbs.config.size_bytes) : "-");
-  setText("db-config-path", dbs.config?.path || "-");
 
   // 历史库
   setText("db-history-size", dbs.history ? formatSize(dbs.history.size_bytes) : "-");
-  setText("db-history-path", dbs.history?.path || "-");
   setText(
     "db-history-count",
     dbs.history ? t("storage.stat.history", { count: dbs.history.history_count ?? 0 }) : "-"
@@ -201,15 +220,21 @@ function renderStorageInfo() {
 
   // AI 库
   setText("db-ai-size", dbs.ai ? formatSize(dbs.ai.size_bytes) : "-");
-  setText("db-ai-path", dbs.ai?.path || "-");
   setText(
     "db-audit-count",
     dbs.ai ? t("storage.stat.audit", { count: dbs.ai.audit_count ?? 0 }) : "-"
   );
+  setText(
+    "db-conversation-count",
+    dbs.ai ? t("storage.stat.conversations", { count: dbs.ai.conversation_count ?? 0 }) : "-"
+  );
+  setText(
+    "db-message-count",
+    dbs.ai ? t("storage.stat.messages", { count: dbs.ai.message_count ?? 0 }) : "-"
+  );
 
   // 缓存库
   setText("db-cache-size", dbs.cache ? formatSize(dbs.cache.size_bytes) : "-");
-  setText("db-cache-path", dbs.cache?.path || "-");
   setText(
     "db-perf-count",
     dbs.cache ? t("storage.stat.perf", { count: dbs.cache.perf_count ?? 0 }) : "-"
@@ -218,14 +243,15 @@ function renderStorageInfo() {
     "db-icon-cache-count",
     dbs.cache ? t("storage.stat.icon_cache", { count: dbs.cache.icon_cache_count ?? 0 }) : "-"
   );
-  // 0.17.0: 剪贴板图片统计
+  // 0.17.0: 剪贴板图片统计（张数 + 占用空间合并展示）
   setText(
     "db-clipboard-image-count",
-    dbs.cache ? t("storage.stat.clipboard_images", { count: dbs.cache.clipboard_image_count ?? 0 }) : "-"
-  );
-  setText(
-    "db-clipboard-image-size",
-    dbs.cache ? formatSize(dbs.cache.clipboard_image_size_bytes ?? 0) : "-"
+    dbs.cache
+      ? t("storage.stat.clipboard_images", {
+          count: dbs.cache.clipboard_image_count ?? 0,
+          size: formatSize(dbs.cache.clipboard_image_size_bytes ?? 0),
+        })
+      : "-"
   );
 }
 

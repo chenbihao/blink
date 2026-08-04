@@ -711,6 +711,7 @@ fn main() {
             app::commands::get_storage_info,
             app::commands::clear_history,
             app::commands::clear_ai_audit,
+            app::commands::clear_all_conversations,
             app::commands::open_data_folder,
             app::commands::retry_migration,
             app::commands::clear_cache_db,

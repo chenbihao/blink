@@ -386,22 +386,42 @@ pub async fn load_all_messages(
     Ok(rows)
 }
 
-/// 对话总数（测试辅助函数）。
-#[cfg(test)]
-async fn count_conversations(pool: &SqlitePool) -> i64 {
+/// 对话总数。
+pub async fn count_conversations(pool: &SqlitePool) -> i64 {
     sqlx::query_scalar("SELECT COUNT(*) FROM conversations")
         .fetch_one(pool)
         .await
         .unwrap_or(0)
 }
 
-/// 消息总数（测试辅助函数）。
-#[cfg(test)]
-async fn count_messages(pool: &SqlitePool) -> i64 {
+/// 消息总数。
+pub async fn count_messages(pool: &SqlitePool) -> i64 {
     sqlx::query_scalar("SELECT COUNT(*) FROM messages")
         .fetch_one(pool)
         .await
         .unwrap_or(0)
+}
+
+/// 清空全部对话（删除 conversations + messages + memory_fts，保留 conversation_groups）。
+///
+/// 与 `delete_conversation` 的单条级联不同，这里是全表清理：
+/// messages -> memory_fts -> conversations，手动级联（SQLite 默认不启用 FK）。
+pub async fn clear_all_conversations(pool: &SqlitePool) -> Result<(), String> {
+    sqlx::query("DELETE FROM messages")
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    sqlx::query("DELETE FROM memory_fts")
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    sqlx::query("DELETE FROM conversations")
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 // ── 分组 CRUD（0.12.6）─────────────────────────────────────────────────────────

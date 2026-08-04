@@ -17,6 +17,9 @@
   --red-bg: #e6d2da;
   --red-border: #d2b3c2;
   --green-bg: #d2e3d8;
+  --warning: #fe640b;       /* Catppuccin Latte peach -- 警告态（迁移失败等） */
+  --warning-bg: #ffe6d6;
+  --warning-border: #fec8b0;
   --shadow: rgba(0, 0, 0, 0.18);
   --shadow-strong: rgba(0, 0, 0, 0.35);
   --border-glow: rgba(0, 0, 0, 0.06);

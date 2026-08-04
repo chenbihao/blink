@@ -17,9 +17,6 @@
 import { invoke } from "../../shared/tauri.js";
 import { t, onLangChange } from "../../i18n/index.js";
 import { saveConfig } from "../../shared/config-keys.js";
-import {
-  readScrollDebugSetting, writeScrollDebugSetting,
-} from "./scroll-debug-setting.js";
 
 /**
  * 初始化 Chord 动作 Tab
@@ -68,11 +65,11 @@ async function loadChordActions() {
     // 与后端 ScreenshotConfig 的 serde camelCase 对齐;字段缺失走默认
     screenshotCfg = {
       prewarmOcr: sc?.prewarmOcr !== false,
-      scrollDebug: readScrollDebugSetting(),
+      scrollDebug: sc?.scrollDebug === true,
     };
   } catch (e) {
     console.warn("load screenshot config failed:", e);
-    screenshotCfg = { prewarmOcr: true, scrollDebug: readScrollDebugSetting() };
+    screenshotCfg = { prewarmOcr: true, scrollDebug: false };
   }
 
   // Chord id → 副标题（不再用 emoji 图标，标题/副标题足够承载语义）
@@ -469,15 +466,10 @@ async function saveClipboardDetail(container) {
 async function saveScreenshotDetail(container) {
   const detail = container.querySelector(".chord-screenshot-detail");
   if (!detail) return;
-  const scrollDebug = detail.querySelector('[data-field="scroll_debug"]')?.checked === true;
-  try {
-    writeScrollDebugSetting(scrollDebug);
-  } catch (e) {
-    console.error("save scroll debug setting failed:", e);
-  }
   try {
     const prewarmOcr = detail.querySelector('[data-field="prewarm_ocr"]')?.checked !== false;
-    await saveConfig("screenshot_config", { prewarmOcr });
+    const scrollDebug = detail.querySelector('[data-field="scroll_debug"]')?.checked === true;
+    await saveConfig("screenshot_config", { prewarmOcr, scrollDebug });
   } catch (e) {
     console.error("save screenshot detail failed:", e);
   }

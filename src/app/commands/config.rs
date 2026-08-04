@@ -409,7 +409,7 @@ pub async fn set_config(
             let sc: crate::app::config::ScreenshotConfig =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
             crate::app::config::ConfigStore::set(&pool, &sc).await?;
-            tracing::info!(prewarm_ocr = sc.prewarm_ocr, "截图配置已更新");
+            tracing::info!(prewarm_ocr = sc.prewarm_ocr, scroll_debug = sc.scroll_debug, "截图配置已更新");
         }
 
         _ => {

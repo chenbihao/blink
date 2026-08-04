@@ -2,6 +2,7 @@
 
 import { SCROLL_DECISION_SCHEMA_VERSION } from './tracker.js';
 import { screenshotSaveReplayFile } from '../../shared/api.js';
+import { ss } from '../ss-state.js';
 
 const MAX_REPLAY_FRAMES = 256;
 const MAX_REPLAY_BYTES = 256 * 1024 * 1024;
@@ -11,12 +12,15 @@ const TIMING_KEYS = [
 ];
 
 export function scrollDiagnosticsEnabled() {
+  // URL 覆盖：dev 一次性调试用，优先级最高
   if (new URLSearchParams(window.location.search).get('scrollDebug') === '1') return true;
-  try {
-    return window.localStorage.getItem('blink.scrollDebug') === '1';
-  } catch {
-    return false;
-  }
+  // 从 SQLite 配置库缓存读取（index.js loadScreenshot 时异步写入 ss.screenshotConfig）
+  return ss.screenshotConfig.scrollDebug === true;
+}
+
+/// 配置读完后刷新面板可见性（index.js 的 get_config_section .then 回调调用）。
+export function refreshDiagnosticsVisibility() {
+  setPanelVisible(scrollDiagnosticsEnabled());
 }
 
 function setPanelVisible(visible) {

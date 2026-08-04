@@ -336,11 +336,14 @@ impl ContextConfig {
 pub struct ScreenshotConfig {
     #[serde(default = "default_true")]
     pub prewarm_ocr: bool,
+    /// 长截图诊断开关（0.17.x 从 localStorage 迁移到 SQLite 配置库）。
+    #[serde(default)]
+    pub scroll_debug: bool,
 }
 
 impl Default for ScreenshotConfig {
     fn default() -> Self {
-        Self { prewarm_ocr: true }
+        Self { prewarm_ocr: true, scroll_debug: false }
     }
 }
 

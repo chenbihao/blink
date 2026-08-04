@@ -12,6 +12,19 @@ pub async fn clear_ai_audit(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// 清空全部对话历史（设置页-存储「清空对话」）。
+///
+/// 删除 conversations + messages + memory_fts，保留 conversation_groups（分组结构）。
+/// 审计日志（ai_tool_audit）不受影响。
+#[tauri::command]
+pub async fn clear_all_conversations(app: tauri::AppHandle) -> Result<(), String> {
+    let pool = &app.state::<crate::infra::data::DbPools>().ai;
+    crate::infra::data::conversations::clear_all_conversations(&pool).await?;
+    crate::infra::data::vacuum(&pool).await;
+    tracing::info!("全部对话历史已清空（分组保留）");
+    Ok(())
+}
+
 /// 保存 Provider API Key 到 Windows Credential Manager。
 ///
 /// **参数**:
