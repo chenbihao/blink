@@ -1,12 +1,9 @@
 /**
- * 便签管理窗口入口（0.16.10）。
+ * 便签管理窗口入口（0.16.10 / 0.17.7 回收站增强）。
  *
- * 从后端拉取便签列表，按更新时间倒序渲染。支持：
- * - 聚焦（已显示的便签）
- * - 恢复（已隐藏的便签）
- * - 编辑（打开内容编辑器）
- * - 改色
- * - 删除（二次确认，默认拒绝）
+ * 双 tab 设计：活跃便签（trashed=false）+ 回收站（trashed=true）。
+ * 活跃 tab：聚焦/恢复、编辑、改色、隐藏、删除(→回收站)
+ * 回收站 tab：恢复、彻底删除、清空回收站
  *
  * 关闭管理窗口不影响桌面便签。
  */
@@ -16,12 +13,16 @@ import { ensureSpriteLoaded, iconHTML } from "../shared/icon.js";
 import { getCurrentWindow, confirmDialog, listen } from "../shared/tauri.js";
 import {
   listStickyNotes,
+  listTrashedStickyNotes,
   createStickyNote,
   showStickyWindow,
   setStickyVisible,
   deleteStickyNote,
   destroyStickyWindow,
   updateStickyAppearance,
+  trashStickyNote,
+  restoreStickyNote,
+  clearTrashedStickyNotes,
   openContentEditor,
 } from "../shared/api.js";
 import { EVENTS } from "../shared/event-names.js";
@@ -29,8 +30,18 @@ import { EVENTS } from "../shared/event-names.js";
 // ── DOM 引用 ──────────────────────────────────────────
 
 const listEl = document.getElementById("sticky-list");
+const trashListEl = document.getElementById("trash-list");
 const emptyEl = document.getElementById("empty-state");
-const countEl = document.getElementById("sticky-count");
+const emptyTextEl = document.getElementById("empty-text");
+const tabActive = document.getElementById("tab-active");
+const tabTrash = document.getElementById("tab-trash");
+const btnNewSticky = document.getElementById("btn-new-sticky");
+const btnEmptyNew = document.getElementById("btn-empty-new");
+const btnClearTrash = document.getElementById("btn-clear-trash");
+
+// ── 状态 ──────────────────────────────────────────────
+
+let currentTab = "active";
 
 // ── 初始化 ────────────────────────────────────────────
 
@@ -40,6 +51,7 @@ async function init() {
 
   bindWindowControls();
   bindButtons();
+  bindTabs();
   bindEvents();
 
   await loadList();
@@ -47,8 +59,6 @@ async function init() {
   // 注册窗口复用回调
   window.__stickyManagerReload = loadList;
 
-  // 0.16.13：后端已改为 visible(true) + background_color 创建窗口，不再依赖前端 show。
-  // 此处 win.show()/setFocus() 保留为 harmless no-op（窗口已由后端 show）。
   const win = getCurrentWindow();
   if (win) {
     try {
@@ -62,36 +72,61 @@ async function init() {
   console.log("[sticky-manager] init 完成");
 }
 
+// ── Tab 切换 ──────────────────────────────────────────
+
+function bindTabs() {
+  tabActive.addEventListener("click", () => switchTab("active"));
+  tabTrash.addEventListener("click", () => switchTab("trash"));
+}
+
+function switchTab(tab) {
+  currentTab = tab;
+  tabActive.classList.toggle("active", tab === "active");
+  tabTrash.classList.toggle("active", tab === "trash");
+  btnNewSticky.hidden = tab === "trash";
+  btnClearTrash.hidden = tab === "active";
+  loadList();
+}
+
 // ── 数据加载 ──────────────────────────────────────────
 
 async function loadList() {
   try {
-    const notes = await listStickyNotes();
-    renderList(notes);
+    if (currentTab === "active") {
+      const notes = await listStickyNotes();
+      renderList(notes, false);
+    } else {
+      const notes = await listTrashedStickyNotes();
+      renderList(notes, true);
+    }
   } catch (e) {
     console.error("[sticky-manager] 加载便签列表失败:", e);
   }
 }
 
-function renderList(notes) {
-  listEl.replaceChildren();
-  countEl.textContent = notes.length ? `${notes.length} 条` : "";
+function renderList(notes, isTrash) {
+  const container = isTrash ? trashListEl : listEl;
+  const otherContainer = isTrash ? listEl : trashListEl;
+  otherContainer.hidden = true;
+  container.hidden = false;
+
+  container.replaceChildren();
 
   if (!notes.length) {
     emptyEl.hidden = false;
-    listEl.hidden = true;
+    emptyTextEl.textContent = isTrash ? "回收站为空" : "还没有便签";
+    btnEmptyNew.hidden = isTrash;
     return;
   }
 
   emptyEl.hidden = true;
-  listEl.hidden = false;
 
   for (const note of notes) {
-    listEl.appendChild(createItem(note));
+    container.appendChild(createItem(note, isTrash));
   }
 }
 
-function createItem(note) {
+function createItem(note, isTrash) {
   const item = document.createElement("div");
   item.className = "sticky-item";
   item.dataset.id = note.id;
@@ -108,16 +143,29 @@ function createItem(note) {
   const summary = document.createElement("div");
   summary.className = "sticky-summary";
   summary.textContent = makeSummary(note.content);
+  // 0.17.7: font-style: normal 防御（中文不斜体铁则）
+  summary.style.fontStyle = "normal";
 
   const meta = document.createElement("div");
   meta.className = "sticky-meta";
+  meta.style.fontStyle = "normal";
 
-  // 可见性 badge
-  if (!note.visible) {
-    const badge = document.createElement("span");
-    badge.className = "sticky-badge hidden";
-    badge.textContent = "已隐藏";
-    meta.appendChild(badge);
+  if (!isTrash) {
+    // 活跃 tab：显示可见性 badge
+    if (!note.visible) {
+      const badge = document.createElement("span");
+      badge.className = "sticky-badge hidden";
+      badge.textContent = "已隐藏";
+      meta.appendChild(badge);
+    }
+  } else {
+    // 回收站 tab：显示删除时间
+    if (note.deletedAt) {
+      const badge = document.createElement("span");
+      badge.className = "sticky-badge trashed";
+      badge.textContent = formatTime(note.deletedAt);
+      meta.appendChild(badge);
+    }
   }
 
   const timeText = formatTime(note.updatedAt);
@@ -135,45 +183,54 @@ function createItem(note) {
   const actions = document.createElement("div");
   actions.className = "sticky-actions";
 
-  // 聚焦/恢复
-  if (note.visible) {
-    actions.appendChild(makeActionBtn("聚焦", "move-up-right", () => {
-      showStickyWindow(note.id).catch((e) => console.error("showStickyWindow failed:", e));
+  if (!isTrash) {
+    // 活跃 tab 操作
+    if (note.visible) {
+      actions.appendChild(makeActionBtn("聚焦", "move-up-right", () => {
+        showStickyWindow(note.id).catch((e) => console.error("showStickyWindow failed:", e));
+      }));
+    } else {
+      actions.appendChild(makeActionBtn("恢复", "plus", () => {
+        setStickyVisible(note.id, true)
+          .then(() => showStickyWindow(note.id))
+          .catch((e) => console.error("restore failed:", e));
+      }));
+    }
+
+    actions.appendChild(makeActionBtn("编辑", "pencil", async () => {
+      await openContentEditor({
+        body: note.content || "",
+        format: "markdown",
+        title: "编辑便签内容",
+        origin: "sticky",
+        originRef: note.id,
+        savePolicy: "sticky_update",
+      }).catch((e) => console.error("openContentEditor failed:", e));
     }));
+
+    actions.appendChild(makeColorBtn(note));
+
+    if (note.visible) {
+      actions.appendChild(makeActionBtn("隐藏", "eye-off", () => {
+        setStickyVisible(note.id, false).catch((e) => console.error("hide failed:", e));
+      }));
+    }
+
+    // 0.17.7：删除=移入回收站（不再是永久删除）
+    actions.appendChild(makeActionBtn("删除", "trash-2", () => {
+      handleTrash(note);
+    }, true));
   } else {
-    actions.appendChild(makeActionBtn("恢复", "plus", () => {
-      setStickyVisible(note.id, true)
-        .then(() => showStickyWindow(note.id))
-        .catch((e) => console.error("restore failed:", e));
+    // 回收站 tab 操作
+    actions.appendChild(makeActionBtn("恢复", "rotate-ccw", () => {
+      handleRestore(note);
     }));
+
+    // 彻底删除（永久）
+    actions.appendChild(makeActionBtn("彻底删除", "eraser", () => {
+      handlePurge(note);
+    }, true));
   }
-
-  // 编辑
-  actions.appendChild(makeActionBtn("编辑", "pencil", async () => {
-    await openContentEditor({
-      body: note.content || "",
-      format: note.format || "plain",
-      title: "编辑便签内容",
-      origin: "sticky",
-      originRef: note.id,
-      savePolicy: "sticky_update",
-    }).catch((e) => console.error("openContentEditor failed:", e));
-  }));
-
-  // 改色
-  actions.appendChild(makeColorBtn(note));
-
-  // 隐藏
-  if (note.visible) {
-    actions.appendChild(makeActionBtn("隐藏", "eye-off", () => {
-      setStickyVisible(note.id, false).catch((e) => console.error("hide failed:", e));
-    }));
-  }
-
-  // 删除
-  actions.appendChild(makeActionBtn("删除", "eraser", () => {
-    handleDelete(note);
-  }, true));
 
   item.appendChild(actions);
   return item;
@@ -181,10 +238,31 @@ function createItem(note) {
 
 // ── 操作 ──────────────────────────────────────────────
 
-async function handleDelete(note) {
-  const confirmed = await confirmDialog("确定删除此便签？删除后不可恢复。", {
+/** 活跃 tab：移入回收站 */
+async function handleTrash(note) {
+  try {
+    await trashStickyNote(note.id);
+    await destroyStickyWindow(note.id);
+  } catch (e) {
+    console.error("[sticky-manager] 移入回收站失败:", e);
+  }
+}
+
+/** 回收站 tab：恢复 */
+async function handleRestore(note) {
+  try {
+    await restoreStickyNote(note.id);
+    await showStickyWindow(note.id);
+  } catch (e) {
+    console.error("[sticky-manager] 恢复便签失败:", e);
+  }
+}
+
+/** 回收站 tab：彻底删除（永久） */
+async function handlePurge(note) {
+  const confirmed = await confirmDialog("确定彻底删除此便签？此操作不可恢复。", {
     kind: "warning",
-    okLabel: "删除",
+    okLabel: "彻底删除",
     cancelLabel: "取消",
   });
   if (!confirmed) return;
@@ -193,7 +271,23 @@ async function handleDelete(note) {
     await deleteStickyNote(note.id);
     await destroyStickyWindow(note.id);
   } catch (e) {
-    console.error("[sticky-manager] 删除便签失败:", e);
+    console.error("[sticky-manager] 彻底删除失败:", e);
+  }
+}
+
+/** 回收站 tab：清空回收站 */
+async function handleClearTrash() {
+  const confirmed = await confirmDialog("确定清空回收站？所有回收站中的便签将被永久删除，此操作不可恢复。", {
+    kind: "warning",
+    okLabel: "清空",
+    cancelLabel: "取消",
+  });
+  if (!confirmed) return;
+
+  try {
+    await clearTrashedStickyNotes();
+  } catch (e) {
+    console.error("[sticky-manager] 清空回收站失败:", e);
   }
 }
 
@@ -260,13 +354,16 @@ function bindEvents() {
   listen(EVENTS.STICKY_VISIBILITY_CHANGED, () => loadList());
   listen(EVENTS.STICKY_APPEARANCE_CHANGED, () => loadList());
   listen(EVENTS.STICKY_CONTENT_CHANGED, () => loadList());
+  listen(EVENTS.STICKY_TRASHED, () => loadList());
+  listen(EVENTS.STICKY_RESTORED, () => loadList());
 }
 
 // ── 按钮绑定 ──────────────────────────────────────────
 
 function bindButtons() {
-  document.getElementById("btn-new-sticky").addEventListener("click", handleNewSticky);
-  document.getElementById("btn-empty-new").addEventListener("click", handleNewSticky);
+  btnNewSticky.addEventListener("click", handleNewSticky);
+  btnEmptyNew.addEventListener("click", handleNewSticky);
+  btnClearTrash.addEventListener("click", handleClearTrash);
 }
 
 async function handleNewSticky() {

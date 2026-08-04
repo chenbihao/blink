@@ -197,6 +197,10 @@ pub struct ProviderEntry {
     /// **CM 别名**,不是 raw Key。形如 `"blink/{id}/key"`。
     /// 由 `secret::build_target_name(&id, "key")` 生成,`SecretError::InvalidRef`
     /// 兜底非法输入。
+    ///
+    /// `#[serde(default)]`——前端新建供应商时可能不带此字段,空串兜底;
+    /// 运行时密钥加载走 `build_target_name(&id, "key")`,不依赖此字段。
+    #[serde(default)]
     pub secret_ref: String,
 
     /// 该 Provider 下配的模型列表——用户可绑多个(GPT-4/mini/nano 等)。
@@ -209,6 +213,8 @@ pub struct ProviderEntry {
     pub enabled: bool,
 
     /// UTC 时间戳(秒),用于设置页展示"添加于"。
+    /// `#[serde(default)]`——前端新建供应商时可能不带此字段,0 兜底。
+    #[serde(default)]
     pub created_at: i64,
 }
 
@@ -924,6 +930,18 @@ mod tests {
         let json = r#"{"id":"p1","display_name":"P1","kind":"openai_compatible","secret_ref":"blink/p1/key","models":[],"created_at":0}"#;
         let p: ProviderEntry = serde_json::from_str(json).unwrap();
         assert!(p.enabled, "老配置缺 enabled 字段应默认 true");
+    }
+
+    #[test]
+    fn provider_entry_deserialize_without_secret_ref_and_created_at() {
+        // 前端新建供应商时构造的 JSON 可能不带 secret_ref / created_at 字段——
+        // serde default 应兜底空串 / 0,不报 missing field 错误。
+        let json = r#"{"id":"p1","display_name":"P1","kind":"openai_compatible","models":[]}"#;
+        let p: ProviderEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(p.id, "p1");
+        assert!(p.secret_ref.is_empty(), "缺 secret_ref 字段应默认空串");
+        assert_eq!(p.created_at, 0, "缺 created_at 字段应默认 0");
+        assert!(p.enabled, "缺 enabled 字段应默认 true");
     }
 
     #[test]

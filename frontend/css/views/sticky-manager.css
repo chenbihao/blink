@@ -1,6 +1,7 @@
 /* sticky-manager view — 便签管理窗口布局 */
 
 /* ── Root ── */
+/* 0.17.7：不透明背景铁则——透明背景在分数 DPI 下产生 tile seam（渲染斜线）。 */
 .manager-root {
   display: flex;
   flex-direction: column;
@@ -10,6 +11,8 @@
   font-family: var(--font-sans);
   font-size: var(--text-sm);
   overflow: hidden;
+  /* 中文不斜体铁则 */
+  font-style: normal;
 }
 
 /* ── Titlebar ── */
@@ -71,6 +74,59 @@
   justify-content: space-between;
   padding: 8px 16px;
   border-bottom: 1px solid var(--border-glow);
+}
+
+/* ── Tabs（0.17.7 回收站）── */
+.manager-tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.manager-tab {
+  padding: 4px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-base);
+  /* 中文不斜体铁则 */
+  font-style: normal;
+}
+
+.manager-tab:hover {
+  background: var(--accent-bg);
+  color: var(--text);
+}
+
+.manager-tab.active {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+.manager-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.manager-clear-trash-btn {
+  padding: 5px 12px;
+  border: 1px solid var(--red);
+  background: transparent;
+  color: var(--red);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+  border-radius: var(--radius-md);
+  transition: all var(--transition-base);
+}
+
+.manager-clear-trash-btn:hover {
+  background: var(--red);
+  color: var(--surface);
 }
 
 .manager-new-btn {
@@ -155,12 +211,16 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  /* 0.17.7: 中文不斜体铁则 */
+  font-style: normal;
 }
 
 .sticky-meta {
   font-size: var(--text-xs);
   color: var(--text-dim);
   margin-top: 2px;
+  /* 0.17.7: 中文不斜体铁则 */
+  font-style: normal;
 }
 
 .sticky-badge {
@@ -172,10 +232,18 @@
   border-radius: 3px;
   background: var(--surface-2);
   color: var(--text-dim);
+  margin-right: 6px;
+  /* 0.17.7: 中文不斜体铁则 */
+  font-style: normal;
 }
 
 .sticky-badge.hidden {
   background: var(--red-bg);
+  color: var(--text-sub);
+}
+
+.sticky-badge.trashed {
+  background: var(--accent-bg);
   color: var(--text-sub);
 }
 

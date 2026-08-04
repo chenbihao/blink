@@ -39,7 +39,7 @@
         <div class="sticky-more-menu" id="more-menu" hidden>
           <button class="more-menu-item" id="more-open-editor">在编辑器中打开</button>
           <button class="more-menu-item" id="more-hide">隐藏</button>
-          <button class="more-menu-item more-menu-danger" id="more-delete">删除</button>
+          <button class="more-menu-item" id="more-open-manager">便签管理</button>
         </div>
         <!-- 关闭 -->
         <button class="sticky-icon-btn sticky-icon-btn-close" id="btn-close" title="关闭">
@@ -48,9 +48,15 @@
       </div>
     </div>
 
-    <!-- 编辑区（直接编辑，自动保存） -->
-    <textarea class="sticky-textarea" id="sticky-textarea" placeholder="输入内容..." spellcheck="false"></textarea>
+    <!-- 编辑区（0.17.7a：Cherry edit&preview，左侧编辑 MD + 右侧实时渲染预览） -->
+    <div class="sticky-editor-container" id="sticky-editor-container"></div>
+    <!-- 降级用 textarea（Cherry 未加载时） -->
+    <textarea class="sticky-textarea" id="sticky-textarea" placeholder="输入内容..." spellcheck="false" hidden></textarea>
   </div>
+
+  <!-- Vendor（0.17.7a：Cherry Markdown Stream 版） -->
+  <script src="vendor/cherry-markdown.stream.min.js"></script>
+  <link href="vendor/cherry-markdown.min.css" rel="stylesheet">
 
   <!-- 入口 -->
   <script type="module" src="js/sticky/main.js"></script>

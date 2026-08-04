@@ -56,4 +56,6 @@ export const EVENTS = Object.freeze({
     STICKY_VISIBILITY_CHANGED: 'blink://sticky-visibility-changed',
     STICKY_APPEARANCE_CHANGED: 'blink://sticky-appearance-changed',
     STICKY_CONTENT_CHANGED: 'blink://sticky-content-changed',
+  STICKY_TRASHED: 'blink://sticky-trashed',
+  STICKY_RESTORED: 'blink://sticky-restored',
 });

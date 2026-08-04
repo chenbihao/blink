@@ -869,6 +869,11 @@ app::commands::ensure_mcp_connected,
             app::commands::show_sticky_window_cmd,
             app::commands::destroy_sticky_window_cmd,
             app::commands::show_sticky_manager_cmd,
+            // 0.17.7 便签回收站
+            app::commands::trash_sticky_note,
+            app::commands::restore_sticky_note,
+            app::commands::list_trashed_sticky_notes,
+            app::commands::clear_trashed_sticky_notes,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

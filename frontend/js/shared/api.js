@@ -384,3 +384,25 @@ export function destroyStickyWindow(stickyId) {
 export function showStickyManager() {
   return invoke("show_sticky_manager_cmd");
 }
+
+// ── 0.17.7 便签回收站 ──────────────────────────────────
+
+/** 0.17.7：将便签移入回收站（软删除）。 */
+export function trashStickyNote(id) {
+  return invoke("trash_sticky_note", { id });
+}
+
+/** 0.17.7：从回收站恢复便签。 */
+export function restoreStickyNote(id) {
+  return invoke("restore_sticky_note", { id });
+}
+
+/** 0.17.7：列出回收站中的便签。 */
+export function listTrashedStickyNotes() {
+  return invoke("list_trashed_sticky_notes");
+}
+
+/** 0.17.7：清空回收站。返回删除的行数。 */
+export function clearTrashedStickyNotes() {
+  return invoke("clear_trashed_sticky_notes");
+}

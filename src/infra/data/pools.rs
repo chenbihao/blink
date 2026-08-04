@@ -95,6 +95,14 @@ impl DbPools {
         }
         // 缓存库（performance_metrics / icon_cache）的清理已在各自 init_db 时 spawn，此处不重复。
 
+        // ── 0.17.7: 回收站过期便签清理（30 天） ──
+        {
+            let pool = self.history.clone();
+            tauri::async_runtime::spawn(async move {
+                crate::infra::data::sticky::cleanup_trashed(&pool, 30).await;
+            });
+        }
+
         // ── 0.17.0: 按需 VACUUM（freelist 占比超 20% 则收缩） ──
         // 在所有清理之后执行，启动时无用户交互查询，VACUUM 独占连接影响可忽略。
         {

@@ -26,15 +26,24 @@
 
     <!-- Toolbar -->
     <div class="manager-toolbar">
-      <button class="manager-new-btn" id="btn-new-sticky">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-        <span>新建便签</span>
-      </button>
-      <span class="manager-count" id="sticky-count"></span>
+      <div class="manager-tabs">
+        <button class="manager-tab active" id="tab-active" data-tab="active">便签</button>
+        <button class="manager-tab" id="tab-trash" data-tab="trash">回收站</button>
+      </div>
+      <div class="manager-toolbar-right">
+        <button class="manager-new-btn" id="btn-new-sticky">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          <span>新建</span>
+        </button>
+        <button class="manager-clear-trash-btn" id="btn-clear-trash" hidden>清空回收站</button>
+      </div>
     </div>
 
-    <!-- List -->
+    <!-- Active list -->
     <div class="manager-list" id="sticky-list"></div>
+
+    <!-- Trash list -->
+    <div class="manager-list" id="trash-list" hidden></div>
 
     <!-- Empty state -->
     <div class="manager-empty" id="empty-state" hidden>
@@ -42,7 +51,7 @@
         <path d="M14 3v4a1 1 0 0 0 1 1h4"/>
         <path d="M5 8V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2Z"/>
       </svg>
-      <p class="manager-empty-text">还没有便签</p>
+      <p class="manager-empty-text" id="empty-text">还没有便签</p>
       <button class="manager-empty-btn" id="btn-empty-new">新建便签</button>
     </div>
   </div>

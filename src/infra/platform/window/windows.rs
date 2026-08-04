@@ -489,6 +489,31 @@ fn launcher_position(_win: &WebviewWindow) -> Option<PhysicalPosition<i32>> {
     None
 }
 
+/// 计算指定尺寸窗口在鼠标所在屏工作区中心的物理位置（0.17.7）。
+///
+/// 与 `launcher_position` 同逻辑，但接受任意宽高（供便签窗口使用）。
+/// `launcher_position` 硬编码主窗口尺寸（BASE_W/BASE_H_LOGICAL），此函数通用化。
+fn compute_center_position(phys_w: i32, phys_h: i32) -> Option<(i32, i32)> {
+    unsafe {
+        let mut pt = POINT { x: 0, y: 0 };
+        let hmon = if GetCursorPos(&mut pt).is_ok() {
+            MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST)
+        } else {
+            MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY)
+        };
+
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if GetMonitorInfoW(hmon, &mut mi).as_bool() {
+            let rc = mi.rcWork;
+            let cx = rc.left + (rc.right - rc.left) / 2;
+            let cy = rc.top + (rc.bottom - rc.top) / 2;
+            return Some((cx - phys_w / 2, cy - phys_h / 2));
+        }
+    }
+    None
+}
+
 /// resize 后若窗口底部超出显示器工作区，向上移动使其完整可见。
 pub fn clamp_to_work_area(win: &WebviewWindow) {
     let Ok(pos) = win.outer_position() else {
@@ -894,10 +919,8 @@ pub fn show_sticky_manager_window(app: &AppHandle) -> Result<(), String> {
 
     let win = if is_new {
         // 0.16.13 fix：改回 .visible(true) + background_color 消除白屏闪烁。
-        // 之前的 .visible(false) + 前端 init 调 win.show() 方案在首次点击时
-        // 因 WebView2 冷启动加载 JS 模块耗时，窗口长时间不可见，用户感知为「没反应」。
-        // background_color 设为 dark 主题底色 #1e1e2e，CSS 加载前不闪白。
-        // 同时注册 prevent_close + hide，窗口复用而非销毁重建。
+        // 0.17.7：background_color 从硬编码 #1e1e2e（dark only）改为中性灰 #333333，
+        // 在 light / dark 主题下都不会产生突兀的色差（CSS 加载后由 .manager-root 覆盖）。
         let w = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("sticky-manager.html".into()))
             .title("便签管理")
             .inner_size(560.0, 640.0)
@@ -909,7 +932,7 @@ pub fn show_sticky_manager_window(app: &AppHandle) -> Result<(), String> {
             .resizable(true)
             .focused(true)
             .visible(true)
-            .background_color(Color(30, 30, 46, 255))
+            .background_color(Color(51, 51, 51, 255))
             .center()
             .build()
             .map_err(|e| {
@@ -1050,6 +1073,15 @@ pub fn show_sticky_window(
             })
             .collect::<String>();
         let url = format!("sticky.html?id={encoded_id}");
+
+        // 0.17.7：新建便签（x=0 && y=0）定位到鼠标所在屏的工作区中心，
+        // 复用 launcher_position 的 DPI 感知 + 工作区中心逻辑，但用便签自身尺寸。
+        let (x, y) = if x == 0 && y == 0 {
+            compute_center_position(width, height).unwrap_or((x, y))
+        } else {
+            (x, y)
+        };
+
         // 0.16.11：几何钳制——显示器拔插/分辨率变化后保证窗口至少部分可见
         let (cx, cy, cw, ch) = clamp_sticky_geometry(x, y, width, height);
 
@@ -1076,6 +1108,9 @@ pub fn show_sticky_window(
             .resizable(true)
             .focused(focus)
             .visible(true)
+            // 0.17.7：background_color 设为默认黄色（与 --sticky-bg: #fff9c4 对齐），
+            // 避免 CSS 加载前闪白 / 分数 DPI 下透明背景产生 tile seam。
+            .background_color(tauri::window::Color(255, 249, 196, 255))
             .build()
             .map_err(|e| {
                 tracing::warn!(error = %e, "sticky window: 创建失败");
@@ -1084,20 +1119,19 @@ pub fn show_sticky_window(
 
         // 注册 CloseRequested handler：仅新窗口注册一次，避免复用时重复绑定
         //
-        // 0.16.11：区分「用户关闭便签」与「应用整体退出」：
-        // - 用户关闭：prevent_close + set_visible(false) + hide（保持数据，只隐藏桌面窗口）
-        // - 应用退出：不 prevent_close，让窗口正常关闭，**不修改 visible**——
-        //   下次启动按 DB 中的 visible 状态恢复，退出不等于全部隐藏
+        // 0.17.7：关闭=软删除进回收站（trashed=true + hide），不再 set_visible(false)。
+        // - 用户关闭：prevent_close + flush + set_trashed(true) + hide
+        // - 应用退出：不 prevent_close，不修改 trashed
         let label_owned = label.clone();
         let app_clone = app.clone();
         let sid = sticky_id.to_string();
         w.on_window_event(move |event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if IS_APP_EXITING.load(Ordering::SeqCst) {
-                    // 应用退出：不 prevent_close，不修改 visible
+                    // 应用退出：不 prevent_close，不修改 trashed
                     tracing::debug!(
                         sticky_id = %sid,
-                        "sticky window: CloseRequested during app exit → 不修改 visible"
+                        "sticky window: CloseRequested during app exit → 不修改 trashed"
                     );
                     return;
                 }
@@ -1106,26 +1140,30 @@ pub fn show_sticky_window(
                 if let Some(w) = app_clone.get_webview_window(&label_owned) {
                     let _ = w.eval("if (window.__stickyFlush) window.__stickyFlush();");
                 }
-                // 异步设置 visible=false 并隐藏窗口
-                // P1-#9 fix: 用 try_state() 而非 state() 避免 panic；
-                //   infra → domain 依赖是已知架构债，后续应改为 emit 事件由 app 层处理
+                // 0.17.7：关闭=软删除进回收站
                 let app_c = app_clone.clone();
                 let sid_owned = sid.clone();
                 tauri::async_runtime::spawn(async move {
                     if let Some(svc) = app_c
                         .try_state::<std::sync::Arc<crate::domain::sticky::StickyService>>()
                     {
-                        if let Err(e) = svc.set_visible(&sid_owned, false).await {
-                            tracing::warn!(error = %e, "便签关闭时设置 visible=false 失败");
+                        if let Err(e) = svc.trash_note(&sid_owned).await {
+                            tracing::warn!(error = %e, "便签关闭时移入回收站失败");
+                        } else {
+                            // emit STICKY_TRASHED 让管理界面刷新列表
+                            let _ = app_c.emit(
+                                EventNames::STICKY_TRASHED,
+                                serde_json::json!({ "stickyId": sid_owned }),
+                            );
                         }
                     } else {
-                        tracing::warn!("便签关闭时 StickyService 不可用，跳过 set_visible");
+                        tracing::warn!("便签关闭时 StickyService 不可用，跳过 trash_note");
                     }
                 });
                 if let Some(w) = app_clone.get_webview_window(&label_owned) {
                     let _ = w.hide();
                 }
-                tracing::debug!(sticky_id = %sid, "sticky window: CloseRequested → prevent_close + flush + hide");
+                tracing::debug!(sticky_id = %sid, "sticky window: CloseRequested → prevent_close + flush + trash + hide");
             }
         });
         w

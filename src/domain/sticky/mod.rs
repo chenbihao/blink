@@ -71,6 +71,8 @@ impl StickyService {
             always_on_top: true,
             created_at: 0,
             updated_at: 0,
+            trashed: false,
+            deleted_at: None,
         };
         crate::infra::data::sticky::create(&self.history_pool, &note)
             .await
@@ -87,6 +89,11 @@ impl StickyService {
     /// 列出全部便签。
     pub async fn list_notes(&self) -> Vec<StickyNote> {
         crate::infra::data::sticky::list(&self.history_pool).await
+    }
+
+    /// 列出回收站中的便签（0.17.7）。
+    pub async fn list_trashed_notes(&self) -> Vec<StickyNote> {
+        crate::infra::data::sticky::list_trashed(&self.history_pool).await
     }
 
     /// 更新便签内容。
@@ -145,6 +152,43 @@ impl StickyService {
         Ok(())
     }
 
+    /// 将便签移入回收站（软删除，0.17.7）。
+    ///
+    /// `trashed=true` + `deleted_at=now`，保留数据。调用后窗口应 hide。
+    pub async fn trash_note(&self, id: &str) -> Result<(), StickyError> {
+        crate::infra::data::sticky::set_trashed(&self.history_pool, id, true)
+            .await
+            .map_err(|e| StickyError::Db { detail: e })?;
+        tracing::info!(sticky_id = %id, "便签已移入回收站");
+        Ok(())
+    }
+
+    /// 从回收站恢复便签（0.17.7）。
+    ///
+    /// `trashed=false` + `deleted_at=null`，恢复到桌面。
+    pub async fn restore_note(&self, id: &str) -> Result<(), StickyError> {
+        crate::infra::data::sticky::set_trashed(&self.history_pool, id, false)
+            .await
+            .map_err(|e| StickyError::Db { detail: e })?;
+        tracing::info!(sticky_id = %id, "便签已从回收站恢复");
+        Ok(())
+    }
+
+    /// 清空回收站（0.17.7）。返回删除的行数。
+    pub async fn clear_trashed(&self) -> Result<u64, StickyError> {
+        let count = crate::infra::data::sticky::clear_all_trashed(&self.history_pool)
+            .await
+            .map_err(|e| StickyError::Db { detail: e })?;
+        tracing::info!(deleted = count, "回收站已清空");
+        Ok(count)
+    }
+
+    /// 清理过期回收站便签（0.17.7）。启动时调用。
+    #[allow(dead_code)] // 启动清理在 pools.rs 直接调 data 层
+    pub async fn cleanup_trashed(&self, retention_days: i64) -> u64 {
+        crate::infra::data::sticky::cleanup_trashed(&self.history_pool, retention_days).await
+    }
+
     /// 设置便签置顶。
     pub async fn set_always_on_top(
         &self,
@@ -173,11 +217,10 @@ impl StickyService {
 
     /// 恢复服务：启动时异步加载所有便签。
     ///
-    /// 返回 visible=true 的便签列表（需恢复窗口），visible=false 的不返回
-    /// （只在管理界面显示，0.16.10）。
+    /// 返回 `trashed=false && visible=true` 的便签列表（需恢复窗口）。
+    /// 回收站中的便签（`trashed=true`）不恢复窗口，只在管理界面显示。
     ///
     /// **单条失败隔离**：某条便签读取失败只记录 warn，不阻断其他便签。
-    /// 当前 list() 内部用 unwrap_or_default 保证不会 panic——全部返回或空 vec。
     pub async fn load_for_recovery(&self) -> Vec<StickyNote> {
         let all = crate::infra::data::sticky::list(&self.history_pool).await;
         let total = all.len();

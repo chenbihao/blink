@@ -90,6 +90,10 @@ impl StickyFormat {
 }
 
 /// 便签实体（§3.8 字段定义）。
+///
+/// 0.17.7 新增 `trashed` / `deleted_at` 字段：关闭=软删除进回收站，
+/// 30 天后自动物理删除。`visible` 保留原有语义（控制桌面窗口显示），
+/// 与 `trashed` 正交——回收站里的便签 `visible` 无意义。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StickyNote {
@@ -125,6 +129,12 @@ pub struct StickyNote {
     pub created_at: i64,
     /// 更新时间（Unix 秒）
     pub updated_at: i64,
+    /// 是否在回收站中（0.17.7）
+    #[serde(default)]
+    pub trashed: bool,
+    /// 进入回收站的时间（Unix 秒），`trashed=false` 时为 None（0.17.7）
+    #[serde(default)]
+    pub deleted_at: Option<i64>,
 }
 
 fn default_true() -> bool {
@@ -142,6 +152,9 @@ pub const DEFAULT_WIDTH: i32 = 240;
 pub const DEFAULT_HEIGHT: i32 = 200;
 
 /// 初始化 sticky_notes 表。
+///
+/// 0.17.7：新增 `trashed` / `deleted_at` 列（迁移）+ 旧数据清理
+/// （`visible=false` 的便签直接删除——0.16 未发版，无线上数据）。
 pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS sticky_notes (
@@ -156,7 +169,9 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
             height INTEGER NOT NULL DEFAULT 200,
             always_on_top INTEGER NOT NULL DEFAULT 1,
             created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
+            updated_at INTEGER NOT NULL,
+            trashed INTEGER NOT NULL DEFAULT 0,
+            deleted_at INTEGER
         )",
     )
     .execute(pool)
@@ -168,7 +183,59 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
 
+    // 0.17.7 迁移：为已有数据库添加 trashed / deleted_at 列
+    // 必须在创建 idx_sticky_trashed 索引之前执行——旧表没有 trashed 列，先建索引会崩溃
+    migrate_add_trashed_columns(pool).await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_sticky_trashed ON sticky_notes(trashed)")
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 0.17.7 旧数据清理：visible=false 的便签直接删除
+    // （0.16 未正式发版，无线上用户数据需保留）
+    let result = sqlx::query("DELETE FROM sticky_notes WHERE visible = 0 AND trashed = 0")
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    if result.rows_affected() > 0 {
+        tracing::info!(
+            deleted = result.rows_affected(),
+            "sticky 旧数据清理：删除 visible=false 的便签"
+        );
+    }
+
     tracing::debug!("sticky_notes 表已初始化");
+    Ok(())
+}
+
+/// 检测并添加 `trashed` / `deleted_at` 列（0.17.7 迁移）。
+async fn migrate_add_trashed_columns(pool: &SqlitePool) -> Result<(), String> {
+    let columns: Vec<(String,)> =
+        sqlx::query_as("SELECT name FROM pragma_table_info('sticky_notes')")
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+    let has_trashed = columns.iter().any(|(name,)| name == "trashed");
+    let has_deleted_at = columns.iter().any(|(name,)| name == "deleted_at");
+
+    if !has_trashed {
+        sqlx::query("ALTER TABLE sticky_notes ADD COLUMN trashed INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        tracing::info!("sticky 迁移：已添加 trashed 列");
+    }
+
+    if !has_deleted_at {
+        sqlx::query("ALTER TABLE sticky_notes ADD COLUMN deleted_at INTEGER")
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        tracing::info!("sticky 迁移：已添加 deleted_at 列");
+    }
+
     Ok(())
 }
 
@@ -196,6 +263,8 @@ fn row_to_note(
     always_on_top: i64,
     created_at: i64,
     updated_at: i64,
+    trashed: i64,
+    deleted_at: Option<i64>,
 ) -> StickyNote {
     StickyNote {
         id,
@@ -210,6 +279,8 @@ fn row_to_note(
         always_on_top: always_on_top != 0,
         created_at,
         updated_at,
+        trashed: trashed != 0,
+        deleted_at,
     }
 }
 
@@ -217,8 +288,8 @@ fn row_to_note(
 pub async fn create(pool: &SqlitePool, note: &StickyNote) -> Result<(), String> {
     let now = chrono::Utc::now().timestamp();
     sqlx::query(
-        "INSERT INTO sticky_notes (id, content, format, color, visible, x, y, width, height, always_on_top, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        "INSERT INTO sticky_notes (id, content, format, color, visible, x, y, width, height, always_on_top, created_at, updated_at, trashed, deleted_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, NULL)",
     )
     .bind(&note.id)
     .bind(&note.content)
@@ -242,8 +313,8 @@ pub async fn create(pool: &SqlitePool, note: &StickyNote) -> Result<(), String> 
 ///
 /// DB 错误时记录 warn 并返回 None（与空结果不可区分，但至少有日志可查）。
 pub async fn get(pool: &SqlitePool, id: &str) -> Option<StickyNote> {
-    let row = sqlx::query_as::<_, (String, String, String, String, i64, i64, i64, i64, i64, i64, i64, i64)>(
-        "SELECT id, content, format, color, visible, x, y, width, height, always_on_top, created_at, updated_at FROM sticky_notes WHERE id = ?1",
+    let row = sqlx::query_as::<_, (String, String, String, String, i64, i64, i64, i64, i64, i64, i64, i64, i64, Option<i64>)>(
+        "SELECT id, content, format, color, visible, x, y, width, height, always_on_top, created_at, updated_at, trashed, deleted_at FROM sticky_notes WHERE id = ?1",
     )
     .bind(id)
     .fetch_optional(pool)
@@ -256,16 +327,17 @@ pub async fn get(pool: &SqlitePool, id: &str) -> Option<StickyNote> {
     .flatten()?;
 
     Some(row_to_note(
-        row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10, row.11,
+        row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10, row.11, row.12, row.13,
     ))
 }
 
-/// 列出全部便签（按 updated_at 倒序）。
+/// 列出全部活跃便签（`trashed=false`，按 updated_at 倒序）。
 ///
-/// DB 错误时记录 warn 并返回空 Vec（启动恢复时一条都不恢复且无告警的问题已修）。
+/// 0.17.7：不再返回回收站中的便签。回收站用 `list_trashed()`。
+/// DB 错误时记录 warn 并返回空 Vec。
 pub async fn list(pool: &SqlitePool) -> Vec<StickyNote> {
-    sqlx::query_as::<_, (String, String, String, String, i64, i64, i64, i64, i64, i64, i64, i64)>(
-        "SELECT id, content, format, color, visible, x, y, width, height, always_on_top, created_at, updated_at FROM sticky_notes ORDER BY updated_at DESC",
+    sqlx::query_as::<_, (String, String, String, String, i64, i64, i64, i64, i64, i64, i64, i64, i64, Option<i64>)>(
+        "SELECT id, content, format, color, visible, x, y, width, height, always_on_top, created_at, updated_at, trashed, deleted_at FROM sticky_notes WHERE trashed = 0 ORDER BY updated_at DESC",
     )
     .fetch_all(pool)
     .await
@@ -277,7 +349,30 @@ pub async fn list(pool: &SqlitePool) -> Vec<StickyNote> {
     .into_iter()
     .map(|r| {
         row_to_note(
-            r.0, r.1, r.2, r.3, r.4, r.5, r.6, r.7, r.8, r.9, r.10, r.11,
+            r.0, r.1, r.2, r.3, r.4, r.5, r.6, r.7, r.8, r.9, r.10, r.11, r.12, r.13,
+        )
+    })
+    .collect()
+}
+
+/// 列出回收站中的便签（`trashed=true`，按 deleted_at 倒序）。
+///
+/// 0.17.7 新增。
+pub async fn list_trashed(pool: &SqlitePool) -> Vec<StickyNote> {
+    sqlx::query_as::<_, (String, String, String, String, i64, i64, i64, i64, i64, i64, i64, i64, i64, Option<i64>)>(
+        "SELECT id, content, format, color, visible, x, y, width, height, always_on_top, created_at, updated_at, trashed, deleted_at FROM sticky_notes WHERE trashed = 1 ORDER BY deleted_at DESC",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        tracing::warn!(error = %e, "sticky list_trashed 查询失败，返回空列表");
+        e
+    })
+    .unwrap_or_default()
+    .into_iter()
+    .map(|r| {
+        row_to_note(
+            r.0, r.1, r.2, r.3, r.4, r.5, r.6, r.7, r.8, r.9, r.10, r.11, r.12, r.13,
         )
     })
     .collect()
@@ -361,6 +456,73 @@ pub async fn set_visible(pool: &SqlitePool, id: &str, visible: bool) -> Result<(
     Ok(())
 }
 
+/// 将便签移入回收站（软删除）。
+///
+/// 0.17.7 新增。`trashed=true` + `deleted_at=now`，不删除数据。
+/// 调用后窗口应 hide。恢复用 `restore_from_trash()`。
+pub async fn set_trashed(pool: &SqlitePool, id: &str, trashed: bool) -> Result<(), String> {
+    let now = chrono::Utc::now().timestamp();
+    if trashed {
+        sqlx::query(
+            "UPDATE sticky_notes SET trashed = 1, deleted_at = ?1, updated_at = ?1 WHERE id = ?2",
+        )
+        .bind(now)
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    } else {
+        sqlx::query(
+            "UPDATE sticky_notes SET trashed = 0, deleted_at = NULL, updated_at = ?1 WHERE id = ?2",
+        )
+        .bind(now)
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 清空回收站：物理删除所有 `trashed=true` 的便签。
+///
+/// 0.17.7 新增。返回删除的行数。
+pub async fn clear_all_trashed(pool: &SqlitePool) -> Result<u64, String> {
+    let result = sqlx::query("DELETE FROM sticky_notes WHERE trashed = 1")
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(result.rows_affected())
+}
+
+/// 清理过期回收站便签：`trashed=true` 且 `deleted_at` 超过指定天数的物理删除。
+///
+/// 0.17.7 新增。启动时调用，默认 30 天。
+pub async fn cleanup_trashed(pool: &SqlitePool, retention_days: i64) -> u64 {
+    let cutoff = chrono::Utc::now().timestamp() - retention_days * 86400;
+    let result = match sqlx::query(
+        "DELETE FROM sticky_notes WHERE trashed = 1 AND deleted_at IS NOT NULL AND deleted_at < ?1",
+    )
+    .bind(cutoff)
+    .execute(pool)
+    .await
+    {
+        Ok(r) => r.rows_affected(),
+        Err(e) => {
+            tracing::warn!(error = %e, "sticky cleanup_trashed 清理失败");
+            return 0;
+        }
+    };
+    if result > 0 {
+        tracing::info!(
+            deleted = result,
+            retention_days,
+            "回收站过期便签已清理"
+        );
+    }
+    result
+}
+
 /// 设置便签置顶状态。
 pub async fn set_always_on_top(
     pool: &SqlitePool,
@@ -392,7 +554,7 @@ pub async fn delete(pool: &SqlitePool, id: &str) -> Result<(), String> {
 ///
 /// DB 错误时记录 warn 并返回 0。
 pub async fn get_stats(pool: &SqlitePool) -> serde_json::Value {
-    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sticky_notes")
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sticky_notes WHERE trashed = 0")
         .fetch_one(pool)
         .await
         .map_err(|e| {
@@ -402,7 +564,7 @@ pub async fn get_stats(pool: &SqlitePool) -> serde_json::Value {
         .unwrap_or((0,));
 
     let visible_count: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM sticky_notes WHERE visible = 1")
+        sqlx::query_as("SELECT COUNT(*) FROM sticky_notes WHERE visible = 1 AND trashed = 0")
             .fetch_one(pool)
             .await
             .map_err(|e| {
@@ -411,9 +573,20 @@ pub async fn get_stats(pool: &SqlitePool) -> serde_json::Value {
             })
             .unwrap_or((0,));
 
+    let trashed_count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM sticky_notes WHERE trashed = 1")
+            .fetch_one(pool)
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %e, "sticky get_stats trashed_count 查询失败");
+                e
+            })
+            .unwrap_or((0,));
+
     serde_json::json!({
         "count": count.0,
         "visible": visible_count.0,
+        "trashed": trashed_count.0,
     })
 }
 

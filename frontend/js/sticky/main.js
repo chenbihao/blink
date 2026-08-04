@@ -11,6 +11,7 @@ import { applyThemeFromConfig } from "../shared/theme.js";
 import { ensureSpriteLoaded } from "../shared/icon.js";
 import { getCurrentWindow, confirmDialog, listen } from "../shared/tauri.js";
 import { EVENTS } from "../shared/event-names.js";
+import { initMarkdown, createMarkdownEditor } from "../shared/markdown.js";
 import {
   getStickyNote,
   updateStickyContent,
@@ -21,6 +22,8 @@ import {
   deleteStickyNote,
   destroyStickyWindow,
   openContentEditor,
+  trashStickyNote,
+  showStickyManager,
 } from "../shared/api.js";
 
 // ── 状态 ──────────────────────────────────────────────
@@ -45,6 +48,7 @@ const GEOMETRY_DEBOUNCE_MS = 300;
 
 const rootEl = document.getElementById("sticky-root");
 const textareaEl = document.getElementById("sticky-textarea");
+const editorContainerEl = document.getElementById("sticky-editor-container");
 const colorBtn = document.getElementById("btn-color");
 const colorPalette = document.getElementById("color-palette");
 const pinBtn = document.getElementById("btn-pin");
@@ -52,8 +56,13 @@ const moreBtn = document.getElementById("btn-more");
 const moreMenu = document.getElementById("more-menu");
 const moreOpenEditor = document.getElementById("more-open-editor");
 const moreHide = document.getElementById("more-hide");
-const moreDelete = document.getElementById("more-delete");
+const moreOpenManager = document.getElementById("more-open-manager");
 const closeBtn = document.getElementById("btn-close");
+
+// ── Markdown 编辑器 ──────────────────────────────────
+
+/** Cherry Markdown 编辑器实例（null = 降级到 textarea） */
+let mdEditor = null;
 
 // ── 初始化 ────────────────────────────────────────────
 
@@ -62,6 +71,9 @@ async function init() {
   await ensureSpriteLoaded();
   await applyThemeFromConfig();
 
+  // 初始化 Markdown 渲染器
+  initMarkdown();
+
   // 从 URL 参数读取 sticky_id
   const params = new URLSearchParams(window.location.search);
   stickyId = params.get("id");
@@ -69,6 +81,23 @@ async function init() {
   if (!stickyId) {
     console.error("[sticky] 未提供 sticky_id");
     return;
+  }
+
+  // 创建 Cherry Markdown 编辑器（0.17.7a）
+  // 如果 Cherry 不可用，降级到 textarea
+  if (editorContainerEl && typeof createMarkdownEditor === "function") {
+    mdEditor = createMarkdownEditor(editorContainerEl, {
+      toolbar: "compact",
+      onChange: () => scheduleSave(),
+    });
+  }
+  if (!mdEditor) {
+    // 降级：显示 textarea，隐藏 editor container
+    if (editorContainerEl) editorContainerEl.hidden = true;
+    if (textareaEl) textareaEl.hidden = false;
+  } else {
+    // 编辑器可用：隐藏 textarea
+    if (textareaEl) textareaEl.hidden = true;
   }
 
   // 从后端拉取便签数据
@@ -81,13 +110,18 @@ async function init() {
   bindWindowControls();
   bindGeometryTracking();
   bindKeyboard();
+  bindContextMenu();
 
   // 内容变更：只在用户未在编辑时刷新，避免打断输入
   listen(EVENTS.STICKY_CONTENT_CHANGED, (event) => {
     const payload = event.payload;
     if (payload && payload.stickyId === stickyId) {
-      // 用户正在编辑 textarea 时不 reload，避免覆盖输入
-      if (document.activeElement !== textareaEl) {
+      // 用户正在编辑时不 reload，避免覆盖输入
+      const activeEl = document.activeElement;
+      const isEditing = mdEditor
+        ? (activeEl && activeEl.tagName === "TEXTAREA")
+        : (activeEl === textareaEl);
+      if (!isEditing) {
         loadStickyData();
       }
     }
@@ -98,6 +132,15 @@ async function init() {
     const payload = event.payload;
     if (payload && payload.stickyId === stickyId && payload.color) {
       applyColor(payload.color);
+    }
+  });
+
+  // 0.17.7：便签被移入回收站时隐藏窗口
+  listen(EVENTS.STICKY_TRASHED, (event) => {
+    const payload = event.payload;
+    if (payload && payload.stickyId === stickyId) {
+      const win = getCurrentWindow();
+      if (win) win.hide();
     }
   });
 
@@ -122,7 +165,7 @@ async function loadStickyData() {
     }
 
     // 填充编辑器
-    textareaEl.value = stickyNote.content || "";
+    setContent(stickyNote.content || "");
 
     // 应用颜色
     applyColor(stickyNote.color || "theme");
@@ -131,18 +174,43 @@ async function loadStickyData() {
     updatePinButton(stickyNote.alwaysOnTop);
 
     // 聚焦编辑器
-    textareaEl.focus();
+    if (mdEditor) {
+      mdEditor.focus();
+    } else {
+      textareaEl.focus();
+    }
   } catch (e) {
     console.error("[sticky] 加载便签数据失败:", e);
+  }
+}
+
+// ── 内容读写抽象（编辑器 / textarea 降级）──────────────
+
+/** 获取当前便签内容 */
+function getContent() {
+  if (mdEditor) return mdEditor.getMarkdown();
+  return textareaEl.value;
+}
+
+/** 设置便签内容 */
+function setContent(text) {
+  if (mdEditor) {
+    mdEditor.setMarkdown(text);
+  } else {
+    textareaEl.value = text;
   }
 }
 
 // ── 编辑与自动保存 ────────────────────────────────────
 
 function bindEditing() {
-  textareaEl.addEventListener("input", () => {
-    scheduleSave();
-  });
+  // Cherry 编辑器已在 createMarkdownEditor 的 onChange 回调中处理 input
+  // 这里只绑定 textarea 降级模式
+  if (!mdEditor) {
+    textareaEl.addEventListener("input", () => {
+      scheduleSave();
+    });
+  }
 }
 
 /** 安排防抖保存 */
@@ -156,7 +224,7 @@ function scheduleSave() {
 /** 立即保存内容 */
 async function saveContent() {
   if (!stickyId) return;
-  const content = textareaEl.value;
+  const content = getContent();
   try {
     await updateStickyContent(stickyId, content);
   } catch (e) {
@@ -229,8 +297,8 @@ function bindMoreMenu() {
     await flushSave();
     try {
       await openContentEditor({
-        body: textareaEl.value,
-        format: "plain",
+        body: getContent(),
+        format: mdEditor ? "markdown" : "plain",
         title: "编辑便签内容",
         origin: "sticky",
         originRef: stickyId,
@@ -241,7 +309,7 @@ function bindMoreMenu() {
     }
   });
 
-  // 隐藏
+  // 隐藏（仅隐藏窗口，不进回收站）
   moreHide.addEventListener("click", async () => {
     moreMenu.hidden = true;
     await flushSave();
@@ -254,29 +322,24 @@ function bindMoreMenu() {
     if (win) win.hide();
   });
 
-  // 删除
-  moreDelete.addEventListener("click", async () => {
-    moreMenu.hidden = true;
-    const confirmed = await confirmDialog("确定删除此便签？删除后不可恢复。", {
-      kind: "warning",
-      okLabel: "删除",
-      cancelLabel: "取消",
+  // 便签管理（0.17.7：从便签页唤起管理窗口）
+  if (moreOpenManager) {
+    moreOpenManager.addEventListener("click", async () => {
+      moreMenu.hidden = true;
+      try {
+        await showStickyManager();
+      } catch (e) {
+        console.error("[sticky] 打开便签管理失败:", e);
+      }
     });
-    if (!confirmed) return;
-    try {
-      await deleteStickyNote(stickyId);
-      // 用后端 destroy 命令销毁窗口（close() 会被 prevent_close 拦截）
-      await destroyStickyWindow(stickyId);
-    } catch (e) {
-      console.error("[sticky] 删除便签失败:", e);
-    }
-  });
+  }
 }
 
 // ── 窗口控制 ──────────────────────────────────────────
 
 function bindWindowControls() {
-  // 关闭 = 隐藏（后端 prevent_close + set_visible=false）
+  // 0.17.7：关闭 = 移入回收站（后端 CloseRequested handler 负责 trash + hide）
+  // 前端只需 flush 保存，然后触发 close（后端 prevent_close + trash + hide）
   closeBtn.addEventListener("click", async () => {
     await flushSave();
     const win = getCurrentWindow();
@@ -314,7 +377,7 @@ function bindKeyboard() {
     // ESC：内容为空时关闭（隐藏）便签窗口
     if (e.key === "Escape") {
       e.preventDefault();
-      if (!textareaEl.value.trim()) {
+      if (!getContent().trim()) {
         closeSticky();
       }
       return;
@@ -370,6 +433,166 @@ async function saveGeometry() {
   } catch (e) {
     console.error("[sticky] 保存几何失败:", e);
   }
+}
+
+// ── 右键菜单（0.17.7）──────────────────────────────
+
+/** 当前右键菜单元素（null = 未显示） */
+let contextMenuEl = null;
+
+function bindContextMenu() {
+  // 屏蔽原生右键菜单
+  document.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    showContextMenu(e.clientX, e.clientY);
+  });
+
+  // 点击外部 / ESC 关闭右键菜单
+  document.addEventListener("click", (e) => {
+    if (contextMenuEl && !contextMenuEl.contains(e.target)) {
+      hideContextMenu();
+    }
+  });
+}
+
+function showContextMenu(x, y) {
+  hideContextMenu();
+
+  const menu = document.createElement("div");
+  menu.className = "sticky-context-menu";
+
+  // 在编辑器中打开
+  const itemEditor = document.createElement("button");
+  itemEditor.className = "ctx-item";
+  itemEditor.textContent = "在编辑器中打开";
+  itemEditor.addEventListener("click", async () => {
+    hideContextMenu();
+    await flushSave();
+    try {
+      await openContentEditor({
+        body: getContent(),
+        format: mdEditor ? "markdown" : "plain",
+        title: "编辑便签内容",
+        origin: "sticky",
+        originRef: stickyId,
+        savePolicy: "sticky_update",
+      });
+    } catch (e) {
+      console.error("[sticky] 打开编辑器失败:", e);
+    }
+  });
+  menu.appendChild(itemEditor);
+
+  // 分割线
+  menu.appendChild(makeSeparator());
+
+  // 改颜色（内联色板）
+  const colorLabel = document.createElement("div");
+  colorLabel.className = "ctx-submenu-label";
+  colorLabel.textContent = "改颜色";
+  menu.appendChild(colorLabel);
+
+  const colorRow = document.createElement("div");
+  colorRow.className = "ctx-color-row";
+  for (const color of ["theme", "yellow", "pink", "purple", "blue", "green", "gray"]) {
+    const swatch = document.createElement("button");
+    swatch.className = `ctx-color-swatch`;
+    swatch.style.background = colorSwatchBg(color);
+    swatch.title = color;
+    swatch.addEventListener("click", async () => {
+      hideContextMenu();
+      applyColor(color);
+      try {
+        await updateStickyAppearance(stickyId, color);
+      } catch (e) {
+        console.error("[sticky] 更新颜色失败:", e);
+      }
+    });
+    colorRow.appendChild(swatch);
+  }
+  menu.appendChild(colorRow);
+
+  // 分割线
+  menu.appendChild(makeSeparator());
+
+  // 隐藏
+  const itemHide = document.createElement("button");
+  itemHide.className = "ctx-item";
+  itemHide.textContent = "隐藏";
+  itemHide.addEventListener("click", async () => {
+    hideContextMenu();
+    await flushSave();
+    try {
+      await setStickyVisible(stickyId, false);
+    } catch (e) {
+      console.error("[sticky] 设置可见性失败:", e);
+    }
+    const win = getCurrentWindow();
+    if (win) win.hide();
+  });
+  menu.appendChild(itemHide);
+
+  // 删除（=移入回收站）
+  const itemDelete = document.createElement("button");
+  itemDelete.className = "ctx-item ctx-danger";
+  itemDelete.textContent = "删除";
+  itemDelete.addEventListener("click", async () => {
+    hideContextMenu();
+    await flushSave();
+    try {
+      await trashStickyNote(stickyId);
+      const win = getCurrentWindow();
+      if (win) win.hide();
+    } catch (e) {
+      console.error("[sticky] 删除便签失败:", e);
+    }
+  });
+  menu.appendChild(itemDelete);
+
+  // 边缘检测定位
+  rootEl.appendChild(menu);
+  const menuRect = menu.getBoundingClientRect();
+  const winRect = rootEl.getBoundingClientRect();
+  let mx = x;
+  let my = y;
+  if (mx + menuRect.width > winRect.width) {
+    mx = winRect.width - menuRect.width - 2;
+  }
+  if (my + menuRect.height > winRect.height) {
+    my = winRect.height - menuRect.height - 2;
+  }
+  mx = Math.max(0, mx);
+  my = Math.max(0, my);
+  menu.style.left = `${mx}px`;
+  menu.style.top = `${my}px`;
+
+  contextMenuEl = menu;
+}
+
+function hideContextMenu() {
+  if (contextMenuEl) {
+    contextMenuEl.remove();
+    contextMenuEl = null;
+  }
+}
+
+function makeSeparator() {
+  const sep = document.createElement("div");
+  sep.className = "ctx-separator";
+  return sep;
+}
+
+function colorSwatchBg(color) {
+  const map = {
+    theme: "var(--accent)",
+    yellow: "#fdd835",
+    pink: "#f48fb1",
+    purple: "#ce93d8",
+    blue: "#90caf9",
+    green: "#a5d6a7",
+    gray: "#bdbdbd",
+  };
+  return map[color] || "#fdd835";
 }
 
 // ── 退出前 flush（0.16.11）────────────────────────────

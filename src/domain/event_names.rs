@@ -67,4 +67,8 @@ impl EventNames {
     pub const STICKY_APPEARANCE_CHANGED: &str = "blink://sticky-appearance-changed";
     /// 便签内容变化。payload: `{ stickyId }`
     pub const STICKY_CONTENT_CHANGED: &str = "blink://sticky-content-changed";
+    /// 便签被移入回收站（0.17.7）。payload: `{ stickyId }`
+    pub const STICKY_TRASHED: &str = "blink://sticky-trashed";
+    /// 便签从回收站恢复（0.17.7）。payload: `{ stickyId }`
+    pub const STICKY_RESTORED: &str = "blink://sticky-restored";
 }

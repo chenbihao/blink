@@ -8,7 +8,7 @@
 import { applyThemeFromConfig } from "../shared/theme.js";
 import { applyI18nFromConfig, t } from "../i18n/index.js";
 import { ensureSpriteLoaded } from "../shared/icon.js";
-import { initMarkdown, renderMarkdown, highlightCodeBlocks } from "../shared/markdown.js";
+import { initMarkdown, renderMarkdown, createMarkdownEditor, highlightCodeBlocks } from "../shared/markdown.js";
 import { getCurrentWindow, confirmDialog } from "../shared/tauri.js";
 import { getContentEditorPayload, saveContentEditor } from "../shared/api.js";
 
@@ -22,6 +22,12 @@ let originRef = null;
 
 /** 当前 savePolicy（0.16.9：clipboard_new | sticky_update） */
 let savePolicy = "clipboard_new";
+
+/** 当前内容格式：plain | md（0.17.7a） */
+let currentFormat = "plain";
+
+/** Cherry Markdown 编辑器实例（format=md 时使用，null = 纯文本模式） */
+let mdEditor = null;
 
 /** 当前模式："edit" | "preview" */
 let currentMode = "edit";
@@ -40,6 +46,7 @@ let closeTimeout = null;
 const titleEl = document.getElementById("editor-title");
 const textareaEl = document.getElementById("editor-textarea");
 const previewEl = document.getElementById("editor-preview");
+const mdContainerEl = document.getElementById("editor-md-container");
 const modeEditBtn = document.getElementById("mode-edit");
 const modePreviewBtn = document.getElementById("mode-preview");
 const saveBtn = document.getElementById("btn-save");
@@ -101,9 +108,44 @@ async function loadPayload() {
     originalBody = (payload.body || "").replace(/\r\n/g, "\n");
     originRef = payload.originRef || null;
     savePolicy = payload.savePolicy || "clipboard_new";
+    currentFormat = payload.format || "plain";
 
-    // 填充编辑器
-    textareaEl.value = originalBody;
+    // 0.17.7a：format=markdown 时使用 Cherry Markdown 编辑器（edit&preview + full 工具栏）
+    if (currentFormat === "markdown" && mdContainerEl) {
+      // 隐藏纯文本编辑区/预览区
+      textareaEl.hidden = true;
+      previewEl.hidden = true;
+      mdContainerEl.hidden = false;
+
+      // 隐藏编辑/预览模式切换按钮（split view 同时显示）
+      modeEditBtn.style.display = "none";
+      modePreviewBtn.style.display = "none";
+
+      // 创建或复用 Cherry 编辑器
+      if (mdEditor) {
+        mdEditor.setMarkdown(originalBody);
+      } else {
+        mdEditor = createMarkdownEditor(mdContainerEl, {
+          toolbar: "full",
+          defaultText: originalBody,
+        });
+      }
+    } else {
+      // 纯文本模式：显示 textarea，隐藏 Cherry 编辑器
+      textareaEl.hidden = false;
+      mdContainerEl.hidden = true;
+      modeEditBtn.style.display = "";
+      modePreviewBtn.style.display = "";
+
+      // 销毁 Cherry 编辑器（如果之前创建过）
+      if (mdEditor) {
+        mdEditor.destroy();
+        mdEditor = null;
+      }
+
+      // 填充编辑器
+      textareaEl.value = originalBody;
+    }
 
     // 设置标题
     titleEl.textContent = payload.title || t("editor.title.default");
@@ -119,10 +161,12 @@ async function loadPayload() {
     saveBtn.disabled = false;
 
     // 切到编辑模式
-    setMode("edit");
-
-    // 聚焦编辑器
-    textareaEl.focus();
+    if (currentFormat === "markdown" && mdEditor) {
+      mdEditor.focus();
+    } else {
+      setMode("edit");
+      textareaEl.focus();
+    }
   } catch (e) {
     console.error("[content-editor] loadPayload 失败:", e);
   }
@@ -131,6 +175,8 @@ async function loadPayload() {
 // ── 模式切换 ──────────────────────────────────────────
 
 function setMode(mode) {
+  // 0.17.7a：format=markdown 时不支持模式切换（split view 同时显示）
+  if (currentFormat === "markdown" && mdEditor) return;
   currentMode = mode;
 
   if (mode === "edit") {
@@ -150,6 +196,8 @@ function setMode(mode) {
 
 /** 渲染 Markdown 预览 */
 function renderPreview() {
+  // 0.17.7a：format=markdown 时预览由 Cherry 编辑器实时处理
+  if (currentFormat === "markdown" && mdEditor) return;
   const text = textareaEl.value;
   renderMarkdown(text, { container: previewEl });
   highlightCodeBlocks(previewEl);
@@ -173,7 +221,8 @@ async function handleSave() {
   statusEl.textContent = t("editor.saving");
 
   try {
-    const body = textareaEl.value;
+    // 0.17.7a：format=md 时从 Cherry 编辑器获取内容
+    const body = mdEditor ? mdEditor.getMarkdown() : textareaEl.value;
     await saveContentEditor(body, originRef, savePolicy);
 
     // 保存成功
@@ -212,7 +261,8 @@ async function handleCancel() {
 
 /** 检查是否有未保存的改动 */
 function hasUnsavedChanges() {
-  return textareaEl.value !== originalBody;
+  const current = mdEditor ? mdEditor.getMarkdown() : textareaEl.value;
+  return current !== originalBody;
 }
 
 /** 关闭窗口（改为 hide 复用模式，不再销毁窗口） */

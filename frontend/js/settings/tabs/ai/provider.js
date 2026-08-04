@@ -620,8 +620,10 @@ async function saveNewProvider({ kind, displayName, baseUrl, apiKey, errEl, sele
     kind,
     display_name: displayName,
     base_url: baseUrl || null,
+    secret_ref: `blink/${providerId}/key`,
     models: newModels,
     enabled: true, // 0.16.0: 新建 provider 默认启用
+    created_at: Math.floor(Date.now() / 1000),
   };
   cfg.providers = [...(cfg.providers || []), newProvider];
   aiState.hasSecretMap.set(providerId, !!apiKey || kind === "ollama_http");
