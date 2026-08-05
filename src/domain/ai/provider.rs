@@ -64,9 +64,10 @@ pub enum AIError {
 #[derive(Debug, Clone)]
 pub enum StreamChunk {
     /// 增量文本片段——前端逐段拼接展示。
-    Text(String),
+    Text(#[allow(dead_code)] String),
     /// 流结束——携带 tool_calls(若有)。
     Done {
+        #[allow(dead_code)] // 流式消费方未读取 tool_calls（chat 路径用 ChatStreamChunk）
         tool_calls: Vec<ToolCall>,
         #[allow(dead_code)] // 流式过程中 usage 可能不精确,保留供未来 SLO 消费
         usage: Usage,

@@ -122,6 +122,15 @@
 - 首屏结果条数由屏幕高度决定（下限 4 上限 9），不随内容跳变
 - 感知/推荐/AI 通道不加高首屏：Context 命中进首屏时替换低分候选，不追加到顶部
 
+### 3.4 分数 DPI 下的透明背景 tile seam（强制）
+
+> **跨版本重复踩坑**：0.12.8 对话窗口踩过，0.17.7 便签管理界面又踩——分数缩放（125%/150%）下透明背景窗口的 GPU 光栅化 tile 边界会产生斜线伪影，肉眼看着像 italic 但根因不是 `font-style`。
+
+- **次级窗口 `background_color` 必须设不透明色**（`windows.rs` 的 `create_*_window` 已统一设置；新建窗口勿漏）
+- **避免 `opacity:0` + `transform` 创建合成层**做显隐——用 `visibility:hidden` 或 `.hidden` class 替代
+- **中文文本容器补 `font-style: normal` 作防御**——即便没显式写 italic，防止继承链意外触发
+- 若怀疑出现斜线，先查窗口透明背景 + DPI 缩放，**别先归因为 italic**
+
 ---
 
 ## 第四层：组件铁则
@@ -195,6 +204,18 @@
 - 典型场景：截图工具栏、OCR 面板、钉图窗口、误点保护（点选区外 `setTimeout(…,0)` 延迟绑定关闭监听）
 - 参考实现：`frontend/js/screenshot/index.js` 的 `singleClickTimeout` / `mouseleave` 状态清理模式
 
+### 5.4 持久化窗口可靠性（强制）
+
+> 便签的核心承诺是"放在那里就不会丢"——只靠用户点保存或退出时写库，覆盖不了崩溃和系统强制结束。0.16.7/0.16.11 摸出这套范式，未来笔记/Todo 等持久化窗口复用。
+
+- **短防抖自动写库**：内容输入用短防抖落库，不能只靠手动保存
+- **失焦 / 隐藏 / 关闭前强制 flush**：防抖中的未保存内容在这些节点必须强制落库
+- **区分"用户关闭窗口"和"应用整体退出"**：用进程级 `IS_APP_EXITING: AtomicBool` 标志——退出时不 `prevent_close`、不改 `visible`；退出前 `flush_all_*_windows()` 确保防抖内容落库
+- **启动恢复不阻塞主链路**：异步 spawn 读取持久化窗口，不抢 Alt+Space 的焦点；恢复循环加节流/验证
+- **显示器变化钳制到可见工作区**：`clamp_*_geometry` 把离屏窗口拉回最近可见工作区
+- **单条恢复失败只记日志跳过**：不阻断其他窗口和主窗口 P0 唤起
+- **窗口外壳复用**：关闭=hide（`prevent_close` + hide），物理销毁只在删除/退出时；动态数量窗口（如 `sticky-{id}`）按需创建但复用同一套 hide 机制
+
 ---
 
 ## 第六层：工程债（收敛中）
@@ -214,6 +235,19 @@
 - 入口文件只负责装配、初始化与稳定导出；拆分时必须保留自定义协议、IPC、事件名和加载顺序，不得臆造新的后端 command
 - 历史 `style.display` 存量尚未清零；拆分完成不等于样式债清零，后续按触达范围迁移为 class
 
+#### 6.2.1 结构拆分护栏（强制）
+
+> 0.14 §9.2 教训：截图 overlay 拆 `ss-*` 时，一度把取图自定义协议误改成不存在的 `screenshot_get_image` command，静态核对才发现。结构拆分是机械重构，但**外部契约不能动**。
+
+拆分巨石文件（如 `chord-screenshot.js` → `ss-*`、`settings.js` → `settings/tabs/*`、`chat.css` → `views/chat/*`）时，必须逐项保持以下外部契约不变：
+
+1. **Tauri command 契约**：`generate_handler!` 注册的 command 与前端所有 `invoke()` 字面量逐一核对（拆分后 invoke 仍命中后端注册，不能凭空造新 command）
+2. **事件名契约**：Rust `blink://*` 事件常量与前端事件常量模块逐一核对（0.14.6 后两端已有集中清单）
+3. **加载顺序与导出**：HTML/CSS/JS 入口的加载顺序、模块导出名、初始化时序（拆分后入口装配顺序必须复现原行为）
+4. **自定义协议 vs IPC 边界**：如截图像素走 `blink-screenshot` 自定义协议读取，**不能因拆分臆造 `screenshot_get_image` command**——协议与 command 是不同链路
+
+拆分完成后逐项静态核对上述四点，不能只靠"功能正常"冒烟判断。
+
 ### 6.3 落地检查清单（每次写前端代码自问）
 
 - [ ] 新写 CSS 里有中文选择器叠 `font-style: italic`？→ ❌
@@ -226,3 +260,8 @@
 - [ ] UI 占位走 Lucide sprite？塞 emoji → ❌
 - [ ] 异步回流校验了版本/id？裸 `innerHTML` → ❌
 - [ ] 悬浮层关闭留了 hover 缓冲期？裸即时隐藏 → ❌
+- [ ] 新窗口 `background_color` 设了不透明色？透明背景 + 分数 DPI 缩放 → tile seam 斜线（§3.4）
+- [ ] 显隐用 `opacity:0 + transform` 创建合成层？→ 改 `visibility:hidden` 或 `.hidden` class（§3.4）
+- [ ] 屏蔽了不该出现的原生浏览器右键菜单？需要自定义右键时用 CSS 弹层 + `preventDefault`，不裸留原生菜单
+- [ ] 持久化内容失焦/隐藏/关闭前 flush 了？退出与用户关窗口用 `IS_APP_EXITING` 区分了？（§5.4）
+- [ ] 新窗口启动恢复逻辑异步化、不抢主窗口焦点？单条失败不阻断？（§5.4）

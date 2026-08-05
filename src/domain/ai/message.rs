@@ -72,6 +72,7 @@ impl ChatMessage {
     /// `content` 是 `{"name":"...","arguments":{...}}` JSON 字符串——
     /// `RigProvider::build_rig_request` 会解析它构造 rig `AssistantContent::ToolCall`。
     /// `tool_call_id` 是 Turn 1 AI 返回的 tool call ID，与后续 `ChatMessage::tool` 的 id 对齐。
+    #[allow(dead_code)] // 0.11.4 Turn 2 回流用，rig_provider 测试消费
     pub fn assistant_tool_call(
         tool_call_id: impl Into<String>,
         content: impl Into<String>,

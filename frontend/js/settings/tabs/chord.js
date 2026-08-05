@@ -110,11 +110,8 @@ function renderActionRow(a, subtitle, clipboardCfg, screenshotCfg) {
   const rowClass = a.enabled ? "" : "is-disabled";
 
   // voice_input 锁定（键位由 hotkey 配置决定）
-  // edit / sticky 锁定（后端 ChordBindings 无对应字段，暂不支持改绑）
-  const keyLocked = a.id === "voice_input" || a.id === "edit" || a.id === "sticky";
-  const lockedMsg = a.id === "voice_input"
-    ? t("chord.binding.voice_input.locked")
-    : t("chord.binding.fixed.locked");
+  const keyLocked = a.id === "voice_input";
+  const lockedMsg = t("chord.binding.voice_input.locked");
 
   // 整行可点击展开；voice_input 锁定时展开体只有 locked 说明，意义不大但保留以维持一致交互
   const subtitleHtml = subtitle

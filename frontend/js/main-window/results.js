@@ -6,7 +6,7 @@
 //! 「激活某项」交给 actions.js；选中/翻页后通知 statusbar 刷新提示。
 
 import { resultsEl } from "./dom.js";
-import { syncWindowSize } from "./window-size.js";
+import { syncWindowSize, resetMaxHeight } from "./window-size.js";
 import { activateItem } from "./actions.js";
 import * as statusbar from "./statusbar.js";
 import { invoke } from "../shared/tauri.js";
@@ -89,6 +89,7 @@ function ensureSeq(seq) {
   allItems = [];
   page = 0;
   selected = 0;
+  resetMaxHeight(); // 新搜索会话：归零 maxHeight，让窗口按实际内容收缩
   return true;
 }
 
@@ -172,6 +173,7 @@ export function clear() {
   selected = 0;
   resultsEl.innerHTML = "";
   resultsEl.classList.remove("has-items");
+  resetMaxHeight(); // 清空时归零，让窗口缩回输入框高度
   refreshStatusbar();
   syncWindowSize();
 }

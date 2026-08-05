@@ -48,15 +48,9 @@
       </div>
     </div>
 
-    <!-- 编辑区（0.17.7a：Cherry edit&preview，左侧编辑 MD + 右侧实时渲染预览） -->
-    <div class="sticky-editor-container" id="sticky-editor-container"></div>
-    <!-- 降级用 textarea（Cherry 未加载时） -->
-    <textarea class="sticky-textarea" id="sticky-textarea" placeholder="输入内容..." spellcheck="false" hidden></textarea>
+    <!-- 编辑区（纯文本 textarea，简洁直接；需要 Markdown 预览可用「在编辑器中打开」） -->
+    <textarea class="sticky-textarea" id="sticky-textarea" placeholder="输入内容..." spellcheck="false"></textarea>
   </div>
-
-  <!-- Vendor（0.17.7a：Cherry Markdown Stream 版） -->
-  <script src="vendor/cherry-markdown.stream.min.js"></script>
-  <link href="vendor/cherry-markdown.min.css" rel="stylesheet">
 
   <!-- 入口 -->
   <script type="module" src="js/sticky/main.js"></script>

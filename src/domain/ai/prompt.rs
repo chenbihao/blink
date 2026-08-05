@@ -181,6 +181,7 @@ pub fn routing_system_prompt(tools: &[ToolPromptInfo], _lang: &str) -> String {
 /// `handle_turn2_tool_call` 会自动执行（不需用户确认）。
 ///
 /// `_lang` 参数预留 i18n。
+#[allow(dead_code)] // 0.11.4 Turn 2 回流用，测试消费
 pub fn tool_result_feedback_prompt(tools: &[ToolPromptInfo], _lang: &str) -> String {
     let mut prompt = String::from(
         "你刚才调用了工具并拿到了结果。现在请基于结果回应用户。\n\n\

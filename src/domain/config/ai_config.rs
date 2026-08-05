@@ -298,6 +298,7 @@ impl ProviderKind {
     /// 获取 serde 序列化后的字符串（与 serde rename 对齐）。
     ///
     /// 用于审计日志存储 `provider_kind` 字段——保证与 JSON 序列化一致。
+    #[allow(dead_code)] // 审计日志预留，测试消费
     pub fn as_serde_str(self) -> &'static str {
         match self {
             ProviderKind::OpenAICompatible => "openai_compatible",
@@ -347,6 +348,7 @@ impl ToolResultFeedback {
     /// - `On` → 始终 true
     /// - `Off` → 始终 false
     /// - `Auto` → `provider_kind.is_local()`（本地开 / 云端关）
+    #[allow(dead_code)] // Turn 2 回流调度消费，测试覆盖
     pub fn should_run(self, provider_kind: ProviderKind) -> bool {
         match self {
             ToolResultFeedback::On => true,

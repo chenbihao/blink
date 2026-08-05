@@ -116,6 +116,7 @@ impl Default for PendingConfirms {
 
 impl PendingConfirms {
     /// 构造空注册表（测试用，无 DB 持久化）。
+    #[allow(dead_code)] // 测试专用，生产用 with_persistence
     pub fn new() -> Self {
         Self::default()
     }

@@ -210,6 +210,15 @@ Blink 的能力分两层,**边界用类型系统钉死**:
 
 **核心铁则**:AI 永远只通过 `CapabilityTool` 调能力。`open_url` / `open_path` / `reveal_in_explorer` 这三个 AI 常用的从 Action 提升为 Capability;`lock` / `shutdown` 等不可逆操作留在 Action,AI 看不到,避免安全隐患。
 
+**危险判定的两维**(`DangerClass` + `CapabilitySchema.sensitive`):
+
+| 维度 | 语义 | 例子 | 进 tool 池 |
+|---|---|---|---|
+| `DangerClass::Dangerous` | 有副作用的危险动作(改系统状态) | lock / shutdown / 写文件 | ✅ 但必确认 |
+| `CapabilitySchema.sensitive` | 读隐私/敏感数据(无副作用但数据敏感) | `search_apps`(读应用列表) / `search_clipboard_history`(读剪贴板) | ✅ 0.13 MCP server 暴露时需授权 |
+
+`CapabilityTool::is_dangerous()` 判定式 = `danger_class == Dangerous || schema.sensitive`——两者都触发人机确认流程,但语义不同(前者防"做了不该做的",后者防"泄露不该泄露的")。`sensitive` 字段在 0.11 引入、0.13 修复为活字段(此前是死字段,`is_dangerous` 未读取它)。
+
 **边界用类型系统钉死**——删除 `ActionTool` 适配器后,AI 该不该调某个能力的决策从"运行时每个 Action 自己标 danger_class"前置成"编译期只有 Capability 才能进 tool 池"。
 
 **不合并 Capability 与 Action 的理由**:四域架构(§A2)是基座,Action trait 承载 Execution 域"已执行副作用"语义,与 Capability"纯数据能力"是不同的事;且 lock/shutdown 等本就不该让 AI 直接调。0.13.7 删 `ActionOutcome::Items` 让 Action 回归纯副作用,说明架构**正朝"Action=副作用专用"收敛,而非合并**。
@@ -303,9 +312,17 @@ manifest 里 `actions` 数组**顺序即优先级**:
 | **MCP 出口** | `data`(纯 JSON 给外部 agent) | 同 AI,只读 data |
 
 ```rust
-/// 用 ProjectionRule 把 PluginRawResult 投影成 CapabilityResult(轨道 A)
-pub fn project(raw: &PluginRawResult, rule: &ProjectionRule) -> CapabilityResult { ... }
+/// invoke 链路只做形态规范化,不挑字段——data 保留完整原始值(0.17.10 收敛)
+pub fn normalize(raw: &PluginRawResult) -> CapabilityResult { ... }
+
+/// Capability trait 独立方法,只在展示出口调用(0.17.10 从 invoke 移出)
+pub trait Capability {
+    // ... invoke 用 normalize,不投影 ...
+    fn projection(&self) -> Option<&ProjectionRule> { None }  // default None
+}
 ```
+
+> **0.17.10 收敛**:旧 `project()` 同时承担"给 AI 挑数据"和"给展示挑字段"两个冲突职责——AI 拿到被 pointer 砍窄的裸字段(ip 丢地理位置、weather 丢天气状况)。收敛后 invoke 走 `normalize()`(只规范化形态,raw JSON → CapabilityResult,**不挑字段**),投影 `projection()` 独立为 Capability trait 方法(default None),只有展示出口 `to_display_text` 才按 manifest 投影。AI 出口天然拿完整 data,零 manifest 改动即修复。详见 [phases/0.17 §3.15](../phases/0.17-enhancement-polish.md)。
 
 **主窗口前端的 fallback 派生**——主标题(旧 `title`)由前端从 `data` 派生:纯字符串→直接用,纯数字→to_string,对象→JSON 串兜底。复杂对象主标题(如 search_files 的文件名)走轨道 B(builtin 直接构造好 ItemResult,data 带格式化字段)。
 
@@ -362,6 +379,27 @@ pub fn project(raw: &PluginRawResult, rule: &ProjectionRule) -> CapabilityResult
 - **AI 反馈铁则**:AI 调用期间主窗口必有 loading/过渡,不能让用户死等
 
 **AI 对话 = takeover view**(0.12 已完成):AI 对话不是 item 列表,而是 `view: chat` 的 takeover 区域——独立对话窗口(Alt+Q),走流式 JSONL。这是 surface 模型 `view` 字段预留的目的。
+
+### §A8.1 主窗口 vs 对话窗口:调度统一,记忆隔离(0.17.6 后)
+
+> **0.17.6 收敛**:主窗口 AI 从 `SearchService::trigger_ai`(外部调度 + 单槽 `PendingAiConfirmation`)切换到 `ChatService::prompt`,与对话窗口**统一调度模型**。旧的两套独立调度(`SearchService` vs `ChatService`)已删除——主窗口不再有独立的 AI 调度路径。
+
+**调度统一,但记忆 kind 严格隔离**:
+
+| 窗口 | Memory kind | 持久化 | FTS5 召回 | 语义 |
+|---|---|---|---|---|
+| **主窗口**(AiMode) | `EphemeralConversationMemory` | ❌ 进程内 `HashMap` | ❌ | 临时性是其交互契约——ESC 即清空,Alt+Q 可提升为持久对话 |
+| **对话窗口**(Alt+Q) | `SqliteConversationMemory` | ✅ SQLite | ✅(0.13.2) | 持久化对话,重启恢复 |
+
+**铁则**:**不可混用 memory kind**——主窗口 AI 的临时性是其交互契约(ESC 即清空、不污染历史),给它接持久化 memory 会破坏语义。`ChatService` 按 `ConversationKind`(`Persistent`/`Ephemeral`)选 memory,Agent 缓存 key 追加 kind。事件通道 `CHAT_STREAM` / `CHAT_CONFIRM_ACTION` 统一,按 `target_window` 定向 emit(旧 `AI_STREAM`/`AI_CONFIRM_ACTION` 已删)。
+
+**watchdog AI 标志**:主窗口 AiMode 下 `MAIN_WINDOW_AI_ACTIVE: AtomicBool` 置位,看门狗跳过失焦隐藏(用户正在和主窗口 AI 对话,不能因切走而关窗)。
+
+### §A8.2 Agent 缓存:preamble hash 自动失效
+
+`AgentProvider` 按 cache key = `(provider_id, model_id, fingerprint, preamble_hash)` 懒构造并缓存。**preamble 字符串变化 → `hash_preamble()` 变 → cache miss → 重建 Agent,无需手工失效**。
+
+这是 Skill 激活、分组系统提示词修改、0.17.8 权限记忆等所有"preamble 变化需重建 Agent"场景的统一机制(0.12 §3.2 + 0.13 §五)。新功能若涉及 preamble 组装,直接改 preamble 字符串即可,不要自造缓存失效逻辑。
 
 ---
 

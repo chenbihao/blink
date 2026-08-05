@@ -8,7 +8,7 @@ import * as ghost from "./ghost.js";
 import * as chord from "./chord.js";
 import * as autosuggestConfig from "./autosuggest-config.js";
 import * as aiMode from "./ai-mode.js";
-import { queryEl, resultsEl, aiQueryEl } from "./dom.js";
+import { queryEl, aiQueryEl, appEl } from "./dom.js";
 
 /** 绑定全部键盘监听 + 滚轮翻页。 */
 export function init() {
@@ -19,7 +19,10 @@ export function init() {
   document.addEventListener("keydown", onEscape);
   document.addEventListener("keydown", onBlockModifiers, true);
   // 滚轮翻页：向上滚 = PageUp，向下滚 = PageDown（整页翻，用鼠标就不用手移到方向键了）
-  resultsEl.addEventListener("wheel", (e) => {
+  // 监听 appEl 而非 resultsEl：window-size.js 的 maxHeight 机制会让窗口在末页
+  // 保持满页高度，#results 下方可能有空白区域（属于 #app），监听 appEl 可覆盖
+  // 全窗口，滚轮不溢出到背后窗口。
+  appEl.addEventListener("wheel", (e) => {
     e.preventDefault(); // 阻止默认滚动（列表本来就不滚动）
     if (!results.hasItems()) return;
     if (e.deltaY < 0) {

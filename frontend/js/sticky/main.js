@@ -11,7 +11,6 @@ import { applyThemeFromConfig } from "../shared/theme.js";
 import { ensureSpriteLoaded } from "../shared/icon.js";
 import { getCurrentWindow, confirmDialog, listen } from "../shared/tauri.js";
 import { EVENTS } from "../shared/event-names.js";
-import { initMarkdown, createMarkdownEditor } from "../shared/markdown.js";
 import {
   getStickyNote,
   updateStickyContent,
@@ -48,7 +47,6 @@ const GEOMETRY_DEBOUNCE_MS = 300;
 
 const rootEl = document.getElementById("sticky-root");
 const textareaEl = document.getElementById("sticky-textarea");
-const editorContainerEl = document.getElementById("sticky-editor-container");
 const colorBtn = document.getElementById("btn-color");
 const colorPalette = document.getElementById("color-palette");
 const pinBtn = document.getElementById("btn-pin");
@@ -59,20 +57,12 @@ const moreHide = document.getElementById("more-hide");
 const moreOpenManager = document.getElementById("more-open-manager");
 const closeBtn = document.getElementById("btn-close");
 
-// ── Markdown 编辑器 ──────────────────────────────────
-
-/** Cherry Markdown 编辑器实例（null = 降级到 textarea） */
-let mdEditor = null;
-
 // ── 初始化 ────────────────────────────────────────────
 
 async function init() {
   // 主题 + 图标
   await ensureSpriteLoaded();
   await applyThemeFromConfig();
-
-  // 初始化 Markdown 渲染器
-  initMarkdown();
 
   // 从 URL 参数读取 sticky_id
   const params = new URLSearchParams(window.location.search);
@@ -81,23 +71,6 @@ async function init() {
   if (!stickyId) {
     console.error("[sticky] 未提供 sticky_id");
     return;
-  }
-
-  // 创建 Cherry Markdown 编辑器（0.17.7a）
-  // 如果 Cherry 不可用，降级到 textarea
-  if (editorContainerEl && typeof createMarkdownEditor === "function") {
-    mdEditor = createMarkdownEditor(editorContainerEl, {
-      toolbar: "compact",
-      onChange: () => scheduleSave(),
-    });
-  }
-  if (!mdEditor) {
-    // 降级：显示 textarea，隐藏 editor container
-    if (editorContainerEl) editorContainerEl.hidden = true;
-    if (textareaEl) textareaEl.hidden = false;
-  } else {
-    // 编辑器可用：隐藏 textarea
-    if (textareaEl) textareaEl.hidden = true;
   }
 
   // 从后端拉取便签数据
@@ -118,9 +91,7 @@ async function init() {
     if (payload && payload.stickyId === stickyId) {
       // 用户正在编辑时不 reload，避免覆盖输入
       const activeEl = document.activeElement;
-      const isEditing = mdEditor
-        ? (activeEl && activeEl.tagName === "TEXTAREA")
-        : (activeEl === textareaEl);
+      const isEditing = activeEl === textareaEl;
       if (!isEditing) {
         loadStickyData();
       }
@@ -174,43 +145,30 @@ async function loadStickyData() {
     updatePinButton(stickyNote.alwaysOnTop);
 
     // 聚焦编辑器
-    if (mdEditor) {
-      mdEditor.focus();
-    } else {
-      textareaEl.focus();
-    }
+    textareaEl.focus();
   } catch (e) {
     console.error("[sticky] 加载便签数据失败:", e);
   }
 }
 
-// ── 内容读写抽象（编辑器 / textarea 降级）──────────────
+// ── 内容读写 ───────────────────────────────────────
 
 /** 获取当前便签内容 */
 function getContent() {
-  if (mdEditor) return mdEditor.getMarkdown();
   return textareaEl.value;
 }
 
 /** 设置便签内容 */
 function setContent(text) {
-  if (mdEditor) {
-    mdEditor.setMarkdown(text);
-  } else {
-    textareaEl.value = text;
-  }
+  textareaEl.value = text;
 }
 
 // ── 编辑与自动保存 ────────────────────────────────────
 
 function bindEditing() {
-  // Cherry 编辑器已在 createMarkdownEditor 的 onChange 回调中处理 input
-  // 这里只绑定 textarea 降级模式
-  if (!mdEditor) {
-    textareaEl.addEventListener("input", () => {
-      scheduleSave();
-    });
-  }
+  textareaEl.addEventListener("input", () => {
+    scheduleSave();
+  });
 }
 
 /** 安排防抖保存 */
@@ -298,7 +256,7 @@ function bindMoreMenu() {
     try {
       await openContentEditor({
         body: getContent(),
-        format: mdEditor ? "markdown" : "plain",
+        format: "plain",
         title: "编辑便签内容",
         origin: "sticky",
         originRef: stickyId,
@@ -471,7 +429,7 @@ function showContextMenu(x, y) {
     try {
       await openContentEditor({
         body: getContent(),
-        format: mdEditor ? "markdown" : "plain",
+        format: "plain",
         title: "编辑便签内容",
         origin: "sticky",
         originRef: stickyId,

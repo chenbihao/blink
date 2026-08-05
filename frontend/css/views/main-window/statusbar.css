@@ -21,6 +21,7 @@
 
 #statusbar.visible {
   display: flex;
+  margin-top: auto; /* 翻页不缩窗口：maxHeight 撑高 #app 时，statusbar 贴底而非紧跟 results */
 }
 
 /* 0.10.8 §11.2 方案 2：左侧改为垂直 stack，主行 primary + 可选副行 secondary。

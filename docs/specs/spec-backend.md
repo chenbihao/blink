@@ -14,6 +14,9 @@
 | **平台抽象预留** | 平台相关逻辑走 `infra/platform/` 的 `mod.rs` 接口 + `windows.rs` 实现，domain 不直接 `use windows::` |
 | **不过度工程** | 0.x 阶段不对外发布，产品化基础设施（manifest 升级/权限强制/插件市场）1.0 前不做 |
 | **架构要有前瞻性** | 精心设计持续演进，不过早腐败，不随便堆砌坏味道与技术债，持续收敛 Clean Architecture |
+| **子进程静默** | 调外部进程（`netstat`/`taskkill`/`python`/`node` 等子进程）必须加 `CREATE_NO_WINDOW`，走 `infra/platform/process.rs` 的 `no_window()` / `no_window_tokio()`，**禁止裸 `Command`**——否则会闪命令行黑窗。0.17.0 自启链路曾因此泄漏 cmd 窗口 |
+| **阻塞操作隔离** | CPU 密集或同步阻塞操作（PNG 编解码、图像像素 swap、Win32 同步 API、SQLite 长查询）必须 `tokio::task::spawn_blocking` 挪出工作线程，**禁止在 async 上下文裸跑**——否则阻塞 tokio 调度器影响 Alt+Space 主链路。参考 0.11 截图 PNG 解码 / BGRA swap / 剪贴板写入均走 `spawn_blocking` |
+| **AI 请求单活跃 + 串行启动** | AI 请求必须满足三约束：① 全局单活跃请求（`RequestTracker` 单槽，新请求 abort 旧或返回 `AlreadyActive`）；② `start_gate` 串行化启动，防并发 IPC 绕过 active 检查；③ 0.17.6 后**跨窗口单活跃**——主窗口 AI 运行时对话窗口发消息得 `AlreadyActive`，前端提示"AI 正在 {active_window} 中处理"。防并发请求导致状态错乱（0.12 §3.2 + 0.17.6） |
 
 > 分层依赖方向的硬约束（domain 不 use tauri / infra 不反向依赖 app）见 `spec-architecture.md §A1`。
 
@@ -25,6 +28,7 @@
 - ❌ **Win32/GUI/Shell/Tauri 集成层免自动化**：这类调用难以稳定 mock，靠 `cargo run` 手动验证主链路
 - ⚠️ **依赖系统资源的测试要可跳过**：用 `Path::exists` 守卫，缺失则跳过（不依赖 CI 桌面环境）
 - ✅ **验证产物正确性**：例如断言 PNG 魔数，而不只是 `!is_empty()`
+- 🚫 **单测绝不修改真实系统状态**：Credential Manager / 注册表 / 用户文件系统等共享系统资源，单测必须用 mock store 或 `Path::exists` 守卫，**禁止直接打真实 CM**。0.17.11 教训——`cargo test` 的 `enumerate_and_delete_all_blink_secrets` 曾直接清空用户真实密钥，改用 `keyring` mock store 后才根治。secret 相关单测优先 `#[ignore]` + 独立 store，绝不依赖"开发者机器上没数据"这种假设
 
 ```bash
 cargo test --bin blink   # 跑单测（bin crate，无 lib target）
@@ -130,6 +134,33 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 | **`blink_cache.db`** | `performance_metrics` 性能统计（高频写）+ `icon_cache` 图标缓存（BLOB） |
 
 **关键业务约束**：`lnk_path` 是 history 主键——扫描产生的路径字符串**不可随意归一化/改写**，否则历史权重 key 失配。
+
+### 7.1 四库数据分类与清理铁则
+
+> 0.17.0 教训：`clear_cache_db` 曾误清用户剪贴板图片；增量清理路径只 DELETE 不 VACUUM 导致 DB 文件不缩小。此处归一清理边界。
+
+| 性质 | 表 | 清理入口 |
+|---|---|---|
+| **配置（不可清理）** | `config.db` 的 `config`（KV）/ `ai_permission_memory` | 无。铁则：任何"清理缓存"/"一键清理"操作**不得触碰 config.db**；`ai_permission_memory` 仅"清除所有权限记忆"按钮 |
+| **用户数据** | `history` / `clipboard_history` / `sticky_notes`（history 库）；`clipboard_images`（cache 库，**用户数据非缓存**）；`conversations` / `messages` / `conversation_groups`（ai 库） | 各自 `clear_*`（带确认）；`sticky_notes` 无清理入口 |
+| **缓存（可重建）** | `performance_metrics` / `icon_cache`（cache 库） | `clear_cache_db` / `clear_perf_data` |
+| **审计** | `ai_tool_audit`（ai 库） | `clear_ai_audit`（带确认） |
+
+**清理铁则**：
+1. `clear_cache_db` 只清缓存表（`performance_metrics` + `icon_cache`），**不碰 `clipboard_images`**——后者是用户数据（0.17.0 曾误归缓存，导致历史图片被清掉）
+2. `optimize_storage`（VACUUM）可对 config.db 执行（只回收空闲页，不删数据），与"不得清理 config.db"不冲突
+3. `cleanup_all_data`（删整个 `%APPDATA%\blink`）**运行时禁用**——该操作删配置 + 全部用户数据，运行中执行会进入不可恢复状态，仅卸载前手动启用
+
+### 7.2 SQLite VACUUM 策略
+
+不用 `PRAGMA auto_vacuum`（需建表时设置且不还给 OS），用定期 VACUUM：
+- 启动时 `vacuum_if_needed(pool, 0.2)`（空闲页占比 > 20% 才 VACUUM）
+- 存储页 `optimize_storage` 手动触发四库 VACUUM
+- 增量清理路径只 `DELETE` 不 `VACUUM` 是常态（SQLite `DELETE` 只标记空闲页不缩文件是正常的），由上述两个入口按需回收
+
+### 7.3 大 BLOB 独立表/独立库
+
+单张截图 `CF_DIB` ~14MB / PNG 1-3MB。大 BLOB **不进** `max_items` 大的混合表（max_items=10000 可达 20GB），且 SQLite 单 pool 写锁会阻塞文本历史。`clipboard_images` 走 cache 库的独立表，与 `clipboard_history` 文本表分库分管。采集时同步生成缩略图（max 边 256px），避免列表滚动重复解码。
 
 ---
 

@@ -60,6 +60,7 @@ pub trait DomainEnv: CapabilityEnv {
     ///
     /// CLI/MCP 的最小运行时可能不构造完整 Capability 栈，因此显式返回 `Option`，
     /// 由调用方转成可恢复错误或降级为空 tool 池，禁止在环境 getter 内 panic。
+    #[allow(dead_code)] // build_agent_tools 直接传参消费，测试验证最小运行时
     fn cap_registry(&self) -> Option<&Arc<CapabilityRegistry>>;
 
     /// 对话窗口服务（可能尚未构造，返回 Option）。

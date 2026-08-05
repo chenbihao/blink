@@ -784,7 +784,7 @@ export function renderEmptyState(providerConfigured, onOpenSettings) {
     const GUIDE_PROMPTS = [
       { text: "帮我打开微信", hint: "应用" },
       { text: "翻译 components", hint: "翻译" },
-      { text: "截取屏幕", hint: "截图" },
+      { text: "我的 IP 多少", hint: "问答" },
       { text: "今天天气怎么样", hint: "问答" },
       { text: "现在能调用哪些MCP服务", hint: "问答" },
     ];

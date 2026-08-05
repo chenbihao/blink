@@ -209,8 +209,8 @@ const CHEATSHEET_ACTIONS = [
   { id: "chat", labelKey: "hotkey.cheatsheet.chat", defaultKey: "q", customizable: true },
   { id: "screenshot", labelKey: "hotkey.cheatsheet.screenshot", defaultKey: "a", customizable: true },
   { id: "clipboard_history", labelKey: "hotkey.cheatsheet.clipboard_history", defaultKey: "c", customizable: true },
-  { id: "edit", labelKey: "hotkey.cheatsheet.edit", defaultKey: "e", customizable: false },
-  { id: "sticky", labelKey: "hotkey.cheatsheet.sticky", defaultKey: "s", customizable: false },
+  { id: "edit", labelKey: "hotkey.cheatsheet.edit", defaultKey: "e", customizable: true },
+  { id: "sticky", labelKey: "hotkey.cheatsheet.sticky", defaultKey: "s", customizable: true },
 ];
 
 /**

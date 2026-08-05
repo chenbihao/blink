@@ -101,6 +101,12 @@ pub struct ChordBindings {
     /// 0.12.1: AI 对话窗口（默认 Alt+Q）。老配置缺字段时 serde default 兜底。
     #[serde(default)]
     pub chat: ChordBinding,
+    /// 0.16.9: 编辑当前内容（默认 Alt+E）。老配置缺字段时 serde default 兜底。
+    #[serde(default)]
+    pub edit: ChordBinding,
+    /// 0.16.9: 钉为便签（默认 Alt+S）。老配置缺字段时 serde default 兜底。
+    #[serde(default)]
+    pub sticky: ChordBinding,
 }
 
 impl ChordBindings {
@@ -112,6 +118,8 @@ impl ChordBindings {
             "screenshot" => Some(&self.screenshot),
             "clipboard_history" => Some(&self.clipboard_history),
             "chat" => Some(&self.chat),
+            "edit" => Some(&self.edit),
+            "sticky" => Some(&self.sticky),
             _ => None,
         }
     }
@@ -124,6 +132,8 @@ impl ChordBindings {
             "screenshot" => Some(&mut self.screenshot),
             "clipboard_history" => Some(&mut self.clipboard_history),
             "chat" => Some(&mut self.chat),
+            "edit" => Some(&mut self.edit),
+            "sticky" => Some(&mut self.sticky),
             _ => None,
         }
     }
@@ -953,5 +963,33 @@ mod tests {
         assert_eq!(sticky["key"], "s");
         assert_eq!(sticky["requires_input"], true);
         assert_eq!(sticky["label"], "Sticky");
+    }
+
+    #[test]
+    fn edit_sticky_bindings_support_override() {
+        let mut bindings = ChordBindings::default();
+        // 默认走 default_key
+        assert_eq!(bindings.effective_key("edit", 'e'), "e");
+        assert_eq!(bindings.effective_key("sticky", 's'), "s");
+
+        // 改绑后走 binding.key
+        bindings.get_mut("edit").unwrap().key = "x".into();
+        bindings.get_mut("sticky").unwrap().key = "z".into();
+        assert_eq!(bindings.effective_key("edit", 'e'), "x");
+        assert_eq!(bindings.effective_key("sticky", 's'), "z");
+    }
+
+    #[test]
+    fn edit_sticky_bindings_backward_compatible() {
+        // 老配置缺 edit/sticky 字段时 serde default 兜底
+        let legacy: ChordBindings = serde_json::from_value(serde_json::json!({
+            "voice_input": {},
+            "screenshot": {},
+            "clipboard_history": {},
+            "chat": {}
+        }))
+        .unwrap();
+        assert_eq!(legacy.effective_key("edit", 'e'), "e");
+        assert_eq!(legacy.effective_key("sticky", 's'), "s");
     }
 }

@@ -148,8 +148,8 @@ fn default_height() -> i32 {
 }
 
 /// 默认窗口尺寸（逻辑像素，前端创建时用）。
-pub const DEFAULT_WIDTH: i32 = 240;
-pub const DEFAULT_HEIGHT: i32 = 200;
+pub const DEFAULT_WIDTH: i32 = 320;
+pub const DEFAULT_HEIGHT: i32 = 270;
 
 /// 初始化 sticky_notes 表。
 ///
