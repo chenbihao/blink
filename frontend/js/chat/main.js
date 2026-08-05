@@ -11,7 +11,7 @@ import * as components from "./components.js";
 import { forceScrollToBottom } from "./components.js";
 import { escapeText, escapeAttr } from "./utils.js";
 // 0.12.7 §6.3：显式导入 renderSignal，多处场景接入
-import { initComposer, setStreamingMode, setInputMode, clearInput, setInputValue, focusInput, setThinkingEnabled as setComposerThinking, showVoiceIndicator, hideVoiceIndicator, showVoiceStatus, updateVoiceLevel, updateVoicePartial, isVoiceRecording } from "./composer.js";
+import { initComposer, setStreamingMode, setInputMode, clearInput, setInputValue, focusInput, setThinkingEnabled as setComposerThinking, showVoiceIndicator, hideVoiceIndicator, showVoiceStatus, showVoiceError, updateVoiceLevel, updateVoicePartial, isVoiceRecording } from "./composer.js";
 import { initSidebar, refreshSidebar, showSidebar, hideSidebar, toggleSidebar, setActiveConversation } from "./sidebar.js";
 import { applyThemeFromConfig } from "../shared/theme.js";
 import { listen, invoke, getCurrentWindow } from "../shared/tauri.js";
@@ -717,7 +717,7 @@ function handleVoiceRecordingEnd() {
   }
 }
 
-/** voice-error: 显示错误 + 隐藏语音指示器 */
+/** voice-error: 在语音指示器上显示错误（红色波形 + 错误文案） */
 function handleVoiceError(event) {
   const payload = event.payload;
   if (payload?.target !== "chat") return;
@@ -725,7 +725,7 @@ function handleVoiceError(event) {
     hideVoiceIndicator();
   }
   if (payload?.message) {
-    components.renderErrorMessage(payload.message);
+    showVoiceError(payload.message);
   }
 }
 

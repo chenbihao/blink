@@ -90,8 +90,8 @@ export function init() {
     // 显示语音指示器
     if (voiceIndicator) {
       voiceIndicator.classList.remove("hidden");
-      // 录音开始：波形切回绿色（移除加载态蓝色）
-      voiceIndicator.querySelector(".voice-wave")?.classList.remove("voice-loading");
+      // 录音开始：波形切回绿色（移除加载态蓝色 + 错误态红色）
+      voiceIndicator.querySelector(".voice-wave")?.classList.remove("voice-loading", "voice-error");
     }
   });
 
@@ -105,7 +105,8 @@ export function init() {
       voiceIndicator.classList.remove("hidden");
       const label = voiceIndicator.querySelector(".voice-label");
       if (label) label.textContent = message;
-      // 模型加载中：波形转蓝色（录音开始后由 voice-recording-start 切回绿色）
+      // 模型加载中：波形转蓝色（清除可能残留的错误态红色）
+      voiceIndicator.querySelector(".voice-wave")?.classList.remove("voice-error");
       voiceIndicator.querySelector(".voice-wave")?.classList.add("voice-loading");
     }
   });
@@ -184,14 +185,16 @@ export function init() {
     if (voiceIndicator) {
       voiceIndicator.classList.add("hidden");
       vwBars.forEach((bar) => (bar.style.height = "4px"));
-      // 恢复语音指示器标签默认文案 + 清除加载态
-      voiceIndicator.querySelector(".voice-wave")?.classList.remove("voice-loading");
+      // 恢复语音指示器标签默认文案 + 清除加载态/错误态
+      voiceIndicator.querySelector(".voice-wave")?.classList.remove("voice-loading", "voice-error");
       const label = voiceIndicator.querySelector(".voice-label");
       if (label) label.textContent = t("voice.indicator.recording");
     }
   });
 
-  // 0.10 语音错误提示（服务未启动等）
+  // 0.10 语音错误提示（STT 未配置 / 服务未启动等）
+  // 设计铁则：所有语音状态统一在波形动画区域展示——
+  // 绿色=录音中 · 蓝色=加载中 · 红色=错误。错误信息显示在 .voice-label 文本上。
   listen(EVENTS.VOICE_ERROR, (event) => {
     const { message, target } = event.payload ?? {};
     if (target !== "g1" || !message) return;
@@ -199,17 +202,26 @@ export function init() {
     // 添加 voice-error 标记——隐藏 chord 提示，避免错误文案与 chord 键帽重叠
     document.body.classList.add("voice-error");
     ghost.unfreeze(); // 确保解冻（错误可能发生在录音中）
+    // 在语音指示器上显示错误信息 + 红色波形
     if (voiceIndicator) {
-      voiceIndicator.classList.add("hidden");
+      voiceIndicator.classList.remove("hidden");
+      const label = voiceIndicator.querySelector(".voice-label");
+      if (label) label.textContent = message;
+      const wave = voiceIndicator.querySelector(".voice-wave");
+      if (wave) {
+        wave.classList.remove("voice-loading"); // 清除可能残留的加载态
+        wave.classList.add("voice-error");
+      }
     }
-    // 在搜索框中显示错误提示，用户输入时自动清除
-    queryEl.value = "";
-    queryEl.placeholder = message;
-    queryEl.dispatchEvent(new Event("input", { bubbles: true }));
-    // 3s 后恢复原 placeholder + 移除 voice-error 标记
+    // 3s 后隐藏指示器 + 恢复默认文案 + 移除 voice-error 标记
     setTimeout(() => {
-      queryEl.placeholder = "";
       document.body.classList.remove("voice-error");
+      if (voiceIndicator) {
+        voiceIndicator.classList.add("hidden");
+        voiceIndicator.querySelector(".voice-wave")?.classList.remove("voice-error");
+        const label = voiceIndicator.querySelector(".voice-label");
+        if (label) label.textContent = t("voice.indicator.recording");
+      }
     }, 3000);
   });
 

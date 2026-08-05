@@ -26,6 +26,14 @@
   background: var(--accent, #89b4fa);
 }
 
+/* 错误态（STT 未配置 / 服务未启动等）：波形转红色，与加载态蓝色区分。
+   voice-error 事件加 .voice-error，voice-recording-start / end 移除。
+   设计铁则：所有语音状态统一在波形动画区域展示——
+   绿色=录音中 · 蓝色=加载中 · 红色=错误 */
+.voice-wave.voice-error .vw-bar {
+  background: var(--red, #f38ba8);
+}
+
 @keyframes vw-breathe {
   0%, 100% { height: 4px; opacity: 0.6; }
   50% { height: 8px; opacity: 1; }

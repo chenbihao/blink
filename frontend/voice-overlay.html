@@ -113,7 +113,7 @@
         textEl.textContent = t("voice.overlay.recording");
         isDefaultText = true;
         bars.forEach((bar) => (bar.style.height = "4px"));
-        waveEl.classList.remove("voice-loading");
+        waveEl.classList.remove("voice-loading", "voice-error");
         autoResize();
       });
 
@@ -123,8 +123,8 @@
         if (target !== "g2") return;
         textEl.textContent = t("voice.overlay.recording");
         isDefaultText = true;
-        // 录音开始：波形切回绿色（移除加载态蓝色）
-        waveEl.classList.remove("voice-loading");
+        // 录音开始：波形切回绿色（移除加载态蓝色 + 错误态红色）
+        waveEl.classList.remove("voice-loading", "voice-error");
         autoResize();
       });
 
@@ -134,17 +134,21 @@
         if (target !== "g2" || !message) return;
         textEl.textContent = message;
         isDefaultText = false;
-        // 模型加载中：波形转蓝色（录音开始后切回绿色）
+        // 模型加载中：波形转蓝色（清除可能残留的错误态红色）
+        waveEl.classList.remove("voice-error");
         waveEl.classList.add("voice-loading");
         autoResize();
       });
 
-      // 语音错误提示（服务未启动等）
+      // 语音错误提示（STT 未配置 / 服务未启动等）
+      // 波形转红色，与加载态蓝色区分。错误信息显示在文本区域。
       listen(EVENTS.VOICE_ERROR, (event) => {
         const { message, target } = event.payload ?? {};
         if (target !== "g2" || !message) return;
         textEl.textContent = message;
         isDefaultText = false;
+        waveEl.classList.remove("voice-loading"); // 清除可能残留的加载态
+        waveEl.classList.add("voice-error");
         autoResize();
       });
     </script>

@@ -1339,15 +1339,24 @@ html, body {
 }
 
 /* ── 窗口吸附虚线框 ─────────────────────────
-   只显示蓝色虚线边框，无背景填充。 */
+   只显示蓝色虚线边框，无背景填充。
+   0.15.x：加粗边框 + 外发光增强存在感；
+   窗口间切换时 left/top/width/height 过渡丝滑跟随。 */
 .window-hint {
   position: fixed;
   z-index: calc(var(--z-dropdown, 100) + 3);
-  display: none;
-  border: 2px dashed rgba(74, 158, 255, 0.8);
-  border-radius: 2px;
+  opacity: 0;
+  visibility: hidden;
+  border: 3px dashed rgba(74, 158, 255, 0.9);
+  border-radius: 3px;
   pointer-events: none;
   box-sizing: border-box;
+  box-shadow: 0 0 0 1px rgba(74, 158, 255, 0.12), 0 0 14px rgba(74, 158, 255, 0.3);
+  transition: left 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+              top 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+              width 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+              height 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+              opacity 0.1s ease-out;
 }
 
 /* ── 0.15.11：二级面板（水印/文字配置）───────────────

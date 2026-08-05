@@ -15,7 +15,8 @@
 //! - `SetForegroundWindow` 合成的 Alt keyup 会**持续**污染 `GetAsyncKeyState`——用户手指
 //!   还按着，内核里已经记为松开，直到用户真松开+再按才恢复。这类污染时长跨越秒级，
 //!   arm 边界瞬时判定的"漏一次"容忍不了。
-//! - LL hook 是唯一能看到 `LLKHF_INJECTED` flag 的层，flag=1 的合成事件直接不参与逻辑态。
+//! - LL hook 是唯一能看到 `LLKHF_INJECTED` flag 的层。0.14.x 起，该 flag 用作 one-shot
+//!   synth-keyup flag 的消费限定（合成 keyup 必带此 flag），而非全量过滤 Alt 事件。
 //!   `is_alt_down()` / chord 独占吞键 / 语音录音吞 Alt+Space 都读 `ALT_LOGICALLY_HELD`，
 //!   免疫合成事件。
 //! - 铁则仍在——只是明确划分场景：**边界现查、跨时长累积**。
@@ -60,6 +61,14 @@ pub fn set_voice_recording(active: bool) {
 ///   合成的 keyup 可能以 VK_MENU 发出（系统不分左右），旧代码只检查 VK_LMENU/VK_RMENU
 ///   导致合成 keyup 跳过维护块 → one-shot flag 未被消费 → 下一个真实 keyup 被误吞 →
 ///   ALT_LOGICALLY_HELD 卡在 true → chord 模式不退出。
+/// - 0.14.x：one-shot flag 消费条件加入 `LLKHF_INJECTED` 限定。原实现无条件消费
+///   200ms 窗口内的首个 Alt keyup，但快速 tap（Alt+Space 瞬按瞬松）时真实 keyup
+///   可能在合成 keyup 之前到达（或 SetForegroundWindow 未合成 keyup），导致真实
+///   keyup 被误吞、ALT_LOGICALLY_HELD 卡 true → chord 模式不退出。改为：仅在 keyup
+///   带 `LLKHF_INJECTED` 时消费 flag（合成 keyup 必带此 flag），真实硬件 keyup 即使
+///   落在窗口内也正常处理。远程控制软件注入的 keyup 也带 `LLKHF_INJECTED`，但
+///   合成 keyup 总是先到（SetForegroundWindow 在 Tap 处理时同步调用），flag 被合成
+///   keyup 消费后真实 keyup 不受影响——与改前行为一致，无回归。
 ///
 /// **例外声明（与顶部"不做累积镜像"铁则的关系）**：
 /// - 铁则针对**组合键 arm/keyup 边界一次性判定**——那种场景瞬时读物理态最稳，累积镜像会被
@@ -79,10 +88,11 @@ static ALT_LOGICALLY_HELD: AtomicBool = AtomicBool::new(false);
 ///   Alt 已松开）。
 /// - 200ms 时间窗口是兜底：若 `SetForegroundWindow` 未合成 keyup（如窗口已是
 ///   前台），flag 会在 200ms 后自然过期，不会误跳后续真实 keyup。
-/// - **本地 vs RDP**：本地场景下合成 keyup 带 `LLKHF_INJECTED`，被 `should_track`
-///   过滤先行拦截，flag 不会被消费——但 keyup 时无条件 `swap(false)` 清除，
-///   防止残留。RDP 场景下合成 keyup 也带 `LLKHF_INJECTED` 但 `should_track=true`，
-///   flag 被消费并跳过 keyup。
+/// - **消费条件**（0.14.x）：仅在 Alt keyup **同时满足** 200ms 窗口 +
+///   `LLKHF_INJECTED` flag 时才消费此 flag 并跳过 keyup。SetForegroundWindow
+///   合成的 keyup 始终带 `LLKHF_INJECTED`（系统注入），真实硬件 keyup 不带。
+///   这修复了快速 tap 时真实 Alt keyup 被误吞导致 chord 模式卡住的 bug。
+/// - 超出 200ms 窗口或新 Alt keydown 时清除 flag（防残留）。
 static EXPECT_SYNTH_KEYUP_AT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 // ── 修饰键物理态 bitmask ────────────────────────────────────────────────────────
@@ -451,33 +461,48 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
 
         // ── Alt 逻辑 hold 态维护（早于任何短路，跨所有分支生效） ──────────────────
         //
-        // **设计**（0.11.11）：不再使用 `LLKHF_INJECTED` 过滤 Alt 事件。
-        // 该 flag 无法区分“远程控制软件注入的真实按键”与“SetForegroundWindow
-        // 合成的 Alt keyup”——RustDesk/TeamViewer 等第三方远程控制工具通过
-        // SendInput 注入键盘事件，事件携带 LLKHF_INJECTED，但
-        // `GetSystemMetrics(SM_REMOTESESSION)` 对它们返回 false（只检测 Windows
-        // 原生 RDP），导致 Alt 事件被全量过滤，ALT_LOGICALLY_HELD 永不为 true。
+        // **设计**（0.11.11 + 0.14.x）：接受所有 Alt keydown/keyup 事件更新
+        // ALT_LOGICALLY_HELD，仅用 `EXPECT_SYNTH_KEYUP_AT` one-shot flag 过滤
+        // 我们自己 SetForegroundWindow 合成的 keyup。
         //
-        // 改为：接受所有 Alt keydown/keyup 事件更新 ALT_LOGICALLY_HELD，仅用
-        // `EXPECT_SYNTH_KEYUP_AT` one-shot flag 过滤我们自己 SetForegroundWindow
-        // 合成的 keyup（这是原 LLKHF_INJECTED 过滤的真正目标）。
-        // **0.14 修复**：加入 VK_MENU（0x12，通用 Alt 键）。
-        // SetForegroundWindow 合成的 Alt keyup 可能以 VK_MENU 发出（系统不知道
-        // 用户按的是左还是右 Alt，用通用码）。旧代码只检查 VK_LMENU/VK_RMENU，
-        // 导致合成 keyup 跳过此块 → EXPECT_SYNTH_KEYUP_AT 标志未被消费 → 下一个
-        // 真实 Alt keyup 被误认为合成 keyup 而跳过 → ALT_LOGICALLY_HELD 卡在 true
-        // → 用户松开 Alt 后 chord 模式不退出。
+        // **0.14.x 关键修复**：one-shot flag 仅在 keyup 带 `LLKHF_INJECTED` 时消费。
+        // SetForegroundWindow 合成的 keyup 始终带 `LLKHF_INJECTED`（系统注入），
+        // 真实硬件 keyup 不带。原实现无条件消费窗口内首个 keyup，快速 tap 时
+        // 真实 keyup 可能在合成 keyup 之前到达（或 SetForegroundWindow 未合成），
+        // 导致真实 keyup 被误吞 → ALT_LOGICALLY_HELD 卡 true → chord 不退出。
+        //
+        // **0.14 VK_MENU 修复**：加入 VK_MENU（0x12，通用 Alt 键）。合成 keyup
+        // 可能以 VK_MENU 发出（系统不分左右），旧代码只检查 VK_LMENU/VK_RMENU
+        // 导致合成 keyup 跳过此块 → flag 未被消费 → 下一个真实 keyup 被误吞。
         if vk == VK_LMENU.0 as u32 || vk == VK_RMENU.0 as u32 || vk == VK_MENU.0 as u32 {
-            // one-shot flag：Alt keyup 时无条件 swap 清除
+            // one-shot flag：仅当 keyup 带 LLKHF_INJECTED 且在 200ms 窗口内时消费
             let was_expected = if is_up {
                 let expected_at = EXPECT_SYNTH_KEYUP_AT.load(Ordering::SeqCst);
                 if expected_at > 0 {
-                    EXPECT_SYNTH_KEYUP_AT.store(0, Ordering::SeqCst);
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis() as i64)
                         .unwrap_or(0);
-                    now - expected_at < 200
+                    let within_window = now - expected_at < 200;
+                    if within_window && kb.flags.contains(LLKHF_INJECTED) {
+                        // 合成 keyup（SetForegroundWindow 注入）——消费 flag，跳过
+                        EXPECT_SYNTH_KEYUP_AT.store(0, Ordering::SeqCst);
+                        tracing::trace!("alt keyup: synthesized (LLKHF_INJECTED), skipping");
+                        true
+                    } else {
+                        // 真实 keyup（无 LLKHF_INJECTED）或窗口已过期——不跳过
+                        if within_window {
+                            // 真实 keyup 落在窗口内但非注入——这正是修复的场景
+                            tracing::debug!(
+                                "alt keyup: real keyup within synth-keyup window, processing normally (LLKHF_INJECTED absent)"
+                            );
+                        }
+                        // 超出窗口时清除过期 flag
+                        if !within_window {
+                            EXPECT_SYNTH_KEYUP_AT.store(0, Ordering::SeqCst);
+                        }
+                        false
+                    }
                 } else {
                     false
                 }
@@ -486,6 +511,8 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
             };
 
             if is_down {
+                // 新 Alt keydown：清除可能残留的 synth-keyup flag
+                EXPECT_SYNTH_KEYUP_AT.store(0, Ordering::SeqCst);
                 ALT_LOGICALLY_HELD.store(true, Ordering::SeqCst);
             } else if is_up && !was_expected {
                 // 真实 keyup——一侧松开时若另一侧仍按着，逻辑态保持 true。
@@ -517,13 +544,23 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
             return unsafe { CallNextHookEx(None, code, wparam, lparam) };
         }
 
-        // hold 录音中吞掉 Alt+Space 的 keydown：防止 Windows 反复弹出系统菜单（"噔噔噔"声）。
-        // 仅在 hold_fired=true（录音已启动）时吞 keydown，keyup 不吞（否则 HoldRelease 收不到）。
+        // hold 期间吞掉 Alt+Space 的 keydown：防止 Windows 反复弹出系统菜单（"噔噔噔"声）。
+        // 仅吞 keydown，keyup 不吞（否则 HoldRelease 收不到）。
+        //
+        // **吞键条件**：`hold_fired || VOICE_RECORDING`
+        // - `hold_fired`：从 hold timer 触发到 keyup 期间一直为 true，覆盖两个时序间隙：
+        //   1. Hold 事件发出 → 主线程 `start_recording()` 设置 VOICE_RECORDING 之间的间隙
+        //   2. **错误场景**（STT 未配置 / 服务未就绪）：`begin_recording` 返回 false →
+        //      guard 析构清除 VOICE_RECORDING，但 `emit_voice_error` 已显示 overlay，
+        //      用户仍按住 Alt+Space → 需要 `hold_fired` 兜底吞键直到 keyup
+        // - `VOICE_RECORDING`：录音真正启动后的持续期（覆盖 keyup → HoldRelease →
+        //   stop_recording 之间的间隙，此阶段 hold_fired 已被 keyup 清零）
         //
         // Alt 判定走 `ALT_LOGICALLY_HELD` 而非 GetAsyncKeyState——录音期间焦点可能被
         // SetForegroundWindow 移动过，物理态被合成 keyup 污染，若读现查会漏吞 Space。
+        let hold_fired = STATE.with(|cell| cell.borrow().hold_fired);
         if is_down
-            && VOICE_RECORDING.load(Ordering::SeqCst)
+            && (hold_fired || VOICE_RECORDING.load(Ordering::SeqCst))
             && (vk == VK_SPACE.0 as u32
                 || vk == VK_MENU.0 as u32
                 || vk == VK_LMENU.0 as u32

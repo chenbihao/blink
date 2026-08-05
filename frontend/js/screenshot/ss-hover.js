@@ -27,6 +27,12 @@ let hoveredIndex = -1;
 /** #window-hint DOM 元素（只显示虚线边框，无蓝色背景填充） */
 let hintEl = null;
 
+/** hintEl 是否当前可见（用于区分首次出现 vs 窗口间切换） */
+let hintVisible = false;
+
+/** hideWindowHint 的延迟计时器（等 opacity 过渡结束再 visibility:hidden） */
+let hintHideTimer = 0;
+
 /**
  * 加载可吸附窗口列表（overlay 加载时调一次）。
  * 物理坐标 → CSS 坐标转换在此一次完成。
@@ -83,12 +89,23 @@ export function normalizePickableWindows(list, meta, dpr, viewportWidth, viewpor
     }).filter((w) => w.w > 0 && w.h > 0);
 }
 
-/** 释放窗口列表 + 隐藏提示框（overlay 关闭时调） */
+/** 释放窗口列表 + 立即隐藏提示框（overlay 关闭时调） */
 export function clearPickableWindows() {
   pickableWindows = [];
   hoveredIndex = -1;
   ss.windowListGen++;
-  hideWindowHint();
+  // 立即清除，不走淡出过渡（overlay 正在关闭）
+  if (hintHideTimer) {
+    clearTimeout(hintHideTimer);
+    hintHideTimer = 0;
+  }
+  hintVisible = false;
+  if (hintEl) {
+    hintEl.style.transition = 'none';
+    hintEl.style.opacity = '0';
+    hintEl.style.visibility = 'hidden';
+    hintEl.style.transition = '';
+  }
 }
 
 /**
@@ -180,7 +197,9 @@ export function findWindowForRect(rect) {
   } : null;
 }
 
-/** 显示窗口虚线框（仅边框，无蓝色背景填充） */
+/** 显示窗口虚线框（仅边框，无蓝色背景填充）
+ *  0.15.x：窗口间切换时 CSS transition 丝滑跟随；
+ *  首次出现（从隐藏→可见）禁用位移过渡，仅淡入，避免从 (0,0) 滑入。 */
 function showWindowHint(w) {
   if (!hintEl) {
     hintEl = document.createElement('div');
@@ -188,19 +207,51 @@ function showWindowHint(w) {
     hintEl.className = 'window-hint';
     document.body.appendChild(hintEl);
   }
+
+  // 取消可能挂起的隐藏计时器
+  if (hintHideTimer) {
+    clearTimeout(hintHideTimer);
+    hintHideTimer = 0;
+  }
+
+  const wasHidden = !hintVisible;
+
+  if (wasHidden) {
+    // 首次出现：禁用所有过渡，瞬时定位
+    hintEl.style.transition = 'none';
+  }
+
   hintEl.style.left = w.x + 'px';
   hintEl.style.top = w.y + 'px';
   hintEl.style.width = w.w + 'px';
   hintEl.style.height = w.h + 'px';
-  hintEl.style.display = 'block';
+  hintEl.style.visibility = 'visible';
+  hintEl.style.opacity = '1';
+
+  if (wasHidden) {
+    // 强制 reflow 提交无过渡的位置，然后恢复 CSS 过渡供后续切换使用
+    hintEl.offsetHeight; // reflow
+    hintEl.style.transition = '';
+    hintVisible = true;
+  }
+
   const label = w.processName ? `${w.processName}` : '';
   const title = w.title ? (label ? `${label} — ${w.title}` : w.title) : label;
   hintEl.title = title;
 }
 
-/** 隐藏窗口虚线框 */
+/** 隐藏窗口虚线框（淡出） */
 function hideWindowHint() {
-  if (hintEl) {
-    hintEl.style.display = 'none';
+  if (hintEl && hintVisible) {
+    hintEl.style.opacity = '0';
+    hintVisible = false;
+    // 等淡出过渡结束后再 visibility:hidden，避免残留可交互区域
+    if (hintHideTimer) clearTimeout(hintHideTimer);
+    hintHideTimer = setTimeout(() => {
+      hintHideTimer = 0;
+      if (hintEl && !hintVisible) {
+        hintEl.style.visibility = 'hidden';
+      }
+    }, 120);
   }
 }

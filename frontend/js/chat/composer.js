@@ -190,8 +190,8 @@ export function showVoiceIndicator() {
   voiceBaseText = textarea ? textarea.value : "";
   if (voiceIndicator) {
     voiceIndicator.classList.remove("hidden");
-    // 录音开始：波形切回绿色（移除加载态蓝色）
-    voiceIndicator.querySelector(".voice-wave")?.classList.remove("voice-loading");
+    // 录音开始：波形切回绿色（移除加载态蓝色 + 错误态红色）
+    voiceIndicator.querySelector(".voice-wave")?.classList.remove("voice-loading", "voice-error");
   }
   if (sendBtn) sendBtn.disabled = true;
   // 0.12.4 §6.6：录音期间 textarea 设为 readOnly，防止 Space 穿透
@@ -205,8 +205,8 @@ export function hideVoiceIndicator() {
   voiceRecording = false;
   if (voiceIndicator) {
     voiceIndicator.classList.add("hidden");
-    // 恢复波形条高度 + 清除加载态
-    voiceIndicator.querySelector(".voice-wave")?.classList.remove("voice-loading");
+    // 恢复波形条高度 + 清除加载态/错误态
+    voiceIndicator.querySelector(".voice-wave")?.classList.remove("voice-loading", "voice-error");
     vwBars.forEach((bar) => (bar.style.height = "4px"));
     const label = voiceIndicator.querySelector(".voice-label");
     if (label) label.textContent = "语音输入中";
@@ -230,8 +230,26 @@ export function showVoiceStatus(message) {
   voiceIndicator.classList.remove("hidden");
   const label = voiceIndicator.querySelector(".voice-label");
   if (label) label.textContent = message;
-  // 模型加载中：波形转蓝色
+  // 模型加载中：波形转蓝色（清除可能残留的错误态红色）
+  voiceIndicator.querySelector(".voice-wave")?.classList.remove("voice-error");
   voiceIndicator.querySelector(".voice-wave")?.classList.add("voice-loading");
+}
+
+/**
+ * 语音错误提示（STT 未配置 / 服务未启动等）。
+ * 对齐主窗口 lifecycle.js 的 voice-error 处理。
+ * 设计铁则：所有语音状态统一在波形动画区域展示——
+ * 绿色=录音中 · 蓝色=加载中 · 红色=错误。
+ * @param {string} message
+ */
+export function showVoiceError(message) {
+  if (!voiceIndicator) return;
+  voiceIndicator.classList.remove("hidden");
+  const label = voiceIndicator.querySelector(".voice-label");
+  if (label) label.textContent = message;
+  // 错误：波形转红色（清除可能残留的加载态蓝色）
+  voiceIndicator.querySelector(".voice-wave")?.classList.remove("voice-loading");
+  voiceIndicator.querySelector(".voice-wave")?.classList.add("voice-error");
 }
 
 /**
