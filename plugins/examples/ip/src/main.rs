@@ -167,32 +167,50 @@ fn main() {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
 
+                let geo_provider = settings
+                    .as_ref()
+                    .and_then(|s| s.get("geo_provider"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("ip-api.com");
+
                 // 本地 IP 同步获取（UDP connect，无 IO 等待）
                 let local_ip = get_local_ip();
                 let local_ipv6 = if use_ipv6 { get_local_ip_v6() } else { None };
 
-                // 公网 IP 通过 core HTTP 代理获取
-                let http_id = format!("ip_{}", chrono::Local::now().timestamp_millis());
-                pending.lock().unwrap().insert(
-                    http_id.clone(),
-                    PendingQuery {
-                        query_id: id,
-                        use_ipv6,
-                        local_ip,
-                        local_ipv6,
-                        is_tool_call: false,
-                    },
-                );
+                if geo_provider == "none" {
+                    // 0.17.10a: geo_provider="none" → 不查公网，直接返回本地 IP
+                    let (items, raw_ips) = build_local_ip_items(local_ip, local_ipv6);
+                    let resp = PluginToCore::Response(PluginResponse {
+                        id,
+                        items,
+                    });
+                    send_message(&mut stdout, &resp);
+                    // raw_ips 在 query 路径不用（走旧 PluginItem 协议）
+                    let _ = raw_ips;
+                } else {
+                    // 公网 IP 通过 core HTTP 代理获取
+                    let http_id = format!("ip_{}", chrono::Local::now().timestamp_millis());
+                    pending.lock().unwrap().insert(
+                        http_id.clone(),
+                        PendingQuery {
+                            query_id: id,
+                            use_ipv6,
+                            local_ip,
+                            local_ipv6,
+                            is_tool_call: false,
+                        },
+                    );
 
-                // 向 core 发起 HTTP 请求
-                let http_req = PluginToCore::HttpRequest(HttpRequest {
-                    id: http_id,
-                    method: "GET".into(),
-                    url: "http://ip-api.com/json/?fields=status,query,city,country".into(),
-                    body: None,
-                    timeout_ms: 10000,
-                });
-                send_message(&mut stdout, &http_req);
+                    // 向 core 发起 HTTP 请求
+                    let http_req = PluginToCore::HttpRequest(HttpRequest {
+                        id: http_id,
+                        method: "GET".into(),
+                        url: "http://ip-api.com/json/?fields=status,query,city,country".into(),
+                        body: None,
+                        timeout_ms: 10000,
+                    });
+                    send_message(&mut stdout, &http_req);
+                }
             }
             CoreToPlugin::HttpResponse {
                 id,
@@ -288,35 +306,86 @@ fn main() {
                     .or_else(|| arguments.get("include_ipv6").and_then(|v| v.as_bool()))
                     .unwrap_or(false);
 
+                let geo_provider = settings
+                    .as_ref()
+                    .and_then(|s| s.get("geo_provider"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("ip-api.com");
+
                 let local_ip = get_local_ip();
                 let local_ipv6 = if use_ipv6 { get_local_ip_v6() } else { None };
 
-                let http_id = format!("tc_{}", chrono::Local::now().timestamp_millis());
-                pending.lock().unwrap().insert(
-                    http_id.clone(),
-                    PendingQuery {
-                        query_id: id,
-                        use_ipv6,
-                        local_ip,
-                        local_ipv6,
-                        is_tool_call: true,
-                    },
-                );
+                if geo_provider == "none" {
+                    // 0.17.10a: geo_provider="none" → 不查公网，直接返回本地 IP
+                    let (_items, raw_ips) = build_local_ip_items(local_ip, local_ipv6);
+                    let resp = PluginToCore::RawResult(RawToolResult {
+                        id,
+                        data: serde_json::Value::Array(raw_ips),
+                        error: None,
+                    });
+                    send_message(&mut stdout, &resp);
+                } else {
+                    let http_id = format!("tc_{}", chrono::Local::now().timestamp_millis());
+                    pending.lock().unwrap().insert(
+                        http_id.clone(),
+                        PendingQuery {
+                            query_id: id,
+                            use_ipv6,
+                            local_ip,
+                            local_ipv6,
+                            is_tool_call: true,
+                        },
+                    );
 
-                let http_req = PluginToCore::HttpRequest(HttpRequest {
-                    id: http_id,
-                    method: "GET".into(),
-                    url: "http://ip-api.com/json/?fields=status,query,city,country".into(),
-                    body: None,
-                    timeout_ms: 10000,
-                });
-                send_message(&mut stdout, &http_req);
+                    let http_req = PluginToCore::HttpRequest(HttpRequest {
+                        id: http_id,
+                        method: "GET".into(),
+                        url: "http://ip-api.com/json/?fields=status,query,city,country".into(),
+                        body: None,
+                        timeout_ms: 10000,
+                    });
+                    send_message(&mut stdout, &http_req);
+                }
             }
             CoreToPlugin::Cancel { .. } => {
                 // 不支持取消，忽略
             }
         }
     }
+}
+
+/// 构建本地 IP 的 items 和 raw_ips（不查公网时用）。
+/// 0.17.10a: geo_provider="none" 时复用此函数，跳过 ip-api HTTP 请求。
+fn build_local_ip_items(
+    local_ip: Option<String>,
+    local_ipv6: Option<String>,
+) -> (Vec<PluginItem>, Vec<serde_json::Value>) {
+    let mut items = Vec::new();
+    let mut raw_ips = Vec::new();
+
+    // 本地 IPv6
+    if let Some(ip) = local_ipv6 {
+        items.push(PluginItem {
+            title: format!("本地 IPv6: {ip}"),
+            subtitle: Some("按 Enter 复制".to_string()),
+            score: 0.8,
+            action: PluginAction::Copy { text: ip.clone() },
+        });
+        raw_ips.push(serde_json::json!({ "ip": ip, "type": "本地 IPv6" }));
+    }
+
+    // 本地 IPv4
+    if let Some(ip) = local_ip {
+        items.push(PluginItem {
+            title: format!("本地 IP: {ip}"),
+            subtitle: Some("按 Enter 复制".to_string()),
+            score: 1.0,
+            action: PluginAction::Copy { text: ip.clone() },
+        });
+        raw_ips.push(serde_json::json!({ "ip": ip, "type": "本地 IP" }));
+    }
+
+    (items, raw_ips)
 }
 
 fn send_message<W: Write, S: Serialize>(writer: &mut W, msg: &S) {

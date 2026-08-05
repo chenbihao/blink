@@ -52,6 +52,7 @@
 | **0.15** | [0.15-screenshot-redesign.md](./phases/0.15-screenshot-redesign.md) | 截图体验重做（标注工具 + 长截图闭环采集 + 窗口吸附与像素检查） | ✅ |
 | **0.16** | [0.16-clipboard-polish.md](./phases/0.16-clipboard-polish.md) | 感知交互清爽化 + chord requires_input 架构 + 剪贴板增强 + actions 数组 + 共享 Markdown + 通用编辑器基础 + 图片/pin + 杂项打磨 + 内容流转 + chord-E/chord-S + 持久化桌面便签 + 管理与恢复 | ✅ |
 | **0.17** | [0.17-enhancement-polish.md](./phases/0.17-enhancement-polish.md) | 增强与打磨（存量修复 / 窗口预热 / 托盘增强 / 搜索增强 / OCR 优化 / Cherry Markdown / 主窗口 AI 统一 / 便签深化 / Live Preview / AI 权限记忆 / 剪贴板来源增强） | ✅ |
+| **0.17.10** | [0.17.10-capability-projection-refactor.md](./phases/0.17.10-capability-projection-refactor.md) | Capability 投影层收敛重构（projection 移出 invoke 回归展示出口 / ip + weather 插件对齐 / weather 多天预报） | 📋 规划中 |
 | **0.20** | [0.20-ai-vector-moat.md](./phases/0.20-ai-vector-moat.md) | 能力扩展向量版(zvec + 记忆向量召回 + RAG + AI 生成 Skill) | 📋 规划中 |
 
 > **非版本档案**：[roadmap.md](./roadmap.md)（0.21+ 与其它未立项候选方向调研）；ADR-001（Agent 后端策略）已并入 [spec-architecture §A10](./specs/spec-architecture.md)。

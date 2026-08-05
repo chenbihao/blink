@@ -189,7 +189,7 @@ pub async fn run_builtin_action(
         };
         match cap.invoke(args, &ctx).await {
             Ok(result) => {
-                tracing::info!(%id, summary = %result.to_display_text(), "run_builtin_action: Capability 执行成功");
+                tracing::info!(%id, summary = %result.to_display_text(cap.projection().as_ref()), "run_builtin_action: Capability 执行成功");
             }
             Err(e) => {
                 tracing::error!(%id, error = %e, "run_builtin_action: Capability 执行失败");

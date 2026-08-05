@@ -15,6 +15,8 @@
 use serde::Serialize;
 use serde_json::Value;
 
+use super::projection::{ProjectionRule, jsonpath_query, value_to_string};
+
 // ── rig 投影层（0.12.0 统一投影入口，0.14 适配新结构）──────────────────────
 //
 // **0.12.0 投影统一**：`to_rig_tool_result()` 是 CapabilityResult → rig ToolResultContent
@@ -70,16 +72,22 @@ impl CapabilityResult {
         }
     }
 
-    /// 投影成人类可读文本——CLI / 审计日志共用（0.14.1 收敛）。
+    /// 投影成人类可读文本——CLI / 审计日志共用（0.14.1 收敛，0.17.10 加 projection 参数）。
     ///
-    /// 与 `to_rig_tool_result()` 的区别：此方法读 `data` + `desc`（给人看），
-    /// 后者只读 `data`（给 AI 看，不含 desc）。
+    /// 与 `to_rig_tool_result()` 的区别：此方法读 `data` + projection（给人看），
+    /// 后者只读 `data`（给 AI 看，不含 projection）。
+    ///
+    /// **0.17.10**：projection 参数从 Capability 的 `projection()` 方法获取。
+    /// - `Items` 形态：用 `projection.item_pointer` 取主标题、`item_desc_pointer`
+    ///   取副标题。pointer 缺失时用 `derive_title(data)` 兜底。
+    /// - `Text` 形态：直接用 `content`（不做 pointer 投影）。
+    /// - 其他形态不变。
     ///
     /// - `Text` → content
-    /// - `Items` → 编号列表（`derive_title` 派生主标题 + desc 副标题）
+    /// - `Items` → 编号列表（projection 投影主标题 + 副标题）
     /// - `Blob` → `blob_summary()`
     /// - `Done` → `✓ {summary}`
-    pub fn to_display_text(&self) -> String {
+    pub fn to_display_text(&self, projection: Option<&ProjectionRule>) -> String {
         match self {
             CapabilityResult::Text { content, .. } => content.clone(),
             CapabilityResult::Items { items } => {
@@ -90,8 +98,18 @@ impl CapabilityResult {
                         .iter()
                         .enumerate()
                         .map(|(i, item)| {
-                            let title = derive_title(&item.data);
-                            match &item.desc {
+                            // 展示投影：从完整 data 用 pointer 取主标题/副标题
+                            let title = projection
+                                .and_then(|r| r.item_pointer.as_deref())
+                                .and_then(|p| jsonpath_query(&item.data, p))
+                                .map(|v| value_to_string(&v))
+                                .unwrap_or_else(|| derive_title(&item.data));
+                            let desc = projection
+                                .and_then(|r| r.item_desc_pointer.as_deref())
+                                .and_then(|p| jsonpath_query(&item.data, p))
+                                .map(|v| value_to_string(&v))
+                                .or_else(|| item.desc.clone()); // builtin capability 手填的 desc 兜底
+                            match desc {
                                 Some(d) if !d.is_empty() => {
                                     format!("{}. {} — {}", i + 1, title, d)
                                 }
@@ -614,7 +632,7 @@ mod tests {
             content: "你好世界".into(),
             desc: None,
         };
-        assert_eq!(r.to_display_text(), "你好世界");
+        assert_eq!(r.to_display_text(None), "你好世界");
     }
 
     #[test]
@@ -622,7 +640,7 @@ mod tests {
         let r = CapabilityResult::Done {
             summary: "已写入剪贴板".into(),
         };
-        assert_eq!(r.to_display_text(), "✓ 已写入剪贴板");
+        assert_eq!(r.to_display_text(None), "✓ 已写入剪贴板");
     }
 
     #[test]
@@ -632,13 +650,14 @@ mod tests {
             bytes: vec![0u8; 2048],
             desc: None,
         };
-        let text = r.to_display_text();
+        let text = r.to_display_text(None);
         assert!(text.contains("image/png"));
         assert!(text.contains("2.0 KB"));
     }
 
+    /// 0.17.10: Items + projection=None → derive_title 兜底 + item.desc 手填副标题。
     #[test]
-    fn display_text_items_numbered_list() {
+    fn display_text_items_numbered_list_no_projection() {
         let r = CapabilityResult::Items {
             items: vec![
                 ItemResult {
@@ -653,7 +672,8 @@ mod tests {
                 },
             ],
         };
-        let text = r.to_display_text();
+        let text = r.to_display_text(None);
+        // projection=None → derive_title 从 name 字段取主标题
         assert!(text.contains("1. file1.txt — 文档"));
         assert!(text.contains("2. file2.txt"));
     }
@@ -661,6 +681,62 @@ mod tests {
     #[test]
     fn display_text_empty_items_returns_placeholder() {
         let r = CapabilityResult::Items { items: vec![] };
-        assert_eq!(r.to_display_text(), "（无结果）");
+        assert_eq!(r.to_display_text(None), "（无结果）");
+    }
+
+    // ── to_display_text + projection 测试（0.17.10）──────────────────────
+
+    /// 0.17.10: Items + projection（item_pointer="$.ip", item_desc_pointer="$.type"）→
+    /// 主标题=ip，副标题=type。
+    #[test]
+    fn display_text_items_with_projection() {
+        use crate::domain::capability::{ActionDef, ActionKindDef, ProjectionRule, ResultShape};
+
+        let r = CapabilityResult::Items {
+            items: vec![
+                ItemResult {
+                    data: json!({ "ip": "192.168.1.1", "type": "本地" }),
+                    desc: None, // normalize 后 desc=None，由 projection 动态投影
+                    actions: vec![],
+                },
+                ItemResult {
+                    data: json!({ "ip": "8.8.8.8", "type": "公网" }),
+                    desc: None,
+                    actions: vec![],
+                },
+            ],
+        };
+        let projection = ProjectionRule {
+            result_shape: Some(ResultShape::Items),
+            items_pointer: Some("$".into()),
+            item_pointer: Some("$.ip".into()),
+            item_desc_pointer: Some("$.type".into()),
+            item_actions: vec![ActionDef {
+                kind: ActionKindDef::Copy,
+                pointer: None,
+            }],
+            ..Default::default()
+        };
+        let text = r.to_display_text(Some(&projection));
+        // projection 取 ip 作主标题、type 作副标题
+        assert!(text.contains("1. 192.168.1.1 — 本地"));
+        assert!(text.contains("2. 8.8.8.8 — 公网"));
+    }
+
+    /// 0.17.10: Items + projection=None → derive_title 兜底（从 name/title 字段取主标题）。
+    #[test]
+    fn display_text_items_no_projection_uses_derive_title() {
+        let r = CapabilityResult::Items {
+            items: vec![ItemResult {
+                data: json!({ "name": "report.pdf", "path": "C:\\docs\\report.pdf" }),
+                desc: None,
+                actions: vec![],
+            }],
+        };
+        let text = r.to_display_text(None);
+        // derive_title 从 name 字段取主标题
+        assert!(text.contains("1. report.pdf"));
+        // 无 desc → 不追加 “ —”
+        assert!(!text.contains("—"));
     }
 }

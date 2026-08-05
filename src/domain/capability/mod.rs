@@ -28,7 +28,7 @@ mod schema;
 
 pub use error::CapabilityError;
 #[allow(unused_imports)]
-pub use projection::{ActionDef, ActionKindDef, ProjectionRule, ResultShape, project};
+pub use projection::{ActionDef, ActionKindDef, ProjectionRule, ResultShape, normalize};
 pub use registry::CapabilityRegistry;
 pub use result::{CapabilityResult, ItemAction, ItemResult, rig_tool_result_to_text};
 pub use schema::CapabilitySchema;
@@ -93,6 +93,16 @@ pub trait Capability: Send + Sync {
         args: Value,
         ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError>;
+
+    /// 展示投影规则（manifest projection）。展示出口（`to_display_text`）用此规则
+    /// 从完整 data 挑选展示字段（主标题/副标题）。AI 出口不读此规则。
+    ///
+    /// default `None`——builtin capability（轨道 B）直接构造 ItemResult，
+    /// 不需要 manifest 投影。`PluginCapabilityAdapter` override 返回 manifest 的
+    /// `projection` 字段。
+    fn projection(&self) -> Option<ProjectionRule> {
+        None
+    }
 }
 
 // ── InvokeContext ────────────────────────────────────────────────────────────

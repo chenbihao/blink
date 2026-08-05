@@ -101,6 +101,10 @@ impl Capability for PluginCapabilityAdapter {
         self.danger
     }
 
+    fn projection(&self) -> Option<ProjectionRule> {
+        self.projection.clone()
+    }
+
     async fn invoke(
         &self,
         args: Value,
@@ -129,7 +133,8 @@ impl Capability for PluginCapabilityAdapter {
             });
         }
 
-        // 0.14.3: 轨道 A（纯 data + 投影引擎）——所有插件 tool 均配 projection
+        // 0.17.10: projection 规则用于展示出口（to_display_text），invoke 只做规范化（normalize）。
+        // normalize 不读 pointer / item_pointer / item_desc_pointer，data 保留完整原始值。
         let projection = self
             .projection
             .as_ref()
@@ -151,7 +156,7 @@ impl Capability for PluginCapabilityAdapter {
             "插件 tool-call 完成（轨道 A 纯数据）"
         );
 
-        Ok(crate::domain::capability::project(&raw.data, projection))
+        Ok(crate::domain::capability::normalize(&raw.data, projection))
     }
 }
 

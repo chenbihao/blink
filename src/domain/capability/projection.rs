@@ -5,12 +5,16 @@
 //! `CapabilityResult`（轨道 A）。
 //!
 //! **双轨制**（§3.2.3）：
-//! - 轨道 A（manifest 投影）：简单返回（translate / IP / weather）→ 只返回 data，
-//!   manifest 配 pointer/desc/actions
+//! - 轨道 A（manifest 规范化）：简单返回（translate / IP / weather）→ 只返回 data，
+//!   manifest 配 result_shape / items_pointer / item_actions
 //! - 轨道 B（直接构造）：复杂返回（search_files 需格式化等）→ 直接吐完整 CapabilityResult
 //!
 //! **0.14.0**：定义 `ProjectionRule` 结构 + JSONPath 取值工具函数 + 单测。
 //! **0.14.1**：实现 `project()` 投影引擎（四出口共用 canonical 投影）。
+//! **0.17.10**：projection 职责收敛——`project()` 替换为 `normalize()`，不再读
+//! pointer / item_pointer / item_desc_pointer（data 保留完整原始值）。展示字段
+//! 挑选移到展示出口（`to_display_text`）用 projection 规则动态完成。AI 出口
+//! 天然拿到完整 raw data。
 
 use serde::{Deserialize, Serialize};
 
@@ -21,10 +25,11 @@ use super::result::{CapabilityResult, ItemAction, ItemResult};
 /// 对应 manifest 的 `result_shape` / `pointer` / `desc` / `desc_pointer` /
 /// `items_pointer` / `item_pointer` / `item_desc_pointer` / `item_actions` 字段。
 ///
-/// **desc 三来源优先级**（§3.2.2）：
-/// 1. `desc_pointer` 指定 data 某字段 → 取值作为 desc（动态）
-/// 2. `desc` 静态字符串
-/// 3. 都没有 → None → 不展示 desc
+/// **0.17.10 职责收敛**：
+/// - `normalize()`（invoke 链路）只读 `result_shape` / `items_pointer` / `item_actions`，
+///   data 保留完整原始值，**不读** `pointer` / `item_pointer` / `item_desc_pointer`。
+/// - `to_display_text()`（展示出口）读 `item_pointer` / `item_desc_pointer` 做展示投影。
+/// - AI 出口（`to_rig_tool_result`）不读任何 pointer，直接拿完整 data。
 ///
 /// manifest **不做格式化**——需要 `format_size(bytes)` 这种时，由能力单元自己在
 /// data 里算好填进去（如 `size_display: "1.2 MB"`）。manifest 只负责"取哪个值"
@@ -32,13 +37,16 @@ use super::result::{CapabilityResult, ItemAction, ItemResult};
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ProjectionRule {
     /// 结果形态：text / items / blob / done。
-    /// 缺失时由投影引擎根据 data 类型推断（0.14.1 实现）。
+    /// 缺失时由规范化引擎根据 data 类型推断。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_shape: Option<ResultShape>,
 
-    // ── text / blob 形态的投影规则 ──────────────────────────────────────
+    // ── text / blob 形态的投影规则（0.17.10: 展示出口用，normalize 不读） ──
     /// 主值从 data 哪里取（JSONPath）。`"$"` = data 整体。
     /// 例：weather 插件 data={city,temp,...}，pointer="$.temp" → 取 temp 作为主值。
+    ///
+    /// **0.17.10**：normalize 不读此字段（content = value_to_string(data)）。
+    /// Text 形态不再支持 pointer 投影。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pointer: Option<String>,
     /// 静态 desc 字符串。例：翻译插件配 `desc: "译文"`。
@@ -55,10 +63,16 @@ pub struct ProjectionRule {
     pub items_pointer: Option<String>,
     /// 每项的主值从该项的哪个字段取（JSONPath，相对于单项）。
     /// 例：IP 插件每项={ip,type}，item_pointer="$.ip" → 主值=ip 字段值。
+    ///
+    /// **0.17.10**：normalize 不读此字段（data 保留完整元素对象）。
+    /// 展示出口 `to_display_text` 用此字段取主标题。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_pointer: Option<String>,
     /// 每项的 desc 从该项的哪个字段取（JSONPath，相对于单项）。
     /// 例：IP 插件 item_desc_pointer="$.type" → desc="本地"/"公网"。
+    ///
+    /// **0.17.10**：normalize 不读此字段（desc = None）。
+    /// 展示出口 `to_display_text` 用此字段取副标题。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_desc_pointer: Option<String>,
     /// 每项支持的动作列表。
@@ -137,7 +151,7 @@ pub fn jsonpath_query(data: &serde_json::Value, path: &str) -> Option<serde_json
 ///
 /// 例：`$[*]` 取数组所有元素，`$[*].ip` 取每项的 ip 字段。
 ///
-/// 当前投影引擎用 `jsonpath_query`（取首个匹配）处理 items_pointer，
+/// 当前规范化引擎用 `jsonpath_query`（取首个匹配）处理 items_pointer，
 /// 本函数保留供未来投影场景（如 `$[*]` 展平）和测试使用。
 #[allow(dead_code)]
 pub fn jsonpath_query_all(data: &serde_json::Value, path: &str) -> Vec<serde_json::Value> {
@@ -154,33 +168,82 @@ pub fn jsonpath_query_all(data: &serde_json::Value, path: &str) -> Vec<serde_jso
     }
 }
 
-// ── 投影引擎（0.14.1）──────────────────────────────────────────────────────
+// ── 规范化引擎（0.17.10 收敛）──────────────────────────────────────────────
 
-/// 用 `ProjectionRule` 把纯 `data` 投影成 `CapabilityResult`（轨道 A，0.14.1）。
+/// 把 raw data 规范化为 `CapabilityResult`（0.17.10 收敛）。
 ///
-/// 四个出口（AI / 主窗口 / CLI / MCP）共用这一个投影引擎（§5.1）。
-/// 插件只吐纯 `data`，投影规则在 manifest 的 `ProjectionRule` 里配置。
+/// 与旧 `project` 的关键区别：**不读** `pointer` / `item_pointer` / `item_desc_pointer`，
+/// data 保留完整原始值。展示字段挑选由展示出口（`to_display_text`）用 projection
+/// 规则动态完成。
 ///
-/// **错误处理**：本函数只处理成功路径（data 投影）。调用方应在调用前检查
-/// `PluginRawResult.error`，有错时走错误路径，不调本函数。
+/// **保留读**：`result_shape`（形态）、`items_pointer`（数组根）、`item_actions`（动作声明）。
 ///
-/// **shape 推断**：`result_shape` 缺失时根据 data 类型推断——
-/// Array → Items，String/Number → Text，其他 → Done。
-///
-/// **desc 三来源**（§3.2.2）：
-/// 1. `desc_pointer` 指定 data 某字段 → 取值作为 desc（动态）
-/// 2. `desc` 静态字符串
-/// 3. 都没有 → None → 不展示 desc
-pub fn project(data: &serde_json::Value, rule: &ProjectionRule) -> CapabilityResult {
+/// **规范化规则**：
+/// | result_shape | raw data 形态 | 规范化结果 |
+/// |---|---|---|
+/// | Items | 数组 | `Items{ items: [ItemResult{ data: 完整元素, desc: None }] }` |
+/// | Items | 非数组 | 兜底为单元素列表 |
+/// | Text | 任意 | `Text{ content: value_to_string(data), desc: None }` |
+/// | Done | 任意 | `Done{ summary: value_to_string(data) }` |
+/// | Blob | 任意 | `Done{ summary }` 兜底（插件通过 JSONL 不传二进制） |
+pub fn normalize(data: &serde_json::Value, rule: &ProjectionRule) -> CapabilityResult {
     let shape = rule.result_shape.unwrap_or_else(|| infer_shape(data));
 
     match shape {
-        ResultShape::Text => project_text(data, rule),
-        ResultShape::Items => project_items(data, rule),
-        ResultShape::Blob => project_blob(data, rule),
-        ResultShape::Done => project_done(data, rule),
+        ResultShape::Text => CapabilityResult::Text {
+            content: value_to_string(data),
+            desc: None,
+        },
+        ResultShape::Items => {
+            let array = rule
+                .items_pointer
+                .as_deref()
+                .and_then(|p| jsonpath_query(data, p))
+                .unwrap_or_else(|| data.clone());
+
+            let elements: Vec<serde_json::Value> = match &array {
+                serde_json::Value::Array(arr) => arr.clone(),
+                // 非数组 → 当作单元素列表兜底
+                other => vec![other.clone()],
+            };
+
+            let items: Vec<ItemResult> = elements
+                .iter()
+                .map(|elem| ItemResult {
+                    data: elem.clone(), // 完整元素，不挑字段
+                    desc: None,         // 展示出口动态投影
+                    actions: rule
+                        .item_actions
+                        .iter()
+                        .map(action_def_to_item_action)
+                        .collect(),
+                })
+                .collect();
+
+            CapabilityResult::Items { items }
+        }
+        ResultShape::Blob => {
+            // 插件通过 JSONL 不传二进制——Blob 结果走轨道 B（builtin 直接构造）。
+            // 如果插件配了 blob shape，把 data 当描述文本，返回 Done 兜底。
+            let summary = match data {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Null => "已完成".to_string(),
+                _ => data.to_string(),
+            };
+            CapabilityResult::Done { summary }
+        }
+        ResultShape::Done => {
+            let summary = match data {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Null => "已完成".to_string(),
+                _ => data.to_string(),
+            };
+            CapabilityResult::Done { summary }
+        }
     }
 }
+
+// ── 工具函数 ───────────────────────────────────────────────────────────────
 
 /// 从 data 类型推断 `ResultShape`（manifest 未配 `result_shape` 时的兜底）。
 fn infer_shape(data: &serde_json::Value) -> ResultShape {
@@ -191,119 +254,8 @@ fn infer_shape(data: &serde_json::Value) -> ResultShape {
     }
 }
 
-/// Text 形态投影。
-///
-/// - `pointer` 取主值（缺失则用 data 整体）
-/// - `desc` / `desc_pointer` 按 §3.2.2 优先级解析
-fn project_text(data: &serde_json::Value, rule: &ProjectionRule) -> CapabilityResult {
-    let content = rule
-        .pointer
-        .as_deref()
-        .and_then(|p| jsonpath_query(data, p))
-        .unwrap_or_else(|| data.clone());
-
-    let content_str = value_to_string(&content);
-    let desc = resolve_desc(data, rule);
-
-    CapabilityResult::Text {
-        content: content_str,
-        desc,
-    }
-}
-
-/// Items 形态投影。
-///
-/// - `items_pointer` 取数组（缺失则用 data 整体，要求是数组）
-/// - 每项：`item_pointer` 取主值 → `data`，`item_desc_pointer` 取 desc，
-///   `item_actions` 映射为 `Vec<ItemAction>`
-fn project_items(data: &serde_json::Value, rule: &ProjectionRule) -> CapabilityResult {
-    let array = rule
-        .items_pointer
-        .as_deref()
-        .and_then(|p| jsonpath_query(data, p))
-        .unwrap_or_else(|| data.clone());
-
-    let elements: Vec<serde_json::Value> = match &array {
-        serde_json::Value::Array(arr) => arr.clone(),
-        // 非数组 → 当作单元素列表兜底
-        other => vec![other.clone()],
-    };
-
-    let items: Vec<ItemResult> = elements
-        .iter()
-        .map(|elem| {
-            let item_data = rule
-                .item_pointer
-                .as_deref()
-                .and_then(|p| jsonpath_query(elem, p))
-                .unwrap_or_else(|| elem.clone());
-
-            let desc = rule
-                .item_desc_pointer
-                .as_deref()
-                .and_then(|p| jsonpath_query(elem, p))
-                .map(|v| value_to_string(&v));
-
-            let actions = rule
-                .item_actions
-                .iter()
-                .map(action_def_to_item_action)
-                .collect();
-
-            ItemResult {
-                data: item_data,
-                desc,
-                actions,
-            }
-        })
-        .collect();
-
-    CapabilityResult::Items { items }
-}
-
-/// Blob 形态投影。
-///
-/// 插件通过 JSONL 不传二进制——Blob 结果走轨道 B（builtin 直接构造
-/// `CapabilityResult::Blob`）。如果插件配了 blob shape，把 data 当描述文本，
-/// 返回 `Done` 兜底（避免构造空 bytes 的假 Blob）。
-fn project_blob(data: &serde_json::Value, rule: &ProjectionRule) -> CapabilityResult {
-    let desc = resolve_desc(data, rule);
-    let summary = match data {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Null => desc.unwrap_or_else(|| "已完成".into()),
-        _ => data.to_string(),
-    };
-    CapabilityResult::Done { summary }
-}
-
-/// Done 形态投影。
-///
-/// `summary` 从 data 取（字符串直接用，Null 用默认文案，其他 JSON 串兜底）。
-fn project_done(data: &serde_json::Value, _rule: &ProjectionRule) -> CapabilityResult {
-    let summary = match data {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Null => "已完成".to_string(),
-        _ => data.to_string(),
-    };
-    CapabilityResult::Done { summary }
-}
-
-/// desc 三来源优先级解析（§3.2.2）。
-///
-/// 1. `desc_pointer` → 从 data 动态取值
-/// 2. `desc` → 静态字符串
-/// 3. 都没有 → None
-fn resolve_desc(data: &serde_json::Value, rule: &ProjectionRule) -> Option<String> {
-    if let Some(path) = &rule.desc_pointer {
-        if let Some(val) = jsonpath_query(data, path) {
-            return Some(value_to_string(&val));
-        }
-    }
-    rule.desc.clone()
-}
-
 /// `serde_json::Value` → 可读字符串（String 原样，其他 `to_string`）。
-fn value_to_string(v: &serde_json::Value) -> String {
+pub(super) fn value_to_string(v: &serde_json::Value) -> String {
     match v {
         serde_json::Value::String(s) => s.clone(),
         _ => v.to_string(),
@@ -528,125 +480,68 @@ mod tests {
         assert_eq!(results[1], "公网");
     }
 
-    // ── project() 投影引擎测试（4 shape × 3 desc 来源）──────────────────
+    // ── normalize() 规范化引擎测试（0.17.10）─────────────────────────────
 
     // ── Text shape ──────────────────────────────────────────────────────
 
-    /// Text + desc=静态字符串。翻译插件场景：data="你好"，desc="译文"。
+    /// Text + 字符串 data → content = value_to_string(data)，desc = None。
+    /// 翻译插件场景：data="你好"，normalize 不挑字段。
     #[test]
-    fn project_text_with_static_desc() {
+    fn normalize_text_string_data() {
         let data = json!("你好");
         let rule = ProjectionRule {
             result_shape: Some(ResultShape::Text),
             pointer: Some("$".into()),
-            desc: Some("译文".into()),
             ..Default::default()
         };
-        let result = project(&data, &rule);
+        let result = normalize(&data, &rule);
         match result {
             CapabilityResult::Text { content, desc } => {
+                // normalize 不读 pointer，content = value_to_string("你好") = "你好"
                 assert_eq!(content, "你好");
-                assert_eq!(desc.as_deref(), Some("译文"));
-            }
-            _ => panic!("应是 Text"),
-        }
-    }
-
-    /// Text + desc_pointer=动态取值。天气插件场景：data={city,temp}，desc_pointer="$.city"。
-    #[test]
-    fn project_text_with_dynamic_desc() {
-        let data = json!({ "city": "北京", "temp": 25, "condition": "晴" });
-        let rule = ProjectionRule {
-            result_shape: Some(ResultShape::Text),
-            pointer: Some("$.temp".into()),
-            desc_pointer: Some("$.city".into()),
-            ..Default::default()
-        };
-        let result = project(&data, &rule);
-        match result {
-            CapabilityResult::Text { content, desc } => {
-                assert_eq!(content, "25");
-                assert_eq!(desc.as_deref(), Some("北京"));
-            }
-            _ => panic!("应是 Text"),
-        }
-    }
-
-    /// Text + 无 desc（desc 和 desc_pointer 都缺失）。
-    #[test]
-    fn project_text_without_desc() {
-        let data = json!("纯文本结果");
-        let rule = ProjectionRule {
-            result_shape: Some(ResultShape::Text),
-            pointer: Some("$".into()),
-            ..Default::default()
-        };
-        let result = project(&data, &rule);
-        match result {
-            CapabilityResult::Text { content, desc } => {
-                assert_eq!(content, "纯文本结果");
+                // normalize 不设 desc
                 assert!(desc.is_none());
             }
             _ => panic!("应是 Text"),
         }
     }
 
-    /// Text + desc_pointer 优先于 desc（两者都有时，desc_pointer 胜出）。
+    /// Text + 对象 data → content = JSON 串（normalize 不读 pointer）。
+    /// 验证 normalize 不挑字段：pointer="$.temp" 被忽略。
     #[test]
-    fn project_text_desc_pointer_takes_priority_over_static_desc() {
-        let data = json!({ "value": "实际值", "label": "动态标签" });
+    fn normalize_text_object_ignores_pointer() {
+        let data = json!({ "city": "北京", "temp": 25 });
         let rule = ProjectionRule {
             result_shape: Some(ResultShape::Text),
-            pointer: Some("$.value".into()),
-            desc: Some("静态desc".into()),
-            desc_pointer: Some("$.label".into()),
+            pointer: Some("$.temp".into()), // normalize 应忽略此字段
+            desc: Some("译文".into()),      // normalize 应忽略此字段
             ..Default::default()
         };
-        let result = project(&data, &rule);
+        let result = normalize(&data, &rule);
         match result {
             CapabilityResult::Text { content, desc } => {
-                assert_eq!(content, "实际值");
-                // desc_pointer 优先
-                assert_eq!(desc.as_deref(), Some("动态标签"));
+                // content = value_to_string(data) = JSON 串
+                assert!(content.contains("北京"));
+                assert!(content.contains("25"));
+                // desc = None（normalize 不读 desc / desc_pointer）
+                assert!(desc.is_none());
             }
             _ => panic!("应是 Text"),
         }
     }
 
-    /// Text + desc_pointer 路径不存在 → 回退到静态 desc。
+    /// Text + 数字 data → content = "42"。
     #[test]
-    fn project_text_desc_pointer_missing_falls_back_to_static_desc() {
-        let data = json!({ "value": "v" });
-        let rule = ProjectionRule {
-            result_shape: Some(ResultShape::Text),
-            pointer: Some("$.value".into()),
-            desc: Some("静态desc".into()),
-            desc_pointer: Some("$.nonexistent".into()),
-            ..Default::default()
-        };
-        let result = project(&data, &rule);
-        match result {
-            CapabilityResult::Text { content, desc } => {
-                assert_eq!(content, "v");
-                // desc_pointer 取不到 → 回退到静态 desc
-                assert_eq!(desc.as_deref(), Some("静态desc"));
-            }
-            _ => panic!("应是 Text"),
-        }
-    }
-
-    /// Text + pointer 缺失 → 用 data 整体作为 content。
-    #[test]
-    fn project_text_without_pointer_uses_data_as_content() {
-        let data = json!("直接文本");
+    fn normalize_text_number_data() {
+        let data = json!(42);
         let rule = ProjectionRule {
             result_shape: Some(ResultShape::Text),
             ..Default::default()
         };
-        let result = project(&data, &rule);
+        let result = normalize(&data, &rule);
         match result {
             CapabilityResult::Text { content, .. } => {
-                assert_eq!(content, "直接文本");
+                assert_eq!(content, "42");
             }
             _ => panic!("应是 Text"),
         }
@@ -654,10 +549,10 @@ mod tests {
 
     // ── Items shape ─────────────────────────────────────────────────────
 
-    /// Items + item_desc_pointer=动态取值。IP 插件场景：
-    /// data=[{ip,type},...]，item_pointer="$.ip"，item_desc_pointer="$.type"。
+    /// Items + 数组 data → 每项 data 保留完整对象，desc = None。
+    /// IP 插件场景：data=[{ip,type},...]，item_pointer="$.ip" 被忽略。
     #[test]
-    fn project_items_with_dynamic_desc() {
+    fn normalize_items_preserves_complete_objects() {
         let data = json!([
             { "ip": "192.168.1.1", "type": "本地" },
             { "ip": "8.8.8.8", "type": "公网" }
@@ -665,39 +560,44 @@ mod tests {
         let rule = ProjectionRule {
             result_shape: Some(ResultShape::Items),
             items_pointer: Some("$".into()),
-            item_pointer: Some("$.ip".into()),
-            item_desc_pointer: Some("$.type".into()),
+            item_pointer: Some("$.ip".into()),         // normalize 应忽略
+            item_desc_pointer: Some("$.type".into()),  // normalize 应忽略
             item_actions: vec![ActionDef {
                 kind: ActionKindDef::Copy,
                 pointer: None,
             }],
             ..Default::default()
         };
-        let result = project(&data, &rule);
+        let result = normalize(&data, &rule);
         match result {
             CapabilityResult::Items { items } => {
                 assert_eq!(items.len(), 2);
-                assert_eq!(items[0].data, "192.168.1.1");
-                assert_eq!(items[0].desc.as_deref(), Some("本地"));
+                // data 保留完整对象，不挑字段
+                assert_eq!(items[0].data["ip"], "192.168.1.1");
+                assert_eq!(items[0].data["type"], "本地");
+                // desc = None（展示出口动态投影）
+                assert!(items[0].desc.is_none());
+                // actions 仍从 item_actions 映射
                 assert_eq!(items[0].actions.len(), 1);
                 assert!(matches!(items[0].actions[0], ItemAction::Copy { .. }));
-                assert_eq!(items[1].data, "8.8.8.8");
-                assert_eq!(items[1].desc.as_deref(), Some("公网"));
+                // 第二项也保留完整对象
+                assert_eq!(items[1].data["ip"], "8.8.8.8");
+                assert_eq!(items[1].data["type"], "公网");
             }
             _ => panic!("应是 Items"),
         }
     }
 
-    /// Items + 无 item_desc_pointer → 每项 desc=None。
+    /// Items + 字符串数组 → 每项 data = 完整字符串。
     #[test]
-    fn project_items_without_desc() {
+    fn normalize_items_string_array() {
         let data = json!(["item1", "item2"]);
         let rule = ProjectionRule {
             result_shape: Some(ResultShape::Items),
             items_pointer: Some("$".into()),
             ..Default::default()
         };
-        let result = project(&data, &rule);
+        let result = normalize(&data, &rule);
         match result {
             CapabilityResult::Items { items } => {
                 assert_eq!(items.len(), 2);
@@ -711,14 +611,13 @@ mod tests {
 
     /// Items + 多 action（open_file + copy）。
     #[test]
-    fn project_items_with_multiple_actions() {
+    fn normalize_items_with_multiple_actions() {
         let data = json!([
             { "path": "C:\\file.txt", "name": "file.txt" }
         ]);
         let rule = ProjectionRule {
             result_shape: Some(ResultShape::Items),
             items_pointer: Some("$".into()),
-            item_pointer: Some("$.path".into()),
             item_actions: vec![
                 ActionDef {
                     kind: ActionKindDef::OpenFile,
@@ -731,11 +630,13 @@ mod tests {
             ],
             ..Default::default()
         };
-        let result = project(&data, &rule);
+        let result = normalize(&data, &rule);
         match result {
             CapabilityResult::Items { items } => {
                 assert_eq!(items.len(), 1);
-                assert_eq!(items[0].data, "C:\\file.txt");
+                // data 保留完整对象
+                assert_eq!(items[0].data["path"], "C:\\file.txt");
+                assert_eq!(items[0].data["name"], "file.txt");
                 assert_eq!(items[0].actions.len(), 2);
                 assert!(matches!(items[0].actions[0], ItemAction::OpenFile { .. }));
                 assert!(matches!(items[0].actions[1], ItemAction::Copy { .. }));
@@ -744,29 +645,45 @@ mod tests {
         }
     }
 
-    /// Items + item_pointer 缺失 → 用每项整体作为 data。
+    /// Items + 空数组 → 空 items 列表。
     #[test]
-    fn project_items_without_item_pointer_uses_whole_element() {
-        let data = json!([{ "name": "a" }, { "name": "b" }]);
+    fn normalize_items_empty_array() {
+        let data = json!([]);
         let rule = ProjectionRule {
             result_shape: Some(ResultShape::Items),
             items_pointer: Some("$".into()),
             ..Default::default()
         };
-        let result = project(&data, &rule);
+        let result = normalize(&data, &rule);
         match result {
             CapabilityResult::Items { items } => {
-                assert_eq!(items.len(), 2);
-                assert_eq!(items[0].data["name"], "a");
-                assert_eq!(items[1].data["name"], "b");
+                assert!(items.is_empty());
             }
             _ => panic!("应是 Items"),
         }
     }
 
-    /// Items + 中文 desc（item_desc_pointer 取中文值）。
+    /// Items + 非数组 data（对象）→ 兜底为单元素列表。
     #[test]
-    fn project_items_chinese_desc() {
+    fn normalize_items_non_array_wraps_as_single() {
+        let data = json!({ "name": "single" });
+        let rule = ProjectionRule {
+            result_shape: Some(ResultShape::Items),
+            ..Default::default()
+        };
+        let result = normalize(&data, &rule);
+        match result {
+            CapabilityResult::Items { items } => {
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0].data["name"], "single");
+            }
+            _ => panic!("应是 Items"),
+        }
+    }
+
+    /// Items + 中文 data（完整对象保留中文字段）。
+    #[test]
+    fn normalize_items_chinese_data() {
         let data = json!([
             { "ip": "127.0.0.1", "type": "本地IP" },
         ]);
@@ -775,35 +692,16 @@ mod tests {
             items_pointer: Some("$".into()),
             item_pointer: Some("$.ip".into()),
             item_desc_pointer: Some("$.type".into()),
-            item_actions: vec![ActionDef {
-                kind: ActionKindDef::Copy,
-                pointer: None,
-            }],
             ..Default::default()
         };
-        let result = project(&data, &rule);
+        let result = normalize(&data, &rule);
         match result {
             CapabilityResult::Items { items } => {
-                assert_eq!(items[0].data, "127.0.0.1");
-                assert_eq!(items[0].desc.as_deref(), Some("本地IP"));
-            }
-            _ => panic!("应是 Items"),
-        }
-    }
-
-    /// Items + 空数组 → 空 items 列表。
-    #[test]
-    fn project_items_empty_array() {
-        let data = json!([]);
-        let rule = ProjectionRule {
-            result_shape: Some(ResultShape::Items),
-            items_pointer: Some("$".into()),
-            ..Default::default()
-        };
-        let result = project(&data, &rule);
-        match result {
-            CapabilityResult::Items { items } => {
-                assert!(items.is_empty());
+                // data 保留完整对象
+                assert_eq!(items[0].data["ip"], "127.0.0.1");
+                assert_eq!(items[0].data["type"], "本地IP");
+                // desc = None
+                assert!(items[0].desc.is_none());
             }
             _ => panic!("应是 Items"),
         }
@@ -813,13 +711,13 @@ mod tests {
 
     /// Done + 字符串 data → summary=data。
     #[test]
-    fn project_done_with_string_data() {
+    fn normalize_done_with_string_data() {
         let data = json!("已写入剪贴板");
         let rule = ProjectionRule {
             result_shape: Some(ResultShape::Done),
             ..Default::default()
         };
-        let result = project(&data, &rule);
+        let result = normalize(&data, &rule);
         match result {
             CapabilityResult::Done { summary } => {
                 assert_eq!(summary, "已写入剪贴板");
@@ -830,13 +728,13 @@ mod tests {
 
     /// Done + Null data → summary="已完成"（默认文案）。
     #[test]
-    fn project_done_with_null_data() {
+    fn normalize_done_with_null_data() {
         let data = json!(null);
         let rule = ProjectionRule {
             result_shape: Some(ResultShape::Done),
             ..Default::default()
         };
-        let result = project(&data, &rule);
+        let result = normalize(&data, &rule);
         match result {
             CapabilityResult::Done { summary } => {
                 assert_eq!(summary, "已完成");
@@ -847,13 +745,13 @@ mod tests {
 
     /// Done + 对象 data → summary=JSON 串兜底。
     #[test]
-    fn project_done_with_object_data() {
+    fn normalize_done_with_object_data() {
         let data = json!({ "status": "ok" });
         let rule = ProjectionRule {
             result_shape: Some(ResultShape::Done),
             ..Default::default()
         };
-        let result = project(&data, &rule);
+        let result = normalize(&data, &rule);
         match result {
             CapabilityResult::Done { summary } => {
                 assert!(summary.contains("ok"));
@@ -866,14 +764,13 @@ mod tests {
 
     /// Blob shape → 兜底返回 Done（插件不传二进制，走轨道 B）。
     #[test]
-    fn project_blob_falls_back_to_done() {
+    fn normalize_blob_falls_back_to_done() {
         let data = json!("截图描述");
         let rule = ProjectionRule {
             result_shape: Some(ResultShape::Blob),
-            desc: Some("截图".into()),
             ..Default::default()
         };
-        let result = project(&data, &rule);
+        let result = normalize(&data, &rule);
         match result {
             CapabilityResult::Done { summary } => {
                 assert_eq!(summary, "截图描述");
@@ -882,19 +779,18 @@ mod tests {
         }
     }
 
-    /// Blob shape + Null data + desc → summary=desc。
+    /// Blob shape + Null data → summary="已完成"。
     #[test]
-    fn project_blob_null_data_uses_desc_as_summary() {
+    fn normalize_blob_null_data_uses_default() {
         let data = json!(null);
         let rule = ProjectionRule {
             result_shape: Some(ResultShape::Blob),
-            desc: Some("截图完成".into()),
             ..Default::default()
         };
-        let result = project(&data, &rule);
+        let result = normalize(&data, &rule);
         match result {
             CapabilityResult::Done { summary } => {
-                assert_eq!(summary, "截图完成");
+                assert_eq!(summary, "已完成");
             }
             _ => panic!("应兜底为 Done"),
         }
@@ -904,10 +800,10 @@ mod tests {
 
     /// data 是字符串 → 推断为 Text。
     #[test]
-    fn project_infers_text_from_string_data() {
+    fn normalize_infers_text_from_string_data() {
         let data = json!("自动推断文本");
         let rule = ProjectionRule::default(); // 无 result_shape
-        let result = project(&data, &rule);
+        let result = normalize(&data, &rule);
         match result {
             CapabilityResult::Text { content, .. } => {
                 assert_eq!(content, "自动推断文本");
@@ -918,10 +814,10 @@ mod tests {
 
     /// data 是数组 → 推断为 Items。
     #[test]
-    fn project_infers_items_from_array_data() {
+    fn normalize_infers_items_from_array_data() {
         let data = json!(["a", "b"]);
         let rule = ProjectionRule::default();
-        let result = project(&data, &rule);
+        let result = normalize(&data, &rule);
         match result {
             CapabilityResult::Items { items } => {
                 assert_eq!(items.len(), 2);
@@ -933,10 +829,10 @@ mod tests {
 
     /// data 是 Null → 推断为 Done。
     #[test]
-    fn project_infers_done_from_null_data() {
+    fn normalize_infers_done_from_null_data() {
         let data = json!(null);
         let rule = ProjectionRule::default();
-        let result = project(&data, &rule);
+        let result = normalize(&data, &rule);
         match result {
             CapabilityResult::Done { summary } => {
                 assert_eq!(summary, "已完成");
@@ -947,10 +843,10 @@ mod tests {
 
     /// data 是数字 → 推断为 Text。
     #[test]
-    fn project_infers_text_from_number_data() {
+    fn normalize_infers_text_from_number_data() {
         let data = json!(42);
         let rule = ProjectionRule::default();
-        let result = project(&data, &rule);
+        let result = normalize(&data, &rule);
         match result {
             CapabilityResult::Text { content, .. } => {
                 assert_eq!(content, "42");

@@ -228,10 +228,14 @@ fn run_capability(
 
     let result = tauri::async_runtime::block_on(cap_registry.invoke(capability, args_value, &ctx));
 
+    // 0.17.10: 获取 capability 的 projection 规则，传给 to_display_text 做展示投影
+    let projection = cap_registry.get(capability).and_then(|cap| cap.projection());
+
     match result {
         Ok(result) => {
             // 0.14.1: 改调 canonical 文本投影（to_display_text），消除内联 match + Blob 摘要重复
-            println!("{}", result.to_display_text());
+            // 0.17.10: 传 projection 参数，展示出口动态挑字段
+            println!("{}", result.to_display_text(projection.as_ref()));
             0
         }
         Err(e) => {

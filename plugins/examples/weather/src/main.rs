@@ -376,8 +376,9 @@ fn main() {
                         };
 
                         // 第二步：weather API（坐标→天气）
+                        // 0.17.10c: 补 daily 参数（7 天预报）
                         let weather_url = format!(
-                            "https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}&current=temperature_2m,weather_code,wind_speed_10m&timezone=auto",
+                            "https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}&current=temperature_2m,weather_code,wind_speed_10m&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max&timezone=auto&forecast_days=7",
                             loc.latitude, loc.longitude
                         );
                         let http_id = format!("w_{}", chrono::Local::now().timestamp_millis());
@@ -476,13 +477,30 @@ fn main() {
                         }];
 
                         // 0.14.3: tool-call 走轨道 A，返回纯 data（结构化天气数据）
-                        let raw_data = serde_json::json!({
+                        // 0.17.10b: raw_data 从对象改为单元素数组（配合 Items 形态迁移）
+                        // 0.17.10c: 加 daily 预报数组（7 天）
+                        let daily_forecast: Vec<serde_json::Value> = weather.daily.as_ref().map(|d| {
+                            d.time.iter().enumerate().map(|(i, date)| {
+                                let daily_desc = wmo_description(d.weather_code.get(i).copied().unwrap_or(0));
+                                serde_json::json!({
+                                    "date": date,
+                                    "condition": daily_desc,
+                                    "temp_max": d.temperature_2m_max.get(i).map(|v| format!("{:.0}°C", v)).unwrap_or_default(),
+                                    "temp_min": d.temperature_2m_min.get(i).map(|v| format!("{:.0}°C", v)).unwrap_or_default(),
+                                    "precip_prob": d.precipitation_probability_max.get(i).and_then(|v| *v).map(|v| format!("{:.0}%", v)),
+                                    "wind_max": d.wind_speed_10m_max.get(i).map(|v| format!("{:.0}km/h", v)).unwrap_or_default(),
+                                })
+                            }).collect()
+                        }).unwrap_or_default();
+
+                        let raw_data = serde_json::json!([{
                             "city": city_name,
                             "temp": temp_str,
                             "condition": desc,
                             "wind_speed": format!("{:.0}km/h", cur.wind_speed_10m),
                             "region": region,
-                        });
+                            "daily": daily_forecast,
+                        }]);
 
                         let resp = make_success_response(query_id, is_tool_call, items, raw_data);
                         send_message(&mut stdout, &resp);
@@ -586,6 +604,9 @@ struct GeoLocation {
 #[derive(Debug, Deserialize)]
 struct WeatherResponse {
     current: CurrentWeather,
+    /// 0.17.10c: daily 预报（7 天）
+    #[serde(default)]
+    daily: Option<DailyWeather>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -593,4 +614,16 @@ struct CurrentWeather {
     temperature_2m: f64,
     weather_code: u32,
     wind_speed_10m: f64,
+}
+
+/// 0.17.10c: open-meteo daily 预报结构
+#[derive(Debug, Deserialize)]
+struct DailyWeather {
+    time: Vec<String>,
+    weather_code: Vec<u32>,
+    temperature_2m_max: Vec<f64>,
+    temperature_2m_min: Vec<f64>,
+    #[serde(default)]
+    precipitation_probability_max: Vec<Option<f64>>,
+    wind_speed_10m_max: Vec<f64>,
 }
