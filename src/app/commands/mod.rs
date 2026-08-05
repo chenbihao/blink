@@ -12,8 +12,8 @@ mod mcp;
 mod plugin;
 mod search;
 mod shared;
-mod stt;
 mod sticky;
+mod stt;
 
 pub use ai::*;
 pub use clipboard::*;
@@ -23,5 +23,5 @@ pub use diagnostic::*;
 pub use mcp::*;
 pub use plugin::*;
 pub use search::*;
-pub use stt::*;
 pub use sticky::*;
+pub use stt::*;

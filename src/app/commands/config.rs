@@ -326,7 +326,15 @@ pub async fn set_config(
                 .await;
             match &result {
                 Ok(_) => {
-                    tracing::info!(plugin_id = %v.plugin_id, enabled = v.enabled, "插件配置已更新")
+                    tracing::info!(plugin_id = %v.plugin_id, enabled = v.enabled, "插件配置已更新");
+                    // 0.17.8: 插件禁用时清理该插件的权限记忆行
+                    if !v.enabled {
+                        use tauri::Manager;
+                        if let Some(pc) = app.try_state::<std::sync::Arc<crate::domain::ai::tool_adapter::PendingConfirms>>() {
+                            let prefix = format!("plugin_{}", v.plugin_id);
+                            pc.clear_plugin_trusted_db(&prefix).await;
+                        }
+                    }
                 }
                 Err(err) => {
                     tracing::warn!(plugin_id = %v.plugin_id, error = %err, "插件配置更新失败")
@@ -401,6 +409,36 @@ pub async fn set_config(
             );
         }
 
+        // ── AI 权限记忆配置（0.17.8）─────────────────────────────────────
+        //
+        // AiPermissionConfig 独立分片（第 9 KV），控制跨会话权限记忆行为。
+        // 写完同步更新 PendingConfirms 的运行时配置副本。
+        "ai_permission" => {
+            let perm: crate::app::config::AiPermissionConfig =
+                serde_json::from_value(value).map_err(|e| e.to_string())?;
+            crate::app::config::ConfigStore::set(&pool, &perm).await?;
+
+            // 同步更新 PendingConfirms 运行时配置
+            {
+                use tauri::Manager;
+                if let Some(pc) = app
+                    .try_state::<std::sync::Arc<crate::domain::ai::tool_adapter::PendingConfirms>>()
+                {
+                    pc.update_memory_config(perm.clone()).await;
+                }
+            }
+
+            let _ = app.emit(
+                EventNames::CONFIG_CHANGED,
+                serde_json::json!({ "key": "ai_permission" }),
+            );
+            tracing::info!(
+                memory_enabled = perm.memory_enabled,
+                memory_days = perm.memory_days,
+                "AI 权限记忆配置已更新"
+            );
+        }
+
         // ── Screenshot 配置(0.11.10-b)───────────────────────────────────
         //
         // 截图 overlay 行为分片。目前只承载 prewarm_ocr;写完不需要热更新任何
@@ -409,7 +447,11 @@ pub async fn set_config(
             let sc: crate::app::config::ScreenshotConfig =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
             crate::app::config::ConfigStore::set(&pool, &sc).await?;
-            tracing::info!(prewarm_ocr = sc.prewarm_ocr, scroll_debug = sc.scroll_debug, "截图配置已更新");
+            tracing::info!(
+                prewarm_ocr = sc.prewarm_ocr,
+                scroll_debug = sc.scroll_debug,
+                "截图配置已更新"
+            );
         }
 
         _ => {

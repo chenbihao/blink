@@ -50,7 +50,10 @@ impl TauriDomainEnv {
     /// 重复注入不会覆盖首次值，仅记录 `warn`。
     pub fn set_cap_registry(&self, reg: Arc<CapabilityRegistry>) {
         if self.cap_registry.set(reg).is_err() {
-            tracing::warn!(slot = "cap_registry", "重复注入 CapabilityRegistry，已忽略（首次注入优先）");
+            tracing::warn!(
+                slot = "cap_registry",
+                "重复注入 CapabilityRegistry，已忽略（首次注入优先）"
+            );
         }
     }
 
@@ -59,7 +62,10 @@ impl TauriDomainEnv {
     /// 重复注入不会覆盖首次值，仅记录 `warn`。
     pub fn set_plugin_engine(&self, engine: Arc<PluginEngine>) {
         if self.plugin_engine.set(engine).is_err() {
-            tracing::warn!(slot = "plugin_engine", "重复注入 PluginEngine，已忽略（首次注入优先）");
+            tracing::warn!(
+                slot = "plugin_engine",
+                "重复注入 PluginEngine，已忽略（首次注入优先）"
+            );
         }
     }
 
@@ -68,7 +74,10 @@ impl TauriDomainEnv {
     /// 重复注入不会覆盖首次值，仅记录 `warn`。
     pub fn set_search_service(&self, svc: Arc<SearchService>) {
         if self.search_service.set(svc).is_err() {
-            tracing::warn!(slot = "search_service", "重复注入 SearchService，已忽略（首次注入优先）");
+            tracing::warn!(
+                slot = "search_service",
+                "重复注入 SearchService，已忽略（首次注入优先）"
+            );
         }
     }
 
@@ -77,7 +86,10 @@ impl TauriDomainEnv {
     /// 重复注入不会覆盖首次值，仅记录 `warn`。
     pub fn set_chat_service(&self, svc: Arc<ChatService>) {
         if self.chat_service.set(svc).is_err() {
-            tracing::warn!(slot = "chat_service", "重复注入 ChatService，已忽略（首次注入优先）");
+            tracing::warn!(
+                slot = "chat_service",
+                "重复注入 ChatService，已忽略（首次注入优先）"
+            );
         }
     }
 }
@@ -192,20 +204,15 @@ impl DomainEnv for TauriDomainEnv {
     async fn create_sticky_and_show(&self, content: &str) -> Result<String, String> {
         use tauri::Emitter;
         // P1-#10: 通过 DomainEnv::sticky_service() 统一访问，与 chord 路径一致
-        let svc = self
-            .sticky_service()
-            .ok_or("StickyService 不可用")?
-            .clone();
+        let svc = self.sticky_service().ok_or("StickyService 不可用")?.clone();
         // 创建便签（默认主题色、visible=true）
         let note = svc
             .create_note(content, crate::domain::sticky::StickyColor::default())
             .await
             .map_err(|e| e.to_string())?;
         // 0.16.11：新建便签居中到当前前台窗口所在显示器的工作区
-        let (cx, cy) = crate::infra::platform::window::center_of_active_monitor(
-            note.width,
-            note.height,
-        );
+        let (cx, cy) =
+            crate::infra::platform::window::center_of_active_monitor(note.width, note.height);
         svc.update_geometry(&note.id, cx, cy, note.width, note.height)
             .await
             .map_err(|e| e.to_string())?;
@@ -296,10 +303,7 @@ mod tests {
         fn hide_main_window(&self, _reason: &str) {}
         fn hide_for_screenshot(&self) {}
         fn unhide_after_screenshot(&self) {}
-        fn show_screenshot_overlay(
-            &self,
-            _meta: &ScreenCaptureMeta,
-        ) -> Result<(), String> {
+        fn show_screenshot_overlay(&self, _meta: &ScreenCaptureMeta) -> Result<(), String> {
             Ok(())
         }
         fn invoke_main_window(&self) {}

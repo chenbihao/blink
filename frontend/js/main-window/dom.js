@@ -12,3 +12,4 @@ export const aiDisplayEl = document.getElementById("ai-display");
 export const aiToolLineEl = document.getElementById("ai-tool-line");
 export const aiRoundsEl = document.getElementById("ai-rounds");
 export const aiContentEl = document.getElementById("ai-content");
+export const aiModelLabelEl = document.getElementById("ai-model-label");

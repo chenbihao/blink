@@ -135,7 +135,10 @@ fn copy_plugins() {
 /// 避免为一次性下载器引入 Rust HTTP 依赖。
 fn fetch_icons() {
     let root = workspace_root();
-    let script = root.join("xtask").join("scripts").join("fetch-lucide-icons.py");
+    let script = root
+        .join("xtask")
+        .join("scripts")
+        .join("fetch-lucide-icons.py");
     if !script.exists() {
         panic!("找不到图标拉取脚本: {}", script.display());
     }

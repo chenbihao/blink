@@ -82,37 +82,23 @@ impl From<crate::domain::capability::CapabilityError> for CommandError {
         use crate::domain::capability::CapabilityError::*;
 
         match e {
-            InvalidArgs { detail } => Self::new(
-                "invalid_args",
-                format!("参数错误: {detail}"),
-                false,
-            ),
-            Permission { detail } => Self::new(
-                "permission_denied",
-                format!("权限不足: {detail}"),
-                false,
-            ),
-            Timeout { detail } => Self::new(
-                "timeout",
-                format!("操作超时: {detail}"),
-                true,
-            ),
-            Cancelled => Self::new(
-                "cancelled",
-                "操作已取消",
-                false,
-            ),
+            InvalidArgs { detail } => {
+                Self::new("invalid_args", format!("参数错误: {detail}"), false)
+            }
+            Permission { detail } => {
+                Self::new("permission_denied", format!("权限不足: {detail}"), false)
+            }
+            Timeout { detail } => Self::new("timeout", format!("操作超时: {detail}"), true),
+            Cancelled => Self::new("cancelled", "操作已取消", false),
             NotFound { id } => Self::with_detail(
                 "not_found",
                 &format!("能力不存在: {id}"),
                 false,
                 serde_json::json!({ "id": id }),
             ),
-            Internal { detail } => Self::new(
-                "internal_error",
-                &format!("内部错误: {detail}"),
-                false,
-            ),
+            Internal { detail } => {
+                Self::new("internal_error", &format!("内部错误: {detail}"), false)
+            }
         }
     }
 }
@@ -131,11 +117,7 @@ impl From<crate::domain::execution::ExecError> for CommandError {
                 false,
                 serde_json::json!({ "arg_name": name }),
             ),
-            Runtime(msg) => Self::new(
-                "runtime_error",
-                msg,
-                false,
-            ),
+            Runtime(msg) => Self::new("runtime_error", msg, false),
         }
     }
 }
@@ -148,21 +130,9 @@ impl From<crate::domain::capability::builtins::ocr_engine::OcrError> for Command
         use crate::domain::capability::builtins::ocr_engine::OcrError::*;
 
         match e {
-            Engine(msg) => Self::new(
-                "ocr_engine_error",
-                format!("OCR 引擎错误: {msg}"),
-                false,
-            ),
-            Decode(msg) => Self::new(
-                "image_decode_error",
-                format!("图片解码错误: {msg}"),
-                false,
-            ),
-            Unsupported => Self::new(
-                "ocr_unsupported",
-                "当前平台不支持 OCR",
-                false,
-            ),
+            Engine(msg) => Self::new("ocr_engine_error", format!("OCR 引擎错误: {msg}"), false),
+            Decode(msg) => Self::new("image_decode_error", format!("图片解码错误: {msg}"), false),
+            Unsupported => Self::new("ocr_unsupported", "当前平台不支持 OCR", false),
         }
     }
 }

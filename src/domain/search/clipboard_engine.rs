@@ -29,9 +29,7 @@ use sqlx::SqlitePool;
 
 use super::engine::{Lane, QueryContext, SearchAction, SearchEngine, SearchItem};
 use crate::infra::data::clipboard::{ClipboardItem, query_recent, search as search_history};
-use crate::infra::data::clipboard_images::{
-    ClipboardImageMeta, query_recent_images,
-};
+use crate::infra::data::clipboard_images::{ClipboardImageMeta, query_recent_images};
 
 /// Engine id — 对应 `SearchEngine::id()` 与 `Route::EngineTakeover.engine_id`。
 pub const ENGINE_ID: &str = "clipboard";

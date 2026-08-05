@@ -549,8 +549,16 @@ fn main() {
             // 0.12.1 Phase 3B-1: chat AgentProvider 懒构造；memory 归 ChatService 所有。
             // 0.13.0: McpClientManager 管理 MCP server 子进程生命周期，传入 ChatService
             // 供 ensure_provider() 拉 MCP tool 进对话窗口 tool 池。
+            // 0.17.8: PendingConfirms 使用 with_persistence，注入 config_pool + AiPermissionConfig。
+            let ai_permission_config =
+                tauri::async_runtime::block_on(
+                    crate::domain::config::app_config::get_ai_permission_config(&pools.config),
+                );
             let pending_confirms = std::sync::Arc::new(
-                domain::ai::tool_adapter::PendingConfirms::new(),
+                domain::ai::tool_adapter::PendingConfirms::with_persistence(
+                    pools.config.clone(),
+                    ai_permission_config,
+                ),
             );
             let mcp_client = std::sync::Arc::new(domain::mcp::McpClientManager::new());
             let chat_service = std::sync::Arc::new(
@@ -661,6 +669,9 @@ fn main() {
             app::commands::get_chat_status,
             app::commands::get_chat_models,
             app::commands::select_chat_model,
+            // 0.17.9: 主窗口 AI 独立模型选择
+            app::commands::get_ephemeral_models,
+            app::commands::select_ephemeral_model,
             app::commands::start_chat_stt,
             app::commands::stop_chat_stt,
             app::commands::list_chat_conversations,
@@ -753,6 +764,8 @@ fn main() {
             app::commands::delete_clipboard_image,
             app::commands::clear_clipboard_history,
             app::commands::clear_clipboard_images,
+            // 0.17.8: AI 权限记忆管理
+            app::commands::clear_all_permission_memory,
             app::commands::get_clipboard_stats,
             // 0.16.4 剪贴板图片
             app::commands::copy_clipboard_image,

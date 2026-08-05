@@ -8,6 +8,11 @@
   display: none !important;
 }
 
+#search-mode {
+  display: flex;
+  flex-direction: column;
+}
+
 #ai-mode {
   display: flex;
   flex-direction: column;
@@ -23,7 +28,7 @@
 #ai-query {
   width: 100%;
   padding: var(--space-sm) var(--space-md);
-  font-size: var(--text-lg);
+  font-size: var(--text-2xl);
   background: transparent;
   color: var(--text);
   border: none;
@@ -40,11 +45,6 @@
   font-weight: var(--weight-light);
 }
 
-#ai-query:focus {
-  background: var(--accent-bg);
-  transition: background var(--transition-base) ease;
-}
-
 /* ── AI 展示区 ── */
 /* 0.17.6: 用固定像素值而非 vh，避免动态窗口高度循环依赖。
    窗口高度由 syncWindowSize 测 #app.offsetHeight 决定，
@@ -52,7 +52,7 @@
 #ai-display {
   max-height: 400px;
   overflow-y: auto;
-  padding: 0 var(--space-md);
+  padding: var(--space-xs) var(--space-md);
   scrollbar-width: thin;
   scrollbar-color: var(--text-faint) transparent;
 }
@@ -135,12 +135,58 @@
   color: var(--text);
   word-wrap: break-word;
   overflow-wrap: break-word;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
-/* Cherry 渲染容器内样式微调 */
+/* ── 用户消息气泡 ── */
+.ai-user-message {
+  font-size: var(--text-sm);
+  color: var(--text-sub);
+  padding: var(--space-xs) var(--space-sm);
+  margin-bottom: var(--space-xs);
+  background: var(--surface);
+  border-radius: var(--radius-sm);
+  border-left: 2px solid var(--accent);
+  user-select: text;
+  -webkit-user-select: text;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+/* ── AI 回复区 ── */
+.ai-response-area {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* Cherry 渲染容器内样式微调
+   Cherry 默认主题是白底深色文字（--base-previewer-bg: #fff, --base-font-color: #3f4a56）。
+   通过覆盖 CSS 变量让 Cherry 渲染融入暗色主题，而非逐元素 !important 覆盖。 */
 #ai-content .cherry {
+  --base-previewer-bg: transparent;
+  --base-font-color: var(--text);
+  --base-sub-font-color: var(--text-dim);
+  --base-border-color: var(--surface);
+  --md-heading-color: var(--text);
+  --md-paragraph-color: var(--text);
+  --md-link-color: var(--accent);
+  --md-inline-code-color: var(--accent);
+  --md-inline-code-bg: var(--surface);
+  --md-blockquote-color: var(--text-dim);
+  --md-blockquote-border: var(--surface-2);
+  --md-blockquote-bg: transparent;
+  --md-table-border: var(--surface);
+  --md-table-head-bg: var(--surface);
   background: transparent !important;
   color: var(--text) !important;
+}
+
+#ai-content .cherry .cherry-previewer {
+  background-color: transparent;
+  border-left: none;
+  padding: 0;
+  width: 100%;
 }
 
 #ai-content pre {
@@ -320,6 +366,48 @@
   font-style: normal;
 }
 
+/* ── AI 复制按钮 ── */
+.ai-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  margin-top: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--text-faint);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: all var(--transition-fast) ease;
+}
+
+.ai-copy-btn:hover {
+  background: var(--accent-bg);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* ── AI 底部栏（模型标签）── */
+#ai-footer {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-md);
+  min-height: 0;
+}
+
+/* 无模型标签时由 JS 设 display:none，消除底部多余间距 */
+#ai-footer.hidden {
+  display: none;
+}
+
+#ai-model-label {
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  font-weight: var(--weight-light);
+}
+
 /* ── 多轮追问折叠摘要（0.17.6a）── */
 .ai-round-summary {
   border-left: 2px solid var(--border, var(--text-faint));
@@ -377,6 +465,8 @@
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: var(--text-faint) transparent;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .ai-round-summary-body::-webkit-scrollbar {
@@ -398,10 +488,32 @@
   font-style: normal;
 }
 
-/* Cherry 渲染容器内样式微调（摘要体） */
+/* Cherry 渲染容器内样式微调（摘要体）
+   同 #ai-content .cherry 的变量覆盖策略。 */
 .ai-round-summary-body .cherry {
+  --base-previewer-bg: transparent;
+  --base-font-color: var(--text);
+  --base-sub-font-color: var(--text-dim);
+  --base-border-color: var(--surface);
+  --md-heading-color: var(--text);
+  --md-paragraph-color: var(--text);
+  --md-link-color: var(--accent);
+  --md-inline-code-color: var(--accent);
+  --md-inline-code-bg: var(--surface);
+  --md-blockquote-color: var(--text-dim);
+  --md-blockquote-border: var(--surface-2);
+  --md-blockquote-bg: transparent;
+  --md-table-border: var(--surface);
+  --md-table-head-bg: var(--surface);
   background: transparent !important;
   color: var(--text) !important;
+}
+
+.ai-round-summary-body .cherry .cherry-previewer {
+  background-color: transparent;
+  border-left: none;
+  padding: 0;
+  width: 100%;
 }
 
 .ai-round-summary-body pre {

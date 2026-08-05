@@ -339,15 +339,12 @@ fn build_cli_command(cli_path: &str) -> tokio::process::Command {
         .to_lowercase();
 
     if ext == "cmd" || ext == "bat" {
-        let mut cmd = crate::infra::platform::no_window_tokio(
-            tokio::process::Command::new("cmd.exe"),
-        );
+        let mut cmd =
+            crate::infra::platform::no_window_tokio(tokio::process::Command::new("cmd.exe"));
         cmd.arg("/C").arg(cli_path);
         cmd
     } else {
-        crate::infra::platform::no_window_tokio(
-            tokio::process::Command::new(cli_path),
-        )
+        crate::infra::platform::no_window_tokio(tokio::process::Command::new(cli_path))
     }
 }
 

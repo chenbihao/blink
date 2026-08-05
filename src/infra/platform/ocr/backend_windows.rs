@@ -5,7 +5,9 @@
 
 use std::sync::OnceLock;
 
-use super::{PlatformOcrBackend, PlatformOcrError, RawOcrLine, RawOcrRect, RawOcrResult, RawOcrWord};
+use super::{
+    PlatformOcrBackend, PlatformOcrError, RawOcrLine, RawOcrRect, RawOcrResult, RawOcrWord,
+};
 use async_trait::async_trait;
 
 /// Windows.Media.Ocr 实现的 OCR 后端。
@@ -77,10 +79,8 @@ fn get_available_language_tags() -> Vec<String> {
 /// 命中则 `TryCreateFromLanguage`，未命中 fallback 到 `TryCreateFromUserProfileLanguages` + `warn!`。
 ///
 /// 返回 `(OcrEngine, Option<String>)`——引擎和命中的语言 tag（None = fallback）。
-fn select_chinese_preferred_engine() -> Result<
-    (windows::Media::Ocr::OcrEngine, Option<String>),
-    PlatformOcrError,
-> {
+fn select_chinese_preferred_engine()
+-> Result<(windows::Media::Ocr::OcrEngine, Option<String>), PlatformOcrError> {
     use windows::Media::Ocr::OcrEngine as WinRtOcrEngine;
 
     let tags = get_available_language_tags();
@@ -242,7 +242,10 @@ mod tests {
             "zh-Hans-CN".to_string(),
             "zh-Hant-TW".to_string(),
         ];
-        assert_eq!(match_chinese_language(&tags), Some("zh-Hans-CN".to_string()));
+        assert_eq!(
+            match_chinese_language(&tags),
+            Some("zh-Hans-CN".to_string())
+        );
     }
 
     #[test]
@@ -254,7 +257,10 @@ mod tests {
     #[test]
     fn match_chinese_falls_back_to_zh_hant_tw() {
         let tags = vec!["en-US".to_string(), "zh-Hant-TW".to_string()];
-        assert_eq!(match_chinese_language(&tags), Some("zh-Hant-TW".to_string()));
+        assert_eq!(
+            match_chinese_language(&tags),
+            Some("zh-Hant-TW".to_string())
+        );
     }
 
     #[test]
@@ -266,7 +272,10 @@ mod tests {
     #[test]
     fn match_chinese_falls_back_to_any_zh_prefix() {
         let tags = vec!["en-US".to_string(), "zh-Hans-SG".to_string()];
-        assert_eq!(match_chinese_language(&tags), Some("zh-Hans-SG".to_string()));
+        assert_eq!(
+            match_chinese_language(&tags),
+            Some("zh-Hans-SG".to_string())
+        );
     }
 
     #[test]

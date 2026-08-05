@@ -186,9 +186,7 @@ pub async fn pin_clipboard_image(app: tauri::AppHandle, image_id: String) -> Res
 
 /// 获取主显示器工作区中心，让图片居中放置。
 fn get_primary_monitor_center(img_w: i32, img_h: i32) -> (i32, i32) {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
-    };
+    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
     let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
     let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
     let x = (screen_w - img_w) / 2;

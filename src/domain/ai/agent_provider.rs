@@ -145,6 +145,8 @@ impl AgentProvider {
         // 在 ChatService 侧调用）。
 
         // 读密钥--与 RigFactory::build 一致(本地 provider 跳过)
+        // 0.17.8: 密钥缺失用 SecretMissing 而非 NotConfigured，区分"档位悬空"与"密钥丢失"，
+        // 让前端能给用户更精准的修复引导。
         let key_str: String = if entry.kind.requires_secret() {
             let key = secret::load_secret(&entry.id, "key").map_err(|e| {
                 tracing::debug!(
@@ -152,7 +154,7 @@ impl AgentProvider {
                     "AgentProvider: {} 密钥未配置 ({e})",
                     entry.display_name,
                 );
-                AIError::NotConfigured
+                AIError::SecretMissing(entry.display_name.clone())
             })?;
             expose_for_rig(&key)
         } else {

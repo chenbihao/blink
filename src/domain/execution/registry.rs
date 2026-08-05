@@ -185,7 +185,12 @@ mod tests {
         let reg = ActionRegistry::new();
 
         // Safe:只读打开 UI
-        for id in ["open_settings", "sticky_manager", "open_logs", "open_data_dir"] {
+        for id in [
+            "open_settings",
+            "sticky_manager",
+            "open_logs",
+            "open_data_dir",
+        ] {
             let action = reg.get(id).expect(id);
             assert_eq!(action.danger_class(), DangerClass::Safe, "{id} 应为 Safe");
         }

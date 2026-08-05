@@ -101,9 +101,7 @@ impl Action for ShowStickyManagerAction {
     async fn execute(&self, cx: &ActionContext<'_>) -> Result<ActionOutcome, ExecError> {
         tracing::debug!("执行内置动作：便签管理");
         cx.env.hide_main_window("sticky_manager");
-        cx.env
-            .show_sticky_manager()
-            .map_err(ExecError::Runtime)?;
+        cx.env.show_sticky_manager().map_err(ExecError::Runtime)?;
         Ok(ActionOutcome::Nop)
     }
 }

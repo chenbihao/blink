@@ -185,7 +185,7 @@ impl SearchItem {
                     context_aware,
                     ..Default::default()
                 }
-            },
+            }
             SearchAction::RunAction { id, arg } => {
                 // 0.16.4：剪贴板图片项的 run_id = "copy_clipboard_image"，
                 // arg = image_id。前端据此渲染缩略图。
@@ -199,28 +199,32 @@ impl SearchItem {
                     String::new() // Run 不使用 lnk_path
                 };
                 AppEntry {
-                name: self.title,
-                pinyin_name: String::new(),
-                pinyin_full: String::new(),
-                description: self.subtitle,
-                lnk_path,
-                is_calc: false,
-                score,
-                is_placeholder: false,
-                is_error,
-                source: self.source.clone(),
-                actions: vec![Action {
-                    kind: ActionKind::Run,
-                    run_id: Some(id),
-                    run_arg: arg,
-                    hint: if is_image { Some("复制".into()) } else { None },
-                    ..Action::default()
-                }],
-                score_detail,
-                context_aware,
-                is_image,
-                ..Default::default()
-            }
+                    name: self.title,
+                    pinyin_name: String::new(),
+                    pinyin_full: String::new(),
+                    description: self.subtitle,
+                    lnk_path,
+                    is_calc: false,
+                    score,
+                    is_placeholder: false,
+                    is_error,
+                    source: self.source.clone(),
+                    actions: vec![Action {
+                        kind: ActionKind::Run,
+                        run_id: Some(id),
+                        run_arg: arg,
+                        hint: if is_image {
+                            Some("复制".into())
+                        } else {
+                            None
+                        },
+                        ..Action::default()
+                    }],
+                    score_detail,
+                    context_aware,
+                    is_image,
+                    ..Default::default()
+                }
             }
         }
     }

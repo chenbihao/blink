@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
 use super::shards::{
-    AppearanceConfig, CalcConfig, ChordConfig, ContextConfig, DisableConfig, FileSearchConfig,
-    HotkeyConfig, SearchConfig, StartMenuConfig, SuggestionConfig,
+    AiPermissionConfig, AppearanceConfig, CalcConfig, ChordConfig, ContextConfig, DisableConfig,
+    FileSearchConfig, HotkeyConfig, SearchConfig, StartMenuConfig, SuggestionConfig,
 };
 use super::store::ConfigStore;
 
@@ -616,6 +616,33 @@ pub async fn set_context_config(pool: &SqlitePool, config: &ContextConfig) -> Re
     Ok(())
 }
 
+// ── AI 权限记忆配置操作（0.17.8）──────────────────────────────────────────────
+
+/// 获取 AI 权限记忆配置。
+pub async fn get_ai_permission_config(pool: &SqlitePool) -> AiPermissionConfig {
+    ConfigStore::get::<AiPermissionConfig>(pool).await
+}
+
+/// 更新 AI 权限记忆配置。
+#[allow(dead_code)] // set_config 命令直接用 ConfigStore::set + 同步 PendingConfirms，此函数为备选 API
+pub async fn update_ai_permission_config(
+    pool: &SqlitePool,
+    memory_enabled: bool,
+    memory_days: u64,
+) -> Result<(), String> {
+    let config = AiPermissionConfig {
+        memory_enabled,
+        memory_days: memory_days.clamp(1, 90),
+    };
+    ConfigStore::set(pool, &config).await?;
+    tracing::info!(
+        memory_enabled,
+        memory_days = config.memory_days,
+        "AI 权限记忆配置已更新"
+    );
+    Ok(())
+}
+
 // ── 测试 ────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -698,69 +725,69 @@ mod tests {
 
     #[tokio::test]
     async fn get_config_on_empty_db_returns_defaults() {
-                    let pool = in_memory_pool().await;
-            let cfg = get_config(&pool).await;
-            assert_eq!(cfg.theme, AppConfig::default().theme);
-            assert_eq!(cfg.hotkey.key, AppConfig::default().hotkey.key);
-            assert_eq!(cfg.tap_threshold, 300);
-            assert_eq!(cfg.grace_period, 500);
+        let pool = in_memory_pool().await;
+        let cfg = get_config(&pool).await;
+        assert_eq!(cfg.theme, AppConfig::default().theme);
+        assert_eq!(cfg.hotkey.key, AppConfig::default().hotkey.key);
+        assert_eq!(cfg.tap_threshold, 300);
+        assert_eq!(cfg.grace_period, 500);
     }
 
     #[tokio::test]
     async fn save_and_get_config_roundtrip() {
-                    let pool = in_memory_pool().await;
-            let mut cfg = AppConfig::default();
-            cfg.theme = "light".to_string();
-            cfg.language = "en".to_string();
-            cfg.max_results = 42;
-            cfg.autosuggest_min_score = 0.85;
-            cfg.chord_enabled = true;
-            cfg.disabled_builtin_actions = vec!["shutdown".to_string()];
-            cfg.tap_threshold = 250;
-            cfg.hotkey.key = "F1".to_string();
-            save_config(&pool, &cfg).await.unwrap();
+        let pool = in_memory_pool().await;
+        let mut cfg = AppConfig::default();
+        cfg.theme = "light".to_string();
+        cfg.language = "en".to_string();
+        cfg.max_results = 42;
+        cfg.autosuggest_min_score = 0.85;
+        cfg.chord_enabled = true;
+        cfg.disabled_builtin_actions = vec!["shutdown".to_string()];
+        cfg.tap_threshold = 250;
+        cfg.hotkey.key = "F1".to_string();
+        save_config(&pool, &cfg).await.unwrap();
 
-            let loaded = get_config(&pool).await;
-            assert_eq!(loaded.theme, "light");
-            assert_eq!(loaded.language, "en");
-            assert_eq!(loaded.max_results, 42);
-            assert!((loaded.autosuggest_min_score - 0.85).abs() < 1e-9);
-            assert!(loaded.chord_enabled);
-            assert_eq!(loaded.disabled_builtin_actions, vec!["shutdown"]);
-            assert_eq!(loaded.tap_threshold, 250);
-            assert_eq!(loaded.hotkey.key, "F1");
-            assert_eq!(loaded.hotkey.tap_threshold, 250);
+        let loaded = get_config(&pool).await;
+        assert_eq!(loaded.theme, "light");
+        assert_eq!(loaded.language, "en");
+        assert_eq!(loaded.max_results, 42);
+        assert!((loaded.autosuggest_min_score - 0.85).abs() < 1e-9);
+        assert!(loaded.chord_enabled);
+        assert_eq!(loaded.disabled_builtin_actions, vec!["shutdown"]);
+        assert_eq!(loaded.tap_threshold, 250);
+        assert_eq!(loaded.hotkey.key, "F1");
+        assert_eq!(loaded.hotkey.tap_threshold, 250);
     }
 
     #[tokio::test]
     async fn shards_persist_to_distinct_kv_keys() {
-                    let pool = in_memory_pool().await;
-            save_config(&pool, &AppConfig::default()).await.unwrap();
+        let pool = in_memory_pool().await;
+        save_config(&pool, &AppConfig::default()).await.unwrap();
 
-            let all = crate::infra::data::history::get_all_config(&pool).await;
-            assert!(all.contains_key("app.hotkey"), "app.hotkey 分片应存在");
-            assert!(
-                all.contains_key("app.appearance"),
-                "app.appearance 分片应存在"
-            );
-            assert!(all.contains_key("app.search"), "app.search 分片应存在");
-            assert!(
-                all.contains_key("app.suggestion"),
-                "app.suggestion 分片应存在"
-            );
-            assert!(all.contains_key("app.chord"), "app.chord 分片应存在");
-            assert!(all.contains_key("app.disable"), "app.disable 分片应存在");
-            assert!(
-                all.contains_key("clipboard:config"),
-                "clipboard 独立 KV 应存在"
-            );
-            assert!(!all.contains_key("app_config"), "旧单 key 不应重现");
+        let all = crate::infra::data::history::get_all_config(&pool).await;
+        assert!(all.contains_key("app.hotkey"), "app.hotkey 分片应存在");
+        assert!(
+            all.contains_key("app.appearance"),
+            "app.appearance 分片应存在"
+        );
+        assert!(all.contains_key("app.search"), "app.search 分片应存在");
+        assert!(
+            all.contains_key("app.suggestion"),
+            "app.suggestion 分片应存在"
+        );
+        assert!(all.contains_key("app.chord"), "app.chord 分片应存在");
+        assert!(all.contains_key("app.disable"), "app.disable 分片应存在");
+        assert!(
+            all.contains_key("clipboard:config"),
+            "clipboard 独立 KV 应存在"
+        );
+        assert!(!all.contains_key("app_config"), "旧单 key 不应重现");
     }
 
     #[tokio::test]
     async fn legacy_app_config_migrates_to_shards() {
-                    let pool = in_memory_pool().await;
-            let legacy_json = r#"{
+        let pool = in_memory_pool().await;
+        let legacy_json = r#"{
                 "hotkey": {"modifiers": ["ctrl", "alt"], "key": "k", "display": "Ctrl+Alt+K"},
                 "tap_threshold": 250,
                 "grace_period": 400,
@@ -785,77 +812,77 @@ mod tests {
                 "chord_hint_visible": false,
                 "disabled_chord_actions": ["screenshot"]
             }"#;
-            crate::infra::data::history::set_config(&pool, "app_config", legacy_json)
+        crate::infra::data::history::set_config(&pool, "app_config", legacy_json)
+            .await
+            .unwrap();
+
+        init_config(&pool).await.unwrap();
+
+        assert!(
+            crate::infra::data::history::get_config(&pool, "app_config")
                 .await
-                .unwrap();
+                .is_none(),
+            "app_config 单 key 应在迁移后删除"
+        );
 
-            init_config(&pool).await.unwrap();
+        let all = crate::infra::data::history::get_all_config(&pool).await;
+        assert!(all.contains_key("app.hotkey"));
+        assert!(all.contains_key("clipboard:config"));
 
-            assert!(
-                crate::infra::data::history::get_config(&pool, "app_config")
-                    .await
-                    .is_none(),
-                "app_config 单 key 应在迁移后删除"
-            );
-
-            let all = crate::infra::data::history::get_all_config(&pool).await;
-            assert!(all.contains_key("app.hotkey"));
-            assert!(all.contains_key("clipboard:config"));
-
-            let cfg = get_config(&pool).await;
-            assert_eq!(cfg.hotkey.modifiers, vec!["ctrl", "alt"]);
-            assert_eq!(cfg.hotkey.key, "k");
-            assert_eq!(cfg.tap_threshold, 250);
-            assert_eq!(cfg.grace_period, 400);
-            assert!(cfg.auto_start);
-            assert_eq!(cfg.language, "en");
-            assert_eq!(cfg.log_level, "debug");
-            assert!(!cfg.surface_takeover_enabled);
-            assert_eq!(cfg.theme, "gruvbox");
-            assert!(!cfg.search_history_enabled);
-            assert_eq!(cfg.max_results, 25);
-            assert!(cfg.proactive_enabled);
-            assert_eq!(cfg.empty_query_topn, 3);
-            assert!(!cfg.clipboard.enabled);
-            assert_eq!(cfg.clipboard.max_items, 100);
-            assert_eq!(cfg.disabled_builtin_actions, vec!["shutdown", "restart"]);
-            assert!(!cfg.autosuggest_enabled);
-            assert!((cfg.autosuggest_min_score - 0.9).abs() < 1e-9);
-            assert_eq!(cfg.autosuggest_tab_key, "ArrowRight");
-            assert_eq!(
-                cfg.disabled_context_bindings,
-                vec!["builtin.translate::text_is_non_target_lang"]
-            );
-            assert!(cfg.chord_enabled);
-            assert!(!cfg.chord_hint_visible);
-            assert_eq!(cfg.disabled_chord_actions, vec!["screenshot"]);
+        let cfg = get_config(&pool).await;
+        assert_eq!(cfg.hotkey.modifiers, vec!["ctrl", "alt"]);
+        assert_eq!(cfg.hotkey.key, "k");
+        assert_eq!(cfg.tap_threshold, 250);
+        assert_eq!(cfg.grace_period, 400);
+        assert!(cfg.auto_start);
+        assert_eq!(cfg.language, "en");
+        assert_eq!(cfg.log_level, "debug");
+        assert!(!cfg.surface_takeover_enabled);
+        assert_eq!(cfg.theme, "gruvbox");
+        assert!(!cfg.search_history_enabled);
+        assert_eq!(cfg.max_results, 25);
+        assert!(cfg.proactive_enabled);
+        assert_eq!(cfg.empty_query_topn, 3);
+        assert!(!cfg.clipboard.enabled);
+        assert_eq!(cfg.clipboard.max_items, 100);
+        assert_eq!(cfg.disabled_builtin_actions, vec!["shutdown", "restart"]);
+        assert!(!cfg.autosuggest_enabled);
+        assert!((cfg.autosuggest_min_score - 0.9).abs() < 1e-9);
+        assert_eq!(cfg.autosuggest_tab_key, "ArrowRight");
+        assert_eq!(
+            cfg.disabled_context_bindings,
+            vec!["builtin.translate::text_is_non_target_lang"]
+        );
+        assert!(cfg.chord_enabled);
+        assert!(!cfg.chord_hint_visible);
+        assert_eq!(cfg.disabled_chord_actions, vec!["screenshot"]);
     }
 
     #[tokio::test]
     async fn update_hotkey_preserves_tap_grace() {
-                    let pool = in_memory_pool().await;
-            let mut cfg = AppConfig::default();
-            cfg.tap_threshold = 250;
-            cfg.grace_period = 700;
-            save_config(&pool, &cfg).await.unwrap();
+        let pool = in_memory_pool().await;
+        let mut cfg = AppConfig::default();
+        cfg.tap_threshold = 250;
+        cfg.grace_period = 700;
+        save_config(&pool, &cfg).await.unwrap();
 
-            let new_hotkey = HotkeyConfig {
-                modifiers: vec!["ctrl".to_string()],
-                key: "F2".to_string(),
-                display: "Ctrl+F2".to_string(),
-                ..Default::default()
-            };
-            update_hotkey(&pool, new_hotkey).await.unwrap();
+        let new_hotkey = HotkeyConfig {
+            modifiers: vec!["ctrl".to_string()],
+            key: "F2".to_string(),
+            display: "Ctrl+F2".to_string(),
+            ..Default::default()
+        };
+        update_hotkey(&pool, new_hotkey).await.unwrap();
 
-            let loaded = get_config(&pool).await;
-            assert_eq!(loaded.hotkey.key, "F2");
-            assert_eq!(
-                loaded.tap_threshold, 250,
-                "update_hotkey 不该覆盖 tap_threshold"
-            );
-            assert_eq!(
-                loaded.grace_period, 700,
-                "update_hotkey 不该覆盖 grace_period"
-            );
+        let loaded = get_config(&pool).await;
+        assert_eq!(loaded.hotkey.key, "F2");
+        assert_eq!(
+            loaded.tap_threshold, 250,
+            "update_hotkey 不该覆盖 tap_threshold"
+        );
+        assert_eq!(
+            loaded.grace_period, 700,
+            "update_hotkey 不该覆盖 grace_period"
+        );
     }
 }

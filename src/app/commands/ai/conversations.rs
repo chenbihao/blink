@@ -14,13 +14,28 @@ pub async fn list_chat_conversations(
 }
 
 /// 删除指定对话（级联删除 messages）。
+///
+/// 0.17.8：同时清除该对话的会话级 trusted 记录（不影响持久化权限记忆）。
 #[tauri::command]
 pub async fn delete_chat_conversation(
     app: tauri::AppHandle,
     conversation_id: String,
 ) -> Result<bool, String> {
     let pools = app.state::<crate::infra::data::DbPools>();
-    crate::infra::data::conversations::delete_conversation(&pools.ai, &conversation_id).await
+    let result =
+        crate::infra::data::conversations::delete_conversation(&pools.ai, &conversation_id).await;
+
+    // 0.17.8: 清除该对话的会话级 trusted（不影响持久化 DB 记忆）
+    if let Ok(true) = &result {
+        use tauri::Manager;
+        if let Some(pc) =
+            app.try_state::<std::sync::Arc<crate::domain::ai::tool_adapter::PendingConfirms>>()
+        {
+            pc.clear_trust(&conversation_id).await;
+        }
+    }
+
+    result
 }
 
 /// 重命名对话。

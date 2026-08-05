@@ -577,6 +577,40 @@
             </div>
           </div>
 
+          <!-- 权限记忆（0.17.8）─────────────────────────────────────── -->
+          <div class="extension-card">
+            <div class="extension-header">
+              <div class="extension-icon"><svg class="icon" aria-hidden="true"><use href="#icon-shield"/></svg></div>
+              <div class="extension-info">
+                <h3 data-i18n="ai.permission.section">权限记忆</h3>
+                <p class="extension-desc" data-i18n="ai.permission.section.desc">危险操作确认的跨会话记忆</p>
+              </div>
+            </div>
+            <div class="extension-body">
+              <div class="setting-row">
+                <label class="setting-label" data-i18n="ai.permission.enabled.label">跨会话记住权限<span class="field-hint-icon" data-i18n-title="ai.permission.enabled.hint">ⓘ</span></label>
+                <label class="switch switch-sm">
+                  <input type="checkbox" id="ai-perm-memory-enabled" />
+                  <span class="slider"></span>
+                </label>
+              </div>
+              <div class="setting-row">
+                <label class="setting-label" data-i18n="ai.permission.days.label">记忆天数<span class="field-hint-icon" data-i18n-title="ai.permission.days.hint">ⓘ</span></label>
+                <div class="number-input-wrapper">
+                  <input type="number" id="ai-perm-memory-days" min="1" max="90" step="1" value="7" />
+                  <div class="number-spinner">
+                    <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">▲</button>
+                    <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">▼</button>
+                  </div>
+                </div>
+              </div>
+              <div class="setting-row">
+                <label class="setting-label" data-i18n="ai.permission.clear.label">清除所有权限记忆<span class="field-hint-icon" data-i18n-title="ai.permission.clear.hint">ⓘ</span></label>
+                <button type="button" id="ai-perm-clear-memory" class="btn-small btn-danger" data-i18n="ai.permission.clear.btn">立即清除</button>
+              </div>
+            </div>
+          </div>
+
           <!-- 记忆策略 ─────────────────────────────────────── -->
           <div class="extension-card">
             <div class="extension-header">

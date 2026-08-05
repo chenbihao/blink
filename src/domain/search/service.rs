@@ -22,9 +22,9 @@ use crate::domain::plugin::PluginEngine;
 use crate::infra::platform::context::ContextSnapshot;
 use crate::infra::utils::perf::ai_slo;
 
+use super::AppEntry;
 use super::engine::{Lane, QueryContext, SearchEngine, SearchItem};
 use super::scorer::{boost_priority, placeholder_score, source_rank};
-use super::AppEntry;
 
 // 0.17.6: AI lane 常量已随 SearchService AI 路径删除（AI_DEFAULT_HARD_TIMEOUT_MS /
 // TURN2_TIMEOUT_MIN_MS / TURN2_TIMEOUT_MAX_MS / TURN2_FALLBACK_DELAY_MS）。
@@ -376,15 +376,15 @@ impl SearchService {
                 let snapshot = ContextSnapshot::default();
                 let disabled: Vec<String> = Vec::new();
                 let disabled_ctx: Vec<String> = Vec::new();
-let search_ctx = QueryContext {
-history: &history,
-snapshot: &snapshot,
-disabled_builtin_actions: &disabled,
-disabled_context_bindings: &disabled_ctx,
-language: "zh",
-};
-let items = engine.search(query, &search_ctx).await;
-return items.into_iter().take(max_results).collect();
+                let search_ctx = QueryContext {
+                    history: &history,
+                    snapshot: &snapshot,
+                    disabled_builtin_actions: &disabled,
+                    disabled_context_bindings: &disabled_ctx,
+                    language: "zh",
+                };
+                let items = engine.search(query, &search_ctx).await;
+                return items.into_iter().take(max_results).collect();
             }
         }
         Vec::new()
@@ -414,16 +414,16 @@ return items.into_iter().take(max_results).collect();
         let snapshot = self.snapshot.read().unwrap().clone();
         let disabled = self.disabled_builtin_actions.read().unwrap().clone();
         let disabled_ctx = self.disabled_context_bindings.read().unwrap().clone();
-let language = self.language.read().unwrap().clone();
-let search_ctx = QueryContext {
-history: &history,
-snapshot: &snapshot,
-disabled_builtin_actions: &disabled,
-disabled_context_bindings: &disabled_ctx,
-language: &language,
-};
+        let language = self.language.read().unwrap().clone();
+        let search_ctx = QueryContext {
+            history: &history,
+            snapshot: &snapshot,
+            disabled_builtin_actions: &disabled,
+            disabled_context_bindings: &disabled_ctx,
+            language: &language,
+        };
 
-// 路由决策
+        // 路由决策
         let ranking_hint = self.last_ranking_hint.lock().unwrap().clone();
         let route = self.router.route(q, &history, ranking_hint.as_ref()).await;
         let route = self.filter_route(route);
@@ -456,9 +456,9 @@ language: &language,
             Route::EngineTakeover { engine_id, arg } => {
                 self.exec_engine_takeover(engine_id, arg, &search_ctx).await
             }
-// AI 前缀触发：产 AI Suggestion，让前端 Ghost + Tab 触发。
-// 不直接调用 AI——用户输入过程中不应立即消耗 token，
-// 需要用户按 Tab 显式确认后才真正调用 AI（0.17.6 后走 chat_prompt ephemeral）。
+            // AI 前缀触发：产 AI Suggestion，让前端 Ghost + Tab 触发。
+            // 不直接调用 AI——用户输入过程中不应立即消耗 token，
+            // 需要用户按 Tab 显式确认后才真正调用 AI（0.17.6 后走 chat_prompt ephemeral）。
             Route::AiTrigger { arg } => {
                 suggestion = self.make_ai_suggestion(&arg);
                 vec![]
@@ -477,8 +477,8 @@ language: &language,
 
     /// 若过 gating 且 AI registry 就绪,产 AI Ghost Suggestion(0.9.2 Phase 5b)。
     ///
-/// display="按 Tab 问 AI",replacement=原 query(前端见 `source==="ai"` 走独立
-/// invoke `chat_prompt` 路径,**不**触发新一轮 search,避免"采纳后又搜索"的循环)。
+    /// display="按 Tab 问 AI",replacement=原 query(前端见 `source==="ai"` 走独立
+    /// invoke `chat_prompt` 路径,**不**触发新一轮 search,避免"采纳后又搜索"的循环)。
     fn maybe_ai_suggestion(&self, q: &str) -> Option<Suggestion> {
         use crate::domain::intent::SuggestionSource;
 
@@ -523,11 +523,11 @@ language: &language,
     /// AI 前缀触发专用 Suggestion 构造（0.9.x）。
     ///
     /// 用户输入 "ai xxx" 显式触发，跳过 gating 四筛子——"ai" 前缀本身就是强信号。
-/// 返回的 Suggestion 让前端 Ghost 渲染 "按 Tab 问 AI"，用户按 Tab 后走
-/// `acceptCurrent() → invoke("chat_prompt")` 路径。
-///
-/// **为什么不直接调 AI**：输入过程中不应立即消耗 token，
-/// 需要用户按 Tab 显式确认后才真正调用 AI（与 Ghost Tab 触发机制统一）。
+    /// 返回的 Suggestion 让前端 Ghost 渲染 "按 Tab 问 AI"，用户按 Tab 后走
+    /// `acceptCurrent() → invoke("chat_prompt")` 路径。
+    ///
+    /// **为什么不直接调 AI**：输入过程中不应立即消耗 token，
+    /// 需要用户按 Tab 显式确认后才真正调用 AI（与 Ghost Tab 触发机制统一）。
     fn make_ai_suggestion(&self, arg: &str) -> Option<Suggestion> {
         use crate::domain::intent::SuggestionSource;
 
@@ -713,10 +713,10 @@ language: &language,
         all_items.extend(hint_entries);
         all_items.extend(placeholders);
 
-// ── 0.9.2 AI Ghost 已在 `search()` 主入口通过 `maybe_ai_suggestion` 覆盖 ──
-// 不在 exec_mixed 自动 spawn AI:边打字连续 spawn 会浪费 token + h2 stream 堆积。
-// 用户看到 Ghost "按 Tab 问 AI" 后显式按 Tab → 前端 invoke `chat_prompt` command
-// → ChatService::prompt(ephemeral) → 单次 spawn。
+        // ── 0.9.2 AI Ghost 已在 `search()` 主入口通过 `maybe_ai_suggestion` 覆盖 ──
+        // 不在 exec_mixed 自动 spawn AI:边打字连续 spawn 会浪费 token + h2 stream 堆积。
+        // 用户看到 Ghost "按 Tab 问 AI" 后显式按 Tab → 前端 invoke `chat_prompt` command
+        // → ChatService::prompt(ephemeral) → 单次 spawn。
 
         let elapsed = search_start.elapsed().as_secs_f64() * 1000.0;
         crate::infra::utils::perf::record(
@@ -907,14 +907,14 @@ language: &language,
                     // async lane 引擎（file/mock）不消费 disabled_builtin_actions /
                     // disabled_context_bindings；这两个字段仅 BuiltinEngine（sync lane）读，
                     // 此处传空 slice 满足契约。
-let ctx = QueryContext {
-history: &history,
-snapshot: &snapshot,
-disabled_builtin_actions: &[],
-disabled_context_bindings: &[],
-language: "zh",
-};
-let items = engine.search(&q, &ctx).await;
+                    let ctx = QueryContext {
+                        history: &history,
+                        snapshot: &snapshot,
+                        disabled_builtin_actions: &[],
+                        disabled_context_bindings: &[],
+                        language: "zh",
+                    };
+                    let items = engine.search(&q, &ctx).await;
                     if seq == latest_seq.load(Ordering::SeqCst) && !items.is_empty() {
                         tracing::trace!(
                             engine = engine.id(),

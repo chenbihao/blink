@@ -35,7 +35,8 @@ pub async fn get_storage_info(app: tauri::AppHandle) -> serde_json::Value {
 
     // AI 库：ai_tool_audit 行数 + conversations/messages 行数
     let ai_audit_count = crate::infra::data::ai_audit::count(&pools.ai).await;
-    let ai_conversation_count = crate::infra::data::conversations::count_conversations(&pools.ai).await;
+    let ai_conversation_count =
+        crate::infra::data::conversations::count_conversations(&pools.ai).await;
     let ai_message_count = crate::infra::data::conversations::count_messages(&pools.ai).await;
 
     // 缓存库：performance_metrics + icon_cache 行数
@@ -231,7 +232,12 @@ pub async fn optimize_storage(app: tauri::AppHandle) -> serde_json::Value {
             .fetch_one(pool)
             .await
             .unwrap_or((0,));
-        tracing::info!(db = name, before = before.0, after = after.0, "optimize_storage: VACUUM 完成");
+        tracing::info!(
+            db = name,
+            before = before.0,
+            after = after.0,
+            "optimize_storage: VACUUM 完成"
+        );
         results.push(serde_json::json!({
             "db": name,
             "freelist_before": before.0,
@@ -598,11 +604,13 @@ pub async fn get_cleanup_info() -> serde_json::Value {
     };
 
     // 四库文件大小
-    let db_files = ["blink_config.db", "blink_history.db", "blink_ai.db", "blink_cache.db"];
-    let db_total: u64 = db_files
-        .iter()
-        .map(|f| file_size(&data_dir.join(f)))
-        .sum();
+    let db_files = [
+        "blink_config.db",
+        "blink_history.db",
+        "blink_ai.db",
+        "blink_cache.db",
+    ];
+    let db_total: u64 = db_files.iter().map(|f| file_size(&data_dir.join(f))).sum();
 
     // 日志目录
     let logs_dir = crate::infra::utils::paths::logs_dir();
@@ -721,10 +729,7 @@ pub async fn cleanup_all_data(app: tauri::AppHandle) -> serde_json::Value {
         if secret_ok {
             results.push(("密钥清理".to_string(), Ok(())));
         } else {
-            results.push((
-                "密钥清理".to_string(),
-                Err(secret_errors.join("; ")),
-            ));
+            results.push(("密钥清理".to_string(), Err(secret_errors.join("; "))));
         }
     }
     #[cfg(not(target_os = "windows"))]
@@ -736,11 +741,7 @@ pub async fn cleanup_all_data(app: tauri::AppHandle) -> serde_json::Value {
     let success_count = results.iter().filter(|(_, r)| r.is_ok()).count();
     let failed_count = results.len() - success_count;
 
-    tracing::info!(
-        success_count,
-        failed_count,
-        "cleanup_all_data: 清理完成"
-    );
+    tracing::info!(success_count, failed_count, "cleanup_all_data: 清理完成");
 
     serde_json::json!({
         "results": results.iter().map(|(target, result)| {

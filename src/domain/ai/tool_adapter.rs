@@ -54,9 +54,10 @@ use std::time::Duration;
 use rig_core::tool::ToolDyn;
 use rig_core::wasm_compat::WasmBoxedFuture;
 use serde_json::Value;
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, RwLock, oneshot};
 
 use crate::domain::capability::{Capability, CapabilityError, CapabilityRegistry, InvokeContext};
+use crate::domain::config::shards::AiPermissionConfig;
 use crate::domain::event::DomainEnv;
 use crate::domain::event_names::EventNames;
 
@@ -83,21 +84,60 @@ const DEFAULT_TOOL_TIMEOUT_MS: u32 = 20_000;
 /// **confirm_id**：`AtomicU64` 全局递增，不引入 uuid 依赖。
 /// **不持久化**：进程重启即丢（pending 确认本就是瞬时状态，重启后 AI 重新发起即可）。
 ///
-/// **对话级信任列表**（`trusted`）：用户确认一次后，同对话内同一 tool 不再弹窗。
-/// 键为 `(conversation_id, tool_name)`，不同对话/不同 tool 不共享信任。
-/// 进程重启清空（内存态，不持久化）。
-#[derive(Default)]
+/// **双层 trusted 设计**（0.17.8）：
+/// - 会话级 `HashSet<(conversation_id, tool_name)>`（进程内，重启即失）
+/// - 持久化 DB 层（`config_pool` -> `ai_permission_memory` 表，跨会话保留）
+/// - `is_trusted` 检查顺序：会话级命中 -> 跳过 DB；未命中 -> 查 DB -> 命中且未过期 -> 加入会话级
+/// - `trust()` 同时写会话级 + DB（若 `memory_enabled`）
+/// - `config_pool = None` 时降级为纯会话级（测试环境）
 pub struct PendingConfirms {
     next_id: AtomicU64,
     pending: Mutex<HashMap<u64, oneshot::Sender<bool>>>,
-    /// 对话级信任列表——`(conversation_id, tool_name)`。
+    /// 会话级信任列表——`(conversation_id, tool_name)`。
     trusted: Mutex<HashSet<(String, String)>>,
+    /// 持久化配置库连接池（0.17.8：跨会话权限记忆）。
+    /// `None` = 未启用持久化（测试环境），`Some` = 生产环境。
+    config_pool: Option<sqlx::SqlitePool>,
+    /// 权限记忆配置（0.17.8）。运行时可更新（用户在设置页改配置后同步）。
+    memory_config: Arc<RwLock<AiPermissionConfig>>,
+}
+
+impl Default for PendingConfirms {
+    fn default() -> Self {
+        Self {
+            next_id: AtomicU64::new(0),
+            pending: Mutex::new(HashMap::new()),
+            trusted: Mutex::new(HashSet::new()),
+            config_pool: None,
+            memory_config: Arc::new(RwLock::new(AiPermissionConfig::default())),
+        }
+    }
 }
 
 impl PendingConfirms {
-    /// 构造空注册表。
+    /// 构造空注册表（测试用，无 DB 持久化）。
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 带持久化的构造（生产用，0.17.8）。
+    ///
+    /// 传入配置库连接池 + 权限记忆配置，启用跨会话权限记忆。
+    pub fn with_persistence(
+        config_pool: sqlx::SqlitePool,
+        memory_config: AiPermissionConfig,
+    ) -> Self {
+        Self {
+            config_pool: Some(config_pool),
+            memory_config: Arc::new(RwLock::new(memory_config)),
+            ..Self::default()
+        }
+    }
+
+    /// 更新权限记忆配置（用户在设置页改配置后调，0.17.8）。
+    pub async fn update_memory_config(&self, config: AiPermissionConfig) {
+        let mut guard = self.memory_config.write().await;
+        *guard = config;
     }
 
     /// 注册一个待确认项，返回 `(confirm_id, receiver)`。
@@ -131,28 +171,95 @@ impl PendingConfirms {
         self.pending.lock().await.remove(&confirm_id);
     }
 
-    /// 检查指定对话 + tool 是否已获用户信任（本次对话内确认过）。
-    /// 信任后同对话内再次调用同一 tool 时跳过确认弹窗，直接执行。
+    /// 检查指定对话 + tool 是否已获用户信任。
+    ///
+    /// **双层 trusted 检查**（0.17.8）：
+    /// 1. 会话级 HashSet 命中 -> 直接返回 true（跳过 DB 查询，热路径快）
+    /// 2. 会话级未命中 -> 查持久化 DB（若 `memory_enabled`）
+    /// 3. DB 命中且未过期 -> 视为 trusted + 加入会话级 HashSet（本次会话不再查 DB）
+    /// 4. DB 未命中或已过期 -> 返回 false，触发确认弹窗
     pub async fn is_trusted(&self, conversation_id: &str, tool_name: &str) -> bool {
-        self.trusted
+        // 1. 会话级 HashSet 命中 -> 快速返回
+        if self
+            .trusted
             .lock()
             .await
             .contains(&(conversation_id.to_string(), tool_name.to_string()))
+        {
+            return true;
+        }
+
+        // 2. 查持久化 DB（若 memory_enabled 且有 config_pool）
+        let config = self.memory_config.read().await.clone();
+        if !config.memory_enabled {
+            return false;
+        }
+        if let Some(ref pool) = self.config_pool {
+            if crate::infra::data::permission_memory::is_tool_trusted(pool, tool_name).await {
+                // 3. DB 命中且未过期 -> 加入会话级（本次会话不再查 DB）
+                self.trusted
+                    .lock()
+                    .await
+                    .insert((conversation_id.to_string(), tool_name.to_string()));
+                tracing::debug!(
+                    %tool_name,
+                    conversation_id = %conversation_id,
+                    "权限记忆命中持久化层，加入会话级"
+                );
+                return true;
+            }
+        }
+        false
     }
 
     /// 将指定对话 + tool 加入信任列表（用户确认后调）。
+    ///
+    /// **双层写入**（0.17.8）：同时写会话级 HashSet + 持久化 DB（若 `memory_enabled`）。
     async fn trust(&self, conversation_id: &str, tool_name: &str) {
+        // 写会话级
         self.trusted
             .lock()
             .await
             .insert((conversation_id.to_string(), tool_name.to_string()));
+
+        // 写 DB（若 memory_enabled 且有 config_pool）
+        let config = self.memory_config.read().await.clone();
+        if config.memory_enabled {
+            if let Some(ref pool) = self.config_pool {
+                crate::infra::data::permission_memory::trust_tool(
+                    pool,
+                    tool_name,
+                    config.memory_days,
+                )
+                .await;
+            }
+        }
     }
 
     /// 清除指定对话的所有信任记录（对话删除时调）。
-    #[allow(dead_code)] // 供未来对话删除 command 调用
+    ///
+    /// **只清会话级**——持久化记忆跨会话保留，不受对话删除影响。
     pub async fn clear_trust(&self, conversation_id: &str) {
         let mut trusted = self.trusted.lock().await;
         trusted.retain(|(conv_id, _)| conv_id != conversation_id);
+    }
+
+    /// 清空所有持久化权限记忆（设置页"清除所有记忆"按钮调，0.17.8）。
+    ///
+    /// 只清 DB 持久化层，不影响会话级 `HashSet`。
+    pub async fn clear_all_trusted_db(&self) {
+        if let Some(ref pool) = self.config_pool {
+            crate::infra::data::permission_memory::clear_all_trusted(pool).await;
+        }
+    }
+
+    /// 清理指定插件的持久化权限记忆（插件禁用时调，0.17.8）。
+    ///
+    /// 按 `plugin_{id}:%` 前缀匹配 tool_name。
+    pub async fn clear_plugin_trusted_db(&self, plugin_prefix: &str) {
+        if let Some(ref pool) = self.config_pool {
+            crate::infra::data::permission_memory::clear_plugin_trusted(pool, plugin_prefix).await;
+        }
     }
 }
 
@@ -228,24 +335,34 @@ async fn check_dangerous_confirm(
         return None;
     }
 
-let (req_id, conv_id, target_win) = crate::domain::ai::chat_service::current_request_context_from_env(env);
+    let (req_id, conv_id, target_win) =
+        crate::domain::ai::chat_service::current_request_context_from_env(env);
 
-// 对话级信任：用户已确认过的危险操作自动放行，不再弹窗
-if pending.is_trusted(&conv_id, tool_name).await {
-tracing::debug!(
-%tool_name,
-conversation_id = %conv_id,
-"危险操作已在本次对话内获用户信任，跳过确认"
-);
-return None;
-}
+    // 对话级信任：用户已确认过的危险操作自动放行，不再弹窗
+    if pending.is_trusted(&conv_id, tool_name).await {
+        tracing::debug!(
+        %tool_name,
+        conversation_id = %conv_id,
+        "危险操作已在本次对话内获用户信任，跳过确认"
+        );
+        return None;
+    }
 
-tracing::warn!(%tool_name, "危险操作被 AI 调用，挂起等待用户确认");
-let (confirm_id, rx) = pending.register().await;
-match await_dangerous_confirm(
-pending, env, confirm_id, rx, tool_name, tool_type, args_value, req_id, &conv_id, &target_win,
-)
-.await
+    tracing::warn!(%tool_name, "危险操作被 AI 调用，挂起等待用户确认");
+    let (confirm_id, rx) = pending.register().await;
+    match await_dangerous_confirm(
+        pending,
+        env,
+        confirm_id,
+        rx,
+        tool_name,
+        tool_type,
+        args_value,
+        req_id,
+        &conv_id,
+        &target_win,
+    )
+    .await
     {
         ConfirmOutcome::Approved => {
             tracing::info!(%tool_name, "用户确认执行危险 {tool_type}");
@@ -313,7 +430,11 @@ fn emit_dangerous_confirm(
     };
     // 0.17.6: 按 target_window 定向 emit（主窗口 AI / 对话窗口共用）。
     // target_window 为空时回落到 "chat"（兼容未注入场景）。
-    let win = if target_window.is_empty() { "chat" } else { target_window };
+    let win = if target_window.is_empty() {
+        "chat"
+    } else {
+        target_window
+    };
     if let Err(e) = env.emit_to(
         win,
         EventNames::CHAT_CONFIRM_ACTION,
@@ -942,5 +1063,216 @@ mod tests {
         let text = crate::domain::capability::rig_tool_result_to_text(&contents);
         assert!(text.contains("result1"));
         assert!(text.contains("/test"));
+    }
+
+    // ── 0.17.8 双层 trusted 单测（7 项核心场景）──────────────────────────────
+    //
+    // 验收点见 phases/0.17-enhancement-polish.md §六 0.17.8。
+    // 使用 in-memory SQLite + PendingConfirms::with_persistence 测试双层逻辑。
+
+    use crate::infra::data::permission_memory::{
+        self, clear_all_trusted as db_clear_all, init_db, is_tool_trusted, trust_tool,
+    };
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    /// 创建内存 SQLite 池 + 初始化 ai_permission_memory 表。
+    async fn test_pool() -> sqlx::SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory pool");
+        init_db(&pool).await.expect("init table");
+        pool
+    }
+
+    /// 场景 1：会话级命中时不查 DB（快路径）。
+    ///
+    /// trust() 写入会话级 + DB 后，清空 DB。is_trusted 仍应返回 true
+    /// （说明走的是会话级 HashSet，没查 DB）。
+    #[tokio::test]
+    async fn perm_session_hit_skips_db() {
+        let pool = test_pool().await;
+        let pc = PendingConfirms::with_persistence(pool.clone(), AiPermissionConfig::default());
+
+        // trust 写入会话级 + DB
+        pc.trust("conv1", "shutdown").await;
+        // 清空 DB
+        db_clear_all(&pool).await;
+        // is_trusted 应仍返回 true——来自会话级，未查 DB
+        assert!(
+            pc.is_trusted("conv1", "shutdown").await,
+            "会话级命中应跳过 DB 查询"
+        );
+    }
+
+    /// 场景 2：会话级未命中 -> 查 DB -> 命中且未过期 -> 加入会话级。
+    ///
+    /// 直接写 DB，调 is_trusted 应返回 true（来自 DB）。
+    /// 再清空 DB 后再调 is_trusted，仍应返回 true（第一次已加入会话级）。
+    #[tokio::test]
+    async fn perm_db_hit_promotes_to_session() {
+        let pool = test_pool().await;
+        let pc = PendingConfirms::with_persistence(pool.clone(), AiPermissionConfig::default());
+
+        // 直接写 DB（绕过 trust()）
+        trust_tool(&pool, "shutdown", 7).await;
+        // 第一次 is_trusted：会话级未命中 -> 查 DB -> 命中 -> 加入会话级
+        assert!(
+            pc.is_trusted("conv1", "shutdown").await,
+            "DB 命中应返回 true"
+        );
+        // 清空 DB
+        db_clear_all(&pool).await;
+        // 第二次 is_trusted：会话级已命中（第一次已加入），不查 DB
+        assert!(
+            pc.is_trusted("conv1", "shutdown").await,
+            "第一次 DB 命中后应已加入会话级，第二次不再查 DB"
+        );
+    }
+
+    /// 场景 3：DB 过期返回 false 并删除行。
+    ///
+    /// 手动写入已过期的行，is_trusted 应返回 false。
+    /// 行应被实时删除（直接查 DB 验证）。
+    #[tokio::test]
+    async fn perm_db_expired_returns_false_and_deletes() {
+        let pool = test_pool().await;
+        let pc = PendingConfirms::with_persistence(pool.clone(), AiPermissionConfig::default());
+
+        // 手动写入已过期记录
+        let now = permission_memory::now_ts();
+        sqlx::query(
+            "INSERT INTO ai_permission_memory (tool_name, trusted_at, expires_at) VALUES (?1, ?2, ?3)",
+        )
+        .bind("lock")
+        .bind(now - 86_400 * 10) // 10 天前确认
+        .bind(now - 1)            // 1 秒前过期
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // is_trusted 应返回 false（已过期）
+        assert!(!pc.is_trusted("conv1", "lock").await, "过期行应返回 false");
+
+        // 行应已被删除
+        assert!(
+            !is_tool_trusted(&pool, "lock").await,
+            "过期行应已被实时删除"
+        );
+    }
+
+    /// 场景 4：trust() 同时写会话级和 DB。
+    ///
+    /// 调 trust() 后，会话级和 DB 都应有记录。
+    /// 验证方式：清空会话级后 is_trusted 仍返回 true（DB 有记录）；
+    /// 清空 DB 后会话级仍返回 true（会话级有记录）。
+    #[tokio::test]
+    async fn perm_trust_writes_both_layers() {
+        let pool = test_pool().await;
+        let pc = PendingConfirms::with_persistence(pool.clone(), AiPermissionConfig::default());
+
+        pc.trust("conv1", "shutdown").await;
+
+        // DB 层有记录
+        assert!(
+            is_tool_trusted(&pool, "shutdown").await,
+            "trust() 应写入 DB 持久化层"
+        );
+        // 会话层有记录（清空 DB 后仍返回 true）
+        db_clear_all(&pool).await;
+        assert!(
+            pc.is_trusted("conv1", "shutdown").await,
+            "trust() 应写入会话级 HashSet"
+        );
+    }
+
+    /// 场景 5：memory_enabled = false 时不查 DB。
+    ///
+    /// 配置 memory_enabled = false，DB 有记录，is_trusted 应返回 false。
+    /// 开启后应返回 true（开始查 DB）。
+    #[tokio::test]
+    async fn perm_memory_disabled_does_not_query_db() {
+        let pool = test_pool().await;
+        let disabled_config = AiPermissionConfig {
+            memory_enabled: false,
+            memory_days: 7,
+        };
+        let pc = PendingConfirms::with_persistence(pool.clone(), disabled_config);
+
+        // DB 有记录
+        trust_tool(&pool, "shutdown", 7).await;
+
+        // memory_enabled = false -> 不查 DB -> 返回 false
+        assert!(
+            !pc.is_trusted("conv1", "shutdown").await,
+            "memory_enabled = false 时不应查 DB"
+        );
+
+        // 开启 memory_enabled
+        pc.update_memory_config(AiPermissionConfig::default()).await;
+
+        // 现在应查 DB -> 返回 true
+        assert!(
+            pc.is_trusted("conv1", "shutdown").await,
+            "开启 memory_enabled 后应查 DB 并返回 true"
+        );
+    }
+
+    /// 场景 6：clear_all_trusted_db() 清空 DB 但不影响会话级。
+    ///
+    /// trust() 写入双层后，调 clear_all_trusted_db()。
+    /// DB 应清空，但会话级 is_trusted 仍返回 true。
+    #[tokio::test]
+    async fn perm_clear_all_db_preserves_session() {
+        let pool = test_pool().await;
+        let pc = PendingConfirms::with_persistence(pool.clone(), AiPermissionConfig::default());
+
+        pc.trust("conv1", "shutdown").await;
+        pc.trust("conv1", "lock").await;
+
+        // 清空 DB
+        pc.clear_all_trusted_db().await;
+
+        // DB 已清空
+        assert!(!is_tool_trusted(&pool, "shutdown").await, "DB 应已清空");
+        assert!(!is_tool_trusted(&pool, "lock").await, "DB 应已清空");
+
+        // 会话级不受影响
+        assert!(
+            pc.is_trusted("conv1", "shutdown").await,
+            "会话级不应受 clear_all_trusted_db 影响"
+        );
+        assert!(
+            pc.is_trusted("conv1", "lock").await,
+            "会话级不应受 clear_all_trusted_db 影响"
+        );
+    }
+
+    /// 场景 7：clear_trust() 只清会话级，不影响持久化 DB。
+    ///
+    /// trust() 写入双层后，调 clear_trust(conv1)。
+    /// 会话级应清空，但 DB 记录保留。
+    #[tokio::test]
+    async fn perm_clear_trust_session_preserves_db() {
+        let pool = test_pool().await;
+        let pc = PendingConfirms::with_persistence(pool.clone(), AiPermissionConfig::default());
+
+        pc.trust("conv1", "shutdown").await;
+
+        // 清空会话级
+        pc.clear_trust("conv1").await;
+
+        // DB 记录保留
+        assert!(
+            is_tool_trusted(&pool, "shutdown").await,
+            "clear_trust 不应影响 DB 持久化记录"
+        );
+
+        // is_trusted 应从 DB 重新命中（会话级已清，DB 还在）
+        assert!(
+            pc.is_trusted("conv1", "shutdown").await,
+            "会话级清空后应从 DB 重新命中"
+        );
     }
 }

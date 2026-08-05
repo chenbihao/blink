@@ -44,6 +44,11 @@ pub enum AIError {
     /// 未配置——`AIConfig::resolve_tier` 返 None(所有档空 或 全悬空)
     #[error("AI 未配置或档位悬空")]
     NotConfigured,
+    /// 供应商密钥缺失——provider 配置存在但 Credential Manager 中找不到密钥。
+    /// 区别于 `NotConfigured`（档位悬空），此错误明确指向"密钥丢失"场景，
+    /// 供前端给用户更精准的修复引导（"请在设置页重新填写密钥"）。
+    #[error("供应商 {0} 的 API 密钥未配置，请在设置页重新填写")]
+    SecretMissing(String),
     /// 网络错误——rig / reqwest 返回,只含 stage 描述,不含 URL/密钥
     #[error("AI 网络错误: {0}")]
     Network(String),
@@ -226,54 +231,54 @@ pub mod tests {
     #[tokio::test]
     async fn mock_provider_returns_tool_call() {
         let p = MockProvider::echo_tool_call(
-                "open_url",
-                serde_json::json!({ "url": "https://example.com" }),
-            );
-            let req = CompletionRequest {
-                messages: vec![ChatMessage::user("open example")],
-                tools: vec![ActionSchema::empty("open_url", "打开 URL")],
-                max_tokens: None,
-                temperature: None,
-                timeout_ms: None,
-            };
-            let resp = p.complete(req).await.unwrap();
-            assert_eq!(resp.tool_calls.len(), 1);
-            assert_eq!(resp.tool_calls[0].name, "open_url");
-            assert_eq!(
-                resp.tool_calls[0]
-                    .arguments
-                    .get("url")
-                    .and_then(|v| v.as_str()),
-                Some("https://example.com")
-            );
-            assert!(resp.first_token_ms > 0, "first_token_ms 必须由 provider 填");
-            assert!(resp.total_ms > 0);
+            "open_url",
+            serde_json::json!({ "url": "https://example.com" }),
+        );
+        let req = CompletionRequest {
+            messages: vec![ChatMessage::user("open example")],
+            tools: vec![ActionSchema::empty("open_url", "打开 URL")],
+            max_tokens: None,
+            temperature: None,
+            timeout_ms: None,
+        };
+        let resp = p.complete(req).await.unwrap();
+        assert_eq!(resp.tool_calls.len(), 1);
+        assert_eq!(resp.tool_calls[0].name, "open_url");
+        assert_eq!(
+            resp.tool_calls[0]
+                .arguments
+                .get("url")
+                .and_then(|v| v.as_str()),
+            Some("https://example.com")
+        );
+        assert!(resp.first_token_ms > 0, "first_token_ms 必须由 provider 填");
+        assert!(resp.total_ms > 0);
     }
 
     #[tokio::test]
     async fn mock_provider_honors_timeout() {
         let p = MockProvider::slow(200);
-            let req = CompletionRequest {
-                messages: vec![ChatMessage::user("q")],
-                tools: Vec::new(),
-                max_tokens: None,
-                temperature: None,
-                timeout_ms: Some(100), // 小于 delay_ms → 应超时
-            };
-            let start = std::time::Instant::now();
-            let result = p.complete(req).await;
-            let elapsed = start.elapsed();
+        let req = CompletionRequest {
+            messages: vec![ChatMessage::user("q")],
+            tools: Vec::new(),
+            max_tokens: None,
+            temperature: None,
+            timeout_ms: Some(100), // 小于 delay_ms → 应超时
+        };
+        let start = std::time::Instant::now();
+        let result = p.complete(req).await;
+        let elapsed = start.elapsed();
 
-            assert!(
-                matches!(result, Err(AIError::Timeout)),
-                "预期 Timeout,实际: {result:?}"
-            );
-            // 允许 ±50ms 抖动
-            assert!(
-                elapsed.as_millis() >= 90 && elapsed.as_millis() <= 200,
-                "超时时机偏差:实际 {}ms",
-                elapsed.as_millis()
-            );
+        assert!(
+            matches!(result, Err(AIError::Timeout)),
+            "预期 Timeout,实际: {result:?}"
+        );
+        // 允许 ±50ms 抖动
+        assert!(
+            elapsed.as_millis() >= 90 && elapsed.as_millis() <= 200,
+            "超时时机偏差:实际 {}ms",
+            elapsed.as_millis()
+        );
     }
 
     #[test]

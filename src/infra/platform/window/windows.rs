@@ -307,7 +307,11 @@ pub fn start_watchdog(app: AppHandle) {
                         // fg == NULL:焦点真空(系统正在切换前台窗口的瞬态,如刚拉起子进程时)。
                         // 这不代表用户切到了别的窗口,据此隐藏会误伤——跳过本轮,等下次轮询。
                         if !fg.0.is_null() && !is_self_foreground(&app, fg) {
-                            tracing::info!(since_invoke, "watchdog: hide! fg=0x{:x}", fg.0 as isize);
+                            tracing::info!(
+                                since_invoke,
+                                "watchdog: hide! fg=0x{:x}",
+                                fg.0 as isize
+                            );
                             hide(&app, "watchdog");
                         }
                     }
@@ -820,7 +824,11 @@ pub fn show_chat_window(app: &AppHandle, initial_text: Option<&str>) -> Result<(
     // 新建窗口（冷启动 fallback）JS init 有延迟，emit 可能在 listener 注册前发出 --
     // 前端 main.js 在 init 时额外检查 window.__chatPendingPrefill 兜底（由 emit_to 写入）。
     if let Some(text) = initial_text.filter(|s| !s.is_empty()) {
-        if let Err(e) = app.emit_to(LABEL, crate::domain::event_names::EventNames::CHAT_PREFILL, text) {
+        if let Err(e) = app.emit_to(
+            LABEL,
+            crate::domain::event_names::EventNames::CHAT_PREFILL,
+            text,
+        ) {
             tracing::warn!(error = %e, "chat-prefill emit 失败");
         }
     }
@@ -921,24 +929,25 @@ pub fn show_sticky_manager_window(app: &AppHandle) -> Result<(), String> {
         // 0.16.13 fix：改回 .visible(true) + background_color 消除白屏闪烁。
         // 0.17.7：background_color 从硬编码 #1e1e2e（dark only）改为中性灰 #333333，
         // 在 light / dark 主题下都不会产生突兀的色差（CSS 加载后由 .manager-root 覆盖）。
-        let w = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("sticky-manager.html".into()))
-            .title("便签管理")
-            .inner_size(560.0, 640.0)
-            .min_inner_size(360.0, 400.0)
-            .decorations(false)
-            .transparent(false)
-            .always_on_top(false)
-            .skip_taskbar(false)
-            .resizable(true)
-            .focused(true)
-            .visible(true)
-            .background_color(Color(51, 51, 51, 255))
-            .center()
-            .build()
-            .map_err(|e| {
-                tracing::warn!(error = %e, "sticky-manager window: 创建失败");
-                format!("创建便签管理窗口失败: {e}")
-            })?;
+        let w =
+            WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("sticky-manager.html".into()))
+                .title("便签管理")
+                .inner_size(560.0, 640.0)
+                .min_inner_size(360.0, 400.0)
+                .decorations(false)
+                .transparent(false)
+                .always_on_top(false)
+                .skip_taskbar(false)
+                .resizable(true)
+                .focused(true)
+                .visible(true)
+                .background_color(Color(51, 51, 51, 255))
+                .center()
+                .build()
+                .map_err(|e| {
+                    tracing::warn!(error = %e, "sticky-manager window: 创建失败");
+                    format!("创建便签管理窗口失败: {e}")
+                })?;
 
         // prevent_close + hide——与 chat/content-editor 一致的复用模式
         let app_clone = app.clone();
@@ -969,7 +978,8 @@ pub fn show_sticky_manager_window(app: &AppHandle) -> Result<(), String> {
 
     // 复用窗口可能被 hide 了，需要重新 show；新窗口已 visible(true) 创建
     if !is_new {
-        win.show().map_err(|e| format!("显示便签管理窗口失败: {e}"))?;
+        win.show()
+            .map_err(|e| format!("显示便签管理窗口失败: {e}"))?;
     }
     let _ = win.unminimize();
     win.set_focus()
@@ -1184,15 +1194,20 @@ pub fn show_sticky_window(
                 crate::infra::platform::dpi::get_dpi_for_hmonitor(hmon),
             )
         };
-        let _ = win.set_size(tauri::LogicalSize::new(cw as f64 / scale, ch as f64 / scale));
+        let _ = win.set_size(tauri::LogicalSize::new(
+            cw as f64 / scale,
+            ch as f64 / scale,
+        ));
         let _ = win.set_position(tauri::PhysicalPosition::new(cx, cy));
         let _ = win.set_always_on_top(always_on_top);
         // 通知前端重新加载便签数据
         // P3-#22 fix: JS 字符串转义防注入
-        let escaped_id = sticky_id.replace('\\', "\\\\").replace('\'', "\\'").replace('\n', "\\n").replace('\r', "\\r");
-        let js = format!(
-            "if (window.__stickyReload) window.__stickyReload('{escaped_id}')"
-        );
+        let escaped_id = sticky_id
+            .replace('\\', "\\\\")
+            .replace('\'', "\\'")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r");
+        let js = format!("if (window.__stickyReload) window.__stickyReload('{escaped_id}')");
         let _ = win.eval(&js);
         win
     };
@@ -1258,7 +1273,11 @@ pub fn flush_all_sticky_windows(app: &AppHandle) -> usize {
         count += 1;
     }
     if count > 0 {
-        tracing::debug!(count, "flush_all_sticky_windows: 已向 {} 个便签窗口发送 flush", count);
+        tracing::debug!(
+            count,
+            "flush_all_sticky_windows: 已向 {} 个便签窗口发送 flush",
+            count
+        );
     }
     count
 }
@@ -1339,10 +1358,18 @@ fn clamp_sticky_geometry(x: i32, y: i32, width: i32, height: i32) -> (i32, i32, 
         };
 
         tracing::trace!(
-            orig_x = x, orig_y = y, orig_w = width, orig_h = height,
-            clamped_x = cx, clamped_y = cy, clamped_w = w, clamped_h = h,
-            work_left = work.left, work_top = work.top,
-            work_right = work.right, work_bottom = work.bottom,
+            orig_x = x,
+            orig_y = y,
+            orig_w = width,
+            orig_h = height,
+            clamped_x = cx,
+            clamped_y = cy,
+            clamped_w = w,
+            clamped_h = h,
+            work_left = work.left,
+            work_top = work.top,
+            work_right = work.right,
+            work_bottom = work.bottom,
             "clamp_sticky_geometry: 钳制完成"
         );
 
@@ -1911,17 +1938,21 @@ pub fn preheat_secondary_windows(app: AppHandle) {
         // 因为 open_settings 的复用路径不调这两个（只在首次创建路径调）。
         if app.get_webview_window("settings").is_none() {
             use tauri::{WebviewUrl, WebviewWindowBuilder};
-            match WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("settings.html".into()))
-                .title("Blink Settings")
-                .inner_size(960.0, 680.0)
-                .min_inner_size(760.0, 520.0)
-                .position(0.0, 0.0)
-                .visible(false)
-                .decorations(false)
-                .transparent(true)
-                .shadow(false)
-                .background_color(tauri::window::Color(0, 0, 0, 0))
-                .build()
+            match WebviewWindowBuilder::new(
+                &app,
+                "settings",
+                WebviewUrl::App("settings.html".into()),
+            )
+            .title("Blink Settings")
+            .inner_size(960.0, 680.0)
+            .min_inner_size(760.0, 520.0)
+            .position(0.0, 0.0)
+            .visible(false)
+            .decorations(false)
+            .transparent(true)
+            .shadow(false)
+            .background_color(tauri::window::Color(0, 0, 0, 0))
+            .build()
             {
                 Ok(win) => {
                     if let Ok(hwnd) = win.hwnd() {

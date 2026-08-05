@@ -243,6 +243,11 @@
   border-radius: var(--radius-md);
   background: var(--green-bg);
   color: var(--green);
+  font-variant-numeric: tabular-nums;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .ai-provider-status.no-key {
   background: var(--red-bg);

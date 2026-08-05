@@ -16,6 +16,11 @@ import { loadSkillList, showSkillImportPanel, initSkillImportHandlers } from "./
 import { invoke } from "../../../shared/tauri.js";
 import { t, onLangChange } from "../../../i18n/index.js";
 
+// 0.17.8: AI 权限记忆配置的默认值
+const defaultPermissionConfig = { memory_enabled: true, memory_days: 7 };
+// 运行时副本，事件回调中读写
+let permissionConfig = { ...defaultPermissionConfig };
+
 /**
  * 初始化 AI Tab
  */
@@ -37,19 +42,37 @@ async function loadAIConfig() {
     console.error("get_config_section app.ai failed:", e);
     aiState.currentAIConfig = defaultAIConfig();
   }
-  // 密钥存在性并行查询
+  // 密钥存在性 + 掩码提示并行查询
   aiState.hasSecretMap = new Map();
+  aiState.secretHintMap = new Map();
   const providers = aiState.currentAIConfig.providers || [];
   await Promise.all(
     providers.map(async (p) => {
       try {
         const has = await invoke("has_ai_secret", { providerId: p.id });
         aiState.hasSecretMap.set(p.id, !!has);
+        if (has) {
+          try {
+            const hint = await invoke("get_ai_secret_hint", { providerId: p.id });
+            aiState.secretHintMap.set(p.id, hint || null);
+          } catch {
+            aiState.secretHintMap.set(p.id, null);
+          }
+        }
       } catch {
         aiState.hasSecretMap.set(p.id, false);
       }
     }),
   );
+  // 0.17.8: 加载 AI 权限记忆配置（独立分片 app.ai_permission）
+  try {
+    const perm = await invoke("get_config_section", { key: "app.ai_permission" });
+    permissionConfig = perm && typeof perm === "object" ? { ...defaultPermissionConfig, ...perm } : { ...defaultPermissionConfig };
+  } catch (e) {
+    console.warn("get_config_section app.ai_permission failed:", e);
+    permissionConfig = { ...defaultPermissionConfig };
+  }
+
   applyAIConfigToUI();
   bindAIEvents();
 }
@@ -91,6 +114,10 @@ function applyAIConfigToUI() {
   const skillCfg = chatCfg.skill_config || { enabled: true };
   if ($("ai-skill-enabled")) $("ai-skill-enabled").checked = skillCfg.enabled !== false;
   loadSkillList();
+  // 0.17.8: 权限记忆配置
+  if ($("ai-perm-memory-enabled")) $("ai-perm-memory-enabled").checked = permissionConfig.memory_enabled !== false;
+  if ($("ai-perm-memory-days")) $("ai-perm-memory-days").value = permissionConfig.memory_days ?? 7;
+
   // 工具结果回流 AI 三态分段按钮
   const feedbackValue = c.ai_tool_result_feedback ?? "on";
   setSegControlValue("ai-tool-feedback", feedbackValue);
@@ -374,6 +401,33 @@ function bindAIEvents() {
       if (tier === "main") updateMemoryContextSizeDisplay();
       saveAIConfig();
     });
+  });
+
+  // 0.17.8: 权限记忆配置事件
+  $("ai-perm-memory-enabled")?.addEventListener("change", (e) => {
+    permissionConfig.memory_enabled = e.target.checked;
+    invoke("set_config", { key: "ai_permission", value: permissionConfig }).catch((e) =>
+      console.error("set_config ai_permission failed:", e),
+    );
+  });
+  $("ai-perm-memory-days")?.addEventListener("change", (e) => {
+    const v = parseInt(e.target.value, 10);
+    permissionConfig.memory_days = isNaN(v) ? 7 : Math.max(1, Math.min(90, v));
+    e.target.value = permissionConfig.memory_days;
+    invoke("set_config", { key: "ai_permission", value: permissionConfig }).catch((e) =>
+      console.error("set_config ai_permission failed:", e),
+    );
+  });
+  $("ai-perm-clear-memory")?.addEventListener("click", async () => {
+    const btn = $("ai-perm-clear-memory");
+    if (btn) { btn.disabled = true; }
+    try {
+      await invoke("clear_all_permission_memory");
+    } catch (e) {
+      console.error("clear_all_permission_memory failed:", e);
+    } finally {
+      if (btn) { btn.disabled = false; }
+    }
   });
 
   // Provider modal 事件

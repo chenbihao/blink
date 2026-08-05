@@ -171,10 +171,7 @@ impl Service for HotkeyService {
                                 if let Some(win) = app.get_webview_window("main") {
                                     let _ = win.set_focus();
                                 }
-                                let _ = app.emit(
-                                    crate::domain::event_names::EventNames::SHOWN,
-                                    (),
-                                );
+                                let _ = app.emit(crate::domain::event_names::EventNames::SHOWN, ());
                             } else {
                                 crate::infra::platform::window::hide(&app, "toggle");
                             }
@@ -320,7 +317,11 @@ impl Service for ClipboardService {
             tracing::info!("剪贴板监听器: cfg.enabled=false, 跳过启动");
             return Ok(());
         }
-        crate::infra::platform::clipboard::start_listener(ctx.pools.history.clone(), ctx.pools.cache.clone(), cfg);
+        crate::infra::platform::clipboard::start_listener(
+            ctx.pools.history.clone(),
+            ctx.pools.cache.clone(),
+            cfg,
+        );
         Ok(())
     }
 }

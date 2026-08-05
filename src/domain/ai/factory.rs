@@ -11,7 +11,7 @@
 //! ## §6.4 兜底铁则
 //!
 //! AI 配置错误绝不破坏主链路。RigFactory::build 失败链:
-//! - `secret::load_secret` 缺 → `AIError::NotConfigured`(不是 Provider,语义"未配置")
+//! - `secret::load_secret` 缺 → `AIError::SecretMissing`(0.17.8: 区分"档位悬空"与"密钥丢失")
 //! - `openai_compat` 缺 base_url → `AIError::Provider`(用户配错,需感知)
 //! - rig `Client::builder().build()` 失败 → `AIError::Provider("client build failed")`
 //!
@@ -57,7 +57,7 @@ impl ProviderFactory for NoopFactory {
 /// **生产 factory** —— 接 rig-core 各 provider client,真跑 LLM。
 ///
 /// 每次 `build` 都:
-/// 1. 从 CM 读密钥(缺 → NotConfigured)
+/// 1. 从 CM 读密钥(缺 → SecretMissing)
 /// 2. 按 `entry.kind` 构造 rig `Client`(base_url 可覆盖)
 /// 3. `client.completion_model(&model.id)` 得到具体 `CompletionModel`
 /// 4. 包进 `RigProvider<M>` → 擦除 `Arc<dyn AIProvider>`
@@ -73,7 +73,7 @@ impl ProviderFactory for RigFactory {
         model: &ModelEntry,
     ) -> Result<Arc<dyn AIProvider>, AIError> {
         // 1. 读密钥——本地 provider (ollama) 不需要密钥,跳过。
-        //    云端 provider 缺密钥 = 未配置,不是错误。
+        //    云端 provider 缺密钥 = SecretMissing（区别于 NotConfigured 档位悬空）。
         let key_str: String;
         if entry.kind.requires_secret() {
             let key = secret::load_secret(&entry.id, "key").map_err(|e| {
@@ -82,7 +82,7 @@ impl ProviderFactory for RigFactory {
                     "AI factory: {} 密钥未配置 ({e})",
                     entry.display_name,
                 );
-                AIError::NotConfigured
+                AIError::SecretMissing(entry.display_name.clone())
             })?;
             key_str = expose_for_rig(&key);
         } else {
@@ -365,22 +365,22 @@ mod tests {
     #[test]
     fn default_factory_is_rig_factory_in_phase_5b() {
         // 0.9.2 第二步:default 是 RigFactory。
-        // 无密钥场景 → load_secret 缺 → NotConfigured(§6.4 兜底铁则,不 panic)
+        // 无密钥场景 → load_secret 缺 → SecretMissing(0.17.8: 区分"档位悬空"与"密钥丢失")
         let f = default_factory();
         let entry = sample_entry(ProviderKind::OpenAICompatible, None);
         let result = f.build(&entry, &sample_model());
         assert!(
-            matches!(result, Err(AIError::NotConfigured)),
-            "无密钥应返 NotConfigured 而非其他错误(is_ok={})",
+            matches!(result, Err(AIError::SecretMissing(_))),
+            "无密钥应返 SecretMissing 而非其他错误(is_ok={})",
             result.is_ok()
         );
     }
 
     #[test]
     fn all_cloud_kinds_have_factory_arms() {
-        // 云端三类协议都能触达 factory dispatch;无密钥场景一律 NotConfigured 早于协议构造。
+        // 云端三类协议都能触达 factory dispatch;无密钥场景一律 SecretMissing 早于协议构造。
         // 这是"分派完整性"测试:防止未来新增 kind 时忘了 factory arm。
-        // 0.12: OllamaHttp 不需要密钥,不走 NotConfigured 路径,单独测试。
+        // 0.12: OllamaHttp 不需要密钥,不走 SecretMissing 路径,单独测试。
         let f = RigFactory;
         for kind in [
             ProviderKind::OpenAICompatible,
@@ -390,8 +390,8 @@ mod tests {
             let entry = sample_entry(kind, None);
             let result = f.build(&entry, &sample_model());
             assert!(
-                matches!(result, Err(AIError::NotConfigured)),
-                "kind={kind:?} 无密钥应返 NotConfigured"
+                matches!(result, Err(AIError::SecretMissing(_))),
+                "kind={kind:?} 无密钥应返 SecretMissing"
             );
         }
     }

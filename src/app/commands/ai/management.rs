@@ -408,6 +408,18 @@ pub async fn compress_context_now(
     Ok(status)
 }
 
+/// 清空所有 AI 权限记忆（设置页-AI对话能力「清除所有权限记忆」按钮，0.17.8）。
+///
+/// 只清持久化 DB 层（`ai_permission_memory` 表），不影响会话级 `HashSet`。
+/// 用户主动撤销全部跨会话权限记忆。
+#[tauri::command]
+pub async fn clear_all_permission_memory(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    let pc = app.state::<std::sync::Arc<crate::domain::ai::tool_adapter::PendingConfirms>>();
+    pc.clear_all_trusted_db().await;
+    Ok(())
+}
+
 /// 获取 composer bar 悬浮预览快照（一次 IPC 聚合上下文 + 内置 tool + MCP 服务）。
 ///
 /// 供前端 composer bar hover popup 使用——避免前端发 4 个 IPC 请求拼装。

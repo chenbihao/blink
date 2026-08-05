@@ -331,7 +331,10 @@ impl AIProviderRegistry {
         model_id: &str,
     ) -> Option<(String, String)> {
         let config = self.config.read().expect("config lock poisoned");
-        let provider = config.providers.iter().find(|p| p.id == provider_id && p.enabled)?;
+        let provider = config
+            .providers
+            .iter()
+            .find(|p| p.id == provider_id && p.enabled)?;
         let model = provider
             .models
             .iter()

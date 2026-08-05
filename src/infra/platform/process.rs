@@ -21,12 +21,10 @@
 /// 返回 `None` 表示端口未被监听或查找失败。
 #[cfg(windows)]
 pub fn find_pid_by_port(port: u16) -> Option<u32> {
-    let output = crate::infra::platform::no_window(
-        std::process::Command::new("netstat"),
-    )
-    .args(["-ano"])
-    .output()
-    .ok()?;
+    let output = crate::infra::platform::no_window(std::process::Command::new("netstat"))
+        .args(["-ano"])
+        .output()
+        .ok()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let port_suffix = format!(":{port}");
@@ -64,12 +62,10 @@ pub fn find_pid_by_port(_port: u16) -> Option<u32> {
 /// 但 taskkill /F 通常能立即终止同用户进程）。
 #[cfg(windows)]
 pub fn kill_process_by_pid(pid: u32) -> Result<(), String> {
-    let output = crate::infra::platform::no_window(
-        std::process::Command::new("taskkill"),
-    )
-    .args(["/F", "/T", "/PID", &pid.to_string()])
-    .output()
-    .map_err(|e| format!("taskkill 执行失败: {e}"))?;
+    let output = crate::infra::platform::no_window(std::process::Command::new("taskkill"))
+        .args(["/F", "/T", "/PID", &pid.to_string()])
+        .output()
+        .map_err(|e| format!("taskkill 执行失败: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

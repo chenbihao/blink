@@ -30,7 +30,9 @@ mod windows;
 
 #[cfg(target_os = "windows")]
 #[allow(unused_imports)] // 0.9.1 Phase 2 定义,Phase 5 AI Provider dispatch 起消费
-pub use windows::{delete_all_blink_secrets, delete_secret, enumerate_blink_secrets, load_secret, save_secret};
+pub use windows::{
+    delete_all_blink_secrets, delete_secret, enumerate_blink_secrets, load_secret, save_secret,
+};
 
 /// 密钥元信息——枚举 CM 中 `blink/*` 条目时返回。
 ///

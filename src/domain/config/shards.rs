@@ -334,19 +334,23 @@ impl ContextConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScreenshotConfig {
-#[serde(default = "default_true")]
-pub prewarm_ocr: bool,
-/// 长截图诊断开关（0.17.x 从 localStorage 迁移到 SQLite 配置库）。
-#[serde(default)]
-pub scroll_debug: bool,
-/// OCR 诊断开关（0.17.5：开启后截图工具栏显示 OCR 诊断按钮）。
-#[serde(default)]
-pub ocr_debug: bool,
+    #[serde(default = "default_true")]
+    pub prewarm_ocr: bool,
+    /// 长截图诊断开关（0.17.x 从 localStorage 迁移到 SQLite 配置库）。
+    #[serde(default)]
+    pub scroll_debug: bool,
+    /// OCR 诊断开关（0.17.5：开启后截图工具栏显示 OCR 诊断按钮）。
+    #[serde(default)]
+    pub ocr_debug: bool,
 }
 
 impl Default for ScreenshotConfig {
     fn default() -> Self {
-        Self { prewarm_ocr: true, scroll_debug: false, ocr_debug: false }
+        Self {
+            prewarm_ocr: true,
+            scroll_debug: false,
+            ocr_debug: false,
+        }
     }
 }
 
@@ -447,4 +451,44 @@ fn default_local_cache_ttl() -> u64 {
 
 fn default_local_max_results() -> u32 {
     50
+}
+
+// ── AiPermissionConfig（0.17.8）──────────────────────────────────────────────────
+
+/// AI 权限记忆配置分片——第 9 个 KV，key = `"app.ai_permission"`。
+///
+/// 控制 AI 危险操作确认的跨会话持久化记忆行为。
+/// 独立于 `AIConfig`（第 7 分片），因为权限记忆是用户安全偏好，
+/// 不应与 AI provider/model 配置耦合。
+///
+/// **设计**（见 phases/0.17-enhancement-polish.md §3.10 定案 4）：
+/// - `memory_enabled`：总开关，默认 true。关闭时不查 DB，DB 数据保留。
+/// - `memory_days`：记忆天数，默认 7。太短频繁确认体验差，太长安全性降低。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiPermissionConfig {
+    /// 权限记忆总开关。默认 true——用户确认一次后在配置天数内不再重复询问。
+    /// 关闭时 `is_trusted` 不查 DB 直接返回 false，DB 数据保留（重新开启后恢复）。
+    #[serde(default = "default_true")]
+    pub memory_enabled: bool,
+
+    /// 记忆天数。默认 7 天。
+    #[serde(default = "default_permission_days")]
+    pub memory_days: u64,
+}
+
+impl Default for AiPermissionConfig {
+    fn default() -> Self {
+        Self {
+            memory_enabled: true,
+            memory_days: default_permission_days(),
+        }
+    }
+}
+
+impl ConfigKey for AiPermissionConfig {
+    const KEY: &'static str = "app.ai_permission";
+}
+
+fn default_permission_days() -> u64 {
+    7
 }

@@ -14,7 +14,7 @@
 
 import { listen } from "../shared/tauri.js";
 import { EVENTS } from "../shared/event-names.js";
-import { chatPrompt, chatAbort, confirmChatAction, promoteEphemeralConversation } from "../shared/api.js";
+import { chatPrompt, chatAbort, confirmChatAction, promoteEphemeralConversation, getEphemeralModels } from "../shared/api.js";
 import { initMarkdown, renderMarkdown, renderMarkdownStream } from "../shared/markdown.js";
 import {
   renderTypingIndicator,
@@ -30,12 +30,15 @@ import {
   aiToolLineEl,
   aiRoundsEl,
   aiContentEl,
+  aiDisplayEl,
+  aiModelLabelEl,
   queryEl,
 } from "./dom.js";
 import { syncWindowSize } from "./window-size.js";
 import { t } from "../i18n/index.js";
 import * as ghost from "./ghost.js";
 import * as search from "./search.js";
+import * as results from "./results.js";
 
 // ── 状态 ──────────────────────────────────────────────────────────────────────
 
@@ -99,8 +102,14 @@ export async function enterAiMode(queryText) {
   aiQueryEl.value = "";
   aiQueryEl.focus();
 
-  // 放 typing 动画
-  aiContentEl.innerHTML = renderTypingIndicator();
+  // 清空搜索结果 + statusbar（避免 AI 模式下残留搜索导航提示）
+  results.clear();
+
+  // 加载当前模型标签（异步，不阻塞首条消息发送）
+  refreshModelLabel();
+
+  // 清空展示区
+  aiContentEl.innerHTML = "";
   aiToolLineEl.innerHTML = "";
   syncWindowSize();
 
@@ -141,6 +150,10 @@ export function exitAiMode() {
   aiContentEl.innerHTML = "";
   aiToolLineEl.innerHTML = "";
   aiRoundsEl.innerHTML = "";
+  aiModelLabelEl.textContent = "";
+  // 重置 footer 隐藏态（下次 enterAiMode 由 refreshModelLabel 控制）
+  const footer = aiModelLabelEl.parentElement;
+  if (footer) footer.classList.add("hidden");
   // 重建 #ai-content（被确认卡片替换后需要恢复）
   aiRoundsEl.appendChild(aiContentEl);
 
@@ -156,6 +169,7 @@ export function exitAiMode() {
 
 /**
  * 调用 chat_prompt 发送消息。
+ * 在 #ai-content 中先渲染用户消息气泡，再创建 AI 回复区放 typing 动画。
  * @param {string} message 用户消息文本
  */
 async function sendPrompt(message) {
@@ -163,12 +177,29 @@ async function sendPrompt(message) {
   awaitingConfirm = false;
   currentQuestion = message;
 
-  // 放 typing 动画
-  aiContentEl.innerHTML = renderTypingIndicator();
+  // 构建当前轮 DOM：用户消息 + AI 回复区（含 typing 动画）
+  aiContentEl.innerHTML = "";
+
+  // 用户消息气泡
+  const userMsg = document.createElement("div");
+  userMsg.className = "ai-user-message";
+  userMsg.textContent = message;
+  aiContentEl.appendChild(userMsg);
+
+  // AI 回复区
+  const responseArea = document.createElement("div");
+  responseArea.className = "ai-response-area";
+  responseArea.innerHTML = renderTypingIndicator();
+  aiContentEl.appendChild(responseArea);
+
   if (throttle) {
     throttle.cancel();
   }
   streamRenderer = null;
+
+  // 滚动到最新内容
+  scrollToBottom();
+  syncWindowSize();
 
   try {
     const rid = await chatPrompt(conversationId, message, {
@@ -272,12 +303,17 @@ function handleTextChunk(text) {
 
   // 首次 text 到达时：移除 typing 动画，创建流式渲染器
   if (!streamRenderer) {
-    aiContentEl.innerHTML = "";
-    streamRenderer = renderMarkdownStream(aiContentEl);
+    const responseArea = aiContentEl.querySelector(".ai-response-area");
+    if (!responseArea) return;
+    responseArea.innerHTML = "";
+    streamRenderer = renderMarkdownStream(responseArea);
     throttle = createThrottledRenderer((accumulated) => {
       if (streamRenderer) {
         streamRenderer.write(accumulated);
       }
+      // 流式渲染期间同步窗口高度 + 滚动到底部
+      scrollToBottom();
+      syncWindowSize();
     });
   }
 
@@ -289,6 +325,8 @@ function handleTextChunk(text) {
  */
 function handleToolCall(toolName, args) {
   aiToolLineEl.innerHTML = renderToolLine(toolName, args);
+  scrollToBottom();
+  syncWindowSize();
 }
 
 /**
@@ -303,6 +341,7 @@ function handleToolResult(callId, success, summary) {
   if (toolName) {
     aiToolLineEl.innerHTML = renderToolResultLine(toolName, success, summary);
   }
+  scrollToBottom();
 }
 
 /**
@@ -333,8 +372,11 @@ function handleDone(chunk) {
   setTimeout(() => {
     if (!active) return;
     aiToolLineEl.innerHTML = "";
+    // 工具行消失后需要同步窗口高度（窗口可能缩短）
+    syncWindowSize();
   }, 2000);
 
+  scrollToBottom();
   syncWindowSize();
 }
 
@@ -349,7 +391,11 @@ function handleError(message) {
   }
   streamRenderer = null;
 
-  aiContentEl.innerHTML = `<div class="ai-error-message">${escapeHtml(message)}</div>`;
+  const responseArea = aiContentEl.querySelector(".ai-response-area");
+  if (responseArea) {
+    responseArea.innerHTML = `<div class="ai-error-message">${escapeHtml(message)}</div>`;
+  }
+  scrollToBottom();
   syncWindowSize();
 }
 
@@ -357,10 +403,14 @@ function handleError(message) {
  * 处理最大轮次到达。
  */
 function handleMaxTurns(maxTurns) {
-  aiContentEl.insertAdjacentHTML(
-    "beforeend",
-    `<div class="ai-max-turns-warning">${escapeHtml(t("ai.max_turns_warning", { max: maxTurns }))}</div>`,
-  );
+  const responseArea = aiContentEl.querySelector(".ai-response-area");
+  if (responseArea) {
+    responseArea.insertAdjacentHTML(
+      "beforeend",
+      `<div class="ai-max-turns-warning">${escapeHtml(t("ai.max_turns_warning", { max: maxTurns }))}</div>`,
+    );
+  }
+  scrollToBottom();
   syncWindowSize();
 }
 
@@ -372,10 +422,19 @@ function handlePromptError(e) {
   // AlreadyActive 错误
   if (msg.startsWith("AlreadyActive:")) {
     const win = msg.slice("AlreadyActive:".length);
-    aiContentEl.innerHTML = `<div class="ai-error-message">${escapeHtml(t("ai.already_active", { window: win }))}</div>`;
+    setResponseError(escapeHtml(t("ai.already_active", { window: win })));
   } else {
-    aiContentEl.innerHTML = `<div class="ai-error-message">${escapeHtml(msg)}</div>`;
+    setResponseError(escapeHtml(msg));
   }
+}
+
+/** 在 AI 回复区显示错误信息。 */
+function setResponseError(html) {
+  const responseArea = aiContentEl.querySelector(".ai-response-area");
+  if (responseArea) {
+    responseArea.innerHTML = `<div class="ai-error-message">${html}</div>`;
+  }
+  scrollToBottom();
   syncWindowSize();
 }
 
@@ -393,7 +452,7 @@ function handleConfirmEvent(event) {
 
   awaitingConfirm = true;
 
-  // 在 #ai-content 区域显示确认卡片
+  // 在 AI 回复区显示确认卡片
   const card = renderConfirmCard(payload, async (confirmId, approved) => {
     try {
       await confirmChatAction(confirmId, approved);
@@ -405,8 +464,12 @@ function handleConfirmEvent(event) {
     awaitingConfirm = false;
   });
 
-  aiContentEl.innerHTML = "";
-  aiContentEl.appendChild(card);
+  const responseArea = aiContentEl.querySelector(".ai-response-area");
+  if (responseArea) {
+    responseArea.innerHTML = "";
+    responseArea.appendChild(card);
+  }
+  scrollToBottom();
   syncWindowSize();
 }
 
@@ -467,32 +530,14 @@ function collapseToSummary(question, answer) {
 // ── 辅助函数 ──────────────────────────────────────────────────────────────────
 
 /**
- * 在内容区底部注入复制按钮。
+ * 在 AI 回复区底部注入复制按钮。
  */
 function injectCopyButton() {
+  const responseArea = aiContentEl.querySelector(".ai-response-area");
+  if (!responseArea) return;
   const btn = document.createElement("button");
   btn.className = "ai-copy-btn";
   btn.textContent = t("ai.copy");
-  btn.style.cssText = `
-    display: block;
-    margin-top: var(--space-sm);
-    padding: var(--space-xs) var(--space-md);
-    border: 1px solid var(--text-faint);
-    border-radius: var(--radius-sm);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: var(--text-xs);
-    cursor: pointer;
-    transition: all var(--transition-fast) ease;
-  `;
-  btn.addEventListener("mouseenter", () => {
-    btn.style.background = "var(--accent-bg)";
-    btn.style.color = "var(--accent)";
-  });
-  btn.addEventListener("mouseleave", () => {
-    btn.style.background = "transparent";
-    btn.style.color = "var(--text-dim)";
-  });
   btn.addEventListener("click", async () => {
     try {
       await navigator.clipboard.writeText(streamBuffer);
@@ -502,7 +547,44 @@ function injectCopyButton() {
       console.error("[ai-mode] 复制失败:", e);
     }
   });
-  aiContentEl.appendChild(btn);
+  responseArea.appendChild(btn);
+}
+
+/**
+ * 滚动 #ai-display 到底部，确保最新内容可见。
+ */
+function scrollToBottom() {
+  if (aiDisplayEl) {
+    aiDisplayEl.scrollTop = aiDisplayEl.scrollHeight;
+  }
+}
+
+/**
+ * 异步拉取当前 Ephemeral 模型并更新底部标签。
+ * 失败静默降级（隐藏标签栏）。
+ */
+async function refreshModelLabel() {
+  const footer = aiModelLabelEl.parentElement;
+  try {
+    const models = await getEphemeralModels();
+    if (!models || !models.length) {
+      aiModelLabelEl.textContent = "";
+      if (footer) footer.classList.add("hidden");
+      return;
+    }
+    const selected = models.find((m) => m.is_selected);
+    if (selected) {
+      aiModelLabelEl.textContent = selected.model_name;
+      if (footer) footer.classList.remove("hidden");
+    } else {
+      aiModelLabelEl.textContent = "";
+      if (footer) footer.classList.add("hidden");
+    }
+  } catch (e) {
+    console.warn("[ai-mode] 获取模型列表失败:", e);
+    aiModelLabelEl.textContent = "";
+    if (footer) footer.classList.add("hidden");
+  }
 }
 
 /** HTML 特殊字符转义。 */

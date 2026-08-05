@@ -39,8 +39,14 @@ export function renderAIProviders() {
       const modelSummary = models.map((m) => m.id).join(", ");
       const isLocalKind = p.kind === "ollama_http";
       const hasKey = isLocalKind || aiState.hasSecretMap.get(p.id) === true;
+      const secretHint = aiState.secretHintMap?.get(p.id);
+      // 本地 provider 显示"本地"，有密钥显示掩码提示，无密钥显示"未配置密钥"
+      const statusText = isLocalKind
+        ? t("ai.provider.local")
+        : hasKey
+          ? (secretHint || t("ai.provider.configured"))
+          : t("ai.provider.not_configured");
       const statusCls = hasKey ? "" : "no-key";
-      const statusText = hasKey ? t("ai.provider.configured") : t("ai.provider.not_configured");
       const presetKey = guessPresetForProvider(p.kind, p.base_url);
       const preset = AI_PRESET_CATALOG[presetKey] || AI_PRESET_CATALOG.custom;
       const rawMono = preset.monogram || (p.display_name || "").slice(0, 2);
@@ -111,10 +117,16 @@ export function renderAIProviders() {
     cards + `<button class="ai-providers-add" id="ai-add-provider">${escapeHtml(t("ai.providers.add"))}</button>`;
 
   document.getElementById("ai-add-provider")?.addEventListener("click", () => openAIProviderModal());
-  // accordion 展开/折叠
+  // accordion 展开/折叠——点击 header 区域切换展开/收起。
+  // 排除交互控件：编辑/删除按钮、拖拽手柄、启用开关（含 label + slider）。
   container.querySelectorAll(".ai-provider-header").forEach((header) => {
     header.addEventListener("click", (e) => {
-      if (e.target.closest(".ai-provider-edit") || e.target.closest(".ai-provider-delete") || e.target.closest(".ai-provider-drag-handle") || e.target.closest(".ai-provider-toggle")) return;
+      if (
+        e.target.closest(".ai-provider-edit") ||
+        e.target.closest(".ai-provider-delete") ||
+        e.target.closest(".ai-provider-drag-handle") ||
+        e.target.closest("label.switch")  // 开关 label + slider + input 都排除
+      ) return;
       const card = header.closest(".ai-provider-card");
       const modelsDiv = card.querySelector(".ai-provider-models");
       const chevron = header.querySelector(".ai-provider-chevron");
@@ -627,6 +639,15 @@ async function saveNewProvider({ kind, displayName, baseUrl, apiKey, errEl, sele
   };
   cfg.providers = [...(cfg.providers || []), newProvider];
   aiState.hasSecretMap.set(providerId, !!apiKey || kind === "ollama_http");
+  // 0.17.8: 保存密钥掩码提示，供 provider 卡片展示
+  if (apiKey) {
+    const hint = apiKey.length > 8
+      ? `${apiKey.slice(0, 4)}••••${apiKey.slice(-4)}`
+      : "••••••••";
+    aiState.secretHintMap?.set(providerId, hint);
+  } else {
+    aiState.secretHintMap?.set(providerId, null);
+  }
 
   try {
     await saveAIConfig();
@@ -684,7 +705,14 @@ async function saveEditedProvider(providerId, { displayName, baseUrl, apiKey, er
     updated,
     ...cfg.providers.slice(idx + 1),
   ];
-  if (changingKey) aiState.hasSecretMap.set(providerId, true);
+  if (changingKey) {
+    aiState.hasSecretMap.set(providerId, true);
+    // 0.17.8: 更新密钥掩码提示
+    const hint = apiKey.length > 8
+      ? `${apiKey.slice(0, 4)}••••${apiKey.slice(-4)}`
+      : "••••••••";
+    aiState.secretHintMap?.set(providerId, hint);
+  }
 
   try {
     await saveAIConfig();
@@ -730,6 +758,7 @@ export async function deleteAIProvider(providerId) {
 
   cfg.providers = (cfg.providers || []).filter((p) => p.id !== providerId);
   aiState.hasSecretMap.delete(providerId);
+  aiState.secretHintMap?.delete(providerId);
   ["router", "light", "main"].forEach((tier) => {
     const a = cfg[`tier_${tier}`];
     if (a && a.provider_id === providerId) {

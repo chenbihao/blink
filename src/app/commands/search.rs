@@ -351,7 +351,13 @@ pub async fn trigger_chord(
         .inner()
         .clone();
     let _surface = registry
-        .trigger(&key, &chord_cfg.bindings, env_arc.as_ref(), input_text.as_deref(), origin_ref.as_deref())
+        .trigger(
+            &key,
+            &chord_cfg.bindings,
+            env_arc.as_ref(),
+            input_text.as_deref(),
+            origin_ref.as_deref(),
+        )
         .await?;
     Ok(())
 }

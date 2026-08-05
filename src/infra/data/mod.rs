@@ -10,6 +10,7 @@ pub mod conversations;
 pub mod history;
 pub mod icon_cache;
 pub mod perf;
+pub mod permission_memory;
 pub mod pools;
 pub mod sticky;
 
@@ -45,10 +46,7 @@ pub async fn vacuum_if_needed(pool: &sqlx::SqlitePool, threshold: f64) -> bool {
             return false;
         }
     };
-    let page_count: (i64,) = match sqlx::query_as("PRAGMA page_count")
-        .fetch_one(pool)
-        .await
-    {
+    let page_count: (i64,) = match sqlx::query_as("PRAGMA page_count").fetch_one(pool).await {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "查 page_count 失败，跳过 VACUUM");
@@ -64,7 +62,10 @@ pub async fn vacuum_if_needed(pool: &sqlx::SqlitePool, threshold: f64) -> bool {
     let ratio = free as f64 / total as f64;
     if ratio < threshold {
         tracing::debug!(
-            free, total, ratio, threshold,
+            free,
+            total,
+            ratio,
+            threshold,
             "freelist 占比低于阈值，跳过 VACUUM"
         );
         return false;

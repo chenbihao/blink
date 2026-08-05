@@ -7,8 +7,8 @@
 
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::domain::sticky::{StickyColor, StickyFormat, StickyService, StickyError};
 use crate::domain::event_names::EventNames;
+use crate::domain::sticky::{StickyColor, StickyError, StickyFormat, StickyService};
 
 /// 创建便签。
 ///
@@ -20,10 +20,7 @@ pub async fn create_sticky_note(
     content: Option<String>,
     color: Option<String>,
 ) -> Result<crate::domain::sticky::StickyNote, String> {
-    let svc = app
-        .state::<std::sync::Arc<StickyService>>()
-        .inner()
-        .clone();
+    let svc = app.state::<std::sync::Arc<StickyService>>().inner().clone();
 
     let c = color
         .as_deref()
@@ -56,9 +53,7 @@ pub async fn get_sticky_note(
 
 /// 列出全部便签。
 #[tauri::command]
-pub async fn list_sticky_notes(
-    app: AppHandle,
-) -> Vec<crate::domain::sticky::StickyNote> {
+pub async fn list_sticky_notes(app: AppHandle) -> Vec<crate::domain::sticky::StickyNote> {
     let svc = app.state::<std::sync::Arc<StickyService>>();
     svc.list_notes().await
 }
@@ -125,11 +120,7 @@ pub async fn update_sticky_geometry(
 
 /// 设置便签可见性。
 #[tauri::command]
-pub async fn set_sticky_visible(
-    app: AppHandle,
-    id: String,
-    visible: bool,
-) -> Result<(), String> {
+pub async fn set_sticky_visible(app: AppHandle, id: String, visible: bool) -> Result<(), String> {
     let svc = app.state::<std::sync::Arc<StickyService>>();
     svc.set_visible(&id, visible)
         .await
@@ -158,10 +149,7 @@ pub async fn set_sticky_always_on_top(
 
 /// 删除便签（永久）。
 #[tauri::command]
-pub async fn delete_sticky_note(
-    app: AppHandle,
-    id: String,
-) -> Result<(), String> {
+pub async fn delete_sticky_note(app: AppHandle, id: String) -> Result<(), String> {
     let svc = app.state::<std::sync::Arc<StickyService>>();
     svc.delete_note(&id)
         .await
@@ -188,10 +176,7 @@ pub async fn get_sticky_stats(app: AppHandle) -> serde_json::Value {
 /// 后端根据 sticky_id 从 DB 读取位置/尺寸/置顶状态，恢复窗口。
 /// 0.17.7：显示时同时确保 trashed=false（从回收站恢复）。
 #[tauri::command]
-pub async fn show_sticky_window_cmd(
-    app: AppHandle,
-    sticky_id: String,
-) -> Result<(), String> {
+pub async fn show_sticky_window_cmd(app: AppHandle, sticky_id: String) -> Result<(), String> {
     let svc = app.state::<std::sync::Arc<StickyService>>();
     let note = svc
         .get_note(&sticky_id)
@@ -234,10 +219,7 @@ pub async fn show_sticky_window_cmd(
 
 /// 销毁便签窗口（删除数据后调用）。
 #[tauri::command]
-pub async fn destroy_sticky_window_cmd(
-    app: AppHandle,
-    sticky_id: String,
-) -> Result<(), String> {
+pub async fn destroy_sticky_window_cmd(app: AppHandle, sticky_id: String) -> Result<(), String> {
     crate::infra::platform::window::destroy_sticky_window(&app, &sticky_id);
     Ok(())
 }
@@ -257,10 +239,7 @@ pub async fn show_sticky_manager_cmd(app: AppHandle) -> Result<(), String> {
 /// 关闭按钮语义：`trashed=true` + `deleted_at=now`，窗口 hide。
 /// emit `STICKY_TRASHED` 让管理界面刷新。
 #[tauri::command]
-pub async fn trash_sticky_note(
-    app: AppHandle,
-    id: String,
-) -> Result<(), String> {
+pub async fn trash_sticky_note(app: AppHandle, id: String) -> Result<(), String> {
     let svc = app.state::<std::sync::Arc<StickyService>>();
     svc.trash_note(&id)
         .await
@@ -279,10 +258,7 @@ pub async fn trash_sticky_note(
 /// `trashed=false` + `deleted_at=null`，恢复到桌面。
 /// emit `STICKY_RESTORED` 让管理界面刷新。
 #[tauri::command]
-pub async fn restore_sticky_note(
-    app: AppHandle,
-    id: String,
-) -> Result<(), String> {
+pub async fn restore_sticky_note(app: AppHandle, id: String) -> Result<(), String> {
     let svc = app.state::<std::sync::Arc<StickyService>>();
     svc.restore_note(&id)
         .await
@@ -298,20 +274,17 @@ pub async fn restore_sticky_note(
 
 /// 列出回收站中的便签。
 #[tauri::command]
-pub async fn list_trashed_sticky_notes(
-    app: AppHandle,
-) -> Vec<crate::domain::sticky::StickyNote> {
+pub async fn list_trashed_sticky_notes(app: AppHandle) -> Vec<crate::domain::sticky::StickyNote> {
     let svc = app.state::<std::sync::Arc<StickyService>>();
     svc.list_trashed_notes().await
 }
 
 /// 清空回收站（物理删除所有 trashed=true 的便签）。
 #[tauri::command]
-pub async fn clear_trashed_sticky_notes(
-    app: AppHandle,
-) -> Result<u64, String> {
+pub async fn clear_trashed_sticky_notes(app: AppHandle) -> Result<u64, String> {
     let svc = app.state::<std::sync::Arc<StickyService>>();
-    let count = svc.clear_trashed()
+    let count = svc
+        .clear_trashed()
         .await
         .map_err(|e: StickyError| e.to_string())?;
 

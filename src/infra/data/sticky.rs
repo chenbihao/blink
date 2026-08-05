@@ -327,7 +327,8 @@ pub async fn get(pool: &SqlitePool, id: &str) -> Option<StickyNote> {
     .flatten()?;
 
     Some(row_to_note(
-        row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10, row.11, row.12, row.13,
+        row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10, row.11,
+        row.12, row.13,
     ))
 }
 
@@ -400,14 +401,16 @@ pub async fn update_appearance(
 ) -> Result<(), String> {
     let now = chrono::Utc::now().timestamp();
     if let Some(fmt) = format {
-        sqlx::query("UPDATE sticky_notes SET color = ?1, format = ?2, updated_at = ?3 WHERE id = ?4")
-            .bind(color.as_str())
-            .bind(fmt.as_str())
-            .bind(now)
-            .bind(id)
-            .execute(pool)
-            .await
-            .map_err(|e| e.to_string())?;
+        sqlx::query(
+            "UPDATE sticky_notes SET color = ?1, format = ?2, updated_at = ?3 WHERE id = ?4",
+        )
+        .bind(color.as_str())
+        .bind(fmt.as_str())
+        .bind(now)
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
     } else {
         sqlx::query("UPDATE sticky_notes SET color = ?1, updated_at = ?2 WHERE id = ?3")
             .bind(color.as_str())
@@ -514,11 +517,7 @@ pub async fn cleanup_trashed(pool: &SqlitePool, retention_days: i64) -> u64 {
         }
     };
     if result > 0 {
-        tracing::info!(
-            deleted = result,
-            retention_days,
-            "回收站过期便签已清理"
-        );
+        tracing::info!(deleted = result, retention_days, "回收站过期便签已清理");
     }
     result
 }

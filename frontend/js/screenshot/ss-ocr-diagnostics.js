@@ -5,7 +5,7 @@
 //! 面板展示已安装 OCR 语言列表、中文包状态、引擎语言、选区 OCR 测试结果。
 //! 无中文包时显示安装引导。
 
-import { ocrDiagnose, ocrImage } from "../shared/api.js";
+import { ocrDiagnose, ocrImage, openUrl } from "../shared/api.js";
 import { t } from "../i18n/index.js";
 import { ss } from "./ss-state.js";
 import { compositeSelection } from "./ss-output.js";
@@ -58,12 +58,13 @@ export async function doOcrDiagnostics() {
 
     if (!hasChinese) {
       guideEl.classList.remove("hidden");
-      guideEl.querySelector("button").addEventListener("click", () => {
+      guideEl.querySelector("button").addEventListener("click", async () => {
         try {
-          open("ms-settings:regionlanguage", "_blank");
+          await openUrl("ms-settings:regionlanguage");
         } catch {
-          // fallback：提示手动打开
-          showText(testEl, t("screenshot.ocr_diag.install_guide"));
+          // fallback：在引导区追加手动提示
+          const hint = guideEl.querySelector(".ocr-diag-hint");
+          if (hint) hint.textContent = t("screenshot.ocr_diag.install_guide");
         }
       });
     }
@@ -152,10 +153,6 @@ function formatTestResult(lines, chars, elapsedMs, preview) {
     html += `<br><span class="ocr-diag-preview">${escapeHtml(preview)}</span>`;
   }
   return html;
-}
-
-function showText(el, text) {
-  if (el) el.textContent = text;
 }
 
 function escapeHtml(str) {

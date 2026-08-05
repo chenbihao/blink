@@ -18,6 +18,8 @@ export const aiState = {
   currentAIConfig: null,
   /** 密钥存在性映射 provider_id → boolean（不发明文回前端） */
   hasSecretMap: new Map(),
+  /** 密钥掩码提示映射 provider_id → string|null（如 "sk-a••••cdef"），仅 hasSecretMap 为 true 时有值 */
+  secretHintMap: new Map(),
 
   // ── 模型编辑 modal 草稿变量 ──────────────────────────────
   _modelEditProviderId: null,

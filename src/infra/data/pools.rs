@@ -103,6 +103,14 @@ impl DbPools {
             });
         }
 
+        // ── 0.17.8: 过期权限记忆清理（启动时批量删除过期行） ──
+        {
+            let pool = self.config.clone();
+            tauri::async_runtime::spawn(async move {
+                crate::infra::data::permission_memory::cleanup_expired(&pool).await;
+            });
+        }
+
         // ── 0.17.0: 按需 VACUUM（freelist 占比超 20% 则收缩） ──
         // 在所有清理之后执行，启动时无用户交互查询，VACUUM 独占连接影响可忽略。
         {
@@ -174,7 +182,7 @@ async fn create_pool(path: &PathBuf) -> Result<SqlitePool, String> {
 
 // ── 各库建表 ─────────────────────────────────────────────────────────────────
 
-/// 配置库：config 表
+/// 配置库：config 表 + ai_permission_memory 表（0.17.8）
 async fn init_config_schema(pool: &SqlitePool) -> Result<(), String> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS config (
@@ -186,6 +194,12 @@ async fn init_config_schema(pool: &SqlitePool) -> Result<(), String> {
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
+
+    // 0.17.8: AI 权限记忆表（跨会话持久化用户对危险 tool 的信任授权）
+    crate::infra::data::permission_memory::init_db(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
     Ok(())
 }
 

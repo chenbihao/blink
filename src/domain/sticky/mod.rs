@@ -100,7 +100,11 @@ impl StickyService {
     ///
     /// 前端 JS 做防抖（500ms 停顿后调用），后端即时写库。
     /// P1-#13 fix: 返回 Result 传播错误，不再吞错——前端需知道保存是否成功。
-    pub async fn update_content_debounced(&self, id: &str, content: &str) -> Result<(), StickyError> {
+    pub async fn update_content_debounced(
+        &self,
+        id: &str,
+        content: &str,
+    ) -> Result<(), StickyError> {
         crate::infra::data::sticky::update_content(&self.history_pool, id, content)
             .await
             .map_err(|e| StickyError::Db { detail: e })?;
@@ -136,11 +140,9 @@ impl StickyService {
         width: i32,
         height: i32,
     ) -> Result<(), StickyError> {
-        crate::infra::data::sticky::update_geometry(
-            &self.history_pool, id, x, y, width, height,
-        )
-        .await
-        .map_err(|e| StickyError::Db { detail: e })
+        crate::infra::data::sticky::update_geometry(&self.history_pool, id, x, y, width, height)
+            .await
+            .map_err(|e| StickyError::Db { detail: e })
     }
 
     /// 设置便签可见性。

@@ -17,8 +17,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use crate::domain::ai::memory::{
-    EphemeralConversationMemory, MemoryLoadResult, SqliteConversationMemory, estimate_messages_tokens,
-    estimate_tokens,
+    EphemeralConversationMemory, MemoryLoadResult, SqliteConversationMemory,
+    estimate_messages_tokens, estimate_tokens,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
@@ -54,14 +54,14 @@ pub enum ConversationKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct AgentCacheKey {
-provider_id: String,
-model_id: String,
-fingerprint: String,
-preamble_hash: u64,
-/// MCP tool 池版本号——拓扑变化时 bump，触发 Agent 重建。
-mcp_epoch: u64,
-/// 0.17.6: 对话类型——Persistent / Ephemeral 使用不同 memory，需独立缓存。
-kind: ConversationKind,
+    provider_id: String,
+    model_id: String,
+    fingerprint: String,
+    preamble_hash: u64,
+    /// MCP tool 池版本号——拓扑变化时 bump，触发 Agent 重建。
+    mcp_epoch: u64,
+    /// 0.17.6: 对话类型——Persistent / Ephemeral 使用不同 memory，需独立缓存。
+    kind: ConversationKind,
 }
 
 struct CachedAgent {
@@ -70,21 +70,21 @@ struct CachedAgent {
 }
 
 struct ActiveChatRequest {
-request_id: u64,
-conversation_id: String,
-/// 0.17.6: 活跃请求所在窗口（"chat" / "main"），供 AlreadyActive 错误提示。
-target_window: String,
-abort_handle: AbortHandle,
+    request_id: u64,
+    conversation_id: String,
+    /// 0.17.6: 活跃请求所在窗口（"chat" / "main"），供 AlreadyActive 错误提示。
+    target_window: String,
+    abort_handle: AbortHandle,
 }
 
 /// 可序列化的 active request 快照，供 Phase 4 `get_chat_status` 使用。
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct ActiveChatStatus {
-pub request_id: u64,
-pub conversation_id: String,
-/// 0.17.6: 活跃请求所在窗口标签。
-#[serde(skip_serializing_if = "Option::is_none")]
-pub target_window: Option<String>,
+    pub request_id: u64,
+    pub conversation_id: String,
+    /// 0.17.6: 活跃请求所在窗口标签。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_window: Option<String>,
 }
 
 // ── 0.13.6: 上下文窗口状态 ──────────────────────────────────────────────────────
@@ -159,11 +159,11 @@ pub struct ChatModelSelection {
 ///
 /// IPC 层持有 `chunks` 并逐项包装 request_id / conversation_id 后 `emit_to("chat", ...)`。
 pub struct ChatPromptHandle {
-pub request_id: u64,
-pub conversation_id: String,
-pub chunks: mpsc::UnboundedReceiver<ChatStreamChunk>,
-/// 0.17.6: 目标窗口标签（IPC 层据此 emit_to 正确窗口）。
-pub target_window: String,
+    pub request_id: u64,
+    pub conversation_id: String,
+    pub chunks: mpsc::UnboundedReceiver<ChatStreamChunk>,
+    /// 0.17.6: 目标窗口标签（IPC 层据此 emit_to 正确窗口）。
+    pub target_window: String,
 }
 
 /// 定向发送到 chat 窗口的流式事件包装（Phase 4）。
@@ -284,7 +284,11 @@ pub struct ChatService {
     /// 串行化 prompt 启动过程，防止两个并发 IPC 同时通过 active 检查。
     start_gate: tokio::sync::Mutex<()>,
     /// 运行时选中的模型（None = 用 Tier::Main 默认）。0.12.2 §4.4。
+    /// 仅用于 Persistent 对话（对话窗口）。
     selected: RwLock<Option<ChatModelSelection>>,
+    /// 0.17.9: Ephemeral 对话（主窗口 AI）的独立模型选择。
+    /// None = 用 Tier::Light 默认（Light 空则降级 Main）；Some = 用户显式选了模型。
+    ephemeral_selected: RwLock<Option<ChatModelSelection>>,
     /// 配置库连接池（持久化模型选择到 config 表）。
     config_pool: sqlx::SqlitePool,
     /// 0.13.6: 上次计算的上下文窗口状态（供 `get_context_window_status` command 查询）。
@@ -310,6 +314,9 @@ impl ChatService {
         // 从配置库加载持久化的模型选择（0.12.7）
         // 0.14.7 W1: async 边界收敛在调用方（wiring），domain 内不再嵌套 runtime
         let selected = Self::load_selected_model(&config_pool, &ai_registry).await;
+        // 0.17.9: 加载 Ephemeral 独立模型选择
+        let ephemeral_selected =
+            Self::load_ephemeral_selected_model(&config_pool, &ai_registry).await;
         Self {
             emitter,
             ai_registry,
@@ -328,6 +335,7 @@ impl ChatService {
             requests: RequestTracker::new(),
             start_gate: tokio::sync::Mutex::new(()),
             selected: RwLock::new(selected),
+            ephemeral_selected: RwLock::new(ephemeral_selected),
             config_pool,
         }
     }
@@ -350,7 +358,10 @@ impl ChatService {
 
         // 校验 provider/model 仍存在
         let config = ai_registry.config_snapshot();
-        let provider = config.providers.iter().find(|p| p.id == provider_id && p.enabled)?;
+        let provider = config
+            .providers
+            .iter()
+            .find(|p| p.id == provider_id && p.enabled)?;
         let model = provider.models.iter().find(|m| m.id == model_id)?;
         if !model
             .capabilities
@@ -377,37 +388,122 @@ impl ChatService {
         })
     }
 
-    /// 解析当前应使用的 Provider+Model entries（0.12.2 §4.4）。
+    /// 0.17.9: 从配置库加载 Ephemeral 对话的持久化模型选择。
     ///
-    /// 优先级：`selected`（用户在模型选择器显式选的）→ `Tier::Main`（回落）。
-    /// selected 引用已失效（provider/model 被删）时自动回落 Main 并清 selected。
+    /// 读取 `chat:ephemeral_selected_model` config key，校验后恢复。失效则返回 None（回落 Light）。
+    async fn load_ephemeral_selected_model(
+        config_pool: &sqlx::SqlitePool,
+        ai_registry: &AIProviderRegistry,
+    ) -> Option<ChatModelSelection> {
+        let selection_id =
+            crate::infra::data::config::get_config(config_pool, "chat:ephemeral_selected_model")
+                .await?;
+
+        let (provider_id, model_id) = selection_id.split_once(':')?;
+        if provider_id.is_empty() || model_id.is_empty() {
+            return None;
+        }
+
+        let config = ai_registry.config_snapshot();
+        let provider = config
+            .providers
+            .iter()
+            .find(|p| p.id == provider_id && p.enabled)?;
+        let model = provider.models.iter().find(|m| m.id == model_id)?;
+        if !model
+            .capabilities
+            .contains(&crate::domain::config::ai_config::ModelCapability::Chat)
+        {
+            return None;
+        }
+
+        let model_name = if model.display_name.is_empty() {
+            model.id.clone()
+        } else {
+            model.display_name.clone()
+        };
+        tracing::info!(
+            provider = %provider.display_name,
+            model = %model_name,
+            "ChatService: 从配置恢复 Ephemeral 模型选择"
+        );
+        Some(ChatModelSelection {
+            provider_id: provider_id.to_string(),
+            model_id: model_id.to_string(),
+            provider_display_name: provider.display_name.clone(),
+            model_display_name: model_name,
+        })
+    }
+
+    /// 解析当前应使用的 Provider+Model entries（0.12.2 §4.4 / 0.17.9 分路）。
+    ///
+    /// 按 `kind` 分路：
+    /// - `Persistent`：`selected` 优先 → `Tier::Main` 回落（行为不变）
+    /// - `Ephemeral`：`ephemeral_selected` 优先 → `Tier::Light` 回落（Light 空则降级 Main）
+    ///
+    /// selected/ephemeral_selected 引用已失效（provider/model 被删）时自动清空并回落。
     ///
     /// 返回 `ResolvedProviderEntries`（含 cache_key，供缓存命中判断）。
-    fn resolve_current_entries(&self) -> Result<ResolvedProviderEntries, AIError> {
-        let selected = self
-            .selected
-            .read()
-            .expect("selected lock poisoned")
-            .clone();
-        if let Some(sel) = selected {
-            match self
-                .ai_registry
-                .resolve_explicit_entries(&sel.provider_id, &sel.model_id)
-            {
-                Ok(entries) => return Ok(entries),
-                Err(AIError::NotConfigured) => {
-                    // selected 引用的 model 已被删/禁用——清空 selected 回落 Main
-                    tracing::warn!(
-                        provider_id = %sel.provider_id,
-                        model_id = %sel.model_id,
-                        "ChatService: 选中的模型已不可用，回落 Main 档"
-                    );
-                    *self.selected.write().expect("selected lock poisoned") = None;
+    fn resolve_current_entries(
+        &self,
+        kind: ConversationKind,
+    ) -> Result<ResolvedProviderEntries, AIError> {
+        match kind {
+            ConversationKind::Persistent => {
+                let selected = self
+                    .selected
+                    .read()
+                    .expect("selected lock poisoned")
+                    .clone();
+                if let Some(sel) = selected {
+                    match self
+                        .ai_registry
+                        .resolve_explicit_entries(&sel.provider_id, &sel.model_id)
+                    {
+                        Ok(entries) => return Ok(entries),
+                        Err(AIError::NotConfigured) => {
+                            tracing::warn!(
+                                provider_id = %sel.provider_id,
+                                model_id = %sel.model_id,
+                                "ChatService: Persistent 选中的模型已不可用，回落 Main 档"
+                            );
+                            *self.selected.write().expect("selected lock poisoned") = None;
+                        }
+                        Err(other) => return Err(other),
+                    }
                 }
-                Err(other) => return Err(other),
+                self.ai_registry.resolve_entries(Tier::Main)
+            }
+            ConversationKind::Ephemeral => {
+                let selected = self
+                    .ephemeral_selected
+                    .read()
+                    .expect("ephemeral_selected lock poisoned")
+                    .clone();
+                if let Some(sel) = selected {
+                    match self
+                        .ai_registry
+                        .resolve_explicit_entries(&sel.provider_id, &sel.model_id)
+                    {
+                        Ok(entries) => return Ok(entries),
+                        Err(AIError::NotConfigured) => {
+                            tracing::warn!(
+                                provider_id = %sel.provider_id,
+                                model_id = %sel.model_id,
+                                "ChatService: Ephemeral 选中的模型已不可用，回落 Light 档"
+                            );
+                            *self
+                                .ephemeral_selected
+                                .write()
+                                .expect("ephemeral_selected lock poisoned") = None;
+                        }
+                        Err(other) => return Err(other),
+                    }
+                }
+                // 0.17.9: Ephemeral 默认走 Light 档（Light 空则 resolve_tier 自动降级 Main）
+                self.ai_registry.resolve_entries(Tier::Light)
             }
         }
-        self.ai_registry.resolve_entries(Tier::Main)
     }
 
     /// 返回当前生效的 AgentProvider；配置未变时复用，变化时锁外重建。
@@ -432,7 +528,7 @@ impl ChatService {
                 return Err(AIError::Cancelled);
             }
             retry_count += 1;
-            let resolved = self.resolve_current_entries()?;
+            let resolved = self.resolve_current_entries(kind)?;
 
             // 0.13.7: lazy connect——确保 MCP server 已连接后再读 epoch，拿到最新 tool 池版本。
             // MCP 拓扑变化（server 连接/断开/disabled_tools 变化）会 bump epoch，
@@ -468,7 +564,9 @@ impl ChatService {
             let memory: Arc<dyn rig_core::memory::ConversationMemory> = match kind {
                 ConversationKind::Persistent => {
                     let context_limit = resolved.model.context_window.map(|u| u as usize);
-                    self.persistent_memory.update_context_limit(context_limit).await;
+                    self.persistent_memory
+                        .update_context_limit(context_limit)
+                        .await;
                     tracing::debug!(
                         model = %resolved.model.id,
                         context_limit = ?context_limit,
@@ -479,18 +577,12 @@ impl ChatService {
                 ConversationKind::Ephemeral => self.ephemeral_memory.clone(),
             };
             let provider = Arc::new(
-                AgentProvider::new(
-                    &resolved.provider,
-                    &resolved.model,
-                    tools,
-                    preamble,
-                    memory,
-                )
-                .await?,
+                AgentProvider::new(&resolved.provider, &resolved.model, tools, preamble, memory)
+                    .await?,
             );
 
             // 构造期间配置可能已更新。只提交仍对应当前 key 的实例。
-            let latest = self.resolve_current_entries()?;
+            let latest = self.resolve_current_entries(kind)?;
             if latest.cache_key != resolved.cache_key {
                 tracing::debug!(
                     old_provider = %resolved.provider.id,
@@ -558,6 +650,60 @@ impl ChatService {
         self.selected
             .read()
             .expect("selected lock poisoned")
+            .clone()
+    }
+
+    /// 0.17.9: 设置 Ephemeral 对话（主窗口 AI）的运行时选中模型。
+    ///
+    /// `Some` = 用户在设置页为主窗口 AI 选了某个 provider+model；
+    /// `None` = 恢复 Light 档默认（Light 空则降级 Main）。
+    /// 写入后清 cached_agent，下次 prompt 按新选择重建 AgentProvider。
+    pub fn select_ephemeral_model(&self, selection: Option<ChatModelSelection>) {
+        // 持久化到配置库
+        let key = selection
+            .as_ref()
+            .map(|s| format!("{}:{}", s.provider_id, s.model_id));
+        let pool = self.config_pool.clone();
+        tokio::spawn(async move {
+            if let Some(id) = key {
+                let _ = crate::infra::data::config::set_config(
+                    &pool,
+                    "chat:ephemeral_selected_model",
+                    &id,
+                )
+                .await;
+            } else {
+                let _ = crate::infra::data::config::delete_config(
+                    &pool,
+                    "chat:ephemeral_selected_model",
+                )
+                .await;
+            }
+        });
+        *self
+            .ephemeral_selected
+            .write()
+            .expect("ephemeral_selected lock poisoned") = selection.clone();
+        *self
+            .cached_agent
+            .write()
+            .expect("chat agent cache lock poisoned") = None;
+        if let Some(sel) = &selection {
+            tracing::info!(
+                provider = %sel.provider_display_name,
+                model = %sel.model_display_name,
+                "ChatService: 主窗口 AI 模型切换"
+            );
+        } else {
+            tracing::info!("ChatService: 主窗口 AI 模型恢复 Light 档");
+        }
+    }
+
+    /// 0.17.9: 当前 Ephemeral 选中的模型快照（供 commands 层 `get_ephemeral_models` 标注 is_selected）。
+    pub fn current_ephemeral_selection(&self) -> Option<ChatModelSelection> {
+        self.ephemeral_selected
+            .read()
+            .expect("ephemeral_selected lock poisoned")
             .clone()
     }
 
@@ -758,7 +904,10 @@ impl ChatService {
     }
 
     /// 0.17.6a: 导出临时对话的全部消息（供 promote 为持久对话用）。
-    pub async fn export_ephemeral_messages(&self, conversation_id: &str) -> Vec<rig_core::completion::Message> {
+    pub async fn export_ephemeral_messages(
+        &self,
+        conversation_id: &str,
+    ) -> Vec<rig_core::completion::Message> {
         self.ephemeral_memory.export_messages(conversation_id).await
     }
 
@@ -773,18 +922,23 @@ impl ChatService {
     }
 
     /// 当前 active request 上下文；Phase 4 注入 Dangerous confirm payload。
-pub fn current_request_context(&self) -> Option<(u64, String, String)> {
-self.requests
-.status()
-.map(|active| (active.request_id, active.conversation_id, active.target_window.unwrap_or_default()))
-}
+    pub fn current_request_context(&self) -> Option<(u64, String, String)> {
+        self.requests.status().map(|active| {
+            (
+                active.request_id,
+                active.conversation_id,
+                active.target_window.unwrap_or_default(),
+            )
+        })
+    }
 
     /// 返回 chat 状态快照。
     ///
     /// 0.12.2：`provider_name`/`model_name` 反映当前生效模型（selected 优先，Main 回落），
     /// 供前端 header 标签展示。`provider_configured` 沿用 Main 档语义（兼容旧前端）。
     pub fn status(&self) -> ChatStatus {
-        let resolved = self.resolve_current_entries().ok();
+        // 0.17.9: status 供对话窗口调用，走 Persistent 路径
+        let resolved = self.resolve_current_entries(ConversationKind::Persistent).ok();
         let (provider_name, model_name) = match &resolved {
             Some(r) => {
                 let model_display = if r.model.display_name.is_empty() {
@@ -835,6 +989,29 @@ self.requests
                 *self.selected.write().expect("selected lock poisoned") = None;
             }
         }
+        // 0.17.9: ephemeral_selected 失效校验
+        let ephemeral_selected = self
+            .ephemeral_selected
+            .read()
+            .expect("ephemeral_selected lock poisoned")
+            .clone();
+        if let Some(sel) = ephemeral_selected {
+            let still_valid = self
+                .ai_registry
+                .validate_model_exists(&sel.provider_id, &sel.model_id)
+                .is_some();
+            if !still_valid {
+                tracing::warn!(
+                    provider_id = %sel.provider_id,
+                    model_id = %sel.model_id,
+                    "ChatService: Ephemeral 选中的模型配置后已不可用，清除选择回落 Light 档"
+                );
+                *self
+                    .ephemeral_selected
+                    .write()
+                    .expect("ephemeral_selected lock poisoned") = None;
+            }
+        }
         tracing::debug!("ChatService: 配置变化，AgentProvider 缓存已失效");
     }
 
@@ -863,7 +1040,11 @@ self.requests
         pending_message: Option<&str>,
         preamble: Option<&str>,
     ) -> ContextWindowStatus {
-        let result = match self.persistent_memory.load_with_stats(conversation_id).await {
+        let result = match self
+            .persistent_memory
+            .load_with_stats(conversation_id)
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(error = %e, "compute_context_status: load_with_stats 失败");
@@ -1009,11 +1190,12 @@ self.requests
 /// 供 `tool_adapter` 在 emit dangerous confirm 时注入，前端按 request_id 校验事件归属。
 /// ChatService 未注册时返回 `(0, String::new())`——confirm 仍可工作，只是前端无法校验归属。
 pub fn current_request_context_from_env(env: &dyn DomainEnv) -> (u64, String, String) {
-if let Some(cs) = env.chat_service() {
-cs.current_request_context().unwrap_or((0, String::new(), String::new()))
-} else {
-(0, String::new(), String::new())
-}
+    if let Some(cs) = env.chat_service() {
+        cs.current_request_context()
+            .unwrap_or((0, String::new(), String::new()))
+    } else {
+        (0, String::new(), String::new())
+    }
 }
 
 /// 计算 preamble 的 hash 值，用于 AgentProvider 缓存 key 的第四元素（0.12.6）。

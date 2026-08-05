@@ -252,7 +252,7 @@ function renderModelFetchList(filter) {
       <span>+ ${escapeHtml(t("ai.model_modal.manual_add", { id: q }))}</span>
     </div>`;
   } else if (filtered.length === 0) {
-    itemsHtml = `<div class="ai-model-fetch-empty">${escapeHtml(t("ai.model_modal.fetch_empty"))}</div>`;
+    itemsHtml = `<div class="ai-model-fetch-empty">${escapeHtml(t("ai.model_modal.fetch.empty"))}</div>`;
   }
 
   // 有匹配但输入文本本身不在列表中 → 也显示手动添加

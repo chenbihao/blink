@@ -78,7 +78,19 @@ pub fn build_menu(app: &impl Manager<tauri::Wry>, lang: &str) -> tauri::Result<M
     let sep = tauri::menu::PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", text(lang, TrayText::Quit), true, None::<&str>)?;
     // 菜单结构：show_main -> sep -> settings -> sticky_manager -> sep -> about -> sep -> quit
-    Menu::with_items(app, &[&show_main, &sep, &settings, &sticky_manager, &sep, &about, &sep, &quit])
+    Menu::with_items(
+        app,
+        &[
+            &show_main,
+            &sep,
+            &settings,
+            &sticky_manager,
+            &sep,
+            &about,
+            &sep,
+            &quit,
+        ],
+    )
 }
 
 /// 重建托盘菜单（运行时语言切换时调用）。

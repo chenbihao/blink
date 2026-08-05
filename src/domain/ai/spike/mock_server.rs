@@ -78,13 +78,13 @@ mod tests {
 
     #[tokio::test]
     async fn mock_server_boots_and_serves_after_delay() {
-                    let server = MockServer::start(Duration::from_millis(50)).await.unwrap();
-            // 简单验证：给足够时间等响应，reqwest 拿到 200
-            let client = reqwest::Client::builder()
-                .timeout(Duration::from_secs(2))
-                .build()
-                .unwrap();
-            let resp = client.get(&server.base_url).send().await.unwrap();
-            assert_eq!(resp.status(), 200);
+        let server = MockServer::start(Duration::from_millis(50)).await.unwrap();
+        // 简单验证：给足够时间等响应，reqwest 拿到 200
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let resp = client.get(&server.base_url).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
     }
 }

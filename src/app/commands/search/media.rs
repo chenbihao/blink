@@ -401,11 +401,7 @@ pub async fn translate_text(
                         .map(str::to_string)
                 })
                 .filter(|s| !s.is_empty())
-                .ok_or_else(|| CommandError::new(
-                    "internal_error",
-                    "翻译插件返回空结果",
-                    false,
-                ))?;
+                .ok_or_else(|| CommandError::new("internal_error", "翻译插件返回空结果", false))?;
             tracing::info!(
                 src_len = trimmed.chars().count(),
                 dst_len = translated.chars().count(),
@@ -566,7 +562,8 @@ pub fn hide_screenshot_overlay(app: tauri::AppHandle) {
 ///
 /// `spawn_blocking` 隔离 Win32 EnumWindows（~5-15ms），不阻塞 tokio runtime。
 #[tauri::command]
-pub async fn screenshot_window_list() -> Result<Vec<crate::infra::platform::window::PickableWindow>, String> {
+pub async fn screenshot_window_list()
+-> Result<Vec<crate::infra::platform::window::PickableWindow>, String> {
     tokio::task::spawn_blocking(crate::infra::platform::window::enumerate_pickable_windows)
         .await
         .map_err(|e| format!("spawn_blocking join 失败: {e}"))
@@ -577,16 +574,26 @@ pub async fn screenshot_window_list() -> Result<Vec<crate::infra::platform::wind
 /// 设为 true 时，overlay 窗口在 BitBlt 屏幕采集中不可见（但用户仍能看到）。
 /// 进入长截图采集阶段时设 true，退出时设 false。
 #[tauri::command]
-pub fn screenshot_set_capture_exclusion(app: tauri::AppHandle, exclude: bool) -> Result<(), String> {
+pub fn screenshot_set_capture_exclusion(
+    app: tauri::AppHandle,
+    exclude: bool,
+) -> Result<(), String> {
     use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
+    };
 
-    let win = app.get_webview_window("chord-screenshot")
+    let win = app
+        .get_webview_window("chord-screenshot")
         .ok_or_else(|| "截图 overlay 窗口未找到".to_string())?;
     let hwnd = win.hwnd().map_err(|e| format!("获取 HWND 失败: {e}"))?;
     let target = HWND(hwnd.0 as _);
 
-    let affinity = if exclude { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
+    let affinity = if exclude {
+        WDA_EXCLUDEFROMCAPTURE
+    } else {
+        WDA_NONE
+    };
     let ok = unsafe { SetWindowDisplayAffinity(target, affinity) };
     if ok.is_err() {
         return Err(format!("SetWindowDisplayAffinity 失败"));
@@ -827,20 +834,33 @@ fn enum_system_fonts() -> Result<Vec<String>, String> {
             _lparam: u32,
             _data: LPARAM,
         ) -> i32 {
-            if lf.is_null() { return 1; }
+            if lf.is_null() {
+                return 1;
+            }
             let lf = unsafe { &*lf };
             // 读取 face name（UTF-16，LF_FACESIZE=32）
             let mut end = 0;
             for i in 0..32 {
-                if lf.lfFaceName[i] == 0 { end = i; break; }
+                if lf.lfFaceName[i] == 0 {
+                    end = i;
+                    break;
+                }
             }
-            if end == 0 { end = 32; }
+            if end == 0 {
+                end = 32;
+            }
             let name = String::from_utf16_lossy(&lf.lfFaceName[..end]);
             // 跳过以 @ 开头的竖排字体
-            if name.starts_with('@') { return 1; }
+            if name.starts_with('@') {
+                return 1;
+            }
             if let Ok(mut guard) = FONT_NAMES.lock() {
-                if guard.is_none() { *guard = Some(BTreeSet::new()); }
-                if let Some(set) = guard.as_mut() { set.insert(name); }
+                if guard.is_none() {
+                    *guard = Some(BTreeSet::new());
+                }
+                if let Some(set) = guard.as_mut() {
+                    set.insert(name);
+                }
             }
             1
         }
@@ -851,7 +871,9 @@ fn enum_system_fonts() -> Result<Vec<String>, String> {
         }
 
         let hdc = unsafe { CreateCompatibleDC(None) };
-        if hdc.is_invalid() { return Err("CreateCompatibleDC 失败".to_string()); }
+        if hdc.is_invalid() {
+            return Err("CreateCompatibleDC 失败".to_string());
+        }
 
         let lf: LOGFONTW = unsafe { std::mem::zeroed() };
         let _ = unsafe { EnumFontFamiliesExW(hdc, &lf, Some(font_enum_proc), LPARAM(0), 0) };
@@ -865,7 +887,11 @@ fn enum_system_fonts() -> Result<Vec<String>, String> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        Ok(vec!["sans-serif".to_string(), "serif".to_string(), "monospace".to_string()])
+        Ok(vec![
+            "sans-serif".to_string(),
+            "serif".to_string(),
+            "monospace".to_string(),
+        ])
     }
 }
 
@@ -892,14 +918,12 @@ mod scroll_probe_tests {
 
     #[test]
     fn replay_export_path_accepts_only_owned_file_shapes() {
-        let path = scroll_replay_export_path(
-            "blink-scroll-2026-08-02T10-20-30-000Z",
-            "frame-0042.png",
-        )
-        .unwrap();
-        assert!(path.ends_with(
-            "scroll-replays/blink-scroll-2026-08-02T10-20-30-000Z/frame-0042.png"
-        ));
+        let path =
+            scroll_replay_export_path("blink-scroll-2026-08-02T10-20-30-000Z", "frame-0042.png")
+                .unwrap();
+        assert!(
+            path.ends_with("scroll-replays/blink-scroll-2026-08-02T10-20-30-000Z/frame-0042.png")
+        );
         assert!(scroll_replay_export_path("../escape", "manifest.json").is_err());
         assert!(scroll_replay_export_path("blink-scroll-valid", "../blink.log").is_err());
         assert!(scroll_replay_export_path("blink-scroll-valid", "frame-42.png").is_err());

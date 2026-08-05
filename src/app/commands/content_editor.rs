@@ -78,9 +78,7 @@ pub async fn open_content_editor(
 
 /// 前端 init 时拉取待编辑 payload（取出后清空）。
 #[tauri::command]
-pub async fn get_content_editor_payload(
-    app: tauri::AppHandle,
-) -> Option<EditableContentPayload> {
+pub async fn get_content_editor_payload(app: tauri::AppHandle) -> Option<EditableContentPayload> {
     let pending = app.state::<PendingEditorPayload>();
     pending.0.lock().ok().and_then(|mut guard| guard.take())
 }
@@ -115,7 +113,7 @@ pub async fn save_content_editor(
                 .ok_or_else(|| "sticky_update 需要 origin_ref".to_string())?;
             let svc = app
                 .state::<std::sync::Arc<crate::domain::sticky::StickyService>>()
-            .inner()
+                .inner()
                 .clone();
             svc.update_content_debounced(sticky_id, &body)
                 .await

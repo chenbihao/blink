@@ -17,7 +17,7 @@
 
 use super::engine::{QueryContext, SearchAction, SearchEngine, SearchItem};
 use super::scorer::{history_boost, normalize_top_relative};
-use super::{to_pinyin_full, to_pinyin_initials, fuzzy_score_entries, Action, AppEntry};
+use super::{Action, AppEntry, fuzzy_score_entries, to_pinyin_full, to_pinyin_initials};
 
 /// 单项系统快捷方式定义。
 struct SystemShortcut {
@@ -253,7 +253,9 @@ mod tests {
         let ctx = make_ctx(&history, &snapshot);
         let results = engine.search("control", &ctx).await;
         assert!(
-            results.iter().any(|r| r.title == "控制面板" || r.title == "Control Panel"),
+            results
+                .iter()
+                .any(|r| r.title == "控制面板" || r.title == "Control Panel"),
             "应能搜到控制面板"
         );
     }

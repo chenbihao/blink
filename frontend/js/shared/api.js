@@ -66,6 +66,19 @@ export function promoteEphemeralConversation(conversationId) {
   return invoke("promote_ephemeral_conversation", { conversationId });
 }
 
+/** 0.17.8: 清除所有 AI 权限记忆（ai_permission_memory 表全清）。
+ *  @returns {Promise<void>} */
+export function clearAllPermissionMemory() {
+  return invoke("clear_all_permission_memory");
+}
+
+/** 0.17.9: 列出主窗口 AI（Ephemeral）可选的所有 Chat 能力模型。
+ *  返回的列表中 is_selected=true 的项为当前选中模型。
+ *  @returns {Promise<Array<{id: string, provider_name: string, model_name: string, is_main: boolean, is_light: boolean, is_selected: boolean}>>} */
+export function getEphemeralModels() {
+  return invoke("get_ephemeral_models");
+}
+
 /** 隐藏主窗口。 */
 export function hideWindow() {
   return invoke("hide_window");
@@ -111,7 +124,7 @@ export function clearClipboardImages() {
   return invoke("clear_clipboard_images");
 }
 
-/** 0.17.0：手动优化存储（三库 VACUUM）。 */
+/** 0.17.0：手动优化存储（四库 VACUUM）。 */
 export function optimizeStorage() {
   return invoke("optimize_storage");
 }
@@ -256,6 +269,11 @@ export function ocrImage(pngData) {
 /** 0.17.5：OCR 诊断——返回已安装语言列表、引擎语言、中文包状态。 */
 export function ocrDiagnose() {
   return invoke("ocr_diagnose");
+}
+
+/** 通过 Win32 ShellExecuteW 打开 URL / 协议（比 window.open 更可靠，支持 ms-settings: 等）。 */
+export function openUrl(url) {
+  return invoke("open_url", { url });
 }
 
 /**

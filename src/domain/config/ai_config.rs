@@ -611,7 +611,10 @@ impl AIConfig {
     /// **0.9.4:enabled=false 视同悬空**——用户在前端关掉 model 开关的语义就是
     /// "从可选池里剔除"。resolve_tier 上层看到 None 会 warn + 降级到下一档。
     fn find_provider_model(&self, a: &TierAssignment) -> Option<(&ProviderEntry, &ModelEntry)> {
-        let provider = self.providers.iter().find(|p| p.id == a.provider_id && p.enabled)?;
+        let provider = self
+            .providers
+            .iter()
+            .find(|p| p.id == a.provider_id && p.enabled)?;
         let model = provider
             .models
             .iter()

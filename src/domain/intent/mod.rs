@@ -2097,7 +2097,8 @@ mod tests {
             "zh",
         )));
         let route =
-            run_route_with_snapshot(&r, "翻译 hello", snap_clipboard("some other english text")).await;
+            run_route_with_snapshot(&r, "翻译 hello", snap_clipboard("some other english text"))
+                .await;
         // 走 Takeover 且 arg 用 keyword_arg="hello"
         assert!(matches!(
             route,
@@ -2819,8 +2820,7 @@ mod tests {
         let hint = RankingHint {
             boost_plugin_id: "builtin.weather".into(),
         };
-        let candidates = match r.route("tq 北京", &h, Some(&hint)).await
-        {
+        let candidates = match r.route("tq 北京", &h, Some(&hint)).await {
             Route::Mixed { candidates } => candidates,
             other => panic!("有 hint 应 Mixed,got {:?}", other),
         };
