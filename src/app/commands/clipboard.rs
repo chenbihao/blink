@@ -149,7 +149,11 @@ pub async fn copy_clipboard_image(app: tauri::AppHandle, image_id: String) -> Re
 
     let bytes_len = png_data.len();
     tokio::task::spawn_blocking(move || {
-        crate::infra::platform::clipboard::write_png_to_clipboard(&png_data)
+        crate::infra::platform::clipboard::write_png_to_clipboard(
+            &png_data,
+            crate::infra::platform::clipboard::SELF_LABEL_REPOST,
+            true,
+        )
     })
     .await
     .map_err(|e| format!("spawn_blocking join 失败: {e}"))??;

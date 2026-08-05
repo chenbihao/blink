@@ -128,7 +128,7 @@ impl SearchEngine for ClipboardEngine {
         let image_items = if arg.is_empty() {
             query_recent_images(&self.cache_pool, limit).await
         } else {
-            // 对图片的 source_app 和稳定标题做包含匹配
+            // 对图片的 source_app、source_path 和稳定标题做包含匹配
             let all_images = query_recent_images(&self.cache_pool, 200).await;
             let arg_lower = arg.to_lowercase();
             all_images
@@ -136,8 +136,8 @@ impl SearchEngine for ClipboardEngine {
                 .filter(|meta| {
                     let title = format!("图片 {}x{}", meta.width, meta.height);
                     let haystack = match &meta.source_app {
-                        Some(app) => format!("{} {}", title, app),
-                        None => title,
+                        Some(app) => format!("{} {} {}", title, app, meta.source_path.as_deref().unwrap_or("")),
+                        None => format!("{} {}", title, meta.source_path.as_deref().unwrap_or("")),
                     };
                     haystack.to_lowercase().contains(&arg_lower)
                 })
@@ -201,18 +201,20 @@ enum ClipboardEntry {
 
 /// ClipboardImageMeta → SearchItem（0.16.4）。
 ///
-/// - `title` = "图片 {W}x{H} ({source_app或"未知"})"
+/// - `title` = "图片 {W}x{H} ({source_desc})"
+///   - 0.17.9：source_desc 拼接逻辑——有 source_path 时「文件名 · 应用名」，无则仅应用名
+///   - 自写入标签（`blink:*` key）经 `resolve_source_desc` 转中英文文案
 /// - `subtitle` 时间描述
 /// - `action` = `RunAction { id: "copy_clipboard_image", arg: image_id }`
 ///   前端 actions.js 识别此 id，调 `copy_clipboard_image` 后端命令写回系统剪贴板
 /// - `source` = "clipboard"（与文本项同 source，前端白名单已含）
 fn to_image_search_item(meta: ClipboardImageMeta, index: usize, lang: &str) -> SearchItem {
     let is_zh = lang == "zh";
-    let source_desc = meta
-        .source_app
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(if is_zh { "未知" } else { "unknown" });
+    let app_desc = resolve_source_desc(meta.source_app.as_deref(), is_zh);
+    let source_desc = match &meta.source_path {
+        Some(path) if !path.is_empty() => format!("{path} · {app_desc}"),
+        _ => app_desc,
+    };
     let title = if is_zh {
         format!("图片 {}x{} ({})", meta.width, meta.height, source_desc)
     } else {
@@ -236,7 +238,30 @@ fn to_image_search_item(meta: ClipboardImageMeta, index: usize, lang: &str) -> S
     }
 }
 
-/// 生成图片副行时间描述。
+/// 0.17.9：将 `source_app` 字段解析为展示文案。
+///
+/// 自写入标签（`blink:screenshot` / `blink:repost` / `blink:ai`）转中英文文案；
+/// 进程名（如 `chrome.exe`）原样返回；None/空 →「未知」/「unknown」。
+///
+/// **不改 DB schema、不改前端契约**——映射纯在展示层完成。
+fn resolve_source_desc(source_app: Option<&str>, is_zh: bool) -> String {
+    match source_app {
+        Some(s) if s == "blink:screenshot" => {
+            if is_zh { "截图".to_string() } else { "Screenshot".to_string() }
+        }
+        Some(s) if s == "blink:repost" => {
+            // 历史回贴 skip_persist=true 不会入库，此处仅防御
+            if is_zh { "回贴".to_string() } else { "Repost".to_string() }
+        }
+        Some(s) if s == "blink:ai" => {
+            if is_zh { "AI".to_string() } else { "AI".to_string() }
+        }
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => {
+            if is_zh { "未知".to_string() } else { "unknown".to_string() }
+        }
+    }
+}
 fn format_image_subtitle(meta: &ClipboardImageMeta, lang: &str) -> String {
     let now = chrono::Utc::now().timestamp();
     let elapsed = (now - meta.created_at).max(0);
@@ -503,5 +528,97 @@ mod tests {
         // 超上限 → 兜底默认值
         engine.update_display_count(9999);
         assert_eq!(*engine.display_count.read().unwrap(), DEFAULT_DISPLAY_COUNT);
+    }
+
+    // ── 0.17.9 resolve_source_desc 单测 ──────────────────────────────────
+
+    #[test]
+    fn resolve_source_desc_screenshot_zh() {
+        assert_eq!(resolve_source_desc(Some("blink:screenshot"), true), "截图");
+    }
+
+    #[test]
+    fn resolve_source_desc_screenshot_en() {
+        assert_eq!(resolve_source_desc(Some("blink:screenshot"), false), "Screenshot");
+    }
+
+    #[test]
+    fn resolve_source_desc_repost_zh() {
+        assert_eq!(resolve_source_desc(Some("blink:repost"), true), "回贴");
+    }
+
+    #[test]
+    fn resolve_source_desc_ai_zh() {
+        assert_eq!(resolve_source_desc(Some("blink:ai"), true), "AI");
+    }
+
+    #[test]
+    fn resolve_source_desc_ai_en() {
+        assert_eq!(resolve_source_desc(Some("blink:ai"), false), "AI");
+    }
+
+    #[test]
+    fn resolve_source_desc_process_name_passthrough() {
+        // 进程名原样返回
+        assert_eq!(resolve_source_desc(Some("chrome.exe"), true), "chrome.exe");
+        assert_eq!(resolve_source_desc(Some("explorer.exe"), false), "explorer.exe");
+    }
+
+    #[test]
+    fn resolve_source_desc_none_returns_unknown() {
+        assert_eq!(resolve_source_desc(None, true), "未知");
+        assert_eq!(resolve_source_desc(None, false), "unknown");
+    }
+
+    #[test]
+    fn resolve_source_desc_empty_string_returns_unknown() {
+        assert_eq!(resolve_source_desc(Some(""), true), "未知");
+        assert_eq!(resolve_source_desc(Some(""), false), "unknown");
+    }
+
+    #[test]
+    fn to_image_search_item_with_source_path() {
+        let meta = ClipboardImageMeta {
+            id: "img_test".into(),
+            thumb_blob: vec![1, 2, 3],
+            width: 1920,
+            height: 1080,
+            created_at: chrono::Utc::now().timestamp(),
+            source_app: Some("explorer.exe".into()),
+            source_path: Some("photo.jpg".into()),
+        };
+        let si = to_image_search_item(meta, 0, "zh");
+        assert!(si.title.contains("photo.jpg · explorer.exe"), "标题应含文件名 · 应用名: {}", si.title);
+    }
+
+    #[test]
+    fn to_image_search_item_without_source_path() {
+        let meta = ClipboardImageMeta {
+            id: "img_test2".into(),
+            thumb_blob: vec![1, 2, 3],
+            width: 800,
+            height: 600,
+            created_at: chrono::Utc::now().timestamp(),
+            source_app: Some("chrome.exe".into()),
+            source_path: None,
+        };
+        let si = to_image_search_item(meta, 0, "zh");
+        assert!(si.title.contains("chrome.exe"), "标题应含应用名: {}", si.title);
+        assert!(!si.title.contains("·"), "无文件名不应有 · 分隔符: {}", si.title);
+    }
+
+    #[test]
+    fn to_image_search_item_with_screenshot_label() {
+        let meta = ClipboardImageMeta {
+            id: "img_test3".into(),
+            thumb_blob: vec![1, 2, 3],
+            width: 2560,
+            height: 1440,
+            created_at: chrono::Utc::now().timestamp(),
+            source_app: Some("blink:screenshot".into()),
+            source_path: None,
+        };
+        let si = to_image_search_item(meta, 0, "zh");
+        assert!(si.title.contains("截图"), "blink:screenshot 应解析为「截图」: {}", si.title);
     }
 }

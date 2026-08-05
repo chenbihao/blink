@@ -69,10 +69,14 @@ impl Capability for WriteClipboard {
     ) -> Result<CapabilityResult, CapabilityError> {
         // 优先 text 模式（clone 成 String——spawn_blocking 要求 'static）
         if let Some(text) = args.get("text").and_then(Value::as_str).map(str::to_string) {
-            let len = text.chars().count();
-            tokio::task::spawn_blocking(move || {
-                crate::infra::platform::clipboard::write_text_to_clipboard(&text)
-            })
+        let len = text.chars().count();
+        tokio::task::spawn_blocking(move || {
+            crate::infra::platform::clipboard::write_text_to_clipboard(
+                &text,
+                crate::infra::platform::clipboard::SELF_LABEL_BLINK,
+                false,
+            )
+        })
             .await
             .map_err(|e| CapabilityError::Internal {
                 detail: format!("write_clipboard task 崩溃: {e}"),
@@ -121,7 +125,13 @@ impl Capability for WriteClipboard {
         }
 
         tokio::task::spawn_blocking(move || {
-            crate::infra::platform::clipboard::write_bgra_to_clipboard(&pixels, width, height)
+            crate::infra::platform::clipboard::write_bgra_to_clipboard(
+                &pixels,
+                width,
+                height,
+                crate::infra::platform::clipboard::SELF_LABEL_BLINK,
+                false,
+            )
         })
         .await
         .map_err(|e| CapabilityError::Internal {

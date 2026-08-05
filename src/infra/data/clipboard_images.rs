@@ -38,6 +38,8 @@ pub struct ClipboardImage {
     pub sha256: String,
     pub created_at: i64,
     pub source_app: Option<String>,
+    /// 0.17.9：源文件名（从 CF_HDROP 提取，文件管理器复制图片文件时有值）。
+    pub source_path: Option<String>,
 }
 
 /// 默认图片上限。
@@ -55,12 +57,26 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
             height INTEGER NOT NULL,
             sha256 TEXT NOT NULL,
             created_at INTEGER NOT NULL,
-            source_app TEXT
+            source_app TEXT,
+            source_path TEXT
         )",
     )
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
+
+    // 0.17.9：旧表迁移——已有 clipboard_images 表加 source_path 列
+    // ALTER TABLE ADD COLUMN 是幂等的（IF NOT EXISTS 不支持，用 try-catch 模式）
+    let migrate_result = sqlx::query("ALTER TABLE clipboard_images ADD COLUMN source_path TEXT")
+        .execute(pool)
+        .await;
+    if let Err(e) = migrate_result {
+        // "duplicate column name" = 已有此列，正常情况，静默跳过
+        let msg = e.to_string();
+        if !msg.contains("duplicate column") {
+            tracing::warn!(error = %msg, "clipboard_images 加 source_path 列失败");
+        }
+    }
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_clip_img_created ON clipboard_images(created_at)")
         .execute(pool)
@@ -93,8 +109,8 @@ pub async fn save_image(pool: &SqlitePool, item: &ClipboardImage) -> Result<(), 
 
     sqlx::query(
         "INSERT OR REPLACE INTO clipboard_images
-         (id, png_blob, thumb_blob, width, height, sha256, created_at, source_app)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+         (id, png_blob, thumb_blob, width, height, sha256, created_at, source_app, source_path)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
     )
     .bind(&item.id)
     .bind(&item.png_blob)
@@ -104,6 +120,7 @@ pub async fn save_image(pool: &SqlitePool, item: &ClipboardImage) -> Result<(), 
     .bind(&item.sha256)
     .bind(item.created_at)
     .bind(&item.source_app)
+    .bind(&item.source_path)
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
@@ -115,7 +132,7 @@ pub async fn save_image(pool: &SqlitePool, item: &ClipboardImage) -> Result<(), 
 /// 查询最近的剪贴板图片条目（不含 BLOB，只元数据 + 缩略图）。
 pub async fn query_recent_images(pool: &SqlitePool, limit: i64) -> Vec<ClipboardImageMeta> {
     sqlx::query_as::<_, ClipboardImageMeta>(
-        "SELECT id, thumb_blob, width, height, created_at, source_app
+        "SELECT id, thumb_blob, width, height, created_at, source_app, source_path
          FROM clipboard_images ORDER BY created_at DESC LIMIT ?1",
     )
     .bind(limit)
@@ -133,7 +150,7 @@ pub async fn query_recent_days_images(
 ) -> Vec<ClipboardImageMeta> {
     let cutoff = chrono::Utc::now().timestamp() - (days as i64 * 86400);
     sqlx::query_as::<_, ClipboardImageMeta>(
-        "SELECT id, thumb_blob, width, height, created_at, source_app
+        "SELECT id, thumb_blob, width, height, created_at, source_app, source_path
          FROM clipboard_images WHERE created_at > ?1 ORDER BY created_at DESC LIMIT ?2",
     )
     .bind(cutoff)
@@ -153,6 +170,8 @@ pub struct ClipboardImageMeta {
     pub height: i64,
     pub created_at: i64,
     pub source_app: Option<String>,
+    /// 0.17.9：源文件名（从 CF_HDROP 提取）。
+    pub source_path: Option<String>,
 }
 
 /// 按 id 查询完整 PNG（写回剪贴板 / pin 用）。
@@ -282,6 +301,7 @@ mod tests {
             sha256: "abc123".to_string(),
             created_at: 1000,
             source_app: Some("TestApp".to_string()),
+            source_path: None,
         };
         save_image(&pool, &item).await.unwrap();
 
@@ -313,6 +333,7 @@ mod tests {
             sha256: "same_hash".to_string(),
             created_at: 1000,
             source_app: None,
+            source_path: None,
         };
         save_image(&pool, &item1).await.unwrap();
 
@@ -326,6 +347,7 @@ mod tests {
             sha256: "same_hash".to_string(),
             created_at: 2000,
             source_app: Some("New".to_string()),
+            source_path: None,
         };
         save_image(&pool, &item2).await.unwrap();
 
@@ -350,6 +372,7 @@ mod tests {
                 sha256: format!("hash_{i}"),
                 created_at: i as i64,
                 source_app: None,
+                source_path: None,
             };
             save_image(&pool, &item).await.unwrap();
         }
@@ -361,5 +384,29 @@ mod tests {
         // 保留最新的（created_at 最大的）
         assert_eq!(items[0].created_at, 4);
         assert_eq!(items[2].created_at, 2);
+    }
+
+    #[tokio::test]
+    async fn save_and_query_source_path() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        init_db(&pool).await.unwrap();
+
+        let item = ClipboardImage {
+            id: generate_image_id(),
+            png_blob: vec![1, 2, 3],
+            thumb_blob: vec![4, 5, 6],
+            width: 800,
+            height: 600,
+            sha256: "hash_sp".to_string(),
+            created_at: 1000,
+            source_app: Some("explorer.exe".to_string()),
+            source_path: Some("photo.jpg".to_string()),
+        };
+        save_image(&pool, &item).await.unwrap();
+
+        let items = query_recent_images(&pool, 10).await;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].source_app.as_deref(), Some("explorer.exe"));
+        assert_eq!(items[0].source_path.as_deref(), Some("photo.jpg"));
     }
 }

@@ -11,18 +11,18 @@ use windows::Win32::System::DataExchange::{
     RemoveClipboardFormatListener,
 };
 use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
-use windows::Win32::System::Ole::{CF_DIB, CF_UNICODETEXT};
+use windows::Win32::System::Ole::{CF_DIB, CF_HDROP, CF_UNICODETEXT};
+use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetForegroundWindow, GetMessageW,
-    GetWindowTextW, MSG, RegisterClassW, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_CLIPBOARDUPDATE, WNDCLASSW,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, MSG, RegisterClassW,
+    TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLIPBOARDUPDATE, WNDCLASSW,
 };
 use windows::core::{PCWSTR, w};
 
 use crate::infra::data::clipboard::{self, ClipboardItem};
 use crate::infra::data::clipboard_images::{self, ClipboardImage};
 
-use super::{is_active, state};
+use super::{is_active, state, take_self_write};
 
 /// 缩略图最大边长（像素）。采集时生成，不延后到展示——避免列表滚动时重复解码。
 const THUMB_MAX_EDGE: u32 = 256;
@@ -103,9 +103,24 @@ unsafe extern "system" fn wnd_proc(
 }
 
 fn on_clipboard_change() {
-    // 黑名单：前台窗口标题命中则不记（密码管理器等）
-    let title_opt = foreground_title();
-    if let Some(ref title) = title_opt
+    // 0.17.9：先消费自写入标记（命中则跳过黑名单 + 用标签作 source_app）
+    let self_write = take_self_write();
+
+    // 确定来源：自写入标签优先，否则用前台进程名
+    let (source_app, title_for_blacklist) = if let Some((ref label, _)) = self_write {
+        (Some(label.clone()), None) // 自写入跳过黑名单
+    } else {
+        let app_info = crate::infra::platform::context::foreground_app();
+        let title = app_info.as_ref().map(|a| a.window_title.clone());
+        let proc_name = app_info
+            .as_ref()
+            .map(|a| a.process_name.clone())
+            .filter(|n| !n.is_empty());
+        (proc_name, title)
+    };
+
+    // 黑名单：前台窗口标题命中则不记（密码管理器等）—— 自写入跳过
+    if let Some(ref title) = title_for_blacklist
         && let Some(s) = state()
     {
         let bl = s.blacklist.read().unwrap();
@@ -114,6 +129,10 @@ fn on_clipboard_change() {
             return;
         }
     }
+
+    // 自写入 skip_persist 标志
+    let skip_persist = self_write.as_ref().is_some_and(|(_, skip)| *skip);
+
     // 先尝试读文本；文本失败则尝试读图片（CF_DIB）
     let text = read_clipboard_text();
     if let Some(ref text) = text {
@@ -146,9 +165,15 @@ fn on_clipboard_change() {
         //（过滤 + 去重后触发,与真实入库同步;hook 侧再做 ContextConfig 门控与敏感应用
         // 过滤,避免密码管理器 Ctrl+C 悄悄进 snapshot）。
         super::notify_change(text);
+
+        // 0.17.9：自写入 skip_persist（历史回贴场景）跳过入库
+        if skip_persist {
+            tracing::trace!("剪贴板：自写入 skip_persist, 跳过文本入库");
+            return;
+        }
+
         let Some(s) = state() else { return };
         let preview = clipboard::make_preview(text);
-        let source_app = title_opt.clone();
         let item = ClipboardItem {
             id: clipboard::generate_id(),
             preview: preview.clone(),
@@ -181,7 +206,9 @@ fn on_clipboard_change() {
         return;
     }
     tracing::trace!("剪贴板：无文本,尝试读取图片 CF_DIB");
-    let dib_data = read_clipboard_dib();
+
+    // 0.17.9：在同一 OpenClipboard 会话中读 CF_HDROP + CF_DIB
+    let (dib_data, source_path) = read_clipboard_dib_with_hdrop();
     let Some(dib) = dib_data else {
         tracing::trace!("剪贴板：无文本也无图片,跳过");
         return;
@@ -211,7 +238,6 @@ fn on_clipboard_change() {
     // 计算 sha256 用于内容去重
     let sha256 = compute_sha256(&png_data);
     let image_id = clipboard_images::generate_image_id();
-    let source_app = title_opt.clone();
     let image_item = ClipboardImage {
         id: image_id.clone(),
         png_blob: png_data,
@@ -221,7 +247,17 @@ fn on_clipboard_change() {
         sha256,
         created_at: now_ts(),
         source_app: source_app.clone(),
+        source_path: source_path.clone(),
     };
+
+    // 0.17.9：自写入 skip_persist（历史回贴场景）跳过入库
+    if skip_persist {
+        tracing::trace!(
+            "剪贴板：自写入 skip_persist, 跳过图片入库（保留原记录的 source_app/source_path）"
+        );
+        return;
+    }
+
     let cache_pool = s.cache_pool.clone();
     let max_image_items = s.max_image_items;
     tauri::async_runtime::spawn(async move {
@@ -243,24 +279,28 @@ fn on_clipboard_change() {
 
 // ── 图片采集辅助函数（0.16.4）─────────────────────────────────────────────
 
-/// 读取剪贴板 CF_DIB 数据。返回 DIB 原始字节（BITMAPINFOHEADER + 像素）。
+/// 在同一 OpenClipboard 会话中读 CF_HDROP（源文件名）+ CF_DIB（位图数据）。
 ///
-/// 与 `read_clipboard_text` 同模式：短重试 + 微退避，解决 OpenClipboard 竞争。
-fn read_clipboard_dib() -> Option<Vec<u8>> {
+/// **0.17.9**：从文件管理器复制图片文件时，剪贴板同时含 `CF_HDROP`（文件路径列表）
+/// + `CF_DIB`（位图）。在同一会话中读两者，避免二次 `OpenClipboard` 竞争。
+///
+/// 返回 `(dib_data, source_path)`，`source_path` 为首个文件的文件名（非完整路径）。
+fn read_clipboard_dib_with_hdrop() -> (Option<Vec<u8>>, Option<String>) {
     const MAX_ATTEMPTS: u32 = 5;
     const BACKOFF_MS: u64 = 8;
     for attempt in 0..MAX_ATTEMPTS {
         unsafe {
             if OpenClipboard(None).is_ok() {
-                let res = read_dib_inner();
+                let hdrop_name = read_hdrop_filename_inner();
+                let dib = read_dib_inner();
                 let _ = CloseClipboard();
-                if res.is_some() {
+                if dib.is_some() {
                     if attempt > 0 {
                         tracing::debug!(attempt, "剪贴板图片读取重试成功");
                     }
-                    return res;
+                    return (dib, hdrop_name);
                 }
-                return None;
+                return (None, None);
             }
         }
         if attempt + 1 < MAX_ATTEMPTS {
@@ -268,7 +308,38 @@ fn read_clipboard_dib() -> Option<Vec<u8>> {
         }
     }
     tracing::debug!("剪贴板图片 OpenClipboard 重试仍失败,放弃");
-    None
+    (None, None)
+}
+
+/// 从 `CF_HDROP` 读取首个文件的文件名（不含路径）。
+///
+/// 需在 `OpenClipboard` 成功后调用。`CF_HDROP` 不存在时返回 `None`。
+unsafe fn read_hdrop_filename_inner() -> Option<String> {
+    unsafe {
+        let handle = GetClipboardData(CF_HDROP.0.into()).ok()?;
+        let hdrop = HDROP(handle.0 as _);
+        // 先查路径长度（buffer=None → 返回路径字符数，不含 null）
+        let path_len = DragQueryFileW(hdrop, 0, None);
+        if path_len == 0 {
+            return None;
+        }
+        // 分配缓冲区（+1 for null terminator）
+        let mut buf = vec![0u16; (path_len as usize) + 1];
+        let copied = DragQueryFileW(hdrop, 0, Some(&mut buf));
+        if copied == 0 {
+            return None;
+        }
+        let full_path = String::from_utf16_lossy(&buf[..copied as usize]);
+        // 提取文件名（不含目录路径）
+        let file_name = std::path::Path::new(&full_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())?;
+        if file_name.is_empty() {
+            None
+        } else {
+            Some(file_name)
+        }
+    }
 }
 
 unsafe fn read_dib_inner() -> Option<Vec<u8>> {
@@ -497,21 +568,6 @@ fn now_ts() -> i64 {
         .unwrap_or(0)
 }
 
-fn foreground_title() -> Option<String> {
-    unsafe {
-        let hwnd = GetForegroundWindow();
-        if hwnd.0.is_null() {
-            return None;
-        }
-        let mut buf = [0u16; 512];
-        let len = GetWindowTextW(hwnd, &mut buf);
-        if len <= 0 {
-            return None;
-        }
-        Some(String::from_utf16_lossy(&buf[..len as usize]))
-    }
-}
-
 /// 读当前剪贴板文本（0.9.7：公开给 read_clipboard Capability）。
 ///
 /// 含短重试（与监听器内部同一逻辑），读文本成功返回 Some，非文本/空返回 None。
@@ -572,7 +628,7 @@ unsafe fn read_clipboard_inner() -> Option<String> {
     }
 }
 
-/// 把 **BGRA** 像素数据写入系统剪贴板（CF_DIB 格式）。
+/// 把 **BGRA** 像素数据写入系统剪贴板（CF_DIB 格式）—— **raw 内核**（不打自写入标记）。
 ///
 /// `pixels` 格式：BGRA、top-down、每行 `width * 4` 字节。CF_DIB 要求 BGRA + bottom-up，
 /// 所以只做 top-down → bottom-up 翻转（`copy_from_slice` 整行拷贝，不再逐像素 shuffle）。
@@ -580,7 +636,10 @@ unsafe fn read_clipboard_inner() -> Option<String> {
 /// **失败清理**：`SetClipboardData` 成功前所有权始终在调用方；任何中途错误都必须
 /// `GlobalFree` 释放 hmem（截图一次 ~14MB DIB，泄漏会累积）。`OpenClipboard` 成功
 /// 后无论后续走哪条分支都必须 `CloseClipboard`，否则会锁住系统剪贴板一段时间。
-pub fn write_bgra_to_clipboard(pixels: &[u8], width: u32, height: u32) -> Result<(), String> {
+///
+/// **0.17.9**：重命名为 `_raw`——外部应走 `mod.rs` 的 `write_bgra_to_clipboard`（打标外壳），
+/// 仅 `write_png_to_clipboard` 内部转调本函数（避免重复打标）。
+pub(super) fn write_bgra_to_clipboard_raw(pixels: &[u8], width: u32, height: u32) -> Result<(), String> {
     use windows::Win32::Foundation::{GlobalFree, HANDLE};
     use windows::Win32::Graphics::Gdi::BITMAPINFOHEADER;
     use windows::Win32::System::DataExchange::{
@@ -681,11 +740,13 @@ pub fn write_bgra_to_clipboard(pixels: &[u8], width: u32, height: u32) -> Result
     Ok(())
 }
 
-/// 把文本写入系统剪贴板（CF_UNICODETEXT 格式）（0.9.7：write_clipboard Capability）。
+/// 把文本写入系统剪贴板（CF_UNICODETEXT 格式）—— **raw 内核**（不打自写入标记）。
 ///
-/// 与 `write_bgra_to_clipboard` 同模式：GlobalAlloc → GlobalLock → 写 UTF-16 →
+/// 与 `write_bgra_to_clipboard_raw` 同模式：GlobalAlloc → GlobalLock → 写 UTF-16 →
 /// EmptyClipboard → SetClipboardData。失败清理 GlobalFree，成对 CloseClipboard。
-pub fn write_text_to_clipboard(text: &str) -> Result<(), String> {
+///
+/// **0.17.9**：重命名为 `_raw`——外部应走 `mod.rs` 的 `write_text_to_clipboard`（打标外壳）。
+pub(super) fn write_text_to_clipboard_raw(text: &str) -> Result<(), String> {
     use windows::Win32::Foundation::{GlobalFree, HANDLE};
     use windows::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,

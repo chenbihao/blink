@@ -82,7 +82,11 @@ fn downsample_luma_bgra(pixels: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String
 pub async fn screenshot_copy(app: tauri::AppHandle, png_data: Vec<u8>) -> Result<(), String> {
     let bytes_len = png_data.len();
     tokio::task::spawn_blocking(move || {
-        crate::infra::platform::clipboard::write_png_to_clipboard(&png_data)
+        crate::infra::platform::clipboard::write_png_to_clipboard(
+            &png_data,
+            crate::infra::platform::clipboard::SELF_LABEL_SCREENSHOT,
+            false,
+        )
     })
     .await
     .map_err(|e| format!("spawn_blocking join 失败: {e}"))??;
@@ -114,7 +118,13 @@ pub async fn screenshot_copy_region(
     tokio::task::spawn_blocking(move || -> Result<(u32, u32), String> {
         let (bgra, cw, ch) = crate::infra::platform::screenshot::crop(x, y, w, h)
             .ok_or_else(|| "SESSION 为空或选区越界".to_string())?;
-        crate::infra::platform::clipboard::write_bgra_to_clipboard(&bgra, cw, ch)?;
+        crate::infra::platform::clipboard::write_bgra_to_clipboard(
+            &bgra,
+            cw,
+            ch,
+            crate::infra::platform::clipboard::SELF_LABEL_SCREENSHOT,
+            false,
+        )?;
         Ok((cw, ch))
     })
     .await
