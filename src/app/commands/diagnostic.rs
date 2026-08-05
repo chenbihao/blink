@@ -661,18 +661,37 @@ pub async fn get_cleanup_info() -> serde_json::Value {
     })
 }
 
-/// 设置页-存储：一键清理全部 Blink 数据（0.16.6）。
+/// 设置页-存储：一键清理全部 Blink 数据（0.16.6 + 0.17.11 顺序调整）。
 ///
 /// 清理范围：
-/// 1. 关闭 DB 连接池
-/// 2. 删除 `%APPDATA%\blink` 整个数据目录（含四库、日志、Python 环境、Skills 等）
-/// 3. 批量删除 Credential Manager 中 `blink/*` 密钥
+/// 1. **先读 AIConfig 拿到 provider id 列表**（0.17.11——删数据目录后配置不可读）
+/// 2. 关闭 DB 连接池
+/// 3. 删除 `%APPDATA%\blink` 整个数据目录（含四库、日志、Python 环境、Skills 等）
+/// 4. 批量删除密钥（按步骤 1 读到的 id 列表逐个调 `delete_secret`）
 ///
 /// **默认拒绝**——前端必须弹确认对话框（默认选否），用户明确点确认后才调用。
 /// 返回每个清理目标的 `Result`，前端按项展示成功/失败。
 #[tauri::command]
 pub async fn cleanup_all_data(app: tauri::AppHandle) -> serde_json::Value {
     let mut results: Vec<(String, Result<(), String>)> = Vec::new();
+
+    // 0.17.11: 先读 AIConfig 拿到要清理的 provider id 列表
+    // （删数据目录后配置不可读，delete_all_blink_secrets 需要这个列表）
+    let provider_ids: Vec<String> = {
+        let pools = app.state::<crate::infra::data::DbPools>();
+        let ai_config =
+            crate::app::config::ConfigStore::get::<crate::app::ai_config::AIConfig>(&pools.config)
+                .await;
+        let mut ids: Vec<String> = ai_config
+            .providers
+            .iter()
+            .filter(|p| p.kind.requires_secret())
+            .map(|p| p.id.clone())
+            .collect();
+        // STT 云端密钥也需清理（固定别名 stt:cloud）
+        ids.push("stt:cloud".to_string());
+        ids
+    };
 
     // 1. 关闭 DB 连接池（释放文件占用，否则 remove_dir_all 会失败）
     {
@@ -711,10 +730,11 @@ pub async fn cleanup_all_data(app: tauri::AppHandle) -> serde_json::Value {
         results.push(("数据目录".to_string(), Ok(()))); // 目录不存在视为成功
     }
 
-    // 3. 清理 Credential Manager 中 blink/* 密钥
+    // 3. 清理密钥（0.17.11: 按步骤 0 读到的 provider id 列表逐个删）
     #[cfg(target_os = "windows")]
     {
-        let delete_results = crate::infra::platform::secret::delete_all_blink_secrets();
+        let delete_results =
+            crate::infra::platform::secret::delete_all_blink_secrets(&provider_ids);
         let mut secret_ok = true;
         let mut secret_errors = Vec::new();
         for (target, result) in delete_results {

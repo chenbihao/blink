@@ -85,6 +85,9 @@ urlencoding = "2.1"
 jsonpath-rust = "0.7"
 # 密钥内存清零(0.9.1 Phase 2):SecretString 落存前从内存抹掉,防止 core dump / 内存快照泄漏
 zeroize = { version = "1.9", features = ["derive"] }
+# keyring: 跨平台密钥存储(0.17.11 替换自写 unsafe FFI)。v1 feature 启用 v1 兼容 API +
+# 自动拉入 windows-native-keyring-store(Windows 走 Credential Manager,安全模型不变)
+keyring = { version = "4", features = ["v1"] }
 winreg = "0.55"
 walkdir = "2.5"
 # cpal: 跨平台音频 I/O（0.10 语音输入麦克风采集，Windows 上走 WASAPI）
@@ -128,6 +131,10 @@ windows = { version = "0.62.2", features = [
 
 [features]
 default = []
+
+[dev-dependencies]
+# keyring-core: 供 store.rs 单测访问 mock store + set_default_store（0.17.11 单测隔离核心）
+keyring-core = "1"
 
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }

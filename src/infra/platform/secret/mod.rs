@@ -1,38 +1,90 @@
-//! 密钥存储（0.9.1 Phase 2）——AI Provider API Key 唯一可信持久层。
+//! 密钥存储（0.9.1 Phase 2 → 0.17.11 keyring 重构）——AI Provider API Key 唯一可信持久层。
 //!
-//! **架构**（对齐 phases/0.9-ai-layer.md §5）：
+//! **架构**（0.17.11 起）：
 //!
-//! - **持久层**：Windows Credential Manager（`CredWriteW` / `CRED_TYPE_GENERIC`），
-//!   DPAPI 加密、账户级隔离，免自维护密钥派生
+//! - **持久层**：`keyring` crate（v1 API）→ Windows 后端走 Credential Manager
+//!   （DPAPI 加密、账户级隔离，与旧实现同等安全级别）
 //! - **内存层**：`SecretString` newtype 包 `Zeroizing<String>`，drop 时按字节清零
 //! - **SQLite**：**绝不**存 raw Key，只存 `secret_ref` 别名（如 `"blink/openai/key1"`）
 //! - **tracing/log**：`Debug` impl 输出 `"<redacted>"`，`Display` 输出掩码 `••••{last4}`
-//! - **前端**：只在"输入 → save_ai_secret invoke → 写 CM → 内存清零"这一次窗口里持有明文
+//! - **前端**：只在"输入 → save_ai_secret invoke → 写 keyring → 内存清零"这一次窗口里持有明文
+//!
+//! **0.17.11 keyring 重构**：
+//! - `store.rs` — keyring 后端，提供 `save_secret`/`load_secret`/`delete_secret`（跨平台）
+//! - `windows_legacy.rs` — 保留 `CredEnumerateW` 枚举 + raw 读删（迁移 + 诊断用）
+//! - `migrate.rs` — 启动期一次性迁移老 CM `blink/*` 条目到 keyring 新命名
+//! - 单测用 keyring mock store，绝不碰真实 CM（根除 `cargo test` 清空生产 CM 的元凶）
 //!
 //! **五条铁则**（§5.1）：
 //! 1. SQLite 只存 secret_ref，不存 raw Key
 //! 2. 编辑 Key = 清空重填，禁止"保留旧 Key + 只改元数据"
-//! 3. 删除 Provider = 立即 `CredDeleteW`，不作"标记删除"
+//! 3. 删除 Provider = 立即删密钥，不作"标记删除"
 //! 4. tracing/log/Debug 三通路都不能出现原文
 //! 5. serde 序列化 Provider 类型必须 `#[serde(skip)]` secret 字段
 //!
-//! **0.16.6 扩展**：新增 `enumerate_blink_secrets` / `delete_all_blink_secrets`，
-//! 支持卸载清理与设置页一键清理 `blink/*` 命名空间下的全部密钥。
-//!
-//! **纯逻辑抽出**：`build_target_name` / `format_masked` 是纯函数，跨平台单测覆盖；
-//! 平台相关 CM 调用走 `windows.rs`（尚未落地平台后端时,mod 层仍能编译/测试）。
+//! **纯逻辑抽出**：`build_target_name` / `format_masked` 是纯函数，跨平台单测覆盖。
 
 use std::fmt;
 use zeroize::Zeroizing;
 
 #[cfg(target_os = "windows")]
-mod windows;
+mod store; // keyring 后端（0.17.11 起，替换 windows.rs 的 unsafe FFI）
 
 #[cfg(target_os = "windows")]
-#[allow(unused_imports)] // 0.9.1 Phase 2 定义,Phase 5 AI Provider dispatch 起消费
-pub use windows::{
-    delete_all_blink_secrets, delete_secret, enumerate_blink_secrets, load_secret, save_secret,
-};
+mod windows_legacy; // 原 windows.rs 改名，保留 enumerate + 迁移用 raw 读删
+
+#[cfg(target_os = "windows")]
+pub mod migrate; // CM→keyring 一次性迁移（0.17.11）
+
+// 生产密钥读写——从 store.rs re-export（调用方零改动）
+#[cfg(target_os = "windows")]
+pub use store::{delete_secret, load_secret, save_secret};
+
+// 枚举老 CM 条目——从 windows_legacy.rs re-export（诊断 + 迁移用）
+#[cfg(target_os = "windows")]
+pub use windows_legacy::enumerate_blink_secrets;
+
+/// 批量删除全部密钥（0.17.11 改为遍历配置逐个删）。
+///
+/// **0.17.11 前**：此函数用 `CredEnumerateW` 枚举 CM 中所有 `blink/*` 条目后逐个删。
+/// **0.17.11 起**：改为接受 provider id 列表，逐个调 `store::delete_secret`。
+/// 这样：
+/// - 清理的是 keyring 新命名下的条目（与生产存储一致）
+/// - 不会误删其他应用的 `blink/*` 条目（更可控）
+/// - `cleanup_all_data` 调用时，调用方需在删数据目录前先读出 provider id 列表
+///
+/// `provider_ids` 应包含所有需要密钥的 provider id + STT 常量 `stt:cloud`。
+/// `NotFound` 视为成功（幂等——可能被其他途径已删）。
+///
+/// # 返回
+/// `Vec<(target_name, Result<(), SecretError>)>`
+#[cfg(target_os = "windows")]
+pub fn delete_all_blink_secrets(provider_ids: &[String]) -> Vec<(String, Result<(), SecretError>)> {
+    let mut results = Vec::with_capacity(provider_ids.len());
+    for pid in provider_ids {
+        let target = format!("{pid}/key");
+        match store::delete_secret(pid, "key") {
+            Ok(()) => {
+                tracing::debug!(target = %target, "批量删除密钥成功");
+                results.push((target, Ok(())));
+            }
+            Err(SecretError::NotFound(_)) => {
+                // NotFound 视为成功（幂等）
+                results.push((target, Ok(())));
+            }
+            Err(e) => {
+                tracing::warn!(target = %target, error = %e, "批量删除密钥失败");
+                results.push((target, Err(e)));
+            }
+        }
+    }
+    tracing::info!(
+        total = results.len(),
+        failed = results.iter().filter(|(_, r)| r.is_err()).count(),
+        "批量删除密钥完成（遍历配置）"
+    );
+    results
+}
 
 /// 密钥元信息——枚举 CM 中 `blink/*` 条目时返回。
 ///

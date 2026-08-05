@@ -50,9 +50,7 @@
         "target_lang": "target_lang"
       },
       "projection": {
-        "result_shape": "text",
-        "pointer": "$",
-        "desc": "译文"
+        "result_shape": "text"
       }
     },
     {

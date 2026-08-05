@@ -49,11 +49,17 @@ pub struct ProjectionRule {
     /// Text 形态不再支持 pointer 投影。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pointer: Option<String>,
-    /// 静态 desc 字符串。例：翻译插件配 `desc: "译文"`。
+    /// 静态 desc 字符串。
+    ///
+    /// **0.17.10**：normalize 不读此字段（desc = None）。Text 形态的展示出口
+    /// `to_display_text` 直接用 content，也不读此字段。保留仅供向后兼容。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desc: Option<String>,
     /// 动态 desc：从 data 取某字段作为 desc（JSONPath）。
-    /// 例：weather 插件配 `desc_pointer: "$.city"` → desc = 城市名。
+    ///
+    /// **0.17.10**：normalize 不读此字段。展示出口 `to_display_text` 对 Items
+    /// 形态用 `item_desc_pointer`（非此字段），对 Text 形态不读任何 pointer。
+    /// 保留仅供向后兼容。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desc_pointer: Option<String>,
 

@@ -1,11 +1,19 @@
-//! Windows 密钥存储实现——`CredWriteW` / `CredReadW` / `CredDeleteW`（DPAPI 加密）。
+//! Windows 原生密钥存储实现（legacy）——保留 `CredEnumerateW` / `CredReadW` / `CredDeleteW`
 //!
-//! **为什么 CM 而不是 DPAPI 直接封 blob**：
-//! - CM 已经封了 DPAPI + 账户级隔离，免自维护 key 文件
-//! - Windows 内置 "Windows 凭据管理器" UI 让用户能看到（透明性）
-//! - 卸载脚本 `CredEnumerateW` "blink/*" 一键清理
+//! **0.17.11 起此文件为 legacy 后端**，仅供迁移和枚举使用：
+//! - `enumerate_blink_secrets()` — 枚举老 CM `blink/*` 条目（诊断页 + 迁移用）
+//! - `load_secret_raw(target)` / `delete_secret_raw(target)` — 按完整 target name 直接读/删（迁移用）
+//! - `delete_all_blink_secrets_raw()` — 批量删除老 CM `blink/*` 条目（迁移清理用）
 //!
-//! **`CredWriteW` 参数关键**:
+//! 生产密钥读写已切换到 `store.rs`（keyring 后端）。
+//!
+//! **单测全部 `#[ignore]`**：此文件的单测直接打真实 Windows Credential Manager，
+//! 默认 `cargo test` 跳过。仅手动 `cargo test -- --ignored` 时运行。
+//!
+//! **历史背景**：此文件原为 `windows.rs`（0.9.1 Phase 2），0.17.11 改名为 `windows_legacy.rs`，
+//! 因为其 `enumerate_and_delete_all_blink_secrets` 单测是 `cargo test` 清空生产 CM 的元凶。
+//!
+//! **`CredWriteW` 参数关键**（历史记录，供迁移逻辑参考）:
 //! - `Type = CRED_TYPE_GENERIC` — 应用自定义密钥（不是登录凭据）
 //! - `Persist = CRED_PERSIST_LOCAL_MACHINE` — 用户账户级，重启保留（不进漫游 profile）
 //! - `TargetName` — 我们的 "blink/{provider_id}/{purpose}" 别名
@@ -24,6 +32,102 @@ use windows::Win32::Security::Credentials::{
 use windows::core::PWSTR;
 
 use super::{SecretError, SecretInfo, SecretString, build_target_name};
+
+// ── raw 读/删（迁移专用，按完整 target name 直接操作老 CM）──────────────────
+
+/// 按完整 CM target name 直接读密钥（迁移专用）。
+///
+/// 与 `load_secret(pid, purpose)` 不同，此函数接受完整 target（如 `"blink/sensenova/key"`），
+/// 绕过 `build_target_name` 的拼接——因为迁移时拿到的就是完整老 target。
+///
+/// # 错误
+/// - `NotFound`: target 不存在
+/// - `Platform`: 其他系统错误
+pub fn load_secret_raw(target: &str) -> Result<SecretString, SecretError> {
+    let target_w = to_wide(target);
+
+    let mut cred_ptr: *mut CREDENTIALW = ptr::null_mut();
+
+    // Safety: PCWSTR 指向 target_w 有效切片;out ptr 由 CM 分配,必须 CredFree
+    let result = unsafe {
+        CredReadW(
+            windows::core::PCWSTR(target_w.as_ptr()),
+            CRED_TYPE_GENERIC,
+            None,
+            &mut cred_ptr,
+        )
+    };
+
+    if let Err(e) = result {
+        if e.code() == windows::core::HRESULT::from_win32(ERROR_NOT_FOUND.0) {
+            return Err(SecretError::NotFound(target.to_string()));
+        }
+        return Err(SecretError::Platform(format!(
+            "CredReadW 失败(target={target}): {}",
+            e.code()
+        )));
+    }
+
+    if cred_ptr.is_null() {
+        return Err(SecretError::Platform("CredReadW 返回 null".to_string()));
+    }
+
+    // Safety: cred_ptr 非空且指向 CM 分配的合法 CREDENTIALW。
+    // 拿到 blob 副本后立即 CredFree。
+    let blob_bytes: Vec<u8> = unsafe {
+        let cred = &*cred_ptr;
+        let blob_len = cred.CredentialBlobSize as usize;
+        let blob_slice = if cred.CredentialBlob.is_null() || blob_len == 0 {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(cred.CredentialBlob, blob_len)
+        };
+        blob_slice.to_vec()
+    };
+
+    unsafe { CredFree(cred_ptr as _) };
+
+    let raw = String::from_utf8(blob_bytes)
+        .map_err(|_| SecretError::Platform("密钥 blob 不是合法 UTF-8(可能已损坏)".to_string()))?;
+    let secret_string = SecretString::new(raw);
+
+    tracing::debug!(target = %target, bytes = secret_string.len(), "密钥已从老 CM 读回(raw)");
+    Ok(secret_string)
+}
+
+/// 按完整 CM target name 直接删密钥（迁移专用）。
+///
+/// 与 `delete_secret(pid, purpose)` 不同，此函数接受完整 target（如 `"blink/sensenova/key"`），
+/// 绕过 `build_target_name` 的拼接。
+///
+/// # 错误
+/// - `NotFound`: target 不存在
+/// - `Platform`: 其他系统错误
+pub fn delete_secret_raw(target: &str) -> Result<(), SecretError> {
+    let target_w = to_wide(target);
+
+    // Safety: PCWSTR 指向 target_w 有效切片
+    let result = unsafe {
+        CredDeleteW(
+            windows::core::PCWSTR(target_w.as_ptr()),
+            CRED_TYPE_GENERIC,
+            None,
+        )
+    };
+
+    if let Err(e) = result {
+        if e.code() == windows::core::HRESULT::from_win32(ERROR_NOT_FOUND.0) {
+            return Err(SecretError::NotFound(target.to_string()));
+        }
+        return Err(SecretError::Platform(format!(
+            "CredDeleteW 失败(target={target}): {}",
+            e.code()
+        )));
+    }
+
+    tracing::debug!(target = %target, "密钥已从老 CM 删除(raw)");
+    Ok(())
+}
 
 /// 把 Rust `&str` 转成 CM API 需要的 null-terminated wide string。
 fn to_wide(s: &str) -> Vec<u16> {
@@ -258,18 +362,22 @@ pub fn enumerate_blink_secrets() -> Result<Vec<SecretInfo>, SecretError> {
     Ok(secrets)
 }
 
-/// 批量删除 Credential Manager 中所有 `blink/*` 命名空间的密钥。
+/// 批量删除 Credential Manager 中所有 `blink/*` 命名空间的密钥（legacy raw 版本）。
+///
+/// **0.17.11 起**：此函数仅供迁移步骤清理老 CM 条目用，不对外暴露。
+/// 生产环境的批量删除走 `mod.rs::delete_all_blink_secrets`（遍历配置逐个调 `store::delete_secret`）。
 ///
 /// 返回每个 target 的删除结果，调用方可按项展示成功/失败。
 /// `NotFound` 视为成功（幂等——可能被其他途径已删）。
 ///
 /// # 返回
 /// `Vec<(target_name, Result<(), SecretError>)>`
-pub fn delete_all_blink_secrets() -> Vec<(String, Result<(), SecretError>)> {
+#[allow(dead_code)] // 0.17.11: 仅 #[ignore]d 测试调用,生产环境用 mod.rs::delete_all_blink_secrets
+pub fn delete_all_blink_secrets_raw() -> Vec<(String, Result<(), SecretError>)> {
     let secrets = match enumerate_blink_secrets() {
         Ok(s) => s,
         Err(e) => {
-            tracing::warn!(error = %e, "delete_all_blink_secrets: 枚举失败，无法批量删除");
+            tracing::warn!(error = %e, "delete_all_blink_secrets_raw: 枚举失败，无法批量删除");
             return vec![("<enumerate_failed>".to_string(), Err(e))];
         }
     };
@@ -367,6 +475,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "此测试打真实 CM，仅 cargo test -- --ignored 手动运行"]
     fn write_read_delete_roundtrip() {
         if !cm_available() {
             eprintln!("跳过:当前环境不可用 Credential Manager");
@@ -408,6 +517,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "此测试打真实 CM，仅 cargo test -- --ignored 手动运行"]
     fn load_missing_returns_not_found() {
         if !cm_available() {
             eprintln!("跳过:当前环境不可用 Credential Manager");
@@ -422,6 +532,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "此测试打真实 CM（调 save_secret），仅 cargo test -- --ignored 手动运行"]
     fn save_rejects_oversized_secret() {
         // 2561 字节 = 超过 CM 单条上限 1 字节
         let big = "a".repeat(2561);
@@ -437,6 +548,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "此测试会清空整个 blink/* 命名空间，是历史密钥丢失的元凶，严禁默认执行"]
     fn enumerate_and_delete_all_blink_secrets() {
         if !cm_available() {
             eprintln!("跳过:当前环境不可用 Credential Manager");
@@ -459,7 +571,7 @@ mod tests {
         assert!(has_p2, "枚举结果应包含刚写入的 secret 2");
 
         // 批量删除
-        let results = delete_all_blink_secrets();
+        let results = delete_all_blink_secrets_raw();
         // 每条结果应该都是 Ok（NotFound 也视为成功）
         for (target, result) in &results {
             assert!(result.is_ok(), "删除 {target} 应成功");
@@ -486,6 +598,6 @@ mod tests {
         );
 
         // 二次删除——幂等，不应报错
-        let _ = delete_all_blink_secrets();
+        let _ = delete_all_blink_secrets_raw();
     }
 }

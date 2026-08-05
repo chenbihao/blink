@@ -459,6 +459,12 @@ fn main() {
                 }
             }
 
+            // 0.17.11: CM→keyring 密钥迁移（一次性,幂等）
+            // 必须在 AIConfig 读取前执行——AIConfig 加载会触发密钥读取,需先迁到 keyring 新命名。
+            tauri::async_runtime::block_on(
+                crate::infra::platform::secret::migrate::migrate_legacy_cm_to_keyring(&pools.config),
+            );
+
             // 0.9.2 Phase 5b:AIProviderRegistry 用 RigFactory 真接 rig-core。
             // AI 配置分片(第 7 分片,独立于 AppConfig 门面);默认 enabled=false,老用户零副作用。
             let ai_config = tauri::async_runtime::block_on(

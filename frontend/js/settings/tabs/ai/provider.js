@@ -601,7 +601,9 @@ export async function saveNewProviderFromModal() {
 }
 
 async function saveNewProvider({ kind, displayName, baseUrl, apiKey, errEl, selectedModels }) {
-  const providerId = displayName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || `provider-${Date.now()}`;
+  // 0.17.11: 恢复 UUID（0.14.6 之前的做法）——slug 方案在重命名/删重建场景会导致密钥失配
+  const providerId = (crypto.randomUUID && crypto.randomUUID())
+    || `p-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const cfg = aiState.currentAIConfig;
   if ((cfg.providers || []).some((p) => p.id === providerId)) {
     if (errEl) errEl.textContent = t("ai.modal.err.duplicate_id");
