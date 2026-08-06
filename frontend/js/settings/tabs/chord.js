@@ -76,10 +76,11 @@ screenshotCfg = {
 prewarmOcr: sc?.prewarmOcr !== false,
 scrollDebug: sc?.scrollDebug === true,
 ocrDebug: sc?.ocrDebug === true,
+controlSnap: sc?.controlSnap === true,
 };
   } catch (e) {
     console.warn("load screenshot config failed:", e);
-    screenshotCfg = { prewarmOcr: true, scrollDebug: false, ocrDebug: false };
+    screenshotCfg = { prewarmOcr: true, scrollDebug: false, ocrDebug: false, controlSnap: false };
   }
 
   // Chord id → 副标题（不再用 emoji 图标，标题/副标题足够承载语义）
@@ -216,7 +217,7 @@ function renderClipboardDetail(cfg) {
  * 后续 0.11.10-i/j 的背景遮罩策略等也归到此区。
  */
 function renderScreenshotDetail(cfg) {
-cfg = cfg || { prewarmOcr: true, scrollDebug: false, ocrDebug: false };
+cfg = cfg || { prewarmOcr: true, scrollDebug: false, ocrDebug: false, controlSnap: false };
 return `<div class="chord-screenshot-detail">
 <div class="chord-field">
 <label class="setting-label chord-field-label">${t("chord.screenshot.prewarm_ocr.label")}
@@ -242,6 +243,15 @@ return `<div class="chord-screenshot-detail">
 </label>
 <label class="switch switch-sm">
 <input type="checkbox" class="screenshot-field" data-field="scroll_debug" ${cfg.scrollDebug === true ? "checked" : ""} />
+<span class="slider"></span>
+</label>
+</div>
+<div class="chord-field">
+<label class="setting-label chord-field-label">${t("chord.screenshot.control_snap.label")}
+<span class="field-hint-icon" title="${escapeAttr(t("chord.screenshot.control_snap.hint"))}">ⓘ</span>
+</label>
+<label class="switch switch-sm">
+<input type="checkbox" class="screenshot-field" data-field="control_snap" ${cfg.controlSnap === true ? "checked" : ""} />
 <span class="slider"></span>
 </label>
 </div>
@@ -492,7 +502,8 @@ async function saveScreenshotDetail(container) {
 const prewarmOcr = detail.querySelector('[data-field="prewarm_ocr"]')?.checked !== false;
 const scrollDebug = detail.querySelector('[data-field="scroll_debug"]')?.checked === true;
 const ocrDebug = detail.querySelector('[data-field="ocr_debug"]')?.checked === true;
-await saveConfig("screenshot_config", { prewarmOcr, scrollDebug, ocrDebug });
+const controlSnap = detail.querySelector('[data-field="control_snap"]')?.checked === true;
+await saveConfig("screenshot_config", { prewarmOcr, scrollDebug, ocrDebug, controlSnap });
   } catch (e) {
     console.error("save screenshot detail failed:", e);
   }

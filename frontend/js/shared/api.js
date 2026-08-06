@@ -232,6 +232,11 @@ export function screenshotWindowList() {
   return invoke("screenshot_window_list");
 }
 
+/** 0.18.2：列出前台窗口的 UIA 控件提示（控件级智能吸附用）。返回 ControlHint 数组。 */
+export function screenshotControlHints() {
+  return invoke("screenshot_control_hints");
+}
+
 /** 0.15.7：设置/清除 overlay 捕获排除（WDA_EXCLUDEFROMCAPTURE）。 */
 export function screenshotSetCaptureExclusion(exclude) {
   return invoke("screenshot_set_capture_exclusion", { exclude });

@@ -389,6 +389,8 @@ export const en = {
     "chord.screenshot.scroll_debug.hint": "Show matching diagnostics and retain replay frames for the current session; files are written to Blink logs only when exported",
 "chord.screenshot.ocr_debug.label": "OCR Diagnostics",
 "chord.screenshot.ocr_debug.hint": "When enabled, a diagnostic button appears next to the OCR button in the screenshot toolbar; shows installed languages, Chinese pack status, and selection test results",
+"chord.screenshot.control_snap.label": "Control-level Snap",
+"chord.screenshot.control_snap.hint": "Snap selection to child controls (buttons, inputs) when hovering during screenshot drag (UIA, 200ms timeout + 3-level depth adaptive fallback); off by default. Amber dashed = control snap, blue dashed = window snap",
 
 // ── OCR diagnostics panel (0.17.5, only shown with ?ocrDebug=1) ──
 "screenshot.ocr_diag.title": "OCR Diagnostics",

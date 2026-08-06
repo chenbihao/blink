@@ -203,4 +203,6 @@
 <symbol id="icon-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3" />
   <path d="M3 5V19A9 3 0 0 0 21 19V5" />
   <path d="M3 12A9 3 0 0 0 21 12" /></symbol>
+<symbol id="icon-bookmark-check" viewBox="0 0 24 24"><path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z" />
+  <path d="m9 10 2 2 4-4" /></symbol>
 </svg>

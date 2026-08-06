@@ -65,6 +65,11 @@ import {
 import { bindToolbar, showTextInput, updateUndoRedoButtons } from "./ss-toolbar.js";
 // 0.15.8：智能窗口吸附 + 像素放大镜
 import { loadPickableWindows, clearPickableWindows, updateWindowHover, getHoveredWindowRect, clearHover } from "./ss-hover.js";
+// 0.18.2：控件级智能吸附
+import {
+  loadControlHints, clearControlHints, updateControlHover,
+  getHoveredControlRect, clearControlHover,
+} from "./ss-control-hints.js";
 // 0.15.7：长截图
 import {
   enterScrollCapture, exitScrollCapture, onScrollWheel,
@@ -123,6 +128,7 @@ ss._showOcrResult = showOcrResult;
 ss._showTransientHint = showTransientHint;
 ss._doCancel = doCancel;
 ss._compositeSelection = compositeSelection;
+ss._doPinSelection = doPinSelection;
 // 0.15.7：长截图回调
 ss._enterAnnotationWithCropData = enterAnnotationWithCropData;
 
@@ -207,6 +213,7 @@ function resetState() {
   ss.sent = false;
   ss.ocrBusy = false;
   ss.translationBusy = false;
+  ss._translateAndPinPending = false;
   // 0.15.9：清除防抖标志——快速连续截图时上一轮的 cancelInProgress/blurGuard
   // 可能仍在生效期，导致新一轮的 cancel/blur 被静默忽略（用户被困在 overlay 里）
   ss.cancelInProgress = false;
@@ -266,6 +273,8 @@ function resetState() {
     toolbar.style.top = '';
   } catch (e) { console.warn('[screenshot] resetState: toolbar reset failed', e); }
   try { clearPickableWindows(); } catch (e) { console.warn('[screenshot] resetState: clearPickableWindows failed', e); }
+  // 0.18.2：清除控件提示列表
+  try { clearControlHints(); } catch (e) { console.warn('[screenshot] resetState: clearControlHints failed', e); }
   if (ss.magnifierRaf) { cancelAnimationFrame(ss.magnifierRaf); ss.magnifierRaf = 0; }
   // 长截图状态、在途任务与 DOM 统一由 resetScrollCaptureSession 清理。
   _spaceDown = false;
@@ -293,8 +302,13 @@ function loadScreenshot() {
         ss.screenshotConfig.prewarmOcr = val.prewarmOcr !== false;
         ss.screenshotConfig.scrollDebug = val.scrollDebug === true;
         ss.screenshotConfig.ocrDebug = val.ocrDebug === true;
+        ss.screenshotConfig.controlSnap = val.controlSnap === true;
         refreshDiagnosticsVisibility();
         refreshOcrDiagnosticsVisibility();
+        // 0.18.2：control_snap 开启时异步加载控件提示（不阻塞 overlay）
+        if (ss.screenshotConfig.controlSnap) {
+          loadControlHints(ss.controlHintsGen);
+        }
       }
     })
     .catch((e) => console.warn('[screenshot] 读 screenshot:config 失败,用默认值', e));
@@ -355,9 +369,10 @@ function enterAnnotationMode(rect) {
   ss.selCss = rect;
   ss.isAnnotating = true;
   ss.sent = false;
-  hidePixelMagnifier();
-  // Bug-fix: 进入标注模式时隐藏窗口吸附虚线框
-  clearHover();
+hidePixelMagnifier();
+// Bug-fix: 进入标注模式时隐藏吸附虚线框
+clearHover();
+clearControlHover();
 
   const dpr = window.devicePixelRatio || 1;
   annotCanvas.classList.remove('hidden');
@@ -523,6 +538,7 @@ function exitAnnotationMode() {
   ss.ocrPrewarm = null;
   ss.ocrBusy = false;
   ss.translationBusy = false;
+  ss._translateAndPinPending = false;
   updateOutputButtonsDisabled();
   ss.ocrResultCache = null;
   exitReadingMode();
@@ -544,6 +560,7 @@ function invalidateSelectionContent() {
   ss.ocrResultCache = null;
   ss.ocrBusy = false;
   ss.translationBusy = false;
+  ss._translateAndPinPending = false;
   updateOutputButtonsDisabled();
   const panel = document.getElementById('ocr-panel');
   if (panel) panel.remove();
@@ -642,16 +659,17 @@ canvas.addEventListener('mousedown', (e) => {
 
   if (e.button !== 0) return;
 
-  // 0.15.8 R2：窗口吸附——pending-snap 状态机
-  // mousedown 只记录候选窗口和起点，不立即吸附；
-  // mouseup 时若总位移 < 3px 才采用窗口矩形；mousemove 达到阈值转 free-selecting。
+  // 0.15.8 R2 + 0.18.2：吸附——pending-snap 状态机（控件优先于窗口）
+  // mousedown 只记录候选矩形和起点，不立即吸附；
+  // mouseup 时若总位移 < 3px 才采用矩形；mousemove 达到阈值转 free-selecting。
   if (!ss.isAnnotating && !ss.selectionInteraction) {
-    const winRect = getHoveredWindowRect();
-    if (winRect) {
+    // 0.18.2：控件优先于窗口——控件命中时用控件矩形，否则回退窗口矩形
+    const snapRect = getHoveredControlRect() || getHoveredWindowRect();
+    if (snapRect) {
       ss.pendingSnap = {
         startX: e.offsetX,
         startY: e.offsetY,
-        winRect: winRect,
+        winRect: snapRect,
         pointerId: e.pointerId,
       };
       // pointer capture 保证快速拖出 canvas 后仍能收到 mouseup
@@ -719,9 +737,15 @@ canvas.addEventListener('mousemove', (e) => {
 
   if (!ss._longImagePan) updateSelectionCursor(e.offsetX, e.offsetY);
 
-  // 0.15.8：选区拖拽阶段智能窗口吸附
+  // 0.18.2：选区拖拽阶段智能吸附（控件优先于窗口）
   if (!ss.isAnnotating && !ss.selectionInteraction) {
-    updateWindowHover(e.offsetX, e.offsetY);
+    // 控件优先 hit-test：控件命中则不检查窗口
+    if (!updateControlHover(e.offsetX, e.offsetY)) {
+      updateWindowHover(e.offsetX, e.offsetY);
+    } else {
+      // 控件命中时清除窗口 hover（避免两个虚线框同时显示）
+      clearHover();
+    }
     updatePixelMagnifier(e.offsetX, e.offsetY);
     // 0.15.12：存储最新位置供 Shift 切格式时强制刷新
     ss._lastMagnifierPos = { x: e.offsetX, y: e.offsetY };
@@ -741,8 +765,9 @@ canvas.addEventListener('mousemove', (e) => {
       e.offsetX,
       e.offsetY,
     )) {
-      // 达到阈值，清除窗口候选并从原始按下点开始自由框选
+      // 达到阈值，清除候选并从原始按下点开始自由框选
       clearHover();
+      clearControlHover();
       ss.startX = ss.pendingSnap.startX;
       ss.startY = ss.pendingSnap.startY;
       ss.endX = e.offsetX;
@@ -798,6 +823,7 @@ canvas.addEventListener('mouseleave', () => {
   if (ss.pendingSnap) {
     ss.pendingSnap = null;
     clearHover();
+    clearControlHover();
   }
   if (!ss.selectionInteraction) {
     ss.canvas.style.cursor = ss._longImagePan && annot.getTool() === 'select'

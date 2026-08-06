@@ -39,10 +39,12 @@ export const ss = {
   ocrBusy: false,            // 显式 OCR 请求门禁
   translationBusy: false,    // 图上译文请求中
   ocrPrewarm: null,          // Promise<OcrResult> | null
-  screenshotConfig: { prewarmOcr: true, scrollDebug: false, ocrDebug: false },
+  screenshotConfig: { prewarmOcr: true, scrollDebug: false, ocrDebug: false, controlSnap: false },
   selectionRevision: 0,
   translationRevision: 0,
   windowListGen: 0,
+  // 0.18.2：控件提示列表 generation（与 windowListGen 独立，控件列表异步加载）
+  controlHintsGen: 0,
   ocrResultCache: null,      // OCR 结果缓存
 
   // ── 选区交互状态 ──────────────────────────────────────────
@@ -98,6 +100,8 @@ export const ss = {
   _showTransientHint: null,           // 临时提示
   _doCancel: null,                    // 取消截图
   _compositeSelection: null,          // 合成选区 PNG
+  _doPinSelection: null,              // 0.18.1：钉图（回调避免 ss-ocr → ss-output 循环依赖）
+  _translateAndPinPending: false,     // 0.18.1：翻译并 pin 流程进行中（防重复点击）
   _longImageBaseCanvas: null,         // 长图编辑底图（不随视口平移改变像素坐标）
 };
 

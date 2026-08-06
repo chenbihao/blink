@@ -14,7 +14,7 @@ import { updateSelectionCursor } from './ss-interaction.js';
 import { doCancel, doPinSelection, doSaveSelection, doCopySelection } from './ss-output.js';
 // 0.15.7：长截图
 import { enterScrollCapture } from './scroll/index.js';
-import { doOcrSelection, doTranslateSelection } from './ss-ocr.js';
+import { doOcrSelection, doTranslateSelection, doTranslateAndPin } from './ss-ocr.js';
 import { doOcrDiagnostics } from './ss-ocr-diagnostics.js';
 import * as annot from './annotation-engine.js';
 import { initColorPicker, syncFromAnnot } from './ss-color-picker.js';
@@ -846,6 +846,7 @@ export function bindToolbar() {
   bind('btn-ocr', doOcrSelection);
   bind('btn-ocr-diag', doOcrDiagnostics);
   bind('btn-translate', doTranslateSelection);
+  bind('btn-translate-pin', doTranslateAndPin);
   bind('btn-save', doSaveSelection);
   bind('btn-copy', doCopySelection);
 

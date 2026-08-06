@@ -44,3 +44,7 @@ pub use windows::{
 // 0.15.8：智能窗口吸附——枚举可吸附窗口
 #[cfg(target_os = "windows")]
 pub use list::{PickableWindow, enumerate_pickable_windows};
+
+// 0.18.2：控件级智能吸附——UIA 控件提示
+#[cfg(target_os = "windows")]
+pub use crate::infra::platform::uia::ControlHint;

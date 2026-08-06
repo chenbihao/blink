@@ -253,6 +253,99 @@ export function doOverlayTranslate() {
 export const doOcrSelection = doIdentifySelection;
 export const doTranslateSelection = doOverlayTranslate;
 
+/**
+ * 点[翻译并 pin]——OCR + 翻译嵌图 → 等翻译完成 → pin 到桌面。
+ * 0.18.1：翻译捷径，合并"翻译"和"pin"两步为一步。
+ *
+ * 时序：翻译是异步的，按钮点击后不能立即 pin（译文还没回填），
+ * 必须等 overlay 翻译完成（所有 lines 的 dstText 就绪）再 pin。期间显示 loading。
+ */
+export function doTranslateAndPin() {
+  if (!ss.selCss || ss.sent) return;
+  if (ss._translateAndPinPending) return;
+
+  const overlay = annot.getOverlay();
+
+  // 1. 翻译已完成 → 直接 pin（快路径）
+  const isTranslated = overlay && overlay.lines.length > 0
+    && overlay.lines.every((l) => hasText(l.dstText));
+  if (isTranslated) {
+    if (overlay.mode !== 'translated') {
+      annot.setOverlayMode('translated');
+      redrawAnnotFull();
+    }
+    if (typeof ss._doPinSelection === 'function') ss._doPinSelection();
+    return;
+  }
+
+  // 2. 需要启动翻译流程（OCR/翻译均未在进行中时才启动）
+  if (!ss.ocrBusy && !ss.translationBusy) {
+    if (!overlay || overlay.lines.length === 0) {
+      // 无 OCR 结果 → 启动 OCR + 翻译
+      // doOverlayTranslate 内部会 activateOverlay → requestOverlayTranslation
+      doOverlayTranslate();
+    } else {
+      // OCR 已完成但翻译未完成 → 请求翻译
+      if (overlay.mode !== 'translated') {
+        annot.setOverlayMode('translated');
+        redrawAnnotFull();
+      }
+      requestOverlayTranslation();
+    }
+  }
+
+  // 3. 等待翻译完成后 pin
+  ss._translateAndPinPending = true;
+  showSelLoading('翻译并 pin 中…');
+  const startTime = Date.now();
+  const TIMEOUT = 30000;
+  const waitAndPin = () => {
+    if (!ss._translateAndPinPending) return;
+
+    const latest = annot.getOverlay();
+    const allTranslated = latest && latest.lines.length > 0
+      && latest.lines.every((line) => hasText(line.dstText));
+
+    if (allTranslated) {
+      // 竞态防护：等 translationBusy 清零再 pin（ensureOutputReady 会检查此标志）
+      if (ss.translationBusy) {
+        if (Date.now() - startTime < TIMEOUT) {
+          setTimeout(waitAndPin, 50);
+          return;
+        }
+      }
+      ss._translateAndPinPending = false;
+      hideSelLoading();
+      if (typeof ss._doPinSelection === 'function') ss._doPinSelection();
+      return;
+    }
+
+    // OCR 刚完成但翻译尚未启动 → 补启动翻译
+    if (latest && latest.lines.length > 0 && !ss.ocrBusy && !ss.translationBusy) {
+      if (latest.mode !== 'translated') {
+        annot.setOverlayMode('translated');
+        redrawAnnotFull();
+      }
+      requestOverlayTranslation();
+    }
+
+    if ((ss.ocrBusy || ss.translationBusy) && Date.now() - startTime < TIMEOUT) {
+      setTimeout(waitAndPin, 100);
+      return;
+    }
+
+    // 超时或失败
+    ss._translateAndPinPending = false;
+    hideSelLoading();
+    if (!latest || latest.lines.length === 0) {
+      showTransientHint('未识别到文字');
+    } else {
+      showTransientHint('翻译超时，请重试');
+    }
+  };
+  setTimeout(waitAndPin, 200);
+}
+
 /** E 键召唤/关闭面板抽屉 */
 export function doPanelToggle() {
   const panel = document.getElementById('ocr-panel');

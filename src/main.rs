@@ -716,6 +716,7 @@ fn main() {
             app::commands::screenshot_save_replay_file,
             app::commands::screenshot_set_annotation_mode,
             app::commands::screenshot_window_list,
+            app::commands::screenshot_control_hints,
             app::commands::screenshot_set_capture_exclusion,
             app::commands::screenshot_capture_band,
             app::commands::screenshot_capture_probe,

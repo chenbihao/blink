@@ -579,6 +579,36 @@ pub async fn screenshot_window_list()
         .map_err(|e| format!("spawn_blocking join 失败: {e}"))
 }
 
+/// 0.18.2：列出前台窗口的 UIA 控件提示（截图控件级智能吸附用）。
+///
+/// 从截图会话的 `session_fg_hwnd()` 取前台窗口 HWND，用 UIA 逐层 BFS 收集
+/// 控件矩形（200ms deadline + 3 层深度自适应降级）。与 `screenshot_window_list`
+/// 完全独立、可并行。
+///
+/// 返回 `Vec<ControlHint>`，每条含控件矩形（物理像素、虚拟屏幕坐标系）+
+/// 控件类型 ID。前端转 CSS 后做 hit-test，**控件优先于窗口**（吸附到更小的控件）。
+///
+/// `spawn_blocking` 隔离 UIA 同步 COM 调用，不阻塞 tokio runtime。
+#[tauri::command]
+pub async fn screenshot_control_hints()
+-> Result<Vec<crate::infra::platform::window::ControlHint>, String> {
+    let hwnd = crate::infra::platform::screenshot::session_fg_hwnd();
+    let hwnd = match hwnd {
+        Some(h) => h,
+        None => {
+            tracing::debug!("screenshot_control_hints: session_fg_hwnd 为空，返回空列表");
+            return Ok(Vec::new());
+        }
+    };
+
+    tokio::task::spawn_blocking(move || {
+        let hwnd = windows::Win32::Foundation::HWND(hwnd as _);
+        crate::infra::platform::uia::collect_control_hints(hwnd)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking join 失败: {e}"))
+}
+
 /// 0.15.7：长截图——设置/清除 overlay 捕获排除（WDA_EXCLUDEFROMCAPTURE）。
 ///
 /// 设为 true 时，overlay 窗口在 BitBlt 屏幕采集中不可见（但用户仍能看到）。

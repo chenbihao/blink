@@ -342,6 +342,10 @@ pub struct ScreenshotConfig {
     /// OCR 诊断开关（0.17.5：开启后截图工具栏显示 OCR 诊断按钮）。
     #[serde(default)]
     pub ocr_debug: bool,
+    /// 控件级智能吸附（0.18.2：UIA 逐层 BFS 收集控件矩形，悬停吸附到子控件）。
+    /// 默认关闭——默认体验与现状逐字节一致。
+    #[serde(default)]
+    pub control_snap: bool,
 }
 
 impl Default for ScreenshotConfig {
@@ -350,6 +354,7 @@ impl Default for ScreenshotConfig {
             prewarm_ocr: true,
             scroll_debug: false,
             ocr_debug: false,
+            control_snap: false,
         }
     }
 }

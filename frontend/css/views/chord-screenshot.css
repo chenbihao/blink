@@ -1359,6 +1359,24 @@ html, body {
               opacity 0.1s ease-out;
 }
 
+/* 0.18.2：控件级智能吸附虚线框（琥珀色，与窗口吸附蓝色区分） */
+.control-hint {
+  position: fixed;
+  z-index: calc(var(--z-dropdown, 100) + 3);
+  opacity: 0;
+  visibility: hidden;
+  border: 3px dashed rgba(255, 180, 50, 0.9);
+  border-radius: 3px;
+  pointer-events: none;
+  box-sizing: border-box;
+  box-shadow: 0 0 0 1px rgba(255, 180, 50, 0.12), 0 0 14px rgba(255, 180, 50, 0.3);
+  transition: left 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+              top 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+              width 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+              height 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+              opacity 0.1s ease-out;
+}
+
 /* ── 0.15.11：二级面板（水印/文字配置）───────────────
    显示在工具栏下方，不随 hover 展开/关闭。
    水印/文字配置内容不再藏在 dropdown 里，而是直接可见可操作。 */

@@ -390,6 +390,8 @@ export const zh = {
     "chord.screenshot.scroll_debug.hint": "显示长截图匹配信息并保留当前会话的回放帧；仅点击导出后才写入 Blink 日志目录",
     "chord.screenshot.ocr_debug.label": "OCR 诊断",
     "chord.screenshot.ocr_debug.hint": "开启后截图工具栏 OCR 按钮旁显示诊断按钮，可查看已安装语言、中文包状态、选区测试结果；排查中文识别不出的问题用",
+    "chord.screenshot.control_snap.label": "控件级吸附",
+    "chord.screenshot.control_snap.hint": "截图选区拖拽时悬停吸附到按钮/输入框等子控件（UIA，200ms 超时+3层深度自适应降级）；默认关闭，开启后琥珀色虚线框=控件吸附，蓝色虚线框=窗口吸附",
 
 // ── OCR 诊断面板（0.17.5，仅 ?ocrDebug=1 显示）──
     "screenshot.ocr_diag.title": "OCR 诊断",
