@@ -43,6 +43,10 @@
     <!-- AI 模式（0.17.6: 独立容器，Tab on AI Ghost 进入，ESC 退出） -->
     <div id="ai-mode" hidden>
         <div id="ai-input-bar">
+            <span class="ai-mode-indicator" aria-hidden="true">
+                <svg class="icon"><use href="#icon-sparkles"/></svg>
+                <span>AI</span>
+            </span>
             <input id="ai-query" type="text" autocomplete="off" spellcheck="false"
                    placeholder="追问…" data-i18n-placeholder="ai.followup_placeholder"/>
         </div>

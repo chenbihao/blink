@@ -360,7 +360,8 @@ async function handleStop() {
   }
   // 立即结束流式状态，不依赖后端兜底 Done chunk。
   // abort 后后端的兜底 Done 会被 request_id 校验过滤（activeRequestId 已清空）。
-  if (currentAssistantEl && (state.streamBuffer || state.thinkingBuffer)) {
+  // 0.18.0: trim 判断——纯空白 text/thinking 走 remove 分支
+  if (currentAssistantEl && ((state.streamBuffer || "").trim() || (state.thinkingBuffer || "").trim())) {
     components.finalizeAssistantMessage(currentAssistantEl, state.streamBuffer, state.thinkingBuffer);
     state.addMessage({ role: "assistant", content: state.streamBuffer });
   } else if (currentAssistantEl) {
@@ -419,7 +420,8 @@ function handleStreamEvent(event) {
 
     case "tool_call":
       // 结束当前 assistant 消息的流式状态（可能有 thinking 而无 text）
-      if (currentAssistantEl && (state.streamBuffer || state.thinkingBuffer)) {
+      // 0.18.0: trim 判断——纯空白 text/thinking 走 remove 分支
+      if (currentAssistantEl && ((state.streamBuffer || "").trim() || (state.thinkingBuffer || "").trim())) {
         components.finalizeAssistantMessage(currentAssistantEl, state.streamBuffer, state.thinkingBuffer);
         state.addMessage({ role: "assistant", content: state.streamBuffer });
         state.resetStreamBuffer();
@@ -465,11 +467,12 @@ function handleStreamEvent(event) {
     case "error":
       // 移除空的 streaming assistant DOM（有内容则先 finalize）
       if (currentAssistantEl) {
-        if (state.streamBuffer || state.thinkingBuffer) {
-          components.finalizeAssistantMessage(currentAssistantEl, state.streamBuffer, state.thinkingBuffer);
-        } else {
-          currentAssistantEl.remove();
-        }
+      // 0.18.0: trim 判断——纯空白走 remove 分支
+      if ((state.streamBuffer || "").trim() || (state.thinkingBuffer || "").trim()) {
+        components.finalizeAssistantMessage(currentAssistantEl, state.streamBuffer, state.thinkingBuffer);
+      } else {
+        currentAssistantEl.remove();
+      }
       }
       components.renderErrorMessage(chunk.message);
       finishStreaming();
@@ -501,9 +504,14 @@ function scheduleRender() {
  * @param {{input_tokens: number, output_tokens: number}} chunk
  */
 function finalizeDone(chunk) {
+  // 0.18.0: 空内容（纯空白）时不 finalize，直接移除元素，不添加空消息到 state
   if (currentAssistantEl) {
-    components.finalizeAssistantMessage(currentAssistantEl, state.streamBuffer, state.thinkingBuffer);
-    state.addMessage({ role: "assistant", content: state.streamBuffer });
+    if ((state.streamBuffer || "").trim() || (state.thinkingBuffer || "").trim()) {
+      components.finalizeAssistantMessage(currentAssistantEl, state.streamBuffer, state.thinkingBuffer);
+      state.addMessage({ role: "assistant", content: state.streamBuffer });
+    } else {
+      currentAssistantEl.remove();
+    }
   }
   // 完成 Tool 状态卡（若有未配对到 result 的卡片，默认成功）
   if (currentToolEl) {

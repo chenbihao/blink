@@ -171,6 +171,12 @@ export function updateAssistantMessage(el, text, thinkingText, thinkingDone) {
  */
 export function finalizeAssistantMessage(el, text, thinkingText) {
   if (!el) return;
+  // 0.18.0: 空内容守卫——text/thinking 均 trim 后为空时直接移除元素，不渲染空气泡
+  // 覆盖所有 finalize 路径（done / error / tool_call / handleStop）
+  if (!text?.trim() && !thinkingText?.trim()) {
+    el.remove();
+    return;
+  }
   el.classList.remove("streaming", "waiting");
   el.dataset.rawText = text;
   const thinkingHtml = renderThinkingBlock(thinkingText, true);

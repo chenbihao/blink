@@ -671,6 +671,7 @@ fn main() {
             app::commands::hide_chat_window,
             app::commands::chat_prompt,
             app::commands::chat_abort,
+            app::commands::clear_main_ai_active,
             app::commands::promote_ephemeral_conversation,
             app::commands::get_chat_status,
             app::commands::get_chat_models,

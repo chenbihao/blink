@@ -50,6 +50,24 @@
 - **settings 预热特殊处理**：预热时补 `strip_window_border` + `enable_rounded_corners`，因为 `open_settings` 的复用路径不调这两个（只在首次创建路径调）
 - **内存预算**：8 个预热窗口 + 动态便签，常驻内存 < 300MB（WebView2 每窗口 ~10-20MB）
 
+### 1.5 vendor 第三方库版本管理（强制）
+
+> **铁则**：`frontend/vendor/` 下所有第三方库必须有可追溯的版本记录，不能只放文件不记版本。
+
+- **版本清单**：`frontend/vendor/VERSIONS.md` 是 vendor 目录所有第三方库的版本真源。升级时必更新。格式：
+
+  ```markdown
+  | 文件 | 包名 | 版本 | 来源 | 打包方式 | 引入日期 | 引入 phase |
+  |---|---|---|---|---|---|---|
+  | cherry-markdown.stream.min.js | cherry-markdown | 0.11.9 | npm tgz | 官方 UMD 产物 | 0.17.6 | 0.17 §3.4 |
+  | tiptap.bundle.min.js | @tiptap/core+pm+starter-kit+markdown | 3.29.2 | npm + esbuild | 自打包 IIFE | 0.18.3 | 0.18 §3.2 |
+  ```
+
+- **自打包产物**（如 Tiptap）：打包脚本归入 `xtask/scripts/`（如 `bundle-tiptap.js`），版本号硬编码为常量（如 `TIPTAP_VERSION = "3.29.2"`），`cargo xtask <name>` 执行。与 `cargo xtask icons`（Lucide 图标脚本生成 sprite）同性质--预处理产物，运行时零构建，不违反无 bundler 铁则。
+- **产物头水印**：自打包脚本在产物头部注入版本注释（包名+版本+构建日期），便于二进制文件也能追溯版本。
+- **官方 UMD 产物**（如 Cherry）：文件名可不含版本号（保持 `cherry-markdown.stream.min.js`），但 VERSIONS.md 必须记录。
+- **升级流程**：① 改打包脚本的版本常量 / 下载新版官方产物 -> ② 重新生成 -> ③ 更新 VERSIONS.md -> ④ review diff（changelog 对比）
+
 ---
 
 ## 第二层：设计 token 与主题

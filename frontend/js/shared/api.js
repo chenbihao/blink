@@ -49,6 +49,12 @@ export function chatAbort(requestId) {
   return invoke("chat_abort", { requestId });
 }
 
+/** 0.18.0: 清除主窗口 AI 活跃标志（exitAiMode 时调用）。
+ *  @returns {Promise<void>} */
+export function clearMainAiActive() {
+  return invoke("clear_main_ai_active");
+}
+
 /** 0.17.6: 确认/拒绝危险操作（主窗口 + 对话窗口共用）。
  *  @param {number} confirmId
  *  @param {boolean} approved

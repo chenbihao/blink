@@ -51,7 +51,10 @@ body {
     overflow-x: hidden;
     scrollbar-width: thin;
     scrollbar-color: var(--surface-2) transparent;
-    -webkit-app-region: drag;
+    /* 不在此处声明 -webkit-app-region: drag：滚动容器同时作 drag region 会让
+       WebView2 在每次滚轮/鼠标移动时做 drag hit-test 仲裁，阻塞合成线程，
+       表现为滚动 sidebar 时整页卡顿。拖窗能力由 .logo / .group-title / h2
+       等静态元素各自承担。 */
 }
 
 .logo {
@@ -112,7 +115,8 @@ body {
     letter-spacing: 0.5px;
     cursor: default;
     user-select: none;
-    -webkit-app-region: drag;
+    /* 不作 drag region：分组标签语义上是 label，不是标题栏；点标签却拖动窗口会意外。
+       拖窗能力由 .logo（顶部 Blink）和 .content h2（面板大标题，撑满内容区全宽）承担。 */
 }
 
 /* ── 内容区 ───────────────────────────────────────────────────────────────── */

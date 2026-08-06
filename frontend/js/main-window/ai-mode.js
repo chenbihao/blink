@@ -14,7 +14,7 @@
 
 import { listen } from "../shared/tauri.js";
 import { EVENTS } from "../shared/event-names.js";
-import { chatPrompt, chatAbort, confirmChatAction, promoteEphemeralConversation, getEphemeralModels } from "../shared/api.js";
+import { chatPrompt, chatAbort, confirmChatAction, promoteEphemeralConversation, getEphemeralModels, clearMainAiActive } from "../shared/api.js";
 import { initMarkdown, renderMarkdown, renderMarkdownStream } from "../shared/markdown.js";
 import {
   renderTypingIndicator,
@@ -34,7 +34,7 @@ import {
   aiModelLabelEl,
   queryEl,
 } from "./dom.js";
-import { syncWindowSize } from "./window-size.js";
+import { syncWindowSize, resetMaxHeight } from "./window-size.js";
 import { t } from "../i18n/index.js";
 import * as ghost from "./ghost.js";
 import * as search from "./search.js";
@@ -132,6 +132,11 @@ export function exitAiMode() {
     requestId = null;
   }
 
+  // 0.18.0: 清除看门狗 AI 活跃标志（即使 request 已 Done 也要清）
+  clearMainAiActive().catch((e) =>
+    console.warn("[ai-mode] clearMainAiActive 失败:", e),
+  );
+
   // 清空状态
   active = false;
   conversationId = null;
@@ -162,6 +167,8 @@ export function exitAiMode() {
   queryEl.focus();
   search.reset();
   ghost.clear();
+  // 0.18.0: 归零 maxHeight，让窗口从 AI 模式的高大高度收缩回搜索模式的紧凑高度
+  resetMaxHeight();
   syncWindowSize();
 }
 

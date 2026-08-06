@@ -115,6 +115,16 @@ async function init() {
     }
   });
 
+  // 0.18.0：管理面板设置 visible=false 时，桌面便签窗口同步隐藏
+  // 后端 set_sticky_visible 已 emit STICKY_VISIBILITY_CHANGED，此处补监听
+  listen(EVENTS.STICKY_VISIBILITY_CHANGED, (event) => {
+    const payload = event.payload;
+    if (payload && payload.stickyId === stickyId && payload.visible === false) {
+      const win = getCurrentWindow();
+      if (win) win.hide();
+    }
+  });
+
   // 注册窗口复用回调
   window.__stickyReload = (id) => {
     stickyId = id;

@@ -23,6 +23,8 @@ export function init() {
   // 保持满页高度，#results 下方可能有空白区域（属于 #app），监听 appEl 可覆盖
   // 全窗口，滚轮不溢出到背后窗口。
   appEl.addEventListener("wheel", (e) => {
+    // 0.18.0: AI 模式放行默认滚动（让 #ai-display 可滚），搜索模式仍 preventDefault + 翻页
+    if (aiMode.isActive()) return;
     e.preventDefault(); // 阻止默认滚动（列表本来就不滚动）
     if (!results.hasItems()) return;
     if (e.deltaY < 0) {

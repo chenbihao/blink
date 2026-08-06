@@ -158,12 +158,24 @@ function unifiedMenu() {
     }, 10);
   };
 
-  const hasSelection = queryEl && queryEl.selectionStart !== queryEl.selectionEnd;
+  // 0.18.0: 除 input 选区外，也检查 div 选区（AI 输出区选中文本）
+  const inputSelection = queryEl && queryEl.selectionStart !== queryEl.selectionEnd;
+  const divSelection = (() => {
+    try {
+      const sel = window.getSelection();
+      return sel && sel.toString().length > 0 ? sel.toString() : "";
+    } catch {
+      return "";
+    }
+  })();
   const hasText = queryEl && queryEl.value && queryEl.value.length > 0;
   const items = [];
-  if (hasSelection) {
+  if (inputSelection) {
     items.push({ label: t("menu.cut"), run: exec("cut") });
     items.push({ label: t("menu.copy"), run: exec("copy") });
+  } else if (divSelection) {
+    // 0.18.0: AI 输出区 div 选区——复制走 copyToClipboard 而非 execCommand
+    items.push({ label: t("menu.copy"), run: () => copyToClipboard(divSelection) });
   }
   items.push({ label: t("menu.paste"), run: paste });
   // 全选门控（0.16.0）：无文本时不显示全选——select all 空输入无意义

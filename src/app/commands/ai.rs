@@ -332,10 +332,11 @@ pub async fn chat_prompt(
                 break;
             }
         }
-        // 0.17.6: Done/Error 后清除 watchdog AI 标志（主窗口 AI 可失焦隐藏了）
-        if target_win == "main" {
-            crate::infra::platform::window::set_main_ai_active(false);
-        }
+        // 0.18.0: 不在 Done 瞬间清零 MAIN_WINDOW_AI_ACTIVE——用户可能还在看结果，
+        // 看门狗会立即恢复失焦隐藏导致关窗。改为：
+        // (1) exitAiMode 路径清零（前端 ESC / 切回搜索时调 clear_main_ai_active）
+        // (2) 兜底定时器：Done 后 30s 清零，防标志长期滞留
+        // 两者取先到者。hide_window 命令（ESC 隐藏窗口）也会清零。
         if !done_sent {
             let event = crate::domain::ai::chat_service::ChatStreamEvent {
                 request_id,
@@ -351,10 +352,14 @@ pub async fn chat_prompt(
                 EventNames::CHAT_STREAM,
                 &event,
             );
-            // 兜底 Done 也清标志
-            if target_win == "main" {
+        }
+        // 0.18.0: 兜底定时器——Done 后延迟 30s 清零，防止用户既不退出 AI 模式也不关窗时标志长期滞留
+        if target_win == "main" {
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 crate::infra::platform::window::set_main_ai_active(false);
-            }
+                tracing::debug!("AI 标志兜底定时器清零（Done 后 30s）");
+            });
         }
     });
 
@@ -364,6 +369,18 @@ pub async fn chat_prompt(
         "chat_prompt: 后台 stream task 已启动"
     );
     Ok(request_id)
+}
+
+/// 0.18.0: 清除主窗口 AI 活跃标志（前端 exitAiMode 时调用）。
+///
+/// 配合 ai.rs stream task 的兜底定时器：
+/// - exitAiMode 时前端调此命令立即清零（用户主动退出 AI 模式）
+/// - 兜底定时器在 Done 后 30s 自动清零（用户既不退出也不关窗时）
+/// 两者取先到者。hide_window 命令也会清零。
+#[tauri::command]
+pub fn clear_main_ai_active() {
+    crate::infra::platform::window::set_main_ai_active(false);
+    tracing::debug!("clear_main_ai_active: AI 标志已清零（exitAiMode 路径）");
 }
 
 /// 中止指定的对话请求（Phase 4）。
