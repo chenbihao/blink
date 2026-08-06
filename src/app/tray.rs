@@ -16,8 +16,9 @@ use tauri::menu::{Menu, MenuItem};
 #[derive(Clone, Copy)]
 pub enum TrayText {
     ShowMain,
-    Settings,
     StickyManager,
+    ChatWindow,
+    Settings,
     About,
     Quit,
 }
@@ -29,13 +30,15 @@ pub enum TrayText {
 pub fn text(lang: &str, key: TrayText) -> &'static str {
     match (lang.starts_with("zh"), key) {
         (true, TrayText::ShowMain) => "显示主窗口",
-        (true, TrayText::Settings) => "设置",
         (true, TrayText::StickyManager) => "便签管理",
+        (true, TrayText::ChatWindow) => "AI 对话窗口",
+        (true, TrayText::Settings) => "设置",
         (true, TrayText::About) => "关于 Blink",
         (true, TrayText::Quit) => "退出 Blink",
         (false, TrayText::ShowMain) => "Show Main Window",
-        (false, TrayText::Settings) => "Settings",
         (false, TrayText::StickyManager) => "Sticky Manager",
+        (false, TrayText::ChatWindow) => "AI Chat Window",
+        (false, TrayText::Settings) => "Settings",
         (false, TrayText::About) => "About Blink",
         (false, TrayText::Quit) => "Quit Blink",
     }
@@ -46,7 +49,8 @@ pub fn text(lang: &str, key: TrayText) -> &'static str {
 /// 菜单 item id（`"settings"` / `"about"` / `"quit"`）是稳定的，重建菜单后 id 不变，
 /// `on_menu_event` 路由依然有效。
 pub fn build_menu(app: &impl Manager<tauri::Wry>, lang: &str) -> tauri::Result<Menu<tauri::Wry>> {
-    // 0.17.2："显示主窗口"加在最上方作为第一项（用户从托盘无法直接拉起搜索框）
+    // 0.18.4：菜单重组——便签管理 + AI 对话窗口归为 chord 能力组，设置上提
+    // 结构：show_main → sep → sticky_manager → chat_window → sep → settings → about → sep → quit
     let show_main = MenuItem::with_id(
         app,
         "show_main",
@@ -54,17 +58,24 @@ pub fn build_menu(app: &impl Manager<tauri::Wry>, lang: &str) -> tauri::Result<M
         true,
         None::<&str>,
     )?;
-    let settings = MenuItem::with_id(
-        app,
-        "settings",
-        text(lang, TrayText::Settings),
-        true,
-        None::<&str>,
-    )?;
     let sticky_manager = MenuItem::with_id(
         app,
         "sticky_manager",
         text(lang, TrayText::StickyManager),
+        true,
+        None::<&str>,
+    )?;
+    let chat_window = MenuItem::with_id(
+        app,
+        "chat_window",
+        text(lang, TrayText::ChatWindow),
+        true,
+        None::<&str>,
+    )?;
+    let settings = MenuItem::with_id(
+        app,
+        "settings",
+        text(lang, TrayText::Settings),
         true,
         None::<&str>,
     )?;
@@ -77,15 +88,15 @@ pub fn build_menu(app: &impl Manager<tauri::Wry>, lang: &str) -> tauri::Result<M
     )?;
     let sep = tauri::menu::PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", text(lang, TrayText::Quit), true, None::<&str>)?;
-    // 菜单结构：show_main -> sep -> settings -> sticky_manager -> sep -> about -> sep -> quit
     Menu::with_items(
         app,
         &[
             &show_main,
             &sep,
-            &settings,
             &sticky_manager,
+            &chat_window,
             &sep,
+            &settings,
             &about,
             &sep,
             &quit,

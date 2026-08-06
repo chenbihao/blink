@@ -944,6 +944,7 @@ export const zh = {
     "menu.selectAll": "全选",
     "menu.openSettings": "打开设置",
     "menu.exit": "退出 Blink",
+    "menu.stickyManager": "便签管理",
     "menu.open": "打开",
     "menu.openFolder": "打开所在文件夹",
     "menu.openLnkTarget": "打开快捷方式目标",
@@ -999,7 +1000,7 @@ export const zh = {
     "welcome.shortcut.chat": "AI 对话",
     "welcome.shortcut.screenshot": "区域截图",
     "welcome.shortcut.clipboard_history": "剪贴板历史",
-    "welcome.shortcut.edit": "编辑",
+    "welcome.shortcut.edit": "编辑窗口",
     "welcome.shortcut.sticky": "钉为便签",
 
     // ── 快捷键速查表（0.17.3）──
@@ -1014,6 +1015,6 @@ export const zh = {
     "hotkey.cheatsheet.chat": "AI 对话",
     "hotkey.cheatsheet.screenshot": "区域截图",
     "hotkey.cheatsheet.clipboard_history": "剪贴板历史",
-    "hotkey.cheatsheet.edit": "编辑",
+    "hotkey.cheatsheet.edit": "编辑窗口",
     "hotkey.cheatsheet.sticky": "钉为便签",
 };

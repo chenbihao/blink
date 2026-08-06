@@ -39,6 +39,11 @@ html, body {
   background: var(--danger-hover-bg);
 }
 
+/* 0.18.4：chord 快捷键淡色显示（括号包裹的 Alt+键） */
+.context-menu-shortcut {
+  opacity: 0.6;
+}
+
 .context-menu-sep {
   height: 1px;
   margin: var(--space-xs) var(--space-sm);

@@ -943,6 +943,7 @@ export const en = {
     "menu.selectAll": "Select all",
     "menu.openSettings": "Open Settings",
     "menu.exit": "Quit Blink",
+    "menu.stickyManager": "Sticky Manager",
     "menu.open": "Open",
     "menu.openFolder": "Open containing folder",
     "menu.openLnkTarget": "Open shortcut target",
@@ -998,7 +999,7 @@ export const en = {
     "welcome.shortcut.chat": "AI chat",
     "welcome.shortcut.screenshot": "Screenshot",
     "welcome.shortcut.clipboard_history": "Clipboard history",
-    "welcome.shortcut.edit": "Edit",
+    "welcome.shortcut.edit": "Edit Window",
     "welcome.shortcut.sticky": "Sticky note",
 
     // ── Hotkey cheatsheet (0.17.3) ──
@@ -1013,6 +1014,6 @@ export const en = {
     "hotkey.cheatsheet.chat": "AI chat",
     "hotkey.cheatsheet.screenshot": "Screenshot",
     "hotkey.cheatsheet.clipboard_history": "Clipboard history",
-    "hotkey.cheatsheet.edit": "Edit",
+    "hotkey.cheatsheet.edit": "Edit Window",
     "hotkey.cheatsheet.sticky": "Sticky note",
 };

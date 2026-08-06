@@ -504,7 +504,7 @@ pub fn build_default_registry() -> ChordRegistry {
         label: bilingual("剪贴板历史", "Clipboard history"),
     }));
     reg.register(Arc::new(EditAction {
-        label: bilingual("编辑", "Edit"),
+        label: bilingual("编辑窗口", "Edit Window"),
     }));
     reg.register(Arc::new(StickyAction {
         label: bilingual("钉为便签", "Sticky"),
@@ -950,7 +950,7 @@ mod tests {
         let edit = listed.iter().find(|item| item["id"] == "edit").unwrap();
         assert_eq!(edit["key"], "e");
         assert_eq!(edit["requires_input"], true);
-        assert_eq!(edit["label"], "编辑");
+        assert_eq!(edit["label"], "编辑窗口");
     }
 
     #[test]

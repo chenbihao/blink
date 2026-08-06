@@ -230,6 +230,10 @@ fn main() {
                     "sticky_manager" => {
                         let _ = crate::infra::platform::window::show_sticky_manager_window(app);
                     }
+                    // 0.18.4：托盘新增"AI 对话窗口"项，复用 chord Alt+Q 的 show_chat_window 链路
+                    "chat_window" => {
+                        let _ = crate::infra::platform::window::show_chat_window(app, None);
+                    }
                     "about" => open_about(app),
                     "quit" => app.exit(0),
                     _ => {}

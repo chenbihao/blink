@@ -5,9 +5,9 @@
 
 import { queryEl, resultsEl } from "./dom.js";
 import { activateItem } from "./actions.js";
-import { openContainingFolder, openLnkTarget, resetItemHistory, runBuiltinAction, copyToClipboard, deleteClipboardItem, deleteClipboardImage, hideWindow, invoke, triggerChord, listChordActions, pinClipboardImage } from "../shared/api.js";
+import { openContainingFolder, openLnkTarget, resetItemHistory, runBuiltinAction, copyToClipboard, deleteClipboardItem, deleteClipboardImage, hideWindow, invoke, triggerChord, listChordActions, pinClipboardImage, showStickyManager } from "../shared/api.js";
 import { retrigger } from "./search.js";
-import { t } from "../i18n/index.js";
+import { t, getLang } from "../i18n/index.js";
 import { EVENTS } from "../shared/event-names.js";
 
 /** 当前菜单数据（用于 Popup 点击时回调执行）。 */
@@ -185,17 +185,26 @@ function unifiedMenu() {
   }
 
   // Chord 快捷入口（tap 语义——截图/剪贴板等，排除 hold 语义的语音输入）
+  // 0.18.4：快捷键用括号包裹并淡色显示（shortcut 字段单独渲染）
   if (cachedChordActions.length) {
     items.push({ separator: true });
+    const isZh = getLang() === "zh";
     for (const a of cachedChordActions) {
       const keyLabel = a.key === " " ? "Space" : a.key.toUpperCase();
+      const shortcut = isZh
+        ? `（Alt+${keyLabel}）`
+        : ` (Alt+${keyLabel})`;
       items.push({
-        label: `${a.label}  Alt+${keyLabel}`,
+        label: a.label,
+        shortcut,
         run: () => triggerChord(a.key),
       });
     }
   }
 
+  // 0.18.4：新增便签管理入口（独立分组，在打开设置上方）
+  items.push({ separator: true });
+  items.push({ label: t("menu.stickyManager"), run: () => showStickyManager() });
   items.push({ separator: true });
   items.push({ label: t("menu.openSettings"), run: () => runBuiltinAction("open_settings") });
   items.push({ label: t("menu.exit"), run: () => runBuiltinAction("exit_blink"), danger: true });

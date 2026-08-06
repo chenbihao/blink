@@ -32,7 +32,19 @@
         }
         const row = document.createElement('div');
         row.className = 'context-menu-item' + (item.danger ? ' danger' : '');
-        row.textContent = item.label;
+        // 0.18.4：chord 项有 shortcut 字段时，拆成 label + shortcut 两个 span 渲染
+        if (item.shortcut) {
+          const labelSpan = document.createElement('span');
+          labelSpan.className = 'context-menu-label';
+          labelSpan.textContent = item.label;
+          const shortcutSpan = document.createElement('span');
+          shortcutSpan.className = 'context-menu-shortcut';
+          shortcutSpan.textContent = item.shortcut;
+          row.appendChild(labelSpan);
+          row.appendChild(shortcutSpan);
+        } else {
+          row.textContent = item.label;
+        }
         row.addEventListener('mousedown', () => { isClickingItem = true; });
         row.addEventListener('click', () => {
           if (invoke) invoke('context_menu_action', { actionId: index });
