@@ -581,16 +581,17 @@ pub async fn screenshot_window_list()
 
 /// 0.18.2：列出前台窗口的 UIA 控件提示（截图控件级智能吸附用）。
 ///
-/// 从截图会话的 `session_fg_hwnd()` 取前台窗口 HWND，用 UIA 逐层 BFS 收集
-/// 控件矩形（200ms deadline + 3 层深度自适应降级）。与 `screenshot_window_list`
-/// 完全独立、可并行。
+/// 从截图会话的 `session_fg_hwnd()` 取前台窗口 HWND，从 DB 读 `ScreenshotConfig`
+/// 取 depth/deadline/min_size 参数，用 UIA 逐层 BFS 收集控件矩形。
+/// 与 `screenshot_window_list` 完全独立、可并行。
 ///
 /// 返回 `Vec<ControlHint>`，每条含控件矩形（物理像素、虚拟屏幕坐标系）+
 /// 控件类型 ID。前端转 CSS 后做 hit-test，**控件优先于窗口**（吸附到更小的控件）。
 ///
 /// `spawn_blocking` 隔离 UIA 同步 COM 调用，不阻塞 tokio runtime。
+/// 异步收集不阻塞 overlay 显示和拖拽——超时只影响 hints 到达时间，不影响用户操作。
 #[tauri::command]
-pub async fn screenshot_control_hints()
+pub async fn screenshot_control_hints(app: tauri::AppHandle)
 -> Result<Vec<crate::infra::platform::window::ControlHint>, String> {
     let hwnd = crate::infra::platform::screenshot::session_fg_hwnd();
     let hwnd = match hwnd {
@@ -601,9 +602,23 @@ pub async fn screenshot_control_hints()
         }
     };
 
+    // 从 DB 读截图配置，取控件吸附参数
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
+    let cfg = crate::app::config::ConfigStore::get::<crate::app::config::ScreenshotConfig>(pool).await;
+    let deadline = std::time::Duration::from_millis(cfg.control_snap_deadline_ms as u64);
+    let max_depth = cfg.control_snap_depth as usize;
+    let min_size = cfg.control_snap_min_size as i32;
+
+    tracing::debug!(
+        deadline_ms = cfg.control_snap_deadline_ms,
+        max_depth,
+        min_size,
+        "screenshot_control_hints 开始收集"
+    );
+
     tokio::task::spawn_blocking(move || {
         let hwnd = windows::Win32::Foundation::HWND(hwnd as _);
-        crate::infra::platform::uia::collect_control_hints(hwnd)
+        crate::infra::platform::uia::collect_control_hints_with(hwnd, deadline, max_depth, min_size)
     })
     .await
     .map_err(|e| format!("spawn_blocking join 失败: {e}"))

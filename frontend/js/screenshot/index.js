@@ -303,6 +303,9 @@ function loadScreenshot() {
         ss.screenshotConfig.scrollDebug = val.scrollDebug === true;
         ss.screenshotConfig.ocrDebug = val.ocrDebug === true;
         ss.screenshotConfig.controlSnap = val.controlSnap === true;
+        ss.screenshotConfig.controlSnapDepth = val.controlSnapDepth ?? 15;
+        ss.screenshotConfig.controlSnapDeadlineMs = val.controlSnapDeadlineMs ?? 1000;
+        ss.screenshotConfig.controlSnapMinSize = val.controlSnapMinSize ?? 50;
         refreshDiagnosticsVisibility();
         refreshOcrDiagnosticsVisibility();
         // 0.18.2：control_snap 开启时异步加载控件提示（不阻塞 overlay）

@@ -1,0 +1,63 @@
+/* md-toolbar component — 共享 MD 格式工具栏（0.18.3）
+ *
+ * 便签窗口和内容编辑器窗口共用。
+ * 容器 class 为 .md-toolbar，按钮为 .md-tool-btn，分隔线为 .md-tool-sep。
+ * 主题色通过 CSS 变量适配：便签用 --sticky-* 变量，编辑器用 --surface-* / --text-* 变量。
+ */
+
+.md-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 2px 4px;
+  background: var(--md-toolbar-bg, var(--surface-2, transparent));
+  flex-shrink: 0;
+  overflow: hidden;
+  flex-wrap: nowrap;
+}
+
+.md-toolbar[hidden] {
+  display: none;
+}
+
+.md-tool-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: var(--md-toolbar-text, var(--text, inherit));
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: background var(--transition-fast);
+  padding: 0 4px;
+  font-size: 11px;
+  font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+  /* 中文不斜体铁则 */
+  font-style: normal;
+  flex-shrink: 0;
+}
+
+.md-tool-btn:hover {
+  background: var(--md-toolbar-hover, var(--surface-2, rgba(0, 0, 0, 0.1)));
+}
+
+.md-tool-btn:active {
+  background: var(--md-toolbar-active, rgba(0, 0, 0, 0.18));
+}
+
+.md-tool-btn.active {
+  background: var(--md-toolbar-hover, var(--surface-2, rgba(0, 0, 0, 0.15)));
+  font-weight: 700;
+}
+
+.md-tool-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--md-toolbar-text, var(--text, currentColor));
+  opacity: 0.2;
+  flex-shrink: 0;
+  margin: 0 2px;
+}

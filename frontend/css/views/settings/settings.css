@@ -389,6 +389,20 @@ a.external-link:hover {
     accent-color: var(--accent);
 }
 
+/* 0.18.2：控件吸附参数 slider 的数值显示 */
+.chord-field-control .range-value {
+    font-size: var(--text-sm);
+    color: var(--text-dim);
+    min-width: 36px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.chord-field-control input[type="range"] {
+    width: 140px;
+    accent-color: var(--accent);
+}
+
 .setting-row select {
     background: var(--surface);
     color: var(--text);

@@ -399,9 +399,11 @@ export function getStickyStats() {
   return invoke("get_sticky_stats");
 }
 
-/** 0.16.8：显示便签窗口（后端创建/复用 Tauri 窗口）。 */
-export function showStickyWindow(stickyId) {
-  return invoke("show_sticky_window_cmd", { stickyId });
+/** 0.16.8：显示便签窗口（后端创建/复用 Tauri 窗口）。
+ *  0.18.4：可选 atCursor=true 时，新便签定位到鼠标处（标题栏中心对准光标）。
+ */
+export function showStickyWindow(stickyId, atCursor = false) {
+  return invoke("show_sticky_window_cmd", { stickyId, atCursor });
 }
 
 /** 0.16.8：销毁便签窗口（删除数据后调用）。 */

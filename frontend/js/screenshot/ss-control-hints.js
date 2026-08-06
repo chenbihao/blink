@@ -6,7 +6,7 @@
 //! **坐标转换**：与窗口吸附相同——后端返回物理像素（虚拟屏幕坐标系），
 //! 前端 `rectScreenToCss` 转 CSS。复用 `ss-selection-geometry.js`。
 //!
-//! **时序**：overlay 显示后异步收集 UIA 控件（200ms deadline + 3 层深度），
+//! **时序**：overlay 显示后异步收集 UIA 控件（可配超时/深度/最小尺寸），
 //! hints 到达前维持窗口吸附；hints 到达后（且未在拖拽中）启用控件 hit-test。
 //!
 //! **降级**：UIA 失败/超时/返回空 → pickableControls 为空，hit-test 退化为纯窗口吸附。

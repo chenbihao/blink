@@ -391,7 +391,13 @@ export const zh = {
     "chord.screenshot.ocr_debug.label": "OCR 诊断",
     "chord.screenshot.ocr_debug.hint": "开启后截图工具栏 OCR 按钮旁显示诊断按钮，可查看已安装语言、中文包状态、选区测试结果；排查中文识别不出的问题用",
     "chord.screenshot.control_snap.label": "控件级吸附",
-    "chord.screenshot.control_snap.hint": "截图选区拖拽时悬停吸附到按钮/输入框等子控件（UIA，200ms 超时+3层深度自适应降级）；默认关闭，开启后琥珀色虚线框=控件吸附，蓝色虚线框=窗口吸附",
+    "chord.screenshot.control_snap.hint": "截图选区拖拽时悬停吸附到按钮/输入框等子控件（UIA，可调超时/深度/最小尺寸）；默认关闭，开启后琥珀色虚线框=控件吸附，蓝色虚线框=窗口吸附",
+    "chord.screenshot.control_snap_depth.label": "遍历深度",
+    "chord.screenshot.control_snap_depth.hint": "UIA 树从窗口往下探几层子控件。1=只看顶层，15=能到 WPF/Office/Electron 的深层控件，20=最深。值越大能识别越多控件但 COM 调用更多、超时风险更大",
+    "chord.screenshot.control_snap_deadline.label": "超时",
+    "chord.screenshot.control_snap_deadline.hint": "UIA 收集的超时时间（毫秒）。异步收集不阻塞截图操作，超时后返回已收集的部分结果。1000ms=1 秒，值越大能识别越多应用但 hints 到达越晚",
+    "chord.screenshot.control_snap_min_size.label": "最小展开尺寸",
+    "chord.screenshot.control_snap_min_size.hint": "控件宽或高低于此值（物理像素）则不展开其子控件。跳过微型控件（如分隔线小点）以节省 COM 调用预算。50px=只展开中等以上控件，1px=几乎都展开",
 
 // ── OCR 诊断面板（0.17.5，仅 ?ocrDebug=1 显示）──
     "screenshot.ocr_diag.title": "OCR 诊断",

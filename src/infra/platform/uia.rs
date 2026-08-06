@@ -153,14 +153,56 @@ pub struct ControlHint {
     pub name: Option<String>,
 }
 
-/// 控件吸附收集的默认超时（200ms deadline）。
-pub const CONTROL_HINT_DEADLINE: Duration = Duration::from_millis(200);
-
-/// 控件吸附收集的默认最大深度（3 层）。
+/// 控件吸附收集的默认超时（1s deadline）。
 ///
-/// 记事本 1 层够（编辑框）、计算器 2 层（分组→按钮）、WPF/Office 一般 3 层到有用控件、
-/// Electron 第 3 层仍是 chrome 容器（被超时挡掉，无害）。
-pub const CONTROL_HINT_MAX_DEPTH: usize = 3;
+/// 异步收集不阻塞 overlay 显示和拖拽，宽松超时让更多应用在 budget 内到达有用控件层。
+/// 实际运行时由 `ScreenshotConfig.control_snap_deadline_ms` 配置覆盖。
+#[allow(dead_code)]
+pub const CONTROL_HINT_DEADLINE: Duration = Duration::from_millis(1000);
+
+/// 记事本 1 层够（编辑框）、计算器 2 层（分组→按钮）、WPF/Office 一般 3-4 层到有用控件、
+/// Electron 第 5 层仍是 chrome 容器（被超时挡掉，无害）。
+/// 死端控件类型（ScrollBar/Thumb/TitleBar 等）不展开子树，节省 COM 调用预算。
+/// 实际运行时由 `ScreenshotConfig.control_snap_depth` 配置覆盖。
+#[allow(dead_code)]
+pub const CONTROL_HINT_MAX_DEPTH: usize = 15;
+
+/// 控件吸附最小展开尺寸（物理像素，0=禁用）。
+///
+/// 控件宽或高低于此值则不展开子树（控件自身仍作为 hint 被收集）。
+/// 跳过微型控件的子树以节省 COM 调用预算。
+/// 实际运行时由 `ScreenshotConfig.control_snap_min_size` 配置覆盖。
+#[allow(dead_code)]
+pub const CONTROL_HINT_MIN_SIZE: i32 = 50;
+
+// ── 死端控件类型剪枝 ─────────────────────────────────────────────────────
+
+/// UIA 控件类型 ID 常量——死端控件（不展开子树）。
+///
+/// 这些控件类型的子元素对截图吸附无意义（如 ScrollBar 的 Thumb、TitleBar 的
+/// min/max/close 按钮），展开它们浪费 COM 调用预算。
+const UIA_SCROLLBAR_CONTROL_TYPE_ID: i32 = 50014;
+const UIA_THUMB_CONTROL_TYPE_ID: i32 = 50027;
+const UIA_TITLEBAR_CONTROL_TYPE_ID: i32 = 50036;
+const UIA_SEPARATOR_CONTROL_TYPE_ID: i32 = 50037;
+const UIA_TOOLTIP_CONTROL_TYPE_ID: i32 = 50022;
+const UIA_PROGRESSBAR_CONTROL_TYPE_ID: i32 = 50012;
+
+/// 判断控件类型是否为"死端"——即其子元素对截图吸附无意义，不应展开。
+///
+/// 注意：死端控件**仍会作为 hint 被收集**（它自身有矩形可以吸附），
+/// 只是不展开它的子树以节省 COM 调用预算。
+fn is_dead_end_control_type(control_type_id: i32) -> bool {
+    matches!(
+        control_type_id,
+        UIA_SCROLLBAR_CONTROL_TYPE_ID
+            | UIA_THUMB_CONTROL_TYPE_ID
+            | UIA_TITLEBAR_CONTROL_TYPE_ID
+            | UIA_SEPARATOR_CONTROL_TYPE_ID
+            | UIA_TOOLTIP_CONTROL_TYPE_ID
+            | UIA_PROGRESSBAR_CONTROL_TYPE_ID
+    )
+}
 
 /// 从 HWND 获取 UIA 根元素。
 ///
@@ -176,23 +218,25 @@ pub fn element_from_handle(hwnd: HWND) -> Option<IUIAutomationElement> {
 
 /// 逐层 BFS 收集控件矩形（0.18.2 截图控件级智能吸附）。
 ///
-/// **设计**（见 phase 0.18.2 §3.6）：
-/// - 用 `TreeScope_Children` 每次拉一层，每层/每元素前检查 deadline
-/// - 深度与超时双重约束，谁先到都停
-/// - 不维护白名单——UIA 树质量差的应用（Electron 巨树）自然超时降级，
-///   UIA 树质量好的应用（Win32/Office/WPF）在 budget 内返回
+/// 使用编译期默认参数。实际运行时应通过 `collect_control_hints_with` 传配置值。
 ///
 /// **调用方**需在 `spawn_blocking` 中调用（UIA 是同步 COM 调用）。
 /// COM MTA 自动初始化/释放。
+#[allow(dead_code)]
 pub fn collect_control_hints(hwnd: HWND) -> Vec<ControlHint> {
-    collect_control_hints_with(hwnd, CONTROL_HINT_DEADLINE, CONTROL_HINT_MAX_DEPTH)
+    collect_control_hints_with(hwnd, CONTROL_HINT_DEADLINE, CONTROL_HINT_MAX_DEPTH, CONTROL_HINT_MIN_SIZE)
 }
 
-/// 带自定义 deadline 和深度的 `collect_control_hints`（主要供测试/诊断用）。
+/// 带自定义 deadline、深度和最小展开尺寸的 `collect_control_hints`。
+///
+/// - `deadline`：BFS 超时，超时后返回已收集的部分结果
+/// - `max_depth`：往下遍历几层子元素（不含 root）
+/// - `min_size`：物理像素，控件宽或高低于此值则不展开子树（0=禁用）
 pub fn collect_control_hints_with(
     hwnd: HWND,
     deadline: Duration,
     max_depth: usize,
+    min_size: i32,
 ) -> Vec<ControlHint> {
     let started = Instant::now();
     let _com = ComGuard::init_mta();
@@ -218,6 +262,29 @@ pub fn collect_control_hints_with(
         max_depth,
         || Instant::now() >= deadline_instant,
         |elem| fetch_uia_children(&automation, elem),
+        |elem| {
+            let ct = unsafe { elem.CurrentControlType() }
+                .map(|t| t.0)
+                .unwrap_or(0);
+            if is_dead_end_control_type(ct) {
+                tracing::trace!(control_type = ct, "跳过展开（死端控件类型）");
+                return false;
+            }
+            if min_size > 0 {
+                if let Ok(rect) = unsafe { elem.CurrentBoundingRectangle() } {
+                    let w = rect.right - rect.left;
+                    let h = rect.bottom - rect.top;
+                    if w < min_size || h < min_size {
+                        tracing::trace!(
+                            w, h, min_size,
+                            "跳过展开（控件尺寸低于阈值）"
+                        );
+                        return false;
+                    }
+                }
+            }
+            true
+        },
         extract_uia_hint,
     );
 
@@ -226,6 +293,7 @@ pub fn collect_control_hints_with(
         hints_count = hints.len(),
         elapsed_ms = elapsed.as_millis() as u64,
         max_depth,
+        min_size,
         "collect_control_hints 完成"
     );
     if elapsed >= deadline {
@@ -244,12 +312,14 @@ pub fn collect_control_hints_with(
 /// - `max_depth`：往下遍历几层子元素（不含 root）
 /// - `is_expired`：超时检查闭包，在每层/每元素前调用
 /// - `fetch_children`：获取元素的直接子元素列表
+/// - `should_expand`：判断元素是否应展开子树（false=收集 hint 但不展开子元素）
 /// - `extract_hint`：从元素提取 `ControlHint`，返回 `None` 表示跳过（如零尺寸）
 fn bfs_collect<E>(
     root: E,
     max_depth: usize,
     is_expired: impl Fn() -> bool,
     fetch_children: impl Fn(&E) -> Vec<E>,
+    should_expand: impl Fn(&E) -> bool,
     extract_hint: impl Fn(&E) -> Option<ControlHint>,
 ) -> Vec<ControlHint>
 where
@@ -258,18 +328,30 @@ where
     let mut hints = Vec::new();
     let mut current_layer = vec![root];
 
-    for _depth in 0..max_depth {
+    for depth in 0..max_depth {
         if is_expired() {
+            tracing::trace!(depth, "bfs 截断（deadline 到达）");
             break;
         }
 
+        tracing::trace!(
+            depth,
+            layer_size = current_layer.len(),
+            hints_so_far = hints.len(),
+            "bfs 开始遍历层"
+        );
+
         let mut next_layer = Vec::new();
+        let mut children_found = 0usize;
+        let mut expanded = 0usize;
+
         for elem in &current_layer {
             if is_expired() {
                 break;
             }
 
             let children = fetch_children(elem);
+            children_found += children.len();
             for child in children {
                 if is_expired() {
                     break;
@@ -278,9 +360,23 @@ where
                 if let Some(hint) = extract_hint(&child) {
                     hints.push(hint);
                 }
-                next_layer.push(child);
+
+                if should_expand(&child) {
+                    next_layer.push(child);
+                    expanded += 1;
+                }
             }
         }
+
+        tracing::trace!(
+            depth,
+            children_found,
+            expanded,
+            skipped = children_found.saturating_sub(expanded),
+            next_layer_size = next_layer.len(),
+            hints_so_far = hints.len(),
+            "bfs 层完成"
+        );
 
         current_layer = next_layer;
         if current_layer.is_empty() {
@@ -419,6 +515,7 @@ mod tests {
                     .map(|(_, children)| children.clone())
                     .unwrap_or_default()
             },
+            |_| true, // expand all
             |elem| {
                 Some(ControlHint {
                     x: 0,
@@ -464,6 +561,7 @@ mod tests {
                     .map(|(_, children)| children.clone())
                     .unwrap_or_default()
             },
+            |_| true, // expand all
             |elem| {
                 Some(ControlHint {
                     x: 0,
@@ -496,6 +594,7 @@ mod tests {
             3,
             || false,
             |_| Vec::new(), // no children
+            |_| true,       // expand all
             |_| {
                 Some(ControlHint {
                     x: 0,
@@ -521,6 +620,7 @@ mod tests {
             1,
             || false,
             |_| children.clone(),
+            |_| true, // expand all
             |elem| {
                 // 只有 id=2 产生有效 hint
                 if elem.id == 2 {
@@ -539,5 +639,50 @@ mod tests {
         );
         assert_eq!(hints.len(), 1, "只有 1 个元素产生有效 hint");
         assert_eq!(hints[0].control_type, 50004);
+    }
+
+    #[test]
+    fn bfs_pruning_skips_dead_end_subtrees() {
+        // make_tree(2,2) 深度优先编号：root(id=0) → [id=1, id=4]
+        //   id=1 → [id=2, id=3]（叶子）
+        //   id=4 → [id=5, id=6]（叶子）
+        // should_expand 对 id=1 返回 false（模拟死端控件），其子 id=2,3 不被遍历
+        let nodes = make_tree(2, 2);
+        let nodes_ref = &nodes;
+        let root = MockElem { id: 0 };
+
+        let hints = bfs_collect(
+            root,
+            5, // enough depth
+            || false,
+            |elem| {
+                nodes_ref
+                    .iter()
+                    .find(|(id, _)| *id == elem.id)
+                    .map(|(_, children)| children.clone())
+                    .unwrap_or_default()
+            },
+            |elem| elem.id != 1, // skip expanding id=1 (dead-end)
+            |_| {
+                Some(ControlHint {
+                    x: 0,
+                    y: 0,
+                    w: 10,
+                    h: 10,
+                    control_type: 50000,
+                    name: None,
+                })
+            },
+        );
+
+        // 层 1（root 的子）：id=1, id=4 → 2 hints，但 id=1 不展开
+        // 层 2（id=4 的子）：id=5, id=6 → 2 hints
+        // id=2, id=3（id=1 的子）不被遍历
+        // 总计 4 hints
+        assert_eq!(
+            hints.len(),
+            4,
+            "id=1 不展开，其子(id=2,3)不被遍历，总计 4 个 hint"
+        );
     }
 }

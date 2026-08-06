@@ -117,7 +117,7 @@ export async function activateItem(data) {
       const text = typeof action.runArg === "string" ? action.runArg : "";
       try {
         const note = await createStickyNote(text);
-        await showStickyWindow(note.id);
+        await showStickyWindow(note.id, true);
       } catch (e) {
         console.error("createStickyNote failed:", e);
       }

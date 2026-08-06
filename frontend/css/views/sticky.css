@@ -134,6 +134,7 @@
 }
 
 /* ── 颜色面板 ── */
+/* 0.18.3：菜单配色随便签颜色统一（非主题色） */
 .sticky-color-palette {
   position: absolute;
   top: 30px;
@@ -141,8 +142,8 @@
   display: flex;
   gap: 4px;
   padding: 6px 8px;
-  background: var(--surface, #fff);
-  border: 1px solid var(--surface-2, #ddd);
+  background: var(--sticky-bg, var(--surface, #fff));
+  border: 1px solid var(--sticky-border, var(--surface-2, #ddd));
   border-radius: var(--radius-md);
   box-shadow: 0 4px 12px var(--shadow);
   z-index: 100;
@@ -159,14 +160,14 @@
 }
 
 .color-swatch:hover {
-  border-color: var(--text-sub, #999);
+  border-color: var(--sticky-text, #999);
 }
 
 .color-swatch.selected {
-  border-color: var(--text, #333);
+  border-color: var(--sticky-text, #333);
 }
 
-.color-swatch.color-theme { background: var(--accent); }
+.color-swatch.color-theme { background: var(--surface-2); }
 .color-swatch.color-yellow { background: #fdd835; }
 .color-swatch.color-pink { background: #f48fb1; }
 .color-swatch.color-purple { background: #ce93d8; }
@@ -175,6 +176,7 @@
 .color-swatch.color-gray { background: #bdbdbd; }
 
 /* ── 更多菜单 ── */
+/* 0.18.3：配色随便签颜色统一 */
 .sticky-more-menu {
   position: absolute;
   top: 30px;
@@ -184,8 +186,8 @@
   gap: 2px;
   padding: 4px;
   min-width: 140px;
-  background: var(--surface, #fff);
-  border: 1px solid var(--surface-2, #ddd);
+  background: var(--sticky-bg, var(--surface, #fff));
+  border: 1px solid var(--sticky-border, var(--surface-2, #ddd));
   border-radius: var(--radius-md);
   box-shadow: 0 4px 12px var(--shadow);
   z-index: 100;
@@ -195,7 +197,7 @@
   padding: 6px 12px;
   border: none;
   background: transparent;
-  color: var(--text, #333);
+  color: var(--sticky-text, #333);
   font-size: var(--text-xs);
   text-align: left;
   cursor: pointer;
@@ -206,7 +208,7 @@
 }
 
 .more-menu-item:hover {
-  background: var(--accent-bg, rgba(0, 0, 0, 0.06));
+  background: var(--sticky-btn-hover, rgba(0, 0, 0, 0.06));
 }
 
 .more-menu-danger {
@@ -217,7 +219,209 @@
   background: var(--danger-hover-bg, rgba(229, 57, 53, 0.1));
 }
 
-/* ── 编辑区 ── */
+/* ── 编辑区（Tiptap IR + textarea 降级）── */
+
+/* 0.18.3：MD 工具栏样式已抽至 components/md-toolbar.css（与内容编辑器共用）。
+   便签端通过 --md-toolbar-* 变量适配色板主题色。 */
+.sticky-md-toolbar {
+  --md-toolbar-bg: var(--sticky-border, transparent);
+  --md-toolbar-text: var(--sticky-text);
+  --md-toolbar-hover: var(--sticky-btn-hover, rgba(0, 0, 0, 0.1));
+  --md-toolbar-active: rgba(0, 0, 0, 0.18);
+}
+
+/* Tiptap 编辑器容器（0.18.3） */
+.sticky-editor {
+  flex: 1;
+  width: 100%;
+  overflow: hidden;
+  background: transparent;
+}
+
+/* ProseMirror（Tiptap 内部可编辑区） */
+.sticky-editor .ProseMirror {
+  min-height: 100%;
+  padding: 12px 14px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--sticky-text);
+  font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  /* 中文不斜体铁则 */
+  font-style: normal;
+  overflow-y: auto;
+  word-wrap: break-word;
+}
+
+/* 空内容占位提示（CSS 方案，无 Placeholder 扩展） */
+.sticky-editor .ProseMirror:empty::before {
+  content: "输入内容...";
+  color: var(--sticky-text);
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+/* ProseMirror 滚动条（与旧 textarea 一致） */
+.sticky-editor .ProseMirror::-webkit-scrollbar {
+  width: 6px;
+}
+
+.sticky-editor .ProseMirror::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sticky-editor .ProseMirror::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--sticky-text) 30%, transparent);
+  border-radius: 3px;
+}
+
+.sticky-editor .ProseMirror::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--sticky-text) 50%, transparent);
+}
+
+/* ── Markdown 排版（IR 渲染元素样式）── */
+
+.sticky-editor .ProseMirror h1 {
+  font-size: 1.5em;
+  font-weight: 700;
+  margin: 0.6em 0 0.3em;
+  line-height: 1.3;
+  font-style: normal;
+}
+
+.sticky-editor .ProseMirror h2 {
+  font-size: 1.3em;
+  font-weight: 700;
+  margin: 0.6em 0 0.3em;
+  line-height: 1.3;
+  font-style: normal;
+}
+
+.sticky-editor .ProseMirror h3 {
+  font-size: 1.15em;
+  font-weight: 600;
+  margin: 0.5em 0 0.3em;
+  line-height: 1.3;
+  font-style: normal;
+}
+
+.sticky-editor .ProseMirror p {
+  margin: 0.3em 0;
+}
+
+.sticky-editor .ProseMirror ul,
+.sticky-editor .ProseMirror ol {
+  margin: 0.3em 0;
+  padding-left: 1.5em;
+}
+
+.sticky-editor .ProseMirror li {
+  margin: 0.15em 0;
+}
+
+.sticky-editor .ProseMirror blockquote {
+  margin: 0.4em 0;
+  padding-left: 0.8em;
+  border-left: 3px solid var(--sticky-border, var(--surface-2, #ddd));
+  opacity: 0.85;
+}
+
+.sticky-editor .ProseMirror code {
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 0.9em;
+  background: color-mix(in srgb, var(--sticky-text) 12%, transparent);
+  padding: 1px 4px;
+  border-radius: var(--radius-sm);
+}
+
+.sticky-editor .ProseMirror pre {
+  margin: 0.4em 0;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--sticky-text) 8%, transparent);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+}
+
+.sticky-editor .ProseMirror pre code {
+  background: transparent;
+  padding: 0;
+}
+
+.sticky-editor .ProseMirror strong {
+  font-weight: 700;
+}
+
+.sticky-editor .ProseMirror em {
+  font-style: italic;
+}
+
+.sticky-editor .ProseMirror a {
+  color: var(--accent, #0066cc);
+  text-decoration: underline;
+}
+
+.sticky-editor .ProseMirror ul[data-type="taskList"] {
+  list-style: none;
+  padding-left: 0;
+}
+
+.sticky-editor .ProseMirror ul[data-type="taskList"] li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sticky-editor .ProseMirror ul[data-type="taskList"] li > label {
+  flex-shrink: 0;
+  cursor: pointer;
+  user-select: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid var(--sticky-text);
+  border-radius: 3px;
+  opacity: 0.5;
+  transition: all var(--transition-fast);
+}
+
+.sticky-editor .ProseMirror ul[data-type="taskList"] li[data-checked="true"] > label {
+  background: var(--sticky-text);
+  opacity: 0.8;
+}
+
+.sticky-editor .ProseMirror ul[data-type="taskList"] li[data-checked="true"] > label::after {
+  content: "";
+  width: 8px;
+  height: 4px;
+  border-left: 2px solid var(--sticky-bg);
+  border-bottom: 2px solid var(--sticky-bg);
+  transform: rotate(-45deg) translate(1px, -1px);
+}
+
+.sticky-editor .ProseMirror ul[data-type="taskList"] li[data-checked="true"] > div {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+
+.sticky-editor .ProseMirror ul[data-type="taskList"] li > label > input[type="checkbox"] {
+  display: none;
+}
+
+.sticky-editor .ProseMirror ul[data-type="taskList"] li > div {
+  flex: 1;
+}
+
+.sticky-editor .ProseMirror hr {
+  border: none;
+  border-top: 1px solid var(--sticky-border, var(--surface-2, #ddd));
+  margin: 0.6em 0;
+}
+
+/* textarea 降级模式（Tiptap 加载失败时用） */
 .sticky-textarea {
   flex: 1;
   width: 100%;
@@ -257,6 +461,7 @@
 }
 
 /* ── 右键菜单（0.17.7）── */
+/* 0.18.3：配色随便签颜色统一 */
 .sticky-context-menu {
   position: absolute;
   display: flex;
@@ -264,8 +469,8 @@
   gap: 2px;
   padding: 4px;
   min-width: 140px;
-  background: var(--surface, #fff);
-  border: 1px solid var(--surface-2, #ddd);
+  background: var(--sticky-bg, var(--surface, #fff));
+  border: 1px solid var(--sticky-border, var(--surface-2, #ddd));
   border-radius: var(--radius-md);
   box-shadow: 0 4px 12px var(--shadow);
   z-index: 200;
@@ -275,7 +480,7 @@
   padding: 6px 12px;
   border: none;
   background: transparent;
-  color: var(--text, #333);
+  color: var(--sticky-text, #333);
   font-size: var(--text-xs);
   text-align: left;
   cursor: pointer;
@@ -286,13 +491,13 @@
 }
 
 .sticky-context-menu .ctx-item:hover {
-  background: var(--accent-bg, rgba(0, 0, 0, 0.06));
+  background: var(--sticky-btn-hover, rgba(0, 0, 0, 0.06));
 }
 
 .sticky-context-menu .ctx-separator {
   height: 1px;
   margin: 2px 0;
-  background: var(--surface-2, #ddd);
+  background: var(--sticky-border, var(--surface-2, #ddd));
 }
 
 .sticky-context-menu .ctx-danger {
@@ -305,7 +510,7 @@
 
 .sticky-context-menu .ctx-submenu-label {
   padding: 6px 12px;
-  color: var(--text, #333);
+  color: var(--sticky-text, #333);
   font-size: var(--text-xs);
   cursor: pointer;
   border-radius: var(--radius-sm);
@@ -314,7 +519,7 @@
 }
 
 .sticky-context-menu .ctx-submenu-label:hover {
-  background: var(--accent-bg, rgba(0, 0, 0, 0.06));
+  background: var(--sticky-btn-hover, rgba(0, 0, 0, 0.06));
 }
 
 .sticky-context-menu .ctx-color-row {
@@ -334,7 +539,9 @@
 }
 
 .sticky-context-menu .ctx-color-swatch:hover {
-  border-color: var(--text-sub, #999);
+  border-color: var(--sticky-text, #999);
 }
 
-/* Markdown 编辑器分栏样式已移除——便签恢复为纯文本 textarea，需要 Markdown 预览可用「在编辑器中打开」 */
+/* 0.18.3：Tiptap IR 编辑器样式。配色统一走 --sticky-* 变量（与色板/按钮一致），
+   Markdown 排版元素（h1/h2/p/ul/blockquote/code 等）在 .ProseMirror 内联渲染。
+   降级 textarea 保留 .sticky-textarea 样式不变。 */

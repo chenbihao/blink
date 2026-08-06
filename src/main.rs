@@ -895,6 +895,8 @@ app::commands::ensure_mcp_connected,
             app::commands::restore_sticky_note,
             app::commands::list_trashed_sticky_notes,
             app::commands::clear_trashed_sticky_notes,
+            // 0.18.3 便签预热
+            app::commands::sticky_spare_ready,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

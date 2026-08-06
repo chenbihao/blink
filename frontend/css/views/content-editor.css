@@ -78,7 +78,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 16px;
+  padding: 4px 16px;
   background: var(--surface);
   border-bottom: 1px solid var(--surface-2);
   flex-shrink: 0;
@@ -87,43 +87,17 @@
 
 .editor-toolbar-left {
   display: flex;
+  align-items: center;
   gap: 4px;
+  flex: 1;
+  min-width: 0;
 }
 
 .editor-toolbar-right {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-.editor-mode-btn {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 12px;
-  border: 1px solid var(--overlay-0);
-  background: transparent;
-  color: var(--text-sub);
-  font-size: 12px;
-  cursor: pointer;
-  border-radius: var(--radius-md);
-  transition: all var(--transition-fast);
-}
-
-.editor-mode-btn:hover {
-  border-color: var(--text-dim);
-  color: var(--text);
-}
-
-.editor-mode-btn.active {
-  background: var(--accent);
-  color: var(--bg);
-  border-color: var(--accent);
-}
-
-.editor-mode-btn .icon {
-  width: 14px;
-  height: 14px;
+  flex-shrink: 0;
 }
 
 .editor-status {
@@ -170,6 +144,17 @@
 }
 
 /* ── 编辑区 ── */
+
+/* 0.18.3：MD 工具栏主题适配（共享组件在 components/md-toolbar.css） */
+/* 0.18.3：工具栏移入 editor-toolbar-left，去掉 border-bottom（父级 editor-toolbar 已有） */
+.editor-md-toolbar {
+  --md-toolbar-bg: transparent;
+  --md-toolbar-text: var(--text-sub);
+  --md-toolbar-hover: var(--surface-2);
+  --md-toolbar-active: var(--text-faint);
+  border-bottom: none;
+}
+
 .editor-body {
   flex: 1;
   overflow: hidden;
@@ -196,77 +181,84 @@
   opacity: 0.5;
 }
 
-/* ── 预览区 ── */
-.editor-preview {
+/* ── Tiptap IR 编辑器（0.18.3：替换 Cherry 双栏）── */
+.editor-tiptap-container {
   width: 100%;
   height: 100%;
+  overflow: hidden;
+}
+
+.editor-tiptap-container .ProseMirror {
+  min-height: 100%;
   padding: 16px 20px;
-  overflow-y: auto;
+  outline: none;
   background: var(--bg);
   color: var(--text);
+  font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
   font-size: 14px;
   line-height: 1.6;
+  font-style: normal;
+  overflow-y: auto;
+  word-wrap: break-word;
 }
 
-/* Markdown 渲染样式（复用 chat 窗口的 markdown-body 语义 class） */
-.editor-preview markdown-body,
-.editor-preview.markdown-body {
-  font-size: 14px;
-  line-height: 1.6;
+.editor-tiptap-container .ProseMirror:empty::before {
+  content: "输入或编辑内容...";
+  color: var(--text-sub);
+  opacity: 0.4;
+  pointer-events: none;
 }
 
-.editor-preview h1,
-.editor-preview h2,
-.editor-preview h3 {
-  margin-top: 16px;
-  margin-bottom: 8px;
+.editor-tiptap-container .ProseMirror::-webkit-scrollbar {
+  width: 8px;
+}
+
+.editor-tiptap-container .ProseMirror::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.editor-tiptap-container .ProseMirror::-webkit-scrollbar-thumb {
+  background: var(--surface-2);
+  border-radius: 4px;
+}
+
+/* Tiptap IR 渲染元素样式 */
+.editor-tiptap-container .ProseMirror h1 {
+  font-size: 1.4em;
+  font-weight: 700;
+  margin: 16px 0 8px;
+  font-style: normal;
+}
+
+.editor-tiptap-container .ProseMirror h2 {
+  font-size: 1.25em;
+  font-weight: 700;
+  margin: 16px 0 8px;
+  font-style: normal;
+}
+
+.editor-tiptap-container .ProseMirror h3 {
+  font-size: 1.1em;
   font-weight: 600;
-  color: var(--text);
+  margin: 12px 0 6px;
+  font-style: normal;
 }
 
-.editor-preview h1 { font-size: 1.4em; }
-.editor-preview h2 { font-size: 1.25em; }
-.editor-preview h3 { font-size: 1.1em; }
-
-.editor-preview p {
-  margin: 8px 0;
+.editor-tiptap-container .ProseMirror p {
+  margin: 6px 0;
 }
 
-.editor-preview ul,
-.editor-preview ol {
-  margin: 8px 0;
-  padding-left: 24px;
+.editor-tiptap-container .ProseMirror ul,
+.editor-tiptap-container .ProseMirror ol {
+  margin: 6px 0;
+  padding-left: 1.5em;
 }
 
-.editor-preview li {
-  margin: 4px 0;
+.editor-tiptap-container .ProseMirror li {
+  margin: 3px 0;
 }
 
-.editor-preview code {
-  padding: 2px 6px;
-  background: var(--surface);
-  border-radius: var(--radius-sm);
-  font-family: "Cascadia Code", "JetBrains Mono", "Consolas", monospace;
-  font-size: 0.9em;
-  color: var(--accent);
-}
-
-.editor-preview pre {
-  padding: 12px 16px;
-  background: var(--surface);
-  border-radius: var(--radius-md);
-  overflow-x: auto;
-  margin: 8px 0;
-}
-
-.editor-preview pre code {
-  padding: 0;
-  background: none;
-  color: var(--text);
-  font-size: 0.9em;
-}
-
-.editor-preview blockquote {
+.editor-tiptap-container .ProseMirror blockquote {
   margin: 8px 0;
   padding: 8px 16px;
   border-left: 3px solid var(--accent);
@@ -275,246 +267,42 @@
   color: var(--text-sub);
 }
 
-.editor-preview a {
-  color: var(--accent);
-  text-decoration: none;
+.editor-tiptap-container .ProseMirror code {
+  font-family: "Cascadia Code", "JetBrains Mono", "Consolas", monospace;
+  font-size: 0.9em;
+  background: var(--surface-2);
+  padding: 1px 4px;
+  border-radius: var(--radius-sm);
 }
 
-.editor-preview a:hover {
+.editor-tiptap-container .ProseMirror pre {
+  margin: 8px 0;
+  padding: 12px 16px;
+  background: var(--surface);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+}
+
+.editor-tiptap-container .ProseMirror pre code {
+  background: transparent;
+  padding: 0;
+}
+
+.editor-tiptap-container .ProseMirror strong {
+  font-weight: 700;
+}
+
+.editor-tiptap-container .ProseMirror em {
+  font-style: italic;
+}
+
+.editor-tiptap-container .ProseMirror a {
+  color: var(--accent);
   text-decoration: underline;
 }
 
-.editor-preview table {
-  border-collapse: collapse;
-  margin: 8px 0;
-  width: 100%;
-}
-
-.editor-preview th,
-.editor-preview td {
-  border: 1px solid var(--surface-2);
-  padding: 6px 12px;
-  text-align: left;
-}
-
-.editor-preview th {
-  background: var(--surface);
-  font-weight: 600;
-}
-
-.editor-preview hr {
+.editor-tiptap-container .ProseMirror hr {
   border: none;
   border-top: 1px solid var(--surface-2);
   margin: 12px 0;
-}
-
-/* ── Cherry Markdown 编辑器（0.17.7a：format=md 时使用）── */
-.editor-md-container {
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-}
-
-.editor-md-container .md-editor {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-}
-
-.editor-md-container .md-editor-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 4px 12px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--surface-2);
-  flex-shrink: 0;
-}
-
-.editor-md-container .md-editor-toolbar-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 28px;
-  height: 28px;
-  padding: 0 6px;
-  border: none;
-  background: transparent;
-  color: var(--text-sub);
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-  transition: background var(--transition-fast), color var(--transition-fast);
-  font-style: normal;
-}
-
-.editor-md-container .md-editor-toolbar-btn:hover {
-  background: var(--surface-2);
-  color: var(--text);
-}
-
-.editor-md-container .md-editor-toolbar-sep {
-  width: 1px;
-  height: 18px;
-  margin: 0 4px;
-  background: var(--surface-2);
-}
-
-.editor-md-container .md-editor-body {
-  display: flex;
-  flex: 1;
-  overflow: hidden;
-}
-
-.editor-md-container .md-editor-textarea {
-  flex: 1;
-  width: 50%;
-  padding: 16px 20px;
-  border: none;
-  border-right: 1px solid var(--surface-2);
-  outline: none;
-  resize: none;
-  background: var(--bg);
-  color: var(--text);
-  font-family: "Cascadia Code", "JetBrains Mono", "Consolas", "Microsoft YaHei", monospace;
-  font-size: 14px;
-  line-height: 1.6;
-  tab-size: 4;
-  font-style: normal;
-}
-
-.editor-md-container .md-editor-textarea::-webkit-scrollbar {
-  width: 8px;
-}
-
-.editor-md-container .md-editor-textarea::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.editor-md-container .md-editor-textarea::-webkit-scrollbar-thumb {
-  background: var(--surface-2);
-  border-radius: 4px;
-}
-
-.editor-md-container .md-editor-preview {
-  flex: 1;
-  width: 50%;
-  padding: 16px 20px;
-  overflow-y: auto;
-  background: var(--bg);
-  color: var(--text);
-  font-size: 14px;
-  line-height: 1.6;
-  font-style: normal;
-}
-
-.editor-md-container .md-editor-preview::-webkit-scrollbar {
-  width: 8px;
-}
-
-.editor-md-container .md-editor-preview::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.editor-md-container .md-editor-preview::-webkit-scrollbar-thumb {
-  background: var(--surface-2);
-  border-radius: 4px;
-}
-
-/* Cherry Markdown 渲染内容样式 */
-.editor-md-container .md-editor-preview .cherry {
-  background: transparent;
-  color: var(--text);
-}
-
-.editor-md-container .md-editor-preview p {
-  margin: 8px 0;
-}
-
-.editor-md-container .md-editor-preview h1 {
-  margin-top: 16px;
-  margin-bottom: 8px;
-  font-size: 1.4em;
-  font-weight: 600;
-  color: var(--text);
-}
-
-.editor-md-container .md-editor-preview h2 {
-  margin-top: 16px;
-  margin-bottom: 8px;
-  font-size: 1.25em;
-  font-weight: 600;
-  color: var(--text);
-}
-
-.editor-md-container .md-editor-preview h3 {
-  margin-top: 12px;
-  margin-bottom: 6px;
-  font-size: 1.1em;
-  font-weight: 600;
-  color: var(--text);
-}
-
-.editor-md-container .md-editor-preview code {
-  padding: 2px 6px;
-  background: var(--surface);
-  border-radius: var(--radius-sm);
-  font-family: "Cascadia Code", "JetBrains Mono", "Consolas", monospace;
-  font-size: 0.9em;
-  color: var(--accent);
-}
-
-.editor-md-container .md-editor-preview pre {
-  padding: 12px 16px;
-  background: var(--surface);
-  border-radius: var(--radius-md);
-  overflow-x: auto;
-  margin: 8px 0;
-}
-
-.editor-md-container .md-editor-preview pre code {
-  padding: 0;
-  background: none;
-  color: var(--text);
-}
-
-.editor-md-container .md-editor-preview ul,
-.editor-md-container .md-editor-preview ol {
-  margin: 8px 0;
-  padding-left: 24px;
-}
-
-.editor-md-container .md-editor-preview blockquote {
-  margin: 8px 0;
-  padding: 8px 16px;
-  border-left: 3px solid var(--accent);
-  background: var(--surface);
-  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-  color: var(--text-sub);
-}
-
-.editor-md-container .md-editor-preview a {
-  color: var(--accent);
-  text-decoration: none;
-}
-
-.editor-md-container .md-editor-preview table {
-  border-collapse: collapse;
-  margin: 8px 0;
-  width: 100%;
-}
-
-.editor-md-container .md-editor-preview th,
-.editor-md-container .md-editor-preview td {
-  border: 1px solid var(--surface-2);
-  padding: 6px 12px;
-  text-align: left;
-}
-
-.editor-md-container .md-editor-preview th {
-  background: var(--surface);
-  font-weight: 600;
 }

@@ -346,6 +346,18 @@ pub struct ScreenshotConfig {
     /// 默认关闭——默认体验与现状逐字节一致。
     #[serde(default)]
     pub control_snap: bool,
+    /// 控件吸附 BFS 最大深度（0.18.2：控制 UIA 树遍历几层子元素）。
+    /// 默认 15。范围 1-20。值越大能识别更深层的控件，但 COM 调用更多、超时风险更大。
+    #[serde(default = "default_control_snap_depth")]
+    pub control_snap_depth: u32,
+    /// 控件吸附超时毫秒数（0.18.2：BFS deadline，超时后返回已收集的部分结果）。
+    /// 默认 1000。异步收集不阻塞 overlay，宽松超时让更多应用在 budget 内到达有用控件层。
+    #[serde(default = "default_control_snap_deadline_ms")]
+    pub control_snap_deadline_ms: u32,
+    /// 控件吸附最小展开尺寸（0.18.2：物理像素，控件宽或高低于此值则不展开子树）。
+    /// 默认 50。范围 1-200。跳过微型控件的子树以节省 COM 调用预算。
+    #[serde(default = "default_control_snap_min_size")]
+    pub control_snap_min_size: u32,
 }
 
 impl Default for ScreenshotConfig {
@@ -355,6 +367,9 @@ impl Default for ScreenshotConfig {
             scroll_debug: false,
             ocr_debug: false,
             control_snap: false,
+            control_snap_depth: default_control_snap_depth(),
+            control_snap_deadline_ms: default_control_snap_deadline_ms(),
+            control_snap_min_size: default_control_snap_min_size(),
         }
     }
 }
@@ -411,6 +426,18 @@ fn default_3() -> u32 {
 
 fn default_5() -> u32 {
     5
+}
+
+fn default_control_snap_depth() -> u32 {
+    15
+}
+
+fn default_control_snap_deadline_ms() -> u32 {
+    1000
+}
+
+fn default_control_snap_min_size() -> u32 {
+    50
 }
 
 fn default_autosuggest_min_score() -> f64 {

@@ -141,15 +141,16 @@ fn default_true() -> bool {
     true
 }
 fn default_width() -> i32 {
-    240
+    280
 }
 fn default_height() -> i32 {
-    200
+    320
 }
 
 /// 默认窗口尺寸（逻辑像素，前端创建时用）。
-pub const DEFAULT_WIDTH: i32 = 320;
-pub const DEFAULT_HEIGHT: i32 = 270;
+/// 0.18.3：偏窄偏高，更符合便签直觉。
+pub const DEFAULT_WIDTH: i32 = 280;
+pub const DEFAULT_HEIGHT: i32 = 320;
 
 /// 初始化 sticky_notes 表。
 ///
@@ -165,8 +166,8 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
             visible INTEGER NOT NULL DEFAULT 1,
             x INTEGER NOT NULL DEFAULT 0,
             y INTEGER NOT NULL DEFAULT 0,
-            width INTEGER NOT NULL DEFAULT 240,
-            height INTEGER NOT NULL DEFAULT 200,
+            width INTEGER NOT NULL DEFAULT 280,
+            height INTEGER NOT NULL DEFAULT 320,
             always_on_top INTEGER NOT NULL DEFAULT 1,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,

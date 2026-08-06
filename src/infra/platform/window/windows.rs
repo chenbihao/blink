@@ -2,7 +2,32 @@
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+// ── 0.18.3：便签 N+1 预热机制 ──────────────────────────
+//
+// 后台始终保留一个已加载 Tiptap bundle 的 WebView2 备用窗口。
+// 被借用后立即创建新的；借出的窗口独立运行，关闭时正常 trash + 回收/销毁。
+//
+// 三个全局状态：
+// - SPARE_SEQ：自增序号，为每个 spare 生成唯一 label（sticky-spare-{N}）
+// - AVAILABLE_SPARE：当前空闲 spare 的 label（None = 无可用，需等待创建）
+// - SPARE_BORROW：已借出 spare 的 label → sticky_id 映射
+
+static SPARE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+static AVAILABLE_SPARE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+fn available_spare() -> &'static Mutex<Option<String>> {
+    AVAILABLE_SPARE.get_or_init(|| Mutex::new(None))
+}
+
+static SPARE_BORROW: OnceLock<Mutex<std::collections::HashMap<String, String>>> = OnceLock::new();
+
+fn spare_borrow() -> &'static Mutex<std::collections::HashMap<String, String>> {
+    SPARE_BORROW.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
 
 use crate::domain::event_names::EventNames;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
@@ -30,6 +55,47 @@ const ST_VISIBLE: u8 = 1;
 
 /// 默认 grace period。
 const DEFAULT_GRACE_MS: u64 = 500;
+
+// ── 0.18.3：窗口尺寸单一数据源 ──────────────────────────
+//
+// 每个窗口的默认尺寸 / 最小尺寸集中定义在此处，show 函数和 preheat 函数
+// 统一引用，消除"散弹式修改"——改一处即同步生效。
+//
+// 便签窗口尺寸另有 `sticky::DEFAULT_WIDTH` / `DEFAULT_HEIGHT`（用于 DB
+// 新建便签的初始 width/height），`create_sticky_spare` 应引用这两个常量
+// 而非硬编码。
+
+/// Chat 窗口
+const CHAT_W: f64 = 900.0;
+const CHAT_H: f64 = 680.0;
+const CHAT_MIN_W: f64 = 560.0;
+const CHAT_MIN_H: f64 = 420.0;
+
+/// 内容编辑器窗口
+const EDITOR_W: f64 = 720.0;
+const EDITOR_H: f64 = 560.0;
+const EDITOR_MIN_W: f64 = 400.0;
+const EDITOR_MIN_H: f64 = 300.0;
+
+/// 便签管理窗口
+const MANAGER_W: f64 = 560.0;
+const MANAGER_H: f64 = 640.0;
+const MANAGER_MIN_W: f64 = 360.0;
+const MANAGER_MIN_H: f64 = 400.0;
+
+/// 设置窗口
+const SETTINGS_W: f64 = 960.0;
+const SETTINGS_H: f64 = 680.0;
+const SETTINGS_MIN_W: f64 = 760.0;
+const SETTINGS_MIN_H: f64 = 520.0;
+
+/// 便签窗口最小尺寸
+const STICKY_MIN_W: f64 = 120.0;
+const STICKY_MIN_H: f64 = 80.0;
+
+/// 语音浮层窗口
+const VOICE_W: f64 = 260.0;
+const VOICE_H: f64 = 140.0;
 
 /// 唤起时的基准逻辑尺寸——用来在跨 DPI 屏定位时算出目标屏上的物理尺寸。
 /// 与前端 `syncWindowSize()` 首帧一致（宽 700 / 高 65 含 CSS padding），
@@ -518,6 +584,33 @@ fn compute_center_position(phys_w: i32, phys_h: i32) -> Option<(i32, i32)> {
     None
 }
 
+/// 便签标题栏高度（CSS 像素），与 `sticky.css` 中 `.sticky-titlebar { height: 32px }` 对齐。
+const STICKY_TITLEBAR_H_CSS: f64 = 32.0;
+
+/// 计算便签窗口位置，使标题栏中心对准鼠标光标（0.18.4）。
+///
+/// 主窗口唤起新便签时使用：窗口水平居中于鼠标 X，标题栏竖直中心在鼠标 Y。
+/// 这样用户从主窗口钉文本为便签时，便签标题栏正好出现在鼠标处，方便立即拖动。
+///
+/// 返回物理坐标。标题栏高度 32 CSS px 按显示器 DPI 换算为物理像素。
+pub fn compute_cursor_titlebar_position(phys_w: i32) -> Option<(i32, i32)> {
+    unsafe {
+        let mut pt = POINT { x: 0, y: 0 };
+        if GetCursorPos(&mut pt).is_err() {
+            return None;
+        }
+        let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        let scale = crate::infra::platform::dpi::scale_factor(
+            crate::infra::platform::dpi::get_dpi_for_hmonitor(hmon),
+        );
+        let titlebar_phys = (STICKY_TITLEBAR_H_CSS * scale) as i32;
+        // 水平居中于鼠标，标题栏竖直中心对准鼠标
+        let x = pt.x - phys_w / 2;
+        let y = pt.y - titlebar_phys / 2;
+        Some((x, y))
+    }
+}
+
 /// resize 后若窗口底部超出显示器工作区，向上移动使其完整可见。
 pub fn clamp_to_work_area(win: &WebviewWindow) {
     let Ok(pos) = win.outer_position() else {
@@ -765,8 +858,8 @@ pub fn show_chat_window(app: &AppHandle, initial_text: Option<&str>) -> Result<(
         // 首次创建（预热未命中时的 fallback）
         WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("chat.html".into()))
             .title("Blink AI")
-            .inner_size(900.0, 680.0)
-            .min_inner_size(560.0, 420.0)
+            .inner_size(CHAT_W, CHAT_H)
+            .min_inner_size(CHAT_MIN_W, CHAT_MIN_H)
             .decorations(false)
             .transparent(false)
             .always_on_top(false)
@@ -872,8 +965,8 @@ pub fn show_content_editor_window(app: &AppHandle) -> Result<(), String> {
         // background_color 设为 dark 主题底色 #1e1e2e，CSS 加载前不闪白。
         WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("content-editor.html".into()))
             .title("编辑内容")
-            .inner_size(720.0, 560.0)
-            .min_inner_size(400.0, 300.0)
+            .inner_size(EDITOR_W, EDITOR_H)
+            .min_inner_size(EDITOR_MIN_W, EDITOR_MIN_H)
             .decorations(false)
             .transparent(false)
             .always_on_top(false)
@@ -932,8 +1025,8 @@ pub fn show_sticky_manager_window(app: &AppHandle) -> Result<(), String> {
         let w =
             WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("sticky-manager.html".into()))
                 .title("便签管理")
-                .inner_size(560.0, 640.0)
-                .min_inner_size(360.0, 400.0)
+                .inner_size(MANAGER_W, MANAGER_H)
+                .min_inner_size(MANAGER_MIN_W, MANAGER_MIN_H)
                 .decorations(false)
                 .transparent(false)
                 .always_on_top(false)
@@ -1067,10 +1160,116 @@ pub fn show_sticky_window(
     let truncated_id: String = sticky_id.chars().take(64).collect();
     let label = format!("sticky-{truncated_id}");
 
+    // 0.18.4：新建便签（x=0 && y=0）定位到鼠标所在屏的工作区中心。
+    // 此逻辑原先只在路径4（全新建窗口）中，但 N+1 预热机制下 spare 几乎总可用，
+    // 新便签走路径3（借用 spare），导致跳过居中 → 定位到 (0,0) 角落。
+    // 提到分支之前，确保所有路径一致居中。
+    let (x, y) = if x == 0 && y == 0 {
+        compute_center_position(width, height).unwrap_or((x, y))
+    } else {
+        (x, y)
+    };
+
     let is_new = app.get_webview_window(&label).is_none();
 
-    let win = if is_new {
-        // URL 带 sticky_id 参数，前端 init 时读取
+    // 0.18.3 N+1：检查此 sticky 是否已借出在某个 spare 窗口中
+    let borrowed_label = spare_borrow()
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(_, sid)| sid.as_str() == sticky_id)
+        .map(|(l, _)| l.clone());
+
+    let win = if !is_new {
+        // 复用已有 sticky-{id} 窗口
+        let (cx, cy, cw, ch) = clamp_sticky_geometry(x, y, width, height);
+        let win = app.get_webview_window(&label).ok_or_else(|| {
+            tracing::warn!(label = %label, "复用便签窗口时发现窗口已不存在");
+            "便签窗口在复用时已不存在".to_string()
+        })?;
+        let scale = unsafe {
+            let pt = POINT { x: cx, y: cy };
+            let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+            crate::infra::platform::dpi::scale_factor(
+                crate::infra::platform::dpi::get_dpi_for_hmonitor(hmon),
+            )
+        };
+        let _ = win.set_size(tauri::LogicalSize::new(cw as f64 / scale, ch as f64 / scale));
+        let _ = win.set_position(tauri::PhysicalPosition::new(cx, cy));
+        let _ = win.set_always_on_top(always_on_top);
+        let escaped_id = sticky_id.replace('\\', "\\\\").replace('\'', "\\'").replace('\n', "\\n").replace('\r', "\\r");
+        let _ = win.eval(&format!("if (window.__stickyReload) window.__stickyReload('{escaped_id}')"));
+        win
+    } else if let Some(bl) = borrowed_label {
+        // 复用已借出的 spare 窗口（同一便签再次唤起）
+        tracing::debug!(sticky_id, spare_label = %bl, "sticky window: 复用已借出 spare");
+        let (cx, cy, cw, ch) = clamp_sticky_geometry(x, y, width, height);
+        let win = app.get_webview_window(&bl).ok_or_else(|| {
+            "便签窗口在复用时已不存在".to_string()
+        })?;
+        let scale = unsafe {
+            let pt = POINT { x: cx, y: cy };
+            let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+            crate::infra::platform::dpi::scale_factor(
+                crate::infra::platform::dpi::get_dpi_for_hmonitor(hmon),
+            )
+        };
+        let _ = win.set_size(tauri::LogicalSize::new(cw as f64 / scale, ch as f64 / scale));
+        let _ = win.set_position(tauri::PhysicalPosition::new(cx, cy));
+        let _ = win.set_always_on_top(always_on_top);
+        let escaped_id = sticky_id.replace('\\', "\\\\").replace('\'', "\\'").replace('\n', "\\n").replace('\r', "\\r");
+        let _ = win.eval(&format!("if (window.__stickyReload) window.__stickyReload('{escaped_id}')"));
+        win
+    } else {
+        // 尝试借用空闲 spare
+        let available_label = available_spare().lock().unwrap().take();
+        if let Some(al) = available_label {
+            // 借用预热窗口
+            tracing::debug!(sticky_id, spare_label = %al, "sticky window: 借用预热 spare");
+            spare_borrow().lock().unwrap().insert(al.clone(), sticky_id.to_string());
+
+            let (cx, cy, cw, ch) = clamp_sticky_geometry(x, y, width, height);
+            let scale = unsafe {
+                let pt = POINT { x: cx, y: cy };
+                let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+                crate::infra::platform::dpi::scale_factor(
+                    crate::infra::platform::dpi::get_dpi_for_hmonitor(hmon),
+                )
+            };
+            let spare_win = app.get_webview_window(&al).ok_or_else(|| {
+                "预热窗口不存在".to_string()
+            })?;
+            let _ = spare_win.set_size(tauri::LogicalSize::new(cw as f64 / scale, ch as f64 / scale));
+            let _ = spare_win.set_position(tauri::PhysicalPosition::new(cx, cy));
+            let _ = spare_win.set_always_on_top(always_on_top);
+            let escaped_id = sticky_id.replace('\\', "\\\\").replace('\'', "\\'").replace('\n', "\\n").replace('\r', "\\r");
+            let _ = spare_win.eval(&format!("if (window.__stickyReload) window.__stickyReload('{escaped_id}')"));
+
+            if let Ok(hwnd) = spare_win.hwnd() {
+                let hwnd = HWND(hwnd.0 as _);
+                install_sysmenu_blocker(hwnd);
+                enable_rounded_corners(hwnd);
+            }
+            spare_win.show().map_err(|e| format!("显示便签窗口失败: {e}"))?;
+            let _ = spare_win.unminimize();
+            if focus {
+                spare_win.set_focus().map_err(|e| format!("聚焦便签窗口失败: {e}"))?;
+            }
+
+            tracing::info!(sticky_id, focus, "sticky window: 已显示（预热借用）");
+
+            // N+1：spare 被借用后，后台延迟创建新的备用窗口
+            let app_clone = app.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                create_sticky_spare(&app_clone);
+                tracing::debug!("sticky-spare: N+1 补充完成");
+            });
+
+            return Ok(());
+        }
+
+        // 无可用 spare，创建新窗口（URL 带 sticky_id 参数）
         // P3-#22 fix: URL 编码防注入——sticky_id 来自前端任意字符串
         let encoded_id = sticky_id
             .chars()
@@ -1083,14 +1282,6 @@ pub fn show_sticky_window(
             })
             .collect::<String>();
         let url = format!("sticky.html?id={encoded_id}");
-
-        // 0.17.7：新建便签（x=0 && y=0）定位到鼠标所在屏的工作区中心，
-        // 复用 launcher_position 的 DPI 感知 + 工作区中心逻辑，但用便签自身尺寸。
-        let (x, y) = if x == 0 && y == 0 {
-            compute_center_position(width, height).unwrap_or((x, y))
-        } else {
-            (x, y)
-        };
 
         // 0.16.11：几何钳制——显示器拔插/分辨率变化后保证窗口至少部分可见
         let (cx, cy, cw, ch) = clamp_sticky_geometry(x, y, width, height);
@@ -1109,7 +1300,7 @@ pub fn show_sticky_window(
         let w = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
             .title("便签")
             .inner_size(logical_w, logical_h)
-            .min_inner_size(120.0, 80.0)
+            .min_inner_size(STICKY_MIN_W, STICKY_MIN_H)
             .position(cx as f64, cy as f64)
             .decorations(false)
             .transparent(false)
@@ -1177,39 +1368,6 @@ pub fn show_sticky_window(
             }
         });
         w
-    } else {
-        // 复用已有窗口——重新定位 + 重新加载便签数据
-        // 0.16.11：复用路径也做几何钳制，防止显示器变化后窗口不可见
-        let (cx, cy, cw, ch) = clamp_sticky_geometry(x, y, width, height);
-        // P3-#23 fix: 用 ok_or_else 替代 unwrap，窗口在判定存在后可能被并发销毁
-        let win = app.get_webview_window(&label).ok_or_else(|| {
-            tracing::warn!(label = %label, "复用便签窗口时发现窗口已不存在");
-            "便签窗口在复用时已不存在".to_string()
-        })?;
-        // 0.16.10 fix P0-#7: 复用路径也用逻辑像素（与新建路径一致）
-        let scale = unsafe {
-            let pt = POINT { x: cx, y: cy };
-            let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-            crate::infra::platform::dpi::scale_factor(
-                crate::infra::platform::dpi::get_dpi_for_hmonitor(hmon),
-            )
-        };
-        let _ = win.set_size(tauri::LogicalSize::new(
-            cw as f64 / scale,
-            ch as f64 / scale,
-        ));
-        let _ = win.set_position(tauri::PhysicalPosition::new(cx, cy));
-        let _ = win.set_always_on_top(always_on_top);
-        // 通知前端重新加载便签数据
-        // P3-#22 fix: JS 字符串转义防注入
-        let escaped_id = sticky_id
-            .replace('\\', "\\\\")
-            .replace('\'', "\\'")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r");
-        let js = format!("if (window.__stickyReload) window.__stickyReload('{escaped_id}')");
-        let _ = win.eval(&js);
-        win
     };
 
     // 系统菜单拦截 + 圆角
@@ -1397,6 +1555,20 @@ pub fn destroy_sticky_window(app: &AppHandle, sticky_id: &str) {
         let _ = win.destroy();
         tracing::debug!(sticky_id, "sticky window: 已销毁");
     }
+    // 0.18.3 N+1：也检查借出的 spare 窗口
+    let borrowed_label = spare_borrow()
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(_, sid)| sid.as_str() == sticky_id)
+        .map(|(l, _)| l.clone());
+    if let Some(bl) = borrowed_label {
+        spare_borrow().lock().unwrap().remove(&bl);
+        if let Some(win) = app.get_webview_window(&bl) {
+            let _ = win.destroy();
+        }
+        tracing::debug!(sticky_id, spare_label = %bl, "sticky spare: 已销毁借出窗口");
+    }
 }
 
 /// 显示语音录音 mini overlay（0.10 G2）。
@@ -1421,7 +1593,7 @@ pub fn show_voice_overlay(app: &AppHandle) {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
     match WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("voice-overlay.html".into()))
         .title("")
-        .inner_size(260.0, 140.0)
+        .inner_size(VOICE_W, VOICE_H)
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
@@ -1790,6 +1962,135 @@ pub fn wait_frame_after_hide(app: &AppHandle) {
     );
 }
 
+/// 0.18.3：创建便签预热窗口。
+///
+/// N+1 预热机制：后台始终保留一个已加载 Tiptap bundle 的 WebView2 备用窗口。
+/// 被借用后由调用方 spawn 新的 spare 创建（500ms 延迟避抢资源）。
+/// 借出的窗口关闭时：flush + trash + 回收（若无可用 spare）或销毁（已有可用 spare）。
+fn create_sticky_spare(app: &AppHandle) {
+    use tauri::{WebviewUrl, WebviewWindowBuilder, window::Color};
+
+    // 已有可用 spare 则不重复创建
+    if available_spare().lock().unwrap().is_some() {
+        return;
+    }
+
+    let seq = SPARE_SEQ.fetch_add(1, Ordering::SeqCst);
+    let label = format!("sticky-spare-{seq}");
+
+    match WebviewWindowBuilder::new(
+        app,
+        &label,
+        WebviewUrl::App("sticky.html?preheat=1".into()),
+    )
+    .title("便签")
+    .inner_size(
+        crate::infra::data::sticky::DEFAULT_WIDTH as f64,
+        crate::infra::data::sticky::DEFAULT_HEIGHT as f64,
+    )
+    .min_inner_size(STICKY_MIN_W, STICKY_MIN_H)
+    .decorations(false)
+    .transparent(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .resizable(true)
+    .focused(false)
+    .visible(false)
+    .background_color(Color(255, 249, 196, 255))
+    .build()
+    {
+        Ok(w) => {
+            let label_owned = label.clone();
+            let app_clone = app.clone();
+            w.on_window_event(move |event| {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    if IS_APP_EXITING.load(Ordering::SeqCst) {
+                        return; // 应用退出：不 prevent_close
+                    }
+                    api.prevent_close();
+
+                    // 检查此 spare 是否已借出
+                    let borrowed_id = spare_borrow().lock().unwrap().remove(&label_owned);
+
+                    if let Some(sid) = borrowed_id {
+                        // 借出的 spare 关闭 → 立即 flush + hide，后台再 trash + 回收/销毁
+                        if let Some(w) = app_clone.get_webview_window(&label_owned) {
+                            let _ = w.eval("if (window.__stickyFlush) window.__stickyFlush();");
+                            // 立即隐藏——用户感知为"点击即关闭"，清理在后台不可见时进行
+                            let _ = w.hide();
+                        }
+
+                        let app_c = app_clone.clone();
+                        let lbl = label_owned.clone();
+                        tauri::async_runtime::spawn(async move {
+                            // 等 flush 完成（前端防抖 500ms）
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+
+                            // trash 便签
+                            if let Some(svc) = app_c
+                                .try_state::<std::sync::Arc<crate::domain::sticky::StickyService>>()
+                            {
+                                if let Err(e) = svc.trash_note(&sid).await {
+                                    tracing::warn!(error = %e, "预热便签关闭时移入回收站失败");
+                                } else {
+                                    let _ = app_c.emit(
+                                        EventNames::STICKY_TRASHED,
+                                        serde_json::json!({ "stickyId": sid }),
+                                    );
+                                }
+                            }
+
+                            // 回收或销毁
+                            let available = available_spare().lock().unwrap();
+                            if available.is_none() {
+                                // 回收：eval __stickyReset，前端完成后会 invoke sticky_spare_ready
+                                // 不在此处直接设 AVAILABLE_SPARE——避免 __stickyReset 未执行完就被借用
+                                drop(available);
+                                if let Some(w) = app_c.get_webview_window(&lbl) {
+                                    let _ = w.eval("if (window.__stickyReset) window.__stickyReset();");
+                                }
+                                tracing::debug!(spare_label = %lbl, "sticky-spare: 回收中，等待前端 __stickyReset 完成后注册");
+                            } else {
+                                // 已有可用 spare，销毁此窗口
+                                drop(available);
+                                if let Some(w) = app_c.get_webview_window(&lbl) {
+                                    let _ = w.destroy();
+                                }
+                                tracing::debug!(spare_label = %lbl, "sticky-spare: 销毁多余备用窗口");
+                            }
+                        });
+                    } else {
+                        // 空闲 spare 被关闭 → 仅 hide
+                        if let Some(w) = app_clone.get_webview_window(&label_owned) {
+                            let _ = w.hide();
+                        }
+                        tracing::debug!(spare_label = %label_owned, "sticky-spare: 空闲关闭 → hide");
+                    }
+                }
+            });
+
+            // 注册为可用 spare——延迟到前端 init 完成后由 mark_spare_ready 设置
+            // 否则 spare 可能在 JS 未加载完时被借用，eval __stickyReload 静默失败
+            tracing::debug!(spare_label = %label, "sticky-spare: 窗口已创建，等待前端 init 就绪");
+        }
+        Err(e) => tracing::warn!(error = %e, "sticky-spare: 创建失败"),
+    }
+}
+
+/// 0.18.3 N+1：前端 init 完成后调用，将 spare 注册为可用。
+///
+/// `create_sticky_spare` 只 build 窗口，不立即注册 available——
+/// 因为 WebView2 的 HTML/JS 加载是异步的，在 init 完成前 eval 会静默失败。
+/// 前端 preheat init 完成后通过 IPC 命令调用此函数，标记 spare 就绪。
+pub fn mark_spare_ready(label: &str) {
+    // 仅当该 label 对应的窗口存在且当前无可用 spare 时才注册
+    let mut available = available_spare().lock().unwrap();
+    if available.is_none() {
+        *available = Some(label.to_string());
+        tracing::debug!(spare_label = %label, "sticky-spare: 前端已就绪，注册为可用备用窗口");
+    }
+}
+
 /// 后台预热次级窗口：延迟创建 chord-screenshot / context-menu / voice-overlay /
 /// chord-pin / chat / settings / content-editor / sticky-manager 并立即隐藏。
 ///
@@ -1871,7 +2172,7 @@ pub fn preheat_secondary_windows(app: AppHandle) {
                 WebviewUrl::App("voice-overlay.html".into()),
             )
             .title("")
-            .inner_size(260.0, 140.0)
+            .inner_size(VOICE_W, VOICE_H)
             .decorations(false)
             .transparent(true)
             .always_on_top(true)
@@ -1916,8 +2217,8 @@ pub fn preheat_secondary_windows(app: AppHandle) {
             use tauri::{WebviewUrl, WebviewWindowBuilder};
             match WebviewWindowBuilder::new(&app, "chat", WebviewUrl::App("chat.html".into()))
                 .title("Blink AI")
-                .inner_size(900.0, 680.0)
-                .min_inner_size(560.0, 420.0)
+                .inner_size(CHAT_W, CHAT_H)
+                .min_inner_size(CHAT_MIN_W, CHAT_MIN_H)
                 .decorations(false)
                 .transparent(false)
                 .always_on_top(false)
@@ -1944,8 +2245,8 @@ pub fn preheat_secondary_windows(app: AppHandle) {
                 WebviewUrl::App("settings.html".into()),
             )
             .title("Blink Settings")
-            .inner_size(960.0, 680.0)
-            .min_inner_size(760.0, 520.0)
+            .inner_size(SETTINGS_W, SETTINGS_H)
+            .min_inner_size(SETTINGS_MIN_W, SETTINGS_MIN_H)
             .position(0.0, 0.0)
             .visible(false)
             .decorations(false)
@@ -1978,8 +2279,8 @@ pub fn preheat_secondary_windows(app: AppHandle) {
                 WebviewUrl::App("content-editor.html".into()),
             )
             .title("编辑内容")
-            .inner_size(720.0, 560.0)
-            .min_inner_size(400.0, 300.0)
+            .inner_size(EDITOR_W, EDITOR_H)
+            .min_inner_size(EDITOR_MIN_W, EDITOR_MIN_H)
             .decorations(false)
             .transparent(false)
             .always_on_top(false)
@@ -2008,8 +2309,8 @@ pub fn preheat_secondary_windows(app: AppHandle) {
                 WebviewUrl::App("sticky-manager.html".into()),
             )
             .title("便签管理")
-            .inner_size(560.0, 640.0)
-            .min_inner_size(360.0, 400.0)
+            .inner_size(MANAGER_W, MANAGER_H)
+            .min_inner_size(MANAGER_MIN_W, MANAGER_MIN_H)
             .decorations(false)
             .transparent(false)
             .always_on_top(false)
@@ -2043,6 +2344,10 @@ pub fn preheat_secondary_windows(app: AppHandle) {
                 Err(e) => tracing::warn!(error = %e, "preheat: sticky-manager 失败"),
             }
         }
+
+        // --- sticky-spare（便签预热窗口，0.18.3 N+1） ---
+        // 后台始终保留一个备用便签窗口，被借用后立即创建新的
+        create_sticky_spare(&app);
 
         tracing::debug!("preheat: 预热完成");
     });
@@ -2130,12 +2435,12 @@ pub fn open_settings(app: &AppHandle) {
     }
     use tauri::{WebviewUrl, WebviewWindowBuilder};
     // 首次创建：先 hidden build（避免主屏闪一下），然后按目标屏 DPI 把默认
-    // CSS 尺寸(960×680) 折算成物理尺寸，place_at_physical 挪到光标屏中心。
+    // CSS 尺寸 折算成物理尺寸，place_at_physical 挪到光标屏中心。
     // 位置给 (0,0) 占位，builder 的 .center() 只会居中主屏——用不上。
     let win = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
         .title("Blink Settings")
-        .inner_size(960.0, 680.0)
-        .min_inner_size(760.0, 520.0)
+        .inner_size(SETTINGS_W, SETTINGS_H)
+        .min_inner_size(SETTINGS_MIN_W, SETTINGS_MIN_H)
         .position(0.0, 0.0)
         .visible(false)
         .decorations(false)
@@ -2145,8 +2450,8 @@ pub fn open_settings(app: &AppHandle) {
         .build()
         .expect("创建设置窗口失败");
     let scale = crate::infra::platform::dpi::scale_factor(target_dpi);
-    let phys_w = (960.0 * scale).round() as i32;
-    let phys_h = (680.0 * scale).round() as i32;
+    let phys_w = (SETTINGS_W * scale).round() as i32;
+    let phys_h = (SETTINGS_H * scale).round() as i32;
     let win_w = phys_w.min(work_w);
     let win_h = phys_h.min(work_h);
     let fx = work.left + (work_w - win_w) / 2;

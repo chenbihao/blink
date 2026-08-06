@@ -13,4 +13,5 @@
 @import '../components/icon.css';
 @import '../components/tooltip.css';
 @import '../components/modal.css';
+@import '../components/md-toolbar.css';
 @import '../views/content-editor.css';

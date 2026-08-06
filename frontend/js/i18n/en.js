@@ -390,7 +390,13 @@ export const en = {
 "chord.screenshot.ocr_debug.label": "OCR Diagnostics",
 "chord.screenshot.ocr_debug.hint": "When enabled, a diagnostic button appears next to the OCR button in the screenshot toolbar; shows installed languages, Chinese pack status, and selection test results",
 "chord.screenshot.control_snap.label": "Control-level Snap",
-"chord.screenshot.control_snap.hint": "Snap selection to child controls (buttons, inputs) when hovering during screenshot drag (UIA, 200ms timeout + 3-level depth adaptive fallback); off by default. Amber dashed = control snap, blue dashed = window snap",
+"chord.screenshot.control_snap.hint": "Snap selection to child controls (buttons, inputs) when hovering during screenshot drag (UIA, adjustable timeout/depth/min-size); off by default. Amber dashed = control snap, blue dashed = window snap",
+"chord.screenshot.control_snap_depth.label": "Traversal Depth",
+"chord.screenshot.control_snap_depth.hint": "How many levels deep to traverse the UIA tree from the window. 1=top-level only, 15=reaches deep controls in WPF/Office/Electron, 20=deepest. Higher values find more controls but increase COM calls and timeout risk",
+"chord.screenshot.control_snap_deadline.label": "Timeout",
+"chord.screenshot.control_snap_deadline.hint": "UIA collection timeout in milliseconds. Async collection does not block screenshot operations; returns partial results on timeout. 1000ms=1s. Higher values find more apps but hints arrive later",
+"chord.screenshot.control_snap_min_size.label": "Min Expand Size",
+"chord.screenshot.control_snap_min_size.hint": "Controls with width or height below this value (physical pixels) will not have their children expanded. Skips tiny controls (e.g. separator dots) to save COM call budget. 50px=only expand medium+ controls, 1px=expand almost all",
 
 // ── OCR diagnostics panel (0.17.5, only shown with ?ocrDebug=1) ──
 "screenshot.ocr_diag.title": "OCR Diagnostics",

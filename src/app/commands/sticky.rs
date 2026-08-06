@@ -73,7 +73,7 @@ pub async fn update_sticky_content(
         .map_err(|e: StickyError| e.to_string())?;
     let _ = app.emit(
         EventNames::STICKY_CONTENT_CHANGED,
-        serde_json::json!({ "stickyId": id }),
+        serde_json::json!({ "stickyId": id, "source": "sticky" }),
     );
     Ok(())
 }
@@ -175,8 +175,14 @@ pub async fn get_sticky_stats(app: AppHandle) -> serde_json::Value {
 /// 前端创建便签后调用此命令打开桌面窗口。
 /// 后端根据 sticky_id 从 DB 读取位置/尺寸/置顶状态，恢复窗口。
 /// 0.17.7：显示时同时确保 trashed=false（从回收站恢复）。
+/// 0.18.4：`at_cursor=true` 时，新便签（x=0,y=0）定位到鼠标处（标题栏中心对准光标），
+///         适用于主窗口唤起场景；便签管理器创建的便签不传此参数，默认居中。
 #[tauri::command]
-pub async fn show_sticky_window_cmd(app: AppHandle, sticky_id: String) -> Result<(), String> {
+pub async fn show_sticky_window_cmd(
+    app: AppHandle,
+    sticky_id: String,
+    at_cursor: Option<bool>,
+) -> Result<(), String> {
     let svc = app.state::<std::sync::Arc<StickyService>>();
     let note = svc
         .get_note(&sticky_id)
@@ -202,12 +208,20 @@ pub async fn show_sticky_window_cmd(app: AppHandle, sticky_id: String) -> Result
         serde_json::json!({ "stickyId": sticky_id, "visible": true }),
     );
 
+    // 0.18.4：主窗口唤起的新便签（x=0,y=0）定位到鼠标处
+    let (x, y) = if at_cursor.unwrap_or(false) && note.x == 0 && note.y == 0 {
+        crate::infra::platform::window::compute_cursor_titlebar_position(note.width)
+            .unwrap_or((note.x, note.y))
+    } else {
+        (note.x, note.y)
+    };
+
     // 创建/显示窗口（用户主动操作，需要聚焦）
     crate::infra::platform::window::show_sticky_window(
         &app,
         &sticky_id,
-        note.x,
-        note.y,
+        x,
+        y,
         note.width,
         note.height,
         note.always_on_top,
@@ -294,4 +308,14 @@ pub async fn clear_trashed_sticky_notes(app: AppHandle) -> Result<u64, String> {
     );
 
     Ok(count)
+}
+
+/// 0.18.3 N+1：前端 preheat init 完成后调用，通知后端 spare 已就绪。
+///
+/// 前端 `init()` preheat 路径完成后 invoke 此命令，后端将窗口 label
+/// 注册为 AVAILABLE_SPARE，此后该 spare 可被 `show_sticky_window` 借用。
+#[tauri::command]
+pub async fn sticky_spare_ready(window: tauri::Window) {
+    let label = window.label().to_string();
+    crate::infra::platform::window::mark_spare_ready(&label);
 }

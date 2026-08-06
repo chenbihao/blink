@@ -217,7 +217,7 @@ function renderClipboardDetail(cfg) {
  * 后续 0.11.10-i/j 的背景遮罩策略等也归到此区。
  */
 function renderScreenshotDetail(cfg) {
-cfg = cfg || { prewarmOcr: true, scrollDebug: false, ocrDebug: false, controlSnap: false };
+cfg = cfg || { prewarmOcr: true, scrollDebug: false, ocrDebug: false, controlSnap: false, controlSnapDepth: 15, controlSnapDeadlineMs: 1000, controlSnapMinSize: 50 };
 return `<div class="chord-screenshot-detail">
 <div class="chord-field">
 <label class="setting-label chord-field-label">${t("chord.screenshot.prewarm_ocr.label")}
@@ -254,6 +254,33 @@ return `<div class="chord-screenshot-detail">
 <input type="checkbox" class="screenshot-field" data-field="control_snap" ${cfg.controlSnap === true ? "checked" : ""} />
 <span class="slider"></span>
 </label>
+</div>
+<div class="chord-field control-snap-params" style="${cfg.controlSnap === true ? "" : "display:none"}">
+<label class="setting-label chord-field-label">${t("chord.screenshot.control_snap_depth.label")}
+<span class="field-hint-icon" title="${escapeAttr(t("chord.screenshot.control_snap_depth.hint"))}">ⓘ</span>
+</label>
+<div class="chord-field-control">
+<input type="range" class="screenshot-field" data-field="control_snap_depth" min="1" max="20" step="1" value="${cfg.controlSnapDepth ?? 15}" />
+<span class="range-value" data-for="control_snap_depth">${cfg.controlSnapDepth ?? 15}</span>
+</div>
+</div>
+<div class="chord-field control-snap-params" style="${cfg.controlSnap === true ? "" : "display:none"}">
+<label class="setting-label chord-field-label">${t("chord.screenshot.control_snap_deadline.label")}
+<span class="field-hint-icon" title="${escapeAttr(t("chord.screenshot.control_snap_deadline.hint"))}">ⓘ</span>
+</label>
+<div class="chord-field-control">
+<input type="range" class="screenshot-field" data-field="control_snap_deadline_ms" min="100" max="2000" step="100" value="${cfg.controlSnapDeadlineMs ?? 1000}" />
+<span class="range-value" data-for="control_snap_deadline_ms">${cfg.controlSnapDeadlineMs ?? 1000}ms</span>
+</div>
+</div>
+<div class="chord-field control-snap-params" style="${cfg.controlSnap === true ? "" : "display:none"}">
+<label class="setting-label chord-field-label">${t("chord.screenshot.control_snap_min_size.label")}
+<span class="field-hint-icon" title="${escapeAttr(t("chord.screenshot.control_snap_min_size.hint"))}">ⓘ</span>
+</label>
+<div class="chord-field-control">
+<input type="range" class="screenshot-field" data-field="control_snap_min_size" min="1" max="200" step="2" value="${cfg.controlSnapMinSize ?? 50}" />
+<span class="range-value" data-for="control_snap_min_size">${cfg.controlSnapMinSize ?? 50}px</span>
+</div>
 </div>
 </div>`;
 }
@@ -380,6 +407,31 @@ function bindRowEvents(container) {
       el.addEventListener("change", () => saveScreenshotDetail(container));
       el.addEventListener("click", (e) => e.stopPropagation());
     });
+
+    // control_snap 开关切换时显示/隐藏参数 slider 区域
+    const snapToggle = shotDetail.querySelector('[data-field="control_snap"]');
+    if (snapToggle) {
+      snapToggle.addEventListener("change", () => {
+        const visible = snapToggle.checked;
+        shotDetail.querySelectorAll(".control-snap-params").forEach((row) => {
+          row.style.display = visible ? "" : "none";
+        });
+      });
+    }
+
+    // range slider 拖动时实时更新数值显示
+    shotDetail.querySelectorAll('input[type="range"].screenshot-field').forEach((slider) => {
+      slider.addEventListener("input", () => {
+        const field = slider.dataset.field;
+        const display = shotDetail.querySelector(`.range-value[data-for="${field}"]`);
+        if (display) {
+          let suffix = "";
+          if (field === "control_snap_deadline_ms") suffix = "ms";
+          else if (field === "control_snap_min_size") suffix = "px";
+          display.textContent = slider.value + suffix;
+        }
+      });
+    });
   }
 }
 
@@ -503,7 +555,10 @@ const prewarmOcr = detail.querySelector('[data-field="prewarm_ocr"]')?.checked !
 const scrollDebug = detail.querySelector('[data-field="scroll_debug"]')?.checked === true;
 const ocrDebug = detail.querySelector('[data-field="ocr_debug"]')?.checked === true;
 const controlSnap = detail.querySelector('[data-field="control_snap"]')?.checked === true;
-await saveConfig("screenshot_config", { prewarmOcr, scrollDebug, ocrDebug, controlSnap });
+const controlSnapDepth = parseInt(detail.querySelector('[data-field="control_snap_depth"]')?.value, 10) || 15;
+const controlSnapDeadlineMs = parseInt(detail.querySelector('[data-field="control_snap_deadline_ms"]')?.value, 10) || 1000;
+const controlSnapMinSize = parseInt(detail.querySelector('[data-field="control_snap_min_size"]')?.value, 10) || 50;
+await saveConfig("screenshot_config", { prewarmOcr, scrollDebug, ocrDebug, controlSnap, controlSnapDepth, controlSnapDeadlineMs, controlSnapMinSize });
   } catch (e) {
     console.error("save screenshot detail failed:", e);
   }

@@ -8,5 +8,5 @@
 | cherry-markdown.stream.min.js | cherry-markdown | 0.11.9 | npm tgz（`tmp_cherry_pack/cherry-markdown-0.11.9.tgz`） | 官方 UMD 产物 | 2025-10 | 0.17 §3.4 |
 | cherry-markdown.min.css | cherry-markdown | 0.11.9 | npm tgz（同上） | 官方产物 | 2025-10 | 0.17 §3.4 |
 | open-props/*.css | open-props | （待补） | npm | 官方产物 | 0.x | - |
-| tiptap.bundle.min.js | @tiptap/core + @tiptap/pm + @tiptap/starter-kit + @tiptap/markdown | 3.29.2（四包同版） | npm + esbuild | 自打包 IIFE（`xtask/scripts/bundle-tiptap.js`） | 0.18.3 | 0.18 §3.2 |
+| tiptap.bundle.min.js | @tiptap/core + @tiptap/pm + @tiptap/starter-kit + @tiptap/markdown | 3.29.2（四包同版） | npm + esbuild | 自打包 IIFE（`xtask/scripts/bundle-tiptap.js`） | 2026-08 | 0.18.3 §3.2 |
 

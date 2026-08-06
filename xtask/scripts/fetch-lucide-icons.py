@@ -101,6 +101,8 @@ ICON_LIST = [
     "mouse-pointer-2",  # 选取工具（0.11.10-a）——工具栏默认工具
     "menu",             # 面板召唤（0.11.10-e）——工具栏右侧[≡]按钮
     "eye-off",          # 便签管理隐藏（0.16.10）——隐藏便签动作
+    "trash-2",          # 便签管理删除（0.17.7）——移入回收站
+    "rotate-ccw",       # 便签管理恢复（0.17.7）——从回收站恢复
 
     # AI 确认徽章
     "triangle-alert",   # AI 需确认 ⚠  （Lucide 1.x 从 alert-triangle 重命名）
