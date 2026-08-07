@@ -1,13 +1,14 @@
 //! 截图 overlay 显示器几何（0.14.6 §4 拆分）。
 //!
-//! 多屏混合 DPI 正确 clamp：后端 show_screenshot_overlay 注入 window.__blinkScreenMeta.displays，
-//! 每屏物理几何 + DPI。selCss / window.inner* 是 CSS 像素，混合 DPI 下换算系数不同。
-//! 策略：每屏用各自的 dpr 折算成 overlay CSS 坐标系矩形，point-in-rect 找所在屏。
+//! 多屏混合 DPI 正确 clamp：后端 `show_screenshot_overlay` 注入 `window.__blinkScreenMeta.displays`，
+//! 每屏已用 overlay 窗口实际 DPI 折算成 **overlay CSS 坐标**（单位 CSS 像素）。前端无需再折算，
+//! `displayToCss` 退化为恒等--消除旧实现"每屏各自 dpr"与主流路径"窗口级单一 dpr"的坐标系分裂
+//! （混合 DPI 下会导致工具栏 clamp / hover 预选区错位）。selCss / window.inner* 同为 CSS 像素，直接对齐。
 
 import { ss } from './ss-state.js';
 
 /**
- * 取注入的 displays 列表（每屏物理几何 + DPI）。
+ * 取注入的 displays 列表（每屏 overlay CSS 几何，由后端折算）。
  * 缺失返回空数组，调用方按"无多屏信息"降级到旧的 innerWidth/innerHeight clamp。
  */
 export function getDisplays() {
@@ -16,18 +17,11 @@ export function getDisplays() {
 }
 
 /**
- * 把单块屏的物理几何折算成 overlay CSS 坐标系里的矩形。
- * 单屏环境：dpr 与 window.devicePixelRatio 相同，结果就是 (0,0,innerW,innerH)。
- * 混合 DPI：每屏用各自的 dpr（= dpi/96）折算，结果矩形拼接覆盖整个 overlay。
+ * 后端已注入 overlay CSS 坐标，此处恒等返回。
+ * 保留函数名以维持调用方签名（`findDisplayCssAt` / `positionToolbar` 等不感知）。
  */
 export function displayToCss(d) {
-  const dpr = (d && d.dpi ? d.dpi : 96) / 96;
-  return {
-    x: d.x / dpr,
-    y: d.y / dpr,
-    w: d.w / dpr,
-    h: d.h / dpr,
-  };
+  return { x: d.x, y: d.y, w: d.w, h: d.h };
 }
 
 /**
@@ -45,9 +39,26 @@ export function findDisplayCssAt(cssX, cssY) {
   return { x: 0, y: 0, w: window.innerWidth, h: window.innerHeight };
 }
 
-/** 定位工具栏到选区右下外侧（PixPin 风格）。
+/** 找一块完全包含 rect 的可见屏 CSS 矩形；找不到返回 null。
+ *  供工具栏放置判定"能否完整落在可见屏内"（点命中 findDisplayCssAt 只判中心点，不够）。 */
+export function findDisplayContainingRect(rect) {
+  const displays = getDisplays();
+  for (const d of displays) {
+    const r = displayToCss(d);
+    if (rect.left >= r.x && rect.right <= r.x + r.w
+        && rect.top >= r.y && rect.bottom <= r.y + r.h) {
+      return r;
+    }
+  }
+  return null;
+}
+
+/** 定位工具栏（PixPin 风格）。
  *  若用户已手动拖过工具栏（dataset.userMoved），保留用户位置不重定位。
- *  按"选区所在屏"clamp——副屏左边缘做选区时工具栏不会被推到另一块屏去。 */
+ *  候选顺序（保持"底部"语义）：
+ *  1. 选区下方外部（落可见屏内）-- 旧默认行为
+ *  2. 选区下方内部浮入（外部落不到可见屏，如全屏/跨屏选区、下方是空白区）-- 永不出屏
+ *  候选2必然在选区内（选区本身在可见区），故无需第三兜底。 */
 export function positionToolbar(rect) {
   const { toolbar } = ss;
   toolbar.classList.remove('hidden');
@@ -60,36 +71,44 @@ export function positionToolbar(rect) {
   requestAnimationFrame(() => {
     const tw = toolbar.offsetWidth;
     const th = toolbar.offsetHeight;
-    const mon = findDisplayCssAt(rect.x + rect.w / 2, rect.y + rect.h / 2);
     const MARGIN = 8;
 
+    // 水平：右对齐选区右边缘，clamp 到选区宽度内（选区比工具栏窄则左对齐）
     let left = rect.x + rect.w - tw;
-    if (left + tw > mon.x + mon.w - MARGIN) left = mon.x + mon.w - tw - MARGIN;
-    if (left < mon.x + MARGIN) left = mon.x + MARGIN;
+    if (left < rect.x) left = rect.x;
 
+    // 候选1：选区下方外部（完全落在某块可见屏内）
     let top = rect.y + rect.h + MARGIN;
-    if (top + th > mon.y + mon.h - MARGIN) {
-      top = rect.y - th - MARGIN;
+    if (findDisplayContainingRect({ left, top, right: left + tw, bottom: top + th })) {
+      applyToolbarPos(left, top, false);
+      return;
     }
-    if (top < mon.y + MARGIN) {
-      top = Math.max(mon.y + MARGIN, mon.y + mon.h - th - MARGIN);
-    }
-
-    toolbar.style.left = left + 'px';
-    toolbar.style.top = top + 'px';
-    // 0.15.12：工具栏自动定位后同步 sub-panel 位置（相对 text-main 按钮）
-    const subP = document.getElementById('sub-panel');
-    if (subP && !subP.classList.contains('hidden')) {
-      const textMain = document.getElementById('text-main');
-      if (textMain) {
-        const tmRect = textMain.getBoundingClientRect();
-        subP.style.left = tmRect.left + 'px';
-        subP.style.top = (tmRect.bottom + 4) + 'px';
-      } else {
-        subP.style.left = left + 'px';
-        subP.style.top = (top + th + 4) + 'px';
-      }
-    }
-    console.debug('[screenshot] toolbar 定位', { left, top, tw, th, rect, mon });
+    // 候选2：选区下方内部浮入（外部放不下；保持"底部"语义一致）
+    // 选区本身在可见区，工具栏在选区内即必在可见区，不会出屏
+    top = rect.y + rect.h - th - MARGIN;
+    if (top < rect.y + MARGIN) top = rect.y + MARGIN; // 选区过矮则贴选区顶部，不越过
+    applyToolbarPos(left, top, true);
   });
+}
+
+/** 应用工具栏坐标 + 同步二级面板。floating=true 标记浮入选区内（供 CSS 区分视觉）。 */
+function applyToolbarPos(left, top, floating) {
+  const { toolbar } = ss;
+  toolbar.style.left = left + 'px';
+  toolbar.style.top = top + 'px';
+  toolbar.classList.toggle('toolbar-floating', floating);
+  // 0.15.12：工具栏定位后同步 sub-panel 位置（相对 text-main 按钮）
+  const subP = document.getElementById('sub-panel');
+  if (subP && !subP.classList.contains('hidden')) {
+    const textMain = document.getElementById('text-main');
+    if (textMain) {
+      const tmRect = textMain.getBoundingClientRect();
+      subP.style.left = tmRect.left + 'px';
+      subP.style.top = (tmRect.bottom + 4) + 'px';
+    } else {
+      subP.style.left = left + 'px';
+      subP.style.top = (top + (floating ? 0 : toolbar.offsetHeight) + 4) + 'px';
+    }
+  }
+  console.debug('[screenshot] toolbar 定位', { left, top, tw: toolbar.offsetWidth, th: toolbar.offsetHeight, floating });
 }

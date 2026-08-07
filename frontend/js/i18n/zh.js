@@ -1017,4 +1017,7 @@ export const zh = {
     "hotkey.cheatsheet.clipboard_history": "剪贴板历史",
     "hotkey.cheatsheet.edit": "编辑窗口",
     "hotkey.cheatsheet.sticky": "钉为便签",
+    // ── 0.18.6 命令执行 MVP ──
+    "command.hint": "输入命令，回车在终端执行",
+    "command.error": "执行失败：{message}",
 };

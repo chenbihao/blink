@@ -13,7 +13,7 @@ import { drawSelection, drawFinalSelection } from './ss-draw.js';
 import { findDisplayCssAt } from './ss-display.js';
 import * as annot from './annotation-engine.js';
 import {
-  cssToScreen, formatSelectionInfo, formatColor, magnifierSampleRegion,
+  formatColor, magnifierSampleRegion,
 } from './ss-selection-geometry.js';
 
 export function selectionCursor(handle) {
@@ -109,14 +109,8 @@ export function updateSelectionInteraction(e) {
     ss.selCss = { x: left, y: top, w: right - left, h: bottom - top };
   }
   drawFinalSelection();
-  // 0.15.8 R0：统一用 formatSelectionInfo 显示选区信息
-  const dpr = window.devicePixelRatio || 1;
-  const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
-  const screenPos = cssToScreen(ss.selCss.x, ss.selCss.y, meta, dpr);
-  ss.sizeHint.textContent = formatSelectionInfo(screenPos.x, screenPos.y, ss.selCss.w * dpr, ss.selCss.h * dpr);
-  ss.sizeHint.classList.remove('hidden');
-  ss.sizeHint.style.left = (ss.selCss.x + 4) + 'px';
-  ss.sizeHint.style.top = (ss.selCss.y > 24 ? ss.selCss.y - 22 : ss.selCss.y + 4) + 'px';
+  // sizeHint 由 drawFinalSelection 统一显示（0.18 优化：合并到 drawFinalSelection，
+  // 修复智能选区路径不显示 sizeHint 的问题）
 }
 
 /** @returns {boolean} true 如果事件被消费（调用方应 return） */

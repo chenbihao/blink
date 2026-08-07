@@ -382,6 +382,19 @@ function bindWindowControls() {
   const maxBtn = document.getElementById("titlebar-maximize");
   const closeBtn = document.getElementById("titlebar-close");
 
+  // ESC：隐藏便签管理窗口（与设置页一致）。
+  // 若有颜色选择弹窗打开，先关闭弹窗而不隐藏窗口。
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    const picker = document.querySelector(".color-picker-popup");
+    if (picker) {
+      picker.remove();
+      return;
+    }
+    e.preventDefault();
+    getCurrentWindow()?.hide();
+  });
+
   if (minBtn) {
     minBtn.addEventListener("click", () => {
       getCurrentWindow()?.minimize();

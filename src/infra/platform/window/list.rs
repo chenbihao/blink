@@ -13,7 +13,10 @@
 //! - 跳过空标题窗口（无标题的浮层/overlay，不具可辨识性）
 //! - 跳过系统桌面（标题为 `Program Manager` 的 Progman 窗口）
 //! - 跳过完全在虚拟屏幕之外的窗口
-//! - 跳过自身进程窗口（截图 overlay 自身不该被吸附）
+//!
+//! **自身进程窗口**：不按进程过滤。截图 overlay（`chord-screenshot`）标题为空，
+//! 已被空标题规则过滤；主窗截图时已 cloak+hide，`IsWindowVisible` 为 false。
+//! 其他 Blink 窗口（便签、设置、对话等）有标题且可见时**应可被吸附**。
 //!
 //! **返回顺序**：`EnumWindows` 按 Z-order 从前景到背景枚举，结果数组索引 0 = 最前景窗口。
 //! 前端从索引 0 开始正序遍历，第一个命中即为最前景匹配。
@@ -28,7 +31,6 @@ use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
 };
-use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GWL_EXSTYLE, GetSystemMetrics, GetWindowLongPtrW, GetWindowTextLengthW,
     GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, SM_CXVIRTUALSCREEN,
@@ -148,14 +150,13 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, _lparam: LPARAM) -> BOOL {
         return BOOL(1);
     }
 
-    // ── 自身进程过滤 ──
+    // ── 进程 PID（供进程名读取用，不按进程过滤）──
+    // 截图 overlay 标题为空已被上面的 title_len == 0 过滤；
+    // 主窗截图时已 cloak+hide（IsWindowVisible = false）。
+    // 其他 Blink 窗口（便签/设置/对话等）有标题且可见时应可被吸附。
     let mut pid: u32 = 0;
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
     if pid == 0 {
-        return BOOL(1);
-    }
-    let self_pid = unsafe { GetCurrentProcessId() };
-    if pid == self_pid {
         return BOOL(1);
     }
 

@@ -145,16 +145,41 @@ pub fn screenshot_cancel(app: tauri::AppHandle) {
 ///
 /// `screen_x`/`screen_y` 为选区左上角的**虚拟屏幕物理坐标**，
 /// 让钉图窗口定位到截图原位（"就地贴住"）。
+///
+/// `show_translating`：true 时在 pin 窗口中心显示「翻译中」指示器
+/// （用于「翻译并 pin」流程——先 pin 原图，后台翻译完原地替换）。
 #[tauri::command]
 pub fn screenshot_pin(
     app: tauri::AppHandle,
     png_data: Vec<u8>,
     screen_x: i32,
     screen_y: i32,
+    show_translating: Option<bool>,
 ) -> Result<(), String> {
-    crate::infra::platform::window::show_pin_window(&app, png_data, screen_x, screen_y)?;
+    let show_translating = show_translating.unwrap_or(false);
+    crate::infra::platform::window::show_pin_window(&app, png_data, screen_x, screen_y, show_translating)?;
     finish_screenshot_session(&app);
-    tracing::info!(screen_x, screen_y, "截图已钉到屏幕");
+    tracing::info!(screen_x, screen_y, show_translating, "截图已钉到屏幕");
+    Ok(())
+}
+
+/// 0.18.3：原地刷新钉图窗口的图片（不重定位、不重置缩放）。
+///
+/// 用于「翻译并 pin」流程：先 pin 原图（`screenshot_pin` + `show_translating=true`），
+/// 后台翻译完成后合成含译文的 PNG，调本命令原地替换 pin 窗口的图片。
+///
+/// `show_translating=false` 时同时隐藏 pin 窗口的「翻译中」指示器。
+///
+/// pin 窗口不存在或已 hide 时静默返回 Ok（用户已关 pin，丢弃译文）。
+#[tauri::command]
+pub fn screenshot_pin_refresh(
+    app: tauri::AppHandle,
+    png_data: Vec<u8>,
+    show_translating: Option<bool>,
+) -> Result<(), String> {
+    let show_translating = show_translating.unwrap_or(false);
+    crate::infra::platform::window::refresh_pin_image(&app, png_data, show_translating)?;
+    tracing::info!(show_translating, "钉图已原地刷新");
     Ok(())
 }
 
@@ -579,32 +604,66 @@ pub async fn screenshot_window_list()
         .map_err(|e| format!("spawn_blocking join 失败: {e}"))
 }
 
-/// 0.18.2：列出前台窗口的 UIA 控件提示（截图控件级智能吸附用）。
+/// 0.18.x：截图控件 hints 流式事件 payload。
 ///
-/// 从截图会话的 `session_fg_hwnd()` 取前台窗口 HWND，从 DB 读 `ScreenshotConfig`
-/// 取 depth/deadline/min_size 参数，用 UIA 逐层 BFS 收集控件矩形。
-/// 与 `screenshot_window_list` 完全独立、可并行。
+/// `generation` 由调用方传入，原样回传，前端防过期。
+/// `kind` 区分 batch（一层完成）和 done（全部结束/超时/出错）。
+#[derive(Debug, Clone, serde::Serialize)]
+struct ControlHintsEvent {
+    /// 调用方传入的 generation，原样回传，前端防过期
+    generation: u32,
+    /// "batch" = 一层完成；"done" = 全部结束（正常/超时/出错）
+    kind: &'static str,
+    /// batch 时为当前层 depth（0-based），done 时为实际到达的最大 depth+1
+    depth: usize,
+    /// batch 时为本层新增的 hints（物理坐标），done 时为空
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    hints: Vec<crate::infra::platform::window::ControlHint>,
+    /// done 时携带：总收集数
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total: Option<usize>,
+    /// done 时携带：是否因 deadline 截断
+    #[serde(skip_serializing_if = "Option::is_none")]
+    truncated: Option<bool>,
+}
+
+/// 0.18.x：流式收集控件 hints，每层 emit 一批，结束发 done。
 ///
-/// 返回 `Vec<ControlHint>`，每条含控件矩形（物理像素、虚拟屏幕坐标系）+
-/// 控件类型 ID。前端转 CSS 后做 hit-test，**控件优先于窗口**（吸附到更小的控件）。
+/// 立即返回 `Ok(())`，实际收集在后台 `spawn_blocking` 中进行。
+/// 前端通过监听 `blink://screenshot-control-hints` 事件增量接收 hints。
 ///
-/// `spawn_blocking` 隔离 UIA 同步 COM 调用，不阻塞 tokio runtime。
-/// 异步收集不阻塞 overlay 显示和拖拽——超时只影响 hints 到达时间，不影响用户操作。
+/// `generation` 由前端传入（`ss.controlHintsGen`），每次 emit 原样回带，
+/// 前端回调里校验 `payload.generation !== ss.controlHintsGen` 则丢弃（防过期）。
 #[tauri::command]
-pub async fn screenshot_control_hints(app: tauri::AppHandle)
--> Result<Vec<crate::infra::platform::window::ControlHint>, String> {
+pub async fn screenshot_control_hints(
+    app: tauri::AppHandle,
+    generation: u32,
+) -> Result<(), String> {
     let hwnd = crate::infra::platform::screenshot::session_fg_hwnd();
     let hwnd = match hwnd {
         Some(h) => h,
         None => {
-            tracing::debug!("screenshot_control_hints: session_fg_hwnd 为空，返回空列表");
-            return Ok(Vec::new());
+            // 无前台窗口：直接发 done（空），前端正常收尾
+            let _ = app.emit_to(
+                "chord-screenshot",
+                EventNames::SCREENSHOT_CONTROL_HINTS,
+                &ControlHintsEvent {
+                    generation,
+                    kind: "done",
+                    depth: 0,
+                    hints: vec![],
+                    total: Some(0),
+                    truncated: Some(false),
+                },
+            );
+            return Ok(());
         }
     };
 
     // 从 DB 读截图配置，取控件吸附参数
     let pool = &app.state::<crate::infra::data::DbPools>().config;
-    let cfg = crate::app::config::ConfigStore::get::<crate::app::config::ScreenshotConfig>(pool).await;
+    let cfg =
+        crate::app::config::ConfigStore::get::<crate::app::config::ScreenshotConfig>(pool).await;
     let deadline = std::time::Duration::from_millis(cfg.control_snap_deadline_ms as u64);
     let max_depth = cfg.control_snap_depth as usize;
     let min_size = cfg.control_snap_min_size as i32;
@@ -613,15 +672,49 @@ pub async fn screenshot_control_hints(app: tauri::AppHandle)
         deadline_ms = cfg.control_snap_deadline_ms,
         max_depth,
         min_size,
-        "screenshot_control_hints 开始收集"
+        generation,
+        "screenshot_control_hints 开始流式收集"
     );
 
+    let app_clone = app.clone();
     tokio::task::spawn_blocking(move || {
         let hwnd = windows::Win32::Foundation::HWND(hwnd as _);
-        crate::infra::platform::uia::collect_control_hints_with(hwnd, deadline, max_depth, min_size)
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking join 失败: {e}"))
+        let (hints, truncated) =
+            crate::infra::platform::uia::collect_control_hints_streaming(
+                hwnd,
+                deadline,
+                max_depth,
+                min_size,
+                |batch, depth| {
+                    let _ = app_clone.emit_to(
+                        "chord-screenshot",
+                        EventNames::SCREENSHOT_CONTROL_HINTS,
+                        &ControlHintsEvent {
+                            generation,
+                            kind: "batch",
+                            depth,
+                            hints: batch.to_vec(),
+                            total: None,
+                            truncated: None,
+                        },
+                    );
+                },
+            );
+        // done
+        let _ = app_clone.emit_to(
+            "chord-screenshot",
+            EventNames::SCREENSHOT_CONTROL_HINTS,
+            &ControlHintsEvent {
+                generation,
+                kind: "done",
+                depth: max_depth,
+                hints: vec![],
+                total: Some(hints.len()),
+                truncated: Some(truncated),
+            },
+        );
+    });
+    Ok(())
 }
 
 /// 0.15.7：长截图——设置/清除 overlay 捕获排除（WDA_EXCLUDEFROMCAPTURE）。

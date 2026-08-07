@@ -14,6 +14,7 @@ mod search;
 mod shared;
 mod sticky;
 mod stt;
+mod terminal;
 
 pub use ai::*;
 pub use clipboard::*;
@@ -25,3 +26,4 @@ pub use plugin::*;
 pub use search::*;
 pub use sticky::*;
 pub use stt::*;
+pub use terminal::*;

@@ -91,6 +91,18 @@ export function drawFinalSelection() {
   ctx.lineWidth = 2 * dpr;
   ctx.strokeRect(px, py, pw, ph);
 
+  // size-hint：选区确定后也需显示尺寸+坐标（与拖拽阶段一致）。
+  // 修复智能选区（snap）后 sizeHint 不显示的问题——snap 路径不经过 drawSelection，
+  // 需要在此统一补显。
+  const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+  const screenPos = cssToScreen(selCss.x, selCss.y, meta, dpr);
+  if (ss.sizeHint) {
+    ss.sizeHint.textContent = formatSelectionInfo(screenPos.x, screenPos.y, pw, ph);
+    ss.sizeHint.classList.remove('hidden');
+    ss.sizeHint.style.left = (selCss.x + 4) + 'px';
+    ss.sizeHint.style.top = (selCss.y > 24 ? selCss.y - 22 : selCss.y + 4) + 'px';
+  }
+
   // 选取工具显示八个调整手柄，明确提示选区可移动/缩放。
   if (annot.getTool() === 'select') {
     const hs = 6 * dpr;

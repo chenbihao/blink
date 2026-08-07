@@ -71,4 +71,9 @@ impl EventNames {
     pub const STICKY_TRASHED: &str = "blink://sticky-trashed";
     /// 便签从回收站恢复（0.17.7）。payload: `{ stickyId }`
     pub const STICKY_RESTORED: &str = "blink://sticky-restored";
+
+    // ── 截图（0.18.x）──
+    /// 截图控件吸附 hints 流式推送（0.18.x）。
+    /// payload: `ControlHintsEvent { generation, kind: "batch"|"done", depth, hints, ... }`
+    pub const SCREENSHOT_CONTROL_HINTS: &str = "blink://screenshot-control-hints";
 }

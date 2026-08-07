@@ -202,9 +202,16 @@ export function screenshotCancel() {
   return invoke("screenshot_cancel");
 }
 
-/** 0.11.7-f：钉图——接收前端合成后的 PNG + 选区屏幕坐标，创建钉图窗口。 */
-export function screenshotPin(pngData, screenX, screenY) {
-  return invoke("screenshot_pin", { pngData, screenX, screenY });
+/** 0.11.7-f：钉图——接收前端合成后的 PNG + 选区屏幕坐标，创建钉图窗口。
+ *  0.18.3：showTranslating=true 时在 pin 窗口中心显示「翻译中」指示器。 */
+export function screenshotPin(pngData, screenX, screenY, showTranslating) {
+  return invoke("screenshot_pin", { pngData, screenX, screenY, showTranslating: showTranslating ?? false });
+}
+
+/** 0.18.3：原地刷新钉图窗口的图片（不重定位、不重置缩放）。
+ *  showTranslating=false 时同时隐藏「翻译中」指示器。 */
+export function screenshotPinRefresh(pngData, showTranslating) {
+  return invoke("screenshot_pin_refresh", { pngData, showTranslating: showTranslating ?? false });
 }
 
 /** 0.11.8：钉图窗口一次性设置位置+尺寸（物理像素，含 PIN_PAD）。 */
@@ -232,9 +239,9 @@ export function screenshotWindowList() {
   return invoke("screenshot_window_list");
 }
 
-/** 0.18.2：列出前台窗口的 UIA 控件提示（控件级智能吸附用）。返回 ControlHint 数组。 */
-export function screenshotControlHints() {
-  return invoke("screenshot_control_hints");
+/** 0.18.x：流式收集控件 hints（每层 emit 一批，结束发 done）。 */
+export function screenshotControlHints(generation) {
+  return invoke("screenshot_control_hints", { generation });
 }
 
 /** 0.15.7：设置/清除 overlay 捕获排除（WDA_EXCLUDEFROMCAPTURE）。 */
@@ -285,6 +292,11 @@ export function ocrDiagnose() {
 /** 通过 Win32 ShellExecuteW 打开 URL / 协议（比 window.open 更可靠，支持 ms-settings: 等）。 */
 export function openUrl(url) {
   return invoke("open_url", { url });
+}
+
+/** 0.18.6：在外部终端中执行命令（wt.exe 优先，cmd.exe fallback）。 */
+export function runInTerminal(command) {
+  return invoke("run_in_terminal", { command });
 }
 
 /**

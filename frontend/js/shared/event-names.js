@@ -58,4 +58,8 @@ export const EVENTS = Object.freeze({
     STICKY_CONTENT_CHANGED: 'blink://sticky-content-changed',
   STICKY_TRASHED: 'blink://sticky-trashed',
   STICKY_RESTORED: 'blink://sticky-restored',
+
+  // ── 截图（0.18.x）──
+  /** 截图控件吸附 hints 流式推送 */
+  SCREENSHOT_CONTROL_HINTS: 'blink://screenshot-control-hints',
 });

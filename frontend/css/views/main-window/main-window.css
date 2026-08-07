@@ -229,3 +229,23 @@ body.voice-error #ghost-overlay .ghost-chord {
   color: var(--text-dim);
   white-space: nowrap;
 }
+
+/* ── 0.18.6 命令模式 hint ─────────────────────────────────────────────── */
+/* `> ` 前缀进入命令模式后，结果区显示一行 hint 文字（非结果项）。 */
+.command-hint {
+  padding: var(--space-sm) var(--space-md);
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+  opacity: 0.7;
+  white-space: nowrap;
+  -webkit-app-region: no-drag;
+}
+
+.command-hint.hidden {
+  display: none;
+}
+
+.command-hint.command-error {
+  color: var(--accent);
+  opacity: 1;
+}

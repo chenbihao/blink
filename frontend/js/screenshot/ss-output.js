@@ -123,6 +123,9 @@ export function compositeSelection(callback) {
   return promise;
 }
 
+/** 0.18.3：导出合成函数，供「翻译并 pin」后台合成译文 PNG 用。 */
+export { compositeSelectionBytes };
+
 /** 将 ImageData 编码为后端输出接口统一接收的 PNG 字节。 */
 export async function encodeImageDataPng(imageData) {
   if (!imageData) return null;
@@ -134,11 +137,12 @@ export async function encodeImageDataPng(imageData) {
   return blob ? new Uint8Array(await blob.arrayBuffer()) : null;
 }
 
-/** 统一分发已经编码好的截图输出，供普通截图和长截图复用。 */
-export async function outputScreenshotPng(action, pngBytes, screenX = 0, screenY = 0) {
+/** 统一分发已经编码好的截图输出，供普通截图和长截图复用。
+ *  0.18.3：pin 动作支持 showTranslating 参数（控制 pin 窗口「翻译中」指示器）。 */
+export async function outputScreenshotPng(action, pngBytes, screenX = 0, screenY = 0, showTranslating = false) {
   switch (action) {
     case 'pin':
-      return screenshotPin(pngBytes, screenX, screenY);
+      return screenshotPin(pngBytes, screenX, screenY, showTranslating);
     case 'save':
       return screenshotSave(pngBytes, null);
     case 'copy':

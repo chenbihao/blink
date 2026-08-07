@@ -21,6 +21,11 @@
     <div id="container">
       <img id="pin-img" src="" alt="钉图" draggable="false" />
       <div id="zoom-level">100%</div>
+      <!-- 0.18.3：翻译中指示器（不随 img transform: scale 缩放，独立固定视觉大小） -->
+      <div id="pin-translating-indicator" class="hidden">
+        <div class="pin-spinner"></div>
+        <span class="pin-translating-text">翻译中</span>
+      </div>
     </div>
 
     <!-- 右键菜单（0.11.9-f：加 OCR / 翻译 项） -->
@@ -86,13 +91,43 @@ import { normalizeError } from "./js/shared/tauri.js";
 
       /** 只更新 img 的 transform（GPU 合成层，丝滑，不动窗口）。
        *  同时反向补偿 box-shadow：box-shadow 在 transform 前渲染，
-       *  会被 scale 放大，所以除以 scale 保持发光大小恒定。 */
+       *  会被 scale 放大，所以除以 scale 保持发光大小恒定。
+       *  0.18.3：同时更新 --pin-cx / --pin-cy 驱动翻译中指示器位置。 */
       function applyTransformOnly() {
         img.style.transform = `scale(${scale})`;
         const s = scale;
         img.style.boxShadow =
           `0 0 0 ${1/s}px rgba(74, 158, 255, 0.55), ` +
           `0 0 ${14/s}px ${3/s}px rgba(74, 158, 255, 0.28)`;
+        updatePinIndicatorPosition();
+      }
+
+      /** 0.18.3：更新翻译中指示器的位置到图片视觉中心。 */
+      function updatePinIndicatorPosition() {
+        const dpr = window.devicePixelRatio || 1;
+        const cx = (PAD + physW * scale / 2) / dpr;
+        const cy = (PAD + physH * scale / 2) / dpr;
+        document.documentElement.style.setProperty('--pin-cx', cx + 'px');
+        document.documentElement.style.setProperty('--pin-cy', cy + 'px');
+      }
+
+      /** 0.18.3：显示翻译中指示器。 */
+      function showTranslatingIndicator() {
+        const el = document.getElementById('pin-translating-indicator');
+        if (el) el.classList.remove('hidden');
+        updatePinIndicatorPosition();
+        // 禁用右键菜单「翻译文字」项，避免与后台翻译重复请求
+        const ctxTranslate = document.getElementById('ctx-translate');
+        if (ctxTranslate) ctxTranslate.disabled = true;
+      }
+
+      /** 0.18.3：隐藏翻译中指示器。 */
+      function hideTranslatingIndicator() {
+        const el = document.getElementById('pin-translating-indicator');
+        if (el) el.classList.add('hidden');
+        // 恢复右键菜单「翻译文字」项
+        const ctxTranslate = document.getElementById('ctx-translate');
+        if (ctxTranslate) ctxTranslate.disabled = false;
       }
 
       /** resize 窗口到当前 scale 对应尺寸（离散调用，不在每次 wheel 触发）。
@@ -146,7 +181,8 @@ import { normalizeError } from "./js/shared/tauri.js";
   }
 
       // 后端复用窗口时通过 eval 调用此函数重置状态
-      window.__blinkResetPin = function(dataUrl, pngW, pngH, screenX, screenY) {
+      // 0.18.3：增加 showTranslating 参数控制翻译中指示器
+      window.__blinkResetPin = function(dataUrl, pngW, pngH, screenX, screenY, showTranslating) {
         physW = pngW;
         physH = pngH;
         scale = 1;
@@ -172,6 +208,38 @@ import { normalizeError } from "./js/shared/tauri.js";
         const winX = Math.round(imgScreenX - PAD);
         const winY = Math.round(imgScreenY - PAD);
         screenshotPinTransform(winX, winY, pngW + 2 * PAD, pngH + 2 * PAD).catch(() => {});
+        // 0.18.3：翻译中指示器控制
+        if (showTranslating) {
+          showTranslatingIndicator();
+        } else {
+          hideTranslatingIndicator();
+        }
+        updatePinIndicatorPosition();
+      };
+
+      // 0.18.3：原地刷新 pin 图片（不重定位、不重置缩放）
+      // 后台翻译完成后调此函数只换 img.src + 隐藏指示器
+      window.__blinkRefreshPinImage = function(dataUrl, w, h, showTranslating) {
+        // 尺寸与当前一致时：只换 img.src，不动 scale/winScale/imgScreenX/imgScreenY
+        if (w === physW && h === physH) {
+          img.src = dataUrl;
+        } else {
+          // 尺寸不一致：走重置路径（会丢失缩放，记 warning）
+          console.warn('[pin] 译文 PNG 尺寸与原图不一致，重置缩放', { old: { w: physW, h: physH }, new: { w, h } });
+          physW = w;
+          physH = h;
+          const dpr = window.devicePixelRatio || 1;
+          img.style.width = (w / dpr) + 'px';
+          img.style.height = (h / dpr) + 'px';
+          img.src = dataUrl;
+          updatePinIndicatorPosition();
+        }
+        // showTranslating===false 时隐藏指示器
+        if (!showTranslating) {
+          hideTranslatingIndicator();
+        } else {
+          showTranslatingIndicator();
+        }
       };
 
       img.addEventListener('load', () => {

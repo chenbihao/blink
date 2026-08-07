@@ -11,7 +11,8 @@
 //! COM 公寓用 MTA（UIA 官方建议）。所有函数在后台线程调用（UIA 是跨进程 COM 调用，单次几十 ms）。
 
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
 };
@@ -132,6 +133,31 @@ pub fn is_focused_on_text_input() -> bool {
 }
 
 // ── 0.18.2 控件级智能吸附 ──────────────────────────────────────────────────
+
+/// 读取窗口的 DWM 扩展边框（物理像素，虚拟屏幕坐标系）。
+///
+/// 与 `list.rs` 中 `enumerate_pickable_windows` 使用相同的 API，确保坐标系一致。
+/// 用于控件矩形 clamp——Chromium/Electron 的 UIA 树会暴露网页 DOM 元素，
+/// 这些元素的 BoundingRectangle 可能超出窗口可视区域（滚动内容、整页文档等），
+/// 需要约束到窗口边框内。
+///
+/// 返回 None 表示 DWM 不可用，调用方应跳过 clamp（降级为不裁剪）。
+fn get_window_dwm_rect(hwnd: HWND) -> Option<RECT> {
+    let mut rect: RECT = unsafe { std::mem::zeroed() };
+    let hr = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut rect as *mut RECT as *mut _,
+            std::mem::size_of::<RECT>() as u32,
+        )
+    };
+    if hr.is_ok() {
+        Some(rect)
+    } else {
+        None
+    }
+}
 
 /// 截图控件吸附提示——一个 UIA 控件的矩形 + 类型信息。
 ///
@@ -256,6 +282,13 @@ pub fn collect_control_hints_with(
         }
     };
 
+    // 读取窗口 DWM 扩展边框，用于 clamp 控件矩形到窗口可视区域内。
+    // Chromium/Electron 的 UIA DOM 元素可能返回超出窗口的矩形（滚动内容等）。
+    let win_rect = get_window_dwm_rect(hwnd);
+    if win_rect.is_none() {
+        tracing::debug!("collect_control_hints: DWM 扩展边框不可用，跳过 clamp");
+    }
+
     let deadline_instant = started + deadline;
     let hints = bfs_collect(
         root,
@@ -285,7 +318,15 @@ pub fn collect_control_hints_with(
             }
             true
         },
-        extract_uia_hint,
+        // 提取 hint 后 clamp 到窗口边框内：Chromium DOM 元素可能超出窗口
+        |elem| {
+            let hint = extract_uia_hint(elem)?;
+            if let Some(wr) = win_rect {
+                clamp_hint_to_rect(hint, wr)
+            } else {
+                Some(hint)
+            }
+        },
     );
 
     let elapsed = started.elapsed();
@@ -306,21 +347,20 @@ pub fn collect_control_hints_with(
     hints
 }
 
-/// BFS 遍历收集控件提示——纯逻辑，与 UIA COM 解耦（可单测）。
+/// 带 `on_batch` 回调的 BFS（流式推送用）。
 ///
-/// - `root`：根元素（**不**产生 hint，它是窗口本身，已由窗口级吸附覆盖）
-/// - `max_depth`：往下遍历几层子元素（不含 root）
-/// - `is_expired`：超时检查闭包，在每层/每元素前调用
-/// - `fetch_children`：获取元素的直接子元素列表
-/// - `should_expand`：判断元素是否应展开子树（false=收集 hint 但不展开子元素）
-/// - `extract_hint`：从元素提取 `ControlHint`，返回 `None` 表示跳过（如零尺寸）
-fn bfs_collect<E>(
+/// 每完成一层，`on_batch(&hints[batch_start..], depth)` 被调用一次，
+/// 传入该层新增的 hints 切片和层号（0-based）。
+///
+/// 其余参数同 `bfs_collect`。
+fn bfs_collect_with_batch<E>(
     root: E,
     max_depth: usize,
     is_expired: impl Fn() -> bool,
     fetch_children: impl Fn(&E) -> Vec<E>,
     should_expand: impl Fn(&E) -> bool,
     extract_hint: impl Fn(&E) -> Option<ControlHint>,
+    mut on_batch: impl FnMut(&[ControlHint], usize),
 ) -> Vec<ControlHint>
 where
     E: Clone,
@@ -333,6 +373,8 @@ where
             tracing::trace!(depth, "bfs 截断（deadline 到达）");
             break;
         }
+
+        let batch_start = hints.len();
 
         tracing::trace!(
             depth,
@@ -378,6 +420,8 @@ where
             "bfs 层完成"
         );
 
+        on_batch(&hints[batch_start..], depth);
+
         current_layer = next_layer;
         if current_layer.is_empty() {
             break;
@@ -385,6 +429,135 @@ where
     }
 
     hints
+}
+
+/// 旧签名保留（6 个测试 + 向后兼容），内部转发，on_batch = noop。
+fn bfs_collect<E>(
+    root: E,
+    max_depth: usize,
+    is_expired: impl Fn() -> bool,
+    fetch_children: impl Fn(&E) -> Vec<E>,
+    should_expand: impl Fn(&E) -> bool,
+    extract_hint: impl Fn(&E) -> Option<ControlHint>,
+) -> Vec<ControlHint>
+where
+    E: Clone,
+{
+    bfs_collect_with_batch(
+        root,
+        max_depth,
+        is_expired,
+        fetch_children,
+        should_expand,
+        extract_hint,
+        |_, _| {},
+    )
+}
+
+/// 流式版 `collect_control_hints_with`：每层完成后调 `on_batch`。
+///
+/// `on_batch(batch_hints, depth)` 收到的是**该层新增**的 hints（已 clamp）。
+/// 调用方负责 emit 给前端。
+///
+/// 返回 `(全部 hints, 是否因 deadline 截断)`。
+/// 不改动现有 `collect_control_hints_with` 签名（旧路径可能还有调用/测试）。
+pub fn collect_control_hints_streaming<F>(
+    hwnd: HWND,
+    deadline: Duration,
+    max_depth: usize,
+    min_size: i32,
+    mut on_batch: F,
+) -> (Vec<ControlHint>, bool)
+where
+    F: FnMut(&[ControlHint], usize),
+{
+    let started = Instant::now();
+    let _com = ComGuard::init_mta();
+    let automation = match create_automation() {
+        Some(a) => a,
+        None => {
+            tracing::debug!("collect_control_hints_streaming: create_automation 失败");
+            return (Vec::new(), false);
+        }
+    };
+
+    let root = match unsafe { automation.ElementFromHandle(hwnd) } {
+        Ok(elem) => elem,
+        Err(e) => {
+            tracing::debug!(error = %e, "collect_control_hints_streaming: ElementFromHandle 失败");
+            return (Vec::new(), false);
+        }
+    };
+
+    let win_rect = get_window_dwm_rect(hwnd);
+    if win_rect.is_none() {
+        tracing::debug!("collect_control_hints_streaming: DWM 扩展边框不可用，跳过 clamp");
+    }
+
+    let deadline_instant = started + deadline;
+    let truncated = std::cell::Cell::new(false);
+    let hints = bfs_collect_with_batch(
+        root,
+        max_depth,
+        || {
+            let expired = Instant::now() >= deadline_instant;
+            if expired {
+                truncated.set(true);
+            }
+            expired
+        },
+        |elem| fetch_uia_children(&automation, elem),
+        |elem| {
+            let ct = unsafe { elem.CurrentControlType() }
+                .map(|t| t.0)
+                .unwrap_or(0);
+            if is_dead_end_control_type(ct) {
+                tracing::trace!(control_type = ct, "跳过展开（死端控件类型）");
+                return false;
+            }
+            if min_size > 0 {
+                if let Ok(rect) = unsafe { elem.CurrentBoundingRectangle() } {
+                    let w = rect.right - rect.left;
+                    let h = rect.bottom - rect.top;
+                    if w < min_size || h < min_size {
+                        tracing::trace!(
+                            w, h, min_size,
+                            "跳过展开（控件尺寸低于阈值）"
+                        );
+                        return false;
+                    }
+                }
+            }
+            true
+        },
+        |elem| {
+            let hint = extract_uia_hint(elem)?;
+            if let Some(wr) = win_rect {
+                clamp_hint_to_rect(hint, wr)
+            } else {
+                Some(hint)
+            }
+        },
+        |batch, depth| on_batch(batch, depth),
+    );
+
+    let elapsed = started.elapsed();
+    tracing::debug!(
+        hints_count = hints.len(),
+        elapsed_ms = elapsed.as_millis() as u64,
+        max_depth,
+        min_size,
+        truncated = truncated.get(),
+        "collect_control_hints_streaming 完成"
+    );
+    if elapsed >= deadline {
+        tracing::warn!(
+            elapsed_ms = elapsed.as_millis() as u64,
+            deadline_ms = deadline.as_millis() as u64,
+            "collect_control_hints_streaming 超时降级（部分结果）"
+        );
+    }
+    (hints, truncated.get())
 }
 
 /// UIA `FindAll(TreeScope_Children, TrueCondition)` 获取直接子元素。
@@ -456,6 +629,31 @@ fn extract_uia_hint(elem: &IUIAutomationElement) -> Option<ControlHint> {
         control_type,
         name,
     })
+}
+
+/// 将控件矩形 clamp 到窗口边框内。
+///
+/// Chromium/Electron 的 UIA DOM 元素可能返回超出窗口可视区域的矩形
+///（滚动内容、整页文档高度等）。本方法将矩形与窗口边框求交：
+/// - 部分超出 → 裁剪到窗口内
+/// - 完全超出 → 返回 None（该控件不可见，不应作为吸附提示）
+///
+/// 返回 `None` 表示裁剪后面积为零或负值，该 hint 应被丢弃。
+fn clamp_hint_to_rect(mut hint: ControlHint, win: RECT) -> Option<ControlHint> {
+    let left = hint.x.max(win.left);
+    let top = hint.y.max(win.top);
+    let right = (hint.x + hint.w).min(win.right);
+    let bottom = (hint.y + hint.h).min(win.bottom);
+    let w = right - left;
+    let h = bottom - top;
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    hint.x = left;
+    hint.y = top;
+    hint.w = w;
+    hint.h = h;
+    Some(hint)
 }
 
 #[cfg(test)]
@@ -684,5 +882,176 @@ mod tests {
             4,
             "id=1 不展开，其子(id=2,3)不被遍历，总计 4 个 hint"
         );
+    }
+
+    // ── clamp_hint_to_rect 单测 ──────────────────────────────────
+
+    fn make_hint(x: i32, y: i32, w: i32, h: i32) -> ControlHint {
+        ControlHint {
+            x,
+            y,
+            w,
+            h,
+            control_type: 50000,
+            name: None,
+        }
+    }
+
+    fn make_rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+        RECT {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    #[test]
+    fn clamp_hint_fully_inside_unchanged() {
+        // 控件完全在窗口内 → 矩形不变
+        let hint = make_hint(100, 100, 200, 150);
+        let win = make_rect(0, 0, 1920, 1080);
+        let clamped = clamp_hint_to_rect(hint, win).unwrap();
+        assert_eq!(clamped.x, 100);
+        assert_eq!(clamped.y, 100);
+        assert_eq!(clamped.w, 200);
+        assert_eq!(clamped.h, 150);
+    }
+
+    #[test]
+    fn clamp_hint_partially_outside_right_bottom() {
+        // 控件右下角超出窗口 → 裁剪到窗口边界
+        let hint = make_hint(1800, 1000, 300, 200);
+        let win = make_rect(0, 0, 1920, 1080);
+        let clamped = clamp_hint_to_rect(hint, win).unwrap();
+        assert_eq!(clamped.x, 1800);
+        assert_eq!(clamped.y, 1000);
+        assert_eq!(clamped.w, 120); // 1920 - 1800
+        assert_eq!(clamped.h, 80);  // 1080 - 1000
+    }
+
+    #[test]
+    fn clamp_hint_partially_outside_left_top() {
+        // 控件左上角超出窗口（负坐标） → 裁剪到窗口边界
+        let hint = make_hint(-50, -30, 200, 150);
+        let win = make_rect(0, 0, 1920, 1080);
+        let clamped = clamp_hint_to_rect(hint, win).unwrap();
+        assert_eq!(clamped.x, 0);
+        assert_eq!(clamped.y, 0);
+        assert_eq!(clamped.w, 150); // 200 - 50
+        assert_eq!(clamped.h, 120); // 150 - 30
+    }
+
+    #[test]
+    fn clamp_hint_completely_outside_returns_none() {
+        // 控件完全在窗口外 → 返回 None
+        let hint = make_hint(2000, 2000, 100, 100);
+        let win = make_rect(0, 0, 1920, 1080);
+        assert!(clamp_hint_to_rect(hint, win).is_none());
+    }
+
+    #[test]
+    fn clamp_hint_completely_outside_negative_returns_none() {
+        // 控件完全在窗口左上方（负坐标区域） → 返回 None
+        let hint = make_hint(-200, -200, 100, 100);
+        let win = make_rect(0, 0, 1920, 1080);
+        assert!(clamp_hint_to_rect(hint, win).is_none());
+    }
+
+    #[test]
+    fn clamp_hint_chromium_dom_scenario() {
+        // 模拟 Chromium DOM Document 元素：矩形高度远超窗口
+        //（网页内容总高度 5000px，但窗口只有 1080px 高）
+        let hint = make_hint(0, 0, 1920, 5000);
+        let win = make_rect(0, 0, 1920, 1080);
+        let clamped = clamp_hint_to_rect(hint, win).unwrap();
+        assert_eq!(clamped.x, 0);
+        assert_eq!(clamped.y, 0);
+        assert_eq!(clamped.w, 1920);
+        assert_eq!(clamped.h, 1080, "DOM Document 应被裁剪到窗口高度");
+    }
+
+    #[test]
+    fn clamp_hint_edge_touching_returns_none() {
+        // 控件恰好贴在窗口边界外侧（右边界 = 窗口左边界）
+        let hint = make_hint(1920, 0, 100, 100);
+        let win = make_rect(0, 0, 1920, 1080);
+        assert!(clamp_hint_to_rect(hint, win).is_none());
+    }
+
+    #[test]
+    fn bfs_with_batch_calls_on_batch_per_layer() {
+        // make_tree(3, 2)：root(id=0) → [id=1, id=8] → [id=2,5,9,12] → [id=3,4,6,7,10,11,13,14]
+        let nodes = make_tree(3, 2);
+        let nodes_ref = &nodes;
+        let root = MockElem { id: 0 };
+
+        let mut calls = Vec::new();
+        let hints = bfs_collect_with_batch(
+            root,
+            3, // max_depth=3
+            || false,
+            |e| {
+                nodes_ref
+                    .iter()
+                    .find(|(id, _)| *id == e.id)
+                    .map(|(_, children)| children.clone())
+                    .unwrap_or_default()
+            },
+            |_| true, // expand all
+            |e| {
+                Some(ControlHint {
+                    x: 0,
+                    y: 0,
+                    w: 10,
+                    h: 10,
+                    control_type: 50000,
+                    name: Some(format!("e{}", e.id)),
+                })
+            },
+            |batch, depth| calls.push((depth, batch.len())),
+        );
+
+        // 3 层各调一次 on_batch
+        assert_eq!(calls.len(), 3, "3 层各调一次 on_batch");
+        // depth 0: root 的 2 个子 → batch 2
+        assert_eq!(calls[0], (0, 2));
+        // depth 1: 4 个子 → batch 4
+        assert_eq!(calls[1], (1, 4));
+        // depth 2: 8 个子 → batch 8
+        assert_eq!(calls[2], (2, 8));
+        // 总计 2+4+8=14
+        assert_eq!(hints.len(), 14);
+    }
+
+    #[test]
+    fn bfs_with_clamp_filters_out_of_bounds_hints() {
+        // 验证 BFS + clamp 集成：3 个子元素，其中 1 个完全在窗口外
+        let children = vec![MockElem { id: 1 }, MockElem { id: 2 }, MockElem { id: 3 }];
+        let root = MockElem { id: 0 };
+        let win = make_rect(0, 0, 1000, 1000);
+
+        let hints = bfs_collect(
+            root,
+            1,
+            || false,
+            |_| children.clone(),
+            |_| true,
+            |elem| {
+                let hint = match elem.id {
+                    1 => make_hint(100, 100, 200, 200),      // 在窗口内
+                    2 => make_hint(1100, 100, 200, 200),     // 完全在窗口外
+                    3 => make_hint(900, 900, 200, 200),       // 部分超出
+                    _ => return None,
+                };
+                clamp_hint_to_rect(hint, win)
+            },
+        );
+
+        assert_eq!(hints.len(), 2, "id=2 完全在窗口外应被过滤");
+        // id=3 部分超出，裁剪后应为 (900, 900, 100, 100)
+        let partial = hints.iter().find(|h| h.x == 900).unwrap();
+        assert_eq!(partial.w, 100);
+        assert_eq!(partial.h, 100);
     }
 }

@@ -17,12 +17,16 @@
 import { ss } from './ss-state.js';
 import { screenshotWindowList } from '../shared/api.js';
 import { clampRectToCss, rectScreenToCss, pointInRect } from './ss-selection-geometry.js';
+import { findDisplayCssAt } from './ss-display.js';
 
 /** 缓存的可吸附窗口列表（CSS 坐标） */
 let pickableWindows = [];
 
 /** 当前悬停的窗口索引（-1 = 无） */
 let hoveredIndex = -1;
+
+/** 当前桌面（全屏）预选区矩形（CSS 坐标）。鼠标在桌面/无窗口区域时激活。 */
+let desktopHintRect = null;
 
 /** #window-hint DOM 元素（只显示虚线边框，无蓝色背景填充） */
 let hintEl = null;
@@ -93,6 +97,7 @@ export function normalizePickableWindows(list, meta, dpr, viewportWidth, viewpor
 export function clearPickableWindows() {
   pickableWindows = [];
   hoveredIndex = -1;
+  desktopHintRect = null;
   ss.windowListGen++;
   // 立即清除，不走淡出过渡（overlay 正在关闭）
   if (hintHideTimer) {
@@ -112,17 +117,19 @@ export function clearPickableWindows() {
  * 在 mousemove 中调用：hit-test 鼠标是否在某窗口上。
  * 只在选区拖拽阶段（!isAnnotating）生效。
  *
+ * 鼠标在桌面/无窗口区域时，回退为全屏（当前显示器）预选区提示，
+ * 单击可吸附整屏。
+ *
  * @param {number} cssX - 鼠标 CSS X
  * @param {number} cssY - 鼠标 CSS Y
  * @returns {boolean} true = 当前悬停在某窗口上（应显示虚线框）
  */
 export function updateWindowHover(cssX, cssY) {
-  if (pickableWindows.length === 0) return false;
-
   // 选区已确定时不吸附（标注模式）
   if (ss.isAnnotating) {
-    if (hoveredIndex >= 0) {
+    if (hoveredIndex >= 0 || desktopHintRect) {
       hoveredIndex = -1;
+      desktopHintRect = null;
       hideWindowHint();
     }
     return false;
@@ -139,30 +146,50 @@ export function updateWindowHover(cssX, cssY) {
     }
   }
 
-  if (found !== hoveredIndex) {
-    hoveredIndex = found;
-    if (found >= 0) {
+  if (found >= 0) {
+    // 命中窗口：显示窗口虚线框，清除桌面预选区
+    if (found !== hoveredIndex || desktopHintRect) {
+      hoveredIndex = found;
+      desktopHintRect = null;
       showWindowHint(pickableWindows[found]);
-    } else {
-      hideWindowHint();
     }
+    return true;
   }
-  return found >= 0;
+
+  // 未命中任何窗口：回退为全屏（当前显示器）预选区
+  const displayRect = findDisplayCssAt(cssX, cssY);
+  if (!desktopHintRect ||
+      desktopHintRect.x !== displayRect.x ||
+      desktopHintRect.y !== displayRect.y ||
+      desktopHintRect.w !== displayRect.w ||
+      desktopHintRect.h !== displayRect.h) {
+    hoveredIndex = -1;
+    desktopHintRect = { ...displayRect };
+    showWindowHint(desktopHintRect);
+  }
+  return false;
 }
 
 /** 获取当前悬停的窗口矩形（CSS 坐标）。
- * 单击时调此函数获取吸附目标；返回 null 表示无悬停。 */
+ * 单击时调此函数获取吸附目标；返回 null 表示无悬停。
+ * 桌面预选区激活时返回全屏矩形（无 hwnd）。 */
 export function getHoveredWindowRect() {
-  if (hoveredIndex < 0) return null;
-  const w = pickableWindows[hoveredIndex];
-  return { x: w.x, y: w.y, w: w.w, h: w.h, hwnd: w.hwnd };
+  if (hoveredIndex >= 0) {
+    const w = pickableWindows[hoveredIndex];
+    return { x: w.x, y: w.y, w: w.w, h: w.h, hwnd: w.hwnd };
+  }
+  if (desktopHintRect) {
+    return { ...desktopHintRect };
+  }
+  return null;
 }
 
 /** 0.15.8 R2：只清除 hover 状态（隐藏虚线框），不清除窗口列表。
  * 拖动开始或进入标注模式时调用。 */
 export function clearHover() {
-  if (hoveredIndex >= 0) {
+  if (hoveredIndex >= 0 || desktopHintRect) {
     hoveredIndex = -1;
+    desktopHintRect = null;
     hideWindowHint();
   }
 }

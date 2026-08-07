@@ -8,6 +8,7 @@ import * as search from "./search.js";
 import * as chord from "./chord.js";
 import * as ghost from "./ghost.js";
 import * as aiMode from "./ai-mode.js";
+import * as cmdMode from "./command-mode.js";
 import { clearAlt, startAltPoll, stopAltPoll, recheckAlt } from "./keyboard.js";
 import { applyThemeFromConfig, applyGlassOpacityFromConfig } from "../shared/theme.js";
 import { applyI18nFromConfig, t } from "../i18n/index.js";
@@ -27,6 +28,7 @@ export function init() {
     document.body.classList.remove("voice-active");
     search.reset(); // 作废在途搜索请求
     results.clear();
+    cmdMode.reset(); // 0.18.6: 复位命令模式
     // 0.11.10：不再在 shown 时 clearAlt——Alt 逻辑态由 hook 层过滤 injected 事件驱动，
     // 用户真松开 Alt 会收到真实 keyup，无需业务层兜底清。冷启动按住 Alt 呼窗的场景下，
     // 之前的 clearAlt 反而会先把 chord-visible/chord-mode 关掉，靠 recheckAlt 补回来，
@@ -60,6 +62,7 @@ export function init() {
     search.reset();
     results.clear();
     clearAlt();
+    cmdMode.reset(); // 0.18.6: 复位命令模式
   });
 
   // 配置变更即时响应（设置页切换主题/语言等，无需关闭再打开主窗口）

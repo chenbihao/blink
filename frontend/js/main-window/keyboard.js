@@ -8,6 +8,7 @@ import * as ghost from "./ghost.js";
 import * as chord from "./chord.js";
 import * as autosuggestConfig from "./autosuggest-config.js";
 import * as aiMode from "./ai-mode.js";
+import * as cmdMode from "./command-mode.js";
 import { queryEl, aiQueryEl, appEl } from "./dom.js";
 
 /** 绑定全部键盘监听 + 滚轮翻页。 */
@@ -25,6 +26,8 @@ export function init() {
   appEl.addEventListener("wheel", (e) => {
     // 0.18.0: AI 模式放行默认滚动（让 #ai-display 可滚），搜索模式仍 preventDefault + 翻页
     if (aiMode.isActive()) return;
+    // 0.18.6: 命令模式无结果可翻页，放行默认行为
+    if (cmdMode.isActive()) return;
     e.preventDefault(); // 阻止默认滚动（列表本来就不滚动）
     if (!results.hasItems()) return;
     if (e.deltaY < 0) {
@@ -47,6 +50,8 @@ export function init() {
 function onAutosuggestAccept(e) {
   // AiMode 下抑制 Tab Ghost 接受
   if (aiMode.isActive()) return;
+  // 0.18.6: 命令模式下抑制 Tab Ghost 接受
+  if (cmdMode.isActive()) return;
   // IME 组字期间放行——部分中日韩输入法用 Tab 切候选词，不能被 ghost 吞掉。
   // `isComposing` 是现代 DOM 标准，`keyCode === 229` 是老浏览器兜底。
   if (e.isComposing || e.keyCode === 229) return;
@@ -62,6 +67,15 @@ function onAutosuggestAccept(e) {
 // ── 导航 / 激活 ───────────────────────────────────────────────────────────────
 
 function onNavigation(e) {
+  // 0.18.6: 命令模式 — 只处理 Enter（执行命令），其余导航全部抑制
+  if (cmdMode.isActive()) {
+    if (e.key === "Enter" && !e.isComposing) {
+      e.preventDefault();
+      cmdMode.execute();
+    }
+    return;
+  }
+
   // 0.17.6: AiMode 下 Enter 发送追问（或确认卡片），不触发结果导航
   if (aiMode.isActive()) {
     if (e.key === "Enter" && !e.isComposing) {

@@ -1016,4 +1016,7 @@ export const en = {
     "hotkey.cheatsheet.clipboard_history": "Clipboard history",
     "hotkey.cheatsheet.edit": "Edit Window",
     "hotkey.cheatsheet.sticky": "Sticky note",
+    // ── 0.18.6 Command execution MVP ──
+    "command.hint": "Type a command, press Enter to run in terminal",
+    "command.error": "Execution failed: {message}",
 };

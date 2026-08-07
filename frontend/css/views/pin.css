@@ -62,6 +62,53 @@ html, body {
   opacity: 0.5;
 }
 
+/* ── 0.18.3：翻译中指示器 ──────────────────────────────── */
+/* 放在 container 层，不随 img transform: scale 缩放，独立固定视觉大小。
+   位置由 --pin-cx / --pin-cy 驱动（JS 在 applyTransformOnly / __blinkResetPin 里更新）。 */
+#pin-translating-indicator {
+  position: absolute;
+  left: var(--pin-cx, 50%);
+  top: var(--pin-cy, 50%);
+  transform: translate(-50%, -50%);
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 20px;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: var(--radius-sm);
+  pointer-events: none;
+  backdrop-filter: blur(4px);
+}
+
+#pin-translating-indicator.hidden {
+  display: none;
+}
+
+.pin-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid rgba(255, 255, 255, 0.2);
+  border-top-color: #4a9eff;
+  border-radius: 50%;
+  animation: pin-spin 0.8s linear infinite;
+}
+
+@keyframes pin-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.pin-translating-text {
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 12px;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-style: normal; /* 铁则：中文不斜体 */
+  white-space: nowrap;
+}
+
 /* ── 右键菜单 ──────────────────────────────────────────── */
 
 #ctx-menu {
@@ -93,6 +140,16 @@ html, body {
 #ctx-menu button:hover {
   background: rgba(255, 255, 255, 0.1);
   color: #fff;
+}
+
+#ctx-menu button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+#ctx-menu button:disabled:hover {
+  background: transparent;
+  color: #ddd;
 }
 
 /* 0.11.9-f：右键菜单分隔线 */

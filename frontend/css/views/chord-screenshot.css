@@ -79,7 +79,7 @@ html, body {
 
 #size-hint {
   position: fixed;
-  background: rgba(0, 0, 0, 0.75);
+  background: rgba(0, 0, 0, 0.55);
   color: #fff;
   font-size: var(--text-base);
   font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
@@ -160,6 +160,12 @@ html, body {
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
   z-index: var(--z-dropdown);
   font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+/* 浮入选区内模式（选区下方外部落不到可见屏时的兜底）--加阴影区分层次，
+   提示用户工具栏此刻浮在选区上方。背景保持不透明（选区底部通常非关键内容）。 */
+#toolbar.toolbar-floating {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.55);
 }
 
 /* ── 拖动 handle（0.11.8-a）：工具栏最左侧，六点竖排 ─────────────

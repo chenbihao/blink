@@ -724,6 +724,9 @@ canvas.addEventListener('mousedown', (e) => {
     return;
   }
 
+  // 手动框选开始时立即关闭预选区虚线框，避免实线选区与虚线预选区同时出现
+  clearHover();
+  clearControlHover();
   ss.isDragging = true;
   ss.sent = false;
   ss.startX = e.offsetX;
@@ -741,7 +744,8 @@ canvas.addEventListener('mousemove', (e) => {
   if (!ss._longImagePan) updateSelectionCursor(e.offsetX, e.offsetY);
 
   // 0.18.2：选区拖拽阶段智能吸附（控件优先于窗口）
-  if (!ss.isAnnotating && !ss.selectionInteraction) {
+  // 手动框选拖拽中（isDragging）不更新吸附提示，避免实线选区与虚线预选区同时出现
+  if (!ss.isAnnotating && !ss.selectionInteraction && !ss.isDragging) {
     // 控件优先 hit-test：控件命中则不检查窗口
     if (!updateControlHover(e.offsetX, e.offsetY)) {
       updateWindowHover(e.offsetX, e.offsetY);

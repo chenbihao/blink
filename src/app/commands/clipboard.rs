@@ -183,7 +183,7 @@ pub async fn pin_clipboard_image(app: tauri::AppHandle, image_id: String) -> Res
 
     tracing::debug!(id = %image_id, w, h, screen_x, screen_y, "pin_clipboard_image");
 
-    crate::infra::platform::window::show_pin_window(&app, png_data, screen_x, screen_y)?;
+    crate::infra::platform::window::show_pin_window(&app, png_data, screen_x, screen_y, false)?;
     tracing::info!(id = %image_id, "剪贴板图片已钉到桌面");
     Ok(())
 }

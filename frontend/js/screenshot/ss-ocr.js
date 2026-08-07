@@ -9,10 +9,12 @@
 import { ss } from './ss-state.js';
 import { redrawAnnotFull } from './ss-draw.js';
 import { findDisplayCssAt } from './ss-display.js';
+import { cssToScreen } from './ss-selection-geometry.js';
 import { enterReadingMode } from './ss-reading.js';
 import * as annot from './annotation-engine.js';
 import {
   ocrImage, translateText, translateLines, copyToClipboard,
+  screenshotPin, screenshotPinRefresh,
 } from '../shared/api.js';
 import { normalizeError } from '../shared/tauri.js';
 
@@ -254,96 +256,138 @@ export const doOcrSelection = doIdentifySelection;
 export const doTranslateSelection = doOverlayTranslate;
 
 /**
- * 点[翻译并 pin]——OCR + 翻译嵌图 → 等翻译完成 → pin 到桌面。
- * 0.18.1：翻译捷径，合并"翻译"和"pin"两步为一步。
+ * 点[翻译并 pin]——立即 pin 原图 + 后台翻译 + 翻译完原地替换。
+ * 0.18.3：重写为「先 pin 原图 + 后台翻译 + 原地替换」模式。
  *
- * 时序：翻译是异步的，按钮点击后不能立即 pin（译文还没回填），
- * 必须等 overlay 翻译完成（所有 lines 的 dstText 就绪）再 pin。期间显示 loading。
+ * 时序：
+ * 1. 合成原图 PNG（不嵌译文）→ screenshotPin(showTranslating=true) → 关 overlay
+ * 2. 后台：OCR（命中预热或 fresh）→ translateLines → 合成译文 PNG → screenshotPinRefresh
+ * 3. 翻译失败/超时：隐藏指示器，pin 保持原图
  */
-export function doTranslateAndPin() {
+export async function doTranslateAndPin() {
   if (!ss.selCss || ss.sent) return;
   if (ss._translateAndPinPending) return;
 
-  const overlay = annot.getOverlay();
-
-  // 1. 翻译已完成 → 直接 pin（快路径）
-  const isTranslated = overlay && overlay.lines.length > 0
-    && overlay.lines.every((l) => hasText(l.dstText));
-  if (isTranslated) {
-    if (overlay.mode !== 'translated') {
-      annot.setOverlayMode('translated');
-      redrawAnnotFull();
-    }
-    if (typeof ss._doPinSelection === 'function') ss._doPinSelection();
-    return;
-  }
-
-  // 2. 需要启动翻译流程（OCR/翻译均未在进行中时才启动）
-  if (!ss.ocrBusy && !ss.translationBusy) {
-    if (!overlay || overlay.lines.length === 0) {
-      // 无 OCR 结果 → 启动 OCR + 翻译
-      // doOverlayTranslate 内部会 activateOverlay → requestOverlayTranslation
-      doOverlayTranslate();
-    } else {
-      // OCR 已完成但翻译未完成 → 请求翻译
-      if (overlay.mode !== 'translated') {
-        annot.setOverlayMode('translated');
-        redrawAnnotFull();
-      }
-      requestOverlayTranslation();
-    }
-  }
-
-  // 3. 等待翻译完成后 pin
   ss._translateAndPinPending = true;
-  showSelLoading('翻译并 pin 中…');
-  const startTime = Date.now();
-  const TIMEOUT = 30000;
-  const waitAndPin = () => {
-    if (!ss._translateAndPinPending) return;
+  let rawPng = null;
+  let pinned = false;
 
-    const latest = annot.getOverlay();
-    const allTranslated = latest && latest.lines.length > 0
-      && latest.lines.every((line) => hasText(line.dstText));
+  try {
+    // ── Step 1: 立即 pin 原图 ──
+    const dpr = window.devicePixelRatio || 1;
+    const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+    const screenPos = ss._longImageBaseCanvas
+      ? { x: ss.scrollBandX, y: ss.scrollBandY }
+      : cssToScreen(ss.selCss.x, ss.selCss.y, meta, dpr);
+    const screenX = screenPos.x;
+    const screenY = screenPos.y;
 
-    if (allTranslated) {
-      // 竞态防护：等 translationBusy 清零再 pin（ensureOutputReady 会检查此标志）
-      if (ss.translationBusy) {
-        if (Date.now() - startTime < TIMEOUT) {
-          setTimeout(waitAndPin, 50);
-          return;
+    // 临时关闭 overlay mode 合成原图（不嵌译文层）
+    const savedMode = annot.getOverlay()?.mode || null;
+    if (savedMode) annot.setOverlayMode(null);
+
+    rawPng = await ss._compositeSelection();
+
+    // 恢复 overlay mode（后台翻译时要用来画译文）
+    if (savedMode) annot.setOverlayMode(savedMode);
+
+    if (!rawPng) {
+      showTransientHint('合成截图失败');
+      return;
+    }
+
+    // pin 原图 + 显示翻译中指示器（screenshot_pin 内部会关 overlay）
+    await screenshotPin(rawPng, screenX, screenY, true);
+    pinned = true;
+
+    // ── Step 2: 后台 OCR + 翻译 + 合成 + 替换 ──
+
+    // 2a. 获取 OCR 结果（优先已有 overlay → 预热 → fresh）
+    let ocrResult = null;
+    const existingOverlay = annot.getOverlay();
+    if (existingOverlay && existingOverlay.lines.length > 0 && ss.ocrResultCache) {
+      ocrResult = ss.ocrResultCache;
+    }
+
+    if (!ocrResult && ss.ocrPrewarm) {
+      try {
+        ocrResult = await ss.ocrPrewarm;
+      } catch (e) {
+        console.warn('[screenshot] translateAndPin: OCR 预热失败', e);
+      }
+    }
+
+    if (!ocrResult) {
+      // Fresh OCR：复用已合成的原图 PNG
+      ocrResult = await ocrImage(rawPng);
+    }
+
+    if (!ocrResult || !ocrResult.lines || ocrResult.lines.length === 0) {
+      // 未识别到文字：隐藏指示器，保持原图
+      await screenshotPinRefresh(rawPng, false).catch(() => {});
+      return;
+    }
+
+    const lines = ocrResult.lines.filter(
+      (ln) => ln && ln.text && ln.rect && ln.rect.w > 0 && ln.rect.h > 0
+    );
+    if (lines.length === 0) {
+      await screenshotPinRefresh(rawPng, false).catch(() => {});
+      return;
+    }
+
+    // 2b. 设置 overlay 数据（用 OCR 行框 + translated 模式）
+    annot.setOverlay({
+      lines: lines.map((ln) => ({
+        rect: { x: ln.rect.x, y: ln.rect.y, w: ln.rect.w, h: ln.rect.h },
+        srcText: ln.text,
+      })),
+      mode: 'translated',
+    });
+    ss.ocrResultCache = ocrResult;
+
+    // 2c. 翻译
+    const srcs = lines.map((ln) => ln.text);
+    let translations;
+    try {
+      translations = await translateLines(srcs, null);
+    } catch (e) {
+      console.warn('[screenshot] translateAndPin: translateLines 失败，降级逐行', e);
+      translations = [];
+      for (let i = 0; i < srcs.length; i++) {
+        try {
+          translations.push(await translateText(srcs[i], null));
+        } catch (_) {
+          translations.push(srcs[i]);
         }
       }
-      ss._translateAndPinPending = false;
-      hideSelLoading();
-      if (typeof ss._doPinSelection === 'function') ss._doPinSelection();
+    }
+
+    // 2d. 回填译文 + 重绘 annotCanvas
+    annot.setOverlayTranslations(translations, null);
+    redrawAnnotFull();
+
+    // 2e. 合成译文 PNG
+    const translatedPng = await ss._compositeSelection();
+
+    if (!translatedPng) {
+      // 合成失败：隐藏指示器，保持原图
+      await screenshotPinRefresh(rawPng, false).catch(() => {});
       return;
     }
 
-    // OCR 刚完成但翻译尚未启动 → 补启动翻译
-    if (latest && latest.lines.length > 0 && !ss.ocrBusy && !ss.translationBusy) {
-      if (latest.mode !== 'translated') {
-        annot.setOverlayMode('translated');
-        redrawAnnotFull();
-      }
-      requestOverlayTranslation();
-    }
+    // 2f. 原地替换 pin 图片 + 隐藏指示器
+    await screenshotPinRefresh(translatedPng, false);
 
-    if ((ss.ocrBusy || ss.translationBusy) && Date.now() - startTime < TIMEOUT) {
-      setTimeout(waitAndPin, 100);
-      return;
+  } catch (e) {
+    console.error('[screenshot] translateAndPin 失败', e);
+    // 翻译失败/超时：隐藏指示器，pin 保持原图
+    if (pinned && rawPng) {
+      await screenshotPinRefresh(rawPng, false).catch(() => {});
     }
-
-    // 超时或失败
+  } finally {
     ss._translateAndPinPending = false;
-    hideSelLoading();
-    if (!latest || latest.lines.length === 0) {
-      showTransientHint('未识别到文字');
-    } else {
-      showTransientHint('翻译超时，请重试');
-    }
-  };
-  setTimeout(waitAndPin, 200);
+  }
 }
 
 /** E 键召唤/关闭面板抽屉 */

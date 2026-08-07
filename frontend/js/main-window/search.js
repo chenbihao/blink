@@ -9,6 +9,7 @@ import { listen } from "../shared/tauri.js";
 import { EVENTS } from "../shared/event-names.js";
 import * as results from "./results.js";
 import * as ghost from "./ghost.js";
+import * as cmdMode from "./command-mode.js";
 
 /** 防抖间隔。后端搜索实测 ~1ms（纯内存），仅用于合并极快连打。 */
 const DEBOUNCE_MS = 40;
@@ -128,6 +129,12 @@ function onCompositionUpdate() {
 
 function onInput() {
   clearTimeout(timer);
+
+  // 0.18.6: `> ` 前缀 → 命令模式，跳过搜索逻辑（清结果、停 ghost、显示 hint）
+  if (cmdMode.handleInput(queryEl.value)) {
+    return;
+  }
+
   const q = queryEl.value.trim();
   if (!q) {
     // 空 query（用户退格清空）：作废在途请求 + 清结果 + 重新拉 Context 建议。

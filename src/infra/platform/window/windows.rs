@@ -1636,22 +1636,16 @@ pub fn show_screenshot_overlay(
     use tauri::{WebviewUrl, WebviewWindowBuilder};
     const LABEL: &str = "chord-screenshot";
 
-    // 0.11.9：注入每屏几何 + DPI（前端工具栏/OCR panel 按"选区所在屏"clamp，
-    // 不再以整个虚拟屏幕为基准——副屏左边缘做选区时工具栏不会被推到主屏）。
-    // x/y/w/h 是物理像素，前端用 devicePixelRatio 折算回 CSS 像素与 selCss 对齐。
-    let displays_json = build_displays_json();
-    let fg_hwnd = crate::infra::platform::screenshot::session_fg_hwnd().unwrap_or(0);
-    let meta_js = format!(
-        "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {}, fgHwnd: {}, displays: {} }};",
-        meta.virtual_x, meta.virtual_y, meta.width, meta.height, fg_hwnd, displays_json
-    );
-
-    // 复用已存在的窗口：先 eval 清屏 + 重定位 → show → 触发重新加载
+    // 0.11.9：注入每屏几何（已折算成 overlay CSS 坐标），前端工具栏/OCR panel 按"选区所在屏"clamp，
+    // 不再以整个虚拟屏幕为基准--副屏左边缘做选区时工具栏不会被推到主屏）。
+    // **顺序关键**：先 place_at_physical 定位窗口，再读窗口实际 DPI（MonitorFromWindow 依赖窗口落点），
+    // 再用该 DPI 把每屏物理几何折算成 CSS 坐标注入。overlay_dpi 与 window.devicePixelRatio 严格对齐。
+    // 复用已存在的窗口：先 eval 清屏 + 重定位 -> show -> 触发重新加载
     if let Some(win) = app.get_webview_window(LABEL) {
-        // 先清屏再 show —— 否则窗口刚出来会看到上次结束时的选区/虚线框闪一下
+        // 先清屏再 show -- 否则窗口刚出来会看到上次结束时的选区/虚线框闪一下
         // （webview `.show()` 到 __blinkReloadScreenshot 执行之间有毫秒级空档）
         let _ = win.eval("window.__blinkReloadScreenshot && window.__blinkReloadScreenshot()");
-        let _ = win.eval(&meta_js);
+        let mut overlay_dpi = 96u32;
         if let Ok(hwnd) = win.hwnd() {
             place_at_physical(
                 HWND(hwnd.0 as _),
@@ -1660,7 +1654,15 @@ pub fn show_screenshot_overlay(
                 meta.width,
                 meta.height,
             );
+            overlay_dpi = crate::infra::platform::dpi::get_dpi_for_hwnd(HWND(hwnd.0 as _));
         }
+        let displays_json = build_displays_json(&meta, overlay_dpi);
+        let fg_hwnd = crate::infra::platform::screenshot::session_fg_hwnd().unwrap_or(0);
+        let meta_js = format!(
+            "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {}, fgHwnd: {}, displays: {} }};",
+            meta.virtual_x, meta.virtual_y, meta.width, meta.height, fg_hwnd, displays_json
+        );
+        let _ = win.eval(&meta_js);
         let _ = win.show();
         let _ = win.set_focus();
         return Ok(());
@@ -1690,6 +1692,18 @@ pub fn show_screenshot_overlay(
             meta.height,
         );
     }
+    // place 后读窗口实际 DPI，再用它折算 displays 注入（顺序同复用分支）
+    let overlay_dpi = win
+        .hwnd()
+        .ok()
+        .map(|h| crate::infra::platform::dpi::get_dpi_for_hwnd(HWND(h.0 as _)))
+        .unwrap_or(96);
+    let displays_json = build_displays_json(&meta, overlay_dpi);
+    let fg_hwnd = crate::infra::platform::screenshot::session_fg_hwnd().unwrap_or(0);
+    let meta_js = format!(
+        "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {}, fgHwnd: {}, displays: {} }};",
+        meta.virtual_x, meta.virtual_y, meta.width, meta.height, fg_hwnd, displays_json
+    );
     let _ = win.eval(&meta_js);
     let _ = win.set_focus();
 
@@ -1698,19 +1712,31 @@ pub fn show_screenshot_overlay(
 
 /// 构造 `__blinkScreenMeta.displays` 字段的 JS 数组字面量。
 ///
-/// 每屏一项：`{ x, y, w, h, dpi, primary }`（物理像素 + DPI）。
-/// 失败时返回空数组 `[]`，前端按"无 displays 信息"降级到旧的虚拟屏幕 clamp。
-fn build_displays_json() -> String {
+/// 注入**已折算成 overlay CSS 坐标**的每屏矩形（单位 CSS 像素），前端 `displayToCss`
+/// 退化为恒等。折算公式与前端 `screenToCss` 一致：`(physical - meta.vx/vy) / scale`，
+/// `scale = overlay_dpi / 96`。`overlay_dpi` 取自 `place_at_physical` 后的 overlay 窗口，
+/// 与浏览器 `window.devicePixelRatio` 严格对齐，混合 DPI 多屏下不会产生坐标系分裂。
+/// 失败时返回空数组 `[]`，前端按"无 displays 信息"降级到虚拟屏幕 clamp。
+fn build_displays_json(
+    meta: &crate::infra::platform::screenshot::ScreenCaptureMeta,
+    overlay_dpi: u32,
+) -> String {
     let displays = crate::infra::platform::screenshot::list_displays();
     if displays.is_empty() {
         return "[]".to_string();
     }
+    let scale = crate::infra::platform::dpi::scale_factor(overlay_dpi);
     let items: Vec<String> = displays
         .iter()
         .map(|d| {
+            // 物理坐标 -> overlay CSS 坐标：减虚拟屏原点、除窗口 scale
+            let css_x = ((d.x - meta.virtual_x) as f64 / scale).round() as i32;
+            let css_y = ((d.y - meta.virtual_y) as f64 / scale).round() as i32;
+            let css_w = (d.w as f64 / scale).round() as i32;
+            let css_h = (d.h as f64 / scale).round() as i32;
             format!(
-                "{{ x: {}, y: {}, w: {}, h: {}, dpi: {}, primary: {} }}",
-                d.x, d.y, d.w, d.h, d.dpi, d.primary
+                "{{ x: {}, y: {}, w: {}, h: {}, primary: {} }}",
+                css_x, css_y, css_w, css_h, d.primary
             )
         })
         .collect();
@@ -1773,6 +1799,7 @@ pub fn show_pin_window(
     png_data: Vec<u8>,
     screen_x: i32,
     screen_y: i32,
+    show_translating: bool,
 ) -> Result<(), String> {
     use base64::Engine;
     use tauri::{WebviewUrl, WebviewWindowBuilder};
@@ -1803,19 +1830,21 @@ pub fn show_pin_window(
         }
         // 把图片左上物理坐标也传给前端（__blinkResetPin 第 4/5 参数），
         // 前端用作缩放基准 imgScreenX/Y，避免 window.screenX 的 DPI 换算问题
+        // show_translating 透传给前端控制「翻译中」指示器
         let js = format!(
-            "if (window.__blinkResetPin) window.__blinkResetPin('{url}', {w}, {h}, {sx}, {sy}); else document.getElementById('pin-img').src = '{url}';",
+            "if (window.__blinkResetPin) window.__blinkResetPin('{url}', {w}, {h}, {sx}, {sy}, {st}); else document.getElementById('pin-img').src = '{url}';",
             url = data_url,
             w = png_w,
             h = png_h,
             sx = screen_x,
-            sy = screen_y
+            sy = screen_y,
+            st = if show_translating { "true" } else { "false" }
         );
         win.eval(&js)
             .map_err(|e| format!("eval 注入 PNG 失败: {e}"))?;
         let _ = win.show();
         let _ = win.set_focus();
-        tracing::debug!(png_w, png_h, screen_x, screen_y, "钉图窗口已复用");
+        tracing::debug!(png_w, png_h, screen_x, screen_y, show_translating, "钉图窗口已复用");
         return Ok(());
     }
 
@@ -1838,17 +1867,18 @@ pub fn show_pin_window(
             }
             // 注入 PNG 数据 + 图片左上物理坐标（首次也走 __blinkResetPin 以统一状态）
             let js = format!(
-                "if (window.__blinkResetPin) window.__blinkResetPin('{url}', {w}, {h}, {sx}, {sy}); else document.getElementById('pin-img').src = '{url}';",
+                "if (window.__blinkResetPin) window.__blinkResetPin('{url}', {w}, {h}, {sx}, {sy}, {st}); else document.getElementById('pin-img').src = '{url}';",
                 url = data_url,
                 w = png_w,
                 h = png_h,
                 sx = screen_x,
-                sy = screen_y
+                sy = screen_y,
+                st = if show_translating { "true" } else { "false" }
             );
             win.eval(&js)
                 .map_err(|e| format!("eval 注入 PNG 失败: {e}"))?;
             let _ = win.show();
-            tracing::debug!(png_w, png_h, screen_x, screen_y, "钉图窗口已创建");
+            tracing::debug!(png_w, png_h, screen_x, screen_y, show_translating, "钉图窗口已创建");
             Ok(())
         }
         Err(e) => {
@@ -1856,6 +1886,56 @@ pub fn show_pin_window(
             Err(format!("钉图窗口创建失败: {e}"))
         }
     }
+}
+
+/// 0.18.3：原地刷新钉图窗口的图片（不重定位、不重置缩放）。
+///
+/// 用于「翻译并 pin」流程：后台翻译完成后合成含译文的 PNG，
+/// 调本函数只换 `img.src`，不动窗口位置和 scale。
+///
+/// - `show_translating=false` 时隐藏 pin 窗口的「翻译中」指示器。
+/// - pin 窗口不存在或已 hide 时静默返回 Ok（用户已关 pin，丢弃译文）。
+pub fn refresh_pin_image(
+    app: &AppHandle,
+    png_data: Vec<u8>,
+    show_translating: bool,
+) -> Result<(), String> {
+    use base64::Engine;
+
+    const LABEL: &str = "chord-pin";
+
+    let win = match app.get_webview_window(LABEL) {
+        Some(w) => w,
+        None => {
+            tracing::debug!("refresh_pin_image: pin 窗口不存在，静默丢弃");
+            return Ok(());
+        }
+    };
+
+    // 窗口已 hide 时静默返回（用户已关 pin）
+    if !win.is_visible().unwrap_or(false) {
+        tracing::debug!("refresh_pin_image: pin 窗口已隐藏，静默丢弃");
+        return Ok(());
+    }
+
+    let (png_w, png_h) = crate::infra::platform::screenshot::parse_png_size(&png_data)
+        .map(|(w, h)| (w as f64, h as f64))
+        .unwrap_or((0.0, 0.0));
+
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&png_data);
+    let data_url = format!("data:image/png;base64,{b64}");
+
+    // 只换 img.src + 控制指示器，不调 place_at_physical，不调 __blinkResetPin
+    let js = format!(
+        "if (window.__blinkRefreshPinImage) window.__blinkRefreshPinImage('{url}', {w}, {h}, {st});",
+        url = data_url,
+        w = png_w,
+        h = png_h,
+        st = if show_translating { "true" } else { "false" }
+    );
+    win.eval(&js)
+        .map_err(|e| format!("eval 刷新 pin 图片失败: {e}"))?;
+    Ok(())
 }
 
 /// Apply or remove DWM Cloak on a window.

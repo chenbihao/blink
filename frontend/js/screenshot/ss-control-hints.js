@@ -13,6 +13,8 @@
 
 import { ss } from './ss-state.js';
 import { screenshotControlHints } from '../shared/api.js';
+import { listen } from '../shared/tauri.js';
+import { EVENTS } from '../shared/event-names.js';
 import { clampRectToCss, rectScreenToCss, pointInRect } from './ss-selection-geometry.js';
 
 /** 缓存的控件矩形列表（CSS 坐标） */
@@ -30,42 +32,52 @@ let hintVisible = false;
 /** hideControlHint 的延迟计时器（等 opacity 过渡结束再 visibility:hidden） */
 let hintHideTimer = 0;
 
+/** 当前流式订阅的 unlisten 函数（done 或 clear 时调用） */
+let unlistenStream = null;
+
 /**
- * 加载控件提示列表（overlay 显示后异步调用）。
- * 物理坐标 → CSS 坐标转换在此一次完成。
- * 支持会话 generation 防止过期回流。
+ * 流式加载控件提示。注册 listener 后 invoke 后端开始收集。
+ * 后端每完成一层 BFS 就 emit 一批 hints，前端增量追加进 pickableControls。
+ * 让浅层控件（窗口直接子元素）几乎立即可吸附，深层控件随后陆续可用。
  *
  * @param {number} requestGen - 调用时的 controlHintsGen，用于防过期
- * @param {Function} [fetchHints] - 可替换的 fetcher（测试用）
  */
-export async function loadControlHints(requestGen, fetchHints = screenshotControlHints) {
+export async function loadControlHints(requestGen) {
+  // 先清理上一次可能残留的监听
+  if (unlistenStream) {
+    unlistenStream();
+    unlistenStream = null;
+  }
+  pickableControls = [];
+
+  const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+  const dpr = window.devicePixelRatio || 1;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+
+  // 注册监听（返回 unlisten promise）
+  unlistenStream = await listen(EVENTS.SCREENSHOT_CONTROL_HINTS, (event) => {
+    const payload = event.payload;
+    if (!payload || payload.generation !== ss.controlHintsGen) return; // 防过期
+
+    if (payload.kind === 'batch' && payload.hints?.length) {
+      const batch = normalizeControlHints(payload.hints, meta, dpr, vw, vh);
+      pickableControls = pickableControls.concat(batch);
+      // console.debug('[screenshot] control hints batch', payload.depth, batch.length, pickableControls.length);
+    } else if (payload.kind === 'done') {
+      console.debug('[screenshot] control hints done', { total: payload.total, truncated: payload.truncated, count: pickableControls.length });
+      if (unlistenStream) { unlistenStream(); unlistenStream = null; }
+    }
+  });
+
+  // 触发后端流式收集
   try {
-    const list = await fetchHints();
-
-    // 检查 generation，防止过期回流
-    if (requestGen !== ss.controlHintsGen) {
-      console.debug('[screenshot] 控件提示已过期，丢弃', { requestGen, current: ss.controlHintsGen });
-      return;
-    }
-
-    const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
-    const dpr = window.devicePixelRatio || 1;
-
-    pickableControls = normalizeControlHints(
-      list,
-      meta,
-      dpr,
-      window.innerWidth,
-      window.innerHeight,
-    );
-
-    console.debug('[screenshot] control hints loaded', pickableControls.length);
+    await screenshotControlHints(requestGen);
   } catch (e) {
-    if (requestGen !== ss.controlHintsGen) {
-      console.debug('[screenshot] 旧控件提示请求失败，忽略', { requestGen, current: ss.controlHintsGen });
-      return;
-    }
-    console.warn('[screenshot] loadControlHints 失败', e);
+    // invoke 失败：清理监听
+    if (unlistenStream) { unlistenStream(); unlistenStream = null; }
+    if (requestGen !== ss.controlHintsGen) return;
+    console.warn('[screenshot] screenshotControlHints invoke 失败', e);
     pickableControls = [];
   }
 }
@@ -91,6 +103,10 @@ export function clearControlHints() {
   pickableControls = [];
   hoveredIndex = -1;
   ss.controlHintsGen++;
+  if (unlistenStream) {
+    unlistenStream();
+    unlistenStream = null;
+  }
   // 立即清除，不走淡出过渡（overlay 正在关闭）
   if (hintHideTimer) {
     clearTimeout(hintHideTimer);
