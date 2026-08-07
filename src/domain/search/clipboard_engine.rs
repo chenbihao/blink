@@ -136,7 +136,12 @@ impl SearchEngine for ClipboardEngine {
                 .filter(|meta| {
                     let title = format!("图片 {}x{}", meta.width, meta.height);
                     let haystack = match &meta.source_app {
-                        Some(app) => format!("{} {} {}", title, app, meta.source_path.as_deref().unwrap_or("")),
+                        Some(app) => format!(
+                            "{} {} {}",
+                            title,
+                            app,
+                            meta.source_path.as_deref().unwrap_or("")
+                        ),
                         None => format!("{} {}", title, meta.source_path.as_deref().unwrap_or("")),
                     };
                     haystack.to_lowercase().contains(&arg_lower)
@@ -247,18 +252,34 @@ fn to_image_search_item(meta: ClipboardImageMeta, index: usize, lang: &str) -> S
 fn resolve_source_desc(source_app: Option<&str>, is_zh: bool) -> String {
     match source_app {
         Some(s) if s == "blink:screenshot" => {
-            if is_zh { "截图".to_string() } else { "Screenshot".to_string() }
+            if is_zh {
+                "截图".to_string()
+            } else {
+                "Screenshot".to_string()
+            }
         }
         Some(s) if s == "blink:repost" => {
             // 历史回贴 skip_persist=true 不会入库，此处仅防御
-            if is_zh { "回贴".to_string() } else { "Repost".to_string() }
+            if is_zh {
+                "回贴".to_string()
+            } else {
+                "Repost".to_string()
+            }
         }
         Some(s) if s == "blink:ai" => {
-            if is_zh { "AI".to_string() } else { "AI".to_string() }
+            if is_zh {
+                "AI".to_string()
+            } else {
+                "AI".to_string()
+            }
         }
         Some(s) if !s.is_empty() => s.to_string(),
         _ => {
-            if is_zh { "未知".to_string() } else { "unknown".to_string() }
+            if is_zh {
+                "未知".to_string()
+            } else {
+                "unknown".to_string()
+            }
         }
     }
 }
@@ -539,7 +560,10 @@ mod tests {
 
     #[test]
     fn resolve_source_desc_screenshot_en() {
-        assert_eq!(resolve_source_desc(Some("blink:screenshot"), false), "Screenshot");
+        assert_eq!(
+            resolve_source_desc(Some("blink:screenshot"), false),
+            "Screenshot"
+        );
     }
 
     #[test]
@@ -561,7 +585,10 @@ mod tests {
     fn resolve_source_desc_process_name_passthrough() {
         // 进程名原样返回
         assert_eq!(resolve_source_desc(Some("chrome.exe"), true), "chrome.exe");
-        assert_eq!(resolve_source_desc(Some("explorer.exe"), false), "explorer.exe");
+        assert_eq!(
+            resolve_source_desc(Some("explorer.exe"), false),
+            "explorer.exe"
+        );
     }
 
     #[test]
@@ -588,7 +615,11 @@ mod tests {
             source_path: Some("photo.jpg".into()),
         };
         let si = to_image_search_item(meta, 0, "zh");
-        assert!(si.title.contains("photo.jpg · explorer.exe"), "标题应含文件名 · 应用名: {}", si.title);
+        assert!(
+            si.title.contains("photo.jpg · explorer.exe"),
+            "标题应含文件名 · 应用名: {}",
+            si.title
+        );
     }
 
     #[test]
@@ -603,8 +634,16 @@ mod tests {
             source_path: None,
         };
         let si = to_image_search_item(meta, 0, "zh");
-        assert!(si.title.contains("chrome.exe"), "标题应含应用名: {}", si.title);
-        assert!(!si.title.contains("·"), "无文件名不应有 · 分隔符: {}", si.title);
+        assert!(
+            si.title.contains("chrome.exe"),
+            "标题应含应用名: {}",
+            si.title
+        );
+        assert!(
+            !si.title.contains("·"),
+            "无文件名不应有 · 分隔符: {}",
+            si.title
+        );
     }
 
     #[test]
@@ -619,6 +658,10 @@ mod tests {
             source_path: None,
         };
         let si = to_image_search_item(meta, 0, "zh");
-        assert!(si.title.contains("截图"), "blink:screenshot 应解析为「截图」: {}", si.title);
+        assert!(
+            si.title.contains("截图"),
+            "blink:screenshot 应解析为「截图」: {}",
+            si.title
+        );
     }
 }

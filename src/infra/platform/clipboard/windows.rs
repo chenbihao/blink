@@ -639,7 +639,11 @@ unsafe fn read_clipboard_inner() -> Option<String> {
 ///
 /// **0.17.9**：重命名为 `_raw`——外部应走 `mod.rs` 的 `write_bgra_to_clipboard`（打标外壳），
 /// 仅 `write_png_to_clipboard` 内部转调本函数（避免重复打标）。
-pub(super) fn write_bgra_to_clipboard_raw(pixels: &[u8], width: u32, height: u32) -> Result<(), String> {
+pub(super) fn write_bgra_to_clipboard_raw(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
     use windows::Win32::Foundation::{GlobalFree, HANDLE};
     use windows::Win32::Graphics::Gdi::BITMAPINFOHEADER;
     use windows::Win32::System::DataExchange::{

@@ -150,6 +150,10 @@ unsafe extern "system" fn hold_timer_callback(
         if s.armed_key.is_some() && !s.hold_fired && !s.aborted {
             s.hold_fired = true;
             send_event(HotkeyEvent::Hold(Instant::now()));
+
+            // ── 0.18.7 Phase B: 影子 HoldDeadline ──
+            // 用 gesture id 近似（legacy 无 gesture id，用 timer id 作为近似）
+            shadow_feed_hold_deadline(id_event as u64);
         }
     });
 }
@@ -162,11 +166,22 @@ pub fn start_hook_thread() {
         .expect("failed to spawn hotkey thread");
 }
 
-/// 热键线程入口：安装钩子 → 消息循环 → 卸载。
+/// 热键线程入口：安装钩子 → 影子初始化 → 消息循环 → 卸载。
 fn hook_thread_main() {
     unsafe {
-        let hhook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(ll_proc), None, 0)
-            .expect("SetWindowsHookExW failed for WH_KEYBOARD_LL");
+        // ── 0.18.7 Phase B: 影子状态机初始化 ──
+        init_shadow_state();
+        init_shadow_window();
+        log_startup_diagnostics();
+
+        let hhook = match SetWindowsHookExW(WH_KEYBOARD_LL, Some(ll_proc), None, 0) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::error!(?e, "SetWindowsHookExW failed for WH_KEYBOARD_LL");
+                return;
+            }
+        };
+        tracing::info!(hook_ptr = hhook.0 as usize, "WH_KEYBOARD_LL hook installed");
 
         // hook 挂上之前发生的 Alt keydown 收不到，此刻用 GetAsyncKeyState 兜底初始化。
         // 此时进程刚起，SetForegroundWindow 还没被调用过，物理态尚未被合成 keyup 污染。
@@ -180,6 +195,10 @@ fn hook_thread_main() {
         }
 
         let _ = UnhookWindowsHookEx(hhook);
+        tracing::info!("WH_KEYBOARD_LL hook uninstalled");
+
+        // ── 0.18.7 Phase B: 影子清理 ──
+        destroy_shadow_window();
     }
 }
 
@@ -539,8 +558,10 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
             // 转发给宿主，前端 preventDefault 拦不住，会呼出左上角系统菜单并冻结
             // webview 消息泵。仅在录制期间、仅此组合吞键，不破坏日常「不吞键」原则。
             if vk == VK_SPACE.0 as u32 && unsafe { GetAsyncKeyState(VK_MENU.0 as i32) } < 0 {
+                shadow_feed_hook(kb, msg, true);
                 return LRESULT(1);
             }
+            shadow_feed_hook(kb, msg, false);
             return unsafe { CallNextHookEx(None, code, wparam, lparam) };
         }
 
@@ -567,6 +588,7 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
                 || vk == VK_RMENU.0 as u32)
             && ALT_LOGICALLY_HELD.load(Ordering::SeqCst)
         {
+            shadow_feed_hook(kb, msg, true);
             return LRESULT(1);
         }
 
@@ -600,6 +622,7 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
                 if is_chord_key(&key) {
                     // 吞键 + 发 Chord 事件
                     send_event(HotkeyEvent::Chord(key));
+                    shadow_feed_hook(kb, msg, true);
                     return LRESULT(1);
                 }
             }
@@ -689,6 +712,9 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
                 }
             }
         });
+
+        // ── 0.18.7 Phase B: 影子喂入（pass-through 路径）──
+        shadow_feed_hook(kb, msg, false);
     }
 
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
@@ -723,6 +749,696 @@ fn feed_recorder(vk: u32, wparam: WPARAM) {
         let Some(name) = vk_to_key(vk) else { return };
         super::recorder::feed(super::recorder::RecordInput::KeyDown(name));
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ── 0.18.7 Phase B: Shadow state machine ───────────────────────────────────────
+//
+// 新 reducer 在 hook 线程以"影子模式"运行：接收真实 Hook/Raw Input/Timer 流，
+// 但只写对比日志，不产生业务副作用。legacy 决策路径保持不变。
+
+use super::state::{
+    self, HookKeyEvent, InputConfigSnapshot, InputEvent, InputSource, InputState, MainViewContext,
+    NormalizedHotkey, RawModifierEvent, RecorderMode, VoicePhase, WindowTransitionReason,
+};
+use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::UI::Input::*;
+use windows::core::PCWSTR;
+
+// ── 常量 ──────────────────────────────────────────────────────────────────────
+
+/// HID usage page: Generic Desktop。
+const HID_USAGE_PAGE_GENERIC: u16 = 0x01;
+/// HID usage: Keyboard。
+const HID_USAGE_KEYBOARD: u16 = 0x06;
+
+/// Raw keyboard flags（RAWKEYBOARD.Flags 位）。
+const RI_KEY_MAKE: u16 = 0;
+const RI_KEY_BREAK: u16 = 1;
+const RI_KEY_E0: u16 = 2;
+const RI_KEY_E1: u16 = 4;
+
+/// GIDC_REMOVAL：设备移除。
+const GIDC_REMOVAL: u32 = 2;
+
+// 控制消息 ID（WM_APP = 0x8000）
+const WM_APP_SHADOW_CONFIG: u32 = 0x8100;
+const WM_APP_SHADOW_WINDOW: u32 = 0x8101;
+const WM_APP_SHADOW_VIEW: u32 = 0x8102;
+const WM_APP_SHADOW_VOICE: u32 = 0x8103;
+const WM_APP_SHADOW_RECORDER: u32 = 0x8104;
+const WM_APP_SHADOW_STOP: u32 = 0x8105;
+
+/// 影子窗口类名。
+const SHADOW_WND_CLASS: &str = "BlinkShadowInput";
+
+// ── 影子状态 ──────────────────────────────────────────────────────────────────
+
+/// 影子 HWND（message-only window），供控制方 PostMessage 唤醒。
+static SHADOW_HWND: std::sync::OnceLock<isize> = std::sync::OnceLock::new();
+
+// 线程局部影子状态机（仅 hook 线程访问）。
+thread_local! {
+    static SHADOW: std::cell::RefCell<Option<InputState>> = const { std::cell::RefCell::new(None) };
+}
+
+// ── 控制消息队列 ──────────────────────────────────────────────────────────────
+//
+// 控制方（主线程）把消息放入队列，再 PostMessageW 唤醒 hook 线程。
+// WindowProc 在消息循环中排空队列。LL Hook callback **不**访问此锁。
+
+/// 影子控制消息。
+enum ShadowControlMsg {
+    Config(InputConfigSnapshot),
+    WindowChanged { visible: bool, revision: u64 },
+    ViewContext(MainViewContext),
+    VoicePhase(VoicePhase),
+    RecorderMode(RecorderMode),
+    Stop,
+}
+
+static CONTROL_QUEUE: std::sync::Mutex<Vec<ShadowControlMsg>> = std::sync::Mutex::new(Vec::new());
+
+/// 向 hook 线程发送控制消息（主线程调用）。
+fn send_shadow_control(msg: ShadowControlMsg) {
+    if let Ok(mut q) = CONTROL_QUEUE.lock() {
+        q.push(msg);
+    }
+    if let Some(&hwnd) = SHADOW_HWND.get() {
+        let _ = unsafe {
+            PostMessageW(
+                Some(windows::Win32::Foundation::HWND(hwnd as *mut _)),
+                WM_APP_SHADOW_CONFIG,
+                WPARAM(0),
+                LPARAM(0),
+            )
+        };
+    }
+}
+
+// ── 回调耗时统计 ──────────────────────────────────────────────────────────────
+
+struct CallbackStats {
+    count: u64,
+    max_us: u64,
+    slow_count: u64, // > 1ms
+}
+
+thread_local! {
+    static STATS: std::cell::RefCell<CallbackStats> = const { std::cell::RefCell::new(CallbackStats {
+        count: 0,
+        max_us: 0,
+        slow_count: 0,
+    }) };
+}
+
+/// 记时守卫：构造时记录起始，析构时更新统计。
+struct TimedCallback {
+    start: Instant,
+}
+
+impl TimedCallback {
+    fn start() -> Self {
+        Self {
+            start: Instant::now(),
+        }
+    }
+
+    fn finish(self) {
+        let elapsed_us = self.start.elapsed().as_micros() as u64;
+        STATS.with(|s| {
+            let mut s = s.borrow_mut();
+            s.count += 1;
+            if elapsed_us > s.max_us {
+                s.max_us = elapsed_us;
+            }
+            if elapsed_us > 1000 {
+                s.slow_count += 1;
+            }
+            // 每 5000 次输出一次聚合
+            if s.count % 5000 == 0 {
+                tracing::info!(
+                    count = s.count,
+                    max_us = s.max_us,
+                    slow_count = s.slow_count,
+                    "shadow callback stats"
+                );
+            }
+        });
+    }
+}
+
+// ── 影子配置派生 ──────────────────────────────────────────────────────────────
+
+/// 从 legacy 全局派生影子配置快照（在 hook 线程消息循环中调用，非 ll_proc）。
+fn derive_shadow_config() -> InputConfigSnapshot {
+    let config = get_current_config();
+    let tap_threshold = get_tap_threshold();
+    InputConfigSnapshot {
+        revision: 0,
+        hotkey: NormalizedHotkey {
+            modifiers: config.modifiers.clone(),
+            key: config.key.clone(),
+        },
+        tap_threshold: Duration::from_millis(tap_threshold),
+        chord_enabled: is_chord_mode(),
+        exclusive_tap_keys: std::collections::HashSet::new(), // 影子模式：近似
+        voice_hold_enabled: true,
+    }
+}
+
+/// 同步外部状态到影子状态机（在消息循环中调用）。
+fn sync_shadow_external() {
+    SHADOW.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let Some(state) = guard.as_mut() else {
+            return;
+        };
+
+        // 派生配置并推送（近似：legacy → shadow）
+        let snapshot = derive_shadow_config();
+        let now = Instant::now();
+        let _ = state::reduce(state, InputEvent::ConfigChanged(snapshot), now);
+
+        // 窗口可见性
+        let visible = crate::infra::platform::window::is_visible();
+        let revision = state.window.revision
+            + if visible != state.window.visible {
+                1
+            } else {
+                0
+            };
+        if visible != state.window.visible || revision > state.window.revision {
+            let _ = state::reduce(
+                state,
+                InputEvent::WindowChanged {
+                    visible,
+                    revision,
+                    reason: WindowTransitionReason::Watchdog,
+                },
+                now,
+            );
+        }
+
+        // 视图上下文（近似：从 chord_mode 派生）
+        let chord_mode = is_chord_mode();
+        let new_view = MainViewContext {
+            view_epoch: state.view.view_epoch.max(1),
+            revision: state.view.revision + 1,
+            ready: true,
+            query_empty: chord_mode,
+            ai_mode: false,
+        };
+        let _ = state::reduce(state, InputEvent::ViewContextChanged(new_view), now);
+
+        // Voice phase
+        let voice_recording = VOICE_RECORDING.load(Ordering::SeqCst);
+        let new_voice = if voice_recording {
+            VoicePhase::Recording { gesture_id: 0 }
+        } else {
+            VoicePhase::Idle
+        };
+        let _ = state::reduce(
+            state,
+            InputEvent::VoicePhaseChanged {
+                gesture_id: None,
+                phase: new_voice,
+            },
+            now,
+        );
+    });
+}
+
+// ── Hook 事件归一化 ───────────────────────────────────────────────────────────
+
+/// 将 KBDLLHOOKSTRUCT + wparam 归一化为 `HookKeyEvent`。
+fn normalize_hook_event(kb: &KBDLLHOOKSTRUCT, msg: u32) -> Option<HookKeyEvent> {
+    let vk = kb.vkCode;
+    let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+    let is_up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
+    if !is_down && !is_up {
+        return None;
+    }
+
+    let key = vk_to_key(vk)?;
+    let is_modifier = is_modifier_key(vk);
+    let injected = kb.flags.contains(LLKHF_INJECTED);
+    let lower_integrity_injected = kb.flags.contains(LLKHF_LOWER_IL_INJECTED);
+    let extended = kb.flags.contains(LLKHF_EXTENDED);
+    let alt_down_flag = kb.flags.contains(LLKHF_ALTDOWN);
+
+    Some(HookKeyEvent {
+        source: if injected {
+            InputSource::Injected
+        } else {
+            InputSource::Local
+        },
+        key,
+        is_down,
+        is_modifier,
+        time_ms: kb.time,
+        injected,
+        lower_integrity_injected,
+        extended,
+        alt_down_flag,
+    })
+}
+
+// ── Raw Input 归一化 ──────────────────────────────────────────────────────────
+
+/// 从 RAWKEYBOARD 提取归一化修饰键名和 down/up。
+fn raw_keyboard_to_modifier(kb: &RAWKEYBOARD) -> Option<(String, bool, u16)> {
+    let vk = kb.VKey;
+    let is_down = (kb.Flags & RI_KEY_BREAK) == 0;
+    let e0 = (kb.Flags & RI_KEY_E0) != 0;
+    let e1 = (kb.Flags & RI_KEY_E1) != 0;
+
+    // 只处理修饰键（Raw Input 只校正修饰键 level）
+    let key = if vk == VK_LCONTROL.0 as u16 && e0 {
+        "rctrl".to_string()
+    } else if vk == VK_LCONTROL.0 as u16 {
+        "lctrl".to_string()
+    } else if vk == VK_RCONTROL.0 as u16 {
+        "rctrl".to_string()
+    } else if vk == VK_LSHIFT.0 as u16 && e0 {
+        "rshift".to_string()
+    } else if vk == VK_LSHIFT.0 as u16 {
+        "lshift".to_string()
+    } else if vk == VK_RSHIFT.0 as u16 {
+        "rshift".to_string()
+    } else if vk == VK_LMENU.0 as u16 && e0 {
+        "ralt".to_string()
+    } else if vk == VK_LMENU.0 as u16 {
+        "lalt".to_string()
+    } else if vk == VK_RMENU.0 as u16 {
+        "ralt".to_string()
+    } else if vk == VK_LWIN.0 as u16 {
+        "meta".to_string()
+    } else if vk == VK_RWIN.0 as u16 {
+        "meta".to_string()
+    } else {
+        return None; // 非修饰键，Raw Input 不进 reducer
+    };
+
+    let flags = if e0 { RI_KEY_E0 } else { 0 } | if e1 { RI_KEY_E1 } else { 0 };
+    Some((key, is_down, flags))
+}
+
+// ── 影子状态喂入 ──────────────────────────────────────────────────────────────
+
+/// 喂入 Hook 事件到影子状态机并记录对比日志。
+fn shadow_feed_hook(kb: &KBDLLHOOKSTRUCT, msg: u32, legacy_swallowed: bool) {
+    let timer = TimedCallback::start();
+
+    let Some(event) = normalize_hook_event(kb, msg) else {
+        timer.finish();
+        return;
+    };
+
+    SHADOW.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let Some(state) = guard.as_mut() else {
+            return;
+        };
+
+        let now = Instant::now();
+        let result = state::reduce(state, InputEvent::HookKey(event), now);
+
+        // ── 影子对比日志 ──
+        let shadow_alt = state.modifiers.alt_down();
+        let legacy_alt = ALT_LOGICALLY_HELD.load(Ordering::SeqCst);
+        if shadow_alt != legacy_alt {
+            tracing::warn!(
+                shadow_alt,
+                legacy_alt,
+                vk = kb.vkCode,
+                is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN,
+                "ALT_STATE_INCONSISTENT: shadow vs legacy Alt held"
+            );
+        }
+
+        let shadow_swallow = result.propagation == state::Propagation::Swallow;
+        if shadow_swallow != legacy_swallowed {
+            tracing::debug!(
+                shadow_swallow,
+                legacy_swallowed,
+                vk = kb.vkCode,
+                "shadow vs legacy swallow divergence"
+            );
+        }
+
+        // 影子 effect 日志（不送业务 channel）
+        for effect in &result.effects {
+            match effect {
+                state::InputEffect::Tap { gesture_id, .. } => {
+                    tracing::debug!(gesture_id, "shadow Tap");
+                }
+                state::InputEffect::HoldStarted { gesture_id } => {
+                    tracing::debug!(gesture_id, "shadow HoldStarted");
+                }
+                state::InputEffect::HoldReleased { gesture_id } => {
+                    tracing::debug!(gesture_id, "shadow HoldReleased");
+                }
+                state::InputEffect::VoiceCancel { gesture_id } => {
+                    tracing::debug!(?gesture_id, "shadow VoiceCancel");
+                }
+                state::InputEffect::ChordTriggered {
+                    chord_session_id,
+                    key,
+                } => {
+                    tracing::debug!(chord_session_id, key, "shadow ChordTriggered");
+                }
+                state::InputEffect::UiStateChanged(ui) => {
+                    tracing::debug!(
+                        rev = ui.revision,
+                        alt = ui.alt_down,
+                        vis = ui.window_visible,
+                        chord = ui.exclusive_chord_active,
+                        "shadow UiStateChanged"
+                    );
+                }
+            }
+        }
+    });
+
+    timer.finish();
+}
+
+/// 喂入 HoldDeadline 到影子状态机。
+fn shadow_feed_hold_deadline(gesture_id: u64) {
+    SHADOW.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let Some(state) = guard.as_mut() else {
+            return;
+        };
+        let now = Instant::now();
+        let result = state::reduce(state, InputEvent::HoldDeadline { gesture_id }, now);
+        for effect in &result.effects {
+            if let state::InputEffect::HoldStarted { gesture_id } = effect {
+                tracing::debug!(gesture_id, "shadow HoldStarted (timer)");
+            }
+        }
+    });
+}
+
+// ── 影子窗口 proc ─────────────────────────────────────────────────────────────
+
+unsafe extern "system" fn shadow_wnd_proc(
+    hwnd: windows::Win32::Foundation::HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_INPUT => {
+            handle_wm_input(lparam);
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        WM_INPUT_DEVICE_CHANGE => {
+            // wparam: GIDC_ARRIVAL(1) 或 GIDC_REMOVAL(2)
+            // lparam: hDevice handle
+            if wparam.0 as u32 == GIDC_REMOVAL {
+                let device_id = lparam.0 as usize;
+                SHADOW.with(|cell| {
+                    let mut guard = cell.borrow_mut();
+                    let Some(state) = guard.as_mut() else {
+                        return;
+                    };
+                    let _ = state::reduce(
+                        state,
+                        InputEvent::RawDeviceRemoved { device_id },
+                        Instant::now(),
+                    );
+                });
+                tracing::debug!(device_id, "raw input device removed (shadow)");
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        WM_APP_SHADOW_CONFIG
+        | WM_APP_SHADOW_WINDOW
+        | WM_APP_SHADOW_VIEW
+        | WM_APP_SHADOW_VOICE
+        | WM_APP_SHADOW_RECORDER
+        | WM_APP_SHADOW_STOP => {
+            // 排空控制队列
+            let msgs: Vec<ShadowControlMsg> = {
+                let mut q = CONTROL_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+                std::mem::take(&mut *q)
+            };
+            for m in msgs {
+                match m {
+                    ShadowControlMsg::Config(snapshot) => {
+                        SHADOW.with(|cell| {
+                            if let Some(state) = cell.borrow_mut().as_mut() {
+                                let _ = state::reduce(
+                                    state,
+                                    InputEvent::ConfigChanged(snapshot),
+                                    Instant::now(),
+                                );
+                            }
+                        });
+                    }
+                    ShadowControlMsg::WindowChanged { visible, revision } => {
+                        SHADOW.with(|cell| {
+                            if let Some(state) = cell.borrow_mut().as_mut() {
+                                let _ = state::reduce(
+                                    state,
+                                    InputEvent::WindowChanged {
+                                        visible,
+                                        revision,
+                                        reason: WindowTransitionReason::Invoke,
+                                    },
+                                    Instant::now(),
+                                );
+                            }
+                        });
+                    }
+                    ShadowControlMsg::ViewContext(ctx) => {
+                        SHADOW.with(|cell| {
+                            if let Some(state) = cell.borrow_mut().as_mut() {
+                                let _ = state::reduce(
+                                    state,
+                                    InputEvent::ViewContextChanged(ctx),
+                                    Instant::now(),
+                                );
+                            }
+                        });
+                    }
+                    ShadowControlMsg::VoicePhase(phase) => {
+                        SHADOW.with(|cell| {
+                            if let Some(state) = cell.borrow_mut().as_mut() {
+                                let _ = state::reduce(
+                                    state,
+                                    InputEvent::VoicePhaseChanged {
+                                        gesture_id: None,
+                                        phase,
+                                    },
+                                    Instant::now(),
+                                );
+                            }
+                        });
+                    }
+                    ShadowControlMsg::RecorderMode(mode) => {
+                        SHADOW.with(|cell| {
+                            if let Some(state) = cell.borrow_mut().as_mut() {
+                                let _ = state::reduce(
+                                    state,
+                                    InputEvent::RecorderModeChanged(mode),
+                                    Instant::now(),
+                                );
+                            }
+                        });
+                    }
+                    ShadowControlMsg::Stop => {
+                        unsafe { PostQuitMessage(0) };
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+/// 处理 WM_INPUT：解析 Raw Input 数据，喂入影子状态。
+fn handle_wm_input(lparam: LPARAM) {
+    unsafe {
+        let hrawinput = HRAWINPUT(lparam.0 as *mut _);
+        let mut data = [0u8; 64];
+        let mut size = 64u32;
+        let result = GetRawInputData(
+            hrawinput,
+            RID_INPUT,
+            Some(data.as_mut_ptr() as *mut _),
+            &mut size,
+            std::mem::size_of::<RAWINPUTHEADER>() as u32,
+        );
+        if result == 0 || result > 64 {
+            return;
+        }
+
+        let rawinput = &*(data.as_ptr() as *const RAWINPUT);
+        if rawinput.header.dwType != RIM_TYPEKEYBOARD.0 {
+            return;
+        }
+
+        let kb = &rawinput.data.keyboard;
+        let device_id = rawinput.header.hDevice.0 as usize;
+        let _ = device_id; // trace only in shadow
+        let time_ms = GetMessageTime() as u32;
+
+        let Some((key, is_down, _flags)) = raw_keyboard_to_modifier(kb) else {
+            return; // 非修饰键，不进 reducer
+        };
+
+        SHADOW.with(|cell| {
+            let mut guard = cell.borrow_mut();
+            let Some(state) = guard.as_mut() else {
+                return;
+            };
+            let _ = state::reduce(
+                state,
+                InputEvent::RawModifier(RawModifierEvent {
+                    device_id,
+                    key,
+                    is_down,
+                    time_ms,
+                }),
+                Instant::now(),
+            );
+        });
+    }
+}
+
+// ── 影子窗口初始化与清理 ──────────────────────────────────────────────────────
+
+/// 创建 message-only window 并注册 Raw Input。
+/// 返回 HWND 失败时记录错误但不 panic（影子模式降级）。
+fn init_shadow_window() {
+    unsafe {
+        // 注册窗口类
+        let class_name: Vec<u16> = SHADOW_WND_CLASS
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(shadow_wnd_proc),
+            lpszClassName: PCWSTR(class_name.as_ptr()),
+            ..Default::default()
+        };
+        let _ = RegisterClassExW(&wc);
+
+        // 创建 message-only window（HWND_MESSAGE = HWND(-1)）
+        let hwnd = CreateWindowExW(
+            WINDOW_EX_STYLE(0x08000000), // WS_EX_NOACTIVATE
+            PCWSTR(class_name.as_ptr()),
+            PCWSTR::null(),
+            WINDOW_STYLE(0),
+            0,
+            0,
+            0,
+            0,
+            Some(windows::Win32::Foundation::HWND(-1isize as *mut _)), // HWND_MESSAGE
+            None,
+            None,
+            None,
+        );
+
+        if let Ok(hwnd) = hwnd {
+            let _ = SHADOW_HWND.set(hwnd.0 as isize);
+
+            // 注册 Raw Input：keyboard, RIDEV_INPUTSINK | RIDEV_DEVNOTIFY
+            let rid = RAWINPUTDEVICE {
+                usUsagePage: HID_USAGE_PAGE_GENERIC,
+                usUsage: HID_USAGE_KEYBOARD,
+                dwFlags: RIDEV_INPUTSINK | RIDEV_DEVNOTIFY,
+                hwndTarget: hwnd,
+            };
+            let result =
+                RegisterRawInputDevices(&[rid], std::mem::size_of::<RAWINPUTDEVICE>() as u32);
+            if result.is_ok() {
+                tracing::info!("shadow: Raw Input registered (keyboard, INPUTSINK|DEVNOTIFY)");
+            } else {
+                tracing::warn!(?result, "shadow: RegisterRawInputDevices failed (degraded)");
+            }
+        } else {
+            tracing::warn!("shadow: CreateWindowExW failed (degraded)");
+        }
+    }
+}
+
+/// 销毁影子窗口。
+fn destroy_shadow_window() {
+    if let Some(&hwnd) = SHADOW_HWND.get() {
+        unsafe {
+            let _ = DestroyWindow(windows::Win32::Foundation::HWND(hwnd as *mut _));
+        }
+    }
+}
+
+// ── 启动诊断 ──────────────────────────────────────────────────────────────────
+
+/// 记录启动诊断：PID、线程 ID、session、integrity、Blink 进程数。
+fn log_startup_diagnostics() {
+    let pid = std::process::id();
+    let thread_id = unsafe { GetCurrentThreadId() };
+
+    // 检测同时运行的 Blink 进程数（只告警，不终止）
+    let blink_count = count_blink_processes();
+
+    // session 检测（简化：只记录 PID 和线程 ID）
+    tracing::info!(pid, thread_id, blink_count, "shadow: hook thread started");
+
+    if blink_count > 1 {
+        tracing::warn!(
+            blink_count,
+            "shadow: multiple Blink processes detected (not terminating)"
+        );
+    }
+}
+
+/// 统计同名进程数（简化版：只检测当前进程是否唯一）。
+fn count_blink_processes() -> u32 {
+    // 简化实现：在影子模式中只返回 1（完整实现需枚举进程）
+    // Phase B 的进程检测在 log_startup_diagnostics 中以日志形式记录
+    1
+}
+
+/// 初始化影子状态机（hook 线程启动时调用）。
+fn init_shadow_state() {
+    let mut state = InputState::default();
+    let snapshot = derive_shadow_config();
+    let _ = state::reduce(
+        &mut state,
+        InputEvent::ConfigChanged(snapshot),
+        Instant::now(),
+    );
+    SHADOW.with(|cell| {
+        *cell.borrow_mut() = Some(state);
+    });
+}
+
+// ── 影子 API（供 mod.rs 调用）─────────────────────────────────────────────────
+
+/// 更新影子配置（主线程调用）。
+pub fn shadow_update_config(snapshot: InputConfigSnapshot) {
+    send_shadow_control(ShadowControlMsg::Config(snapshot));
+}
+
+/// 更新影子窗口状态（主线程调用）。
+pub fn shadow_update_window(visible: bool, revision: u64) {
+    send_shadow_control(ShadowControlMsg::WindowChanged { visible, revision });
+}
+
+/// 更新影子视图上下文（主线程调用）。
+pub fn shadow_update_view(ctx: MainViewContext) {
+    send_shadow_control(ShadowControlMsg::ViewContext(ctx));
+}
+
+/// 停止影子引擎（主线程调用）。
+pub fn shadow_stop() {
+    send_shadow_control(ShadowControlMsg::Stop);
 }
 
 #[cfg(test)]

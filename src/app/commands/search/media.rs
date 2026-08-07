@@ -157,7 +157,13 @@ pub fn screenshot_pin(
     show_translating: Option<bool>,
 ) -> Result<(), String> {
     let show_translating = show_translating.unwrap_or(false);
-    crate::infra::platform::window::show_pin_window(&app, png_data, screen_x, screen_y, show_translating)?;
+    crate::infra::platform::window::show_pin_window(
+        &app,
+        png_data,
+        screen_x,
+        screen_y,
+        show_translating,
+    )?;
     finish_screenshot_session(&app);
     tracing::info!(screen_x, screen_y, show_translating, "截图已钉到屏幕");
     Ok(())
@@ -679,27 +685,26 @@ pub async fn screenshot_control_hints(
     let app_clone = app.clone();
     tokio::task::spawn_blocking(move || {
         let hwnd = windows::Win32::Foundation::HWND(hwnd as _);
-        let (hints, truncated) =
-            crate::infra::platform::uia::collect_control_hints_streaming(
-                hwnd,
-                deadline,
-                max_depth,
-                min_size,
-                |batch, depth| {
-                    let _ = app_clone.emit_to(
-                        "chord-screenshot",
-                        EventNames::SCREENSHOT_CONTROL_HINTS,
-                        &ControlHintsEvent {
-                            generation,
-                            kind: "batch",
-                            depth,
-                            hints: batch.to_vec(),
-                            total: None,
-                            truncated: None,
-                        },
-                    );
-                },
-            );
+        let (hints, truncated) = crate::infra::platform::uia::collect_control_hints_streaming(
+            hwnd,
+            deadline,
+            max_depth,
+            min_size,
+            |batch, depth| {
+                let _ = app_clone.emit_to(
+                    "chord-screenshot",
+                    EventNames::SCREENSHOT_CONTROL_HINTS,
+                    &ControlHintsEvent {
+                        generation,
+                        kind: "batch",
+                        depth,
+                        hints: batch.to_vec(),
+                        total: None,
+                        truncated: None,
+                    },
+                );
+            },
+        );
         // done
         let _ = app_clone.emit_to(
             "chord-screenshot",

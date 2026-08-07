@@ -938,7 +938,9 @@ impl ChatService {
     /// 供前端 header 标签展示。`provider_configured` 沿用 Main 档语义（兼容旧前端）。
     pub fn status(&self) -> ChatStatus {
         // 0.17.9: status 供对话窗口调用，走 Persistent 路径
-        let resolved = self.resolve_current_entries(ConversationKind::Persistent).ok();
+        let resolved = self
+            .resolve_current_entries(ConversationKind::Persistent)
+            .ok();
         let (provider_name, model_name) = match &resolved {
             Some(r) => {
                 let model_display = if r.model.display_name.is_empty() {

@@ -177,10 +177,7 @@ fn which_python() -> String {
 /// 运行时零构建，不违反无 bundler 铁则（spec-frontend §1.1/§1.5）。
 fn bundle_tiptap() {
     let root = workspace_root();
-    let script = root
-        .join("xtask")
-        .join("scripts")
-        .join("bundle-tiptap.js");
+    let script = root.join("xtask").join("scripts").join("bundle-tiptap.js");
     if !script.exists() {
         panic!("找不到 Tiptap 打包脚本: {}", script.display());
     }
@@ -222,8 +219,10 @@ fn main() {
             println!("📦 cargo tauri build ...");
             run("cargo", &["tauri", "build"], &root);
         }
-        "icons" => fetch_icons(), // 拉取 Lucide 图标生成 sprite
+        "icons" => fetch_icons(),    // 拉取 Lucide 图标生成 sprite
         "tiptap" => bundle_tiptap(), // 打包 Tiptap IIFE 产物
-        other => panic!("未知子命令: {other}\n用法: cargo xtask <plugins|copy|release|icons|tiptap>"),
+        other => {
+            panic!("未知子命令: {other}\n用法: cargo xtask <plugins|copy|release|icons|tiptap>")
+        }
     }
 }

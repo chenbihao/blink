@@ -1,8 +1,8 @@
 //! Windows 平台特定的窗口控制实现：Win32 API。
 
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicU64, Ordering};
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 // ── 0.18.3：便签 N+1 预热机制 ──────────────────────────
@@ -1194,19 +1194,28 @@ pub fn show_sticky_window(
                 crate::infra::platform::dpi::get_dpi_for_hmonitor(hmon),
             )
         };
-        let _ = win.set_size(tauri::LogicalSize::new(cw as f64 / scale, ch as f64 / scale));
+        let _ = win.set_size(tauri::LogicalSize::new(
+            cw as f64 / scale,
+            ch as f64 / scale,
+        ));
         let _ = win.set_position(tauri::PhysicalPosition::new(cx, cy));
         let _ = win.set_always_on_top(always_on_top);
-        let escaped_id = sticky_id.replace('\\', "\\\\").replace('\'', "\\'").replace('\n', "\\n").replace('\r', "\\r");
-        let _ = win.eval(&format!("if (window.__stickyReload) window.__stickyReload('{escaped_id}')"));
+        let escaped_id = sticky_id
+            .replace('\\', "\\\\")
+            .replace('\'', "\\'")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r");
+        let _ = win.eval(&format!(
+            "if (window.__stickyReload) window.__stickyReload('{escaped_id}')"
+        ));
         win
     } else if let Some(bl) = borrowed_label {
         // 复用已借出的 spare 窗口（同一便签再次唤起）
         tracing::debug!(sticky_id, spare_label = %bl, "sticky window: 复用已借出 spare");
         let (cx, cy, cw, ch) = clamp_sticky_geometry(x, y, width, height);
-        let win = app.get_webview_window(&bl).ok_or_else(|| {
-            "便签窗口在复用时已不存在".to_string()
-        })?;
+        let win = app
+            .get_webview_window(&bl)
+            .ok_or_else(|| "便签窗口在复用时已不存在".to_string())?;
         let scale = unsafe {
             let pt = POINT { x: cx, y: cy };
             let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
@@ -1214,11 +1223,20 @@ pub fn show_sticky_window(
                 crate::infra::platform::dpi::get_dpi_for_hmonitor(hmon),
             )
         };
-        let _ = win.set_size(tauri::LogicalSize::new(cw as f64 / scale, ch as f64 / scale));
+        let _ = win.set_size(tauri::LogicalSize::new(
+            cw as f64 / scale,
+            ch as f64 / scale,
+        ));
         let _ = win.set_position(tauri::PhysicalPosition::new(cx, cy));
         let _ = win.set_always_on_top(always_on_top);
-        let escaped_id = sticky_id.replace('\\', "\\\\").replace('\'', "\\'").replace('\n', "\\n").replace('\r', "\\r");
-        let _ = win.eval(&format!("if (window.__stickyReload) window.__stickyReload('{escaped_id}')"));
+        let escaped_id = sticky_id
+            .replace('\\', "\\\\")
+            .replace('\'', "\\'")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r");
+        let _ = win.eval(&format!(
+            "if (window.__stickyReload) window.__stickyReload('{escaped_id}')"
+        ));
         win
     } else {
         // 尝试借用空闲 spare
@@ -1226,7 +1244,10 @@ pub fn show_sticky_window(
         if let Some(al) = available_label {
             // 借用预热窗口
             tracing::debug!(sticky_id, spare_label = %al, "sticky window: 借用预热 spare");
-            spare_borrow().lock().unwrap().insert(al.clone(), sticky_id.to_string());
+            spare_borrow()
+                .lock()
+                .unwrap()
+                .insert(al.clone(), sticky_id.to_string());
 
             let (cx, cy, cw, ch) = clamp_sticky_geometry(x, y, width, height);
             let scale = unsafe {
@@ -1236,24 +1257,37 @@ pub fn show_sticky_window(
                     crate::infra::platform::dpi::get_dpi_for_hmonitor(hmon),
                 )
             };
-            let spare_win = app.get_webview_window(&al).ok_or_else(|| {
-                "预热窗口不存在".to_string()
-            })?;
-            let _ = spare_win.set_size(tauri::LogicalSize::new(cw as f64 / scale, ch as f64 / scale));
+            let spare_win = app
+                .get_webview_window(&al)
+                .ok_or_else(|| "预热窗口不存在".to_string())?;
+            let _ = spare_win.set_size(tauri::LogicalSize::new(
+                cw as f64 / scale,
+                ch as f64 / scale,
+            ));
             let _ = spare_win.set_position(tauri::PhysicalPosition::new(cx, cy));
             let _ = spare_win.set_always_on_top(always_on_top);
-            let escaped_id = sticky_id.replace('\\', "\\\\").replace('\'', "\\'").replace('\n', "\\n").replace('\r', "\\r");
-            let _ = spare_win.eval(&format!("if (window.__stickyReload) window.__stickyReload('{escaped_id}')"));
+            let escaped_id = sticky_id
+                .replace('\\', "\\\\")
+                .replace('\'', "\\'")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r");
+            let _ = spare_win.eval(&format!(
+                "if (window.__stickyReload) window.__stickyReload('{escaped_id}')"
+            ));
 
             if let Ok(hwnd) = spare_win.hwnd() {
                 let hwnd = HWND(hwnd.0 as _);
                 install_sysmenu_blocker(hwnd);
                 enable_rounded_corners(hwnd);
             }
-            spare_win.show().map_err(|e| format!("显示便签窗口失败: {e}"))?;
+            spare_win
+                .show()
+                .map_err(|e| format!("显示便签窗口失败: {e}"))?;
             let _ = spare_win.unminimize();
             if focus {
-                spare_win.set_focus().map_err(|e| format!("聚焦便签窗口失败: {e}"))?;
+                spare_win
+                    .set_focus()
+                    .map_err(|e| format!("聚焦便签窗口失败: {e}"))?;
             }
 
             tracing::info!(sticky_id, focus, "sticky window: 已显示（预热借用）");
@@ -1844,7 +1878,14 @@ pub fn show_pin_window(
             .map_err(|e| format!("eval 注入 PNG 失败: {e}"))?;
         let _ = win.show();
         let _ = win.set_focus();
-        tracing::debug!(png_w, png_h, screen_x, screen_y, show_translating, "钉图窗口已复用");
+        tracing::debug!(
+            png_w,
+            png_h,
+            screen_x,
+            screen_y,
+            show_translating,
+            "钉图窗口已复用"
+        );
         return Ok(());
     }
 
@@ -1878,7 +1919,14 @@ pub fn show_pin_window(
             win.eval(&js)
                 .map_err(|e| format!("eval 注入 PNG 失败: {e}"))?;
             let _ = win.show();
-            tracing::debug!(png_w, png_h, screen_x, screen_y, show_translating, "钉图窗口已创建");
+            tracing::debug!(
+                png_w,
+                png_h,
+                screen_x,
+                screen_y,
+                show_translating,
+                "钉图窗口已创建"
+            );
             Ok(())
         }
         Err(e) => {
@@ -2058,26 +2106,22 @@ fn create_sticky_spare(app: &AppHandle) {
     let seq = SPARE_SEQ.fetch_add(1, Ordering::SeqCst);
     let label = format!("sticky-spare-{seq}");
 
-    match WebviewWindowBuilder::new(
-        app,
-        &label,
-        WebviewUrl::App("sticky.html?preheat=1".into()),
-    )
-    .title("便签")
-    .inner_size(
-        crate::infra::data::sticky::DEFAULT_WIDTH as f64,
-        crate::infra::data::sticky::DEFAULT_HEIGHT as f64,
-    )
-    .min_inner_size(STICKY_MIN_W, STICKY_MIN_H)
-    .decorations(false)
-    .transparent(false)
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .resizable(true)
-    .focused(false)
-    .visible(false)
-    .background_color(Color(255, 249, 196, 255))
-    .build()
+    match WebviewWindowBuilder::new(app, &label, WebviewUrl::App("sticky.html?preheat=1".into()))
+        .title("便签")
+        .inner_size(
+            crate::infra::data::sticky::DEFAULT_WIDTH as f64,
+            crate::infra::data::sticky::DEFAULT_HEIGHT as f64,
+        )
+        .min_inner_size(STICKY_MIN_W, STICKY_MIN_H)
+        .decorations(false)
+        .transparent(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .resizable(true)
+        .focused(false)
+        .visible(false)
+        .background_color(Color(255, 249, 196, 255))
+        .build()
     {
         Ok(w) => {
             let label_owned = label.clone();

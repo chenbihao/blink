@@ -30,7 +30,9 @@ fn entry_user(provider_id: &str, purpose: &str) -> Result<String, SecretError> {
         )));
     }
     if purpose.is_empty() || purpose.contains('\0') {
-        return Err(SecretError::InvalidRef(format!("purpose 非法: {purpose:?}")));
+        return Err(SecretError::InvalidRef(format!(
+            "purpose 非法: {purpose:?}"
+        )));
     }
     Ok(format!("{provider_id}/{purpose}"))
 }

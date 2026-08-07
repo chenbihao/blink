@@ -63,10 +63,7 @@ pub async fn run_in_terminal(command: String) -> Result<(), String> {
 
     tracing::info!("run_in_terminal: 执行命令");
 
-    let result = tokio::task::spawn_blocking(move || {
-        run_in_terminal_blocking(&command)
-    })
-    .await;
+    let result = tokio::task::spawn_blocking(move || run_in_terminal_blocking(&command)).await;
 
     match result {
         Ok(Ok(())) => Ok(()),

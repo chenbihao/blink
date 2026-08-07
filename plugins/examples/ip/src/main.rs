@@ -180,10 +180,7 @@ fn main() {
                 if geo_provider == "none" {
                     // 0.17.10a: geo_provider="none" → 不查公网，直接返回本地 IP
                     let (items, raw_ips) = build_local_ip_items(local_ip, local_ipv6);
-                    let resp = PluginToCore::Response(PluginResponse {
-                        id,
-                        items,
-                    });
+                    let resp = PluginToCore::Response(PluginResponse { id, items });
                     send_message(&mut stdout, &resp);
                     // raw_ips 在 query 路径不用（走旧 PluginItem 协议）
                     let _ = raw_ips;

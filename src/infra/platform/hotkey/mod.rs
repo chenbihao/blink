@@ -122,13 +122,18 @@ pub fn set_chord_mode(on: bool, tap_keys: std::collections::HashSet<String>) {
     tracing::trace!(on, "chord mode 已切换");
 }
 
+// 0.18.7 纯输入状态机（阶段 A）
+mod state;
+
 // 平台特定实现
 #[cfg(target_os = "windows")]
 mod windows;
 
 #[cfg(target_os = "windows")]
+#[allow(unused_imports)]
 pub use windows::{
-    expect_synthesized_alt_keyup, is_alt_down, set_voice_recording, start_hook_thread,
+    expect_synthesized_alt_keyup, is_alt_down, set_voice_recording, shadow_stop,
+    shadow_update_config, shadow_update_view, shadow_update_window, start_hook_thread,
 };
 
 // 快捷键录制

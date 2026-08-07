@@ -224,15 +224,33 @@
 
 ### 5.4 持久化窗口可靠性（强制）
 
-> 便签的核心承诺是"放在那里就不会丢"——只靠用户点保存或退出时写库，覆盖不了崩溃和系统强制结束。0.16.7/0.16.11 摸出这套范式，未来笔记/Todo 等持久化窗口复用。
+> 便签的核心承诺是"放在那里就不会丢"--只靠用户点保存或退出时写库，覆盖不了崩溃和系统强制结束。0.16.7/0.16.11 摸出这套范式，未来笔记/Todo 等持久化窗口复用。
 
 - **短防抖自动写库**：内容输入用短防抖落库，不能只靠手动保存
 - **失焦 / 隐藏 / 关闭前强制 flush**：防抖中的未保存内容在这些节点必须强制落库
-- **区分"用户关闭窗口"和"应用整体退出"**：用进程级 `IS_APP_EXITING: AtomicBool` 标志——退出时不 `prevent_close`、不改 `visible`；退出前 `flush_all_*_windows()` 确保防抖内容落库
+- **区分"用户关闭窗口"和"应用整体退出"**：用进程级 `IS_APP_EXITING: AtomicBool` 标志--退出时不 `prevent_close`、不改 `visible`；退出前 `flush_all_*_windows()` 确保防抖内容落库
 - **启动恢复不阻塞主链路**：异步 spawn 读取持久化窗口，不抢 Alt+Space 的焦点；恢复循环加节流/验证
 - **显示器变化钳制到可见工作区**：`clamp_*_geometry` 把离屏窗口拉回最近可见工作区
 - **单条恢复失败只记日志跳过**：不阻断其他窗口和主窗口 P0 唤起
 - **窗口外壳复用**：关闭=hide（`prevent_close` + hide），物理销毁只在删除/退出时；动态数量窗口（如 `sticky-{id}`）按需创建但复用同一套 hide 机制
+
+### 5.5 输入状态：后端单一真源，前端只消费（强制）
+
+> 0.18.7 收敛。此前前端 50ms 轮询 Alt 状态、`set_chord_mode` 反向控制后端、合成 keyup 时间窗猜测，多真源长期分叉导致安装后 Alt/Chord 行为混乱。
+
+**铁则**：物理键状态（Alt 是否按下）、Chord 独占会话、主窗口可见性，**后端是唯一真源**。前端只消费后端推送的状态，不反向控制。
+
+| 禁止 | 替代 |
+|---|---|
+| 前端定时轮询后端物理键状态做 UI 决策 | 监听后端 `INPUT_STATE_CHANGED` 事件 + 注册时拿快照，用 UI revision 去重/拒绝旧状态 |
+| 前端通过 IPC 反向开关后端输入状态（如 `set_chord_mode`） | 后端状态机据 view context（ready/query_empty/ai_mode）自行决定 exclusive |
+| 前端用时间窗猜测合成键事件（如 200ms synth keyup） | 后端用 Raw Input + Hook 双源校正，不猜 |
+
+**防御式消费**：键盘事件处理用 `inputState.isAltDown() || e.altKey`--后端快照抵抗 WebView synthetic keyup，事件自带 `altKey` 覆盖状态事件尚未到达的即时边沿（§5.1 异步竞态防护在键盘事件上的具体表现）。不得只用 `e.altKey`。
+
+**视图上下文上报**：前端只上报离散视图状态（`ready/query_empty/ai_mode`），不逐字符同步 query 文本给后端输入状态机；字段未变化不发送。
+
+> 落地（InputUiState 协议、view epoch、register_main_input_view）见 [phases/0.18.7 §3.3/§3.9](../phases/0.18.7-input-state-flow-refactor.md)。
 
 ---
 

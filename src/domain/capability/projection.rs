@@ -566,8 +566,8 @@ mod tests {
         let rule = ProjectionRule {
             result_shape: Some(ResultShape::Items),
             items_pointer: Some("$".into()),
-            item_pointer: Some("$.ip".into()),         // normalize 应忽略
-            item_desc_pointer: Some("$.type".into()),  // normalize 应忽略
+            item_pointer: Some("$.ip".into()), // normalize 应忽略
+            item_desc_pointer: Some("$.type".into()), // normalize 应忽略
             item_actions: vec![ActionDef {
                 kind: ActionKindDef::Copy,
                 pointer: None,

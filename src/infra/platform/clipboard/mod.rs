@@ -298,11 +298,7 @@ pub fn read_current_text() -> Option<String> {
 ///
 /// 内部先 `mark_self_write(label, skip_persist)`，再调 `write_text_to_clipboard_raw`。
 #[cfg(target_os = "windows")]
-pub fn write_text_to_clipboard(
-    text: &str,
-    label: &str,
-    skip_persist: bool,
-) -> Result<(), String> {
+pub fn write_text_to_clipboard(text: &str, label: &str, skip_persist: bool) -> Result<(), String> {
     mark_self_write(label, skip_persist);
     windows::write_text_to_clipboard_raw(text)
 }

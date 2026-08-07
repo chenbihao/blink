@@ -152,11 +152,7 @@ fn get_window_dwm_rect(hwnd: HWND) -> Option<RECT> {
             std::mem::size_of::<RECT>() as u32,
         )
     };
-    if hr.is_ok() {
-        Some(rect)
-    } else {
-        None
-    }
+    if hr.is_ok() { Some(rect) } else { None }
 }
 
 /// 截图控件吸附提示——一个 UIA 控件的矩形 + 类型信息。
@@ -250,7 +246,12 @@ pub fn element_from_handle(hwnd: HWND) -> Option<IUIAutomationElement> {
 /// COM MTA 自动初始化/释放。
 #[allow(dead_code)]
 pub fn collect_control_hints(hwnd: HWND) -> Vec<ControlHint> {
-    collect_control_hints_with(hwnd, CONTROL_HINT_DEADLINE, CONTROL_HINT_MAX_DEPTH, CONTROL_HINT_MIN_SIZE)
+    collect_control_hints_with(
+        hwnd,
+        CONTROL_HINT_DEADLINE,
+        CONTROL_HINT_MAX_DEPTH,
+        CONTROL_HINT_MIN_SIZE,
+    )
 }
 
 /// 带自定义 deadline、深度和最小展开尺寸的 `collect_control_hints`。
@@ -308,10 +309,7 @@ pub fn collect_control_hints_with(
                     let w = rect.right - rect.left;
                     let h = rect.bottom - rect.top;
                     if w < min_size || h < min_size {
-                        tracing::trace!(
-                            w, h, min_size,
-                            "跳过展开（控件尺寸低于阈值）"
-                        );
+                        tracing::trace!(w, h, min_size, "跳过展开（控件尺寸低于阈值）");
                         return false;
                     }
                 }
@@ -520,10 +518,7 @@ where
                     let w = rect.right - rect.left;
                     let h = rect.bottom - rect.top;
                     if w < min_size || h < min_size {
-                        tracing::trace!(
-                            w, h, min_size,
-                            "跳过展开（控件尺寸低于阈值）"
-                        );
+                        tracing::trace!(w, h, min_size, "跳过展开（控件尺寸低于阈值）");
                         return false;
                     }
                 }
@@ -704,7 +699,7 @@ mod tests {
 
         let hints = bfs_collect(
             root,
-            3, // max_depth = 3
+            3,        // max_depth = 3
             || false, // never expire
             |elem| {
                 nodes_ref
@@ -773,10 +768,7 @@ mod tests {
         );
 
         // deadline 在第 5 次 is_expired 检查后触发，应该收集到部分结果
-        assert!(
-            !hints.is_empty(),
-            "deadline 截断应返回部分结果，不应为空"
-        );
+        assert!(!hints.is_empty(), "deadline 截断应返回部分结果，不应为空");
         // 且不应收集到全部结果（树有 3+9+27=39 个非 root 元素）
         assert!(
             hints.len() < 39,
@@ -927,7 +919,7 @@ mod tests {
         assert_eq!(clamped.x, 1800);
         assert_eq!(clamped.y, 1000);
         assert_eq!(clamped.w, 120); // 1920 - 1800
-        assert_eq!(clamped.h, 80);  // 1080 - 1000
+        assert_eq!(clamped.h, 80); // 1080 - 1000
     }
 
     #[test]
@@ -1039,9 +1031,9 @@ mod tests {
             |_| true,
             |elem| {
                 let hint = match elem.id {
-                    1 => make_hint(100, 100, 200, 200),      // 在窗口内
-                    2 => make_hint(1100, 100, 200, 200),     // 完全在窗口外
-                    3 => make_hint(900, 900, 200, 200),       // 部分超出
+                    1 => make_hint(100, 100, 200, 200),  // 在窗口内
+                    2 => make_hint(1100, 100, 200, 200), // 完全在窗口外
+                    3 => make_hint(900, 900, 200, 200),  // 部分超出
                     _ => return None,
                 };
                 clamp_hint_to_rect(hint, win)

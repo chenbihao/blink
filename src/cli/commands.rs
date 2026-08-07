@@ -229,7 +229,9 @@ fn run_capability(
     let result = tauri::async_runtime::block_on(cap_registry.invoke(capability, args_value, &ctx));
 
     // 0.17.10: 获取 capability 的 projection 规则，传给 to_display_text 做展示投影
-    let projection = cap_registry.get(capability).and_then(|cap| cap.projection());
+    let projection = cap_registry
+        .get(capability)
+        .and_then(|cap| cap.projection());
 
     match result {
         Ok(result) => {
