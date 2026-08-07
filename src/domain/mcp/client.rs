@@ -396,7 +396,7 @@ impl McpClientManager {
 
         tracing::info!(
             server = %config.name,
-            url = %url,
+            url = %redact_url_secrets(url),
             "MCP: 尝试 HTTP 连接"
         );
 
@@ -473,7 +473,7 @@ impl McpClientManager {
 
         tracing::info!(
             server = %config.name,
-            url = %url,
+            url = %redact_url_secrets(url),
             "MCP: 尝试 SSE 连接"
         );
 
@@ -725,6 +725,50 @@ impl Default for McpClientManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// 脱敏 URL query 中的敏感参数——防止 API key/token 明文进入日志。
+///
+/// MCP server 配置常把凭证塞在 URL query string 里（如 Tavily 的
+/// `?tavilyApiKey=tvly-dev-...`），直接 `%url` 打印会违反「敏感信息永不记日志」
+/// 铁则（spec-backend.md §3.2）。这里对参数名命中 key/token/secret/password/auth
+/// 的值统一替换为 `***REDACTED***`，保留 scheme/host/path/参数名便于诊断。
+///
+/// 取舍：关键词匹配宁严勿松——宁可误打码非密钥参数（如 `oauth_scope`，其值是
+/// scope 字符串），也不漏放真实凭证。诊断时从参数名仍能看出语义。
+fn redact_url_secrets(url: &str) -> String {
+    // 无 ? 的 URL（纯 endpoint）无 query，原样返回
+    let Some((prefix, query)) = url.split_once('?') else {
+        return url.to_string();
+    };
+    let redacted = query
+        .split('&')
+        .map(|pair| {
+            if let Some((k, v)) = pair.split_once('=') {
+                if is_sensitive_param(k) {
+                    format!("{k}=***REDACTED***")
+                } else {
+                    format!("{k}={v}")
+                }
+            } else {
+                // 无 = 的裸参数（如 ?flag）原样保留
+                pair.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("{prefix}?{redacted}")
+}
+
+/// 判断 query 参数名是否疑似敏感凭证（不区分大小写）。
+fn is_sensitive_param(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("key")
+        || lower.contains("token")
+        || lower.contains("secret")
+        || lower.contains("password")
+        || lower.contains("passwd")
+        || lower.contains("auth")
 }
 
 /// Windows 命令解析：处理 `.cmd`/`.bat` 文件。
@@ -1004,5 +1048,99 @@ mod tests {
             epoch_before,
             "stop_server 未实际移除 server 时不应 bump epoch"
         );
+    }
+
+    // ── 0.18.7: URL query 敏感参数脱敏（防 API key 明文进日志）──
+
+    #[test]
+    fn redact_url_secrets_masks_api_key() {
+        // Tavily 风格：key 在 query
+        let url = "https://mcp.tavily.com/mcp/?tavilyApiKey=tvly-dev-SECRET123";
+        let redacted = redact_url_secrets(url);
+        assert!(
+            redacted.contains("tavilyApiKey=***REDACTED***"),
+            "key 值应被打码: {redacted}"
+        );
+        assert!(
+            !redacted.contains("SECRET123"),
+            "明文不得残留: {redacted}"
+        );
+        // scheme/host/path 保留用于诊断
+        assert!(
+            redacted.starts_with("https://mcp.tavily.com/mcp/?"),
+            "endpoint 应保留: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redact_url_secrets_masks_multiple_sensitive_params() {
+        let url = "https://api.example.com/sse?token=abc123&refresh=yes&secret=topsecret&X-API-Key=k1";
+        let redacted = redact_url_secrets(url);
+        assert!(redacted.contains("token=***REDACTED***"));
+        assert!(redacted.contains("secret=***REDACTED***"));
+        assert!(redacted.contains("X-API-Key=***REDACTED***"));
+        // 非敏感参数原样保留
+        assert!(redacted.contains("refresh=yes"));
+    }
+
+    #[test]
+    fn redact_url_secrets_case_insensitive() {
+        // 大小写不敏感：KEY / Token / SECRET 都该被打码
+        let url = "https://x.com/?KEY=k1&Token=t1&SECRET=s1";
+        let redacted = redact_url_secrets(url);
+        assert!(redacted.contains("KEY=***REDACTED***"));
+        assert!(redacted.contains("Token=***REDACTED***"));
+        assert!(redacted.contains("SECRET=***REDACTED***"));
+    }
+
+    #[test]
+    fn redact_url_secrets_preserves_url_without_query() {
+        // 纯 endpoint（无 ?）原样返回
+        let url = "https://mcp.context7.com/mcp";
+        assert_eq!(redact_url_secrets(url), url);
+    }
+
+    #[test]
+    fn redact_url_secrets_preserves_bare_flag_params() {
+        // 无 = 的裸参数（如 ?flag）原样保留，不 panic
+        let url = "https://x.com/api?flag&key=secret";
+        let redacted = redact_url_secrets(url);
+        assert!(redacted.contains("flag&"));
+        assert!(redacted.contains("key=***REDACTED***"));
+    }
+
+    #[test]
+    fn is_sensitive_param_detects_common_names() {
+        for name in &[
+            "key",
+            "apiKey",
+            "api_key",
+            "X-API-Key",
+            "token",
+            "access_token",
+            "accessToken",
+            "refreshToken",
+            "secret",
+            "clientSecret",
+            "password",
+            "passwd",
+            "Authorization",
+            "auth",
+        ] {
+            assert!(
+                is_sensitive_param(name),
+                "{name} 应被判定为敏感参数"
+            );
+        }
+    }
+
+    #[test]
+    fn is_sensitive_param_rejects_non_sensitive() {
+        for name in &["model", "stream", "version", "limit", "url", "page"] {
+            assert!(
+                !is_sensitive_param(name),
+                "{name} 不应被判定为敏感参数"
+            );
+        }
     }
 }

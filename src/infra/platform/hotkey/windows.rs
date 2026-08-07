@@ -526,8 +526,9 @@ fn process_control_message(state: &mut InputState, msg: ControlMsg) {
 fn handle_wm_input(lparam: LPARAM) {
     unsafe {
         let hrawinput = HRAWINPUT(lparam.0 as *mut _);
-        let mut data = [0u8; 64];
-        let mut size = 64u32;
+        // 用 MaybeUninit<RAWINPUT> 保证结构体对齐（不可用 [u8; N]，会 misaligned panic）。
+        let mut data = std::mem::MaybeUninit::<RAWINPUT>::uninit();
+        let mut size = std::mem::size_of::<RAWINPUT>() as u32;
         let result = GetRawInputData(
             hrawinput,
             RID_INPUT,
@@ -535,11 +536,11 @@ fn handle_wm_input(lparam: LPARAM) {
             &mut size,
             std::mem::size_of::<RAWINPUTHEADER>() as u32,
         );
-        if result == 0 || result > 64 {
+        if result == 0 {
             return;
         }
 
-        let rawinput = &*(data.as_ptr() as *const RAWINPUT);
+        let rawinput = data.assume_init_ref();
         if rawinput.header.dwType != RIM_TYPEKEYBOARD.0 {
             return;
         }
@@ -635,17 +636,20 @@ fn init_window() {
         };
         let _ = RegisterClassExW(&wc);
 
-        // 创建 message-only window（HWND_MESSAGE = HWND(-1)）
+        // 创建不可见窗口（等同 message-only window）。
+        // 不用 HWND_MESSAGE（HWND(-1)）--windows 0.62 下该构造产生
+        // ERROR_INVALID_WINDOW_HANDLE(0x80070578)。改用 None parent + 无 WS_VISIBLE，
+        // 与 clipboard 监听窗口同模式（已验证可行），窗口不可见即可作消息泵。
         let hwnd = CreateWindowExW(
-            WINDOW_EX_STYLE(0x08000000), // WS_EX_NOACTIVATE
+            WINDOW_EX_STYLE::default(),
             PCWSTR(class_name.as_ptr()),
             PCWSTR::null(),
-            WINDOW_STYLE(0),
+            WINDOW_STYLE::default(),
             0,
             0,
             0,
             0,
-            Some(windows::Win32::Foundation::HWND(-1isize as *mut _)), // HWND_MESSAGE
+            None,
             None,
             None,
             None,
@@ -669,7 +673,7 @@ fn init_window() {
                 tracing::warn!(?result, "RegisterRawInputDevices failed (degraded)");
             }
         } else {
-            tracing::warn!("CreateWindowExW failed (degraded)");
+            tracing::warn!(error = ?hwnd, "CreateWindowExW failed (degraded)");
         }
     }
 }

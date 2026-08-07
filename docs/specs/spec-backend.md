@@ -17,7 +17,7 @@
 | **子进程静默** | 调外部进程（`netstat`/`taskkill`/`python`/`node` 等子进程）必须加 `CREATE_NO_WINDOW`，走 `infra/platform/process.rs` 的 `no_window()` / `no_window_tokio()`，**禁止裸 `Command`**——否则会闪命令行黑窗。0.17.0 自启链路曾因此泄漏 cmd 窗口 |
 | **阻塞操作隔离** | CPU 密集或同步阻塞操作（PNG 编解码、图像像素 swap、Win32 同步 API、SQLite 长查询）必须 `tokio::task::spawn_blocking` 挪出工作线程，**禁止在 async 上下文裸跑**——否则阻塞 tokio 调度器影响 Alt+Space 主链路。参考 0.11 截图 PNG 解码 / BGRA swap / 剪贴板写入均走 `spawn_blocking` |
 | **AI 请求单活跃 + 串行启动** | AI 请求必须满足三约束：① 全局单活跃请求（`RequestTracker` 单槽，新请求 abort 旧或返回 `AlreadyActive`）；② `start_gate` 串行化启动，防并发 IPC 绕过 active 检查；③ 0.17.6 后**跨窗口单活跃**——主窗口 AI 运行时对话窗口发消息得 `AlreadyActive`，前端提示"AI 正在 {active_window} 中处理"。防并发请求导致状态错乱（0.12 §3.2 + 0.17.6） |
-| **Hook 热路径无锁无 IO** | `WH_KEYBOARD_LL` 回调在系统线程上同步执行，**禁止**取得可能阻塞/竞争的 Mutex/RwLock、查 DB、调 Tauri、`await`、或任何阻塞 IO--否则会拖慢全局键盘响应甚至被系统摘除 Hook。同步 `Pass/Swallow` 判定在回调内完成，业务副作用通过非阻塞 channel send 转交 `HotkeyService` 在 Tauri runtime 执行。原子操作和非阻塞 channel send 允许。0.18.7 进一步把 Hook 决策收敛到单线程 `InputStateMachine` reducer，回调只负责归一化事件 + 同步传播判定（见 [phases/0.18.7 §3.1](../phases/0.18.7-input-state-flow-refactor.md)） |
+| **Hook 热路径无锁无 IO** | `WH_KEYBOARD_LL` 回调在系统线程上同步执行，**禁止**取得可能阻塞/竞争的 Mutex/RwLock、查 DB、调 Tauri、`await`、或任何阻塞 IO--否则会拖慢全局键盘响应甚至被系统摘除 Hook。同步 `Pass/Swallow` 判定在回调内完成，业务副作用通过非阻塞 channel send 转交 `HotkeyService` 在 Tauri runtime 执行。原子操作和非阻塞 channel send 允许。0.18.7 进一步把 Hook 决策收敛到单线程 `InputStateMachine` reducer，回调只负责归一化事件 + 同步传播判定（见 [phases/0.18 §3.7 单线程输入引擎](../phases/0.18-enhancement-chord.md)） |
 
 > 分层依赖方向的硬约束（domain 不 use tauri / infra 不反向依赖 app）见 `spec-architecture.md §A1`。
 

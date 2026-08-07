@@ -107,6 +107,9 @@ static STATE: AtomicU8 = AtomicU8::new(ST_HIDDEN);
 static START: OnceLock<Instant> = OnceLock::new();
 static INVOKE_AT: AtomicU64 = AtomicU64::new(0);
 static GRACE_MS: AtomicU64 = AtomicU64::new(DEFAULT_GRACE_MS);
+/// 主窗口 visibility transition 计数器（window 模块拥有，每次成功 transition 递增）。
+/// 通知 hotkey 输入状态机时携带，旧 revision 被 reduce_window_changed 丢弃。
+static WINDOW_REVISION: AtomicU64 = AtomicU64::new(0);
 /// Blink 主窗口抢焦点前的外部前台窗口，截图/chord 后续需要恢复或驱动原应用时使用。
 static LAST_EXTERNAL_HWND: AtomicIsize = AtomicIsize::new(0);
 
@@ -128,7 +131,19 @@ fn elapsed_ms() -> u64 {
     START.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
-/// 唤起：采集上下文快照 → 定位 → show → set_focus → 通知前端。
+/// 统一的 visibility transition：写 STATE + 递增 revision + 通知 hotkey 输入状态机。
+///
+/// 所有主窗口 visibility 写入收敛到此 helper（§3.5）。每次成功 transition 递增
+/// revision 并通知 InputController，使输入状态机的 `state.window.visible` 与真实
+/// 窗口同步——native chord session 据此建立/退出。
+fn transition_visibility(visible: bool) {
+    let st = if visible { ST_VISIBLE } else { ST_HIDDEN };
+    STATE.store(st, Ordering::SeqCst);
+    let rev = WINDOW_REVISION.fetch_add(1, Ordering::SeqCst) + 1;
+    crate::infra::platform::hotkey::InputController::update_window(visible, rev);
+}
+
+/// 唤起：采集上下文快照 -> 定位 -> show -> set_focus -> 通知前端。
 ///
 /// **采集时机很重要**：必须在 show() 之前调用，否则拿到的前台是 Blink 自己。
 pub fn invoke(app: &AppHandle) {
@@ -200,10 +215,12 @@ pub fn invoke(app: &AppHandle) {
     let now = elapsed_ms();
     let grace_ms = GRACE_MS.load(Ordering::SeqCst);
     INVOKE_AT.store(now, Ordering::SeqCst);
-    STATE.store(ST_VISIBLE, Ordering::SeqCst);
-    tracing::trace!(grace_ms, "invoke: state → VISIBLE, show + set_focus");
+    tracing::trace!(grace_ms, "invoke: show + set_focus");
     let _ = win.show();
     let _ = win.set_focus();
+    // show 成功后建立 Visible（§3.5）：通知输入状态机 window 已可见，
+    // native chord session 据此建立。必须在 emit SHOWN 之前。
+    transition_visibility(true);
     let _ = app.emit(EventNames::SHOWN, ());
     tracing::debug!(
         target: "perf",
@@ -263,9 +280,9 @@ pub fn invoke(app: &AppHandle) {
 /// 同时隐藏右键菜单窗口（保留窗口供下次复用）。
 pub fn hide(app: &AppHandle, reason: &str) {
     if let Some(win) = app.get_webview_window("main") {
-        STATE.store(ST_HIDDEN, Ordering::SeqCst);
-        tracing::debug!(reason, "hide: state → HIDDEN");
         let _ = win.hide();
+        tracing::debug!(reason, "hide: state -> HIDDEN");
+        transition_visibility(false);
         let _ = app.emit(EventNames::HIDDEN, ());
     }
     // 主窗口隐藏时联动隐藏右键菜单（保留窗口供下次复用）
@@ -274,15 +291,13 @@ pub fn hide(app: &AppHandle, reason: &str) {
     }
 }
 
-/// 窗口焦点事件：仅在真正获焦时进入 Visible（启用看门狗）。
-/// 失焦不在此时处理，交给看门狗轮询前台窗口。
+/// 窗口焦点事件：仅记录诊断，不写 Visible（§3.5）。
+///
+/// Focus 是观察量，不是状态写入口。窗口可见性只由 `invoke()`/`hide()` 经
+/// `transition_visibility` 建立。看门狗只依据后者产生的权威 visible state。
 pub fn on_focused(focused: bool) {
     let st = STATE.load(Ordering::SeqCst);
     tracing::trace!(focused, st, "on_focused");
-    if focused {
-        STATE.store(ST_VISIBLE, Ordering::SeqCst);
-        tracing::trace!("on_focused: state → VISIBLE, watchdog armed");
-    }
 }
 
 /// 启用系统级圆角（Windows 11+）。Win10 不支持此 API，静默忽略。
@@ -2015,11 +2030,11 @@ pub fn apply_cloak(hwnd: HWND, on: bool) {
 /// 否则下次 `show()` 出来的窗口是不可见的。
 pub fn hide_for_screenshot(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
-        STATE.store(ST_HIDDEN, Ordering::SeqCst);
         if let Ok(hwnd) = win.hwnd() {
             apply_cloak(HWND(hwnd.0 as _), true);
         }
         let _ = win.hide();
+        transition_visibility(false);
         let _ = app.emit(EventNames::HIDDEN, ());
     }
     // 联动隐藏右键菜单（保留窗口供下次复用）

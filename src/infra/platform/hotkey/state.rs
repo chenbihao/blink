@@ -172,6 +172,27 @@ impl ModifierState {
         self.sides[key as usize].last_hook_time = Some(time_ms);
     }
 
+    /// Hook 路径处理修饰键 keyup。
+    ///
+    /// **注入的 keyup 一律不清 level**。真实物理松开永远是 `injected=false`
+    /// （Win32 保证），会正常清 level；注入 keyup 的唯一常见来源是
+    /// `SetForegroundWindow` 抢前台焦点时系统注入的合成 Alt up（带 `LLKHF_INJECTED`），
+    /// 这是假事件——用户并没有真的松开 Alt。忽略它不会让状态机永久卡住：
+    /// 后续真实 keydown 会覆盖，真实 keyup（非注入）会正常清。
+    /// Raw Input 若工作也会作独立兜底。
+    ///
+    /// 返回是否实际清成了 Up（调用方据此决定是否连带 clear_inferred_alt）。
+    fn set_level_hook_keyup(&mut self, key: ModifierKey, time_ms: u32, injected: bool) -> bool {
+        if injected {
+            // 注入合成 keyup：不清 level。last_hook_time 仍更新以维持时间域过滤一致性。
+            self.sides[key as usize].last_hook_time = Some(time_ms);
+            return false;
+        }
+        self.sides[key as usize].level = ModifierLevel::Up;
+        self.sides[key as usize].last_hook_time = Some(time_ms);
+        true
+    }
+
     /// Alt（任一侧）是否视为按下。
     pub fn alt_down(&self) -> bool {
         self.level(ModifierKey::LAlt).is_pressed() || self.level(ModifierKey::RAlt).is_pressed()
@@ -673,14 +694,27 @@ impl InputState {
             (ChordSession::Inactive, true) => {
                 // 建立 session
                 let session_id = self.alloc_chord_session_id();
+                tracing::debug!(
+                    session_id,
+                    alt_down = self.modifiers.alt_down(),
+                    "chord session 建立"
+                );
                 self.chord = ChordSession::Active {
                     session_id,
                     last_triggered_key: None,
                 };
                 None // UI emit 由调用方统一处理
             }
-            (ChordSession::Active { .. }, false) => {
+            (ChordSession::Active { session_id, .. }, false) => {
                 // 退出 session
+                tracing::debug!(
+                    session_id,
+                    alt_down = self.modifiers.alt_down(),
+                    window_visible = self.window.visible,
+                    view_ready = self.view.ready,
+                    query_empty = self.view.query_empty,
+                    "chord session 退出"
+                );
                 self.chord = ChordSession::Inactive;
                 None
             }
@@ -903,11 +937,12 @@ fn reduce_hook_key(state: &mut InputState, e: HookKeyEvent, now: Instant) -> Red
                 }
             } else {
                 // 修饰键 keyup
-                state
+                // 注入的合成 keyup（如 SetForegroundWindow 抢焦点时系统注入的假 Alt up）
+                // 一律不清 level——真实物理 up 一定非注入，由 Hook 真事件兜底。
+                let cleared = state
                     .modifiers
-                    .set_level_hook(mod_key, ModifierLevel::Up, e.time_ms);
-                // 真实 Alt up：清除所有 InferredDown
-                if mod_key.is_alt() {
+                    .set_level_hook_keyup(mod_key, e.time_ms, e.injected);
+                if cleared && mod_key.is_alt() {
                     state.modifiers.clear_inferred_alt();
                 }
             }
@@ -988,6 +1023,11 @@ fn reduce_hook_key(state: &mut InputState, e: HookKeyEvent, now: Instant) -> Red
             if state.config.exclusive_tap_keys.contains(&key_lower) {
                 // 防止 autorepeat：同键已触发过，直到 keyup 才能再次触发
                 if last_triggered_key.as_deref() != Some(key_lower.as_str()) {
+                    tracing::debug!(
+                        session_id = *session_id,
+                        key = %key_lower,
+                        "chord 触发（吞键）"
+                    );
                     result.propagation = Propagation::Swallow;
                     result.effects.push(InputEffect::ChordTriggered {
                         chord_session_id: *session_id,
@@ -1012,7 +1052,7 @@ fn reduce_hook_key(state: &mut InputState, e: HookKeyEvent, now: Instant) -> Red
         }
     } else {
         // 非修饰键 up
-        // Chord key up → 重置 autorepeat lock，允许同键再次触发
+        // Chord key up -> 重置 autorepeat lock，允许同键再次触发
         if let ChordSession::Active {
             session_id,
             last_triggered_key,

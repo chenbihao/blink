@@ -250,7 +250,7 @@
 
 **视图上下文上报**：前端只上报离散视图状态（`ready/query_empty/ai_mode`），不逐字符同步 query 文本给后端输入状态机；字段未变化不发送。
 
-> 落地（InputUiState 协议、view epoch、register_main_input_view）见 [phases/0.18.7 §3.3/§3.9](../phases/0.18.7-input-state-flow-refactor.md)。
+> 落地（InputUiState 协议、view epoch、register_main_input_view）见 [phases/0.18 §3.7 四类独立 ID / 配置快照 / 首次状态同步](../phases/0.18-enhancement-chord.md)。
 
 ---
 

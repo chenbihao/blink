@@ -161,14 +161,23 @@ fn parse_level(level: &str) -> String {
         // 默认：压制 rig/rig_core 内部噪音
         "h2=warn,rustls=warn,tower=warn,hpack=warn,rig=warn,rig_core=warn"
     };
+    // **keyring / keyring_core 压到 warn**（0.18.7 修复）:keyring v4 每次读/写密钥
+    // 内部刷 4 条 DEBUG（creating entry / create entry wrapping / created entry /
+    // get password），启动时 AI factory 构造 N 个 provider = 4N 行，淹没 blink 自身
+    // 日志。blink 自己的 `密钥已从 keyring 读回`（store.rs，结构化、无明文）已覆盖
+    // 诊断需求，keyring 内部 CM 调用细节无价值。独立于 ai_verbose 开关——这是纯噪音，
+    // 不该被「AI 详细模式」复活。
+    let keyring_noise = "keyring=warn,keyring_core=warn";
     match level {
         "trace" => {
             format!(
-                "trace,sqlx=warn,tauri=warn,tao=warn,hyper=warn,reqwest=warn,rmcp=warn,{ai_noise}"
+                "trace,sqlx=warn,tauri=warn,tao=warn,hyper=warn,reqwest=warn,rmcp=warn,{ai_noise},{keyring_noise}"
             )
         }
-        "debug" => format!("debug,sqlx=warn,tauri=warn,rmcp=warn,{ai_noise}"),
-        "info" => format!("info,sqlx=warn,tauri=warn,rmcp=warn,{ai_noise}"),
+        "debug" => {
+            format!("debug,sqlx=warn,tauri=warn,rmcp=warn,{ai_noise},{keyring_noise}")
+        }
+        "info" => format!("info,sqlx=warn,tauri=warn,rmcp=warn,{ai_noise},{keyring_noise}"),
         _ => "error".to_string(),
     }
 }

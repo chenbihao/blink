@@ -114,7 +114,6 @@ impl InputController {
     }
 
     /// 通知窗口可见性变化。
-    #[allow(dead_code)]
     pub fn update_window(visible: bool, revision: u64) {
         send_control(ControlMsg::WindowChanged { visible, revision });
     }
@@ -148,7 +147,6 @@ impl InputController {
 #[derive(Debug)]
 pub(crate) enum ControlMsg {
     Config(InputConfigSnapshot),
-    #[allow(dead_code)]
     WindowChanged {
         visible: bool,
         revision: u64,

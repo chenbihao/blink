@@ -158,7 +158,9 @@ impl Service for HotkeyService {
         let mut rx = crate::infra::platform::hotkey::start();
 
         // 发送初始配置快照到 hook 线程（从 DB + ChordRegistry 派生完整 snapshot）
-        crate::app::config::refresh_input_config(&app).await;
+        // 启动时 ChordRegistry 尚未 app.manage，显式传入避免 try_state 返回 None
+        crate::app::config::refresh_input_config_with_registry(&app, Some(&ctx.chord_registry))
+            .await;
 
         tauri::async_runtime::spawn(async move {
             while let Some(ev) = rx.recv().await {
