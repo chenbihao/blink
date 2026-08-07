@@ -202,7 +202,6 @@ pub fn invoke(app: &AppHandle) {
     INVOKE_AT.store(now, Ordering::SeqCst);
     STATE.store(ST_VISIBLE, Ordering::SeqCst);
     tracing::trace!(grace_ms, "invoke: state → VISIBLE, show + set_focus");
-    crate::infra::platform::hotkey::expect_synthesized_alt_keyup();
     let _ = win.show();
     let _ = win.set_focus();
     let _ = app.emit(EventNames::SHOWN, ());
@@ -792,8 +791,6 @@ pub fn restore_foreground(hwnd: isize) {
         let _ = PostMessageW(Some(target_hwnd), WM_CANCELMODE, WPARAM(0), LPARAM(0));
 
         // 2. AttachThreadInput + SetForegroundWindow（恢复前台窗口，不使用 Alt 欺骗）
-        // 通知 hotkey：若 Alt 正按住则设 flag 跳过合成 Alt keyup（RDP 场景必需）
-        crate::infra::platform::hotkey::expect_synthesized_alt_keyup();
         let current_tid = GetCurrentThreadId();
         let mut target_pid: u32 = 0;
         let target_tid = GetWindowThreadProcessId(target_hwnd, Some(&mut target_pid));

@@ -328,14 +328,36 @@ impl ChordRegistry {
     ///
     /// 供 command 层做 disabled 门禁——先查 id → 再对比 DB 里的 disabled 列表。
     /// registry 本身不持 disabled 状态，保持"注册/分派"单一职责。
-    ///
-    /// 0.10.7：键位由 binding 覆盖，匹配时用 effective_key。
     pub fn action_id_for_key(&self, key: &str, bindings: &ChordBindings) -> Option<&str> {
         let lower = key.to_lowercase();
         self.actions
             .iter()
             .find(|a| bindings.effective_key(a.id(), a.default_key()) == lower)
             .map(|a| a.id())
+    }
+
+    /// 派生 native exclusive chord 可吞的键集合。
+    ///
+    /// 只含 enabled、Tap 语义、`requires_input=false`（空 query 可 native 触发）的键。
+    /// 供 app 层 `refresh_input_config` 构建 `InputConfigSnapshot.exclusive_tap_keys`。
+    pub fn exclusive_tap_keys(
+        &self,
+        bindings: &ChordBindings,
+        disabled: &[String],
+    ) -> std::collections::HashSet<String> {
+        self.actions
+            .iter()
+            .filter(|a| !disabled.iter().any(|d| d == a.id()))
+            .filter(|a| {
+                bindings.effective_semantic(a.id(), a.default_semantic()) == ChordSemantic::Tap
+            })
+            .filter(|a| !a.requires_input())
+            .map(|a| {
+                bindings
+                    .effective_key(a.id(), a.default_key())
+                    .to_lowercase()
+            })
+            .collect()
     }
 
     /// 按字母键触发对应动作，返回动作的 surface（供 command 层决定显示哪个窗口）。
@@ -416,7 +438,7 @@ impl Default for ChordRegistry {
 /// **0.10.7**：`default_semantic = Hold`，PR2 起原生 hotkey hook 读 chord 配置
 /// 决定是否 hold 触发；chord 总开关 / disabled 列表也会门禁 hold 路径。
 ///
-/// **execute 防御**：前端 `keyboard.js` 的 `CHORD_KEYS` 只含 semantic=tap 的键，
+/// **execute 防御**：前端 `chord.getTapKeys()` 只含 semantic=tap 的键，
 /// Alt+Space 不会走 `onChordTrigger → trigger_chord`。若因任何原因被调用（如未来改动），
 /// execute 返回 Nop——真正录音由 hotkey 层已在 hold 时启动。
 ///

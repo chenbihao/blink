@@ -1,5 +1,5 @@
 /**
- * 事件名常量清单（0.14.6 §3.3）。
+ * 事件名常量清单。
  *
  * 所有 blink:// 事件名的 single source of truth（前端侧）。
  * 后端对应文件：src/app/event_names.rs（手动同步，后续可考虑 codegen）。
@@ -13,6 +13,10 @@ export const EVENTS = Object.freeze({
     // ── 窗口生命周期 ──
     SHOWN: 'blink://shown',
     HIDDEN: 'blink://hidden',
+
+    // ── 输入状态 ──
+    /** 后端输入 UI 状态变化。payload: { revision, altDown, windowVisible, exclusiveChordActive }。 */
+    INPUT_STATE_CHANGED: 'blink://input-state-changed',
 
     // ── 搜索 ──
     RESULTS: 'blink://results',

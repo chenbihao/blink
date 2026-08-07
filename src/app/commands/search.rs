@@ -415,13 +415,6 @@ pub async fn list_all_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Va
         .collect()
 }
 
-/// 当前 Alt 键是否物理按下（0.8.5 §6.1）。前端轮询驱动 alt-active 状态——
-/// WebView2 不转发 Alt 键自身的 keydown 到 JS，前端监听不可靠，改轮询物理态。
-#[tauri::command]
-pub fn is_alt_down() -> bool {
-    crate::infra::platform::hotkey::is_alt_down()
-}
-
 /// 0.16.9：获取当前 awareness 快照中的选区文本。
 ///
 /// 供 chord E/S 在空闲态（空 query、无结果）解析上下文用。
@@ -431,55 +424,6 @@ pub async fn get_awareness_text(app: tauri::AppHandle) -> Option<String> {
     use tauri::Manager;
     let svc = app.state::<std::sync::Arc<crate::domain::search::SearchService>>();
     svc.get_selection_text()
-}
-
-/// 0.10.7：设置 Chord 独占模式。前端在「主窗 focused + Alt hold + chordEligible」
-/// 满足时调 `set_chord_mode(true)`，Alt 松开 / 失焦 / 不再 eligible 时调
-/// `set_chord_mode(false)`。
-///
-/// 后端读 chord 配置派生 tap 键集合（只含 semantic=tap，排除 hold 的 voice_input），
-/// 传给 hotkey 模块。LL hook 在 chord mode 下吞掉这些键的 keydown，独占 chord 触发。
-///
-/// **0.14 优化**：`tap_keys` 参数允许前端直接传入已派生的 tap 键集合（前端
-/// `chord.refresh()` 完成后已持有 chord actions 列表，`chord.getTapKeys()` 可
-/// 派生出与后端一致的集合）。传入时跳过 3 次 DB 查询，将 `setChordMode(true)`
-/// 的延迟从 ~20ms 降到 ~1ms。不传时回退到 DB 派生（向后兼容）。
-#[tauri::command]
-pub async fn set_chord_mode(
-    app: tauri::AppHandle,
-    on: bool,
-    tap_keys: Option<Vec<String>>,
-) -> Result<(), String> {
-    if !on {
-        crate::infra::platform::hotkey::set_chord_mode(false, std::collections::HashSet::new());
-        return Ok(());
-    }
-    // 0.14：前端传入 tap_keys 时直接使用，跳过 DB 查询
-    let tap_keys_set: std::collections::HashSet<String> = if let Some(keys) = tap_keys {
-        keys.into_iter().map(|k| k.to_lowercase()).collect()
-    } else {
-        // 回退：从 DB 派生（向后兼容，如旧前端或 CLI 调用）
-        let pool = &app.state::<crate::infra::data::DbPools>().config;
-        let chord_cfg = crate::app::config::get_chord_config(&pool).await;
-        let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
-        let language = crate::app::config::get_config(&pool).await.language;
-        let Some(registry) = app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
-        else {
-            return Err("chord registry 未就绪".into());
-        };
-        let actions = registry.list(&disabled, &chord_cfg.bindings, &language);
-        let mut set = std::collections::HashSet::new();
-        for a in actions {
-            if a["semantic"] == "tap" {
-                if let Some(key) = a["key"].as_str() {
-                    set.insert(key.to_lowercase());
-                }
-            }
-        }
-        set
-    };
-    crate::infra::platform::hotkey::set_chord_mode(true, tap_keys_set);
-    Ok(())
 }
 
 /// 列出所有已注册的 context binding + 当前 enabled 状态（0.8.3 §4.6 设置页面板）。

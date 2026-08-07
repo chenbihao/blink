@@ -151,21 +151,34 @@ export function listChordActions() {
   return invoke("list_chord_actions");
 }
 
-/** 当前 Alt 键是否按下（0.8.5 §6.1 前端轮询驱动 alt-active，WebView2 不转发 Alt keydown）。 */
-export function isAltDown() {
-  return invoke("is_alt_down");
-}
-
 /** 0.16.9：获取当前 awareness 选区文本（chord E/S 空闲态上下文解析用）。 */
 export function getAwarenessText() {
   return invoke("get_awareness_text");
 }
 
-/** 0.10.7：设置 Chord 独占模式。主窗 Alt hold + chordEligible 时进 true，退出时 false。
- *  后端 LL hook 在 chord mode 下吞掉 chord 键 keydown，独占触发。
- *  0.14：tapKeys 参数让前端直接传入已派生的 tap 键集合，跳过后端 DB 查询。 */
-export function setChordMode(on, tapKeys) {
-  return invoke("set_chord_mode", { on, tapKeys: tapKeys ?? null });
+// ── 输入状态 ──
+
+/**
+ * 注册主窗口输入视图，返回初始快照 + view_epoch。
+ * 前端先注册 INPUT_STATE_CHANGED listener，再调用此 command。
+ * @param {boolean} queryEmpty 当前搜索框是否为空
+ * @param {boolean} aiMode 当前是否处于 AI 模式
+ * @returns {Promise<{viewEpoch: number, state: {revision: number, altDown: boolean, windowVisible: boolean, exclusiveChordActive: boolean}}>}
+ */
+export function registerMainInputView(queryEmpty, aiMode) {
+  return invoke("register_main_input_view", { queryEmpty, aiMode });
+}
+
+/**
+ * 更新主窗口输入视图上下文（query 空/非空、AI mode 变化时调）。
+ * 只在离散状态变化时调用，不逐字符发送。
+ * @param {number} viewEpoch register_main_input_view 返回的 view_epoch
+ * @param {number} revision 递增的 context revision
+ * @param {boolean} queryEmpty
+ * @param {boolean} aiMode
+ */
+export function updateMainInputContext(viewEpoch, revision, queryEmpty, aiMode) {
+  return invoke("update_main_input_context", { viewEpoch, revision, queryEmpty, aiMode });
 }
 
 /** 拉取剪贴板历史（Alt+C 面板渲染用）。 */

@@ -183,14 +183,13 @@ PoC 通过 → 0.15+ 立项；PoC 发现外部 agent 接口不稳/委托判断�
 
 ### 7.3 CAP 闭环：AI 感知屏幕（原 0.18 候选）
 
-现状缺口：`capture_screen` 可返回 `Blob`，但当前投影只给模型文本摘要，像素不会到达模型；`ocr_image` 也无法直接消费上一步 bytes。
+> **0.19 已落地**：轻量闭环档（`list_windows` / `screenshot{op:window}` / `screenshot{op:capture_to_clipboard}` 复合操作 / OCR 用户侧入口收编经 CapabilityRegistry）已在 [phases/0.19-capability-closure.md](./phases/0.19-capability-closure.md) 落地。架构原则（Rust 侧完成复合操作、图片不过 LLM channel）亦由 0.19 采纳。下述仅保留未完成档。
 
-候选分档：
+未完成档：
 
-| 档位 | 内容 | 判断 |
+| 档位 | 内容 | 状态 |
 |---|---|---|
-| 轻量闭环 | AI 获取显示器/光标/前台窗口信息，调用截图并写入剪贴板 | 优先；大部分基础设施已存在 |
-| OCR 内部直链 | Rust 内部将截图 bytes 交给 OCR，不经过 LLM channel | 低成本且架构清晰 |
-| 完整多模态 | Blob→Image 投影并喂给多模态模型 | 成本较高，后置 |
+| OCR 内部直链 | Rust 内部将截图 bytes 交给 OCR，不经过 LLM channel | 待定--0.19 仅收编了用户侧入口，完整直链需「结果引用」机制（0.19 未引入，后置评估） |
+| 完整多模态 | Blob->Image 投影并喂给多模态模型 | 成本较高，后置 0.20 |
 
-**架构原则**：优先增加类似 `screenshot{op:capture_to_clipboard}` 的内部复合操作，让 Rust 直接完成截图→剪贴板，AI 只下指令并接收文本确认。不得让 megabytes 图片无必要地经过 LLM channel。
+**架构原则**（仍有效）：复合操作在 Rust 侧完成，AI 只下指令并接收文本确认，不得让 megabytes 图片无必要地经过 LLM channel。

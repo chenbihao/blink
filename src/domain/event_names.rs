@@ -1,4 +1,4 @@
-//! 事件名常量清单（0.14.6 §3.3）。
+//! 事件名常量清单。
 //!
 //! 所有 `blink://*` 事件名的 single source of truth。
 //! 后端 emit / 前端 listen 都从此处取常量，消除字面量散落、拼错无编译期保护的问题。
@@ -17,6 +17,11 @@ impl EventNames {
     // ── 窗口生命周期 ──
     pub const SHOWN: &str = "blink://shown";
     pub const HIDDEN: &str = "blink://hidden";
+
+    // ── 输入状态 ──
+    /// 后端输入 UI 状态变化。payload: `InputUiState { revision, altDown, windowVisible, exclusiveChordActive }`。
+    /// 前端以 `revision` 去重/拒绝旧状态，投影 `alt-active` / `chord-visible`。
+    pub const INPUT_STATE_CHANGED: &str = "blink://input-state-changed";
 
     // ── 搜索 ──
     pub const RESULTS: &str = "blink://results";

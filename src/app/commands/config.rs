@@ -86,7 +86,7 @@ pub async fn set_config(
         "tap_threshold" => {
             let threshold: u64 = serde_json::from_value(value).map_err(|e| e.to_string())?;
             crate::app::config::update_tap_threshold(&pool, threshold).await?;
-            crate::infra::platform::hotkey::update_tap_threshold(threshold);
+            crate::app::config::refresh_input_config(&app).await;
             tracing::debug!(threshold, "tap 阈值已更新");
         }
         "grace_period" => {
@@ -115,7 +115,7 @@ pub async fn set_config(
             let hotkey: crate::app::config::HotkeyConfig =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
             crate::app::config::update_hotkey(&pool, hotkey.clone()).await?;
-            crate::infra::platform::hotkey::update_config(hotkey.clone());
+            crate::app::config::refresh_input_config(&app).await;
             tracing::info!(display = %hotkey.display, "全局热键已更新");
         }
         "general_config" => {
@@ -160,14 +160,16 @@ pub async fn set_config(
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
             crate::app::config::update_chord_toggles(&pool, v.chord_enabled, v.chord_hint_visible)
                 .await?;
+            crate::app::config::refresh_input_config(&app).await;
             let _ = app.emit(EventNames::CONFIG_CHANGED, ());
             tracing::info!(v.chord_enabled, v.chord_hint_visible, "Chord 开关已更新");
         }
         "chord_bindings" => {
-            // 0.10.7：chord 键位绑定（设置页改键用）
+            // chord 键位绑定（设置页改键用）
             let bindings: crate::domain::chord::ChordBindings =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
             crate::app::config::update_chord_bindings(&pool, bindings.clone()).await?;
+            crate::app::config::refresh_input_config(&app).await;
             let _ = app.emit(EventNames::CONFIG_CHANGED, ());
             tracing::info!("Chord 键位绑定已更新");
         }
@@ -218,6 +220,7 @@ pub async fn set_config(
         "disabled_chord_actions" => {
             let disabled: Vec<String> = serde_json::from_value(value).map_err(|e| e.to_string())?;
             crate::app::config::update_disabled_chord_actions(&pool, disabled.clone()).await?;
+            crate::app::config::refresh_input_config(&app).await;
             let _ = app.emit(EventNames::CONFIG_CHANGED, ());
             tracing::info!(
                 count = disabled.len(),

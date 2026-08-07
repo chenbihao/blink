@@ -217,17 +217,6 @@ fn finish(state: &'static RecorderState, outcome: RecordOutcome) {
     state.recording.store(false, Ordering::Release);
 }
 
-/// 检查是否为单独的修饰键快捷键(如右 Alt、右 Ctrl、右 Shift、Win)。
-///
-/// 录制与触发共用此白名单,保证「可录即可触」——任何能被录制的单独修饰键
-/// 必须在此列表中,否则会出现「录得到、按了不触发」的不一致。
-pub fn is_standalone_modifier_key(key: &str) -> bool {
-    matches!(
-        key,
-        "ralt" | "lalt" | "rctrl" | "lctrl" | "rshift" | "lshift" | "meta"
-    )
-}
-
 /// 格式化快捷键显示名称。
 fn format_display(modifiers: &[String], key: &str) -> String {
     let mut parts = Vec::new();

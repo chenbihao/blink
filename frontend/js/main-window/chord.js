@@ -38,7 +38,7 @@ let hintVisible = true;
 export function init() {
   ghostChordEl = document.querySelector("#ghost-overlay .ghost-chord");
   // 0.16.1：输入框文本变化时重新 render overlay--有文本时清空 chord 提示（让位
-  // keyword 影子），无文本时恢复。chord-visible 由 setAlt 控制，此处只管内容。
+  // keyword 影子），无文本时恢复。chord-visible 由 input-state.js 投影，此处只管内容。
   queryEl.addEventListener("input", render);
 }
 
@@ -94,7 +94,7 @@ export function onVisibilityChange(cb) {
   onVisibilityChangeCallback = cb;
 }
 
-/** keyboard.js setAlt() 调用，通知订阅者重绘。 */
+/** input-state.js projectUi() 调用，通知订阅者重绘。 */
 export function notifyVisibilityChange() {
   if (onVisibilityChangeCallback) onVisibilityChangeCallback();
 }

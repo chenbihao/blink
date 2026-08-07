@@ -2,198 +2,197 @@
 //!
 //! 平台特定实现（如 Windows WH_KEYBOARD_LL）在对应平台模块中。
 //!
-//! TODO: 方案 B - 平台抽象 trait
-//!
-//! 当需要支持多平台时，可以将热键抽象为 trait：
-//!
-//! ```rust
-//! pub trait HotkeyManager {
-//!     fn start(&self, config: &HotkeyConfig, tap_threshold: u64) -> mpsc::UnboundedReceiver<HotkeyEvent>;
-//!     fn update_config(&self, config: HotkeyConfig);
-//!     fn update_tap_threshold(&self, threshold: u64);
-//!     fn stop(&self);
-//! }
-//!
-//! // 每个平台实现自己的 HotkeyManager
-//! pub struct WindowsHotkeyManager { /* WH_KEYBOARD_LL */ }
-//! pub struct MacosHotkeyManager { /* CGEventTap */ }
-//! pub struct LinuxHotkeyManager { /* X11/Wayland */ }
-//! ```
+//! 新状态机（`state.rs` reducer）是物理键/tap/hold/Chord exclusive 的唯一决策者。
+//! 前端通过 `INPUT_STATE_CHANGED` 事件 + `register_main_input_view` 快照同步，
+//! 不再轮询或反向控制 Alt/Chord。
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
-use std::time::Instant;
 
 use tokio::sync::mpsc;
 
-use crate::domain::config::HotkeyConfig;
-
-/// 热键事件（由 hook 线程发往主线程）。
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub enum HotkeyEvent {
-    /// 快捷键触发（tap），附带触发时刻用于延迟测量。
-    Tap(Instant),
-    /// 长按开始(hold)——按住超过 tap 阈值时触发,语音录音开始。
-    Hold(Instant),
-    /// 长按结束(hold release)——松开已触发 Hold 的按键,语音录音停止→STT→注入。
-    HoldRelease(Instant),
-    /// 语音取消(ESC)——录音中按 ESC,取消录音不识别不注入。
-    VoiceCancel(Instant),
-    /// Chord 触发（0.10.7.2）——chord 独占模式吞键后,前端收不到 keydown,
-    /// 由 hook 直接发此事件,HotkeyService 消费后调 trigger_chord 逻辑。
-    /// 携带已 toLowerCase 的 chord 主键（如 `"a"` / `"c"`）。
-    Chord(String),
-}
-
-/// 热键运行时状态(配置 + tap 阈值 + 事件发送端)。
-///
-/// Win32 hook 回调(`windows.rs::ll_proc`)运行在 OS 直接调用的 C 函数里,无法接收
-/// `&self`,只能访问进程级全局。故这里用单一 `OnceLock<HotkeyRuntime>` 收敛——
-/// 把原先四散的 config / sender / tap_threshold 三个全局合并(见 0.2 设计 §1.6)。
-/// 对外暴露的访问函数(get_current_config / get_tap_threshold / send_event 等)签名不变,
-/// 回调与 command 层无需改动。
-struct HotkeyRuntime {
-    config: RwLock<HotkeyConfig>,
-    tap_threshold: RwLock<u64>,
-    sender: mpsc::UnboundedSender<HotkeyEvent>,
-}
-
-static RUNTIME: OnceLock<HotkeyRuntime> = OnceLock::new();
-
-// ── 0.10.7：Chord 独占模式全局状态 ─────────────────────────────────────────────
-//
-// **设计**：主窗 focused + Alt hold + chordEligible 时，前端调 `set_chord_mode(true)`
-// 命令，后端刷新 `CHORD_KEYS`（当前生效的 tap 语义 chord 键集合）并置 `CHORD_MODE=true`。
-// LL hook 在 chord mode 下，Alt 按下时吞掉 CHORD_KEYS 中的 keydown，让前端
-// `onChordTrigger` 独占处理（preventDefault + trigger_chord），避免其他软件的
-// 全局快捷键（如 Alt+A 截图）抢键。
-//
-// **退出时机**：Alt 松开 / 主窗失焦 / chordEligible 不再满足 → 前端调
-// `set_chord_mode(false)`，`CHORD_MODE=false`，hook 停止吞键。
-//
-// **与"不吞键"铁则的关系**：0.10.5.2 回滚的是"吞 Alt keyup"（破坏 GetKeyState，
-// 导致 Alt+Tab 异常）。0.10.7 吞的是"chord 键的 keydown"（字母键，非修饰键），
-// 且仅在 chord mode 窗口内，Alt 本身全程放行。两者本质不同，详见
-// docs/phases/0.10-voice-agent.md §10.5。
-
-/// Chord 独占模式是否激活。LL hook 读此标志决定是否吞 chord keydown。
-static CHORD_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// 当前生效的 tap 语义 chord 键集合（已 toLowerCase，如 `{"a", "c"}`）。
-/// chord mode 激活时由 `set_chord_mode` 刷新。hook 据此判断哪些 keydown 要吞。
-/// 用 `OnceLock<RwLock<...>>` 因 `HashSet::new()` 非 const fn，无法直接用于 static。
-static CHORD_KEYS: OnceLock<RwLock<std::collections::HashSet<String>>> = OnceLock::new();
-
-/// 初始化 CHORD_KEYS（首次 set_chord_mode 调用时自动触发）。
-fn ensure_chord_keys() -> &'static RwLock<std::collections::HashSet<String>> {
-    CHORD_KEYS.get_or_init(|| RwLock::new(std::collections::HashSet::new()))
-}
-
-/// 查询 chord 独占模式是否激活（供 LL hook 调用）。
-pub fn is_chord_mode() -> bool {
-    CHORD_MODE.load(std::sync::atomic::Ordering::SeqCst)
-}
-
-/// 查询某键是否为当前 chord 键（供 LL hook 调用）。
-/// `key` 调用前已 toLowerCase。未初始化时返回 false。
-pub fn is_chord_key(key: &str) -> bool {
-    CHORD_KEYS
-        .get()
-        .and_then(|g| g.read().ok().map(|g| g.contains(key)))
-        .unwrap_or(false)
-}
-
-/// 设置 chord 独占模式（前端 `set_chord_mode` 命令调用）。
-///
-/// - `on=true`：刷新 `CHORD_KEYS` 为当前 chord 配置的 tap 键集合，置 `CHORD_MODE=true`。
-/// - `on=false`：置 `CHORD_MODE=false`，`CHORD_KEYS` 清空。
-///
-/// `tap_keys` 由 command 层从 `ChordRegistry::list` + bindings 派生（只取 semantic=tap）。
-pub fn set_chord_mode(on: bool, tap_keys: std::collections::HashSet<String>) {
-    let keys = ensure_chord_keys();
-    CHORD_MODE.store(on, std::sync::atomic::Ordering::SeqCst);
-    if let Ok(mut g) = keys.write() {
-        if on {
-            *g = tap_keys;
-        } else {
-            g.clear();
-        }
-    }
-    tracing::trace!(on, "chord mode 已切换");
-}
-
-// 0.18.7 纯输入状态机（阶段 A）
+// 纯输入状态机
 mod state;
 
 // 平台特定实现
 #[cfg(target_os = "windows")]
 mod windows;
 
-#[cfg(target_os = "windows")]
-#[allow(unused_imports)]
-pub use windows::{
-    expect_synthesized_alt_keyup, is_alt_down, set_voice_recording, shadow_stop,
-    shadow_update_config, shadow_update_view, shadow_update_window, start_hook_thread,
-};
-
 // 快捷键录制
 mod recorder;
 pub use recorder::record_hotkey_blocking;
 
-/// 启动热键线程，返回事件接收端。
-pub fn start(config: HotkeyConfig, tap_threshold: u64) -> mpsc::UnboundedReceiver<HotkeyEvent> {
-    let (tx, rx) = mpsc::unbounded_channel::<HotkeyEvent>();
+// ── 公开类型重导出 ────────────────────────────────────────────────────────────
 
-    // 初始化运行时状态(config / tap_threshold / sender 合并为单一全局)
-    let _ = RUNTIME.set(HotkeyRuntime {
-        config: RwLock::new(config),
-        tap_threshold: RwLock::new(tap_threshold),
-        sender: tx,
-    });
+pub use state::{
+    HookKeyEvent, InputConfigSnapshot, InputEffect, InputEvent, InputSource, InputState,
+    InputUiState, MainViewContext, NormalizedHotkey, Propagation, RecorderMode, VoicePhase,
+    WindowTransitionReason,
+};
 
-    // 启动平台特定的钩子线程
-    start_hook_thread();
+// ── Effect channel（hook 线程 → 主线程）──────────────────────────────────────
 
-    rx
-}
+/// Effect sender 全局（hook 线程写，start() 时初始化）。
+static EFFECT_SENDER: OnceLock<mpsc::UnboundedSender<InputEffect>> = OnceLock::new();
 
-/// 更新热键配置（线程安全）。
-pub fn update_config(config: HotkeyConfig) {
-    if let Some(rt) = RUNTIME.get() {
-        if let Ok(mut guard) = rt.config.write() {
-            *guard = config;
-        }
+/// 从 hook 线程发送 effect 到主线程。
+pub fn send_effect(effect: InputEffect) {
+    if let Some(tx) = EFFECT_SENDER.get() {
+        let _ = tx.send(effect);
     }
 }
 
-/// 更新 tap 阈值（线程安全）。
-pub fn update_tap_threshold(threshold: u64) {
-    if let Some(rt) = RUNTIME.get() {
-        if let Ok(mut guard) = rt.tap_threshold.write() {
-            *guard = threshold;
-        }
+// ── 最新 UI 状态快照（hook 线程写，主线程读）──────────────────────────────
+//
+// hook 线程在每次 reduce 后用原子 store 更新，主线程通过 `get_latest_ui_state()` 读取。
+// 使用原子而非 RwLock：Hook 热路径无锁铁则。
+// 四个原子非单次原子读，但 UI 状态不需要线性一致性——偶尔读到 revision 新但
+// alt_down 旧只是让前端多渲染一帧，下次事件即修正。
+
+static LATEST_ALT_DOWN: AtomicBool = AtomicBool::new(false);
+static LATEST_WINDOW_VISIBLE: AtomicBool = AtomicBool::new(false);
+static LATEST_CHORD_ACTIVE: AtomicBool = AtomicBool::new(false);
+static LATEST_UI_REVISION: AtomicU64 = AtomicU64::new(0);
+
+/// hook 线程更新最新 UI 状态（在每次 reduce 后调用）。
+pub fn set_latest_ui_state(ui: &InputUiState) {
+    LATEST_ALT_DOWN.store(ui.alt_down, Ordering::SeqCst);
+    LATEST_WINDOW_VISIBLE.store(ui.window_visible, Ordering::SeqCst);
+    LATEST_CHORD_ACTIVE.store(ui.exclusive_chord_active, Ordering::SeqCst);
+    LATEST_UI_REVISION.store(ui.revision, Ordering::SeqCst);
+}
+
+/// 读取最新 UI 状态快照（主线程调用，如 `register_main_input_view` command）。
+pub fn get_latest_ui_state() -> InputUiState {
+    InputUiState {
+        revision: LATEST_UI_REVISION.load(Ordering::SeqCst),
+        alt_down: LATEST_ALT_DOWN.load(Ordering::SeqCst),
+        window_visible: LATEST_WINDOW_VISIBLE.load(Ordering::SeqCst),
+        exclusive_chord_active: LATEST_CHORD_ACTIVE.load(Ordering::SeqCst),
     }
 }
 
-/// 获取当前热键配置（供平台模块调用）。
-pub fn get_current_config() -> HotkeyConfig {
-    RUNTIME
-        .get()
-        .and_then(|rt| rt.config.read().ok().map(|g| g.clone()))
+// ── Config snapshot 存储（供 windows.rs 初始化用）─────────────────────────────
+
+static CONFIG_SNAPSHOT: OnceLock<RwLock<InputConfigSnapshot>> = OnceLock::new();
+
+fn ensure_config_snapshot() -> &'static RwLock<InputConfigSnapshot> {
+    CONFIG_SNAPSHOT.get_or_init(|| RwLock::new(InputConfigSnapshot::default()))
+}
+
+/// 获取当前配置快照（供平台模块初始化用）。
+pub fn get_config_snapshot() -> InputConfigSnapshot {
+    ensure_config_snapshot()
+        .read()
+        .map(|g| g.clone())
         .unwrap_or_default()
 }
 
-/// 获取当前 tap 阈值（供平台模块调用）。
-pub fn get_tap_threshold() -> u64 {
-    RUNTIME
-        .get()
-        .and_then(|rt| rt.tap_threshold.read().ok().map(|g| *g))
-        .unwrap_or(300)
+// ── View epoch 分配（register_main_input_view command 用）────────────────────
+
+static NEXT_VIEW_EPOCH: AtomicU64 = AtomicU64::new(1);
+
+/// 分配一个新的 view_epoch（非 0，递增）。
+pub fn alloc_view_epoch() -> u64 {
+    NEXT_VIEW_EPOCH.fetch_add(1, Ordering::SeqCst)
 }
 
-/// 发送热键事件（供平台模块调用）。
-pub fn send_event(event: HotkeyEvent) {
-    if let Some(rt) = RUNTIME.get() {
-        let _ = rt.sender.send(event);
+// ── InputController ──────────────────────────────────────────────────────────
+
+/// 输入控制器 handle（主线程持有，向 hook 线程发送控制消息）。
+///
+/// 所有方法是非阻塞的：把消息放入控制队列，再 `PostMessageW` 唤醒 hook 线程。
+pub struct InputController;
+
+impl InputController {
+    /// 更新配置快照（app 层 `refresh_input_config` 调用）。
+    pub fn update_config(snapshot: InputConfigSnapshot) {
+        if let Ok(mut g) = ensure_config_snapshot().write() {
+            *g = snapshot.clone();
+        }
+        send_control(ControlMsg::Config(snapshot));
     }
+
+    /// 通知窗口可见性变化。
+    #[allow(dead_code)]
+    pub fn update_window(visible: bool, revision: u64) {
+        send_control(ControlMsg::WindowChanged { visible, revision });
+    }
+
+    /// 更新前端视图上下文。
+    pub fn update_view(ctx: MainViewContext) {
+        send_control(ControlMsg::ViewContext(ctx));
+    }
+
+    /// 更新语音阶段。
+    pub fn update_voice_phase(phase: VoicePhase) {
+        send_control(ControlMsg::VoicePhase(phase));
+    }
+
+    /// 更新录制模式。
+    #[allow(dead_code)]
+    pub fn update_recorder(mode: RecorderMode) {
+        send_control(ControlMsg::RecorderMode(mode));
+    }
+
+    /// 停止输入引擎。
+    #[allow(dead_code)]
+    pub fn stop() {
+        send_control(ControlMsg::Stop);
+    }
+}
+
+// ── 控制消息 ──────────────────────────────────────────────────────────────────
+
+/// 控制消息（主线程 → hook 线程）。
+#[derive(Debug)]
+pub(crate) enum ControlMsg {
+    Config(InputConfigSnapshot),
+    #[allow(dead_code)]
+    WindowChanged {
+        visible: bool,
+        revision: u64,
+    },
+    ViewContext(MainViewContext),
+    VoicePhase(VoicePhase),
+    #[allow(dead_code)]
+    RecorderMode(RecorderMode),
+    #[allow(dead_code)]
+    Stop,
+}
+
+/// 控制消息队列（主线程写，hook 线程 WindowProc 读）。
+static CONTROL_QUEUE: std::sync::Mutex<Vec<ControlMsg>> = std::sync::Mutex::new(Vec::new());
+
+/// 向 hook 线程发送控制消息（主线程调用）。
+fn send_control(msg: ControlMsg) {
+    if let Ok(mut q) = CONTROL_QUEUE.lock() {
+        q.push(msg);
+    }
+    // PostMessageW 唤醒 hook 线程（平台特定实现）
+    #[cfg(target_os = "windows")]
+    windows::post_control_wakeup();
+}
+
+/// 排空控制队列（hook 线程 WindowProc 调用）。
+pub fn drain_control_messages() -> Vec<ControlMsg> {
+    let mut q = CONTROL_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+    std::mem::take(&mut *q)
+}
+
+// ── 启动/停止 ──────────────────────────────────────────────────────────────────
+
+/// 启动热键引擎，返回 effect 接收端。
+///
+/// 初始配置通过 `InputController::update_config()` 发送，
+/// 通常在 `start()` 返回后立即调用。
+pub fn start() -> mpsc::UnboundedReceiver<InputEffect> {
+    let (tx, rx) = mpsc::unbounded_channel::<InputEffect>();
+    let _ = EFFECT_SENDER.set(tx);
+
+    // 启动平台特定的钩子线程
+    #[cfg(target_os = "windows")]
+    windows::start_hook_thread();
+
+    rx
 }

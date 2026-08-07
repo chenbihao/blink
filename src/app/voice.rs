@@ -112,17 +112,18 @@ impl VoiceService {
             return;
         }
 
-        // ── 立即设置 VOICE_RECORDING 标志 ──
-        // hotkey hook 读此标志吞掉 Alt+Space 的 Space keydown（防止系统菜单 + 空格进输入框）。
-        // 必须在任何 .await 之前设置——否则 await 期间 Space 自动重复键穿透到输入框，
-        // 打出一堆空格导致 chordEligible() 失效。
-        // guard 确保所有早退路径（服务未就绪 / 模型加载中等）清除标志。
+        // ── 立即通知输入状态机进入 Recording ──
+        // hook 状态机的 Holding 状态已吞 Space autorepeat，此处同步 voice phase
+        // 使 ESC 能产生 VoiceCancel。必须在任何 .await 之前设置——否则 await 期间
+        // ESC 无法取消。guard 确保所有早退路径（服务未就绪 / 模型加载中等）回 Idle。
         struct VoiceRecordingGuard {
             armed: bool,
         }
         impl VoiceRecordingGuard {
             fn new() -> Self {
-                crate::infra::platform::hotkey::set_voice_recording(true);
+                crate::infra::platform::hotkey::InputController::update_voice_phase(
+                    crate::infra::platform::hotkey::VoicePhase::Recording { gesture_id: 0 },
+                );
                 Self { armed: true }
             }
             fn disarm(&mut self) {
@@ -132,7 +133,9 @@ impl VoiceService {
         impl Drop for VoiceRecordingGuard {
             fn drop(&mut self) {
                 if self.armed {
-                    crate::infra::platform::hotkey::set_voice_recording(false);
+                    crate::infra::platform::hotkey::InputController::update_voice_phase(
+                        crate::infra::platform::hotkey::VoicePhase::Idle,
+                    );
                 }
             }
         }
@@ -215,7 +218,7 @@ impl VoiceService {
     /// - 检查 `session.recording`（互斥）
     /// - 管理 `VoiceRecordingGuard`（仅热键路径）
     ///
-    /// `set_voice_flag`：是否设置 `hotkey::set_voice_recording(true)`。
+    /// `set_voice_flag`：是否通知输入状态机进入 Recording（仅热键路径需要）。
     /// 返回 `true` = 录音已启动。
     async fn begin_recording(
         &self,
@@ -315,9 +318,11 @@ impl VoiceService {
             Ok(mut rx) => {
                 session.recording = true;
 
-                // 设置全局录音标志（hotkey hook 读它判断 ESC + 吞 Alt+Space）
+                // 通知输入状态机进入 Recording（仅热键路径，使 ESC 能产生 VoiceCancel）
                 if set_voice_flag {
-                    crate::infra::platform::hotkey::set_voice_recording(true);
+                    crate::infra::platform::hotkey::InputController::update_voice_phase(
+                        crate::infra::platform::hotkey::VoicePhase::Recording { gesture_id: 0 },
+                    );
                 }
 
                 tracing::info!(
@@ -428,9 +433,11 @@ impl VoiceService {
 
             if !session.recording {
                 tracing::warn!("stop_recording: 未在录音中,忽略");
-                // 即使没真正录音，start_recording 可能已设置 VOICE_RECORDING（吞 Space 键），
-                // 仍需清除标志 + 清理 UI 状态。
-                crate::infra::platform::hotkey::set_voice_recording(false);
+                // 即使没真正录音，start_recording 可能已通知输入状态机 Recording（吞 Space 键），
+                // 仍需回 Idle + 清理 UI 状态。
+                crate::infra::platform::hotkey::InputController::update_voice_phase(
+                    crate::infra::platform::hotkey::VoicePhase::Idle,
+                );
                 platform::window::hide_voice_overlay(&self.app);
                 let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
                 return;
@@ -454,8 +461,10 @@ impl VoiceService {
             let engine = session.engine.take();
             session.recording = false;
 
-            // 清除全局录音标志
-            crate::infra::platform::hotkey::set_voice_recording(false);
+            // 通知输入状态机回 Idle
+            crate::infra::platform::hotkey::InputController::update_voice_phase(
+                crate::infra::platform::hotkey::VoicePhase::Idle,
+            );
 
             (engine, target)
         }; // 锁在此释放，await 不持锁
@@ -573,8 +582,10 @@ impl VoiceService {
         session.recording = false;
         session.engine = None;
 
-        // 清除全局录音标志
-        crate::infra::platform::hotkey::set_voice_recording(false);
+        // 通知输入状态机回 Idle
+        crate::infra::platform::hotkey::InputController::update_voice_phase(
+            crate::infra::platform::hotkey::VoicePhase::Idle,
+        );
 
         tracing::info!("语音录音已取消");
         drop(session);

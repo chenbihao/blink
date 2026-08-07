@@ -1,7 +1,7 @@
-//! 纯输入状态机（0.18.7 阶段 A）。
+//! 纯输入状态机。
 //!
 //! 与 Win32/Tauri/domain 无关的 reducer：接收归一化事件，产出 effect + 传播决策。
-//! adapter（阶段 B 的 `windows.rs`）负责 VK/scanCode → 归一化键名、Raw Input 注册
+//! adapter（`windows.rs`）负责 VK/scanCode → 归一化键名、Raw Input 注册
 //! 和 timer 管理；本模块只做状态流转和动作边沿判定。
 //!
 //! **铁则**：
@@ -28,11 +28,13 @@ pub fn time_is_newer(new: u32, old: u32) -> bool {
 }
 
 /// 同一时间域 u32 时间回绕比较：`a` 是否在 `b` 时刻或之后。
+#[allow(dead_code)]
 pub fn time_at_or_after(a: u32, b: u32) -> bool {
     (a as i32).wrapping_sub(b as i32) >= 0
 }
 
 /// 计算 `later - earlier` 的无符号差（同一时间域，回绕安全）。
+#[allow(dead_code)]
 pub fn time_diff(later: u32, earlier: u32) -> u32 {
     later.wrapping_sub(earlier)
 }
@@ -407,6 +409,9 @@ pub enum GestureState {
         hold_fired: bool,
     },
     /// Hold 已触发（超过 tap 阈值），等待 keyup → HoldReleased。
+    ///
+    /// 当前实现保持 Armed + hold_fired=true，此变体预留。
+    #[allow(dead_code)]
     Holding {
         gesture_id: u64,
         key: String,
@@ -507,8 +512,14 @@ impl Default for MainViewContext {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VoicePhase {
     Idle,
-    Starting { gesture_id: u64 },
-    Recording { gesture_id: u64 },
+    /// voice worker 正在启动（generation-aware wiring 尚未接入此阶段）。
+    #[allow(dead_code)]
+    Starting {
+        gesture_id: u64,
+    },
+    Recording {
+        gesture_id: u64,
+    },
 }
 
 impl Default for VoicePhase {
@@ -521,7 +532,11 @@ impl Default for VoicePhase {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RecorderMode {
     Idle,
-    Recording { recorder_id: u64 },
+    /// 录制模式（recorder.rs 接入 Controller 后由控制消息设置）。
+    #[allow(dead_code)]
+    Recording {
+        recorder_id: u64,
+    },
 }
 
 impl Default for RecorderMode {
@@ -696,8 +711,10 @@ pub struct HookKeyEvent {
     /// Win32 时间域（KBDLLHOOKSTRUCT.time）。
     pub time_ms: u32,
     pub injected: bool,
+    #[allow(dead_code)]
     pub lower_integrity_injected: bool,
     /// E0/E1 extended prefix。
+    #[allow(dead_code)]
     pub extended: bool,
     /// LLKHF_ALTDOWN flag（Alt 在本事件前已按下）。
     pub alt_down_flag: bool,
@@ -717,13 +734,20 @@ pub struct RawModifierEvent {
 /// 窗口 visibility 转换原因。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WindowTransitionReason {
+    #[allow(dead_code)]
     Startup,
+    #[allow(dead_code)]
     Invoke,
+    #[allow(dead_code)]
     Toggle,
+    #[allow(dead_code)]
     Escape,
     Watchdog,
+    #[allow(dead_code)]
     Screenshot,
+    #[allow(dead_code)]
     SingleInstance,
+    #[allow(dead_code)]
     AiActiveRefocus,
 }
 
@@ -743,6 +767,7 @@ pub enum InputEvent {
         revision: u64,
         reason: WindowTransitionReason,
     },
+    #[allow(dead_code)]
     WindowFocusObserved(bool),
     ViewContextChanged(MainViewContext),
     VoicePhaseChanged {
@@ -757,19 +782,25 @@ pub enum InputEvent {
 #[derive(Clone, Debug)]
 pub enum InputEffect {
     Tap {
+        #[allow(dead_code)]
         gesture_id: u64,
+        #[allow(dead_code)]
         triggered_at: Instant,
     },
     HoldStarted {
+        #[allow(dead_code)]
         gesture_id: u64,
     },
     HoldReleased {
+        #[allow(dead_code)]
         gesture_id: u64,
     },
     VoiceCancel {
+        #[allow(dead_code)]
         gesture_id: Option<u64>,
     },
     ChordTriggered {
+        #[allow(dead_code)]
         chord_session_id: u64,
         key: String,
     },
@@ -787,13 +818,6 @@ impl ReduceResult {
     fn pass() -> Self {
         Self {
             propagation: Propagation::Pass,
-            effects: Vec::new(),
-        }
-    }
-
-    fn swallow() -> Self {
-        Self {
-            propagation: Propagation::Swallow,
             effects: Vec::new(),
         }
     }
@@ -1308,6 +1332,7 @@ fn reduce_config_changed(state: &mut InputState, snapshot: InputConfigSnapshot) 
 // ── 辅助：构造事件 ──────────────────────────────────────────────────────────
 
 /// 便利构造：本地修饰键 down 事件。
+#[cfg(test)]
 pub fn hook_modifier_down(key: &str, time_ms: u32) -> HookKeyEvent {
     HookKeyEvent {
         source: InputSource::Local,
@@ -1323,6 +1348,7 @@ pub fn hook_modifier_down(key: &str, time_ms: u32) -> HookKeyEvent {
 }
 
 /// 便利构造：本地修饰键 up 事件。
+#[cfg(test)]
 pub fn hook_modifier_up(key: &str, time_ms: u32) -> HookKeyEvent {
     HookKeyEvent {
         source: InputSource::Local,
@@ -1338,6 +1364,7 @@ pub fn hook_modifier_up(key: &str, time_ms: u32) -> HookKeyEvent {
 }
 
 /// 便利构造：本地普通键 down 事件。
+#[cfg(test)]
 pub fn hook_key_down(key: &str, time_ms: u32) -> HookKeyEvent {
     HookKeyEvent {
         source: InputSource::Local,
@@ -1353,6 +1380,7 @@ pub fn hook_key_down(key: &str, time_ms: u32) -> HookKeyEvent {
 }
 
 /// 便利构造：本地普通键 up 事件。
+#[cfg(test)]
 pub fn hook_key_up(key: &str, time_ms: u32) -> HookKeyEvent {
     HookKeyEvent {
         source: InputSource::Local,
@@ -1368,6 +1396,7 @@ pub fn hook_key_up(key: &str, time_ms: u32) -> HookKeyEvent {
 }
 
 /// 便利构造：注入普通键 down 事件。
+#[cfg(test)]
 pub fn injected_key_down(key: &str, time_ms: u32) -> HookKeyEvent {
     HookKeyEvent {
         source: InputSource::Injected,
@@ -1383,6 +1412,7 @@ pub fn injected_key_down(key: &str, time_ms: u32) -> HookKeyEvent {
 }
 
 /// 便利构造：注入普通键 up 事件。
+#[cfg(test)]
 pub fn injected_key_up(key: &str, time_ms: u32) -> HookKeyEvent {
     HookKeyEvent {
         source: InputSource::Injected,

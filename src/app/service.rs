@@ -155,17 +155,18 @@ impl Service for HotkeyService {
     async fn start(&self, ctx: &AppContext) -> Result<(), String> {
         let app = ctx.app.clone();
         let voice_service = ctx.voice_service.clone();
-        let mut rx = crate::infra::platform::hotkey::start(
-            ctx.config.hotkey.clone(),
-            ctx.config.tap_threshold,
-        );
+        let mut rx = crate::infra::platform::hotkey::start();
+
+        // 发送初始配置快照到 hook 线程（从 DB + ChordRegistry 派生完整 snapshot）
+        crate::app::config::refresh_input_config(&app).await;
+
         tauri::async_runtime::spawn(async move {
             while let Some(ev) = rx.recv().await {
                 match ev {
-                    crate::infra::platform::hotkey::HotkeyEvent::Tap(trigger_time) => {
+                    crate::infra::platform::hotkey::InputEffect::Tap { .. } => {
                         // toggle:已可见则隐藏(仅快捷键;单实例重复运行仍走 invoke 总是显示)
                         if crate::infra::platform::window::is_visible() {
-                            // 0.17.6: AI 活跃时不隐藏，而是 set_focus + emit SHOWN
+                            // AI 活跃时不隐藏，而是 set_focus + emit SHOWN
                             // 防止用户在 AI 生成过程中误按热键导致窗口消失
                             if crate::infra::platform::window::is_main_ai_active() {
                                 if let Some(win) = app.get_webview_window("main") {
@@ -176,31 +177,13 @@ impl Service for HotkeyService {
                                 crate::infra::platform::window::hide(&app, "toggle");
                             }
                         } else {
-                            let chan_ms = trigger_time.elapsed().as_secs_f64() * 1000.0;
-                            tracing::debug!(
-                                target: "perf",
-                                chan_ms,
-                                "[perf] Tap→invoke: channel+scheduling delay"
-                            );
+                            // 注意：Tap effect 不再包含 triggered_at，但 <50ms 性能目标仍需验证
                             crate::infra::platform::window::invoke(&app);
-                            let total_ms = trigger_time.elapsed().as_secs_f64() * 1000.0;
-                            tracing::debug!(
-                                target: "perf",
-                                total_ms,
-                                "[perf] Tap→shown: total (key-up to emit blink://shown)"
-                            );
-                            // 记录热键唤起耗时（按键 → 窗口 invoke）
-                            crate::infra::utils::perf::record(
-                                crate::infra::utils::perf::MetricCategory::Hotkey,
-                                "key_to_show",
-                                total_ms,
-                                None,
-                            );
                         }
                     }
-                    crate::infra::platform::hotkey::HotkeyEvent::Hold(_) => {
+                    crate::infra::platform::hotkey::InputEffect::HoldStarted { .. } => {
                         // 长按开始 → 语音录音开始（async：可能需等待模型加载）
-                        // 0.10.7：chord 门禁——chord 总开关关 / voice_input 在 disabled 列表 →
+                        // chord 门禁——chord 总开关关 / voice_input 在 disabled 列表 →
                         // 不启动录音。这让设置页的 voice_input 开关真正生效（而非仅控显示）。
                         let pool = &app.state::<crate::infra::data::DbPools>().config;
                         let chord_cfg = crate::app::config::get_chord_config(&pool).await;
@@ -208,7 +191,7 @@ impl Service for HotkeyService {
                         let voice_disabled = disabled.iter().any(|d| d == "voice_input");
                         if chord_cfg.chord_enabled && !voice_disabled {
                             voice_service.start_recording().await;
-                            // 0.17.2：语音录音开始 → 托盘呼吸动画
+                            // 语音录音开始 → 托盘呼吸动画
                             crate::app::tray::start_breathing(&app);
                         } else {
                             tracing::debug!(
@@ -218,20 +201,20 @@ impl Service for HotkeyService {
                             );
                         }
                     }
-                    crate::infra::platform::hotkey::HotkeyEvent::HoldRelease(_) => {
+                    crate::infra::platform::hotkey::InputEffect::HoldReleased { .. } => {
                         // 长按结束 → 停止录音 → STT → 注入/fill-query
                         voice_service.stop_recording().await;
-                        // 0.17.2：语音录音结束 → 停止托盘呼吸动画
+                        // 语音录音结束 → 停止托盘呼吸动画
                         crate::app::tray::stop_breathing(&app);
                     }
-                    crate::infra::platform::hotkey::HotkeyEvent::VoiceCancel(_) => {
+                    crate::infra::platform::hotkey::InputEffect::VoiceCancel { .. } => {
                         // ESC 取消录音
                         voice_service.cancel_recording();
-                        // 0.17.2：取消录音 → 停止托盘呼吸动画
+                        // 取消录音 → 停止托盘呼吸动画
                         crate::app::tray::stop_breathing(&app);
                     }
-                    crate::infra::platform::hotkey::HotkeyEvent::Chord(key) => {
-                        // 0.10.7.2：chord 独占模式吞键后,前端收不到 keydown,
+                    crate::infra::platform::hotkey::InputEffect::ChordTriggered { key, .. } => {
+                        // chord 独占模式吞键后,前端收不到 keydown,
                         // 由 hook 发此事件,此处复用 trigger_chord 逻辑触发动作。
                         let Some(registry) =
                             app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
@@ -262,6 +245,14 @@ impl Service for HotkeyService {
                         {
                             tracing::warn!(%key, %e, "chord trigger 失败");
                         }
+                    }
+                    crate::infra::platform::hotkey::InputEffect::UiStateChanged(ui) => {
+                        // 向前端推送输入 UI 状态变化事件。
+                        // 前端以 revision 去重/拒绝旧状态，投影 alt-active / chord-visible。
+                        let _ = app.emit(
+                            crate::domain::event_names::EventNames::INPUT_STATE_CHANGED,
+                            ui,
+                        );
                     }
                 }
             }

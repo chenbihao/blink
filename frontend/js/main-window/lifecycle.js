@@ -9,7 +9,7 @@ import * as chord from "./chord.js";
 import * as ghost from "./ghost.js";
 import * as aiMode from "./ai-mode.js";
 import * as cmdMode from "./command-mode.js";
-import { clearAlt, startAltPoll, stopAltPoll, recheckAlt } from "./keyboard.js";
+import * as inputState from "./input-state.js";
 import { applyThemeFromConfig, applyGlassOpacityFromConfig } from "../shared/theme.js";
 import { applyI18nFromConfig, t } from "../i18n/index.js";
 
@@ -19,7 +19,7 @@ export function init() {
     // 0.17.6: AiMode 下 SHOWN 只 focus AI 输入框，不重置搜索状态
     if (aiMode.isActive()) {
       aiQueryEl.focus();
-      startAltPoll();
+      inputState.onShown();
       return;
     }
     queryEl.value = "";
@@ -29,10 +29,6 @@ export function init() {
     search.reset(); // 作废在途搜索请求
     results.clear();
     cmdMode.reset(); // 0.18.6: 复位命令模式
-    // 0.11.10：不再在 shown 时 clearAlt——Alt 逻辑态由 hook 层过滤 injected 事件驱动，
-    // 用户真松开 Alt 会收到真实 keyup，无需业务层兜底清。冷启动按住 Alt 呼窗的场景下，
-    // 之前的 clearAlt 反而会先把 chord-visible/chord-mode 关掉，靠 recheckAlt 补回来，
-    // 中间空窗期用户按 Alt+字母不生效（0.11.10 定位复现）。
     const vi = document.getElementById("voice-indicator");
     if (vi) vi.classList.add("hidden");
     queryEl.focus();
@@ -48,12 +44,14 @@ export function init() {
     // candidate,该调用现在的作用是拿 `response.suggestion` 走 Ghost 通道——函数名保留,
     // 内部实现在 search.js 已重写。
     search.fetchContextSuggestions();
-    chord.refresh().then(recheckAlt); // 0.8.5：拉 Chord 动作列表渲染增强菜单；就绪后补检 Alt 态（修首次唤起竞态）
-    startAltPoll(); // 0.8.5：轮询 Alt 物理态驱动 alt-active（WebView2 不转发 Alt keydown）
+    // chord 配置刷新后重新投影 chord-visible
+    chord.refresh().then(() => inputState.reevaluate());
+    // query 被清空后上报 context（programmatic value= 不触发 input 事件）
+    inputState.onShown();
   });
 
   listen(EVENTS.HIDDEN, () => {
-    stopAltPoll(); // 0.8.5：停 Alt 轮询
+    // Alt/Chord 状态由后端 INPUT_STATE_CHANGED 事件驱动，不在 HIDDEN 补偿清理。
     // 0.17.6: AiMode 下 HIDDEN 也清理 AI 状态
     if (aiMode.isActive()) {
       aiMode.exitAiMode();
@@ -61,7 +59,6 @@ export function init() {
     queryEl.value = "";
     search.reset();
     results.clear();
-    clearAlt();
     cmdMode.reset(); // 0.18.6: 复位命令模式
   });
 
@@ -71,7 +68,7 @@ export function init() {
     applyGlassOpacityFromConfig(); // 毛玻璃透明度即时生效
     applyI18nFromConfig();
     results.refreshMaxResults();
-    chord.refresh(); // 0.8.5.1 §6.6：Chord 开关/可见性改动即时生效
+    chord.refresh().then(() => inputState.reevaluate()); // Chord 开关/可见性改动即时生效；刷新后重投影
   });
 
   // 0.8.5 §6.4：Chord Alt+C 剪贴板改走 fill-query——后端 ClipboardHistoryAction
