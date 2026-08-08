@@ -274,11 +274,10 @@ export async function doTranslateAndPin() {
 
   try {
     // ── Step 1: 立即 pin 原图 ──
-    const dpr = window.devicePixelRatio || 1;
     const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
     const screenPos = ss._longImageBaseCanvas
       ? { x: ss.scrollBandX, y: ss.scrollBandY }
-      : cssToScreen(ss.selCss.x, ss.selCss.y, meta, dpr);
+      : cssToScreen(ss.selCss.x, ss.selCss.y, meta);
     const screenX = screenPos.x;
     const screenY = screenPos.y;
 

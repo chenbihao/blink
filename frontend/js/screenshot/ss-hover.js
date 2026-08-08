@@ -3,12 +3,9 @@
 //! 在选区拖拽阶段（`!ss.isAnnotating`），鼠标悬停在桌面窗口上时显示虚线框，
 //! 单击自动吸附选区到该窗口矩形。
 //!
-//! **坐标转换**：
+//! **坐标转换**（0.18.8 per-monitor）：
 //! 后端返回的窗口矩形是虚拟屏幕物理像素坐标（含 origin offset），
-//! 需要转换为 overlay CSS 坐标：
-//!   CSS_x = (physical_x - meta.vx) / dpr
-//!   CSS_y = (physical_y - meta.vy) / dpr
-//! 其中 dpr = window.devicePixelRatio（overlay 窗口自身的 DPR）。
+//! 前端 `rectScreenToCss` 按窗口所在屏的 dpr 分段换算为 CSS 坐标。
 //!
 //! **性能策略**：
 //! 后端枚举 ~5-15ms，只在 overlay 加载时调一次。前端 mousemove 做纯 JS
@@ -53,12 +50,10 @@ export async function loadPickableWindows(requestGen, fetchWindows = screenshotW
     }
     
     const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
-    const dpr = window.devicePixelRatio || 1;
     
     pickableWindows = normalizePickableWindows(
       list,
       meta,
-      dpr,
       window.innerWidth,
       window.innerHeight,
     );
@@ -76,14 +71,14 @@ export async function loadPickableWindows(requestGen, fetchWindows = screenshotW
 }
 
 /** 将物理窗口矩形转换并裁剪到当前 overlay；完全不可见的窗口不进入 hit-test。 */
-export function normalizePickableWindows(list, meta, dpr, viewportWidth, viewportHeight) {
+export function normalizePickableWindows(list, meta, viewportWidth, viewportHeight) {
   return (list || []).map((w) => {
-      const screenRect = { x: w.x, y: w.y, w: w.w, h: w.h };
-      const cssRect = clampRectToCss(
-        rectScreenToCss(screenRect, meta, dpr),
-        viewportWidth,
-        viewportHeight,
-      );
+    const screenRect = { x: w.x, y: w.y, w: w.w, h: w.h };
+    const cssRect = clampRectToCss(
+      rectScreenToCss(screenRect, meta),
+      viewportWidth,
+      viewportHeight,
+    );
       return {
         hwnd: w.hwnd,
         title: w.title,

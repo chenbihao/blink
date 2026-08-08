@@ -45,6 +45,7 @@ import {
   bindScrollDiagnostics, recordScrollDiagnostic, resetScrollDiagnostics,
 } from './diagnostics.js';
 import { encodeImageDataPng, outputScreenshotPng } from '../ss-output.js';
+import { cssToScreen, cssSizeToPhysical } from '../ss-selection-geometry.js';
 import {
   hideCaptureFrame, positionPreview, resetPreviewRendering, SCROLL_PREVIEW_GAP,
   showCaptureFrame, showPredictedPreview, updatePreview,
@@ -77,14 +78,15 @@ export async function enterScrollCapture(rect) {
   session.autoLowConfidenceCount = 0;
   session.queuedManualWheel = null;
   session.captureFinalizing = false;
-  const dpr = window.devicePixelRatio || 1;
   const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
 
   // 记录采集带几何（物理像素，虚拟屏幕坐标系）
-  session.scrollBandX = meta.vx + Math.round(rect.x * dpr);
-  session.scrollBandY = meta.vy + Math.round(rect.y * dpr);
-  session.scrollBandW = Math.round(rect.w * dpr);
-  session.scrollBandH = Math.round(rect.h * dpr);
+  // 0.18.8：内联公式收口为 cssToScreen / cssSizeToPhysical（per-monitor）
+  const bandPos = cssToScreen(rect.x, rect.y, meta);
+  session.scrollBandX = bandPos.x;
+  session.scrollBandY = bandPos.y;
+  session.scrollBandW = cssSizeToPhysical(rect.w, rect.x, rect.y, meta);
+  session.scrollBandH = cssSizeToPhysical(rect.h, rect.x, rect.y, meta);
   session.scrollDirection = 'vertical';
   session.autoScroll = false;
   session.scrollFrames = [];
@@ -103,12 +105,17 @@ export async function enterScrollCapture(rect) {
   // 优先锁定框选区域实际覆盖的外部窗口；兜底使用 Blink 唤起前保存的前台窗口。
   const pickedWindow = findWindowForRect(rect);
   session.scrollHwnd = pickedWindow?.hwnd || meta.fgHwnd || null;
+  // 0.18.8：内联公式收口为 cssToScreen（per-monitor）
+  const targetPos = pickedWindow
+    ? cssToScreen(pickedWindow.targetX, pickedWindow.targetY, meta)
+    : { x: session.scrollBandX + Math.floor(session.scrollBandW / 2),
+        y: session.scrollBandY };
   session.scrollTargetX = pickedWindow
-    ? meta.vx + Math.round(pickedWindow.targetX * dpr)
+    ? targetPos.x
     : session.scrollBandX + Math.floor(session.scrollBandW / 2);
   session.scrollTargetY = pickedWindow
-    ? meta.vy + Math.round(pickedWindow.targetY * dpr)
-    : session.scrollBandY + Math.floor(session.scrollBandH / 2);
+    ? targetPos.y
+    : session.scrollBandY;
   session.scrollSourceRect = { ...rect };
 
   // 设置 WDA_EXCLUDEFROMCAPTURE：overlay 在 BitBlt 中不可见
@@ -492,10 +499,11 @@ export function onScrollWheel(e) {
   session.scrollPendingDirection = rawDelta > 0 ? 1 : -1;
   session.scrollWheelStartedAtMs = performance.now();
   session.manualWheelVersion++;
-  const dpr = window.devicePixelRatio || 1;
+  // 0.18.8：内联公式收口为 cssToScreen（per-monitor）
   const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
-  const cursorScreenX = Math.round(meta.vx + e.clientX * dpr);
-  const cursorScreenY = Math.round(meta.vy + e.clientY * dpr);
+  const cursorPos = cssToScreen(e.clientX, e.clientY, meta);
+  const cursorScreenX = cursorPos.x;
+  const cursorScreenY = cursorPos.y;
 
   queueManualWheel(session, delta, cursorScreenX, cursorScreenY);
   showPredictedPreview(session.scrollPendingDirection);

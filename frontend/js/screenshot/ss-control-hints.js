@@ -51,7 +51,6 @@ export async function loadControlHints(requestGen) {
   pickableControls = [];
 
   const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
-  const dpr = window.devicePixelRatio || 1;
   const vw = window.innerWidth;
   const vh = window.innerHeight;
 
@@ -61,7 +60,7 @@ export async function loadControlHints(requestGen) {
     if (!payload || payload.generation !== ss.controlHintsGen) return; // 防过期
 
     if (payload.kind === 'batch' && payload.hints?.length) {
-      const batch = normalizeControlHints(payload.hints, meta, dpr, vw, vh);
+      const batch = normalizeControlHints(payload.hints, meta, vw, vh);
       pickableControls = pickableControls.concat(batch);
       // console.debug('[screenshot] control hints batch', payload.depth, batch.length, pickableControls.length);
     } else if (payload.kind === 'done') {
@@ -83,11 +82,11 @@ export async function loadControlHints(requestGen) {
 }
 
 /** 将物理控件矩形转换并裁剪到当前 overlay；完全不可见的控件不进入 hit-test。 */
-export function normalizeControlHints(list, meta, dpr, viewportWidth, viewportHeight) {
+export function normalizeControlHints(list, meta, viewportWidth, viewportHeight) {
   return (list || []).map((c) => {
       const screenRect = { x: c.x, y: c.y, w: c.w, h: c.h };
       const cssRect = clampRectToCss(
-        rectScreenToCss(screenRect, meta, dpr),
+        rectScreenToCss(screenRect, meta),
         viewportWidth,
         viewportHeight,
       );

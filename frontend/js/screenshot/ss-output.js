@@ -4,7 +4,7 @@
 
 import { ss } from './ss-state.js';
 import * as annot from './annotation-engine.js';
-import { cssToBitmap, cssToScreen } from './ss-selection-geometry.js';
+import { cssToBitmap, cssToScreen, cssSizeToPhysical } from './ss-selection-geometry.js';
 import {
   screenshotCopy, screenshotCopyRegion, screenshotPin, screenshotSave,
   screenshotCancel, hideScreenshotOverlay,
@@ -26,11 +26,11 @@ export function doCopySelection() {
 
   // 快路径：无标注 → 后端直接从 SESSION 裁剪 BGRA 写剪贴板
   if (!annot.hasAnnotations() && !ss._longImageBaseCanvas) {
-    const dpr = window.devicePixelRatio || 1;
     const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
-    const bmp = cssToBitmap(ss.selCss.x, ss.selCss.y, meta, dpr);
-    const pw = Math.round(ss.selCss.w * dpr);
-    const ph = Math.round(ss.selCss.h * dpr);
+    const bmp = cssToBitmap(ss.selCss.x, ss.selCss.y, meta);
+    // B 类：裁剪宽高按选区所在屏 dpr 折算为物理尺寸
+    const pw = cssSizeToPhysical(ss.selCss.w, ss.selCss.x, ss.selCss.y, meta);
+    const ph = cssSizeToPhysical(ss.selCss.h, ss.selCss.x, ss.selCss.y, meta);
     const px = bmp.x;
     const py = bmp.y;
     screenshotCopyRegion(px, py, pw, ph)
@@ -76,12 +76,11 @@ export function doCopyFullScreen() {
 export function doPinSelection() {
   if (!ss.selCss || ss.sent || !ensureOutputReady()) return;
   ss.sent = true;
-  const dpr = window.devicePixelRatio || 1;
   const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
-  // 0.15.8 R0：统一用 cssToScreen 计算屏幕物理坐标
+  // 0.15.8 R0：统一用 cssToScreen 计算屏幕物理坐标（0.18.8 per-monitor）
   const screenPos = ss._longImageBaseCanvas
     ? { x: ss.scrollBandX, y: ss.scrollBandY }
-    : cssToScreen(ss.selCss.x, ss.selCss.y, meta, dpr);
+    : cssToScreen(ss.selCss.x, ss.selCss.y, meta);
   const screenX = screenPos.x;
   const screenY = screenPos.y;
   compositeSelection((pngBytes) => {
@@ -160,12 +159,12 @@ async function compositeSelectionBytes() {
   }
   try {
     const longBase = ss._longImageBaseCanvas;
-    const dpr = window.devicePixelRatio || 1;
     const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
-    const pw = longBase?.width ?? Math.round(ss.selCss.w * dpr);
-    const ph = longBase?.height ?? Math.round(ss.selCss.h * dpr);
-    // 0.15.8 R0：统一用 cssToBitmap 计算裁剪区起点
-    const bmp = longBase ? { x: 0, y: 0 } : cssToBitmap(ss.selCss.x, ss.selCss.y, meta, dpr);
+    // B 类：裁剪宽高按选区所在屏 dpr 折算为物理尺寸
+    const pw = longBase?.width ?? cssSizeToPhysical(ss.selCss.w, ss.selCss.x, ss.selCss.y, meta);
+    const ph = longBase?.height ?? cssSizeToPhysical(ss.selCss.h, ss.selCss.x, ss.selCss.y, meta);
+    // 0.15.8 R0：统一用 cssToBitmap 计算裁剪区起点（0.18.8 per-monitor）
+    const bmp = longBase ? { x: 0, y: 0 } : cssToBitmap(ss.selCss.x, ss.selCss.y, meta);
     const px = bmp.x;
     const py = bmp.y;
 

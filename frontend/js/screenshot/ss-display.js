@@ -1,9 +1,8 @@
 //! 截图 overlay 显示器几何（0.14.6 §4 拆分）。
 //!
-//! 多屏混合 DPI 正确 clamp：后端 `show_screenshot_overlay` 注入 `window.__blinkScreenMeta.displays`，
-//! 每屏已用 overlay 窗口实际 DPI 折算成 **overlay CSS 坐标**（单位 CSS 像素）。前端无需再折算，
-//! `displayToCss` 退化为恒等--消除旧实现"每屏各自 dpr"与主流路径"窗口级单一 dpr"的坐标系分裂
-//! （混合 DPI 下会导致工具栏 clamp / hover 预选区错位）。selCss / window.inner* 同为 CSS 像素，直接对齐。
+//! 0.18.8：后端 `build_displays_json` 每屏用自己的 dpi 折算 CSS 坐标并注入 `dpi` 字段。
+//! 前端 `dprAtCss` 基于 `findDisplayCssAt` 查屏取 dpr，供 `ss-selection-geometry.js` 的
+//! per-monitor 换算函数使用。`displayToCss` 仍恒等（displays 已是 CSS 坐标）。
 
 import { ss } from './ss-state.js';
 

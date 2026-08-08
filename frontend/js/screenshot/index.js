@@ -41,9 +41,9 @@ import { applyThemeFromConfig } from "../shared/theme.js";
 // ── 子模块 ──────────────────────────────────────────────
 import { ss, initDOM, PREWARM_MIN_WIDTH, PREWARM_MIN_HEIGHT, TOOL_CAPS } from "./ss-state.js";
 import { norm, pointInRect, applySquareConstraint } from "./ss-utils.js";
-import { shouldStartFreeSelection } from "./ss-selection-geometry.js";
+import { shouldStartFreeSelection, dprAtCss } from "./ss-selection-geometry.js";
 import { drawDimmed, drawSelection, drawFinalSelection, redrawAnnotPreview, redrawAnnotFull } from "./ss-draw.js";
-import { positionToolbar } from "./ss-display.js";
+import { positionToolbar, findDisplayCssAt } from "./ss-display.js";
 import {
   getSelectionHandle, beginSelectionInteraction, updateSelectionInteraction,
   finishSelectionInteraction, updateSelectionCursor, refreshShapePreviewOnShift,
@@ -377,6 +377,8 @@ hidePixelMagnifier();
 clearHover();
 clearControlHover();
 
+  // C 类：标注 canvas backing store = 物理像素，CSS width/height 铺满选区。
+  // bitmap↔CSS 映射比 = overlay dpr，全局固定，不改 per-monitor。
   const dpr = window.devicePixelRatio || 1;
   annotCanvas.classList.remove('hidden');
   annotCanvas.style.left = rect.x + 'px';
@@ -817,8 +819,19 @@ canvas.addEventListener('mousemove', (e) => {
   }
 
   if (ss.isDragging) {
-    ss.endX = e.offsetX;
-    ss.endY = e.offsetY;
+    // 0.18.8 spike-B 策略 2：禁止跨 dpr 边界选区，clamp 到起点屏
+    const startMon = findDisplayCssAt(ss.startX, ss.startY);
+    const startDpr = dprAtCss(ss.startX, ss.startY, window.__blinkScreenMeta);
+    const curDpr = dprAtCss(e.offsetX, e.offsetY, window.__blinkScreenMeta);
+    let clampedX = e.offsetX;
+    let clampedY = e.offsetY;
+    if (startDpr !== curDpr) {
+      // 跨 dpr 屏：clamp 到起点屏边界
+      clampedX = Math.max(startMon.x, Math.min(clampedX, startMon.x + startMon.w));
+      clampedY = Math.max(startMon.y, Math.min(clampedY, startMon.y + startMon.h));
+    }
+    ss.endX = clampedX;
+    ss.endY = clampedY;
     drawSelection();
   }
 });

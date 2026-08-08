@@ -254,21 +254,23 @@ import { normalizeError } from "./js/shared/tauri.js";
       });
 
       // ── 拖动（document 级，mousedown/move/up）─────────────────────────
+      // 0.18.8：e.screenX/Y 在 Win32 下已是物理像素坐标，不需要 * dpr。
+      // 旧代码 * dpr 是多余的一层缩放，在单 dpr 下碰巧能工作是因为 dpr=1，
+      // 但跨 dpr 屏时 window.devicePixelRatio 会变，导致 imgScreenX/Y 漂移。
       document.addEventListener('mousedown', (e) => {
         if (e.button !== 0) return;
         if (e.target.closest('#ctx-menu')) return;
         isDragging = true;
         dragMoved = false;
-        const dpr = window.devicePixelRatio || 1;
-        dragLastPhysX = e.screenX * dpr;
-        dragLastPhysY = e.screenY * dpr;
+        dragLastPhysX = e.screenX;
+        dragLastPhysY = e.screenY;
       });
 
       document.addEventListener('mousemove', (e) => {
         if (!isDragging) return;
-        const dpr = window.devicePixelRatio || 1;
-        const curX = e.screenX * dpr;
-        const curY = e.screenY * dpr;
+        // 0.18.8：e.screenX/Y 已是物理像素，直接用
+        const curX = e.screenX;
+        const curY = e.screenY;
         const dx = curX - dragLastPhysX;
         const dy = curY - dragLastPhysY;
         dragLastPhysX = curX;

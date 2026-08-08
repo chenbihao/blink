@@ -350,6 +350,7 @@ function enterPickMode() {
     e.preventDefault();
     e.stopPropagation();
     if (!picking) return;
+    // D 类：取色器从主 canvas bitmap 采样，bitmap↔CSS 映射 = overlay dpr。
     const dpr = window.devicePixelRatio || 1;
     const px = Math.round(e.offsetX * dpr);
     const py = Math.round(e.offsetY * dpr);

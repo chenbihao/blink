@@ -193,6 +193,7 @@ function renderPixelMagnifier() {
   }
 
   const { x: cssX, y: cssY } = ss._pendingMagnifierPos;
+  // D 类：像素放大镜从主 canvas bitmap 采样，bitmap↔CSS 映射 = overlay dpr。
   const dpr = window.devicePixelRatio || 1;
   const px = Math.round(cssX * dpr);
   const py = Math.round(cssY * dpr);
@@ -362,6 +363,7 @@ export function updateStrokeCursor(clientX, clientY) {
     return;
   }
   const w = annot.getWidthForTool(tool);
+  // D 类：画笔光标大小映射到 CSS 显示，bitmap↔CSS = overlay dpr。
   const dpr = window.devicePixelRatio || 1;
   let cssPxDiameter = 0;
   if (tool === 'pencil') {

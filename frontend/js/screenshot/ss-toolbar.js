@@ -324,6 +324,8 @@ function openWatermarkForm() {
 /** 文本标注输入框 */
 export function showTextInput(x, y) {
   if (!ss.selCss) return;
+  // C 类：x/y 是标注 bitmap 坐标，/ dpr 转回 CSS；fontSize / dpr 同理。
+  // bitmap↔CSS 映射全局固定为 overlay dpr，不改 per-monitor。
   const dpr = window.devicePixelRatio || 1;
 
   const input = document.createElement('span');

@@ -188,12 +188,29 @@ pub async fn pin_clipboard_image(app: tauri::AppHandle, image_id: String) -> Res
     Ok(())
 }
 
-/// 获取主显示器工作区中心，让图片居中放置。
+/// 获取光标所在显示器工作区中心，让图片居中放置。
+/// 0.18.8：从 `GetSystemMetrics(SM_CXSCREEN)`（仅主屏）改为
+/// `MonitorFromPoint` + `GetMonitorInfoW` 取光标所在屏的工作区，
+/// 副屏右键钉图时图片不再出现在主屏。
 fn get_primary_monitor_center(img_w: i32, img_h: i32) -> (i32, i32) {
-    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
-    let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
-    let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
-    let x = (screen_w - img_w) / 2;
-    let y = (screen_h - img_h) / 2;
-    (x.max(0), y.max(0))
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    unsafe {
+        let mut pt = std::mem::zeroed();
+        let _ = GetCursorPos(&mut pt);
+        let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        let _ = GetMonitorInfoW(hmon, &mut mi);
+        // 工作区（rcWork）排除任务栏，居中放置
+        let wa = &mi.rcWork;
+        let wa_w = wa.right - wa.left;
+        let wa_h = wa.bottom - wa.top;
+        let x = wa.left + (wa_w - img_w) / 2;
+        let y = wa.top + (wa_h - img_h) / 2;
+        (x.max(wa.left), y.max(wa.top))
+    }
 }

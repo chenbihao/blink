@@ -67,6 +67,7 @@ function charKind(ch) {
 /** 命中测试：把点击的 CSS 坐标(相对 hitCanvas)映射到物理像素 + 找命中 word */
 function hitTestWord(cssX, cssY) {
   if (!ss.reading) return -1;
+  // C 类：hit canvas backing store = 物理像素，bitmap↔CSS = overlay dpr。
   const dpr = window.devicePixelRatio || 1;
   const px = cssX * dpr;
   const py = cssY * dpr;

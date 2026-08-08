@@ -34,6 +34,7 @@ export function drawDimmed() {
 /** 选区绘制：选区外暗 + 选区内亮 */
 export function drawSelection() {
   const { ctx, canvas, screenshot, startX, startY, endX, endY, sizeHint } = ss;
+  // C 类：主 canvas bitmap 映射，必须用 overlay dpr（bitmap↔CSS 映射全局固定）
   const dpr = window.devicePixelRatio || 1;
   const r = norm(startX, startY, endX, endY);
   const px = r.x * dpr;
@@ -57,9 +58,9 @@ export function drawSelection() {
   ctx.strokeRect(px, py, pw, ph);
 
   // size-hint 显示物理像素尺寸 + 坐标（0.15.8 R0：统一用 formatSelectionInfo）
+  // A 类：屏幕坐标换算，0.18.8 per-monitor（不再传 dpr）
   const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
-  const dpr2 = window.devicePixelRatio || 1;
-  const screenPos = cssToScreen(r.x, r.y, meta, dpr2);
+  const screenPos = cssToScreen(r.x, r.y, meta);
   sizeHint.textContent = formatSelectionInfo(screenPos.x, screenPos.y, pw, ph);
   sizeHint.classList.remove('hidden');
   sizeHint.style.left = (r.x + 4) + 'px';
@@ -70,6 +71,7 @@ export function drawSelection() {
 export function drawFinalSelection() {
   const { ctx, canvas, screenshot, selCss } = ss;
   if (!selCss) return;
+  // C 类：主 canvas bitmap 映射，必须用 overlay dpr（bitmap↔CSS 映射全局固定）
   const dpr = window.devicePixelRatio || 1;
   const px = selCss.x * dpr;
   const py = selCss.y * dpr;
@@ -95,7 +97,8 @@ export function drawFinalSelection() {
   // 修复智能选区（snap）后 sizeHint 不显示的问题——snap 路径不经过 drawSelection，
   // 需要在此统一补显。
   const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
-  const screenPos = cssToScreen(selCss.x, selCss.y, meta, dpr);
+  // A 类：屏幕坐标换算，0.18.8 per-monitor（不再传 dpr）
+  const screenPos = cssToScreen(selCss.x, selCss.y, meta);
   if (ss.sizeHint) {
     ss.sizeHint.textContent = formatSelectionInfo(screenPos.x, screenPos.y, pw, ph);
     ss.sizeHint.classList.remove('hidden');

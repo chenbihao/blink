@@ -53,7 +53,7 @@
 | **0.16** | [0.16-clipboard-polish.md](./phases/0.16-clipboard-polish.md) | 感知交互清爽化 + chord requires_input 架构 + 剪贴板增强 + actions 数组 + 共享 Markdown + 通用编辑器基础 + 图片/pin + 杂项打磨 + 内容流转 + chord-E/chord-S + 持久化桌面便签 + 管理与恢复 | ✅ |
 | **0.17** | [0.17-enhancement-polish.md](./phases/0.17-enhancement-polish.md) | 增强与打磨（存量修复 / 窗口预热 / 托盘增强 / 搜索增强 / OCR 优化 / Cherry Markdown / 主窗口 AI 统一 / 便签深化 / Live Preview / AI 权限记忆 / 剪贴板来源增强） | ✅ |
 | **0.17.10** | [0.17.10-capability-projection-refactor.md](./phases/0.17.10-capability-projection-refactor.md) | Capability 投影层收敛重构（projection 移出 invoke 回归展示出口 / ip + weather 插件对齐 / weather 多天预报） | 📋 规划中 |
-| **0.18** | [0.18-enhancement-chord.md](./phases/0.18-enhancement-chord.md) | 增强与 Chord 体验（存量修复 / 截图 / 便签 IR / 托盘 / 命令执行 / 输入状态流转重构 / 截图多屏 DPI 收敛） | 🚧 0.18.7/0.18.8 规划中 |
+| **0.18** | [0.18-enhancement-chord.md](./phases/0.18-enhancement-chord.md) | 增强与 Chord 体验（存量修复 / 截图 / 便签 IR / 托盘 / 命令执行 / 输入状态流转重构 / 截图多屏 DPI 收敛） | 🚧 0.18.0~0.18.8 完成 |
 | **0.20** | [0.20-ai-vector-moat.md](./phases/0.20-ai-vector-moat.md) | 能力扩展向量版(zvec + 记忆向量召回 + RAG + AI 生成 Skill) | 📋 规划中 |
 
 > **非版本档案**：[roadmap.md](./roadmap.md)（0.21+ 与其它未立项候选方向调研）；ADR-001（Agent 后端策略）已并入 [spec-architecture §A10](./specs/spec-architecture.md)。
@@ -77,7 +77,7 @@
 | 0.15.x | 截图体验重做（标注工具 + 长截图闭环采集 + 窗口吸附与像素检查） | ✅ |
 | 0.16.x | 感知交互清爽化 + chord requires_input 架构 + 剪贴板增强 + actions 数组 + 共享 Markdown + 通用编辑器基础 + 图片/pin + 杂项打磨 + 内容流转 + chord-E/chord-S + 持久化桌面便签 + 管理与恢复 | ✅ |
 | 0.17.x | 增强与打磨（存量修复 + 窗口预热 + 托盘 + 搜索增强 + OCR + Cherry Markdown + 主窗口AI统一 + 便签深化 + Live Preview + 权限记忆 + 剪贴板来源增强） | ✅ |
-| 0.18.x | 增强与 Chord 体验（0.18.0～0.18.6 已完成；0.18.7 收敛 Alt/Chord 输入状态流转；0.18.8 截图多屏混合 DPI 坐标收敛） | 🚧 0.18.7/0.18.8 规划中 |
+| 0.18.x | 增强与 Chord 体验（0.18.0～0.18.6 已完成；0.18.7 收敛 Alt/Chord 输入状态流转；0.18.8 截图多屏混合 DPI 坐标收敛） | 🚧 0.18.0~0.18.8 完成 |
 | 0.20.x | 能力扩展向量版(zvec + 记忆向量召回 + RAG) | 📋 规划中 |
 | 0.21+ | 候选：外部 agent subagent / 事实记忆 / proactivity | 🔮 候选 |
 
