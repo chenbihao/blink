@@ -23,6 +23,7 @@
 //! - [`pin_image`] — 将 PNG 图片钉到桌面 → `Done`（0.19.6）
 
 pub mod create_sticky;
+pub mod image_input;
 pub mod list_clipboard_images;
 pub mod list_sticky;
 pub mod list_windows;

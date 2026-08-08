@@ -13,7 +13,7 @@ use std::sync::{Arc, OnceLock};
 use tauri::{AppHandle, Emitter};
 
 use crate::domain::ai::chat_service::ChatService;
-use crate::domain::capability::CapabilityRegistry;
+use crate::domain::capability::{CapabilityRegistry, ImageStash};
 use crate::domain::event::{CapabilityEnv, DomainEnv};
 use crate::domain::plugin::PluginEngine;
 use crate::domain::search::SearchService;
@@ -32,6 +32,8 @@ pub struct TauriDomainEnv {
     plugin_engine: OnceLock<Arc<PluginEngine>>,
     search_service: OnceLock<Arc<SearchService>>,
     chat_service: OnceLock<Arc<ChatService>>,
+    /// 进程级图片暂存（0.19.4）——构造时创建，生命周期与 app 相同。
+    image_stash: Arc<ImageStash>,
 }
 
 impl TauriDomainEnv {
@@ -43,6 +45,7 @@ impl TauriDomainEnv {
             plugin_engine: OnceLock::new(),
             search_service: OnceLock::new(),
             chat_service: OnceLock::new(),
+            image_stash: Arc::new(ImageStash::new()),
         }
     }
 
@@ -107,6 +110,12 @@ impl CapabilityEnv for TauriDomainEnv {
 
     fn search_service(&self) -> Option<&Arc<SearchService>> {
         self.search_service.get()
+    }
+
+    // ── 图片暂存（0.19.4 ImageStash 引用闭环）──────────────────────────
+
+    fn image_stash(&self) -> Option<&Arc<ImageStash>> {
+        Some(&self.image_stash)
     }
 
     // ── 便签窗口操作（0.19.5 从 DomainEnv 提升到 CapabilityEnv）─────────
@@ -299,6 +308,9 @@ mod tests {
             None
         }
         fn search_service(&self) -> Option<&Arc<SearchService>> {
+            None
+        }
+        fn image_stash(&self) -> Option<&Arc<ImageStash>> {
             None
         }
         fn sticky_service(&self) -> Option<&Arc<StickyService>> {

@@ -45,10 +45,16 @@
 - **预热范围**：`chord-screenshot` / `context-menu` / `voice-overlay` / `chord-pin` / `chat` / `settings` / `content-editor` / `sticky-manager` — 8 个静态 label 窗口全部预热
 - **例外**：动态数量的窗口（`sticky-{id}`）按需创建，但窗口外壳复用机制已有（prevent_close + hide）
 - **时序**：预热在启动 3s 后异步执行（`preheat_secondary_windows`），不阻塞 Alt+Space 主链路
-- **容错**：预热失败打 `warn!` 日志但不阻断，show 函数的 fallback 创建逻辑兜底（`get_webview_window` 不存在则 build）
-- **预热窗口的事件注册**：需在预热时注册 `on_window_event`（如 sticky-manager 的 prevent_close + hide），因为 show 函数的复用路径（`is_new=false`）不注册事件
-- **settings 预热特殊处理**：预热时补 `strip_window_border` + `enable_rounded_corners`，因为 `open_settings` 的复用路径不调这两个（只在首次创建路径调）
+- **创建 single-flight**：同一 label 的预热与用户唤起必须共用统一的 `get_or_create` 入口，并按 label 串行化“二次检查 + build”；禁止各路径独立执行 `get_webview_window().is_none() → build()`。并发调用只能有一个创建者，其余调用等待后复用同一窗口；创建失败必须释放创建态，允许后续重试
+- **锁粒度**：创建锁只覆盖同一 label 的“检查 + build”，不得跨 label 串行化全部窗口，也不得覆盖后续 `show` / `focus` / `emit`；预热不得持有 Alt+Space 主链路需要的全局锁
+- **存在不等于就绪**：窗口对象已创建（native/webview created）与前端监听器已注册（frontend ready）是两种状态。`show` 可在创建完成后执行；依赖前端监听器的首次 payload/event 必须通过 pending state、前端主动 pull 或显式 ready handshake 兜底，禁止假设 `build()` 返回后事件一定可达
+- **状态提交以成功为准**：窗口 Visible/Hidden 等权威状态只能在对应 `show()` / `hide()` 成功后更新；禁止忽略窗口操作错误后仍乐观写状态，否则 toggle 会与真实窗口失步。`focus()` 失败至少记录带上下文的 `warn!`，关键输入窗口还需提供重试或失败恢复
+- **容错**：预热失败打 `warn!` 日志但不阻断，用户唤起仍通过同一 `get_or_create` 入口重试；等待创建、复用、失败与重试需有适量结构化日志
+- **窗口级初始化只执行一次**：`on_window_event`、系统菜单拦截、圆角等初始化必须收敛到统一创建成功钩子，或使用幂等 `ensure_*`；不得依赖“必定由预热创建”或“必定由用户路径创建”的分支假设
+- **settings 特殊初始化**：`strip_window_border` + `enable_rounded_corners` 必须纳入统一创建成功钩子或幂等 `ensure_*`，预热创建与用户 fallback 创建不得产生不同外观
 - **内存预算**：8 个预热窗口 + 动态便签，常驻内存 < 300MB（WebView2 每窗口 ~10-20MB）
+
+**反例**：预热任务和 `show_chat_window` 分别先检查 `chat` 不存在、再各自 `build("chat")`。两次检查都可能通过，随后争用相同 label；若用户唤起还在串行热键 effect 循环中等待该建窗路径，后续 Alt+Space 会一起排队。
 
 ### 1.5 vendor 第三方库版本管理（强制）
 

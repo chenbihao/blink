@@ -15,6 +15,7 @@
 use serde::Serialize;
 use serde_json::Value;
 
+use super::image_stash::ImageStash;
 use super::projection::{ProjectionRule, jsonpath_query, value_to_string};
 
 // ── rig 投影层（0.12.0 统一投影入口，0.14 适配新结构）──────────────────────
@@ -51,6 +52,47 @@ impl CapabilityResult {
             CapabilityResult::Done { summary } => {
                 vec![ToolResultContent::text(summary)]
             }
+        }
+    }
+
+    /// 带 ImageStash 上下文的 canonical agent 投影（0.19.4 §3.7）。
+    ///
+    /// **与 `to_rig_tool_result()` 的区别**：
+    /// - `image/*` Blob + stash=Some → 字节移入 stash，返回结构化 `image_ref` JSON：
+    ///   `{"kind":"image_ref","image_ref":"<token>","mime":"image/png","size_bytes":12345,"expires_in_seconds":900}`
+    /// - 非 image Blob 或 stash=None → 降级为现有 blob_summary（尺寸摘要）
+    ///
+    /// **消费方**：内部 AI（`CapabilityTool::call`）和 MCP server 共用此方法，
+    /// 保证投影策略一致。
+    pub fn to_rig_tool_result_with_stash(
+        &self,
+        stash: Option<&ImageStash>,
+    ) -> Vec<rig_core::completion::message::ToolResultContent> {
+        use rig_core::completion::message::ToolResultContent;
+
+        match self {
+            CapabilityResult::Blob { mime, bytes, .. } if mime.starts_with("image/") => {
+                if let Some(stash) = stash {
+                    // 尝试移入 stash
+                    if let Some(image_ref) = stash.put(bytes.clone(), mime.clone()) {
+                        // TTL 固定 15 分钟，直接用常量避免额外 get 调用
+                        let size_bytes = bytes.len();
+                        let structured = serde_json::json!({
+                            "kind": "image_ref",
+                            "image_ref": image_ref,
+                            "mime": mime,
+                            "size_bytes": size_bytes,
+                            "expires_in_seconds": 900,
+                        });
+                        return vec![ToolResultContent::text(structured.to_string())];
+                    }
+                    // stash put 失败（超单项上限等）→ 降级摘要
+                }
+                // 无 stash 或 put 失败 → 摘要降级
+                vec![ToolResultContent::text(self.blob_summary())]
+            }
+            // 非 image Blob / 其他变体 → 原有逻辑
+            _ => self.to_rig_tool_result(),
         }
     }
 
@@ -622,6 +664,113 @@ mod tests {
         } else {
             panic!("Done should project to Text");
         }
+    }
+
+    // ── to_rig_tool_result_with_stash 测试（0.19.4 ImageStash 投影）──────────
+
+    #[test]
+    fn with_stash_image_blob_produces_image_ref() {
+        use rig_core::completion::message::ToolResultContent;
+        let stash = super::ImageStash::new();
+        let r = CapabilityResult::Blob {
+            mime: "image/png".into(),
+            bytes: vec![0x89, 0x50, 0x4E, 0x47],
+            desc: None,
+        };
+        let contents = r.to_rig_tool_result_with_stash(Some(&stash));
+        assert_eq!(contents.len(), 1);
+        if let ToolResultContent::Text(t) = &contents[0] {
+            let parsed: serde_json::Value = serde_json::from_str(t.text()).unwrap();
+            assert_eq!(parsed["kind"], "image_ref");
+            assert!(parsed["image_ref"].is_string());
+            assert_eq!(parsed["mime"], "image/png");
+            assert_eq!(parsed["size_bytes"], 4);
+            assert!(parsed["expires_in_seconds"].as_u64().unwrap() <= 900);
+            // image_ref 可从 stash 取回
+            let token = parsed["image_ref"].as_str().unwrap();
+            let img = stash.get(token).expect("stash 应有刚放入的图片");
+            assert_eq!(img.bytes, vec![0x89, 0x50, 0x4E, 0x47]);
+        } else {
+            panic!("image Blob with stash should produce image_ref JSON");
+        }
+    }
+
+    #[test]
+    fn with_stash_non_image_blob_degrades_to_summary() {
+        use rig_core::completion::message::ToolResultContent;
+        let stash = super::ImageStash::new();
+        let r = CapabilityResult::Blob {
+            mime: "application/octet-stream".into(),
+            bytes: vec![1, 2, 3, 4],
+            desc: None,
+        };
+        let contents = r.to_rig_tool_result_with_stash(Some(&stash));
+        assert_eq!(contents.len(), 1);
+        if let ToolResultContent::Text(t) = &contents[0] {
+            // 非图片 → 摘要降级
+            assert!(t.text().contains("application/octet-stream"));
+            assert!(!t.text().contains("image_ref"));
+        } else {
+            panic!("non-image Blob should degrade to summary");
+        }
+    }
+
+    #[test]
+    fn with_stash_none_degrades_to_summary() {
+        use rig_core::completion::message::ToolResultContent;
+        let r = CapabilityResult::Blob {
+            mime: "image/png".into(),
+            bytes: vec![0u8; 2048],
+            desc: None,
+        };
+        let contents = r.to_rig_tool_result_with_stash(None);
+        assert_eq!(contents.len(), 1);
+        if let ToolResultContent::Text(t) = &contents[0] {
+            // 无 stash → 摘要降级
+            assert!(t.text().contains("image/png"));
+            assert!(t.text().contains("KB"));
+            assert!(!t.text().contains("image_ref"));
+        } else {
+            panic!("image Blob without stash should degrade to summary");
+        }
+    }
+
+    #[test]
+    fn with_stash_text_unchanged() {
+        use rig_core::completion::message::ToolResultContent;
+        let stash = super::ImageStash::new();
+        let r = CapabilityResult::Text {
+            content: "hello".into(),
+            desc: None,
+        };
+        let contents = r.to_rig_tool_result_with_stash(Some(&stash));
+        assert_eq!(contents.len(), 1);
+        if let ToolResultContent::Text(t) = &contents[0] {
+            assert_eq!(t.text(), "hello");
+        } else {
+            panic!("Text should be unchanged");
+        }
+    }
+
+    #[test]
+    fn with_stash_image_ref_non_consuming() {
+        // 投影后 image_ref 可多次读取（先 OCR 再 pin）
+        let stash = super::ImageStash::new();
+        let r = CapabilityResult::Blob {
+            mime: "image/png".into(),
+            bytes: vec![1, 2, 3],
+            desc: None,
+        };
+        let contents = r.to_rig_tool_result_with_stash(Some(&stash));
+        let text = match &contents[0] {
+            rig_core::completion::message::ToolResultContent::Text(t) => t.text().to_string(),
+            _ => panic!("expected Text"),
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let token = parsed["image_ref"].as_str().unwrap();
+        // 两次读取都应成功
+        assert!(stash.get(token).is_some(), "第一次读取应成功");
+        assert!(stash.get(token).is_some(), "第二次读取应成功");
     }
 
     // ── to_display_text 测试（0.14.1 CLI canonical 投影）─────────────────

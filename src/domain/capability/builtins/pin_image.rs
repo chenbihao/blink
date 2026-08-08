@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
+use super::image_input::resolve_png_input;
 use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
 };
@@ -38,14 +39,18 @@ impl Capability for PinImage {
     fn schema(&self) -> CapabilitySchema {
         CapabilitySchema {
             name: "pin_image".into(),
-            description: "将 PNG 图片钉到桌面（显示为始终置顶的透明窗口）。可指定位置(x/y物理像素)，不指定则居中于光标所在显示器。".into(),
+            description: "将 PNG 图片钉到桌面（显示为始终置顶的透明窗口）。可指定位置(x/y物理像素)，不指定则居中于光标所在显示器。图片来源：image_ref（来自截图/剪贴板等能力返回的引用）或 png（原始 PNG 字节数组），二选一。".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
+                    "image_ref": {
+                        "type": "string",
+                        "description": "图片引用（来自 read_clipboard/screenshot 等能力返回的 image_ref，与 png 二选一）"
+                    },
                     "png": {
                         "type": "array",
                         "items": { "type": "integer" },
-                        "description": "PNG 图片字节数据"
+                        "description": "PNG 图片字节数组（与 image_ref 二选一）"
                     },
                     "x": {
                         "type": "integer",
@@ -55,8 +60,7 @@ impl Capability for PinImage {
                         "type": "integer",
                         "description": "图片左上角 y 坐标（物理像素），不指定则居中"
                     }
-                },
-                "required": ["png"]
+                }
             }),
             ..Default::default()
         }
@@ -74,22 +78,9 @@ impl Capability for PinImage {
             });
         }
 
-        // 提取 PNG 字节（与 ocr_image 同模式）
-        let png_bytes = args
-            .get("png")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| CapabilityError::InvalidArgs {
-                detail: "缺少 png 参数".into(),
-            })?
-            .iter()
-            .filter_map(|v| v.as_u64().map(|n| n as u8))
-            .collect::<Vec<u8>>();
-
-        if png_bytes.is_empty() {
-            return Err(CapabilityError::InvalidArgs {
-                detail: "png 数据为空".into(),
-            });
-        }
+        // 提取 PNG 字节：image_ref 或 png 二选一（0.19.4）
+        let stash = ctx.env.image_stash();
+        let png_bytes = resolve_png_input(&args, stash.map(|s| s.as_ref()), "png")?;
 
         // 提取可选位置
         let x = args.get("x").and_then(Value::as_i64).map(|v| v as i32);
@@ -139,11 +130,14 @@ mod tests {
     }
 
     #[test]
-    fn schema_has_png_parameter() {
+    fn schema_has_png_and_image_ref_params() {
         let s = PinImage.schema();
         assert_eq!(s.name, "pin_image");
         assert_eq!(s.parameters["properties"]["png"]["type"], "array");
-        assert_eq!(s.parameters["required"][0], "png");
+        assert_eq!(s.parameters["properties"]["image_ref"]["type"], "string");
+        // 0.19.4: png 不再 required，与 image_ref 二选一
+        let required = s.parameters.get("required");
+        assert!(required.is_none() || required.unwrap().as_array().unwrap().is_empty());
     }
 
     #[test]
@@ -151,10 +145,12 @@ mod tests {
         let s = PinImage.schema();
         assert_eq!(s.parameters["properties"]["x"]["type"], "integer");
         assert_eq!(s.parameters["properties"]["y"]["type"], "integer");
-        // x/y 不在 required 中
-        let required = s.parameters["required"].as_array().unwrap();
-        assert!(!required.iter().any(|v| v == "x"));
-        assert!(!required.iter().any(|v| v == "y"));
+        // x/y 不在 required 中（0.19.4: 无 required 字段）
+        let required = s.parameters.get("required");
+        assert!(
+            required.is_none() || required.unwrap().as_array().unwrap().is_empty(),
+            "不应有 required 字段"
+        );
     }
 
     #[test]

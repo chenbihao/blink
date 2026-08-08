@@ -21,12 +21,16 @@
 
 pub(crate) mod builtins; // Step 2 填真实能力（screenshot 等）
 mod error;
+mod image_stash;
 mod projection;
 mod registry;
 mod result;
 mod schema;
 
 pub use error::CapabilityError;
+pub use image_stash::ImageStash;
+#[allow(unused_imports)]
+pub use image_stash::StashedImage;
 #[allow(unused_imports)]
 pub use projection::{ActionDef, ActionKindDef, ProjectionRule, ResultShape, normalize};
 pub use registry::CapabilityRegistry;

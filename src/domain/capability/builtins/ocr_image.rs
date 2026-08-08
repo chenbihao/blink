@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
+use super::image_input::resolve_png_input;
 use super::ocr_engine::{OcrResult, backend};
 use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
@@ -24,18 +25,20 @@ impl Capability for OcrImage {
     fn schema(&self) -> CapabilitySchema {
         CapabilitySchema {
             name: "ocr_image".into(),
-            description: "识别图片中的文字，返回识别文本和每行文字的位置坐标。支持中文和英文。"
-                .into(),
+            description: "识别图片中的文字，返回识别文本和每行文字的位置坐标。支持中文和英文。图片来源：image_ref（来自截图/剪贴板等能力返回的引用）或 png（原始 PNG 字节数组），二选一。".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
+                    "image_ref": {
+                        "type": "string",
+                        "description": "图片引用（来自 read_clipboard/screenshot 等能力返回的 image_ref，与 png 二选一）"
+                    },
                     "png": {
                         "type": "array",
                         "items": {"type": "integer"},
-                        "description": "PNG 图片字节数据"
+                        "description": "PNG 图片字节数组（与 image_ref 二选一）"
                     }
-                },
-                "required": ["png"]
+                }
             }),
             ..Default::default()
         }
@@ -44,24 +47,11 @@ impl Capability for OcrImage {
     async fn invoke(
         &self,
         args: Value,
-        _ctx: &InvokeContext<'_>,
+        ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError> {
-        // 提取 PNG 字节
-        let png_bytes = args
-            .get("png")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| CapabilityError::InvalidArgs {
-                detail: "缺少 png 参数".into(),
-            })?
-            .iter()
-            .filter_map(|v| v.as_u64().map(|n| n as u8))
-            .collect::<Vec<u8>>();
-
-        if png_bytes.is_empty() {
-            return Err(CapabilityError::InvalidArgs {
-                detail: "png 数据为空".into(),
-            });
-        }
+        // 提取 PNG 字节：image_ref 或 png 二选一（0.19.4）
+        let stash = ctx.env.image_stash();
+        let png_bytes = resolve_png_input(&args, stash.map(|s| s.as_ref()), "png")?;
 
         // 调用注入的 OCR backend
         let b = backend();
@@ -95,15 +85,14 @@ mod tests {
     }
 
     #[test]
-    fn schema_has_png_parameter() {
+    fn schema_has_png_and_image_ref_params() {
         let s = OcrImage.schema();
         assert_eq!(s.name, "ocr_image");
-        assert!(
-            s.parameters["required"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("png"))
-        );
+        assert_eq!(s.parameters["properties"]["png"]["type"], "array");
+        assert_eq!(s.parameters["properties"]["image_ref"]["type"], "string");
+        // 0.19.4: png 不再 required，与 image_ref 二选一
+        let required = s.parameters.get("required");
+        assert!(required.is_none() || required.unwrap().as_array().unwrap().is_empty());
     }
 
     /// Capability 通过 backend() 拿注入的 FakeOcrBackend。

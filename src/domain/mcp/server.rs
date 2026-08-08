@@ -100,13 +100,20 @@ impl BlinkMcpServer {
     ///
     /// 0.14.1: 改调 canonical 投影（`to_rig_tool_result()` + `rig_tool_result_to_text()`），
     /// 消除内联 match + Blob 摘要重复 + Items score 漂移。
+    /// 0.19.4: 改用 `to_rig_tool_result_with_stash()`，image Blob 移入 stash 并返回 image_ref。
     ///
     /// - `Text` → MCP TextContent
     /// - `Items` → 序列化 data JSON（不含 desc/actions/score）
-    /// - `Blob` → 文本摘要（不传原始字节，与 rig 投影策略一致）
+    /// - `Blob{image/*}` → 移入 stash 返回 image_ref JSON（无 stash 时降级为摘要）
+    /// - `Blob{非 image}` → 文本摘要
     /// - `Done` → summary 文本
-    fn result_to_call_tool_result(result: CapabilityResult) -> CallToolResult {
-        let text = crate::domain::capability::rig_tool_result_to_text(&result.to_rig_tool_result());
+    fn result_to_call_tool_result(
+        result: CapabilityResult,
+        stash: Option<&crate::domain::capability::ImageStash>,
+    ) -> CallToolResult {
+        let text = crate::domain::capability::rig_tool_result_to_text(
+            &result.to_rig_tool_result_with_stash(stash),
+        );
         CallToolResult::success(vec![Content::text(text)])
     }
 
@@ -191,9 +198,10 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
 
             let call_tool_result = match result {
                 Ok(cap_result) => {
+                    let stash = env.capability_env().image_stash();
                     // 审计日志（caller = mcp_external）——0.14.1 改调 canonical 投影
                     let summary = crate::domain::capability::rig_tool_result_to_text(
-                        &cap_result.to_rig_tool_result(),
+                        &cap_result.to_rig_tool_result_with_stash(stash.map(|s| s.as_ref())),
                     );
                     ai_audit::save_audit_log(
                         &ai_pool,
@@ -207,7 +215,10 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
                     )
                     .await;
 
-                    BlinkMcpServer::result_to_call_tool_result(cap_result)
+                    BlinkMcpServer::result_to_call_tool_result(
+                        cap_result,
+                        stash.map(|s| s.as_ref()),
+                    )
                 }
                 Err(e) => {
                     let err_msg = format!("{e}");
@@ -320,7 +331,7 @@ mod tests {
             content: "hello world".into(),
             desc: None,
         };
-        let projected = BlinkMcpServer::result_to_call_tool_result(result);
+        let projected = BlinkMcpServer::result_to_call_tool_result(result, None);
         assert_eq!(projected.content.len(), 1);
         // CallToolResult::success() sets is_error = Some(false)
         assert_eq!(projected.is_error, Some(false));
@@ -331,7 +342,7 @@ mod tests {
         let result = CapabilityResult::Done {
             summary: "已写入剪贴板".into(),
         };
-        let projected = BlinkMcpServer::result_to_call_tool_result(result);
+        let projected = BlinkMcpServer::result_to_call_tool_result(result, None);
         assert_eq!(projected.content.len(), 1);
         assert_eq!(projected.is_error, Some(false));
     }
@@ -343,7 +354,7 @@ mod tests {
             bytes: vec![0u8; 2048],
             desc: None,
         };
-        let projected = BlinkMcpServer::result_to_call_tool_result(result);
+        let projected = BlinkMcpServer::result_to_call_tool_result(result, None);
         assert_eq!(projected.content.len(), 1);
         // 文本摘要应包含 mime 类型和大小
         let text = projected.content[0]
@@ -364,7 +375,7 @@ mod tests {
                 actions: vec![],
             }],
         };
-        let projected = BlinkMcpServer::result_to_call_tool_result(result);
+        let projected = BlinkMcpServer::result_to_call_tool_result(result, None);
         assert_eq!(projected.content.len(), 1);
         let text = projected.content[0]
             .as_text()
@@ -385,7 +396,7 @@ mod tests {
             content: "hello".into(),
             desc: None,
         };
-        let projected = BlinkMcpServer::result_to_call_tool_result(result);
+        let projected = BlinkMcpServer::result_to_call_tool_result(result, None);
         assert_eq!(projected.is_error, Some(false));
         assert_eq!(projected.content.len(), 1);
         let text = projected.content[0].as_text().unwrap().text.clone();
@@ -395,7 +406,7 @@ mod tests {
         let result = CapabilityResult::Done {
             summary: "已完成".into(),
         };
-        let projected = BlinkMcpServer::result_to_call_tool_result(result);
+        let projected = BlinkMcpServer::result_to_call_tool_result(result, None);
         assert_eq!(projected.content.len(), 1);
         let text = projected.content[0].as_text().unwrap().text.clone();
         assert!(text.contains("已完成"));
@@ -408,7 +419,7 @@ mod tests {
                 actions: vec![],
             }],
         };
-        let projected = BlinkMcpServer::result_to_call_tool_result(result);
+        let projected = BlinkMcpServer::result_to_call_tool_result(result, None);
         let text = projected.content[0].as_text().unwrap().text.clone();
         assert!(text.contains("test.txt"));
 
@@ -418,7 +429,7 @@ mod tests {
             bytes: vec![0u8; 4096],
             desc: None,
         };
-        let projected = BlinkMcpServer::result_to_call_tool_result(result);
+        let projected = BlinkMcpServer::result_to_call_tool_result(result, None);
         let text = projected.content[0].as_text().unwrap().text.clone();
         assert!(text.contains("image/png"));
         assert!(text.contains("KB"));

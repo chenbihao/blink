@@ -34,19 +34,22 @@ impl Capability for WriteClipboard {
     fn schema(&self) -> CapabilitySchema {
         CapabilitySchema {
             name: "write_clipboard".into(),
-            description: "写入系统剪贴板。支持文本（text）或图片（image_bytes + width + height）。"
-                .into(),
+            description: "写入系统剪贴板。支持文本（text）、图片引用（image_ref，来自截图/剪贴板等能力返回）或 BGRA 图片（image_bytes + width + height）。三种模式互斥。".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "text": {
                         "type": "string",
-                        "description": "要写入的文本内容（与 image_bytes 二选一）"
+                        "description": "要写入的文本内容"
+                    },
+                    "image_ref": {
+                        "type": "string",
+                        "description": "图片引用（来自 read_clipboard/screenshot 等能力返回的 image_ref，写入为 PNG）"
                     },
                     "image_bytes": {
                         "type": "array",
                         "items": { "type": "integer" },
-                        "description": "BGRA 像素字节数组（与 text 二选一，需同时给 width/height）"
+                        "description": "BGRA 像素字节数组（需同时给 width/height）"
                     },
                     "width": {
                         "type": "integer",
@@ -65,10 +68,16 @@ impl Capability for WriteClipboard {
     async fn invoke(
         &self,
         args: Value,
-        _ctx: &InvokeContext<'_>,
+        ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError> {
         // 优先 text 模式（clone 成 String——spawn_blocking 要求 'static）
         if let Some(text) = args.get("text").and_then(Value::as_str).map(str::to_string) {
+            // text 与 image_ref/image_bytes 互斥
+            if args.get("image_ref").is_some() || args.get("image_bytes").is_some() {
+                return Err(CapabilityError::InvalidArgs {
+                    detail: "text 与 image_ref/image_bytes 不能同时提供".into(),
+                });
+            }
             let len = text.chars().count();
             tokio::task::spawn_blocking(move || {
                 crate::infra::platform::clipboard::write_text_to_clipboard(
@@ -88,7 +97,45 @@ impl Capability for WriteClipboard {
             });
         }
 
-        // image_bytes 模式
+        // image_ref 模式（0.19.4）：从 stash 解析 PNG，用 write_png_to_clipboard
+        if let Some(ref_val) = args.get("image_ref").and_then(Value::as_str) {
+            // image_ref 与 image_bytes 互斥
+            if args.get("image_bytes").is_some() {
+                return Err(CapabilityError::InvalidArgs {
+                    detail: "image_ref 与 image_bytes 不能同时提供".into(),
+                });
+            }
+            let stash = ctx.env.image_stash().ok_or_else(|| CapabilityError::InvalidArgs {
+                detail: "image_ref 不可用（运行时未启用 ImageStash）".into(),
+            })?;
+            let img = stash.get(ref_val).ok_or_else(|| CapabilityError::InvalidArgs {
+                detail: "image_ref 不存在或已过期".into(),
+            })?;
+            if !img.mime.starts_with("image/") {
+                return Err(CapabilityError::InvalidArgs {
+                    detail: format!("image_ref 指向的不是图片（mime: {}）", img.mime),
+                });
+            }
+            let png = img.bytes;
+            tokio::task::spawn_blocking(move || {
+                crate::infra::platform::clipboard::write_png_to_clipboard(
+                    &png,
+                    crate::infra::platform::clipboard::SELF_LABEL_BLINK,
+                    false,
+                )
+            })
+            .await
+            .map_err(|e| CapabilityError::Internal {
+                detail: format!("write_clipboard task 崩溃: {e}"),
+            })?
+            .map_err(|e| CapabilityError::Internal { detail: e })?;
+
+            return Ok(CapabilityResult::Done {
+                summary: "已写入图片".into(),
+            });
+        }
+
+        // image_bytes 模式（BGRA）
         let width = args.get("width").and_then(Value::as_u64).ok_or_else(|| {
             CapabilityError::InvalidArgs {
                 detail: "image 模式缺少 width".into(),
@@ -164,6 +211,7 @@ mod tests {
         assert!(s.parameters["properties"]["text"]["type"] == "string");
         assert!(s.parameters["properties"]["image_bytes"]["type"] == "array");
         assert!(s.parameters["properties"]["width"]["type"] == "integer");
+        assert!(s.parameters["properties"]["image_ref"]["type"] == "string");
     }
 
     #[test]

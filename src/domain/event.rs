@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use crate::domain::ai::chat_service::ChatService;
-use crate::domain::capability::CapabilityRegistry;
+use crate::domain::capability::{CapabilityRegistry, ImageStash};
 use crate::domain::plugin::PluginEngine;
 use crate::domain::search::SearchService;
 use crate::domain::sticky::StickyService;
@@ -67,6 +67,14 @@ pub trait CapabilityEnv: Send + Sync {
         w: Option<i32>,
         h: Option<i32>,
     ) -> Result<String, String>;
+
+    // ── 图片暂存（0.19.4 ImageStash 引用闭环）──────────────────────────
+
+    /// 进程级图片暂存——投影层把 image/* Blob 字节移入 stash 并生成 `image_ref`，
+    /// 后续 tool 只传 ref，不把图片编码进 LLM 上下文。
+    ///
+    /// 返回 `None`——CLI/MCP 最小运行时不构造，投影层降级为摘要。
+    fn image_stash(&self) -> Option<&Arc<ImageStash>>;
 
     // ── pin 窗口操作（0.19.6 pin 能力化桥接）──────────────────────────
 

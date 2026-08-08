@@ -36,7 +36,7 @@ impl Capability for ReadClipboard {
                 "type": "object",
                 "properties": {}
             }),
-            ..Default::default()
+            sensitive: true, // 读剪贴板属隐私敏感数据（0.19.4 补齐）
         }
     }
 
@@ -114,6 +114,15 @@ mod tests {
         assert!(
             s.description.contains("图片"),
             "schema description 应提及图片"
+        );
+    }
+
+    #[test]
+    fn schema_sensitive_is_true() {
+        let s = ReadClipboard.schema();
+        assert!(
+            s.sensitive,
+            "read_clipboard 必须 sensitive=true（读取用户剪贴板属隐私数据）"
         );
     }
 }

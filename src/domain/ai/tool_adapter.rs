@@ -546,7 +546,8 @@ impl ToolDyn for CapabilityTool {
             // 调用 Capability
             match self.cap.invoke(args_value, &ctx).await {
                 Ok(cap_result) => {
-                    let contents = cap_result.to_rig_tool_result();
+                    let stash = self.emitter.capability_env().image_stash();
+                    let contents = cap_result.to_rig_tool_result_with_stash(stash.map(|s| s.as_ref()));
                     Ok(crate::domain::capability::rig_tool_result_to_text(
                         &contents,
                     ))

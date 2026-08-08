@@ -53,7 +53,7 @@ impl Capability for Screenshot {
                 },
                 "required": ["op"]
             }),
-            ..Default::default()
+            sensitive: true, // 截图获取用户屏幕内容属隐私敏感数据（0.19.4 补齐）
         }
     }
 
@@ -439,6 +439,15 @@ mod tests {
         let props = &s.parameters["properties"];
         assert!(props.get("hwnd").is_some(), "schema 应包含 hwnd 参数");
         assert_eq!(props["hwnd"]["type"], "integer");
+    }
+
+    #[test]
+    fn schema_sensitive_is_true() {
+        let s = Screenshot.schema();
+        assert!(
+            s.sensitive,
+            "screenshot 必须 sensitive=true（截取用户屏幕内容属隐私数据）"
+        );
     }
 
     /// list_displays 通过 fake backend 返回预设显示器列表。
