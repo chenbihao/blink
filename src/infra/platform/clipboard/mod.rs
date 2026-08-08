@@ -294,6 +294,15 @@ pub fn read_current_text() -> Option<String> {
     windows::read_current_text()
 }
 
+/// 读当前剪贴板图片（0.19.1 read_clipboard Capability 图片分支）。
+///
+/// 返回 `Some(png_bytes)` = 图片剪贴板（PNG 字节）；`None` = 空/非图片。
+/// 含短重试（与 `read_current_text` 同一逻辑）。
+#[cfg(target_os = "windows")]
+pub fn read_current_image() -> Option<Vec<u8>> {
+    windows::read_current_image()
+}
+
 /// 把文本写入系统剪贴板（CF_UNICODETEXT 格式）—— 打标外壳。
 ///
 /// 内部先 `mark_self_write(label, skip_persist)`，再调 `write_text_to_clipboard_raw`。

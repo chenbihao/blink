@@ -4,11 +4,12 @@
 //! 新增能力 = 新建文件 + 写一行 submit，注册表零改动。
 //!
 //! **内置能力**（文档 §4.1）：
-//! - [`screenshot`] — 0.11.7-f 统一入口，`op=list_displays|capture|crop`
-//! - [`capture_screen`] — alias to `screenshot { op: capture }`（保留 3 个月）
-//! - [`crop_image`] — alias to `screenshot { op: crop }`（保留 3 个月）
+//! - [`screenshot`] — 0.11.7-f 统一入口，`op=list_displays|capture|crop|window`
 //! - [`ocr_image`] — OCR 文字识别（0.11.7-c）
-//! - [`read_clipboard`] — 读剪贴板 → `Text`/`Blob`
+//! - [`read_clipboard`] — 读剪贴板 → `Text`/`Blob{png}`（0.19.1 图片分支）
+//! - [`read_clipboard_history_image`] — 按 id 读剪贴板历史图片 → `Blob{png}`（0.19.1）
+//! - [`list_clipboard_images`] — 列出剪贴板图片历史 → `Items`（0.19.1，sensitive=true）
+//! - [`list_windows`] — 列出桌面可见窗口 → `Items`（0.19.2，sensitive=true）
 //! - [`write_clipboard`] — 写剪贴板 → `Done`（图/文双模式）
 //! - [`search_files`] — 搜文件 → `Items`（包装 FileEngine）
 //! - [`search_apps`] — 搜应用 → `Items`（0.11.2 改进 5，共享 StartMenuEngine）
@@ -17,13 +18,14 @@
 //! - [`open_path`] — 打开文件/目录 → `Done`（0.14.2 从 Action 提升为 Capability）
 //! - [`reveal_in_explorer`] — 资源管理器定位 → `Done`（0.14.2 从 Action 提升为 Capability）
 
-pub mod capture_screen;
-pub mod crop_image;
+pub mod list_clipboard_images;
+pub mod list_windows;
 pub mod ocr_engine;
 pub mod ocr_image;
 pub mod open_path;
 pub mod open_url;
 pub mod read_clipboard;
+pub mod read_clipboard_history_image;
 pub mod reveal_in_explorer;
 pub mod screenshot;
 pub mod search_apps;

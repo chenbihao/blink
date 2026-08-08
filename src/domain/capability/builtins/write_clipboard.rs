@@ -5,7 +5,7 @@
 //! - `text` 模式：写 CF_UNICODETEXT（新写函数 `write_text_to_clipboard`）
 //! - `image` 模式：写 CF_DIB（复用 `write_bgra_to_clipboard`，需 width/height）
 //!
-//! 这是截图链路的编排终点（capture_screen → crop_image → write_clipboard），
+//! 这是截图链路的编排终点（screenshot → write_clipboard），
 //! 也是 AI "把结果写到剪贴板" 的通用出口。
 
 use std::sync::Arc;

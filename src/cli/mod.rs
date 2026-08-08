@@ -46,7 +46,7 @@ pub enum Commands {
 
     /// 调用任意 Capability
     Run {
-        /// Capability id（如 capture_screen / search_files）
+        /// Capability id（如 screenshot / search_files）
         capability: String,
         /// 参数 JSON（如 '{"query": "test"}'）
         #[arg(long)]

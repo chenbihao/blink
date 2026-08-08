@@ -19,7 +19,7 @@
 //! - 取消：drop future + seq 校验，复用 AI stream cancel 模式
 //! - SLO：`MetricCategory::Capability`，`CapabilityRegistry::invoke` 包装层自动埋点
 
-pub(crate) mod builtins; // Step 2 填真实能力（capture_screen 等）
+pub(crate) mod builtins; // Step 2 填真实能力（screenshot 等）
 mod error;
 mod projection;
 mod registry;
@@ -52,13 +52,13 @@ inventory::collect!(CapabilityEntry);
 /// 原子能力——一切"做一件事拿一个结果"的统一抽象（文档 §3.2）。
 ///
 /// 四种调用方共享同一份 Capability：
-/// - Action.execute() 编排它（如 ScreenshotAction 编排 capture_screen）
+/// - Action.execute() 编排它（如 ScreenshotAction 编排 screenshot）
 /// - AI tool 直接 tool_call 它（0.10 语音找文件 / Agent 窗口）
 /// - （0.11）CLI 派生 `blink screenshot --display 1`
 /// - （0.11）MCP server 暴露给外部 Agent
 #[async_trait::async_trait]
 pub trait Capability: Send + Sync {
-    /// 唯一标识（如 `"capture_screen"`）。
+    /// 唯一标识（如 `"screenshot"`）。
     fn id(&self) -> &str;
 
     /// 能力自述——送 LLM 的 tool schema（纯 JSON Schema）。

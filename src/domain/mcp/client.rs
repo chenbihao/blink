@@ -991,7 +991,7 @@ mod tests {
                 parameters: serde_json::json!({"type": "object", "properties": {}}),
                 sensitive: true, // sensitive 不应映射到 MCP annotations
             },
-            CapabilitySchema::empty("capture_screen", "截屏"),
+            CapabilitySchema::empty("screenshot", "截屏"),
         ];
 
         let tools = capability_schemas_to_mcp_tools(&schemas);

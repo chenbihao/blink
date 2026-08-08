@@ -92,7 +92,7 @@ mod tests {
         let pool = setup_pool().await;
         let config = McpServerModeConfig {
             enabled: true,
-            exposed_capabilities: vec!["capture_screen".into(), "search_files".into()],
+            exposed_capabilities: vec!["screenshot".into(), "search_files".into()],
         };
         McpServerModeConfigStore::save(&pool, &config)
             .await

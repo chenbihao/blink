@@ -847,38 +847,32 @@ pub async fn record_clipboard_hit(app: tauri::AppHandle, id: String) -> Result<(
 }
 
 /// 在外部浏览器打开 URL。
+///
+/// **0.19.0**：改经 `CapabilityRegistry` 调 `OpenUrl` Capability，消除双入口
+/// （旧实现直调 `ShellExecuteW`，与 Capability 路径走 `open::that` 是两套独立底层）。
 #[tauri::command]
-pub async fn open_url(url: String) -> Result<(), String> {
+pub async fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
     tracing::debug!(%url, "open_url");
 
-    // 使用 Windows ShellExecuteW 打开默认浏览器
-    #[cfg(target_os = "windows")]
-    {
-        use windows::Win32::UI::Shell::ShellExecuteW;
-        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-        use windows::core::{PCWSTR, w};
+    let cap_reg = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
+    let cap = cap_reg
+        .get("open_url")
+        .ok_or_else(|| "open_url Capability 未注册".to_string())?;
 
-        let url_wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
-        let result = unsafe {
-            ShellExecuteW(
-                None,
-                w!("open"),
-                PCWSTR(url_wide.as_ptr()),
-                None,
-                None,
-                SW_SHOWNORMAL,
-            )
-        };
-        if result.0 as i32 <= 32 {
-            return Err(format!("打开 URL 失败，返回值: {}", result.0 as i32));
-        }
-    }
+    let env_arc = app
+        .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
+        .inner()
+        .clone();
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        // 非 Windows 平台使用 open crate（后续可添加）
-        return Err("当前平台暂不支持打开 URL".to_string());
-    }
+    let args = serde_json::json!({ "url": url });
+    let ctx = crate::domain::capability::InvokeContext {
+        env: env_arc.as_ref(),
+        deadline: None,
+    };
+
+    cap.invoke(args, &ctx)
+        .await
+        .map_err(|e| e.to_string())?;
 
     Ok(())
 }

@@ -1,15 +1,12 @@
 //! `screenshot` Capability（0.11.7-f）：统一的截图能力入口。
 //!
-//! **三合一 op**：
+//! **四合一 op**：
 //! - `list_displays` — 枚举所有显示器，返回 `Text{JSON}`
 //! - `capture` — 截取指定屏或虚拟屏幕，返回 `Blob{png}`
 //! - `crop` — 从最近 SESSION 裁剪，返回 `Blob{png}`
+//! - `window` — 截取指定窗口（按 hwnd），返回 `Blob{png}`（0.19.3）
 //!
-//! **与旧 alias 的关系**：
-//! - `capture_screen` → 委托到 `screenshot { op: capture }`
-//! - `crop_image` → 委托到 `screenshot { op: crop, x/y/w/h }`
-//!
-//! 旧 tool 名 alias 保留 3 个月，避免 AI 提示词层缓存失效（详见 phases/0.11.7 §12.6）。
+//! 0.19.0 已删除 `capture_screen` / `crop_image` alias，统一走 `screenshot { op }`。
 
 use std::sync::Arc;
 
@@ -31,18 +28,22 @@ impl Capability for Screenshot {
     fn schema(&self) -> CapabilitySchema {
         CapabilitySchema {
             name: "screenshot".into(),
-            description: "屏幕相关操作。op=list_displays 枚举显示器；op=capture 截取（可选 display_id）；op=crop 裁剪最近截屏。".into(),
+            description: "屏幕相关操作。op=list_displays 枚举显示器；op=capture 截取（可选 display_id）；op=crop 裁剪最近截屏；op=window 截取指定窗口（需 hwnd，从 list_windows 获取）。".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "op": {
                         "type": "string",
-                        "enum": ["list_displays", "capture", "crop"],
+                        "enum": ["list_displays", "capture", "crop", "window"],
                         "description": "操作类型"
                     },
                     "display_id": {
                         "type": "integer",
                         "description": "显示器 id（op=capture 时可选，缺省截取虚拟屏幕）"
+                    },
+                    "hwnd": {
+                        "type": "integer",
+                        "description": "窗口句柄（op=window 必填，从 list_windows 获取）"
                     },
                     "x": { "type": "integer", "description": "裁剪起点 X（op=crop 必填，物理像素）" },
                     "y": { "type": "integer", "description": "裁剪起点 Y（op=crop 必填）" },
@@ -98,6 +99,14 @@ impl Capability for Screenshot {
                     }
                 })? as u32;
                 op_crop(x, y, w, h).await
+            }
+            "window" => {
+                let hwnd = args.get("hwnd").and_then(Value::as_i64).ok_or_else(|| {
+                    CapabilityError::InvalidArgs {
+                        detail: "缺少 hwnd 参数".into(),
+                    }
+                })? as isize;
+                op_window(hwnd).await
             }
             other => Err(CapabilityError::InvalidArgs {
                 detail: format!("未知 op: {other}"),
@@ -226,6 +235,52 @@ pub(super) async fn op_crop(
     })
 }
 
+/// window：截取指定窗口，返回 `Blob{png}`（0.19.3）。
+///
+/// 入参 `hwnd`：从 `list_windows` Capability 拿到的窗口句柄（isize）。
+///
+/// **不依赖 SESSION cache**——与 `op:capture`（指定显示器）同理，每次新截。
+/// 实现流程：`spawn_blocking` → `get_window_dwm_rect(hwnd)` 取 DWM 扩展边框
+/// → `capture_region(x, y, w, h)` 截取虚拟屏幕对应区域 → `encode_png`。
+///
+/// **坐标系**：DWM rect 是虚拟屏幕物理像素坐标，与 `capture_region` 一致，
+/// 无需转换。`get_window_dwm_rect` 返回的是 `DWMWA_EXTENDED_FRAME_BOUNDS`
+/// （真实可视边框，非含阴影的 `GetWindowRect`），截图区域与用户所见窗口一致。
+pub(super) async fn op_window(hwnd: isize) -> Result<CapabilityResult, CapabilityError> {
+    let (bgra, w, h) =
+        tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, u32, u32), CapabilityError> {
+            let (x, y, w, h) =
+                crate::infra::platform::window::get_window_dwm_rect(hwnd).ok_or_else(|| {
+                    CapabilityError::InvalidArgs {
+                        detail: format!("hwnd {hwnd} 无效或窗口不可见"),
+                    }
+                })?;
+            let bgra = crate::infra::platform::screenshot::capture_region(x, y, w, h)
+                .map_err(|e| CapabilityError::Internal { detail: e })?;
+            Ok((bgra, w, h))
+        })
+        .await
+        .map_err(|e| CapabilityError::Internal {
+            detail: format!("op_window task 崩溃: {e}"),
+        })??;
+
+    let png = tokio::task::spawn_blocking(move || {
+        crate::infra::platform::screenshot::encode_png(&bgra, w, h)
+    })
+    .await
+    .map_err(|e| CapabilityError::Internal {
+        detail: format!("encode_png task 崩溃: {e}"),
+    })?
+    .map_err(|e| CapabilityError::Internal { detail: e })?;
+
+    tracing::debug!(hwnd, bytes = png.len(), "op_window: 截取窗口完成");
+    Ok(CapabilityResult::Blob {
+        mime: "image/png".into(),
+        bytes: png,
+        desc: None,
+    })
+}
+
 // ── 测试辅助（其他 builtin 的测试也可能与全局 backend 竞争，共享同一把锁） ─────
 
 #[cfg(test)]
@@ -255,13 +310,22 @@ mod tests {
     }
 
     #[test]
-    fn schema_declares_three_ops() {
+    fn schema_declares_four_ops() {
         let s = Screenshot.schema();
         let ops = s.parameters["properties"]["op"]["enum"].as_array().unwrap();
-        assert_eq!(ops.len(), 3);
+        assert_eq!(ops.len(), 4);
         assert!(ops.contains(&json!("list_displays")));
         assert!(ops.contains(&json!("capture")));
         assert!(ops.contains(&json!("crop")));
+        assert!(ops.contains(&json!("window")));
+    }
+
+    #[test]
+    fn schema_has_hwnd_param() {
+        let s = Screenshot.schema();
+        let props = &s.parameters["properties"];
+        assert!(props.get("hwnd").is_some(), "schema 应包含 hwnd 参数");
+        assert_eq!(props["hwnd"]["type"], "integer");
     }
 
     /// list_displays 通过 fake backend 返回预设显示器列表。
@@ -346,6 +410,48 @@ mod tests {
         let CapabilityResult::Blob { bytes, .. } = result else {
             panic!("期望 Blob 结果");
         };
+        assert_eq!(
+            &bytes[..8],
+            &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+        );
+    }
+
+    /// hwnd=0 是 NULL HWND，`get_window_dwm_rect` 应返回 None → InvalidArgs。
+    #[tokio::test]
+    async fn op_window_invalid_hwnd_returns_error() {
+        let _g = test_lock();
+        let fake = Arc::new(FakeScreenshotBackend::single_primary(800, 600));
+        crate::infra::platform::screenshot::install_backend(fake);
+
+        let err = op_window(0).await.unwrap_err();
+        assert!(
+            matches!(err, CapabilityError::InvalidArgs { .. }),
+            "期望 InvalidArgs，实际: {err:?}"
+        );
+    }
+
+    /// 尝试用真实桌面窗口验证 op_window 全链路。
+    ///
+    /// `enumerate_pickable_windows()` 枚举桌面可见窗口，取第一个的 hwnd 调 `op_window`。
+    /// 测试环境无可见窗口时 skip（不应 fail）。
+    #[tokio::test]
+    async fn op_window_with_real_window_returns_png() {
+        let _g = test_lock();
+        let fake = Arc::new(FakeScreenshotBackend::single_primary(1920, 1080));
+        crate::infra::platform::screenshot::install_backend(fake);
+
+        let windows = crate::infra::platform::window::enumerate_pickable_windows();
+        let Some(win) = windows.first() else {
+            // 测试环境无可见窗口——skip 而非 fail
+            eprintln!("op_window_with_real_window_returns_png: 跳过（无可见窗口）");
+            return;
+        };
+
+        let result = op_window(win.hwnd).await.unwrap();
+        let CapabilityResult::Blob { mime, bytes, .. } = result else {
+            panic!("期望 Blob 结果");
+        };
+        assert_eq!(mime, "image/png");
         assert_eq!(
             &bytes[..8],
             &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]

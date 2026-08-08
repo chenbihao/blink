@@ -1,9 +1,11 @@
-//! `read_clipboard` Capability（0.9.7 Step 2）。
+//! `read_clipboard` Capability（0.9.7 Step 2, 0.19.1 图片分支）。
 //!
-//! 读当前剪贴板 → `Text`（文本）或 `Blob{png}`（图片，暂不支持）。
+//! 读当前剪贴板 → `Text`（文本）或 `Blob{png}`（图片）。
 //!
-//! 当前实现：只读文本（CF_UNICODETEXT）。图片剪贴板读取留后续——现状截图写的是
-//! CF_DIB，读回来需要 DIB→PNG 转换，0.9.7 暂不做（read 剪贴板图的使用场景稀少）。
+//! **0.19.1**：先试 CF_DIB（图片），有则返回 `Blob{image/png}`；
+//! 无则 fallback 读 CF_UNICODETEXT（文本），返回 `Text`。
+//! 图片"获取"与"识别/消费"正交分离——本 cap 只负责获取图片字节，
+//! OCR/翻译/pin 等消费由 AI 组合其他 cap 完成。
 
 use std::sync::Arc;
 
@@ -13,10 +15,11 @@ use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
 };
 
-/// `read_clipboard` — 读当前剪贴板内容。
+/// `read_clipboard` — 读当前剪贴板内容（文本或图片）。
 ///
 /// 入参：`{}`（无参）。
-/// 出参：`Text { content }`（文本剪贴板）；空剪贴板返回 `Text { content: "" }`。
+/// 出参：`Blob { mime: "image/png", bytes }`（图片剪贴板）；
+///       `Text { content }`（文本剪贴板）；空剪贴板返回 `Text { content: "" }`。
 pub struct ReadClipboard;
 
 #[async_trait::async_trait]
@@ -28,7 +31,7 @@ impl Capability for ReadClipboard {
     fn schema(&self) -> CapabilitySchema {
         CapabilitySchema {
             name: "read_clipboard".into(),
-            description: "读取当前系统剪贴板的文本内容。".into(),
+            description: "读取当前系统剪贴板内容。如果剪贴板包含图片则返回图片（PNG 字节），否则返回文本。".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {}
@@ -42,24 +45,46 @@ impl Capability for ReadClipboard {
         _args: Value,
         _ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError> {
-        let text =
-            tokio::task::spawn_blocking(|| crate::infra::platform::clipboard::read_current_text())
-                .await
-                .map_err(|e| CapabilityError::Internal {
-                    detail: format!("read_clipboard task 崩溃: {e}"),
-                })?;
-
-        let content = text.unwrap_or_default();
-        if content.is_empty() {
-            tracing::debug!("read_clipboard: 剪贴板为空或非文本");
-        } else {
-            tracing::debug!(len = content.chars().count(), "read_clipboard: 读到文本");
-        }
-        Ok(CapabilityResult::Text {
-            content,
-            desc: None,
+        // 单次 spawn_blocking：先试图片，无则 fallback 文本（避免两次线程池跳转）
+        let result = tokio::task::spawn_blocking(|| {
+            // 先试 CF_DIB（图片）
+            if let Some(png) = crate::infra::platform::clipboard::read_current_image() {
+                return ReadResult::Image(png);
+            }
+            // fallback 文本
+            let text = crate::infra::platform::clipboard::read_current_text();
+            ReadResult::Text(text.unwrap_or_default())
         })
+        .await
+        .map_err(|e| CapabilityError::Internal {
+            detail: format!("read_clipboard task 崩溃: {e}"),
+        })?;
+
+        match result {
+            ReadResult::Image(png) => {
+                tracing::debug!(bytes = png.len(), "read_clipboard: 读到图片");
+                Ok(CapabilityResult::Blob {
+                    mime: "image/png".into(),
+                    bytes: png,
+                    desc: None,
+                })
+            }
+            ReadResult::Text(content) => {
+                if content.is_empty() {
+                    tracing::debug!("read_clipboard: 剪贴板为空");
+                } else {
+                    tracing::debug!(len = content.chars().count(), "read_clipboard: 读到文本");
+                }
+                Ok(CapabilityResult::Text { content, desc: None })
+            }
+        }
     }
+}
+
+/// spawn_blocking 内部用的传输枚举。
+enum ReadResult {
+    Image(Vec<u8>),
+    Text(String),
 }
 
 inventory::submit!(crate::domain::capability::CapabilityEntry {
@@ -81,5 +106,14 @@ mod tests {
         assert_eq!(s.parameters["type"], "object");
         // 无 properties（空 object）
         assert!(s.parameters["properties"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn schema_description_mentions_image() {
+        let s = ReadClipboard.schema();
+        assert!(
+            s.description.contains("图片"),
+            "schema description 应提及图片"
+        );
     }
 }

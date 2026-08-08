@@ -61,13 +61,13 @@ mod tests {
     #[test]
     fn projection_maps_name_and_description() {
         let schema = CapabilitySchema {
-            name: "capture_screen".into(),
+            name: "screenshot".into(),
             description: "截取屏幕截图".into(),
             parameters: json!({"type": "object", "properties": {}}),
             sensitive: false,
         };
         let tool = capability_schema_to_mcp_tool(&schema);
-        assert_eq!(tool.name, "capture_screen");
+        assert_eq!(tool.name, "screenshot");
         assert_eq!(tool.description.as_deref(), Some("截取屏幕截图"));
     }
 

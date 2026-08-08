@@ -81,8 +81,8 @@ mod tests {
 
     #[test]
     fn empty_schema_has_object_parameters() {
-        let s = CapabilitySchema::empty("capture_screen", "截取屏幕");
-        assert_eq!(s.name, "capture_screen");
+        let s = CapabilitySchema::empty("screenshot", "截取屏幕");
+        assert_eq!(s.name, "screenshot");
         assert_eq!(s.description, "截取屏幕");
         assert_eq!(s.parameters["type"], "object");
         assert!(s.parameters["properties"].is_object());

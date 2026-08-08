@@ -160,6 +160,34 @@ pub async fn query_recent_days_images(
     .unwrap_or_default()
 }
 
+/// 图片元数据（不含任何 BLOB，用于 AI Capability 等纯元数据场景）。
+///
+/// 0.19.1：`list_clipboard_images` Capability 只需 id/尺寸/来源/时间，
+/// 不需要缩略图 BLOB（~50KB/条），避免无谓的数据加载。
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ClipboardImageListItem {
+    pub id: String,
+    pub width: i64,
+    pub height: i64,
+    pub created_at: i64,
+    pub source_app: Option<String>,
+    pub source_path: Option<String>,
+}
+
+/// 查询最近的剪贴板图片元数据（不含任何 BLOB，仅 id/尺寸/来源/时间）。
+///
+/// 0.19.1：供 `list_clipboard_images` Capability 用，避免加载缩略图 BLOB。
+pub async fn query_recent_image_list(pool: &SqlitePool, limit: i64) -> Vec<ClipboardImageListItem> {
+    sqlx::query_as::<_, ClipboardImageListItem>(
+        "SELECT id, width, height, created_at, source_app, source_path
+         FROM clipboard_images ORDER BY created_at DESC LIMIT ?1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+}
+
 /// 图片元数据（不含完整 PNG，用于列表展示）。
 #[derive(Debug, Clone, sqlx::FromRow)]
 #[allow(dead_code)]

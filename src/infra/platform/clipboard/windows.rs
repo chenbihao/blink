@@ -575,6 +575,41 @@ pub fn read_current_text() -> Option<String> {
     read_clipboard_text()
 }
 
+/// 读当前剪贴板图片（0.19.1：供 read_clipboard Capability 图片分支用）。
+///
+/// 尝试读 CF_DIB → 解码 DIB → BGRA → PNG。成功返回 `Some(png_bytes)`，
+/// 非图片剪贴板（文本/文件列表/空）返回 `None`。
+///
+/// 含短重试（与 `read_current_text` 同一逻辑），读不到返回 None 不报错。
+pub fn read_current_image() -> Option<Vec<u8>> {
+    const MAX_ATTEMPTS: u32 = 5;
+    const BACKOFF_MS: u64 = 8;
+    for attempt in 0..MAX_ATTEMPTS {
+        unsafe {
+            if OpenClipboard(None).is_ok() {
+                let dib = read_dib_inner();
+                let _ = CloseClipboard();
+                if let Some(dib_data) = dib {
+                    if attempt > 0 {
+                        tracing::debug!(attempt, "剪贴板图片读取重试成功");
+                    }
+                    let (bgra, width, height) = decode_dib(&dib_data)?;
+                    let png = bgra_to_png(&bgra, width, height).ok()?;
+                    tracing::debug!(width, height, bytes = png.len(), "read_current_image: 读到图片");
+                    return Some(png);
+                }
+                // Open 成功但读 DIB 失败（非 CF_DIB） —— 不是竞争问题，不重试
+                return None;
+            }
+        }
+        if attempt + 1 < MAX_ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(BACKOFF_MS));
+        }
+    }
+    tracing::debug!("剪贴板图片 OpenClipboard 重试仍失败,放弃");
+    None
+}
+
 fn read_clipboard_text() -> Option<String> {
     // 短重试 + 微退避:写入方(浏览器/编辑器)刚 SetClipboardData + CloseClipboard,
     // 我们收到 WM_CLIPBOARDUPDATE 立即 OpenClipboard 有几率抢不过 —— 系统内部把

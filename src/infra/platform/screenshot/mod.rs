@@ -90,7 +90,7 @@ struct Session {
 static SESSION: RwLock<Option<Session>> = RwLock::new(None);
 
 /// 标注模式标志（0.11.7）：选区完成后、用户确认输出前为 true。
-/// AI 调用 `capture_screen` 时检测此标志，活跃则新截一帧而非复用 SESSION。
+/// AI 调用 `screenshot { op: capture }` 时检测此标志，活跃则新截一帧而非复用 SESSION。
 static ANNOTATION_MODE: AtomicBool = AtomicBool::new(false);
 
 /// 0.15.7：截图会话开始时的前台窗口 HWND（供长截图 PostMessage 滚轮用）。
@@ -188,7 +188,7 @@ pub fn capture_region(x: i32, y: i32, w: u32, h: u32) -> Result<Vec<u8>, String>
 /// **0.11.7-f**：改走注入的 backend 而非直接调 Win32。
 ///
 /// **标注模式重置**：新会话开始前复位 `ANNOTATION_MODE`，防止前一次崩溃残留导致
-/// AI `capture_screen` 永远跳过 SESSION 缓存。
+/// AI `screenshot { op: capture }` 永远跳过 SESSION 缓存。
 pub fn begin_session() -> Result<ScreenCaptureMeta, String> {
     // 新会话开始时清除前一次可能残留的标注模式（backend crash / 前端异常退出等情况）
     set_annotation_mode(false);
@@ -249,7 +249,7 @@ pub fn end_session() {
 
 /// 设置/清除标注模式（0.11.7）。
 ///
-/// 标注模式 = 选区完成到用户确认输出之间。AI 调用 `capture_screen` 时检测此标志，
+/// 标注模式 = 选区完成到用户确认输出之间。AI 调用 `screenshot { op: capture }` 时检测此标志，
 /// 活跃则新截一帧而非复用 SESSION（避免读到标注进行中的截图）。
 pub fn set_annotation_mode(active: bool) {
     ANNOTATION_MODE.store(active, Ordering::SeqCst);

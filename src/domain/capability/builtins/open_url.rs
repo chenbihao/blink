@@ -3,10 +3,9 @@
 //! 从 Action 提升为 Capability——AI 常用（打开搜索结果 / 用户请求的 URL）。
 //! 入参：`{ "url": "..." }`，出参：`Done { summary }`。
 //!
-//! **与 Action 的关系**：0.14.2 前 `open_url` 是 `Action`（返回 `ActionOutcome::Nop`），
-//! 经 `ActionTool` 适配器暴露给 AI tool 池。0.14.2 删 `ActionTool` 后，AI tool 池
-//! 只含 Capability，`open_url` 提升为 Capability 直接进池。Action 保留在
-//! `ActionRegistry` 供主窗口搜索流（`run_builtin_action`）使用。
+//! **0.19.0**：用户侧 `#[tauri::command] open_url` 也改经 `CapabilityRegistry`
+//! 调本 Capability，消除双入口（旧 command 直调 `ShellExecuteW`，本 Capability
+//! 走 `open::that`，两套独立底层）。
 
 use std::sync::Arc;
 

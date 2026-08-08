@@ -307,31 +307,87 @@ pub fn screenshot_pin_transform(
 /// 0.11.7-f：改走 `ocr_engine::backend()` 注入的后端（测试可替换）。
 ///
 /// **0.14.7 W3**：返回 `CommandError`（结构化错误协议）。
+///
+/// **0.19.4**：用户侧 command 改经 `CapabilityRegistry` 调 `OcrImage` Capability，
+/// 与 AI 走同一个入口（照搬 `translate_text` 模式）。底层 `ocr_engine::backend()`
+/// 不动，OcrImage Capability 仍调它。消除双入口行为漂移。
 #[tauri::command]
 pub async fn ocr_image(
-    _app: tauri::AppHandle,
+    app: tauri::AppHandle,
     png_data: Vec<u8>,
 ) -> Result<serde_json::Value, crate::app::command_error::CommandError> {
-    let backend = crate::domain::capability::builtins::ocr_engine::backend();
-    let result = backend
-        .recognize(&png_data)
-        .await
-        .map_err(crate::app::command_error::CommandError::from)?;
+    use crate::app::command_error::CommandError;
 
-    let json = serde_json::to_value(&result).map_err(|e| {
-        crate::app::command_error::CommandError::new(
-            "internal_error",
-            &format!("序列化 OCR 结果失败: {e}"),
+    let bytes_len = png_data.len();
+
+    let registry =
+        app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
+    const OCR_CAPABILITY_ID: &str = "ocr_image";
+    if registry.get(OCR_CAPABILITY_ID).is_none() {
+        tracing::warn!("ocr_image: OcrImage Capability 未注册");
+        return Err(CommandError::new(
+            "not_found",
+            "OCR 能力未注册",
             false,
-        )
-    })?;
-    tracing::debug!(text_len = result.text.len(), "OCR 识别完成");
-    Ok(json)
+        ));
+    }
+
+    // 构造 Capability invoke 参数 —— png 为 JSON 整数数组
+    let arguments = serde_json::json!({ "png": png_data });
+
+    // 构造 InvokeContext（确定性调用，无超时）
+    let env_arc = app
+        .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
+        .inner()
+        .clone();
+    let ctx = crate::domain::capability::InvokeContext {
+        env: env_arc.as_ref(),
+        deadline: None,
+    };
+
+    tracing::debug!(bytes = bytes_len, "ocr_image: 调 OcrImage Capability");
+
+    let result = registry
+        .invoke(OCR_CAPABILITY_ID, arguments, &ctx)
+        .await
+        .map_err(CommandError::from)?;
+
+    // OcrImage Capability 返回 Text{ content = OcrResult 的 JSON 序列化字符串 }
+    match result {
+        crate::domain::capability::CapabilityResult::Text { content, .. } => {
+            let json: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
+                CommandError::new(
+                    "internal_error",
+                    &format!("解析 OCR 结果失败: {e}"),
+                    false,
+                )
+            })?;
+            let text_len = json
+                .get("text")
+                .and_then(|v| v.as_str())
+                .map(|s| s.len())
+                .unwrap_or(0);
+            tracing::debug!(text_len, "OCR 识别完成");
+            Ok(json)
+        }
+        other => {
+            tracing::warn!(?other, "ocr_image: OcrImage Capability 返回意外的结果类型");
+            Err(CommandError::new(
+                "internal_error",
+                "OCR 返回意外的结果类型",
+                false,
+            ))
+        }
+    }
 }
 
 /// 0.17.5：OCR 诊断——返回设备已安装的 OCR 语言列表、当前引擎语言、中文包状态。
 ///
 /// 供截图 overlay 诊断面板调用，帮助用户排查"中文截图识别不出"问题。
+///
+/// **0.19.4**：本命令保留为诊断专用直调 `ocr_engine::backend()`——`available_languages()`
+/// 和 `engine_language()` 是 `OcrBackend` trait 的诊断方法，不在 OcrImage Capability
+/// （只做 `recognize`）的职责范围内。为诊断面板单独建 Capability 属过度工程。
 #[tauri::command]
 pub async fn ocr_diagnose(
     _app: tauri::AppHandle,

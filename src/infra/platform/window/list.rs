@@ -77,6 +77,37 @@ pub fn enumerate_pickable_windows() -> Vec<PickableWindow> {
     ENUM_BUF.with(|buf| buf.borrow_mut().drain(..).collect())
 }
 
+/// 获取指定窗口的 DWM 扩展边框矩形（物理像素，虚拟屏幕坐标系）。
+///
+/// 供 `screenshot { op: window }`（0.19.3）使用——AI 从 `list_windows` 拿到 hwnd 后，
+/// 截取该窗口区域。返回 `(x, y, w, h)`：虚拟屏幕左上角坐标 + 宽高。
+///
+/// **为什么用 `DWMWA_EXTENDED_FRAME_BOUNDS`**：与 `enumerate_pickable_windows` 一致，
+/// 返回 DWM 合成后的真实可视边框（Windows 10/11 无边框窗口比 `GetWindowRect` 小 7-8px）。
+///
+/// 返回 `None` 表示窗口无效、DWM 不可用或窗口尺寸为零。
+pub fn get_window_dwm_rect(hwnd: isize) -> Option<(i32, i32, u32, u32)> {
+    let hwnd = HWND(hwnd as *mut _);
+    let mut rect: RECT = unsafe { std::mem::zeroed() };
+    let hr = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut rect as *mut RECT as *mut _,
+            std::mem::size_of::<RECT>() as u32,
+        )
+    };
+    if !hr.is_ok() {
+        return None;
+    }
+    let w = rect.right - rect.left;
+    let h = rect.bottom - rect.top;
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    Some((rect.left, rect.top, w as u32, h as u32))
+}
+
 unsafe extern "system" fn enum_proc(hwnd: HWND, _lparam: LPARAM) -> BOOL {
     // ── 可见性过滤 ──
     if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
