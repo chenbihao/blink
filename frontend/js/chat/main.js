@@ -77,15 +77,48 @@ bindLinkOpener();
     onThinkingToggle: handleThinkingToggle,
   });
 
-  // 0.16.2：chord Alt+Q 带文本触发时，后端 emit CHAT_PREFILL 把文本推过来。
-  // 仅填充输入框，不自动发送--用户可检查/修改后手动回车。
-  listen(EVENTS.CHAT_PREFILL, (event) => {
-    const text = event?.payload;
+  // 0.19：chat prefill 投递（revision 机制防残留/防旧事件误删）
+  //
+  // 两条路径都不丢文本：
+  //   冷启动：listener 注册后 take 拉取 pending（take 清空）
+  //   热窗口：listener 收到事件 → ack 清空 pending
+  // revision 防止旧事件的 ack 误删新 pending。
+  // appliedRevision 防止 take 和 event 同时命中时重复填充。
+  let appliedRevision = 0;
+
+  function applyPrefill(text, revision) {
+    if (revision && revision === appliedRevision) return; // 已填充过同一 revision
     if (typeof text === "string" && text) {
       setInputValue(text);
       focusInput();
+      appliedRevision = revision || 0;
+    }
+  }
+
+  // 先 await listen，确认 listener 注册成功后再 take
+  await listen(EVENTS.CHAT_PREFILL, (event) => {
+    const payload = event?.payload;
+    const text = payload?.text;
+    const revision = payload?.revision || 0;
+    applyPrefill(text, revision);
+    // 热窗口路径：收到事件后 ack 清空 pending（revision 匹配才清）
+    if (revision) {
+      ipc.ackChatPrefill(revision).catch(() => {});
     }
   });
+
+  // listener 已注册，现在 take 兜底冷启动路径
+  // 两种顺序都不会丢：
+  //   pending 先写入 → take 拉取 → event 后到同 revision 被 appliedRevision 去重
+  //   take 返回 null → event 后到正常填充 + ack
+  try {
+    const pending = await ipc.takeChatPrefill();
+    if (pending && typeof pending.text === "string" && pending.text) {
+      applyPrefill(pending.text, pending.revision);
+    }
+  } catch (e) {
+    console.warn("[chat] take_chat_prefill 失败:", e);
+  }
 
   initSidebar({
     onSwitch: handleSwitchConversation,

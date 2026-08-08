@@ -126,6 +126,146 @@ static IS_APP_EXITING: AtomicBool = AtomicBool::new(false);
 /// 防止 AI 生成过程中窗口被意外隐藏。Done/Error/abort 时设回 false。
 static MAIN_WINDOW_AI_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+// ── 0.19：chat prefill 暂存（infra 层，带 revision） ──────────────────────
+//
+// show_chat_window 先 set_chat_prefill(text) 拿到 revision R，再 emit {R, text}。
+// 前端两条路径：
+//   冷启动：await listen → take_chat_prefill() 拉取 {R, text}（take 清空 pending）
+//   热窗口：listener 已在线 → 收到事件 → ack_chat_prefill(R) 清空 pending
+// revision 防止旧事件的 ack 误删较新的 pending。
+// build/show 失败时 clear_chat_prefill(R) 回滚。
+
+struct ChatPrefill {
+    revision: u64,
+    text: String,
+}
+
+static CHAT_PREFILL_STATE: OnceLock<Mutex<Option<ChatPrefill>>> = OnceLock::new();
+static CHAT_PREFILL_REV: AtomicU64 = AtomicU64::new(0);
+
+fn chat_prefill_state() -> &'static Mutex<Option<ChatPrefill>> {
+    CHAT_PREFILL_STATE.get_or_init(|| Mutex::new(None))
+}
+
+/// 写入 prefill，返回本次 revision（用于后续 ack/clear/rollback）。
+pub fn set_chat_prefill(text: &str) -> u64 {
+    let revision = CHAT_PREFILL_REV.fetch_add(1, Ordering::SeqCst) + 1;
+    let mut guard = chat_prefill_state().lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some(ChatPrefill {
+        revision,
+        text: text.to_string(),
+    });
+    revision
+}
+
+/// 拉取并清空 pending（冷启动路径）。
+/// 返回 (revision, text) 或 None。
+pub fn take_chat_prefill() -> Option<(u64, String)> {
+    let mut guard = chat_prefill_state().lock().unwrap_or_else(|e| e.into_inner());
+    guard.take().map(|p| (p.revision, p.text))
+}
+
+/// 按 revision 清除 pending（热窗口 event 路径）。
+/// 仅当当前 pending 的 revision 匹配时才清空，防止旧事件误删新 pending。
+pub fn ack_chat_prefill(revision: u64) {
+    let mut guard = chat_prefill_state().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref p) = *guard {
+        if p.revision == revision {
+            *guard = None;
+        }
+    }
+}
+
+/// 按 revision 回滚 pending（build/show 失败时调用）。
+/// 与 ack 相同语义：仅清除匹配 revision 的 pending。
+pub fn clear_chat_prefill(revision: u64) {
+    ack_chat_prefill(revision);
+}
+
+// ── 0.19：按 label 串行化窗口创建（single-flight） ──────────────────────────
+//
+// 预热和用户唤起可能并发创建同一 label 的窗口（如 chat），Tauri 不容忍
+// duplicate label。用 per-label Mutex 串行化"检查 + build"，配合二次检查
+// 消除竞态。锁只覆盖创建，不覆盖 show/focus/emit。
+//
+// 设计要点：
+// - 无竞争快速路径：先不加锁检查 get_webview_window，命中直接返回。
+// - 加锁后二次检查：等待期间可能已被并发路径创建。
+// - build 失败后再查一次：防御 Tauri 注册与 build 返回的边界竞态。
+// - 锁中毒时恢复（into_inner），避免一次 panic 永久破坏入口。
+
+type WindowCreateLock = std::sync::Arc<std::sync::Mutex<()>>;
+
+static WINDOW_CREATE_LOCKS: OnceLock<std::sync::Mutex<std::collections::HashMap<String, WindowCreateLock>>> =
+    OnceLock::new();
+
+fn creation_lock(label: &str) -> WindowCreateLock {
+    let locks = WINDOW_CREATE_LOCKS.get_or_init(|| std::sync::Mutex::new(Default::default()));
+    let mut locks = locks.lock().unwrap_or_else(|e| e.into_inner());
+    locks
+        .entry(label.to_string())
+        .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(())))
+        .clone()
+}
+
+/// 按 label 串行化创建窗口（single-flight）。
+///
+/// 返回 `(window, created)`：`created=true` 表示本次调用真正创建了窗口，
+/// `false` 表示复用了已存在的窗口（无论来自快速路径还是并发创建）。
+///
+/// `build` 闭包只覆盖窗口创建，**不**包含 show/focus/emit——这些在锁外执行，
+/// 避免持有全局锁做 IO 密集操作。
+///
+/// 日志：等待耗时 + created 标记，便于排查热键被冷建窗堵住的场景。
+fn get_or_create_window<F>(
+    app: &AppHandle,
+    label: &str,
+    build: F,
+) -> Result<(WebviewWindow, bool), String>
+where
+    F: FnOnce() -> Result<WebviewWindow, tauri::Error>,
+{
+    use tauri::Manager;
+
+    // 无竞争快速路径
+    if let Some(win) = app.get_webview_window(label) {
+        return Ok((win, false));
+    }
+
+    let lock = creation_lock(label);
+    let t_wait = Instant::now();
+    tracing::debug!(label, "window get_or_create: waiting");
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let waited_ms = t_wait.elapsed().as_millis();
+
+    // 二次检查：等待期间可能已由并发路径创建
+    if let Some(win) = app.get_webview_window(label) {
+        tracing::debug!(label, waited_ms, created = false, "window get_or_create: ready (race)");
+        return Ok((win, false));
+    }
+
+    match build() {
+        Ok(win) => {
+            tracing::debug!(label, waited_ms, created = true, "window get_or_create: ready");
+            Ok((win, true))
+        }
+        Err(error) => {
+            // 防御 Tauri 注册窗口与 build 返回之间的边界竞态
+            if let Some(win) = app.get_webview_window(label) {
+                tracing::debug!(
+                    label,
+                    waited_ms,
+                    created = false,
+                    "window get_or_create: build 失败但窗口已由并发路径创建，复用"
+                );
+                Ok((win, false))
+            } else {
+                Err(format!("创建窗口 {label} 失败: {error}"))
+            }
+        }
+    }
+}
+
 /// 程序启动以来的毫秒数（单调时钟，用于 grace period 计算）。
 fn elapsed_ms() -> u64 {
     START.get_or_init(Instant::now).elapsed().as_millis() as u64
@@ -216,11 +356,20 @@ pub fn invoke(app: &AppHandle) {
     let grace_ms = GRACE_MS.load(Ordering::SeqCst);
     INVOKE_AT.store(now, Ordering::SeqCst);
     tracing::trace!(grace_ms, "invoke: show + set_focus");
-    let _ = win.show();
-    let _ = win.set_focus();
+    // 0.19 修正：show 失败时不能写 Visible——内部状态不能在窗口根本没显示时
+    // 被写成 Visible，否则输入状态机误判窗口可见、watchdog 不隐藏。
+    if let Err(error) = win.show() {
+        tracing::warn!(%error, "invoke: 主窗口 show 失败，保持 Hidden");
+        return;
+    }
     // show 成功后建立 Visible（§3.5）：通知输入状态机 window 已可见，
     // native chord session 据此建立。必须在 emit SHOWN 之前。
     transition_visibility(true);
+    // set_focus 失败不回滚 Visible——窗口已确实可见，只是焦点没拿到。
+    // 记录 warn 便于诊断；前端仍会收到 SHOWN 事件触发输入 focus。
+    if let Err(error) = win.set_focus() {
+        tracing::warn!(%error, "invoke: 主窗口显示成功但聚焦失败");
+    }
     let _ = app.emit(EventNames::SHOWN, ());
     tracing::debug!(
         target: "perf",
@@ -864,10 +1013,14 @@ pub fn show_chat_window(app: &AppHandle, initial_text: Option<&str>) -> Result<(
     use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
     const LABEL: &str = "chat";
-    let is_new = app.get_webview_window(LABEL).is_none();
 
-    let win = if is_new {
-        // 首次创建（预热未命中时的 fallback）
+    // 0.19：带初始文本时先写入 prefill（infra 层），拿到 revision 用于后续 ack/rollback。
+    let prefill_text: Option<&str> = initial_text.filter(|s| !s.is_empty());
+    let prefill_rev: Option<u64> = prefill_text.map(|t| set_chat_prefill(t));
+
+    // 0.19：经 get_or_create_window 串行化创建，消除预热与用户唤起的 duplicate label 竞态。
+    // 统一创建配置：visible(false) + focused(false)，show/focus 在锁外统一执行。
+    let (win, _is_new) = match get_or_create_window(app, LABEL, || {
         WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("chat.html".into()))
             .title("Blink AI")
             .inner_size(CHAT_W, CHAT_H)
@@ -877,17 +1030,18 @@ pub fn show_chat_window(app: &AppHandle, initial_text: Option<&str>) -> Result<(
             .always_on_top(false)
             .skip_taskbar(false)
             .resizable(true)
-            .focused(true)
-            .visible(true)
-            .center()
+            .focused(false)
+            .visible(false)
             .build()
-            .map_err(|e| {
-                tracing::warn!(error = %e, "chat window: 创建失败");
-                format!("创建 chat 窗口失败: {e}")
-            })?
-    } else {
-        // 复用预热窗口
-        app.get_webview_window(LABEL).unwrap()
+    }) {
+        Ok(v) => v,
+        Err(e) => {
+            // build 失败：回滚本次 pending
+            if let Some(rev) = prefill_rev {
+                clear_chat_prefill(rev);
+            }
+            return Err(e);
+        }
     };
 
     // 0.12.4 §6.6：安装系统菜单拦截器 + 圆角（与主窗口一致）
@@ -919,23 +1073,33 @@ pub fn show_chat_window(app: &AppHandle, initial_text: Option<&str>) -> Result<(
 
     // 每次显示时居中到当前屏幕（与主窗口行为一致）
     let _ = win.center();
-    win.show().map_err(|e| format!("显示 chat 窗口失败: {e}"))?;
+    // show 失败：回滚 pending 后返回错误
+    if let Err(e) = win.show() {
+        if let Some(rev) = prefill_rev {
+            clear_chat_prefill(rev);
+        }
+        return Err(format!("显示 chat 窗口失败: {e}"));
+    }
     let _ = win.unminimize();
-    win.set_focus()
-        .map_err(|e| format!("聚焦 chat 窗口失败: {e}"))?;
 
-    // 0.16.2：带初始文本时 emit chat-prefill 事件，前端监听后填充输入框（仅填充不发送）。
-    // 预热窗口（常见路径）JS init 已完成，listener 在线，emit 立即收到。
-    // 新建窗口（冷启动 fallback）JS init 有延迟，emit 可能在 listener 注册前发出 --
-    // 前端 main.js 在 init 时额外检查 window.__chatPendingPrefill 兜底（由 emit_to 写入）。
-    if let Some(text) = initial_text.filter(|s| !s.is_empty()) {
+    // 0.19：交付 prefill（emit 加速 + pending 兜底）。
+    // 顺序：show → unminimize → 交付 prefill → set_focus
+    // set_focus 失败不阻断 prefill 投递——窗口已可见，文本必须送达。
+    if let (Some(rev), Some(text)) = (prefill_rev, prefill_text) {
+        // emit {revision, text} —— 热窗口 listener 立即收到，冷窗口走 take 兜底
+        let payload = serde_json::json!({ "revision": rev, "text": text });
         if let Err(e) = app.emit_to(
             LABEL,
             crate::domain::event_names::EventNames::CHAT_PREFILL,
-            text,
+            payload,
         ) {
             tracing::warn!(error = %e, "chat-prefill emit 失败");
         }
+    }
+
+    // set_focus 放最后：失败只 warn，不返回 Err——窗口已显示、prefill 已投递。
+    if let Err(e) = win.set_focus() {
+        tracing::warn!(error = %e, "chat window: 显示成功但聚焦失败");
     }
 
     tracing::info!("chat window: 已显示");
@@ -2339,9 +2503,10 @@ pub fn preheat_secondary_windows(app: AppHandle) {
         tracing::debug!("preheat: 开始预热次级窗口");
 
         // --- chord-screenshot（截图 overlay，透明全屏层） ---
-        if app.get_webview_window("chord-screenshot").is_none() {
+        // 0.19：经 get_or_create_window 串行化创建。
+        match get_or_create_window(&app, "chord-screenshot", || {
             use tauri::{WebviewUrl, WebviewWindowBuilder};
-            match WebviewWindowBuilder::new(
+            WebviewWindowBuilder::new(
                 &app,
                 "chord-screenshot",
                 // 0.11.7-f：URL 加 ?preheat=1，前端识别参数跳过 loadScreenshot，
@@ -2349,7 +2514,7 @@ pub fn preheat_secondary_windows(app: AppHandle) {
                 WebviewUrl::App("chord-screenshot.html?preheat=1".into()),
             )
             .title("")
-            .inner_size(1920.0, 1080.0) // 默认尺寸，实际使用时 place_at_physical 会覆盖
+            .inner_size(1920.0, 1080.0)
             .decorations(false)
             .transparent(true)
             .always_on_top(true)
@@ -2358,22 +2523,28 @@ pub fn preheat_secondary_windows(app: AppHandle) {
             .focused(false)
             .visible(false)
             .build()
-            {
-                Ok(_) => tracing::debug!("preheat: chord-screenshot ✓"),
-                Err(e) => tracing::warn!(error = %e, "preheat: chord-screenshot 失败"),
+        }) {
+            Ok((_, created)) => {
+                if created {
+                    tracing::debug!("preheat: chord-screenshot ✓");
+                } else {
+                    tracing::debug!("preheat: chord-screenshot 复用已有窗口");
+                }
             }
+            Err(e) => tracing::warn!(error = %e, "preheat: chord-screenshot 失败"),
         }
 
         // --- context-menu（右键菜单，非透明小窗） ---
-        if app.get_webview_window("context-menu").is_none() {
+        // 0.19：经 get_or_create_window 串行化创建。
+        match get_or_create_window(&app, "context-menu", || {
             use tauri::{WebviewUrl, WebviewWindowBuilder};
-            match WebviewWindowBuilder::new(
+            WebviewWindowBuilder::new(
                 &app,
                 "context-menu",
                 WebviewUrl::App("contextmenu-popup.html".into()),
             )
             .title("")
-            .inner_size(200.0, 200.0) // 默认尺寸，实际使用时会 resize
+            .inner_size(200.0, 200.0)
             .decorations(false)
             .transparent(false)
             .always_on_top(true)
@@ -2382,21 +2553,25 @@ pub fn preheat_secondary_windows(app: AppHandle) {
             .resizable(false)
             .visible(false)
             .build()
-            {
-                Ok(win) => {
+        }) {
+            Ok((win, created)) => {
+                if created {
                     if let Ok(hwnd) = win.hwnd() {
                         force_topmost(HWND(hwnd.0 as _));
                     }
                     tracing::debug!("preheat: context-menu ✓");
+                } else {
+                    tracing::debug!("preheat: context-menu 复用已有窗口");
                 }
-                Err(e) => tracing::warn!(error = %e, "preheat: context-menu 失败"),
             }
+            Err(e) => tracing::warn!(error = %e, "preheat: context-menu 失败"),
         }
 
         // --- voice-overlay（语音录音 mini overlay，0.10 G2） ---
-        if app.get_webview_window("voice-overlay").is_none() {
+        // 0.19：经 get_or_create_window 串行化创建。
+        match get_or_create_window(&app, "voice-overlay", || {
             use tauri::{WebviewUrl, WebviewWindowBuilder};
-            match WebviewWindowBuilder::new(
+            WebviewWindowBuilder::new(
                 &app,
                 "voice-overlay",
                 WebviewUrl::App("voice-overlay.html".into()),
@@ -2411,21 +2586,25 @@ pub fn preheat_secondary_windows(app: AppHandle) {
             .focused(false)
             .visible(false)
             .build()
-            {
-                Ok(win) => {
+        }) {
+            Ok((win, created)) => {
+                if created {
                     if let Ok(hwnd) = win.hwnd() {
                         apply_no_activate(HWND(hwnd.0 as _));
                     }
                     tracing::debug!("preheat: voice-overlay ✓");
+                } else {
+                    tracing::debug!("preheat: voice-overlay 复用已有窗口");
                 }
-                Err(e) => tracing::warn!(error = %e, "preheat: voice-overlay 失败"),
             }
+            Err(e) => tracing::warn!(error = %e, "preheat: voice-overlay 失败"),
         }
 
         // --- chord-pin（钉图窗口，0.11.7-d；0.11.8 透明贴合） ---
-        if app.get_webview_window("chord-pin").is_none() {
+        // 0.19：经 get_or_create_window 串行化创建。
+        match get_or_create_window(&app, "chord-pin", || {
             use tauri::{WebviewUrl, WebviewWindowBuilder};
-            match WebviewWindowBuilder::new(&app, "chord-pin", WebviewUrl::App("pin.html".into()))
+            WebviewWindowBuilder::new(&app, "chord-pin", WebviewUrl::App("pin.html".into()))
                 .title("")
                 .inner_size(400.0, 300.0)
                 .decorations(false)
@@ -2436,16 +2615,24 @@ pub fn preheat_secondary_windows(app: AppHandle) {
                 .focused(false)
                 .visible(false)
                 .build()
-            {
-                Ok(_) => tracing::debug!("preheat: chord-pin ✓"),
-                Err(e) => tracing::warn!(error = %e, "preheat: chord-pin 失败"),
+        }) {
+            Ok((_, created)) => {
+                if created {
+                    tracing::debug!("preheat: chord-pin ✓");
+                } else {
+                    tracing::debug!("preheat: chord-pin 复用已有窗口");
+                }
             }
+            Err(e) => tracing::warn!(error = %e, "preheat: chord-pin 失败"),
         }
 
         // --- chat（对话窗口，0.12.2 加入预热） ---
-        if app.get_webview_window("chat").is_none() {
+        // 0.19：经 get_or_create_window 串行化创建，消除预热与用户 Alt+Q 的 duplicate label 竞态。
+        // 创建配置与 show_chat_window 完全一致（visible=false + focused=false），保证
+        // 无论谁创建，后续 show/focus 路径都统一。
+        match get_or_create_window(&app, "chat", || {
             use tauri::{WebviewUrl, WebviewWindowBuilder};
-            match WebviewWindowBuilder::new(&app, "chat", WebviewUrl::App("chat.html".into()))
+            WebviewWindowBuilder::new(&app, "chat", WebviewUrl::App("chat.html".into()))
                 .title("Blink AI")
                 .inner_size(CHAT_W, CHAT_H)
                 .min_inner_size(CHAT_MIN_W, CHAT_MIN_H)
@@ -2457,19 +2644,23 @@ pub fn preheat_secondary_windows(app: AppHandle) {
                 .focused(false)
                 .visible(false)
                 .build()
-            {
-                Ok(_) => tracing::debug!("preheat: chat ✓"),
-                Err(e) => tracing::warn!(error = %e, "preheat: chat 失败"),
+        }) {
+            Ok((_, created)) => {
+                if created {
+                    tracing::debug!("preheat: chat ✓");
+                } else {
+                    tracing::debug!("preheat: chat 复用已有窗口");
+                }
             }
+            Err(e) => tracing::warn!(error = %e, "preheat: chat 失败"),
         }
 
         // --- settings（设置窗口，0.17.2 加入预热） ---
-        // 静态 URL 无参数，open_settings 已有复用路径（get_webview_window → 重新定位 + show）。
-        // 预热时补 strip_window_border + enable_rounded_corners，
-        // 因为 open_settings 的复用路径不调这两个（只在首次创建路径调）。
-        if app.get_webview_window("settings").is_none() {
+        // 0.19：经 get_or_create_window 串行化创建。
+        // 预热时补 strip_window_border + enable_rounded_corners（幂等，重复调用安全）。
+        match get_or_create_window(&app, "settings", || {
             use tauri::{WebviewUrl, WebviewWindowBuilder};
-            match WebviewWindowBuilder::new(
+            WebviewWindowBuilder::new(
                 &app,
                 "settings",
                 WebviewUrl::App("settings.html".into()),
@@ -2484,26 +2675,27 @@ pub fn preheat_secondary_windows(app: AppHandle) {
             .shadow(false)
             .background_color(tauri::window::Color(0, 0, 0, 0))
             .build()
-            {
-                Ok(win) => {
+        }) {
+            Ok((win, created)) => {
+                if created {
                     if let Ok(hwnd) = win.hwnd() {
                         let hwnd = HWND(hwnd.0 as _);
                         strip_window_border(hwnd);
                         enable_rounded_corners(hwnd);
                     }
                     tracing::debug!("preheat: settings ✓");
+                } else {
+                    tracing::debug!("preheat: settings 复用已有窗口");
                 }
-                Err(e) => tracing::warn!(error = %e, "preheat: settings 失败"),
             }
+            Err(e) => tracing::warn!(error = %e, "preheat: settings 失败"),
         }
 
         // --- content-editor（内容编辑器，0.17.2 加入预热） ---
-        // 静态 URL，payload 走 Tauri State（PendingEditorPayload）。
-        // show_content_editor_window 的复用路径会 eval __contentEditorReload + show，
-        // install_sysmenu_blocker / enable_rounded_corners 在 show 函数中对新旧窗口都调。
-        if app.get_webview_window("content-editor").is_none() {
+        // 0.19：经 get_or_create_window 串行化创建。
+        match get_or_create_window(&app, "content-editor", || {
             use tauri::{WebviewUrl, WebviewWindowBuilder, window::Color};
-            match WebviewWindowBuilder::new(
+            WebviewWindowBuilder::new(
                 &app,
                 "content-editor",
                 WebviewUrl::App("content-editor.html".into()),
@@ -2521,19 +2713,24 @@ pub fn preheat_secondary_windows(app: AppHandle) {
             .background_color(Color(30, 30, 46, 255))
             .center()
             .build()
-            {
-                Ok(_) => tracing::debug!("preheat: content-editor ✓"),
-                Err(e) => tracing::warn!(error = %e, "preheat: content-editor 失败"),
+        }) {
+            Ok((_, created)) => {
+                if created {
+                    tracing::debug!("preheat: content-editor ✓");
+                } else {
+                    tracing::debug!("preheat: content-editor 复用已有窗口");
+                }
             }
+            Err(e) => tracing::warn!(error = %e, "preheat: content-editor 失败"),
         }
 
         // --- sticky-manager（便签管理，0.17.2 加入预热） ---
-        // 静态 URL，自取列表（listStickyNotes）。
+        // 0.19：经 get_or_create_window 串行化创建。
         // 预热时注册 prevent_close + hide（与 show_sticky_manager_window 创建路径一致），
         // 因为 show 函数的复用路径（is_new=false）不注册 on_window_event。
-        if app.get_webview_window("sticky-manager").is_none() {
+        match get_or_create_window(&app, "sticky-manager", || {
             use tauri::{WebviewUrl, WebviewWindowBuilder, window::Color};
-            match WebviewWindowBuilder::new(
+            WebviewWindowBuilder::new(
                 &app,
                 "sticky-manager",
                 WebviewUrl::App("sticky-manager.html".into()),
@@ -2551,8 +2748,9 @@ pub fn preheat_secondary_windows(app: AppHandle) {
             .background_color(Color(30, 30, 46, 255))
             .center()
             .build()
-            {
-                Ok(w) => {
+        }) {
+            Ok((w, created)) => {
+                if created {
                     // 注册 prevent_close + hide（复用模式）
                     let app_clone = app.clone();
                     w.on_window_event(move |event| {
@@ -2570,9 +2768,11 @@ pub fn preheat_secondary_windows(app: AppHandle) {
                         }
                     });
                     tracing::debug!("preheat: sticky-manager ✓");
+                } else {
+                    tracing::debug!("preheat: sticky-manager 复用已有窗口");
                 }
-                Err(e) => tracing::warn!(error = %e, "preheat: sticky-manager 失败"),
             }
+            Err(e) => tracing::warn!(error = %e, "preheat: sticky-manager 失败"),
         }
 
         // --- sticky-spare（便签预热窗口，0.18.3 N+1） ---
@@ -2697,5 +2897,117 @@ pub fn open_settings(app: &AppHandle) {
         let _ = win.set_focus();
     } else {
         let _ = win.show();
+    }
+}
+
+// ── 0.19 单元测试：chat prefill revision 机制 ──────────────────────────────
+
+#[cfg(test)]
+mod tests_0_19_prefill {
+    use super::*;
+
+    /// take 后清空。
+    #[test]
+    fn test_take_clears_pending() {
+        // 重置状态：先 take 清空任何残留
+        let _ = take_chat_prefill();
+
+        let rev = set_chat_prefill("hello");
+        let taken = take_chat_prefill();
+        assert_eq!(taken, Some((rev, "hello".to_string())));
+
+        // 再次 take 返回 None
+        assert_eq!(take_chat_prefill(), None);
+    }
+
+    /// 旧 revision 的 ack 不能清除新值。
+    #[test]
+    fn test_old_revision_ack_does_not_clear_new() {
+        let _ = take_chat_prefill();
+
+        let rev1 = set_chat_prefill("first");
+        let rev2 = set_chat_prefill("second");
+        assert_ne!(rev1, rev2);
+
+        // ack 旧 revision → 不应清除当前 pending（rev2）
+        ack_chat_prefill(rev1);
+        let taken = take_chat_prefill();
+        assert_eq!(taken, Some((rev2, "second".to_string())));
+    }
+
+    /// 匹配 revision 的 ack 清除 pending。
+    #[test]
+    fn test_matching_revision_ack_clears() {
+        let _ = take_chat_prefill();
+
+        let rev = set_chat_prefill("data");
+        ack_chat_prefill(rev);
+        // ack 后 take 应返回 None
+        assert_eq!(take_chat_prefill(), None);
+    }
+
+    /// 失败回滚（clear）不能清除更新后的值。
+    #[test]
+    fn test_rollback_does_not_clear_newer_value() {
+        let _ = take_chat_prefill();
+
+        let rev1 = set_chat_prefill("old");
+        let rev2 = set_chat_prefill("new");
+
+        // 回滚 rev1（模拟 build 失败）→ 不应清除 rev2
+        clear_chat_prefill(rev1);
+        let taken = take_chat_prefill();
+        assert_eq!(taken, Some((rev2, "new".to_string())));
+    }
+
+    /// 失败回滚匹配 revision 时清除 pending。
+    #[test]
+    fn test_rollback_matching_revision_clears() {
+        let _ = take_chat_prefill();
+
+        let rev = set_chat_prefill("temp");
+        clear_chat_prefill(rev);
+        assert_eq!(take_chat_prefill(), None);
+    }
+
+    /// revision 单调递增。
+    #[test]
+    fn test_revision_monotonic() {
+        let _ = take_chat_prefill();
+
+        let r1 = set_chat_prefill("a");
+        let r2 = set_chat_prefill("b");
+        let r3 = set_chat_prefill("c");
+        assert!(r1 < r2);
+        assert!(r2 < r3);
+
+        // 清理
+        let _ = take_chat_prefill();
+    }
+
+    /// warm event 成功后 ack 无残留。
+    #[test]
+    fn test_warm_event_ack_no_residue() {
+        let _ = take_chat_prefill();
+
+        let rev = set_chat_prefill("warm-text");
+        // 模拟热窗口：event 收到后 ack
+        ack_chat_prefill(rev);
+        // take 应返回 None（已被 ack 清空）
+        assert_eq!(take_chat_prefill(), None);
+    }
+
+    /// 冷启动路径：take 拉取后，后续 ack 同 revision 是 no-op。
+    #[test]
+    fn test_cold_take_then_ack_same_revision_is_noop() {
+        let _ = take_chat_prefill();
+
+        let rev = set_chat_prefill("cold-text");
+        // 冷启动：take 拉取
+        let taken = take_chat_prefill();
+        assert_eq!(taken, Some((rev, "cold-text".to_string())));
+        // 后续 ack 同 revision → pending 已空，no-op（不 panic）
+        ack_chat_prefill(rev);
+        assert_eq!(take_chat_prefill(), None);
     }
 }

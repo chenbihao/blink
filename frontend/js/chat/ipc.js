@@ -48,6 +48,28 @@ export function getChatStatus() {
 }
 
 /**
+ * 拉取待填充文本（0.19）。
+ *
+ * 冷启动新建窗口时 emit CHAT_PREFILL 可能早于 listener 注册。
+ * init 时主动调此命令拉取 pending，取出后后端清空。
+ * @returns {Promise<{revision: number, text: string}|null>}
+ */
+export function takeChatPrefill() {
+  return invoke("take_chat_prefill");
+}
+
+/**
+ * 热窗口 event 路径：收到 CHAT_PREFILL 事件后调此命令清空 pending（0.19）。
+ *
+ * 仅当 pending 的 revision 匹配时才清空，防止旧事件误删较新的 pending。
+ * @param {number} revision
+ * @returns {Promise<void>}
+ */
+export function ackChatPrefill(revision) {
+  return invoke("ack_chat_prefill", { revision });
+}
+
+/**
  * 列出 chat 可选的所有 Chat 能力模型（0.12.2 §4.4）。
  * @returns {Promise<Array<{id: string, provider_name: string, model_name: string, is_main: boolean, is_light: boolean, is_selected: boolean}>>}
  */

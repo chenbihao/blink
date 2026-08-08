@@ -673,6 +673,8 @@ fn main() {
             app::commands::run_builtin_action,
             app::commands::confirm_chat_action,
             app::commands::hide_chat_window,
+            app::commands::take_chat_prefill,
+            app::commands::ack_chat_prefill,
             app::commands::chat_prompt,
             app::commands::chat_abort,
             app::commands::clear_main_ai_active,

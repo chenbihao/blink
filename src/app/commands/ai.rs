@@ -219,6 +219,33 @@ pub fn hide_chat_window(app: tauri::AppHandle) {
     crate::infra::platform::window::hide_chat_window(&app);
 }
 
+/// 前端 init 时拉取待填充文本（0.19）。
+///
+/// 返回 `{revision, text}` 或 null。take 后 pending 清空。
+/// 冷启动路径：listener 尚未注册时 emit 丢失，前端主动 take 兜底。
+#[tauri::command]
+pub fn take_chat_prefill() -> Option<ChatPrefillPayload> {
+    crate::infra::platform::window::take_chat_prefill().map(|(revision, text)| ChatPrefillPayload {
+        revision,
+        text,
+    })
+}
+
+/// 热窗口 event 路径：前端收到 CHAT_PREFILL 事件后调此命令清空 pending（0.19）。
+///
+/// 仅当 pending 的 revision 匹配时才清空，防止旧事件误删较新的 pending。
+#[tauri::command]
+pub fn ack_chat_prefill(revision: u64) {
+    crate::infra::platform::window::ack_chat_prefill(revision);
+}
+
+/// chat prefill 返回载荷（0.19）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ChatPrefillPayload {
+    pub revision: u64,
+    pub text: String,
+}
+
 /// 启动对话 prompt（Phase 4）。
 ///
 /// 调用 `ChatService::prompt()` 获取流式 chunk receiver，spawn 后台 task 逐 chunk
