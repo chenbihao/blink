@@ -13,15 +13,9 @@
  *   updateToolbarStates(toolbar, tiptapEditor);
  */
 
-// ── SVG 图标 ──────────────────────────────────────────
-
-const ICONS = {
-  bulletList: `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>`,
-  orderedList: `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><line x1="10" y1="6" x2="21" y2="6"/><line x1="10" y1="12" x2="21" y2="12"/><line x1="10" y1="18" x2="21" y2="18"/><path d="M4 6h1v4"/><path d="M4 10h2"/><path d="M6 18H4c0-1 2-2 2-3s-1-1.5-2-1"/></svg>`,
-  taskList: `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>`,
-  blockquote: `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 21c3 0 5-1 5-5V5c0-1-1-2-2-2H4c-1 0-2 1-2 2v6c0 1 1 2 2 2h2"/><path d="M15 21c3 0 5-1 5-5V5c0-1-1-2-2-2h-2c-1 0-2 1-2 2v6c0 1 1 2 2 2h2"/></svg>`,
-  codeBlock: `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>`,
-};
+// ── 图标 ─────────────────────────────────────────────
+// 0.18 review：从内联 SVG 迁移到 Lucide sprite，统一走 iconHTML()。
+import { iconHTML } from "./icon.js";
 
 // ── DOM 创建 ──────────────────────────────────────────
 
@@ -44,11 +38,11 @@ export function createMdToolbar(id = "md-toolbar") {
     <button class="md-tool-btn" data-cmd="strike" title="删除线"><s>S</s></button>
     <button class="md-tool-btn" data-cmd="code" title="行内代码">&lt;/&gt;</button>
     <span class="md-tool-sep"></span>
-    <button class="md-tool-btn" data-cmd="bulletList" title="无序列表">${ICONS.bulletList}</button>
-    <button class="md-tool-btn" data-cmd="orderedList" title="有序列表">${ICONS.orderedList}</button>
-    <button class="md-tool-btn" data-cmd="taskList" title="任务清单">${ICONS.taskList}</button>
-    <button class="md-tool-btn" data-cmd="blockquote" title="引用">${ICONS.blockquote}</button>
-    <button class="md-tool-btn" data-cmd="codeBlock" title="代码块">${ICONS.codeBlock}</button>
+    <button class="md-tool-btn" data-cmd="bulletList" title="无序列表">${iconHTML("list")}</button>
+    <button class="md-tool-btn" data-cmd="orderedList" title="有序列表">${iconHTML("list-ordered")}</button>
+    <button class="md-tool-btn" data-cmd="taskList" title="任务清单">${iconHTML("list-checks")}</button>
+    <button class="md-tool-btn" data-cmd="blockquote" title="引用">${iconHTML("quote")}</button>
+    <button class="md-tool-btn" data-cmd="codeBlock" title="代码块">${iconHTML("code")}</button>
   `;
   return toolbar;
 }

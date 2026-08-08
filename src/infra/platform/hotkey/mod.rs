@@ -6,7 +6,7 @@
 //! 前端通过 `INPUT_STATE_CHANGED` 事件 + `register_main_input_view` 快照同步，
 //! 不再轮询或反向控制 Alt/Chord。
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
 
 use tokio::sync::mpsc;
@@ -159,13 +159,37 @@ pub(crate) enum ControlMsg {
     Stop,
 }
 
-/// 控制消息队列（主线程写，hook 线程 WindowProc 读）。
-static CONTROL_QUEUE: std::sync::Mutex<Vec<ControlMsg>> = std::sync::Mutex::new(Vec::new());
+/// 控制消息节点（Treiber stack 用）。
+struct ControlNode {
+    msg: ControlMsg,
+    next: *mut ControlNode,
+}
+// Safety: ControlNode 仅通过 AtomicPtr 原子操作跨线程传递，
+// ControlMsg 本身已是 Send（原 Mutex<Vec<ControlMsg>> 跨线程使用）。
+unsafe impl Send for ControlNode {}
+
+/// 控制消息队列（主线程 push，hook 线程 drain）——无锁 Treiber stack。
+///
+/// 替代原 `Mutex<Vec<ControlMsg>>`，消除 hook 线程 WindowProc 中可能的
+/// 内核态等待。push 是 O(1) 原子 CAS，drain 是 O(n) swap + 遍历回收。
+static CONTROL_HEAD: AtomicPtr<ControlNode> = AtomicPtr::new(std::ptr::null_mut());
 
 /// 向 hook 线程发送控制消息（主线程调用）。
 fn send_control(msg: ControlMsg) {
-    if let Ok(mut q) = CONTROL_QUEUE.lock() {
-        q.push(msg);
+    let node = Box::into_raw(Box::new(ControlNode {
+        msg,
+        next: std::ptr::null_mut(),
+    }));
+    loop {
+        let head = CONTROL_HEAD.load(Ordering::Acquire);
+        // Safety: node 是刚分配的，当前线程独占
+        unsafe { (*node).next = head; }
+        if CONTROL_HEAD
+            .compare_exchange_weak(head, node, Ordering::Release, Ordering::Relaxed)
+            .is_ok()
+        {
+            break;
+        }
     }
     // PostMessageW 唤醒 hook 线程（平台特定实现）
     #[cfg(target_os = "windows")]
@@ -174,8 +198,16 @@ fn send_control(msg: ControlMsg) {
 
 /// 排空控制队列（hook 线程 WindowProc 调用）。
 pub fn drain_control_messages() -> Vec<ControlMsg> {
-    let mut q = CONTROL_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
-    std::mem::take(&mut *q)
+    let head = CONTROL_HEAD.swap(std::ptr::null_mut(), Ordering::Acquire);
+    let mut result = Vec::new();
+    let mut current = head;
+    while !current.is_null() {
+        // Safety: swap 给了我们独占访问权，回收 Box
+        let node = unsafe { Box::from_raw(current) };
+        result.push(node.msg);
+        current = node.next;
+    }
+    result
 }
 
 // ── 启动/停止 ──────────────────────────────────────────────────────────────────

@@ -1,5 +1,38 @@
 /* ── 钉图窗口视图（0.11.7-d，0.11.8 透明贴合 + PAD 架构）────────── */
 
+/* ── Pin 窗口配色（独立深色浮窗，不跟随主题） ────────────────────── */
+:root {
+  --pin-accent: #4a9eff;
+  --pin-accent-rgb: 74, 158, 255;
+
+  --pin-text: #ddd;
+  --pin-text-bright: #fff;
+  --pin-text-dim: #888;
+  --pin-text-dimmer: #aaa;
+  --pin-text-editor: #eee;
+  --pin-text-soft: rgba(255, 255, 255, 0.9);
+
+  --pin-bg-panel: rgba(30, 30, 30, 0.95);
+  --pin-bg-panel-solid: rgba(30, 30, 30, 0.96);
+  --pin-bg-overlay: rgba(0, 0, 0, 0.55);
+  --pin-bg-tooltip: rgba(0, 0, 0, 0.6);
+  --pin-bg-input: rgba(0, 0, 0, 0.35);
+  --pin-bg-shadow: rgba(0, 0, 0, 0.4);
+  --pin-bg-shadow-deep: rgba(0, 0, 0, 0.6);
+
+  --pin-border: rgba(255, 255, 255, 0.15);
+  --pin-border-bright: rgba(255, 255, 255, 0.18);
+  --pin-border-dim: rgba(255, 255, 255, 0.1);
+  --pin-border-faint: rgba(255, 255, 255, 0.12);
+
+  --pin-hover: rgba(255, 255, 255, 0.1);
+  --pin-hover-dim: rgba(255, 255, 255, 0.05);
+  --pin-hover-faint: rgba(255, 255, 255, 0.08);
+  --pin-white-faint: rgba(255, 255, 255, 0.2);
+
+  --pin-amber: #f59e0b;
+}
+
 html, body {
   margin: 0;
   padding: 0;
@@ -37,8 +70,8 @@ html, body {
      窗口预留了 PIN_PAD=20px 物理像素的空间，所以发光不会被窗口边界裁。
      注意：box-shadow 在 transform 之前渲染，会被 scale 放大；
      JS 层在 applyTransformOnly() 里反向补偿 blur/spread，保持发光大小恒定。 */
-  box-shadow: 0 0 0 1px rgba(74, 158, 255, 0.55),
-              0 0 14px 3px rgba(74, 158, 255, 0.28);
+  box-shadow: 0 0 0 1px rgba(var(--pin-accent-rgb), 0.55),
+              0 0 14px 3px rgba(var(--pin-accent-rgb), 0.28);
 }
 
 #zoom-level {
@@ -46,8 +79,8 @@ html, body {
   /* 0.15.13：固定左上角，不随窗口缩放变动，丝滑 */
   left: 8px;
   top: 8px;
-  background: rgba(0, 0, 0, 0.6);
-  color: #fff;
+  background: var(--pin-bg-tooltip);
+  color: var(--pin-text-bright);
   font-size: 12px;
   font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
   padding: 2px 8px;
@@ -76,7 +109,7 @@ html, body {
   align-items: center;
   gap: 8px;
   padding: 16px 20px;
-  background: rgba(0, 0, 0, 0.55);
+  background: var(--pin-bg-overlay);
   border-radius: var(--radius-sm);
   pointer-events: none;
   backdrop-filter: blur(4px);
@@ -89,8 +122,8 @@ html, body {
 .pin-spinner {
   width: 28px;
   height: 28px;
-  border: 3px solid rgba(255, 255, 255, 0.2);
-  border-top-color: #4a9eff;
+  border: 3px solid var(--pin-white-faint);
+  border-top-color: var(--pin-accent);
   border-radius: 50%;
   animation: pin-spin 0.8s linear infinite;
 }
@@ -102,7 +135,7 @@ html, body {
 }
 
 .pin-translating-text {
-  color: rgba(255, 255, 255, 0.9);
+  color: var(--pin-text-soft);
   font-size: 12px;
   font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
   font-style: normal; /* 铁则：中文不斜体 */
@@ -115,10 +148,10 @@ html, body {
   position: fixed;
   display: flex;
   flex-direction: column;
-  background: rgba(30, 30, 30, 0.95);
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: var(--pin-bg-panel);
+  border: 1px solid var(--pin-border);
   border-radius: var(--radius-xs);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 4px 12px var(--pin-bg-shadow);
   z-index: 100;
   min-width: 100px;
   padding: 4px;
@@ -127,7 +160,7 @@ html, body {
 #ctx-menu button {
   background: transparent;
   border: none;
-  color: #ddd;
+  color: var(--pin-text);
   padding: 6px 12px;
   font-size: 13px;
   font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
@@ -138,8 +171,8 @@ html, body {
 }
 
 #ctx-menu button:hover {
-  background: rgba(255, 255, 255, 0.1);
-  color: #fff;
+  background: var(--pin-hover);
+  color: var(--pin-text-bright);
 }
 
 #ctx-menu button:disabled {
@@ -149,13 +182,13 @@ html, body {
 
 #ctx-menu button:disabled:hover {
   background: transparent;
-  color: #ddd;
+  color: var(--pin-text);
 }
 
 /* 0.11.9-f：右键菜单分隔线 */
 .ctx-sep {
   height: 1px;
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--pin-border-faint);
   margin: 4px 6px;
 }
 
@@ -167,10 +200,10 @@ html, body {
   left: 50%;
   transform: translate(-50%, -50%);
   z-index: 200;
-  background: rgba(30, 30, 30, 0.96);
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: var(--pin-bg-panel-solid);
+  border: 1px solid var(--pin-border-bright);
   border-radius: var(--radius-sm);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+  box-shadow: 0 8px 32px var(--pin-bg-shadow-deep);
   min-width: 320px;
   width: 480px;
   max-height: 420px;
@@ -184,7 +217,7 @@ html, body {
   align-items: center;
   justify-content: space-between;
   padding: 6px 10px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: 1px solid var(--pin-border-dim);
 }
 
 .pin-ocr-tabs {
@@ -195,7 +228,7 @@ html, body {
 .pin-ocr-tab {
   background: transparent;
   border: none;
-  color: #888;
+  color: var(--pin-text-dim);
   font-size: 12px;
   padding: 4px 12px;
   border-radius: var(--radius-xs);
@@ -206,13 +239,13 @@ html, body {
 }
 
 .pin-ocr-tab:hover {
-  color: #ddd;
-  background: rgba(255, 255, 255, 0.05);
+  color: var(--pin-text);
+  background: var(--pin-hover-dim);
 }
 
 .pin-ocr-tab.active {
-  color: #4a9eff;
-  background: rgba(74, 158, 255, 0.12);
+  color: var(--pin-accent);
+  background: rgba(var(--pin-accent-rgb), 0.12);
 }
 
 .pin-ocr-tab .stale-dot {
@@ -220,7 +253,7 @@ html, body {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #f59e0b;
+  background: var(--pin-amber);
 }
 
 .pin-ocr-tab[data-stale="true"] .stale-dot {
@@ -230,7 +263,7 @@ html, body {
 #pin-ocr-close {
   background: transparent;
   border: none;
-  color: #aaa;
+  color: var(--pin-text-dimmer);
   font-size: 12px;
   cursor: pointer;
   padding: 2px 6px;
@@ -238,8 +271,8 @@ html, body {
 }
 
 #pin-ocr-close:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: #fff;
+  background: var(--pin-hover-faint);
+  color: var(--pin-text-bright);
 }
 
 #pin-ocr-panel textarea {
@@ -248,10 +281,10 @@ html, body {
   min-height: 180px;
   max-height: 260px;
   flex: 1;
-  background: rgba(0, 0, 0, 0.35);
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: var(--pin-bg-input);
+  border: 1px solid var(--pin-border);
   border-radius: var(--radius-xs);
-  color: #eee;
+  color: var(--pin-text-editor);
   font-size: 13px;
   font-family: "Cascadia Code", "Consolas", "Segoe UI", "Microsoft YaHei", monospace;
   line-height: 1.6;
@@ -261,7 +294,7 @@ html, body {
 }
 
 #pin-ocr-panel textarea:focus {
-  border-color: rgba(74, 158, 255, 0.6);
+  border-color: rgba(var(--pin-accent-rgb), 0.6);
 }
 
 #pin-ocr-panel textarea[hidden] {
@@ -274,7 +307,7 @@ html, body {
 
 .pin-ocr-footer {
   padding: 6px 10px;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  border-top: 1px solid var(--pin-border-dim);
   display: flex;
   justify-content: flex-end;
   gap: 8px;
@@ -282,8 +315,8 @@ html, body {
 
 .pin-ocr-footer button {
   background: transparent;
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  color: #ddd;
+  border: 1px solid var(--pin-border-bright);
+  color: var(--pin-text);
   font-size: 12px;
   padding: 4px 12px;
   border-radius: var(--radius-xs);
@@ -291,17 +324,17 @@ html, body {
 }
 
 .pin-ocr-footer button:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--pin-hover-faint);
 }
 
 .pin-ocr-footer button.primary {
-  background: rgba(74, 158, 255, 0.85);
-  border-color: rgba(74, 158, 255, 0.9);
-  color: #fff;
+  background: rgba(var(--pin-accent-rgb), 0.85);
+  border-color: rgba(var(--pin-accent-rgb), 0.9);
+  color: var(--pin-text-bright);
 }
 
 .pin-ocr-footer button.primary:hover {
-  background: rgba(74, 158, 255, 1);
+  background: rgba(var(--pin-accent-rgb), 1);
 }
 
 .pin-ocr-footer button:disabled {

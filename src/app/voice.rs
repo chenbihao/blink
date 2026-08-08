@@ -492,29 +492,10 @@ impl VoiceService {
         match target {
             VoiceTarget::MainWindow => {
                 // G1: finalize 在 effect 循环内（G1 无 overlay，不阻塞 UI 反馈）
-                let final_text = match engine {
-                    Some(e) => match tokio::time::timeout(
-                        std::time::Duration::from_secs(10),
-                        e.finalize(),
-                    )
-                    .await
-                    {
-                        Ok(Ok(text)) => text,
-                        Ok(Err(e)) => {
-                            tracing::warn!(%e, "STT finalize 失败");
-                            String::new()
-                        }
-                        Err(_) => {
-                            tracing::warn!("STT finalize 超时（10s），放弃等待");
-                            String::new()
-                        }
-                    },
-                    None => String::new(),
-                };
-                tracing::info!(
+                let final_text = finalize_engine(engine).await;
+                tracing::debug!(
                     target = ?target,
                     text_len = final_text.chars().count(),
-                    %final_text,
                     "语音识别完成"
                 );
                 if final_text.is_empty() {
@@ -524,7 +505,7 @@ impl VoiceService {
                         EventNames::CHORD_FILL_QUERY,
                         serde_json::Value::String(final_text.clone()),
                     );
-                    tracing::info!(text = %final_text, "G1: 文字已 emit chord-fill-query");
+                    tracing::debug!("G1: 文字已 emit chord-fill-query");
                     let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
                 }
             }
@@ -538,33 +519,14 @@ impl VoiceService {
                 platform::window::hide_voice_overlay(&self.app);
                 let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
                 tokio::spawn(async move {
-                    let final_text = match engine {
-                        Some(e) => match tokio::time::timeout(
-                            std::time::Duration::from_secs(10),
-                            e.finalize(),
-                        )
-                        .await
-                        {
-                            Ok(Ok(text)) => text,
-                            Ok(Err(e)) => {
-                                tracing::warn!(%e, "STT finalize 失败");
-                                String::new()
-                            }
-                            Err(_) => {
-                                tracing::warn!("STT finalize 超时（10s），放弃等待");
-                                String::new()
-                            }
-                        },
-                        None => String::new(),
-                    };
-                    tracing::info!(
+                    let final_text = finalize_engine(engine).await;
+                    tracing::debug!(
                         target = "ForegroundApp",
                         text_len = final_text.chars().count(),
-                        %final_text,
                         "语音识别完成"
                     );
                     if final_text.is_empty() {
-                        tracing::info!("识别结果为空,跳过注入");
+                        tracing::debug!("识别结果为空,跳过注入");
                         return;
                     }
                     // 注入在 spawn_blocking 中执行(SendInput 需要同线程)
@@ -582,33 +544,14 @@ impl VoiceService {
             }
             VoiceTarget::ChatWindow => {
                 // G3: finalize 在 effect 循环内（G3 无 overlay，chat 窗口自己管理 UI）
-                let final_text = match engine {
-                    Some(e) => match tokio::time::timeout(
-                        std::time::Duration::from_secs(10),
-                        e.finalize(),
-                    )
-                    .await
-                    {
-                        Ok(Ok(text)) => text,
-                        Ok(Err(e)) => {
-                            tracing::warn!(%e, "STT finalize 失败");
-                            String::new()
-                        }
-                        Err(_) => {
-                            tracing::warn!("STT finalize 超时（10s），放弃等待");
-                            String::new()
-                        }
-                    },
-                    None => String::new(),
-                };
-                tracing::info!(
+                let final_text = finalize_engine(engine).await;
+                tracing::debug!(
                     target = ?target,
                     text_len = final_text.chars().count(),
-                    %final_text,
                     "语音识别完成"
                 );
                 if final_text.is_empty() {
-                    tracing::info!("识别结果为空,跳过注入");
+                    tracing::debug!("识别结果为空,跳过注入");
                     let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
                 } else {
                     let _ = self.app.emit(
@@ -725,6 +668,32 @@ impl VoiceService {
     /// 是否正在录音。
     pub fn is_recording(&self) -> bool {
         self.session.lock().unwrap().recording
+    }
+}
+
+/// STT finalize + 10s 超时保护（G1/G2/G3 三路共用）。
+///
+/// engine 为 None 时返回空字符串；finalize 成功返回识别文本；
+/// 失败或超时返回空字符串并打 warn 日志。
+async fn finalize_engine(engine: Option<Arc<dyn SttEngine>>) -> String {
+    match engine {
+        Some(e) => match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            e.finalize(),
+        )
+        .await
+        {
+            Ok(Ok(text)) => text,
+            Ok(Err(e)) => {
+                tracing::warn!(%e, "STT finalize 失败");
+                String::new()
+            }
+            Err(_) => {
+                tracing::warn!("STT finalize 超时（10s），放弃等待");
+                String::new()
+            }
+        },
+        None => String::new(),
     }
 }
 

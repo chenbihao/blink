@@ -115,6 +115,13 @@ ICON_LIST = [
     "puzzle",           # Skill 约定式 section
     "message-square",   # 对话 section
     "database",         # 记忆策略 section
+
+    # MD 工具栏图标（0.18 review：md-toolbar.js 从内联 SVG 迁移到 Lucide sprite）
+    "list",             # 无序列表
+    "list-ordered",     # 有序列表
+    "list-checks",      # 任务清单
+    "quote",            # 引用
+    "code",             # 代码块
 ]
 
 # ── 路径 ───────────────────────────────────────────────────────────────────────
