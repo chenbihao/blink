@@ -206,9 +206,16 @@ Blink 的能力分两层,**边界用类型系统钉死**:
 | 定位 | 面向所有调用方(AI / CLI / MCP / 主窗口) | 主窗口 / chord 本地执行域 |
 | 进 AI tool 池 | ✅ **唯一合法形态**(经 `CapabilityTool` 适配)| ❌ 永不(0.14 删 `ActionTool` 适配器)|
 | 语义 | 纯数据能力(取数/计算/翻译/打开),返回 `CapabilityResult` | 已执行副作用描述(Copy/Open/Emit/Nop)|
-| 例子 | search_files / translate / capture_screen / open_url | lock / shutdown / open_settings / chord 动作 |
+| 例子 | search_files / translate / screenshot / open_url / pin_image | lock / shutdown / open_settings / chord 动作 |
 
 **核心铁则**:AI 永远只通过 `CapabilityTool` 调能力。`open_url` / `open_path` / `reveal_in_explorer` 这三个 AI 常用的从 Action 提升为 Capability;`lock` / `shutdown` 等不可逆操作留在 Action,AI 看不到,避免安全隐患。
+
+**Capability「不碰 UI」边界定义**(0.19 放宽):Capability 的"不碰 UI"指**不直接操作前端 DOM/事件流**,而非"不产生任何窗口副作用"。区分两层:
+
+- **禁止层**(保持):Capability 不直接操作前端 DOM、不 emit 前端事件、不弹模态框——这是"AI 不该越权操控用户界面流"。
+- **允许层**(放宽):Capability 可产生操作系统级窗口副作用(开浏览器、开资源管理器、显示便签/pin 窗口)——这是"AI 调用系统能力"的合理语义。
+
+`open_url`/`open_path`/`reveal_in_explorer` 已有副作用(开浏览器/资源管理器)是先例,0.19 的便签/pin cap(`create_sticky`/`pin_image`)同属此类。`CapabilityResult::Done` 变体("已写入/已打开/已锁定")即为副作用语义准备。
 
 **危险判定的两维**(`DangerClass` + `CapabilitySchema.sensitive`):
 

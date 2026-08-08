@@ -83,7 +83,9 @@ pub trait Capability: Send + Sync {
         ) || self.schema().sensitive
     }
 
-    /// 纯能力执行：入参 → 出参。不碰 UI、不 emit、不弹窗。
+    /// 纯能力执行：入参 → 出参。不直接操作前端 DOM/事件流，不 emit 前端事件，不弹模态框。
+    /// 可产生 OS 级窗口副作用（如 open_url 开浏览器、create_sticky 显示便签窗口）——
+    /// 见 `spec-architecture.md §A4`「Capability「不碰 UI」边界定义」。
     ///
     /// 运行时依赖通过 `ctx.env` 获取（满足 inventory 零参构造）。
     /// **硬超时铁则**（§3.5）：长耗时实现方必须在关键 await 点检查 `ctx.is_expired()`

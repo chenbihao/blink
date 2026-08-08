@@ -1,10 +1,11 @@
 //! `screenshot` Capability（0.11.7-f）：统一的截图能力入口。
 //!
-//! **四合一 op**：
+//! **五合一 op**：
 //! - `list_displays` — 枚举所有显示器，返回 `Text{JSON}`
 //! - `capture` — 截取指定屏或虚拟屏幕，返回 `Blob{png}`
 //! - `crop` — 从最近 SESSION 裁剪，返回 `Blob{png}`
 //! - `window` — 截取指定窗口（按 hwnd），返回 `Blob{png}`（0.19.3）
+//! - `capture_to_clipboard` — 截图直接写入剪贴板，返回 `Done`（0.19.6）
 //!
 //! 0.19.0 已删除 `capture_screen` / `crop_image` alias，统一走 `screenshot { op }`。
 
@@ -28,13 +29,13 @@ impl Capability for Screenshot {
     fn schema(&self) -> CapabilitySchema {
         CapabilitySchema {
             name: "screenshot".into(),
-            description: "屏幕相关操作。op=list_displays 枚举显示器；op=capture 截取（可选 display_id）；op=crop 裁剪最近截屏；op=window 截取指定窗口（需 hwnd，从 list_windows 获取）。".into(),
+            description: "屏幕相关操作。op=list_displays 枚举显示器；op=capture 截取（可选 display_id）；op=crop 裁剪最近截屏；op=window 截取指定窗口（需 hwnd，从 list_windows 获取）；op=capture_to_clipboard 截图直接写入系统剪贴板（不返回图片数据）。".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "op": {
                         "type": "string",
-                        "enum": ["list_displays", "capture", "crop", "window"],
+                        "enum": ["list_displays", "capture", "crop", "window", "capture_to_clipboard"],
                         "description": "操作类型"
                     },
                     "display_id": {
@@ -107,6 +108,13 @@ impl Capability for Screenshot {
                     }
                 })? as isize;
                 op_window(hwnd).await
+            }
+            "capture_to_clipboard" => {
+                let display_id = args
+                    .get("display_id")
+                    .and_then(Value::as_u64)
+                    .map(|v| v as u32);
+                op_capture_to_clipboard(display_id).await
             }
             other => Err(CapabilityError::InvalidArgs {
                 detail: format!("未知 op: {other}"),
@@ -281,6 +289,110 @@ pub(super) async fn op_window(hwnd: isize) -> Result<CapabilityResult, Capabilit
     })
 }
 
+/// capture_to_clipboard：截图直接写入系统剪贴板，返回 `Done`（0.19.6）。
+///
+/// **目的**（roadmap §7.3 复合操作）：AI 只下指令收文本确认，MB 级图片不经过
+/// LLM channel。与 `op:capture` 不同，本 op 不返回 `Blob`，而是将截图写入
+/// 系统剪贴板（CF_DIB），AI 只收到 `Done{summary}`。
+///
+/// **复用 SESSION cache**：与 `op:capture`（虚拟屏幕路径）一致，标注模式活跃时
+/// 跳过 cache，否则优先复用 SESSION 中已编码的 PNG。
+///
+/// **剪贴板写入**：
+/// - 指定显示器路径：`capture_display` → BGRA → `write_bgra_to_clipboard`（零编码）
+/// - 虚拟屏幕路径：`session_png` → PNG → `write_png_to_clipboard`（解码回 BGRA）
+///
+/// **自写入标记**：label=`blink:screenshot`，`skip_persist=false`（新截图应入库）。
+pub(super) async fn op_capture_to_clipboard(
+    display_id: Option<u32>,
+) -> Result<CapabilityResult, CapabilityError> {
+    use crate::infra::platform::clipboard::{SELF_LABEL_SCREENSHOT};
+
+    // ── 指定显示器：capture_display → BGRA → write_bgra_to_clipboard（零编码）──
+    if let Some(id) = display_id {
+        let (bgra, geom) =
+            tokio::task::spawn_blocking(move || crate::infra::platform::screenshot::capture_display(id))
+                .await
+                .map_err(|e| CapabilityError::Internal {
+                    detail: format!("capture_display task 崩溃: {e}"),
+                })?
+                .map_err(|e| CapabilityError::Internal { detail: e })?;
+
+        let (w, h) = (geom.w, geom.h);
+        tokio::task::spawn_blocking(move || {
+            crate::infra::platform::clipboard::write_bgra_to_clipboard(
+                &bgra,
+                w,
+                h,
+                SELF_LABEL_SCREENSHOT,
+                false,
+            )
+        })
+        .await
+        .map_err(|e| CapabilityError::Internal {
+            detail: format!("write_bgra_to_clipboard task 崩溃: {e}"),
+        })?
+        .map_err(|e| CapabilityError::Internal { detail: e })?;
+
+        tracing::debug!(display_id = id, w, h, "capture_to_clipboard: 指定显示器截图已写入剪贴板");
+        return Ok(CapabilityResult::Done {
+            summary: "已截图到剪贴板".into(),
+        });
+    }
+
+    // ── 虚拟屏幕：复用 SESSION cache 策略（与 op:capture 一致）──────────────
+    // 标注模式活跃时不复用——标注中的截图可能包含半成品标注
+    let session_png = if crate::infra::platform::screenshot::is_annotation_active() {
+        tracing::debug!("capture_to_clipboard: 标注模式活跃，跳过 SESSION cache");
+        None
+    } else {
+        crate::infra::platform::screenshot::session_png()
+    };
+
+    let png = match session_png {
+        Some(png) => {
+            tracing::debug!(bytes = png.len(), "capture_to_clipboard: 复用 SESSION cache");
+            png
+        }
+        None => {
+            // 无 SESSION 或标注模式 → 新截一帧
+            tokio::task::spawn_blocking(
+                crate::infra::platform::screenshot::begin_session,
+            )
+            .await
+            .map_err(|e| CapabilityError::Internal {
+                detail: format!("begin_session task 崩溃: {e}"),
+            })?
+            .map_err(|e| CapabilityError::Internal { detail: e })?;
+
+            crate::infra::platform::screenshot::session_png().ok_or_else(|| {
+                CapabilityError::Internal {
+                    detail: "begin_session 成功但 session_png 返回空".into(),
+                }
+            })?
+        }
+    };
+
+    // 写入剪贴板（PNG → 解码为 BGRA → CF_DIB）
+    tokio::task::spawn_blocking(move || {
+        crate::infra::platform::clipboard::write_png_to_clipboard(
+            &png,
+            SELF_LABEL_SCREENSHOT,
+            false,
+        )
+    })
+    .await
+    .map_err(|e| CapabilityError::Internal {
+        detail: format!("write_png_to_clipboard task 崩溃: {e}"),
+    })?
+    .map_err(|e| CapabilityError::Internal { detail: e })?;
+
+    tracing::debug!("capture_to_clipboard: 虚拟屏幕截图已写入剪贴板");
+    Ok(CapabilityResult::Done {
+        summary: "已截图到剪贴板".into(),
+    })
+}
+
 // ── 测试辅助（其他 builtin 的测试也可能与全局 backend 竞争，共享同一把锁） ─────
 
 #[cfg(test)]
@@ -310,14 +422,15 @@ mod tests {
     }
 
     #[test]
-    fn schema_declares_four_ops() {
+    fn schema_declares_five_ops() {
         let s = Screenshot.schema();
         let ops = s.parameters["properties"]["op"]["enum"].as_array().unwrap();
-        assert_eq!(ops.len(), 4);
+        assert_eq!(ops.len(), 5);
         assert!(ops.contains(&json!("list_displays")));
         assert!(ops.contains(&json!("capture")));
         assert!(ops.contains(&json!("crop")));
         assert!(ops.contains(&json!("window")));
+        assert!(ops.contains(&json!("capture_to_clipboard")));
     }
 
     #[test]
@@ -456,5 +569,39 @@ mod tests {
             &bytes[..8],
             &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
         );
+    }
+
+    /// capture_to_clipboard 虚拟屏幕路径：返回 Done，不返回 Blob。
+    #[tokio::test]
+    async fn op_capture_to_clipboard_virtual_screen_returns_done() {
+        let _g = test_lock();
+        let fake = Arc::new(FakeScreenshotBackend::single_primary(800, 600));
+        crate::infra::platform::screenshot::install_backend(fake);
+        crate::infra::platform::screenshot::end_session();
+
+        let result = op_capture_to_clipboard(None).await.unwrap();
+        let CapabilityResult::Done { summary } = result else {
+            panic!("期望 Done 结果，实际: {result:?}");
+        };
+        assert!(summary.contains("剪贴板"), "summary 应提及剪贴板");
+    }
+
+    /// capture_to_clipboard 指定显示器路径：返回 Done。
+    #[tokio::test]
+    async fn op_capture_to_clipboard_specific_display_returns_done() {
+        let _g = test_lock();
+        let fake = Arc::new(
+            FakeScreenshotBackend::builder()
+                .display(0, 0, 0, 800, 600, true)
+                .display(1, 800, 0, 400, 300, false)
+                .build(),
+        );
+        crate::infra::platform::screenshot::install_backend(fake);
+
+        let result = op_capture_to_clipboard(Some(1)).await.unwrap();
+        let CapabilityResult::Done { summary } = result else {
+            panic!("期望 Done 结果，实际: {result:?}");
+        };
+        assert!(summary.contains("剪贴板"), "summary 应提及剪贴板");
     }
 }

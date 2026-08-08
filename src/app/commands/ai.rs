@@ -250,11 +250,6 @@ pub async fn chat_prompt(
         crate::domain::ai::chat_service::ConversationKind::Persistent
     };
 
-    // 0.17.6: 主窗口 AI 激活时设 watchdog 标志，防止失焦隐藏
-    if target == "main" {
-        crate::infra::platform::window::set_main_ai_active(true);
-    }
-
     // 0.12.8: 查询系统提示词 + 调 prompt() 在前，持久化分组在后
     let pools = app.state::<crate::infra::data::DbPools>();
 
@@ -284,6 +279,13 @@ pub async fn chat_prompt(
             }
             other => other.to_string(),
         })?;
+
+    // 0.17.6: 主窗口 AI 激活时设 watchdog 标志，防止失焦隐藏。
+    // 必须在 prompt() 成功后设置--失败时提前返回，标志不会泄漏，
+    // 后续 spawn 内的 30s 兜底清零定时器也不会启动。
+    if target == "main" {
+        crate::infra::platform::window::set_main_ai_active(true);
+    }
 
     // prompt 成功后才持久化分组（副作用后置）
     if let Some(ref gid) = group_id {

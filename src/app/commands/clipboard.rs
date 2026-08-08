@@ -178,8 +178,9 @@ pub async fn pin_clipboard_image(app: tauri::AppHandle, image_id: String) -> Res
         .map(|(pw, ph)| (pw as i32, ph as i32))
         .unwrap_or((400, 300));
 
-    // 获取主显示器工作区，居中放置
-    let (screen_x, screen_y) = get_primary_monitor_center(w, h);
+    // 获取光标所在显示器工作区，居中放置（0.19.6 从本文件提升到 window 模块）
+    let (screen_x, screen_y) =
+        crate::infra::platform::window::get_primary_monitor_center(w, h);
 
     tracing::debug!(id = %image_id, w, h, screen_x, screen_y, "pin_clipboard_image");
 
@@ -188,29 +189,3 @@ pub async fn pin_clipboard_image(app: tauri::AppHandle, image_id: String) -> Res
     Ok(())
 }
 
-/// 获取光标所在显示器工作区中心，让图片居中放置。
-/// 0.18.8：从 `GetSystemMetrics(SM_CXSCREEN)`（仅主屏）改为
-/// `MonitorFromPoint` + `GetMonitorInfoW` 取光标所在屏的工作区，
-/// 副屏右键钉图时图片不再出现在主屏。
-fn get_primary_monitor_center(img_w: i32, img_h: i32) -> (i32, i32) {
-    use windows::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-    };
-    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
-
-    unsafe {
-        let mut pt = std::mem::zeroed();
-        let _ = GetCursorPos(&mut pt);
-        let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-        let mut mi: MONITORINFO = std::mem::zeroed();
-        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
-        let _ = GetMonitorInfoW(hmon, &mut mi);
-        // 工作区（rcWork）排除任务栏，居中放置
-        let wa = &mi.rcWork;
-        let wa_w = wa.right - wa.left;
-        let wa_h = wa.bottom - wa.top;
-        let x = wa.left + (wa_w - img_w) / 2;
-        let y = wa.top + (wa_h - img_h) / 2;
-        (x.max(wa.left), y.max(wa.top))
-    }
-}

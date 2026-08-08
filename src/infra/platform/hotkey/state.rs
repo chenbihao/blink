@@ -707,7 +707,7 @@ impl InputState {
             (ChordSession::Inactive, true) => {
                 // 建立 session
                 let session_id = self.alloc_chord_session_id();
-                tracing::debug!(
+                tracing::trace!(
                     session_id,
                     alt_down = self.modifiers.alt_down(),
                     "chord session 建立"
@@ -720,7 +720,7 @@ impl InputState {
             }
             (ChordSession::Active { session_id, .. }, false) => {
                 // 退出 session
-                tracing::debug!(
+                tracing::trace!(
                     session_id,
                     alt_down = self.modifiers.alt_down(),
                     window_visible = self.window.visible,

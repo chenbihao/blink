@@ -17,6 +17,7 @@ use crate::domain::capability::CapabilityRegistry;
 use crate::domain::event::{CapabilityEnv, DomainEnv};
 use crate::domain::plugin::PluginEngine;
 use crate::domain::search::SearchService;
+use crate::domain::sticky::StickyService;
 use crate::infra::data::pools::DbPools;
 use crate::infra::platform::screenshot::ScreenCaptureMeta;
 
@@ -94,6 +95,7 @@ impl TauriDomainEnv {
     }
 }
 
+#[async_trait::async_trait]
 impl CapabilityEnv for TauriDomainEnv {
     fn db_pools(&self) -> &DbPools {
         &self.db_pools
@@ -105,6 +107,75 @@ impl CapabilityEnv for TauriDomainEnv {
 
     fn search_service(&self) -> Option<&Arc<SearchService>> {
         self.search_service.get()
+    }
+
+    // ── 便签窗口操作（0.19.5 从 DomainEnv 提升到 CapabilityEnv）─────────
+
+    fn sticky_service(&self) -> Option<&Arc<StickyService>> {
+        use tauri::Manager;
+        self.app
+            .try_state::<std::sync::Arc<StickyService>>()
+            .map(|s| s.inner())
+    }
+
+    async fn create_sticky_and_show(
+        &self,
+        content: &str,
+        x: Option<i32>,
+        y: Option<i32>,
+        w: Option<i32>,
+        h: Option<i32>,
+    ) -> Result<String, String> {
+        use tauri::Emitter;
+        let svc = self.sticky_service().ok_or("StickyService 不可用")?.clone();
+
+        // 创建便签（默认黄色、visible=true）
+        let note = svc
+            .create_note(content, crate::domain::sticky::StickyColor::default())
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // 应用可选尺寸（None 则用 create_note 的默认值）
+        let width = w.unwrap_or(note.width);
+        let height = h.unwrap_or(note.height);
+
+        // 位置：有 x/y 则用指定位置，None 则居中到当前前台窗口所在显示器
+        let (cx, cy) = match (x, y) {
+            (Some(px), Some(py)) => (px, py),
+            _ => {
+                crate::infra::platform::window::center_of_active_monitor(width, height)
+            }
+        };
+
+        svc.update_geometry(&note.id, cx, cy, width, height)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // 显示桌面窗口（focus=true：用户需能立即输入便签，与 chord 路径行为一致）
+        crate::infra::platform::window::show_sticky_window(
+            &self.app,
+            &note.id,
+            cx,
+            cy,
+            width,
+            height,
+            note.always_on_top,
+            true, // 0.16.11：用户操作需要聚焦
+        )?;
+
+        // emit 事件让管理界面和其它监听者更新
+        let _ = self.app.emit(
+            crate::domain::event_names::EventNames::STICKY_CREATED,
+            serde_json::json!({ "stickyId": note.id }),
+        );
+        Ok(note.id)
+    }
+
+    // ── pin 窗口操作（0.19.6 pin 能力化桥接）──────────────────────────
+
+    fn show_pin_window(&self, png_bytes: Vec<u8>, x: i32, y: i32) -> Result<(), String> {
+        // show_translating 固定 false——对 AI pin 场景无意义
+        crate::infra::platform::window::show_pin_window(&self.app, png_bytes, x, y, false)
     }
 }
 
@@ -170,13 +241,6 @@ impl DomainEnv for TauriDomainEnv {
         crate::infra::platform::window::show_sticky_manager_window(&self.app)
     }
 
-    fn sticky_service(&self) -> Option<&std::sync::Arc<crate::domain::sticky::StickyService>> {
-        use tauri::Manager;
-        self.app
-            .try_state::<std::sync::Arc<crate::domain::sticky::StickyService>>()
-            .map(|s| s.inner())
-    }
-
     fn show_content_editor(
         &self,
         body: &str,
@@ -199,40 +263,6 @@ impl DomainEnv for TauriDomainEnv {
             .state::<crate::app::commands::PendingEditorPayload>();
         *pending.0.lock().map_err(|e| format!("锁失败: {e}"))? = Some(payload);
         crate::infra::platform::window::show_content_editor_window(&self.app)
-    }
-
-    async fn create_sticky_and_show(&self, content: &str) -> Result<String, String> {
-        use tauri::Emitter;
-        // P1-#10: 通过 DomainEnv::sticky_service() 统一访问，与 chord 路径一致
-        let svc = self.sticky_service().ok_or("StickyService 不可用")?.clone();
-        // 创建便签（默认主题色、visible=true）
-        let note = svc
-            .create_note(content, crate::domain::sticky::StickyColor::default())
-            .await
-            .map_err(|e| e.to_string())?;
-        // 0.16.11：新建便签居中到当前前台窗口所在显示器的工作区
-        let (cx, cy) =
-            crate::infra::platform::window::center_of_active_monitor(note.width, note.height);
-        svc.update_geometry(&note.id, cx, cy, note.width, note.height)
-            .await
-            .map_err(|e| e.to_string())?;
-        // 显示桌面窗口（用户操作需要聚焦）
-        crate::infra::platform::window::show_sticky_window(
-            &self.app,
-            &note.id,
-            cx,
-            cy,
-            note.width,
-            note.height,
-            note.always_on_top,
-            true, // 0.16.11：用户操作需要聚焦
-        )?;
-        // emit 事件让管理界面和其它监听者更新
-        let _ = self.app.emit(
-            crate::domain::event_names::EventNames::STICKY_CREATED,
-            serde_json::json!({ "stickyId": note.id }),
-        );
-        Ok(note.id)
     }
 
     fn exit_app(&self) {
@@ -260,6 +290,7 @@ mod tests {
         pools: DbPools,
     }
 
+    #[async_trait::async_trait]
     impl CapabilityEnv for FakeDomainEnv {
         fn db_pools(&self) -> &DbPools {
             &self.pools
@@ -269,6 +300,23 @@ mod tests {
         }
         fn search_service(&self) -> Option<&Arc<SearchService>> {
             None
+        }
+        fn sticky_service(&self) -> Option<&Arc<StickyService>> {
+            None
+        }
+        async fn create_sticky_and_show(
+            &self,
+            _content: &str,
+            _x: Option<i32>,
+            _y: Option<i32>,
+            _w: Option<i32>,
+            _h: Option<i32>,
+        ) -> Result<String, String> {
+            Ok("fake_sticky_id".to_string())
+        }
+
+        fn show_pin_window(&self, _png_bytes: Vec<u8>, _x: i32, _y: i32) -> Result<(), String> {
+            Ok(())
         }
     }
 
@@ -294,9 +342,6 @@ mod tests {
         fn chat_service(&self) -> Option<&Arc<ChatService>> {
             None
         }
-        fn sticky_service(&self) -> Option<&std::sync::Arc<crate::domain::sticky::StickyService>> {
-            None
-        }
         fn show_chat_window(&self, _initial_text: Option<&str>) -> Result<(), String> {
             Ok(())
         }
@@ -320,9 +365,6 @@ mod tests {
             _save_policy: &str,
         ) -> Result<(), String> {
             Ok(())
-        }
-        async fn create_sticky_and_show(&self, _content: &str) -> Result<String, String> {
-            Ok("fake_sticky_id".to_string())
         }
         fn exit_app(&self) {}
         async fn wait_frame_after_hide(&self) {}

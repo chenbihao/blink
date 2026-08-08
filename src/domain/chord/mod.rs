@@ -890,7 +890,7 @@ impl crate::domain::execution::Action for StickyAction {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         cx.env
-            .create_sticky_and_show(input)
+            .create_sticky_and_show(input, None, None, None, None)
             .await
             .map_err(crate::domain::execution::ExecError::Runtime)?;
         cx.env.hide_main_window("sticky_chord");

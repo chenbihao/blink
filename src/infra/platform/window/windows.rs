@@ -2012,6 +2012,36 @@ pub fn show_pin_window(
     }
 }
 
+/// 获取光标所在显示器工作区中心，让图片居中放置（0.19.6 从 clipboard.rs 提升到 window 模块）。
+///
+/// 0.18.8：从 `GetSystemMetrics(SM_CXSCREEN)`（仅主屏）改为
+/// `MonitorFromPoint` + `GetMonitorInfoW` 取光标所在屏的工作区，
+/// 副屏右键钉图时图片不再出现在主屏。
+///
+/// 供 `pin_image` Capability 位置兜底和 `pin_clipboard_image` command 共用。
+pub fn get_primary_monitor_center(img_w: i32, img_h: i32) -> (i32, i32) {
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    unsafe {
+        let mut pt = std::mem::zeroed();
+        let _ = GetCursorPos(&mut pt);
+        let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        let _ = GetMonitorInfoW(hmon, &mut mi);
+        // 工作区（rcWork）排除任务栏，居中放置
+        let wa = &mi.rcWork;
+        let wa_w = wa.right - wa.left;
+        let wa_h = wa.bottom - wa.top;
+        let x = wa.left + (wa_w - img_w) / 2;
+        let y = wa.top + (wa_h - img_h) / 2;
+        (x.max(wa.left), y.max(wa.top))
+    }
+}
+
 /// 0.18.3：原地刷新钉图窗口的图片（不重定位、不重置缩放）。
 ///
 /// 用于「翻译并 pin」流程：后台翻译完成后合成含译文的 PNG，

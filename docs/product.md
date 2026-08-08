@@ -355,7 +355,7 @@ Suggestion 域是唯一能读 Awareness 的层，也是**AI 意图判定器的�
 - **新能力自问**：设计时必须自答"它的产出能被谁消费、它能调用哪些已有能力"，答不出则它是孤岛，与统一能力底座脱节。
 - **铁则自身可演进**：以上铁则不是死守的教条。在框架设计或能力演进中，若某条铁则阻碍了更优的设计，应公开反思、记录理由、同步修订--铁则随产品生长而演进，而非产品被铁则锁死。
 
-> **已知技术债**（截至 0.18）：ActionRegistry 与 ChordRegistry 互不可见（chord action 实现了 `Action` trait 但不注册进 ActionRegistry）；`capture_screen`/`crop_image` 别名 Capability 注释标 `TODO(0.13) 删除` 但仍在；`open_url` 在 command 路径和 Capability 路径各有一套底层实现未收敛；OCR 用户侧 command 与 AI Capability 入口独立、仅共用 backend。这些是自然生长中待收敛的补丁，不阻塞当前能力共生，但应在后续重构中逐一清理。
+> **已知技术债**（截至 0.19）：ActionRegistry 与 ChordRegistry 互不可见（chord action 实现了 `Action` trait 但不注册进 ActionRegistry）。0.19 已清理的债：`capture_screen`/`crop_image` alias 删除、`open_url` 双实现收敛（command 改经 CapabilityRegistry）、OCR 双入口收编（用户侧 command 改经 OcrImage Capability）。剩余项是自然生长中待收敛的补丁，不阻塞当前能力共生，但应在后续重构中清理。
 
 ### 6.4 可辨识度与视觉一致性（横切信念）
 

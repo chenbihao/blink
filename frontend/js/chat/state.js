@@ -152,7 +152,9 @@ export function setConversationId(id) {
 
 /** 设置当前对话所属分组 ID（0.12.6）。 */
 export function setCurrentGroupId(id) {
-  currentGroupId = id ?? null;
+  // 防御：groupId 必须是字符串或 null，避免对象/其他类型泄漏到 invoke("chat_prompt")
+  // 导致后端 serde 报 "invalid type: map, expected a string"
+  currentGroupId = typeof id === "string" ? id : null;
 }
 
 /** 记录一个进行中的 Tool 卡片（按 call_id 索引）。 */
