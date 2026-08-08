@@ -104,18 +104,20 @@ impl VoiceService {
     /// 根据 main 窗口是否可见决定 G1/G2 目标。
     ///
     /// async 因为需要检查模型加载状态（HTTP /health 请求）。
-    pub async fn start_recording(&self) {
+    /// 返回 `true` = 录音已真正启动（调用方据此决定是否启动托盘动画等副作用）。
+    pub async fn start_recording(&self) -> bool {
         // ── 总开关检查：STT 未启用时静默忽略 hold 事件 ──
         let config = crate::app::stt_config::get_stt_config();
         if !config.enabled {
             tracing::debug!("语音未启用,忽略 hold 事件");
-            return;
+            return false;
         }
 
         // ── 立即通知输入状态机进入 Recording ──
-        // hook 状态机的 Holding 状态已吞 Space autorepeat，此处同步 voice phase
-        // 使 ESC 能产生 VoiceCancel。必须在任何 .await 之前设置——否则 await 期间
-        // ESC 无法取消。guard 确保所有早退路径（服务未就绪 / 模型加载中等）回 Idle。
+        // hold_fired 期间 reducer 已吞 Space/Alt keydown（防系统菜单），此处同步 voice phase
+        // 使 ESC 能产生 VoiceCancel，并延续吞键到 keyup -> stop_recording 之间。必须在任何
+        // .await 之前设置--否则 await 期间 ESC 无法取消。guard 确保所有早退路径
+        // （服务未就绪 / 模型加载中等）回 Idle。
         struct VoiceRecordingGuard {
             armed: bool,
         }
@@ -142,15 +144,16 @@ impl VoiceService {
         let mut _voice_guard = VoiceRecordingGuard::new();
 
         // ── G1/G2 判定 + 互斥检查（scoped block：MutexGuard 不跨 await） ──
+        let target;
         {
             let mut session = self.session.lock().unwrap();
 
             if session.recording {
                 tracing::warn!("start_recording: 已在录音中,忽略");
-                return;
+                return false;
             }
 
-            // 判断 G1/G2/G3：主窗口可见→G1，chat 窗口可见→G3，否则→G2
+            // 判断 G1/G2/G3：主窗口可见->G1，chat 窗口可见->G3，否则->G2
             let main_visible = self
                 .app
                 .get_webview_window("main")
@@ -161,19 +164,30 @@ impl VoiceService {
                 .get_webview_window("chat")
                 .map(|w| w.is_visible().unwrap_or(false))
                 .unwrap_or(false);
-            session.target = if main_visible {
+            target = if main_visible {
                 VoiceTarget::MainWindow
             } else if chat_visible {
                 VoiceTarget::ChatWindow
             } else {
                 VoiceTarget::ForegroundApp
             };
+            session.target = target;
+        }
+
+        // G2: 在服务就绪检查之前立即显示 overlay，让用户瞬间看到反馈。
+        // overlay 初始显示默认文案（"语音输入中…"），服务检查完成后再更新内容
+        // （错误消息或录音开始）。避免服务检查阻塞导致窗口延迟出现。
+        if target == VoiceTarget::ForegroundApp {
+            platform::window::show_voice_overlay(&self.app);
         }
 
         // ── 共享录音启动逻辑 ──
         if self.begin_recording(&config, true).await {
             // 录音真正开始，解除 guard（标志由 stop_recording/cancel_recording 清除）
             _voice_guard.disarm();
+            true
+        } else {
+            false
         }
     }
 
@@ -239,7 +253,7 @@ impl VoiceService {
             let (ready, msg) = match config.mode {
                 SttMode::Local => {
                     let port = config.local_engine.server_port;
-                    if crate::domain::stt::funasr::is_server_ready(port) {
+                    if crate::domain::stt::funasr::is_server_ready_async(port).await {
                         (true, String::new())
                     } else {
                         (
@@ -330,11 +344,10 @@ impl VoiceService {
                     "语音录音开始"
                 );
 
-                // G2: 显示 mini overlay 窗口
+                // G2: overlay 已在 start_recording 中提前显示，此处只需保存前台窗口 HWND
                 if session.target == VoiceTarget::ForegroundApp {
                     // 保存前台窗口 HWND（注入前恢复焦点，提升 Ctrl+V 成功率）
                     session.prev_fg_hwnd = platform::window::get_foreground_hwnd();
-                    platform::window::show_voice_overlay(&self.app);
                 }
 
                 // 通知前端录音已开始（G1 隐藏 Ghost overlay / G2 overlay 已显示 / G3 chat 麦克风按钮切换态）
@@ -433,8 +446,9 @@ impl VoiceService {
 
             if !session.recording {
                 tracing::warn!("stop_recording: 未在录音中,忽略");
-                // 即使没真正录音，start_recording 可能已通知输入状态机 Recording（吞 Space 键），
-                // 仍需回 Idle + 清理 UI 状态。
+                // 服务未就绪 / 模型加载中等早退路径：overlay 已在 start_recording 中提前显示，
+                // emit_voice_error/emit_voice_status 已更新了内容（不再 spawn 延迟 hide task）。
+                // 松键即隐藏 overlay + 回 Idle + 清理前端状态。
                 crate::infra::platform::hotkey::InputController::update_voice_phase(
                     crate::infra::platform::hotkey::VoicePhase::Idle,
                 );
@@ -471,84 +485,141 @@ impl VoiceService {
 
         // 最终识别（async）
         // 加 10s 超时保护：即使 abort 后仍有异常情况（如 WS 半连接），不会永久卡住
-        let final_text = match engine {
-            Some(e) => {
-                match tokio::time::timeout(std::time::Duration::from_secs(10), e.finalize()).await {
-                    Ok(Ok(text)) => text,
-                    Ok(Err(e)) => {
-                        tracing::warn!(%e, "STT finalize 失败");
-                        String::new()
-                    }
-                    Err(_) => {
-                        tracing::warn!("STT finalize 超时（10s），放弃等待");
-                        String::new()
-                    }
-                }
-            }
-            None => String::new(),
-        };
-
-        tracing::info!(
-            target = ?target,
-            text_len = final_text.chars().count(),
-            %final_text,
-            "语音识别完成"
-        );
-
-        if final_text.is_empty() {
-            tracing::info!("识别结果为空,跳过注入");
-            // G2: 隐藏 mini overlay
-            if target == VoiceTarget::ForegroundApp {
-                platform::window::hide_voice_overlay(&self.app);
-            }
-            let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
-            return;
-        }
-
+        //
+        // **G2 路径优化**：finalize + inject 整体放到 spawn 里脱离 effect 串行循环，
+        // 避免识别期间阻塞后续 effect（Tap/HoldStarted）。松键后 overlay 立即隐藏，
+        // 识别完成后在 spawn_blocking 中恢复焦点 + 注入文本。
         match target {
             VoiceTarget::MainWindow => {
-                // G1: 填进 #query(复用 chord-fill-query 链路)
-                // payload 必须是 serde_json::Value::String,与 chord 模块 pattern 一致
-                let _ = self.app.emit(
-                    EventNames::CHORD_FILL_QUERY,
-                    serde_json::Value::String(final_text.clone()),
+                // G1: finalize 在 effect 循环内（G1 无 overlay，不阻塞 UI 反馈）
+                let final_text = match engine {
+                    Some(e) => match tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        e.finalize(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(text)) => text,
+                        Ok(Err(e)) => {
+                            tracing::warn!(%e, "STT finalize 失败");
+                            String::new()
+                        }
+                        Err(_) => {
+                            tracing::warn!("STT finalize 超时（10s），放弃等待");
+                            String::new()
+                        }
+                    },
+                    None => String::new(),
+                };
+                tracing::info!(
+                    target = ?target,
+                    text_len = final_text.chars().count(),
+                    %final_text,
+                    "语音识别完成"
                 );
-                tracing::info!(text = %final_text, "G1: 文字已 emit chord-fill-query");
-                let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
+                if final_text.is_empty() {
+                    let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
+                } else {
+                    let _ = self.app.emit(
+                        EventNames::CHORD_FILL_QUERY,
+                        serde_json::Value::String(final_text.clone()),
+                    );
+                    tracing::info!(text = %final_text, "G1: 文字已 emit chord-fill-query");
+                    let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
+                }
             }
             VoiceTarget::ForegroundApp => {
-                // G2: 注入前台应用
-                // 注入在 spawn_blocking 中执行(SendInput 需要同线程)
-                let app = self.app.clone();
+                // G2: finalize + restore_foreground + inject 脱离 effect 循环
                 let prev_hwnd = {
                     let session = self.session.lock().unwrap();
                     session.prev_fg_hwnd
                 };
-                tokio::task::spawn_blocking(move || {
-                    // 注入前恢复前台窗口焦点（finalize 期间焦点可能漂移）
-                    if let Some(hwnd) = prev_hwnd {
-                        platform::window::restore_foreground(hwnd);
-                        std::thread::sleep(std::time::Duration::from_millis(50));
+                // 松键立即隐藏 overlay（识别 + 注入在后台进行）
+                platform::window::hide_voice_overlay(&self.app);
+                let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
+                tokio::spawn(async move {
+                    let final_text = match engine {
+                        Some(e) => match tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            e.finalize(),
+                        )
+                        .await
+                        {
+                            Ok(Ok(text)) => text,
+                            Ok(Err(e)) => {
+                                tracing::warn!(%e, "STT finalize 失败");
+                                String::new()
+                            }
+                            Err(_) => {
+                                tracing::warn!("STT finalize 超时（10s），放弃等待");
+                                String::new()
+                            }
+                        },
+                        None => String::new(),
+                    };
+                    tracing::info!(
+                        target = "ForegroundApp",
+                        text_len = final_text.chars().count(),
+                        %final_text,
+                        "语音识别完成"
+                    );
+                    if final_text.is_empty() {
+                        tracing::info!("识别结果为空,跳过注入");
+                        return;
                     }
-                    if let Err(e) = platform::inject::inject_text(&final_text) {
-                        tracing::error!(%e, "G2: 文本注入失败");
-                    }
-                    // 注入完成后隐藏 overlay + emit end
-                    platform::window::hide_voice_overlay(&app);
-                    let _ = app.emit(EventNames::VOICE_RECORDING_END, ());
+                    // 注入在 spawn_blocking 中执行(SendInput 需要同线程)
+                    tokio::task::spawn_blocking(move || {
+                        // 注入前恢复前台窗口焦点（finalize 期间焦点可能漂移）
+                        if let Some(hwnd) = prev_hwnd {
+                            platform::window::restore_foreground(hwnd);
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                        }
+                        if let Err(e) = platform::inject::inject_text(&final_text) {
+                            tracing::error!(%e, "G2: 文本注入失败");
+                        }
+                    });
                 });
             }
             VoiceTarget::ChatWindow => {
-                // G3: 识别结果 emit 到 chat 窗口（前端监听 voice-partial target="chat"）
-                let _ = self.app.emit(
-                    EventNames::VOICE_PARTIAL,
-                    serde_json::json!({
-                        "text": final_text.clone(),
-                        "target": "chat",
-                    }),
+                // G3: finalize 在 effect 循环内（G3 无 overlay，chat 窗口自己管理 UI）
+                let final_text = match engine {
+                    Some(e) => match tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        e.finalize(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(text)) => text,
+                        Ok(Err(e)) => {
+                            tracing::warn!(%e, "STT finalize 失败");
+                            String::new()
+                        }
+                        Err(_) => {
+                            tracing::warn!("STT finalize 超时（10s），放弃等待");
+                            String::new()
+                        }
+                    },
+                    None => String::new(),
+                };
+                tracing::info!(
+                    target = ?target,
+                    text_len = final_text.chars().count(),
+                    %final_text,
+                    "语音识别完成"
                 );
-                tracing::info!(text = %final_text, "G3: 文字已 emit voice-partial(chat)");
-                let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
+                if final_text.is_empty() {
+                    tracing::info!("识别结果为空,跳过注入");
+                    let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
+                } else {
+                    let _ = self.app.emit(
+                        EventNames::VOICE_PARTIAL,
+                        serde_json::json!({
+                            "text": final_text,
+                            "target": "chat",
+                        }),
+                    );
+                    let _ = self.app.emit(EventNames::VOICE_RECORDING_END, ());
+                }
             }
         }
     }
@@ -604,20 +675,14 @@ impl VoiceService {
     /// G3: 直接 emit（chat 窗口已可见）。
     fn emit_voice_status(&self, target: VoiceTarget, message: &str) {
         if target == VoiceTarget::ForegroundApp {
-            // G2: 先显示 overlay，再延迟 emit 状态消息
-            platform::window::show_voice_overlay(&self.app);
-            let app_clone = self.app.clone();
-            let msg_clone = message.to_string();
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                let _ = app_clone.emit(
-                    EventNames::VOICE_STATUS,
-                    serde_json::json!({
-                        "message": msg_clone,
-                        "target": target.as_str(),
-                    }),
-                );
-            });
+            // G2: overlay 已在 start_recording 中提前显示，此处只 emit 状态消息更新内容。
+            let _ = self.app.emit(
+                EventNames::VOICE_STATUS,
+                serde_json::json!({
+                    "message": message,
+                    "target": target.as_str(),
+                }),
+            );
         } else {
             // G1/G3: 直接 emit
             let _ = self.app.emit(
@@ -635,24 +700,16 @@ impl VoiceService {
     /// **绝不**用 Mock 引擎的假文本上屏——错误就是错误，告知用户而非静默吞掉。
     fn emit_voice_error(&self, target: VoiceTarget, message: &str) {
         if target == VoiceTarget::ForegroundApp {
-            // G2: 先显示 overlay，再延迟 emit 错误消息
-            // （窗口刚 show 时事件可能未就绪，延迟 100ms 确保接收）
-            platform::window::show_voice_overlay(&self.app);
-            let app_clone = self.app.clone();
-            let msg_clone = message.to_string();
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                let _ = app_clone.emit(
-                    EventNames::VOICE_ERROR,
-                    serde_json::json!({
-                        "message": msg_clone,
-                        "target": target.as_str(),
-                    }),
-                );
-                // 2s 后自动隐藏
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                platform::window::hide_voice_overlay(&app_clone);
-            });
+            // G2: overlay 已在 start_recording 中提前显示，此处只 emit 错误消息更新内容。
+            // 不再 show_voice_overlay（已显示），也不 spawn 延迟 hide--
+            // overlay 生命周期由 stop_recording/cancel_recording 统一管理（松键即隐藏）。
+            let _ = self.app.emit(
+                EventNames::VOICE_ERROR,
+                serde_json::json!({
+                    "message": message,
+                    "target": target.as_str(),
+                }),
+            );
         } else {
             // G1/G3: 直接 emit（窗口已可见，事件就绪）
             let _ = self.app.emit(

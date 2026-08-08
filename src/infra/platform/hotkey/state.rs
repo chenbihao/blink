@@ -455,6 +455,19 @@ impl GestureState {
             GestureState::Idle => None,
         }
     }
+
+    /// 当前是否处于 hold_fired 状态（HoldDeadline 已触发，等待 keyup）。
+    pub fn is_hold_fired(&self) -> bool {
+        matches!(self, GestureState::Armed { hold_fired: true, .. })
+    }
+
+    /// 当前 armed 的主键（Idle 时 None）。
+    pub fn armed_key(&self) -> Option<&str> {
+        match self {
+            GestureState::Armed { key, .. } => Some(key),
+            _ => None,
+        }
+    }
 }
 
 // ── Chord Session ───────────────────────────────────────────────────────────
@@ -909,7 +922,7 @@ fn reduce_hook_key(state: &mut InputState, e: HookKeyEvent, now: Instant) -> Red
     }
 
     // LLKHF_ALTDOWN：非注入主键事件推断 Alt 已按下。
-    // 只推断 LAlt——LLKHF_ALTDOWN 不区分左右，推断两侧会导致 mask 多余位使配置匹配失败。
+    // 只推断 LAlt--LLKHF_ALTDOWN 不区分左右，推断两侧会导致 mask 多余位使配置匹配失败。
     // 若实际是 RAlt，后续 RAlt Hook 事件会校正。
     if e.alt_down_flag && !e.injected && e.is_down {
         if state.modifiers.level(ModifierKey::LAlt) == ModifierLevel::Unknown {
@@ -918,6 +931,30 @@ fn reduce_hook_key(state: &mut InputState, e: HookKeyEvent, now: Instant) -> Red
                 ModifierLevel::InferredDown,
                 e.time_ms,
             );
+        }
+    }
+
+    // hold/voice 期间吞主键 + Alt 的 keydown（防系统菜单"噔噔噔"声）。
+    //
+    // 旧代码（0.18.6 windows.rs ll_proc）有一个独立于状态机的吞键守卫，
+    // 覆盖 hold_fired || VOICE_RECORDING 期间的 Space + Alt keydown。0.18.7 重构
+    // 把吞键决策收敛到 reducer 的 Propagation，但漏掉了这一层，导致语音录音期间
+    // Space autorepeat 透传给系统，反复弹出系统菜单。
+    //
+    // 条件：hold_fired（同步，覆盖 HoldDeadline -> VoicePhase 到达前的间隙）
+    //   或 VoicePhase 非 Idle（覆盖录音持续期 + keyup -> stop 之间的间隙）。
+    // 范围：主键（armed_key，通常 Space）+ Alt（lalt/ralt）的 keydown。
+    // 只吞 keydown，不吞 keyup（否则 HoldRelease 收不到）。
+    //
+    // 标 propagation 后不 return：modifier level 维护、autorepeat 忽略、ESC 取消
+    // 等逻辑正常执行，各分支 return result 时自然带着 Swallow。
+    if e.is_down
+        && (state.gesture.is_hold_fired() || !matches!(state.voice, VoicePhase::Idle))
+    {
+        let is_armed_main_key = state.gesture.armed_key().map(|k| k == e.key).unwrap_or(false);
+        let is_alt_key = e.key == "lalt" || e.key == "ralt";
+        if is_armed_main_key || is_alt_key {
+            result.propagation = Propagation::Swallow;
         }
     }
 
@@ -1619,13 +1656,30 @@ mod tests {
         );
         assert!(has_hold_started(&r.effects));
 
-        // keyup → HoldReleased
+        // hold_fired 期间 Space autorepeat -> 吞键（防系统菜单"噔噔噔"声）
+        let r = reduce(
+            &mut s,
+            InputEvent::HookKey(hook_key_down(" ", 210)),
+            Instant::now(),
+        );
+        assert_eq!(r.propagation, Propagation::Swallow);
+
+        // hold_fired 期间 Alt keydown autorepeat -> 也吞
+        let r = reduce(
+            &mut s,
+            InputEvent::HookKey(hook_modifier_down("lalt", 220)),
+            Instant::now(),
+        );
+        assert_eq!(r.propagation, Propagation::Swallow);
+
+        // keyup -> HoldReleased（keyup 不吞，确保 HoldRelease 能收到）
         let r = reduce(
             &mut s,
             InputEvent::HookKey(hook_key_up(" ", 600)),
             Instant::now(),
         );
         assert!(has_hold_released(&r.effects));
+        assert_eq!(r.propagation, Propagation::Pass);
     }
 
     #[test]
@@ -1660,7 +1714,8 @@ mod tests {
             InputEvent::HookKey(hook_key_down(" ", 200)),
             Instant::now(),
         );
-        // 同一主键 repeat down → 忽略（仍 armed，不重置）
+        // 同一主键 repeat down -> 忽略（仍 armed，不重置）
+        // tap 窗口内（hold_fired=false, voice=Idle）-> 放行
         let r = reduce(
             &mut s,
             InputEvent::HookKey(hook_key_down(" ", 210)),
@@ -1668,8 +1723,9 @@ mod tests {
         );
         assert!(!has_tap(&r.effects));
         assert!(matches!(s.gesture, GestureState::Armed { .. }));
+        assert_eq!(r.propagation, Propagation::Pass);
 
-        // keyup → tap
+        // keyup -> tap
         let r = reduce(
             &mut s,
             InputEvent::HookKey(hook_key_up(" ", 250)),
@@ -2424,6 +2480,125 @@ mod tests {
             Instant::now(),
         );
         assert!(has_voice_cancel(&r.effects));
+    }
+
+    // ── hold_fired 期间吞 Space autorepeat（防系统菜单"噔噔噔"声）──
+
+    #[test]
+    fn hold_fired_swallows_space_autorepeat() {
+        let mut s = armed_state();
+        reduce(
+            &mut s,
+            InputEvent::HookKey(hook_key_down(" ", 200)),
+            Instant::now(),
+        );
+        let gid = s.gesture.gesture_id().unwrap();
+
+        // HoldDeadline -> hold_fired=true
+        reduce(
+            &mut s,
+            InputEvent::HoldDeadline { gesture_id: gid },
+            Instant::now(),
+        );
+        assert!(s.gesture.is_hold_fired());
+
+        // Space autorepeat -> Swallow（不透传给系统）
+        let r = reduce(
+            &mut s,
+            InputEvent::HookKey(hook_key_down(" ", 210)),
+            Instant::now(),
+        );
+        assert_eq!(r.propagation, Propagation::Swallow);
+        // 仍 armed，不重置
+        assert!(s.gesture.is_hold_fired());
+
+        // keyup -> HoldReleased + Pass
+        let r = reduce(
+            &mut s,
+            InputEvent::HookKey(hook_key_up(" ", 600)),
+            Instant::now(),
+        );
+        assert!(has_hold_released(&r.effects));
+        assert_eq!(r.propagation, Propagation::Pass);
+    }
+
+    // ── VoicePhase::Recording 期间吞 Space + Alt keydown，不吞 keyup ──
+
+    #[test]
+    fn voice_recording_swallows_space_and_alt() {
+        let mut s = armed_state();
+        reduce(
+            &mut s,
+            InputEvent::HookKey(hook_key_down(" ", 200)),
+            Instant::now(),
+        );
+        // 进入 Voice Recording（模拟主线程 update_voice_phase）
+        reduce(
+            &mut s,
+            InputEvent::VoicePhaseChanged {
+                gesture_id: None,
+                phase: VoicePhase::Recording { gesture_id: 1 },
+            },
+            Instant::now(),
+        );
+
+        // Space keydown -> Swallow
+        let r = reduce(
+            &mut s,
+            InputEvent::HookKey(hook_key_down(" ", 210)),
+            Instant::now(),
+        );
+        assert_eq!(r.propagation, Propagation::Swallow);
+
+        // Alt keydown -> Swallow
+        let r = reduce(
+            &mut s,
+            InputEvent::HookKey(hook_modifier_down("lalt", 220)),
+            Instant::now(),
+        );
+        assert_eq!(r.propagation, Propagation::Swallow);
+
+        // 非主键非 Alt 的 keydown -> 仍放行（不影响其他键）
+        let r = reduce(
+            &mut s,
+            InputEvent::HookKey(hook_key_down("a", 230)),
+            Instant::now(),
+        );
+        assert_eq!(r.propagation, Propagation::Pass);
+    }
+
+    #[test]
+    fn voice_recording_keyup_passes() {
+        let mut s = armed_state();
+        reduce(
+            &mut s,
+            InputEvent::HookKey(hook_key_down(" ", 200)),
+            Instant::now(),
+        );
+        let gid = s.gesture.gesture_id().unwrap();
+        // hold_fired + Voice Recording
+        reduce(
+            &mut s,
+            InputEvent::HoldDeadline { gesture_id: gid },
+            Instant::now(),
+        );
+        reduce(
+            &mut s,
+            InputEvent::VoicePhaseChanged {
+                gesture_id: None,
+                phase: VoicePhase::Recording { gesture_id: gid },
+            },
+            Instant::now(),
+        );
+
+        // Space keyup -> Pass（HoldRelease 必须能收到）+ HoldReleased
+        let r = reduce(
+            &mut s,
+            InputEvent::HookKey(hook_key_up(" ", 600)),
+            Instant::now(),
+        );
+        assert_eq!(r.propagation, Propagation::Pass);
+        assert!(has_hold_released(&r.effects));
     }
 
     // ── Recorder 进入 Recording 清空 gesture ──

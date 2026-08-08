@@ -503,6 +503,7 @@ export const zh = {
     "voice.local.funasr.start_btn": "启动服务",
     "voice.local.funasr.stop_btn": "停止服务",
     "voice.local.funasr.btn_starting": "启动中...",
+    "voice.local.funasr.btn_checking": "检测环境中...",
     "voice.local.funasr.btn_running": "已运行 ✓",
     "voice.local.funasr.btn_loading_model": "加载模型中...",
     "voice.local.funasr.auto_start.label": "自动启动",

@@ -502,6 +502,7 @@ export const en = {
     "voice.local.funasr.start_btn": "Start service",
     "voice.local.funasr.stop_btn": "Stop service",
     "voice.local.funasr.btn_starting": "Starting...",
+    "voice.local.funasr.btn_checking": "Checking env...",
     "voice.local.funasr.btn_running": "Running ✓",
     "voice.local.funasr.btn_loading_model": "Loading model...",
     "voice.local.funasr.auto_start.label": "Auto-start",

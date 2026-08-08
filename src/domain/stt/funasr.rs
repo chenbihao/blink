@@ -293,9 +293,42 @@ pub fn is_server_ready(port: u16) -> bool {
         &addr
             .parse()
             .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], port))),
-        Duration::from_secs(2),
+        // 500ms 超时：服务正常时 localhost TCP 连接毫秒级返回；
+        // 服务未启动时 Windows 上未监听端口会等满超时（非 RST），2s 太长会阻塞调用方。
+        Duration::from_millis(500),
     ) {
         Ok(_) => true,
+        Err(_) => false,
+    }
+}
+
+/// `is_server_ready` 的异步版本，用 tokio async TCP + 短超时。
+///
+/// **为什么不用 `spawn_blocking(is_server_ready)`**：Windows 上 127.0.0.1 未监听端口
+/// 的 `connect_timeout` 返回 "connection timed out"（非 "refused"），等满整个超时时间。
+/// 旧实现用 2s 超时 + spawn_blocking，虽不阻塞 worker 线程，但 effect 串行循环仍需
+/// 等 2s 才能处理 HoldReleased -> 窗口出现/消失慢一拍。
+///
+/// 改用 `tokio::net::TcpStream::connect` + 500ms 超时：端口有服务时毫秒级返回，
+/// 无服务时最多等 500ms（而非 2s）。不影响其他 tokio task。
+pub async fn is_server_ready_async(port: u16) -> bool {
+    let addr = format!("127.0.0.1:{port}");
+    match tokio::net::lookup_host(addr).await {
+        Ok(mut addrs) => {
+            if let Some(sock_addr) = addrs.next() {
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(500),
+                    tokio::net::TcpStream::connect(sock_addr),
+                )
+                .await
+                {
+                    Ok(Ok(_)) => true,
+                    _ => false,
+                }
+            } else {
+                false
+            }
+        }
         Err(_) => false,
     }
 }
@@ -326,7 +359,7 @@ pub enum ModelLoadStatus {
 pub async fn check_model_loaded(port: u16) -> ModelLoadStatus {
     let url = format!("http://localhost:{port}/health");
     let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
+        .timeout(std::time::Duration::from_secs(2))
         .build()
     {
         Ok(c) => c,

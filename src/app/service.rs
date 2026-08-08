@@ -184,17 +184,22 @@ impl Service for HotkeyService {
                         }
                     }
                     crate::infra::platform::hotkey::InputEffect::HoldStarted { .. } => {
-                        // 长按开始 → 语音录音开始（async：可能需等待模型加载）
-                        // chord 门禁——chord 总开关关 / voice_input 在 disabled 列表 →
+                        // 长按开始 -> 语音录音开始（async：可能需等待模型加载）
+                        // chord 门禁--chord 总开关关 / voice_input 在 disabled 列表 ->
                         // 不启动录音。这让设置页的 voice_input 开关真正生效（而非仅控显示）。
                         let pool = &app.state::<crate::infra::data::DbPools>().config;
                         let chord_cfg = crate::app::config::get_chord_config(&pool).await;
                         let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
                         let voice_disabled = disabled.iter().any(|d| d == "voice_input");
                         if chord_cfg.chord_enabled && !voice_disabled {
-                            voice_service.start_recording().await;
-                            // 语音录音开始 → 托盘呼吸动画
-                            crate::app::tray::start_breathing(&app);
+                            // 仅在录音真正启动时才启动托盘呼吸动画。
+                            // 服务未就绪 / 模型加载中时 begin_recording 返回 false，
+                            // emit_voice_error/emit_voice_status 已负责用户反馈，
+                            // 不应再启动呼吸动画（否则 stop_breathing 与 emit_voice_error
+                            // 的延迟 hide_overlay 会在主线程上竞争托盘 IPC + overlay 窗口）。
+                            if voice_service.start_recording().await {
+                                crate::app::tray::start_breathing(&app);
+                            }
                         } else {
                             tracing::debug!(
                                 chord_enabled = chord_cfg.chord_enabled,
@@ -204,9 +209,9 @@ impl Service for HotkeyService {
                         }
                     }
                     crate::infra::platform::hotkey::InputEffect::HoldReleased { .. } => {
-                        // 长按结束 → 停止录音 → STT → 注入/fill-query
+                        // 长按结束 -> 停止录音 -> STT -> 注入/fill-query
                         voice_service.stop_recording().await;
-                        // 语音录音结束 → 停止托盘呼吸动画
+                        // 语音录音结束 -> 停止托盘呼吸动画
                         crate::app::tray::stop_breathing(&app);
                     }
                     crate::infra::platform::hotkey::InputEffect::VoiceCancel { .. } => {

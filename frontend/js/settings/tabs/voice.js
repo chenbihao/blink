@@ -588,6 +588,12 @@ async function initFunasrEnv(config) {
 
   if (!setupBtn && !startBtn && !statusText) return;
 
+  // 检测完成前禁用启动按钮，避免用户无效点击（后端 get_funasr_env 需跑 Python 子进程）
+  if (startBtn) {
+    startBtn.textContent = t("voice.local.funasr.btn_checking");
+    startBtn.disabled = true;
+  }
+
   // 日志缓冲已提升为模块级（appendLog / clearLog），此处仅绑定按钮事件
 
   if (logClearBtn) {
@@ -666,6 +672,11 @@ async function initFunasrEnv(config) {
     } catch (e) {
       console.error("get_funasr_env failed:", e);
       if (statusText) statusText.textContent = t("voice.local.python_env.status_query_failed");
+      // 探测失败：恢复按钮为默认文案但保持禁用（环境未知，不应允许启动）
+      if (startBtn) {
+        startBtn.textContent = t("voice.local.funasr.start_btn");
+        startBtn.disabled = true;
+      }
     }
   }
 

@@ -460,7 +460,9 @@ pub async fn update_disabled_context_bindings(
 }
 
 pub async fn get_disabled_chord_actions(pool: &SqlitePool) -> Vec<String> {
-    get_config(pool).await.disabled_chord_actions
+    // 直接查 DisableConfig 分片（1 次 DB），不走 get_config 全量门面（7 次 DB）。
+    // 此函数在 HoldStarted effect 热路径上调用，全量查询会阻塞串行事件循环。
+    ConfigStore::get::<DisableConfig>(pool).await.disabled_chord_actions
 }
 
 pub async fn get_chord_config(pool: &SqlitePool) -> ChordConfig {
