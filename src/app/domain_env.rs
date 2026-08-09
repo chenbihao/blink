@@ -151,9 +151,7 @@ impl CapabilityEnv for TauriDomainEnv {
         // 位置：有 x/y 则用指定位置，None 则居中到当前前台窗口所在显示器
         let (cx, cy) = match (x, y) {
             (Some(px), Some(py)) => (px, py),
-            _ => {
-                crate::infra::platform::window::center_of_active_monitor(width, height)
-            }
+            _ => crate::infra::platform::window::center_of_active_monitor(width, height),
         };
 
         svc.update_geometry(&note.id, cx, cy, width, height)
@@ -178,6 +176,25 @@ impl CapabilityEnv for TauriDomainEnv {
             serde_json::json!({ "stickyId": note.id }),
         );
         Ok(note.id)
+    }
+
+    fn hide_sticky_and_notify_trashed(&self, sticky_id: &str) -> Result<(), String> {
+        let hide_result = crate::infra::platform::window::hide_sticky_window(&self.app, sticky_id);
+        let emit_result = self
+            .app
+            .emit(
+                crate::domain::event_names::EventNames::STICKY_TRASHED,
+                serde_json::json!({ "stickyId": sticky_id }),
+            )
+            .map_err(|e| e.to_string());
+        match (hide_result, emit_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(hide), Ok(())) => Err(format!("隐藏便签窗口失败: {hide}")),
+            (Ok(()), Err(emit)) => Err(format!("通知便签管理器失败: {emit}")),
+            (Err(hide), Err(emit)) => Err(format!(
+                "隐藏便签窗口失败: {hide}; 通知便签管理器失败: {emit}"
+            )),
+        }
     }
 
     // ── pin 窗口操作（0.19.3 pin 能力化桥接）──────────────────────────
@@ -325,6 +342,9 @@ mod tests {
             _h: Option<i32>,
         ) -> Result<String, String> {
             Ok("fake_sticky_id".to_string())
+        }
+        fn hide_sticky_and_notify_trashed(&self, _sticky_id: &str) -> Result<(), String> {
+            Ok(())
         }
 
         fn show_pin_window(&self, _png_bytes: Vec<u8>, _x: i32, _y: i32) -> Result<(), String> {

@@ -8,6 +8,18 @@
 
 use sqlx::SqlitePool;
 
+/// 带状态判定的便签写入结果。
+///
+/// 0.19.5：写入不能再把 `rows_affected == 0` 当成功。领域层据此区分不存在、
+/// 已回收和乐观并发冲突，避免 AI 静默覆盖或对不存在记录谎报成功。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StickyWriteOutcome {
+    Applied { updated_at: i64 },
+    NotFound,
+    Trashed,
+    Conflict { actual_updated_at: i64 },
+}
+
 /// 便签颜色（有限色板，§3.11）。
 ///
 /// 序列化值与前端 CSS class 后缀对应：`sticky-color-yellow` 等。
@@ -314,23 +326,32 @@ pub async fn create(pool: &SqlitePool, note: &StickyNote) -> Result<(), String> 
 ///
 /// DB 错误时记录 warn 并返回 None（与空结果不可区分，但至少有日志可查）。
 pub async fn get(pool: &SqlitePool, id: &str) -> Option<StickyNote> {
+    get_result(pool, id)
+        .await
+        .map_err(|e| {
+            tracing::warn!(sticky_id = %id, error = %e, "sticky get 查询失败");
+            e
+        })
+        .ok()
+        .flatten()
+}
+
+/// 按 id 查询单条便签并保留 DB 错误，供需要精确错误语义的领域路径使用。
+pub async fn get_result(pool: &SqlitePool, id: &str) -> Result<Option<StickyNote>, String> {
     let row = sqlx::query_as::<_, (String, String, String, String, i64, i64, i64, i64, i64, i64, i64, i64, i64, Option<i64>)>(
         "SELECT id, content, format, color, visible, x, y, width, height, always_on_top, created_at, updated_at, trashed, deleted_at FROM sticky_notes WHERE id = ?1",
     )
     .bind(id)
     .fetch_optional(pool)
     .await
-    .map_err(|e| {
-        tracing::warn!(sticky_id = %id, error = %e, "sticky get 查询失败");
-        e
-    })
-    .ok()
-    .flatten()?;
+    .map_err(|e| e.to_string())?;
 
-    Some(row_to_note(
-        row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10, row.11,
-        row.12, row.13,
-    ))
+    Ok(row.map(|row| {
+        row_to_note(
+            row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10,
+            row.11, row.12, row.13,
+        )
+    }))
 }
 
 /// 列出全部活跃便签（`trashed=false`，按 updated_at 倒序）。
@@ -381,16 +402,74 @@ pub async fn list_trashed(pool: &SqlitePool) -> Vec<StickyNote> {
 }
 
 /// 更新便签正文内容（自动更新 updated_at）。
-pub async fn update_content(pool: &SqlitePool, id: &str, content: &str) -> Result<(), String> {
+///
+/// `expected_updated_at` 为 `Some` 时启用乐观并发；更新时间保证单调递增，
+/// 即使两次写入发生在同一秒也会产生不同 revision。
+pub async fn update_content(
+    pool: &SqlitePool,
+    id: &str,
+    content: &str,
+    expected_updated_at: Option<i64>,
+) -> Result<StickyWriteOutcome, String> {
     let now = chrono::Utc::now().timestamp();
-    sqlx::query("UPDATE sticky_notes SET content = ?1, updated_at = ?2 WHERE id = ?3")
+    let updated_at = match expected_updated_at {
+        Some(expected) => sqlx::query_scalar::<_, i64>(
+            "UPDATE sticky_notes
+                 SET content = ?1,
+                     updated_at = CASE WHEN updated_at >= ?2 THEN updated_at + 1 ELSE ?2 END
+                 WHERE id = ?3 AND trashed = 0 AND updated_at = ?4
+                 RETURNING updated_at",
+        )
         .bind(content)
         .bind(now)
         .bind(id)
-        .execute(pool)
+        .bind(expected)
+        .fetch_optional(pool)
         .await
-        .map_err(|e| e.to_string())?;
-    Ok(())
+        .map_err(|e| e.to_string())?,
+        None => sqlx::query_scalar::<_, i64>(
+            "UPDATE sticky_notes
+                 SET content = ?1,
+                     updated_at = CASE WHEN updated_at >= ?2 THEN updated_at + 1 ELSE ?2 END
+                 WHERE id = ?3 AND trashed = 0
+                 RETURNING updated_at",
+        )
+        .bind(content)
+        .bind(now)
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?,
+    };
+
+    if let Some(updated_at) = updated_at {
+        return Ok(StickyWriteOutcome::Applied { updated_at });
+    }
+
+    classify_failed_write(pool, id, expected_updated_at).await
+}
+
+async fn classify_failed_write(
+    pool: &SqlitePool,
+    id: &str,
+    expected_updated_at: Option<i64>,
+) -> Result<StickyWriteOutcome, String> {
+    let row = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT trashed, updated_at FROM sticky_notes WHERE id = ?1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(match row {
+        None => StickyWriteOutcome::NotFound,
+        Some((1, _)) => StickyWriteOutcome::Trashed,
+        Some((_, actual_updated_at)) if expected_updated_at.is_some() => {
+            StickyWriteOutcome::Conflict { actual_updated_at }
+        }
+        Some((_, actual_updated_at)) => StickyWriteOutcome::Conflict { actual_updated_at },
+    })
 }
 
 /// 更新便签外观（颜色 + 格式）。
@@ -464,28 +543,45 @@ pub async fn set_visible(pool: &SqlitePool, id: &str, visible: bool) -> Result<(
 ///
 /// 0.17.7 新增。`trashed=true` + `deleted_at=now`，不删除数据。
 /// 调用后窗口应 hide。恢复用 `restore_from_trash()`。
-pub async fn set_trashed(pool: &SqlitePool, id: &str, trashed: bool) -> Result<(), String> {
+pub async fn set_trashed(
+    pool: &SqlitePool,
+    id: &str,
+    trashed: bool,
+) -> Result<StickyWriteOutcome, String> {
     let now = chrono::Utc::now().timestamp();
-    if trashed {
-        sqlx::query(
-            "UPDATE sticky_notes SET trashed = 1, deleted_at = ?1, updated_at = ?1 WHERE id = ?2",
+    let updated_at = if trashed {
+        sqlx::query_scalar::<_, i64>(
+            "UPDATE sticky_notes
+             SET trashed = 1, deleted_at = ?1,
+                 updated_at = CASE WHEN updated_at >= ?1 THEN updated_at + 1 ELSE ?1 END
+             WHERE id = ?2 AND trashed = 0
+             RETURNING updated_at",
         )
         .bind(now)
         .bind(id)
-        .execute(pool)
+        .fetch_optional(pool)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
     } else {
-        sqlx::query(
-            "UPDATE sticky_notes SET trashed = 0, deleted_at = NULL, updated_at = ?1 WHERE id = ?2",
+        sqlx::query_scalar::<_, i64>(
+            "UPDATE sticky_notes
+             SET trashed = 0, deleted_at = NULL,
+                 updated_at = CASE WHEN updated_at >= ?1 THEN updated_at + 1 ELSE ?1 END
+             WHERE id = ?2 AND trashed = 1
+             RETURNING updated_at",
         )
         .bind(now)
         .bind(id)
-        .execute(pool)
+        .fetch_optional(pool)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+    };
+
+    if let Some(updated_at) = updated_at {
+        return Ok(StickyWriteOutcome::Applied { updated_at });
     }
-    Ok(())
+
+    classify_failed_write(pool, id, None).await
 }
 
 /// 清空回收站：物理删除所有 `trashed=true` 的便签。
@@ -593,6 +689,7 @@ pub async fn get_stats(pool: &SqlitePool) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
 
     #[test]
     fn color_roundtrip() {
@@ -630,5 +727,84 @@ mod tests {
     fn generate_id_has_prefix() {
         let id = generate_id();
         assert!(id.starts_with("sticky_"));
+    }
+
+    async fn test_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        init_db(&pool).await.unwrap();
+        pool
+    }
+
+    async fn insert_note(pool: &SqlitePool, id: &str) -> StickyNote {
+        let note = StickyNote {
+            id: id.into(),
+            content: "before".into(),
+            format: StickyFormat::Plain,
+            color: StickyColor::Yellow,
+            visible: true,
+            x: 0,
+            y: 0,
+            width: DEFAULT_WIDTH,
+            height: DEFAULT_HEIGHT,
+            always_on_top: true,
+            created_at: 0,
+            updated_at: 0,
+            trashed: false,
+            deleted_at: None,
+        };
+        create(pool, &note).await.unwrap();
+        get(pool, id).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn optimistic_update_is_monotonic_and_detects_conflict() {
+        let pool = test_pool().await;
+        let note = insert_note(&pool, "s1").await;
+
+        let first = update_content(&pool, "s1", "first", Some(note.updated_at))
+            .await
+            .unwrap();
+        let StickyWriteOutcome::Applied { updated_at } = first else {
+            panic!("expected applied")
+        };
+        assert!(updated_at > note.updated_at);
+
+        let stale = update_content(&pool, "s1", "stale", Some(note.updated_at))
+            .await
+            .unwrap();
+        assert_eq!(
+            stale,
+            StickyWriteOutcome::Conflict {
+                actual_updated_at: updated_at
+            }
+        );
+        assert_eq!(get(&pool, "s1").await.unwrap().content, "first");
+    }
+
+    #[tokio::test]
+    async fn writes_distinguish_missing_and_trashed() {
+        let pool = test_pool().await;
+        assert_eq!(
+            update_content(&pool, "missing", "x", None).await.unwrap(),
+            StickyWriteOutcome::NotFound
+        );
+
+        insert_note(&pool, "s2").await;
+        assert!(matches!(
+            set_trashed(&pool, "s2", true).await.unwrap(),
+            StickyWriteOutcome::Applied { .. }
+        ));
+        assert_eq!(
+            update_content(&pool, "s2", "x", None).await.unwrap(),
+            StickyWriteOutcome::Trashed
+        );
+        assert_eq!(
+            set_trashed(&pool, "s2", true).await.unwrap(),
+            StickyWriteOutcome::Trashed
+        );
     }
 }

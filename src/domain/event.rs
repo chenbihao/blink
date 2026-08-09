@@ -68,6 +68,11 @@ pub trait CapabilityEnv: Send + Sync {
         h: Option<i32>,
     ) -> Result<String, String>;
 
+    /// 隐藏指定便签窗口并广播回收事件。
+    ///
+    /// 数据库回收语义由 `StickyService` 负责；本方法只做 Tauri 窗口与前端通知桥接。
+    fn hide_sticky_and_notify_trashed(&self, sticky_id: &str) -> Result<(), String>;
+
     // ── 图片暂存（0.19.4 ImageStash 引用闭环）──────────────────────────
 
     /// 进程级图片暂存——投影层把 image/* Blob 字节移入 stash 并生成 `image_ref`，

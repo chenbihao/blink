@@ -11,7 +11,7 @@
 
 use serde::Serialize;
 
-/// 能力调用错误——六变体覆盖所有失败场景。
+/// 能力调用错误——覆盖参数、状态、并发、权限、时限与内部失败。
 #[derive(Debug, Clone, Serialize, PartialEq, thiserror::Error)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[allow(dead_code)]
@@ -19,6 +19,15 @@ pub enum CapabilityError {
     /// 参数缺失/类型错（args 不符 schema）。
     #[error("参数错误: {detail}")]
     InvalidArgs { detail: String },
+    /// 目标实体存在，但当前状态不允许该操作（如便签已在回收站）。
+    #[error("状态错误: {detail}")]
+    InvalidState { detail: String },
+    /// 乐观并发冲突；调用方应重新读取最新版本再决定是否重试。
+    #[error("并发冲突: {detail}")]
+    Conflict { detail: String },
+    /// 文件/载荷内容不符合能力契约（如二进制、非 UTF-8、超长单行）。
+    #[error("数据无效（{reason}）: {detail}")]
+    InvalidData { reason: String, detail: String },
     /// 权限不足（剪贴板被锁/无截图权限）。
     #[error("权限不足: {detail}")]
     Permission { detail: String },
@@ -112,6 +121,18 @@ mod tests {
                 "invalid_args",
             ),
             (
+                CapabilityError::InvalidState { detail: "x".into() },
+                "invalid_state",
+            ),
+            (CapabilityError::Conflict { detail: "x".into() }, "conflict"),
+            (
+                CapabilityError::InvalidData {
+                    reason: "binary".into(),
+                    detail: "x".into(),
+                },
+                "invalid_data",
+            ),
+            (
                 CapabilityError::Permission { detail: "x".into() },
                 "permission",
             ),
@@ -180,6 +201,12 @@ mod tests {
         // 除 Cancelled 外,所有变体都应投影成 Some(Text)
         let cases = [
             CapabilityError::InvalidArgs { detail: "x".into() },
+            CapabilityError::InvalidState { detail: "x".into() },
+            CapabilityError::Conflict { detail: "x".into() },
+            CapabilityError::InvalidData {
+                reason: "binary".into(),
+                detail: "x".into(),
+            },
             CapabilityError::Permission { detail: "x".into() },
             CapabilityError::Timeout { detail: "x".into() },
             CapabilityError::NotFound { id: "x".into() },

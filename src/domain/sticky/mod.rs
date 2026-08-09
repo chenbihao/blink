@@ -25,6 +25,16 @@ pub enum StickyError {
     /// 便签不存在（id 无效或已被删除）。
     #[error("便签不存在: {id}")]
     NotFound { id: String },
+    /// 便签已在回收站，活跃便签操作不能继续。
+    #[error("便签已在回收站: {id}")]
+    Trashed { id: String },
+    /// 乐观并发冲突，调用方应重新读取后再决定是否更新。
+    #[error("便签已被修改: {id}（期望版本 {expected_updated_at}，当前版本 {actual_updated_at}）")]
+    Conflict {
+        id: String,
+        expected_updated_at: i64,
+        actual_updated_at: i64,
+    },
 }
 
 impl From<String> for StickyError {
@@ -86,6 +96,18 @@ impl StickyService {
         crate::infra::data::sticky::get(&self.history_pool, id).await
     }
 
+    /// 获取一条活跃便签，区分不存在与已回收。
+    pub async fn get_active_note(&self, id: &str) -> Result<StickyNote, StickyError> {
+        let note = crate::infra::data::sticky::get_result(&self.history_pool, id)
+            .await
+            .map_err(|detail| StickyError::Db { detail })?
+            .ok_or_else(|| StickyError::NotFound { id: id.to_string() })?;
+        if note.trashed {
+            return Err(StickyError::Trashed { id: id.to_string() });
+        }
+        Ok(note)
+    }
+
     /// 列出全部便签。
     pub async fn list_notes(&self) -> Vec<StickyNote> {
         crate::infra::data::sticky::list(&self.history_pool).await
@@ -105,11 +127,39 @@ impl StickyService {
         id: &str,
         content: &str,
     ) -> Result<(), StickyError> {
-        crate::infra::data::sticky::update_content(&self.history_pool, id, content)
-            .await
-            .map_err(|e| StickyError::Db { detail: e })?;
+        self.update_content(id, content, None).await?;
         tracing::trace!(sticky_id = %id, "便签内容已保存");
         Ok(())
+    }
+
+    /// 更新正文；传入 revision 时执行乐观并发校验，返回新的 revision。
+    pub async fn update_content(
+        &self,
+        id: &str,
+        content: &str,
+        expected_updated_at: Option<i64>,
+    ) -> Result<i64, StickyError> {
+        use crate::infra::data::sticky::StickyWriteOutcome;
+
+        let outcome = crate::infra::data::sticky::update_content(
+            &self.history_pool,
+            id,
+            content,
+            expected_updated_at,
+        )
+        .await
+        .map_err(|e| StickyError::Db { detail: e })?;
+
+        match outcome {
+            StickyWriteOutcome::Applied { updated_at } => Ok(updated_at),
+            StickyWriteOutcome::NotFound => Err(StickyError::NotFound { id: id.to_string() }),
+            StickyWriteOutcome::Trashed => Err(StickyError::Trashed { id: id.to_string() }),
+            StickyWriteOutcome::Conflict { actual_updated_at } => Err(StickyError::Conflict {
+                id: id.to_string(),
+                expected_updated_at: expected_updated_at.unwrap_or_default(),
+                actual_updated_at,
+            }),
+        }
     }
 
     /// 更新便签外观（颜色 + 可选格式）。
@@ -158,9 +208,19 @@ impl StickyService {
     ///
     /// `trashed=true` + `deleted_at=now`，保留数据。调用后窗口应 hide。
     pub async fn trash_note(&self, id: &str) -> Result<(), StickyError> {
-        crate::infra::data::sticky::set_trashed(&self.history_pool, id, true)
+        let outcome = crate::infra::data::sticky::set_trashed(&self.history_pool, id, true)
             .await
             .map_err(|e| StickyError::Db { detail: e })?;
+        match outcome {
+            crate::infra::data::sticky::StickyWriteOutcome::Applied { .. } => {}
+            crate::infra::data::sticky::StickyWriteOutcome::NotFound => {
+                return Err(StickyError::NotFound { id: id.to_string() });
+            }
+            crate::infra::data::sticky::StickyWriteOutcome::Trashed => {
+                return Err(StickyError::Trashed { id: id.to_string() });
+            }
+            crate::infra::data::sticky::StickyWriteOutcome::Conflict { .. } => unreachable!(),
+        }
         tracing::info!(sticky_id = %id, "便签已移入回收站");
         Ok(())
     }
@@ -169,9 +229,18 @@ impl StickyService {
     ///
     /// `trashed=false` + `deleted_at=null`，恢复到桌面。
     pub async fn restore_note(&self, id: &str) -> Result<(), StickyError> {
-        crate::infra::data::sticky::set_trashed(&self.history_pool, id, false)
+        let outcome = crate::infra::data::sticky::set_trashed(&self.history_pool, id, false)
             .await
             .map_err(|e| StickyError::Db { detail: e })?;
+        match outcome {
+            crate::infra::data::sticky::StickyWriteOutcome::Applied { .. } => {}
+            crate::infra::data::sticky::StickyWriteOutcome::NotFound => {
+                return Err(StickyError::NotFound { id: id.to_string() });
+            }
+            // 已是活跃状态时恢复是幂等成功。
+            crate::infra::data::sticky::StickyWriteOutcome::Conflict { .. } => {}
+            crate::infra::data::sticky::StickyWriteOutcome::Trashed => unreachable!(),
+        }
         tracing::info!(sticky_id = %id, "便签已从回收站恢复");
         Ok(())
     }

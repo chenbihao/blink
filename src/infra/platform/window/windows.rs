@@ -1746,14 +1746,29 @@ fn clamp_sticky_geometry(x: i32, y: i32, width: i32, height: i32) -> (i32, i32, 
 }
 
 /// 隐藏便签窗口（不删除数据）。
-#[allow(dead_code)] // 0.16.10 管理界面将使用
-pub fn hide_sticky_window(app: &AppHandle, sticky_id: &str) {
+pub fn hide_sticky_window(app: &AppHandle, sticky_id: &str) -> Result<(), String> {
     let truncated_id: String = sticky_id.chars().take(64).collect();
     let label = format!("sticky-{truncated_id}");
     if let Some(win) = app.get_webview_window(&label) {
-        let _ = win.hide();
+        win.hide().map_err(|e| e.to_string())?;
         tracing::debug!(sticky_id, "sticky window: 已隐藏");
+        return Ok(());
     }
+
+    // 0.18.3 N+1：显示中的便签可能借用了 sticky-spare-* 窗口。
+    let borrowed_label = spare_borrow()
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(_, sid)| sid.as_str() == sticky_id)
+        .map(|(label, _)| label.clone());
+    if let Some(label) = borrowed_label
+        && let Some(win) = app.get_webview_window(&label)
+    {
+        win.hide().map_err(|e| e.to_string())?;
+        tracing::debug!(sticky_id, spare_label = %label, "sticky spare: 已隐藏借出窗口");
+    }
+    Ok(())
 }
 
 /// 销毁便签窗口（删除数据后调用）。

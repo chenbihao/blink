@@ -547,7 +547,8 @@ impl ToolDyn for CapabilityTool {
             match self.cap.invoke(args_value, &ctx).await {
                 Ok(cap_result) => {
                     let stash = self.emitter.capability_env().image_stash();
-                    let contents = cap_result.to_rig_tool_result_with_stash(stash.map(|s| s.as_ref()));
+                    let contents =
+                        cap_result.to_rig_tool_result_with_stash(stash.map(|s| s.as_ref()));
                     Ok(crate::domain::capability::rig_tool_result_to_text(
                         &contents,
                     ))
@@ -573,6 +574,11 @@ impl ToolDyn for CapabilityTool {
 fn capability_error_to_string(e: CapabilityError) -> String {
     match e {
         CapabilityError::InvalidArgs { detail } => format!("参数无效: {detail}"),
+        CapabilityError::InvalidState { detail } => format!("状态无效: {detail}"),
+        CapabilityError::Conflict { detail } => format!("并发冲突: {detail}"),
+        CapabilityError::InvalidData { reason, detail } => {
+            format!("数据无效（{reason}）: {detail}")
+        }
         CapabilityError::Permission { detail } => format!("权限不足: {detail}"),
         CapabilityError::Timeout { detail } => format!("超时: {detail}"),
         CapabilityError::Cancelled => "已取消".to_string(),

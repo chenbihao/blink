@@ -55,9 +55,12 @@ impl Capability for ListSticky {
             });
         }
 
-        let svc = ctx.env.sticky_service().ok_or_else(|| CapabilityError::Internal {
-            detail: "StickyService 不可用".into(),
-        })?;
+        let svc = ctx
+            .env
+            .sticky_service()
+            .ok_or_else(|| CapabilityError::Internal {
+                detail: "StickyService 不可用".into(),
+            })?;
 
         let notes = svc.list_notes().await;
 
@@ -81,6 +84,7 @@ impl Capability for ListSticky {
                         "h": note.height,
                         "color": note.color.as_str(),
                         "always_on_top": note.always_on_top,
+                        "updated_at": note.updated_at,
                     }),
                     desc: Some(desc),
                     actions: vec![],

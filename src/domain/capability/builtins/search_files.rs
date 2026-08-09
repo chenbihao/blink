@@ -8,7 +8,6 @@
 //! **SearchItem → ItemResult 转换**：payload 放 `{ "path": "..." }`，
 //! 主窗口可据此打开文件，AI 可读 JSON 上下文。
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
@@ -16,9 +15,8 @@ use serde_json::{Value, json};
 use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
 };
-use crate::domain::search::engine::{QueryContext, SearchEngine};
 use crate::domain::search::file_engine::FileEngine;
-use crate::infra::platform::context::ContextSnapshot;
+use crate::domain::search::file_engine::FileSearchHit;
 
 /// `search_files` — 按关键词搜索本地文件。
 ///
@@ -62,7 +60,9 @@ impl Capability for SearchFiles {
                     "max_results": {
                         "type": "integer",
                         "description": "最大返回数（可选，默认跟随配置）",
-                        "default": 20
+                        "default": 20,
+                        "minimum": 1,
+                        "maximum": 100
                     }
                 },
                 "required": ["query"]
@@ -98,31 +98,23 @@ impl Capability for SearchFiles {
         // 从 SQLite 加载用户真实 FileSearchConfig（而非默认值）。
         // 每次 invoke 都加载——SQLite KV 查询快（<1ms），且保证配置热更新生效。
         let pool = &ctx.env.db_pools().config;
-        let mut fs_config = crate::domain::config::get_file_search_config(&pool).await;
+        let mut fs_config = crate::domain::config::get_file_search_config(pool).await;
         // AI 可通过 args 覆盖 max_results
         if let Some(max) = args.get("max_results").and_then(Value::as_u64) {
+            if !(1..=100).contains(&max) {
+                return Err(CapabilityError::InvalidArgs {
+                    detail: "max_results 必须在 1..=100 之间".into(),
+                });
+            }
             fs_config.max_results = max as u32;
         }
         self.engine.update_config(fs_config).await;
-
-        // 构造最小 QueryContext——FileEngine::search 不消费 ctx 字段（签名 _ctx），
-        // 但 trait 要求传，给空的即可（与 service.rs spawn_mixed_lane 同模式）。
-        let history = HashMap::new();
-        let snapshot = ContextSnapshot::default();
-        let disabled: Vec<String> = Vec::new();
-        let search_ctx = QueryContext {
-            history: &history,
-            snapshot: &snapshot,
-            disabled_builtin_actions: &disabled,
-            disabled_context_bindings: &[],
-            language: "zh",
-        };
 
         // 铁则 1：用 ctx.deadline 包裹 search——Everything 不响应时不在 deadline 上挂死。
         // FileEngine 内部已有 3s reqwest 超时，deadline 是第二道防线（AI 总预算）。
         let items = tokio::time::timeout_at(
             ctx.deadline_or_far_future(),
-            self.engine.search(query, &search_ctx),
+            self.engine.search_with_metadata(query),
         )
         .await
         .map_err(|_| CapabilityError::Timeout {
@@ -130,37 +122,38 @@ impl Capability for SearchFiles {
         })?;
 
         // SearchItem → ItemResult（payload 放 path，前端/AI 各取所需）
-        let results: Vec<_> = items
-            .into_iter()
-            .map(|item| {
-                // 从 SearchAction::Open { path } 提取路径
-                let path = match &item.action {
-                    crate::domain::search::engine::SearchAction::Open { path } => {
-                        Some(path.clone())
-                    }
-                    _ => None,
-                };
-                crate::domain::capability::ItemResult {
-                    data: {
-                        let mut d = serde_json::json!({ "name": item.title });
-                        if let Some(ref p) = path {
-                            d["path"] = serde_json::json!(p);
-                        }
-                        d
-                    },
-                    desc: item.subtitle,
-                    actions: path
-                        .map(|_| crate::domain::capability::ItemAction::OpenFile {
-                            pointer: Some("$.path".into()),
-                        })
-                        .into_iter()
-                        .collect(),
-                }
-            })
-            .collect();
+        let results: Vec<_> = items.into_iter().map(hit_to_item_result).collect();
 
         tracing::debug!(query = %query, count = results.len(), "search_files 完成");
         Ok(CapabilityResult::Items { items: results })
+    }
+}
+
+fn hit_to_item_result(hit: FileSearchHit) -> crate::domain::capability::ItemResult {
+    let item = hit.item;
+    let path = match &item.action {
+        crate::domain::search::engine::SearchAction::Open { path } => Some(path.clone()),
+        _ => None,
+    };
+    let mut data = serde_json::json!({ "name": item.title });
+    if let Some(ref path) = path {
+        data["path"] = serde_json::json!(path);
+    }
+    if let Some(size_bytes) = hit.size_bytes {
+        data["size_bytes"] = serde_json::json!(size_bytes);
+    }
+    if let Some(modified_at) = hit.modified_at {
+        data["modified_at"] = serde_json::json!(modified_at);
+    }
+    crate::domain::capability::ItemResult {
+        data,
+        desc: item.subtitle,
+        actions: path
+            .map(|_| crate::domain::capability::ItemAction::OpenFile {
+                pointer: Some("$.path".into()),
+            })
+            .into_iter()
+            .collect(),
     }
 }
 
@@ -192,5 +185,29 @@ mod tests {
         // max_results 不在 required 里
         let required = s.parameters["required"].as_array().unwrap();
         assert!(!required.contains(&json!("max_results")));
+    }
+
+    #[test]
+    fn projection_preserves_available_file_metadata() {
+        use crate::domain::search::engine::{SearchAction, SearchItem};
+
+        let result = hit_to_item_result(FileSearchHit {
+            item: SearchItem {
+                id: "C:\\tmp\\a.txt".into(),
+                title: "a.txt".into(),
+                subtitle: Some("C:\\tmp".into()),
+                score: 1.0,
+                action: SearchAction::Open {
+                    path: "C:\\tmp\\a.txt".into(),
+                },
+                source: "file".into(),
+                score_detail: None,
+                context_aware: false,
+            },
+            size_bytes: Some(42),
+            modified_at: Some(1_700_000_000),
+        });
+        assert_eq!(result.data["size_bytes"], 42);
+        assert_eq!(result.data["modified_at"], 1_700_000_000_i64);
     }
 }

@@ -16,7 +16,7 @@ pub use windows::{
     clamp_to_work_area, compute_cursor_titlebar_position, destroy_sticky_window,
     enable_rounded_corners, flush_all_sticky_windows, force_topmost, get_foreground_hwnd,
     get_primary_monitor_center, hide, hide_chat_window, hide_for_screenshot, hide_screenshot_overlay,
-    hide_voice_overlay, install_sysmenu_blocker, invoke, is_main_ai_active, is_visible,
+    hide_sticky_window, hide_voice_overlay, install_sysmenu_blocker, invoke, is_main_ai_active, is_visible,
     last_external_foreground_hwnd, mark_spare_ready, on_focused, open_settings, place_at_physical,
     preheat_secondary_windows, refresh_pin_image, restore_foreground, set_app_exiting,
     set_main_ai_active, show_chat_window, show_content_editor_window, show_pin_window,

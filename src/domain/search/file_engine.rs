@@ -9,6 +9,7 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::UNIX_EPOCH;
 use std::time::{Duration, Instant};
 
 use tokio::sync::RwLock;
@@ -43,6 +44,16 @@ pub struct FileEngine {
     fallback_cache: Arc<Mutex<FallbackCache>>,
 }
 
+/// 文件搜索的专用命中结构。
+///
+/// 通用搜索只消费 `item`；`search_files` Capability 额外透传后端已有的文件元数据。
+#[derive(Debug, Clone)]
+pub struct FileSearchHit {
+    pub item: SearchItem,
+    pub size_bytes: Option<u64>,
+    pub modified_at: Option<i64>,
+}
+
 /// Fallback 缓存条目。
 #[derive(Debug, Clone)]
 struct CachedFileEntry {
@@ -52,6 +63,8 @@ struct CachedFileEntry {
     full_path: String,
     /// 父目录路径（用于 subtitle 显示）
     parent_dir: String,
+    size_bytes: Option<u64>,
+    modified_at: Option<i64>,
 }
 
 /// Fallback 缓存状态。
@@ -148,7 +161,12 @@ impl FileEngine {
     }
 
     /// 搜索 Everything HTTP API。
-    async fn search_everything(&self, port: u16, query: &str, max_results: u32) -> Vec<SearchItem> {
+    async fn search_everything(
+        &self,
+        port: u16,
+        query: &str,
+        max_results: u32,
+    ) -> Vec<FileSearchHit> {
         // Unavailable 状态下定期重试（每 30 秒一次，兼容后续启动 Everything 的场景）
         const RETRY_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -185,10 +203,10 @@ impl FileEngine {
         // - json=1: 返回 JSON 格式
         // - count=N: 返回结果数
         // - path_column=1: 包含完整路径列 (不是 path=1)
-        // - size=1: 包含文件大小
-        // - date_modified=1: 包含修改时间
+        // - size_column=1: 包含文件大小
+        // - date_modified_column=1: 包含修改时间（Windows FILETIME）
         let url = format!(
-            "http://localhost:{port}/?search={}&json=1&count={max_results}&path_column=1&size=1&date_modified=1",
+            "http://localhost:{port}/?search={}&json=1&count={max_results}&path_column=1&size_column=1&date_modified_column=1",
             urlencoding::encode(query)
         );
 
@@ -266,29 +284,33 @@ impl FileEngine {
 
             let score = super::scorer::file_search_score(i);
 
-            items.push(SearchItem {
-                id: full_path.clone(),
-                title: name.to_string(),
-                subtitle: Some(subtitle),
-                score,
-                action: SearchAction::Open { path: full_path },
-                source: "file".into(),
-                score_detail: Some(format!("file_rank={}", i)),
-                context_aware: false,
+            items.push(FileSearchHit {
+                item: SearchItem {
+                    id: full_path.clone(),
+                    title: name.to_string(),
+                    subtitle: Some(subtitle),
+                    score,
+                    action: SearchAction::Open { path: full_path },
+                    source: "file".into(),
+                    score_detail: Some(format!("file_rank={}", i)),
+                    context_aware: false,
+                },
+                size_bytes: json_u64(&result["size"]),
+                modified_at: json_u64(&result["date_modified"]).and_then(filetime_to_unix_seconds),
             });
         }
 
         tracing::debug!("Everything 返回 {} 个结果，query={}", items.len(), query);
-        for (i, item) in items.iter().enumerate() {
-            let detail = item.score_detail.as_deref().unwrap_or("");
+        for (i, hit) in items.iter().enumerate() {
+            let detail = hit.item.score_detail.as_deref().unwrap_or("");
             tracing::trace!(
                 index = i,
                 score = if detail.is_empty() {
-                    format!("{:.4}", item.score)
+                    format!("{:.4}", hit.item.score)
                 } else {
-                    format!("{:.4} ({})", item.score, detail)
+                    format!("{:.4} ({})", hit.item.score, detail)
                 },
-                name = %item.title,
+                name = %hit.item.title,
                 "文件搜索结果项"
             );
         }
@@ -296,7 +318,7 @@ impl FileEngine {
     }
 
     /// 从 Fallback 缓存中搜索文件。
-    fn search_fallback(&self, query: &str, max_results: u32) -> Vec<SearchItem> {
+    fn search_fallback(&self, query: &str, max_results: u32) -> Vec<FileSearchHit> {
         let cache = self.fallback_cache.lock().unwrap();
         if !cache.is_valid() {
             return Vec::new();
@@ -328,7 +350,7 @@ impl FileEngine {
 
         scored.sort_by(|a, b| b.0.cmp(&a.0));
 
-        let items: Vec<SearchItem> = scored
+        let items: Vec<FileSearchHit> = scored
             .into_iter()
             .take(max_results as usize)
             .map(|(_score, entry)| {
@@ -340,17 +362,21 @@ impl FileEngine {
                     entry.parent_dir.clone()
                 };
 
-                SearchItem {
-                    id: entry.full_path.clone(),
-                    title: entry.name.clone(),
-                    subtitle: Some(subtitle),
-                    score: super::scorer::file_search_score(0), // Fallback 结果给统一分数
-                    action: SearchAction::Open {
-                        path: entry.full_path.clone(),
+                FileSearchHit {
+                    item: SearchItem {
+                        id: entry.full_path.clone(),
+                        title: entry.name.clone(),
+                        subtitle: Some(subtitle),
+                        score: super::scorer::file_search_score(0), // Fallback 结果给统一分数
+                        action: SearchAction::Open {
+                            path: entry.full_path.clone(),
+                        },
+                        source: "file_local".into(),
+                        score_detail: Some("local_fallback".into()),
+                        context_aware: false,
                     },
-                    source: "file_local".into(),
-                    score_detail: Some("local_fallback".into()),
-                    context_aware: false,
+                    size_bytes: entry.size_bytes,
+                    modified_at: entry.modified_at,
                 }
             })
             .collect();
@@ -360,7 +386,7 @@ impl FileEngine {
     }
 
     /// 仅本地目录搜索（触发后台扫描 + 从缓存搜索）。
-    async fn search_local_only(&self, cfg: &FileSearchConfig, query: &str) -> Vec<SearchItem> {
+    async fn search_local_only(&self, cfg: &FileSearchConfig, query: &str) -> Vec<FileSearchHit> {
         // 触发后台扫描（如果缓存无效）
         let dirs = cfg.local_dirs.clone();
         let depth = cfg.local_max_depth;
@@ -436,11 +462,19 @@ impl FileEngine {
                         .parent()
                         .map(|p| p.to_string_lossy().to_string())
                         .unwrap_or_default();
+                    let metadata = entry.metadata().ok();
+                    let size_bytes = metadata.as_ref().map(|metadata| metadata.len());
+                    let modified_at = metadata
+                        .and_then(|metadata| metadata.modified().ok())
+                        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                        .and_then(|duration| i64::try_from(duration.as_secs()).ok());
 
                     all_entries.push(CachedFileEntry {
                         name: file_name,
                         full_path,
                         parent_dir: parent,
+                        size_bytes,
+                        modified_at,
                     });
                 }
             }
@@ -465,6 +499,58 @@ impl FileEngine {
             c.scanning = false;
         }
     }
+
+    /// 给 Capability 使用的带元数据搜索；与通用 SearchEngine 共用同一分流和缓存。
+    pub async fn search_with_metadata(&self, query: &str) -> Vec<FileSearchHit> {
+        let q = query.trim();
+        if q.is_empty() || q.len() < 2 {
+            tracing::trace!(query = %q, "FileEngine: 查询太短，跳过");
+            return Vec::new();
+        }
+
+        let cfg = self.config.read().await;
+        if !cfg.enabled {
+            tracing::trace!("FileEngine: 已禁用，跳过");
+            return Vec::new();
+        }
+        let data_source = cfg.data_source.as_str();
+        if data_source == "local" {
+            tracing::debug!(query = %q, "FileEngine: 本地模式");
+            return self.search_local_only(&cfg, q).await;
+        }
+
+        tracing::debug!(
+            query = %q,
+            port = cfg.everything_port,
+            max_results = cfg.max_results,
+            "FileEngine: 搜索 Everything"
+        );
+        let results = self
+            .search_everything(cfg.everything_port, q, cfg.max_results)
+            .await;
+        if results.is_empty() && data_source == "auto" {
+            let status = self.everything_status.read().await;
+            if *status == EverythingStatus::Unavailable {
+                tracing::debug!("FileEngine: Everything 不可用，降级本地搜索");
+                drop(status);
+                return self.search_local_only(&cfg, q).await;
+            }
+        }
+        tracing::debug!(count = results.len(), "FileEngine: 返回结果");
+        results
+    }
+}
+
+fn json_u64(value: &serde_json::Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|raw| raw.parse().ok()))
+}
+
+fn filetime_to_unix_seconds(filetime: u64) -> Option<i64> {
+    const WINDOWS_TO_UNIX_EPOCH_100NS: u64 = 116_444_736_000_000_000;
+    let ticks = filetime.checked_sub(WINDOWS_TO_UNIX_EPOCH_100NS)?;
+    i64::try_from(ticks / 10_000_000).ok()
 }
 
 /// 解析特殊目录名为实际路径。
@@ -565,48 +651,30 @@ impl SearchEngine for FileEngine {
     }
 
     async fn search(&self, query: &str, _ctx: &QueryContext<'_>) -> Vec<SearchItem> {
-        let q = query.trim();
-        if q.is_empty() || q.len() < 2 {
-            tracing::trace!("FileEngine: 查询太短，跳过: {q}");
-            return Vec::new();
-        }
+        self.search_with_metadata(query)
+            .await
+            .into_iter()
+            .map(|hit| hit.item)
+            .collect()
+    }
+}
 
-        let cfg = self.config.read().await;
-        if !cfg.enabled {
-            tracing::trace!("FileEngine: 已禁用，跳过");
-            return Vec::new();
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        let data_source = cfg.data_source.as_str();
+    #[test]
+    fn parses_everything_numeric_fields() {
+        assert_eq!(json_u64(&serde_json::json!(123)), Some(123));
+        assert_eq!(json_u64(&serde_json::json!("456")), Some(456));
+        assert_eq!(json_u64(&serde_json::Value::Null), None);
+    }
 
-        // 模式 "local"：只用本地目录扫描
-        if data_source == "local" {
-            tracing::debug!("FileEngine: 本地模式，query={q}");
-            return self.search_local_only(&cfg, q).await;
-        }
-
-        // 模式 "everything" 或 "auto"：先尝试 Everything
-        tracing::debug!(
-            "FileEngine: 搜索 Everything，query={q}, port={}, max_results={}",
-            cfg.everything_port,
-            cfg.max_results
-        );
-        let results = self
-            .search_everything(cfg.everything_port, q, cfg.max_results)
-            .await;
-
-        // 模式 "auto"：Everything 不可用时降级本地
-        if results.is_empty() && data_source == "auto" {
-            let status = self.everything_status.read().await;
-            if *status == EverythingStatus::Unavailable {
-                tracing::debug!("FileEngine: Everything 不可用，降级本地搜索");
-                drop(status);
-                return self.search_local_only(&cfg, q).await;
-            }
-        }
-
-        tracing::debug!("FileEngine: 返回 {} 个结果", results.len());
-        results
+    #[test]
+    fn converts_windows_filetime_to_unix_seconds() {
+        assert_eq!(filetime_to_unix_seconds(116_444_736_000_000_000), Some(0));
+        assert_eq!(filetime_to_unix_seconds(116_444_736_010_000_000), Some(1));
+        assert_eq!(filetime_to_unix_seconds(1), None);
     }
 }
 

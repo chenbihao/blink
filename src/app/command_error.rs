@@ -85,6 +85,16 @@ impl From<crate::domain::capability::CapabilityError> for CommandError {
             InvalidArgs { detail } => {
                 Self::new("invalid_args", format!("参数错误: {detail}"), false)
             }
+            InvalidState { detail } => {
+                Self::new("invalid_state", format!("状态错误: {detail}"), false)
+            }
+            Conflict { detail } => Self::new("conflict", format!("并发冲突: {detail}"), true),
+            InvalidData { reason, detail } => Self::with_detail(
+                "invalid_data",
+                format!("数据无效: {detail}"),
+                false,
+                serde_json::json!({ "reason": reason }),
+            ),
             Permission { detail } => {
                 Self::new("permission_denied", format!("权限不足: {detail}"), false)
             }
