@@ -9,7 +9,7 @@
 //! - 状态访问返回 `&Arc<T>`（引用而非 clone），靠 `OnceLock` 内部存储支撑生命周期
 //! - 窗口操作仅 chord action 消费（show_chat / hide / screenshot overlay 等）
 //! - `wait_frame_after_hide` 和 `create_sticky_and_show` 是 async 方法，用 `async_trait` 标注
-//! - 0.19.5：`CapabilityEnv` 新增便签窗口操作方法（`sticky_service` / `create_sticky_and_show`），
+//! - 0.19.3：`CapabilityEnv` 新增便签窗口操作方法（`sticky_service` / `create_sticky_and_show`），
 //!   使 Capability 能触达便签窗口副作用，不直接暴露 AppHandle
 
 use std::sync::Arc;
@@ -27,7 +27,7 @@ use crate::infra::platform::screenshot::ScreenCaptureMeta;
 /// 该接口刻意不包含事件、窗口和进程控制。AI 即使拿到某个 Capability，
 /// 也只能通过这里声明的数据/服务依赖工作，不能借 `InvokeContext` 越权进入 Action 域。
 ///
-/// **0.19.5**：新增便签窗口操作方法（`sticky_service` / `create_sticky_and_show`），
+/// **0.19.3**：新增便签窗口操作方法（`sticky_service` / `create_sticky_and_show`），
 /// 使便签能力化 Capability 能触达窗口副作用。这与 `open_url` 等 Capability 产生
 /// OS 级窗口副作用（开浏览器）同属一类——"可逆窗口副作用"，不违反 §A4 "不碰 UI" 边界
 /// （不直接操作前端 DOM/事件流）。参见 phase 0.19 §3.2/§3.3 决策。
@@ -45,7 +45,7 @@ pub trait CapabilityEnv: Send + Sync {
     /// 由 Capability 转成可恢复错误，禁止在环境 getter 内 panic。
     fn search_service(&self) -> Option<&Arc<SearchService>>;
 
-    // ── 便签窗口操作（0.19.5 便签能力化桥接）──────────────────────────
+    // ── 便签窗口操作（0.19.3 便签能力化桥接）──────────────────────────
 
     /// 便签服务——供 `list_sticky` / `set_sticky_geometry` cap 直接调
     /// `list_notes()` / `update_geometry()` 等 DB 操作。
@@ -53,7 +53,7 @@ pub trait CapabilityEnv: Send + Sync {
     /// 返回 `Option`——CLI/MCP 最小运行时可能不构造完整服务栈。
     fn sticky_service(&self) -> Option<&Arc<StickyService>>;
 
-    /// 创建便签并显示桌面窗口（0.19.5）。
+    /// 创建便签并显示桌面窗口（0.19.3）。
     ///
     /// `content` 为便签正文；`x`/`y`/`w`/`h` 为可选位置尺寸（物理像素），
     /// `None` 则居中到当前前台窗口所在显示器（复用 `center_of_active_monitor`）。
@@ -76,9 +76,9 @@ pub trait CapabilityEnv: Send + Sync {
     /// 返回 `None`——CLI/MCP 最小运行时不构造，投影层降级为摘要。
     fn image_stash(&self) -> Option<&Arc<ImageStash>>;
 
-    // ── pin 窗口操作（0.19.6 pin 能力化桥接）──────────────────────────
+    // ── pin 窗口操作（0.19.3 pin 能力化桥接）──────────────────────────
 
-    /// 显示钉图窗口（0.19.6）。
+    /// 显示钉图窗口（0.19.3）。
     ///
     /// `png_bytes` 为 PNG 图片字节；`x`/`y` 为图片左上的物理像素坐标
     /// （窗口会在此基础上偏移 `-PIN_PAD` 给发光区留空间）。

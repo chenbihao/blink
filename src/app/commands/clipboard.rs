@@ -178,7 +178,7 @@ pub async fn pin_clipboard_image(app: tauri::AppHandle, image_id: String) -> Res
         .map(|(pw, ph)| (pw as i32, ph as i32))
         .unwrap_or((400, 300));
 
-    // 获取光标所在显示器工作区，居中放置（0.19.6 从本文件提升到 window 模块）
+    // 获取光标所在显示器工作区，居中放置（0.19.3 从本文件提升到 window 模块）
     let (screen_x, screen_y) =
         crate::infra::platform::window::get_primary_monitor_center(w, h);
 
@@ -188,4 +188,3 @@ pub async fn pin_clipboard_image(app: tauri::AppHandle, image_id: String) -> Res
     tracing::info!(id = %image_id, "剪贴板图片已钉到桌面");
     Ok(())
 }
-

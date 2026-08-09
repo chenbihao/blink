@@ -308,7 +308,7 @@ pub fn screenshot_pin_transform(
 ///
 /// **0.14.7 W3**：返回 `CommandError`（结构化错误协议）。
 ///
-/// **0.19.4**：用户侧 command 改经 `CapabilityRegistry` 调 `OcrImage` Capability，
+/// **0.19.1**：用户侧 command 改经 `CapabilityRegistry` 调 `OcrImage` Capability，
 /// 与 AI 走同一个入口（照搬 `translate_text` 模式）。底层 `ocr_engine::backend()`
 /// 不动，OcrImage Capability 仍调它。消除双入口行为漂移。
 #[tauri::command]
@@ -385,7 +385,7 @@ pub async fn ocr_image(
 ///
 /// 供截图 overlay 诊断面板调用，帮助用户排查"中文截图识别不出"问题。
 ///
-/// **0.19.4**：本命令保留为诊断专用直调 `ocr_engine::backend()`——`available_languages()`
+/// **0.19.1**：本命令保留为诊断专用直调 `ocr_engine::backend()`——`available_languages()`
 /// 和 `engine_language()` 是 `OcrBackend` trait 的诊断方法，不在 OcrImage Capability
 /// （只做 `recognize`）的职责范围内。为诊断面板单独建 Capability 属过度工程。
 #[tauri::command]

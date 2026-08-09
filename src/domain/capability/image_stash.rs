@@ -1,4 +1,4 @@
-//! ImageStash — 进程级图片引用暂存（0.19.4 §3.7–3.9）。
+//! ImageStash — 进程级图片引用暂存（0.19.4 §3.6）。
 //!
 //! **目的**：修复 `CapabilityResult::Blob` 在 agent 投影层只产生尺寸摘要、
 //! 原始字节无法传给下一个 tool call 的断点。图片生产者（screenshot /

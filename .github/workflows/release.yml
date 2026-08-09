@@ -95,12 +95,13 @@ jobs:
             ## Blink ${{ inputs.tag || github.ref_name }}
 
             ### 下载
-            - **MSI 安装包**（`.msi`）：推荐，标准 Windows 安装程序
+            - **MSI 安装包**（`.msi`）：标准 Windows 安装程序
             - **NSIS 安装包**（`-setup.exe`）：轻量安装程序
 
             > 首次运行未签名，Windows SmartScreen 可能拦截，点击「更多信息 → 仍要运行」即可。
 
             ### 更新日志
+            
             见下方自动生成的 Release Notes。
           draft: true
           prerelease: false

@@ -1,195 +1,165 @@
-# 前瞻路线图 · 候选方向调研
+# Blink Roadmap
 
-> **状态**：🔮 前瞻调研（非承诺规划）。候选落地版本：**0.21+**。
+> **状态**：🔮 候选方向池，不是版本承诺，也不预占版本号。
 >
-> **来源**：讨论「Blink 自动整理下载文件夹」类长任务场景时启发。结论：Blink 自身的 tool 体系（读为主 + 可逆写）不足以支撑「AI 自主操作文件系统的长任务」，但**不必自己造完整的编码 agent 运行时**——可把 opencode / pi agent / Claude Code 等现成 agent **作为 subagent 调用**，借力生态而不外包架构主权。
+> **当前判断**：短期继续强化 Blink 的主链路、统一能力底座与已有功能闭环；**不立项 RAG、向量数据库或记忆向量化**。相关设计仅作为远期观察档保留。
 >
-> **关联**：[spec-architecture §A10](./specs/spec-architecture.md)（ADR-001 为何不当后端）· [phases/0.13 §七 CLI 化](./phases/0.13-ai-capability-expansion.md)
+> **进入 phase 的条件**：用户价值、最小操作路径、技术边界和验收范围均明确后，才从本文件迁入 `phases/{version}-*.md`。
 
 ---
 
-## 一、问题背景
+## 一、怎么读这份 Roadmap
 
-### 1.1 启发场景：「Blink 自动整理下载文件夹」
+### 1.1 五种状态
 
-用户说：「帮我整理下载文件夹，按类型分到子文件夹，超过 30 天没动的归档到 Archive」。
-
-这个任务的特点：
-- **需要 AI 自主做文件系统写操作**（move / rename / mkdir / delete）
-- **多步编排**（扫描 → 分类决策 → 批量移动 → 验证）
-- **可能出错需要回滚**（移错了要能恢复）
-- **需要权限边界**（不能动系统目录）
-
-### 1.2 Blink 现状做不到
-
-盘点 Blink 当前的文件能力（截至 0.12.7）：
-
-| 能力 | 实现 | 性质 |
+| 状态 | 含义 | 下一步 |
 |---|---|---|
-| `search_files` | `src/domain/capability/builtins/search_files.rs` | **只读**（无 fs 写操作） |
-| `open_path` | `src/domain/execution/builtin.rs:401` Action | 无副作用（调系统打开） |
-| `reveal_in_explorer` | `src/domain/execution/builtin.rs:444` Action | 无副作用（资源管理器定位） |
+| **已立项** | 边界与验收已明确，详细设计已迁入 phase | 只保留一行结论和 phase 链接，不在 roadmap 重复展开 |
+| **近期优先** | 与主链路、可靠性或能力闭环直接相关 | 可做问题盘点或小范围验证，成熟后立 phase |
+| **条件候选** | 有价值，但依赖明确触发条件 | 先验证需求与边界，不预排版本 |
+| **远期观察** | 当前投入产出比不成立 | 只留结论与重评门槛，不做实现设计 |
+| **不建议** | 与产品定位或体积/复杂度约束冲突 | 除非前提变化，否则不再展开 |
 
-**结论**：Blink **没有任何文件系统写 capability**（move/rename/delete/mkdir 全无）。这是 [spec-architecture §A10](./specs/spec-architecture.md)（ADR-001）所述的有意为之的产品边界——Blink 的 tool 是「读为主 + 可逆写（剪贴板）」，不是「让 AI 改用户文件」。
+### 1.2 排序原则
 
-### 1.3 两条路
+候选方向按以下顺序判断，而不是按“功能听起来多智能”排序：
 
-要支持这类场景，有两条路：
-
-| 路径 | 做法 | 成本 | 风险 |
-|---|---|---|---|
-| **A. 自己造文件操作 capability + 事务/回滚** | 新增 `move_file`/`rename_file`/`delete_file` capability + 全局快照回滚体系（对标 opencode） | **高**——快照/回滚/权限/事务化是编码 agent 的重包袱，Blink 守「不做 AI 运行时」边界 | 偏离产品定位，背 opencode 式重机制 |
-| **B. 把外部 agent 当 subagent 调用** | Blink 的 supervisor agent 通过 subagent tool，调起 opencode/pi/claude-code 处理「文件长任务」，结果回流 | **中**——复用生态，Blink 只做编排 + 结果呈现 | 依赖外部 agent 安装；但架构主权完整 |
-
-**本卷主张路径 B**。理由：符合 [ADR-001（§A10）](./specs/spec-architecture.md) 的「Blink 不做 AI 运行时」边界，借力而非重造。
-
----
-
-## 二、可行性调研结论
-
-### 2.1 rig 支持多 agent / subagent 编排吗？
-
-**结论：支持，且无需新概念。** rig 不提供「开箱即用的 supervisor API」，但提供两个原语足以拼出 subagent 模式：
-
-1. **agent-as-tool 模式**：把一个 `Agent` 包装成 `impl ToolDyn`，挂进另一个 supervisor agent 的 tool 池。supervisor 像调普通 tool 一样调 subagent。
-2. **手动编排**：用标准 Rust 控制流（`for`/`extract`）串联多个 agent。rig 提供 `pipeline` API（`parallel!()` / `passthrough()`）辅助。
-
-**关键事实**：Blink 0.12.0 的 **Tool 适配层**（`CapabilityTool` / `ActionTool` impl `ToolDyn`，见 `src/domain/ai/tool_adapter.rs`）**已经在用 agent-as-tool 的同款模式**——把 Capability 包装成 ToolDyn 挂进 agent tool 池。把 subagent 包装成 ToolDyn 是同一套机制，**零新概念，零新依赖**。
-
-> 参考实现模式见 [Implementing Design Patterns for Agentic AI with Rig & Rust](https://dev.to/joshmo_dev/implementing-design-patterns-for-agentic-ai-with-rig-rust-1o71)。社区有更高层编排框架 `rigs`（[docs.rs/rigs](https://docs.rs/rigs/latest/rigs/)），但 Blink **不需要**——手动编排 + ToolDyn 包装已够。
-
-### 2.2 外部 agent 能被 Blink 当 subagent 调用吗？
-
-**结论：能。** 三大现成 agent 都支持「单次任务 + 结构化输出」的 headless 模式，可被 Blink 子进程化调用：
-
-| Agent | headless 接口 | 输出格式 | 调用方式 |
-|---|---|---|---|
-| **Claude Code** | `claude -p "<prompt>"`（[官方文档](https://code.claude.com/docs/en/headless)） | `--output-format json`（单对象）/ `stream-json`（流式 JSONL） | 子进程 stdin/stdout |
-| **opencode** | `opencode serve`（HTTP/WebSocket server）+ [JS SDK](https://opencode.ai/docs/sdk/) | HTTP JSON + SSE 流 | HTTP client（或子进程） |
-| **pi agent** | CLI 单次模式 | stdout | 子进程 |
-
-**统一抽象**：Blink 可定义 `ExternalAgentSubagent` trait，把三种调用方式收敛到同一接口：
-
-```rust
-/// 外部 agent 作为 subagent 的统一接口（规划，0.15+ 候选；架构清理已并入 0.14，0.15 号段留给此类大主题）。
-#[async_trait]
-pub trait ExternalAgentSubagent: Send + Sync {
-    /// 单次任务执行：给 prompt，返回结构化结果。
-    async fn run_task(&self, prompt: &str, opts: &TaskOpts) -> Result<TaskResult, SubagentError>;
-}
-
-// 具体实现：
-// - ClaudeCodeSubagent: tokio::process::Command 调 `claude -p`，解析 JSON
-// - OpencodeSubagent: reqwest 调 HTTP server，收 SSE
-// - PiSubagent: tokio::process::Command 调 pi CLI
-```
-
-然后包装成 `impl ToolDyn`（沿用 0.12.0 适配层模式），挂进 supervisor 的 tool 池。supervisor AI 判断「这是个文件整理任务」时，自主调用 `delegate_to_claude_code` tool。
-
-### 2.3 难度评估
-
-| 维度 | 难度 | 说明 |
-|---|---|---|
-| **subagent 机制**（rig 侧） | ⭐ 低 | 复用 0.12.0 ToolDyn 适配层模式，零新概念 |
-| **外部 agent 调用**（进程/HTTP） | ⭐⭐ 中 | `tokio::process` 子进程 + JSON 解析，Blink 已有插件子进程经验（`src/domain/plugin/`） |
-| **结果回流 + UI 呈现** | ⭐⭐ 中 | 复用 0.12 tool result 投影（`to_rig_tool_result()`），subagent 结果当 tool result 渲染 |
-| **依赖管理**（外部 agent 是否安装） | ⭐⭐⭐ 中高 | 需检测 PATH 里是否有 claude/opencode/pi，缺失则 tool 标灰；不能强依赖 |
-| **权限/审批**（subagent 能改文件） | ⭐⭐⭐ 中高 | 复用 0.12 `PendingConfirms` 危险确认闭环，subagent tool 标 `Dangerous` |
-
-**总体判断**：路径 B 难度中等，且**大部分基础设施 Blink 已有**（ToolDyn 适配层、插件子进程经验、危险确认闭环、tool result 投影）。放 0.15+ 做是合理的，**不需要大重构**（架构清理已在 0.14 收敛）。
+1. 是否保护 `Alt+Space → Focus → 输入 → 首个结果` 主链路；
+2. 是否让现有能力形成闭环、减少搬运和心智切换；
+3. 是否能复用统一能力底座，而不是新增一套平行系统；
+4. 是否默认本地、按需启用，并守住常驻内存与安装体积；
+5. 是否有真实用户场景和可验证收益，而非仅有技术可行性。
 
 ---
 
-## 三、与现有规划的关系
+## 二、方向总览
 
-### 3.1 不冲突，且互相增强
+| 方向 | 状态 | 当前结论 | 触发条件 |
+|---|---|---|---|
+| 主链路可靠性与性能 | **近期优先** | 始终高于新 AI 基础设施 | 出现焦点、唤起、输入或首结果回退时立即处理 |
+| 统一能力底座继续收敛 | **已进入 0.19** | 0.19.6 收敛共享语义实现与行为契约；不机械合并 Action/Chord/Capability Registry | 按 [0.19 phase](./phases/0.19-capability-closure.md) 验收 |
+| 自然语言设置 | **已进入 0.19** | 0.19.8 以显式白名单读取和修改常用设置，不暴露原始 KV 或密钥 | 按 [0.19 phase](./phases/0.19-capability-closure.md) 验收 |
+| AI 设置、纯对话与 MCP 生命周期 | **已进入 0.19** | 0.19.9–0.19.11 分别收敛设置真实语义、纯对话/Skill 运行态和 MCP client single-flight | 按 [0.19 phase](./phases/0.19-capability-closure.md) 验收 |
+| Agent 能力增强 | **条件候选** | 集中评估路径级授权、`write_text_file`、受控 `read_url` 与更长任务的能力边界；不并入当前轻量读取 | 出现稳定的“读取→修改→保存”或“URL→正文→处理”高频场景 |
+| AI 视觉结果引用与内部直链 | **条件候选** | 复用 0.19 ImageStash；避免图片经过 LLM channel | OCR/多模态消费出现稳定场景与清晰收益 |
+| 外部 agent 作为 subagent | **条件候选** | 可借力长任务生态，但不能把 Blink 变成 agent 壳 | 文件长任务成为高频核心场景，且权限范围可控 |
+| 主动建议深化 | **条件候选** | 坚持弱信号 pull、不 push | 有低误报、可关闭、能减少至少一步操作的场景 |
+| 配置同步（WebDAV） | **条件候选** | 多设备分发阶段再评估 | 多设备用户需求成立，并先定加密与冲突策略 |
+| AI 生成 Skill | **条件候选** | 现有纯文本模板可用，不急于引入 LLM 生成链 | 模板准确率成为真实瓶颈，且生成结果有审核闭环 |
+| 事实记忆（tool-based） | **远期观察** | 与向量检索解耦，先证明用户确实需要显式长期记忆 | 记忆写入、查看、纠正、删除的产品模型明确 |
+| 记忆向量召回 | **远期观察** | FTS5 + token-aware 窗口继续作为当前方案 | 有数据证明关键词召回无法满足真实对话 |
+| RAG 本地知识库 | **远期观察** | 短期不做文档摄取、分块、embedding 与索引生命周期 | 本地知识问答成为高频场景，且轻量方案不可满足 |
+| 完整多模态模型投影 | **远期观察** | 先走 Rust 内部复合操作和结果引用 | 模型直读图片比 OCR/结构化结果有显著收益 |
+| 完整 QuickLook 式预览 | **不建议** | 解码器、体积和维护成本偏离核心定位 | 除非只做可复用的极轻量文本/图片类型 |
 
-| 现有规划 | 与 subagent 的关系 |
+---
+
+## 三、近期优先：先把“身体”做扎实
+
+### 3.1 主链路可靠性
+
+任何候选工作都不能牺牲以下指标：唤起 `< 50ms`、首个结果 `< 20ms`、焦点成功率 `> 99.9%`、常驻内存 `< 300MB`。出现回退时，新功能让位于主链路修复。
+
+### 3.2 统一能力底座收敛
+
+这里的“统一能力底座”不是把所有入口塞进 CapabilityRegistry，而是让同一业务语义只有一个实现，并让不同入口的参数校验、副作用、错误、日志、敏感性和危险级别保持一致。command、Capability、Action 与 Chord 仍可保留各自的交互协议和注册表，重叠部分通过共享领域/基础设施函数复用。
+
+0.19.6 已承接当前明确的收敛项：剪贴板读写与截图复制、图片加载与 pin、便签编排、OCR 用户入口与 Capability 的行为一致性。UI 状态机 command 保持独立，现有 command 对外契约不因收敛而改变。
+
+`ActionRegistry` 与 `ChordRegistry` 的互通或合并仍留作真实场景触发后的独立问题，不顺带塞进 0.19.6，也不组成一个无边界的“继续重构”版本。
+
+---
+
+## 四、条件候选
+
+### 4.1 外部 agent 作为 subagent
+
+**目标场景**：整理下载目录、跨文件批处理等需要多步写操作、验证和可能回滚的长任务。
+
+**边界结论**：Blink 不自建完整编码 agent 运行时，也不把 opencode、Claude Code 等作为自身执行后端；若需求成立，只把外部 agent 包装成受控的粗粒度 tool。这样可复用现有 Tool 适配、子进程、危险操作确认和结果投影能力，同时保留 Blink 的架构主权。
+
+启动前必须回答：
+
+- 工作目录和可写范围如何限制；
+- 外部 agent 缺失或执行失败时如何降级；
+- 分钟级任务如何展示进度、中止和结果；
+- 一次授权覆盖什么，哪些操作仍必须逐次确认；
+- 是否有足够高频的非编码场景证明这不是生态炫技。
+
+最小验证只需选择一个稳定的 headless agent，验证“单次任务 → 结构化结果 → ToolDyn 包装 → 危险确认 → 结果回流”闭环；PoC 通过也不等于自动立项。
+
+### 4.2 主动建议深化
+
+继续遵守产品既有边界：弱意图信号只产 Ghost/Suggestion，由用户采纳；不抢首屏、不直接执行副作用、可一键关闭。只有当一个建议能稳定减少至少一步操作且误报足够低时，才值得进入 phase。
+
+### 4.3 配置同步
+
+多设备分发阶段可评估 WebDAV。首期若立项，只应覆盖低风险配置；历史、剪贴板图片、便签等用户内容必须另行决定加密、冲突解决和删除传播规则，不能随配置默认同步。
+
+### 4.4 AI 生成 Skill
+
+0.13.6 已能从 CLI `--help` 启发式生成 SKILL.md 模板。只有当真实工具证明纯文本解析准确率不足时，才评估让 LLM 补全语义；生成物必须可预览、编辑和确认，不能静默成为执行指导。
+
+### 4.5 Agent 能力增强
+
+0.19 的 `read_text_file` 先沿用按工具名确认与权限记忆。更细的授权模型不在轻量读取阶段零散增加，后续与 `write_text_file`、受控 `read_url` 和长任务能力集中评估。
+
+文件能力增强首先要定义路径信任边界：授权 key 是否包含规范化后的文件/目录、symlink 与 Windows reparse point 如何解析、大小写和短路径如何归一、目录授权是否允许递归，以及配置变化或文件移动后如何失效。读取能力也要区分“用户明确指定的路径”和“模型自行搜索到的路径”，避免一次工具名授权永久放大为任意文件访问。上述增强不得破坏 0.19 已有的工具名级兼容行为，立项时需设计迁移策略。
+
+`write_text_file` 要解决的是“读取 → 修改 → 另存/覆盖”的产出闭环。立项前必须明确原子写入、默认不覆盖、覆盖确认、路径范围、编码、大小限制和失败恢复；不能把任意文件写入伪装成安全文本工具。
+
+`read_url` 要解决的是“URL → 正文 → 总结/提取”的输入闭环。立项前必须明确响应体上限、超时与重定向、正文抽取、内容类型、内网/localhost/`file://` 等 SSRF 边界，以及分页或续读协议。动态网页、登录态浏览和浏览器自动化不与基础 HTTP 读取混为一个能力。
+
+这些能力都应保持 Capability canonical data 的完整语义，通过显式参数、分页或分段协议控制单次操作；模型上下文适配属于 AI 出口，不在 CapabilityRegistry 或通用结果层做隐式全局截断。
+
+---
+
+## 五、远期观察：原 0.20 向量 / RAG 规划归档
+
+> 原 `0.20-ai-vector-moat.md` 已撤销并移除。以下内容只保留未来重新评估时仍有价值的产品与架构约束，**不代表会做，也不指定技术选型或版本**。
+
+### 5.1 为什么现在不做
+
+- 现有 token-aware 窗口 + FTS5 记忆召回已经覆盖基础需求，尚无数据证明语义召回是主要瓶颈；
+- 向量化会同时引入 embedding 模型管理、索引存储、重建与迁移、后台任务、失败恢复和设置 UI，不是一个局部增强；
+- RAG 还会额外引入文档监听、解析、分块、增量更新、删除同步和来源引用，产品面与维护面都偏重；
+- 本地 embedding 增加下载、内存与磁盘负担，云端 embedding 又扩大隐私告知和成本边界；
+- 这些投入短期不会直接改善 Blink 最重要的唤起、输入、感知与执行链路。
+
+### 5.2 若未来重评，保留的设计原则
+
+| 原则 | 约束 |
 |---|---|
-| **0.13.0 MCP client** | subagent 是另一种「外部能力来源」。MCP 是细粒度 tool，subagent 是粗粒度「整个 agent」。两者可并存于 tool 池 |
-| **0.13.3 Skill 约定式** | Skill 教 AI「怎么做」，subagent 让 AI「委托谁做」。互补 |
-| **0.13.4 MCP server** | Blink 作为 MCP server 暴露能力；subagent 是 Blink 作为 client 消费外部 agent。对称 |
-| **0.13.5 CLI 化** | `blink delegate` 命令可直接调 subagent，复用同一后端 |
+| **无 embedding 也完整可用** | FTS5 与 token-aware 窗口是正式方案，不是等待向量版的临时垫片 |
+| **主链路旁路化** | 文档解析、embedding、索引和重建只能后台运行，不能进入搜索或唤起热路径 |
+| **锁定模型身份** | 索引必须记录 embedding model id、维度和版本；切换模型需显式重建，不得静默混用 |
+| **本地优先与强告知** | 本地文档默认不出机；若使用云端 embedding，必须在发送片段前明确告知范围与接收方 |
+| **可降级、可删除** | 模型不可用时记忆回退 FTS5；知识库必须能彻底移除原文、chunk、索引和缓存 |
+| **复用能力协议** | 若做知识检索，应作为 Capability 进入既有 tool loop，不建立独立 AI 调用通道 |
+| **先验证检索质量再选库** | 不预定 zvec、sqlite-vec 或其他实现；先用真实中文语料验证召回、体积和 Rust 生态成熟度 |
 
-### 3.2 为什么放 0.15+ 而不是更早
+### 5.3 重新评估门槛
 
-1. **前置依赖**：subagent 要有用，得先有「supervisor agent 能自主判断何时委托」——这依赖 0.13.1 token-aware 窗口（supervisor 自己的 context 要健康）+ 0.13.3 Skill（教 supervisor 何时该委托）。
-2. **生态成熟度**：外部 agent 的 headless 接口仍在演进（opencode serve、claude `-p` 都是近期才稳定），早做易踩 API 变更。
-3. **优先级**：0.13（MCP 双向 / CLI / 记忆召回 / Skill）/ 0.14（能力协议与架构收敛）/ 0.20（向量召回 / RAG）是「所有用户受益」的基础设施；subagent 是「进阶用户借力生态」的增强，优先级靠后合理。
+只有同时满足以下条件，才值得新建 phase：
 
-### 3.3 0.21 候选范围（若启动）
+1. 有一组真实、高频用例证明 FTS5 召回或普通文件搜索明显不够；
+2. 能定义可量化的离线评测集与收益门槛，而不是凭演示判断“更智能”；
+3. 有满足 Rust、Windows、安装体积和常驻内存约束的成熟实现；
+4. 文档来源、更新、删除、引用和隐私告知的完整生命周期已经设计清楚；
+5. 后台索引不会影响主链路，关闭功能后也不会留下不可控数据。
 
-如果 0.21 立项，subagent 可能是其中一环，与其他候选并列：
+### 5.4 与向量化解耦的长期记忆
 
-```
-0.21（候选，未定案）
-  ├─ 外部 agent 作为 subagent（本卷）          P1
-  ├─ 事实记忆（tool-based，ChatGPT 式 memory）  P2（0.20 砍掉项）
-  ├─ proactivity 主动建议深化（../product.md §五 感知与隐私）  P2
-  └─ ...（其他）
-```
-
----
-
-## 四、未决问题（启动前需回答）
-
-| # | 问题 | 方向 |
-|---|---|---|
-| 1 | subagent 的权限模型——它调用的外部 agent 默认能改文件，Blink 怎么约束其作用域（限定目录？）| 倾向：subagent tool 标 `Dangerous`，每次调用走 `PendingConfirms`，且支持「限定工作目录」参数 |
-| 2 | 多个外部 agent 并存时，supervisor 怎么选？ | 倾向：每个外部 agent 是独立 tool（`delegate_to_claude`/`delegate_to_opencode`），supervisor 自主选；或一个 `delegate` tool 带 agent 参数 |
-| 3 | 外部 agent 缺失时的降级 | 倾向：tool 标灰 + 设置页提示「安装 Claude Code 可启用文件整理能力」 |
-| 4 | subagent 结果的呈现——长任务可能几分钟，UI 怎么反馈 | 倾向：subagent tool 走流式（类似 0.12 tool loop），前端显示「子任务进行中」+ 阶段性回传 |
-| 5 | 是否需要「Blink 自己的轻量文件操作 capability」作为 subagent 不可用时的降级 | 开放——若社区反馈「不想装 claude 也想整理文件夹」，可补 `move_file`/`rename_file` capability（Dangerous），但不做全局快照（限定单次操作可逆） |
+ChatGPT 式“事实记忆”本质上是显式的写入、读取、纠正和删除产品模型，不必依赖向量数据库。若未来有需求，应先单独验证用户控制和可解释性，再决定检索实现；不要因为想做记忆而顺带引入向量基础设施。
 
 ---
 
-## 五、最小可行验证（PoC，若推进时先做）
+## 六、已落地或迁出 Roadmap 的方向
 
-启动 0.15+ subagent 工作前，先做一个 1-2 天的 PoC 回答：
+| 方向 | 结果 |
+|---|---|
+| CAP 轻量闭环 | 0.19.1–0.19.4 已落地窗口/图片感知、基础执行、ImageStash 与窗口竞态收敛；0.19.5–0.19.11 已承接便签/文本闭环、行为一致性、图片编辑解耦、自然语言设置、AI 设置、纯对话与 MCP 生命周期 |
+| MCP 双向 / CLI / Skill / FTS5 记忆召回 | 0.13 已落地，不再作为候选 |
+| Capability / Action 协议与投影收敛 | 0.14 起持续落地，后续具体债进入对应 phase，不在 roadmap 重复维护 |
 
-1. **claude `-p` 能否被 Blink 子进程化稳定调用？**（最简单的 headless 接口）——写个 50 行 spike，`tokio::process::Command::new("claude").arg("-p").arg(prompt).arg("--output-format").arg("json")`，解析 JSON 结果。
-2. **把 spike 包成 `impl ToolDyn` 挂进对话窗口 tool 池**——验证 agent-as-tool 模式在 Blink 现有适配层上零摩擦。
-3. **supervisor 能否自主判断何时委托？**——给个「整理下载文件夹」prompt，看 supervisor 是否会调 `delegate_to_claude` tool。
-
-PoC 通过 → 0.15+ 立项；PoC 发现外部 agent 接口不稳/委托判断不可靠 → 降级或推迟。
-
----
-
-## 六、参考
-
-- [Claude Code headless `-p` 模式](https://code.claude.com/docs/en/headless)
-- [opencode Server 架构](https://opencode.ai/docs/server/) · [opencode SDK](https://opencode.ai/docs/sdk/)
-- [pi agent (earendil-works)](https://github.com/earendil-works/pi)
-- [Implementing Design Patterns for Agentic AI with Rig & Rust](https://dev.to/joshmo_dev/implementing-design-patterns-for-agentic-ai-with-rig-rust-1o71)
-- [ADR-001：Agent 后端策略（并入 spec-architecture §A10）](./specs/spec-architecture.md)
-
----
-
-## 七、从原 0.17 迁出的候选留档
-
-> 原 0.17 已并入 0.16（重编号为 0.16.7-0.16.11），原候选文档中的正交方向迁到此处，避免混入已立项 phase，也避免讨论结论丢失。
-
-### 7.1 配置同步（WebDAV）
-
-- **价值**：多设备用户收益高；单设备自用阶段可后置。
-- **成本**：需 WebDAV client、增量同步、加密、冲突检测与解决策略。
-- **边界**：配置同步风险较低；历史、剪贴板图片、便签内容是否同步必须另行定案，不能默认扩大范围。
-- **建议**：进入多设备分发阶段前再单独立项，不占 0.16。
-
-### 7.2 快速预览（QuickLook 式）
-
-- **判断**：完整版文件预览成本和安装体积过高，偏离“感知 + 执行 + 速度”核心。
-- **建议**：不做完整版；若未来确有需求，只评估文本/图片等极轻量类型并复用已有解码能力。
-
-### 7.3 CAP 闭环：AI 感知屏幕（原 0.18 候选）
-
-> **0.19 已落地**：轻量闭环档（`list_windows` / `screenshot{op:window}` / `screenshot{op:capture_to_clipboard}` 复合操作 / OCR 用户侧入口收编经 CapabilityRegistry）已在 [phases/0.19-capability-closure.md](./phases/0.19-capability-closure.md) 落地。架构原则（Rust 侧完成复合操作、图片不过 LLM channel）亦由 0.19 采纳。下述仅保留未完成档。
-
-未完成档：
-
-| 档位 | 内容 | 状态 |
-|---|---|---|
-| OCR 内部直链 | Rust 内部将截图 bytes 交给 OCR，不经过 LLM channel | 待定--0.19 仅收编了用户侧入口，完整直链需「结果引用」机制（0.19 未引入，后置评估） |
-| 完整多模态 | Blob->Image 投影并喂给多模态模型 | 成本较高，后置 0.20 |
-
-**架构原则**（仍有效）：复合操作在 Rust 侧完成，AI 只下指令并接收文本确认，不得让 megabytes 图片无必要地经过 LLM channel。
+Roadmap 中的候选一旦立项，应把详细设计迁到新 phase，本文件只保留一行状态和链接；已完成方向则从候选区移到本节，避免 roadmap 继续膨胀成历史流水账。

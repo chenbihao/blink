@@ -1,4 +1,4 @@
-//! `pin_image` Capability（0.19.6）。
+//! `pin_image` Capability（0.19.3）。
 //!
 //! 将 PNG 图片钉到桌面（pin 窗口） → `Done`。
 //!

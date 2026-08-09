@@ -2176,7 +2176,7 @@ pub fn show_pin_window(
     }
 }
 
-/// 获取光标所在显示器工作区中心，让图片居中放置（0.19.6 从 clipboard.rs 提升到 window 模块）。
+/// 获取光标所在显示器工作区中心，让图片居中放置（0.19.3 从 clipboard.rs 提升到 window 模块）。
 ///
 /// 0.18.8：从 `GetSystemMetrics(SM_CXSCREEN)`（仅主屏）改为
 /// `MonitorFromPoint` + `GetMonitorInfoW` 取光标所在屏的工作区，

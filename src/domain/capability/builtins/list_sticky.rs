@@ -1,4 +1,4 @@
-//! `list_sticky` Capability（0.19.5）。
+//! `list_sticky` Capability（0.19.3）。
 //!
 //! 列出所有活跃便签 → `Items`。
 //!

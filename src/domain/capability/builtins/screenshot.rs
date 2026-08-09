@@ -4,8 +4,8 @@
 //! - `list_displays` — 枚举所有显示器，返回 `Text{JSON}`
 //! - `capture` — 截取指定屏或虚拟屏幕，返回 `Blob{png}`
 //! - `crop` — 从最近 SESSION 裁剪，返回 `Blob{png}`
-//! - `window` — 截取指定窗口（按 hwnd），返回 `Blob{png}`（0.19.3）
-//! - `capture_to_clipboard` — 截图直接写入剪贴板，返回 `Done`（0.19.6）
+//! - `window` — 截取指定窗口（按 hwnd），返回 `Blob{png}`（0.19.2）
+//! - `capture_to_clipboard` — 截图直接写入剪贴板，返回 `Done`（0.19.3）
 //!
 //! 0.19.0 已删除 `capture_screen` / `crop_image` alias，统一走 `screenshot { op }`。
 
@@ -243,7 +243,7 @@ pub(super) async fn op_crop(
     })
 }
 
-/// window：截取指定窗口，返回 `Blob{png}`（0.19.3）。
+/// window：截取指定窗口，返回 `Blob{png}`（0.19.2）。
 ///
 /// 入参 `hwnd`：从 `list_windows` Capability 拿到的窗口句柄（isize）。
 ///
@@ -289,7 +289,7 @@ pub(super) async fn op_window(hwnd: isize) -> Result<CapabilityResult, Capabilit
     })
 }
 
-/// capture_to_clipboard：截图直接写入系统剪贴板，返回 `Done`（0.19.6）。
+/// capture_to_clipboard：截图直接写入系统剪贴板，返回 `Done`（0.19.3）。
 ///
 /// **目的**（roadmap §7.3 复合操作）：AI 只下指令收文本确认，MB 级图片不经过
 /// LLM channel。与 `op:capture` 不同，本 op 不返回 `Blob`，而是将截图写入

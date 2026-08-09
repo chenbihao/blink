@@ -118,7 +118,7 @@ impl CapabilityEnv for TauriDomainEnv {
         Some(&self.image_stash)
     }
 
-    // ── 便签窗口操作（0.19.5 从 DomainEnv 提升到 CapabilityEnv）─────────
+    // ── 便签窗口操作（0.19.3 从 DomainEnv 提升到 CapabilityEnv）─────────
 
     fn sticky_service(&self) -> Option<&Arc<StickyService>> {
         use tauri::Manager;
@@ -180,7 +180,7 @@ impl CapabilityEnv for TauriDomainEnv {
         Ok(note.id)
     }
 
-    // ── pin 窗口操作（0.19.6 pin 能力化桥接）──────────────────────────
+    // ── pin 窗口操作（0.19.3 pin 能力化桥接）──────────────────────────
 
     fn show_pin_window(&self, png_bytes: Vec<u8>, x: i32, y: i32) -> Result<(), String> {
         // show_translating 固定 false——对 AI pin 场景无意义

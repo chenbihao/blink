@@ -1,4 +1,4 @@
-//! `create_sticky` Capability（0.19.5）。
+//! `create_sticky` Capability（0.19.3）。
 //!
 //! 创建桌面便签并显示窗口 → `Done`。
 //!

@@ -8,7 +8,7 @@
 //! AI 完全看不到。本 cap 补上"AI 看到屏幕窗口布局"的感知入口，是"AI 截某 app"
 //! "AI 把便签钉在某窗口旁"等所有定位场景的前置依赖。
 //!
-//! **与 `screenshot { op: window }` 的配合**（0.19.3）：AI 先调本 cap 拿到窗口列表
+//! **与 `screenshot { op: window }` 的配合**（0.19.2）：AI 先调本 cap 拿到窗口列表
 //! （含 hwnd），再调 `screenshot { op: "window", hwnd }` 截指定窗口。
 //!
 //! **sensitive=true**：读窗口列表属隐私敏感数据（窗口标题可能含敏感信息），

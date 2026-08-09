@@ -17,10 +17,10 @@
 //! - [`open_url`] — 打开 URL → `Done`（0.14.2 从 Action 提升为 Capability）
 //! - [`open_path`] — 打开文件/目录 → `Done`（0.14.2 从 Action 提升为 Capability）
 //! - [`reveal_in_explorer`] — 资源管理器定位 → `Done`（0.14.2 从 Action 提升为 Capability）
-//! - [`create_sticky`] — 创建便签并显示窗口 → `Done`（0.19.5，sensitive=true）
-//! - [`set_sticky_geometry`] — 更新便签位置/尺寸 → `Done`（0.19.5）
-//! - [`list_sticky`] — 列出活跃便签 → `Items`（0.19.5，sensitive=true）
-//! - [`pin_image`] — 将 PNG 图片钉到桌面 → `Done`（0.19.6）
+//! - [`create_sticky`] — 创建便签并显示窗口 → `Done`（0.19.3，sensitive=true）
+//! - [`set_sticky_geometry`] — 更新便签位置/尺寸 → `Done`（0.19.3）
+//! - [`list_sticky`] — 列出活跃便签 → `Items`（0.19.3，sensitive=true）
+//! - [`pin_image`] — 将 PNG 图片钉到桌面 → `Done`（0.19.3）
 
 pub mod create_sticky;
 pub mod image_input;

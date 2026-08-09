@@ -1,4 +1,4 @@
-//! `set_sticky_geometry` Capability（0.19.5）。
+//! `set_sticky_geometry` Capability（0.19.3）。
 //!
 //! 更新便签窗口的位置和尺寸 → `Done`。
 //!

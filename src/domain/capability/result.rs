@@ -55,7 +55,7 @@ impl CapabilityResult {
         }
     }
 
-    /// 带 ImageStash 上下文的 canonical agent 投影（0.19.4 §3.7）。
+    /// 带 ImageStash 上下文的 canonical agent 投影（0.19.4 §3.6）。
     ///
     /// **与 `to_rig_tool_result()` 的区别**：
     /// - `image/*` Blob + stash=Some → 字节移入 stash，返回结构化 `image_ref` JSON：

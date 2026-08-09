@@ -256,7 +256,7 @@ Blink 的能力分两层,**边界用类型系统钉死**:
 
 ### §A5.1 关键设计点
 
-- **JSONPath 取值**:用 `jsonpath-rust` crate(纯 Rust,~30KB)。单值/数组通配/嵌套对象/过滤都覆盖,后续向量检索、RAG chunk 提取可复用。不用自造 dialect。
+- **JSONPath 取值**:用 `jsonpath-rust` crate(纯 Rust,~30KB)。单值/数组通配/嵌套对象/过滤都覆盖,后续结构化数据投影可复用。不用自造 dialect。
 - **desc 三来源优先级**:① manifest `desc_pointer` 指定 data 某字段(动态)→ ② manifest 静态字符串 → ③ 都没有则 None(不展示)。manifest **不做格式化**——需 `format_size(bytes)` 这种时由能力单元自己在 data 里算好。
 - **双轨制**:轨道 A(manifest 投影,简单返回)与轨道 B(直接吐完整 `CapabilityResult`,复杂返回/格式化/builtin capability)都合法。
 
@@ -424,11 +424,11 @@ Blink 不是「内置 AI 的启动器」,是**「本地 AI 的感知与执行层
 
 **产品铁则**:任何让 Blink 变成「纯对话壳子」的设计都要拒绝。AI 是消费者(调 Blink 的 tool)兼生产者(产 Suggestion),Blink 是身体。大脑可换,身体不可换。
 
-**架构铁则**:**Agent 后端坚持 rig-core 自建,不用 opencode/pi 当执行端**——它们是和 Blink 同层的 agent 产品(非依赖),外包执行端会违反「不做 AI 运行时」边界、报废 0.12-0.20 架构投入。现成 agent 的正确用法是当 subagent/MCP server,不当后端。详见 [§A10](#§a10-adr-001agent-后端策略附录)。
+**架构铁则**:**Agent 后端坚持 rig-core 自建,不用 opencode/pi 当执行端**——它们是和 Blink 同层的 agent 产品(非依赖),外包执行端会违反「不做 AI 运行时」边界,并架空 Blink 已有的 Tool/Memory/preamble/gating 能力。现成 agent 的正确用法是当受控 subagent/MCP server,不当后端。详见 [§A10](#§a10-adr-001agent-后端策略附录)。
 
 ### §A9.2 Provider 多档(能力供应商)
 
-Provider 不只是聊天 API,是**能力供应商**:LLM(`chat`/`chat_stream`)/ STT(`transcribe`)/ embedding(留 RAG)。一个 Provider 可只供一项(本地 whisper 只供 STT),也可全供(OpenAI)。
+Provider 不只是聊天 API,是**能力供应商**:当前覆盖 LLM(`chat`/`chat_stream`)与 STT(`transcribe`),并允许未来扩展其他模型能力。一个 Provider 可只供一项(本地 whisper 只供 STT),也可供应多项。embedding / RAG 当前不进入短期路线,见 [roadmap §五](../roadmap.md#五远期观察原-020-向量--rag-规划归档)。
 
 三档配置:**路由模型**(意图分类 + 抽参,快、便宜、可本地)/ **轻量模型**(日常单轮)/ **主模型**(多步推理)。档位空缺自动降级。
 
@@ -442,9 +442,9 @@ Provider 不只是聊天 API,是**能力供应商**:LLM(`chat`/`chat_stream`)/ S
 | **0.12** | AI 能力架构搭骨架 | 对话窗口 / DB 四层拆分 / Provider 模型统一 / Tool 适配层 / CapabilityRegistry 动态注册 |
 | **0.13** | 能力扩展(基础版 + 开放) | MCP client/server / CLI 化 / token-aware 压缩 / 记忆 FTS5 召回 / Skill 约定式 / 0.13.7 收敛(P3 投影剔 score + 插件 Action→Capability 迁移,删 `ActionOutcome::Items`) |
 | **0.14** | 能力协议与架构收敛 | Capability/Action 边界钉死(删 `ActionTool`) + Cap 协议分层(§A5) + 四出口投影引擎(§A6) + config 下沉、AppHandle/Emitter 隔离、主要 Win32 归 infra、commands 与前端巨石拆分、Schema/事件/invoke 收敛；0.14.7 深层工程债见 phase §9.3 |
-| **0.20** | 能力扩展向量版 | zvec 向量基础设施 / 记忆向量召回(混合检索升级 FTS5)/ RAG 知识库 / AI 生成 Skill |
+| **0.19** | 能力闭环 | 窗口/图片感知 + 便签/pin 执行 + 用户/AI 双入口收敛 + ImageStash 图片跨 Capability 引用 |
 
-**解耦智慧**:先验证大脑(0.9 文本闭环),再加感官(0.10 语音)。0.12-0.14 是 AI 能力架构的「搭骨架 → 扩展 → 收敛重构」三步。**核心原则:零嵌入模型依赖——0.13 所有功能在用户只有 chat 模型时也完整可用,向量版留 0.20**。
+**解耦智慧**:先验证大脑(0.9 文本闭环),再加感官(0.10 语音)。0.12-0.14 是 AI 能力架构的「搭骨架 → 扩展 → 收敛重构」三步,0.19 再补感知与执行闭环。**核心原则:零嵌入模型依赖——FTS5 + token-aware 窗口是当前正式方案,向量化与 RAG 仅保留为远期观察,不预占版本**。
 
 > 各版完整实现见对应 `phases/`。Skill ≠ Tool:Skill 注入 preamble(教 AI 怎么做),Tool 进 tool 池(让 AI 能做什么)。
 
@@ -475,18 +475,18 @@ Provider 不只是聊天 API,是**能力供应商**:LLM(`chat`/`chat_stream`)/ S
 ### §A10.2 三层错位(为何 opencode 不适合当 Blink 后端)
 
 1. **场景错配**:opencode/pi 绑定 cwd、为代码仓库设计(LSP/bash/快照)。Blink 是全局快捷入口 + 上下文感知助手,对话场景是「翻译这段」「截图识别」,不是「在仓库里编码」。重机制是死重甚至干扰。
-2. **违反产品边界**:opencode 自带完整 AI 运行时(管 session/context/快照)。把它当后端 = Blink 降级成 opencode 的前端壳,0.12-0.20 在 agent 能力上的差异化投入全部作废。
-3. **报废护城河**:0.13.4 MCP server(暴露 Blink 能力给生态)、0.20 RAG 是 Blink 要构建的独特价值。外包 agent 端后,Blink 自己的 Capability 反而要反向给 opencode 写 MCP server 才能被其 agent 用——绕一大圈,且与 Blink 自己的 MCP server 护城河功能重叠。
+2. **违反产品边界**:opencode 自带完整 AI 运行时(管 session/context/快照)。把它当后端 = Blink 降级成 opencode 的前端壳,0.12-0.14 已建立的 Tool/Memory/preamble/gating 主权被架空。
+3. **架空统一能力底座**:Blink 已通过 Capability/MCP server 暴露自身能力。外包 agent 端后,Blink 反而要把自己的能力再包装给外部后端才能使用,形成多余反向依赖,并削弱感知与执行闭环这一真正护城河。
 
 ### §A10.3 坚持自建的四点理由 + 唯一缺口
 
-**理由**:① 抽象层正确(地基与建筑的关系)② 产品边界守得住(rig 不假设上层改文件,Blink 不背「快照/LSP/bash」重包袱,符合常驻内存 < 300MB)③ 架构主权完整(Tool 适配层/Memory/preamble/gating/未来 MCP server 全在自己手里)④ 0.13/0.14/0.20 投入不白费。
+**理由**:① 抽象层正确(地基与建筑的关系)② 产品边界守得住(rig 不假设上层改文件,Blink 不背「快照/LSP/bash」重包袱,符合常驻内存 < 300MB)③ 架构主权完整(Tool 适配层/Memory/preamble/gating/MCP server 全在自己手里)④ 感知与执行能力可以独立演进,不被外部 agent 产品绑架。
 
-**唯一缺口——context 压缩**:rig 只给原语(hook)不给策略,但 opencode/pi 这块**也是各自自建**(行业常态,非 Blink 劣势)。Blink 的路径更优:0.13 FTS5 召回(零嵌入依赖)→ 0.13 token-aware 窗口 → 0.20 向量召回(语义),「窗口 + 召回」比 opencode 的「超限粗暴截断 + LLM 摘要」更精细。
+**唯一缺口——context 压缩**:rig 只给原语(hook)不给策略,但 opencode/pi 这块**也是各自自建**(行业常态,非 Blink 劣势)。Blink 当前用 0.13 token-aware 窗口 + FTS5 召回解决,保持零嵌入依赖；只有真实数据证明关键词召回不足时,才按 roadmap 门槛重新评估语义召回。
 
 ### §A10.4 现成 agent 的正确用法
 
-ADR-001 不否定「利用现成 agent 的能力」,只是否定「把执行端交给它们」。正确用法:通过 `claude -p` / `opencode serve` 等单次任务接口,把外部 agent 包装成 **subagent(agent-as-tool)**,让 Blink 的 supervisor 在需要「复杂文件操作 / 长任务编排」时调用。保留架构主权,又借力现成生态——是 0.21+ 候选方向(详见 `../roadmap.md`)。
+ADR-001 不否定「利用现成 agent 的能力」,只是否定「把执行端交给它们」。正确用法:通过稳定的单次任务接口,把外部 agent 包装成 **subagent(agent-as-tool)**,让 Blink 的 supervisor 在需要「复杂文件操作 / 长任务编排」时受控调用。保留架构主权,又借力现成生态——这是未立项的条件候选(详见 `../roadmap.md`)。
 
 ### §A10.5 何时重新评估此决策
 
