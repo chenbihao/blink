@@ -138,7 +138,8 @@ body {
     display: block;
 }
 
-h2 {
+/* 仅设置页面板的直系标题承担拖拽区布局，避免污染 Markdown 等嵌套内容的 h2。 */
+.panel > h2 {
     font-size: var(--text-3xl);
     font-weight: var(--weight-semibold);
     color: var(--text);
@@ -152,7 +153,7 @@ h2 {
     padding: 28px 32px 20px 32px; /* 加回 padding，文字位置不变 */
 }
 
-h2:active {
+.panel > h2:active {
     cursor: grabbing;
 }
 

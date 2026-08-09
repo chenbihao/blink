@@ -29,7 +29,23 @@ Blink transforms multi-step operations like "select English text → translate",
 
 With **Chord mode** (hold Alt + letter key while the main window is open), you can quickly invoke screenshot, translation, voice input and other enhanced capabilities without switching windows or memorizing complex shortcuts.
 
-Under the hood is a **capability architecture**: every feature (search, screenshot, translation, plugins...) is wrapped as a standard Capability that can be called by AI. In the future, these capabilities will also be available to external AI tools as CLI tools or Skills.
+Under the hood, Blink is built on a **unified capability foundation**. Sticky notes, images, the clipboard, screenshots, OCR, translation, and more are no longer isolated features: the output of one capability can flow directly into another, without repeatedly saving files, switching apps, or copying and pasting.
+
+These capabilities can be called by Blink's built-in AI or exposed through a local **MCP Server**. You decide which capabilities to expose, allowing other agents to use the search, plugin, window, image, and sticky-note capabilities running in your current Blink process.
+
+---
+
+## Capability Loops: Content Flows Naturally Between Capabilities
+
+Blink's features are not isolated islands. The output of one capability can become the input of another:
+
+- **Image Loop** — Screenshots, windows, and clipboard images can be annotated, processed with OCR, pinned, copied, or saved
+- **Sticky Note Loop** — AI can create, read, update, and recycle sticky notes so temporary content remains actionable
+- **Clipboard Loop** — Text and images can serve as context sources as well as inputs and outputs for other capabilities
+- **AI Invocation** — Blink's built-in AI can combine these capabilities on demand to complete multi-step tasks
+- **MCP Exposure** — Blink can run as a local MCP Server and make user-selected capabilities available to other agents
+
+This is more than putting sticky notes, screenshots, and AI in the same app. They share the same capability semantics and live runtime state, reducing the cost of moving content between separate tools.
 
 ---
 
@@ -81,19 +97,24 @@ Plugins run in isolated processes — crashes don't affect Blink's core. Support
 
 ## Chord Enhancements
 
-screenshot:
+Screenshot:
 <p align="center">
-  <img src="docs/images/feature-chord-screenshot.gif" width="680" alt="Chord 模式"/>
+  <img src="docs/images/feature-chord-screenshot.gif" width="680" alt="Chord screenshot"/>
 </p>
 
 AI:
 <p align="center">
-  <img src="docs/images/feature-chord-ai.gif" width="680" alt="Chord 模式"/>
+  <img src="docs/images/feature-chord-ai.gif" width="680" alt="Chord AI"/>
 </p>
 
-other:
+Voice input:
 <p align="center">
-  <img src="docs/images/feature-chord-other.gif" width="680" alt="Chord 模式"/>
+  <img src="docs/images/feature-voice.gif" width="680" alt="Voice input"/>
+</p>
+
+Other capabilities:
+<p align="center">
+  <img src="docs/images/feature-chord-other.gif" width="680" alt="Other Chord capabilities"/>
 </p>
 
 
@@ -105,6 +126,8 @@ While the main window is open, hold Alt and letter keys become quick action shor
 | `Alt + Q` | Open AI chat window for conversation |
 | `Alt + A` | Region screenshot → OCR / translate / pin / copy / save |
 | `Alt + C` | Clipboard history |
+| `Alt + E` | Edit the current content; opens a blank editor when no context is available |
+| `Alt + S` | Turn the current content into a sticky note; creates a blank note when no context is available |
 | `Alt + Space` | Voice input (supports input in the main window or as a separate voice input method) |
 | `Alt + 1~9` | Quick launch item by position in results |
 
@@ -112,30 +135,39 @@ Screenshots support annotation (rectangle, arrow, text, brush, blur, mosaic, etc
 
 ---
 
-## AI and VoiceInput Ready
+## AI, Skills, and MCP Ready
 
+Capability invocation:
 <p align="center">
-  <img src="docs/images/feature-ai.gif" width="680" alt="AI Capabilities"/>
+  <img src="docs/images/feature-ai-cap.gif" width="680" alt="AI capability invocation"/>
 </p>
 
-Every feature in Blink is wrapped as a standard Capability that can be called by AI:
+MCP Server:
+<p align="center">
+  <img src="docs/images/feature-ai-mcps.gif" width="680" alt="Blink MCP Server"/>
+</p>
 
-- **Capability Invocation** — AI can call Blink's built-in capabilities (search, open apps, execute commands...)
-- **Plugin Invocation** — AI can call any installed plugin's features
-- **Multi-provider Support** — Built-in presets for OpenAI, DeepSeek, etc. Configure any compatible provider or local LLM (ollama / lmstudio)
-- **Chat Window** — Independent Agent window, natural language command
-- **Future Openness** — These capabilities will gradually be available to external AI tools as CLI, MCP, or Skills
+Blink's reusable capabilities can be called by AI and connected to external tools through open protocols:
+
+- **Built-in Capabilities** — AI can invoke search, app, window, image, clipboard, sticky-note, and other capabilities
+- **Plugin Invocation** — Installed plugins join the unified AI tool pool
+- **Skill Support** — Use `SKILL.md` files to give AI specialized workflows and domain knowledge
+- **MCP Client** — Blink can connect to external MCP Servers and use their tools in conversations
+- **MCP Server** — Blink can also make user-selected local capabilities available to other agents
+- **Multi-provider Support** — Includes presets for OpenAI, DeepSeek, and more, with support for compatible providers and local models such as Ollama and LM Studio
+- **Chat Window** — A standalone agent window where natural language can be used to combine and invoke capabilities
 
 ---
 
 ## Roadmap
 
-**Completed:** Core search → Plugin ecosystem → Context awareness → Chord interactions → Voice input → Screenshot annotation → AI basic call chain
+**Completed:** Core search → Plugin ecosystem → Context awareness → Chord interactions → Voice input → Screenshot annotation → AI Agent → Skills and bidirectional MCP integration → Sticky note, image, and clipboard capability loops
 
-**Next:**
+**Continuing Evolution:**
 
-- **Feature Completion** — Improve screenshot capability, clipboard capability, add preview capability, etc.
-- **Memory** — Let AI remember your preferences and history, getting smarter over time
+- **Core-path Reliability** — Continue protecting summon, focus, input, and first-result performance
+- **Capability Foundation** — Let more existing capabilities share implementations and form more natural workflows
+- **Capability Discoverability** — Make existing capabilities easier for both users and AI to find, understand, and invoke
 
 ---
 
@@ -162,9 +194,11 @@ Download the latest installer from [Releases](../../releases).
 | `↑` `↓` | Navigate results |
 | `Tab` | Accept completion suggestion (e.g. `fy` → `fanyi `) or context recommendation |
 | `Enter` | Launch / copy result |
-| `Alt + Q` | AI chat window (coming soon) |
+| `Alt + Q` | AI chat window |
 | `Alt + A` | Region screenshot |
 | `Alt + C` | Clipboard history |
+| `Alt + E` | Edit the current content; opens a blank editor when no context is available |
+| `Alt + S` | Turn the current content into a sticky note; creates a blank note when no context is available |
 | `Alt + 1~9` | Quick launch by position |
 | `Alt + Space` (hold) | Voice input |
 | `Esc` | Hide |
