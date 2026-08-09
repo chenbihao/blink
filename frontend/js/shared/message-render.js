@@ -83,6 +83,7 @@ export function renderConfirmCard(payload, onConfirm) {
     <div class="ai-confirm-card-tool">
       ${escapeText(payload.tool_type || "")}: <strong>${escapeText(payload.tool_name)}</strong>
     </div>
+    ${renderSettingConfirmDetails(payload)}
     <div class="ai-confirm-card-actions">
       <button class="ai-confirm-btn ai-confirm-btn-reject" data-action="reject">${escapeText(t("ai.confirm_reject"))}</button>
       <button class="ai-confirm-btn ai-confirm-btn-approve" data-action="approve">${escapeText(t("ai.confirm_approve"))}</button>
@@ -99,6 +100,17 @@ export function renderConfirmCard(payload, onConfirm) {
       `<span class="ai-confirm-status ai-confirm-status-approved">${escapeText(t("ai.confirm_approved"))}</span>`;
   });
   return el;
+}
+
+function renderSettingConfirmDetails(payload) {
+  if (payload.tool_name !== "update_setting" || !payload.arguments) return "";
+  const args = payload.arguments;
+  const format = (value) => escapeText(JSON.stringify(value) ?? "null");
+  return `<div class="ai-confirm-card-details">
+    <div><span>设置</span><strong>${escapeText(args.setting_id || "")}</strong></div>
+    <div><span>旧值</span><code>${format(args.old_value)}</code></div>
+    <div><span>新值</span><code>${format(args.new_value)}</code></div>
+  </div>`;
 }
 
 /**

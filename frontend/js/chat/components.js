@@ -659,6 +659,7 @@ export function renderConfirmCard(payload, onConfirm) {
     <div class="chat-confirm-card-tool">
       ${escapeText(payload.tool_type)}: <strong>${escapeText(payload.tool_name)}</strong>
     </div>
+    ${renderSettingConfirmDetails(payload)}
     <div class="chat-confirm-card-actions">
       <button class="chat-confirm-btn chat-confirm-btn-reject" data-action="reject">拒绝</button>
       <button class="chat-confirm-btn chat-confirm-btn-approve" data-action="approve">允许执行</button>
@@ -678,6 +679,17 @@ export function renderConfirmCard(payload, onConfirm) {
   messagesEl.appendChild(el);
   scrollToBottom();
   return el;
+}
+
+function renderSettingConfirmDetails(payload) {
+  if (payload.tool_name !== "update_setting" || !payload.arguments) return "";
+  const args = payload.arguments;
+  const format = (value) => escapeText(JSON.stringify(value) ?? "null");
+  return `<div class="chat-confirm-card-details">
+    <div><span>设置</span><strong>${escapeText(args.setting_id || "")}</strong></div>
+    <div><span>旧值</span><code>${format(args.old_value)}</code></div>
+    <div><span>新值</span><code>${format(args.new_value)}</code></div>
+  </div>`;
 }
 
 /**

@@ -97,16 +97,12 @@ pub async fn set_config(
         }
         "clipboard_enabled" => {
             let enabled: bool = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            // 只读写 clipboard:config 分片，不走门面 get_config（避免 7 片全读全写）。
-            // 0.9 删掉 AppConfig.clipboard 字段后此处不受影响。
             let mut clip_cfg = crate::app::config::ConfigStore::get::<
                 crate::infra::data::clipboard::ClipboardConfig,
             >(&pool)
             .await;
             clip_cfg.enabled = enabled;
-            crate::app::config::ConfigStore::set(&pool, &clip_cfg).await?;
-            crate::infra::platform::clipboard::set_active(enabled);
-            let _ = app.emit(EventNames::CONFIG_CHANGED, ());
+            crate::app::setting_service::apply_clipboard(&app, &clip_cfg).await?;
             tracing::info!(enabled, "剪贴板监听开关已更新");
         }
 
@@ -121,19 +117,12 @@ pub async fn set_config(
         "general_config" => {
             let general: crate::app::config::GeneralConfig =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
-            let max_results = general.max_results;
-            crate::app::config::update_general_config(&pool, &general).await?;
-            if let Some(ss) =
-                app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
-            {
-                ss.update_max_results(max_results as usize);
-            }
-            let _ = app.emit(EventNames::CONFIG_CHANGED, ());
+            crate::app::setting_service::apply_general_config(&app, &general).await?;
             tracing::info!(
                 theme = %general.theme,
                 search_history_enabled = general.search_history_enabled,
                 search_history_days = general.search_history_days,
-                max_results,
+                max_results = general.max_results,
                 page_size = general.page_size,
                 "通用配置已更新"
             );
@@ -141,18 +130,7 @@ pub async fn set_config(
         "autosuggest" => {
             let v: crate::app::config::AutosuggestUpdate =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::update_autosuggest_config(
-                &pool,
-                v.enabled,
-                v.min_score,
-                v.tab_key.clone(),
-            )
-            .await?;
-            if let Some(ss) =
-                app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
-            {
-                ss.update_autosuggest_config(v.enabled, v.min_score);
-            }
+            crate::app::setting_service::apply_autosuggest(&app, &v).await?;
             tracing::info!(v.enabled, v.min_score, tab_key = %v.tab_key, "Autosuggest 配置已更新");
         }
         "chord_toggles" => {
@@ -177,14 +155,7 @@ pub async fn set_config(
             // 0.10.7：剪贴板历史详细配置（retention_days / max_items / blacklist_keywords / display_count）
             let cfg: crate::infra::data::clipboard::ClipboardConfig =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::ConfigStore::set(&pool, &cfg).await?;
-            // 热更新：display_count 转发到 ClipboardEngine（downcast 模式，同 update_language）。
-            if let Some(ss) =
-                app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
-            {
-                ss.update_clipboard_display_count(cfg.display_count);
-            }
-            let _ = app.emit(EventNames::CONFIG_CHANGED, ());
+            crate::app::setting_service::apply_clipboard(&app, &cfg).await?;
             tracing::info!(
                 enabled = cfg.enabled,
                 max_items = cfg.max_items,
@@ -230,12 +201,8 @@ pub async fn set_config(
         }
         "window_opacity" => {
             let opacity: f64 = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            let opacity = opacity.clamp(0.2, 1.0); // 最低 20% 防止完全不可见
-            let mut config = crate::app::config::get_config(&pool).await;
-            config.window_opacity = opacity;
-            crate::app::config::save_config(&pool, &config).await?;
-            // 前端通过 blink://config-changed 事件自行读取并设置 CSS 变量
-            let _ = app.emit(EventNames::CONFIG_CHANGED, ());
+            let opacity = opacity.clamp(0.2, 1.0);
+            crate::app::setting_service::apply_window_opacity(&app, opacity).await?;
             tracing::info!(opacity, "主窗口透明度已更新");
         }
 

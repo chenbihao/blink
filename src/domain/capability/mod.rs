@@ -87,6 +87,13 @@ pub trait Capability: Send + Sync {
         ) || self.schema().sensitive
     }
 
+    /// 确认结果是否允许按工具名记忆。
+    ///
+    /// 默认保持现有权限记忆行为；涉及字段级配置写入等每次参数都不同的操作必须返回 false。
+    fn ai_confirmation_rememberable(&self) -> bool {
+        true
+    }
+
     /// 纯能力执行：入参 → 出参。不直接操作前端 DOM/事件流，不 emit 前端事件，不弹模态框。
     /// 可产生 OS 级窗口副作用（如 open_url 开浏览器、create_sticky 显示便签窗口）——
     /// 见 `spec-architecture.md §A4`「Capability「不碰 UI」边界定义」。

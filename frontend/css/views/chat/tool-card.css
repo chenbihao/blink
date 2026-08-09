@@ -345,6 +345,29 @@
   margin-bottom: var(--space-sm);
 }
 
+.chat-confirm-card-details {
+  display: grid;
+  gap: var(--space-xs);
+  margin-bottom: var(--space-sm);
+  font-size: var(--text-sm);
+}
+
+.chat-confirm-card-details > div {
+  display: grid;
+  grid-template-columns: 3em minmax(0, 1fr);
+  gap: var(--space-sm);
+}
+
+.chat-confirm-card-details span {
+  opacity: 0.65;
+}
+
+.chat-confirm-card-details code,
+.chat-confirm-card-details strong {
+  overflow-wrap: anywhere;
+  font-style: normal;
+}
+
 .chat-confirm-card-actions {
   display: flex;
   gap: var(--space-sm);

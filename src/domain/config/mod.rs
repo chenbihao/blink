@@ -13,6 +13,7 @@
 
 pub mod ai_config;
 pub mod app_config;
+pub mod managed_settings;
 pub mod plugin_config;
 pub mod shards;
 pub mod store;
@@ -23,6 +24,7 @@ pub mod stt_config;
 pub use ai_config::*;
 #[allow(unused_imports)]
 pub use app_config::*;
+pub use managed_settings::*;
 pub use plugin_config::*;
 pub use shards::*;
 #[allow(unused_imports)]

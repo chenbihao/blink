@@ -428,20 +428,6 @@ pub async fn update_disabled_builtin_actions(
     save_config(pool, &config).await
 }
 
-pub async fn update_autosuggest_config(
-    pool: &SqlitePool,
-    enabled: bool,
-    min_score: f64,
-    tab_key: String,
-) -> Result<(), String> {
-    let min_score = min_score.clamp(0.0, 1.0);
-    let mut config = get_config(pool).await;
-    config.autosuggest_enabled = enabled;
-    config.autosuggest_min_score = min_score;
-    config.autosuggest_tab_key = tab_key;
-    save_config(pool, &config).await
-}
-
 #[allow(dead_code)]
 pub async fn get_disabled_context_bindings(pool: &SqlitePool) -> Vec<String> {
     get_config(pool).await.disabled_context_bindings
@@ -505,19 +491,6 @@ pub async fn update_chord_bindings(
     let mut chord = get_chord_config(pool).await;
     chord.bindings = bindings;
     ConfigStore::set(pool, &chord).await
-}
-
-pub async fn update_general_config(
-    pool: &SqlitePool,
-    general: &GeneralConfig,
-) -> Result<(), String> {
-    let mut config = get_config(pool).await;
-    config.theme = general.theme.clone();
-    config.search_history_enabled = general.search_history_enabled;
-    config.search_history_days = general.search_history_days;
-    config.max_results = general.max_results;
-    config.page_size = general.page_size;
-    save_config(pool, &config).await
 }
 
 // ── 引擎配置（通用 API）─────────────────────────────────────────────────────────

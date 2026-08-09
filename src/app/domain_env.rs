@@ -114,6 +114,27 @@ impl CapabilityEnv for TauriDomainEnv {
         self.search_service.get()
     }
 
+    async fn list_managed_settings(
+        &self,
+    ) -> Result<Vec<crate::domain::config::ManagedSetting>, String> {
+        Ok(crate::app::setting_service::list_managed_settings(&self.app).await)
+    }
+
+    async fn update_managed_setting(
+        &self,
+        setting_id: &str,
+        expected_old_value: serde_json::Value,
+        new_value: serde_json::Value,
+    ) -> Result<crate::domain::config::ManagedSettingUpdate, String> {
+        crate::app::setting_service::update_managed_setting(
+            &self.app,
+            setting_id,
+            expected_old_value,
+            new_value,
+        )
+        .await
+    }
+
     // ── 图片暂存（0.19.4 ImageStash 引用闭环）──────────────────────────
 
     fn image_stash(&self) -> Option<&Arc<ImageStash>> {
@@ -412,6 +433,25 @@ mod tests {
         }
         fn search_service(&self) -> Option<&Arc<SearchService>> {
             None
+        }
+        async fn list_managed_settings(
+            &self,
+        ) -> Result<Vec<crate::domain::config::ManagedSetting>, String> {
+            Ok(Vec::new())
+        }
+        async fn update_managed_setting(
+            &self,
+            setting_id: &str,
+            expected_old_value: serde_json::Value,
+            new_value: serde_json::Value,
+        ) -> Result<crate::domain::config::ManagedSettingUpdate, String> {
+            Ok(crate::domain::config::ManagedSettingUpdate {
+                setting_id: setting_id.into(),
+                old_value: expected_old_value,
+                new_value,
+                immediately_effective: true,
+                requires_restart: false,
+            })
         }
         fn image_stash(&self) -> Option<&Arc<ImageStash>> {
             None

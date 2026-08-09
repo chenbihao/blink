@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use crate::domain::ai::chat_service::ChatService;
 use crate::domain::capability::{CapabilityRegistry, ImageStash};
+use crate::domain::config::{ManagedSetting, ManagedSettingUpdate};
 use crate::domain::plugin::PluginEngine;
 use crate::domain::search::SearchService;
 use crate::domain::sticky::{
@@ -46,6 +47,17 @@ pub trait CapabilityEnv: Send + Sync {
     /// CLI/MCP 的最小运行时可能不构造完整搜索栈，因此显式返回 `Option`，
     /// 由 Capability 转成可恢复错误，禁止在环境 getter 内 panic。
     fn search_service(&self) -> Option<&Arc<SearchService>>;
+
+    /// 列出 AI 可见的稳定设置白名单；不得返回底层 KV 或完整配置对象。
+    async fn list_managed_settings(&self) -> Result<Vec<ManagedSetting>, String>;
+
+    /// 字段级更新受控设置。`expected_old_value` 同时用于确认预览与并发保护。
+    async fn update_managed_setting(
+        &self,
+        setting_id: &str,
+        expected_old_value: serde_json::Value,
+        new_value: serde_json::Value,
+    ) -> Result<ManagedSettingUpdate, String>;
 
     // ── 便签窗口操作（0.19.3 便签能力化桥接）──────────────────────────
 

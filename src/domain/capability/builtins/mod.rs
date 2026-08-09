@@ -29,6 +29,7 @@ pub mod image_input;
 pub mod list_clipboard_images;
 pub mod list_sticky;
 pub mod list_windows;
+pub mod get_settings;
 pub mod ocr_engine;
 pub mod ocr_image;
 pub mod open_path;
@@ -47,6 +48,7 @@ pub mod set_sticky_geometry;
 pub mod sticky_common;
 pub mod trash_sticky;
 pub mod update_sticky;
+pub mod update_setting;
 pub mod write_clipboard;
 
 #[cfg(test)]
@@ -60,6 +62,14 @@ mod tests {
             "trash_sticky",
             "read_text_file",
         ] {
+            assert!(registry.get(id).is_some(), "{id} 应通过 inventory 注册");
+        }
+    }
+
+    #[test]
+    fn phase_0_19_8_capabilities_are_in_inventory() {
+        let registry = crate::domain::capability::CapabilityRegistry::new();
+        for id in ["get_settings", "update_setting"] {
             assert!(registry.get(id).is_some(), "{id} 应通过 inventory 注册");
         }
     }

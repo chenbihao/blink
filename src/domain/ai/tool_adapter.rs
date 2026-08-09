@@ -326,6 +326,7 @@ async fn await_dangerous_confirm(
 /// 如果 `is_dangerous` 为 false：直接返回 None，调用方继续执行。
 async fn check_dangerous_confirm(
     is_dangerous: bool,
+    rememberable: bool,
     pending: &PendingConfirms,
     env: &dyn DomainEnv,
     tool_name: &str,
@@ -340,7 +341,8 @@ async fn check_dangerous_confirm(
         crate::domain::ai::chat_service::current_request_context_from_env(env);
 
     // 对话级信任：用户已确认过的危险操作自动放行，不再弹窗
-    if pending.is_trusted(&conv_id, tool_name).await {
+    let trusted = rememberable && pending.is_trusted(&conv_id, tool_name).await;
+    if may_reuse_confirmation(rememberable, trusted) {
         tracing::debug!(
         %tool_name,
         conversation_id = %conv_id,
@@ -367,8 +369,10 @@ async fn check_dangerous_confirm(
     {
         ConfirmOutcome::Approved => {
             tracing::info!(%tool_name, "用户确认执行危险 {tool_type}");
-            // 加入对话级信任列表，后续同对话内不再弹窗
-            pending.trust(&conv_id, tool_name).await;
+            if rememberable {
+                // 加入对话级信任列表，后续同对话内不再弹窗
+                pending.trust(&conv_id, tool_name).await;
+            }
             None
         }
         ConfirmOutcome::Rejected => Some(Ok(format!("用户拒绝了操作: {tool_name}（未执行）"))),
@@ -377,6 +381,10 @@ async fn check_dangerous_confirm(
         ))),
         ConfirmOutcome::Dropped => Some(Ok(format!("确认信号异常，未执行: {tool_name}"))),
     }
+}
+
+fn may_reuse_confirmation(rememberable: bool, trusted: bool) -> bool {
+    rememberable && trusted
 }
 
 // ── 辅助函数 ──────────────────────────────────────────────────────────────────
@@ -526,6 +534,7 @@ impl ToolDyn for CapabilityTool {
             // 危险操作确认（四域墙 + 闭环）
             if let Some(result) = check_dangerous_confirm(
                 self.requires_confirmation(),
+                self.cap.ai_confirmation_rememberable(),
                 &self.pending,
                 self.emitter.as_ref(),
                 self.cap.id(),
@@ -860,6 +869,13 @@ mod tests {
         assert!(!safe.requires_ai_confirmation());
         assert!(sensitive.requires_ai_confirmation());
         assert!(dangerous.requires_ai_confirmation());
+    }
+
+    #[test]
+    fn non_rememberable_capability_never_reuses_tool_trust() {
+        assert!(!may_reuse_confirmation(false, true));
+        assert!(may_reuse_confirmation(true, true));
+        assert!(!may_reuse_confirmation(true, false));
     }
 
     // ── CapabilityRegistry::entries 测试 ──────────────────────────────────

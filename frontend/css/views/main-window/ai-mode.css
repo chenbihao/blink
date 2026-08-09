@@ -331,6 +331,29 @@
   margin-bottom: var(--space-sm);
 }
 
+.ai-confirm-card-details {
+  display: grid;
+  gap: var(--space-xs);
+  margin-bottom: var(--space-sm);
+  font-size: var(--text-sm);
+}
+
+.ai-confirm-card-details > div {
+  display: grid;
+  grid-template-columns: 3em minmax(0, 1fr);
+  gap: var(--space-sm);
+}
+
+.ai-confirm-card-details span {
+  opacity: 0.65;
+}
+
+.ai-confirm-card-details code,
+.ai-confirm-card-details strong {
+  overflow-wrap: anywhere;
+  font-style: normal;
+}
+
 .ai-confirm-card-actions {
   display: flex;
   gap: var(--space-sm);
