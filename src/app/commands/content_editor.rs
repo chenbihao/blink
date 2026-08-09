@@ -10,7 +10,7 @@
 
 use std::sync::Mutex;
 
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 
 /// 待编辑内容 payload（前端 → 后端 → 前端，经 Tauri State 中转避免事件竞态）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -111,21 +111,19 @@ pub async fn save_content_editor(
             let sticky_id = origin_ref
                 .as_deref()
                 .ok_or_else(|| "sticky_update 需要 origin_ref".to_string())?;
-            let svc = app
-                .state::<std::sync::Arc<crate::domain::sticky::StickyService>>()
+            use crate::domain::event::CapabilityEnv;
+            let env = app
+                .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
                 .inner()
                 .clone();
-            svc.update_content_debounced(sticky_id, &body)
+            env.update_sticky_content_and_notify(
+                sticky_id,
+                &body,
+                None,
+                crate::domain::sticky::StickyChangeSource::ContentEditor,
+            )
                 .await
-                .map_err(|e: crate::domain::sticky::StickyError| e.to_string())?;
-            // emit 内容变更事件让管理界面和其它监听者更新
-            // 0.18.3 fix: 添加 source 字段，让便签窗口区分变更来源——
-            // content-editor 来源的变更应始终 reload（跳过 isEditing 检查），
-            // 避免多窗口场景下 document.activeElement 不可靠导致便签不刷新。
-            let _ = app.emit(
-                crate::domain::event_names::EventNames::STICKY_CONTENT_CHANGED,
-                serde_json::json!({ "stickyId": sticky_id, "source": "content-editor" }),
-            );
+                .map_err(|e| e.to_string())?;
             tracing::info!(sticky_id = %sticky_id, "save_content_editor: sticky_update 完成");
             Ok(sticky_id.to_string())
         }

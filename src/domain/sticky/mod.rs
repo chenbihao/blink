@@ -37,6 +37,33 @@ pub enum StickyError {
     },
 }
 
+/// 便签正文变更来源；用于前端去重/刷新，不携带正文。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StickyChangeSource {
+    UserWindow,
+    ContentEditor,
+    Capability,
+}
+
+impl StickyChangeSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UserWindow => "sticky",
+            Self::ContentEditor => "content-editor",
+            Self::Capability => "capability",
+        }
+    }
+}
+
+/// 跨 DB、窗口与事件通知的便签编排错误。
+#[derive(Debug, thiserror::Error)]
+pub enum StickyWorkflowError {
+    #[error(transparent)]
+    Sticky(#[from] StickyError),
+    #[error("便签界面同步失败: {detail}")]
+    SideEffect { detail: String },
+}
+
 impl From<String> for StickyError {
     fn from(s: String) -> Self {
         StickyError::Db { detail: s }
@@ -118,20 +145,6 @@ impl StickyService {
         crate::infra::data::sticky::list_trashed(&self.history_pool).await
     }
 
-    /// 更新便签内容。
-    ///
-    /// 前端 JS 做防抖（500ms 停顿后调用），后端即时写库。
-    /// P1-#13 fix: 返回 Result 传播错误，不再吞错——前端需知道保存是否成功。
-    pub async fn update_content_debounced(
-        &self,
-        id: &str,
-        content: &str,
-    ) -> Result<(), StickyError> {
-        self.update_content(id, content, None).await?;
-        tracing::trace!(sticky_id = %id, "便签内容已保存");
-        Ok(())
-    }
-
     /// 更新正文；传入 revision 时执行乐观并发校验，返回新的 revision。
     pub async fn update_content(
         &self,
@@ -190,9 +203,26 @@ impl StickyService {
         width: i32,
         height: i32,
     ) -> Result<(), StickyError> {
-        crate::infra::data::sticky::update_geometry(&self.history_pool, id, x, y, width, height)
-            .await
-            .map_err(|e| StickyError::Db { detail: e })
+        use crate::infra::data::sticky::StickyWriteOutcome;
+
+        let outcome = crate::infra::data::sticky::update_geometry(
+            &self.history_pool,
+            id,
+            x,
+            y,
+            width,
+            height,
+        )
+        .await
+        .map_err(|detail| StickyError::Db { detail })?;
+        match outcome {
+            StickyWriteOutcome::Applied { .. } => Ok(()),
+            StickyWriteOutcome::NotFound => Err(StickyError::NotFound { id: id.to_string() }),
+            StickyWriteOutcome::Trashed => Err(StickyError::Trashed { id: id.to_string() }),
+            StickyWriteOutcome::Conflict { .. } => Err(StickyError::Db {
+                detail: format!("便签几何更新状态冲突: {id}"),
+            }),
+        }
     }
 
     /// 设置便签可见性。

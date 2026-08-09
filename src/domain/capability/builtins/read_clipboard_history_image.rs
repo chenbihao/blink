@@ -70,7 +70,7 @@ impl Capability for ReadClipboardHistoryImage {
         // 铁则 1：用 deadline 包裹 DB 查询
         let png = tokio::time::timeout_at(
             ctx.deadline_or_far_future(),
-            crate::infra::data::clipboard_images::get_png_by_id(&pool, id),
+            crate::domain::clipboard::load_history_png(&pool, id),
         )
         .await
         .map_err(|_| CapabilityError::Timeout {
@@ -78,7 +78,7 @@ impl Capability for ReadClipboardHistoryImage {
         })?;
 
         match png {
-            Some(bytes) => {
+            Ok(bytes) => {
                 tracing::debug!(id = %id, bytes = bytes.len(), "read_clipboard_history_image: 找到图片");
                 Ok(CapabilityResult::Blob {
                     mime: "image/png".into(),
@@ -86,12 +86,15 @@ impl Capability for ReadClipboardHistoryImage {
                     desc: None,
                 })
             }
-            None => {
+            Err(crate::domain::clipboard::ClipboardError::ImageNotFound { .. }) => {
                 tracing::debug!(id = %id, "read_clipboard_history_image: 无此图片");
                 Ok(CapabilityResult::Done {
                     summary: "无此图片".into(),
                 })
             }
+            Err(error) => Err(CapabilityError::Internal {
+                detail: error.to_string(),
+            }),
         }
     }
 }

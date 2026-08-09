@@ -245,7 +245,7 @@ fn to_image_search_item(meta: ClipboardImageMeta, index: usize, lang: &str) -> S
 
 /// 0.17.9：将 `source_app` 字段解析为展示文案。
 ///
-/// 自写入标签（`blink:screenshot` / `blink:repost` / `blink:ai`）转中英文文案；
+/// 自写入标签（`blink:screenshot` / `blink:repost` / `blink:app` / `blink:ai`）转中英文文案；
 /// 进程名（如 `chrome.exe`）原样返回；None/空 →「未知」/「unknown」。
 ///
 /// **不改 DB schema、不改前端契约**——映射纯在展示层完成。
@@ -266,6 +266,7 @@ fn resolve_source_desc(source_app: Option<&str>, is_zh: bool) -> String {
                 "Repost".to_string()
             }
         }
+        Some(s) if s == "blink:app" => "Blink".to_string(),
         Some(s) if s == "blink:ai" => {
             if is_zh {
                 "AI".to_string()
@@ -574,6 +575,12 @@ mod tests {
     #[test]
     fn resolve_source_desc_ai_zh() {
         assert_eq!(resolve_source_desc(Some("blink:ai"), true), "AI");
+    }
+
+    #[test]
+    fn resolve_source_desc_app_is_not_misattributed_to_ai() {
+        assert_eq!(resolve_source_desc(Some("blink:app"), true), "Blink");
+        assert_eq!(resolve_source_desc(Some("blink:app"), false), "Blink");
     }
 
     #[test]

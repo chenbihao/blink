@@ -17,7 +17,9 @@ use crate::domain::capability::{CapabilityRegistry, ImageStash};
 use crate::domain::event::{CapabilityEnv, DomainEnv};
 use crate::domain::plugin::PluginEngine;
 use crate::domain::search::SearchService;
-use crate::domain::sticky::StickyService;
+use crate::domain::sticky::{
+    StickyChangeSource, StickyService, StickyWorkflowError,
+};
 use crate::infra::data::pools::DbPools;
 use crate::infra::platform::screenshot::ScreenCaptureMeta;
 
@@ -127,6 +129,26 @@ impl CapabilityEnv for TauriDomainEnv {
             .map(|s| s.inner())
     }
 
+    async fn create_sticky_and_notify(
+        &self,
+        content: &str,
+        color: crate::domain::sticky::StickyColor,
+    ) -> Result<crate::domain::sticky::StickyNote, StickyWorkflowError> {
+        let svc = self
+            .sticky_service()
+            .ok_or_else(|| StickyWorkflowError::SideEffect {
+                detail: "StickyService 不可用".into(),
+            })?;
+        let note = svc.create_note(content, color).await?;
+        if let Err(error) = self.app.emit(
+            crate::domain::event_names::EventNames::STICKY_CREATED,
+            serde_json::json!({ "stickyId": note.id }),
+        ) {
+            tracing::warn!(sticky_id = %note.id, %error, "便签已创建，但创建事件发送失败");
+        }
+        Ok(note)
+    }
+
     async fn create_sticky_and_show(
         &self,
         content: &str,
@@ -135,12 +157,9 @@ impl CapabilityEnv for TauriDomainEnv {
         w: Option<i32>,
         h: Option<i32>,
     ) -> Result<String, String> {
-        use tauri::Emitter;
         let svc = self.sticky_service().ok_or("StickyService 不可用")?.clone();
-
-        // 创建便签（默认黄色、visible=true）
-        let note = svc
-            .create_note(content, crate::domain::sticky::StickyColor::default())
+        let note = self
+            .create_sticky_and_notify(content, crate::domain::sticky::StickyColor::default())
             .await
             .map_err(|e| e.to_string())?;
 
@@ -170,15 +189,48 @@ impl CapabilityEnv for TauriDomainEnv {
             true, // 0.16.11：用户操作需要聚焦
         )?;
 
-        // emit 事件让管理界面和其它监听者更新
-        let _ = self.app.emit(
-            crate::domain::event_names::EventNames::STICKY_CREATED,
-            serde_json::json!({ "stickyId": note.id }),
-        );
         Ok(note.id)
     }
 
-    fn hide_sticky_and_notify_trashed(&self, sticky_id: &str) -> Result<(), String> {
+    async fn update_sticky_content_and_notify(
+        &self,
+        sticky_id: &str,
+        content: &str,
+        expected_updated_at: Option<i64>,
+        source: StickyChangeSource,
+    ) -> Result<i64, StickyWorkflowError> {
+        let svc = self
+            .sticky_service()
+            .ok_or_else(|| StickyWorkflowError::SideEffect {
+                detail: "StickyService 不可用".into(),
+            })?;
+        let updated_at = svc
+            .update_content(sticky_id, content, expected_updated_at)
+            .await?;
+        if let Err(error) = self.app.emit(
+            crate::domain::event_names::EventNames::STICKY_CONTENT_CHANGED,
+            serde_json::json!({
+                "stickyId": sticky_id,
+                "source": source.as_str(),
+                "updatedAt": updated_at,
+            }),
+        ) {
+            // DB 已成功写入，不能把已完成操作伪装成失败；记录同步降级即可。
+            tracing::warn!(sticky_id, %error, "便签正文已更新，但变更事件发送失败");
+        }
+        Ok(updated_at)
+    }
+
+    async fn trash_sticky_and_notify(
+        &self,
+        sticky_id: &str,
+    ) -> Result<(), StickyWorkflowError> {
+        let svc = self
+            .sticky_service()
+            .ok_or_else(|| StickyWorkflowError::SideEffect {
+                detail: "StickyService 不可用".into(),
+            })?;
+        svc.trash_note(sticky_id).await?;
         let hide_result = crate::infra::platform::window::hide_sticky_window(&self.app, sticky_id);
         let emit_result = self
             .app
@@ -189,19 +241,43 @@ impl CapabilityEnv for TauriDomainEnv {
             .map_err(|e| e.to_string());
         match (hide_result, emit_result) {
             (Ok(()), Ok(())) => Ok(()),
-            (Err(hide), Ok(())) => Err(format!("隐藏便签窗口失败: {hide}")),
-            (Ok(()), Err(emit)) => Err(format!("通知便签管理器失败: {emit}")),
-            (Err(hide), Err(emit)) => Err(format!(
-                "隐藏便签窗口失败: {hide}; 通知便签管理器失败: {emit}"
-            )),
+            (Err(hide), Ok(())) => Err(StickyWorkflowError::SideEffect {
+                detail: format!("隐藏便签窗口失败: {hide}"),
+            }),
+            (Ok(()), Err(emit)) => Err(StickyWorkflowError::SideEffect {
+                detail: format!("通知便签管理器失败: {emit}"),
+            }),
+            (Err(hide), Err(emit)) => Err(StickyWorkflowError::SideEffect {
+                detail: format!("隐藏便签窗口失败: {hide}; 通知便签管理器失败: {emit}"),
+            }),
         }
     }
 
     // ── pin 窗口操作（0.19.3 pin 能力化桥接）──────────────────────────
 
-    fn show_pin_window(&self, png_bytes: Vec<u8>, x: i32, y: i32) -> Result<(), String> {
-        // show_translating 固定 false——对 AI pin 场景无意义
-        crate::infra::platform::window::show_pin_window(&self.app, png_bytes, x, y, false)
+    fn show_pin_image(
+        &self,
+        png_bytes: Vec<u8>,
+        x: Option<i32>,
+        y: Option<i32>,
+    ) -> Result<(i32, i32), String> {
+        let (width, height) = crate::infra::platform::screenshot::parse_png_size(&png_bytes)
+            .and_then(|(width, height)| {
+                Some((i32::try_from(width).ok()?, i32::try_from(height).ok()?))
+            })
+            .unwrap_or((400, 300));
+        let (center_x, center_y) =
+            crate::infra::platform::window::get_primary_monitor_center(width, height);
+        let position = (x.unwrap_or(center_x), y.unwrap_or(center_y));
+        // show_translating 固定 false——仅截图翻译 UI 状态机需要该状态。
+        crate::infra::platform::window::show_pin_window(
+            &self.app,
+            png_bytes,
+            position.0,
+            position.1,
+            false,
+        )?;
+        Ok(position)
     }
 }
 
@@ -333,6 +409,28 @@ mod tests {
         fn sticky_service(&self) -> Option<&Arc<StickyService>> {
             None
         }
+        async fn create_sticky_and_notify(
+            &self,
+            content: &str,
+            color: crate::domain::sticky::StickyColor,
+        ) -> Result<crate::domain::sticky::StickyNote, StickyWorkflowError> {
+            Ok(crate::domain::sticky::StickyNote {
+                id: "fake_sticky_id".into(),
+                content: content.into(),
+                format: crate::domain::sticky::StickyFormat::default(),
+                color,
+                visible: true,
+                x: 0,
+                y: 0,
+                width: 280,
+                height: 320,
+                always_on_top: true,
+                created_at: 0,
+                updated_at: 0,
+                trashed: false,
+                deleted_at: None,
+            })
+        }
         async fn create_sticky_and_show(
             &self,
             _content: &str,
@@ -343,12 +441,29 @@ mod tests {
         ) -> Result<String, String> {
             Ok("fake_sticky_id".to_string())
         }
-        fn hide_sticky_and_notify_trashed(&self, _sticky_id: &str) -> Result<(), String> {
+        async fn update_sticky_content_and_notify(
+            &self,
+            _sticky_id: &str,
+            _content: &str,
+            expected_updated_at: Option<i64>,
+            _source: StickyChangeSource,
+        ) -> Result<i64, StickyWorkflowError> {
+            Ok(expected_updated_at.unwrap_or_default() + 1)
+        }
+        async fn trash_sticky_and_notify(
+            &self,
+            _sticky_id: &str,
+        ) -> Result<(), StickyWorkflowError> {
             Ok(())
         }
 
-        fn show_pin_window(&self, _png_bytes: Vec<u8>, _x: i32, _y: i32) -> Result<(), String> {
-            Ok(())
+        fn show_pin_image(
+            &self,
+            _png_bytes: Vec<u8>,
+            x: Option<i32>,
+            y: Option<i32>,
+        ) -> Result<(i32, i32), String> {
+            Ok((x.unwrap_or(0), y.unwrap_or(0)))
         }
     }
 

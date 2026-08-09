@@ -511,19 +511,28 @@ pub async fn update_geometry(
     y: i32,
     width: i32,
     height: i32,
-) -> Result<(), String> {
+) -> Result<StickyWriteOutcome, String> {
     let now = chrono::Utc::now().timestamp();
-    sqlx::query("UPDATE sticky_notes SET x = ?1, y = ?2, width = ?3, height = ?4, updated_at = ?5 WHERE id = ?6")
+    let updated_at = sqlx::query_scalar::<_, i64>(
+        "UPDATE sticky_notes
+         SET x = ?1, y = ?2, width = ?3, height = ?4,
+             updated_at = CASE WHEN updated_at >= ?5 THEN updated_at + 1 ELSE ?5 END
+         WHERE id = ?6 AND trashed = 0
+         RETURNING updated_at",
+    )
         .bind(x as i64)
         .bind(y as i64)
         .bind(width as i64)
         .bind(height as i64)
         .bind(now)
         .bind(id)
-        .execute(pool)
+        .fetch_optional(pool)
         .await
         .map_err(|e| e.to_string())?;
-    Ok(())
+    match updated_at {
+        Some(updated_at) => Ok(StickyWriteOutcome::Applied { updated_at }),
+        None => classify_failed_write(pool, id, None).await,
+    }
 }
 
 /// 设置便签可见性（关闭 = 隐藏，不删除）。
@@ -792,6 +801,12 @@ mod tests {
             update_content(&pool, "missing", "x", None).await.unwrap(),
             StickyWriteOutcome::NotFound
         );
+        assert_eq!(
+            update_geometry(&pool, "missing", 1, 2, 300, 400)
+                .await
+                .unwrap(),
+            StickyWriteOutcome::NotFound
+        );
 
         insert_note(&pool, "s2").await;
         assert!(matches!(
@@ -803,8 +818,30 @@ mod tests {
             StickyWriteOutcome::Trashed
         );
         assert_eq!(
+            update_geometry(&pool, "s2", 1, 2, 300, 400)
+                .await
+                .unwrap(),
+            StickyWriteOutcome::Trashed
+        );
+        assert_eq!(
             set_trashed(&pool, "s2", true).await.unwrap(),
             StickyWriteOutcome::Trashed
         );
+    }
+
+    #[tokio::test]
+    async fn geometry_update_changes_revision_and_values() {
+        let pool = test_pool().await;
+        let note = insert_note(&pool, "geometry").await;
+        let outcome = update_geometry(&pool, &note.id, 10, 20, 320, 440)
+            .await
+            .unwrap();
+        let StickyWriteOutcome::Applied { updated_at } = outcome else {
+            panic!("expected applied")
+        };
+        assert!(updated_at > note.updated_at);
+        let updated = get(&pool, &note.id).await.unwrap();
+        assert_eq!((updated.x, updated.y), (10, 20));
+        assert_eq!((updated.width, updated.height), (320, 440));
     }
 }

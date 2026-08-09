@@ -306,7 +306,7 @@ pub(super) async fn op_window(hwnd: isize) -> Result<CapabilityResult, Capabilit
 pub(super) async fn op_capture_to_clipboard(
     display_id: Option<u32>,
 ) -> Result<CapabilityResult, CapabilityError> {
-    use crate::infra::platform::clipboard::{SELF_LABEL_SCREENSHOT};
+    use crate::domain::clipboard::ClipboardWriteSource;
 
     // ── 指定显示器：capture_display → BGRA → write_bgra_to_clipboard（零编码）──
     if let Some(id) = display_id {
@@ -319,20 +319,11 @@ pub(super) async fn op_capture_to_clipboard(
                 .map_err(|e| CapabilityError::Internal { detail: e })?;
 
         let (w, h) = (geom.w, geom.h);
-        tokio::task::spawn_blocking(move || {
-            crate::infra::platform::clipboard::write_bgra_to_clipboard(
-                &bgra,
-                w,
-                h,
-                SELF_LABEL_SCREENSHOT,
-                false,
-            )
-        })
-        .await
-        .map_err(|e| CapabilityError::Internal {
-            detail: format!("write_bgra_to_clipboard task 崩溃: {e}"),
-        })?
-        .map_err(|e| CapabilityError::Internal { detail: e })?;
+        crate::domain::clipboard::write_bgra(bgra, w, h, ClipboardWriteSource::Screenshot)
+            .await
+            .map_err(|e| CapabilityError::Internal {
+                detail: e.to_string(),
+            })?;
 
         tracing::debug!(display_id = id, w, h, "capture_to_clipboard: 指定显示器截图已写入剪贴板");
         return Ok(CapabilityResult::Done {
@@ -374,18 +365,11 @@ pub(super) async fn op_capture_to_clipboard(
     };
 
     // 写入剪贴板（PNG → 解码为 BGRA → CF_DIB）
-    tokio::task::spawn_blocking(move || {
-        crate::infra::platform::clipboard::write_png_to_clipboard(
-            &png,
-            SELF_LABEL_SCREENSHOT,
-            false,
-        )
-    })
-    .await
-    .map_err(|e| CapabilityError::Internal {
-        detail: format!("write_png_to_clipboard task 崩溃: {e}"),
-    })?
-    .map_err(|e| CapabilityError::Internal { detail: e })?;
+    crate::domain::clipboard::write_png(png, ClipboardWriteSource::Screenshot)
+        .await
+        .map_err(|e| CapabilityError::Internal {
+            detail: e.to_string(),
+        })?;
 
     tracing::debug!("capture_to_clipboard: 虚拟屏幕截图已写入剪贴板");
     Ok(CapabilityResult::Done {

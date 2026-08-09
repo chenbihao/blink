@@ -58,6 +58,7 @@ const SELF_WRITE_TTL: Duration = Duration::from_millis(500);
 /// 自写入标记语义 key 常量。
 pub const SELF_LABEL_SCREENSHOT: &str = "blink:screenshot";
 pub const SELF_LABEL_REPOST: &str = "blink:repost";
+pub const SELF_LABEL_APP: &str = "blink:app";
 pub const SELF_LABEL_BLINK: &str = "blink:ai";
 
 /// 进程级自写入标记（0.17.9）。
@@ -385,6 +386,7 @@ mod tests {
     fn label_constants_are_correct() {
         assert_eq!(SELF_LABEL_SCREENSHOT, "blink:screenshot");
         assert_eq!(SELF_LABEL_REPOST, "blink:repost");
+        assert_eq!(SELF_LABEL_APP, "blink:app");
         assert_eq!(SELF_LABEL_BLINK, "blink:ai");
     }
 }

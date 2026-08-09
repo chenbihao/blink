@@ -81,15 +81,12 @@ fn downsample_luma_bgra(pixels: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String
 #[tauri::command]
 pub async fn screenshot_copy(app: tauri::AppHandle, png_data: Vec<u8>) -> Result<(), String> {
     let bytes_len = png_data.len();
-    tokio::task::spawn_blocking(move || {
-        crate::infra::platform::clipboard::write_png_to_clipboard(
-            &png_data,
-            crate::infra::platform::clipboard::SELF_LABEL_SCREENSHOT,
-            false,
-        )
-    })
+    crate::domain::clipboard::write_png(
+        png_data,
+        crate::domain::clipboard::ClipboardWriteSource::Screenshot,
+    )
     .await
-    .map_err(|e| format!("spawn_blocking join 失败: {e}"))??;
+    .map_err(|e| e.to_string())?;
     finish_screenshot_session(&app);
     tracing::info!(bytes = bytes_len, "截图已保存到剪贴板");
     Ok(())
@@ -114,22 +111,22 @@ pub async fn screenshot_copy_region(
     w: u32,
     h: u32,
 ) -> Result<(), String> {
-    // BGRA 裁剪 + 剪贴板写入都同步，挪到阻塞线程池
-    tokio::task::spawn_blocking(move || -> Result<(u32, u32), String> {
-        let (bgra, cw, ch) = crate::infra::platform::screenshot::crop(x, y, w, h)
-            .ok_or_else(|| "SESSION 为空或选区越界".to_string())?;
-        crate::infra::platform::clipboard::write_bgra_to_clipboard(
-            &bgra,
-            cw,
-            ch,
-            crate::infra::platform::clipboard::SELF_LABEL_SCREENSHOT,
-            false,
-        )?;
-        Ok((cw, ch))
+    // BGRA 裁剪与剪贴板写入都是同步操作，分别由共享语义隔离到阻塞线程池。
+    let (bgra, cw, ch) = tokio::task::spawn_blocking(move || {
+        crate::infra::platform::screenshot::crop(x, y, w, h)
+            .ok_or_else(|| "SESSION 为空或选区越界".to_string())
     })
     .await
-    .map_err(|e| format!("spawn_blocking join 失败: {e}"))?
-    .map(|(cw, ch)| tracing::info!(w = cw, h = ch, "截图选区已直传剪贴板（快路径）"))?;
+    .map_err(|e| format!("spawn_blocking join 失败: {e}"))??;
+    crate::domain::clipboard::write_bgra(
+        bgra,
+        cw,
+        ch,
+        crate::domain::clipboard::ClipboardWriteSource::Screenshot,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    tracing::info!(w = cw, h = ch, "截图选区已直传剪贴板（快路径）");
     finish_screenshot_session(&app);
     Ok(())
 }
@@ -311,6 +308,34 @@ pub fn screenshot_pin_transform(
 /// **0.19.1**：用户侧 command 改经 `CapabilityRegistry` 调 `OcrImage` Capability，
 /// 与 AI 走同一个入口（照搬 `translate_text` 模式）。底层 `ocr_engine::backend()`
 /// 不动，OcrImage Capability 仍调它。消除双入口行为漂移。
+const OCR_CAPABILITY_ID: &str = "ocr_image";
+
+fn project_ocr_command_result(
+    result: crate::domain::capability::CapabilityResult,
+) -> Result<serde_json::Value, crate::app::command_error::CommandError> {
+    use crate::app::command_error::CommandError;
+
+    match result {
+        crate::domain::capability::CapabilityResult::Text { content, .. } => {
+            serde_json::from_str(&content).map_err(|error| {
+                CommandError::new(
+                    "internal_error",
+                    format!("解析 OCR 结果失败: {error}"),
+                    false,
+                )
+            })
+        }
+        other => {
+            tracing::warn!(?other, "ocr_image: OcrImage Capability 返回意外的结果类型");
+            Err(CommandError::new(
+                "internal_error",
+                "OCR 返回意外的结果类型",
+                false,
+            ))
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn ocr_image(
     app: tauri::AppHandle,
@@ -322,7 +347,6 @@ pub async fn ocr_image(
 
     let registry =
         app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
-    const OCR_CAPABILITY_ID: &str = "ocr_image";
     if registry.get(OCR_CAPABILITY_ID).is_none() {
         tracing::warn!("ocr_image: OcrImage Capability 未注册");
         return Err(CommandError::new(
@@ -352,33 +376,15 @@ pub async fn ocr_image(
         .await
         .map_err(CommandError::from)?;
 
-    // OcrImage Capability 返回 Text{ content = OcrResult 的 JSON 序列化字符串 }
-    match result {
-        crate::domain::capability::CapabilityResult::Text { content, .. } => {
-            let json: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
-                CommandError::new(
-                    "internal_error",
-                    &format!("解析 OCR 结果失败: {e}"),
-                    false,
-                )
-            })?;
-            let text_len = json
-                .get("text")
-                .and_then(|v| v.as_str())
-                .map(|s| s.len())
-                .unwrap_or(0);
-            tracing::debug!(text_len, "OCR 识别完成");
-            Ok(json)
-        }
-        other => {
-            tracing::warn!(?other, "ocr_image: OcrImage Capability 返回意外的结果类型");
-            Err(CommandError::new(
-                "internal_error",
-                "OCR 返回意外的结果类型",
-                false,
-            ))
-        }
-    }
+    // OcrImage Capability 返回 Text{ content = OcrResult 的 JSON 序列化字符串 }。
+    let json = project_ocr_command_result(result)?;
+    let text_len = json
+        .get("text")
+        .and_then(|value| value.as_str())
+        .map(str::len)
+        .unwrap_or(0);
+    tracing::debug!(text_len, "OCR 识别完成");
+    Ok(json)
 }
 
 /// 0.17.5：OCR 诊断——返回设备已安装的 OCR 语言列表、当前引擎语言、中文包状态。
@@ -1136,6 +1142,27 @@ mod scroll_probe_tests {
         assert!(scroll_replay_export_path("../escape", "manifest.json").is_err());
         assert!(scroll_replay_export_path("blink-scroll-valid", "../blink.log").is_err());
         assert!(scroll_replay_export_path("blink-scroll-valid", "frame-42.png").is_err());
+    }
+
+    #[test]
+    fn ocr_command_projection_preserves_json_contract() {
+        let projected = project_ocr_command_result(
+            crate::domain::capability::CapabilityResult::Text {
+                content: r#"{"text":"识别结果","lines":[],"words":[]}"#.into(),
+                desc: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(projected["text"], "识别结果");
+        assert!(projected["lines"].is_array());
+
+        let invalid = project_ocr_command_result(
+            crate::domain::capability::CapabilityResult::Done {
+                summary: "unexpected".into(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(invalid.code, "internal_error");
     }
 }
 

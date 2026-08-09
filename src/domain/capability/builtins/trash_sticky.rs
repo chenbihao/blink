@@ -5,7 +5,7 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use super::read_sticky::required_id;
-use super::sticky_common::map_sticky_error;
+use super::sticky_common::map_sticky_workflow_error;
 use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
 };
@@ -45,16 +45,10 @@ impl Capability for TrashSticky {
             });
         }
         let id = required_id(&args, self.id())?;
-        let service = ctx
-            .env
-            .sticky_service()
-            .ok_or_else(|| CapabilityError::Internal {
-                detail: "StickyService 不可用".into(),
-            })?;
-        service.trash_note(id).await.map_err(map_sticky_error)?;
         ctx.env
-            .hide_sticky_and_notify_trashed(id)
-            .map_err(|detail| CapabilityError::Internal { detail })?;
+            .trash_sticky_and_notify(id)
+            .await
+            .map_err(map_sticky_workflow_error)?;
 
         tracing::info!(sticky_id = %id, "trash_sticky: 便签已移入废纸篓并隐藏");
         Ok(CapabilityResult::Done {

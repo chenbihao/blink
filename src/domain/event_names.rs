@@ -70,7 +70,8 @@ impl EventNames {
     pub const STICKY_VISIBILITY_CHANGED: &str = "blink://sticky-visibility-changed";
     /// 便签外观变化（颜色）。payload: `{ stickyId, color }`
     pub const STICKY_APPEARANCE_CHANGED: &str = "blink://sticky-appearance-changed";
-    /// 便签内容变化。payload: `{ stickyId, source }`（0.18.3: source="content-editor"|"sticky"）
+    /// 便签内容变化。payload: `{ stickyId, source, updatedAt }`；source 为
+    /// `content-editor | sticky | capability`。
     pub const STICKY_CONTENT_CHANGED: &str = "blink://sticky-content-changed";
     /// 便签被移入回收站（0.17.7）。payload: `{ stickyId }`
     pub const STICKY_TRASHED: &str = "blink://sticky-trashed";

@@ -36,33 +36,10 @@ pub fn resolve_png_input(
         });
     }
 
-    if let Some(ref_val) = args.get("image_ref").and_then(Value::as_str) {
-        // 从 stash 解析
-        let stash = stash.ok_or_else(|| CapabilityError::InvalidArgs {
-            detail: "image_ref 不可用（运行时未启用 ImageStash）".into(),
-        })?;
-        let img = stash.get(ref_val).ok_or_else(|| CapabilityError::InvalidArgs {
-            detail: "image_ref 不存在或已过期".into(),
-        })?;
-        // MIME 校验
-        if !img.mime.starts_with("image/") {
-            return Err(CapabilityError::InvalidArgs {
-                detail: format!("image_ref 指向的不是图片（mime: {}）", img.mime),
-            });
-        }
-        Ok(img.bytes)
+    if args.get("image_ref").is_some() {
+        resolve_image_ref(args, stash)
     } else {
-        // 从原始字节解析
-        let bytes = args
-            .get(bytes_key)
-            .and_then(Value::as_array)
-            .ok_or_else(|| CapabilityError::InvalidArgs {
-                detail: format!("{bytes_key} 参数格式无效（应为整数数组）"),
-            })?
-            .iter()
-            .filter_map(|v| v.as_u64().map(|n| n as u8))
-            .collect::<Vec<u8>>();
-
+        let bytes = parse_byte_array(args, bytes_key)?;
         if bytes.is_empty() {
             return Err(CapabilityError::InvalidArgs {
                 detail: format!("{bytes_key} 数据为空"),
@@ -70,6 +47,54 @@ pub fn resolve_png_input(
         }
         Ok(bytes)
     }
+}
+
+/// 解析并校验 `image_ref` 指向的图片字节。
+pub fn resolve_image_ref(
+    args: &Value,
+    stash: Option<&ImageStash>,
+) -> Result<Vec<u8>, CapabilityError> {
+    let ref_val = args
+        .get("image_ref")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| CapabilityError::InvalidArgs {
+            detail: "image_ref 参数格式无效（应为非空字符串）".into(),
+        })?;
+    let stash = stash.ok_or_else(|| CapabilityError::InvalidArgs {
+        detail: "image_ref 不可用（运行时未启用 ImageStash）".into(),
+    })?;
+    let img = stash.get(ref_val).ok_or_else(|| CapabilityError::InvalidArgs {
+        detail: "image_ref 不存在或已过期".into(),
+    })?;
+    if !img.mime.starts_with("image/") {
+        return Err(CapabilityError::InvalidArgs {
+            detail: format!("image_ref 指向的不是图片（mime: {}）", img.mime),
+        });
+    }
+    Ok(img.bytes)
+}
+
+/// 严格解析 JSON 字节数组；拒绝非整数和超出 u8 范围的元素，不静默丢弃/截断。
+pub fn parse_byte_array(args: &Value, key: &str) -> Result<Vec<u8>, CapabilityError> {
+    let values = args
+        .get(key)
+        .and_then(Value::as_array)
+        .ok_or_else(|| CapabilityError::InvalidArgs {
+            detail: format!("{key} 参数格式无效（应为整数数组）"),
+        })?;
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value
+                .as_u64()
+                .and_then(|number| u8::try_from(number).ok())
+                .ok_or_else(|| CapabilityError::InvalidArgs {
+                    detail: format!("{key}[{index}] 必须是 0..=255 的整数"),
+                })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -129,5 +154,13 @@ mod tests {
         let args = json!({ "png": [] });
         let err = resolve_png_input(&args, None, "png").unwrap_err();
         assert!(matches!(err, CapabilityError::InvalidArgs { .. }));
+    }
+
+    #[test]
+    fn byte_array_rejects_invalid_or_out_of_range_values() {
+        for args in [json!({ "png": [1, "2"] }), json!({ "png": [256] })] {
+            let err = resolve_png_input(&args, None, "png").unwrap_err();
+            assert!(matches!(err, CapabilityError::InvalidArgs { .. }));
+        }
     }
 }

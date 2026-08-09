@@ -83,27 +83,15 @@ impl Capability for PinImage {
         let png_bytes = resolve_png_input(&args, stash.map(|s| s.as_ref()), "png")?;
 
         // 提取可选位置
-        let x = args.get("x").and_then(Value::as_i64).map(|v| v as i32);
-        let y = args.get("y").and_then(Value::as_i64).map(|v| v as i32);
-
-        // 位置兜底：x/y 任一为 None 时，解析 PNG 尺寸后居中
-        let (x, y) = match (x, y) {
-            (Some(px), Some(py)) => (px, py),
-            _ => {
-                let (w, h) = crate::infra::platform::screenshot::parse_png_size(&png_bytes)
-                    .map(|(pw, ph)| (pw as i32, ph as i32))
-                    .unwrap_or((400, 300));
-                let (cx, cy) =
-                    crate::infra::platform::window::get_primary_monitor_center(w, h);
-                (x.unwrap_or(cx), y.unwrap_or(cy))
-            }
-        };
+        let x = optional_i32(&args, "x")?;
+        let y = optional_i32(&args, "y")?;
 
         tracing::debug!(x, y, bytes = png_bytes.len(), "pin_image: 开始 pin 图");
 
-        // 调 CapabilityEnv 桥接（show_translating 固定 false）
-        ctx.env
-            .show_pin_window(png_bytes, x, y)
+        // 调共享语义桥接：位置兜底与窗口创建只保留一个实现。
+        let (x, y) = ctx
+            .env
+            .show_pin_image(png_bytes, x, y)
             .map_err(|e| CapabilityError::Internal {
                 detail: format!("pin 图失败: {e}"),
             })?;
@@ -113,6 +101,19 @@ impl Capability for PinImage {
         Ok(CapabilityResult::Done {
             summary: "已 pin 图到桌面".into(),
         })
+    }
+}
+
+fn optional_i32(args: &Value, key: &str) -> Result<Option<i32>, CapabilityError> {
+    match args.get(key) {
+        None => Ok(None),
+        Some(value) => value
+            .as_i64()
+            .and_then(|number| i32::try_from(number).ok())
+            .map(Some)
+            .ok_or_else(|| CapabilityError::InvalidArgs {
+                detail: format!("pin_image: {key} 必须是 i32 范围内的整数"),
+            }),
     }
 }
 
@@ -175,5 +176,15 @@ mod tests {
             s.description.contains("pin") || s.description.contains("钉"),
             "schema description 应提及 pin/钉"
         );
+    }
+
+    #[test]
+    fn optional_coordinates_reject_out_of_range_values() {
+        assert_eq!(optional_i32(&json!({}), "x").unwrap(), None);
+        assert_eq!(optional_i32(&json!({ "x": -42 }), "x").unwrap(), Some(-42));
+        assert!(matches!(
+            optional_i32(&json!({ "x": i64::MAX }), "x"),
+            Err(CapabilityError::InvalidArgs { .. })
+        ));
     }
 }

@@ -171,16 +171,15 @@ async function init() {
   bindContextMenu();
 
   // 内容变更：只在用户未在编辑时刷新，避免打断输入
-  // 0.18.3 fix: content-editor 来源的变更始终 reload（多窗口下 isEditing 不可靠）
+  // 外部入口（内容编辑器 / Capability）的变更始终 reload；本窗口防抖写入才避开输入中刷新。
   listen(EVENTS.STICKY_CONTENT_CHANGED, (event) => {
     const payload = event.payload;
     if (payload && payload.stickyId === stickyId) {
-      // content-editor 来源：用户在编辑器中显式保存，必须刷新
-      if (payload.source === "content-editor") {
+      if (payload.source !== "sticky") {
         loadStickyData();
         return;
       }
-      // sticky 来源：用户正在编辑时不 reload，避免覆盖输入
+      // sticky 来源：用户正在本窗口编辑时不 reload，避免反馈循环和光标跳动
       const activeEl = document.activeElement;
       const isEditing = tiptapEditor
         ? activeEl === editorEl || editorEl?.contains(activeEl)
@@ -261,11 +260,11 @@ function registerStickyReload() {
       bindContextMenu();
 
       // 内容变更监听
-      // 0.18.3 fix: content-editor 来源的变更始终 reload
+      // 外部入口（内容编辑器 / Capability）的变更始终 reload
       listen(EVENTS.STICKY_CONTENT_CHANGED, (event) => {
         const payload = event.payload;
         if (payload && payload.stickyId === stickyId) {
-          if (payload.source === "content-editor") {
+          if (payload.source !== "sticky") {
             loadStickyData();
             return;
           }

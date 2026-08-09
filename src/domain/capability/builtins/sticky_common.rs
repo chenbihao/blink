@@ -1,5 +1,5 @@
 use crate::domain::capability::CapabilityError;
-use crate::domain::sticky::StickyError;
+use crate::domain::sticky::{StickyError, StickyWorkflowError};
 
 pub(super) fn map_sticky_error(error: StickyError) -> CapabilityError {
     match error {
@@ -17,5 +17,12 @@ pub(super) fn map_sticky_error(error: StickyError) -> CapabilityError {
                 "便签 {id} 已被修改（期望版本 {expected_updated_at}，当前版本 {actual_updated_at}）"
             ),
         },
+    }
+}
+
+pub(super) fn map_sticky_workflow_error(error: StickyWorkflowError) -> CapabilityError {
+    match error {
+        StickyWorkflowError::Sticky(error) => map_sticky_error(error),
+        StickyWorkflowError::SideEffect { detail } => CapabilityError::Internal { detail },
     }
 }

@@ -45,23 +45,14 @@ impl Capability for ReadClipboard {
         _args: Value,
         _ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError> {
-        // 单次 spawn_blocking：先试图片，无则 fallback 文本（避免两次线程池跳转）
-        let result = tokio::task::spawn_blocking(|| {
-            // 先试 CF_DIB（图片）
-            if let Some(png) = crate::infra::platform::clipboard::read_current_image() {
-                return ReadResult::Image(png);
-            }
-            // fallback 文本
-            let text = crate::infra::platform::clipboard::read_current_text();
-            ReadResult::Text(text.unwrap_or_default())
-        })
-        .await
-        .map_err(|e| CapabilityError::Internal {
-            detail: format!("read_clipboard task 崩溃: {e}"),
-        })?;
+        let result = crate::domain::clipboard::read_current()
+            .await
+            .map_err(|e| CapabilityError::Internal {
+                detail: e.to_string(),
+            })?;
 
         match result {
-            ReadResult::Image(png) => {
+            crate::domain::clipboard::ClipboardContent::ImagePng(png) => {
                 tracing::debug!(bytes = png.len(), "read_clipboard: 读到图片");
                 Ok(CapabilityResult::Blob {
                     mime: "image/png".into(),
@@ -69,7 +60,7 @@ impl Capability for ReadClipboard {
                     desc: None,
                 })
             }
-            ReadResult::Text(content) => {
+            crate::domain::clipboard::ClipboardContent::Text(content) => {
                 if content.is_empty() {
                     tracing::debug!("read_clipboard: 剪贴板为空");
                 } else {
@@ -79,12 +70,6 @@ impl Capability for ReadClipboard {
             }
         }
     }
-}
-
-/// spawn_blocking 内部用的传输枚举。
-enum ReadResult {
-    Image(Vec<u8>),
-    Text(String),
 }
 
 inventory::submit!(crate::domain::capability::CapabilityEntry {

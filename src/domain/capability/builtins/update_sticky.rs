@@ -5,7 +5,7 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use super::read_sticky::required_id;
-use super::sticky_common::map_sticky_error;
+use super::sticky_common::map_sticky_workflow_error;
 use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext, ItemResult,
 };
@@ -60,16 +60,16 @@ impl Capability for UpdateSticky {
             .ok_or_else(|| CapabilityError::InvalidArgs {
                 detail: "update_sticky: 缺少 expected_updated_at 参数".into(),
             })?;
-        let service = ctx
+        let updated_at = ctx
             .env
-            .sticky_service()
-            .ok_or_else(|| CapabilityError::Internal {
-                detail: "StickyService 不可用".into(),
-            })?;
-        let updated_at = service
-            .update_content(id, content, Some(expected))
+            .update_sticky_content_and_notify(
+                id,
+                content,
+                Some(expected),
+                crate::domain::sticky::StickyChangeSource::Capability,
+            )
             .await
-            .map_err(map_sticky_error)?;
+            .map_err(map_sticky_workflow_error)?;
 
         tracing::info!(sticky_id = %id, updated_at, "update_sticky: 便签正文已更新");
         Ok(CapabilityResult::Items {

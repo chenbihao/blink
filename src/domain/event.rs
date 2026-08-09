@@ -18,7 +18,9 @@ use crate::domain::ai::chat_service::ChatService;
 use crate::domain::capability::{CapabilityRegistry, ImageStash};
 use crate::domain::plugin::PluginEngine;
 use crate::domain::search::SearchService;
-use crate::domain::sticky::StickyService;
+use crate::domain::sticky::{
+    StickyChangeSource, StickyColor, StickyNote, StickyService, StickyWorkflowError,
+};
 use crate::infra::data::pools::DbPools;
 use crate::infra::platform::screenshot::ScreenCaptureMeta;
 
@@ -53,6 +55,13 @@ pub trait CapabilityEnv: Send + Sync {
     /// 返回 `Option`——CLI/MCP 最小运行时可能不构造完整服务栈。
     fn sticky_service(&self) -> Option<&Arc<StickyService>>;
 
+    /// 创建便签记录并广播创建事件；不负责显示窗口。
+    async fn create_sticky_and_notify(
+        &self,
+        content: &str,
+        color: StickyColor,
+    ) -> Result<StickyNote, StickyWorkflowError>;
+
     /// 创建便签并显示桌面窗口（0.19.3）。
     ///
     /// `content` 为便签正文；`x`/`y`/`w`/`h` 为可选位置尺寸（物理像素），
@@ -68,10 +77,20 @@ pub trait CapabilityEnv: Send + Sync {
         h: Option<i32>,
     ) -> Result<String, String>;
 
-    /// 隐藏指定便签窗口并广播回收事件。
-    ///
-    /// 数据库回收语义由 `StickyService` 负责；本方法只做 Tauri 窗口与前端通知桥接。
-    fn hide_sticky_and_notify_trashed(&self, sticky_id: &str) -> Result<(), String>;
+    /// 更新便签正文并广播变更事件。command 可不带 revision；Capability 必须带 revision。
+    async fn update_sticky_content_and_notify(
+        &self,
+        sticky_id: &str,
+        content: &str,
+        expected_updated_at: Option<i64>,
+        source: StickyChangeSource,
+    ) -> Result<i64, StickyWorkflowError>;
+
+    /// 将便签移入废纸篓、隐藏对应窗口并广播回收事件。
+    async fn trash_sticky_and_notify(
+        &self,
+        sticky_id: &str,
+    ) -> Result<(), StickyWorkflowError>;
 
     // ── 图片暂存（0.19.4 ImageStash 引用闭环）──────────────────────────
 
@@ -83,14 +102,19 @@ pub trait CapabilityEnv: Send + Sync {
 
     // ── pin 窗口操作（0.19.3 pin 能力化桥接）──────────────────────────
 
-    /// 显示钉图窗口（0.19.3）。
+    /// 显示通用钉图窗口（0.19.6 command / Capability 共享语义）。
     ///
-    /// `png_bytes` 为 PNG 图片字节；`x`/`y` 为图片左上的物理像素坐标
-    /// （窗口会在此基础上偏移 `-PIN_PAD` 给发光区留空间）。
+    /// `png_bytes` 为 PNG 图片字节；`x`/`y` 为可选的图片左上物理像素坐标。
+    /// 任一坐标缺失时，按图片尺寸计算光标所在显示器的居中位置，再保留已给坐标。
     ///
     /// `show_translating` 对 AI pin 场景无意义，桥接层固定传 `false`。
-    /// 返回 `Err` 表示窗口创建/更新失败。
-    fn show_pin_window(&self, png_bytes: Vec<u8>, x: i32, y: i32) -> Result<(), String>;
+    /// 返回最终使用的 `(x, y)`；`Err` 表示窗口创建/更新失败。
+    fn show_pin_image(
+        &self,
+        png_bytes: Vec<u8>,
+        x: Option<i32>,
+        y: Option<i32>,
+    ) -> Result<(i32, i32), String>;
 }
 
 /// 领域环境——domain 层与 Tauri 之间的抽象边界。

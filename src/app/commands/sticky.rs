@@ -8,6 +8,7 @@
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::domain::event_names::EventNames;
+use crate::domain::event::CapabilityEnv;
 use crate::domain::sticky::{StickyColor, StickyError, StickyFormat, StickyService};
 
 /// 创建便签。
@@ -20,25 +21,18 @@ pub async fn create_sticky_note(
     content: Option<String>,
     color: Option<String>,
 ) -> Result<crate::domain::sticky::StickyNote, String> {
-    let svc = app.state::<std::sync::Arc<StickyService>>().inner().clone();
-
     let c = color
         .as_deref()
         .map(StickyColor::from_str)
         .unwrap_or_default();
 
-    let note = svc
-        .create_note(content.as_deref().unwrap_or(""), c)
+    let env = app
+        .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
+        .inner()
+        .clone();
+    env.create_sticky_and_notify(content.as_deref().unwrap_or(""), c)
         .await
-        .map_err(|e: StickyError| e.to_string())?;
-
-    // emit 事件（不传正文）
-    let _ = app.emit(
-        EventNames::STICKY_CREATED,
-        serde_json::json!({ "stickyId": note.id }),
-    );
-
-    Ok(note)
+        .map_err(|e| e.to_string())
 }
 
 /// 获取单条便签。
@@ -67,14 +61,18 @@ pub async fn update_sticky_content(
     id: String,
     content: String,
 ) -> Result<(), String> {
-    let svc = app.state::<std::sync::Arc<StickyService>>();
-    svc.update_content_debounced(&id, &content)
+    let env = app
+        .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
+        .inner()
+        .clone();
+    env.update_sticky_content_and_notify(
+        &id,
+        &content,
+        None,
+        crate::domain::sticky::StickyChangeSource::UserWindow,
+    )
         .await
-        .map_err(|e: StickyError| e.to_string())?;
-    let _ = app.emit(
-        EventNames::STICKY_CONTENT_CHANGED,
-        serde_json::json!({ "stickyId": id, "source": "sticky" }),
-    );
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -254,16 +252,13 @@ pub async fn show_sticky_manager_cmd(app: AppHandle) -> Result<(), String> {
 /// emit `STICKY_TRASHED` 让管理界面刷新。
 #[tauri::command]
 pub async fn trash_sticky_note(app: AppHandle, id: String) -> Result<(), String> {
-    let svc = app.state::<std::sync::Arc<StickyService>>();
-    svc.trash_note(&id)
+    let env = app
+        .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
+        .inner()
+        .clone();
+    env.trash_sticky_and_notify(&id)
         .await
-        .map_err(|e: StickyError| e.to_string())?;
-
-    let _ = app.emit(
-        EventNames::STICKY_TRASHED,
-        serde_json::json!({ "stickyId": id }),
-    );
-
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 

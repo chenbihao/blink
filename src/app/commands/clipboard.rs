@@ -2,58 +2,16 @@
 
 use tauri::Manager;
 
+use crate::domain::clipboard::ClipboardWriteSource;
+use crate::domain::event::CapabilityEnv;
+
 /// 将文本写入系统剪贴板（Windows API）。
 /// 右键菜单独立 Popup 窗口中 navigator.clipboard 不可靠，改走后端。
 #[tauri::command]
 pub async fn copy_to_clipboard(text: String) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || {
-        use windows::Win32::Foundation::HWND;
-        use windows::Win32::System::DataExchange::{
-            CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
-        };
-        use windows::Win32::System::Memory::{
-            GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock,
-        };
-
-        // RAII guard: 确保 CloseClipboard 在所有路径上被调用
-        struct ClipboardGuard;
-        impl Drop for ClipboardGuard {
-            fn drop(&mut self) {
-                unsafe {
-                    let _ = CloseClipboard();
-                }
-            }
-        }
-
-        unsafe {
-            if OpenClipboard(Some(HWND(std::ptr::null_mut()))).is_err() {
-                return Err("打开剪贴板失败".into());
-            }
-            let _guard = ClipboardGuard;
-
-            let _ = EmptyClipboard();
-
-            // 分配全局内存（+1 for null terminator）
-            let wchars: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-            let byte_size = wchars.len() * 2;
-            let hmem = GlobalAlloc(GMEM_MOVEABLE, byte_size)
-                .map_err(|e| format!("GlobalAlloc 失败: {e}"))?;
-            let ptr = GlobalLock(hmem) as *mut u16;
-            if ptr.is_null() {
-                return Err("GlobalLock 失败".into());
-            }
-            std::ptr::copy_nonoverlapping(wchars.as_ptr(), ptr, wchars.len());
-            let _ = GlobalUnlock(hmem);
-
-            // CF_UNICODETEXT = 13; SetClipboardData 要求 HANDLE 而非 HGLOBAL
-            if SetClipboardData(13, Some(std::mem::transmute(hmem))).is_err() {
-                return Err("SetClipboardData 失败".into());
-            }
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking 失败: {e}"))?
+    crate::domain::clipboard::write_text(text, ClipboardWriteSource::User)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// 获取最近的剪贴板历史。
@@ -141,22 +99,16 @@ pub async fn get_clipboard_stats(app: tauri::AppHandle) -> serde_json::Value {
 #[tauri::command]
 pub async fn copy_clipboard_image(app: tauri::AppHandle, image_id: String) -> Result<(), String> {
     let pools = app.state::<crate::infra::data::DbPools>();
-    let png_data = crate::infra::data::clipboard_images::get_png_by_id(&pools.cache, &image_id)
+    let png_data = crate::domain::clipboard::load_history_png(&pools.cache, &image_id)
         .await
-        .ok_or_else(|| format!("图片不存在: {image_id}"))?;
+        .map_err(|e| e.to_string())?;
 
     tracing::debug!(id = %image_id, bytes = png_data.len(), "copy_clipboard_image: 开始写入");
 
     let bytes_len = png_data.len();
-    tokio::task::spawn_blocking(move || {
-        crate::infra::platform::clipboard::write_png_to_clipboard(
-            &png_data,
-            crate::infra::platform::clipboard::SELF_LABEL_REPOST,
-            true,
-        )
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking join 失败: {e}"))??;
+    crate::domain::clipboard::write_png(png_data, ClipboardWriteSource::HistoryRepost)
+        .await
+        .map_err(|e| e.to_string())?;
 
     tracing::info!(id = %image_id, bytes = bytes_len, "剪贴板图片已写回系统剪贴板");
     Ok(())
@@ -169,22 +121,16 @@ pub async fn copy_clipboard_image(app: tauri::AppHandle, image_id: String) -> Re
 #[tauri::command]
 pub async fn pin_clipboard_image(app: tauri::AppHandle, image_id: String) -> Result<(), String> {
     let pools = app.state::<crate::infra::data::DbPools>();
-    let png_data = crate::infra::data::clipboard_images::get_png_by_id(&pools.cache, &image_id)
+    let png_data = crate::domain::clipboard::load_history_png(&pools.cache, &image_id)
         .await
-        .ok_or_else(|| format!("图片不存在: {image_id}"))?;
+        .map_err(|e| e.to_string())?;
+    let env = app
+        .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
+        .inner()
+        .clone();
+    let (screen_x, screen_y) = env.show_pin_image(png_data, None, None)?;
 
-    // 解析图片尺寸用于定位（居中于主显示器工作区）
-    let (w, h) = crate::infra::platform::screenshot::parse_png_size(&png_data)
-        .map(|(pw, ph)| (pw as i32, ph as i32))
-        .unwrap_or((400, 300));
-
-    // 获取光标所在显示器工作区，居中放置（0.19.3 从本文件提升到 window 模块）
-    let (screen_x, screen_y) =
-        crate::infra::platform::window::get_primary_monitor_center(w, h);
-
-    tracing::debug!(id = %image_id, w, h, screen_x, screen_y, "pin_clipboard_image");
-
-    crate::infra::platform::window::show_pin_window(&app, png_data, screen_x, screen_y, false)?;
+    tracing::debug!(id = %image_id, screen_x, screen_y, "pin_clipboard_image");
     tracing::info!(id = %image_id, "剪贴板图片已钉到桌面");
     Ok(())
 }

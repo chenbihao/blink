@@ -12,6 +12,8 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
+use super::image_input::{parse_byte_array, resolve_image_ref};
+use crate::domain::clipboard::ClipboardWriteSource;
 use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
 };
@@ -79,18 +81,11 @@ impl Capability for WriteClipboard {
                 });
             }
             let len = text.chars().count();
-            tokio::task::spawn_blocking(move || {
-                crate::infra::platform::clipboard::write_text_to_clipboard(
-                    &text,
-                    crate::infra::platform::clipboard::SELF_LABEL_BLINK,
-                    false,
-                )
-            })
+            crate::domain::clipboard::write_text(text, ClipboardWriteSource::Capability)
             .await
             .map_err(|e| CapabilityError::Internal {
-                detail: format!("write_clipboard task 崩溃: {e}"),
-            })?
-            .map_err(|e| CapabilityError::Internal { detail: e })?;
+                detail: e.to_string(),
+            })?;
 
             return Ok(CapabilityResult::Done {
                 summary: format!("已写入文本（{len} 字）"),
@@ -98,37 +93,22 @@ impl Capability for WriteClipboard {
         }
 
         // image_ref 模式（0.19.4）：从 stash 解析 PNG，用 write_png_to_clipboard
-        if let Some(ref_val) = args.get("image_ref").and_then(Value::as_str) {
+        if args.get("image_ref").is_some() {
             // image_ref 与 image_bytes 互斥
             if args.get("image_bytes").is_some() {
                 return Err(CapabilityError::InvalidArgs {
                     detail: "image_ref 与 image_bytes 不能同时提供".into(),
                 });
             }
-            let stash = ctx.env.image_stash().ok_or_else(|| CapabilityError::InvalidArgs {
-                detail: "image_ref 不可用（运行时未启用 ImageStash）".into(),
-            })?;
-            let img = stash.get(ref_val).ok_or_else(|| CapabilityError::InvalidArgs {
-                detail: "image_ref 不存在或已过期".into(),
-            })?;
-            if !img.mime.starts_with("image/") {
-                return Err(CapabilityError::InvalidArgs {
-                    detail: format!("image_ref 指向的不是图片（mime: {}）", img.mime),
-                });
-            }
-            let png = img.bytes;
-            tokio::task::spawn_blocking(move || {
-                crate::infra::platform::clipboard::write_png_to_clipboard(
-                    &png,
-                    crate::infra::platform::clipboard::SELF_LABEL_BLINK,
-                    false,
-                )
-            })
+            let png = resolve_image_ref(
+                &args,
+                ctx.env.image_stash().map(|stash| stash.as_ref()),
+            )?;
+            crate::domain::clipboard::write_png(png, ClipboardWriteSource::Capability)
             .await
             .map_err(|e| CapabilityError::Internal {
-                detail: format!("write_clipboard task 崩溃: {e}"),
-            })?
-            .map_err(|e| CapabilityError::Internal { detail: e })?;
+                detail: e.to_string(),
+            })?;
 
             return Ok(CapabilityResult::Done {
                 summary: "已写入图片".into(),
@@ -136,60 +116,43 @@ impl Capability for WriteClipboard {
         }
 
         // image_bytes 模式（BGRA）
-        let width = args.get("width").and_then(Value::as_u64).ok_or_else(|| {
-            CapabilityError::InvalidArgs {
-                detail: "image 模式缺少 width".into(),
-            }
-        })? as u32;
-        let height = args.get("height").and_then(Value::as_u64).ok_or_else(|| {
-            CapabilityError::InvalidArgs {
-                detail: "image 模式缺少 height".into(),
-            }
-        })? as u32;
-        let image_bytes = args
-            .get("image_bytes")
-            .and_then(Value::as_array)
-            .ok_or_else(|| CapabilityError::InvalidArgs {
-                detail: "image 模式缺少 image_bytes".into(),
-            })?;
+        let width = parse_dimension(&args, "width")?;
+        let height = parse_dimension(&args, "height")?;
+        let pixels = parse_byte_array(&args, "image_bytes")?;
 
-        // JSON array → Vec<u8>
-        let pixels: Vec<u8> = image_bytes
-            .iter()
-            .filter_map(|v| v.as_u64().map(|n| n as u8))
-            .collect();
-
-        if pixels.len() != (width as usize) * (height as usize) * 4 {
-            return Err(CapabilityError::InvalidArgs {
-                detail: format!(
-                    "像素长度不匹配: {} vs {} ({}x{}x4)",
-                    pixels.len(),
-                    (width as usize) * (height as usize) * 4,
-                    width,
-                    height
-                ),
-            });
-        }
-
-        tokio::task::spawn_blocking(move || {
-            crate::infra::platform::clipboard::write_bgra_to_clipboard(
-                &pixels,
-                width,
-                height,
-                crate::infra::platform::clipboard::SELF_LABEL_BLINK,
-                false,
-            )
-        })
+        crate::domain::clipboard::write_bgra(
+            pixels,
+            width,
+            height,
+            ClipboardWriteSource::Capability,
+        )
         .await
-        .map_err(|e| CapabilityError::Internal {
-            detail: format!("write_clipboard task 崩溃: {e}"),
-        })?
-        .map_err(|e| CapabilityError::Internal { detail: e })?;
+        .map_err(|e| match e {
+            crate::domain::clipboard::ClipboardError::PixelLengthMismatch { .. }
+            | crate::domain::clipboard::ClipboardError::PixelSizeOverflow { .. } => {
+                CapabilityError::InvalidArgs {
+                    detail: e.to_string(),
+                }
+            }
+            _ => CapabilityError::Internal {
+                detail: e.to_string(),
+            },
+        })?;
 
         Ok(CapabilityResult::Done {
             summary: format!("已写入图片（{width}x{height}）"),
         })
     }
+}
+
+fn parse_dimension(args: &Value, key: &str) -> Result<u32, CapabilityError> {
+    args.get(key)
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| CapabilityError::InvalidArgs {
+            detail: format!("image 模式缺少或无效的 {key}"),
+        })
 }
 
 inventory::submit!(crate::domain::capability::CapabilityEntry {
