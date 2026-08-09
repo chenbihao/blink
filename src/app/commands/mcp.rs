@@ -304,6 +304,13 @@ pub async fn batch_set_mcp_enabled(
 /// 单个 server 连接失败只记状态（Offline），不影响其他 server。
 #[tauri::command]
 pub async fn ensure_mcp_connected(app: tauri::AppHandle) -> Result<(), String> {
+    if app
+        .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
+        .is_some_and(|chat| chat.is_pure_chat_mode())
+    {
+        tracing::debug!("MCP: 纯对话模式跳过对话窗口 lazy connect");
+        return Ok(());
+    }
     let pools = app.state::<crate::infra::data::DbPools>();
     let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
     manager.ensure_connected(&pools.config).await;
@@ -313,6 +320,12 @@ pub async fn ensure_mcp_connected(app: tauri::AppHandle) -> Result<(), String> {
 /// 获取对话窗口 tool 池规模（内置 + MCP，供前端显示）。
 #[tauri::command]
 pub async fn get_mcp_tool_pool_size(app: tauri::AppHandle) -> serde_json::Value {
+    if app
+        .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
+        .is_some_and(|chat| chat.is_pure_chat_mode())
+    {
+        return serde_json::json!({ "builtin": 0, "mcp": 0, "total": 0 });
+    }
     let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
     // 0.13.8: 用轻量 count_tools() 替代 collect_tools().len()，
     // 避免仅为取一个数字就构造完整的 McpTool（clone + Box 分配）
@@ -332,6 +345,12 @@ pub async fn get_mcp_tool_pool_size(app: tauri::AppHandle) -> serde_json::Value 
 /// 获取所有已连接 MCP server 的 tool 名称列表（供前端区分工具来源）。
 #[tauri::command]
 pub async fn get_mcp_tool_names(app: tauri::AppHandle) -> Vec<String> {
+    if app
+        .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
+        .is_some_and(|chat| chat.is_pure_chat_mode())
+    {
+        return Vec::new();
+    }
     let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
     manager.get_all_tool_names().await
 }
@@ -343,6 +362,12 @@ pub async fn get_mcp_tool_names(app: tauri::AppHandle) -> Vec<String> {
 pub async fn get_mcp_tool_sources(
     app: tauri::AppHandle,
 ) -> Vec<crate::domain::mcp::client::McpToolSource> {
+    if app
+        .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
+        .is_some_and(|chat| chat.is_pure_chat_mode())
+    {
+        return Vec::new();
+    }
     let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
     manager.get_tool_sources().await
 }

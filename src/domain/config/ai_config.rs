@@ -374,6 +374,11 @@ impl ToolResultFeedback {
 /// 老配置缺此字段时 serde default 填充——零迁移成本。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChatConfig {
+    /// 纯对话模式。开启后 Blink AI Agent 不装配 Capability、MCP client tool 或 Skill。
+    /// 默认关闭；只影响 Blink 自身对话，不改变 Capability 的其他出口。
+    #[serde(default)]
+    pub pure_chat: bool,
+
     /// LLM 自动命名开关——开启后新对话首条消息发送后异步调 LLM 生成标题。
     /// 默认关闭——opt-in 设计，用户可能不想消耗 token 生成标题。
     #[serde(default)]
@@ -404,6 +409,7 @@ pub struct ChatConfig {
 impl Default for ChatConfig {
     fn default() -> Self {
         Self {
+            pure_chat: false,
             auto_title: false,
             title_tier: default_title_tier(),
             memory_config: crate::domain::ai::memory::MemoryConfig::default(),
@@ -1129,6 +1135,7 @@ mod tests {
             streaming: false,
             slo_hard_timeout_ms: Some(3000),
             chat_config: ChatConfig {
+                pure_chat: true,
                 auto_title: true,
                 title_tier: "router".to_string(),
                 memory_config: crate::domain::ai::memory::MemoryConfig::default(),
@@ -1151,6 +1158,7 @@ mod tests {
             original.direct_execute_safe_actions
         );
         assert_eq!(restored.streaming, original.streaming);
+        assert!(restored.chat_config.pure_chat);
         assert_eq!(restored.slo_hard_timeout_ms, Some(3000));
         assert_eq!(
             restored.ai_tool_result_feedback,
@@ -1221,6 +1229,7 @@ mod tests {
         // 老配置没有 chat_config 字段 → serde default 填充
         let json = r#"{"enabled": false}"#;
         let c: AIConfig = serde_json::from_str(json).unwrap();
+        assert!(!c.chat_config.pure_chat, "pure_chat 默认 false");
         assert!(!c.chat_config.auto_title, "auto_title 默认 false");
         assert_eq!(c.chat_config.title_tier, "light", "title_tier 默认 light");
         // 0.13.1: memory_config 默认 TokenAware 模式
@@ -1238,6 +1247,7 @@ mod tests {
         let original = AIConfig {
             enabled: true,
             chat_config: ChatConfig {
+                pure_chat: false,
                 auto_title: false,
                 title_tier: "light".to_string(),
                 memory_config: crate::domain::ai::memory::MemoryConfig {

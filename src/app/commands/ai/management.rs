@@ -430,6 +430,9 @@ pub async fn get_composer_bar_snapshot(
     use tauri::Manager;
 
     // ── 上：上下文容量（从 ChatService 缓存读）──
+    let pure_chat = app
+        .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
+        .is_some_and(|chat| chat.is_pure_chat_mode());
     let (
         estimated_tokens,
         context_limit,
@@ -464,14 +467,18 @@ pub async fn get_composer_bar_snapshot(
     // ── 中：内置工具（0.14 Capability-only）──
     let cap_registry = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
 
-    let builtin_tools: Vec<BuiltinToolSummary> = cap_registry
-        .list()
-        .into_iter()
-        .map(|s| BuiltinToolSummary {
-            name: s.name,
-            description: s.description,
-        })
-        .collect();
+    let builtin_tools: Vec<BuiltinToolSummary> = if pure_chat {
+        Vec::new()
+    } else {
+        cap_registry
+            .list()
+            .into_iter()
+            .map(|s| BuiltinToolSummary {
+                name: s.name,
+                description: s.description,
+            })
+            .collect()
+    };
 
     let builtin_count = builtin_tools.len();
 
@@ -497,7 +504,9 @@ pub async fn get_composer_bar_snapshot(
         // 的 transient 探测覆盖成 Offline，但持久连接仍在 connected map 中。
         let server_tools = manager.get_server_tools(&config.name).await;
         let online = server_tools.is_some();
-        let tool_names: Vec<String> = if let Some(tools) = server_tools {
+        let tool_names: Vec<String> = if pure_chat {
+            Vec::new()
+        } else if let Some(tools) = server_tools {
             tools
                 .into_iter()
                 .filter(|t| !t.disabled)

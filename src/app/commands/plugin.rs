@@ -41,17 +41,10 @@ pub async fn refresh_skills(app: tauri::AppHandle) -> Result<usize, String> {
         crate::app::config::ConfigStore::get::<crate::app::ai_config::AIConfig>(&pools.config)
             .await;
 
-    if !ai_config.chat_config.skill_config.enabled {
-        return Ok(0);
-    }
-
-    let sources = ai_config.chat_config.skill_config.enabled_sources();
     let chat = app
         .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
         .ok_or("ChatService 未初始化")?;
-    chat.refresh_skills(&sources);
-    // 0.13.6: 同步 disabled_skills
-    chat.update_skill_disabled(ai_config.chat_config.skill_config.disabled_skills.clone());
+    chat.apply_skill_config(&ai_config.chat_config.skill_config);
     let count = cs_count_skills(&chat);
     tracing::info!(count, "Skill 注册表已手动刷新");
     Ok(count)

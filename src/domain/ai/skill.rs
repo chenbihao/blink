@@ -35,6 +35,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 
 use regex::Regex;
@@ -162,6 +163,8 @@ pub struct SkillRegistry {
     skills: RwLock<Vec<SkillEntry>>,
     /// 0.13.6: 被用户禁用的 Skill 标识列表（格式：`name@source`）。
     disabled_skills: RwLock<std::collections::HashSet<String>>,
+    /// 0.19.10: 运行时总开关。关闭时所有读取/触发入口立即旁路。
+    enabled: AtomicBool,
 }
 
 impl SkillRegistry {
@@ -169,7 +172,25 @@ impl SkillRegistry {
         Self {
             skills: RwLock::new(Vec::new()),
             disabled_skills: RwLock::new(std::collections::HashSet::new()),
+            enabled: AtomicBool::new(true),
         }
+    }
+
+    /// 设置运行时总开关。调用方在重扫期间先关闭，完成后再开启，避免半更新可见。
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Release);
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
+    }
+
+    /// 清空当前进程已发现的 Skill；禁用总开关时调用。
+    pub fn clear(&self) {
+        self.skills
+            .write()
+            .expect("skill registry lock poisoned")
+            .clear();
     }
 
     /// 扫描所有启用的来源目录，解析 SKILL.md。
@@ -225,6 +246,9 @@ impl SkillRegistry {
     ///
     /// 0.13.6: 过滤被用户禁用的 Skill。
     pub fn summaries(&self) -> Vec<SkillSummary> {
+        if !self.is_enabled() {
+            return Vec::new();
+        }
         let disabled = self.disabled_skills.read().expect("lock poisoned");
         self.skills
             .read()
@@ -257,8 +281,11 @@ impl SkillRegistry {
     ///
     /// 0.13.6: 过滤被用户禁用的 Skill。
     pub fn match_triggers(&self, message: &str) -> Vec<SkillEntry> {
-        let skills = self.skills.read().expect("skill registry lock poisoned");
+        if !self.is_enabled() {
+            return Vec::new();
+        }
         let disabled = self.disabled_skills.read().expect("lock poisoned");
+        let skills = self.skills.read().expect("skill registry lock poisoned");
         let msg_lower = message.to_lowercase();
 
         skills
@@ -294,16 +321,27 @@ impl SkillRegistry {
         name: &str,
         source_filter: Option<SkillSource>,
     ) -> Option<SkillEntry> {
+        if !self.is_enabled() {
+            return None;
+        }
+        let disabled = self.disabled_skills.read().expect("lock poisoned");
         self.skills
             .read()
             .expect("skill registry lock poisoned")
             .iter()
-            .find(|s| s.name == name && source_filter.map_or(true, |src| s.source == src))
+            .find(|s| {
+                s.name == name
+                    && source_filter.map_or(true, |src| s.source == src)
+                    && !disabled.contains(&skill_id(&s.name, s.source))
+            })
             .cloned()
     }
 
     /// 已发现的 Skill 数量。
     pub fn count(&self) -> usize {
+        if !self.is_enabled() {
+            return 0;
+        }
         self.skills
             .read()
             .expect("skill registry lock poisoned")
@@ -330,6 +368,9 @@ impl SkillRegistry {
     ///
     /// 设置页展示用——前端用此标记渲染复选框状态。
     pub fn all_with_status(&self) -> Vec<SkillEntryWithStatus> {
+        if !self.is_enabled() {
+            return Vec::new();
+        }
         let disabled = self.disabled_skills.read().expect("lock poisoned");
         self.skills
             .read()
@@ -978,6 +1019,35 @@ mod tests {
     // ── SkillRegistry::match_triggers ──
 
     #[test]
+    fn runtime_switch_immediately_bypasses_and_can_restore_registry() {
+        let registry = SkillRegistry::new();
+        let skill = parse_skill_md(
+            "---\nname: runtime-switch\ndescription: Runtime switch test\ntriggers:\n  keywords: [activate-me]\n---\nBody",
+            SkillSource::Blink,
+            PathBuf::from("/tmp/runtime-switch"),
+        )
+        .unwrap();
+        *registry.skills.write().unwrap() = vec![skill];
+
+        assert_eq!(registry.count(), 1);
+        assert_eq!(registry.match_triggers("activate-me").len(), 1);
+        assert!(registry.find_by_name("runtime-switch", None).is_some());
+
+        registry.set_enabled(false);
+        assert_eq!(registry.count(), 0);
+        assert!(registry.summaries().is_empty());
+        assert!(registry.match_triggers("activate-me").is_empty());
+        assert!(registry.find_by_name("runtime-switch", None).is_none());
+
+        registry.set_enabled(true);
+        assert_eq!(registry.count(), 1);
+        assert_eq!(registry.match_triggers("activate-me").len(), 1);
+
+        registry.clear();
+        assert_eq!(registry.count(), 0);
+    }
+
+    #[test]
     fn registry_match_keyword_trigger() {
         let registry = SkillRegistry::new();
         let skill = SkillEntry {
@@ -1358,6 +1428,7 @@ mod tests {
         // Disable
         registry.set_disabled_skills(vec!["test@blink".to_string()]);
         assert!(registry.is_disabled("test", SkillSource::Blink));
+        assert!(registry.find_by_name("test", None).is_none());
         assert!(registry.match_triggers("cargo").is_empty());
 
         // Re-enable

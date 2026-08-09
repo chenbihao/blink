@@ -611,14 +611,14 @@ fn main() {
             {
                 let ai_config = app::ai_config::get_ai_config();
                 if ai_config.chat_config.skill_config.enabled {
-                    let sources = ai_config.chat_config.skill_config.enabled_sources();
+                    let skill_config = ai_config.chat_config.skill_config;
                     let app_clone = app.handle().clone();
                     tauri::async_runtime::spawn(async move {
                         use tauri::Manager;
                         if let Some(cs) = app_clone
                             .try_state::<std::sync::Arc<domain::ai::chat_service::ChatService>>()
                         {
-                            cs.refresh_skills(&sources);
+                            cs.apply_skill_config(&skill_config);
                             let count = cs.skill_registry().count();
                             if count > 0 {
                                 tracing::info!(count, "启动时 Skill 扫描完成");

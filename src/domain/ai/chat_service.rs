@@ -13,7 +13,7 @@
 //! - 自然完成时按 request_id compare-and-clear，旧任务不会误清新请求。
 //! - Phase 4 消费 `ChatPromptHandle.chunks` 并定向 emit 前端。
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use crate::domain::ai::memory::{
@@ -27,7 +27,9 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use crate::domain::ai::agent_provider::{AgentProvider, ChatStreamChunk};
-use crate::domain::ai::prompt::chat_system_prompt_with_skills;
+use crate::domain::ai::prompt::{
+    chat_system_prompt_with_skills, pure_chat_system_prompt_with_group,
+};
 use crate::domain::ai::provider::AIError;
 use crate::domain::ai::registry::{AIProviderRegistry, ResolvedProviderEntries};
 use crate::domain::ai::skill::{SkillRegistry, parse_skill_command};
@@ -62,6 +64,24 @@ struct AgentCacheKey {
     mcp_epoch: u64,
     /// 0.17.6: 对话类型——Persistent / Ephemeral 使用不同 memory，需独立缓存。
     kind: ConversationKind,
+    /// 0.19.10: 纯对话与工具对话必须使用不同 Agent，禁止跨模式复用。
+    pure_chat: bool,
+}
+
+/// 单次 prompt 的 Agent 装配计划。三类扩展共用同一模式快照，避免边界漂移。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AgentAssemblyPlan {
+    pure_chat: bool,
+}
+
+impl AgentAssemblyPlan {
+    fn for_mode(pure_chat: bool) -> Self {
+        Self { pure_chat }
+    }
+
+    fn includes_extensions(self) -> bool {
+        !self.pure_chat
+    }
 }
 
 struct CachedAgent {
@@ -293,6 +313,8 @@ pub struct ChatService {
     config_pool: sqlx::SqlitePool,
     /// 0.13.6: 上次计算的上下文窗口状态（供 `get_context_window_status` command 查询）。
     last_context_status: RwLock<Option<ContextWindowStatus>>,
+    /// 0.19.10: 当前对话模式；由 AIConfig 热更新，不修改其他 Capability 出口。
+    pure_chat_mode: AtomicBool,
 }
 
 impl ChatService {
@@ -311,6 +333,10 @@ impl ChatService {
         ai_pool: sqlx::SqlitePool,
         config_pool: sqlx::SqlitePool,
     ) -> Self {
+        let chat_config = ai_registry.config_snapshot().chat_config;
+        let pure_chat_mode = chat_config.pure_chat;
+        let skill_registry = SkillRegistry::new();
+        skill_registry.set_enabled(chat_config.skill_config.enabled);
         // 从配置库加载持久化的模型选择（0.12.7）
         // 0.14.7 W1: async 边界收敛在调用方（wiring），domain 内不再嵌套 runtime
         let selected = Self::load_selected_model(&config_pool, &ai_registry).await;
@@ -329,9 +355,10 @@ impl ChatService {
             ephemeral_memory: Arc::new(
                 crate::domain::ai::memory::EphemeralConversationMemory::new(),
             ),
-            skill_registry: SkillRegistry::new(),
+            skill_registry,
             cached_agent: RwLock::new(None),
             last_context_status: RwLock::new(None),
+            pure_chat_mode: AtomicBool::new(pure_chat_mode),
             requests: RequestTracker::new(),
             start_gate: tokio::sync::Mutex::new(()),
             selected: RwLock::new(selected),
@@ -514,10 +541,11 @@ impl ChatService {
     ///
     /// 0.12.6：`preamble` 参数支持分组级系统提示词——不同分组的 preamble hash
     /// 不同，cache key 自然失配，触发重建。传空字符串等同默认 `chat_system_prompt()`。
-    pub(crate) async fn ensure_provider(
+    async fn ensure_provider(
         &self,
         preamble: &str,
         kind: ConversationKind,
+        plan: AgentAssemblyPlan,
     ) -> Result<Arc<AgentProvider>, AIError> {
         const MAX_PROVIDER_RETRY: usize = 3;
         let mut retry_count = 0;
@@ -533,8 +561,12 @@ impl ChatService {
             // 0.13.7: lazy connect——确保 MCP server 已连接后再读 epoch，拿到最新 tool 池版本。
             // MCP 拓扑变化（server 连接/断开/disabled_tools 变化）会 bump epoch，
             // 使 AgentCacheKey 失配，触发 Agent 重建——修「首次连接慢的 server 未进 agent 缓存」。
-            self.mcp_client.ensure_connected(&self.config_pool).await;
-            let mcp_epoch = self.mcp_client.tool_pool_epoch();
+            let mcp_epoch = if plan.includes_extensions() {
+                self.mcp_client.ensure_connected(&self.config_pool).await;
+                self.mcp_client.tool_pool_epoch()
+            } else {
+                0
+            };
 
             let cache_key = AgentCacheKey {
                 provider_id: resolved.cache_key.0.clone(),
@@ -543,6 +575,7 @@ impl ChatService {
                 preamble_hash,
                 mcp_epoch,
                 kind,
+                pure_chat: plan.pure_chat,
             };
 
             if let Some(provider) = self.cached_provider(&cache_key) {
@@ -552,13 +585,18 @@ impl ChatService {
             // Client/Agent 构造可能读取 Credential Manager，必须在 ChatService 锁外进行。
             // 0.13.0: MCP tool 通过 external_tools 入口进池——collect_tools() 从已连接的
             // MCP server 拉 tool（过滤 disabled_tools），与内置 Capability/Action 并列。
-            let external_tools = self.mcp_client.collect_tools().await;
-            let tools = build_agent_tools(
-                &self.capability_registry,
-                external_tools,
-                self.emitter.clone(),
-                self.pending_confirms.clone(),
-            );
+            let tools: Vec<Box<dyn rig_core::tool::ToolDyn>> = if plan.includes_extensions() {
+                let external_tools = self.mcp_client.collect_tools().await;
+                build_agent_tools(
+                    &self.capability_registry,
+                    external_tools,
+                    self.emitter.clone(),
+                    self.pending_confirms.clone(),
+                )
+            } else {
+                tracing::debug!("ChatService: 纯对话模式，Agent tool schema 为空");
+                Vec::new()
+            };
             // 0.17.6: 按 kind 选撞 memory——Persistent 用 SQLite，Ephemeral 用进程内。
             // 0.13.1: context_limit 注入仅对 Persistent 有意义（Ephemeral 不做压缩）。
             let memory: Arc<dyn rig_core::memory::ConversationMemory> = match kind {
@@ -592,6 +630,13 @@ impl ChatService {
                     "ChatService: Agent 构造期间配置变化，丢弃旧实例并重试"
                 );
                 continue;
+            }
+            if self.pure_chat_mode.load(Ordering::Acquire) != plan.pure_chat {
+                tracing::debug!(
+                    requested_pure_chat = plan.pure_chat,
+                    "ChatService: Agent 构造期间对话模式变化，丢弃旧实例"
+                );
+                return Err(AIError::Cancelled);
             }
 
             *self
@@ -744,18 +789,32 @@ impl ChatService {
         let conversation_for_task = conversation_id.clone();
         let weak_service: Weak<Self> = Arc::downgrade(self);
 
+        let plan = AgentAssemblyPlan::for_mode(self.pure_chat_mode.load(Ordering::Acquire));
+
         // 0.13.3：构建 skill-aware preamble
         // 1. 检查 /skill 显式激活指令
         // 2. 阶段 1：所有 Skill 摘要常驻
         // 3. 阶段 2：触发匹配（关键词/正则）或显式激活的 Skill 全文注入
-        let (effective_message, triggered_skills) = self.resolve_skill_triggers(&message);
+        let (effective_message, triggered_skills) = if plan.includes_extensions() {
+            self.resolve_skill_triggers(&message)
+        } else {
+            (message.clone(), Vec::new())
+        };
 
-        let skill_summaries = self.skill_registry.summaries();
-        let preamble = chat_system_prompt_with_skills(
-            group_system_prompt.as_deref(),
-            &skill_summaries,
-            &triggered_skills,
-        );
+        let skill_summaries = if plan.includes_extensions() {
+            self.skill_registry.summaries()
+        } else {
+            Vec::new()
+        };
+        let preamble = if plan.pure_chat {
+            pure_chat_system_prompt_with_group(group_system_prompt.as_deref())
+        } else {
+            chat_system_prompt_with_skills(
+                group_system_prompt.as_deref(),
+                &skill_summaries,
+                &triggered_skills,
+            )
+        };
 
         if !triggered_skills.is_empty() {
             tracing::info!(
@@ -800,7 +859,10 @@ impl ChatService {
             };
 
             // Provider 构造也放进可 abort 的 task：窗口在冷构造期间关闭时仍能立即中断。
-            match service.ensure_provider(&preamble, kind_for_task).await {
+            match service
+                .ensure_provider(&preamble, kind_for_task, plan)
+                .await
+            {
                 Ok(provider) => {
                     // 0.13.6: 在 stream_prompt 前计算上下文窗口状态并推送前端
                     // 传入 pending message + preamble，因为此时消息尚未写入 DB，
@@ -1017,6 +1079,23 @@ impl ChatService {
         tracing::debug!("ChatService: 配置变化，AgentProvider 缓存已失效");
     }
 
+    /// 热更新纯对话模式。Agent cache key 也包含模式，此处清缓存用于立即释放旧实例。
+    pub fn update_pure_chat_mode(&self, pure_chat: bool) {
+        let previous = self.pure_chat_mode.swap(pure_chat, Ordering::AcqRel);
+        if previous != pure_chat {
+            *self
+                .cached_agent
+                .write()
+                .expect("chat agent cache lock poisoned") = None;
+            tracing::info!(pure_chat, "ChatService: 纯对话模式已更新");
+        }
+    }
+
+    /// 当前 Blink AI 对话是否为纯对话模式。只供对话相关投影/连接入口守门。
+    pub fn is_pure_chat_mode(&self) -> bool {
+        self.pure_chat_mode.load(Ordering::Acquire)
+    }
+
     /// 应用用户从设置页修改的记忆策略配置（0.13.1 §3.7）。
     ///
     /// 在 `set_config('ai_config')` 命令处理中调用——保存 DB 后、`notify_config_changed`
@@ -1167,11 +1246,25 @@ impl ChatService {
         (effective_message, triggered)
     }
 
-    /// 刷新 Skill 注册表——重新扫描所有启用的来源目录。
-    ///
-    /// 供设置页「刷新」按钮和配置变更后调用。
-    pub fn refresh_skills(&self, enabled_sources: &[crate::domain::ai::skill::SkillSource]) {
-        self.skill_registry.scan(enabled_sources);
+    /// 应用 Skill 运行时配置。关闭时立即旁路并清空；开启时在门闩关闭期间完成重扫，
+    /// 然后按当前单 Skill 禁用清单恢复可见状态。
+    pub fn apply_skill_config(&self, config: &crate::domain::config::ai_config::SkillConfig) {
+        self.skill_registry.set_enabled(false);
+        self.skill_registry
+            .set_disabled_skills(config.disabled_skills.clone());
+        if !config.enabled {
+            self.skill_registry.clear();
+            tracing::info!("ChatService: Skill 运行时已关闭并清空");
+            return;
+        }
+
+        self.skill_registry.scan(&config.enabled_sources());
+        self.skill_registry.set_enabled(true);
+        tracing::info!(
+            count = self.skill_registry.count(),
+            disabled = config.disabled_skills.len(),
+            "ChatService: Skill 运行时已重载"
+        );
     }
 
     /// 0.13.6: 更新被禁用的 Skill 列表。
@@ -1216,6 +1309,26 @@ fn hash_preamble(preamble: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pure_chat_plan_disables_all_agent_extensions() {
+        assert!(!AgentAssemblyPlan::for_mode(true).includes_extensions());
+        assert!(AgentAssemblyPlan::for_mode(false).includes_extensions());
+    }
+
+    #[test]
+    fn agent_cache_key_separates_pure_chat_mode() {
+        let base = AgentCacheKey {
+            provider_id: "p".into(),
+            model_id: "m".into(),
+            fingerprint: "f".into(),
+            preamble_hash: 1,
+            mcp_epoch: 0,
+            kind: ConversationKind::Persistent,
+            pure_chat: false,
+        };
+        assert_ne!(base, AgentCacheKey { pure_chat: true, ..base.clone() });
+    }
 
     fn pending_request(request_id: u64, conversation_id: &str) -> ActiveChatRequest {
         let task = tokio::spawn(std::future::pending::<()>());

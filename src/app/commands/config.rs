@@ -351,12 +351,11 @@ pub async fn set_config(
             if let Some(chat) =
                 app.try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
             {
+                chat.update_pure_chat_mode(ai.chat_config.pure_chat);
                 chat.update_memory_config(ai.chat_config.memory_config.clone())
                     .await;
-                // 0.13.3: Skill 配置变更后刷新 Skill 注册表
-                if ai.chat_config.skill_config.enabled {
-                    chat.refresh_skills(&ai.chat_config.skill_config.enabled_sources());
-                }
+                // 0.19.10: Skill 总开关、重扫与单 Skill 禁用清单统一热更新。
+                chat.apply_skill_config(&ai.chat_config.skill_config);
                 chat.notify_config_changed();
             }
 

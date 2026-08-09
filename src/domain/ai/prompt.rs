@@ -240,6 +240,25 @@ pub fn chat_system_prompt() -> String {
     )
 }
 
+/// 纯对话模式的 system prompt。明确声明当前对话无外部工具，避免模型依据普通
+/// Agent prompt 猜测可用能力；分组提示仍由调用方通过统一 helper 追加。
+pub fn pure_chat_system_prompt() -> String {
+    String::from(
+        "你是 Blink 的 AI 助手。请直接、准确地帮助用户完成任务。\n\n\
+         【当前模式】这是纯对话，当前对话没有可调用的外部工具。请仅基于对话上下文回答；\
+         不要声称读取了环境、执行了操作或调用了工具。\n\n\
+         【安全】不要假称操作成功。\n\n\
+         【语言】跟随用户输入语言回答。",
+    )
+}
+
+fn append_group_prompt(base: String, group_prompt: Option<&str>) -> String {
+    match group_prompt {
+        Some(p) if !p.is_empty() => format!("{base}\n\n【分组指令】\n{p}"),
+        _ => base,
+    }
+}
+
 /// 带分组系统提示词的 chat system prompt（0.12.6）。
 ///
 /// 在基础 system prompt 之后追加分组级系统提示词（如果有）。
@@ -247,13 +266,12 @@ pub fn chat_system_prompt() -> String {
 ///
 /// `group_prompt` 为 None 或空字符串时，退化为 `chat_system_prompt()`。
 pub fn chat_system_prompt_with_group(group_prompt: Option<&str>) -> String {
-    let base = chat_system_prompt();
-    match group_prompt {
-        Some(p) if !p.is_empty() => {
-            format!("{base}\n\n【分组指令】\n{p}")
-        }
-        _ => base,
-    }
+    append_group_prompt(chat_system_prompt(), group_prompt)
+}
+
+/// 带可选分组指令的纯对话 system prompt。
+pub fn pure_chat_system_prompt_with_group(group_prompt: Option<&str>) -> String {
+    append_group_prompt(pure_chat_system_prompt(), group_prompt)
 }
 
 /// 带分组系统提示词 + Skill 注入的完整 chat system prompt（0.13.3）。
@@ -691,6 +709,22 @@ mod tests {
     fn chat_prompt_with_group_empty_equals_base() {
         let prompt = chat_system_prompt_with_group(Some(""));
         assert_eq!(prompt, chat_system_prompt());
+    }
+
+    #[test]
+    fn pure_chat_prompt_explicitly_has_no_tools() {
+        let prompt = pure_chat_system_prompt();
+        assert!(prompt.contains("纯对话"));
+        assert!(prompt.contains("没有可调用的外部工具"));
+        assert!(!prompt.contains("危险操作必须等待"));
+    }
+
+    #[test]
+    fn pure_chat_prompt_preserves_group_instruction() {
+        let prompt = pure_chat_system_prompt_with_group(Some("你是翻译助手"));
+        assert!(prompt.contains("没有可调用的外部工具"));
+        assert!(prompt.contains("分组指令"));
+        assert!(prompt.contains("你是翻译助手"));
     }
 
     // ── chat_system_prompt_with_skills ──

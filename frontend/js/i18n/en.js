@@ -695,6 +695,8 @@ export const en = {
     "ai.chat.section.desc": "Conversation window behavior",
     "ai.chat.lede": "Manage conversation behavior, automatic titles, context, and recall of earlier content in this conversation.",
     "ai.extensions.lede": "Manage Skills that guide AI, external tools used by Blink AI, tool authorization, and the Blink MCP Server for external apps.",
+    "ai.chat.pure.label": "Pure Chat Mode",
+    "ai.chat.pure.hint": "Use the model without built-in capabilities, external MCP tools, or Skills. This does not affect the CLI, internal calls, or Blink MCP Server.",
     "ai.chat.auto_title.label": "LLM Auto Title",
     "ai.chat.auto_title.hint": "When enabled, automatically generates a conversation title using LLM after the first turn, replacing the default \"New Chat\"",
     "ai.chat.title_tier.label": "Title Model Tier",

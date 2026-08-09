@@ -46,6 +46,9 @@ async function init() {
     applyThemeFromConfig();
     if (e?.payload?.key === "ai_config") {
       refreshModelSelector();
+      refreshToolPool(true);
+      invalidateComposerBarCache();
+      refreshPopupIfVisible();
     }
     // 0.13.0：MCP 配置变更时刷新 tool 池
     if (e?.payload?.key === "mcp:servers") {

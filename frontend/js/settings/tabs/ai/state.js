@@ -58,7 +58,7 @@ export function defaultAIConfig() {
     tier_light: null,
     tier_main: null,
     slo_hard_timeout_ms: 20_000,
-    chat_config: { auto_title: false, title_tier: "light", memory_config: { mode: "token_aware", window_size: 20, trigger_ratio: 0.8, compress_ratio: 0.7, recall_enabled: true, recall_top_k: 3 }, skill_config: { enabled: true, source_blink: true, source_claude: true, source_zcode: false } },
+    chat_config: { pure_chat: false, auto_title: false, title_tier: "light", memory_config: { mode: "token_aware", window_size: 20, trigger_ratio: 0.8, compress_ratio: 0.7, recall_enabled: true, recall_top_k: 3 }, skill_config: { enabled: true, source_blink: true, source_claude: true, source_zcode: false } },
   };
 }
 

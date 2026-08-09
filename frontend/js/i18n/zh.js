@@ -696,6 +696,8 @@ export const zh = {
     "ai.chat.section.desc": "对话窗口行为配置",
     "ai.chat.lede": "管理对话行为、自动标题、上下文与本对话的较早内容召回。",
     "ai.extensions.lede": "管理教 AI 如何工作的 Skill、供 Blink AI 使用的外部工具、工具授权，以及面向外部应用的 Blink MCP Server。",
+    "ai.chat.pure.label": "纯对话模式",
+    "ai.chat.pure.hint": "开启后，Blink 对话只使用模型回答，不装配内置能力、MCP 外部工具或 Skill；不会影响 CLI、内部调用或 Blink MCP Server。",
     "ai.chat.auto_title.label": "LLM 自动命名",
     "ai.chat.auto_title.hint": "开启后新对话的首轮完成后自动用 LLM 生成标题，取代默认「新对话」",
     "ai.chat.title_tier.label": "命名模型档位",
