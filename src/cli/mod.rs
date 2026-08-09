@@ -9,7 +9,7 @@
 //!
 //! ## 命令
 //!
-//! - `blink mcp-server` — 作为 MCP server 运行（stdio 模式，0.13.4）
+//! - `blink mcp-server` — 已迁移到主进程 Streamable HTTP（0.19.13，返回迁移提示）
 //! - `blink search <query>` — 应用搜索
 //! - `blink run <capability> [--args JSON]` — 调用任意 Capability
 //! - `blink config get <key>` / `blink config set <key> <value>` — 读写配置
@@ -32,7 +32,9 @@ pub struct Cli {
 /// CLI 子命令。
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// 作为 MCP server 运行（stdio 模式，供外部 MCP client 连接）
+    /// 已迁移到主进程 Streamable HTTP（0.19.13）。
+    ///
+    /// 旧 stdio 子进程路径已收口，执行时返回迁移提示。
     McpServer,
 
     /// 搜索应用

@@ -888,6 +888,20 @@
                   <span class="slider"></span>
                 </label>
               </div>
+              <!-- 端口配置（始终可见） -->
+              <div class="setting-row">
+                <label class="setting-label" data-i18n="ai.mcp_server.port">监听端口</label>
+                <input type="number" id="mcp-server-port-input" min="1024" max="65535" value="32123" class="input-small mcp-port-input" />
+                <span class="mcp-port-hint" data-i18n="ai.mcp_server.port_hint">范围 1024–65535</span>
+              </div>
+              <!-- 运行时状态栏（始终可见） -->
+              <div id="mcp-server-status-bar" class="mcp-runtime-status">
+                <span class="mcp-runtime-dot" id="mcp-server-status-dot"></span>
+                <span class="mcp-runtime-label" id="mcp-server-status-text" data-i18n="ai.mcp_server.status.disabled">未启用</span>
+                <span class="mcp-runtime-endpoint" id="mcp-server-endpoint"></span>
+                <span class="mcp-runtime-tool-count" id="mcp-server-tool-count"></span>
+                <p class="mcp-runtime-error" id="mcp-server-error-msg"></p>
+              </div>
               <!-- 启用后才显示 -->
               <div id="mcp-server-detail" class="hidden">
                 <div class="setting-row">

@@ -1,6 +1,6 @@
 [package]
 name = "blink"
-version = "0.18.6"
+version = "0.19.12"
 edition = "2024"
 description = "Blink — Windows Universal Action Layer"
 license = "MIT"
@@ -59,7 +59,16 @@ rig-core = { version = "0.39", features = ["rmcp", "test-utils"] }
 # - client + transport-child-process: 0.13.0 MCP client 拉起外部 server 子进程走 stdio JSON-RPC
 # - server + transport-io: 0.13.4 MCP server 暴露 Blink 能力给外部 client（stdio 传输）
 # - transport-streamable-http-client-reqwest: 0.13.6 MCP client 支持 Streamable HTTP 远程 server
-rmcp = { version = "1.8", features = ["client", "server", "transport-child-process", "transport-io", "transport-streamable-http-client-reqwest"] }
+# - transport-streamable-http-server: 0.19.13 MCP server Streamable HTTP transport（主进程托管）
+rmcp = { version = "1.8", features = ["client", "server", "transport-child-process", "transport-io", "transport-streamable-http-client-reqwest", "transport-streamable-http-server"] }
+# hyper + hyper-util: HTTP 服务器（0.19.13 MCP Streamable HTTP transport 需要）
+# hyper 已作为 reqwest 传递依赖在树中；这里显式启用 server + http1 feature 供主进程 HTTP listener 使用
+hyper = { version = "1", features = ["server", "http1"] }
+# hyper-util: HTTP 服务器工具（0.19.13 MCP Streamable HTTP transport 需要）
+# service: TowerToHyperService 适配 Tower Service → hyper Service
+hyper-util = { version = "0.1", features = ["server", "tokio", "service"] }
+# tokio-util: CancellationToken（0.19.13 MCP Streamable HTTP server 优雅关闭）
+tokio-util = "0.7"
 # clap: 命令行参数解析（0.13.5 CLI 化——blink chat/search/screenshot/mcp-server）
 clap = { version = "4.5", features = ["derive"] }
 # semver: 语义化版本比较（检查更新用），支持 pre-release / build metadata

@@ -606,6 +606,15 @@ fn main() {
             app.manage(mcp_client.clone());
             // 0.14.6 §2.2：DomainEnv 注册为 managed state（command 层 app.state 取用）
             app.manage(domain_env);
+            // 0.19.13: 保留 clone 供 McpServerRuntime 构造用
+            let domain_env_for_mcp = app
+                .state::<std::sync::Arc<app::domain_env::TauriDomainEnv>>()
+                .inner()
+                .clone();
+            let cap_registry_for_mcp = app
+                .state::<std::sync::Arc<domain::capability::CapabilityRegistry>>()
+                .inner()
+                .clone();
 
             // 0.13.3: 启动时扫描 Skill 目录（非阻塞，后台执行）
             {
@@ -666,6 +675,30 @@ fn main() {
 
             // 0.16.13：便签恢复逻辑已提取为 StickyRecoveryService，纳入 all_services() 编排。
             // 见 src/app/service.rs::StickyRecoveryService。
+
+            // 0.19.13: MCP Server Runtime——主进程 Streamable HTTP MCP Server 生命周期管理。
+            // 在 CapabilityRegistry、DomainEnv、pools.ai 都就绪后构造。
+            // 启动时按配置自动启动 listener（如果 enabled=true）。
+            let mcp_server_runtime = std::sync::Arc::new(
+                app::mcp_server_runtime::McpServerRuntime::new(
+                    cap_registry_for_mcp,
+                    domain_env_for_mcp,
+                    pools.ai.clone(),
+                ),
+            );
+            app.manage(mcp_server_runtime.clone());
+
+            // 后台加载配置并按需启动 listener（不阻塞启动流程）
+            {
+                let runtime = mcp_server_runtime.clone();
+                let config_pool = pools.config.clone();
+                tauri::async_runtime::spawn(async move {
+                    let config = domain::mcp::McpServerModeConfigStore::load(&config_pool)
+                        .await
+                        .unwrap_or_default();
+                    runtime.apply_config(&config).await;
+                });
+            }
 
             Ok(())
         })
@@ -875,6 +908,8 @@ app::commands::ensure_mcp_connected,
             app::commands::get_mcp_server_config,
             app::commands::set_mcp_server_config,
             app::commands::list_exposable_capabilities,
+            // 0.19.13 MCP server 运行时状态
+            app::commands::get_mcp_server_runtime_status,
             // 0.13.3 Skill 约定式
             app::commands::list_skills,
             app::commands::refresh_skills,
@@ -942,6 +977,16 @@ app::commands::ensure_mcp_connected,
                         let _ = tokio::time::timeout(
                             std::time::Duration::from_secs(3),
                             mcp.stop_all(),
+                        ).await;
+                    });
+                }
+
+                // 0.19.13: 关闭 MCP Server HTTP listener，释放端口
+                if let Some(runtime) = _app.try_state::<std::sync::Arc<app::mcp_server_runtime::McpServerRuntime>>() {
+                    let _ = tauri::async_runtime::block_on(async {
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_secs(3),
+                            runtime.shutdown(),
                         ).await;
                     });
                 }

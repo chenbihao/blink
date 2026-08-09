@@ -75,7 +75,7 @@ pub fn dispatch(cli: Cli) -> i32 {
 
     // 执行 CLI 命令
     let exit_code = match cli.command {
-        Commands::McpServer => run_mcp_server(&handle, &cap_registry),
+        Commands::McpServer => run_mcp_server(),
         Commands::Search { query, json } => run_search(&handle, &query, json),
         Commands::Run { capability, args } => {
             run_capability(&handle, &cap_registry, &capability, args)
@@ -91,32 +91,27 @@ pub fn dispatch(cli: Cli) -> i32 {
     exit_code
 }
 
-/// `blink mcp-server` — 作为 MCP server 运行（stdio 模式）。
-fn run_mcp_server(
-    handle: &tauri::AppHandle,
-    cap_registry: &Arc<crate::domain::capability::CapabilityRegistry>,
-) -> i32 {
-    use tauri::Manager;
-
-    let pools = handle.state::<crate::infra::data::DbPools>();
-    let env_arc = handle
-        .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
-        .inner()
-        .clone();
-    let result = tauri::async_runtime::block_on(crate::domain::mcp::run_stdio_server(
-        cap_registry.clone(),
-        env_arc,
-        pools.ai.clone(),
-        pools.config.clone(),
-    ));
-
-    match result {
-        Ok(()) => 0,
-        Err(e) => {
-            eprintln!("MCP server 错误: {e}");
-            1
-        }
-    }
+/// `blink mcp-server` — 已迁移到主进程 Streamable HTTP（0.19.13）。
+///
+/// 旧 stdio 子进程路径已收口。执行时打印迁移指引并退出。
+fn run_mcp_server() -> i32 {
+    eprintln!(
+        "Blink MCP Server 已迁移到主进程 Streamable HTTP（0.19.13）。\n\
+         \n\
+         旧 `blink mcp-server` stdio 子进程路径已停用。\n\
+         MCP Server 现由 Blink 主进程托管，请在设置页「MCP Server」中启用。\n\
+         连接地址：http://127.0.0.1:<port>/mcp（默认端口 32123）\n\
+         \n\
+         在外部 MCP 客户端配置中使用 Streamable HTTP URL 连接，例如：\n\
+         {{\n\
+           \"mcpServers\": {{\n\
+             \"blink\": {{\n\
+               \"url\": \"http://127.0.0.1:32123/mcp\"\n\
+             }}\n\
+           }}\n\
+         }}"
+    );
+    1
 }
 
 /// `blink search <query>` — 搜索应用。

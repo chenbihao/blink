@@ -1,12 +1,13 @@
 /**
  * MCP Server Tab 模块
  *
- * 管理 Blink 作为 MCP server 的配置：总开关 + 暴露能力清单 + 使用方式。
+ * 管理 Blink 作为 MCP server 的配置：总开关 + 端口 + 暴露能力清单 + 运行时状态 + 使用方式。
  *
  * 后端 commands:
- * - get_mcp_server_config — 读取配置（enabled + exposed_capabilities）
+ * - get_mcp_server_config — 读取配置（enabled + port + exposed_capabilities）
  * - set_mcp_server_config — 保存配置
  * - list_exposable_capabilities — 列出所有可暴露的 Capability
+ * - get_mcp_server_runtime_status — 获取运行时状态快照（status / endpoint / port / tool_count / error）
  */
 import { invoke } from "../../shared/tauri.js";
 import { t } from "../../i18n/index.js";
@@ -17,18 +18,21 @@ import { t } from "../../i18n/index.js";
 export async function initMcpServerSection() {
   await loadConfig();
   initToggle();
+  initPortInput();
   initCopyConfig();
+  startStatusPolling();
 }
 
 // ── 配置加载与渲染 ────────────────────────────────────────────────────────────
 
-let currentConfig = { enabled: false, exposed_capabilities: [] };
+let currentConfig = { enabled: false, port: 32123, exposed_capabilities: [] };
 
 async function loadConfig() {
   try {
     currentConfig = await invoke("get_mcp_server_config");
     await renderCapabilities();
     updateToggle();
+    updatePortInput();
     updateDetailVisibility();
     updateConfigJson();
   } catch (e) {
@@ -113,6 +117,32 @@ function updateToggle() {
   }
 }
 
+// ── 端口输入 ──────────────────────────────────────────────────────────────────
+
+function initPortInput() {
+  const input = document.getElementById("mcp-server-port-input");
+  if (!input) return;
+
+  input.addEventListener("change", async () => {
+    const port = parseInt(input.value, 10);
+    if (isNaN(port) || port < 1024 || port > 65535) {
+      alert(t("ai.mcp_server.port_invalid") || "端口必须在 1024–65535 范围内");
+      input.value = currentConfig.port || 32123;
+      return;
+    }
+    currentConfig.port = port;
+    await saveConfig();
+    updateConfigJson();
+  });
+}
+
+function updatePortInput() {
+  const input = document.getElementById("mcp-server-port-input");
+  if (input) {
+    input.value = currentConfig.port || 32123;
+  }
+}
+
 /**
  * 根据开关状态显示/隐藏能力列表和使用方式。
  */
@@ -123,20 +153,101 @@ function updateDetailVisibility() {
   }
 }
 
+// ── 运行时状态轮询 ────────────────────────────────────────────────────────────
+
+let statusPollTimer = null;
+
+function startStatusPolling() {
+  // 立即查询一次
+  refreshStatus();
+  // 每 3 秒轮询一次运行时状态
+  if (statusPollTimer) clearInterval(statusPollTimer);
+  statusPollTimer = setInterval(refreshStatus, 3000);
+}
+
+async function refreshStatus() {
+  try {
+    const snapshot = await invoke("get_mcp_server_runtime_status");
+    renderStatus(snapshot);
+  } catch (e) {
+    console.error("getMcpServerRuntimeStatus failed:", e);
+  }
+}
+
+function renderStatus(snapshot) {
+  const dot = document.getElementById("mcp-server-status-dot");
+  const text = document.getElementById("mcp-server-status-text");
+  const endpoint = document.getElementById("mcp-server-endpoint");
+  const toolCount = document.getElementById("mcp-server-tool-count");
+  const errorMsg = document.getElementById("mcp-server-error-msg");
+
+  if (!dot || !text) return;
+
+  // 状态映射
+  const statusMap = {
+    disabled: { class: "mcp-dot-disabled", label: t("ai.mcp_server.status.disabled") || "未启用" },
+    starting: { class: "mcp-dot-probing", label: t("ai.mcp_server.status.starting") || "启动中" },
+    listening: { class: "mcp-dot-online", label: t("ai.mcp_server.status.listening") || "运行中" },
+    error: { class: "mcp-dot-offline", label: t("ai.mcp_server.status.error") || "错误" },
+  };
+
+  const info = statusMap[snapshot.status] || statusMap.disabled;
+
+  // 更新状态点
+  dot.className = "mcp-runtime-dot " + info.class;
+
+  // 更新状态文字
+  text.textContent = info.label;
+
+  // 更新 endpoint
+  if (endpoint) {
+    if (snapshot.endpoint) {
+      endpoint.textContent = snapshot.endpoint;
+      endpoint.style.display = "";
+    } else {
+      endpoint.textContent = "";
+      endpoint.style.display = "none";
+    }
+  }
+
+  // 更新 tool 数量
+  if (toolCount) {
+    if (snapshot.status === "listening" && snapshot.tool_count > 0) {
+      toolCount.textContent = `${snapshot.tool_count} ${t("ai.mcp_server.tools") || "个工具"}`;
+      toolCount.style.display = "";
+    } else {
+      toolCount.textContent = "";
+      toolCount.style.display = "none";
+    }
+  }
+
+  // 更新错误信息
+  if (errorMsg) {
+    if (snapshot.error) {
+      errorMsg.textContent = snapshot.error;
+      errorMsg.style.display = "";
+    } else {
+      errorMsg.textContent = "";
+      errorMsg.style.display = "none";
+    }
+  }
+}
+
 // ── 使用方式：配置 JSON + 复制 ────────────────────────────────────────────────
 
 /**
  * 生成 MCP 客户端配置 JSON 并填充到 <pre> 中。
+ * 0.19.13: 使用 Streamable HTTP URL 格式。
  */
 function updateConfigJson() {
   const pre = document.getElementById("mcp-server-config-json");
   if (!pre) return;
 
+  const port = currentConfig.port || 32123;
   const config = {
     mcpServers: {
       blink: {
-        command: "blink",
-        args: ["mcp-server"],
+        url: `http://127.0.0.1:${port}/mcp`,
       },
     },
   };
@@ -174,6 +285,8 @@ function initCopyConfig() {
 async function saveConfig() {
   try {
     await invoke("set_mcp_server_config", { config: currentConfig });
+    // 保存后立即刷新状态（启停/端口变更会触发 runtime 状态变化）
+    setTimeout(refreshStatus, 200);
   } catch (e) {
     console.error("saveMcpServerConfig failed:", e);
     alert("保存 MCP server 配置失败: " + e);

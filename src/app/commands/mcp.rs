@@ -438,6 +438,8 @@ pub async fn get_mcp_server_config(
 }
 
 /// 保存 MCP server 配置。
+///
+/// 0.19.13: 保存后同步通知 McpServerRuntime 热更新（启停/改端口/改暴露清单）。
 #[tauri::command]
 pub async fn set_mcp_server_config(
     app: tauri::AppHandle,
@@ -446,7 +448,27 @@ pub async fn set_mcp_server_config(
     let pools = app.state::<crate::infra::data::DbPools>();
     crate::domain::mcp::McpServerModeConfigStore::save(&pools.config, &config)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // 0.19.13: 通知 runtime 应用配置变更（启停/改端口/热更新暴露清单）
+    if let Some(runtime) = app.try_state::<std::sync::Arc<crate::app::mcp_server_runtime::McpServerRuntime>>() {
+        runtime.apply_config(&config).await;
+    }
+
+    Ok(())
+}
+
+/// 0.19.13: 获取 MCP server 运行时状态（只读快照）。
+///
+/// 返回 `McpServerRuntimeSnapshot`，包含 status / endpoint / port / tool_count / error。
+/// 状态查询只读，不隐式启动 listener。
+#[tauri::command]
+pub async fn get_mcp_server_runtime_status(
+    app: tauri::AppHandle,
+) -> Result<crate::app::mcp_server_runtime::McpServerRuntimeSnapshot, String> {
+    let runtime = app
+        .state::<std::sync::Arc<crate::app::mcp_server_runtime::McpServerRuntime>>();
+    Ok(runtime.snapshot().await)
 }
 
 // ── 辅助类型（从 commands.rs 迁移）──

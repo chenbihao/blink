@@ -1,4 +1,4 @@
-//! MCP server 编排（0.13.4）——Blink 作为 MCP server 暴露能力给外部 client。
+//! MCP server 编排（0.13.4 / 0.19.13）——Blink 作为 MCP server 暴露能力给外部 client。
 //!
 //! ## 架构
 //!
@@ -11,89 +11,180 @@
 //! - sensitive capability：不直接暴露给外部（安全优先），需用户在设置页显式启用
 //! - 所有对外调用走审计日志（`ai_tool_audit`，`caller = mcp_external`）
 //!
-//! ## 传输
+//! ## 传输（0.19.13）
 //!
-//! stdio 模式——外部 client 拉起 Blink 子进程（`blink mcp-server`），走 stdin/stdout JSON-RPC。
-//! 与 0.13.0 MCP client 对称（client 拉 server 子进程，server 暴露 tool）。
-//!
-//! ## 与 CLI 化的关系
-//!
-//! `blink mcp-server` 命令（0.13.5）等价于调用 `run_stdio_server()`——以独立进程运行，
-//! 不启动 GUI。设置页只控制暴露配置，实际 server 由 CLI 启动。
+//! 主进程通过 Streamable HTTP transport 暴露，endpoint `http://127.0.0.1:{port}/mcp`。
+//! 旧 stdio CLI 路径已收口为迁移错误。所有 HTTP session 共享同一份 `ExposureSnapshot`，
+//! 修改暴露清单时立即重建快照并通知所有活跃 session 的 `tools/listChanged`。
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
-use rmcp::ServiceExt;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, Content, Implementation, InitializeResult,
     ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
 };
-use rmcp::service::{RequestContext, RoleServer};
+use rmcp::service::{NotificationContext, RequestContext, RoleServer};
 use serde_json::Value;
+use tokio::sync::{RwLock, watch};
 
 use crate::domain::capability::{CapabilityRegistry, CapabilityResult, InvokeContext};
 use crate::domain::event::DomainEnv;
 use crate::domain::mcp::projection::capability_schemas_to_mcp_tools;
-use crate::domain::mcp::server_config::{McpServerModeConfig, McpServerModeConfigStore};
+use crate::domain::mcp::server_config::McpServerModeConfig;
 use crate::infra::data::ai_audit;
+
+// ── ExposureSnapshot ─────────────────────────────────────────────────────────
+
+/// 所有 HTTP session 共享的暴露快照（0.19.13）。
+///
+/// - `generation`：单调递增版本号，每次重建 +1，用于驱动 `tools/listChanged` 通知。
+/// - `allowed`：当前允许暴露的 Capability id 集合（call-time 二次门禁用）。
+/// - `tools`：按 capability name 排序的 rmcp Tool 列表（list_tools 用）。
+///
+/// 修改暴露清单时重建整个快照并递增 generation；
+/// `list_tools` / `get_tool` / `call_tool` 都读取当前快照，
+/// 已撤销暴露的工具即使旧 session 曾经获取过也会被 call-time 门禁拒绝。
+pub struct ExposureSnapshot {
+    pub generation: u64,
+    pub allowed: HashSet<String>,
+    pub tools: Vec<Tool>,
+}
+
+impl ExposureSnapshot {
+    /// 空快照（初始状态，不暴露任何能力）。
+    fn empty() -> Self {
+        Self {
+            generation: 0,
+            allowed: HashSet::new(),
+            tools: Vec::new(),
+        }
+    }
+
+    /// 从 CapabilityRegistry 和配置构建快照。
+    /// tools 按 capability name 排序，保证不同 session list_tools 结果一致。
+    fn build(cap_registry: &CapabilityRegistry, config: &McpServerModeConfig) -> Self {
+        let allowed: HashSet<String> = config.exposed_capabilities.iter().cloned().collect();
+
+        let mut schemas: Vec<_> = cap_registry
+            .list()
+            .into_iter()
+            .filter(|s| allowed.contains(&s.name))
+            .collect();
+        schemas.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let tools = capability_schemas_to_mcp_tools(&schemas);
+
+        Self {
+            generation: 0,
+            allowed,
+            tools,
+        }
+    }
+}
+
+/// 共享暴露状态——所有 HTTP session 通过 `Arc<RwLock<ExposureSnapshot>>` 读取。
+///
+/// 外层 `Arc<RwLock<>>` 允许 runtime 在修改暴露清单时原子替换快照；
+/// 内层 `watch::Sender<u64>` 用于通知 session worker generation 变化。
+pub struct SharedExposure {
+    snapshot: Arc<RwLock<ExposureSnapshot>>,
+    generation_tx: watch::Sender<u64>,
+}
+
+impl SharedExposure {
+    /// 创建初始空快照。
+    pub fn new() -> Self {
+        let snapshot = Arc::new(RwLock::new(ExposureSnapshot::empty()));
+        let (generation_tx, _) = watch::channel(0u64);
+        Self {
+            snapshot,
+            generation_tx,
+        }
+    }
+
+    /// 从 CapabilityRegistry 和配置构建并安装新快照，递增 generation。
+    /// 返回新 generation 值（调用方据此判断是否需要通知 session）。
+    pub async fn rebuild(&self, cap_registry: &CapabilityRegistry, config: &McpServerModeConfig) -> u64 {
+        let mut new_snapshot = ExposureSnapshot::build(cap_registry, config);
+        let old_generation = {
+            let current = self.snapshot.read().await;
+            current.generation
+        };
+        new_snapshot.generation = old_generation + 1;
+
+        tracing::info!(
+            generation = new_snapshot.generation,
+            tool_count = new_snapshot.tools.len(),
+            "ExposureSnapshot: 已重建"
+        );
+
+        *self.snapshot.write().await = new_snapshot;
+
+        let new_gen = old_generation + 1;
+        let _ = self.generation_tx.send(new_gen);
+        new_gen
+    }
+
+    /// 读取当前快照（list_tools / get_tool 用）。
+    pub async fn read(&self) -> tokio::sync::RwLockReadGuard<'_, ExposureSnapshot> {
+        self.snapshot.read().await
+    }
+
+    /// 订阅 generation 变化通知（session on_initialized 用）。
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.generation_tx.subscribe()
+    }
+
+    /// 获取当前 generation（只读，不持有锁）。
+    #[allow(dead_code)]
+    pub async fn current_generation(&self) -> u64 {
+        self.snapshot.read().await.generation
+    }
+}
+
+impl Default for SharedExposure {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ── BlinkMcpServer ───────────────────────────────────────────────────────────
 
 /// Blink MCP server——实现 rmcp ServerHandler，暴露 Capability 给外部 client。
 ///
-/// 持有 CapabilityRegistry + DomainEnv + AI DB pool + 配置，
-/// 在 `list_tools` / `call_tool` 时按配置过滤和执行。
+/// 持有 CapabilityRegistry + DomainEnv + AI DB pool + 共享暴露快照。
+/// `list_tools` / `call_tool` 读取共享快照，call-time 二次校验 allowed 集合。
 ///
-/// **0.14.6 §2.2**：`app_handle: tauri::AppHandle` 替换为 `env: Arc<dyn DomainEnv>`，
-/// domain 层不再直接依赖 tauri。
+/// **0.19.13**：config / cached_tools 替换为 `Arc<SharedExposure>`，
+/// 所有 HTTP session 共享同一份快照，修改暴露清单不重启 listener。
 pub struct BlinkMcpServer {
-    /// 能力注册表——list_tools 和 call_tool 的数据源。
+    /// 能力注册表——call_tool 的数据源。
     cap_registry: Arc<CapabilityRegistry>,
     /// 领域环境——构造 InvokeContext 用（能力通过它访问 managed state）。
     env: Arc<dyn DomainEnv>,
     /// AI 库连接池——审计日志写入。
     ai_pool: sqlx::SqlitePool,
-    /// server 配置——控制哪些 capability 暴露。
-    config: McpServerModeConfig,
-    /// 缓存的 tool 列表（配置不变时复用，避免每次 list_tools 都投影）。
-    cached_tools: Vec<Tool>,
+    /// 共享暴露快照——所有 session 共享。
+    exposure: Arc<SharedExposure>,
 }
 
 impl BlinkMcpServer {
-    /// 构造 MCP server。
+    /// 构造 MCP server handler。
     ///
-    /// 构造时立即按配置过滤 + 投影 Capability schema → rmcp Tool，缓存结果。
+    /// `exposure` 由 `McpServerRuntime` 持有并共享给所有 session。
     pub fn new(
         cap_registry: Arc<CapabilityRegistry>,
         env: Arc<dyn DomainEnv>,
         ai_pool: sqlx::SqlitePool,
-        config: McpServerModeConfig,
+        exposure: Arc<SharedExposure>,
     ) -> Self {
-        // 按配置过滤 Capability，只暴露用户勾选的
-        let exposed_schemas: Vec<_> = cap_registry
-            .list()
-            .into_iter()
-            .filter(|s| config.exposed_capabilities.contains(&s.name))
-            .collect();
-
-        let cached_tools = capability_schemas_to_mcp_tools(&exposed_schemas);
-
-        tracing::info!(
-            total_capabilities = cap_registry.len(),
-            exposed = cached_tools.len(),
-            "BlinkMcpServer: 初始化完成"
-        );
-
         Self {
             cap_registry,
             env,
             ai_pool,
-            config,
-            cached_tools,
+            exposure,
         }
-    }
-
-    /// 按 name 查找 tool 定义（供 `get_tool` 用）。
-    fn find_tool(&self, name: &str) -> Option<Tool> {
-        self.cached_tools.iter().find(|t| t.name == name).cloned()
     }
 
     /// 把 CapabilityResult 投影为 MCP CallToolResult。
@@ -101,12 +192,6 @@ impl BlinkMcpServer {
     /// 0.14.1: 改调 canonical 投影（`to_rig_tool_result()` + `rig_tool_result_to_text()`），
     /// 消除内联 match + Blob 摘要重复 + Items score 漂移。
     /// 0.19.4: 改用 `to_rig_tool_result_with_stash()`，image Blob 移入 stash 并返回 image_ref。
-    ///
-    /// - `Text` → MCP TextContent
-    /// - `Items` → 序列化 data JSON（不含 desc/actions/score）
-    /// - `Blob{image/*}` → 移入 stash 返回 image_ref JSON（无 stash 时降级为摘要）
-    /// - `Blob{非 image}` → 文本摘要
-    /// - `Done` → summary 文本
     fn result_to_call_tool_result(
         result: CapabilityResult,
         stash: Option<&crate::domain::capability::ImageStash>,
@@ -129,7 +214,10 @@ impl BlinkMcpServer {
 impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
     fn get_info(&self) -> ServerInfo {
         let mut caps = ServerCapabilities::default();
-        caps.tools = Some(Default::default());
+        // 0.19.13: 声明 tools.listChanged = true，让 client 知道我们支持热刷新
+        let mut tools_caps = rmcp::model::ToolsCapability::default();
+        tools_caps.list_changed = Some(true);
+        caps.tools = Some(tools_caps);
         let mut info = InitializeResult::new(caps);
         info.server_info = Implementation::new("blink", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(
@@ -143,12 +231,17 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
         request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ListToolsResult, rmcp::ErrorData>> + Send + '_ {
-        let tools = self.cached_tools.clone();
-        std::future::ready(Ok(ListToolsResult::with_all_items(tools)))
+        let exposure = self.exposure.clone();
+        async move {
+            let snapshot = exposure.read().await;
+            Ok(ListToolsResult::with_all_items(snapshot.tools.clone()))
+        }
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        self.find_tool(name)
+        // 同步上下文中不能 await，用 try_read 快速尝试
+        let snapshot = self.exposure.snapshot.try_read().ok()?;
+        snapshot.tools.iter().find(|t| t.name == name).cloned()
     }
 
     fn call_tool(
@@ -162,22 +255,26 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
             .map(|m| Value::Object(m))
             .unwrap_or(Value::Null);
 
-        // Clone 所有需要的值到 async block 中（避免借用 self）
         let cap_registry = self.cap_registry.clone();
         let ai_pool = self.ai_pool.clone();
         let env = self.env.clone();
-        let exposed = self.config.exposed_capabilities.clone();
-        let available = self.config.exposed_capabilities.join(", ");
+        let exposure = self.exposure.clone();
         let tool_name_for_audit = tool_name.clone();
         let args_for_audit = args.clone();
 
         async move {
-            // 检查 tool 是否在暴露列表中
-            if !exposed.contains(&tool_name) {
+            // 0.19.13: call-time 二次门禁——读取最新快照校验 allowed
+            let allowed = {
+                let snapshot = exposure.read().await;
+                snapshot.allowed.clone()
+            };
+
+            if !allowed.contains(&tool_name) {
                 tracing::warn!(
                     tool = %tool_name,
-                    "MCP server: 外部 client 调用了未暴露的 tool"
+                    "MCP server: 外部 client 调用了未暴露的 tool（call-time 门禁拒绝）"
                 );
+                let available = allowed.iter().cloned().collect::<Vec<_>>().join(", ");
                 let result = BlinkMcpServer::error_to_call_tool_result(&format!(
                     "Tool '{tool_name}' is not exposed. Available tools: {available}"
                 ));
@@ -186,7 +283,7 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
 
             let start = std::time::Instant::now();
 
-            // 构造 InvokeContext（env 在 async block 内 owned，取引用）
+            // 构造 InvokeContext
             let ctx = InvokeContext {
                 env: env.capability_env(),
                 deadline: None,
@@ -199,7 +296,7 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
             let call_tool_result = match result {
                 Ok(cap_result) => {
                     let stash = env.capability_env().image_stash();
-                    // 审计日志（caller = mcp_external）——0.14.1 改调 canonical 投影
+                    // 审计日志（caller = mcp_external）
                     let summary = crate::domain::capability::rig_tool_result_to_text(
                         &cap_result.to_rig_tool_result_with_stash(stash.map(|s| s.as_ref())),
                     );
@@ -238,7 +335,7 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
                         "",
                         "",
                         1,
-                        "mcp_external", // caller — 外部 MCP client 调用
+                        "mcp_external",
                     )
                     .await;
 
@@ -257,61 +354,52 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
             Ok(call_tool_result)
         }
     }
-}
 
-/// 以 stdio 模式运行 MCP server。
-///
-/// 读取 stdin / 写入 stdout，走 JSON-RPC 协议。
-/// 外部 MCP client 拉起 `blink mcp-server` 子进程后，通过 stdio 通信。
-///
-/// **不启动 GUI**——纯 stdio 进程，适合 CLI / 脚本场景。
-/// 设置页的暴露配置从配置库读取，决定哪些 Capability 暴露。
-///
-/// # 参数
-/// - `cap_registry`：能力注册表
-/// - `env`：领域环境（能力通过它访问 managed state）
-/// - `ai_pool`：AI 库连接池（审计日志）
-/// - `config_pool`：配置库连接池（读取 MCP server 配置）
-pub async fn run_stdio_server(
-    cap_registry: Arc<CapabilityRegistry>,
-    env: Arc<dyn DomainEnv>,
-    ai_pool: sqlx::SqlitePool,
-    config_pool: sqlx::SqlitePool,
-) -> Result<(), String> {
-    // 读取配置
-    let config = McpServerModeConfigStore::load(&config_pool)
-        .await
-        .map_err(|e| format!("读取 MCP server 配置失败: {e}"))?;
+    /// 0.19.13: client 完成初始化后，订阅 generation 变化通知。
+    ///
+    /// generation 改变时调用 `peer.notify_tool_list_changed()`，
+    /// 让 client 重新拉 `tools/list` 获取最新工具列表。
+    /// session 结束后订阅任务自动退出（watch receiver 关闭或 peer 断开）。
+    fn on_initialized(
+        &self,
+        context: NotificationContext<RoleServer>,
+    ) -> impl Future<Output = ()> + Send + '_ {
+        let exposure = self.exposure.clone();
+        let peer = context.peer;
+        async move {
+            let mut rx = exposure.subscribe();
+            let current_gen = *rx.borrow();
+            tracing::debug!(
+                generation = current_gen,
+                "MCP session initialized, subscribing to tool list changes"
+            );
 
-    if !config.enabled {
-        return Err("MCP server 未启用。请在设置页「MCP Server」中开启。".into());
+            // 后台任务：监听 generation 变化，通知 client
+            tokio::spawn(async move {
+                loop {
+                    // 等待 generation 变化
+                    if rx.changed().await.is_err() {
+                        // sender dropped (runtime 关闭)
+                        break;
+                    }
+                    let new_gen = *rx.borrow();
+                    tracing::info!(
+                        generation = new_gen,
+                        "MCP: exposure generation 变化，通知 client tool list changed"
+                    );
+                    // 通知 client 重新拉 tools/list
+                    // 如果 client 不支持 listChanged 或已断开，notify 会失败，忽略即可
+                    if let Err(e) = peer.notify_tool_list_changed().await {
+                        tracing::debug!(
+                            error = %e,
+                            "MCP: notify_tool_list_changed 失败（client 可能已断开或不支持）"
+                        );
+                        break;
+                    }
+                }
+            });
+        }
     }
-
-    if config.exposed_capabilities.is_empty() {
-        return Err(
-            "MCP server 已启用但未暴露任何能力。请在设置页勾选要暴露的 Capability。".into(),
-        );
-    }
-
-    let server = BlinkMcpServer::new(cap_registry, env, ai_pool, config);
-
-    tracing::info!("MCP server: 启动 stdio 模式");
-
-    // 用 rmcp 的 stdio transport 启动 server
-    let transport = rmcp::transport::io::stdio();
-    let service = server
-        .serve(transport)
-        .await
-        .map_err(|e| format!("MCP server 启动失败: {e}"))?;
-
-    // 等待服务结束（stdin 关闭或 client 断开）
-    service
-        .waiting()
-        .await
-        .map_err(|e| format!("MCP server 运行错误: {e}"))?;
-
-    tracing::info!("MCP server: stdio 服务已结束");
-    Ok(())
 }
 
 #[cfg(test)]
@@ -333,7 +421,6 @@ mod tests {
         };
         let projected = BlinkMcpServer::result_to_call_tool_result(result, None);
         assert_eq!(projected.content.len(), 1);
-        // CallToolResult::success() sets is_error = Some(false)
         assert_eq!(projected.is_error, Some(false));
     }
 
@@ -356,7 +443,6 @@ mod tests {
         };
         let projected = BlinkMcpServer::result_to_call_tool_result(result, None);
         assert_eq!(projected.content.len(), 1);
-        // 文本摘要应包含 mime 类型和大小
         let text = projected.content[0]
             .as_text()
             .map(|t| t.text.as_str())
@@ -385,8 +471,6 @@ mod tests {
     }
 
     /// P3: 验证 CapabilityResult → CallToolResult 全变体投影闭环。
-    ///
-    /// 模拟 Blink 作为 MCP server 被 client 调用 call_tool 后返回的格式。
     #[test]
     fn mcp_result_projection_all_variants_roundtrip() {
         use crate::domain::capability::{CapabilityResult, ItemResult};
@@ -411,7 +495,7 @@ mod tests {
         let text = projected.content[0].as_text().unwrap().text.clone();
         assert!(text.contains("已完成"));
 
-        // Items → JSON（0.14：只序列化 data，不含 score/desc/actions）
+        // Items → JSON
         let result = CapabilityResult::Items {
             items: vec![ItemResult {
                 data: serde_json::json!({"name": "test.txt", "path": "C:\\test.txt"}),
@@ -439,205 +523,118 @@ mod tests {
         assert_eq!(err.is_error, Some(true));
     }
 
-    // ── 真正的 MCP 协议端到端闭环测试 ──────────────────────────────────────
-    //
-    // 用 tokio::io::duplex() 创建 in-memory 双向管道，一端跑 server（实现
-    // ServerHandler），一端跑 rmcp client。client 发 JSON-RPC：initialize →
-    // list_tools → call_tool，验证 MCP 协议完整闭环。
-    //
-    // 这不是投影测试——是真正的 JSON-RPC 协议在线上的往返。
+    // ── ExposureSnapshot 单测 ──────────────────────────────────────────────
 
-    /// 测试用 MCP server——模拟 BlinkMcpServer 的行为，但不需要 AppHandle。
-    ///
-    /// 暴露一个 `echo` tool：收到什么参数就回什么。
-    struct TestMcpServer {
-        tools: Vec<Tool>,
+    /// 测试用 mock Capability——避免构造 AppHandle（与 registry.rs 测试同模式）。
+    struct MockCap {
+        id_val: String,
     }
 
-    impl TestMcpServer {
-        fn new() -> Self {
-            let tool = Tool::new(
-                "echo".to_string(),
-                "Echo back the input".to_string(),
-                std::sync::Arc::new(
-                    serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "message": { "type": "string", "description": "Message to echo" }
-                        },
-                        "required": ["message"]
-                    })
-                    .as_object()
-                    .cloned()
-                    .unwrap_or_default(),
-                ),
+    #[async_trait::async_trait]
+    impl crate::domain::capability::Capability for MockCap {
+        fn id(&self) -> &str {
+            &self.id_val
+        }
+        fn schema(&self) -> crate::domain::capability::CapabilitySchema {
+            crate::domain::capability::CapabilitySchema::empty(&self.id_val, "mock for test")
+        }
+        async fn invoke(
+            &self,
+            _args: Value,
+            _ctx: &InvokeContext<'_>,
+        ) -> Result<CapabilityResult, crate::domain::capability::CapabilityError> {
+            Ok(CapabilityResult::Done { summary: "mock".into() })
+        }
+    }
+
+    /// 构建带 N 个 mock capability 的注册表。
+    fn mock_registry(names: &[&str]) -> crate::domain::capability::CapabilityRegistry {
+        let reg = crate::domain::capability::CapabilityRegistry::default();
+        for &name in names {
+            reg.register(
+                std::sync::Arc::new(MockCap { id_val: name.to_string() }) as std::sync::Arc<dyn crate::domain::capability::Capability>,
             );
-            Self { tools: vec![tool] }
         }
+        reg
     }
 
-    impl rmcp::handler::server::ServerHandler for TestMcpServer {
-        fn get_info(&self) -> ServerInfo {
-            let mut caps = ServerCapabilities::default();
-            caps.tools = Some(Default::default());
-            let mut info = InitializeResult::new(caps);
-            info.server_info =
-                Implementation::new("blink-test-server".to_string(), "0.0.0-test".to_string());
-            info
-        }
-
-        fn list_tools(
-            &self,
-            _request: Option<PaginatedRequestParams>,
-            _context: RequestContext<RoleServer>,
-        ) -> impl Future<Output = Result<ListToolsResult, rmcp::ErrorData>> + Send + '_ {
-            let tools = self.tools.clone();
-            std::future::ready(Ok(ListToolsResult::with_all_items(tools)))
-        }
-
-        fn get_tool(&self, name: &str) -> Option<Tool> {
-            self.tools.iter().find(|t| t.name == name).cloned()
-        }
-
-        fn call_tool(
-            &self,
-            request: CallToolRequestParams,
-            _context: RequestContext<RoleServer>,
-        ) -> impl Future<Output = Result<CallToolResult, rmcp::ErrorData>> + Send + '_ {
-            let tool_name = request.name.to_string();
-            let args = request
-                .arguments
-                .map(|m| Value::Object(m))
-                .unwrap_or(Value::Null);
-
-            async move {
-                if tool_name == "echo" {
-                    let msg = args
-                        .get("message")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("(no message)");
-                    Ok(CallToolResult::success(vec![Content::text(
-                        msg.to_string(),
-                    )]))
-                } else {
-                    Ok(BlinkMcpServer::error_to_call_tool_result(&format!(
-                        "Unknown tool: {tool_name}"
-                    )))
-                }
-            }
-        }
-    }
-
-    /// 真正的 MCP 协议端到端闭环：
-    /// 1. 用 `tokio::io::duplex()` 创建 in-memory 管道
-    /// 2. 一端启动 TestMcpServer（实现 ServerHandler）
-    /// 3. 另一端启动 rmcp client（ClientInfo::default()）
-    /// 4. client 调 `list_all_tools()` → 验证返回 `echo` tool
-    /// 5. client 调 `call_tool("echo", {message: "hello"})` → 验证返回 "hello"
-    ///
-    /// 这验证了 JSON-RPC 消息在线上的完整往返：
-    /// initialize → tools/list → tools/call
     #[tokio::test]
-    async fn mcp_protocol_e2e_client_server_loop() {
-        use rmcp::ServiceExt;
-        use rmcp::model::ClientInfo;
-
-        // 创建双向管道
-        let (client_stream, server_stream) = tokio::io::duplex(8192);
-
-        // 分割为 read/write 两半
-        let (client_read, client_write) = tokio::io::split(client_stream);
-        let (server_read, server_write) = tokio::io::split(server_stream);
-
-        // 启动 server（在后台 task 中）
-        let server = TestMcpServer::new();
-        let server_handle = tokio::spawn(async move {
-            let transport = (server_read, server_write);
-            let service = server.serve(transport).await;
-            // 等待 client 断开后退出
-            if let Ok(svc) = service {
-                let _ = svc.waiting().await;
-            }
-        });
-
-        // 启动 client
-        let client_transport = (client_read, client_write);
-        let client_info = ClientInfo::default();
-        let service = client_info
-            .serve(client_transport)
-            .await
-            .expect("client 握手失败");
-
-        // 1. list_tools → 验证返回 echo tool
-        let tools = service
-            .peer()
-            .list_all_tools()
-            .await
-            .expect("list_all_tools 失败");
-
-        assert_eq!(tools.len(), 1, "应返回 1 个 tool");
-        assert_eq!(tools[0].name, "echo");
-        assert_eq!(tools[0].description.as_deref(), Some("Echo back the input"));
-
-        // 2. call_tool("echo", {message: "hello blink"}) → 验证返回 "hello blink"
-        // 用 rig McpTool 封装（与生产代码 collect_tools() 同路径）
-        use rig_core::tool::ToolDyn;
-        let mcp_tool = rig_core::tool::rmcp::McpTool::from_mcp_server(
-            tools[0].clone(),
-            service.peer().clone(),
-        );
-        let result = mcp_tool
-            .call(serde_json::json!({"message": "hello blink"}).to_string())
-            .await
-            .expect("McpTool call 失败");
-        assert!(result.contains("hello blink"), "result was: {result}");
-
-        // 断开 client → server 应自动退出
-        drop(service);
-        let _ = server_handle.await;
-
-        tracing::info!("MCP e2e: client→server 协议闭环验证通过");
+    async fn exposure_snapshot_starts_empty() {
+        let exposure = SharedExposure::new();
+        let snapshot = exposure.read().await;
+        assert!(snapshot.tools.is_empty());
+        assert!(snapshot.allowed.is_empty());
+        assert_eq!(snapshot.generation, 0);
     }
 
-    /// 验证 client 调用不存在的 tool 时，server 返回 error result。
     #[tokio::test]
-    async fn mcp_protocol_e2e_unknown_tool_returns_error() {
-        use rmcp::ServiceExt;
-        use rmcp::model::ClientInfo;
+    async fn exposure_generation_increments_on_rebuild() {
+        let registry = mock_registry(&["test_cap"]);
 
-        let (client_stream, server_stream) = tokio::io::duplex(8192);
-        let (client_read, client_write) = tokio::io::split(client_stream);
-        let (server_read, server_write) = tokio::io::split(server_stream);
+        let exposure = SharedExposure::new();
+        assert_eq!(exposure.current_generation().await, 0);
 
-        let server = TestMcpServer::new();
-        let server_handle = tokio::spawn(async move {
-            let transport = (server_read, server_write);
-            let service = server.serve(transport).await;
-            if let Ok(svc) = service {
-                let _ = svc.waiting().await;
-            }
-        });
+        let config = McpServerModeConfig {
+            enabled: true,
+            port: 32123,
+            exposed_capabilities: vec!["test_cap".into()],
+        };
+        let gen1 = exposure.rebuild(&registry, &config).await;
+        assert_eq!(gen1, 1);
+        assert_eq!(exposure.current_generation().await, 1);
 
-        let client_info = ClientInfo::default();
-        let service = client_info
-            .serve((client_read, client_write))
-            .await
-            .expect("client 握手失败");
+        let snapshot = exposure.read().await;
+        assert_eq!(snapshot.tools.len(), 1);
+        assert!(snapshot.allowed.contains("test_cap"));
+        drop(snapshot);
 
-        // 调用不存在的 tool（用 McpTool 封装一个 fake tool）
-        use rig_core::tool::ToolDyn;
-        let fake_tool = rmcp::model::Tool::new(
-            "nonexistent".to_string(),
-            "Does not exist".to_string(),
-            std::sync::Arc::new(serde_json::Map::new()),
-        );
-        let mcp_tool =
-            rig_core::tool::rmcp::McpTool::from_mcp_server(fake_tool, service.peer().clone());
-        let result = mcp_tool.call(serde_json::Value::Null.to_string()).await;
-        // server 返回错误，McpTool 应转为 ToolError
-        assert!(result.is_err(), "调用不存在的 tool 应失败");
+        // 再次重建（移除暴露）
+        let config2 = McpServerModeConfig {
+            enabled: true,
+            port: 32123,
+            exposed_capabilities: vec![],
+        };
+        let gen2 = exposure.rebuild(&registry, &config2).await;
+        assert_eq!(gen2, 2);
+        let snapshot = exposure.read().await;
+        assert!(snapshot.tools.is_empty());
+    }
 
-        drop(service);
-        let _ = server_handle.await;
+    #[tokio::test]
+    async fn exposure_snapshot_tools_sorted_by_name() {
+        // 故意以非字母序注册
+        let registry = mock_registry(&["zebra", "apple", "mango"]);
+
+        let exposure = SharedExposure::new();
+        let config = McpServerModeConfig {
+            enabled: true,
+            port: 32123,
+            exposed_capabilities: vec!["zebra".into(), "apple".into(), "mango".into()],
+        };
+        exposure.rebuild(&registry, &config).await;
+
+        let snapshot = exposure.read().await;
+        let names: Vec<&str> = snapshot.tools.iter().map(|t| t.name.as_ref()).collect();
+        assert_eq!(names, vec!["apple", "mango", "zebra"]);
+    }
+
+    #[tokio::test]
+    async fn exposure_generation_watch_notifies() {
+        let registry = mock_registry(&["test_cap"]);
+
+        let exposure = SharedExposure::new();
+        let mut rx = exposure.subscribe();
+        assert_eq!(*rx.borrow(), 0);
+
+        let config = McpServerModeConfig {
+            enabled: true,
+            port: 32123,
+            exposed_capabilities: vec!["test_cap".into()],
+        };
+        exposure.rebuild(&registry, &config).await;
+
+        // watch 应该收到 generation = 1
+        rx.changed().await.unwrap();
+        assert_eq!(*rx.borrow(), 1);
     }
 }
