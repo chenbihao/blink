@@ -558,11 +558,16 @@ impl ChatService {
             retry_count += 1;
             let resolved = self.resolve_current_entries(kind)?;
 
-            // 0.13.7: lazy connect——确保 MCP server 已连接后再读 epoch，拿到最新 tool 池版本。
-            // MCP 拓扑变化（server 连接/断开/disabled_tools 变化）会 bump epoch，
-            // 使 AgentCacheKey 失配，触发 Agent 重建——修「首次连接慢的 server 未进 agent 缓存」。
+            // 0.19.11: prompt 复用预热中的 single-flight，最多等待独立的 5 秒 MCP
+            // 准备预算。预算到期即以已就绪 tool snapshot 继续；后台连接完成后通过
+            // epoch 让下一轮 Agent 自然重建，不占用模型/Capability 的 20 秒硬超时。
             let mcp_epoch = if plan.includes_extensions() {
-                self.mcp_client.ensure_connected(&self.config_pool).await;
+                self.mcp_client
+                    .prepare_enabled(
+                        &self.config_pool,
+                        crate::domain::mcp::client::PROMPT_PREPARE_BUDGET,
+                    )
+                    .await;
                 self.mcp_client.tool_pool_epoch()
             } else {
                 0

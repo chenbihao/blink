@@ -8,7 +8,7 @@
 //! ## 生命周期（lazy connect）
 //!
 //! - **不在 Blink 启动时自动拉起**——避免 npx 下载等慢操作拖慢启动
-//! - `ensure_connected()` 在对话窗口首次需要 tool 时 lazy 连接所有 enabled server
+//! - 首次可见用 `prewarm()` 后台连接；prompt 用 `prepare_enabled()` 最多等待 5 秒
 //! - 手动「测试连接」/「连接」/「断开」按钮供用户在设置页控制
 //!
 //! ## 故障降级
@@ -25,12 +25,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use rig_core::tool::ToolDyn;
 use rmcp::ServiceExt;
 use rmcp::model::ClientInfo;
 use rmcp::service::RunningService;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, Notify, RwLock, Semaphore};
 
 use crate::domain::mcp::config::{McpServerConfig, McpServerConfigStore};
 
@@ -70,6 +71,46 @@ struct ConnectedServer {
     config: McpServerConfig,
 }
 
+/// 已完成握手和 tool 拉取、但尚未通过 generation 校验的候选连接。
+///
+/// transport 只有在 `commit_connection` 通过代际校验后才进入 `connected`；
+/// 旧任务的候选值会直接 drop，从而关闭旧 stdio/HTTP/SSE transport。
+struct PendingConnection {
+    service: RunningService<rmcp::service::RoleClient, ClientInfo>,
+    rmcp_tools: Vec<rmcp::model::Tool>,
+    tools: Vec<McpToolInfo>,
+    config: McpServerConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectIntent {
+    Automatic,
+    Manual,
+}
+
+struct ServerLifecycle {
+    generation: u64,
+    /// 只比较会影响 transport 的字段；enabled/disabled_tools 不应导致重连。
+    connection_config: Option<McpServerConfig>,
+    connecting_generation: Option<u64>,
+    cooldown_until: Option<Instant>,
+    last_result: Option<(u64, Result<(), String>)>,
+    notify: Arc<Notify>,
+}
+
+impl ServerLifecycle {
+    fn new(config: &McpServerConfig) -> Self {
+        Self {
+            generation: 1,
+            connection_config: Some(config.clone()),
+            connecting_generation: None,
+            cooldown_until: None,
+            last_result: None,
+            notify: Arc::new(Notify::new()),
+        }
+    }
+}
+
 /// MCP client 管理器——管理所有外部 MCP server 的连接生命周期。
 /// MCP tool 来源信息（0.13.6——供前端工具卡片增强）。
 #[derive(Debug, Clone, serde::Serialize)]
@@ -84,6 +125,12 @@ pub struct McpClientManager {
     connected: Arc<RwLock<HashMap<String, ConnectedServer>>>,
     /// 各 server 的状态（供前端查询）。
     statuses: Arc<RwLock<HashMap<String, McpServerStatus>>>,
+    /// 每个 server 的 generation / single-flight / cooldown 状态。
+    lifecycles: Mutex<HashMap<String, ServerLifecycle>>,
+    /// 不同 server 的 transport 建连并发上限。
+    connect_slots: Arc<Semaphore>,
+    #[cfg(test)]
+    connect_attempts: AtomicU64,
     /// tool 池版本号（单调递增）。任何改变会喂给 AI 的 tool 池的操作都 bump，
     /// ChatService 的 AgentCacheKey 含此 epoch，拓扑变化自然触发 cache miss。
     epoch: AtomicU64,
@@ -93,6 +140,14 @@ pub struct McpClientManager {
 const MAX_START_RETRIES: usize = 2;
 /// 重试间隔（秒）。
 const RETRY_INTERVAL_SECS: u64 = 1;
+/// 自动连接失败后的冷却期；配置变化和手动操作可绕过。
+const FAILURE_COOLDOWN: Duration = Duration::from_secs(30);
+/// 跨 server 同时建立 transport 的默认上限。
+const MAX_CONCURRENT_CONNECTS: usize = 3;
+/// 单次 transport 握手 + tool 拉取的上限，防止旧 generation 永久占住 single-flight。
+const CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(15);
+/// prompt 等待 MCP 工具准备的独立预算。
+pub const PROMPT_PREPARE_BUDGET: Duration = Duration::from_secs(5);
 
 impl McpClientManager {
     /// 构造空管理器。
@@ -100,6 +155,10 @@ impl McpClientManager {
         Self {
             connected: Arc::new(RwLock::new(HashMap::new())),
             statuses: Arc::new(RwLock::new(HashMap::new())),
+            lifecycles: Mutex::new(HashMap::new()),
+            connect_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTS)),
+            #[cfg(test)]
+            connect_attempts: AtomicU64::new(0),
             epoch: AtomicU64::new(0),
         }
     }
@@ -117,85 +176,87 @@ impl McpClientManager {
         tracing::debug!(epoch = new_epoch, "MCP: tool 池变化，bump epoch");
     }
 
-    /// 0.13.7: lazy connect——连接所有 enabled 但尚未连接的 server。
+    /// 首次可见等非阻塞触发点使用：任务立即进入后台，不阻塞窗口显示。
+    pub fn prewarm(self: &Arc<Self>, config_pool: sqlx::SqlitePool) {
+        let manager = self.clone();
+        tokio::spawn(async move {
+            manager.connect_enabled(&config_pool, None).await;
+        });
+    }
+
+    /// prompt 使用：最多等待 `budget`，未完成的连接任务保持在后台继续运行。
     ///
-    /// 在对话窗口首次需要 tool 时调用（`ensure_provider` → `ensure_connected` → `collect_tools`）。
-    /// 已连接的 server 跳过，不在每次对话都重新连接。
-    ///
-    /// 与旧的 `start_all` 不同：不在 Blink 启动时调用，避免 npx 下载等慢操作拖慢启动。
-    pub async fn ensure_connected(&self, config_pool: &sqlx::SqlitePool) {
+    /// 返回 true 表示预算内全部 enabled server 的当前连接任务已结束；false 表示预算到期。
+    pub async fn prepare_enabled(
+        self: &Arc<Self>,
+        config_pool: &sqlx::SqlitePool,
+        budget: Duration,
+    ) -> bool {
+        self.connect_enabled(config_pool, Some(budget)).await
+    }
+
+    async fn connect_enabled(
+        self: &Arc<Self>,
+        config_pool: &sqlx::SqlitePool,
+        budget: Option<Duration>,
+    ) -> bool {
         let configs = match McpServerConfigStore::load_all(config_pool).await {
-            Ok(c) => c,
+            Ok(configs) => configs,
             Err(e) => {
-                tracing::warn!(error = %e, "MCP: 加载 server 配置失败，跳过 lazy connect");
-                return;
+                tracing::warn!(error = %e, "MCP: 加载 server 配置失败，跳过连接准备");
+                return true;
             }
         };
-
-        // 过滤出 enabled 且尚未连接的 server
-        let connected = self.connected.read().await;
-        let to_connect: Vec<_> = configs
+        let enabled: Vec<_> = configs
             .into_iter()
-            .filter(|c| c.enabled && !connected.contains_key(&c.name))
+            .filter(|config| config.enabled)
             .collect();
-        drop(connected); // 释放读锁
-
-        if to_connect.is_empty() {
-            return;
+        if enabled.is_empty() {
+            return true;
         }
 
-        tracing::info!(
-            count = to_connect.len(),
-            "MCP: lazy connect——连接尚未连接的 enabled server"
-        );
+        let mut handles = Vec::with_capacity(enabled.len());
+        for config in enabled {
+            let manager = self.clone();
+            handles.push(tokio::spawn(async move {
+                if let Err(error) = manager
+                    .connect_server(&config, ConnectIntent::Automatic)
+                    .await
+                {
+                    tracing::debug!(server = %config.name, %error, "MCP: 自动连接未就绪");
+                }
+            }));
+        }
 
-        for config in to_connect {
-            // 不阻塞——单个 server 连接失败只记状态
-            if let Err(e) = self.start_server(&config).await {
-                tracing::warn!(
-                    server = %config.name,
-                    error = %e,
-                    "MCP: server lazy connect 失败"
-                );
+        let wait_all = futures::future::join_all(handles);
+        if let Some(budget) = budget {
+            match tokio::time::timeout(budget, wait_all).await {
+                Ok(_) => true,
+                Err(_) => {
+                    tracing::debug!(
+                        budget_ms = budget.as_millis(),
+                        "MCP: 工具准备预算到期，使用当前已就绪快照"
+                    );
+                    false
+                }
             }
+        } else {
+            wait_all.await;
+            true
         }
     }
 
-    /// 0.13.7: 「测试连接」——连接 + 拉 tool 列表 + 立即断开。
-    ///
-    /// 用于设置页的「测试连接」按钮——验证 server 是否可用，不保持子进程。
-    /// 返回 tool 列表供前端预览，断开后状态回到 Offline。
-    ///
-    /// 0.13.8: 不再经过 `try_connect_once` → `finalize_connection`（会写入 connected 表），
-    /// 改用 `try_connect_transient`——连接 + 拉 tool 列表但不存入 connected 表，
-    /// 从根源消除测试连接期间临时 entry 被并发的 `collect_tools` 拾取的竞态。
+    /// 设置页「测试连接」：加入持久连接 single-flight，成功后直接复用为在线连接。
     pub async fn test_connection(
         &self,
         config: &McpServerConfig,
     ) -> Result<Vec<McpToolInfo>, String> {
-        let tools = self.try_connect_transient(config).await?;
-        // service 在 try_connect_transient 中已 drop（子进程被 kill），无需手动 remove
-
-        // 恢复运行时状态：如果 server 已有持久连接（在 connected map 中），
-        // 恢复其 Online 状态——test_connection 的 transient 连接不应影响持久连接的状态。
-        // 只有原本就没有持久连接的 server 才设为 Offline。
-        let connected = self.connected.read().await;
-        if let Some(server) = connected.get(&config.name) {
-            let tool_count = server.tools.len();
-            drop(connected);
-            self.set_status(&config.name, McpServerStatus::Online { tool_count })
-                .await;
-        } else {
-            drop(connected);
-            self.set_status(
-                &config.name,
-                McpServerStatus::Offline {
-                    reason: "测试连接完成".to_string(),
-                },
-            )
-            .await;
-        }
-        Ok(tools)
+        // 0.19.11: 设置页测试也加入同名 server 的 single-flight，避免与预热/prompt
+        // 同时各建一条 transport。测试成功后保留为正常在线连接。
+        self.connect_server(config, ConnectIntent::Manual).await?;
+        self.get_server_tools(&config.name)
+            .await
+            .ok_or_else(|| format!("server {} 连接完成但 tool 快照缺失", config.name))
     }
 
     /// 启动单个 MCP server（含重试）。
@@ -203,30 +264,111 @@ impl McpClientManager {
     /// 确定性错误（空 command / URL 格式错误）不重试，立即返回。
     /// 网络类错误（握手超时 / 连接拒绝）重试 MAX_START_RETRIES 次。
     pub async fn start_server(&self, config: &McpServerConfig) -> Result<(), String> {
-        self.set_status(&config.name, McpServerStatus::Connecting)
+        self.connect_server(config, ConnectIntent::Manual).await
+    }
+
+    async fn connect_server(
+        &self,
+        config: &McpServerConfig,
+        intent: ConnectIntent,
+    ) -> Result<(), String> {
+        let generation = self.register_config(config).await;
+
+        loop {
+            let notified = {
+                let mut lifecycles = self.lifecycles.lock().await;
+                let lifecycle = lifecycles
+                    .get_mut(&config.name)
+                    .expect("register_config must create lifecycle");
+                if lifecycle.generation != generation
+                    || !lifecycle
+                        .connection_config
+                        .as_ref()
+                        .is_some_and(|current| same_connection_config(current, config))
+                {
+                    return Err(format!("server {} 配置已变化，取消旧连接", config.name));
+                }
+
+                if self.connected.read().await.contains_key(&config.name) {
+                    return Ok(());
+                }
+
+                if lifecycle.connecting_generation.is_some() {
+                    Some(lifecycle.notify.clone().notified_owned())
+                } else {
+                    if intent == ConnectIntent::Automatic
+                        && lifecycle
+                            .cooldown_until
+                            .is_some_and(|until| until > Instant::now())
+                    {
+                        return Err(format!("server {} 处于连接冷却期", config.name));
+                    }
+                    lifecycle.connecting_generation = Some(generation);
+                    lifecycle.last_result = None;
+                    None
+                }
+            };
+
+            if let Some(notified) = notified {
+                notified.await;
+                let lifecycles = self.lifecycles.lock().await;
+                let Some(lifecycle) = lifecycles.get(&config.name) else {
+                    return Err(format!("server {} 已删除", config.name));
+                };
+                if let Some((result_generation, result)) = &lifecycle.last_result
+                    && *result_generation == generation
+                {
+                    return result.clone();
+                }
+                continue;
+            }
+            break;
+        }
+
+        self.set_status_if_generation(&config.name, generation, McpServerStatus::Connecting)
             .await;
 
+        let _permit = self
+            .connect_slots
+            .acquire()
+            .await
+            .map_err(|_| "MCP 连接并发控制器已关闭".to_string())?;
+        if !self
+            .is_current_generation(&config.name, generation, config)
+            .await
+        {
+            self.finish_stale_attempt(&config.name, generation).await;
+            return Err(format!("server {} 配置已变化，取消旧连接", config.name));
+        }
         let mut last_err = String::new();
+        let mut candidate = None;
         for attempt in 1..=MAX_START_RETRIES {
+            if !self
+                .is_current_generation(&config.name, generation, config)
+                .await
+            {
+                self.finish_stale_attempt(&config.name, generation).await;
+                return Err(format!("server {} 配置已变化，取消旧连接", config.name));
+            }
+            #[cfg(test)]
+            self.connect_attempts.fetch_add(1, Ordering::SeqCst);
             tracing::debug!(
                 server = %config.name,
                 attempt,
                 max = MAX_START_RETRIES,
                 "MCP: 尝试连接 server"
             );
-            match self.try_connect_once(config).await {
-                Ok(tools) => {
-                    let tool_count = tools.len();
-                    tracing::info!(
-                        server = %config.name,
-                        tools = tool_count,
-                        "MCP: server 已连接"
-                    );
-                    self.set_status(&config.name, McpServerStatus::Online { tool_count })
-                        .await;
-                    // server 进入 tool 池，bump epoch 使旧 AgentCacheKey 失配
-                    self.bump_epoch();
-                    return Ok(());
+            let attempt_result = tokio::time::timeout(
+                CONNECT_ATTEMPT_TIMEOUT,
+                self.build_connection(config),
+            )
+            .await
+            .map_err(|_| format!("MCP 连接超时（{} 秒）", CONNECT_ATTEMPT_TIMEOUT.as_secs()))
+            .and_then(|result| result);
+            match attempt_result {
+                Ok(connection) => {
+                    candidate = Some(connection);
+                    break;
                 }
                 Err(e) => {
                     last_err = e.clone();
@@ -252,14 +394,192 @@ impl McpClientManager {
                 }
             }
         }
-        self.set_status(
-            &config.name,
-            McpServerStatus::Offline {
-                reason: last_err.clone(),
-            },
-        )
-        .await;
-        Err(last_err)
+
+        self.finish_connection(config, generation, candidate, last_err)
+            .await
+    }
+
+    /// 注册/刷新配置并返回当前 generation。
+    ///
+    /// transport 字段变化会立即让旧任务失效并关闭已连接 transport；仅 enabled 或
+    /// disabled_tools 变化不重连，后者只更新稳定 tool snapshot。
+    async fn register_config(&self, config: &McpServerConfig) -> u64 {
+        let mut lifecycles = self.lifecycles.lock().await;
+        let lifecycle = lifecycles
+            .entry(config.name.clone())
+            .or_insert_with(|| ServerLifecycle::new(config));
+        let connection_changed = lifecycle
+            .connection_config
+            .as_ref()
+            .is_some_and(|current| !same_connection_config(current, config));
+
+        if connection_changed {
+            lifecycle.generation = lifecycle.generation.saturating_add(1);
+            lifecycle.cooldown_until = None;
+            lifecycle.last_result = None;
+            lifecycle.notify.notify_waiters();
+        }
+        lifecycle.connection_config = Some(config.clone());
+        let generation = lifecycle.generation;
+
+        let mut connected = self.connected.write().await;
+        if connection_changed {
+            if connected.remove(&config.name).is_some() {
+                self.bump_epoch();
+            }
+            self.statuses.write().await.insert(
+                config.name.clone(),
+                McpServerStatus::Offline {
+                    reason: "配置已更新，等待重新连接".to_string(),
+                },
+            );
+        } else if let Some(server) = connected.get_mut(&config.name) {
+            let visibility_changed = server.config.disabled_tools != config.disabled_tools;
+            server.config.enabled = config.enabled;
+            server.config.disabled_tools = config.disabled_tools.clone();
+            for tool in &mut server.tools {
+                tool.disabled = config.disabled_tools.contains(&tool.name);
+            }
+            if visibility_changed {
+                self.bump_epoch();
+            }
+        }
+        generation
+    }
+
+    async fn build_connection(
+        &self,
+        config: &McpServerConfig,
+    ) -> Result<PendingConnection, String> {
+        use crate::domain::mcp::config::McpTransport;
+        let service = match &config.transport {
+            McpTransport::Stdio => self.build_stdio_service(config).await?,
+            McpTransport::Sse { url, headers } => {
+                self.build_sse_service(config, url, headers).await?
+            }
+            McpTransport::Http { url, headers } => {
+                self.build_http_service(config, url, headers).await?
+            }
+        };
+        let (rmcp_tools, tools) = Self::pull_tools_from_service(&service, config).await?;
+        Ok(PendingConnection {
+            service,
+            rmcp_tools,
+            tools,
+            config: config.clone(),
+        })
+    }
+
+    /// 唯一连接任务的原子提交点。generation 不匹配时 candidate 在返回时 drop。
+    async fn finish_connection(
+        &self,
+        config: &McpServerConfig,
+        generation: u64,
+        candidate: Option<PendingConnection>,
+        error: String,
+    ) -> Result<(), String> {
+        let mut lifecycles = self.lifecycles.lock().await;
+        let Some(lifecycle) = lifecycles.get_mut(&config.name) else {
+            return Err(format!("server {} 已删除，丢弃旧连接", config.name));
+        };
+        if lifecycle.generation != generation
+            || !lifecycle
+                .connection_config
+                .as_ref()
+                .is_some_and(|current| same_connection_config(current, config))
+        {
+            drop(candidate);
+            if lifecycle.connecting_generation == Some(generation) {
+                lifecycle.connecting_generation = None;
+                lifecycle.notify.notify_waiters();
+            }
+            return Err(format!("server {} 配置已变化，丢弃旧连接", config.name));
+        }
+
+        let result = if let Some(mut candidate) = candidate {
+            if let Some(latest_config) = lifecycle.connection_config.as_ref() {
+                candidate.config.enabled = latest_config.enabled;
+                candidate.config.disabled_tools = latest_config.disabled_tools.clone();
+                for tool in &mut candidate.tools {
+                    tool.disabled = candidate.config.disabled_tools.contains(&tool.name);
+                }
+            }
+            let tool_count = candidate.tools.len();
+            self.connected.write().await.insert(
+                config.name.clone(),
+                ConnectedServer {
+                    service: candidate.service,
+                    rmcp_tools: candidate.rmcp_tools,
+                    tools: candidate.tools,
+                    config: candidate.config,
+                },
+            );
+            self.statuses
+                .write()
+                .await
+                .insert(config.name.clone(), McpServerStatus::Online { tool_count });
+            lifecycle.cooldown_until = None;
+            self.bump_epoch();
+            tracing::info!(server = %config.name, tools = tool_count, "MCP: server 已连接");
+            Ok(())
+        } else {
+            let error = if error.is_empty() {
+                "MCP 连接失败".to_string()
+            } else {
+                error
+            };
+            lifecycle.cooldown_until = Some(Instant::now() + FAILURE_COOLDOWN);
+            self.statuses.write().await.insert(
+                config.name.clone(),
+                McpServerStatus::Offline {
+                    reason: error.clone(),
+                },
+            );
+            Err(error)
+        };
+        lifecycle.connecting_generation = None;
+        lifecycle.last_result = Some((generation, result.clone()));
+        lifecycle.notify.notify_waiters();
+        result
+    }
+
+    async fn set_status_if_generation(&self, name: &str, generation: u64, status: McpServerStatus) {
+        let lifecycles = self.lifecycles.lock().await;
+        if lifecycles
+            .get(name)
+            .is_some_and(|lifecycle| lifecycle.generation == generation)
+        {
+            self.statuses.write().await.insert(name.to_string(), status);
+        }
+    }
+
+    async fn is_current_generation(
+        &self,
+        name: &str,
+        generation: u64,
+        config: &McpServerConfig,
+    ) -> bool {
+        self.lifecycles
+            .lock()
+            .await
+            .get(name)
+            .is_some_and(|lifecycle| {
+                lifecycle.generation == generation
+                    && lifecycle
+                        .connection_config
+                        .as_ref()
+                        .is_some_and(|current| same_connection_config(current, config))
+            })
+    }
+
+    async fn finish_stale_attempt(&self, name: &str, generation: u64) {
+        let mut lifecycles = self.lifecycles.lock().await;
+        if let Some(lifecycle) = lifecycles.get_mut(name)
+            && lifecycle.connecting_generation == Some(generation)
+        {
+            lifecycle.connecting_generation = None;
+            lifecycle.notify.notify_waiters();
+        }
     }
 
     /// 判断错误是否为确定性错误（重试也不会成功）。
@@ -276,64 +596,7 @@ impl McpClientManager {
             || err.contains("No such file or directory")
     }
 
-    /// 单次连接尝试（不含重试逻辑）。
-    ///
-    /// 供 `start_server`（含重试）和 `test_connection`（不重试）共用。
-    async fn try_connect_once(&self, config: &McpServerConfig) -> Result<Vec<McpToolInfo>, String> {
-        self.try_connect(config).await
-    }
-
-    /// 尝试连接单个 server（根据 transport 类型分派 stdio / SSE / HTTP）。
-    async fn try_connect(&self, config: &McpServerConfig) -> Result<Vec<McpToolInfo>, String> {
-        use crate::domain::mcp::config::McpTransport;
-        match &config.transport {
-            McpTransport::Stdio => self.try_connect_stdio(config).await,
-            McpTransport::Sse { url, headers } => self.try_connect_sse(config, url, headers).await,
-            McpTransport::Http { url, headers } => {
-                self.try_connect_http(config, url, headers).await
-            }
-        }
-    }
-
-    /// 0.13.8: 临时连接——连接 + 拉 tool 列表，不写入 connected 表。
-    ///
-    /// 供 `test_connection` 使用——与 `try_connect_once` 不同，不调用
-    /// `finalize_connection`（不存入 connected 表），避免测试连接期间的临时 entry
-    /// 被并发的 `collect_tools` 拾取。
-    ///
-    /// service 在方法返回时 drop → 子进程被 kill，不保持连接。
-    async fn try_connect_transient(
-        &self,
-        config: &McpServerConfig,
-    ) -> Result<Vec<McpToolInfo>, String> {
-        use crate::domain::mcp::config::McpTransport;
-        let service = match &config.transport {
-            McpTransport::Stdio => self.build_stdio_service(config).await?,
-            McpTransport::Sse { url, headers } => {
-                self.build_sse_service(config, url, headers).await?
-            }
-            McpTransport::Http { url, headers } => {
-                self.build_http_service(config, url, headers).await?
-            }
-        };
-        // 只拉 tool 列表，不存入 connected 表
-        let (_rmcp_tools, tools) = Self::pull_tools_from_service(&service, config).await?;
-        // service 在此 drop → 子进程被 kill
-        Ok(tools)
-    }
-
-    /// stdio 模式连接——拉起子进程 + 握手 + 拉 tool 列表。
-    async fn try_connect_stdio(
-        &self,
-        config: &McpServerConfig,
-    ) -> Result<Vec<McpToolInfo>, String> {
-        let service = self.build_stdio_service(config).await?;
-        self.finalize_connection(config, service).await
-    }
-
     /// 构建 stdio 模式的 rmcp service（拉起子进程 + 握手），不含存储逻辑。
-    ///
-    /// 供 `try_connect_stdio`（持久连接）和 `try_connect_transient`（临时探测）共用。
     async fn build_stdio_service(
         &self,
         config: &McpServerConfig,
@@ -369,20 +632,7 @@ impl McpClientManager {
             .map_err(|e| format!("MCP 握手失败: {e}"))
     }
 
-    /// HTTP 模式连接——Streamable HTTP transport + 握手 + 拉 tool 列表（0.13.6）。
-    async fn try_connect_http(
-        &self,
-        config: &McpServerConfig,
-        url: &str,
-        headers: &std::collections::HashMap<String, String>,
-    ) -> Result<Vec<McpToolInfo>, String> {
-        let service = self.build_http_service(config, url, headers).await?;
-        self.finalize_connection(config, service).await
-    }
-
     /// 构建 HTTP 模式的 rmcp service（Streamable HTTP transport + 握手），不含存储逻辑。
-    ///
-    /// 供 `try_connect_http`（持久连接）和 `try_connect_transient`（临时探测）共用。
     async fn build_http_service(
         &self,
         config: &McpServerConfig,
@@ -440,27 +690,7 @@ impl McpClientManager {
             .map_err(|e| format!("HTTP MCP 握手失败: {e}"))
     }
 
-    /// SSE 模式连接——旧版 SSE transport + 握手 + 拉 tool 列表（0.13.8）。
-    ///
-    /// SSE 协议：GET `/sse` → SSE 长连接 → `endpoint` 事件带 POST URL →
-    /// POST JSON-RPC 到 POST URL → 响应通过 SSE 流返回。
-    ///
-    /// 使用自建 `SseClientTransport`（实现 `rmcp::Transport<RoleClient>`），
-    /// 因为 rmcp 的 `StreamableHttpClientTransport` 用 POST 到单一端点，
-    /// 对 SSE server 的 `/sse` 端点发 POST 会得到 405 Method Not Allowed。
-    async fn try_connect_sse(
-        &self,
-        config: &McpServerConfig,
-        url: &str,
-        headers: &std::collections::HashMap<String, String>,
-    ) -> Result<Vec<McpToolInfo>, String> {
-        let service = self.build_sse_service(config, url, headers).await?;
-        self.finalize_connection(config, service).await
-    }
-
     /// 构建 SSE 模式的 rmcp service（旧版 SSE transport + 握手），不含存储逻辑。
-    ///
-    /// 供 `try_connect_sse`（持久连接）和 `try_connect_transient`（临时探测）共用。
     async fn build_sse_service(
         &self,
         config: &McpServerConfig,
@@ -488,33 +718,7 @@ impl McpClientManager {
             .map_err(|e| format!("SSE MCP 握手失败: {e}"))
     }
 
-    /// 连接后通用逻辑——拉 tool 列表 + 转换 + 存入连接表。
-    async fn finalize_connection(
-        &self,
-        config: &McpServerConfig,
-        service: RunningService<rmcp::service::RoleClient, ClientInfo>,
-    ) -> Result<Vec<McpToolInfo>, String> {
-        let (rmcp_tools, tools) = Self::pull_tools_from_service(&service, config).await?;
-
-        // 存入连接表（同时缓存原始 rmcp tool 列表，collect_tools 时直接用，不重新拉取）
-        let mut connected = self.connected.write().await;
-        connected.insert(
-            config.name.clone(),
-            ConnectedServer {
-                service,
-                rmcp_tools,
-                tools: tools.clone(),
-                config: config.clone(),
-            },
-        );
-
-        Ok(tools)
-    }
-
     /// 0.13.8: 从已建立的 service 拉 tool 列表 + 转换为 McpToolInfo（不含存储逻辑）。
-    ///
-    /// 供 `finalize_connection`（持久连接 → 存入 connected 表）和
-    /// `try_connect_transient`（临时探测 → 不存入）共用。
     async fn pull_tools_from_service(
         service: &RunningService<rmcp::service::RoleClient, ClientInfo>,
         config: &McpServerConfig,
@@ -545,6 +749,14 @@ impl McpClientManager {
 
     /// 停止单个 server（断开连接 + 杀子进程）。
     pub async fn stop_server(&self, name: &str) {
+        let mut lifecycles = self.lifecycles.lock().await;
+        if let Some(lifecycle) = lifecycles.get_mut(name) {
+            lifecycle.generation = lifecycle.generation.saturating_add(1);
+            lifecycle.connection_config = None;
+            lifecycle.cooldown_until = None;
+            lifecycle.last_result = None;
+            lifecycle.notify.notify_waiters();
+        }
         let mut connected = self.connected.write().await;
         if let Some(server) = connected.remove(name) {
             // Drop service 会触发子进程清理（TokioChildProcess 的 Drop impl 会 kill）
@@ -553,13 +765,17 @@ impl McpClientManager {
             // 仅当实际 remove 了才 bump——没移除则池子没变，bump 会无谓触发重建
             self.bump_epoch();
         }
-        self.set_status(
-            name,
+        self.statuses.write().await.insert(
+            name.to_string(),
             McpServerStatus::Offline {
                 reason: "手动停止".to_string(),
             },
-        )
-        .await;
+        );
+    }
+
+    /// 配置写库后立即同步运行时代际，保证旧任务在 command 返回前已失效。
+    pub async fn apply_config(&self, config: &McpServerConfig) {
+        self.register_config(config).await;
     }
 
     /// 重连单个 server（先停再启）。
@@ -685,18 +901,28 @@ impl McpClientManager {
 
     /// 更新单个 server 的 disabled_tools 并刷新 tool 列表缓存。
     pub async fn update_disabled_tools(&self, name: &str, disabled_tools: Vec<String>) {
+        let mut lifecycles = self.lifecycles.lock().await;
+        if let Some(config) = lifecycles
+            .get_mut(name)
+            .and_then(|lifecycle| lifecycle.connection_config.as_mut())
+        {
+            config.disabled_tools = disabled_tools.clone();
+        }
         let mut connected = self.connected.write().await;
         if let Some(server) = connected.get_mut(name) {
+            let changed = server.config.disabled_tools != disabled_tools;
             server.config.disabled_tools = disabled_tools.clone();
             // 更新 tools 列表中的 disabled 标记
             for tool in &mut server.tools {
                 tool.disabled = disabled_tools.contains(&tool.name);
             }
             // disabled_tools 变化改变了喂给 AI 的 tool 池，bump epoch
-            self.bump_epoch();
+            if changed {
+                self.bump_epoch();
+            }
         } else {
             // server 未连接——DB 已更新，运行时缓存无此 server。
-            // 下次 ensure_connected 时会从 DB 加载最新配置，最终一致。
+            // 下次 prewarm / prompt prepare 会从 DB 加载最新配置，最终一致。
             tracing::debug!(
                 server = %name,
                 "MCP: update_disabled_tools 时 server 未连接，运行时缓存未更新（下次连接时从 DB 加载）"
@@ -706,18 +932,22 @@ impl McpClientManager {
 
     /// 停止所有 server（进程退出时调用）。
     pub async fn stop_all(&self) {
+        let mut lifecycles = self.lifecycles.lock().await;
+        for lifecycle in lifecycles.values_mut() {
+            lifecycle.generation = lifecycle.generation.saturating_add(1);
+            lifecycle.connection_config = None;
+            lifecycle.cooldown_until = None;
+            lifecycle.last_result = None;
+            lifecycle.notify.notify_waiters();
+        }
         let mut connected = self.connected.write().await;
         let names: Vec<String> = connected.keys().cloned().collect();
         connected.clear();
-        drop(connected);
-        self.bump_epoch();
+        if !names.is_empty() {
+            self.bump_epoch();
+        }
         // Drop 所有 service（触发子进程清理）
         tracing::info!(count = names.len(), "MCP: 所有 server 已停止");
-    }
-
-    /// 设置单个 server 的状态。
-    async fn set_status(&self, name: &str, status: McpServerStatus) {
-        self.statuses.write().await.insert(name.to_string(), status);
     }
 }
 
@@ -725,6 +955,14 @@ impl Default for McpClientManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn same_connection_config(left: &McpServerConfig, right: &McpServerConfig) -> bool {
+    left.name == right.name
+        && left.transport == right.transport
+        && left.command == right.command
+        && left.args == right.args
+        && left.env == right.env
 }
 
 /// 脱敏 URL query 中的敏感参数——防止 API key/token 明文进入日志。
@@ -817,7 +1055,8 @@ mod tests {
 
     #[test]
     fn mcp_client_manager_can_construct() {
-        let _manager = McpClientManager::new();
+        let manager = McpClientManager::new();
+        assert_eq!(manager.connect_slots.available_permits(), MAX_CONCURRENT_CONNECTS);
     }
 
     #[tokio::test]
@@ -861,7 +1100,7 @@ mod tests {
             enabled: true,
             disabled_tools: vec![],
         };
-        let result = manager.try_connect_stdio(&config).await;
+        let result = manager.build_stdio_service(&config).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("command 不能为空"), "error was: {err}");
@@ -883,7 +1122,7 @@ mod tests {
             disabled_tools: vec![],
         };
         let result = manager
-            .try_connect_http(&config, "", &std::collections::HashMap::new())
+            .build_http_service(&config, "", &std::collections::HashMap::new())
             .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -934,6 +1173,130 @@ mod tests {
             elapsed < std::time::Duration::from_secs(1),
             "elapsed: {elapsed:?}"
         );
+    }
+
+    fn empty_stdio_config(name: &str) -> McpServerConfig {
+        McpServerConfig {
+            name: name.to_string(),
+            transport: crate::domain::mcp::config::McpTransport::Stdio,
+            command: String::new(),
+            args: vec![],
+            env: std::collections::HashMap::new(),
+            enabled: true,
+            disabled_tools: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_manual_requests_share_one_connection_attempt() {
+        let manager = Arc::new(McpClientManager::new());
+        let permits = manager
+            .connect_slots
+            .clone()
+            .acquire_many_owned(MAX_CONCURRENT_CONNECTS as u32)
+            .await
+            .unwrap();
+        let config = empty_stdio_config("single-flight");
+
+        let first_manager = manager.clone();
+        let first_config = config.clone();
+        let first = tokio::spawn(async move { first_manager.start_server(&first_config).await });
+        loop {
+            if manager
+                .lifecycles
+                .lock()
+                .await
+                .get(&config.name)
+                .is_some_and(|lifecycle| lifecycle.connecting_generation.is_some())
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let second_manager = manager.clone();
+        let second_config = config.clone();
+        let second = tokio::spawn(async move { second_manager.start_server(&second_config).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        drop(permits);
+
+        assert!(first.await.unwrap().is_err());
+        assert!(second.await.unwrap().is_err());
+        assert_eq!(manager.connect_attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn automatic_failure_respects_cooldown_but_manual_retry_bypasses_it() {
+        let manager = McpClientManager::new();
+        let config = empty_stdio_config("cooldown");
+
+        assert!(
+            manager
+                .connect_server(&config, ConnectIntent::Automatic)
+                .await
+                .is_err()
+        );
+        assert!(
+            manager
+                .connect_server(&config, ConnectIntent::Automatic)
+                .await
+                .is_err()
+        );
+        assert_eq!(manager.connect_attempts.load(Ordering::SeqCst), 1);
+
+        assert!(manager.start_server(&config).await.is_err());
+        assert_eq!(manager.connect_attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn configuration_change_invalidates_queued_old_generation() {
+        let manager = Arc::new(McpClientManager::new());
+        let permits = manager
+            .connect_slots
+            .clone()
+            .acquire_many_owned(MAX_CONCURRENT_CONNECTS as u32)
+            .await
+            .unwrap();
+        let old_config = empty_stdio_config("generation");
+        let task_manager = manager.clone();
+        let task_config = old_config.clone();
+        let old_task = tokio::spawn(async move { task_manager.start_server(&task_config).await });
+
+        loop {
+            if manager
+                .lifecycles
+                .lock()
+                .await
+                .get(&old_config.name)
+                .is_some_and(|lifecycle| lifecycle.connecting_generation.is_some())
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let mut new_config = old_config.clone();
+        new_config.args = vec!["changed".to_string()];
+        manager.apply_config(&new_config).await;
+
+        let new_manager = manager.clone();
+        let next_config = new_config.clone();
+        let new_task = tokio::spawn(async move { new_manager.start_server(&next_config).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !new_task.is_finished(),
+            "新 generation 必须等待旧 single-flight 释放"
+        );
+        drop(permits);
+
+        let error = old_task.await.unwrap().unwrap_err();
+        assert!(error.contains("配置已变化"), "error was: {error}");
+        assert!(new_task.await.unwrap().is_err());
+        assert_eq!(manager.connect_attempts.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            manager.get_statuses().await.get(&old_config.name),
+            Some(McpServerStatus::Offline { .. })
+        ));
     }
 
     // ── P3: MCP 双向投影闭环（Capability → MCP Tool → Capability schema 一致性）──
@@ -1061,10 +1424,7 @@ mod tests {
             redacted.contains("tavilyApiKey=***REDACTED***"),
             "key 值应被打码: {redacted}"
         );
-        assert!(
-            !redacted.contains("SECRET123"),
-            "明文不得残留: {redacted}"
-        );
+        assert!(!redacted.contains("SECRET123"), "明文不得残留: {redacted}");
         // scheme/host/path 保留用于诊断
         assert!(
             redacted.starts_with("https://mcp.tavily.com/mcp/?"),
@@ -1074,7 +1434,8 @@ mod tests {
 
     #[test]
     fn redact_url_secrets_masks_multiple_sensitive_params() {
-        let url = "https://api.example.com/sse?token=abc123&refresh=yes&secret=topsecret&X-API-Key=k1";
+        let url =
+            "https://api.example.com/sse?token=abc123&refresh=yes&secret=topsecret&X-API-Key=k1";
         let redacted = redact_url_secrets(url);
         assert!(redacted.contains("token=***REDACTED***"));
         assert!(redacted.contains("secret=***REDACTED***"));
@@ -1127,20 +1488,14 @@ mod tests {
             "Authorization",
             "auth",
         ] {
-            assert!(
-                is_sensitive_param(name),
-                "{name} 应被判定为敏感参数"
-            );
+            assert!(is_sensitive_param(name), "{name} 应被判定为敏感参数");
         }
     }
 
     #[test]
     fn is_sensitive_param_rejects_non_sensitive() {
         for name in &["model", "stream", "version", "limit", "url", "page"] {
-            assert!(
-                !is_sensitive_param(name),
-                "{name} 不应被判定为敏感参数"
-            );
+            assert!(!is_sensitive_param(name), "{name} 不应被判定为敏感参数");
         }
     }
 }

@@ -649,7 +649,7 @@ fn main() {
             }
 
             // 0.13.7: MCP server 不在启动时自动拉起——改为 lazy connect。
-            // 对话窗口首次需要 tool 时由 ChatService.ensure_provider → ensure_connected 拉起。
+            // 对话窗口首次可见后台预热；prompt 侧最多等待 5 秒并复用同一连接任务。
             // 设置页的「测试连接」按钮也可手动探测。
 
             // 持有服务列表,保证其生命周期与 app 一致。

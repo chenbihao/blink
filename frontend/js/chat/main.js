@@ -52,20 +52,11 @@ async function init() {
     }
     // 0.13.0：MCP 配置变更时刷新 tool 池
     if (e?.payload?.key === "mcp:servers") {
-      // 预热阶段（windowActivated=false）跳过——窗口未真正打开，不触发 MCP 连接
+      // 配置 command 已负责 generation 失效与按需后台连接；这里仅刷新只读快照。
       if (!windowActivated) return;
-      // 0.13.8: 设置页切换 MCP server 开关后，对话窗口需要重连 + 刷新 popup
-      ipc.ensureMcpConnected().then(() => {
-        refreshToolPool(true);
-        invalidateComposerBarCache();
-        refreshPopupIfVisible();
-      }).catch(() => {
-        // 即使 ensure_connected 失败，也要清缓存 + 刷新 popup，
-        // 否则 popup 会显示过期的 online 状态
-        refreshToolPool(true);
-        invalidateComposerBarCache();
-        refreshPopupIfVisible();
-      });
+      refreshToolPool(true);
+      invalidateComposerBarCache();
+      refreshPopupIfVisible();
     }
   });
 
@@ -190,7 +181,7 @@ bindLinkOpener();
 
   // 0.13.0：加载 tool 池规模 + MCP tool 名称（供工具卡片来源标记）
   // 注意：此处不触发 MCP 连接——预热阶段窗口不可见，无需拉起 MCP server 子进程。
-  // MCP lazy connect 在窗口首次获得焦点（真正显示给用户）时由 focus 事件触发。
+  // MCP 后台预热在窗口首次获得焦点（真正显示给用户）时由 focus 事件触发。
   refreshToolPool(true);
 
   // Composer bar 悬浮预览 popup 初始化
@@ -217,18 +208,18 @@ bindLinkOpener();
   // 0.12.6：重试按钮（assistant 消息的 retry action）
   document.addEventListener("chat:retry", handleRetry);
 
-  // 窗口获得焦点时自动聚焦输入框 + 刷新 tool 池（MCP server 可能在设置页被启停）
-  // 0.13.8: focus 时也触发 ensure_mcp_connected，让掉线的 server 重新连接
-  // 0.13.9: 首次 focus 标记窗口已激活——preheat 创建的隐藏窗口不会收到 focus 事件，
-  //         只有 show_chat_window → set_focus() 真正显示时才触发，避免预热阶段拉起 MCP。
+  // 0.19.11: 只有首次真正可见的 focus 发起一次非阻塞后台预热；普通 focus
+  // 仅刷新只读 tool snapshot，不再自动重试失败 server。
   window.addEventListener("focus", () => {
     focusInput();
+    const firstVisibleActivation = !windowActivated;
     windowActivated = true;
-    ipc.ensureMcpConnected().then(() => {
-      refreshToolPool(true);
-      invalidateComposerBarCache();
-      refreshPopupIfVisible();
-    }).catch(() => {});
+    if (firstVisibleActivation) {
+      ipc.ensureMcpConnected().catch(() => {});
+    }
+    refreshToolPool(true);
+    invalidateComposerBarCache();
+    refreshPopupIfVisible();
   });
 
   // 初始聚焦
@@ -645,7 +636,7 @@ function handleContextStatus(event) {
   components.renderContextWarning(status.usage_percent, handleContextWarningAction);
   // 0.13.6: 保存 recall_count 供 finalizeDone 渲染
   state.setLastRecallCount(status.last_recall_count || 0);
-  // MCP 拓扑可能在 ensure_connected 时变化（lazy connect 重连成功），
+  // MCP 拓扑可能在后台预热或 prompt 准备时变化，
   // context-status 事件在 ensure_provider 之后推送，此时 tool 池可能已变，
   // 刷新 composer bar 文本 + 清除 popup 缓存。
   refreshToolPool(true);

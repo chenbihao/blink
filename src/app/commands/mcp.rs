@@ -35,9 +35,19 @@ pub async fn upsert_mcp_server(
     config: crate::domain::mcp::McpServerConfig,
 ) -> Result<(), String> {
     let pools = app.state::<crate::infra::data::DbPools>();
-    crate::domain::mcp::McpServerConfigStore::upsert(&pools.config, config)
+    crate::domain::mcp::McpServerConfigStore::upsert(&pools.config, config.clone())
         .await
         .map_err(|e| e.to_string())?;
+
+    let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
+    manager.apply_config(&config).await;
+    if config.enabled {
+        if !is_pure_chat_mode(&app) {
+            manager.inner().clone().prewarm(pools.config.clone());
+        }
+    } else {
+        manager.stop_server(&config.name).await;
+    }
 
     // 0.13.8: 广播配置变更事件
     let _ = app.emit(
@@ -72,8 +82,7 @@ pub async fn delete_mcp_server(app: tauri::AppHandle, name: String) -> Result<()
 /// 设置 MCP server 的 enabled 状态。
 ///
 /// 禁用时同时停止已连接的 server（杀子进程 / 断开 HTTP 连接），
-/// 避免禁用后子进程仍在后台运行。启用时不自动拉起（lazy connect 在对话时处理），
-/// 前端会调用 test_mcp_connection 探测可用性。
+/// 避免禁用后子进程仍在后台运行。启用时在非纯对话模式下发起后台连接。
 #[tauri::command]
 pub async fn set_mcp_server_enabled(
     app: tauri::AppHandle,
@@ -90,6 +99,17 @@ pub async fn set_mcp_server_enabled(
         let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
         manager.stop_server(&name).await;
         tracing::info!(server = %name, "MCP: server 已禁用并停止");
+    } else {
+        let configs = crate::domain::mcp::McpServerConfigStore::load_all(&pools.config)
+            .await
+            .map_err(|e| e.to_string())?;
+        if let Some(config) = configs.iter().find(|config| config.name == name) {
+            let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
+            manager.apply_config(config).await;
+            if !is_pure_chat_mode(&app) {
+                manager.inner().clone().prewarm(pools.config.clone());
+            }
+        }
     }
 
     // 0.13.8: 广播配置变更事件，让对话窗口 popup 刷新
@@ -133,10 +153,9 @@ pub async fn reconnect_mcp_server(app: tauri::AppHandle, name: String) -> Result
     manager.reconnect_server(&name, &pools.config).await
 }
 
-/// 0.13.7: 测试 MCP server 连接——连接 + 拉 tool 列表 + 立即断开。
+/// 测试 MCP server 连接并返回 tool 列表。
 ///
-/// 用于设置页的「测试连接」按钮——验证 server 是否可用，不保持子进程。
-/// 返回 tool 列表供前端预览。
+/// 0.19.11 起与预热/prompt 共用同名 single-flight，成功连接直接保留复用。
 #[tauri::command]
 pub async fn test_mcp_connection(
     app: tauri::AppHandle,
@@ -237,7 +256,7 @@ pub async fn import_mcp_from_json(
 /// 批量导入 server 配置（0.13.6）。
 ///
 /// `overwrite=true` 覆盖同名，`false` 跳过同名。
-/// 只写配置，不拉起子进程——用户在列表页手动「启动」。
+/// 写库后同步 generation；非纯对话模式下对 enabled 项发起后台连接。
 #[tauri::command]
 pub async fn batch_import_mcp_servers(
     app: tauri::AppHandle,
@@ -256,6 +275,8 @@ pub async fn batch_import_mcp_servers(
     let mut overwritten = 0usize;
     let mut names = Vec::new();
 
+    let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
+    let mut should_prewarm = false;
     for config in configs {
         let is_existing = existing_names.contains(config.name.as_str());
         if is_existing && !overwrite {
@@ -268,10 +289,20 @@ pub async fn batch_import_mcp_servers(
             imported += 1;
         }
         names.push(config.name.clone());
-        crate::domain::mcp::McpServerConfigStore::upsert(&pools.config, config)
+        crate::domain::mcp::McpServerConfigStore::upsert(&pools.config, config.clone())
             .await
             .map_err(|e| e.to_string())?;
+        manager.apply_config(&config).await;
+        should_prewarm |= config.enabled;
     }
+
+    if should_prewarm && !is_pure_chat_mode(&app) {
+        manager.inner().clone().prewarm(pools.config.clone());
+    }
+    let _ = app.emit(
+        EventNames::CONFIG_CHANGED,
+        serde_json::json!({ "key": "mcp:servers" }),
+    );
 
     Ok(crate::domain::mcp::ImportResult {
         imported,
@@ -290,30 +321,46 @@ pub async fn batch_set_mcp_enabled(
 ) -> Result<(), String> {
     let pools = app.state::<crate::infra::data::DbPools>();
     for name in &names {
-        let _ = crate::domain::mcp::McpServerConfigStore::set_enabled(&pools.config, name, enabled)
-            .await;
+        crate::domain::mcp::McpServerConfigStore::set_enabled(&pools.config, name, enabled)
+            .await
+            .map_err(|e| e.to_string())?;
     }
+    let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
+    if enabled {
+        let configs = crate::domain::mcp::McpServerConfigStore::load_all(&pools.config)
+            .await
+            .map_err(|e| e.to_string())?;
+        for config in configs.iter().filter(|config| names.contains(&config.name)) {
+            manager.apply_config(config).await;
+        }
+        if !is_pure_chat_mode(&app) {
+            manager.inner().clone().prewarm(pools.config.clone());
+        }
+    } else {
+        for name in &names {
+            manager.stop_server(name).await;
+        }
+    }
+    let _ = app.emit(
+        EventNames::CONFIG_CHANGED,
+        serde_json::json!({ "key": "mcp:servers" }),
+    );
     Ok(())
 }
 
-/// 0.13.8: 触发 MCP lazy connect——持久连接所有 enabled 但尚未连接的 server。
-///
-/// 供对话窗口打开时调用，让 popup 能显示正确的在线状态。
-/// 与 `ensure_provider` 中的 `ensure_connected` 调用相同，但此处不依赖 ChatService——
-/// 对话窗口 init 时即可调用，不需要等用户发消息。
-/// 单个 server 连接失败只记状态（Offline），不影响其他 server。
+/// 0.19.11: 首次可见触发 MCP 后台预热；命令立即返回，不阻塞窗口显示。
 #[tauri::command]
 pub async fn ensure_mcp_connected(app: tauri::AppHandle) -> Result<(), String> {
     if app
         .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
         .is_some_and(|chat| chat.is_pure_chat_mode())
     {
-        tracing::debug!("MCP: 纯对话模式跳过对话窗口 lazy connect");
+        tracing::debug!("MCP: 纯对话模式跳过对话窗口后台预热");
         return Ok(());
     }
     let pools = app.state::<crate::infra::data::DbPools>();
     let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
-    manager.ensure_connected(&pools.config).await;
+    manager.inner().clone().prewarm(pools.config.clone());
     Ok(())
 }
 
@@ -403,4 +450,9 @@ pub struct McpServerListItem {
     pub config: crate::domain::mcp::McpServerConfig,
     /// 运行时状态（online / offline / connecting）。
     pub status: crate::domain::mcp::McpServerStatus,
+}
+
+fn is_pure_chat_mode(app: &tauri::AppHandle) -> bool {
+    app.try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
+        .is_some_and(|chat| chat.is_pure_chat_mode())
 }

@@ -12,7 +12,7 @@
  * - upsert_mcp_server — 添加/更新 server 配置
  * - delete_mcp_server — 删除 server（同时停止）
  * - set_mcp_server_enabled — 切换 enabled
- * - test_mcp_connection — 测试连接（连接+拉 tool 列表+立即断开）
+ * - test_mcp_connection — 测试连接（与预热/prompt 共用 single-flight）
  * - get_mcp_server_tools — 获取 tool 列表
  * - set_mcp_server_disabled_tools — 更新 tool 可见性
  * - get_mcp_tool_pool_size — 获取 tool 池规模
@@ -36,7 +36,7 @@ export function initMcPTab() {
  * 加载并渲染 server 列表。
  *
  * 0.13.7: 进入页面时自动逐个探测所有 server 状态（test_connection），
- * 显示绿灯/红灯 + 工具数 + 错误信息。探测后立即断开，不保持子进程。
+ * 显示绿灯/红灯 + 工具数 + 错误信息。成功连接保留并进入正常 tool pool。
  */
 async function loadServerList() {
   const container = document.getElementById("mcp-server-list");

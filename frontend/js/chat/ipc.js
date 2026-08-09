@@ -363,8 +363,7 @@ export function getConversationSystemPrompt(conversationId) {
 // ── MCP tool 池（0.13.0）──────────────────────────────────────────
 
 /**
- * 0.13.8: 触发 MCP lazy connect——持久连接所有 enabled 但尚未连接的 server。
- * 供对话窗口打开时调用，让 popup 能显示正确的在线状态。
+ * 0.19.11: 首次可见时触发一次非阻塞 MCP 后台预热。
  * @returns {Promise<void>}
  */
 export function ensureMcpConnected() {
