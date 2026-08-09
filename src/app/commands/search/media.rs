@@ -409,15 +409,10 @@ pub async fn ocr_image(
 
     let bytes_len = png_data.len();
 
-    let registry =
-        app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
+    let registry = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
     if registry.get(OCR_CAPABILITY_ID).is_none() {
         tracing::warn!("ocr_image: OcrImage Capability 未注册");
-        return Err(CommandError::new(
-            "not_found",
-            "OCR 能力未注册",
-            false,
-        ));
+        return Err(CommandError::new("not_found", "OCR 能力未注册", false));
     }
 
     // 构造 Capability invoke 参数 —— png 为 JSON 整数数组
@@ -1214,22 +1209,20 @@ mod scroll_probe_tests {
 
     #[test]
     fn ocr_command_projection_preserves_json_contract() {
-        let projected = project_ocr_command_result(
-            crate::domain::capability::CapabilityResult::Text {
+        let projected =
+            project_ocr_command_result(crate::domain::capability::CapabilityResult::Text {
                 content: r#"{"text":"识别结果","lines":[],"words":[]}"#.into(),
                 desc: None,
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
         assert_eq!(projected["text"], "识别结果");
         assert!(projected["lines"].is_array());
 
-        let invalid = project_ocr_command_result(
-            crate::domain::capability::CapabilityResult::Done {
+        let invalid =
+            project_ocr_command_result(crate::domain::capability::CapabilityResult::Done {
                 summary: "unexpected".into(),
-            },
-        )
-        .unwrap_err();
+            })
+            .unwrap_err();
         assert_eq!(invalid.code, "internal_error");
     }
 }

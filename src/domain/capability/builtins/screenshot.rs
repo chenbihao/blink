@@ -257,11 +257,9 @@ pub(super) async fn op_crop(
 pub(super) async fn op_window(hwnd: isize) -> Result<CapabilityResult, CapabilityError> {
     let (bgra, w, h) =
         tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, u32, u32), CapabilityError> {
-            let (x, y, w, h) =
-                crate::infra::platform::window::get_window_dwm_rect(hwnd).ok_or_else(|| {
-                    CapabilityError::InvalidArgs {
-                        detail: format!("hwnd {hwnd} 无效或窗口不可见"),
-                    }
+            let (x, y, w, h) = crate::infra::platform::window::get_window_dwm_rect(hwnd)
+                .ok_or_else(|| CapabilityError::InvalidArgs {
+                    detail: format!("hwnd {hwnd} 无效或窗口不可见"),
                 })?;
             let bgra = crate::infra::platform::screenshot::capture_region(x, y, w, h)
                 .map_err(|e| CapabilityError::Internal { detail: e })?;
@@ -310,13 +308,14 @@ pub(super) async fn op_capture_to_clipboard(
 
     // ── 指定显示器：capture_display → BGRA → write_bgra_to_clipboard（零编码）──
     if let Some(id) = display_id {
-        let (bgra, geom) =
-            tokio::task::spawn_blocking(move || crate::infra::platform::screenshot::capture_display(id))
-                .await
-                .map_err(|e| CapabilityError::Internal {
-                    detail: format!("capture_display task 崩溃: {e}"),
-                })?
-                .map_err(|e| CapabilityError::Internal { detail: e })?;
+        let (bgra, geom) = tokio::task::spawn_blocking(move || {
+            crate::infra::platform::screenshot::capture_display(id)
+        })
+        .await
+        .map_err(|e| CapabilityError::Internal {
+            detail: format!("capture_display task 崩溃: {e}"),
+        })?
+        .map_err(|e| CapabilityError::Internal { detail: e })?;
 
         let (w, h) = (geom.w, geom.h);
         crate::domain::clipboard::write_bgra(bgra, w, h, ClipboardWriteSource::Screenshot)
@@ -325,7 +324,12 @@ pub(super) async fn op_capture_to_clipboard(
                 detail: e.to_string(),
             })?;
 
-        tracing::debug!(display_id = id, w, h, "capture_to_clipboard: 指定显示器截图已写入剪贴板");
+        tracing::debug!(
+            display_id = id,
+            w,
+            h,
+            "capture_to_clipboard: 指定显示器截图已写入剪贴板"
+        );
         return Ok(CapabilityResult::Done {
             summary: "已截图到剪贴板".into(),
         });
@@ -342,19 +346,20 @@ pub(super) async fn op_capture_to_clipboard(
 
     let png = match session_png {
         Some(png) => {
-            tracing::debug!(bytes = png.len(), "capture_to_clipboard: 复用 SESSION cache");
+            tracing::debug!(
+                bytes = png.len(),
+                "capture_to_clipboard: 复用 SESSION cache"
+            );
             png
         }
         None => {
             // 无 SESSION 或标注模式 → 新截一帧
-            tokio::task::spawn_blocking(
-                crate::infra::platform::screenshot::begin_session,
-            )
-            .await
-            .map_err(|e| CapabilityError::Internal {
-                detail: format!("begin_session task 崩溃: {e}"),
-            })?
-            .map_err(|e| CapabilityError::Internal { detail: e })?;
+            tokio::task::spawn_blocking(crate::infra::platform::screenshot::begin_session)
+                .await
+                .map_err(|e| CapabilityError::Internal {
+                    detail: format!("begin_session task 崩溃: {e}"),
+                })?
+                .map_err(|e| CapabilityError::Internal { detail: e })?;
 
             crate::infra::platform::screenshot::session_png().ok_or_else(|| {
                 CapabilityError::Internal {

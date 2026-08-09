@@ -1332,7 +1332,13 @@ mod tests {
             kind: ConversationKind::Persistent,
             pure_chat: false,
         };
-        assert_ne!(base, AgentCacheKey { pure_chat: true, ..base.clone() });
+        assert_ne!(
+            base,
+            AgentCacheKey {
+                pure_chat: true,
+                ..base.clone()
+            }
+        );
     }
 
     fn pending_request(request_id: u64, conversation_id: &str) -> ActiveChatRequest {

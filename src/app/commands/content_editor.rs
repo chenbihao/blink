@@ -122,8 +122,8 @@ pub async fn save_content_editor(
                 None,
                 crate::domain::sticky::StickyChangeSource::ContentEditor,
             )
-                .await
-                .map_err(|e| e.to_string())?;
+            .await
+            .map_err(|e| e.to_string())?;
             tracing::info!(sticky_id = %sticky_id, "save_content_editor: sticky_update 完成");
             Ok(sticky_id.to_string())
         }

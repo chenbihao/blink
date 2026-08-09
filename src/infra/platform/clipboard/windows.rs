@@ -595,7 +595,12 @@ pub fn read_current_image() -> Option<Vec<u8>> {
                     }
                     let (bgra, width, height) = decode_dib(&dib_data)?;
                     let png = bgra_to_png(&bgra, width, height).ok()?;
-                    tracing::debug!(width, height, bytes = png.len(), "read_current_image: 读到图片");
+                    tracing::debug!(
+                        width,
+                        height,
+                        bytes = png.len(),
+                        "read_current_image: 读到图片"
+                    );
                     return Some(png);
                 }
                 // Open 成功但读 DIB 失败（非 CF_DIB） —— 不是竞争问题，不重试

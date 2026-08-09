@@ -15,8 +15,6 @@ pub async fn show_context_menu(
     height: f64,
     items: String,
 ) -> Result<(), String> {
-    use tauri::{WebviewUrl, WebviewWindowBuilder};
-
     // 主题 resolve（auto → dark/light）
     let theme = {
         let pool = &app.state::<crate::infra::data::DbPools>().config;
@@ -39,6 +37,7 @@ pub async fn show_context_menu(
 
     // 多屏感知定位：Win32 直接拿光标物理坐标 + 目标屏 DPI 缩放 + 智能翻转
     let (fx, fy, fw, fh) = crate::infra::platform::window::clamp_context_menu(width, height);
+    crate::infra::platform::window::set_context_menu_payload(items.clone(), theme.clone());
 
     // 复用已有窗口：resize → reposition → show → eval 渲染新数据 → force_topmost
     // ⚠️ 不能在隐藏态用 emit 传数据：WebView2 在 IsVisible=false 时会丢弃事件
@@ -95,19 +94,9 @@ pub async fn show_context_menu(
     let encoded_items = urlencoding::encode(&items).to_string();
     let url = format!("contextmenu-popup.html?items={encoded_items}&theme={theme}");
     tracing::debug!(fx, fy, fw, fh, "创建右键菜单窗口");
-    let _win = WebviewWindowBuilder::new(&app, "context-menu", WebviewUrl::App(url.into()))
-        .title("")
-        .inner_size(width, height) // 逻辑像素占位，稍后 place_at_physical 覆盖
-        .position(0.0, 0.0)
-        .decorations(false)
-        .transparent(false)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .visible(false) // 先隐藏建，place 后再 show，避免闪一下错位窗口
-        .focused(false)
-        .resizable(false)
-        .build()
-        .map_err(|e| format!("创建右键菜单窗口失败: {e}"))?;
+    let (_win, _) = crate::infra::platform::window::get_or_create_context_menu_window(
+        &app, url, width, height,
+    )?;
 
     if let Ok(hwnd) = _win.hwnd() {
         let hwnd = windows::Win32::Foundation::HWND(hwnd.0 as _);
@@ -123,6 +112,16 @@ pub async fn show_context_menu(
         let _ = _win.show();
     }
 
+    // helper 可能复用了刚完成预热的窗口；URL 参数只覆盖“本调用是创建者”的情况。
+    // 对已经 ready 的复用窗口再走一次 eval，尚未 ready 时则由 pending pull 兜底。
+    let theme_js = serde_json::to_string(&theme).unwrap_or_else(|_| "\"dark\"".to_string());
+    let js = format!(
+        "window.__renderContextMenu && window.__renderContextMenu({items}, {theme})",
+        items = items,
+        theme = theme_js,
+    );
+    let _ = _win.eval(&js);
+
     tracing::trace!(
         fx,
         fy,
@@ -132,6 +131,17 @@ pub async fn show_context_menu(
         "右键菜单窗口已创建"
     );
     Ok(())
+}
+
+/// 前端 ready 主动拉取首次菜单载荷，避免预热刚建完但模块脚本尚未注册时 eval 丢失。
+#[tauri::command]
+pub fn take_context_menu_payload() -> Option<serde_json::Value> {
+    crate::infra::platform::window::take_context_menu_payload().map(|(items, theme)| {
+        serde_json::json!({
+            "items": items,
+            "theme": theme,
+        })
+    })
 }
 
 /// 隐藏右键菜单窗口（hide 而非 close，保留窗口供下次复用）。

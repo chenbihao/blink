@@ -358,13 +358,13 @@ impl McpClientManager {
                 max = MAX_START_RETRIES,
                 "MCP: 尝试连接 server"
             );
-            let attempt_result = tokio::time::timeout(
-                CONNECT_ATTEMPT_TIMEOUT,
-                self.build_connection(config),
-            )
-            .await
-            .map_err(|_| format!("MCP 连接超时（{} 秒）", CONNECT_ATTEMPT_TIMEOUT.as_secs()))
-            .and_then(|result| result);
+            let attempt_result =
+                tokio::time::timeout(CONNECT_ATTEMPT_TIMEOUT, self.build_connection(config))
+                    .await
+                    .map_err(|_| {
+                        format!("MCP 连接超时（{} 秒）", CONNECT_ATTEMPT_TIMEOUT.as_secs())
+                    })
+                    .and_then(|result| result);
             match attempt_result {
                 Ok(connection) => {
                     candidate = Some(connection);
@@ -1056,7 +1056,10 @@ mod tests {
     #[test]
     fn mcp_client_manager_can_construct() {
         let manager = McpClientManager::new();
-        assert_eq!(manager.connect_slots.available_permits(), MAX_CONCURRENT_CONNECTS);
+        assert_eq!(
+            manager.connect_slots.available_permits(),
+            MAX_CONCURRENT_CONNECTS
+        );
     }
 
     #[tokio::test]

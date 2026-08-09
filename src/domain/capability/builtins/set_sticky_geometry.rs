@@ -87,34 +87,37 @@ impl Capability for SetStickyGeometry {
                 detail: "set_sticky_geometry: 缺少 id 参数".into(),
             })?;
 
-        let x = args
-            .get("x")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| CapabilityError::InvalidArgs {
-                detail: "set_sticky_geometry: 缺少 x 参数".into(),
-            })? as i32;
-        let y = args
-            .get("y")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| CapabilityError::InvalidArgs {
-                detail: "set_sticky_geometry: 缺少 y 参数".into(),
-            })? as i32;
-        let w = args
-            .get("w")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| CapabilityError::InvalidArgs {
-                detail: "set_sticky_geometry: 缺少 w 参数".into(),
-            })? as i32;
-        let h = args
-            .get("h")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| CapabilityError::InvalidArgs {
-                detail: "set_sticky_geometry: 缺少 h 参数".into(),
-            })? as i32;
+        let x =
+            args.get("x")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| CapabilityError::InvalidArgs {
+                    detail: "set_sticky_geometry: 缺少 x 参数".into(),
+                })? as i32;
+        let y =
+            args.get("y")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| CapabilityError::InvalidArgs {
+                    detail: "set_sticky_geometry: 缺少 y 参数".into(),
+                })? as i32;
+        let w =
+            args.get("w")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| CapabilityError::InvalidArgs {
+                    detail: "set_sticky_geometry: 缺少 w 参数".into(),
+                })? as i32;
+        let h =
+            args.get("h")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| CapabilityError::InvalidArgs {
+                    detail: "set_sticky_geometry: 缺少 h 参数".into(),
+                })? as i32;
 
-        let svc = ctx.env.sticky_service().ok_or_else(|| CapabilityError::Internal {
-            detail: "StickyService 不可用".into(),
-        })?;
+        let svc = ctx
+            .env
+            .sticky_service()
+            .ok_or_else(|| CapabilityError::Internal {
+                detail: "StickyService 不可用".into(),
+            })?;
 
         svc.update_geometry(id, x, y, w, h)
             .await
@@ -158,7 +161,10 @@ mod tests {
     #[test]
     fn schema_sensitive_is_false() {
         let s = SetStickyGeometry.schema();
-        assert!(!s.sensitive, "set_sticky_geometry 不标 sensitive（几何参数不含隐私）");
+        assert!(
+            !s.sensitive,
+            "set_sticky_geometry 不标 sensitive（几何参数不含隐私）"
+        );
     }
 
     #[test]

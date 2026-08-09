@@ -150,7 +150,9 @@ fn chat_prefill_state() -> &'static Mutex<Option<ChatPrefill>> {
 /// 写入 prefill，返回本次 revision（用于后续 ack/clear/rollback）。
 pub fn set_chat_prefill(text: &str) -> u64 {
     let revision = CHAT_PREFILL_REV.fetch_add(1, Ordering::SeqCst) + 1;
-    let mut guard = chat_prefill_state().lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = chat_prefill_state()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     *guard = Some(ChatPrefill {
         revision,
         text: text.to_string(),
@@ -161,14 +163,18 @@ pub fn set_chat_prefill(text: &str) -> u64 {
 /// 拉取并清空 pending（冷启动路径）。
 /// 返回 (revision, text) 或 None。
 pub fn take_chat_prefill() -> Option<(u64, String)> {
-    let mut guard = chat_prefill_state().lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = chat_prefill_state()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     guard.take().map(|p| (p.revision, p.text))
 }
 
 /// 按 revision 清除 pending（热窗口 event 路径）。
 /// 仅当当前 pending 的 revision 匹配时才清空，防止旧事件误删新 pending。
 pub fn ack_chat_prefill(revision: u64) {
-    let mut guard = chat_prefill_state().lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = chat_prefill_state()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if let Some(ref p) = *guard {
         if p.revision == revision {
             *guard = None;
@@ -196,8 +202,11 @@ pub fn clear_chat_prefill(revision: u64) {
 
 type WindowCreateLock = std::sync::Arc<std::sync::Mutex<()>>;
 
-static WINDOW_CREATE_LOCKS: OnceLock<std::sync::Mutex<std::collections::HashMap<String, WindowCreateLock>>> =
-    OnceLock::new();
+static WINDOW_CREATE_LOCKS: OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, WindowCreateLock>>,
+> = OnceLock::new();
+
+static PENDING_CONTEXT_MENU: OnceLock<Mutex<Option<(String, String)>>> = OnceLock::new();
 
 fn creation_lock(label: &str) -> WindowCreateLock {
     let locks = WINDOW_CREATE_LOCKS.get_or_init(|| std::sync::Mutex::new(Default::default()));
@@ -206,6 +215,21 @@ fn creation_lock(label: &str) -> WindowCreateLock {
         .entry(label.to_string())
         .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(())))
         .clone()
+}
+
+/// 保存首次建窗期间可能尚未有前端 listener 的右键菜单载荷。
+pub fn set_context_menu_payload(items: String, theme: String) {
+    let pending = PENDING_CONTEXT_MENU.get_or_init(|| Mutex::new(None));
+    *pending.lock().unwrap_or_else(|error| error.into_inner()) = Some((items, theme));
+}
+
+/// 前端 ready 后主动拉取，兜底预热与用户首次唤起并发时丢失 eval 的窗口。
+pub fn take_context_menu_payload() -> Option<(String, String)> {
+    PENDING_CONTEXT_MENU
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take()
 }
 
 /// 按 label 串行化创建窗口（single-flight）。
@@ -240,13 +264,23 @@ where
 
     // 二次检查：等待期间可能已由并发路径创建
     if let Some(win) = app.get_webview_window(label) {
-        tracing::debug!(label, waited_ms, created = false, "window get_or_create: ready (race)");
+        tracing::debug!(
+            label,
+            waited_ms,
+            created = false,
+            "window get_or_create: ready (race)"
+        );
         return Ok((win, false));
     }
 
     match build() {
         Ok(win) => {
-            tracing::debug!(label, waited_ms, created = true, "window get_or_create: ready");
+            tracing::debug!(
+                label,
+                waited_ms,
+                created = true,
+                "window get_or_create: ready"
+            );
             Ok((win, true))
         }
         Err(error) => {
@@ -264,6 +298,30 @@ where
             }
         }
     }
+}
+
+/// 右键菜单唯一建窗入口；预热与用户首次唤起必须共用同一 label single-flight。
+pub fn get_or_create_context_menu_window(
+    app: &AppHandle,
+    initial_url: String,
+    width: f64,
+    height: f64,
+) -> Result<(WebviewWindow, bool), String> {
+    get_or_create_window(app, "context-menu", || {
+        use tauri::{WebviewUrl, WebviewWindowBuilder};
+        WebviewWindowBuilder::new(app, "context-menu", WebviewUrl::App(initial_url.into()))
+            .title("")
+            .inner_size(width, height)
+            .position(0.0, 0.0)
+            .decorations(false)
+            .transparent(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .focused(false)
+            .resizable(false)
+            .visible(false)
+            .build()
+    })
 }
 
 /// 程序启动以来的毫秒数（单调时钟，用于 grace period 计算）。
@@ -1961,12 +2019,14 @@ pub fn show_image_editor_window(
         .find(|display| display.primary)
         .or_else(|| displays.first());
     let meta = display
-        .map(|display| crate::infra::platform::screenshot::ScreenCaptureMeta {
-            virtual_x: display.x,
-            virtual_y: display.y,
-            width: display.w,
-            height: display.h,
-        })
+        .map(
+            |display| crate::infra::platform::screenshot::ScreenCaptureMeta {
+                virtual_x: display.x,
+                virtual_y: display.y,
+                width: display.w,
+                height: display.h,
+            },
+        )
         .unwrap_or(crate::infra::platform::screenshot::ScreenCaptureMeta {
             virtual_x: 0,
             virtual_y: 0,
@@ -2013,7 +2073,12 @@ pub fn show_image_editor_window(
     if let Err(error) = win.set_focus() {
         tracing::warn!(%error, "图片编辑窗口 focus 失败");
     }
-    tracing::info!(created, width = image.width, height = image.height, "用户图片编辑窗口已显示");
+    tracing::info!(
+        created,
+        width = image.width,
+        height = image.height,
+        "用户图片编辑窗口已显示"
+    );
     Ok(())
 }
 
@@ -2283,7 +2348,7 @@ pub fn show_pin_window(
 /// 供 `pin_image` Capability 位置兜底和 `pin_clipboard_image` command 共用。
 pub fn get_primary_monitor_center(img_w: i32, img_h: i32) -> (i32, i32) {
     use windows::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
     };
     use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
@@ -2634,24 +2699,12 @@ pub fn preheat_secondary_windows(app: AppHandle) {
 
         // --- context-menu（右键菜单，非透明小窗） ---
         // 0.19：经 get_or_create_window 串行化创建。
-        match get_or_create_window(&app, "context-menu", || {
-            use tauri::{WebviewUrl, WebviewWindowBuilder};
-            WebviewWindowBuilder::new(
-                &app,
-                "context-menu",
-                WebviewUrl::App("contextmenu-popup.html".into()),
-            )
-            .title("")
-            .inner_size(200.0, 200.0)
-            .decorations(false)
-            .transparent(false)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .focused(false)
-            .resizable(false)
-            .visible(false)
-            .build()
-        }) {
+        match get_or_create_context_menu_window(
+            &app,
+            "contextmenu-popup.html".to_string(),
+            200.0,
+            200.0,
+        ) {
             Ok((win, created)) => {
                 if created {
                     if let Ok(hwnd) = win.hwnd() {
@@ -2758,21 +2811,17 @@ pub fn preheat_secondary_windows(app: AppHandle) {
         // 预热时补 strip_window_border + enable_rounded_corners（幂等，重复调用安全）。
         match get_or_create_window(&app, "settings", || {
             use tauri::{WebviewUrl, WebviewWindowBuilder};
-            WebviewWindowBuilder::new(
-                &app,
-                "settings",
-                WebviewUrl::App("settings.html".into()),
-            )
-            .title("Blink Settings")
-            .inner_size(SETTINGS_W, SETTINGS_H)
-            .min_inner_size(SETTINGS_MIN_W, SETTINGS_MIN_H)
-            .position(0.0, 0.0)
-            .visible(false)
-            .decorations(false)
-            .transparent(true)
-            .shadow(false)
-            .background_color(tauri::window::Color(0, 0, 0, 0))
-            .build()
+            WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("settings.html".into()))
+                .title("Blink Settings")
+                .inner_size(SETTINGS_W, SETTINGS_H)
+                .min_inner_size(SETTINGS_MIN_W, SETTINGS_MIN_H)
+                .position(0.0, 0.0)
+                .visible(false)
+                .decorations(false)
+                .transparent(true)
+                .shadow(false)
+                .background_color(tauri::window::Color(0, 0, 0, 0))
+                .build()
         }) {
             Ok((win, created)) => {
                 if created {

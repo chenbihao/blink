@@ -348,8 +348,8 @@ pub async fn get_result(pool: &SqlitePool, id: &str) -> Result<Option<StickyNote
 
     Ok(row.map(|row| {
         row_to_note(
-            row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10,
-            row.11, row.12, row.13,
+            row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10, row.11,
+            row.12, row.13,
         )
     }))
 }
@@ -520,15 +520,15 @@ pub async fn update_geometry(
          WHERE id = ?6 AND trashed = 0
          RETURNING updated_at",
     )
-        .bind(x as i64)
-        .bind(y as i64)
-        .bind(width as i64)
-        .bind(height as i64)
-        .bind(now)
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| e.to_string())?;
+    .bind(x as i64)
+    .bind(y as i64)
+    .bind(width as i64)
+    .bind(height as i64)
+    .bind(now)
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
     match updated_at {
         Some(updated_at) => Ok(StickyWriteOutcome::Applied { updated_at }),
         None => classify_failed_write(pool, id, None).await,
@@ -818,9 +818,7 @@ mod tests {
             StickyWriteOutcome::Trashed
         );
         assert_eq!(
-            update_geometry(&pool, "s2", 1, 2, 300, 400)
-                .await
-                .unwrap(),
+            update_geometry(&pool, "s2", 1, 2, 300, 400).await.unwrap(),
             StickyWriteOutcome::Trashed
         );
         assert_eq!(

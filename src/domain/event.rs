@@ -99,10 +99,7 @@ pub trait CapabilityEnv: Send + Sync {
     ) -> Result<i64, StickyWorkflowError>;
 
     /// 将便签移入废纸篓、隐藏对应窗口并广播回收事件。
-    async fn trash_sticky_and_notify(
-        &self,
-        sticky_id: &str,
-    ) -> Result<(), StickyWorkflowError>;
+    async fn trash_sticky_and_notify(&self, sticky_id: &str) -> Result<(), StickyWorkflowError>;
 
     // ── 图片暂存（0.19.4 ImageStash 引用闭环）──────────────────────────
 

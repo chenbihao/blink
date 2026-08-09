@@ -89,12 +89,12 @@ impl Capability for PinImage {
         tracing::debug!(x, y, bytes = png_bytes.len(), "pin_image: 开始 pin 图");
 
         // 调共享语义桥接：位置兜底与窗口创建只保留一个实现。
-        let (x, y) = ctx
-            .env
-            .show_pin_image(png_bytes, x, y)
-            .map_err(|e| CapabilityError::Internal {
-                detail: format!("pin 图失败: {e}"),
-            })?;
+        let (x, y) =
+            ctx.env
+                .show_pin_image(png_bytes, x, y)
+                .map_err(|e| CapabilityError::Internal {
+                    detail: format!("pin 图失败: {e}"),
+                })?;
 
         tracing::info!(x, y, "pin_image: 图片已钉到桌面");
 

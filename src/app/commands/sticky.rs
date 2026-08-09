@@ -7,8 +7,8 @@
 
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::domain::event_names::EventNames;
 use crate::domain::event::CapabilityEnv;
+use crate::domain::event_names::EventNames;
 use crate::domain::sticky::{StickyColor, StickyError, StickyFormat, StickyService};
 
 /// 创建便签。
@@ -71,8 +71,8 @@ pub async fn update_sticky_content(
         None,
         crate::domain::sticky::StickyChangeSource::UserWindow,
     )
-        .await
-        .map_err(|e| e.to_string())?;
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 

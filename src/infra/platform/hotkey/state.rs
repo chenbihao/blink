@@ -458,7 +458,13 @@ impl GestureState {
 
     /// 当前是否处于 hold_fired 状态（HoldDeadline 已触发，等待 keyup）。
     pub fn is_hold_fired(&self) -> bool {
-        matches!(self, GestureState::Armed { hold_fired: true, .. })
+        matches!(
+            self,
+            GestureState::Armed {
+                hold_fired: true,
+                ..
+            }
+        )
     }
 
     /// 当前 armed 的主键（Idle 时 None）。
@@ -948,10 +954,12 @@ fn reduce_hook_key(state: &mut InputState, e: HookKeyEvent, now: Instant) -> Red
     //
     // 标 propagation 后不 return：modifier level 维护、autorepeat 忽略、ESC 取消
     // 等逻辑正常执行，各分支 return result 时自然带着 Swallow。
-    if e.is_down
-        && (state.gesture.is_hold_fired() || !matches!(state.voice, VoicePhase::Idle))
-    {
-        let is_armed_main_key = state.gesture.armed_key().map(|k| k == e.key).unwrap_or(false);
+    if e.is_down && (state.gesture.is_hold_fired() || !matches!(state.voice, VoicePhase::Idle)) {
+        let is_armed_main_key = state
+            .gesture
+            .armed_key()
+            .map(|k| k == e.key)
+            .unwrap_or(false);
         let is_alt_key = e.key == "lalt" || e.key == "ralt";
         if is_armed_main_key || is_alt_key {
             result.propagation = Propagation::Swallow;

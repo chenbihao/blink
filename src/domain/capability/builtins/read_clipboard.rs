@@ -31,7 +31,9 @@ impl Capability for ReadClipboard {
     fn schema(&self) -> CapabilitySchema {
         CapabilitySchema {
             name: "read_clipboard".into(),
-            description: "读取当前系统剪贴板内容。如果剪贴板包含图片则返回图片（PNG 字节），否则返回文本。".into(),
+            description:
+                "读取当前系统剪贴板内容。如果剪贴板包含图片则返回图片（PNG 字节），否则返回文本。"
+                    .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {}
@@ -66,7 +68,10 @@ impl Capability for ReadClipboard {
                 } else {
                     tracing::debug!(len = content.chars().count(), "read_clipboard: 读到文本");
                 }
-                Ok(CapabilityResult::Text { content, desc: None })
+                Ok(CapabilityResult::Text {
+                    content,
+                    desc: None,
+                })
             }
         }
     }

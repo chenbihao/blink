@@ -73,6 +73,18 @@
       console.error('右键菜单 JSON 解析失败:', e);
     }
 
+    // 预热与首次唤起可能并发：窗口对象已创建时模块脚本未必 ready。
+    // 主动 pull 最新载荷，避免后端首次 eval 早于 __renderContextMenu 注册而显示空菜单。
+    try {
+      const pending = await invoke('take_context_menu_payload');
+      if (pending) {
+        applyTheme(pending.theme || 'dark');
+        renderMenu(JSON.parse(pending.items || '[]'));
+      }
+    } catch (e) {
+      console.error('右键菜单首次载荷读取失败:', e);
+    }
+
     // ── 复用窗口：后端 hide → emit 新数据 → show，此处监听并重新渲染 ──
     // 注意：此事件目前未被后端 emit（后端改用 eval 调 __renderContextMenu），
     // 保留 listener 作为未来 emit 方案的预留。

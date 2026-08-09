@@ -22,7 +22,6 @@ const rawWindows = [
 const normalized = normalizePickableWindows(
   rawWindows,
   window.__blinkScreenMeta,
-  window.devicePixelRatio,
   window.innerWidth,
   window.innerHeight,
 );

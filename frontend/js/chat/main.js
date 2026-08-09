@@ -11,7 +11,7 @@ import * as components from "./components.js";
 import { forceScrollToBottom } from "./components.js";
 import { escapeText, escapeAttr } from "./utils.js";
 // 0.12.7 §6.3：显式导入 renderSignal，多处场景接入
-import { initComposer, setStreamingMode, setInputMode, clearInput, setInputValue, focusInput, setThinkingEnabled as setComposerThinking, showVoiceIndicator, hideVoiceIndicator, showVoiceStatus, showVoiceError, updateVoiceLevel, updateVoicePartial, isVoiceRecording } from "./composer.js";
+import { initComposer, invalidateSkillCache, setStreamingMode, setInputMode, clearInput, setInputValue, focusInput, setThinkingEnabled as setComposerThinking, showVoiceIndicator, hideVoiceIndicator, showVoiceStatus, showVoiceError, updateVoiceLevel, updateVoicePartial, isVoiceRecording } from "./composer.js";
 import { initSidebar, refreshSidebar, showSidebar, hideSidebar, toggleSidebar, setActiveConversation } from "./sidebar.js";
 import { applyThemeFromConfig } from "../shared/theme.js";
 import { listen, invoke, getCurrentWindow } from "../shared/tauri.js";
@@ -45,6 +45,7 @@ async function init() {
   listen(EVENTS.CONFIG_CHANGED, (e) => {
     applyThemeFromConfig();
     if (e?.payload?.key === "ai_config") {
+      invalidateSkillCache();
       refreshModelSelector();
       refreshToolPool(true);
       invalidateComposerBarCache();
@@ -682,9 +683,8 @@ function handleSkillActivated(event) {
   // 忽略不属于当前请求的事件
   if (request_id !== state.activeRequestId) return;
   for (const skill of skills) {
-    const icon = skill.trigger_type === "explicit" ? "🎯" : "🔍";
     components.renderSignal(
-      `${icon} Skill 已激活: ${skill.name} (${skill.source})`,
+      `Skill 已激活: ${skill.name} (${skill.source})`,
       "info"
     );
   }

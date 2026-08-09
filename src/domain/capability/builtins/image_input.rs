@@ -64,9 +64,11 @@ pub fn resolve_image_ref(
     let stash = stash.ok_or_else(|| CapabilityError::InvalidArgs {
         detail: "image_ref 不可用（运行时未启用 ImageStash）".into(),
     })?;
-    let img = stash.get(ref_val).ok_or_else(|| CapabilityError::InvalidArgs {
-        detail: "image_ref 不存在或已过期".into(),
-    })?;
+    let img = stash
+        .get(ref_val)
+        .ok_or_else(|| CapabilityError::InvalidArgs {
+            detail: "image_ref 不存在或已过期".into(),
+        })?;
     if !img.mime.starts_with("image/") {
         return Err(CapabilityError::InvalidArgs {
             detail: format!("image_ref 指向的不是图片（mime: {}）", img.mime),
@@ -77,12 +79,12 @@ pub fn resolve_image_ref(
 
 /// 严格解析 JSON 字节数组；拒绝非整数和超出 u8 范围的元素，不静默丢弃/截断。
 pub fn parse_byte_array(args: &Value, key: &str) -> Result<Vec<u8>, CapabilityError> {
-    let values = args
-        .get(key)
-        .and_then(Value::as_array)
-        .ok_or_else(|| CapabilityError::InvalidArgs {
-            detail: format!("{key} 参数格式无效（应为整数数组）"),
-        })?;
+    let values =
+        args.get(key)
+            .and_then(Value::as_array)
+            .ok_or_else(|| CapabilityError::InvalidArgs {
+                detail: format!("{key} 参数格式无效（应为整数数组）"),
+            })?;
     values
         .iter()
         .enumerate()

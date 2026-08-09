@@ -225,10 +225,8 @@ pub fn hide_chat_window(app: tauri::AppHandle) {
 /// 冷启动路径：listener 尚未注册时 emit 丢失，前端主动 take 兜底。
 #[tauri::command]
 pub fn take_chat_prefill() -> Option<ChatPrefillPayload> {
-    crate::infra::platform::window::take_chat_prefill().map(|(revision, text)| ChatPrefillPayload {
-        revision,
-        text,
-    })
+    crate::infra::platform::window::take_chat_prefill()
+        .map(|(revision, text)| ChatPrefillPayload { revision, text })
 }
 
 /// 热窗口 event 路径：前端收到 CHAT_PREFILL 事件后调此命令清空 pending（0.19）。

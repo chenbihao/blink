@@ -70,13 +70,12 @@ impl Capability for ListWindows {
 
         // spawn_blocking：EnumWindows 是同步 Win32 API（~5-15ms），
         // 按 spec-backend §一"阻塞操作隔离"铁则，不得在 async 上下文裸跑
-        let windows = tokio::task::spawn_blocking(
-            crate::infra::platform::window::enumerate_pickable_windows,
-        )
-        .await
-        .map_err(|e| CapabilityError::Internal {
-            detail: format!("list_windows task 崩溃: {e}"),
-        })?;
+        let windows =
+            tokio::task::spawn_blocking(crate::infra::platform::window::enumerate_pickable_windows)
+                .await
+                .map_err(|e| CapabilityError::Internal {
+                    detail: format!("list_windows task 崩溃: {e}"),
+                })?;
 
         let results: Vec<ItemResult> = windows
             .into_iter()

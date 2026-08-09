@@ -25,11 +25,11 @@
 //! - [`pin_image`] — 将 PNG 图片钉到桌面 → `Done`（0.19.3）
 
 pub mod create_sticky;
+pub mod get_settings;
 pub mod image_input;
 pub mod list_clipboard_images;
 pub mod list_sticky;
 pub mod list_windows;
-pub mod get_settings;
 pub mod ocr_engine;
 pub mod ocr_image;
 pub mod open_path;
@@ -47,8 +47,8 @@ pub mod search_files;
 pub mod set_sticky_geometry;
 pub mod sticky_common;
 pub mod trash_sticky;
-pub mod update_sticky;
 pub mod update_setting;
+pub mod update_sticky;
 pub mod write_clipboard;
 
 #[cfg(test)]

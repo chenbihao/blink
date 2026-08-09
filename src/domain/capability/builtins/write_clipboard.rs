@@ -13,10 +13,10 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use super::image_input::{parse_byte_array, resolve_image_ref};
-use crate::domain::clipboard::ClipboardWriteSource;
 use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
 };
+use crate::domain::clipboard::ClipboardWriteSource;
 
 /// `write_clipboard` — 写入系统剪贴板（文本或图片）。
 ///
@@ -82,10 +82,10 @@ impl Capability for WriteClipboard {
             }
             let len = text.chars().count();
             crate::domain::clipboard::write_text(text, ClipboardWriteSource::Capability)
-            .await
-            .map_err(|e| CapabilityError::Internal {
-                detail: e.to_string(),
-            })?;
+                .await
+                .map_err(|e| CapabilityError::Internal {
+                    detail: e.to_string(),
+                })?;
 
             return Ok(CapabilityResult::Done {
                 summary: format!("已写入文本（{len} 字）"),
@@ -100,15 +100,12 @@ impl Capability for WriteClipboard {
                     detail: "image_ref 与 image_bytes 不能同时提供".into(),
                 });
             }
-            let png = resolve_image_ref(
-                &args,
-                ctx.env.image_stash().map(|stash| stash.as_ref()),
-            )?;
+            let png = resolve_image_ref(&args, ctx.env.image_stash().map(|stash| stash.as_ref()))?;
             crate::domain::clipboard::write_png(png, ClipboardWriteSource::Capability)
-            .await
-            .map_err(|e| CapabilityError::Internal {
-                detail: e.to_string(),
-            })?;
+                .await
+                .map_err(|e| CapabilityError::Internal {
+                    detail: e.to_string(),
+                })?;
 
             return Ok(CapabilityResult::Done {
                 summary: "已写入图片".into(),

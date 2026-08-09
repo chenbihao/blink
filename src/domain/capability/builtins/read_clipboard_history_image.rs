@@ -59,11 +59,12 @@ impl Capability for ReadClipboardHistoryImage {
             });
         }
 
-        let id = args.get("id").and_then(Value::as_str).ok_or_else(|| {
-            CapabilityError::InvalidArgs {
-                detail: "缺少 id 参数".into(),
-            }
-        })?;
+        let id =
+            args.get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| CapabilityError::InvalidArgs {
+                    detail: "缺少 id 参数".into(),
+                })?;
 
         let pool = ctx.env.db_pools().cache.clone();
 
@@ -118,10 +119,7 @@ mod tests {
     #[test]
     fn schema_requires_id() {
         let s = ReadClipboardHistoryImage.schema();
-        assert_eq!(
-            s.parameters["required"].as_array().unwrap()[0],
-            "id"
-        );
+        assert_eq!(s.parameters["required"].as_array().unwrap()[0], "id");
         assert_eq!(s.parameters["properties"]["id"]["type"], "string");
     }
 

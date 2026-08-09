@@ -46,6 +46,7 @@ pub struct StashedImage {
 
 impl StashedImage {
     /// 剩余秒数（向下取整，最小 0）。
+    #[cfg(test)]
     pub fn expires_in_seconds(&self) -> u64 {
         let now = Instant::now();
         if now >= self.expires_at {
@@ -115,7 +116,11 @@ impl ImageStash {
     /// 按最早创建顺序淘汰，直到满足 `max_items` 和 `max_total` 约束。
     ///
     /// 调用方已持有写锁，且已清理过期项。
-    fn evict_oldest(entries: &mut HashMap<String, StashedImage>, max_items: usize, max_total: usize) {
+    fn evict_oldest(
+        entries: &mut HashMap<String, StashedImage>,
+        max_items: usize,
+        max_total: usize,
+    ) {
         // 先按项数淘汰
         while entries.len() > max_items {
             let oldest_key = entries
@@ -334,9 +339,7 @@ mod tests {
         assert_eq!(stash.len(), 6);
 
         // 第 7 项 → 总量 70 MiB > 64 MiB → 淘汰最早的
-        let _t7 = stash
-            .put(vec![6u8; item_size], "image/png".into())
-            .unwrap();
+        let _t7 = stash.put(vec![6u8; item_size], "image/png".into()).unwrap();
         assert!(stash.total_size() <= MAX_TOTAL_BYTES, "总量应 <= 64 MiB");
         assert!(stash.get(&tokens[0]).is_none(), "最早的应被淘汰");
     }
@@ -350,8 +353,7 @@ mod tests {
         // 手动让 token1 过期
         {
             let mut entries = stash.entries.write().unwrap();
-            entries.get_mut(&token1).unwrap().expires_at =
-                Instant::now() - Duration::from_secs(1);
+            entries.get_mut(&token1).unwrap().expires_at = Instant::now() - Duration::from_secs(1);
         }
         // put 新条目应触发清理
         let _token2 = stash.put(vec![2], "image/png".into()).unwrap();
@@ -368,8 +370,7 @@ mod tests {
         // 手动让 token1 过期
         {
             let mut entries = stash.entries.write().unwrap();
-            entries.get_mut(&token1).unwrap().expires_at =
-                Instant::now() - Duration::from_secs(1);
+            entries.get_mut(&token1).unwrap().expires_at = Instant::now() - Duration::from_secs(1);
         }
         // get token2 应触发清理 token1
         let _ = stash.get(&token2);

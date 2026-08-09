@@ -677,22 +677,19 @@ impl VoiceService {
 /// 失败或超时返回空字符串并打 warn 日志。
 async fn finalize_engine(engine: Option<Arc<dyn SttEngine>>) -> String {
     match engine {
-        Some(e) => match tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            e.finalize(),
-        )
-        .await
-        {
-            Ok(Ok(text)) => text,
-            Ok(Err(e)) => {
-                tracing::warn!(%e, "STT finalize 失败");
-                String::new()
+        Some(e) => {
+            match tokio::time::timeout(std::time::Duration::from_secs(10), e.finalize()).await {
+                Ok(Ok(text)) => text,
+                Ok(Err(e)) => {
+                    tracing::warn!(%e, "STT finalize 失败");
+                    String::new()
+                }
+                Err(_) => {
+                    tracing::warn!("STT finalize 超时（10s），放弃等待");
+                    String::new()
+                }
             }
-            Err(_) => {
-                tracing::warn!("STT finalize 超时（10s），放弃等待");
-                String::new()
-            }
-        },
+        }
         None => String::new(),
     }
 }

@@ -267,8 +267,8 @@ pub async fn batch_import_mcp_servers(
     let existing = crate::domain::mcp::McpServerConfigStore::load_all(&pools.config)
         .await
         .map_err(|e| e.to_string())?;
-    let existing_names: std::collections::HashSet<&str> =
-        existing.iter().map(|c| c.name.as_str()).collect();
+    let mut known_names: std::collections::HashSet<String> =
+        existing.iter().map(|config| config.name.clone()).collect();
 
     let mut imported = 0usize;
     let mut skipped = 0usize;
@@ -278,7 +278,8 @@ pub async fn batch_import_mcp_servers(
     let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
     let mut should_prewarm = false;
     for config in configs {
-        let is_existing = existing_names.contains(config.name.as_str());
+        // 同一批导入里重复的 name 也按“已存在”处理，避免计数与最终 upsert 结果分叉。
+        let is_existing = !known_names.insert(config.name.clone());
         if is_existing && !overwrite {
             skipped += 1;
             continue;
@@ -292,8 +293,14 @@ pub async fn batch_import_mcp_servers(
         crate::domain::mcp::McpServerConfigStore::upsert(&pools.config, config.clone())
             .await
             .map_err(|e| e.to_string())?;
-        manager.apply_config(&config).await;
-        should_prewarm |= config.enabled;
+        if config.enabled {
+            manager.apply_config(&config).await;
+            should_prewarm = true;
+        } else {
+            // 覆盖导入可能把一个已在线的 server 改为 disabled；仅刷新配置不会
+            // 从稳定 tool snapshot 移除它，必须同步停止并推进 generation。
+            manager.stop_server(&config.name).await;
+        }
     }
 
     if should_prewarm && !is_pure_chat_mode(&app) {

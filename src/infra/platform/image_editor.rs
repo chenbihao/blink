@@ -49,15 +49,21 @@ mod tests {
     use super::*;
 
     const ONE_PIXEL_PNG: &[u8] = &[
-        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0,
-        1, 8, 6, 0, 0, 0, 31, 21, 196, 137,
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
+        0, 0, 0, 31, 21, 196, 137,
     ];
 
     #[test]
     fn editor_session_is_independent_and_bounded() {
         end_session();
         let meta = begin_session(ONE_PIXEL_PNG.to_vec()).unwrap();
-        assert_eq!(meta, ImageEditorMeta { width: 1, height: 1 });
+        assert_eq!(
+            meta,
+            ImageEditorMeta {
+                width: 1,
+                height: 1
+            }
+        );
         assert_eq!(session_png().as_deref(), Some(ONE_PIXEL_PNG));
         end_session();
         assert!(session_png().is_none());

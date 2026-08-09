@@ -84,17 +84,10 @@ pub async fn read_current() -> Result<ClipboardContent, ClipboardError> {
 }
 
 /// 写文本到系统剪贴板。
-pub async fn write_text(
-    text: String,
-    source: ClipboardWriteSource,
-) -> Result<(), ClipboardError> {
+pub async fn write_text(text: String, source: ClipboardWriteSource) -> Result<(), ClipboardError> {
     let (label, skip_persist) = source.marker();
     tokio::task::spawn_blocking(move || {
-        crate::infra::platform::clipboard::write_text_to_clipboard(
-            &text,
-            label,
-            skip_persist,
-        )
+        crate::infra::platform::clipboard::write_text_to_clipboard(&text, label, skip_persist)
     })
     .await
     .map_err(task_error)?
@@ -102,10 +95,7 @@ pub async fn write_text(
 }
 
 /// 写 PNG 到系统剪贴板。
-pub async fn write_png(
-    png: Vec<u8>,
-    source: ClipboardWriteSource,
-) -> Result<(), ClipboardError> {
+pub async fn write_png(png: Vec<u8>, source: ClipboardWriteSource) -> Result<(), ClipboardError> {
     let (label, skip_persist) = source.marker();
     tokio::task::spawn_blocking(move || {
         crate::infra::platform::clipboard::write_png_to_clipboard(&png, label, skip_persist)

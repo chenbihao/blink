@@ -870,9 +870,7 @@ pub async fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> 
         deadline: None,
     };
 
-    cap.invoke(args, &ctx)
-        .await
-        .map_err(|e| e.to_string())?;
+    cap.invoke(args, &ctx).await.map_err(|e| e.to_string())?;
 
     Ok(())
 }

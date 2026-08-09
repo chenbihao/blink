@@ -17,9 +17,7 @@ use crate::domain::capability::{CapabilityRegistry, ImageStash};
 use crate::domain::event::{CapabilityEnv, DomainEnv};
 use crate::domain::plugin::PluginEngine;
 use crate::domain::search::SearchService;
-use crate::domain::sticky::{
-    StickyChangeSource, StickyService, StickyWorkflowError,
-};
+use crate::domain::sticky::{StickyChangeSource, StickyService, StickyWorkflowError};
 use crate::infra::data::pools::DbPools;
 use crate::infra::platform::screenshot::ScreenCaptureMeta;
 
@@ -242,10 +240,7 @@ impl CapabilityEnv for TauriDomainEnv {
         Ok(updated_at)
     }
 
-    async fn trash_sticky_and_notify(
-        &self,
-        sticky_id: &str,
-    ) -> Result<(), StickyWorkflowError> {
+    async fn trash_sticky_and_notify(&self, sticky_id: &str) -> Result<(), StickyWorkflowError> {
         let svc = self
             .sticky_service()
             .ok_or_else(|| StickyWorkflowError::SideEffect {
@@ -292,11 +287,7 @@ impl CapabilityEnv for TauriDomainEnv {
         let position = (x.unwrap_or(center_x), y.unwrap_or(center_y));
         // show_translating 固定 false——仅截图翻译 UI 状态机需要该状态。
         crate::infra::platform::window::show_pin_window(
-            &self.app,
-            png_bytes,
-            position.0,
-            position.1,
-            false,
+            &self.app, png_bytes, position.0, position.1, false,
         )?;
         Ok(position)
     }
@@ -354,7 +345,8 @@ impl DomainEnv for TauriDomainEnv {
 
     fn show_image_editor(&self, png_data: Vec<u8>) -> Result<(), String> {
         let meta = crate::infra::platform::image_editor::begin_session(png_data)?;
-        if let Err(error) = crate::infra::platform::window::show_image_editor_window(&self.app, meta)
+        if let Err(error) =
+            crate::infra::platform::window::show_image_editor_window(&self.app, meta)
         {
             crate::infra::platform::image_editor::end_session();
             return Err(error);

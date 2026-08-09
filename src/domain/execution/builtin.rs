@@ -138,7 +138,9 @@ impl Action for EditClipboardImageAction {
         let crate::domain::clipboard::ClipboardContent::ImagePng(png_data) = content else {
             return Err(ExecError::Runtime("当前剪贴板中没有图片".into()));
         };
-        cx.env.show_image_editor(png_data).map_err(ExecError::Runtime)?;
+        cx.env
+            .show_image_editor(png_data)
+            .map_err(ExecError::Runtime)?;
         Ok(ActionOutcome::Nop)
     }
 }

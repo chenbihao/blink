@@ -183,7 +183,9 @@ fn send_control(msg: ControlMsg) {
     loop {
         let head = CONTROL_HEAD.load(Ordering::Acquire);
         // Safety: node 是刚分配的，当前线程独占
-        unsafe { (*node).next = head; }
+        unsafe {
+            (*node).next = head;
+        }
         if CONTROL_HEAD
             .compare_exchange_weak(head, node, Ordering::Release, Ordering::Relaxed)
             .is_ok()

@@ -777,6 +777,7 @@ fn main() {
             app::commands::show_context_menu,
             app::commands::hide_context_menu,
             app::commands::context_menu_action,
+            app::commands::take_context_menu_payload,
             app::commands::probe_interpreters,
             app::commands::get_interpreter_paths,
             app::commands::open_file_dialog,

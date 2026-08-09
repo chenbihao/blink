@@ -50,6 +50,30 @@ let cachedSkills = null;
 /** @type {number} skill 缓存过期时间戳 */
 let skillCacheExpiry = 0;
 
+/** @type {boolean|null} 当前对话模式是否允许 Skill；null 表示尚未读取配置 */
+let skillHintsEnabled = null;
+
+/** 异步提示请求代次；输入或配置变化后，旧请求不得回写 DOM。 */
+let skillHintRevision = 0;
+
+/** AI 配置变化时由 chat 入口调用，避免纯对话切换后继续使用旧 Skill 缓存。 */
+export function invalidateSkillCache() {
+  cachedSkills = null;
+  skillCacheExpiry = 0;
+  skillHintsEnabled = null;
+  skillHintRevision += 1;
+  if (skillHintEl) skillHintEl.hidden = true;
+}
+
+/** 只向对话输入提示实际可激活的 Skill；设置页仍可展示 disabled 条目。 */
+export function filterActiveSkills(skills, query = "") {
+  const normalizedQuery = query.trim().toLowerCase();
+  return (Array.isArray(skills) ? skills : []).filter((skill) =>
+    !skill.disabled &&
+    (!normalizedQuery || String(skill.name || "").toLowerCase().includes(normalizedQuery))
+  );
+}
+
 /**
  * 初始化 composer。
  * @param {{ onSend: (message: string) => void, onStop: () => void, onThinkingToggle: (enabled: boolean) => void }} callbacks
@@ -349,6 +373,8 @@ const stopIcon = `<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6"
 async function checkSkillHint() {
   if (!skillHintEl || !textarea) return;
 
+  const revision = ++skillHintRevision;
+
   const value = textarea.value.trim();
   if (!value.toLowerCase().startsWith("/skill")) {
     skillHintEl.hidden = true;
@@ -360,7 +386,17 @@ async function checkSkillHint() {
   if (!cachedSkills || now > skillCacheExpiry) {
     try {
       const { invoke } = await import("../shared/tauri.js");
+      const aiConfig = await invoke("get_config_section", { key: "app.ai" });
+      if (revision !== skillHintRevision) return;
+      skillHintsEnabled = !aiConfig?.chat_config?.pure_chat;
+      if (!skillHintsEnabled) {
+        cachedSkills = [];
+        skillCacheExpiry = now + 30000;
+        skillHintEl.hidden = true;
+        return;
+      }
       cachedSkills = await invoke("list_skills");
+      if (revision !== skillHintRevision) return;
       skillCacheExpiry = now + 30000; // 30s 缓存
     } catch (e) {
       console.error("[skill-hint] list_skills failed:", e);
@@ -369,7 +405,16 @@ async function checkSkillHint() {
     }
   }
 
-  if (!cachedSkills || cachedSkills.length === 0) {
+  if (!skillHintsEnabled || revision !== skillHintRevision) {
+    skillHintEl.hidden = true;
+    return;
+  }
+
+  // 等待 IPC 期间用户可能已经删除/替换了命令，旧结果不能重新打开提示。
+  if (!textarea.value.trim().toLowerCase().startsWith("/skill")) return;
+
+  const activeSkills = filterActiveSkills(cachedSkills);
+  if (activeSkills.length === 0) {
     skillHintEl.innerHTML = `<div class="skill-hint-empty">未发现 Skill。请在设置页 AI tab 配置来源目录并刷新。</div>`;
     skillHintEl.hidden = false;
     return;
@@ -377,9 +422,7 @@ async function checkSkillHint() {
 
   // 提取 /skill 后面的输入（用于过滤）
   const query = value.slice(6).trim().toLowerCase(); // 去掉 "/skill"
-  const filtered = query
-    ? cachedSkills.filter((s) => s.name.toLowerCase().includes(query))
-    : cachedSkills;
+  const filtered = filterActiveSkills(activeSkills, query);
 
   if (filtered.length === 0) {
     skillHintEl.innerHTML = `<div class="skill-hint-empty">未匹配到 "${escapeHtml(query)}" 的 Skill</div>`;
