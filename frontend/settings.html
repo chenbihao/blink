@@ -24,7 +24,8 @@
         <div class="sidebar-group">
           <span class="group-title" data-i18n="sidebar.group.ai">AI</span>
           <button class="tab" data-tab="ai-providers" data-i18n="tab.ai_providers">AI 供应商</button>
-          <button class="tab" data-tab="ai-chat" data-i18n="tab.ai_chat">AI 对话能力</button>
+          <button class="tab" data-tab="ai-chat" data-i18n="tab.ai_chat">AI 对话设置</button>
+          <button class="tab" data-tab="ai-extensions" data-i18n="tab.ai_extensions">AI 扩展</button>
         </div>
         <div class="sidebar-group">
           <span class="group-title" data-i18n="sidebar.group.interaction">感知与交互</span>
@@ -494,8 +495,8 @@
 
         <!-- ══ AI 窗口配置（0.12.5 → 0.13.x 拆分）══════════════════════════════ -->
         <div id="ai-chat" class="panel">
-          <h2 data-i18n="panel.ai_chat">AI 对话能力</h2>
-          <p class="panel-lede" data-i18n="ai.chat.lede">对话窗口行为、记忆策略、Skill 约定式与 MCP 外部工具的统一配置。</p>
+          <h2 data-i18n="panel.ai_chat">AI 对话设置</h2>
+          <p class="panel-lede" data-i18n="ai.chat.lede">管理对话行为、自动标题、上下文与本对话的较早内容召回。</p>
 
           <!-- 对话 ─────────────────────────────────────── -->
           <div class="extension-card">
@@ -531,62 +532,126 @@
               <div class="extension-icon"><svg class="icon" aria-hidden="true"><use href="#icon-zap"/></svg></div>
               <div class="extension-info">
                 <h3 data-i18n="ai.advanced.section">高级</h3>
-                <p class="extension-desc" data-i18n="ai.advanced.section.desc">AI 调用行为与工具链路控制</p>
+                <p class="extension-desc" data-i18n="ai.advanced.section.desc">模型请求与能力调用的可靠性设置</p>
               </div>
             </div>
             <div class="extension-body">
               <div class="setting-row">
-                <label class="setting-label" data-i18n="ai.advanced.streaming">流式输出<span class="field-hint-icon" data-i18n-title="ai.advanced.streaming.hint">ⓘ</span></label>
-                <label class="switch switch-sm">
-                  <input type="checkbox" id="ai-streaming" />
-                  <span class="slider"></span>
-                </label>
-              </div>
-              <div class="setting-row">
-                <label class="setting-label" data-i18n="ai.advanced.direct_safe">允许直接执行 Safe 动作<span class="field-hint-icon" data-i18n-title="ai.advanced.direct_safe.hint">ⓘ</span></label>
-                <label class="switch switch-sm">
-                  <input type="checkbox" id="ai-direct-safe" />
-                  <span class="slider"></span>
-                </label>
-              </div>
-              <div class="setting-row">
-                <label class="setting-label" data-i18n="ai.advanced.tool_feedback">工具结果回流 AI<span class="field-hint-icon" data-i18n-title="ai.advanced.tool_feedback.hint">ⓘ</span></label>
-                <div class="seg-control" id="ai-tool-feedback">
-                  <button type="button" class="seg-btn tip" data-value="auto" data-tip="ai.advanced.tool_feedback.desc.auto" data-i18n="ai.advanced.tool_feedback.auto">自动</button>
-                  <button type="button" class="seg-btn tip" data-value="on" data-tip="ai.advanced.tool_feedback.desc.on" data-i18n="ai.advanced.tool_feedback.on">开启</button>
-                  <button type="button" class="seg-btn tip" data-value="off" data-tip="ai.advanced.tool_feedback.desc.off" data-i18n="ai.advanced.tool_feedback.off">关闭</button>
-                </div>
-              </div>
-              <div class="setting-row">
                 <label class="setting-label" data-i18n="ai.advanced.timeout">硬超时（毫秒）<span class="field-hint-icon" data-i18n-title="ai.advanced.timeout.hint">ⓘ</span></label>
                 <div class="number-input-wrapper">
-                  <input type="number" id="ai-timeout-ms" min="500" max="30000" step="500" value="2500" />
+                  <input type="number" id="ai-timeout-ms" min="500" max="30000" step="500" value="20000" />
                   <div class="number-spinner">
                     <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">▲</button>
                     <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">▼</button>
                   </div>
                 </div>
               </div>
+            </div>
+          </div>
+
+          <!-- 记忆策略 ─────────────────────────────────────── -->
+          <div class="extension-card">
+            <div class="extension-header">
+              <div class="extension-icon"><svg class="icon" aria-hidden="true"><use href="#icon-database"/></svg></div>
+              <div class="extension-info">
+                <h3 data-i18n="ai.memory.section">记忆策略</h3>
+                <p class="extension-desc" data-i18n="ai.memory.section.desc">上下文窗口管理与历史记忆召回</p>
+              </div>
+            </div>
+            <div class="extension-body">
+              <p class="panel-hint" data-i18n="ai.memory.behavior_hint">默认按当前模型的上下文容量自动裁剪并归档；不会调用 LLM 生成摘要。</p>
+              <div class="setting-row" id="ai-memory-recall-row">
+                <label class="setting-label" data-i18n="ai.memory.recall.label">召回本对话较早内容<span class="field-hint-icon" data-i18n-title="ai.memory.recall.hint">ⓘ</span></label>
+                <label class="switch">
+                  <input type="checkbox" id="ai-memory-recall-enabled" />
+                  <span class="slider"></span>
+                </label>
+              </div>
+              <div class="setting-row" id="ai-memory-context-display-row">
+                <label class="setting-label" data-i18n="ai.memory.context_size.label">当前模型上下文窗口<span class="field-hint-icon" data-i18n-title="ai.memory.context_size.hint">ⓘ</span></label>
+                <div class="number-input-wrapper number-input-readonly">
+                  <span id="ai-memory-context-size" class="ai-prompt-tokens">—</span>
+                </div>
+              </div>
+              <details class="ai-expert-settings">
+                <summary data-i18n="ai.memory.expert.summary">专家设置</summary>
+                <div class="ai-expert-settings-body">
+                  <div class="setting-row">
+                    <label class="setting-label" data-i18n="ai.memory.mode.label">窗口模式<span class="field-hint-icon" data-i18n-title="ai.memory.mode.hint">ⓘ</span></label>
+                    <select id="ai-memory-mode" class="input-wide">
+                      <option value="token_aware" data-i18n="ai.memory.mode.token_aware">Token 感知</option>
+                      <option value="fixed_count" data-i18n="ai.memory.mode.fixed_count">固定条数</option>
+                    </select>
+                  </div>
+                  <div class="setting-row hidden" id="ai-memory-window-size-row">
+                    <label class="setting-label" data-i18n="ai.memory.window_size.label">窗口大小（条）<span class="field-hint-icon" data-i18n-title="ai.memory.window_size.hint">ⓘ</span></label>
+                    <div class="number-input-wrapper">
+                      <input type="number" id="ai-memory-window-size" min="5" max="100" step="1" value="20" />
+                      <div class="number-spinner">
+                        <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">▲</button>
+                        <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">▼</button>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="setting-row" id="ai-memory-trigger-row">
+                    <label class="setting-label" data-i18n="ai.memory.trigger_ratio.label">触发裁剪阈值（%）<span class="field-hint-icon" data-i18n-title="ai.memory.trigger_ratio.hint">ⓘ</span></label>
+                    <div class="number-input-wrapper">
+                      <input type="number" id="ai-memory-trigger-ratio" min="50" max="95" step="5" value="80" />
+                      <div class="number-spinner">
+                        <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">▲</button>
+                        <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">▼</button>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="setting-row" id="ai-memory-compress-row">
+                    <label class="setting-label" data-i18n="ai.memory.compress_ratio.label">裁剪目标（%）<span class="field-hint-icon" data-i18n-title="ai.memory.compress_ratio.hint">ⓘ</span></label>
+                    <div class="number-input-wrapper">
+                      <input type="number" id="ai-memory-compress-ratio" min="30" max="90" step="5" value="70" />
+                      <div class="number-spinner">
+                        <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">▲</button>
+                        <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">▼</button>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="setting-row" id="ai-memory-recall-top-k-row">
+                    <label class="setting-label" data-i18n="ai.memory.recall_top_k.label">召回条数（Top-K）<span class="field-hint-icon" data-i18n-title="ai.memory.recall_top_k.hint">ⓘ</span></label>
+                    <div class="number-input-wrapper">
+                      <input type="number" id="ai-memory-recall-top-k" min="1" max="10" step="1" value="3" />
+                      <div class="number-spinner">
+                        <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">▲</button>
+                        <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">▼</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </details>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- ══ AI 扩展：Skill / MCP client / 工具授权 / MCP Server ════════ -->
+        <div id="ai-extensions" class="panel">
+          <h2 data-i18n="panel.ai_extensions">AI 扩展</h2>
+          <p class="panel-lede" data-i18n="ai.extensions.lede">管理教 AI 如何工作的 Skill、供 Blink AI 使用的外部工具、工具授权，以及面向外部应用的 Blink MCP Server。</p>
+
+          <!-- 工具与授权 ──────────────────────────────────────── -->
+          <div class="extension-card">
+            <div class="extension-header">
+              <div class="extension-icon"><svg class="icon" aria-hidden="true"><use href="#icon-shield"/></svg></div>
+              <div class="extension-info">
+                <h3 data-i18n="ai.permission.section">工具与授权</h3>
+                <p class="extension-desc" data-i18n="ai.permission.section.desc">查看工具上下文开销并管理危险操作确认</p>
+              </div>
+            </div>
+            <div class="extension-body">
               <div class="setting-row" id="ai-prompt-info-row">
-                <label class="setting-label">System Prompt Token<span class="field-hint-icon" title="当前 AI 路由 system prompt 的估算 token 数（含工具列表）。超 1500 会影响响应质量与延迟。工具数越多 token 越高。">ⓘ</span></label>
+                <label class="setting-label" data-i18n="ai.tools.prompt_tokens.label">工具与 System Prompt Token<span class="field-hint-icon" data-i18n-title="ai.tools.prompt_tokens.hint">ⓘ</span></label>
                 <div class="ai-prompt-info-display">
                   <span id="ai-prompt-tokens" class="ai-prompt-tokens">—</span>
                   <span class="ai-prompt-meta" id="ai-prompt-meta"></span>
                 </div>
               </div>
-            </div>
-          </div>
-
-          <!-- 权限记忆（0.17.8）─────────────────────────────────────── -->
-          <div class="extension-card">
-            <div class="extension-header">
-              <div class="extension-icon"><svg class="icon" aria-hidden="true"><use href="#icon-shield"/></svg></div>
-              <div class="extension-info">
-                <h3 data-i18n="ai.permission.section">权限记忆</h3>
-                <p class="extension-desc" data-i18n="ai.permission.section.desc">危险操作确认的跨会话记忆</p>
-              </div>
-            </div>
-            <div class="extension-body">
               <div class="setting-row">
                 <label class="setting-label" data-i18n="ai.permission.enabled.label">跨会话记住权限<span class="field-hint-icon" data-i18n-title="ai.permission.enabled.hint">ⓘ</span></label>
                 <label class="switch switch-sm">
@@ -607,79 +672,6 @@
               <div class="setting-row">
                 <label class="setting-label" data-i18n="ai.permission.clear.label">清除所有权限记忆<span class="field-hint-icon" data-i18n-title="ai.permission.clear.hint">ⓘ</span></label>
                 <button type="button" id="ai-perm-clear-memory" class="btn-small btn-danger" data-i18n="ai.permission.clear.btn">立即清除</button>
-              </div>
-            </div>
-          </div>
-
-          <!-- 记忆策略 ─────────────────────────────────────── -->
-          <div class="extension-card">
-            <div class="extension-header">
-              <div class="extension-icon"><svg class="icon" aria-hidden="true"><use href="#icon-database"/></svg></div>
-              <div class="extension-info">
-                <h3 data-i18n="ai.memory.section">记忆策略</h3>
-                <p class="extension-desc" data-i18n="ai.memory.section.desc">上下文窗口管理与历史记忆召回</p>
-              </div>
-            </div>
-            <div class="extension-body">
-              <div class="setting-row">
-                <label class="setting-label" data-i18n="ai.memory.mode.label">窗口模式<span class="field-hint-icon" data-i18n-title="ai.memory.mode.hint">ⓘ</span></label>
-                <select id="ai-memory-mode" class="input-wide">
-                  <option value="token_aware" data-i18n="ai.memory.mode.token_aware">Token 感知</option>
-                  <option value="fixed_count" data-i18n="ai.memory.mode.fixed_count">固定条数</option>
-                </select>
-              </div>
-              <div class="setting-row hidden" id="ai-memory-window-size-row">
-                <label class="setting-label" data-i18n="ai.memory.window_size.label">窗口大小（条）<span class="field-hint-icon" data-i18n-title="ai.memory.window_size.hint">ⓘ</span></label>
-                <div class="number-input-wrapper">
-                  <input type="number" id="ai-memory-window-size" min="5" max="100" step="1" value="20" />
-                  <div class="number-spinner">
-                    <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">▲</button>
-                    <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">▼</button>
-                  </div>
-                </div>
-              </div>
-              <div class="setting-row" id="ai-memory-trigger-row">
-                <label class="setting-label" data-i18n="ai.memory.trigger_ratio.label">触发压缩阈值（%）<span class="field-hint-icon" data-i18n-title="ai.memory.trigger_ratio.hint">ⓘ</span></label>
-                <div class="number-input-wrapper">
-                  <input type="number" id="ai-memory-trigger-ratio" min="50" max="95" step="5" value="80" />
-                  <div class="number-spinner">
-                    <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">▲</button>
-                    <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">▼</button>
-                  </div>
-                </div>
-              </div>
-              <div class="setting-row" id="ai-memory-compress-row">
-                <label class="setting-label" data-i18n="ai.memory.compress_ratio.label">压缩目标（%）<span class="field-hint-icon" data-i18n-title="ai.memory.compress_ratio.hint">ⓘ</span></label>
-                <div class="number-input-wrapper">
-                  <input type="number" id="ai-memory-compress-ratio" min="30" max="90" step="5" value="70" />
-                  <div class="number-spinner">
-                    <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">▲</button>
-                    <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">▼</button>
-                  </div>
-                </div>
-              </div>
-              <div class="setting-row" id="ai-memory-recall-row">
-                <label class="setting-label" data-i18n="ai.memory.recall.label">历史记忆召回<span class="field-hint-icon" data-i18n-title="ai.memory.recall.hint">ⓘ</span></label>
-                <label class="switch">
-                  <input type="checkbox" id="ai-memory-recall-enabled" />
-                  <span class="slider"></span>
-                </label>
-              </div>
-              <div class="setting-row" id="ai-memory-recall-top-k-row">
-                <label class="setting-label" data-i18n="ai.memory.recall_top_k.label">召回条数（Top-K）<span class="field-hint-icon" data-i18n-title="ai.memory.recall_top_k.hint">ⓘ</span></label>
-                <div class="number-input-wrapper">
-                  <input type="number" id="ai-memory-recall-top-k" min="1" max="10" step="1" value="3" />
-                  <div class="number-spinner">
-                    <button type="button" class="spinner-up" data-i18n-aria-label="spinner.increase" aria-label="增加">▲</button>
-                    <button type="button" class="spinner-down" data-i18n-aria-label="spinner.decrease" aria-label="减少">▼</button>
-                  </div>
-                </div>
-              </div>
-              <div class="setting-row" id="ai-memory-context-display-row">
-                <label class="setting-label" data-i18n="ai.memory.context_size.label">当前模型上下文窗口<span class="field-hint-icon" data-i18n-title="ai.memory.context_size.hint">ⓘ</span></label>
-                <div class="number-input-wrapper number-input-readonly">
-                  <span id="ai-memory-context-size" class="ai-prompt-tokens">—</span>
-                </div>
               </div>
             </div>
           </div>
@@ -864,6 +856,8 @@
               </div>
             </div>
           </div>
+
+          <div class="section-label" data-i18n="ai.mcp_server.outbound_label">对外服务 · 将 Blink 能力提供给其他应用</div>
 
           <!-- MCP Server ─────────────────────────────────────── -->
           <div class="extension-card">

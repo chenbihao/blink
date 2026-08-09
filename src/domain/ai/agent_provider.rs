@@ -39,6 +39,7 @@ use rig_core::wasm_compat::WasmCompatSend;
 
 use crate::domain::config::ai_config::{ModelEntry, ProviderEntry, ProviderKind};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Anthropic API 要求 max_tokens 必填，若 model 层未配置则使用此默认值。
 /// 与 `rig_provider::build_rig_request` 中的 `ANTHROPIC_DEFAULT_MAX_TOKENS` 保持一致。
@@ -293,16 +294,55 @@ impl AgentProvider {
         M: CompletionModel + 'static,
         <M as CompletionModel>::StreamingResponse: WasmCompatSend + Clone + Unpin + GetTokenUsage,
     {
-        let mut stream = agent
-            .stream_prompt(user_msg)
-            .conversation(conversation_id)
-            .await;
+        let timeout_ms =
+            crate::domain::config::ai_config::get_ai_config().effective_hard_timeout_ms();
+        let idle_timeout = Duration::from_millis(timeout_ms as u64);
+        let mut stream = match tokio::time::timeout(
+            idle_timeout,
+            agent.stream_prompt(user_msg).conversation(conversation_id),
+        )
+        .await
+        {
+            Ok(stream) => stream,
+            Err(_) => {
+                tracing::warn!(
+                    target: crate::infra::utils::perf::ai_slo::TARGET,
+                    conversation = %conversation_id,
+                    timeout_ms,
+                    "run_stream: 等待模型首个响应超时"
+                );
+                let _ = tx.send(ChatStreamChunk::Error {
+                    message: format!(
+                        "AI 请求超时（{timeout_ms} 毫秒），请重试或在设置中调整硬超时"
+                    ),
+                });
+                return;
+            }
+        };
         let mut done_sent = false;
         // 跟踪是否收到过实质内容（Text/Thinking/ToolCall/ToolResult）。
         // rig 在 SSE 解析失败时可能 yield 一个空 FinalResponse（0 token + 无内容），
         // 需区分"正常空回复"与"请求根本未处理"——后者转为 Error 上报前端。
         let mut has_content = false;
-        while let Some(item) = stream.next().await {
+        loop {
+            let item = match tokio::time::timeout(idle_timeout, stream.next()).await {
+                Ok(Some(item)) => item,
+                Ok(None) => break,
+                Err(_) => {
+                    tracing::warn!(
+                        target: crate::infra::utils::perf::ai_slo::TARGET,
+                        conversation = %conversation_id,
+                        timeout_ms,
+                        "run_stream: 等待模型流式响应超时"
+                    );
+                    let _ = tx.send(ChatStreamChunk::Error {
+                        message: format!(
+                            "AI 请求超时（{timeout_ms} 毫秒），请重试或在设置中调整硬超时"
+                        ),
+                    });
+                    return;
+                }
+            };
             let chunk = match item {
                 Ok(MultiTurnStreamItem::StreamAssistantItem(content)) => match content {
                     StreamedAssistantContent::Text(t) => {

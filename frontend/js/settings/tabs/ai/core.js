@@ -13,6 +13,12 @@ import { renderAITierSelects, renderAITierDegrade, renderAITierBanner } from "./
 import { renderAIProviders, closeAIProviderModal, saveNewProviderFromModal, guessPresetForProvider, clearProviderModelSelect, triggerProviderModelFetch, filterProviderModels, renderProviderModelTags } from "./provider.js";
 import { bindAIModelEditModalEvents } from "./model-edit.js";
 import { loadSkillList, showSkillImportPanel, initSkillImportHandlers } from "./skill.js";
+import {
+  clampAIHardTimeoutMs,
+  effectiveAIHardTimeoutMs,
+  formatModelContextWindow,
+  memoryExpertVisibility,
+} from "./semantics.js";
 import { invoke } from "../../../shared/tauri.js";
 import { t, onLangChange } from "../../../i18n/index.js";
 
@@ -89,9 +95,7 @@ function applyAIConfigToUI() {
   if ($("ai-require-whitespace")) $("ai-require-whitespace").checked = c.require_whitespace !== false;
   if ($("ai-exclude-pure-numeric")) $("ai-exclude-pure-numeric").checked = c.exclude_pure_numeric !== false;
   if ($("ai-respect-awareness-url-path")) $("ai-respect-awareness-url-path").checked = c.respect_awareness_url_path !== false;
-  if ($("ai-streaming")) $("ai-streaming").checked = c.streaming !== false;
-  if ($("ai-direct-safe")) $("ai-direct-safe").checked = !!c.direct_execute_safe_actions;
-  if ($("ai-timeout-ms")) $("ai-timeout-ms").value = c.slo_hard_timeout_ms ?? 2500;
+  if ($("ai-timeout-ms")) $("ai-timeout-ms").value = effectiveAIHardTimeoutMs(c.slo_hard_timeout_ms);
   // 对话配置
   const chatCfg = c.chat_config || { auto_title: false, title_tier: "light" };
   if ($("ai-chat-auto-title")) $("ai-chat-auto-title").checked = !!chatCfg.auto_title;
@@ -108,7 +112,7 @@ function applyAIConfigToUI() {
   }
   if ($("ai-memory-recall-enabled")) $("ai-memory-recall-enabled").checked = memCfg.recall_enabled !== false;
   if ($("ai-memory-recall-top-k")) $("ai-memory-recall-top-k").value = memCfg.recall_top_k ?? 3;
-  updateMemoryConfigVisibility(memCfg.mode || "token_aware");
+  updateMemoryConfigVisibility(memCfg.mode || "token_aware", memCfg.recall_enabled !== false);
   updateMemoryContextSizeDisplay();
   // Skill 配置
   const skillCfg = chatCfg.skill_config || { enabled: true };
@@ -117,10 +121,6 @@ function applyAIConfigToUI() {
   // 0.17.8: 权限记忆配置
   if ($("ai-perm-memory-enabled")) $("ai-perm-memory-enabled").checked = permissionConfig.memory_enabled !== false;
   if ($("ai-perm-memory-days")) $("ai-perm-memory-days").value = permissionConfig.memory_days ?? 7;
-
-  // 工具结果回流 AI 三态分段按钮
-  const feedbackValue = c.ai_tool_result_feedback ?? "on";
-  setSegControlValue("ai-tool-feedback", feedbackValue);
 
   renderAIProviders();
   renderAITierSelects();
@@ -150,7 +150,7 @@ async function loadSystemPromptInfo() {
     } else {
       tokensEl.className = "ai-prompt-tokens";
     }
-    metaEl.textContent = `· ${toolsCount} 个工具`;
+    metaEl.textContent = t("ai.tools.count", { count: toolsCount });
   } catch (e) {
     tokensEl.textContent = "—";
     tokensEl.className = "ai-prompt-tokens";
@@ -161,18 +161,12 @@ async function loadSystemPromptInfo() {
 
 // ── UI helpers ──────────────────────────────────────────────
 
-function setSegControlValue(id, value) {
-  const container = document.getElementById(id);
-  if (!container) return;
-  container.querySelectorAll(".seg-btn").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.value === value);
-  });
-}
-
-function updateMemoryConfigVisibility(mode) {
-  const body = document.getElementById("ai-memory-config-body");
-  if (!body) return;
-  body.classList.toggle('hidden', mode === "off");
+function updateMemoryConfigVisibility(mode, recallEnabled = true) {
+  const visibility = memoryExpertVisibility(mode, recallEnabled);
+  document.getElementById("ai-memory-window-size-row")?.classList.toggle("hidden", !visibility.fixedCount);
+  document.getElementById("ai-memory-trigger-row")?.classList.toggle("hidden", !visibility.tokenAware);
+  document.getElementById("ai-memory-compress-row")?.classList.toggle("hidden", !visibility.tokenAware);
+  document.getElementById("ai-memory-recall-top-k-row")?.classList.toggle("hidden", !visibility.recallTopK);
 }
 
 function updateMemoryContextSizeDisplay() {
@@ -192,10 +186,7 @@ function updateMemoryContextSizeDisplay() {
     el.textContent = t("ai.memory.context_size.unknown") || "未知";
     return;
   }
-  const memCfg = cfg.chat_config?.memory_config || {};
-  const windowSize = memCfg.window_size ?? 20;
-  const estimated = Math.round(ctxWindow * 0.6);
-  el.textContent = `${estimated} tokens (≈${windowSize} 轮)`;
+  el.textContent = formatModelContextWindow(ctxWindow) || (t("ai.memory.context_size.unknown") || "未知");
 }
 
 // ── Toast ───────────────────────────────────────────────────
@@ -252,14 +243,6 @@ function bindAIEvents() {
     cfg.respect_awareness_url_path = e.target.checked;
     saveAIConfig();
   });
-  $("ai-streaming")?.addEventListener("change", (e) => {
-    cfg.streaming = e.target.checked;
-    saveAIConfig();
-  });
-  $("ai-direct-safe")?.addEventListener("change", (e) => {
-    cfg.direct_execute_safe_actions = e.target.checked;
-    saveAIConfig();
-  });
   $("ai-chat-auto-title")?.addEventListener("change", (e) => {
     cfg.chat_config = cfg.chat_config || { auto_title: false, title_tier: "light" };
     cfg.chat_config.auto_title = e.target.checked;
@@ -274,7 +257,10 @@ function bindAIEvents() {
     cfg.chat_config = cfg.chat_config || {};
     cfg.chat_config.memory_config = cfg.chat_config.memory_config || {};
     cfg.chat_config.memory_config.mode = e.target.value;
-    updateMemoryConfigVisibility(e.target.value);
+    updateMemoryConfigVisibility(
+      e.target.value,
+      cfg.chat_config.memory_config.recall_enabled !== false,
+    );
     saveAIConfig();
   });
   $("ai-memory-window-size")?.addEventListener("change", (e) => {
@@ -360,6 +346,7 @@ function bindAIEvents() {
     cfg.chat_config = cfg.chat_config || {};
     cfg.chat_config.memory_config = cfg.chat_config.memory_config || {};
     cfg.chat_config.memory_config.recall_enabled = e.target.checked;
+    updateMemoryConfigVisibility(cfg.chat_config.memory_config.mode || "token_aware", e.target.checked);
     saveAIConfig();
   });
   $("ai-memory-recall-top-k")?.addEventListener("change", (e) => {
@@ -370,18 +357,9 @@ function bindAIEvents() {
     e.target.value = cfg.chat_config.memory_config.recall_top_k;
     saveAIConfig();
   });
-  $("ai-tool-feedback")?.addEventListener("click", (e) => {
-    const btn = e.target.closest(".seg-btn");
-    if (!btn) return;
-    const val = btn.dataset.value;
-    setSegControlValue("ai-tool-feedback", val);
-    cfg.ai_tool_result_feedback = val;
-    saveAIConfig();
-  });
   $("ai-timeout-ms")?.addEventListener("change", (e) => {
-    const v = parseInt(e.target.value, 10);
-    cfg.slo_hard_timeout_ms = isNaN(v) ? null : Math.max(500, Math.min(30000, v));
-    e.target.value = cfg.slo_hard_timeout_ms ?? 2500;
+    cfg.slo_hard_timeout_ms = clampAIHardTimeoutMs(e.target.value);
+    e.target.value = effectiveAIHardTimeoutMs(cfg.slo_hard_timeout_ms);
     saveAIConfig();
   });
 

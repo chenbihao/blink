@@ -55,13 +55,8 @@ use tokio::sync::mpsc;
 
 use crate::domain::ai::message::{CompletionRequest, CompletionResponse, Role, ToolCall, Usage};
 use crate::domain::ai::provider::{AIError, AIProvider, StreamChunk};
-use crate::domain::config::ai_config::{CustomParam, ProviderKind};
+use crate::domain::config::ai_config::{CustomParam, DEFAULT_AI_HARD_TIMEOUT_MS, ProviderKind};
 use crate::infra::platform::secret::SecretString;
-
-/// 默认硬超时(§3.3 骨架层)——用户未在 `CompletionRequest.timeout_ms` 覆盖时的兜底。
-///
-/// 与 `AIConfig::slo_hard_timeout_ms` 默认值一致(见 §3.3 SLO 表)。
-const DEFAULT_HARD_TIMEOUT_MS: u32 = 20_000;
 
 /// rig-core 承载的 `AIProvider` 实体。泛型 M 由 factory 按 `ProviderKind` 敲定。
 ///
@@ -90,7 +85,7 @@ pub(crate) struct RigProvider<M: RigCompletionModel> {
 impl<M: RigCompletionModel> RigProvider<M> {
     /// 构造——`RigFactory` 在挑好 rig client + model_id 后调这个。
     ///
-    /// `default_timeout_ms` 从 `AIConfig::slo_hard_timeout_ms` 或 `DEFAULT_HARD_TIMEOUT_MS` 来。
+    /// `default_timeout_ms` 从 `AIConfig::slo_hard_timeout_ms` 或统一 20 秒默认值来。
     /// `default_temperature / default_max_tokens / custom_parameters` 从 `ModelEntry` 来。
     #[allow(dead_code)] // 0.9.2 Phase 5b 由 factory 消费
     pub(crate) fn new(
@@ -106,7 +101,7 @@ impl<M: RigCompletionModel> RigProvider<M> {
             kind,
             model_id: model_id.into(),
             model,
-            default_timeout_ms: default_timeout_ms.unwrap_or(DEFAULT_HARD_TIMEOUT_MS),
+            default_timeout_ms: default_timeout_ms.unwrap_or(DEFAULT_AI_HARD_TIMEOUT_MS),
             default_temperature,
             default_max_tokens,
             custom_params_json: build_custom_params_json(custom_parameters),

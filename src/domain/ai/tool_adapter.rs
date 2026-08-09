@@ -57,6 +57,7 @@ use serde_json::Value;
 use tokio::sync::{Mutex, RwLock, oneshot};
 
 use crate::domain::capability::{Capability, CapabilityError, CapabilityRegistry, InvokeContext};
+use crate::domain::config::ai_config::get_ai_config;
 use crate::domain::config::shards::AiPermissionConfig;
 use crate::domain::event::DomainEnv;
 use crate::domain::event_names::EventNames;
@@ -67,12 +68,6 @@ use crate::domain::event_names::EventNames;
 ///
 /// 60s 给用户足够时间审视危险操作（如关机/清空历史）；超时即放弃，AI 收到超时消息可换路径。
 const DANGEROUS_CONFIRM_TIMEOUT_SECS: u64 = 60;
-
-/// 对话窗口 tool 调用硬超时默认值（毫秒）--对齐 `service.rs::AI_DEFAULT_HARD_TIMEOUT_MS`。
-///
-/// `AIConfig.slo_hard_timeout_ms` 缺省时兜底。对话窗口 Capability invoke 的硬超时
-/// 与主窗口 service.rs 共用同一铁则（§3.3 骨架层硬超时）。
-const DEFAULT_TOOL_TIMEOUT_MS: u32 = 20_000;
 
 // ── 危险确认闭环骨架（0.12.0 §2.4）────────────────────────────────────────────
 
@@ -456,10 +451,9 @@ fn emit_dangerous_confirm(
 /// 从 `AIConfig.slo_hard_timeout_ms` 派生 tool 调用 deadline（P1.3 硬超时铁则）。
 ///
 /// 对话窗口 Capability invoke 的硬超时，对齐主窗口 `service.rs` 的 `slo_hard_timeout_ms`。
-/// `None` -> 用 `DEFAULT_TOOL_TIMEOUT_MS` 兜底（20s）。
+/// `None` -> 用 `AIConfig::effective_hard_timeout_ms()` 的统一 20 秒默认值兜底。
 fn derive_tool_deadline() -> Option<std::time::Instant> {
-    let cfg = crate::domain::config::ai_config::get_ai_config();
-    let timeout_ms = cfg.slo_hard_timeout_ms.unwrap_or(DEFAULT_TOOL_TIMEOUT_MS);
+    let timeout_ms = get_ai_config().effective_hard_timeout_ms();
     Some(std::time::Instant::now() + Duration::from_millis(timeout_ms as u64))
 }
 
@@ -759,7 +753,7 @@ mod tests {
     fn derive_tool_deadline_returns_some_future_instant() {
         // 纯逻辑：应返回一个未来的 Instant（无论 AIConfig 是否配置）。
         // 不依赖系统资源--get_ai_config 未初始化时返回 default（enabled=false，
-        // slo_hard_timeout_ms=None -> 兜底 DEFAULT_TOOL_TIMEOUT_MS）。
+        // slo_hard_timeout_ms=None -> 兜底统一 20 秒默认值。
         let now = std::time::Instant::now();
         let deadline = derive_tool_deadline();
         assert!(deadline.is_some(), "deadline 应为 Some");

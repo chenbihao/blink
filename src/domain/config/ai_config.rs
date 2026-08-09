@@ -25,6 +25,11 @@ use serde::{Deserialize, Serialize};
 
 use super::store::ConfigKey;
 
+/// 模型请求与 Capability 工具调用共用的默认硬超时。
+pub const DEFAULT_AI_HARD_TIMEOUT_MS: u32 = 20_000;
+pub const MIN_AI_HARD_TIMEOUT_MS: u32 = 500;
+pub const MAX_AI_HARD_TIMEOUT_MS: u32 = 30_000;
+
 /// AI 配置分片——第 7 个 KV。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AIConfig {
@@ -80,32 +85,22 @@ pub struct AIConfig {
     #[serde(default)]
     pub tier_main: Option<TierAssignment>,
 
-    // ── §3.4 危险动作白名单(默认关,即使 Safe 也需要 Tab) ─────────────────
-    /// 允许 AI 直接执行 Safe 动作(§3.4)。**默认关**——0.9.2 起用户可打开。
-    /// 关闭时任何 AI-routed 动作都需 Tab / Enter 确认。
+    // ── 旧字段兼容（0.19.9 起不再暴露或消费）─────────────────────────────
+    /// 旧版 Safe 动作直执行开关，仅用于反序列化兼容；当前运行时不消费。
     #[serde(default)]
     pub direct_execute_safe_actions: bool,
 
-    // ── 流式输出 ─────────────────────────────────────────────────────────
-    /// 流式输出开关——**默认 true**。开启后 AI 文本逐 chunk 推送到前端,
-    /// 用户无需等待完整响应。关闭时 fallback 到非流式 complete(一次性返回)。
+    /// 旧版流式开关，仅用于反序列化兼容；当前对话固定使用 `stream_prompt`。
     #[serde(default = "default_true")]
     pub streaming: bool,
 
     // ── SLO 覆盖(§3.3 骨架层) ─────────────────────────────────────────────
-    /// 单次路由调用硬超时(毫秒)。`None` → 用 default 20000ms。
-    #[serde(default)]
+    /// 模型首响应、流式 idle 与 Capability 调用共用的硬超时（毫秒）。
+    #[serde(default = "default_hard_timeout_ms")]
     pub slo_hard_timeout_ms: Option<u32>,
 
     // ── 0.11.4 改进 2:结果回流 AI(Tool Chain + 三态配置) ────────────────
-    /// AI 工具结果回流开关（§2.2.2 三态配置 D2）。
-    ///
-    /// - `Auto`（默认）: 本地模型开 + 云端模型关。0.11 阶段所有 provider 都是云端，
-    ///   实际等同 `Off`；0.12 本地模型（Ollama / Mistral.rs）上线后 `Auto` 对它们自动开启。
-    /// - `On`: 始终开启 Turn 2 回流（总结工具结果 / 链式调 safe tool）。
-    /// - `Off`: 始终关闭（单轮直通，快，省 token）。
-    ///
-    /// 详见 `should_run_tool_feedback`。
+    /// 旧版工具结果回流开关，仅用于反序列化兼容；rig Agent 当前自行管理 tool loop。
     // ── 0.12.5 §5.4：对话配置 ──────────────────────────────────────────
     /// 对话窗口配置子结构（LLM 自动命名等）。
     #[serde(default)]
@@ -131,11 +126,24 @@ impl Default for AIConfig {
             tier_main: None,
             direct_execute_safe_actions: false,
             streaming: true,
-            slo_hard_timeout_ms: None,
+            slo_hard_timeout_ms: default_hard_timeout_ms(),
             chat_config: ChatConfig::default(),
             ai_tool_result_feedback: ToolResultFeedback::default(),
         }
     }
+}
+
+impl AIConfig {
+    /// 返回当前生效的硬超时；未显式覆盖时统一使用 20 秒。
+    pub fn effective_hard_timeout_ms(&self) -> u32 {
+        self.slo_hard_timeout_ms
+            .unwrap_or(DEFAULT_AI_HARD_TIMEOUT_MS)
+            .clamp(MIN_AI_HARD_TIMEOUT_MS, MAX_AI_HARD_TIMEOUT_MS)
+    }
+}
+
+fn default_hard_timeout_ms() -> Option<u32> {
+    Some(DEFAULT_AI_HARD_TIMEOUT_MS)
 }
 
 impl ConfigKey for AIConfig {
@@ -679,6 +687,23 @@ fn default_chat_capability() -> Vec<ModelCapability> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hard_timeout_effective_default_and_override_are_consistent() {
+        let mut config = AIConfig::default();
+        assert_eq!(config.slo_hard_timeout_ms, Some(20_000));
+        assert_eq!(config.effective_hard_timeout_ms(), 20_000);
+
+        let from_legacy: AIConfig = serde_json::from_str(r#"{"enabled":false}"#).unwrap();
+        assert_eq!(from_legacy.slo_hard_timeout_ms, Some(20_000));
+        assert_eq!(from_legacy.effective_hard_timeout_ms(), 20_000);
+
+        config.slo_hard_timeout_ms = Some(45_000);
+        assert_eq!(config.effective_hard_timeout_ms(), 30_000);
+
+        config.slo_hard_timeout_ms = Some(100);
+        assert_eq!(config.effective_hard_timeout_ms(), 500);
+    }
 
     fn sample_provider(id: &str, model_id: &str) -> ProviderEntry {
         ProviderEntry {

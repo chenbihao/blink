@@ -1152,7 +1152,7 @@ async function updatePromptBanner(conversationId) {
 // ── 设置 ────────────────────────────────────────
 
 function openSettings() {
-  // 跳转到设置页「AI 对话能力」tab
+  // 跳转到设置页「AI 对话设置」tab
   invoke("open_settings_tab", { tab: "ai-chat" });
 }
 

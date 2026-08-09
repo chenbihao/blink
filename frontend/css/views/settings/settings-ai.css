@@ -35,6 +35,24 @@
 
 /* ── AI Tab 专用（0.9.1 Phase 6）─────────────────────────────────────────── */
 
+.ai-expert-settings {
+  border-top: 1px solid var(--surface);
+  margin-top: var(--space-sm, 8px);
+  padding-top: var(--space-sm, 8px);
+}
+
+.ai-expert-settings > summary {
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  padding: var(--space-xs, 6px) 0;
+}
+
+.ai-expert-settings-body {
+  padding-top: var(--space-xs, 6px);
+}
+
 /* 独立 modal 变体（供 AI 添加供应商弹窗用；不复用 .modal 因为它绑了列表布局） */
 
 /* setting-row-column：纵向布局变体（extension-card 内使用，非 modal 专属） */
