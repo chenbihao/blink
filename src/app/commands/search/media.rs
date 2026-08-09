@@ -196,32 +196,96 @@ pub async fn screenshot_save(
     png_data: Vec<u8>,
     path: Option<String>,
 ) -> Result<String, String> {
-    use std::io::Write;
+    let file_path = save_editor_png(&app, &png_data, path, "截图")?;
 
+    finish_screenshot_session(&app);
+    tracing::info!(path = %file_path, "截图已保存到文件");
+    Ok(file_path)
+}
+
+/// 通用图片编辑输出：以用户来源写入剪贴板，不借用截图来源标记或截图 SESSION。
+#[tauri::command]
+pub async fn image_editor_copy(app: tauri::AppHandle, png_data: Vec<u8>) -> Result<(), String> {
+    let bytes_len = png_data.len();
+    crate::domain::clipboard::write_png(
+        png_data,
+        crate::domain::clipboard::ClipboardWriteSource::User,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    finish_image_editor_session(&app);
+    tracing::info!(bytes = bytes_len, "编辑图片已复制到剪贴板");
+    Ok(())
+}
+
+#[tauri::command]
+pub fn image_editor_pin(
+    app: tauri::AppHandle,
+    png_data: Vec<u8>,
+    show_translating: Option<bool>,
+) -> Result<(), String> {
+    use crate::domain::event::CapabilityEnv;
+    let env = app
+        .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
+        .inner()
+        .clone();
+    let show_translating = show_translating.unwrap_or(false);
+    let refresh_png = show_translating.then(|| png_data.clone());
+    let (screen_x, screen_y) = env.show_pin_image(png_data, None, None)?;
+    if let Some(png_data) = refresh_png {
+        crate::infra::platform::window::refresh_pin_image(&app, png_data, true)?;
+    }
+    finish_image_editor_session(&app);
+    tracing::info!(screen_x, screen_y, show_translating, "编辑图片已钉到屏幕");
+    Ok(())
+}
+
+#[tauri::command]
+pub fn image_editor_save(
+    app: tauri::AppHandle,
+    png_data: Vec<u8>,
+    path: Option<String>,
+) -> Result<String, String> {
+    let file_path = save_editor_png(&app, &png_data, path, "图片")?;
+    finish_image_editor_session(&app);
+    tracing::info!(path = %file_path, "编辑图片已保存到文件");
+    Ok(file_path)
+}
+
+#[tauri::command]
+pub fn image_editor_cancel(app: tauri::AppHandle) {
+    finish_image_editor_session(&app);
+    tracing::info!("用户图片编辑已取消");
+}
+
+fn save_editor_png(
+    app: &tauri::AppHandle,
+    png_data: &[u8],
+    path: Option<String>,
+    default_prefix: &str,
+) -> Result<String, String> {
+    use std::io::Write;
     let file_path = match path {
-        Some(p) => p,
+        Some(path) => path,
         None => {
-            let timestamp = chrono::Local::now().format("截图_%Y%m%d_%H%M%S");
-            let default_name = format!("{}.png", timestamp);
-            let dialog = app.dialog().file();
-            let picked = dialog
+            let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+            let default_name = format!("{default_prefix}_{timestamp}.png");
+            match app
+                .dialog()
+                .file()
                 .add_filter("PNG 图片", &["png"])
                 .add_filter("JPEG 图片", &["jpg", "jpeg"])
                 .set_file_name(&default_name)
-                .blocking_save_file();
-            match picked {
+                .blocking_save_file()
+            {
                 Some(path) => path.to_string(),
                 None => return Err("用户取消了保存".to_string()),
             }
         }
     };
-
     let mut file = std::fs::File::create(&file_path).map_err(|e| format!("创建文件失败: {e}"))?;
-    file.write_all(&png_data)
+    file.write_all(png_data)
         .map_err(|e| format!("写入文件失败: {e}"))?;
-
-    finish_screenshot_session(&app);
-    tracing::info!(path = %file_path, "截图已保存到文件");
     Ok(file_path)
 }
 
@@ -1018,6 +1082,10 @@ fn post_wheel_to_target(
 fn finish_screenshot_session(app: &tauri::AppHandle) {
     crate::infra::platform::screenshot::set_annotation_mode(false);
     crate::infra::platform::window::hide_screenshot_overlay(app);
+}
+
+fn finish_image_editor_session(app: &tauri::AppHandle) {
+    crate::infra::platform::window::hide_image_editor_window(app);
 }
 
 /// 列出系统已安装的字体名称列表，供截图文字工具选择字体用。

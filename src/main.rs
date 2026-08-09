@@ -113,10 +113,15 @@ fn main() {
         // 由 `screenshot::begin_session()` 提前截屏并存 SESSION，协议只做"读内存 + 编码 PNG"，
         // 不再触发新的截屏——避免"overlay show 之后才 BitBlt"的时序竞态。
         // SESSION 为空 → 404，overlay 前端可显示错误提示。
-        .register_asynchronous_uri_scheme_protocol("blink-screenshot", |_ctx, _request, responder| {
+        .register_asynchronous_uri_scheme_protocol("blink-screenshot", |_ctx, request, responder| {
+            let editor_payload = request.uri().path().trim_matches('/') == "editor";
             tauri::async_runtime::spawn(async move {
-                let bytes = tauri::async_runtime::spawn_blocking(|| {
-                    crate::infra::platform::screenshot::session_png()
+                let bytes = tauri::async_runtime::spawn_blocking(move || {
+                    if editor_payload {
+                        crate::infra::platform::image_editor::session_png()
+                    } else {
+                        crate::infra::platform::screenshot::session_png()
+                    }
                 })
                 .await
                 .ok()
@@ -131,7 +136,7 @@ fn main() {
                         .body(bytes)
                         .unwrap(),
                     None => {
-                        tracing::warn!("blink-screenshot: SESSION 为空,返回 404");
+                        tracing::warn!(editor_payload, "blink-screenshot: SESSION 为空,返回 404");
                         tauri::http::Response::builder()
                             .status(404)
                             .body(Vec::new())
@@ -720,6 +725,10 @@ fn main() {
             app::commands::screenshot_pin_transform,
             app::commands::screenshot_pin_refresh,
             app::commands::screenshot_save,
+            app::commands::image_editor_copy,
+            app::commands::image_editor_pin,
+            app::commands::image_editor_save,
+            app::commands::image_editor_cancel,
             app::commands::screenshot_save_replay_file,
             app::commands::screenshot_set_annotation_mode,
             app::commands::screenshot_window_list,

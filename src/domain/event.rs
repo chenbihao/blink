@@ -166,6 +166,9 @@ pub trait DomainEnv: CapabilityEnv {
     /// 显示截图选区 overlay 窗口。
     fn show_screenshot_overlay(&self, meta: &ScreenCaptureMeta) -> Result<(), String>;
 
+    /// 以独立用户会话打开通用图片编辑器；不得借用截图 SESSION 或 ImageStash。
+    fn show_image_editor(&self, png_data: Vec<u8>) -> Result<(), String>;
+
     /// 显示 + 聚焦主窗口。
     fn invoke_main_window(&self);
 

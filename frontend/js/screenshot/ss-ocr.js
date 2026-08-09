@@ -14,7 +14,7 @@ import { enterReadingMode } from './ss-reading.js';
 import * as annot from './annotation-engine.js';
 import {
   ocrImage, translateText, translateLines, copyToClipboard,
-  screenshotPin, screenshotPinRefresh,
+  screenshotPinRefresh,
 } from '../shared/api.js';
 import { normalizeError } from '../shared/tauri.js';
 
@@ -275,8 +275,8 @@ export async function doTranslateAndPin() {
   try {
     // ── Step 1: 立即 pin 原图 ──
     const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
-    const screenPos = ss._longImageBaseCanvas
-      ? { x: ss.scrollBandX, y: ss.scrollBandY }
+    const screenPos = ss.editorSession.canvasBacked
+      ? { x: ss.editorSession.screenX || ss.scrollBandX, y: ss.editorSession.screenY || ss.scrollBandY }
       : cssToScreen(ss.selCss.x, ss.selCss.y, meta);
     const screenX = screenPos.x;
     const screenY = screenPos.y;
@@ -296,7 +296,7 @@ export async function doTranslateAndPin() {
     }
 
     // pin 原图 + 显示翻译中指示器（screenshot_pin 内部会关 overlay）
-    await screenshotPin(rawPng, screenX, screenY, true);
+    await ss._outputEditorPng('pin', rawPng, screenX, screenY, true);
     pinned = true;
 
     // ── Step 2: 后台 OCR + 翻译 + 合成 + 替换 ──

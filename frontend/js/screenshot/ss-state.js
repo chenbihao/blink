@@ -4,6 +4,7 @@
 //! 各子模块通过 `import { ss } from './ss-state.js'` 访问和修改状态。
 
 import { attachScrollSessionFacade } from './scroll/session.js';
+import { ImageEditorSession } from './image-editor-session.js';
 
 export const ss = {
   // ── DOM 引用（initDOM() 填充）─────────────────────────────
@@ -101,8 +102,10 @@ export const ss = {
   _doCancel: null,                    // 取消截图
   _compositeSelection: null,          // 合成选区 PNG
   _doPinSelection: null,              // 0.18.1：钉图（回调避免 ss-ocr → ss-output 循环依赖）
+  _outputEditorPng: null,             // 图片来源感知输出（避免 ss-ocr → ss-output 循环依赖）
+  _enterCanvasImageEditor: null,       // 来源无关的 ImageData 编辑入口
   _translateAndPinPending: false,     // 0.18.1：翻译并 pin 流程进行中（防重复点击）
-  _longImageBaseCanvas: null,         // 长图编辑底图（不随视口平移改变像素坐标）
+  editorSession: new ImageEditorSession(), // 截图/长图/剪贴板共用的图片编辑会话
 };
 
 attachScrollSessionFacade(ss);

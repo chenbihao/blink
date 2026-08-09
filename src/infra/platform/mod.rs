@@ -8,6 +8,7 @@ pub mod context;
 #[cfg(windows)]
 pub mod dpi;
 pub mod hotkey;
+pub mod image_editor;
 #[cfg(windows)]
 pub mod icon; // 0.14.6 §2.3：从 domain/search/icon.rs 迁入
 pub mod inject;

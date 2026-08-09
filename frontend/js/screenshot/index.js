@@ -40,6 +40,7 @@ import { applyThemeFromConfig } from "../shared/theme.js";
 
 // ── 子模块 ──────────────────────────────────────────────
 import { ss, initDOM, PREWARM_MIN_WIDTH, PREWARM_MIN_HEIGHT, TOOL_CAPS } from "./ss-state.js";
+import { IMAGE_SOURCE } from './image-editor-session.js';
 import { norm, pointInRect, applySquareConstraint } from "./ss-utils.js";
 import { shouldStartFreeSelection, dprAtCss } from "./ss-selection-geometry.js";
 import { drawDimmed, drawSelection, drawFinalSelection, redrawAnnotPreview, redrawAnnotFull } from "./ss-draw.js";
@@ -60,7 +61,7 @@ import {
 } from "./ss-ocr.js";
 import {
   doCopySelection, doCopyFullScreen, doPinSelection, doSaveSelection,
-  compositeSelection, doCancel, hasActivePanel,
+  compositeSelection, doCancel, hasActivePanel, outputEditorPng,
 } from "./ss-output.js";
 import { bindToolbar, showTextInput, updateUndoRedoButtons } from "./ss-toolbar.js";
 // 0.15.8：智能窗口吸附 + 像素放大镜
@@ -129,8 +130,9 @@ ss._showTransientHint = showTransientHint;
 ss._doCancel = doCancel;
 ss._compositeSelection = compositeSelection;
 ss._doPinSelection = doPinSelection;
+ss._outputEditorPng = outputEditorPng;
 // 0.15.7：长截图回调
-ss._enterAnnotationWithCropData = enterAnnotationWithCropData;
+ss._enterCanvasImageEditor = enterCanvasImageEditor;
 
 // 图标 sprite
 ensureSpriteLoaded();
@@ -159,12 +161,18 @@ annot.setTool('select');
   }
 }
 
-// 预热窗口跳过 loadScreenshot
-const isPreheat = new URLSearchParams(window.location.search).get('preheat') === '1';
+// 预热窗口跳过图片加载；冷建窗可通过 query 直接进入剪贴板图片编辑。
+const initialParams = new URLSearchParams(window.location.search);
+const isPreheat = initialParams.get('preheat') === '1';
+const initialSource = initialParams.get('source');
 if (!isPreheat) {
-  loadScreenshot();
-  // 0.15.8 R1：加载可吸附窗口列表（异步，不阻塞截图加载），传 generation 防过期回流
-  loadPickableWindows(ss.windowListGen);
+  if (initialSource === IMAGE_SOURCE.CLIPBOARD) {
+    loadEditorImage(IMAGE_SOURCE.CLIPBOARD);
+  } else {
+    loadScreenshot();
+    // 0.15.8 R1：加载可吸附窗口列表（异步，不阻塞截图加载），传 generation 防过期回流
+    loadPickableWindows(ss.windowListGen);
+  }
 }
 // 0.15.7：绑定长截图专属工具栏
 bindScrollToolbar();
@@ -190,6 +198,18 @@ window.__blinkReloadScreenshot = function () {
     loadPickableWindows(ss.windowListGen);
   } catch (e) {
     console.warn('[screenshot] reload loadPickableWindows threw', e);
+  }
+};
+
+window.__blinkOpenImageEditor = function () {
+  console.info('[image-editor] __blinkOpenImageEditor called');
+  try {
+    resetState();
+    loadEditorImage(window.__blinkEditorSource?.kind || IMAGE_SOURCE.CLIPBOARD);
+  } catch (e) {
+    console.error('[image-editor] 初始化失败', e);
+    ss.errorHint.textContent = '图片编辑初始化失败，按 ESC 关闭';
+    ss.errorHint.classList.remove('hidden');
   }
 };
 
@@ -229,6 +249,10 @@ function resetState() {
   canvas.setAttribute('data-tool', 'select');
   ss.screenshot = null;
   ss.screenshotOffscreen = null;
+  ss.editorSession.reset();
+  document.body.classList.remove('image-editor-mode');
+  const scrollButton = document.getElementById('btn-scroll');
+  if (scrollButton) scrollButton.hidden = false;
   if (ss.singleClickTimeout) { clearTimeout(ss.singleClickTimeout); ss.singleClickTimeout = null; }
   sizeHint.classList.add('hidden');
   toolbar.classList.add('hidden');
@@ -296,25 +320,7 @@ function loadScreenshot() {
   ss.errorHint.classList.add('hidden');
 
   // 配置读取与图像加载并行；失败时保留默认值。
-  invoke('get_config_section', { key: 'screenshot:config' })
-    .then((val) => {
-      if (val && typeof val === 'object') {
-        ss.screenshotConfig.prewarmOcr = val.prewarmOcr !== false;
-        ss.screenshotConfig.scrollDebug = val.scrollDebug === true;
-        ss.screenshotConfig.ocrDebug = val.ocrDebug === true;
-        ss.screenshotConfig.controlSnap = val.controlSnap === true;
-        ss.screenshotConfig.controlSnapDepth = val.controlSnapDepth ?? 15;
-        ss.screenshotConfig.controlSnapDeadlineMs = val.controlSnapDeadlineMs ?? 1000;
-        ss.screenshotConfig.controlSnapMinSize = val.controlSnapMinSize ?? 50;
-        refreshDiagnosticsVisibility();
-        refreshOcrDiagnosticsVisibility();
-        // 0.18.2：control_snap 开启时异步加载控件提示（不阻塞 overlay）
-        if (ss.screenshotConfig.controlSnap) {
-          loadControlHints(ss.controlHintsGen);
-        }
-      }
-    })
-    .catch((e) => console.warn('[screenshot] 读 screenshot:config 失败,用默认值', e));
+  loadEditorConfig(true);
 
   // 加载代际守卫
   const gen = ++ss._loadGen;
@@ -364,12 +370,80 @@ function loadScreenshot() {
   img.src = 'http://blink-screenshot.localhost/capture?t=' + Date.now();
 }
 
+function loadEditorConfig(includeCaptureHints) {
+  invoke('get_config_section', { key: 'screenshot:config' })
+    .then((val) => {
+      if (val && typeof val === 'object') {
+        ss.screenshotConfig.prewarmOcr = val.prewarmOcr !== false;
+        ss.screenshotConfig.scrollDebug = val.scrollDebug === true;
+        ss.screenshotConfig.ocrDebug = val.ocrDebug === true;
+        ss.screenshotConfig.controlSnap = val.controlSnap === true;
+        ss.screenshotConfig.controlSnapDepth = val.controlSnapDepth ?? 15;
+        ss.screenshotConfig.controlSnapDeadlineMs = val.controlSnapDeadlineMs ?? 1000;
+        ss.screenshotConfig.controlSnapMinSize = val.controlSnapMinSize ?? 50;
+        refreshDiagnosticsVisibility();
+        refreshOcrDiagnosticsVisibility();
+        // 0.18.2：control_snap 开启时异步加载控件提示（不阻塞 overlay）
+        if (includeCaptureHints && ss.screenshotConfig.controlSnap) {
+          loadControlHints(ss.controlHintsGen);
+        }
+      }
+    })
+    .catch((e) => console.warn('[image-editor] 读 screenshot:config 失败,用默认值', e));
+}
+
+/** 从独立用户编辑载荷初始化完整图片画布，不读取截图捕获 SESSION。 */
+function loadEditorImage(source) {
+  if (source !== IMAGE_SOURCE.CLIPBOARD) {
+    throw new TypeError(`不支持的用户图片来源: ${source}`);
+  }
+  document.body.classList.add('image-editor-mode');
+  loadEditorConfig(false);
+  ss.errorHint.classList.add('hidden');
+  const gen = ++ss._loadGen;
+  const img = new Image();
+  img.crossOrigin = 'anonymous';
+  const timeoutId = setTimeout(() => {
+    if (gen !== ss._loadGen || ss.editorSession.active) return;
+    ss.errorHint.textContent = '图片加载超时，按 ESC 关闭';
+    ss.errorHint.classList.remove('hidden');
+  }, 5000);
+  img.onload = () => {
+    clearTimeout(timeoutId);
+    if (gen !== ss._loadGen) return;
+    try {
+      const baseCanvas = document.createElement('canvas');
+      baseCanvas.width = img.width;
+      baseCanvas.height = img.height;
+      const baseCtx = baseCanvas.getContext('2d', { willReadFrequently: true });
+      baseCtx.drawImage(img, 0, 0);
+      const imageData = baseCtx.getImageData(0, 0, img.width, img.height);
+      enterCanvasImageEditor(imageData, img.width, img.height, source);
+      triggerOcrPrewarm(img.width, img.height);
+      console.info('[image-editor] image loaded', { source, w: img.width, h: img.height, gen });
+    } catch (e) {
+      console.error('[image-editor] image onload 处理失败', e);
+      ss.errorHint.textContent = '图片渲染失败，按 ESC 关闭';
+      ss.errorHint.classList.remove('hidden');
+    }
+  };
+  img.onerror = (error) => {
+    clearTimeout(timeoutId);
+    if (gen !== ss._loadGen) return;
+    console.error('[image-editor] image load failed', { source, error });
+    ss.errorHint.textContent = '图片加载失败，按 ESC 关闭';
+    ss.errorHint.classList.remove('hidden');
+  };
+  img.src = `http://blink-screenshot.localhost/editor?t=${Date.now()}`;
+}
+
 /** 进入标注模式：显示工具栏 + 定位标注 canvas + 通知后端 */
 function enterAnnotationMode(rect) {
   console.info('[screenshot] enterAnnotationMode', rect);
   const { annotCanvas, screenshot } = ss;
 
   ss.selCss = rect;
+  ss.editorSession.beginScreenshotSelection();
   ss.isAnnotating = true;
   ss.sent = false;
 hidePixelMagnifier();
@@ -413,18 +487,15 @@ clearControlHover();
 }
 
 /**
- * 0.15.7 长图编辑入口：跳过从屏幕抓 cropData 的步骤，
- * 直接用传入的合成 ImageData 调 annot.reset + 设置标注 canvas。
+ * 来源无关的图片编辑入口：跳过截图 SESSION 裁剪，直接以 ImageData 初始化底图、
+ * 标注画布与输出会话。长截图与剪贴板图片共用此路径。
  *
- * 这是 enterAnnotationMode 的变体——长图的 cropData 是自己合成的、
- * 不对应屏幕任何位置，不能走 enterAnnotationMode 内部的 getImageData 路径。
- *
- * @param {ImageData} cropData - 合成的长图 ImageData
+ * @param {ImageData} cropData - 来源适配器提供的完整图片
  * @param {number} pw - 物理像素宽
  * @param {number} ph - 物理像素高
  */
-function enterAnnotationWithCropData(cropData, pw, ph) {
-  console.debug('[screenshot] enterAnnotationWithCropData', { pw, ph });
+function enterCanvasImageEditor(cropData, pw, ph, source = IMAGE_SOURCE.LONG_SCREENSHOT) {
+  console.debug('[image-editor] enterCanvasImageEditor', { source, pw, ph });
   const { annotCanvas, toolbar } = ss;
   const dpr = window.devicePixelRatio || 1;
   const cssW = pw / dpr;
@@ -440,7 +511,7 @@ function enterAnnotationWithCropData(cropData, pw, ph) {
   ss.selCss = { x: initialX, y: clampedY, w: cssW, h: cssH };
   ss.isAnnotating = true;
   ss.sent = false;
-  ss._longImagePan = {
+  ss._imagePan = {
     x: initialX, y: clampedY, dragging: false, lastX: 0, lastY: 0,
   };
   hidePixelMagnifier();
@@ -449,7 +520,9 @@ function enterAnnotationWithCropData(cropData, pw, ph) {
   baseCanvas.width = pw;
   baseCanvas.height = ph;
   baseCanvas.getContext('2d').putImageData(cropData, 0, 0);
-  ss._longImageBaseCanvas = baseCanvas;
+  ss.editorSession.beginCanvasSource(source, baseCanvas);
+  const scrollButton = document.getElementById('btn-scroll');
+  if (scrollButton) scrollButton.hidden = source === IMAGE_SOURCE.CLIPBOARD;
 
   // 主 canvas 作为长图可见底图；annotCanvas 只承载透明标注层。
   ss.canvas.width = pw;
@@ -474,7 +547,9 @@ function enterAnnotationWithCropData(cropData, pw, ph) {
 
   annot.reset(pw, ph, cropData);
   updateUndoRedoButtons();
-  screenshotSetAnnotationMode(true).catch((e) => console.error('setAnnotationMode(true) 失败', e));
+  if (ss.editorSession.ownsScreenshotSession) {
+    screenshotSetAnnotationMode(true).catch((e) => console.error('setAnnotationMode(true) 失败', e));
+  }
 
   // 工具栏定位：选区未超出屏幕时贴选区下方，超出时贴屏幕底部。
   toolbar.classList.remove('hidden');
@@ -589,7 +664,7 @@ const { canvas } = ss;
 /** 长图画布移动后，offsetX/Y 已经是图片局部坐标，不能再减 selCss 偏移。 */
 function annotationPoint(e) {
   const dpr = window.devicePixelRatio || 1;
-  if (ss._longImagePan) return { x: e.offsetX * dpr, y: e.offsetY * dpr };
+  if (ss._imagePan) return { x: e.offsetX * dpr, y: e.offsetY * dpr };
   return {
     x: (e.offsetX - ss.selCss.x) * dpr,
     y: (e.offsetY - ss.selCss.y) * dpr,
@@ -598,15 +673,15 @@ function annotationPoint(e) {
 
 function pointInEditableImage(e) {
   if (!ss.selCss) return false;
-  if (!ss._longImagePan) return pointInRect(e.offsetX, e.offsetY, ss.selCss);
+  if (!ss._imagePan) return pointInRect(e.offsetX, e.offsetY, ss.selCss);
   return e.offsetX >= 0 && e.offsetY >= 0
     && e.offsetX <= ss.selCss.w && e.offsetY <= ss.selCss.h;
 }
 
 function beginLongImagePan(e) {
-  ss._longImagePan.dragging = true;
-  ss._longImagePan.lastX = e.clientX;
-  ss._longImagePan.lastY = e.clientY;
+  ss._imagePan.dragging = true;
+  ss._imagePan.lastX = e.clientX;
+  ss._imagePan.lastY = e.clientY;
   ss.canvas.style.cursor = 'grabbing';
   e.preventDefault();
 }
@@ -624,40 +699,40 @@ function longImagePanBounds() {
 }
 
 function moveLongImagePan(e) {
-  if (!ss._longImagePan?.dragging) return false;
-  const dx = e.clientX - ss._longImagePan.lastX;
-  const dy = e.clientY - ss._longImagePan.lastY;
+  if (!ss._imagePan?.dragging) return false;
+  const dx = e.clientX - ss._imagePan.lastX;
+  const dy = e.clientY - ss._imagePan.lastY;
   const bounds = longImagePanBounds();
-  ss._longImagePan.x = Math.max(bounds.minX, Math.min(bounds.maxX, ss._longImagePan.x + dx));
-  ss._longImagePan.y = Math.max(bounds.minY, Math.min(bounds.maxY, ss._longImagePan.y + dy));
-  ss._longImagePan.lastX = e.clientX;
-  ss._longImagePan.lastY = e.clientY;
+  ss._imagePan.x = Math.max(bounds.minX, Math.min(bounds.maxX, ss._imagePan.x + dx));
+  ss._imagePan.y = Math.max(bounds.minY, Math.min(bounds.maxY, ss._imagePan.y + dy));
+  ss._imagePan.lastX = e.clientX;
+  ss._imagePan.lastY = e.clientY;
   const { annotCanvas, selCss } = ss;
-  ss.canvas.style.left = ss._longImagePan.x + 'px';
-  ss.canvas.style.top = ss._longImagePan.y + 'px';
-  annotCanvas.style.left = ss._longImagePan.x + 'px';
-  annotCanvas.style.top = ss._longImagePan.y + 'px';
+  ss.canvas.style.left = ss._imagePan.x + 'px';
+  ss.canvas.style.top = ss._imagePan.y + 'px';
+  annotCanvas.style.left = ss._imagePan.x + 'px';
+  annotCanvas.style.top = ss._imagePan.y + 'px';
   if (selCss) {
-    selCss.x = ss._longImagePan.x;
-    selCss.y = ss._longImagePan.y;
+    selCss.x = ss._imagePan.x;
+    selCss.y = ss._imagePan.y;
   }
   return true;
 }
 
 function endLongImagePan() {
-  if (!ss._longImagePan?.dragging) return false;
-  ss._longImagePan.dragging = false;
+  if (!ss._imagePan?.dragging) return false;
+  ss._imagePan.dragging = false;
   ss.canvas.style.cursor = (_spaceDown || annot.getTool() === 'select') ? 'grab' : 'crosshair';
   return true;
 }
 
 canvas.addEventListener('mousedown', (e) => {
-  if (!ss.screenshot && !ss._longImagePan) return;
+  if (!ss.screenshot && !ss._imagePan) return;
 
   const tool = annot.getTool();
 
   // 默认选取工具左键即可平移；其它工具仍可用 Space/中键临时平移。
-  if (ss._longImagePan && (_spaceDown || e.button === 1 || (e.button === 0 && tool === 'select'))) {
+  if (ss._imagePan && (_spaceDown || e.button === 1 || (e.button === 0 && tool === 'select'))) {
     beginLongImagePan(e);
     return;
   }
@@ -741,9 +816,9 @@ canvas.addEventListener('mousemove', (e) => {
   // 0.15.7：长图平移拖拽
   if (moveLongImagePan(e)) return;
 
-  if (!ss.screenshot) return;
+  if (!ss.screenshot && !ss.editorSession.canvasBacked) return;
 
-  if (!ss._longImagePan) updateSelectionCursor(e.offsetX, e.offsetY);
+  if (!ss._imagePan) updateSelectionCursor(e.offsetX, e.offsetY);
 
   // 0.18.2：选区拖拽阶段智能吸附（控件优先于窗口）
   // 手动框选拖拽中（isDragging）不更新吸附提示，避免实线选区与虚线预选区同时出现
@@ -846,7 +921,7 @@ canvas.addEventListener('mouseleave', () => {
     clearControlHover();
   }
   if (!ss.selectionInteraction) {
-    ss.canvas.style.cursor = ss._longImagePan && annot.getTool() === 'select'
+    ss.canvas.style.cursor = ss._imagePan && annot.getTool() === 'select'
       ? 'grab'
       : (annot.getTool() === 'select' ? 'default' : 'crosshair');
   }
@@ -856,7 +931,7 @@ canvas.addEventListener('mouseup', (e) => {
   // 0.15.7：长图平移结束
   if (endLongImagePan()) return;
 
-  if (!ss.screenshot) return;
+  if (!ss.screenshot && !ss.editorSession.canvasBacked) return;
 
   // 0.15.8 R2：pending-snap 完成——未达阈值，采用窗口矩形
   if (ss.pendingSnap) {
@@ -953,7 +1028,7 @@ canvas.addEventListener('mouseup', (e) => {
 
 canvas.addEventListener('dblclick', (e) => {
   console.debug('[screenshot] dblclick', { isAnnotating: ss.isAnnotating, hasSelCss: !!ss.selCss, sent: ss.sent });
-  if (!ss.screenshot || ss.sent) return;
+  if ((!ss.screenshot && !ss.editorSession.canvasBacked) || ss.sent) return;
   if (ss.singleClickTimeout) { clearTimeout(ss.singleClickTimeout); ss.singleClickTimeout = null; }
 
   if (ss.isAnnotating && ss.selCss) {
@@ -1064,7 +1139,7 @@ window.addEventListener('mousemove', (e) => {
 
 // 0.15.7：长图编辑——Space 或中键拖拽平移超长图（_spaceDown 已在文件顶部声明）
 window.addEventListener('keydown', (e) => {
-  if (e.code === 'Space' && ss._longImagePan && !ss._longImagePan.dragging) {
+  if (e.code === 'Space' && ss._imagePan && !ss._imagePan.dragging) {
     const tgt = e.target;
     if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
     _spaceDown = true;
@@ -1076,7 +1151,7 @@ window.addEventListener('keyup', (e) => {
   if (e.code === 'Space') {
     _spaceDown = false;
     if (ss.canvas && !ss.isAnnotDragging) {
-      ss.canvas.style.cursor = ss._longImagePan && annot.getTool() === 'select' ? 'grab' : '';
+      ss.canvas.style.cursor = ss._imagePan && annot.getTool() === 'select' ? 'grab' : '';
     }
   }
 });

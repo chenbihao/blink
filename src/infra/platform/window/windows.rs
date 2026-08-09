@@ -1944,6 +1944,79 @@ pub fn show_screenshot_overlay(
     Ok(())
 }
 
+/// 显示来源无关的用户图片编辑窗口。
+///
+/// 复用截图 overlay 的预热 WebView，但不创建或读取截图 SESSION。图片字节由独立的
+/// `image_editor` 会话提供，前端从 `/editor` 协议路径初始化完整图片画布。
+pub fn show_image_editor_window(
+    app: &AppHandle,
+    image: crate::infra::platform::image_editor::ImageEditorMeta,
+) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+    const LABEL: &str = "chord-screenshot";
+
+    let displays = crate::infra::platform::screenshot::list_displays();
+    let display = displays
+        .iter()
+        .find(|display| display.primary)
+        .or_else(|| displays.first());
+    let meta = display
+        .map(|display| crate::infra::platform::screenshot::ScreenCaptureMeta {
+            virtual_x: display.x,
+            virtual_y: display.y,
+            width: display.w,
+            height: display.h,
+        })
+        .unwrap_or(crate::infra::platform::screenshot::ScreenCaptureMeta {
+            virtual_x: 0,
+            virtual_y: 0,
+            width: image.width.max(640),
+            height: image.height.max(480),
+        });
+
+    let (win, created) = get_or_create_window(app, LABEL, || {
+        WebviewWindowBuilder::new(
+            app,
+            LABEL,
+            WebviewUrl::App("chord-screenshot.html?source=clipboard".into()),
+        )
+        .title("")
+        .inner_size(meta.width as f64, meta.height as f64)
+        .position(meta.virtual_x as f64, meta.virtual_y as f64)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .shadow(false)
+        .focused(true)
+        .build()
+    })?;
+
+    let mut overlay_dpi = 96u32;
+    if let Ok(hwnd) = win.hwnd() {
+        place_at_physical(
+            HWND(hwnd.0 as _),
+            meta.virtual_x,
+            meta.virtual_y,
+            meta.width,
+            meta.height,
+        );
+        overlay_dpi = crate::infra::platform::dpi::get_dpi_for_hwnd(HWND(hwnd.0 as _));
+    }
+    let displays_json = build_displays_json(&meta, overlay_dpi);
+    let init_js = format!(
+        "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {}, fgHwnd: 0, displays: {} }}; window.__blinkEditorSource = {{ kind: 'clipboard' }}; window.__blinkOpenImageEditor && window.__blinkOpenImageEditor();",
+        meta.virtual_x, meta.virtual_y, meta.width, meta.height, displays_json
+    );
+    win.eval(&init_js).map_err(|e| e.to_string())?;
+    win.show().map_err(|e| e.to_string())?;
+    if let Err(error) = win.set_focus() {
+        tracing::warn!(%error, "图片编辑窗口 focus 失败");
+    }
+    tracing::info!(created, width = image.width, height = image.height, "用户图片编辑窗口已显示");
+    Ok(())
+}
+
 /// 构造 `__blinkScreenMeta.displays` 字段的 JS 数组字面量。
 ///
 /// 0.18.8：每屏用自己的 `d.dpi` 折算 CSS 坐标（而非统一 `overlay_dpi`），
@@ -2065,6 +2138,16 @@ pub fn hide_screenshot_overlay(app: &AppHandle) {
         let _ = win.hide();
     }
     crate::infra::platform::screenshot::end_session();
+    // 同一 WebView 也承载通用图片编辑；看门狗/脚本兜底退出需释放两类短期载荷。
+    crate::infra::platform::image_editor::end_session();
+}
+
+/// 隐藏通用图片编辑窗口并释放用户图片载荷；不触碰截图 SESSION。
+pub fn hide_image_editor_window(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("chord-screenshot") {
+        let _ = win.hide();
+    }
+    crate::infra::platform::image_editor::end_session();
 }
 
 /// 钉图窗口的物理像素 padding（窗口比图片大一圈，给发光留空间）。

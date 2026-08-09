@@ -331,6 +331,16 @@ impl DomainEnv for TauriDomainEnv {
         crate::infra::platform::window::show_screenshot_overlay(&self.app, meta.clone())
     }
 
+    fn show_image_editor(&self, png_data: Vec<u8>) -> Result<(), String> {
+        let meta = crate::infra::platform::image_editor::begin_session(png_data)?;
+        if let Err(error) = crate::infra::platform::window::show_image_editor_window(&self.app, meta)
+        {
+            crate::infra::platform::image_editor::end_session();
+            return Err(error);
+        }
+        Ok(())
+    }
+
     fn invoke_main_window(&self) {
         crate::infra::platform::window::invoke(&self.app);
     }
@@ -496,6 +506,9 @@ mod tests {
         fn hide_for_screenshot(&self) {}
         fn unhide_after_screenshot(&self) {}
         fn show_screenshot_overlay(&self, _meta: &ScreenCaptureMeta) -> Result<(), String> {
+            Ok(())
+        }
+        fn show_image_editor(&self, _png_data: Vec<u8>) -> Result<(), String> {
             Ok(())
         }
         fn invoke_main_window(&self) {}

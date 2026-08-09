@@ -25,9 +25,11 @@ const apiUrl = dataUrl(`
     return 'C:/AppData/blink/logs/scroll-replays/' + directoryName;
   }
 `);
+const stateUrl = dataUrl(`export const ss = { screenshotConfig: { scrollDebug: true } };`);
 const source = (await readFile(new URL('./diagnostics.js', import.meta.url), 'utf8'))
   .replace("'./tracker.js'", JSON.stringify(trackerUrl))
-  .replace("'../../shared/api.js'", JSON.stringify(apiUrl));
+  .replace("'../../shared/api.js'", JSON.stringify(apiUrl))
+  .replace("'../ss-state.js'", JSON.stringify(stateUrl));
 const { exportScrollReplay } = await import(dataUrl(source));
 
 const frame = { width: 1, height: 1, data: new Uint8ClampedArray([0, 0, 0, 255]) };

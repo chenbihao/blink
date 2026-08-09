@@ -22,6 +22,11 @@ html, body {
   background: rgba(0, 0, 0, 0.15);
 }
 
+/* 通用图片编辑使用同一透明 overlay 外壳，画布之外采用主题背景。 */
+body.image-editor-mode {
+  background: var(--bg);
+}
+
 /*
  * canvas 内部像素 = 截图物理像素；CSS 尺寸 = 物理像素 / DPR。
  * width/height 属性在 JS 里设，样式只负责铺满 + crosshair 光标。

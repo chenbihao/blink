@@ -62,6 +62,15 @@ const ACTIONS: &[BuiltinAction] = &[
         default_enabled: true,
     },
     BuiltinAction {
+        id: "edit_clipboard_image",
+        title: "编辑剪贴板图片",
+        subtitle: "标注当前剪贴板图片",
+        keywords: &["编辑图片", "剪贴板图片", "edit image", "edit clipboard image", "bjtp"],
+        context: &[],
+        param_source: ParamSource::None,
+        default_enabled: true,
+    },
+    BuiltinAction {
         id: "lock",
         title: "锁定电脑",
         subtitle: "Lock Workstation",
@@ -567,6 +576,22 @@ mod tests {
         assert!(!items.is_empty());
         assert_eq!(items[0].title, "打开设置");
         assert!(items[0].score > 0.0);
+    }
+
+    #[tokio::test]
+    async fn search_edit_clipboard_image() {
+        let engine = BuiltinEngine;
+        let history = HashMap::new();
+        let snapshot = ContextSnapshot::default();
+        let ctx = make_ctx(&history, &snapshot);
+
+        let items = engine.search("编辑图片", &ctx).await;
+        assert!(
+            items
+                .iter()
+                .any(|item| item.id == "builtin:edit_clipboard_image"),
+            "编辑图片应召回本地用户 Action"
+        );
     }
 
     #[tokio::test]

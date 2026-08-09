@@ -362,7 +362,7 @@ function compositeLongImage() {
  * 进入长图编辑阶段。
  * 合成所有帧 → 进入标注模式（复用 annot.reset）。
  *
- * 需要调用 `enterAnnotationWithCropData`（index.js 提供）。
+ * 需要调用来源无关的 `enterCanvasImageEditor`（index.js 提供）。
  */
 export async function enterScrollEdit() {
   if (session.scrollCapturePhase !== 'capturing') return;
@@ -410,9 +410,9 @@ export async function enterScrollEdit() {
   if (ss.scrollPreviewCanvas) ss.scrollPreviewCanvas.classList.add('hidden');
   hideCaptureFrame();
 
-  // 调用 index.js 提供的 enterAnnotationWithCropData 回调
-  if (ss._enterAnnotationWithCropData) {
-    ss._enterAnnotationWithCropData(longImage, longImage.width, longImage.height);
+  // 调用 index.js 提供的来源无关编辑入口
+  if (ss._enterCanvasImageEditor) {
+    ss._enterCanvasImageEditor(longImage, longImage.width, longImage.height);
   }
   console.info('[scroll] enter editing', { w: longImage.width, h: longImage.height });
 }
@@ -450,8 +450,8 @@ export async function exitScrollCapture(restoreSelection = true) {
 function resetScrollCaptureState() {
   session.reset();
   resetPreviewRendering();
-  ss._longImageBaseCanvas = null;
-  ss._longImagePan = null;
+  ss.editorSession.reset();
+  ss._imagePan = null;
   ss.canvas?.classList.remove('long-image-editing');
 
   document.getElementById('scroll-toolbar')?.classList.add('hidden');
@@ -472,7 +472,7 @@ export function resetScrollCaptureSession() {
 }
 
 export function isScrollCaptureActive() {
-  return session.active || !!ss._longImagePan;
+  return session.active || !!ss._imagePan;
 }
 
 /**

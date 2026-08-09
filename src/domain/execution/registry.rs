@@ -20,11 +20,11 @@ pub struct ActionRegistry {
 }
 
 impl ActionRegistry {
-    /// 构建默认注册表（10 个内置动作）。
+    /// 构建默认注册表（11 个内置动作）。
     ///
     /// 0.14.4: open_url / open_path / reveal_in_explorer 的 Action 版本已删除，
     /// 由 Capability 版本承担（CapabilityRegistry）。
-    /// 0.16.10: 新增 ShowStickyManagerAction，共 10 个。
+    /// 0.19.7: 新增 EditClipboardImageAction，共 11 个。
     pub fn new() -> Self {
         let mut actions: HashMap<String, Arc<dyn Action>> = HashMap::new();
 
@@ -32,6 +32,7 @@ impl ActionRegistry {
         let builtins: Vec<Arc<dyn Action>> = vec![
             Arc::new(OpenSettingsAction),
             Arc::new(ShowStickyManagerAction),
+            Arc::new(EditClipboardImageAction),
             Arc::new(LockWorkstationAction),
             Arc::new(ShutdownAction),
             Arc::new(RestartAction),
@@ -93,9 +94,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_has_10_builtin_actions() {
+    fn registry_has_11_builtin_actions() {
         let reg = ActionRegistry::new();
-        assert_eq!(reg.len(), 10);
+        assert_eq!(reg.len(), 11);
     }
 
     #[test]
@@ -104,6 +105,7 @@ mod tests {
         let expected = [
             "open_settings",
             "sticky_manager",
+            "edit_clipboard_image",
             "lock",
             "shutdown",
             "restart",
@@ -129,11 +131,13 @@ mod tests {
     }
 
     #[test]
-    fn action_ids_match_original_kind() {
-        // 验证每个 Action::id() 与原 BuiltinActionKind 的 action_id 一致
+    fn action_ids_match_registry_keys() {
+        // 验证每个 Action::id() 与注册表 key 一致
         let reg = ActionRegistry::new();
         let expected_ids = [
             "open_settings",
+            "sticky_manager",
+            "edit_clipboard_image",
             "lock",
             "shutdown",
             "restart",
@@ -149,7 +153,7 @@ mod tests {
         }
     }
 
-    /// 0.9.0 §3.3 铁则:12 个 builtin 全部显式覆盖 `schema()`——
+    /// 0.9.0 §3.3 铁则：所有 builtin 显式覆盖 `schema()`——
     /// name 与 id 一致 + description 非空。若有人新增 builtin 忘了写 schema
     /// (走了 default impl 的空 description),此测会 fail。
     #[test]
@@ -158,6 +162,7 @@ mod tests {
         for id in [
             "open_settings",
             "sticky_manager",
+            "edit_clipboard_image",
             "lock",
             "shutdown",
             "restart",
@@ -188,6 +193,7 @@ mod tests {
         for id in [
             "open_settings",
             "sticky_manager",
+            "edit_clipboard_image",
             "open_logs",
             "open_data_dir",
         ] {
@@ -216,9 +222,9 @@ mod tests {
     #[test]
     fn register_with_ref_self_works() {
         let reg = ActionRegistry::new();
-        assert_eq!(reg.len(), 10);
+        assert_eq!(reg.len(), 11);
         // 注册一个新动作
         reg.register(Arc::new(OpenSettingsAction)); // 重复 id,应跳过
-        assert_eq!(reg.len(), 10, "重复 id 不应增加数量");
+        assert_eq!(reg.len(), 11, "重复 id 不应增加数量");
     }
 }

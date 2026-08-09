@@ -106,6 +106,43 @@ impl Action for ShowStickyManagerAction {
     }
 }
 
+/// 打开当前剪贴板图片进入用户侧通用编辑会话。
+pub struct EditClipboardImageAction;
+#[async_trait::async_trait]
+impl Action for EditClipboardImageAction {
+    fn id(&self) -> &str {
+        "edit_clipboard_image"
+    }
+    fn title(&self) -> &LocalizableText {
+        static T: std::sync::OnceLock<LocalizableText> = std::sync::OnceLock::new();
+        T.get_or_init(|| bilingual("编辑剪贴板图片", "Edit Clipboard Image"))
+    }
+    fn subtitle(&self) -> &LocalizableText {
+        static T: std::sync::OnceLock<LocalizableText> = std::sync::OnceLock::new();
+        T.get_or_init(|| bilingual("标注当前剪贴板图片", "Annotate the current clipboard image"))
+    }
+    fn schema(&self) -> ActionSchema {
+        ActionSchema::empty(
+            "edit_clipboard_image",
+            "Open the current clipboard image in the local annotation editor",
+        )
+    }
+    fn danger_class(&self) -> DangerClass {
+        DangerClass::Safe
+    }
+    async fn execute(&self, cx: &ActionContext<'_>) -> Result<ActionOutcome, ExecError> {
+        tracing::debug!("执行内置动作：编辑剪贴板图片");
+        let content = crate::domain::clipboard::read_current()
+            .await
+            .map_err(|error| ExecError::Runtime(error.to_string()))?;
+        let crate::domain::clipboard::ClipboardContent::ImagePng(png_data) = content else {
+            return Err(ExecError::Runtime("当前剪贴板中没有图片".into()));
+        };
+        cx.env.show_image_editor(png_data).map_err(ExecError::Runtime)?;
+        Ok(ActionOutcome::Nop)
+    }
+}
+
 pub struct LockWorkstationAction;
 #[async_trait::async_trait]
 impl Action for LockWorkstationAction {

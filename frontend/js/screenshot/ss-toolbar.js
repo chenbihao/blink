@@ -36,7 +36,7 @@ function selectTool(tool) {
   }
   annot.setTool(tool);
   canvas.setAttribute('data-tool', tool);
-  if (ss._longImageBaseCanvas) {
+  if (ss.editorSession.canvasBacked) {
     // 长图底图由独立 canvas 保存；普通选区重绘会把它覆盖回初始全屏截图。
     canvas.style.cursor = tool === 'select' ? 'grab' : 'crosshair';
   } else {
@@ -473,7 +473,7 @@ export function bindToolbar() {
       annot.setMagnifierZoom(zoom);
       document.querySelectorAll('.zoom-btn').forEach((b) => b.classList.remove('active'));
       btn.classList.add('active');
-      if (ss.selCss && !ss._longImageBaseCanvas) drawFinalSelection();
+      if (ss.selCss && !ss.editorSession.canvasBacked) drawFinalSelection();
     });
     btn.addEventListener('mousedown', (e) => e.stopPropagation());
   });
@@ -515,7 +515,7 @@ export function bindToolbar() {
           switcher.querySelectorAll('.mode-btn').forEach((b) => b.classList.remove('active'));
           btn.classList.add('active');
         }
-        if (ss.selCss && !ss._longImageBaseCanvas) drawFinalSelection();
+        if (ss.selCss && !ss.editorSession.canvasBacked) drawFinalSelection();
       }
       // 0.15.8-fix：hover 模式下重新展开（模式切换后面板保持打开）
       const hoveredWrap = document.querySelector('.dropdown-wrap:hover');

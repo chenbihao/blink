@@ -237,6 +237,23 @@ export function screenshotSave(pngData, path) {
   return invoke("screenshot_save", { pngData, path });
 }
 
+/** 通用用户图片编辑输出；不结束或标记截图 SESSION。 */
+export function imageEditorCopy(pngData) {
+  return invoke('image_editor_copy', { pngData });
+}
+
+export function imageEditorPin(pngData, showTranslating) {
+  return invoke('image_editor_pin', { pngData, showTranslating: showTranslating ?? false });
+}
+
+export function imageEditorSave(pngData, path) {
+  return invoke('image_editor_save', { pngData, path });
+}
+
+export function imageEditorCancel() {
+  return invoke('image_editor_cancel');
+}
+
 /** 0.15.7-R4：把诊断回放文件写入 Blink 日志目录下的受控子目录。 */
 export function screenshotSaveReplayFile(directoryName, fileName, data) {
   return invoke("screenshot_save_replay_file", { directoryName, fileName, data });
