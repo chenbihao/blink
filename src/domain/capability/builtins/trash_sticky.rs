@@ -52,7 +52,7 @@ impl Capability for TrashSticky {
 
         tracing::info!(sticky_id = %id, "trash_sticky: 便签已移入废纸篓并隐藏");
         Ok(CapabilityResult::Done {
-            summary: format!("便签 {id} 已移入废纸篓（可恢复）"),
+            summary: format!("便签 {id} 已移入回收站；桌面窗口已关闭，可从回收站恢复"),
         })
     }
 }

@@ -128,7 +128,7 @@ function renderList(notes, isTrash) {
 
 function createItem(note, isTrash) {
   const item = document.createElement("div");
-  item.className = "sticky-item";
+  item.className = `sticky-item${!isTrash && !note.visible ? " is-hidden" : ""}`;
   item.dataset.id = note.id;
 
   // 颜色条
@@ -155,7 +155,7 @@ function createItem(note, isTrash) {
     if (!note.visible) {
       const badge = document.createElement("span");
       badge.className = "sticky-badge hidden";
-      badge.textContent = "已隐藏";
+      badge.innerHTML = `${iconHTML("eye-off")}<span>桌面已隐藏</span>`;
       meta.appendChild(badge);
     }
   } else {
@@ -190,10 +190,9 @@ function createItem(note, isTrash) {
         showStickyWindow(note.id).catch((e) => console.error("showStickyWindow failed:", e));
       }));
     } else {
-      actions.appendChild(makeActionBtn("恢复", "plus", () => {
+      actions.appendChild(makeActionBtn("显示到桌面", "eye", () => {
         setStickyVisible(note.id, true)
-          .then(() => showStickyWindow(note.id))
-          .catch((e) => console.error("restore failed:", e));
+          .catch((e) => console.error("show sticky failed:", e));
       }));
     }
 

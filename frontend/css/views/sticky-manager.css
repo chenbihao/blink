@@ -184,6 +184,15 @@
   border-color: var(--surface-2);
 }
 
+.sticky-item.is-hidden {
+  background: var(--bg-deep);
+  border-style: dashed;
+}
+
+.sticky-item.is-hidden .sticky-summary {
+  color: var(--text-sub);
+}
+
 .sticky-color-bar {
   width: 4px;
   height: 24px;
@@ -239,7 +248,13 @@
 
 .sticky-badge.hidden {
   background: var(--red-bg);
-  color: var(--text-sub);
+  color: var(--text);
+  font-weight: var(--weight-medium);
+}
+
+.sticky-badge .icon {
+  width: 11px;
+  height: 11px;
 }
 
 .sticky-badge.trashed {

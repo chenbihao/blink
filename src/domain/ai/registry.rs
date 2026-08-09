@@ -414,7 +414,7 @@ mod tests {
 
     fn make_config(
         providers: Vec<(&str, Vec<&str>)>,
-        tier_router: Option<(&str, &str)>,
+        tier_ultra_light: Option<(&str, &str)>,
     ) -> AIConfig {
         AIConfig {
             enabled: true,
@@ -445,7 +445,7 @@ mod tests {
                     created_at: 0,
                 })
                 .collect(),
-            tier_router: tier_router.map(|(p, m)| TierAssignment {
+            tier_ultra_light: tier_ultra_light.map(|(p, m)| TierAssignment {
                 provider_id: p.into(),
                 model_id: m.into(),
             }),
@@ -458,7 +458,7 @@ mod tests {
         let f = Arc::new(CountingFactory::new());
         let reg = AIProviderRegistry::new(f);
         assert!(matches!(
-            reg.resolve(Tier::Router),
+            reg.resolve(Tier::UltraLight),
             Err(AIError::NotConfigured)
         ));
         assert!(matches!(
@@ -483,9 +483,9 @@ mod tests {
         assert_eq!(f.calls(), 2);
 
         // dispatch Router → (p1, m1)
-        let (p, actual) = reg.resolve(Tier::Router).unwrap();
+        let (p, actual) = reg.resolve(Tier::UltraLight).unwrap();
         assert_eq!(p.model_id(), "mock-echo"); // MockProvider 内部 id,证明 dispatch 到实例
-        assert_eq!(actual, Tier::Router);
+        assert_eq!(actual, Tier::UltraLight);
     }
 
     #[test]
@@ -499,7 +499,7 @@ mod tests {
         assert_eq!(f.calls(), 2, "两个 model 都被尝试构造");
 
         // Router 指向 m2 → 成功
-        assert!(reg.resolve(Tier::Router).is_ok());
+        assert!(reg.resolve(Tier::UltraLight).is_ok());
     }
 
     #[test]
@@ -511,7 +511,7 @@ mod tests {
 
         assert_eq!(reg.size(), 0);
         assert!(matches!(
-            reg.resolve(Tier::Router),
+            reg.resolve(Tier::UltraLight),
             Err(AIError::NotConfigured)
         ));
     }
@@ -524,13 +524,13 @@ mod tests {
         assert_eq!(f.calls(), 2);
 
         // 保存旧实例的引用,证明"没被重建"
-        let old_p1_m1 = reg.resolve(Tier::Router).unwrap().0;
+        let old_p1_m1 = reg.resolve(Tier::UltraLight).unwrap().0;
 
         // reload 到同样的 cfg——不应再调 factory
         reg.reload(&cfg1);
         assert_eq!(f.calls(), 2, "同 config reload 不该再 build");
 
-        let new_p1_m1 = reg.resolve(Tier::Router).unwrap().0;
+        let new_p1_m1 = reg.resolve(Tier::UltraLight).unwrap().0;
         assert!(
             Arc::ptr_eq(&old_p1_m1, &new_p1_m1),
             "reload 后 instance 应完全复用"
@@ -545,7 +545,7 @@ mod tests {
         let cfg1 = make_config(vec![("p1", vec!["m1"])], Some(("p1", "m1")));
         let reg = AIProviderRegistry::from_config(f.clone(), &cfg1);
         assert_eq!(f.calls(), 1);
-        let old = reg.resolve(Tier::Router).unwrap().0;
+        let old = reg.resolve(Tier::UltraLight).unwrap().0;
 
         // 改 base_url
         let mut cfg2 = cfg1.clone();
@@ -553,7 +553,7 @@ mod tests {
         reg.reload(&cfg2);
         assert_eq!(f.calls(), 2, "base_url 变了必须重建");
 
-        let new = reg.resolve(Tier::Router).unwrap().0;
+        let new = reg.resolve(Tier::UltraLight).unwrap().0;
         assert!(!Arc::ptr_eq(&old, &new), "新实例不该等于旧实例");
     }
 
@@ -563,13 +563,13 @@ mod tests {
         let f = Arc::new(CountingFactory::new());
         let cfg1 = make_config(vec![("p1", vec!["m1"])], Some(("p1", "m1")));
         let reg = AIProviderRegistry::from_config(f.clone(), &cfg1);
-        let old = reg.resolve(Tier::Router).unwrap().0;
+        let old = reg.resolve(Tier::UltraLight).unwrap().0;
 
         let mut cfg2 = cfg1.clone();
         cfg2.providers[0].kind = ProviderKind::AnthropicMessages;
         reg.reload(&cfg2);
         assert_eq!(f.calls(), 2);
-        let new = reg.resolve(Tier::Router).unwrap().0;
+        let new = reg.resolve(Tier::UltraLight).unwrap().0;
         assert!(!Arc::ptr_eq(&old, &new));
     }
 
@@ -580,13 +580,13 @@ mod tests {
         let f = Arc::new(CountingFactory::new());
         let cfg = make_config(vec![("p1", vec!["m1"])], Some(("p1", "m1")));
         let reg = AIProviderRegistry::from_config(f.clone(), &cfg);
-        let old = reg.resolve(Tier::Router).unwrap().0;
+        let old = reg.resolve(Tier::UltraLight).unwrap().0;
 
         // 用户改密钥场景:save_ai_secret bump epoch → set_config 触发 reload
         reg.bump_secret_epoch();
         reg.reload(&cfg);
         assert_eq!(f.calls(), 2, "epoch bump 后必须重建实例");
-        let new = reg.resolve(Tier::Router).unwrap().0;
+        let new = reg.resolve(Tier::UltraLight).unwrap().0;
         assert!(!Arc::ptr_eq(&old, &new));
     }
 
@@ -606,7 +606,7 @@ mod tests {
         assert_eq!(f.calls(), 2, "只对 m2 调一次 build");
 
         // 验证 tier 指向新 m2 生效
-        let (p, _) = reg.resolve(Tier::Router).unwrap();
+        let (p, _) = reg.resolve(Tier::UltraLight).unwrap();
         assert_eq!(p.model_id(), "mock-echo");
     }
 
@@ -622,7 +622,7 @@ mod tests {
         let reg = AIProviderRegistry::from_config(f, &cfg);
 
         // 请求 Router → 降级到 Main
-        let (_, actual) = reg.resolve(Tier::Router).unwrap();
+        let (_, actual) = reg.resolve(Tier::UltraLight).unwrap();
         assert_eq!(actual, Tier::Main);
     }
 
@@ -632,7 +632,7 @@ mod tests {
         let cfg = make_config(vec![("p1", vec!["m1"])], Some(("p1", "m1")));
         let reg = AIProviderRegistry::from_config(f, &cfg);
 
-        let resolved = reg.resolve_entries(Tier::Router).unwrap();
+        let resolved = reg.resolve_entries(Tier::UltraLight).unwrap();
         assert_eq!(resolved.provider.id, "p1");
         assert_eq!(resolved.model.id, "m1");
         assert_eq!(resolved.cache_key.0, "p1");
@@ -640,7 +640,7 @@ mod tests {
         assert!(resolved.cache_key.2.ends_with("|e0"));
 
         reg.bump_secret_epoch();
-        let after_secret_change = reg.resolve_entries(Tier::Router).unwrap();
+        let after_secret_change = reg.resolve_entries(Tier::UltraLight).unwrap();
         assert_ne!(resolved.cache_key, after_secret_change.cache_key);
     }
 
@@ -663,7 +663,7 @@ mod tests {
     fn resolve_explicit_entries_returns_when_exists() {
         let f = Arc::new(CountingFactory::new());
         let reg = AIProviderRegistry::new(f);
-        // tier_router 指向 m1,便于对比 cache_key
+        // tier_ultra_light 指向 m1,便于对比 cache_key
         reg.reload(&make_config(
             vec![("p1", vec!["m1", "m2"])],
             Some(("p1", "m1")),
@@ -674,7 +674,7 @@ mod tests {
         assert_eq!(entries.model.id, "m2");
         // 显式解析的 cache_key 与 tier 解析的 cache_key 第三段(fingerprint)应一致,
         // 因为同一 provider 的 fingerprint 不变;前两段按各自 (pid, mid) 不同。
-        let tier_entries = reg.resolve_entries(Tier::Router).unwrap();
+        let tier_entries = reg.resolve_entries(Tier::UltraLight).unwrap();
         assert_eq!(
             entries.cache_key.0, tier_entries.cache_key.0,
             "provider id 应同"

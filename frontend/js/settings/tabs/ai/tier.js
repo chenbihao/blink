@@ -1,4 +1,4 @@
-//! AI Tab tier 路由（0.14.6 §4.2 拆分）。
+//! AI Tab 模型档位（0.14.6 §4.2 拆分）。
 //!
 //! 渲染 tier 下拉选项、降级提示、状态横幅。
 
@@ -19,19 +19,20 @@ export function renderAITierSelects() {
     });
   });
   const html = options.join("");
-  ["router", "light", "main"].forEach((tier) => {
+  ["ultra-light", "light", "main"].forEach((tier) => {
     const sel = document.getElementById(`ai-tier-${tier}`);
     if (!sel) return;
     sel.innerHTML = html;
-    const assign = cfg[`tier_${tier}`];
+    const assign = cfg[`tier_${tier.replace('-', '_')}`];
     sel.value = assign ? `${assign.provider_id}::${assign.model_id}` : "";
   });
   renderAITierDegrade();
+  renderMainWindowModelSelect();
 }
 
 export function renderAITierDegrade() {
   const cfg = aiState.currentAIConfig;
-  const chain = { router: ["light", "main"], light: ["main"], main: [] };
+  const chain = { ultra_light: ["light", "main"], light: ["main"], main: [] };
   const isUsable = (a) => {
     if (!a) return false;
     const provider = (cfg.providers || []).find((p) => p.id === a.provider_id);
@@ -44,8 +45,8 @@ export function renderAITierDegrade() {
     const model = provider && (provider.models || []).find((m) => m.id === a.model_id);
     return { provider, model };
   };
-  ["router", "light", "main"].forEach((tier) => {
-    const el = document.getElementById(`ai-tier-${tier}-degrade`);
+  ["ultra_light", "light", "main"].forEach((tier) => {
+    const el = document.getElementById(`ai-tier-${tier.replace('_', '-')}-degrade`);
     if (!el) return;
     const assign = cfg[`tier_${tier}`];
     if (assign) {
@@ -91,7 +92,7 @@ export function renderAITierBanner() {
     banner.classList.add('hidden');
     return;
   }
-  const hasIssue = ["router", "light", "main"].some((tier) => {
+  const hasIssue = ["ultra_light", "light", "main"].some((tier) => {
     const assign = cfg[`tier_${tier}`];
     if (!assign) return tier !== "main";
     const provider = (cfg.providers || []).find((p) => p.id === assign.provider_id);
@@ -112,4 +113,35 @@ export function renderAITierBanner() {
   banner.textContent = mainMissing
     ? t("ai.tier.no_provider").replace(/^→\s*/, "")
     : t("ai.tier.degrade_to", { tier: t("ai.tier.main") });
+}
+
+/** 渲染主窗口 AI 的自选模型列表，并按配置切换可见性。 */
+export function renderMainWindowModelSelect() {
+  const cfg = aiState.currentAIConfig;
+  const policy = cfg.chat_config?.main_window_model || "light";
+  const mode = policy === "light" || policy === "main" ? policy : "custom";
+  const modeSelect = document.getElementById("ai-main-window-model-mode");
+  const customRow = document.getElementById("ai-main-window-custom-model-row");
+  const customSelect = document.getElementById("ai-main-window-custom-model");
+  if (modeSelect) modeSelect.value = mode;
+  if (customRow) customRow.classList.toggle("hidden", mode !== "custom");
+  if (!customSelect) return;
+
+  const options = [];
+  const values = new Set();
+  for (const provider of cfg.providers || []) {
+    if (provider.enabled === false) continue;
+    for (const model of provider.models || []) {
+      if (model.enabled === false || !(model.capabilities || ["chat"]).includes("chat")) continue;
+      const value = `${provider.id}:${model.id}`;
+      const label = `${provider.display_name} / ${model.display_name || model.id}`;
+      options.push(`<option value="${escapeAttr(value)}">${escapeHtml(label)}</option>`);
+      values.add(value);
+    }
+  }
+  if (mode === "custom" && !values.has(policy)) {
+    options.unshift(`<option value="${escapeAttr(policy)}">${escapeHtml(t("ai.chat.main_model.unavailable"))}</option>`);
+  }
+  customSelect.innerHTML = options.join("");
+  if (mode === "custom") customSelect.value = policy;
 }

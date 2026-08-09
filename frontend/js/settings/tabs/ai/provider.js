@@ -56,13 +56,14 @@ export function renderAIProviders() {
       const modelsTable = models.length > 0
         ? `<table class="ai-models-table">
             <colgroup>
+              <col class="col-drag" />
               <col class="col-id" />
               <col class="col-name" />
               <col class="col-caps" />
               <col class="col-enabled" />
               <col class="col-actions" />
             </colgroup>
-            <thead><tr><th>Model ID</th><th>${escapeHtml(t("ai.model.col.name"))}</th><th>${escapeHtml(t("ai.model.col.capabilities"))}</th><th>${escapeHtml(t("ai.model.col.enabled"))}</th><th>${escapeHtml(t("ai.model.col.actions"))}</th></tr></thead>
+            <thead><tr><th></th><th>Model ID</th><th>${escapeHtml(t("ai.model.col.name"))}</th><th>${escapeHtml(t("ai.model.col.capabilities"))}</th><th>${escapeHtml(t("ai.model.col.enabled"))}</th><th>${escapeHtml(t("ai.model.col.actions"))}</th></tr></thead>
             <tbody>${models.map((m) => {
               const enabled = m.enabled !== false;
               const hasParams = m.temperature != null || m.max_tokens != null || (m.custom_parameters && m.custom_parameters.length > 0);
@@ -72,6 +73,7 @@ export function renderAIProviders() {
               const caps = (m.capabilities || ["chat"]);
               const capsHtml = caps.map((cap) => `<span class="ai-cap-badge ai-cap-${escapeAttr(cap)}">${escapeHtml(t("ai.cap." + cap))}</span>`).join("");
               return `<tr data-model-id="${escapeAttr(m.id)}" data-provider-id="${escapeAttr(p.id)}">
+                <td class="ai-model-drag-cell"><span class="ai-model-drag-handle" title="${escapeAttr(t("ai.model.drag"))}">⋮⋮</span></td>
                 <td class="ai-models-table-id" title="${escapeAttr(m.id)}">${escapeHtml(m.id)}${paramsBadge}</td>
                 <td title="${escapeAttr(m.display_name || m.id)}">${escapeHtml(m.display_name || m.id)}</td>
                 <td class="ai-models-table-caps">${capsHtml}</td>
@@ -94,12 +96,12 @@ export function renderAIProviders() {
       return `
         <div class="ai-provider-card" data-provider-id="${escapeAttr(p.id)}">
           <div class="ai-provider-header" data-provider-id="${escapeAttr(p.id)}">
-            <span class="ai-provider-drag-handle" draggable="true" title="拖动排序">⋮⋮</span>
+            <span class="ai-provider-drag-handle" draggable="true" title="${escapeAttr(t("ai.provider.drag"))}">⋮⋮</span>
             <span class="ai-provider-chevron">▸</span>
             <span class="ai-provider-mono${monoCjkCls}" data-tint="${preset.tint}">${escapeHtml(monogram)}</span>
             <div class="ai-provider-info">
               <div class="ai-provider-title">${escapeHtml(p.display_name)}</div>
-              <div class="ai-provider-meta">${escapeHtml(kindLabel)} · ${escapeHtml(modelSummary || "(no model)")}</div>
+              <div class="ai-provider-meta">${escapeHtml(kindLabel)} · ${escapeHtml(modelSummary || t("ai.model.none"))}</div>
             </div>
             <span class="ai-provider-status ${statusCls}">${escapeHtml(statusText)}</span>
 <label class="switch switch-sm" title="${escapeAttr(t("ai.provider.enable_toggle"))}">
@@ -181,6 +183,78 @@ export function renderAIProviders() {
       openAIModelEditModal(btn.dataset.providerId, null);
     });
   });
+
+  // ── 单个供应商内的模型拖动排序 ──
+  let modelDragState = null;
+  container.querySelectorAll(".ai-model-drag-handle").forEach((handle) => {
+    handle.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const row = handle.closest("tr[data-model-id]");
+      const tbody = row?.closest("tbody");
+      if (!row || !tbody) return;
+      modelDragState = { row, tbody, startY: e.clientY, started: false };
+      document.addEventListener("mousemove", onModelDragMove);
+      document.addEventListener("mouseup", onModelDragEnd);
+    });
+  });
+
+  function onModelDragMove(e) {
+    if (!modelDragState) return;
+    if (!modelDragState.started && Math.abs(e.clientY - modelDragState.startY) > 4) {
+      modelDragState.started = true;
+      modelDragState.row.classList.add("dragging");
+    }
+    if (!modelDragState.started) return;
+
+    const { row: draggedRow, tbody } = modelDragState;
+    const rows = Array.from(tbody.querySelectorAll("tr[data-model-id]"));
+    for (const row of rows) {
+      if (row === draggedRow) continue;
+      const rect = row.getBoundingClientRect();
+      if (e.clientY < rect.top || e.clientY > rect.bottom) continue;
+      if (e.clientY < rect.top + rect.height / 2) {
+        tbody.insertBefore(draggedRow, row);
+      } else {
+        tbody.insertBefore(draggedRow, row.nextElementSibling);
+      }
+      break;
+    }
+  }
+
+  function onModelDragEnd() {
+    document.removeEventListener("mousemove", onModelDragMove);
+    document.removeEventListener("mouseup", onModelDragEnd);
+    if (!modelDragState) return;
+    const { row, tbody, started } = modelDragState;
+    row.classList.remove("dragging");
+    modelDragState = null;
+    if (!started) return;
+
+    const providerId = row.dataset.providerId;
+    const provider = (aiState.currentAIConfig.providers || []).find((p) => p.id === providerId);
+    if (!provider) return;
+    const previousModels = [...(provider.models || [])];
+    const newOrder = Array.from(tbody.querySelectorAll("tr[data-model-id]")).map((item) => item.dataset.modelId);
+    const reordered = newOrder.map((id) => previousModels.find((model) => model.id === id)).filter(Boolean);
+    if (reordered.length !== previousModels.length) return;
+
+    provider.models = reordered;
+    const expandedIds = getExpandedProviderIds();
+    saveAIConfig()
+      .then(() => {
+        renderAIProviders();
+        restoreExpandedProviderIds(expandedIds);
+        renderAITierSelects();
+        renderAITierBanner();
+      })
+      .catch((e) => {
+        provider.models = previousModels;
+        renderAIProviders();
+        restoreExpandedProviderIds(expandedIds);
+        console.error("[ai] reorder models failed:", e);
+      });
+  }
 
   // ── 供应商拖动排序 ──
   let dragState = null;
@@ -329,7 +403,7 @@ async function deleteModelFromProvider(providerId, modelId) {
   if (!ok) return;
   provider.models = provider.models.filter((m) => m.id !== modelId);
   // 清悬空 tier
-  ["router", "light", "main"].forEach((tier) => {
+  ["ultra_light", "light", "main"].forEach((tier) => {
     const a = cfg[`tier_${tier}`];
     if (a && a.provider_id === providerId && a.model_id === modelId) {
       cfg[`tier_${tier}`] = null;
@@ -463,7 +537,34 @@ export function renderPresetList(selectedKey, isEdit) {
       item.classList.add("selected");
       document.getElementById("ai-modal-preset").value = key;
       applyAIPresetToModal(key, isEdit);
+      updatePresetToggleSummary(key);
     });
+  });
+  updatePresetToggleSummary(selectedKey);
+}
+
+function updatePresetToggleSummary(key) {
+  const summary = document.getElementById("ai-preset-toggle-summary");
+  if (!summary) return;
+  const preset = AI_PRESET_CATALOG[key] || AI_PRESET_CATALOG.custom;
+  summary.textContent = preset.display_name_default || t("ai.modal.preset.custom");
+}
+
+function setPresetExpanded(expanded) {
+  const row = document.getElementById("ai-modal-preset-row");
+  const toggle = document.getElementById("ai-preset-toggle");
+  if (!row || !toggle) return;
+  row.classList.toggle("hidden", !expanded);
+  toggle.setAttribute("aria-expanded", String(expanded));
+  toggle.classList.toggle("is-expanded", expanded);
+}
+
+function bindPresetToggle() {
+  const toggle = document.getElementById("ai-preset-toggle");
+  if (!toggle || toggle.dataset.bound === "1") return;
+  toggle.dataset.bound = "1";
+  toggle.addEventListener("click", () => {
+    setPresetExpanded(toggle.getAttribute("aria-expanded") !== "true");
   });
 }
 
@@ -504,6 +605,7 @@ export function openAIProviderModal(editProviderId) {
   if (!overlay) return;
   const cfg = aiState.currentAIConfig;
   const isEdit = typeof editProviderId === "string" && editProviderId.length > 0;
+  bindPresetToggle();
 
   if (isEdit) {
     const p = (cfg.providers || []).find((x) => x.id === editProviderId);
@@ -528,7 +630,7 @@ export function openAIProviderModal(editProviderId) {
       }
     }).catch(() => { });
     $("ai-modal-kind-row").classList.remove('hidden');
-    $("ai-modal-preset-row").classList.remove('hidden');
+    setPresetExpanded(false);
     renderPresetList(guessPresetForProvider(p.kind, p.base_url), true);
     $("ai-modal-kind").disabled = false;
     $("ai-modal-model-section").classList.remove('hidden');
@@ -540,7 +642,7 @@ export function openAIProviderModal(editProviderId) {
     delete overlay.dataset.editProviderId;
     $("ai-modal-title").textContent = t("ai.modal.title");
     $("ai-modal-kind-row").classList.remove('hidden');
-    $("ai-modal-preset-row").classList.remove('hidden');
+    setPresetExpanded(true);
     $("ai-modal-preset").value = "openai";
     $("ai-modal-kind").value = "openai_compatible";
     $("ai-modal-display-name").value = "";
@@ -585,11 +687,11 @@ export async function saveNewProviderFromModal() {
   const editProviderId = overlay?.dataset?.editProviderId || null;
 
   if (!displayName) {
-    if (errEl) errEl.textContent = t("ai.modal.err.name");
+    if (errEl) errEl.textContent = t("ai.modal.save.empty_display");
     return;
   }
   if (kind !== "ollama_http" && !apiKey && !editProviderId) {
-    if (errEl) errEl.textContent = t("ai.modal.err.api_key");
+    if (errEl) errEl.textContent = t("ai.modal.save.empty_key");
     return;
   }
 
@@ -606,7 +708,7 @@ async function saveNewProvider({ kind, displayName, baseUrl, apiKey, errEl, sele
     || `p-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const cfg = aiState.currentAIConfig;
   if ((cfg.providers || []).some((p) => p.id === providerId)) {
-    if (errEl) errEl.textContent = t("ai.modal.err.duplicate_id");
+    if (errEl) errEl.textContent = t("ai.modal.save.duplicate_id");
     return;
   }
   if (apiKey) {
@@ -736,7 +838,7 @@ export async function deleteAIProvider(providerId) {
   if (!provider) return;
 
   const referenced = [];
-  ["router", "light", "main"].forEach((tier) => {
+  ["ultra_light", "light", "main"].forEach((tier) => {
     const a = cfg[`tier_${tier}`];
     if (a && a.provider_id === providerId) referenced.push(t(`ai.tier.${tier}`));
   });
@@ -761,7 +863,7 @@ export async function deleteAIProvider(providerId) {
   cfg.providers = (cfg.providers || []).filter((p) => p.id !== providerId);
   aiState.hasSecretMap.delete(providerId);
   aiState.secretHintMap?.delete(providerId);
-  ["router", "light", "main"].forEach((tier) => {
+  ["ultra_light", "light", "main"].forEach((tier) => {
     const a = cfg[`tier_${tier}`];
     if (a && a.provider_id === providerId) {
       cfg[`tier_${tier}`] = null;
@@ -838,15 +940,15 @@ export function filterProviderModels(filter) {
 
   const cache = aiState._providerModelCache;
   if (!cache || cache.loading) {
-    dropdown.innerHTML = `<div class="ai-provider-model-dropdown-empty"><span class="ai-spinner"></span> 正在拉取模型列表…</div>`;
+    dropdown.innerHTML = `<div class="ai-provider-model-dropdown-empty"><span class="ai-spinner"></span> ${escapeHtml(t("ai.model_modal.fetch.loading"))}</div>`;
     return;
   }
   if (cache.error) {
     const q = (filter || "").trim();
-    let html = `<div class="ai-provider-model-dropdown-empty">❌ ${escapeHtml(cache.error)}</div>`;
+    let html = `<div class="ai-provider-model-dropdown-empty">${escapeHtml(t("ai.model_modal.fetch.failed", { err: cache.error }))}</div>`;
     if (q && !aiState._providerSelectedModels.includes(q)) {
       html += `<div class="ai-provider-model-dropdown-item ai-manual-add" data-model-id="${escapeAttr(q)}">
-        <span>+ 添加 "${escapeHtml(q)}"</span>
+        <span>+ ${escapeHtml(t("ai.model_modal.manual_add", { id: q }))}</span>
       </div>`;
     }
     dropdown.innerHTML = html;
@@ -878,7 +980,7 @@ export function filterProviderModels(filter) {
       return `<label class="ai-provider-model-dropdown-item is-already" data-model-id="${escapeAttr(m)}">
         <input type="checkbox" disabled data-model-id="${escapeAttr(m)}" />
         <span>${escapeHtml(m)}</span>
-        <span class="added-label">已添加</span>
+        <span class="added-label">${escapeHtml(t("ai.model_modal.added"))}</span>
       </label>`;
     }
     return `<label class="ai-provider-model-dropdown-item" data-model-id="${escapeAttr(m)}">
@@ -890,18 +992,18 @@ export function filterProviderModels(filter) {
   if (filtered.length === 0 && q) {
     if (!selectedSet.has(q) && !providerModelIds.has(q)) {
       itemsHtml += `<div class="ai-provider-model-dropdown-item ai-manual-add" data-model-id="${escapeAttr(q)}">
-        <span>+ 添加 "${escapeHtml(q)}"</span>
+        <span>+ ${escapeHtml(t("ai.model_modal.manual_add", { id: q }))}</span>
       </div>`;
     } else {
-      itemsHtml += `<div class="ai-provider-model-dropdown-empty">无匹配模型</div>`;
+      itemsHtml += `<div class="ai-provider-model-dropdown-empty">${escapeHtml(t("ai.model_modal.fetch.no_match"))}</div>`;
     }
   } else if (filtered.length === 0) {
-    itemsHtml += `<div class="ai-provider-model-dropdown-empty">未返回可用模型</div>`;
+    itemsHtml += `<div class="ai-provider-model-dropdown-empty">${escapeHtml(t("ai.model_modal.fetch.empty"))}</div>`;
   }
 
   if (q && filtered.length > 0 && !cache.models.some((m) => m.toLowerCase() === qLower) && !selectedSet.has(q) && !providerModelIds.has(q)) {
     itemsHtml += `<div class="ai-provider-model-dropdown-item ai-manual-add" data-model-id="${escapeAttr(q)}">
-      <span>+ 添加 "${escapeHtml(q)}"</span>
+      <span>+ ${escapeHtml(t("ai.model_modal.manual_add", { id: q }))}</span>
     </div>`;
   }
 

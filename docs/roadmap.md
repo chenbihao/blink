@@ -40,6 +40,7 @@
 | 统一能力底座继续收敛 | **已进入 0.19** | 0.19.6 收敛共享语义实现与行为契约；不机械合并 Action/Chord/Capability Registry | 按 [0.19 phase](./phases/0.19-capability-closure.md) 验收 |
 | 自然语言设置 | **已进入 0.19** | 0.19.8 以显式白名单读取和修改常用设置，不暴露原始 KV 或密钥 | 按 [0.19 phase](./phases/0.19-capability-closure.md) 验收 |
 | AI 设置、纯对话与 MCP 生命周期 | **已进入 0.19** | 0.19.9–0.19.11 分别收敛设置真实语义、纯对话/Skill 运行态和 MCP client single-flight | 按 [0.19 phase](./phases/0.19-capability-closure.md) 验收 |
+| Agent 交互入口与能力可发现性 | **近期优先** | 建立统一 Slash 命令注册与补全，优先覆盖 `/new`、`/model`、`/skill`、`/tools` 和受控 `/mcp` 入口 | 先明确命令语义、可用范围、键盘交互与危险确认边界 |
 | Agent 能力增强 | **条件候选** | 集中评估路径级授权、`write_text_file`、受控 `read_url` 与更长任务的能力边界；不并入当前轻量读取 | 出现稳定的“读取→修改→保存”或“URL→正文→处理”高频场景 |
 | AI 视觉结果引用与内部直链 | **条件候选** | 复用 0.19 ImageStash；避免图片经过 LLM channel | OCR/多模态消费出现稳定场景与清晰收益 |
 | 外部 agent 作为 subagent | **条件候选** | 可借力长任务生态，但不能把 Blink 变成 agent 壳 | 文件长任务成为高频核心场景，且权限范围可控 |
@@ -67,6 +68,12 @@
 0.19.6 已承接当前明确的收敛项：剪贴板读写与截图复制、图片加载与 pin、便签编排、OCR 用户入口与 Capability 的行为一致性。UI 状态机 command 保持独立，现有 command 对外契约不因收敛而改变。
 
 `ActionRegistry` 与 `ChordRegistry` 的互通或合并仍留作真实场景触发后的独立问题，不顺带塞进 0.19.6，也不组成一个无边界的“继续重构”版本。
+
+### 3.3 Agent 交互入口与能力可发现性
+
+近期先解决“已有能力看不见、命令入口各自特判”的交互问题，不提前扩张文件写入或长任务权限。建立统一 Slash 命令注册表，由同一份 metadata 驱动解析、说明、可用范围与输入补全；输入 `/` 后支持模糊过滤、上下键选择、Tab 补全、Enter 执行和 Esc 收起。
+
+首批候选为 `/new`、`/model`、`/skill <name>` 与 `/tools`。`/mcp` 只用于查看服务器状态或限定当前对话的 MCP 来源，不直接绕过 Agent 调任意 MCP tool；复杂参数仍由 Agent 按 tool schema 组织，并继续经过既有危险确认。`/skill` 从当前 composer 特判迁入统一注册表，避免 Slash 命令继续形成平行解析链。
 
 ---
 

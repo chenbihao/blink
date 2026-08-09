@@ -51,14 +51,20 @@ impl CapabilityRegistry {
         self.caps.read().unwrap().get(id).cloned()
     }
 
-    /// 列出所有已注册能力的 schema（供 AI tool 池消费）。
+    /// 按名称列出所有已注册能力的 schema（供 AI tool 池 / CLI / MCP 消费）。
+    ///
+    /// 注册表内部是 `HashMap`，遍历顺序不稳定；在公共 list 边界统一排序，
+    /// 避免设置页与 MCP `tools/list` 每次启动出现不同顺序。
     pub fn list(&self) -> Vec<CapabilitySchema> {
-        self.caps
+        let mut schemas: Vec<_> = self
+            .caps
             .read()
             .unwrap()
             .values()
             .map(|cap| cap.schema())
-            .collect()
+            .collect();
+        schemas.sort_by(|a, b| a.name.cmp(&b.name));
+        schemas
     }
 
     /// 运行期动态注册能力（0.12.0 §2.5）。
@@ -212,6 +218,20 @@ mod tests {
         let reg = CapabilityRegistry::default();
         let _schemas = reg.list();
         // 测试环境 inventory 可能含测试 submit，只验证不 panic + 返回 Vec
+    }
+
+    #[test]
+    fn list_is_sorted_by_capability_name() {
+        let reg = CapabilityRegistry::default();
+        reg.register(Arc::new(MockCap {
+            id_val: "sort_test_zulu",
+        }));
+        reg.register(Arc::new(MockCap {
+            id_val: "sort_test_alpha",
+        }));
+
+        let names: Vec<_> = reg.list().into_iter().map(|schema| schema.name).collect();
+        assert!(names.windows(2).all(|pair| pair[0] <= pair[1]));
     }
 
     /// registry::invoke 的 NotFound 路径在 get(id) 返回 None 时短路——

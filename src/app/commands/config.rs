@@ -351,7 +351,7 @@ pub async fn set_config(
             if let Some(chat) =
                 app.try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
             {
-                chat.update_pure_chat_mode(ai.chat_config.pure_chat);
+                chat.update_chat_config(&ai.chat_config);
                 chat.update_memory_config(ai.chat_config.memory_config.clone())
                     .await;
                 // 0.19.10: Skill 总开关、重扫与单 Skill 禁用清单统一热更新。
@@ -369,7 +369,7 @@ pub async fn set_config(
             tracing::info!(
                 enabled = ai.enabled,
                 providers = ai.providers.len(),
-                tier_router = ai.tier_router.is_some(),
+                tier_ultra_light = ai.tier_ultra_light.is_some(),
                 tier_light = ai.tier_light.is_some(),
                 tier_main = ai.tier_main.is_some(),
                 direct_execute_safe_actions = ai.direct_execute_safe_actions,

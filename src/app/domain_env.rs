@@ -240,6 +240,54 @@ impl CapabilityEnv for TauriDomainEnv {
         Ok(updated_at)
     }
 
+    async fn set_sticky_visibility_and_notify(
+        &self,
+        sticky_id: &str,
+        visible: bool,
+    ) -> Result<(), StickyWorkflowError> {
+        let svc = self
+            .sticky_service()
+            .ok_or_else(|| StickyWorkflowError::SideEffect {
+                detail: "StickyService 不可用".into(),
+            })?;
+        let note = svc.get_active_note(sticky_id).await?;
+        svc.set_visible(sticky_id, visible).await?;
+
+        let window_result = if visible {
+            crate::infra::platform::window::show_sticky_window(
+                &self.app,
+                sticky_id,
+                note.x,
+                note.y,
+                note.width,
+                note.height,
+                note.always_on_top,
+                false,
+            )
+        } else {
+            crate::infra::platform::window::hide_sticky_window(&self.app, sticky_id)
+        };
+        let emit_result = self
+            .app
+            .emit(
+                crate::domain::event_names::EventNames::STICKY_VISIBILITY_CHANGED,
+                serde_json::json!({ "stickyId": sticky_id, "visible": visible }),
+            )
+            .map_err(|e| e.to_string());
+        match (window_result, emit_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(window), Ok(())) => Err(StickyWorkflowError::SideEffect {
+                detail: format!("同步便签窗口可见性失败: {window}"),
+            }),
+            (Ok(()), Err(emit)) => Err(StickyWorkflowError::SideEffect {
+                detail: format!("通知便签管理器失败: {emit}"),
+            }),
+            (Err(window), Err(emit)) => Err(StickyWorkflowError::SideEffect {
+                detail: format!("同步便签窗口可见性失败: {window}; 通知便签管理器失败: {emit}"),
+            }),
+        }
+    }
+
     async fn trash_sticky_and_notify(&self, sticky_id: &str) -> Result<(), StickyWorkflowError> {
         let svc = self
             .sticky_service()
@@ -495,6 +543,14 @@ mod tests {
         async fn trash_sticky_and_notify(
             &self,
             _sticky_id: &str,
+        ) -> Result<(), StickyWorkflowError> {
+            Ok(())
+        }
+
+        async fn set_sticky_visibility_and_notify(
+            &self,
+            _sticky_id: &str,
+            _visible: bool,
         ) -> Result<(), StickyWorkflowError> {
             Ok(())
         }

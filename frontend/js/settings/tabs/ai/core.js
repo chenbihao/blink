@@ -9,7 +9,7 @@
 //! 依赖所有子模块：state / tier / provider / model-edit / skill
 
 import { aiState, defaultAIConfig, saveAIConfig } from "./state.js";
-import { renderAITierSelects, renderAITierDegrade, renderAITierBanner } from "./tier.js";
+import { renderAITierSelects, renderAITierDegrade, renderAITierBanner, renderMainWindowModelSelect } from "./tier.js";
 import { renderAIProviders, closeAIProviderModal, saveNewProviderFromModal, guessPresetForProvider, clearProviderModelSelect, triggerProviderModelFetch, filterProviderModels, renderProviderModelTags } from "./provider.js";
 import { bindAIModelEditModalEvents } from "./model-edit.js";
 import { loadSkillList, showSkillImportPanel, initSkillImportHandlers } from "./skill.js";
@@ -48,6 +48,7 @@ async function loadAIConfig() {
     console.error("get_config_section app.ai failed:", e);
     aiState.currentAIConfig = defaultAIConfig();
   }
+  normalizeAIConfig(aiState.currentAIConfig);
   // 密钥存在性 + 掩码提示并行查询
   aiState.hasSecretMap = new Map();
   aiState.secretHintMap = new Map();
@@ -83,6 +84,20 @@ async function loadAIConfig() {
   bindAIEvents();
 }
 
+function normalizeAIConfig(cfg) {
+  if (cfg.tier_ultra_light == null && cfg.tier_router != null) {
+    cfg.tier_ultra_light = cfg.tier_router;
+  }
+  delete cfg.tier_router;
+  cfg.chat_config = cfg.chat_config || {};
+  if (!cfg.chat_config.agent_mode) {
+    cfg.chat_config.agent_mode = cfg.chat_config.pure_chat ? "pure_chat" : "full";
+  }
+  delete cfg.chat_config.pure_chat;
+  cfg.chat_config.main_window_model ||= "light";
+  delete cfg.chat_config.title_tier;
+}
+
 /**
  * 应用 AI 配置到 UI
  */
@@ -97,10 +112,12 @@ function applyAIConfigToUI() {
   if ($("ai-respect-awareness-url-path")) $("ai-respect-awareness-url-path").checked = c.respect_awareness_url_path !== false;
   if ($("ai-timeout-ms")) $("ai-timeout-ms").value = effectiveAIHardTimeoutMs(c.slo_hard_timeout_ms);
   // 对话配置
-  const chatCfg = c.chat_config || { pure_chat: false, auto_title: false, title_tier: "light" };
-  if ($("ai-chat-pure")) $("ai-chat-pure").checked = !!chatCfg.pure_chat;
+  const chatCfg = c.chat_config || { agent_mode: "full", main_window_model: "light", auto_title: false };
+  document.querySelectorAll('input[name="ai-agent-mode"]').forEach((input) => {
+    input.checked = input.value === (chatCfg.agent_mode || "full");
+  });
   if ($("ai-chat-auto-title")) $("ai-chat-auto-title").checked = !!chatCfg.auto_title;
-  if ($("ai-chat-title-tier")) $("ai-chat-title-tier").value = chatCfg.title_tier || "light";
+  renderMainWindowModelSelect();
   // 记忆策略配置
   const memCfg = chatCfg.memory_config || { mode: "token_aware", window_size: 20, trigger_ratio: 0.8, compress_ratio: 0.7, recall_enabled: true, recall_top_k: 3 };
   if ($("ai-memory-mode")) $("ai-memory-mode").value = memCfg.mode || "token_aware";
@@ -244,19 +261,31 @@ function bindAIEvents() {
     cfg.respect_awareness_url_path = e.target.checked;
     saveAIConfig();
   });
-  $("ai-chat-pure")?.addEventListener("change", (e) => {
+  document.querySelectorAll('input[name="ai-agent-mode"]').forEach((input) => input.addEventListener("change", (e) => {
+    if (!e.target.checked) return;
     cfg.chat_config = cfg.chat_config || {};
-    cfg.chat_config.pure_chat = e.target.checked;
+    cfg.chat_config.agent_mode = e.target.value;
+    saveAIConfig();
+  }));
+  $("ai-main-window-model-mode")?.addEventListener("change", (e) => {
+    cfg.chat_config = cfg.chat_config || {};
+    if (e.target.value === "custom") {
+      const custom = $("ai-main-window-custom-model");
+      cfg.chat_config.main_window_model = custom?.value || "light";
+    } else {
+      cfg.chat_config.main_window_model = e.target.value;
+    }
+    renderMainWindowModelSelect();
+    saveAIConfig();
+  });
+  $("ai-main-window-custom-model")?.addEventListener("change", (e) => {
+    cfg.chat_config = cfg.chat_config || {};
+    cfg.chat_config.main_window_model = e.target.value || "light";
     saveAIConfig();
   });
   $("ai-chat-auto-title")?.addEventListener("change", (e) => {
-    cfg.chat_config = cfg.chat_config || { auto_title: false, title_tier: "light" };
+    cfg.chat_config = cfg.chat_config || { auto_title: false };
     cfg.chat_config.auto_title = e.target.checked;
-    saveAIConfig();
-  });
-  $("ai-chat-title-tier")?.addEventListener("change", (e) => {
-    cfg.chat_config = cfg.chat_config || { auto_title: false, title_tier: "light" };
-    cfg.chat_config.title_tier = e.target.value;
     saveAIConfig();
   });
   $("ai-memory-mode")?.addEventListener("change", (e) => {
@@ -374,8 +403,8 @@ function bindAIEvents() {
     saveAIConfig();
   });
 
-  ["router", "light", "main"].forEach((tier) => {
-    $(`ai-tier-${tier}`)?.addEventListener("change", (e) => {
+  ["ultra_light", "light", "main"].forEach((tier) => {
+    $(`ai-tier-${tier.replace('_', '-')}`)?.addEventListener("change", (e) => {
       const val = e.target.value;
       if (!val) {
         cfg[`tier_${tier}`] = null;

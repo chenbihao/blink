@@ -72,9 +72,10 @@ pub struct AIConfig {
     pub providers: Vec<ProviderEntry>,
 
     // ── 三档指派 ───────────────────────────────────────────────────────────
-    /// 路由档:意图分类 + 参数抽取。快、便宜、高频调。空 → 降级到 light。
-    #[serde(default)]
-    pub tier_router: Option<TierAssignment>,
+    /// 超轻档:标题命名、分类、翻译等短任务。快、便宜、高频调。空 → 降级到 light。
+    /// `tier_router` 是 0.19.12 前的旧字段名，反序列化时兼容并在下次保存迁移。
+    #[serde(default, alias = "tier_router")]
+    pub tier_ultra_light: Option<TierAssignment>,
 
     /// 轻量档:日常单轮任务。中等。空 → 降级到 main。
     #[serde(default)]
@@ -121,7 +122,7 @@ impl Default for AIConfig {
             exclude_pure_numeric: true,
             respect_awareness_url_path: true,
             providers: Vec::new(),
-            tier_router: None,
+            tier_ultra_light: None,
             tier_light: None,
             tier_main: None,
             direct_execute_safe_actions: false,
@@ -374,20 +375,24 @@ impl ToolResultFeedback {
 /// 老配置缺此字段时 serde default 填充——零迁移成本。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChatConfig {
-    /// 纯对话模式。开启后 Blink AI Agent 不装配 Capability、MCP client tool 或 Skill。
-    /// 默认关闭；只影响 Blink 自身对话，不改变 Capability 的其他出口。
+    /// 旧版纯对话布尔开关，仅用于兼容已有配置。
+    /// 新配置写 `agent_mode`；当其缺失时才读取本字段。
     #[serde(default)]
     pub pure_chat: bool,
+
+    /// Agent 能力模式：`full` / `main_chat_only` / `pure_chat`。
+    /// None 表示旧配置，运行时由 `pure_chat` 推导。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_mode: Option<ChatAgentMode>,
+
+    /// 主窗口 AI 模型策略：`light` / `main` / `provider_id:model_id`。
+    #[serde(default = "default_main_window_model")]
+    pub main_window_model: String,
 
     /// LLM 自动命名开关——开启后新对话首条消息发送后异步调 LLM 生成标题。
     /// 默认关闭——opt-in 设计，用户可能不想消耗 token 生成标题。
     #[serde(default)]
     pub auto_title: bool,
-
-    /// 命名模型档位——LLM 命名使用的模型档位。
-    /// "main" / "light" / "router"，默认 "light"（日常命名不需要强模型）。
-    #[serde(default = "default_title_tier")]
-    pub title_tier: String,
 
     /// 记忆策略配置（0.13.1 §3.7）。
     ///
@@ -404,22 +409,45 @@ pub struct ChatConfig {
     pub skill_config: SkillConfig,
 }
 
-/// `ChatConfig` 的 Default 实现——`title_tier` 走 `default_title_tier()` 而非空字符串。
-/// serde 在整个 `chat_config` 字段缺失时调 `Default::default()`，此时必须拿到 "light"。
+/// `ChatConfig` 的 Default 实现。
 impl Default for ChatConfig {
     fn default() -> Self {
         Self {
             pure_chat: false,
+            agent_mode: Some(ChatAgentMode::Full),
+            main_window_model: default_main_window_model(),
             auto_title: false,
-            title_tier: default_title_tier(),
             memory_config: crate::domain::ai::memory::MemoryConfig::default(),
             skill_config: SkillConfig::default(),
         }
     }
 }
 
-/// `ChatConfig.title_tier` 的 serde 默认值——"light"。
-fn default_title_tier() -> String {
+impl ChatConfig {
+    /// 兼容旧 `pure_chat` 布尔值，返回当前有效能力模式。
+    pub fn effective_agent_mode(&self) -> ChatAgentMode {
+        self.agent_mode.unwrap_or(if self.pure_chat {
+            ChatAgentMode::PureChat
+        } else {
+            ChatAgentMode::Full
+        })
+    }
+}
+
+/// Blink 两类对话窗口的 Agent 能力装配模式。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatAgentMode {
+    /// 主窗口和持久对话窗口均装配内置 Capability、MCP 与 Skill。
+    #[default]
+    Full,
+    /// 仅主窗口保持纯对话，持久对话窗口仍装配全部能力。
+    MainChatOnly,
+    /// 两类窗口都不装配任何 Agent 扩展。
+    PureChat,
+}
+
+fn default_main_window_model() -> String {
     "light".to_string()
 }
 
@@ -480,7 +508,7 @@ impl SkillConfig {
 /// 一个模型的元数据 + 调用参数默认值。
 ///
 /// **0.9.4 Step 1** 起 `temperature / max_tokens / custom_parameters` 三个字段进入,
-/// 变成"调用参数**默认值**"载体——请求方(SearchService 路由档等)不指定时 fallback 到这里。
+/// 变成"调用参数**默认值**"载体——请求方不指定时 fallback 到这里。
 /// 优先级见 `RigProvider::complete`(rig_provider.rs)。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelEntry {
@@ -509,7 +537,7 @@ pub struct ModelEntry {
 
     // ── 0.9.4 Step 1:调用参数默认值 ──────────────────────────────────────
     /// 采样温度默认值。`CompletionRequest.temperature` 为 `None` 时 fallback 此值;
-    /// 请求方显式指定(如路由档 `temperature=0.0`)时**优先级高于此字段**——保证路由确定性。
+    /// 请求方显式指定时**优先级高于此字段**。
     #[serde(default)]
     pub temperature: Option<f32>,
 
@@ -559,8 +587,8 @@ pub struct TierAssignment {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)] // 0.9.1 Phase 4 起被 AIProvider dispatch 消费
 pub enum Tier {
-    /// 路由档:意图分类 + 参数抽取
-    Router,
+    /// 超轻档:标题命名、分类、翻译等低成本短任务
+    UltraLight,
     /// 轻量档:单轮任务
     Light,
     /// 主档:多步推理
@@ -572,7 +600,7 @@ pub enum Tier {
 impl AIConfig {
     /// 按档位选出 (Provider, Model),空档自动降级到下一档。
     ///
-    /// - `Router` 空 → `Light` → `Main` → None
+    /// - `UltraLight` 空 → `Light` → `Main` → None
     /// - `Light` 空 → `Main` → None
     /// - `Main` 空 → None(SearchService fallback 常规 fuzzy)
     ///
@@ -582,12 +610,12 @@ impl AIConfig {
     /// 消费方(SearchService)拿到降级信号后再决定要不要 emit 前端 event。
     ///
     /// 返回 `(&ProviderEntry, &ModelEntry, actual_tier)`——`actual_tier` 是实际
-    /// 落到哪一档(用户请求 Router 但落到 Light,`actual_tier = Light`)。
+    /// 落到哪一档(用户请求 UltraLight 但落到 Light,`actual_tier = Light`)。
     #[allow(dead_code)] // 0.9.1 Phase 5 起 AppContext AIProvider dispatch 消费
     pub fn resolve_tier(&self, tier: Tier) -> Option<(&ProviderEntry, &ModelEntry, Tier)> {
         let chain: &[(Tier, &Option<TierAssignment>)] = match tier {
-            Tier::Router => &[
-                (Tier::Router, &self.tier_router),
+            Tier::UltraLight => &[
+                (Tier::UltraLight, &self.tier_ultra_light),
                 (Tier::Light, &self.tier_light),
                 (Tier::Main, &self.tier_main),
             ],
@@ -640,16 +668,16 @@ impl AIConfig {
 
     /// 检测 provider_id 是否被任一档引用——删除 Provider 前问一下。
     ///
-    /// 用于 §6.4 UX:删 Provider 前弹"此 Provider 是 Router 档的引用,删除后回退"。
+    /// 用于 §6.4 UX:删 Provider 前提示该 Provider 被哪些模型档位引用。
     #[allow(dead_code)] // 0.9.1 Phase 6 前端删 Provider 时消费
     pub fn tiers_referencing(&self, provider_id: &str) -> Vec<Tier> {
         let mut hits = Vec::new();
         if self
-            .tier_router
+            .tier_ultra_light
             .as_ref()
             .is_some_and(|a| a.provider_id == provider_id)
         {
-            hits.push(Tier::Router);
+            hits.push(Tier::UltraLight);
         }
         if self
             .tier_light
@@ -747,7 +775,7 @@ mod tests {
         assert!(c.exclude_pure_numeric);
         assert!(c.respect_awareness_url_path);
         assert!(c.providers.is_empty());
-        assert!(c.tier_router.is_none());
+        assert!(c.tier_ultra_light.is_none());
         assert!(c.tier_light.is_none());
         assert!(c.tier_main.is_none());
     }
@@ -774,13 +802,13 @@ mod tests {
     #[test]
     fn resolve_tier_returns_none_when_all_empty() {
         let c = AIConfig::default();
-        assert!(c.resolve_tier(Tier::Router).is_none());
+        assert!(c.resolve_tier(Tier::UltraLight).is_none());
         assert!(c.resolve_tier(Tier::Light).is_none());
         assert!(c.resolve_tier(Tier::Main).is_none());
     }
 
     #[test]
-    fn resolve_tier_router_degrades_to_light() {
+    fn resolve_tier_ultra_light_degrades_to_light() {
         // 只配了 light,请求 router → 降级到 light
         let c = AIConfig {
             providers: vec![sample_provider("p1", "gpt-4")],
@@ -790,7 +818,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let (p, m, actual) = c.resolve_tier(Tier::Router).unwrap();
+        let (p, m, actual) = c.resolve_tier(Tier::UltraLight).unwrap();
         assert_eq!(p.id, "p1");
         assert_eq!(m.id, "gpt-4");
         assert_eq!(actual, Tier::Light, "router 空 → 实际落到 light");
@@ -815,14 +843,14 @@ mod tests {
         // Router 直接配好 → 不降级
         let c = AIConfig {
             providers: vec![sample_provider("p1", "nano")],
-            tier_router: Some(TierAssignment {
+            tier_ultra_light: Some(TierAssignment {
                 provider_id: "p1".to_string(),
                 model_id: "nano".to_string(),
             }),
             ..Default::default()
         };
-        let (_p, _m, actual) = c.resolve_tier(Tier::Router).unwrap();
-        assert_eq!(actual, Tier::Router, "已配置不该降级");
+        let (_p, _m, actual) = c.resolve_tier(Tier::UltraLight).unwrap();
+        assert_eq!(actual, Tier::UltraLight, "已配置不该降级");
     }
 
     #[test]
@@ -830,7 +858,7 @@ mod tests {
         // Router 指向不存在的 provider → 悬空降级
         let c = AIConfig {
             providers: vec![sample_provider("p1", "gpt-4")],
-            tier_router: Some(TierAssignment {
+            tier_ultra_light: Some(TierAssignment {
                 provider_id: "ghost".to_string(), // 不存在
                 model_id: "gpt-4".to_string(),
             }),
@@ -840,7 +868,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let (_p, _m, actual) = c.resolve_tier(Tier::Router).unwrap();
+        let (_p, _m, actual) = c.resolve_tier(Tier::UltraLight).unwrap();
         assert_eq!(actual, Tier::Light, "悬空 provider 应降级");
     }
 
@@ -849,7 +877,7 @@ mod tests {
         // Router provider 对但 model_id 悬空 → 也算悬空降级
         let c = AIConfig {
             providers: vec![sample_provider("p1", "gpt-4")],
-            tier_router: Some(TierAssignment {
+            tier_ultra_light: Some(TierAssignment {
                 provider_id: "p1".to_string(),
                 model_id: "ghost-model".to_string(),
             }),
@@ -859,7 +887,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let (_p, _m, actual) = c.resolve_tier(Tier::Router).unwrap();
+        let (_p, _m, actual) = c.resolve_tier(Tier::UltraLight).unwrap();
         assert_eq!(actual, Tier::Main);
     }
 
@@ -883,7 +911,7 @@ mod tests {
         });
         let c = AIConfig {
             providers: vec![provider],
-            tier_router: Some(TierAssignment {
+            tier_ultra_light: Some(TierAssignment {
                 provider_id: "p1".to_string(),
                 model_id: "gpt-4".to_string(), // 已禁用
             }),
@@ -893,7 +921,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let (_p, m, actual) = c.resolve_tier(Tier::Router).unwrap();
+        let (_p, m, actual) = c.resolve_tier(Tier::UltraLight).unwrap();
         assert_eq!(actual, Tier::Main, "禁用 model 应触发降级到 Main");
         assert_eq!(m.id, "gpt-3.5");
     }
@@ -985,7 +1013,7 @@ mod tests {
         // 一个 provider 被 Router + Light 引用
         let c = AIConfig {
             providers: vec![sample_provider("p1", "gpt-4")],
-            tier_router: Some(TierAssignment {
+            tier_ultra_light: Some(TierAssignment {
                 provider_id: "p1".to_string(),
                 model_id: "gpt-4".to_string(),
             }),
@@ -996,7 +1024,7 @@ mod tests {
             ..Default::default()
         };
         let hits = c.tiers_referencing("p1");
-        assert_eq!(hits, vec![Tier::Router, Tier::Light]);
+        assert_eq!(hits, vec![Tier::UltraLight, Tier::Light]);
         assert!(c.tiers_referencing("ghost").is_empty());
     }
 
@@ -1125,7 +1153,7 @@ mod tests {
             exclude_pure_numeric: false,
             respect_awareness_url_path: true,
             providers: vec![sample_provider("p1", "gpt-4")],
-            tier_router: Some(TierAssignment {
+            tier_ultra_light: Some(TierAssignment {
                 provider_id: "p1".to_string(),
                 model_id: "gpt-4".to_string(),
             }),
@@ -1136,8 +1164,9 @@ mod tests {
             slo_hard_timeout_ms: Some(3000),
             chat_config: ChatConfig {
                 pure_chat: true,
+                agent_mode: Some(ChatAgentMode::PureChat),
+                main_window_model: "main".to_string(),
                 auto_title: true,
-                title_tier: "router".to_string(),
                 memory_config: crate::domain::ai::memory::MemoryConfig::default(),
                 skill_config: SkillConfig::default(),
             },
@@ -1152,7 +1181,7 @@ mod tests {
         assert_eq!(restored.min_query_len_cjk, original.min_query_len_cjk);
         assert_eq!(restored.providers.len(), 1);
         assert_eq!(restored.providers[0].id, "p1");
-        assert_eq!(restored.tier_router, original.tier_router);
+        assert_eq!(restored.tier_ultra_light, original.tier_ultra_light);
         assert_eq!(
             restored.direct_execute_safe_actions,
             original.direct_execute_safe_actions
@@ -1167,7 +1196,6 @@ mod tests {
         );
         // 0.12.5: ChatConfig round-trip
         assert!(restored.chat_config.auto_title);
-        assert_eq!(restored.chat_config.title_tier, "router");
     }
 
     // ── 0.11.4 改进 2:ToolResultFeedback 三态配置 ────────────────────────
@@ -1230,13 +1258,43 @@ mod tests {
         let json = r#"{"enabled": false}"#;
         let c: AIConfig = serde_json::from_str(json).unwrap();
         assert!(!c.chat_config.pure_chat, "pure_chat 默认 false");
+        assert_eq!(c.chat_config.effective_agent_mode(), ChatAgentMode::Full);
+        assert_eq!(c.chat_config.main_window_model, "light");
         assert!(!c.chat_config.auto_title, "auto_title 默认 false");
-        assert_eq!(c.chat_config.title_tier, "light", "title_tier 默认 light");
         // 0.13.1: memory_config 默认 TokenAware 模式
         assert_eq!(
             c.chat_config.memory_config.mode,
             crate::domain::ai::memory::WindowMode::TokenAware,
             "memory_config.mode 默认 TokenAware"
+        );
+    }
+
+    #[test]
+    fn legacy_pure_chat_maps_to_global_pure_mode() {
+        let json = r#"{"pure_chat":true}"#;
+        let c: ChatConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(c.effective_agent_mode(), ChatAgentMode::PureChat);
+    }
+
+    #[test]
+    fn legacy_title_tier_is_ignored() {
+        let json = r#"{"auto_title":true,"title_tier":"main"}"#;
+        let c: ChatConfig = serde_json::from_str(json).unwrap();
+        let serialized = serde_json::to_string(&c).unwrap();
+        assert!(c.auto_title);
+        assert!(!serialized.contains("title_tier"));
+    }
+
+    #[test]
+    fn legacy_router_tier_deserializes_as_ultra_light() {
+        let json = r#"{"tier_router":{"provider_id":"p1","model_id":"nano"}}"#;
+        let c: AIConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            c.tier_ultra_light,
+            Some(TierAssignment {
+                provider_id: "p1".into(),
+                model_id: "nano".into(),
+            })
         );
     }
 
@@ -1248,8 +1306,9 @@ mod tests {
             enabled: true,
             chat_config: ChatConfig {
                 pure_chat: false,
+                agent_mode: Some(ChatAgentMode::Full),
+                main_window_model: "light".to_string(),
                 auto_title: false,
-                title_tier: "light".to_string(),
                 memory_config: crate::domain::ai::memory::MemoryConfig {
                     mode: crate::domain::ai::memory::WindowMode::FixedCount,
                     window_size: 30,

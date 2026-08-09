@@ -34,7 +34,7 @@ impl Capability for ListSticky {
     fn schema(&self) -> CapabilitySchema {
         CapabilitySchema {
             name: "list_sticky".into(),
-            description: "列出所有活跃便签（不含回收站），返回每个便签的id、内容、位置(x/y)、尺寸(w/h)、颜色和置顶状态。按更新时间倒序排列。".into(),
+            description: "列出所有未回收便签（包含桌面显示和已隐藏），返回每个便签的id、内容、可见性、位置(x/y)、尺寸(w/h)、颜色和置顶状态。按更新时间倒序排列。".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {}
@@ -78,6 +78,8 @@ impl Capability for ListSticky {
                     data: json!({
                         "id": note.id,
                         "content": note.content,
+                        "visible": note.visible,
+                        "visibility": if note.visible { "shown" } else { "hidden" },
                         "x": note.x,
                         "y": note.y,
                         "w": note.width,

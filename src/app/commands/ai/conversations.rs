@@ -189,7 +189,7 @@ pub async fn get_chat_messages(
 
 /// 异步生成对话标题（0.12.5 §5.3）。
 ///
-/// 读取 `ChatConfig.auto_title` 开关 + `title_tier` 档位，调
+/// 读取 `ChatConfig.auto_title` 开关，固定使用超轻档模型，调
 /// `AIProvider::complete()`（非 Agent 路径，单轮补全）生成 6-10 字语义化标题。
 ///
 /// 成功后更新 `conversations.title` 并 emit `blink://chat-title-updated` 事件，
@@ -213,13 +213,8 @@ pub async fn generate_conversation_title(
         return Ok(());
     }
 
-    // 2. 解析 tier
-    let tier = match chat_cfg.title_tier.as_str() {
-        "main" => Tier::Main,
-        "router" => Tier::Router,
-        _ => Tier::Light,
-    };
-    let (provider, _actual_tier) = registry.resolve(tier).map_err(|e| {
+    // 2. 命名固定使用超轻档；未配置时由 Registry 按超轻 → 轻量 → 主档降级。
+    let (provider, _actual_tier) = registry.resolve(Tier::UltraLight).map_err(|e| {
         tracing::warn!(%conversation_id, "标题生成：provider 解析失败: {e}");
         e.to_string()
     })?;

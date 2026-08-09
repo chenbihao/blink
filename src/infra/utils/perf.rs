@@ -343,7 +343,7 @@ pub mod ai_slo {
     #[allow(dead_code)]
     pub const TIMEOUT: &str = "timeout";
 
-    /// 字段:选中的路由档位（"router" / "light" / "main"）——观测多档降级
+    /// 字段:选中的模型档位（"ultra_light" / "light" / "main"）——观测多档降级
     #[allow(dead_code)]
     pub const TIER: &str = "tier";
 }

@@ -13,7 +13,7 @@
 //! - 自然完成时按 request_id compare-and-clear，旧任务不会误清新请求。
 //! - Phase 4 消费 `ChatPromptHandle.chunks` 并定向 emit 前端。
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use crate::domain::ai::memory::{
@@ -35,7 +35,7 @@ use crate::domain::ai::registry::{AIProviderRegistry, ResolvedProviderEntries};
 use crate::domain::ai::skill::{SkillRegistry, parse_skill_command};
 use crate::domain::ai::tool_adapter::{PendingConfirms, build_agent_tools};
 use crate::domain::capability::CapabilityRegistry;
-use crate::domain::config::ai_config::Tier;
+use crate::domain::config::ai_config::{ChatAgentMode, ChatConfig, Tier};
 use crate::domain::event::DomainEnv;
 use crate::domain::event_names::EventNames;
 use crate::domain::mcp::McpClientManager;
@@ -64,23 +64,44 @@ struct AgentCacheKey {
     mcp_epoch: u64,
     /// 0.17.6: 对话类型——Persistent / Ephemeral 使用不同 memory，需独立缓存。
     kind: ConversationKind,
-    /// 0.19.10: 纯对话与工具对话必须使用不同 Agent，禁止跨模式复用。
-    pure_chat: bool,
+    /// 有扩展与无扩展的 Agent 必须隔离，禁止跨模式复用。
+    extensions_enabled: bool,
 }
 
 /// 单次 prompt 的 Agent 装配计划。三类扩展共用同一模式快照，避免边界漂移。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AgentAssemblyPlan {
-    pure_chat: bool,
+    extensions_enabled: bool,
 }
 
 impl AgentAssemblyPlan {
-    fn for_mode(pure_chat: bool) -> Self {
-        Self { pure_chat }
+    fn for_mode(mode: ChatAgentMode, kind: ConversationKind) -> Self {
+        let extensions_enabled = match mode {
+            ChatAgentMode::Full => true,
+            ChatAgentMode::MainChatOnly => kind == ConversationKind::Persistent,
+            ChatAgentMode::PureChat => false,
+        };
+        Self { extensions_enabled }
     }
 
     fn includes_extensions(self) -> bool {
-        !self.pure_chat
+        self.extensions_enabled
+    }
+}
+
+fn encode_agent_mode(mode: ChatAgentMode) -> u8 {
+    match mode {
+        ChatAgentMode::Full => 0,
+        ChatAgentMode::MainChatOnly => 1,
+        ChatAgentMode::PureChat => 2,
+    }
+}
+
+fn decode_agent_mode(value: u8) -> ChatAgentMode {
+    match value {
+        1 => ChatAgentMode::MainChatOnly,
+        2 => ChatAgentMode::PureChat,
+        _ => ChatAgentMode::Full,
     }
 }
 
@@ -313,8 +334,10 @@ pub struct ChatService {
     config_pool: sqlx::SqlitePool,
     /// 0.13.6: 上次计算的上下文窗口状态（供 `get_context_window_status` command 查询）。
     last_context_status: RwLock<Option<ContextWindowStatus>>,
-    /// 0.19.10: 当前对话模式；由 AIConfig 热更新，不修改其他 Capability 出口。
-    pure_chat_mode: AtomicBool,
+    /// 当前 Agent 能力模式；由 AIConfig 热更新，不修改其他 Capability 出口。
+    agent_mode: AtomicU8,
+    /// 主窗口模型策略：`light` / `main` / `provider_id:model_id`。
+    ephemeral_model_policy: RwLock<String>,
 }
 
 impl ChatService {
@@ -334,7 +357,8 @@ impl ChatService {
         config_pool: sqlx::SqlitePool,
     ) -> Self {
         let chat_config = ai_registry.config_snapshot().chat_config;
-        let pure_chat_mode = chat_config.pure_chat;
+        let agent_mode = chat_config.effective_agent_mode();
+        let ephemeral_model_policy = chat_config.main_window_model.clone();
         let skill_registry = SkillRegistry::new();
         skill_registry.set_enabled(chat_config.skill_config.enabled);
         // 从配置库加载持久化的模型选择（0.12.7）
@@ -358,7 +382,8 @@ impl ChatService {
             skill_registry,
             cached_agent: RwLock::new(None),
             last_context_status: RwLock::new(None),
-            pure_chat_mode: AtomicBool::new(pure_chat_mode),
+            agent_mode: AtomicU8::new(encode_agent_mode(agent_mode)),
+            ephemeral_model_policy: RwLock::new(ephemeral_model_policy),
             requests: RequestTracker::new(),
             start_gate: tokio::sync::Mutex::new(()),
             selected: RwLock::new(selected),
@@ -502,6 +527,32 @@ impl ChatService {
                 self.ai_registry.resolve_entries(Tier::Main)
             }
             ConversationKind::Ephemeral => {
+                let policy = self
+                    .ephemeral_model_policy
+                    .read()
+                    .expect("ephemeral model policy lock poisoned")
+                    .clone();
+                if policy == "main" {
+                    return self.ai_registry.resolve_entries(Tier::Main);
+                }
+                if policy != "light"
+                    && let Some((provider_id, model_id)) = policy.split_once(':')
+                {
+                    match self
+                        .ai_registry
+                        .resolve_explicit_entries(provider_id, model_id)
+                    {
+                        Ok(entries) => return Ok(entries),
+                        Err(AIError::NotConfigured) => {
+                            tracing::warn!(
+                                provider_id,
+                                model_id,
+                                "ChatService: 主窗口自选模型不可用，回落 Light 档"
+                            );
+                        }
+                        Err(other) => return Err(other),
+                    }
+                }
                 let selected = self
                     .ephemeral_selected
                     .read()
@@ -527,7 +578,7 @@ impl ChatService {
                         Err(other) => return Err(other),
                     }
                 }
-                // 0.17.9: Ephemeral 默认走 Light 档（Light 空则 resolve_tier 自动降级 Main）
+                // Ephemeral 默认走 Light 档（Light 空则 resolve_tier 自动降级 Main）
                 self.ai_registry.resolve_entries(Tier::Light)
             }
         }
@@ -580,7 +631,7 @@ impl ChatService {
                 preamble_hash,
                 mcp_epoch,
                 kind,
-                pure_chat: plan.pure_chat,
+                extensions_enabled: plan.extensions_enabled,
             };
 
             if let Some(provider) = self.cached_provider(&cache_key) {
@@ -636,9 +687,10 @@ impl ChatService {
                 );
                 continue;
             }
-            if self.pure_chat_mode.load(Ordering::Acquire) != plan.pure_chat {
+            let latest_plan = AgentAssemblyPlan::for_mode(self.agent_mode(), kind);
+            if latest_plan != plan {
                 tracing::debug!(
-                    requested_pure_chat = plan.pure_chat,
+                    requested_extensions = plan.extensions_enabled,
                     "ChatService: Agent 构造期间对话模式变化，丢弃旧实例"
                 );
                 return Err(AIError::Cancelled);
@@ -735,6 +787,13 @@ impl ChatService {
             .write()
             .expect("ephemeral_selected lock poisoned") = selection.clone();
         *self
+            .ephemeral_model_policy
+            .write()
+            .expect("ephemeral model policy lock poisoned") = selection
+            .as_ref()
+            .map(|s| format!("{}:{}", s.provider_id, s.model_id))
+            .unwrap_or_else(|| "light".to_string());
+        *self
             .cached_agent
             .write()
             .expect("chat agent cache lock poisoned") = None;
@@ -754,6 +813,14 @@ impl ChatService {
         self.ephemeral_selected
             .read()
             .expect("ephemeral_selected lock poisoned")
+            .clone()
+    }
+
+    /// 当前主窗口模型策略，供设置与模型标签投影使用。
+    pub fn current_ephemeral_model_policy(&self) -> String {
+        self.ephemeral_model_policy
+            .read()
+            .expect("ephemeral model policy lock poisoned")
             .clone()
     }
 
@@ -794,7 +861,7 @@ impl ChatService {
         let conversation_for_task = conversation_id.clone();
         let weak_service: Weak<Self> = Arc::downgrade(self);
 
-        let plan = AgentAssemblyPlan::for_mode(self.pure_chat_mode.load(Ordering::Acquire));
+        let plan = AgentAssemblyPlan::for_mode(self.agent_mode(), kind);
 
         // 0.13.3：构建 skill-aware preamble
         // 1. 检查 /skill 显式激活指令
@@ -811,7 +878,7 @@ impl ChatService {
         } else {
             Vec::new()
         };
-        let preamble = if plan.pure_chat {
+        let preamble = if !plan.includes_extensions() {
             pure_chat_system_prompt_with_group(group_system_prompt.as_deref())
         } else {
             chat_system_prompt_with_skills(
@@ -1084,21 +1151,40 @@ impl ChatService {
         tracing::debug!("ChatService: 配置变化，AgentProvider 缓存已失效");
     }
 
-    /// 热更新纯对话模式。Agent cache key 也包含模式，此处清缓存用于立即释放旧实例。
-    pub fn update_pure_chat_mode(&self, pure_chat: bool) {
-        let previous = self.pure_chat_mode.swap(pure_chat, Ordering::AcqRel);
-        if previous != pure_chat {
+    /// 热更新对话能力模式与主窗口模型策略。
+    pub fn update_chat_config(&self, config: &ChatConfig) {
+        let mode = config.effective_agent_mode();
+        let encoded = encode_agent_mode(mode);
+        let previous = self.agent_mode.swap(encoded, Ordering::AcqRel);
+        let mut policy = self
+            .ephemeral_model_policy
+            .write()
+            .expect("ephemeral model policy lock poisoned");
+        let policy_changed = *policy != config.main_window_model;
+        if policy_changed {
+            *policy = config.main_window_model.clone();
+            *self
+                .ephemeral_selected
+                .write()
+                .expect("ephemeral_selected lock poisoned") = None;
+        }
+        drop(policy);
+        if previous != encoded || policy_changed {
             *self
                 .cached_agent
                 .write()
                 .expect("chat agent cache lock poisoned") = None;
-            tracing::info!(pure_chat, "ChatService: 纯对话模式已更新");
+            tracing::info!(?mode, main_window_model = %config.main_window_model, "ChatService: 对话配置已更新");
         }
     }
 
-    /// 当前 Blink AI 对话是否为纯对话模式。只供对话相关投影/连接入口守门。
+    fn agent_mode(&self) -> ChatAgentMode {
+        decode_agent_mode(self.agent_mode.load(Ordering::Acquire))
+    }
+
+    /// 两类窗口是否都处于纯对话。供 MCP 预热与持久对话投影守门。
     pub fn is_pure_chat_mode(&self) -> bool {
-        self.pure_chat_mode.load(Ordering::Acquire)
+        self.agent_mode() == ChatAgentMode::PureChat
     }
 
     /// 应用用户从设置页修改的记忆策略配置（0.13.1 §3.7）。
@@ -1316,9 +1402,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pure_chat_plan_disables_all_agent_extensions() {
-        assert!(!AgentAssemblyPlan::for_mode(true).includes_extensions());
-        assert!(AgentAssemblyPlan::for_mode(false).includes_extensions());
+    fn agent_mode_scopes_extensions_by_window() {
+        assert!(
+            AgentAssemblyPlan::for_mode(ChatAgentMode::Full, ConversationKind::Ephemeral)
+                .includes_extensions()
+        );
+        assert!(
+            AgentAssemblyPlan::for_mode(ChatAgentMode::MainChatOnly, ConversationKind::Persistent,)
+                .includes_extensions()
+        );
+        assert!(
+            !AgentAssemblyPlan::for_mode(ChatAgentMode::MainChatOnly, ConversationKind::Ephemeral,)
+                .includes_extensions()
+        );
+        assert!(
+            !AgentAssemblyPlan::for_mode(ChatAgentMode::PureChat, ConversationKind::Persistent)
+                .includes_extensions()
+        );
     }
 
     #[test]
@@ -1330,12 +1430,12 @@ mod tests {
             preamble_hash: 1,
             mcp_epoch: 0,
             kind: ConversationKind::Persistent,
-            pure_chat: false,
+            extensions_enabled: true,
         };
         assert_ne!(
             base,
             AgentCacheKey {
-                pure_chat: true,
+                extensions_enabled: false,
                 ..base.clone()
             }
         );

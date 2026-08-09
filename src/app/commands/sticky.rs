@@ -119,17 +119,13 @@ pub async fn update_sticky_geometry(
 /// 设置便签可见性。
 #[tauri::command]
 pub async fn set_sticky_visible(app: AppHandle, id: String, visible: bool) -> Result<(), String> {
-    let svc = app.state::<std::sync::Arc<StickyService>>();
-    svc.set_visible(&id, visible)
+    let env = app
+        .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
+        .inner()
+        .clone();
+    env.set_sticky_visibility_and_notify(&id, visible)
         .await
-        .map_err(|e: StickyError| e.to_string())?;
-
-    let _ = app.emit(
-        EventNames::STICKY_VISIBILITY_CHANGED,
-        serde_json::json!({ "stickyId": id, "visible": visible }),
-    );
-
-    Ok(())
+        .map_err(|e| e.to_string())
 }
 
 /// 设置便签置顶。

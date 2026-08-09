@@ -388,7 +388,9 @@ async function checkSkillHint() {
       const { invoke } = await import("../shared/tauri.js");
       const aiConfig = await invoke("get_config_section", { key: "app.ai" });
       if (revision !== skillHintRevision) return;
-      skillHintsEnabled = !aiConfig?.chat_config?.pure_chat;
+      const agentMode = aiConfig?.chat_config?.agent_mode
+        || (aiConfig?.chat_config?.pure_chat ? "pure_chat" : "full");
+      skillHintsEnabled = agentMode !== "pure_chat";
       if (!skillHintsEnabled) {
         cachedSkills = [];
         skillCacheExpiry = now + 30000;

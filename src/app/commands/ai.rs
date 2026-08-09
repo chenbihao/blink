@@ -681,11 +681,19 @@ pub fn get_ephemeral_models(app: tauri::AppHandle) -> Vec<ChatModelOption> {
         .resolve_tier(Tier::Light)
         .map(|(p, m, _)| (p.id.clone(), m.id.clone()));
 
-    // 0.17.9: Ephemeral 的 selected——None 时回落 Light 档（而非 Main）
     let selected_pair = app
         .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
-        .and_then(|chat| chat.current_ephemeral_selection())
-        .map(|sel| (sel.provider_id, sel.model_id))
+        .and_then(|chat| {
+            chat.current_ephemeral_selection()
+                .map(|sel| (sel.provider_id, sel.model_id))
+                .or_else(|| match chat.current_ephemeral_model_policy().as_str() {
+                    "main" => main_pair.clone(),
+                    "light" => light_pair.clone(),
+                    explicit => explicit
+                        .split_once(':')
+                        .map(|(provider, model)| (provider.to_string(), model.to_string())),
+                })
+        })
         .or_else(|| light_pair.clone());
 
     let mut options = Vec::new();

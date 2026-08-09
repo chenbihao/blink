@@ -220,12 +220,12 @@ function renderModelFetchList(filter) {
   if (!cache) return;
 
   if (cache.loading) {
-    dropdown.innerHTML = `<div class="ai-model-fetch-loading"><span class="ai-spinner"></span> ${escapeHtml(t("ai.model_modal.fetching"))}</div>`;
+    dropdown.innerHTML = `<div class="ai-model-fetch-loading"><span class="ai-spinner"></span> ${escapeHtml(t("ai.model_modal.fetch.loading"))}</div>`;
     return;
   }
   if (cache.error) {
     const q = (filter || "").trim();
-    let html = `<div class="ai-model-fetch-error">❌ ${escapeHtml(cache.error)}</div>`;
+    let html = `<div class="ai-model-fetch-error">${escapeHtml(t("ai.model_modal.fetch.failed", { err: cache.error }))}</div>`;
     if (q) {
       html += `<div class="ai-model-fetch-item ai-manual-add" data-model-id="${escapeAttr(q)}">
         <span>+ ${escapeHtml(t("ai.model_modal.manual_add", { id: q }))}</span>

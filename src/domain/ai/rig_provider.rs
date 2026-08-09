@@ -276,7 +276,7 @@ where
 /// - `additional_params`: 请求方目前不显式塞,直接用 model 层 `custom_params_json`
 ///   (未来若 request 层要合并,需增字段)
 ///
-/// **铁则**:请求方显式指定(路由档 `temperature=0.0`)优先——model 层默认不能覆盖它,
+/// **铁则**:请求方显式指定优先——model 层默认不能覆盖它,
 /// 保证 SearchService 路由的确定性(见 §3.6)。
 ///
 /// **Anthropic 特殊处理**:`max_tokens` 是 Anthropic API 的必填字段,
@@ -832,7 +832,7 @@ mod tests {
 
     #[test]
     fn build_rig_request_request_overrides_model_defaults() {
-        // 路由档铁则:request 显式指定必须优先——即使 model 默认也不能覆盖
+        // request 显式指定必须优先——即使 model 默认也不能覆盖
         let req = CompletionRequest {
             messages: vec![ChatMessage::user("q")],
             tools: Vec::new(),

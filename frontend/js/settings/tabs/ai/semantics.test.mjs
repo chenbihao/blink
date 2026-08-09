@@ -41,9 +41,13 @@ for (const removedControl of ["ai-streaming", "ai-direct-safe", "ai-tool-feedbac
   assert.doesNotMatch(coreSource, new RegExp(`\\$\\("${removedControl}"\\)`));
 }
 assert.match(settingsHtml, /id="ai-timeout-ms"[^>]*value="20000"/);
-assert.match(settingsHtml, /id="ai-chat"[\s\S]*id="ai-chat-pure"/);
-assert.match(coreSource, /chatCfg\.pure_chat/);
-assert.match(coreSource, /cfg\.chat_config\.pure_chat = e\.target\.checked/);
+assert.match(settingsHtml, /name="ai-agent-mode"[^>]*value="full"/);
+assert.match(settingsHtml, /name="ai-agent-mode"[^>]*value="main_chat_only"/);
+assert.match(settingsHtml, /name="ai-agent-mode"[^>]*value="pure_chat"/);
+assert.match(settingsHtml, /id="ai-main-window-model-mode"/);
+assert.match(settingsHtml, /id="ai-tier-ultra-light"/);
+assert.match(coreSource, /cfg\.chat_config\.agent_mode = e\.target\.value/);
+assert.match(coreSource, /cfg\.chat_config\.main_window_model/);
 assert.doesNotMatch(coreSource, /ctxWindow\s*\*\s*0\.6/);
 assert.doesNotMatch(coreSource, /≈.*轮/);
 

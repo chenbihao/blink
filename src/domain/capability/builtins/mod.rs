@@ -21,7 +21,7 @@
 //! - [`create_sticky`] — 创建便签并显示窗口 → `Done`（0.19.3，sensitive=true）
 //! - [`set_sticky_geometry`] — 更新便签位置/尺寸 → `Done`（0.19.3）
 //! - [`list_sticky`] — 列出活跃便签 → `Items`（0.19.3，sensitive=true）
-//! - [`read_sticky`] / [`update_sticky`] / [`trash_sticky`] — 便签生命周期闭环（0.19.5）
+//! - [`read_sticky`] / [`update_sticky`] / [`trash_sticky`] / [`set_sticky_visibility`] — 便签生命周期闭环
 //! - [`pin_image`] — 将 PNG 图片钉到桌面 → `Done`（0.19.3）
 
 pub mod create_sticky;
@@ -45,6 +45,7 @@ pub mod search_apps;
 pub mod search_clipboard_history;
 pub mod search_files;
 pub mod set_sticky_geometry;
+pub mod set_sticky_visibility;
 pub mod sticky_common;
 pub mod trash_sticky;
 pub mod update_setting;
@@ -60,6 +61,7 @@ mod tests {
             "read_sticky",
             "update_sticky",
             "trash_sticky",
+            "set_sticky_visibility",
             "read_text_file",
         ] {
             assert!(registry.get(id).is_some(), "{id} 应通过 inventory 注册");

@@ -437,10 +437,10 @@
           <div class="extension-card">
             <div class="extension-body">
               <div class="setting-row">
-                <label class="setting-label" data-i18n="ai.tier.router">路由档<span class="field-hint-icon" data-i18n-title="ai.tier.router.hint">ⓘ</span></label>
-                <select id="ai-tier-router" class="input-wide"></select>
+                <label class="setting-label" data-i18n="ai.tier.ultra_light">超轻档<span class="field-hint-icon" data-i18n-title="ai.tier.ultra_light.hint">ⓘ</span></label>
+                <select id="ai-tier-ultra-light" class="input-wide"></select>
               </div>
-              <div class="ai-tier-degrade" id="ai-tier-router-degrade"></div>
+              <div class="ai-tier-degrade" id="ai-tier-ultra-light-degrade"></div>
               <div class="setting-row">
                 <label class="setting-label" data-i18n="ai.tier.light">轻量档<span class="field-hint-icon" data-i18n-title="ai.tier.light.hint">ⓘ</span></label>
                 <select id="ai-tier-light" class="input-wide"></select>
@@ -508,12 +508,25 @@
               </div>
             </div>
             <div class="extension-body">
+              <div class="setting-row ai-agent-mode-row">
+                <label class="setting-label" data-i18n="ai.chat.agent_mode.label">对话能力模式<span class="field-hint-icon" data-i18n-title="ai.chat.agent_mode.hint">ⓘ</span></label>
+                <div class="ai-agent-mode-segmented" role="radiogroup" aria-label="对话能力模式" data-i18n-aria-label="ai.chat.agent_mode.label">
+                  <label><input type="radio" name="ai-agent-mode" value="full" /><span data-i18n="ai.chat.agent_mode.full" data-i18n-title="ai.chat.agent_mode.full.hint">全能力</span></label>
+                  <label><input type="radio" name="ai-agent-mode" value="main_chat_only" /><span data-i18n="ai.chat.agent_mode.main_only" data-i18n-title="ai.chat.agent_mode.main_only.hint">仅主窗口纯对话</span></label>
+                  <label><input type="radio" name="ai-agent-mode" value="pure_chat" /><span data-i18n="ai.chat.agent_mode.pure" data-i18n-title="ai.chat.agent_mode.pure.hint">全部纯对话</span></label>
+                </div>
+              </div>
               <div class="setting-row">
-                <label class="setting-label" data-i18n="ai.chat.pure.label">纯对话模式<span class="field-hint-icon" data-i18n-title="ai.chat.pure.hint">ⓘ</span></label>
-                <label class="switch switch-sm">
-                  <input type="checkbox" id="ai-chat-pure" />
-                  <span class="slider"></span>
-                </label>
+                <label class="setting-label" data-i18n="ai.chat.main_model.label">主窗口 AI 模型<span class="field-hint-icon" data-i18n-title="ai.chat.main_model.hint">ⓘ</span></label>
+                <select id="ai-main-window-model-mode" class="input-wide">
+                  <option value="light" data-i18n="ai.chat.main_model.light">轻量档（默认）</option>
+                  <option value="main" data-i18n="ai.chat.main_model.main">主档</option>
+                  <option value="custom" data-i18n="ai.chat.main_model.custom">自选模型</option>
+                </select>
+              </div>
+              <div class="setting-row hidden" id="ai-main-window-custom-model-row">
+                <label class="setting-label" data-i18n="ai.chat.main_model.custom_label">自选模型</label>
+                <select id="ai-main-window-custom-model" class="input-wide"></select>
               </div>
               <div class="setting-row">
                 <label class="setting-label" data-i18n="ai.chat.auto_title.label">LLM 自动命名<span class="field-hint-icon" data-i18n-title="ai.chat.auto_title.hint">ⓘ</span></label>
@@ -521,14 +534,6 @@
                   <input type="checkbox" id="ai-chat-auto-title" />
                   <span class="slider"></span>
                 </label>
-              </div>
-              <div class="setting-row">
-                <label class="setting-label" data-i18n="ai.chat.title_tier.label">命名模型档位<span class="field-hint-icon" data-i18n-title="ai.chat.title_tier.hint">ⓘ</span></label>
-                <select id="ai-chat-title-tier" class="input-wide">
-                  <option value="main">主档</option>
-                  <option value="light">轻量档</option>
-                  <option value="router">路由档</option>
-                </select>
               </div>
             </div>
           </div>
@@ -653,7 +658,7 @@
             </div>
             <div class="extension-body">
               <div class="setting-row" id="ai-prompt-info-row">
-                <label class="setting-label" data-i18n="ai.tools.prompt_tokens.label">工具与 System Prompt Token<span class="field-hint-icon" data-i18n-title="ai.tools.prompt_tokens.hint">ⓘ</span></label>
+                <label class="setting-label" data-i18n="ai.tools.prompt_tokens.label">System Prompt Token<span class="field-hint-icon" data-i18n-title="ai.tools.prompt_tokens.hint">ⓘ</span></label>
                 <div class="ai-prompt-info-display">
                   <span id="ai-prompt-tokens" class="ai-prompt-tokens">—</span>
                   <span class="ai-prompt-meta" id="ai-prompt-meta"></span>
@@ -982,7 +987,11 @@
 
             <!-- 段一:品牌 —— 一键填 kind + base_url;custom 手填模式 -->
             <div class="ai-modal-section">
-              <div class="ai-modal-section-label" data-i18n="ai.modal.section.brand">品牌</div>
+              <button type="button" class="ai-preset-toggle" id="ai-preset-toggle" aria-expanded="true">
+                <span data-i18n="ai.modal.section.brand">预设</span>
+                <span class="ai-preset-toggle-summary" id="ai-preset-toggle-summary"></span>
+                <svg class="icon" aria-hidden="true"><use href="#icon-chevron-down"/></svg>
+              </button>
               <div class="setting-row setting-row-column" id="ai-modal-preset-row">
                 <div id="ai-preset-list" class="ai-preset-list">
                   <!-- 由 JS 动态渲染 -->
@@ -1091,7 +1100,7 @@
             <!-- 段二:调用参数 -->
             <div class="ai-modal-section">
               <div class="ai-modal-section-label" data-i18n="ai.model_modal.section.params">调用参数</div>
-              <p class="modal-hint" data-i18n="ai.model_modal.params.hint">留空 = 由调用方决定（路由档会用 0.0；日常会话用默认）；填值只在调用方未指定时生效</p>
+              <p class="modal-hint" data-i18n="ai.model_modal.params.hint">留空 = 由模型或调用场景决定；填值只在调用方未显式指定时生效</p>
 
               <!-- Temperature 覆盖开关 + slider -->
               <div class="ai-model-param" id="ai-model-param-temperature">
