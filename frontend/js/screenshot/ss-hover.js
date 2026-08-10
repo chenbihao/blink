@@ -3,9 +3,9 @@
 //! 在选区拖拽阶段（`!ss.isAnnotating`），鼠标悬停在桌面窗口上时显示虚线框，
 //! 单击自动吸附选区到该窗口矩形。
 //!
-//! **坐标转换**（0.18.8 per-monitor）：
+//! **坐标转换**：
 //! 后端返回的窗口矩形是虚拟屏幕物理像素坐标（含 origin offset），
-//! 前端 `rectScreenToCss` 按窗口所在屏的 dpr 分段换算为 CSS 坐标。
+//! 前端 `rectScreenToCss` 统一使用 renderScale 换算为 CSS 坐标。
 //!
 //! **性能策略**：
 //! 后端枚举 ~5-15ms，只在 overlay 加载时调一次。前端 mousemove 做纯 JS

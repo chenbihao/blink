@@ -733,10 +733,12 @@ pub async fn screenshot_window_list()
 
 /// 0.18.x：截图控件 hints 流式事件 payload。
 ///
-/// `generation` 由调用方传入，原样回传，前端防过期。
+/// `hwnd` + `generation` 由调用方传入，原样回传，前端双重校验防过期。
 /// `kind` 区分 batch（一层完成）和 done（全部结束/超时/出错）。
 #[derive(Debug, Clone, serde::Serialize)]
 struct ControlHintsEvent {
+    /// 请求对应的窗口 HWND，前端校验 payload.hwnd === activeHwnd
+    hwnd: isize,
     /// 调用方传入的 generation，原样回传，前端防过期
     generation: u32,
     /// "batch" = 一层完成；"done" = 全部结束（正常/超时/出错）
@@ -754,38 +756,79 @@ struct ControlHintsEvent {
     truncated: Option<bool>,
 }
 
+/// 纯函数：检查 HWND 是否在可吸附窗口列表中。
+///
+/// 校验逻辑可独立测试，不依赖 Win32 调用。
+fn is_hwnd_pickable(
+    hwnd: isize,
+    windows: &[crate::infra::platform::window::PickableWindow],
+) -> bool {
+    windows.iter().any(|w| w.hwnd == hwnd)
+}
+
+/// 校验目标 HWND 是否有效：非零 + 仍然存在 + 属于可吸附窗口列表。
+///
+/// 重新枚举顶层窗口（`enumerate_pickable_windows`），确认该 HWND：
+/// - 当前仍然存在（`IsWindow`）
+/// - 属于可吸附窗口列表（非工具窗口、非 NOACTIVATE、非 Cloaked、有标题、有有效 DWM 矩形）
+///
+/// 校验失败时返回 false，调用方应发送空的 done 事件，不要启动 UIA 遍历。
+///
+/// 不记录窗口标题或 UIA 文本，只记录 hwnd。
+fn validate_target_hwnd(hwnd: isize) -> bool {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::IsWindow;
+
+    if hwnd == 0 {
+        return false;
+    }
+
+    let hwnd_ptr = HWND(hwnd as *mut _);
+    if !unsafe { IsWindow(Some(hwnd_ptr)) }.as_bool() {
+        return false;
+    }
+
+    let windows = crate::infra::platform::window::enumerate_pickable_windows();
+    is_hwnd_pickable(hwnd, &windows)
+}
+
 /// 0.18.x：流式收集控件 hints，每层 emit 一批，结束发 done。
 ///
 /// 立即返回 `Ok(())`，实际收集在后台 `spawn_blocking` 中进行。
 /// 前端通过监听 `blink://screenshot-control-hints` 事件增量接收 hints。
 ///
-/// `generation` 由前端传入（`ss.controlHintsGen`），每次 emit 原样回带，
-/// 前端回调里校验 `payload.generation !== ss.controlHintsGen` 则丢弃（防过期）。
+/// `hwnd` 由前端传入（当前悬停的顶层窗口 HWND），后端校验后用于 UIA 遍历。
+/// `generation` 由前端传入，每次 emit 原样回带，前端校验防过期。
+///
+/// 事件 payload 同时携带 `hwnd` 和 `generation`，前端必须同时校验两者。
 #[tauri::command]
 pub async fn screenshot_control_hints(
     app: tauri::AppHandle,
+    hwnd: isize,
     generation: u32,
 ) -> Result<(), String> {
-    let hwnd = crate::infra::platform::screenshot::session_fg_hwnd();
-    let hwnd = match hwnd {
-        Some(h) => h,
-        None => {
-            // 无前台窗口：直接发 done（空），前端正常收尾
-            let _ = app.emit_to(
-                "chord-screenshot",
-                EventNames::SCREENSHOT_CONTROL_HINTS,
-                &ControlHintsEvent {
-                    generation,
-                    kind: "done",
-                    depth: 0,
-                    hints: vec![],
-                    total: Some(0),
-                    truncated: Some(false),
-                },
-            );
-            return Ok(());
-        }
-    };
+    // 校验 HWND：非零 + 存在 + 属于可吸附窗口列表
+    if !validate_target_hwnd(hwnd) {
+        tracing::debug!(
+            hwnd,
+            generation,
+            "screenshot_control_hints: HWND 校验失败，发送空 done"
+        );
+        let _ = app.emit_to(
+            "chord-screenshot",
+            EventNames::SCREENSHOT_CONTROL_HINTS,
+            &ControlHintsEvent {
+                hwnd,
+                generation,
+                kind: "done",
+                depth: 0,
+                hints: vec![],
+                total: Some(0),
+                truncated: Some(false),
+            },
+        );
+        return Ok(());
+    }
 
     // 从 DB 读截图配置，取控件吸附参数
     let pool = &app.state::<crate::infra::data::DbPools>().config;
@@ -796,18 +839,19 @@ pub async fn screenshot_control_hints(
     let min_size = cfg.control_snap_min_size as i32;
 
     tracing::debug!(
+        hwnd,
+        generation,
         deadline_ms = cfg.control_snap_deadline_ms,
         max_depth,
         min_size,
-        generation,
         "screenshot_control_hints 开始流式收集"
     );
 
     let app_clone = app.clone();
     tokio::task::spawn_blocking(move || {
-        let hwnd = windows::Win32::Foundation::HWND(hwnd as _);
+        let win_handle = windows::Win32::Foundation::HWND(hwnd as _);
         let (hints, truncated) = crate::infra::platform::uia::collect_control_hints_streaming(
-            hwnd,
+            win_handle,
             deadline,
             max_depth,
             min_size,
@@ -816,6 +860,7 @@ pub async fn screenshot_control_hints(
                     "chord-screenshot",
                     EventNames::SCREENSHOT_CONTROL_HINTS,
                     &ControlHintsEvent {
+                        hwnd,
                         generation,
                         kind: "batch",
                         depth,
@@ -831,6 +876,7 @@ pub async fn screenshot_control_hints(
             "chord-screenshot",
             EventNames::SCREENSHOT_CONTROL_HINTS,
             &ControlHintsEvent {
+                hwnd,
                 generation,
                 kind: "done",
                 depth: max_depth,
@@ -1224,6 +1270,87 @@ mod scroll_probe_tests {
             })
             .unwrap_err();
         assert_eq!(invalid.code, "internal_error");
+    }
+}
+
+/// 0.18.x：HWND 校验纯函数测试。
+#[cfg(test)]
+mod hwnd_validation_tests {
+    use super::*;
+    use crate::infra::platform::window::PickableWindow;
+
+    fn make_window(hwnd: isize, x: i32, y: i32, w: i32, h: i32) -> PickableWindow {
+        PickableWindow {
+            hwnd,
+            x,
+            y,
+            w,
+            h,
+            title: format!("Win-{hwnd}"),
+            process_name: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn pickable_hwnd_passes_validation() {
+        let windows = vec![
+            make_window(100, 0, 0, 800, 600),
+            make_window(200, 800, 0, 800, 600),
+        ];
+        assert!(is_hwnd_pickable(100, &windows));
+        assert!(is_hwnd_pickable(200, &windows));
+    }
+
+    #[test]
+    fn unpickable_hwnd_rejected() {
+        let windows = vec![
+            make_window(100, 0, 0, 800, 600),
+            make_window(200, 800, 0, 800, 600),
+        ];
+        assert!(!is_hwnd_pickable(999, &windows));
+        assert!(!is_hwnd_pickable(0, &windows));
+        assert!(!is_hwnd_pickable(-1, &windows));
+    }
+
+    #[test]
+    fn empty_window_list_rejects_all() {
+        let windows: Vec<PickableWindow> = vec![];
+        assert!(!is_hwnd_pickable(100, &windows));
+    }
+
+    #[test]
+    fn control_hints_event_serializes_with_hwnd() {
+        let event = ControlHintsEvent {
+            hwnd: 12345,
+            generation: 7,
+            kind: "batch",
+            depth: 1,
+            hints: vec![],
+            total: None,
+            truncated: None,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"hwnd\":12345"));
+        assert!(json.contains("\"generation\":7"));
+        assert!(json.contains("\"kind\":\"batch\""));
+    }
+
+    #[test]
+    fn control_hints_event_done_serializes_with_hwnd() {
+        let event = ControlHintsEvent {
+            hwnd: 12345,
+            generation: 3,
+            kind: "done",
+            depth: 5,
+            hints: vec![],
+            total: Some(42),
+            truncated: Some(false),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"hwnd\":12345"));
+        assert!(json.contains("\"generation\":3"));
+        assert!(json.contains("\"kind\":\"done\""));
+        assert!(json.contains("\"total\":42"));
     }
 }
 

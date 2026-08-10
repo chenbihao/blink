@@ -31,4 +31,4 @@ pub use import::{ImportResult, McpImportSource};
 #[allow(unused_imports)]
 pub use server::{BlinkMcpServer, ExposureSnapshot, SharedExposure};
 #[allow(unused_imports)]
-pub use server_config::{McpServerModeConfig, McpServerModeConfigStore, DEFAULT_MCP_SERVER_PORT};
+pub use server_config::{DEFAULT_MCP_SERVER_PORT, McpServerModeConfig, McpServerModeConfigStore};

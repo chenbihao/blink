@@ -269,9 +269,10 @@ export function screenshotWindowList() {
   return invoke("screenshot_window_list");
 }
 
-/** 0.18.x：流式收集控件 hints（每层 emit 一批，结束发 done）。 */
-export function screenshotControlHints(generation) {
-  return invoke("screenshot_control_hints", { generation });
+/** 0.18.x：流式收集控件 hints（每层 emit 一批，结束发 done）。
+ *  hwnd 为目标窗口的 HWND（isize），后端校验后用于 UIA 遍历。 */
+export function screenshotControlHints(hwnd, generation) {
+  return invoke("screenshot_control_hints", { hwnd, generation });
 }
 
 /** 0.15.7：设置/清除 overlay 捕获排除（WDA_EXCLUDEFROMCAPTURE）。 */

@@ -1919,16 +1919,17 @@ pub fn show_screenshot_overlay(
     use tauri::{WebviewUrl, WebviewWindowBuilder};
     const LABEL: &str = "chord-screenshot";
 
-    // 0.18.8：每屏用自己的 dpi 折算 CSS 坐标注入 displays（不再统一用 overlay_dpi）。
-    // overlay_dpi 仍读（用于 log 诊断 + overlay 窗口自身 canvas 对齐参考），但不传给 build_displays_json 做折算。
-    // **顺序关键**：先 place_at_physical 定位窗口，再读窗口实际 DPI（MonitorFromWindow 依赖窗口落点）。
-    // 复用已存在的窗口：先 eval 清屏 + 重定位 -> show -> 触发重新加载
+    // 注入原始物理显示器矩形（physicalDisplays），前端用 canvas 实测 renderScale 转换 CSS。
+    // overlayDpi 仅诊断用，不参与坐标变换。
+    // **复用窗口时序**：clear → place → inject meta → show → focus → 双 rAF 后 reload
+    // 先清屏防止旧选区闪现，place 后注入物理 meta，show+focus 后等布局稳定再 reload。
     if let Some(win) = app.get_webview_window(LABEL) {
-        // 先清屏再 show -- 否则窗口刚出来会看到上次结束时的选区/虚线框闪一下
-        // （webview `.show()` 到 __blinkReloadScreenshot 执行之间有毫秒级空档）
-        let _ = win.eval("window.__blinkReloadScreenshot && window.__blinkReloadScreenshot()");
+        // 1. 清屏——只清旧画面，不触发截图加载
+        let _ = win
+            .eval("window.__blinkClearScreenshotVisual && window.__blinkClearScreenshotVisual()");
         let mut overlay_dpi = 96u32;
         if let Ok(hwnd) = win.hwnd() {
+            // 2. place
             place_at_physical(
                 HWND(hwnd.0 as _),
                 meta.virtual_x,
@@ -1938,20 +1939,32 @@ pub fn show_screenshot_overlay(
             );
             overlay_dpi = crate::infra::platform::dpi::get_dpi_for_hwnd(HWND(hwnd.0 as _));
         }
-        let displays_json = build_displays_json(&meta, overlay_dpi);
+        let displays_json = build_physical_displays_json();
         tracing::debug!(
             overlay_dpi,
-            displays = %displays_json,
-            "show_screenshot_overlay (reuse): per-monitor DPI displays injected"
+            physical_displays = %displays_json,
+            "show_screenshot_overlay (reuse): physical displays injected"
         );
         let fg_hwnd = crate::infra::platform::screenshot::session_fg_hwnd().unwrap_or(0);
+        // 3. 注入物理 meta
         let meta_js = format!(
-            "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {}, fgHwnd: {}, displays: {} }};",
-            meta.virtual_x, meta.virtual_y, meta.width, meta.height, fg_hwnd, displays_json
+            "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {}, overlayDpi: {}, fgHwnd: {}, physicalDisplays: {} }};",
+            meta.virtual_x,
+            meta.virtual_y,
+            meta.width,
+            meta.height,
+            overlay_dpi,
+            fg_hwnd,
+            displays_json
         );
         let _ = win.eval(&meta_js);
+        // 4. show + 5. focus
         let _ = win.show();
         let _ = win.set_focus();
+        // 6. 双 rAF 后 reload——等布局稳定再加载截图，确保 canvas 已有正确尺寸
+        let _ = win.eval(
+            "requestAnimationFrame(()=>{requestAnimationFrame(()=>{window.__blinkReloadScreenshot&&window.__blinkReloadScreenshot()})})"
+        );
         return Ok(());
     }
 
@@ -1979,22 +1992,28 @@ pub fn show_screenshot_overlay(
             meta.height,
         );
     }
-    // 0.18.8：place 后读窗口实际 DPI（用于 log 诊断），displays 用每屏各自 dpi 折算
+    // place 后读窗口实际 DPI（仅诊断用）
     let overlay_dpi = win
         .hwnd()
         .ok()
         .map(|h| crate::infra::platform::dpi::get_dpi_for_hwnd(HWND(h.0 as _)))
         .unwrap_or(96);
-    let displays_json = build_displays_json(&meta, overlay_dpi);
+    let displays_json = build_physical_displays_json();
     tracing::debug!(
         overlay_dpi,
-        displays = %displays_json,
-        "show_screenshot_overlay (first build): per-monitor DPI displays injected"
+        physical_displays = %displays_json,
+        "show_screenshot_overlay (first build): physical displays injected"
     );
     let fg_hwnd = crate::infra::platform::screenshot::session_fg_hwnd().unwrap_or(0);
     let meta_js = format!(
-        "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {}, fgHwnd: {}, displays: {} }};",
-        meta.virtual_x, meta.virtual_y, meta.width, meta.height, fg_hwnd, displays_json
+        "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {}, overlayDpi: {}, fgHwnd: {}, physicalDisplays: {} }};",
+        meta.virtual_x,
+        meta.virtual_y,
+        meta.width,
+        meta.height,
+        overlay_dpi,
+        fg_hwnd,
+        displays_json
     );
     let _ = win.eval(&meta_js);
     let _ = win.set_focus();
@@ -2063,10 +2082,10 @@ pub fn show_image_editor_window(
         );
         overlay_dpi = crate::infra::platform::dpi::get_dpi_for_hwnd(HWND(hwnd.0 as _));
     }
-    let displays_json = build_displays_json(&meta, overlay_dpi);
+    let displays_json = build_physical_displays_json();
     let init_js = format!(
-        "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {}, fgHwnd: 0, displays: {} }}; window.__blinkEditorSource = {{ kind: 'clipboard' }}; window.__blinkOpenImageEditor && window.__blinkOpenImageEditor();",
-        meta.virtual_x, meta.virtual_y, meta.width, meta.height, displays_json
+        "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {}, overlayDpi: {}, fgHwnd: 0, physicalDisplays: {} }}; window.__blinkEditorSource = {{ kind: 'clipboard' }}; window.__blinkOpenImageEditor && window.__blinkOpenImageEditor();",
+        meta.virtual_x, meta.virtual_y, meta.width, meta.height, overlay_dpi, displays_json
     );
     win.eval(&init_js).map_err(|e| e.to_string())?;
     win.show().map_err(|e| e.to_string())?;
@@ -2082,21 +2101,13 @@ pub fn show_image_editor_window(
     Ok(())
 }
 
-/// 构造 `__blinkScreenMeta.displays` 字段的 JS 数组字面量。
+/// 构造 `__blinkScreenMeta.physicalDisplays` 字段的 JS 数组字面量。
 ///
-/// 0.18.8：每屏用自己的 `d.dpi` 折算 CSS 坐标（而非统一 `overlay_dpi`），
-/// 并注入 `dpi` 字段。混合 DPI 下副屏 CSS 矩形 = 副屏物理矩形 / 副屏 dpr，
-/// 与副屏实际可视区 1:1 对齐。前端 `screenToCss`/`cssToScreen` 按坐标查屏取
-/// 该屏 `dpi/96` 做 dpr 分段换算。
-///
-/// `overlay_dpi` 不再用于折算 displays，仅保留用于 log 诊断 + overlay 窗口自身
-/// canvas 物理尺寸对齐（`index.js` 内 `enterAnnotationMode` 标注 canvas）。
+/// 注入原始物理显示器矩形（虚拟屏幕坐标系），不做任何 DPI 折算。
+/// 前端用 canvas 实测的 renderScale 负责物理↔CSS 转换。
 ///
 /// 失败时返回空数组 `[]`，前端按"无 displays 信息"降级到虚拟屏幕 clamp。
-fn build_displays_json(
-    meta: &crate::infra::platform::screenshot::ScreenCaptureMeta,
-    _overlay_dpi: u32,
-) -> String {
+fn build_physical_displays_json() -> String {
     let displays = crate::infra::platform::screenshot::list_displays();
     if displays.is_empty() {
         return "[]".to_string();
@@ -2104,69 +2115,40 @@ fn build_displays_json(
     let items: Vec<String> = displays
         .iter()
         .map(|d| {
-            // 每屏用自己的 dpi 折算：物理坐标 -> CSS 坐标
-            let scale = crate::infra::platform::dpi::scale_factor(d.dpi);
-            let css_x = ((d.x - meta.virtual_x) as f64 / scale).round() as i32;
-            let css_y = ((d.y - meta.virtual_y) as f64 / scale).round() as i32;
-            let css_w = (d.w as f64 / scale).round() as i32;
-            let css_h = (d.h as f64 / scale).round() as i32;
             format!(
                 "{{ x: {}, y: {}, w: {}, h: {}, primary: {}, dpi: {} }}",
-                css_x, css_y, css_w, css_h, d.primary, d.dpi
+                d.x, d.y, d.w, d.h, d.primary, d.dpi
             )
         })
         .collect();
     format!("[{}]", items.join(", "))
 }
 
-/// 0.18.8 单测：验证 `build_displays_json` 的 per-monitor DPI 折算和 `dpi` 字段注入。
+/// 单测：验证 `build_physical_displays_json` 格式和物理几何注入。
 #[cfg(test)]
-mod tests_0_18_8 {
-    use super::*;
-    use crate::infra::platform::screenshot::ScreenCaptureMeta;
-
-    fn make_meta(virtual_x: i32, virtual_y: i32, width: u32, height: u32) -> ScreenCaptureMeta {
-        ScreenCaptureMeta {
-            virtual_x,
-            virtual_y,
-            width,
-            height,
-        }
-    }
-
-    /// 同 DPI 双屏（双 100%）：每屏折算结果应与旧单一 dpr 一致（零回归）。
+mod tests_display_geometry {
+    /// scale_factor 基础数学验证（仍用于诊断日志的正确性保证）。
     #[test]
-    fn test_build_displays_json_same_dpi() {
-        // 临时 mock list_displays 不可行（全局函数），这里只验证 build_displays_json
-        // 的格式和 dpi 字段存在性。实际折算逻辑由前端单测覆盖。
-        let meta = make_meta(0, 0, 3840, 1080);
-        let json = build_displays_json(&meta, 96);
-        // 空 displays 时返回 []
-        // 非空时每项含 dpi 字段（集成环境会返回非空）
-        // 这里只验证空数组的 fallback 路径
-        // 注意：list_displays 在无显示器环境返回空 vec
-        assert!(json.starts_with('['));
-    }
-
-    /// 验证 scale_factor 的 per-monitor 折算数学正确性。
-    #[test]
-    fn test_per_monitor_scale_math() {
-        // 96 DPI → 1.0
+    fn test_scale_factor_math() {
         assert_eq!(crate::infra::platform::dpi::scale_factor(96), 1.0);
-        // 144 DPI → 1.5
         assert!((crate::infra::platform::dpi::scale_factor(144) - 1.5).abs() < 1e-9);
-        // 192 DPI → 2.0
         assert!((crate::infra::platform::dpi::scale_factor(192) - 2.0).abs() < 1e-9);
-        // 兜底：0 → 1.0
         assert_eq!(crate::infra::platform::dpi::scale_factor(0), 1.0);
     }
 
-    /// 验证 per-monitor CSS 折算数学：物理 2560 / 1.5 ≈ 1707（副屏 150%）
+    /// build_physical_displays_json 格式验证：返回合法 JS 数组，每项含物理坐标 + dpi 字段。
     #[test]
-    fn test_per_monitor_css_conversion() {
-        let scale = crate::infra::platform::dpi::scale_factor(144); // 1.5
-        let css_w = (2560_f64 / scale).round() as i32;
-        assert_eq!(css_w, 1707);
+    fn test_build_physical_displays_json_format() {
+        let json = super::build_physical_displays_json();
+        assert!(
+            json.starts_with('[') && json.ends_with(']'),
+            "应为 JS 数组字面量"
+        );
+        if json != "[]" {
+            assert!(json.contains("dpi:"), "每项应含 dpi 字段");
+            assert!(json.contains("primary:"), "每项应含 primary 字段");
+            assert!(json.contains("x:"), "每项应含物理 x 字段");
+        }
     }
 }
 

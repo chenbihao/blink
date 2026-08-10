@@ -48,17 +48,28 @@ pub enum ModifierLevel {
     Unknown,
     /// 确认松开。
     Up,
-    /// 确认按下（由 Hook down 或 Raw Input 确认）。
+    /// 确认按下（由 Hook 真实 down 或 Raw Input 确认）。
     Down,
+    /// 由注入 keydown 设置（远程桌面 / SendInput）。
+    ///
+    /// 与 `Down` 的区别：注入 keyup 能清除 `InjectedDown`，但不能清除 `Down`。
+    /// 这样远程桌面的完整 down→up 序列能正常流转，而 `SetForegroundWindow`
+    /// 的合成 Alt up（发生在真实 keydown 之后）不会误清真实 Down。
+    ///
+    /// Raw Input down 会将此升级为 `Down`（真实硬件确认）。
+    InjectedDown,
     /// 由 `LLKHF_ALTDOWN` 推断的临时按下——Hook 安装前 Alt 已按下。
     /// 真实 Alt up / Raw 校正 / 设备移除时清除。不是跨真实 keyup 的长期镜像。
     InferredDown,
 }
 
 impl ModifierLevel {
-    /// 是否视为"按下"（Down 或 InferredDown）。
+    /// 是否视为"按下"（Down / InjectedDown / InferredDown）。
     pub fn is_pressed(self) -> bool {
-        matches!(self, ModifierLevel::Down | ModifierLevel::InferredDown)
+        matches!(
+            self,
+            ModifierLevel::Down | ModifierLevel::InjectedDown | ModifierLevel::InferredDown
+        )
     }
 }
 
@@ -174,17 +185,26 @@ impl ModifierState {
 
     /// Hook 路径处理修饰键 keyup。
     ///
-    /// **注入的 keyup 一律不清 level**。真实物理松开永远是 `injected=false`
-    /// （Win32 保证），会正常清 level；注入 keyup 的唯一常见来源是
-    /// `SetForegroundWindow` 抢前台焦点时系统注入的合成 Alt up（带 `LLKHF_INJECTED`），
-    /// 这是假事件——用户并没有真的松开 Alt。忽略它不会让状态机永久卡住：
-    /// 后续真实 keydown 会覆盖，真实 keyup（非注入）会正常清。
-    /// Raw Input 若工作也会作独立兜底。
+    /// **注入 keyup 的处理分两种情况**：
+    /// - level 为 `InjectedDown`（由注入 keydown 设置）：注入 keyup 能清除。
+    ///   这是远程桌面 / SendInput 的完整 down→up 序列，应当正常流转。
+    /// - level 为 `Down`（由真实 keydown 或 Raw Input 设置）：注入 keyup 不清除。
+    ///   典型来源是 `SetForegroundWindow` 抢前台焦点时系统注入的合成 Alt up——
+    ///   这是假事件，用户并没有真的松开 Alt。
+    /// - level 为 `InferredDown`：同上不清除，等待真实事件或 Raw 校正。
+    ///
+    /// 真实物理松开永远是 `injected=false`（Win32 保证），无条件清 level。
     ///
     /// 返回是否实际清成了 Up（调用方据此决定是否连带 clear_inferred_alt）。
     fn set_level_hook_keyup(&mut self, key: ModifierKey, time_ms: u32, injected: bool) -> bool {
         if injected {
-            // 注入合成 keyup：不清 level。last_hook_time 仍更新以维持时间域过滤一致性。
+            // 只有 InjectedDown 才接受注入 keyup 的清除
+            if self.sides[key as usize].level == ModifierLevel::InjectedDown {
+                self.sides[key as usize].level = ModifierLevel::Up;
+                self.sides[key as usize].last_hook_time = Some(time_ms);
+                return true;
+            }
+            // Down / InferredDown / Unknown / Up：不清 level
             self.sides[key as usize].last_hook_time = Some(time_ms);
             return false;
         }
@@ -279,9 +299,14 @@ impl ModifierState {
                     .raw_devices
                     .values()
                     .any(|&mask| mask & (1 << (key as u8)) != 0);
-                if !aggregate_pressed && self.sides[key as usize].level == ModifierLevel::Down {
+                if !aggregate_pressed
+                    && matches!(
+                        self.sides[key as usize].level,
+                        ModifierLevel::Down | ModifierLevel::InjectedDown
+                    )
+                {
                     // 没有设备按住 → 但 Hook 可能还按着
-                    // 只在 Hook 也已 Up 时才设 Up；Hook 仍 Down 时保持（Hook fallback）
+                    // 只在 Hook 也已 Up 时才设 Up；Hook 仍 Down/InjectedDown 时保持（Hook fallback）
                     // 这里简化：如果 Raw 曾确认过且聚合为空，设 Up
                     self.sides[key as usize].level = ModifierLevel::Up;
                     if key.is_alt() {
@@ -970,16 +995,16 @@ fn reduce_hook_key(state: &mut InputState, e: HookKeyEvent, now: Instant) -> Red
     if e.is_modifier {
         if let Some(mod_key) = ModifierKey::from_key_name(&e.key) {
             if e.is_down {
-                // 新 Alt keydown：清除 InferredDown（真实 down 替代推断）
-                if mod_key.is_alt() {
-                    state
-                        .modifiers
-                        .set_level_hook(mod_key, ModifierLevel::Down, e.time_ms);
+                // 真实 keydown → Down；注入 keydown → InjectedDown。
+                // 区分两者使注入 keyup 能精准清除 InjectedDown 而不动 Down。
+                let level = if e.injected {
+                    ModifierLevel::InjectedDown
                 } else {
-                    state
-                        .modifiers
-                        .set_level_hook(mod_key, ModifierLevel::Down, e.time_ms);
-                }
+                    ModifierLevel::Down
+                };
+                state
+                    .modifiers
+                    .set_level_hook(mod_key, level, e.time_ms);
             } else {
                 // 修饰键 keyup
                 // 注入的合成 keyup（如 SetForegroundWindow 抢焦点时系统注入的假 Alt up）
@@ -1512,6 +1537,38 @@ pub fn injected_key_up(key: &str, time_ms: u32) -> HookKeyEvent {
     }
 }
 
+/// 便利构造：注入修饰键 down 事件。
+#[cfg(test)]
+pub fn injected_modifier_down(key: &str, time_ms: u32) -> HookKeyEvent {
+    HookKeyEvent {
+        source: InputSource::Injected,
+        key: key.to_string(),
+        is_down: true,
+        is_modifier: true,
+        time_ms,
+        injected: true,
+        lower_integrity_injected: false,
+        extended: false,
+        alt_down_flag: false,
+    }
+}
+
+/// 便利构造：注入修饰键 up 事件。
+#[cfg(test)]
+pub fn injected_modifier_up(key: &str, time_ms: u32) -> HookKeyEvent {
+    HookKeyEvent {
+        source: InputSource::Injected,
+        key: key.to_string(),
+        is_down: false,
+        is_modifier: true,
+        time_ms,
+        injected: true,
+        lower_integrity_injected: false,
+        extended: false,
+        alt_down_flag: false,
+    }
+}
+
 // ── 测试 ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2036,6 +2093,213 @@ mod tests {
             Instant::now(),
         );
         assert!(has_tap(&r.effects));
+    }
+
+    // ── 注入修饰键 down/up（远程桌面场景）──
+
+    /// 注入 Alt keydown → InjectedDown；注入 Alt keyup → 清为 Up。
+    /// 远程桌面完整 down→up 序列应正常流转，不卡死。
+    #[test]
+    fn injected_alt_down_up_clears_level() {
+        let mut s = InputState::default();
+        s.config = alt_space_config();
+        reduce(
+            &mut s,
+            InputEvent::ConfigChanged(alt_space_config()),
+            Instant::now(),
+        );
+
+        // 注入 LAlt down → InjectedDown
+        reduce(
+            &mut s,
+            InputEvent::HookKey(injected_modifier_down("lalt", 100)),
+            Instant::now(),
+        );
+        assert!(s.modifiers.alt_down());
+        assert_eq!(
+            s.modifiers.level(ModifierKey::LAlt),
+            ModifierLevel::InjectedDown
+        );
+
+        // 注入 LAlt up → 清为 Up（InjectedDown 接受注入 keyup）
+        reduce(
+            &mut s,
+            InputEvent::HookKey(injected_modifier_up("lalt", 200)),
+            Instant::now(),
+        );
+        assert!(!s.modifiers.alt_down());
+        assert_eq!(
+            s.modifiers.level(ModifierKey::LAlt),
+            ModifierLevel::Up
+        );
+    }
+
+    /// 本地 Alt keydown → Down；注入 Alt keyup 不清除（SetForegroundWindow 合成事件）。
+    #[test]
+    fn local_alt_down_ignores_injected_keyup() {
+        let mut s = InputState::default();
+        s.config = alt_space_config();
+        reduce(
+            &mut s,
+            InputEvent::ConfigChanged(alt_space_config()),
+            Instant::now(),
+        );
+
+        // 本地 LAlt down → Down
+        reduce(
+            &mut s,
+            InputEvent::HookKey(hook_modifier_down("lalt", 100)),
+            Instant::now(),
+        );
+        assert_eq!(
+            s.modifiers.level(ModifierKey::LAlt),
+            ModifierLevel::Down
+        );
+
+        // 注入 LAlt up → 不清除（Down 不接受注入 keyup）
+        reduce(
+            &mut s,
+            InputEvent::HookKey(injected_modifier_up("lalt", 200)),
+            Instant::now(),
+        );
+        assert!(s.modifiers.alt_down());
+        assert_eq!(
+            s.modifiers.level(ModifierKey::LAlt),
+            ModifierLevel::Down
+        );
+
+        // 本地 LAlt up → 清为 Up
+        reduce(
+            &mut s,
+            InputEvent::HookKey(hook_modifier_up("lalt", 300)),
+            Instant::now(),
+        );
+        assert!(!s.modifiers.alt_down());
+    }
+
+    /// InjectedDown 被 Raw Input down 升级为 Down 后，注入 keyup 不再清除。
+    #[test]
+    fn raw_down_upgrades_injected_down() {
+        let mut s = InputState::default();
+        s.config = alt_space_config();
+        reduce(
+            &mut s,
+            InputEvent::ConfigChanged(alt_space_config()),
+            Instant::now(),
+        );
+
+        // 注入 LAlt down → InjectedDown
+        reduce(
+            &mut s,
+            InputEvent::HookKey(injected_modifier_down("lalt", 100)),
+            Instant::now(),
+        );
+        assert_eq!(
+            s.modifiers.level(ModifierKey::LAlt),
+            ModifierLevel::InjectedDown
+        );
+
+        // Raw Input LAlt down → 升级为 Down（真实硬件确认）
+        reduce(
+            &mut s,
+            InputEvent::RawModifier(RawModifierEvent {
+                device_id: 1,
+                key: "lalt".to_string(),
+                is_down: true,
+                time_ms: 110,
+            }),
+            Instant::now(),
+        );
+        assert_eq!(
+            s.modifiers.level(ModifierKey::LAlt),
+            ModifierLevel::Down
+        );
+
+        // 注入 LAlt up → 不清除（已升级为 Down）
+        reduce(
+            &mut s,
+            InputEvent::HookKey(injected_modifier_up("lalt", 200)),
+            Instant::now(),
+        );
+        assert!(s.modifiers.alt_down());
+        assert_eq!(
+            s.modifiers.level(ModifierKey::LAlt),
+            ModifierLevel::Down
+        );
+    }
+
+    /// 远程桌面完整序列：注入 Alt down → 注入 Space down → 注入 Space up → Tap
+    /// → 注入 Alt up → alt_down=false。此前注入 Alt up 被忽略导致 Alt 卡死。
+    #[test]
+    fn injected_alt_space_complete_sequence_no_stuck() {
+        let mut s = InputState::default();
+        s.config = alt_space_config();
+        reduce(
+            &mut s,
+            InputEvent::ConfigChanged(alt_space_config()),
+            Instant::now(),
+        );
+
+        // 注入 Alt down
+        reduce(
+            &mut s,
+            InputEvent::HookKey(injected_modifier_down("lalt", 100)),
+            Instant::now(),
+        );
+        assert!(s.modifiers.alt_down());
+
+        // 注入 Space down → armed
+        reduce(
+            &mut s,
+            InputEvent::HookKey(injected_key_down(" ", 110)),
+            Instant::now(),
+        );
+        assert!(matches!(s.gesture, GestureState::Armed { .. }));
+
+        // 注入 Space up → Tap
+        let r = reduce(
+            &mut s,
+            InputEvent::HookKey(injected_key_up(" ", 150)),
+            Instant::now(),
+        );
+        assert!(has_tap(&r.effects));
+
+        // 注入 Alt up → 清除（修复后）
+        reduce(
+            &mut s,
+            InputEvent::HookKey(injected_modifier_up("lalt", 200)),
+            Instant::now(),
+        );
+        assert!(!s.modifiers.alt_down(), "注入 Alt up 后应清除，不卡死");
+    }
+
+    /// 注入 Ctrl down → InjectedDown；注入 Ctrl up → 清除。
+    /// 验证 send_paste (Ctrl+V) 回退路径不残留 Ctrl Down。
+    #[test]
+    fn injected_ctrl_down_up_clears_level() {
+        let mut s = InputState::default();
+        s.config = alt_space_config();
+        reduce(
+            &mut s,
+            InputEvent::ConfigChanged(alt_space_config()),
+            Instant::now(),
+        );
+
+        // 注入 LCtrl down → InjectedDown
+        reduce(
+            &mut s,
+            InputEvent::HookKey(injected_modifier_down("lctrl", 100)),
+            Instant::now(),
+        );
+        assert!(s.modifiers.is_pressed(ModifierKey::LCtrl));
+
+        // 注入 LCtrl up → 清为 Up
+        reduce(
+            &mut s,
+            InputEvent::HookKey(injected_modifier_up("lctrl", 200)),
+            Instant::now(),
+        );
+        assert!(!s.modifiers.is_pressed(ModifierKey::LCtrl));
     }
 
     // ── LLKHF_ALTDOWN 临时证据 ──

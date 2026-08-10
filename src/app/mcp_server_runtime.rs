@@ -47,7 +47,7 @@ use tokio_util::sync::CancellationToken;
 use crate::domain::capability::CapabilityRegistry;
 use crate::domain::event::DomainEnv;
 use crate::domain::mcp::server::{BlinkMcpServer, SharedExposure};
-use crate::domain::mcp::server_config::{McpServerModeConfig, DEFAULT_MCP_SERVER_PORT};
+use crate::domain::mcp::server_config::{DEFAULT_MCP_SERVER_PORT, McpServerModeConfig};
 
 // ── 状态枚举 ─────────────────────────────────────────────────────────────────
 
@@ -172,9 +172,7 @@ impl McpServerRuntime {
         let mut inner = self.inner.lock().await;
 
         // 先重建暴露快照（无论是否需要重启 listener，tool 列表都要更新）
-        self.exposure
-            .rebuild(&self.cap_registry, config)
-            .await;
+        self.exposure.rebuild(&self.cap_registry, config).await;
 
         if !config.enabled {
             // 停止 listener（如果正在运行）
@@ -469,10 +467,7 @@ mod tests {
             snapshot.status
         );
         if snapshot.status == McpServerStatus::Listening {
-            assert_eq!(
-                snapshot.endpoint,
-                Some("http://127.0.0.1:43210/mcp".into())
-            );
+            assert_eq!(snapshot.endpoint, Some("http://127.0.0.1:43210/mcp".into()));
         }
         // 清理
         runtime.stop().await;
@@ -566,10 +561,7 @@ mod tests {
             exposed_capabilities: vec![],
         };
         runtime.apply_config(&config1).await;
-        assert_eq!(
-            runtime.snapshot().await.status,
-            McpServerStatus::Listening
-        );
+        assert_eq!(runtime.snapshot().await.status, McpServerStatus::Listening);
 
         // 改端口
         let config2 = McpServerModeConfig {
@@ -622,9 +614,7 @@ mod tests {
             ) -> Result<crate::domain::config::ManagedSettingUpdate, String> {
                 Err("not implemented".into())
             }
-            fn sticky_service(
-                &self,
-            ) -> Option<&Arc<crate::domain::sticky::StickyService>> {
+            fn sticky_service(&self) -> Option<&Arc<crate::domain::sticky::StickyService>> {
                 None
             }
             async fn create_sticky_and_notify(
@@ -667,9 +657,7 @@ mod tests {
             ) -> Result<(), crate::domain::sticky::StickyWorkflowError> {
                 unimplemented!("not needed for runtime tests")
             }
-            fn image_stash(
-                &self,
-            ) -> Option<&Arc<crate::domain::capability::ImageStash>> {
+            fn image_stash(&self) -> Option<&Arc<crate::domain::capability::ImageStash>> {
                 None
             }
             fn show_pin_image(
@@ -686,11 +674,7 @@ mod tests {
             fn capability_env(&self) -> &dyn CapabilityEnv {
                 self
             }
-            fn emit(
-                &self,
-                _event: &str,
-                _payload: serde_json::Value,
-            ) -> Result<(), String> {
+            fn emit(&self, _event: &str, _payload: serde_json::Value) -> Result<(), String> {
                 Ok(())
             }
             fn emit_to(
@@ -704,9 +688,7 @@ mod tests {
             fn cap_registry(&self) -> Option<&Arc<CapabilityRegistry>> {
                 None
             }
-            fn chat_service(
-                &self,
-            ) -> Option<&Arc<crate::domain::ai::chat_service::ChatService>> {
+            fn chat_service(&self) -> Option<&Arc<crate::domain::ai::chat_service::ChatService>> {
                 None
             }
             fn show_chat_window(&self, _initial_text: Option<&str>) -> Result<(), String> {

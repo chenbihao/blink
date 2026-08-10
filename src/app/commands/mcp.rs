@@ -451,7 +451,9 @@ pub async fn set_mcp_server_config(
         .map_err(|e| e.to_string())?;
 
     // 0.19.13: 通知 runtime 应用配置变更（启停/改端口/热更新暴露清单）
-    if let Some(runtime) = app.try_state::<std::sync::Arc<crate::app::mcp_server_runtime::McpServerRuntime>>() {
+    if let Some(runtime) =
+        app.try_state::<std::sync::Arc<crate::app::mcp_server_runtime::McpServerRuntime>>()
+    {
         runtime.apply_config(&config).await;
     }
 
@@ -466,8 +468,7 @@ pub async fn set_mcp_server_config(
 pub async fn get_mcp_server_runtime_status(
     app: tauri::AppHandle,
 ) -> Result<crate::app::mcp_server_runtime::McpServerRuntimeSnapshot, String> {
-    let runtime = app
-        .state::<std::sync::Arc<crate::app::mcp_server_runtime::McpServerRuntime>>();
+    let runtime = app.state::<std::sync::Arc<crate::app::mcp_server_runtime::McpServerRuntime>>();
     Ok(runtime.snapshot().await)
 }
 

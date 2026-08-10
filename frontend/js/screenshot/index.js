@@ -42,7 +42,7 @@ import { applyThemeFromConfig } from "../shared/theme.js";
 import { ss, initDOM, PREWARM_MIN_WIDTH, PREWARM_MIN_HEIGHT, TOOL_CAPS } from "./ss-state.js";
 import { IMAGE_SOURCE } from './image-editor-session.js';
 import { norm, pointInRect, applySquareConstraint } from "./ss-utils.js";
-import { shouldStartFreeSelection, dprAtCss } from "./ss-selection-geometry.js";
+import { shouldStartFreeSelection, monitorDprAtCss, syncRenderScale, cssRectToBitmap, cssPointToScreen } from "./ss-selection-geometry.js";
 import { drawDimmed, drawSelection, drawFinalSelection, redrawAnnotPreview, redrawAnnotFull } from "./ss-draw.js";
 import { positionToolbar, findDisplayCssAt } from "./ss-display.js";
 import {
@@ -66,9 +66,9 @@ import {
 import { bindToolbar, showTextInput, updateUndoRedoButtons } from "./ss-toolbar.js";
 // 0.15.8：智能窗口吸附 + 像素放大镜
 import { loadPickableWindows, clearPickableWindows, updateWindowHover, getHoveredWindowRect, clearHover } from "./ss-hover.js";
-// 0.18.2：控件级智能吸附
+// 0.18.2：控件级智能吸附（跨屏预选版）
 import {
-  loadControlHints, clearControlHints, updateControlHover,
+  setControlTarget, prefetchControlHints, clearControlHints, updateControlHover,
   getHoveredControlRect, clearControlHover,
 } from "./ss-control-hints.js";
 // 0.15.7：长截图
@@ -117,6 +117,34 @@ import { refreshOcrDiagnosticsVisibility } from "./ss-ocr-diagnostics.js";
 
 // 0.15.7：长图编辑——Space 或中键拖拽平移超长图
 let _spaceDown = false;
+
+// 0.18.x：控件预选统一门控——截图加载完成 + renderScale 同步 + 配置加载完成 后只触发一次
+let captureHintsStarted = false;
+let screenshotReady = false;
+let renderScaleReady = false;
+let configReady = false;
+
+/** 统一门控：截图 + 窗口列表 + 控件预热只触发一次 */
+function maybeStartCaptureHints() {
+  if (captureHintsStarted) return;
+  if (!screenshotReady) return;
+  if (!renderScaleReady) return;
+  if (!configReady) return;
+
+  captureHintsStarted = true;
+  try {
+    loadPickableWindows(ss.windowListGen);
+  } catch (e) {
+    console.warn('[screenshot] maybeStartCaptureHints: loadPickableWindows threw', e);
+  }
+  // 初始前台窗口预热：只触发一次
+  if (ss.screenshotConfig.controlSnap) {
+    const meta = window.__blinkScreenMeta;
+    if (meta && meta.fgHwnd) {
+      prefetchControlHints(meta.fgHwnd);
+    }
+  }
+}
 
 initDOM();
 
@@ -170,13 +198,33 @@ if (!isPreheat) {
     loadEditorImage(IMAGE_SOURCE.CLIPBOARD);
   } else {
     loadScreenshot();
-    // 0.15.8 R1：加载可吸附窗口列表（异步，不阻塞截图加载），传 generation 防过期回流
-    loadPickableWindows(ss.windowListGen);
+    // 窗口列表在 img.onload 的 rAF 中加载（syncRenderScale 之后）
   }
 }
 // 0.15.7：绑定长截图专属工具栏
 bindScrollToolbar();
 refreshOcrDiagnosticsVisibility();
+
+// resize 时重新同步 renderScale（canvas 布局变化后比例可能改变）
+window.addEventListener('resize', () => {
+  const { canvas } = ss;
+  const meta = window.__blinkScreenMeta;
+  if (!canvas || !meta) return;
+  if (syncRenderScale(canvas, meta)) {
+    console.debug('[screenshot] resize: renderScale re-synced', { scaleX: meta.renderScaleX, scaleY: meta.renderScaleY });
+  }
+});
+
+window.__blinkClearScreenshotVisual = function () {
+  console.info('[screenshot] __blinkClearScreenshotVisual called');
+  try {
+    resetState();
+    const { canvas, ctx } = ss;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  } catch (e) {
+    console.error('[screenshot] clearScreenshotVisual threw', e);
+  }
+};
 
 window.__blinkReloadScreenshot = function () {
   console.info('[screenshot] __blinkReloadScreenshot called');
@@ -192,12 +240,6 @@ window.__blinkReloadScreenshot = function () {
     console.error('[screenshot] loadScreenshot threw', e);
     ss.errorHint.textContent = '截图初始化失败，按 ESC 重试';
     ss.errorHint.classList.remove('hidden');
-  }
-  // 0.15.8 R1：重载截图时同步刷新窗口列表（在新 meta 生效后）
-  try {
-    loadPickableWindows(ss.windowListGen);
-  } catch (e) {
-    console.warn('[screenshot] reload loadPickableWindows threw', e);
   }
 };
 
@@ -299,6 +341,11 @@ function resetState() {
   try { clearPickableWindows(); } catch (e) { console.warn('[screenshot] resetState: clearPickableWindows failed', e); }
   // 0.18.2：清除控件提示列表
   try { clearControlHints(); } catch (e) { console.warn('[screenshot] resetState: clearControlHints failed', e); }
+  // 0.18.x：重置控件预选门控
+  captureHintsStarted = false;
+  screenshotReady = false;
+  renderScaleReady = false;
+  configReady = false;
   if (ss.magnifierRaf) { cancelAnimationFrame(ss.magnifierRaf); ss.magnifierRaf = 0; }
   // 长截图状态、在途任务与 DOM 统一由 resetScrollCaptureSession 清理。
   _spaceDown = false;
@@ -351,7 +398,29 @@ function loadScreenshot() {
       ss.screenshotOffscreen.width = img.width;
       ss.screenshotOffscreen.height = img.height;
       ss.screenshotOffscreen.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0);
-      drawDimmed();
+      // 等布局稳定后同步 renderScale，再绘制和加载窗口/控件
+      requestAnimationFrame(() => {
+        if (gen !== ss._loadGen) return;
+        const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+        syncRenderScale(canvas, meta);
+        drawDimmed();
+        // 诊断日志：截图加载完成后的坐标空间状态
+        const rect = canvas.getBoundingClientRect();
+        console.debug('[screenshot] render scale synced', {
+          injectedDpi: meta.overlayDpi,
+          devicePixelRatio: window.devicePixelRatio,
+          canvasWidth: canvas.width,
+          canvasHeight: canvas.height,
+          canvasRectWidth: rect.width,
+          canvasRectHeight: rect.height,
+          scaleX: meta.renderScaleX,
+          scaleY: meta.renderScaleY,
+        });
+        // 0.18.x：统一门控触发窗口列表加载 + 控件预热
+        screenshotReady = true;
+        renderScaleReady = true;
+        maybeStartCaptureHints();
+      });
       console.info('[screenshot] screenshot loaded', { w: img.width, h: img.height, gen });
     } catch (e) {
       console.error('[screenshot] img.onload 处理异常', e, { gen });
@@ -383,13 +452,17 @@ function loadEditorConfig(includeCaptureHints) {
         ss.screenshotConfig.controlSnapMinSize = val.controlSnapMinSize ?? 50;
         refreshDiagnosticsVisibility();
         refreshOcrDiagnosticsVisibility();
-        // 0.18.2：control_snap 开启时异步加载控件提示（不阻塞 overlay）
-        if (includeCaptureHints && ss.screenshotConfig.controlSnap) {
-          loadControlHints(ss.controlHintsGen);
-        }
+        // 0.18.x：配置加载完成，触发统一门控
+        configReady = true;
+        maybeStartCaptureHints();
       }
     })
-    .catch((e) => console.warn('[image-editor] 读 screenshot:config 失败,用默认值', e));
+    .catch((e) => {
+      console.warn('[image-editor] 读 screenshot:config 失败,用默认值', e);
+      // 配置加载失败也需放行门控（使用默认配置）
+      configReady = true;
+      maybeStartCaptureHints();
+    });
 }
 
 /** 从独立用户编辑载荷初始化完整图片画布，不读取截图捕获 SESSION。 */
@@ -821,13 +894,17 @@ canvas.addEventListener('mousemove', (e) => {
   if (!ss._imagePan) updateSelectionCursor(e.offsetX, e.offsetY);
 
   // 0.18.2：选区拖拽阶段智能吸附（控件优先于窗口）
+  // 0.18.x：跨屏预选——先命中全局顶层窗口 → 得到 hovered hwnd → setControlTarget → 控件 hit-test
   // 手动框选拖拽中（isDragging）不更新吸附提示，避免实线选区与虚线预选区同时出现
   if (!ss.isAnnotating && !ss.selectionInteraction && !ss.isDragging) {
-    // 控件优先 hit-test：控件命中则不检查窗口
+    // 先命中全局顶层窗口，得到 hovered hwnd
+    updateWindowHover(e.offsetX, e.offsetY);
+    const winRect = getHoveredWindowRect();
+    setControlTarget(winRect?.hwnd ?? null);
+    // 控件优先 hit-test：命中控件时清除窗口虚线框
     if (!updateControlHover(e.offsetX, e.offsetY)) {
-      updateWindowHover(e.offsetX, e.offsetY);
+      // 控件未命中或尚未加载：保持窗口级蓝色预选框
     } else {
-      // 控件命中时清除窗口 hover（避免两个虚线框同时显示）
       clearHover();
     }
     updatePixelMagnifier(e.offsetX, e.offsetY);
@@ -894,10 +971,10 @@ canvas.addEventListener('mousemove', (e) => {
   }
 
   if (ss.isDragging) {
-    // 0.18.8 spike-B 策略 2：禁止跨 dpr 边界选区，clamp 到起点屏
+    // 跨 dpr 边界选区 clamp 到起点屏（用 monitorDprAtCss 比较原生 DPI，非 overlayDpr）
     const startMon = findDisplayCssAt(ss.startX, ss.startY);
-    const startDpr = dprAtCss(ss.startX, ss.startY, window.__blinkScreenMeta);
-    const curDpr = dprAtCss(e.offsetX, e.offsetY, window.__blinkScreenMeta);
+    const startDpr = monitorDprAtCss(ss.startX, ss.startY, window.__blinkScreenMeta);
+    const curDpr = monitorDprAtCss(e.offsetX, e.offsetY, window.__blinkScreenMeta);
     let clampedX = e.offsetX;
     let clampedY = e.offsetY;
     if (startDpr !== curDpr) {

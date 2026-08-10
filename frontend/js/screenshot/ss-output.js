@@ -4,7 +4,7 @@
 
 import { ss } from './ss-state.js';
 import * as annot from './annotation-engine.js';
-import { cssToBitmap, cssToScreen, cssSizeToPhysical } from './ss-selection-geometry.js';
+import { cssRectToBitmap, cssPointToScreen } from './ss-selection-geometry.js';
 import {
   screenshotCopy, screenshotCopyRegion, screenshotPin, screenshotSave,
   screenshotCancel, hideScreenshotOverlay,
@@ -29,13 +29,9 @@ export function doCopySelection() {
   // 快路径：无标注 → 后端直接从 SESSION 裁剪 BGRA 写剪贴板
   if (!annot.hasAnnotations() && ss.editorSession.canUseCaptureCropFastPath) {
     const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
-    const bmp = cssToBitmap(ss.selCss.x, ss.selCss.y, meta);
-    // B 类：裁剪宽高按选区所在屏 dpr 折算为物理尺寸
-    const pw = cssSizeToPhysical(ss.selCss.w, ss.selCss.x, ss.selCss.y, meta);
-    const ph = cssSizeToPhysical(ss.selCss.h, ss.selCss.x, ss.selCss.y, meta);
-    const px = bmp.x;
-    const py = bmp.y;
-    screenshotCopyRegion(px, py, pw, ph)
+    // 统一用 cssRectToBitmap 生成 bitmap rect，避免 X/Y scale 分歧
+    const bmp = cssRectToBitmap(ss.selCss, meta);
+    screenshotCopyRegion(bmp.x, bmp.y, bmp.w, bmp.h)
       .then(() => console.info('[screenshot] copy 成功（快路径）'))
       .catch((err) => {
         console.error('[screenshot] copy 失败（快路径）', err);
@@ -79,10 +75,10 @@ export function doPinSelection() {
   if (!ss.selCss || ss.sent || !ensureOutputReady()) return;
   ss.sent = true;
   const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
-  // 0.15.8 R0：统一用 cssToScreen 计算屏幕物理坐标（0.18.8 per-monitor）
+  // 统一用 cssPointToScreen 计算屏幕物理坐标
   const screenPos = ss.editorSession.canvasBacked
     ? { x: ss.editorSession.screenX || ss.scrollBandX, y: ss.editorSession.screenY || ss.scrollBandY }
-    : cssToScreen(ss.selCss.x, ss.selCss.y, meta);
+    : cssPointToScreen(ss.selCss.x, ss.selCss.y, meta);
   const screenX = screenPos.x;
   const screenY = screenPos.y;
   compositeSelection((pngBytes) => {
@@ -179,13 +175,12 @@ async function compositeSelectionBytes() {
   try {
     const sessionBase = ss.editorSession.baseCanvas;
     const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
-    // B 类：裁剪宽高按选区所在屏 dpr 折算为物理尺寸
-    const pw = sessionBase?.width ?? cssSizeToPhysical(ss.selCss.w, ss.selCss.x, ss.selCss.y, meta);
-    const ph = sessionBase?.height ?? cssSizeToPhysical(ss.selCss.h, ss.selCss.x, ss.selCss.y, meta);
-    // 0.15.8 R0：统一用 cssToBitmap 计算裁剪区起点（0.18.8 per-monitor）
-    const bmp = sessionBase ? { x: 0, y: 0 } : cssToBitmap(ss.selCss.x, ss.selCss.y, meta);
+    // 统一用 cssRectToBitmap 生成 bitmap rect，快路径与合成路径输出一致
+    const bmp = sessionBase ? { x: 0, y: 0, w: sessionBase.width, h: sessionBase.height } : cssRectToBitmap(ss.selCss, meta);
     const px = bmp.x;
     const py = bmp.y;
+    const pw = bmp.w;
+    const ph = bmp.h;
 
     const off = document.createElement('canvas');
     off.width = pw;

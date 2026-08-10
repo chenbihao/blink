@@ -9,7 +9,7 @@
 import { ss } from './ss-state.js';
 import { redrawAnnotFull } from './ss-draw.js';
 import { findDisplayCssAt } from './ss-display.js';
-import { cssToScreen } from './ss-selection-geometry.js';
+import { cssPointToScreen } from './ss-selection-geometry.js';
 import { enterReadingMode } from './ss-reading.js';
 import * as annot from './annotation-engine.js';
 import {
@@ -277,7 +277,7 @@ export async function doTranslateAndPin() {
     const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
     const screenPos = ss.editorSession.canvasBacked
       ? { x: ss.editorSession.screenX || ss.scrollBandX, y: ss.editorSession.screenY || ss.scrollBandY }
-      : cssToScreen(ss.selCss.x, ss.selCss.y, meta);
+      : cssPointToScreen(ss.selCss.x, ss.selCss.y, meta);
     const screenX = screenPos.x;
     const screenY = screenPos.y;
 

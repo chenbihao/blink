@@ -10,7 +10,7 @@
 import { ss, TOOL_CAPS } from './ss-state.js';
 import { norm } from './ss-utils.js';
 import * as annot from './annotation-engine.js';
-import { cssToScreen, formatSelectionInfo } from './ss-selection-geometry.js';
+import { cssPointToScreen, formatSelectionInfo } from './ss-selection-geometry.js';
 
 /** 暗色蒙版（初始态 + 无选区时） */
 export function drawDimmed() {
@@ -58,9 +58,9 @@ export function drawSelection() {
   ctx.strokeRect(px, py, pw, ph);
 
   // size-hint 显示物理像素尺寸 + 坐标（0.15.8 R0：统一用 formatSelectionInfo）
-  // A 类：屏幕坐标换算，0.18.8 per-monitor（不再传 dpr）
+  // A 类：屏幕坐标换算，统一使用 renderScale
   const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
-  const screenPos = cssToScreen(r.x, r.y, meta);
+  const screenPos = cssPointToScreen(r.x, r.y, meta);
   sizeHint.textContent = formatSelectionInfo(screenPos.x, screenPos.y, pw, ph);
   sizeHint.classList.remove('hidden');
   sizeHint.style.left = (r.x + 4) + 'px';
@@ -97,8 +97,8 @@ export function drawFinalSelection() {
   // 修复智能选区（snap）后 sizeHint 不显示的问题——snap 路径不经过 drawSelection，
   // 需要在此统一补显。
   const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
-  // A 类：屏幕坐标换算，0.18.8 per-monitor（不再传 dpr）
-  const screenPos = cssToScreen(selCss.x, selCss.y, meta);
+  // A 类：屏幕坐标换算，统一使用 renderScale
+  const screenPos = cssPointToScreen(selCss.x, selCss.y, meta);
   if (ss.sizeHint) {
     ss.sizeHint.textContent = formatSelectionInfo(screenPos.x, screenPos.y, pw, ph);
     ss.sizeHint.classList.remove('hidden');

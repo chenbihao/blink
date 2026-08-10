@@ -105,7 +105,11 @@ impl SharedExposure {
 
     /// 从 CapabilityRegistry 和配置构建并安装新快照，递增 generation。
     /// 返回新 generation 值（调用方据此判断是否需要通知 session）。
-    pub async fn rebuild(&self, cap_registry: &CapabilityRegistry, config: &McpServerModeConfig) -> u64 {
+    pub async fn rebuild(
+        &self,
+        cap_registry: &CapabilityRegistry,
+        config: &McpServerModeConfig,
+    ) -> u64 {
         let mut new_snapshot = ExposureSnapshot::build(cap_registry, config);
         let old_generation = {
             let current = self.snapshot.read().await;
@@ -543,7 +547,9 @@ mod tests {
             _args: Value,
             _ctx: &InvokeContext<'_>,
         ) -> Result<CapabilityResult, crate::domain::capability::CapabilityError> {
-            Ok(CapabilityResult::Done { summary: "mock".into() })
+            Ok(CapabilityResult::Done {
+                summary: "mock".into(),
+            })
         }
     }
 
@@ -551,9 +557,10 @@ mod tests {
     fn mock_registry(names: &[&str]) -> crate::domain::capability::CapabilityRegistry {
         let reg = crate::domain::capability::CapabilityRegistry::default();
         for &name in names {
-            reg.register(
-                std::sync::Arc::new(MockCap { id_val: name.to_string() }) as std::sync::Arc<dyn crate::domain::capability::Capability>,
-            );
+            reg.register(std::sync::Arc::new(MockCap {
+                id_val: name.to_string(),
+            })
+                as std::sync::Arc<dyn crate::domain::capability::Capability>);
         }
         reg
     }

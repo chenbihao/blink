@@ -45,7 +45,7 @@ import {
   bindScrollDiagnostics, recordScrollDiagnostic, resetScrollDiagnostics,
 } from './diagnostics.js';
 import { encodeImageDataPng, outputScreenshotPng } from '../ss-output.js';
-import { cssToScreen, cssSizeToPhysical } from '../ss-selection-geometry.js';
+import { cssPointToScreen, cssRectToBitmap } from '../ss-selection-geometry.js';
 import {
   hideCaptureFrame, positionPreview, resetPreviewRendering, SCROLL_PREVIEW_GAP,
   showCaptureFrame, showPredictedPreview, updatePreview,
@@ -81,12 +81,13 @@ export async function enterScrollCapture(rect) {
   const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
 
   // 记录采集带几何（物理像素，虚拟屏幕坐标系）
-  // 0.18.8：内联公式收口为 cssToScreen / cssSizeToPhysical（per-monitor）
-  const bandPos = cssToScreen(rect.x, rect.y, meta);
+  // 统一使用 renderScale 换算
+  const bandPos = cssPointToScreen(rect.x, rect.y, meta);
   session.scrollBandX = bandPos.x;
   session.scrollBandY = bandPos.y;
-  session.scrollBandW = cssSizeToPhysical(rect.w, rect.x, rect.y, meta);
-  session.scrollBandH = cssSizeToPhysical(rect.h, rect.x, rect.y, meta);
+  const bandBmp = cssRectToBitmap(rect, meta);
+  session.scrollBandW = bandBmp.w;
+  session.scrollBandH = bandBmp.h;
   session.scrollDirection = 'vertical';
   session.autoScroll = false;
   session.scrollFrames = [];
@@ -105,9 +106,9 @@ export async function enterScrollCapture(rect) {
   // 优先锁定框选区域实际覆盖的外部窗口；兜底使用 Blink 唤起前保存的前台窗口。
   const pickedWindow = findWindowForRect(rect);
   session.scrollHwnd = pickedWindow?.hwnd || meta.fgHwnd || null;
-  // 0.18.8：内联公式收口为 cssToScreen（per-monitor）
+  // 统一使用 renderScale 换算
   const targetPos = pickedWindow
-    ? cssToScreen(pickedWindow.targetX, pickedWindow.targetY, meta)
+    ? cssPointToScreen(pickedWindow.targetX, pickedWindow.targetY, meta)
     : { x: session.scrollBandX + Math.floor(session.scrollBandW / 2),
         y: session.scrollBandY };
   session.scrollTargetX = pickedWindow
@@ -499,9 +500,9 @@ export function onScrollWheel(e) {
   session.scrollPendingDirection = rawDelta > 0 ? 1 : -1;
   session.scrollWheelStartedAtMs = performance.now();
   session.manualWheelVersion++;
-  // 0.18.8：内联公式收口为 cssToScreen（per-monitor）
+  // 统一使用 renderScale 换算
   const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
-  const cursorPos = cssToScreen(e.clientX, e.clientY, meta);
+  const cursorPos = cssPointToScreen(e.clientX, e.clientY, meta);
   const cursorScreenX = cursorPos.x;
   const cursorScreenY = cursorPos.y;
 
