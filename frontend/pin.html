@@ -54,7 +54,7 @@
     </div>
 
     <script type="module">
-      import { invoke, screenshotPinTransform, ocrImage, translateText } from "./js/shared/api.js";
+      import { invoke, screenshotPinTransform, screenshotPinMove, ocrImage, translateText } from "./js/shared/api.js";
 import { normalizeError } from "./js/shared/tauri.js";
       import { applyThemeFromConfig } from "./js/shared/theme.js";
 
@@ -82,6 +82,8 @@ import { normalizeError } from "./js/shared/tauri.js";
       let dragMoved = false;
       let dragEndTime = 0;
       let dragRafId = 0;
+      // 0.19.4：IPC 防堆积 — 拖拽时最多 1 个 move IPC 在途，多余的 mousemove 合并
+      let dragIpcInFlight = false;
 
       let isCtxOpen = false;
 
@@ -131,13 +133,26 @@ import { normalizeError } from "./js/shared/tauri.js";
       }
 
       /** resize 窗口到当前 scale 对应尺寸（离散调用，不在每次 wheel 触发）。
-       *  精确检测：当图片边缘距窗口边缘的剩余 padding < GLOW_RADIUS 时
-       *  触发 resize，确保发光不被裁切。 */
+       *  两个触发条件：
+       *  - 放大时 padding < GLOW_RADIUS → 发光被裁，必须扩窗
+       *  - 缩小时 winScale - scale > 0.25 → 窗口远大于图片，缩窗减少透明区
+       *    （透明区越小，DWM 合成面积越小，拖拽越流畅；也修复缩小后透明区可拖拽的 bug） */
       function resizeWindowIfNeeded() {
         // 当前窗口内，图片两侧的剩余 padding（物理像素）
         // 窗口宽 = physW * winScale + 2*PAD，图片视觉宽 = physW * scale
         const padRemaining = (physW * (winScale - scale) + 2 * PAD) / 2;
-        if (padRemaining >= GLOW_RADIUS) return;
+        if (padRemaining >= GLOW_RADIUS) {
+          // 0.19.4：缩小时也 resize — 窗口比图片大太多时收缩，减少透明拖拽区
+          if (scale < winScale && winScale - scale > 0.25) {
+            doResizeWindow();
+          }
+          return;
+        }
+        doResizeWindow();
+      }
+
+      /** 实际执行窗口 resize（sync winScale → scale，调 screenshotPinTransform）。 */
+      function doResizeWindow() {
         winScale = scale;
         const winX = Math.round(imgScreenX - PAD);
         const winY = Math.round(imgScreenY - PAD);
@@ -148,16 +163,26 @@ import { normalizeError } from "./js/shared/tauri.js";
         });
       }
 
-      /** 拖动时只改窗口位置（尺寸不变）。 */
+      /** 拖动时只改窗口位置（尺寸不变）。
+       *  0.19.4 优化：
+       *  - 用 screenshotPinMove（SWP_NOSIZE）替代 screenshotPinTransform，零 resize 开销
+       *  - 加 dragIpcInFlight flag：最多 1 个 move IPC 在途，多余 mousemove 合并
+       *    避免 IPC 堆积导致拖拽卡顿（每帧最多 1 次 IPC，合而不是堆） */
       function scheduleDragMove() {
         if (dragRafId !== 0) return;
         dragRafId = requestAnimationFrame(() => {
           dragRafId = 0;
+          if (dragIpcInFlight) return; // 上一个 move 还在途，跳过，等它回来再发最新的
           const winX = Math.round(imgScreenX - PAD);
           const winY = Math.round(imgScreenY - PAD);
-          const winW = winDispW() + 2 * PAD;
-          const winH = winDispH() + 2 * PAD;
-          screenshotPinTransform(winX, winY, winW, winH).catch(() => {});
+          dragIpcInFlight = true;
+          screenshotPinMove(winX, winY)
+            .catch(() => {})
+            .finally(() => {
+              dragIpcInFlight = false;
+              // 如果还在拖且有新位移，补发一次
+              if (isDragging) scheduleDragMove();
+            });
         });
       }
 
@@ -257,9 +282,20 @@ import { normalizeError } from "./js/shared/tauri.js";
       // 0.18.8：e.screenX/Y 在 Win32 下已是物理像素坐标，不需要 * dpr。
       // 旧代码 * dpr 是多余的一层缩放，在单 dpr 下碰巧能工作是因为 dpr=1，
       // 但跨 dpr 屏时 window.devicePixelRatio 会变，导致 imgScreenX/Y 漂移。
+      // 0.19.4：只在图片视觉区域内才开始拖拽 — 修复缩小后透明 padding 区可拖拽的 bug。
       document.addEventListener('mousedown', (e) => {
         if (e.button !== 0) return;
         if (e.target.closest('#ctx-menu')) return;
+        // 限制拖拽到图片视觉边界（CSS 像素，窗口内坐标）
+        const dpr = window.devicePixelRatio || 1;
+        const imgLeft = PAD / dpr;
+        const imgTop = PAD / dpr;
+        const imgVisW = (physW * scale) / dpr;
+        const imgVisH = (physH * scale) / dpr;
+        if (e.clientX < imgLeft || e.clientX > imgLeft + imgVisW ||
+            e.clientY < imgTop  || e.clientY > imgTop + imgVisH) {
+          return; // 点击在图片视觉区域外，不启动拖拽
+        }
         isDragging = true;
         dragMoved = false;
         dragLastPhysX = e.screenX;
@@ -296,9 +332,12 @@ import { normalizeError } from "./js/shared/tauri.js";
         if (dragRafId !== 0) {
           cancelAnimationFrame(dragRafId);
           dragRafId = 0;
+        }
+        // 0.19.4：拖拽结束用 screenshotPinMove 做最终位置同步（仅在有移动时）
+        if (dragMoved) {
           const winX = Math.round(imgScreenX - PAD);
           const winY = Math.round(imgScreenY - PAD);
-          screenshotPinTransform(winX, winY, winDispW() + 2 * PAD, winDispH() + 2 * PAD).catch(() => {});
+          screenshotPinMove(winX, winY).catch(() => {});
         }
       });
 

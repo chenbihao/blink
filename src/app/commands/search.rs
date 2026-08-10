@@ -373,7 +373,12 @@ pub async fn list_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Value>
     let pool = &app.state::<crate::infra::data::DbPools>().config;
     let chord_cfg = crate::app::config::get_chord_config(&pool).await;
     let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
-    let language = crate::app::config::get_config(&pool).await.language;
+    // 仅取 AppearanceConfig 单分片（1 次 DB），不走 get_config 全量门面（7 次 DB）。
+    let language = crate::domain::config::store::ConfigStore::get::<
+        crate::domain::config::shards::AppearanceConfig,
+    >(&pool)
+    .await
+    .language;
     let stt_enabled = crate::app::stt_config::get_stt_config().enabled;
     let ai_enabled = crate::app::ai_config::get_ai_config().enabled;
     let Some(registry) = app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()
@@ -400,7 +405,12 @@ pub async fn list_all_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Va
     let pool = &app.state::<crate::infra::data::DbPools>().config;
     let chord_cfg = crate::app::config::get_chord_config(&pool).await;
     let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
-    let language = crate::app::config::get_config(&pool).await.language;
+    // 仅取 AppearanceConfig 单分片（1 次 DB），不走 get_config 全量门面（7 次 DB）。
+    let language = crate::domain::config::store::ConfigStore::get::<
+        crate::domain::config::shards::AppearanceConfig,
+    >(&pool)
+    .await
+    .language;
     let stt_enabled = crate::app::stt_config::get_stt_config().enabled;
     let ai_enabled = crate::app::ai_config::get_ai_config().enabled;
     let Some(registry) = app.try_state::<std::sync::Arc<crate::domain::chord::ChordRegistry>>()

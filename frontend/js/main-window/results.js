@@ -48,6 +48,15 @@ export async function refreshMaxResults() {
   }
 }
 
+/** 从已读好的 config 对象刷新最大结果数（避免重复 invoke get_config）。
+ * @param {object} cfg - get_config 返回的 AppConfig 对象 */
+export function refreshMaxResultsFromConfigData(cfg) {
+  if (cfg) {
+    if (cfg.max_results) maxResults = cfg.max_results;
+    if (cfg.page_size) PAGE_SIZE = cfg.page_size;
+  }
+}
+
 /** 后端返回的全部结果（数据，非 DOM）。 */
 let allItems = [];
 /** 当前结果所属的请求 seq；render / merge 据此协调（同一 seq 合并，新 seq 重置）。 */

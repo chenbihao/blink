@@ -3,7 +3,7 @@
 //! 与截图 `SESSION` 分离：这里只暂存用户显式打开编辑器的 PNG，生命周期止于
 //! 当前编辑窗口。它不是 Capability ImageStash，也不跨调用或持久化。
 
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 const MAX_EDITOR_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 
@@ -13,7 +13,7 @@ pub struct ImageEditorMeta {
     pub height: u32,
 }
 
-static SESSION: RwLock<Option<Vec<u8>>> = RwLock::new(None);
+static SESSION: RwLock<Option<Arc<Vec<u8>>>> = RwLock::new(None);
 
 pub fn begin_session(png_data: Vec<u8>) -> Result<ImageEditorMeta, String> {
     if png_data.is_empty() || png_data.len() > MAX_EDITOR_IMAGE_BYTES {
@@ -26,13 +26,13 @@ pub fn begin_session(png_data: Vec<u8>) -> Result<ImageEditorMeta, String> {
         .ok_or_else(|| "图片编辑载荷不是有效 PNG".to_string())?;
     *SESSION
         .write()
-        .map_err(|e| format!("图片编辑 SESSION 写锁失败: {e}"))? = Some(png_data);
+        .map_err(|e| format!("图片编辑 SESSION 写锁失败: {e}"))? = Some(Arc::new(png_data));
     tracing::debug!(width, height, "用户图片编辑 SESSION 已建立");
     Ok(ImageEditorMeta { width, height })
 }
 
-pub fn session_png() -> Option<Vec<u8>> {
-    SESSION.read().ok()?.clone()
+pub fn session_png() -> Option<Arc<Vec<u8>>> {
+    SESSION.read().ok()?.as_ref().map(Arc::clone)
 }
 
 pub fn end_session() {
@@ -64,7 +64,7 @@ mod tests {
                 height: 1
             }
         );
-        assert_eq!(session_png().as_deref(), Some(ONE_PIXEL_PNG));
+        assert_eq!(session_png().as_deref().map(|v| v.as_slice()), Some(ONE_PIXEL_PNG));
         end_session();
         assert!(session_png().is_none());
         assert!(begin_session(Vec::new()).is_err());

@@ -410,7 +410,12 @@ impl SearchService {
         self.latest_seq.store(seq, Ordering::SeqCst);
 
         let q = query.trim();
-        let history = crate::infra::data::history::get_weights(&self.pool).await;
+        // 空 query 时同步引擎全部 early return，history 权重无使用场景——跳过全表 SELECT。
+        let history = if q.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            crate::infra::data::history::get_weights(&self.pool).await
+        };
         let snapshot = self.snapshot.read().unwrap().clone();
         let disabled = self.disabled_builtin_actions.read().unwrap().clone();
         let disabled_ctx = self.disabled_context_bindings.read().unwrap().clone();

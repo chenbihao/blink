@@ -129,6 +129,30 @@ export async function refresh() {
   render();
 }
 
+/** 从已读好的 config 对象刷新 chord 配置并拉取动作列表（避免重复 invoke get_config）。
+ * @param {object} cfg - get_config 返回的 AppConfig 对象 */
+export async function refreshFromConfigData(cfg) {
+  // 先刷新配置快照
+  if (cfg) {
+    chordEnabled = cfg.chord_enabled === true;
+    hintVisible = cfg.chord_hint_visible !== false;
+  }
+
+  if (!chordEnabled) {
+    chordActions = [];
+    if (ghostChordEl) ghostChordEl.replaceChildren();
+    return;
+  }
+
+  try {
+    chordActions = await listChordActions();
+  } catch (e) {
+    console.warn("[chord] list_chord_actions 失败", e);
+    chordActions = [];
+  }
+  render();
+}
+
 /**
  * 把 chord action 的 key 转成渲染用的键名。
  * key=' '（语音输入）→ "Space"；其它直接大写。

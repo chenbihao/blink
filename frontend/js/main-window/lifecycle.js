@@ -1,6 +1,6 @@
 //! 窗口生命周期：响应后端 blink://shown / blink://hidden，复位输入与列表。
 
-import { listen } from "../shared/tauri.js";
+import { listen, invoke } from "../shared/tauri.js";
 import { EVENTS } from "../shared/event-names.js";
 import { queryEl, aiQueryEl } from "./dom.js";
 import * as results from "./results.js";
@@ -10,8 +10,8 @@ import * as ghost from "./ghost.js";
 import * as aiMode from "./ai-mode.js";
 import * as cmdMode from "./command-mode.js";
 import * as inputState from "./input-state.js";
-import { applyThemeFromConfig, applyGlassOpacityFromConfig } from "../shared/theme.js";
-import { applyI18nFromConfig, t } from "../i18n/index.js";
+import { applyThemeFromConfigData, applyGlassOpacityFromConfigData } from "../shared/theme.js";
+import { applyI18nFromConfigData, t } from "../i18n/index.js";
 
 /** 注册生命周期事件监听。 */
 export function init() {
@@ -32,20 +32,21 @@ export function init() {
     const vi = document.getElementById("voice-indicator");
     if (vi) vi.classList.add("hidden");
     queryEl.focus();
-    // 异步刷新主题（设置页可能改了 theme）；不 await，不阻塞 focus
-    applyThemeFromConfig();
-    applyGlassOpacityFromConfig(); // 刷新毛玻璃透明度
-    // 刷新界面语言（设置页可能改了 language）；不 await，不阻塞 focus
-    applyI18nFromConfig();
-    // 刷新最大结果数（设置页可能改了 max_results）
-    results.refreshMaxResults();
+    // 异步刷新主题/透明度/语言/结果数/chord——只调一次 get_config 分发给各模块
+    // （原实现每个模块各自 invoke get_config，每次唤起 5×7=35 次无谓 DB 查询）
+    invoke("get_config").then((cfg) => {
+      if (!cfg) return;
+      applyThemeFromConfigData(cfg);
+      applyGlassOpacityFromConfigData(cfg);
+      applyI18nFromConfigData(cfg);
+      results.refreshMaxResultsFromConfigData(cfg);
+      chord.refreshFromConfigData(cfg).then(() => inputState.reevaluate());
+    }).catch((e) => console.error("SHOWN: get_config 失败", e));
     // 0.8.3 §4.13 P0-1：唤起瞬间发一次空 query,拉后端产的 Context Suggestion（Ghost）。
     // 0.8.2 此调用是拉 Context 召回条目（AppEntry）;0.8.3 契约变更后 Context 不产
     // candidate,该调用现在的作用是拿 `response.suggestion` 走 Ghost 通道——函数名保留,
     // 内部实现在 search.js 已重写。
     search.fetchContextSuggestions();
-    // chord 配置刷新后重新投影 chord-visible
-    chord.refresh().then(() => inputState.reevaluate());
     // query 被清空后上报 context（programmatic value= 不触发 input 事件）
     inputState.onShown();
   });
@@ -64,11 +65,14 @@ export function init() {
 
   // 配置变更即时响应（设置页切换主题/语言等，无需关闭再打开主窗口）
   listen(EVENTS.CONFIG_CHANGED, () => {
-    applyThemeFromConfig();
-    applyGlassOpacityFromConfig(); // 毛玻璃透明度即时生效
-    applyI18nFromConfig();
-    results.refreshMaxResults();
-    chord.refresh().then(() => inputState.reevaluate()); // Chord 开关/可见性改动即时生效；刷新后重投影
+    invoke("get_config").then((cfg) => {
+      if (!cfg) return;
+      applyThemeFromConfigData(cfg);
+      applyGlassOpacityFromConfigData(cfg);
+      applyI18nFromConfigData(cfg);
+      results.refreshMaxResultsFromConfigData(cfg);
+      chord.refreshFromConfigData(cfg).then(() => inputState.reevaluate());
+    }).catch((e) => console.error("CONFIG_CHANGED: get_config 失败", e));
   });
 
   // 0.8.5 §6.4：Chord Alt+C 剪贴板改走 fill-query——后端 ClipboardHistoryAction

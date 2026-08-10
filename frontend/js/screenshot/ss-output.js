@@ -123,12 +123,27 @@ export function compositeSelection(callback) {
 /** 0.18.3：导出合成函数，供「翻译并 pin」后台合成译文 PNG 用。 */
 export { compositeSelectionBytes };
 
+// M10 优化：复用合成 canvas，避免每次 compositeSelectionBytes / encodeImageDataPng 都 createElement
+let _compositeCanvas = null;
+
+/** M10 优化：获取复用的 canvas（尺寸不匹配时自动 resize + 清空） */
+function getCompositeCanvas(w, h) {
+  if (!_compositeCanvas) {
+    _compositeCanvas = document.createElement('canvas');
+  }
+  if (_compositeCanvas.width !== w || _compositeCanvas.height !== h) {
+    _compositeCanvas.width = w;
+    _compositeCanvas.height = h;
+  }
+  const ctx = _compositeCanvas.getContext('2d');
+  ctx.clearRect(0, 0, w, h);
+  return _compositeCanvas;
+}
+
 /** 将 ImageData 编码为后端输出接口统一接收的 PNG 字节。 */
 export async function encodeImageDataPng(imageData) {
   if (!imageData) return null;
-  const canvas = document.createElement('canvas');
-  canvas.width = imageData.width;
-  canvas.height = imageData.height;
+  const canvas = getCompositeCanvas(imageData.width, imageData.height);
   canvas.getContext('2d').putImageData(imageData, 0, 0);
   const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
   return blob ? new Uint8Array(await blob.arrayBuffer()) : null;
@@ -182,9 +197,7 @@ async function compositeSelectionBytes() {
     const pw = bmp.w;
     const ph = bmp.h;
 
-    const off = document.createElement('canvas');
-    off.width = pw;
-    off.height = ph;
+    const off = getCompositeCanvas(pw, ph);
     const offCtx = off.getContext('2d');
     if (sessionBase) {
       offCtx.drawImage(sessionBase, 0, 0);

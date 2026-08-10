@@ -12,6 +12,26 @@ import { norm } from './ss-utils.js';
 import * as annot from './annotation-engine.js';
 import { cssPointToScreen, formatSelectionInfo } from './ss-selection-geometry.js';
 
+// H1 优化：rAF 节流——同一帧内多次 mousemove 只绘制一次
+let _drawSelectionRaf = null;
+
+/** H1 优化：rAF 节流版 drawSelection，mousemove 高频调用时合并到单帧 */
+export function scheduleDrawSelection() {
+  if (_drawSelectionRaf !== null) return;
+  _drawSelectionRaf = requestAnimationFrame(() => {
+    _drawSelectionRaf = null;
+    drawSelection();
+  });
+}
+
+/** 取消待执行的 drawSelection rAF（mouseup / ESC 时调） */
+export function cancelDrawSelectionRaf() {
+  if (_drawSelectionRaf !== null) {
+    cancelAnimationFrame(_drawSelectionRaf);
+    _drawSelectionRaf = null;
+  }
+}
+
 /** 暗色蒙版（初始态 + 无选区时） */
 export function drawDimmed() {
   try {

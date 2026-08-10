@@ -6,16 +6,46 @@
 //! 现有调用点（`history::get_config` 等）无需改动。
 
 use std::collections::HashMap;
+use std::sync::{OnceLock, RwLock};
 
 use sqlx::SqlitePool;
 
+// ── 内存缓存 ──────────────────────────────────────────────────────────────
+//
+// 配置写入频率极低（仅用户改设置时），读频率极高（每次唤起 7+ 次）。
+// 缓存 Some(String) 结果；None 不缓存（缺失 key 走 default 兜底，不影响正确性）。
+// set 时更新缓存，delete 时移除缓存——保证一致性。
+
+static CONFIG_CACHE: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
+
+fn config_cache() -> &'static RwLock<HashMap<String, String>> {
+    CONFIG_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
 /// 获取配置值。
 pub async fn get_config(pool: &SqlitePool, key: &str) -> Option<String> {
+    // 生产环境：先查内存缓存（测试环境跳过——多 pool 并行测试会互相污染）
+    #[cfg(not(test))]
+    {
+        if let Ok(cache) = config_cache().read() {
+            if let Some(val) = cache.get(key) {
+                return Some(val.clone());
+            }
+        }
+    }
+    // 查 SQLite
     let row: (String,) = sqlx::query_as("SELECT value FROM config WHERE key = ?1")
         .bind(key)
         .fetch_optional(pool)
         .await
         .ok()??;
+    // 回填缓存
+    #[cfg(not(test))]
+    {
+        if let Ok(mut cache) = config_cache().write() {
+            cache.insert(key.to_string(), row.0.clone());
+        }
+    }
     Some(row.0)
 }
 
@@ -31,6 +61,13 @@ pub async fn set_config(pool: &SqlitePool, key: &str, value: &str) -> Result<(),
     .bind(now)
     .execute(pool)
     .await?;
+    // 同步更新缓存
+    #[cfg(not(test))]
+    {
+        if let Ok(mut cache) = config_cache().write() {
+            cache.insert(key.to_string(), value.to_string());
+        }
+    }
     Ok(())
 }
 
@@ -40,6 +77,13 @@ pub async fn delete_config(pool: &SqlitePool, key: &str) -> Result<(), sqlx::Err
         .bind(key)
         .execute(pool)
         .await?;
+    // 移除缓存
+    #[cfg(not(test))]
+    {
+        if let Ok(mut cache) = config_cache().write() {
+            cache.remove(key);
+        }
+    }
     Ok(())
 }
 

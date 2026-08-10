@@ -363,6 +363,35 @@ pub fn screenshot_pin_transform(
     Ok(())
 }
 
+/// 0.19.4：钉图窗口仅移动位置（拖拽专用，零 resize 开销）。
+///
+/// 与 `screenshot_pin_transform` 的区别：用 `SWP_NOSIZE | SWP_NOZORDER` 跳过
+/// 尺寸计算和 Z 序调整，只改窗口位置。拖拽时窗口尺寸不变，无需每次都传
+/// winW/winH 让 Win32 做无用的 resize 判定。减少每帧 IPC 的后端开销。
+#[tauri::command]
+pub fn screenshot_pin_move(app: tauri::AppHandle, win_x: i32, win_y: i32) -> Result<(), String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SET_WINDOW_POS_FLAGS, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+    };
+    if let Some(win) = app.get_webview_window("chord-pin") {
+        if let Ok(hwnd) = win.hwnd() {
+            unsafe {
+                let _ = SetWindowPos(
+                    HWND(hwnd.0 as _),
+                    None,
+                    win_x,
+                    win_y,
+                    0,
+                    0,
+                    SET_WINDOW_POS_FLAGS(SWP_NOSIZE.0 | SWP_NOZORDER.0 | SWP_NOACTIVATE.0),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 0.11.7-c：OCR 识别图片中的文字，返回 `{text, lines}`。
 ///
 /// 0.11.7-f：改走 `ocr_engine::backend()` 注入的后端（测试可替换）。
@@ -938,10 +967,17 @@ pub async fn screenshot_capture_band(
 ) -> Result<tauri::ipc::Response, String> {
     let bytes = tokio::task::spawn_blocking(move || {
         let bgra = crate::infra::platform::screenshot::capture_region(x, y, w, h)?;
-        // BGRA → RGBA（swap R and B per pixel）
+        // H5 优化：u32 位运算批量 swap R↔B，替代 chunks_exact_mut(4).swap(0, 2)
+        // BGRA [B,G,R,A] 在 little-endian 下 = u32 0xAARRGGBB
+        // RGBA [R,G,B,A]            = u32 0xAABBGGRR
+        // 差别仅 R/B 位置对换 → mask 0x00FF00FF 提出 R/B 两字节交换
         let mut rgba = bgra;
         for chunk in rgba.chunks_exact_mut(4) {
-            chunk.swap(0, 2);
+            let px = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            let rb = px & 0x00FF00FF;
+            let ga = px & 0xFF00FF00;
+            let swapped = ga | (rb << 16) | (rb >> 16);
+            chunk.copy_from_slice(&swapped.to_ne_bytes());
         }
         Ok::<Vec<u8>, String>(rgba)
     })

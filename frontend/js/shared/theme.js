@@ -76,6 +76,12 @@ export async function applyThemeFromConfig() {
   applyTheme(mode);
 }
 
+/** 从已读好的 config 对象应用主题（避免重复 invoke get_config）。
+ * @param {object} cfg - get_config 返回的 AppConfig 对象 */
+export function applyThemeFromConfigData(cfg) {
+  applyTheme((cfg && cfg.theme) || "auto");
+}
+
 /** 从 AppConfig 读 window_opacity 并设置 CSS 变量 --glass-opacity。启动时与每次 shown/config-changed 刷新。 */
 export async function applyGlassOpacityFromConfig() {
   try {
@@ -85,6 +91,14 @@ export async function applyGlassOpacityFromConfig() {
     }
   } catch (e) {
     console.error("applyGlassOpacityFromConfig: 读 config 失败", e);
+  }
+}
+
+/** 从已读好的 config 对象应用毛玻璃透明度（避免重复 invoke get_config）。
+ * @param {object} cfg - get_config 返回的 AppConfig 对象 */
+export function applyGlassOpacityFromConfigData(cfg) {
+  if (cfg && cfg.window_opacity !== undefined) {
+    document.documentElement.style.setProperty("--glass-opacity", cfg.window_opacity);
   }
 }
 

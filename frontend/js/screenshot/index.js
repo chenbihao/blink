@@ -31,7 +31,7 @@
 
 import {
   screenshotSetAnnotationMode, hideScreenshotOverlay,
-  ocrImage, frontendLog, invoke, copyToClipboard,
+  ocrImage, invoke, copyToClipboard,
 } from "../shared/api.js";
 import { normalizeError } from "../shared/tauri.js";
 import * as annot from "./annotation-engine.js";
@@ -43,8 +43,8 @@ import { ss, initDOM, PREWARM_MIN_WIDTH, PREWARM_MIN_HEIGHT, TOOL_CAPS } from ".
 import { IMAGE_SOURCE } from './image-editor-session.js';
 import { norm, pointInRect, applySquareConstraint } from "./ss-utils.js";
 import { shouldStartFreeSelection, monitorDprAtCss, syncRenderScale, cssRectToBitmap, cssPointToScreen } from "./ss-selection-geometry.js";
-import { drawDimmed, drawSelection, drawFinalSelection, redrawAnnotPreview, redrawAnnotFull } from "./ss-draw.js";
-import { positionToolbar, findDisplayCssAt } from "./ss-display.js";
+import { drawDimmed, drawSelection, drawFinalSelection, redrawAnnotPreview, redrawAnnotFull, scheduleDrawSelection, cancelDrawSelectionRaf } from "./ss-draw.js";
+import { positionToolbar, findDisplayCssAt, invalidateDisplaysCache } from "./ss-display.js";
 import {
   getSelectionHandle, beginSelectionInteraction, updateSelectionInteraction,
   finishSelectionInteraction, updateSelectionCursor, refreshShapePreviewOnShift,
@@ -79,37 +79,6 @@ import {
 } from "./scroll/index.js";
 import { refreshDiagnosticsVisibility } from "./scroll/diagnostics.js";
 import { refreshOcrDiagnosticsVisibility } from "./ss-ocr-diagnostics.js";
-
-// ── **临时**（0.11.7-f 调试用）：console 转发到后端 tracing ────────────
-// TODO(0.11.7 收尾)：0.11.7 稳定后移除此块 + api.js 的 frontendLog + Rust 端 frontend_log command
-{
-  const wrap = (level) => {
-    const orig = console[level].bind(console);
-    return (...args) => {
-      orig(...args);
-      try {
-        const msg = args
-          .map((a) => {
-            if (typeof a === 'string') return a;
-            if (a instanceof Error) return `${a.name}: ${a.message}\n${a.stack || ''}`;
-            try { return JSON.stringify(a); } catch { return String(a); }
-          })
-          .join(' ');
-        frontendLog(level, msg);
-      } catch (_) { /* fail-silent */ }
-    };
-  };
-  console.error = wrap('error');
-  console.warn = wrap('warn');
-  console.info = wrap('info');
-  console.debug = wrap('debug');
-  window.addEventListener('error', (e) => {
-    frontendLog('error', `window.onerror: ${e.message} @ ${e.filename}:${e.lineno}:${e.colno}`);
-  });
-  window.addEventListener('unhandledrejection', (e) => {
-    frontendLog('error', `unhandledrejection: ${e.reason && e.reason.stack ? e.reason.stack : e.reason}`);
-  });
-}
 
 // ════════════════════════════════════════════════════════════
 //  初始化
@@ -211,6 +180,8 @@ window.addEventListener('resize', () => {
   const meta = window.__blinkScreenMeta;
   if (!canvas || !meta) return;
   if (syncRenderScale(canvas, meta)) {
+    // M7 优化：renderScale 变化后失效 displays 缓存
+    invalidateDisplaysCache();
     console.debug('[screenshot] resize: renderScale re-synced', { scaleX: meta.renderScaleX, scaleY: meta.renderScaleY });
   }
 });
@@ -403,6 +374,8 @@ function loadScreenshot() {
         if (gen !== ss._loadGen) return;
         const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
         syncRenderScale(canvas, meta);
+        // M7 优化：初始 renderScale 设定后失效 displays 缓存
+        invalidateDisplaysCache();
         drawDimmed();
         // 诊断日志：截图加载完成后的坐标空间状态
         const rect = canvas.getBoundingClientRect();
@@ -937,7 +910,8 @@ canvas.addEventListener('mousemove', (e) => {
       ss.isDragging = true;
       ss.sent = false;
       ss.snappedHwnd = null;
-      drawSelection();
+      // H1 优化：rAF 节流
+      scheduleDrawSelection();
     }
     return;
   }
@@ -984,7 +958,8 @@ canvas.addEventListener('mousemove', (e) => {
     }
     ss.endX = clampedX;
     ss.endY = clampedY;
-    drawSelection();
+    // H1 优化：rAF 节流，避免 mousemove 高频全量重绘
+    scheduleDrawSelection();
   }
 });
 
@@ -1005,6 +980,8 @@ canvas.addEventListener('mouseleave', () => {
 });
 
 canvas.addEventListener('mouseup', (e) => {
+  // H1 优化：取消待执行的 drawSelection rAF，确保最终绘制是最新的
+  cancelDrawSelectionRaf();
   // 0.15.7：长图平移结束
   if (endLongImagePan()) return;
 
@@ -1243,6 +1220,8 @@ window.addEventListener('blur', () => {
     return;
   }
 
+  // H1 优化：取消待执行的 drawSelection rAF
+  cancelDrawSelectionRaf();
   console.debug('[screenshot] window blur, hiding overlay');
   if (isScrollCaptureActive()) {
     exitScrollCapture(false)

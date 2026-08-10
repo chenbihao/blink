@@ -817,7 +817,8 @@ export function showOcrResult(result, options = {}) {
         loadingAnimTimer = null;
         return;
       }
-      redrawAnnotFull();
+      // H2 优化：用快照+spinner 替代全量重绘
+      annot.redrawLoadingSpinner();
     }, 50);
     const overlayLang = annot.getOverlay()?.translationTargetLang;
     requestOverlayTranslation(overlayLang);

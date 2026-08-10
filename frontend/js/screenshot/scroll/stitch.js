@@ -18,7 +18,7 @@ const DEFAULT_DETAIL_LUMA_RANGE = 10;
 const DEFAULT_DETAIL_TILE_MISMATCH_THRESHOLD = 8;
 const DEFAULT_DETAIL_MISMATCH_RATIO = 0.32;
 
-function sampledSad(prevFrame, currFrame, shift, sampleRows = 24, sampleCols = 28) {
+function sampledSad(prevFrame, currFrame, shift, sampleRows = 24, sampleCols = 28, precomputed = null) {
   const w = Math.min(prevFrame.width, currFrame.width);
   const h = Math.min(prevFrame.height, currFrame.height);
   const overlap = h - shift;
@@ -26,8 +26,6 @@ function sampledSad(prevFrame, currFrame, shift, sampleRows = 24, sampleCols = 2
 
   const prev = prevFrame.data;
   const curr = currFrame.data;
-  const prevStride = prevFrame.width * 4;
-  const currStride = currFrame.width * 4;
   // 避开最上方常见的吸顶栏，并覆盖中下部内容。
   const marginY = Math.min(
     Math.floor(overlap / 4),
@@ -37,16 +35,31 @@ function sampledSad(prevFrame, currFrame, shift, sampleRows = 24, sampleCols = 2
   let sad = 0;
   let samples = 0;
 
+  // H8 优化：Uint32Array 视图——2 次读取替代 6 次 Uint8Array 读取
+  const prev32 = new Uint32Array(prev.buffer, prev.byteOffset, prev.byteLength >> 2);
+  const curr32 = new Uint32Array(curr.buffer, curr.byteOffset, curr.byteLength >> 2);
+  const prevStride32 = prevFrame.width;
+  const currStride32 = currFrame.width;
+
+  // H8 优化：复用预计算的采样坐标
+  const xs = precomputed?.xs;
+  const ys = precomputed?.ys;
+
   for (let sy = 0; sy < sampleRows; sy++) {
-    const y = marginY + Math.min(usableH - 1, Math.floor((sy + 0.5) * usableH / sampleRows));
+    const y = ys ? ys[sy] : marginY + Math.min(usableH - 1, Math.floor((sy + 0.5) * usableH / sampleRows));
     const prevY = y + shift;
+    const prevRowBase32 = prevY * prevStride32;
+    const currRowBase32 = y * currStride32;
     for (let sx = 0; sx < sampleCols; sx++) {
-      const x = Math.min(w - 1, Math.floor((sx + 0.5) * w / sampleCols));
-      const pi = prevY * prevStride + x * 4;
-      const ci = y * currStride + x * 4;
-      sad += Math.abs(prev[pi] - curr[ci]);
-      sad += Math.abs(prev[pi + 1] - curr[ci + 1]);
-      sad += Math.abs(prev[pi + 2] - curr[ci + 2]);
+      const x = xs ? xs[sx] : Math.min(w - 1, Math.floor((sx + 0.5) * w / sampleCols));
+      const pi = prevRowBase32 + x;
+      const ci = currRowBase32 + x;
+      // Uint32 读取 RGBA，bitwise 提取 R/G/B（little-endian: 0xAABBGGRR）
+      const pp = prev32[pi];
+      const cp = curr32[ci];
+      sad += Math.abs((pp & 0xFF) - (cp & 0xFF));
+      sad += Math.abs(((pp >> 8) & 0xFF) - ((cp >> 8) & 0xFF));
+      sad += Math.abs(((pp >> 16) & 0xFF) - ((cp >> 16) & 0xFF));
       samples += 3;
     }
   }
@@ -65,6 +78,7 @@ export function estimateVerticalShift(prevFrame, currFrame, options = {}) {
   }
 
   const h = prevFrame.height;
+  const w = prevFrame.width;
   const sampleRows = options.sampleRows ?? 24;
   const sampleCols = options.sampleCols ?? 28;
   const unchangedThreshold = options.unchangedThreshold ?? DEFAULT_UNCHANGED_THRESHOLD;
@@ -82,22 +96,57 @@ export function estimateVerticalShift(prevFrame, currFrame, options = {}) {
   let bestScore = Infinity;
   let bestRank = Infinity;
   const candidates = [];
-  // 默认把滚轮方向作为重复纹理中的优先级；采集链路可启用 strictDirection，
-  // 防止“向上滚动”被相似内容解释成向下追加。
   const directions = expectedDirection === 0
     ? [1, -1]
     : (options.strictDirection ? [expectedDirection] : [expectedDirection, -expectedDirection]);
+
+  // H8 优化：预计算采样坐标——shift 变化时 x 坐标和相对 y 坐标不变，无需每次重算
+  const xs = new Array(sampleCols);
+  for (let sx = 0; sx < sampleCols; sx++) {
+    xs[sx] = Math.min(w - 1, Math.floor((sx + 0.5) * w / sampleCols));
+  }
+  // y 坐标依赖 overlap（= h - shift），但 shift=0 时的 y 分布可作为近似
+  // 实际上 sampledSad 内部仍会按 overlap 重算 y，这里只传 x 做优化
+  const precomputed = { xs };
+
+  // H8 优化：粗到细搜索——先以 step=4 找大致位置，再 ±3 精细搜索
+  // rejectAmbiguous 模式需收集所有候选位移做歧义检测，不能跳步——退回全量搜索
+  const useCoarseSearch = !options.rejectAmbiguous;
+  const coarseStep = 4;
+  const refineRange = 3;
   for (const direction of directions) {
-    for (let distance = 1; distance <= maxShift; distance++) {
+    const step = useCoarseSearch ? coarseStep : 1;
+    for (let distance = 1; distance <= maxShift; distance += step) {
       const score = direction > 0
-        ? sampledSad(prevFrame, currFrame, distance, sampleRows, sampleCols)
-        : sampledSad(currFrame, prevFrame, distance, sampleRows, sampleCols);
+        ? sampledSad(prevFrame, currFrame, distance, sampleRows, sampleCols, precomputed)
+        : sampledSad(currFrame, prevFrame, distance, sampleRows, sampleCols, precomputed);
       const rank = score * (expectedDirection !== 0 && direction !== expectedDirection ? 1.08 : 1);
       if (options.rejectAmbiguous) candidates.push({ shift: direction * distance, score });
       if (rank < bestRank) {
         bestRank = rank;
         bestScore = score;
         bestShift = direction * distance;
+      }
+    }
+  }
+  // 精细搜索：在粗搜最佳位移附近 ±refineRange 做逐像素搜索（仅非 rejectAmbiguous 模式）
+  if (useCoarseSearch && bestShift !== 0) {
+    const coarseShift = bestShift;
+    const coarseDir = Math.sign(coarseShift);
+    const coarseDist = Math.abs(coarseShift);
+    const refineStart = Math.max(1, coarseDist - refineRange);
+    const refineEnd = Math.min(maxShift, coarseDist + refineRange);
+    for (let distance = refineStart; distance <= refineEnd; distance++) {
+      // 跳过粗搜已试过的点（coarseStep 的倍数）
+      if (distance % coarseStep === 0 && distance <= coarseDist) continue;
+      const score = coarseDir > 0
+        ? sampledSad(prevFrame, currFrame, distance, sampleRows, sampleCols, precomputed)
+        : sampledSad(currFrame, prevFrame, distance, sampleRows, sampleCols, precomputed);
+      const rank = score * (expectedDirection !== 0 && coarseDir !== expectedDirection ? 1.08 : 1);
+      if (rank < bestRank) {
+        bestRank = rank;
+        bestScore = score;
+        bestShift = coarseDir * distance;
       }
     }
   }

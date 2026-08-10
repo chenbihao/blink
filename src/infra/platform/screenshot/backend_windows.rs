@@ -13,8 +13,8 @@ use windows::Win32::Foundation::{LPARAM, RECT};
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{
     BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDCW,
-    DIB_RGB_COLORS, DeleteDC, DeleteObject, EnumDisplayMonitors, GetDIBits, GetMonitorInfoW, HDC,
-    HMONITOR, MONITORINFO, MONITORINFOEXW, RGBQUAD, SRCCOPY, SelectObject,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, EnumDisplayMonitors, GetDIBits, GetMonitorInfoW,
+    HBITMAP, HDC, HGDIOBJ, HMONITOR, MONITORINFO, MONITORINFOEXW, RGBQUAD, SRCCOPY, SelectObject,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
@@ -137,6 +137,34 @@ unsafe extern "system" fn monitor_enum_proc(
 
 // ── 截屏实现 ──────────────────────────────────────────────────────────────────
 
+// H4 优化：thread_local GDI 资源缓存——避免每次 capture_region_bgra 全建全毁 DC+bitmap。
+// bitmap 在尺寸变化时才重建；DC 全程复用直到 thread 退出（Drop 自动清理）。
+struct GdiCache {
+    hdc_screen: HDC,
+    hdc_mem: HDC,
+    hbitmap: HBITMAP,
+    bitmap_w: i32,
+    bitmap_h: i32,
+    old_bmp: HGDIOBJ, // SelectObject 保存的原对象，销毁 bitmap 前需恢复
+}
+
+impl Drop for GdiCache {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.hbitmap.is_invalid() {
+                let _ = SelectObject(self.hdc_mem, self.old_bmp);
+                let _ = DeleteObject(self.hbitmap.into());
+            }
+            let _ = DeleteDC(self.hdc_mem);
+            let _ = DeleteDC(self.hdc_screen);
+        }
+    }
+}
+
+thread_local! {
+    static GDI_CACHE: RefCell<Option<GdiCache>> = const { RefCell::new(None) };
+}
+
 /// 截取整个虚拟屏幕（等价于旧 `windows::capture_virtual_screen()`）。
 fn capture_virtual_screen_impl() -> Result<(Vec<u8>, ScreenCaptureMeta), String> {
     unsafe {
@@ -166,89 +194,106 @@ fn capture_virtual_screen_impl() -> Result<(Vec<u8>, ScreenCaptureMeta), String>
 ///
 /// `src_x/src_y` 是虚拟屏幕坐标；`w/h` 是目标像素尺寸。
 /// **像素格式**：BGRA、top-down、每行 `w*4` 字节（BitBlt 原生输出，不做 swap）。
+///
+/// H4 优化：使用 thread_local GDI 缓存——DC 全程复用，bitmap 仅在尺寸变化时重建。
+/// 避免每次调用都 CreateDC + CreateCompatibleDC + CreateCompatibleBitmap + Delete* 6 次 syscall。
 fn capture_region_bgra(src_x: i32, src_y: i32, w: u32, h: u32) -> Result<Vec<u8>, String> {
     unsafe {
         // BitBlt 前再 DwmFlush 一次——确保 GDI 拿到的屏幕是 DWM 最新合成的一帧
         let _ = DwmFlush();
 
-        let hdc_screen = CreateDCW(windows::core::w!("DISPLAY"), None, None, None);
-        if hdc_screen.is_invalid() {
-            return Err("CreateDC(DISPLAY) 失败".into());
-        }
+        GDI_CACHE.with(|cache| {
+            let mut gdi_opt = cache.borrow_mut();
 
-        let hdc_mem = CreateCompatibleDC(Some(hdc_screen));
-        if hdc_mem.is_invalid() {
-            let _ = DeleteDC(hdc_screen);
-            return Err("CreateCompatibleDC 失败".into());
-        }
+            // 初始化 DC（仅首次或 thread 首次调用时）
+            if gdi_opt.is_none() {
+                let hdc_screen = CreateDCW(windows::core::w!("DISPLAY"), None, None, None);
+                if hdc_screen.is_invalid() {
+                    return Err("CreateDC(DISPLAY) 失败".into());
+                }
+                let hdc_mem = CreateCompatibleDC(Some(hdc_screen));
+                if hdc_mem.is_invalid() {
+                    let _ = DeleteDC(hdc_screen);
+                    return Err("CreateCompatibleDC 失败".into());
+                }
+                *gdi_opt = Some(GdiCache {
+                    hdc_screen,
+                    hdc_mem,
+                    hbitmap: HBITMAP::default(),
+                    bitmap_w: 0,
+                    bitmap_h: 0,
+                    old_bmp: HGDIOBJ::default(),
+                });
+            }
 
-        let hbitmap = CreateCompatibleBitmap(hdc_screen, w as i32, h as i32);
-        if hbitmap.is_invalid() {
-            let _ = DeleteDC(hdc_mem);
-            let _ = DeleteDC(hdc_screen);
-            return Err("CreateCompatibleBitmap 失败".into());
-        }
+            let gdi = gdi_opt.as_mut().unwrap();
 
-        let old_bmp = SelectObject(hdc_mem, hbitmap.into());
+            // 尺寸变化时重建 bitmap（长截图采集带尺寸通常不变，仅首次重建）
+            if gdi.bitmap_w != w as i32 || gdi.bitmap_h != h as i32 {
+                // 先恢复旧对象再删除旧 bitmap
+                if !gdi.hbitmap.is_invalid() {
+                    let _ = SelectObject(gdi.hdc_mem, gdi.old_bmp);
+                    let _ = DeleteObject(gdi.hbitmap.into());
+                }
+                gdi.hbitmap = CreateCompatibleBitmap(gdi.hdc_screen, w as i32, h as i32);
+                if gdi.hbitmap.is_invalid() {
+                    return Err("CreateCompatibleBitmap 失败".into());
+                }
+                gdi.old_bmp = SelectObject(gdi.hdc_mem, gdi.hbitmap.into());
+                gdi.bitmap_w = w as i32;
+                gdi.bitmap_h = h as i32;
+            }
 
-        let ok = BitBlt(
-            hdc_mem,
-            0,
-            0,
-            w as i32,
-            h as i32,
-            Some(hdc_screen),
-            src_x,
-            src_y,
-            SRCCOPY,
-        );
-        if !ok.is_ok() {
-            let _ = SelectObject(hdc_mem, old_bmp);
-            let _ = DeleteObject(hbitmap.into());
-            let _ = DeleteDC(hdc_mem);
-            let _ = DeleteDC(hdc_screen);
-            return Err("BitBlt 失败".into());
-        }
+            let ok = BitBlt(
+                gdi.hdc_mem,
+                0,
+                0,
+                w as i32,
+                h as i32,
+                Some(gdi.hdc_screen),
+                src_x,
+                src_y,
+                SRCCOPY,
+            );
+            if !ok.is_ok() {
+                return Err("BitBlt 失败".into());
+            }
 
-        let pixel_count = (w * h) as usize;
-        let mut pixels: Vec<u8> = vec![0u8; pixel_count * 4];
+            let pixel_count = (w * h) as usize;
+            let mut pixels: Vec<u8> = vec![0u8; pixel_count * 4];
 
-        let bmi = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: w as i32,
-                biHeight: -(h as i32), // 负值 = top-down
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: 0, // BI_RGB
-                biSizeImage: 0,
-                biXPelsPerMeter: 0,
-                biYPelsPerMeter: 0,
-                biClrUsed: 0,
-                biClrImportant: 0,
-            },
-            bmiColors: [RGBQUAD::default(); 1],
-        };
+            let bmi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: w as i32,
+                    biHeight: -(h as i32), // 负值 = top-down
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: 0, // BI_RGB
+                    biSizeImage: 0,
+                    biXPelsPerMeter: 0,
+                    biYPelsPerMeter: 0,
+                    biClrUsed: 0,
+                    biClrImportant: 0,
+                },
+                bmiColors: [RGBQUAD::default(); 1],
+            };
 
-        let lines = GetDIBits(
-            hdc_mem,
-            hbitmap,
-            0,
-            h,
-            Some(pixels.as_mut_ptr() as *mut _),
-            &bmi as *const _ as *mut _,
-            DIB_RGB_COLORS,
-        );
+            let lines = GetDIBits(
+                gdi.hdc_mem,
+                gdi.hbitmap,
+                0,
+                h,
+                Some(pixels.as_mut_ptr() as *mut _),
+                &bmi as *const _ as *mut _,
+                DIB_RGB_COLORS,
+            );
 
-        let _ = SelectObject(hdc_mem, old_bmp);
-        let _ = DeleteObject(hbitmap.into());
-        let _ = DeleteDC(hdc_mem);
-        let _ = DeleteDC(hdc_screen);
-
-        if lines == 0 {
-            return Err("GetDIBits 返回 0 行".into());
-        }
-        Ok(pixels)
+            if lines == 0 {
+                return Err("GetDIBits 返回 0 行".into());
+            }
+            Ok(pixels)
+        })
     }
 }
 

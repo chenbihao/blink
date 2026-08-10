@@ -83,7 +83,9 @@ struct Session {
     /// BGRA、top-down、每行 `width * 4` 字节。
     pixels: Vec<u8>,
     /// 预编码的 PNG 字节（`begin_session` 时编码好，`session_png` 直接返回）。
-    png_bytes: Vec<u8>,
+    /// M3 优化：用 Arc 避免 session_png() 全量 clone——Arc::clone 仅引用计数，
+    /// 调用方需要 owned Vec 时再 to_vec()，不持读锁。
+    png_bytes: Arc<Vec<u8>>,
     meta: ScreenCaptureMeta,
 }
 
@@ -196,8 +198,8 @@ pub fn begin_session() -> Result<ScreenCaptureMeta, String> {
     let (pixels, meta) = backend().capture_virtual_screen()?;
 
     // 截屏后立即编码 PNG——此时主窗已 hide，BitBlt 不会拍到自己
-    let png_bytes = encode_png(&pixels, meta.width, meta.height)
-        .map_err(|e| format!("预编码 PNG 失败: {e}"))?;
+    let png_bytes = Arc::new(encode_png(&pixels, meta.width, meta.height)
+        .map_err(|e| format!("预编码 PNG 失败: {e}"))?);
 
     let meta_copy = meta;
     *SESSION
@@ -217,10 +219,13 @@ pub fn begin_session() -> Result<ScreenCaptureMeta, String> {
 ///
 /// **0.8.8 优化**：PNG 已在 `begin_session()` 时编码好存进 `png_bytes`，
 /// 这里只读内存返回，零编码延迟。
-pub fn session_png() -> Option<Vec<u8>> {
+///
+/// **M3 优化**：返回 `Arc<Vec<u8>>` 而非 `Vec<u8>`——`Arc::clone` 仅引用计数 O(1)，
+/// 不拷贝 PNG 字节。调用方需要 owned Vec 时调 `.to_vec()`。
+pub fn session_png() -> Option<Arc<Vec<u8>>> {
     let guard = SESSION.read().ok()?;
     let s = guard.as_ref()?;
-    Some(s.png_bytes.clone())
+    Some(Arc::clone(&s.png_bytes))
 }
 
 /// 按物理像素坐标裁剪 SESSION 的位图，返回 **BGRA** 子矩形 + 尺寸。

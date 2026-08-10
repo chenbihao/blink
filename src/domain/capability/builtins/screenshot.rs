@@ -183,6 +183,7 @@ pub(super) async fn op_capture(
     if crate::infra::platform::screenshot::is_annotation_active() {
         tracing::debug!("capture: 标注模式活跃，跳过 SESSION cache");
     } else if let Some(png) = crate::infra::platform::screenshot::session_png() {
+        let png = (*png).clone();
         tracing::debug!(bytes = png.len(), "capture: 复用 SESSION cache");
         return Ok(CapabilityResult::Blob {
             mime: "image/png".into(),
@@ -201,6 +202,7 @@ pub(super) async fn op_capture(
 
     match crate::infra::platform::screenshot::session_png() {
         Some(png) => {
+            let png = (*png).clone();
             tracing::debug!(bytes = png.len(), "capture: 新截虚拟屏幕 + 编码 PNG");
             Ok(CapabilityResult::Blob {
                 mime: "image/png".into(),
@@ -345,12 +347,13 @@ pub(super) async fn op_capture_to_clipboard(
     };
 
     let png = match session_png {
-        Some(png) => {
+        Some(arc) => {
             tracing::debug!(
-                bytes = png.len(),
+                bytes = arc.len(),
                 "capture_to_clipboard: 复用 SESSION cache"
             );
-            png
+            // M3 优化：session_png 返回 Arc<Vec<u8>>，此处转 owned Vec
+            (*arc).clone()
         }
         None => {
             // 无 SESSION 或标注模式 → 新截一帧
@@ -361,11 +364,13 @@ pub(super) async fn op_capture_to_clipboard(
                 })?
                 .map_err(|e| CapabilityError::Internal { detail: e })?;
 
-            crate::infra::platform::screenshot::session_png().ok_or_else(|| {
-                CapabilityError::Internal {
-                    detail: "begin_session 成功但 session_png 返回空".into(),
-                }
-            })?
+            crate::infra::platform::screenshot::session_png()
+                .map(|arc| (*arc).clone())
+                .ok_or_else(|| {
+                    CapabilityError::Internal {
+                        detail: "begin_session 成功但 session_png 返回空".into(),
+                    }
+                })?
         }
     };
 

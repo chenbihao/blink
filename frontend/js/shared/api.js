@@ -232,6 +232,11 @@ export function screenshotPinTransform(winX, winY, winW, winH) {
   return invoke("screenshot_pin_transform", { winX, winY, winW, winH });
 }
 
+/** 0.19.4：钉图窗口仅移动位置（拖拽专用，零 resize 开销）。 */
+export function screenshotPinMove(winX, winY) {
+  return invoke("screenshot_pin_move", { winX, winY });
+}
+
 /** 0.11.7-f：保存截图选区为文件。path 可选，不传则弹出保存对话框。 */
 export function screenshotSave(pngData, path) {
   return invoke("screenshot_save", { pngData, path });
@@ -346,14 +351,6 @@ export function translateText(text, targetLang) {
  */
 export function translateLines(lines, targetLang) {
   return invoke("translate_lines", { lines, targetLang: targetLang ?? null });
-}
-
-/**
- * **临时**（0.11.7-f 调试用）：把前端消息转发到后端 tracing 控制台。
- * TODO(0.11.7 收尾)：0.11.7 稳定后可移除。
- */
-export function frontendLog(level, message) {
-  return invoke("frontend_log", { level, message }).catch(() => {});
 }
 
 // ── 0.16.3 内容编辑器 ──

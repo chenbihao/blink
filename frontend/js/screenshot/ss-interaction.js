@@ -9,7 +9,7 @@
 
 import { ss, SELECTION_HANDLE_SIZE, MIN_SELECTION_SIZE, TOOL_CAPS } from './ss-state.js';
 import { norm, applySquareConstraint } from './ss-utils.js';
-import { drawSelection, drawFinalSelection } from './ss-draw.js';
+import { scheduleDrawSelection, drawFinalSelection } from './ss-draw.js';
 import { findDisplayCssAt } from './ss-display.js';
 import * as annot from './annotation-engine.js';
 import {
@@ -86,7 +86,8 @@ export function updateSelectionInteraction(e) {
   if (ss.selectionInteraction.kind === 'new') {
     ss.endX = e.offsetX;
     ss.endY = e.offsetY;
-    drawSelection();
+    // H1 优化：rAF 节流，避免 mousemove 高频全量重绘
+    scheduleDrawSelection();
     return;
   }
 
@@ -281,8 +282,14 @@ export function getMagnifierColorText() {
   return text || null;
 }
 
+// M9 优化：复用的小 canvas + ImageData（drawMagnifierGrid 用 putImageData+drawImage 替代逐格 fillRect）
+let _magTempCanvas = null;
+let _magImageData = null;
+
 /** 在放大镜画布上绘制像素网格
  *  0.15.8 R3：支持网格偏移，确保边缘采样时中心格对应鼠标像素。
+ *  M9 优化：用 putImageData + drawImage(nearest-neighbor) 替代逐格 fillStyle + fillRect，
+ *  将 144 次 canvas 绘制调用降为 2 次（putImageData + drawImage）。
  * @param {ImageData} imgData - 实际读取的像素数据（可能小于 PM_COLS×PM_ROWS）
  * @param {number} gridOffX - 网格 X 偏移（网格中跳过的列数）
  * @param {number} gridOffY - 网格 Y 偏移
@@ -293,17 +300,57 @@ function drawMagnifierGrid(imgData, gridOffX, gridOffY, dataCols, dataRows) {
   const ctx = ss.magnifierCtx;
   if (!ctx) return;
   const { data } = imgData;
-  ctx.clearRect(0, 0, PM_COLS * PM_CELL, PM_ROWS * PM_CELL);
-  for (let row = 0; row < dataRows; row++) {
-    for (let col = 0; col < dataCols; col++) {
-      const idx = (row * dataCols + col) * 4;
-      const r = data[idx];
-      const g = data[idx + 1];
-      const b = data[idx + 2];
-      ctx.fillStyle = `rgb(${r},${g},${b})`;
-      ctx.fillRect((gridOffX + col) * PM_CELL, (gridOffY + row) * PM_CELL, PM_CELL, PM_CELL);
+  const totalW = PM_COLS;
+  const totalH = PM_ROWS;
+
+  // M9 优化：优先用 putImageData + drawImage 缩放
+  if (!_magTempCanvas) {
+    _magTempCanvas = document.createElement('canvas');
+    _magTempCanvas.width = totalW;
+    _magTempCanvas.height = totalH;
+    _magImageData = _magTempCanvas.getContext('2d')?.createImageData(totalW, totalH) ?? null;
+  }
+  const tempCtx = _magTempCanvas.getContext('2d');
+
+  if (tempCtx && _magImageData) {
+    // 把采样像素填入 gridImageData（直接数组写入，无 canvas 状态开销）
+    const gridData = _magImageData.data;
+    // 清空（上次调用可能残留）
+    gridData.fill(0);
+    for (let row = 0; row < dataRows; row++) {
+      for (let col = 0; col < dataCols; col++) {
+        const srcIdx = (row * dataCols + col) * 4;
+        const dstCol = gridOffX + col;
+        const dstRow = gridOffY + row;
+        if (dstCol < 0 || dstCol >= totalW || dstRow < 0 || dstRow >= totalH) continue;
+        const dstIdx = (dstRow * totalW + dstCol) * 4;
+        gridData[dstIdx] = data[srcIdx];
+        gridData[dstIdx + 1] = data[srcIdx + 1];
+        gridData[dstIdx + 2] = data[srcIdx + 2];
+        gridData[dstIdx + 3] = 255;
+      }
+    }
+    tempCtx.putImageData(_magImageData, 0, 0);
+    ctx.clearRect(0, 0, totalW * PM_CELL, totalH * PM_CELL);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(_magTempCanvas, 0, 0, totalW, totalH,
+      0, 0, totalW * PM_CELL, totalH * PM_CELL);
+    ctx.imageSmoothingEnabled = true;
+  } else {
+    // fallback：原始逐格绘制
+    ctx.clearRect(0, 0, totalW * PM_CELL, totalH * PM_CELL);
+    for (let row = 0; row < dataRows; row++) {
+      for (let col = 0; col < dataCols; col++) {
+        const idx = (row * dataCols + col) * 4;
+        const r = data[idx];
+        const g = data[idx + 1];
+        const b = data[idx + 2];
+        ctx.fillStyle = `rgb(${r},${g},${b})`;
+        ctx.fillRect((gridOffX + col) * PM_CELL, (gridOffY + row) * PM_CELL, PM_CELL, PM_CELL);
+      }
     }
   }
+
   // 中心格高亮边框（固定位置，不随偏移移动）
   const halfR = Math.floor(PM_ROWS / 2);
   const halfC = Math.floor(PM_COLS / 2);

@@ -3,21 +3,6 @@
 use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
-/// **临时**（0.11.7-f 调试用）：前端把 console 日志转发到后端 tracing。
-///
-/// TODO(0.11.7 收尾)：0.11.7 稳定后删除此 command 与前端 `frontendLog()` 封装。
-/// 前端诊断转由 devtools 完成。
-#[tauri::command]
-pub fn frontend_log(level: String, message: String) {
-    match level.as_str() {
-        "error" => tracing::error!(target: "blink::frontend", "{message}"),
-        "warn" => tracing::warn!(target: "blink::frontend", "{message}"),
-        "info" => tracing::info!(target: "blink::frontend", "{message}"),
-        "debug" => tracing::debug!(target: "blink::frontend", "{message}"),
-        _ => tracing::trace!(target: "blink::frontend", "{message}"),
-    }
-}
-
 /// 设置页-存储：获取四库统计信息（0.12.0 DB 四层拆分）。
 ///
 /// 返回各库的行数 + 文件大小 + 路径，前端渲染分区展示。

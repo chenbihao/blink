@@ -68,12 +68,17 @@ pub async fn set_config(
         "auto_start" => {
             let auto_start: bool = serde_json::from_value(value).map_err(|e| e.to_string())?;
             crate::app::config::update_auto_start(&pool, auto_start).await?;
-            use tauri_plugin_autostart::ManagerExt;
-            let manager = app.autolaunch();
-            if auto_start {
-                manager.enable().map_err(|e| e.to_string())?;
-            } else {
-                manager.disable().map_err(|e| e.to_string())?;
+            // dev 模式跳过注册表写入（原因同 main.rs 启动同步逻辑）：
+            // current_exe() 是 debug 构建（console 子系统），写入 Run 键后开机弹控制台。
+            // 配置 DB 仍正常记录偏好，release 下 set_config 才真正写注册表。
+            if !cfg!(debug_assertions) {
+                use tauri_plugin_autostart::ManagerExt;
+                let manager = app.autolaunch();
+                if auto_start {
+                    manager.enable().map_err(|e| e.to_string())?;
+                } else {
+                    manager.disable().map_err(|e| e.to_string())?;
+                }
             }
             tracing::info!(auto_start, "开机自启配置已更新");
         }

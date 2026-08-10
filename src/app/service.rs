@@ -180,7 +180,16 @@ impl Service for HotkeyService {
                             }
                         } else {
                             // 注意：Tap effect 不再包含 triggered_at，但 <50ms 性能目标仍需验证
-                            crate::infra::platform::window::invoke(&app);
+                            // invoke() 含同步 Win32 调用（GetForegroundWindow / OpenClipboard /
+                            // UIA capture），必须 spawn_blocking 避免阻塞 tokio worker 线程
+                            // （后端铁则：阻塞操作隔离）。await 保证下一个热键事件不会在
+                            // 窗口尚未显示完成时被处理。
+                            let app_clone = app.clone();
+                            tauri::async_runtime::spawn_blocking(move || {
+                                crate::infra::platform::window::invoke(&app_clone);
+                            })
+                            .await
+                            .ok();
                         }
                     }
                     crate::infra::platform::hotkey::InputEffect::HoldStarted { .. } => {

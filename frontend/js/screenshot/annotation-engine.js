@@ -111,6 +111,47 @@ let magnifierZoom = 1.3;
  */
 let overlayLayer = null;
 
+// H2 优化：loading 动画快照——loading 期间用快照恢复 + 仅重绘 spinner，
+// 避免每 50ms 全量重放标注命令 + 逐像素采样。
+let _skipLoadingSpinner = false;
+let _loadingSnapshot = null;
+
+// M2 优化：Canvas 对象池——避免标注重绘时反复 createElement('canvas') + GC
+const _canvasPool = [];
+const MAX_POOL_SIZE = 4;
+
+/** M2 优化：从池中获取 canvas，尺寸不匹配时自动 resize。
+ *  复用时重置所有关键 canvas 状态——上次调用者可能遗留了 globalCompositeOperation='source-in'
+ *  或 filter='blur(...)'，不重置会导致新笔画完全不可见。 */
+function acquireCanvas(w, h) {
+  const c = _canvasPool.length > 0 ? _canvasPool.pop() : document.createElement('canvas');
+  if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+  const ctx = c.getContext('2d');
+  if (ctx) {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1.0;
+    ctx.filter = 'none';
+    ctx.imageSmoothingEnabled = true;
+    ctx.clearRect(0, 0, w, h);
+  }
+  return c;
+}
+
+/** M2 优化：归还 canvas 到池中供下次复用 */
+function releaseCanvas(c) {
+  if (_canvasPool.length < MAX_POOL_SIZE) {
+    const ctx = c.getContext('2d');
+    if (ctx) {
+      // 重置状态，确保下次 acquireCanvas 取出时是干净的
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = 1.0;
+      ctx.filter = 'none';
+      ctx.clearRect(0, 0, c.width, c.height);
+    }
+    _canvasPool.push(c);
+  }
+}
+
 // ── 初始化和重置 ──────────────────────────────────────
 
 /** 绑定标注 canvas */
@@ -442,9 +483,7 @@ export function executeCommand(cmd, targetCtx) {
       if (cmd.points.length >= 2 && canvas) {
         const alpha = cmd.type === 'highlight-multiply' ? 0.55 : 0.30;
         const lineW = (cmd.width || config.brush.size) * 4;
-        const off = document.createElement('canvas');
-        off.width = canvas.width;
-        off.height = canvas.height;
+        const off = acquireCanvas(canvas.width, canvas.height);
         const offCtx = off.getContext('2d');
         offCtx.strokeStyle = cmd.color || currentColor;
         offCtx.lineWidth = lineW;
@@ -456,11 +495,11 @@ export function executeCommand(cmd, targetCtx) {
           offCtx.lineTo(cmd.points[i].x, cmd.points[i].y);
         }
         offCtx.stroke();
-        // 以目标 alpha 贴到主 canvas —— 整条笔画作为"一层"，自交处不加深
         c.save();
         c.globalAlpha = alpha;
         c.drawImage(off, 0, 0);
         c.restore();
+        releaseCanvas(off);
       }
       break;
     case 'text':
@@ -585,9 +624,7 @@ export function executeCommand(cmd, targetCtx) {
       if (cmd.points.length >= 1 && cropSourceCanvas && canvas) {
         const intensity = config.effect.blurIntensity;
         const brushW = config.brush.size * 2;
-        const off = document.createElement('canvas');
-        off.width = canvas.width;
-        off.height = canvas.height;
+        const off = acquireCanvas(canvas.width, canvas.height);
         const offCtx = off.getContext('2d');
         // 1) 画 stroke mask
         offCtx.strokeStyle = '#fff';
@@ -606,6 +643,7 @@ export function executeCommand(cmd, targetCtx) {
         offCtx.drawImage(cropSourceCanvas, 0, 0);
         offCtx.filter = 'none';
         c.drawImage(off, 0, 0);
+        releaseCanvas(off);
         break;
       }
       break;
@@ -876,15 +914,19 @@ export function setOverlay(config = {}) {
   const mode = config.mode === undefined ? 'source' : config.mode;
   // 保留原有 fontScale/showOriginal(若已存在),便于阶段 i/j 局部更新时不丢失。
   const prev = overlayLayer || {};
+  const newBgStrategy = config.bgStrategy || 'average';
+  // H3 优化：bgStrategy 变化时清除缓存的 bgColor/inkColor，强制重新采样
+  const bgStrategyChanged = prev.bgStrategy !== newBgStrategy;
   overlayLayer = {
     mode,
     lines: lines.map((l) => ({
       rect: l.rect,
       srcText: l.srcText || '',
       dstText: l.dstText || null,
-      bgColor: l.bgColor || null,
+      bgColor: bgStrategyChanged ? null : (l.bgColor || null),
+      inkColor: bgStrategyChanged ? null : (l.inkColor || null),
     })),
-    bgStrategy: config.bgStrategy || 'average',
+    bgStrategy: newBgStrategy,
     fontScale: typeof config.fontScale === 'number' ? config.fontScale : (prev.fontScale ?? 1.0),
     showOriginal: typeof config.showOriginal === 'boolean' ? config.showOriginal : (prev.showOriginal ?? false),
     translationTargetLang: config.targetLang || null,
@@ -945,7 +987,19 @@ export function setOverlayShowOriginal(flag) {
 export function setOverlayLoading(loading) {
   if (!overlayLayer) return;
   overlayLayer.loading = !!loading;
+  // H2 优化：loading 结束时清除快照
+  if (!loading) {
+    _loadingSnapshot = null;
+  }
   redrawAll();
+}
+
+/** H2 优化：仅重绘 loading 动画——恢复快照 + 画 spinner，替代全量 redrawAnnotFull */
+export function redrawLoadingSpinner() {
+  if (!ctx || !canvas || !_loadingSnapshot || !overlayLayer || !overlayLayer.loading) return;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(_loadingSnapshot, 0, 0);
+  drawLoadingSpinner(ctx, overlayLayer);
 }
 
 /** 清空嵌图图层(整片下线)。 */
@@ -990,24 +1044,51 @@ export function getCropSourceCanvas() {
 export function getMagnifierZoom() { return magnifierZoom; }
 export function setMagnifierZoom(z) { magnifierZoom = Math.max(1.1, Math.min(4.0, z)); }
 
+// H7 优化：复用的临时小 canvas（drawPixelate 用缩小再放大替代逐像素循环）
+let _pixelateTempCanvas = null;
+
 /**
  * 经典像素化马赛克绘制：把 (x,y,w,h) 矩形区域分成 blockSize×blockSize 的网格，
  * 每个网格用该区域内所有像素的 RGB 平均色填充。
  *
- * 与「缩小再放大」算法的差别：块内严格用算术平均（信息完全丢失，更"硬"），
- * 而非 nearest-neighbor（保留某个像素值）。视觉上是经典的方块马赛克。
- *
- * 越界像素自动 clamp 到 ImageData 范围。
+ * H7 优化：用 drawImage 缩小再放大替代逐像素 JS 循环——
+ * 缩小时 GPU 双线性插值 ≈ 算术平均，放大时关闭平滑产生方块效果。
+ * 性能：O(w*h) 像素读取 → 2 次 drawImage（GPU 加速）。
  */
 function drawPixelate(c, imageData, x, y, w, h, blockSize) {
+  // H7 优化：优先用 cropSourceCanvas 做 drawImage 缩放（GPU 加速）
+  if (cropSourceCanvas) {
+    const bw = Math.max(1, Math.ceil(w / blockSize));
+    const bh = Math.max(1, Math.ceil(h / blockSize));
+    if (!_pixelateTempCanvas) {
+      _pixelateTempCanvas = document.createElement('canvas');
+    }
+    _pixelateTempCanvas.width = bw;
+    _pixelateTempCanvas.height = bh;
+    const tempCtx = _pixelateTempCanvas.getContext('2d');
+    if (tempCtx) {
+      // 缩小：双线性插值做块内平均
+      tempCtx.imageSmoothingEnabled = true;
+      tempCtx.drawImage(cropSourceCanvas, x, y, w, h, 0, 0, bw, bh);
+      // 放大：关闭平滑产生方块效果
+      c.imageSmoothingEnabled = false;
+      c.drawImage(_pixelateTempCanvas, 0, 0, bw, bh, x, y, w, h);
+      c.imageSmoothingEnabled = true;
+      return;
+    }
+  }
+  // fallback：无 cropSourceCanvas 时退回原始逐像素循环
+  drawPixelateSlow(c, imageData, x, y, w, h, blockSize);
+}
+
+/** 原始逐像素马赛克算法（fallback，无 cropSourceCanvas 时用）。 */
+function drawPixelateSlow(c, imageData, x, y, w, h, blockSize) {
   const { data, width: iw, height: ih } = imageData;
   c.imageSmoothingEnabled = false;
   for (let by = y; by < y + h; by += blockSize) {
     for (let bx = x; bx < x + w; bx += blockSize) {
-      // 当前块的边界（最后一个块可能不足 blockSize）
       const bxEnd = Math.min(bx + blockSize, x + w);
       const byEnd = Math.min(by + blockSize, y + h);
-      // clamp 到 ImageData 范围
       const sx0 = Math.max(0, Math.floor(bx));
       const sx1 = Math.min(iw - 1, Math.floor(bxEnd - 1));
       const sy0 = Math.max(0, Math.floor(by));
@@ -1027,7 +1108,6 @@ function drawPixelate(c, imageData, x, y, w, h, blockSize) {
       const avgG = Math.round(sumG / count);
       const avgB = Math.round(sumB / count);
       c.fillStyle = `rgb(${avgR},${avgG},${avgB})`;
-      // 在标注层上绘制方块（坐标即图片像素坐标，因为标注 canvas 与裁剪区对齐）
       c.fillRect(bx, by, bxEnd - bx, byEnd - by);
     }
   }
@@ -1080,21 +1160,19 @@ function drawPixelateBrush(c, imageData, points, brushWidth, blockSize) {
   const y1 = Math.min(imageData.height, Math.ceil((maxY + radius + 1) / block) * block);
   if (x1 <= x0 || y1 <= y0) return;
 
-  const off = document.createElement('canvas');
-  off.width = c.canvas.width;
-  off.height = c.canvas.height;
+  const off = acquireCanvas(c.canvas.width, c.canvas.height);
   const offCtx = off.getContext('2d');
-  const pixelated = document.createElement('canvas');
-  pixelated.width = c.canvas.width;
-  pixelated.height = c.canvas.height;
+  const pixelated = acquireCanvas(c.canvas.width, c.canvas.height);
   const pixelatedCtx = pixelated.getContext('2d');
-  if (!offCtx || !pixelatedCtx) return;
+  if (!offCtx || !pixelatedCtx) { releaseCanvas(off); releaseCanvas(pixelated); return; }
 
   drawBrushMask(offCtx, points, brushWidth);
   drawPixelate(pixelatedCtx, imageData, x0, y0, x1 - x0, y1 - y0, block);
   offCtx.globalCompositeOperation = 'source-in';
   offCtx.drawImage(pixelated, 0, 0);
   c.drawImage(off, 0, 0);
+  releaseCanvas(off);
+  releaseCanvas(pixelated);
 }
 
 // ── 撤销/重做 ──────────────────────────────────────────
@@ -1131,8 +1209,16 @@ export function canRedo() {
  */
 function redrawAll() {
   if (!ctx || !canvas) return;
+  // H2 优化：loading 期间跳过 spinner 绘制，先渲染快照（含文字/标注），再画 spinner
+  const isLoading = overlayLayer && overlayLayer.loading && overlayLayer.mode === 'translated';
+  if (isLoading) _skipLoadingSpinner = true;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   renderCommandsTo(commands.slice(0, undoIndex + 1), ctx, canvas.width, canvas.height);
+  if (isLoading) {
+    _skipLoadingSpinner = false;
+    updateLoadingSnapshot();
+    drawLoadingSpinner(ctx, overlayLayer);
+  }
 }
 
 /**
@@ -1218,9 +1304,7 @@ function renderHighlightMultiplyLayer(cmds, targetCtx, w, h) {
  *  最后一次性 drawImage 到目标 ctx。重叠聚光灯的暗度不叠加（叠底只应用一次）。
  *  0.15.13：clearRect 替代 destination-out+fillRect，更可靠地镂空区域。 */
 function renderSpotlightMultiLayer(cmds, targetCtx, w, h) {
-  const off = document.createElement('canvas');
-  off.width = w;
-  off.height = h;
+  const off = acquireCanvas(w, h);
   const offCtx = off.getContext('2d');
   // 填满遮罩
   offCtx.fillStyle = 'rgba(0,0,0,0.6)';
@@ -1238,6 +1322,7 @@ function renderSpotlightMultiLayer(cmds, targetCtx, w, h) {
   }
   // 绘制到目标
   targetCtx.drawImage(off, 0, 0);
+  releaseCanvas(off);
 }
 
 // ── 输出 ──────────────────────────────────────────────
@@ -1270,6 +1355,56 @@ export function hasAnnotations() {
 // 所有采样/字号算法都是纯函数(见文件末尾的 `sample*` / `fitFontSize` / `luminance`),
 // 便于后续在 Node 环境 mock ctx 做单测。
 
+/** H2 优化：绘制 loading 动画（旋转弧线）。从 drawOverlay 提取为独立函数，
+ *  供 redrawLoadingSpinner() 快速重绘 spinner 而无需全量重放标注命令。 */
+function drawLoadingSpinner(targetCtx, layer) {
+  if (!layer.lines || layer.lines.length === 0) return;
+  // 计算所有 lines 的包围盒
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const line of layer.lines) {
+    const r = line.rect;
+    if (!r || r.w <= 0 || r.h <= 0) continue;
+    minX = Math.min(minX, r.x);
+    minY = Math.min(minY, r.y);
+    maxX = Math.max(maxX, r.x + r.w);
+    maxY = Math.max(maxY, r.y + r.h);
+  }
+  if (minX < maxX && minY < maxY) {
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    const radius = 18;
+    // 半透明背景圆
+    targetCtx.beginPath();
+    targetCtx.arc(cx, cy, radius + 8, 0, Math.PI * 2);
+    targetCtx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+    targetCtx.fill();
+    // 旋转弧线（用时间驱动角度）
+    const t = (Date.now() % 1200) / 1200;
+    const startAngle = t * Math.PI * 2;
+    const endAngle = startAngle + Math.PI * 1.2;
+    targetCtx.beginPath();
+    targetCtx.arc(cx, cy, radius, startAngle, endAngle);
+    targetCtx.strokeStyle = '#4a9eff';
+    targetCtx.lineWidth = 3;
+    targetCtx.lineCap = 'round';
+    targetCtx.stroke();
+  }
+}
+
+/** H2 优化：将当前 annotCanvas（不含 spinner）复制到快照 canvas */
+function updateLoadingSnapshot() {
+  if (!_loadingSnapshot) {
+    _loadingSnapshot = document.createElement('canvas');
+  }
+  if (_loadingSnapshot.width !== canvas.width || _loadingSnapshot.height !== canvas.height) {
+    _loadingSnapshot.width = canvas.width;
+    _loadingSnapshot.height = canvas.height;
+  }
+  const snapCtx = _loadingSnapshot.getContext('2d');
+  snapCtx.clearRect(0, 0, canvas.width, canvas.height);
+  snapCtx.drawImage(canvas, 0, 0);
+}
+
 function drawOverlay(targetCtx, layer, _w, _h) {
   if (!layer.lines || layer.lines.length === 0) return;
   const mode = layer.mode;
@@ -1281,37 +1416,9 @@ function drawOverlay(targetCtx, layer, _w, _h) {
   targetCtx.save();
 
   // 0.11.10-k：翻译中 loading 动画——在嵌图区域中心绘制
-  if (isLoading && mode === 'translated') {
-    // 计算所有 lines 的包围盒
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const line of layer.lines) {
-      const r = line.rect;
-      if (!r || r.w <= 0 || r.h <= 0) continue;
-      minX = Math.min(minX, r.x);
-      minY = Math.min(minY, r.y);
-      maxX = Math.max(maxX, r.x + r.w);
-      maxY = Math.max(maxY, r.y + r.h);
-    }
-    if (minX < maxX && minY < maxY) {
-      const cx = (minX + maxX) / 2;
-      const cy = (minY + maxY) / 2;
-      const radius = 18;
-      // 半透明背景圆
-      targetCtx.beginPath();
-      targetCtx.arc(cx, cy, radius + 8, 0, Math.PI * 2);
-      targetCtx.fillStyle = 'rgba(0, 0, 0, 0.55)';
-      targetCtx.fill();
-      // 旋转弧线（用时间驱动角度）
-      const t = (Date.now() % 1200) / 1200;
-      const startAngle = t * Math.PI * 2;
-      const endAngle = startAngle + Math.PI * 1.2;
-      targetCtx.beginPath();
-      targetCtx.arc(cx, cy, radius, startAngle, endAngle);
-      targetCtx.strokeStyle = '#4a9eff';
-      targetCtx.lineWidth = 3;
-      targetCtx.lineCap = 'round';
-      targetCtx.stroke();
-    }
+  // H2 优化：loading 动画提取为独立函数，redrawAll 跳过它以构建快照
+  if (isLoading && mode === 'translated' && !_skipLoadingSpinner) {
+    drawLoadingSpinner(targetCtx, layer);
     // loading 态仍继续画文字（显示原文作为占位）
   }
 
@@ -1374,6 +1481,7 @@ function drawOverlay(targetCtx, layer, _w, _h) {
     const { line, r, text } = lineEntries[i];
     // ── 背景 ──
     // blur 直接把原图对应区域模糊绘回；其它策略再用色块覆盖。
+    // H3 优化：bgColor/inkColor 首次计算后缓存到 line 对象，后续重绘直接读取
     let backgroundDrawn = false;
     let bg = line.bgColor;
     if (!bg) {
@@ -1386,6 +1494,10 @@ function drawOverlay(targetCtx, layer, _w, _h) {
         // 平均色策略(默认):采样 rect 周围环形区
         bg = sampleAverageBackgroundColor(r) || 'rgba(255, 255, 255, 0.95)';
       }
+      // 缓存到 line 对象（blur 策略不缓存——它是绘制操作而非纯色值）
+      if (bg && bgStrategy !== 'blur') {
+        line.bgColor = bg;
+      }
     }
     if (!backgroundDrawn) {
       targetCtx.fillStyle = bg;
@@ -1395,10 +1507,14 @@ function drawOverlay(targetCtx, layer, _w, _h) {
     // ── 文字 ──
 
     // 字色：优先采样原图文字颜色（匹配原文字色），失败时用背景亮度决定深/浅
-    const ink = sampleInkColor(r) || (() => {
-      const inkBg = bg || sampleAverageBackgroundColor(r) || 'rgba(255, 255, 255, 0.95)';
-      return pickInkColorByBg(inkBg);
-    })();
+    // H3 优化：inkColor 缓存到 line；sampleInkColor 接收 bg 参数避免重复采样
+    let ink = line.inkColor;
+    if (!ink) {
+      ink = sampleInkColor(r, bg) || pickInkColorByBg(bg || 'rgba(255, 255, 255, 0.95)');
+      if (ink) {
+        line.inkColor = ink;
+      }
+    }
     // 组内统一字号 + 重新计算截断/省略
     const fontPx = unifiedSizes[i];
     const display = fitDisplayText(targetCtx, text, r, fontPx);
@@ -1556,8 +1672,9 @@ function pickInkColorByBg(bgCss) {
  *
  * @returns {string|null} CSS 颜色字符串，采样失败返回 null
  */
-function sampleInkColor(rect) {
-  const bg = sampleAverageBackgroundColor(rect);
+function sampleInkColor(rect, bgCss) {
+  // H3 优化：接收已采样的 bg 参数，避免重复调用 sampleAverageBackgroundColor
+  const bg = bgCss || sampleAverageBackgroundColor(rect);
   if (!bg) return null;
   return pickInkColorByBg(bg);
 }

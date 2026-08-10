@@ -128,3 +128,12 @@ export async function applyI18nFromConfig() {
   }
   applyI18n();
 }
+
+/**
+ * 从已读好的 config 对象应用语言（避免重复 invoke get_config）。
+ * @param {object} cfg - get_config 返回的 AppConfig 对象
+ */
+export function applyI18nFromConfigData(cfg) {
+  if (cfg && cfg.language) setLang(cfg.language);
+  applyI18n();
+}

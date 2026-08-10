@@ -7,6 +7,10 @@
 import { ss } from './ss-state.js';
 import { screenRectToCss } from './ss-selection-geometry.js';
 
+// M7 优化：缓存 getDisplays() 结果——renderScale 不变时 CSS 矩形不变
+let _displaysCache = null;
+let _displaysCacheKey = null;
+
 /**
  * 取注入的 physicalDisplays 列表（原始物理矩形）。
  * 缺失返回空数组。
@@ -20,16 +24,34 @@ export function getPhysicalDisplays() {
  * 取 CSS 坐标的 displays 列表。
  * 从 physicalDisplays 通过 screenRectToCss 实时转换（使用当前 renderScale）。
  * 缺失返回空数组。
+ *
+ * M7 优化：结果按 renderScale 缓存，mousemove 高频调用时不重复转换。
+ * 缓存 key = renderScaleX|renderScaleY，resize 时调 invalidateDisplaysCache() 失效。
  */
 export function getDisplays() {
   const meta = window.__blinkScreenMeta;
   if (!meta) return [];
   const physical = getPhysicalDisplays();
   if (physical.length === 0) return [];
-  return physical.map((d) => {
+  // 缓存 key：renderScale 变化时失效
+  const rx = meta.renderScaleX || 1;
+  const ry = meta.renderScaleY || 1;
+  const key = `${rx}|${ry}|${physical.length}`;
+  if (_displaysCache && _displaysCacheKey === key) {
+    return _displaysCache;
+  }
+  _displaysCache = physical.map((d) => {
     const css = screenRectToCss({ x: d.x, y: d.y, w: d.w, h: d.h }, meta);
     return { x: css.x, y: css.y, w: css.w, h: css.h, dpi: d.dpi, primary: d.primary };
   });
+  _displaysCacheKey = key;
+  return _displaysCache;
+}
+
+/** M7 优化：手动失效 displays 缓存（resize / syncRenderScale 后调） */
+export function invalidateDisplaysCache() {
+  _displaysCache = null;
+  _displaysCacheKey = null;
 }
 
 /**

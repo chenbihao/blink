@@ -54,6 +54,10 @@ import {
 const session = ss.scrollSession;
 const DELAYED_MOTION_RECHECK_MS = 90;
 
+// M12 优化：长截图帧数 / 总高度上限，防止无界增长导致 OOM
+const MAX_SCROLL_FRAMES = 200;       // 200 帧（每帧是一个增量行段）
+const MAX_SCROLL_TOTAL_HEIGHT = 32768; // 32K 像素高度上限（≈ 30 个 1080p 屏高）
+
 function roundedMs(value) {
   return Number.isFinite(value) ? Math.round(value * 10) / 10 : null;
 }
@@ -283,6 +287,29 @@ async function captureFrameOnce(expectedDirection = 0, generation = session.capt
 
     const previousTop = session.scrollCurrentTop;
     session.scrollCurrentTop = tracked.nextTop;
+
+    // M12 优化：帧数 / 总高度上限检查，超限则停止追加并提示用户
+    const estimatedTotalHeight = Math.abs(tracked.nextTop) + session.scrollBandH;
+    if (session.scrollFrames.length >= MAX_SCROLL_FRAMES
+        || estimatedTotalHeight > MAX_SCROLL_TOTAL_HEIGHT) {
+      console.warn('[scroll] frame limit reached, stopping accumulation', {
+        frameCount: session.scrollFrames.length,
+        maxFrames: MAX_SCROLL_FRAMES,
+        estimatedTotalHeight,
+        maxHeight: MAX_SCROLL_TOTAL_HEIGHT,
+      });
+      ss._showTransientHint?.('长截图已达上限，请点击完成按钮结束');
+      return {
+        appended: false,
+        reason: 'frame-limit',
+        moved: true,
+        match,
+        decision,
+        trackingState: tracking.trackingState,
+        becameLost: tracking.becameLost,
+      };
+    }
+
     const commitStartedAt = performance.now();
     const committed = commitTrackedFrame(
       session.scrollFrames,

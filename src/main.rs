@@ -125,7 +125,9 @@ fn main() {
                 })
                 .await
                 .ok()
-                .flatten();
+                .flatten()
+                // M3 优化：session_png 返回 Arc<Vec<u8>>，此处转 owned Vec 供 HTTP body
+                .map(|arc| (*arc).clone());
 
                 let response = match bytes {
                     Some(bytes) => tauri::http::Response::builder()
@@ -190,10 +192,18 @@ fn main() {
             ));
 
             // 同步开机自启（确保注册表 Run 项与配置一致，覆盖用户在 app 外改动的情况）
+            //
+            // dev 模式跳过 enable：tauri-plugin-autostart 的 enable() 用 current_exe()
+            // 决定注册哪个 exe，dev 下拿到的是 target\debug\blink.exe（PE console 子系统），
+            // 写入 Run 键后开机会为它分配控制台窗口。dev 下改为主动 disable，清除可能残留
+            // 的 debug exe 注册项；release 下正常按配置同步。配置 DB 仍记录 auto_start 偏好，
+            // 下次跑 release 时同步逻辑会恢复注册表。
             {
                 use tauri_plugin_autostart::ManagerExt;
                 let manager = app.autolaunch();
-                let _ = if app_config.auto_start {
+                let _ = if cfg!(debug_assertions) {
+                    manager.disable()
+                } else if app_config.auto_start {
                     manager.enable()
                 } else {
                     manager.disable()
@@ -705,7 +715,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             app::commands::hide_window,
             app::commands::hide_settings_window,
-            app::commands::frontend_log,
+
             app::commands::search_apps,
             app::commands::launch_app,
             app::commands::run_builtin_action,
@@ -756,6 +766,7 @@ fn main() {
             app::commands::screenshot_pin,
             app::commands::screenshot_pin_hide,
             app::commands::screenshot_pin_transform,
+            app::commands::screenshot_pin_move,
             app::commands::screenshot_pin_refresh,
             app::commands::screenshot_save,
             app::commands::image_editor_copy,
