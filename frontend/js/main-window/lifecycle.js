@@ -15,6 +15,20 @@ import { applyI18nFromConfigData, t } from "../i18n/index.js";
 
 /** 注册生命周期事件监听。 */
 export function init() {
+  // voice-error 的 3s 自动隐藏定时器 ID。
+  // VOICE_RECORDING_END / VOICE_RECORDING_START / SHOWN 会通过 clearVoiceError 提前清除，
+  // 避免松键后 chord 提示被 voice-error CSS 隐藏 2-3 秒。
+  let voiceErrorTimer = null;
+
+  /** 清除 voice-error 状态：取消定时器 + 移除 body 类。 */
+  function clearVoiceError() {
+    if (voiceErrorTimer) {
+      clearTimeout(voiceErrorTimer);
+      voiceErrorTimer = null;
+    }
+    document.body.classList.remove("voice-error");
+  }
+
   listen(EVENTS.SHOWN, () => {
     // 0.17.6: AiMode 下 SHOWN 只 focus AI 输入框，不重置搜索状态
     if (aiMode.isActive()) {
@@ -25,6 +39,8 @@ export function init() {
     queryEl.value = "";
     // 先解冻 ghost（上次录音可能残留 frozen），再 reset 让 ghost.clear 正常清 DOM
     ghost.unfreeze();
+    // 清除语音状态（voice-active / voice-error），确保唤起时 chord 提示不被残留状态隐藏
+    clearVoiceError();
     document.body.classList.remove("voice-active");
     search.reset(); // 作废在途搜索请求
     results.clear();
@@ -89,6 +105,8 @@ export function init() {
   listen(EVENTS.VOICE_RECORDING_START, (event) => {
     const { target } = event.payload ?? {};
     if (target !== "g1") return;
+    // 清除可能残留的 voice-error 状态（上一次录音出错后 3s 定时器可能仍在运行）
+    clearVoiceError();
     document.body.classList.add("voice-active");
     ghost.freeze(); // voice-partial 独占 overlay，search 不覆写
     // 显示语音指示器
@@ -183,7 +201,11 @@ export function init() {
   });
 
   // 0.10 录音结束 → 隐藏 G1 指示器 + 解冻 Ghost overlay（恢复 search 建议）
+  // 同时清除 voice-error 状态——松键后 voice-active 和 voice-error 都应立即移除，
+  // 让 chord 提示能立刻恢复显示。否则 voice-error 的 3s 定时器会让 chord 提示
+  // 在语音动画消失后仍被隐藏 2-3 秒。
   listen(EVENTS.VOICE_RECORDING_END, () => {
+    clearVoiceError();
     document.body.classList.remove("voice-active");
     ghost.unfreeze(); // 恢复 ghost.update DOM 写入 + 清除 voice-preview-text + 重绘当前 suggestion
     if (voiceIndicator) {
@@ -218,7 +240,9 @@ export function init() {
       }
     }
     // 3s 后隐藏指示器 + 恢复默认文案 + 移除 voice-error 标记
-    setTimeout(() => {
+    // 若期间收到 VOICE_RECORDING_END / VOICE_RECORDING_START，clearVoiceError 会取消此定时器
+    voiceErrorTimer = setTimeout(() => {
+      voiceErrorTimer = null;
       document.body.classList.remove("voice-error");
       if (voiceIndicator) {
         voiceIndicator.classList.add("hidden");

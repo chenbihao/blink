@@ -29,6 +29,36 @@ fn spare_borrow() -> &'static Mutex<std::collections::HashMap<String, String>> {
     SPARE_BORROW.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
+// ── 多 Pin N+1 预热机制（镜像便签 N+1 架构）──────────────────
+//
+// 支持同时 pin 多张图片。后台始终保留一个已加载 pin.html 的 WebView2 备用窗口。
+// 被借用后立即创建新的；借出的窗口独立运行，关闭时回收/销毁。
+//
+// - PIN_SEQ：自增序号，为每个 spare 生成唯一 label（pin-spare-{N}）
+// - AVAILABLE_PIN_SPARE：当前空闲 spare 的 label（None = 无可用）
+// - PIN_SPARE_BORROW：已借出 spare 的 label → "pin" 固定值映射（pin 无持久化 id）
+// - LAST_PIN_LABEL：最近一次 pin 的窗口 label，供 refresh_pin_image 定位目标
+
+static PIN_SEQ: AtomicU64 = AtomicU64::new(0);
+
+static AVAILABLE_PIN_SPARE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+fn available_pin_spare() -> &'static Mutex<Option<String>> {
+    AVAILABLE_PIN_SPARE.get_or_init(|| Mutex::new(None))
+}
+
+static PIN_SPARE_BORROW: OnceLock<Mutex<std::collections::HashMap<String, String>>> = OnceLock::new();
+
+fn pin_spare_borrow() -> &'static Mutex<std::collections::HashMap<String, String>> {
+    PIN_SPARE_BORROW.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+static LAST_PIN_LABEL: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+fn last_pin_label() -> &'static Mutex<Option<String>> {
+    LAST_PIN_LABEL.get_or_init(|| Mutex::new(None))
+}
+
 use crate::domain::event_names::EventNames;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
 use tokio::time::sleep;
@@ -1318,7 +1348,7 @@ pub fn show_sticky_manager_window(app: &AppHandle) -> Result<(), String> {
 
 /// 0.17.3：显示首次启动引导窗口。
 ///
-/// 独立窗口（label "welcome"），480×440 居中，有标题栏（decorations: true），
+/// 独立窗口（label "welcome"），480×500 居中，有标题栏（decorations: true），
 /// 不可调整大小。关闭时自动标记 `first_run = false`（防止用户点 X 不点"开始使用"）。
 /// 与主窗口独立——watchdog 只 hide "main" 窗口，不影响引导窗口。
 pub fn show_welcome_window(app: &AppHandle) {
@@ -1335,7 +1365,7 @@ pub fn show_welcome_window(app: &AppHandle) {
 
     let win = match WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("welcome.html".into()))
         .title("Blink")
-        .inner_size(480.0, 440.0)
+        .inner_size(480.0, 500.0)
         .resizable(false)
         .decorations(true)
         .transparent(false)
@@ -1368,6 +1398,32 @@ pub fn show_welcome_window(app: &AppHandle) {
     });
 
     tracing::info!("welcome window: 已显示");
+}
+
+/// 更新便签窗口的任务栏可见性（置顶→跳过任务栏，非置顶→显示任务栏）。
+///
+/// 在 `set_sticky_always_on_top` 命令中调用，使 toggle 立即生效于已打开的窗口。
+/// 窗口可能尚未创建（便签在管理器中 toggle 但桌面窗口未打开）——此时 no-op，
+/// 下次 `show_sticky_window` 会按 DB 中的 `always_on_top` 正确设置。
+pub fn update_sticky_taskbar(app: &AppHandle, sticky_id: &str, always_on_top: bool) {
+    let truncated_id: String = sticky_id.chars().take(64).collect();
+    let label = format!("sticky-{truncated_id}");
+    if let Some(win) = app.get_webview_window(&label) {
+        let _ = win.set_skip_taskbar(always_on_top);
+        return;
+    }
+    // 尝试已借出的 spare 窗口
+    if let Some(bl) = spare_borrow()
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(_, sid)| sid.as_str() == sticky_id)
+        .map(|(l, _)| l.clone())
+    {
+        if let Some(win) = app.get_webview_window(&bl) {
+            let _ = win.set_skip_taskbar(always_on_top);
+        }
+    }
 }
 
 /// 显示便签窗口（0.16.8）。
@@ -1434,13 +1490,15 @@ pub fn show_sticky_window(
         ));
         let _ = win.set_position(tauri::PhysicalPosition::new(cx, cy));
         let _ = win.set_always_on_top(always_on_top);
+        // 非置顶时显示在任务栏，让用户能找回便签；置顶时跳过任务栏
+        let _ = win.set_skip_taskbar(always_on_top);
         let escaped_id = sticky_id
-            .replace('\\', "\\\\")
-            .replace('\'', "\\'")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r");
+          .replace('\\', "\\\\")
+          .replace('\'', "\\'")
+          .replace('\n', "\\n")
+          .replace('\r', "\\r");
         let _ = win.eval(&format!(
-            "if (window.__stickyReload) window.__stickyReload('{escaped_id}')"
+          "if (window.__stickyReload) window.__stickyReload('{escaped_id}')"
         ));
         win
     } else if let Some(bl) = borrowed_label {
@@ -1463,13 +1521,15 @@ pub fn show_sticky_window(
         ));
         let _ = win.set_position(tauri::PhysicalPosition::new(cx, cy));
         let _ = win.set_always_on_top(always_on_top);
+        // 非置顶时显示在任务栏，让用户能找回便签；置顶时跳过任务栏
+        let _ = win.set_skip_taskbar(always_on_top);
         let escaped_id = sticky_id
-            .replace('\\', "\\\\")
-            .replace('\'', "\\'")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r");
+          .replace('\\', "\\\\")
+          .replace('\'', "\\'")
+          .replace('\n', "\\n")
+          .replace('\r', "\\r");
         let _ = win.eval(&format!(
-            "if (window.__stickyReload) window.__stickyReload('{escaped_id}')"
+          "if (window.__stickyReload) window.__stickyReload('{escaped_id}')"
         ));
         win
     } else {
@@ -1500,6 +1560,8 @@ pub fn show_sticky_window(
             ));
             let _ = spare_win.set_position(tauri::PhysicalPosition::new(cx, cy));
             let _ = spare_win.set_always_on_top(always_on_top);
+            // 非置顶时显示在任务栏，让用户能找回便签；置顶时跳过任务栏
+            let _ = spare_win.set_skip_taskbar(always_on_top);
             let escaped_id = sticky_id
                 .replace('\\', "\\\\")
                 .replace('\'', "\\'")
@@ -1573,7 +1635,7 @@ pub fn show_sticky_window(
             .decorations(false)
             .transparent(false)
             .always_on_top(always_on_top)
-            .skip_taskbar(true)
+            .skip_taskbar(always_on_top)
             .resizable(true)
             .focused(focus)
             .visible(true)
@@ -2201,29 +2263,29 @@ pub fn hide_image_editor_window(app: &AppHandle) {
 /// 20px 足够 box-shadow 的 12px 模糊半径扩散。
 pub const PIN_PAD: i32 = 20;
 
-/// 显示钉图窗口（0.11.7-d）。
+/// 显示钉图窗口（0.11.7-d；多 Pin N+1 改造）。
 ///
-/// 复用预热窗口（首次创建 ~300ms → 复用后 <50ms），通过 `eval` 注入 PNG base64 到 `<img>`。
+/// **多 Pin 策略**：每次 pin 创建/借用一个独立窗口（label `pin-spare-{N}` 或
+/// `pin-{N}`），支持同时 pin 多张图片。N+1 预热机制：后台始终保留一个备用窗口，
+/// 被借用后立即创建新的；关闭时回收/销毁。
 ///
 /// **纯图片贴桌面效果**（0.11.8）：
 /// - 窗口 `.transparent(true)` 让背景完全透明，只有图片本身可见
 /// - 窗口尺寸 = 图片显示尺寸 + 2×PIN_PAD（预留发光空间，否则 box-shadow 被裁）
 /// - 窗口左上 = `(screen_x - PAD, screen_y - PAD)`，使图片左上落在选区原位
 /// - 缩放时窗口尺寸跟随变化（`screenshot_pin_transform`），图片用 width/height 不用 scale
-///   —— 这样发光区不会因窗口固定被裁，放大时图片也不会被窗口边界裁
 ///
-/// **单钉图策略**：目前只支持单张钉图，重复触发会覆盖已有内容。
+/// 返回窗口 label，供 `refresh_pin_image` 定位目标窗口。
 pub fn show_pin_window(
     app: &AppHandle,
     png_data: Vec<u8>,
     screen_x: i32,
     screen_y: i32,
     show_translating: bool,
-) -> Result<(), String> {
+) -> Result<String, String> {
     use base64::Engine;
     use tauri::{WebviewUrl, WebviewWindowBuilder};
 
-    const LABEL: &str = "chord-pin";
     const FALLBACK_W: f64 = 400.0;
     const FALLBACK_H: f64 = 300.0;
 
@@ -2241,41 +2303,62 @@ pub fn show_pin_window(
     let win_w = png_w as u32 + 2 * PIN_PAD as u32;
     let win_h = png_h as u32 + 2 * PIN_PAD as u32;
 
-    // 复用已存在的窗口（预热或上次钉图）
-    if let Some(win) = app.get_webview_window(LABEL) {
-        // 先按物理坐标定位（绕开 Tauri 逻辑像素的 DPI 竞态）
-        if let Ok(hwnd) = win.hwnd() {
+    // 构造注入 JS（复用窗口与首次创建共用）
+    let js = format!(
+        "if (window.__blinkResetPin) window.__blinkResetPin('{url}', {w}, {h}, {sx}, {sy}, {st}); else document.getElementById('pin-img').src = '{url}';",
+        url = data_url,
+        w = png_w,
+        h = png_h,
+        sx = screen_x,
+        sy = screen_y,
+        st = if show_translating { "true" } else { "false" }
+    );
+
+    // 尝试借用空闲 spare
+    let available_label = available_pin_spare().lock().unwrap().take();
+    if let Some(al) = available_label {
+        tracing::debug!(spare_label = %al, "pin window: 借用预热 spare");
+        pin_spare_borrow()
+            .lock()
+            .unwrap()
+            .insert(al.clone(), "pin".to_string());
+
+        let spare_win = app
+            .get_webview_window(&al)
+            .ok_or_else(|| "预热 pin 窗口不存在".to_string())?;
+        if let Ok(hwnd) = spare_win.hwnd() {
             place_at_physical(HWND(hwnd.0 as _), win_x, win_y, win_w, win_h);
         }
-        // 把图片左上物理坐标也传给前端（__blinkResetPin 第 4/5 参数），
-        // 前端用作缩放基准 imgScreenX/Y，避免 window.screenX 的 DPI 换算问题
-        // show_translating 透传给前端控制「翻译中」指示器
-        let js = format!(
-            "if (window.__blinkResetPin) window.__blinkResetPin('{url}', {w}, {h}, {sx}, {sy}, {st}); else document.getElementById('pin-img').src = '{url}';",
-            url = data_url,
-            w = png_w,
-            h = png_h,
-            sx = screen_x,
-            sy = screen_y,
-            st = if show_translating { "true" } else { "false" }
-        );
-        win.eval(&js)
+        spare_win
+            .eval(&js)
             .map_err(|e| format!("eval 注入 PNG 失败: {e}"))?;
-        let _ = win.show();
-        let _ = win.set_focus();
+        let _ = spare_win.show();
+        let _ = spare_win.set_focus();
+
+        // 记录最近 pin 的 label
+        *last_pin_label().lock().unwrap() = Some(al.clone());
+
         tracing::debug!(
-            png_w,
-            png_h,
-            screen_x,
-            screen_y,
-            show_translating,
-            "钉图窗口已复用"
+            png_w, png_h, screen_x, screen_y, show_translating,
+            "钉图窗口已借用预热 spare"
         );
-        return Ok(());
+
+        // N+1：spare 被借用后，后台延迟创建新的备用窗口
+        let app_clone = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            create_pin_spare(&app_clone);
+            tracing::debug!("pin-spare: N+1 补充完成");
+        });
+
+        return Ok(al);
     }
 
-    // 首次创建：transparent + 按 (图片尺寸 + 2*PAD) 开窗 + 定位使图片左上落选区原位
-    match WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("pin.html".into()))
+    // 无可用 spare，创建新窗口
+    let seq = PIN_SEQ.fetch_add(1, Ordering::SeqCst);
+    let label = format!("pin-{seq}");
+
+    match WebviewWindowBuilder::new(app, &label, WebviewUrl::App("pin.html".into()))
         .title("")
         .decorations(false)
         .transparent(true)
@@ -2291,28 +2374,31 @@ pub fn show_pin_window(
             if let Ok(hwnd) = win.hwnd() {
                 place_at_physical(HWND(hwnd.0 as _), win_x, win_y, win_w, win_h);
             }
-            // 注入 PNG 数据 + 图片左上物理坐标（首次也走 __blinkResetPin 以统一状态）
-            let js = format!(
-                "if (window.__blinkResetPin) window.__blinkResetPin('{url}', {w}, {h}, {sx}, {sy}, {st}); else document.getElementById('pin-img').src = '{url}';",
-                url = data_url,
-                w = png_w,
-                h = png_h,
-                sx = screen_x,
-                sy = screen_y,
-                st = if show_translating { "true" } else { "false" }
-            );
             win.eval(&js)
                 .map_err(|e| format!("eval 注入 PNG 失败: {e}"))?;
             let _ = win.show();
+
+            // 注册关闭处理：prevent_close + hide + 回收/销毁
+            let label_owned = label.clone();
+            let app_clone = app.clone();
+            win.on_window_event(move |event| {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    if IS_APP_EXITING.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    api.prevent_close();
+                    handle_pin_close(&app_clone, &label_owned);
+                }
+            });
+
+            // 记录最近 pin 的 label
+            *last_pin_label().lock().unwrap() = Some(label.clone());
+
             tracing::debug!(
-                png_w,
-                png_h,
-                screen_x,
-                screen_y,
-                show_translating,
+                png_w, png_h, screen_x, screen_y, show_translating,
                 "钉图窗口已创建"
             );
-            Ok(())
+            Ok(label)
         }
         Err(e) => {
             tracing::warn!(error = %e, "钉图窗口创建失败");
@@ -2356,6 +2442,8 @@ pub fn get_primary_monitor_center(img_w: i32, img_h: i32) -> (i32, i32) {
 /// 用于「翻译并 pin」流程：后台翻译完成后合成含译文的 PNG，
 /// 调本函数只换 `img.src`，不动窗口位置和 scale。
 ///
+/// 多 Pin 改造：通过 `LAST_PIN_LABEL` 定位最近 pin 的窗口。
+///
 /// - `show_translating=false` 时隐藏 pin 窗口的「翻译中」指示器。
 /// - pin 窗口不存在或已 hide 时静默返回 Ok（用户已关 pin，丢弃译文）。
 pub fn refresh_pin_image(
@@ -2365,12 +2453,22 @@ pub fn refresh_pin_image(
 ) -> Result<(), String> {
     use base64::Engine;
 
-    const LABEL: &str = "chord-pin";
+    let label = last_pin_label()
+        .lock()
+        .unwrap()
+        .clone();
+    let label = match label {
+        Some(l) => l,
+        None => {
+            tracing::debug!("refresh_pin_image: 无 LAST_PIN_LABEL，静默丢弃");
+            return Ok(());
+        }
+    };
 
-    let win = match app.get_webview_window(LABEL) {
+    let win = match app.get_webview_window(&label) {
         Some(w) => w,
         None => {
-            tracing::debug!("refresh_pin_image: pin 窗口不存在，静默丢弃");
+            tracing::debug!(label = %label, "refresh_pin_image: pin 窗口不存在，静默丢弃");
             return Ok(());
         }
     };
@@ -2399,6 +2497,104 @@ pub fn refresh_pin_image(
     win.eval(&js)
         .map_err(|e| format!("eval 刷新 pin 图片失败: {e}"))?;
     Ok(())
+}
+
+/// 多 Pin N+1：处理 pin 窗口关闭（回收或销毁）。
+///
+/// 立即 hide（用户感知"点击即关闭"），后台 500ms 后回收/销毁：
+/// - 无可用 spare → 回收：eval `__blinkClearPin` 清空状态，标记为可用 spare
+/// - 已有可用 spare → 销毁窗口
+fn handle_pin_close(app: &AppHandle, label: &str) {
+    // 立即隐藏
+    if let Some(w) = app.get_webview_window(label) {
+        let _ = w.hide();
+    }
+
+    // 从借出映射移除
+    pin_spare_borrow().lock().unwrap().remove(label);
+
+    let label_owned = label.to_string();
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // 回收或销毁
+        let available = available_pin_spare().lock().unwrap();
+        if available.is_none() {
+            // 回收：清空图片状态，标记为可用 spare
+            drop(available);
+            if let Some(w) = app_clone.get_webview_window(&label_owned) {
+                let _ = w.eval("if (window.__blinkClearPin) window.__blinkClearPin();");
+            }
+            tracing::debug!(spare_label = %label_owned, "pin-spare: 回收中，等待前端 __blinkClearPin 完成");
+        } else {
+            // 已有可用 spare，销毁此窗口
+            drop(available);
+            if let Some(w) = app_clone.get_webview_window(&label_owned) {
+                let _ = w.destroy();
+            }
+            tracing::debug!(spare_label = %label_owned, "pin-spare: 销毁多余备用窗口");
+        }
+    });
+}
+
+/// 多 Pin N+1：创建 pin 预热窗口。
+///
+/// 后台始终保留一个已加载 pin.html 的 WebView2 备用窗口。
+/// 被借用后由调用方 spawn 新的 spare 创建（500ms 延迟避抢资源）。
+/// 借出的窗口关闭时：hide + 回收（若无可用 spare）或销毁（已有可用 spare）。
+fn create_pin_spare(app: &AppHandle) {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    // 已有可用 spare 则不重复创建
+    if available_pin_spare().lock().unwrap().is_some() {
+        return;
+    }
+
+    let seq = PIN_SEQ.fetch_add(1, Ordering::SeqCst);
+    let label = format!("pin-spare-{seq}");
+
+    match WebviewWindowBuilder::new(app, &label, WebviewUrl::App("pin.html?preheat=1".into()))
+        .title("")
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .shadow(false)
+        .focused(false)
+        .visible(false)
+        .inner_size(400.0, 300.0)
+        .build()
+    {
+        Ok(w) => {
+            let label_owned = label.clone();
+            let app_clone = app.clone();
+            w.on_window_event(move |event| {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    if IS_APP_EXITING.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    api.prevent_close();
+                    handle_pin_close(&app_clone, &label_owned);
+                }
+            });
+            tracing::debug!(spare_label = %label, "pin-spare: 窗口已创建，等待前端 init 就绪");
+        }
+        Err(e) => tracing::warn!(error = %e, "pin-spare: 创建失败"),
+    }
+}
+
+/// 多 Pin N+1：前端 init 完成后调用，将 spare 注册为可用。
+///
+/// `create_pin_spare` 只 build 窗口，不立即注册 available——
+/// 因为 WebView2 的 HTML/JS 加载是异步的，在 init 完成前 eval 会静默失败。
+/// 前端 preheat init 完成后通过 IPC 命令调用此函数，标记 spare 就绪。
+pub fn mark_pin_spare_ready(label: &str) {
+    let mut available = available_pin_spare().lock().unwrap();
+    if available.is_none() {
+        *available = Some(label.to_string());
+        tracing::debug!(spare_label = %label, "pin-spare: 前端已就绪，注册为可用备用窗口");
+    }
 }
 
 /// Apply or remove DWM Cloak on a window.
@@ -2733,31 +2929,9 @@ pub fn preheat_secondary_windows(app: AppHandle) {
             Err(e) => tracing::warn!(error = %e, "preheat: voice-overlay 失败"),
         }
 
-        // --- chord-pin（钉图窗口，0.11.7-d；0.11.8 透明贴合） ---
-        // 0.19：经 get_or_create_window 串行化创建。
-        match get_or_create_window(&app, "chord-pin", || {
-            use tauri::{WebviewUrl, WebviewWindowBuilder};
-            WebviewWindowBuilder::new(&app, "chord-pin", WebviewUrl::App("pin.html".into()))
-                .title("")
-                .inner_size(400.0, 300.0)
-                .decorations(false)
-                .transparent(true)
-                .shadow(false)
-                .always_on_top(true)
-                .skip_taskbar(true)
-                .focused(false)
-                .visible(false)
-                .build()
-        }) {
-            Ok((_, created)) => {
-                if created {
-                    tracing::debug!("preheat: chord-pin ✓");
-                } else {
-                    tracing::debug!("preheat: chord-pin 复用已有窗口");
-                }
-            }
-            Err(e) => tracing::warn!(error = %e, "preheat: chord-pin 失败"),
-        }
+        // --- pin-spare（钉图预热窗口，多 Pin N+1） ---
+        // 后台始终保留一个备用钉图窗口，被借用后立即创建新的
+        create_pin_spare(&app);
 
         // --- chat（对话窗口，0.12.2 加入预热） ---
         // 0.19：经 get_or_create_window 串行化创建，消除预热与用户 Alt+Q 的 duplicate label 竞态。

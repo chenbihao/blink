@@ -12,11 +12,10 @@
         transform 是 GPU 合成层属性，零 reflow，60fps 丝滑无跳变。
       - 左上角固定缩放：窗口位置（imgScreenX/Y）缩放时不动，只改尺寸。
         transformOrigin 固定 0,0，scale 时图片左上不动、右下角伸缩，视觉完全连续。
-        （不做鼠标中心缩放——那会同时改位置+尺寸+origin，三者叠加导致跳变。
-         用户想看不同部分用拖动，这是 Snipaste 等工具的标准做法。）
       - 窗口尺寸跟随 scale，但只在 scale 跨越 ±5% 阈值时 resize 一次（离散），
         避免每次 wheel 都 resize 窗口（Win32 resize 同步重绘，会跳）。
       - 拖动：只改窗口位置（screenshotPinTransform），不改尺寸。
+      - 多 Pin N+1：每个 pin 窗口通过 label 标识，IPC 调用传 label 定位目标窗口。
     -->
     <div id="container">
       <img id="pin-img" src="" alt="钉图" draggable="false" />
@@ -28,11 +27,15 @@
       </div>
     </div>
 
-    <!-- 右键菜单（0.11.9-f：加 OCR / 翻译 项） -->
+    <!-- 右键菜单 -->
     <div id="ctx-menu" class="hidden">
       <button id="ctx-ocr">识别文字</button>
       <button id="ctx-translate">翻译文字</button>
       <div class="ctx-sep"></div>
+      <button id="ctx-copy">保存到剪贴板</button>
+      <button id="ctx-save-as">另存为</button>
+      <div class="ctx-sep"></div>
+      <button id="ctx-reset-zoom">重置缩放</button>
       <button id="ctx-close">关闭</button>
     </div>
 
@@ -54,8 +57,8 @@
     </div>
 
     <script type="module">
-      import { invoke, screenshotPinTransform, screenshotPinMove, ocrImage, translateText } from "./js/shared/api.js";
-import { normalizeError } from "./js/shared/tauri.js";
+      import { invoke, screenshotPinTransform, screenshotPinMove, ocrImage, translateText, pinSpareReady, pinSaveClipboard, pinSaveAs } from "./js/shared/api.js";
+      import { normalizeError, getCurrentWindow } from "./js/shared/tauri.js";
       import { applyThemeFromConfig } from "./js/shared/theme.js";
 
       // 应用主题（右键菜单 / OCR 面板的 token 引用随用户主题切换）
@@ -63,18 +66,29 @@ import { normalizeError } from "./js/shared/tauri.js";
 
       const PAD = 20;       // 与后端 PIN_PAD 一致（物理像素，给发光留空间）
       const GLOW_RADIUS = 18; // 发光视觉半径（1px spread + 14px blur ≈ 18px）
+      const MINI_MAX_SIDE = 160; // 缩小态最长边（CSS 像素）
 
       const img = document.getElementById('pin-img');
       const zoomLabel = document.getElementById('zoom-level');
       const ctxMenu = document.getElementById('ctx-menu');
 
+      // ── 多 Pin：当前窗口 label ──
+      const myLabel = getCurrentWindow()?.label || 'pin-unknown';
+
+      // ── 预热模式：?preheat=1 时不加载图片，只通知后端就绪 ──
+      const params = new URLSearchParams(location.search);
+      const isPreheat = params.get('preheat') === '1';
+      if (isPreheat) {
+        pinSpareReady().catch((e) => console.error('pin_spare_ready 失败', e));
+      }
+
       // ── 核心状态 ──
       let physW = 0, physH = 0;             // 图片原始物理尺寸
       let scale = 1;                         // 当前总缩放比例
       let imgScreenX = 0, imgScreenY = 0;   // 图片左上角屏幕物理坐标（按 scale 算）
-      // 窗口当前对应的 scale（实际 resize 到的尺寸对应的 scale）
-      // 当 |scale - winScale| > RESIZE_THRESHOLD 时才触发新一次 resize
       let winScale = 1;
+      let isMinimized = false;               // 缩小态标志
+      let savedScale = 1;                    // 进入缩小态前的 scale
 
       // 拖动状态
       let isDragging = false;
@@ -82,7 +96,6 @@ import { normalizeError } from "./js/shared/tauri.js";
       let dragMoved = false;
       let dragEndTime = 0;
       let dragRafId = 0;
-      // 0.19.4：IPC 防堆积 — 拖拽时最多 1 个 move IPC 在途，多余的 mousemove 合并
       let dragIpcInFlight = false;
 
       let isCtxOpen = false;
@@ -92,19 +105,29 @@ import { normalizeError } from "./js/shared/tauri.js";
       function winDispH() { return Math.max(1, Math.round(physH * winScale)); }
 
       /** 只更新 img 的 transform（GPU 合成层，丝滑，不动窗口）。
-       *  同时反向补偿 box-shadow：box-shadow 在 transform 前渲染，
-       *  会被 scale 放大，所以除以 scale 保持发光大小恒定。
-       *  0.18.3：同时更新 --pin-cx / --pin-cy 驱动翻译中指示器位置。 */
+       *  同时反向补偿 box-shadow / border / border-radius：这些在 transform 前渲染，
+       *  会被 scale 放大，所以除以 scale 保持视觉大小恒定。
+       *  缩小态：虚线边框 + 柔和发光，降低视觉重量。 */
       function applyTransformOnly() {
         img.style.transform = `scale(${scale})`;
         const s = scale;
-        img.style.boxShadow =
-          `0 0 0 ${1/s}px rgba(74, 158, 255, 0.55), ` +
-          `0 0 ${14/s}px ${3/s}px rgba(74, 158, 255, 0.28)`;
+        if (isMinimized) {
+          // 缩小态：虚线边框 + 圆角，无发光（降低视觉重量）
+          const bw = 2 / s;     // 虚线边框宽 2px 视觉
+          const br = 6 / s;     // 圆角 6px 视觉
+          img.style.border = `${bw}px dashed rgba(74, 158, 255, 0.6)`;
+          img.style.borderRadius = `${br}px`;
+          img.style.boxShadow = 'none';
+        } else {
+          img.style.border = '';
+          img.style.borderRadius = '';
+          img.style.boxShadow =
+            `0 0 0 ${1/s}px rgba(74, 158, 255, 0.55), ` +
+            `0 0 ${14/s}px ${3/s}px rgba(74, 158, 255, 0.28)`;
+        }
         updatePinIndicatorPosition();
       }
 
-      /** 0.18.3：更新翻译中指示器的位置到图片视觉中心。 */
       function updatePinIndicatorPosition() {
         const dpr = window.devicePixelRatio || 1;
         const cx = (PAD + physW * scale / 2) / dpr;
@@ -113,36 +136,24 @@ import { normalizeError } from "./js/shared/tauri.js";
         document.documentElement.style.setProperty('--pin-cy', cy + 'px');
       }
 
-      /** 0.18.3：显示翻译中指示器。 */
       function showTranslatingIndicator() {
         const el = document.getElementById('pin-translating-indicator');
         if (el) el.classList.remove('hidden');
         updatePinIndicatorPosition();
-        // 禁用右键菜单「翻译文字」项，避免与后台翻译重复请求
         const ctxTranslate = document.getElementById('ctx-translate');
         if (ctxTranslate) ctxTranslate.disabled = true;
       }
 
-      /** 0.18.3：隐藏翻译中指示器。 */
       function hideTranslatingIndicator() {
         const el = document.getElementById('pin-translating-indicator');
         if (el) el.classList.add('hidden');
-        // 恢复右键菜单「翻译文字」项
         const ctxTranslate = document.getElementById('ctx-translate');
         if (ctxTranslate) ctxTranslate.disabled = false;
       }
 
-      /** resize 窗口到当前 scale 对应尺寸（离散调用，不在每次 wheel 触发）。
-       *  两个触发条件：
-       *  - 放大时 padding < GLOW_RADIUS → 发光被裁，必须扩窗
-       *  - 缩小时 winScale - scale > 0.25 → 窗口远大于图片，缩窗减少透明区
-       *    （透明区越小，DWM 合成面积越小，拖拽越流畅；也修复缩小后透明区可拖拽的 bug） */
       function resizeWindowIfNeeded() {
-        // 当前窗口内，图片两侧的剩余 padding（物理像素）
-        // 窗口宽 = physW * winScale + 2*PAD，图片视觉宽 = physW * scale
         const padRemaining = (physW * (winScale - scale) + 2 * PAD) / 2;
         if (padRemaining >= GLOW_RADIUS) {
-          // 0.19.4：缩小时也 resize — 窗口比图片大太多时收缩，减少透明拖拽区
           if (scale < winScale && winScale - scale > 0.25) {
             doResizeWindow();
           }
@@ -158,29 +169,23 @@ import { normalizeError } from "./js/shared/tauri.js";
         const winY = Math.round(imgScreenY - PAD);
         const winW = winDispW() + 2 * PAD;
         const winH = winDispH() + 2 * PAD;
-        screenshotPinTransform(winX, winY, winW, winH).catch((e) => {
+        screenshotPinTransform(myLabel, winX, winY, winW, winH).catch((e) => {
           console.error('screenshotPinTransform 失败', e);
         });
       }
 
-      /** 拖动时只改窗口位置（尺寸不变）。
-       *  0.19.4 优化：
-       *  - 用 screenshotPinMove（SWP_NOSIZE）替代 screenshotPinTransform，零 resize 开销
-       *  - 加 dragIpcInFlight flag：最多 1 个 move IPC 在途，多余 mousemove 合并
-       *    避免 IPC 堆积导致拖拽卡顿（每帧最多 1 次 IPC，合而不是堆） */
       function scheduleDragMove() {
         if (dragRafId !== 0) return;
         dragRafId = requestAnimationFrame(() => {
           dragRafId = 0;
-          if (dragIpcInFlight) return; // 上一个 move 还在途，跳过，等它回来再发最新的
+          if (dragIpcInFlight) return;
           const winX = Math.round(imgScreenX - PAD);
           const winY = Math.round(imgScreenY - PAD);
           dragIpcInFlight = true;
-          screenshotPinMove(winX, winY)
+          screenshotPinMove(myLabel, winX, winY)
             .catch(() => {})
             .finally(() => {
               dragIpcInFlight = false;
-              // 如果还在拖且有新位移，补发一次
               if (isDragging) scheduleDragMove();
             });
         });
@@ -188,7 +193,6 @@ import { normalizeError } from "./js/shared/tauri.js";
 
       function showZoomLabel() {
         zoomLabel.textContent = Math.round(scale * 100) + '%';
-        // 0.15.5：贴图视觉右下角定位（不贴窗口右下角）
         updateZoomLabelPosition();
         zoomLabel.style.opacity = '1';
         clearTimeout(zoomLabel._hideTimer);
@@ -197,28 +201,58 @@ import { normalizeError } from "./js/shared/tauri.js";
         }, 1200);
       }
 
-  /** 0.15.13：zoom label 固定左上角——不随窗口缩放变动，丝滑 */
-  function updateZoomLabelPosition() {
-    zoomLabel.style.left = '8px';
-    zoomLabel.style.top = '8px';
-    zoomLabel.style.right = 'auto';
-    zoomLabel.style.bottom = 'auto';
-  }
+      function updateZoomLabelPosition() {
+        zoomLabel.style.left = '8px';
+        zoomLabel.style.top = '8px';
+        zoomLabel.style.right = 'auto';
+        zoomLabel.style.bottom = 'auto';
+      }
+
+      // ── 缩小/还原模式（双击切换）──────────────────────────────
+      function computeMiniScale() {
+        const dpr = window.devicePixelRatio || 1;
+        const longestCss = Math.max(physW, physH) / dpr;
+        if (longestCss <= 0) return 1;
+        return Math.min(1, MINI_MAX_SIDE / longestCss);
+      }
+
+      function enterMiniMode() {
+        if (isMinimized) return;
+        savedScale = scale;
+        isMinimized = true;
+        document.body.classList.add('mini-mode');
+        scale = computeMiniScale();
+        applyTransformOnly();
+        doResizeWindow();
+        zoomLabel.style.opacity = '0';
+      }
+
+      function exitMiniMode() {
+        if (!isMinimized) return;
+        isMinimized = false;
+        document.body.classList.remove('mini-mode');
+        scale = savedScale;
+        applyTransformOnly();
+        doResizeWindow();
+        showZoomLabel();
+      }
+
+      // ── 后端 eval 入口 ──────────────────────────────────────
 
       // 后端复用窗口时通过 eval 调用此函数重置状态
-      // 0.18.3：增加 showTranslating 参数控制翻译中指示器
       window.__blinkResetPin = function(dataUrl, pngW, pngH, screenX, screenY, showTranslating) {
         physW = pngW;
         physH = pngH;
         scale = 1;
         winScale = 1;
+        isMinimized = false;
+        savedScale = 1;
+        document.body.classList.remove('mini-mode');
         imgScreenX = screenX || 0;
         imgScreenY = screenY || 0;
         zoomLabel.textContent = '100%';
         zoomLabel.style.opacity = '0';
-        updateZoomLabelPosition(); // 0.15.5：初始化 label 位置，防止 hover 闪位
-        // img 固定为原始物理尺寸对应的 CSS 尺寸（physW/dpr），保证 1:1 像素清晰。
-        // transform: scale 承载所有缩放（GPU 合成层，丝滑）。
+        updateZoomLabelPosition();
         const dpr = window.devicePixelRatio || 1;
         img.style.width = (pngW / dpr) + 'px';
         img.style.height = (pngH / dpr) + 'px';
@@ -226,14 +260,13 @@ import { normalizeError } from "./js/shared/tauri.js";
         img.style.top = (PAD / dpr) + 'px';
         img.style.transformOrigin = '0 0';
         img.style.transform = 'scale(1)';
-        // 清除内联 box-shadow，让 CSS 默认值生效（scale=1 时无需补偿）
         img.style.boxShadow = '';
+        img.style.border = '';
+        img.style.borderRadius = '';
         img.src = dataUrl;
-        // 立即 resize 窗口到原始尺寸
         const winX = Math.round(imgScreenX - PAD);
         const winY = Math.round(imgScreenY - PAD);
-        screenshotPinTransform(winX, winY, pngW + 2 * PAD, pngH + 2 * PAD).catch(() => {});
-        // 0.18.3：翻译中指示器控制
+        screenshotPinTransform(myLabel, winX, winY, pngW + 2 * PAD, pngH + 2 * PAD).catch(() => {});
         if (showTranslating) {
           showTranslatingIndicator();
         } else {
@@ -242,14 +275,11 @@ import { normalizeError } from "./js/shared/tauri.js";
         updatePinIndicatorPosition();
       };
 
-      // 0.18.3：原地刷新 pin 图片（不重定位、不重置缩放）
-      // 后台翻译完成后调此函数只换 img.src + 隐藏指示器
+      // 原地刷新 pin 图片（不重定位、不重置缩放）
       window.__blinkRefreshPinImage = function(dataUrl, w, h, showTranslating) {
-        // 尺寸与当前一致时：只换 img.src，不动 scale/winScale/imgScreenX/imgScreenY
         if (w === physW && h === physH) {
           img.src = dataUrl;
         } else {
-          // 尺寸不一致：走重置路径（会丢失缩放，记 warning）
           console.warn('[pin] 译文 PNG 尺寸与原图不一致，重置缩放', { old: { w: physW, h: physH }, new: { w, h } });
           physW = w;
           physH = h;
@@ -259,12 +289,31 @@ import { normalizeError } from "./js/shared/tauri.js";
           img.src = dataUrl;
           updatePinIndicatorPosition();
         }
-        // showTranslating===false 时隐藏指示器
         if (!showTranslating) {
           hideTranslatingIndicator();
         } else {
           showTranslatingIndicator();
         }
+      };
+
+      // N+1 回收时后端 eval 调用，清空图片和状态
+      window.__blinkClearPin = function() {
+        img.src = '';
+        physW = 0;
+        physH = 0;
+        scale = 1;
+        winScale = 1;
+        isMinimized = false;
+        savedScale = 1;
+        document.body.classList.remove('mini-mode');
+        img.style.transform = 'scale(1)';
+        img.style.boxShadow = '';
+        img.style.border = '';
+        img.style.borderRadius = '';
+        zoomLabel.style.opacity = '0';
+        hideTranslatingIndicator();
+        // 通知后端：回收完成，可被借用
+        pinSpareReady().catch((e) => console.error('pin_spare_ready (recycle) 调用失败:', e));
       };
 
       img.addEventListener('load', () => {
@@ -278,15 +327,11 @@ import { normalizeError } from "./js/shared/tauri.js";
         showZoomLabel();
       });
 
-      // ── 拖动（document 级，mousedown/move/up）─────────────────────────
-      // 0.18.8：e.screenX/Y 在 Win32 下已是物理像素坐标，不需要 * dpr。
-      // 旧代码 * dpr 是多余的一层缩放，在单 dpr 下碰巧能工作是因为 dpr=1，
-      // 但跨 dpr 屏时 window.devicePixelRatio 会变，导致 imgScreenX/Y 漂移。
-      // 0.19.4：只在图片视觉区域内才开始拖拽 — 修复缩小后透明 padding 区可拖拽的 bug。
+      // ── 拖动 ──────────────────────────────────────────────────
       document.addEventListener('mousedown', (e) => {
         if (e.button !== 0) return;
         if (e.target.closest('#ctx-menu')) return;
-        // 限制拖拽到图片视觉边界（CSS 像素，窗口内坐标）
+        if (e.target.closest('#pin-ocr-panel')) return;
         const dpr = window.devicePixelRatio || 1;
         const imgLeft = PAD / dpr;
         const imgTop = PAD / dpr;
@@ -294,7 +339,7 @@ import { normalizeError } from "./js/shared/tauri.js";
         const imgVisH = (physH * scale) / dpr;
         if (e.clientX < imgLeft || e.clientX > imgLeft + imgVisW ||
             e.clientY < imgTop  || e.clientY > imgTop + imgVisH) {
-          return; // 点击在图片视觉区域外，不启动拖拽
+          return;
         }
         isDragging = true;
         dragMoved = false;
@@ -304,7 +349,6 @@ import { normalizeError } from "./js/shared/tauri.js";
 
       document.addEventListener('mousemove', (e) => {
         if (!isDragging) return;
-        // 0.18.8：e.screenX/Y 已是物理像素，直接用
         const curX = e.screenX;
         const curY = e.screenY;
         const dx = curX - dragLastPhysX;
@@ -333,47 +377,52 @@ import { normalizeError } from "./js/shared/tauri.js";
           cancelAnimationFrame(dragRafId);
           dragRafId = 0;
         }
-        // 0.19.4：拖拽结束用 screenshotPinMove 做最终位置同步（仅在有移动时）
         if (dragMoved) {
           const winX = Math.round(imgScreenX - PAD);
           const winY = Math.round(imgScreenY - PAD);
-          screenshotPinMove(winX, winY).catch(() => {});
+          screenshotPinMove(myLabel, winX, winY).catch(() => {});
         }
       });
 
-      // ── 滚轮缩放（左上角固定，只动 transform，离散 resize 尺寸）─────────
-      // 不做鼠标中心缩放——那会同时改窗口位置 + 尺寸 + transform origin，
-      // 三者叠加导致跳变。改为左上角固定：窗口位置不变，只往右下扩展/收缩，
-      // 视觉完全连续。用户想看不同部分用拖动。
+      // ── 滚轮缩放 ──────────────────────────────────────────────
       document.addEventListener('wheel', (e) => {
         e.preventDefault();
+        // 缩小态下滚轮：先恢复正常态，本次不叠加缩放
+        if (isMinimized) {
+          exitMiniMode();
+          return;
+        }
         const step = e.ctrlKey ? 0.25 : 0.1;
         const delta = e.deltaY > 0 ? -step : step;
         const newScale = Math.max(0.1, Math.min(8, scale + delta));
         if (newScale === scale) return;
-
-        // 只改 scale，imgScreenX/Y 不动（窗口左上角固定）
         scale = newScale;
         applyTransformOnly();
         resizeWindowIfNeeded();
         showZoomLabel();
       }, { passive: false });
 
-      // 双击重置缩放到 100%（位置不变）
+      // 双击：切换缩小/还原模式
       document.addEventListener('dblclick', (e) => {
         if (e.target.closest('#ctx-menu')) return;
-        if (scale === 1) return;
-        scale = 1;
-        applyTransformOnly();
-        resizeWindowIfNeeded();
-        showZoomLabel();
+        if (e.target.closest('#pin-ocr-panel')) return;
+        // 翻译中不打断
+        const indicator = document.getElementById('pin-translating-indicator');
+        if (indicator && !indicator.classList.contains('hidden')) return;
+
+        if (isMinimized) {
+          exitMiniMode();
+        } else {
+          enterMiniMode();
+        }
       });
 
-      // ── 右键菜单 ──────────────────────────────────────────────────────
+      // ── 右键菜单 ──────────────────────────────────────────────
       document.addEventListener('contextmenu', (e) => {
         e.preventDefault();
         if (Date.now() - dragEndTime < 200) return;
         if (e.target.closest('#ctx-menu')) return;
+        if (e.target.closest('#pin-ocr-panel')) return;
         showCtxMenu(e.clientX, e.clientY);
       });
 
@@ -387,16 +436,35 @@ import { normalizeError } from "./js/shared/tauri.js";
         if (e.key === 'Escape') {
           if (isCtxOpen) {
             hideCtxMenu();
+          } else if (isMinimized) {
+            exitMiniMode();
           } else {
             closePin();
           }
         }
       });
 
+      /** 右键菜单显示——钳制在窗口可视区域内，防止越界被裁。 */
       function showCtxMenu(x, y) {
+        // mini 模式只保留重置缩放 + 关闭
+        ctxMenu.classList.toggle('ctx-menu-mini', isMinimized);
         ctxMenu.classList.remove('hidden');
-        ctxMenu.style.left = x + 'px';
-        ctxMenu.style.top = y + 'px';
+        // 先显示才能测量尺寸
+        const rect = ctxMenu.getBoundingClientRect();
+        const winW = window.innerWidth;
+        const winH = window.innerHeight;
+        let mx = x;
+        let my = y;
+        // 右越界 → 左移
+        if (mx + rect.width > winW) {
+          mx = Math.max(0, winW - rect.width - 4);
+        }
+        // 下越界 → 上移
+        if (my + rect.height > winH) {
+          my = Math.max(0, winH - rect.height - 4);
+        }
+        ctxMenu.style.left = mx + 'px';
+        ctxMenu.style.top = my + 'px';
         isCtxOpen = true;
       }
 
@@ -410,11 +478,43 @@ import { normalizeError } from "./js/shared/tauri.js";
         closePin();
       });
 
-      // ── 0.11.9-f：pin 窗口内 OCR / 翻译 ──────────────────────────
-      //
-      // pin 窗口不做完整"阅读模式 word 拖选",只提供"识别文字"和"翻译"两个
-      // 二等入口——用户 workflow 是"钉图→比对→需要文字时点右键"。要完整
-      // word 交互请 Alt+A 重新截图。
+      document.getElementById('ctx-reset-zoom').addEventListener('click', () => {
+        hideCtxMenu();
+        if (isMinimized) {
+          exitMiniMode();
+          savedScale = 1;
+        } else {
+          scale = 1;
+          applyTransformOnly();
+          resizeWindowIfNeeded();
+          showZoomLabel();
+        }
+      });
+
+      document.getElementById('ctx-copy').addEventListener('click', async () => {
+        hideCtxMenu();
+        try {
+          const png = await pinImageToPng();
+          await pinSaveClipboard(png);
+        } catch (e) {
+          console.error('保存到剪贴板失败', e);
+        }
+      });
+
+      document.getElementById('ctx-save-as').addEventListener('click', async () => {
+        hideCtxMenu();
+        try {
+          const png = await pinImageToPng();
+          await pinSaveAs(png);
+        } catch (e) {
+          const err = normalizeError(e);
+          if (!err.message.includes('用户取消了保存')) {
+            console.error('另存为失败', e);
+          }
+        }
+      });
+
+      // ── pin 窗口内 OCR / 翻译 ──────────────────────────────────
 
       const pinOcrPanel = document.getElementById('pin-ocr-panel');
       const pinOcrSource = document.getElementById('pin-ocr-source');
@@ -426,7 +526,7 @@ import { normalizeError } from "./js/shared/tauri.js";
 
       let ocrBusy = false;
 
-      /** 把 pin 窗口图片的 CSS 元素编码为 PNG bytes(通过 canvas)。
+      /** 把 pin 窗口图片编码为 PNG bytes(通过 canvas)。
        *  用 img 的物理尺寸,不带 zoom scale——OCR 需要原图。 */
       function pinImageToPng() {
         return new Promise((resolve, reject) => {
@@ -550,7 +650,7 @@ import { normalizeError } from "./js/shared/tauri.js";
       pinOcrPanel.addEventListener('wheel', (e) => e.stopPropagation());
 
       function closePin() {
-        invoke('screenshot_pin_hide').catch((e) => {
+        invoke('screenshot_pin_hide', { label: myLabel }).catch((e) => {
           console.error('screenshot_pin_hide 失败', e);
         });
       }

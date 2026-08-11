@@ -27,7 +27,7 @@ export function updateUndoRedoButtons() {
 }
 
 /** 工具切换统一入口 */
-function selectTool(tool) {
+export function selectTool(tool) {
   const { canvas, hitCanvas } = ss;
   // 0.15.14：聚光灯/多次聚光灯切换时清理旧命令
   // 单次↔多次切换时，旧工具的聚光灯命令不应残留
@@ -123,7 +123,8 @@ function selectTool(tool) {
   }
 }
 
-const TOOL_GROUPS = {
+/** 工具→组映射，export 供快捷键模块使用 */
+export const TOOL_GROUPS = {
   select: 'direct',
   rect: 'shape', ellipse: 'shape',
   spotlight: 'shape', 'spotlight-multi': 'shape', magnifier: 'shape',
@@ -145,6 +146,24 @@ const GROUP_META = {
   blur:   { mainId: 'blur-main',   iconId: 'blur-main-icon',   dropdown: '#blur-dropdown' },
   eraser: { mainId: 'eraser-main', iconId: null,               dropdown: '#eraser-dropdown' },
 };
+
+/**
+ * 快捷键组内循环切换：重复按同一组快捷键时，切换到组内下一个工具。
+ * @param {string} groupName — 'shape' | 'stroke' | 'text' | 'blur' | 'eraser'
+ * @returns {string|null} 切换后的工具名（null 表示组不存在或无可切换工具）
+ */
+export function cycleToolInGroup(groupName) {
+  const meta = GROUP_META[groupName];
+  if (!meta) return null;
+  const items = document.querySelectorAll(`${meta.dropdown} .dropdown-item[data-tool]`);
+  if (items.length === 0) return null;
+  const currentTool = annot.getTool();
+  let idx = Array.from(items).findIndex((it) => it.dataset.tool === currentTool);
+  if (idx < 0) idx = 0; else idx = (idx + 1) % items.length;
+  const nextTool = items[idx].dataset.tool;
+  selectTool(nextTool);
+  return nextTool;
+}
 
 function closeAllDropdowns() {
   document.querySelectorAll('.dropdown').forEach((d) => d.setAttribute('data-open', 'false'));

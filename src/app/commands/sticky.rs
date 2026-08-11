@@ -138,7 +138,10 @@ pub async fn set_sticky_always_on_top(
     let svc = app.state::<std::sync::Arc<StickyService>>();
     svc.set_always_on_top(&id, always_on_top)
         .await
-        .map_err(|e: StickyError| e.to_string())
+        .map_err(|e: StickyError| e.to_string())?;
+    // 同步窗口任务栏可见性：置顶→跳过任务栏，非置顶→显示任务栏
+    crate::infra::platform::window::update_sticky_taskbar(&app, &id, always_on_top);
+    Ok(())
 }
 
 /// 删除便签（永久）。

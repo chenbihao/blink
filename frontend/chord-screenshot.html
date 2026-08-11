@@ -76,7 +76,7 @@
       <!-- 选取工具（0.11.10-a/k）：默认工具，负责选区重选、移动和缩放。
            有识别结果时，选区内文字由 #ocr-hit-canvas 优先承接拖选；边缘仍保留缩放热区。
            切到其它工具时把 #ocr-hit-canvas pointer-events 让渡给标注层。 -->
-      <button class="tool-btn tool-direct active" data-tool="select" id="select-main" title="选取（默认）"><svg class="icon" aria-hidden="true"><use href="#icon-mouse-pointer-2"/></svg></button>
+      <button class="tool-btn tool-direct active" data-tool="select" id="select-main" title="选取（默认） Alt+`"><svg class="icon" aria-hidden="true"><use href="#icon-mouse-pointer-2"/></svg><span class="kbd-hint">`</span></button>
 
       <div class="toolbar-divider"></div>
 
@@ -85,8 +85,9 @@
            按住 Shift 时约束长宽等比（矩形→正方形、椭圆→圆） -->
       <!-- 0.15.8-fix：移除 caret 按钮，改为 hover 自动展开 dropdown -->
       <div class="dropdown-wrap">
-        <button class="tool-btn split-main" id="shape-main" data-tool="rect" title="图形">
+        <button class="tool-btn split-main" id="shape-main" data-tool="rect" title="图形 Alt+1">
           <span id="shape-main-icon"><svg class="icon" aria-hidden="true"><use href="#icon-square"/></svg></span>
+          <span class="kbd-hint">1</span>
         </button>
         <div class="dropdown" id="shape-dropdown" data-open="false">
           <button class="dropdown-item active" data-tool="rect"><span class="item-icon"><svg class="icon" aria-hidden="true"><use href="#icon-square"/></svg></span><span class="item-label">矩形</span></button>
@@ -109,8 +110,9 @@
            0.15.0：箭头从一级默认降为下拉子项，画笔（pencil）作组默认
            0.15.8-fix：hover 自动展开 -->
       <div class="dropdown-wrap">
-        <button class="tool-btn split-main" id="stroke-main" data-tool="pencil" title="画笔">
+        <button class="tool-btn split-main" id="stroke-main" data-tool="pencil" title="画笔 Alt+2">
           <span id="stroke-main-icon"><svg class="icon" aria-hidden="true"><use href="#icon-pencil"/></svg></span>
+          <span class="kbd-hint">2</span>
         </button>
         <div class="dropdown" id="stroke-dropdown" data-open="false">
           <button class="dropdown-item active" data-tool="pencil"><span class="item-icon"><svg class="icon" aria-hidden="true"><use href="#icon-pencil"/></svg></span><span class="item-label">铅笔</span></button>
@@ -124,8 +126,9 @@
            0.15.11：二级菜单内容移至工具栏下方 sub-panel，hover dropdown 只保留工具选择
            0.15.8-fix：hover 自动展开 -->
       <div class="dropdown-wrap">
-        <button class="tool-btn split-main" id="text-main" data-tool="text" title="文字">
+        <button class="tool-btn split-main" id="text-main" data-tool="text" title="文字 Alt+3">
           <span id="text-main-icon">A</span>
+          <span class="kbd-hint">3</span>
         </button>
         <div class="dropdown dropdown-text" id="text-dropdown" data-open="false">
           <!-- 0.15.14：移除多余的 dropdown-view 包裹，与其他 dropdown 结构一致 -->
@@ -138,8 +141,9 @@
       <!-- 马赛克分组：马赛克/高斯模糊（框选与画笔均使用像素块马赛克，覆盖形状不同）
            0.15.8-fix：hover 自动展开 -->
       <div class="dropdown-wrap">
-        <button class="tool-btn split-main" id="blur-main" data-tool="pixelate" title="马赛克">
+        <button class="tool-btn split-main" id="blur-main" data-tool="pixelate" title="马赛克 Alt+4">
           <span id="blur-main-icon"><span class="icon-mask icon-mask-mosaic" aria-hidden="true"></span></span>
+          <span class="kbd-hint">4</span>
         </button>
         <div class="dropdown" id="blur-dropdown" data-open="false">
           <div class="mode-switcher">
@@ -160,7 +164,7 @@
 
       <!-- 橡皮（0.15.1：转 dropdown，含模式切换器。0.15.8-fix：hover 自动展开） -->
       <div class="dropdown-wrap">
-        <button class="tool-btn split-main" id="eraser-main" data-tool="eraser" title="橡皮"><svg class="icon" aria-hidden="true"><use href="#icon-eraser"/></svg></button>
+        <button class="tool-btn split-main" id="eraser-main" data-tool="eraser" title="橡皮 Alt+5"><svg class="icon" aria-hidden="true"><use href="#icon-eraser"/></svg><span class="kbd-hint">5</span></button>
         <div class="dropdown" id="eraser-dropdown" data-open="false">
           <div class="mode-switcher">
             <button class="mode-btn active" data-mode="brush">画笔</button>
@@ -270,9 +274,9 @@
 
       <!-- 操作区（0.15.9：undo/redo 始终可见 + 重置按钮，三键一组） -->
       <div class="toolbar-group undo-group" data-group="ops">
-        <button class="tool-btn" id="btn-undo" title="撤销 (Ctrl+Z)" disabled><svg class="icon" aria-hidden="true"><use href="#icon-undo-2"/></svg></button>
+        <button class="tool-btn" id="btn-undo" title="撤销 (Alt+Z)" disabled><svg class="icon" aria-hidden="true"><use href="#icon-undo-2"/></svg><span class="kbd-hint">Z</span></button>
         <button class="tool-btn" id="btn-redo" title="重做 (Ctrl+Y)" disabled><svg class="icon" aria-hidden="true"><use href="#icon-redo-2"/></svg></button>
-        <button class="tool-btn" id="btn-reset" title="重置全部标注"><svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg></button>
+        <button class="tool-btn" id="btn-reset" title="重置全部标注 (Alt+R)"><svg class="icon" aria-hidden="true"><use href="#icon-refresh-cw"/></svg><span class="kbd-hint">R</span></button>
       </div>
 
       <div class="toolbar-divider"></div>

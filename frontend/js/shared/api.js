@@ -227,14 +227,16 @@ export function screenshotPinRefresh(pngData, showTranslating) {
   return invoke("screenshot_pin_refresh", { pngData, showTranslating: showTranslating ?? false });
 }
 
-/** 0.11.8：钉图窗口一次性设置位置+尺寸（物理像素，含 PIN_PAD）。 */
-export function screenshotPinTransform(winX, winY, winW, winH) {
-  return invoke("screenshot_pin_transform", { winX, winY, winW, winH });
+/** 0.11.8：钉图窗口一次性设置位置+尺寸（物理像素，含 PIN_PAD）。
+ *  多 Pin：label 为当前窗口 label。 */
+export function screenshotPinTransform(label, winX, winY, winW, winH) {
+  return invoke("screenshot_pin_transform", { label, winX, winY, winW, winH });
 }
 
-/** 0.19.4：钉图窗口仅移动位置（拖拽专用，零 resize 开销）。 */
-export function screenshotPinMove(winX, winY) {
-  return invoke("screenshot_pin_move", { winX, winY });
+/** 0.19.4：钉图窗口仅移动位置（拖拽专用，零 resize 开销）。
+ *  多 Pin：label 为当前窗口 label。 */
+export function screenshotPinMove(label, winX, winY) {
+  return invoke("screenshot_pin_move", { label, winX, winY });
 }
 
 /** 0.11.7-f：保存截图选区为文件。path 可选，不传则弹出保存对话框。 */
@@ -257,6 +259,21 @@ export function imageEditorSave(pngData, path) {
 
 export function imageEditorCancel() {
   return invoke('image_editor_cancel');
+}
+
+/** 多 Pin N+1：前端 preheat init 完成后调用，将 spare 注册为可用。 */
+export function pinSpareReady() {
+  return invoke("pin_spare_ready");
+}
+
+/** 将 pin 窗口图片复制到剪贴板。 */
+export function pinSaveClipboard(pngData) {
+  return invoke("pin_save_clipboard", { pngData });
+}
+
+/** 将 pin 窗口图片另存为文件，同时复制到剪贴板。path 可选，不传则弹出保存对话框。 */
+export function pinSaveAs(pngData, path) {
+  return invoke("pin_save_as", { pngData, path });
 }
 
 /** 0.15.7-R4：把诊断回放文件写入 Blink 日志目录下的受控子目录。 */

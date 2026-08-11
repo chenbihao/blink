@@ -243,6 +243,20 @@ impl ModifierState {
         }
     }
 
+    /// 重置所有修饰键状态（锁屏/解锁后调用）。
+    ///
+    /// 锁屏期间无法获知键盘物理状态，解锁后所有 level 归零为 `Unknown`，
+    /// 清空 per-device pressed set。后续由 Hook/Raw Input 事件重新建立。
+    pub fn reset_all(&mut self) {
+        tracing::info!("重置所有修饰键状态（锁屏/解锁后调用）");
+        for side in &mut self.sides {
+            side.level = ModifierLevel::Unknown;
+            side.last_hook_time = None;
+            side.raw_ever_seen = false;
+        }
+        self.raw_devices.clear();
+    }
+
     /// Raw Input 确认修饰键按下/松开（per-device）。
     ///
     /// 时间域过滤：比最近 Hook transition 更旧的 Raw 事件丢弃。

@@ -801,10 +801,12 @@ export function renderEmptyState(providerConfigured, onOpenSettings) {
     // 0.12.5 §5.2：引导泡泡——点击预填充到输入框
     const GUIDE_PROMPTS = [
       { text: "帮我打开微信", hint: "应用" },
-      { text: "翻译 components", hint: "翻译" },
       { text: "我的 IP 多少", hint: "问答" },
       { text: "今天天气怎么样", hint: "问答" },
-      { text: "现在能调用哪些MCP服务", hint: "问答" },
+      { text: "翻译 components", hint: "翻译" },
+      { text: "现在能调用哪些MCP服务", hint: "能力" },
+      { text: "截一下图，然后 pin 到桌面上", hint: "能力" },
+      { text: "blink能做什么？记录到便签中", hint: "能力" },
     ];
     const bubblesEl = document.createElement("div");
     bubblesEl.className = "chat-guide-bubbles";

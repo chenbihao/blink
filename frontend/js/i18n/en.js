@@ -1032,12 +1032,15 @@ export const en = {
     "welcome.title": "Welcome to Blink",
     "welcome.subtitle": "Your desktop productivity hub",
     "welcome.start": "Get Started",
-    "welcome.shortcut.voice_input": "Voice input / Summon",
+    "welcome.shortcut.voice_input": "Summon window",
     "welcome.shortcut.chat": "AI chat",
     "welcome.shortcut.screenshot": "Screenshot",
     "welcome.shortcut.clipboard_history": "Clipboard history",
     "welcome.shortcut.edit": "Edit Window",
     "welcome.shortcut.sticky": "Sticky note",
+    "welcome.main.hint": "Global hotkey · Press anywhere to summon, hold for voice input",
+    "welcome.chord.title": "Chord Shortcuts",
+    "welcome.chord.desc": "Summon the window first, then hold Alt + letter key to trigger",
 
     // ── Hotkey cheatsheet (0.17.3) ──
     "hotkey.cheatsheet.title": "Current shortcuts",

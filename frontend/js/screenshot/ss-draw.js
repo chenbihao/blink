@@ -14,6 +14,12 @@ import { cssPointToScreen, formatSelectionInfo } from './ss-selection-geometry.j
 
 // H1 优化：rAF 节流——同一帧内多次 mousemove 只绘制一次
 let _drawSelectionRaf = null;
+let _drawFinalSelectionRaf = null;
+
+/** 取截图底图来源：优先用 screenshotOffscreen（canvas→canvas 无解码开销） */
+function getScreenshotSource() {
+  return ss.screenshotOffscreen || ss.screenshot;
+}
 
 /** H1 优化：rAF 节流版 drawSelection，mousemove 高频调用时合并到单帧 */
 export function scheduleDrawSelection() {
@@ -32,6 +38,23 @@ export function cancelDrawSelectionRaf() {
   }
 }
 
+/** 性能优化：rAF 节流版 drawFinalSelection，move/resize 高频调用时合并到单帧 */
+export function scheduleDrawFinalSelection() {
+  if (_drawFinalSelectionRaf !== null) return;
+  _drawFinalSelectionRaf = requestAnimationFrame(() => {
+    _drawFinalSelectionRaf = null;
+    drawFinalSelection();
+  });
+}
+
+/** 取消待执行的 drawFinalSelection rAF */
+export function cancelDrawFinalSelectionRaf() {
+  if (_drawFinalSelectionRaf !== null) {
+    cancelAnimationFrame(_drawFinalSelectionRaf);
+    _drawFinalSelectionRaf = null;
+  }
+}
+
 /** 暗色蒙版（初始态 + 无选区时） */
 export function drawDimmed() {
   try {
@@ -43,7 +66,7 @@ export function drawDimmed() {
       return;
     }
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(screenshot, 0, 0);
+    ctx.drawImage(getScreenshotSource(), 0, 0);
     ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
   } catch (e) {
@@ -53,7 +76,8 @@ export function drawDimmed() {
 
 /** 选区绘制：选区外暗 + 选区内亮 */
 export function drawSelection() {
-  const { ctx, canvas, screenshot, startX, startY, endX, endY, sizeHint } = ss;
+  const { ctx, canvas, startX, startY, endX, endY, sizeHint } = ss;
+  const src = getScreenshotSource();
   // C 类：主 canvas bitmap 映射，必须用 overlay dpr（bitmap↔CSS 映射全局固定）
   const dpr = window.devicePixelRatio || 1;
   const r = norm(startX, startY, endX, endY);
@@ -63,7 +87,7 @@ export function drawSelection() {
   const ph = r.h * dpr;
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(screenshot, 0, 0);
+  ctx.drawImage(src, 0, 0);
 
   // 暗色蒙版（选区外）
   ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
@@ -89,8 +113,9 @@ export function drawSelection() {
 
 /** 确定选区后的静态绘制（选区不再随鼠标变化，但仍需要蒙版效果） */
 export function drawFinalSelection() {
-  const { ctx, canvas, screenshot, selCss } = ss;
+  const { ctx, canvas, selCss } = ss;
   if (!selCss) return;
+  const src = getScreenshotSource();
   // C 类：主 canvas bitmap 映射，必须用 overlay dpr（bitmap↔CSS 映射全局固定）
   const dpr = window.devicePixelRatio || 1;
   const px = selCss.x * dpr;
@@ -99,7 +124,7 @@ export function drawFinalSelection() {
   const ph = selCss.h * dpr;
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(screenshot, 0, 0);
+  ctx.drawImage(src, 0, 0);
 
   // 蒙版
   ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';

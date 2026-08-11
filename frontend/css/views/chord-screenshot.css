@@ -1749,3 +1749,34 @@ body.image-editor-mode {
   outline-offset: -2px;
   box-shadow: var(--shadow-modal);
 }
+
+/* ── Alt 快捷键提示：按住 Alt 时在工具栏按钮右下角显示 kbd 标记 ──────────────
+   默认隐藏（opacity:0 + visibility:hidden），body[data-alt-down] 时淡入。
+   绝对定位到按钮右下角，不挤占图标空间。 */
+.kbd-hint {
+  position: absolute;
+  bottom: 1px;
+  right: 2px;
+  font-size: 9px;
+  font-family: -apple-system, "Segoe UI", "SF Mono", Consolas, monospace;
+  font-weight: 600;
+  line-height: 1;
+  color: #fff;
+  background: rgba(74, 158, 255, 0.8);
+  border-radius: 3px;
+  padding: 1px 3px;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.12s ease, visibility 0.12s ease;
+}
+
+/* .tool-btn 需 position:relative 让 .kbd-hint 定位 */
+.tool-btn {
+  position: relative;
+}
+
+body[data-alt-down="true"] .kbd-hint {
+  opacity: 1;
+  visibility: visible;
+}

@@ -1033,12 +1033,15 @@ export const zh = {
     "welcome.title": "欢迎使用 Blink",
     "welcome.subtitle": "你的桌面效率中枢",
     "welcome.start": "开始使用",
-    "welcome.shortcut.voice_input": "语音输入 / 唤起",
+    "welcome.shortcut.voice_input": "唤起主窗口",
     "welcome.shortcut.chat": "AI 对话",
     "welcome.shortcut.screenshot": "区域截图",
     "welcome.shortcut.clipboard_history": "剪贴板历史",
     "welcome.shortcut.edit": "编辑窗口",
     "welcome.shortcut.sticky": "钉为便签",
+    "welcome.main.hint": "全局快捷键 · 随时按下唤出窗口，长按开始语音输入",
+    "welcome.chord.title": "Chord 快捷键",
+    "welcome.chord.desc": "先按主快捷键唤起窗口，不松开或按住 Alt + 字母键快速触发",
 
     // ── 快捷键速查表（0.17.3）──
     "hotkey.cheatsheet.title": "当前快捷键",

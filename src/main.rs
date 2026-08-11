@@ -768,6 +768,10 @@ fn main() {
             app::commands::screenshot_pin_transform,
             app::commands::screenshot_pin_move,
             app::commands::screenshot_pin_refresh,
+            // 多 Pin N+1 + pin 保存
+            app::commands::pin_spare_ready,
+            app::commands::pin_save_clipboard,
+            app::commands::pin_save_as,
             app::commands::screenshot_save,
             app::commands::image_editor_copy,
             app::commands::image_editor_pin,

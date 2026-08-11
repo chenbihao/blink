@@ -13,6 +13,33 @@ import {
 import { IMAGE_SOURCE } from './image-editor-session.js';
 import { showTransientHint, hideSelLoading } from './ss-ocr.js';
 
+/**
+ * 清理画布视觉状态——在输出完成（copy/pin/save/cancel）后、窗口隐藏前调用。
+ *
+ * 动机：窗口复用时 eval resetState 与 win.show() 有竞态，旧画面会一闪而过。
+ * 在完成时主动清空 canvas + 标注层，使窗口隐藏时画面已干净，下次唤起无残留。
+ */
+export function cleanupCanvasVisuals() {
+  const { canvas, ctx, annotCanvas, annotCtx, toolbar, sizeHint, errorHint } = ss;
+  // 清主 canvas
+  if (canvas && ctx && canvas.width > 0) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  }
+  // 清标注 canvas
+  if (annotCanvas && annotCtx) {
+    annotCtx.clearRect(0, 0, annotCanvas.width, annotCanvas.height);
+    annotCanvas.width = 0;
+    annotCanvas.height = 0;
+    annotCanvas.classList.add('hidden');
+  }
+  // 清标注引擎状态
+  annot.clearAll();
+  annot.clearOverlay();
+  // 隐藏 UI 元素
+  if (toolbar) toolbar.classList.add('hidden');
+  if (sizeHint) sizeHint.classList.add('hidden');
+}
+
 export function ensureOutputReady() {
   const overlay = annot.getOverlay();
   const activeTranslation = ss.translationBusy && overlay && overlay.mode === 'translated';
@@ -31,6 +58,7 @@ export function doCopySelection() {
     const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
     // 统一用 cssRectToBitmap 生成 bitmap rect，避免 X/Y scale 分歧
     const bmp = cssRectToBitmap(ss.selCss, meta);
+    cleanupCanvasVisuals();
     screenshotCopyRegion(bmp.x, bmp.y, bmp.w, bmp.h)
       .then(() => console.info('[screenshot] copy 成功（快路径）'))
       .catch((err) => {
@@ -43,6 +71,7 @@ export function doCopySelection() {
   }
 
   compositeSelection((pngBytes) => {
+    cleanupCanvasVisuals();
     outputEditorPng('copy', pngBytes)
       .then(() => {
         console.info('[screenshot] copy 成功');
@@ -61,6 +90,7 @@ export function doCopyFullScreen() {
   if (ss.sent) return;
   ss.sent = true;
   console.info('[screenshot] copy fullscreen');
+  cleanupCanvasVisuals();
   screenshotCopyRegion(0, 0, ss.canvas.width, ss.canvas.height)
     .then(() => console.info('[screenshot] fullscreen copy 成功（快路径）'))
     .catch((err) => {
@@ -82,6 +112,7 @@ export function doPinSelection() {
   const screenX = screenPos.x;
   const screenY = screenPos.y;
   compositeSelection((pngBytes) => {
+    cleanupCanvasVisuals();
     outputEditorPng('pin', pngBytes, screenX, screenY)
       .then(() => cleanupLongCapture())
       .catch((err) => {
@@ -95,6 +126,7 @@ export function doSaveSelection() {
   if (!ss.selCss || ss.sent || !ensureOutputReady()) return;
   ss.sent = true;
   compositeSelection((pngBytes) => {
+    cleanupCanvasVisuals();
     outputEditorPng('save', pngBytes)
       .then(() => cleanupLongCapture())
       .catch((err) => {
@@ -244,10 +276,13 @@ export function doCancel() {
     Promise.resolve(ss.scrollSession.exit(false)).catch(() => {});
   }
   if (source === IMAGE_SOURCE.CLIPBOARD) {
+    cleanupCanvasVisuals();
     imageEditorCancel().catch((e) => console.error('[image-editor] cancel 失败', e));
   } else if (ss.isAnnotating) {
+    cleanupCanvasVisuals();
     screenshotCancel().catch((e) => console.error('[screenshot] screenshotCancel 失败', e));
   } else {
+    cleanupCanvasVisuals();
     hideScreenshotOverlay().catch((e) => console.error('[screenshot] hideScreenshotOverlay 失败', e));
   }
 }

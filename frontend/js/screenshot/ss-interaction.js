@@ -9,7 +9,7 @@
 
 import { ss, SELECTION_HANDLE_SIZE, MIN_SELECTION_SIZE, TOOL_CAPS } from './ss-state.js';
 import { norm, applySquareConstraint } from './ss-utils.js';
-import { scheduleDrawSelection, drawFinalSelection } from './ss-draw.js';
+import { scheduleDrawSelection, drawFinalSelection, scheduleDrawFinalSelection, cancelDrawFinalSelectionRaf } from './ss-draw.js';
 import { findDisplayCssAt } from './ss-display.js';
 import * as annot from './annotation-engine.js';
 import {
@@ -109,7 +109,8 @@ export function updateSelectionInteraction(e) {
     if (handle.includes('s')) bottom = Math.min(monitor.y + monitor.h, Math.max(e.offsetY, top + MIN_SELECTION_SIZE));
     ss.selCss = { x: left, y: top, w: right - left, h: bottom - top };
   }
-  drawFinalSelection();
+  // 性能优化：rAF 节流，避免 move/resize mousemove 高频全量重绘
+  scheduleDrawFinalSelection();
   // sizeHint 由 drawFinalSelection 统一显示（0.18 优化：合并到 drawFinalSelection，
   // 修复智能选区路径不显示 sizeHint 的问题）
 }
@@ -117,6 +118,8 @@ export function updateSelectionInteraction(e) {
 /** @returns {boolean} true 如果事件被消费（调用方应 return） */
 export function finishSelectionInteraction(e) {
   if (!ss.selectionInteraction) return false;
+  // 取消待执行的 rAF，确保最终绘制是最新的（不被节流帧覆盖）
+  cancelDrawFinalSelectionRaf();
   const { kind, activated } = ss.selectionInteraction;
   if (!activated) {
     ss.selectionInteraction = null;

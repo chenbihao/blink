@@ -1,5 +1,6 @@
 /* ── 引导窗口视图样式 ──────────────────────────────────────────────────────────
-   0.17.3：首次启动引导窗口。480×440 居中，圆角，与 app 主题一致。 */
+   0.17.3：首次启动引导窗口。480×500 居中，圆角，与 app 主题一致。
+   优化：主快捷键与 Chord 快捷键分两组展示，避免误解为全局快捷键。 */
 
 .welcome-root {
   display: flex;
@@ -65,10 +66,76 @@
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 8px;
   width: 100%;
   max-width: 320px;
 }
+
+/* ── 分组容器 ───────────────────────────────────────────────────────────────── */
+
+.welcome-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* ── 主快捷键分组 ── */
+
+.welcome-section--main {
+  gap: 6px;
+}
+
+.welcome-shortcut-row--main {
+  background: color-mix(in srgb, var(--accent, #89b4fa) 14%, var(--surface, var(--surface0, #313244)));
+  border: 1px solid color-mix(in srgb, var(--accent, #89b4fa) 30%, transparent);
+}
+
+.welcome-shortcut-row--main:hover {
+  background: color-mix(in srgb, var(--accent, #89b4fa) 20%, var(--surface, var(--surface0, #313244)));
+}
+
+.welcome-section-hint {
+  margin: 0;
+  padding: 0 4px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-sub, var(--subtext0, #a6adc8));
+  opacity: 0.7;
+  font-style: normal;
+}
+
+/* ── Chord 快捷键分组 ── */
+
+.welcome-section--chord {
+  gap: 6px;
+}
+
+.welcome-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  padding: 0 4px;
+  margin-top: 4px;
+  font-style: normal;
+}
+
+.welcome-section-desc {
+  margin: 0;
+  padding: 0 4px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-sub, var(--subtext0, #a6adc8));
+  opacity: 0.7;
+  font-style: normal;
+}
+
+.welcome-chord-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* ── 快捷键行（通用） ─────────────────────────────────────────────────────── */
 
 .welcome-shortcut-row {
   display: flex;

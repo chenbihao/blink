@@ -7,9 +7,12 @@
 //! - Hook 回调（`ll_proc`）不查 DB、不调 Tauri、不 await、不取可能阻塞的锁。
 //! - 原子操作和非阻塞 channel send 允许。
 
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::System::RemoteDesktop::WTSRegisterSessionNotification;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Input::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -43,10 +46,24 @@ const WND_CLASS: &str = "BlinkInputWindow";
 /// 控制消息唤醒用的 WM_APP（与 mod.rs 控制队列配合）。
 const WM_APP_WAKEUP: u32 = 0x8000;
 
+/// 会话变化通知消息（WTSRegisterSessionNotification 注册后收到）。
+const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
+/// 会话锁定。
+const WTS_SESSION_LOCK: u32 = 0x7;
+/// 会话解锁。
+const WTS_SESSION_UNLOCK: u32 = 0x8;
+/// 心跳定时器 ID（60 秒安全网，防止 hook 被系统静默移除）。
+const TIMER_ID_HEARTBEAT: usize = 2;
+/// 心跳间隔（毫秒）。
+const HEARTBEAT_INTERVAL_MS: u32 = 60_000;
+
 // ── Hook 线程状态 ─────────────────────────────────────────────────────────────
 
 /// Hook 线程的 message-only window HWND（供控制消息唤醒）。
 static WND_HWND: std::sync::OnceLock<isize> = std::sync::OnceLock::new();
+
+/// 标记需要重装 hook（锁屏解锁后 / 心跳安全网设置）。
+static NEED_HOOK_REINSTALL: AtomicBool = AtomicBool::new(false);
 
 // Hook 线程的输入状态机（thread-local）。
 thread_local! {
@@ -477,47 +494,93 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
+        WM_TIMER => {
+            // 心跳安全网：定期标记需要重装 hook
+            if wparam.0 as usize == TIMER_ID_HEARTBEAT {
+                tracing::trace!("Heartbeat timer fired");
+                NEED_HOOK_REINSTALL.store(true, Ordering::SeqCst);
+            }
+            LRESULT(0)
+        }
+        WM_WTSSESSION_CHANGE => {
+            // 会话变化通知（WTSRegisterSessionNotification 注册后收到）
+            match wparam.0 as u32 {
+                WTS_SESSION_LOCK => {
+                    tracing::info!("Session locked — resetting modifier state");
+                    INPUT_STATE.with(|cell| {
+                        if let Some(state) = cell.borrow_mut().as_mut() {
+                            state.modifiers.reset_all();
+                        }
+                    });
+                }
+                WTS_SESSION_UNLOCK => {
+                    tracing::info!("Session unlocked — scheduling hook re-install");
+                    INPUT_STATE.with(|cell| {
+                        if let Some(state) = cell.borrow_mut().as_mut() {
+                            state.modifiers.reset_all();
+                        }
+                    });
+                    NEED_HOOK_REINSTALL.store(true, Ordering::SeqCst);
+                }
+                _ => {}
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
 
 /// 处理单个控制消息（在 hook 线程，持有 InputState 可变借用）。
+///
+/// 与 `ll_proc` / `hold_timer_callback` 一致，reduce 产出的 effects 通过 `send_effect`
+/// 转发给主线程，`UiStateChanged` 同时更新原子快照。此前此处用 `let _ =` 丢弃了
+/// `ReduceResult`，导致 `VoicePhaseChanged` 等控制消息引发的 `UiStateChanged` 事件
+/// 既不 emit 到前端也不更新快照——`exclusive_chord_active` 状态对前端不可见。
 fn process_control_message(state: &mut InputState, msg: ControlMsg) {
     let now = Instant::now();
-    match msg {
+    let result = match msg {
         ControlMsg::Config(snapshot) => {
-            let _ = state::reduce(state, InputEvent::ConfigChanged(snapshot), now);
+            state::reduce(state, InputEvent::ConfigChanged(snapshot), now)
         }
-        ControlMsg::WindowChanged { visible, revision } => {
-            let _ = state::reduce(
-                state,
-                InputEvent::WindowChanged {
-                    visible,
-                    revision,
-                    reason: WindowTransitionReason::Watchdog,
-                },
-                now,
-            );
-        }
+        ControlMsg::WindowChanged { visible, revision } => state::reduce(
+            state,
+            InputEvent::WindowChanged {
+                visible,
+                revision,
+                reason: WindowTransitionReason::Watchdog,
+            },
+            now,
+        ),
         ControlMsg::ViewContext(ctx) => {
-            let _ = state::reduce(state, InputEvent::ViewContextChanged(ctx), now);
+            state::reduce(state, InputEvent::ViewContextChanged(ctx), now)
         }
-        ControlMsg::VoicePhase(phase) => {
-            let _ = state::reduce(
-                state,
-                InputEvent::VoicePhaseChanged {
-                    gesture_id: None,
-                    phase,
-                },
-                now,
-            );
-        }
+        ControlMsg::VoicePhase(phase) => state::reduce(
+            state,
+            InputEvent::VoicePhaseChanged {
+                gesture_id: None,
+                phase,
+            },
+            now,
+        ),
         ControlMsg::RecorderMode(mode) => {
-            let _ = state::reduce(state, InputEvent::RecorderModeChanged(mode), now);
+            state::reduce(state, InputEvent::RecorderModeChanged(mode), now)
         }
         ControlMsg::Stop => {
             unsafe { PostQuitMessage(0) };
+            return;
         }
+    };
+
+    // 转发 effects（与 ll_proc / hold_timer_callback 一致）
+    for effect in &result.effects {
+        send_effect(effect.clone());
+    }
+
+    // 更新最新 UI 状态快照
+    if let Some(InputEffect::UiStateChanged(ui)) =
+        result.effects.iter().find(|e| matches!(e, InputEffect::UiStateChanged(_)))
+    {
+        set_latest_ui_state(ui);
     }
 }
 
@@ -600,7 +663,7 @@ fn hook_thread_main() {
         init_window();
 
         // 安装 Hook
-        let hhook = match SetWindowsHookExW(WH_KEYBOARD_LL, Some(ll_proc), None, 0) {
+        let mut hhook = match SetWindowsHookExW(WH_KEYBOARD_LL, Some(ll_proc), None, 0) {
             Ok(h) => h,
             Err(e) => {
                 tracing::error!(?e, "SetWindowsHookExW failed for WH_KEYBOARD_LL");
@@ -609,14 +672,50 @@ fn hook_thread_main() {
         };
         tracing::info!(hook_ptr = hhook.0 as usize, "WH_KEYBOARD_LL hook installed");
 
+        // 心跳定时器：60 秒安全网，防止 hook 被系统静默移除
+        // （锁屏/超时/休眠等场景）。UnhookWindowsHookEx + SetWindowsHookExW 开销极小。
+        if let Some(&hwnd_raw) = WND_HWND.get() {
+            let hwnd = HWND(hwnd_raw as *mut _);
+            let _ = SetTimer(Some(hwnd), TIMER_ID_HEARTBEAT, HEARTBEAT_INTERVAL_MS, None);
+            tracing::debug!("Heartbeat timer started ({}ms)", HEARTBEAT_INTERVAL_MS);
+        }
+
         // 消息循环
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
+
+            // 解锁后 / 心跳触发：重装 hook
+            if NEED_HOOK_REINSTALL.swap(false, Ordering::SeqCst) {
+                tracing::info!("Reinstalling WH_KEYBOARD_LL hook");
+                let _ = UnhookWindowsHookEx(hhook);
+                match SetWindowsHookExW(WH_KEYBOARD_LL, Some(ll_proc), None, 0) {
+                    Ok(new_hook) => {
+                        hhook = new_hook;
+                        tracing::info!(
+                            hook_ptr = hhook.0 as usize,
+                            "WH_KEYBOARD_LL hook re-installed successfully"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(?e, "Failed to re-install WH_KEYBOARD_LL hook");
+                    }
+                }
+                // 重装后重置修饰键状态
+                INPUT_STATE.with(|cell| {
+                    if let Some(state) = cell.borrow_mut().as_mut() {
+                        state.modifiers.reset_all();
+                    }
+                });
+            }
         }
 
         // 清理
+        if let Some(&hwnd_raw) = WND_HWND.get() {
+            let hwnd = HWND(hwnd_raw as *mut _);
+            let _ = KillTimer(Some(hwnd), TIMER_ID_HEARTBEAT);
+        }
         let _ = UnhookWindowsHookEx(hhook);
         tracing::info!("WH_KEYBOARD_LL hook uninstalled");
         destroy_window();
@@ -671,6 +770,14 @@ fn init_window() {
                 tracing::info!("Raw Input registered (keyboard, INPUTSINK|DEVNOTIFY)");
             } else {
                 tracing::warn!(?result, "RegisterRawInputDevices failed (degraded)");
+            }
+
+            // 注册会话变化通知（锁屏/解锁后重装 hook）
+            // NOTIFY_FOR_THIS_SESSION = 0：只接收当前会话的通知
+            if WTSRegisterSessionNotification(hwnd, 0).is_ok() {
+                tracing::info!("WTS session notification registered");
+            } else {
+                tracing::warn!("WTSRegisterSessionNotification failed (degraded)");
             }
         } else {
             tracing::warn!(error = ?hwnd, "CreateWindowExW failed (degraded)");

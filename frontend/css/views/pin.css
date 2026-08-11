@@ -192,6 +192,16 @@ html, body {
   margin: 4px 6px;
 }
 
+/* mini 模式：只保留重置缩放 + 关闭，隐藏其余项及关联分隔线 */
+#ctx-menu.ctx-menu-mini #ctx-ocr,
+#ctx-menu.ctx-menu-mini #ctx-translate,
+#ctx-menu.ctx-menu-mini #ctx-translate + .ctx-sep,
+#ctx-menu.ctx-menu-mini #ctx-copy,
+#ctx-menu.ctx-menu-mini #ctx-save-as,
+#ctx-menu.ctx-menu-mini #ctx-save-as + .ctx-sep {
+  display: none;
+}
+
 /* ── 0.11.9-f：pin 窗口内 OCR 面板 ────────────────────── */
 
 #pin-ocr-panel {
@@ -340,4 +350,13 @@ html, body {
 .pin-ocr-footer button:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+/* ── 缩小态（mini-mode）────────────────────────────────── */
+
+/* 缩小态：隐藏 zoom label（JS 也设 opacity:0，CSS 双保险）
+   box-shadow / border / border-radius 由 JS applyTransformOnly
+   按比例反向补偿，不在 CSS 中写，避免与内联样式冲突。 */
+body.mini-mode #zoom-level {
+  opacity: 0 !important;
 }

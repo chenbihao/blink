@@ -43,7 +43,7 @@ import { ss, initDOM, PREWARM_MIN_WIDTH, PREWARM_MIN_HEIGHT, TOOL_CAPS } from ".
 import { IMAGE_SOURCE } from './image-editor-session.js';
 import { norm, pointInRect, applySquareConstraint } from "./ss-utils.js";
 import { shouldStartFreeSelection, monitorDprAtCss, syncRenderScale, cssRectToBitmap, cssPointToScreen } from "./ss-selection-geometry.js";
-import { drawDimmed, drawSelection, drawFinalSelection, redrawAnnotPreview, redrawAnnotFull, scheduleDrawSelection, cancelDrawSelectionRaf } from "./ss-draw.js";
+import { drawDimmed, drawSelection, drawFinalSelection, redrawAnnotPreview, redrawAnnotFull, scheduleDrawSelection, cancelDrawSelectionRaf, scheduleDrawFinalSelection, cancelDrawFinalSelectionRaf } from "./ss-draw.js";
 import { positionToolbar, findDisplayCssAt, invalidateDisplaysCache } from "./ss-display.js";
 import {
   getSelectionHandle, beginSelectionInteraction, updateSelectionInteraction,
@@ -62,8 +62,9 @@ import {
 import {
   doCopySelection, doCopyFullScreen, doPinSelection, doSaveSelection,
   compositeSelection, doCancel, hasActivePanel, outputEditorPng,
+  cleanupCanvasVisuals,
 } from "./ss-output.js";
-import { bindToolbar, showTextInput, updateUndoRedoButtons } from "./ss-toolbar.js";
+import { bindToolbar, showTextInput, updateUndoRedoButtons, selectTool, cycleToolInGroup, TOOL_GROUPS } from "./ss-toolbar.js";
 // 0.15.8：智能窗口吸附 + 像素放大镜
 import { loadPickableWindows, clearPickableWindows, updateWindowHover, getHoveredWindowRect, clearHover } from "./ss-hover.js";
 // 0.18.2：控件级智能吸附（跨屏预选版）
@@ -238,6 +239,9 @@ function resetState() {
   ss._loadGen++;  // BUG1 fix: 使待处理的旧 img.onload 回调失效
   // 0.15.9：取消待执行的标注预览 rAF
   if (ss._annotRaf) { cancelAnimationFrame(ss._annotRaf); ss._annotRaf = 0; }
+  // 取消待执行的选区绘制 rAF，防止 resetState 后旧 rAF 用 null source 尝试绘制
+  cancelDrawSelectionRaf();
+  cancelDrawFinalSelectionRaf();
   // 0.15.10：清除快照
   ss._committedSnapshot = null;
   ss.isDragging = false;
@@ -982,6 +986,7 @@ canvas.addEventListener('mouseleave', () => {
 canvas.addEventListener('mouseup', (e) => {
   // H1 优化：取消待执行的 drawSelection rAF，确保最终绘制是最新的
   cancelDrawSelectionRaf();
+  cancelDrawFinalSelectionRaf();
   // 0.15.7：长图平移结束
   if (endLongImagePan()) return;
 
@@ -1145,6 +1150,63 @@ document.addEventListener('keydown', (e) => {
     }
     return;
   }
+  // ── Alt 快捷键：工具切换 + undo/reset（仅标注模式生效）──────────
+  // Alt+` → 选取工具；Alt+1~5 → 图形/画笔/文字/马赛克/橡皮；重复按循环组内下一个
+  // Alt+Z → undo；Alt+R → reset（清除全部标注）
+  if (e.altKey && !e.ctrlKey && !e.metaKey && ss.isAnnotating) {
+    const tgt = e.target;
+    if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
+    const key = e.key;
+    if (key === '`' || key === '~') {
+      e.preventDefault();
+      selectTool('select');
+      return;
+    }
+    if (key === '1') {
+      e.preventDefault();
+      // 当前已在 shape 组内则循环，否则切到默认工具
+      if (TOOL_GROUPS[annot.getTool()] === 'shape') cycleToolInGroup('shape');
+      else selectTool('rect');
+      return;
+    }
+    if (key === '2') {
+      e.preventDefault();
+      if (TOOL_GROUPS[annot.getTool()] === 'stroke') cycleToolInGroup('stroke');
+      else selectTool('pencil');
+      return;
+    }
+    if (key === '3') {
+      e.preventDefault();
+      if (TOOL_GROUPS[annot.getTool()] === 'text') cycleToolInGroup('text');
+      else selectTool('text');
+      return;
+    }
+    if (key === '4') {
+      e.preventDefault();
+      if (TOOL_GROUPS[annot.getTool()] === 'blur') cycleToolInGroup('blur');
+      else selectTool('pixelate');
+      return;
+    }
+    if (key === '5') {
+      e.preventDefault();
+      if (TOOL_GROUPS[annot.getTool()] === 'eraser') cycleToolInGroup('eraser');
+      else selectTool('eraser');
+      return;
+    }
+    if (key === 'z' || key === 'Z') {
+      e.preventDefault();
+      annot.undo();
+      updateUndoRedoButtons();
+      return;
+    }
+    if (key === 'r' || key === 'R') {
+      e.preventDefault();
+      annot.clearAll();
+      updateUndoRedoButtons();
+      redrawAnnotFull();
+      return;
+    }
+  }
   if (e.key === 'Escape') {
     e.preventDefault();
     // 0.15.7：长截图采集阶段——ESC 先退出长截图模式
@@ -1210,6 +1272,16 @@ window.addEventListener('keyup', (e) => {
   }
 });
 
+// ── Alt 按键状态跟踪：显示/隐藏工具栏上的 kbd 快捷键提示 ──
+// 按住 Alt 时 body 加 data-alt-down，CSS 据此显示 .kbd-hint
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Alt' && !e.repeat) document.body.dataset.altDown = 'true';
+});
+window.addEventListener('keyup', (e) => {
+  if (e.key === 'Alt') delete document.body.dataset.altDown;
+});
+window.addEventListener('blur', () => { delete document.body.dataset.altDown; });
+
 window.addEventListener('blur', () => {
   if (ss.blurGuard) return;
   ss.blurGuard = true;
@@ -1222,7 +1294,10 @@ window.addEventListener('blur', () => {
 
   // H1 优化：取消待执行的 drawSelection rAF
   cancelDrawSelectionRaf();
+  cancelDrawFinalSelectionRaf();
   console.debug('[screenshot] window blur, hiding overlay');
+  // 完成时清理画布，防止下次唤起残留旧画面
+  cleanupCanvasVisuals();
   if (isScrollCaptureActive()) {
     exitScrollCapture(false)
       .catch((e) => console.warn('[screenshot] blur: scroll cleanup failed', e))

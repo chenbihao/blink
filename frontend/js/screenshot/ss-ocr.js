@@ -17,6 +17,7 @@ import {
   screenshotPinRefresh,
 } from '../shared/api.js';
 import { normalizeError } from '../shared/tauri.js';
+import { cleanupCanvasVisuals } from './ss-output.js';
 
 // ════════════════════════════════════════════════════════════
 //  UI Helpers
@@ -386,6 +387,8 @@ export async function doTranslateAndPin() {
     }
   } finally {
     ss._translateAndPinPending = false;
+    // 后台翻译全部结束后清理画布，防止下次唤起残留旧画面
+    cleanupCanvasVisuals();
   }
 }
 

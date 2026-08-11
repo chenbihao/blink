@@ -324,11 +324,11 @@ pub async fn screenshot_save_replay_file(
     Ok(result_directory.to_string_lossy().into_owned())
 }
 
-/// 0.11.7-d：隐藏钉图窗口（hide 而非 close，保留窗口实例供下次钉图复用）。
+/// 隐藏钉图窗口（多 Pin：通过 label 定位目标窗口，触发 CloseRequested → 回收/销毁）。
 #[tauri::command]
-pub fn screenshot_pin_hide(app: tauri::AppHandle) {
-    if let Some(win) = app.get_webview_window("chord-pin") {
-        let _ = win.hide();
+pub fn screenshot_pin_hide(app: tauri::AppHandle, label: String) {
+    if let Some(win) = app.get_webview_window(&label) {
+        let _ = win.close();
     }
 }
 
@@ -339,17 +339,18 @@ pub fn screenshot_pin_hide(app: tauri::AppHandle) {
 /// - `win_x`/`win_y`：窗口左上角屏幕坐标（= 图片左上 - PIN_PAD）
 /// - `win_w`/`win_h`：窗口尺寸（= 图片显示尺寸 + 2×PIN_PAD，含发光区）
 ///
-/// 前端在缩放/拖动时算好这 4 个值一次性传入，避免多次 set_position/set_size 竞态。
+/// 多 Pin：通过 `label` 定位目标窗口。
 #[tauri::command]
 pub fn screenshot_pin_transform(
     app: tauri::AppHandle,
+    label: String,
     win_x: i32,
     win_y: i32,
     win_w: u32,
     win_h: u32,
 ) -> Result<(), String> {
     use windows::Win32::Foundation::HWND;
-    if let Some(win) = app.get_webview_window("chord-pin") {
+    if let Some(win) = app.get_webview_window(&label) {
         if let Ok(hwnd) = win.hwnd() {
             crate::infra::platform::window::place_at_physical(
                 HWND(hwnd.0 as _),
@@ -368,13 +369,20 @@ pub fn screenshot_pin_transform(
 /// 与 `screenshot_pin_transform` 的区别：用 `SWP_NOSIZE | SWP_NOZORDER` 跳过
 /// 尺寸计算和 Z 序调整，只改窗口位置。拖拽时窗口尺寸不变，无需每次都传
 /// winW/winH 让 Win32 做无用的 resize 判定。减少每帧 IPC 的后端开销。
+///
+/// 多 Pin：通过 `label` 定位目标窗口。
 #[tauri::command]
-pub fn screenshot_pin_move(app: tauri::AppHandle, win_x: i32, win_y: i32) -> Result<(), String> {
+pub fn screenshot_pin_move(
+    app: tauri::AppHandle,
+    label: String,
+    win_x: i32,
+    win_y: i32,
+) -> Result<(), String> {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{
         SET_WINDOW_POS_FLAGS, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
     };
-    if let Some(win) = app.get_webview_window("chord-pin") {
+    if let Some(win) = app.get_webview_window(&label) {
         if let Ok(hwnd) = win.hwnd() {
             unsafe {
                 let _ = SetWindowPos(
@@ -390,6 +398,49 @@ pub fn screenshot_pin_move(app: tauri::AppHandle, win_x: i32, win_y: i32) -> Res
         }
     }
     Ok(())
+}
+
+/// 多 Pin N+1：前端 preheat init 完成后调用，将 spare 注册为可用。
+#[tauri::command]
+pub async fn pin_spare_ready(window: tauri::Window) {
+    let label = window.label().to_string();
+    crate::infra::platform::window::mark_pin_spare_ready(&label);
+}
+
+/// 将 pin 窗口图片复制到剪贴板。
+#[tauri::command]
+pub async fn pin_save_clipboard(png_data: Vec<u8>) -> Result<(), String> {
+    crate::domain::clipboard::write_png(
+        png_data,
+        crate::domain::clipboard::ClipboardWriteSource::User,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    tracing::info!("pin 图已复制到剪贴板");
+    Ok(())
+}
+
+/// 将 pin 窗口图片另存为文件，同时复制到剪贴板方便流转。
+///
+/// `path=None` 弹出保存对话框；用户取消时返回 Err。
+#[tauri::command]
+pub async fn pin_save_as(
+    app: tauri::AppHandle,
+    png_data: Vec<u8>,
+    path: Option<String>,
+) -> Result<String, String> {
+    // 先写剪贴板（方便流转）
+    let png_clone = png_data.clone();
+    crate::domain::clipboard::write_png(
+        png_clone,
+        crate::domain::clipboard::ClipboardWriteSource::User,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    // 再保存文件
+    let file_path = save_editor_png(&app, &png_data, path, "钉图")?;
+    tracing::info!(path = %file_path, "pin 图已另存为文件并复制到剪贴板");
+    Ok(file_path)
 }
 
 /// 0.11.7-c：OCR 识别图片中的文字，返回 `{text, lines}`。
