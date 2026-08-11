@@ -66,7 +66,7 @@ import {
 } from "./ss-output.js";
 import { bindToolbar, showTextInput, updateUndoRedoButtons, selectTool, cycleToolInGroup, TOOL_GROUPS } from "./ss-toolbar.js";
 // 0.15.8：智能窗口吸附 + 像素放大镜
-import { loadPickableWindows, clearPickableWindows, updateWindowHover, getHoveredWindowRect, clearHover } from "./ss-hover.js";
+import { loadPickableWindows, clearPickableWindows, updateWindowHover, getHoveredWindowRect, clearHover, hideWindowHintIfVisible, showWindowHintIfPending } from "./ss-hover.js";
 // 0.18.2：控件级智能吸附（跨屏预选版）
 import {
   setControlTarget, prefetchControlHints, clearControlHints, updateControlHover,
@@ -334,10 +334,19 @@ function resetState() {
     }
     if (ss.hitCanvas) ss.hitCanvas.style.pointerEvents = '';
   } catch (e) { console.warn('[screenshot] resetState: pointer-events restore failed', e); }
+  // P5: 立即画暗罩——不等截图加载完成，消除"锁死感"
+  // 用户看到暗色背景 + 十字光标，可以立即移动鼠标
+  // 截图加载后 drawDimmed() 会叠加截图图像
+  if (canvas.width > 0 && ctx) {
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
   console.info('[screenshot] resetState done');
 }
 
-function loadScreenshot() {
+// P4: raw BGRA 协议——fetch raw RGBA bytes + ImageData + putImageData
+// 消除 PNG 编码（~241ms）+ 浏览器 PNG 解码（~50ms），进入截图从 ~400ms → ~160ms
+async function loadScreenshot() {
   console.info('[screenshot] loadScreenshot start');
   ss.errorHint.classList.add('hidden');
 
@@ -346,8 +355,6 @@ function loadScreenshot() {
 
   // 加载代际守卫
   const gen = ++ss._loadGen;
-  const img = new Image();
-  img.crossOrigin = 'anonymous';
 
   // 0.15.9：加载超时检测——5 秒未完成则提示错误（防止协议请求静默失败）
   const timeoutId = setTimeout(() => {
@@ -358,62 +365,75 @@ function loadScreenshot() {
     ss.errorHint.classList.remove('hidden');
   }, 5000);
 
-  img.onload = () => {
-    clearTimeout(timeoutId);
+  try {
+    console.info('[screenshot] requesting raw rgba', { gen });
+    const response = await fetch('http://blink-screenshot.localhost/raw?t=' + Date.now());
+    if (!response.ok) throw new Error(`fetch failed: ${response.status}`);
+
+    const buffer = await response.arrayBuffer();
     if (gen !== ss._loadGen) {
       console.info('[screenshot] 丢弃过期截图加载回调', { gen, cur: ss._loadGen });
       return;
     }
-    try {
-      const { canvas } = ss;
-      ss.screenshot = img;
-      canvas.width = img.width;
-      canvas.height = img.height;
-      ss.screenshotOffscreen = document.createElement('canvas');
-      ss.screenshotOffscreen.width = img.width;
-      ss.screenshotOffscreen.height = img.height;
-      ss.screenshotOffscreen.getContext('2d', { willReadFrequently: true }).drawImage(img, 0, 0);
-      // 等布局稳定后同步 renderScale，再绘制和加载窗口/控件
-      requestAnimationFrame(() => {
-        if (gen !== ss._loadGen) return;
-        const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
-        syncRenderScale(canvas, meta);
-        // M7 优化：初始 renderScale 设定后失效 displays 缓存
-        invalidateDisplaysCache();
-        drawDimmed();
-        // 诊断日志：截图加载完成后的坐标空间状态
-        const rect = canvas.getBoundingClientRect();
-        console.debug('[screenshot] render scale synced', {
-          injectedDpi: meta.overlayDpi,
-          devicePixelRatio: window.devicePixelRatio,
-          canvasWidth: canvas.width,
-          canvasHeight: canvas.height,
-          canvasRectWidth: rect.width,
-          canvasRectHeight: rect.height,
-          scaleX: meta.renderScaleX,
-          scaleY: meta.renderScaleY,
-        });
-        // 0.18.x：统一门控触发窗口列表加载 + 控件预热
-        screenshotReady = true;
-        renderScaleReady = true;
-        maybeStartCaptureHints();
+
+    // 从 __blinkScreenMeta 取尺寸（Tauri 自定义协议不暴露 X-Width/X-Height headers）
+    const meta = window.__blinkScreenMeta || {};
+    const w = meta.w || 0;
+    const h = meta.h || 0;
+    if (w === 0 || h === 0) throw new Error('invalid dimensions from __blinkScreenMeta');
+
+    const imageData = new ImageData(new Uint8ClampedArray(buffer), w, h);
+
+    const { canvas } = ss;
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    ctx.putImageData(imageData, 0, 0);
+
+    // offscreen canvas 供 compositeSelectionBytes 的 drawImage 使用
+    ss.screenshotOffscreen = document.createElement('canvas');
+    ss.screenshotOffscreen.width = w;
+    ss.screenshotOffscreen.height = h;
+    ss.screenshotOffscreen.getContext('2d', { willReadFrequently: true }).putImageData(imageData, 0, 0);
+
+    // ss.screenshot 设为 offscreen canvas（drawImage 接受 canvas source）
+    ss.screenshot = ss.screenshotOffscreen;
+
+    clearTimeout(timeoutId);
+
+    // 等布局稳定后同步 renderScale，再绘制和加载窗口/控件
+    requestAnimationFrame(() => {
+      if (gen !== ss._loadGen) return;
+      const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+      syncRenderScale(canvas, meta);
+      // M7 优化：初始 renderScale 设定后失效 displays 缓存
+      invalidateDisplaysCache();
+      drawDimmed();
+      // 诊断日志：截图加载完成后的坐标空间状态
+      const rect = canvas.getBoundingClientRect();
+      console.debug('[screenshot] render scale synced', {
+        injectedDpi: meta.overlayDpi,
+        devicePixelRatio: window.devicePixelRatio,
+        canvasWidth: canvas.width,
+        canvasHeight: canvas.height,
+        canvasRectWidth: rect.width,
+        canvasRectHeight: rect.height,
+        scaleX: meta.renderScaleX,
+        scaleY: meta.renderScaleY,
       });
-      console.info('[screenshot] screenshot loaded', { w: img.width, h: img.height, gen });
-    } catch (e) {
-      console.error('[screenshot] img.onload 处理异常', e, { gen });
-      ss.errorHint.textContent = '截图渲染失败，按 ESC 重试';
-      ss.errorHint.classList.remove('hidden');
-    }
-  };
-  img.onerror = (e) => {
+      // 0.18.x：统一门控触发窗口列表加载 + 控件预热
+      screenshotReady = true;
+      renderScaleReady = true;
+      maybeStartCaptureHints();
+    });
+    console.info('[screenshot] screenshot loaded', { w, h, gen });
+  } catch (e) {
     clearTimeout(timeoutId);
     if (gen !== ss._loadGen) return;
-    console.error('[screenshot] Image load failed (onerror)', { gen, error: e, src: img.src });
-    ss.errorHint.textContent = '截图加载失败，按 ESC 关闭';
+    console.error('[screenshot] loadScreenshot failed', e, { gen });
+    ss.errorHint.textContent = '截图加载失败，按 ESC 重试';
     ss.errorHint.classList.remove('hidden');
-  };
-  console.info('[screenshot] requesting screenshot image', { gen });
-  img.src = 'http://blink-screenshot.localhost/capture?t=' + Date.now();
+  }
 }
 
 function loadEditorConfig(includeCaptureHints) {
@@ -873,16 +893,20 @@ canvas.addEventListener('mousemove', (e) => {
   // 0.18.2：选区拖拽阶段智能吸附（控件优先于窗口）
   // 0.18.x：跨屏预选——先命中全局顶层窗口 → 得到 hovered hwnd → setControlTarget → 控件 hit-test
   // 手动框选拖拽中（isDragging）不更新吸附提示，避免实线选区与虚线预选区同时出现
+  // 0.19.14-fix：先 hit-test 窗口获取 hwnd 但不显示 hint，等控件 hit-test 结果再决定显示哪个 hint，
+  // 避免控件命中时每帧 show→hide 窗口 hint 导致蓝色虚线框闪烁
   if (!ss.isAnnotating && !ss.selectionInteraction && !ss.isDragging) {
-    // 先命中全局顶层窗口，得到 hovered hwnd
-    updateWindowHover(e.offsetX, e.offsetY);
+    // 第一步：窗口 hit-test（仅更新内部索引，不显示 hint）
+    updateWindowHover(e.offsetX, e.offsetY, { skipShowHint: true });
     const winRect = getHoveredWindowRect();
     setControlTarget(winRect?.hwnd ?? null);
-    // 控件优先 hit-test：命中控件时清除窗口虚线框
-    if (!updateControlHover(e.offsetX, e.offsetY)) {
-      // 控件未命中或尚未加载：保持窗口级蓝色预选框
+    // 第二步：控件优先 hit-test
+    if (updateControlHover(e.offsetX, e.offsetY)) {
+      // 控件命中：隐藏窗口 hint（可能上次鼠标在窗口空白处时显示了）
+      hideWindowHintIfVisible();
     } else {
-      clearHover();
+      // 控件未命中或尚未加载：显示窗口级蓝色预选框
+      showWindowHintIfPending();
     }
     updatePixelMagnifier(e.offsetX, e.offsetY);
     // 0.15.12：存储最新位置供 Shift 切格式时强制刷新

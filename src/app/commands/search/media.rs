@@ -66,20 +66,51 @@ fn downsample_luma_bgra(pixels: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String
     Ok(probe)
 }
 
+/// 0.19.14 raw IPC 辅助：从 Request body 提取 PNG bytes。
+/// 前端用 `invoke(cmd, uint8array, { headers })` 传 raw bytes，body 为 `InvokeBody::Raw`。
+fn extract_png_from_request(request: &tauri::ipc::Request<'_>) -> Result<Vec<u8>, String> {
+    match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => Ok(bytes.clone()),
+        tauri::ipc::InvokeBody::Json(_) => Err("expected raw bytes payload, got JSON".to_string()),
+    }
+}
+
+/// 0.19.14 raw IPC 辅助：从 headers 提取 i32。
+fn header_i32(headers: &tauri::http::HeaderMap, key: &str) -> Result<i32, String> {
+    headers
+        .get(key)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| format!("missing header: {key}"))
+}
+
+/// 0.19.14 raw IPC 辅助：从 headers 提取 Option<bool>。
+fn header_opt_bool(headers: &tauri::http::HeaderMap, key: &str) -> Option<bool> {
+    headers
+        .get(key)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s == "true")
+}
+
+/// 0.19.14 raw IPC 辅助：从 headers 提取 Option<String>。
+fn header_opt_string(headers: &tauri::http::HeaderMap, key: &str) -> Option<String> {
+    headers
+        .get(key)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+}
+
 /// 0.11.7-f：接收前端合成后的 PNG（裁剪区 + 标注），写入剪贴板，结束会话。
 ///
-/// **替代** 0.8.7 `capture_region`（后端从 SESSION 裁剪）——现在前端一份合成路径
-/// 走通所有输出（复制/保存/钉图），双击全屏也走这里。
-///
-/// **异步执行**（0.11.7 review 修）：PNG 解码 + BGRA swap + Win32 剪贴板写入都是
-/// 同步 CPU/syscall 密集操作，全屏 2560x1440 约 50-100ms。放在异步命令直接跑会
-/// 阻塞 tokio 工作线程，影响其他并发任务。用 `spawn_blocking` 挪到阻塞线程池。
+/// **0.19.14 raw IPC**：前端用 `invoke("screenshot_copy", uint8array)` 传 raw bytes，
+/// 避免 JSON 序列化 6MB PNG → 8MB base64 的开销（省 ~2s IPC 时间）。
 ///
 /// **快路径**：如果只需要复制选区（无标注、无全屏合成），前端应走 `screenshot_copy_region`
 /// 直接传坐标——避开前端 toBlob PNG 编码 + 后端 PNG 解码的双重开销，全屏路径
 /// 快 ~150-250ms。有标注 / 全屏合成时才走本命令。
 #[tauri::command]
-pub async fn screenshot_copy(app: tauri::AppHandle, png_data: Vec<u8>) -> Result<(), String> {
+pub async fn screenshot_copy(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    let png_data = extract_png_from_request(&request)?;
     let bytes_len = png_data.len();
     crate::domain::clipboard::write_png(
         png_data,
@@ -89,6 +120,38 @@ pub async fn screenshot_copy(app: tauri::AppHandle, png_data: Vec<u8>) -> Result
     .map_err(|e| e.to_string())?;
     finish_screenshot_session(&app);
     tracing::info!(bytes = bytes_len, "截图已保存到剪贴板");
+    Ok(())
+}
+
+/// P7：有标注 copy 直传 RGBA → 写剪贴板，消除 PNG 编解码往返。
+///
+/// 前端 `getImageData()` 产生 raw RGBA，通过 raw IPC 直传。后端原地 swap 为 BGRA
+/// 后写 CF_DIB，跳过 `toBlob('image/png')`（~160ms）+ PNG decode（~289ms）。
+///
+/// 与 `screenshot_copy`（PNG 路径）的关系：
+/// - 无标注快路径走 `screenshot_copy_region`（后端直接 crop BGRA）
+/// - 有标注慢路径原本走 `screenshot_copy`（前端 toBlob PNG → 后端 decode）
+/// - 有标注慢路径现在走本命令（前端 getImageData RGBA → 后端 swap）
+#[tauri::command]
+pub async fn screenshot_copy_rgba(
+    app: tauri::AppHandle,
+    request: tauri::ipc::Request<'_>,
+) -> Result<(), String> {
+    let rgba_data = extract_png_from_request(&request)?;
+    let bytes_len = rgba_data.len();
+    let headers = request.headers();
+    let w = header_i32(headers, "w")? as u32;
+    let h = header_i32(headers, "h")? as u32;
+    crate::domain::clipboard::write_rgba(
+        rgba_data,
+        w,
+        h,
+        crate::domain::clipboard::ClipboardWriteSource::Screenshot,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    finish_screenshot_session(&app);
+    tracing::info!(bytes = bytes_len, w, h, "截图 RGBA 已直传剪贴板");
     Ok(())
 }
 
@@ -148,21 +211,66 @@ pub fn screenshot_cancel(app: tauri::AppHandle) {
 #[tauri::command]
 pub fn screenshot_pin(
     app: tauri::AppHandle,
-    png_data: Vec<u8>,
-    screen_x: i32,
-    screen_y: i32,
-    show_translating: Option<bool>,
+    request: tauri::ipc::Request<'_>,
 ) -> Result<(), String> {
-    let show_translating = show_translating.unwrap_or(false);
+    let png_data = extract_png_from_request(&request)?;
+    let png_len = png_data.len();
+    let headers = request.headers();
+    let screen_x = header_i32(headers, "screen-x")?;
+    let screen_y = header_i32(headers, "screen-y")?;
+    let show_translating = header_opt_bool(headers, "show-translating").unwrap_or(false);
     crate::infra::platform::window::show_pin_window(
         &app,
-        png_data,
+        crate::infra::platform::window::PinImage::Png(std::sync::Arc::new(png_data)),
         screen_x,
         screen_y,
         show_translating,
     )?;
     finish_screenshot_session(&app);
-    tracing::info!(screen_x, screen_y, show_translating, "截图已钉到屏幕");
+    tracing::info!(
+        screen_x, screen_y, show_translating,
+        png_bytes = png_len,
+        "截图已钉到屏幕"
+    );
+    Ok(())
+}
+
+/// 0.19.14：Pin 快路径——后端直接从 SESSION 裁剪 BGRA → 编码 PNG → show_pin_window。
+///
+/// 与 `screenshot_copy_region` 对称的优化：无标注时前端只传坐标 + 屏幕坐标，
+/// 跳过前端 toBlob + IPC PNG 往返。全屏 pin 从 ~1280ms → ~40ms。
+///
+/// `screen_x`/`screen_y` 为选区左上角的虚拟屏幕物理坐标。
+#[tauri::command]
+pub async fn screenshot_pin_region(
+    app: tauri::AppHandle,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    screen_x: i32,
+    screen_y: i32,
+) -> Result<(), String> {
+    // P6: crop BGRA → 直接 store + show_pin，不阻塞 encode_png
+    let (bgra, cw, ch) = tokio::task::spawn_blocking(move || {
+        crate::infra::platform::screenshot::crop(x, y, w, h)
+            .ok_or_else(|| "SESSION 为空或选区越界".to_string())
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking join 失败: {e}"))??;
+
+    let data_len = bgra.len();
+    crate::infra::platform::window::show_pin_window(
+        &app,
+        crate::infra::platform::window::PinImage::Bgra(std::sync::Arc::new(bgra), cw, ch),
+        screen_x, screen_y, false,
+    )?;
+    finish_screenshot_session(&app);
+    tracing::info!(
+        w, h, screen_x, screen_y,
+        bgra_bytes = data_len,
+        "截图已钉到屏幕（快路径 P6 raw BGRA）"
+    );
     Ok(())
 }
 
@@ -177,10 +285,10 @@ pub fn screenshot_pin(
 #[tauri::command]
 pub fn screenshot_pin_refresh(
     app: tauri::AppHandle,
-    png_data: Vec<u8>,
-    show_translating: Option<bool>,
+    request: tauri::ipc::Request<'_>,
 ) -> Result<(), String> {
-    let show_translating = show_translating.unwrap_or(false);
+    let png_data = extract_png_from_request(&request)?;
+    let show_translating = header_opt_bool(request.headers(), "show-translating").unwrap_or(false);
     crate::infra::platform::window::refresh_pin_image(&app, png_data, show_translating)?;
     tracing::info!(show_translating, "钉图已原地刷新");
     Ok(())
@@ -193,9 +301,10 @@ pub fn screenshot_pin_refresh(
 #[tauri::command]
 pub async fn screenshot_save(
     app: tauri::AppHandle,
-    png_data: Vec<u8>,
-    path: Option<String>,
+    request: tauri::ipc::Request<'_>,
 ) -> Result<String, String> {
+    let png_data = extract_png_from_request(&request)?;
+    let path = header_opt_string(request.headers(), "path");
     let file_path = save_editor_png(&app, &png_data, path, "截图")?;
 
     finish_screenshot_session(&app);
@@ -205,7 +314,8 @@ pub async fn screenshot_save(
 
 /// 通用图片编辑输出：以用户来源写入剪贴板，不借用截图来源标记或截图 SESSION。
 #[tauri::command]
-pub async fn image_editor_copy(app: tauri::AppHandle, png_data: Vec<u8>) -> Result<(), String> {
+pub async fn image_editor_copy(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    let png_data = extract_png_from_request(&request)?;
     let bytes_len = png_data.len();
     crate::domain::clipboard::write_png(
         png_data,
@@ -221,15 +331,15 @@ pub async fn image_editor_copy(app: tauri::AppHandle, png_data: Vec<u8>) -> Resu
 #[tauri::command]
 pub fn image_editor_pin(
     app: tauri::AppHandle,
-    png_data: Vec<u8>,
-    show_translating: Option<bool>,
+    request: tauri::ipc::Request<'_>,
 ) -> Result<(), String> {
     use crate::domain::event::CapabilityEnv;
+    let png_data = extract_png_from_request(&request)?;
+    let show_translating = header_opt_bool(request.headers(), "show-translating").unwrap_or(false);
     let env = app
         .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
         .inner()
         .clone();
-    let show_translating = show_translating.unwrap_or(false);
     let refresh_png = show_translating.then(|| png_data.clone());
     let (screen_x, screen_y) = env.show_pin_image(png_data, None, None)?;
     if let Some(png_data) = refresh_png {
@@ -243,9 +353,10 @@ pub fn image_editor_pin(
 #[tauri::command]
 pub fn image_editor_save(
     app: tauri::AppHandle,
-    png_data: Vec<u8>,
-    path: Option<String>,
+    request: tauri::ipc::Request<'_>,
 ) -> Result<String, String> {
+    let png_data = extract_png_from_request(&request)?;
+    let path = header_opt_string(request.headers(), "path");
     let file_path = save_editor_png(&app, &png_data, path, "图片")?;
     finish_image_editor_session(&app);
     tracing::info!(path = %file_path, "编辑图片已保存到文件");
@@ -409,7 +520,8 @@ pub async fn pin_spare_ready(window: tauri::Window) {
 
 /// 将 pin 窗口图片复制到剪贴板。
 #[tauri::command]
-pub async fn pin_save_clipboard(png_data: Vec<u8>) -> Result<(), String> {
+pub async fn pin_save_clipboard(request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    let png_data = extract_png_from_request(&request)?;
     crate::domain::clipboard::write_png(
         png_data,
         crate::domain::clipboard::ClipboardWriteSource::User,
@@ -426,9 +538,10 @@ pub async fn pin_save_clipboard(png_data: Vec<u8>) -> Result<(), String> {
 #[tauri::command]
 pub async fn pin_save_as(
     app: tauri::AppHandle,
-    png_data: Vec<u8>,
-    path: Option<String>,
+    request: tauri::ipc::Request<'_>,
 ) -> Result<String, String> {
+    let png_data = extract_png_from_request(&request)?;
+    let path = header_opt_string(request.headers(), "path");
     // 先写剪贴板（方便流转）
     let png_clone = png_data.clone();
     crate::domain::clipboard::write_png(
@@ -483,10 +596,13 @@ fn project_ocr_command_result(
 #[tauri::command]
 pub async fn ocr_image(
     app: tauri::AppHandle,
-    png_data: Vec<u8>,
+    request: tauri::ipc::Request<'_>,
 ) -> Result<serde_json::Value, crate::app::command_error::CommandError> {
     use crate::app::command_error::CommandError;
 
+    let png_data = extract_png_from_request(&request).map_err(|e| {
+        CommandError::new("invalid_args", e, false)
+    })?;
     let bytes_len = png_data.len();
 
     let registry = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();

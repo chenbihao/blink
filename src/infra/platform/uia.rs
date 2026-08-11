@@ -189,10 +189,10 @@ pub const CONTROL_HINT_DEADLINE: Duration = Duration::from_millis(1000);
 #[allow(dead_code)]
 pub const CONTROL_HINT_MAX_DEPTH: usize = 15;
 
-/// 控件吸附最小展开尺寸（物理像素，0=禁用）。
+/// 控件吸附最小尺寸（物理像素，0=禁用）。
 ///
-/// 控件宽或高低于此值则不展开子树（控件自身仍作为 hint 被收集）。
-/// 跳过微型控件的子树以节省 COM 调用预算。
+/// 控件宽或高低于此值则完全跳过：既不收集为 hint，也不展开子树。
+/// 跳过微型控件以节省 COM 调用预算。
 /// 实际运行时由 `ScreenshotConfig.control_snap_min_size` 配置覆盖。
 #[allow(dead_code)]
 pub const CONTROL_HINT_MIN_SIZE: i32 = 50;
@@ -301,7 +301,7 @@ pub fn collect_control_hints_with(
                 .map(|t| t.0)
                 .unwrap_or(0);
             if is_dead_end_control_type(ct) {
-                tracing::trace!(control_type = ct, "跳过展开（死端控件类型）");
+                // tracing::trace!(control_type = ct, "跳过展开（死端控件类型）");
                 return false;
             }
             if min_size > 0 {
@@ -309,16 +309,19 @@ pub fn collect_control_hints_with(
                     let w = rect.right - rect.left;
                     let h = rect.bottom - rect.top;
                     if w < min_size || h < min_size {
-                        tracing::trace!(w, h, min_size, "跳过展开（控件尺寸低于阈值）");
+                        // tracing::trace!(w, h, min_size, "跳过展开（控件尺寸低于阈值）");
                         return false;
                     }
                 }
             }
             true
         },
-        // 提取 hint 后 clamp 到窗口边框内：Chromium DOM 元素可能超出窗口
+        // 提取 hint → min_size 过滤 → clamp 到窗口边框内
         |elem| {
             let hint = extract_uia_hint(elem)?;
+            if min_size > 0 && (hint.w < min_size || hint.h < min_size) {
+                return None;
+            }
             if let Some(wr) = win_rect {
                 clamp_hint_to_rect(hint, wr)
             } else {
@@ -510,7 +513,7 @@ where
                 .map(|t| t.0)
                 .unwrap_or(0);
             if is_dead_end_control_type(ct) {
-                tracing::trace!(control_type = ct, "跳过展开（死端控件类型）");
+                // tracing::trace!(control_type = ct, "跳过展开（死端控件类型）");
                 return false;
             }
             if min_size > 0 {
@@ -518,7 +521,7 @@ where
                     let w = rect.right - rect.left;
                     let h = rect.bottom - rect.top;
                     if w < min_size || h < min_size {
-                        tracing::trace!(w, h, min_size, "跳过展开（控件尺寸低于阈值）");
+                        // tracing::trace!(w, h, min_size, "跳过展开（控件尺寸低于阈值）");
                         return false;
                     }
                 }
@@ -527,6 +530,9 @@ where
         },
         |elem| {
             let hint = extract_uia_hint(elem)?;
+            if min_size > 0 && (hint.w < min_size || hint.h < min_size) {
+                return None;
+            }
             if let Some(wr) = win_rect {
                 clamp_hint_to_rect(hint, wr)
             } else {

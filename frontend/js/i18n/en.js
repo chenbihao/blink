@@ -395,8 +395,8 @@ export const en = {
 "chord.screenshot.control_snap_depth.hint": "How many levels deep to traverse the UIA tree from the window. 1=top-level only, 15=reaches deep controls in WPF/Office/Electron, 20=deepest. Higher values find more controls but increase COM calls and timeout risk",
 "chord.screenshot.control_snap_deadline.label": "Timeout",
 "chord.screenshot.control_snap_deadline.hint": "UIA collection timeout in milliseconds. Async collection does not block screenshot operations; returns partial results on timeout. 1000ms=1s. Higher values find more apps but hints arrive later",
-"chord.screenshot.control_snap_min_size.label": "Min Expand Size",
-"chord.screenshot.control_snap_min_size.hint": "Controls with width or height below this value (physical pixels) will not have their children expanded. Skips tiny controls (e.g. separator dots) to save COM call budget. 50px=only expand medium+ controls, 1px=expand almost all",
+"chord.screenshot.control_snap_min_size.label": "Min Control Size",
+"chord.screenshot.control_snap_min_size.hint": "Controls with width or height below this value (physical pixels) are completely skipped: not collected as snap targets and not expanded. 200px=only large controls, 50px=medium+ controls, 1px=almost all",
 
 // ── OCR diagnostics panel (0.17.5, only shown with ?ocrDebug=1) ──
 "screenshot.ocr_diag.title": "OCR Diagnostics",

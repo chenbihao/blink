@@ -6,7 +6,7 @@ import { ss } from './ss-state.js';
 import * as annot from './annotation-engine.js';
 import { cssRectToBitmap, cssPointToScreen } from './ss-selection-geometry.js';
 import {
-  screenshotCopy, screenshotCopyRegion, screenshotPin, screenshotSave,
+  screenshotCopy, screenshotCopyRegion, screenshotCopyRgba, screenshotPin, screenshotPinRegion, screenshotSave,
   screenshotCancel, hideScreenshotOverlay,
   imageEditorCopy, imageEditorPin, imageEditorSave, imageEditorCancel,
 } from '../shared/api.js';
@@ -51,10 +51,11 @@ export function ensureOutputReady() {
 export function doCopySelection() {
   if (!ss.selCss || ss.sent || !ensureOutputReady()) return;
   ss.sent = true;
-  console.info('[screenshot] copy selection', { hasAnnot: annot.hasAnnotations() });
+  const hasAnnot = annot.hasAnnotations();
+  console.info('[screenshot] copy selection start', { hasAnnot, selW: ss.selCss.w, selH: ss.selCss.h });
 
   // 快路径：无标注 → 后端直接从 SESSION 裁剪 BGRA 写剪贴板
-  if (!annot.hasAnnotations() && ss.editorSession.canUseCaptureCropFastPath) {
+  if (!hasAnnot && ss.editorSession.canUseCaptureCropFastPath) {
     const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
     // 统一用 cssRectToBitmap 生成 bitmap rect，避免 X/Y scale 分歧
     const bmp = cssRectToBitmap(ss.selCss, meta);
@@ -70,11 +71,32 @@ export function doCopySelection() {
     return;
   }
 
+  // P7: 有标注 copy → getImageData RGBA 直传，跳过 toBlob + PNG decode
+  if (hasAnnot && ss.editorSession.canUseCaptureCropFastPath) {
+    compositeSelectionRgba().then(({ rgba, w, h }) => {
+      cleanupCanvasVisuals();
+      screenshotCopyRgba(rgba, w, h)
+        .then(() => {
+          console.info('[screenshot] copy 成功（RGBA 直传）');
+          cleanupLongCapture();
+        })
+        .catch((err) => {
+          console.error('[screenshot] copy 失败（RGBA 直传）', err);
+          ss.errorHint.textContent = '截图保存失败：' + err;
+          ss.errorHint.classList.remove('hidden');
+          ss.sent = false;
+        });
+    }).catch((err) => {
+      console.error('[screenshot] compositeSelectionRgba failed', err);
+      ss.sent = false;
+    });
+    return;
+  }
+
   compositeSelection((pngBytes) => {
     cleanupCanvasVisuals();
     outputEditorPng('copy', pngBytes)
       .then(() => {
-        console.info('[screenshot] copy 成功');
         cleanupLongCapture();
       })
       .catch((err) => {
@@ -89,7 +111,7 @@ export function doCopySelection() {
 export function doCopyFullScreen() {
   if (ss.sent) return;
   ss.sent = true;
-  console.info('[screenshot] copy fullscreen');
+  console.info('[screenshot] copy fullscreen start', { canvasW: ss.canvas.width, canvasH: ss.canvas.height });
   cleanupCanvasVisuals();
   screenshotCopyRegion(0, 0, ss.canvas.width, ss.canvas.height)
     .then(() => console.info('[screenshot] fullscreen copy 成功（快路径）'))
@@ -104,6 +126,7 @@ export function doCopyFullScreen() {
 export function doPinSelection() {
   if (!ss.selCss || ss.sent || !ensureOutputReady()) return;
   ss.sent = true;
+  const hasAnnot = annot.hasAnnotations();
   const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
   // 统一用 cssPointToScreen 计算屏幕物理坐标
   const screenPos = ss.editorSession.canvasBacked
@@ -111,10 +134,28 @@ export function doPinSelection() {
     : cssPointToScreen(ss.selCss.x, ss.selCss.y, meta);
   const screenX = screenPos.x;
   const screenY = screenPos.y;
+  console.info('[screenshot] pin start', { hasAnnot, selW: ss.selCss.w, selH: ss.selCss.h });
+
+  // 0.19.14 快路径：无标注 → 后端直接 crop BGRA + encode PNG + show_pin，
+  // 跳过前端 toBlob + IPC PNG 往返（省 ~1200ms 全屏）
+  if (!hasAnnot && ss.editorSession.canUseCaptureCropFastPath) {
+    const bmp = cssRectToBitmap(ss.selCss, meta);
+    cleanupCanvasVisuals();
+    screenshotPinRegion(bmp.x, bmp.y, bmp.w, bmp.h, screenX, screenY)
+      .then(() => console.info('[screenshot] pin 成功（快路径）'))
+      .catch((err) => {
+        console.error('[screenshot] pin 失败（快路径）', err);
+        ss.sent = false;
+      });
+    return;
+  }
+
   compositeSelection((pngBytes) => {
     cleanupCanvasVisuals();
     outputEditorPng('pin', pngBytes, screenX, screenY)
-      .then(() => cleanupLongCapture())
+      .then(() => {
+        cleanupLongCapture();
+      })
       .catch((err) => {
         console.error('[screenshot] pin 失败', err);
         ss.sent = false;
@@ -245,12 +286,40 @@ async function compositeSelectionBytes() {
       ss.sent = false;
       return null;
     }
-    return new Uint8Array(await blob.arrayBuffer());
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    return bytes;
   } catch (e) {
     console.error('[screenshot] compositeSelection threw', e);
     ss.sent = false;
     return null;
   }
+}
+
+/** P7：合成选区为 raw RGBA bytes（用 getImageData 替代 toBlob，消除 PNG 编解码）。 */
+async function compositeSelectionRgba() {
+  if (!ss.selCss || (!ss.screenshot && !ss.editorSession.baseCanvas)) {
+    throw new Error('compositeSelectionRgba: no selection or screenshot');
+  }
+  const sessionBase = ss.editorSession.baseCanvas;
+  const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+  const bmp = sessionBase ? { x: 0, y: 0, w: sessionBase.width, h: sessionBase.height } : cssRectToBitmap(ss.selCss, meta);
+  const pw = bmp.w;
+  const ph = bmp.h;
+
+  const off = getCompositeCanvas(pw, ph);
+  const offCtx = off.getContext('2d');
+  if (sessionBase) {
+    offCtx.drawImage(sessionBase, 0, 0);
+  } else {
+    offCtx.drawImage(ss.screenshot, bmp.x, bmp.y, pw, ph, 0, 0, pw, ph);
+  }
+  if (annot.hasAnnotations()) {
+    offCtx.drawImage(ss.annotCanvas, 0, 0);
+  }
+  // getImageData 产生 RGBA，无需 toBlob PNG 编码
+  const imageData = offCtx.getImageData(0, 0, pw, ph);
+  const rgba = new Uint8Array(imageData.data.buffer);
+  return { rgba, w: pw, h: ph };
 }
 
 function cleanupLongCapture() {

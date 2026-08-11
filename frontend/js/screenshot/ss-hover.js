@@ -115,17 +115,25 @@ export function clearPickableWindows() {
  * 鼠标在桌面/无窗口区域时，回退为全屏（当前显示器）预选区提示，
  * 单击可吸附整屏。
  *
+ * **0.19.14-fix**：`options.skipShowHint=true` 时只更新内部索引（hoveredIndex /
+ * desktopHintRect），不立即调用 showWindowHint。调用方在控件 hit-test 完成后
+ * 通过 `showWindowHintIfPending()` / `hideWindowHintIfVisible()` 决定是否显示，
+ * 避免控件命中时每帧 show→hide 窗口 hint 导致蓝色虚线框闪烁。
+ *
  * @param {number} cssX - 鼠标 CSS X
  * @param {number} cssY - 鼠标 CSS Y
+ * @param {{ skipShowHint?: boolean }} [options]
  * @returns {boolean} true = 当前悬停在某窗口上（应显示虚线框）
  */
-export function updateWindowHover(cssX, cssY) {
+export function updateWindowHover(cssX, cssY, options) {
+  const skipShowHint = options?.skipShowHint === true;
+
   // 选区已确定时不吸附（标注模式）
   if (ss.isAnnotating) {
     if (hoveredIndex >= 0 || desktopHintRect) {
       hoveredIndex = -1;
       desktopHintRect = null;
-      hideWindowHint();
+      if (!skipShowHint) hideWindowHint();
     }
     return false;
   }
@@ -142,11 +150,11 @@ export function updateWindowHover(cssX, cssY) {
   }
 
   if (found >= 0) {
-    // 命中窗口：显示窗口虚线框，清除桌面预选区
+    // 命中窗口：更新索引，清除桌面预选区
     if (found !== hoveredIndex || desktopHintRect) {
       hoveredIndex = found;
       desktopHintRect = null;
-      showWindowHint(pickableWindows[found]);
+      if (!skipShowHint) showWindowHint(pickableWindows[found]);
     }
     return true;
   }
@@ -160,7 +168,7 @@ export function updateWindowHover(cssX, cssY) {
       desktopHintRect.h !== displayRect.h) {
     hoveredIndex = -1;
     desktopHintRect = { ...displayRect };
-    showWindowHint(desktopHintRect);
+    if (!skipShowHint) showWindowHint(desktopHintRect);
   }
   return false;
 }
@@ -260,6 +268,22 @@ function showWindowHint(w) {
   const label = w.processName ? `${w.processName}` : '';
   const title = w.title ? (label ? `${label} — ${w.title}` : w.title) : label;
   hintEl.title = title;
+}
+
+/** 0.19.14-fix：如果窗口 hint 当前可见，立即隐藏（淡出）。
+ * 供 mousemove 在控件命中时调用，避免先 show 再 hide 的闪烁。 */
+export function hideWindowHintIfVisible() {
+  if (hintVisible) hideWindowHint();
+}
+
+/** 0.19.14-fix：如果有待显示的窗口/桌面 hint（索引已更新但未显示），立即显示。
+ * 供 mousemove 在控件未命中时调用。 */
+export function showWindowHintIfPending() {
+  if (hoveredIndex >= 0) {
+    showWindowHint(pickableWindows[hoveredIndex]);
+  } else if (desktopHintRect) {
+    showWindowHint(desktopHintRect);
+  }
 }
 
 /** 隐藏窗口虚线框（淡出） */

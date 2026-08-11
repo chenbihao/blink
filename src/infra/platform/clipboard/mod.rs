@@ -248,12 +248,14 @@ pub fn write_png_to_clipboard(
 
     match info.color_type {
         ColorType::Rgba => {
-            // RGBA → BGRA：swap R↔B
-            let mut bgra = buf;
-            for px in bgra.chunks_exact_mut(4) {
-                px.swap(0, 2);
-            }
-            windows::write_bgra_to_clipboard_raw(&bgra, w, h)
+            // RGBA → BGRA：u32 mask swap（比 chunks_exact_mut(4).swap(0,2) 快 5-14x）
+            crate::infra::platform::screenshot::swap_rgba_bgra_in_place(&mut buf);
+            tracing::info!(
+                w, h,
+                png_bytes = png_data.len(),
+                "write_png_to_clipboard: RGBA→BGRA→CF_DIB"
+            );
+            windows::write_bgra_to_clipboard_raw(&buf, w, h)
         }
         ColorType::Rgb => {
             // RGB → 扩展为 BGRA（A=255）

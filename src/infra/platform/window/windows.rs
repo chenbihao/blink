@@ -1,5 +1,6 @@
 //! Windows 平台特定的窗口控制实现：Win32 API。
 
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicU64, Ordering};
@@ -57,6 +58,48 @@ static LAST_PIN_LABEL: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
 fn last_pin_label() -> &'static Mutex<Option<String>> {
     LAST_PIN_LABEL.get_or_init(|| Mutex::new(None))
+}
+
+// ── 0.19.14：pin 图片进程内 registry ──────────────────────
+//
+// pin 窗口通过 `blink-pin:///{seq}` 自定义协议拉取 PNG bytes，
+// 替代 base64 data URL（7.2MB PNG → 9.6MB base64 → WebView 解析阻塞）。
+// 每次 store 返回递增 seq，URL 不同 → 浏览器不缓存，refresh 也能刷新。
+static PIN_IMAGE_SEQ: AtomicU64 = AtomicU64::new(0);
+static PIN_IMAGE_REGISTRY: OnceLock<Mutex<std::collections::HashMap<u64, PinImage>>> =
+OnceLock::new();
+
+/// P6：pin 图片存储格式——PNG（有标注路径）或 raw BGRA（快路径）。
+/// 快路径存 raw BGRA，协议 handler 按需 lazy 编码 PNG，
+/// `screenshot_pin_region` 不再阻塞等 encode_png 完成。
+#[derive(Clone)]
+pub enum PinImage {
+    Png(Arc<Vec<u8>>),
+    Bgra(Arc<Vec<u8>>, u32, u32),
+}
+
+fn pin_image_registry() -> &'static Mutex<std::collections::HashMap<u64, PinImage>> {
+PIN_IMAGE_REGISTRY.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 把图片存入进程内 registry，返回递增 seq 供 `blink-pin:///{seq}` URL 使用。
+///
+/// registry 保留最近 8 条，超出时删除最旧的——pin 窗口 fetch 是同步的
+/// （协议 handler 直接读内存 Arc），store 后立即 eval，不存在旧条目被删前未 fetch 的竞态。
+pub fn store_pin_image(image: PinImage) -> u64 {
+let seq = PIN_IMAGE_SEQ.fetch_add(1, Ordering::SeqCst);
+let mut reg = pin_image_registry().lock().unwrap();
+reg.insert(seq, image);
+while reg.len() > 8 {
+let oldest = *reg.keys().min().unwrap();
+reg.remove(&oldest);
+}
+seq
+}
+
+/// 按 seq 取 pin 图片（供 `blink-pin://` 协议 handler 调用）。
+pub fn get_pin_image(seq: u64) -> Option<PinImage> {
+pin_image_registry().lock().unwrap().get(&seq).cloned()
 }
 
 use crate::domain::event_names::EventNames;
@@ -1991,6 +2034,8 @@ pub fn show_screenshot_overlay(
             .eval("window.__blinkClearScreenshotVisual && window.__blinkClearScreenshotVisual()");
         let mut overlay_dpi = 96u32;
         if let Ok(hwnd) = win.hwnd() {
+            // 0.19.14：撤销 hide_screenshot_overlay 设的 cloak，否则 show 后窗口不可见
+            apply_cloak(HWND(hwnd.0 as _), false);
             // 2. place
             place_at_physical(
                 HWND(hwnd.0 as _),
@@ -2244,6 +2289,11 @@ pub fn place_at_physical(hwnd: HWND, x: i32, y: i32, w: u32, h: u32) {
 /// 隐藏截图覆盖窗 + 清空 SESSION（释放位图内存）。
 pub fn hide_screenshot_overlay(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("chord-screenshot") {
+        if let Ok(hwnd) = win.hwnd() {
+            // 0.19.14：cloak 先于 hide——DWM 瞬时从合成中剔除 overlay，
+            // 避免 fullscreen 透明窗口 hide 触发的 DWM 全屏重组闪烁（视频场景尤为明显）。
+            apply_cloak(HWND(hwnd.0 as _), true);
+        }
         let _ = win.hide();
     }
     crate::infra::platform::screenshot::end_session();
@@ -2278,24 +2328,32 @@ pub const PIN_PAD: i32 = 20;
 /// 返回窗口 label，供 `refresh_pin_image` 定位目标窗口。
 pub fn show_pin_window(
     app: &AppHandle,
-    png_data: Vec<u8>,
+    image: PinImage,
     screen_x: i32,
     screen_y: i32,
     show_translating: bool,
 ) -> Result<String, String> {
-    use base64::Engine;
     use tauri::{WebviewUrl, WebviewWindowBuilder};
 
     const FALLBACK_W: f64 = 400.0;
     const FALLBACK_H: f64 = 300.0;
 
-    // 解析 PNG 像素尺寸用于开窗（失败兜底 400×300）
-    let (png_w, png_h) = crate::infra::platform::screenshot::parse_png_size(&png_data)
-        .map(|(w, h)| (w as f64, h as f64))
-        .unwrap_or((FALLBACK_W, FALLBACK_H));
+    // 解析图片像素尺寸用于开窗
+    let (png_w, png_h) = match &image {
+        PinImage::Png(data) => crate::infra::platform::screenshot::parse_png_size(data)
+            .map(|(w, h)| (w as f64, h as f64))
+            .unwrap_or((FALLBACK_W, FALLBACK_H)),
+        PinImage::Bgra(_, w, h) => (*w as f64, *h as f64),
+    };
+    let png_len = match &image {
+        PinImage::Png(data) => data.len(),
+        PinImage::Bgra(data, _, _) => data.len(),
+    };
 
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&png_data);
-    let data_url = format!("data:image/png;base64,{b64}");
+    // 0.19.14：存入进程内 registry，用 blink-pin:// 协议替代 base64 data URL。
+    // P6：快路径存 raw BGRA，协议 handler lazy 编码 PNG，不阻塞 screenshot_pin_region。
+    let pin_seq = store_pin_image(image);
+    let img_url = format!("http://blink-pin.localhost/{pin_seq}");
 
     // 窗口左上 = 图片左上 - PAD（让图片左上对齐选区原位，窗口外圈留 PAD 给发光）
     let win_x = screen_x - PIN_PAD;
@@ -2306,7 +2364,7 @@ pub fn show_pin_window(
     // 构造注入 JS（复用窗口与首次创建共用）
     let js = format!(
         "if (window.__blinkResetPin) window.__blinkResetPin('{url}', {w}, {h}, {sx}, {sy}, {st}); else document.getElementById('pin-img').src = '{url}';",
-        url = data_url,
+        url = img_url,
         w = png_w,
         h = png_h,
         sx = screen_x,
@@ -2331,15 +2389,16 @@ pub fn show_pin_window(
         }
         spare_win
             .eval(&js)
-            .map_err(|e| format!("eval 注入 PNG 失败: {e}"))?;
+                .map_err(|e| format!("eval 注入 PNG 失败: {e}"))?;
         let _ = spare_win.show();
         let _ = spare_win.set_focus();
 
         // 记录最近 pin 的 label
         *last_pin_label().lock().unwrap() = Some(al.clone());
 
-        tracing::debug!(
+        tracing::info!(
             png_w, png_h, screen_x, screen_y, show_translating,
+            png_bytes = png_len,
             "钉图窗口已借用预热 spare"
         );
 
@@ -2394,9 +2453,10 @@ pub fn show_pin_window(
             // 记录最近 pin 的 label
             *last_pin_label().lock().unwrap() = Some(label.clone());
 
-            tracing::debug!(
+            tracing::info!(
                 png_w, png_h, screen_x, screen_y, show_translating,
-                "钉图窗口已创建"
+            png_bytes = png_len,
+            "钉图窗口已创建"
             );
             Ok(label)
         }
@@ -2451,8 +2511,6 @@ pub fn refresh_pin_image(
     png_data: Vec<u8>,
     show_translating: bool,
 ) -> Result<(), String> {
-    use base64::Engine;
-
     let label = last_pin_label()
         .lock()
         .unwrap()
@@ -2483,13 +2541,13 @@ pub fn refresh_pin_image(
         .map(|(w, h)| (w as f64, h as f64))
         .unwrap_or((0.0, 0.0));
 
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&png_data);
-    let data_url = format!("data:image/png;base64,{b64}");
+    let pin_seq = store_pin_image(PinImage::Png(Arc::new(png_data)));
+    let img_url = format!("http://blink-pin.localhost/{pin_seq}");
 
     // 只换 img.src + 控制指示器，不调 place_at_physical，不调 __blinkResetPin
     let js = format!(
         "if (window.__blinkRefreshPinImage) window.__blinkRefreshPinImage('{url}', {w}, {h}, {st});",
-        url = data_url,
+        url = img_url,
         w = png_w,
         h = png_h,
         st = if show_translating { "true" } else { "false" }
@@ -2840,8 +2898,27 @@ pub fn mark_spare_ready(label: &str) {
 pub fn preheat_secondary_windows(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         // 等主窗稳定 + 前端加载完毕，不与启动路径抢资源
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
         tracing::debug!("preheat: 开始预热次级窗口");
+
+        // --- main（主窗口首次激活预热） ---
+        // 首次唤起时 SetForegroundWindow 对从未被 WM_ACTIVATE 激活过的窗口会使用
+        // "Alt trick"（合成 Alt keydown/keyup 绕过前台锁定），合成 Alt keyup 会
+        // 清掉修饰键状态机的 Alt level，导致 chord session 建立后立即退出。
+        // 预热：启动时 show + set_focus 让窗口经历一次完整激活，后续唤起走轻量路径。
+        // 不调 transition_visibility——STATE 保持 HIDDEN，watchdog / hook 状态机不受影响。
+        if let Some(win) = app.get_webview_window("main") {
+            // 移到屏幕外避免闪现（窗口 always_on_top + 居中，直接 show 会闪一下）
+            let _ = win.set_position(PhysicalPosition::new(-10000, -10000));
+            let _ = win.show();
+            let _ = win.set_focus();
+            // 等 WM_ACTIVATE 到达，完成 Windows 内部激活标记
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = win.hide();
+            tracing::debug!("preheat: main window ✓ (首次激活完成)");
+        } else {
+            tracing::warn!("preheat: main window 不存在");
+        }
 
         // --- chord-screenshot（截图 overlay，透明全屏层） ---
         // 0.19：经 get_or_create_window 串行化创建。

@@ -74,18 +74,18 @@ pub struct ScreenCaptureMeta {
 /// SESSION 存 BGRA 可以省掉全屏 R↔B swap（3.7M 像素 x 3.5MB shuffle，低配机 ~30ms）。
 /// PNG 编码这个偏门路径承担按行 swap 成本（`encode_png` 内部处理）。
 ///
-/// **为什么预编码 PNG**（0.8.8 优化）：
+/// **为什么预编码 PNG**（0.8.8 优化 → 0.19.14 改为 lazy）：
 /// 原流程：前端拉 `blink-screenshot://` → `session_png()` 现场编码 → 返回。
 /// 编码 2560x1440 全屏 PNG 在 dev 下 ~150ms，是用户感知延迟的最大瓶颈。
-/// 改后：`begin_session()` 截屏后立即编码 PNG 存进 `png_bytes`，`session_png()` 只读内存。
-/// 前端拉取时零编码延迟，总感知从 ~320ms 降到 ~170ms（dev）。
+/// 0.8.8 改为 `begin_session()` 截屏后立即编码。
+/// 0.19.14 改为 lazy：`begin_session()` 只存 BGRA 像素，`session_png()` 首次调用时才编码。
+/// 快路径（copy_region / pin_region）完全不经过 session_png()，省掉 ~165ms 编码。
 struct Session {
     /// BGRA、top-down、每行 `width * 4` 字节。
     pixels: Vec<u8>,
-    /// 预编码的 PNG 字节（`begin_session` 时编码好，`session_png` 直接返回）。
-    /// M3 优化：用 Arc 避免 session_png() 全量 clone——Arc::clone 仅引用计数，
-    /// 调用方需要 owned Vec 时再 to_vec()，不持读锁。
-    png_bytes: Arc<Vec<u8>>,
+    /// 延迟编码的 PNG 字节（首次 `session_png()` 调用时编码）。
+    /// `OnceLock` 允许在只读锁下 lazy init，不需要升级为写锁。
+    png_bytes: std::sync::OnceLock<Arc<Vec<u8>>>,
     meta: ScreenCaptureMeta,
 }
 
@@ -196,20 +196,23 @@ pub fn begin_session() -> Result<ScreenCaptureMeta, String> {
     set_annotation_mode(false);
 
     let (pixels, meta) = backend().capture_virtual_screen()?;
+    let pixel_len = pixels.len();
 
-    // 截屏后立即编码 PNG——此时主窗已 hide，BitBlt 不会拍到自己
-    let png_bytes = Arc::new(encode_png(&pixels, meta.width, meta.height)
-        .map_err(|e| format!("预编码 PNG 失败: {e}"))?);
-
+    // 0.19.14：不再立即编码 PNG——快路径（copy_region / pin_region）不走 session_png()，
+    // 省掉 ~165ms 编码。session_png() 首次调用时 lazy 编码。
     let meta_copy = meta;
     *SESSION
         .write()
         .map_err(|e| format!("SESSION 写锁失败: {e}"))? = Some(Session {
         pixels,
-        png_bytes,
+        png_bytes: std::sync::OnceLock::new(),
         meta,
     });
-    tracing::debug!(?meta_copy, "截图 SESSION 已建立（含预编码 PNG）");
+    tracing::info!(
+        ?meta_copy,
+        pixel_bytes = pixel_len,
+        "截图 SESSION 已建立（lazy PNG）"
+    );
     Ok(meta_copy)
 }
 
@@ -225,7 +228,56 @@ pub fn begin_session() -> Result<ScreenCaptureMeta, String> {
 pub fn session_png() -> Option<Arc<Vec<u8>>> {
     let guard = SESSION.read().ok()?;
     let s = guard.as_ref()?;
-    Some(Arc::clone(&s.png_bytes))
+    // 0.19.14：lazy 编码——首次调用时编码，后续直接返回缓存的 Arc。
+    // OnceLock::get_or_init 在只读锁下安全初始化，不需要升级为写锁。
+    let png = s.png_bytes.get_or_init(|| {
+        match encode_png(&s.pixels, s.meta.width, s.meta.height) {
+            Ok(png) => {
+                tracing::debug!(
+                    w = s.meta.width, h = s.meta.height,
+                    "session_png lazy 编码完成"
+                );
+                Arc::new(png)
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "session_png lazy 编码失败");
+                Arc::new(Vec::new())
+            }
+        }
+    });
+    Some(Arc::clone(png))
+}
+
+/// 从 SESSION 取 raw RGBA bytes（BGRA→RGBA swap），供 blink-screenshot://raw 协议使用。
+/// 不编码 PNG，省 ~241ms encode + ~50ms 浏览器 decode。
+///
+/// 分配新 `Vec<u8>`（不能原地 swap，SESSION 是共享只读的），
+/// 用 u32 指针 cast + `swap_rb_u32` 单遍 copy+swap。
+pub fn session_rgba() -> Option<(Vec<u8>, u32, u32)> {
+    let guard = SESSION.read().ok()?;
+    let s = guard.as_ref()?;
+    let bgra = &s.pixels;
+    let n = bgra.len() / 4;
+    let mut rgba = vec![0u8; bgra.len()];
+    let src_ptr = bgra.as_ptr();
+    let dst_ptr = rgba.as_mut_ptr();
+    let is_aligned = (src_ptr as usize) % 4 == 0 && (dst_ptr as usize) % 4 == 0;
+    if is_aligned && n > 0 {
+        // Safety: src/dst 均来自有效 Vec，对齐 4 字节，n*4 <= len
+        let src_u32 = unsafe { std::slice::from_raw_parts(src_ptr as *const u32, n) };
+        let dst_u32 = unsafe { std::slice::from_raw_parts_mut(dst_ptr as *mut u32, n) };
+        for (src, dst) in src_u32.iter().zip(dst_u32.iter_mut()) {
+            *dst = swap_rb_u32(*src);
+        }
+    } else {
+        for (chunk, out) in bgra.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
+            out[0] = chunk[2]; // R
+            out[1] = chunk[1]; // G
+            out[2] = chunk[0]; // B
+            out[3] = chunk[3]; // A
+        }
+    }
+    Some((rgba, s.meta.width, s.meta.height))
 }
 
 /// 按物理像素坐标裁剪 SESSION 的位图，返回 **BGRA** 子矩形 + 尺寸。
@@ -354,16 +406,51 @@ pub fn encode_png(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Str
             let src = &pixels[row_idx * stride..(row_idx + 1) * stride];
             row_buf_bytes.copy_from_slice(src);
             for px in row_buf.iter_mut() {
-                let v = *px;
-                let rb = v & 0x00FF00FF;
-                let ga = v & 0xFF00FF00;
-                *px = ga | (rb << 16) | (rb >> 16);
+                *px = swap_rb_u32(*px);
             }
             std::io::Write::write_all(&mut stream, row_buf_bytes).map_err(|e| e.to_string())?;
         }
         std::io::Write::flush(&mut stream).map_err(|e| e.to_string())?;
     }
     Ok(buf)
+}
+
+/// u32 位运算做 R↔B 交换（BGRA↔RGBA）。
+///
+/// little-endian 下 BGRA=[B,G,R,A]=0xAARRGGBB，RGBA=[R,G,B,A]=0xAABBGGRR。
+/// mask 0x00FF00FF 提取 R/B 两字节交换，G/A 不变。
+#[inline]
+fn swap_rb_u32(v: u32) -> u32 {
+    let rb = v & 0x00FF00FF;
+    let ga = v & 0xFF00FF00;
+    ga | (rb << 16) | (rb >> 16)
+}
+
+/// 在原地把 RGBA 像素序列转为 BGRA（R↔B 交换）。
+///
+/// **快路径**（u32 对齐时）：把 `&mut [u8]` 直接 cast 为 `&mut [u32]`，
+/// 每个 pixel 只需 1 次读 + 1 次写 + 位运算（`swap_rb_u32`），无中间 copy。
+/// `Vec<u8>` 在 64 位系统上通常 8 字节对齐，满足 u32 的 4 字节要求。
+///
+/// **慢路径**（未对齐时，极罕见）：回退到 `chunks_exact_mut(4).swap(0, 2)`。
+///
+/// 供 `write_png_to_clipboard` 和任何需要 RGBA→BGRA 的路径复用。
+pub fn swap_rgba_bgra_in_place(buf: &mut [u8]) {
+    let ptr = buf.as_mut_ptr();
+    let is_aligned = (ptr as usize) % std::mem::align_of::<u32>() == 0;
+    let n = buf.len() / 4;
+    if is_aligned && n > 0 {
+        // Safety: ptr 来自 buf，valid for buf.len() 字节。
+        // is_aligned 保证 u32 对齐。n * 4 <= buf.len()。
+        let u32_slice = unsafe { std::slice::from_raw_parts_mut(ptr as *mut u32, n) };
+        for px in u32_slice {
+            *px = swap_rb_u32(*px);
+        }
+    } else {
+        for chunk in buf.chunks_exact_mut(4) {
+            chunk.swap(0, 2);
+        }
+    }
 }
 
 /// 解析 PNG 字节流的像素尺寸（宽 × 高），读 IHDR chunk。

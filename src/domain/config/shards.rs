@@ -354,8 +354,8 @@ pub struct ScreenshotConfig {
     /// 默认 1000。异步收集不阻塞 overlay，宽松超时让更多应用在 budget 内到达有用控件层。
     #[serde(default = "default_control_snap_deadline_ms")]
     pub control_snap_deadline_ms: u32,
-    /// 控件吸附最小展开尺寸（0.18.2：物理像素，控件宽或高低于此值则不展开子树）。
-    /// 默认 50。范围 1-200。跳过微型控件的子树以节省 COM 调用预算。
+    /// 控件吸附最小尺寸（0.18.2：物理像素，控件宽或高低于此值则完全跳过：不收集为 hint 也不展开子树）。
+    /// 默认 50。范围 1-200。跳过微型控件以节省 COM 调用预算。
     #[serde(default = "default_control_snap_min_size")]
     pub control_snap_min_size: u32,
 }

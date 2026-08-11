@@ -114,31 +114,129 @@ fn main() {
         // 不再触发新的截屏——避免"overlay show 之后才 BitBlt"的时序竞态。
         // SESSION 为空 → 404，overlay 前端可显示错误提示。
         .register_asynchronous_uri_scheme_protocol("blink-screenshot", |_ctx, request, responder| {
-            let editor_payload = request.uri().path().trim_matches('/') == "editor";
+            let path = request.uri().path().trim_matches('/');
+            let editor_payload = path == "editor";
+            let raw_payload = path == "raw";
             tauri::async_runtime::spawn(async move {
-                let bytes = tauri::async_runtime::spawn_blocking(move || {
-                    if editor_payload {
-                        crate::infra::platform::image_editor::session_png()
-                    } else {
-                        crate::infra::platform::screenshot::session_png()
-                    }
+                if raw_payload {
+                    // P4: raw BGRA → RGBA，不编码 PNG，省 ~241ms encode + ~50ms 浏览器 decode
+                    let result = tauri::async_runtime::spawn_blocking(move || {
+                        crate::infra::platform::screenshot::session_rgba()
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+
+                    let response = match result {
+                        Some((rgba, w, h)) => tauri::http::Response::builder()
+                            .status(200)
+                            .header("Content-Type", "application/octet-stream")
+                            .header("Cache-Control", "no-store")
+                            .header("Access-Control-Allow-Origin", "*")
+                            .header("X-Width", w.to_string())
+                            .header("X-Height", h.to_string())
+                            .body(rgba)
+                            .unwrap(),
+                        None => {
+                            tracing::warn!("blink-screenshot://raw: SESSION 为空,返回 404");
+                            tauri::http::Response::builder()
+                                .status(404)
+                                .body(Vec::new())
+                                .unwrap()
+                        }
+                    };
+                    responder.respond(response);
+                } else {
+                    // 原有 PNG 路径（capture / editor）
+                    let bytes = tauri::async_runtime::spawn_blocking(move || {
+                        if editor_payload {
+                            crate::infra::platform::image_editor::session_png()
+                        } else {
+                            crate::infra::platform::screenshot::session_png()
+                        }
+                    })
+                    .await
+                    .ok()
+                    .flatten()
+                    // M3 优化：session_png 返回 Arc<Vec<u8>>，此处转 owned Vec 供 HTTP body
+                    .map(|arc| (*arc).clone());
+
+                    let response = match bytes {
+                        Some(bytes) => tauri::http::Response::builder()
+                            .status(200)
+                            .header("Content-Type", "image/png")
+                            .header("Access-Control-Allow-Origin", "*")
+                            .header("Cache-Control", "no-store")
+                            .body(bytes)
+                            .unwrap(),
+                        None => {
+                            tracing::warn!(editor_payload, "blink-screenshot: SESSION 为空,返回 404");
+                            tauri::http::Response::builder()
+                                .status(404)
+                                .body(Vec::new())
+                                .unwrap()
+                        }
+                    };
+                    responder.respond(response);
+                }
+            });
+        })
+        // 自定义协议：http://blink-pin.localhost/{seq}（0.19.14）——
+        // pin 窗口 <img src="blink-pin://{seq}"> 通过此协议拉取进程内 PNG bytes。
+        // 替代 base64 data URL：消除 7.2MB PNG → 9.6MB base64 → WebView 解析巨型
+        // data URL eval 的瓶颈。seq 由 `store_pin_image()` 递增分配，URL 不同 → 不缓存。
+        .register_asynchronous_uri_scheme_protocol("blink-pin", |_ctx, request, responder| {
+            let path = request.uri().path().trim_start_matches('/');
+            let seq: u64 = match path.parse() {
+                Ok(n) => n,
+                Err(_) => {
+                    responder.respond(
+                        tauri::http::Response::builder()
+                            .status(404)
+                            .body(Vec::new())
+                            .unwrap(),
+                    );
+                    return;
+                }
+            };
+            tauri::async_runtime::spawn(async move {
+                let result = tauri::async_runtime::spawn_blocking(move || {
+                    crate::infra::platform::window::get_pin_image(seq)
                 })
                 .await
                 .ok()
-                .flatten()
-                // M3 优化：session_png 返回 Arc<Vec<u8>>，此处转 owned Vec 供 HTTP body
-                .map(|arc| (*arc).clone());
+                .flatten();
+
+                // P6: PinImage::Png 直接返回；PinImage::Bgra lazy 编码 PNG
+                let bytes = match result {
+                    Some(crate::infra::platform::window::PinImage::Png(arc)) => {
+                        Some((*arc).clone())
+                    }
+                    Some(crate::infra::platform::window::PinImage::Bgra(arc, w, h)) => {
+                        let bgra = (*arc).clone();
+                        match crate::infra::platform::screenshot::encode_png(&bgra, w, h) {
+                            Ok(png) => {
+                                tracing::debug!(seq, w, h, "blink-pin: lazy PNG 编码完成");
+                                Some(png)
+                            }
+                            Err(e) => {
+                                tracing::error!(seq, error = %e, "blink-pin: lazy PNG 编码失败");
+                                None
+                            }
+                        }
+                    }
+                    None => None,
+                };
 
                 let response = match bytes {
                     Some(bytes) => tauri::http::Response::builder()
                         .status(200)
                         .header("Content-Type", "image/png")
-                        .header("Access-Control-Allow-Origin", "*")
                         .header("Cache-Control", "no-store")
                         .body(bytes)
                         .unwrap(),
                     None => {
-                        tracing::warn!(editor_payload, "blink-screenshot: SESSION 为空,返回 404");
+                        tracing::warn!(seq, "blink-pin: 未找到 pin 图片，返回 404");
                         tauri::http::Response::builder()
                             .status(404)
                             .body(Vec::new())
@@ -760,10 +858,12 @@ fn main() {
             app::commands::get_awareness_text,
             app::commands::register_main_input_view,
             app::commands::update_main_input_context,
-            app::commands::screenshot_copy,
-            app::commands::screenshot_copy_region,
+app::commands::screenshot_copy,
+app::commands::screenshot_copy_region,
+app::commands::screenshot_copy_rgba,
             app::commands::screenshot_cancel,
             app::commands::screenshot_pin,
+            app::commands::screenshot_pin_region,
             app::commands::screenshot_pin_hide,
             app::commands::screenshot_pin_transform,
             app::commands::screenshot_pin_move,

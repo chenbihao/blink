@@ -396,8 +396,8 @@ export const zh = {
     "chord.screenshot.control_snap_depth.hint": "UIA 树从窗口往下探几层子控件。1=只看顶层，15=能到 WPF/Office/Electron 的深层控件，20=最深。值越大能识别越多控件但 COM 调用更多、超时风险更大",
     "chord.screenshot.control_snap_deadline.label": "超时",
     "chord.screenshot.control_snap_deadline.hint": "UIA 收集的超时时间（毫秒）。异步收集不阻塞截图操作，超时后返回已收集的部分结果。1000ms=1 秒，值越大能识别越多应用但 hints 到达越晚",
-    "chord.screenshot.control_snap_min_size.label": "最小展开尺寸",
-    "chord.screenshot.control_snap_min_size.hint": "控件宽或高低于此值（物理像素）则不展开其子控件。跳过微型控件（如分隔线小点）以节省 COM 调用预算。50px=只展开中等以上控件，1px=几乎都展开",
+    "chord.screenshot.control_snap_min_size.label": "最小识别尺寸",
+    "chord.screenshot.control_snap_min_size.hint": "控件宽或高低于此值（物理像素）则完全跳过：既不识别为预选区也不展开其子控件。200px=只识别大控件，50px=中等以上控件，1px=几乎都识别",
 
 // ── OCR 诊断面板（0.17.5，仅 ?ocrDebug=1 显示）──
     "screenshot.ocr_diag.title": "OCR 诊断",

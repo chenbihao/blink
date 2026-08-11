@@ -105,6 +105,33 @@ pub async fn write_png(png: Vec<u8>, source: ClipboardWriteSource) -> Result<(),
     .map_err(platform_error)
 }
 
+/// 写 RGBA 像素到系统剪贴板（P7：消除 PNG 编解码往返）。
+/// 前端 `getImageData` 产生 RGBA，此处原地 swap 为 BGRA 后写 CF_DIB。
+pub async fn write_rgba(
+    pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+    source: ClipboardWriteSource,
+) -> Result<(), ClipboardError> {
+    validate_bgra_len(pixels.len(), width, height)?;
+    let (label, skip_persist) = source.marker();
+    tokio::task::spawn_blocking(move || {
+        // RGBA → BGRA 原地 swap（21ms / 14.7MB），替代 PNG decode(289ms) + swap
+        let mut bgra = pixels;
+        crate::infra::platform::screenshot::swap_rgba_bgra_in_place(&mut bgra);
+        crate::infra::platform::clipboard::write_bgra_to_clipboard(
+            &bgra,
+            width,
+            height,
+            label,
+            skip_persist,
+        )
+    })
+    .await
+    .map_err(task_error)?
+    .map_err(platform_error)
+}
+
 /// 写 BGRA 像素到系统剪贴板；长度校验在进入阻塞平台调用前统一完成。
 pub async fn write_bgra(
     pixels: Vec<u8>,

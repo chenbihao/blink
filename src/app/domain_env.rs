@@ -334,9 +334,11 @@ impl CapabilityEnv for TauriDomainEnv {
             crate::infra::platform::window::get_primary_monitor_center(width, height);
         let position = (x.unwrap_or(center_x), y.unwrap_or(center_y));
         // show_translating 固定 false——仅截图翻译 UI 状态机需要该状态。
-        crate::infra::platform::window::show_pin_window(
-            &self.app, png_bytes, position.0, position.1, false,
-        )?;
+crate::infra::platform::window::show_pin_window(
+&self.app,
+crate::infra::platform::window::PinImage::Png(std::sync::Arc::new(png_bytes)),
+position.0, position.1, false,
+)?;
         Ok(position)
     }
 }

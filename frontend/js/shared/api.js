@@ -196,9 +196,10 @@ export function hideScreenshotOverlay() {
   return invoke("hide_screenshot_overlay");
 }
 
-/** 0.11.7-f：接收前端合成后的 PNG，写入剪贴板，结束截图会话。 */
+/** 0.11.7-f：接收前端合成后的 PNG，写入剪贴板，结束截图会话。
+ *  0.19.14 raw IPC：直接传 Uint8Array，避开 JSON 序列化大 PNG 的开销。 */
 export function screenshotCopy(pngData) {
-  return invoke("screenshot_copy", { pngData });
+  return invoke("screenshot_copy", pngData);
 }
 
 /**
@@ -207,7 +208,19 @@ export function screenshotCopy(pngData) {
  * 合成 PNG 传入。坐标是物理像素、SESSION 坐标系。
  */
 export function screenshotCopyRegion(x, y, w, h) {
-  return invoke("screenshot_copy_region", { x, y, w, h });
+return invoke("screenshot_copy_region", { x, y, w, h });
+}
+
+/** P7：有标注 copy 直传 raw RGBA → 后端 swap 为 BGRA → 写剪贴板。
+*  消除前端 toBlob('image/png')（~160ms）+ 后端 PNG decode（~289ms）。
+*  raw IPC：RGBA 直接传 Uint8Array，w/h 走 headers。 */
+export function screenshotCopyRgba(rgbaData, w, h) {
+return invoke("screenshot_copy_rgba", rgbaData, {
+headers: {
+"w": String(w),
+"h": String(h),
+},
+});
 }
 
 /** 0.11.7-f：取消截图，结束会话，不保存。 */
@@ -216,15 +229,31 @@ export function screenshotCancel() {
 }
 
 /** 0.11.7-f：钉图——接收前端合成后的 PNG + 选区屏幕坐标，创建钉图窗口。
- *  0.18.3：showTranslating=true 时在 pin 窗口中心显示「翻译中」指示器。 */
+ *  0.18.3：showTranslating=true 时在 pin 窗口中心显示「翻译中」指示器。
+ *  0.19.14 raw IPC：PNG 直接传 Uint8Array，其余参数走 headers。 */
 export function screenshotPin(pngData, screenX, screenY, showTranslating) {
-  return invoke("screenshot_pin", { pngData, screenX, screenY, showTranslating: showTranslating ?? false });
+  return invoke("screenshot_pin", pngData, {
+    headers: {
+      "screen-x": String(screenX),
+      "screen-y": String(screenY),
+      "show-translating": String(showTranslating ?? false),
+    },
+  });
+}
+
+/** 0.19.14 Pin 快路径：无标注时后端直接从 SESSION 裁剪 BGRA → 编码 PNG → show_pin。
+ *  跳过前端 toBlob + IPC PNG 往返，全屏 pin 从 ~1280ms → ~40ms。 */
+export function screenshotPinRegion(x, y, w, h, screenX, screenY) {
+  return invoke("screenshot_pin_region", { x, y, w, h, screenX, screenY });
 }
 
 /** 0.18.3：原地刷新钉图窗口的图片（不重定位、不重置缩放）。
- *  showTranslating=false 时同时隐藏「翻译中」指示器。 */
+ *  showTranslating=false 时同时隐藏「翻译中」指示器。
+ *  0.19.14 raw IPC：PNG 直接传 Uint8Array，showTranslating 走 headers。 */
 export function screenshotPinRefresh(pngData, showTranslating) {
-  return invoke("screenshot_pin_refresh", { pngData, showTranslating: showTranslating ?? false });
+  return invoke("screenshot_pin_refresh", pngData, {
+    headers: { "show-translating": String(showTranslating ?? false) },
+  });
 }
 
 /** 0.11.8：钉图窗口一次性设置位置+尺寸（物理像素，含 PIN_PAD）。
@@ -239,22 +268,29 @@ export function screenshotPinMove(label, winX, winY) {
   return invoke("screenshot_pin_move", { label, winX, winY });
 }
 
-/** 0.11.7-f：保存截图选区为文件。path 可选，不传则弹出保存对话框。 */
+/** 0.11.7-f：保存截图选区为文件。path 可选，不传则弹出保存对话框。
+ *  0.19.14 raw IPC：PNG 直接传 Uint8Array，path 走 headers。 */
 export function screenshotSave(pngData, path) {
-  return invoke("screenshot_save", { pngData, path });
+  const headers = {};
+  if (path) headers["path"] = path;
+  return invoke("screenshot_save", pngData, { headers });
 }
 
-/** 通用用户图片编辑输出；不结束或标记截图 SESSION。 */
+/** 0.19.14 raw IPC：PNG 直接传 Uint8Array，避开 JSON 序列化开销。 */
 export function imageEditorCopy(pngData) {
-  return invoke('image_editor_copy', { pngData });
+  return invoke('image_editor_copy', pngData);
 }
 
 export function imageEditorPin(pngData, showTranslating) {
-  return invoke('image_editor_pin', { pngData, showTranslating: showTranslating ?? false });
+  return invoke('image_editor_pin', pngData, {
+    headers: { 'show-translating': String(showTranslating ?? false) },
+  });
 }
 
 export function imageEditorSave(pngData, path) {
-  return invoke('image_editor_save', { pngData, path });
+  const headers = {};
+  if (path) headers['path'] = path;
+  return invoke('image_editor_save', pngData, { headers });
 }
 
 export function imageEditorCancel() {
@@ -266,14 +302,16 @@ export function pinSpareReady() {
   return invoke("pin_spare_ready");
 }
 
-/** 将 pin 窗口图片复制到剪贴板。 */
+/** 将 pin 窗口图片复制到剪贴板。0.19.14 raw IPC。 */
 export function pinSaveClipboard(pngData) {
-  return invoke("pin_save_clipboard", { pngData });
+  return invoke("pin_save_clipboard", pngData);
 }
 
-/** 将 pin 窗口图片另存为文件，同时复制到剪贴板。path 可选，不传则弹出保存对话框。 */
+/** 将 pin 窗口图片另存为文件，同时复制到剪贴板。path 可选，不传则弹出保存对话框。0.19.14 raw IPC。 */
 export function pinSaveAs(pngData, path) {
-  return invoke("pin_save_as", { pngData, path });
+  const headers = {};
+  if (path) headers["path"] = path;
+  return invoke("pin_save_as", pngData, { headers });
 }
 
 /** 0.15.7-R4：把诊断回放文件写入 Blink 日志目录下的受控子目录。 */
@@ -332,9 +370,10 @@ export function listSystemFonts() {
   return invoke("list_system_fonts");
 }
 
-/** 0.11.7-c：OCR 识别图片中的文字，返回 `{text, lines, words, text_angle?}`（0.11.9-b word 级）。 */
+/** 0.11.7-c：OCR 识别图片中的文字，返回 `{text, lines, words, text_angle?}`（0.11.9-b word 级）。
+ *  0.19.14 raw IPC：PNG 直接传 Uint8Array。 */
 export function ocrImage(pngData) {
-  return invoke("ocr_image", { pngData });
+  return invoke("ocr_image", pngData);
 }
 
 /** 0.17.5：OCR 诊断——返回已安装语言列表、引擎语言、中文包状态。 */
