@@ -1060,4 +1060,6 @@ export const zh = {
     // ── 0.18.6 命令执行 MVP ──
     "command.hint": "输入命令，回车在终端执行",
     "command.error": "执行失败：{message}",
+// ── 0.19.15 剪贴板模式 ──
+"clipboard.mode_placeholder": "搜索剪贴板历史…",
 };

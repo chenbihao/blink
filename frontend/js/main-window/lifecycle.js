@@ -9,6 +9,7 @@ import * as chord from "./chord.js";
 import * as ghost from "./ghost.js";
 import * as aiMode from "./ai-mode.js";
 import * as cmdMode from "./command-mode.js";
+import * as clipboardMode from "./clipboard-mode.js";
 import * as inputState from "./input-state.js";
 import { applyThemeFromConfigData, applyGlassOpacityFromConfigData } from "../shared/theme.js";
 import { applyI18nFromConfigData, t } from "../i18n/index.js";
@@ -73,10 +74,12 @@ export function init() {
     if (aiMode.isActive()) {
       aiMode.exitAiMode();
     }
+    clipboardMode.reset(); // 0.19.15: 复位剪贴板模式
     queryEl.value = "";
     search.reset();
     results.clear();
     cmdMode.reset(); // 0.18.6: 复位命令模式
+    clipboardMode.reset(); // 0.19.15: 复位剪贴板模式
   });
 
   // 配置变更即时响应（设置页切换主题/语言等，无需关闭再打开主窗口）
@@ -91,12 +94,16 @@ export function init() {
     }).catch((e) => console.error("CONFIG_CHANGED: get_config 失败", e));
   });
 
-  // 0.8.5 §6.4：Chord Alt+C 剪贴板改走 fill-query——后端 ClipboardHistoryAction
-  // execute 里 window::invoke + emit "剪贴板 " → 前端填搜索框 + 触发 ClipboardEngine 召回。
-  listen(EVENTS.CHORD_FILL_QUERY, (event) => {
-    queryEl.value = String(event.payload ?? "");
-    queryEl.dispatchEvent(new Event("input", { bubbles: true }));
-  });
+// 0.8.5 §6.4：Chord Alt+C 剪贴板改走 fill-query——后端 ClipboardHistoryAction
+// execute 里 window::invoke + emit "剪贴板 " → 前端填搜索框 + 触发 ClipboardEngine 召回。
+// 0.19.14：改用 search.fillQuery 跳过 40ms 防抖（程序化输入无需合并）。
+// 0.19.15：改为 CHORD_ENTER_MODE，前端进入剪贴板独占模式，bypass SearchService pipeline。
+listen(EVENTS.CHORD_ENTER_MODE, (event) => {
+  const { mode } = event.payload ?? {};
+  if (mode === "clipboard") {
+    clipboardMode.enter();
+  }
+});
 
   // 0.10 语音录音开始 → G1 隐藏 Ghost overlay + 显示语音指示器
   // 注意：不清空 ghost-chord 文本内容——CSS body.voice-active 已隐藏它，

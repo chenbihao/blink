@@ -18,10 +18,11 @@ pub enum ManagedSettingId {
     ClipboardRetentionDays,
     ClipboardMaxItems,
     ClipboardDisplayCount,
+    ClipboardCandidateLimit,
 }
 
 impl ManagedSettingId {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Theme,
         Self::WindowOpacity,
         Self::SearchHistoryEnabled,
@@ -33,6 +34,7 @@ impl ManagedSettingId {
         Self::ClipboardRetentionDays,
         Self::ClipboardMaxItems,
         Self::ClipboardDisplayCount,
+        Self::ClipboardCandidateLimit,
     ];
 
     pub fn parse(id: &str) -> Option<Self> {
@@ -48,6 +50,7 @@ impl ManagedSettingId {
             "clipboard.retention_days" => Self::ClipboardRetentionDays,
             "clipboard.max_items" => Self::ClipboardMaxItems,
             "clipboard.display_count" => Self::ClipboardDisplayCount,
+            "clipboard.candidate_limit" => Self::ClipboardCandidateLimit,
             _ => return None,
         })
     }
@@ -65,6 +68,7 @@ impl ManagedSettingId {
             Self::ClipboardRetentionDays => "clipboard.retention_days",
             Self::ClipboardMaxItems => "clipboard.max_items",
             Self::ClipboardDisplayCount => "clipboard.display_count",
+            Self::ClipboardCandidateLimit => "clipboard.candidate_limit",
         }
     }
 
@@ -123,6 +127,13 @@ impl ManagedSettingId {
                 None,
                 "每次展示或召回的剪贴板历史条数",
             ),
+            Self::ClipboardCandidateLimit => (
+                "integer",
+                Some(50.0),
+                Some(5000.0),
+                None,
+                "搜索候选池上限，控制 fuzzy 匹配时加载多少条元数据",
+            ),
         };
         ManagedSetting {
             id: self.id().into(),
@@ -156,6 +167,7 @@ impl ManagedSettingId {
             Self::ClipboardRetentionDays => validate_integer(value, 0, 3650),
             Self::ClipboardMaxItems => validate_integer(value, 10, 5000),
             Self::ClipboardDisplayCount => validate_integer(value, 1, 200),
+            Self::ClipboardCandidateLimit => validate_integer(value, 50, 5000),
         }
     }
 }

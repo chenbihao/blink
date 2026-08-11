@@ -88,6 +88,24 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
 
+    // 覆盖索引：query_recent_image_list / search_image_list 只 SELECT
+    // id, width, height, created_at, source_app, source_path——此索引让查询
+    // 完全不碰表 B-tree（png_blob/thumb_blob 的 overflow page）。
+    //
+    // **性能关键**：clipboard_images 表的 png_blob 可达数十 MB/条（截图），
+    // 表 B-tree 页与 BLOB overflow 页交错分布在 130MB+ 的 cache DB 文件中。
+    // 没有覆盖索引时，即使只查元数据列，SQLite 也需要读取 leaf page 来解析行头，
+    // 而 leaf page 可能远离文件头部，导致冷缓存下多次磁盘 I/O。
+    // 覆盖索引将元数据集中在 ~2 个 index page（60 行 × ~100B），读取量从
+    // 数十 KB 降至 ~12KB。
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_clip_img_meta_covering \
+         ON clipboard_images(created_at DESC, id, width, height, source_app, source_path)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
     tracing::debug!("clipboard_images 表已初始化");
     Ok(())
 }
@@ -130,6 +148,10 @@ pub async fn save_image(pool: &SqlitePool, item: &ClipboardImage) -> Result<(), 
 }
 
 /// 查询最近的剪贴板图片条目（不含 BLOB，只元数据 + 缩略图）。
+///
+/// 0.19.15：生产路径已改用 `query_recent_image_list`（不含 thumb_blob），
+/// 此函数仅在测试中使用（验证 save/get 闭环）。
+#[allow(dead_code)]
 pub async fn query_recent_images(pool: &SqlitePool, limit: i64) -> Vec<ClipboardImageMeta> {
     sqlx::query_as::<_, ClipboardImageMeta>(
         "SELECT id, thumb_blob, width, height, created_at, source_app, source_path
@@ -182,6 +204,33 @@ pub async fn query_recent_image_list(pool: &SqlitePool, limit: i64) -> Vec<Clipb
         "SELECT id, width, height, created_at, source_app, source_path
          FROM clipboard_images ORDER BY created_at DESC LIMIT ?1",
     )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+}
+
+/// SQL 级搜索图片元数据（按 source_app / source_path LIKE 过滤）。
+///
+/// 替代旧方案（加载 200 条全量元数据 → Rust 层 `String::contains` 过滤），
+/// 将过滤下推到 SQLite，减少 IPC 数据量。`query` 已为原始用户输入，
+/// SQL 用 `%query%` 做 contains 匹配（大小写不敏感——SQLite LIKE 默认 ASCII 不敏感）。
+///
+/// **注意**：不搜索 width/height（"图片 800x600" 这种标题是前端渲染时拼的，
+/// 用户极少按尺寸搜索；即使需要，SQL LIKE 也无法匹配拼接字符串）。
+pub async fn search_image_list(
+    pool: &SqlitePool,
+    query: &str,
+    limit: i64,
+) -> Vec<ClipboardImageListItem> {
+    let pattern = format!("%{query}%");
+    sqlx::query_as::<_, ClipboardImageListItem>(
+        "SELECT id, width, height, created_at, source_app, source_path
+         FROM clipboard_images
+         WHERE source_app LIKE ?1 OR source_path LIKE ?1
+         ORDER BY created_at DESC LIMIT ?2",
+    )
+    .bind(&pattern)
     .bind(limit)
     .fetch_all(pool)
     .await

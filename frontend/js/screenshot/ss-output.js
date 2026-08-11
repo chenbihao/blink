@@ -52,6 +52,8 @@ export function doCopySelection() {
   if (!ss.selCss || ss.sent || !ensureOutputReady()) return;
   ss.sent = true;
   const hasAnnot = annot.hasAnnotations();
+  // ⚠️ 临时打桩日志（0.19.14 性能排查用），收尾时清理
+  const _t0 = performance.now();
   console.info('[screenshot] copy selection start', { hasAnnot, selW: ss.selCss.w, selH: ss.selCss.h });
 
   // 快路径：无标注 → 后端直接从 SESSION 裁剪 BGRA 写剪贴板
@@ -61,7 +63,7 @@ export function doCopySelection() {
     const bmp = cssRectToBitmap(ss.selCss, meta);
     cleanupCanvasVisuals();
     screenshotCopyRegion(bmp.x, bmp.y, bmp.w, bmp.h)
-      .then(() => console.info('[screenshot] copy 成功（快路径）'))
+      .then(() => console.info('[screenshot] copy 成功（快路径）', { ms: Math.round(performance.now() - _t0) }))
       .catch((err) => {
         console.error('[screenshot] copy 失败（快路径）', err);
         ss.errorHint.textContent = '截图保存失败：' + err;
@@ -77,7 +79,7 @@ export function doCopySelection() {
       cleanupCanvasVisuals();
       screenshotCopyRgba(rgba, w, h)
         .then(() => {
-          console.info('[screenshot] copy 成功（RGBA 直传）');
+          console.info('[screenshot] copy 成功（RGBA 直传）', { ms: Math.round(performance.now() - _t0) });
           cleanupLongCapture();
         })
         .catch((err) => {
@@ -97,6 +99,7 @@ export function doCopySelection() {
     cleanupCanvasVisuals();
     outputEditorPng('copy', pngBytes)
       .then(() => {
+        console.info('[screenshot] copy 成功（PNG 路径）', { ms: Math.round(performance.now() - _t0) });
         cleanupLongCapture();
       })
       .catch((err) => {
@@ -111,10 +114,12 @@ export function doCopySelection() {
 export function doCopyFullScreen() {
   if (ss.sent) return;
   ss.sent = true;
+  // ⚠️ 临时打桩日志（0.19.14 性能排查用），收尾时清理
+  const _t0 = performance.now();
   console.info('[screenshot] copy fullscreen start', { canvasW: ss.canvas.width, canvasH: ss.canvas.height });
   cleanupCanvasVisuals();
   screenshotCopyRegion(0, 0, ss.canvas.width, ss.canvas.height)
-    .then(() => console.info('[screenshot] fullscreen copy 成功（快路径）'))
+    .then(() => console.info('[screenshot] fullscreen copy 成功（快路径）', { ms: Math.round(performance.now() - _t0) }))
     .catch((err) => {
       console.error('[screenshot] fullscreen copy 失败', err);
       ss.errorHint.textContent = '截图保存失败：' + err;
@@ -134,6 +139,8 @@ export function doPinSelection() {
     : cssPointToScreen(ss.selCss.x, ss.selCss.y, meta);
   const screenX = screenPos.x;
   const screenY = screenPos.y;
+  // ⚠️ 临时打桩日志（0.19.14 性能排查用），收尾时清理
+  const _t0 = performance.now();
   console.info('[screenshot] pin start', { hasAnnot, selW: ss.selCss.w, selH: ss.selCss.h });
 
   // 0.19.14 快路径：无标注 → 后端直接 crop BGRA + encode PNG + show_pin，
@@ -142,7 +149,7 @@ export function doPinSelection() {
     const bmp = cssRectToBitmap(ss.selCss, meta);
     cleanupCanvasVisuals();
     screenshotPinRegion(bmp.x, bmp.y, bmp.w, bmp.h, screenX, screenY)
-      .then(() => console.info('[screenshot] pin 成功（快路径）'))
+      .then(() => console.info('[screenshot] pin 成功（快路径）', { ms: Math.round(performance.now() - _t0) }))
       .catch((err) => {
         console.error('[screenshot] pin 失败（快路径）', err);
         ss.sent = false;
@@ -154,6 +161,7 @@ export function doPinSelection() {
     cleanupCanvasVisuals();
     outputEditorPng('pin', pngBytes, screenX, screenY)
       .then(() => {
+        console.info('[screenshot] pin 成功（PNG 路径）', { ms: Math.round(performance.now() - _t0) });
         cleanupLongCapture();
       })
       .catch((err) => {

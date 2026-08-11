@@ -649,16 +649,20 @@ impl crate::domain::execution::Action for ScreenshotAction {
         &self,
         cx: &crate::domain::execution::ActionContext<'_>,
     ) -> Result<crate::domain::execution::ActionOutcome, crate::domain::execution::ExecError> {
+        // ⚠️ 临时打桩日志（0.19.14 性能排查用），收尾时清理
         let t0 = std::time::Instant::now();
 
         // 0.15.7：记录前台窗口 HWND（长截图 PostMessage 滚轮用）——必须在 hide_for_screenshot 之前
         crate::infra::platform::screenshot::record_fg_hwnd();
+        let t_record = t0.elapsed();
 
         // 1. 隐藏主窗——走 cloak 路径（无 Win11 fade 动画，瞬间从桌面消失）
         cx.env.hide_for_screenshot();
+        let t_hide = t0.elapsed();
 
         // 2. 等 DWM 完成一次不含主窗的新合成（DwmFlush + IsVisible 轮询，通常 <20ms）
         cx.env.wait_frame_after_hide().await;
+        let t_wait = t0.elapsed();
 
         // 3. 截屏存 SESSION（此刻桌面上没有 blink，BitBlt 不会拍到自己）。
         //    Win32 阻塞调用（BitBlt + GetDIBits 合计 ~50-100ms 全屏）—— 走 spawn_blocking
@@ -673,19 +677,31 @@ impl crate::domain::execution::Action for ScreenshotAction {
                 cx.env.unhide_after_screenshot();
                 crate::domain::execution::ExecError::Runtime(e)
             })?;
+        let t_capture = t0.elapsed();
 
         // 4. 撤销 cloak（主窗保持 hidden 状态，只是解除 DWM 雾化标志）——放在建 overlay
         //    之前：万一建 overlay 失败也不会残留 cloak；主窗不 show 用户看不到差别
         cx.env.unhide_after_screenshot();
+        let t_unhide = t0.elapsed();
 
         // 5. 建 overlay + 按 meta 精确定位（物理像素）
         cx.env.show_screenshot_overlay(&meta).map_err(|e| {
             crate::infra::platform::screenshot::end_session();
             crate::domain::execution::ExecError::Runtime(e)
         })?;
+        let t_overlay = t0.elapsed();
+
         tracing::info!(
-            total_ms = t0.elapsed().as_millis() as u64,
-            "screenshot overlay 已就绪"
+            total_ms = t_overlay.as_millis() as u64,
+            record_ms = t_record.as_millis() as u64,
+            hide_ms = (t_hide - t_record).as_millis() as u64,
+            wait_frame_ms = (t_wait - t_hide).as_millis() as u64,
+            capture_ms = (t_capture - t_wait).as_millis() as u64,
+            unhide_ms = (t_unhide - t_capture).as_millis() as u64,
+            overlay_ms = (t_overlay - t_unhide).as_millis() as u64,
+            vw = meta.virtual_x, vh = meta.virtual_y,
+            w = meta.width, h = meta.height,
+            "screenshot overlay 已就绪（分步计时）"
         );
         Ok(crate::domain::execution::ActionOutcome::Nop)
     }
@@ -744,10 +760,10 @@ impl crate::domain::execution::Action for ClipboardHistoryAction {
     ) -> Result<crate::domain::execution::ActionOutcome, crate::domain::execution::ExecError> {
         // 主窗 show + 焦点（同步）
         cx.env.invoke_main_window();
-        // 返回 Emit outcome，由 ChordRegistry::trigger 负责实际 emit
+        // 返回 Emit outcome，前端进入剪贴板独占模式（bypass SearchService pipeline）
         Ok(crate::domain::execution::ActionOutcome::Emit {
-            event: EventNames::CHORD_FILL_QUERY.to_string(),
-            payload: serde_json::Value::String("剪贴板 ".to_string()),
+            event: EventNames::CHORD_ENTER_MODE.to_string(),
+            payload: serde_json::json!({ "mode": "clipboard" }),
         })
     }
 }

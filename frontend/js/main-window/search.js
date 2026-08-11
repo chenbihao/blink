@@ -10,6 +10,7 @@ import { EVENTS } from "../shared/event-names.js";
 import * as results from "./results.js";
 import * as ghost from "./ghost.js";
 import * as cmdMode from "./command-mode.js";
+import * as clipboardMode from "./clipboard-mode.js";
 
 /** 防抖间隔。后端搜索实测 ~1ms（纯内存），仅用于合并极快连打。 */
 const DEBOUNCE_MS = 40;
@@ -117,6 +118,29 @@ export async function fetchContextSuggestions() {
 }
 
 /**
+ * 程序化填充 query 并立即搜索（跳过 40ms 防抖）。
+ *
+ * 用于 chord-fill-query（Alt+C 剪贴板等）——后端直接填入完整 query，
+ * 不是用户逐字输入，无需防抖合并。跳过防抖可省 ~40ms 延迟。
+ *
+ * 竞态防护：++seq 作废在途请求；用户在结果返回前开始输入也会作废此结果。
+ */
+export async function fillQuery(text) {
+  clearTimeout(timer);
+  queryEl.value = text;
+  ghost.syncTypedText(text);
+  const mySeq = ++seq;
+  try {
+    const resp = await searchApps(text, mySeq);
+    if (mySeq !== seq) return;
+    results.render(resp.entries || [], mySeq);
+    ghost.update(text, resp.suggestion);
+  } catch (e) {
+    console.error("fillQuery search failed:", e);
+  }
+}
+
+/**
  * IME compositionupdate 事件处理：拼音/笔画每变化一次就触发。
  * 把当前 IME 文字同步到 ghost-typed（透明占位），让 ghost-suggest 跟随后移。
  * 示例：用户输入 "ni" → "ni'h" → "ni'hao"，ghost-typed 实时更新，suggest 不重叠。
@@ -129,6 +153,11 @@ function onCompositionUpdate() {
 
 function onInput() {
   clearTimeout(timer);
+
+  // 0.19.15: 剪贴板模式 → 直接调 searchClipboard，跳过 searchApps
+  if (clipboardMode.handleInput(queryEl.value)) {
+    return;
+  }
 
   // 0.18.6: `> ` 前缀 → 命令模式，跳过搜索逻辑（清结果、停 ghost、显示 hint）
   if (cmdMode.handleInput(queryEl.value)) {

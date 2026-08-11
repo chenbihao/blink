@@ -192,10 +192,14 @@ pub fn capture_region(x: i32, y: i32, w: u32, h: u32) -> Result<Vec<u8>, String>
 /// **标注模式重置**：新会话开始前复位 `ANNOTATION_MODE`，防止前一次崩溃残留导致
 /// AI `screenshot { op: capture }` 永远跳过 SESSION 缓存。
 pub fn begin_session() -> Result<ScreenCaptureMeta, String> {
+    // ⚠️ 临时打桩日志（0.19.14 性能排查用），收尾时清理
+    let t0 = std::time::Instant::now();
+
     // 新会话开始时清除前一次可能残留的标注模式（backend crash / 前端异常退出等情况）
     set_annotation_mode(false);
 
     let (pixels, meta) = backend().capture_virtual_screen()?;
+    let t_capture = t0.elapsed();
     let pixel_len = pixels.len();
 
     // 0.19.14：不再立即编码 PNG——快路径（copy_region / pin_region）不走 session_png()，
@@ -211,6 +215,8 @@ pub fn begin_session() -> Result<ScreenCaptureMeta, String> {
     tracing::info!(
         ?meta_copy,
         pixel_bytes = pixel_len,
+        capture_ms = t_capture.as_millis() as u64,
+        total_ms = t0.elapsed().as_millis() as u64,
         "截图 SESSION 已建立（lazy PNG）"
     );
     Ok(meta_copy)

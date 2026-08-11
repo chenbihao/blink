@@ -98,7 +98,8 @@ pub async fn update_managed_setting(
         ManagedSettingId::ClipboardEnabled
         | ManagedSettingId::ClipboardRetentionDays
         | ManagedSettingId::ClipboardMaxItems
-        | ManagedSettingId::ClipboardDisplayCount => {
+        | ManagedSettingId::ClipboardDisplayCount
+        | ManagedSettingId::ClipboardCandidateLimit => {
             let mut cfg = ConfigStore::get::<ClipboardConfig>(pool).await;
             match setting_id {
                 ManagedSettingId::ClipboardEnabled => cfg.enabled = value.as_bool().unwrap(),
@@ -110,6 +111,9 @@ pub async fn update_managed_setting(
                 }
                 ManagedSettingId::ClipboardDisplayCount => {
                     cfg.display_count = value.as_u64().unwrap() as u32
+                }
+                ManagedSettingId::ClipboardCandidateLimit => {
+                    cfg.candidate_limit = value.as_u64().unwrap() as u32
                 }
                 _ => unreachable!(),
             }
@@ -208,6 +212,7 @@ async fn save_clipboard(app: &tauri::AppHandle, cfg: &ClipboardConfig) -> Result
     crate::infra::platform::clipboard::set_active(cfg.enabled);
     if let Some(service) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
         service.update_clipboard_display_count(cfg.display_count);
+        service.update_clipboard_candidate_limit(cfg.candidate_limit);
     }
     emit_changed(app, "clipboard:config");
     Ok(())
@@ -238,5 +243,6 @@ fn current_value(
         ManagedSettingId::ClipboardRetentionDays => json!(clipboard.retention_days),
         ManagedSettingId::ClipboardMaxItems => json!(clipboard.max_items),
         ManagedSettingId::ClipboardDisplayCount => json!(clipboard.display_count),
+        ManagedSettingId::ClipboardCandidateLimit => json!(clipboard.candidate_limit),
     }
 }

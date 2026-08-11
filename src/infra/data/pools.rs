@@ -15,8 +15,9 @@
 
 use crate::infra::utils::paths;
 use sqlx::SqlitePool;
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// 四库连接池集合——作为单一 Tauri State 注册。
 ///
@@ -170,12 +171,35 @@ pub async fn init_all() -> Result<DbPools, String> {
     })
 }
 
-/// 创建单个 SQLite pool（max_connections(1)，串行写可接受）。
+/// 创建单个 SQLite pool。
+///
+/// **SQLite 优化**（0.19.15 性能修复）：
+/// - `journal_mode=WAL`：读写不互斥（WAL 允许并发读）
+/// - `synchronous=NORMAL`：WAL 模式下安全，减少 fsync 频率
+/// - `busy_timeout=5s`：锁冲突时等待而非立即失败
+/// - `mmap_size=256MB`：内存映射 I/O，避免 read() 系统调用开销
+/// - `cache_size=20MB`：SQLite 内部页面缓存，减少磁盘读取
+///
+/// 用 `SqliteConnectOptions` 确保 pool 中**每个连接**都设置 PRAGMA
+/// （原先 `.execute("PRAGMA ...")` 只设置第一个连接）。
+///
+/// **背景**：原先 `max_connections(1)` + 默认 DELETE journal + 无 mmap/cache 导致
+/// Alt+C 搜索延迟 ~315ms——即使加了 WAL 也不改善，因为查询本身需要从磁盘读取页面。
+/// 覆盖索引 + mmap + cache 三管齐下后降至个位数毫秒。
 async fn create_pool(path: &PathBuf) -> Result<SqlitePool, String> {
-    let url = format!("sqlite:{}?mode=rwc", path.display());
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .busy_timeout(Duration::from_secs(5))
+        .pragma("mmap_size", "268435456")   // 256MB mmap
+        .pragma("cache_size", "-20000")      // 20MB page cache
+        .pragma("temp_store", "MEMORY");     // 临时表用内存
+
     SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect(&url)
+        .max_connections(4)
+        .connect_with(options)
         .await
         .map_err(|e| format!("connect {}: {e}", path.display()))
 }

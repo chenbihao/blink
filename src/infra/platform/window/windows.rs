@@ -2024,6 +2024,9 @@ pub fn show_screenshot_overlay(
     use tauri::{WebviewUrl, WebviewWindowBuilder};
     const LABEL: &str = "chord-screenshot";
 
+    // ⚠️ 临时打桩日志（0.19.14 性能排查用），收尾时清理
+    let t0 = std::time::Instant::now();
+
     // 注入原始物理显示器矩形（physicalDisplays），前端用 canvas 实测 renderScale 转换 CSS。
     // overlayDpi 仅诊断用，不参与坐标变换。
     // **复用窗口时序**：clear → place → inject meta → show → focus → 双 rAF 后 reload
@@ -2032,6 +2035,7 @@ pub fn show_screenshot_overlay(
         // 1. 清屏——只清旧画面，不触发截图加载
         let _ = win
             .eval("window.__blinkClearScreenshotVisual && window.__blinkClearScreenshotVisual()");
+        let t_clear = t0.elapsed();
         let mut overlay_dpi = 96u32;
         if let Ok(hwnd) = win.hwnd() {
             // 0.19.14：撤销 hide_screenshot_overlay 设的 cloak，否则 show 后窗口不可见
@@ -2046,6 +2050,7 @@ pub fn show_screenshot_overlay(
             );
             overlay_dpi = crate::infra::platform::dpi::get_dpi_for_hwnd(HWND(hwnd.0 as _));
         }
+        let t_place = t0.elapsed();
         let displays_json = build_physical_displays_json();
         tracing::debug!(
             overlay_dpi,
@@ -2068,14 +2073,24 @@ pub fn show_screenshot_overlay(
         // 4. show + 5. focus
         let _ = win.show();
         let _ = win.set_focus();
+        let t_show = t0.elapsed();
         // 6. 双 rAF 后 reload——等布局稳定再加载截图，确保 canvas 已有正确尺寸
         let _ = win.eval(
             "requestAnimationFrame(()=>{requestAnimationFrame(()=>{window.__blinkReloadScreenshot&&window.__blinkReloadScreenshot()})})"
+        );
+        tracing::info!(
+            total_ms = t0.elapsed().as_millis() as u64,
+            clear_ms = t_clear.as_millis() as u64,
+            place_ms = (t_place - t_clear).as_millis() as u64,
+            show_focus_ms = (t_show - t_place).as_millis() as u64,
+            path = "reuse",
+            "show_screenshot_overlay 完成"
         );
         return Ok(());
     }
 
     // 首次构建：inner_size / position 会被后续 SetWindowPos 覆盖，这里只是让 Tauri 别报参数错。
+    let t_build_start = t0.elapsed();
     let win =
         WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("chord-screenshot.html".into()))
             .title("")
@@ -2089,6 +2104,7 @@ pub fn show_screenshot_overlay(
             .focused(true)
             .build()
             .map_err(|e| e.to_string())?;
+    let t_build = t0.elapsed();
 
     if let Ok(hwnd) = win.hwnd() {
         place_at_physical(
@@ -2099,6 +2115,7 @@ pub fn show_screenshot_overlay(
             meta.height,
         );
     }
+    let t_place = t0.elapsed();
     // place 后读窗口实际 DPI（仅诊断用）
     let overlay_dpi = win
         .hwnd()
@@ -2124,6 +2141,15 @@ pub fn show_screenshot_overlay(
     );
     let _ = win.eval(&meta_js);
     let _ = win.set_focus();
+
+    tracing::info!(
+        total_ms = t0.elapsed().as_millis() as u64,
+        pre_ms = t_build_start.as_millis() as u64,
+        build_ms = (t_build - t_build_start).as_millis() as u64,
+        place_ms = (t_place - t_build).as_millis() as u64,
+        path = "first_build",
+        "show_screenshot_overlay 完成"
+    );
 
     Ok(())
 }
@@ -2750,7 +2776,8 @@ pub fn wait_frame_after_hide(app: &AppHandle) {
         }
     }
 
-    tracing::debug!(
+    // ⚠️ 临时打桩日志（0.19.14 性能排查用），收尾时降回 debug!
+    tracing::info!(
         flush_ms = t_flush.as_millis() as u64,
         poll_ms = polled_ms,
         total_ms = t0.elapsed().as_millis() as u64,

@@ -4,7 +4,7 @@
 //! 且未来动作类型会增多（插件动作、文件打开等）——集中在此便于扩展。
 //! 行为由后端提供的 action.kind 驱动，与提示栏（hints.js）同源，语义一致。
 
-import { launchApp, runBuiltinAction, hideWindow, recordClipboardHit, copyClipboardImage, pinClipboardImage, openContentEditor, createStickyNote, showStickyWindow } from "../shared/api.js";
+import { launchApp, runBuiltinAction, hideWindow, recordClipboardHit, getClipboardText, copyClipboardImage, pinClipboardImage, openContentEditor, createStickyNote, showStickyWindow } from "../shared/api.js";
 import { normalizeError } from "../shared/tauri.js";
 
 /**
@@ -24,8 +24,18 @@ export async function activateItem(data) {
 
   if (kind === "copy") {
     // 复制结果到剪贴板；成功才隐藏。失败/空文本不隐藏，避免用户误以为已复制。
-    // 插件 Copy 走 action.payload；计算结果无 payload 时回退 calcValue。
-    const text = action.payload ?? data.calcValue;
+    // 插件 Copy / 计算结果走 action.payload；剪贴板历史走 LazyCopy（payload 为空，
+    // hitId 非空时按需调 getClipboardText 拉取完整 text）。
+    let text = action.payload ?? data.calcValue;
+    if (!text && action.hitId) {
+      // LazyCopy：搜索路径未预载 text，激活时按需拉取
+      try {
+        text = await getClipboardText(action.hitId);
+      } catch (e) {
+        console.error("getClipboardText failed:", e);
+        return; // 保留窗口，让用户察觉并重试
+      }
+    }
     if (text) {
       try {
         await navigator.clipboard.writeText(text);
@@ -92,9 +102,17 @@ export async function activateItem(data) {
     // P2-#18: 文本型 item 的编辑动作——打开内容编辑器
     if (id === "edit_text_item") {
       const arg = action.runArg;
-      const text = arg?.text ?? "";
+      let text = arg?.text ?? "";
       const originRef = arg?.originRef ?? null;
       const source = arg?.source ?? "item";
+      // LazyCopy：runArg 不含 text 字段时，按 originRef 拉取完整 text
+      if (!text && originRef) {
+        try {
+          text = (await getClipboardText(originRef)) ?? "";
+        } catch (e) {
+          console.error("getClipboardText for edit failed:", e);
+        }
+      }
       const isClipboard = source === "clipboard";
       try {
         await openContentEditor({
@@ -113,8 +131,19 @@ export async function activateItem(data) {
     }
 
     // P2-#18: 文本型 item 的钉为便签动作
+    // LazyCopy：runArg 现在是 { originRef } 对象（旧版为 string），兼容两种
     if (id === "pin_text_item") {
-      const text = typeof action.runArg === "string" ? action.runArg : "";
+      const arg = action.runArg;
+      let text = "";
+      if (typeof arg === "string") {
+        text = arg;
+      } else if (arg?.originRef) {
+        try {
+          text = (await getClipboardText(arg.originRef)) ?? "";
+        } catch (e) {
+          console.error("getClipboardText for pin failed:", e);
+        }
+      }
       try {
         const note = await createStickyNote(text);
         await showStickyWindow(note.id, true);

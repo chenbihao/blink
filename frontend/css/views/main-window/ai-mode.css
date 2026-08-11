@@ -9,8 +9,9 @@
 }
 
 #search-mode {
-  display: flex;
-  flex-direction: column;
+display: flex;
+flex-direction: column;
+position: relative; /* 0.19.15: clipboard-mode-badge 绝对定位锚点 */
 }
 
 #ai-mode {

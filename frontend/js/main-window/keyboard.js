@@ -10,6 +10,7 @@ import * as chord from "./chord.js";
 import * as autosuggestConfig from "./autosuggest-config.js";
 import * as aiMode from "./ai-mode.js";
 import * as cmdMode from "./command-mode.js";
+import * as clipboardMode from "./clipboard-mode.js";
 import * as inputState from "./input-state.js";
 import { queryEl, aiQueryEl, appEl } from "./dom.js";
 
@@ -28,10 +29,11 @@ export function init() {
   appEl.addEventListener("wheel", (e) => {
     // 0.18.0: AI 模式放行默认滚动（让 #ai-display 可滚），搜索模式仍 preventDefault + 翻页
     if (aiMode.isActive()) return;
-    // 0.18.6: 命令模式无结果可翻页，放行默认行为
-    if (cmdMode.isActive()) return;
-    e.preventDefault(); // 阻止默认滚动（列表本来就不滚动）
-    if (!results.hasItems()) return;
+  // 0.18.6: 命令模式无结果可翻页，放行默认行为
+  if (cmdMode.isActive()) return;
+  // 0.19.15: 剪贴板模式有结果，正常翻页
+  e.preventDefault(); // 阻止默认滚动（列表本来就不滚动）
+  if (!results.hasItems()) return;
     if (e.deltaY < 0) {
       results.pageUp(); // 向上滚 → 上一页（等价于 PageUp）
     } else {
@@ -53,6 +55,8 @@ function onAutosuggestAccept(e) {
   if (aiMode.isActive()) return;
   // 0.18.6: 命令模式下抑制 Tab Ghost 接受
   if (cmdMode.isActive()) return;
+  // 0.19.15: 剪贴板模式下抑制 Tab Ghost 接受
+  if (clipboardMode.isActive()) return;
   // IME 组字期间放行——部分中日韩输入法用 Tab 切候选词，不能被 ghost 吞掉。
   // `isComposing` 是现代 DOM 标准，`keyCode === 229` 是老浏览器兜底。
   if (e.isComposing || e.keyCode === 229) return;
@@ -76,6 +80,10 @@ function onNavigation(e) {
     }
     return;
   }
+
+  // 0.19.15: 剪贴板模式 — 导航/激活与搜索模式一致（复用 results.js），
+  // 但不拦截键盘——结果列表正常可用。
+  // ESC 处理在 onEscape 中单独拦截。
 
   // 0.17.6: AiMode 下 Enter 发送追问（或确认卡片），不触发结果导航
   if (aiMode.isActive()) {
@@ -128,6 +136,11 @@ function onEscape(e) {
     // AiMode 下 ESC 退出 AI 模式（不 hide 窗口）
     if (aiMode.isActive()) {
       aiMode.exitAiMode();
+      return;
+    }
+    // 0.19.15: 剪贴板模式下 ESC 退出剪贴板模式（不 hide 窗口）
+    if (clipboardMode.isActive()) {
+      clipboardMode.exit();
       return;
     }
     ghost.clear();

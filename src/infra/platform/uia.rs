@@ -618,9 +618,9 @@ fn extract_uia_hint(elem: &IUIAutomationElement) -> Option<ControlHint> {
         .filter(|s| !s.is_empty());
 
     // trace 级记录控件 name（诊断用），不记 info/debug 避免泄露界面文本
-    if let Some(ref n) = name {
-        tracing::trace!(control_type, name = %n, "UIA 控件命中");
-    }
+    // trace 级记录控件 name（诊断用），不记 info/debug 避免泄露界面文本
+    // 0.19.15：注释掉的 trace 已无用途，移除避免 unused variable 警告
+    let _ = name;
 
     Some(ControlHint {
         x: rect.left,

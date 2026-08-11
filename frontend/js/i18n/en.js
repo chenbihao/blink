@@ -1059,4 +1059,6 @@ export const en = {
     // ── 0.18.6 Command execution MVP ──
     "command.hint": "Type a command, press Enter to run in terminal",
     "command.error": "Execution failed: {message}",
+// ── 0.19.15 Clipboard mode ──
+"clipboard.mode_placeholder": "Search clipboard history…",
 };

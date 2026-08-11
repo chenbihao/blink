@@ -92,7 +92,7 @@ fn main() {
                     Some(bytes) => tauri::http::Response::builder()
                         .status(200)
                         .header("Content-Type", "image/png")
-                        .header("Cache-Control", "no-store")
+                        .header("Cache-Control", "max-age=3600")
                         .body(bytes)
                         .unwrap(),
                     None => {
@@ -930,8 +930,10 @@ app::commands::screenshot_copy_rgba,
             app::commands::get_interpreter_paths,
             app::commands::open_file_dialog,
             app::commands::pick_directory_dialog,
-            app::commands::get_clipboard_history,
-            app::commands::search_clipboard_history,
+app::commands::get_clipboard_history,
+app::commands::search_clipboard,
+app::commands::search_clipboard_history,
+            app::commands::get_clipboard_text,
             app::commands::record_clipboard_hit,
             app::commands::delete_clipboard_item,
             app::commands::delete_clipboard_image,

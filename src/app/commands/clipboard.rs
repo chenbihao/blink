@@ -4,6 +4,48 @@ use tauri::Manager;
 
 use crate::domain::clipboard::ClipboardWriteSource;
 use crate::domain::event::CapabilityEnv;
+use crate::domain::search::SearchResponse;
+
+/// 剪贴板模式直接搜索（bypass SearchService pipeline）。
+///
+/// Alt+C 进入剪贴板模式后，前端输入直接调此命令，
+/// 不经过 SearchService::search / IntentRouter / get_weights / Route 分派，
+/// 只走 ClipboardEngine。性能最优。
+#[tauri::command]
+pub async fn search_clipboard(
+    app: tauri::AppHandle,
+    query: String,
+    seq: u64,
+) -> SearchResponse {
+    tracing::debug!(%query, seq, "search_clipboard: 收到请求");
+    let service = app.state::<std::sync::Arc<crate::domain::search::SearchService>>();
+    // 复用 SearchService 持有的 ClipboardEngine 实例（不重复建池）
+    let entries = service.search_clipboard_mode(&query).await;
+    tracing::debug!(
+        count = entries.len(),
+        %query,
+        "search_clipboard: 返回结果"
+    );
+    for (i, item) in entries.iter().enumerate() {
+        let detail = item.score_detail.as_deref().unwrap_or("");
+        tracing::trace!(
+            index = i,
+            score = if detail.is_empty() {
+                format!("{:.4}", item.score)
+            } else {
+                format!("{:.4} ({})", item.score, detail)
+            },
+            source = %item.source,
+            name = %item.name,
+            lnk_path = %item.lnk_path,
+            "剪贴板模式结果项"
+        );
+    }
+    SearchResponse {
+        entries,
+        suggestion: None,
+    }
+}
 
 /// 将文本写入系统剪贴板（Windows API）。
 /// 右键菜单独立 Popup 窗口中 navigator.clipboard 不可靠，改走后端。
@@ -33,6 +75,21 @@ pub async fn search_clipboard_history(
 ) -> Vec<crate::infra::data::clipboard::ClipboardItem> {
     let pool = &app.state::<crate::infra::data::DbPools>().history;
     crate::infra::data::clipboard::search(&pool, &query, limit.unwrap_or(20)).await
+}
+
+/// 按 id 拉取完整 text（延迟加载）。
+///
+/// 搜索路径只携带 `id` + `preview`（80 字符截断），用户选中某条历史时
+/// 前端调此命令按需拉取完整 `text`。避免搜索路径预载 500 条完整 text
+/// 导致 MB 级 JSON 序列化开销。
+#[tauri::command]
+pub async fn get_clipboard_text(app: tauri::AppHandle, id: String) -> Result<Option<String>, String> {
+    let pool = &app.state::<crate::infra::data::DbPools>().history;
+    let text = crate::infra::data::clipboard::get_text_by_id(pool, &id).await;
+    if text.is_none() {
+        tracing::warn!(%id, "get_clipboard_text: 未找到记录（可能已被清理）");
+    }
+    Ok(text)
 }
 
 /// 删除指定剪贴板条目。

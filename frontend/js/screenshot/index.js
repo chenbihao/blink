@@ -233,6 +233,8 @@ window.__blinkOpenImageEditor = function () {
 
 /** 完全重置前端状态——每次 overlay 显示时都要走一遍 */
 function resetState() {
+  // ⚠️ 临时打桩日志（0.19.14 性能排查用），收尾时清理
+  const _t0 = performance.now();
   console.info('[screenshot] resetState start');
   resetScrollCaptureSession();
   const { canvas, ctx, annotCanvas, annotCtx, sizeHint, toolbar, errorHint } = ss;
@@ -341,12 +343,14 @@ function resetState() {
     ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
   }
-  console.info('[screenshot] resetState done');
+  console.info('[screenshot] resetState done', { ms: Math.round(performance.now() - _t0) });
 }
 
 // P4: raw BGRA 协议——fetch raw RGBA bytes + ImageData + putImageData
 // 消除 PNG 编码（~241ms）+ 浏览器 PNG 解码（~50ms），进入截图从 ~400ms → ~160ms
 async function loadScreenshot() {
+  // ⚠️ 临时打桩日志（0.19.14 性能排查用），收尾时清理
+  const _t0 = performance.now();
   console.info('[screenshot] loadScreenshot start');
   ss.errorHint.classList.add('hidden');
 
@@ -367,10 +371,13 @@ async function loadScreenshot() {
 
   try {
     console.info('[screenshot] requesting raw rgba', { gen });
+    const _tFetchStart = performance.now();
     const response = await fetch('http://blink-screenshot.localhost/raw?t=' + Date.now());
     if (!response.ok) throw new Error(`fetch failed: ${response.status}`);
 
     const buffer = await response.arrayBuffer();
+    const _tFetchEnd = performance.now();
+    console.info('[screenshot] raw rgba fetched', { gen, ms: Math.round(_tFetchEnd - _tFetchStart), bytes: buffer.byteLength });
     if (gen !== ss._loadGen) {
       console.info('[screenshot] 丢弃过期截图加载回调', { gen, cur: ss._loadGen });
       return;
@@ -382,6 +389,7 @@ async function loadScreenshot() {
     const h = meta.h || 0;
     if (w === 0 || h === 0) throw new Error('invalid dimensions from __blinkScreenMeta');
 
+    const _tPutStart = performance.now();
     const imageData = new ImageData(new Uint8ClampedArray(buffer), w, h);
 
     const { canvas } = ss;
@@ -400,18 +408,22 @@ async function loadScreenshot() {
     ss.screenshot = ss.screenshotOffscreen;
 
     clearTimeout(timeoutId);
+    const _tPutEnd = performance.now();
+    console.info('[screenshot] putImageData done', { w, h, ms: Math.round(_tPutEnd - _tPutStart) });
 
     // 等布局稳定后同步 renderScale，再绘制和加载窗口/控件
     requestAnimationFrame(() => {
       if (gen !== ss._loadGen) return;
+      const _tRafStart = performance.now();
       const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
       syncRenderScale(canvas, meta);
       // M7 优化：初始 renderScale 设定后失效 displays 缓存
       invalidateDisplaysCache();
       drawDimmed();
+      const _tRafEnd = performance.now();
       // 诊断日志：截图加载完成后的坐标空间状态
       const rect = canvas.getBoundingClientRect();
-      console.debug('[screenshot] render scale synced', {
+      console.info('[screenshot] render scale synced', {
         injectedDpi: meta.overlayDpi,
         devicePixelRatio: window.devicePixelRatio,
         canvasWidth: canvas.width,
@@ -425,8 +437,9 @@ async function loadScreenshot() {
       screenshotReady = true;
       renderScaleReady = true;
       maybeStartCaptureHints();
+      console.info('[screenshot] rAF render done', { ms: Math.round(_tRafEnd - _tRafStart), totalMs: Math.round(performance.now() - _t0) });
     });
-    console.info('[screenshot] screenshot loaded', { w, h, gen });
+    console.info('[screenshot] screenshot loaded', { w, h, gen, ms: Math.round(performance.now() - _t0) });
   } catch (e) {
     clearTimeout(timeoutId);
     if (gen !== ss._loadGen) return;

@@ -10,6 +10,16 @@ export function searchApps(query, seq) {
   return invoke("search_apps", { query, seq });
 }
 
+/** 剪贴板模式直接搜索（bypass SearchService pipeline）。
+ *  Alt+C 进入剪贴板模式后，前端输入直接调此命令，
+ *  不经过 SearchService::search / IntentRouter / get_weights / Route 分派。
+ *  @param {string} query 搜索词（用户原始输入，无需"剪贴板"前缀）
+ *  @param {number} seq 请求序号
+ *  @returns {Promise<{entries: Array, suggestion: *}>} */
+export function searchClipboard(query, seq) {
+  return invoke("search_clipboard", { query, seq });
+}
+
 /** 启动应用（打开 lnk）。 */
 export function launchApp(lnkPath) {
   return invoke("launch_app", { lnkPath });
@@ -189,6 +199,15 @@ export function getClipboardHistory(limit) {
 /** 记录剪贴板项命中（点选后调用，频率加权）。 */
 export function recordClipboardHit(id) {
   return invoke("record_clipboard_hit", { id });
+}
+
+/** 按 id 拉取完整 text（延迟加载）。
+ *  搜索路径只携带 id + preview（80 字符截断），用户选中某条历史时
+ *  调此函数按需拉取完整 text。避免搜索路径预载 500 条完整 text 导致 MB 级 JSON。
+ *  @param {string} id clipboard_history 表主键
+ *  @returns {Promise<string|null>} 完整文本（未找到返回 null） */
+export function getClipboardText(id) {
+  return invoke("get_clipboard_text", { id });
 }
 
 /** 隐藏截图覆盖窗（ESC 取消调；无选区路径走这里）。 */

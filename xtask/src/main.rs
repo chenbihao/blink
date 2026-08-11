@@ -3,6 +3,7 @@
 //! 用法：
 //!   cargo xtask plugins   编译 Rust 插件（仅编译到 target/release，不复制到 bin）
 //!   cargo xtask release   编译插件 + 复制到 bin + cargo tauri build（本地一键打包）
+//!   cargo xtask release --debug  同上，但用 debug profile（DevTools 可用，F12 打开）
 //!   cargo xtask tiptap    打包 Tiptap IIFE 产物到 frontend/vendor/（调用 Node 脚本）
 //!   cargo xtask icons     拉取 Lucide 图标并生成 SVG sprite（调用 Python 脚本）
 //!
@@ -64,11 +65,13 @@ fn run(cmd: &str, args: &[&str], cwd: impl AsRef<Path>) {
     }
 }
 
-/// 编译所有 Rust 插件（release）。
-/// copy_to_bin = true 时才拷贝到 plugins/builtin/<id>/bin/（仅 release 打包时需要）。
-fn build_plugins(copy_to_bin: bool) {
+/// 编译所有 Rust 插件。
+/// debug = true 时用 debug profile（供 `cargo xtask release --debug` 使用，DevTools 可用）。
+/// copy_to_bin = true 时才拷贝到 plugins/builtin/<id>/bin/（仅打包时需要）。
+fn build_plugins(copy_to_bin: bool, debug: bool) {
     let root = workspace_root();
-    let target_release = root.join("target").join("release");
+    let profile = if debug { "debug" } else { "release" };
+    let target_dir = root.join("target").join(profile);
     let builtin_dir = root.join("plugins").join("builtin");
 
     let rust_plugins = discover_rust_plugins();
@@ -77,26 +80,30 @@ fn build_plugins(copy_to_bin: bool) {
         rust_plugins.len(),
         rust_plugins
     );
-    println!("🔨 编译 Rust 插件（release）...");
+    println!("🔨 编译 Rust 插件（{profile}）...");
 
     for id in &rust_plugins {
         let pkg = format!("blink-plugin-{id}");
         print!("  编译 {pkg} ... ");
         // -p 显式选 workspace 成员包（跨 cargo 版本稳定，详见原 copy-plugins.ps1 注释）
-        run("cargo", &["build", "--release", "-p", pkg.as_str()], &root);
-        println!("✓ -> target/release/{pkg}.exe");
+        let mut args = vec!["build", "-p", pkg.as_str()];
+        if !debug {
+            args.push("--release");
+        }
+        run("cargo", &args, &root);
+        println!("✓ -> target/{profile}/{pkg}.exe");
 
         if copy_to_bin {
             let dest_dir = builtin_dir.join(id).join("bin");
             std::fs::create_dir_all(&dest_dir)
                 .unwrap_or_else(|e| panic!("创建 {} 失败: {e}", dest_dir.display()));
             let dest = dest_dir.join(format!("{pkg}.exe"));
-            std::fs::copy(target_release.join(format!("{pkg}.exe")), &dest)
+            std::fs::copy(target_dir.join(format!("{pkg}.exe")), &dest)
                 .unwrap_or_else(|e| panic!("拷贝 {pkg}.exe 失败: {e}"));
             println!("     拷贝 -> {}", dest.display());
         }
     }
-    println!("🐍 脚本插件无需编译（Python/Node.js 源码已在 builtin 下）");
+    println!("🐍 脚本插件无需编译（Python/Node.js 源码已在 builtin下）");
     if copy_to_bin {
         println!("✅ 插件编译 + 拷贝到 bin 完成");
     } else {
@@ -206,23 +213,31 @@ fn which_node() -> String {
 }
 
 fn main() {
-    let task = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| panic!("用法: cargo xtask <plugins|copy|release|icons|tiptap>"));
+    let args: Vec<String> = std::env::args().collect();
+    let task = args
+        .get(1)
+        .unwrap_or_else(|| panic!("用法: cargo xtask <plugins|copy|release|icons|tiptap> [--debug]"));
 
     match task.as_str() {
-        "plugins" => build_plugins(false), // 开发期：仅编译，不复制到 bin
-        "copy" => copy_plugins(),          // CI：仅拷贝已编译的 exe 到 bin
+        "plugins" => build_plugins(false, false), // 开发期：仅编译，不复制到 bin
+        "copy" => copy_plugins(),                 // CI：仅拷贝已编译的 exe 到 bin
         "release" => {
-            build_plugins(true); // 打包期：编译 + 复制到 bin
+            // --debug: 用 debug profile 打包，DevTools 可用（F12 打开），用于排查多屏幕等问题
+            let debug = args.iter().any(|a| a == "--debug");
+            build_plugins(true, debug); // 打包期：编译 + 复制到 bin
             let root = workspace_root();
-            println!("📦 cargo tauri build ...");
-            run("cargo", &["tauri", "build"], &root);
+            if debug {
+                println!("📦 cargo tauri build --debug（DevTools 可用）...");
+                run("cargo", &["tauri", "build", "--debug"], &root);
+            } else {
+                println!("📦 cargo tauri build ...");
+                run("cargo", &["tauri", "build"], &root);
+            }
         }
         "icons" => fetch_icons(),    // 拉取 Lucide 图标生成 sprite
         "tiptap" => bundle_tiptap(), // 打包 Tiptap IIFE 产物
         other => {
-            panic!("未知子命令: {other}\n用法: cargo xtask <plugins|copy|release|icons|tiptap>")
+            panic!("未知子命令: {other}\n用法: cargo xtask <plugins|copy|release|icons|tiptap> [--debug]")
         }
     }
 }

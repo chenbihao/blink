@@ -166,6 +166,7 @@ pub async fn set_config(
                 max_items = cfg.max_items,
                 retention_days = cfg.retention_days,
                 display_count = cfg.display_count,
+                candidate_limit = cfg.candidate_limit,
                 "剪贴板配置已更新"
             );
         }

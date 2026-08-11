@@ -267,6 +267,10 @@ function itemKey(item) {
   if (item.lnk_path) return "open:" + item.lnk_path.toLowerCase();
   if (item.is_calc) return "calc:" + item.name;
   if (item.is_placeholder) return "placeholder:" + item.name;
+  // 剪贴板历史项：用 hitId（= clipboard_history 表主键）做去重键，
+  // 不用 name+description——preview 截断后多条可能相同（如长文件路径），导致误去重。
+  const hitId = item.actions?.[0]?.hitId;
+  if (hitId) return "clip:" + hitId;
   return (item.actions?.[0]?.kind || "x") + ":" + item.name + ":" + (item.description || "");
 }
 

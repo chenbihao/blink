@@ -10,6 +10,7 @@ import * as autosuggestConfig from "./autosuggest-config.js";
 import * as chord from "./chord.js";
 import * as aiMode from "./ai-mode.js";
 import * as cmdMode from "./command-mode.js";
+import * as clipboardMode from "./clipboard-mode.js";
 import * as inputState from "./input-state.js";
 import { applyThemeFromConfig, applyGlassOpacityFromConfig } from "../shared/theme.js";
 import { applyI18nFromConfig } from "../i18n/index.js";
@@ -35,4 +36,5 @@ contextmenu.init();
 chord.init();
 aiMode.init(); // 0.17.6: AI 模式初始化（注册 CHAT_STREAM / CHAT_CONFIRM_ACTION 监听）
 cmdMode.init(); // 0.18.6: 命令模式初始化（创建 hint DOM）
+clipboardMode.init(); // 0.19.15: 剪贴板模式初始化（创建徽章 DOM）
 inputState.init(); // 输入状态桥接初始化（注册 listener + register_main_input_view）

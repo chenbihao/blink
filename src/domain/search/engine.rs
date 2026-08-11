@@ -31,13 +31,21 @@ pub enum SearchAction {
     None,
     /// 打开路径(应用/快捷方式/文件/URL)。
     Open { path: String },
-    /// 复制文本到剪贴板(计算结果 / 插件 Copy / 剪贴板历史)。
+    /// 复制文本到剪贴板(计算结果 / 插件 Copy)。
     /// `text` 为结构化 payload,经 `into_app_entry` 透传到前端 `Action.payload`。
-    /// `hit_id` 是命中回写通道（0.8.5 §6.4）——ClipboardEngine 展开的历史条目带 `Some(item.id)`,
-    /// 前端复制成功后 `record_clipboard_hit` 频率加权。CalcEngine / Plugin Copy 传 `None`。
+    /// CalcEngine / Plugin Copy 用此变体——text 在搜索时已有(短文本)。
     Copy {
         text: String,
         hit_id: Option<String>,
+    },
+    /// 延迟复制(剪贴板历史)——搜索路径只携带 `hit_id`(= clipboard_history 表主键)，
+    /// 不预载完整 `text`。用户激活时前端 `invoke("get_clipboard_text", { id })` 按需拉取。
+    ///
+    /// **动机**：剪贴板历史可达 500 条候选 × 长 text（数十 KB/条），搜索路径全量预载
+    /// + `into_app_entry` 三序列化(Copy payload + edit runArg + pin runArg)导致 MB 级 JSON。
+    /// LazyCopy 切断搜索路径与 text 的耦合，将延迟从 ~467ms 降到 <100ms。
+    LazyCopy {
+        hit_id: String,
     },
     /// 运行内置动作（0.8.0 §1.3）：`id` 为动作注册表 key，`arg` 为参数（可选）。
     /// 前端命中 `Action.kind == Run` → `invoke("run_builtin_action", { id, arg })`。
@@ -142,6 +150,9 @@ impl SearchItem {
                 // P2-#18: 文本型 item 声明 edit/pin actions（§4.1）。
                 // hint 存 i18n key，前端 contextmenu.js (a) 段用 t(hint) 渲染。
                 // actions.js 按 run_id 分派到 openContentEditor / createStickyNote。
+                //
+                // CalcEngine / Plugin Copy 走此分支——text 在搜索时已有(短文本)。
+                // 剪贴板历史走 LazyCopy 分支(延迟加载)。
                 AppEntry {
                     name: self.title,
                     pinyin_name: String::new(),
@@ -177,6 +188,61 @@ impl SearchItem {
                             kind: ActionKind::Run,
                             run_id: Some("pin_text_item".to_string()),
                             run_arg: Some(serde_json::Value::String(text)),
+                            hint: Some("menu.sticky".to_string()),
+                            ..Action::default()
+                        },
+                    ],
+                    score_detail,
+                    context_aware,
+                    ..Default::default()
+                }
+            }
+            SearchAction::LazyCopy { hit_id } => {
+                // 剪贴板历史项：搜索路径不预载 text，激活时按需拉取。
+                //
+                // actions[0] = Copy { payload: None, hit_id } —— 前端检测到 payload 为空
+                //   且 hitId 非空时，调 `get_clipboard_text(hitId)` 拉取 text 再复制。
+                // actions[1] = Run { edit_text_item, run_arg: { originRef: hit_id, source } }
+                //   —— 前端编辑时同样按需拉取 text。
+                // actions[2] = Run { pin_text_item, run_arg: { originRef: hit_id } }
+                //   —— 前端钉便签时按需拉取 text。
+                //
+                // **与 Copy 分支的区别**：run_arg 不含 `text` 字段，前端检测到缺 text 时
+                // 先 `getClipboardText(originRef)` 拉取再执行后续逻辑。
+                AppEntry {
+                    name: self.title,
+                    pinyin_name: String::new(),
+                    pinyin_full: String::new(),
+                    description: self.subtitle,
+                    lnk_path: String::new(),
+                    is_calc: false,
+                    score,
+                    is_placeholder: false,
+                    is_error,
+                    source: self.source.clone(),
+                    actions: vec![
+                        Action {
+                            kind: ActionKind::Copy,
+                            payload: None, // 延迟加载：前端按需调 get_clipboard_text
+                            hit_id: Some(hit_id.clone()),
+                            ..Action::default()
+                        },
+                        Action {
+                            kind: ActionKind::Run,
+                            run_id: Some("edit_text_item".to_string()),
+                            run_arg: Some(serde_json::json!({
+                                "originRef": hit_id,
+                                "source": self.source,
+                            })),
+                            hint: Some("menu.edit".to_string()),
+                            ..Action::default()
+                        },
+                        Action {
+                            kind: ActionKind::Run,
+                            run_id: Some("pin_text_item".to_string()),
+                            run_arg: Some(serde_json::json!({
+                                "originRef": hit_id,
+                            })),
                             hint: Some("menu.sticky".to_string()),
                             ..Action::default()
                         },

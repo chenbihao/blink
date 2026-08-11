@@ -23,6 +23,8 @@ export const EVENTS = Object.freeze({
 
     // ── Chord ──
     CHORD_FILL_QUERY: 'blink://chord-fill-query',
+    /** Chord 触发后要求前端进入独占模式。payload: { mode: "clipboard" }。 */
+    CHORD_ENTER_MODE: 'blink://chord-enter-mode',
 
     // ── Chat ──
     CHAT_STREAM: 'blink://chat-stream',

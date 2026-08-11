@@ -151,7 +151,12 @@ body.no-glass #app::before {
 }
 
 body.chord-visible #ghost-overlay:has(.ghost-suggest:empty) .ghost-chord:not(:empty) {
-  display: inline;
+display: inline;
+}
+
+/* 0.19.15: 剪贴板独占模式——隐藏 chord 待命提示（用户已在交互，Alt+字母提示无意义） */
+body.clipboard-mode-active #ghost-overlay .ghost-chord {
+display: none !important;
 }
 
 #ghost-overlay .ghost-chord .chord-item {
@@ -248,4 +253,32 @@ body.voice-error #ghost-overlay .ghost-chord {
 .command-hint.command-error {
   color: var(--accent);
   opacity: 1;
+}
+
+/* ── 0.19.15 剪贴板模式徽章 ────────────────────────────────────────────── */
+/* Alt+C 进入剪贴板模式后，搜索栏右侧显示模式徽章。 */
+.clipboard-mode-badge {
+  position: absolute;
+  top: var(--space-xs);
+  right: var(--space-sm);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px var(--space-xs);
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+  background: var(--bg-elevated);
+  border-radius: var(--radius-sm);
+  pointer-events: none;
+  -webkit-app-region: no-drag;
+}
+
+.clipboard-mode-badge.hidden {
+  display: none;
+}
+
+.clipboard-mode-badge .icon {
+  width: 12px;
+  height: 12px;
+  opacity: 0.7;
 }

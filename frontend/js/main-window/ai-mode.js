@@ -389,6 +389,11 @@ function handleDone(chunk) {
 
 /**
  * 处理错误。
+ *
+ * 0.19.1：Error 是终态，用户接下来大概率想重试或退出——
+ * 立即清除 MAIN_WINDOW_AI_ACTIVE，恢复看门狗失焦隐藏 + Alt+Space toggle。
+ * 不靠后端 30s 兜底定时器（那 30s 内用户按 Alt+Space 会走 "AI 活跃" 分支
+ * 只 refocus 不 toggle，感知为"窗口唤不起来了"）。
  */
 function handleError(message) {
   requestId = null;
@@ -397,6 +402,11 @@ function handleError(message) {
     throttle = null;
   }
   streamRenderer = null;
+
+  // 立即清除看门狗 AI 活跃标志——Error 是终态，不应继续阻止 toggle / 失焦隐藏
+  clearMainAiActive().catch((e) =>
+    console.warn("[ai-mode] clearMainAiActive 失败 (handleError):", e),
+  );
 
   const responseArea = aiContentEl.querySelector(".ai-response-area");
   if (responseArea) {
@@ -408,8 +418,15 @@ function handleError(message) {
 
 /**
  * 处理最大轮次到达。
+ *
+ * 0.19.1：MaxTurnsReached 是终态，同 handleError——立即清除 AI 活跃标志。
  */
 function handleMaxTurns(maxTurns) {
+  // 立即清除看门狗 AI 活跃标志——MaxTurnsReached 是终态
+  clearMainAiActive().catch((e) =>
+    console.warn("[ai-mode] clearMainAiActive 失败 (handleMaxTurns):", e),
+  );
+
   const responseArea = aiContentEl.querySelector(".ai-response-area");
   if (responseArea) {
     responseArea.insertAdjacentHTML(

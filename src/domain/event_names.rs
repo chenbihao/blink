@@ -28,6 +28,9 @@ impl EventNames {
 
     // ── Chord ──
     pub const CHORD_FILL_QUERY: &str = "blink://chord-fill-query";
+    /// Chord 触发后要求前端进入独占模式。payload: `{ mode: "clipboard" }`。
+    /// 前端据此切换模式状态机，不走 search pipeline。
+    pub const CHORD_ENTER_MODE: &str = "blink://chord-enter-mode";
 
     // ── Chat ──
     pub const CHAT_STREAM: &str = "blink://chat-stream";

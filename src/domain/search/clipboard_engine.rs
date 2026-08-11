@@ -5,9 +5,9 @@
 //! 传入的 query 已经是**剥离 keyword 后的参数**（如 `"剪贴板 hello"` → engine 收到 `"hello"`）。
 //!
 //! **engine 只负责按 arg 展开**：
-//! - 空 arg → `query_recent(pool, 9)` top-N（对齐 Alt+1~9）
-//! - 非空 arg → `search_history(pool, arg, 9)` fuzzy 搜索
-//! - 每条 → `SearchAction::Copy { text, hit_id: Some(id) }`，激活时前端复制 + 回写命中
+//! - 空 arg → `query_recent_meta(pool, 9)` top-N 元数据（对齐 Alt+1~9）
+//! - 非空 arg → `query_recent_days_meta(pool, 30, 500)` + nucleo fuzzy 匹配 preview
+//! - 每条 → `SearchAction::LazyCopy { hit_id }`，搜索路径不预载 text，激活时前端按需拉取
 //!
 //! **不做 keyword 检测**：完全由 route 层判定。engine 收到什么参数就按什么展开——这样：
 //! - engine 边界清爽（关键字派发在 intent 域，engine 只做数据召回）
@@ -28,8 +28,10 @@ use std::sync::{Arc, RwLock};
 use sqlx::SqlitePool;
 
 use super::engine::{Lane, QueryContext, SearchAction, SearchEngine, SearchItem};
-use crate::infra::data::clipboard::{ClipboardItem, query_recent, search as search_history};
-use crate::infra::data::clipboard_images::{ClipboardImageMeta, query_recent_images};
+use crate::infra::data::clipboard::{
+    ClipboardMeta, query_recent_meta, query_recent_days_meta,
+};
+use crate::infra::data::clipboard_images::{ClipboardImageListItem, query_recent_image_list, search_image_list};
 
 /// Engine id — 对应 `SearchEngine::id()` 与 `Route::EngineTakeover.engine_id`。
 pub const ENGINE_ID: &str = "clipboard";
@@ -40,9 +42,15 @@ pub const TRIGGERS: &[&str] = &["剪贴板", "clip", "jtb", "jiantieban"];
 
 /// 单次展示条数默认值（与 `ClipboardConfig::display_count` 默认值一致）。
 const DEFAULT_DISPLAY_COUNT: usize = 30;
-/// 单次展示条数下限/上限。下限 1 防"啥也不显示"，上限 200 防一次拉太多拖慢 UI。
+/// 单次展示条数下限/上限。下限 1 防“啥也不显示”，上限 200 防一次拉太多拖慢 UI。
 const DISPLAY_COUNT_MIN: usize = 1;
 const DISPLAY_COUNT_MAX: usize = 200;
+
+/// 搜索候选池上限默认值（与 `ClipboardConfig::candidate_limit` 默认值一致）。
+const DEFAULT_CANDIDATE_LIMIT: usize = 500;
+/// 搜索候选池下限/上限。下限 50 防几乎无结果，上限 5000 防内存/IO 过载。
+const CANDIDATE_LIMIT_MIN: usize = 50;
+const CANDIDATE_LIMIT_MAX: usize = 5000;
 
 /// 副行预览截断字符数（避免长文本挤爆 UI；前端本身也会截）。
 const PREVIEW_MAX_CHARS: usize = 60;
@@ -57,6 +65,9 @@ pub struct ClipboardEngine {
     /// 单次展示条数快照（`display_count` 配置项）。
     /// 与 `SearchService` 联动：`set_config("clipboard_config")` 时 downcast 转发到本 engine。
     display_count: Arc<RwLock<usize>>,
+    /// 搜索候选池上限快照（`candidate_limit` 配置项）。
+    /// 控制搜索时拉多少条元数据做 fuzzy 匹配。默认 500。
+    candidate_limit: Arc<RwLock<usize>>,
 }
 
 impl ClipboardEngine {
@@ -66,6 +77,7 @@ impl ClipboardEngine {
             cache_pool,
             language: Arc::new(RwLock::new("zh".to_string())),
             display_count: Arc::new(RwLock::new(DEFAULT_DISPLAY_COUNT)),
+            candidate_limit: Arc::new(RwLock::new(DEFAULT_CANDIDATE_LIMIT)),
         }
     }
 
@@ -83,6 +95,17 @@ impl ClipboardEngine {
             DEFAULT_DISPLAY_COUNT
         };
         *self.display_count.write().unwrap() = clamped;
+    }
+
+    /// 更新搜索候选池上限（设置页 `clipboard_config` 保存时转发）。
+    /// 自动 clamp 到 `[CANDIDATE_LIMIT_MIN, CANDIDATE_LIMIT_MAX]`，非法值兜底默认值。
+    pub fn update_candidate_limit(&self, limit: u32) {
+        let clamped = if (CANDIDATE_LIMIT_MIN..=CANDIDATE_LIMIT_MAX).contains(&(limit as usize)) {
+            limit as usize
+        } else {
+            DEFAULT_CANDIDATE_LIMIT
+        };
+        *self.candidate_limit.write().unwrap() = clamped;
     }
 }
 
@@ -107,91 +130,108 @@ impl SearchEngine for ClipboardEngine {
     }
 
     /// query 是**已剥离触发词后的参数**（由 intent 层负责剥离）。
-    /// - 空串 → 拉最近 top-N
-    /// - 非空 → fuzzy search
+    /// - 空串 → 拉最近 top-N（元数据，不含 text）
+    /// - 非空 → fuzzy search（元数据，不含 text）
+    ///
+    /// **不预载完整 text**：搜索路径只携带 `id` + `preview`（80 字符截断），
+    /// 完整 text 在用户激活时通过 `get_clipboard_text` command 按需拉取。
+    /// 这将搜索路径 JSON 从 MB 级降到 KB 级。
     ///
     /// **不再检测 keyword**：0.8.5 §6.4 后此 engine 只在 EngineTakeover 路径被调用；
     /// route 层保证 Mixed 分支不会调到本 engine。
     async fn search(&self, query: &str, _ctx: &QueryContext<'_>) -> Vec<SearchItem> {
         let arg = query.trim();
         let limit = *self.display_count.read().unwrap() as i64;
+        let candidate_limit = *self.candidate_limit.read().unwrap() as i64;
         let lang = self.language.read().unwrap().clone();
+        let t0 = std::time::Instant::now();
 
-        // 查文本历史
-        let text_items = if arg.is_empty() {
-            query_recent(&self.pool, limit).await
+        // 并行查询文本元数据 + 图片元数据（两个不同的 SQLite pool，无竞争）。
+        // 不加载 text / thumb_blob——前端通过 get_clipboard_text / blink-clipimg 协议按需懒加载。
+        let (text_metas, image_items) = if arg.is_empty() {
+            // Alt+C 场景：两条简单 LIMIT 查询并行（不含 text 列）
+            let t_text = std::time::Instant::now();
+            let t_img = std::time::Instant::now();
+            let (text, images) = tokio::join!(
+                query_recent_meta(&self.pool, limit),
+                query_recent_image_list(&self.cache_pool, limit)
+            );
+            tracing::trace!(
+                text_count = text.len(),
+                image_count = images.len(),
+                text_ms = t_text.elapsed().as_millis() as u64,
+                image_ms = t_img.elapsed().as_millis() as u64,
+                elapsed_ms = t0.elapsed().as_millis() as u64,
+                "ClipboardEngine: 空查询 DB 并行完成"
+            );
+            (text, images)
         } else {
-            search_history(&self.pool, arg, limit).await
+            // 搜索场景：文本 fuzzy + 图片 SQL LIKE 并行
+            // 文本：拉近 30 天元数据（不含 text），nucleo 匹配 preview
+            // 图片：SQL LIKE 过滤 source_app / source_path（不下全量再 Rust 过滤）
+            let (text_metas, image_items) = tokio::join!(
+                query_recent_days_meta(&self.pool, 30, candidate_limit),
+                search_image_list(&self.cache_pool, arg, limit)
+            );
+            // nucleo fuzzy match on preview（不含 text）
+            let text_matched = fuzzy_match_metas(&text_metas, arg, limit as usize);
+            (text_matched, image_items)
         };
 
-        // 查图片历史（0.16.4）——空 arg 拉最近；非空 arg 对 source_app 和稳定标题做包含匹配
-        let image_items = if arg.is_empty() {
-            query_recent_images(&self.cache_pool, limit).await
-        } else {
-            // 对图片的 source_app、source_path 和稳定标题做包含匹配
-            let all_images = query_recent_images(&self.cache_pool, 200).await;
-            let arg_lower = arg.to_lowercase();
-            all_images
-                .into_iter()
-                .filter(|meta| {
-                    let title = format!("图片 {}x{}", meta.width, meta.height);
-                    let haystack = match &meta.source_app {
-                        Some(app) => format!(
-                            "{} {} {}",
-                            title,
-                            app,
-                            meta.source_path.as_deref().unwrap_or("")
-                        ),
-                        None => format!("{} {}", title, meta.source_path.as_deref().unwrap_or("")),
-                    };
-                    haystack.to_lowercase().contains(&arg_lower)
-                })
-                .take(limit as usize)
-                .collect()
-        };
+        let t1 = std::time::Instant::now();
 
         // 合并文本 + 图片，按 created_at 倒序
         let mut combined: Vec<(i64, ClipboardEntry)> = Vec::new();
-        for item in text_items {
-            combined.push((item.created_at, ClipboardEntry::Text(item)));
+        for meta in text_metas {
+            combined.push((meta.created_at, ClipboardEntry::Text(meta)));
         }
         for item in image_items {
             combined.push((item.created_at, ClipboardEntry::Image(item)));
         }
         combined.sort_by(|a, b| b.0.cmp(&a.0));
 
-        combined
+        let combined_len_before_take = combined.len();
+        let result: Vec<SearchItem> = combined
             .into_iter()
             .enumerate()
             .map(|(i, (_, entry))| match entry {
-                ClipboardEntry::Text(item) => to_search_item(item, i, &lang),
+                ClipboardEntry::Text(meta) => to_search_item(meta, i, &lang),
                 ClipboardEntry::Image(meta) => to_image_search_item(meta, i, &lang),
             })
             .take(limit as usize)
-            .collect()
+            .collect();
+        tracing::trace!(
+            total = combined_len_before_take,
+            returned = result.len(),
+            db_ms = t0.elapsed().as_millis() as u64,
+            merge_ms = t1.elapsed().as_millis() as u64,
+            "ClipboardEngine: search 完成"
+        );
+        result
     }
 }
 
-/// ClipboardItem → SearchItem。
+/// ClipboardMeta → SearchItem（延迟加载版）。
 ///
 /// - `title` 用 preview 的截断版（原文含换行则去掉），主行清爽
 /// - `subtitle` "3 分钟前 · N chars"（副行时间提示）
 /// - `score` 基线 0.9 起按名次递减 0.02，确保后端排序稳定（前端仍会按 score sort）
-/// - `hit_id = Some(item.id)` → 前端复制成功后回写 `record_clipboard_hit`
-fn to_search_item(item: ClipboardItem, index: usize, lang: &str) -> SearchItem {
-    let title = preview_line(&item.preview);
-    let subtitle = format_subtitle(&item, lang);
+/// - `action = LazyCopy { hit_id }`——搜索路径不预载 text，激活时前端按需拉取
+///
+/// **与旧 `to_search_item` 的区别**：不再携带 `text`，改用 `LazyCopy` 变体。
+/// 副行的 chars 计数用 `preview.chars().count()`（preview 是 80 字符截断版，
+/// 精确计数需激活后拉取 text 才有——但副行只是提示性文案，截断值可接受）。
+fn to_search_item(meta: ClipboardMeta, index: usize, lang: &str) -> SearchItem {
+    let title = preview_line(&meta.preview);
+    let subtitle = format_subtitle(&meta, lang);
     let score = (0.9 - index as f32 * 0.02).max(0.5);
 
     SearchItem {
-        id: format!("clipboard:{}", item.id),
+        id: format!("clipboard:{}", meta.id),
         title,
         subtitle: Some(subtitle),
         score,
-        action: SearchAction::Copy {
-            text: item.text,
-            hit_id: Some(item.id),
-        },
+        action: SearchAction::LazyCopy { hit_id: meta.id },
         source: "clipboard".into(),
         score_detail: Some(format!("clip=0.9-{:.2}", index as f32 * 0.02)),
         context_aware: false,
@@ -200,11 +240,11 @@ fn to_search_item(item: ClipboardItem, index: usize, lang: &str) -> SearchItem {
 
 /// 文本/图片条目的统一容器（合并排序用）。
 enum ClipboardEntry {
-    Text(ClipboardItem),
-    Image(ClipboardImageMeta),
+    Text(ClipboardMeta),
+    Image(ClipboardImageListItem),
 }
 
-/// ClipboardImageMeta → SearchItem（0.16.4）。
+/// ClipboardImageListItem → SearchItem（0.16.4）。
 ///
 /// - `title` = "图片 {W}x{H} ({source_desc})"
 ///   - 0.17.9：source_desc 拼接逻辑——有 source_path 时「文件名 · 应用名」，无则仅应用名
@@ -213,7 +253,10 @@ enum ClipboardEntry {
 /// - `action` = `RunAction { id: "copy_clipboard_image", arg: image_id }`
 ///   前端 actions.js 识别此 id，调 `copy_clipboard_image` 后端命令写回系统剪贴板
 /// - `source` = "clipboard"（与文本项同 source，前端白名单已含）
-fn to_image_search_item(meta: ClipboardImageMeta, index: usize, lang: &str) -> SearchItem {
+///
+/// **不含 thumb_blob**：缩略图由前端通过 blink-clipimg 协议按需懒加载，
+/// 搜索路径无需加载 ~50KB/条的 BLOB 数据。
+fn to_image_search_item(meta: ClipboardImageListItem, index: usize, lang: &str) -> SearchItem {
     let is_zh = lang == "zh";
     let app_desc = resolve_source_desc(meta.source_app.as_deref(), is_zh);
     let source_desc = match &meta.source_path {
@@ -284,7 +327,7 @@ fn resolve_source_desc(source_app: Option<&str>, is_zh: bool) -> String {
         }
     }
 }
-fn format_image_subtitle(meta: &ClipboardImageMeta, lang: &str) -> String {
+fn format_image_subtitle(meta: &ClipboardImageListItem, lang: &str) -> String {
     let now = chrono::Utc::now().timestamp();
     let elapsed = (now - meta.created_at).max(0);
     let is_zh = lang == "zh";
@@ -359,9 +402,12 @@ fn preview_line(raw: &str) -> String {
 ///
 /// zh/en 双语。lang 传入 "zh" 或 "en"（其他视作 en fallback）。
 /// "chars" 单位跨语言保留——ASCII 字数国际化收益低,且 CJK 字符计数概念相通。
-fn format_subtitle(item: &ClipboardItem, lang: &str) -> String {
+///
+/// **注意**：chars 计数基于 `preview`（80 字符截断版），非完整 text。
+/// 精确计数需激活后拉取 text 才有——但副行只是提示性文案，截断值可接受。
+fn format_subtitle(meta: &ClipboardMeta, lang: &str) -> String {
     let now = chrono::Utc::now().timestamp();
-    let elapsed = (now - item.created_at).max(0);
+    let elapsed = (now - meta.created_at).max(0);
     let is_zh = lang == "zh";
     let time_desc = if elapsed < 60 {
         if is_zh {
@@ -391,8 +437,43 @@ fn format_subtitle(item: &ClipboardItem, lang: &str) -> String {
             format!("{n} d ago")
         }
     };
-    let char_count = item.text.chars().count();
+    let char_count = meta.preview.chars().count();
     format!("{time_desc} · {char_count} chars")
+}
+
+/// nucleo fuzzy 匹配 `ClipboardMeta` 列表，按 preview 字段打分。
+///
+/// 与 `infra::data::clipboard::search` 逻辑一致，但作用于 `ClipboardMeta`（不含 text）。
+/// 返回按 score 降序排列的 top-N `ClipboardMeta`。
+fn fuzzy_match_metas(metas: &[ClipboardMeta], query: &str, limit: usize) -> Vec<ClipboardMeta> {
+    use nucleo::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
+    use nucleo::{Config, Matcher, Utf32Str};
+
+    let query_lower = query.to_ascii_lowercase();
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let pattern = Pattern::new(
+        &query_lower,
+        CaseMatching::Smart,
+        Normalization::Smart,
+        AtomKind::Fuzzy,
+    );
+    let mut buf = Vec::new();
+
+    let mut scored: Vec<(u32, ClipboardMeta)> = metas
+        .iter()
+        .filter_map(|meta| {
+            let haystack = Utf32Str::new(&meta.preview, &mut buf);
+            let score = pattern.score(haystack, &mut matcher)?;
+            Some((score, meta.clone()))
+        })
+        .collect();
+
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, meta)| meta)
+        .collect()
 }
 
 #[cfg(test)]
@@ -415,22 +496,20 @@ mod tests {
 
     #[test]
     fn to_search_item_carries_hit_id() {
-        let item = ClipboardItem {
+        let meta = ClipboardMeta {
             id: "clip_123".into(),
-            text: "hello".into(),
             preview: "hello".into(),
             created_at: chrono::Utc::now().timestamp(),
             source_app: None,
             hit_count: 0,
         };
-        let si = to_search_item(item, 0, "zh");
+        let si = to_search_item(meta, 0, "zh");
         assert_eq!(si.id, "clipboard:clip_123");
         assert_eq!(si.source, "clipboard");
-        if let SearchAction::Copy { text, hit_id } = &si.action {
-            assert_eq!(text, "hello");
-            assert_eq!(hit_id.as_deref(), Some("clip_123"));
+        if let SearchAction::LazyCopy { hit_id } = &si.action {
+            assert_eq!(hit_id, "clip_123");
         } else {
-            panic!("expected Copy action");
+            panic!("expected LazyCopy action");
         }
         assert!((si.score - 0.9).abs() < 1e-6);
     }
@@ -438,15 +517,14 @@ mod tests {
     #[test]
     fn score_decreases_with_index() {
         let mk = |i: usize| {
-            let item = ClipboardItem {
+            let meta = ClipboardMeta {
                 id: format!("id_{i}"),
-                text: "x".into(),
                 preview: "x".into(),
                 created_at: 0,
                 source_app: None,
                 hit_count: 0,
             };
-            to_search_item(item, i, "zh").score
+            to_search_item(meta, i, "zh").score
         };
         assert!(mk(0) > mk(1));
         assert!(mk(1) > mk(2));
@@ -456,56 +534,52 @@ mod tests {
 
     #[test]
     fn format_subtitle_recent_zh() {
-        let item = ClipboardItem {
+        let meta = ClipboardMeta {
             id: "x".into(),
-            text: "hello".into(),
             preview: "hello".into(),
             created_at: chrono::Utc::now().timestamp() - 30,
             source_app: None,
             hit_count: 0,
         };
-        assert!(format_subtitle(&item, "zh").starts_with("刚刚"));
-        assert!(format_subtitle(&item, "zh").ends_with("5 chars"));
+        assert!(format_subtitle(&meta, "zh").starts_with("刚刚"));
+        assert!(format_subtitle(&meta, "zh").ends_with("5 chars"));
     }
 
     #[test]
     fn format_subtitle_recent_en() {
-        let item = ClipboardItem {
+        let meta = ClipboardMeta {
             id: "x".into(),
-            text: "hello".into(),
             preview: "hello".into(),
             created_at: chrono::Utc::now().timestamp() - 30,
             source_app: None,
             hit_count: 0,
         };
-        assert!(format_subtitle(&item, "en").starts_with("just now"));
-        assert!(format_subtitle(&item, "en").ends_with("5 chars"));
+        assert!(format_subtitle(&meta, "en").starts_with("just now"));
+        assert!(format_subtitle(&meta, "en").ends_with("5 chars"));
     }
 
     #[test]
     fn format_subtitle_minutes_zh() {
-        let item = ClipboardItem {
+        let meta = ClipboardMeta {
             id: "x".into(),
-            text: "ab".into(),
             preview: "ab".into(),
             created_at: chrono::Utc::now().timestamp() - 300,
             source_app: None,
             hit_count: 0,
         };
-        assert!(format_subtitle(&item, "zh").contains("分钟前"));
+        assert!(format_subtitle(&meta, "zh").contains("分钟前"));
     }
 
     #[test]
     fn format_subtitle_minutes_en() {
-        let item = ClipboardItem {
+        let meta = ClipboardMeta {
             id: "x".into(),
-            text: "ab".into(),
             preview: "ab".into(),
             created_at: chrono::Utc::now().timestamp() - 300,
             source_app: None,
             hit_count: 0,
         };
-        assert!(format_subtitle(&item, "en").contains("min ago"));
+        assert!(format_subtitle(&meta, "en").contains("min ago"));
     }
 
     #[test]
@@ -612,9 +686,8 @@ mod tests {
 
     #[test]
     fn to_image_search_item_with_source_path() {
-        let meta = ClipboardImageMeta {
+        let meta = ClipboardImageListItem {
             id: "img_test".into(),
-            thumb_blob: vec![1, 2, 3],
             width: 1920,
             height: 1080,
             created_at: chrono::Utc::now().timestamp(),
@@ -631,9 +704,8 @@ mod tests {
 
     #[test]
     fn to_image_search_item_without_source_path() {
-        let meta = ClipboardImageMeta {
+        let meta = ClipboardImageListItem {
             id: "img_test2".into(),
-            thumb_blob: vec![1, 2, 3],
             width: 800,
             height: 600,
             created_at: chrono::Utc::now().timestamp(),
@@ -655,9 +727,8 @@ mod tests {
 
     #[test]
     fn to_image_search_item_with_screenshot_label() {
-        let meta = ClipboardImageMeta {
+        let meta = ClipboardImageListItem {
             id: "img_test3".into(),
-            thumb_blob: vec![1, 2, 3],
             width: 2560,
             height: 1440,
             created_at: chrono::Utc::now().timestamp(),

@@ -174,6 +174,8 @@ pub async fn screenshot_copy_region(
     w: u32,
     h: u32,
 ) -> Result<(), String> {
+    // ⚠️ 临时打桩日志（0.19.14 性能排查用），收尾时清理
+    let t0 = std::time::Instant::now();
     // BGRA 裁剪与剪贴板写入都是同步操作，分别由共享语义隔离到阻塞线程池。
     let (bgra, cw, ch) = tokio::task::spawn_blocking(move || {
         crate::infra::platform::screenshot::crop(x, y, w, h)
@@ -181,6 +183,7 @@ pub async fn screenshot_copy_region(
     })
     .await
     .map_err(|e| format!("spawn_blocking join 失败: {e}"))??;
+    let t_crop = t0.elapsed();
     crate::domain::clipboard::write_bgra(
         bgra,
         cw,
@@ -189,7 +192,13 @@ pub async fn screenshot_copy_region(
     )
     .await
     .map_err(|e| e.to_string())?;
-    tracing::info!(w = cw, h = ch, "截图选区已直传剪贴板（快路径）");
+    tracing::info!(
+        w = cw, h = ch,
+        crop_ms = t_crop.as_millis() as u64,
+        write_ms = (t0.elapsed() - t_crop).as_millis() as u64,
+        total_ms = t0.elapsed().as_millis() as u64,
+        "截图选区已直传剪贴板（快路径）"
+    );
     finish_screenshot_session(&app);
     Ok(())
 }
@@ -251,6 +260,8 @@ pub async fn screenshot_pin_region(
     screen_x: i32,
     screen_y: i32,
 ) -> Result<(), String> {
+    // ⚠️ 临时打桩日志（0.19.14 性能排查用），收尾时清理
+    let t0 = std::time::Instant::now();
     // P6: crop BGRA → 直接 store + show_pin，不阻塞 encode_png
     let (bgra, cw, ch) = tokio::task::spawn_blocking(move || {
         crate::infra::platform::screenshot::crop(x, y, w, h)
@@ -258,6 +269,7 @@ pub async fn screenshot_pin_region(
     })
     .await
     .map_err(|e| format!("spawn_blocking join 失败: {e}"))??;
+    let t_crop = t0.elapsed();
 
     let data_len = bgra.len();
     crate::infra::platform::window::show_pin_window(
@@ -265,12 +277,15 @@ pub async fn screenshot_pin_region(
         crate::infra::platform::window::PinImage::Bgra(std::sync::Arc::new(bgra), cw, ch),
         screen_x, screen_y, false,
     )?;
-    finish_screenshot_session(&app);
     tracing::info!(
         w, h, screen_x, screen_y,
         bgra_bytes = data_len,
+        crop_ms = t_crop.as_millis() as u64,
+        show_ms = (t0.elapsed() - t_crop).as_millis() as u64,
+        total_ms = t0.elapsed().as_millis() as u64,
         "截图已钉到屏幕（快路径 P6 raw BGRA）"
     );
+    finish_screenshot_session(&app);
     Ok(())
 }
 

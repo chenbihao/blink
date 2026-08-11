@@ -7,7 +7,7 @@
 //! - Hook 回调（`ll_proc`）不查 DB、不调 Tauri、不 await、不取可能阻塞的锁。
 //! - 原子操作和非阻塞 channel send 允许。
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU8;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -62,8 +62,20 @@ const HEARTBEAT_INTERVAL_MS: u32 = 60_000;
 /// Hook 线程的 message-only window HWND（供控制消息唤醒）。
 static WND_HWND: std::sync::OnceLock<isize> = std::sync::OnceLock::new();
 
-/// 标记需要重装 hook（锁屏解锁后 / 心跳安全网设置）。
-static NEED_HOOK_REINSTALL: AtomicBool = AtomicBool::new(false);
+/// 重装 hook 的原因（区分心跳安全网与会话变更，用于决定日志等级和是否重置修饰键）。
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq)]
+enum ReinstallReason {
+    /// 无待处理的重装请求。
+    None = 0,
+    /// 心跳安全网（每 60 秒例行重装，防止 hook 被系统静默移除）。
+    Heartbeat = 1,
+    /// 会话变更（锁屏/解锁后重装，需同时重置修饰键状态）。
+    SessionChange = 2,
+}
+
+/// 标记需要重装 hook 及原因（锁屏解锁后 / 心跳安全网设置）。
+static REINSTALL_REASON: AtomicU8 = AtomicU8::new(ReinstallReason::None as u8);
 
 // Hook 线程的输入状态机（thread-local）。
 thread_local! {
@@ -498,7 +510,7 @@ unsafe extern "system" fn wnd_proc(
             // 心跳安全网：定期标记需要重装 hook
             if wparam.0 as usize == TIMER_ID_HEARTBEAT {
                 tracing::trace!("Heartbeat timer fired");
-                NEED_HOOK_REINSTALL.store(true, Ordering::SeqCst);
+                REINSTALL_REASON.store(ReinstallReason::Heartbeat as u8, Ordering::SeqCst);
             }
             LRESULT(0)
         }
@@ -520,7 +532,7 @@ unsafe extern "system" fn wnd_proc(
                             state.modifiers.reset_all();
                         }
                     });
-                    NEED_HOOK_REINSTALL.store(true, Ordering::SeqCst);
+                    REINSTALL_REASON.store(ReinstallReason::SessionChange as u8, Ordering::SeqCst);
                 }
                 _ => {}
             }
@@ -686,28 +698,44 @@ fn hook_thread_main() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
 
-            // 解锁后 / 心跳触发：重装 hook
-            if NEED_HOOK_REINSTALL.swap(false, Ordering::SeqCst) {
-                tracing::info!("Reinstalling WH_KEYBOARD_LL hook");
+            // 心跳 / 解锁后触发：重装 hook（防止 hook 被系统静默移除）
+            let reason = REINSTALL_REASON.swap(ReinstallReason::None as u8, Ordering::SeqCst);
+            if reason != ReinstallReason::None as u8 {
+                let is_session_change = reason == ReinstallReason::SessionChange as u8;
+                if is_session_change {
+                    tracing::info!("Reinstalling WH_KEYBOARD_LL hook (session change)");
+                } else {
+                    tracing::debug!("Reinstalling WH_KEYBOARD_LL hook (heartbeat safety net)");
+                }
                 let _ = UnhookWindowsHookEx(hhook);
                 match SetWindowsHookExW(WH_KEYBOARD_LL, Some(ll_proc), None, 0) {
                     Ok(new_hook) => {
                         hhook = new_hook;
-                        tracing::info!(
-                            hook_ptr = hhook.0 as usize,
-                            "WH_KEYBOARD_LL hook re-installed successfully"
-                        );
+                        if is_session_change {
+                            tracing::info!(
+                                hook_ptr = hhook.0 as usize,
+                                "WH_KEYBOARD_LL hook re-installed successfully"
+                            );
+                        } else {
+                            tracing::debug!(
+                                hook_ptr = hhook.0 as usize,
+                                "WH_KEYBOARD_LL hook re-installed successfully"
+                            );
+                        }
                     }
                     Err(e) => {
                         tracing::error!(?e, "Failed to re-install WH_KEYBOARD_LL hook");
                     }
                 }
-                // 重装后重置修饰键状态
-                INPUT_STATE.with(|cell| {
-                    if let Some(state) = cell.borrow_mut().as_mut() {
-                        state.modifiers.reset_all();
-                    }
-                });
+                // 仅会话变更时重置修饰键状态（心跳重装不重置——
+                // 没有锁屏/解锁，修饰键物理状态仍可信）
+                if is_session_change {
+                    INPUT_STATE.with(|cell| {
+                        if let Some(state) = cell.borrow_mut().as_mut() {
+                            state.modifiers.reset_all();
+                        }
+                    });
+                }
             }
         }
 

@@ -65,6 +65,14 @@ pub struct ClipboardConfig {
     /// 图片最大保留条数（0.16.4）。独立于文本 max_items。
     #[serde(default = "default_max_image_items")]
     pub max_image_items: u32,
+    /// 搜索候选池上限（0.19.15：性能可配置化）。
+    ///
+    /// 搜索时拉近 N 天的元数据做 fuzzy 匹配，N 由 `retention_days` 控制，
+    /// 此值控制候选池最大条数。默认 500——对大多数用户足够，
+    /// 历史记录特别多的用户可调高（消耗更多内存/IO），或调低（更快响应）。
+    /// 范围 [50, 5000]。
+    #[serde(default = "default_candidate_limit")]
+    pub candidate_limit: u32,
 }
 
 fn default_max_items() -> u32 {
@@ -76,6 +84,10 @@ fn default_retention_days() -> u32 {
 /// 单次展示条数默认值。30 对齐 AI Capability `search_clipboard_history` 默认值。
 fn default_display_count() -> u32 {
     30
+}
+/// 搜索候选池上限默认值。500 条 × preview(80 chars) ≈ 40KB JSON，足够 fuzzy 匹配。
+fn default_candidate_limit() -> u32 {
+    500
 }
 fn default_true() -> bool {
     true
@@ -104,6 +116,7 @@ impl Default for ClipboardConfig {
             blacklist_keywords: default_blacklist(),
             capture_images: true,
             max_image_items: 200,
+            candidate_limit: 500,
         }
     }
 }
@@ -128,6 +141,17 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
         .execute(pool)
         .await
         .map_err(|e| e.to_string())?;
+
+    // 覆盖索引：query_recent_meta / query_recent_days_meta 只 SELECT
+    // id, preview, created_at, source_app, hit_count——此索引让查询完全不碰
+    // 表 B-tree（text 列的 overflow page），对 1000+ 行 + 大 text 场景提速显著。
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_clip_meta_covering \
+         ON clipboard_history(created_at DESC, id, preview, source_app, hit_count)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
 
     tracing::debug!("clipboard_history 表已初始化");
     Ok(())
@@ -218,6 +242,77 @@ pub async fn query_recent_days(pool: &SqlitePool, days: u32, limit: i64) -> Vec<
     .collect()
 }
 
+/// 剪贴板条目元数据（不含完整 text，供搜索路径用）。
+///
+/// 搜索路径只需 preview（80 字符截断）做 fuzzy 匹配 + 展示，
+/// 完整 text 在用户激活时通过 [`get_text_by_id`] 按需拉取，避免搜索路径
+/// 加载 500 条完整 text 导致 MB 级 JSON 序列化开销。
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct ClipboardMeta {
+    pub id: String,
+    pub preview: String,
+    pub created_at: i64,
+    pub source_app: Option<String>,
+    pub hit_count: u32,
+}
+
+/// 查询近 N 天的剪贴板元数据（不含 text 列）。
+///
+/// 供搜索路径用——`query_recent_days` 的轻量版，不加载完整 `text` 列
+/// （长文本可达数十 KB/条，500 条 × text = MB 级数据传输 + 序列化开销）。
+/// 仅 SELECT `id, preview, created_at, source_app, hit_count`，足够 fuzzy
+/// 匹配 + 副行展示用。
+pub async fn query_recent_days_meta(
+    pool: &SqlitePool,
+    days: u32,
+    limit: i64,
+) -> Vec<ClipboardMeta> {
+    let cutoff = chrono::Utc::now().timestamp() - (days as i64 * 86400);
+    sqlx::query_as::<_, (String, String, i64, Option<String>, u32)>(
+        "SELECT id, preview, created_at, source_app, hit_count \
+         FROM clipboard_history WHERE created_at > ?1 ORDER BY created_at DESC LIMIT ?2",
+    )
+    .bind(cutoff)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(id, preview, created_at, source_app, hit_count)| ClipboardMeta {
+        id,
+        preview,
+        created_at,
+        source_app,
+        hit_count,
+    })
+    .collect()
+}
+
+/// 查询最近的剪贴板元数据（不含 text 列）。
+///
+/// 供空 query 场景（Alt+C 刚进入剪贴板模式）用——只需最近 N 条的 preview + 元数据
+/// 做展示，不需要完整 text。`query_recent` 的轻量版。
+pub async fn query_recent_meta(pool: &SqlitePool, limit: i64) -> Vec<ClipboardMeta> {
+    sqlx::query_as::<_, (String, String, i64, Option<String>, u32)>(
+        "SELECT id, preview, created_at, source_app, hit_count \
+         FROM clipboard_history ORDER BY created_at DESC LIMIT ?1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(id, preview, created_at, source_app, hit_count)| ClipboardMeta {
+        id,
+        preview,
+        created_at,
+        source_app,
+        hit_count,
+    })
+    .collect()
+}
+
 /// 模糊搜索剪贴板内容（限定近 30 天，与默认 retention_days 对齐）。
 ///
 /// **0.11.5 改动**：原先查最近 200 条做 fuzzy 候选池，现改为查近 30 天的记录——
@@ -257,6 +352,8 @@ pub async fn search(pool: &SqlitePool, query: &str, limit: i64) -> Vec<Clipboard
 }
 
 /// 按 id 查询单条剪贴板记录（0.16.3：编辑器保存时继承 hit_count 用）。
+///
+/// 返回完整 `ClipboardItem`（含 text），供编辑器等需要完整文本的场景用。
 pub async fn query_by_id(pool: &SqlitePool, id: &str) -> Option<ClipboardItem> {
     sqlx::query_as::<_, (String, String, String, i64, Option<String>, u32)>(
         "SELECT id, text, preview, created_at, source_app, hit_count FROM clipboard_history WHERE id = ?1",
@@ -274,6 +371,19 @@ pub async fn query_by_id(pool: &SqlitePool, id: &str) -> Option<ClipboardItem> {
         source_app,
         hit_count,
     })
+}
+
+/// 按 id 查询完整 text（激活时按需加载）。
+///
+/// 搜索路径只携带 `id` + `preview`，用户选中某条历史时调此函数拉取完整 `text`。
+/// 相比 `query_by_id` 只取 `text` 列，不加载其他字段——单列 scalar 查询最快。
+pub async fn get_text_by_id(pool: &SqlitePool, id: &str) -> Option<String> {
+    sqlx::query_scalar::<_, String>("SELECT text FROM clipboard_history WHERE id = ?1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
 }
 
 /// 记录剪贴板命中（用户选择粘贴某条历史）。

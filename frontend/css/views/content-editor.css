@@ -145,7 +145,7 @@
 
 /* ── 编辑区 ── */
 
-/* 0.18.3：MD 工具栏主题适配（共享组件在 components/md-toolbar.css） */
+/* 0.18.3：MD 工具栏主题适配（共有组件在 components/md-toolbar.css） */
 /* 0.18.3：工具栏移入 editor-toolbar-left，去掉 border-bottom（父级 editor-toolbar 已有） */
 .editor-md-toolbar {
   --md-toolbar-bg: transparent;
@@ -179,6 +179,24 @@
 .editor-textarea::placeholder {
   color: var(--text-sub);
   opacity: 0.5;
+}
+
+/* 滚动条——与 Tiptap 编辑区保持一致 */
+.editor-textarea::-webkit-scrollbar {
+  width: 8px;
+}
+
+.editor-textarea::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.editor-textarea::-webkit-scrollbar-thumb {
+  background: var(--surface-2);
+  border-radius: 4px;
+}
+
+.editor-textarea::-webkit-scrollbar-thumb:hover {
+  background: var(--text-faint);
 }
 
 /* ── Tiptap IR 编辑器（0.18.3：替换 Cherry 双栏）── */

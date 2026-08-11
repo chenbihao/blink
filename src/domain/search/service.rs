@@ -305,6 +305,19 @@ impl SearchService {
         tracing::debug!(count, "ClipboardEngine 展示条数已热更新");
     }
 
+    /// 更新 ClipboardEngine 的搜索候选池上限（设置页 `clipboard_config` 保存时转发）。
+    pub fn update_clipboard_candidate_limit(&self, limit: u32) {
+        for engine in &self.sync_engines {
+            if let Some(clip) = engine
+                .as_any()
+                .downcast_ref::<super::clipboard_engine::ClipboardEngine>()
+            {
+                clip.update_candidate_limit(limit);
+            }
+        }
+        tracing::debug!(limit, "ClipboardEngine 候选池上限已热更新");
+    }
+
     /// 启动所有引擎的后台任务(如 StartMenuEngine 预扫)。
     pub fn start(&self) {
         for e in self.sync_engines.iter().chain(self.async_engines.iter()) {
@@ -390,6 +403,48 @@ impl SearchService {
         Vec::new()
     }
 
+    /// 剪贴板模式直接搜索（bypass SearchService pipeline）。
+    ///
+    /// Alt+C 进入剪贴板模式后，前端直接调此方法，不经过 route / get_weights / Mixed 分派。
+    /// 只走 ClipboardEngine，返回已转换的 `AppEntry` 列表。
+    pub async fn search_clipboard_mode(&self, query: &str) -> Vec<AppEntry> {
+        let arg = query.trim();
+        let limit = self.max_results.load(Ordering::SeqCst);
+        let t0 = std::time::Instant::now();
+
+        for engine in &self.sync_engines {
+            if engine.id() == "clipboard" {
+                let history = std::collections::HashMap::new();
+                let snapshot = ContextSnapshot::default();
+                let disabled: Vec<String> = Vec::new();
+                let disabled_ctx: Vec<String> = Vec::new();
+                let language = self.language.read().unwrap().clone();
+                let search_ctx = QueryContext {
+                    history: &history,
+                    snapshot: &snapshot,
+                    disabled_builtin_actions: &disabled,
+                    disabled_context_bindings: &disabled_ctx,
+                    language: &language,
+                };
+                let items = engine.search(arg, &search_ctx).await;
+                let t1 = std::time::Instant::now();
+                let entries: Vec<AppEntry> = fuse_items(items, limit)
+                    .into_iter()
+                    .map(SearchItem::into_app_entry)
+                    .collect();
+                tracing::trace!(
+                    query = %arg,
+                    count = entries.len(),
+                    engine_ms = t0.elapsed().as_millis() as u64,
+                    fuse_ms = t1.elapsed().as_millis() as u64,
+                    "search_clipboard_mode: 完成"
+                );
+                return entries;
+            }
+        }
+        Vec::new()
+    }
+
     /// 搜索:先路由 → 按 Takeover/Mixed 分支执行 → 返回首批结果 + spawn 增量。
     ///
     /// 空 query 场景（0.8.0 §1.3）：跳过 intent 路由 + 插件；仅让 sync lane 内置引擎
@@ -410,9 +465,23 @@ impl SearchService {
         self.latest_seq.store(seq, Ordering::SeqCst);
 
         let q = query.trim();
-        // 空 query 时同步引擎全部 early return，history 权重无使用场景——跳过全表 SELECT。
-        let history = if q.is_empty() {
-            std::collections::HashMap::new()
+
+        // 路由决策——keyword 检测不需要 history 权重，先用空表路由。
+        // 这样 EngineTakeover（如"剪贴板"→ClipboardEngine）可以跳过 get_weights 全表扫描。
+        let ranking_hint = self.last_ranking_hint.lock().unwrap().clone();
+        let empty_history = std::collections::HashMap::new();
+        let route = self.router.route(q, &empty_history, ranking_hint.as_ref()).await;
+        let route = self.filter_route(route);
+
+        // 只在 Mixed 路径加载 history——sync 引擎（StartMenuEngine 等）用 history 权重
+        // 做频率加权排序。EngineTakeover / AiTrigger / 空 query 的引擎都不消费 history。
+        let history = if q.is_empty()
+            || matches!(
+                route,
+                Route::EngineTakeover { .. } | Route::AiTrigger { .. }
+            )
+        {
+            empty_history
         } else {
             crate::infra::data::history::get_weights(&self.pool).await
         };
@@ -427,11 +496,6 @@ impl SearchService {
             disabled_context_bindings: &disabled_ctx,
             language: &language,
         };
-
-        // 路由决策
-        let ranking_hint = self.last_ranking_hint.lock().unwrap().clone();
-        let route = self.router.route(q, &history, ranking_hint.as_ref()).await;
-        let route = self.filter_route(route);
 
         // Suggestion（0.8.3 / 0.8.6 arbiter）
         let mut suggestion = self.compute_suggestion(query, &snapshot);

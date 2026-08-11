@@ -13,6 +13,8 @@ import { registerMainInputView, updateMainInputContext } from "../shared/api.js"
 import { createInputStateCore } from "./input-state-core.js";
 import * as chord from "./chord.js";
 import * as aiMode from "./ai-mode.js";
+import * as clipboardMode from "./clipboard-mode.js";
+import * as cmdMode from "./command-mode.js";
 import { queryEl } from "./dom.js";
 
 const core = createInputStateCore();
@@ -30,7 +32,11 @@ function projectUi() {
   if (!state) return;
 
   const altDown = state.altDown;
-  const chordEligible = chord.isEnabled();
+  // 0.19.15: 独占模式（AI / 剪贴板 / 命令）下不显示 chord 待命提示——
+  // 用户已在特定模式中交互，Alt+字母待命列表无意义。
+  const inExclusiveMode =
+    aiMode.isActive() || clipboardMode.isActive() || cmdMode.isActive();
+  const chordEligible = chord.isEnabled() && !inExclusiveMode;
   const showChord = altDown && chordEligible;
 
   const prevChordVisible = document.body.classList.contains("chord-visible");
