@@ -10,7 +10,8 @@
 import { ss, TOOL_CAPS } from './ss-state.js';
 import { norm } from './ss-utils.js';
 import * as annot from './annotation-engine.js';
-import { cssPointToScreen, formatSelectionInfo } from './ss-selection-geometry.js';
+import { cssPointToScreen, cssRectToBitmap, getRenderScale, monitorDprAtCss, formatSelectionInfo } from './ss-selection-geometry.js';
+import { applyFloatingUiScale, applyFloatingUiScaleAt, findDisplayCssAt } from './ss-display.js';
 
 // H1 优化：rAF 节流——同一帧内多次 mousemove 只绘制一次
 let _drawSelectionRaf = null;
@@ -81,13 +82,16 @@ export function drawSelection() {
   const _t0 = performance.now();
   const { ctx, canvas, startX, startY, endX, endY, sizeHint } = ss;
   const src = getScreenshotSource();
-  // C 类：主 canvas bitmap 映射，必须用 overlay dpr（bitmap↔CSS 映射全局固定）
-  const dpr = window.devicePixelRatio || 1;
+  // 选区位置和宽高来自 cssRectToBitmap（使用实测 renderScale）
+  const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
   const r = norm(startX, startY, endX, endY);
-  const px = r.x * dpr;
-  const py = r.y * dpr;
-  const pw = r.w * dpr;
-  const ph = r.h * dpr;
+  const bmp = cssRectToBitmap(r, meta);
+  const px = bmp.x;
+  const py = bmp.y;
+  const pw = bmp.w;
+  const ph = bmp.h;
+  // 边框粗细按选区所在屏的 monitorDpr 做视觉补偿
+  const targetDpr = monitorDprAtCss(r.x, r.y, meta);
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.drawImage(src, 0, 0);
@@ -101,16 +105,15 @@ export function drawSelection() {
 
   // 选区边框（拖拽预览：实线，与智能预选的虚线区分）
   ctx.strokeStyle = '#4a9eff';
-  ctx.lineWidth = 2 * dpr;
+  ctx.lineWidth = 2 * targetDpr;
   ctx.strokeRect(px, py, pw, ph);
 
   // size-hint 显示物理像素尺寸 + 坐标（0.15.8 R0：统一用 formatSelectionInfo）
-  // A 类：屏幕坐标换算，统一使用 renderScale
-  const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
   const screenPos = cssPointToScreen(r.x, r.y, meta);
   sizeHint.textContent = formatSelectionInfo(screenPos.x, screenPos.y, pw, ph);
-  sizeHint.classList.remove('hidden');
-  sizeHint.style.left = (r.x + 4) + 'px';
+sizeHint.classList.remove('hidden');
+applyFloatingUiScaleAt(sizeHint, r.x, r.y);
+sizeHint.style.left = (r.x + 4) + 'px';
   sizeHint.style.top = (r.y > 24 ? r.y - 22 : r.y + 4) + 'px';
   console.info('[screenshot] drawSelection', { ms: Math.round(performance.now() - _t0) });
 }
@@ -121,12 +124,15 @@ export function drawFinalSelection() {
   const { ctx, canvas, selCss } = ss;
   if (!selCss) return;
   const src = getScreenshotSource();
-  // C 类：主 canvas bitmap 映射，必须用 overlay dpr（bitmap↔CSS 映射全局固定）
-  const dpr = window.devicePixelRatio || 1;
-  const px = selCss.x * dpr;
-  const py = selCss.y * dpr;
-  const pw = selCss.w * dpr;
-  const ph = selCss.h * dpr;
+  // 选区位置和宽高来自 cssRectToBitmap（使用实测 renderScale）
+  const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+  const bmp = cssRectToBitmap(selCss, meta);
+  const px = bmp.x;
+  const py = bmp.y;
+  const pw = bmp.w;
+  const ph = bmp.h;
+  // 边框粗细按选区所在屏的 monitorDpr 做视觉补偿
+  const targetDpr = monitorDprAtCss(selCss.x, selCss.y, meta);
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.drawImage(src, 0, 0);
@@ -140,25 +146,26 @@ export function drawFinalSelection() {
 
   // 选区边框（标注模式：实线，与拖拽虚线区分）
   ctx.strokeStyle = '#4a9eff';
-  ctx.lineWidth = 2 * dpr;
+  ctx.lineWidth = 2 * targetDpr;
   ctx.strokeRect(px, py, pw, ph);
 
   // size-hint：选区确定后也需显示尺寸+坐标（与拖拽阶段一致）。
   // 修复智能选区（snap）后 sizeHint 不显示的问题——snap 路径不经过 drawSelection，
   // 需要在此统一补显。
-  const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
-  // A 类：屏幕坐标换算，统一使用 renderScale
-  const screenPos = cssPointToScreen(selCss.x, selCss.y, meta);
-  if (ss.sizeHint) {
+  // 但 canvas-backed 来源（长截图/剪贴板）不显示截图坐标提示。
+  if (ss.sizeHint && !ss.editorSession.canvasBacked) {
+    const screenPos = cssPointToScreen(selCss.x, selCss.y, meta);
     ss.sizeHint.textContent = formatSelectionInfo(screenPos.x, screenPos.y, pw, ph);
-    ss.sizeHint.classList.remove('hidden');
-    ss.sizeHint.style.left = (selCss.x + 4) + 'px';
+ss.sizeHint.classList.remove('hidden');
+applyFloatingUiScaleAt(ss.sizeHint, selCss.x, selCss.y);
+ss.sizeHint.style.left = (selCss.x + 4) + 'px';
     ss.sizeHint.style.top = (selCss.y > 24 ? selCss.y - 22 : selCss.y + 4) + 'px';
   }
 
   // 选取工具显示八个调整手柄，明确提示选区可移动/缩放。
   if (annot.getTool() === 'select') {
-    const hs = 6 * dpr;
+    // 手柄物理大小按目标屏 monitorDpr 决定
+    const hs = 6 * targetDpr;
     const points = [
       [px, py], [px + pw / 2, py], [px + pw, py],
       [px + pw, py + ph / 2], [px + pw, py + ph],
@@ -166,7 +173,7 @@ export function drawFinalSelection() {
     ];
     ctx.fillStyle = '#ffffff';
     ctx.strokeStyle = '#4a9eff';
-    ctx.lineWidth = Math.max(1, dpr);
+    ctx.lineWidth = Math.max(1, targetDpr);
     for (const [hx, hy] of points) {
       ctx.fillRect(hx - hs / 2, hy - hs / 2, hs, hs);
       ctx.strokeRect(hx - hs / 2, hy - hs / 2, hs, hs);

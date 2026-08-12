@@ -32,7 +32,7 @@
 //!   多次应用/换保存格式都会视觉上"多层水印"。改为单例配置后天然只有一层。
 //!
 //! 标注坐标使用**物理像素**（canvas 内部像素）坐标系，与裁剪区像素对齐。
-//! 前端鼠标事件 `offsetX/Y` 为 CSS 像素，需乘 `devicePixelRatio` 转物理像素。
+//! 前端鼠标事件 `offsetX/Y` 为 CSS 像素，需乘 `renderScale` 转物理像素。
 
 import { TOOL_CAPS } from './ss-state.js';
 
@@ -1006,6 +1006,27 @@ export function redrawLoadingSpinner() {
 export function clearOverlay() {
   overlayLayer = null;
   redrawAll();
+}
+
+/**
+ * 将显式传入的 overlay 快照渲染到目标 ctx。
+ *
+ * 用于「翻译并 Pin」后台合成链路——任务自己持有 overlay 副本，
+ * 不依赖即将被清理的全局 overlayLayer 或 annotCanvas。
+ *
+ * 要求：
+ * - 使用传入的 overlaySnapshot；
+ * - 不读取模块全局 overlayLayer；
+ * - 不修改当前编辑会话；
+ * - 可复用现有内部 drawOverlay 实现。
+ *
+ * 注意：drawOverlay 内部的背景采样会读取模块全局 cropImageData/cropSourceCanvas，
+ * 这属于图片底层数据（非编辑会话状态），在会话未被 reset 前仍然有效。
+ * 若 bgColor/inkColor 已在 overlaySnapshot.lines 中缓存，则不会触发采样。
+ */
+export function renderOverlaySnapshotTo(overlaySnapshot, targetCtx, width, height) {
+  if (!overlaySnapshot || !overlaySnapshot.mode) return;
+  drawOverlay(targetCtx, overlaySnapshot, width, height);
 }
 
 /** 只读快照(供 UI 判断 / 面板召唤时读文本)。 */

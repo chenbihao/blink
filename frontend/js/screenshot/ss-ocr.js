@@ -8,8 +8,8 @@
 
 import { ss } from './ss-state.js';
 import { redrawAnnotFull } from './ss-draw.js';
-import { findDisplayCssAt } from './ss-display.js';
-import { cssPointToScreen } from './ss-selection-geometry.js';
+import { findDisplayCssAt, applyFloatingUiScale, getToolbarUiScale } from './ss-display.js';
+import { cssPointToScreen, cssRectToBitmap, uiScaleAtCss } from './ss-selection-geometry.js';
 import { enterReadingMode } from './ss-reading.js';
 import * as annot from './annotation-engine.js';
 import {
@@ -17,7 +17,7 @@ import {
   screenshotPinRefresh,
 } from '../shared/api.js';
 import { normalizeError } from '../shared/tauri.js';
-import { cleanupCanvasVisuals } from './ss-output.js';
+import { cleanupCanvasVisuals, composeTranslatedPinPng } from './ss-output.js';
 
 // ════════════════════════════════════════════════════════════
 //  UI Helpers
@@ -43,7 +43,7 @@ export function hideSelLoading() {
   if (el) el.hidden = true;
 }
 
-/** 简易临时提示(选区附近,2 秒后自动消失)。 */
+/** 简易临时提示(选区附近,2 秒后自动消失)。0.19.16：DPI 适配。 */
 export function showTransientHint(msg) {
   const { errorHint, selCss } = ss;
   errorHint.textContent = msg;
@@ -56,9 +56,16 @@ export function showTransientHint(msg) {
   requestAnimationFrame(() => {
     if (selCss) {
       const MARGIN = 8;
-      const ew = errorHint.offsetWidth;
-      const eh = errorHint.offsetHeight;
-      const mon = findDisplayCssAt(selCss.x + selCss.w / 2, selCss.y + selCss.h / 2);
+      // 0.19.16：按选区中心所在屏计算 uiScale，保证提示文字物理尺寸跨屏一致
+      const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+      const cx = selCss.x + selCss.w / 2;
+      const cy = selCss.y + selCss.h / 2;
+      const uiScale = uiScaleAtCss(cx, cy, meta);
+      errorHint.style.transformOrigin = 'top left';
+      errorHint.style.transform = `scale(${uiScale})`;
+      const ew = errorHint.offsetWidth * uiScale;
+      const eh = errorHint.offsetHeight * uiScale;
+      const mon = findDisplayCssAt(cx, cy);
       let left = selCss.x + (selCss.w - ew) / 2;
       left = Math.max(mon.x + MARGIN, Math.min(left, mon.x + mon.w - ew - MARGIN));
       let top = selCss.y - eh - MARGIN;
@@ -258,11 +265,17 @@ export const doTranslateSelection = doOverlayTranslate;
 
 /**
  * 点[翻译并 pin]——立即 pin 原图 + 后台翻译 + 翻译完原地替换。
- * 0.18.3：重写为「先 pin 原图 + 后台翻译 + 原地替换」模式。
+ * 0.19.16：重写为 job-local 合成链路，不再依赖全局 annotCanvas 做第二次合成。
+ *
+ * 核心改进：
+ * - 启动时保存 editor epoch；
+ * - 第一次 Pin 前生成 job-local rawPng（底图 + 标注，排除翻译 overlay）；
+ * - 第二次合成使用独立 composeTranslatedPinPng，不读取 ss.annotCanvas；
+ * - finally 中仅当 epoch 仍匹配时才清理 canvas 和 pending 状态。
  *
  * 时序：
  * 1. 合成原图 PNG（不嵌译文）→ screenshotPin(showTranslating=true) → 关 overlay
- * 2. 后台：OCR（命中预热或 fresh）→ translateLines → 合成译文 PNG → screenshotPinRefresh
+ * 2. 后台：OCR（命中预热或 fresh）→ translateLines → composeTranslatedPinPng → screenshotPinRefresh
  * 3. 翻译失败/超时：隐藏指示器，pin 保持原图
  */
 export async function doTranslateAndPin() {
@@ -270,8 +283,11 @@ export async function doTranslateAndPin() {
   if (ss._translateAndPinPending) return;
 
   ss._translateAndPinPending = true;
+  const jobEpoch = ss.editorSession.epoch;
   let rawPng = null;
   let pinned = false;
+  let jobWidth = 0;
+  let jobHeight = 0;
 
   try {
     // ── Step 1: 立即 pin 原图 ──
@@ -294,6 +310,16 @@ export async function doTranslateAndPin() {
     if (!rawPng) {
       showTransientHint('合成截图失败');
       return;
+    }
+
+    // 记录合成尺寸供第二次 job-local 合成使用
+    if (ss.editorSession.canvasBacked) {
+      jobWidth = ss.editorSession.baseCanvas.width;
+      jobHeight = ss.editorSession.baseCanvas.height;
+    } else {
+      const bmp = cssRectToBitmap(ss.selCss, meta);
+      jobWidth = bmp.w;
+      jobHeight = bmp.h;
     }
 
     // pin 原图 + 显示翻译中指示器（screenshot_pin 内部会关 overlay）
@@ -336,15 +362,30 @@ export async function doTranslateAndPin() {
       return;
     }
 
-    // 2b. 设置 overlay 数据（用 OCR 行框 + translated 模式）
-    annot.setOverlay({
+    // 2b. 构造任务局部 overlay（最终 Pin 合成以此为准）
+    const jobOverlay = {
       lines: lines.map((ln) => ({
         rect: { x: ln.rect.x, y: ln.rect.y, w: ln.rect.w, h: ln.rect.h },
         srcText: ln.text,
+        dstText: null,
+        bgColor: null,
+        inkColor: null,
       })),
       mode: 'translated',
-    });
-    ss.ocrResultCache = ocrResult;
+      bgStrategy: 'average',
+      fontScale: 1.0,
+      showOriginal: false,
+      translationTargetLang: null,
+    };
+
+    // 同步更新当前 annot overlay（如果 UI 尚未被重置）
+    if (ss.editorSession.epoch === jobEpoch) {
+      annot.setOverlay({
+        lines: jobOverlay.lines.map((l) => ({ ...l })),
+        mode: 'translated',
+      });
+      ss.ocrResultCache = ocrResult;
+    }
 
     // 2c. 翻译
     const srcs = lines.map((ln) => ln.text);
@@ -363,12 +404,24 @@ export async function doTranslateAndPin() {
       }
     }
 
-    // 2d. 回填译文 + 重绘 annotCanvas
-    annot.setOverlayTranslations(translations, null);
-    redrawAnnotFull();
+    // 2d. 回填译文到 job-local overlay
+    for (let i = 0; i < Math.min(translations.length, jobOverlay.lines.length); i++) {
+      jobOverlay.lines[i].dstText = translations[i];
+    }
 
-    // 2e. 合成译文 PNG
-    const translatedPng = await ss._compositeSelection();
+    // 同步更新 UI（如果当前 epoch 仍匹配）
+    if (ss.editorSession.epoch === jobEpoch) {
+      annot.setOverlayTranslations(translations, null);
+      redrawAnnotFull();
+    }
+
+    // 2e. 用 job-local 合成链路生成译文 PNG（不依赖 ss.annotCanvas）
+    const translatedPng = await composeTranslatedPinPng({
+      rawPng,
+      overlay: jobOverlay,
+      width: jobWidth,
+      height: jobHeight,
+    });
 
     if (!translatedPng) {
       // 合成失败：隐藏指示器，保持原图
@@ -386,9 +439,16 @@ export async function doTranslateAndPin() {
       await screenshotPinRefresh(rawPng, false).catch(() => {});
     }
   } finally {
-    ss._translateAndPinPending = false;
-    // 后台翻译全部结束后清理画布，防止下次唤起残留旧画面
-    cleanupCanvasVisuals();
+    // 只有当前 editor epoch 仍等于任务启动 epoch 时才清理
+    if (ss.editorSession.epoch === jobEpoch) {
+      ss._translateAndPinPending = false;
+      cleanupCanvasVisuals();
+    } else {
+      // 新会话已开始，旧任务不清理新 canvas，也不改 pending 状态
+      console.debug('[screenshot] translateAndPin: epoch mismatch, skipping cleanup', {
+        jobEpoch, currentEpoch: ss.editorSession.epoch,
+      });
+    }
   }
 }
 
@@ -634,8 +694,10 @@ export function showOcrResult(result, options = {}) {
   // 抽屉锚定触发按钮
   const MARGIN = 8;
   const mon = findDisplayCssAt(ss.selCss.x + ss.selCss.w / 2, ss.selCss.y + ss.selCss.h / 2);
-  const pw = panel.offsetWidth;
-  const ph = panel.offsetHeight;
+  // 应用与工具栏一致的 UI scale
+  const uiScale = applyFloatingUiScale(panel);
+  const pw = panel.offsetWidth * uiScale;
+  const ph = panel.offsetHeight * uiScale;
   const anchorBtn = document.getElementById('btn-ocr');
   const anchorRect = anchorBtn ? anchorBtn.getBoundingClientRect() : ss.toolbar.getBoundingClientRect();
 
@@ -680,8 +742,8 @@ export function showOcrResult(result, options = {}) {
         document.body.style.cursor = '';
         return;
       }
-      const pwl = panel.offsetWidth;
-      const phl = panel.offsetHeight;
+      const pwl = panel.offsetWidth * uiScale;
+      const phl = panel.offsetHeight * uiScale;
       const monMove = findDisplayCssAt(e.clientX, e.clientY);
       let nl = e.clientX - offsetX;
       let nt = e.clientY - offsetY;

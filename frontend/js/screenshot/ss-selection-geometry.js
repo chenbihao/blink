@@ -104,6 +104,27 @@ export function monitorDprAtCss(cssX, cssY, meta) {
   return monitorDprAtScreen(screen.x, screen.y, meta);
 }
 
+/**
+ * 浮动 UI 在 overlay CSS 坐标系中的视觉缩放比。
+ *
+ * 单一跨屏 HWND 的 DOM 只能按一个 renderScale 渲染，因此当工具栏落在
+ * 不同 DPI 显示器时物理尺寸不一致。uiScaleAtCss 补偿这个差异：
+ *
+ *   uiScale = monitorDpr / renderScale
+ *
+ * - renderScale=1.5, 目标屏 100% → 1/1.5 ≈ 0.667（UI 需缩小）
+ * - renderScale=1.5, 目标屏 150% → 1.5/1.5 = 1（无缩放）
+ * - renderScale=1,   目标屏 200% → 2/1 = 2（UI 需放大）
+ *
+ * 调用方用 `transform: scale(uiScale)` + `transform-origin: top left` 应用。
+ * position/clamp 逻辑必须使用变换后的视觉宽高（= offsetWidth * uiScale）。
+ */
+export function uiScaleAtCss(cssX, cssY, meta) {
+  const monitorDpr = monitorDprAtCss(cssX, cssY, meta);
+  const { scaleX } = getRenderScale(meta);
+  return monitorDpr / scaleX;
+}
+
 // 兼容导出
 export { monitorDprAtCss as dprAtCss, monitorDprAtScreen as dprAtScreen };
 
@@ -149,6 +170,19 @@ export function cssPointToScreen(cssX, cssY, meta) {
   return {
     x: Math.round((meta?.vx || 0) + cssX * scaleX),
     y: Math.round((meta?.vy || 0) + cssY * scaleY)
+  };
+}
+
+/**
+ * 虚拟屏幕物理坐标 → 截图 bitmap 坐标。
+ *
+ * 全虚拟桌面截图与 Win32 屏幕物理像素 1:1；这里只需减去虚拟屏原点，
+ * 不经过 renderScale，避免高 DPI 屏幕上把光标量化到 CSS 像素网格。
+ */
+export function screenPointToBitmap(screenX, screenY, meta) {
+  return {
+    x: Math.round(screenX - (meta?.vx || 0)),
+    y: Math.round(screenY - (meta?.vy || 0)),
   };
 }
 

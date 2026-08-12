@@ -13,6 +13,7 @@ import { ss } from './ss-state.js';
 import { findDisplayCssAt } from './ss-display.js';
 import { getSelectionHandle, beginSelectionInteraction, updateSelectionInteraction, finishSelectionInteraction } from './ss-interaction.js';
 import { copyToClipboard } from '../shared/api.js';
+import { cssRectToBitmap, cssPointToBitmap, getRenderScale } from './ss-selection-geometry.js';
 
 /** 从 result 构造 charRanges —— 用与后端 join_words_smart 相同的规则复算字符偏移。 */
 function computeCharRanges(words) {
@@ -67,10 +68,11 @@ function charKind(ch) {
 /** 命中测试：把点击的 CSS 坐标(相对 hitCanvas)映射到物理像素 + 找命中 word */
 function hitTestWord(cssX, cssY) {
   if (!ss.reading) return -1;
-  // C 类：hit canvas backing store = 物理像素，bitmap↔CSS = overlay dpr。
-  const dpr = window.devicePixelRatio || 1;
-  const px = cssX * dpr;
-  const py = cssY * dpr;
+  // hit canvas backing store = 物理像素，CSS→bitmap 使用实测 renderScale
+  const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+  const bmp = cssPointToBitmap(cssX, cssY, meta);
+  const px = bmp.x;
+  const py = bmp.y;
   for (let i = 0; i < ss.reading.words.length; i++) {
     const r = ss.reading.words[i].rect;
     if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) return i;
@@ -81,9 +83,10 @@ function hitTestWord(cssX, cssY) {
 /** 找出接近点击点(垂直方向)的最近 word——空白处点击时靠近哪 word 就选哪 */
 function nearestWordByLine(cssX, cssY) {
   if (!ss.reading || ss.reading.words.length === 0) return -1;
-  const dpr = window.devicePixelRatio || 1;
-  const px = cssX * dpr;
-  const py = cssY * dpr;
+  const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+  const bmp = cssPointToBitmap(cssX, cssY, meta);
+  const px = bmp.x;
+  const py = bmp.y;
   let bestLine = ss.reading.words[0].lineIndex;
   let bestDy = Infinity;
   for (const w of ss.reading.words) {
@@ -117,7 +120,10 @@ function redrawHitLayer() {
       hitCtx.fillRect(r.x, r.y, r.w, r.h);
     }
     hitCtx.strokeStyle = 'rgba(74, 158, 255, 0.85)';
-    hitCtx.lineWidth = Math.max(1, Math.round(window.devicePixelRatio || 1));
+    // hitCanvas backing store 使用 renderScale，线宽也需匹配
+    const _meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+    const { scaleX: _rsx } = getRenderScale(_meta);
+    hitCtx.lineWidth = Math.max(1, Math.round(_rsx));
     for (let i = lo; i <= hi; i++) {
       const r = ss.reading.words[i].rect;
       hitCtx.strokeRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
@@ -137,14 +143,16 @@ export function enterReadingMode(result) {
   const words = (result && Array.isArray(result.words)) ? result.words : [];
   if (words.length === 0) return;
 
-  const dpr = window.devicePixelRatio || 1;
+  // hitCanvas backing size 来自 cssRectToBitmap（使用实测 renderScale）
+  const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+  const bmpRect = cssRectToBitmap(ss.selCss, meta);
   const { hitCanvas } = ss;
   hitCanvas.style.left = ss.selCss.x + 'px';
   hitCanvas.style.top = ss.selCss.y + 'px';
   hitCanvas.style.width = ss.selCss.w + 'px';
   hitCanvas.style.height = ss.selCss.h + 'px';
-  hitCanvas.width = Math.max(1, Math.round(ss.selCss.w * dpr));
-  hitCanvas.height = Math.max(1, Math.round(ss.selCss.h * dpr));
+  hitCanvas.width = Math.max(1, bmpRect.w);
+  hitCanvas.height = Math.max(1, bmpRect.h);
   hitCanvas.setAttribute('data-reading', 'true');
 
   ss.reading = {

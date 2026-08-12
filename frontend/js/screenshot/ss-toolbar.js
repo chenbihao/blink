@@ -8,7 +8,7 @@
 //! - updateUndoRedoButtons()：撤销/重做按钮状态
 
 import { ss, TOOL_CAPS } from './ss-state.js';
-import { findDisplayCssAt } from './ss-display.js';
+import { findDisplayCssAt, applyFloatingUiScale } from './ss-display.js';
 import { drawFinalSelection, redrawAnnotFull } from './ss-draw.js';
 import { updateSelectionCursor } from './ss-interaction.js';
 import { doCancel, doPinSelection, doSaveSelection, doCopySelection } from './ss-output.js';
@@ -18,6 +18,7 @@ import { doOcrSelection, doTranslateSelection, doTranslateAndPin } from './ss-oc
 import { doOcrDiagnostics } from './ss-ocr-diagnostics.js';
 import * as annot from './annotation-engine.js';
 import { initColorPicker, syncFromAnnot } from './ss-color-picker.js';
+import { getRenderScale } from './ss-selection-geometry.js';
 
 export function updateUndoRedoButtons() {
   const btnUndo = document.getElementById('btn-undo');
@@ -207,14 +208,17 @@ function showSubPanel(view) {
   if (anchor) {
     const rect = anchor.getBoundingClientRect();
     const mon = findDisplayCssAt(rect.left, rect.top);
+    // 应用与工具栏一致的 UI scale
+    const uiScale = applyFloatingUiScale(subPanel);
     let left = rect.left;
     let top = rect.bottom + 4;
-    // 不超出屏幕
-    const pw = subPanel.offsetWidth || 210;
+    // 不超出屏幕（使用变换后的视觉宽高）
+    const pw = (subPanel.offsetWidth || 210) * uiScale;
+    const ph = (subPanel.offsetHeight || 120) * uiScale;
     if (left + pw > mon.x + mon.w - 8) left = mon.x + mon.w - pw - 8;
     if (left < mon.x + 8) left = mon.x + 8;
-    if (top + (subPanel.offsetHeight || 120) > mon.y + mon.h - 8) {
-      top = rect.top - (subPanel.offsetHeight || 120) - 4;
+    if (top + ph > mon.y + mon.h - 8) {
+      top = rect.top - ph - 4;
     }
     subPanel.style.left = left + 'px';
     subPanel.style.top = top + 'px';
@@ -343,18 +347,18 @@ function openWatermarkForm() {
 /** 文本标注输入框 */
 export function showTextInput(x, y) {
   if (!ss.selCss) return;
-  // C 类：x/y 是标注 bitmap 坐标，/ dpr 转回 CSS；fontSize / dpr 同理。
-  // bitmap↔CSS 映射全局固定为 overlay dpr，不改 per-monitor。
-  const dpr = window.devicePixelRatio || 1;
+  // x/y 是标注 bitmap 坐标，/ renderScale 转回 CSS；fontSize / renderScale 同理。
+  const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+  const { scaleX: rsx, scaleY: rsy } = getRenderScale(meta);
 
   const input = document.createElement('span');
   input.className = 'text-annot-input';
   input.contentEditable = 'true';
   input.setAttribute('role', 'textbox');
   input.setAttribute('data-placeholder', '输入文本…');
-  input.style.left = (ss.selCss.x + x / dpr) + 'px';
-  input.style.top = (ss.selCss.y + y / dpr) + 'px';
-  const cssFontPx = annot.getTextConfig().fontSize / dpr;
+  input.style.left = (ss.selCss.x + x / rsx) + 'px';
+  input.style.top = (ss.selCss.y + y / rsy) + 'px';
+  const cssFontPx = annot.getTextConfig().fontSize / rsx;
   input.style.fontSize = cssFontPx + 'px';
   input.style.fontFamily = annot.getTextConfig().fontFamily;
   if (annot.getTextConfig().bold) input.style.fontWeight = 'bold';
@@ -889,8 +893,10 @@ export function bindToolbar() {
     });
     document.addEventListener('mousemove', (e) => {
       if (!dragging) return;
-      const tw = toolbar.offsetWidth;
-      const th = toolbar.offsetHeight;
+      // 使用变换后的视觉宽高进行 clamp
+      const uiScale = parseFloat(toolbar.dataset.uiScale) || 1;
+      const tw = toolbar.offsetWidth * uiScale;
+      const th = toolbar.offsetHeight * uiScale;
       const mon = findDisplayCssAt(e.clientX, e.clientY);
       const MARGIN = 8;
       let left = e.clientX - offsetX;

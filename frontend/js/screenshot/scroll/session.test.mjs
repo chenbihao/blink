@@ -10,7 +10,14 @@ const session = new ScrollCaptureSession();
 assert.equal(session.scrollCapturePhase, 'idle');
 assert.deepEqual(session.scrollFrames, []);
 assert.equal(session.active, false);
+assert.equal(session.capturing, false);
 
+session.scrollCapturePhase = 'capturing';
+assert.equal(session.active, true);
+assert.equal(session.capturing, true);
+session.scrollCapturePhase = 'editing';
+assert.equal(session.active, true);
+assert.equal(session.capturing, false);
 session.scrollCapturePhase = 'capturing';
 session.scrollFrames.push({ top: 0 });
 session.queuedManualWheel = { delta: 120 };

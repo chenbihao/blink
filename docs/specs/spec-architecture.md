@@ -193,6 +193,12 @@ pub struct SuggestionArbiter { producers: Vec<Arc<dyn SuggestionProducer>> }
 
 > 三个入口的落地(0.8.6 架构固化)见 [phases/0.8 §八](../phases/0.8-context-interaction.md)。
 
+### §A3.5 多协议入口，单一业务语义（强制）
+
+UI Command、Capability、CLI、MCP 可以保留各自协议入口，但只要表达同一个业务动作，就必须收敛到同一 application/domain 实现。协议层只负责参数适配、调用方授权、错误映射与结果投影，**禁止复制业务规则形成多套实现**；这不要求把所有 UI command 强行改造成 Capability。
+
+生产者与消费者的资源生命周期必须解耦：截图采集、图片编辑、资源暂存属于不同会话，消费者不得隐式依赖生产者窗口、DOM 或采集 session 仍然存活。跨调用共享大资源时使用有界引用/分页协议，不传递对临时 UI 对象的隐式引用。
+
 ---
 
 ## §A4 能力体系边界(Capability / Action 钉死)
@@ -365,6 +371,13 @@ pub trait Capability {
 
 > 价值论证见 [principles §13.4](../product.md)。主窗口/Agent 窗口两种模式的落地形态见 [phases/0.9 §4.3](../phases/0.9-ai-layer.md)。
 
+### §A7.3 AI 修改设置的信任边界（强制）
+
+- AI 可读/可写设置必须经过**显式、类型化白名单**，禁止暴露原始 KV、任意配置路径、密钥或其他敏感字段
+- 写入前向用户展示字段语义及旧值/新值；每次写入独立确认，不记忆或继承上一次写权限
+- 写入时重新校验白名单、参数类型与乐观并发版本；确认只授权已展示的那一次变更，参数变化后必须重新确认
+- 协议返回可审计的结构化结果，但日志和审计摘要不得记录密钥或敏感原文
+
 ---
 
 ## §A8 AI 接入点总览(0.14 后)
@@ -402,11 +415,11 @@ pub trait Capability {
 
 **watchdog AI 标志**:主窗口 AiMode 下 `MAIN_WINDOW_AI_ACTIVE: AtomicBool` 置位,看门狗跳过失焦隐藏(用户正在和主窗口 AI 对话,不能因切走而关窗)。
 
-### §A8.2 Agent 缓存:preamble hash 自动失效
+### §A8.2 Agent 缓存：行为维度完整覆盖
 
-`AgentProvider` 按 cache key = `(provider_id, model_id, fingerprint, preamble_hash)` 懒构造并缓存。**preamble 字符串变化 → `hash_preamble()` 变 → cache miss → 重建 Agent,无需手工失效**。
+`AgentProvider` 的 cache key 必须覆盖所有会改变运行时行为的维度，至少包括 provider/model、凭据 fingerprint、conversation kind/mode、Skill/tool 集合以及 preamble hash；也可在相关配置变化时显式失效。**行为维度变化后不得复用旧 Agent**。
 
-这是 Skill 激活、分组系统提示词修改、0.17.8 权限记忆等所有"preamble 变化需重建 Agent"场景的统一机制(0.12 §3.2 + 0.13 §五)。新功能若涉及 preamble 组装,直接改 preamble 字符串即可,不要自造缓存失效逻辑。
+其中 preamble 使用内容 hash 自动失效：preamble 字符串变化 → `hash_preamble()` 变化 → cache miss → 重建 Agent。Skill 激活、分组系统提示词、权限策略等如果进入 preamble，直接由内容 hash 覆盖；不进入 preamble 的行为维度必须进入 cache key 或显式失效，禁止依赖调用方“记得手工重建”。
 
 ---
 

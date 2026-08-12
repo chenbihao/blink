@@ -287,14 +287,28 @@ const py = bmp.y;
 const pw = bmp.w;
 const ph = bmp.h;
 
+// 防御校验：输出尺寸必须 > 0
+if (pw <= 0 || ph <= 0) {
+throw new Error(`compositeSelectionBytes: invalid output dimensions { pw: ${pw}, ph: ${ph} }`);
+}
+
 const off = getCompositeCanvas(pw, ph);
 const offCtx = off.getContext('2d');
 if (sessionBase) {
+if (sessionBase.width <= 0 || sessionBase.height <= 0) {
+throw new Error(`compositeSelectionBytes: sessionBase has zero dimensions { w: ${sessionBase.width}, h: ${sessionBase.height} }`);
+}
 offCtx.drawImage(sessionBase, 0, 0);
 } else {
+if (!ss.screenshot || ss.screenshot.width <= 0 || ss.screenshot.height <= 0) {
+throw new Error(`compositeSelectionBytes: screenshot source has zero dimensions`);
+}
 offCtx.drawImage(ss.screenshot, px, py, pw, ph, 0, 0, pw, ph);
 }
 if (annot.hasAnnotations()) {
+if (!ss.annotCanvas || ss.annotCanvas.width <= 0 || ss.annotCanvas.height <= 0) {
+throw new Error(`compositeSelectionBytes: annotCanvas has zero dimensions { w: ${ss.annotCanvas?.width}, h: ${ss.annotCanvas?.height} }`);
+}
 offCtx.drawImage(ss.annotCanvas, 0, 0);
 }
 console.info('[screenshot] compositeSelectionBytes: sync draw done', { pw, ph, ms: Math.round(performance.now() - _t0) });
@@ -325,14 +339,28 @@ async function compositeSelectionRgba() {
   const pw = bmp.w;
   const ph = bmp.h;
 
+  // 防御校验：输出尺寸必须 > 0
+  if (pw <= 0 || ph <= 0) {
+    throw new Error(`compositeSelectionRgba: invalid output dimensions { pw: ${pw}, ph: ${ph} }`);
+  }
+
   const off = getCompositeCanvas(pw, ph);
   const offCtx = off.getContext('2d');
   if (sessionBase) {
+    if (sessionBase.width <= 0 || sessionBase.height <= 0) {
+      throw new Error(`compositeSelectionRgba: sessionBase has zero dimensions { w: ${sessionBase.width}, h: ${sessionBase.height} }`);
+    }
     offCtx.drawImage(sessionBase, 0, 0);
   } else {
+    if (!ss.screenshot || ss.screenshot.width <= 0 || ss.screenshot.height <= 0) {
+      throw new Error(`compositeSelectionRgba: screenshot source has zero dimensions`);
+    }
     offCtx.drawImage(ss.screenshot, bmp.x, bmp.y, pw, ph, 0, 0, pw, ph);
   }
   if (annot.hasAnnotations()) {
+    if (!ss.annotCanvas || ss.annotCanvas.width <= 0 || ss.annotCanvas.height <= 0) {
+      throw new Error(`compositeSelectionRgba: annotCanvas has zero dimensions { w: ${ss.annotCanvas?.width}, h: ${ss.annotCanvas?.height} }`);
+    }
     offCtx.drawImage(ss.annotCanvas, 0, 0);
   }
   // getImageData 产生 RGBA，无需 toBlob PNG 编码
@@ -346,6 +374,52 @@ function cleanupLongCapture() {
   if (!ss.scrollSession.active && !ss._imagePan) return;
   Promise.resolve(ss.scrollSession.exit(false))
     .catch((e) => console.warn('[screenshot] long capture cleanup failed', e));
+}
+
+/**
+ * 独立合成译文 PNG：将 rawPng 解码到任务自己的离屏 canvas，
+ * 在其上绘制显式传入的 translated overlay，编码 PNG。
+ *
+ * 不读取 ss.screenshot、ss.annotCanvas、ss.editorSession.baseCanvas。
+ * 专供「翻译并 Pin」后台第二次合成使用，避免依赖已可能被清理的全局 canvas。
+ *
+ * @param {{ rawPng: Uint8Array, overlay: object|null, width: number, height: number }} opts
+ * @returns {Promise<Uint8Array|null>} PNG bytes
+ */
+export async function composeTranslatedPinPng({ rawPng, overlay, width, height }) {
+  if (!rawPng) {
+    throw new Error('composeTranslatedPinPng: rawPng is null');
+  }
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    throw new Error(`composeTranslatedPinPng: invalid dimensions { width: ${width}, height: ${height} }`);
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+
+  // 解码 rawPng 到离屏 canvas
+  const blob = new Blob([rawPng], { type: 'image/png' });
+  const bitmap = await createImageBitmap(blob);
+  if (bitmap.width <= 0 || bitmap.height <= 0) {
+    bitmap.close?.();
+    throw new Error(`composeTranslatedPinPng: decoded bitmap has zero dimensions { w: ${bitmap.width}, h: ${bitmap.height} }`);
+  }
+  ctx.drawImage(bitmap, 0, 0, width, height);
+  bitmap.close?.();
+
+  // 在其上绘制显式传入的 translated overlay
+  if (overlay) {
+    annot.renderOverlaySnapshotTo(overlay, ctx, width, height);
+  }
+
+  // 编码 PNG
+  const outBlob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+  if (!outBlob) {
+    throw new Error('composeTranslatedPinPng: toBlob returned null');
+  }
+  return new Uint8Array(await outBlob.arrayBuffer());
 }
 
 export function doCancel() {

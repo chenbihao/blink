@@ -12,10 +12,12 @@ export const IMAGE_SOURCE = Object.freeze({
 
 export class ImageEditorSession {
   constructor() {
+    this.epoch = 0;
     this.reset();
   }
 
   reset() {
+    this.epoch = (this.epoch || 0) + 1;
     this.source = IMAGE_SOURCE.NONE;
     this.baseCanvas = null;
     this.screenX = 0;
@@ -37,6 +39,7 @@ export class ImageEditorSession {
     if (![IMAGE_SOURCE.LONG_SCREENSHOT, IMAGE_SOURCE.CLIPBOARD].includes(source)) {
       throw new TypeError(`不支持的图片编辑来源: ${source}`);
     }
+    this.epoch = (this.epoch || 0) + 1;
     this.source = source;
     this.baseCanvas = baseCanvas;
     this.screenX = Number.isFinite(options.screenX) ? options.screenX : 0;

@@ -46,9 +46,12 @@ import {
 } from './diagnostics.js';
 import { encodeImageDataPng, outputScreenshotPng } from '../ss-output.js';
 import { cssPointToScreen, cssRectToBitmap } from '../ss-selection-geometry.js';
+import { findDisplayCssAt } from '../ss-display.js';
+import { IMAGE_SOURCE } from '../image-editor-session.js';
 import {
-  hideCaptureFrame, positionPreview, resetPreviewRendering, SCROLL_PREVIEW_GAP,
+  hideCaptureFrame, positionPreview, resetPreviewRendering,
   showCaptureFrame, showPredictedPreview, updatePreview,
+  positionScrollToolbar, logScrollUiDiagnostics,
 } from './preview.js';
 
 const session = ss.scrollSession;
@@ -104,6 +107,10 @@ export async function enterScrollCapture(rect) {
   session.scrollPendingDirection = 0;
   session.scrollUnchangedCount = 0;
   session.scrollCapturePhase = 'capturing';
+  // 工具栏 click 进入采集后，不允许旧选区 pointer/mouseup 状态再次提交普通选区。
+  ss.selectionInteraction = null;
+  ss.pendingSnap = null;
+  ss.isDragging = false;
   resetPreviewRendering();
   resetScrollDiagnostics(session);
 
@@ -123,7 +130,14 @@ export async function enterScrollCapture(rect) {
     : session.scrollBandY;
   session.scrollSourceRect = { ...rect };
 
-  // 设置 WDA_EXCLUDEFROMCAPTURE：overlay 在 BitBlt 中不可见
+  // 确定来源显示器：使用选区中心或右下角内侧点作为锚点。
+  // 锚点必须使用 rect.y + rect.h - 1（显示器排他边界内侧），
+  // 不能使用 rect.y + rect.h（排他边界本身可能落在下一屏或虚拟桌面空洞）。
+  const monitorAnchorX = rect.x + rect.w / 2;
+  const monitorAnchorY = rect.y + Math.max(0, rect.h - 1);
+  session.scrollSourceMonitor = findDisplayCssAt(monitorAnchorX, monitorAnchorY);
+
+  // 设置 WDA_EXCLUDEFROMCAPTURE：overlay 在整段采集会话中不进入 BitBlt。
   try {
     await screenshotSetCaptureExclusion(true);
   } catch (e) {
@@ -150,19 +164,17 @@ export async function enterScrollCapture(rect) {
   if (ss.hitCanvas) ss.hitCanvas.style.pointerEvents = 'none';
   showCaptureFrame(rect);
 
-  // 切换工具栏：隐藏默认，显示专属
+  // 主动隐藏 sizeHint——长截图采集阶段不需要截图坐标提示
+  if (ss.sizeHint) ss.sizeHint.classList.add('hidden');
+
+  // 切换工具栏：隐藏默认，显示专属（0.19.16 DPI 适配）
   if (ss.toolbar) ss.toolbar.classList.add('hidden');
-  const scrollTb = document.getElementById('scroll-toolbar');
-  if (scrollTb) {
-    scrollTb.classList.remove('hidden');
-    // 定位到选区下方
-    scrollTb.style.left = (rect.x + rect.w / 2 - 100) + 'px';
-    scrollTb.style.top = (rect.y + rect.h + SCROLL_PREVIEW_GAP) + 'px';
-  }
+  positionScrollToolbar(rect);
 
   // 显示预览缩略图——贴选区侧边
   // 纵向：贴右边；横向：贴下边
   positionPreview(rect);
+  logScrollUiDiagnostics(rect);
 
   // 截取第一帧
   await captureFrame(0, generation);
@@ -171,8 +183,9 @@ export async function enterScrollCapture(rect) {
     ss._showTransientHint?.('未找到可滚动窗口，请重新框选目标窗口内的区域');
   }
   console.info('[scroll] enter capturing', {
-    bandW: session.scrollBandW,
-    bandH: session.scrollBandH,
+    sourceRect: { x: rect.x, y: rect.y, w: rect.w, h: rect.h },
+    sourceMonitor: session.scrollSourceMonitor,
+    bandPhysicalRect: { x: session.scrollBandX, y: session.scrollBandY, w: session.scrollBandW, h: session.scrollBandH },
     hwnd: session.scrollHwnd,
     target: pickedWindow?.processName || pickedWindow?.title || 'fallback',
   });
@@ -440,9 +453,9 @@ export async function enterScrollEdit() {
 
   // 调用 index.js 提供的来源无关编辑入口
   if (ss._enterCanvasImageEditor) {
-    ss._enterCanvasImageEditor(longImage, longImage.width, longImage.height);
+    ss._enterCanvasImageEditor(longImage, longImage.width, longImage.height, IMAGE_SOURCE.LONG_SCREENSHOT, session.scrollSourceMonitor);
   }
-  console.info('[scroll] enter editing', { w: longImage.width, h: longImage.height });
+  console.info('[scroll] enter editing', { w: longImage.width, h: longImage.height, sourceMonitor: session.scrollSourceMonitor });
 }
 
 /**
@@ -450,6 +463,11 @@ export async function enterScrollEdit() {
  * 清理状态，隐藏专属工具栏和预览。
  */
 export async function exitScrollCapture(restoreSelection = true) {
+  console.debug('[scroll] exit capture', {
+    restoreSelection,
+    phase: session.scrollCapturePhase,
+    frameCount: session.scrollFrames?.length || 0,
+  });
   const sourceRect = session.scrollSourceRect ? { ...session.scrollSourceRect } : null;
   resetScrollCaptureState();
   const cleanupGeneration = session.captureGeneration;
@@ -501,6 +519,16 @@ export function resetScrollCaptureSession() {
 
 export function isScrollCaptureActive() {
   return session.active || !!ss._imagePan;
+}
+
+/**
+ * 是否正处于逐帧采集阶段。
+ *
+ * 长截图会把滚轮交给底层窗口，overlay 因此可能正常失焦；只有 capturing
+ * 需要忽略这类 blur。editing/finalizing 继续沿用普通截图的失焦退出语义。
+ */
+export function isScrollCapturing() {
+  return session.capturing;
 }
 
 /**

@@ -377,6 +377,11 @@ export function screenshotCaptureProbe(x, y, w, h) {
   return invoke("screenshot_capture_probe", { x, y, w, h });
 }
 
+/** 返回当前光标的物理屏幕坐标（虚拟屏幕坐标系），供取色器直接采样。 */
+export function screenshotCursorPosition() {
+  return invoke("screenshot_cursor_position");
+}
+
 /** 0.15.7：转发滚轮事件给目标窗口。 */
 export function screenshotForwardWheel(
   hwnd,

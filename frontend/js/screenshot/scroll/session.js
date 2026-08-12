@@ -16,6 +16,7 @@ const SESSION_DEFAULTS = Object.freeze({
   scrollTargetX: 0,
   scrollTargetY: 0,
   scrollSourceRect: null,
+  scrollSourceMonitor: null,
   scrollLastFrame: null,
   scrollKeyframes: null,
   scrollTrackingState: 'tracking',
@@ -52,6 +53,11 @@ export class ScrollCaptureSession {
 
   get active() {
     return this.scrollCapturePhase !== 'idle' || this.autoScroll;
+  }
+
+  /** 仅表示逐帧采集阶段；editing/finalizing 不享受采集期失焦豁免。 */
+  get capturing() {
+    return this.scrollCapturePhase === 'capturing';
   }
 
   invalidate() {

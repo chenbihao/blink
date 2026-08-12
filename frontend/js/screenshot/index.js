@@ -41,10 +41,10 @@ import { applyThemeFromConfig } from "../shared/theme.js";
 // ── 子模块 ──────────────────────────────────────────────
 import { ss, initDOM, PREWARM_MIN_WIDTH, PREWARM_MIN_HEIGHT, TOOL_CAPS } from "./ss-state.js";
 import { IMAGE_SOURCE } from './image-editor-session.js';
-import { norm, pointInRect, applySquareConstraint } from "./ss-utils.js";
-import { shouldStartFreeSelection, syncRenderScale, cssRectToBitmap, cssPointToScreen } from "./ss-selection-geometry.js";
+import { norm, pointInRect, applySquareConstraint, computePanAxisBounds, computeCanvasEditorInitialPosition } from "./ss-utils.js";
+import { shouldStartFreeSelection, syncRenderScale, cssRectToBitmap, cssPointToScreen, cssPointToBitmap, getRenderScale } from "./ss-selection-geometry.js";
 import { drawDimmed, drawSelection, drawFinalSelection, redrawAnnotPreview, redrawAnnotFull, scheduleDrawSelection, cancelDrawSelectionRaf, scheduleDrawFinalSelection, cancelDrawFinalSelectionRaf } from "./ss-draw.js";
-import { positionToolbar, invalidateDisplaysCache } from "./ss-display.js";
+import { positionToolbar, invalidateDisplaysCache, findDisplayCssAt, getMonitorForScroll } from "./ss-display.js";
 import {
   getSelectionHandle, beginSelectionInteraction, updateSelectionInteraction,
   finishSelectionInteraction, updateSelectionCursor, refreshShapePreviewOnShift,
@@ -75,7 +75,7 @@ import {
 // 0.15.7：长截图
 import {
   enterScrollCapture, exitScrollCapture, onScrollWheel,
-  bindScrollToolbar, enterScrollEdit, isScrollCaptureActive,
+  bindScrollToolbar, enterScrollEdit, isScrollCaptureActive, isScrollCapturing,
   outputLongImage, resetScrollCaptureSession,
 } from "./scroll/index.js";
 import { refreshDiagnosticsVisibility } from "./scroll/diagnostics.js";
@@ -354,6 +354,8 @@ function resetState() {
   renderScaleReady = false;
   configReady = false;
   if (ss.magnifierRaf) { cancelAnimationFrame(ss.magnifierRaf); ss.magnifierRaf = 0; }
+  ss._magnifierSampleGen = (ss._magnifierSampleGen || 0) + 1;
+  ss._pendingMagnifierPos = null;
   // 长截图状态、在途任务与 DOM 统一由 resetScrollCaptureSession 清理。
   _spaceDown = false;
   try {
@@ -656,16 +658,17 @@ hidePixelMagnifier();
 clearHover();
 clearControlHover();
 
-  // C 类：标注 canvas backing store = 物理像素，CSS width/height 铺满选区。
-  // bitmap↔CSS 映射比 = overlay dpr，全局固定，不改 per-monitor。
-  const dpr = window.devicePixelRatio || 1;
+  // 标注 canvas backing store = 物理像素，CSS width/height 铺满选区。
+  // bitmap rect 来自 cssRectToBitmap（使用实测 renderScale）。
+  const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+  const bmpRect = cssRectToBitmap(rect, meta);
   annotCanvas.classList.remove('hidden');
   annotCanvas.style.left = rect.x + 'px';
   annotCanvas.style.top = rect.y + 'px';
   annotCanvas.style.width = rect.w + 'px';
   annotCanvas.style.height = rect.h + 'px';
-  const pw = Math.max(1, Math.round(rect.w * dpr));
-  const ph = Math.max(1, Math.round(rect.h * dpr));
+  const pw = Math.max(1, bmpRect.w);
+  const ph = Math.max(1, bmpRect.h);
 
   let cropData = null;
   try {
@@ -676,7 +679,7 @@ clearControlHover();
     const tempCtx = tempCanvas.getContext('2d');
     tempCtx.drawImage(
       screenshot,
-      Math.round(rect.x * dpr), Math.round(rect.y * dpr), pw, ph,
+      bmpRect.x, bmpRect.y, pw, ph,
       0, 0, pw, ph
     );
     cropData = tempCtx.getImageData(0, 0, pw, ph);
@@ -707,28 +710,35 @@ clearControlHover();
  * @param {ImageData} cropData - 来源适配器提供的完整图片
  * @param {number} pw - 物理像素宽
  * @param {number} ph - 物理像素高
+ * @param {string} source - 图片来源（IMAGE_SOURCE）
+ * @param {{x,y,w,h}|null} sourceMonitor - 来源显示器 CSS 矩形
  */
-function enterCanvasImageEditor(cropData, pw, ph, source = IMAGE_SOURCE.LONG_SCREENSHOT) {
-  console.debug('[image-editor] enterCanvasImageEditor', { source, pw, ph });
+function enterCanvasImageEditor(cropData, pw, ph, source = IMAGE_SOURCE.LONG_SCREENSHOT, sourceMonitor = null) {
+  console.debug('[image-editor] enterCanvasImageEditor', { source, pw, ph, sourceMonitor });
   const { annotCanvas, toolbar } = ss;
-  const dpr = window.devicePixelRatio || 1;
-  const cssW = pw / dpr;
-  const cssH = ph / dpr;
+  // CSS 尺寸 = bitmap 尺寸 / renderScale
+  const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+  const { scaleX: rsx, scaleY: rsy } = getRenderScale(meta);
+  const cssW = pw / rsx;
+  const cssH = ph / rsy;
 
-  // 水平默认展示长图中央；竖向超出视口时从底部开始编辑。
-  const initialX = Math.round((window.innerWidth - cssW) / 2);
-  const initialY = cssH <= window.innerHeight
-    ? Math.round((window.innerHeight - cssH) / 2)
-    : Math.round(window.innerHeight - cssH);
-  // 顶部至少留 12px 边距
-  const clampedY = Math.max(12, initialY);
-  ss.selCss = { x: initialX, y: clampedY, w: cssW, h: cssH };
+  // 使用来源显示器矩形作为定位容器，默认居中到该屏幕，而不是虚拟桌面。
+  const mon = sourceMonitor || { x: 0, y: 0, w: window.innerWidth, h: window.innerHeight };
+
+  const initial = computeCanvasEditorInitialPosition(cssW, cssH, mon);
+  const initialX = initial.x;
+  const initialY = initial.y;
+  ss.selCss = { x: initialX, y: initialY, w: cssW, h: cssH };
   ss.isAnnotating = true;
   ss.sent = false;
   ss._imagePan = {
-    x: initialX, y: clampedY, dragging: false, lastX: 0, lastY: 0,
+    x: initialX, y: initialY, dragging: false, lastX: 0, lastY: 0,
+    monitor: mon,
   };
   hidePixelMagnifier();
+
+  // 主动隐藏 sizeHint——canvas-backed 编辑器不需要截图坐标提示
+  if (ss.sizeHint) ss.sizeHint.classList.add('hidden');
 
   const baseCanvas = document.createElement('canvas');
   baseCanvas.width = pw;
@@ -742,7 +752,7 @@ function enterCanvasImageEditor(cropData, pw, ph, source = IMAGE_SOURCE.LONG_SCR
   ss.canvas.width = pw;
   ss.canvas.height = ph;
   ss.canvas.style.left = initialX + 'px';
-  ss.canvas.style.top = clampedY + 'px';
+  ss.canvas.style.top = initialY + 'px';
   ss.canvas.style.width = cssW + 'px';
   ss.canvas.style.height = cssH + 'px';
   ss.canvas.style.pointerEvents = '';
@@ -753,7 +763,7 @@ function enterCanvasImageEditor(cropData, pw, ph, source = IMAGE_SOURCE.LONG_SCR
 
   annotCanvas.classList.remove('hidden');
   annotCanvas.style.left = initialX + 'px';
-  annotCanvas.style.top = clampedY + 'px';
+  annotCanvas.style.top = initialY + 'px';
   annotCanvas.style.width = cssW + 'px';
   annotCanvas.style.height = cssH + 'px';
   annotCanvas.width = pw;
@@ -765,17 +775,17 @@ function enterCanvasImageEditor(cropData, pw, ph, source = IMAGE_SOURCE.LONG_SCR
     screenshotSetAnnotationMode(true).catch((e) => console.error('setAnnotationMode(true) 失败', e));
   }
 
-  // 工具栏定位：选区未超出屏幕时贴选区下方，超出时贴屏幕底部。
+  // 工具栏定位：选区未超出来源显示器时贴选区下方，超出时贴来源显示器底部。
   toolbar.classList.remove('hidden');
-  const selectionBottom = clampedY + cssH;
+  const selectionBottom = initialY + cssH;
   const toolbarH = toolbar.offsetHeight || 48;
-  const placeBelow = selectionBottom + toolbarH + 8 <= window.innerHeight;
+  const placeBelow = selectionBottom + toolbarH + 8 <= mon.y + mon.h;
   const toolbarTop = placeBelow
     ? (selectionBottom + 8)
-    : Math.max(8, window.innerHeight - toolbarH - 8);
+    : Math.max(mon.y + 8, mon.y + mon.h - toolbarH - 8);
   toolbar.style.top = toolbarTop + 'px';
   requestAnimationFrame(() => {
-    toolbar.style.left = Math.max(8, Math.round((window.innerWidth - toolbar.offsetWidth) / 2)) + 'px';
+    toolbar.style.left = Math.max(mon.x + 8, Math.round(mon.x + (mon.w - toolbar.offsetWidth) / 2)) + 'px';
   });
 }
 
@@ -877,11 +887,13 @@ const { canvas } = ss;
 
 /** 长图画布移动后，offsetX/Y 已经是图片局部坐标，不能再减 selCss 偏移。 */
 function annotationPoint(e) {
-  const dpr = window.devicePixelRatio || 1;
-  if (ss._imagePan) return { x: e.offsetX * dpr, y: e.offsetY * dpr };
+  // CSS 局部坐标按实际 annotation canvas backing/CSS 比例（= renderScale）转换
+  const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+  const { scaleX: rsx, scaleY: rsy } = getRenderScale(meta);
+  if (ss._imagePan) return { x: e.offsetX * rsx, y: e.offsetY * rsy };
   return {
-    x: (e.offsetX - ss.selCss.x) * dpr,
-    y: (e.offsetY - ss.selCss.y) * dpr,
+    x: (e.offsetX - ss.selCss.x) * rsx,
+    y: (e.offsetY - ss.selCss.y) * rsy,
   };
 }
 
@@ -903,13 +915,11 @@ function beginLongImagePan(e) {
 function longImagePanBounds() {
   const w = ss.selCss?.w || 0;
   const h = ss.selCss?.h || 0;
-  const margin = 48;
-  return {
-    minX: w <= window.innerWidth ? 0 : window.innerWidth - w - margin,
-    maxX: w <= window.innerWidth ? window.innerWidth - w : margin,
-    minY: h <= window.innerHeight ? 0 : window.innerHeight - h - margin,
-    maxY: h <= window.innerHeight ? window.innerHeight - h : margin,
-  };
+  // 使用来源显示器矩形作为平移边界基准，而不是虚拟桌面。
+  const mon = ss._imagePan?.monitor || { x: 0, y: 0, w: window.innerWidth, h: window.innerHeight };
+  const xBounds = computePanAxisBounds(w, mon.w, mon.x);
+  const yBounds = computePanAxisBounds(h, mon.h, mon.y);
+  return { minX: xBounds.min, maxX: xBounds.max, minY: yBounds.min, maxY: yBounds.max };
 }
 
 function moveLongImagePan(e) {
@@ -1465,6 +1475,17 @@ window.addEventListener('keyup', (e) => {
 window.addEventListener('blur', () => { delete document.body.dataset.altDown; });
 
 window.addEventListener('blur', () => {
+  // 长截图采集会把滚轮交给底层窗口，overlay 失焦属于正常流程。
+  // 必须在 blurGuard 和任何视觉清理之前返回，否则会刚进入 capturing 就被
+  // 普通截图的“失焦即退出”策略错杀。
+  if (isScrollCapturing()) {
+    console.debug('[screenshot] window blur ignored during scroll capture', {
+      phase: ss.scrollSession?.scrollCapturePhase,
+      frameCount: ss.scrollSession?.scrollFrames?.length || 0,
+      documentFocus: document.hasFocus(),
+    });
+    return;
+  }
   if (ss.blurGuard) return;
   ss.blurGuard = true;
   setTimeout(() => { ss.blurGuard = false; }, 500);
@@ -1477,7 +1498,12 @@ window.addEventListener('blur', () => {
   // H1 优化：取消待执行的 drawSelection rAF
   cancelDrawSelectionRaf();
   cancelDrawFinalSelectionRaf();
-  console.debug('[screenshot] window blur, hiding overlay');
+  console.debug('[screenshot] window blur, hiding overlay', {
+    phase: ss.scrollSession?.scrollCapturePhase,
+    active: ss.scrollSession?.active,
+    frameCount: ss.scrollSession?.scrollFrames?.length || 0,
+    documentFocus: document.hasFocus(),
+  });
   // 完成时清理画布，防止下次唤起残留旧画面
   cleanupCanvasVisuals();
   if (isScrollCaptureActive()) {

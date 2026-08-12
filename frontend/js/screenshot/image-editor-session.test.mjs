@@ -33,4 +33,32 @@ session.reset();
 assert.equal(session.source, IMAGE_SOURCE.NONE);
 assert.equal(session.baseCanvas, null);
 
-console.log('image editor session tests passed');
+// ── Epoch 机制测试（0.19.16）──
+// reset / beginCanvasSource 必须递增 epoch，使后台异步回调能检测代际失效
+const epochBeforeReset = session.epoch;
+session.reset();
+assert.equal(session.epoch, epochBeforeReset + 1, 'reset() 递增 epoch');
+
+const epochAfterReset = session.epoch;
+session.reset();
+session.reset();
+assert.equal(session.epoch, epochAfterReset + 2, '连续 reset 每次 +1');
+
+// beginCanvasSource 也递增 epoch
+const epochBeforeCanvas = session.epoch;
+session.beginCanvasSource(IMAGE_SOURCE.LONG_SCREENSHOT, canvas);
+assert.equal(session.epoch, epochBeforeCanvas + 1, 'beginCanvasSource 递增 epoch');
+
+// beginScreenshotSelection 内部调 reset → epoch 递增
+const epochBeforeScreenshot = session.epoch;
+session.beginScreenshotSelection();
+assert.equal(session.epoch, epochBeforeScreenshot + 1, 'beginScreenshotSelection 递增 epoch');
+
+// 构造时 epoch 已初始化
+const freshSession = new ImageEditorSession();
+assert.ok(freshSession.epoch >= 1, '新实例 epoch >= 1');
+const freshEpoch = freshSession.epoch;
+freshSession.reset();
+assert.equal(freshSession.epoch, freshEpoch + 1, '新实例 reset 后 epoch +1');
+
+console.log('image editor session tests passed (incl. epoch)');

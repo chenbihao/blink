@@ -14,6 +14,7 @@ import { ss } from './ss-state.js';
 import * as annot from './annotation-engine.js';
 import { initPalette } from './ss-palette.js';
 import { hidePixelMagnifier } from './ss-interaction.js';
+import { screenshotCursorPosition } from '../shared/api.js';
 
 // ── 色彩空间转换（纯函数）──────────────────────────────────
 
@@ -344,21 +345,22 @@ function enterPickMode() {
     hidePixelMagnifier();
   };
 
-  // capture 阶段 mousedown：从原始截图像素采样（非遮罩后的 canvas）
-  // 用 mousedown 而非 click，避免与选区拖拽冲突
-  const onPick = (e) => {
+  // capture 阶段 mousedown：从原始截图像素采样。
+  // 使用 Win32 GetCursorPos 获取物理屏幕坐标，直接映射到 bitmap 坐标，
+  // 不通过 CSS 坐标插值，确保在高 DPI 屏幕上逐物理像素精确采样。
+  const onPick = async (e) => {
     e.preventDefault();
     e.stopPropagation();
     if (!picking) return;
-    // D 类：取色器从主 canvas bitmap 采样，bitmap↔CSS 映射 = overlay dpr。
-    const dpr = window.devicePixelRatio || 1;
-    const px = Math.round(e.offsetX * dpr);
-    const py = Math.round(e.offsetY * dpr);
+    const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
     try {
+      const pos = await screenshotCursorPosition();
+      const bitmapX = Math.round(pos.x - meta.vx);
+      const bitmapY = Math.round(pos.y - meta.vy);
       // 0.15.8-fix：从原始截图离屏 canvas 读取，而非遮罩后的主 canvas
       const source = ss.screenshotOffscreen || ss.canvas;
       const sourceCtx = source.getContext('2d');
-      const pixel = sourceCtx.getImageData(px, py, 1, 1).data;
+      const pixel = sourceCtx.getImageData(bitmapX, bitmapY, 1, 1).data;
       hsv = rgbToHsv(pixel[0], pixel[1], pixel[2]);
       alpha = 1;  // 取色后重置透明度，避免半透明导致用户以为没取色成功
       updateAll();

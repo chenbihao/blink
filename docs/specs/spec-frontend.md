@@ -212,6 +212,12 @@
 
 **禁止**：不校验直接 `innerHTML = 新结果`——慢响应覆盖快响应、切换后旧内容闪回。
 
+**跨窗口生命周期任务**（OCR / 翻译 / Pin 图 / 导出 / 长截图合成）还必须满足：
+
+- 任务启动前取得完成任务所需的**自有数据快照**（bytes / `ImageBitmap` / 独立 Canvas 等），不得在窗口隐藏、复用或销毁后继续读取 DOM 中的可变 Canvas
+- 每轮交互使用独立 epoch/session id；旧任务只能提交或清理所属会话，不能覆盖、清空新会话状态
+- 合成前校验输入资源已就绪且宽高均大于 0；无效输入走可诊断错误/降级路径，禁止直接进入 `drawImage`
+
 ### 5.2 窗体尺寸稳定（强制）
 
 **铁则**：内容变化不得导致窗口反复 resize 抖动。
@@ -258,6 +264,30 @@
 
 > 落地（InputUiState 协议、view epoch、register_main_input_view）见 [phases/0.18 §3.7 四类独立 ID / 配置快照 / 首次状态同步](../phases/0.18-enhancement-chord.md)。
 
+### 5.6 混合 DPI 与跨屏浮层（强制）
+
+> 0.19 多屏截图收敛出的通用契约。截图 overlay、选区、工具栏、控制点、菜单、Pin 图和其他跨屏浮层均适用。
+
+**坐标空间必须显式区分**：
+
+- 屏幕坐标与截图位图坐标使用**物理像素**
+- DOM 布局、Pointer/Mouse 事件使用 **CSS 像素**
+- CSS 与位图的权威换算比例来自实际渲染尺寸（在视觉 transform 之前测量）：
+
+  ```text
+  renderScaleX = canvas.width  / canvas.getBoundingClientRect().width
+  renderScaleY = canvas.height / canvas.getBoundingClientRect().height
+  ```
+
+- `devicePixelRatio`、窗口 DPI、目标显示器 DPI 不得假设相等；它们只能用于目标显示器识别、视觉补偿或异常兜底，不能替代实际 `renderScale`
+
+**几何与视觉缩放分离**：
+
+- 跨多个显示器的同一个 HWND/WebView 只有一套 CSS 渲染比例；浮动 UI 在目标显示器上的视觉补偿为 `uiScale = targetMonitorDpr / renderScale`
+- 选区、截图内容和 Canvas 等几何层保持真实坐标，禁止为“看起来大小一致”整体 transform；只缩放工具栏、控制点、菜单等 UI 壳层
+- 放置、避让和边界判断必须使用缩放后的**视觉尺寸**，不得用未缩放的 `offsetWidth/offsetHeight` 直接钳制
+- 图片、长截图等内容层允许受控地超出屏幕；关键控制面、关闭入口及最小可拖拽区域必须留在可见工作区，保证用户始终能找回和操作
+
 ---
 
 ## 第六层：工程债（收敛中）
@@ -301,7 +331,11 @@
 - [ ] 键位提示走 `kbd.js::renderKey/renderCombo`？自己拼字符串 → ❌
 - [ ] UI 占位走 Lucide sprite？塞 emoji → ❌
 - [ ] 异步回流校验了版本/id？裸 `innerHTML` → ❌
+- [ ] 跨窗口异步任务持有自有数据快照与 epoch？窗口隐藏后还读 DOM Canvas → ❌
+- [ ] Canvas 合成前校验资源 ready 且宽高 > 0？空 Canvas 直接 `drawImage` → ❌
 - [ ] 悬浮层关闭留了 hover 缓冲期？裸即时隐藏 → ❌
+- [ ] 跨屏浮层明确区分物理像素与 CSS 像素，并从实际 Canvas/DOM 尺寸求 `renderScale`？直接套 `devicePixelRatio` → ❌
+- [ ] 浮动 UI 的定位/钳制使用缩放后的视觉尺寸？内容可越界时仍保留可见控制面和拖拽入口？（§5.6）
 - [ ] 新窗口 `background_color` 设了不透明色？透明背景 + 分数 DPI 缩放 → tile seam 斜线（§3.4）
 - [ ] 显隐用 `opacity:0 + transform` 创建合成层？→ 改 `visibility:hidden` 或 `.hidden` class（§3.4）
 - [ ] 屏蔽了不该出现的原生浏览器右键菜单？需要自定义右键时用 CSS 弹层 + `preventDefault`，不裸留原生菜单

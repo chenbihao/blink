@@ -1215,6 +1215,29 @@ pub async fn screenshot_capture_probe(
     Ok(tauri::ipc::Response::new(bytes))
 }
 
+/// 返回当前光标的物理屏幕坐标（虚拟屏幕坐标系，可能为负）。
+///
+/// 通过 Win32 `GetCursorPos` 获取，供取色器逐物理像素直接采样截图 bitmap。
+/// 前端用 `bitmapX = screenX - meta.vx`, `bitmapY = screenY - meta.vy` 直接定位像素，
+/// 不需要通过 CSS 坐标插值。
+#[tauri::command]
+pub fn screenshot_cursor_position() -> Result<serde_json::Value, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        let mut pt = POINT { x: 0, y: 0 };
+        unsafe {
+            GetCursorPos(&mut pt).map_err(|e| format!("GetCursorPos 失败: {e}"))?;
+        }
+        Ok(serde_json::json!({ "x": pt.x, "y": pt.y }))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("screenshot_cursor_position 仅支持 Windows".to_string())
+    }
+}
+
 /// 0.15.7：长截图——转发滚轮事件给目标窗口。
 ///
 /// 手动滚动模式下，overlay 接收 wheel 事件后调用本命令，

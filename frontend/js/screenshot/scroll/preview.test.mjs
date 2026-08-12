@@ -18,6 +18,10 @@ const layoutUrl = dataUrl(`
       + options.direction * 100;
   };
 `);
+// 0.19.16 DPI 适配 mock
+const geometryUrl = dataUrl('export function uiScaleAtCss() { return 1; }');
+const displayUrl = dataUrl('export function findDisplayCssAt() { return { x: 0, y: 0, w: 1000, h: 700 }; } export function getMonitorForScroll() { return null; }');
+const utilsUrl = dataUrl('export function computeFloatingPlacement(opts) { return { left: 0, top: 0 }; }');
 let dashedDraws = 0;
 globalThis.predictionCalls = [];
 const context = {
@@ -33,7 +37,7 @@ globalThis.document = {
   },
   getElementById: () => null,
 };
-globalThis.window = { innerWidth: 1000, innerHeight: 700 };
+globalThis.window = { innerWidth: 1000, innerHeight: 700, __blinkScreenMeta: { vx: 0, vy: 0, renderScaleX: 1, renderScaleY: 1 } };
 globalThis.getComputedStyle = () => ({ getPropertyValue: () => '#4f8cff' });
 globalThis.requestAnimationFrame = (callback) => { callback(); return 1; };
 globalThis.cancelAnimationFrame = () => {};
@@ -53,7 +57,10 @@ globalThis.previewTestState = {
 const source = (await readFile(new URL('./preview.js', import.meta.url), 'utf8'))
   .replace("'../ss-state.js'", JSON.stringify(ssUrl))
   .replace("'./stitch.js'", JSON.stringify(stitchUrl))
-  .replace("'./preview-layout.js'", JSON.stringify(layoutUrl));
+  .replace("'./preview-layout.js'", JSON.stringify(layoutUrl))
+  .replace("'../ss-selection-geometry.js'", JSON.stringify(geometryUrl))
+  .replace("'../ss-display.js'", JSON.stringify(displayUrl))
+  .replace("'../ss-utils.js'", JSON.stringify(utilsUrl));
 const { showPredictedPreview, updatePreview } = await import(dataUrl(source));
 
 updatePreview();

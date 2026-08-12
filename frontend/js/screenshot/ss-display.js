@@ -5,7 +5,7 @@
 //! 查询原生 DPI，仅供显示器识别和跨 DPI clamp 使用，不参与坐标变换。
 
 import { ss } from './ss-state.js';
-import { screenRectToCss } from './ss-selection-geometry.js';
+import { screenRectToCss, uiScaleAtCss } from './ss-selection-geometry.js';
 
 // M7 优化：缓存 getDisplays() 结果——renderScale 不变时 CSS 矩形不变
 let _displaysCache = null;
@@ -55,6 +55,58 @@ export function invalidateDisplaysCache() {
 }
 
 /**
+ * 读取当前工具栏 UI scale（由 positionToolbar 设置）。
+ * 浮层元素（sub-panel、OCR panel、size-hint、magnifier）调用此函数
+ * 获取与工具栏一致的视觉缩放比，保证跨屏物理尺寸一致。
+ */
+export function getToolbarUiScale() {
+  const { toolbar } = ss;
+  return parseFloat(toolbar?.dataset?.uiScale) || 1;
+}
+
+/**
+ * 给浮层元素应用 UI scale（transform: scale + transform-origin: top left）。
+ * 返回 uiScale 供调用方用于视觉宽高计算。
+ */
+export function applyFloatingUiScale(el) {
+  const uiScale = getToolbarUiScale();
+  el.style.transformOrigin = 'top left';
+  el.style.transform = `scale(${uiScale})`;
+  return uiScale;
+}
+
+/**
+ * 按锚点 CSS 坐标计算 UI scale 并应用到浮层元素。
+ *
+ * 与 `applyFloatingUiScale` 不同，此函数不依赖工具栏的 dataset.uiScale，
+ * 而是根据指定 CSS 坐标所在显示器的原生 DPR 独立计算缩放比。
+ * 用于 sizeHint、pixel magnifier 等需要按自身位置独立缩放的浮层。
+ *
+ * @param {HTMLElement} el - 要缩放的元素
+ * @param {number} cssX - 锚点 CSS X
+ * @param {number} cssY - 锚点 CSS Y
+ * @returns {number} 应用的 uiScale
+ */
+export function applyFloatingUiScaleAt(el, cssX, cssY) {
+  const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+  const uiScale = uiScaleAtCss(cssX, cssY, meta);
+  el.style.transformOrigin = 'top left';
+  el.style.transform = `scale(${uiScale})`;
+  return uiScale;
+}
+
+/**
+ * 获取长截图会话保存的来源显示器矩形。
+ * 如果 session 中没有保存，返回 null（调用方应 fallback 到 findDisplayCssAt）。
+ */
+export function getMonitorForScroll(session) {
+  if (session && session.scrollSourceMonitor) {
+    return session.scrollSourceMonitor;
+  }
+  return null;
+}
+
+/**
  * 给一个 CSS 坐标点，返回它所在屏的 CSS 矩形（含 fallback）。
  * 找不到匹配屏时回退到整个 overlay 视口。
  */
@@ -82,15 +134,26 @@ export function findDisplayContainingRect(rect) {
 
 /** 定位工具栏（PixPin 风格）。
  *  先确定目标屏（选区右下角内侧），计算候选位置后无条件 clamp 到屏内。
- *  用户已手动拖动过时，保留位置但重新 clamp 防止越界。 */
+ *  用户已手动拖动过时，保留位置但重新 clamp 防止越界。
+ *  工具栏按选区右下角所在屏的 DPR 计算 UI scale，用 transform: scale 补偿
+ *  跨屏 renderScale 差异，保证物理尺寸一致。 */
 export function positionToolbar(rect) {
   const { toolbar } = ss;
   toolbar.classList.remove('hidden');
 
+  // 按选区右下角所在屏计算 UI scale
+  const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+  const anchorX = rect.x + Math.max(0, rect.w - 1);
+  const anchorY = rect.y + Math.max(0, rect.h - 1);
+  const uiScale = uiScaleAtCss(anchorX, anchorY, meta);
+  toolbar.dataset.uiScale = String(uiScale);
+  toolbar.style.transformOrigin = 'top left';
+  toolbar.style.transform = `scale(${uiScale})`;
+
   // 用户已手动拖动过：保留位置但重新 clamp 到当前屏
   if (toolbar.dataset.userMoved === 'true' && toolbar.style.left && toolbar.style.top) {
-    const tw = toolbar.offsetWidth;
-    const th = toolbar.offsetHeight;
+    const tw = toolbar.offsetWidth * uiScale;
+    const th = toolbar.offsetHeight * uiScale;
     if (tw > 0 && th > 0) {
       const left = parseFloat(toolbar.style.left);
       const top = parseFloat(toolbar.style.top);
@@ -100,7 +163,7 @@ export function positionToolbar(rect) {
       const clampedTop = Math.max(mon.y + MARGIN, Math.min(top, mon.y + mon.h - th - MARGIN));
       if (clampedLeft !== left || clampedTop !== top) {
         const floating = toolbar.classList.contains('toolbar-floating');
-        applyToolbarPos(clampedLeft, clampedTop, floating);
+        applyToolbarPos(clampedLeft, clampedTop, floating, uiScale);
       }
     }
     return;
@@ -110,15 +173,12 @@ export function positionToolbar(rect) {
   toolbar.style.top = '-9999px';
 
   requestAnimationFrame(() => {
-    const tw = toolbar.offsetWidth;
-    const th = toolbar.offsetHeight;
+    const tw = toolbar.offsetWidth * uiScale;
+    const th = toolbar.offsetHeight * uiScale;
     const MARGIN = 8;
 
     // 确定目标屏（选区右下角内侧点，默认语义工具栏靠选区右侧）
-    const mon = findDisplayCssAt(
-      rect.x + Math.max(0, rect.w - 1),
-      rect.y + Math.max(0, rect.h - 1),
-    );
+    const mon = findDisplayCssAt(anchorX, anchorY);
 
     // 水平：优先右对齐，clamp 到目标屏
     const minLeft = mon.x + MARGIN;
@@ -148,11 +208,11 @@ export function positionToolbar(rect) {
     left = Math.max(minLeft, Math.min(left, maxLeft));
     top = Math.max(minTop, Math.min(top, maxTop));
 
-    applyToolbarPos(left, top, floating);
+    applyToolbarPos(left, top, floating, uiScale);
   });
 }
 
-function applyToolbarPos(left, top, floating) {
+function applyToolbarPos(left, top, floating, uiScale = 1) {
   const { toolbar } = ss;
   toolbar.style.left = left + 'px';
   toolbar.style.top = top + 'px';
@@ -165,9 +225,11 @@ function applyToolbarPos(left, top, floating) {
       subP.style.left = tmRect.left + 'px';
       subP.style.top = (tmRect.bottom + 4) + 'px';
     } else {
+      // 使用变换后的视觉高度
+      const visualH = toolbar.offsetHeight * uiScale;
       subP.style.left = left + 'px';
-      subP.style.top = (top + (floating ? 0 : toolbar.offsetHeight) + 4) + 'px';
+      subP.style.top = (top + (floating ? 0 : visualH) + 4) + 'px';
     }
   }
-  console.debug('[screenshot] toolbar 定位', { left, top, tw: toolbar.offsetWidth, th: toolbar.offsetHeight, floating });
+  console.debug('[screenshot] toolbar 定位', { left, top, tw: toolbar.offsetWidth, th: toolbar.offsetHeight, visualW: toolbar.offsetWidth * uiScale, visualH: toolbar.offsetHeight * uiScale, uiScale, floating });
 }

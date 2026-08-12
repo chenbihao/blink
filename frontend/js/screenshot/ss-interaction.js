@@ -10,11 +10,12 @@
 import { ss, SELECTION_HANDLE_SIZE, MIN_SELECTION_SIZE, TOOL_CAPS } from './ss-state.js';
 import { norm, applySquareConstraint } from './ss-utils.js';
 import { scheduleDrawSelection, drawFinalSelection, scheduleDrawFinalSelection, cancelDrawFinalSelectionRaf } from './ss-draw.js';
-import { findDisplayCssAt } from './ss-display.js';
+import { findDisplayCssAt, applyFloatingUiScale, applyFloatingUiScaleAt } from './ss-display.js';
 import * as annot from './annotation-engine.js';
 import {
-  formatColor, magnifierSampleRegion,
+  formatColor, magnifierSampleRegion, cssPointToBitmap, getRenderScale, screenPointToBitmap,
 } from './ss-selection-geometry.js';
+import { screenshotCursorPosition } from '../shared/api.js';
 
 export function selectionCursor(handle) {
   if (handle === 'n' || handle === 's') return 'ns-resize';
@@ -181,7 +182,11 @@ export function updatePixelMagnifier(cssX, cssY) {
     return;
   }
   // R3：只记录 pending 坐标，由 rAF 回调执行实际工作
-  ss._pendingMagnifierPos = { x: cssX, y: cssY };
+  // 每次指针移动立即失效上一个异步 GetCursorPos 结果；否则 IPC 回流顺序变化时
+  // 放大镜可能短暂跳回旧像素。
+  const generation = (ss._magnifierSampleGen || 0) + 1;
+  ss._magnifierSampleGen = generation;
+  ss._pendingMagnifierPos = { x: cssX, y: cssY, generation };
   if (!ss.magnifierRaf) {
     ss.magnifierRaf = requestAnimationFrame(renderPixelMagnifier);
   }
@@ -196,11 +201,34 @@ function renderPixelMagnifier() {
     return;
   }
 
-  const { x: cssX, y: cssY } = ss._pendingMagnifierPos;
-  // D 类：像素放大镜从主 canvas bitmap 采样，bitmap↔CSS 映射 = overlay dpr。
-  const dpr = window.devicePixelRatio || 1;
-  const px = Math.round(cssX * dpr);
-  const py = Math.round(cssY * dpr);
+  const { x: cssX, y: cssY, generation } = ss._pendingMagnifierPos;
+  const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+
+  // 选区预览和正式吸管统一使用 Win32 GetCursorPos 的虚拟屏幕物理坐标。
+  // CSS 指针坐标在 200% 缩放下通常每次只变化 1 DIP，乘 renderScale 后会
+  // 形成 0、2、4… 的 bitmap 步进；物理坐标则能覆盖每一个截图像素。
+  screenshotCursorPosition().then((pos) => {
+    if (!canRenderMagnifierSample(generation)) return;
+    const bmpPt = screenPointToBitmap(pos.x, pos.y, meta);
+    renderMagnifierFromBitmap(bmpPt.x, bmpPt.y, cssX, cssY, meta);
+  }).catch(() => {
+    // 平台命令异常时保留旧路径作为降级，至少不让放大镜完全不可用。
+    if (!canRenderMagnifierSample(generation)) return;
+    const bmpPt = cssPointToBitmap(cssX, cssY, meta);
+    renderMagnifierFromBitmap(bmpPt.x, bmpPt.y, cssX, cssY, meta);
+  });
+}
+
+function canRenderMagnifierSample(generation) {
+  return generation === ss._magnifierSampleGen
+    && !!ss.magnifierEl
+    && (!ss.isAnnotating || ss.eyedropperActive);
+}
+
+/**
+ * 从 bitmap 坐标采样像素并渲染放大镜网格 + 定位元素。
+ */
+function renderMagnifierFromBitmap(px, py, cssX, cssY, meta) {
   const halfR = Math.floor(PM_ROWS / 2);
   const halfC = Math.floor(PM_COLS / 2);
 
@@ -232,21 +260,24 @@ function renderPixelMagnifier() {
 
   // 定位放大镜：鼠标右下方，偏移 16px；空间不足时向左/上翻转
   const el = ss.magnifierEl;
-  const elW = el.offsetWidth || 160;
-  const elH = el.offsetHeight || 120;
+  // 按鼠标所在位置独立计算 UI scale，不复用工具栏的 dataset.uiScale
+  const uiScale = applyFloatingUiScaleAt(el, cssX, cssY);
+  const elW = (el.offsetWidth || 160) * uiScale;
+  const elH = (el.offsetHeight || 120) * uiScale;
+  // 使用鼠标所在显示器矩形作为 clamp 基准，不使用全局 viewport
+  const mon = findDisplayCssAt(cssX, cssY);
   let left = cssX + 16;
   let top = cssY + 16;
-  if (left + elW > window.innerWidth) left = cssX - elW - 16;
-  if (top + elH > window.innerHeight) top = cssY - elH - 16;
-  // R3：最终 clamp 到 overlay 视口，不遮住目标像素也不越界
-  left = Math.max(0, Math.min(left, window.innerWidth - elW));
-  top = Math.max(0, Math.min(top, window.innerHeight - elH));
+  if (left + elW > mon.x + mon.w) left = cssX - elW - 16;
+  if (top + elH > mon.y + mon.h) top = cssY - elH - 16;
+  // 最终 clamp 到来源显示器视口，不遮住目标像素也不越界
+  left = Math.max(mon.x, Math.min(left, mon.x + mon.w - elW));
+  top = Math.max(mon.y, Math.min(top, mon.y + mon.h - elH));
   el.style.left = left + 'px';
   el.style.top = top + 'px';
   el.classList.remove('hidden');
 
   // 坐标显示（虚拟屏幕物理坐标）
-  const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
   if (ss.magnifierCoord) {
     ss.magnifierCoord.textContent = `${meta.vx + px}, ${meta.vy + py}`;
   }
@@ -270,6 +301,9 @@ function renderPixelMagnifier() {
 /** 隐藏像素放大镜 */
 export function hidePixelMagnifier() {
   if (ss.magnifierRaf) { cancelAnimationFrame(ss.magnifierRaf); ss.magnifierRaf = 0; }
+  // 递增代际，使正在途中的 GetCursorPos 异步结果失效
+  ss._magnifierSampleGen = (ss._magnifierSampleGen || 0) + 1;
+  ss._pendingMagnifierPos = null;
   if (ss.magnifierEl) ss.magnifierEl.classList.add('hidden');
 }
 
@@ -413,15 +447,16 @@ export function updateStrokeCursor(clientX, clientY) {
     return;
   }
   const w = annot.getWidthForTool(tool);
-  // D 类：画笔光标大小映射到 CSS 显示，bitmap↔CSS = overlay dpr。
-  const dpr = window.devicePixelRatio || 1;
+  // 画笔光标大小映射到 CSS 显示，bitmap→CSS = renderScale
+  const _meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+  const { scaleX: rsx } = getRenderScale(_meta);
   let cssPxDiameter = 0;
   if (tool === 'pencil') {
-    cssPxDiameter = w / dpr;
+    cssPxDiameter = w / rsx;
   } else if (tool === 'highlight-multiply' || tool === 'highlight-translucent') {
-    cssPxDiameter = (w * 4) / dpr;
+    cssPxDiameter = (w * 4) / rsx;
   } else if (tool === 'eraser') {
-    cssPxDiameter = (Math.max(6, w * 3) * 2) / dpr;
+    cssPxDiameter = (Math.max(6, w * 3) * 2) / rsx;
   } else if (tool === 'mosaic' || tool === 'pixelate' || tool === 'blur') {
     // 0.15.8-fix→fix：统一画笔模式工具的光标大小计算。
     // 0.15.11：pixelate/blur 的 widthCat='effect'，getWidthForTool 返回 blurIntensity（统一强度）
@@ -429,15 +464,15 @@ export function updateStrokeCursor(clientX, clientY) {
     const brushSize = annot.getBrushSize();
     if (tool === 'blur') {
       // blur brush 模式的笔画宽度 = brush.size * 2
-      cssPxDiameter = (brushSize * 2) / dpr;
+      cssPxDiameter = (brushSize * 2) / rsx;
     } else {
       // mosaic/pixelate brush 模式的半径 = max(8, brush.size / 2 + 8)，直径 = 半径 * 2
-      cssPxDiameter = (Math.max(8, brushSize / 2 + 8) * 2) / dpr;
+      cssPxDiameter = (Math.max(8, brushSize / 2 + 8) * 2) / rsx;
     }
   } else if (tool === 'number') {
     // 0.15.11：数字标号光标——圆形虚线圈，大小跟随 brushSize
     const brushSize = annot.getBrushSize();
-    cssPxDiameter = (Math.max(10, brushSize * 1.2) * 2) / dpr;
+    cssPxDiameter = (Math.max(10, brushSize * 1.2) * 2) / rsx;
   } else {
     strokeCursor.style.display = 'none';
     return;

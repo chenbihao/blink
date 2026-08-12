@@ -91,6 +91,8 @@ export const ss = {
 
   // ── 0.15.10：取色器活跃标志（eyedropper 模式时显示像素放大镜）──
   eyedropperActive: false,
+  // 放大镜异步物理坐标采样代际守卫，防止旧 GetCursorPos 结果回流
+  _magnifierSampleGen: 0,
 
   // ── 跨模块回调（主文件注册，避免循环依赖）──────────────────
   _invalidateSelectionContent: null,  // 选区内容失效（清 OCR/阅读/overlay）
