@@ -355,11 +355,6 @@ fn main() {
                 });
             }
 
-            // 主窗口预热：启动后第一时间 spawn（无 1s 延迟），让窗口尽早完成
-            // WM_ACTIVATE 激活标记，后续 Alt+Space 唤起不触发 Alt trick。
-            // 与 preheat_secondary_windows 分离——后者仍等 1s 预热次级窗口。
-            infra::platform::window::preheat_main_window(app.handle().clone());
-
             // 0.17.3：首次启动弹出独立引导窗口（主窗口照常 hide）
             if app_config.first_run {
                 infra::platform::window::show_welcome_window(app.handle());
@@ -383,6 +378,11 @@ fn main() {
                         let _ = crate::infra::platform::window::show_chat_window(app, None);
                     }
                     "about" => open_about(app),
+                    // 0.19.17：输入钩子逃生舱——Alt+Space 失效时从此手动恢复
+                    "recover_hook" => {
+                        tracing::info!("托盘菜单：用户请求恢复输入钩子");
+                        crate::infra::platform::hotkey::InputController::request_manual_recovery();
+                    }
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -781,7 +781,6 @@ fn main() {
             }
 
             // 后台预热次级窗口（1s 延迟，不阻塞启动；WebView2 冷启动 300~400ms → 预热后 show <50ms）
-            // 主窗口预热已在上方 preheat_main_window 中第一时间执行，此处仅预热次级窗口。
             infra::platform::window::preheat_secondary_windows(app.handle().clone());
 
             // 0.10: 自动启动 funasr-server（懒加载，延迟 5s 避免与启动竞争资源）

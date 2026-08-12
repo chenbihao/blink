@@ -148,6 +148,41 @@ const ACTIONS: &[BuiltinAction] = &[
         param_source: ParamSource::None,
         default_enabled: true,
     },
+    BuiltinAction {
+        id: "blink_print_debug_info",
+        title: "Blink Print Debug Info",
+        subtitle: "复制 Blink 通用调试信息（当前详细包含 Windows 输入状态）",
+        keywords: &[
+            "debug",
+            "debug info",
+            "print debug",
+            "调试",
+            "调试信息",
+            "诊断",
+            "diagnostic",
+        ],
+        context: &[],
+        param_source: ParamSource::None,
+        default_enabled: true,
+    },
+    BuiltinAction {
+        id: "blink_debug_inithook",
+        title: "Blink Debug InitHook",
+        subtitle: "打印调试信息，并安全重置输入状态与重装 Windows Hook",
+        keywords: &[
+            "debug",
+            "debug inithook",
+            "inithook",
+            "init hook",
+            "恢复hook",
+            "恢复输入",
+            "修复快捷键",
+            "alt卡住",
+        ],
+        context: &[],
+        param_source: ParamSource::None,
+        default_enabled: true,
+    },
     // ── 0.8.0 §1.3 参数化动作 ───────────────────────────────────────────────
     BuiltinAction {
         id: "open_url",
@@ -1008,5 +1043,72 @@ mod tests {
                 "非空 query 即使走 Context-only 分支也不标 context_aware（用户已在输入）"
             );
         }
+    }
+
+    // ── 0.19.17：诊断动作搜索 ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn search_blink_print_debug_info() {
+        let engine = BuiltinEngine;
+        let history = HashMap::new();
+        let snapshot = ContextSnapshot::default();
+        let ctx = make_ctx(&history, &snapshot);
+
+        let items = engine.search("诊断", &ctx).await;
+        assert!(
+            items
+                .iter()
+                .any(|it| it.id == "builtin:blink_print_debug_info"),
+            "搜索'诊断'应召回 blink_print_debug_info"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_blink_print_debug_info_pinyin() {
+        let engine = BuiltinEngine;
+        let history = HashMap::new();
+        let snapshot = ContextSnapshot::default();
+        let ctx = make_ctx(&history, &snapshot);
+
+        // 拼音首字母 "zd" 匹配 "诊断"
+        let items = engine.search("zd", &ctx).await;
+        assert!(
+            items
+                .iter()
+                .any(|it| it.id == "builtin:blink_print_debug_info"),
+            "搜索'zd'应召回 blink_print_debug_info"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_blink_debug_inithook() {
+        let engine = BuiltinEngine;
+        let history = HashMap::new();
+        let snapshot = ContextSnapshot::default();
+        let ctx = make_ctx(&history, &snapshot);
+
+        let items = engine.search("恢复输入", &ctx).await;
+        assert!(
+            items
+                .iter()
+                .any(|it| it.id == "builtin:blink_debug_inithook"),
+            "搜索'恢复输入'应召回 blink_debug_inithook"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_blink_debug_inithook_english() {
+        let engine = BuiltinEngine;
+        let history = HashMap::new();
+        let snapshot = ContextSnapshot::default();
+        let ctx = make_ctx(&history, &snapshot);
+
+        let items = engine.search("inithook", &ctx).await;
+        assert!(
+            items
+                .iter()
+                .any(|it| it.id == "builtin:blink_debug_inithook"),
+            "搜索'inithook'应召回 blink_debug_inithook"
+        );
     }
 }

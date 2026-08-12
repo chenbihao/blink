@@ -19,6 +19,7 @@ pub enum TrayText {
     StickyManager,
     ChatWindow,
     Settings,
+    RecoverInputHook,
     About,
     Quit,
 }
@@ -33,12 +34,14 @@ pub fn text(lang: &str, key: TrayText) -> &'static str {
         (true, TrayText::StickyManager) => "便签管理",
         (true, TrayText::ChatWindow) => "AI 对话窗口",
         (true, TrayText::Settings) => "设置",
+        (true, TrayText::RecoverInputHook) => "恢复输入钩子",
         (true, TrayText::About) => "关于 Blink",
         (true, TrayText::Quit) => "退出 Blink",
         (false, TrayText::ShowMain) => "Show Main Window",
         (false, TrayText::StickyManager) => "Sticky Manager",
         (false, TrayText::ChatWindow) => "AI Chat Window",
         (false, TrayText::Settings) => "Settings",
+        (false, TrayText::RecoverInputHook) => "Recover Input Hook",
         (false, TrayText::About) => "About Blink",
         (false, TrayText::Quit) => "Quit Blink",
     }
@@ -50,7 +53,8 @@ pub fn text(lang: &str, key: TrayText) -> &'static str {
 /// `on_menu_event` 路由依然有效。
 pub fn build_menu(app: &impl Manager<tauri::Wry>, lang: &str) -> tauri::Result<Menu<tauri::Wry>> {
     // 0.18.4：菜单重组——便签管理 + AI 对话窗口归为 chord 能力组，设置上提
-    // 结构：show_main → sep → sticky_manager → chat_window → sep → settings → about → sep → quit
+    // 0.19.17：新增「恢复输入钩子」逃生舱——Alt+Space 失效时用户可从此恢复
+    // 结构：show_main → sep → sticky_manager → chat_window → sep → settings → recover_hook → about → sep → quit
     let show_main = MenuItem::with_id(
         app,
         "show_main",
@@ -79,6 +83,13 @@ pub fn build_menu(app: &impl Manager<tauri::Wry>, lang: &str) -> tauri::Result<M
         true,
         None::<&str>,
     )?;
+    let recover_hook = MenuItem::with_id(
+        app,
+        "recover_hook",
+        text(lang, TrayText::RecoverInputHook),
+        true,
+        None::<&str>,
+    )?;
     let about = MenuItem::with_id(
         app,
         "about",
@@ -97,6 +108,7 @@ pub fn build_menu(app: &impl Manager<tauri::Wry>, lang: &str) -> tauri::Result<M
             &chat_window,
             &sep,
             &settings,
+            &recover_hook,
             &about,
             &sep,
             &quit,

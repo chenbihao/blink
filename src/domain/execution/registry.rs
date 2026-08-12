@@ -25,6 +25,7 @@ impl ActionRegistry {
     /// 0.14.4: open_url / open_path / reveal_in_explorer 的 Action 版本已删除，
     /// 由 Capability 版本承担（CapabilityRegistry）。
     /// 0.19.7: 新增 EditClipboardImageAction，共 11 个。
+    /// 0.19.17: 新增 BlinkPrintDebugInfoAction 和 BlinkDebugInitHookAction，共 13 个。
     pub fn new() -> Self {
         let mut actions: HashMap<String, Arc<dyn Action>> = HashMap::new();
 
@@ -41,6 +42,8 @@ impl ActionRegistry {
             Arc::new(ExitBlinkAction),
             Arc::new(OpenLogsAction),
             Arc::new(OpenDataDirAction),
+            Arc::new(BlinkPrintDebugInfoAction),
+            Arc::new(BlinkDebugInitHookAction),
         ];
 
         for action in builtins {
@@ -94,9 +97,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_has_11_builtin_actions() {
+    fn registry_has_13_builtin_actions() {
         let reg = ActionRegistry::new();
-        assert_eq!(reg.len(), 11);
+        assert_eq!(reg.len(), 13);
     }
 
     #[test]
@@ -114,6 +117,8 @@ mod tests {
             "exit_blink",
             "open_logs",
             "open_data_dir",
+            "blink_print_debug_info",
+            "blink_debug_inithook",
         ];
         for id in &expected {
             assert!(reg.get(id).is_some(), "缺少动作: {id}");
@@ -146,6 +151,8 @@ mod tests {
             "exit_blink",
             "open_logs",
             "open_data_dir",
+            "blink_print_debug_info",
+            "blink_debug_inithook",
         ];
         for id in &expected_ids {
             let action = reg.get(id).expect(id);
@@ -171,6 +178,8 @@ mod tests {
             "exit_blink",
             "open_logs",
             "open_data_dir",
+            "blink_print_debug_info",
+            "blink_debug_inithook",
         ] {
             let action = reg.get(id).expect(id);
             let schema = action.schema();
@@ -189,13 +198,15 @@ mod tests {
         use crate::domain::execution::DangerClass;
         let reg = ActionRegistry::new();
 
-        // Safe:只读打开 UI
+        // Safe:只读打开 UI / 诊断信息
         for id in [
             "open_settings",
             "sticky_manager",
             "edit_clipboard_image",
             "open_logs",
             "open_data_dir",
+            "blink_print_debug_info",
+            "blink_debug_inithook",
         ] {
             let action = reg.get(id).expect(id);
             assert_eq!(action.danger_class(), DangerClass::Safe, "{id} 应为 Safe");
@@ -222,9 +233,9 @@ mod tests {
     #[test]
     fn register_with_ref_self_works() {
         let reg = ActionRegistry::new();
-        assert_eq!(reg.len(), 11);
+        assert_eq!(reg.len(), 13);
         // 注册一个新动作
         reg.register(Arc::new(OpenSettingsAction)); // 重复 id,应跳过
-        assert_eq!(reg.len(), 11, "重复 id 不应增加数量");
+        assert_eq!(reg.len(), 13, "重复 id 不应增加数量");
     }
 }

@@ -405,6 +405,374 @@ impl Action for OpenDataDirAction {
     }
 }
 
+/// Blink 通用调试信息（0.19.17 首版重点覆盖 Windows 输入链路）。
+///
+/// 采集 InputState 快照、Hook 状态、物理修饰键、已发布 UI 状态和最近事件环形缓冲区，
+/// 格式化为可读文本并复制到剪贴板。后续版本可在同一动作中扩展其他运行时模块。
+pub struct BlinkPrintDebugInfoAction;
+
+#[async_trait::async_trait]
+impl Action for BlinkPrintDebugInfoAction {
+    fn id(&self) -> &str {
+        "blink_print_debug_info"
+    }
+    fn title(&self) -> &LocalizableText {
+        static T: std::sync::OnceLock<LocalizableText> = std::sync::OnceLock::new();
+        T.get_or_init(|| bilingual("Blink Print Debug Info", "Blink Print Debug Info"))
+    }
+    fn subtitle(&self) -> &LocalizableText {
+        static T: std::sync::OnceLock<LocalizableText> = std::sync::OnceLock::new();
+        T.get_or_init(|| {
+            bilingual(
+                "复制 Blink 通用调试信息；当前版本详细包含 Windows Hook 与输入状态",
+                "Copy general Blink debug info, currently with detailed Windows hook and input state",
+            )
+        })
+    }
+    fn schema(&self) -> ActionSchema {
+        ActionSchema::empty(
+            "blink_print_debug_info",
+            "Collect general Blink runtime debug info and copy it to the clipboard; this version includes detailed Windows input diagnostics",
+        )
+    }
+    fn danger_class(&self) -> DangerClass {
+        DangerClass::Safe
+    }
+    async fn execute(&self, _cx: &ActionContext<'_>) -> Result<ActionOutcome, ExecError> {
+        tracing::info!("执行内置动作：Blink Print Debug Info");
+
+        let physical = crate::infra::platform::hotkey::read_physical_modifiers();
+        let snapshot =
+            crate::infra::platform::hotkey::diagnostics::take_diagnostic_snapshot(physical);
+        let events = crate::infra::platform::hotkey::diagnostics::take_diagnostic_events();
+        let text = format_diagnostic_info(&snapshot, &events);
+
+        // 复制到剪贴板（skip_persist = true，不写入剪贴板历史）
+        if let Err(e) = crate::infra::platform::clipboard::write_text_to_clipboard(
+            &text,
+            "blink_print_debug_info",
+            true,
+        ) {
+            tracing::error!(error = %e, "写入诊断信息到剪贴板失败");
+        }
+
+        Ok(ActionOutcome::Nop)
+    }
+}
+
+/// Blink 调试快照 + Windows Hook 恢复（0.19.17）。
+///
+/// 与 `BlinkPrintDebugInfoAction` 相同地采集诊断快照并复制到剪贴板，
+/// **额外**触发一次 `ManualRecovery` 请求——当用户怀疑 Hook 已失效时，
+/// 执行此动作可在采集诊断的同时尝试恢复 Hook。
+pub struct BlinkDebugInitHookAction;
+
+#[async_trait::async_trait]
+impl Action for BlinkDebugInitHookAction {
+    fn id(&self) -> &str {
+        "blink_debug_inithook"
+    }
+    fn title(&self) -> &LocalizableText {
+        static T: std::sync::OnceLock<LocalizableText> = std::sync::OnceLock::new();
+        T.get_or_init(|| bilingual("Blink Debug InitHook", "Blink Debug InitHook"))
+    }
+    fn subtitle(&self) -> &LocalizableText {
+        static T: std::sync::OnceLock<LocalizableText> = std::sync::OnceLock::new();
+        T.get_or_init(|| {
+            bilingual(
+                "打印调试信息，并在安全门禁满足后重置输入状态与重装 Windows Hook",
+                "Print debug info, then safely reset input state and reinstall the Windows hook",
+            )
+        })
+    }
+    fn schema(&self) -> ActionSchema {
+        ActionSchema::empty(
+            "blink_debug_inithook",
+            "Collect current Blink debug info, then safely reset volatile Windows input state and request hook reinstallation",
+        )
+    }
+    fn danger_class(&self) -> DangerClass {
+        DangerClass::Safe
+    }
+    async fn execute(&self, _cx: &ActionContext<'_>) -> Result<ActionOutcome, ExecError> {
+        tracing::info!("执行内置动作：恢复输入钩子（诊断 + ManualRecovery）");
+
+        // 1. 采集诊断快照（与 BlinkPrintDebugInfoAction 相同）
+        let physical = crate::infra::platform::hotkey::read_physical_modifiers();
+        let snapshot =
+            crate::infra::platform::hotkey::diagnostics::take_diagnostic_snapshot(physical);
+        let events = crate::infra::platform::hotkey::diagnostics::take_diagnostic_events();
+        let text = format_diagnostic_info(&snapshot, &events);
+
+        if let Err(e) = crate::infra::platform::clipboard::write_text_to_clipboard(
+            &text,
+            "blink_debug_inithook",
+            true,
+        ) {
+            tracing::error!(error = %e, "写入诊断信息到剪贴板失败");
+        }
+
+        // 2. 请求手动 Hook 恢复
+        crate::infra::platform::hotkey::InputController::request_manual_recovery();
+        tracing::info!("ManualRecovery 已请求");
+
+        Ok(ActionOutcome::Nop)
+    }
+}
+
+/// 格式化诊断快照为可读文本。
+fn format_diagnostic_info(
+    snapshot: &crate::infra::platform::hotkey::diagnostics::InputDiagnosticSnapshot,
+    events: &[crate::infra::platform::hotkey::diagnostics::InputDiagnosticEvent],
+) -> String {
+    let mut lines = Vec::new();
+
+    lines.push("=== Blink Debug Info ===".to_string());
+    lines.push("Schema: 1".to_string());
+    lines.push("Profile: windows_input".to_string());
+    lines.push(format!("Version: {}", env!("CARGO_PKG_VERSION")));
+    lines.push(format!(
+        "Platform: {} / {}",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    ));
+    lines.push(format!("Uptime: {}ms", snapshot.uptime_ms));
+    lines.push(String::new());
+
+    // ── Modifiers ──
+    lines.push("--- Modifiers (Level | Physical) ---".to_string());
+    let key_names = [
+        "LCtrl", "RCtrl", "LShift", "RShift", "LAlt", "RAlt", "LMeta", "RMeta",
+    ];
+    let phys = [
+        snapshot.physical.lctrl,
+        snapshot.physical.rctrl,
+        snapshot.physical.lshift,
+        snapshot.physical.rshift,
+        snapshot.physical.lalt,
+        snapshot.physical.ralt,
+        snapshot.physical.lmeta,
+        snapshot.physical.rmeta,
+    ];
+    for (i, name) in key_names.iter().enumerate() {
+        let level = level_str(snapshot.state.modifier_levels[i]);
+        let p = if phys[i] { "Down" } else { "Up" };
+        lines.push(format!("{name:>6}: {level:>12} | {p}"));
+    }
+    lines.push(format!(
+        "Pressed mask: 0x{:04x}",
+        snapshot.state.pressed_mask
+    ));
+    lines.push(String::new());
+
+    // ── Gesture ──
+    lines.push("--- Gesture ---".to_string());
+    let gesture = if snapshot.state.gesture_idle {
+        "Idle"
+    } else if snapshot.state.gesture_armed {
+        "Armed"
+    } else {
+        "Active"
+    };
+    lines.push(format!("State: {gesture}"));
+    lines.push(String::new());
+
+    // ── Chord ──
+    lines.push("--- Chord ---".to_string());
+    lines.push(format!(
+        "Active: {}, Session: {:?}",
+        snapshot.state.chord_active, snapshot.state.chord_session_id
+    ));
+    lines.push(String::new());
+
+    // ── Voice / Recorder ──
+    lines.push("--- Voice / Recorder ---".to_string());
+    lines.push(format!(
+        "Voice: {}, Recorder: {}",
+        if snapshot.state.voice_idle {
+            "Idle"
+        } else {
+            "Active"
+        },
+        if snapshot.state.recorder_idle {
+            "Idle"
+        } else {
+            "Active"
+        },
+    ));
+    lines.push(String::new());
+
+    // ── Window ──
+    lines.push("--- Window ---".to_string());
+    lines.push(format!(
+        "Visible: {}, Revision: {}",
+        snapshot.state.window_visible, snapshot.state.window_revision
+    ));
+    lines.push(String::new());
+
+    // ── View ──
+    lines.push("--- View ---".to_string());
+    lines.push(format!(
+        "Ready: {}, Epoch: {}, Revision: {}",
+        snapshot.state.view_ready, snapshot.state.view_epoch, snapshot.state.view_revision
+    ));
+    lines.push(format!(
+        "QueryEmpty: {}, AiMode: {}",
+        snapshot.state.view_query_empty, snapshot.state.view_ai_mode
+    ));
+    lines.push(String::new());
+
+    // ── Config ──
+    lines.push("--- Config ---".to_string());
+    lines.push(format!("Revision: {}", snapshot.state.config_revision));
+    lines.push(String::new());
+
+    // ── UI State ──
+    lines.push("--- UI State ---".to_string());
+    lines.push(format!(
+        "Desired:  Alt={} Chord={} Rev={}",
+        snapshot.state.desired_alt_down,
+        snapshot.state.desired_chord_active,
+        snapshot.state.desired_revision
+    ));
+    lines.push(format!(
+        "Published: Alt={} Chord={} Rev={}",
+        snapshot.published_alt_down, snapshot.published_chord_active, snapshot.published_revision
+    ));
+    lines.push(String::new());
+
+    // ── Hook ──
+    lines.push("--- Hook ---".to_string());
+    lines.push(format!(
+        "Installed: {}, Available: {}",
+        snapshot.hook.hook_installed, snapshot.hook.hook_available
+    ));
+    lines.push(format!(
+        "PendingReinstall: {:?}, Attempt: {}",
+        snapshot.hook.pending_reinstall, snapshot.hook.reinstall_attempt
+    ));
+    lines.push(format!(
+        "WTS: {}, Raw: {}",
+        snapshot.hook.wts_registered, snapshot.hook.raw_registered
+    ));
+    lines.push(String::new());
+
+    // ── Recent Events ──
+    lines.push(format!("--- Recent Events ({}) ---", events.len()));
+    for event in events.iter().rev().take(20) {
+        lines.push(format_event(event));
+    }
+    lines.push(String::new());
+
+    // ── Findings ──
+    lines.push("--- Findings ---".to_string());
+    let mut findings = Vec::new();
+    for (i, name) in key_names.iter().enumerate() {
+        let cached_down = snapshot.state.modifier_levels[i].is_pressed();
+        if cached_down != phys[i] {
+            findings.push(format!(
+                "ERROR MODIFIER_MISMATCH: {name} cached={} physical={}",
+                if cached_down { "Down" } else { "Up" },
+                if phys[i] { "Down" } else { "Up" }
+            ));
+        }
+    }
+    if snapshot.state.desired_revision != snapshot.published_revision
+        || snapshot.state.desired_alt_down != snapshot.published_alt_down
+        || snapshot.state.desired_chord_active != snapshot.published_chord_active
+    {
+        findings.push(format!(
+            "ERROR UI_PROJECTION_MISMATCH: desired_rev={} published_rev={}",
+            snapshot.state.desired_revision, snapshot.published_revision
+        ));
+    }
+    if !snapshot.hook.hook_installed || !snapshot.hook.hook_available {
+        findings.push("ERROR HOOK_UNAVAILABLE".to_string());
+    }
+    if findings.is_empty() {
+        lines.push("OK: no known input inconsistency detected".to_string());
+    } else {
+        lines.extend(findings);
+    }
+
+    lines.join("\n")
+}
+
+/// 格式化 ModifierLevel 为短字符串。
+fn level_str(level: crate::infra::platform::hotkey::ModifierLevel) -> &'static str {
+    use crate::infra::platform::hotkey::ModifierLevel;
+    match level {
+        ModifierLevel::Unknown => "Unknown",
+        ModifierLevel::Up => "Up",
+        ModifierLevel::Down => "Down",
+        ModifierLevel::InjectedDown => "InjectedDn",
+        ModifierLevel::InferredDown => "InferredDn",
+    }
+}
+
+/// 格式化单条诊断事件。
+fn format_event(
+    event: &crate::infra::platform::hotkey::diagnostics::InputDiagnosticEvent,
+) -> String {
+    use crate::infra::platform::hotkey::diagnostics::{
+        DiagnosticKeyClass, DiagnosticSource, DiagnosticTransition,
+    };
+
+    let src = match event.source {
+        DiagnosticSource::Hook => "Hook",
+        DiagnosticSource::Raw => "Raw",
+        DiagnosticSource::Physical => "Phys",
+        DiagnosticSource::Control => "Ctrl",
+        DiagnosticSource::SessionReset => "SReset",
+        DiagnosticSource::HoldTimer => "Timer",
+    };
+    let key = match event.key {
+        DiagnosticKeyClass::Modifier(m) => match m {
+            crate::infra::platform::hotkey::ModifierKey::LCtrl => "LCtrl",
+            crate::infra::platform::hotkey::ModifierKey::RCtrl => "RCtrl",
+            crate::infra::platform::hotkey::ModifierKey::LShift => "LShift",
+            crate::infra::platform::hotkey::ModifierKey::RShift => "RShift",
+            crate::infra::platform::hotkey::ModifierKey::LAlt => "LAlt",
+            crate::infra::platform::hotkey::ModifierKey::RAlt => "RAlt",
+            crate::infra::platform::hotkey::ModifierKey::LMeta => "LMeta",
+            crate::infra::platform::hotkey::ModifierKey::RMeta => "RMeta",
+        },
+        DiagnosticKeyClass::MainKey => "MainKey",
+        DiagnosticKeyClass::OtherKey => "OtherKey",
+        DiagnosticKeyClass::None => "-",
+    };
+    let trans = match event.transition {
+        DiagnosticTransition::Down => "Down",
+        DiagnosticTransition::Up => "Up",
+        DiagnosticTransition::Reconcile => "Reconcile",
+        DiagnosticTransition::ConfigChanged => "ConfigChg",
+        DiagnosticTransition::WindowChanged => "WindowChg",
+        DiagnosticTransition::VoicePhaseChanged => "VoiceChg",
+        DiagnosticTransition::RecorderModeChanged => "RecorderChg",
+        DiagnosticTransition::SessionReset => "SessionReset",
+        DiagnosticTransition::ManualRecovery => "ManualRecovery",
+        DiagnosticTransition::HoldDeadline => "HoldDeadline",
+        DiagnosticTransition::RawDeviceRemoved => "DevRemoved",
+    };
+    let inj = match event.injected {
+        Some(true) => " inj=T",
+        Some(false) => " inj=F",
+        None => "",
+    };
+    let chord = format!("{}→{}", event.chord_before, event.chord_after);
+    let level = match (event.before_level, event.after_level) {
+        (Some(before), Some(after)) => {
+            format!(" level:{}→{}", level_str(before), level_str(after))
+        }
+        _ => String::new(),
+    };
+
+    format!(
+        "[{:04}] +{}ms {}/{} {}{}{} chord:{}",
+        event.seq, event.elapsed_ms, src, key, trans, inj, level, chord
+    )
+}
+
 // 0.14.4: OpenUrlAction / OpenPathAction / RevealInExplorerAction 已删除。
 // 它们的功能由 Capability 版本承担（src/domain/capability/builtins/open_url.rs 等）。
 // run_builtin_action 命令在 ActionRegistry 未命中时 fallback 到 CapabilityRegistry。

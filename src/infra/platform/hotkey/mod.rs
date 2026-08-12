@@ -22,12 +22,25 @@ mod windows;
 mod recorder;
 pub use recorder::record_hotkey_blocking;
 
+// 诊断快照 + 环形缓冲区
+pub mod diagnostics;
+
+/// 取消热键录制（会话重置等场景调用）。
+///
+/// 发送取消信号解除 `record_hotkey_blocking` 的阻塞，应用层随后应通过
+/// `InputController::update_recorder(RecorderMode::Idle)` 回写状态。
+pub fn cancel_recorder() {
+    recorder::cancel();
+}
+
 // ── 公开类型重导出 ────────────────────────────────────────────────────────────
 
+#[allow(unused_imports)]
 pub use state::{
     HookKeyEvent, InputConfigSnapshot, InputEffect, InputEvent, InputSource, InputState,
-    InputUiState, MainViewContext, NormalizedHotkey, Propagation, RecorderMode, VoicePhase,
-    WindowTransitionReason,
+    InputUiState, MainViewContext, ModifierKey, ModifierLevel, NormalizedHotkey,
+    NormalizedRawModifier, PhysicalModifierSnapshot, PhysicalObservationReason, Propagation,
+    RecorderMode, VoicePhase, WindowTransitionReason,
 };
 
 // ── Effect channel（hook 线程 → 主线程）──────────────────────────────────────
@@ -129,9 +142,17 @@ impl InputController {
     }
 
     /// 更新录制模式。
-    #[allow(dead_code)]
     pub fn update_recorder(mode: RecorderMode) {
         send_control(ControlMsg::RecorderMode(mode));
+    }
+
+    /// 请求手动 Hook 恢复（托盘菜单 / 设置页逃生舱）。
+    ///
+    /// 发送 `ManualRecovery` 控制消息到 hook 线程，设置 `pending_reason = ManualRecovery`
+    /// 并立即尝试重装。`ManualRecovery` 优先级高于 `Heartbeat`，
+    /// 且不受主窗口可见性门禁限制（用户显式恢复时窗口通常已打开）。
+    pub fn request_manual_recovery() {
+        send_control(ControlMsg::ManualRecovery);
     }
 
     /// 停止输入引擎。
@@ -155,6 +176,8 @@ pub(crate) enum ControlMsg {
     VoicePhase(VoicePhase),
     #[allow(dead_code)]
     RecorderMode(RecorderMode),
+    /// 用户手动请求 Hook 恢复（托盘菜单 / 设置页逃生舱）。
+    ManualRecovery,
     #[allow(dead_code)]
     Stop,
 }
@@ -210,6 +233,22 @@ pub fn drain_control_messages() -> Vec<ControlMsg> {
         current = node.next;
     }
     result
+}
+
+// ── 物理修饰键快照（主线程诊断用）────────────────────────────────────────────
+
+/// 读取物理修饰键快照（主线程也可调用，用于 `blink_print_debug_info` 诊断）。
+///
+/// Windows 底层使用 `GetAsyncKeyState()`，可在任意线程安全调用。
+#[cfg(target_os = "windows")]
+pub fn read_physical_modifiers() -> PhysicalModifierSnapshot {
+    windows::read_physical_modifier_snapshot()
+}
+
+/// 非 Windows 平台返回默认值（全 Up）。
+#[cfg(not(target_os = "windows"))]
+pub fn read_physical_modifiers() -> PhysicalModifierSnapshot {
+    PhysicalModifierSnapshot::default()
 }
 
 // ── 启动/停止 ──────────────────────────────────────────────────────────────────

@@ -122,6 +122,17 @@ pub fn is_recording() -> bool {
     get_recorder().recording.load(Ordering::Acquire)
 }
 
+/// 外部取消录制（如锁屏/会话重置时调用）。
+///
+/// 发送 `Cancelled` 到通道，解除 `record_hotkey_blocking` 的阻塞。
+/// 如果当前未在录制，无操作。
+pub fn cancel() {
+    let state = get_recorder();
+    if state.recording.load(Ordering::Acquire) {
+        finish(state, RecordOutcome::Cancelled);
+    }
+}
+
 /// 喂入一个语义事件(供平台事件源调用)。
 ///
 /// 状态机语义:

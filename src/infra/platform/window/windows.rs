@@ -2978,32 +2978,6 @@ pub fn mark_spare_ready(label: &str) {
     }
 }
 
-/// 主窗口首次激活预热——启动后第一时间执行。
-///
-/// 首次唤起时 SetForegroundWindow 对从未被 WM_ACTIVATE 激活过的窗口会使用
-/// "Alt trick"（合成 Alt keydown/keyup 绕过前台锁定），合成 Alt keyup 会
-/// 清掉修饰键状态机的 Alt level，导致 chord session 建立后立即退出。
-/// 预热：启动时 show + set_focus 让窗口经历一次完整激活，后续唤起走轻量路径。
-/// 不调 transition_visibility——STATE 保持 HIDDEN，watchdog / hook 状态机不受影响。
-///
-/// 与 `preheat_secondary_windows` 分离：不等 1s 延迟，在 setup 中主窗口 hide
-/// 完毕后立即 spawn，让 WebView2 窗口对象尽早完成 WM_ACTIVATE 标记。
-pub fn preheat_main_window(app: AppHandle) {
-    tauri::async_runtime::spawn(async move {
-        if let Some(win) = app.get_webview_window("main") {
-            // 移到屏幕外避免闪现（窗口 always_on_top + 居中，直接 show 会闪一下）
-            let _ = win.set_position(PhysicalPosition::new(-10000, -10000));
-            let _ = win.show();
-            let _ = win.set_focus();
-            // 等 WM_ACTIVATE 到达，完成 Windows 内部激活标记
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            let _ = win.hide();
-            tracing::debug!("preheat: main window ✓ (首次激活完成)");
-        } else {
-            tracing::warn!("preheat: main window 不存在");
-        }
-    });
-}
 
 /// 后台预热次级窗口：延迟创建 chord-screenshot / context-menu / voice-overlay /
 /// chord-pin / chat / settings / content-editor / sticky-manager 并立即隐藏。
@@ -3011,8 +2985,6 @@ pub fn preheat_main_window(app: AppHandle) {
 /// WebView2 首次建实例 300~400ms，预热后 show 只是切可见性 (<50ms)。
 /// 代价：常驻内存 +10~20MB × N（8 窗口 + 动态便签，实测 < 300MB 预算内）；
 /// 收益：所有次级窗口首次触发无感。
-///
-/// 主窗口预热已提取到 `preheat_main_window`，在 setup 中第一时间执行。
 ///
 /// 0.17.2：追加 settings / content-editor / sticky-manager 三个窗口预热。
 /// sticky-manager 预热时注册 prevent_close + hide（show 函数复用路径不注册）。

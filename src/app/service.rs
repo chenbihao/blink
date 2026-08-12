@@ -270,6 +270,13 @@ impl Service for HotkeyService {
                             ui,
                         );
                     }
+                    crate::infra::platform::hotkey::InputEffect::RecorderCancel => {
+                        // 会话重置时取消热键录制，回写 RecorderMode::Idle。
+                        crate::infra::platform::hotkey::cancel_recorder();
+                        crate::infra::platform::hotkey::InputController::update_recorder(
+                            crate::infra::platform::hotkey::RecorderMode::Idle,
+                        );
+                    }
                 }
             }
         });

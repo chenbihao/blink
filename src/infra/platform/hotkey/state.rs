@@ -177,9 +177,36 @@ impl ModifierState {
         self.sides[key as usize].level
     }
 
-    /// 设置某侧的电平态（Hook 路径）。
+    /// 设置某侧的电平态（Hook 路径，直接覆盖）。
+    ///
+    /// 仅用于 InferredDown 推断——调用方已保证仅在 Unknown 时设置。
+    /// 修饰键 keydown 应使用 [`set_level_hook_keydown`] 遵守转换表优先级。
     fn set_level_hook(&mut self, key: ModifierKey, level: ModifierLevel, time_ms: u32) {
         self.sides[key as usize].level = level;
+        self.sides[key as usize].last_hook_time = Some(time_ms);
+    }
+
+    /// Hook 路径处理修饰键 keydown（转换表实现）。
+    ///
+    /// 优先级：真实 Down > InferredDown > InjectedDown > Up/Unknown
+    ///
+    /// - 真实 down（`injected=false`）始终 → Down（升级任何状态）
+    /// - injected down 不把 Down 降级为 InjectedDown
+    /// - injected down 不把 InferredDown 降级为 InjectedDown
+    /// - injected down 把 Unknown/Up 设为 InjectedDown
+    fn set_level_hook_keydown(&mut self, key: ModifierKey, injected: bool, time_ms: u32) {
+        let current = self.sides[key as usize].level;
+        let new_level = if injected {
+            match current {
+                ModifierLevel::Down | ModifierLevel::InferredDown | ModifierLevel::InjectedDown => {
+                    current
+                }
+                ModifierLevel::Unknown | ModifierLevel::Up => ModifierLevel::InjectedDown,
+            }
+        } else {
+            ModifierLevel::Down
+        };
+        self.sides[key as usize].level = new_level;
         self.sides[key as usize].last_hook_time = Some(time_ms);
     }
 
@@ -329,6 +356,40 @@ impl ModifierState {
                 }
             }
         }
+    }
+
+    /// 用物理快照校正内部状态——卡键自愈的最终出口。
+    ///
+    /// 规则：
+    /// - 物理快照 Up：Down / InferredDown / InjectedDown → Up；清除 raw_devices 残留位。
+    /// - 物理快照 Down：Unknown / Up → Down（补漏）；已按下状态保持不变。
+    ///
+    /// 返回是否有 modifier level 发生了变化（调用方据此决定是否 finalize）。
+    fn apply_physical_snapshot(&mut self, snapshot: PhysicalModifierSnapshot) -> bool {
+        let mut changed = false;
+        for key in ModifierKey::ALL {
+            let physical_down = snapshot.is_down(key);
+            let current = self.sides[key as usize].level;
+            if !physical_down {
+                // 物理松开 → 清除任何按下状态
+                if current.is_pressed() {
+                    self.sides[key as usize].level = ModifierLevel::Up;
+                    changed = true;
+                    // 清除 raw_devices 残留位
+                    let bit = 1 << (key as u8);
+                    for mask in self.raw_devices.values_mut() {
+                        *mask &= !bit;
+                    }
+                }
+            } else {
+                // 物理按下 → 补漏（Unknown/Up → Down）
+                if !current.is_pressed() {
+                    self.sides[key as usize].level = ModifierLevel::Down;
+                    changed = true;
+                }
+            }
+        }
+        changed
     }
 }
 
@@ -816,11 +877,83 @@ pub struct HookKeyEvent {
 #[derive(Clone, Debug)]
 pub struct RawModifierEvent {
     pub device_id: usize,
-    /// 归一化修饰键名："lalt", "ralt", etc.
-    pub key: String,
+    /// 归一化修饰键（已由 Windows adapter 完成左右侧判定）。
+    pub key: ModifierKey,
     pub is_down: bool,
     /// Win32 时间域（GetMessageTime）。
     pub time_ms: u32,
+}
+
+/// Windows 物理修饰键快照（由 `GetAsyncKeyState` 高位读取）。
+///
+/// 该快照是**校正依据**，不直接承载业务状态。
+/// 当内部状态与物理快照矛盾时，以物理快照为准（卡键自愈的最终出口）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PhysicalModifierSnapshot {
+    pub lalt: bool,
+    pub ralt: bool,
+    pub lctrl: bool,
+    pub rctrl: bool,
+    pub lshift: bool,
+    pub rshift: bool,
+    pub lmeta: bool,
+    pub rmeta: bool,
+}
+
+impl PhysicalModifierSnapshot {
+    /// 取某侧修饰键的物理按下状态。
+    pub fn is_down(self, key: ModifierKey) -> bool {
+        match key {
+            ModifierKey::LAlt => self.lalt,
+            ModifierKey::RAlt => self.ralt,
+            ModifierKey::LCtrl => self.lctrl,
+            ModifierKey::RCtrl => self.rctrl,
+            ModifierKey::LShift => self.lshift,
+            ModifierKey::RShift => self.rshift,
+            ModifierKey::LMeta => self.lmeta,
+            ModifierKey::RMeta => self.rmeta,
+        }
+    }
+
+    /// 所有修饰键是否全部物理松开。
+    pub fn all_up(self) -> bool {
+        !self.lalt
+            && !self.ralt
+            && !self.lctrl
+            && !self.rctrl
+            && !self.lshift
+            && !self.rshift
+            && !self.lmeta
+            && !self.rmeta
+    }
+}
+
+/// 物理修饰键观察的原因。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum PhysicalObservationReason {
+    /// 主热键 keydown 到达前强制校正。
+    MainKeyBoundary,
+    /// Chord session 建立/退出边界校正。
+    ChordBoundary,
+    /// `blink_print_debug_info` 手动诊断。
+    ManualDiagnostic,
+    /// `blink_debug_inithook` 手动恢复。
+    ManualRecovery,
+    /// 锁屏解锁后的会话恢复。
+    SessionRecovery,
+}
+
+/// Raw Input 归一化修饰键结构体（供诊断和精确映射使用）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NormalizedRawModifier {
+    pub key: ModifierKey,
+    pub is_down: bool,
+    pub vkey: u16,
+    pub make_code: u16,
+    pub e0: bool,
+    pub e1: bool,
+    pub device_id: usize,
 }
 
 /// 窗口 visibility 转换原因。
@@ -841,6 +974,13 @@ pub enum WindowTransitionReason {
     SingleInstance,
     #[allow(dead_code)]
     AiActiveRefocus,
+}
+
+/// 会话重置原因（锁屏/解锁）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionResetReason {
+    Lock,
+    Unlock,
 }
 
 /// 输入事件（reducer 的输入）。
@@ -868,6 +1008,19 @@ pub enum InputEvent {
     },
     RecorderModeChanged(RecorderMode),
     ConfigChanged(InputConfigSnapshot),
+    SessionReset {
+        reason: SessionResetReason,
+    },
+    /// 用户显式请求重建输入基线；保留 config/window/view 与业务录音状态。
+    ManualRecovery,
+    /// 物理修饰键快照观察（由 Windows adapter 通过 `GetAsyncKeyState` 读取）。
+    ///
+    /// 用于校正内部状态与物理状态的偏差——卡键自愈的最终出口。
+    PhysicalModifiersObserved {
+        snapshot: PhysicalModifierSnapshot,
+        #[allow(dead_code)]
+        reason: PhysicalObservationReason,
+    },
 }
 
 /// 输入 effect（reducer 的输出，由 HotkeyService 消费执行业务副作用）。
@@ -897,6 +1050,8 @@ pub enum InputEffect {
         key: String,
     },
     UiStateChanged(InputUiState),
+    /// 会话重置时取消热键录制（应用层调 recorder::cancel 并回写 Idle）。
+    RecorderCancel,
 }
 
 /// reducer 返回结果。
@@ -939,6 +1094,25 @@ pub fn reduce(state: &mut InputState, event: InputEvent, now: Instant) -> Reduce
         }
         InputEvent::RecorderModeChanged(mode) => reduce_recorder_mode(state, mode),
         InputEvent::ConfigChanged(snapshot) => reduce_config_changed(state, snapshot),
+        InputEvent::SessionReset { reason } => reduce_session_reset(state, reason),
+        InputEvent::ManualRecovery => reduce_manual_recovery(state),
+        InputEvent::PhysicalModifiersObserved {
+            snapshot,
+            reason: _,
+        } => reduce_physical_modifiers(state, snapshot),
+    }
+}
+
+/// 手动恢复只清理可能卡住的易失输入状态，不伪造 voice/recorder 业务态。
+fn reduce_manual_recovery(state: &mut InputState) -> ReduceResult {
+    state.modifiers.reset_all();
+    state.gesture = GestureState::Idle;
+    state.chord = ChordSession::Inactive;
+    state.next_gesture_id += 1;
+
+    ReduceResult {
+        propagation: Propagation::Pass,
+        effects: finalize(state),
     }
 }
 
@@ -1009,16 +1183,11 @@ fn reduce_hook_key(state: &mut InputState, e: HookKeyEvent, now: Instant) -> Red
     if e.is_modifier {
         if let Some(mod_key) = ModifierKey::from_key_name(&e.key) {
             if e.is_down {
-                // 真实 keydown → Down；注入 keydown → InjectedDown。
-                // 区分两者使注入 keyup 能精准清除 InjectedDown 而不动 Down。
-                let level = if e.injected {
-                    ModifierLevel::InjectedDown
-                } else {
-                    ModifierLevel::Down
-                };
+                // 转换表：injected down 不降级 Down/InferredDown。
+                // 真实 down 始终 → Down；injected down 仅在 Unknown/Up 时 → InjectedDown。
                 state
                     .modifiers
-                    .set_level_hook(mod_key, level, e.time_ms);
+                    .set_level_hook_keydown(mod_key, e.injected, e.time_ms);
             } else {
                 // 修饰键 keyup
                 // 注入的合成 keyup（如 SetForegroundWindow 抢焦点时系统注入的假 Alt up）
@@ -1281,11 +1450,9 @@ fn try_release(
 // ── RawModifier 处理 ───────────────────────────────────────────────────────
 
 fn reduce_raw_modifier(state: &mut InputState, e: RawModifierEvent) -> ReduceResult {
-    if let Some(mod_key) = ModifierKey::from_key_name(&e.key) {
-        state
-            .modifiers
-            .apply_raw(mod_key, e.is_down, e.device_id, e.time_ms);
-    }
+    state
+        .modifiers
+        .apply_raw(e.key, e.is_down, e.device_id, e.time_ms);
     let effects = finalize(state);
     ReduceResult {
         propagation: Propagation::Pass,
@@ -1298,6 +1465,24 @@ fn reduce_raw_modifier(state: &mut InputState, e: RawModifierEvent) -> ReduceRes
 fn reduce_raw_device_removed(state: &mut InputState, device_id: usize) -> ReduceResult {
     state.modifiers.remove_device(device_id);
     let effects = finalize(state);
+    ReduceResult {
+        propagation: Propagation::Pass,
+        effects,
+    }
+}
+
+// ── PhysicalModifiersObserved 处理 ──────────────────────────────────────────
+
+/// 物理修饰键快照校正 reducer。
+///
+/// 用物理快照校正内部 modifier 状态。如果校正导致 level 变化，
+/// 调用 finalize 重新评估 chord session 并发布 UI 状态。
+fn reduce_physical_modifiers(
+    state: &mut InputState,
+    snapshot: PhysicalModifierSnapshot,
+) -> ReduceResult {
+    let changed = state.modifiers.apply_physical_snapshot(snapshot);
+    let effects = if changed { finalize(state) } else { Vec::new() };
     ReduceResult {
         propagation: Propagation::Pass,
         effects,
@@ -1450,6 +1635,123 @@ fn reduce_config_changed(state: &mut InputState, snapshot: InputConfigSnapshot) 
     ReduceResult {
         propagation: Propagation::Pass,
         effects,
+    }
+}
+
+// ── SessionReset 处理 ──────────────────────────────────────────────────────
+
+/// 会话重置：锁屏/解锁后原子清理全部输入状态。
+///
+/// 不直接伪造 voice/recorder Idle——产生 cancel effect 交由应用层处理。
+/// 在真实回写 Idle 前，Hook 重装请求保持 pending（`can_reinstall` 门禁拦截）。
+fn reduce_session_reset(state: &mut InputState, _reason: SessionResetReason) -> ReduceResult {
+    let mut effects = Vec::new();
+
+    // modifier 全部置为 Unknown + 清空 Raw Input per-device pressed set
+    state.modifiers.reset_all();
+
+    // gesture 置 Idle
+    state.gesture = GestureState::Idle;
+
+    // 推进 gesture generation/id，使旧 HoldDeadline 失效
+    state.next_gesture_id += 1;
+
+    // chord 置 Inactive（含清除 autorepeat last_triggered_key）
+    state.chord = ChordSession::Inactive;
+
+    // voice cancel effect（不直接伪造 Idle）
+    if !matches!(state.voice, VoicePhase::Idle) {
+        let gesture_id = match state.voice {
+            VoicePhase::Recording { gesture_id } => Some(gesture_id),
+            VoicePhase::Starting { gesture_id } => Some(gesture_id),
+            VoicePhase::Idle => None,
+        };
+        effects.push(InputEffect::VoiceCancel { gesture_id });
+    }
+
+    // recorder cancel effect（不直接伪造 Idle）
+    if !matches!(state.recorder, RecorderMode::Idle) {
+        effects.push(InputEffect::RecorderCancel);
+    }
+
+    // 调用 finalize() 更新 chord session 和 UI 状态
+    effects.extend(finalize(state));
+
+    ReduceResult {
+        propagation: Propagation::Pass,
+        effects,
+    }
+}
+
+// ── Hook 重装策略（纯函数，供 windows.rs adapter 测试）──────────────────────
+
+/// Hook 重装原因。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReinstallReason {
+    /// 心跳安全网（每 60 秒例行重装）。
+    Heartbeat,
+    /// 会话恢复（锁屏/解锁后重装）。
+    SessionRecovery,
+    /// 用户手动恢复（`blink_debug_inithook` 或托盘/设置页入口）。
+    ManualRecovery,
+}
+
+impl ReinstallReason {
+    /// 合并两个原因，优先级：ManualRecovery >= SessionRecovery > Heartbeat。
+    ///
+    /// 无请求 + Heartbeat → Heartbeat
+    /// 无请求 + SessionRecovery → SessionRecovery
+    /// 无请求 + ManualRecovery → ManualRecovery
+    /// Heartbeat + Heartbeat → Heartbeat
+    /// SessionRecovery + 任意 → SessionRecovery（或更高）
+    /// ManualRecovery + 任意 → ManualRecovery
+    /// 任意 + ManualRecovery → ManualRecovery
+    pub fn merge(self, other: ReinstallReason) -> ReinstallReason {
+        if self == ReinstallReason::ManualRecovery || other == ReinstallReason::ManualRecovery {
+            ReinstallReason::ManualRecovery
+        } else if self == ReinstallReason::SessionRecovery
+            || other == ReinstallReason::SessionRecovery
+        {
+            ReinstallReason::SessionRecovery
+        } else {
+            ReinstallReason::Heartbeat
+        }
+    }
+}
+
+/// idle 门禁：是否可以安全重装 Hook（纯函数，不含 Win32 调用）。
+///
+/// 共同条件：gesture Idle、chord Inactive、voice Idle、recorder Idle、
+/// 所有 modifier 物理松开（以 `physical` 快照为准，不依赖可能故障的内部状态）。
+///
+/// Heartbeat 额外要求主窗口隐藏；SessionRecovery 和 ManualRecovery 只要求共同条件，
+/// 但 ManualRecovery 允许主窗口可见（用户显式恢复时窗口通常已打开）。
+pub fn can_reinstall(
+    reason: ReinstallReason,
+    state: &InputState,
+    physical: &PhysicalModifierSnapshot,
+) -> bool {
+    let common = matches!(state.gesture, GestureState::Idle)
+        && !state.chord.is_active()
+        && matches!(state.voice, VoicePhase::Idle)
+        && matches!(state.recorder, RecorderMode::Idle)
+        && physical.all_up();
+
+    match reason {
+        ReinstallReason::Heartbeat => common && !state.window.visible,
+        ReinstallReason::SessionRecovery | ReinstallReason::ManualRecovery => common,
+    }
+}
+
+/// retry 退避延迟（毫秒）。
+///
+/// attempt 1 → 100ms, 2 → 500ms, 3 → 1s, 4+ → 5s。
+pub fn retry_delay_ms(attempt: u8) -> u32 {
+    match attempt {
+        1 => 100,
+        2 => 500,
+        3 => 1_000,
+        _ => 5_000,
     }
 }
 
@@ -2142,10 +2444,7 @@ mod tests {
             Instant::now(),
         );
         assert!(!s.modifiers.alt_down());
-        assert_eq!(
-            s.modifiers.level(ModifierKey::LAlt),
-            ModifierLevel::Up
-        );
+        assert_eq!(s.modifiers.level(ModifierKey::LAlt), ModifierLevel::Up);
     }
 
     /// 本地 Alt keydown → Down；注入 Alt keyup 不清除（SetForegroundWindow 合成事件）。
@@ -2165,10 +2464,7 @@ mod tests {
             InputEvent::HookKey(hook_modifier_down("lalt", 100)),
             Instant::now(),
         );
-        assert_eq!(
-            s.modifiers.level(ModifierKey::LAlt),
-            ModifierLevel::Down
-        );
+        assert_eq!(s.modifiers.level(ModifierKey::LAlt), ModifierLevel::Down);
 
         // 注入 LAlt up → 不清除（Down 不接受注入 keyup）
         reduce(
@@ -2177,10 +2473,7 @@ mod tests {
             Instant::now(),
         );
         assert!(s.modifiers.alt_down());
-        assert_eq!(
-            s.modifiers.level(ModifierKey::LAlt),
-            ModifierLevel::Down
-        );
+        assert_eq!(s.modifiers.level(ModifierKey::LAlt), ModifierLevel::Down);
 
         // 本地 LAlt up → 清为 Up
         reduce(
@@ -2218,16 +2511,13 @@ mod tests {
             &mut s,
             InputEvent::RawModifier(RawModifierEvent {
                 device_id: 1,
-                key: "lalt".to_string(),
+                key: ModifierKey::LAlt,
                 is_down: true,
                 time_ms: 110,
             }),
             Instant::now(),
         );
-        assert_eq!(
-            s.modifiers.level(ModifierKey::LAlt),
-            ModifierLevel::Down
-        );
+        assert_eq!(s.modifiers.level(ModifierKey::LAlt), ModifierLevel::Down);
 
         // 注入 LAlt up → 不清除（已升级为 Down）
         reduce(
@@ -2236,10 +2526,7 @@ mod tests {
             Instant::now(),
         );
         assert!(s.modifiers.alt_down());
-        assert_eq!(
-            s.modifiers.level(ModifierKey::LAlt),
-            ModifierLevel::Down
-        );
+        assert_eq!(s.modifiers.level(ModifierKey::LAlt), ModifierLevel::Down);
     }
 
     /// 远程桌面完整序列：注入 Alt down → 注入 Space down → 注入 Space up → Tap
@@ -3032,7 +3319,7 @@ mod tests {
             &mut s,
             InputEvent::RawModifier(RawModifierEvent {
                 device_id: 1,
-                key: "lalt".to_string(),
+                key: ModifierKey::LAlt,
                 is_down: true,
                 time_ms: 101,
             }),
@@ -3045,7 +3332,7 @@ mod tests {
             &mut s,
             InputEvent::RawModifier(RawModifierEvent {
                 device_id: 1,
-                key: "lalt".to_string(),
+                key: ModifierKey::LAlt,
                 is_down: false,
                 time_ms: 200,
             }),
@@ -3077,7 +3364,7 @@ mod tests {
             &mut s,
             InputEvent::RawModifier(RawModifierEvent {
                 device_id: 1,
-                key: "lalt".to_string(),
+                key: ModifierKey::LAlt,
                 is_down: true,
                 time_ms: 100,
             }),
@@ -3088,7 +3375,7 @@ mod tests {
             &mut s,
             InputEvent::RawModifier(RawModifierEvent {
                 device_id: 2,
-                key: "lalt".to_string(),
+                key: ModifierKey::LAlt,
                 is_down: true,
                 time_ms: 101,
             }),
@@ -3101,7 +3388,7 @@ mod tests {
             &mut s,
             InputEvent::RawModifier(RawModifierEvent {
                 device_id: 1,
-                key: "lalt".to_string(),
+                key: ModifierKey::LAlt,
                 is_down: false,
                 time_ms: 200,
             }),
@@ -3114,7 +3401,7 @@ mod tests {
             &mut s,
             InputEvent::RawModifier(RawModifierEvent {
                 device_id: 2,
-                key: "lalt".to_string(),
+                key: ModifierKey::LAlt,
                 is_down: false,
                 time_ms: 201,
             }),
@@ -3146,7 +3433,7 @@ mod tests {
             &mut s,
             InputEvent::RawModifier(RawModifierEvent {
                 device_id: 1,
-                key: "lalt".to_string(),
+                key: ModifierKey::LAlt,
                 is_down: true,
                 time_ms: 100,
             }),
@@ -3193,7 +3480,7 @@ mod tests {
             &mut s,
             InputEvent::RawModifier(RawModifierEvent {
                 device_id: 1,
-                key: "lalt".to_string(),
+                key: ModifierKey::LAlt,
                 is_down: true,
                 time_ms: 100,
             }),
@@ -3280,5 +3567,612 @@ mod tests {
             Instant::now(),
         );
         assert!(!has_hold_started(&r.effects));
+    }
+
+    // ── Modifier 转换表：injected down 不降级 Down/InferredDown ──
+
+    /// 真实 Alt down → Down；injected down/up 不降级、不清除。
+    #[test]
+    fn real_alt_down_survives_injected_down_up() {
+        let mut s = InputState::default();
+        s.config = alt_space_config();
+        reduce(
+            &mut s,
+            InputEvent::ConfigChanged(alt_space_config()),
+            Instant::now(),
+        );
+
+        // 真实 LAlt down → Down
+        reduce(
+            &mut s,
+            InputEvent::HookKey(hook_modifier_down("lalt", 100)),
+            Instant::now(),
+        );
+        assert_eq!(s.modifiers.level(ModifierKey::LAlt), ModifierLevel::Down);
+
+        // tao injected LAlt down → 不降级（保持 Down）
+        reduce(
+            &mut s,
+            InputEvent::HookKey(injected_modifier_down("lalt", 110)),
+            Instant::now(),
+        );
+        assert_eq!(s.modifiers.level(ModifierKey::LAlt), ModifierLevel::Down);
+
+        // tao injected LAlt up → 不清除（Down 不接受注入 keyup）
+        reduce(
+            &mut s,
+            InputEvent::HookKey(injected_modifier_up("lalt", 120)),
+            Instant::now(),
+        );
+        assert_eq!(s.modifiers.level(ModifierKey::LAlt), ModifierLevel::Down);
+        assert!(s.modifiers.alt_down());
+    }
+
+    /// InferredDown 不被 injected down 降级，也不被 injected up 清除。
+    #[test]
+    fn inferred_alt_down_survives_injected_down_up() {
+        let mut s = InputState::default();
+        s.config = alt_space_config();
+        reduce(
+            &mut s,
+            InputEvent::ConfigChanged(alt_space_config()),
+            Instant::now(),
+        );
+
+        // 用 alt_down_flag 推断 InferredDown
+        reduce(
+            &mut s,
+            InputEvent::HookKey(HookKeyEvent {
+                source: InputSource::Local,
+                key: " ".to_string(),
+                is_down: true,
+                is_modifier: false,
+                time_ms: 100,
+                injected: false,
+                lower_integrity_injected: false,
+                extended: false,
+                alt_down_flag: true,
+            }),
+            Instant::now(),
+        );
+        assert_eq!(
+            s.modifiers.level(ModifierKey::LAlt),
+            ModifierLevel::InferredDown
+        );
+
+        // injected LAlt down → 不降级
+        reduce(
+            &mut s,
+            InputEvent::HookKey(injected_modifier_down("lalt", 110)),
+            Instant::now(),
+        );
+        assert_eq!(
+            s.modifiers.level(ModifierKey::LAlt),
+            ModifierLevel::InferredDown
+        );
+
+        // injected LAlt up → 不清除
+        reduce(
+            &mut s,
+            InputEvent::HookKey(injected_modifier_up("lalt", 120)),
+            Instant::now(),
+        );
+        assert_eq!(
+            s.modifiers.level(ModifierKey::LAlt),
+            ModifierLevel::InferredDown
+        );
+        assert!(s.modifiers.alt_down());
+    }
+
+    /// 纯注入 down→up 完整序列回到 Up（远程桌面不卡键）。
+    #[test]
+    fn pure_injected_alt_down_up_returns_up() {
+        let mut s = InputState::default();
+        s.config = alt_space_config();
+        reduce(
+            &mut s,
+            InputEvent::ConfigChanged(alt_space_config()),
+            Instant::now(),
+        );
+
+        reduce(
+            &mut s,
+            InputEvent::HookKey(injected_modifier_down("lalt", 100)),
+            Instant::now(),
+        );
+        assert_eq!(
+            s.modifiers.level(ModifierKey::LAlt),
+            ModifierLevel::InjectedDown
+        );
+        assert!(s.modifiers.alt_down());
+
+        reduce(
+            &mut s,
+            InputEvent::HookKey(injected_modifier_up("lalt", 200)),
+            Instant::now(),
+        );
+        assert_eq!(s.modifiers.level(ModifierKey::LAlt), ModifierLevel::Up);
+        assert!(!s.modifiers.alt_down());
+    }
+
+    /// 真实 Alt up 始终清除当前按下状态（即使被 preserved 为 Down）。
+    #[test]
+    fn real_alt_up_clears_preserved_down() {
+        let mut s = InputState::default();
+        s.config = alt_space_config();
+        reduce(
+            &mut s,
+            InputEvent::ConfigChanged(alt_space_config()),
+            Instant::now(),
+        );
+
+        // 真实 down → Down
+        reduce(
+            &mut s,
+            InputEvent::HookKey(hook_modifier_down("lalt", 100)),
+            Instant::now(),
+        );
+        // injected down → 保持 Down
+        reduce(
+            &mut s,
+            InputEvent::HookKey(injected_modifier_down("lalt", 110)),
+            Instant::now(),
+        );
+        // injected up → 不清除
+        reduce(
+            &mut s,
+            InputEvent::HookKey(injected_modifier_up("lalt", 120)),
+            Instant::now(),
+        );
+        assert!(s.modifiers.alt_down());
+
+        // 真实 up → 清除
+        reduce(
+            &mut s,
+            InputEvent::HookKey(hook_modifier_up("lalt", 200)),
+            Instant::now(),
+        );
+        assert!(!s.modifiers.alt_down());
+        assert_eq!(s.modifiers.level(ModifierKey::LAlt), ModifierLevel::Up);
+    }
+
+    /// tao 注入序列不破坏 chord eligibility（核心场景）。
+    ///
+    /// 冷启动后首次 Alt+Space：
+    /// 1. 真实 Alt down → Down
+    /// 2. 真实 Space down → gesture Armed
+    /// 3. Space up → Tap → 窗口 visible
+    /// 4. tao injected Alt down → 不降级（保持 Down）
+    /// 5. tao injected Alt up → 不清除（保持 Down）
+    /// 6. chord_exclusive_eligible() 应得到 alt_down=true
+    #[test]
+    fn tao_injected_sequence_does_not_break_chord_eligibility() {
+        let mut s = InputState::default();
+        s.config = alt_space_config();
+        reduce(
+            &mut s,
+            InputEvent::ConfigChanged(alt_space_config()),
+            Instant::now(),
+        );
+        reduce(&mut s, window_visible(), Instant::now());
+        reduce(
+            &mut s,
+            InputEvent::ViewContextChanged(ready_view()),
+            Instant::now(),
+        );
+
+        // 真实 Alt down
+        reduce(
+            &mut s,
+            InputEvent::HookKey(hook_modifier_down("lalt", 100)),
+            Instant::now(),
+        );
+
+        // tao injected Alt down（set_focus fallback）
+        reduce(
+            &mut s,
+            InputEvent::HookKey(injected_modifier_down("lalt", 110)),
+            Instant::now(),
+        );
+
+        // tao injected Alt up
+        reduce(
+            &mut s,
+            InputEvent::HookKey(injected_modifier_up("lalt", 120)),
+            Instant::now(),
+        );
+
+        // 断言：Alt 仍按下，Chord Active
+        assert!(
+            s.modifiers.alt_down(),
+            "Alt 应仍为按下——注入序列不应破坏真实 Down"
+        );
+        assert!(s.chord.is_active(), "Chord session 应已建立");
+        assert!(s.ui_state().exclusive_chord_active);
+    }
+
+    // ── SessionReset ──
+
+    #[test]
+    fn session_reset_clears_modifiers() {
+        let mut s = armed_state();
+        assert!(s.modifiers.alt_down());
+
+        reduce(
+            &mut s,
+            InputEvent::SessionReset {
+                reason: SessionResetReason::Lock,
+            },
+            Instant::now(),
+        );
+        assert!(!s.modifiers.alt_down());
+        assert_eq!(s.modifiers.level(ModifierKey::LAlt), ModifierLevel::Unknown);
+    }
+
+    #[test]
+    fn session_reset_clears_gesture() {
+        let mut s = armed_state();
+        reduce(
+            &mut s,
+            InputEvent::HookKey(hook_key_down(" ", 200)),
+            Instant::now(),
+        );
+        assert!(matches!(s.gesture, GestureState::Armed { .. }));
+
+        reduce(
+            &mut s,
+            InputEvent::SessionReset {
+                reason: SessionResetReason::Lock,
+            },
+            Instant::now(),
+        );
+        assert!(matches!(s.gesture, GestureState::Idle));
+    }
+
+    #[test]
+    fn session_reset_clears_chord_and_autorepeat() {
+        let mut s = armed_state();
+        assert!(s.chord.is_active());
+
+        // 触发一次 chord
+        reduce(
+            &mut s,
+            InputEvent::HookKey(hook_key_down("a", 200)),
+            Instant::now(),
+        );
+
+        reduce(
+            &mut s,
+            InputEvent::SessionReset {
+                reason: SessionResetReason::Lock,
+            },
+            Instant::now(),
+        );
+        assert!(matches!(s.chord, ChordSession::Inactive));
+    }
+
+    #[test]
+    fn session_reset_invalidates_old_hold_deadline() {
+        let mut s = armed_state();
+        reduce(
+            &mut s,
+            InputEvent::HookKey(hook_key_down(" ", 200)),
+            Instant::now(),
+        );
+        let old_gid = s.gesture.gesture_id().unwrap();
+
+        reduce(
+            &mut s,
+            InputEvent::SessionReset {
+                reason: SessionResetReason::Lock,
+            },
+            Instant::now(),
+        );
+
+        // 旧 HoldDeadline → 忽略（gesture_id 不匹配新 next_gesture_id）
+        let r = reduce(
+            &mut s,
+            InputEvent::HoldDeadline {
+                gesture_id: old_gid,
+            },
+            Instant::now(),
+        );
+        assert!(!has_hold_started(&r.effects));
+    }
+
+    #[test]
+    fn session_reset_produces_ui_state_changed() {
+        let mut s = armed_state();
+        assert!(s.ui_state().exclusive_chord_active);
+
+        let r = reduce(
+            &mut s,
+            InputEvent::SessionReset {
+                reason: SessionResetReason::Lock,
+            },
+            Instant::now(),
+        );
+        let has_ui = r
+            .effects
+            .iter()
+            .any(|e| matches!(e, InputEffect::UiStateChanged(_)));
+        assert!(has_ui, "SessionReset 应产生 UiStateChanged");
+        assert!(!s.ui_state().exclusive_chord_active);
+        assert!(!s.ui_state().alt_down);
+    }
+
+    #[test]
+    fn session_reset_voice_active_produces_cancel_effect() {
+        let mut s = armed_state();
+        reduce(
+            &mut s,
+            InputEvent::HookKey(hook_key_down(" ", 200)),
+            Instant::now(),
+        );
+        let gid = s.gesture.gesture_id().unwrap();
+        reduce(
+            &mut s,
+            InputEvent::HoldDeadline { gesture_id: gid },
+            Instant::now(),
+        );
+        reduce(
+            &mut s,
+            InputEvent::VoicePhaseChanged {
+                gesture_id: Some(gid),
+                phase: VoicePhase::Recording { gesture_id: gid },
+            },
+            Instant::now(),
+        );
+        // voice 仍 active（不直接伪造 Idle）
+
+        let r = reduce(
+            &mut s,
+            InputEvent::SessionReset {
+                reason: SessionResetReason::Lock,
+            },
+            Instant::now(),
+        );
+        assert!(
+            has_voice_cancel(&r.effects),
+            "voice active 时应产生 VoiceCancel"
+        );
+        // voice 枚举未被伪造为 Idle
+        assert!(!matches!(s.voice, VoicePhase::Idle));
+    }
+
+    #[test]
+    fn session_reset_recorder_active_produces_cancel_effect() {
+        let mut s = armed_state();
+        reduce(
+            &mut s,
+            InputEvent::RecorderModeChanged(RecorderMode::Recording { recorder_id: 1 }),
+            Instant::now(),
+        );
+
+        let r = reduce(
+            &mut s,
+            InputEvent::SessionReset {
+                reason: SessionResetReason::Lock,
+            },
+            Instant::now(),
+        );
+        let has_recorder_cancel = r
+            .effects
+            .iter()
+            .any(|e| matches!(e, InputEffect::RecorderCancel));
+        assert!(
+            has_recorder_cancel,
+            "recorder active 时应产生 RecorderCancel"
+        );
+        // recorder 枚举未被伪造为 Idle
+        assert!(!matches!(s.recorder, RecorderMode::Idle));
+    }
+
+    #[test]
+    fn manual_recovery_clears_stale_input_but_preserves_runtime_context() {
+        let mut s = armed_state();
+        let config_revision = s.config_revision;
+        let window = s.window.clone();
+        let view = s.view.clone();
+        assert!(s.modifiers.alt_down());
+        assert!(s.chord.is_active());
+
+        let r = reduce(&mut s, InputEvent::ManualRecovery, Instant::now());
+
+        assert_eq!(s.modifiers.pressed_mask(), 0);
+        assert!(matches!(s.gesture, GestureState::Idle));
+        assert!(matches!(s.chord, ChordSession::Inactive));
+        assert_eq!(s.config_revision, config_revision);
+        assert_eq!(s.window, window);
+        assert_eq!(s.view, view);
+        assert!(
+            r.effects
+                .iter()
+                .any(|effect| matches!(effect, InputEffect::UiStateChanged(_)))
+        );
+    }
+
+    #[test]
+    fn manual_recovery_does_not_cancel_voice_or_recorder() {
+        let mut s = armed_state();
+        s.voice = VoicePhase::Recording { gesture_id: 7 };
+        s.recorder = RecorderMode::Recording { recorder_id: 8 };
+
+        let r = reduce(&mut s, InputEvent::ManualRecovery, Instant::now());
+
+        assert!(matches!(s.voice, VoicePhase::Recording { gesture_id: 7 }));
+        assert!(matches!(
+            s.recorder,
+            RecorderMode::Recording { recorder_id: 8 }
+        ));
+        assert!(!has_voice_cancel(&r.effects));
+        assert!(
+            !r.effects
+                .iter()
+                .any(|effect| matches!(effect, InputEffect::RecorderCancel))
+        );
+    }
+
+    // ── Hook 重装策略纯函数 ──
+
+    #[test]
+    fn heartbeat_blocked_when_modifier_pressed() {
+        let mut s = InputState::default();
+        s.config = alt_space_config();
+        reduce(
+            &mut s,
+            InputEvent::ConfigChanged(alt_space_config()),
+            Instant::now(),
+        );
+        reduce(
+            &mut s,
+            InputEvent::HookKey(hook_modifier_down("lalt", 100)),
+            Instant::now(),
+        );
+        let phys = PhysicalModifierSnapshot {
+            lalt: true,
+            ..Default::default()
+        };
+        assert!(!can_reinstall(ReinstallReason::Heartbeat, &s, &phys));
+    }
+
+    #[test]
+    fn heartbeat_blocked_when_gesture_armed() {
+        let mut s = armed_state();
+        reduce(
+            &mut s,
+            InputEvent::HookKey(hook_key_down(" ", 200)),
+            Instant::now(),
+        );
+        let phys = PhysicalModifierSnapshot {
+            lalt: true,
+            ..Default::default()
+        };
+        assert!(!can_reinstall(ReinstallReason::Heartbeat, &s, &phys));
+    }
+
+    #[test]
+    fn heartbeat_blocked_when_chord_active() {
+        let s = armed_state();
+        assert!(s.chord.is_active());
+        let phys = PhysicalModifierSnapshot {
+            lalt: true,
+            ..Default::default()
+        };
+        assert!(!can_reinstall(ReinstallReason::Heartbeat, &s, &phys));
+    }
+
+    #[test]
+    fn heartbeat_blocked_when_window_visible() {
+        let mut s = InputState::default();
+        s.config = alt_space_config();
+        reduce(
+            &mut s,
+            InputEvent::ConfigChanged(alt_space_config()),
+            Instant::now(),
+        );
+        reduce(&mut s, window_visible(), Instant::now());
+        // 窗口 visible → heartbeat 不可重装（即使其他条件 idle）
+        let phys = PhysicalModifierSnapshot::default();
+        assert!(!can_reinstall(ReinstallReason::Heartbeat, &s, &phys));
+    }
+
+    #[test]
+    fn heartbeat_allowed_when_idle_and_hidden() {
+        let mut s = InputState::default();
+        s.config = alt_space_config();
+        reduce(
+            &mut s,
+            InputEvent::ConfigChanged(alt_space_config()),
+            Instant::now(),
+        );
+        // 完全 idle + hidden
+        let phys = PhysicalModifierSnapshot::default();
+        assert!(can_reinstall(ReinstallReason::Heartbeat, &s, &phys));
+    }
+
+    #[test]
+    fn session_recovery_allowed_when_idle_and_visible() {
+        let mut s = InputState::default();
+        s.config = alt_space_config();
+        reduce(
+            &mut s,
+            InputEvent::ConfigChanged(alt_space_config()),
+            Instant::now(),
+        );
+        reduce(&mut s, window_visible(), Instant::now());
+        // 窗口 visible 但 session recovery 仍可重装
+        let phys = PhysicalModifierSnapshot::default();
+        assert!(can_reinstall(ReinstallReason::SessionRecovery, &s, &phys));
+    }
+
+    #[test]
+    fn manual_recovery_allowed_when_idle_and_visible() {
+        let mut s = InputState::default();
+        s.config = alt_space_config();
+        reduce(
+            &mut s,
+            InputEvent::ConfigChanged(alt_space_config()),
+            Instant::now(),
+        );
+        reduce(&mut s, window_visible(), Instant::now());
+        // 窗口 visible 但 manual recovery 仍可重装（用户显式恢复时窗口通常已打开）
+        let phys = PhysicalModifierSnapshot::default();
+        assert!(can_reinstall(ReinstallReason::ManualRecovery, &s, &phys));
+    }
+
+    #[test]
+    fn manual_recovery_blocked_when_physical_modifier_down() {
+        let mut s = InputState::default();
+        s.config = alt_space_config();
+        reduce(
+            &mut s,
+            InputEvent::ConfigChanged(alt_space_config()),
+            Instant::now(),
+        );
+        // 物理修饰键仍按下 → 不允许重装
+        let phys = PhysicalModifierSnapshot {
+            lalt: true,
+            ..Default::default()
+        };
+        assert!(!can_reinstall(ReinstallReason::ManualRecovery, &s, &phys));
+    }
+
+    #[test]
+    fn manual_recovery_not_downgraded_by_heartbeat_or_session() {
+        use ReinstallReason::*;
+        assert_eq!(ManualRecovery.merge(Heartbeat), ManualRecovery);
+        assert_eq!(ManualRecovery.merge(SessionRecovery), ManualRecovery);
+        assert_eq!(Heartbeat.merge(ManualRecovery), ManualRecovery);
+        assert_eq!(SessionRecovery.merge(ManualRecovery), ManualRecovery);
+    }
+
+    #[test]
+    fn session_recovery_not_downgraded_by_heartbeat() {
+        let r = ReinstallReason::SessionRecovery.merge(ReinstallReason::Heartbeat);
+        assert_eq!(r, ReinstallReason::SessionRecovery);
+    }
+
+    #[test]
+    fn reinstall_reason_merge_all_combinations() {
+        use ReinstallReason::*;
+        assert_eq!(Heartbeat.merge(Heartbeat), Heartbeat);
+        assert_eq!(Heartbeat.merge(SessionRecovery), SessionRecovery);
+        assert_eq!(Heartbeat.merge(ManualRecovery), ManualRecovery);
+        assert_eq!(SessionRecovery.merge(Heartbeat), SessionRecovery);
+        assert_eq!(SessionRecovery.merge(SessionRecovery), SessionRecovery);
+        assert_eq!(SessionRecovery.merge(ManualRecovery), ManualRecovery);
+        assert_eq!(ManualRecovery.merge(Heartbeat), ManualRecovery);
+        assert_eq!(ManualRecovery.merge(SessionRecovery), ManualRecovery);
+        assert_eq!(ManualRecovery.merge(ManualRecovery), ManualRecovery);
+    }
+
+    #[test]
+    fn retry_delay_values() {
+        assert_eq!(retry_delay_ms(1), 100);
+        assert_eq!(retry_delay_ms(2), 500);
+        assert_eq!(retry_delay_ms(3), 1_000);
+        assert_eq!(retry_delay_ms(4), 5_000);
+        assert_eq!(retry_delay_ms(10), 5_000);
     }
 }
