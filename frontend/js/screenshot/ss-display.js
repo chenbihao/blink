@@ -80,13 +80,32 @@ export function findDisplayContainingRect(rect) {
   return null;
 }
 
-/** 定位工具栏（PixPin 风格）。 */
+/** 定位工具栏（PixPin 风格）。
+ *  先确定目标屏（选区右下角内侧），计算候选位置后无条件 clamp 到屏内。
+ *  用户已手动拖动过时，保留位置但重新 clamp 防止越界。 */
 export function positionToolbar(rect) {
   const { toolbar } = ss;
   toolbar.classList.remove('hidden');
+
+  // 用户已手动拖动过：保留位置但重新 clamp 到当前屏
   if (toolbar.dataset.userMoved === 'true' && toolbar.style.left && toolbar.style.top) {
+    const tw = toolbar.offsetWidth;
+    const th = toolbar.offsetHeight;
+    if (tw > 0 && th > 0) {
+      const left = parseFloat(toolbar.style.left);
+      const top = parseFloat(toolbar.style.top);
+      const mon = findDisplayCssAt(left + tw / 2, top + th / 2);
+      const MARGIN = 8;
+      const clampedLeft = Math.max(mon.x + MARGIN, Math.min(left, mon.x + mon.w - tw - MARGIN));
+      const clampedTop = Math.max(mon.y + MARGIN, Math.min(top, mon.y + mon.h - th - MARGIN));
+      if (clampedLeft !== left || clampedTop !== top) {
+        const floating = toolbar.classList.contains('toolbar-floating');
+        applyToolbarPos(clampedLeft, clampedTop, floating);
+      }
+    }
     return;
   }
+
   toolbar.style.left = '-9999px';
   toolbar.style.top = '-9999px';
 
@@ -95,17 +114,41 @@ export function positionToolbar(rect) {
     const th = toolbar.offsetHeight;
     const MARGIN = 8;
 
-    let left = rect.x + rect.w - tw;
-    if (left < rect.x) left = rect.x;
+    // 确定目标屏（选区右下角内侧点，默认语义工具栏靠选区右侧）
+    const mon = findDisplayCssAt(
+      rect.x + Math.max(0, rect.w - 1),
+      rect.y + Math.max(0, rect.h - 1),
+    );
 
-    let top = rect.y + rect.h + MARGIN;
-    if (findDisplayContainingRect({ left, top, right: left + tw, bottom: top + th })) {
-      applyToolbarPos(left, top, false);
-      return;
+    // 水平：优先右对齐，clamp 到目标屏
+    const minLeft = mon.x + MARGIN;
+    const maxLeft = mon.x + mon.w - tw - MARGIN;
+    let left = rect.x + rect.w - tw;
+    left = Math.max(minLeft, Math.min(left, maxLeft));
+
+    // 垂直：选区下方 → 上方 → 浮动选区内部
+    const minTop = mon.y + MARGIN;
+    const maxTop = mon.y + mon.h - th - MARGIN;
+    const below = rect.y + rect.h + MARGIN;
+    const above = rect.y - th - MARGIN;
+
+    let top;
+    let floating = false;
+
+    if (below <= maxTop) {
+      top = below;
+    } else if (above >= minTop) {
+      top = above;
+    } else {
+      top = Math.max(minTop, Math.min(rect.y + rect.h - th - MARGIN, maxTop));
+      floating = true;
     }
-    top = rect.y + rect.h - th - MARGIN;
-    if (top < rect.y + MARGIN) top = rect.y + MARGIN;
-    applyToolbarPos(left, top, true);
+
+    // 最终无条件 clamp（保证工具栏完整位于屏内）
+    left = Math.max(minLeft, Math.min(left, maxLeft));
+    top = Math.max(minTop, Math.min(top, maxTop));
+
+    applyToolbarPos(left, top, floating);
   });
 }
 

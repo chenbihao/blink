@@ -65,10 +65,12 @@ export function drawDimmed() {
       });
       return;
     }
+    const _t0 = performance.now();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(getScreenshotSource(), 0, 0);
     ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
+    console.info('[screenshot] drawDimmed', { w: canvas.width, h: canvas.height, ms: Math.round(performance.now() - _t0) });
   } catch (e) {
     console.error('[screenshot] drawDimmed threw', e);
   }
@@ -76,6 +78,7 @@ export function drawDimmed() {
 
 /** 选区绘制：选区外暗 + 选区内亮 */
 export function drawSelection() {
+  const _t0 = performance.now();
   const { ctx, canvas, startX, startY, endX, endY, sizeHint } = ss;
   const src = getScreenshotSource();
   // C 类：主 canvas bitmap 映射，必须用 overlay dpr（bitmap↔CSS 映射全局固定）
@@ -109,10 +112,12 @@ export function drawSelection() {
   sizeHint.classList.remove('hidden');
   sizeHint.style.left = (r.x + 4) + 'px';
   sizeHint.style.top = (r.y > 24 ? r.y - 22 : r.y + 4) + 'px';
+  console.info('[screenshot] drawSelection', { ms: Math.round(performance.now() - _t0) });
 }
 
 /** 确定选区后的静态绘制（选区不再随鼠标变化，但仍需要蒙版效果） */
 export function drawFinalSelection() {
+  const _t0 = performance.now();
   const { ctx, canvas, selCss } = ss;
   if (!selCss) return;
   const src = getScreenshotSource();
@@ -167,6 +172,7 @@ export function drawFinalSelection() {
       ctx.strokeRect(hx - hs / 2, hy - hs / 2, hs, hs);
     }
   }
+  console.info('[screenshot] drawFinalSelection', { w: canvas.width, h: canvas.height, ms: Math.round(performance.now() - _t0) });
 }
 
 /**

@@ -147,6 +147,14 @@ export function doPinSelection() {
   // 跳过前端 toBlob + IPC PNG 往返（省 ~1200ms 全屏）
   if (!hasAnnot && ss.editorSession.canUseCaptureCropFastPath) {
     const bmp = cssRectToBitmap(ss.selCss, meta);
+    // ⚠️ 临时诊断日志（跨 DPR 排查用），收尾时清理
+    console.info('[screenshot] pin fast path', {
+      selCss: ss.selCss,
+      bmpRect: bmp,
+      screenX, screenY,
+      renderScale: meta.renderScaleX,
+      dpr: window.devicePixelRatio,
+    });
     cleanupCanvasVisuals();
     screenshotPinRegion(bmp.x, bmp.y, bmp.w, bmp.h, screenX, screenY)
       .then(() => console.info('[screenshot] pin 成功（快路径）', { ms: Math.round(performance.now() - _t0) }))
@@ -263,32 +271,35 @@ export async function outputEditorPng(action, pngBytes, screenX = 0, screenY = 0
 }
 
 async function compositeSelectionBytes() {
-  if (!ss.selCss || (!ss.screenshot && !ss.editorSession.baseCanvas)) {
-    console.error('[screenshot] compositeSelection: no selection or screenshot');
-    ss.sent = false;
-    return null;
-  }
-  try {
-    const sessionBase = ss.editorSession.baseCanvas;
-    const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
-    // 统一用 cssRectToBitmap 生成 bitmap rect，快路径与合成路径输出一致
-    const bmp = sessionBase ? { x: 0, y: 0, w: sessionBase.width, h: sessionBase.height } : cssRectToBitmap(ss.selCss, meta);
-    const px = bmp.x;
-    const py = bmp.y;
-    const pw = bmp.w;
-    const ph = bmp.h;
+if (!ss.selCss || (!ss.screenshot && !ss.editorSession.baseCanvas)) {
+console.error('[screenshot] compositeSelection: no selection or screenshot');
+ss.sent = false;
+return null;
+}
+const _t0 = performance.now();
+try {
+const sessionBase = ss.editorSession.baseCanvas;
+const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+// 统一用 cssRectToBitmap 生成 bitmap rect，快路径与合成路径输出一致
+const bmp = sessionBase ? { x: 0, y: 0, w: sessionBase.width, h: sessionBase.height } : cssRectToBitmap(ss.selCss, meta);
+const px = bmp.x;
+const py = bmp.y;
+const pw = bmp.w;
+const ph = bmp.h;
 
-    const off = getCompositeCanvas(pw, ph);
-    const offCtx = off.getContext('2d');
-    if (sessionBase) {
-      offCtx.drawImage(sessionBase, 0, 0);
-    } else {
-      offCtx.drawImage(ss.screenshot, px, py, pw, ph, 0, 0, pw, ph);
-    }
-    if (annot.hasAnnotations()) {
-      offCtx.drawImage(ss.annotCanvas, 0, 0);
-    }
-    const blob = await new Promise((resolve) => off.toBlob(resolve, 'image/png'));
+const off = getCompositeCanvas(pw, ph);
+const offCtx = off.getContext('2d');
+if (sessionBase) {
+offCtx.drawImage(sessionBase, 0, 0);
+} else {
+offCtx.drawImage(ss.screenshot, px, py, pw, ph, 0, 0, pw, ph);
+}
+if (annot.hasAnnotations()) {
+offCtx.drawImage(ss.annotCanvas, 0, 0);
+}
+console.info('[screenshot] compositeSelectionBytes: sync draw done', { pw, ph, ms: Math.round(performance.now() - _t0) });
+const blob = await new Promise((resolve) => off.toBlob(resolve, 'image/png'));
+console.info('[screenshot] compositeSelectionBytes: toBlob done', { ms: Math.round(performance.now() - _t0) });
     if (!blob) {
       console.error('[screenshot] PNG 合成失败（blob=null）');
       ss.sent = false;

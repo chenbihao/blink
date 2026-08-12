@@ -15,6 +15,9 @@ import { ss } from './ss-state.js';
 import { screenshotWindowList } from '../shared/api.js';
 import { clampRectToCss, rectScreenToCss, pointInRect } from './ss-selection-geometry.js';
 import { findDisplayCssAt } from './ss-display.js';
+import {
+  hidePreselectionHint, resetPreselectionHint, showPreselectionHint,
+} from './ss-preselection-hint.js';
 
 /** 缓存的可吸附窗口列表（CSS 坐标） */
 let pickableWindows = [];
@@ -25,23 +28,17 @@ let hoveredIndex = -1;
 /** 当前桌面（全屏）预选区矩形（CSS 坐标）。鼠标在桌面/无窗口区域时激活。 */
 let desktopHintRect = null;
 
-/** #window-hint DOM 元素（只显示虚线边框，无蓝色背景填充） */
-let hintEl = null;
-
-/** hintEl 是否当前可见（用于区分首次出现 vs 窗口间切换） */
-let hintVisible = false;
-
-/** hideWindowHint 的延迟计时器（等 opacity 过渡结束再 visibility:hidden） */
-let hintHideTimer = 0;
-
 /**
  * 加载可吸附窗口列表（overlay 加载时调一次）。
  * 物理坐标 → CSS 坐标转换在此一次完成。
  * 支持会话 generation 防止过期回流。
  */
 export async function loadPickableWindows(requestGen, fetchWindows = screenshotWindowList) {
+  const _t0 = performance.now();
+  console.info('[screenshot] loadPickableWindows start', { gen: requestGen });
   try {
     const list = await fetchWindows();
+    const _tFetchEnd = performance.now();
     
     // 检查 generation，防止过期回流
     if (requestGen !== ss.windowListGen) {
@@ -58,7 +55,7 @@ export async function loadPickableWindows(requestGen, fetchWindows = screenshotW
       window.innerHeight,
     );
 
-    console.debug('[screenshot] pickable windows loaded', pickableWindows.length);
+    console.info('[screenshot] loadPickableWindows done', { count: pickableWindows.length, fetchMs: Math.round(_tFetchEnd - _t0), totalMs: Math.round(performance.now() - _t0) });
   } catch (e) {
     // 旧请求的失败与旧请求的成功一样，都不能覆盖新一代列表。
     if (requestGen !== ss.windowListGen) {
@@ -94,18 +91,7 @@ export function clearPickableWindows() {
   hoveredIndex = -1;
   desktopHintRect = null;
   ss.windowListGen++;
-  // 立即清除，不走淡出过渡（overlay 正在关闭）
-  if (hintHideTimer) {
-    clearTimeout(hintHideTimer);
-    hintHideTimer = 0;
-  }
-  hintVisible = false;
-  if (hintEl) {
-    hintEl.style.transition = 'none';
-    hintEl.style.opacity = '0';
-    hintEl.style.visibility = 'hidden';
-    hintEl.style.transition = '';
-  }
+  resetPreselectionHint();
 }
 
 /**
@@ -175,7 +161,8 @@ export function updateWindowHover(cssX, cssY, options) {
 
 /** 获取当前悬停的窗口矩形（CSS 坐标）。
  * 单击时调此函数获取吸附目标；返回 null 表示无悬停。
- * 桌面预选区激活时返回全屏矩形（无 hwnd）。 */
+ * 桌面预选区激活时返回全屏矩形（无 hwnd），单击桌面可 snap 到全屏。
+ * 全屏标注被困问题由 index.js 的"点击选区外部 → 退出标注"解决。 */
 export function getHoveredWindowRect() {
   if (hoveredIndex >= 0) {
     const w = pickableWindows[hoveredIndex];
@@ -227,57 +214,19 @@ export function findWindowForRect(rect) {
   } : null;
 }
 
-/** 显示窗口虚线框（仅边框，无蓝色背景填充）
- *  0.15.x：窗口间切换时 CSS transition 丝滑跟随；
- *  首次出现（从隐藏→可见）禁用位移过渡，仅淡入，避免从 (0,0) 滑入。 */
+/** 把统一预选框切换到窗口层级；几何过渡由 ss-preselection-hint 统一管理。 */
 function showWindowHint(w) {
-  if (!hintEl) {
-    hintEl = document.createElement('div');
-    hintEl.id = 'window-hint';
-    hintEl.className = 'window-hint';
-    document.body.appendChild(hintEl);
-  }
-
-  // 取消可能挂起的隐藏计时器
-  if (hintHideTimer) {
-    clearTimeout(hintHideTimer);
-    hintHideTimer = 0;
-  }
-
-  const wasHidden = !hintVisible;
-
-  if (wasHidden) {
-    // 首次出现：禁用所有过渡，瞬时定位
-    hintEl.style.transition = 'none';
-  }
-
-  hintEl.style.left = w.x + 'px';
-  hintEl.style.top = w.y + 'px';
-  hintEl.style.width = w.w + 'px';
-  hintEl.style.height = w.h + 'px';
-  hintEl.style.visibility = 'visible';
-  hintEl.style.opacity = '1';
-
-  if (wasHidden) {
-    // 强制 reflow 提交无过渡的位置，然后恢复 CSS 过渡供后续切换使用
-    hintEl.offsetHeight; // reflow
-    hintEl.style.transition = '';
-    hintVisible = true;
-  }
-
   const label = w.processName ? `${w.processName}` : '';
   const title = w.title ? (label ? `${label} — ${w.title}` : w.title) : label;
-  hintEl.title = title;
+  showPreselectionHint(w, 'window', title);
 }
 
-/** 0.19.14-fix：如果窗口 hint 当前可见，立即隐藏（淡出）。
- * 供 mousemove 在控件命中时调用，避免先 show 再 hide 的闪烁。 */
+/** 控件命中时释放窗口层级；若控件已接管统一预选框则不会误隐藏。 */
 export function hideWindowHintIfVisible() {
-  if (hintVisible) hideWindowHint();
+  hideWindowHint();
 }
 
-/** 0.19.14-fix：如果有待显示的窗口/桌面 hint（索引已更新但未显示），立即显示。
- * 供 mousemove 在控件未命中时调用。 */
+/** 控件未命中时把统一预选框切回待显示的窗口或桌面。 */
 export function showWindowHintIfPending() {
   if (hoveredIndex >= 0) {
     showWindowHint(pickableWindows[hoveredIndex]);
@@ -288,16 +237,5 @@ export function showWindowHintIfPending() {
 
 /** 隐藏窗口虚线框（淡出） */
 function hideWindowHint() {
-  if (hintEl && hintVisible) {
-    hintEl.style.opacity = '0';
-    hintVisible = false;
-    // 等淡出过渡结束后再 visibility:hidden，避免残留可交互区域
-    if (hintHideTimer) clearTimeout(hintHideTimer);
-    hintHideTimer = setTimeout(() => {
-      hintHideTimer = 0;
-      if (hintEl && !hintVisible) {
-        hintEl.style.visibility = 'hidden';
-      }
-    }, 120);
-  }
+  hidePreselectionHint('window');
 }

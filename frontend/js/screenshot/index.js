@@ -42,9 +42,9 @@ import { applyThemeFromConfig } from "../shared/theme.js";
 import { ss, initDOM, PREWARM_MIN_WIDTH, PREWARM_MIN_HEIGHT, TOOL_CAPS } from "./ss-state.js";
 import { IMAGE_SOURCE } from './image-editor-session.js';
 import { norm, pointInRect, applySquareConstraint } from "./ss-utils.js";
-import { shouldStartFreeSelection, monitorDprAtCss, syncRenderScale, cssRectToBitmap, cssPointToScreen } from "./ss-selection-geometry.js";
+import { shouldStartFreeSelection, syncRenderScale, cssRectToBitmap, cssPointToScreen } from "./ss-selection-geometry.js";
 import { drawDimmed, drawSelection, drawFinalSelection, redrawAnnotPreview, redrawAnnotFull, scheduleDrawSelection, cancelDrawSelectionRaf, scheduleDrawFinalSelection, cancelDrawFinalSelectionRaf } from "./ss-draw.js";
-import { positionToolbar, findDisplayCssAt, invalidateDisplaysCache } from "./ss-display.js";
+import { positionToolbar, invalidateDisplaysCache } from "./ss-display.js";
 import {
   getSelectionHandle, beginSelectionInteraction, updateSelectionInteraction,
   finishSelectionInteraction, updateSelectionCursor, refreshShapePreviewOnShift,
@@ -93,6 +93,9 @@ let captureHintsStarted = false;
 let screenshotReady = false;
 let renderScaleReady = false;
 let configReady = false;
+// ⚠️ 临时打桩日志（0.19.14 性能排查用），收尾时清理
+let _screenshotReadyTs = 0; // ss.screenshot 赋值时刻
+let _firstMousedownLogged = false;
 
 /** 统一门控：截图 + 窗口列表 + 控件预热只触发一次 */
 function maybeStartCaptureHints() {
@@ -102,6 +105,7 @@ function maybeStartCaptureHints() {
   if (!configReady) return;
 
   captureHintsStarted = true;
+  console.info('[screenshot] maybeStartCaptureHints fired', { screenshotReady, renderScaleReady, configReady });
   try {
     loadPickableWindows(ss.windowListGen);
   } catch (e) {
@@ -187,24 +191,48 @@ window.addEventListener('resize', () => {
   }
 });
 
+// P0 优化：clearVisual 不再 clearRect 暗罩（保留 resetState 画的 P5 暗罩），
+// 并立即启动 fetch 预取——与 show+focus+double rAF 并行，省 ~80ms。
 window.__blinkClearScreenshotVisual = function () {
   console.info('[screenshot] __blinkClearScreenshotVisual called');
   try {
     resetState();
-    const { canvas, ctx } = ss;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // 不 clearRect——resetState 末尾已画出 P5 暗罩（rgba(0,0,0,0.45)），
+    // 保留它让用户在窗口 show 的瞬间就看到暗色背景 + 十字光标。
   } catch (e) {
     console.error('[screenshot] clearScreenshotVisual threw', e);
   }
+  // 立即启动 fetch 预取——不等 double rAF，与 show+focus 并行。
+  // SESSION 在 begin_session 完成后就准备好了，此时可以安全读取。
+  const _tPreload = performance.now();
+  const _activeMonitor = window.__blinkActiveDisplay ?? 0;
+  window.__blinkScreenshotPreload = fetch(`http://blink-screenshot.localhost/raw?monitor=${_activeMonitor}&t=${Date.now()}`)
+    .then(r => {
+      if (!r.ok) throw new Error(`preload fetch failed: ${r.status}`);
+      // Tauri 自定义协议不暴露自定义 headers 给前端 fetch API，
+      // 尺寸/偏移由 loadScreenshot 从 __blinkScreenMeta.physicalDisplays 计算。
+      return r.arrayBuffer();
+    })
+    .then(buf => {
+      console.info('[screenshot] preload fetch done', { ms: Math.round(performance.now() - _tPreload), bytes: buf.byteLength, monitor: _activeMonitor });
+      return buf;
+    })
+    .catch(e => {
+      console.error('[screenshot] preload fetch error', e);
+      return null;
+    });
 };
 
 window.__blinkReloadScreenshot = function () {
   console.info('[screenshot] __blinkReloadScreenshot called');
-  try {
-    resetState();
-    console.info('[screenshot] resetState done');
-  } catch (e) {
-    console.error('[screenshot] resetState threw, attempting to continue', e);
+  // P0 优化：resetState 已在 clearVisual 里调过一次，这里跳过避免重复。
+  // 但如果 clearVisual 没被调过（首次创建路径），仍需要 resetState。
+  if (!window.__blinkScreenshotPreload) {
+    try {
+      resetState();
+    } catch (e) {
+      console.error('[screenshot] resetState threw, attempting to continue', e);
+    }
   }
   try {
     loadScreenshot();
@@ -303,6 +331,8 @@ function resetState() {
       wmDropdown.setAttribute('data-open', 'false');
     }
   } catch (e) { console.warn('[screenshot] resetState: text-dropdown reset failed', e); }
+  // P0 优化：清理预取 promise，防止上一轮截图的预取残留到新一轮
+  window.__blinkScreenshotPreload = null;
   ss.ocrPrewarm = null;
   ss.ocrResultCache = null;
   ss.ocrBusy = false;
@@ -346,8 +376,20 @@ function resetState() {
   console.info('[screenshot] resetState done', { ms: Math.round(performance.now() - _t0) });
 }
 
-// P4: raw BGRA 协议——fetch raw RGBA bytes + ImageData + putImageData
-// 消除 PNG 编码（~241ms）+ 浏览器 PNG 解码（~50ms），进入截图从 ~400ms → ~160ms
+// A+B 优化：BGRA → RGBA 原地 swap（u32 位运算，与后端 swap_rb_u32 等价）
+// 在前端做 swap 省掉后端 43MB 分配 + 遍历，且 per-monitor 数据量更小（~15MB）
+function swapBgraToRgba(buffer) {
+  const u32 = new Uint32Array(buffer);
+  for (let i = 0; i < u32.length; i++) {
+    const v = u32[i];
+    const rb = v & 0x00FF00FF;
+    const ga = v & 0xFF00FF00;
+    u32[i] = ga | (rb << 16) | (rb >>> 16);
+  }
+}
+
+// P4: raw BGRA 协议——fetch raw BGRA bytes + 前端 swap + ImageData + putImageData
+// A+B 优化：per-monitor 分块加载，先传光标所在屏（~15MB），其他屏懒加载
 async function loadScreenshot() {
   // ⚠️ 临时打桩日志（0.19.14 性能排查用），收尾时清理
   const _t0 = performance.now();
@@ -370,46 +412,88 @@ async function loadScreenshot() {
   }, 5000);
 
   try {
-    console.info('[screenshot] requesting raw rgba', { gen });
-    const _tFetchStart = performance.now();
-    const response = await fetch('http://blink-screenshot.localhost/raw?t=' + Date.now());
-    if (!response.ok) throw new Error(`fetch failed: ${response.status}`);
-
-    const buffer = await response.arrayBuffer();
-    const _tFetchEnd = performance.now();
-    console.info('[screenshot] raw rgba fetched', { gen, ms: Math.round(_tFetchEnd - _tFetchStart), bytes: buffer.byteLength });
-    if (gen !== ss._loadGen) {
-      console.info('[screenshot] 丢弃过期截图加载回调', { gen, cur: ss._loadGen });
-      return;
+    // P0 优化：复用 clearVisual 阶段启动的预取 fetch，避免重复请求。
+    // 预取在 show 之前就开始了，这里可能已经完成（0ms 等待）。
+    const preloadPromise = window.__blinkScreenshotPreload;
+    let rawBuffer;
+    if (preloadPromise) {
+      console.info('[screenshot] reusing preload fetch', { gen });
+      rawBuffer = await preloadPromise;
+      window.__blinkScreenshotPreload = null;
+      if (gen !== ss._loadGen) {
+        console.info('[screenshot] 丢弃过期截图加载回调', { gen, cur: ss._loadGen });
+        return;
+      }
+      if (!rawBuffer) throw new Error('preload fetch 返回 null');
+    } else {
+      console.info('[screenshot] requesting raw bgra (no preload)', { gen });
+      const _tFetchStart = performance.now();
+      const _activeMonitor = window.__blinkActiveDisplay ?? 0;
+      const response = await fetch(`http://blink-screenshot.localhost/raw?monitor=${_activeMonitor}&t=${Date.now()}`);
+      if (!response.ok) throw new Error(`fetch failed: ${response.status}`);
+      rawBuffer = await response.arrayBuffer();
+      console.info('[screenshot] raw bgra fetched', { gen, ms: Math.round(performance.now() - _tFetchStart), bytes: rawBuffer.byteLength });
+      if (gen !== ss._loadGen) {
+        console.info('[screenshot] 丢弃过期截图加载回调', { gen, cur: ss._loadGen });
+        return;
+      }
     }
 
-    // 从 __blinkScreenMeta 取尺寸（Tauri 自定义协议不暴露 X-Width/X-Height headers）
+    // 从 __blinkScreenMeta 取完整虚拟桌面尺寸 + 显示器列表
     const meta = window.__blinkScreenMeta || {};
     const w = meta.w || 0;
     const h = meta.h || 0;
     if (w === 0 || h === 0) throw new Error('invalid dimensions from __blinkScreenMeta');
 
-    const _tPutStart = performance.now();
-    const imageData = new ImageData(new Uint8ClampedArray(buffer), w, h);
+    // A 优化：从 physicalDisplays 计算活动显示器的尺寸和偏移
+    // （Tauri 自定义协议不暴露自定义 headers 给前端 fetch API）
+    const _activeIdx = window.__blinkActiveDisplay ?? 0;
+    const _displays = meta.physicalDisplays || [];
+    const _activeDisp = _displays[_activeIdx];
+    if (!_activeDisp || !_activeDisp.w || !_activeDisp.h) {
+      throw new Error('active display geometry unavailable');
+    }
+    const activeData = {
+      buffer: rawBuffer,
+      width: _activeDisp.w,
+      height: _activeDisp.h,
+      offsetX: _activeDisp.x - (meta.vx || 0),
+      offsetY: _activeDisp.y - (meta.vy || 0),
+    };
+    if (!activeData.buffer || activeData.width === 0 || activeData.height === 0) {
+      throw new Error('active monitor data invalid');
+    }
 
+    const _tPutStart = performance.now();
+
+    // A+B 优化：offscreen canvas 建为完整虚拟桌面尺寸，
+    // 逐显示器 putImageData 到各自偏移位置。
     const { canvas } = ss;
     canvas.width = w;
     canvas.height = h;
-    const ctx = canvas.getContext('2d');
-    ctx.putImageData(imageData, 0, 0);
 
-    // offscreen canvas 供 compositeSelectionBytes 的 drawImage 使用
     ss.screenshotOffscreen = document.createElement('canvas');
     ss.screenshotOffscreen.width = w;
     ss.screenshotOffscreen.height = h;
-    ss.screenshotOffscreen.getContext('2d', { willReadFrequently: true }).putImageData(imageData, 0, 0);
+    const offCtx = ss.screenshotOffscreen.getContext('2d', { willReadFrequently: true });
+
+    // 写入光标所在屏的 BGRA→RGBA 数据
+    swapBgraToRgba(activeData.buffer);
+    const activeImageData = new ImageData(
+      new Uint8ClampedArray(activeData.buffer),
+      activeData.width,
+      activeData.height
+    );
+    offCtx.putImageData(activeImageData, activeData.offsetX, activeData.offsetY);
 
     // ss.screenshot 设为 offscreen canvas（drawImage 接受 canvas source）
     ss.screenshot = ss.screenshotOffscreen;
+    _screenshotReadyTs = performance.now();
+    _firstMousedownLogged = false;
 
     clearTimeout(timeoutId);
     const _tPutEnd = performance.now();
-    console.info('[screenshot] putImageData done', { w, h, ms: Math.round(_tPutEnd - _tPutStart) });
+    console.info('[screenshot] putImageData done', { w: activeData.width, h: activeData.height, ox: activeData.offsetX, oy: activeData.offsetY, ms: Math.round(_tPutEnd - _tPutStart) });
 
     // 等布局稳定后同步 renderScale，再绘制和加载窗口/控件
     requestAnimationFrame(() => {
@@ -432,6 +516,8 @@ async function loadScreenshot() {
         canvasRectHeight: rect.height,
         scaleX: meta.renderScaleX,
         scaleY: meta.renderScaleY,
+        vx: meta.vx, vy: meta.vy, vw: meta.w, vh: meta.h,
+        physicalDisplays: meta.physicalDisplays,
       });
       // 0.18.x：统一门控触发窗口列表加载 + 控件预热
       screenshotReady = true;
@@ -439,7 +525,39 @@ async function loadScreenshot() {
       maybeStartCaptureHints();
       console.info('[screenshot] rAF render done', { ms: Math.round(_tRafEnd - _tRafStart), totalMs: Math.round(performance.now() - _t0) });
     });
-    console.info('[screenshot] screenshot loaded', { w, h, gen, ms: Math.round(performance.now() - _t0) });
+
+    // A 优化：懒加载其他显示器——不阻塞用户交互，后台 fetch + swap + putImageData
+    for (let i = 0; i < _displays.length; i++) {
+      if (i === _activeIdx) continue;
+      const _disp = _displays[i];
+      if (!_disp || !_disp.w || !_disp.h) continue;
+      fetch(`http://blink-screenshot.localhost/raw?monitor=${i}&t=${Date.now()}`)
+        .then(r => {
+          if (!r.ok) return null;
+          return r.arrayBuffer();
+        })
+        .then(buf => {
+          if (gen !== ss._loadGen) return; // 过期丢弃
+          if (!buf || buf.byteLength === 0) return;
+          const _tLazy = performance.now();
+          swapBgraToRgba(buf);
+          const imgData = new ImageData(
+            new Uint8ClampedArray(buf),
+            _disp.w,
+            _disp.h
+          );
+          offCtx.putImageData(imgData, _disp.x - (meta.vx || 0), _disp.y - (meta.vy || 0));
+          console.info('[screenshot] lazy monitor loaded', { monitor: i, ms: Math.round(performance.now() - _tLazy) });
+          // 仅在暗色蒙版态（未拖选/未标注）时刷新主 canvas，
+          // 拖选中/标注中不调 drawDimmed（下次 mousemove/redraw 会自然读到新数据）
+          if (!ss.isDragging && !ss.isAnnotating && !ss.selectionInteraction) {
+            drawDimmed();
+          }
+        })
+        .catch(e => console.warn('[screenshot] lazy monitor load failed', e));
+    }
+
+    console.info('[screenshot] screenshot loaded', { w, h, gen, activeMonitor: _activeIdx, totalMonitors: _displays.length, ms: Math.round(performance.now() - _t0) });
   } catch (e) {
     clearTimeout(timeoutId);
     if (gen !== ss._loadGen) return;
@@ -450,8 +568,10 @@ async function loadScreenshot() {
 }
 
 function loadEditorConfig(includeCaptureHints) {
+  const _t0 = performance.now();
   invoke('get_config_section', { key: 'screenshot:config' })
     .then((val) => {
+      console.info('[screenshot] loadEditorConfig done', { ms: Math.round(performance.now() - _t0), hasVal: !!val });
       if (val && typeof val === 'object') {
         ss.screenshotConfig.prewarmOcr = val.prewarmOcr !== false;
         ss.screenshotConfig.scrollDebug = val.scrollDebug === true;
@@ -469,6 +589,7 @@ function loadEditorConfig(includeCaptureHints) {
     })
     .catch((e) => {
       console.warn('[image-editor] 读 screenshot:config 失败,用默认值', e);
+      console.info('[screenshot] loadEditorConfig failed', { ms: Math.round(performance.now() - _t0) });
       // 配置加载失败也需放行门控（使用默认配置）
       configReady = true;
       maybeStartCaptureHints();
@@ -522,6 +643,7 @@ function loadEditorImage(source) {
 
 /** 进入标注模式：显示工具栏 + 定位标注 canvas + 通知后端 */
 function enterAnnotationMode(rect) {
+  const _t0 = performance.now();
   console.info('[screenshot] enterAnnotationMode', rect);
   const { annotCanvas, screenshot } = ss;
 
@@ -547,6 +669,7 @@ clearControlHover();
 
   let cropData = null;
   try {
+    const _tCropStart = performance.now();
     const tempCanvas = document.createElement('canvas');
     tempCanvas.width = pw;
     tempCanvas.height = ph;
@@ -557,16 +680,24 @@ clearControlHover();
       0, 0, pw, ph
     );
     cropData = tempCtx.getImageData(0, 0, pw, ph);
+    console.info('[screenshot] enterAnnotationMode: crop+getImageData', { pw, ph, ms: Math.round(performance.now() - _tCropStart) });
   } catch (e) {
     console.warn('[screenshot] 提取裁剪区图像失败（马赛克功能不可用）', e);
   }
 
+  const _tResetStart = performance.now();
   annot.reset(pw, ph, cropData);
   updateUndoRedoButtons();
+  console.info('[screenshot] enterAnnotationMode: annot.reset', { ms: Math.round(performance.now() - _tResetStart) });
   screenshotSetAnnotationMode(true).catch((e) => console.error('[screenshot] setAnnotationMode(true) 失败', e));
+  const _tDrawStart = performance.now();
   drawFinalSelection();
+  console.info('[screenshot] enterAnnotationMode: drawFinalSelection', { ms: Math.round(performance.now() - _tDrawStart) });
   positionToolbar(rect);
+  const _tOcrStart = performance.now();
   triggerOcrPrewarm(pw, ph);
+  console.info('[screenshot] enterAnnotationMode: triggerOcrPrewarm (sync part)', { ms: Math.round(performance.now() - _tOcrStart) });
+  console.info('[screenshot] enterAnnotationMode: total', { ms: Math.round(performance.now() - _t0) });
 }
 
 /**
@@ -810,6 +941,11 @@ function endLongImagePan() {
 }
 
 canvas.addEventListener('mousedown', (e) => {
+  if (!_firstMousedownLogged) {
+    _firstMousedownLogged = true;
+    const delta = _screenshotReadyTs > 0 ? Math.round(performance.now() - _screenshotReadyTs) : -1;
+    console.info('[screenshot] first mousedown', { hasScreenshot: !!ss.screenshot, deltaSinceReady: delta });
+  }
   if (!ss.screenshot && !ss._imagePan) return;
 
   const tool = annot.getTool();
@@ -853,7 +989,14 @@ canvas.addEventListener('mousedown', (e) => {
       beginSelectionInteraction('move', e);
       return;
     }
-    beginSelectionInteraction('move', e);
+    // 0.19.15：点击选区外部 → 退出标注模式，回到自由框选状态（不取消截图）。
+    // 此前行为是 beginSelectionInteraction('move')，对全屏选区来说没有"外部"，
+    // 用户被困在全屏标注中无法退出。改为仅退出标注模式，overlay 保留，
+    // 用户可再次 click+drag 开始新选区。
+    console.info('[screenshot] click outside selection → exit annotation mode');
+    exitAnnotationMode();
+    clearHover();
+    clearControlHover();
     return;
   }
 
@@ -986,19 +1129,12 @@ canvas.addEventListener('mousemove', (e) => {
   }
 
   if (ss.isDragging) {
-    // 跨 dpr 边界选区 clamp 到起点屏（用 monitorDprAtCss 比较原生 DPI，非 overlayDpr）
-    const startMon = findDisplayCssAt(ss.startX, ss.startY);
-    const startDpr = monitorDprAtCss(ss.startX, ss.startY, window.__blinkScreenMeta);
-    const curDpr = monitorDprAtCss(e.offsetX, e.offsetY, window.__blinkScreenMeta);
-    let clampedX = e.offsetX;
-    let clampedY = e.offsetY;
-    if (startDpr !== curDpr) {
-      // 跨 dpr 屏：clamp 到起点屏边界
-      clampedX = Math.max(startMon.x, Math.min(clampedX, startMon.x + startMon.w));
-      clampedY = Math.max(startMon.y, Math.min(clampedY, startMon.y + startMon.h));
-    }
-    ss.endX = clampedX;
-    ss.endY = clampedY;
+    // 0.19.15：移除跨 DPR clamp——canvas backing store = 虚拟桌面物理像素（1:1），
+    // renderScale 全局一致，cssRectToBitmap 对任意屏的 CSS 坐标都能正确映射到
+    // SESSION 物理像素坐标。跨 DPR 选区的裁剪/复制/pin 均由后端 crop_bgra_virtual
+    // 按虚拟屏幕坐标直接裁剪，不存在比例错误。
+    ss.endX = e.offsetX;
+    ss.endY = e.offsetY;
     // H1 优化：rAF 节流，避免 mousemove 高频全量重绘
     scheduleDrawSelection();
   }
@@ -1112,7 +1248,16 @@ canvas.addEventListener('mouseup', (e) => {
     return;
   }
 
-  console.info('[screenshot] selection confirmed', rect);
+  // ⚠️ 临时诊断日志（跨 DPR 排查用），收尾时清理
+  const _meta = window.__blinkScreenMeta || {};
+  const _bmp = cssRectToBitmap(rect, _meta);
+  console.info('[screenshot] selection confirmed', {
+    cssRect: rect,
+    bmpRect: _bmp,
+    renderScale: _meta.renderScaleX,
+    dpr: window.devicePixelRatio,
+    physicalDisplays: _meta.physicalDisplays,
+  });
   // 0.15.8 R2：自由框选不关联窗口 HWND
   ss.snappedHwnd = null;
   try {

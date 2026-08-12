@@ -353,7 +353,10 @@
           <button class="wm-apply tool-btn tool-btn-primary">应用</button>
         </div>
       </div>
-    </div>：在 ES module 加载/执行失败时提供最小逃生通道。
+    </div>
+
+    <!--
+      以下 <script> 块在 ES module 加载/执行失败时提供最小逃生通道。
       如果 index.js 成功加载，这些 handler 会被其 preventDefault 覆盖或共存（ESC/cancel 重复调用幂等）。
       问题背景：0.15 新增 ss-scroll.js / ss-hover.js 等模块，若任一 import 失败或运行时抛异常，
       整个 module 不执行 → 无 keydown/contextmenu/blur handler → 用户被 always_on_top 全屏遮罩困住。

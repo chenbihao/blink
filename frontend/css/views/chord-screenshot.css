@@ -1349,43 +1349,31 @@ body.image-editor-mode {
   white-space: nowrap;
 }
 
-/* ── 窗口吸附虚线框 ─────────────────────────
-   只显示蓝色虚线边框，无背景填充。
-   0.15.x：加粗边框 + 外发光增强存在感；
-   窗口间切换时 left/top/width/height 过渡丝滑跟随。 */
-.window-hint {
+/* ── 统一智能吸附预选框 ──────────────────────
+   窗口与控件共用一个元素：几何位置连续形变，层级变化只切换语义色。 */
+.preselection-hint {
+  --preselection-color: var(--preselection-window);
   position: fixed;
   z-index: calc(var(--z-dropdown, 100) + 3);
   opacity: 0;
   visibility: hidden;
-  border: 3px dashed rgba(74, 158, 255, 0.9);
+  border: 3px dashed var(--preselection-color);
   border-radius: 3px;
   pointer-events: none;
   box-sizing: border-box;
-  box-shadow: 0 0 0 1px rgba(74, 158, 255, 0.12), 0 0 14px rgba(74, 158, 255, 0.3);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--preselection-color) 14%, transparent),
+              0 0 14px color-mix(in srgb, var(--preselection-color) 32%, transparent);
   transition: left 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
               top 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
               width 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
               height 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
-              opacity 0.1s ease-out;
+              opacity var(--transition-fast) ease-out,
+              border-color var(--transition-base) ease-out,
+              box-shadow var(--transition-base) ease-out;
 }
 
-/* 0.18.2：控件级智能吸附虚线框（琥珀色，与窗口吸附蓝色区分） */
-.control-hint {
-  position: fixed;
-  z-index: calc(var(--z-dropdown, 100) + 3);
-  opacity: 0;
-  visibility: hidden;
-  border: 3px dashed rgba(255, 180, 50, 0.9);
-  border-radius: 3px;
-  pointer-events: none;
-  box-sizing: border-box;
-  box-shadow: 0 0 0 1px rgba(255, 180, 50, 0.12), 0 0 14px rgba(255, 180, 50, 0.3);
-  transition: left 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
-              top 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
-              width 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
-              height 0.13s cubic-bezier(0.25, 0.46, 0.45, 0.94),
-              opacity 0.1s ease-out;
+.preselection-hint--control {
+  --preselection-color: var(--preselection-control);
 }
 
 /* ── 0.15.11：二级面板（水印/文字配置）───────────────
@@ -1403,7 +1391,7 @@ body.image-editor-mode {
   border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: 10px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-  /* 0.15.12：z-index 低于悬浮菜单（window-hint +3）和 dropdown（+10） */
+  /* 0.15.12：z-index 低于预选框（preselection-hint +3）和 dropdown（+10） */
   z-index: calc(var(--z-dropdown) - 1);
   font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
   min-width: 210px;

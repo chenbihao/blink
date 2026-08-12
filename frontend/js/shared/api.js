@@ -281,10 +281,18 @@ export function screenshotPinTransform(label, winX, winY, winW, winH) {
   return invoke("screenshot_pin_transform", { label, winX, winY, winW, winH });
 }
 
-/** 0.19.4：钉图窗口仅移动位置（拖拽专用，零 resize 开销）。
+/** 0.19.4：钉图窗口仅移动位置（拖拽专用+尺寸专用，零 resize 开销）。
  *  多 Pin：label 为当前窗口 label。 */
 export function screenshotPinMove(label, winX, winY) {
   return invoke("screenshot_pin_move", { label, winX, winY });
+}
+
+/** 获取 Pin 窗口的当前物理矩形和目标屏 DPR。
+ *  用于 DPI reconcile：onScaleChanged 或拖动跨 DPI 边界后回读窗口实际物理位置。
+ *  @param {string} label 窗口 label
+ *  @returns {Promise<{x: number, y: number, w: number, h: number, dpr: number} | null>} */
+export function screenshotPinGetRect(label) {
+  return invoke("screenshot_pin_get_rect", { label });
 }
 
 /** 0.11.7-f：保存截图选区为文件。path 可选，不传则弹出保存对话框。

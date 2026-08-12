@@ -300,6 +300,65 @@ pub fn crop(x: i32, y: i32, w: u32, h: u32) -> Option<(Vec<u8>, u32, u32)> {
     Some((bgra, cw, ch))
 }
 
+/// 返回 SESSION 的元数据（虚拟屏幕坐标 + 尺寸）。
+pub fn session_meta() -> Option<ScreenCaptureMeta> {
+    let guard = SESSION.read().ok()?;
+    let s = guard.as_ref()?;
+    Some(s.meta)
+}
+
+/// 从 SESSION 按**虚拟屏幕坐标**裁剪 BGRA 区域，不做 RGBA swap。
+///
+/// 与 `crop()` 的区别：输入 `(vx, vy)` 是虚拟屏幕坐标（可能为负，
+/// 如副屏 y=-109），内部先减去 `meta.virtual_x/y` 转为 pixel array 坐标。
+/// 用于按显示器分块传输——多屏下只传光标所在屏的 BGRA（~15MB），
+/// 前端做 BGRA→RGBA swap，省掉后端 43MB 分配 + swap + 全量 IPC 传输。
+///
+/// 返回 `(bgra_bytes, actual_w, actual_h)`，已在 SESSION 边界内 clamp。
+pub fn crop_bgra_virtual(vx: i32, vy: i32, w: u32, h: u32) -> Option<(Vec<u8>, u32, u32)> {
+    let guard = SESSION.read().ok()?;
+    let s = guard.as_ref()?;
+    let meta = s.meta;
+    // 虚拟屏幕坐标 → pixel array 坐标
+    let px_x = vx - meta.virtual_x;
+    let px_y = vy - meta.virtual_y;
+    let (bgra, cw, ch) = crop_rgba(&s.pixels, meta.width, meta.height, px_x, px_y, w, h)?;
+    Some((bgra, cw, ch))
+}
+
+/// 返回光标所在显示器的索引（基于 `list_displays()` 顺序，主屏在第一个）。
+///
+/// 用于多屏截图优化：只先传光标所在屏的 BGRA，其他屏懒加载。
+/// 光标不在任何显示器上时回退到 0（主屏）。
+pub fn active_display_index() -> usize {
+    let displays = backend().list_displays();
+    if displays.is_empty() {
+        return 0;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use ::windows::Win32::Foundation::POINT;
+        use ::windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        let mut pt = POINT { x: 0, y: 0 };
+        let ok = unsafe { GetCursorPos(&mut pt) };
+        if ok.is_ok() {
+            for (i, d) in displays.iter().enumerate() {
+                if pt.x >= d.x
+                    && pt.x < d.x + d.w as i32
+                    && pt.y >= d.y
+                    && pt.y < d.y + d.h as i32
+                {
+                    return i;
+                }
+            }
+        }
+    }
+
+    // 回退：主屏（index 0）
+    0
+}
+
 /// 清空 SESSION（释放位图内存）。overlay 关闭时调。
 pub fn end_session() {
     if let Ok(mut g) = SESSION.write() {

@@ -109,7 +109,10 @@ fn header_opt_string(headers: &tauri::http::HeaderMap, key: &str) -> Option<Stri
 /// 直接传坐标——避开前端 toBlob PNG 编码 + 后端 PNG 解码的双重开销，全屏路径
 /// 快 ~150-250ms。有标注 / 全屏合成时才走本命令。
 #[tauri::command]
-pub async fn screenshot_copy(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) -> Result<(), String> {
+pub async fn screenshot_copy(
+    app: tauri::AppHandle,
+    request: tauri::ipc::Request<'_>,
+) -> Result<(), String> {
     let png_data = extract_png_from_request(&request)?;
     let bytes_len = png_data.len();
     crate::domain::clipboard::write_png(
@@ -193,7 +196,8 @@ pub async fn screenshot_copy_region(
     .await
     .map_err(|e| e.to_string())?;
     tracing::info!(
-        w = cw, h = ch,
+        w = cw,
+        h = ch,
         crop_ms = t_crop.as_millis() as u64,
         write_ms = (t0.elapsed() - t_crop).as_millis() as u64,
         total_ms = t0.elapsed().as_millis() as u64,
@@ -237,7 +241,9 @@ pub fn screenshot_pin(
     )?;
     finish_screenshot_session(&app);
     tracing::info!(
-        screen_x, screen_y, show_translating,
+        screen_x,
+        screen_y,
+        show_translating,
         png_bytes = png_len,
         "截图已钉到屏幕"
     );
@@ -275,10 +281,15 @@ pub async fn screenshot_pin_region(
     crate::infra::platform::window::show_pin_window(
         &app,
         crate::infra::platform::window::PinImage::Bgra(std::sync::Arc::new(bgra), cw, ch),
-        screen_x, screen_y, false,
+        screen_x,
+        screen_y,
+        false,
     )?;
     tracing::info!(
-        w, h, screen_x, screen_y,
+        w,
+        h,
+        screen_x,
+        screen_y,
         bgra_bytes = data_len,
         crop_ms = t_crop.as_millis() as u64,
         show_ms = (t0.elapsed() - t_crop).as_millis() as u64,
@@ -329,7 +340,10 @@ pub async fn screenshot_save(
 
 /// 通用图片编辑输出：以用户来源写入剪贴板，不借用截图来源标记或截图 SESSION。
 #[tauri::command]
-pub async fn image_editor_copy(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) -> Result<(), String> {
+pub async fn image_editor_copy(
+    app: tauri::AppHandle,
+    request: tauri::ipc::Request<'_>,
+) -> Result<(), String> {
     let png_data = extract_png_from_request(&request)?;
     let bytes_len = png_data.len();
     crate::domain::clipboard::write_png(
@@ -533,6 +547,18 @@ pub async fn pin_spare_ready(window: tauri::Window) {
     crate::infra::platform::window::mark_pin_spare_ready(&label);
 }
 
+/// 获取 Pin 窗口的当前物理矩形和目标屏 DPR。
+///
+/// 用于 DPI reconcile：`onScaleChanged` 或拖动跨 DPI 边界后，
+/// 前端调用此命令回读窗口实际物理位置，再用 `pin-geometry.js::reconcileDpi` 重算状态。
+///
+/// 返回 `{ x, y, w, h, dpr }`，窗口不存在时返回 null。
+#[tauri::command]
+pub fn screenshot_pin_get_rect(app: tauri::AppHandle, label: String) -> Option<serde_json::Value> {
+    crate::infra::platform::window::get_pin_window_rect(&app, &label)
+        .map(|(x, y, w, h, dpr)| serde_json::json!({ "x": x, "y": y, "w": w, "h": h, "dpr": dpr }))
+}
+
 /// 将 pin 窗口图片复制到剪贴板。
 #[tauri::command]
 pub async fn pin_save_clipboard(request: tauri::ipc::Request<'_>) -> Result<(), String> {
@@ -615,9 +641,8 @@ pub async fn ocr_image(
 ) -> Result<serde_json::Value, crate::app::command_error::CommandError> {
     use crate::app::command_error::CommandError;
 
-    let png_data = extract_png_from_request(&request).map_err(|e| {
-        CommandError::new("invalid_args", e, false)
-    })?;
+    let png_data = extract_png_from_request(&request)
+        .map_err(|e| CommandError::new("invalid_args", e, false))?;
     let bytes_len = png_data.len();
 
     let registry = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();

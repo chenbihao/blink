@@ -22,6 +22,9 @@ import { screenshotControlHints } from '../shared/api.js';
 import { listen } from '../shared/tauri.js';
 import { EVENTS } from '../shared/event-names.js';
 import { clampRectToCss, rectScreenToCss, pointInRect } from './ss-selection-geometry.js';
+import {
+  hidePreselectionHint, resetPreselectionHint, showPreselectionHint,
+} from './ss-preselection-hint.js';
 
 // ── 会话级状态 ──────────────────────────────────────────────────────────────
 
@@ -52,15 +55,6 @@ let pickableControls = [];
 
 /** 当前悬停的控件索引（-1 = 无） */
 let hoveredIndex = -1;
-
-/** #control-hint DOM 元素（控件吸附虚线框，与窗口吸附视觉区分） */
-let hintEl = null;
-
-/** hintEl 是否当前可见 */
-let hintVisible = false;
-
-/** hideControlHint 的延迟计时器（等 opacity 过渡结束再 visibility:hidden） */
-let hintHideTimer = 0;
 
 // ── 内部工具函数 ──────────────────────────────────────────────────────────
 
@@ -272,18 +266,7 @@ export function clearControlHints() {
     clearTimeout(hoverDebounceTimer);
     hoverDebounceTimer = 0;
   }
-  // 立即清除，不走淡出过渡（overlay 正在关闭）
-  if (hintHideTimer) {
-    clearTimeout(hintHideTimer);
-    hintHideTimer = 0;
-  }
-  hintVisible = false;
-  if (hintEl) {
-    hintEl.style.transition = 'none';
-    hintEl.style.opacity = '0';
-    hintEl.style.visibility = 'hidden';
-    hintEl.style.transition = '';
-  }
+  resetPreselectionHint();
 }
 
 /**
@@ -350,56 +333,12 @@ export function clearControlHover() {
   }
 }
 
-/** 显示控件虚线框（仅边框，琥珀色以区分窗口吸附的蓝色）
- *  与 showWindowHint 同款过渡逻辑：首次出现禁用位移过渡仅淡入。 */
+/** 把统一预选框切换到控件层级，保留与窗口层级的连续几何轨迹。 */
 function showControlHint(c) {
-  if (!hintEl) {
-    hintEl = document.createElement('div');
-    hintEl.id = 'control-hint';
-    hintEl.className = 'control-hint';
-    document.body.appendChild(hintEl);
-  }
-
-  // 取消可能挂起的隐藏计时器
-  if (hintHideTimer) {
-    clearTimeout(hintHideTimer);
-    hintHideTimer = 0;
-  }
-
-  const wasHidden = !hintVisible;
-
-  if (wasHidden) {
-    // 首次出现：禁用所有过渡，瞬时定位
-    hintEl.style.transition = 'none';
-  }
-
-  hintEl.style.left = c.x + 'px';
-  hintEl.style.top = c.y + 'px';
-  hintEl.style.width = c.w + 'px';
-  hintEl.style.height = c.h + 'px';
-  hintEl.style.visibility = 'visible';
-  hintEl.style.opacity = '1';
-
-  if (wasHidden) {
-    // 强制 reflow 提交无过渡的位置，然后恢复 CSS 过渡供后续切换使用
-    hintEl.offsetHeight; // reflow
-    hintEl.style.transition = '';
-    hintVisible = true;
-  }
+  showPreselectionHint(c, 'control');
 }
 
 /** 隐藏控件虚线框（淡出） */
 function hideControlHint() {
-  if (hintEl && hintVisible) {
-    hintEl.style.opacity = '0';
-    hintVisible = false;
-    // 等淡出过渡结束后再 visibility:hidden，避免残留可交互区域
-    if (hintHideTimer) clearTimeout(hintHideTimer);
-    hintHideTimer = setTimeout(() => {
-      hintHideTimer = 0;
-      if (hintEl && !hintVisible) {
-        hintEl.style.visibility = 'hidden';
-      }
-    }, 120);
-  }
+  hidePreselectionHint('control');
 }

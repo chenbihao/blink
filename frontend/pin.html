@@ -7,15 +7,13 @@
   </head>
   <body>
     <!--
-      丝滑缩放架构（transform scale + 左上角固定 + 离散窗口 resize）：
-      - 图片固定为原始物理尺寸（width/height 不变），用 transform: scale() 缩放。
-        transform 是 GPU 合成层属性，零 reflow，60fps 丝滑无跳变。
-      - 左上角固定缩放：窗口位置（imgScreenX/Y）缩放时不动，只改尺寸。
-        transformOrigin 固定 0,0，scale 时图片左上不动、右下角伸缩，视觉完全连续。
-      - 窗口尺寸跟随 scale，但只在 scale 跨越 ±5% 阈值时 resize 一次（离散），
-        避免每次 wheel 都 resize 窗口（Win32 resize 同步重绘，会跳）。
-      - 拖动：只改窗口位置（screenshotPinTransform），不改尺寸。
-      - 多 Pin N+1：每个 pin 窗口通过 label 标识，IPC 调用传 label 定位目标窗口。
+      统一几何模型（多屏混合 DPI 安全）：
+      - 图片 CSS 尺寸 = baseCss × zoom，跨屏保持视觉大小不变。
+      - 窗口物理矩形由 pin-geometry.js::computeWindowRect 算出，随目标屏 DPR 变化。
+      - 拖动用 Tauri 原生 startDragging()，系统处理鼠标捕获和跨屏移动。
+      - DPI 变化通过 onScaleChanged 监听，reconcile 回读窗口实际物理矩形。
+      - 滚轮缩放围绕鼠标锚点，鼠标下内容保持稳定。
+      - 窗口尺寸和位置在同一 rAF 内合并提交，无透明空壳。
     -->
     <div id="container">
       <img id="pin-img" src="" alt="钉图" draggable="false" />
@@ -57,16 +55,24 @@
     </div>
 
     <script type="module">
-      import { invoke, screenshotPinTransform, screenshotPinMove, ocrImage, translateText, pinSpareReady, pinSaveClipboard, pinSaveAs } from "./js/shared/api.js";
+      import { invoke, screenshotPinTransform, screenshotPinGetRect, ocrImage, translateText, pinSpareReady, pinSaveClipboard, pinSaveAs } from "./js/shared/api.js";
       import { normalizeError, getCurrentWindow } from "./js/shared/tauri.js";
       import { applyThemeFromConfig } from "./js/shared/theme.js";
+      import {
+        PIN_PAD_CSS,
+        baseCssSize,
+        computeWindowRect,
+        reconcileDpi,
+        clampZoom,
+      } from "./js/pin/pin-geometry.js";
 
       // 应用主题（右键菜单 / OCR 面板的 token 引用随用户主题切换）
       applyThemeFromConfig();
 
-      const PAD = 20;       // 与后端 PIN_PAD 一致（物理像素，给发光留空间）
-      const GLOW_RADIUS = 18; // 发光视觉半径（1px spread + 14px blur ≈ 18px）
       const MINI_MAX_SIDE = 160; // 缩小态最长边（CSS 像素）
+      const MINI_ENTER_MS = 140;  // 进入 mini 动画时长
+      const MINI_EXIT_MS = 170;   // 退出 mini 动画时长
+      const MINI_EASING = 'cubic-bezier(.2, .8, .2, 1)';
 
       const img = document.getElementById('pin-img');
       const zoomLabel = document.getElementById('zoom-level');
@@ -74,6 +80,7 @@
 
       // ── 多 Pin：当前窗口 label ──
       const myLabel = getCurrentWindow()?.label || 'pin-unknown';
+      const tauriWin = getCurrentWindow();
 
       // ── 预热模式：?preheat=1 时不加载图片，只通知后端就绪 ──
       const params = new URLSearchParams(location.search);
@@ -82,39 +89,43 @@
         pinSpareReady().catch((e) => console.error('pin_spare_ready 失败', e));
       }
 
-      // ── 核心状态 ──
-      let physW = 0, physH = 0;             // 图片原始物理尺寸
-      let scale = 1;                         // 当前总缩放比例
-      let imgScreenX = 0, imgScreenY = 0;   // 图片左上角屏幕物理坐标（按 scale 算）
-      let winScale = 1;
-      let isMinimized = false;               // 缩小态标志
-      let savedScale = 1;                    // 进入缩小态前的 scale
+      // ── 统一几何状态 ──
+      // 图片资源像素（只读）
+      let sourcePixelW = 0, sourcePixelH = 0;
+      // 100% zoom 时的视觉 CSS 尺寸（只读，= sourcePixel / sourceDpr）
+      let baseCssW = 0, baseCssH = 0;
+      // 用户显式缩放 (0.1..8)
+      let zoom = 1;
+      // 图片左上角屏幕物理坐标
+      let imageScreenX = 0, imageScreenY = 0;
+      // 当前窗口目标屏 DPR
+      let monitorDpr = 1;
+      // 缩小态
+      let isMinimized = false;
+      let savedZoom = 1;
+      // reconcile generation（防止旧异步回调覆盖新状态）
+      let reconcileGen = 0;
+      // 窗口尺寸提交 generation
+      let commitGen = 0;
 
-      // 拖动状态
-      let isDragging = false;
-      let dragLastPhysX = 0, dragLastPhysY = 0;
-      let dragMoved = false;
-      let dragEndTime = 0;
-      let dragRafId = 0;
-      let dragIpcInFlight = false;
+      // mini mode 动画状态机：normal → entering → mini → exiting → normal
+      let miniState = 'normal';
+      let miniAnimGen = 0;
+      let pendingReconcileDpr = null; // 动画期间延后的 reconcile
 
       let isCtxOpen = false;
+      let dragEndTime = 0;
 
-      /** 当前窗口应显示的图片物理尺寸（按 winScale 算，含余量）。 */
-      function winDispW() { return Math.max(1, Math.round(physW * winScale)); }
-      function winDispH() { return Math.max(1, Math.round(physH * winScale)); }
+      // ── 几何计算辅助 ──────────────────────────────────────────
 
       /** 只更新 img 的 transform（GPU 合成层，丝滑，不动窗口）。
-       *  同时反向补偿 box-shadow / border / border-radius：这些在 transform 前渲染，
-       *  会被 scale 放大，所以除以 scale 保持视觉大小恒定。
-       *  缩小态：虚线边框 + 柔和发光，降低视觉重量。 */
+       *  同时反向补偿 box-shadow / border / border-radius。 */
       function applyTransformOnly() {
-        img.style.transform = `scale(${scale})`;
-        const s = scale;
+        img.style.transform = `scale(${zoom})`;
+        const s = zoom;
         if (isMinimized) {
-          // 缩小态：虚线边框 + 圆角，无发光（降低视觉重量）
-          const bw = 2 / s;     // 虚线边框宽 2px 视觉
-          const br = 6 / s;     // 圆角 6px 视觉
+          const bw = 2 / s;
+          const br = 6 / s;
           img.style.border = `${bw}px dashed rgba(74, 158, 255, 0.6)`;
           img.style.borderRadius = `${br}px`;
           img.style.boxShadow = 'none';
@@ -129,71 +140,80 @@
       }
 
       function updatePinIndicatorPosition() {
-        const dpr = window.devicePixelRatio || 1;
-        const cx = (PAD + physW * scale / 2) / dpr;
-        const cy = (PAD + physH * scale / 2) / dpr;
+        const cx = PIN_PAD_CSS + baseCssW * zoom / 2;
+        const cy = PIN_PAD_CSS + baseCssH * zoom / 2;
         document.documentElement.style.setProperty('--pin-cx', cx + 'px');
         document.documentElement.style.setProperty('--pin-cy', cy + 'px');
       }
 
-      function showTranslatingIndicator() {
-        const el = document.getElementById('pin-translating-indicator');
-        if (el) el.classList.remove('hidden');
-        updatePinIndicatorPosition();
-        const ctxTranslate = document.getElementById('ctx-translate');
-        if (ctxTranslate) ctxTranslate.disabled = true;
+      /** 一步提交窗口位置和尺寸（物理像素，通过 SetWindowPos 原子设置）。
+       *  @param {number} [zoomOverride] 显式 zoom（用于 mini 动画期间提交不同 zoom 的窗口尺寸）
+       *  @returns {Promise<void>} */
+      function commitWindowRect(zoomOverride) {
+        const myGen = ++commitGen;
+        const z = zoomOverride ?? zoom;
+        const rect = computeWindowRect(
+          { baseCssW, baseCssH, zoom: z, imageScreenX, imageScreenY },
+          monitorDpr,
+        );
+        return screenshotPinTransform(myLabel, rect.winX, rect.winY, rect.winW, rect.winH).catch((e) => {
+          console.error('screenshotPinTransform 失败', e);
+          throw e;
+        });
       }
 
-      function hideTranslatingIndicator() {
-        const el = document.getElementById('pin-translating-indicator');
-        if (el) el.classList.add('hidden');
-        const ctxTranslate = document.getElementById('ctx-translate');
-        if (ctxTranslate) ctxTranslate.disabled = false;
-      }
+      function isMiniAnimating() { return miniState === 'entering' || miniState === 'exiting'; }
 
-      function resizeWindowIfNeeded() {
-        const padRemaining = (physW * (winScale - scale) + 2 * PAD) / 2;
-        if (padRemaining >= GLOW_RADIUS) {
-          if (scale < winScale && winScale - scale > 0.25) {
-            doResizeWindow();
-          }
+      /** 从后端回读窗口实际物理矩形并 reconcile 状态。
+       *  用于 DPI 变化、原生拖动结束后、或任何需要与 Win32 真源对齐的场景。
+       *  @param {number} [newDprOverride] 如果已知新 DPR（如 onScaleChanged payload），直接传入。 */
+      async function reconcileFromBackend(newDprOverride) {
+        if (isMiniAnimating()) {
+          pendingReconcileDpr = newDprOverride ?? null;
           return;
         }
-        doResizeWindow();
+        const myGen = ++reconcileGen;
+        try {
+          const rect = await screenshotPinGetRect(myLabel);
+          if (!rect || myGen !== reconcileGen) return;
+
+          const newDpr = newDprOverride ?? rect.dpr;
+          monitorDpr = newDpr;
+
+          const result = reconcileDpi(
+            { baseCssW, baseCssH, zoom },
+            newDpr,
+            { winX: rect.x, winY: rect.y, winW: rect.w, winH: rect.h },
+          );
+
+          imageScreenX = result.imageScreenX;
+          imageScreenY = result.imageScreenY;
+
+          // 用新矩形重设窗口（Windows 可能已改了位置但尺寸可能不对）
+          screenshotPinTransform(myLabel, result.winX, result.winY, result.winW, result.winH).catch(() => {});
+
+          // 刷新 CSS（baseCss 不变，只刷 transform 和 indicator）
+          applyTransformOnly();
+
+          if (rect.dpr !== newDpr || newDprOverride) {
+            tracing_debug('reconcile', { oldDpr: monitorDpr, newDpr, rect });
+          }
+        } catch (e) {
+          console.error('reconcileFromBackend 失败', e);
+        }
       }
 
-      /** 实际执行窗口 resize（sync winScale → scale，调 screenshotPinTransform）。 */
-      function doResizeWindow() {
-        winScale = scale;
-        const winX = Math.round(imgScreenX - PAD);
-        const winY = Math.round(imgScreenY - PAD);
-        const winW = winDispW() + 2 * PAD;
-        const winH = winDispH() + 2 * PAD;
-        screenshotPinTransform(myLabel, winX, winY, winW, winH).catch((e) => {
-          console.error('screenshotPinTransform 失败', e);
-        });
-      }
-
-      function scheduleDragMove() {
-        if (dragRafId !== 0) return;
-        dragRafId = requestAnimationFrame(() => {
-          dragRafId = 0;
-          if (dragIpcInFlight) return;
-          const winX = Math.round(imgScreenX - PAD);
-          const winY = Math.round(imgScreenY - PAD);
-          dragIpcInFlight = true;
-          screenshotPinMove(myLabel, winX, winY)
-            .catch(() => {})
-            .finally(() => {
-              dragIpcInFlight = false;
-              if (isDragging) scheduleDragMove();
-            });
-        });
+      function tracing_debug(label, data) {
+        // 开发诊断日志（生产不输出）
+        console.debug(`[pin] ${label}`, data);
       }
 
       function showZoomLabel() {
-        zoomLabel.textContent = Math.round(scale * 100) + '%';
-        updateZoomLabelPosition();
+        zoomLabel.textContent = Math.round(zoom * 100) + '%';
+        zoomLabel.style.left = '8px';
+        zoomLabel.style.top = '8px';
+        zoomLabel.style.right = 'auto';
+        zoomLabel.style.bottom = 'auto';
         zoomLabel.style.opacity = '1';
         clearTimeout(zoomLabel._hideTimer);
         zoomLabel._hideTimer = setTimeout(() => {
@@ -201,72 +221,169 @@
         }, 1200);
       }
 
-      function updateZoomLabelPosition() {
-        zoomLabel.style.left = '8px';
-        zoomLabel.style.top = '8px';
-        zoomLabel.style.right = 'auto';
-        zoomLabel.style.bottom = 'auto';
-      }
-
       // ── 缩小/还原模式（双击切换）──────────────────────────────
-      function computeMiniScale() {
-        const dpr = window.devicePixelRatio || 1;
-        const longestCss = Math.max(physW, physH) / dpr;
+      function computeMiniZoom() {
+        const longestCss = Math.max(baseCssW, baseCssH);
         if (longestCss <= 0) return 1;
         return Math.min(1, MINI_MAX_SIDE / longestCss);
       }
 
       function enterMiniMode() {
-        if (isMinimized) return;
-        savedScale = scale;
-        isMinimized = true;
-        document.body.classList.add('mini-mode');
-        scale = computeMiniScale();
-        applyTransformOnly();
-        doResizeWindow();
-        zoomLabel.style.opacity = '0';
+        if (miniState !== 'normal') return;
+        const gen = ++miniAnimGen;
+        miniState = 'entering';
+        savedZoom = zoom;
+        const miniZoom = computeMiniZoom();
+
+        // 左上角固定：imageScreenX/Y 不变，只改 zoom 和窗口尺寸
+
+        // reduced-motion：直接到最终状态
+        if (window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches) {
+          zoom = miniZoom;
+          isMinimized = true;
+          miniState = 'mini';
+          document.body.classList.add('mini-mode');
+          applyTransformOnly();
+          commitWindowRect();
+          zoomLabel.style.opacity = '0';
+          return;
+        }
+
+        // Phase 1：CSS transform 纯 scale 动画（窗口不动，左上角固定）
+        img.style.transition = `transform ${MINI_ENTER_MS}ms ${MINI_EASING}`;
+        img.style.transform = `scale(${miniZoom})`;
+
+        // Phase 2：动画结束后收窗口（只裁右侧和下侧透明区域）
+        const finishEnter = () => {
+          if (gen !== miniAnimGen) return;
+          img.removeEventListener('transitionend', onTransEnd);
+          clearTimeout(fallback);
+          img.style.transition = '';
+          zoom = miniZoom;
+          isMinimized = true;
+          miniState = 'mini';
+          document.body.classList.add('mini-mode');
+          applyTransformOnly();
+          commitWindowRect();
+          zoomLabel.style.opacity = '0';
+          if (pendingReconcileDpr !== null) {
+            const dpr = pendingReconcileDpr;
+            pendingReconcileDpr = null;
+            reconcileFromBackend(dpr);
+          }
+        };
+        const onTransEnd = (e) => {
+          if (e.target !== img || e.propertyName !== 'transform') return;
+          finishEnter();
+        };
+        img.addEventListener('transitionend', onTransEnd);
+        const fallback = setTimeout(finishEnter, MINI_ENTER_MS + 250);
       }
 
       function exitMiniMode() {
-        if (!isMinimized) return;
-        isMinimized = false;
-        document.body.classList.remove('mini-mode');
-        scale = savedScale;
-        applyTransformOnly();
-        doResizeWindow();
-        showZoomLabel();
+        if (miniState !== 'mini') return;
+        const gen = ++miniAnimGen;
+        miniState = 'exiting';
+
+        const targetZoom = savedZoom;
+
+        // 左上角固定：imageScreenX/Y 不变，只改 zoom 和窗口尺寸
+
+        // reduced-motion：直接到最终状态
+        if (window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches) {
+          zoom = targetZoom;
+          isMinimized = false;
+          miniState = 'normal';
+          document.body.classList.remove('mini-mode');
+          applyTransformOnly();
+          commitWindowRect();
+          showZoomLabel();
+          return;
+        }
+
+        // Phase 1：先扩窗口（位置不变，imageScreenX/Y 不变）
+        // transform 保持 scale(miniZoom)，用显式 zoom 提交大窗口
+        img.style.transition = '';
+        // 切换边框为 normal 补偿（基于 targetZoom）
+        const s = targetZoom;
+        img.style.border = '';
+        img.style.borderRadius = '';
+        img.style.boxShadow =
+          `0 0 0 ${1/s}px rgba(74, 158, 255, 0.55), ` +
+          `0 0 ${14/s}px ${3/s}px rgba(74, 158, 255, 0.28)`;
+        commitWindowRect(targetZoom);
+
+        // Phase 2：等窗口稳定后 CSS transform 纯 scale 展开
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            if (gen !== miniAnimGen) return;
+            zoom = targetZoom;
+            img.style.transition = `transform ${MINI_EXIT_MS}ms ${MINI_EASING}`;
+            img.style.transform = `scale(${targetZoom})`;
+            const finishExit = () => {
+              if (gen !== miniAnimGen) return;
+              img.removeEventListener('transitionend', onTransEnd);
+              clearTimeout(fallback);
+              img.style.transition = '';
+              isMinimized = false;
+              miniState = 'normal';
+              document.body.classList.remove('mini-mode');
+              applyTransformOnly();
+              showZoomLabel();
+              if (pendingReconcileDpr !== null) {
+                const dpr = pendingReconcileDpr;
+                pendingReconcileDpr = null;
+                reconcileFromBackend(dpr);
+              }
+            };
+            const onTransEnd = (e) => {
+              if (e.target !== img || e.propertyName !== 'transform') return;
+              finishExit();
+            };
+            img.addEventListener('transitionend', onTransEnd);
+            const fallback = setTimeout(finishExit, MINI_EXIT_MS + 250);
+          });
+        });
       }
 
       // ── 后端 eval 入口 ──────────────────────────────────────
 
       // 后端复用窗口时通过 eval 调用此函数重置状态
-      window.__blinkResetPin = function(dataUrl, pngW, pngH, screenX, screenY, showTranslating) {
-        physW = pngW;
-        physH = pngH;
-        scale = 1;
-        winScale = 1;
+      // sourceDpr 由后端从图片初始落点显示器算出，不依赖 window.devicePixelRatio
+      window.__blinkResetPin = function(dataUrl, pngW, pngH, screenX, screenY, showTranslating, sourceDpr) {
+        sourcePixelW = pngW;
+        sourcePixelH = pngH;
+        const sdpr = sourceDpr || 1;
+        monitorDpr = sdpr;
+        const { baseCssW: bw, baseCssH: bh } = baseCssSize(pngW, pngH, sdpr);
+        baseCssW = bw;
+        baseCssH = bh;
+        zoom = 1;
         isMinimized = false;
-        savedScale = 1;
+        savedZoom = 1;
+        miniState = 'normal';
+        miniAnimGen++;
+        pendingReconcileDpr = null;
+        reconcileGen = 0;
+        commitGen = 0;
+        img.style.transition = '';
         document.body.classList.remove('mini-mode');
-        imgScreenX = screenX || 0;
-        imgScreenY = screenY || 0;
+        imageScreenX = screenX || 0;
+        imageScreenY = screenY || 0;
         zoomLabel.textContent = '100%';
         zoomLabel.style.opacity = '0';
-        updateZoomLabelPosition();
-        const dpr = window.devicePixelRatio || 1;
-        img.style.width = (pngW / dpr) + 'px';
-        img.style.height = (pngH / dpr) + 'px';
-        img.style.left = (PAD / dpr) + 'px';
-        img.style.top = (PAD / dpr) + 'px';
+        // CSS 布局：left/top = padding（CSS 逻辑像素），width/height = baseCss
+        img.style.width = baseCssW + 'px';
+        img.style.height = baseCssH + 'px';
+        img.style.left = PIN_PAD_CSS + 'px';
+        img.style.top = PIN_PAD_CSS + 'px';
         img.style.transformOrigin = '0 0';
         img.style.transform = 'scale(1)';
         img.style.boxShadow = '';
         img.style.border = '';
         img.style.borderRadius = '';
         img.src = dataUrl;
-        const winX = Math.round(imgScreenX - PAD);
-        const winY = Math.round(imgScreenY - PAD);
-        screenshotPinTransform(myLabel, winX, winY, pngW + 2 * PAD, pngH + 2 * PAD).catch(() => {});
+        commitWindowRect();
         if (showTranslating) {
           showTranslatingIndicator();
         } else {
@@ -277,15 +394,17 @@
 
       // 原地刷新 pin 图片（不重定位、不重置缩放）
       window.__blinkRefreshPinImage = function(dataUrl, w, h, showTranslating) {
-        if (w === physW && h === physH) {
+        if (w === sourcePixelW && h === sourcePixelH) {
           img.src = dataUrl;
         } else {
-          console.warn('[pin] 译文 PNG 尺寸与原图不一致，重置缩放', { old: { w: physW, h: physH }, new: { w, h } });
-          physW = w;
-          physH = h;
-          const dpr = window.devicePixelRatio || 1;
-          img.style.width = (w / dpr) + 'px';
-          img.style.height = (h / dpr) + 'px';
+          console.warn('[pin] 译文 PNG 尺寸与原图不一致，重置缩放', { old: { w: sourcePixelW, h: sourcePixelH }, new: { w, h } });
+          sourcePixelW = w;
+          sourcePixelH = h;
+          const { baseCssW: bw, baseCssH: bh } = baseCssSize(w, h, monitorDpr);
+          baseCssW = bw;
+          baseCssH = bh;
+          img.style.width = baseCssW + 'px';
+          img.style.height = baseCssH + 'px';
           img.src = dataUrl;
           updatePinIndicatorPosition();
         }
@@ -299,13 +418,19 @@
       // N+1 回收时后端 eval 调用，清空图片和状态
       window.__blinkClearPin = function() {
         img.src = '';
-        physW = 0;
-        physH = 0;
-        scale = 1;
-        winScale = 1;
+        sourcePixelW = 0;
+        sourcePixelH = 0;
+        baseCssW = 0;
+        baseCssH = 0;
+        zoom = 1;
         isMinimized = false;
-        savedScale = 1;
+        savedZoom = 1;
+        miniState = 'normal';
+        miniAnimGen++;
+        pendingReconcileDpr = null;
+        monitorDpr = 1;
         document.body.classList.remove('mini-mode');
+        img.style.transition = '';
         img.style.transform = 'scale(1)';
         img.style.boxShadow = '';
         img.style.border = '';
@@ -317,75 +442,118 @@
       };
 
       img.addEventListener('load', () => {
-        if (physW === 0 || physH === 0) {
-          physW = img.naturalWidth;
-          physH = img.naturalHeight;
-          const dpr = window.devicePixelRatio || 1;
-          img.style.width = (physW / dpr) + 'px';
-          img.style.height = (physH / dpr) + 'px';
+        if (sourcePixelW === 0 || sourcePixelH === 0) {
+          sourcePixelW = img.naturalWidth;
+          sourcePixelH = img.naturalHeight;
+          const dpr = monitorDpr || 1;
+          const { baseCssW: bw, baseCssH: bh } = baseCssSize(sourcePixelW, sourcePixelH, dpr);
+          baseCssW = bw;
+          baseCssH = bh;
+          img.style.width = baseCssW + 'px';
+          img.style.height = baseCssH + 'px';
         }
         showZoomLabel();
       });
 
-      // ── 拖动 ──────────────────────────────────────────────────
-      document.addEventListener('mousedown', (e) => {
+      // ── 原生拖动（Tauri startDragging）─────────────────────────
+      // 系统处理鼠标捕获、跨屏边界和高频移动，移除每帧 IPC。
+      // 只在图片可见区域按下左键时触发。
+      // 移动阈值后再启动原生拖动，避免吞掉 click/dblclick。
+      const DRAG_THRESHOLD = 5; // CSS px — 低于此位移视为点击
+      let dragCandidate = null;   // { pointerId, x, y } 或 null
+      let nativeDragActive = false;
+      let suppressClick = false;  // 拖动后吞掉一次残余 click
+
+      document.addEventListener('pointerdown', (e) => {
         if (e.button !== 0) return;
+        if (isMiniAnimating()) return;
         if (e.target.closest('#ctx-menu')) return;
         if (e.target.closest('#pin-ocr-panel')) return;
-        const dpr = window.devicePixelRatio || 1;
-        const imgLeft = PAD / dpr;
-        const imgTop = PAD / dpr;
-        const imgVisW = (physW * scale) / dpr;
-        const imgVisH = (physH * scale) / dpr;
+        // 检查是否点在图片可见区域内
+        const imgLeft = PIN_PAD_CSS;
+        const imgTop = PIN_PAD_CSS;
+        const imgVisW = baseCssW * zoom;
+        const imgVisH = baseCssH * zoom;
         if (e.clientX < imgLeft || e.clientX > imgLeft + imgVisW ||
             e.clientY < imgTop  || e.clientY > imgTop + imgVisH) {
           return;
         }
-        isDragging = true;
-        dragMoved = false;
-        dragLastPhysX = e.screenX;
-        dragLastPhysY = e.screenY;
+        dragCandidate = { pointerId: e.pointerId, x: e.clientX, y: e.clientY };
+        nativeDragActive = false;
       });
 
-      document.addEventListener('mousemove', (e) => {
-        if (!isDragging) return;
-        const curX = e.screenX;
-        const curY = e.screenY;
-        const dx = curX - dragLastPhysX;
-        const dy = curY - dragLastPhysY;
-        dragLastPhysX = curX;
-        dragLastPhysY = curY;
-        if (!dragMoved) {
-          if (Math.abs(dx) + Math.abs(dy) > 2) {
-            dragMoved = true;
-          } else {
-            return;
+      document.addEventListener('pointermove', (e) => {
+        if (!dragCandidate || e.pointerId !== dragCandidate.pointerId) return;
+        if (!(e.buttons & 1)) return;
+        const dx = e.clientX - dragCandidate.x;
+        const dy = e.clientY - dragCandidate.y;
+        if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+        // 达到阈值，启动系统原生拖动
+        dragCandidate = null;
+        nativeDragActive = true;
+        tauriWin?.startDragging?.().catch(() => { nativeDragActive = false; });
+      });
+
+      document.addEventListener('pointerup', () => {
+        dragCandidate = null;
+        if (!nativeDragActive) return;
+        nativeDragActive = false;
+        suppressClick = true;
+        dragEndTime = Date.now();
+        // 拖动刚结束，reconcile 从后端读真实位置
+        reconcileFromBackend();
+      });
+
+      document.addEventListener('pointercancel', () => {
+        dragCandidate = null;
+        nativeDragActive = false;
+      });
+
+      // 吞掉原生拖动后浏览器可能产生的残余 click（capture 阶段，仅一次）
+      document.addEventListener('click', (e) => {
+        if (suppressClick) {
+          suppressClick = false;
+          e.stopPropagation();
+          e.preventDefault();
+        }
+      }, true);
+
+      // ── DPI 变化监听 ──────────────────────────────────────────
+      // onScaleChanged: payload 可能有 { scaleFactor } 或直接是 number
+      if (tauriWin?.onScaleChanged) {
+        tauriWin.onScaleChanged((event) => {
+          const payload = event?.payload ?? event;
+          const newScaleFactor = payload?.scaleFactor ?? payload;
+          if (typeof newScaleFactor === 'number' && newScaleFactor > 0) {
+            tracing_debug('onScaleChanged', { newScaleFactor, oldDpr: monitorDpr });
+            reconcileFromBackend(newScaleFactor);
           }
-        }
-        imgScreenX += dx;
-        imgScreenY += dy;
-        scheduleDragMove();
-      });
+        }).catch(() => {});
+      }
 
-      document.addEventListener('mouseup', () => {
-        if (!isDragging) return;
-        isDragging = false;
-        if (dragMoved) {
-          dragEndTime = Date.now();
-        }
-        if (dragRafId !== 0) {
-          cancelAnimationFrame(dragRafId);
-          dragRafId = 0;
-        }
-        if (dragMoved) {
-          const winX = Math.round(imgScreenX - PAD);
-          const winY = Math.round(imgScreenY - PAD);
-          screenshotPinMove(myLabel, winX, winY).catch(() => {});
-        }
-      });
+      // onMoved: 窗口移动后 debounce reconcile（备份机制，确保拖动后状态正确）
+      let movedDebounce = 0;
+      if (tauriWin?.onMoved) {
+        tauriWin.onMoved(() => {
+          clearTimeout(movedDebounce);
+          movedDebounce = setTimeout(() => {
+            // 安全网：若 pointerup 未被系统触发（startDragging 接管鼠标），
+            // 在此清理拖动状态并标记 dragEndTime 供 contextmenu 判断。
+            if (nativeDragActive) {
+              nativeDragActive = false;
+              suppressClick = true;
+              dragEndTime = Date.now();
+            }
+            reconcileFromBackend();
+          }, 150);
+        }).catch(() => {});
+      }
 
-      // ── 滚轮缩放 ──────────────────────────────────────────────
+      // ── 滚轮缩放（左上角固定锚点）────────────────────────────────
       document.addEventListener('wheel', (e) => {
+        // 右键菜单 / OCR 面板内 wheel 不触发图片缩放
+        if (e.target.closest('#pin-ocr-panel')) return;
+        if (isMiniAnimating()) return;
         e.preventDefault();
         // 缩小态下滚轮：先恢复正常态，本次不叠加缩放
         if (isMinimized) {
@@ -394,11 +562,13 @@
         }
         const step = e.ctrlKey ? 0.25 : 0.1;
         const delta = e.deltaY > 0 ? -step : step;
-        const newScale = Math.max(0.1, Math.min(8, scale + delta));
-        if (newScale === scale) return;
-        scale = newScale;
+        const newZoom = clampZoom(zoom + delta);
+        if (newZoom === zoom) return;
+
+        // 左上角固定：imageScreenX/Y 不变，只改 zoom
+        zoom = newZoom;
         applyTransformOnly();
-        resizeWindowIfNeeded();
+        commitWindowRect();
         showZoomLabel();
       }, { passive: false });
 
@@ -406,6 +576,7 @@
       document.addEventListener('dblclick', (e) => {
         if (e.target.closest('#ctx-menu')) return;
         if (e.target.closest('#pin-ocr-panel')) return;
+        if (isMiniAnimating()) return;
         // 翻译中不打断
         const indicator = document.getElementById('pin-translating-indicator');
         if (indicator && !indicator.classList.contains('hidden')) return;
@@ -420,6 +591,7 @@
       // ── 右键菜单 ──────────────────────────────────────────────
       document.addEventListener('contextmenu', (e) => {
         e.preventDefault();
+        if (isMiniAnimating()) return;
         if (Date.now() - dragEndTime < 200) return;
         if (e.target.closest('#ctx-menu')) return;
         if (e.target.closest('#pin-ocr-panel')) return;
@@ -482,11 +654,12 @@
         hideCtxMenu();
         if (isMinimized) {
           exitMiniMode();
-          savedScale = 1;
+          savedZoom = 1;
         } else {
-          scale = 1;
+          // 左上角固定：imageScreenX/Y 不变
+          zoom = 1;
           applyTransformOnly();
-          resizeWindowIfNeeded();
+          commitWindowRect();
           showZoomLabel();
         }
       });
@@ -527,19 +700,19 @@
       let ocrBusy = false;
 
       /** 把 pin 窗口图片编码为 PNG bytes(通过 canvas)。
-       *  用 img 的物理尺寸,不带 zoom scale——OCR 需要原图。 */
+       *  用 img 的资源像素尺寸,不带 zoom scale——OCR 需要原图。 */
       function pinImageToPng() {
         return new Promise((resolve, reject) => {
-          if (!physW || !physH || !img.src) {
+          if (!sourcePixelW || !sourcePixelH || !img.src) {
             reject(new Error('图片未加载'));
             return;
           }
           const c = document.createElement('canvas');
-          c.width = physW;
-          c.height = physH;
+          c.width = sourcePixelW;
+          c.height = sourcePixelH;
           const cc = c.getContext('2d');
           try {
-            cc.drawImage(img, 0, 0, physW, physH);
+            cc.drawImage(img, 0, 0, sourcePixelW, sourcePixelH);
             c.toBlob((blob) => {
               if (!blob) { reject(new Error('toBlob 失败')); return; }
               blob.arrayBuffer().then((buf) => resolve(new Uint8Array(buf))).catch(reject);
@@ -648,6 +821,22 @@
       pinOcrPanel.addEventListener('contextmenu', (e) => e.stopPropagation());
       pinOcrPanel.addEventListener('dblclick', (e) => e.stopPropagation());
       pinOcrPanel.addEventListener('wheel', (e) => e.stopPropagation());
+
+      // ── 翻译中指示器 ──────────────────────────────────────────
+      function showTranslatingIndicator() {
+        const el = document.getElementById('pin-translating-indicator');
+        if (el) el.classList.remove('hidden');
+        updatePinIndicatorPosition();
+        const ctxTranslate = document.getElementById('ctx-translate');
+        if (ctxTranslate) ctxTranslate.disabled = true;
+      }
+
+      function hideTranslatingIndicator() {
+        const el = document.getElementById('pin-translating-indicator');
+        if (el) el.classList.add('hidden');
+        const ctxTranslate = document.getElementById('ctx-translate');
+        if (ctxTranslate) ctxTranslate.disabled = false;
+      }
 
       function closePin() {
         invoke('screenshot_pin_hide', { label: myLabel }).catch((e) => {

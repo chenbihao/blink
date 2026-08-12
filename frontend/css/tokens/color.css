@@ -23,6 +23,10 @@
   --accent-bg: rgba(137, 180, 250, 0.15);
   --on-accent: #fff; /* 在 accent/品牌色等彩色背景上的前景文字与图形（spinner 描边、AI 徽章字等） */
 
+  /* 截图智能预选层级色：窗口深蓝，控件浅蓝 */
+  --preselection-window: #3478d4;
+  --preselection-control: #7fc4ff;
+
   /* 状态色 */
   --green: #a6e3a1;
   --green-bg: #2a3f4e;

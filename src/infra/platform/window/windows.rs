@@ -48,7 +48,8 @@ fn available_pin_spare() -> &'static Mutex<Option<String>> {
     AVAILABLE_PIN_SPARE.get_or_init(|| Mutex::new(None))
 }
 
-static PIN_SPARE_BORROW: OnceLock<Mutex<std::collections::HashMap<String, String>>> = OnceLock::new();
+static PIN_SPARE_BORROW: OnceLock<Mutex<std::collections::HashMap<String, String>>> =
+    OnceLock::new();
 
 fn pin_spare_borrow() -> &'static Mutex<std::collections::HashMap<String, String>> {
     PIN_SPARE_BORROW.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
@@ -67,7 +68,7 @@ fn last_pin_label() -> &'static Mutex<Option<String>> {
 // 每次 store 返回递增 seq，URL 不同 → 浏览器不缓存，refresh 也能刷新。
 static PIN_IMAGE_SEQ: AtomicU64 = AtomicU64::new(0);
 static PIN_IMAGE_REGISTRY: OnceLock<Mutex<std::collections::HashMap<u64, PinImage>>> =
-OnceLock::new();
+    OnceLock::new();
 
 /// P6：pin 图片存储格式——PNG（有标注路径）或 raw BGRA（快路径）。
 /// 快路径存 raw BGRA，协议 handler 按需 lazy 编码 PNG，
@@ -79,7 +80,7 @@ pub enum PinImage {
 }
 
 fn pin_image_registry() -> &'static Mutex<std::collections::HashMap<u64, PinImage>> {
-PIN_IMAGE_REGISTRY.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+    PIN_IMAGE_REGISTRY.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
 /// 把图片存入进程内 registry，返回递增 seq 供 `blink-pin:///{seq}` URL 使用。
@@ -87,19 +88,19 @@ PIN_IMAGE_REGISTRY.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 /// registry 保留最近 8 条，超出时删除最旧的——pin 窗口 fetch 是同步的
 /// （协议 handler 直接读内存 Arc），store 后立即 eval，不存在旧条目被删前未 fetch 的竞态。
 pub fn store_pin_image(image: PinImage) -> u64 {
-let seq = PIN_IMAGE_SEQ.fetch_add(1, Ordering::SeqCst);
-let mut reg = pin_image_registry().lock().unwrap();
-reg.insert(seq, image);
-while reg.len() > 8 {
-let oldest = *reg.keys().min().unwrap();
-reg.remove(&oldest);
-}
-seq
+    let seq = PIN_IMAGE_SEQ.fetch_add(1, Ordering::SeqCst);
+    let mut reg = pin_image_registry().lock().unwrap();
+    reg.insert(seq, image);
+    while reg.len() > 8 {
+        let oldest = *reg.keys().min().unwrap();
+        reg.remove(&oldest);
+    }
+    seq
 }
 
 /// 按 seq 取 pin 图片（供 `blink-pin://` 协议 handler 调用）。
 pub fn get_pin_image(seq: u64) -> Option<PinImage> {
-pin_image_registry().lock().unwrap().get(&seq).cloned()
+    pin_image_registry().lock().unwrap().get(&seq).cloned()
 }
 
 use crate::domain::event_names::EventNames;
@@ -1536,12 +1537,12 @@ pub fn show_sticky_window(
         // 非置顶时显示在任务栏，让用户能找回便签；置顶时跳过任务栏
         let _ = win.set_skip_taskbar(always_on_top);
         let escaped_id = sticky_id
-          .replace('\\', "\\\\")
-          .replace('\'', "\\'")
-          .replace('\n', "\\n")
-          .replace('\r', "\\r");
+            .replace('\\', "\\\\")
+            .replace('\'', "\\'")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r");
         let _ = win.eval(&format!(
-          "if (window.__stickyReload) window.__stickyReload('{escaped_id}')"
+            "if (window.__stickyReload) window.__stickyReload('{escaped_id}')"
         ));
         win
     } else if let Some(bl) = borrowed_label {
@@ -1567,12 +1568,12 @@ pub fn show_sticky_window(
         // 非置顶时显示在任务栏，让用户能找回便签；置顶时跳过任务栏
         let _ = win.set_skip_taskbar(always_on_top);
         let escaped_id = sticky_id
-          .replace('\\', "\\\\")
-          .replace('\'', "\\'")
-          .replace('\n', "\\n")
-          .replace('\r', "\\r");
+            .replace('\\', "\\\\")
+            .replace('\'', "\\'")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r");
         let _ = win.eval(&format!(
-          "if (window.__stickyReload) window.__stickyReload('{escaped_id}')"
+            "if (window.__stickyReload) window.__stickyReload('{escaped_id}')"
         ));
         win
     } else {
@@ -2032,6 +2033,13 @@ pub fn show_screenshot_overlay(
     // **复用窗口时序**：clear → place → inject meta → show → focus → 双 rAF 后 reload
     // 先清屏防止旧选区闪现，place 后注入物理 meta，show+focus 后等布局稳定再 reload。
     if let Some(win) = app.get_webview_window(LABEL) {
+        // 0. 注入光标所在显示器索引——必须在 clearScreenshotVisual 之前，
+        //    因为 clearScreenshotVisual 会启动 per-monitor 预取 fetch
+        let active_display = crate::infra::platform::screenshot::active_display_index();
+        let _ = win.eval(&format!(
+            "window.__blinkActiveDisplay = {};",
+            active_display
+        ));
         // 1. 清屏——只清旧画面，不触发截图加载
         let _ = win
             .eval("window.__blinkClearScreenshotVisual && window.__blinkClearScreenshotVisual()");
@@ -2060,13 +2068,14 @@ pub fn show_screenshot_overlay(
         let fg_hwnd = crate::infra::platform::screenshot::session_fg_hwnd().unwrap_or(0);
         // 3. 注入物理 meta
         let meta_js = format!(
-            "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {}, overlayDpi: {}, fgHwnd: {}, physicalDisplays: {} }};",
+            "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {}, overlayDpi: {}, fgHwnd: {}, activeDisplay: {}, physicalDisplays: {} }};",
             meta.virtual_x,
             meta.virtual_y,
             meta.width,
             meta.height,
             overlay_dpi,
             fg_hwnd,
+            active_display,
             displays_json
         );
         let _ = win.eval(&meta_js);
@@ -2097,6 +2106,7 @@ pub fn show_screenshot_overlay(
             .inner_size(meta.width as f64, meta.height as f64)
             .position(meta.virtual_x as f64, meta.virtual_y as f64)
             .decorations(false)
+            .resizable(false) // 禁用原生 resize 边框，防止屏幕边缘出现 resize 双箭头并误触 blur
             .transparent(true) // 透明背景，让 canvas 上的桌面截图独占视觉
             .always_on_top(true)
             .skip_taskbar(true)
@@ -2129,14 +2139,16 @@ pub fn show_screenshot_overlay(
         "show_screenshot_overlay (first build): physical displays injected"
     );
     let fg_hwnd = crate::infra::platform::screenshot::session_fg_hwnd().unwrap_or(0);
+    let active_display = crate::infra::platform::screenshot::active_display_index();
     let meta_js = format!(
-        "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {}, overlayDpi: {}, fgHwnd: {}, physicalDisplays: {} }};",
+        "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {}, overlayDpi: {}, fgHwnd: {}, activeDisplay: {}, physicalDisplays: {} }};",
         meta.virtual_x,
         meta.virtual_y,
         meta.width,
         meta.height,
         overlay_dpi,
         fg_hwnd,
+        active_display,
         displays_json
     );
     let _ = win.eval(&meta_js);
@@ -2196,6 +2208,7 @@ pub fn show_image_editor_window(
         .inner_size(meta.width as f64, meta.height as f64)
         .position(meta.virtual_x as f64, meta.virtual_y as f64)
         .decorations(false)
+        .resizable(false) // 与截图 overlay 保持一致：禁用原生 resize 边框
         .transparent(true)
         .always_on_top(true)
         .skip_taskbar(true)
@@ -2381,21 +2394,35 @@ pub fn show_pin_window(
     let pin_seq = store_pin_image(image);
     let img_url = format!("http://blink-pin.localhost/{pin_seq}");
 
+    // 0.18.8+：取图片初始落点显示器的 DPR，作为前端视觉尺寸的权威基准。
+    // 不依赖 WebView 尚未稳定的 window.devicePixelRatio（跨屏后会变化）。
+    use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromPoint};
+    let source_dpi = {
+        let pt = windows::Win32::Foundation::POINT {
+            x: screen_x,
+            y: screen_y,
+        };
+        let hmon = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
+        crate::infra::platform::dpi::get_dpi_for_hmonitor(hmon)
+    };
+    let source_dpr = crate::infra::platform::dpi::scale_factor(source_dpi);
+
     // 窗口左上 = 图片左上 - PAD（让图片左上对齐选区原位，窗口外圈留 PAD 给发光）
     let win_x = screen_x - PIN_PAD;
     let win_y = screen_y - PIN_PAD;
     let win_w = png_w as u32 + 2 * PIN_PAD as u32;
     let win_h = png_h as u32 + 2 * PIN_PAD as u32;
 
-    // 构造注入 JS（复用窗口与首次创建共用）
+    // 构造注入 JS（复用窗口与首次创建共用）。sourceDpr 传给前端作为视觉尺寸基准。
     let js = format!(
-        "if (window.__blinkResetPin) window.__blinkResetPin('{url}', {w}, {h}, {sx}, {sy}, {st}); else document.getElementById('pin-img').src = '{url}';",
+        "if (window.__blinkResetPin) window.__blinkResetPin('{url}', {w}, {h}, {sx}, {sy}, {st}, {sdpr}); else document.getElementById('pin-img').src = '{url}';",
         url = img_url,
         w = png_w,
         h = png_h,
         sx = screen_x,
         sy = screen_y,
-        st = if show_translating { "true" } else { "false" }
+        st = if show_translating { "true" } else { "false" },
+        sdpr = source_dpr,
     );
 
     // 尝试借用空闲 spare
@@ -2415,7 +2442,7 @@ pub fn show_pin_window(
         }
         spare_win
             .eval(&js)
-                .map_err(|e| format!("eval 注入 PNG 失败: {e}"))?;
+            .map_err(|e| format!("eval 注入 PNG 失败: {e}"))?;
         let _ = spare_win.show();
         let _ = spare_win.set_focus();
 
@@ -2423,7 +2450,11 @@ pub fn show_pin_window(
         *last_pin_label().lock().unwrap() = Some(al.clone());
 
         tracing::info!(
-            png_w, png_h, screen_x, screen_y, show_translating,
+            png_w,
+            png_h,
+            screen_x,
+            screen_y,
+            show_translating,
             png_bytes = png_len,
             "钉图窗口已借用预热 spare"
         );
@@ -2450,6 +2481,7 @@ pub fn show_pin_window(
         .always_on_top(true)
         .skip_taskbar(true)
         .shadow(false)
+        .resizable(false)
         .inner_size(win_w as f64, win_h as f64)
         .position(win_x as f64, win_y as f64)
         .build()
@@ -2480,9 +2512,13 @@ pub fn show_pin_window(
             *last_pin_label().lock().unwrap() = Some(label.clone());
 
             tracing::info!(
-                png_w, png_h, screen_x, screen_y, show_translating,
-            png_bytes = png_len,
-            "钉图窗口已创建"
+                png_w,
+                png_h,
+                screen_x,
+                screen_y,
+                show_translating,
+                png_bytes = png_len,
+                "钉图窗口已创建"
             );
             Ok(label)
         }
@@ -2537,10 +2573,7 @@ pub fn refresh_pin_image(
     png_data: Vec<u8>,
     show_translating: bool,
 ) -> Result<(), String> {
-    let label = last_pin_label()
-        .lock()
-        .unwrap()
-        .clone();
+    let label = last_pin_label().lock().unwrap().clone();
     let label = match label {
         Some(l) => l,
         None => {
@@ -2645,6 +2678,7 @@ fn create_pin_spare(app: &AppHandle) {
         .always_on_top(true)
         .skip_taskbar(true)
         .shadow(false)
+        .resizable(false)
         .focused(false)
         .visible(false)
         .inner_size(400.0, 300.0)
@@ -2679,6 +2713,39 @@ pub fn mark_pin_spare_ready(label: &str) {
         *available = Some(label.to_string());
         tracing::debug!(spare_label = %label, "pin-spare: 前端已就绪，注册为可用备用窗口");
     }
+}
+
+/// 获取 Pin 窗口的当前物理矩形和目标屏 DPR。
+///
+/// 用于 DPI reconcile：`onScaleChanged` 回调后或拖动跨 DPI 边界后，
+/// 前端调用此命令回读窗口实际物理位置（Windows 可能因 WM_DPICHANGED 改变了矩形），
+/// 再用 `pin-geometry.js::reconcileDpi` 重算状态。
+///
+/// 返回 `None` 如果窗口不存在。
+pub fn get_pin_window_rect(app: &AppHandle, label: &str) -> Option<(i32, i32, u32, u32, f64)> {
+    use windows::Win32::Graphics::Gdi::MONITOR_DEFAULTTONEAREST;
+    use windows::Win32::Graphics::Gdi::MonitorFromWindow;
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+
+    let win = app.get_webview_window(label)?;
+    let hwnd = win.hwnd().ok()?;
+    let hwnd_raw = windows::Win32::Foundation::HWND(hwnd.0 as _);
+
+    let mut rect = unsafe { std::mem::zeroed() };
+    if unsafe { GetWindowRect(hwnd_raw, &mut rect) }.is_err() {
+        return None;
+    }
+
+    let hmon = unsafe { MonitorFromWindow(hwnd_raw, MONITOR_DEFAULTTONEAREST) };
+    let dpi = crate::infra::platform::dpi::get_dpi_for_hmonitor(hmon);
+    let dpr = crate::infra::platform::dpi::scale_factor(dpi);
+
+    let x = rect.left;
+    let y = rect.top;
+    let w = (rect.right - rect.left) as u32;
+    let h = (rect.bottom - rect.top) as u32;
+
+    Some((x, y, w, h, dpr))
 }
 
 /// Apply or remove DWM Cloak on a window.
@@ -2911,29 +2978,18 @@ pub fn mark_spare_ready(label: &str) {
     }
 }
 
-/// 后台预热次级窗口：延迟创建 chord-screenshot / context-menu / voice-overlay /
-/// chord-pin / chat / settings / content-editor / sticky-manager 并立即隐藏。
+/// 主窗口首次激活预热——启动后第一时间执行。
 ///
-/// WebView2 首次建实例 300~400ms，预热后 show 只是切可见性 (<50ms)。
-/// 代价：常驻内存 +10~20MB × N（8 窗口 + 动态便签，实测 < 300MB 预算内）；
-/// 收益：所有次级窗口首次触发无感。
+/// 首次唤起时 SetForegroundWindow 对从未被 WM_ACTIVATE 激活过的窗口会使用
+/// "Alt trick"（合成 Alt keydown/keyup 绕过前台锁定），合成 Alt keyup 会
+/// 清掉修饰键状态机的 Alt level，导致 chord session 建立后立即退出。
+/// 预热：启动时 show + set_focus 让窗口经历一次完整激活，后续唤起走轻量路径。
+/// 不调 transition_visibility——STATE 保持 HIDDEN，watchdog / hook 状态机不受影响。
 ///
-/// 0.17.2：追加 settings / content-editor / sticky-manager 三个窗口预热。
-/// sticky-manager 预热时注册 prevent_close + hide（show 函数复用路径不注册）。
-///
-/// chord-ball 悬浮球预热已随划词翻译 chord 移除而删除。
-pub fn preheat_secondary_windows(app: AppHandle) {
+/// 与 `preheat_secondary_windows` 分离：不等 1s 延迟，在 setup 中主窗口 hide
+/// 完毕后立即 spawn，让 WebView2 窗口对象尽早完成 WM_ACTIVATE 标记。
+pub fn preheat_main_window(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
-        // 等主窗稳定 + 前端加载完毕，不与启动路径抢资源
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        tracing::debug!("preheat: 开始预热次级窗口");
-
-        // --- main（主窗口首次激活预热） ---
-        // 首次唤起时 SetForegroundWindow 对从未被 WM_ACTIVATE 激活过的窗口会使用
-        // "Alt trick"（合成 Alt keydown/keyup 绕过前台锁定），合成 Alt keyup 会
-        // 清掉修饰键状态机的 Alt level，导致 chord session 建立后立即退出。
-        // 预热：启动时 show + set_focus 让窗口经历一次完整激活，后续唤起走轻量路径。
-        // 不调 transition_visibility——STATE 保持 HIDDEN，watchdog / hook 状态机不受影响。
         if let Some(win) = app.get_webview_window("main") {
             // 移到屏幕外避免闪现（窗口 always_on_top + 居中，直接 show 会闪一下）
             let _ = win.set_position(PhysicalPosition::new(-10000, -10000));
@@ -2946,6 +3002,27 @@ pub fn preheat_secondary_windows(app: AppHandle) {
         } else {
             tracing::warn!("preheat: main window 不存在");
         }
+    });
+}
+
+/// 后台预热次级窗口：延迟创建 chord-screenshot / context-menu / voice-overlay /
+/// chord-pin / chat / settings / content-editor / sticky-manager 并立即隐藏。
+///
+/// WebView2 首次建实例 300~400ms，预热后 show 只是切可见性 (<50ms)。
+/// 代价：常驻内存 +10~20MB × N（8 窗口 + 动态便签，实测 < 300MB 预算内）；
+/// 收益：所有次级窗口首次触发无感。
+///
+/// 主窗口预热已提取到 `preheat_main_window`，在 setup 中第一时间执行。
+///
+/// 0.17.2：追加 settings / content-editor / sticky-manager 三个窗口预热。
+/// sticky-manager 预热时注册 prevent_close + hide（show 函数复用路径不注册）。
+///
+/// chord-ball 悬浮球预热已随划词翻译 chord 移除而删除。
+pub fn preheat_secondary_windows(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        // 等主窗稳定 + 前端加载完毕，不与启动路径抢资源
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        tracing::debug!("preheat: 开始预热次级窗口");
 
         // --- chord-screenshot（截图 overlay，透明全屏层） ---
         // 0.19：经 get_or_create_window 串行化创建。
@@ -2961,6 +3038,7 @@ pub fn preheat_secondary_windows(app: AppHandle) {
             .title("")
             .inner_size(1920.0, 1080.0)
             .decorations(false)
+            .resizable(false) // 与截图 overlay 首次创建路径保持一致：禁用原生 resize 边框
             .transparent(true)
             .always_on_top(true)
             .skip_taskbar(true)
