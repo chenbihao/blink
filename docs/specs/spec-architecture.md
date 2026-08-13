@@ -5,6 +5,8 @@
 > 配套:`../product.md`(产品决策:为什么这么设计)· `../phases/`(每版实现)。同层 spec:`spec-frontend.md` / `spec-backend.md` / `spec-phase.md`。
 >
 > **读法**:本文只留**最终决策**与**结构骨架**(trait 签名只放声明 + 一句注释)。实现细节、踩坑、验收在 `../phases/`;铁则的"为什么不可妥协"在 `../product.md`。
+>
+> **实施状态提示**：Capability 唯一原子执行入口、`CapabilityPolicy`、调用来源/运行时门禁和统一功能目录是已定的目标架构，但代码将在 [0.21](../phases/0.21-capability-unification-feature-catalog.md) 完成物理迁移。0.21 完成前，仓库仍存在本地 Action/Capability 双轨；阅读本规范时不得误判为已经落地。
 
 ---
 
@@ -15,11 +17,11 @@ Blink 的架构由两层正交的骨架撑起:
 | 骨架 | 性质 | 把它钉成物理实体的东西 |
 |---|---|---|
 | **分层架构**(§A1) | 物理——模块怎么摆、依赖往哪指 | `src/{app,domain,infra,cli}` 四目录 + 依赖方向约束 |
-| **四域架构**(§A2) | 逻辑——数据/控制流怎么走、信任边界在哪 | 三个统一入口 trait(§A3) + `ExecArg` 类型墙(§A7) |
+| **四域架构**(§A2) | 逻辑——数据/控制流怎么走、信任边界在哪 | 统一入口与 Interaction 边界(§A3) + `ExecArg` 类型墙(§A7) |
 
-之上叠加能力体系(§A4-§A6,0.14 重构定稿)、信任边界(§A7)、AI 接入约定(§A8)、护城河与演进(§A9)。
+之上叠加能力体系(§A4-§A6；0.14 建立协议，0.21 规划收敛为 Capability 唯一原子执行入口)、信任边界(§A7)、AI 接入约定(§A8)、护城河与演进(§A9)。
 
-新人路径:**§A1 分层 → §A2 四域 → §A3 三入口 → §A4 能力边界 → §A5/§A6 协议与投影 → §A7 信任边界**。读完这六节就能定位任何代码"它该在哪一层、属于哪个域、走哪个入口"。
+新人路径:**§A1 分层 → §A2 四域 → §A3 统一入口 → §A4 能力边界 → §A5/§A6 协议与投影 → §A7 信任边界**。读完这六节就能定位任何代码"它该在哪一层、属于哪个域、走哪个入口"。
 
 ---
 
@@ -103,46 +105,32 @@ Blink 源码分四层目录,依赖**只准向下**:
 
 ---
 
-## §A3 三个统一入口(物理骨架)
+## §A3 统一入口与交互边界(物理骨架)
 
-四域是**逻辑规范**,三个统一入口 trait 让四域成为**物理骨架**。0.14 后 AI 能力的接入点从 Action 迁到 Capability,于是实际是**四个入口**:
+四域是**逻辑规范**,统一入口让四域成为**物理骨架**。0.21 完成后原子执行统一进入 Capability；需要持续用户手势/会话状态的流程由各领域 Interaction 服务承载，不再保留平行的通用 Action 执行体系:
 
 | 域 | 统一入口 | AI 如何接入 |
 |---|---|---|
-| **Execution(本地)** | `Action` trait + `ActionOutcome` | **AI 不接入**(0.14 后 AI 走 Capability,Action 退回纯本地执行) |
-| **Capability(开放)** | `Capability` trait + `CapabilityResult` + `CapabilityTool` 适配 | AI 产 tool-call → `CapabilityTool::call()` → `cap.invoke()` → `CapabilityResult` |
+| **Execution / Capability** | `Capability` trait + `CapabilityResult` + 出口策略 | 本地/AI/CLI/MCP 都解析到同一原子能力；AI 经 `CapabilityTool` 适配 |
+| **Interaction** | 截图、取色、编辑、录音等领域会话服务 | AI 只能调用获准的 Capability 启动/消费交互，不能伪造用户手势或直接驱动会话内部状态 |
 | **Suggestion** | `SuggestionProducer` trait + `SuggestionArbiter` | `AIProducer` register 到 arbiter,三源竞争 |
 | **配置** | `ConfigStore<T>` 泛型 + `blink://config-changed` 广播 | AI Provider 配置 `impl ConfigKey for AIConfig`,前端零脚手架 |
 
-### §A3.1 Action trait —— 本地副作用的统一入口(0.14 后不再接 AI)
+### §A3.1 Capability —— 唯一原子执行入口
 
-```rust
-pub trait Action: Send + Sync {
-    fn id(&self) -> &str;
-    async fn execute(&self, cx: &ActionContext) -> Result<ActionOutcome, ExecError>;
-}
+凡是能以稳定 id、有限结构化参数和明确结果完成一次调用的操作，都建模为 Capability；是否打开 Blink/系统窗口、是否产生副作用，不再决定其类型。搜索、Chord、菜单、ResultAction、AI、CLI 与 MCP 可以保留各自入口协议，但最终必须解析到同一 Capability 实现。
 
-// 0.13.7 后 ActionOutcome 只剩副作用描述(Items 变体已删,迁入 Capability)
-pub enum ActionOutcome {
-    Copy { text: String, hit_id: Option<String> },
-    Open { path: String },
-    Emit { event: String, payload: serde_json::Value },  // Chord 副作用统一走这
-    Nop,
-}
-```
+成为 Capability **不等于自动向 AI/MCP 开放**。代码级出口策略是硬上限，用户配置只能在其子集内授权；危险/敏感确认又独立于出口授权。`open_settings`、`sticky_manager` 可以是允许 AI 的安全 Capability，`exit_blink` 可以是仅本地 Capability，`shutdown` 可以是 AI 默认关闭且每次确认的 Dangerous Capability。
 
-两种来源(0.14 后移除了"AI Action"来源):
-- **BuiltinAction** → 每个 kind 一个 struct,各自 `impl Action`(lock/shutdown/open_settings 等 9 个,服务主窗口/chord)
-- **ChordAction** → 直接实现 `Action`(副作用走 `Emit`,是 Action 的 supertrait 而非平行 trait)
+0.21 完成迁移后删除 `execution::Action`、`ActionRegistry`、`ActionContext`、`ActionOutcome`、`ExecError` 及双 Registry fallback。旧 Action 必须全量分流：可确定调用者迁 Capability；持续交互状态迁领域 Interaction；仅用于入口展示/按键绑定者迁 descriptor，禁止制造空执行体的伪 Capability。
 
-> **注意**:`open_url` / `open_path` / `reveal_in_explorer` 在 0.14 已从 Action 提升为 Capability(§A4),AI 可调用。其余 9 个 Action 永不进 AI tool 池。
-
-### §A3.2 Capability trait —— 开放能力的统一入口(AI 唯一调用形态)
+### §A3.2 Capability trait 与出口策略
 
 ```rust
 pub trait Capability: Send + Sync {
     fn id(&self) -> &str;
     fn schema(&self) -> CapabilitySchema;        // 送 LLM 的 tool schema
+    fn policy(&self) -> CapabilityPolicy;        // 代码级出口上限、默认授权、运行时要求
     fn danger_class(&self) -> DangerClass;        // Safe / Dangerous
     async fn invoke(&self, args: Value, ctx: &InvokeContext) -> Result<CapabilityResult, CapabilityError>;
 }
@@ -156,7 +144,11 @@ pub enum CapabilityResult {
 }
 ```
 
-AI 进 tool 池的唯一适配器是 `CapabilityTool`(`impl rig ToolDyn`)。0.14 删除了 `ActionTool`——AI 永远无法直接调 Action。
+AI 进 tool 池的唯一适配器是 `CapabilityTool`(`impl rig ToolDyn`)。`ActionTool` 永久删除；Agent 构建时只包装“代码允许 AI 且用户已授权”的 Capability。功能目录保存稳定身份、呈现元数据、运行时要求与出口策略，不复制 schema/风险等 Capability 自有真源。
+
+`CapabilityPolicy` 至少表达代码级允许来源（local/AI/CLI/MCP）、各出口默认授权、确认是否可记忆与运行时要求；策略属于 Capability 的静态自述，功能目录只投影，不另存一份可漂移副本。调用边界仍须在 invoke 前复核来源和授权，不能只依赖 settings UI 或 tools/list 过滤。
+
+`InvokeContext` 必须携带调用来源与可用运行时能力。需要 GUI 的 Capability 通过受限、语义化的 surface port（如 open_settings/sticky_manager）请求 app 层执行，不取得通用 DOM、事件或任意窗口控制权；CLI/独立 MCP 等无 GUI 运行时在 list/invoke 边界依据 runtime requirement 隐藏或返回结构化 Unsupported/InvalidState，禁止扩大 `CapabilityEnv` 成无边界的 `DomainEnv`，也禁止 getter panic。
 
 ### §A3.3 SuggestionProducer + Arbiter —— 一切建议只从这一处出
 
@@ -191,35 +183,36 @@ pub struct SuggestionArbiter { producers: Vec<Arc<dyn SuggestionProducer>> }
 
 **前端 API**:泛型 `get_config(key) / set_config(key, value)` 命令 + `frontend/js/shared/config-keys.js` 维护 key 常量表 + `blink://config-changed` 广播(各模块按 key 订阅)。取代散落 20+ 个 `update_*` 专用命令。
 
-> 三个入口的落地(0.8.6 架构固化)见 [phases/0.8 §八](../phases/0.8-context-interaction.md)。
+> Suggestion/Config 入口的早期落地见 [phases/0.8 §八](../phases/0.8-context-interaction.md)；Capability 唯一执行入口的实施计划见 [0.21](../phases/0.21-capability-unification-feature-catalog.md)。
 
-### §A3.5 多协议入口，单一业务语义（强制）
+### §A3.5 多协议入口，单一原子执行语义（强制）
 
-UI Command、Capability、CLI、MCP 可以保留各自协议入口，但只要表达同一个业务动作，就必须收敛到同一 application/domain 实现。协议层只负责参数适配、调用方授权、错误映射与结果投影，**禁止复制业务规则形成多套实现**；这不要求把所有 UI command 强行改造成 Capability。
+UI Command、CLI、MCP 与各类本地 surface 可以保留各自协议入口，但只要表达同一个原子操作，就必须解析并调用同一个 Capability。协议层只负责参数适配、调用来源标记、授权、错误映射与结果投影，**禁止复制业务规则形成多套实现**。纯 UI 状态读写 command 不必伪装成 Capability；它属于 Interaction 内部协议，不是独立原子能力。
 
 生产者与消费者的资源生命周期必须解耦：截图采集、图片编辑、资源暂存属于不同会话，消费者不得隐式依赖生产者窗口、DOM 或采集 session 仍然存活。跨调用共享大资源时使用有界引用/分页协议，不传递对临时 UI 对象的隐式引用。
 
 ---
 
-## §A4 能力体系边界(Capability / Action 钉死)
+## §A4 能力体系边界(Capability / Interaction / ResultAction)
 
-> **0.14 能力协议重构后的边界**。旧版"一切皆 tool"已被推翻——详见 [phases/0.14](../phases/0.14-capability-protocol-refactor.md)。
+> **0.21 定稿边界（规划中）**。0.14 删除 `ActionTool`、建立 Capability 协议；0.21 进一步消除本地 Action 与 Capability 的双执行体系。
 
-Blink 的能力分两层,**边界用类型系统钉死**:
+Blink 的能力分三层:
 
-| | **Capability**(开放能力) | **Action**(本地执行) |
-|---|---|---|
-| 定位 | 面向所有调用方(AI / CLI / MCP / 主窗口) | 主窗口 / chord 本地执行域 |
-| 进 AI tool 池 | ✅ **唯一合法形态**(经 `CapabilityTool` 适配)| ❌ 永不(0.14 删 `ActionTool` 适配器)|
-| 语义 | 纯数据能力(取数/计算/翻译/打开),返回 `CapabilityResult` | 已执行副作用描述(Copy/Open/Emit/Nop)|
-| 例子 | search_files / translate / screenshot / open_url / pin_image | lock / shutdown / open_settings / chord 动作 |
+| | **Capability**(原子执行) | **Interaction**(人机流程) | **ResultAction**(结果操作) |
+|---|---|---|---|
+| 定位 | 稳定 id + 有限结构化参数 + 明确结果的一次调用 | 需要持续用户手势、输入、会话状态或 UI 生命周期 | 结果项上的 Copy/Preview 或对 Capability 的参数绑定 |
+| 注册/落点 | `CapabilityRegistry`，唯一原子执行注册表 | 截图/取色/编辑/录音等各领域服务；不要求巨型统一 Registry | 结果协议/展示层描述，不是执行域 trait |
+| AI | 仅代码允许且用户授权者经 `CapabilityTool` 进入 tool 池 | AI 不直接驱动内部状态；可调获准 Capability 启动或消费交互 | AI 不直接执行展示操作；Invoke 绑定落到 Capability |
+| 例子 | search_files / open_settings / lock / shutdown / create_sticky | 区域拖选、吸管选点、图片标注、按住说话 | Copy / Preview / Invoke(open_path) |
 
-**核心铁则**:AI 永远只通过 `CapabilityTool` 调能力。`open_url` / `open_path` / `reveal_in_explorer` 这三个 AI 常用的从 Action 提升为 Capability;`lock` / `shutdown` 等不可逆操作留在 Action,AI 看不到,避免安全隐患。
+**核心铁则**:所有原子执行只走 Capability。是否有副作用、是否打开 UI、是否允许 AI 都不是类型分界；调用契约是否闭合才是分界。`ActionTool` 不恢复，也不得在运行时把任意入口 descriptor 动态包装成 tool。
 
-**Capability「不碰 UI」边界定义**(0.19 放宽):Capability 的"不碰 UI"指**不直接操作前端 DOM/事件流**,而非"不产生任何窗口副作用"。区分两层:
+**Capability 的 UI 边界**:Capability 可以打开/切换 Blink 或系统窗口、启动一个 Interaction，但不能伪造用户手势、直接操纵 DOM，或把“已启动交互”谎报成“用户已完成交互”。区分三层:
 
-- **禁止层**(保持):Capability 不直接操作前端 DOM、不 emit 前端事件、不弹模态框——这是"AI 不该越权操控用户界面流"。
-- **允许层**(放宽):Capability 可产生操作系统级窗口副作用(开浏览器、开资源管理器、显示便签/pin 窗口)——这是"AI 调用系统能力"的合理语义。
+- **允许的一次性 UI 副作用**:打开设置、便签管理、浏览器、资源管理器、pin/编辑窗口等；返回值只确认请求是否成功受理。
+- **交互启动**:Capability 可启动截图、取色、编辑等 Interaction；若后续结果尚未产生，必须明确返回“已启动、等待用户”的真实状态（当前可用 `Done.summary` 表达；需要续接时再设计 session_ref 协议），不能返回“编辑/截图已完成”。
+- **禁止层**:Capability 不直接操纵 DOM、不伪造点击/拖选/输入、不绕过确认卡片，也不暴露通用 `emit_event` 一类越权 dispatcher。
 
 `open_url`/`open_path`/`reveal_in_explorer` 已有副作用(开浏览器/资源管理器)是先例,0.19 的便签/pin cap(`create_sticky`/`pin_image`)同属此类。`CapabilityResult::Done` 变体("已写入/已打开/已锁定")即为副作用语义准备。
 
@@ -232,11 +225,11 @@ Blink 的能力分两层,**边界用类型系统钉死**:
 
 `CapabilityTool::is_dangerous()` 判定式 = `danger_class == Dangerous || schema.sensitive`——两者都触发人机确认流程,但语义不同(前者防"做了不该做的",后者防"泄露不该泄露的")。`sensitive` 字段在 0.11 引入、0.13 修复为活字段(此前是死字段,`is_dangerous` 未读取它)。
 
-**边界用类型系统钉死**——删除 `ActionTool` 适配器后,AI 该不该调某个能力的决策从"运行时每个 Action 自己标 danger_class"前置成"编译期只有 Capability 才能进 tool 池"。
+**出口授权与类型正交**——只有 Capability 能进入 tool 池，但并非所有 Capability 都能进入。代码级 `allowed_origins`/运行时要求是硬上限，用户配置是其子集；`Dangerous`/`sensitive` 的确认与审计再独立叠加。`exit_blink` 可是 Capability 且代码级禁止 AI/MCP；`open_settings` 可安全允许 AI；`shutdown` 可允许 AI 但默认关闭并强制逐次确认。
 
-**不合并 Capability 与 Action 的理由**:四域架构(§A2)是基座,Action trait 承载 Execution 域"已执行副作用"语义,与 Capability"纯数据能力"是不同的事;且 lock/shutdown 等本就不该让 AI 直接调。0.13.7 删 `ActionOutcome::Items` 让 Action 回归纯副作用,说明架构**正朝"Action=副作用专用"收敛,而非合并**。
+**Interaction 不等于旧 Action 改名**:它承载的是有生命周期的人机流程，不是另一套通用原子执行接口。开始交互、提交结果、取消会话可分别调用领域服务或 Capability，但持续状态留在所属领域。Chord/Search/Menu 只是入口或 binding，不拥有业务执行语义。
 
-> 价值论证(为什么这条边界不可妥协)见 [principles §13.4](../product.md)。落地(删 ActionTool、三个提升为 Capability)见 [phases/0.14 §二](../phases/0.14-capability-protocol-refactor.md)。
+> 0.14 的历史边界与迁移背景见 [phases/0.14](../phases/0.14-capability-protocol-refactor.md)；统一执行终态与全量分流见 [0.21](../phases/0.21-capability-unification-feature-catalog.md)。
 
 ---
 
@@ -295,6 +288,8 @@ pub enum ItemAction {
     Reveal { pointer: Option<String> },
 }
 ```
+
+`ItemAction` 是 0.14 wire 名称，语义上属于 ResultAction，不是计划删除的 `execution::Action`。0.21 后领域副作用型结果操作应优先投影为 `Invoke { capability_id, args }`；Copy/Preview 等纯展示短路径可保留专用变体。兼容期可保留旧枚举名/旧 wire shape，但执行必须落到 Capability。
 
 **对比旧 `ItemResult` 的关键变化**:删 `title`/`subtitle`/`score`(主窗口展示概念,不该在协议层);`data` 取代 `payload`;主标题(旧 title)由前端从 `data` 派生(投影规则见 §A6)。
 
@@ -380,16 +375,16 @@ pub trait Capability {
 
 ---
 
-## §A8 AI 接入点总览(0.14 后)
+## §A8 AI 接入点总览（0.21 目标态）
 
-四个入口就是 AI 的接入点:
+AI 通过下列受控入口接入:
 
 | AI 产出 | 接入点 | 路径 |
 |---|---|---|
 | **tool-call** | Capability | AI → `CapabilityTool` → `Capability::invoke()` → `CapabilityResult` → 投影(§A6)给四出口 |
 | **建议(Suggestion)** | Suggestion | `AIProducer` register 到 `SuggestionArbiter`,与 Keyword/Context 三源竞争 |
 | **配置** | ConfigStore | Provider 配置 `impl ConfigKey for AIConfig` |
-| ~~tool-call(副作用)~~ | ~~Action~~ | **0.14 后此路不通**——删 `ActionTool`,AI 永不直接调 Action |
+| tool-call(副作用或 UI 启动) | Capability | 仍经 `CapabilityTool`，并受出口授权、危险确认和运行时要求约束 |
 
 **四域信任边界依旧成立**:AI 只能产 Suggestion / tool-call 候选,不能构造 `ExecArg::UserExplicit`。用户 Tab 采纳后才穿过 Suggestion → Execution 边界。危险 Capability AI 调用时需用户确认(§A7.2)。
 
@@ -454,8 +449,9 @@ Provider 不只是聊天 API,是**能力供应商**:当前覆盖 LLM(`chat`/`cha
 | **0.9.7** | Capability 能力协议层诞生 | 原子能力 + 统一声明/返回 + inventory 注册 + 截图/剪贴板拆解 + 接 AI tool 池 |
 | **0.12** | AI 能力架构搭骨架 | 对话窗口 / DB 四层拆分 / Provider 模型统一 / Tool 适配层 / CapabilityRegistry 动态注册 |
 | **0.13** | 能力扩展(基础版 + 开放) | MCP client/server / CLI 化 / token-aware 压缩 / 记忆 FTS5 召回 / Skill 约定式 / 0.13.7 收敛(P3 投影剔 score + 插件 Action→Capability 迁移,删 `ActionOutcome::Items`) |
-| **0.14** | 能力协议与架构收敛 | Capability/Action 边界钉死(删 `ActionTool`) + Cap 协议分层(§A5) + 四出口投影引擎(§A6) + config 下沉、AppHandle/Emitter 隔离、主要 Win32 归 infra、commands 与前端巨石拆分、Schema/事件/invoke 收敛；0.14.7 深层工程债见 phase §9.3 |
+| **0.14** | 能力协议与架构收敛 | 删除 `ActionTool`、AI 仅经 Capability + Cap 协议分层(§A5) + 四出口投影引擎(§A6) + 分层与工程债清理；当时保留本地 Action 双轨，后由 0.21 承接 |
 | **0.19** | 能力闭环 | 窗口/图片感知 + 便签/pin 执行 + 用户/AI 双入口收敛 + ImageStash 图片跨 Capability 引用 |
+| **0.21（规划）** | 唯一原子执行入口 | 旧 Action 全量分流为 Capability / Interaction / descriptor，删除 ActionRegistry 与双 Registry fallback；功能目录统一呈现及本地/AI/MCP 出口策略 |
 
 **解耦智慧**:先验证大脑(0.9 文本闭环),再加感官(0.10 语音)。0.12-0.14 是 AI 能力架构的「搭骨架 → 扩展 → 收敛重构」三步,0.19 再补感知与执行闭环。**核心原则:零嵌入模型依赖——FTS5 + token-aware 窗口是当前正式方案,向量化与 RAG 仅保留为远期观察,不预占版本**。
 

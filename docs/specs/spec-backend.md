@@ -2,7 +2,7 @@
 
 > **怎么做（HOW）**——Rust 后端代码的硬约束 / 铁则。写或改后端代码前先读本文。
 >
-> 架构层铁则（分层依赖方向、四域边界、Capability/Action）见 `./spec-architecture.md`；本卷聚焦编码、测试、日志、错误、事件、存储这些横切工程规范。
+> 架构层铁则（分层依赖方向、四域边界、Capability 唯一原子执行、Interaction/ResultAction）见 `./spec-architecture.md`；本卷聚焦编码、测试、日志、错误、事件、存储这些横切工程规范。
 
 ---
 

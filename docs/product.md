@@ -329,11 +329,11 @@ Suggestion 域是唯一能读 Awareness 的层，也是**AI 意图判定器的�
 
 **感知路径铁则**：弱意图信号 pull 不 push（Context 命中走 Ghost + Tab，不抢首屏）；信号即产 Suggestion 多路竞争 top-1（前端只消费单 `Suggestion` 字段）；感知类路径无副作用兜底（UIA 划词只进内存，不改剪贴板）；manifest 声明 ≠ 用户启用。
 
-**AI 路径铁则**：护城河是感知+执行不是推理（详见 §1.4）；两条路径分离（确定性命中走快速通道不过 AI，未命中才走 AI 路由）；AI 调用必有感知反馈（不能把延迟从唤起挪到路由）；危险动作必确认（独立于交互模式）；授权粒度按交互模式分层（主窗口每次工具检查 / 对话窗口整个会话，但 Dangerous 一律确认）；Capability 是 AI 唯一入口 Action 回归纯副作用（详见 `specs/spec-architecture.md §A4`）；本地一切按需下载（安装包 < 100MB）；AI/语音上云强告知。
+**AI 路径铁则**：护城河是感知+执行不是推理（详见 §1.4）；两条路径分离（确定性命中走快速通道不过 AI，未命中才走 AI 路由）；AI 调用必有感知反馈（不能把延迟从唤起挪到路由）；危险动作必确认（独立于交互模式）；授权粒度按交互模式分层（主窗口每次工具检查 / 对话窗口整个会话，但 Dangerous 一律确认）；Capability 是唯一原子执行入口，但只有代码允许且用户授权者才进入 AI tool 池，Interaction 的用户手势不可由 AI 伪造（详见 `specs/spec-architecture.md §A4`）；本地一切按需下载（安装包 < 100MB）；AI/语音上云强告知。
 
 ### 6.3 能力共生与统一能力底座（横切信念）
 
-> **核心信念**：Blink 的能力不是孤岛。截图、标注、pin、剪贴板、便签、编辑器、翻译、OCR、AI 对话、感知--这些能力共生在同一个身体里，**任意场景可调用任意能力，任意能力的产出可被任意场景消费**。这是 Blink 对比"单独的剪贴板管理器 / 单独的 AI 对话框 / 单独的启动器 / 单独的便签软件"的根本差异：不是功能更多，而是**能力之间天然可互达**。共生之所以成立，是因为所有能力坐落在**统一能力底座**上--同一套 Action 契约、同一个进程、同一份感知上下文，能力之间无需跨进程/跨软件搬运。
+> **核心信念**：Blink 的能力不是孤岛。截图、标注、pin、剪贴板、便签、编辑器、翻译、OCR、AI 对话、感知--这些能力共生在同一个身体里，**任意场景可调用获准能力，任意能力的产出可被任意场景消费**。这是 Blink 对比"单独的剪贴板管理器 / 单独的 AI 对话框 / 单独的启动器 / 单独的便签软件"的根本差异：不是功能更多，而是**能力之间天然可互达**。共生之所以成立，是因为所有原子执行坐落在**统一 Capability 底座**上--同一份调用契约、同一个进程、同一份感知上下文，能力之间无需跨进程/跨软件搬运；持续人机流程留在 Interaction，不把用户手势伪装成原子调用。
 
 **这不是"内容流转"，是"能力正交"**：
 
@@ -351,11 +351,13 @@ Suggestion 域是唯一能读 Awareness 的层，也是**AI 意图判定器的�
 **落地铁则**：
 
 - **能力化判定**：当一段逻辑被第二个场景需要时，它就应当从"某入口的私有功能"演进为"统一能力底座上的能力单元"--有明确的 id、声明的入参与产出、可被非绑死入口调用。第一次写时不必抽象，第二次复用时才演进成能力，避免过早抽象。
-- **能力载体不绑死单一协议**：能力单元的载体视场景而定--本地交互副作用走 `execution::Action` trait（注册 `ActionRegistry`/`ChordRegistry`）；入参->出参的纯计算/IO 走 `Capability` trait（注册 `CapabilityRegistry`，AI tool-call 共用）；复杂前端编排能力（截图 overlay 内的标注/OCR/翻译）可走 Tauri command + domain service 组合。三者不是必须统一为一个 trait，但**同一个能力若被多个场景调用，应共用底层 domain/infra 实现，不各自重写一遍**（如 OCR 的 `ocr_engine::backend()` 被用户侧 command 和 AI Capability 共用）。
+- **原子执行统一、入口协议分离**：凡有稳定 id、有限结构化参数和明确结果的一次调用都进入 `CapabilityRegistry`；本地搜索、Chord、菜单、Tauri command、AI、CLI 与 MCP 可以保留各自入口协议，但最终解析到同一 Capability。是否产生副作用或打开 UI 不作为类型分界，是否允许 AI/MCP 由代码级出口策略和用户授权决定。
+- **Interaction 保留人的主权**：截图拖选、吸管选点、图片标注、按住说话等持续流程由所属领域 Interaction 服务维护。Capability 可以启动交互或消费其结果，但不得伪造点击/拖选/输入，也不得把“交互已启动”报告成“用户已完成”。
+- **入口描述不承载业务执行**：搜索、Chord、菜单与结果项只保存召回、按键、呈现及 target 绑定；领域副作用最终调用 Capability，纯展示条目不实现空执行体。复杂前端编排可保留 Tauri command 作为 Interaction 内部协议，但不能复制原子业务规则。
 - **新能力自问**：设计时必须自答"它的产出能被谁消费、它能调用哪些已有能力"，答不出则它是孤岛，与统一能力底座脱节。
 - **铁则自身可演进**：以上铁则不是死守的教条。在框架设计或能力演进中，若某条铁则阻碍了更优的设计，应公开反思、记录理由、同步修订--铁则随产品生长而演进，而非产品被铁则锁死。
 
-> **已知技术债**（截至 0.19）：ActionRegistry 与 ChordRegistry 互不可见（chord action 实现了 `Action` trait 但不注册进 ActionRegistry）。0.19 已清理的债：`capture_screen`/`crop_image` alias 删除、`open_url` 双实现收敛（command 改经 CapabilityRegistry）、OCR 双入口收编（用户侧 command 改经 OcrImage Capability）。剩余项是自然生长中待收敛的补丁，不阻塞当前能力共生，但应在后续重构中清理。
+> **架构收敛计划**（0.21，尚未落地）：当前仍存在 ActionRegistry 与 ChordRegistry 互不可见、`run_builtin_action` 双 Registry fallback、入口 metadata 与真实执行目标漂移等债。0.21 将旧 Action 全量分流为 Capability / Interaction / descriptor，并删除 Action 执行链路；`capture_screen`/`crop_image` alias、`open_url` 双实现和 OCR 双入口等此前已完成的收敛继续作为迁移范例。实施细节见 [0.21 phase](./phases/0.21-capability-unification-feature-catalog.md)。
 
 ### 6.4 可辨识度与视觉一致性（横切信念）
 

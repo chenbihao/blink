@@ -16,7 +16,7 @@
 |---|---|
 | **改前端代码**（HTML/CSS/JS） | [docs/specs/spec-frontend.md](docs/specs/spec-frontend.md)（CSS 七层 / token / 中文不斜体 / 图标用包禁 emoji / 竞态防护 / 无 bundler 铁则） |
 | **改后端代码**（Rust） | [docs/specs/spec-backend.md](docs/specs/spec-backend.md)（日志分级 / 错误处理 / 事件名常量化 / 测试策略 / UTF-8 安全） |
-| **改架构 / 做重构 / 定位代码归属** | [docs/specs/spec-architecture.md](docs/specs/spec-architecture.md)（分层依赖方向 / 四域边界 / Capability·Action 边界 / 信任边界） |
+| **改架构 / 做重构 / 定位代码归属** | [docs/specs/spec-architecture.md](docs/specs/spec-architecture.md)（分层依赖方向 / 四域边界 / Capability 唯一原子执行目标态 / Interaction·ResultAction / 信任边界；0.21 完成前仍处双轨迁移期） |
 | **新建 phase / 维护 phase 文档** | [docs/specs/spec-phase.md](docs/specs/spec-phase.md)（8 结构块模板 / 子版本切分 / 完成后精简规则） |
 | **动核心逻辑**（搜索/路由/能力/Chord） | 对应 [docs/phases/](docs/phases/)（0.2/0.3 标"改核心前必读"，0.8 §五四域架构） |
 | **了解产品为什么这么设计** | [docs/product.md](docs/product.md)（定位 / 交互 / 扩展 / 感知 / 原则） |
@@ -70,7 +70,7 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 | **图标懒加载** | 图标提取**不进搜索热路径**，由自定义协议 `blink-icon` 按需提供 |
 | **lnk_path 是 history 主键** | 扫描产生的路径字符串不可随意归一化/改写，否则历史权重 key 失配 |
 
-> 架构级决策（四域、Capability/Action 边界、分层依赖方向、信任边界）见 [docs/specs/spec-architecture.md](docs/specs/spec-architecture.md)。
+> 架构级决策（四域、Capability 唯一原子执行、Interaction/ResultAction 边界、分层依赖方向、信任边界）见 [docs/specs/spec-architecture.md](docs/specs/spec-architecture.md)。Capability 终态已定，但代码需由 0.21 完成 Action 双轨迁移，改动前必须同时核对 [0.21 phase](docs/phases/0.21-capability-unification-feature-catalog.md) 的当前进度。
 
 ---
 
@@ -87,7 +87,7 @@ cargo test --bin blink   # 跑单测（bin crate，无 lib target）
 | 事件名常量化 / invoke 路径收敛 | [spec-backend.md §五/§六](docs/specs/spec-backend.md) |
 | 数据存储（SQLite 四库） | [spec-backend.md §七](docs/specs/spec-backend.md) |
 | 前端 CSS 七层 / token / 主题 / 图标 / 视觉交互铁则 | [spec-frontend.md](docs/specs/spec-frontend.md) |
-| 分层架构 / 四域 / Capability·Action / 信任边界 | [spec-architecture.md](docs/specs/spec-architecture.md) |
+| 分层架构 / 四域 / Capability·Interaction·ResultAction / 信任边界 | [spec-architecture.md](docs/specs/spec-architecture.md) |
 
 **仍在本文件有效的通用工作铁则**：
 

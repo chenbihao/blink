@@ -819,10 +819,10 @@ function showContextMenu(x, y) {
   menu.appendChild(makeSeparator());
 
   // 改颜色（内联色板）
-  const colorLabel = document.createElement("div");
-  colorLabel.className = "ctx-submenu-label";
-  colorLabel.textContent = "改颜色";
-  menu.appendChild(colorLabel);
+  // const colorLabel = document.createElement("div");
+  // colorLabel.className = "ctx-submenu-label";
+  // colorLabel.textContent = "改颜色";
+  // menu.appendChild(colorLabel);
 
   const colorRow = document.createElement("div");
   colorRow.className = "ctx-color-row";

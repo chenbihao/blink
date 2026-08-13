@@ -343,7 +343,7 @@ async function probeSingleInterpreter(type) {
 }
 
 /**
- * 探测全部解释器（只在首次启动两个路径都为空时自动调用，避免覆盖用户手动配置）
+ * 探测全部解释器（页面初始化时验证已保存路径，未配置时扫描 PATH）
  *
  * 传入当前 input 中的路径（可能为空），后端逻辑：
  * - 有手动路径 → 验证该路径
@@ -352,8 +352,6 @@ async function probeSingleInterpreter(type) {
 async function probeAllInterpreters() {
   const pythonPath = document.getElementById("python-path")?.value || null;
   const nodePath = document.getElementById("node-path")?.value || null;
-  // 如果两个路径都有值，说明是已保存的配置，不重复探测
-  if (pythonPath && nodePath) return;
 
   ["python", "node"].forEach((type) => {
     const statusEl = document.getElementById(`${type}-status`);
@@ -372,6 +370,14 @@ async function probeAllInterpreters() {
     saveInterpreterPaths();
   } catch (e) {
     console.error("probeInterpreters failed:", e);
+    ["python", "node"].forEach((type) => {
+      const statusEl = document.getElementById(`${type}-status`);
+      if (statusEl) {
+        statusEl.textContent = t("engine.status.failed");
+        statusEl.className = "status-badge status-unavailable";
+        statusEl.dataset.badgeState = "failed";
+      }
+    });
   }
 }
 
@@ -407,12 +413,8 @@ async function initInterpreterProbing() {
     }
   });
 
-  // 首次启动：两个路径都为空时才自动探测
+  // 每次设置页初始化都验证当前路径；否则已有配置时徽章会一直停在「探测中」
   setTimeout(() => {
-    const pythonPath = document.getElementById("python-path")?.value;
-    const nodePath = document.getElementById("node-path")?.value;
-    if (!pythonPath && !nodePath) {
-      probeAllInterpreters();
-    }
+    probeAllInterpreters();
   }, 100);
 }
