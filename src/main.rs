@@ -503,8 +503,10 @@ fn main() {
             );
             // 初始化界面语言快照（0.8.1）— 供 empty_arg_hint 等 LocalizableText 解析用
             search_service.update_language(app_config.language.clone());
-            // 初始化 ClipboardEngine 展示条数快照（0.13.x：display_count 配置项）
-            search_service.update_clipboard_display_count(app_config.clipboard.display_count);
+            // 初始化 ClipboardEngine 展示页数快照（0.20.1：display_pages 配置项）
+            search_service.update_clipboard_display_pages(app_config.clipboard.display_pages);
+            // 0.20.1: 同步 page_size 到 ClipboardEngine（effective_limit = display_pages × page_size）
+            search_service.update_clipboard_page_size(app_config.page_size);
             // 启动后台清理（0.12.0 §2.2.4）：搜索历史 + 剪贴板历史 + AI 审计日志
             // 缓存库（performance_metrics / icon_cache）的清理在各自 init 时已 spawn。
             pools.spawn_startup_cleanup(infra::data::CleanupParams {
@@ -971,6 +973,7 @@ app::commands::get_clipboard_history,
 app::commands::search_clipboard,
 app::commands::search_clipboard_history,
             app::commands::get_clipboard_text,
+            app::commands::get_clipboard_text_batch,
             app::commands::record_clipboard_hit,
             app::commands::delete_clipboard_item,
             app::commands::delete_clipboard_image,
@@ -1103,6 +1106,8 @@ app::commands::ensure_mcp_connected,
             app::commands::restore_sticky_note,
             app::commands::list_trashed_sticky_notes,
             app::commands::clear_trashed_sticky_notes,
+            // 0.20.0 便签原子关闭
+            app::commands::close_sticky_note,
             // 0.18.3 便签预热
             app::commands::sticky_spare_ready,
         ])

@@ -104,6 +104,8 @@ pub fn get_pin_image(seq: u64) -> Option<PinImage> {
 }
 
 use crate::domain::event_names::EventNames;
+// 0.20.0：便签兜底关闭需要调用 trash_sticky_and_notify
+use crate::domain::event::CapabilityEnv;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
 use tokio::time::sleep;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
@@ -1694,9 +1696,11 @@ pub fn show_sticky_window(
 
         // 注册 CloseRequested handler：仅新窗口注册一次，避免复用时重复绑定
         //
-        // 0.17.7：关闭=软删除进回收站（trashed=true + hide），不再 set_visible(false)。
-        // - 用户关闭：prevent_close + flush + set_trashed(true) + hide
+        // 0.20.0：关闭 = 原子关闭工作流（空→删除，非空→保存+回收站）。
+        // - 用户关闭（前端按钮/ESC）：前端直接调 closeStickyNote API，不走 CloseRequested。
+        // - 此 handler 是兜底路径（系统 Alt+F4 等）：prevent_close + flush + close_sticky_and_notify + hide
         // - 应用退出：不 prevent_close，不修改 trashed
+        // - spare 窗口回收不走此路径（spare 有独立的 CloseRequested handler）
         let label_owned = label.clone();
         let app_clone = app.clone();
         let sid = sticky_id.to_string();
@@ -1715,30 +1719,26 @@ pub fn show_sticky_window(
                 if let Some(w) = app_clone.get_webview_window(&label_owned) {
                     let _ = w.eval("if (window.__stickyFlush) window.__stickyFlush();");
                 }
-                // 0.17.7：关闭=软删除进回收站
+                // 0.20.0：兜底路径用 trash（flush 已保存最新内容到 DB）
+                // 前端按钮/ESC 走 closeStickyNote API 实现原子关闭（空→删除）
                 let app_c = app_clone.clone();
                 let sid_owned = sid.clone();
                 tauri::async_runtime::spawn(async move {
-                    if let Some(svc) = app_c
-                        .try_state::<std::sync::Arc<crate::domain::sticky::StickyService>>()
+                    if let Some(env) = app_c
+                        .try_state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
                     {
-                        if let Err(e) = svc.trash_note(&sid_owned).await {
-                            tracing::warn!(error = %e, "便签关闭时移入回收站失败");
-                        } else {
-                            // emit STICKY_TRASHED 让管理界面刷新列表
-                            let _ = app_c.emit(
-                                EventNames::STICKY_TRASHED,
-                                serde_json::json!({ "stickyId": sid_owned }),
-                            );
+                        // flush 已把最新内容写入 DB → trash 保存最终状态
+                        if let Err(e) = env.trash_sticky_and_notify(&sid_owned).await {
+                            tracing::warn!(error = %e, sticky_id = %sid_owned, "便签兜底关闭失败");
                         }
                     } else {
-                        tracing::warn!("便签关闭时 StickyService 不可用，跳过 trash_note");
+                        tracing::warn!("便签关闭时 TauriDomainEnv 不可用，跳过");
                     }
                 });
                 if let Some(w) = app_clone.get_webview_window(&label_owned) {
                     let _ = w.hide();
                 }
-                tracing::debug!(sticky_id = %sid, "sticky window: CloseRequested → prevent_close + flush + trash + hide");
+                tracing::debug!(sticky_id = %sid, "sticky window: CloseRequested → prevent_close + flush + close + hide");
             }
         });
         w

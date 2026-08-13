@@ -157,7 +157,7 @@ pub async fn set_config(
             tracing::info!("Chord 键位绑定已更新");
         }
         "clipboard_config" => {
-            // 0.10.7：剪贴板历史详细配置（retention_days / max_items / blacklist_keywords / display_count）
+            // 0.20.1：剪贴板历史详细配置（retention_days / max_items / blacklist_keywords / display_pages）
             let cfg: crate::infra::data::clipboard::ClipboardConfig =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
             crate::app::setting_service::apply_clipboard(&app, &cfg).await?;
@@ -165,7 +165,7 @@ pub async fn set_config(
                 enabled = cfg.enabled,
                 max_items = cfg.max_items,
                 retention_days = cfg.retention_days,
-                display_count = cfg.display_count,
+                display_pages = cfg.display_pages,
                 candidate_limit = cfg.candidate_limit,
                 "剪贴板配置已更新"
             );

@@ -17,7 +17,7 @@ use crate::domain::capability::{CapabilityRegistry, ImageStash};
 use crate::domain::event::{CapabilityEnv, DomainEnv};
 use crate::domain::plugin::PluginEngine;
 use crate::domain::search::SearchService;
-use crate::domain::sticky::{StickyChangeSource, StickyService, StickyWorkflowError};
+use crate::domain::sticky::{StickyChangeSource, StickyCloseOutcome, StickyService, StickyWorkflowError};
 use crate::infra::data::pools::DbPools;
 use crate::infra::platform::screenshot::ScreenCaptureMeta;
 
@@ -317,6 +317,58 @@ impl CapabilityEnv for TauriDomainEnv {
         }
     }
 
+    async fn close_sticky_and_notify(
+        &self,
+        sticky_id: &str,
+        final_content: &str,
+        expected_updated_at: Option<i64>,
+    ) -> Result<StickyCloseOutcome, StickyWorkflowError> {
+        let svc = self
+            .sticky_service()
+            .ok_or_else(|| StickyWorkflowError::SideEffect {
+                detail: "StickyService 不可用".into(),
+            })?;
+
+        // 原子关闭：revision 校验 → 保存最终内容 → delete/trash 决策
+        let outcome = svc
+            .close_note(sticky_id, final_content, expected_updated_at)
+            .await?;
+
+        // 根据结果广播事件 + 隐藏窗口
+        let (event_name, payload) = match outcome {
+            StickyCloseOutcome::DeletedEmpty => (
+                crate::domain::event_names::EventNames::STICKY_DELETED,
+                serde_json::json!({ "stickyId": sticky_id }),
+            ),
+            StickyCloseOutcome::Trashed => (
+                crate::domain::event_names::EventNames::STICKY_TRASHED,
+                serde_json::json!({ "stickyId": sticky_id }),
+            ),
+        };
+
+        let hide_result =
+            crate::infra::platform::window::hide_sticky_window(&self.app, sticky_id);
+        let emit_result = self
+            .app
+            .emit(event_name, payload)
+            .map_err(|e| e.to_string());
+
+        match (hide_result, emit_result) {
+            (Ok(()), Ok(())) => Ok(outcome),
+            (Err(hide), Ok(())) => Err(StickyWorkflowError::SideEffect {
+                detail: format!("便签已关闭但隐藏窗口失败: {hide}"),
+            }),
+            (Ok(()), Err(emit)) => Err(StickyWorkflowError::SideEffect {
+                detail: format!("便签已关闭但通知管理器失败: {emit}"),
+            }),
+            (Err(hide), Err(emit)) => Err(StickyWorkflowError::SideEffect {
+                detail: format!(
+                    "便签已关闭但隐藏窗口失败: {hide}; 通知管理器失败: {emit}"
+                ),
+            }),
+        }
+    }
+
     // ── pin 窗口操作（0.19.3 pin 能力化桥接）──────────────────────────
 
     fn show_pin_image(
@@ -547,6 +599,15 @@ mod tests {
             _sticky_id: &str,
         ) -> Result<(), StickyWorkflowError> {
             Ok(())
+        }
+
+        async fn close_sticky_and_notify(
+            &self,
+            _sticky_id: &str,
+            _final_content: &str,
+            _expected_updated_at: Option<i64>,
+        ) -> Result<StickyCloseOutcome, StickyWorkflowError> {
+            Ok(StickyCloseOutcome::Trashed)
         }
 
         async fn set_sticky_visibility_and_notify(

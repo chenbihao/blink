@@ -291,18 +291,32 @@ impl SearchService {
         tracing::debug!("SearchService 界面语言已热更新");
     }
 
-    /// 更新 ClipboardEngine 的单次展示条数（设置页 `clipboard_config` 保存时转发）。
+    /// 更新 ClipboardEngine 的加载页数（设置页 `clipboard_config` 保存时转发）。
     /// downcast 模式同 `update_language`。
-    pub fn update_clipboard_display_count(&self, count: u32) {
+    pub fn update_clipboard_display_pages(&self, pages: u32) {
         for engine in &self.sync_engines {
             if let Some(clip) = engine
                 .as_any()
                 .downcast_ref::<super::clipboard_engine::ClipboardEngine>()
             {
-                clip.update_display_count(count);
+                clip.update_display_pages(pages);
             }
         }
-        tracing::debug!(count, "ClipboardEngine 展示条数已热更新");
+        tracing::debug!(pages, "ClipboardEngine 加载页数已热更新");
+    }
+
+    /// 更新 ClipboardEngine 的每页条数（SearchConfig::page_size 变化时转发）。
+    /// effective_limit = display_pages × page_size。
+    pub fn update_clipboard_page_size(&self, page_size: u32) {
+        for engine in &self.sync_engines {
+            if let Some(clip) = engine
+                .as_any()
+                .downcast_ref::<super::clipboard_engine::ClipboardEngine>()
+            {
+                clip.update_page_size(page_size);
+            }
+        }
+        tracing::debug!(page_size, "ClipboardEngine 每页条数已热更新");
     }
 
     /// 更新 ClipboardEngine 的搜索候选池上限（设置页 `clipboard_config` 保存时转发）。
@@ -407,9 +421,12 @@ impl SearchService {
     ///
     /// Alt+C 进入剪贴板模式后，前端直接调此方法，不经过 route / get_weights / Mixed 分派。
     /// 只走 ClipboardEngine，返回已转换的 `AppEntry` 列表。
+    ///
+    /// 0.20.1: 不使用 `max_results` 截断——ClipboardEngine 内部已按
+    /// `effective_limit = display_pages × page_size` 截断，普通搜索的 `max_results`
+    /// 不再干扰剪贴板模式的结果上限。
     pub async fn search_clipboard_mode(&self, query: &str) -> Vec<AppEntry> {
         let arg = query.trim();
-        let limit = self.max_results.load(Ordering::SeqCst);
         let t0 = std::time::Instant::now();
 
         for engine in &self.sync_engines {
@@ -428,7 +445,8 @@ impl SearchService {
                 };
                 let items = engine.search(arg, &search_ctx).await;
                 let t1 = std::time::Instant::now();
-                let entries: Vec<AppEntry> = fuse_items(items, limit)
+                // 0.20.1: 不使用 max_results 截断，engine 内部已截断
+                let entries: Vec<AppEntry> = items
                     .into_iter()
                     .map(SearchItem::into_app_entry)
                     .collect();

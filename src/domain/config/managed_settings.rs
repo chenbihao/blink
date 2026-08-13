@@ -18,11 +18,12 @@ pub enum ManagedSettingId {
     ClipboardRetentionDays,
     ClipboardMaxItems,
     ClipboardDisplayCount,
+    ClipboardDisplayPages,
     ClipboardCandidateLimit,
 }
 
 impl ManagedSettingId {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Theme,
         Self::WindowOpacity,
         Self::SearchHistoryEnabled,
@@ -34,6 +35,7 @@ impl ManagedSettingId {
         Self::ClipboardRetentionDays,
         Self::ClipboardMaxItems,
         Self::ClipboardDisplayCount,
+        Self::ClipboardDisplayPages,
         Self::ClipboardCandidateLimit,
     ];
 
@@ -50,6 +52,7 @@ impl ManagedSettingId {
             "clipboard.retention_days" => Self::ClipboardRetentionDays,
             "clipboard.max_items" => Self::ClipboardMaxItems,
             "clipboard.display_count" => Self::ClipboardDisplayCount,
+            "clipboard.display_pages" => Self::ClipboardDisplayPages,
             "clipboard.candidate_limit" => Self::ClipboardCandidateLimit,
             _ => return None,
         })
@@ -68,6 +71,7 @@ impl ManagedSettingId {
             Self::ClipboardRetentionDays => "clipboard.retention_days",
             Self::ClipboardMaxItems => "clipboard.max_items",
             Self::ClipboardDisplayCount => "clipboard.display_count",
+            Self::ClipboardDisplayPages => "clipboard.display_pages",
             Self::ClipboardCandidateLimit => "clipboard.candidate_limit",
         }
     }
@@ -125,7 +129,14 @@ impl ManagedSettingId {
                 Some(1.0),
                 Some(200.0),
                 None,
-                "每次展示或召回的剪贴板历史条数",
+                "（已废弃，请使用 clipboard.display_pages）旧字段：单次展示条数",
+            ),
+            Self::ClipboardDisplayPages => (
+                "integer",
+                Some(1.0),
+                Some(20.0),
+                None,
+                "剪贴板模式一次加载几页（每页条数由 search.page_size 控制）",
             ),
             Self::ClipboardCandidateLimit => (
                 "integer",
@@ -167,6 +178,7 @@ impl ManagedSettingId {
             Self::ClipboardRetentionDays => validate_integer(value, 0, 3650),
             Self::ClipboardMaxItems => validate_integer(value, 10, 5000),
             Self::ClipboardDisplayCount => validate_integer(value, 1, 200),
+            Self::ClipboardDisplayPages => validate_integer(value, 1, 20),
             Self::ClipboardCandidateLimit => validate_integer(value, 50, 5000),
         }
     }

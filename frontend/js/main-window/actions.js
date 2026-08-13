@@ -3,9 +3,12 @@
 //! 抽成独立模块，因为「激活」是 click 和键盘 Enter/Alt+数字的共同终点，
 //! 且未来动作类型会增多（插件动作、文件打开等）——集中在此便于扩展。
 //! 行为由后端提供的 action.kind 驱动，与提示栏（hints.js）同源，语义一致。
+//!
+//! 0.20.0：所有 catch 块统一走 action-error.js 的 showActionError，
+//! 不再静默吞错——内置动作失败进入可见 statusbar 反馈。
 
 import { launchApp, runBuiltinAction, hideWindow, recordClipboardHit, getClipboardText, copyClipboardImage, pinClipboardImage, openContentEditor, createStickyNote, showStickyWindow } from "../shared/api.js";
-import { normalizeError } from "../shared/tauri.js";
+import { showActionError } from "./action-error.js";
 
 /**
  * 激活一个结果项。
@@ -32,7 +35,7 @@ export async function activateItem(data) {
       try {
         text = await getClipboardText(action.hitId);
       } catch (e) {
-        console.error("getClipboardText failed:", e);
+        showActionError("get_clipboard_text", e);
         return; // 保留窗口，让用户察觉并重试
       }
     }
@@ -40,7 +43,7 @@ export async function activateItem(data) {
       try {
         await navigator.clipboard.writeText(text);
       } catch (e) {
-        console.error("clipboard write failed:", e);
+        showActionError("clipboard_write", e);
         return; // 保留窗口，让用户察觉并重试
       }
       // 0.8.5 §6.4：ClipboardEngine 展开的历史条目带 hitId → 回写频率加权（fire-and-forget）。
@@ -73,8 +76,7 @@ export async function activateItem(data) {
       try {
         await copyClipboardImage(imageId);
       } catch (e) {
-        const err = normalizeError(e);
-        console.error(`[copy_clipboard_image] ${err.message}`);
+        showActionError("copy_clipboard_image", e);
         return; // 失败不隐藏，让用户察觉
       }
       hideWindow();
@@ -91,8 +93,7 @@ export async function activateItem(data) {
       try {
         await pinClipboardImage(imageId);
       } catch (e) {
-        const err = normalizeError(e);
-        console.error(`[pin_clipboard_image] ${err.message}`);
+        showActionError("pin_clipboard_image", e);
         return;
       }
       hideWindow();
@@ -110,7 +111,7 @@ export async function activateItem(data) {
         try {
           text = (await getClipboardText(originRef)) ?? "";
         } catch (e) {
-          console.error("getClipboardText for edit failed:", e);
+          showActionError("get_clipboard_text", e);
         }
       }
       const isClipboard = source === "clipboard";
@@ -124,7 +125,7 @@ export async function activateItem(data) {
           savePolicy: "clipboard_new",
         });
       } catch (e) {
-        console.error("openContentEditor failed:", e);
+        showActionError("edit_text_item", e);
       }
       hideWindow();
       return;
@@ -141,14 +142,14 @@ export async function activateItem(data) {
         try {
           text = (await getClipboardText(arg.originRef)) ?? "";
         } catch (e) {
-          console.error("getClipboardText for pin failed:", e);
+          showActionError("get_clipboard_text", e);
         }
       }
       try {
         const note = await createStickyNote(text);
         await showStickyWindow(note.id, true);
       } catch (e) {
-        console.error("createStickyNote failed:", e);
+        showActionError("pin_text_item", e);
       }
       hideWindow();
       return;
@@ -159,8 +160,7 @@ export async function activateItem(data) {
     try {
       await runBuiltinAction(id, action.runArg ?? null);
     } catch (e) {
-      const err = normalizeError(e);
-      console.error(`[run_builtin_action] [${err.code}] ${err.message}`);
+      showActionError("run_builtin_action", e);
     }
     return;
   }
@@ -170,7 +170,7 @@ export async function activateItem(data) {
     try {
       await launchApp(data.lnkPath);
     } catch (e) {
-      console.error("launch_app failed:", e);
+      showActionError("launch_app", e);
     }
   }
 }

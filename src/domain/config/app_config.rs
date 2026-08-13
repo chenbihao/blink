@@ -246,7 +246,44 @@ pub async fn get_config(pool: &SqlitePool) -> AppConfig {
     let suggestion = ConfigStore::get::<SuggestionConfig>(pool).await;
     let chord = ConfigStore::get::<ChordConfig>(pool).await;
     let disable = ConfigStore::get::<DisableConfig>(pool).await;
-    let clipboard = ConfigStore::get::<crate::infra::data::clipboard::ClipboardConfig>(pool).await;
+
+    // 0.20.1：clipboard display_count → display_pages 启动迁移。
+    // 读取 raw JSON 判定新旧字段并存情况，执行迁移换算后覆盖反序列化结果。
+    let clipboard = {
+        let raw = crate::infra::data::history::get_config(
+            pool,
+            <crate::infra::data::clipboard::ClipboardConfig as super::store::ConfigKey>::KEY,
+        )
+        .await;
+        let mut cfg: crate::infra::data::clipboard::ClipboardConfig = raw
+            .as_deref()
+            .and_then(|json| serde_json::from_str(json).ok())
+            .unwrap_or_default();
+
+        if let Some(json_str) = &raw {
+            if let Ok(raw_val) = serde_json::from_str::<serde_json::Value>(json_str) {
+                let (resolved_pages, migrated) =
+                    crate::infra::data::clipboard::resolve_display_pages_from_json(
+                        &raw_val,
+                        search.page_size.max(1),
+                    );
+                cfg.display_pages = resolved_pages;
+                // 迁移后立即写回，确保下次读取时 DB 中已有 display_pages。
+                if migrated {
+                    if let Err(e) = crate::infra::data::history::set_config(
+                        pool,
+                        <crate::infra::data::clipboard::ClipboardConfig as super::store::ConfigKey>::KEY,
+                        &serde_json::to_string(&cfg).unwrap_or_default(),
+                    )
+                    .await
+                    {
+                        tracing::warn!(error = %e, "clipboard display_pages 迁移写回失败");
+                    }
+                }
+            }
+        }
+        cfg
+    };
 
     AppConfig {
         hotkey: HotkeyConfig {

@@ -48,6 +48,12 @@
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent);
 }
 
+/* 0.20.2: 剪贴板多选态——左侧强调条 + 淡色背景，区别于键盘选中态 */
+#results li.clipboard-selected {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
 #results li .app-icon {
   width: 24px;
   height: 24px;
@@ -121,6 +127,11 @@ body.alt-active #results li .item-badge {
 
 #results li.active {
   background: var(--surface-2);
+}
+
+/* 0.20.2: 剪贴板图片项 active 态——淡化背景，仅保留微弱指示，避免与文本项 active 混淆 */
+#results li[data-is-image="true"].active {
+  background: color-mix(in srgb, var(--surface-2) 50%, transparent);
 }
 
 #results li.calc-result {

@@ -920,10 +920,10 @@ impl ChordAction for StickyAction {
         's'
     }
     fn requires_input(&self) -> bool {
-        true
+        true // 0.20.0：Alt+S 预填输入框文本（用户显式输入），但不读 SelectionCache
     }
-    /// 空文本时提示隐藏——sticky 是 contextual 动作，空文本时主用途不明确（依赖
-    /// awareness 选区兜底），提示价值低。触发仍保留（Alt+S 创建空白便签）。
+    /// 空文本时提示隐藏——sticky 是 contextual 动作，空文本时创建空白便签，
+    /// 提示价值低。触发仍保留（Alt+S 创建空白便签）。
     fn hint_hidden_when_empty(&self) -> bool {
         true
     }
@@ -999,7 +999,7 @@ mod tests {
         let listed = registry.list(&[], &bindings, "en");
         let sticky = listed.iter().find(|item| item["id"] == "sticky").unwrap();
         assert_eq!(sticky["key"], "s");
-        assert_eq!(sticky["requires_input"], true);
+        assert_eq!(sticky["requires_input"], true); // 0.20.0: Alt+S 预填输入框文本
         assert_eq!(sticky["label"], "Sticky");
     }
 

@@ -651,12 +651,20 @@ mod tests {
             ) -> Result<(), crate::domain::sticky::StickyWorkflowError> {
                 unimplemented!("not needed for runtime tests")
             }
-            async fn trash_sticky_and_notify(
-                &self,
-                _sticky_id: &str,
-            ) -> Result<(), crate::domain::sticky::StickyWorkflowError> {
-                unimplemented!("not needed for runtime tests")
-            }
+async fn trash_sticky_and_notify(
+&self,
+_sticky_id: &str,
+) -> Result<(), crate::domain::sticky::StickyWorkflowError> {
+unimplemented!("not needed for runtime tests")
+}
+async fn close_sticky_and_notify(
+&self,
+_sticky_id: &str,
+_final_content: &str,
+_expected_updated_at: Option<i64>,
+) -> Result<crate::domain::sticky::StickyCloseOutcome, crate::domain::sticky::StickyWorkflowError> {
+unimplemented!("not needed for runtime tests")
+}
             fn image_stash(&self) -> Option<&Arc<crate::domain::capability::ImageStash>> {
                 None
             }

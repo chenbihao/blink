@@ -11,6 +11,7 @@ import { activateItem } from "./actions.js";
 import * as statusbar from "./statusbar.js";
 import { invoke } from "../shared/tauri.js";
 import { renderIcon } from "../shared/icon.js";
+import * as clipboardMode from "./clipboard-mode.js";
 
 // 0.17.6: showAiConfirm / getAiConfirmData / updateAiStream 已删除。
 // 主窗口 AI 改走 ChatService，流式渲染由 ai-mode.js 负责。
@@ -20,8 +21,14 @@ let PAGE_SIZE = 9;
 
 /** 融合后最大显示条数（AppConfig.max_results）。
  *  后端单次 emit 已截断，但前端 merge 多次增量会累积，故此处对 allItems 再做最终上限。
- *  启动读一次 + lifecycle shown 时 refreshMaxResults 刷新（设置页改动下次唤起生效）。 */
+ *  启动读一次 + lifecycle shown 时 refreshMaxResults 刷新（设置页改动下次唤起生效）。
+ *
+ *  0.20.1: 剪贴板模式使用独立上限（display_pages × page_size），不受 maxResults 截断。 */
 let maxResults = 50;
+
+/** 0.20.1: 是否处于剪贴板模式（clipboard-mode.js 进入时设 true，退出时 false）。
+ *  为 true 时，appendNew 不做 maxResults 截断——engine 内部已按 effective_limit 截断。 */
+let clipboardModeActive = false;
 
 (async function loadConfig() {
   try {
@@ -55,6 +62,12 @@ export function refreshMaxResultsFromConfigData(cfg) {
     if (cfg.max_results) maxResults = cfg.max_results;
     if (cfg.page_size) PAGE_SIZE = cfg.page_size;
   }
+}
+
+/** 0.20.1: 设置/清除剪贴板模式标志（clipboard-mode.js 进入/退出时调用）。
+ *  为 true 时 appendNew 不做 maxResults 截断。 */
+export function setClipboardMode(active) {
+  clipboardModeActive = active;
 }
 
 /** 后端返回的全部结果（数据，非 DOM）。 */
@@ -166,7 +179,8 @@ function appendNew(items, didReset) {
   // 不需要前端重复 sourceRank 逻辑。
   allItems.sort((a, b) => (b.score || 0) - (a.score || 0));
   // 最终上限：多次增量累积后截断到 max_results（高 score 在前，保留 top-N）
-  if (allItems.length > maxResults) {
+  // 0.20.1: 剪贴板模式不受 maxResults 截断（engine 内部已按 effective_limit 截断）
+  if (!clipboardModeActive && allItems.length > maxResults) {
     allItems.length = maxResults;
   }
   renderPage();
@@ -234,6 +248,35 @@ export function pageUp() {
 export function getActive() {
   const items = pageItems();
   return items[selected] ? itemData(items[selected]) : null;
+}
+
+/** 0.20.2: 通过 DOM 元素设置 active 选中（剪贴板模式下点击项只移动光标，不激活）。 */
+export function setActiveByEl(li) {
+  const idx = pageLis.indexOf(li);
+  if (idx >= 0 && idx !== selected) {
+    selected = idx;
+    updateSelection();
+  }
+}
+
+/** 0.20.2: 获取当前页号（0-based）。 */
+export function getPage() {
+  return page;
+}
+
+/** 0.20.2: 获取当前页内选中索引。 */
+export function getSelectedIndex() {
+  return selected;
+}
+
+/** 0.20.2: 恢复页号和光标位置（右键删除后刷新用）。 */
+export function restorePosition(savedPage, savedSelected) {
+  // 防越界：如果 savedPage 超出总页数，夹到最后一页
+  const maxPage = allItems.length > 0 ? Math.ceil(allItems.length / PAGE_SIZE) - 1 : 0;
+  page = Math.min(savedPage, maxPage);
+  const pageLen = pageLength(page);
+  selected = Math.min(savedSelected, Math.max(pageLen - 1, 0));
+  renderPage();
 }
 
 /** 取当前页第 n 项（1-based，用于 Alt+数字）的数据；越界返回 null。 */
@@ -336,10 +379,12 @@ function renderPage() {
   pageLis = lis;
   liCache = nextCache;
 
+  // 0.20.2: 翻页后同步刷新剪贴板多选 CSS（clipboard-selected 可能因 DOM 重建丢失）
   resultsEl.classList.toggle("has-items", slice.length > 0);
   // selected 防越界（末页不足一页时）
   if (selected > slice.length - 1) selected = Math.max(slice.length - 1, 0);
   updateSelection();
+  clipboardMode.onPageChanged?.();
   syncWindowSize();
 }
 
@@ -501,7 +546,15 @@ li.dataset.aiConfirmId = app._aiConfirm.confirmId;
 
   // 用 mousedown 代替 click：避免拖动区域检测拦截了第一次点击（"需要双击" bug）
   li.addEventListener("mousedown", (e) => {
-    if (e.button === 0) activateItem(itemData(li)); // 只响应左键
+    if (e.button !== 0) return; // 只响应左键
+    // 0.20.2: 剪贴板模式下单击文本项 → 切换选中态；图片项 → 移动光标
+    if (clipboardMode.handleMousedown(e, li)) return;
+    // 0.20.2: 剪贴板模式下普通点击只移动光标到点击项，不直接激活
+    if (clipboardMode.isActive()) {
+      clipboardMode.setActiveByLi(li);
+      return;
+    }
+    activateItem(itemData(li));
   });
   return li;
 }
@@ -515,10 +568,12 @@ function itemData(li) {
     console.error("actions parse failed:", e);
   }
   // 0.17.6: AI 确认卡片相关代码已删除（主窗口 AI 改走 ai-mode.js）
+  // 0.20.2: 返回 isImage 供 clipboard-mode 多选过滤图片项
   return {
     lnkPath: li.dataset.lnkPath,
     calcValue: li.dataset.calcValue,
     isError: li.dataset.isError === "true",
+    isImage: li.dataset.isImage === "true",
     actions,
   };
 }
@@ -529,7 +584,7 @@ function updateSelection() {
 }
 
 /** 把当前选中项 + 翻页信息推给提示栏。 */
-function refreshStatusbar() {
+export function refreshStatusbar() {
   const pageCount = allItems.length ? Math.ceil(allItems.length / PAGE_SIZE) : 0;
   statusbar.update(getActive(), { page: page + 1, pageCount });
 }

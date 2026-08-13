@@ -26,6 +26,15 @@
 
 use sqlx::SqlitePool;
 
+/// display_pages 默认值：3 页（与 phase 0.20.1 契约一致）。
+const DEFAULT_DISPLAY_PAGES: u32 = 3;
+/// display_pages 范围下限。
+const DISPLAY_PAGES_MIN: u32 = 1;
+/// display_pages 范围上限。
+const DISPLAY_PAGES_MAX: u32 = 20;
+/// 旧 display_count 默认值（迁移计算用）。
+const LEGACY_DISPLAY_COUNT_DEFAULT: u32 = 30;
+
 /// 剪贴板条目。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ClipboardItem {
@@ -49,9 +58,15 @@ pub struct ClipboardConfig {
     /// 保留天数（0=永久）
     #[serde(default = "default_retention_days")]
     pub retention_days: u32,
-    /// 单次展示条数（Alt+C / 搜索"剪贴板"时一次显示多少条）。
-    /// 与 `max_items`（存储上限）语义不同：这只控制一次召回展示多少。
-    #[serde(default = "default_display_count")]
+    /// 剪贴板模式一次加载几页（0.20.1：替代旧 `display_count`）。
+    /// `effective_limit = display_pages × page_size`，`page_size` 来自 SearchConfig。
+    /// 范围 1..=20，默认 3。
+    #[serde(default = "default_display_pages")]
+    pub display_pages: u32,
+    /// 旧字段：单次展示条数。0.20.1 起废弃，仅用于反序列化迁移。
+    /// 新代码不应读写此字段；保存时只写 `display_pages`。
+    /// `skip_serializing` 确保保存时不双写旧字段（规划 3.5：只向前迁移）。
+    #[serde(default = "default_display_count", skip_serializing)]
     pub display_count: u32,
     /// 是否允许搜索剪贴板内容
     #[serde(default = "default_true")]
@@ -81,9 +96,90 @@ fn default_max_items() -> u32 {
 fn default_retention_days() -> u32 {
     30
 }
-/// 单次展示条数默认值。30 对齐 AI Capability `search_clipboard_history` 默认值。
+/// 单次展示条数默认值（旧字段，迁移用）。30 = 3 页 × 10（旧默认 page_size）。
 fn default_display_count() -> u32 {
-    30
+    LEGACY_DISPLAY_COUNT_DEFAULT
+}
+/// display_pages 默认值。
+fn default_display_pages() -> u32 {
+    DEFAULT_DISPLAY_PAGES
+}
+/// 从旧 `display_count` 和 `page_size` 换算 `display_pages`。
+/// `ceil(display_count / page_size)`，钳制到 `[1, 20]`；非法值回退 3。
+pub fn migrate_display_count_to_pages(display_count: u32, page_size: u32) -> u32 {
+    if display_count == 0 || page_size == 0 {
+        return DEFAULT_DISPLAY_PAGES;
+    }
+    let pages = (display_count + page_size - 1) / page_size; // ceil
+    pages.clamp(DISPLAY_PAGES_MIN, DISPLAY_PAGES_MAX)
+}
+/// 钳制 `display_pages` 到 `[1, 20]`，非法值回退 3。
+pub fn clamp_display_pages(pages: u32) -> u32 {
+    if (DISPLAY_PAGES_MIN..=DISPLAY_PAGES_MAX).contains(&pages) {
+        pages
+    } else {
+        DEFAULT_DISPLAY_PAGES
+    }
+}
+
+/// 0.20.1 启动迁移：从 raw clipboard JSON 判定 `display_pages` 最终值。
+///
+/// **迁移规则**（规划 §3.5、§5.2 配置契约）：
+/// - 新旧字段同时存在：`display_pages` 优先，忽略 `display_count` 并记录一次 warn。
+/// - 只有旧字段：`ceil(display_count / page_size)` 钳制到 `[1, 20]`；非法旧值回退 3 页。
+/// - 只有新字段或两者都不存在：使用 `display_pages` 原值或默认 3 页。
+///
+/// 返回 `(display_pages, migrated)`——`migrated=true` 表示从旧字段换算过，
+/// 调用方可据此决定是否在首次保存时写回迁移后的值。
+pub fn resolve_display_pages_from_json(
+    raw_json: &serde_json::Value,
+    page_size: u32,
+) -> (u32, bool) {
+    let has_new = raw_json.get("display_pages").is_some();
+    let has_old = raw_json.get("display_count").is_some();
+
+    match (has_new, has_old) {
+        // 新旧并存：新字段优先，忽略旧字段
+        (true, true) => {
+            let pages = raw_json
+                .get("display_pages")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32)
+                .unwrap_or(DEFAULT_DISPLAY_PAGES);
+            tracing::warn!(
+                display_pages = pages,
+                display_count = raw_json
+                    .get("display_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                "clipboard: display_count 与 display_pages 并存，display_pages 优先（旧字段将被丢弃）"
+            );
+            (clamp_display_pages(pages), false)
+        }
+        // 只有旧字段：换算迁移
+        (false, true) => {
+            let raw_count = raw_json
+                .get("display_count")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32)
+                .unwrap_or(LEGACY_DISPLAY_COUNT_DEFAULT);
+            let migrated = migrate_display_count_to_pages(raw_count, page_size);
+            tracing::info!(
+                raw_count, page_size, migrated_pages = migrated,
+                "clipboard: display_count → display_pages 迁移换算"
+            );
+            (migrated, true)
+        }
+        // 只有新字段或都没有：使用 display_pages 原值或默认
+        _ => {
+            let pages = raw_json
+                .get("display_pages")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32)
+                .unwrap_or(DEFAULT_DISPLAY_PAGES);
+            (clamp_display_pages(pages), false)
+        }
+    }
 }
 /// 搜索候选池上限默认值。500 条 × preview(80 chars) ≈ 40KB JSON，足够 fuzzy 匹配。
 fn default_candidate_limit() -> u32 {
@@ -111,7 +207,8 @@ impl Default for ClipboardConfig {
             enabled: true,
             max_items: 10000, // 兜底；主要靠 retention_days=30 按天清理
             retention_days: 30,
-            display_count: 30,
+            display_pages: DEFAULT_DISPLAY_PAGES,
+            display_count: LEGACY_DISPLAY_COUNT_DEFAULT,
             search_enabled: true,
             blacklist_keywords: default_blacklist(),
             capture_images: true,
@@ -386,6 +483,26 @@ pub async fn get_text_by_id(pool: &SqlitePool, id: &str) -> Option<String> {
         .flatten()
 }
 
+/// 0.20.2：按 id 批量查询完整 text（批量原子复制用）。
+///
+/// 接受 id 列表，返回 `(id, Option<String>)` 元组列表，顺序与输入一致。
+/// 未找到的 id 返回 `None`——调用方据此次定是否整体放弃。
+///
+/// **实现**：逐个 `get_text_by_id` 查询（曾尝试动态 IN 查询但 sqlx 生命周期问题，
+/// 且批量通常 < 50 条，逐查性能足够 < 10ms）。
+pub async fn get_text_batch_by_ids(pool: &SqlitePool, ids: &[&str]) -> Vec<(String, Option<String>)> {
+    if ids.is_empty() {
+        return Vec::new();
+    }
+    // 逐个查询，保持输入顺序
+    let mut results = Vec::with_capacity(ids.len());
+    for id in ids {
+        let text = get_text_by_id(pool, id).await;
+        results.push((id.to_string(), text));
+    }
+    results
+}
+
 /// 记录剪贴板命中（用户选择粘贴某条历史）。
 pub async fn record_hit(pool: &SqlitePool, id: &str) {
     let _ = sqlx::query("UPDATE clipboard_history SET hit_count = hit_count + 1 WHERE id = ?1")
@@ -530,5 +647,192 @@ mod tests {
         let blacklist = vec!["password".to_string()];
         assert!(is_blacklisted("PASSWORD", &blacklist));
         assert!(is_blacklisted("Password", &blacklist));
+    }
+
+    // ── 0.20.1: display_count → display_pages 迁移单测 ───────────────
+
+    #[test]
+    fn migrate_30_count_9_page_size_yields_4_pages() {
+        assert_eq!(migrate_display_count_to_pages(30, 9), 4);
+    }
+
+    #[test]
+    fn migrate_18_count_9_page_size_yields_2_pages() {
+        assert_eq!(migrate_display_count_to_pages(18, 9), 2);
+    }
+
+    #[test]
+    fn migrate_exact_multiple_no_rounding() {
+        assert_eq!(migrate_display_count_to_pages(9, 9), 1);
+        assert_eq!(migrate_display_count_to_pages(18, 9), 2);
+    }
+
+    #[test]
+    fn migrate_clamps_to_20_max() {
+        assert_eq!(migrate_display_count_to_pages(9999, 1), 20);
+    }
+
+    #[test]
+    fn migrate_zero_values_fallback_to_default() {
+        assert_eq!(migrate_display_count_to_pages(0, 9), DEFAULT_DISPLAY_PAGES);
+        assert_eq!(migrate_display_count_to_pages(30, 0), DEFAULT_DISPLAY_PAGES);
+    }
+
+    #[test]
+    fn clamp_display_pages_valid_range() {
+        assert_eq!(clamp_display_pages(1), 1);
+        assert_eq!(clamp_display_pages(20), 20);
+        assert_eq!(clamp_display_pages(10), 10);
+    }
+
+    #[test]
+    fn clamp_display_pages_invalid_falls_back() {
+        assert_eq!(clamp_display_pages(0), DEFAULT_DISPLAY_PAGES);
+        assert_eq!(clamp_display_pages(21), DEFAULT_DISPLAY_PAGES);
+        assert_eq!(clamp_display_pages(9999), DEFAULT_DISPLAY_PAGES);
+    }
+
+    #[test]
+    fn config_default_has_display_pages_3() {
+        let cfg = ClipboardConfig::default();
+        assert_eq!(cfg.display_pages, 3);
+        // 旧字段保留默认值但不参与运行时逻辑
+        assert_eq!(cfg.display_count, 30);
+    }
+
+    #[test]
+    fn config_serde_new_field_takes_priority() {
+        let json = serde_json::json!({
+            "display_pages": 5,
+            "display_count": 30,
+            "enabled": true,
+            "max_items": 1000,
+            "retention_days": 30,
+            "search_enabled": true,
+            "blacklist_keywords": [],
+            "capture_images": true,
+            "max_image_items": 200,
+            "candidate_limit": 500,
+        });
+        let cfg: ClipboardConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(cfg.display_pages, 5);
+    }
+
+    #[test]
+    fn config_serde_only_old_field_uses_default_pages() {
+        // 只有旧字段、没有新字段时，display_pages 使用 serde default = 3。
+        // 迁移换算在应用层 helper 中完成（需要 page_size 上下文）。
+        let json = serde_json::json!({
+            "display_count": 30,
+            "enabled": true,
+            "max_items": 1000,
+            "retention_days": 30,
+            "search_enabled": true,
+            "blacklist_keywords": [],
+            "capture_images": true,
+            "max_image_items": 200,
+            "candidate_limit": 500,
+        });
+        let cfg: ClipboardConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(cfg.display_pages, 3); // serde default
+        assert_eq!(cfg.display_count, 30); // 旧字段保留原值
+    }
+
+    // ── 0.20.1: resolve_display_pages_from_json 迁移单测 ────────────
+
+    #[test]
+    fn resolve_both_fields_new_takes_priority() {
+        // 新旧并存：display_pages 优先
+        let json = serde_json::json!({"display_pages": 5, "display_count": 30});
+        let (pages, migrated) = resolve_display_pages_from_json(&json, 9);
+        assert_eq!(pages, 5);
+        assert!(!migrated); // 不算迁移
+    }
+
+    #[test]
+    fn resolve_only_old_field_migrates() {
+        // 只有旧字段：ceil(30/9) = 4 页
+        let json = serde_json::json!({"display_count": 30});
+        let (pages, migrated) = resolve_display_pages_from_json(&json, 9);
+        assert_eq!(pages, 4);
+        assert!(migrated);
+    }
+
+    #[test]
+    fn resolve_only_old_field_18_count_9_page() {
+        // ceil(18/9) = 2 页
+        let json = serde_json::json!({"display_count": 18});
+        let (pages, migrated) = resolve_display_pages_from_json(&json, 9);
+        assert_eq!(pages, 2);
+        assert!(migrated);
+    }
+
+    #[test]
+    fn resolve_only_new_field_no_migration() {
+        let json = serde_json::json!({"display_pages": 7});
+        let (pages, migrated) = resolve_display_pages_from_json(&json, 9);
+        assert_eq!(pages, 7);
+        assert!(!migrated);
+    }
+
+    #[test]
+    fn resolve_neither_field_returns_default() {
+        let json = serde_json::json!({"enabled": true});
+        let (pages, migrated) = resolve_display_pages_from_json(&json, 9);
+        assert_eq!(pages, DEFAULT_DISPLAY_PAGES);
+        assert!(!migrated);
+    }
+
+    #[test]
+    fn resolve_old_field_zero_falls_back() {
+        // display_count=0 是非法值，migrate 函数回退默认 3 页
+        let json = serde_json::json!({"display_count": 0});
+        let (pages, migrated) = resolve_display_pages_from_json(&json, 9);
+        assert_eq!(pages, DEFAULT_DISPLAY_PAGES);
+        assert!(migrated);
+    }
+
+    #[test]
+    fn resolve_old_field_clamps_to_20() {
+        // display_count=9999, page_size=1 → 9999 页，clamp 到 20
+        let json = serde_json::json!({"display_count": 9999});
+        let (pages, migrated) = resolve_display_pages_from_json(&json, 1);
+        assert_eq!(pages, 20);
+        assert!(migrated);
+    }
+
+    #[test]
+    fn resolve_new_field_out_of_range_clamps() {
+        // 新字段越界时 clamp
+        let json = serde_json::json!({"display_pages": 99});
+        let (pages, migrated) = resolve_display_pages_from_json(&json, 9);
+        assert_eq!(pages, DEFAULT_DISPLAY_PAGES);
+        assert!(!migrated);
+    }
+
+    // ── 0.20.1: 序列化不双写单测 ─────────────────────────────────────
+
+    #[test]
+    fn config_serialize_omits_display_count() {
+        // 保存时不双写 display_count（规划 3.5：只向前迁移）
+        let cfg = ClipboardConfig::default();
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert!(json.get("display_count").is_none(), "序列化不应包含 display_count");
+        assert!(json.get("display_pages").is_some(), "序列化应包含 display_pages");
+    }
+
+    #[test]
+    fn config_roundtrip_preserves_display_pages_without_display_count() {
+        let cfg = ClipboardConfig {
+            display_pages: 7,
+            display_count: 99, // 旧值不应影响
+            ..ClipboardConfig::default()
+        };
+        let json_str = serde_json::to_string(&cfg).unwrap();
+        // 反序列化回来 display_pages 应保持 7
+        let roundtrip: ClipboardConfig = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(roundtrip.display_pages, 7);
+        // 旧字段不写出，反序列化时走 default = 30
+        assert_eq!(roundtrip.display_count, LEGACY_DISPLAY_COUNT_DEFAULT);
     }
 }

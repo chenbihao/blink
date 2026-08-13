@@ -108,6 +108,19 @@ pub trait CapabilityEnv: Send + Sync {
     /// 将便签移入废纸篓、隐藏对应窗口并广播回收事件。
     async fn trash_sticky_and_notify(&self, sticky_id: &str) -> Result<(), StickyWorkflowError>;
 
+    /// 原子关闭便签（0.20.0）。
+    ///
+    /// 在同一后端工作流内完成 revision 校验、最终保存和 delete/trash 决策。
+    /// 空内容 → 物理删除；非空 → 保存最终内容并移入回收站。
+    /// 成功后隐藏窗口并广播对应事件（STICKY_DELETED 或 STICKY_TRASHED）。
+    /// 失败时窗口不关闭，内容保留。
+    async fn close_sticky_and_notify(
+        &self,
+        sticky_id: &str,
+        final_content: &str,
+        expected_updated_at: Option<i64>,
+    ) -> Result<crate::domain::sticky::StickyCloseOutcome, StickyWorkflowError>;
+
     // ── 图片暂存（0.19.4 ImageStash 引用闭环）──────────────────────────
 
     /// 进程级图片暂存——投影层把 image/* Blob 字节移入 stash 并生成 `image_ref`，

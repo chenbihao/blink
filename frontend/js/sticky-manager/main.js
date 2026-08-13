@@ -26,6 +26,7 @@ import {
   openContentEditor,
 } from "../shared/api.js";
 import { EVENTS } from "../shared/event-names.js";
+import { STICKY_COLORS } from "../sticky/palette.js";
 
 // ── DOM 引用 ──────────────────────────────────────────
 
@@ -304,8 +305,6 @@ function makeColorBtn(note) {
   return btn;
 }
 
-/** 便签色板常量——与后端 StickyColor 枚举及 sticky.html 保持一致。 */
-const STICKY_COLORS = ["theme", "yellow", "green", "blue", "pink", "purple", "gray"];
 
 function showColorPicker(note, anchor) {
   const picker = document.createElement("div");

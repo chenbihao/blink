@@ -40,11 +40,17 @@ pub const ENGINE_ID: &str = "clipboard";
 /// engine 场景不做首拼弱信号派生（本体数据信号天然强，"剪贴板" 不会误命中）。
 pub const TRIGGERS: &[&str] = &["剪贴板", "clip", "jtb", "jiantieban"];
 
-/// 单次展示条数默认值（与 `ClipboardConfig::display_count` 默认值一致）。
-const DEFAULT_DISPLAY_COUNT: usize = 30;
-/// 单次展示条数下限/上限。下限 1 防“啥也不显示”，上限 200 防一次拉太多拖慢 UI。
-const DISPLAY_COUNT_MIN: usize = 1;
-const DISPLAY_COUNT_MAX: usize = 200;
+/// display_pages 默认值（与 ClipboardConfig::display_pages 默认值一致 = 3）。
+const DEFAULT_DISPLAY_PAGES: usize = 3;
+/// display_pages 范围下限/上限。
+const DISPLAY_PAGES_MIN: usize = 1;
+const DISPLAY_PAGES_MAX: usize = 20;
+/// 默认 page_size（与 SearchConfig::page_size 默认值一致）。
+const DEFAULT_PAGE_SIZE: usize = 9;
+/// effective_limit 下限保护：至少返回 1 条。
+const EFFECTIVE_LIMIT_MIN: usize = 1;
+/// effective_limit 上限保护：防一次拉太多拖慢 UI。
+const EFFECTIVE_LIMIT_MAX: usize = 400;
 
 /// 搜索候选池上限默认值（与 `ClipboardConfig::candidate_limit` 默认值一致）。
 const DEFAULT_CANDIDATE_LIMIT: usize = 500;
@@ -62,9 +68,12 @@ pub struct ClipboardEngine {
     /// UI 语言快照,用于 subtitle 时间描述 zh/en 切换（0.8.5.1 §6.6）。
     /// 与 SearchService.language 联动:`SearchService::update_language` 转发到本 engine。
     language: Arc<RwLock<String>>,
-    /// 单次展示条数快照（`display_count` 配置项）。
+    /// 剪贴板模式一次加载几页（`display_pages` 配置项）。
     /// 与 `SearchService` 联动：`set_config("clipboard_config")` 时 downcast 转发到本 engine。
-    display_count: Arc<RwLock<usize>>,
+    display_pages: Arc<RwLock<usize>>,
+    /// 搜索结果每页条数快照（`page_size`，来自 SearchConfig）。
+    /// effective_limit = display_pages × page_size。
+    page_size: Arc<RwLock<usize>>,
     /// 搜索候选池上限快照（`candidate_limit` 配置项）。
     /// 控制搜索时拉多少条元数据做 fuzzy 匹配。默认 500。
     candidate_limit: Arc<RwLock<usize>>,
@@ -76,7 +85,8 @@ impl ClipboardEngine {
             pool,
             cache_pool,
             language: Arc::new(RwLock::new("zh".to_string())),
-            display_count: Arc::new(RwLock::new(DEFAULT_DISPLAY_COUNT)),
+            display_pages: Arc::new(RwLock::new(DEFAULT_DISPLAY_PAGES)),
+            page_size: Arc::new(RwLock::new(DEFAULT_PAGE_SIZE)),
             candidate_limit: Arc::new(RwLock::new(DEFAULT_CANDIDATE_LIMIT)),
         }
     }
@@ -86,15 +96,34 @@ impl ClipboardEngine {
         *self.language.write().unwrap() = lang;
     }
 
-    /// 更新单次展示条数（设置页 `clipboard_config` 保存时转发）。
-    /// 自动 clamp 到 `[DISPLAY_COUNT_MIN, DISPLAY_COUNT_MAX]`，非法值兜底默认值。
-    pub fn update_display_count(&self, count: u32) {
-        let clamped = if (DISPLAY_COUNT_MIN..=DISPLAY_COUNT_MAX).contains(&(count as usize)) {
-            count as usize
+    /// 更新剪贴板模式加载页数（设置页 `clipboard_config` 保存时转发）。
+    /// 自动 clamp 到 `[DISPLAY_PAGES_MIN, DISPLAY_PAGES_MAX]`，非法值兜底默认值。
+    pub fn update_display_pages(&self, pages: u32) {
+        let clamped = if (DISPLAY_PAGES_MIN..=DISPLAY_PAGES_MAX).contains(&(pages as usize)) {
+            pages as usize
         } else {
-            DEFAULT_DISPLAY_COUNT
+            DEFAULT_DISPLAY_PAGES
         };
-        *self.display_count.write().unwrap() = clamped;
+        *self.display_pages.write().unwrap() = clamped;
+    }
+
+    /// 更新搜索结果每页条数（`SearchConfig::page_size` 变化时转发）。
+    /// effective_limit = display_pages × page_size。
+    pub fn update_page_size(&self, page_size: u32) {
+        let clamped = if page_size == 0 {
+            DEFAULT_PAGE_SIZE
+        } else {
+            page_size as usize
+        };
+        *self.page_size.write().unwrap() = clamped;
+    }
+
+    /// 计算 effective limit = display_pages × page_size，钳制到 [1, 400]。
+    fn effective_limit(&self) -> usize {
+        let pages = *self.display_pages.read().unwrap();
+        let ps = *self.page_size.read().unwrap();
+        let limit = pages.saturating_mul(ps);
+        limit.clamp(EFFECTIVE_LIMIT_MIN, EFFECTIVE_LIMIT_MAX)
     }
 
     /// 更新搜索候选池上限（设置页 `clipboard_config` 保存时转发）。
@@ -141,7 +170,7 @@ impl SearchEngine for ClipboardEngine {
     /// route 层保证 Mixed 分支不会调到本 engine。
     async fn search(&self, query: &str, _ctx: &QueryContext<'_>) -> Vec<SearchItem> {
         let arg = query.trim();
-        let limit = *self.display_count.read().unwrap() as i64;
+        let limit = self.effective_limit() as i64;
         let candidate_limit = *self.candidate_limit.read().unwrap() as i64;
         let lang = self.language.read().unwrap().clone();
         let t0 = std::time::Instant::now();
@@ -583,47 +612,75 @@ mod tests {
     }
 
     #[test]
-    fn display_count_defaults_to_30() {
-        // 无 pool 也能构造——display_count 是内存快照，构造时不读 DB。
-        // connect_lazy 需要 Tokio runtime，测试里用阻塞 runtime 兜底。
+    fn display_pages_defaults_to_3() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let pool =
             rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
         let cache_pool =
             rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
         let engine = ClipboardEngine::new(pool, cache_pool);
-        assert_eq!(*engine.display_count.read().unwrap(), DEFAULT_DISPLAY_COUNT);
-        assert_eq!(DEFAULT_DISPLAY_COUNT, 30);
+        assert_eq!(*engine.display_pages.read().unwrap(), DEFAULT_DISPLAY_PAGES);
+        assert_eq!(DEFAULT_DISPLAY_PAGES, 3);
     }
 
     #[test]
-    fn update_display_count_accepts_valid_range() {
+    fn update_display_pages_accepts_valid_range() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let pool =
             rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
         let cache_pool =
             rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
         let engine = ClipboardEngine::new(pool, cache_pool);
-        engine.update_display_count(5);
-        assert_eq!(*engine.display_count.read().unwrap(), 5);
-        engine.update_display_count(200);
-        assert_eq!(*engine.display_count.read().unwrap(), 200);
+        engine.update_display_pages(1);
+        assert_eq!(*engine.display_pages.read().unwrap(), 1);
+        engine.update_display_pages(20);
+        assert_eq!(*engine.display_pages.read().unwrap(), 20);
     }
 
     #[test]
-    fn update_display_count_clamps_out_of_range_to_default() {
+    fn update_display_pages_clamps_out_of_range_to_default() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let pool =
             rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
         let cache_pool =
             rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
         let engine = ClipboardEngine::new(pool, cache_pool);
-        // 0 = 下限外 → 兜底默认值
-        engine.update_display_count(0);
-        assert_eq!(*engine.display_count.read().unwrap(), DEFAULT_DISPLAY_COUNT);
-        // 超上限 → 兜底默认值
-        engine.update_display_count(9999);
-        assert_eq!(*engine.display_count.read().unwrap(), DEFAULT_DISPLAY_COUNT);
+        engine.update_display_pages(0);
+        assert_eq!(*engine.display_pages.read().unwrap(), DEFAULT_DISPLAY_PAGES);
+        engine.update_display_pages(9999);
+        assert_eq!(*engine.display_pages.read().unwrap(), DEFAULT_DISPLAY_PAGES);
+    }
+
+    #[test]
+    fn effective_limit_is_pages_times_page_size() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let pool =
+            rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
+        let cache_pool =
+            rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
+        let engine = ClipboardEngine::new(pool, cache_pool);
+        // 默认 3 页 × 9 条/页 = 27
+        assert_eq!(engine.effective_limit(), 27);
+        engine.update_display_pages(5);
+        engine.update_page_size(9);
+        // 5 × 9 = 45
+        assert_eq!(engine.effective_limit(), 45);
+        engine.update_display_pages(20);
+        engine.update_page_size(20);
+        // 20 × 20 = 400 (at upper clamp)
+        assert_eq!(engine.effective_limit(), 400);
+    }
+
+    #[test]
+    fn update_page_size_zero_falls_back() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let pool =
+            rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
+        let cache_pool =
+            rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
+        let engine = ClipboardEngine::new(pool, cache_pool);
+        engine.update_page_size(0);
+        assert_eq!(*engine.page_size.read().unwrap(), DEFAULT_PAGE_SIZE);
     }
 
     // ── 0.17.9 resolve_source_desc 单测 ──────────────────────────────────

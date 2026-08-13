@@ -140,6 +140,311 @@ pub fn is_file_path(s: &str) -> bool {
 
 // ── 语言检测与"值得翻译"判定（0.8.2 §3.3）───────────────────────────────────
 
+// ── 0.20.0 结构化文本负向过滤 ──────────────────────────────────────────────
+//
+// 在 needs_translation 前加入分类型 is_non_prose_structured_text：
+// 颜色、UUID、hash、版本、IP/端口、邮箱、CSS 声明/变量、短 JSON、命令参数、纯代码标识符。
+// 每类为独立纯函数，禁止总括式"像代码"正则。
+// 显式"翻译 …"前缀不受抑制——用户明确要求翻译时永远放行。
+
+/// 判断文本是否为颜色字面量（0.20.0）。
+///
+/// 认可格式：`#RGB`、`#RGBA`、`#RRGGBB`、`#RRGGBBAA`、`rgb()/rgba()`、`hsl()/hsla()`。
+fn is_color_literal(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() || s.len() > 64 {
+        return false;
+    }
+    // HEX 颜色：# 后 3/4/6/8 位十六进制
+    if let Some(rest) = s.strip_prefix('#') {
+        return matches!(rest.len(), 3 | 4 | 6 | 8) && rest.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    let lower = s.to_ascii_lowercase();
+    // rgb()/rgba()
+    if let Some(rest) = lower.strip_prefix("rgb(") {
+        return rest.ends_with(')') && rest.trim_end_matches(')').split(',').count() >= 3;
+    }
+    if let Some(rest) = lower.strip_prefix("rgba(") {
+        return rest.ends_with(')') && rest.trim_end_matches(')').split(',').count() == 4;
+    }
+    // hsl()/hsla()
+    if let Some(rest) = lower.strip_prefix("hsl(") {
+        return rest.ends_with(')') && rest.trim_end_matches(')').split(',').count() >= 3;
+    }
+    if let Some(rest) = lower.strip_prefix("hsla(") {
+        return rest.ends_with(')') && rest.trim_end_matches(')').split(',').count() == 4;
+    }
+    false
+}
+
+/// 判断文本是否为 UUID（0.20.0）。
+fn is_uuid(s: &str) -> bool {
+    let s = s.trim();
+    // 标准 UUID: 8-4-4-4-12 = 36 字符（含连字符）
+    if s.len() == 36 {
+        return s.chars().enumerate().all(|(i, c)| {
+            if i == 8 || i == 13 || i == 18 || i == 23 {
+                c == '-'
+            } else {
+                c.is_ascii_hexdigit()
+            }
+        });
+    }
+    // 无连字符的 UUID: 32 字符纯十六进制
+    if s.len() == 32 {
+        return s.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    false
+}
+
+/// 判断文本是否为 hash 值（0.20.0）。
+///
+/// 认可：MD5(32)、SHA1(40)、SHA256(64)、SHA512(128) 纯十六进制。
+fn is_hash(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() {
+        return false;
+    }
+    // 常见 hash 长度前缀（git short hash 等）+ 完整长度
+    let valid_lengths = [7, 8, 32, 40, 64, 128];
+    valid_lengths.contains(&s.len()) && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// 判断文本是否为版本号（0.20.0）。
+///
+/// 认可：`1.0`、`v1.2.3`、`2.0.0-beta`、`1.2.3-rc.1` 等。
+fn is_version_string(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() || s.len() > 64 {
+        return false;
+    }
+    // 去除可选的 v/V 前缀
+    let s = s.strip_prefix(['v', 'V']).unwrap_or(s);
+    // 必须以数字开头
+    if !s.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    // 核心版本号：数字.数字.数字...（至少两个数字段）
+    let core = s.split(|c: char| !c.is_ascii_digit() && c != '.').next().unwrap_or("");
+    let dot_count = core.matches('.').count();
+    if dot_count < 1 {
+        return false;
+    }
+    // 每个点分隔段必须是数字
+    core.split('.').all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// 判断文本是否为 IP 地址 / IP:端口（0.20.0）。
+fn is_ip_or_port(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() || s.len() > 64 {
+        return false;
+    }
+    // IPv4:port 或 IPv4
+    if s.chars().all(|c| c.is_ascii_digit() || c == '.') || s.contains('.') {
+        let host = s.rsplit_once(':').map(|(h, _)| h).unwrap_or(s);
+        let port = s.rsplit_once(':').map(|(_, p)| p);
+        // IPv4 校验
+        let parts: Vec<&str> = host.split('.').collect();
+        if parts.len() == 4
+            && parts.iter().all(|p| {
+                !p.is_empty()
+                    && p.len() <= 3
+                    && p.chars().all(|c| c.is_ascii_digit())
+                    && p.parse::<u8>().is_ok()
+            })
+        {
+            // 如果有端口，校验端口 1-65535
+            if let Some(p) = port {
+                return !p.is_empty()
+                    && p.len() <= 5
+                    && p.chars().all(|c| c.is_ascii_digit())
+                    && p.parse::<u32>().is_ok_and(|v| v <= 65535);
+            }
+            return true;
+        }
+    }
+    // IPv6 简单检测：含多个冒号且只含十六进制和冒号
+    if s.matches(':').count() >= 2
+        && s.chars().all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
+    {
+        return true;
+    }
+    false
+}
+
+/// 判断文本是否为邮箱地址（0.20.0）。
+fn is_email(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() || s.len() > 320 {
+        return false;
+    }
+    // 简单校验：local@domain，local 和 domain 非空，domain 含点
+    let at_pos = match s.find('@') {
+        Some(i) if i > 0 => i,
+        _ => return false,
+    };
+    let domain = &s[at_pos + 1..];
+    if domain.is_empty() || !domain.contains('.') {
+        return false;
+    }
+    // 不含空格
+    !s.chars().any(|c| c.is_whitespace())
+}
+
+/// 判断文本是否为 CSS 声明或变量（0.20.0）。
+///
+/// 认可：`--var: value;`、`property: value;`、`--var-name`。
+fn is_css_declaration(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() || s.len() > 512 {
+        return false;
+    }
+    // CSS 变量定义：--var: value;
+    if s.starts_with("--") && s.contains(':') {
+        return true;
+    }
+    // CSS 声明：property: value; （含冒号和分号，无空格开头）
+    if s.contains(':') && s.contains(';') && !s.starts_with("http") {
+        // 排除 URL（http: 已被排除）
+        let before_colon = s.split(':').next().unwrap_or("");
+        // CSS 属性名只含字母和连字符
+        return !before_colon.is_empty()
+            && before_colon.chars().all(|c| c.is_ascii_alphabetic() || c == '-');
+    }
+    // 纯 CSS 变量引用：--var-name
+    if s.starts_with("--") && s.len() > 4 && !s.contains(' ') {
+        return s[2..].chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    }
+    false
+}
+
+/// 判断文本是否为短 JSON（0.20.0）。
+fn is_short_json(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() || s.len() > 1024 {
+        return false;
+    }
+    // 必须以 { 或 [ 开头
+    if !s.starts_with('{') && !s.starts_with('[') {
+        return false;
+    }
+    // 必须以 } 或 ] 结尾（对应）
+    let (open, close) = if s.starts_with('{') {
+        ('{', '}')
+    } else {
+        ('[', ']')
+    };
+    if !s.ends_with(close) {
+        return false;
+    }
+    // 粗略校验：引号数量为偶数
+    let quote_count = s.matches('"').count();
+    quote_count % 2 == 0
+}
+
+/// 判断文本是否为命令参数（0.20.0）。
+///
+/// 认可：`--flag`、`-f value`、`--opt=value`、`npm install -g` 等。
+fn is_command_args(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() || s.len() > 512 {
+        return false;
+    }
+    // 必须包含至少一个 -- 或 - 开头的 flag
+    let words: Vec<&str> = s.split_whitespace().collect();
+    if words.is_empty() {
+        return false;
+    }
+    // 至少一个 word 以 -- 或 - 开头（但不是单个 - ）
+    let has_flag = words.iter().any(|w| {
+        (w.starts_with("--") && w.len() > 2) || (w.starts_with('-') && w.len() > 1 && !w.starts_with("--"))
+    });
+    if !has_flag {
+        return false;
+    }
+    // 所有 word 不含自然语言常见模式（如连续的 a/an/the + 空格 + 单词）
+    // 简单策略：如果文本中非 flag 的 word 超过 5 个自然语言词，则不算命令参数
+    let non_flag_words = words
+        .iter()
+        .filter(|w| !w.starts_with('-'))
+        .count();
+    non_flag_words <= 10
+}
+
+/// 判断文本是否为纯代码标识符（0.20.0）。
+///
+/// 认可：`camelCase`、`snake_case`、`PascalCase`、`SCREAMING_SNAKE`、`module.function` 等。
+fn is_code_identifier(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() || s.len() > 128 {
+        return false;
+    }
+    // 不能含空格（代码标识符无空格）
+    if s.contains(' ') {
+        return false;
+    }
+    // 不能含自然语言标点（句号、逗号、问号、感叹号）
+    if s.chars().any(|c| matches!(c, '.' | ',' | '?' | '!')) {
+        // 但允许 . 用于 module.function 形式
+        // 如果含 . 以外的自然语言标点 → 不是纯标识符
+        if s.chars().any(|c| matches!(c, ',' | '?' | '!')) {
+            return false;
+        }
+    }
+    // 所有字符必须是字母、数字、下划线、点、$、#（类名前缀）
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '$' || c == '#')
+    {
+        return false;
+    }
+    // 不能以数字开头（纯数字已被 Empty 分类挡住）
+    if s.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    // 至少含一个下划线或点或大小写混合（区分于普通英文单词）
+    let has_underscore = s.contains('_');
+    let has_dot = s.contains('.');
+    let has_upper = s.chars().any(|c| c.is_ascii_uppercase());
+    let has_lower = s.chars().any(|c| c.is_ascii_lowercase());
+    let has_mixed_case = has_upper && has_lower;
+    // 纯小写字母+数字且无下划线/点 → 普通英文词，不算代码标识符
+    // 除非长度较短且有数字（如 `var2`）
+    let has_digit = s.chars().any(|c| c.is_ascii_digit());
+    has_underscore || has_dot || has_mixed_case || (has_digit && s.len() <= 8)
+}
+
+/// 判断文本是否为结构化非自然语言文本（0.20.0）。
+///
+/// 分类型检测：颜色、UUID、hash、版本、IP/端口、邮箱、CSS 声明/变量、
+/// 短 JSON、命令参数、纯代码标识符。
+///
+/// **显式"翻译 …"不受抑制**：如果文本以"翻译"或"translate"开头（不区分大小写），
+/// 直接返回 false——用户明确要求翻译时永远放行。
+pub fn is_non_prose_structured_text(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() {
+        return false;
+    }
+    // 显式"翻译 …"前缀不受抑制
+    let lower = s.to_ascii_lowercase();
+    if lower.starts_with("翻译") || lower.starts_with("translate ") || lower.starts_with("translate\t") {
+        return false;
+    }
+    // 分类型检测（短路 OR）
+    is_color_literal(s)
+        || is_uuid(s)
+        || is_hash(s)
+        || is_version_string(s)
+        || is_ip_or_port(s)
+        || is_email(s)
+        || is_css_declaration(s)
+        || is_short_json(s)
+        || is_command_args(s)
+        || is_code_identifier(s)
+}
+
 /// 文本主要字符集。用最简单的字符集分档覆盖 95%+ 场景，不引 `whatlang` / `lingua`
 /// （多 200KB+ 依赖，0.8.x 阶段不划算）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -259,6 +564,12 @@ pub fn needs_translation(s: &str, target: &str) -> bool {
             return false;
         }
     }
+    // 0.20.0 护栏 7：结构化非自然语言文本负向过滤
+    // 颜色、UUID、hash、版本、IP/端口、邮箱、CSS 声明/变量、短 JSON、命令参数、纯代码标识符。
+    // 显式"翻译 …"前缀不受抑制（is_non_prose_structured_text 内部已处理）。
+    if is_non_prose_structured_text(s) {
+        return false;
+    }
     // 护栏 5：auto 兜底
     if target == "auto" || target.is_empty() {
         return false;
@@ -267,6 +578,14 @@ pub fn needs_translation(s: &str, target: &str) -> bool {
     let lang = detect_lang(s);
     if lang == TextLang::Empty {
         return false;
+    }
+    // 0.20.0：显式"翻译 …"/"translate …"前缀绕过 Mixed 抑制——
+    // 用户明确要求翻译时，即使 Mixed 也应放行。
+    let lower = s.to_ascii_lowercase();
+    let explicit_translate =
+        lower.starts_with("翻译") || lower.starts_with("translate ") || lower.starts_with("translate\t");
+    if explicit_translate {
+        return lang != TextLang::Empty;
     }
     // 分档
     match (target, lang) {
@@ -675,5 +994,194 @@ mod tests {
             "check this out\nhttps://example.com",
             "zh",
         ));
+    }
+
+    // ---- 0.20.0 结构化文本负向过滤 ----
+
+    #[test]
+    fn structured_text_color_literals() {
+        // 正例
+        assert!(is_non_prose_structured_text("#fff"));
+        assert!(is_non_prose_structured_text("#FF0000"));
+        assert!(is_non_prose_structured_text("#1a2b3c4d"));
+        assert!(is_non_prose_structured_text("rgb(255, 0, 0)"));
+        assert!(is_non_prose_structured_text("rgba(0,0,0,0.5)"));
+        assert!(is_non_prose_structured_text("hsl(120, 100%, 50%)"));
+        // 反例（自然语言）
+        assert!(!is_non_prose_structured_text("hello world"));
+        assert!(!is_non_prose_structured_text("the color is red"));
+        assert!(!is_non_prose_structured_text("I like blue"));
+        assert!(!is_non_prose_structured_text("RGB is a color model"));
+        assert!(!is_non_prose_structured_text("this is a test"));
+    }
+
+    #[test]
+    fn structured_text_uuid() {
+        // 正例
+        assert!(is_non_prose_structured_text("550e8400-e29b-41d4-a716-446655440000"));
+        assert!(is_non_prose_structured_text("12345678123456781234567812345678"));
+        assert!(is_non_prose_structured_text(
+            "deadbeef-dead-beef-dead-beefdeadbeef"
+        ));
+        assert!(is_non_prose_structured_text("00000000-0000-0000-0000-000000000000"));
+        assert!(is_non_prose_structured_text("FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF"));
+        // 反例
+        assert!(!is_non_prose_structured_text("this is a uuid"));
+        assert!(!is_non_prose_structured_text("hello world"));
+        assert!(!is_non_prose_structured_text("the id is 12345"));
+        assert!(!is_non_prose_structured_text("a test string"));
+        assert!(!is_non_prose_structured_text("some random text"));
+    }
+
+    #[test]
+    fn structured_text_hash() {
+        // 正例
+        assert!(is_non_prose_structured_text("098f6bcd4621d373cade4e832627b4f6"));
+        assert!(is_non_prose_structured_text("a94a8fef"));
+        assert!(is_non_prose_structured_text("da39a3ee5e6b4b0d3255bfef95601890afd80709"));
+        assert!(is_non_prose_structured_text("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
+        assert!(is_non_prose_structured_text("abc1234"));
+        // 反例
+        assert!(!is_non_prose_structured_text("hello world"));
+        assert!(!is_non_prose_structured_text("the hash is valid"));
+        assert!(!is_non_prose_structured_text("this is a test"));
+        assert!(!is_non_prose_structured_text("some random text"));
+        assert!(!is_non_prose_structured_text("a short string"));
+    }
+
+    #[test]
+    fn structured_text_version() {
+        // 正例
+        assert!(is_non_prose_structured_text("1.0"));
+        assert!(is_non_prose_structured_text("v1.2.3"));
+        assert!(is_non_prose_structured_text("2.0.0-beta"));
+        assert!(is_non_prose_structured_text("1.2.3-rc.1"));
+        assert!(is_non_prose_structured_text("10.5.2"));
+        // 反例
+        assert!(!is_non_prose_structured_text("hello world"));
+        assert!(!is_non_prose_structured_text("version one point zero"));
+        assert!(!is_non_prose_structured_text("this is a test"));
+        assert!(!is_non_prose_structured_text("the number is 5"));
+        assert!(!is_non_prose_structured_text("some text here"));
+    }
+
+    #[test]
+    fn structured_text_ip_port() {
+        // 正例
+        assert!(is_non_prose_structured_text("192.168.1.1"));
+        assert!(is_non_prose_structured_text("10.0.0.1:8080"));
+        assert!(is_non_prose_structured_text("127.0.0.1"));
+        assert!(is_non_prose_structured_text("255.255.255.0:443"));
+        assert!(is_non_prose_structured_text("::1"));
+        // 反例
+        assert!(!is_non_prose_structured_text("hello world"));
+        assert!(!is_non_prose_structured_text("the IP is local"));
+        assert!(!is_non_prose_structured_text("some text here"));
+        assert!(!is_non_prose_structured_text("this is a test"));
+        assert!(!is_non_prose_structured_text("version 1.2.3"));
+    }
+
+    #[test]
+    fn structured_text_email() {
+        // 正例
+        assert!(is_non_prose_structured_text("user@example.com"));
+        assert!(is_non_prose_structured_text("test.user@domain.org"));
+        assert!(is_non_prose_structured_text("a@b.co"));
+        assert!(is_non_prose_structured_text("name+surname@company.io"));
+        assert!(is_non_prose_structured_text("admin@sub.domain.com"));
+        // 反例
+        assert!(!is_non_prose_structured_text("hello world"));
+        assert!(!is_non_prose_structured_text("the email is valid"));
+        assert!(!is_non_prose_structured_text("this is a test"));
+        assert!(!is_non_prose_structured_text("some text here"));
+        assert!(!is_non_prose_structured_text("contact us please"));
+    }
+
+    #[test]
+    fn structured_text_css_declaration() {
+        // 正例
+        assert!(is_non_prose_structured_text("--accent: #ff0000;"));
+        assert!(is_non_prose_structured_text("color: red;"));
+        assert!(is_non_prose_structured_text("--my-var"));
+        assert!(is_non_prose_structured_text("background-color: #fff;"));
+        assert!(is_non_prose_structured_text("margin: 0 auto;"));
+        // 反例
+        assert!(!is_non_prose_structured_text("hello world"));
+        assert!(!is_non_prose_structured_text("the CSS is valid"));
+        assert!(!is_non_prose_structured_text("this is a test"));
+        assert!(!is_non_prose_structured_text("some text here"));
+        assert!(!is_non_prose_structured_text("color is red"));
+    }
+
+    #[test]
+    fn structured_text_short_json() {
+        // 正例
+        assert!(is_non_prose_structured_text(r#"{"key": "value"}"#));
+        assert!(is_non_prose_structured_text(r#"[1, 2, 3]"#));
+        assert!(is_non_prose_structured_text(r#"{"a": 1, "b": 2}"#));
+        assert!(is_non_prose_structured_text(r#"{"nested": {"inner": true}}"#));
+        assert!(is_non_prose_structured_text(r#"["a", "b"]"#));
+        // 反例
+        assert!(!is_non_prose_structured_text("hello world"));
+        assert!(!is_non_prose_structured_text("the JSON is valid"));
+        assert!(!is_non_prose_structured_text("this is a test"));
+        assert!(!is_non_prose_structured_text("some text here"));
+        assert!(!is_non_prose_structured_text("a plain string"));
+    }
+
+    #[test]
+    fn structured_text_command_args() {
+        // 正例
+        assert!(is_non_prose_structured_text("--help"));
+        assert!(is_non_prose_structured_text("npm install -g"));
+        assert!(is_non_prose_structured_text("--output=xml"));
+        assert!(is_non_prose_structured_text("-v --verbose"));
+        assert!(is_non_prose_structured_text("git commit -m"));
+        // 反例
+        assert!(!is_non_prose_structured_text("hello world"));
+        assert!(!is_non_prose_structured_text("the command is valid"));
+        assert!(!is_non_prose_structured_text("this is a test"));
+        assert!(!is_non_prose_structured_text("some text here"));
+        assert!(!is_non_prose_structured_text("a short string"));
+    }
+
+    #[test]
+    fn structured_text_code_identifier() {
+        // 正例
+        assert!(is_non_prose_structured_text("camelCaseVar"));
+        assert!(is_non_prose_structured_text("snake_case_var"));
+        assert!(is_non_prose_structured_text("PascalCase"));
+        assert!(is_non_prose_structured_text("SCREAMING_SNAKE"));
+        assert!(is_non_prose_structured_text("module.function"));
+        assert!(is_non_prose_structured_text("obj.method2"));
+        // 反例
+        assert!(!is_non_prose_structured_text("hello world"));
+        assert!(!is_non_prose_structured_text("the identifier is valid"));
+        assert!(!is_non_prose_structured_text("this is a test"));
+        assert!(!is_non_prose_structured_text("some text here"));
+        assert!(!is_non_prose_structured_text("just a word"));
+    }
+
+    #[test]
+    fn structured_text_explicit_translate_not_suppressed() {
+        // 显式"翻译 …"前缀不受抑制
+        assert!(!is_non_prose_structured_text("翻译 hello world"));
+        assert!(!is_non_prose_structured_text("翻译 #ff0000"));
+        assert!(!is_non_prose_structured_text("translate this code"));
+        assert!(!is_non_prose_structured_text("translate --help"));
+        assert!(!is_non_prose_structured_text("翻译 user@example.com"));
+    }
+
+    #[test]
+    fn needs_translation_structured_text_guard() {
+        // 结构化文本不应触发翻译
+        assert!(!needs_translation("#ff0000", "zh"));
+        assert!(!needs_translation("550e8400-e29b-41d4-a716-446655440000", "zh"));
+        assert!(!needs_translation("192.168.1.1", "zh"));
+        assert!(!needs_translation("user@example.com", "zh"));
+        assert!(!needs_translation("--help", "zh"));
+        // 但显式"翻译 …"前缀放行
+        assert!(needs_translation("翻译 hello world", "zh"));
+        assert!(needs_translation("translate this text", "zh"));
     }
 }

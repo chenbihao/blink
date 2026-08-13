@@ -81,6 +81,11 @@ export function getSeq() {
  * - contextmenu `resetItemHistory` 后 retrigger
  */
 export function retrigger() {
+  // 0.20.2: 剪贴板模式下右键删除后维持在 chord 内——刷新列表但保持当前页号
+  if (clipboardMode.isActive()) {
+    clipboardMode.reloadList();
+    return;
+  }
   if (queryEl.value.trim()) {
     onInput();
   } else {

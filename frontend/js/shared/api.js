@@ -210,6 +210,13 @@ export function getClipboardText(id) {
   return invoke("get_clipboard_text", { id });
 }
 
+/** 0.20.2：按 id 批量拉取完整 text（批量原子复制用）。
+ *  @param {string[]} ids clipboard_history 表主键列表
+ *  @returns {Promise<Array<{id: string, text: string|null}>>} 批量结果，顺序与输入一致 */
+export function getClipboardTextBatch(ids) {
+  return invoke("get_clipboard_text_batch", { ids });
+}
+
 /** 隐藏截图覆盖窗（ESC 取消调；无选区路径走这里）。 */
 export function hideScreenshotOverlay() {
   return invoke("hide_screenshot_overlay");
@@ -549,6 +556,16 @@ export function showStickyManager() {
 /** 0.17.7：将便签移入回收站（软删除）。 */
 export function trashStickyNote(id) {
   return invoke("trash_sticky_note", { id });
+}
+
+/** 0.20.0：原子关闭便签。空内容→物理删除，非空→保存最终内容并移入回收站。
+ * 返回 { kind: "deleted_empty" | "trashed" }。失败时窗口不关闭。 */
+export function closeStickyNote(id, finalContent, expectedUpdatedAt) {
+  return invoke("close_sticky_note", {
+    id,
+    finalContent: finalContent ?? "",
+    expectedUpdatedAt: expectedUpdatedAt ?? null,
+  });
 }
 
 /** 0.17.7：从回收站恢复便签。 */

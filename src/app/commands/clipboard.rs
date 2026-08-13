@@ -92,6 +92,30 @@ pub async fn get_clipboard_text(app: tauri::AppHandle, id: String) -> Result<Opt
     Ok(text)
 }
 
+/// 0.20.2：按 id 批量拉取完整 text（批量原子复制用）。
+///
+/// 接受 id 列表，返回 `[{ id, text }]`——text 为 null 表示未找到。
+/// 前端收到后检查是否有 null，有则整体放弃复制。
+#[tauri::command]
+pub async fn get_clipboard_text_batch(
+    app: tauri::AppHandle,
+    ids: Vec<String>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let pool = &app.state::<crate::infra::data::DbPools>().history;
+    let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+    let results = crate::infra::data::clipboard::get_text_batch_by_ids(pool, &id_refs).await;
+    let json_results: Vec<serde_json::Value> = results
+        .into_iter()
+        .map(|(id, text)| {
+            serde_json::json!({
+                "id": id,
+                "text": text,
+            })
+        })
+        .collect();
+    Ok(json_results)
+}
+
 /// 删除指定剪贴板条目。
 #[tauri::command]
 pub async fn delete_clipboard_item(app: tauri::AppHandle, id: String) -> Result<(), String> {

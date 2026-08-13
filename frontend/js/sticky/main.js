@@ -27,8 +27,11 @@ import {
   destroyStickyWindow,
   openContentEditor,
   trashStickyNote,
+  closeStickyNote,
   showStickyManager,
 } from "../shared/api.js";
+import { normalizeError } from "../shared/tauri.js";
+import { createSwatchRow } from "./palette.js";
 
 // ── 状态 ──────────────────────────────────────────────
 
@@ -344,11 +347,78 @@ async function loadStickyData() {
     // 应用置顶状态
     updatePinButton(stickyNote.alwaysOnTop);
 
+    // 0.20.0：同步窗口标题（从内容派生）
+    syncWindowTitle(stickyNote.content || "");
+
     // 聚焦编辑器
     focusEditor();
   } catch (e) {
     console.error("[sticky] 加载便签数据失败:", e);
   }
+}
+
+/**
+ * 0.20.0：从便签内容派生标题并设置到窗口。
+ * 空内容时设置为"便签"（或 "Sticky"）。
+ */
+function syncWindowTitle(content) {
+  const win = getCurrentWindow();
+  if (!win) return;
+  const isZh = document.documentElement?.lang?.startsWith("zh");
+  const title = deriveTitle(content, isZh ? "zh" : "en");
+  win.setTitle(title).catch((e) => {
+    console.warn("[sticky] 设置窗口标题失败:", e);
+  });
+}
+
+/**
+ * 0.20.0：从便签内容派生标题（前端侧简化版，与后端 derive_sticky_title 同语义）。
+ * 前端无法调 Rust 纯函数，此处实现一个等价的 JS 版本。
+ */
+function deriveTitle(content, locale) {
+  // 取第一条非空行
+  const lines = (content || "").split("\n");
+  let firstLine = "";
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed) {
+      firstLine = trimmed;
+      break;
+    }
+  }
+  if (!firstLine) {
+    return locale === "zh" ? "便签" : "Sticky";
+  }
+  // 剥离 Markdown 前缀和行内标记
+  let cleaned = stripMarkdown(firstLine);
+  // 截断到 48 字符
+  cleaned = Array.from(cleaned).slice(0, 48).join("");
+  return cleaned || (locale === "zh" ? "便签" : "Sticky");
+}
+
+/** 剥离 Markdown 标记 */
+function stripMarkdown(s) {
+  let r = s;
+  // 标题前缀
+  r = r.replace(/^#{1,6}\s*/, "");
+  // 引用
+  r = r.replace(/^>\s*/, "");
+  // 任务列表
+  r = r.replace(/^[-*+]\s*\[[ xX]\]\s*/, "");
+  // 无序列表
+  r = r.replace(/^[-*+]\s+/, "");
+  // 有序列表
+  r = r.replace(/^\d{1,3}[.)]\s+/, "");
+  // 行内标记
+  r = r.replace(/\*\*(.+?)\*\*/g, "$1");
+  r = r.replace(/__(.+?)__/g, "$1");
+  r = r.replace(/\*(.+?)\*/g, "$1");
+  r = r.replace(/_(.+?)_/g, "$1");
+  r = r.replace(/~~(.+?)~~/g, "$1");
+  r = r.replace(/`(.+?)`/g, "$1");
+  // 链接
+  r = r.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1");
+  return r;
 }
 
 // ── Tiptap IR 编辑器初始化（0.18.3）──────────────────────────
@@ -492,6 +562,8 @@ async function saveContent() {
   const content = getContent();
   try {
     await updateStickyContent(stickyId, content);
+    // 0.20.0：内容保存后同步窗口标题（从派生标题跟随内容变化）
+    syncWindowTitle(content);
   } catch (e) {
     console.error("[sticky] 保存内容失败:", e);
   }
@@ -670,12 +742,11 @@ function bindMoreMenu() {
 // ── 窗口控制 ──────────────────────────────────────────
 
 function bindWindowControls() {
-  // 0.17.7：关闭 = 移入回收站（后端 CloseRequested handler 负责 trash + hide）
-  // 前端只需 flush 保存，然后触发 close（后端 prevent_close + trash + hide）
-  closeBtn.addEventListener("click", async () => {
-    await flushSave();
-    const win = getCurrentWindow();
-    if (win) win.close();
+  // 0.20.0：关闭 = 原子关闭工作流（空→删除，非空→保存+回收站）
+  // 前端先 flush 未保存防抖，然后调用 closeStickyNote API，
+  // 成功后才隐藏窗口。失败时保持窗口与内容并显示错误。
+  closeBtn.addEventListener("click", () => {
+    closeSticky();
   });
 
   // 置顶切换
@@ -706,22 +777,74 @@ function updatePinButton(active) {
 
 function bindKeyboard() {
   document.addEventListener("keydown", (e) => {
-    // ESC：内容为空时关闭（隐藏）便签窗口
+    // ESC：关闭便签窗口（走原子关闭工作流）
     if (e.key === "Escape") {
       e.preventDefault();
-      if (!getContent().trim()) {
-        closeSticky();
-      }
+      closeSticky();
       return;
     }
   });
 }
 
-/** 关闭（隐藏）便签窗口 */
+/**
+ * 关闭便签窗口（0.20.0 原子关闭工作流）。
+ *
+ * 直接调用 closeStickyNote API，由后端在一次调用中完成：
+ * 保存最终内容 + delete/trash 决策。
+ * 空内容 → 物理删除；非空 → 保存最终内容并移入回收站。
+ * 成功后隐藏窗口。失败时保持窗口与内容并显示错误。
+ *
+ * 不先调 flushSave：getContent() 已拿到编辑器最新内容（含未防抖保存的修改），
+ * 传给后端 close_note 即可在一次事务中保存。传 null 作为 expected_updated_at
+ * 避免与之前防抖保存产生的 updated_at 冲突。
+ */
 async function closeSticky() {
-  await flushSave();
-  const win = getCurrentWindow();
-  if (win) win.close();
+  if (!stickyId) {
+    // 无 stickyId（预热/异常态）→ 直接隐藏
+    const win = getCurrentWindow();
+    if (win) win.hide();
+    return;
+  }
+
+  const content = getContent();
+  try {
+    const outcome = await closeStickyNote(stickyId, content, null);
+    // 成功：根据结果打日志（不记录正文）
+    if (outcome?.kind === "deleted_empty") {
+      console.log("[sticky] 便签已关闭（空→删除）");
+    } else if (outcome?.kind === "trashed") {
+      console.log("[sticky] 便签已关闭（非空→回收站）");
+    }
+    // 隐藏窗口（后端 close_sticky_and_notify 已调 hide_sticky_window，
+    // 但前端也 hide 确保 UI 即时响应）
+    const win = getCurrentWindow();
+    if (win) win.hide();
+  } catch (e) {
+    // 失败：保持窗口与内容，显示错误
+    const err = normalizeError(e);
+    console.error(`[sticky] 原子关闭失败 [${err.code}]: ${err.message}`);
+    showError(err.message);
+  }
+}
+
+/**
+ * 显示错误反馈（便签窗口内）。
+ * 复用右键菜单区域的临时提示，避免引入额外的 DOM 结构。
+ */
+function showError(message) {
+  // 简单方案：在 closeBtn 旁边显示临时提示，3 秒后消失
+  let errEl = document.getElementById("sticky-error-hint");
+  if (!errEl) {
+    errEl = document.createElement("div");
+    errEl.id = "sticky-error-hint";
+    errEl.className = "sticky-error-hint";
+    rootEl.appendChild(errEl);
+  }
+  errEl.textContent = message;
+  errEl.hidden = false;
+  setTimeout(() => {
+    if (errEl) errEl.hidden = true;
+  }, 3000);
 }
 
 // ── 窗口几何追踪与持久化 ──────────────────────────────
@@ -818,20 +941,10 @@ function showContextMenu(x, y) {
   // 分割线
   menu.appendChild(makeSeparator());
 
-  // 改颜色（内联色板）
-  // const colorLabel = document.createElement("div");
-  // colorLabel.className = "ctx-submenu-label";
-  // colorLabel.textContent = "改颜色";
-  // menu.appendChild(colorLabel);
-
-  const colorRow = document.createElement("div");
-  colorRow.className = "ctx-color-row";
-  for (const color of ["theme", "yellow", "pink", "purple", "blue", "green", "gray"]) {
-    const swatch = document.createElement("button");
-    swatch.className = `ctx-color-swatch`;
-    swatch.style.background = colorSwatchBg(color);
-    swatch.title = color;
-    swatch.addEventListener("click", async () => {
+  // 0.20.0：改颜色——共享色板模块，只消费颜色 id 与 CSS class
+  const colorRow = createSwatchRow({
+    selectedColor: stickyNote?.color,
+    onSelect: async (color) => {
       hideContextMenu();
       applyColor(color);
       try {
@@ -839,9 +952,8 @@ function showContextMenu(x, y) {
       } catch (e) {
         console.error("[sticky] 更新颜色失败:", e);
       }
-    });
-    colorRow.appendChild(swatch);
-  }
+    },
+  });
   menu.appendChild(colorRow);
 
   // 分割线
@@ -914,18 +1026,6 @@ function makeSeparator() {
   return sep;
 }
 
-function colorSwatchBg(color) {
-  const map = {
-    theme: "var(--accent)",
-    yellow: "#fdd835",
-    pink: "#f48fb1",
-    purple: "#ce93d8",
-    blue: "#90caf9",
-    green: "#a5d6a7",
-    gray: "#bdbdbd",
-  };
-  return map[color] || "#fdd835";
-}
 
 // ── 退出前 flush（0.16.11）────────────────────────────
 
@@ -968,6 +1068,8 @@ window.__stickyDestroyEditor = function () {
  * 0.18.3 N+1：spare 回收时后端 eval 调用此函数，重置到预热态。
  * 销毁编辑器、清除计时器、重置 stickyId，然后通知后端已就绪。
  * initReady 保持 true——realStickyReload 已注册，下次 __stickyReload 可直接执行。
+ *
+ * 0.20.0：回收时重置窗口标题，防止下一张便签继承旧标题。
  */
 window.__stickyReset = function () {
   if (window.__stickyDestroyEditor) {
@@ -982,6 +1084,12 @@ window.__stickyReset = function () {
   if (geometryTimer) {
     clearTimeout(geometryTimer);
     geometryTimer = null;
+  }
+  // 0.20.0：重置窗口标题到本地化默认值
+  const isZh = document.documentElement?.lang?.startsWith("zh");
+  const win = getCurrentWindow();
+  if (win) {
+    win.setTitle(isZh ? "便签" : "Sticky").catch(() => {});
   }
   console.log("[sticky] spare 已回收，通知后端就绪");
   // 通知后端：回收完成，可被借用

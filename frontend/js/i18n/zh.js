@@ -371,8 +371,8 @@ export const zh = {
     "chord.binding.reset": "恢复默认",
     "chord.binding.voice_input.locked": "语音输入键位由热键配置决定，暂不支持在此修改",
 "chord.binding.fixed.locked": "此动作键位固定，暂不支持改绑",
-    "chord.clipboard.display_count.label": "单次展示条数",
-    "chord.clipboard.display_count.hint": "Alt+C 或搜索\"剪贴板\"时一次显示多少条（1-200，默认 30）",
+"chord.clipboard.display_pages.label": "加载页数",
+"chord.clipboard.display_pages.hint": "Alt+C 或搜索\"剪贴板\"时一次加载几页（每页条数由搜索设置控制，1-20，默认 3）",
     "chord.clipboard.max_items.label": "最大历史条数",
     "chord.clipboard.max_items.hint": "超过此数量自动淘汰最旧记录（建议 50-500）",
     "chord.clipboard.retention_days.label": "保留天数",
@@ -982,6 +982,7 @@ export const zh = {
     "menu.openSettings": "打开设置",
     "menu.exit": "退出 Blink",
     "menu.stickyManager": "便签管理",
+    "menu.createStickyFromQuery": "从搜索文本创建便签",
     "menu.open": "打开",
     "menu.openFolder": "打开所在文件夹",
     "menu.openLnkTarget": "打开快捷方式目标",
@@ -996,6 +997,7 @@ export const zh = {
     "menu.pin": "钉图",
     "menu.sticky": "钉为便签",
     "menu.delete": "删除记录",
+    "menu.copySelected": "复制选中的 {count} 条",
 
     // ── 主窗口：提示栏 ──
     "hint.open": "打开",
@@ -1062,4 +1064,25 @@ export const zh = {
     "command.error": "执行失败：{message}",
 // ── 0.19.15 剪贴板模式 ──
 "clipboard.mode_placeholder": "搜索剪贴板历史…",
+// ── 0.20.0 动作错误投影 ──
+"action.error.invalid_args": "参数错误：{message}",
+"action.error.invalid_state": "状态不允许：{message}",
+"action.error.conflict": "内容已变更，请重试：{message}",
+"action.error.invalid_data": "数据无效：{message}",
+"action.error.permission_denied": "权限不足：{message}",
+"action.error.timeout": "操作超时：{message}",
+"action.error.cancelled": "操作已取消",
+"action.error.not_found": "未找到：{message}",
+"action.error.internal": "内部错误：{message}",
+"action.error.runtime": "执行失败：{message}",
+"action.error.missing_arg": "缺少参数：{message}",
+"action.error.unknown": "操作失败：{message}",
+// ── 0.20.2 剪贴板多选 ──
+"clipboard.selected_count": "已选择 {count} 段文本",
+"clipboard.loading_count": "正在加载 {count} 项…",
+"clipboard.copied_count": "已复制 {count} 段文本",
+"clipboard.copy_failed": "批量复制失败：{message}",
+"clipboard.hint_select": "单击选择 · Ctrl+A 全选 · Ctrl+C 批量复制",
+"clipboard.hint_selected": "Ctrl+C 复制 {count} 段 · 右键菜单可复制选中项 · Esc 取消选择",
+"clipboard.item_unavailable": "部分内容已不可用",
 };

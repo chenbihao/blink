@@ -243,6 +243,32 @@ pub async fn show_sticky_manager_cmd(app: AppHandle) -> Result<(), String> {
     crate::infra::platform::window::show_sticky_manager_window(&app)
 }
 
+// ── 0.20.0 原子关闭 ──────────────────────────────────
+
+/// 原子关闭便签（0.20.0）。
+///
+/// 在同一后端工作流内完成 revision 校验、最终内容保存和 delete/trash 决策。
+/// 空内容 → 物理删除；非空 → 保存最终内容并移入回收站。
+/// 成功后隐藏窗口并广播对应事件。
+/// 失败时窗口不关闭，内容保留在编辑器中。
+///
+/// 返回 `{ kind: "deleted_empty" | "trashed" }` 供前端决定后续 UI 反馈。
+#[tauri::command]
+pub async fn close_sticky_note(
+    app: AppHandle,
+    id: String,
+    final_content: String,
+    expected_updated_at: Option<i64>,
+) -> Result<crate::domain::sticky::StickyCloseOutcome, String> {
+    let env = app
+        .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
+        .inner()
+        .clone();
+    env.close_sticky_and_notify(&id, &final_content, expected_updated_at)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ── 0.17.7 回收站 IPC ──────────────────────────────────
 
 /// 将便签移入回收站（软删除）。

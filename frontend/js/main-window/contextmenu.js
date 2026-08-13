@@ -5,10 +5,12 @@
 
 import { queryEl, resultsEl } from "./dom.js";
 import { activateItem } from "./actions.js";
-import { openContainingFolder, openLnkTarget, resetItemHistory, runBuiltinAction, copyToClipboard, deleteClipboardItem, deleteClipboardImage, hideWindow, invoke, triggerChord, listChordActions, pinClipboardImage, showStickyManager } from "../shared/api.js";
+import { openContainingFolder, openLnkTarget, resetItemHistory, runBuiltinAction, copyToClipboard, deleteClipboardItem, deleteClipboardImage, hideWindow, invoke, triggerChord, listChordActions, pinClipboardImage, showStickyManager, createStickyNote, showStickyWindow } from "../shared/api.js";
 import { retrigger } from "./search.js";
 import { t, getLang } from "../i18n/index.js";
+import { showActionError } from "./action-error.js";
 import { EVENTS } from "../shared/event-names.js";
+import * as clipboardMode from "./clipboard-mode.js";
 
 /** 当前菜单数据（用于 Popup 点击时回调执行）。 */
 let currentItems = [];
@@ -34,6 +36,16 @@ export function init() {
       items = itemMenu(li);
     } else {
       items = unifiedMenu();
+    }
+
+    // 0.20.2: 剪贴板模式下有多选时，在菜单顶部插入「复制选中的 N 条」
+    if (clipboardMode.isActive() && clipboardMode.hasSelection()) {
+      const count = clipboardMode.getSelectionCount();
+      items = [
+        { label: t("menu.copySelected", { count }), run: () => clipboardMode.batchCopy() },
+        { separator: true },
+        ...items,
+      ];
     }
 
     if (!items.length) return;
@@ -200,6 +212,25 @@ function unifiedMenu() {
         run: () => triggerChord(a.key),
       });
     }
+  }
+
+  // 0.20.0：显式“从查询创建便签”动作——Alt+S 永远创建空白便签后，
+  // 用户仍可通过右键菜单从当前 query 文本创建带内容的便签
+  if (hasText) {
+    items.push({ separator: true });
+    items.push({
+      label: t("menu.createStickyFromQuery"),
+      run: async () => {
+        try {
+          const text = queryEl.value;
+          const note = await createStickyNote(text);
+          await showStickyWindow(note.id, true);
+          hideWindow();
+        } catch (e) {
+          showActionError("create_sticky_from_query", e);
+        }
+      },
+    });
   }
 
   // 0.18.4：新增便签管理入口（独立分组，在打开设置上方）

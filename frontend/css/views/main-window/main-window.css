@@ -255,6 +255,29 @@ body.voice-error #ghost-overlay .ghost-chord {
   opacity: 1;
 }
 
+/* ── 0.20.0 动作错误投影 ──────────────────────────────────────────────── */
+/* 内置动作失败时在 statusbar 上叠加的临时错误提示。3.5s 后自动移除。
+   绝对定位覆盖在 statusbar 内容上方，不替换原有 DOM，避免破坏事件监听。 */
+#statusbar.has-action-error {
+  position: relative;
+}
+
+.action-error-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  padding: var(--space-sm) var(--space-md);
+  font-size: var(--text-sm);
+  color: var(--accent);
+  background: var(--bg-elevated, var(--bg-base));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  -webkit-app-region: no-drag;
+  z-index: 1;
+}
+
 /* ── 0.19.15 剪贴板模式徽章 ────────────────────────────────────────────── */
 /* Alt+C 进入剪贴板模式后，搜索栏右侧显示模式徽章。 */
 .clipboard-mode-badge {

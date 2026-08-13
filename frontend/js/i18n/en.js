@@ -370,8 +370,8 @@ export const en = {
     "chord.binding.reset": "Reset to default",
     "chord.binding.voice_input.locked": "Voice input key is bound to the hotkey config and cannot be changed here",
 "chord.binding.fixed.locked": "This action's key is fixed and cannot be rebound yet",
-    "chord.clipboard.display_count.label": "Display count",
-    "chord.clipboard.display_count.hint": "How many entries to show at once via Alt+C or searching \"clip\" (1-200, default 30)",
+"chord.clipboard.display_pages.label": "Display pages",
+"chord.clipboard.display_pages.hint": "How many pages to load at once via Alt+C or searching \"clip\" (page size is controlled by search settings, 1-20, default 3)",
     "chord.clipboard.max_items.label": "Max history items",
     "chord.clipboard.max_items.hint": "Oldest entries are evicted beyond this count (50-500 recommended)",
     "chord.clipboard.retention_days.label": "Retention days",
@@ -981,6 +981,7 @@ export const en = {
     "menu.openSettings": "Open Settings",
     "menu.exit": "Quit Blink",
     "menu.stickyManager": "Sticky Manager",
+    "menu.createStickyFromQuery": "Create Sticky from Query",
     "menu.open": "Open",
     "menu.openFolder": "Open containing folder",
     "menu.openLnkTarget": "Open shortcut target",
@@ -995,6 +996,7 @@ export const en = {
 "menu.pin": "Pin",
     "menu.sticky": "Sticky",
     "menu.delete": "Delete",
+    "menu.copySelected": "Copy {count} selected items",
 
     // ── Main window: status bar ──
     "hint.open": "Open",
@@ -1061,4 +1063,25 @@ export const en = {
     "command.error": "Execution failed: {message}",
 // ── 0.19.15 Clipboard mode ──
 "clipboard.mode_placeholder": "Search clipboard history…",
+// ── 0.20.0 Action error projection ──
+"action.error.invalid_args": "Invalid args: {message}",
+"action.error.invalid_state": "Invalid state: {message}",
+"action.error.conflict": "Content changed, please retry: {message}",
+"action.error.invalid_data": "Invalid data: {message}",
+"action.error.permission_denied": "Permission denied: {message}",
+"action.error.timeout": "Operation timed out: {message}",
+"action.error.cancelled": "Operation cancelled",
+"action.error.not_found": "Not found: {message}",
+"action.error.internal": "Internal error: {message}",
+"action.error.runtime": "Execution failed: {message}",
+"action.error.missing_arg": "Missing argument: {message}",
+"action.error.unknown": "Operation failed: {message}",
+// ── 0.20.2 Clipboard multi-select ──
+"clipboard.selected_count": "Selected {count} items",
+"clipboard.loading_count": "Loading {count} items…",
+"clipboard.copied_count": "Copied {count} items",
+"clipboard.copy_failed": "Batch copy failed: {message}",
+"clipboard.hint_select": "Click to select · Ctrl+A select all · Ctrl+C batch copy",
+"clipboard.hint_selected": "Ctrl+C copy {count} items · Right-click for batch copy · Esc to deselect",
+"clipboard.item_unavailable": "Some items are no longer available",
 };

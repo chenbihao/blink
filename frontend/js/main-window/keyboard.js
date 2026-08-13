@@ -81,6 +81,13 @@ function onNavigation(e) {
     return;
   }
 
+  // 0.20.2: 剪贴板模式多选键盘拦截（Ctrl+A / Ctrl+C）
+  // 单击选中由 results.js mousedown → clipboardMode.handleMousedown 处理
+  // 非多选键返回 false，继续走正常导航
+  if (clipboardMode.isActive()) {
+    if (clipboardMode.handleKeydown(e)) return;
+  }
+
   // 0.19.15: 剪贴板模式 — 导航/激活与搜索模式一致（复用 results.js），
   // 但不拦截键盘——结果列表正常可用。
   // ESC 处理在 onEscape 中单独拦截。
@@ -138,8 +145,14 @@ function onEscape(e) {
       aiMode.exitAiMode();
       return;
     }
-    // 0.19.15: 剪贴板模式下 ESC 退出剪贴板模式（不 hide 窗口）
+    // 0.20.2: 剪贴板模式下 ESC 顺序：清空多选 → 退出剪贴板模式 → 隐藏窗口
     if (clipboardMode.isActive()) {
+      // 有多选时先清空选择，不退出模式
+      if (clipboardMode.hasSelection()) {
+        clipboardMode.clearSelection();
+        return;
+      }
+      // 无多选时退出剪贴板模式
       clipboardMode.exit();
       return;
     }
@@ -186,8 +199,10 @@ async function fireChord(key) {
   let inputText = queryEl.value;
   let originRef = null;
 
-  // E/S 需要 contextual 解析
-  if (key === "e" || key === "s") {
+  // E 需要 contextual 解析（active item 文本 > query > selection > 空白）
+  // S 直接取输入框文本——用户显式输入的内容带过去，但不读 SelectionCache。
+  //   空输入框时 Alt+S 创建空白便签。
+  if (key === "e") {
     const ctx = await resolveContextualContent();
     inputText = ctx.text;
     originRef = ctx.hitId;
