@@ -1,12 +1,12 @@
 //! 截图 overlay 绘制模块（0.14.6 §4 拆分，0.20.5 分层优化）。
 //!
 //! 0.20.5 分层架构：
-//! - #canvas（静态层）：只在 session 初始化/来源切换时 drawImage 绘制截图原图 + 暗色蒙版
-//! - #interaction-canvas（动态层）：拖拽/缩放时只清理+重绘遮罩、边框、手柄
+//! - #canvas（静态层）：只在 session 初始化/来源切换时 drawImage 绘制截图原图
+//! - #interaction-canvas（动态层）：统一绘制暗色遮罩、边框、手柄
 //! - #annot-canvas（标注层）：保持独立生命周期，不合并回动态层
 //!
 //! 从 chord-screenshot.js 提取的绘制函数：
-//! - drawStaticBase：静态底图 + 暗色蒙版（初始化/来源切换/drawDimmed 时调）
+//! - drawStaticBase：静态原图（初始化/来源切换/drawDimmed 时调）
 //! - drawSelection：选区拖拽中的实时绘制（只画动态层）
 //! - drawFinalSelection：选区确定后的静态绘制（只画动态层）
 //! - redrawAnnotPreview：标注实时预览
@@ -76,8 +76,8 @@ export function syncInteractionCanvasSize() {
 
 /**
  * 0.20.5：绘制静态底图层。
- * 只在 session 初始化/来源切换/无选区暗色蒙版时调用，不在拖拽/缩放循环中调用。
- * 画截图原图 + 全屏暗色蒙版到主 canvas，并清空动态交互层。
+ * 只在 session 初始化/来源切换时调用，不在拖拽/缩放循环中调用。
+ * 主 canvas 永远只保存截图原图；所有遮罩统一画到 interaction canvas，确保选区可真正透出原色。
  */
 export function drawStaticBase() {
   try {
@@ -91,8 +91,6 @@ export function drawStaticBase() {
     syncInteractionCanvasSize();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(getScreenshotSource(), 0, 0);
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
     // 清空动态交互层
     if (interactionCtx) {
       interactionCtx.clearRect(0, 0, canvas.width, canvas.height);
@@ -102,9 +100,13 @@ export function drawStaticBase() {
   }
 }
 
-/** 暗色蒙版（初始态 + 无选区时）—— 0.20.5：委托到 drawStaticBase */
+/** 暗色蒙版（初始态 + 无选区时）：原图在静态层，整屏遮罩只画到交互层。 */
 export function drawDimmed() {
   drawStaticBase();
+  const { interactionCtx, interactionCanvas } = ss;
+  if (!interactionCtx || !interactionCanvas) return;
+  interactionCtx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+  interactionCtx.fillRect(0, 0, interactionCanvas.width, interactionCanvas.height);
 }
 
 /**

@@ -66,7 +66,8 @@ import {
   compositeSelection, doCancel, hasActivePanel, outputEditorPng,
   cleanupCanvasVisuals,
 } from "./ss-output.js";
-import { bindToolbar, showTextInput, updateUndoRedoButtons, selectTool, cycleToolInGroup, TOOL_GROUPS } from "./ss-toolbar.js";
+import { bindToolbar, showTextInput, updateUndoRedoButtons, selectTool, cycleToolInGroup, TOOL_GROUPS, resetToolbarDropdowns } from "./ss-toolbar.js";
+import { resetPaletteState } from "./ss-palette.js";
 // 0.15.8：智能窗口吸附 + 像素放大镜
 import { loadPickableWindows, clearPickableWindows, updateWindowHover, getHoveredWindowRect, clearHover, hideWindowHintIfVisible, showWindowHintIfPending } from "./ss-hover.js";
 // 0.18.2：控件级智能吸附（跨屏预选版）
@@ -364,6 +365,8 @@ function resetState() {
   ss.colorPickerMode = 'idle';
   ss._pickerBitmapPos = null;
   if (ss.precisionHint) ss.precisionHint.classList.add('hidden');
+  try { resetToolbarDropdowns(); } catch (e) { console.warn('[screenshot] resetState: dropdown reset failed', e); }
+  try { resetPaletteState(); } catch (e) { console.warn('[screenshot] resetState: palette reset failed', e); }
   // 长截图状态、在途任务与 DOM 统一由 resetScrollCaptureSession 清理。
   _spaceDown = false;
   try {
@@ -655,6 +658,9 @@ function enterAnnotationMode(rect) {
   const _t0 = performance.now();
   console.debug('[screenshot] enterAnnotationMode', rect);
   const { annotCanvas, screenshot } = ss;
+
+  // 新选区（含移动/缩放后重新进入）不能沿用旧图的聚类、展开与基准色。
+  resetPaletteState();
 
   ss.selCss = rect;
   ss.editorSession.beginScreenshotSelection();

@@ -705,6 +705,11 @@ body.image-editor-mode #canvas.long-image-editing {
   align-items: center;
 }
 
+.dropdown-trigger.menu-open {
+  color: var(--accent);
+  background: var(--accent-bg);
+}
+
 /* 颜色触发器里的圆点（0.11.8-b：改实心圆，与 .color-swatch 视觉统一） */
 .color-dot {
   display: inline-block;
@@ -822,8 +827,54 @@ body.image-editor-mode #canvas.long-image-editing {
 
 /* 颜色下拉特殊布局：0.15.4 完整色盘 */
 .dropdown-color {
-  padding: 6px;
-  min-width: 220px;
+  padding: 8px;
+  width: 286px;
+  min-width: 286px;
+  max-height: min(720px, calc(100vh - 24px));
+  background: color-mix(in srgb, var(--bg) 96%, transparent);
+  border-color: color-mix(in srgb, var(--text) 18%, transparent);
+  box-shadow: 0 6px 20px var(--shadow);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: auto;
+}
+
+/* JS 生成结果后会切 hidden；显式声明避免 flex/grid author style 覆盖 UA hidden。 */
+.dropdown-color [hidden] {
+  display: none;
+}
+
+.color-panel-drag {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 24px;
+  margin: -2px -2px 6px;
+  padding: 0 4px 5px;
+  border-bottom: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
+  color: var(--text-sub);
+  cursor: grab;
+  user-select: none;
+  font-style: normal;
+  position: sticky;
+  top: -2px;
+  z-index: 1;
+  background: var(--bg);
+}
+
+.color-panel-drag:active {
+  cursor: grabbing;
+}
+
+.color-panel-title {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.color-panel-drag-hint {
+  font-size: 10px;
+  opacity: 0.62;
 }
 
 /* 预设色阵列 */
@@ -962,65 +1013,102 @@ body.image-editor-mode #canvas.long-image-editing {
   box-shadow: 0 0 0 2px rgba(74, 158, 255, 0.15);
 }
 
-/* ── 0.15.6：配色提取（median cut + harmony）────────────── */
+/* ── 0.20.7：配色提取与可用输出 ────────────────────────── */
 
 .palette-divider {
   height: 1px;
-  background: rgba(255, 255, 255, 0.1);
-  margin: 6px 0;
+  background: color-mix(in srgb, var(--text) 12%, transparent);
+  margin: 8px 0;
+}
+
+.palette-section-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  font-style: normal;
+}
+
+.palette-source-heading {
+  align-items: center;
 }
 
 .palette-extract-btn {
-  flex: 1;
-  height: 26px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: var(--radius-xs);
-  color: #ccc;
-  font-size: 12px;
+  width: auto;
+  height: 22px;
+  padding: 0 9px;
+  background: var(--accent-bg);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: var(--radius-md);
+  color: var(--accent);
+  font-size: 10px;
   font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-weight: 600;
   cursor: pointer;
-  transition: background 0.1s ease;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
 }
 
 .palette-extract-btn:hover {
-  background: rgba(74, 158, 255, 0.15);
-  color: #fff;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: var(--accent);
 }
 
-/* 主色板 + harmony 色板共用 swatch 样式 */
-.palette-extract-row {
-  display: flex;
-  gap: 4px;
-  margin-top: 0;
+.palette-extracted {
+  display: block;
+  margin-top: 6px;
 }
 
-/* 0.15.12：宽度与取色按钮/色彩格式对齐 */
-.palette-count {
-  width: 56px;
-  min-width: 56px;
-  background: rgba(0, 0, 0, 0.35);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  color: #ccc;
-  font-size: 11px;
-  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-  padding: 3px 4px;
-  border-radius: var(--radius-xs);
-  cursor: pointer;
-  outline: none;
-}
-
-.palette-count option {
-  background: #2a2a2a;
-  color: #eee;
-}
-
-.palette-extracted,
-.harmony-swatches {
+.palette-theme-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 3px;
-  margin-top: 4px;
+  gap: 4px;
+}
+
+.palette-theme-summary {
+  margin-top: 5px;
+  color: var(--text-sub);
+  font-size: 10px;
+  line-height: 1.35;
+  opacity: 0.78;
+  font-style: normal;
+}
+
+.palette-theme-color {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 2px 6px 2px 3px;
+  border: 1px solid color-mix(in srgb, var(--text) 13%, transparent);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--surface) 48%, transparent);
+  color: var(--text-sub);
+  font: 10px/1 "Segoe UI", "Microsoft YaHei", sans-serif;
+  cursor: pointer;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.palette-theme-color:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.palette-theme-color.is-selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.palette-theme-swatch {
+  width: 20px;
+  height: 20px;
+  border: 1px solid color-mix(in srgb, var(--text) 22%, transparent);
+  border-radius: var(--radius-sm);
+}
+
+.palette-theme-label {
+  white-space: nowrap;
 }
 
 .palette-swatch {
@@ -1040,43 +1128,198 @@ body.image-editor-mode #canvas.long-image-editing {
 
 /* 复制反馈 */
 .palette-swatch.copied {
-  border-color: #4a9eff;
-  box-shadow: 0 0 0 2px rgba(74, 158, 255, 0.4);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.palette-swatch.is-selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
 /* harmony 区域 */
 .palette-harmony {
-  margin-top: 4px;
+  margin-top: 10px;
 }
 
-.harmony-label {
-  font-size: 11px;
-  color: #888;
-  margin-bottom: 3px;
+/* ── 0.20.7：角色色、推荐方案、对比度、复制 UI ─────────────────── */
+
+.palette-actions-row {
+  display: grid;
+  grid-template-columns: auto minmax(70px, 1fr) minmax(96px, auto);
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
 }
 
-.harmony-schemes {
-  display: flex;
-  gap: 3px;
-  margin-bottom: 4px;
+.palette-format-label {
+  color: var(--text-sub);
+  font-size: 10px;
+  font-style: normal;
 }
 
-.harmony-scheme-btn {
-  flex: 1;
-  height: 22px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: var(--radius-xs);
-  color: #aaa;
+.palette-copy-all {
+  height: 26px;
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+  border: 1px solid color-mix(in srgb, var(--text) 14%, transparent);
+  border-radius: var(--radius-md);
+  color: var(--text-sub);
   font-size: 11px;
   font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
   cursor: pointer;
-  transition: background 0.1s ease, color 0.1s ease;
+  transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
 }
 
-.harmony-scheme-btn:hover {
-  background: rgba(74, 158, 255, 0.12);
-  color: #fff;
+.palette-copy-all:hover {
+  background: var(--accent-bg);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--accent);
+}
+
+.palette-copy-all {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}
+
+.palette-copy-all:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.palette-copy-all .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.palette-more-toggle {
+  width: auto;
+  min-width: 0;
+  margin: 0;
+  white-space: nowrap;
+}
+
+.palette-output-format {
+  width: 100%;
+  min-width: 0;
+  height: 26px;
+  background: var(--bg-deep);
+  border: 1px solid color-mix(in srgb, var(--text) 16%, transparent);
+  color: var(--text);
+  font-size: 11px;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  padding: 3px 4px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  outline: none;
+}
+
+.palette-output-format option {
+  background: var(--bg);
+  color: var(--text);
+}
+
+.palette-empty {
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 4px 0;
+}
+
+/* harmony 方案区域 */
+.harmony-scheme-label {
+  font-size: 11px;
+  color: var(--text);
+  font-weight: 600;
+  font-style: normal;
+}
+
+.harmony-scheme-header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.harmony-scheme-description {
+  overflow: hidden;
+  color: var(--text-sub);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.7;
+  font-style: normal;
+}
+
+.harmony-copy-group {
+  padding: 1px 4px;
+  border: 0;
+  background: transparent;
+  color: var(--text-sub);
+  font: 9px/1.4 "Segoe UI", "Microsoft YaHei", sans-serif;
+  cursor: pointer;
+}
+
+.harmony-copy-group:hover {
+  color: var(--accent);
+}
+
+.harmony-color-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.harmony-swatches {
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.harmony-scheme-card {
+  padding: 5px 6px;
+  border: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--surface) 46%, transparent);
+}
+
+/* 完整方案区域 */
+.palette-more-schemes {
+  margin-top: 6px;
+  display: grid;
+  gap: 6px;
+}
+
+.palette-generated-heading {
+  color: var(--text-sub);
+  font-size: 10px;
+  line-height: 1.3;
+}
+
+/* 复制失败反馈 */
+.palette-swatch.copy-failed {
+  border-color: var(--red);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--red) 30%, transparent);
+}
+
+.palette-copy-all.copy-failed {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.palette-copy-status {
+  min-height: 14px;
+  margin-top: 4px;
+  color: var(--text-sub);
+  font-size: 10px;
+  text-align: center;
+  opacity: 0.72;
+  font-style: normal;
+}
+
+.palette-copy-status:empty {
+  display: none;
 }
 
 /* ── 水印表单（0.11.8-c：内嵌 text-dropdown 视图切换）─────────────

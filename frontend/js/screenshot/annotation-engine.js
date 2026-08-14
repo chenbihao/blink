@@ -1078,6 +1078,11 @@ export function getCropSourceCanvas() {
   return cropSourceCanvas;
 }
 
+/** 供颜色分析只读扫描原始选区像素；调用方不得修改 data。 */
+export function getCropImageData() {
+  return cropImageData;
+}
+
 /** 0.15.9：放大镜倍率 getter/setter */
 export function getMagnifierZoom() { return magnifierZoom; }
 export function setMagnifierZoom(z) { magnifierZoom = Math.max(1.1, Math.min(4.0, z)); }

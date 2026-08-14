@@ -184,10 +184,14 @@
       <!-- 颜色下拉触发器（0.15.4：完整色盘 + 取色器）
            触发器圆点用 background 填色 -->
       <div class="dropdown-wrap">
-        <button class="tool-btn dropdown-trigger" id="color-trigger" title="颜色">
+        <button class="tool-btn dropdown-trigger" id="color-trigger" title="颜色" aria-expanded="false" aria-controls="color-dropdown">
           <span class="color-dot" id="color-trigger-dot" style="background:#ff0000"></span>
         </button>
         <div class="dropdown dropdown-color" id="color-dropdown" data-open="false">
+          <div class="color-panel-drag" title="拖动颜色面板">
+            <span class="color-panel-title">颜色与配色</span>
+            <span class="color-panel-drag-hint">拖动</span>
+          </div>
           <!-- 预设色阵列 -->
           <div class="color-presets">
             <button class="color-swatch active" data-color="#ff0000" title="红色" style="background:#ff0000"></button>
@@ -217,29 +221,34 @@
             </select>
             <input type="text" class="color-value" value="#FF0000" spellcheck="false" />
           </div>
-          <!-- 0.15.6：配色提取（k-means 聚类 + harmony 配色方案） -->
+          <!-- 0.20.7：来源无关配色核心（OKLab 聚类 + 角色色 + harmony + 对比度） -->
           <div class="palette-divider"></div>
-          <div class="palette-extract-row">
-            <select class="palette-count" title="提取颜色数量">
-              <option value="3">3</option>
-              <option value="5" selected>5</option>
-              <option value="8">8</option>
-              <option value="10">10</option>
-              <option value="12">12</option>
+          <div class="palette-section-heading palette-source-heading">
+            <span>配色分析</span>
+            <button class="palette-extract-btn" title="分析截图选区的主题色与配色">提取配色</button>
+          </div>
+          <div class="palette-theme-summary" hidden></div>
+          <div class="palette-actions-row" hidden>
+            <label class="palette-format-label" for="palette-output-format">复制格式</label>
+            <select class="palette-output-format" id="palette-output-format" title="复制格式">
+              <option value="hex">HEX</option>
+              <option value="rgb">RGB</option>
+              <option value="hsl">HSL</option>
+              <option value="list">列表</option>
+              <option value="css">CSS变量</option>
             </select>
-            <button class="palette-extract-btn" title="从截图选区提取主色调">提取配色</button>
+            <button class="palette-copy-all" title="复制 Ctrl+左键多选的颜色"><svg class="icon" aria-hidden="true"><use href="#icon-copy"/></svg><span>复制多选</span></button>
           </div>
-          <div class="palette-extracted" hidden></div>
           <div class="palette-harmony" hidden>
-            <div class="harmony-label">配色方案</div>
-            <div class="harmony-schemes">
-              <button class="harmony-scheme-btn" data-scheme="complementary">互补</button>
-              <button class="harmony-scheme-btn" data-scheme="triadic">三元</button>
-              <button class="harmony-scheme-btn" data-scheme="analogous">类比</button>
-              <button class="harmony-scheme-btn" data-scheme="splitComplementary">分裂互补</button>
+            <div class="palette-section-heading">
+              <span>图片取色</span>
+              <button class="palette-more-toggle palette-extract-btn" title="基于当前颜色生成配色方案">生成当前色配色方案</button>
             </div>
+            <div class="palette-extracted harmony-scheme-card" hidden></div>
             <div class="harmony-swatches"></div>
+            <div class="palette-more-schemes" hidden></div>
           </div>
+          <div class="palette-copy-status" role="status" aria-live="polite"></div>
         </div>
       </div>
 

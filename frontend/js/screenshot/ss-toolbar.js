@@ -72,9 +72,10 @@ export function selectTool(tool) {
   const hoveredWrap = document.querySelector('.dropdown-wrap:hover');
   if (hoveredWrap) {
     const dd = hoveredWrap.querySelector('.dropdown');
-    if (dd) {
+    // 颜色面板是点击式二级页面，不能被通用工具 hover 保持逻辑重新打开。
+    if (dd && dd.id !== 'color-dropdown') {
       positionDropdown(dd);
-      dd.setAttribute('data-open', 'true');
+      setDropdownOpen(dd, true);
     }
   }
 
@@ -167,17 +168,59 @@ export function cycleToolInGroup(groupName) {
 }
 
 function closeAllDropdowns() {
-  document.querySelectorAll('.dropdown').forEach((d) => d.setAttribute('data-open', 'false'));
+  document.querySelectorAll('.dropdown').forEach((d) => setDropdownOpen(d, false));
+}
+
+function setDropdownOpen(dropdown, open) {
+  dropdown.setAttribute('data-open', open ? 'true' : 'false');
+  const trigger = dropdown.closest('.dropdown-wrap')?.querySelector('.dropdown-trigger');
+  if (trigger) {
+    trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+    trigger.classList.toggle('menu-open', open);
+  }
 }
 
 function positionDropdown(dropdown) {
   if (!dropdown) return;
-  dropdown.removeAttribute('data-placement');
   const wrap = dropdown.closest('.dropdown-wrap');
   const anchor = wrap ? wrap.getBoundingClientRect() : ss.toolbar.getBoundingClientRect();
-  const mon = findDisplayCssAt(anchor.left, anchor.top);
+  const mon = findDisplayCssAt(anchor.left + anchor.width / 2, anchor.top + anchor.height / 2);
+
+  if (dropdown.id === 'color-dropdown') {
+    const uiScale = parseFloat(ss.toolbar?.dataset?.uiScale) || 1;
+    const margin = 8;
+    // 高度先受目标显示器约束，再测量实际内容；整个颜色面板用原生滚动。
+    dropdown.style.maxHeight = `${Math.max(180, (mon.h - margin * 2) / uiScale)}px`;
+    dropdown.style.visibility = 'hidden';
+    setDropdownOpen(dropdown, true);
+    const rect = dropdown.getBoundingClientRect();
+
+    if (dropdown.dataset.userMoved === 'true' && dropdown.style.left && dropdown.style.top) {
+      const clampedLeft = Math.max(mon.x + margin, Math.min(rect.left, mon.x + mon.w - rect.width - margin));
+      const clampedTop = Math.max(mon.y + margin, Math.min(rect.top, mon.y + mon.h - rect.height - margin));
+      dropdown.style.left = `${parseFloat(dropdown.style.left) + (clampedLeft - rect.left) / uiScale}px`;
+      dropdown.style.top = `${parseFloat(dropdown.style.top) + (clampedTop - rect.top) / uiScale}px`;
+      dropdown.style.visibility = '';
+      return;
+    }
+
+    const desiredLeft = Math.max(mon.x + margin, Math.min(anchor.left, mon.x + mon.w - rect.width - margin));
+    // 二级页面默认停靠在颜色按钮下方；空间不足时只向屏幕内钳制，不翻转到按钮上方。
+    const desiredTop = Math.max(
+      mon.y + margin,
+      Math.min(anchor.bottom + 4, mon.y + mon.h - rect.height - margin),
+    );
+    dropdown.removeAttribute('data-placement');
+    dropdown.style.bottom = 'auto';
+    dropdown.style.left = `${(desiredLeft - anchor.left) / uiScale}px`;
+    dropdown.style.top = `${(desiredTop - anchor.top) / uiScale}px`;
+    dropdown.style.visibility = '';
+    return;
+  }
+
+  dropdown.removeAttribute('data-placement');
   dropdown.style.visibility = 'hidden';
-  dropdown.setAttribute('data-open', 'true');
+  setDropdownOpen(dropdown, true);
   const dh = dropdown.offsetHeight;
   if (anchor.bottom + 4 + dh > mon.y + mon.h - 8 && anchor.top - 4 - dh >= mon.y + 8) {
     dropdown.setAttribute('data-placement', 'top');
@@ -185,10 +228,82 @@ function positionDropdown(dropdown) {
   dropdown.style.visibility = '';
 }
 
+/**
+ * 让颜色二级面板可独立拖动。坐标仍保存在 toolbar 的局部 CSS 空间，
+ * pointer 位移按 toolbar UI scale 反算，并用目标显示器的视觉边界钳制。
+ */
+function bindColorPanelDrag(dropdown) {
+  const handle = dropdown?.querySelector('.color-panel-drag');
+  if (!handle || handle.dataset.bound === 'true') return;
+  handle.dataset.bound = 'true';
+
+  let drag = null;
+  handle.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    const localLeft = dropdown.offsetLeft;
+    const localTop = dropdown.offsetTop;
+    const rect = dropdown.getBoundingClientRect();
+    dropdown.removeAttribute('data-placement');
+    dropdown.style.left = `${localLeft}px`;
+    dropdown.style.top = `${localTop}px`;
+    dropdown.style.bottom = 'auto';
+    dropdown.dataset.dragging = 'true';
+    dropdown.dataset.userMoved = 'true';
+    drag = {
+      startX: e.clientX,
+      startY: e.clientY,
+      startLeft: localLeft,
+      startTop: localTop,
+      screenLeft: rect.left,
+      screenTop: rect.top,
+      width: rect.width,
+      height: rect.height,
+    };
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!drag) return;
+    const uiScale = parseFloat(ss.toolbar?.dataset?.uiScale) || 1;
+    const mon = findDisplayCssAt(e.clientX, e.clientY);
+    const margin = 8;
+    const desiredLeft = drag.screenLeft + e.clientX - drag.startX;
+    const desiredTop = drag.screenTop + e.clientY - drag.startY;
+    const left = Math.max(mon.x + margin, Math.min(desiredLeft, mon.x + mon.w - drag.width - margin));
+    const top = Math.max(mon.y + margin, Math.min(desiredTop, mon.y + mon.h - drag.height - margin));
+    dropdown.style.left = `${drag.startLeft + (left - drag.screenLeft) / uiScale}px`;
+    dropdown.style.top = `${drag.startTop + (top - drag.screenTop) / uiScale}px`;
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!drag) return;
+    drag = null;
+    dropdown.dataset.dragging = 'false';
+  });
+}
+
 function toggleDropdown(dropdown) {
   const willOpen = dropdown.getAttribute('data-open') !== 'true';
   closeAllDropdowns();
   if (willOpen) positionDropdown(dropdown);
+}
+
+/** 新截图会话开始时关闭所有菜单，并让颜色面板重新跟随工具栏定位。 */
+export function resetToolbarDropdowns() {
+  closeAllDropdowns();
+  const colorDropdown = document.getElementById('color-dropdown');
+  if (!colorDropdown) return;
+  delete colorDropdown.dataset.userMoved;
+  delete colorDropdown.dataset.dragging;
+  colorDropdown.removeAttribute('data-placement');
+  colorDropdown.style.left = '';
+  colorDropdown.style.top = '';
+  colorDropdown.style.bottom = '';
+  colorDropdown.style.maxHeight = '';
+  colorDropdown.style.visibility = '';
+  colorDropdown.scrollTop = 0;
 }
 
 /** 0.15.12：二级面板显示/隐藏——根据当前工具决定显示哪个视图 */
@@ -426,20 +541,37 @@ export function bindToolbar() {
     if (!dd) return;
     const isColor = dd.id === 'color-dropdown';
 
+    if (isColor) {
+      bindColorPanelDrag(dd);
+      const trigger = wrap.querySelector('#color-trigger');
+      trigger?.addEventListener('click', (e) => {
+        // 颜色面板是点击切换的二级页面，不参与工具组的 hover-dropdown 机制。
+        e.stopPropagation();
+        const willOpen = dd.getAttribute('data-open') !== 'true';
+        closeAllDropdowns();
+        if (willOpen) {
+          positionDropdown(dd);
+          setDropdownOpen(dd, true);
+          syncFromAnnot();
+        }
+      });
+      dd.addEventListener('palette-layout-changed', () => {
+        if (dd.getAttribute('data-open') === 'true') positionDropdown(dd);
+      });
+      return;
+    }
+
     wrap.addEventListener('mouseenter', () => {
       clearTimeout(hoverCloseTimer);
       closeAllDropdowns();
       positionDropdown(dd);
-      dd.setAttribute('data-open', 'true');
-      if (isColor) syncFromAnnot();
+      setDropdownOpen(dd, true);
       // 0.15.14：text dropdown 不再有 data-view，无需重置
     });
 
     wrap.addEventListener('mouseleave', () => {
-      // 0.15.14：所有 dropdown 统一 hover-close
-      hoverCloseTimer = setTimeout(() => {
-        dd.setAttribute('data-open', 'false');
-      }, 200);
+      // 工具组 dropdown 统一 hover-close；颜色二级页面不走这里。
+      hoverCloseTimer = setTimeout(() => setDropdownOpen(dd, false), 200);
     });
   });
 
@@ -544,9 +676,9 @@ export function bindToolbar() {
       const hoveredWrap = document.querySelector('.dropdown-wrap:hover');
       if (hoveredWrap) {
         const dd = hoveredWrap.querySelector('.dropdown');
-        if (dd) {
+        if (dd && dd.id !== 'color-dropdown') {
           positionDropdown(dd);
-          dd.setAttribute('data-open', 'true');
+          setDropdownOpen(dd, true);
         }
       }
     });

@@ -1,0 +1,219 @@
+{
+  "version": 1,
+  "description": "Golden fixtures for 0.20.7 palette-core: OKLab, k-means++, role assignment, harmony, contrast, output formats",
+  "constants": {
+    "MAX_SAMPLE_DIM": 96,
+    "MIN_ALPHA": 0.5,
+    "K_MIN": 3,
+    "K_MAX": 8,
+    "MAX_ITERATIONS": 32,
+    "CONVERGENCE_EPSILON": 0.001,
+    "DEBOUNCE_MS": 120
+  },
+  "oklab_cases": [
+    {
+      "name": "pure_red",
+      "rgba": [255, 0, 0, 255],
+      "oklab": [0.6316, 0.2249, 0.1258],
+      "tolerance": 0.001
+    },
+    {
+      "name": "pure_green",
+      "rgba": [0, 255, 0, 255],
+      "oklab": [0.8718, -0.2341, 0.1798],
+      "tolerance": 0.001
+    },
+    {
+      "name": "pure_blue",
+      "rgba": [0, 0, 255, 255],
+      "oklab": [0.4590, -0.0325, -0.3115],
+      "tolerance": 0.001
+    },
+    {
+      "name": "white",
+      "rgba": [255, 255, 255, 255],
+      "oklab": [1.0081, 0.0, 0.0],
+      "tolerance": 0.01
+    },
+    {
+      "name": "black",
+      "rgba": [0, 0, 0, 255],
+      "oklab": [0.0, 0.0, 0.0],
+      "tolerance": 0.001
+    },
+    {
+      "name": "mid_gray",
+      "rgba": [128, 128, 128, 255],
+      "oklab": [0.6048, 0.0, 0.0],
+      "tolerance": 0.001
+    }
+  ],
+  "roundtrip_cases": [
+    {
+      "name": "red_roundtrip",
+      "rgba": [255, 0, 0, 255],
+      "tolerance": 10
+    },
+    {
+      "name": "cyan_roundtrip",
+      "rgba": [0, 255, 255, 255],
+      "tolerance": 20
+    },
+    {
+      "name": "dark_green_roundtrip",
+      "rgba": [30, 100, 50, 255],
+      "tolerance": 3
+    },
+    {
+      "name": "light_pink_roundtrip",
+      "rgba": [255, 220, 230, 255],
+      "tolerance": 5
+    }
+  ],
+  "contrast_cases": [
+    {
+      "name": "black_on_white",
+      "fg": [0, 0, 0, 255],
+      "bg": [255, 255, 255, 255],
+      "expected_ratio": 21.0,
+      "tolerance": 0.1,
+      "expected_text_color": "dark"
+    },
+    {
+      "name": "white_on_black",
+      "fg": [255, 255, 255, 255],
+      "bg": [0, 0, 0, 255],
+      "expected_ratio": 21.0,
+      "tolerance": 0.1,
+      "expected_text_color": "light"
+    },
+    {
+      "name": "blue_on_white",
+      "fg": [0, 0, 255, 255],
+      "bg": [255, 255, 255, 255],
+      "expected_ratio_min": 8.0,
+      "expected_text_color": "dark"
+    },
+    {
+      "name": "yellow_on_white",
+      "fg": [255, 255, 0, 255],
+      "bg": [255, 255, 255, 255],
+      "expected_ratio_max": 1.5,
+      "expected_text_color": "dark"
+    },
+    {
+      "name": "dark_blue_on_light_blue",
+      "fg": [0, 0, 139, 255],
+      "bg": [173, 216, 230, 255],
+      "expected_ratio_min": 3.0,
+      "expected_text_color": "dark"
+    }
+  ],
+  "harmony_cases": [
+    {
+      "name": "red_complementary",
+      "base_rgb": [255, 0, 0, 255],
+      "scheme": "complementary",
+      "expected_hue_count": 2,
+      "expected_total_count": 6
+    },
+    {
+      "name": "red_triadic",
+      "base_rgb": [255, 0, 0, 255],
+      "scheme": "triadic",
+      "expected_hue_count": 3,
+      "expected_total_count": 9
+    },
+    {
+      "name": "blue_analogous",
+      "base_rgb": [0, 0, 255, 255],
+      "scheme": "analogous",
+      "expected_hue_count": 3,
+      "expected_total_count": 9
+    },
+    {
+      "name": "green_split_complementary",
+      "base_rgb": [0, 255, 0, 255],
+      "scheme": "splitComplementary",
+      "expected_hue_count": 3,
+      "expected_total_count": 9
+    }
+  ],
+  "role_cases": [
+    {
+      "name": "solid_color_background",
+      "description": "Single dominant color is background",
+      "pixels_rgba_flat": [240, 240, 240, 255, 240, 240, 240, 255, 240, 240, 240, 255, 240, 240, 240, 255],
+      "width": 2,
+      "height": 2,
+      "expected_roles": ["background"],
+      "expected_role_count": 1
+    },
+    {
+      "name": "ui_with_accent",
+      "description": "Light background + blue accent",
+      "pixels_rgba_flat": [255, 255, 255, 255, 255, 255, 255, 255, 30, 100, 200, 255, 255, 255, 255, 255],
+      "width": 2,
+      "height": 2,
+      "expected_roles": ["background", "accent"],
+      "expected_role_count_min": 2
+    },
+    {
+      "name": "colorful_ui",
+      "description": "Three distinct colors",
+      "pixels_rgba_flat": [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255],
+      "width": 2,
+      "height": 2,
+      "expected_role_count_min": 3,
+      "expected_role_count_max": 4
+    }
+  ],
+  "clustering_cases": [
+    {
+      "name": "deterministic_solid",
+      "description": "Same input always produces same output order",
+      "pixels_rgba_flat": [255, 0, 0, 255, 255, 0, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255],
+      "width": 2,
+      "height": 2,
+      "expected_color_count_min": 2,
+      "expected_color_count_max": 2
+    },
+    {
+      "name": "transparent_skip",
+      "description": "Pixels with alpha < 128 are skipped",
+      "pixels_rgba_flat": [255, 0, 0, 100, 0, 255, 0, 255, 0, 0, 255, 255, 0, 255, 0, 200],
+      "width": 2,
+      "height": 2,
+      "expected_color_count_max": 2
+    },
+    {
+      "name": "representative_from_sample",
+      "description": "Cluster centers map to nearest real sampled pixel",
+      "pixels_rgba_flat": [100, 50, 30, 255, 100, 50, 30, 255, 200, 100, 60, 255, 200, 100, 60, 255],
+      "width": 2,
+      "height": 2,
+      "expected_color_count_min": 2,
+      "expected_color_count_max": 2
+    }
+  ],
+  "output_format_cases": [
+    {
+      "name": "list_format",
+      "colors": [
+        {"rgba": [255, 0, 0, 255], "role": "accent", "hex": "#FF0000"},
+        {"rgba": [240, 240, 240, 255], "role": "background", "hex": "#F0F0F0"}
+      ],
+      "format": "list",
+      "expected_contains": ["#FF0000", "#F0F0F0"]
+    },
+    {
+      "name": "css_variables",
+      "colors": [
+        {"rgba": [255, 0, 0, 255], "role": "accent", "hex": "#FF0000"},
+        {"rgba": [240, 240, 240, 255], "role": "background", "hex": "#F0F0F0"}
+      ],
+      "format": "css",
+      "expected_contains": ["--blink-color-accent: #FF0000", "--blink-color-background: #F0F0F0"]
+    }
+  ]
+}

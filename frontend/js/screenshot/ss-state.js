@@ -102,6 +102,16 @@ export const ss = {
   _pickerBitmapPos: null,        // 方向键精调的 bitmap 坐标基线 {x, y}
   precisionHint: null,           // #precision-hint DOM 元素
 
+  // ── 0.20.7：配色面板状态 ──────────────────────────────────
+  paletteEpoch: 0,          // 配色分析代际，旧 epoch 不覆盖新结果
+  paletteWorker: null,      // Worker 实例
+  paletteResult: null,      // 最近一次分析结果 { roles, recommended, full, empty }
+  paletteSelected: new Set(), // Ctrl+左键选中的任意主题/方案色 hex 集合
+  paletteColorOrder: [],    // 当前结果全部颜色的稳定去重顺序，批量复制按此输出
+  paletteAnchorHex: null,   // 显式配色生成基准色；普通左键点击任意提取色时更新
+  paletteFormat: 'hex',     // 输出格式: 'hex' | 'rgb' | 'hsl' | 'list' | 'css'
+  paletteMoreExpanded: false, // 显式基准色生成方案是否展开
+
   // ── 跨模块回调（主文件注册，避免循环依赖）──────────────────
   _invalidateSelectionContent: null,  // 选区内容失效（清 OCR/阅读/overlay）
   _enterAnnotationMode: null,         // 进入标注模式
