@@ -25,6 +25,19 @@ html, body {
   border-radius: var(--radius-sm);
   cursor: pointer;
   white-space: nowrap;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+}
+
+/* 0.20.3：颜色项 shortcut 与 label 同行，等宽小号 + 淡色 */
+.context-menu-item.has-subtext .context-menu-shortcut {
+  margin-left: auto;
+  font-size: var(--text-sm);
+  font-family: ui-monospace, Consolas, monospace;
+  opacity: 0.55;
+  white-space: pre;
 }
 
 .context-menu-item:hover {
@@ -42,6 +55,7 @@ html, body {
 /* 0.18.4：chord 快捷键淡色显示（括号包裹的 Alt+键） */
 .context-menu-shortcut {
   opacity: 0.6;
+  flex-shrink: 0;
 }
 
 .context-menu-sep {

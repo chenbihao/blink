@@ -1,0 +1,419 @@
+{
+  "description": "Rust/JS shared color-literal fixtures for 0.20.3 ColorEngine. Each case has input, expected RGBA8 (r,g,b,a), and canonical HEX/RGB/HSL outputs. Illegal inputs produce null. Canonical HSL hue is normalized to 0-359 range (integer). Hex output is 6-digit when alpha=255, 8-digit when alpha<255.",
+  "cases": [
+    {
+      "input": "#fff",
+      "kind": "hex3",
+      "rgba": { "r": 255, "g": 255, "b": 255, "a": 255 },
+      "hex": "#FFFFFF",
+      "rgb": "rgb(255, 255, 255)",
+      "hsl": "hsl(0, 0%, 100%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "#FFF",
+      "kind": "hex3",
+      "rgba": { "r": 255, "g": 255, "b": 255, "a": 255 },
+      "hex": "#FFFFFF",
+      "rgb": "rgb(255, 255, 255)",
+      "hsl": "hsl(0, 0%, 100%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "#000",
+      "kind": "hex3",
+      "rgba": { "r": 0, "g": 0, "b": 0, "a": 255 },
+      "hex": "#000000",
+      "rgb": "rgb(0, 0, 0)",
+      "hsl": "hsl(0, 0%, 0%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "#f00",
+      "kind": "hex3",
+      "rgba": { "r": 255, "g": 0, "b": 0, "a": 255 },
+      "hex": "#FF0000",
+      "rgb": "rgb(255, 0, 0)",
+      "hsl": "hsl(0, 100%, 50%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "#0f0",
+      "kind": "hex3",
+      "rgba": { "r": 0, "g": 255, "b": 0, "a": 255 },
+      "hex": "#00FF00",
+      "rgb": "rgb(0, 255, 0)",
+      "hsl": "hsl(120, 100%, 50%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "#00f",
+      "kind": "hex3",
+      "rgba": { "r": 0, "g": 0, "b": 255, "a": 255 },
+      "hex": "#0000FF",
+      "rgb": "rgb(0, 0, 255)",
+      "hsl": "hsl(240, 100%, 50%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "#abcd",
+      "kind": "hex4",
+      "rgba": { "r": 170, "g": 187, "b": 204, "a": 221 },
+      "hex": "#AABBCCDD",
+      "rgb": "rgb(170, 187, 204, 0.867)",
+      "hsl": "hsl(210, 25%, 73.3%, 0.867)",
+      "alpha": 0.8666667
+    },
+    {
+      "input": "#fffa",
+      "kind": "hex4",
+      "rgba": { "r": 255, "g": 255, "b": 255, "a": 170 },
+      "hex": "#FFFFFFAA",
+      "rgb": "rgb(255, 255, 255, 0.667)",
+      "hsl": "hsl(0, 0%, 100%, 0.667)",
+      "alpha": 0.6666667
+    },
+    {
+      "input": "#ff0000",
+      "kind": "hex6",
+      "rgba": { "r": 255, "g": 0, "b": 0, "a": 255 },
+      "hex": "#FF0000",
+      "rgb": "rgb(255, 0, 0)",
+      "hsl": "hsl(0, 100%, 50%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "#FF0000",
+      "kind": "hex6",
+      "rgba": { "r": 255, "g": 0, "b": 0, "a": 255 },
+      "hex": "#FF0000",
+      "rgb": "rgb(255, 0, 0)",
+      "hsl": "hsl(0, 100%, 50%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "#000000",
+      "kind": "hex6",
+      "rgba": { "r": 0, "g": 0, "b": 0, "a": 255 },
+      "hex": "#000000",
+      "rgb": "rgb(0, 0, 0)",
+      "hsl": "hsl(0, 0%, 0%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "#ffffff",
+      "kind": "hex6",
+      "rgba": { "r": 255, "g": 255, "b": 255, "a": 255 },
+      "hex": "#FFFFFF",
+      "rgb": "rgb(255, 255, 255)",
+      "hsl": "hsl(0, 0%, 100%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "#808080",
+      "kind": "hex6",
+      "rgba": { "r": 128, "g": 128, "b": 128, "a": 255 },
+      "hex": "#808080",
+      "rgb": "rgb(128, 128, 128)",
+      "hsl": "hsl(0, 0%, 50.2%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "#ff0000aa",
+      "kind": "hex8",
+      "rgba": { "r": 255, "g": 0, "b": 0, "a": 170 },
+      "hex": "#FF0000AA",
+      "rgb": "rgb(255, 0, 0, 0.667)",
+      "hsl": "hsl(0, 100%, 50%, 0.667)",
+      "alpha": 0.6666667
+    },
+    {
+      "input": "#00000000",
+      "kind": "hex8",
+      "rgba": { "r": 0, "g": 0, "b": 0, "a": 0 },
+      "hex": "#00000000",
+      "rgb": "rgb(0, 0, 0, 0)",
+      "hsl": "hsl(0, 0%, 0%, 0)",
+      "alpha": 0.0
+    },
+    {
+      "input": "#ffffffff",
+      "kind": "hex8",
+      "rgba": { "r": 255, "g": 255, "b": 255, "a": 255 },
+      "hex": "#FFFFFF",
+      "rgb": "rgb(255, 255, 255)",
+      "hsl": "hsl(0, 0%, 100%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "rgb(255, 0, 0)",
+      "kind": "rgb",
+      "rgba": { "r": 255, "g": 0, "b": 0, "a": 255 },
+      "hex": "#FF0000",
+      "rgb": "rgb(255, 0, 0)",
+      "hsl": "hsl(0, 100%, 50%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "rgb(0, 128, 255)",
+      "kind": "rgb",
+      "rgba": { "r": 0, "g": 128, "b": 255, "a": 255 },
+      "hex": "#0080FF",
+      "rgb": "rgb(0, 128, 255)",
+      "hsl": "hsl(210, 100%, 50%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "rgb(100%, 0%, 0%)",
+      "kind": "rgb_percent",
+      "rgba": { "r": 255, "g": 0, "b": 0, "a": 255 },
+      "hex": "#FF0000",
+      "rgb": "rgb(255, 0, 0)",
+      "hsl": "hsl(0, 100%, 50%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "rgb(50%, 50%, 50%)",
+      "kind": "rgb_percent",
+      "rgba": { "r": 128, "g": 128, "b": 128, "a": 255 },
+      "hex": "#808080",
+      "rgb": "rgb(128, 128, 128)",
+      "hsl": "hsl(0, 0%, 50.2%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "rgba(255, 0, 0, 0.5)",
+      "kind": "rgba",
+      "rgba": { "r": 255, "g": 0, "b": 0, "a": 128 },
+      "hex": "#FF000080",
+      "rgb": "rgb(255, 0, 0, 0.502)",
+      "hsl": "hsl(0, 100%, 50%, 0.502)",
+      "alpha": 0.5019608
+    },
+    {
+      "input": "rgba(0, 0, 0, 0)",
+      "kind": "rgba",
+      "rgba": { "r": 0, "g": 0, "b": 0, "a": 0 },
+      "hex": "#00000000",
+      "rgb": "rgb(0, 0, 0, 0)",
+      "hsl": "hsl(0, 0%, 0%, 0)",
+      "alpha": 0.0
+    },
+    {
+      "input": "rgba(255, 255, 255, 1)",
+      "kind": "rgba",
+      "rgba": { "r": 255, "g": 255, "b": 255, "a": 255 },
+      "hex": "#FFFFFF",
+      "rgb": "rgb(255, 255, 255)",
+      "hsl": "hsl(0, 0%, 100%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "hsl(0, 0%, 100%)",
+      "kind": "hsl",
+      "rgba": { "r": 255, "g": 255, "b": 255, "a": 255 },
+      "hex": "#FFFFFF",
+      "rgb": "rgb(255, 255, 255)",
+      "hsl": "hsl(0, 0%, 100%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "hsl(0, 100%, 50%)",
+      "kind": "hsl",
+      "rgba": { "r": 255, "g": 0, "b": 0, "a": 255 },
+      "hex": "#FF0000",
+      "rgb": "rgb(255, 0, 0)",
+      "hsl": "hsl(0, 100%, 50%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "hsl(120, 100%, 50%)",
+      "kind": "hsl",
+      "rgba": { "r": 0, "g": 255, "b": 0, "a": 255 },
+      "hex": "#00FF00",
+      "rgb": "rgb(0, 255, 0)",
+      "hsl": "hsl(120, 100%, 50%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "hsl(240, 100%, 50%)",
+      "kind": "hsl",
+      "rgba": { "r": 0, "g": 0, "b": 255, "a": 255 },
+      "hex": "#0000FF",
+      "rgb": "rgb(0, 0, 255)",
+      "hsl": "hsl(240, 100%, 50%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "hsl(180, 50%, 50%)",
+      "kind": "hsl",
+      "rgba": { "r": 64, "g": 191, "b": 191, "a": 255 },
+      "hex": "#40BFBF",
+      "rgb": "rgb(64, 191, 191)",
+      "hsl": "hsl(180, 49.8%, 50%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "hsla(0, 100%, 50%, 0.5)",
+      "kind": "hsla",
+      "rgba": { "r": 255, "g": 0, "b": 0, "a": 128 },
+      "hex": "#FF000080",
+      "rgb": "rgb(255, 0, 0, 0.502)",
+      "hsl": "hsl(0, 100%, 50%, 0.502)",
+      "alpha": 0.5019608
+    },
+    {
+      "input": "hsla(120, 100%, 50%, 0)",
+      "kind": "hsla",
+      "rgba": { "r": 0, "g": 255, "b": 0, "a": 0 },
+      "hex": "#00FF0000",
+      "rgb": "rgb(0, 255, 0, 0)",
+      "hsl": "hsl(120, 100%, 50%, 0)",
+      "alpha": 0.0
+    },
+    {
+      "input": "#a",
+      "kind": "illegal",
+      "rgba": null,
+      "hex": null,
+      "rgb": null,
+      "hsl": null,
+      "alpha": null
+    },
+    {
+      "input": "#gggggg",
+      "kind": "illegal",
+      "rgba": null,
+      "hex": null,
+      "rgb": null,
+      "hsl": null,
+      "alpha": null
+    },
+    {
+      "input": "rgb(256, 0, 0)",
+      "kind": "illegal",
+      "rgba": null,
+      "hex": null,
+      "rgb": null,
+      "hsl": null,
+      "alpha": null
+    },
+    {
+      "input": "rgb(-1, 0, 0)",
+      "kind": "illegal",
+      "rgba": null,
+      "hex": null,
+      "rgb": null,
+      "hsl": null,
+      "alpha": null
+    },
+    {
+      "input": "hello world",
+      "kind": "illegal",
+      "rgba": null,
+      "hex": null,
+      "rgb": null,
+      "hsl": null,
+      "alpha": null
+    },
+    {
+      "input": "red",
+      "kind": "illegal",
+      "rgba": null,
+      "hex": null,
+      "rgb": null,
+      "hsl": null,
+      "alpha": null
+    },
+    {
+      "input": "calc",
+      "kind": "illegal",
+      "rgba": null,
+      "hex": null,
+      "rgb": null,
+      "hsl": null,
+      "alpha": null
+    },
+    {
+      "input": "settings",
+      "kind": "illegal",
+      "rgba": null,
+      "hex": null,
+      "rgb": null,
+      "hsl": null,
+      "alpha": null
+    },
+    {
+      "input": "#ff0000 ",
+      "kind": "hex6",
+      "rgba": { "r": 255, "g": 0, "b": 0, "a": 255 },
+      "hex": "#FF0000",
+      "rgb": "rgb(255, 0, 0)",
+      "hsl": "hsl(0, 100%, 50%)",
+      "alpha": 1.0
+    },
+    {
+      "input": " rgb(0, 0, 0) ",
+      "kind": "rgb",
+      "rgba": { "r": 0, "g": 0, "b": 0, "a": 255 },
+      "hex": "#000000",
+      "rgb": "rgb(0, 0, 0)",
+      "hsl": "hsl(0, 0%, 0%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "hsl(360, 100%, 50%)",
+      "kind": "hsl",
+      "rgba": { "r": 255, "g": 0, "b": 0, "a": 255 },
+      "hex": "#FF0000",
+      "rgb": "rgb(255, 0, 0)",
+      "hsl": "hsl(0, 100%, 50%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "hsl(720, 100%, 50%)",
+      "kind": "hsl",
+      "rgba": { "r": 255, "g": 0, "b": 0, "a": 255 },
+      "hex": "#FF0000",
+      "rgb": "rgb(255, 0, 0)",
+      "hsl": "hsl(0, 100%, 50%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "hsl(-120, 100%, 50%)",
+      "kind": "hsl",
+      "rgba": { "r": 0, "g": 0, "b": 255, "a": 255 },
+      "hex": "#0000FF",
+      "rgb": "rgb(0, 0, 255)",
+      "hsl": "hsl(240, 100%, 50%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "#000000ff",
+      "kind": "hex8",
+      "rgba": { "r": 0, "g": 0, "b": 0, "a": 255 },
+      "hex": "#000000",
+      "rgb": "rgb(0, 0, 0)",
+      "hsl": "hsl(0, 0%, 0%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "rgb(127.5, 0, 0)",
+      "kind": "rgb",
+      "rgba": { "r": 128, "g": 0, "b": 0, "a": 255 },
+      "hex": "#800000",
+      "rgb": "rgb(128, 0, 0)",
+      "hsl": "hsl(0, 100%, 25.1%)",
+      "alpha": 1.0
+    },
+    {
+      "input": "rgba(255, 255, 255, 0.337)",
+      "kind": "rgba",
+      "rgba": { "r": 255, "g": 255, "b": 255, "a": 86 },
+      "hex": "#FFFFFF56",
+      "rgb": "rgb(255, 255, 255, 0.337)",
+      "hsl": "hsl(0, 0%, 100%, 0.337)",
+      "alpha": 0.3372549
+    }
+  ]
+}

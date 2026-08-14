@@ -185,12 +185,14 @@ pub use scorer::{
 mod builtin_engine;
 pub mod calc;
 mod calc_engine;
+mod color_engine;
 pub(crate) mod clipboard_engine;
 pub mod file_engine;
 mod mock_slow_engine;
 mod start_menu_engine;
 mod system_shortcuts;
 use builtin_engine::BuiltinEngine;
+use color_engine::ColorEngine;
 // BuiltinActionInfo + list_builtin_actions 由 commands::list_builtin_actions 用（设置页）。
 // list_builtin_context_bindings 由 commands::list_context_bindings 合并 builtin 一路用（0.11.8）。
 pub use builtin_engine::{BuiltinActionInfo, list_builtin_actions, list_builtin_context_bindings};
@@ -227,6 +229,8 @@ pub fn build_engines(
         std::sync::Arc::new(BuiltinEngine),
         // CalcEngine（可配置）
         std::sync::Arc::new(CalcEngine::with_config(configs.calc)),
+        // ColorEngine（0.20.3：颜色字面量确定性结果，始终启用）
+        std::sync::Arc::new(ColorEngine::new()),
         // ClipboardEngine（0.8.5 §6.4，keyword 剪贴板/clip 触发展开历史）
         std::sync::Arc::new(ClipboardEngine::new(pool, cache_pool)),
         // StartMenuEngine（可配置）

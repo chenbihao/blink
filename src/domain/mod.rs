@@ -4,6 +4,7 @@ pub mod ai;
 pub mod capability; // 0.9.7：能力协议层（原子能力 + 统一声明/返回）
 pub mod chord;
 pub mod clipboard; // 0.19.6：剪贴板读写共享语义（command / Capability 共用）
+pub mod color; // 0.20.3：确定性颜色字面量解析（纯函数，Rust/JS 共享 fixture）
 pub mod config; // 0.14.6 §2.1：配置域（从 app/ 下沉）
 pub mod context;
 pub mod event; // 0.14.6 §2.2：领域环境抽象（DomainEnv trait，domain 去 tauri）

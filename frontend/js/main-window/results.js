@@ -11,6 +11,7 @@ import { activateItem } from "./actions.js";
 import * as statusbar from "./statusbar.js";
 import { invoke } from "../shared/tauri.js";
 import { renderIcon } from "../shared/icon.js";
+import { isColorEntry, getColorPayload, createSwatch, parse as parseColor } from "../shared/color.js";
 import * as clipboardMode from "./clipboard-mode.js";
 
 // 0.17.6: showAiConfirm / getAiConfirmData / updateAiStream 已删除。
@@ -305,10 +306,12 @@ export function hasUserItems() {
 
 // ── 内部 ──────────────────────────────────────────────────────────────────────
 
-/** 去重键：应用按路径（小写），计算结果按名，占位按名，其余按 kind+名+描述。 */
+/** 去重键：应用按路径（小写），计算结果按名，占位按名，颜色按 canonical hex，其余按 kind+名+描述。 */
 function itemKey(item) {
   if (item.lnk_path) return "open:" + item.lnk_path.toLowerCase();
   if (item.is_calc) return "calc:" + item.name;
+  // 0.20.3：颜色结果项按 canonical hex 去重
+  if (item.source === "color") return "color:" + item.name;
   if (item.is_placeholder) return "placeholder:" + item.name;
   // 剪贴板历史项：用 hitId（= clipboard_history 表主键）做去重键，
   // 不用 name+description——preview 截断后多条可能相同（如长文件路径），导致误去重。
@@ -488,10 +491,27 @@ li.dataset.aiConfirmId = app._aiConfirm.confirmId;
     li.appendChild(badge);
   }
 
+  // 0.20.3：颜色结果项——用大格子 swatch（与剪贴板图片缩略图同级 36px）。
+  if (isColorEntry(app)) {
+    const hex = getColorPayload(app) || app.name;
+    const colorResult = parseColor(hex);
+    if (colorResult) {
+      const swatch = createSwatch(colorResult.rgba, { className: "app-icon clip-thumb", size: 36 });
+      li.appendChild(swatch);
+    }
+  }
+  // 0.20.3：剪贴板文本项降级检测——如果文本恰好是颜色字面量，也显示大格子 swatch
+  else if (!app.is_image && !app.lnk_path && !app.is_calc) {
+    const clipColor = parseColor(app.name);
+    if (clipColor) {
+      const swatch = createSwatch(clipColor.rgba, { className: "app-icon clip-thumb", size: 36 });
+      li.appendChild(swatch);
+    }
+  }
   // 图标：自定义协议按需懒加载（calc 无 lnk_path 不显示）。
   // Windows/WebView2 下 scheme 映射为 http://<scheme>.localhost/<path>
   // 0.16.4：剪贴板图片项 is_image=true 时用 blink-clipimg 协议加载缩略图。
-  if (app.is_image && app.lnk_path) {
+  else if (app.is_image && app.lnk_path) {
     const img = document.createElement("img");
     img.src = "http://blink-clipimg.localhost/" + encodeURIComponent(app.lnk_path);
     img.className = "app-icon clip-thumb";

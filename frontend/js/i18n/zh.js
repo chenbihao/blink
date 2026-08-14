@@ -998,6 +998,10 @@ export const zh = {
     "menu.sticky": "钉为便签",
     "menu.delete": "删除记录",
     "menu.copySelected": "复制选中的 {count} 条",
+"menu.copyHex": "复制 HEX",
+"menu.copyRgb": "复制 RGB",
+"menu.copyHsl": "复制 HSL",
+"menu.createStickyFromColor": "贴为便签",
 
     // ── 主窗口：提示栏 ──
     "hint.open": "打开",

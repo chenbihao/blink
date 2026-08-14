@@ -28,6 +28,7 @@ import { syncWindowSize } from "./window-size.js";
 import { searchClipboard, copyToClipboard, getClipboardTextBatch, recordClipboardHit } from "../shared/api.js";
 import { t } from "../i18n/index.js";
 import * as selection from "./clipboard-selection.js";
+import { parse as parseColor } from "../shared/color.js";
 
 // 0.20.1: 从 results.js 导入 setClipboardMode，进入/退出模式时设置标志。
 
@@ -216,6 +217,25 @@ export function handleInput(value) {
 
   // 0.20.2: query 真正变化时清空选择状态（递增 generation 使旧请求失效）
   selection.onQueryChanged();
+
+  // 0.20.3：颜色字面量优先——在剪贴板模式中输入颜色也立即返回颜色结果
+  const colorResult = parseColor(q);
+  if (colorResult) {
+    // 构造与 ColorEngine 一致的颜色 AppEntry
+    const entry = {
+      name: colorResult.hex,
+      description: `${colorResult.rgb} · ${colorResult.hsl}`,
+      source: "color",
+      score: 1.0,
+      actions: [{ kind: "copy", payload: colorResult.hex }],
+    };
+    clearTimeout(timer);
+    lastQuery = q;
+    seq++;
+    results.render([entry], seq);
+    refreshSelectionCss();
+    return true;
+  }
 
   // 40ms 防抖（与正常搜索一致，合并极快连打）
   clearTimeout(timer);

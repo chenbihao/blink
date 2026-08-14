@@ -10,7 +10,41 @@ import { retrigger } from "./search.js";
 import { t, getLang } from "../i18n/index.js";
 import { showActionError } from "./action-error.js";
 import { EVENTS } from "../shared/event-names.js";
+import { parse as parseColor } from "../shared/color.js";
 import * as clipboardMode from "./clipboard-mode.js";
+
+/** 0.20.3：判断 shortcut 文本是否为颜色格式预览（#xxx / rgb(...) / hsl(...)）。 */
+function isColorShortcut(s) {
+  return !!s && (s.startsWith("#") || s.startsWith("rgb") || s.startsWith("hsl"));
+}
+
+/**
+ * 0.20.3：为颜色项构建 HEX/RGB/HSL 复制 + 贴便签菜单项。
+ * @param {string} colorHex — canonical HEX
+ * @returns {object[]} 菜单项数组（不含前导 separator，由调用方追加）
+ */
+function colorMenuItems(colorHex) {
+  const colorResult = parseColor(colorHex);
+  if (!colorResult) return [];
+  return [
+    { label: t("menu.copyHex"), shortcut: colorResult.hex, run: () => { copyToClipboard(colorResult.hex).catch((e) => console.error("copy hex failed:", e)); hideWindow(); } },
+    { label: t("menu.copyRgb"), shortcut: colorResult.rgb, run: () => { copyToClipboard(colorResult.rgb).catch((e) => console.error("copy rgb failed:", e)); hideWindow(); } },
+    { label: t("menu.copyHsl"), shortcut: colorResult.hsl, run: () => { copyToClipboard(colorResult.hsl).catch((e) => console.error("copy hsl failed:", e)); hideWindow(); } },
+    { separator: true },
+    {
+      label: t("menu.createStickyFromColor"),
+      run: async () => {
+        try {
+          const note = await createStickyNote(colorResult.hex);
+          await showStickyWindow(note.id, true);
+          hideWindow();
+        } catch (e) {
+          showActionError("create_sticky_from_color", e);
+        }
+      },
+    },
+  ];
+}
 
 /** 当前菜单数据（用于 Popup 点击时回调执行）。 */
 let currentItems = [];
@@ -64,7 +98,9 @@ export function init() {
     const V_BUFFER = 8;
     const rows = items.reduce((h, it) => h + (it.separator ? 9 : 36), 0);
     const estimatedHeight = rows + 16 + V_BUFFER;
-    const estimatedWidth = 180 + H_BUFFER;
+    // 0.20.3：颜色项 shortcut 同行显示，但格式预览较长，需要更宽的菜单
+    const hasColorShortcut = items.some((it) => isColorShortcut(it.shortcut));
+    const estimatedWidth = (hasColorShortcut ? 260 : 180) + H_BUFFER;
 
     // 光标物理坐标由后端 GetCursorPos 直接读取——MouseEvent.screenX/Y 在 WebView2
     // 里是 CSS 像素，高 DPI 屏当物理像素用会偏 1/3；索性不传，避免 dpr 猜谜。
@@ -271,6 +307,7 @@ function itemMenu(li) {
   const items = [];
 
   // (a) 展开 actions 全部动作（hint 存 i18n key，用 t() 渲染）
+  // 0.20.3：颜色项不再跳过 (a) 段——当做文本处理，默认 Copy 动作正常显示。
   for (const action of actions) {
     const label = action.hint ? t(action.hint) : (KIND_LABELS[action.kind]?.() ?? null);
     if (!label) continue; // 无标签的动作（如无 hint 的 run）跳过
@@ -282,6 +319,24 @@ function itemMenu(li) {
 
   // P2-#18: edit/pin 已由后端 actions 声明（edit_text_item / pin_text_item），
   // (a) 段从 actions 数组派生即可，不再在此硬编码追加。
+
+  // 0.20.3：颜色结果项或剪贴板颜色项——追加多格式复制 + 贴便签
+  let colorHex = null;
+  if (source === "color") {
+    colorHex = actions[0]?.payload || "";
+  } else if (source === "clipboard") {
+    // 剪贴板文本项降级检测：如果文本恰好是颜色字面量
+    const clipText = li.querySelector(".item-name")?.textContent || "";
+    const clipColor = parseColor(clipText);
+    if (clipColor) colorHex = clipColor.hex;
+  }
+  if (colorHex) {
+    const colorItems = colorMenuItems(colorHex);
+    if (colorItems.length) {
+      items.push({ separator: true });
+      items.push(...colorItems);
+    }
+  }
 
   // 0.16.5：剪贴板图片项追加"钉图"动作
   // 图片项的 lnkPath 存的是 image_id，调 pin_clipboard_image 后端命令

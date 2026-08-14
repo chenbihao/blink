@@ -33,6 +33,7 @@
         const row = document.createElement('div');
         row.className = 'context-menu-item' + (item.danger ? ' danger' : '');
         // 0.18.4：chord 项有 shortcut 字段时，拆成 label + shortcut 两个 span 渲染
+        // 0.20.3：颜色项 shortcut 同行显示，用 has-subtext 标记等宽小号样式
         if (item.shortcut) {
           const labelSpan = document.createElement('span');
           labelSpan.className = 'context-menu-label';
@@ -42,6 +43,10 @@
           shortcutSpan.textContent = item.shortcut;
           row.appendChild(labelSpan);
           row.appendChild(shortcutSpan);
+          // 颜色格式预览（#xxx / rgb(...) / hsl(...)）→ 等宽小号
+          if (item.shortcut.startsWith('#') || item.shortcut.startsWith('rgb') || item.shortcut.startsWith('hsl')) {
+            row.classList.add('has-subtext');
+          }
         } else {
           row.textContent = item.label;
         }

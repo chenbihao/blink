@@ -227,7 +227,7 @@ pub fn file_search_score(rank: usize) -> f32 {
 /// source 优先级排名（小 = 靠前）。
 ///
 /// # 排序逻辑
-/// calc > builtin > start_menu > file > 插件
+/// calc/color > builtin > start_menu > file > 插件
 ///
 /// # 用途
 /// 1. fuse_items 二级排序（同分时的 tie-break）
@@ -235,6 +235,7 @@ pub fn file_search_score(rank: usize) -> f32 {
 pub fn source_rank(source: &str) -> u8 {
     match source {
         "calc" => 0,
+        "color" => 0, // 0.20.3：颜色字面量确定性匹配，与 calc 同梯队
         "builtin" => 1,
         "start_menu" => 2,
         "file" => 3,
@@ -246,7 +247,7 @@ pub fn source_rank(source: &str) -> u8 {
 ///
 /// # 原理
 /// 给分数叠加 `SOURCE_BOOST_STEP * (4 - rank)`：
-/// - calc(0) → +0.8
+/// - calc/color(0) → +0.8
 /// - builtin(1) → +0.6
 /// - start_menu(2) → +0.4
 /// - file(3) → +0.2
@@ -379,6 +380,7 @@ mod tests {
     #[test]
     fn source_rank_order() {
         assert_eq!(source_rank("calc"), 0);
+        assert_eq!(source_rank("color"), 0);
         assert_eq!(source_rank("builtin"), 1);
         assert_eq!(source_rank("start_menu"), 2);
         assert_eq!(source_rank("file"), 3);

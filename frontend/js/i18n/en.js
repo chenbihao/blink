@@ -997,6 +997,10 @@ export const en = {
     "menu.sticky": "Sticky",
     "menu.delete": "Delete",
     "menu.copySelected": "Copy {count} selected items",
+"menu.copyHex": "Copy HEX",
+"menu.copyRgb": "Copy RGB",
+"menu.copyHsl": "Copy HSL",
+"menu.createStickyFromColor": "Create Sticky from Color",
 
     // ── Main window: status bar ──
     "hint.open": "Open",
