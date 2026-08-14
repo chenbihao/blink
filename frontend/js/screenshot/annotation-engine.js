@@ -181,6 +181,23 @@ export function reset(cropW, cropH, cropImageDataRef) {
   }
 }
 
+/**
+ * 0.20.6：仅更新裁剪区域数据（选区移动后调），不重置 commands。
+ * 选区移动 1px 后裁剪区域改变，马赛克/模糊等依赖 cropImageData 的工具
+ * 需要新的底图数据。标注命令保持不变（坐标为相对裁剪区的物理像素）。
+ */
+export function updateCropData(cropImageDataRef, cropW, cropH) {
+  cropImageData = cropImageDataRef;
+  if (cropImageDataRef) {
+    if (!cropSourceCanvas) {
+      cropSourceCanvas = document.createElement('canvas');
+    }
+    cropSourceCanvas.width = cropW;
+    cropSourceCanvas.height = cropH;
+    cropSourceCanvas.getContext('2d').putImageData(cropImageDataRef, 0, 0);
+  }
+}
+
 // ── 工具切换 ──────────────────────────────────────────
 
 export function setTool(tool) {

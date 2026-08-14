@@ -64,12 +64,15 @@ pub fn parse(input: &str) -> Option<ColorResult> {
 
     let rgba = if first == &b'#' {
         parse_hex(trimmed)?
-    } else if trimmed.starts_with("rgb") {
-        parse_rgb_like(trimmed)?
-    } else if trimmed.starts_with("hsl") {
-        parse_hsl_like(trimmed)?
     } else {
-        return None;
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("rgb") {
+            parse_rgb_like(trimmed)?
+        } else if lower.starts_with("hsl") {
+            parse_hsl_like(trimmed)?
+        } else {
+            return None;
+        }
     };
 
     // 确认不是误匹配（如 "rgbhello"）——parse 函数内部已做结构校验，

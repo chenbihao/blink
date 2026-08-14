@@ -40,12 +40,15 @@ export function parse(input) {
 
   if (first === 0x23 /* '#' */) {
     rgba = parseHex(trimmed);
-  } else if (trimmed.startsWith("rgb")) {
-    rgba = parseRgbLike(trimmed);
-  } else if (trimmed.startsWith("hsl")) {
-    rgba = parseHslLike(trimmed);
   } else {
-    return null;
+    const lower = trimmed.toLowerCase();
+    if (lower.startsWith("rgb")) {
+      rgba = parseRgbLike(trimmed);
+    } else if (lower.startsWith("hsl")) {
+      rgba = parseHslLike(trimmed);
+    } else {
+      return null;
+    }
   }
 
   if (!rgba) return null;

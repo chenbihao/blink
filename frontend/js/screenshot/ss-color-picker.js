@@ -13,7 +13,7 @@
 import { ss } from './ss-state.js';
 import * as annot from './annotation-engine.js';
 import { initPalette } from './ss-palette.js';
-import { hidePixelMagnifier } from './ss-interaction.js';
+import { hidePixelMagnifier, enterColorPickerFollowing, resetColorPickerState, isColorPickerActive, movePickerPixel } from './ss-interaction.js';
 import { screenshotCursorPosition } from '../shared/api.js';
 
 // ── 色彩空间转换（纯函数）──────────────────────────────────
@@ -328,6 +328,8 @@ function parseValueInput() {
 function enterPickMode() {
   picking = true;
   ss.eyedropperActive = true;  // 0.15.10：让 mousemove 显示像素放大镜
+  // 0.20.6：进入取色跟随模式（方向键精调）
+  enterColorPickerFollowing();
   if (dropdown) dropdown.setAttribute('data-open', 'false');
   ss.canvas.style.cursor = 'crosshair';
 
@@ -338,9 +340,11 @@ function enterPickMode() {
     cleaned = true;
     picking = false;
     ss.eyedropperActive = false;  // 0.15.10：清除标志
+    // 0.20.6：重置取色状态机
+    resetColorPickerState();
     ss.canvas.style.cursor = '';
     ss.canvas.removeEventListener('mousedown', onPick, true);
-    document.removeEventListener('keydown', onEsc, true);
+    document.removeEventListener('keydown', onPickKey, true);
     // 0.15.10：隐藏像素放大镜
     hidePixelMagnifier();
   };
@@ -357,13 +361,7 @@ function enterPickMode() {
       const pos = await screenshotCursorPosition();
       const bitmapX = Math.round(pos.x - meta.vx);
       const bitmapY = Math.round(pos.y - meta.vy);
-      // 0.15.8-fix：从原始截图离屏 canvas 读取，而非遮罩后的主 canvas
-      const source = ss.screenshotOffscreen || ss.canvas;
-      const sourceCtx = source.getContext('2d');
-      const pixel = sourceCtx.getImageData(bitmapX, bitmapY, 1, 1).data;
-      hsv = rgbToHsv(pixel[0], pixel[1], pixel[2]);
-      alpha = 1;  // 取色后重置透明度，避免半透明导致用户以为没取色成功
-      updateAll();
+      await samplePixelAt(bitmapX, bitmapY);
     } catch (err) {
       console.warn('[color-picker] 取色失败', err);
     }
@@ -371,11 +369,39 @@ function enterPickMode() {
   };
   ss.canvas.addEventListener('mousedown', onPick, true);
 
-  // ESC 取消取色
-  const onEsc = (e) => {
-    if (e.key === 'Escape') cleanup();
+  // 0.20.6：取色器键盘事件——方向键移动 1 物理像素、Esc 退出
+  const onPickKey = (e) => {
+    // IME composition 优先
+    if (e.isComposing) return;
+    if (e.key === 'Escape') {
+      cleanup();
+      return;
+    }
+    // 方向键移动 1 物理像素（取色器激活时）
+    if (isColorPickerActive()) {
+      let dx = 0, dy = 0;
+      if (e.key === 'ArrowLeft') { dx = -1; }
+      else if (e.key === 'ArrowRight') { dx = 1; }
+      else if (e.key === 'ArrowUp') { dy = -1; }
+      else if (e.key === 'ArrowDown') { dy = 1; }
+      if (dx !== 0 || dy !== 0) {
+        e.preventDefault();
+        e.stopPropagation();
+        movePickerPixel(dx, dy);
+      }
+    }
   };
-  document.addEventListener('keydown', onEsc, true);
+  document.addEventListener('keydown', onPickKey, true);
+}
+
+/** 0.20.6：从指定 bitmap 坐标采样像素并更新色盘 */
+async function samplePixelAt(bitmapX, bitmapY) {
+  const source = ss.screenshotOffscreen || ss.canvas;
+  const sourceCtx = source.getContext('2d');
+  const pixel = sourceCtx.getImageData(bitmapX, bitmapY, 1, 1).data;
+  hsv = rgbToHsv(pixel[0], pixel[1], pixel[2]);
+  alpha = 1;
+  updateAll();
 }
 
 // ── 初始化与绑定 ──────────────────────────────────────────

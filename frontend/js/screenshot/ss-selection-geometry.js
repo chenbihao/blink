@@ -349,11 +349,11 @@ export function formatSelectionInfo(screenX, screenY, width, height) {
  */
 export function formatColor(r, g, b, fmt) {
   if (fmt === 1) {
-    return `RGB(${r}, ${g}, ${b})`;
+    return `rgb(${r}, ${g}, ${b})`;
   }
   if (fmt === 2) {
     const [h, s, l] = rgbToHsl(r, g, b);
-    return `HSL(${h}, ${s}%, ${l}%)`;
+    return `hsl(${h}, ${s}%, ${l}%)`;
   }
   return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`.toUpperCase();
 }
@@ -379,6 +379,89 @@ export function rgbToHsl(r, g, b) {
 /** pending-snap 是否已达到自由框选阈值。 */
 export function shouldStartFreeSelection(startX, startY, currentX, currentY, threshold = 3) {
   return distanceCss(startX, startY, currentX, currentY) >= threshold;
+}
+
+// ── 0.20.6：像素精调纯函数 ──────────────────────────────────────────────────
+//
+// 所有函数在 bitmap 物理像素坐标空间操作，不涉及 CSS/DOM。
+// 调用方负责把 CSS 坐标通过 cssRectToBitmap / cssPointToBitmap 转入 bitmap 空间后再调用。
+
+/**
+ * 选区整体移动 1 bitmap 物理像素，并钳制到 bitmap 边界。
+ * @param {{x,y,w,h}} rect - bitmap 矩形
+ * @param {number} dx - X 方向位移（-1 / 0 / +1）
+ * @param {number} dy - Y 方向位移（-1 / 0 / +1）
+ * @param {number} bitmapWidth
+ * @param {number} bitmapHeight
+ * @returns {{x,y,w,h}} 钳制后的新矩形（w/h 不变）
+ */
+export function moveRect1px(rect, dx, dy, bitmapWidth, bitmapHeight) {
+  const newX = rect.x + dx;
+  const newY = rect.y + dy;
+  // 钳制：选区不超出 bitmap 范围 [0, bitmapWidth - rect.w]
+  const clampedX = Math.max(0, Math.min(newX, Math.max(0, bitmapWidth - rect.w)));
+  const clampedY = Math.max(0, Math.min(newY, Math.max(0, bitmapHeight - rect.h)));
+  return { x: clampedX, y: clampedY, w: rect.w, h: rect.h };
+}
+
+/**
+ * Resize 选区时应用 1:1 等边约束（Shift 按下）。
+ * 以 anchor 边为基准，让新矩形宽=高=max(新宽,新高)。
+ * @param {{x,y,w,h}} original - 原始 bitmap 矩形
+ * @param {string} handle - 'nw'|'ne'|'sw'|'se'|'n'|'s'|'e'|'w'
+ * @param {number} newW - resize 后的新宽
+ * @param {number} newH - resize 后的新新高
+ * @param {number} bitmapWidth
+ * @param {number} bitmapHeight
+ * @returns {{x,y,w,h}} 约束+钳制后的矩形
+ */
+export function applySquareResize(original, handle, newW, newH, bitmapWidth, bitmapHeight) {
+  const side = Math.max(Math.abs(newW), Math.abs(newH));
+  const s = Math.max(MIN_RESIZE_SIDE, side);
+  let x = original.x, y = original.y, w = s, h = s;
+  // 按 handle 方向确定锚点
+  // 锚点 = 被拖拽边的对侧边
+  if (handle.includes('w')) x = original.x + original.w - s;   // 拖西边 → 锚东
+  if (handle.includes('n')) y = original.y + original.h - s;  // 拖北边 → 锚南
+  // 'e' / 's' 保持 original.x / original.y 不变
+  // 钳制到 bitmap
+  if (x < 0) { const d = -x; x = 0; w = Math.max(MIN_RESIZE_SIDE, s - d); h = w; }
+  if (y < 0) { const d = -y; y = 0; h = Math.max(MIN_RESIZE_SIDE, s - d); w = h; }
+  if (x + w > bitmapWidth) { w = Math.max(MIN_RESIZE_SIDE, bitmapWidth - x); h = w; }
+  if (y + h > bitmapHeight) { h = Math.max(MIN_RESIZE_SIDE, bitmapHeight - y); w = h; }
+  return { x, y, w, h };
+}
+
+/** resize 最小边长常量 */
+const MIN_RESIZE_SIDE = 2;
+
+/**
+ * 准星（取色十字）移动 1 bitmap px 并钳制到选区 bitmap 范围。
+ * @param {{x,y}} pos - 当前准星 bitmap 坐标
+ * @param {number} dx
+ * @param {number} dy
+ * @param {{x,y,w,h}} rect - 选区 bitmap 矩形（准星被限制在此范围内）
+ * @returns {{x,y}} 钳制后的新坐标
+ */
+export function moveCrosshair1px(pos, dx, dy, rect) {
+  const newX = pos.x + dx;
+  const newY = pos.y + dy;
+  // 准星限制在选区内 [rect.x, rect.x + rect.w - 1]
+  const clampedX = Math.max(rect.x, Math.min(newX, rect.x + Math.max(0, rect.w - 1)));
+  const clampedY = Math.max(rect.y, Math.min(newY, rect.y + Math.max(0, rect.h - 1)));
+  return { x: clampedX, y: clampedY };
+}
+
+/**
+ * 钳制选区矩形到 bitmap 物理边界。
+ * 与 clampRectToBitmap 类似，但确保 w/h 不为负且不越界。
+ */
+export function clampRectToBitmapBounds(rect, bitmapWidth, bitmapHeight) {
+  const x = Math.max(0, Math.min(rect.x, Math.max(0, bitmapWidth - 1)));
+  const y = Math.max(0, Math.min(rect.y, Math.max(0, bitmapHeight - 1)));
+  const right = Math.max(x + MIN_RESIZE_SIDE, Math.min(rect.x + rect.w, bitmapWidth));
+  const bottom = Math.max(y + MIN_RESIZE_SIDE, Math.min(rect.y + rect.h, bitmapHeight));
+  return { x, y, w: right - x, h: bottom - y };
 }
 
 /**

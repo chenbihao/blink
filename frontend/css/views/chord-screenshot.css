@@ -143,6 +143,25 @@ body.image-editor-mode #canvas.long-image-editing {
   display: block;    /* 0.14.7 W4：默认可见，由 .hidden class 控制隐藏 */
 }
 
+/* 0.20.6：精调状态提示 */
+.precision-hint {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-size: var(--text-sm);
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  padding: 4px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(74, 158, 255, 0.4);
+  pointer-events: none;
+  display: block;
+  z-index: var(--z-dropdown);
+  white-space: nowrap;
+}
+
 /* ── 选区中央加载转圈（OCR/翻译进行中） ────────────────────────── */
 .sel-loading {
   position: fixed;

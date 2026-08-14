@@ -97,6 +97,11 @@ export const ss = {
   // 放大镜异步物理坐标采样代际守卫，防止旧 GetCursorPos 结果回流
   _magnifierSampleGen: 0,
 
+  // ── 0.20.6：取色器精调状态 ──────────────────────────────
+  colorPickerMode: 'idle',       // 'idle' | 'following'
+  _pickerBitmapPos: null,        // 方向键精调的 bitmap 坐标基线 {x, y}
+  precisionHint: null,           // #precision-hint DOM 元素
+
   // ── 跨模块回调（主文件注册，避免循环依赖）──────────────────
   _invalidateSelectionContent: null,  // 选区内容失效（清 OCR/阅读/overlay）
   _enterAnnotationMode: null,         // 进入标注模式
@@ -178,6 +183,8 @@ export function initDOM() {
   ss.interactionCtx = ss.interactionCanvas ? ss.interactionCanvas.getContext('2d') : null;
   ss.hitCanvas = document.getElementById('ocr-hit-canvas');
   ss.hitCtx = ss.hitCanvas ? ss.hitCanvas.getContext('2d') : null;
+  // 0.20.6：精调状态提示元素
+  ss.precisionHint = document.getElementById('precision-hint');
   // 0.15.7：长截图预览缩略图
   ss.scrollPreviewCanvas = document.getElementById('scroll-preview');
   ss.scrollPreviewCtx = ss.scrollPreviewCanvas ? ss.scrollPreviewCanvas.getContext('2d') : null;

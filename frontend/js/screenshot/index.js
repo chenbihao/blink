@@ -43,6 +43,7 @@ import { ss, initDOM, PREWARM_MIN_WIDTH, PREWARM_MIN_HEIGHT, TOOL_CAPS } from ".
 import { IMAGE_SOURCE } from './image-editor-session.js';
 import { norm, pointInRect, applySquareConstraint, computePanAxisBounds, computeCanvasEditorInitialPosition } from "./ss-utils.js";
 import { shouldStartFreeSelection, syncRenderScale, cssRectToBitmap, cssPointToScreen, cssPointToBitmap, getRenderScale } from "./ss-selection-geometry.js";
+import { applySquareResize } from "./ss-selection-geometry.js";
 import { drawDimmed, drawStaticBase, drawSelection, drawFinalSelection, redrawAnnotPreview, redrawAnnotFull, scheduleDrawSelection, cancelDrawSelectionRaf, scheduleDrawFinalSelection, cancelDrawFinalSelectionRaf, syncInteractionCanvasSize } from "./ss-draw.js";
 import { positionToolbar, invalidateDisplaysCache, findDisplayCssAt, getMonitorForScroll } from "./ss-display.js";
 import {
@@ -50,6 +51,7 @@ import {
   finishSelectionInteraction, updateSelectionCursor, refreshShapePreviewOnShift,
   updateStrokeCursor,
   updatePixelMagnifier, hidePixelMagnifier, cycleMagnifierFormat, getMagnifierColorText,
+  moveSelection1px,
 } from "./ss-interaction.js";
 import {
   exitReadingMode, getReadingSelectionText, showReadingContextMenu, copyReadingSelection,
@@ -358,6 +360,10 @@ function resetState() {
   if (ss.magnifierRaf) { cancelAnimationFrame(ss.magnifierRaf); ss.magnifierRaf = 0; }
   ss._magnifierSampleGen = (ss._magnifierSampleGen || 0) + 1;
   ss._pendingMagnifierPos = null;
+  // 0.20.6：重置取色器状态
+  ss.colorPickerMode = 'idle';
+  ss._pickerBitmapPos = null;
+  if (ss.precisionHint) ss.precisionHint.classList.add('hidden');
   // 长截图状态、在途任务与 DOM 统一由 resetScrollCaptureSession 清理。
   _spaceDown = false;
   try {
@@ -1149,8 +1155,17 @@ canvas.addEventListener('mousemove', (e) => {
     // renderScale 全局一致，cssRectToBitmap 对任意屏的 CSS 坐标都能正确映射到
     // SESSION 物理像素坐标。跨 DPR 选区的裁剪/复制/pin 均由后端 crop_bgra_virtual
     // 按虚拟屏幕坐标直接裁剪，不存在比例错误。
-    ss.endX = e.offsetX;
-    ss.endY = e.offsetY;
+    // 0.20.6：Shift 按下时强制 1:1 正方形约束（自由框选 mousemove 路径同步）
+    if (e.shiftKey) {
+      const dx = e.offsetX - ss.startX;
+      const dy = e.offsetY - ss.startY;
+      const side = Math.max(Math.abs(dx), Math.abs(dy));
+      ss.endX = ss.startX + (dx >= 0 ? side : -side);
+      ss.endY = ss.startY + (dy >= 0 ? side : -side);
+    } else {
+      ss.endX = e.offsetX;
+      ss.endY = e.offsetY;
+    }
     // H1 优化：rAF 节流，避免 mousemove 高频全量重绘
     scheduleDrawSelection();
   }
@@ -1247,8 +1262,17 @@ canvas.addEventListener('mouseup', (e) => {
 
   if (!ss.isDragging) return;
   ss.isDragging = false;
-  ss.endX = e.offsetX;
-  ss.endY = e.offsetY;
+  // 0.20.6：Shift 按下时强制 1:1 正方形约束（自由框选 mouseup 路径同步）
+  if (e.shiftKey) {
+    const dx = e.offsetX - ss.startX;
+    const dy = e.offsetY - ss.startY;
+    const side = Math.max(Math.abs(dx), Math.abs(dy));
+    ss.endX = ss.startX + (dx >= 0 ? side : -side);
+    ss.endY = ss.startY + (dy >= 0 ? side : -side);
+  } else {
+    ss.endX = e.offsetX;
+    ss.endY = e.offsetY;
+  }
 
   const rect = norm(ss.startX, ss.startY, ss.endX, ss.endY);
   if (rect.w < 5 || rect.h < 5) {
@@ -1405,6 +1429,59 @@ document.addEventListener('keydown', (e) => {
       return;
     }
   }
+  // 0.20.6：方向键移动选区 1 bitmap px（标注模式下、选取工具、有选区、无标注拖拽时）
+  if (ss.isAnnotating && ss.selCss && annot.getTool() === 'select' && !ss.isAnnotDragging && !ss.selectionInteraction) {
+    // 标注对象键盘操作优先于选区；文本输入/IME 优先于截图快捷键
+    const tgt = e.target;
+    if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) {
+      // 文本输入中不拦截方向键
+    } else if (!e.isComposing) {
+      let dx = 0, dy = 0;
+      if (e.key === 'ArrowLeft') { dx = -1; }
+      else if (e.key === 'ArrowRight') { dx = 1; }
+      else if (e.key === 'ArrowUp') { dy = -1; }
+      else if (e.key === 'ArrowDown') { dy = 1; }
+      if (dx !== 0 || dy !== 0) {
+        e.preventDefault();
+        const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+        const newSelCss = moveSelection1px(ss.selCss, dx, dy, meta);
+        if (newSelCss) {
+          ss.selCss = newSelCss;
+          // 重置标注 canvas 位置和裁剪区域
+          const bmpRect = cssRectToBitmap(newSelCss, meta);
+          const pw = Math.max(1, bmpRect.w);
+          const ph = Math.max(1, bmpRect.h);
+          ss.annotCanvas.style.left = newSelCss.x + 'px';
+          ss.annotCanvas.style.top = newSelCss.y + 'px';
+          // 重新裁剪底图（选区移动后裁剪区域改变）
+          if (ss.screenshot) {
+            try {
+              const tempCanvas = document.createElement('canvas');
+              tempCanvas.width = pw;
+              tempCanvas.height = ph;
+              const tempCtx = tempCanvas.getContext('2d');
+              tempCtx.drawImage(ss.screenshot, bmpRect.x, bmpRect.y, pw, ph, 0, 0, pw, ph);
+              const cropData = tempCtx.getImageData(0, 0, pw, ph);
+              annot.updateCropData(cropData, pw, ph);
+            } catch (err) {
+              console.warn('[screenshot] 方向键移动选区后裁剪失败', err);
+            }
+          }
+          ss.selectionRevision++;
+          ss.ocrPrewarm = null;
+          ss.ocrResultCache = null;
+          if (typeof ss._invalidateSelectionContent === 'function') {
+            ss._invalidateSelectionContent();
+          }
+          drawFinalSelection();
+          // 刷新 OCR 预热
+          triggerOcrPrewarm(pw, ph);
+        }
+        return;
+      }
+    }
+  }
+
   if (e.key === 'Escape') {
     e.preventDefault();
     // 0.15.7：长截图采集阶段——ESC 先退出长截图模式

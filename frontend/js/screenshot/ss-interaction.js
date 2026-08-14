@@ -14,6 +14,7 @@ import { findDisplayCssAt, applyFloatingUiScale, applyFloatingUiScaleAt } from '
 import * as annot from './annotation-engine.js';
 import {
   formatColor, magnifierSampleRegion, cssPointToBitmap, getRenderScale, screenPointToBitmap,
+  moveCrosshair1px, moveRect1px, clampRectToBitmapBounds,
 } from './ss-selection-geometry.js';
 import { screenshotCursorPosition } from '../shared/api.js';
 
@@ -85,8 +86,19 @@ export function updateSelectionInteraction(e) {
     }
   }
   if (ss.selectionInteraction.kind === 'new') {
-    ss.endX = e.offsetX;
-    ss.endY = e.offsetY;
+    // 0.20.6：Shift 按下时强制 1:1 正方形约束（新建拖选路径）
+    if (e.shiftKey) {
+      const sx = ss.selectionInteraction.startX;
+      const sy = ss.selectionInteraction.startY;
+      const dx = e.offsetX - sx;
+      const dy = e.offsetY - sy;
+      const side = Math.max(Math.abs(dx), Math.abs(dy));
+      ss.endX = sx + (dx >= 0 ? side : -side);
+      ss.endY = sy + (dy >= 0 ? side : -side);
+    } else {
+      ss.endX = e.offsetX;
+      ss.endY = e.offsetY;
+    }
     // H1 优化：rAF 节流，避免 mousemove 高频全量重绘
     scheduleDrawSelection();
     return;
@@ -108,6 +120,32 @@ export function updateSelectionInteraction(e) {
     if (handle.includes('e')) right = Math.min(monitor.x + monitor.w, Math.max(e.offsetX, left + MIN_SELECTION_SIZE));
     if (handle.includes('n')) top = Math.max(monitor.y, Math.min(e.offsetY, bottom - MIN_SELECTION_SIZE));
     if (handle.includes('s')) bottom = Math.min(monitor.y + monitor.h, Math.max(e.offsetY, top + MIN_SELECTION_SIZE));
+    // 0.20.6：Shift 按下时强制 1:1 等边约束
+    if (e.shiftKey) {
+      const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+      const { scaleX: rsx, scaleY: rsy } = getRenderScale(meta);
+      // 把 CSS 坐标转换为 bitmap 坐标来调用 applySquareResize
+      const origBmpX = Math.round(original.x * rsx);
+      const origBmpY = Math.round(original.y * rsy);
+      const origBmpW = Math.round(original.w * rsx);
+      const origBmpH = Math.round(original.h * rsy);
+      const newBmpW = Math.round((right - left) * rsx);
+      const newBmpH = Math.round((bottom - top) * rsy);
+      const canvasW = ss.canvas?.width || meta?.w || 0;
+      const canvasH = ss.canvas?.height || meta?.h || 0;
+      const constrained = applySquareResize(
+        { x: origBmpX, y: origBmpY, w: origBmpW, h: origBmpH },
+        handle,
+        newBmpW,
+        newBmpH,
+        canvasW,
+        canvasH
+      );
+      left = constrained.x / rsx;
+      top = constrained.y / rsy;
+      right = (constrained.x + constrained.w) / rsx;
+      bottom = (constrained.y + constrained.h) / rsy;
+    }
     ss.selCss = { x: left, y: top, w: right - left, h: bottom - top };
   }
   // 性能优化：rAF 节流，避免 move/resize mousemove 高频全量重绘
@@ -130,6 +168,16 @@ export function finishSelectionInteraction(e) {
   if (kind === 'new') {
     ss.endX = e.offsetX;
     ss.endY = e.offsetY;
+    // 0.20.6：Shift 按下时强制 1:1 正方形约束（finish 路径同步）
+    if (e.shiftKey) {
+      const sx = ss.selectionInteraction.startX;
+      const sy = ss.selectionInteraction.startY;
+      const dx = e.offsetX - sx;
+      const dy = e.offsetY - sy;
+      const side = Math.max(Math.abs(dx), Math.abs(dy));
+      ss.endX = sx + (dx >= 0 ? side : -side);
+      ss.endY = sy + (dy >= 0 ? side : -side);
+    }
     ss.selCss = norm(ss.startX, ss.startY, ss.endX, ss.endY);
     ss.isDragging = false;
   }
@@ -145,6 +193,11 @@ export function finishSelectionInteraction(e) {
 }
 
 export function updateSelectionCursor(x, y) {
+  // 0.20.6：取色器激活时始终使用十字光标
+  if (ss.eyedropperActive) {
+    ss.canvas.style.cursor = 'crosshair';
+    return;
+  }
   if (annot.getTool() !== 'select') {
     ss.canvas.style.cursor = 'crosshair';
     return;
@@ -298,6 +351,10 @@ function canRenderMagnifierSample(generation) {
  * 从 bitmap 坐标采样像素并渲染放大镜网格 + 定位元素。
  */
 function renderMagnifierFromBitmap(px, py, cssX, cssY, meta) {
+  // 0.20.6：同步取色器精调基线位置（方向键从此点开始 1px 移动）
+  if (ss.eyedropperActive) {
+    ss._pickerBitmapPos = { x: px, y: py };
+  }
   const halfR = Math.floor(PM_ROWS / 2);
   const halfC = Math.floor(PM_COLS / 2);
 
@@ -466,6 +523,109 @@ function drawMagnifierGrid(imgData, gridOffX, gridOffY, dataCols, dataRows) {
 }
 
 // 0.15.8 R0：formatColor / rgbToHsl 已统一到 ss-selection-geometry.js，此处不再重复定义
+
+// ── 0.20.6：取色器方向键 1px 精调 ──────────────────────────────────
+//
+// 取色器始终处于 following 模式（鼠标跟随实时采样）。
+// 方向键辅助鼠标移动 1 个物理像素，用于像素级精确定位。
+// 不再使用滚轮冻结方案——精调时直接移动鼠标采样位置并刷新放大镜。
+
+/**
+ * 进入取色器跟随模式。由 ss-color-picker.js 的 enterPickMode 调用。
+ */
+export function enterColorPickerFollowing() {
+  ss.colorPickerMode = 'following';
+  ss._pickerBitmapPos = null;
+  updatePrecisionHint();
+}
+
+/**
+ * 取色器完全退出（idle）。由 cleanup 路径调用。
+ */
+export function resetColorPickerState() {
+  ss.colorPickerMode = 'idle';
+  ss._pickerBitmapPos = null;
+  updatePrecisionHint();
+}
+
+/**
+ * 取色器方向键移动 1 个物理像素。
+ * 调用后立即从新位置采样并刷新放大镜显示。
+ * @param {number} dx -1/0/+1
+ * @param {number} dy -1/0/+1
+ */
+export function movePickerPixel(dx, dy) {
+  if (ss.colorPickerMode !== 'following' || !ss.eyedropperActive) return;
+  const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+  // 初始化或更新采样位置
+  if (!ss._pickerBitmapPos) {
+    // 首次按键：用当前鼠标位置初始化
+    // _pickerBitmapPos 在 mousemove 中由 updatePixelMagnifier 同步更新
+    return; // 首次按键没有基线位置时跳过
+  }
+  const newPos = moveCrosshair1px(
+    ss._pickerBitmapPos, dx, dy,
+    { x: 0, y: 0, w: ss.screenshotOffscreen?.width || 0, h: ss.screenshotOffscreen?.height || 0 }
+  );
+  ss._pickerBitmapPos = newPos;
+  // 立即从新位置采样并渲染放大镜
+  const { scaleX: rsx, scaleY: rsy } = getRenderScale(meta);
+  const cssX = newPos.x / rsx;
+  const cssY = newPos.y / rsy;
+  renderMagnifierFromBitmap(newPos.x, newPos.y, cssX, cssY, meta);
+  updatePrecisionHint();
+}
+
+/**
+ * 判断当前是否处于取色器激活状态。
+ */
+export function isColorPickerActive() {
+  return ss.colorPickerMode === 'following';
+}
+
+/**
+ * 更新精调状态提示 DOM。
+ */
+function updatePrecisionHint() {
+  if (!ss.precisionHint) return;
+  if (ss.colorPickerMode === 'following') {
+    ss.precisionHint.textContent = '方向键移动 1px · C 复制颜色 · Esc 取消';
+    ss.precisionHint.classList.remove('hidden');
+  } else {
+    ss.precisionHint.classList.add('hidden');
+  }
+}
+
+/**
+ * 0.20.6：选区方向键移动 1 bitmap px。
+ * 在 bitmap 空间操作，返回 CSS 空间的新矩形供调用方更新 selCss。
+ * @param {{x,y,w,h}} selCss - 当前 CSS 选区
+ * @param {number} dx -1/0/+1
+ * @param {number} dy -1/0/+1
+ * @param {object} meta - window.__blinkScreenMeta
+ * @returns {{x,y,w,h} | null} 新的 CSS 选区矩形，或 null 表示不可移动
+ */
+export function moveSelection1px(selCss, dx, dy, meta) {
+  if (!selCss) return null;
+  const bmp = cssPointToBitmap(selCss.x, selCss.y, meta);
+  const bmpW = Math.round(selCss.w * (meta?.renderScaleX || 1));
+  const bmpH = Math.round(selCss.h * (meta?.renderScaleY || 1));
+  const bmpRect = { x: bmp.x, y: bmp.y, w: bmpW, h: bmpH };
+  const canvasW = ss.canvas?.width || meta?.w || 0;
+  const canvasH = ss.canvas?.height || meta?.h || 0;
+  const newBmpRect = moveRect1px(bmpRect, dx, dy, canvasW, canvasH);
+  // 转回 CSS
+  const rsx = meta?.renderScaleX || 1;
+  const rsy = meta?.renderScaleY || 1;
+  return {
+    x: newBmpRect.x / rsx,
+    y: newBmpRect.y / rsy,
+    w: newBmpRect.w / rsx,
+    h: newBmpRect.h / rsy,
+  };
+}
+
+// moveRect1px 已在顶部导入
 
 /** 0.11.8-e：矩形/椭圆拖动期间按/松 Shift 实时更新预览 */
 export function refreshShapePreviewOnShift(e) {
