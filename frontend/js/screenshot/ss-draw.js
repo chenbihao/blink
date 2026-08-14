@@ -1,9 +1,14 @@
-//! 截图 overlay 绘制模块（0.14.6 §4 拆分）。
+//! 截图 overlay 绘制模块（0.14.6 §4 拆分，0.20.5 分层优化）。
+//!
+//! 0.20.5 分层架构：
+//! - #canvas（静态层）：只在 session 初始化/来源切换时 drawImage 绘制截图原图 + 暗色蒙版
+//! - #interaction-canvas（动态层）：拖拽/缩放时只清理+重绘遮罩、边框、手柄
+//! - #annot-canvas（标注层）：保持独立生命周期，不合并回动态层
 //!
 //! 从 chord-screenshot.js 提取的绘制函数：
-//! - drawDimmed：暗色蒙版（初始态 + 无选区时）
-//! - drawSelection：选区拖拽中的实时绘制
-//! - drawFinalSelection：选区确定后的静态绘制
+//! - drawStaticBase：静态底图 + 暗色蒙版（初始化/来源切换/drawDimmed 时调）
+//! - drawSelection：选区拖拽中的实时绘制（只画动态层）
+//! - drawFinalSelection：选区确定后的静态绘制（只画动态层）
 //! - redrawAnnotPreview：标注实时预览
 //! - redrawAnnotFull：全量重绘标注层
 
@@ -56,32 +61,60 @@ export function cancelDrawFinalSelectionRaf() {
   }
 }
 
-/** 暗色蒙版（初始态 + 无选区时） */
-export function drawDimmed() {
+/**
+ * 0.20.5：同步 interaction canvas 的 backing store 尺寸与主 canvas 一致。
+ * 在主 canvas 尺寸变化后调用（loadScreenshot / resetState / enterCanvasImageEditor）。
+ */
+export function syncInteractionCanvasSize() {
+  const { canvas, interactionCanvas } = ss;
+  if (!canvas || !interactionCanvas) return;
+  if (interactionCanvas.width !== canvas.width || interactionCanvas.height !== canvas.height) {
+    interactionCanvas.width = canvas.width;
+    interactionCanvas.height = canvas.height;
+  }
+}
+
+/**
+ * 0.20.5：绘制静态底图层。
+ * 只在 session 初始化/来源切换/无选区暗色蒙版时调用，不在拖拽/缩放循环中调用。
+ * 画截图原图 + 全屏暗色蒙版到主 canvas，并清空动态交互层。
+ */
+export function drawStaticBase() {
   try {
-    const { ctx, canvas, screenshot } = ss;
+    const { ctx, canvas, screenshot, interactionCtx } = ss;
     if (!screenshot || !ctx || !canvas) {
-      console.warn('[screenshot] drawDimmed: missing prerequisites', {
+      console.warn('[screenshot] drawStaticBase: missing prerequisites', {
         hasScreenshot: !!screenshot, hasCtx: !!ctx, canvasW: canvas?.width,
       });
       return;
     }
-    const _t0 = performance.now();
+    syncInteractionCanvasSize();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(getScreenshotSource(), 0, 0);
     ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    console.info('[screenshot] drawDimmed', { w: canvas.width, h: canvas.height, ms: Math.round(performance.now() - _t0) });
+    // 清空动态交互层
+    if (interactionCtx) {
+      interactionCtx.clearRect(0, 0, canvas.width, canvas.height);
+    }
   } catch (e) {
-    console.error('[screenshot] drawDimmed threw', e);
+    console.error('[screenshot] drawStaticBase threw', e);
   }
 }
 
-/** 选区绘制：选区外暗 + 选区内亮 */
+/** 暗色蒙版（初始态 + 无选区时）—— 0.20.5：委托到 drawStaticBase */
+export function drawDimmed() {
+  drawStaticBase();
+}
+
+/**
+ * 选区绘制：选区外暗 + 选区内亮。
+ * 0.20.5：只绘制动态交互层（遮罩 + 边框），不再重绘静态底图。
+ * 拖拽期间 drawImage(底图) 次数为 0。
+ */
 export function drawSelection() {
-  const _t0 = performance.now();
-  const { ctx, canvas, startX, startY, endX, endY, sizeHint } = ss;
-  const src = getScreenshotSource();
+  const { interactionCtx, interactionCanvas, startX, startY, endX, endY, sizeHint } = ss;
+  if (!interactionCtx || !interactionCanvas) return;
   // 选区位置和宽高来自 cssRectToBitmap（使用实测 renderScale）
   const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
   const r = norm(startX, startY, endX, endY);
@@ -93,20 +126,20 @@ export function drawSelection() {
   // 边框粗细按选区所在屏的 monitorDpr 做视觉补偿
   const targetDpr = monitorDprAtCss(r.x, r.y, meta);
 
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(src, 0, 0);
+  // 0.20.5：只清理动态交互层，不触碰静态底图
+  interactionCtx.clearRect(0, 0, interactionCanvas.width, interactionCanvas.height);
 
   // 暗色蒙版（选区外）
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
-  ctx.fillRect(0, 0, canvas.width, py);
-  ctx.fillRect(0, py + ph, canvas.width, canvas.height - py - ph);
-  ctx.fillRect(0, py, px, ph);
-  ctx.fillRect(px + pw, py, canvas.width - px - pw, ph);
+  interactionCtx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+  interactionCtx.fillRect(0, 0, interactionCanvas.width, py);
+  interactionCtx.fillRect(0, py + ph, interactionCanvas.width, interactionCanvas.height - py - ph);
+  interactionCtx.fillRect(0, py, px, ph);
+  interactionCtx.fillRect(px + pw, py, interactionCanvas.width - px - pw, ph);
 
   // 选区边框（拖拽预览：实线，与智能预选的虚线区分）
-  ctx.strokeStyle = '#4a9eff';
-  ctx.lineWidth = 2 * targetDpr;
-  ctx.strokeRect(px, py, pw, ph);
+  interactionCtx.strokeStyle = '#4a9eff';
+  interactionCtx.lineWidth = 2 * targetDpr;
+  interactionCtx.strokeRect(px, py, pw, ph);
 
   // size-hint 显示物理像素尺寸 + 坐标（0.15.8 R0：统一用 formatSelectionInfo）
   const screenPos = cssPointToScreen(r.x, r.y, meta);
@@ -115,15 +148,15 @@ sizeHint.classList.remove('hidden');
 applyFloatingUiScaleAt(sizeHint, r.x, r.y);
 sizeHint.style.left = (r.x + 4) + 'px';
   sizeHint.style.top = (r.y > 24 ? r.y - 22 : r.y + 4) + 'px';
-  console.info('[screenshot] drawSelection', { ms: Math.round(performance.now() - _t0) });
 }
 
-/** 确定选区后的静态绘制（选区不再随鼠标变化，但仍需要蒙版效果） */
+/**
+ * 确定选区后的静态绘制（选区不再随鼠标变化，但仍需要蒙版效果）。
+ * 0.20.5：只绘制动态交互层，不重绘底图。拖动/缩放期间 drawImage(底图) 次数为 0。
+ */
 export function drawFinalSelection() {
-  const _t0 = performance.now();
-  const { ctx, canvas, selCss } = ss;
-  if (!selCss) return;
-  const src = getScreenshotSource();
+  const { interactionCtx, interactionCanvas, selCss } = ss;
+  if (!selCss || !interactionCtx || !interactionCanvas) return;
   // 选区位置和宽高来自 cssRectToBitmap（使用实测 renderScale）
   const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
   const bmp = cssRectToBitmap(selCss, meta);
@@ -134,20 +167,20 @@ export function drawFinalSelection() {
   // 边框粗细按选区所在屏的 monitorDpr 做视觉补偿
   const targetDpr = monitorDprAtCss(selCss.x, selCss.y, meta);
 
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(src, 0, 0);
+  // 0.20.5：只清理动态交互层
+  interactionCtx.clearRect(0, 0, interactionCanvas.width, interactionCanvas.height);
 
   // 蒙版
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
-  ctx.fillRect(0, 0, canvas.width, py);
-  ctx.fillRect(0, py + ph, canvas.width, canvas.height - py - ph);
-  ctx.fillRect(0, py, px, ph);
-  ctx.fillRect(px + pw, py, canvas.width - px - pw, ph);
+  interactionCtx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+  interactionCtx.fillRect(0, 0, interactionCanvas.width, py);
+  interactionCtx.fillRect(0, py + ph, interactionCanvas.width, interactionCanvas.height - py - ph);
+  interactionCtx.fillRect(0, py, px, ph);
+  interactionCtx.fillRect(px + pw, py, interactionCanvas.width - px - pw, ph);
 
   // 选区边框（标注模式：实线，与拖拽虚线区分）
-  ctx.strokeStyle = '#4a9eff';
-  ctx.lineWidth = 2 * targetDpr;
-  ctx.strokeRect(px, py, pw, ph);
+  interactionCtx.strokeStyle = '#4a9eff';
+  interactionCtx.lineWidth = 2 * targetDpr;
+  interactionCtx.strokeRect(px, py, pw, ph);
 
   // size-hint：选区确定后也需显示尺寸+坐标（与拖拽阶段一致）。
   // 修复智能选区（snap）后 sizeHint 不显示的问题——snap 路径不经过 drawSelection，
@@ -171,15 +204,14 @@ ss.sizeHint.style.left = (selCss.x + 4) + 'px';
       [px + pw, py + ph / 2], [px + pw, py + ph],
       [px + pw / 2, py + ph], [px, py + ph], [px, py + ph / 2],
     ];
-    ctx.fillStyle = '#ffffff';
-    ctx.strokeStyle = '#4a9eff';
-    ctx.lineWidth = Math.max(1, targetDpr);
+    interactionCtx.fillStyle = '#ffffff';
+    interactionCtx.strokeStyle = '#4a9eff';
+    interactionCtx.lineWidth = Math.max(1, targetDpr);
     for (const [hx, hy] of points) {
-      ctx.fillRect(hx - hs / 2, hy - hs / 2, hs, hs);
-      ctx.strokeRect(hx - hs / 2, hy - hs / 2, hs, hs);
+      interactionCtx.fillRect(hx - hs / 2, hy - hs / 2, hs, hs);
+      interactionCtx.strokeRect(hx - hs / 2, hy - hs / 2, hs, hs);
     }
   }
-  console.info('[screenshot] drawFinalSelection', { w: canvas.width, h: canvas.height, ms: Math.round(performance.now() - _t0) });
 }
 
 /**

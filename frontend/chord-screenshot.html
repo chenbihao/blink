@@ -6,8 +6,11 @@
     <link rel="stylesheet" href="css/entries/chord-screenshot.css" />
   </head>
   <body>
-    <!-- 主 canvas：全屏截图 + 暗色蒙版 + 亮区 -->
+    <!-- 主 canvas：静态底图层——截图原图，只在 session 初始化/来源切换时绘制 -->
     <canvas id="canvas"></canvas>
+
+    <!-- 0.20.5：动态交互层——选区外遮罩、边框、手柄、尺寸提示，拖动/缩放只清理此层 -->
+    <canvas id="interaction-canvas"></canvas>
 
     <!-- 标注 canvas：覆盖在裁剪区上，显示标注内容（0.11.7-b） -->
     <canvas id="annot-canvas" class="hidden"></canvas>

@@ -169,15 +169,38 @@ const PM_ROWS = 9;
 const PM_COLS = 16;
 const PM_CELL = 9;
 
+// 0.20.5：坐标 IPC 频率控制常量
+const CURSOR_IPC_MIN_INTERVAL_MS = 1000 / 30; // 30Hz 上限
+let _cursorIpcInFlight = false; // single-flight：同时只允许一个在途 invoke
+let _cursorIpcLastTime = 0; // 上次 IPC 发起时间
+let _cursorIpcPendingPos = null; // 待发送的位置（被 throttle 跳过的最新位置）
+
+/**
+ * 0.20.5：判断当前是否处于高速框选状态。
+ * 高速框选 = 正在拖拽新选区（isDragging）且鼠标移动速度较快。
+ * 此时暂停放大镜采样以避免 IPC 和 getImageData 压力。
+ */
+function isHighSpeedSelecting() {
+  // isDragging = 正在拖拽新选区；isAnnotDragging = 标注工具拖拽
+  // 取色器模式（eyedropperActive）不在此限
+  return ss.isDragging && !ss.eyedropperActive;
+}
+
 /**
  * 更新像素放大镜（在 mousemove 中调，rAF 节流）。
  * 0.15.8 R3：mousemove 只记录 pending 坐标，getImageData / 网格绘制 / DOM 定位
  * 全部放进 rAF 回调，一帧最多执行一次。
  * 只在选区拖拽阶段（!isAnnotating）或取色器模式生效。
+ * 0.20.5：高速框选时暂停放大镜采样；取色工具/低速/停留或显式精调时恢复。
  */
 export function updatePixelMagnifier(cssX, cssY) {
   // 0.15.10：取色器模式下也显示放大镜（复用选区阶段的取色预览逻辑）
   if (!ss.magnifierEl || (ss.isAnnotating && !ss.eyedropperActive)) {
+    if (ss.magnifierEl) ss.magnifierEl.classList.add('hidden');
+    return;
+  }
+  // 0.20.5：高速框选时暂停放大镜采样
+  if (isHighSpeedSelecting()) {
     if (ss.magnifierEl) ss.magnifierEl.classList.add('hidden');
     return;
   }
@@ -192,7 +215,9 @@ export function updatePixelMagnifier(cssX, cssY) {
   }
 }
 
-/** 0.15.8 R3：rAF 回调——一帧最多执行一次 getImageData + 绘制 + DOM 更新 */
+/** 0.15.8 R3：rAF 回调——一帧最多执行一次 getImageData + 绘制 + DOM 更新
+ *  0.20.5：坐标 IPC 实现 single-flight（同时只允许一个在途 invoke）、
+ *  30Hz 上限和 generation 门禁。旧 generation 不回流。 */
 function renderPixelMagnifier() {
   ss.magnifierRaf = 0;
   if (!ss._pendingMagnifierPos || !ss.magnifierEl) return;
@@ -200,23 +225,67 @@ function renderPixelMagnifier() {
     ss.magnifierEl.classList.add('hidden');
     return;
   }
+  // 0.20.5：高速框选时再次检查（可能在 rAF 等待期间进入高速状态）
+  if (isHighSpeedSelecting()) {
+    ss.magnifierEl.classList.add('hidden');
+    return;
+  }
 
   const { x: cssX, y: cssY, generation } = ss._pendingMagnifierPos;
   const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
 
-  // 选区预览和正式吸管统一使用 Win32 GetCursorPos 的虚拟屏幕物理坐标。
-  // CSS 指针坐标在 200% 缩放下通常每次只变化 1 DIP，乘 renderScale 后会
-  // 形成 0、2、4… 的 bitmap 步进；物理坐标则能覆盖每一个截图像素。
-  screenshotCursorPosition().then((pos) => {
-    if (!canRenderMagnifierSample(generation)) return;
-    const bmpPt = screenPointToBitmap(pos.x, pos.y, meta);
-    renderMagnifierFromBitmap(bmpPt.x, bmpPt.y, cssX, cssY, meta);
-  }).catch(() => {
-    // 平台命令异常时保留旧路径作为降级，至少不让放大镜完全不可用。
+  // 0.20.5：single-flight + 30Hz throttle
+  const now = performance.now();
+  const elapsed = now - _cursorIpcLastTime;
+  const canSend = !_cursorIpcInFlight && elapsed >= CURSOR_IPC_MIN_INTERVAL_MS;
+
+  if (canSend) {
+    _cursorIpcInFlight = true;
+    _cursorIpcLastTime = now;
+    // 选区预览和正式吸管统一使用 Win32 GetCursorPos 的虚拟屏幕物理坐标。
+    // CSS 指针坐标在 200% 缩放下通常每次只变化 1 DIP，乘 renderScale 后会
+    // 形成 0、2、4… 的 bitmap 步进；物理坐标则能覆盖每一个截图像素。
+    screenshotCursorPosition().then((pos) => {
+      _cursorIpcInFlight = false;
+      if (!canRenderMagnifierSample(generation)) return;
+      const bmpPt = screenPointToBitmap(pos.x, pos.y, meta);
+      renderMagnifierFromBitmap(bmpPt.x, bmpPt.y, cssX, cssY, meta);
+    }).catch(() => {
+      _cursorIpcInFlight = false;
+      // 平台命令异常时保留旧路径作为降级，至少不让放大镜完全不可用。
+      if (!canRenderMagnifierSample(generation)) return;
+      const bmpPt = cssPointToBitmap(cssX, cssY, meta);
+      renderMagnifierFromBitmap(bmpPt.x, bmpPt.y, cssX, cssY, meta);
+    });
+  } else if (_cursorIpcInFlight) {
+    // IPC 在途：用 CSS 坐标降级采样（不走 IPC，不阻塞放大镜显示）
     if (!canRenderMagnifierSample(generation)) return;
     const bmpPt = cssPointToBitmap(cssX, cssY, meta);
     renderMagnifierFromBitmap(bmpPt.x, bmpPt.y, cssX, cssY, meta);
-  });
+  } else {
+    // 被 throttle 跳过：安排下一轮发送
+    _cursorIpcPendingPos = { cssX, cssY, generation, meta };
+    setTimeout(() => {
+      if (_cursorIpcInFlight) return;
+      if (!canRenderMagnifierSample(generation)) return;
+      const p = _cursorIpcPendingPos;
+      _cursorIpcPendingPos = null;
+      if (!p) return;
+      _cursorIpcInFlight = true;
+      _cursorIpcLastTime = performance.now();
+      screenshotCursorPosition().then((pos) => {
+        _cursorIpcInFlight = false;
+        if (!canRenderMagnifierSample(p.generation)) return;
+        const bmpPt = screenPointToBitmap(pos.x, pos.y, p.meta);
+        renderMagnifierFromBitmap(bmpPt.x, bmpPt.y, p.cssX, p.cssY, p.meta);
+      }).catch(() => {
+        _cursorIpcInFlight = false;
+        if (!canRenderMagnifierSample(p.generation)) return;
+        const bmpPt = cssPointToBitmap(p.cssX, p.cssY, p.meta);
+        renderMagnifierFromBitmap(bmpPt.x, bmpPt.y, p.cssX, p.cssY, p.meta);
+      });
+    }, CURSOR_IPC_MIN_INTERVAL_MS - elapsed);
+  }
 }
 
 function canRenderMagnifierSample(generation) {

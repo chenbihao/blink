@@ -10,6 +10,9 @@ export const ss = {
   // ── DOM 引用（initDOM() 填充）─────────────────────────────
   canvas: null,
   ctx: null,
+  // 0.20.5：动态交互层——遮罩/边框/手柄，拖动/缩放只清理此层
+  interactionCanvas: null,
+  interactionCtx: null,
   annotCanvas: null,
   annotCtx: null,
   toolbar: null,
@@ -170,6 +173,9 @@ export function initDOM() {
     ss.magnifierColor = ss.magnifierEl.querySelector('.pm-color-text');
     ss.magnifierColorSwatch = ss.magnifierEl.querySelector('.pm-color-swatch');
   }
+  // 0.20.5：动态交互层 canvas
+  ss.interactionCanvas = document.getElementById('interaction-canvas');
+  ss.interactionCtx = ss.interactionCanvas ? ss.interactionCanvas.getContext('2d') : null;
   ss.hitCanvas = document.getElementById('ocr-hit-canvas');
   ss.hitCtx = ss.hitCanvas ? ss.hitCanvas.getContext('2d') : null;
   // 0.15.7：长截图预览缩略图

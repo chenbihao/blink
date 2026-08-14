@@ -1,6 +1,7 @@
 /* ── 截图 overlay 视图（0.11.7 新增工具栏 + 标注层）────────────────────
    Layer 0: body 兜底背景
-   Layer 1: #canvas — 全屏截图 + 暗色蒙版 + 亮区
+   Layer 1: #canvas — 静态底图层（截图原图，0.20.5 分层）
+   Layer 1.5: #interaction-canvas — 动态交互层（遮罩/边框/手柄，0.20.5 新增）
    Layer 2: #annot-canvas — 标注层（覆盖在裁剪区上）
    Layer 3: #toolbar — 工具栏（HTML 元素） */
 
@@ -61,6 +62,19 @@ body.image-editor-mode #canvas.long-image-editing {
 /* 选取工具由 JS 根据热区切换 move/resize/crosshair；标注工具统一回到准星。 */
 #canvas[data-tool="select"] {
   cursor: default;
+}
+
+/* 0.20.5：动态交互层——与 #canvas 完全重叠，但只承载遮罩/边框/手柄等动态内容。
+   拖动/缩放时只 clearRect + 重绘此层，不触碰静态底图的 drawImage。
+   pointer-events: none 让鼠标事件穿透到 #canvas（它仍负责事件绑定）。 */
+#interaction-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 1;
 }
 
 /* 标注 canvas：位置和尺寸由 JS 动态设置（覆盖在裁剪区上） */
