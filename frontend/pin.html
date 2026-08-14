@@ -27,6 +27,8 @@
 
     <!-- 右键菜单 -->
     <div id="ctx-menu" class="hidden">
+      <button id="ctx-edit-image">编辑图片</button>
+      <div class="ctx-sep"></div>
       <button id="ctx-ocr">识别文字</button>
       <button id="ctx-translate">翻译文字</button>
       <div class="ctx-sep"></div>
@@ -55,7 +57,7 @@
     </div>
 
     <script type="module">
-      import { invoke, screenshotPinTransform, screenshotPinGetRect, ocrImage, translateText, pinSpareReady, pinSaveClipboard, pinSaveAs } from "./js/shared/api.js";
+      import { invoke, screenshotPinTransform, screenshotPinGetRect, ocrImage, translateText, pinSpareReady, pinSaveClipboard, pinSaveAs, openImageEditorFromPin } from "./js/shared/api.js";
       import { normalizeError, getCurrentWindow } from "./js/shared/tauri.js";
       import { applyThemeFromConfig } from "./js/shared/theme.js";
       import {
@@ -644,6 +646,21 @@
         ctxMenu.classList.add('hidden');
         isCtxOpen = false;
       }
+
+      document.getElementById('ctx-edit-image').addEventListener('click', () => {
+        hideCtxMenu();
+        openImageEditorFromPin(myLabel)
+          .catch((e) => {
+            const err = String(e);
+            if (err === 'AlreadyActive') {
+              console.info('[pin] 编辑会话已活跃，后端已激活现有编辑器');
+            } else if (err === 'PinImageNotFound') {
+              console.warn('[pin] 图片不存在或窗口已关闭');
+            } else {
+              console.error('[pin] 从 pin 图打开编辑器失败', e);
+            }
+          });
+      });
 
       document.getElementById('ctx-close').addEventListener('click', () => {
         hideCtxMenu();

@@ -22,9 +22,27 @@ html, body {
   background: rgba(0, 0, 0, 0.15);
 }
 
-/* 通用图片编辑使用同一透明 overlay 外壳，画布之外采用主题背景。 */
+/* 通用图片编辑复用透明 overlay 外壳，但图片以外不应遮住桌面。
+ * 交互控件和 canvas 自身都有不透明像素，仍可正常接收输入；完全透明的空白区域
+ * 则保留桌面上下文，也避免普通图片编辑产生“再次截图”的沉浸式错觉。 */
 body.image-editor-mode {
-  background: var(--bg);
+  background: transparent;
+}
+
+/* 独立图片需要明确的画布边界。棋盘底让透明 PNG 可辨识，描边和阴影把图片从
+ * 真实桌面内容中托起；这些都是 canvas 的 CSS 背景，不会进入复制/保存输出。 */
+body.image-editor-mode #canvas.long-image-editing {
+  background-color: #f3f3f3;
+  background-image:
+    linear-gradient(45deg, #d8d8d8 25%, transparent 25%),
+    linear-gradient(-45deg, #d8d8d8 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #d8d8d8 75%),
+    linear-gradient(-45deg, transparent 75%, #d8d8d8 75%);
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  background-size: 16px 16px;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.28),
+    0 12px 36px rgba(0, 0, 0, 0.48);
 }
 
 /*

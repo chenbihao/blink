@@ -331,6 +331,29 @@ export function imageEditorCancel() {
   return invoke('image_editor_cancel');
 }
 
+// ── 0.20.4：多来源图片编辑入口 ──
+
+/** 0.20.4：从当前系统剪贴板图片打开编辑器。
+ *  剪贴板无图片时返回错误 "ClipboardNoImage"。
+ *  编辑会话已活跃时返回 "AlreadyActive"（同时后端激活现有编辑器窗口）。 */
+export function openImageEditorFromClipboard() {
+  return invoke('open_image_editor_from_clipboard');
+}
+
+/** 0.20.4：从剪贴板历史图片打开编辑器。
+ *  @param {string} imageId clipboard_images 表 id
+ *  不先覆盖系统剪贴板。 */
+export function openImageEditorFromHistory(imageId) {
+  return invoke('open_image_editor_from_history', { imageId });
+}
+
+/** 0.20.4：从仍显示的 pin 窗口打开编辑器。
+ *  @param {string} windowLabel pin 窗口 label
+ *  不先覆盖系统剪贴板。pin 图窗口本身不受影响。 */
+export function openImageEditorFromPin(windowLabel) {
+  return invoke('open_image_editor_from_pin', { windowLabel });
+}
+
 /** 多 Pin N+1：前端 preheat init 完成后调用，将 spare 注册为可用。 */
 export function pinSpareReady() {
   return invoke("pin_spare_ready");

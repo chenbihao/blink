@@ -995,6 +995,7 @@ export const zh = {
     "menu.copyResult": "复制结果",
     "menu.edit": "编辑",
     "menu.pin": "钉图",
+"menu.editImage": "编辑图片",
     "menu.sticky": "钉为便签",
     "menu.delete": "删除记录",
     "menu.copySelected": "复制选中的 {count} 条",

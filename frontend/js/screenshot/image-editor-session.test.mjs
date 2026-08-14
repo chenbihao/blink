@@ -26,7 +26,17 @@ assert.deepEqual([session.screenX, session.screenY], [12, 34]);
 session.beginCanvasSource(IMAGE_SOURCE.LONG_SCREENSHOT, canvas);
 assert.equal(session.ownsScreenshotSession, true);
 
-assert.throws(() => session.beginCanvasSource('history', canvas), /不支持/);
+// HISTORY 和 PIN 是 0.20.4 新增的受支持来源
+session.beginCanvasSource(IMAGE_SOURCE.HISTORY, canvas);
+assert.equal(session.source, IMAGE_SOURCE.HISTORY);
+assert.equal(session.ownsScreenshotSession, false);
+
+session.beginCanvasSource(IMAGE_SOURCE.PIN, canvas);
+assert.equal(session.source, IMAGE_SOURCE.PIN);
+assert.equal(session.ownsScreenshotSession, false);
+
+// 仍应拒绝未注册的来源
+assert.throws(() => session.beginCanvasSource('unknown', canvas), /不支持/);
 assert.throws(() => session.beginCanvasSource(IMAGE_SOURCE.CLIPBOARD, { width: 0, height: 1 }), /非空/);
 
 session.reset();

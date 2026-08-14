@@ -5,7 +5,7 @@
 
 import { queryEl, resultsEl } from "./dom.js";
 import { activateItem } from "./actions.js";
-import { openContainingFolder, openLnkTarget, resetItemHistory, runBuiltinAction, copyToClipboard, deleteClipboardItem, deleteClipboardImage, hideWindow, invoke, triggerChord, listChordActions, pinClipboardImage, showStickyManager, createStickyNote, showStickyWindow } from "../shared/api.js";
+import { openContainingFolder, openLnkTarget, resetItemHistory, runBuiltinAction, copyToClipboard, deleteClipboardItem, deleteClipboardImage, hideWindow, invoke, triggerChord, listChordActions, pinClipboardImage, openImageEditorFromHistory, showStickyManager, createStickyNote, showStickyWindow } from "../shared/api.js";
 import { retrigger } from "./search.js";
 import { t, getLang } from "../i18n/index.js";
 import { showActionError } from "./action-error.js";
@@ -348,6 +348,23 @@ function itemMenu(li) {
       run: () => {
         pinClipboardImage(lnkPath).catch((e) => console.error("pinClipboardImage failed:", e));
         hideWindow();
+      },
+    });
+    // 0.20.4：历史图片右键"编辑"——直接进入图片编辑器，不先覆盖剪贴板
+    items.push({
+      label: t("menu.editImage"),
+      run: () => {
+        openImageEditorFromHistory(lnkPath)
+          .then(() => hideWindow())
+          .catch((e) => {
+            const err = String(e);
+            if (err === "AlreadyActive") {
+              // 后端已激活现有编辑器窗口，只需关闭主窗
+              hideWindow();
+            } else {
+              console.error("openImageEditorFromHistory failed:", e);
+            }
+          });
       },
     });
   }

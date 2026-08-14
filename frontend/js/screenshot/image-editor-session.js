@@ -8,6 +8,8 @@ export const IMAGE_SOURCE = Object.freeze({
   SCREENSHOT: 'screenshot',
   LONG_SCREENSHOT: 'long-screenshot',
   CLIPBOARD: 'clipboard',
+  HISTORY: 'history',
+  PIN: 'pin',
 });
 
 export class ImageEditorSession {
@@ -36,7 +38,7 @@ export class ImageEditorSession {
       || baseCanvas.width < 1 || baseCanvas.height < 1) {
       throw new TypeError('图片编辑底图必须是非空 canvas');
     }
-    if (![IMAGE_SOURCE.LONG_SCREENSHOT, IMAGE_SOURCE.CLIPBOARD].includes(source)) {
+    if (![IMAGE_SOURCE.LONG_SCREENSHOT, IMAGE_SOURCE.CLIPBOARD, IMAGE_SOURCE.HISTORY, IMAGE_SOURCE.PIN].includes(source)) {
       throw new TypeError(`不支持的图片编辑来源: ${source}`);
     }
     this.epoch = (this.epoch || 0) + 1;

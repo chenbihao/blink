@@ -448,7 +448,7 @@ impl DomainEnv for TauriDomainEnv {
     fn show_image_editor(&self, png_data: Vec<u8>) -> Result<(), String> {
         let meta = crate::infra::platform::image_editor::begin_session(png_data)?;
         if let Err(error) =
-            crate::infra::platform::window::show_image_editor_window(&self.app, meta)
+            crate::infra::platform::window::show_image_editor_window(&self.app, meta, "clipboard")
         {
             crate::infra::platform::image_editor::end_session();
             return Err(error);

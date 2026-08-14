@@ -255,7 +255,11 @@ export async function outputScreenshotPng(action, pngBytes, screenX = 0, screenY
 
 /** 按编辑来源分派输出：截图保留原位 pin/来源标记，普通图片走用户输出适配器。 */
 export async function outputEditorPng(action, pngBytes, screenX = 0, screenY = 0, showTranslating = false) {
-  if (ss.editorSession.source !== IMAGE_SOURCE.CLIPBOARD) {
+  // 0.20.4：CLIPBOARD / HISTORY / PIN 都走 image_editor 后端路径
+  // （finish_image_editor_session → hide_image_editor_window，不 cloak 窗口）。
+  // 只有 SCREENSHOT / LONG_SCREENSHOT 走 screenshot 后端路径。
+  if (ss.editorSession.source === IMAGE_SOURCE.SCREENSHOT
+      || ss.editorSession.source === IMAGE_SOURCE.LONG_SCREENSHOT) {
     return outputScreenshotPng(action, pngBytes, screenX, screenY, showTranslating);
   }
   switch (action) {
@@ -437,7 +441,7 @@ export function doCancel() {
     // 异步清理，不阻塞 cancel；入口由长截图 session 唯一提供。
     Promise.resolve(ss.scrollSession.exit(false)).catch(() => {});
   }
-  if (source === IMAGE_SOURCE.CLIPBOARD) {
+  if (source === IMAGE_SOURCE.CLIPBOARD || source === IMAGE_SOURCE.HISTORY || source === IMAGE_SOURCE.PIN) {
     cleanupCanvasVisuals();
     imageEditorCancel().catch((e) => console.error('[image-editor] cancel 失败', e));
   } else if (ss.isAnnotating) {

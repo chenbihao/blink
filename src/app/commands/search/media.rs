@@ -398,6 +398,138 @@ pub fn image_editor_cancel(app: tauri::AppHandle) {
     tracing::info!("用户图片编辑已取消");
 }
 
+// ── 0.20.4：多来源图片编辑入口 ──────────────────────────────
+
+/// 0.20.4：检查单会话约束——已有活跃编辑会话时激活现有窗口并返回 `AlreadyActive`。
+///
+/// 三个 `open_image_editor_from_*` 入口共用的前置检查。返回 `Err` 表示应
+/// 提前返回（已活跃），`Ok(())` 表示可以继续建立新会话。
+fn check_already_active(app: &tauri::AppHandle, log_ctx: &str) -> Result<(), String> {
+    if crate::infra::platform::image_editor::is_active() {
+        if let Some(win) = app.get_webview_window("chord-screenshot") {
+            let _ = win.set_focus();
+        }
+        tracing::info!(log_ctx, "编辑会话已活跃，激活现有窗口");
+        return Err("AlreadyActive".to_string());
+    }
+    Ok(())
+}
+
+/// 0.20.4：建立编辑会话并显示窗口——三个入口共用的后半段逻辑。
+///
+/// `begin_session` → `show_image_editor_window`；若 `show` 失败则回滚 `end_session`。
+/// `source_kind` 传递给前端 `window.__blinkEditorSource.kind`。
+fn begin_and_show(
+    app: &tauri::AppHandle,
+    png_data: Vec<u8>,
+    source_kind: &str,
+    log_ctx: &str,
+) -> Result<(), String> {
+    let png_len = png_data.len();
+    let meta = crate::infra::platform::image_editor::begin_session(png_data)
+        .map_err(|e| {
+            tracing::warn!(log_ctx, error = %e, "begin_session 失败");
+            e
+        })?;
+
+    if let Err(error) =
+        crate::infra::platform::window::show_image_editor_window(app, meta, source_kind)
+    {
+        crate::infra::platform::image_editor::end_session();
+        tracing::error!(log_ctx, error = %error, "显示编辑窗口失败");
+        return Err(error);
+    }
+
+    tracing::info!(log_ctx, png_bytes = png_len, "图片编辑器已打开");
+    Ok(())
+}
+
+/// 0.20.4：从当前系统剪贴板图片打开编辑器。
+///
+/// 读取当前剪贴板 PNG → `begin_session` → `show_image_editor_window`。
+/// 剪贴板无图片时返回结构化错误。
+#[tauri::command]
+pub async fn open_image_editor_from_clipboard(app: tauri::AppHandle) -> Result<(), String> {
+    use crate::domain::clipboard::{read_current, ClipboardContent};
+
+    check_already_active(&app, "open_image_editor_from_clipboard")?;
+
+    let content = read_current()
+        .await
+        .map_err(|e| format!("读取剪贴板失败: {e}"))?;
+
+    let png_data = match content {
+        ClipboardContent::ImagePng(data) => data,
+        ClipboardContent::Text(_) => {
+            tracing::info!("open_image_editor_from_clipboard: 剪贴板无图片");
+            return Err("ClipboardNoImage".to_string());
+        }
+    };
+
+    begin_and_show(&app, png_data, "clipboard", "open_image_editor_from_clipboard")
+}
+
+/// 0.20.4：从剪贴板历史图片打开编辑器。
+///
+/// 按 `image_id` 从数据库读取完整 PNG → `begin_session` → `show_image_editor_window`。
+/// 不先覆盖系统剪贴板（§5.5 第 7 条）。
+#[tauri::command]
+pub async fn open_image_editor_from_history(
+    app: tauri::AppHandle,
+    image_id: String,
+) -> Result<(), String> {
+    use crate::domain::clipboard::load_history_png;
+
+    check_already_active(&app, "open_image_editor_from_history")?;
+
+    let pools = app.state::<crate::infra::data::DbPools>();
+    let png_data = load_history_png(&pools.cache, &image_id)
+        .await
+        .map_err(|e| {
+            tracing::warn!(image_id = %image_id, error = %e, "open_image_editor_from_history: 加载历史图片失败");
+            e.to_string()
+        })?;
+
+    begin_and_show(&app, png_data, "history", "open_image_editor_from_history")
+}
+
+/// 0.20.4：从仍显示的 pin 窗口打开编辑器。
+///
+/// 前端传 pin 窗口 label，后端通过 `get_pin_image_by_label` 查找图片。
+/// PinImage 可能是 PNG 或 BGRA：BGRA 在 `spawn_blocking` 中编码为 PNG。
+/// 不先覆盖系统剪贴板（§5.5 第 7 条）。
+#[tauri::command]
+pub async fn open_image_editor_from_pin(
+    app: tauri::AppHandle,
+    window_label: String,
+) -> Result<(), String> {
+    use crate::infra::platform::window::{get_pin_image_by_label, PinImage};
+
+    check_already_active(&app, "open_image_editor_from_pin")?;
+
+    // 从 pin registry 获取图片
+    let pin_image = get_pin_image_by_label(&window_label).ok_or_else(|| {
+        tracing::debug!(window_label = %window_label, "open_image_editor_from_pin: pin 图片不存在或窗口已关闭");
+        "PinImageNotFound".to_string()
+    })?;
+
+    // BGRA 需要 spawn_blocking 编码为 PNG；PNG 直接使用
+    let png_data = match pin_image {
+        PinImage::Png(arc) => (*arc).clone(),
+        PinImage::Bgra(arc, w, h) => {
+            let bgra = (*arc).clone();
+            tokio::task::spawn_blocking(move || {
+                crate::infra::platform::screenshot::encode_png(&bgra, w, h)
+            })
+            .await
+            .map_err(|e| format!("spawn_blocking join 失败: {e}"))?
+            .map_err(|e| format!("BGRA 编码 PNG 失败: {e}"))?
+        }
+    };
+
+    begin_and_show(&app, png_data, "pin", "open_image_editor_from_pin")
+}
+
 fn save_editor_png(
     app: &tauri::AppHandle,
     png_data: &[u8],

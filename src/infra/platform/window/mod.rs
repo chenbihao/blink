@@ -15,7 +15,7 @@ pub use windows::{
     PinImage, ack_chat_prefill, apply_cloak, center_of_active_monitor, clamp_context_menu,
     clamp_to_work_area, compute_cursor_titlebar_position, destroy_sticky_window,
     enable_rounded_corners, flush_all_sticky_windows, force_topmost, get_foreground_hwnd,
-    get_or_create_context_menu_window, get_pin_image, get_pin_window_rect,
+    get_or_create_context_menu_window, get_pin_image, get_pin_image_by_label, get_pin_window_rect,
     get_primary_monitor_center, hide, hide_chat_window, hide_for_screenshot,
     hide_image_editor_window, hide_screenshot_overlay, hide_sticky_window, hide_voice_overlay,
     install_sysmenu_blocker, invoke, is_main_ai_active, is_visible, last_external_foreground_hwnd,

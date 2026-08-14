@@ -600,7 +600,7 @@ function loadEditorConfig(includeCaptureHints) {
 
 /** 从独立用户编辑载荷初始化完整图片画布，不读取截图捕获 SESSION。 */
 function loadEditorImage(source) {
-  if (source !== IMAGE_SOURCE.CLIPBOARD) {
+  if (source !== IMAGE_SOURCE.CLIPBOARD && source !== IMAGE_SOURCE.HISTORY && source !== IMAGE_SOURCE.PIN) {
     throw new TypeError(`不支持的用户图片来源: ${source}`);
   }
   document.body.classList.add('image-editor-mode');
@@ -1477,13 +1477,21 @@ window.addEventListener('blur', () => { delete document.body.dataset.altDown; })
 window.addEventListener('blur', () => {
   // 长截图采集会把滚轮交给底层窗口，overlay 失焦属于正常流程。
   // 必须在 blurGuard 和任何视觉清理之前返回，否则会刚进入 capturing 就被
-  // 普通截图的“失焦即退出”策略错杀。
+  // 普通截图的"失焦即退出"策略错杀。
   if (isScrollCapturing()) {
     console.debug('[screenshot] window blur ignored during scroll capture', {
       phase: ss.scrollSession?.scrollCapturePhase,
       frameCount: ss.scrollSession?.scrollFrames?.length || 0,
       documentFocus: document.hasFocus(),
     });
+    return;
+  }
+  // 0.20.4：图片编辑器模式下用更长的 blurGuard 防止主窗口关闭导致的
+  // 焦点瞬态切换误关编辑器，但 2s 后仍允许 blur 自动关闭（用户点击其他窗口时）。
+  if (document.body.classList.contains('image-editor-mode') && ss.editorSession.active && !ss.blurGuard) {
+    ss.blurGuard = true;
+    setTimeout(() => { ss.blurGuard = false; }, 2000);
+    console.debug('[screenshot] window blur ignored (image editor mode, extended blurGuard)');
     return;
   }
   if (ss.blurGuard) return;

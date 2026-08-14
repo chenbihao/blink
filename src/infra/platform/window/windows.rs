@@ -66,9 +66,21 @@ fn last_pin_label() -> &'static Mutex<Option<String>> {
 // pin 窗口通过 `blink-pin:///{seq}` 自定义协议拉取 PNG bytes，
 // 替代 base64 data URL（7.2MB PNG → 9.6MB base64 → WebView 解析阻塞）。
 // 每次 store 返回递增 seq，URL 不同 → 浏览器不缓存，refresh 也能刷新。
+//
+// 0.20.4：增加 PIN_LABEL_TO_SEQ 映射，使 pin 窗口 label → image seq
+// 可查（编辑器从 pin 窗口进入时需要按 label 找到对应图片）。
 static PIN_IMAGE_SEQ: AtomicU64 = AtomicU64::new(0);
 static PIN_IMAGE_REGISTRY: OnceLock<Mutex<std::collections::HashMap<u64, PinImage>>> =
     OnceLock::new();
+
+/// 0.20.4：pin 窗口 label → image seq 映射。
+/// pin 窗口创建/刷新时写入，关闭时清除。
+static PIN_LABEL_TO_SEQ: OnceLock<Mutex<std::collections::HashMap<String, u64>>> =
+    OnceLock::new();
+
+fn pin_label_to_seq() -> &'static Mutex<std::collections::HashMap<String, u64>> {
+    PIN_LABEL_TO_SEQ.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
 
 /// P6：pin 图片存储格式——PNG（有标注路径）或 raw BGRA（快路径）。
 /// 快路径存 raw BGRA，协议 handler 按需 lazy 编码 PNG，
@@ -101,6 +113,16 @@ pub fn store_pin_image(image: PinImage) -> u64 {
 /// 按 seq 取 pin 图片（供 `blink-pin://` 协议 handler 调用）。
 pub fn get_pin_image(seq: u64) -> Option<PinImage> {
     pin_image_registry().lock().unwrap().get(&seq).cloned()
+}
+
+/// 0.20.4：按 pin 窗口 label 取对应的图片。
+///
+/// 用于编辑器从 pin 窗口进入：前端传 window label，后端查 label → seq → PinImage。
+/// pin 窗口关闭后映射被清除，此函数返回 None。
+/// 返回的 PinImage 供编辑器 session 使用，不受原 pin 生命周期影响（Arc clone）。
+pub fn get_pin_image_by_label(label: &str) -> Option<PinImage> {
+    let seq = pin_label_to_seq().lock().unwrap().get(label).copied()?;
+    get_pin_image(seq)
 }
 
 use crate::domain::event_names::EventNames;
@@ -201,6 +223,13 @@ static IS_APP_EXITING: AtomicBool = AtomicBool::new(false);
 /// 主窗口 AI（AiMode）激活时设为 true，watchdog 据此跳过失焦隐藏，
 /// 防止 AI 生成过程中窗口被意外隐藏。Done/Error/abort 时设回 false。
 static MAIN_WINDOW_AI_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// 0.20.4: 图片编辑器活跃标志。
+///
+/// 图片编辑器（chord-screenshot 窗口 image-editor-mode）激活时设为 true，
+/// watchdog 据此跳过 screenshot overlay 失焦隐藏——防止主窗口关闭导致
+/// 编辑器被误关。编辑器关闭（cancel/copy/pin/save）时设回 false。
+static IMAGE_EDITOR_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 // ── 0.19：chat prefill 暂存（infra 层，带 revision） ──────────────────────
 //
@@ -616,6 +645,24 @@ pub fn force_topmost(hwnd: HWND) {
     }
 }
 
+/// 0.20.4-fix：取消窗口的 topmost 属性，允许其他窗口覆盖。
+///
+/// 图片编辑器不需要像截图 overlay 那样强制置顶——用户可能需要在编辑图片时
+/// 参考其他窗口内容。`HWND_NOTOPMOST` = `HWND(-2)`。
+pub fn cancel_topmost(hwnd: HWND) {
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND(-2isize as *mut _)), // HWND_NOTOPMOST
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+}
+
 /// 彻底移除窗口边框和标题栏（DWM 在 transparent + decorations:false 时仍会画）。
 ///
 /// 双重手段：① 去掉 WS_CAPTION + WS_THICKFRAME 窗口样式；
@@ -685,17 +732,22 @@ pub fn start_watchdog(app: AppHandle) {
             // overlay 可见 + 前台非本进程 → 自动隐藏。
             // 覆盖场景：用户 Ctrl+Shift+Esc 唤起任务管理器、Alt+Tab 切窗口、
             // 或前端 JS 模块加载失败导致 blur handler 未注册。
-            if let Some(ss_win) = app.get_webview_window("chord-screenshot") {
-                if ss_win.is_visible().unwrap_or(false) {
-                    let fg = unsafe { GetForegroundWindow() };
-                    if !fg.0.is_null() && !is_self_foreground(&app, fg) {
-                        tracing::info!(
-                            "watchdog: screenshot overlay hide! fg=0x{:x}",
-                            fg.0 as isize
-                        );
-                        // 用 hide_screenshot_overlay 而非 win.hide()，
-                        // 确保同时清空 SESSION 释放位图内存
-                        hide_screenshot_overlay(&app);
+            //
+            // 0.20.4：图片编辑器活跃时跳过——编辑器复用 chord-screenshot 窗口，
+            // 主窗口关闭导致的焦点瞬态切换不应触发编辑器关闭。
+            if !IMAGE_EDITOR_ACTIVE.load(Ordering::Relaxed) {
+                if let Some(ss_win) = app.get_webview_window("chord-screenshot") {
+                    if ss_win.is_visible().unwrap_or(false) {
+                        let fg = unsafe { GetForegroundWindow() };
+                        if !fg.0.is_null() && !is_self_foreground(&app, fg) {
+                            tracing::info!(
+                                "watchdog: screenshot overlay hide! fg=0x{:x}",
+                                fg.0 as isize
+                            );
+                            // 用 hide_screenshot_overlay 而非 win.hide()，
+                            // 确保同时清空 SESSION 释放位图内存
+                            hide_screenshot_overlay(&app);
+                        }
                     }
                 }
             }
@@ -1789,6 +1841,19 @@ pub fn is_main_ai_active() -> bool {
     MAIN_WINDOW_AI_ACTIVE.load(Ordering::Relaxed)
 }
 
+/// 0.20.4：设置图片编辑器活跃标志。
+///
+/// `active = true`：watchdog 跳过 screenshot overlay 失焦隐藏，
+/// 防止主窗口关闭或焦点切换导致编辑器被误关。
+/// `active = false`：恢复正常 watchdog 行为。
+///
+/// 调用时机：`show_image_editor_window` 设 true；
+/// `hide_image_editor_window` / `hide_screenshot_overlay` 设 false。
+pub fn set_image_editor_active(active: bool) {
+    IMAGE_EDITOR_ACTIVE.store(active, Ordering::SeqCst);
+    tracing::debug!(active, "set_image_editor_active: IMAGE_EDITOR_ACTIVE");
+}
+
 /// 0.16.11：退出前 flush 所有便签窗口的未保存内容。
 ///
 /// 前端有 500ms 内容防抖和 300ms 几何防抖。退出时 eval flush JS，
@@ -2056,6 +2121,9 @@ pub fn show_screenshot_overlay(
                 meta.width,
                 meta.height,
             );
+            // 0.20.4-fix：图片编辑器可能用 cancel_topmost 取消了置顶，
+            // 截图 overlay 必须恢复 topmost 以覆盖全屏。
+            force_topmost(HWND(hwnd.0 as _));
             overlay_dpi = crate::infra::platform::dpi::get_dpi_for_hwnd(HWND(hwnd.0 as _));
         }
         let t_place = t0.elapsed();
@@ -2170,9 +2238,13 @@ pub fn show_screenshot_overlay(
 ///
 /// 复用截图 overlay 的预热 WebView，但不创建或读取截图 SESSION。图片字节由独立的
 /// `image_editor` 会话提供，前端从 `/editor` 协议路径初始化完整图片画布。
+///
+/// `source_kind` 传递给前端 `window.__blinkEditorSource.kind`，用于区分
+/// 来源（clipboard / history / pin），前端据此走不同初始化路径。
 pub fn show_image_editor_window(
     app: &AppHandle,
     image: crate::infra::platform::image_editor::ImageEditorMeta,
+    source_kind: &str,
 ) -> Result<(), String> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
     const LABEL: &str = "chord-screenshot";
@@ -2219,25 +2291,40 @@ pub fn show_image_editor_window(
 
     let mut overlay_dpi = 96u32;
     if let Ok(hwnd) = win.hwnd() {
+        let hwnd = HWND(hwnd.0 as _);
+        // 0.20.4：撤销 hide_screenshot_overlay 可能设置的 DWM cloak，
+        // 否则窗口 show 后在 DWM 合成器层面仍不可见（症状：窗口"打开"了但看不到画面）。
+        if !created {
+            apply_cloak(hwnd, false);
+        }
         place_at_physical(
-            HWND(hwnd.0 as _),
+            hwnd,
             meta.virtual_x,
             meta.virtual_y,
             meta.width,
             meta.height,
         );
-        overlay_dpi = crate::infra::platform::dpi::get_dpi_for_hwnd(HWND(hwnd.0 as _));
+        overlay_dpi = crate::infra::platform::dpi::get_dpi_for_hwnd(hwnd);
     }
     let displays_json = build_physical_displays_json();
     let init_js = format!(
-        "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {}, overlayDpi: {}, fgHwnd: 0, physicalDisplays: {} }}; window.__blinkEditorSource = {{ kind: 'clipboard' }}; window.__blinkOpenImageEditor && window.__blinkOpenImageEditor();",
-        meta.virtual_x, meta.virtual_y, meta.width, meta.height, overlay_dpi, displays_json
+        "window.__blinkScreenMeta = {{ vx: {}, vy: {}, w: {}, h: {}, overlayDpi: {}, fgHwnd: 0, physicalDisplays: {} }}; window.__blinkEditorSource = {{ kind: '{kind}' }}; window.__blinkOpenImageEditor && window.__blinkOpenImageEditor();",
+        meta.virtual_x, meta.virtual_y, meta.width, meta.height, overlay_dpi, displays_json,
+        kind = source_kind,
     );
     win.eval(&init_js).map_err(|e| e.to_string())?;
     win.show().map_err(|e| e.to_string())?;
+    if let Ok(hwnd) = win.hwnd() {
+        // 0.20.4-fix：图片编辑器不强制置顶——用户可能需要参考其他窗口内容。
+        // 窗口创建时设了 always_on_top(true)（与截图 overlay 共用窗口），
+        // 这里用 HWND_NOTOPMOST 取消置顶，允许其他窗口覆盖编辑器。
+        cancel_topmost(HWND(hwnd.0 as _));
+    }
     if let Err(error) = win.set_focus() {
         tracing::warn!(%error, "图片编辑窗口 focus 失败");
     }
+    // 0.20.4：标记编辑器活跃，watchdog 据此跳过 overlay 失焦隐藏
+    set_image_editor_active(true);
     tracing::info!(
         created,
         width = image.width,
@@ -2338,6 +2425,8 @@ pub fn hide_screenshot_overlay(app: &AppHandle) {
     crate::infra::platform::screenshot::end_session();
     // 同一 WebView 也承载通用图片编辑；看门狗/脚本兜底退出需释放两类短期载荷。
     crate::infra::platform::image_editor::end_session();
+    // 0.20.4：清除编辑器活跃标志，恢复 watchdog 正常行为
+    set_image_editor_active(false);
 }
 
 /// 隐藏通用图片编辑窗口并释放用户图片载荷；不触碰截图 SESSION。
@@ -2346,6 +2435,8 @@ pub fn hide_image_editor_window(app: &AppHandle) {
         let _ = win.hide();
     }
     crate::infra::platform::image_editor::end_session();
+    // 0.20.4：清除编辑器活跃标志，恢复 watchdog 正常行为
+    set_image_editor_active(false);
 }
 
 /// 钉图窗口的物理像素 padding（窗口比图片大一圈，给发光留空间）。
@@ -2448,6 +2539,8 @@ pub fn show_pin_window(
 
         // 记录最近 pin 的 label
         *last_pin_label().lock().unwrap() = Some(al.clone());
+        // 0.20.4：注册 label → seq 映射，供编辑器按 label 查找 pin 图片
+        pin_label_to_seq().lock().unwrap().insert(al.clone(), pin_seq);
 
         tracing::info!(
             png_w,
@@ -2510,6 +2603,8 @@ pub fn show_pin_window(
 
             // 记录最近 pin 的 label
             *last_pin_label().lock().unwrap() = Some(label.clone());
+            // 0.20.4：注册 label → seq 映射
+            pin_label_to_seq().lock().unwrap().insert(label.clone(), pin_seq);
 
             tracing::info!(
                 png_w,
@@ -2603,6 +2698,9 @@ pub fn refresh_pin_image(
     let pin_seq = store_pin_image(PinImage::Png(Arc::new(png_data)));
     let img_url = format!("http://blink-pin.localhost/{pin_seq}");
 
+    // 0.20.4：更新 label → seq 映射（刷新后旧 seq 对应的图片已过时）
+    pin_label_to_seq().lock().unwrap().insert(label.clone(), pin_seq);
+
     // 只换 img.src + 控制指示器，不调 place_at_physical，不调 __blinkResetPin
     let js = format!(
         "if (window.__blinkRefreshPinImage) window.__blinkRefreshPinImage('{url}', {w}, {h}, {st});",
@@ -2629,6 +2727,8 @@ fn handle_pin_close(app: &AppHandle, label: &str) {
 
     // 从借出映射移除
     pin_spare_borrow().lock().unwrap().remove(label);
+    // 0.20.4：从 label → seq 映射移除（pin 已关闭，图片不再可编辑）
+    pin_label_to_seq().lock().unwrap().remove(label);
 
     let label_owned = label.to_string();
     let app_clone = app.clone();

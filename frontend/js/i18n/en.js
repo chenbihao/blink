@@ -994,6 +994,7 @@ export const en = {
     "menu.copyResult": "Copy result",
     "menu.edit": "Edit",
 "menu.pin": "Pin",
+"menu.editImage": "Edit Image",
     "menu.sticky": "Sticky",
     "menu.delete": "Delete",
     "menu.copySelected": "Copy {count} selected items",
