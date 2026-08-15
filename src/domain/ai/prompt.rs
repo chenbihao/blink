@@ -16,20 +16,20 @@
 //! 工具描述段——插件作者一句话告诉 AI 这个工具的用法窍门。
 
 use crate::domain::ai::skill::{SkillEntry, SkillSummary};
-use crate::domain::execution::ActionSchema;
+use crate::domain::schema::ToolSchema;
 use std::collections::HashMap;
 
 /// system prompt token 告警阈值（§3.8：超 1500 token warn）。
 const TOKEN_WARN_THRESHOLD: usize = 1500;
 
-/// 工具提示词信息——`ActionSchema` 的超集，多了 `hint` 字段。
+/// 工具提示词信息——`ToolSchema` 的超集，多了 `hint` 字段。
 ///
-/// `hint` 来自 manifest `tools[].hint`（0.11.1 改进 3a），`ActionSchema` 不携带
-/// （它是协议层描述，hint 是 prompt 层元数据）。调用方从 `ActionSchema` + hints map
+/// `hint` 来自 manifest `tools[].hint`（0.11.1 改进 3a），`ToolSchema` 不携带
+/// （它是协议层描述，hint 是 prompt 层元数据）。调用方从 `ToolSchema` + hints map
 /// 构造 `ToolPromptInfo` 列表传入。
 #[derive(Debug, Clone)]
 pub struct ToolPromptInfo {
-    /// 工具名（与 ActionSchema.name 一致）。
+    /// 工具名（与 ToolSchema.name 一致）。
     pub name: String,
     /// 人类可读描述。
     pub description: String,
@@ -40,9 +40,9 @@ pub struct ToolPromptInfo {
 }
 
 impl ToolPromptInfo {
-    /// 从 `ActionSchema` 构造（无 hint）。
+    /// 从 `ToolSchema` 构造（无 hint）。
     #[allow(dead_code)] // 便利 API，build_prompt_infos 批量构造时用 from_schema_with_hint
-    pub fn from_schema(schema: ActionSchema) -> Self {
+    pub fn from_schema(schema: ToolSchema) -> Self {
         ToolPromptInfo {
             name: schema.name,
             description: schema.description,
@@ -51,8 +51,8 @@ impl ToolPromptInfo {
         }
     }
 
-    /// 从 `ActionSchema` + hint 构造。
-    pub fn from_schema_with_hint(schema: ActionSchema, hint: Option<String>) -> Self {
+    /// 从 `ToolSchema` + hint 构造。
+    pub fn from_schema_with_hint(schema: ToolSchema, hint: Option<String>) -> Self {
         ToolPromptInfo {
             name: schema.name,
             description: schema.description,
@@ -62,12 +62,12 @@ impl ToolPromptInfo {
     }
 }
 
-/// 从 `Vec<ActionSchema>` + hints map 批量构造 `ToolPromptInfo` 列表。
+/// 从 `Vec<ToolSchema>` + hints map 批量构造 `ToolPromptInfo` 列表。
 ///
 /// `hints` 的 key 是 tool name（如 `"builtin.weather:get_weather"`），
 /// value 是 manifest `tools[].hint` 的值。
 pub fn build_prompt_infos(
-    tools: Vec<ActionSchema>,
+    tools: Vec<ToolSchema>,
     hints: &HashMap<String, String>,
 ) -> Vec<ToolPromptInfo> {
     tools
@@ -644,12 +644,12 @@ mod tests {
     #[test]
     fn build_prompt_infos_attaches_hints() {
         let tools = vec![
-            ActionSchema {
+            ToolSchema {
                 name: "get_weather".into(),
                 description: "天气".into(),
                 parameters: json!({"type":"object","properties":{}}),
             },
-            ActionSchema {
+            ToolSchema {
                 name: "get_ip".into(),
                 description: "IP".into(),
                 parameters: json!({"type":"object","properties":{}}),

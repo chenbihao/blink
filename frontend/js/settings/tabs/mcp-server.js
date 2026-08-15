@@ -1,15 +1,17 @@
 /**
  * MCP Server Tab 模块
  *
- * 管理 Blink 作为 MCP server 的配置：总开关 + 端口 + 暴露能力清单 + 运行时状态 + 使用方式。
+ * 管理 Blink 作为 MCP server 的配置：总开关 + 端口 + 简明状态 + 目录深链。
+ * 详细能力管理已迁移至"能力与操作"页。
  *
  * 后端 commands:
  * - get_mcp_server_config — 读取配置（enabled + port + exposed_capabilities）
  * - set_mcp_server_config — 保存配置
- * - list_exposable_capabilities — 列出所有可暴露的 Capability
  * - get_mcp_server_runtime_status — 获取运行时状态快照（status / endpoint / port / tool_count / error）
+ * - get_catalog_mcp_summary — 获取 MCP 能力摘要（exposed_count / total_count）
  */
-import { invoke } from "../../shared/tauri.js";
+import { invoke, listen } from "../../shared/tauri.js";
+import { EVENTS } from "../../shared/event-names.js";
 import { t } from "../../i18n/index.js";
 
 /**
@@ -20,7 +22,13 @@ export async function initMcpServerSection() {
   initToggle();
   initPortInput();
   initCopyConfig();
+  initCapabilitiesLink();
   startStatusPolling();
+
+  // 能力目录页改暴露状态后（set_mcp_server_config 广播）刷新 N/M 摘要
+  listen(EVENTS.CONFIG_CHANGED, () => {
+    updateCapabilitiesSummary();
+  });
 }
 
 // ── 配置加载与渲染 ────────────────────────────────────────────────────────────
@@ -30,71 +38,58 @@ let currentConfig = { enabled: false, port: 32123, exposed_capabilities: [] };
 async function loadConfig() {
   try {
     currentConfig = await invoke("get_mcp_server_config");
-    await renderCapabilities();
     updateToggle();
     updatePortInput();
     updateDetailVisibility();
     updateConfigJson();
+    await updateCapabilitiesSummary();
   } catch (e) {
     console.error("loadMcpServerConfig failed:", e);
   }
 }
 
-async function renderCapabilities() {
-  const container = document.getElementById("mcp-server-capabilities");
+async function updateCapabilitiesSummary() {
+  const container = document.getElementById("mcp-server-capabilities-summary");
   if (!container) return;
 
   try {
-    const caps = await invoke("list_exposable_capabilities");
-    if (!caps || caps.length === 0) {
-      container.innerHTML =
-        '<p class="mcp-empty-hint">无可用 Capability</p>';
-      return;
-    }
+    const summary = await invoke("get_catalog_mcp_summary");
+    const exposedCount = summary.exposed_count || 0;
+    const totalCount = summary.total_count || 0;
 
-    container.innerHTML = caps
-      .map((cap) => {
-        const checked = currentConfig.exposed_capabilities.includes(cap.id)
-          ? "checked"
-          : "";
-        const sensitiveTag = cap.sensitive
-          ? '<span class="mcp-sensitive-tag">sensitive</span>'
-          : "";
-        return `
-      <div class="mcp-capability-item">
-        <label class="checkbox">
-          <input type="checkbox" class="mcp-cap-toggle" data-cap-id="${escapeHtml(cap.id)}" ${checked} />
-          <span class="checkmark"></span>
-        </label>
-        <div class="mcp-capability-info">
-          <span class="mcp-capability-name">${escapeHtml(cap.id)} ${sensitiveTag}</span>
-          <span class="mcp-capability-desc">${escapeHtml(cap.description || "")}</span>
-        </div>
+    container.innerHTML = `
+      <div class="mcp-summary">
+        <span class="mcp-summary-text">
+          ${t("ai.mcp_server.exposed_summary", { exposed_count: exposedCount, total_count: totalCount })}
+        </span>
+        <button class="btn-link btn-small" id="mcp-view-capabilities">
+          ${t("ai.mcp_server.view_capabilities")}
+        </button>
       </div>
     `;
-      })
-      .join("");
-
-    // 绑定 checkbox 事件
-    container.querySelectorAll(".mcp-cap-toggle").forEach((cb) => {
-      cb.addEventListener("change", async () => {
-        const capId = cb.dataset.capId;
-        if (cb.checked) {
-          if (!currentConfig.exposed_capabilities.includes(capId)) {
-            currentConfig.exposed_capabilities.push(capId);
-          }
-        } else {
-          currentConfig.exposed_capabilities =
-            currentConfig.exposed_capabilities.filter((c) => c !== capId);
-        }
-        await saveConfig();
-      });
-    });
   } catch (e) {
-    container.innerHTML =
-      '<p class="mcp-error">加载失败: ' + escapeHtml(String(e)) + "</p>";
-    console.error("renderCapabilities failed:", e);
+    container.innerHTML = '<p class="mcp-error">加载失败: ' + escapeHtml(String(e)) + "</p>";
+    console.error("updateCapabilitiesSummary failed:", e);
   }
+}
+
+function initCapabilitiesLink() {
+  document.addEventListener("click", (e) => {
+    if (e.target && e.target.id === "mcp-view-capabilities") {
+      // 跳转到能力与操作页，过滤到 MCP 出口列并滚动到控制区
+      document.querySelector('[data-tab="capabilities"]')?.click();
+      setTimeout(() => {
+        const exitFilter = document.getElementById("filter-exit");
+        if (exitFilter) {
+          exitFilter.value = "mcp";
+          exitFilter.dispatchEvent(new Event("change"));
+        }
+        document
+          .getElementById("capabilities-container")
+          ?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 100);
+    }
+  });
 }
 
 // ── 总开关 ────────────────────────────────────────────────────────────────────

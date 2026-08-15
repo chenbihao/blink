@@ -45,6 +45,10 @@ use crate::infra::data::ai_audit;
 /// 修改暴露清单时重建整个快照并递增 generation；
 /// `list_tools` / `get_tool` / `call_tool` 都读取当前快照，
 /// 已撤销暴露的工具即使旧 session 曾经获取过也会被 call-time 门禁拒绝。
+///
+/// **0.21.5**：build 时同时过滤 policy——Dangerous 和 `mcp_default == Forbidden`
+/// 的 Capability 即使被用户加入 `exposed_capabilities` 也不进入 MCP 暴露清单。
+/// call-time 再检查 policy + exposed list + runtime，撤销后旧 session 调用失败。
 pub struct ExposureSnapshot {
     pub generation: u64,
     pub allowed: HashSet<String>,
@@ -63,16 +67,54 @@ impl ExposureSnapshot {
 
     /// 从 CapabilityRegistry 和配置构建快照。
     /// tools 按 capability name 排序，保证不同 session list_tools 结果一致。
+    ///
+    /// **0.21.5**：build 时同时过滤 policy：
+    /// - `Dangerous` 的 Capability 永远拒绝（§3.5）
+    /// - `mcp_default == Forbidden` 的 Capability 永远拒绝（GUI starter / local-only）
+    /// - 用户配置的 `exposed_capabilities` 是授权子集，但不能绕过代码级禁止
     fn build(cap_registry: &CapabilityRegistry, config: &McpServerModeConfig) -> Self {
-        let allowed: HashSet<String> = config.exposed_capabilities.iter().cloned().collect();
+        use crate::domain::capability::{DangerClass, McpDefault};
 
-        let mut schemas: Vec<_> = cap_registry
-            .list()
+        let user_exposed: HashSet<String> = config.exposed_capabilities.iter().cloned().collect();
+
+        // 获取所有 Capability 的 (id, schema, policy)，过滤出允许 MCP 的
+        let mut entries: Vec<_> = cap_registry
+            .entries()
             .into_iter()
-            .filter(|s| allowed.contains(&s.name))
-            .collect();
-        schemas.sort_by(|a, b| a.name.cmp(&b.name));
+            .filter_map(|(id, cap)| {
+                // 只处理用户显式暴露的
+                if !user_exposed.contains(&id) {
+                    return None;
+                }
 
+                let policy = cap.policy();
+
+                // 0.21.5 §3.5: Dangerous 对 MCP 永远拒绝
+                if policy.danger == DangerClass::Dangerous {
+                    tracing::warn!(
+                        capability = %id,
+                        "MCP ExposureSnapshot: Dangerous capability 被用户暴露但代码级禁止，已过滤"
+                    );
+                    return None;
+                }
+
+                // 0.21.5 §3.5: mcp_default == Forbidden 的永远拒绝
+                if policy.mcp_default == McpDefault::Forbidden {
+                    tracing::warn!(
+                        capability = %id,
+                        "MCP ExposureSnapshot: Forbidden capability 被用户暴露但代码级禁止，已过滤"
+                    );
+                    return None;
+                }
+
+                Some((id, cap.schema()))
+            })
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // allowed 只包含通过 policy 过滤的 id
+        let allowed: HashSet<String> = entries.iter().map(|(id, _)| id.clone()).collect();
+        let schemas: Vec<_> = entries.into_iter().map(|(_, s)| s).collect();
         let tools = capability_schemas_to_mcp_tools(&schemas);
 
         Self {
@@ -283,6 +325,26 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
                     "Tool '{tool_name}' is not exposed. Available tools: {available}"
                 ));
                 return Ok(result);
+            }
+
+            // 0.21.5: call-time policy 二次检查
+            // 即使 allowed 集合中有该 id，也再次验证 policy 是否允许 MCP 调用。
+            // 这覆盖了 build 后到 call 之间 Capability 可能被动态替换的极端情况。
+            if let Some(cap) = cap_registry.get(&tool_name) {
+                let policy = cap.policy();
+                use crate::domain::capability::{DangerClass, McpDefault};
+                if policy.danger == DangerClass::Dangerous || policy.mcp_default == McpDefault::Forbidden {
+                    tracing::warn!(
+                        tool = %tool_name,
+                        danger = ?policy.danger,
+                        mcp_default = ?policy.mcp_default,
+                        "MCP server: call-time policy 拒绝（Dangerous 或 Forbidden）"
+                    );
+                    let result = BlinkMcpServer::error_to_call_tool_result(&format!(
+                        "Tool '{tool_name}' is not available for MCP (policy denied)"
+                    ));
+                    return Ok(result);
+                }
             }
 
             let start = std::time::Instant::now();
@@ -650,5 +712,180 @@ mod tests {
         // watch 应该收到 generation = 1
         rx.changed().await.unwrap();
         assert_eq!(*rx.borrow(), 1);
+    }
+
+    // ── 0.21.5: ExposureSnapshot policy 过滤单测 ─────────────────────────
+
+    /// 带 policy 的 mock Capability。
+    struct PolicyMockCap {
+        id_val: String,
+        policy: crate::domain::capability::CapabilityPolicy,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::domain::capability::Capability for PolicyMockCap {
+        fn id(&self) -> &str {
+            &self.id_val
+        }
+        fn schema(&self) -> crate::domain::capability::CapabilitySchema {
+            crate::domain::capability::CapabilitySchema::empty(&self.id_val, "policy mock")
+        }
+        fn policy(&self) -> crate::domain::capability::CapabilityPolicy {
+            self.policy.clone()
+        }
+        async fn invoke(
+            &self,
+            _args: Value,
+            _ctx: &InvokeContext<'_>,
+        ) -> Result<CapabilityResult, crate::domain::capability::CapabilityError> {
+            Ok(CapabilityResult::Done {
+                summary: "ok".into(),
+            })
+        }
+    }
+
+    use crate::domain::capability::{
+        CapabilityPolicy, DangerClass, McpDefault, OriginSet, RuntimeRequirement,
+    };
+
+    fn safe_mcp_default_off_policy() -> CapabilityPolicy {
+        CapabilityPolicy {
+            allowed_origins: OriginSet::ALL,
+            runtime_requirement: RuntimeRequirement::NONE,
+            danger: DangerClass::Safe,
+            sensitive: false,
+            ai_default: crate::domain::capability::AiDefault::On,
+            mcp_default: McpDefault::DefaultOff,
+            confirmation: crate::domain::capability::ConfirmationPolicy::safe(),
+        }
+    }
+
+    fn dangerous_policy() -> CapabilityPolicy {
+        CapabilityPolicy {
+            danger: DangerClass::Dangerous,
+            mcp_default: McpDefault::Forbidden,
+            confirmation: crate::domain::capability::ConfirmationPolicy::dangerous(true),
+            ..safe_mcp_default_off_policy()
+        }
+    }
+
+    fn forbidden_gui_policy() -> CapabilityPolicy {
+        // Safe 但 GUI starter —— mcp_default = Forbidden
+        CapabilityPolicy {
+            danger: DangerClass::Safe,
+            mcp_default: McpDefault::Forbidden,
+            ..safe_mcp_default_off_policy()
+        }
+    }
+
+    /// Dangerous Capability 即使被用户暴露也不进入 MCP 清单。
+    #[tokio::test]
+    async fn exposure_filters_dangerous_even_if_exposed() {
+        let reg = crate::domain::capability::CapabilityRegistry::default();
+        reg.register(std::sync::Arc::new(PolicyMockCap {
+            id_val: "dangerous_cap".into(),
+            policy: dangerous_policy(),
+        }) as std::sync::Arc<dyn crate::domain::capability::Capability>);
+
+        let exposure = SharedExposure::new();
+        let config = McpServerModeConfig {
+            enabled: true,
+            port: 32123,
+            exposed_capabilities: vec!["dangerous_cap".into()],
+        };
+        exposure.rebuild(&reg, &config).await;
+
+        let snapshot = exposure.read().await;
+        assert!(
+            snapshot.tools.is_empty(),
+            "Dangerous capability 不应进入 MCP 暴露清单"
+        );
+        assert!(
+            !snapshot.allowed.contains("dangerous_cap"),
+            "Dangerous capability 不应在 allowed 集合中"
+        );
+    }
+
+    /// Forbidden（GUI starter）Capability 即使被用户暴露也不进入 MCP 清单。
+    #[tokio::test]
+    async fn exposure_filters_forbidden_even_if_exposed() {
+        let reg = crate::domain::capability::CapabilityRegistry::default();
+        reg.register(std::sync::Arc::new(PolicyMockCap {
+            id_val: "gui_starter_cap".into(),
+            policy: forbidden_gui_policy(),
+        }) as std::sync::Arc<dyn crate::domain::capability::Capability>);
+
+        let exposure = SharedExposure::new();
+        let config = McpServerModeConfig {
+            enabled: true,
+            port: 32123,
+            exposed_capabilities: vec!["gui_starter_cap".into()],
+        };
+        exposure.rebuild(&reg, &config).await;
+
+        let snapshot = exposure.read().await;
+        assert!(
+            snapshot.tools.is_empty(),
+            "Forbidden GUI starter capability 不应进入 MCP 暴露清单"
+        );
+    }
+
+    /// Safe + DefaultOff 的 Capability 被用户暴露后应进入 MCP 清单。
+    #[tokio::test]
+    async fn exposure_allows_safe_default_off_when_exposed() {
+        let reg = crate::domain::capability::CapabilityRegistry::default();
+        reg.register(std::sync::Arc::new(PolicyMockCap {
+            id_val: "safe_cap".into(),
+            policy: safe_mcp_default_off_policy(),
+        }) as std::sync::Arc<dyn crate::domain::capability::Capability>);
+
+        let exposure = SharedExposure::new();
+        let config = McpServerModeConfig {
+            enabled: true,
+            port: 32123,
+            exposed_capabilities: vec!["safe_cap".into()],
+        };
+        exposure.rebuild(&reg, &config).await;
+
+        let snapshot = exposure.read().await;
+        assert_eq!(snapshot.tools.len(), 1);
+        assert!(snapshot.allowed.contains("safe_cap"));
+    }
+
+    /// 混合场景：Safe + Dangerous + Forbidden 同时暴露，只 Safe 进入清单。
+    #[tokio::test]
+    async fn exposure_mixed_only_safe_passes() {
+        let reg = crate::domain::capability::CapabilityRegistry::default();
+        reg.register(std::sync::Arc::new(PolicyMockCap {
+            id_val: "safe_cap".into(),
+            policy: safe_mcp_default_off_policy(),
+        }) as std::sync::Arc<dyn crate::domain::capability::Capability>);
+        reg.register(std::sync::Arc::new(PolicyMockCap {
+            id_val: "dangerous_cap".into(),
+            policy: dangerous_policy(),
+        }) as std::sync::Arc<dyn crate::domain::capability::Capability>);
+        reg.register(std::sync::Arc::new(PolicyMockCap {
+            id_val: "forbidden_cap".into(),
+            policy: forbidden_gui_policy(),
+        }) as std::sync::Arc<dyn crate::domain::capability::Capability>);
+
+        let exposure = SharedExposure::new();
+        let config = McpServerModeConfig {
+            enabled: true,
+            port: 32123,
+            exposed_capabilities: vec![
+                "safe_cap".into(),
+                "dangerous_cap".into(),
+                "forbidden_cap".into(),
+            ],
+        };
+        exposure.rebuild(&reg, &config).await;
+
+        let snapshot = exposure.read().await;
+        // 只有 safe_cap 通过
+        assert_eq!(snapshot.tools.len(), 1);
+        assert!(snapshot.allowed.contains("safe_cap"));
+        assert!(!snapshot.allowed.contains("dangerous_cap"));
+        assert!(!snapshot.allowed.contains("forbidden_cap"));
     }
 }

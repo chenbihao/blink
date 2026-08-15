@@ -6,7 +6,7 @@
 >
 > **读法**:本文只留**最终决策**与**结构骨架**(trait 签名只放声明 + 一句注释)。实现细节、踩坑、验收在 `../phases/`;铁则的"为什么不可妥协"在 `../product.md`。
 >
-> **实施状态提示**：Capability 唯一原子执行入口、`CapabilityPolicy`、调用来源/运行时门禁和统一功能目录是已定的目标架构，但代码将在 [0.21](../phases/0.21-capability-unification-feature-catalog.md) 完成物理迁移。0.21 完成前，仓库仍存在本地 Action/Capability 双轨；阅读本规范时不得误判为已经落地。
+> **实施状态提示**：Capability 唯一原子执行入口、`CapabilityPolicy`、调用来源/运行时门禁和统一功能目录已在 [0.21](../phases/0.21-capability-unification-feature-catalog.md) 完成物理迁移并落地。旧 `execution::Action` / `ActionRegistry` / `ActionContext` / `ActionOutcome` / `ExecError` / `ActionSchema` 及双 Registry fallback 已于 0.21.7 全量删除。
 
 ---
 
@@ -122,7 +122,7 @@ Blink 源码分四层目录,依赖**只准向下**:
 
 成为 Capability **不等于自动向 AI/MCP 开放**。代码级出口策略是硬上限，用户配置只能在其子集内授权；危险/敏感确认又独立于出口授权。`open_settings`、`sticky_manager` 可以是允许 AI 的安全 Capability，`exit_blink` 可以是仅本地 Capability，`shutdown` 可以是 AI 默认关闭且每次确认的 Dangerous Capability。
 
-0.21 完成迁移后删除 `execution::Action`、`ActionRegistry`、`ActionContext`、`ActionOutcome`、`ExecError` 及双 Registry fallback。旧 Action 必须全量分流：可确定调用者迁 Capability；持续交互状态迁领域 Interaction；仅用于入口展示/按键绑定者迁 descriptor，禁止制造空执行体的伪 Capability。
+0.21 已完成迁移，删除了 `execution::Action`、`ActionRegistry`、`ActionContext`、`ActionOutcome`、`ExecError`、`ActionSchema` 及双 Registry fallback。旧 Action 已全量分流：可确定调用者迁 Capability；持续交互状态迁领域 Interaction；仅用于入口展示/按键绑定者迁 descriptor，无空执行体的伪 Capability。
 
 ### §A3.2 Capability trait 与出口策略
 
@@ -183,7 +183,7 @@ pub struct SuggestionArbiter { producers: Vec<Arc<dyn SuggestionProducer>> }
 
 **前端 API**:泛型 `get_config(key) / set_config(key, value)` 命令 + `frontend/js/shared/config-keys.js` 维护 key 常量表 + `blink://config-changed` 广播(各模块按 key 订阅)。取代散落 20+ 个 `update_*` 专用命令。
 
-> Suggestion/Config 入口的早期落地见 [phases/0.8 §八](../phases/0.8-context-interaction.md)；Capability 唯一执行入口的实施计划见 [0.21](../phases/0.21-capability-unification-feature-catalog.md)。
+> Suggestion/Config 入口的早期落地见 [phases/0.8 §八](../phases/0.8-context-interaction.md)；Capability 唯一执行入口的实施见 [0.21](../phases/0.21-capability-unification-feature-catalog.md)（已落地）。
 
 ### §A3.5 多协议入口，单一原子执行语义（强制）
 
@@ -195,7 +195,7 @@ UI Command、CLI、MCP 与各类本地 surface 可以保留各自协议入口，
 
 ## §A4 能力体系边界(Capability / Interaction / ResultAction)
 
-> **0.21 定稿边界（规划中）**。0.14 删除 `ActionTool`、建立 Capability 协议；0.21 进一步消除本地 Action 与 Capability 的双执行体系。
+> **0.21 已落地**。0.14 删除 `ActionTool`、建立 Capability 协议；0.21 消除了本地 Action 与 Capability 的双执行体系，旧 Action 全量分流完成。
 
 Blink 的能力分三层:
 
@@ -229,7 +229,7 @@ Blink 的能力分三层:
 
 **Interaction 不等于旧 Action 改名**:它承载的是有生命周期的人机流程，不是另一套通用原子执行接口。开始交互、提交结果、取消会话可分别调用领域服务或 Capability，但持续状态留在所属领域。Chord/Search/Menu 只是入口或 binding，不拥有业务执行语义。
 
-> 0.14 的历史边界与迁移背景见 [phases/0.14](../phases/0.14-capability-protocol-refactor.md)；统一执行终态与全量分流见 [0.21](../phases/0.21-capability-unification-feature-catalog.md)。
+> 0.14 的历史边界与迁移背景见 [phases/0.14](../phases/0.14-capability-protocol-refactor.md)；统一执行终态与全量分流见 [0.21](../phases/0.21-capability-unification-feature-catalog.md)（已落地）。
 
 ---
 
@@ -289,7 +289,7 @@ pub enum ItemAction {
 }
 ```
 
-`ItemAction` 是 0.14 wire 名称，语义上属于 ResultAction，不是计划删除的 `execution::Action`。0.21 后领域副作用型结果操作应优先投影为 `Invoke { capability_id, args }`；Copy/Preview 等纯展示短路径可保留专用变体。兼容期可保留旧枚举名/旧 wire shape，但执行必须落到 Capability。
+`ItemAction` 是 0.14 wire 名称，语义上属于 ResultAction。0.21 后领域副作用型结果操作优先投影为 `Invoke { capability_id, args }`；Copy/Preview 等纯展示短路径保留专用变体。旧 `execution::Action` 已于 0.21.7 删除，执行统一落到 Capability。
 
 **对比旧 `ItemResult` 的关键变化**:删 `title`/`subtitle`/`score`(主窗口展示概念,不该在协议层);`data` 取代 `payload`;主标题(旧 title)由前端从 `data` 派生(投影规则见 §A6)。
 
@@ -451,7 +451,7 @@ Provider 不只是聊天 API,是**能力供应商**:当前覆盖 LLM(`chat`/`cha
 | **0.13** | 能力扩展(基础版 + 开放) | MCP client/server / CLI 化 / token-aware 压缩 / 记忆 FTS5 召回 / Skill 约定式 / 0.13.7 收敛(P3 投影剔 score + 插件 Action→Capability 迁移,删 `ActionOutcome::Items`) |
 | **0.14** | 能力协议与架构收敛 | 删除 `ActionTool`、AI 仅经 Capability + Cap 协议分层(§A5) + 四出口投影引擎(§A6) + 分层与工程债清理；当时保留本地 Action 双轨，后由 0.21 承接 |
 | **0.19** | 能力闭环 | 窗口/图片感知 + 便签/pin 执行 + 用户/AI 双入口收敛 + ImageStash 图片跨 Capability 引用 |
-| **0.21（规划）** | 唯一原子执行入口 | 旧 Action 全量分流为 Capability / Interaction / descriptor，删除 ActionRegistry 与双 Registry fallback；功能目录统一呈现及本地/AI/MCP 出口策略 |
+| **0.21** | 唯一原子执行入口 | 旧 Action 全量分流为 Capability / Interaction / descriptor，删除 ActionRegistry 与双 Registry fallback；功能目录统一呈现及本地/AI/MCP 出口策略 |
 
 **解耦智慧**:先验证大脑(0.9 文本闭环),再加感官(0.10 语音)。0.12-0.14 是 AI 能力架构的「搭骨架 → 扩展 → 收敛重构」三步,0.19 再补感知与执行闭环。**核心原则:零嵌入模型依赖——FTS5 + token-aware 窗口是当前正式方案,向量化与 RAG 仅保留为远期观察,不预占版本**。
 

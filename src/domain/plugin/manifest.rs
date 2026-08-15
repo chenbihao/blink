@@ -44,14 +44,14 @@ pub struct PluginManifest {
     pub settings_schema: Vec<SettingField>,
     /// 插件声明的 tool 列表(0.9.3)——AI 路由可调用的能力。
     ///
-    /// 每个 tool 对应一份 `ActionSchema` + `DangerClass`，启动时注册进
-    /// `ActionRegistry`，与 builtin 动作并列供 AI tool-call 消费。
+    /// 每个 tool 对应一份 `ToolSchema` + `DangerClass`，启动时注册进
+    /// `CapabilityRegistry`，与 builtin 能力并列供 AI tool-call 消费。
     /// 缺失或空 = 该插件不参与 AI tool-call（老插件向后兼容）。
     #[serde(default)]
     pub tools: Vec<ToolDef>,
 }
 
-/// 插件声明的 tool 定义(0.9.3)——对齐 `ActionSchema` + `DangerClass`。
+/// 插件声明的 tool 定义(0.9.3)——对齐 `ToolSchema` + `DangerClass`。
 ///
 /// **0.11.1 改进 3a**：新增 5 个元信息字段（`result_type` / `hint` / `examples` /
 /// `sensitive` / `progress_hint`）+ `setting_bindings`（3b 参数动态注入用）。
@@ -71,7 +71,7 @@ pub struct PluginManifest {
 /// ```
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ToolDef {
-    /// tool 唯一标识——全局唯一(ActionRegistry 按此查找)，冲突则 warn + 跳过。
+    /// tool 唯一标识——全局唯一(CapabilityRegistry 按此查找)，冲突则 warn + 跳过。
     pub name: String,
     /// 人类可读描述，直接送入 LLM。
     #[serde(default)]
@@ -113,7 +113,7 @@ pub struct ToolDef {
     /// - description 自动追加"（默认: {value}）"
     ///
     /// **投影层改动**：不动 manifest 的 `parameters` 原文，只在 `build_capability_tools`
-    /// 时通过 `inject_plugin_settings` 生成新的 ActionSchema。运行时 setting 变更
+    /// 时通过 `inject_plugin_settings` 生成新的 ToolSchema。运行时 setting 变更
     /// 下次构建 tools 时自动生效（每次 AI 请求都重建）。
     #[serde(default)]
     pub setting_bindings: Option<std::collections::HashMap<String, String>>,

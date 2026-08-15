@@ -25,7 +25,7 @@ use crate::infra::platform::screenshot::ScreenCaptureMeta;
 /// Tauri 运行时实现的 DomainEnv。
 ///
 /// 内部持有 `AppHandle` + `DbPools` + 各 service 的 `OnceLock`。
-/// ActionRegistry 刻意不暴露在 DomainEnv 上，避免 AI Capability 反向进入本地执行域。
+/// 旧 ActionRegistry 刻意不暴露在 DomainEnv 上，避免 AI Capability 反向进入本地执行域。0.21.7 后 ActionRegistry 已删除，此约束由 CapabilityRegistry 唯一入口保证。
 pub struct TauriDomainEnv {
     app: AppHandle,
     db_pools: DbPools,

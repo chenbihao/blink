@@ -344,7 +344,7 @@ fn build_rig_request(
         AIError::Serialization("CompletionRequest.messages 至少需一条 user 消息".into())
     })?;
 
-    // ActionSchema → rig::ToolDefinition(唯一 tool 类型投影)
+    // ToolSchema → rig::ToolDefinition(唯一 tool 类型投影)
     let tools = req.tools.iter().map(|s| s.to_rig_tool()).collect();
 
     // 参数 fallback:req 显式值 > model 层默认值 > None(rig 让 provider 自己决定)
@@ -659,7 +659,7 @@ pub(crate) fn expose_for_rig(s: &SecretString) -> String {
 mod tests {
     use super::*;
     use crate::domain::ai::message::ChatMessage;
-    use crate::domain::execution::ActionSchema;
+    use crate::domain::schema::ToolSchema;
     use rig_core::completion::{CompletionResponse as RigResp, Usage as RigUsage};
     use rig_core::message::{
         Text as RigText, ToolCall as RigToolCall, ToolFunction as RigToolFunc,
@@ -710,8 +710,8 @@ mod tests {
         let req = CompletionRequest {
             messages: vec![ChatMessage::user("q")],
             tools: vec![
-                ActionSchema::empty("open_settings", "打开设置"),
-                ActionSchema::empty("lock", "锁定电脑"),
+                ToolSchema::empty("open_settings", "打开设置"),
+                ToolSchema::empty("lock", "锁定电脑"),
             ],
             max_tokens: Some(128),
             temperature: Some(0.2),

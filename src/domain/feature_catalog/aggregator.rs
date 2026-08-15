@@ -40,6 +40,9 @@ impl FeatureCatalogAggregator {
     /// - `cap_registry`: CapabilityRegistry（已注册的 capability）
     /// - `chord_registry`: ChordRegistry（已注册的 chord action）
     /// - `plugin_engine`: 可选的 PluginEngine（None = CLI/无插件环境）
+    /// - `ai_allowlist`: 用户 AI 授权集合（`ai.capability_access` 真源）；
+    ///   None = 无授权数据（CLI 等环境），AI 列退回 policy 默认投影
+    /// - `mcp_exposed`: 用户 MCP 暴露集合（`exposed_capabilities` 真源）
     pub fn aggregate(
         disabled_builtin: &[String],
         disabled_chord: &[String],
@@ -48,6 +51,8 @@ impl FeatureCatalogAggregator {
         cap_registry: &CapabilityRegistry,
         chord_registry: &ChordRegistry,
         plugin_engine: Option<&PluginEngine>,
+        ai_allowlist: Option<&HashSet<String>>,
+        mcp_exposed: &HashSet<String>,
     ) -> Vec<FeatureCatalogItem> {
         let use_en = language.starts_with("en");
         let disabled_context_set: HashSet<&str> =
@@ -120,7 +125,14 @@ impl FeatureCatalogAggregator {
             // Capability 投影
             let cap_projection = cap_registry
                 .get(cap_id)
-                .map(|cap| build_capability_projection(&cap, FeatureSource::Builtin));
+                .map(|cap| {
+                    build_capability_projection(
+                        &cap,
+                        FeatureSource::Builtin,
+                        ai_allowlist,
+                        mcp_exposed,
+                    )
+                });
 
             let unavailable_reason = if local_availability != LocalAvailability::Available {
                 if !action.enabled {
@@ -203,9 +215,14 @@ impl FeatureCatalogAggregator {
                 // capability 存在但没有对应的 descriptor item——独立成项
                 let feature_id = format!("chord.{}", chord_id);
                 let group = FeatureGroup::infer_from_capability_id(cap_id);
-                let cap_projection = cap_registry
-                    .get(cap_id)
-                    .map(|cap| build_capability_projection(&cap, FeatureSource::Chord));
+                let cap_projection = cap_registry.get(cap_id).map(|cap| {
+                    build_capability_projection(
+                        &cap,
+                        FeatureSource::Chord,
+                        ai_allowlist,
+                        mcp_exposed,
+                    )
+                });
 
                 cap_id_to_feature_id.insert(cap_id.clone(), feature_id.clone());
                 feature_id_to_index.insert(feature_id.clone(), items.len());
@@ -316,7 +333,8 @@ impl FeatureCatalogAggregator {
                 schema.description.clone()
             };
 
-            let cap_projection = build_capability_projection(&cap_arc, source);
+            let cap_projection =
+                build_capability_projection(&cap_arc, source, ai_allowlist, mcp_exposed);
 
             // 插件可用性
             let (local_availability, unavailable_reason) = if is_plugin {
@@ -401,9 +419,14 @@ fn find_plugin_name_for_cap(
 }
 
 /// 从 Capability 构建 CatalogCapabilityProjection。
+///
+/// `ai_allowlist` / `mcp_exposed` 是用户授权的真源快照（§3.4/§3.5）；
+/// 出口状态反映**实际授权**，不是 policy 默认值。
 fn build_capability_projection(
     cap: &std::sync::Arc<dyn Capability>,
     source: FeatureSource,
+    ai_allowlist: Option<&HashSet<String>>,
+    mcp_exposed: &HashSet<String>,
 ) -> CatalogCapabilityProjection {
     let schema = cap.schema();
     let policy = cap.policy();
@@ -413,8 +436,9 @@ fn build_capability_projection(
         DangerClass::Dangerous => "dangerous",
     };
 
-    let ai_status = project_ai_exit_status(&policy);
-    let mcp_status = project_mcp_exit_status(&policy);
+    let ai_status =
+        project_ai_exit_status(&policy, cap.id(), ai_allowlist);
+    let mcp_status = project_mcp_exit_status(&policy, cap.id(), mcp_exposed);
 
     let runtime_requirement = format_runtime_requirement(policy.runtime_requirement);
 
@@ -431,12 +455,26 @@ fn build_capability_projection(
     }
 }
 
-/// 从 policy 投影 AI 出口状态。
-fn project_ai_exit_status(policy: &CapabilityPolicy) -> CatalogExitStatus {
+/// 投影 AI 出口状态。
+///
+/// - origin 不允许 AI → 代码级禁止；
+/// - 有用户 allowlist 时以 allowlist 为准（Enabled/Disabled）；
+/// - 无 allowlist 数据（None，CLI 等环境）退回 `ai_default` 投影。
+fn project_ai_exit_status(
+    policy: &CapabilityPolicy,
+    cap_id: &str,
+    ai_allowlist: Option<&HashSet<String>>,
+) -> CatalogExitStatus {
     if !policy.allowed_origins.contains(InvocationOrigin::LocalAi) {
-        CatalogExitStatus::CodeForbidden
+        return CatalogExitStatus::CodeForbidden;
+    }
+    if let Some(allowlist) = ai_allowlist {
+        if allowlist.contains(cap_id) {
+            CatalogExitStatus::Enabled
+        } else {
+            CatalogExitStatus::Disabled
+        }
     } else {
-        // 0.21.5 将从用户 allowlist 读取；当前从 ai_default 投影
         match policy.ai_default {
             crate::domain::capability::AiDefault::On => CatalogExitStatus::Enabled,
             crate::domain::capability::AiDefault::Off => CatalogExitStatus::Disabled,
@@ -444,15 +482,26 @@ fn project_ai_exit_status(policy: &CapabilityPolicy) -> CatalogExitStatus {
     }
 }
 
-/// 从 policy 投影 MCP 出口状态。
-fn project_mcp_exit_status(policy: &CapabilityPolicy) -> CatalogExitStatus {
-    if !policy.allowed_origins.contains(InvocationOrigin::Mcp) {
-        CatalogExitStatus::CodeForbidden
+/// 投影 MCP 出口状态。
+///
+/// - origin 不允许 MCP、Dangerous、`mcp_default == Forbidden` → 代码级禁止
+///   （§3.5：MCP 首版禁止 Dangerous，配置不能绕过）；
+/// - 其余以用户 `exposed_capabilities` 为准。
+fn project_mcp_exit_status(
+    policy: &CapabilityPolicy,
+    cap_id: &str,
+    mcp_exposed: &HashSet<String>,
+) -> CatalogExitStatus {
+    if !policy.allowed_origins.contains(InvocationOrigin::Mcp)
+        || policy.danger == DangerClass::Dangerous
+        || policy.mcp_default == crate::domain::capability::McpDefault::Forbidden
+    {
+        return CatalogExitStatus::CodeForbidden;
+    }
+    if mcp_exposed.contains(cap_id) {
+        CatalogExitStatus::Enabled
     } else {
-        match policy.mcp_default {
-            crate::domain::capability::McpDefault::DefaultOff => CatalogExitStatus::Disabled,
-            crate::domain::capability::McpDefault::Forbidden => CatalogExitStatus::CodeForbidden,
-        }
+        CatalogExitStatus::Disabled
     }
 }
 
@@ -691,33 +740,50 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            project_ai_exit_status(&policy),
+            project_ai_exit_status(&policy, "cap_x", Some(&HashSet::new())),
             CatalogExitStatus::CodeForbidden
         );
     }
 
     #[test]
-    fn project_ai_status_enabled() {
+    fn project_ai_status_follows_allowlist_when_present() {
         let policy = CapabilityPolicy {
             allowed_origins: OriginSet::ALL,
             ai_default: AiDefault::On,
             ..Default::default()
         };
+        let allowlist: HashSet<String> = ["cap_in".to_string()].into_iter().collect();
+        // allowlist 包含 → Enabled（ai_default 不参与判定）
         assert_eq!(
-            project_ai_exit_status(&policy),
+            project_ai_exit_status(&policy, "cap_in", Some(&allowlist)),
             CatalogExitStatus::Enabled
+        );
+        // allowlist 不包含 → Disabled——即使 ai_default == On
+        assert_eq!(
+            project_ai_exit_status(&policy, "cap_out", Some(&allowlist)),
+            CatalogExitStatus::Disabled
         );
     }
 
     #[test]
-    fn project_ai_status_disabled() {
-        let policy = CapabilityPolicy {
+    fn project_ai_status_falls_back_to_default_without_allowlist() {
+        // None（CLI 等无授权数据环境）→ 退回 ai_default 投影
+        let policy_on = CapabilityPolicy {
+            allowed_origins: OriginSet::ALL,
+            ai_default: AiDefault::On,
+            ..Default::default()
+        };
+        assert_eq!(
+            project_ai_exit_status(&policy_on, "cap_x", None),
+            CatalogExitStatus::Enabled
+        );
+        let policy_off = CapabilityPolicy {
             allowed_origins: OriginSet::ALL,
             ai_default: AiDefault::Off,
             ..Default::default()
         };
         assert_eq!(
-            project_ai_exit_status(&policy),
+            project_ai_exit_status(&policy_off, "cap_x", None),
             CatalogExitStatus::Disabled
         );
     }
@@ -729,7 +795,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            project_mcp_exit_status(&policy),
+            project_mcp_exit_status(&policy, "cap_x", &HashSet::new()),
             CatalogExitStatus::CodeForbidden
         );
     }
@@ -741,21 +807,43 @@ mod tests {
             mcp_default: McpDefault::Forbidden,
             ..Default::default()
         };
+        // exposed 即使包含该 id 也无法绕过代码级禁止
+        let exposed: HashSet<String> = ["cap_x".to_string()].into_iter().collect();
         assert_eq!(
-            project_mcp_exit_status(&policy),
+            project_mcp_exit_status(&policy, "cap_x", &exposed),
             CatalogExitStatus::CodeForbidden
         );
     }
 
     #[test]
-    fn project_mcp_status_disabled() {
+    fn project_mcp_status_dangerous_always_code_forbidden() {
+        // §3.5：MCP 首版禁止 Dangerous，即使 origin 允许
+        let policy = CapabilityPolicy {
+            allowed_origins: OriginSet::ALL,
+            danger: DangerClass::Dangerous,
+            ..Default::default()
+        };
+        let exposed: HashSet<String> = ["cap_x".to_string()].into_iter().collect();
+        assert_eq!(
+            project_mcp_exit_status(&policy, "cap_x", &exposed),
+            CatalogExitStatus::CodeForbidden
+        );
+    }
+
+    #[test]
+    fn project_mcp_status_follows_exposed_set() {
         let policy = CapabilityPolicy {
             allowed_origins: OriginSet::ALL,
             mcp_default: McpDefault::DefaultOff,
             ..Default::default()
         };
+        let exposed: HashSet<String> = ["cap_exposed".to_string()].into_iter().collect();
         assert_eq!(
-            project_mcp_exit_status(&policy),
+            project_mcp_exit_status(&policy, "cap_exposed", &exposed),
+            CatalogExitStatus::Enabled
+        );
+        assert_eq!(
+            project_mcp_exit_status(&policy, "cap_hidden", &exposed),
             CatalogExitStatus::Disabled
         );
     }
@@ -765,7 +853,8 @@ mod tests {
     #[test]
     fn build_projection_for_safe_cap() {
         let cap = make_mock_cap("test_safe_cap");
-        let proj = build_capability_projection(&cap, FeatureSource::Builtin);
+        let proj =
+            build_capability_projection(&cap, FeatureSource::Builtin, None, &HashSet::new());
 
         assert_eq!(proj.capability_id, "test_safe_cap");
         assert_eq!(proj.source, FeatureSource::Builtin);
@@ -785,7 +874,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        let proj = build_capability_projection(&cap, FeatureSource::Builtin);
+        let proj =
+            build_capability_projection(&cap, FeatureSource::Builtin, None, &HashSet::new());
 
         assert_eq!(proj.danger, "dangerous");
         assert!(proj.requires_confirmation);
@@ -801,7 +891,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        let proj = build_capability_projection(&cap, FeatureSource::Builtin);
+        let proj =
+            build_capability_projection(&cap, FeatureSource::Builtin, None, &HashSet::new());
 
         assert!(proj.sensitive);
         assert!(proj.requires_confirmation);
@@ -818,7 +909,8 @@ mod tests {
             FeatureSource::BuiltinCapability,
         ] {
             let cap = make_mock_cap("test_source_cap");
-            let proj = build_capability_projection(&cap, source);
+            let proj =
+                build_capability_projection(&cap, source, None, &HashSet::new());
             assert_eq!(proj.source, source);
         }
     }
@@ -839,6 +931,8 @@ mod tests {
             &cap_reg,
             &chord_reg,
             None,
+            None,
+            &HashSet::new(),
         );
 
         // 至少有 builtin action（list_builtin_actions 返回的条目数）
@@ -883,6 +977,8 @@ mod tests {
             &cap_reg,
             &chord_reg,
             None,
+            None,
+            &HashSet::new(),
         );
 
         let settings_item = items
@@ -923,6 +1019,8 @@ mod tests {
             &cap_reg,
             &chord_reg,
             None,
+            None,
+            &HashSet::new(),
         );
 
         // screenshot 的目录项应有 ChordKey binding
@@ -957,6 +1055,8 @@ mod tests {
             &cap_reg,
             &chord_reg,
             None,
+            None,
+            &HashSet::new(),
         );
 
         let voice_item = items
@@ -985,6 +1085,8 @@ mod tests {
             &cap_reg,
             &chord_reg,
             None,
+            None,
+            &HashSet::new(),
         );
 
         let voice_item = items
@@ -1019,6 +1121,8 @@ mod tests {
             &cap_reg,
             &chord_reg,
             None, // 无 PluginEngine → 归为 BuiltinCapability
+            None,
+            &HashSet::new(),
         );
 
         let custom_item = items
@@ -1045,6 +1149,8 @@ mod tests {
             &cap_reg,
             &chord_reg,
             None,
+            None,
+            &HashSet::new(),
         );
 
         // 验证排序：group 升序，组内 title 升序
@@ -1079,6 +1185,8 @@ mod tests {
             &cap_reg,
             &chord_reg,
             None,
+            None,
+            &HashSet::new(),
         );
 
         let items_en = FeatureCatalogAggregator::aggregate(
@@ -1089,6 +1197,8 @@ mod tests {
             &cap_reg,
             &chord_reg,
             None,
+            None,
+            &HashSet::new(),
         );
 
         // 两语言应返回相同数量的目录项
@@ -1125,6 +1235,8 @@ mod tests {
             &cap_reg,
             &chord_reg,
             None,
+            None,
+            &HashSet::new(),
         );
 
         // 找有 context binding 的项（open_url 通常有 clipboard_is_url context trigger）
@@ -1158,6 +1270,8 @@ mod tests {
             &cap_reg,
             &chord_reg,
             None,
+            None,
+            &HashSet::new(),
         );
 
         // 找到所有 context binding 的 key
@@ -1182,6 +1296,8 @@ mod tests {
                 &cap_reg,
                 &chord_reg,
                 None,
+                None,
+                &HashSet::new(),
             );
 
             // 验证对应的 context binding 被标记为 disabled
@@ -1226,6 +1342,8 @@ mod tests {
             &cap_reg,
             &chord_reg,
             None,
+            None,
+            &HashSet::new(),
         );
 
         let proj_item = items
@@ -1267,6 +1385,8 @@ mod tests {
             &cap_reg,
             &chord_reg,
             None,
+            None,
+            &HashSet::new(),
         );
 
         // open_settings 应只出现一次（descriptor 已覆盖，不再独立成项）
@@ -1299,6 +1419,8 @@ mod tests {
             &cap_reg,
             &chord_reg,
             None,
+            None,
+            &HashSet::new(),
         );
 
         // 应有 chord.custom_chord 项

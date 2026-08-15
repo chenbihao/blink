@@ -3,7 +3,7 @@
 //! ## 动机
 //!
 //! rig Agent 的 `AgentBuilder` 注册 tool 的方式与现有架构根本不同：
-//! - **现有架构**：数据 + 外部调度--`Vec<ActionSchema>` -> 投影成 `Vec<ToolDefinition>`
+//! - **现有架构**：数据 + 外部调度--`Vec<ToolSchema>` -> 投影成 `Vec<ToolDefinition>`
 //!   作为 `CompletionRequest` 参数，service.rs 收到 `tool_calls` 后手工执行
 //! - **rig Agent**：代码 + 内部调度--`impl rig::tool::Tool` trait，Agent 内部自动循环
 //!
@@ -23,7 +23,7 @@
 //! open_logs/open_data_dir/open_settings）不再出现在 AI tool 池。
 //!
 //! `open_url` / `open_path` / `reveal_in_explorer` 从 Action 提升为 Capability，
-//! AI 通过 CapabilityTool 调用。Action 版本保留在 `ActionRegistry` 供主窗口搜索流使用。
+//! AI 通过 CapabilityTool 调用。0.21.7 起 execution 模块已删除，全量经 CapabilityRegistry。
 //!
 //! ## 四域墙（危险操作确认 + 闭环）
 //!
@@ -644,6 +644,8 @@ fn capability_error_to_string(e: CapabilityError) -> String {
 ///   （0.13.0 §9.3：统一外部 tool 入口，为 MCP tool 留对称性）
 /// - `emitter`: DomainEnv，用于构造 InvokeContext + emit 确认事件
 /// - `pending`: 危险确认注册表（`Arc<PendingConfirms>`，由 main.rs manage，对话窗口共享）
+/// - `ai_allowlist`: AI 授权的 Capability id 集合（0.21.5）。`None` = 不过滤（兼容旧测试）；
+///   `Some(set)` = 只包装 set 中的 Capability。
 ///
 /// **返回**：所有可用的 tool（CapabilityTool + external_tools）
 ///
@@ -651,19 +653,32 @@ fn capability_error_to_string(e: CapabilityError) -> String {
 /// 只含 Capability。9 个保留 Action（lock/shutdown/...）不再出现在 tool 池——
 /// 这把"AI 该不该调这个能力"从运行时过滤前置成编译期类型约束。
 /// **危险操作**：危险 Capability 仍会被包装进 tool 池，但调用时挂起等用户确认。
+/// **0.21.5 变化**：增加 `ai_allowlist` 参数——只包装 policy 允许 AI 且用户 enabled 的 Capability。
+/// 纯对话模式传空 `HashSet`（tool 池为空）。
 #[allow(dead_code)] // 0.12.1 对话窗口 AgentBuilder 消费
 pub fn build_agent_tools(
     cap_registry: &CapabilityRegistry,
     external_tools: Vec<Box<dyn ToolDyn>>,
     emitter: Arc<dyn DomainEnv>,
     pending: Arc<PendingConfirms>,
+    ai_allowlist: Option<&std::collections::HashSet<String>>,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
 
-    // 1. 包装所有 Capability
-    for (_id, cap) in cap_registry.entries() {
+    // 1. 包装所有 Capability（0.21.5: 仅包装 allowlist 中的）
+    let mut cap_count = 0;
+    let mut skipped_count = 0;
+    for (id, cap) in cap_registry.entries() {
+        // 0.21.5: allowlist 过滤——只包装用户授权的 Capability
+        if let Some(allowlist) = ai_allowlist {
+            if !allowlist.contains(&id) {
+                skipped_count += 1;
+                continue;
+            }
+        }
         let tool = CapabilityTool::new(cap, emitter.clone(), pending.clone());
         tools.push(Box::new(tool));
+        cap_count += 1;
     }
 
     // 2. 追加外部 tool（MCP tool 等，已包装为 ToolDyn，直接进池）
@@ -671,10 +686,11 @@ pub fn build_agent_tools(
     tools.extend(external_tools);
 
     tracing::info!(
-        capabilities = cap_registry.len(),
+        capabilities = cap_count,
+        skipped = skipped_count,
         external_tools = external_count,
         total_tools = tools.len(),
-        "build_agent_tools: tool 池构建完成（0.14.2: AI tool 池只含 Capability）"
+        "build_agent_tools: tool 池构建完成（0.21.5: AI allowlist 过滤）"
     );
 
     tools
@@ -860,7 +876,7 @@ mod tests {
 
     struct ConfirmationCap {
         sensitive: bool,
-        danger: crate::domain::execution::DangerClass,
+        danger: crate::domain::capability::policy::DangerClass,
     }
 
     #[async_trait::async_trait]
@@ -906,7 +922,7 @@ mod tests {
 
     #[test]
     fn capability_confirmation_covers_dangerous_and_sensitive() {
-        use crate::domain::execution::DangerClass;
+        use crate::domain::capability::policy::DangerClass;
 
         let safe = ConfirmationCap {
             sensitive: false,

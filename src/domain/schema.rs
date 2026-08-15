@@ -1,12 +1,10 @@
-//! 统一 ToolSchema 公共基（0.14.6 §3.1）。
+//! 统一 ToolSchema 公共基（0.14.6 §3.1；0.21.7 起为唯一 tool schema）。
 //!
-//! `ActionSchema` 和 `CapabilitySchema` 共享同一份三字段结构 + 同一个 `to_rig_tool()`。
+//! `CapabilitySchema` 扁平持有三字段 + `sensitive: bool`，`to_rig_tool()` 委托 `ToolSchema`。
 //! rig 触点从 2 处收敛到 1 处——rig 若 breaking `ToolDefinition`，只改这里。
 //!
-//! - `ActionSchema` = `ToolSchema` 的 type alias（0.14.6 后直接等价）
-//! - `CapabilitySchema` = 扁平持有三字段 + `sensitive: bool`，`to_rig_tool()` 委托 `ToolSchema`
-//!
-//! 与 `DangerClass` 复用策略对齐——安全枚举也只有一份（在 `execution::schema`）。
+//! 0.21.7 删除 execution 模块后，`ActionSchema` type alias 已移除，
+//! 全项目统一使用 `ToolSchema`。
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -17,10 +15,10 @@ use serde_json::{Value, json};
 /// 不引入任何解释层。
 ///
 /// **`to_rig_tool()` 是全项目唯一触碰 rig 类型的地方**；rig 若破坏 `ToolDefinition` 结构，
-/// 只需要改这里，`ActionSchema` / `CapabilitySchema` 及全体实现零波及。
+/// 只需要改这里，`CapabilitySchema` 及全体实现零波及。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolSchema {
-    /// 唯一标识（与 `Action::id()` / `Capability::id()` 一致）。传给模型时作为 tool name。
+    /// 唯一标识（与 `Capability::id()` 一致）。传给模型时作为 tool name。
     pub name: String,
     /// 人类可读描述，直接送入 LLM。空字符串合法（无参无描述动作，如系统命令）。
     pub description: String,
@@ -51,7 +49,7 @@ impl ToolSchema {
     /// 投影到 rig 的 `ToolDefinition`——AI 路由消费入口。
     ///
     /// 本方法是**全项目唯一**触碰 rig 类型的地方；rig 若破坏 `ToolDefinition` 结构，
-    /// 只需要改这里，`ActionSchema` / `CapabilitySchema` 及全体实现零波及。
+    /// 只需要改这里，`CapabilitySchema` 及全体实现零波及。
     pub fn to_rig_tool(&self) -> rig_core::completion::ToolDefinition {
         rig_core::completion::ToolDefinition {
             name: self.name.clone(),

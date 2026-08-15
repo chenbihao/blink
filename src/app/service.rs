@@ -40,8 +40,6 @@ pub struct AppContext {
     pub router: std::sync::Arc<crate::domain::intent::RuleRouter>,
     #[allow(dead_code)]
     pub chord_registry: std::sync::Arc<crate::domain::chord::ChordRegistry>,
-    #[allow(dead_code)]
-    pub action_registry: std::sync::Arc<crate::domain::execution::ActionRegistry>,
     /// 0.9.7 Capability 能力协议层（inventory 自动收集）。
     /// `build_capability_tools` 消费，AI tool_call 只命中 Capability。
     /// **运行时通过 `app.state::<Arc<CapabilityRegistry>>()` 访问**，AppContext 仅服务于 setup 期。

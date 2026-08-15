@@ -357,7 +357,7 @@ Suggestion 域是唯一能读 Awareness 的层，也是**AI 意图判定器的�
 - **新能力自问**：设计时必须自答"它的产出能被谁消费、它能调用哪些已有能力"，答不出则它是孤岛，与统一能力底座脱节。
 - **铁则自身可演进**：以上铁则不是死守的教条。在框架设计或能力演进中，若某条铁则阻碍了更优的设计，应公开反思、记录理由、同步修订--铁则随产品生长而演进，而非产品被铁则锁死。
 
-> **架构收敛计划**（0.21，尚未落地）：当前仍存在 ActionRegistry 与 ChordRegistry 互不可见、`run_builtin_action` 双 Registry fallback、入口 metadata 与真实执行目标漂移等债。0.21 将旧 Action 全量分流为 Capability / Interaction / descriptor，并删除 Action 执行链路；`capture_screen`/`crop_image` alias、`open_url` 双实现和 OCR 双入口等此前已完成的收敛继续作为迁移范例。实施细节见 [0.21 phase](./phases/0.21-capability-unification-feature-catalog.md)。
+> **架构收敛**（0.21，已落地）：旧 Action 全量分流为 Capability / Interaction / descriptor，Action 执行链路已删除。`run_builtin_action` 统一走 CapabilityRegistry；`capture_screen`/`crop_image` alias、`open_url` 双实现和 OCR 双入口等此前已完成的收敛继续作为迁移范例。实施细节见 [0.21 phase](./phases/0.21-capability-unification-feature-catalog.md)。
 
 ### 6.4 可辨识度与视觉一致性（横切信念）
 

@@ -11,26 +11,6 @@ import { t, onLangChange } from "../../i18n/index.js";
 import { iconHTML } from "../../shared/icon.js";
 import { saveConfig } from "../../shared/config-keys.js";
 
-/** 内置动作图标映射（0.10.8：emoji → Lucide 图标名） */
-const BUILTIN_ACTION_ICONS = {
-  open_settings: "settings",
-  lock: "lock",
-  shutdown: "power",
-  restart: "refresh-cw",
-  sleep: "moon",
-  clear_history: "eraser",
-  exit_blink: "log-out",
-  open_logs: "file-text",
-  open_data_dir: "folder-open",
-  sticky_manager: "list-checks",
-  edit_clipboard_image: "pencil-sparkles",
-  blink_print_debug_info: "terminal",
-  blink_debug_inithook: "refresh-cw",
-  open_url: "external-link",
-  open_path: "folder",
-  reveal_in_explorer: "folder-search",
-};
-
 /** 插件图标映射（0.10.8：emoji → Lucide 图标名；builtin.echo 保留 volume-2 声波语义） */
 const PLUGIN_ICONS = {
   "builtin.ip": "globe",
@@ -47,103 +27,17 @@ let _langChangeRegistered = false;
  * 初始化插件 Tab
  */
 export function initPluginsTab() {
-  loadBuiltinActions();
   loadPlugins();
   initNumberSpinner();
   initExternalLinkDelegate();
 
-  // 语言切换时重新渲染（toggle 状态已自动保存；插件配置需重新加载）
+  // 语言切换时重新渲染（插件配置需重新加载）
   if (!_langChangeRegistered) {
     _langChangeRegistered = true;
     onLangChange(() => {
-      loadBuiltinActions();
       loadPlugins();
     });
   }
-}
-
-// ── 内置动作列表 ──────────────────────────────────────────────────────────────
-
-/**
- * 加载内置动作列表
- */
-async function loadBuiltinActions() {
-  const list = document.getElementById("builtin-actions-list");
-  if (!list) return;
-
-  try {
-    const actions = await invoke("list_builtin_actions");
-    if (!Array.isArray(actions) || actions.length === 0) {
-      list.innerHTML = `<p class="hint" style="padding: 12px 0;">${t("engine.builtin_actions.empty")}</p>`;
-      return;
-    }
-    list.innerHTML = actions.map(renderBuiltinActionRow).join("");
-    if (!list.dataset.eventsBound) {
-      bindBuiltinActionEvents(list);
-      list.dataset.eventsBound = "1";
-    }
-  } catch (e) {
-    console.error("loadBuiltinActions failed:", e);
-    list.innerHTML = `<p class="hint msg-error" style="padding: 12px 0;">${escapeHtml(String(e))}</p>`;
-  }
-}
-
-/**
- * 渲染单个内置动作行
- */
-function renderBuiltinActionRow(a) {
-  // 0.10.8：Lucide 图标名 → iconHTML；未知 id 兜底显示占位符
-  const iconName = BUILTIN_ACTION_ICONS[a.id];
-  const iconMarkup = iconName ? iconHTML(iconName) : "•";
-  const keywords = (a.keywords || []).join(" / ");
-  const meta = [
-    `<span>${t("engine.builtin_actions.keywords_label")}: ${escapeHtml(keywords)}</span>`,
-    a.trigger_desc ? `<span>${escapeHtml(a.trigger_desc)}</span>` : "",
-    a.param_desc
-      ? `<span>${t("engine.builtin_actions.param_label")}: ${escapeHtml(a.param_desc)}</span>`
-      : "",
-  ].filter(Boolean).join(" · ");
-
-  return `<div class="builtin-action-row" data-action-id="${escapeAttr(a.id)}">
-    <div class="builtin-action-icon">${iconMarkup}</div>
-    <div class="builtin-action-info">
-      <div class="builtin-action-title">${escapeHtml(a.title)}</div>
-      <div class="builtin-action-subtitle">${escapeHtml(a.subtitle)}</div>
-      <div class="builtin-action-meta">${meta}</div>
-    </div>
-    <label class="switch">
-      <input type="checkbox" class="builtin-action-toggle" ${a.enabled ? "checked" : ""} />
-      <span class="slider"></span>
-    </label>
-  </div>`;
-}
-
-/**
- * 绑定内置动作事件
- */
-function bindBuiltinActionEvents(list) {
-  list.addEventListener("change", async (e) => {
-    if (!e.target.classList.contains("builtin-action-toggle")) return;
-    const disabled = [];
-    list.querySelectorAll(".builtin-action-row").forEach((row) => {
-      const toggle = row.querySelector(".builtin-action-toggle");
-      if (toggle && !toggle.checked) disabled.push(row.dataset.actionId);
-    });
-
-    const msg = document.getElementById("builtin-actions-save-msg");
-    if (msg) msg.textContent = "";
-
-    try {
-      await saveConfig("disabled_builtin_actions", disabled);
-    } catch (err) {
-      console.error("set_disabled_builtin_actions failed:", err);
-      if (msg) {
-        msg.textContent = `${t("engine.builtin_actions.save_failed")}: ${err}`;
-        msg.className = "plugin-save-msg msg-error";
-      }
-      loadBuiltinActions();
-    }
-  });
 }
 
 // ── 插件列表（搬自原 settings.js）─────────────────────────────────────────────

@@ -1,11 +1,11 @@
 //! 插件 tool 的 Capability 适配器（0.13.7）——让插件能力注册进 CapabilityRegistry。
 //!
-//! **演进背景**：0.9.3 起，插件 tool 通过 `PluginActionAdapter`（impl `Action`）注册进
-//! `ActionRegistry`，靠 `ActionOutcome::Items` 借用 Capability 的 Items 模型。0.13.7
+//! **演进背景**：0.9.3 起，插件 tool 通过 `PluginActionAdapter`（impl 旧 `Action`）注册进
+//! 旧 `ActionRegistry`，靠 `ActionOutcome::Items` 借用 Capability 的 Items 模型。0.13.7
 //! 收敛双体系——插件 tool 的语义本就是「纯计算→返回结果」（入参→出参，不碰 UI），
 //! 天然属于 Capability 范畴。迁移后：
 //! - 插件进 `CapabilityRegistry`，与 `search_files` / `read_clipboard` 等并列
-//! - `ActionOutcome::Items` 变体删除，Action 回归纯粹（Copy/Open/Emit/Nop 副作用意图）
+//! - 0.21.7 删除 execution 模块后，旧 `ActionOutcome` 已不存在
 //! - 插件 `ToolDef.sensitive` 字段有处安放（`CapabilitySchema.sensitive`）
 //!
 //! AI 路由层通过 `CapabilityRegistry::get(id)` 拿到本 adapter，调 `invoke()` 时走

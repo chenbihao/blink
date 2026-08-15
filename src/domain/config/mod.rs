@@ -9,8 +9,10 @@
 //! - `app_config` — AppConfig 门面 + init/get/save/update 操作函数
 //! - `plugin_config` — PluginConfig + 插件配置 CRUD
 //! - `ai_config` — AIConfig 第 7 分片 + Provider/Model 类型 + 缓存
+//! - `ai_capability_access` — AiCapabilityAccessConfig AI 出口授权分片（0.21.5）
 //! - `stt_config` — SttConfig 第 8 分片 + STT 引擎类型 + 缓存
 
+pub mod ai_capability_access;
 pub mod ai_config;
 pub mod app_config;
 pub mod managed_settings;
@@ -20,6 +22,8 @@ pub mod store;
 pub mod stt_config;
 
 // ── 扁平 re-exports（方便 `crate::domain::config::*` 直接引用）─────────────────
+#[allow(unused_imports)]
+pub use ai_capability_access::*;
 #[allow(unused_imports)]
 pub use ai_config::*;
 #[allow(unused_imports)]

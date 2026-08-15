@@ -524,3 +524,59 @@ impl ConfigKey for AiPermissionConfig {
 fn default_permission_days() -> u64 {
     7
 }
+
+// ── AiCapabilityAccessConfig（0.21.5）──────────────────────────────────────────
+
+/// AI Capability 出口授权配置分片——key = `"ai.capability_access"`。
+///
+/// 控制哪些 Capability 可以进入 AI tool 池。
+///
+/// **设计**（见 phases/0.21 §3.4）：
+/// - `schema_version`：配置 schema 版本，当前固定为 1。
+/// - `profile`：初始化来源标记（`"recommended"` = 首次升级自动生成）。
+///   只记录初始化来源，不在每次启动重新套默认；一旦持久化，后续只读 `enabled_capabilities`。
+/// - `enabled_capabilities`：用户授权的 Capability id 集合，是 AI tool 池的唯一真源。
+///
+/// **推荐集合生成规则**（§3.4）：
+/// - 代码允许 `LocalAi` 且 `DangerClass::Safe` 的普通生产能力默认开启。
+/// - Safe + sensitive 的普通读取能力也默认开启，但调用时仍走 sensitive 确认。
+/// - Dangerous、仅本地、诊断信息采集和诊断恢复类默认关闭。
+/// - 用户修改后以持久化的 capability id 集合为真源；未来新增 Capability 不自动进入已有用户的 allowlist。
+/// - 纯对话模式仍为空 tool 池。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiCapabilityAccessConfig {
+    /// Schema 版本。当前固定为 1。
+    #[serde(default = "default_ai_access_schema_version")]
+    pub schema_version: u32,
+
+    /// 初始化来源标记。`"recommended"` = 首次升级自动生成推荐集合。
+    /// 只记录来源，不重新套默认。
+    #[serde(default = "default_ai_access_profile")]
+    pub profile: String,
+
+    /// 用户授权的 Capability id 集合——AI tool 池的唯一真源。
+    #[serde(default)]
+    pub enabled_capabilities: Vec<String>,
+}
+
+impl Default for AiCapabilityAccessConfig {
+    fn default() -> Self {
+        Self {
+            schema_version: default_ai_access_schema_version(),
+            profile: default_ai_access_profile(),
+            enabled_capabilities: Vec::new(),
+        }
+    }
+}
+
+impl ConfigKey for AiCapabilityAccessConfig {
+    const KEY: &'static str = "ai.capability_access";
+}
+
+fn default_ai_access_schema_version() -> u32 {
+    1
+}
+
+fn default_ai_access_profile() -> String {
+    "recommended".to_string()
+}

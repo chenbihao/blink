@@ -4,14 +4,14 @@
 //! - rig 每月 breaking——把它锁死在 `domain::ai` 内部适配层里,业务代码
 //!   `use crate::domain::ai::ChatMessage` 就够,rig 破 API 我们改一层
 //! - `ToolCall.arguments` 用 `serde_json::Value` 而不是 rig 的 wrapper——
-//!   直接喂 `ActionContext::from_arguments()`,零适配
+//!   直接喂 Capability invoke 的 args，零适配
 //!
 //! **0.9.1 阶段规模**:主窗口打字模式,消息历史通常 1-3 条(system + user 或
 //! user + tool-result)。没上多轮对话,不做 message trimming / summarization。
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::execution::ActionSchema;
+use crate::domain::schema::ToolSchema;
 
 /// 会话消息角色。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -119,14 +119,14 @@ pub struct Usage {
 
 /// AI 调用请求。
 ///
-/// **`tools` 用我们自己的 `ActionSchema`**——不是 `rig::ToolDefinition`。
-/// Provider 内部通过 `ActionSchema::to_rig_tool()` 投影(唯一 rig 触点)。
+/// **`tools` 用我们自己的 `ToolSchema`**——不是 `rig::ToolDefinition`。
+/// Provider 内部通过 `ToolSchema::to_rig_tool()` 投影(唯一 rig 触点)。
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct CompletionRequest {
     pub messages: Vec<ChatMessage>,
     /// tool 描述——空 vec 表示"无 tool 调用需求,只做文本 completion"
-    pub tools: Vec<ActionSchema>,
+    pub tools: Vec<ToolSchema>,
     /// 生成上限——None 用 provider default
     pub max_tokens: Option<u32>,
     /// 采样温度——0.0=确定,1.0=创意。路由模型建议 0.0-0.2
@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn tool_call_arguments_directly_json_value() {
-        // ActionContext::from_arguments 消费 serde_json::Value——TypeCall 提供的
+        // Capability invoke 消费 serde_json::Value——ToolCall 提供的
         // arguments 类型必须能直接注入
         let tc = ToolCall {
             id: "call_123".into(),

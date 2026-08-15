@@ -138,7 +138,7 @@ pub trait AIProvider: Send + Sync {
 pub mod tests {
     use super::super::message::{ChatMessage, ToolCall, Usage};
     use super::*;
-    use crate::domain::execution::ActionSchema;
+    use crate::domain::schema::ToolSchema;
 
     /// 测试专用 Provider——固定返回预置结果,不打网络。
     pub struct MockProvider {
@@ -237,7 +237,7 @@ pub mod tests {
         );
         let req = CompletionRequest {
             messages: vec![ChatMessage::user("open example")],
-            tools: vec![ActionSchema::empty("open_url", "打开 URL")],
+            tools: vec![ToolSchema::empty("open_url", "打开 URL")],
             max_tokens: None,
             temperature: None,
             timeout_ms: None,

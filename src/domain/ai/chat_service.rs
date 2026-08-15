@@ -66,6 +66,9 @@ struct AgentCacheKey {
     kind: ConversationKind,
     /// 有扩展与无扩展的 Agent 必须隔离，禁止跨模式复用。
     extensions_enabled: bool,
+    /// 0.21.5: AI capability allowlist fingerprint——allowlist 变化时触发 Agent 重建。
+    /// 空池的 fingerprint 为 0；非空池为 sorted ids 的 hash。
+    ai_capability_epoch: u64,
 }
 
 /// 单次 prompt 的 Agent 装配计划。三类扩展共用同一模式快照，避免边界漂移。
@@ -624,6 +627,15 @@ impl ChatService {
                 0
             };
 
+            // 0.21.5: 加载 AI capability allowlist + 计算 fingerprint
+            // allowlist 变化时 fingerprint 不同，触发 Agent 重建
+            let ai_allowlist = if plan.includes_extensions() {
+                crate::domain::config::ai_capability_access::AiCapabilityAccessStore::enabled_set(&self.config_pool).await
+            } else {
+                std::collections::HashSet::new()
+            };
+            let ai_capability_epoch = compute_allowlist_fingerprint(&ai_allowlist);
+
             let cache_key = AgentCacheKey {
                 provider_id: resolved.cache_key.0.clone(),
                 model_id: resolved.cache_key.1.clone(),
@@ -632,6 +644,7 @@ impl ChatService {
                 mcp_epoch,
                 kind,
                 extensions_enabled: plan.extensions_enabled,
+                ai_capability_epoch,
             };
 
             if let Some(provider) = self.cached_provider(&cache_key) {
@@ -641,6 +654,8 @@ impl ChatService {
             // Client/Agent 构造可能读取 Credential Manager，必须在 ChatService 锁外进行。
             // 0.13.0: MCP tool 通过 external_tools 入口进池——collect_tools() 从已连接的
             // MCP server 拉 tool（过滤 disabled_tools），与内置 Capability/Action 并列。
+            // 0.21.5: 只包装 AI allowlist 中的 Capability（用户授权 + policy 允许 AI）。
+            // allowlist 已在 cache_key 构造前加载（ai_allowlist），此处复用。
             let tools: Vec<Box<dyn rig_core::tool::ToolDyn>> = if plan.includes_extensions() {
                 let external_tools = self.mcp_client.collect_tools().await;
                 build_agent_tools(
@@ -648,6 +663,7 @@ impl ChatService {
                     external_tools,
                     self.emitter.clone(),
                     self.pending_confirms.clone(),
+                    Some(&ai_allowlist),
                 )
             } else {
                 tracing::debug!("ChatService: 纯对话模式，Agent tool schema 为空");
@@ -1397,6 +1413,23 @@ fn hash_preamble(preamble: &str) -> u64 {
     hasher.finish()
 }
 
+/// 0.21.5: 计算 AI capability allowlist 的稳定 fingerprint。
+///
+/// 空集合返回 0（纯对话模式）；非空集合对 sorted ids 做 hash。
+/// allowlist 变化时 fingerprint 不同，触发 Agent cache miss → 重建。
+fn compute_allowlist_fingerprint(allowlist: &std::collections::HashSet<String>) -> u64 {
+    if allowlist.is_empty() {
+        return 0;
+    }
+    let mut ids: Vec<&String> = allowlist.iter().collect();
+    ids.sort();
+    let mut hasher = DefaultHasher::new();
+    for id in ids {
+        id.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1431,6 +1464,7 @@ mod tests {
             mcp_epoch: 0,
             kind: ConversationKind::Persistent,
             extensions_enabled: true,
+            ai_capability_epoch: 0,
         };
         assert_ne!(
             base,
@@ -1438,6 +1472,96 @@ mod tests {
                 extensions_enabled: false,
                 ..base.clone()
             }
+        );
+    }
+
+    // ── 0.21.5: ai_capability_epoch 单测 ─────────────────────────────────
+
+    #[test]
+    fn agent_cache_key_separates_by_ai_capability_epoch() {
+        let base = AgentCacheKey {
+            provider_id: "p".into(),
+            model_id: "m".into(),
+            fingerprint: "f".into(),
+            preamble_hash: 1,
+            mcp_epoch: 0,
+            kind: ConversationKind::Persistent,
+            extensions_enabled: true,
+            ai_capability_epoch: 100,
+        };
+        // 不同 epoch 应导致 cache miss
+        assert_ne!(
+            base,
+            AgentCacheKey {
+                ai_capability_epoch: 200,
+                ..base.clone()
+            }
+        );
+    }
+
+    #[test]
+    fn fingerprint_empty_allowlist_is_zero() {
+        let set = std::collections::HashSet::new();
+        assert_eq!(compute_allowlist_fingerprint(&set), 0);
+    }
+
+    #[test]
+    fn fingerprint_non_empty_allowlist_is_nonzero() {
+        let mut set = std::collections::HashSet::new();
+        set.insert("open_url".to_string());
+        set.insert("search_apps".to_string());
+        assert_ne!(compute_allowlist_fingerprint(&set), 0);
+    }
+
+    #[test]
+    fn fingerprint_is_order_independent() {
+        // HashSet 本身无序，但 fingerprint 应对同一集合稳定
+        let mut set1 = std::collections::HashSet::new();
+        set1.insert("cap_a".into());
+        set1.insert("cap_b".into());
+        set1.insert("cap_c".into());
+
+        let mut set2 = std::collections::HashSet::new();
+        set2.insert("cap_c".into());
+        set2.insert("cap_a".into());
+        set2.insert("cap_b".into());
+
+        assert_eq!(
+            compute_allowlist_fingerprint(&set1),
+            compute_allowlist_fingerprint(&set2)
+        );
+    }
+
+    #[test]
+    fn fingerprint_changes_when_allowlist_changes() {
+        let mut set1 = std::collections::HashSet::new();
+        set1.insert("cap_a".into());
+        set1.insert("cap_b".into());
+
+        let mut set2 = std::collections::HashSet::new();
+        set2.insert("cap_a".into());
+        set2.insert("cap_b".into());
+        set2.insert("cap_c".into()); // 新增一个
+
+        assert_ne!(
+            compute_allowlist_fingerprint(&set1),
+            compute_allowlist_fingerprint(&set2)
+        );
+    }
+
+    #[test]
+    fn fingerprint_changes_when_capability_removed() {
+        let mut set1 = std::collections::HashSet::new();
+        set1.insert("cap_a".into());
+        set1.insert("cap_b".into());
+
+        let mut set2 = std::collections::HashSet::new();
+        set2.insert("cap_a".into());
+        // 移除了 cap_b
+
+        assert_ne!(
+            compute_allowlist_fingerprint(&set1),
+            compute_allowlist_fingerprint(&set2)
         );
     }
 

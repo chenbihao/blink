@@ -54,17 +54,6 @@ pub enum CapabilityError {
     Internal { detail: String },
 }
 
-/// 跨域转换：ExecError → CapabilityError（Capability 编排 Action 失败时用）。
-///
-/// **0.21.0 备注**：兼容期保留；0.21.7 删除 execution 模块时此 From impl 一并移除。
-impl From<crate::domain::execution::ExecError> for CapabilityError {
-    fn from(e: crate::domain::execution::ExecError) -> Self {
-        CapabilityError::Internal {
-            detail: e.to_string(),
-        }
-    }
-}
-
 impl CapabilityError {
     /// 投影到 rig `ToolResultContent::Text`——让 AI 知道失败原因（可重试或换路径）。
     ///

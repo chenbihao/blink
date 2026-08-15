@@ -4,7 +4,7 @@
 //! 和 MCP（schema → rmcp tool）零摩擦。
 //!
 //! **0.14.6 §3.1 变化**：`to_rig_tool()` 不再自己实现，委托 `ToolSchema::to_rig_tool()`。
-//! rig 触点从 2 处（ActionSchema + CapabilitySchema）收敛到 1 处（ToolSchema）。
+//! rig 触点从 2 处（旧 ActionSchema + CapabilitySchema）收敛到 1 处（ToolSchema）。
 //! 三字段（name / description / parameters）保持扁平——所有构造点和字段访问零改动。
 
 use serde::{Deserialize, Serialize};

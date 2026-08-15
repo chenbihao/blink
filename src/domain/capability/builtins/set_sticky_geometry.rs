@@ -183,7 +183,7 @@ mod tests {
 
     #[test]
     fn danger_class_is_safe() {
-        use crate::domain::execution::DangerClass;
+        use crate::domain::capability::policy::DangerClass;
         assert_eq!(SetStickyGeometry.danger_class(), DangerClass::Safe);
     }
 }

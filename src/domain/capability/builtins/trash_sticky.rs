@@ -78,7 +78,7 @@ inventory::submit!(crate::domain::capability::CapabilityEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::execution::DangerClass;
+    use crate::domain::capability::policy::DangerClass;
 
     #[test]
     fn schema_is_recoverable_and_safe() {

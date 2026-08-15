@@ -1,23 +1,25 @@
 //! AI Capability schema 投影与插件 settings 注入。
 //!
-//! 0.14 删除 ActionTool 后，AI tool 池只从 CapabilityRegistry 构建。
-//! 本模块保留公共 schema 投影与插件参数动态注入，不再包含 Action 分组逻辑。
+//! 从 `execution::group` 迁入（0.21.7）——execution 模块删除后，AI tool 池构建
+//! 和插件参数注入逻辑留在 capability 域，使用 `ToolSchema` 公共基。
+//!
+//! `build_capability_tools` 从 `CapabilityRegistry` 构建工具列表；
+//! `inject_plugin_settings` 在 manifest `setting_bindings` 声明时动态注入
+//! 插件配置值作为参数 default。
 
-use super::schema::ActionSchema;
 use crate::domain::capability::CapabilityRegistry;
+use crate::domain::schema::ToolSchema;
 
 /// 构建 AI tool 列表。
 ///
-/// 0.14 的 Capability-only 边界在函数签名上体现：这里不接收 `ActionRegistry`，
-/// 因而新增 Action 不可能因默认字段或漏标而进入 LLM 工具列表。
-pub fn build_capability_tools(cap_registry: &CapabilityRegistry) -> Vec<ActionSchema> {
-    // Capability → 独立 tool（含 builtin 能力 + 插件 tool）
-    // CapabilitySchema 与 ActionSchema 结构相同（name/description/parameters），
-    // 直接字段投影；`sensitive` 只参与执行前确认，不发送给模型。
+/// 从 `CapabilityRegistry` 的全量 `list()` 投影为 `ToolSchema` 列表。
+/// `CapabilitySchema` 与 `ToolSchema` 结构相同（name/description/parameters），
+/// 直接字段投影；`sensitive` 只参与执行前确认，不发送给模型。
+pub fn build_capability_tools(cap_registry: &CapabilityRegistry) -> Vec<ToolSchema> {
     cap_registry
         .list()
         .into_iter()
-        .map(|cap_schema| ActionSchema {
+        .map(|cap_schema| ToolSchema {
             name: cap_schema.name,
             description: cap_schema.description,
             parameters: cap_schema.parameters,
@@ -27,7 +29,7 @@ pub fn build_capability_tools(cap_registry: &CapabilityRegistry) -> Vec<ActionSc
 
 /// 参数 schema 动态注入插件 settings（0.11.1 §2.3b）。
 ///
-/// **投影层改动**：不改 manifest 的 `parameters` 原文，生成新的 `ActionSchema`。
+/// **投影层改动**：不改 manifest 的 `parameters` 原文，生成新的 `ToolSchema`。
 /// 调用方（`service.rs` AI lane）每次 AI 请求时从 `PluginEngine` 取 settings +
 /// 从 manifest `ToolDef.setting_bindings` 取绑定映射，调此函数注入。
 ///
@@ -36,16 +38,11 @@ pub fn build_capability_tools(cap_registry: &CapabilityRegistry) -> Vec<ActionSc
 /// 2. **required → optional**：从 `parameters.required` 移除 `param_name`
 /// 3. **注入 default**：`parameters.properties[param_name].default = <setting_value>`
 /// 4. **description 增强**：追加"（默认: {value}）"
-///
-/// **为什么放 group.rs 而非 plugin 域**：此函数是纯投影逻辑（输入 ActionSchema +
-/// settings JSON + bindings map，输出 ActionSchema），不依赖 `PluginEngine` /
-/// `PluginHandle` 等 plugin 域类型。放 execution 域避免 execution → plugin 循环依赖。
-/// 调用方（service.rs）已 import 两个域，负责组装参数。
 pub fn inject_plugin_settings(
-    mut schema: ActionSchema,
+    mut schema: ToolSchema,
     settings: Option<&serde_json::Value>,
     bindings: &std::collections::HashMap<String, String>,
-) -> ActionSchema {
+) -> ToolSchema {
     let Some(settings) = settings else {
         return schema; // 无 settings 配置，原样返回
     };
@@ -119,21 +116,21 @@ mod tests {
             .map(|schema| schema.name)
             .collect();
 
-assert_eq!(actual, expected);
-assert!(!actual.contains("system_action"));
-assert!(!actual.contains("blink_action"));
-// 0.21.1: lock/shutdown 等已迁为 Capability，现在会出现在列表中
-assert!(actual.contains("lock"));
-assert!(actual.contains("shutdown"));
-}
+        assert_eq!(actual, expected);
+        assert!(!actual.contains("system_action"));
+        assert!(!actual.contains("blink_action"));
+        // 0.21.1: lock/shutdown 等已迁为 Capability，现在会出现在列表中
+        assert!(actual.contains("lock"));
+        assert!(actual.contains("shutdown"));
+    }
 
     // ── 0.11.1 §2.3b：inject_plugin_settings 参数动态注入 ──────────────────
 
     use std::collections::HashMap;
 
-    fn weather_schema_with_city_required() -> ActionSchema {
+    fn weather_schema_with_city_required() -> ToolSchema {
         // 模拟 weather 插件的原始 schema（city 是 required）
-        ActionSchema {
+        ToolSchema {
             name: "builtin.weather:get_weather".into(),
             description: "查询天气".into(),
             parameters: serde_json::json!({
@@ -272,7 +269,7 @@ assert!(actual.contains("shutdown"));
     #[test]
     fn inject_removes_required_field_when_becomes_empty() {
         // 只有一个 required 参数且被注入 → required 数组变空 → 整个 required 字段移除
-        let schema = ActionSchema {
+        let schema = ToolSchema {
             name: "test".into(),
             description: "test".into(),
             parameters: serde_json::json!({
@@ -298,7 +295,7 @@ assert!(actual.contains("shutdown"));
     #[test]
     fn inject_preserves_unbound_required_params() {
         // 有 city(required+bound) 和 text(required+unbound) → 只移除 city
-        let schema = ActionSchema {
+        let schema = ToolSchema {
             name: "test".into(),
             description: "test".into(),
             parameters: serde_json::json!({

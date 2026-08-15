@@ -15,6 +15,7 @@ import { initGeneralTab } from "./tabs/general.js";
 import { initHotkeyTab } from "./tabs/hotkey.js";
 import { initEnginesTab } from "./tabs/engines.js";
 import { initPluginsTab } from "./tabs/plugins.js";
+import { initCapabilitiesTab } from "./tabs/capabilities.js";
 import { initNetworkTab } from "./tabs/network.js";
 import { initContextTab } from "./tabs/context.js";
 import { initStorageTab } from "./tabs/storage.js";
@@ -75,6 +76,7 @@ async function init() {
     initHotkeyTab(cfg);
     initEnginesTab(cfg);
     initPluginsTab(cfg);
+    initCapabilitiesTab();
     initNetworkTab(cfg);
     initContextTab(cfg);
     initStorageTab(cfg);

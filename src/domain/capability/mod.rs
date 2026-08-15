@@ -27,6 +27,7 @@ mod projection;
 mod registry;
 mod result;
 mod schema;
+pub mod tool_projection; // 0.21.7：从 execution::group 迁入
 
 pub use error::CapabilityError;
 pub use image_stash::ImageStash;
@@ -43,6 +44,7 @@ pub use projection::{ActionDef, ActionKindDef, ProjectionRule, ResultShape, norm
 pub use registry::CapabilityRegistry;
 pub use result::{CapabilityResult, ItemAction, ItemResult, rig_tool_result_to_text};
 pub use schema::CapabilitySchema;
+pub use tool_projection::{build_capability_tools, inject_plugin_settings};
 
 use serde_json::Value;
 

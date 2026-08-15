@@ -228,7 +228,7 @@ pub async fn fetch_ai_models(
 pub async fn get_system_prompt_info(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
     use crate::domain::ai::prompt::{build_prompt_infos, estimate_tokens, routing_system_prompt};
     use crate::domain::capability::CapabilityRegistry;
-    use crate::domain::execution::group::{build_capability_tools, inject_plugin_settings};
+    use crate::domain::capability::{build_capability_tools, inject_plugin_settings};
     use crate::domain::plugin::PluginEngine;
     use std::sync::Arc;
     use tauri::Manager;
@@ -717,4 +717,103 @@ pub(crate) fn cs_count_skills(
     chat: &std::sync::Arc<crate::domain::ai::chat_service::ChatService>,
 ) -> usize {
     chat.skill_registry().count()
+}
+
+// ── 0.21.5: AI Capability Access IPC commands ───────────────────────────────
+
+/// 获取 AI Capability 出口授权配置。
+///
+/// 返回 `AiCapabilityAccessConfig`（含 schema_version、profile、enabled_capabilities）。
+#[tauri::command]
+pub async fn get_ai_capability_access(
+    app: tauri::AppHandle,
+) -> Result<crate::domain::config::shards::AiCapabilityAccessConfig, String> {
+    use tauri::Manager;
+    let pools = app.state::<crate::infra::data::DbPools>();
+    Ok(crate::domain::config::ai_capability_access::AiCapabilityAccessStore::load(&pools.config).await)
+}
+
+/// 设置单个 Capability 的 AI 启用状态。
+///
+/// 更新后广播 `blink://config-changed`，前端和 ChatService 据此刷新。
+#[tauri::command]
+pub async fn toggle_ai_capability(
+    app: tauri::AppHandle,
+    capability_id: String,
+    enabled: bool,
+) -> Result<crate::domain::config::shards::AiCapabilityAccessConfig, String> {
+    use tauri::Manager;
+    let pools = app.state::<crate::infra::data::DbPools>();
+    let config =
+        crate::domain::config::ai_capability_access::AiCapabilityAccessStore::toggle_capability(
+            &pools.config,
+            &capability_id,
+            enabled,
+        )
+        .await?;
+
+    // 广播配置变更（前端 + ChatService 订阅）
+    broadcast_config_changed(&app);
+
+    Ok(config)
+}
+
+/// 批量设置 Capability 的 AI 启用状态。
+///
+/// 用于设置页组级批量操作。更新后广播 `blink://config-changed`。
+#[tauri::command]
+pub async fn toggle_ai_capabilities(
+    app: tauri::AppHandle,
+    ops: Vec<(String, bool)>,
+) -> Result<crate::domain::config::shards::AiCapabilityAccessConfig, String> {
+    use tauri::Manager;
+    let pools = app.state::<crate::infra::data::DbPools>();
+    let config =
+        crate::domain::config::ai_capability_access::AiCapabilityAccessStore::toggle_capabilities(
+            &pools.config,
+            &ops,
+        )
+        .await?;
+
+    broadcast_config_changed(&app);
+
+    Ok(config)
+}
+
+/// 重置 AI Capability allowlist 为推荐集合。
+///
+/// 重新生成推荐集合并覆盖当前配置。`profile` 保持为 `"recommended"`。
+#[tauri::command]
+pub async fn reset_ai_capability_access(
+    app: tauri::AppHandle,
+) -> Result<crate::domain::config::shards::AiCapabilityAccessConfig, String> {
+    use tauri::Manager;
+    let pools = app.state::<crate::infra::data::DbPools>();
+    let cap_registry = app
+        .state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>()
+        .inner()
+        .clone();
+    let config =
+        crate::domain::config::ai_capability_access::AiCapabilityAccessStore::reset_to_recommended(
+            &pools.config,
+            cap_registry.as_ref(),
+        )
+        .await?;
+
+    broadcast_config_changed(&app);
+
+    Ok(config)
+}
+
+/// 广播 `blink://config-changed` 事件。
+///
+/// ChatService 和前端设置页订阅此事件，触发 Agent 缓存失效和 UI 刷新。
+fn broadcast_config_changed(app: &tauri::AppHandle) {
+    use tauri::Emitter;
+    if let Err(e) = app.emit(
+        crate::domain::event_names::EventNames::CONFIG_CHANGED,
+        serde_json::json!({}),
+    ) {
+        tracing::warn!(error = %e, "broadcast config-changed failed");
+    }
 }

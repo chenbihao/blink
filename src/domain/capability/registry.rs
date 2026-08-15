@@ -27,7 +27,7 @@ impl CapabilityRegistry {
     /// 从 inventory 自动收集所有 `CapabilityEntry`（链接期注册的能力）。
     ///
     /// **零手动注册**：每个 Capability 文件写一行 `inventory::submit!` 即可。
-    /// 重复 id → warn + 跳过（与 `ActionRegistry::register` 一致策略）。
+    /// 重复 id → warn + 跳过（与旧 ActionRegistry 一致策略）。
     pub fn new() -> Self {
         let mut caps: HashMap<String, Arc<dyn Capability>> = HashMap::new();
         for entry in inventory::iter::<CapabilityEntry> {
@@ -75,7 +75,7 @@ impl CapabilityRegistry {
     /// **去重策略**：与 `new()` 的 inventory 收集一致——重复 id → warn + 跳过。
     /// 与 inventory 共存：`new()` 先收集链接期能力，`register()` 在运行期追加。
     ///
-    /// **参照**：`ActionRegistry::register`（`execution/registry.rs`）/ `ChordRegistry::register`。
+    /// **参照**：`ChordRegistry::register`。
     #[allow(dead_code)] // 0.13 Skill 化（运行期生成 Capability）消费；0.12.0 铺路
     pub fn register(&self, cap: Arc<dyn Capability>) {
         let id = cap.id().to_string();

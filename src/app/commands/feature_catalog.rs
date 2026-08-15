@@ -14,6 +14,8 @@ use crate::domain::feature_catalog::{
 /// 列出功能目录——聚合 builtin descriptor、chord binding 和 capability。
 ///
 /// 前端调用后在"能力与操作"设置页按六组展示。
+/// AI/MCP 出口状态从用户授权真源（allowlist / exposed_capabilities）投影，
+/// 供目录页三列开关显示实际状态。
 /// 配置变更后前端订阅 `blink://config-changed` 重新调用此命令刷新。
 #[tauri::command]
 pub async fn list_feature_catalog(
@@ -21,6 +23,19 @@ pub async fn list_feature_catalog(
 ) -> Result<Vec<FeatureCatalogItem>, String> {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
     let config = crate::app::config::get_config(pool).await;
+
+    // AI allowlist 真源（0.21.5 落地，key `ai.capability_access`）
+    let ai_cfg =
+        crate::domain::config::ai_capability_access::AiCapabilityAccessStore::load(pool).await;
+    let ai_allowlist: std::collections::HashSet<String> =
+        ai_cfg.enabled_capabilities.into_iter().collect();
+
+    // MCP exposed 真源
+    let mcp_config = crate::domain::mcp::McpServerModeConfigStore::load(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mcp_exposed: std::collections::HashSet<String> =
+        mcp_config.exposed_capabilities.into_iter().collect();
 
     let cap_registry = app
         .state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>()
@@ -44,6 +59,8 @@ pub async fn list_feature_catalog(
         cap_registry.as_ref(),
         chord_registry.as_ref(),
         plugin_engine.as_deref(),
+        Some(&ai_allowlist),
+        &mcp_exposed,
     );
 
     Ok(items)
@@ -65,4 +82,49 @@ pub async fn apply_binding_ops(
     let _ = app.emit(EventNames::CONFIG_CHANGED, serde_json::json!({ "source": "feature_catalog" }));
 
     Ok(results)
+}
+
+/// MCP 能力摘要——返回已暴露/总数计数（0.21.6）。
+///
+/// 供 MCP Server 设置页显示 "已暴露 N/M" 摘要，替代旧的全量清单。
+#[tauri::command]
+pub async fn get_catalog_mcp_summary(
+    app: tauri::AppHandle,
+) -> Result<McpCapabilitySummary, String> {
+    let cap_registry = app
+        .state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>()
+        .inner()
+        .clone();
+
+    let pools = app.state::<crate::infra::data::DbPools>();
+
+    // 从 MCP server config store 读取已暴露的 capability id 集合
+    let mcp_config = crate::domain::mcp::McpServerModeConfigStore::load(&pools.config)
+        .await
+        .map_err(|e| e.to_string())?;
+    let exposed_count = mcp_config.exposed_capabilities.len();
+
+    // 统计所有可暴露的 capability 总数（policy 不禁止 MCP 的）
+    let total_count = cap_registry
+        .entries()
+        .iter()
+        .filter(|(_, cap)| {
+            use crate::domain::capability::policy::{DangerClass, McpDefault};
+            let policy = cap.policy();
+            policy.danger != DangerClass::Dangerous
+                && policy.mcp_default != McpDefault::Forbidden
+        })
+        .count();
+
+    Ok(McpCapabilitySummary {
+        exposed_count,
+        total_count,
+    })
+}
+
+/// MCP 能力摘要数据结构
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct McpCapabilitySummary {
+    pub exposed_count: usize,
+    pub total_count: usize,
 }

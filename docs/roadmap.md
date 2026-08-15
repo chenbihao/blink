@@ -37,7 +37,7 @@
 | 方向 | 状态 | 当前结论 | 触发条件 |
 |---|---|---|---|
 | 主链路可靠性与性能 | **近期优先** | 始终高于新 AI 基础设施 | 出现焦点、唤起、输入或首结果回退时立即处理 |
-| 统一能力底座继续收敛 | **已进入 0.21** | Capability 收敛为唯一原子执行入口；旧 Action 全量分流为 Capability / Interaction / descriptor 后删除 | 按 [0.21 phase](./phases/0.21-capability-unification-feature-catalog.md) 验收 |
+| 统一能力底座继续收敛 | **0.21 已落地** | Capability 收敛为唯一原子执行入口；旧 Action 全量分流为 Capability / Interaction / descriptor 后删除 | 按 [0.21 phase](./phases/0.21-capability-unification-feature-catalog.md) 验收 |
 | 自然语言设置 | **已进入 0.19** | 0.19.8 以显式白名单读取和修改常用设置，不暴露原始 KV 或密钥 | 按 [0.19 phase](./phases/0.19-capability-closure.md) 验收 |
 | AI 设置、纯对话与 MCP 生命周期 | **已进入 0.19** | 0.19.9–0.19.11 分别收敛设置真实语义、纯对话/Skill 运行态和 MCP client single-flight | 按 [0.19 phase](./phases/0.19-capability-closure.md) 验收 |
 | Agent 交互入口与能力可发现性 | **近期优先** | 建立统一 Slash 命令注册与补全，优先覆盖 `/new`、`/model`、`/skill`、`/tools` 和受控 `/mcp` 入口 | 先明确命令语义、可用范围、键盘交互与危险确认边界 |
@@ -67,7 +67,7 @@
 
 0.19.6 已承接当前明确的收敛项：剪贴板读写与截图复制、图片加载与 pin、便签编排、OCR 用户入口与 Capability 的行为一致性。UI 状态机 command 保持独立，现有 command 对外契约不因收敛而改变。
 
-0.19.6 不追溯扩大范围；其后暴露出的 Action/Capability 双执行、Chord supertrait 与 fallback 债由 0.21 明确承接。迁移完成后删除 ActionRegistry；ChordRegistry 若保留，只注册按键/呈现/Interaction 入口描述，不再注册第二套原子执行实现。
+0.19.6 不追溯扩大范围；其后暴露出的 Action/Capability 双执行、Chord supertrait 与 fallback 债由 0.21 承接并完成。0.21.7 已删除 ActionRegistry；ChordRegistry 保留按键/呈现/Interaction 入口描述，不再注册第二套原子执行实现。
 
 ### 3.3 Agent 交互入口与能力可发现性
 
@@ -167,6 +167,6 @@ ChatGPT 式“事实记忆”本质上是显式的写入、读取、纠正和删
 |---|---|
 | CAP 轻量闭环 | 0.19.1–0.19.4 已落地窗口/图片感知、基础执行、ImageStash 与窗口竞态收敛；0.19.5–0.19.11 已承接便签/文本闭环、行为一致性、图片编辑解耦、自然语言设置、AI 设置、纯对话与 MCP 生命周期 |
 | MCP 双向 / CLI / Skill / FTS5 记忆召回 | 0.13 已落地，不再作为候选 |
-| Capability 协议、投影与唯一执行入口收敛 | 0.14 建立协议和投影，0.21 承接 Action 全量分流与旧执行链删除；细节见对应 phase |
+| Capability 协议、投影与唯一执行入口收敛 | 0.14 建立协议和投影，0.21 完成 Action 全量分流与旧执行链删除；细节见对应 phase |
 
 Roadmap 中的候选一旦立项，应把详细设计迁到新 phase，本文件只保留一行状态和链接；已完成方向则从候选区移到本节，避免 roadmap 继续膨胀成历史流水账。

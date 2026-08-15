@@ -565,14 +565,12 @@ fn main() {
 
             // 0.8.5 Chord：构建 registry（注册 stub 动作）
             let chord_registry = std::sync::Arc::new(crate::domain::chord::build_default_registry());
-            // 0.8.6 Action 统一执行入口
-            let action_registry = std::sync::Arc::new(crate::domain::execution::ActionRegistry::new());
             // 0.9.7 Capability 能力协议层（inventory 自动收集 5 个样板能力）
             let capability_registry = std::sync::Arc::new(crate::domain::capability::CapabilityRegistry::new());
             domain_env.set_cap_registry(capability_registry.clone());
 
             // 0.13.7:注册插件 tool 到 CapabilityRegistry——插件语义是「纯计算→返回结果」，
-            // 天然属于 Capability 范畴（入参→出参，不碰 UI）。迁移自 ActionRegistry。
+            // 天然属于 Capability 范畴（入参→出参，不碰 UI）。0.13.7 从旧 ActionRegistry 迁入。
             // 遍历所有已加载插件的 manifest.tools，为每个 tool 创建 PluginCapabilityAdapter 并注册。
             {
                 let mut plugin_tool_count = 0usize;
@@ -675,7 +673,6 @@ fn main() {
                 plugin_engine: plugin_engine_for_ctx,
                 router: router.clone(),
                 chord_registry: chord_registry.clone(),
-                action_registry: action_registry.clone(),
                 capability_registry: capability_registry.clone(),
                 ai_registry: ai_registry.clone(),
                 voice_service: voice_service.clone(),
@@ -737,9 +734,15 @@ fn main() {
             // 注册到 Tauri state（command 层 app.state 取用）
             app.manage(plugin_engine);
             app.manage(chord_registry);
-            app.manage(action_registry);
             // 0.9.7 Capability 能力协议层（Step 4 起 AI tool 池消费）
-            app.manage(capability_registry);
+            app.manage(capability_registry.clone());
+            // 0.21.5: 首次启动生成 AI 推荐 allowlist（静默，不提示用户）
+            tauri::async_runtime::block_on(
+                crate::domain::config::ai_capability_access::AiCapabilityAccessStore::ensure_recommended(
+                    &pools.config,
+                    capability_registry.as_ref(),
+                ),
+            );
             // 0.9.1 Phase 5a：AI Provider registry(Phase 5b 起 SearchService 消费)
             app.manage(ai_registry);
             // 0.10: VoiceService(command 层 cancel_voice_recording / is_voice_recording 消费)
@@ -892,6 +895,8 @@ fn main() {
             // 0.21.4：功能目录聚合与批量 binding 操作
             app::commands::list_feature_catalog,
             app::commands::apply_binding_ops,
+            // 0.21.6：MCP 能力摘要
+            app::commands::get_catalog_mcp_summary,
             app::commands::trigger_chord,
             app::commands::list_chord_actions,
             app::commands::list_all_chord_actions,
@@ -1121,6 +1126,11 @@ app::commands::ensure_mcp_connected,
             app::commands::sticky_spare_ready,
             // P0-2 便签关闭 ack
             app::commands::sticky_close_ack,
+            // 0.21.5: AI Capability Access
+            app::commands::get_ai_capability_access,
+            app::commands::toggle_ai_capability,
+            app::commands::toggle_ai_capabilities,
+            app::commands::reset_ai_capability_access,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

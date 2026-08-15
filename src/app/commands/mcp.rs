@@ -440,6 +440,7 @@ pub async fn get_mcp_server_config(
 /// 保存 MCP server 配置。
 ///
 /// 0.19.13: 保存后同步通知 McpServerRuntime 热更新（启停/改端口/改暴露清单）。
+/// 0.21.6 修复: 广播 `blink://config-changed`，功能目录页和 MCP 摘要据此刷新。
 #[tauri::command]
 pub async fn set_mcp_server_config(
     app: tauri::AppHandle,
@@ -456,6 +457,13 @@ pub async fn set_mcp_server_config(
     {
         runtime.apply_config(&config).await;
     }
+
+    // 广播配置变更——前端功能目录（MCP 列开关状态）与 MCP 摘要自动刷新
+    use tauri::Emitter;
+    let _ = app.emit(
+        crate::domain::event_names::EventNames::CONFIG_CHANGED,
+        serde_json::json!({ "source": "mcp_server_config" }),
+    );
 
     Ok(())
 }

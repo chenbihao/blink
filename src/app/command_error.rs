@@ -125,25 +125,6 @@ impl From<crate::domain::capability::CapabilityError> for CommandError {
     }
 }
 
-// ── ExecError 映射（run_builtin_action 的 Action 路径）────────────────────
-
-/// ExecError → CommandError 映射（0.14.7 W3）。
-impl From<crate::domain::execution::ExecError> for CommandError {
-    fn from(e: crate::domain::execution::ExecError) -> Self {
-        use crate::domain::execution::ExecError::*;
-
-        match e {
-            MissingArg(name) => Self::with_detail(
-                "missing_arg",
-                format!("缺少参数: {name}"),
-                false,
-                serde_json::json!({ "arg_name": name }),
-            ),
-            Runtime(msg) => Self::new("runtime_error", msg, false),
-        }
-    }
-}
-
 // ── OcrError 映射（ocr_image command）──────────────────────────────────────
 
 /// OcrError → CommandError 映射（0.14.7 W3）。
@@ -281,16 +262,6 @@ mod tests {
         let ce: CommandError = e.into();
         assert_eq!(ce.code, "not_found");
         assert_eq!(ce.detail.unwrap()["id"], "nonexistent");
-    }
-
-    #[test]
-    fn exec_error_missing_arg_maps_correctly() {
-        use crate::domain::execution::ExecError;
-        let e = ExecError::MissingArg("path".into());
-        let ce: CommandError = e.into();
-        assert_eq!(ce.code, "missing_arg");
-        assert_eq!(ce.detail.unwrap()["arg_name"], "path");
-        assert!(!ce.retryable);
     }
 
     #[test]

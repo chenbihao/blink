@@ -17,9 +17,10 @@
           <button class="tab" data-tab="hotkey" data-i18n="tab.hotkey">快捷键</button>
         </div>
         <div class="sidebar-group">
-          <span class="group-title" data-i18n="sidebar.group.search">搜索</span>
+          <span class="group-title" data-i18n="sidebar.group.functionality">功能</span>
           <button class="tab" data-tab="engines" data-i18n="tab.engines">引擎</button>
           <button class="tab" data-tab="plugins" data-i18n="tab.plugins">插件</button>
+          <button class="tab" data-tab="capabilities" data-i18n="tab.capabilities">能力与操作</button>
         </div>
         <div class="sidebar-group">
           <span class="group-title" data-i18n="sidebar.group.ai">AI</span>
@@ -366,33 +367,58 @@
               </div>
             </div>
           </div>
-
-          <!-- 内置动作（BuiltinEngine，0.8.0 §1.3） -->
-          <div class="extension-card">
-            <div class="extension-header">
-              <div class="extension-icon"><svg class="icon" aria-hidden="true"><use href="#icon-zap"/></svg></div>
-              <div class="extension-info">
-                <h3 data-i18n="engine.builtin_actions.title">内置动作</h3>
-                <p class="extension-desc" data-i18n="engine.builtin_actions.desc">锁屏、关机、打开设置等系统操作，以及依剪贴板/选区上下文出现的智能动作</p>
-              </div>
-              <span id="builtin-actions-save-msg" class="plugin-save-msg"></span>
-            </div>
-            <div class="extension-body">
-              <div id="builtin-actions-list">
-                <!-- 内容由 renderBuiltinActions() 动态渲染 -->
-              </div>
-            </div>
-          </div>
         </div>
 
-        <!-- 插件 -->
-        <div id="plugins" class="panel">
-          <h2 data-i18n="panel.plugins">插件管理</h2>
-          <p class="panel-lede" data-i18n="plugins.lede">已安装的第三方与内置插件，逐一开关与配置。</p>
-          <div id="plugins-container">
-            <!-- 插件卡片由 JS 动态渲染 -->
-          </div>
-        </div>
+<!-- 插件 -->
+<div id="plugins" class="panel">
+<h2 data-i18n="panel.plugins">插件管理</h2>
+<p class="panel-lede" data-i18n="plugins.lede">已安装的第三方与内置插件，逐一开关与配置。</p>
+<div id="plugins-container">
+<!-- 插件卡片由 JS 动态渲染 -->
+</div>
+</div>
+
+<!-- 能力与操作（0.21.6 矩阵表格：行=功能，列=本地/AI/MCP 三出口开关） -->
+<div id="capabilities" class="panel">
+<h2 data-i18n="panel.capabilities">能力与操作</h2>
+<p class="panel-lede" data-i18n="capabilities.lede">Blink 的所有功能，按组分类展示本地绑定、AI 与 MCP 三出口状态。</p>
+
+<!-- 搜索与过滤 -->
+<div class="capabilities-controls">
+  <div class="search-row">
+    <input type="text" id="capabilities-search" class="input-wide" data-i18n-placeholder="capabilities.search.placeholder" />
+  </div>
+  <div class="filter-row">
+    <select id="filter-source" class="input-small">
+      <option value="all" data-i18n="capabilities.filter.source.all">全部来源</option>
+      <option value="builtin" data-i18n="capabilities.filter.source.builtin">内置</option>
+      <option value="plugin" data-i18n="capabilities.filter.source.plugin">插件</option>
+      <option value="chord" data-i18n="capabilities.filter.source.chord">Chord</option>
+    </select>
+    <select id="filter-risk" class="input-small">
+      <option value="all" data-i18n="capabilities.filter.risk.all">全部风险</option>
+      <option value="safe" data-i18n="capabilities.filter.risk.safe">安全</option>
+      <option value="sensitive" data-i18n="capabilities.filter.risk.sensitive">敏感读取</option>
+      <option value="dangerous" data-i18n="capabilities.filter.risk.dangerous">危险操作</option>
+    </select>
+    <select id="filter-availability" class="input-small">
+      <option value="all" data-i18n="capabilities.filter.availability.all">全部状态</option>
+      <option value="available" data-i18n="capabilities.filter.availability.available">可用</option>
+      <option value="unavailable" data-i18n="capabilities.filter.availability.unavailable">不可用</option>
+    </select>
+    <select id="filter-exit" class="input-small">
+      <option value="all" data-i18n="capabilities.filter.exit.all">全部出口</option>
+      <option value="local" data-i18n="capabilities.filter.exit.local">本地已启用</option>
+      <option value="ai" data-i18n="capabilities.filter.exit.ai">AI 已启用</option>
+      <option value="mcp" data-i18n="capabilities.filter.exit.mcp">MCP 已暴露</option>
+    </select>
+  </div>
+</div>
+
+<div id="capabilities-container">
+<!-- 功能目录矩阵由 JS 动态渲染 -->
+</div>
+</div>
 
         <!-- ══ AI 供应商（0.9.1 Phase 6 → 0.13.x 拆分）══════════════════════════ -->
         <div id="ai-providers" class="panel">
@@ -902,18 +928,14 @@
                 <span class="mcp-runtime-tool-count" id="mcp-server-tool-count"></span>
                 <p class="mcp-runtime-error" id="mcp-server-error-msg"></p>
               </div>
-              <!-- 启用后才显示 -->
-              <div id="mcp-server-detail" class="hidden">
-                <div class="setting-row">
-                  <label class="setting-label" data-i18n="ai.mcp_server.exposed">暴露的能力</label>
-                </div>
-                <div id="mcp-server-capabilities" class="mcp-capabilities-list">
-                  <!-- 由 JS 动态渲染 -->
-                </div>
-                <p class="panel-hint mcp-sensitive-hint">
-                  <svg class="icon" aria-hidden="true"><use href="#icon-triangle-alert"/></svg>
-                  <span data-i18n="ai.mcp_server.sensitive_hint">标记为 sensitive 的能力涉及隐私数据（如剪贴板历史、应用列表），暴露后外部 client 可访问。</span>
-                </p>
+<!-- 启用后才显示 -->
+<div id="mcp-server-detail" class="hidden">
+<div class="setting-row">
+<label class="setting-label" data-i18n="ai.mcp_server.exposed">暴露的能力</label>
+<div id="mcp-server-capabilities-summary">
+<!-- 由 JS 动态渲染：N/M 摘要 + "查看能力目录" 深链 -->
+</div>
+</div>
                 <!-- 使用方式 -->
                 <div class="mcp-server-usage">
                   <label class="setting-label" data-i18n="ai.mcp_server.usage">使用方式</label>
