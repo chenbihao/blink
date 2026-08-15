@@ -822,6 +822,12 @@ pub async fn ocr_image(
         .clone();
     let ctx = crate::domain::capability::InvokeContext {
         env: env_arc.as_ref(),
+        origin: crate::domain::capability::InvocationOrigin::LocalCommand,
+        runtime: crate::domain::capability::RuntimeCapabilities {
+            surface: None,
+            main_process: true,
+            desktop_session: true,
+        },
         deadline: None,
     };
 
@@ -1181,6 +1187,12 @@ pub async fn translate_text(
         .clone();
     let ctx = crate::domain::capability::InvokeContext {
         env: env_arc.as_ref(),
+        origin: crate::domain::capability::InvocationOrigin::LocalCommand,
+        runtime: crate::domain::capability::RuntimeCapabilities {
+            surface: None,
+            main_process: true,
+            desktop_session: true,
+        },
         deadline: None,
     };
     let result = registry
@@ -1276,6 +1288,12 @@ pub async fn translate_lines(
             .clone();
         let ctx = crate::domain::capability::InvokeContext {
             env: env_arc.as_ref(),
+            origin: crate::domain::capability::InvocationOrigin::LocalCommand,
+            runtime: crate::domain::capability::RuntimeCapabilities {
+                surface: None,
+                main_process: true,
+                desktop_session: true,
+            },
             deadline: None,
         };
         match registry

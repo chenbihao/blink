@@ -6,8 +6,9 @@ use serde_json::{Value, json};
 
 use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
+    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
+    RuntimeRequirement,
 };
-use crate::domain::execution::DangerClass;
 
 pub struct UpdateSetting;
 
@@ -36,12 +37,17 @@ impl Capability for UpdateSetting {
         }
     }
 
-    fn danger_class(&self) -> DangerClass {
-        DangerClass::Dangerous
-    }
-
-    fn ai_confirmation_rememberable(&self) -> bool {
-        false
+    // 0.21.0: policy 是唯一真源——Dangerous + 不可记忆 + local+AI+CLI
+    fn policy(&self) -> CapabilityPolicy {
+        CapabilityPolicy {
+            allowed_origins: OriginSet::LOCAL_AND_CLI,
+            runtime_requirement: RuntimeRequirement::MAIN_PROCESS,
+            danger: DangerClass::Dangerous,
+            sensitive: false,
+            ai_default: AiDefault::Off,
+            mcp_default: McpDefault::Forbidden,
+            confirmation: ConfirmationPolicy::dangerous(false), // 不可记忆
+        }
     }
 
     async fn invoke(

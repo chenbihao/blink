@@ -541,10 +541,45 @@ impl ToolDyn for CapabilityTool {
             }
 
             // 构造 InvokeContext（P1.3: 从 slo_hard_timeout_ms 派生 deadline）
+            // 0.21.0: 携带 origin=LocalAi + 完整 runtime（AI 在主进程中运行，有 GUI surface）
             let ctx = InvokeContext {
                 env: self.emitter.capability_env(),
+                origin: crate::domain::capability::InvocationOrigin::LocalAi,
+                runtime: crate::domain::capability::RuntimeCapabilities {
+                    surface: None, // 0.21.1+ 接入 SurfacePort；当前 AI 不调 GUI starter cap
+                    main_process: true,
+                    desktop_session: true,
+                },
                 deadline: derive_tool_deadline(),
             };
+
+            // 0.21.0: 代码级 origin/runtime 门禁（与 registry.invoke 一致）
+            let policy = self.cap.policy();
+            if !policy.allows_origin(ctx.origin) {
+                tracing::warn!(
+                    capability = %self.cap.id(),
+                    origin = %ctx.origin,
+                    allowed = %policy.allowed_origins,
+                    "capability tool: 来源不被允许"
+                );
+                let msg = format!("来源不被允许: {} 不在允许集合内", ctx.origin);
+                return Err(rig_core::tool::ToolError::ToolCallError(Box::new(
+                    ToolErrMsg(msg),
+                )));
+            }
+            let actual_rt = ctx.runtime.as_requirement();
+            if !policy.runtime_satisfied(actual_rt) {
+                tracing::warn!(
+                    capability = %self.cap.id(),
+                    required = %policy.runtime_requirement,
+                    actual = %actual_rt,
+                    "capability tool: 运行时不满足要求"
+                );
+                let msg = format!("运行时不支持: 需要 {}，当前可用 {}", policy.runtime_requirement, actual_rt);
+                return Err(rig_core::tool::ToolError::ToolCallError(Box::new(
+                    ToolErrMsg(msg),
+                )));
+            }
 
             // 调用 Capability
             match self.cap.invoke(args_value, &ctx).await {
@@ -583,6 +618,12 @@ fn capability_error_to_string(e: CapabilityError) -> String {
             format!("数据无效（{reason}）: {detail}")
         }
         CapabilityError::Permission { detail } => format!("权限不足: {detail}"),
+        CapabilityError::OriginDenied { origin, allowed } => {
+            format!("来源不被允许: {origin} 不在允许集合内 ({allowed})")
+        }
+        CapabilityError::Unsupported { required, actual } => {
+            format!("运行时不支持: 需要 {required}，当前可用 {actual}")
+        }
         CapabilityError::Timeout { detail } => format!("超时: {detail}"),
         CapabilityError::Cancelled => "已取消".to_string(),
         CapabilityError::NotFound { id } => format!("未找到: {id}"),
@@ -798,7 +839,12 @@ mod tests {
         // 确保所有变体都有可读消息，不会 panic
         let cases = [
             CapabilityError::InvalidArgs { detail: "x".into() },
+            CapabilityError::InvalidState { detail: "x".into() },
+            CapabilityError::Conflict { detail: "x".into() },
+            CapabilityError::InvalidData { reason: "binary".into(), detail: "x".into() },
             CapabilityError::Permission { detail: "x".into() },
+            CapabilityError::OriginDenied { origin: "mcp".into(), allowed: "all".into() },
+            CapabilityError::Unsupported { required: "gui".into(), actual: "none".into() },
             CapabilityError::Timeout { detail: "x".into() },
             CapabilityError::Cancelled,
             CapabilityError::NotFound { id: "x".into() },
@@ -830,8 +876,23 @@ mod tests {
             }
         }
 
-        fn danger_class(&self) -> crate::domain::execution::DangerClass {
-            self.danger
+        // 0.21.0: policy 是唯一真源，danger_class / requires_ai_confirmation 从此投影
+        fn policy(&self) -> crate::domain::capability::CapabilityPolicy {
+            use crate::domain::capability::*;
+            let danger = self.danger;
+            let sensitive = self.sensitive;
+            CapabilityPolicy {
+                danger,
+                sensitive,
+                confirmation: if danger == DangerClass::Dangerous {
+                    ConfirmationPolicy::dangerous(true)
+                } else if sensitive {
+                    ConfirmationPolicy::sensitive()
+                } else {
+                    ConfirmationPolicy::safe()
+                },
+                ..Default::default()
+            }
         }
 
         async fn invoke(

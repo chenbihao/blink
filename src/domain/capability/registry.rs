@@ -107,9 +107,13 @@ impl CapabilityRegistry {
             .collect()
     }
 
-    /// invoke 包装层（§3.5 铁则 3）——统一 SLO 埋点 + tracing。
+    /// invoke 包装层（§3.5 铁则 3）——统一 SLO 埋点 + tracing + origin/runtime 门禁。
     ///
-    /// **调用方应优先用此方法**而非直接 `cap.invoke()`——保证 SLO 一致性。
+    /// **0.21.0**：在调用 `cap.invoke()` 前执行代码级 origin/runtime 门禁：
+    /// - origin 不在 `policy().allowed_origins` 中 → `OriginDenied`
+    /// - runtime 不满足 `policy().runtime_requirement` → `Unsupported`
+    ///
+    /// **调用方应优先用此方法**而非直接 `cap.invoke()`——保证 SLO 一致性 + 门禁。
     ///
     /// **outcome 分桶**（文档 §3.3）：
     /// - `Ok` → "ok"
@@ -129,6 +133,38 @@ impl CapabilityRegistry {
                 return Err(CapabilityError::NotFound { id: id.into() });
             }
         };
+
+        // ── 0.21.0 代码级门禁 ──────────────────────────────────────────
+        let policy = cap.policy();
+
+        // 门禁 1：调用来源检查
+        if !policy.allows_origin(ctx.origin) {
+            tracing::warn!(
+                capability = id,
+                origin = %ctx.origin,
+                allowed = %policy.allowed_origins,
+                "invoke: 来源不被允许"
+            );
+            return Err(CapabilityError::OriginDenied {
+                origin: ctx.origin.to_string(),
+                allowed: policy.allowed_origins.to_string(),
+            });
+        }
+
+        // 门禁 2：运行时要求检查
+        let actual_runtime = ctx.runtime.as_requirement();
+        if !policy.runtime_satisfied(actual_runtime) {
+            tracing::warn!(
+                capability = id,
+                required = %policy.runtime_requirement,
+                actual = %actual_runtime,
+                "invoke: 运行时不满足要求"
+            );
+            return Err(CapabilityError::Unsupported {
+                required: policy.runtime_requirement.to_string(),
+                actual: actual_runtime.to_string(),
+            });
+        }
 
         let start = std::time::Instant::now();
         let outcome = cap.invoke(args, ctx).await;

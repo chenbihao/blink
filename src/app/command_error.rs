@@ -98,6 +98,18 @@ impl From<crate::domain::capability::CapabilityError> for CommandError {
             Permission { detail } => {
                 Self::new("permission_denied", format!("权限不足: {detail}"), false)
             }
+            OriginDenied { origin, allowed } => Self::with_detail(
+                "origin_denied",
+                &format!("来源不被允许: {origin} 不在允许集合内 ({allowed})"),
+                false,
+                serde_json::json!({ "origin": origin, "allowed": allowed }),
+            ),
+            Unsupported { required, actual } => Self::with_detail(
+                "unsupported",
+                &format!("运行时不支持: 需要 {required}，当前可用 {actual}"),
+                false,
+                serde_json::json!({ "required": required, "actual": actual }),
+            ),
             Timeout { detail } => Self::new("timeout", format!("操作超时: {detail}"), true),
             Cancelled => Self::new("cancelled", "操作已取消", false),
             NotFound { id } => Self::with_detail(

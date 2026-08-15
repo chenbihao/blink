@@ -21,8 +21,8 @@ use serde_json::Value;
 
 use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext, ProjectionRule,
+    CapabilityPolicy, DangerClass, ConfirmationPolicy,
 };
-use crate::domain::execution::DangerClass;
 use crate::domain::plugin::manifest::{DangerClassDef, ToolDef};
 
 use super::process::PluginHandle;
@@ -99,6 +99,24 @@ impl Capability for PluginCapabilityAdapter {
 
     fn danger_class(&self) -> DangerClass {
         self.danger
+    }
+
+    // 0.21.0: policy 从 danger + schema.sensitive 投影，保持与旧 danger_class + sensitive 语义一致
+    fn policy(&self) -> CapabilityPolicy {
+        let danger = self.danger;
+        let sensitive = self.schema.sensitive;
+        CapabilityPolicy {
+            danger,
+            sensitive,
+            confirmation: if danger == DangerClass::Dangerous {
+                ConfirmationPolicy::dangerous(true)
+            } else if sensitive {
+                ConfirmationPolicy::sensitive()
+            } else {
+                ConfirmationPolicy::safe()
+            },
+            ..Default::default()
+        }
     }
 
     fn projection(&self) -> Option<ProjectionRule> {

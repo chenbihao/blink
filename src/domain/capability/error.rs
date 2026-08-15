@@ -31,6 +31,13 @@ pub enum CapabilityError {
     /// 权限不足（剪贴板被锁/无截图权限）。
     #[error("权限不足: {detail}")]
     Permission { detail: String },
+    /// 调用来源不被允许（0.21.0）——`CapabilityPolicy.allowed_origins` 门禁拒绝。
+    #[error("来源不被允许: {origin} 不在允许集合内 ({allowed})")]
+    OriginDenied { origin: String, allowed: String },
+    /// 运行时不满足要求（0.21.0）——缺 MAIN_PROCESS / GUI_SURFACE / DESKTOP_SESSION。
+    /// 返回结构化错误而非 panic，让 CLI/MCP/无头环境得到可恢复结果。
+    #[error("运行时不支持: 需要 {required}，当前可用 {actual}")]
+    Unsupported { required: String, actual: String },
     /// 超时——`invoke` 检查 `ctx.is_expired()` 返回 true，或 `timeout_at` 触发。
     /// 投影到 AI："工具超时，可重试或换路径"。
     #[error("超时: {detail}")]
@@ -48,6 +55,8 @@ pub enum CapabilityError {
 }
 
 /// 跨域转换：ExecError → CapabilityError（Capability 编排 Action 失败时用）。
+///
+/// **0.21.0 备注**：兼容期保留；0.21.7 删除 execution 模块时此 From impl 一并移除。
 impl From<crate::domain::execution::ExecError> for CapabilityError {
     fn from(e: crate::domain::execution::ExecError) -> Self {
         CapabilityError::Internal {
@@ -136,6 +145,20 @@ mod tests {
                 CapabilityError::Permission { detail: "x".into() },
                 "permission",
             ),
+            (
+                CapabilityError::OriginDenied {
+                    origin: "mcp".into(),
+                    allowed: "all".into(),
+                },
+                "origin_denied",
+            ),
+            (
+                CapabilityError::Unsupported {
+                    required: "gui_surface".into(),
+                    actual: "none".into(),
+                },
+                "unsupported",
+            ),
             (CapabilityError::Timeout { detail: "x".into() }, "timeout"),
             (CapabilityError::Cancelled, "cancelled"),
             (CapabilityError::NotFound { id: "x".into() }, "not_found"),
@@ -208,6 +231,14 @@ mod tests {
                 detail: "x".into(),
             },
             CapabilityError::Permission { detail: "x".into() },
+            CapabilityError::OriginDenied {
+                origin: "mcp".into(),
+                allowed: "all".into(),
+            },
+            CapabilityError::Unsupported {
+                required: "gui".into(),
+                actual: "none".into(),
+            },
             CapabilityError::Timeout { detail: "x".into() },
             CapabilityError::NotFound { id: "x".into() },
             CapabilityError::Internal { detail: "x".into() },

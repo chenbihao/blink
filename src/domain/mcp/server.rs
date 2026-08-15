@@ -288,8 +288,15 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
             let start = std::time::Instant::now();
 
             // 构造 InvokeContext
+            // 0.21.0: 携带 origin=Mcp + runtime（MCP server 运行在主进程中，但不应获得 GUI 权限）
             let ctx = InvokeContext {
                 env: env.capability_env(),
+                origin: crate::domain::capability::InvocationOrigin::Mcp,
+                runtime: crate::domain::capability::RuntimeCapabilities {
+                    surface: None, // MCP 首版禁止 GUI starter，不注入 surface
+                    main_process: true,
+                    desktop_session: true,
+                },
                 deadline: None,
             };
 

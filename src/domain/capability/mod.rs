@@ -22,6 +22,7 @@
 pub(crate) mod builtins; // Step 2 填真实能力（screenshot 等）
 mod error;
 mod image_stash;
+pub(crate) mod policy;
 mod projection;
 mod registry;
 mod result;
@@ -31,6 +32,12 @@ pub use error::CapabilityError;
 pub use image_stash::ImageStash;
 #[allow(unused_imports)]
 pub use image_stash::StashedImage;
+#[allow(unused_imports)]
+pub use policy::{
+    AiDefault, CapabilityPolicy, ConfirmationPolicy, DangerClass, EditorSourceRef,
+    InvocationOrigin, McpDefault, OriginSet, RuntimeCapabilities, RuntimeRequirement,
+    SurfaceError, SurfacePort, ContentEditorRequest,
+};
 #[allow(unused_imports)]
 pub use projection::{ActionDef, ActionKindDef, ProjectionRule, ResultShape, normalize};
 pub use registry::CapabilityRegistry;
@@ -69,29 +76,41 @@ pub trait Capability: Send + Sync {
     /// 被 `CapabilityRegistry::list()` → `build_capability_tools()` 消费。
     fn schema(&self) -> CapabilitySchema;
 
-    /// 危险等级（复用 `execution::DangerClass`，保持单一安全枚举）。
-    /// default `Safe`——危险动作（如 delete_file）显式 override。
-    /// AI 入口通过 `requires_ai_confirmation()` 统一消费此字段。
-    fn danger_class(&self) -> crate::domain::execution::DangerClass {
-        crate::domain::execution::DangerClass::Safe
+    /// 出口策略——风险、运行时要求和出口授权的**唯一真源**（0.21.0）。
+    ///
+    /// Registry 在 invoke 前检查 origin、runtime 和用户授权；
+    /// UI 隐藏 / tool list 过滤只是第一层。
+    ///
+    /// default 返回 `CapabilityPolicy::default()`（全部来源、无运行时要求、Safe）。
+    /// 各 Capability 在 0.21.1 逐项覆盖为真实 policy。
+    fn policy(&self) -> CapabilityPolicy {
+        CapabilityPolicy::default()
+    }
+
+    /// 危险等级——从 `policy()` 投影，不再独立维护第二份值。
+    ///
+    /// **0.21.0**：改为从 `policy().danger` 读取。兼容期保留此方法供
+    /// `requires_ai_confirmation()` 和旧调用方使用。
+    fn danger_class(&self) -> DangerClass {
+        self.policy().danger
     }
 
     /// AI 调用前是否必须经过用户确认。
     ///
     /// 危险副作用与敏感数据读取共用同一条硬边界。所有 AI 入口必须调用本方法，
     /// 避免主窗口与对话窗口分别实现后产生策略漂移。
+    ///
+    /// **0.21.0**：改为从 `policy()` 投影（`danger == Dangerous || sensitive`）。
     fn requires_ai_confirmation(&self) -> bool {
-        matches!(
-            self.danger_class(),
-            crate::domain::execution::DangerClass::Dangerous
-        ) || self.schema().sensitive
+        self.policy().requires_confirmation()
     }
 
     /// 确认结果是否允许按工具名记忆。
     ///
-    /// 默认保持现有权限记忆行为；涉及字段级配置写入等每次参数都不同的操作必须返回 false。
+    /// 默认从 `policy().confirmation.rememberable` 读取；
+    /// 涉及字段级配置写入等每次参数都不同的操作必须返回 false。
     fn ai_confirmation_rememberable(&self) -> bool {
-        true
+        self.policy().confirmation.rememberable
     }
 
     /// 纯能力执行：入参 → 出参。不直接操作前端 DOM/事件流，不 emit 前端事件，不弹模态框。
@@ -122,6 +141,9 @@ pub trait Capability: Send + Sync {
 
 /// invoke 时的运行时上下文——运行时依赖通过 `env` 获取（满足 inventory 零参构造）。
 ///
+/// **0.21.0 扩展**：新增 `origin`（调用来源）和 `runtime`（可用运行时能力），
+/// Registry 在 invoke 前据此执行代码级 origin/runtime 门禁。
+///
 /// 协议层（0.11 CLI/MCP）投影时，ctx 从环境变量/连接读取，不影响实现方。
 ///
 /// **超时铁则**（§3.5 铁则 1，对齐 [0.9 AIProvider §3.3](../../ai/provider.rs)）：
@@ -136,6 +158,12 @@ pub struct InvokeContext<'a> {
     /// 领域环境——能力通过它访问 managed state（如 `DbPools`、`SearchService`）。
     /// 满足 inventory 零参构造：config 不在构造时注入，在调用时通过 env 自取。
     pub env: &'a dyn crate::domain::event::CapabilityEnv,
+    /// 调用来源（0.21.0）——标识谁触发了这次 invoke。
+    /// Registry 据此检查 `CapabilityPolicy.allowed_origins`。
+    pub origin: InvocationOrigin,
+    /// 可用运行时能力（0.21.0）——`surface` 为 None 表示无 GUI 运行时。
+    /// Registry 据此检查 `CapabilityPolicy.runtime_requirement`。
+    pub runtime: RuntimeCapabilities<'a>,
     /// 绝对截止时刻。`None` = 无超时（仅本地同步编排，如 Alt+A 截图）。
     /// AI lane / 异步编排路径**必须**传 `Some`。
     pub deadline: Option<std::time::Instant>,
@@ -155,6 +183,12 @@ impl<'a> InvokeContext<'a> {
         self.deadline
             .map(tokio::time::Instant::from_std)
             .unwrap_or_else(|| tokio::time::Instant::now() + tokio::time::Duration::from_secs(3600))
+    }
+
+    /// 当前运行时是否满足指定要求（0.21.0）。
+    /// 供 Capability 实现方在 invoke 内做运行时自检（如果需要）。
+    pub fn runtime_satisfies(&self, req: RuntimeRequirement) -> bool {
+        req.is_satisfied_by(self.runtime.as_requirement())
     }
 }
 

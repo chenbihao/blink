@@ -179,17 +179,25 @@ pub async fn run_builtin_action(
 
     // 0.14.4: Action 未命中 → 查 CapabilityRegistry（open_url / open_path / reveal_in_explorer）
     let cap_reg = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
-    if let Some(cap) = cap_reg.get(&id) {
+    if cap_reg.get(&id).is_some() {
         // BuiltinEngine 传的 arg 是 Option<Value>（String 或 None），
         // Capability invoke 需要 { "url"/"path": value } 格式
         let args = convert_legacy_arg_to_capability_args(&id, arg);
         let ctx = crate::domain::capability::InvokeContext {
             env: env_arc.as_ref(),
+            origin: crate::domain::capability::InvocationOrigin::LocalSurface,
+            runtime: crate::domain::capability::RuntimeCapabilities {
+                surface: None, // 0.21.1+ 接入 SurfacePort
+                main_process: true,
+                desktop_session: true,
+            },
             deadline: None,
         };
-        match cap.invoke(args, &ctx).await {
+        // 0.21.0: 走 registry.invoke 执行 origin/runtime 门禁
+        match cap_reg.invoke(&id, args, &ctx).await {
             Ok(result) => {
-                tracing::info!(%id, summary = %result.to_display_text(cap.projection().as_ref()), "run_builtin_action: Capability 执行成功");
+                let projection = cap_reg.get(&id).and_then(|cap| cap.projection());
+                tracing::info!(%id, summary = %result.to_display_text(projection.as_ref()), "run_builtin_action: Capability 执行成功");
             }
             Err(e) => {
                 tracing::error!(%id, error = %e, "run_builtin_action: Capability 执行失败");
@@ -865,9 +873,6 @@ pub async fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> 
     tracing::debug!(%url, "open_url");
 
     let cap_reg = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
-    let cap = cap_reg
-        .get("open_url")
-        .ok_or_else(|| "open_url Capability 未注册".to_string())?;
 
     let env_arc = app
         .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
@@ -877,10 +882,17 @@ pub async fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> 
     let args = serde_json::json!({ "url": url });
     let ctx = crate::domain::capability::InvokeContext {
         env: env_arc.as_ref(),
+        origin: crate::domain::capability::InvocationOrigin::LocalCommand,
+        runtime: crate::domain::capability::RuntimeCapabilities {
+            surface: None,
+            main_process: true,
+            desktop_session: true,
+        },
         deadline: None,
     };
 
-    cap.invoke(args, &ctx).await.map_err(|e| e.to_string())?;
+    // 0.21.0: 走 registry.invoke 执行 origin/runtime 门禁
+    cap_reg.invoke("open_url", args, &ctx).await.map_err(|e| e.to_string())?;
 
     Ok(())
 }

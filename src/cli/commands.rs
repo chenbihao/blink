@@ -212,12 +212,19 @@ fn run_capability(
     };
 
     // 构造 InvokeContext
+    // 0.21.0: 携带 origin=Cli + runtime（CLI 通过 Tauri handle 运行在主进程中）
     let env_arc = handle
         .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
         .inner()
         .clone();
     let ctx = crate::domain::capability::InvokeContext {
         env: env_arc.as_ref(),
+        origin: crate::domain::capability::InvocationOrigin::Cli,
+        runtime: crate::domain::capability::RuntimeCapabilities {
+            surface: None, // CLI 无 GUI surface（0.21.1+ 按需注入）
+            main_process: true,
+            desktop_session: true,
+        },
         deadline: None,
     };
 
