@@ -8,6 +8,8 @@ use super::read_sticky::required_id;
 use super::sticky_common::map_sticky_workflow_error;
 use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
+    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
+    RuntimeRequirement,
 };
 
 pub struct TrashSticky;
@@ -34,6 +36,18 @@ impl Capability for TrashSticky {
         }
     }
 
+
+    fn policy(&self) -> CapabilityPolicy {
+        CapabilityPolicy {
+            allowed_origins: OriginSet::ALL,
+            runtime_requirement: RuntimeRequirement::MAIN_PROCESS,
+            danger: DangerClass::Safe,
+            sensitive: false,
+            ai_default: AiDefault::On,
+            mcp_default: McpDefault::DefaultOff,
+            confirmation: ConfirmationPolicy::safe(),
+        }
+    }
     async fn invoke(
         &self,
         args: Value,

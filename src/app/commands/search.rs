@@ -117,6 +117,9 @@ pub async fn search_apps(
 ///
 /// 0.8.0 §1.3 起，内置动作走 `run_builtin_action`（前端 `Action.kind == "run"` 时分派），
 /// 此命令只处理真正的文件/应用路径。计算结果无 lnk_path，忽略。
+///
+/// 0.21.3：打开操作收敛走 `open_path` Capability，不再直接调 `search::launch`。
+/// 历史记录仍在此 command 完成（搜索特有副作用，不属于 Capability 职责）。
 #[tauri::command]
 pub async fn launch_app(app: tauri::AppHandle, lnk_path: String) -> Result<(), String> {
     if lnk_path.is_empty() {
@@ -131,9 +134,38 @@ pub async fn launch_app(app: tauri::AppHandle, lnk_path: String) -> Result<(), S
     if config.search_history_enabled {
         crate::infra::data::history::record_launch(&pools.history, &lnk_path).await;
     }
-    crate::domain::search::launch(&lnk_path)?;
-    crate::infra::platform::window::hide(&app, "launch");
-    Ok(())
+
+    // 0.21.3：打开操作统一走 open_path Capability
+    let env_arc = app
+        .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
+        .inner()
+        .clone();
+    let cap_reg = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
+    let ctx = crate::domain::capability::InvokeContext {
+        env: env_arc.as_ref(),
+        origin: crate::domain::capability::InvocationOrigin::LocalSurface,
+        runtime: crate::domain::capability::RuntimeCapabilities {
+            surface: Some(env_arc.as_ref()),
+            main_process: true,
+            desktop_session: true,
+        },
+        deadline: None,
+    };
+    let args = serde_json::json!({ "path": lnk_path });
+    match cap_reg.invoke("open_path", args, &ctx).await {
+        Ok(_) => {
+            crate::infra::platform::window::hide(&app, "launch");
+            Ok(())
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "launch_app: open_path Capability 执行失败");
+            // 降级：如果 Capability 失败（如 registry 未注册），回退到直接 launch
+            // 0.21.7 删除 execution 模块后移除此降级
+            crate::domain::search::launch(&lnk_path)?;
+            crate::infra::platform::window::hide(&app, "launch");
+            Ok(())
+        }
+    }
 }
 
 /// 运行内置动作（0.8.0 §1.3 / 0.8.6 §8.1.1 重构）。
@@ -141,9 +173,9 @@ pub async fn launch_app(app: tauri::AppHandle, lnk_path: String) -> Result<(), S
 /// 前端 `Action.kind === "run"` → `invoke("run_builtin_action", { id, arg })`。
 /// `id` 为内置动作注册表 key（如 `"open_settings"`），后端按 id 查找执行。
 ///
-/// **0.14.4**：查找顺序改为 ActionRegistry → CapabilityRegistry。
-/// `open_url` / `open_path` / `reveal_in_explorer` 的 Action 版本已删除（0.14.4），
-/// 关键词触发的 `run_builtin_action` 会命中 Capability 版本。
+/// **0.21.1**：删除 ActionRegistry → CapabilityRegistry 双 fallback，
+/// 统一走 CapabilityRegistry。13 个旧 Action 已全量迁为 Capability。
+/// `blink_print_debug_info` 返回 Text 结果后，兼容桥在此处完成复制副作用。
 ///
 /// 未知 id → 返回 `Err`；前端会打印到控制台，不弹窗。
 ///
@@ -162,32 +194,19 @@ pub async fn run_builtin_action(
         .inner()
         .clone();
 
-    // 0.14.4: 先查 ActionRegistry，未命中再查 CapabilityRegistry
-    let registry = app.state::<std::sync::Arc<crate::domain::execution::ActionRegistry>>();
-    if let Some(action) = registry.get(&id) {
-        let cx = crate::domain::execution::ActionContext::new(env_arc.as_ref(), arg);
-        match action.execute(&cx).await {
-            Ok(_outcome) => {}
-            Err(e) => {
-                tracing::error!(%id, error = %e, "内置动作执行失败");
-                return Err(crate::app::command_error::CommandError::from(e));
-            }
-        }
-        crate::infra::platform::window::hide(&app, "run_builtin_action");
-        return Ok(());
-    }
-
-    // 0.14.4: Action 未命中 → 查 CapabilityRegistry（open_url / open_path / reveal_in_explorer）
+    // 0.21.3: 直接查 CapabilityRegistry（descriptor target）。
+    // 不再有 Action-first/Capability-fallback——descriptor 的 capability_id 直接指向 Capability。
     let cap_reg = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
     if cap_reg.get(&id).is_some() {
-        // BuiltinEngine 传的 arg 是 Option<Value>（String 或 None），
-        // Capability invoke 需要 { "url"/"path": value } 格式
+        // 兼容桥：BuiltinEngine 的 ParamSource::extract 返回 Value::String（裸字符串），
+        // Capability invoke 需要 { "url"/"path": value } object 格式。
+        // 0.21.7 删除 execution 模块后可考虑让 ParamSource 直接产 object。
         let args = convert_legacy_arg_to_capability_args(&id, arg);
         let ctx = crate::domain::capability::InvokeContext {
             env: env_arc.as_ref(),
             origin: crate::domain::capability::InvocationOrigin::LocalSurface,
             runtime: crate::domain::capability::RuntimeCapabilities {
-                surface: None, // 0.21.1+ 接入 SurfacePort
+                surface: Some(env_arc.as_ref()), // 0.21.1: 注入 SurfacePort
                 main_process: true,
                 desktop_session: true,
             },
@@ -198,6 +217,21 @@ pub async fn run_builtin_action(
             Ok(result) => {
                 let projection = cap_reg.get(&id).and_then(|cap| cap.projection());
                 tracing::info!(%id, summary = %result.to_display_text(projection.as_ref()), "run_builtin_action: Capability 执行成功");
+
+                // 0.21.1 兼容桥：blink_print_debug_info / blink_debug_inithook
+                // 旧 Action 会复制诊断信息到剪贴板，新 Capability 只返回 Text。
+                // 本地入口调用时在此处完成复制副作用（ResultAction 层）。
+                if matches!(id.as_str(), "blink_print_debug_info" | "blink_debug_inithook") {
+                    if let crate::domain::capability::CapabilityResult::Text { content, .. } = &result {
+                        if let Err(e) = crate::infra::platform::clipboard::write_text_to_clipboard(
+                            content,
+                            &id,
+                            true, // skip_persist = true
+                        ) {
+                            tracing::error!(error = %e, "写入诊断信息到剪贴板失败");
+                        }
+                    }
+                }
             }
             Err(e) => {
                 tracing::error!(%id, error = %e, "run_builtin_action: Capability 执行失败");
@@ -299,10 +333,9 @@ pub async fn list_builtin_actions(
 ) -> Vec<crate::domain::search::BuiltinActionInfo> {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
     let disabled = crate::app::config::get_disabled_builtin_actions(&pool).await;
-    let registry = app.state::<std::sync::Arc<crate::domain::execution::ActionRegistry>>();
-    // 读当前语言（从 AppConfig 快照取）
+    // 0.21.3：不再依赖 ActionRegistry，descriptor 自带双语 title/subtitle
     let config = crate::app::config::get_config(&pool).await;
-    crate::domain::search::list_builtin_actions(&disabled, &registry, &config.language)
+    crate::domain::search::list_builtin_actions(&disabled, &config.language)
 }
 
 /// 触发 Chord 动作（0.8.5 §六）。前端 Alt+字母 → invoke 此 command。
@@ -352,17 +385,22 @@ pub async fn trigger_chord(
             return Ok(());
         }
     }
-    // surface 现已无 command 层消费者（MiniBall 划词已移除，各 action 自管 UI），
-    // 保留 trigger 返回值以备未来扩展。
+    // 0.21.2：Chord trigger 改为按 ChordTarget 分派，需要 CapabilityRegistry 和 SurfacePort。
     let env_arc = app
         .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
+        .inner()
+        .clone();
+    let cap_registry = app
+        .state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>()
         .inner()
         .clone();
     let _surface = registry
         .trigger(
             &key,
             &chord_cfg.bindings,
+            cap_registry.as_ref(),
             env_arc.as_ref(),
+            Some(env_arc.as_ref()),
             input_text.as_deref(),
             origin_ref.as_deref(),
         )
@@ -488,17 +526,17 @@ pub async fn list_context_bindings(app: tauri::AppHandle) -> Vec<serde_json::Val
         }
     }
 
-    // ── 路径 2：内置参数化动作的 Context binding（0.11.8 补齐） ────────────
-    // BuiltinEngine 自判 context、不走 RuleRouter，故需要单独取数。字段格式与路径 1
-    // 完全对齐，前端 renderBindingRow 无需区分来源。
-    if let Some(reg) = app.try_state::<std::sync::Arc<crate::domain::execution::ActionRegistry>>() {
-        let disabled_vec: Vec<String> = disabled.iter().cloned().collect();
-        bindings.extend(crate::domain::search::list_builtin_context_bindings(
-            &disabled_vec,
-            &reg,
-            &lang,
-        ));
-    }
+// ── 路径 2：内置参数化动作的 Context binding（0.11.8 补齐） ────────────
+// BuiltinEngine 自判 context、不走 RuleRouter，故需要单独取数。字段格式与路径 1
+// 完全对齐，前端 renderBindingRow 无需区分来源。
+// 0.21.3：不再依赖 ActionRegistry，descriptor 自带双语 title。
+{
+    let disabled_vec: Vec<String> = disabled.iter().cloned().collect();
+    bindings.extend(crate::domain::search::list_builtin_context_bindings(
+        &disabled_vec,
+        &lang,
+    ));
+}
 
     bindings
 }

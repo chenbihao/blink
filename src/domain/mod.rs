@@ -11,6 +11,7 @@ pub mod context;
 pub mod event; // 0.14.6 §2.2：领域环境抽象（DomainEnv trait，domain 去 tauri）
 pub mod event_names; // 0.14.6 §3.3：blink:// 事件名常量（domain 层，避免反向依赖）
 pub mod execution;
+pub mod feature_catalog; // 0.21.4：功能目录聚合层
 pub mod intent;
 pub mod mcp; // 0.13.0：MCP client（消费外部 tool，包装进 Tool 适配层）
 pub mod plugin;

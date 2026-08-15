@@ -119,12 +119,13 @@ mod tests {
             .map(|schema| schema.name)
             .collect();
 
-        assert_eq!(actual, expected);
-        assert!(!actual.contains("system_action"));
-        assert!(!actual.contains("blink_action"));
-        assert!(!actual.contains("lock"));
-        assert!(!actual.contains("shutdown"));
-    }
+assert_eq!(actual, expected);
+assert!(!actual.contains("system_action"));
+assert!(!actual.contains("blink_action"));
+// 0.21.1: lock/shutdown 等已迁为 Capability，现在会出现在列表中
+assert!(actual.contains("lock"));
+assert!(actual.contains("shutdown"));
+}
 
     // ── 0.11.1 §2.3b：inject_plugin_settings 参数动态注入 ──────────────────
 

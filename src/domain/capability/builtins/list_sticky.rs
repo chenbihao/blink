@@ -16,6 +16,8 @@ use serde_json::{Value, json};
 
 use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext, ItemResult,
+    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
+    RuntimeRequirement,
 };
 
 /// `list_sticky` — 列出所有活跃便签。
@@ -43,6 +45,18 @@ impl Capability for ListSticky {
         }
     }
 
+
+    fn policy(&self) -> CapabilityPolicy {
+        CapabilityPolicy {
+            allowed_origins: OriginSet::ALL,
+            runtime_requirement: RuntimeRequirement::MAIN_PROCESS,
+            danger: DangerClass::Safe,
+            sensitive: true,
+            ai_default: AiDefault::On,
+            mcp_default: McpDefault::DefaultOff,
+            confirmation: ConfirmationPolicy::sensitive(),
+        }
+    }
     async fn invoke(
         &self,
         _args: Value,

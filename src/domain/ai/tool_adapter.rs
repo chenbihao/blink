@@ -1003,16 +1003,15 @@ mod tests {
         );
     }
 
-    /// 0.14.2 验收点：9 个保留 Action 不出现在 AI tool 池。
+    /// 0.21.1 验收点：旧 13 个 Action 已全量迁为 Capability，现在都在 CapabilityRegistry 中。
     ///
-    /// 由于 `build_agent_tools` 签名不再接受 `ActionRegistry`，
-    /// lock/shutdown/restart/sleep/clear_history/exit_blink/open_logs/open_data_dir/open_settings
-    /// 编译期就无法进入 AI tool 池。这里验证它们不在 CapabilityRegistry 中
-    /// （即不会被 CapabilityTool 包装进 tool 池）。
+    /// Dangerous 类（lock/shutdown/restart/sleep/clear_history/exit_blink）虽已迁为
+    /// Capability，但 `ai_default: Off` 意味着不会进入推荐 allowlist。
+    /// Safe GUI 类（open_settings/open_logs/open_data_dir）`ai_default: On` 但 `mcp_default: Forbidden`。
     #[test]
-    fn retained_actions_not_in_capability_registry() {
+    fn retained_actions_now_in_capability_registry() {
         let cap_reg = CapabilityRegistry::default();
-        // 9 个保留 Action 不应在 CapabilityRegistry 中
+        // 13 个旧 Action 现在都应在 CapabilityRegistry 中
         for action_id in [
             "lock",
             "shutdown",
@@ -1023,10 +1022,14 @@ mod tests {
             "open_logs",
             "open_data_dir",
             "open_settings",
+            "sticky_manager",
+            "edit_clipboard_image",
+            "blink_print_debug_info",
+            "blink_debug_inithook",
         ] {
             assert!(
-                cap_reg.get(action_id).is_none(),
-                "{action_id} 不应在 CapabilityRegistry 中（保留为 Action）"
+                cap_reg.get(action_id).is_some(),
+                "{action_id} 应已在 CapabilityRegistry 中（0.21.1 迁移）"
             );
         }
     }

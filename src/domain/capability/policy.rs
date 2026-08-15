@@ -302,14 +302,22 @@ impl<'a> RuntimeCapabilities<'a> {
 /// **0.21.0**：trait 定义落地，具体注入由 app 层桥接 `TauriDomainEnv`。
 /// 当前 `DomainEnv` 已有的 `open_settings` / `show_sticky_manager` 等方法
 /// 在 0.21.1+ 迁移 Capability 时逐项接入此端口。
+#[async_trait::async_trait]
 pub trait SurfacePort: Send + Sync {
     fn open_settings(&self) -> Result<(), SurfaceError>;
     fn open_sticky_manager(&self) -> Result<(), SurfaceError>;
     fn open_chat(&self, prefill: Option<&str>) -> Result<(), SurfaceError>;
     fn open_clipboard_mode(&self) -> Result<(), SurfaceError>;
-    fn start_region_capture(&self) -> Result<(), SurfaceError>;
+    /// 启动区域截图选区。async 因截图时序需等待 DWM 合成。
+    async fn start_region_capture(&self) -> Result<(), SurfaceError>;
     fn start_image_editor(&self, source: EditorSourceRef) -> Result<(), SurfaceError>;
     fn start_content_editor(&self, request: ContentEditorRequest) -> Result<(), SurfaceError>;
+
+    /// 隐藏主窗口（GUI starter Capability 打开新窗口前调用）。
+    fn hide_main_window(&self, reason: &str);
+
+    /// 退出应用进程。
+    fn exit_app(&self);
 }
 
 /// SurfacePort 错误——不暴露内部窗口创建失败细节，只给语义化分类。
@@ -667,6 +675,7 @@ mod tests {
     #[test]
     fn runtime_capabilities_full() {
         struct DummySurface;
+        #[async_trait::async_trait]
         impl SurfacePort for DummySurface {
             fn open_settings(&self) -> Result<(), SurfaceError> {
                 Ok(())
@@ -680,7 +689,7 @@ mod tests {
             fn open_clipboard_mode(&self) -> Result<(), SurfaceError> {
                 Ok(())
             }
-            fn start_region_capture(&self) -> Result<(), SurfaceError> {
+            async fn start_region_capture(&self) -> Result<(), SurfaceError> {
                 Ok(())
             }
             fn start_image_editor(&self, _: EditorSourceRef) -> Result<(), SurfaceError> {
@@ -689,6 +698,8 @@ mod tests {
             fn start_content_editor(&self, _: ContentEditorRequest) -> Result<(), SurfaceError> {
                 Ok(())
             }
+            fn hide_main_window(&self, _reason: &str) {}
+            fn exit_app(&self) {}
         }
         let caps = RuntimeCapabilities {
             surface: Some(&DummySurface),

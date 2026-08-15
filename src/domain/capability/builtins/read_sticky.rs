@@ -7,6 +7,8 @@ use serde_json::{Value, json};
 use super::sticky_common::map_sticky_error;
 use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext, ItemResult,
+    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
+    RuntimeRequirement,
 };
 
 pub struct ReadSticky;
@@ -32,6 +34,18 @@ impl Capability for ReadSticky {
         }
     }
 
+
+    fn policy(&self) -> CapabilityPolicy {
+        CapabilityPolicy {
+            allowed_origins: OriginSet::ALL,
+            runtime_requirement: RuntimeRequirement::MAIN_PROCESS,
+            danger: DangerClass::Safe,
+            sensitive: true,
+            ai_default: AiDefault::On,
+            mcp_default: McpDefault::DefaultOff,
+            confirmation: ConfirmationPolicy::sensitive(),
+        }
+    }
     async fn invoke(
         &self,
         args: Value,

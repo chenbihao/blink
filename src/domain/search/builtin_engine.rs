@@ -20,15 +20,24 @@ use crate::domain::context::trigger::{self as ctx_trigger, ContextTrigger, Param
 
 /// 内置动作定义（引擎内部模型，用于 keyword 匹配 + Context 触发 + 搜索结果展示）。
 ///
-/// 0.8.6：分派逻辑已迁移到 `domain::execution::ActionRegistry`，本结构仅保留
-/// keyword/context 匹配和搜索结果 `SearchItem` 构造所需的字段。
+/// **0.21.3**：从 ActionRegistry 读 title/subtitle 收敛为 descriptor 自带双语字段。
+/// `capability_id` 显式声明 descriptor → Capability target，不再隐式假设 id == capability_id。
+/// `list_builtin_actions` / `list_builtin_context_bindings` 不再依赖 ActionRegistry。
 struct BuiltinAction {
-    /// 唯一标识（与 ActionRegistry 的 Action::id() 一致）
+    /// 唯一标识（descriptor id，与前端 disabled list / context binding key 一致）
     id: &'static str,
-    /// 主显示标题（keyword 匹配 + SearchItem.title；设置页走 Action trait 的 LocalizableText）
+    /// 对应的 Capability id（descriptor target）。
+    /// 0.21.3：无参动作 capability_id 与 id 相同；参数化动作也相同（open_url/open_path/reveal_in_explorer）。
+    /// 显式声明而非隐式假设，为 0.21.4 FeatureCatalog 聚合预留。
+    capability_id: &'static str,
+    /// 主显示标题（中文）——keyword 匹配 + SearchItem.title
     title: &'static str,
-    /// 副标题/说明（SearchItem.subtitle）
+    /// 主显示标题（英文）——按 language 选择
+    title_en: &'static str,
+    /// 副标题/说明（中文）——SearchItem.subtitle
     subtitle: &'static str,
+    /// 副标题/说明（英文）——按 language 选择
+    subtitle_en: &'static str,
     /// 匹配关键词（拼音首字母也会自动匹配，如 "设置" → "sz"）
     keywords: &'static [&'static str],
     /// Context 触发条件；空 slice = 不参与 Context 路由（0.8.0 §1.3）。
@@ -45,8 +54,11 @@ struct BuiltinAction {
 const ACTIONS: &[BuiltinAction] = &[
     BuiltinAction {
         id: "open_settings",
+        capability_id: "open_settings",
         title: "打开设置",
+        title_en: "Open Settings",
         subtitle: "Blink 偏好设置",
+        subtitle_en: "Blink Preferences",
         keywords: &["设置", "settings", "sz", "偏好", "配置"],
         context: &[],
         param_source: ParamSource::None,
@@ -54,8 +66,11 @@ const ACTIONS: &[BuiltinAction] = &[
     },
     BuiltinAction {
         id: "sticky_manager",
+        capability_id: "sticky_manager",
         title: "便签管理",
+        title_en: "Sticky Manager",
         subtitle: "管理桌面便签",
+        subtitle_en: "Manage desktop sticky notes",
         keywords: &["便签", "sticky", "bj", "管理", "笔记", "notes"],
         context: &[],
         param_source: ParamSource::None,
@@ -63,8 +78,11 @@ const ACTIONS: &[BuiltinAction] = &[
     },
     BuiltinAction {
         id: "edit_clipboard_image",
+        capability_id: "edit_clipboard_image",
         title: "编辑剪贴板图片",
+        title_en: "Edit Clipboard Image",
         subtitle: "标注当前剪贴板图片",
+        subtitle_en: "Annotate the current clipboard image",
         keywords: &[
             "编辑图片",
             "剪贴板图片",
@@ -78,8 +96,11 @@ const ACTIONS: &[BuiltinAction] = &[
     },
     BuiltinAction {
         id: "lock",
+        capability_id: "lock",
         title: "锁定电脑",
+        title_en: "Lock Workstation",
         subtitle: "Lock Workstation",
+        subtitle_en: "Lock Workstation",
         keywords: &["锁定", "lock", "锁屏", "sd"],
         context: &[],
         param_source: ParamSource::None,
@@ -87,8 +108,11 @@ const ACTIONS: &[BuiltinAction] = &[
     },
     BuiltinAction {
         id: "shutdown",
+        capability_id: "shutdown",
         title: "关机",
+        title_en: "Shutdown",
         subtitle: "Shutdown",
+        subtitle_en: "Shutdown",
         keywords: &["关机", "shutdown", "gj"],
         context: &[],
         param_source: ParamSource::None,
@@ -96,8 +120,11 @@ const ACTIONS: &[BuiltinAction] = &[
     },
     BuiltinAction {
         id: "restart",
+        capability_id: "restart",
         title: "重启",
+        title_en: "Restart",
         subtitle: "Restart",
+        subtitle_en: "Restart",
         keywords: &["重启", "restart", "cq"],
         context: &[],
         param_source: ParamSource::None,
@@ -105,8 +132,11 @@ const ACTIONS: &[BuiltinAction] = &[
     },
     BuiltinAction {
         id: "sleep",
+        capability_id: "sleep",
         title: "睡眠",
+        title_en: "Sleep",
         subtitle: "Sleep",
+        subtitle_en: "Sleep",
         keywords: &["睡眠", "sleep", "sm"],
         context: &[],
         param_source: ParamSource::None,
@@ -114,8 +144,11 @@ const ACTIONS: &[BuiltinAction] = &[
     },
     BuiltinAction {
         id: "clear_history",
+        capability_id: "clear_history",
         title: "清空搜索历史",
+        title_en: "Clear Search History",
         subtitle: "清除所有应用启动记录",
+        subtitle_en: "Clear all app launch records",
         keywords: &["清空历史", "clear history", "qkls", "清除历史"],
         context: &[],
         param_source: ParamSource::None,
@@ -123,8 +156,11 @@ const ACTIONS: &[BuiltinAction] = &[
     },
     BuiltinAction {
         id: "exit_blink",
+        capability_id: "exit_blink",
         title: "退出 Blink",
+        title_en: "Exit Blink",
         subtitle: "Exit Blink Launcher",
+        subtitle_en: "Exit Blink Launcher",
         keywords: &["退出", "exit", "quit", "tc", "关闭", "结束"],
         context: &[],
         param_source: ParamSource::None,
@@ -132,8 +168,11 @@ const ACTIONS: &[BuiltinAction] = &[
     },
     BuiltinAction {
         id: "open_logs",
+        capability_id: "open_logs",
         title: "打开日志文件",
+        title_en: "Open Log File",
         subtitle: "Open Blink Log File",
+        subtitle_en: "Open Blink Log File",
         keywords: &["日志", "log", "日志文件", "rz"],
         context: &[],
         param_source: ParamSource::None,
@@ -141,8 +180,11 @@ const ACTIONS: &[BuiltinAction] = &[
     },
     BuiltinAction {
         id: "open_data_dir",
+        capability_id: "open_data_dir",
         title: "打开数据目录",
+        title_en: "Open Data Directory",
         subtitle: "Open Blink Data Folder",
+        subtitle_en: "Open Blink Data Folder",
         keywords: &["目录", "文件夹", "数据", "ml"],
         context: &[],
         param_source: ParamSource::None,
@@ -150,8 +192,11 @@ const ACTIONS: &[BuiltinAction] = &[
     },
     BuiltinAction {
         id: "blink_print_debug_info",
+        capability_id: "blink_print_debug_info",
         title: "Blink Print Debug Info",
-        subtitle: "复制 Blink 通用调试信息（当前详细包含 Windows 输入状态）",
+        title_en: "Blink Print Debug Info",
+        subtitle: "复制 Blink 通用调试信息；当前版本详细包含 Windows Hook 与输入状态",
+        subtitle_en: "Copy general Blink debug info, currently with detailed Windows hook and input state",
         keywords: &[
             "debug",
             "debug info",
@@ -167,8 +212,11 @@ const ACTIONS: &[BuiltinAction] = &[
     },
     BuiltinAction {
         id: "blink_debug_inithook",
+        capability_id: "blink_debug_inithook",
         title: "Blink Debug InitHook",
-        subtitle: "打印调试信息，并安全重置输入状态与重装 Windows Hook",
+        title_en: "Blink Debug InitHook",
+        subtitle: "打印调试信息，并在安全门禁满足后重置输入状态与重装 Windows Hook",
+        subtitle_en: "Print debug info, then safely reset input state and reinstall the Windows hook",
         keywords: &[
             "debug",
             "debug inithook",
@@ -184,11 +232,15 @@ const ACTIONS: &[BuiltinAction] = &[
         default_enabled: true,
     },
     // ── 0.8.0 §1.3 参数化动作 ───────────────────────────────────────────────
+    // 0.21.3：target 直接为既有 Capability（open_url/open_path/reveal_in_explorer），
+    // 不再经 ActionRegistry → CapabilityRegistry fallback。
     BuiltinAction {
         id: "open_url",
+        capability_id: "open_url",
         title: "打开链接",
+        title_en: "Open URL",
         subtitle: "用默认浏览器打开剪贴板中的 URL",
-        // keyword 让用户输入"打开链接"也能召回；空 query 时 Context 命中主导
+        subtitle_en: "Open the clipboard URL in the default browser",
         keywords: &["打开链接", "open url", "dkurl", "url", "链接"],
         context: &[ContextTrigger::ClipboardIsUrl],
         param_source: ParamSource::Clipboard,
@@ -196,8 +248,11 @@ const ACTIONS: &[BuiltinAction] = &[
     },
     BuiltinAction {
         id: "open_path",
+        capability_id: "open_path",
         title: "打开路径",
+        title_en: "Open Path",
         subtitle: "用系统默认程序打开剪贴板中的文件或目录",
+        subtitle_en: "Open the clipboard file or directory with the default program",
         keywords: &["打开路径", "打开目录", "open path", "dklj", "路径"],
         context: &[ContextTrigger::ClipboardIsFilePath],
         param_source: ParamSource::Clipboard,
@@ -205,8 +260,11 @@ const ACTIONS: &[BuiltinAction] = &[
     },
     BuiltinAction {
         id: "reveal_in_explorer",
+        capability_id: "reveal_in_explorer",
         title: "在资源管理器中显示",
+        title_en: "Reveal in Explorer",
         subtitle: "定位到剪贴板中的文件（explorer /select）",
+        subtitle_en: "Reveal the clipboard file in Windows Explorer",
         keywords: &["定位", "resource", "reveal", "explorer", "dw", "资源管理器"],
         context: &[ContextTrigger::ClipboardIsFilePath],
         param_source: ParamSource::Clipboard,
@@ -410,13 +468,15 @@ fn action_to_search_item(
     score_detail: String,
     context_aware: bool,
 ) -> SearchItem {
+    // 0.21.3：RunAction.id 直接为 capability_id（descriptor target），
+    // 不再隐式假设 descriptor id == capability id。
     SearchItem {
         id: format!("builtin:{}", action.id),
         title: action.title.to_string(),
         subtitle: Some(action.subtitle.to_string()),
         score,
         action: SearchAction::RunAction {
-            id: action.id.to_string(),
+            id: action.capability_id.to_string(),
             arg,
         },
         source: "builtin".to_string(),
@@ -454,33 +514,26 @@ pub struct BuiltinActionInfo {
     pub default_enabled: bool,
 }
 
-/// 列出所有内置动作元数据 + 当前 enabled 状态（0.8.6 §8.2.4 i18n）。
+/// 列出所有内置动作元数据 + 当前 enabled 状态。
 ///
 /// `disabled_ids` 从 `AppConfig.disabled_builtin_actions` 读得——由命令层注入，
 /// 保持 domain 层与 SQLite 解耦。
-/// `language` 用于解析 `LocalizableText` 到当前 UI 语言字符串。
+/// `language` 用于选择 descriptor 自带的双语 title/subtitle。
 ///
-/// 0.8.6 重构：title/subtitle 从 `ActionRegistry` 的 `Action::title()/subtitle()` 取，
-/// 走 `LocalizableText::resolve(language)`；不再从 `ACTIONS` 表硬编码中文读。
+/// 0.21.3：title/subtitle 从 descriptor 自带双语字段读，不再依赖 ActionRegistry。
+/// 语言前缀匹配："zh" → 中文，其他 → 英文。
 pub fn list_builtin_actions(
     disabled_ids: &[String],
-    registry: &crate::domain::execution::ActionRegistry,
     language: &str,
 ) -> Vec<BuiltinActionInfo> {
+    let use_en = language.starts_with("en");
     ACTIONS
         .iter()
         .map(|a| {
-            let (title, subtitle) = match registry.get(a.id) {
-                Some(action) => (
-                    action.title().resolve(language),
-                    action.subtitle().resolve(language),
-                ),
-                None => (a.title.to_string(), a.subtitle.to_string()), // fallback
-            };
             BuiltinActionInfo {
                 id: a.id.to_string(),
-                title,
-                subtitle,
+                title: if use_en { a.title_en } else { a.title }.to_string(),
+                subtitle: if use_en { a.subtitle_en } else { a.subtitle }.to_string(),
                 keywords: a.keywords.iter().map(|k| k.to_string()).collect(),
                 trigger_desc: describe_triggers(a.keywords, a.context),
                 param_desc: describe_param_source(a.param_source),
@@ -511,19 +564,16 @@ pub fn list_builtin_actions(
 /// `disabled` 是 `AppConfig.disabled_context_bindings` 的快照。
 pub fn list_builtin_context_bindings(
     disabled: &[String],
-    registry: &crate::domain::execution::ActionRegistry,
     language: &str,
 ) -> Vec<serde_json::Value> {
+    let use_en = language.starts_with("en");
     let mut out = Vec::new();
     for action in ACTIONS.iter() {
         if action.context.is_empty() {
             continue;
         }
         let target_id = format!("builtin:{}", action.id);
-        let target_label = registry
-            .get(action.id)
-            .map(|a| a.title().resolve(language))
-            .unwrap_or_else(|| target_id.clone());
+        let target_label = if use_en { action.title_en } else { action.title }.to_string();
         for trig in action.context {
             let trigger_key = crate::domain::intent::trigger_key(trig);
             let key = crate::domain::intent::binding_key(&target_id, trigger_key);

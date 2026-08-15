@@ -14,6 +14,8 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, BufReader};
 use crate::domain::ai::memory::estimate_tokens;
 use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext, ItemResult,
+    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
+    RuntimeRequirement,
 };
 
 const PROBE_BYTES: usize = 8 * 1024;
@@ -100,6 +102,18 @@ impl Capability for ReadTextFile {
         }
     }
 
+
+    fn policy(&self) -> CapabilityPolicy {
+        CapabilityPolicy {
+            allowed_origins: OriginSet::ALL,
+            runtime_requirement: RuntimeRequirement::NONE,
+            danger: DangerClass::Safe,
+            sensitive: true,
+            ai_default: AiDefault::On,
+            mcp_default: McpDefault::DefaultOff,
+            confirmation: ConfirmationPolicy::sensitive(),
+        }
+    }
     async fn invoke(
         &self,
         args: Value,

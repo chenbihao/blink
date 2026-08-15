@@ -14,6 +14,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::domain::ai::chat_service::ChatService;
 use crate::domain::capability::{CapabilityRegistry, ImageStash};
+use crate::domain::capability::policy::{EditorSourceRef, SurfaceError, SurfacePort, ContentEditorRequest};
 use crate::domain::event::{CapabilityEnv, DomainEnv};
 use crate::domain::plugin::PluginEngine;
 use crate::domain::search::SearchService;
@@ -412,12 +413,128 @@ impl CapabilityEnv for TauriDomainEnv {
             crate::infra::platform::window::get_primary_monitor_center(width, height);
         let position = (x.unwrap_or(center_x), y.unwrap_or(center_y));
         // show_translating 固定 false——仅截图翻译 UI 状态机需要该状态。
-crate::infra::platform::window::show_pin_window(
+ crate::infra::platform::window::show_pin_window(
 &self.app,
-crate::infra::platform::window::PinImage::Png(std::sync::Arc::new(png_bytes)),
+ crate::infra::platform::window::PinImage::Png(std::sync::Arc::new(png_bytes)),
 position.0, position.1, false,
 )?;
         Ok(position)
+    }
+}
+
+// ── SurfacePort 实现（0.21.1）─────────────────────────────────────────────
+//
+// TauriDomainEnv 实现 SurfacePort trait，供 GUI starter Capability 通过
+// InvokeContext.runtime.surface 调用。这是从 DomainEnv 到 SurfacePort 的
+// 桥接——Capability 不直接接触 DomainEnv 的窗口方法，只通过最小化端口访问。
+
+#[async_trait::async_trait]
+impl SurfacePort for TauriDomainEnv {
+    fn open_settings(&self) -> Result<(), SurfaceError> {
+        crate::infra::platform::window::open_settings(&self.app);
+        Ok(())
+    }
+
+    fn open_sticky_manager(&self) -> Result<(), SurfaceError> {
+        crate::infra::platform::window::show_sticky_manager_window(&self.app)
+            .map_err(|e| SurfaceError::CreateFailed { detail: e })
+    }
+
+    fn open_chat(&self, prefill: Option<&str>) -> Result<(), SurfaceError> {
+        crate::infra::platform::window::show_chat_window(&self.app, prefill)
+            .map_err(|e| SurfaceError::CreateFailed { detail: e })
+    }
+
+    fn open_clipboard_mode(&self) -> Result<(), SurfaceError> {
+        // 0.21.2：Chord clipboard_history binding 的 GUI starter target。
+        // 旧 ClipboardHistoryAction 的行为：主窗 show + emit CHORD_ENTER_MODE
+        crate::infra::platform::window::invoke(&self.app);
+        let _ = self.app.emit(
+            crate::domain::event_names::EventNames::CHORD_ENTER_MODE,
+            serde_json::json!({ "mode": "clipboard" }),
+        );
+        Ok(())
+    }
+
+    async fn start_region_capture(&self) -> Result<(), SurfaceError> {
+        // 0.21.2：Chord screenshot binding 的 GUI starter target。
+        // 旧 ScreenshotAction 的截图时序：
+        // 1. record_fgHwnd  2. hide_for_screenshot  3. wait_frame_after_hide
+        // 4. begin_session  5. unhide_after_screenshot  6. show_screenshot_overlay
+        crate::infra::platform::screenshot::record_fg_hwnd();
+        crate::infra::platform::window::hide_for_screenshot(&self.app);
+        // 等 DWM 合成——用 spawn_blocking 包装同步等待
+        let app = self.app.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::infra::platform::window::wait_frame_after_hide(&app);
+        })
+        .await
+        .map_err(|e| SurfaceError::CreateFailed { detail: format!("等待 DWM 合成失败: {e}") })?;
+
+        let meta = tokio::task::spawn_blocking(crate::infra::platform::screenshot::begin_session)
+            .await
+            .map_err(|e| SurfaceError::CreateFailed { detail: format!("截屏任务崩溃: {e}") })?
+            .map_err(|e| {
+                // 截屏失败也要撤销 cloak
+                crate::infra::platform::window::unhide_after_screenshot(&self.app);
+                SurfaceError::CreateFailed { detail: e }
+            })?;
+
+        crate::infra::platform::window::unhide_after_screenshot(&self.app);
+        crate::infra::platform::window::show_screenshot_overlay(&self.app, meta)
+            .map_err(|e| {
+                crate::infra::platform::screenshot::end_session();
+                SurfaceError::CreateFailed { detail: e }
+            })?;
+        Ok(())
+    }
+
+    fn start_image_editor(&self, source: EditorSourceRef) -> Result<(), SurfaceError> {
+        match source {
+            EditorSourceRef::ClipboardImage(png_data) => {
+                let meta = crate::infra::platform::image_editor::begin_session(png_data)
+                    .map_err(|e| SurfaceError::CreateFailed { detail: e })?;
+                crate::infra::platform::window::show_image_editor_window(&self.app, meta, "clipboard")
+                    .map_err(|e| {
+                        crate::infra::platform::image_editor::end_session();
+                        SurfaceError::CreateFailed { detail: e }
+                    })
+            }
+            EditorSourceRef::StashRef(_) => Err(SurfaceError::Unavailable {
+                detail: "StashRef 来源的图片编辑器尚未接入".into(),
+            }),
+        }
+    }
+
+    fn start_content_editor(&self, request: ContentEditorRequest) -> Result<(), SurfaceError> {
+        use tauri::Manager;
+        let payload = crate::app::commands::EditableContentPayload {
+            body: request.body,
+            format: "plain".to_string(),
+            title: request.title,
+            origin: request.origin,
+            origin_ref: request.origin_ref,
+            save_policy: request.save_policy,
+        };
+        let pending = self
+            .app
+            .state::<crate::app::commands::PendingEditorPayload>();
+        *pending
+            .0
+            .lock()
+            .map_err(|e| SurfaceError::CreateFailed {
+                detail: format!("锁失败: {e}"),
+            })? = Some(payload);
+        crate::infra::platform::window::show_content_editor_window(&self.app)
+            .map_err(|e| SurfaceError::CreateFailed { detail: e })
+    }
+
+    fn hide_main_window(&self, reason: &str) {
+        crate::infra::platform::window::hide(&self.app, reason);
+    }
+
+    fn exit_app(&self) {
+        self.app.exit(0);
     }
 }
 

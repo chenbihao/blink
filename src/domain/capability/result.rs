@@ -292,28 +292,49 @@ pub struct ItemResult {
 ///
 /// `pointer` 为 None 时默认取 item 的主值（由 manifest 的 `item_pointer` 指定）。
 /// 主窗口交互约定：`actions[0]` = 回车行为，右键展开全部。
+///
+/// **0.21.3**：新增 `Invoke` 变体——直接声明 `capability_id + args`，
+/// 让 ResultAction 的副作用统一走 Capability。
+/// `OpenFile`/`OpenUrl`/`Reveal` 保留兼容期使用；新增 Capability 优先用 `Invoke`。
+/// 0.21.7 删除旧变体后，`Invoke` 成为唯一副作用路径。
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ItemAction {
     /// 复制。`pointer` 指定从 data 取哪个值复制。
+    /// 纯展示层短路径，保留专用变体。
     Copy {
         #[serde(skip_serializing_if = "Option::is_none")]
         pointer: Option<String>,
     },
     /// 打开文件。`pointer` 指定从 data 取哪个路径。
+    /// 兼容期保留；语义等价于 `Invoke { capability_id: "open_path", args: { path } }`。
     OpenFile {
         #[serde(skip_serializing_if = "Option::is_none")]
         pointer: Option<String>,
     },
     /// 打开 URL。`pointer` 指定从 data 取哪个 URL。
+    /// 兼容期保留；语义等价于 `Invoke { capability_id: "open_url", args: { url } }`。
     OpenUrl {
         #[serde(skip_serializing_if = "Option::is_none")]
         pointer: Option<String>,
     },
     /// 资源管理器定位。`pointer` 指定从 data 取哪个路径。
+    /// 兼容期保留；语义等价于 `Invoke { capability_id: "reveal_in_explorer", args: { path } }`。
     Reveal {
         #[serde(skip_serializing_if = "Option::is_none")]
         pointer: Option<String>,
+    },
+    /// 0.21.3：直接调用指定 Capability。
+    /// `capability_id` 是 CapabilityRegistry 中的稳定 id；
+    /// `args` 是 invoke 参数（JSON object）。
+    /// 前端识别 `type == "invoke"` → `invoke("run_builtin_action", { id: capability_id, arg: args })`。
+    /// 也可由前端直接调 `invoke("invoke_capability", { id, args })`（如未来提供）。
+    #[serde(rename = "invoke")]
+    Invoke {
+        capability_id: String,
+        /// invoke 参数。None = 无参数。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        args: Option<serde_json::Value>,
     },
 }
 
@@ -465,6 +486,33 @@ mod tests {
         let action = ItemAction::Reveal { pointer: None };
         let v = serde_json::to_value(&action).unwrap();
         assert_eq!(v["type"], "reveal");
+    }
+
+    // ── 0.21.3: Invoke 变体测试 ─────────────────────────────────────────
+
+    #[test]
+    fn item_action_invoke_serializes_with_args() {
+        let action = ItemAction::Invoke {
+            capability_id: "open_path".into(),
+            args: Some(json!({ "path": "C:\\file.txt" })),
+        };
+        let v = serde_json::to_value(&action).unwrap();
+        assert_eq!(v["type"], "invoke");
+        assert_eq!(v["capability_id"], "open_path");
+        assert_eq!(v["args"]["path"], "C:\\file.txt");
+    }
+
+    #[test]
+    fn item_action_invoke_serializes_without_args() {
+        let action = ItemAction::Invoke {
+            capability_id: "open_settings".into(),
+            args: None,
+        };
+        let v = serde_json::to_value(&action).unwrap();
+        assert_eq!(v["type"], "invoke");
+        assert_eq!(v["capability_id"], "open_settings");
+        // args=None 时 skip_serializing_if 生效
+        assert!(v.get("args").is_none());
     }
 
     // ── derive_title 测试 ────────────────────────────────────────────────

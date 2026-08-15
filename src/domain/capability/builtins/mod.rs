@@ -27,6 +27,8 @@
 
 pub mod analyze_image_palette;
 pub mod create_sticky;
+pub mod diagnostics;
+pub mod edit_clipboard_image;
 pub mod get_settings;
 pub mod image_input;
 pub mod list_clipboard_images;
@@ -34,7 +36,11 @@ pub mod list_sticky;
 pub mod list_windows;
 pub mod ocr_engine;
 pub mod ocr_image;
+pub mod open_chat;
+pub mod open_clipboard_mode;
+pub mod open_logs_data_dir;
 pub mod open_path;
+pub mod open_settings;
 pub mod open_url;
 pub mod pin_image;
 pub mod read_clipboard;
@@ -44,11 +50,15 @@ pub mod read_text_file;
 pub mod reveal_in_explorer;
 pub mod screenshot;
 pub mod search_apps;
+pub mod start_content_editor;
+pub mod start_region_capture;
 pub mod search_clipboard_history;
 pub mod search_files;
 pub mod set_sticky_geometry;
 pub mod set_sticky_visibility;
 pub mod sticky_common;
+pub mod sticky_manager;
+pub mod system_ops;
 pub mod trash_sticky;
 pub mod update_setting;
 pub mod update_sticky;
@@ -82,6 +92,41 @@ mod tests {
     fn phase_0_20_7_capabilities_are_in_inventory() {
         let registry = crate::domain::capability::CapabilityRegistry::new();
         for id in ["analyze_image_palette"] {
+            assert!(registry.get(id).is_some(), "{id} 应通过 inventory 注册");
+        }
+    }
+
+    #[test]
+    fn phase_0_21_1_capabilities_are_in_inventory() {
+        let registry = crate::domain::capability::CapabilityRegistry::new();
+        for id in [
+            "open_settings",
+            "sticky_manager",
+            "edit_clipboard_image",
+            "lock",
+            "shutdown",
+            "restart",
+            "sleep",
+            "clear_history",
+            "exit_blink",
+            "open_logs",
+            "open_data_dir",
+            "blink_print_debug_info",
+            "blink_debug_inithook",
+        ] {
+            assert!(registry.get(id).is_some(), "{id} 应通过 inventory 注册");
+        }
+    }
+
+    #[test]
+    fn phase_0_21_2_chord_starter_capabilities_are_in_inventory() {
+        let registry = crate::domain::capability::CapabilityRegistry::new();
+        for id in [
+            "open_chat",
+            "start_region_capture",
+            "open_clipboard_mode",
+            "start_content_editor",
+        ] {
             assert!(registry.get(id).is_some(), "{id} 应通过 inventory 注册");
         }
     }

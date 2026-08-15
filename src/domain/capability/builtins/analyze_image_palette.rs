@@ -29,6 +29,8 @@ use serde_json::{Value, json};
 use super::image_input::resolve_image_ref;
 use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext, ItemResult,
+    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
+    RuntimeRequirement,
 };
 use crate::domain::palette;
 
@@ -83,6 +85,18 @@ impl Capability for AnalyzeImagePalette {
         }
     }
 
+
+    fn policy(&self) -> CapabilityPolicy {
+        CapabilityPolicy {
+            allowed_origins: OriginSet::ALL,
+            runtime_requirement: RuntimeRequirement::NONE,
+            danger: DangerClass::Safe,
+            sensitive: true,
+            ai_default: AiDefault::On,
+            mcp_default: McpDefault::DefaultOff,
+            confirmation: ConfirmationPolicy::sensitive(),
+        }
+    }
     async fn invoke(
         &self,
         args: Value,

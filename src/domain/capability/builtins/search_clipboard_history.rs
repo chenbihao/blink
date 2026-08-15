@@ -21,6 +21,8 @@ use serde_json::{Value, json};
 
 use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
+    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
+    RuntimeRequirement,
 };
 use crate::infra::data::clipboard::{query_recent, search as search_history};
 
@@ -65,6 +67,18 @@ impl Capability for SearchClipboardHistory {
         }
     }
 
+
+    fn policy(&self) -> CapabilityPolicy {
+        CapabilityPolicy {
+            allowed_origins: OriginSet::ALL,
+            runtime_requirement: RuntimeRequirement::NONE,
+            danger: DangerClass::Safe,
+            sensitive: true,
+            ai_default: AiDefault::On,
+            mcp_default: McpDefault::DefaultOff,
+            confirmation: ConfirmationPolicy::sensitive(),
+        }
+    }
     async fn invoke(
         &self,
         args: Value,

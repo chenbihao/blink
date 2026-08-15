@@ -3,8 +3,10 @@
 //! 12 个内置动作，每个一个 struct `impl Action`。
 //! 从 `commands.rs::execute_builtin_action` 的 match 分支迁移而来。
 //!
-//! **i18n**（0.8.6 §8.2.4）：title/subtitle 走 `LocalizableText`，
-//! `list_builtin_actions` 按当前 UI 语言 resolve。
+//! **i18n**（0.8.6 §8.2.4）：title/subtitle 走 `LocalizableText`。
+//! **0.21.3**：`list_builtin_actions` 不再从 ActionRegistry 读 title/subtitle，
+//! 改为从 `BuiltinEngine::ACTIONS` descriptor 自带双语字段读。本模块的
+//! `title()`/`subtitle()` 仅保留供 0.21.7 删除前的兼容期使用。
 //!
 //! **0.9.0 §3.3 演进**：所有 12 个动作**显式覆盖** `schema()` + `danger_class()`——
 //! 即使多数是 `Safe`，也强制开发者思考,防漏于千里之堤。参数化 3 个（`OpenUrl` /

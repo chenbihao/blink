@@ -889,6 +889,9 @@ fn main() {
             app::commands::set_group_expanded,
             app::commands::list_builtin_actions,
             app::commands::list_context_bindings,
+            // 0.21.4：功能目录聚合与批量 binding 操作
+            app::commands::list_feature_catalog,
+            app::commands::apply_binding_ops,
             app::commands::trigger_chord,
             app::commands::list_chord_actions,
             app::commands::list_all_chord_actions,

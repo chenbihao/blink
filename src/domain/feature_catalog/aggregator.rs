@@ -1,0 +1,1316 @@
+//! FeatureCatalog 聚合器（0.21.4）。
+//!
+//! 从多个数据源聚合功能目录项：
+//! - `BuiltinEngine::ACTIONS` descriptor（13 无参 + 3 参数化）
+//! - `ChordRegistry` binding（6 个 chord action）
+//! - `CapabilityRegistry` entries（builtin + plugin capability）
+//!
+//! 聚合策略：
+//! 1. 以 builtin descriptor 为基准，每个 descriptor 生成一个 FeatureCatalogItem。
+//! 2. Chord binding 按 capability_id 关联到已有 item（补充 binding），或独立成项。
+//! 3. CapabilityRegistry 中未被 descriptor/chord 覆盖的 capability 独立成项。
+//! 4. 未知/已移除 id 保留为残留项，标记 `SourceUnavailable`。
+
+use std::collections::{HashMap, HashSet};
+
+use super::types::*;
+
+use crate::domain::capability::{
+    Capability, CapabilityPolicy, CapabilityRegistry, DangerClass,
+    InvocationOrigin, RuntimeRequirement,
+};
+use crate::domain::chord::{ChordRegistry, ChordTarget};
+use crate::domain::plugin::PluginEngine;
+use crate::domain::search::{list_builtin_actions, list_builtin_context_bindings};
+
+/// FeatureCatalog 聚合器——纯数据聚合，不持有状态。
+///
+/// 每次调用 `aggregate()` 从传入的各 registry / config 重建目录。
+/// 调用方（command 层）负责传入最新的 config 快照。
+pub struct FeatureCatalogAggregator;
+
+impl FeatureCatalogAggregator {
+    /// 聚合所有数据源，生成功能目录。
+    ///
+    /// # 参数
+    /// - `disabled_builtin`: 用户禁用的 builtin action id 列表
+    /// - `disabled_chord`: 用户禁用的 chord action id 列表
+    /// - `disabled_context`: 用户禁用的 context binding key 列表
+    /// - `language`: 当前 UI 语言（"zh" / "en" 等）
+    /// - `cap_registry`: CapabilityRegistry（已注册的 capability）
+    /// - `chord_registry`: ChordRegistry（已注册的 chord action）
+    /// - `plugin_engine`: 可选的 PluginEngine（None = CLI/无插件环境）
+    pub fn aggregate(
+        disabled_builtin: &[String],
+        disabled_chord: &[String],
+        disabled_context: &[String],
+        language: &str,
+        cap_registry: &CapabilityRegistry,
+        chord_registry: &ChordRegistry,
+        plugin_engine: Option<&PluginEngine>,
+    ) -> Vec<FeatureCatalogItem> {
+        let use_en = language.starts_with("en");
+        let disabled_context_set: HashSet<&str> =
+            disabled_context.iter().map(|s| s.as_str()).collect();
+
+        // ── Step 1: builtin descriptor → 目录项 ──────────────────────────
+        // list_builtin_actions 接收 disabled_builtin_actions，内部读取 descriptor 双语 title
+        let builtin_actions = list_builtin_actions(disabled_builtin, language);
+        // list_builtin_context_bindings 接收 disabled_context_bindings，但当前 disabled_builtin
+        // 是 disabled_builtin_actions（不同分片）。context binding 的 disabled 状态由
+        // disabled_context_set 在下面单独判定。
+        let context_bindings = list_builtin_context_bindings(disabled_context, language);
+
+        // 用 feature_id → index 做查重，chord binding 和 capability 都靠这个关联
+        let mut items: Vec<FeatureCatalogItem> = Vec::new();
+        let mut feature_id_to_index: HashMap<String, usize> = HashMap::new();
+        // capability_id → feature_id 的映射，chord binding 和独立 capability 据此关联
+        let mut cap_id_to_feature_id: HashMap<String, String> = HashMap::new();
+
+        for action in &builtin_actions {
+            let cap_id = &action.id; // 0.21.3: descriptor id == capability_id
+            let feature_id = format!("blink.{}", cap_id);
+            let group = FeatureGroup::infer_from_descriptor_id(cap_id);
+
+            // 收集该 descriptor 的 binding
+            let mut bindings = Vec::new();
+
+            // SearchKeyword binding（所有 builtin action 都有关键词）
+            bindings.push(BindingSummary {
+                binding_id: cap_id.clone(),
+                kind: BindingKind::SearchKeyword,
+                enabled: action.enabled,
+                trigger_label: if use_en {
+                    format!("Keywords: {}", action.keywords.join(", "))
+                } else {
+                    format!("关键词：{}", action.keywords.join("、"))
+                },
+            });
+
+        // context binding 的 target_id 格式为 "builtin:{action_id}"
+        // 需要提取 action_id 来匹配 descriptor
+        for ctx in &context_bindings {
+            let ctx_target_id = ctx["target_id"].as_str().unwrap_or_default();
+            // target_id 格式 "builtin:open_url" → 提取 "open_url"
+            let ctx_action_id = ctx_target_id
+                .strip_prefix("builtin:")
+                .unwrap_or(ctx_target_id);
+            if ctx_action_id == *cap_id {
+                let ctx_key = ctx["key"].as_str().unwrap_or_default().to_string();
+                let enabled = !disabled_context_set.contains(ctx_key.as_str());
+                bindings.push(BindingSummary {
+                    binding_id: ctx_key,
+                    kind: BindingKind::ContextBinding,
+                    enabled,
+                    trigger_label: ctx["trigger_label"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                });
+            }
+        }
+
+            // 本地可用性
+            let local_availability = if !action.enabled {
+                LocalAvailability::Disabled
+            } else {
+                LocalAvailability::Available
+            };
+
+            // Capability 投影
+            let cap_projection = cap_registry
+                .get(cap_id)
+                .map(|cap| build_capability_projection(&cap, FeatureSource::Builtin));
+
+            let unavailable_reason = if local_availability != LocalAvailability::Available {
+                if !action.enabled {
+                    Some(if use_en { "Disabled by user".into() } else { "用户已禁用".into() })
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            cap_id_to_feature_id.insert(cap_id.clone(), feature_id.clone());
+            feature_id_to_index.insert(feature_id.clone(), items.len());
+
+            items.push(FeatureCatalogItem {
+                feature_id,
+                title: action.title.clone(),
+                description: action.subtitle.clone(),
+                group,
+                source: FeatureSource::Builtin,
+                capability_id: Some(cap_id.clone()),
+                bindings,
+                local_availability,
+                capability_projection: cap_projection,
+                unavailable_reason,
+            });
+        }
+
+        // ── Step 2: chord binding → 补充到已有 item 或独立成项 ──────────
+        let chord_list = chord_registry.list_all(disabled_chord, &Default::default(), language);
+        for chord in &chord_list {
+            let chord_id = chord["id"].as_str().unwrap_or_default().to_string();
+            let label = chord["label"].as_str().unwrap_or_default().to_string();
+            let key = chord["key"].as_str().unwrap_or_default().to_string();
+            let enabled = chord["enabled"].as_bool().unwrap_or(true);
+
+            // 查找 chord 的 target capability_id
+            let target_cap_id: Option<String> = chord_registry
+                .actions_iter()
+                .find(|a| a.id() == chord_id)
+                .and_then(|a| match a.target() {
+                    ChordTarget::Capability { capability_id, .. } => {
+                        Some(capability_id.to_string())
+                    }
+                    ChordTarget::VoiceInteraction => None,
+                });
+
+            let trigger_label = if key.is_empty() {
+                label.clone()
+            } else if use_en {
+                format!("Alt+{} (hold)", key.to_uppercase())
+            } else {
+                format!("Alt+{}", key.to_uppercase())
+            };
+
+            let binding_summary = BindingSummary {
+                binding_id: format!("chord.{}", chord_id),
+                kind: BindingKind::ChordKey,
+                enabled,
+                trigger_label,
+            };
+
+            if let Some(ref cap_id) = target_cap_id {
+                // 有关联的 capability——尝试补充到已有 item
+                if let Some(feat_id) = cap_id_to_feature_id.get(cap_id) {
+                    if let Some(&idx) = feature_id_to_index.get(feat_id) {
+                        items[idx].bindings.push(binding_summary);
+                        // 如果 chord 被 disable 但 descriptor 没被 disable，
+                        // 本地可用性应反映 chord 的 disable 状态
+                        if !enabled && items[idx].local_availability == LocalAvailability::Available {
+                            // chord disabled 不等于整个功能不可用——
+                            // 只是 chord binding 不可用。保持 Available，binding.enabled=false。
+                            // 但如果该功能只有 chord binding 且 chord 被禁用，则应标记 Disabled。
+                            // 当前所有 chord 对应的 capability 也有 descriptor，所以保持 Available。
+                        }
+                        continue;
+                    }
+                }
+
+                // capability 存在但没有对应的 descriptor item——独立成项
+                let feature_id = format!("chord.{}", chord_id);
+                let group = FeatureGroup::infer_from_capability_id(cap_id);
+                let cap_projection = cap_registry
+                    .get(cap_id)
+                    .map(|cap| build_capability_projection(&cap, FeatureSource::Chord));
+
+                cap_id_to_feature_id.insert(cap_id.clone(), feature_id.clone());
+                feature_id_to_index.insert(feature_id.clone(), items.len());
+
+                items.push(FeatureCatalogItem {
+                    feature_id,
+                    title: label.clone(),
+                    description: String::new(),
+                    group,
+                    source: FeatureSource::Chord,
+                    capability_id: Some(cap_id.clone()),
+                    bindings: vec![binding_summary],
+                    local_availability: if !enabled {
+                        LocalAvailability::Disabled
+                    } else {
+                        LocalAvailability::Available
+                    },
+                    capability_projection: cap_projection,
+                    unavailable_reason: if !enabled {
+                        Some(if use_en { "Chord disabled".into() } else { "Chord 已禁用".into() })
+                    } else {
+                        None
+                    },
+                });
+            } else {
+                // VoiceInteraction —— Interaction-only，无 capability
+                let feature_id = format!("chord.{}", chord_id);
+                feature_id_to_index.insert(feature_id.clone(), items.len());
+
+                items.push(FeatureCatalogItem {
+                    feature_id,
+                    title: label,
+                    description: if use_en {
+                        "Voice interaction (hold to talk)".into()
+                    } else {
+                        "语音交互（按住说话）".into()
+                    },
+                    group: FeatureGroup::BlinkManagement,
+                    source: FeatureSource::Chord,
+                    capability_id: None,
+                    bindings: vec![binding_summary],
+                    local_availability: if !enabled {
+                        LocalAvailability::Disabled
+                    } else {
+                        LocalAvailability::Available
+                    },
+                    capability_projection: None,
+                    unavailable_reason: if !enabled {
+                        Some(if use_en { "Chord disabled".into() } else { "Chord 已禁用".into() })
+                    } else {
+                        None
+                    },
+                });
+            }
+        }
+
+        // ── Step 3: CapabilityRegistry 中未被覆盖的 capability 独立成项 ─
+        let covered_cap_ids: HashSet<String> = cap_id_to_feature_id.keys().cloned().collect();
+
+        // 收集所有插件 capability id（从 PluginEngine 的 manifest tools 派生）
+        let plugin_cap_ids: HashSet<String> = if let Some(pe) = plugin_engine {
+            pe.list_manifests()
+                .iter()
+                .flat_map(|manifest| {
+                    manifest.tools.iter().map(move |tool| {
+                        crate::domain::plugin::plugin_tool_id(&manifest.id, &tool.name)
+                    })
+                })
+                .collect()
+        } else {
+            HashSet::new()
+        };
+
+        for (cap_id, cap_arc) in cap_registry.entries() {
+            if covered_cap_ids.contains(&cap_id) {
+                continue;
+            }
+
+            // 判断是插件还是 builtin：检查是否在插件 tool id 集合中
+            let is_plugin = plugin_cap_ids.contains(&cap_id);
+            let source = if is_plugin {
+                FeatureSource::Plugin
+            } else {
+                FeatureSource::BuiltinCapability
+            };
+
+            let group = if is_plugin {
+                FeatureGroup::OtherPlugin
+            } else {
+                FeatureGroup::infer_from_capability_id(&cap_id)
+            };
+
+            let feature_id = if is_plugin {
+                format!("plugin.{}", cap_id)
+            } else {
+                format!("blink.{}", cap_id)
+            };
+
+            let schema = cap_arc.schema();
+            let title = if is_plugin {
+                // 尝试从 plugin manifest 获取名称
+                if let Some(pe) = plugin_engine {
+                    find_plugin_name_for_cap(pe, &cap_id, language)
+                } else {
+                    schema.description.clone()
+                }
+            } else {
+                schema.description.clone()
+            };
+
+            let cap_projection = build_capability_projection(&cap_arc, source);
+
+            // 插件可用性
+            let (local_availability, unavailable_reason) = if is_plugin {
+                if let Some(pe) = plugin_engine {
+                    // 从 plugin_cap_ids 反查 plugin_id
+                    let plugin_id = find_plugin_id_for_cap(pe, &cap_id);
+                    if let Some(pid) = plugin_id {
+                        if !pe.is_enabled(&pid) {
+                            (LocalAvailability::Disabled, Some(
+                                if use_en { "Plugin disabled".into() } else { "插件已禁用".into() }
+                            ))
+                        } else {
+                            (LocalAvailability::Available, None)
+                        }
+                    } else {
+                        (LocalAvailability::Available, None)
+                    }
+                } else {
+                    (LocalAvailability::SourceUnavailable, Some(
+                        if use_en { "Plugin engine not available".into() } else { "插件引擎不可用".into() }
+                    ))
+                }
+            } else {
+                (LocalAvailability::Available, None)
+            };
+
+            items.push(FeatureCatalogItem {
+                feature_id,
+                title,
+                description: String::new(),
+                group,
+                source,
+                capability_id: Some(cap_id.clone()),
+                bindings: Vec::new(),
+                local_availability,
+                capability_projection: Some(cap_projection),
+                unavailable_reason,
+            });
+        }
+
+        // ── Step 4: 按 group 排序，组内按 title 排序 ────────────────────
+        items.sort_by(|a, b| {
+            a.group.cmp(&b.group).then_with(|| a.title.cmp(&b.title))
+        });
+
+        items
+    }
+}
+
+// ── 辅助函数 ─────────────────────────────────────────────────────────────────
+
+/// 从 PluginEngine 查找插件 capability 对应的 plugin_id。
+///
+/// 遍历所有 manifest 的 tools，用 `plugin_tool_id` 构造 id 并比对。
+fn find_plugin_id_for_cap(
+    pe: &PluginEngine,
+    cap_id: &str,
+) -> Option<String> {
+    for manifest in pe.list_manifests() {
+        for tool in &manifest.tools {
+            let id = crate::domain::plugin::plugin_tool_id(&manifest.id, &tool.name);
+            if id == cap_id {
+                return Some(manifest.id.clone());
+            }
+        }
+    }
+    None
+}
+
+/// 从 PluginEngine 查找插件 capability 对应的插件显示名。
+fn find_plugin_name_for_cap(
+    pe: &PluginEngine,
+    cap_id: &str,
+    language: &str,
+) -> String {
+    if let Some(plugin_id) = find_plugin_id_for_cap(pe, cap_id) {
+        if let Some(manifest) = pe.get_manifest(&plugin_id) {
+            return manifest.name.resolve(language);
+        }
+    }
+    cap_id.to_string()
+}
+
+/// 从 Capability 构建 CatalogCapabilityProjection。
+fn build_capability_projection(
+    cap: &std::sync::Arc<dyn Capability>,
+    source: FeatureSource,
+) -> CatalogCapabilityProjection {
+    let schema = cap.schema();
+    let policy = cap.policy();
+
+    let danger = match policy.danger {
+        DangerClass::Safe => "safe",
+        DangerClass::Dangerous => "dangerous",
+    };
+
+    let ai_status = project_ai_exit_status(&policy);
+    let mcp_status = project_mcp_exit_status(&policy);
+
+    let runtime_requirement = format_runtime_requirement(policy.runtime_requirement);
+
+    CatalogCapabilityProjection {
+        capability_id: cap.id().to_string(),
+        source,
+        danger: danger.to_string(),
+        sensitive: policy.sensitive,
+        requires_confirmation: policy.requires_confirmation(),
+        ai_status,
+        mcp_status,
+        runtime_requirement,
+        description: schema.description,
+    }
+}
+
+/// 从 policy 投影 AI 出口状态。
+fn project_ai_exit_status(policy: &CapabilityPolicy) -> CatalogExitStatus {
+    if !policy.allowed_origins.contains(InvocationOrigin::LocalAi) {
+        CatalogExitStatus::CodeForbidden
+    } else {
+        // 0.21.5 将从用户 allowlist 读取；当前从 ai_default 投影
+        match policy.ai_default {
+            crate::domain::capability::AiDefault::On => CatalogExitStatus::Enabled,
+            crate::domain::capability::AiDefault::Off => CatalogExitStatus::Disabled,
+        }
+    }
+}
+
+/// 从 policy 投影 MCP 出口状态。
+fn project_mcp_exit_status(policy: &CapabilityPolicy) -> CatalogExitStatus {
+    if !policy.allowed_origins.contains(InvocationOrigin::Mcp) {
+        CatalogExitStatus::CodeForbidden
+    } else {
+        match policy.mcp_default {
+            crate::domain::capability::McpDefault::DefaultOff => CatalogExitStatus::Disabled,
+            crate::domain::capability::McpDefault::Forbidden => CatalogExitStatus::CodeForbidden,
+        }
+    }
+}
+
+/// 格式化运行时要求为人类可读字符串。
+///
+/// `RuntimeRequirement` 已实现 `Display`，直接复用。
+fn format_runtime_requirement(req: RuntimeRequirement) -> String {
+    req.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::capability::{
+        AiDefault, CapabilityError, CapabilityRegistry, CapabilityResult, CapabilitySchema,
+        ConfirmationPolicy, DangerClass, McpDefault, OriginSet,
+        RuntimeRequirement,
+    };
+    use crate::domain::chord::{
+        ChordAction, ChordRegistry, ChordSurface, ChordTarget,
+    };
+    use crate::domain::plugin::LocalizableText;
+    use std::sync::Arc;
+
+    // ── 辅助：构造 mock Capability ──────────────────────────────────────────
+
+    /// 测试用 mock Capability——可自定义 id、schema、policy。
+    struct MockCap {
+        id_val: &'static str,
+        schema_val: CapabilitySchema,
+        policy_val: CapabilityPolicy,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::domain::capability::Capability for MockCap {
+        fn id(&self) -> &str {
+            self.id_val
+        }
+        fn schema(&self) -> CapabilitySchema {
+            self.schema_val.clone()
+        }
+        fn policy(&self) -> CapabilityPolicy {
+            self.policy_val.clone()
+        }
+        async fn invoke(
+            &self,
+            _args: serde_json::Value,
+            _ctx: &crate::domain::capability::InvokeContext<'_>,
+        ) -> Result<CapabilityResult, CapabilityError> {
+            Ok(CapabilityResult::Done {
+                summary: "mock".into(),
+            })
+        }
+    }
+
+    /// 便利构造：Safe + 无运行时要求 + 全出口允许。
+    fn make_mock_cap(id: &'static str) -> Arc<dyn Capability> {
+        Arc::new(MockCap {
+            id_val: id,
+            schema_val: CapabilitySchema::empty(id, "mock capability"),
+            policy_val: CapabilityPolicy::default(),
+        })
+    }
+
+    /// 便利构造：自定义 policy。
+    fn make_mock_cap_with_policy(
+        id: &'static str,
+        policy: CapabilityPolicy,
+    ) -> Arc<dyn Capability> {
+        Arc::new(MockCap {
+            id_val: id,
+            schema_val: CapabilitySchema::empty(id, "mock capability"),
+            policy_val: policy,
+        })
+    }
+
+    // ── 辅助：构造 mock ChordAction ─────────────────────────────────────────
+
+    /// 测试用 mock ChordAction。
+    struct MockChordAction {
+        id_val: &'static str,
+        key_val: char,
+        label_val: LocalizableText,
+        target_val: ChordTarget,
+    }
+
+    impl ChordAction for MockChordAction {
+        fn id(&self) -> &str {
+            self.id_val
+        }
+        fn default_key(&self) -> char {
+            self.key_val
+        }
+        fn label(&self) -> &LocalizableText {
+            &self.label_val
+        }
+        fn surface(&self) -> ChordSurface {
+            ChordSurface::Default
+        }
+        fn target(&self) -> ChordTarget {
+            self.target_val.clone()
+        }
+    }
+
+    /// 便利构造：ChordTarget::Capability 的 chord action。
+    fn make_capability_chord(
+        id: &'static str,
+        key: char,
+        cap_id: &'static str,
+        label: &str,
+    ) -> Arc<dyn ChordAction> {
+        Arc::new(MockChordAction {
+            id_val: id,
+            key_val: key,
+            label_val: LocalizableText::Plain(label.to_string()),
+            target_val: ChordTarget::Capability {
+                capability_id: cap_id,
+                input_param: None,
+                extra_args: Vec::new(),
+                hide_main_before: false,
+            },
+        })
+    }
+
+    /// 便利构造：ChordTarget::VoiceInteraction 的 chord action。
+    fn make_voice_chord(id: &'static str, key: char, label: &str) -> Arc<dyn ChordAction> {
+        Arc::new(MockChordAction {
+            id_val: id,
+            key_val: key,
+            label_val: LocalizableText::Plain(label.to_string()),
+            target_val: ChordTarget::VoiceInteraction,
+        })
+    }
+
+    // ── 辅助：构造空 PluginEngine（测试环境无插件） ──────────────────────────
+    // PluginEngine 需要 SqlitePool，在单元测试中不构造。
+    // aggregate 的 plugin_engine 参数传 None 即可测试非插件路径。
+
+    // ── 1. FeatureGroup 推断 ──────────────────────────────────────────────────
+
+    #[test]
+    fn infer_group_for_known_ids() {
+        assert_eq!(
+            FeatureGroup::infer_from_capability_id("open_url"),
+            FeatureGroup::AppsFilesLinks
+        );
+        assert_eq!(
+            FeatureGroup::infer_from_capability_id("read_clipboard"),
+            FeatureGroup::ClipboardText
+        );
+        assert_eq!(
+            FeatureGroup::infer_from_capability_id("screenshot"),
+            FeatureGroup::ImageColor
+        );
+        assert_eq!(
+            FeatureGroup::infer_from_capability_id("create_sticky"),
+            FeatureGroup::StickyContent
+        );
+        assert_eq!(
+            FeatureGroup::infer_from_capability_id("lock"),
+            FeatureGroup::WindowSystem
+        );
+        assert_eq!(
+            FeatureGroup::infer_from_capability_id("open_settings"),
+            FeatureGroup::BlinkManagement
+        );
+    }
+
+    #[test]
+    fn infer_group_for_unknown_id_is_other() {
+        assert_eq!(
+            FeatureGroup::infer_from_capability_id("some_random_cap"),
+            FeatureGroup::OtherPlugin
+        );
+    }
+
+    #[test]
+    fn infer_group_from_descriptor_id_matches_capability_id() {
+        // 0.21.3: descriptor id == capability_id，infer 结果应一致
+        assert_eq!(
+            FeatureGroup::infer_from_descriptor_id("open_url"),
+            FeatureGroup::infer_from_capability_id("open_url")
+        );
+        assert_eq!(
+            FeatureGroup::infer_from_descriptor_id("screenshot"),
+            FeatureGroup::infer_from_capability_id("screenshot")
+        );
+    }
+
+    // ── 2. plugin_tool_id 格式 ────────────────────────────────────────────────
+
+    #[test]
+    fn plugin_tool_id_format() {
+        assert_eq!(
+            crate::domain::plugin::plugin_tool_id("translate", "translate"),
+            "translate_translate"
+        );
+        assert_eq!(
+            crate::domain::plugin::plugin_tool_id("weather", "get_weather"),
+            "weather_get_weather"
+        );
+        assert_eq!(
+            crate::domain::plugin::plugin_tool_id("echo", "echo"),
+            "echo_echo"
+        );
+    }
+
+    // ── 3. RuntimeRequirement 格式化 ──────────────────────────────────────────
+
+    #[test]
+    fn format_runtime_none() {
+        assert_eq!(format_runtime_requirement(RuntimeRequirement::NONE), "none");
+    }
+
+    #[test]
+    fn format_runtime_combined() {
+        let req = RuntimeRequirement::DESKTOP_SESSION | RuntimeRequirement::MAIN_PROCESS;
+        let formatted = format_runtime_requirement(req);
+        assert!(formatted.contains("main_process"));
+        assert!(formatted.contains("desktop_session"));
+    }
+
+    #[test]
+    fn format_runtime_gui_surface() {
+        let formatted = format_runtime_requirement(RuntimeRequirement::GUI_SURFACE);
+        // Display 不调用 normalize()，GUI_SURFACE 只输出自身
+        assert!(formatted.contains("gui_surface"));
+    }
+
+    // ── 4. AI/MCP 出口状态投影 ─────────────────────────────────────────────────
+
+    #[test]
+    fn project_ai_status_forbidden() {
+        let policy = CapabilityPolicy {
+            allowed_origins: OriginSet::LOCAL_SURFACE,
+            ..Default::default()
+        };
+        assert_eq!(
+            project_ai_exit_status(&policy),
+            CatalogExitStatus::CodeForbidden
+        );
+    }
+
+    #[test]
+    fn project_ai_status_enabled() {
+        let policy = CapabilityPolicy {
+            allowed_origins: OriginSet::ALL,
+            ai_default: AiDefault::On,
+            ..Default::default()
+        };
+        assert_eq!(
+            project_ai_exit_status(&policy),
+            CatalogExitStatus::Enabled
+        );
+    }
+
+    #[test]
+    fn project_ai_status_disabled() {
+        let policy = CapabilityPolicy {
+            allowed_origins: OriginSet::ALL,
+            ai_default: AiDefault::Off,
+            ..Default::default()
+        };
+        assert_eq!(
+            project_ai_exit_status(&policy),
+            CatalogExitStatus::Disabled
+        );
+    }
+
+    #[test]
+    fn project_mcp_status_forbidden() {
+        let policy = CapabilityPolicy {
+            allowed_origins: OriginSet::LOCAL_SURFACE,
+            ..Default::default()
+        };
+        assert_eq!(
+            project_mcp_exit_status(&policy),
+            CatalogExitStatus::CodeForbidden
+        );
+    }
+
+    #[test]
+    fn project_mcp_status_code_forbidden_via_mcp_default() {
+        let policy = CapabilityPolicy {
+            allowed_origins: OriginSet::ALL,
+            mcp_default: McpDefault::Forbidden,
+            ..Default::default()
+        };
+        assert_eq!(
+            project_mcp_exit_status(&policy),
+            CatalogExitStatus::CodeForbidden
+        );
+    }
+
+    #[test]
+    fn project_mcp_status_disabled() {
+        let policy = CapabilityPolicy {
+            allowed_origins: OriginSet::ALL,
+            mcp_default: McpDefault::DefaultOff,
+            ..Default::default()
+        };
+        assert_eq!(
+            project_mcp_exit_status(&policy),
+            CatalogExitStatus::Disabled
+        );
+    }
+
+    // ── 5. build_capability_projection ─────────────────────────────────────────
+
+    #[test]
+    fn build_projection_for_safe_cap() {
+        let cap = make_mock_cap("test_safe_cap");
+        let proj = build_capability_projection(&cap, FeatureSource::Builtin);
+
+        assert_eq!(proj.capability_id, "test_safe_cap");
+        assert_eq!(proj.source, FeatureSource::Builtin);
+        assert_eq!(proj.danger, "safe");
+        assert!(!proj.sensitive);
+        assert!(!proj.requires_confirmation);
+        assert_eq!(proj.runtime_requirement, "none");
+    }
+
+    #[test]
+    fn build_projection_for_dangerous_cap() {
+        let cap = make_mock_cap_with_policy(
+            "test_dangerous_cap",
+            CapabilityPolicy {
+                danger: DangerClass::Dangerous,
+                confirmation: ConfirmationPolicy::dangerous(true),
+                ..Default::default()
+            },
+        );
+        let proj = build_capability_projection(&cap, FeatureSource::Builtin);
+
+        assert_eq!(proj.danger, "dangerous");
+        assert!(proj.requires_confirmation);
+    }
+
+    #[test]
+    fn build_projection_for_sensitive_cap() {
+        let cap = make_mock_cap_with_policy(
+            "test_sensitive_cap",
+            CapabilityPolicy {
+                sensitive: true,
+                confirmation: ConfirmationPolicy::sensitive(),
+                ..Default::default()
+            },
+        );
+        let proj = build_capability_projection(&cap, FeatureSource::Builtin);
+
+        assert!(proj.sensitive);
+        assert!(proj.requires_confirmation);
+        // sensitive 不改变 danger
+        assert_eq!(proj.danger, "safe");
+    }
+
+    #[test]
+    fn build_projection_preserves_source() {
+        for source in [
+            FeatureSource::Builtin,
+            FeatureSource::Chord,
+            FeatureSource::Plugin,
+            FeatureSource::BuiltinCapability,
+        ] {
+            let cap = make_mock_cap("test_source_cap");
+            let proj = build_capability_projection(&cap, source);
+            assert_eq!(proj.source, source);
+        }
+    }
+
+    // ── 6. 聚合器集成测试 ─────────────────────────────────────────────────────
+
+    #[test]
+    fn aggregate_builtin_descriptors() {
+        // 空 registry + 空 chord → 只返回 builtin descriptor 项
+        let cap_reg = CapabilityRegistry::default();
+        let chord_reg = ChordRegistry::default();
+
+        let items = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &[],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None,
+        );
+
+        // 至少有 builtin action（list_builtin_actions 返回的条目数）
+        assert!(!items.is_empty(), "builtin descriptor 目录不应为空");
+
+        // Builtin source 的项应有 SearchKeyword binding
+        for item in items.iter().filter(|i| i.source == FeatureSource::Builtin) {
+            assert!(
+                item.bindings.iter().any(|b| b.kind == BindingKind::SearchKeyword),
+                "builtin feature {} 应至少有 SearchKeyword binding",
+                item.feature_id
+            );
+            assert!(
+                item.feature_id.starts_with("blink."),
+                "builtin feature_id 应以 blink. 开头: {}",
+                item.feature_id
+            );
+        }
+
+        // BuiltinCapability source 的项（从 CapabilityRegistry inventory 补充的）
+        // 可能有空 bindings（无 descriptor/chord 关联）
+        for item in items.iter().filter(|i| i.source == FeatureSource::BuiltinCapability) {
+            assert!(
+                item.feature_id.starts_with("blink."),
+                "builtin_capability feature_id 应以 blink. 开头: {}",
+                item.feature_id
+            );
+        }
+    }
+
+    #[test]
+    fn aggregate_with_disabled_builtin() {
+        let cap_reg = CapabilityRegistry::default();
+        let chord_reg = ChordRegistry::default();
+
+        // 禁用 open_settings
+        let items = FeatureCatalogAggregator::aggregate(
+            &["open_settings".to_string()],
+            &[],
+            &[],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None,
+        );
+
+        let settings_item = items
+            .iter()
+            .find(|i| i.feature_id == "blink.open_settings")
+            .expect("应找到 open_settings 目录项");
+
+        assert_eq!(settings_item.local_availability, LocalAvailability::Disabled);
+        assert!(settings_item.unavailable_reason.is_some());
+        // SearchKeyword binding 的 enabled 应为 false
+        let sk_binding = settings_item
+            .bindings
+            .iter()
+            .find(|b| b.kind == BindingKind::SearchKeyword)
+            .expect("应有 SearchKeyword binding");
+        assert!(!sk_binding.enabled);
+    }
+
+    #[test]
+    fn aggregate_chord_supplements_existing_item() {
+        // 构造 chord action 指向 screenshot capability
+        // screenshot 是 builtin descriptor 之一，chord 应补充到已有 item
+        let mut chord_reg = ChordRegistry::new();
+        chord_reg.register(make_capability_chord(
+            "screenshot_test",
+            'a',
+            "screenshot",
+            "截图",
+        ));
+
+        let cap_reg = CapabilityRegistry::default();
+
+        let items = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &[],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None,
+        );
+
+        // screenshot 的目录项应有 ChordKey binding
+        let screenshot_item = items
+            .iter()
+            .find(|i| i.capability_id.as_deref() == Some("screenshot"))
+            .expect("应找到 screenshot 目录项");
+
+        let chord_binding = screenshot_item
+            .bindings
+            .iter()
+            .find(|b| b.kind == BindingKind::ChordKey)
+            .expect("screenshot 应有 ChordKey binding");
+
+        assert!(chord_binding.enabled);
+        assert!(chord_binding.binding_id.starts_with("chord."));
+    }
+
+    #[test]
+    fn aggregate_chord_voice_interaction_standalone() {
+        // VoiceInteraction chord 无 capability，应独立成项
+        let mut chord_reg = ChordRegistry::new();
+        chord_reg.register(make_voice_chord("voice_test", 'v', "语音输入"));
+
+        let cap_reg = CapabilityRegistry::default();
+
+        let items = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &[],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None,
+        );
+
+        let voice_item = items
+            .iter()
+            .find(|i| i.feature_id == "chord.voice_test")
+            .expect("应找到 voice_test 独立目录项");
+
+        assert_eq!(voice_item.source, FeatureSource::Chord);
+        assert!(voice_item.capability_id.is_none());
+        assert_eq!(voice_item.group, FeatureGroup::BlinkManagement);
+        assert_eq!(voice_item.local_availability, LocalAvailability::Available);
+    }
+
+    #[test]
+    fn aggregate_chord_disabled() {
+        let mut chord_reg = ChordRegistry::new();
+        chord_reg.register(make_voice_chord("disabled_voice", 'v', "语音"));
+
+        let cap_reg = CapabilityRegistry::default();
+
+        let items = FeatureCatalogAggregator::aggregate(
+            &[],
+            &["disabled_voice".to_string()],
+            &[],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None,
+        );
+
+        let voice_item = items
+            .iter()
+            .find(|i| i.feature_id == "chord.disabled_voice")
+            .expect("应找到 disabled_voice 目录项");
+
+        assert_eq!(voice_item.local_availability, LocalAvailability::Disabled);
+        assert!(voice_item.unavailable_reason.is_some());
+
+        let chord_binding = voice_item
+            .bindings
+            .iter()
+            .find(|b| b.kind == BindingKind::ChordKey)
+            .expect("应有 ChordKey binding");
+        assert!(!chord_binding.enabled);
+    }
+
+    #[test]
+    fn aggregate_uncovered_capability_standalone() {
+        // 注册一个不在 descriptor/chord 中的 capability
+        let cap_reg = CapabilityRegistry::default();
+        cap_reg.register(make_mock_cap("custom_cap_123"));
+
+        let chord_reg = ChordRegistry::default();
+
+        let items = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &[],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None, // 无 PluginEngine → 归为 BuiltinCapability
+        );
+
+        let custom_item = items
+            .iter()
+            .find(|i| i.capability_id.as_deref() == Some("custom_cap_123"))
+            .expect("应找到 custom_cap_123 目录项");
+
+        assert_eq!(custom_item.source, FeatureSource::BuiltinCapability);
+        assert_eq!(custom_item.feature_id, "blink.custom_cap_123");
+        assert_eq!(custom_item.local_availability, LocalAvailability::Available);
+        assert!(custom_item.capability_projection.is_some());
+    }
+
+    #[test]
+    fn aggregate_sorts_by_group_then_title() {
+        let cap_reg = CapabilityRegistry::default();
+        let chord_reg = ChordRegistry::default();
+
+        let items = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &[],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None,
+        );
+
+        // 验证排序：group 升序，组内 title 升序
+        for i in 1..items.len() {
+            assert!(
+                items[i - 1].group <= items[i].group,
+                "分组排序错误：{:?} > {:?}",
+                items[i - 1].group,
+                items[i].group
+            );
+            if items[i - 1].group == items[i].group {
+                assert!(
+                    items[i - 1].title <= items[i].title,
+                    "组内 title 排序错误：{:?} > {:?}",
+                    items[i - 1].title,
+                    items[i].title
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn aggregate_english_language() {
+        let cap_reg = CapabilityRegistry::default();
+        let chord_reg = ChordRegistry::default();
+
+        let items_zh = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &[],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None,
+        );
+
+        let items_en = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &[],
+            "en",
+            &cap_reg,
+            &chord_reg,
+            None,
+        );
+
+        // 两语言应返回相同数量的目录项
+        assert_eq!(items_zh.len(), items_en.len());
+
+        // 英文版本的 keyword binding trigger_label 应含 "Keywords:"
+        for item in &items_en {
+            if let Some(sk) = item
+                .bindings
+                .iter()
+                .find(|b| b.kind == BindingKind::SearchKeyword)
+            {
+                assert!(
+                    sk.trigger_label.starts_with("Keywords:"),
+                    "英文 trigger_label 应以 'Keywords:' 开头: {}",
+                    sk.trigger_label
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn aggregate_context_binding_attached() {
+        // 某些 builtin action 有 context binding（如 open_url 在剪贴板是 URL 时触发）
+        // 验证 context binding 被正确关联到对应 descriptor
+        let cap_reg = CapabilityRegistry::default();
+        let chord_reg = ChordRegistry::default();
+
+        let items = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &[],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None,
+        );
+
+        // 找有 context binding 的项（open_url 通常有 clipboard_is_url context trigger）
+        let has_context_binding: bool = items.iter().any(|item| {
+            item.bindings.iter().any(|b| b.kind == BindingKind::ContextBinding)
+        });
+
+        // 如果当前 builtin 没有任何 context binding，这个断言也能通过
+        // 但如果有，验证其 enabled 状态正确
+        if has_context_binding {
+            for item in &items {
+                for ctx in item.bindings.iter().filter(|b| b.kind == BindingKind::ContextBinding) {
+                    // 默认无禁用 → enabled = true
+                    assert!(ctx.enabled, "context binding {} 应为 enabled", ctx.binding_id);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn aggregate_context_binding_disabled() {
+        let cap_reg = CapabilityRegistry::default();
+        let chord_reg = ChordRegistry::default();
+
+        // 获取 context binding 的 items
+        let items_default = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &[],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None,
+        );
+
+        // 找到所有 context binding 的 key
+        let context_keys: Vec<String> = items_default
+            .iter()
+            .flat_map(|item| {
+                item.bindings
+                    .iter()
+                    .filter(|b| b.kind == BindingKind::ContextBinding)
+                    .map(|b| b.binding_id.clone())
+            })
+            .collect();
+
+        if !context_keys.is_empty() {
+            // 禁用第一个 context binding
+            let disabled_ctx = vec![context_keys[0].clone()];
+            let items_disabled = FeatureCatalogAggregator::aggregate(
+                &[],
+                &[],
+                &disabled_ctx,
+                "zh",
+                &cap_reg,
+                &chord_reg,
+                None,
+            );
+
+            // 验证对应的 context binding 被标记为 disabled
+            for item in &items_disabled {
+                for ctx in item
+                    .bindings
+                    .iter()
+                    .filter(|b| b.kind == BindingKind::ContextBinding)
+                {
+                    if ctx.binding_id == context_keys[0] {
+                        assert!(!ctx.enabled, "context binding {} 应被禁用", ctx.binding_id);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn aggregate_capability_projection_fields() {
+        // 注册一个有完整 policy 的 capability
+        let cap_reg = CapabilityRegistry::default();
+        cap_reg.register(make_mock_cap_with_policy(
+            "proj_test_cap",
+            CapabilityPolicy {
+                allowed_origins: OriginSet::ALL_LOCAL | OriginSet::CLI,
+                runtime_requirement: RuntimeRequirement::GUI_SURFACE,
+                danger: DangerClass::Dangerous,
+                sensitive: true,
+                ai_default: AiDefault::On,
+                mcp_default: McpDefault::Forbidden,
+                confirmation: ConfirmationPolicy::dangerous(false),
+            },
+        ));
+
+        let chord_reg = ChordRegistry::default();
+
+        let items = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &[],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None,
+        );
+
+        let proj_item = items
+            .iter()
+            .find(|i| i.capability_id.as_deref() == Some("proj_test_cap"))
+            .expect("应找到 proj_test_cap");
+
+        let proj = proj_item
+            .capability_projection
+            .as_ref()
+            .expect("应有 capability projection");
+
+        assert_eq!(proj.danger, "dangerous");
+        assert!(proj.sensitive);
+        assert!(proj.requires_confirmation);
+        // AI: ALL_LOCAL 含 LocalAi, ai_default=On → Enabled
+        assert_eq!(proj.ai_status, CatalogExitStatus::Enabled);
+        // MCP: allowed_origins 不含 Mcp → CodeForbidden
+        assert_eq!(proj.mcp_status, CatalogExitStatus::CodeForbidden);
+        // runtime: GUI_SURFACE normalize 后含 main_process + gui_surface
+        assert!(proj.runtime_requirement.contains("gui_surface"));
+    }
+
+    #[test]
+    fn aggregate_no_duplicate_feature_for_same_capability() {
+        // 同一个 capability_id 不应在 descriptor 和 chord 之外再独立成项
+        let cap_reg = CapabilityRegistry::default();
+        // 注册一个与 builtin descriptor 同 id 的 capability
+        // 这里用 "open_settings"（它通常在 descriptor 中存在）
+        cap_reg.register(make_mock_cap("open_settings"));
+
+        let chord_reg = ChordRegistry::default();
+
+        let items = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &[],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None,
+        );
+
+        // open_settings 应只出现一次（descriptor 已覆盖，不再独立成项）
+        let count = items
+            .iter()
+            .filter(|i| i.capability_id.as_deref() == Some("open_settings"))
+            .count();
+        assert_eq!(count, 1, "open_settings 应只出现一次，实际 {}", count);
+    }
+
+    #[test]
+    fn aggregate_chord_with_capability_not_in_descriptor() {
+        // chord 指向一个不在 descriptor 中的 capability
+        // 应独立成项（source = Chord）
+        let mut chord_reg = ChordRegistry::new();
+        chord_reg.register(make_capability_chord(
+            "custom_chord",
+            'x',
+            "non_descriptor_cap",
+            "自定义",
+        ));
+
+        let cap_reg = CapabilityRegistry::default();
+
+        let items = FeatureCatalogAggregator::aggregate(
+            &[],
+            &[],
+            &[],
+            "zh",
+            &cap_reg,
+            &chord_reg,
+            None,
+        );
+
+        // 应有 chord.custom_chord 项
+        let chord_item = items
+            .iter()
+            .find(|i| i.feature_id == "chord.custom_chord")
+            .expect("应找到 chord.custom_chord 独立项");
+
+        assert_eq!(chord_item.source, FeatureSource::Chord);
+        assert_eq!(
+            chord_item.capability_id.as_deref(),
+            Some("non_descriptor_cap")
+        );
+    }
+}

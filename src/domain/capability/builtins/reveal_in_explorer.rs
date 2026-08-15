@@ -11,6 +11,8 @@ use serde_json::{Value, json};
 
 use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
+    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
+    RuntimeRequirement,
 };
 
 /// `reveal_in_explorer` — 在 Windows 资源管理器中定位文件（高亮显示）。
@@ -43,6 +45,18 @@ impl Capability for RevealInExplorer {
         }
     }
 
+
+    fn policy(&self) -> CapabilityPolicy {
+        CapabilityPolicy {
+            allowed_origins: OriginSet::ALL,
+            runtime_requirement: RuntimeRequirement::DESKTOP_SESSION,
+            danger: DangerClass::Safe,
+            sensitive: false,
+            ai_default: AiDefault::On,
+            mcp_default: McpDefault::DefaultOff,
+            confirmation: ConfirmationPolicy::safe(),
+        }
+    }
     async fn invoke(
         &self,
         args: Value,

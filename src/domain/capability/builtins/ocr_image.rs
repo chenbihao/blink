@@ -11,6 +11,8 @@ use super::image_input::resolve_png_input;
 use super::ocr_engine::{OcrResult, backend};
 use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
+    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
+    RuntimeRequirement,
 };
 
 /// `ocr_image` — 识别图片中的文字，返回文本 + 行级坐标。
@@ -40,10 +42,23 @@ impl Capability for OcrImage {
                     }
                 }
             }),
+            sensitive: true, // 0.21.1 §4.1b：识图输出用户内容，对齐 analyze_image_palette
             ..Default::default()
         }
     }
 
+
+    fn policy(&self) -> CapabilityPolicy {
+        CapabilityPolicy {
+            allowed_origins: OriginSet::ALL,
+            runtime_requirement: RuntimeRequirement::NONE,
+            danger: DangerClass::Safe,
+            sensitive: true,
+            ai_default: AiDefault::On,
+            mcp_default: McpDefault::DefaultOff,
+            confirmation: ConfirmationPolicy::sensitive(),
+        }
+    }
     async fn invoke(
         &self,
         args: Value,

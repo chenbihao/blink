@@ -255,8 +255,20 @@ impl Service for HotkeyService {
                             .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
                             .inner()
                             .clone();
+                        let cap_registry = app
+                            .state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>()
+                            .inner()
+                            .clone();
                         if let Err(e) = registry
-                            .trigger(&key, &chord_cfg.bindings, env_arc.as_ref(), None, None)
+                            .trigger(
+                                &key,
+                                &chord_cfg.bindings,
+                                cap_registry.as_ref(),
+                                env_arc.as_ref(),
+                                Some(env_arc.as_ref()),
+                                None,
+                                None,
+                            )
                             .await
                         {
                             tracing::warn!(%key, %e, "chord trigger 失败");

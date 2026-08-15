@@ -8,6 +8,8 @@ use super::read_sticky::required_id;
 use super::sticky_common::map_sticky_workflow_error;
 use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
+    CapabilityPolicy, ConfirmationPolicy, DangerClass, AiDefault, McpDefault, OriginSet,
+    RuntimeRequirement,
 };
 
 pub struct SetStickyVisibility;
@@ -36,6 +38,18 @@ impl Capability for SetStickyVisibility {
         }
     }
 
+
+    fn policy(&self) -> CapabilityPolicy {
+        CapabilityPolicy {
+            allowed_origins: OriginSet::LOCAL_AND_CLI,
+            runtime_requirement: RuntimeRequirement::GUI_SURFACE,
+            danger: DangerClass::Safe,
+            sensitive: false,
+            ai_default: AiDefault::On,
+            mcp_default: McpDefault::Forbidden,
+            confirmation: ConfirmationPolicy::safe(),
+        }
+    }
     async fn invoke(
         &self,
         args: Value,

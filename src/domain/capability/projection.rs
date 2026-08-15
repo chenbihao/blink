@@ -129,6 +129,11 @@ pub enum ActionKindDef {
     OpenUrl,
     /// 资源管理器定位。
     Reveal,
+    /// 0.21.3：直接调用指定 Capability。
+    /// manifest 需额外声明 `capability_id` 和可选 `args_pointer`。
+    /// 当前由 builtin capability 直接构造 ItemAction::Invoke，
+    /// manifest 侧声明路径待 0.21.4 FeatureCatalog 补齐。
+    Invoke,
 }
 
 // ── JSONPath 取值工具 ──────────────────────────────────────────────────────
@@ -269,6 +274,10 @@ pub(super) fn value_to_string(v: &serde_json::Value) -> String {
 }
 
 /// `ActionDef` → `ItemAction` 映射。
+///
+/// 0.21.3：`Invoke` 类型需要 `capability_id`，但 `ActionDef` 当前无此字段。
+/// manifest 侧声明 `Invoke` 需 0.21.4 FeatureCatalog 补齐 `capability_id` 字段。
+/// 当前 `Invoke` 变体由 builtin capability 直接构造 ItemResult.actions。
 fn action_def_to_item_action(def: &ActionDef) -> ItemAction {
     match def.kind {
         ActionKindDef::Copy => ItemAction::Copy {
@@ -281,6 +290,12 @@ fn action_def_to_item_action(def: &ActionDef) -> ItemAction {
             pointer: def.pointer.clone(),
         },
         ActionKindDef::Reveal => ItemAction::Reveal {
+            pointer: def.pointer.clone(),
+        },
+        // 0.21.3：manifest 侧暂不支持声明 Invoke（缺 capability_id 字段）。
+        // 如果 manifest 声明了 invoke 类型，降级为 OpenFile（默认行为）。
+        // 0.21.4 FeatureCatalog 补齐后移除此 fallback。
+        ActionKindDef::Invoke => ItemAction::OpenFile {
             pointer: def.pointer.clone(),
         },
     }
