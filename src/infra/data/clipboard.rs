@@ -106,11 +106,18 @@ fn default_display_pages() -> u32 {
 }
 /// 从旧 `display_count` 和 `page_size` 换算 `display_pages`。
 /// `ceil(display_count / page_size)`，钳制到 `[1, 20]`；非法值回退 3。
+///
+/// 0.20.7：使用饱和/扩大整数计算，避免 `display_count + page_size - 1` 的 `u32` 溢出。
 pub fn migrate_display_count_to_pages(display_count: u32, page_size: u32) -> u32 {
     if display_count == 0 || page_size == 0 {
         return DEFAULT_DISPLAY_PAGES;
     }
-    let pages = (display_count + page_size - 1) / page_size; // ceil
+    // 扩大到 u64 做加法，避免溢出
+    let count = display_count as u64;
+    let size = page_size as u64;
+    let pages = (count + size - 1) / size; // ceil
+    // 钳制到 u32 范围再 clamp 到合法区间
+    let pages = pages.min(u32::MAX as u64) as u32;
     pages.clamp(DISPLAY_PAGES_MIN, DISPLAY_PAGES_MAX)
 }
 /// 钳制 `display_pages` 到 `[1, 20]`，非法值回退 3。
@@ -139,12 +146,15 @@ pub fn resolve_display_pages_from_json(
     let has_old = raw_json.get("display_count").is_some();
 
     match (has_new, has_old) {
-        // 新旧并存：新字段优先，忽略旧字段
+        // 新旧并存：新字段优先，忽略旧字段。
+        // 返回 migrated=true 让调用方写回——`display_count` 有 skip_serializing，
+        // 写回即丢弃旧字段，避免旧字段永远留在 DB 导致每次启动重复 warn
         (true, true) => {
+            // 0.20.7：从 u64 checked 转换到 u32，不静默截断
             let pages = raw_json
                 .get("display_pages")
                 .and_then(|v| v.as_u64())
-                .map(|v| v as u32)
+                .and_then(|v| u32::try_from(v).ok())
                 .unwrap_or(DEFAULT_DISPLAY_PAGES);
             tracing::warn!(
                 display_pages = pages,
@@ -154,14 +164,15 @@ pub fn resolve_display_pages_from_json(
                     .unwrap_or(0),
                 "clipboard: display_count 与 display_pages 并存，display_pages 优先（旧字段将被丢弃）"
             );
-            (clamp_display_pages(pages), false)
+            (clamp_display_pages(pages), true)
         }
         // 只有旧字段：换算迁移
         (false, true) => {
+            // 0.20.7：从 u64 checked 转换到 u32，不静默截断
             let raw_count = raw_json
                 .get("display_count")
                 .and_then(|v| v.as_u64())
-                .map(|v| v as u32)
+                .and_then(|v| u32::try_from(v).ok())
                 .unwrap_or(LEGACY_DISPLAY_COUNT_DEFAULT);
             let migrated = migrate_display_count_to_pages(raw_count, page_size);
             tracing::info!(
@@ -172,10 +183,11 @@ pub fn resolve_display_pages_from_json(
         }
         // 只有新字段或都没有：使用 display_pages 原值或默认
         _ => {
+            // 0.20.7：从 u64 checked 转换到 u32，不静默截断
             let pages = raw_json
                 .get("display_pages")
                 .and_then(|v| v.as_u64())
-                .map(|v| v as u32)
+                .and_then(|v| u32::try_from(v).ok())
                 .unwrap_or(DEFAULT_DISPLAY_PAGES);
             (clamp_display_pages(pages), false)
         }
@@ -742,11 +754,11 @@ mod tests {
 
     #[test]
     fn resolve_both_fields_new_takes_priority() {
-        // 新旧并存：display_pages 优先
+        // 新旧并存：display_pages 优先，且要求写回（丢弃旧字段，避免每次启动重复 warn）
         let json = serde_json::json!({"display_pages": 5, "display_count": 30});
         let (pages, migrated) = resolve_display_pages_from_json(&json, 9);
         assert_eq!(pages, 5);
-        assert!(!migrated); // 不算迁移
+        assert!(migrated);
     }
 
     #[test]

@@ -10,7 +10,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::domain::ai::chat_service::ChatService;
 use crate::domain::capability::{CapabilityRegistry, ImageStash};
@@ -38,6 +38,27 @@ pub struct TauriDomainEnv {
 
 impl TauriDomainEnv {
     pub fn new(app: AppHandle, db_pools: DbPools) -> Self {
+        // 0.20.7：注册便签兜底关闭回调——CloseRequested 兜底路径降级时调用
+        // （WebView 不可用或前端超时 2s 未完成关闭时触发）。
+        // 降级只能基于 DB 中已持久化的数据：trash 将便签移入回收站，不声称
+        // 保存了前端尚未确认的编辑器正文。infra 层通过回调槽调用，不反向依赖 app/domain。
+        crate::infra::platform::window::set_sticky_close_fallback(std::sync::Arc::new(
+            |app: &AppHandle, sticky_id: &str| {
+                let app = app.clone();
+                let sticky_id = sticky_id.to_string();
+                tauri::async_runtime::spawn(async move {
+                    let Some(env) = app.try_state::<std::sync::Arc<TauriDomainEnv>>() else {
+                        tracing::warn!(sticky_id = %sticky_id, "便签关闭时 TauriDomainEnv 不可用，跳过");
+                        return;
+                    };
+                    // 降级路径：基于 DB 已持久化数据 trash 便签
+                    if let Err(e) = env.trash_sticky_and_notify(&sticky_id).await {
+                        tracing::warn!(error = %e, sticky_id = %sticky_id, "便签兜底关闭失败");
+                    }
+                });
+            },
+        ));
+
         Self {
             app,
             db_pools,
@@ -244,14 +265,14 @@ impl CapabilityEnv for TauriDomainEnv {
         &self,
         sticky_id: &str,
         visible: bool,
-    ) -> Result<(), StickyWorkflowError> {
+    ) -> Result<i64, StickyWorkflowError> {
         let svc = self
             .sticky_service()
             .ok_or_else(|| StickyWorkflowError::SideEffect {
                 detail: "StickyService 不可用".into(),
             })?;
         let note = svc.get_active_note(sticky_id).await?;
-        svc.set_visible(sticky_id, visible).await?;
+        let updated_at = svc.set_visible(sticky_id, visible).await?;
 
         let window_result = if visible {
             crate::infra::platform::window::show_sticky_window(
@@ -275,7 +296,7 @@ impl CapabilityEnv for TauriDomainEnv {
             )
             .map_err(|e| e.to_string());
         match (window_result, emit_result) {
-            (Ok(()), Ok(())) => Ok(()),
+            (Ok(()), Ok(())) => Ok(updated_at),
             (Err(window), Ok(())) => Err(StickyWorkflowError::SideEffect {
                 detail: format!("同步便签窗口可见性失败: {window}"),
             }),
@@ -330,11 +351,13 @@ impl CapabilityEnv for TauriDomainEnv {
             })?;
 
         // 原子关闭：revision 校验 → 保存最终内容 → delete/trash 决策
+        // DB 操作不可逆——成功后 hide/emit 失败不能伪装成"关闭未发生"
         let outcome = svc
             .close_note(sticky_id, final_content, expected_updated_at)
             .await?;
 
         // 根据结果广播事件 + 隐藏窗口
+        // DB 已提交：side effect 失败只记 warn，不回滚已完成操作（spec-backend §4）
         let (event_name, payload) = match outcome {
             StickyCloseOutcome::DeletedEmpty => (
                 crate::domain::event_names::EventNames::STICKY_DELETED,
@@ -353,20 +376,23 @@ impl CapabilityEnv for TauriDomainEnv {
             .emit(event_name, payload)
             .map_err(|e| e.to_string());
 
-        match (hide_result, emit_result) {
-            (Ok(()), Ok(())) => Ok(outcome),
-            (Err(hide), Ok(())) => Err(StickyWorkflowError::SideEffect {
-                detail: format!("便签已关闭但隐藏窗口失败: {hide}"),
-            }),
-            (Ok(()), Err(emit)) => Err(StickyWorkflowError::SideEffect {
-                detail: format!("便签已关闭但通知管理器失败: {emit}"),
-            }),
-            (Err(hide), Err(emit)) => Err(StickyWorkflowError::SideEffect {
-                detail: format!(
-                    "便签已关闭但隐藏窗口失败: {hide}; 通知管理器失败: {emit}"
-                ),
-            }),
+        // DB 已成功，side effect 失败只记 warn，返回已提交的 outcome
+        if let Err(hide) = &hide_result {
+            tracing::warn!(
+                sticky_id = sticky_id,
+                error = %hide,
+                "便签已关闭但隐藏窗口失败（DB 已提交，不回滚）"
+            );
         }
+        if let Err(emit) = &emit_result {
+            tracing::warn!(
+                sticky_id = sticky_id,
+                error = %emit,
+                "便签已关闭但通知管理器失败（DB 已提交，不回滚）"
+            );
+        }
+
+        Ok(outcome)
     }
 
     // ── pin 窗口操作（0.19.3 pin 能力化桥接）──────────────────────────
@@ -614,8 +640,8 @@ mod tests {
             &self,
             _sticky_id: &str,
             _visible: bool,
-        ) -> Result<(), StickyWorkflowError> {
-            Ok(())
+        ) -> Result<i64, StickyWorkflowError> {
+            Ok(0)
         }
 
         fn show_pin_image(

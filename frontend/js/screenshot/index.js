@@ -266,6 +266,7 @@ function resetState() {
   const _t0 = performance.now();
   console.debug('[screenshot] resetState start');
   resetScrollCaptureSession();
+  cancelSelectionNudge();
   const { canvas, ctx, annotCanvas, annotCtx, sizeHint, toolbar, errorHint } = ss;
   ss._loadGen++;  // BUG1 fix: 使待处理的旧 img.onload 回调失效
   // 0.15.9：取消待执行的标注预览 rAF
@@ -842,6 +843,7 @@ function triggerOcrPrewarm(pw, ph) {
 /** 退出标注模式（清除选区，回到可拖选状态） */
 function exitAnnotationMode() {
   console.debug('[screenshot] exitAnnotationMode');
+  cancelSelectionNudge();
   if (ss._annotRaf) { cancelAnimationFrame(ss._annotRaf); ss._annotRaf = 0; }
   // 0.15.10：清除快照
   ss._committedSnapshot = null;
@@ -1340,6 +1342,112 @@ canvas.addEventListener('contextmenu', (e) => {
   }
 });
 
+// ── 0.20.7：方向键移动选区合帧 ────────────────────────────────────────────
+// 按住方向键 auto-repeat（~25-30 次/秒）时，逐键执行 canvas 裁剪 + putImageData
+// + OCR 预热 IPC 会产生可观开销与预热风暴。改为 rAF 内合并增量、单次裁剪，
+// OCR 预热 debounce，最后一步停下才触发。
+//
+// 0.20.7 fix：rAF 和 OCR timer 绑定 selectionRevision/session generation，
+// 旧会话排队的任务在新会话中只清理自己的状态，不能改新会话。
+
+/** 方向键增量合帧的 rAF id（0 = 无待刷新帧） */
+let nudgeRafId = 0;
+/** 待合并的方向键增量（bitmap px） */
+let nudgePendingDx = 0;
+let nudgePendingDy = 0;
+/** OCR 预热 debounce 定时器 */
+let nudgeOcrPrewarmTimer = 0;
+/** OCR 预热 debounce 时长 */
+const NUDGE_OCR_PREWARM_DEBOUNCE_MS = 300;
+/** 排队时的 selectionRevision，回调执行前校验 */
+let nudgeSelectionRevision = 0;
+
+/**
+ * 取消方向键 nudge 的 rAF、OCR timer 和 pending 增量。
+ * 在 resetState、exitAnnotationMode 和会话切换时调用，
+ * 确保旧会话排队的任务不会影响新会话。
+ */
+function cancelSelectionNudge() {
+  if (nudgeRafId) {
+    cancelAnimationFrame(nudgeRafId);
+    nudgeRafId = 0;
+  }
+  if (nudgeOcrPrewarmTimer) {
+    clearTimeout(nudgeOcrPrewarmTimer);
+    nudgeOcrPrewarmTimer = 0;
+  }
+  nudgePendingDx = 0;
+  nudgePendingDy = 0;
+}
+
+/** rAF 回调：一次性应用累积增量的选区移动 + 裁剪 + 刷新。 */
+function flushSelectionNudge() {
+  nudgeRafId = 0;
+  const dx = nudgePendingDx;
+  const dy = nudgePendingDy;
+  nudgePendingDx = 0;
+  nudgePendingDy = 0;
+  if (dx === 0 && dy === 0) return;
+  // 会话已退出/选区已清除/selectionRevision 已变时丢弃过期增量
+  if (!ss.isAnnotating || !ss.selCss || annot.getTool() !== 'select') return;
+  if (nudgeSelectionRevision !== ss.selectionRevision) return;
+
+  const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+  const newSelCss = moveSelection1px(ss.selCss, dx, dy, meta);
+  if (!newSelCss) return;
+  ss.selCss = newSelCss;
+  // 重置标注 canvas 位置和裁剪区域
+  const bmpRect = cssRectToBitmap(newSelCss, meta);
+  const pw = Math.max(1, bmpRect.w);
+  const ph = Math.max(1, bmpRect.h);
+  ss.annotCanvas.style.left = newSelCss.x + 'px';
+  ss.annotCanvas.style.top = newSelCss.y + 'px';
+  // 重新裁剪底图（选区移动后裁剪区域改变）
+  if (ss.screenshot) {
+    try {
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = pw;
+      tempCanvas.height = ph;
+      const tempCtx = tempCanvas.getContext('2d');
+      tempCtx.drawImage(ss.screenshot, bmpRect.x, bmpRect.y, pw, ph, 0, 0, pw, ph);
+      const cropData = tempCtx.getImageData(0, 0, pw, ph);
+      annot.updateCropData(cropData, pw, ph);
+    } catch (err) {
+      console.warn('[screenshot] 方向键移动选区后裁剪失败', err);
+    }
+  }
+  ss.selectionRevision++;
+  // P1-4 fix：移动后更新 nudgeSelectionRevision 为最新值。
+  // queueSelectionNudge 捕获的是移动前的 revision，flushSelectionNudge
+  // 执行 ss.selectionRevision++ 后两者不再相等，导致 OCR 预热 timer
+  // 回调中的 revision 校验永远失败、预热永远不触发。
+  // 在此同步为最新 revision，让 timer 回调校验能通过。
+  nudgeSelectionRevision = ss.selectionRevision;
+  ss.ocrPrewarm = null;
+  ss.ocrResultCache = null;
+  if (typeof ss._invalidateSelectionContent === 'function') {
+    ss._invalidateSelectionContent();
+  }
+  drawFinalSelection();
+  // 刷新 OCR 预热（debounce：连续按键只在停下后触发一次）
+  clearTimeout(nudgeOcrPrewarmTimer);
+  nudgeOcrPrewarmTimer = setTimeout(() => {
+    nudgeOcrPrewarmTimer = 0;
+    // 校验 selectionRevision：旧会话的 timer 不能在新会话上触发 OCR 预热
+    if (nudgeSelectionRevision !== ss.selectionRevision) return;
+    triggerOcrPrewarm(pw, ph);
+  }, NUDGE_OCR_PREWARM_DEBOUNCE_MS);
+}
+
+/** 排队一次方向键增量（rAF 合帧）。 */
+function queueSelectionNudge(dx, dy) {
+  // 捕获当前 selectionRevision，回调执行前校验
+  nudgeSelectionRevision = ss.selectionRevision;
+  nudgePendingDx += dx;
+  nudgePendingDy += dy;
+  if (!nudgeRafId) nudgeRafId = requestAnimationFrame(flushSelectionNudge);
+}
+
 document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
     const tgt = e.target;
@@ -1449,40 +1557,8 @@ document.addEventListener('keydown', (e) => {
       else if (e.key === 'ArrowDown') { dy = 1; }
       if (dx !== 0 || dy !== 0) {
         e.preventDefault();
-        const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
-        const newSelCss = moveSelection1px(ss.selCss, dx, dy, meta);
-        if (newSelCss) {
-          ss.selCss = newSelCss;
-          // 重置标注 canvas 位置和裁剪区域
-          const bmpRect = cssRectToBitmap(newSelCss, meta);
-          const pw = Math.max(1, bmpRect.w);
-          const ph = Math.max(1, bmpRect.h);
-          ss.annotCanvas.style.left = newSelCss.x + 'px';
-          ss.annotCanvas.style.top = newSelCss.y + 'px';
-          // 重新裁剪底图（选区移动后裁剪区域改变）
-          if (ss.screenshot) {
-            try {
-              const tempCanvas = document.createElement('canvas');
-              tempCanvas.width = pw;
-              tempCanvas.height = ph;
-              const tempCtx = tempCanvas.getContext('2d');
-              tempCtx.drawImage(ss.screenshot, bmpRect.x, bmpRect.y, pw, ph, 0, 0, pw, ph);
-              const cropData = tempCtx.getImageData(0, 0, pw, ph);
-              annot.updateCropData(cropData, pw, ph);
-            } catch (err) {
-              console.warn('[screenshot] 方向键移动选区后裁剪失败', err);
-            }
-          }
-          ss.selectionRevision++;
-          ss.ocrPrewarm = null;
-          ss.ocrResultCache = null;
-          if (typeof ss._invalidateSelectionContent === 'function') {
-            ss._invalidateSelectionContent();
-          }
-          drawFinalSelection();
-          // 刷新 OCR 预热
-          triggerOcrPrewarm(pw, ph);
-        }
+        // 0.20.7：合帧处理——rAF 内合并增量、单次裁剪、OCR 预热 debounce
+        queueSelectionNudge(dx, dy);
         return;
       }
     }

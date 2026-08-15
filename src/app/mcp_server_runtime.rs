@@ -648,7 +648,7 @@ mod tests {
                 &self,
                 _sticky_id: &str,
                 _visible: bool,
-            ) -> Result<(), crate::domain::sticky::StickyWorkflowError> {
+            ) -> Result<i64, crate::domain::sticky::StickyWorkflowError> {
                 unimplemented!("not needed for runtime tests")
             }
 async fn trash_sticky_and_notify(

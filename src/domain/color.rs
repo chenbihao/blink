@@ -98,6 +98,11 @@ pub fn build_color_result(original: &str, rgba: Rgba8) -> ColorResult {
 
 fn parse_hex(s: &str) -> Option<Rgba8> {
     let hex = &s[1..]; // skip '#'
+    // 多字节字符的字节长度会误命中 3/4/6/8 分支，随后的固定步长切片
+    // 会切进 UTF-8 字符中间导致 panic（如 "#你好" 恰为 6 字节）
+    if !hex.is_ascii() {
+        return None;
+    }
     match hex.len() {
         3 => {
             // #RGB → #RRGGBB
@@ -239,10 +244,14 @@ fn parse_hsl_like(s: &str) -> Option<Rgba8> {
     }
 }
 
-/// 解析色相值：支持任意浮点（含负数和 >360），对 360 取模
+/// 解析色相值：支持任意有限浮点（含负数和 >360），对 360 取模
 fn parse_hue(s: &str) -> Option<f64> {
     let s = s.trim();
     let v: f64 = s.parse().ok()?;
+    // "NaN"/"inf" 能通过 parse，但 rem_euclid 只会产出垃圾值
+    if !v.is_finite() {
+        return None;
+    }
     Some(v)
 }
 
@@ -563,6 +572,22 @@ mod tests {
     #[test]
     fn parse_illegal_short_hex() {
         assert!(parse("#a").is_none());
+    }
+
+    #[test]
+    fn parse_illegal_multibyte_hex() {
+        // "#你好" 恰为 6 字节，曾误命中 #RRGGBB 分支后 panic
+        assert!(parse("#你好").is_none());
+        assert!(parse("#红色的").is_none());
+        assert!(parse("#色").is_none());
+        assert!(parse("#顔色").is_none());
+    }
+
+    #[test]
+    fn parse_illegal_nonfinite_hue() {
+        assert!(parse("hsl(NaN, 100%, 50%)").is_none());
+        assert!(parse("hsl(inf, 100%, 50%)").is_none());
+        assert!(parse("hsla(-inf, 100%, 50%, 0.5)").is_none());
     }
 
     #[test]

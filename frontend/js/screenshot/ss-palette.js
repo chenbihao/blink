@@ -47,11 +47,23 @@ let actionsRowEl = null;
 /** 防抖定时器 */
 let debounceTimer = 0;
 let pendingHistogram = null;
+/** Worker 已回传结果的最新 epoch（看门狗据此判断本轮是否仍在等待） */
+let workerResultEpoch = -1;
+/** 每个 epoch 的 watchdog timer 和完成状态 */
+let workerWatchdogTimer = 0;
+/** 当前 watchdog 对应的 epoch（只取消/触发属于该 epoch 的 timer） */
+let workerWatchdogEpoch = -1;
 
 /** 新截图/图片编辑会话开始时清理上一轮分析、展开与多选状态。 */
 export function resetPaletteState() {
   clearTimeout(debounceTimer);
   debounceTimer = 0;
+  // 清理 watchdog timer，防止旧 epoch 的超时回调影响新会话
+  if (workerWatchdogTimer) {
+    clearTimeout(workerWatchdogTimer);
+    workerWatchdogTimer = 0;
+  }
+  workerWatchdogEpoch = -1;
   // 让已经发给 Worker 的旧任务失效，避免结果回写到新截图。
   ss.paletteEpoch++;
   ss.paletteResult = null;
@@ -111,6 +123,20 @@ function ensureWorker() {
 }
 
 /**
+ * 销毁当前 Worker（异常/超时后调用），让下次 ensureWorker 重建。
+ * 异常后的 Worker 已不可信，静默死亡时 postMessage 不报错也不回结果。
+ */
+function destroyWorker() {
+  if (!ss.paletteWorker) return;
+  try {
+    ss.paletteWorker.terminate();
+  } catch {
+    // terminate 失败也直接丢弃引用
+  }
+  ss.paletteWorker = null;
+}
+
+/**
  * Worker 消息处理。校验 version/epoch，旧 epoch 丢弃。
  * @param {MessageEvent} e
  */
@@ -123,21 +149,41 @@ function onWorkerMessage(e) {
 
   if (msg.type === 'result') {
     if (extractBtn) extractBtn.disabled = false;
+    workerResultEpoch = msg.epoch;
+    // 0.20.7：result 后结束该 epoch 的 watchdog timer
+    clearWatchdogTimer(msg.epoch);
     ss.paletteResult = msg.result;
     renderPalette(msg.result);
   } else if (msg.type === 'error') {
     console.warn('[palette] Worker 错误:', msg.message);
+    // 0.20.7：error 后也结束该 epoch 的 watchdog timer，防止 fallback 成功后 watchdog 仍触发
+    clearWatchdogTimer(msg.epoch);
     // 降级到主线程
     fallbackMainThreadAnalysis(msg.epoch);
   }
 }
 
 /**
+ * 清理指定 epoch 的 watchdog timer。
+ * 超时回调只销毁它启动时对应的 Worker 实例，不能误杀后来重建的 Worker。
+ */
+function clearWatchdogTimer(epoch) {
+  if (workerWatchdogTimer && workerWatchdogEpoch === epoch) {
+    clearTimeout(workerWatchdogTimer);
+    workerWatchdogTimer = 0;
+    workerWatchdogEpoch = -1;
+  }
+}
+
+/**
  * Worker 异常处理。
+ * 异常后的 Worker 已不可信：先销毁（下次 ensureWorker 重建），再降级主线程。
  * @param {ErrorEvent} e
  */
 function onWorkerError(e) {
   console.warn('[palette] Worker 异常:', e.message || e);
+  clearWatchdogTimer(ss.paletteEpoch);
+  destroyWorker();
   // 降级到主线程
   if (ss.paletteEpoch > 0) {
     fallbackMainThreadAnalysis(ss.paletteEpoch);
@@ -158,10 +204,13 @@ function fallbackMainThreadAnalysis(epoch) {
     if (epoch !== ss.paletteEpoch) return;
     if (extractBtn) extractBtn.disabled = false;
     ss.paletteResult = result;
+    // 0.20.7：fallback 成功后结束该 epoch 的 watchdog timer
+    clearWatchdogTimer(epoch);
     renderPalette(result);
   } catch (err) {
     console.warn('[palette] 主线程降级分析失败:', err);
     if (extractBtn) extractBtn.disabled = false;
+    clearWatchdogTimer(epoch);
   }
 }
 
@@ -224,6 +273,9 @@ export function triggerPaletteAnalysis() {
 
     const worker = ensureWorker();
     if (worker) {
+      // 捕获 Worker 实例引用——超时回调只销毁它启动时对应的 Worker，不能误杀后来重建的
+      const workerRef = worker;
+      const watchdogEpoch = epoch;
       worker.postMessage({
         type: 'analyze-histogram',
         version: C.WORKER_VERSION,
@@ -232,6 +284,23 @@ export function triggerPaletteAnalysis() {
         width: histogram.width,
         height: histogram.height,
       });
+      // 静默死亡看门狗：Worker 无 error 事件但也迟迟不回结果时，
+      // 销毁重建 + 降级主线程，避免按钮永久 disabled / 状态卡在"正在扫描"
+      // 0.20.7：保存 timer 和 epoch；result、error、fallback 完成、reset 都 clear
+      clearWatchdogTimer(watchdogEpoch);
+      workerWatchdogTimer = setTimeout(() => {
+        // 只处理属于该 epoch 的超时，且只销毁启动时的 Worker 实例
+        if (watchdogEpoch !== ss.paletteEpoch) return;
+        if (workerResultEpoch < watchdogEpoch) {
+          // 再次检查：result/error 可能在 timer 排队期间到达
+          if (workerRef === ss.paletteWorker) {
+            console.warn('[palette] Worker 分析超时，销毁并降级到主线程');
+            destroyWorker();
+          }
+          fallbackMainThreadAnalysis(watchdogEpoch);
+        }
+      }, C.WORKER_TIMEOUT_MS);
+      workerWatchdogEpoch = watchdogEpoch;
     } else {
       fallbackMainThreadAnalysis(epoch);
     }

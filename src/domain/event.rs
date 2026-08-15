@@ -99,11 +99,13 @@ pub trait CapabilityEnv: Send + Sync {
     ) -> Result<i64, StickyWorkflowError>;
 
     /// 设置便签桌面可见性、同步窗口并广播可见性事件。
+    ///
+    /// P0-1：返回新的 `updated_at`，前端 mutation queue 据此跟踪 revision。
     async fn set_sticky_visibility_and_notify(
         &self,
         sticky_id: &str,
         visible: bool,
-    ) -> Result<(), StickyWorkflowError>;
+    ) -> Result<i64, StickyWorkflowError>;
 
     /// 将便签移入废纸篓、隐藏对应窗口并广播回收事件。
     async fn trash_sticky_and_notify(&self, sticky_id: &str) -> Result<(), StickyWorkflowError>;

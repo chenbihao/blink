@@ -126,8 +126,6 @@ pub fn get_pin_image_by_label(label: &str) -> Option<PinImage> {
 }
 
 use crate::domain::event_names::EventNames;
-// 0.20.0：便签兜底关闭需要调用 trash_sticky_and_notify
-use crate::domain::event::CapabilityEnv;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow};
 use tokio::time::sleep;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
@@ -1524,6 +1522,63 @@ pub fn update_sticky_taskbar(app: &AppHandle, sticky_id: &str, always_on_top: bo
     }
 }
 
+// ── 0.20.7：便签兜底关闭回调 ──────────────────────────────────────────────
+//
+// CloseRequested 兜底路径需要调用 domain 编排（trash_sticky_and_notify），但
+// infra 不得反向依赖 app/domain（spec-architecture §A1）。改为 infra 定义回调槽，
+// app 层启动 wiring 时注入实现。
+
+/// 便签窗口 CloseRequested 兜底关闭回调：参数为 (app, sticky_id)。
+/// 实现自行决定异步执行方式；infra 只负责在兜底路径调用。
+pub type StickyCloseFallback = std::sync::Arc<dyn Fn(&AppHandle, &str) + Send + Sync>;
+
+static STICKY_CLOSE_FALLBACK: std::sync::OnceLock<StickyCloseFallback> = std::sync::OnceLock::new();
+
+/// P0-2：便签关闭请求 ID 生成器（单调递增）。
+/// 每次 Alt+F4/系统关闭生成唯一 id，前端 ack 时回传以匹配。
+static STICKY_CLOSE_REQUEST_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// P0-2：全局 ack channel 注册表。
+/// CloseRequested handler 注册一个 oneshot::Sender，等待前端 sticky_close_ack 命令触发。
+/// 前端 invoke sticky_close_ack 时，通过 request_id 查表发送信号，取消超时降级。
+type AckMap = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<()>>>>;
+static STICKY_CLOSE_ACK_MAP: OnceLock<AckMap> = OnceLock::new();
+
+fn ack_map() -> AckMap {
+    STICKY_CLOSE_ACK_MAP
+        .get_or_init(|| std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())))
+        .clone()
+}
+
+/// P0-2：注册一个 request_id 对应的 ack sender。
+/// 返回的 receiver 在 tokio::select! 中等待 ack 或超时降级。
+fn register_sticky_close_ack(request_id: u64) -> tokio::sync::oneshot::Receiver<()> {
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let map = ack_map();
+    map.lock().unwrap().insert(request_id, tx);
+    rx
+}
+
+/// P0-2：前端 sticky_close_ack 命令调用此函数，触发对应 request_id 的 ack sender。
+/// 取出后从 map 中删除（oneshot 只能发送一次）。
+pub fn signal_sticky_close_ack(request_id: u64) -> bool {
+    let map = ack_map();
+    let mut guard = map.lock().unwrap();
+    if let Some(tx) = guard.remove(&request_id) {
+        let _ = tx.send(());
+        true
+    } else {
+        false
+    }
+}
+
+/// 注册便签兜底关闭回调（app 层启动 wiring 时调用，只应注册一次；重复注册被忽略）。
+pub fn set_sticky_close_fallback(f: StickyCloseFallback) {
+    if STICKY_CLOSE_FALLBACK.set(f).is_err() {
+        tracing::warn!("set_sticky_close_fallback: 回调已注册，忽略重复注册");
+    }
+}
+
 /// 显示便签窗口（0.16.8）。
 ///
 /// 每条便签一个独立 Tauri 窗口，label 为 `sticky-{id}`（id 截断到 60 字符防止超长）。
@@ -1750,7 +1805,9 @@ pub fn show_sticky_window(
         //
         // 0.20.0：关闭 = 原子关闭工作流（空→删除，非空→保存+回收站）。
         // - 用户关闭（前端按钮/ESC）：前端直接调 closeStickyNote API，不走 CloseRequested。
-        // - 此 handler 是兜底路径（系统 Alt+F4 等）：prevent_close + flush + close_sticky_and_notify + hide
+        // - 此 handler 是兜底路径（系统 Alt+F4 等）：
+        //   prevent_close → 请求前端 closeSticky()（前端成功后自行 hide）。
+        //   WebView 不可用时有界超时降级到 fallback（基于已持久化的数据，不声称保存了未确认内容）。
         // - 应用退出：不 prevent_close，不修改 trashed
         // - spare 窗口回收不走此路径（spare 有独立的 CloseRequested handler）
         let label_owned = label.clone();
@@ -1767,30 +1824,80 @@ pub fn show_sticky_window(
                     return;
                 }
                 api.prevent_close();
-                // P1-#12 fix: 关闭前 flush 未保存内容（前端有 500ms 防抖）
-                if let Some(w) = app_clone.get_webview_window(&label_owned) {
-                    let _ = w.eval("if (window.__stickyFlush) window.__stickyFlush();");
-                }
-                // 0.20.0：兜底路径用 trash（flush 已保存最新内容到 DB）
-                // 前端按钮/ESC 走 closeStickyNote API 实现原子关闭（空→删除）
-                let app_c = app_clone.clone();
-                let sid_owned = sid.clone();
-                tauri::async_runtime::spawn(async move {
-                    if let Some(env) = app_c
-                        .try_state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
-                    {
-                        // flush 已把最新内容写入 DB → trash 保存最终状态
-                        if let Err(e) = env.trash_sticky_and_notify(&sid_owned).await {
-                            tracing::warn!(error = %e, sticky_id = %sid_owned, "便签兜底关闭失败");
+                // P0-2：请求前端执行 closeSticky()——带 requestId 的 request/ack 协议。
+                // 前端完成后 invoke sticky_close_ack，后端监听 STICKY_CLOSE_ACK 事件取消超时降级。
+                // 区分 success/conflict/error：收到任何有效 ack 都不降级（conflict 时前端保持窗口）。
+                let request_id = STICKY_CLOSE_REQUEST_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+                let eval_code = format!(
+                    "if (typeof window.__stickyRequestClose === 'function') window.__stickyRequestClose({request_id});"
+                );
+                let frontend_ok = if let Some(w) = app_clone.get_webview_window(&label_owned) {
+                    w.eval(&eval_code).is_ok()
+                } else {
+                    false
+                };
+                if frontend_ok {
+                    tracing::debug!(
+                        sticky_id = %sid,
+                        request_id,
+                        "sticky window: CloseRequested → prevent_close + 请求前端 closeSticky()"
+                    );
+                    // P0-2：有界超时降级——5s 未收到 ack 时才降级（留足慢 SQL 时间）。
+                    // 收到 ack（success/conflict/error）时取消降级。
+                    // conflict 时前端保持窗口可见是预期行为，不应当降级覆盖。
+                    let app_c = app_clone.clone();
+                    let sid_owned = sid.clone();
+                    let label_for_timeout = label_owned.clone();
+                    let mut ack_rx = register_sticky_close_ack(request_id);
+                    tauri::async_runtime::spawn(async move {
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                                if let Some(w) = app_c.get_webview_window(&label_for_timeout) {
+                                    if w.is_visible().unwrap_or(false) {
+                                        tracing::warn!(
+                                            sticky_id = %sid_owned,
+                                            "便签关闭前端超时 5s 无 ack，降级到 fallback"
+                                        );
+                                        match STICKY_CLOSE_FALLBACK.get() {
+                                            Some(fallback) => fallback(&app_c, &sid_owned),
+                                            None => tracing::warn!(
+                                                sticky_id = %sid_owned,
+                                                "便签兜底关闭回调未注册，跳过"
+                                            ),
+                                        }
+                                    }
+                                }
+                            }
+                            _ = &mut ack_rx => {
+                                tracing::debug!(
+                                    sticky_id = %sid_owned,
+                                    "sticky close ack 收到，取消超时降级"
+                                );
+                            }
                         }
-                    } else {
-                        tracing::warn!("便签关闭时 TauriDomainEnv 不可用，跳过");
+                    });
+                } else {
+                    // WebView 不可用：直接降级到 fallback
+                    tracing::warn!(
+                        sticky_id = %sid,
+                        "sticky window: WebView 不可用，降级到 fallback 关闭"
+                    );
+                    let app_c = app_clone.clone();
+                    let sid_owned = sid.clone();
+                    tauri::async_runtime::spawn(async move {
+                        match STICKY_CLOSE_FALLBACK.get() {
+                            Some(fallback) => fallback(&app_c, &sid_owned),
+                            None => tracing::warn!(
+                                sticky_id = %sid_owned,
+                                "便签兜底关闭回调未注册，跳过"
+                            ),
+                        }
+                    });
+                    // WebView 不可用时 hide 可能不能执行，但尝试一下
+                    if let Some(w) = app_clone.get_webview_window(&label_owned) {
+                        let _ = w.hide();
                     }
-                });
-                if let Some(w) = app_clone.get_webview_window(&label_owned) {
-                    let _ = w.hide();
                 }
-                tracing::debug!(sticky_id = %sid, "sticky window: CloseRequested → prevent_close + flush + close + hide");
             }
         });
         w
@@ -1858,6 +1965,13 @@ pub fn set_image_editor_active(active: bool) {
 ///
 /// 前端有 500ms 内容防抖和 300ms 几何防抖。退出时 eval flush JS，
 /// 让前端立即写入后端，避免丢失最近 500ms 的编辑。
+///
+/// **已知限制**（spec-frontend §5.4）：`eval()` 只提交脚本，不等待前端
+/// `__stickyFlush` 的 Promise 完成。应用退出时无法等待 ack，因此最近
+/// 防抖窗口内（≤500ms）的编辑可能丢失。这是 fire-and-forget eval 的
+/// 固有限制，不在退出路径阻塞等待（避免无限延迟退出）。
+/// 非退出路径的关闭已改用 `__stickyRequestClose` → `closeSticky()` 原子链路。
+///
 /// 返回 flush 的窗口数量。
 pub fn flush_all_sticky_windows(app: &AppHandle) -> usize {
     let mut count = 0usize;

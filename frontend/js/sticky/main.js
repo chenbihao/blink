@@ -41,6 +41,42 @@ let stickyId = null;
 /** 当前便签数据 */
 let stickyNote = null;
 
+/** 当前便签的 updated_at（Unix 秒），用于乐观并发校验（spec-backend §7.5）。
+ *  每次成功保存后由后端返回新值更新；关闭时传给 close_sticky_note。
+ *
+ *  P0-1：revision 只允许单调递增——多个 mutation 的 IPC 响应可能乱序返回，
+ *  用 max(newRev, stickyUpdatedAt) 防止迟到响应倒退 revision。 */
+let stickyUpdatedAt = null;
+
+/** 便签会话 generation（每次加载/复用时递增）。
+ *  异步保存回流时校验，spare 窗口复用后旧便签的保存结果不得写入新便签。 */
+let stickyGeneration = 0;
+
+/** P0-1：便签 mutation 串行化队列。
+ *  内容、几何、外观、可见性、置顶、关闭全部通过此队列执行，
+ *  确保 IPC 响应严格按发起顺序处理，revision 不会被乱序响应倒退。
+ *  close 也排在此前 mutation 之后，保证关闭前的写操作全部完成。 */
+let mutationQueue = Promise.resolve();
+
+/** P0-1：将一个 async 函数排入 mutation 队列串行执行。
+ *  捕获 generation，回调中校验防止 spare 复用后旧结果写入新便签。
+ *  @param {() => Promise<any>} fn — mutation 函数，返回值忽略
+ *  @returns {Promise<any>} fn 的返回值（或 void） */
+function enqueueMutation(fn) {
+  const gen = stickyGeneration;
+  const result = mutationQueue.then(() => fn(gen));
+  // 无论成功失败，都把链推进；失败不阻断后续 mutation
+  mutationQueue = result.catch(() => {});
+  return result;
+}
+
+/** P0-1：单调递增更新 stickyUpdatedAt，防止乱序响应倒退 revision。 */
+function applyRevision(newUpdatedAt) {
+  if (newUpdatedAt != null && (stickyUpdatedAt == null || newUpdatedAt > stickyUpdatedAt)) {
+    stickyUpdatedAt = newUpdatedAt;
+  }
+}
+
 /** 内容保存防抖计时器 */
 let saveTimer = null;
 
@@ -142,9 +178,10 @@ async function init() {
     }
 
     // 0.18.3 N+1: 通知后端 spare 已就绪，可被借用
-    invoke("sticky_spare_ready").catch((e) =>
-      console.error("[sticky] sticky_spare_ready 调用失败:", e)
-    );
+  invoke("sticky_spare_ready").catch((e) => {
+    const err = normalizeError(e);
+    console.error(`[sticky] sticky_spare_ready 调用失败 [${err.code}]: ${err.message}`);
+  });
     return;
   }
 
@@ -338,6 +375,10 @@ async function loadStickyData() {
       return;
     }
 
+    // 0.20.7：初始化 revision 和 generation（spec-backend §7.5）
+    stickyUpdatedAt = stickyNote.updatedAt ?? null;
+    stickyGeneration++;
+
     // 填充编辑器
     setContent(stickyNote.content || "");
 
@@ -353,7 +394,8 @@ async function loadStickyData() {
     // 聚焦编辑器
     focusEditor();
   } catch (e) {
-    console.error("[sticky] 加载便签数据失败:", e);
+    const err = normalizeError(e);
+    console.error(`[sticky] 加载便签数据失败 [${err.code}]: ${err.message}`);
   }
 }
 
@@ -560,13 +602,30 @@ function scheduleSave() {
 async function saveContent() {
   if (!stickyId) return;
   const content = getContent();
-  try {
-    await updateStickyContent(stickyId, content);
-    // 0.20.0：内容保存后同步窗口标题（从派生标题跟随内容变化）
-    syncWindowTitle(content);
-  } catch (e) {
-    console.error("[sticky] 保存内容失败:", e);
-  }
+  const expectedRev = stickyUpdatedAt;
+  return enqueueMutation(async (gen) => {
+    try {
+      const newUpdatedAt = await updateStickyContent(stickyId, content, expectedRev);
+      if (gen !== stickyGeneration) {
+        console.debug("[sticky] saveContent 回流时 generation 已变，丢弃结果");
+        return;
+      }
+      // P0-1：单调递增，防止乱序响应倒退 revision
+      applyRevision(newUpdatedAt);
+      // 0.20.0：内容保存后同步窗口标题（从派生标题跟随内容变化）
+      syncWindowTitle(content);
+    } catch (e) {
+      // generation 变化后不再处理错误（窗口已复用）
+      if (gen !== stickyGeneration) return;
+      const err = normalizeError(e);
+      console.error(`[sticky] 保存内容失败 [${err.code}]: ${err.message}`);
+      // 冲突时不动 stickyUpdatedAt——用户下次保存会再次冲突
+      // 提示错误但不覆盖编辑器内容
+      if (err.code === "conflict") {
+        showError("便签已被其他入口修改，请刷新后重试");
+      }
+    }
+  });
 }
 
 /** 强制 flush（失焦/隐藏前调用） */
@@ -594,11 +653,17 @@ function bindColorPalette() {
       const color = swatch.dataset.color;
       colorPalette.hidden = true;
       applyColor(color);
-      try {
-        await updateStickyAppearance(stickyId, color);
-      } catch (e) {
-        console.error("[sticky] 更新颜色失败:", e);
-      }
+      enqueueMutation(async (gen) => {
+        try {
+          const newUpdatedAt = await updateStickyAppearance(stickyId, color);
+          if (gen !== stickyGeneration) return;
+          applyRevision(newUpdatedAt);
+        } catch (e) {
+          if (gen !== stickyGeneration) return;
+          const err = normalizeError(e);
+          console.error(`[sticky] 更新颜色失败 [${err.code}]: ${err.message}`);
+        }
+      });
     });
   });
 
@@ -709,7 +774,8 @@ function bindMoreMenu() {
         savePolicy: "sticky_update",
       });
     } catch (e) {
-      console.error("[sticky] 打开编辑器失败:", e);
+      const err = normalizeError(e);
+      console.error(`[sticky] 打开编辑器失败 [${err.code}]: ${err.message}`);
     }
   });
 
@@ -717,11 +783,17 @@ function bindMoreMenu() {
   moreHide.addEventListener("click", async () => {
     moreMenu.hidden = true;
     await flushSave();
-    try {
-      await setStickyVisible(stickyId, false);
-    } catch (e) {
-      console.error("[sticky] 设置可见性失败:", e);
-    }
+    enqueueMutation(async (gen) => {
+      try {
+        const newUpdatedAt = await setStickyVisible(stickyId, false);
+        if (gen !== stickyGeneration) return;
+        applyRevision(newUpdatedAt);
+      } catch (e) {
+        if (gen !== stickyGeneration) return;
+        const err = normalizeError(e);
+        console.error(`[sticky] 设置可见性失败 [${err.code}]: ${err.message}`);
+      }
+    });
     const win = getCurrentWindow();
     if (win) win.hide();
   });
@@ -731,10 +803,11 @@ function bindMoreMenu() {
     moreOpenManager.addEventListener("click", async () => {
       moreMenu.hidden = true;
       try {
-        await showStickyManager();
-      } catch (e) {
-        console.error("[sticky] 打开便签管理失败:", e);
-      }
+      await showStickyManager();
+    } catch (e) {
+      const err = normalizeError(e);
+      console.error(`[sticky] 打开便签管理失败 [${err.code}]: ${err.message}`);
+    }
     });
   }
 }
@@ -753,14 +826,20 @@ function bindWindowControls() {
   pinBtn.addEventListener("click", async () => {
     const newState = !pinBtn.classList.contains("active");
     updatePinButton(newState);
-    try {
-      await setStickyAlwaysOnTop(stickyId, newState);
-      const win = getCurrentWindow();
-      if (win) win.setAlwaysOnTop(newState);
-    } catch (e) {
-      console.error("[sticky] 切换置顶失败:", e);
-      updatePinButton(!newState);
-    }
+    enqueueMutation(async (gen) => {
+      try {
+        const newUpdatedAt = await setStickyAlwaysOnTop(stickyId, newState);
+        if (gen !== stickyGeneration) return;
+        applyRevision(newUpdatedAt);
+        const win = getCurrentWindow();
+        if (win) win.setAlwaysOnTop(newState);
+      } catch (e) {
+        if (gen !== stickyGeneration) return;
+        const err = normalizeError(e);
+        console.error(`[sticky] 切换置顶失败 [${err.code}]: ${err.message}`);
+        updatePinButton(!newState);
+      }
+    });
   });
 }
 
@@ -794,9 +873,11 @@ function bindKeyboard() {
  * 空内容 → 物理删除；非空 → 保存最终内容并移入回收站。
  * 成功后隐藏窗口。失败时保持窗口与内容并显示错误。
  *
- * 不先调 flushSave：getContent() 已拿到编辑器最新内容（含未防抖保存的修改），
- * 传给后端 close_note 即可在一次事务中保存。传 null 作为 expected_updated_at
- * 避免与之前防抖保存产生的 updated_at 冲突。
+ * 0.20.7：传当前 revision（stickyUpdatedAt）做乐观并发校验，
+ * 防止旧窗口无条件物理删除已被其他入口改写为非空的便签（spec-backend §7.5）。
+ *
+ * P0-1：close 排在 mutation 队列尾部，确保此前发起的 saveContent/saveGeometry
+ * 等全部完成后才执行关闭，避免“关闭读取旧 revision 覆盖刚保存的新 revision”的竞态。
  */
 async function closeSticky() {
   if (!stickyId) {
@@ -807,30 +888,44 @@ async function closeSticky() {
   }
 
   const content = getContent();
-  try {
-    const outcome = await closeStickyNote(stickyId, content, null);
-    // 成功：根据结果打日志（不记录正文）
-    if (outcome?.kind === "deleted_empty") {
-      console.log("[sticky] 便签已关闭（空→删除）");
-    } else if (outcome?.kind === "trashed") {
-      console.log("[sticky] 便签已关闭（非空→回收站）");
+  const expectedRev = stickyUpdatedAt;
+  return enqueueMutation(async (gen) => {
+    try {
+      const outcome = await closeStickyNote(stickyId, content, expectedRev);
+      if (gen !== stickyGeneration) {
+        console.debug("[sticky] closeSticky 回流时 generation 已变，丢弃结果");
+        return;
+      }
+      // 成功：根据结果打日志（不记录正文）
+      if (outcome?.kind === "deleted_empty") {
+        console.log("[sticky] 便签已关闭（空→删除）");
+      } else if (outcome?.kind === "trashed") {
+        console.log("[sticky] 便签已关闭（非空→回收站）");
+      }
+      // 隐藏窗口（后端 close_sticky_and_notify 已调 hide_sticky_window，
+      // 但前端也 hide 确保 UI 即时响应）
+      const win = getCurrentWindow();
+      if (win) win.hide();
+    } catch (e) {
+      if (gen !== stickyGeneration) return;
+      // 失败：保持窗口与内容，显示错误
+      const err = normalizeError(e);
+      console.error(`[sticky] 原子关闭失败 [${err.code}]: ${err.message}`);
+      // 冲突时展示结构化提示，不自动用服务端正文覆盖本地编辑器
+      if (err.code === "conflict") {
+        showError("便签已被其他入口修改，请刷新后重试");
+      } else {
+        showError(err.message);
+      }
     }
-    // 隐藏窗口（后端 close_sticky_and_notify 已调 hide_sticky_window，
-    // 但前端也 hide 确保 UI 即时响应）
-    const win = getCurrentWindow();
-    if (win) win.hide();
-  } catch (e) {
-    // 失败：保持窗口与内容，显示错误
-    const err = normalizeError(e);
-    console.error(`[sticky] 原子关闭失败 [${err.code}]: ${err.message}`);
-    showError(err.message);
-  }
+  });
 }
 
 /**
  * 显示错误反馈（便签窗口内）。
  * 复用右键菜单区域的临时提示，避免引入额外的 DOM 结构。
  */
+let stickyErrorTimer = 0;
 function showError(message) {
   // 简单方案：在 closeBtn 旁边显示临时提示，3 秒后消失
   let errEl = document.getElementById("sticky-error-hint");
@@ -842,8 +937,11 @@ function showError(message) {
   }
   errEl.textContent = message;
   errEl.hidden = false;
-  setTimeout(() => {
+  // 取消上一次的计时器，防止旧计时器提前隐藏新错误
+  clearTimeout(stickyErrorTimer);
+  stickyErrorTimer = setTimeout(() => {
     if (errEl) errEl.hidden = true;
+    stickyErrorTimer = 0;
   }, 3000);
 }
 
@@ -875,19 +973,25 @@ async function saveGeometry() {
   if (!stickyId) return;
   const win = getCurrentWindow();
   if (!win) return;
-  try {
-    const pos = await win.outerPosition();
-    const size = await win.outerSize();
-    await updateStickyGeometry(
-      stickyId,
-      pos.x,
-      pos.y,
-      size.width,
-      size.height,
-    );
-  } catch (e) {
-    console.error("[sticky] 保存几何失败:", e);
-  }
+  return enqueueMutation(async (gen) => {
+    try {
+      const pos = await win.outerPosition();
+      const size = await win.outerSize();
+      const newUpdatedAt = await updateStickyGeometry(
+        stickyId,
+        pos.x,
+        pos.y,
+        size.width,
+        size.height,
+      );
+      if (gen !== stickyGeneration) return;
+      applyRevision(newUpdatedAt);
+    } catch (e) {
+      if (gen !== stickyGeneration) return;
+      const err = normalizeError(e);
+      console.error(`[sticky] 保存几何失败 [${err.code}]: ${err.message}`);
+    }
+  });
 }
 
 // ── 右键菜单（0.17.7）──────────────────────────────
@@ -933,7 +1037,8 @@ function showContextMenu(x, y) {
         savePolicy: "sticky_update",
       });
     } catch (e) {
-      console.error("[sticky] 打开编辑器失败:", e);
+      const err = normalizeError(e);
+      console.error(`[sticky] 打开编辑器失败 [${err.code}]: ${err.message}`);
     }
   });
   menu.appendChild(itemEditor);
@@ -950,7 +1055,8 @@ function showContextMenu(x, y) {
       try {
         await updateStickyAppearance(stickyId, color);
       } catch (e) {
-        console.error("[sticky] 更新颜色失败:", e);
+        const err = normalizeError(e);
+        console.error(`[sticky] 更新颜色失败 [${err.code}]: ${err.message}`);
       }
     },
   });
@@ -966,11 +1072,17 @@ function showContextMenu(x, y) {
   itemHide.addEventListener("click", async () => {
     hideContextMenu();
     await flushSave();
-    try {
-      await setStickyVisible(stickyId, false);
-    } catch (e) {
-      console.error("[sticky] 设置可见性失败:", e);
-    }
+    enqueueMutation(async (gen) => {
+      try {
+        const newUpdatedAt = await setStickyVisible(stickyId, false);
+        if (gen !== stickyGeneration) return;
+        applyRevision(newUpdatedAt);
+      } catch (e) {
+        if (gen !== stickyGeneration) return;
+        const err = normalizeError(e);
+        console.error(`[sticky] 设置可见性失败 [${err.code}]: ${err.message}`);
+      }
+    });
     const win = getCurrentWindow();
     if (win) win.hide();
   });
@@ -988,7 +1100,8 @@ function showContextMenu(x, y) {
       const win = getCurrentWindow();
       if (win) win.hide();
     } catch (e) {
-      console.error("[sticky] 删除便签失败:", e);
+      const err = normalizeError(e);
+      console.error(`[sticky] 删除便签失败 [${err.code}]: ${err.message}`);
     }
   });
   menu.appendChild(itemDelete);
@@ -1030,8 +1143,30 @@ function makeSeparator() {
 // ── 退出前 flush（0.16.11）────────────────────────────
 
 /**
+ * P0-2：后端 CloseRequested 兜底路径（Alt+F4/系统关闭）调用的前端入口。
+ * 带 requestId 的 request/ack 协议：
+ * - 后端 eval 传入 requestId，前端 closeSticky() 完成后 invoke sticky_close_ack 回传结果
+ * - ack 区分 success/conflict/error，后端收到任何有效 ack 都取消超时降级
+ * - conflict 时前端保持窗口可见，后端不降级覆盖
+ */
+window.__stickyRequestClose = function (requestId) {
+  closeSticky()
+    .then(() => {
+      // closeSticky 成功（窗口已 hide 或已关闭）
+      invoke('sticky_close_ack', { requestId, outcome: 'success' }).catch(() => {});
+    })
+    .catch((e) => {
+      const err = normalizeError(e);
+      const outcome = err.code === 'conflict' ? 'conflict' : 'error';
+      invoke('sticky_close_ack', { requestId, outcome, message: err.message }).catch(() => {});
+    });
+};
+
+/**
  * 应用退出时后端 eval 调用此函数，立即保存未写入的内容和几何。
  * 防抖计时器内的内容最多 500ms 未保存，退出时强制 flush。
+ *
+ * P0-1：flush 也走 mutation 队列，确保内容保存和几何保存串行化。
  */
 window.__stickyFlush = async function () {
   // 清除防抖计时器，直接保存
@@ -1043,8 +1178,10 @@ window.__stickyFlush = async function () {
     clearTimeout(geometryTimer);
     geometryTimer = null;
   }
-  // 并行保存内容和几何
+  // flush 也走队列，确保内容保存和几何保存串行化
   await Promise.allSettled([saveContent(), saveGeometry()]);
+  // 等待队列中所有 mutation 完成
+  await mutationQueue.catch(() => {});
 };
 
 // ── Tiptap 编辑器销毁（窗口复用前清理）────────────────────
@@ -1077,6 +1214,11 @@ window.__stickyReset = function () {
   }
   stickyId = null;
   stickyNote = null;
+  // 0.20.7：递增 generation 使旧便签的迟到保存结果失效
+  stickyGeneration++;
+  stickyUpdatedAt = null;
+  // P0-1：重置 mutation 队列，旧 mutation 的迟到响应不再干扰新便签
+  mutationQueue = Promise.resolve();
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
@@ -1093,9 +1235,10 @@ window.__stickyReset = function () {
   }
   console.log("[sticky] spare 已回收，通知后端就绪");
   // 通知后端：回收完成，可被借用
-  invoke("sticky_spare_ready").catch((e) =>
-    console.error("[sticky] sticky_spare_ready (recycle) 调用失败:", e)
-  );
+  invoke("sticky_spare_ready").catch((e) => {
+    const err = normalizeError(e);
+    console.error(`[sticky] sticky_spare_ready (recycle) 调用失败 [${err.code}]: ${err.message}`);
+  });
 };
 
 // ── 启动 ──────────────────────────────────────────────

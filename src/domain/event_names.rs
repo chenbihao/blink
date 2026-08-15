@@ -81,6 +81,14 @@ impl EventNames {
     /// 便签从回收站恢复（0.17.7）。payload: `{ stickyId }`
     pub const STICKY_RESTORED: &str = "blink://sticky-restored";
 
+    /// P0-2：便签关闭 ack（Alt+F4/系统关闭路径）。
+    /// payload: `{ requestId, outcome: "success"|"conflict"|"error", message? }`
+    /// 前端 closeSticky() 完成后 invoke 此命令通知后端取消超时降级。
+    /// P0-2 修订：实际 ack 信号通过全局 channel 注册表传递（AppHandle 不支持
+    /// listen/unlisten），此常量保留作文档和未来事件系统迁移的参考。
+    #[allow(dead_code)]
+    pub const STICKY_CLOSE_ACK: &str = "blink://sticky-close-ack";
+
     // ── 截图（0.18.x）──
     /// 截图控件吸附 hints 流式推送（0.18.x）。
     /// payload: `ControlHintsEvent { generation, kind: "batch"|"done", depth, hints, ... }`

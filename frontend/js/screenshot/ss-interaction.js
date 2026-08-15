@@ -607,16 +607,17 @@ function updatePrecisionHint() {
  */
 export function moveSelection1px(selCss, dx, dy, meta) {
   if (!selCss) return null;
+  // 与本文件其他几何换算一致：走 getRenderScale 的 fallback 链
+  // （meta 未同步时回退 devicePixelRatio），不裸读 renderScaleX/Y
+  const { scaleX: rsx, scaleY: rsy } = getRenderScale(meta);
   const bmp = cssPointToBitmap(selCss.x, selCss.y, meta);
-  const bmpW = Math.round(selCss.w * (meta?.renderScaleX || 1));
-  const bmpH = Math.round(selCss.h * (meta?.renderScaleY || 1));
+  const bmpW = Math.round(selCss.w * rsx);
+  const bmpH = Math.round(selCss.h * rsy);
   const bmpRect = { x: bmp.x, y: bmp.y, w: bmpW, h: bmpH };
   const canvasW = ss.canvas?.width || meta?.w || 0;
   const canvasH = ss.canvas?.height || meta?.h || 0;
   const newBmpRect = moveRect1px(bmpRect, dx, dy, canvasW, canvasH);
   // 转回 CSS
-  const rsx = meta?.renderScaleX || 1;
-  const rsy = meta?.renderScaleY || 1;
   return {
     x: newBmpRect.x / rsx,
     y: newBmpRect.y / rsy,

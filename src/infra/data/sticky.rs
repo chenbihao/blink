@@ -536,16 +536,24 @@ pub async fn update_geometry(
 }
 
 /// 设置便签可见性（关闭 = 隐藏，不删除）。
-pub async fn set_visible(pool: &SqlitePool, id: &str, visible: bool) -> Result<(), String> {
+///
+/// 返回新的 `updated_at`（P0-1：前端 mutation queue 需要 revision 跟踪）。
+pub async fn set_visible(pool: &SqlitePool, id: &str, visible: bool) -> Result<i64, String> {
     let now = chrono::Utc::now().timestamp();
-    sqlx::query("UPDATE sticky_notes SET visible = ?1, updated_at = ?2 WHERE id = ?3")
-        .bind(visible as i64)
-        .bind(now)
-        .bind(id)
-        .execute(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    let updated_at = sqlx::query_scalar::<_, i64>(
+        "UPDATE sticky_notes
+         SET visible = ?1,
+             updated_at = CASE WHEN updated_at >= ?2 THEN updated_at + 1 ELSE ?2 END
+         WHERE id = ?3 AND trashed = 0
+         RETURNING updated_at",
+    )
+    .bind(visible as i64)
+    .bind(now)
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    updated_at.ok_or_else(|| format!("便签不存在或已回收: {id}"))
 }
 
 /// 将便签移入回收站（软删除）。
@@ -629,20 +637,28 @@ pub async fn cleanup_trashed(pool: &SqlitePool, retention_days: i64) -> u64 {
 }
 
 /// 设置便签置顶状态。
+///
+/// 返回新的 `updated_at`（P0-1：前端 mutation queue 需要 revision 跟踪）。
 pub async fn set_always_on_top(
     pool: &SqlitePool,
     id: &str,
     always_on_top: bool,
-) -> Result<(), String> {
+) -> Result<i64, String> {
     let now = chrono::Utc::now().timestamp();
-    sqlx::query("UPDATE sticky_notes SET always_on_top = ?1, updated_at = ?2 WHERE id = ?3")
-        .bind(always_on_top as i64)
-        .bind(now)
-        .bind(id)
-        .execute(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    let updated_at = sqlx::query_scalar::<_, i64>(
+        "UPDATE sticky_notes
+         SET always_on_top = ?1,
+             updated_at = CASE WHEN updated_at >= ?2 THEN updated_at + 1 ELSE ?2 END
+         WHERE id = ?3 AND trashed = 0
+         RETURNING updated_at",
+    )
+    .bind(always_on_top as i64)
+    .bind(now)
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    updated_at.ok_or_else(|| format!("便签不存在或已回收: {id}"))
 }
 
 /// 删除便签（永久删除，不可恢复）。
@@ -653,6 +669,84 @@ pub async fn delete(pool: &SqlitePool, id: &str) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// 原子关闭便签的 DB 结果（0.20.0，0.20.7 修订）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StickyCloseDbOutcome {
+    /// 空便签已物理删除
+    DeletedEmpty,
+    /// 非空便签已保存最终内容并移入回收站
+    Trashed,
+}
+
+/// 原子关闭便签：revision 校验 + 最终内容保存 + delete/trash 决策（0.20.0，0.20.7 修订）。
+///
+/// - final content 经 Unicode whitespace trim 后为空 → **带 revision 守卫的物理删除**
+///   （`expected_updated_at` 过期时返回 `Conflict` 而非删除——防止过期版本
+///   误删已被其他入口改写为非空的便签，spec-backend §7.5）
+/// - 非空 → 保存最终内容并移入回收站，两条写合并为**单条 UPDATE** 原子完成，
+///   不存在"已保存但未进回收站"的中间态
+///
+/// 外层 `Err` 为 DB 错误；内层 `Err` 为 NotFound / Trashed / Conflict 分类，
+/// 语义与 [`update_content`] 一致。
+pub async fn close_note(
+    pool: &SqlitePool,
+    id: &str,
+    final_content: &str,
+    expected_updated_at: Option<i64>,
+) -> Result<Result<StickyCloseDbOutcome, StickyWriteOutcome>, String> {
+    let now = chrono::Utc::now().timestamp();
+    let trimmed = final_content.trim_matches(|c: char| c.is_whitespace());
+
+    // spec-backend §7.5：破坏性关闭操作必须携带 revision。
+    // 无 revision 时拒绝执行，防止旧窗口无条件物理删除/覆盖他方写入的内容。
+    let expected = match expected_updated_at {
+        Some(v) => v,
+        None => {
+            tracing::warn!(
+                sticky_id = %id,
+                "close_note 被调用时未携带 expected_updated_at，拒绝无条件关闭"
+            );
+            // 尝试读取当前 updated_at 用于构造 Conflict 响应
+            return Ok(Err(classify_failed_write(pool, id, None).await?));
+        }
+    };
+
+    if trimmed.is_empty() {
+        // 空便签 → 物理删除。revision 守卫确保只删除调用方所见版本的便签。
+        let result =
+            sqlx::query("DELETE FROM sticky_notes WHERE id = ?1 AND trashed = 0 AND updated_at = ?2")
+                .bind(id)
+                .bind(expected)
+                .execute(pool)
+                .await
+                .map_err(|e| e.to_string())?;
+        if result.rows_affected() == 0 {
+            return Ok(Err(classify_failed_write(pool, id, Some(expected)).await?));
+        }
+        Ok(Ok(StickyCloseDbOutcome::DeletedEmpty))
+    } else {
+        // 非空 → 单条 UPDATE 原子完成内容保存 + 移入回收站
+        let updated_at = sqlx::query_scalar::<_, i64>(
+            "UPDATE sticky_notes
+             SET content = ?1, trashed = 1, deleted_at = ?2,
+                 updated_at = CASE WHEN updated_at >= ?2 THEN updated_at + 1 ELSE ?2 END
+             WHERE id = ?3 AND trashed = 0 AND updated_at = ?4
+             RETURNING updated_at",
+        )
+        .bind(final_content)
+        .bind(now)
+        .bind(id)
+        .bind(expected)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        match updated_at {
+            Some(_) => Ok(Ok(StickyCloseDbOutcome::Trashed)),
+            None => Ok(Err(classify_failed_write(pool, id, Some(expected)).await?)),
+        }
+    }
 }
 
 /// 获取便签统计信息。
@@ -841,5 +935,149 @@ mod tests {
         let updated = get(&pool, &note.id).await.unwrap();
         assert_eq!((updated.x, updated.y), (10, 20));
         assert_eq!((updated.width, updated.height), (320, 440));
+    }
+
+    #[tokio::test]
+    async fn close_note_deletes_empty_and_trashes_nonempty() {
+        let pool = test_pool().await;
+
+        // 空内容（含纯空白）→ 物理删除
+        let note = insert_note(&pool, "close-empty").await;
+        assert_eq!(
+            close_note(&pool, "close-empty", "  \n\t ", Some(note.updated_at))
+                .await
+                .unwrap()
+                .unwrap(),
+            StickyCloseDbOutcome::DeletedEmpty
+        );
+        assert!(get(&pool, "close-empty").await.is_none());
+
+        // 非空 → 内容保存 + 回收站，单条 UPDATE 原子完成
+        let note2 = insert_note(&pool, "close-full").await;
+        assert_eq!(
+            close_note(&pool, "close-full", "最终内容", Some(note2.updated_at))
+                .await
+                .unwrap()
+                .unwrap(),
+            StickyCloseDbOutcome::Trashed
+        );
+        let closed = get(&pool, "close-full").await.unwrap();
+        assert!(closed.trashed);
+        assert_eq!(closed.content, "最终内容");
+        assert!(closed.deleted_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn close_note_empty_with_stale_revision_conflicts_not_deletes() {
+        let pool = test_pool().await;
+        let note = insert_note(&pool, "stale").await;
+
+        // 另一入口先写入非空内容，revision 前移
+        let StickyWriteOutcome::Applied { updated_at } =
+            update_content(&pool, "stale", "已被他方保存的内容", Some(note.updated_at))
+                .await
+                .unwrap()
+        else {
+            panic!("expected applied")
+        };
+
+        // 过期版本尝试原子关闭（空内容）→ 必须 Conflict，且便签仍存在
+        assert_eq!(
+            close_note(&pool, "stale", " ", Some(note.updated_at))
+                .await
+                .unwrap()
+                .unwrap_err(),
+            StickyWriteOutcome::Conflict {
+                actual_updated_at: updated_at
+            }
+        );
+        let still = get(&pool, "stale").await.unwrap();
+        assert!(!still.trashed);
+        assert_eq!(still.content, "已被他方保存的内容");
+    }
+
+    #[tokio::test]
+    async fn close_note_classifies_missing_and_trashed() {
+        let pool = test_pool().await;
+        assert_eq!(
+            close_note(&pool, "missing", "x", None).await.unwrap().unwrap_err(),
+            StickyWriteOutcome::NotFound
+        );
+
+        insert_note(&pool, "gone").await;
+        set_trashed(&pool, "gone", true).await.unwrap();
+        assert_eq!(
+            close_note(&pool, "gone", "x", None).await.unwrap().unwrap_err(),
+            StickyWriteOutcome::Trashed
+        );
+    }
+
+    #[tokio::test]
+    async fn set_visible_returns_monotonic_revision() {
+        let pool = test_pool().await;
+        let note = insert_note(&pool, "vis").await;
+        let rev1 = set_visible(&pool, "vis", false).await.unwrap();
+        assert!(rev1 > note.updated_at);
+        let rev2 = set_visible(&pool, "vis", true).await.unwrap();
+        assert!(rev2 > rev1);
+    }
+
+    #[tokio::test]
+    async fn set_always_on_top_returns_monotonic_revision() {
+        let pool = test_pool().await;
+        let note = insert_note(&pool, "aot").await;
+        let rev1 = set_always_on_top(&pool, "aot", false).await.unwrap();
+        assert!(rev1 > note.updated_at);
+        let rev2 = set_always_on_top(&pool, "aot", true).await.unwrap();
+        assert!(rev2 > rev1);
+    }
+
+    #[tokio::test]
+    async fn set_visible_on_missing_returns_err() {
+        let pool = test_pool().await;
+        assert!(set_visible(&pool, "nope", false).await.is_err());
+        assert!(set_always_on_top(&pool, "nope", true).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn set_visible_on_trashed_returns_err() {
+        let pool = test_pool().await;
+        insert_note(&pool, "tv").await;
+        set_trashed(&pool, "tv", true).await.unwrap();
+        assert!(set_visible(&pool, "tv", false).await.is_err());
+        assert!(set_always_on_top(&pool, "tv", true).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn interleaved_content_and_geometry_revisions_are_monotonic() {
+        // P0-1 验收：模拟“几何保存先返回 102，内容保存后返回 101”的乱序场景。
+        // 前端 applyRevision 用 max() 保证 revision 不倒退。
+        let pool = test_pool().await;
+        let note = insert_note(&pool, "inter").await;
+
+        // 先发起内容保存（返回 101）
+        let content_outcome = update_content(&pool, "inter", "hello", Some(note.updated_at))
+            .await
+            .unwrap();
+        let StickyWriteOutcome::Applied { updated_at: content_rev } = content_outcome else {
+            panic!("expected applied")
+        };
+
+        // 再发起几何保存（返回 102）
+        let geom_outcome =
+            update_geometry(&pool, "inter", 10, 20, 300, 400).await.unwrap();
+        let StickyWriteOutcome::Applied { updated_at: geom_rev } = geom_outcome else {
+            panic!("expected applied")
+        };
+
+        // 两者都应 > 原始 revision
+        assert!(content_rev > note.updated_at);
+        assert!(geom_rev > note.updated_at);
+
+        // 前端 applyRevision 模拟：先收到 102，后收到 101，不应倒退
+        let mut frontend_rev = note.updated_at;
+        frontend_rev = frontend_rev.max(geom_rev); // 先收到 102
+        frontend_rev = frontend_rev.max(content_rev); // 后收到 101（不应倒退）
+        assert_eq!(frontend_rev, geom_rev);
     }
 }

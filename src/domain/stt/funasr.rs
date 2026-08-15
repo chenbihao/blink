@@ -56,10 +56,17 @@ pub fn server_script_path() -> PathBuf {
 ///
 /// 返回脚本路径，失败时返回 None（调用方应提示用户）。
 pub fn ensure_server_script() -> Result<PathBuf, String> {
-    let dir = python_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建 python 目录失败: {e}"))?;
+    ensure_server_script_in(&python_dir())
+}
 
-    let script_path = server_script_path();
+/// `ensure_server_script` 的内部实现，接受显式目标目录（测试用）。
+///
+/// 生产入口 [`ensure_server_script`] 使用正式 `python_dir()`，
+/// 测试传入 `tempfile::TempDir` 路径以隔离真实 `%APPDATA%`。
+pub(crate) fn ensure_server_script_in(dir: &std::path::Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("创建 python 目录失败: {e}"))?;
+
+    let script_path = dir.join("blink_stt_server.py");
 
     // 检查是否已存在且内容一致（避免无谓写入）
     let need_write = match std::fs::read_to_string(&script_path) {
@@ -87,25 +94,23 @@ pub fn ensure_server_script() -> Result<PathBuf, String> {
 ///
 /// 返回文件路径（如果 hotwords 为空则返回 None，不写文件）。
 pub fn write_hotwords_file(hotwords: &Option<String>) -> Option<PathBuf> {
-    let hotwords = hotwords.as_ref()?;
-    if hotwords.trim().is_empty() {
-        return None;
-    }
+    write_hotwords_file_in(&python_dir(), hotwords)
+}
 
-    // 统一分隔：英文逗号 + 换行都可以，每个热词 trim 后去空行
-    let normalized: String = hotwords
-        .split([',', '\n', '\r'])
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
-
+/// `write_hotwords_file` 的内部实现，接受显式目标目录（测试用）。
+///
+/// 生产入口 [`write_hotwords_file`] 使用正式 `python_dir()`，
+/// 测试传入 `tempfile::TempDir` 路径以隔离真实 `%APPDATA%`。
+pub(crate) fn write_hotwords_file_in(
+    dir: &std::path::Path,
+    hotwords: &Option<String>,
+) -> Option<PathBuf> {
+    let normalized = normalize_hotwords(hotwords.as_deref()?);
     if normalized.is_empty() {
         return None;
     }
 
-    let dir = python_dir();
-    if std::fs::create_dir_all(&dir).is_err() {
+    if std::fs::create_dir_all(dir).is_err() {
         return None;
     }
 
@@ -120,6 +125,24 @@ pub fn write_hotwords_file(hotwords: &Option<String>) -> Option<PathBuf> {
             None
         }
     }
+}
+
+/// 纯函数：将热词配置文本归一化为换行分隔格式。
+///
+/// 前端用英文逗号分隔热词（省空间），FunASR 要求每行一个——
+/// 此函数自动将逗号 / 换行混合分隔转为换行格式。
+///
+/// 空白输入返回空字符串（调用方据此跳过文件写入）。
+pub(crate) fn normalize_hotwords(raw: &str) -> String {
+    if raw.trim().is_empty() {
+        return String::new();
+    }
+
+    raw.split([',', '\n', '\r'])
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ── 状态结构 ──────────────────────────────────────────────────────────────
@@ -670,8 +693,9 @@ mod tests {
 
     #[test]
     fn ensure_server_script_creates_file() {
-        // 释放脚本（幂等操作）
-        let path = ensure_server_script().expect("ensure_server_script 失败");
+        // 使用临时目录，不写真实 %APPDATA%
+        let tmp = tempfile::tempdir().expect("创建临时目录失败");
+        let path = ensure_server_script_in(tmp.path()).expect("ensure_server_script_in 失败");
         assert!(path.exists(), "script file should exist after ensure");
 
         // 验证文件内容与嵌入内容一致
@@ -679,20 +703,73 @@ mod tests {
         assert_eq!(content, BLINK_STT_SERVER_PY);
     }
 
+    // ── normalize_hotwords 纯函数测试 ──
+
+    #[test]
+    fn normalize_hotwords_empty_returns_empty() {
+        assert_eq!(normalize_hotwords(""), "");
+        assert_eq!(normalize_hotwords("   "), "");
+        assert_eq!(normalize_hotwords("  \n  \r  "), "");
+    }
+
+    #[test]
+    fn normalize_hotwords_comma_separated() {
+        assert_eq!(
+            normalize_hotwords("美团 100, 快手 80, Blink 100"),
+            "美团 100\n快手 80\nBlink 100"
+        );
+    }
+
+    #[test]
+    fn normalize_hotwords_newline_separated() {
+        assert_eq!(
+            normalize_hotwords("美团 100\n快手 80\nBlink 100"),
+            "美团 100\n快手 80\nBlink 100"
+        );
+    }
+
+    #[test]
+    fn normalize_hotwords_mixed_separators() {
+        assert_eq!(
+            normalize_hotwords("美团 100, 快手 80\nBlink 100"),
+            "美团 100\n快手 80\nBlink 100"
+        );
+    }
+
+    #[test]
+    fn normalize_hotwords_trims_whitespace() {
+        assert_eq!(
+            normalize_hotwords("  美团 100 ,  快手 80  "),
+            "美团 100\n快手 80"
+        );
+    }
+
+    #[test]
+    fn normalize_hotwords_filters_empty_entries() {
+        assert_eq!(
+            normalize_hotwords("美团 100,, ,快手 80"),
+            "美团 100\n快手 80"
+        );
+    }
+
+    // ── write_hotwords_file 落盘测试（使用临时目录，只验证一次实际写入）──
+
     #[test]
     fn write_hotwords_none_for_empty() {
-        let result = write_hotwords_file(&None);
+        let tmp = tempfile::tempdir().expect("创建临时目录失败");
+        let result = write_hotwords_file_in(tmp.path(), &None);
         assert!(result.is_none());
 
-        let result = write_hotwords_file(&Some("   \n  ".to_string()));
+        let result = write_hotwords_file_in(tmp.path(), &Some("   \n  ".to_string()));
         assert!(result.is_none());
     }
 
     #[test]
     fn write_hotwords_creates_file() {
-        // 逗号分隔 → 转为换行格式写入文件
+        // 只验证一次实际落盘和路径
+        let tmp = tempfile::tempdir().expect("创建临时目录失败");
         let hotwords = "美团 100, 快手 80, Blink 100".to_string();
-        let path = write_hotwords_file(&Some(hotwords));
+        let path = write_hotwords_file_in(tmp.path(), &Some(hotwords));
         assert!(path.is_some(), "热词文件应被创建");
 
         let path = path.unwrap();
@@ -700,28 +777,6 @@ mod tests {
         assert!(path.ends_with("hotwords.txt"));
 
         let content = std::fs::read_to_string(&path).expect("读取热词文件失败");
-        assert_eq!(content, "美团 100\n快手 80\nBlink 100");
-    }
-
-    #[test]
-    fn write_hotwords_newline_compat() {
-        // 旧换行格式也兼容
-        let hotwords = "美团 100\n快手 80\nBlink 100".to_string();
-        let path = write_hotwords_file(&Some(hotwords));
-        assert!(path.is_some());
-
-        let content = std::fs::read_to_string(&path.unwrap()).expect("读取热词文件失败");
-        assert_eq!(content, "美团 100\n快手 80\nBlink 100");
-    }
-
-    #[test]
-    fn write_hotwords_mixed_separators() {
-        // 逗号 + 换行混合
-        let hotwords = "美团 100, 快手 80\nBlink 100".to_string();
-        let path = write_hotwords_file(&Some(hotwords));
-        assert!(path.is_some());
-
-        let content = std::fs::read_to_string(&path.unwrap()).expect("读取热词文件失败");
         assert_eq!(content, "美团 100\n快手 80\nBlink 100");
     }
 

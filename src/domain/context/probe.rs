@@ -240,8 +240,8 @@ fn is_ip_or_port(s: &str) -> bool {
     if s.is_empty() || s.len() > 64 {
         return false;
     }
-    // IPv4:port 或 IPv4
-    if s.chars().all(|c| c.is_ascii_digit() || c == '.') || s.contains('.') {
+    // IPv4:port 或 IPv4（含 '.' 才可能是 IPv4；纯数字走下方端口分支）
+    if s.contains('.') {
         let host = s.rsplit_once(':').map(|(h, _)| h).unwrap_or(s);
         let port = s.rsplit_once(':').map(|(_, p)| p);
         // IPv4 校验
@@ -330,11 +330,7 @@ fn is_short_json(s: &str) -> bool {
         return false;
     }
     // 必须以 } 或 ] 结尾（对应）
-    let (open, close) = if s.starts_with('{') {
-        ('{', '}')
-    } else {
-        ('[', ']')
-    };
+    let close = if s.starts_with('{') { '}' } else { ']' };
     if !s.ends_with(close) {
         return false;
     }

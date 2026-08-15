@@ -14,7 +14,9 @@ use sqlx::SqlitePool;
 
 /// 便签错误——可序列化，IPC 边界保留 `kind` 字段供前端分类展示（spec §4.1）。
 ///
-/// domain 层用此类型替代 `Result<_, String>`，command 层在 IPC 边界 `.to_string()` 拍平。
+/// domain 层用此类型替代 `Result<_, String>`；command 层经
+/// `CommandError::from(StickyError)` 投影为稳定 `{code, message, detail, retryable}`
+/// wire schema（app/command_error.rs）。
 #[derive(Debug, serde::Serialize, thiserror::Error)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[allow(dead_code)]
@@ -66,8 +68,8 @@ pub enum StickyWorkflowError {
 
 /// 便签原子关闭工作流结果（0.20.0）。
 ///
-/// `close_note` 在同一事务内完成 revision 校验、最终保存和 delete/trash 决策。
-/// 空内容 → 物理删除；非空 → 保存最终内容并移入回收站。
+/// `close_note` 在单条 SQL 内原子完成 revision 校验、最终保存和 delete/trash 决策。
+/// 空内容 → 物理删除（带 revision 守卫）；非空 → 保存最终内容并移入回收站。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StickyCloseOutcome {
@@ -188,13 +190,13 @@ impl StickyService {
         }
     }
 
-    /// 更新便签外观（颜色 + 可选格式）。
+    /// 更新便签外观（颜色 + 可选格式）。返回新的 `updated_at`。
     pub async fn update_appearance(
         &self,
         id: &str,
         color: StickyColor,
         format: Option<StickyFormat>,
-    ) -> Result<(), StickyError> {
+    ) -> Result<i64, StickyError> {
         crate::infra::data::sticky::update_appearance(
             &self.history_pool,
             id,
@@ -203,11 +205,14 @@ impl StickyService {
         )
         .await
         .map_err(|e| StickyError::Db { detail: e })?;
+        let note = crate::infra::data::sticky::get(&self.history_pool, id)
+            .await
+            .ok_or_else(|| StickyError::NotFound { id: id.to_string() })?;
         tracing::debug!(sticky_id = %id, color = %color.as_str(), "便签外观已更新");
-        Ok(())
+        Ok(note.updated_at)
     }
 
-    /// 更新便签窗口几何。
+    /// 更新便签窗口几何。返回新的 `updated_at`。
     pub async fn update_geometry(
         &self,
         id: &str,
@@ -215,7 +220,7 @@ impl StickyService {
         y: i32,
         width: i32,
         height: i32,
-    ) -> Result<(), StickyError> {
+    ) -> Result<i64, StickyError> {
         use crate::infra::data::sticky::StickyWriteOutcome;
 
         let outcome = crate::infra::data::sticky::update_geometry(
@@ -229,7 +234,7 @@ impl StickyService {
         .await
         .map_err(|detail| StickyError::Db { detail })?;
         match outcome {
-            StickyWriteOutcome::Applied { .. } => Ok(()),
+            StickyWriteOutcome::Applied { updated_at } => Ok(updated_at),
             StickyWriteOutcome::NotFound => Err(StickyError::NotFound { id: id.to_string() }),
             StickyWriteOutcome::Trashed => Err(StickyError::Trashed { id: id.to_string() }),
             StickyWriteOutcome::Conflict { .. } => Err(StickyError::Db {
@@ -239,12 +244,14 @@ impl StickyService {
     }
 
     /// 设置便签可见性。
-    pub async fn set_visible(&self, id: &str, visible: bool) -> Result<(), StickyError> {
-        crate::infra::data::sticky::set_visible(&self.history_pool, id, visible)
+    ///
+    /// 返回新的 `updated_at`（P0-1：前端 mutation queue 需要 revision 跟踪）。
+    pub async fn set_visible(&self, id: &str, visible: bool) -> Result<i64, StickyError> {
+        let updated_at = crate::infra::data::sticky::set_visible(&self.history_pool, id, visible)
             .await
             .map_err(|e| StickyError::Db { detail: e })?;
         tracing::info!(sticky_id = %id, visible, "便签可见性已变更");
-        Ok(())
+        Ok(updated_at)
     }
 
     /// 将便签移入回收站（软删除，0.17.7）。
@@ -304,22 +311,26 @@ impl StickyService {
     }
 
     /// 设置便签置顶。
+    ///
+    /// 返回新的 `updated_at`（P0-1：前端 mutation queue 需要 revision 跟踪）。
     pub async fn set_always_on_top(
         &self,
         id: &str,
         always_on_top: bool,
-    ) -> Result<(), StickyError> {
-        crate::infra::data::sticky::set_always_on_top(&self.history_pool, id, always_on_top)
-            .await
-            .map_err(|e| StickyError::Db { detail: e })?;
-        Ok(())
+    ) -> Result<i64, StickyError> {
+        let updated_at =
+            crate::infra::data::sticky::set_always_on_top(&self.history_pool, id, always_on_top)
+                .await
+                .map_err(|e| StickyError::Db { detail: e })?;
+        Ok(updated_at)
     }
 
-    /// 原子关闭便签（0.20.0）。
+    /// 原子关闭便签（0.20.0，0.20.7 修订）。
     ///
-    /// 在同一调用内完成：revision 校验 → 最终内容保存 → delete/trash 决策。
-    /// - final content 经 Unicode whitespace trim 后为空 → 物理删除
-    /// - 非空 → 保存最终内容并移入回收站
+    /// 在单条 SQL 内原子完成：revision 校验 → 最终内容保存 → delete/trash 决策。
+    /// - final content 经 Unicode whitespace trim 后为空 → 物理删除（带 revision 守卫，
+    ///   过期版本返回 `Conflict` 而非删除，防止误删他方刚写入的非空内容）
+    /// - 非空 → 保存最终内容并移入回收站（无"已保存但未进回收站"中间态）
     ///
     /// `expected_updated_at` 用于乐观并发校验（与 `update_content` 同语义）。
     /// 返回 `StickyCloseOutcome` 表示最终状态；冲突/存储失败走 `StickyError`。
@@ -329,45 +340,40 @@ impl StickyService {
         final_content: &str,
         expected_updated_at: Option<i64>,
     ) -> Result<StickyCloseOutcome, StickyError> {
-        let trimmed = final_content.trim_matches(|c: char| c.is_whitespace());
-        if trimmed.is_empty() {
-            // 空便签 → 物理删除
-            crate::infra::data::sticky::delete(&self.history_pool, id)
-                .await
-                .map_err(|e| StickyError::Db { detail: e })?;
-            tracing::info!(sticky_id = %id, "便签已原子关闭（空→删除）");
-            Ok(StickyCloseOutcome::DeletedEmpty)
-        } else {
-            // 非空 → 先保存最终内容，再移入回收站
-            // 用 update_content 做 revision 校验
-            let updated_at = self.update_content(id, final_content, expected_updated_at).await?;
-            // 保存成功后移入回收站
-            let outcome = crate::infra::data::sticky::set_trashed(
-                &self.history_pool,
-                id,
-                true,
-            )
-            .await
-            .map_err(|e| StickyError::Db { detail: e })?;
-            match outcome {
-                crate::infra::data::sticky::StickyWriteOutcome::Applied { .. } => {
-                    tracing::info!(
-                        sticky_id = %id,
-                        content_len = final_content.len(),
-                        updated_at,
-                        "便签已原子关闭（非空→回收站）"
-                    );
-                    Ok(StickyCloseOutcome::Trashed)
-                }
-                crate::infra::data::sticky::StickyWriteOutcome::NotFound => {
-                    Err(StickyError::NotFound { id: id.to_string() })
-                }
-                crate::infra::data::sticky::StickyWriteOutcome::Trashed => {
-                    Err(StickyError::Trashed { id: id.to_string() })
-                }
-                crate::infra::data::sticky::StickyWriteOutcome::Conflict { .. } => {
-                    unreachable!("set_trashed 不使用 expected_updated_at")
-                }
+        use crate::infra::data::sticky::{StickyCloseDbOutcome, StickyWriteOutcome};
+
+        let outcome = crate::infra::data::sticky::close_note(
+            &self.history_pool,
+            id,
+            final_content,
+            expected_updated_at,
+        )
+        .await
+        .map_err(|e| StickyError::Db { detail: e })?;
+
+        match outcome {
+            Ok(StickyCloseDbOutcome::DeletedEmpty) => {
+                tracing::info!(sticky_id = %id, "便签已原子关闭（空→删除）");
+                Ok(StickyCloseOutcome::DeletedEmpty)
+            }
+            Ok(StickyCloseDbOutcome::Trashed) => {
+                tracing::info!(
+                    sticky_id = %id,
+                    content_len = final_content.len(),
+                    "便签已原子关闭（非空→回收站）"
+                );
+                Ok(StickyCloseOutcome::Trashed)
+            }
+            Err(StickyWriteOutcome::NotFound) => Err(StickyError::NotFound { id: id.to_string() }),
+            Err(StickyWriteOutcome::Trashed) => Err(StickyError::Trashed { id: id.to_string() }),
+            // classify_failed_write 只产 NotFound/Trashed/Conflict
+            Err(StickyWriteOutcome::Applied { .. }) => unreachable!("close_note 失败分类不含 Applied"),
+            Err(StickyWriteOutcome::Conflict { actual_updated_at }) => {
+                Err(StickyError::Conflict {
+                    id: id.to_string(),
+                    expected_updated_at: expected_updated_at.unwrap_or_default(),
+                    actual_updated_at,
+                })
             }
         }
     }

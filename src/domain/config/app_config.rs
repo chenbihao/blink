@@ -200,14 +200,28 @@ fn default_window_opacity() -> f64 {
 /// 初始化配置：首次运行写默认值 + 检测旧 `app_config` 单 key 触发迁移。
 pub async fn init_config(pool: &SqlitePool) -> Result<(), String> {
     // Step 1: 检测旧 KV 迁移
+    // P1-3：typed deserialize 失败时不写回默认值（会覆盖有效用户配置）。
+    // 旧 JSON 损坏时只删除旧 key，让 Step 2 的首次运行逻辑补写默认分片。
     if let Some(json) = crate::infra::data::history::get_config(pool, "app_config").await {
         tracing::info!("检测到旧 app_config 单 key,开始迁移到分片 KV");
-        let legacy: AppConfig = serde_json::from_str(&json).unwrap_or_default();
-        save_config(pool, &legacy).await?;
-        crate::infra::data::history::delete_config(pool, "app_config")
-            .await
-            .map_err(|e| e.to_string())?;
-        tracing::info!("app_config 单 key 已拆分到 6 分片 + clipboard 独立 KV,旧 key 删除");
+        match serde_json::from_str::<AppConfig>(&json) {
+            Ok(legacy) => {
+                save_config(pool, &legacy).await?;
+                crate::infra::data::history::delete_config(pool, "app_config")
+                    .await
+                    .map_err(|e| e.to_string())?;
+                tracing::info!("app_config 单 key 已拆分到 6 分片 + clipboard 独立 KV,旧 key 删除");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "旧 app_config JSON 反序列化失败，跳过迁移写回（不覆盖），仅删除旧 key"
+                );
+                crate::infra::data::history::delete_config(pool, "app_config")
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+        }
     }
 
     // Step 2: 首次运行
@@ -248,40 +262,110 @@ pub async fn get_config(pool: &SqlitePool) -> AppConfig {
     let disable = ConfigStore::get::<DisableConfig>(pool).await;
 
     // 0.20.1：clipboard display_count → display_pages 启动迁移。
-    // 读取 raw JSON 判定新旧字段并存情况，执行迁移换算后覆盖反序列化结果。
+    // 0.20.7 修订：typed deserialize 失败时绝不写回默认值（会覆盖有效用户配置）。
+    // 在原始 JSON object 上操作：只更新 display_pages、删除 display_count，
+    // 保留未知字段和其他合法字段。成功验证后才写回。
     let clipboard = {
         let raw = crate::infra::data::history::get_config(
             pool,
             <crate::infra::data::clipboard::ClipboardConfig as super::store::ConfigKey>::KEY,
         )
         .await;
-        let mut cfg: crate::infra::data::clipboard::ClipboardConfig = raw
-            .as_deref()
-            .and_then(|json| serde_json::from_str(json).ok())
-            .unwrap_or_default();
 
-        if let Some(json_str) = &raw {
-            if let Ok(raw_val) = serde_json::from_str::<serde_json::Value>(json_str) {
-                let (resolved_pages, migrated) =
-                    crate::infra::data::clipboard::resolve_display_pages_from_json(
-                        &raw_val,
-                        search.page_size.max(1),
-                    );
-                cfg.display_pages = resolved_pages;
-                // 迁移后立即写回，确保下次读取时 DB 中已有 display_pages。
-                if migrated {
-                    if let Err(e) = crate::infra::data::history::set_config(
-                        pool,
-                        <crate::infra::data::clipboard::ClipboardConfig as super::store::ConfigKey>::KEY,
-                        &serde_json::to_string(&cfg).unwrap_or_default(),
-                    )
-                    .await
-                    {
-                        tracing::warn!(error = %e, "clipboard display_pages 迁移写回失败");
+        let cfg: crate::infra::data::clipboard::ClipboardConfig = match raw.as_deref() {
+            Some(json_str) => match serde_json::from_str::<serde_json::Value>(json_str) {
+                Ok(raw_val) => {
+                    // 迁移换算（并存时新字段优先；结果需要写回时 migrated=true）
+                    let (resolved_pages, migrated) =
+                        crate::infra::data::clipboard::resolve_display_pages_from_json(
+                            &raw_val,
+                            search.page_size.max(1),
+                        );
+
+                    // typed deserialize 失败时不写回默认值（spec-backend §7.5）
+                    // ——unwrap_or_default 会掩盖字段类型损坏，导致整份默认配置被写回
+                    let parsed: crate::infra::data::clipboard::ClipboardConfig =
+                        match serde_json::from_value::<crate::infra::data::clipboard::ClipboardConfig>(
+                            raw_val.clone(),
+                        ) {
+                            Ok(mut p) => {
+                                p.display_pages = resolved_pages;
+                                p
+                            }
+                            Err(e) => {
+                                // typed deserialize 失败：不写回，返回默认值
+                                tracing::warn!(
+                                    error = %e,
+                                    "clipboard 配置反序列化失败，使用默认值（不写回 DB）"
+                                );
+                                let mut d =
+                                    crate::infra::data::clipboard::ClipboardConfig::default();
+                                d.display_pages = resolved_pages;
+                                d
+                            }
+                        };
+
+                    // 迁移/清理后立即写回，确保下次读取时 DB 中已是新字段
+                    if migrated {
+                        // 0.20.7：在原始 JSON object 上操作，保留未知字段
+                        if let serde_json::Value::Object(mut obj) = raw_val {
+                            obj.insert(
+                                "display_pages".to_string(),
+                                serde_json::Value::Number(resolved_pages.into()),
+                            );
+                            obj.remove("display_count");
+                            let migrated_val = serde_json::Value::Object(obj);
+                            match serde_json::to_string(&migrated_val) {
+                                Ok(serialized) => {
+                                    if let Err(e) =
+                                        crate::infra::data::history::set_config(
+                                            pool,
+                                            <crate::infra::data::clipboard::ClipboardConfig as super::store::ConfigKey>::KEY,
+                                            &serialized,
+                                        )
+                                        .await
+                                    {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "clipboard display_pages 迁移写回失败"
+                                        );
+                                    }
+                                }
+                                Err(e) => tracing::warn!(
+                                    error = %e,
+                                    "clipboard display_pages 迁移序列化失败，跳过写回"
+                                ),
+                            }
+                        } else {
+                            // 非 object（数组/标量）→ 用 typed struct 序列化
+                            match serde_json::to_string(&parsed) {
+                                Ok(serialized) => {
+                                    if let Err(e) = crate::infra::data::history::set_config(
+                                        pool,
+                                        <crate::infra::data::clipboard::ClipboardConfig as super::store::ConfigKey>::KEY,
+                                        &serialized,
+                                    )
+                                    .await
+                                    {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "clipboard display_pages 迁移写回失败"
+                                        );
+                                    }
+                                }
+                                Err(e) => tracing::warn!(
+                                    error = %e,
+                                    "clipboard display_pages 迁移序列化失败，跳过写回"
+                                ),
+                            }
+                        }
                     }
+                    parsed
                 }
-            }
-        }
+                Err(_) => crate::infra::data::clipboard::ClipboardConfig::default(),
+            },
+            None => crate::infra::data::clipboard::ClipboardConfig::default(),
+        };
         cfg
     };
 
@@ -898,5 +982,77 @@ mod tests {
             loaded.grace_period, 700,
             "update_hotkey 不该覆盖 grace_period"
         );
+    }
+
+    /// P1-3：旧 app_config JSON 损坏时，init_config 不应写回默认值覆盖已有分片。
+    #[tokio::test]
+    async fn init_config_corrupt_legacy_does_not_overwrite_with_defaults() {
+        let pool = in_memory_pool().await;
+
+        // 预先保存一份有效配置到分片
+        let mut cfg = AppConfig::default();
+        cfg.theme = "dark".to_string();
+        cfg.language = "en".to_string();
+        cfg.max_results = 42;
+        save_config(&pool, &cfg).await.unwrap();
+
+        // 写入损坏的旧 app_config 单 key
+        crate::infra::data::history::set_config(&pool, "app_config", "{not valid json")
+            .await
+            .unwrap();
+
+        init_config(&pool).await.unwrap();
+
+        // 旧 key 应被删除
+        assert!(
+            crate::infra::data::history::get_config(&pool, "app_config")
+                .await
+                .is_none(),
+            "损坏的旧 app_config key 应被删除"
+        );
+
+        // 已有分片配置不应被覆盖
+        let loaded = get_config(&pool).await;
+        assert_eq!(loaded.theme, "dark", "已有 theme 不应被默认值覆盖");
+        assert_eq!(loaded.language, "en", "已有 language 不应被默认值覆盖");
+        assert_eq!(loaded.max_results, 42, "已有 max_results 不应被默认值覆盖");
+    }
+
+    /// P1-3：旧 app_config JSON 缺少部分字段（合法缺失），init_config 应正常迁移。
+    /// serde #[serde(default)] 使得缺字段时仍能反序列化成功。
+    #[tokio::test]
+    async fn init_config_partial_legacy_migrates_successfully() {
+        let pool = in_memory_pool().await;
+
+        // 部分字段缺失的旧 JSON（有 hotkey 但没有 chord 等新功能字段）
+        let partial_json = r#"{
+            "hotkey": {"modifiers": ["alt"], "key": "space", "display": "Alt+Space"},
+            "tap_threshold": 300,
+            "grace_period": 500,
+            "auto_start": false,
+            "language": "zh",
+            "theme": "auto"
+        }"#;
+        crate::infra::data::history::set_config(&pool, "app_config", partial_json)
+            .await
+            .unwrap();
+
+        init_config(&pool).await.unwrap();
+
+        assert!(
+            crate::infra::data::history::get_config(&pool, "app_config")
+                .await
+                .is_none(),
+            "旧 app_config key 应在成功迁移后删除"
+        );
+
+        // 迁移后的配置应保留旧 JSON 中的值
+        // 注意：init_config Step 3 会把 hotkey.key "space" → " "（一次性修正）
+        let loaded = get_config(&pool).await;
+        assert_eq!(loaded.hotkey.key, " ");
+        assert_eq!(loaded.language, "zh");
+        assert_eq!(loaded.theme, "auto");
+        // 缺失字段应使用默认值
+        assert!(!loaded.chord_enabled);
     }
 }

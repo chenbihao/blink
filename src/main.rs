@@ -1114,6 +1114,8 @@ app::commands::ensure_mcp_connected,
             app::commands::close_sticky_note,
             // 0.18.3 便签预热
             app::commands::sticky_spare_ready,
+            // P0-2 便签关闭 ack
+            app::commands::sticky_close_ack,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

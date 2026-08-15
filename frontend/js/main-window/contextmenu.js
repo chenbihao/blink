@@ -9,6 +9,7 @@ import { openContainingFolder, openLnkTarget, resetItemHistory, runBuiltinAction
 import { retrigger } from "./search.js";
 import { t, getLang } from "../i18n/index.js";
 import { showActionError } from "./action-error.js";
+import { normalizeError } from "../shared/tauri.js";
 import { EVENTS } from "../shared/event-names.js";
 import { parse as parseColor } from "../shared/color.js";
 import * as clipboardMode from "./clipboard-mode.js";
@@ -357,12 +358,13 @@ function itemMenu(li) {
         openImageEditorFromHistory(lnkPath)
           .then(() => hideWindow())
           .catch((e) => {
-            const err = String(e);
-            if (err === "AlreadyActive") {
+            const err = normalizeError(e);
+            // 0.20.7：同时判断 code 与 detail.reason，未来新增其他 invalid_state 不会被误当作成功
+            if (err.code === "invalid_state" && err.detail?.reason === "already_active") {
               // 后端已激活现有编辑器窗口，只需关闭主窗
               hideWindow();
             } else {
-              console.error("openImageEditorFromHistory failed:", e);
+              console.error("openImageEditorFromHistory failed:", err.message);
             }
           });
       },

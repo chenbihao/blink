@@ -17,6 +17,49 @@ use crate::domain::capability::{
     Capability, CapabilityError, CapabilityResult, CapabilitySchema, InvokeContext,
 };
 
+// ── 可注入的图片写入 seam（测试用）─────────────────────────────────────────
+//
+// `op_capture_to_clipboard` 需要将截图写入系统剪贴板。生产路径调用
+// `domain::clipboard::write_png/write_bgra`（最终走 Win32 CF_DIB）。
+// 单测不能触碰真实剪贴板（被其他进程锁定 / CI session 权限 / 覆盖用户剪贴板），
+// 因此提取此 trait 作为窄 seam，测试传 fake writer 覆盖核心分支。
+
+/// 图片写入剪贴板的窄接口（可注入 seam）。
+///
+/// 生产实现 `ProductionClipboardWriter` 调用 `domain::clipboard::write_png/write_bgra`。
+/// 测试传 `FakeClipboardWriter` 记录写入的图片数据，不触碰真实剪贴板。
+#[async_trait::async_trait]
+trait ClipboardImageWriter: Send + Sync {
+    /// 写 PNG 到剪贴板（虚拟屏幕路径）。
+    async fn write_png(&self, png: Vec<u8>) -> Result<(), CapabilityError>;
+    /// 写 BGRA 像素到剪贴板（指定显示器路径）。
+    async fn write_bgra(&self, bgra: Vec<u8>, w: u32, h: u32) -> Result<(), CapabilityError>;
+}
+
+/// 生产实现：调用 `domain::clipboard` 的真实函数。
+struct ProductionClipboardWriter;
+
+#[async_trait::async_trait]
+impl ClipboardImageWriter for ProductionClipboardWriter {
+    async fn write_png(&self, png: Vec<u8>) -> Result<(), CapabilityError> {
+        use crate::domain::clipboard::ClipboardWriteSource;
+        crate::domain::clipboard::write_png(png, ClipboardWriteSource::Screenshot)
+            .await
+            .map_err(|e| CapabilityError::Internal {
+                detail: e.to_string(),
+            })
+    }
+
+    async fn write_bgra(&self, bgra: Vec<u8>, w: u32, h: u32) -> Result<(), CapabilityError> {
+        use crate::domain::clipboard::ClipboardWriteSource;
+        crate::domain::clipboard::write_bgra(bgra, w, h, ClipboardWriteSource::Screenshot)
+            .await
+            .map_err(|e| CapabilityError::Internal {
+                detail: e.to_string(),
+            })
+    }
+}
+
 /// 统一截图能力。
 pub struct Screenshot;
 
@@ -306,9 +349,19 @@ pub(super) async fn op_window(hwnd: isize) -> Result<CapabilityResult, Capabilit
 pub(super) async fn op_capture_to_clipboard(
     display_id: Option<u32>,
 ) -> Result<CapabilityResult, CapabilityError> {
-    use crate::domain::clipboard::ClipboardWriteSource;
+    op_capture_to_clipboard_with_writer(display_id, &ProductionClipboardWriter).await
+}
 
-    // ── 指定显示器：capture_display → BGRA → write_bgra_to_clipboard（零编码）──
+/// `op_capture_to_clipboard` 的内部实现，接受注入的剪贴板 writer（测试 seam）。
+///
+/// 生产入口 [`op_capture_to_clipboard`] 传 `ProductionClipboardWriter`（调用真实
+/// `domain::clipboard::write_png/write_bgra`）；测试传 `FakeClipboardWriter`
+/// 记录写入数据，不触碰真实 Win32 剪贴板。
+async fn op_capture_to_clipboard_with_writer(
+    display_id: Option<u32>,
+    writer: &dyn ClipboardImageWriter,
+) -> Result<CapabilityResult, CapabilityError> {
+    // ── 指定显示器：capture_display → BGRA → write_bgra（零编码）──
     if let Some(id) = display_id {
         let (bgra, geom) = tokio::task::spawn_blocking(move || {
             crate::infra::platform::screenshot::capture_display(id)
@@ -320,11 +373,7 @@ pub(super) async fn op_capture_to_clipboard(
         .map_err(|e| CapabilityError::Internal { detail: e })?;
 
         let (w, h) = (geom.w, geom.h);
-        crate::domain::clipboard::write_bgra(bgra, w, h, ClipboardWriteSource::Screenshot)
-            .await
-            .map_err(|e| CapabilityError::Internal {
-                detail: e.to_string(),
-            })?;
+        writer.write_bgra(bgra, w, h).await?;
 
         tracing::debug!(
             display_id = id,
@@ -366,20 +415,14 @@ pub(super) async fn op_capture_to_clipboard(
 
             crate::infra::platform::screenshot::session_png()
                 .map(|arc| (*arc).clone())
-                .ok_or_else(|| {
-                    CapabilityError::Internal {
-                        detail: "begin_session 成功但 session_png 返回空".into(),
-                    }
+                .ok_or_else(|| CapabilityError::Internal {
+                    detail: "begin_session 成功但 session_png 返回空".into(),
                 })?
         }
     };
 
     // 写入剪贴板（PNG → 解码为 BGRA → CF_DIB）
-    crate::domain::clipboard::write_png(png, ClipboardWriteSource::Screenshot)
-        .await
-        .map_err(|e| CapabilityError::Internal {
-            detail: e.to_string(),
-        })?;
+    writer.write_png(png).await?;
 
     tracing::debug!("capture_to_clipboard: 虚拟屏幕截图已写入剪贴板");
     Ok(CapabilityResult::Done {
@@ -409,6 +452,84 @@ mod tests {
     use super::test_helpers::test_lock;
     use super::*;
     use crate::infra::platform::screenshot::backend_fake::FakeScreenshotBackend;
+
+    // ── session 清理 guard：确保测试结束后 SESSION 被清空，避免残留影响后续测试 ──
+
+    struct SessionGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl SessionGuard {
+        fn new() -> Self {
+            Self { _lock: test_lock() }
+        }
+    }
+
+    impl Drop for SessionGuard {
+        fn drop(&mut self) {
+            crate::infra::platform::screenshot::end_session();
+        }
+    }
+
+    // ── FakeClipboardWriter：记录写入操作，不触碰真实 Win32 剪贴板 ──
+
+    /// 写入操作记录。
+    #[derive(Debug, Clone, PartialEq)]
+    enum ClipboardWrite {
+        Png(Vec<u8>),
+        Bgra { bgra: Vec<u8>, w: u32, h: u32 },
+    }
+
+    struct FakeClipboardWriter {
+        writes: std::sync::Mutex<Vec<ClipboardWrite>>,
+        fail: bool,
+    }
+
+    impl FakeClipboardWriter {
+        fn new() -> Self {
+            Self {
+                writes: std::sync::Mutex::new(Vec::new()),
+                fail: false,
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                writes: std::sync::Mutex::new(Vec::new()),
+                fail: true,
+            }
+        }
+
+        fn writes(&self) -> Vec<ClipboardWrite> {
+            self.writes.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ClipboardImageWriter for FakeClipboardWriter {
+        async fn write_png(&self, png: Vec<u8>) -> Result<(), CapabilityError> {
+            if self.fail {
+                return Err(CapabilityError::Internal {
+                    detail: "fake clipboard write failure".into(),
+                });
+            }
+            self.writes.lock().unwrap().push(ClipboardWrite::Png(png));
+            Ok(())
+        }
+
+        async fn write_bgra(&self, bgra: Vec<u8>, w: u32, h: u32) -> Result<(), CapabilityError> {
+            if self.fail {
+                return Err(CapabilityError::Internal {
+                    detail: "fake clipboard write failure".into(),
+                });
+            }
+            self.writes
+                .lock()
+                .unwrap()
+                .push(ClipboardWrite::Bgra { bgra, w, h });
+            Ok(())
+        }
+    }
 
     #[test]
     fn id_is_screenshot() {
@@ -447,7 +568,7 @@ mod tests {
     /// list_displays 通过 fake backend 返回预设显示器列表。
     #[tokio::test]
     async fn op_list_displays_returns_fake_backend_configured() {
-        let _g = test_lock();
+        let _g = SessionGuard::new();
         let fake = Arc::new(
             FakeScreenshotBackend::builder()
                 .display(0, 0, 0, 2560, 1440, true)
@@ -469,7 +590,7 @@ mod tests {
 
     #[tokio::test]
     async fn op_capture_virtual_screen_returns_png_blob() {
-        let _g = test_lock();
+        let _g = SessionGuard::new();
         let fake = Arc::new(FakeScreenshotBackend::single_primary(800, 600));
         crate::infra::platform::screenshot::install_backend(fake);
         crate::infra::platform::screenshot::end_session();
@@ -487,7 +608,7 @@ mod tests {
 
     #[tokio::test]
     async fn op_capture_specific_display_returns_png() {
-        let _g = test_lock();
+        let _g = SessionGuard::new();
         let fake = Arc::new(
             FakeScreenshotBackend::builder()
                 .display(0, 0, 0, 800, 600, true)
@@ -509,7 +630,7 @@ mod tests {
 
     #[tokio::test]
     async fn op_crop_without_session_returns_invalid_args() {
-        let _g = test_lock();
+        let _g = SessionGuard::new();
         crate::infra::platform::screenshot::end_session();
         let err = op_crop(0, 0, 100, 100).await.unwrap_err();
         assert!(matches!(err, CapabilityError::InvalidArgs { .. }));
@@ -517,7 +638,7 @@ mod tests {
 
     #[tokio::test]
     async fn op_crop_after_capture_returns_png() {
-        let _g = test_lock();
+        let _g = SessionGuard::new();
         let fake = Arc::new(FakeScreenshotBackend::single_primary(200, 200));
         crate::infra::platform::screenshot::install_backend(fake);
         let _ = op_capture(None).await.unwrap();
@@ -535,7 +656,7 @@ mod tests {
     /// hwnd=0 是 NULL HWND，`get_window_dwm_rect` 应返回 None → InvalidArgs。
     #[tokio::test]
     async fn op_window_invalid_hwnd_returns_error() {
-        let _g = test_lock();
+        let _g = SessionGuard::new();
         let fake = Arc::new(FakeScreenshotBackend::single_primary(800, 600));
         crate::infra::platform::screenshot::install_backend(fake);
 
@@ -552,7 +673,7 @@ mod tests {
     /// 测试环境无可见窗口时 skip（不应 fail）。
     #[tokio::test]
     async fn op_window_with_real_window_returns_png() {
-        let _g = test_lock();
+        let _g = SessionGuard::new();
         let fake = Arc::new(FakeScreenshotBackend::single_primary(1920, 1080));
         crate::infra::platform::screenshot::install_backend(fake);
 
@@ -574,25 +695,48 @@ mod tests {
         );
     }
 
-    /// capture_to_clipboard 虚拟屏幕路径：返回 Done，不返回 Blob。
+    /// capture_to_clipboard 虚拟屏幕路径：写入 PNG，返回 Done。
+    ///
+    /// 使用 FakeClipboardWriter 记录写入数据，不触碰真实 Win32 剪贴板。
+    /// 验证：收到 PNG 字节（含 PNG 魔数），summary 提及剪贴板。
     #[tokio::test]
     async fn op_capture_to_clipboard_virtual_screen_returns_done() {
-        let _g = test_lock();
+        let _g = SessionGuard::new();
         let fake = Arc::new(FakeScreenshotBackend::single_primary(800, 600));
         crate::infra::platform::screenshot::install_backend(fake);
         crate::infra::platform::screenshot::end_session();
 
-        let result = op_capture_to_clipboard(None).await.unwrap();
+        let writer = FakeClipboardWriter::new();
+        let result = op_capture_to_clipboard_with_writer(None, &writer)
+            .await
+            .unwrap();
         let CapabilityResult::Done { summary } = result else {
             panic!("期望 Done 结果，实际: {result:?}");
         };
         assert!(summary.contains("剪贴板"), "summary 应提及剪贴板");
+
+        // 验证 writer 收到 PNG（含魔数）
+        let writes = writer.writes();
+        assert_eq!(writes.len(), 1, "应有 1 次写入");
+        match &writes[0] {
+            ClipboardWrite::Png(png) => {
+                assert_eq!(
+                    &png[..8],
+                    &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
+                    "PNG 魔数应匹配"
+                );
+            }
+            other => panic!("期望 Png 写入，实际: {other:?}"),
+        }
     }
 
-    /// capture_to_clipboard 指定显示器路径：返回 Done。
+    /// capture_to_clipboard 指定显示器路径：写入 BGRA，返回 Done。
+    ///
+    /// 使用 FakeClipboardWriter 记录写入数据，不触碰真实 Win32 剪贴板。
+    /// 验证：收到 BGRA 字节、宽高正确、长度匹配。
     #[tokio::test]
     async fn op_capture_to_clipboard_specific_display_returns_done() {
-        let _g = test_lock();
+        let _g = SessionGuard::new();
         let fake = Arc::new(
             FakeScreenshotBackend::builder()
                 .display(0, 0, 0, 800, 600, true)
@@ -601,10 +745,47 @@ mod tests {
         );
         crate::infra::platform::screenshot::install_backend(fake);
 
-        let result = op_capture_to_clipboard(Some(1)).await.unwrap();
+        let writer = FakeClipboardWriter::new();
+        let result = op_capture_to_clipboard_with_writer(Some(1), &writer)
+            .await
+            .unwrap();
         let CapabilityResult::Done { summary } = result else {
             panic!("期望 Done 结果，实际: {result:?}");
         };
         assert!(summary.contains("剪贴板"), "summary 应提及剪贴板");
+
+        // 验证 writer 收到 BGRA（宽 400 × 高 300 × 4 = 480000 字节）
+        let writes = writer.writes();
+        assert_eq!(writes.len(), 1, "应有 1 次写入");
+        match &writes[0] {
+            ClipboardWrite::Bgra { bgra, w, h } => {
+                assert_eq!(*w, 400, "宽度应为 400");
+                assert_eq!(*h, 300, "高度应为 300");
+                assert_eq!(bgra.len(), 400 * 300 * 4, "BGRA 长度应匹配宽高");
+            }
+            other => panic!("期望 Bgra 写入，实际: {other:?}"),
+        }
+    }
+
+    /// capture_to_clipboard writer 失败时返回 CapabilityError::Internal。
+    #[tokio::test]
+    async fn op_capture_to_clipboard_writer_error_returns_internal() {
+        let _g = SessionGuard::new();
+        let fake = Arc::new(
+            FakeScreenshotBackend::builder()
+                .display(0, 0, 0, 800, 600, true)
+                .display(1, 800, 0, 400, 300, false)
+                .build(),
+        );
+        crate::infra::platform::screenshot::install_backend(fake);
+
+        let writer = FakeClipboardWriter::failing();
+        let err = op_capture_to_clipboard_with_writer(Some(1), &writer)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, CapabilityError::Internal { .. }),
+            "writer 失败应映射为 Internal，实际: {err:?}"
+        );
     }
 }

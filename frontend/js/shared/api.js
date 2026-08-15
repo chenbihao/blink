@@ -334,8 +334,9 @@ export function imageEditorCancel() {
 // ── 0.20.4：多来源图片编辑入口 ──
 
 /** 0.20.4：从当前系统剪贴板图片打开编辑器。
- *  剪贴板无图片时返回错误 "ClipboardNoImage"。
- *  编辑会话已活跃时返回 "AlreadyActive"（同时后端激活现有编辑器窗口）。 */
+ *  剪贴板无图片时 reject { code: "invalid_state", detail: { reason: "clipboard_no_image" } }。
+ *  编辑会话已活跃时 reject { code: "invalid_state", detail: { reason: "already_active" } }
+ *  （同时后端激活现有编辑器窗口）。用 normalizeError 归一化。 */
 export function openImageEditorFromClipboard() {
   return invoke('open_image_editor_from_clipboard');
 }
@@ -522,27 +523,32 @@ export function listStickyNotes() {
   return invoke("list_sticky_notes");
 }
 
-/** 0.16.7：更新便签内容（前端防抖 500ms 后调用）。 */
-export function updateStickyContent(id, content) {
-  return invoke("update_sticky_content", { id, content });
+/** 0.16.7：更新便签内容（前端防抖 500ms 后调用）。
+ *  0.20.7：返回新的 `updated_at`（Unix 秒），前端据此跟踪 revision。 */
+export function updateStickyContent(id, content, expectedUpdatedAt) {
+  return invoke("update_sticky_content", { id, content, expectedUpdatedAt: expectedUpdatedAt ?? null });
 }
 
-/** 0.16.7：更新便签外观（颜色 + 可选格式）。 */
+/** 0.16.7：更新便签外观（颜色 + 可选格式）。
+ *  0.20.7：返回新的 `updated_at`。 */
 export function updateStickyAppearance(id, color, format) {
   return invoke("update_sticky_appearance", { id, color, format: format ?? null });
 }
 
-/** 0.16.7：更新便签窗口几何（位置 + 尺寸，物理像素）。 */
+/** 0.16.7：更新便签窗口几何（位置 + 尺寸，物理像素）。
+ *  0.20.7：返回新的 `updated_at`。 */
 export function updateStickyGeometry(id, x, y, width, height) {
   return invoke("update_sticky_geometry", { id, x, y, width, height });
 }
 
-/** 0.16.7：设置便签可见性（关闭 = 隐藏）。 */
+/** 0.16.7：设置便签可见性（关闭 = 隐藏）。
+ *  P0-1：返回新的 `updated_at`。 */
 export function setStickyVisible(id, visible) {
   return invoke("set_sticky_visible", { id, visible });
 }
 
-/** 0.16.7：设置便签置顶。 */
+/** 0.16.7：设置便签置顶。
+ *  P0-1：返回新的 `updated_at`。 */
 export function setStickyAlwaysOnTop(id, alwaysOnTop) {
   return invoke("set_sticky_always_on_top", { id, alwaysOnTop });
 }

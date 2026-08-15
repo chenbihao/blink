@@ -147,6 +147,59 @@ impl From<crate::domain::capability::builtins::ocr_engine::OcrError> for Command
     }
 }
 
+// ── StickyError / StickyWorkflowError 映射（close_sticky_note command，0.20.7）──
+
+impl From<crate::domain::sticky::StickyError> for CommandError {
+    fn from(e: crate::domain::sticky::StickyError) -> Self {
+        use crate::domain::sticky::StickyError;
+
+        match e {
+            StickyError::Db { detail } => {
+                Self::new("internal_error", format!("数据库错误: {detail}"), false)
+            }
+            StickyError::NotFound { id } => Self::with_detail(
+                "not_found",
+                &format!("便签不存在: {id}"),
+                false,
+                serde_json::json!({ "id": id }),
+            ),
+            StickyError::Trashed { id } => Self::with_detail(
+                "invalid_state",
+                &format!("便签已在回收站: {id}"),
+                false,
+                serde_json::json!({ "id": id }),
+            ),
+            StickyError::Conflict {
+                id,
+                expected_updated_at,
+                actual_updated_at,
+            } => Self::with_detail(
+                "conflict",
+                &format!(
+                    "便签已被修改，请重试（期望版本 {expected_updated_at}，当前版本 {actual_updated_at}）"
+                ),
+                true,
+                serde_json::json!({
+                    "id": id,
+                    "expected_updated_at": expected_updated_at,
+                    "actual_updated_at": actual_updated_at,
+                }),
+            ),
+        }
+    }
+}
+
+impl From<crate::domain::sticky::StickyWorkflowError> for CommandError {
+    fn from(e: crate::domain::sticky::StickyWorkflowError) -> Self {
+        match e {
+            crate::domain::sticky::StickyWorkflowError::Sticky(err) => err.into(),
+            crate::domain::sticky::StickyWorkflowError::SideEffect { detail } => {
+                Self::new("internal_error", format!("便签界面同步失败: {detail}"), false)
+            }
+        }
+    }
+}
+
 // ── 测试 ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

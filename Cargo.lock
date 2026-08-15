@@ -480,6 +480,7 @@ dependencies = [
  "tauri-plugin-autostart",
  "tauri-plugin-dialog",
  "tauri-plugin-single-instance",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",

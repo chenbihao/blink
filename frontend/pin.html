@@ -88,7 +88,10 @@
       const params = new URLSearchParams(location.search);
       const isPreheat = params.get('preheat') === '1';
       if (isPreheat) {
-        pinSpareReady().catch((e) => console.error('pin_spare_ready 失败', e));
+        pinSpareReady().catch((e) => {
+          const err = normalizeError(e);
+          console.error(`pin_spare_ready 失败 [${err.code}] ${err.message}`);
+        });
       }
 
       // ── 统一几何状态 ──
@@ -159,7 +162,8 @@
           monitorDpr,
         );
         return screenshotPinTransform(myLabel, rect.winX, rect.winY, rect.winW, rect.winH).catch((e) => {
-          console.error('screenshotPinTransform 失败', e);
+          const err = normalizeError(e);
+          console.error(`screenshotPinTransform 失败 [${err.code}] ${err.message}`);
           throw e;
         });
       }
@@ -201,7 +205,8 @@
             tracing_debug('reconcile', { oldDpr: monitorDpr, newDpr, rect });
           }
         } catch (e) {
-          console.error('reconcileFromBackend 失败', e);
+          const err = normalizeError(e);
+          console.error(`reconcileFromBackend 失败 [${err.code}] ${err.message}`);
         }
       }
 
@@ -440,7 +445,10 @@
         zoomLabel.style.opacity = '0';
         hideTranslatingIndicator();
         // 通知后端：回收完成，可被借用
-        pinSpareReady().catch((e) => console.error('pin_spare_ready (recycle) 调用失败:', e));
+        pinSpareReady().catch((e) => {
+          const err = normalizeError(e);
+          console.error(`pin_spare_ready (recycle) 调用失败: [${err.code}] ${err.message}`);
+        });
       };
 
       img.addEventListener('load', () => {
@@ -651,13 +659,14 @@
         hideCtxMenu();
         openImageEditorFromPin(myLabel)
           .catch((e) => {
-            const err = String(e);
-            if (err === 'AlreadyActive') {
+            const err = normalizeError(e);
+            // 0.20.7：同时判断 code 与 detail.reason，避免新增其他 invalid_state 被误判
+            if (err.code === 'invalid_state' && err.detail?.reason === 'already_active') {
               console.info('[pin] 编辑会话已活跃，后端已激活现有编辑器');
-            } else if (err === 'PinImageNotFound') {
+            } else if (err.code === 'not_found') {
               console.warn('[pin] 图片不存在或窗口已关闭');
             } else {
-              console.error('[pin] 从 pin 图打开编辑器失败', e);
+              console.error(`[pin] 从 pin 图打开编辑器失败 [${err.code}] ${err.message}`);
             }
           });
       });
@@ -687,7 +696,8 @@
           const png = await pinImageToPng();
           await pinSaveClipboard(png);
         } catch (e) {
-          console.error('保存到剪贴板失败', e);
+          const err = normalizeError(e);
+          console.error(`保存到剪贴板失败 [${err.code}] ${err.message}`);
         }
       });
 
@@ -699,7 +709,7 @@
         } catch (e) {
           const err = normalizeError(e);
           if (!err.message.includes('用户取消了保存')) {
-            console.error('另存为失败', e);
+            console.error(`另存为失败 [${err.code}] ${err.message}`);
           }
         }
       });
@@ -798,7 +808,10 @@
         const currentTa = pinOcrSource.hidden ? pinOcrTranslated : pinOcrSource;
         const value = currentTa.value;
         if (value) {
-          navigator.clipboard.writeText(value).catch((e) => console.error('复制失败', e));
+          navigator.clipboard.writeText(value).catch((e) => {
+            const err = normalizeError(e);
+            console.error(`复制失败 [${err.code}] ${err.message}`);
+          });
         }
         pinOcrPanel.classList.add('hidden');
       });
@@ -857,7 +870,8 @@
 
       function closePin() {
         invoke('screenshot_pin_hide', { label: myLabel }).catch((e) => {
-          console.error('screenshot_pin_hide 失败', e);
+          const err = normalizeError(e);
+          console.error(`screenshot_pin_hide 失败 [${err.code}] ${err.message}`);
         });
       }
     </script>

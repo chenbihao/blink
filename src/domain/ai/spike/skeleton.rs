@@ -3,6 +3,7 @@
 //! **一律用 mock server（127.0.0.1:0），不打真实供应商**——spike 门槛验的是我们自己，
 //! 供应商延迟不在验收范围（详见 §4.4）。
 
+use std::future::Future;
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
@@ -131,64 +132,99 @@ async fn abort_handle_cancels_inflight_task() {
 /// 验收 4：**loading 反闪烁定时器逻辑**（后端时机侧）
 ///
 /// UI 侧的"150ms 不显 loading"其实是"若 150ms 内响应，就不发 loading 事件"。
-/// 后端职责是精确计时并在阈值处发信号；这里模拟三档响应：
-/// - 80ms 完成 → 不应触发 loading 显示
-/// - 300ms 完成 → 应触发 loading 显示（因为超过 150ms 阈值）
-#[tokio::test]
+/// 后端职责是精确计时并在阈值处发信号。
+///
+/// 使用 tokio 虚拟时间 + oneshot future 精确控制请求完成时机，不依赖真实 HTTP / TCP / 墙钟：
+/// - 149ms 完成 → 不应触发 loading
+/// - 150ms timer 到且请求仍 pending → 应触发 loading
+/// - timer 触发后再完成请求 → task 正常收尾
+///
+/// **为什么不用真实 HTTP**：CI 调度、线程抢占和 TCP 建连时间可能让"80ms 响应"跨过 150ms，
+/// 测试验证的是 runner 调度状态，而不只是 debounce 语义。
+#[tokio::test(start_paused = true)]
 async fn loading_indicator_respects_150ms_debounce() {
-    // 场景 A：快速响应（80ms），loading 不应触发
+    // ── 场景 A：149ms 完成（阈值前）→ 不触发 loading ──
     {
-        let server = MockServer::start(Duration::from_millis(80)).await.unwrap();
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(2))
-            .build()
-            .unwrap();
-        let loading_triggered = run_with_loading_timer(&client, &server.base_url).await;
+        let (tx, rx) = oneshot::channel::<()>();
+        // 请求 future：等待 oneshot 信号才完成
+        let req_future = async move {
+            let _ = rx.await;
+        };
+        // 149ms 后发信号让请求完成
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(149)).await;
+            let _ = tx.send(());
+        });
+
+        let loading_triggered = run_with_loading_timer_generic(req_future).await;
         assert!(
             !loading_triggered,
-            "80ms 响应不应触发 loading（阈值 150ms）"
+            "149ms 完成（阈值 150ms 前）不应触发 loading"
         );
     }
 
-    // 场景 B：慢响应（300ms），loading 应触发
+    // ── 场景 B：timer 到 150ms 且请求仍 pending → 触发 loading，之后请求完成 ──
     {
-        let server = MockServer::start(Duration::from_millis(300)).await.unwrap();
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(2))
-            .build()
-            .unwrap();
-        let loading_triggered = run_with_loading_timer(&client, &server.base_url).await;
+        let (tx, rx) = oneshot::channel::<()>();
+        let req_future = async move {
+            let _ = rx.await;
+        };
+        // 300ms 后才发信号（确保 timer 先到）
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let _ = tx.send(());
+        });
+
+        let loading_triggered = run_with_loading_timer_generic(req_future).await;
         assert!(
             loading_triggered,
-            "300ms 响应应触发 loading（超过 150ms 阈值）"
+            "150ms timer 到时请求仍 pending，应触发 loading"
         );
+    }
+
+    // ── 场景 C：timer 触发后请求正常收尾 ──
+    {
+        let (tx, rx) = oneshot::channel::<()>();
+        let req_future = async move {
+            let _ = rx.await;
+        };
+        // 200ms 后完成（timer 150ms 先到）
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let _ = tx.send(());
+        });
+
+        // run_with_loading_timer_generic 返回 loading=true，但内部已 await 请求完成
+        let loading_triggered = run_with_loading_timer_generic(req_future).await;
+        assert!(loading_triggered, "timer 先到应触发 loading");
+        // 虚拟时间已推进到 200ms，请求 future 已被 await 完毕
     }
 }
 
-/// 后端"loading 反闪烁"参考实现：
-/// - 起一个 150ms 定时器与 HTTP 请求赛跑
-/// - 定时器先到 → 触发 loading 显示
-/// - HTTP 请求先完成 → 不触发 loading，直接展示结果
+/// 后端"loading 反闪烁"参考实现（泛型版，可注入任意 future）：
+/// - 起一个 150ms 定时器与请求 future 赛跑
+/// - 定时器先到 → 触发 loading 显示（但请求仍被 await 到完成）
+/// - 请求先完成 → 不触发 loading
 ///
 /// 返回值：是否触发了 loading。
 ///
 /// **注意**：这段逻辑 0.9.2 上真前端时会挪到 `SearchService::exec_ai_intent` 里,
 /// spike 阶段用来验证时机准确。
-async fn run_with_loading_timer(client: &reqwest::Client, url: &str) -> bool {
+async fn run_with_loading_timer_generic<F>(request: F) -> bool
+where
+    F: Future<Output = ()>,
+{
     let loading_timer = tokio::time::sleep(Duration::from_millis(150));
-    // pin 到栈上,tokio::select! 可以对同一个 future 「二次 poll」（第一次赛跑输了继续 await）
     tokio::pin!(loading_timer);
-
-    let http_req = client.get(url).send();
-    tokio::pin!(http_req);
+    tokio::pin!(request);
 
     tokio::select! {
         _ = &mut loading_timer => {
             // 阈值到了，触发 loading —— 但请求还得继续等
-            let _ = http_req.await;
+            let _ = request.as_mut().await;
             true
         }
-        _ = &mut http_req => {
+        _ = &mut request => {
             // 请求先完成，跳过 loading
             false
         }

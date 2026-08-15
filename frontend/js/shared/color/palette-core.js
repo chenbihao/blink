@@ -30,6 +30,7 @@ export const PALETTE_ALGORITHM_V1 = Object.freeze({
   NEAR_COLOR_MERGE_DELTA_E: 0.05, // 近色合并阈值（OKLab 欧氏距离）
   ACCENT_MIN_RATIO: 0.02,         // 点缀最小占比
   BACKGROUND_MIN_RATIO: 0.35,     // 背景最小占比
+  WORKER_TIMEOUT_MS: 8000,        // Worker 静默死亡看门狗：超时未回结果则降级主线程
   WORKER_VERSION: 1,
 });
 

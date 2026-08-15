@@ -400,17 +400,26 @@ pub fn image_editor_cancel(app: tauri::AppHandle) {
 
 // ── 0.20.4：多来源图片编辑入口 ──────────────────────────────
 
-/// 0.20.4：检查单会话约束——已有活跃编辑会话时激活现有窗口并返回 `AlreadyActive`。
+/// IPC 错误类型别名（0.20.7：哨兵字符串 → 结构化 CommandError）。
+type MediaError = crate::app::command_error::CommandError;
+
+/// 0.20.4：检查单会话约束——已有活跃编辑会话时激活现有窗口并返回结构化错误。
 ///
 /// 三个 `open_image_editor_from_*` 入口共用的前置检查。返回 `Err` 表示应
-/// 提前返回（已活跃），`Ok(())` 表示可以继续建立新会话。
-fn check_already_active(app: &tauri::AppHandle, log_ctx: &str) -> Result<(), String> {
+/// 提前返回（已活跃，code=invalid_state + reason=already_active），`Ok(())`
+/// 表示可以继续建立新会话。
+fn check_already_active(app: &tauri::AppHandle, log_ctx: &str) -> Result<(), MediaError> {
     if crate::infra::platform::image_editor::is_active() {
         if let Some(win) = app.get_webview_window("chord-screenshot") {
             let _ = win.set_focus();
         }
         tracing::info!(log_ctx, "编辑会话已活跃，激活现有窗口");
-        return Err("AlreadyActive".to_string());
+        return Err(MediaError::with_detail(
+            "invalid_state",
+            "图片编辑会话已活跃，已激活现有窗口",
+            false,
+            serde_json::json!({ "reason": "already_active" }),
+        ));
     }
     Ok(())
 }
@@ -424,20 +433,23 @@ fn begin_and_show(
     png_data: Vec<u8>,
     source_kind: &str,
     log_ctx: &str,
-) -> Result<(), String> {
+) -> Result<(), MediaError> {
     let png_len = png_data.len();
-    let meta = crate::infra::platform::image_editor::begin_session(png_data)
-        .map_err(|e| {
-            tracing::warn!(log_ctx, error = %e, "begin_session 失败");
-            e
-        })?;
+    let meta = crate::infra::platform::image_editor::begin_session(png_data).map_err(|e| {
+        tracing::warn!(log_ctx, error = %e, "begin_session 失败");
+        MediaError::new("internal_error", format!("建立编辑会话失败: {e}"), false)
+    })?;
 
     if let Err(error) =
         crate::infra::platform::window::show_image_editor_window(app, meta, source_kind)
     {
         crate::infra::platform::image_editor::end_session();
         tracing::error!(log_ctx, error = %error, "显示编辑窗口失败");
-        return Err(error);
+        return Err(MediaError::new(
+            "internal_error",
+            format!("显示编辑窗口失败: {error}"),
+            false,
+        ));
     }
 
     tracing::info!(log_ctx, png_bytes = png_len, "图片编辑器已打开");
@@ -449,20 +461,27 @@ fn begin_and_show(
 /// 读取当前剪贴板 PNG → `begin_session` → `show_image_editor_window`。
 /// 剪贴板无图片时返回结构化错误。
 #[tauri::command]
-pub async fn open_image_editor_from_clipboard(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn open_image_editor_from_clipboard(
+    app: tauri::AppHandle,
+) -> Result<(), MediaError> {
     use crate::domain::clipboard::{read_current, ClipboardContent};
 
     check_already_active(&app, "open_image_editor_from_clipboard")?;
 
     let content = read_current()
         .await
-        .map_err(|e| format!("读取剪贴板失败: {e}"))?;
+        .map_err(|e| MediaError::new("internal_error", format!("读取剪贴板失败: {e}"), false))?;
 
     let png_data = match content {
         ClipboardContent::ImagePng(data) => data,
         ClipboardContent::Text(_) => {
             tracing::info!("open_image_editor_from_clipboard: 剪贴板无图片");
-            return Err("ClipboardNoImage".to_string());
+            return Err(MediaError::with_detail(
+                "invalid_state",
+                "剪贴板中没有图片",
+                false,
+                serde_json::json!({ "reason": "clipboard_no_image" }),
+            ));
         }
     };
 
@@ -477,7 +496,7 @@ pub async fn open_image_editor_from_clipboard(app: tauri::AppHandle) -> Result<(
 pub async fn open_image_editor_from_history(
     app: tauri::AppHandle,
     image_id: String,
-) -> Result<(), String> {
+) -> Result<(), MediaError> {
     use crate::domain::clipboard::load_history_png;
 
     check_already_active(&app, "open_image_editor_from_history")?;
@@ -487,7 +506,12 @@ pub async fn open_image_editor_from_history(
         .await
         .map_err(|e| {
             tracing::warn!(image_id = %image_id, error = %e, "open_image_editor_from_history: 加载历史图片失败");
-            e.to_string()
+            MediaError::with_detail(
+                "not_found",
+                format!("历史图片不存在或加载失败: {e}"),
+                false,
+                serde_json::json!({ "reason": "history_image", "image_id": image_id }),
+            )
         })?;
 
     begin_and_show(&app, png_data, "history", "open_image_editor_from_history")
@@ -502,7 +526,7 @@ pub async fn open_image_editor_from_history(
 pub async fn open_image_editor_from_pin(
     app: tauri::AppHandle,
     window_label: String,
-) -> Result<(), String> {
+) -> Result<(), MediaError> {
     use crate::infra::platform::window::{get_pin_image_by_label, PinImage};
 
     check_already_active(&app, "open_image_editor_from_pin")?;
@@ -510,7 +534,12 @@ pub async fn open_image_editor_from_pin(
     // 从 pin registry 获取图片
     let pin_image = get_pin_image_by_label(&window_label).ok_or_else(|| {
         tracing::debug!(window_label = %window_label, "open_image_editor_from_pin: pin 图片不存在或窗口已关闭");
-        "PinImageNotFound".to_string()
+        MediaError::with_detail(
+            "not_found",
+            "Pin 图片不存在或窗口已关闭",
+            false,
+            serde_json::json!({ "reason": "pin_image", "window_label": window_label }),
+        )
     })?;
 
     // BGRA 需要 spawn_blocking 编码为 PNG；PNG 直接使用
@@ -522,8 +551,8 @@ pub async fn open_image_editor_from_pin(
                 crate::infra::platform::screenshot::encode_png(&bgra, w, h)
             })
             .await
-            .map_err(|e| format!("spawn_blocking join 失败: {e}"))?
-            .map_err(|e| format!("BGRA 编码 PNG 失败: {e}"))?
+            .map_err(|e| MediaError::new("internal_error", format!("spawn_blocking join 失败: {e}"), false))?
+            .map_err(|e| MediaError::new("internal_error", format!("BGRA 编码 PNG 失败: {e}"), false))?
         }
     };
 

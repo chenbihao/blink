@@ -54,53 +54,59 @@ pub async fn list_sticky_notes(app: AppHandle) -> Vec<crate::domain::sticky::Sti
 
 /// 更新便签内容（前端防抖后调用）。
 ///
+/// 返回新的 `updated_at`（Unix 秒），前端据此跟踪 revision，
+/// 关闭时传给 `close_sticky_note` 做乐观并发校验（spec-backend §7.5）。
+///
 /// emit `STICKY_CONTENT_CHANGED` 让管理界面和其他便签窗口感知内容变更。
 #[tauri::command]
 pub async fn update_sticky_content(
     app: AppHandle,
     id: String,
     content: String,
-) -> Result<(), String> {
+    expected_updated_at: Option<i64>,
+) -> Result<i64, crate::app::command_error::CommandError> {
     let env = app
         .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
         .inner()
         .clone();
-    env.update_sticky_content_and_notify(
-        &id,
-        &content,
-        None,
-        crate::domain::sticky::StickyChangeSource::UserWindow,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    Ok(())
+    let updated_at = env
+        .update_sticky_content_and_notify(
+            &id,
+            &content,
+            expected_updated_at,
+            crate::domain::sticky::StickyChangeSource::UserWindow,
+        )
+        .await
+        .map_err(crate::app::command_error::CommandError::from)?;
+    Ok(updated_at)
 }
 
-/// 更新便签外观（颜色 + 可选格式）。
+/// 更新便签外观（颜色 + 可选格式）。返回新的 `updated_at`。
 #[tauri::command]
 pub async fn update_sticky_appearance(
     app: AppHandle,
     id: String,
     color: String,
     format: Option<String>,
-) -> Result<(), String> {
+) -> Result<i64, crate::app::command_error::CommandError> {
     let svc = app.state::<std::sync::Arc<StickyService>>();
     let c = StickyColor::from_str(&color);
     let color_str = c.as_str().to_string();
     let f = format.map(|s| StickyFormat::from_str(&s));
-    svc.update_appearance(&id, c, f)
+    let updated_at = svc
+        .update_appearance(&id, c, f)
         .await
-        .map_err(|e: StickyError| e.to_string())?;
+        .map_err(|e: StickyError| crate::app::command_error::CommandError::from(e))?;
 
     let _ = app.emit(
         EventNames::STICKY_APPEARANCE_CHANGED,
         serde_json::json!({ "stickyId": id, "color": color_str }),
     );
 
-    Ok(())
+    Ok(updated_at)
 }
 
-/// 更新便签窗口几何。
+/// 更新便签窗口几何。返回新的 `updated_at`。
 #[tauri::command]
 pub async fn update_sticky_geometry(
     app: AppHandle,
@@ -109,39 +115,46 @@ pub async fn update_sticky_geometry(
     y: i32,
     width: i32,
     height: i32,
-) -> Result<(), String> {
+) -> Result<i64, crate::app::command_error::CommandError> {
     let svc = app.state::<std::sync::Arc<StickyService>>();
     svc.update_geometry(&id, x, y, width, height)
         .await
-        .map_err(|e: StickyError| e.to_string())
+        .map_err(crate::app::command_error::CommandError::from)
 }
 
 /// 设置便签可见性。
+///
+/// P0-1：返回新的 `updated_at`，前端 mutation queue 据此跟踪 revision。
 #[tauri::command]
-pub async fn set_sticky_visible(app: AppHandle, id: String, visible: bool) -> Result<(), String> {
+pub async fn set_sticky_visible(app: AppHandle, id: String, visible: bool) -> Result<i64, String> {
     let env = app
         .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
         .inner()
         .clone();
-    env.set_sticky_visibility_and_notify(&id, visible)
+    let updated_at = env
+        .set_sticky_visibility_and_notify(&id, visible)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    Ok(updated_at)
 }
 
 /// 设置便签置顶。
+///
+/// P0-1：返回新的 `updated_at`，前端 mutation queue 据此跟踪 revision。
 #[tauri::command]
 pub async fn set_sticky_always_on_top(
     app: AppHandle,
     id: String,
     always_on_top: bool,
-) -> Result<(), String> {
+) -> Result<i64, String> {
     let svc = app.state::<std::sync::Arc<StickyService>>();
-    svc.set_always_on_top(&id, always_on_top)
+    let updated_at = svc
+        .set_always_on_top(&id, always_on_top)
         .await
         .map_err(|e: StickyError| e.to_string())?;
     // 同步窗口任务栏可见性：置顶→跳过任务栏，非置顶→显示任务栏
     crate::infra::platform::window::update_sticky_taskbar(&app, &id, always_on_top);
-    Ok(())
+    Ok(updated_at)
 }
 
 /// 删除便签（永久）。
@@ -253,20 +266,22 @@ pub async fn show_sticky_manager_cmd(app: AppHandle) -> Result<(), String> {
 /// 失败时窗口不关闭，内容保留在编辑器中。
 ///
 /// 返回 `{ kind: "deleted_empty" | "trashed" }` 供前端决定后续 UI 反馈。
+/// 错误走结构化 `CommandError`（conflict/not_found/invalid_state），
+/// 前端可按 code 分类展示而非匹配中文字符串（spec-backend §4.2）。
 #[tauri::command]
 pub async fn close_sticky_note(
     app: AppHandle,
     id: String,
     final_content: String,
     expected_updated_at: Option<i64>,
-) -> Result<crate::domain::sticky::StickyCloseOutcome, String> {
+) -> Result<crate::domain::sticky::StickyCloseOutcome, crate::app::command_error::CommandError> {
     let env = app
         .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
         .inner()
         .clone();
     env.close_sticky_and_notify(&id, &final_content, expected_updated_at)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(crate::app::command_error::CommandError::from)
 }
 
 // ── 0.17.7 回收站 IPC ──────────────────────────────────
@@ -338,4 +353,33 @@ pub async fn clear_trashed_sticky_notes(app: AppHandle) -> Result<u64, String> {
 pub async fn sticky_spare_ready(window: tauri::Window) {
     let label = window.label().to_string();
     crate::infra::platform::window::mark_spare_ready(&label);
+}
+
+/// P0-2：前端 closeSticky() 完成后 invoke 此命令通知后端取消超时降级。
+///
+/// `request_id` 与 CloseRequested 时 eval 传入的 id 一致。
+/// `outcome` 为 "success" | "conflict" | "error"。
+#[tauri::command]
+pub async fn sticky_close_ack(
+    _app: AppHandle,
+    request_id: u64,
+    outcome: String,
+    message: Option<String>,
+) -> Result<(), String> {
+    tracing::debug!(
+        request_id,
+        outcome = %outcome,
+        message = ?message,
+        "sticky_close_ack: 收到前端关闭 ack"
+    );
+    // P0-2：通过全局 ack channel 注册表触发信号，取消超时降级。
+    // 不走 Tauri 事件系统（AppHandle 不支持 listen/unlisten）。
+    let signalled = crate::infra::platform::window::signal_sticky_close_ack(request_id);
+    if !signalled {
+        tracing::debug!(
+            request_id,
+            "sticky_close_ack: 无匹配的等待 channel（可能已超时降级或重复 ack）"
+        );
+    }
+    Ok(())
 }

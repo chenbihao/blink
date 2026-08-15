@@ -529,8 +529,12 @@ mod tests {
     /// 验证 cpal 采集能实际收到音频数据。
     ///
     /// 打开默认输入设备，采集 3 秒，断言至少收到一个非空 chunk。
-    /// 如果机器没有音频输入设备，跳过（不 fail）。
+    ///
+    /// **此测试依赖真实音频硬件**——需要可用的麦克风设备且隐私权限已授予。
+    /// 在 CI、远程桌面、无麦克风环境会失败，因此标记 `#[ignore]`。
+    /// 手动运行：`cargo test --bin blink cpal_capture_returns_chunks -- --ignored --nocapture`
     #[test]
+    #[ignore = "依赖真实音频输入设备，需手动运行：--ignored --nocapture"]
     fn cpal_capture_returns_chunks() {
         let mut capture = CpalCapture::new(None);
         let format = AudioFormat::default();
