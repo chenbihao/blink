@@ -267,8 +267,14 @@ function onChordTrigger(e) {
   const key = e.key.toLowerCase();
   // 用动态 tap 键集合（从 chord 配置派生）
   if (!chord.getTapKeys().has(key)) return;
-  // 门禁不再检查 queryEmpty--getTapKeys() 已按 query 是否为空动态过滤。
-  // 非空 query 时 getTapKeys 只返回 requires_input=true 的键，此处的 key 已通过过滤。
+
+  // 0.20.8: 独占模式内抑制 chord 触发——chord 待命提示已隐藏（input-state.js projectUi），
+  // 触发也应一致屏蔽；Alt+字母放行给模式自身快捷键（剪贴板 Alt+E/Alt+D）。
+  // 不 preventDefault/stopPropagation，键事件继续冒泡给 clipboardMode.handleKeydown。
+  if (clipboardMode.isActive() || cmdMode.isActive()) return;
+  // AI 模式仅保留 Alt+Q 提升对话（模式内设计交互），其余键抑制
+  if (aiMode.isActive() && key !== "q") return;
+
   e.preventDefault(); // 不进输入框
   e.stopPropagation();
   // AiMode 下 Alt+Q 触发临时对话提升，不走常规 chord 路径

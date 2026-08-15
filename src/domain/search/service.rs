@@ -1168,6 +1168,7 @@ mod tests {
             source: source.into(),
             score_detail: None,
             context_aware: false,
+        color_list_hex: None,
         }
     }
 

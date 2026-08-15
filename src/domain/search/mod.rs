@@ -145,6 +145,13 @@ pub struct AppEntry {
     /// 前端渲染缩略图而非文本预览；lnk_path 存图片 id（`clipimg_xxx`）。
     #[serde(default)]
     pub is_image: bool,
+    /// 多行颜色列表标记（0.20）——剪贴板历史中文本是多行颜色字面量时，
+    /// 前端渲染一排小 swatch 而非无 swatch。color_list_hex 存每行 hex 数组。
+    #[serde(default)]
+    pub is_color_list: bool,
+    /// 多行颜色列表的 hex 数组（配合 is_color_list，如 ["#5D5D3C", "#9D646A"]）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub color_list_hex: Vec<String>,
     /// 环境自动填充标记（0.10.8 §11.2 方案 1）——空 query + Context-only 命中的候选。
     ///
     /// 前端 `chordEligible` 通过 `results.hasUserItems()`（过滤掉 context_aware=true

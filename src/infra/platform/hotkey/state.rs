@@ -634,6 +634,8 @@ pub struct MainViewContext {
     pub ready: bool,
     pub query_empty: bool,
     pub ai_mode: bool,
+    /// 0.20.8: 剪贴板模式活跃——独占模式之一，chord_exclusive_eligible 据此抑制 native 独占会话。
+    pub clipboard_mode: bool,
 }
 
 impl Default for MainViewContext {
@@ -644,6 +646,7 @@ impl Default for MainViewContext {
             ready: false,
             query_empty: true,
             ai_mode: false,
+            clipboard_mode: false,
         }
     }
 }
@@ -794,12 +797,15 @@ impl InputState {
     }
 
     /// native exclusive chord 条件是否满足。
+    /// 0.20.8: 剪贴板模式作为独占模式之一，抑制 native 独占会话建立
+    /// （与 ai_mode 对称）。
     fn chord_exclusive_eligible(&self) -> bool {
         self.window.visible
             && self.modifiers.alt_down()
             && self.view.ready
             && self.view.query_empty
             && !self.view.ai_mode
+            && !self.view.clipboard_mode
             && self.config.chord_enabled
             && !self.config.exclusive_tap_keys.is_empty()
             && matches!(self.recorder, RecorderMode::Idle)
@@ -1912,6 +1918,7 @@ mod tests {
             ready: true,
             query_empty: true,
             ai_mode: false,
+            clipboard_mode: false,
         }
     }
 
@@ -2278,6 +2285,38 @@ mod tests {
         assert!(!s.chord.is_active());
 
         // 再变空 → 重新进入
+        let mut ctx2 = ready_view();
+        ctx2.revision = 2;
+        reduce(&mut s, InputEvent::ViewContextChanged(ctx2), Instant::now());
+        assert!(s.chord.is_active());
+    }
+
+    // ── clipboard_mode 抑制 exclusive（0.20.8） ──
+
+    #[test]
+    fn clipboard_mode_exits_exclusive() {
+        let mut s = armed_state();
+        assert!(s.chord.is_active());
+
+        // 进入剪贴板模式 → 退出 exclusive
+        let mut ctx = ready_view();
+        ctx.clipboard_mode = true;
+        ctx.revision = 1;
+        reduce(&mut s, InputEvent::ViewContextChanged(ctx), Instant::now());
+        assert!(!s.chord.is_active()); // 退出 exclusive
+    }
+
+    #[test]
+    fn clipboard_mode_re_enters_exclusive() {
+        let mut s = armed_state();
+        // 先进入剪贴板模式 → 退出
+        let mut ctx = ready_view();
+        ctx.clipboard_mode = true;
+        ctx.revision = 1;
+        reduce(&mut s, InputEvent::ViewContextChanged(ctx), Instant::now());
+        assert!(!s.chord.is_active());
+
+        // 退出剪贴板模式 → 重新进入
         let mut ctx2 = ready_view();
         ctx2.revision = 2;
         reduce(&mut s, InputEvent::ViewContextChanged(ctx2), Instant::now());
@@ -3249,6 +3288,7 @@ mod tests {
             ready: true,
             query_empty: false,
             ai_mode: true,
+            clipboard_mode: false,
         };
         reduce(
             &mut s,

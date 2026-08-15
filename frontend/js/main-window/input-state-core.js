@@ -17,6 +17,7 @@
  * @property {number} revision
  * @property {boolean} queryEmpty
  * @property {boolean} aiMode
+ * @property {boolean} clipboardMode
  */
 
 /**
@@ -35,6 +36,7 @@ export function createInputStateCore() {
   /** @type {number} */ let contextRevision = 0;
   /** @type {boolean} */ let queryEmpty = true;
   /** @type {boolean} */ let aiMode = false;
+  /** @type {boolean} */ let clipboardMode = false;
   /** @type {number} */ let lastAppliedRevision = 0;
   /** @type {InputUiState|null} */ let currentState = null;
 
@@ -45,6 +47,8 @@ export function createInputStateCore() {
     get queryEmpty() { return queryEmpty; },
     /** 当前 AI 模式。 */
     get aiMode() { return aiMode; },
+    /** 当前剪贴板模式。 */
+    get clipboardMode() { return clipboardMode; },
     /** 最近接受的 UI 状态（null = 尚未收到）。 */
     get state() { return currentState; },
 
@@ -84,26 +88,29 @@ export function createInputStateCore() {
     },
 
     /**
-     * 尝试更新视图上下文（queryEmpty / aiMode 变化时调）。
+     * 尝试更新视图上下文（queryEmpty / aiMode / clipboardMode 变化时调）。
      *
      * 只在实际变化时返回需要上报的新 context；未变化返回 null。
      *
      * @param {boolean} newQueryEmpty
      * @param {boolean} newAiMode
+     * @param {boolean} newClipboardMode
      * @returns {ViewContext|null} 需要上报的 context（或 null 表示无变化）
      */
-    updateContext(newQueryEmpty, newAiMode) {
-      if (newQueryEmpty === queryEmpty && newAiMode === aiMode) {
+    updateContext(newQueryEmpty, newAiMode, newClipboardMode) {
+      if (newQueryEmpty === queryEmpty && newAiMode === aiMode && newClipboardMode === clipboardMode) {
         return null;
       }
       queryEmpty = newQueryEmpty;
       aiMode = newAiMode;
+      clipboardMode = newClipboardMode;
       contextRevision += 1;
       return {
         viewEpoch,
         revision: contextRevision,
         queryEmpty,
         aiMode,
+        clipboardMode,
       };
     },
 
@@ -116,6 +123,7 @@ export function createInputStateCore() {
       contextRevision = 0;
       queryEmpty = true;
       aiMode = false;
+      clipboardMode = false;
       lastAppliedRevision = 0;
       currentState = null;
     },
@@ -127,9 +135,10 @@ export function createInputStateCore() {
  * @property {() => number} viewEpoch
  * @property {() => boolean} queryEmpty
  * @property {() => boolean} aiMode
+ * @property {() => boolean} clipboardMode
  * @property {() => InputUiState|null} state
  * @property {(epoch: number) => void} setViewEpoch
  * @property {(state: InputUiState) => boolean} applyState
- * @property {(newQueryEmpty: boolean, newAiMode: boolean) => ViewContext|null} updateContext
+ * @property {(newQueryEmpty: boolean, newAiMode: boolean, newClipboardMode: boolean) => ViewContext|null} updateContext
  * @property {() => void} reset
  */

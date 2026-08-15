@@ -415,5 +415,96 @@
       "hsl": "hsl(0, 0%, 100%, 0.337)",
       "alpha": 0.3372549
     }
+  ],
+  "color_list_description": "Rust/JS shared multi-line color list fixtures for parse_color_list. Each case has multi-line input, expected result count, and per-line RGBA. Null result means parse_color_list returns None.",
+  "color_list_cases": [
+    {
+      "input": "#FF0000\n#00FF00\n#0000FF",
+      "expected_count": 3,
+      "results": [
+        { "rgba": { "r": 255, "g": 0, "b": 0, "a": 255 }, "hex": "#FF0000" },
+        { "rgba": { "r": 0, "g": 255, "b": 0, "a": 255 }, "hex": "#00FF00" },
+        { "rgba": { "r": 0, "g": 0, "b": 255, "a": 255 }, "hex": "#0000FF" }
+      ]
+    },
+    {
+      "input": "#5D5D3C\n#9D646A\n#355D8A",
+      "expected_count": 3,
+      "results": [
+        { "rgba": { "r": 93, "g": 93, "b": 60, "a": 255 }, "hex": "#5D5D3C" },
+        { "rgba": { "r": 157, "g": 100, "b": 106, "a": 255 }, "hex": "#9D646A" },
+        { "rgba": { "r": 53, "g": 93, "b": 138, "a": 255 }, "hex": "#355D8A" }
+      ]
+    },
+    {
+      "input": "#FF0000\n\n#00FF00\n  \n#0000FF",
+      "expected_count": 3,
+      "results": [
+        { "rgba": { "r": 255, "g": 0, "b": 0, "a": 255 }, "hex": "#FF0000" },
+        { "rgba": { "r": 0, "g": 255, "b": 0, "a": 255 }, "hex": "#00FF00" },
+        { "rgba": { "r": 0, "g": 0, "b": 255, "a": 255 }, "hex": "#0000FF" }
+      ]
+    },
+    {
+      "input": "#FF0000\n#00FF00",
+      "expected_count": 2,
+      "results": [
+        { "rgba": { "r": 255, "g": 0, "b": 0, "a": 255 }, "hex": "#FF0000" },
+        { "rgba": { "r": 0, "g": 255, "b": 0, "a": 255 }, "hex": "#00FF00" }
+      ]
+    },
+    {
+      "input": "#000000\n#111111\n#222222\n#333333\n#444444\n#555555\n#666666\n#777777",
+      "expected_count": 8,
+      "results": [
+        { "rgba": { "r": 0, "g": 0, "b": 0, "a": 255 }, "hex": "#000000" },
+        { "rgba": { "r": 17, "g": 17, "b": 17, "a": 255 }, "hex": "#111111" },
+        { "rgba": { "r": 34, "g": 34, "b": 34, "a": 255 }, "hex": "#222222" },
+        { "rgba": { "r": 51, "g": 51, "b": 51, "a": 255 }, "hex": "#333333" },
+        { "rgba": { "r": 68, "g": 68, "b": 68, "a": 255 }, "hex": "#444444" },
+        { "rgba": { "r": 85, "g": 85, "b": 85, "a": 255 }, "hex": "#555555" },
+        { "rgba": { "r": 102, "g": 102, "b": 102, "a": 255 }, "hex": "#666666" },
+        { "rgba": { "r": 119, "g": 119, "b": 119, "a": 255 }, "hex": "#777777" }
+      ]
+    },
+    {
+      "input": "#FF0000",
+      "expected_count": null,
+      "results": null,
+      "comment": "Single line → null (use parse instead)"
+    },
+    {
+      "input": "#000000\n#111111\n#222222\n#333333\n#444444\n#555555\n#666666\n#777777\n#888888",
+      "expected_count": null,
+      "results": null,
+      "comment": "More than 8 lines → null"
+    },
+    {
+      "input": "#FF0000\nhello\n#00FF00",
+      "expected_count": null,
+      "results": null,
+      "comment": "Invalid line in middle → null"
+    },
+    {
+      "input": "",
+      "expected_count": null,
+      "results": null,
+      "comment": "Empty input → null"
+    },
+    {
+      "input": "  \n  \n  ",
+      "expected_count": null,
+      "results": null,
+      "comment": "Only whitespace → null"
+    },
+    {
+      "input": "#5D5D3C\nrgb(157, 100, 106)\nhsl(212, 43%, 37%)",
+      "expected_count": 3,
+      "results": [
+        { "rgba": { "r": 93, "g": 93, "b": 60, "a": 255 }, "hex": "#5D5D3C" },
+        { "rgba": { "r": 157, "g": 100, "b": 106, "a": 255 }, "hex": "#9D646A" },
+        { "rgba": { "r": 54, "g": 92, "b": 135, "a": 255 }, "hex": "#365C87" }
+      ]
+    }
   ]
 }

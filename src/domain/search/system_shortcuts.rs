@@ -200,6 +200,7 @@ fn normalize_to_items(
                 source: "system".into(),
                 score_detail: Some(detail),
                 context_aware: false,
+        color_list_hex: None,
             }
         })
         .collect()

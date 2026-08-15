@@ -81,6 +81,31 @@ pub fn parse(input: &str) -> Option<ColorResult> {
     Some(build_color_result(trimmed, rgba))
 }
 
+/// 尝试将多行文本解析为颜色列表（0.20 多行颜色列表）。
+///
+/// 按行 split，忽略空行，每个非空行须可解析为颜色字面量。
+/// 任一非空行不可解析则返回 `None`。
+/// 行数 2~8 之外返回 `None`（单行走普通 `parse`，超过 8 行不展示 swatch）。
+///
+/// 典型场景：剪贴板历史中"每行一个"颜色复制格式，
+/// 如 `#5D5D3C\n#9D646A\n#355D8A`。
+pub fn parse_color_list(input: &str) -> Option<Vec<ColorResult>> {
+    let mut results = Vec::new();
+    for line in input.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let result = parse(trimmed)?;
+        results.push(result);
+    }
+
+    match results.len() {
+        2..=8 => Some(results),
+        _ => None,
+    }
+}
+
 /// 从 RGBA8 构建 canonical 输出。
 pub fn build_color_result(original: &str, rgba: Rgba8) -> ColorResult {
     let alpha = rgba.alpha_f32();
@@ -686,6 +711,71 @@ mod tests {
         assert!((r.alpha - 0.3372549).abs() < 0.001);
     }
 
+    #[test]
+    fn parse_color_list_basic() {
+        let r = parse_color_list("#FF0000\n#00FF00\n#0000FF").unwrap();
+        assert_eq!(r.len(), 3);
+        assert_eq!(r[0].rgba, Rgba8::new(255, 0, 0, 255));
+        assert_eq!(r[1].rgba, Rgba8::new(0, 255, 0, 255));
+        assert_eq!(r[2].rgba, Rgba8::new(0, 0, 255, 255));
+    }
+
+    #[test]
+    fn parse_color_list_with_empty_lines() {
+        let r = parse_color_list("#FF0000\n\n#00FF00\n  \n#0000FF\n").unwrap();
+        assert_eq!(r.len(), 3);
+    }
+
+    #[test]
+    fn parse_color_list_mixed_formats() {
+        let r = parse_color_list("#5D5D3C\nrgb(157, 100, 106)\nhsl(212, 43%, 37%)").unwrap();
+        assert_eq!(r.len(), 3);
+    }
+
+    #[test]
+    fn parse_color_list_two_lines() {
+        let r = parse_color_list("#FF0000\n#00FF00").unwrap();
+        assert_eq!(r.len(), 2);
+    }
+
+    #[test]
+    fn parse_color_list_eight_lines() {
+        let input = "#000000\n#111111\n#222222\n#333333\n#444444\n#555555\n#666666\n#777777";
+        let r = parse_color_list(input).unwrap();
+        assert_eq!(r.len(), 8);
+    }
+
+    #[test]
+    fn parse_color_list_single_line_none() {
+        // 单行 → None（走普通 parse）
+        assert!(parse_color_list("#FF0000").is_none());
+    }
+
+    #[test]
+    fn parse_color_list_too_many_none() {
+        // 超过 8 行 → None
+        let input = "#000000\n#111111\n#222222\n#333333\n#444444\n#555555\n#666666\n#777777\n#888888";
+        assert!(parse_color_list(input).is_none());
+    }
+
+    #[test]
+    fn parse_color_list_with_invalid_line_none() {
+        // 任一行不可解析 → None
+        assert!(parse_color_list("#FF0000\nhello\n#00FF00").is_none());
+    }
+
+    #[test]
+    fn parse_color_list_empty_input_none() {
+        assert!(parse_color_list("").is_none());
+        assert!(parse_color_list("  \n  \n  ").is_none());
+    }
+
+    #[test]
+    fn parse_color_list_with_trailing_spaces() {
+        let r = parse_color_list("#FF0000 \n #00FF00 \n").unwrap();
+        assert_eq!(r.len(), 2);
+    }
+
     // ── Fixture 驱动测试：Rust/JS 共享 color-literals.json ───────────────
     //
     // 读取 `frontend/js/shared/fixtures/color-literals.json`，对每个 case
@@ -775,6 +865,90 @@ mod tests {
         eprintln!(
             "color fixture 测试通过: total={}, pass={}, illegal={}",
             fixture.cases.len(), pass_count, illegal_count
+        );
+    }
+
+    // ── Fixture 驱动测试：parse_color_list 共享 color_list_cases ─────────
+
+    #[derive(serde::Deserialize)]
+    struct FixtureListRgba {
+        r: u8,
+        g: u8,
+        b: u8,
+        a: u8,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct FixtureListResult {
+        rgba: FixtureListRgba,
+        hex: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct FixtureListCase {
+        input: String,
+        expected_count: Option<usize>,
+        results: Option<Vec<FixtureListResult>>,
+        #[allow(dead_code)]
+        #[serde(default)]
+        comment: Option<String>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct FixtureWithList {
+        #[serde(flatten)]
+        #[allow(dead_code)] // serde 用，编译器看不到读取
+        base: Fixture,
+        color_list_cases: Vec<FixtureListCase>,
+    }
+
+    #[test]
+    fn fixture_color_list_consistency() {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("frontend/js/shared/fixtures/color-literals.json");
+
+        if !fixture_path.exists() {
+            eprintln!("跳过 color_list fixture 测试：{} 不存在", fixture_path.display());
+            return;
+        }
+
+        let content = std::fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|e| panic!("读取 fixture 失败: {e}"));
+        let fixture: FixtureWithList = serde_json::from_str(&content)
+            .unwrap_or_else(|e| panic!("解析 fixture JSON 失败: {e}"));
+
+        let mut checked = 0;
+        for case in &fixture.color_list_cases {
+            let result = parse_color_list(&case.input);
+
+            match (case.expected_count, &case.results) {
+                (None, None) => {
+                    assert!(result.is_none(),
+                        "输入 {:?} 应返回 None，但 parse_color_list 返回了 Some", case.input);
+                }
+                (Some(count), Some(expected_results)) => {
+                    let results = result.unwrap_or_else(|| {
+                        panic!("输入 {:?} 应返回 Some，但 parse_color_list 返回了 None", case.input)
+                    });
+                    assert_eq!(results.len(), count,
+                        "输入 {:?} 的结果数量不匹配", case.input);
+                    assert_eq!(results.len(), expected_results.len(),
+                        "输入 {:?} 的 expected_count 与 results 数量不匹配", case.input);
+                    for (i, (r, expected)) in results.iter().zip(expected_results.iter()).enumerate() {
+                        assert_eq!(r.rgba, Rgba8::new(expected.rgba.r, expected.rgba.g, expected.rgba.b, expected.rgba.a),
+                            "输入 {:?} 第 {} 行 RGBA 不匹配", case.input, i);
+                        assert_eq!(r.hex, expected.hex,
+                            "输入 {:?} 第 {} 行 hex 不匹配", case.input, i);
+                    }
+                    checked += 1;
+                }
+                _ => panic!("fixture case {:?} 的 expected_count/results 配置不一致", case.input),
+            }
+        }
+
+        eprintln!(
+            "color_list fixture 测试通过: total={}, checked={}",
+            fixture.color_list_cases.len(), checked
         );
     }
 }

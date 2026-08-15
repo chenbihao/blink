@@ -83,6 +83,10 @@ pub struct SearchItem {
     /// **产地**：仅 `BuiltinEngine` 空 query + Context 命中且无 keyword 命中时置 true。
     /// keyword 命中 / 非空 query / 其它引擎产的项一律 false。
     pub context_aware: bool,
+    /// 多行颜色列表的 hex 数组（0.20）——ClipboardEngine 检测到 preview 是多行颜色
+    /// 字面量时填充。into_app_entry 时透传到 AppEntry.color_list_hex 并设 is_color_list。
+    /// None = 非颜色列表；Some(vec) = 颜色列表（2~8 项）。
+    pub color_list_hex: Option<Vec<String>>,
 }
 
 impl SearchItem {
@@ -113,6 +117,10 @@ impl SearchItem {
         // 0.10.8 §11.2：环境自动填充标记透传给前端(chordEligible 判定用)
         let context_aware = self.context_aware;
 
+        // 0.20：多行颜色列表 hex 数组透传给前端（is_color_list + color_list_hex）
+        let is_color_list = self.color_list_hex.is_some();
+        let color_list_hex = self.color_list_hex.clone().unwrap_or_default();
+
         match self.action {
             SearchAction::None => AppEntry {
                 name: self.title,
@@ -128,6 +136,8 @@ impl SearchItem {
                 actions: vec![],
                 score_detail,
                 context_aware,
+                    is_color_list,
+                    color_list_hex: color_list_hex.clone(),
                 ..Default::default()
             },
             SearchAction::Open { path } => AppEntry {
@@ -144,6 +154,8 @@ impl SearchItem {
                 actions: vec![Action::default()], // Open 动作
                 score_detail,
                 context_aware,
+                    is_color_list,
+                    color_list_hex: color_list_hex.clone(),
                 ..Default::default()
             },
             SearchAction::Copy { text, hit_id } => {
@@ -194,6 +206,8 @@ impl SearchItem {
                     ],
                     score_detail,
                     context_aware,
+                    is_color_list,
+                    color_list_hex: color_list_hex.clone(),
                     ..Default::default()
                 }
             }
@@ -249,6 +263,8 @@ impl SearchItem {
                     ],
                     score_detail,
                     context_aware,
+                    is_color_list,
+                    color_list_hex: color_list_hex.clone(),
                     ..Default::default()
                 }
             }
@@ -289,6 +305,8 @@ impl SearchItem {
                     score_detail,
                     context_aware,
                     is_image,
+                    is_color_list,
+                    color_list_hex: color_list_hex.clone(),
                     ..Default::default()
                 }
             }
@@ -362,6 +380,7 @@ mod tests {
             source: "start_menu".into(),
             score_detail: Some("fuzzy=0.8".into()),
             context_aware: false,
+            color_list_hex: None,
         };
         let e = item.into_app_entry();
         assert_eq!(e.name, "App");
@@ -386,6 +405,7 @@ mod tests {
             source: "calc".into(),
             score_detail: Some("calc=1.0".into()),
             context_aware: false,
+            color_list_hex: None,
         };
         let e = item.into_app_entry();
         assert_eq!(e.name, "= 2");

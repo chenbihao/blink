@@ -500,6 +500,22 @@ li.dataset.aiConfirmId = app._aiConfirm.confirmId;
       li.appendChild(swatch);
     }
   }
+  // 0.20：多行颜色列表——后端 is_color_list 标记 + color_list_hex 数组。
+  // 渲染一排小 swatch（16px），布局由 .color-list-swatch CSS 控制（宽度自适应）。
+  else if (app.is_color_list && Array.isArray(app.color_list_hex) && app.color_list_hex.length >= 2) {
+    const container = document.createElement("div");
+    container.className = "app-icon color-list-swatch";
+    for (const hex of app.color_list_hex) {
+      const colorResult = parseColor(hex);
+      if (colorResult) {
+        const swatch = createSwatch(colorResult.rgba, { size: 16 });
+        container.appendChild(swatch);
+      }
+    }
+    if (container.children.length > 0) {
+      li.appendChild(container);
+    }
+  }
   // 0.20.3：剪贴板文本项降级检测——如果文本恰好是颜色字面量，也显示大格子 swatch
   else if (!app.is_image && !app.lnk_path && !app.is_calc) {
     const clipColor = parseColor(app.name);
@@ -589,8 +605,10 @@ function itemData(li) {
   }
   // 0.17.6: AI 确认卡片相关代码已删除（主窗口 AI 改走 ai-mode.js）
   // 0.20.2: 返回 isImage 供 clipboard-mode 多选过滤图片项
+  // 0.20.8: 返回 source 供 clipboard-shortcuts findDeleteTarget 检查来源
   return {
     lnkPath: li.dataset.lnkPath,
+    source: li.dataset.source || "",
     calcValue: li.dataset.calcValue,
     isError: li.dataset.isError === "true",
     isImage: li.dataset.isImage === "true",

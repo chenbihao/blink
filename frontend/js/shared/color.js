@@ -57,6 +57,31 @@ export function parse(input) {
 }
 
 /**
+ * 尝试将多行文本解析为颜色列表（0.20 多行颜色列表）。
+ *
+ * 按行 split，忽略空行，每个非空行须可解析为颜色字面量。
+ * 行数 2~8 之外返回 null（单行走普通 parse，超过 8 行不展示 swatch）。
+ *
+ * 与 Rust `domain/color.rs::parse_color_list` 输出必须完全一致。
+ *
+ * @param {string} input
+ * @returns {ColorResult[] | null}
+ */
+export function parseColorList(input) {
+  const lines = (input ?? "").split(/\r\n|\r|\n/);
+  const results = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const result = parse(trimmed);
+    if (!result) return null; // 任一非空行不可解析 → null
+    results.push(result);
+  }
+  if (results.length >= 2 && results.length <= 8) return results;
+  return null;
+}
+
+/**
  * 从 RGBA8 构建 canonical 输出。
  * @param {string} original
  * @param {Rgba8} rgba

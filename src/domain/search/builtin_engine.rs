@@ -422,6 +422,7 @@ fn action_to_search_item(
         source: "builtin".to_string(),
         score_detail: Some(score_detail),
         context_aware,
+        color_list_hex: None,
     }
 }
 

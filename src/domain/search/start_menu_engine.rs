@@ -421,6 +421,7 @@ fn normalize_to_items(
                 source: "start_menu".into(),
                 score_detail: Some(detail),
                 context_aware: false,
+        color_list_hex: None,
             }
         })
         .collect()

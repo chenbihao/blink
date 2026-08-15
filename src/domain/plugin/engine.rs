@@ -404,5 +404,6 @@ fn to_search_item(plugin_id: &str, item: PluginItem) -> SearchItem {
         source: plugin_id.to_string(),
         score_detail: Some(format!("plugin={:.2}", score)),
         context_aware: false,
+        color_list_hex: None,
     }
 }

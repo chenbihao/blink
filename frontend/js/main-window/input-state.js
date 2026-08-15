@@ -26,7 +26,15 @@ const core = createInputStateCore();
  *
  * - `body.alt-active` ← `state.altDown`（物理真相）
  * - `body.chord-visible` ← `state.altDown && chord.isEnabled()`（前端本地投影）
+ * - `queryEl.readOnly` ← chord 待命态时 true（禁用 IME 组字，防止竞态窗口内字母进入候选窗）
+ *
+ * 0.20-fix：首次唤起时 native 独占会话建立有竞态窗口（window.visible 翻转期间 hook
+ * 不吞字母键），此时 IME 组字放行会导致字母进入候选窗。readOnly 是前端兜底，
+ * 覆盖整个竞态窗口——即便 native 独占尚未建立，IME 也被禁用。
+ * 退出待命态时恢复 readOnly = false 并重新 focus，防止光标丢失。
  */
+let wasChordStandby = false;
+
 function projectUi() {
   const state = core.state;
   if (!state) return;
@@ -43,9 +51,35 @@ function projectUi() {
   document.body.classList.toggle("alt-active", altDown);
   document.body.classList.toggle("chord-visible", showChord);
 
+  // 0.20-fix：chord 待命态 → readOnly = true（禁用 IME 组字）
+  const isChordStandby = showChord;
+  if (isChordStandby && !wasChordStandby) {
+    queryEl.readOnly = true;
+    wasChordStandby = true;
+  } else if (!isChordStandby && wasChordStandby) {
+    queryEl.readOnly = false;
+    wasChordStandby = false;
+    // 恢复后重新 focus，防止 readOnly 切换导致光标丢失
+    // （AGENTS.md 核心指标：焦点成功率 >99.9%）
+    if (document.visibilityState !== "hidden") {
+      queryEl.focus();
+    }
+  }
+
   if (showChord !== prevChordVisible) {
     chord.notifyVisibilityChange();
   }
+}
+
+/**
+ * 强制恢复 readOnly = false（lifecycle HIDDEN / reset 时调用）。
+ *
+ * WebView 可能收不到 keyup（窗口隐藏等场景），导致 wasChordStandby 残留 true，
+ * 输入框永久 readOnly 打不了字。此函数在窗口隐藏时强制清理。
+ */
+export function forceClearReadOnly() {
+  wasChordStandby = false;
+  queryEl.readOnly = false;
 }
 
 // ── Context 上报 ──────────────────────────────────────────────────────────────
@@ -58,9 +92,10 @@ function reportContext() {
   if (core.viewEpoch === 0) return; // 未注册
   const queryEmpty = !queryEl.value.trim();
   const aiModeActive = aiMode.isActive();
-  const ctx = core.updateContext(queryEmpty, aiModeActive);
+  const clipboardModeActive = clipboardMode.isActive();
+  const ctx = core.updateContext(queryEmpty, aiModeActive, clipboardModeActive);
   if (ctx) {
-    updateMainInputContext(ctx.viewEpoch, ctx.revision, ctx.queryEmpty, ctx.aiMode).catch(
+    updateMainInputContext(ctx.viewEpoch, ctx.revision, ctx.queryEmpty, ctx.aiMode, ctx.clipboardMode).catch(
       (e) => console.warn("[input-state] update_main_input_context 失败", e),
     );
   }
@@ -80,7 +115,8 @@ export function init() {
   // 2. 注册 view，获取初始快照 + view_epoch
   const queryEmpty = !queryEl.value.trim();
   const aiModeActive = aiMode.isActive();
-  registerMainInputView(queryEmpty, aiModeActive)
+  const clipboardModeActive = clipboardMode.isActive();
+  registerMainInputView(queryEmpty, aiModeActive, clipboardModeActive)
     .then((result) => {
       core.setViewEpoch(result.viewEpoch);
       core.applyState(result.state);
@@ -99,6 +135,15 @@ export function init() {
     const observer = new MutationObserver(() => reportContext());
     observer.observe(aiModeEl, { attributes: true, attributeFilter: ["hidden"] });
   }
+
+  // 5. 0.20.8: 用 MutationObserver 检测剪贴板模式切换（不修改 clipboard-mode.js）
+  // document.body 的 clipboard-mode-active class 增删时上报 context。
+  // enter/exit 时同步通知 hook 退出/重建 chord 独占会话。
+  const clipboardObserver = new MutationObserver(() => reportContext());
+  clipboardObserver.observe(document.body, {
+    attributes: true,
+    attributeFilter: ["class"],
+  });
 }
 
 // ── 公开接口 ──────────────────────────────────────────────────────────────────

@@ -173,10 +173,11 @@ export function getAwarenessText() {
  * 前端先注册 INPUT_STATE_CHANGED listener，再调用此 command。
  * @param {boolean} queryEmpty 当前搜索框是否为空
  * @param {boolean} aiMode 当前是否处于 AI 模式
+ * @param {boolean} clipboardMode 当前是否处于剪贴板模式（0.20.8 新增）
  * @returns {Promise<{viewEpoch: number, state: {revision: number, altDown: boolean, windowVisible: boolean, exclusiveChordActive: boolean}}>}
  */
-export function registerMainInputView(queryEmpty, aiMode) {
-  return invoke("register_main_input_view", { queryEmpty, aiMode });
+export function registerMainInputView(queryEmpty, aiMode, clipboardMode) {
+  return invoke("register_main_input_view", { queryEmpty, aiMode, clipboardMode });
 }
 
 /**
@@ -186,9 +187,10 @@ export function registerMainInputView(queryEmpty, aiMode) {
  * @param {number} revision 递增的 context revision
  * @param {boolean} queryEmpty
  * @param {boolean} aiMode
+ * @param {boolean} clipboardMode 剪贴板模式是否活跃（0.20.8 新增）
  */
-export function updateMainInputContext(viewEpoch, revision, queryEmpty, aiMode) {
-  return invoke("update_main_input_context", { viewEpoch, revision, queryEmpty, aiMode });
+export function updateMainInputContext(viewEpoch, revision, queryEmpty, aiMode, clipboardMode) {
+  return invoke("update_main_input_context", { viewEpoch, revision, queryEmpty, aiMode, clipboardMode });
 }
 
 /** 拉取剪贴板历史（Alt+C 面板渲染用）。 */

@@ -255,6 +255,12 @@ fn to_search_item(meta: ClipboardMeta, index: usize, lang: &str) -> SearchItem {
     let subtitle = format_subtitle(&meta, lang);
     let score = (0.9 - index as f32 * 0.02).max(0.5);
 
+    // 0.20：检测多行颜色列表（如截图配色面板"每行一个"复制格式）。
+    // 对 preview 跑 parse_color_list，命中则给 SearchItem 附加 hex 数组，
+    // 前端渲染一排小 swatch。name 仍保留 preview_line 截断版。
+    let color_list_hex = crate::domain::color::parse_color_list(&meta.preview)
+        .map(|results| results.iter().map(|r| r.hex.clone()).collect());
+
     SearchItem {
         id: format!("clipboard:{}", meta.id),
         title,
@@ -264,6 +270,7 @@ fn to_search_item(meta: ClipboardMeta, index: usize, lang: &str) -> SearchItem {
         source: "clipboard".into(),
         score_detail: Some(format!("clip=0.9-{:.2}", index as f32 * 0.02)),
         context_aware: false,
+        color_list_hex,
     }
 }
 
@@ -312,6 +319,7 @@ fn to_image_search_item(meta: ClipboardImageListItem, index: usize, lang: &str) 
         source: "clipboard".into(),
         score_detail: Some(format!("clipimg=0.9-{:.2}", index as f32 * 0.02)),
         context_aware: false,
+        color_list_hex: None,
     }
 }
 
@@ -392,19 +400,35 @@ fn format_image_subtitle(meta: &ClipboardImageListItem, lang: &str) -> String {
     format!("{time_desc} · {}x{}", meta.width, meta.height)
 }
 
-/// 生成单行预览：去换行 + 压缩连续空白 + 字符数截断。
+/// 生成单行预览：换行符转为可见标记 ⏎（U+23CE），其余控制字符替换为空格，
+/// 压缩连续空白（⏎ 不被当作空白压缩），字符数截断。
+///
+/// 视觉效果：`foo\nbar` → `foo ⏎ bar`，用户能从预览看出换行位置，
+/// 同时保持单行布局不变。`\r\n` 视为一次换行（先归一化为 `\n`）。
 fn preview_line(raw: &str) -> String {
-    let flat: String = raw
+    // ⏎ (U+23CE) — 换行可见标记
+    const NEWLINE_MARKER: char = '\u{23CE}';
+
+    // 第一步：归一化 \r\n → \n，独立 \r → \n（统一换行表示）。
+    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
+
+    // 第二步：将换行符 \n 替换为 ⏎，其余控制字符替换为空格。
+    let flat: String = normalized
         .chars()
         .map(|c| {
-            if c.is_control() || c == '\n' || c == '\r' {
+            if c == '\n' {
+                NEWLINE_MARKER
+            } else if c.is_control() {
                 ' '
             } else {
                 c
             }
         })
         .collect();
-    // 压缩连续空白
+
+    // 第三步：压缩连续空白（仅空格），⏎ 不被当作空白压缩。
+    // ⏎ 两侧的空格各保留一个，视觉效果 `foo ⏎ bar`。
+    // 连续多个 ⏎（如原文本 \n\n）各自保留，因为每个代表一次换行。
     let mut out = String::with_capacity(flat.len());
     let mut prev_space = false;
     for c in flat.chars() {
@@ -510,9 +534,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preview_line_flattens_newlines() {
-        assert_eq!(preview_line("hello\nworld"), "hello world");
-        assert_eq!(preview_line("  a\r\n  b  "), "a b");
+    fn preview_line_shows_newline_marker() {
+        // \n → ⏎（无额外空格时直接拼接）
+        assert_eq!(preview_line("hello\nworld"), "hello⏎world");
+        // \r\n 先归一化为 \n → 单个 ⏎，两侧原有空格压缩后各保留一个
+        // "  a\r\n  b  " → 归一化 "  a\n  b  " → 映射 "  a⏎  b  "
+        // → 压缩 " a⏎ b " → trim "a⏎ b"
+        assert_eq!(preview_line("  a\r\n  b  "), "a⏎ b");
+        // 纯 \r 归一化为 \n → 单个 ⏎
+        assert_eq!(preview_line("x\ry"), "x⏎y");
+    }
+
+    #[test]
+    fn preview_line_multiple_newlines() {
+        // 连续换行各显示一个 ⏎（无空格时直接拼接）
+        assert_eq!(preview_line("a\n\nb"), "a⏎⏎b");
+        // \r\n\r\n → 归一化为 \n\n → 两个 ⏎
+        assert_eq!(preview_line("a\r\n\r\nb"), "a⏎⏎b");
+        // 有空格时两侧各保留一个
+        assert_eq!(preview_line("a \n b"), "a ⏎ b");
+    }
+
+    #[test]
+    fn preview_line_no_newline() {
+        assert_eq!(preview_line("hello world"), "hello world");
+        assert_eq!(preview_line("  hello  "), "hello");
+    }
+
+    #[test]
+    fn preview_line_control_chars_still_become_space() {
+        // 制表符等控制字符仍替换为空格
+        assert_eq!(preview_line("a\tb"), "a b");
+        assert_eq!(preview_line("a\u{0007}b"), "a b"); // BEL
     }
 
     #[test]

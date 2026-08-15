@@ -167,8 +167,14 @@ export function cycleToolInGroup(groupName) {
   return nextTool;
 }
 
-function closeAllDropdowns() {
-  document.querySelectorAll('.dropdown').forEach((d) => setDropdownOpen(d, false));
+function closeAllDropdowns(opts = {}) {
+  const { includeColor = true } = opts;
+  document.querySelectorAll('.dropdown').forEach((d) => {
+    // hover 路径传 includeColor=false 时跳过颜色面板（点击式面板只由它自己的
+    // trigger click、document 级点击外部、canvas mousedown 关闭）。
+    if (!includeColor && d.id === 'color-dropdown') return;
+    setDropdownOpen(d, false);
+  });
 }
 
 function setDropdownOpen(dropdown, open) {
@@ -563,7 +569,9 @@ export function bindToolbar() {
 
     wrap.addEventListener('mouseenter', () => {
       clearTimeout(hoverCloseTimer);
-      closeAllDropdowns();
+      // 0.20-fix：hover 路径不关闭颜色面板（点击式面板只由 trigger click /
+      // document click / canvas mousedown 关闭），防止鼠标路过工具栏误关面板。
+      closeAllDropdowns({ includeColor: false });
       positionDropdown(dd);
       setDropdownOpen(dd, true);
       // 0.15.14：text dropdown 不再有 data-view，无需重置

@@ -25,10 +25,12 @@ import { queryEl, resultsEl } from "./dom.js";
 import * as results from "./results.js";
 import * as ghost from "./ghost.js";
 import { syncWindowSize } from "./window-size.js";
-import { searchClipboard, copyToClipboard, getClipboardTextBatch, recordClipboardHit } from "../shared/api.js";
+import { searchClipboard, copyToClipboard, getClipboardTextBatch, recordClipboardHit, deleteClipboardItem, deleteClipboardImage } from "../shared/api.js";
 import { t } from "../i18n/index.js";
 import * as selection from "./clipboard-selection.js";
 import { parse as parseColor } from "../shared/color.js";
+import { activateItem } from "./actions.js";
+import { resolveShortcutAction, findEditAction, findDeleteTarget } from "./clipboard-shortcuts.js";
 
 // 0.20.1: 从 results.js 导入 setClipboardMode，进入/退出模式时设置标志。
 
@@ -336,6 +338,20 @@ export function handleKeydown(e) {
     return true;
   }
 
+  // 0.20.8：Alt+E / Alt+D / Delete 快捷操作
+  const queryIsEmpty = !queryEl.value.trim();
+  const shortcutAction = resolveShortcutAction(e, queryIsEmpty);
+  if (shortcutAction === "edit") {
+    e.preventDefault();
+    handleEditActive();
+    return true;
+  }
+  if (shortcutAction === "delete") {
+    e.preventDefault();
+    handleDeleteActive();
+    return true;
+  }
+
   return false;
 }
 
@@ -539,4 +555,51 @@ function showStatusError(message) {
   setTimeout(() => {
     results.refreshStatusbar?.();
   }, 3000);
+}
+
+// ── 0.20.8 快捷编辑/删除 ────────────────────────────────────────────────────
+
+/**
+ * 0.20.8：Alt+E — 编辑 active 文本项。
+ * 从 active 项 actions 中查找 edit_text_item 并复用 activateItem 分派；
+ * 图片项或无 edit_text_item action 时不误开文本编辑器。
+ */
+function handleEditActive() {
+  const activeItem = results.getActive();
+  const editAction = findEditAction(activeItem);
+  if (!editAction) {
+    console.log("[clipboard-mode] Alt+E: no edit_text_item action for active item");
+    return;
+  }
+  // 复用 activateItem——它内部会处理 LazyCopy 拉取和内容编辑器打开
+  activateItem({ ...activeItem, actions: [editAction] });
+}
+
+/**
+ * 0.20.8：Alt+D / Delete — 删除 active 文本或图片历史。
+ * 只对 source=clipboard 的 active 项复用既有单删命令；
+ * 颜色降级结果等非历史项不响应。删除成功后维持 clipboard mode 并刷新当前页。
+ */
+async function handleDeleteActive() {
+  const activeItem = results.getActive();
+  const target = findDeleteTarget(activeItem);
+  if (!target) {
+    console.log("[clipboard-mode] Alt+D: no deletable active item");
+    return;
+  }
+
+  try {
+    if (target.type === "text") {
+      await deleteClipboardItem(target.id);
+    } else {
+      await deleteClipboardImage(target.id);
+    }
+    console.log(`[clipboard-mode] deleted ${target.type} item: ${target.id}`);
+    // 刷新列表（维持当前页号），由 reconcile 清理已不存在的多选 key
+    reloadList();
+  } catch (e) {
+    console.error(`[clipboard-mode] delete failed for ${target.type} ${target.id}:`, e);
+    // 失败时保留结果、模式和选择，显示可见错误
+    showStatusError(e?.message || "delete failed");
+  }
 }

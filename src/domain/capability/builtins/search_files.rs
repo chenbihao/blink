@@ -203,6 +203,7 @@ mod tests {
                 source: "file".into(),
                 score_detail: None,
                 context_aware: false,
+        color_list_hex: None,
             },
             size_bytes: Some(42),
             modified_at: Some(1_700_000_000),

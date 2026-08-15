@@ -15,6 +15,7 @@ import { applyThemeFromConfig } from "../shared/theme.js";
 import { ensureSpriteLoaded } from "../shared/icon.js";
 import { getCurrentWindow, confirmDialog, listen, invoke } from "../shared/tauri.js";
 import { EVENTS } from "../shared/event-names.js";
+import { t } from "../i18n/index.js";
 import { createMdToolbar, bindMdToolbar, updateToolbarStates } from "../shared/md-toolbar.js";
 import {
   getStickyNote,
@@ -1064,6 +1065,21 @@ function showContextMenu(x, y) {
 
   // 分割线
   menu.appendChild(makeSeparator());
+
+  // 0.20.8：便签管理——与顶部更多菜单同一入口
+  const itemManager = document.createElement("button");
+  itemManager.className = "ctx-item";
+  itemManager.textContent = t("menu.stickyManager");
+  itemManager.addEventListener("click", async () => {
+    hideContextMenu();
+    try {
+      await showStickyManager();
+    } catch (e) {
+      const err = normalizeError(e);
+      console.error(`[sticky] 打开便签管理失败 [${err.code}]: ${err.message}`);
+    }
+  });
+  menu.appendChild(itemManager);
 
   // 隐藏
   const itemHide = document.createElement("button");

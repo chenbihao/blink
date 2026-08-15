@@ -77,7 +77,7 @@ export function init() {
     if (clipboardMode.isActive() && clipboardMode.hasSelection()) {
       const count = clipboardMode.getSelectionCount();
       items = [
-        { label: t("menu.copySelected", { count }), run: () => clipboardMode.batchCopy() },
+        { label: t("menu.copySelected", { count }), shortcut: "Ctrl+C", run: () => clipboardMode.batchCopy() },
         { separator: true },
         ...items,
       ];
@@ -314,6 +314,7 @@ function itemMenu(li) {
     if (!label) continue; // 无标签的动作（如无 hint 的 run）跳过
     items.push({
       label,
+      shortcut: action.runId === "edit_text_item" ? "Alt+E" : undefined,
       run: () => activateItem({ ...readData(li), actions: [action] }),
     });
   }
@@ -381,6 +382,7 @@ function itemMenu(li) {
       items.push({ separator: true });
       items.push({
         label: t("menu.delete"),
+        shortcut: "Alt+D",
         run: () => {
           deleteClipboardImage(lnkPath)
             .then(() => retrigger())
@@ -393,6 +395,7 @@ function itemMenu(li) {
       items.push({ separator: true });
       items.push({
         label: t("menu.delete"),
+        shortcut: "Alt+D",
         run: () => {
           deleteClipboardItem(clipboardId)
             .then(() => retrigger())

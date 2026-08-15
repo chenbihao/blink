@@ -68,6 +68,15 @@
   border-radius: var(--radius-sm, 4px);
 }
 
+/* 0.20：多行颜色列表——一排小 swatch，宽度随色数自适应（覆盖 .app-icon 的 24px 固定宽） */
+#results li .app-icon.color-list-swatch {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  width: auto;
+  height: 24px;
+}
+
 /* 插件查询中占位动画 - 明确用户命令已被识别 */
 #results li.is-loading {
   color: var(--text-dim);

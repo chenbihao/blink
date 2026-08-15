@@ -70,6 +70,7 @@ impl SearchEngine for ColorEngine {
             source: "color".into(),
             score_detail: Some("color=1.0".into()),
             context_aware: false,
+        color_list_hex: None,
         }]
     }
 }

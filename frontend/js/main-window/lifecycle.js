@@ -31,6 +31,8 @@ export function init() {
   }
 
   listen(EVENTS.SHOWN, () => {
+    // 0.20-fix: 防御性清理 readOnly 残留（HIDDEN 已调 forceClearReadOnly，但双保险）
+    inputState.forceClearReadOnly();
     // 0.17.6: AiMode 下 SHOWN 只 focus AI 输入框，不重置搜索状态
     if (aiMode.isActive()) {
       aiQueryEl.focus();
@@ -70,6 +72,9 @@ export function init() {
 
   listen(EVENTS.HIDDEN, () => {
     // Alt/Chord 状态由后端 INPUT_STATE_CHANGED 事件驱动，不在 HIDDEN 补偿清理。
+    // 0.20-fix: 强制恢复 readOnly = false，防止 chord 待命态 readOnly 残留
+    // （WebView 可能收不到 keyup，wasChordStandby 残留 true 导致输入框永久 readOnly）
+    inputState.forceClearReadOnly();
     // 0.17.6: AiMode 下 HIDDEN 也清理 AI 状态
     if (aiMode.isActive()) {
       aiMode.exitAiMode();
