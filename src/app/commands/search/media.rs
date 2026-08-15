@@ -843,6 +843,246 @@ pub async fn ocr_image(
     Ok(json)
 }
 
+/// 0.20.7：分析截图选区或图片编辑会话的配色方案。
+///
+/// **两种来源**（P0-1 修订：直调配色核心，不走 Capability JSON 像素搬运）：
+/// - `source = "screenshot"`：从截图 SESSION 按物理坐标裁剪 BGRA → swap 为 RGBA →
+///   直接调 `palette::analyze_palette`。坐标是物理像素、SESSION 坐标系（虚拟屏幕原点为
+///   (0,0)）——与 `screenshot_copy_region` 相同的坐标系。
+/// - `source = "editor"`：从图片编辑会话 SESSION 取原始 PNG → 解码为 RGBA →
+///   按可选选区裁剪 → 直接调 `palette::analyze_palette`。
+///
+/// **零回传**：前端只传坐标（screenshot）或选区坐标（editor），不传 Canvas RGBA/PNG/Base64。
+///
+/// **零 JSON 像素搬运**：不再构造 `serde_json::json!({"rgba_flat": ...})`，
+/// 避免 4K 选区每字节变 `serde_json::Value::Number`（~24-32B/byte）的内存炸弹。
+///
+/// **长截图禁用**：长截图来源在前后端均拒绝配色提取。
+///
+/// 返回 `PaletteResult` 的 JSON 序列化（直连 Rust 核心，不经 Capability Text 反序列化）。
+#[tauri::command]
+pub async fn analyze_palette(
+    source: String,
+    x: Option<i32>,
+    y: Option<i32>,
+    w: Option<u32>,
+    h: Option<u32>,
+    crop: Option<CropRect>,
+) -> Result<serde_json::Value, crate::app::command_error::CommandError> {
+    use crate::app::command_error::CommandError;
+
+    // P1-4：长截图来源拒绝配色提取
+    if source == "long-screenshot" {
+        return Err(CommandError::with_detail(
+            "invalid_state",
+            "长截图不支持配色提取",
+            false,
+            serde_json::json!({ "reason": "long_screenshot_disabled" }),
+        ));
+    }
+
+    let (rgba_flat, width, height) = match source.as_str() {
+        "screenshot" => {
+            let x = x.ok_or_else(|| {
+                CommandError::new("invalid_args", "screenshot 来源需要 x 参数", false)
+            })?;
+            let y = y.ok_or_else(|| {
+                CommandError::new("invalid_args", "screenshot 来源需要 y 参数", false)
+            })?;
+            let w = w.ok_or_else(|| {
+                CommandError::new("invalid_args", "screenshot 来源需要 w 参数", false)
+            })?;
+            let h = h.ok_or_else(|| {
+                CommandError::new("invalid_args", "screenshot 来源需要 h 参数", false)
+            })?;
+
+            // 从截图 SESSION 裁剪 BGRA → swap 为 RGBA（spawn_blocking 隔离 CPU）
+            tokio::task::spawn_blocking(move || {
+                let (bgra, cw, ch) =
+                    crate::infra::platform::screenshot::crop(x, y, w, h)
+                        .ok_or_else(|| "SESSION 为空或选区越界".to_string())?;
+                // BGRA → RGBA（u32 位运算批量 swap R↔B）
+                let mut rgba = bgra;
+                for chunk in rgba.chunks_exact_mut(4) {
+                    let px =
+                        u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    let rb = px & 0x00FF00FF;
+                    let ga = px & 0xFF00FF00;
+                    let swapped = ga | (rb << 16) | (rb >> 16);
+                    chunk.copy_from_slice(&swapped.to_ne_bytes());
+                }
+                Ok::<(Vec<u8>, usize, usize), String>((rgba, cw as usize, ch as usize))
+            })
+            .await
+            .map_err(|e| {
+                CommandError::new("internal_error", format!("spawn_blocking join 失败: {e}"), false)
+            })?
+            .map_err(|e| {
+                CommandError::new("invalid_state", e, false)
+            })?
+        }
+        "editor" => {
+            // 从图片编辑会话 SESSION 取原始 PNG
+            let png_bytes = crate::infra::platform::image_editor::session_png().ok_or_else(|| {
+                tracing::warn!("analyze_palette: 图片编辑会话不活跃");
+                CommandError::with_detail(
+                    "invalid_state",
+                    "图片编辑会话不活跃",
+                    false,
+                    serde_json::json!({ "reason": "editor_session_inactive" }),
+                )
+            })?;
+            let png_bytes = (*png_bytes).clone();
+
+            // 解码 PNG → RGBA（spawn_blocking 隔离 CPU）
+            let (rgba, img_w, img_h) = tokio::task::spawn_blocking(move || {
+                crate::infra::platform::screenshot::decode_png_to_rgba(&png_bytes)
+            })
+            .await
+            .map_err(|e| {
+                CommandError::new("internal_error", format!("spawn_blocking join 失败: {e}"), false)
+            })?
+            .map_err(|e| {
+                CommandError::new("invalid_data", format!("PNG 解码失败: {e}"), false)
+            })?;
+
+            // P1-4：按可选选区裁剪
+            if let Some(crop) = crop {
+                let (cropped, cw, ch) = crop_rgba(&rgba, img_w as usize, img_h as usize, &crop);
+                (cropped, cw, ch)
+            } else {
+                (rgba, img_w as usize, img_h as usize)
+            }
+        }
+        other => {
+            return Err(CommandError::new(
+                "invalid_args",
+                format!("不支持的 source: {other}（仅支持 screenshot / editor）"),
+                false,
+            ));
+        }
+    };
+
+    // P0-1：直调配色核心，不经 JSON 像素数组搬运
+    let result = tokio::task::spawn_blocking(move || {
+        crate::domain::palette::analyze_palette(&rgba_flat, width, height)
+    })
+    .await
+    .map_err(|e| {
+        CommandError::new("internal_error", format!("配色分析 task 崩溃: {e}"), false)
+    })?;
+
+    // 直连 Rust 核心，序列化 PaletteResult 返回前端
+    let json = serde_json::to_value(&result).map_err(|e| {
+        CommandError::new(
+            "internal_error",
+            format!("序列化 PaletteResult 失败: {e}"),
+            false,
+        )
+    })?;
+
+    tracing::debug!(
+        source = %source,
+        roles = result.roles.len(),
+        empty = result.empty,
+        "analyze_palette: 分析完成"
+    );
+    Ok(json)
+}
+
+/// P1-4：editor 选区裁剪参数。
+#[derive(serde::Deserialize)]
+pub struct CropRect {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// 0.20.7 P1-1：基于显式基准色生成配色方案（OKLCH 数学方案接线）。
+///
+/// 前端"生成当前色配色方案"展开时调用此命令，由后端 OKLCH 单一真源生成：
+/// - 同色层级（monochrome）：基准色 OKLCH 明度梯度
+/// - 邻近协调（analogous）：基准色 ±30° 色相
+/// - 互补强调（complement）：基准色 + 互补色 + 原图灰阶
+///
+/// **删除前端 HSL 双算法**：前端不再自己用 HSL 生成方案，统一走后端 OKLCH。
+///
+/// 参数：
+/// - `anchor_hex`：基准色 HEX 字符串（如 "#FF5500"）
+/// - `source_colors`：原图角色色 RGB 数组（可为空）
+///
+/// 返回 `Vec<HarmonyScheme>` 的 JSON 序列化。
+#[tauri::command]
+pub async fn generate_palette_schemes(
+    anchor_hex: String,
+    source_colors: Option<Vec<[u8; 3]>>,
+) -> Result<serde_json::Value, crate::app::command_error::CommandError> {
+    use crate::app::command_error::CommandError;
+
+    // 解析 HEX → RGB
+    let hex = anchor_hex.trim_start_matches('#');
+    if hex.len() != 6 {
+        return Err(CommandError::new(
+            "invalid_args",
+            format!("anchor_hex 格式无效: {anchor_hex}（需要 #RRGGBB）"),
+            false,
+        ));
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16)
+        .map_err(|e| CommandError::new("invalid_args", format!("anchor_hex R 解析失败: {e}"), false))?;
+    let g = u8::from_str_radix(&hex[2..4], 16)
+        .map_err(|e| CommandError::new("invalid_args", format!("anchor_hex G 解析失败: {e}"), false))?;
+    let b = u8::from_str_radix(&hex[4..6], 16)
+        .map_err(|e| CommandError::new("invalid_args", format!("anchor_hex B 解析失败: {e}"), false))?;
+
+    let source: Vec<[u8; 3]> = source_colors.unwrap_or_default();
+
+    // 调后端 OKLCH 方案生成（纯 CPU，spawn_blocking 隔离）
+    let schemes = tokio::task::spawn_blocking(move || {
+        crate::domain::palette::generate_design_palettes([r, g, b], &source)
+    })
+    .await
+    .map_err(|e| {
+        CommandError::new("internal_error", format!("配色方案生成 task 崩溃: {e}"), false)
+    })?;
+
+    let json = serde_json::to_value(&schemes).map_err(|e| {
+        CommandError::new(
+            "internal_error",
+            format!("序列化 HarmonyScheme 失败: {e}"),
+            false,
+        )
+    })?;
+
+    tracing::debug!(
+        anchor = %anchor_hex,
+        schemes = schemes.len(),
+        "generate_palette_schemes: 生成完成"
+    );
+    Ok(json)
+}
+
+/// 对 RGBA flat 数据执行裁剪（P1-4：复用 analyze_image_palette 的 apply_crop 逻辑）。
+fn crop_rgba(rgba: &[u8], width: usize, height: usize, crop: &CropRect) -> (Vec<u8>, usize, usize) {
+    let x = (crop.x.max(0) as usize).min(width);
+    let y = (crop.y.max(0) as usize).min(height);
+    let cw = (crop.w as usize).min(width.saturating_sub(x)).max(1);
+    let ch = (crop.h as usize).min(height.saturating_sub(y)).max(1);
+
+    let stride = width * 4;
+    let crop_stride = cw * 4;
+    let mut result = Vec::with_capacity(crop_stride * ch);
+
+    for row in y..(y + ch) {
+        let start = row * stride + x * 4;
+        let end = start + crop_stride;
+        result.extend_from_slice(&rgba[start..end]);
+    }
+
+    (result, cw, ch)
+}
+
 /// 0.17.5：OCR 诊断——返回设备已安装的 OCR 语言列表、当前引擎语言、中文包状态。
 ///
 /// 供截图 overlay 诊断面板调用，帮助用户排查"中文截图识别不出"问题。

@@ -197,16 +197,19 @@ function renderHue() {
   hueCtx.stroke();
 }
 
-/** 0.15.8-fix：渲染透明度条 */
+/** P1-3：渲染透明度条——标准方形棋盘，棋盘色/边框/指示线走主题变量 */
 function renderAlpha() {
   if (!alphaCtx) return;
   const w = alphaCanvas.width;
   const h = alphaCanvas.height;
-  // 棋盘格背景
+  // P1-3：棋盘格背景色从主题变量读取（--surface 为深色格，--surface-2 为浅色格）
+  const style = getComputedStyle(alphaCanvas);
+  const checkerLight = style.getPropertyValue('--surface-2').trim() || '#ccc';
+  const checkerDark = style.getPropertyValue('--surface').trim() || '#999';
   const cellSize = 4;
   for (let y = 0; y < h; y += cellSize) {
     for (let x = 0; x < w; x += cellSize) {
-      alphaCtx.fillStyle = ((Math.floor(x / cellSize) + Math.floor(y / cellSize)) % 2 === 0) ? '#fff' : '#ccc';
+      alphaCtx.fillStyle = ((Math.floor(x / cellSize) + Math.floor(y / cellSize)) % 2 === 0) ? checkerLight : checkerDark;
       alphaCtx.fillRect(x, y, cellSize, cellSize);
     }
   }
@@ -217,9 +220,9 @@ function renderAlpha() {
   grad.addColorStop(1, `rgba(${rgb.r},${rgb.g},${rgb.b},1)`);
   alphaCtx.fillStyle = grad;
   alphaCtx.fillRect(0, 0, w, h);
-  // 当前透明度标记
+  // P1-3：指示线用主题文字色，确保在明/暗主题下均可见
   const mx = alpha * w;
-  alphaCtx.strokeStyle = '#fff';
+  alphaCtx.strokeStyle = style.getPropertyValue('--text').trim() || '#fff';
   alphaCtx.lineWidth = 2;
   alphaCtx.beginPath();
   alphaCtx.moveTo(mx, 0);
@@ -574,3 +577,7 @@ export function initColorPicker() {
 
 // 导出转换工具函数（供 0.15.6 配色提取复用）
 export { hsvToRgb, rgbToHsv, rgbToHex, hexToRgb, rgbToHsl, hslToRgb };
+
+// P1-3：导出共享色彩格式 getter/setter，配色区复用顶部 .color-format 的格式状态
+export function getColorFormat() { return format; }
+export function setColorFormat(f) { format = f; }

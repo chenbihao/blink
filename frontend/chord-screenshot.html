@@ -229,15 +229,16 @@
           </div>
           <div class="palette-theme-summary" hidden></div>
           <div class="palette-actions-row" hidden>
-            <label class="palette-format-label" for="palette-output-format">复制格式</label>
-            <select class="palette-output-format" id="palette-output-format" title="复制格式">
-              <option value="hex">HEX</option>
-              <option value="rgb">RGB</option>
-              <option value="hsl">HSL</option>
-              <option value="list">列表</option>
-              <option value="css">CSS变量</option>
-            </select>
-            <button class="palette-copy-all" title="复制 Ctrl+左键多选的颜色"><svg class="icon" aria-hidden="true"><use href="#icon-copy"/></svg><span>复制多选</span></button>
+            <span class="palette-selection-hint">Ctrl + 单击可多选</span>
+            <div class="dropdown-wrap palette-copy-wrap">
+              <button class="palette-copy-all" title="复制 Ctrl+左键多选的颜色" disabled><svg class="icon" aria-hidden="true"><use href="#icon-copy"/></svg><span>复制所选</span></button>
+              <div class="dropdown palette-copy-menu" data-open="false">
+                <button class="dropdown-item" data-copy-mode="format"><span class="item-label">按当前格式复制</span></button>
+                <div class="dropdown-separator"></div>
+                <button class="dropdown-item" data-copy-mode="list"><span class="item-label">每行一个</span></button>
+                <button class="dropdown-item" data-copy-mode="css"><span class="item-label">CSS 变量</span></button>
+              </div>
+            </div>
           </div>
           <div class="palette-harmony" hidden>
             <div class="palette-section-heading">

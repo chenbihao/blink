@@ -554,6 +554,61 @@ pub fn parse_png_size(png: &[u8]) -> Option<(u32, u32)> {
     Some((width, height))
 }
 
+/// 将 PNG 字节解码为 RGBA flat 像素数据 + 尺寸。
+///
+/// 支持所有 PNG 颜色类型（RGB/RGBA/Grayscale/GrayscaleAlpha），
+/// 统一输出为 RGBA8 格式（灰度扩展为三通道相同，无 alpha 通道补 255）。
+///
+/// 用于 `analyze_image_palette` Capability 等需要像素级分析的消费者。
+pub fn decode_png_to_rgba(png_data: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
+    use png::ColorType;
+    let decoder = png::Decoder::new(std::io::Cursor::new(png_data));
+    let mut reader = decoder
+        .read_info()
+        .map_err(|e| format!("PNG 读取失败: {e}"))?;
+    let (w, h) = (reader.info().width, reader.info().height);
+
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader
+        .next_frame(&mut buf)
+        .map_err(|e| format!("PNG 解码失败: {e}"))?;
+    buf.truncate(info.buffer_size());
+
+    let rgba = match info.color_type {
+        ColorType::Rgba => buf,
+        ColorType::Rgb => {
+            let mut rgba = Vec::with_capacity(buf.len() / 3 * 4);
+            for chunk in buf.chunks_exact(3) {
+                rgba.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+            }
+            rgba
+        }
+        ColorType::GrayscaleAlpha => {
+            let mut rgba = Vec::with_capacity(buf.len() / 2 * 4);
+            for chunk in buf.chunks_exact(2) {
+                let gray = chunk[0];
+                rgba.extend_from_slice(&[gray, gray, gray, chunk[1]]);
+            }
+            rgba
+        }
+        ColorType::Grayscale => {
+            let mut rgba = Vec::with_capacity(buf.len() * 4);
+            for &gray in &buf {
+                rgba.extend_from_slice(&[gray, gray, gray, 255]);
+            }
+            rgba
+        }
+        ColorType::Indexed => {
+            // png 0.17 在 read_info 后已展开为 RGB 或 RGBA
+            // 如果遇到 Indexed，next_frame 会输出为 RGB 或 RGBA
+            // 此分支理论上不会触发，但做防御处理
+            buf
+        }
+    };
+
+    Ok((rgba, w, h))
+}
+
 // ── 测试 ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

@@ -1,34 +1,31 @@
-//! 0.20.7：来源无关配色核心与可用输出。
+//! 0.20.7：配色分析 UI 收敛——后端单一真源。
 //!
-//! 功能：
-//! - 整图分块扫描固定直方图，提取色始终来自原始像素
-//! - 首屏展示 3 个图片提取方案；数学配色由显式基准色独立生成
-//! - 显示 WCAG 对比度值和推荐黑/白文字色
-//! - 支持 Ctrl+左键跨方案多选、复制所选/整组；输出格式含 HEX/RGB/HSL、纯颜色列表、CSS variables
-//! - 色块左键设标注色，右键单色复制
-//! - Worker 负责紧凑直方图聚类；主线程分块扫描时主动让出事件循环
+//! 算法核心已迁移至 Rust `src/domain/palette.rs`，前端只负责：
+//! - 调用 `analyze_palette` Tauri 命令（截图选区或图片编辑会话）
+//! - 渲染角色色、推荐方案、生成方案
+//! - 复制/格式化输出
+//! - 显式基准色的配色方案生成（调 `generate_palette_schemes` 后端命令）
 //!
-//! 算法说明：
-//! - 扫描：5-bit RGB 固定直方图，每桶保留原图真实代表像素
-//! - 聚类：在 OKLab 空间对直方图桶做带权 k-means，K=1..8
-//! - 角色色：background / accent / foreground / muted
-//! - harmony：RGB→HSL → 色相偏移 → HSL→RGB，每色相 3 档明暗梯度
+//! **零数据回传**：截图来源只传物理坐标，后端从 SESSION 直接裁剪；
+//! 编辑器来源传 `"editor"` + 选区 bitmap 坐标（crop），后端从编辑会话 SESSION 取 PNG → 按坐标裁剪。
 
 import * as annot from './annotation-engine.js';
 import { ss } from './ss-state.js';
-import { syncFromAnnot } from './ss-color-picker.js';
+import { syncFromAnnot, getColorFormat } from './ss-color-picker.js';
 import { copyToClipboard as copyTextToClipboard } from '../shared/api.js';
-import {
-  analyzePaletteHistogram,
-  accumulateColorHistogram,
-  createColorHistogramAccumulator,
-  finalizeColorHistogram,
-  generateDesignPalettes,
-  PALETTE_ALGORITHM_V1,
-  rgbToHex,
-  formatAsCssVariables,
-  formatOutput,
-} from '../shared/color/palette-core.js';
+import { invoke } from '../shared/api.js';
+import { cssRectToBitmap } from './ss-selection-geometry.js';
+import { IMAGE_SOURCE } from './image-editor-session.js';
+import { rgbToHex, formatOutput, formatAsCssVariables, formatPaletteColors } from './palette-format.js';
+
+// ── 纯工具函数（已提取至 palette-format.js，此处仅保留 import）──────────────
+//
+// P1-1：删除前端 HSL 双算法（rgbToHsl / hslToRgb / generateDesignPalettes）。
+// 所有色彩运算统一走后端 Rust `src/domain/palette.rs` OKLCH 单一真源。
+// 前端"生成当前色配色方案"展开时调 `generate_palette_schemes` Tauri 命令。
+//
+// P4-1：纯格式化函数（rgbToHex / hexToHslString / formatOutput / formatAsCssVariables /
+// formatPaletteColors）已提取至 `palette-format.js`，ss-palette.js 和测试共同 import 同一模块。
 
 // ── DOM 引用 ──────────────────────────────────────────────
 
@@ -37,42 +34,28 @@ let paletteEl = null;
 let harmonyEl = null;
 let harmonySwatches = null;
 let moreSchemesEl = null;
-let outputFormatSelect = null;
 let copyAllBtn = null;
 let copyStatusEl = null;
 let themeSummaryEl = null;
 let moreToggleEl = null;
 let actionsRowEl = null;
+let selectionHintEl = null; // P1-3：操作行左侧提示/计数
+let copyMenuEl = null; // P1-3：复制模式下拉菜单
 
 /** 防抖定时器 */
 let debounceTimer = 0;
-let pendingHistogram = null;
-/** Worker 已回传结果的最新 epoch（看门狗据此判断本轮是否仍在等待） */
-let workerResultEpoch = -1;
-/** 每个 epoch 的 watchdog timer 和完成状态 */
-let workerWatchdogTimer = 0;
-/** 当前 watchdog 对应的 epoch（只取消/触发属于该 epoch 的 timer） */
-let workerWatchdogEpoch = -1;
 
 /** 新截图/图片编辑会话开始时清理上一轮分析、展开与多选状态。 */
 export function resetPaletteState() {
   clearTimeout(debounceTimer);
   debounceTimer = 0;
-  // 清理 watchdog timer，防止旧 epoch 的超时回调影响新会话
-  if (workerWatchdogTimer) {
-    clearTimeout(workerWatchdogTimer);
-    workerWatchdogTimer = 0;
-  }
-  workerWatchdogEpoch = -1;
-  // 让已经发给 Worker 的旧任务失效，避免结果回写到新截图。
   ss.paletteEpoch++;
   ss.paletteResult = null;
   ss.paletteSelected = new Set();
   ss.paletteColorOrder = [];
-  ss.paletteFormat = 'hex';
+  // P1-3：paletteFormat 已移除，格式由顶部 .color-format 统一管理
   ss.paletteMoreExpanded = false;
   ss.paletteAnchorHex = null;
-  pendingHistogram = null;
 
   if (paletteEl) {
     paletteEl.replaceChildren();
@@ -92,163 +75,9 @@ export function resetPaletteState() {
   if (actionsRowEl) actionsRowEl.hidden = true;
   if (copyStatusEl) copyStatusEl.textContent = '';
   if (extractBtn) extractBtn.disabled = false;
-  if (outputFormatSelect) outputFormatSelect.value = 'hex';
   if (moreToggleEl) moreToggleEl.textContent = '生成当前色配色方案';
+  closeCopyMenu();
   updateCopyButtonLabel();
-}
-
-// ── Worker 管理 ────────────────────────────────────────────
-
-/**
- * 确保 Worker 已创建（幂等）。
- * Worker 创建失败时返回 null，主线程降级处理。
- *
- * @returns {Worker | null}
- */
-function ensureWorker() {
-  if (ss.paletteWorker) return ss.paletteWorker;
-  try {
-    // 纯 ES module worker，无构建步骤
-    ss.paletteWorker = new Worker(
-      new URL('../shared/color/palette-worker.js', import.meta.url),
-      { type: 'module' }
-    );
-    ss.paletteWorker.onmessage = onWorkerMessage;
-    ss.paletteWorker.onerror = onWorkerError;
-  } catch (err) {
-    console.warn('[palette] Worker 创建失败，降级到主线程', err);
-    ss.paletteWorker = null;
-  }
-  return ss.paletteWorker;
-}
-
-/**
- * 销毁当前 Worker（异常/超时后调用），让下次 ensureWorker 重建。
- * 异常后的 Worker 已不可信，静默死亡时 postMessage 不报错也不回结果。
- */
-function destroyWorker() {
-  if (!ss.paletteWorker) return;
-  try {
-    ss.paletteWorker.terminate();
-  } catch {
-    // terminate 失败也直接丢弃引用
-  }
-  ss.paletteWorker = null;
-}
-
-/**
- * Worker 消息处理。校验 version/epoch，旧 epoch 丢弃。
- * @param {MessageEvent} e
- */
-function onWorkerMessage(e) {
-  const msg = e.data;
-  if (!msg) return;
-
-  // 旧 epoch 丢弃
-  if (msg.epoch !== ss.paletteEpoch) return;
-
-  if (msg.type === 'result') {
-    if (extractBtn) extractBtn.disabled = false;
-    workerResultEpoch = msg.epoch;
-    // 0.20.7：result 后结束该 epoch 的 watchdog timer
-    clearWatchdogTimer(msg.epoch);
-    ss.paletteResult = msg.result;
-    renderPalette(msg.result);
-  } else if (msg.type === 'error') {
-    console.warn('[palette] Worker 错误:', msg.message);
-    // 0.20.7：error 后也结束该 epoch 的 watchdog timer，防止 fallback 成功后 watchdog 仍触发
-    clearWatchdogTimer(msg.epoch);
-    // 降级到主线程
-    fallbackMainThreadAnalysis(msg.epoch);
-  }
-}
-
-/**
- * 清理指定 epoch 的 watchdog timer。
- * 超时回调只销毁它启动时对应的 Worker 实例，不能误杀后来重建的 Worker。
- */
-function clearWatchdogTimer(epoch) {
-  if (workerWatchdogTimer && workerWatchdogEpoch === epoch) {
-    clearTimeout(workerWatchdogTimer);
-    workerWatchdogTimer = 0;
-    workerWatchdogEpoch = -1;
-  }
-}
-
-/**
- * Worker 异常处理。
- * 异常后的 Worker 已不可信：先销毁（下次 ensureWorker 重建），再降级主线程。
- * @param {ErrorEvent} e
- */
-function onWorkerError(e) {
-  console.warn('[palette] Worker 异常:', e.message || e);
-  clearWatchdogTimer(ss.paletteEpoch);
-  destroyWorker();
-  // 降级到主线程
-  if (ss.paletteEpoch > 0) {
-    fallbackMainThreadAnalysis(ss.paletteEpoch);
-  }
-}
-
-/**
- * 主线程降级分析（Worker 不可用时）。
- */
-function fallbackMainThreadAnalysis(epoch) {
-  if (!pendingHistogram || epoch !== ss.paletteEpoch) return;
-  try {
-    const result = analyzePaletteHistogram(
-      pendingHistogram,
-      pendingHistogram.width,
-      pendingHistogram.height,
-    );
-    if (epoch !== ss.paletteEpoch) return;
-    if (extractBtn) extractBtn.disabled = false;
-    ss.paletteResult = result;
-    // 0.20.7：fallback 成功后结束该 epoch 的 watchdog timer
-    clearWatchdogTimer(epoch);
-    renderPalette(result);
-  } catch (err) {
-    console.warn('[palette] 主线程降级分析失败:', err);
-    if (extractBtn) extractBtn.disabled = false;
-    clearWatchdogTimer(epoch);
-  }
-}
-
-// ── 原图整图扫描 ──────────────────────────────────────────
-
-function getSelectionImageData() {
-  const crop = annot.getCropImageData();
-  if (crop?.data?.length && crop.width > 0 && crop.height > 0) return crop;
-  const source = annot.getCropSourceCanvas() || ss.editorSession?.baseCanvas;
-  if (!source?.width || !source?.height) return null;
-  try {
-    return source.getContext('2d', { willReadFrequently: true })
-      .getImageData(0, 0, source.width, source.height);
-  } catch (error) {
-    console.warn('[palette] 读取原始选区像素失败', error);
-    return null;
-  }
-}
-
-/** 分块扫描整张原图；固定桶内存约 320KB，不创建逐像素对象。 */
-async function scanFullImageHistogram(imageData, epoch) {
-  const data = imageData.data;
-  const accumulator = createColorHistogramAccumulator();
-  const pixelsPerChunk = 500_000;
-  const totalPixels = Math.floor(data.length / 4);
-
-  for (let startPixel = 0; startPixel < totalPixels; startPixel += pixelsPerChunk) {
-    if (epoch !== ss.paletteEpoch) return null;
-    const endPixel = Math.min(totalPixels, startPixel + pixelsPerChunk);
-    accumulateColorHistogram(accumulator, data, startPixel, endPixel);
-    if (endPixel < totalPixels) await new Promise((resolve) => setTimeout(resolve, 0));
-  }
-
-  return {
-    ...finalizeColorHistogram(accumulator, totalPixels),
-    width: imageData.width,
-    height: imageData.height,
-  };
 }
 
 // ── 配色分析触发 ───────────────────────────────────────────
@@ -256,61 +85,87 @@ async function scanFullImageHistogram(imageData, epoch) {
 /**
  * 触发配色分析（防抖 120ms）。
  * 选区变化后 120ms 启动最新分析，旧 epoch 不覆盖新结果。
+ *
+ * **零数据回传**：
+ * - 截图来源：前端只传物理坐标 (bitmap 坐标系 = SESSION 坐标系)，后端从 SESSION 裁剪 BGRA → swap → 分析
+ * - 编辑器来源：前端传 `"editor"` + 选区 bitmap 坐标 (crop)，后端从编辑会话 SESSION 取 PNG → 解码 → 按坐标裁剪 → 分析
  */
 export function triggerPaletteAnalysis() {
+  // P1-4：长截图来源禁用配色提取
+  if (ss.editorSession.source === IMAGE_SOURCE.LONG_SCREENSHOT) {
+    if (copyStatusEl) copyStatusEl.textContent = '长截图不支持配色提取';
+    return;
+  }
   clearTimeout(debounceTimer);
-  const C = PALETTE_ALGORITHM_V1;
+  const DEBOUNCE_MS = 120;
   debounceTimer = setTimeout(async () => {
     ss.paletteEpoch++;
     const epoch = ss.paletteEpoch;
-    const imageData = getSelectionImageData();
-    if (!imageData) return;
-    if (extractBtn) extractBtn.disabled = true;
-    if (copyStatusEl) copyStatusEl.textContent = `正在扫描整块选区 ${imageData.width}×${imageData.height}…`;
-    const histogram = await scanFullImageHistogram(imageData, epoch);
-    if (!histogram || epoch !== ss.paletteEpoch) return;
-    pendingHistogram = histogram;
 
-    const worker = ensureWorker();
-    if (worker) {
-      // 捕获 Worker 实例引用——超时回调只销毁它启动时对应的 Worker，不能误杀后来重建的
-      const workerRef = worker;
-      const watchdogEpoch = epoch;
-      worker.postMessage({
-        type: 'analyze-histogram',
-        version: C.WORKER_VERSION,
-        epoch,
-        histogram,
-        width: histogram.width,
-        height: histogram.height,
-      });
-      // 静默死亡看门狗：Worker 无 error 事件但也迟迟不回结果时，
-      // 销毁重建 + 降级主线程，避免按钮永久 disabled / 状态卡在"正在扫描"
-      // 0.20.7：保存 timer 和 epoch；result、error、fallback 完成、reset 都 clear
-      clearWatchdogTimer(watchdogEpoch);
-      workerWatchdogTimer = setTimeout(() => {
-        // 只处理属于该 epoch 的超时，且只销毁启动时的 Worker 实例
-        if (watchdogEpoch !== ss.paletteEpoch) return;
-        if (workerResultEpoch < watchdogEpoch) {
-          // 再次检查：result/error 可能在 timer 排队期间到达
-          if (workerRef === ss.paletteWorker) {
-            console.warn('[palette] Worker 分析超时，销毁并降级到主线程');
-            destroyWorker();
-          }
-          fallbackMainThreadAnalysis(watchdogEpoch);
-        }
-      }, C.WORKER_TIMEOUT_MS);
-      workerWatchdogEpoch = watchdogEpoch;
-    } else {
-      fallbackMainThreadAnalysis(epoch);
+    if (extractBtn) extractBtn.disabled = true;
+    if (copyStatusEl) copyStatusEl.textContent = '正在分析选区配色…';
+
+    try {
+      const result = await invokeAnalyzePalette();
+      if (epoch !== ss.paletteEpoch) return; // 旧 epoch 丢弃
+      if (extractBtn) extractBtn.disabled = false;
+      ss.paletteResult = result;
+      renderPalette(result);
+    } catch (err) {
+      if (epoch !== ss.paletteEpoch) return;
+      if (extractBtn) extractBtn.disabled = false;
+      console.warn('[palette] 分析失败:', err);
+      if (copyStatusEl) copyStatusEl.textContent = '配色分析失败';
+      // 渲染空结果
+      renderPalette({ roles: [], recommended: [], full: [], empty: true });
     }
-  }, C.DEBOUNCE_MS);
+  }, DEBOUNCE_MS);
+}
+
+/**
+ * 调用后端 `analyze_palette` 命令。
+ * 根据当前会话来源选择参数：
+ * - 截图来源（SCREENSHOT 且无 canvas 底图）：传物理坐标
+ * - 编辑器来源（clipboard/history/pin/long-screenshot）：传 "editor"
+ */
+async function invokeAnalyzePalette() {
+  const isScreenshotSource = ss.editorSession.source === IMAGE_SOURCE.SCREENSHOT
+    && !ss.editorSession.canvasBacked;
+
+  if (isScreenshotSource) {
+    // 截图来源：从 CSS 选区转 bitmap 坐标（= SESSION 物理坐标）
+    if (!ss.selCss) throw new Error('无选区');
+    const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+    const bmp = cssRectToBitmap(ss.selCss, meta);
+    return invoke('analyze_palette', {
+      source: 'screenshot',
+      x: bmp.x,
+      y: bmp.y,
+      w: bmp.w,
+      h: bmp.h,
+    });
+  } else {
+    // 编辑器来源：后端从编辑会话 SESSION 取 PNG，前端传选区 bitmap 坐标用于裁剪
+    const meta = window.__blinkScreenMeta || { vx: 0, vy: 0 };
+    const crop = ss.selCss ? cssRectToBitmap(ss.selCss, meta) : null;
+    return invoke('analyze_palette', {
+      source: 'editor',
+      crop: crop ? { x: crop.x, y: crop.y, w: crop.w, h: crop.h } : null,
+    });
+  }
 }
 
 // ── UI 渲染 ──────────────────────────────────────────────────
 
 /**
  * 渲染配色结果到 UI。
+ *
+ * 后端返回的 JSON 字段为 snake_case（Rust serde 默认）：
+ * - roles[i].rgb = [r, g, b], roles[i].hex, roles[i].role, roles[i].ratio
+ * - recommended[i].colors = [[r,g,b], ...], .label, .scheme, .description
+ * - sample.valid_pixels, sample.scanned_pixels, .width, .height, .mode
+ * - theme.summary
+ *
  * @param {{roles: Array, recommended: Array, full: Array, empty: boolean}} result
  */
 function renderPalette(result) {
@@ -331,7 +186,7 @@ function renderPalette(result) {
     return;
   }
 
-  // 新一轮分析默认不多选；普通左键仍是“设为标注色”，Ctrl+左键才进入批量选择。
+  // 新一轮分析默认不多选；普通左键仍是"设为标注色"，Ctrl+左键才进入批量选择。
   ss.paletteSelected = new Set();
   ss.paletteColorOrder = collectPaletteColorOrder(result);
   ss.paletteMoreExpanded = false;
@@ -346,12 +201,13 @@ function renderPalette(result) {
   renderRoleSwatches(result.roles);
   paletteEl.hidden = false;
   if (themeSummaryEl) {
-    const sampleSize = result.sample?.width && result.sample?.height
-      ? ` · 整图扫描 ${result.sample.width}×${result.sample.height}`
+    const sample = result.sample;
+    const sampleSize = sample?.width && sample?.height
+      ? ` · 整图扫描 ${sample.width}×${sample.height}`
       : '';
     themeSummaryEl.textContent = `${result.theme?.summary || `${result.roles.length} 个主题色`}${sampleSize}`;
-    themeSummaryEl.title = result.sample
-      ? `逐像素扫描整块选区，共分析 ${result.sample.validPixels} 个有效像素；提取色均来自原图真实像素`
+    themeSummaryEl.title = sample
+      ? `逐像素扫描整块选区，共分析 ${sample.valid_pixels} 个有效像素；提取色均来自原图真实像素`
       : '';
     themeSummaryEl.hidden = false;
   }
@@ -363,17 +219,21 @@ function renderPalette(result) {
   if (harmonyEl) {
     harmonyEl.hidden = false;
     renderRecommendedSchemes(result.recommended.filter((scheme) => scheme.scheme !== 'source'));
-
   }
   notifyPaletteLayoutChanged();
 }
 
 function updateCopyButtonLabel() {
-  if (!copyAllBtn) return;
   const count = ss.paletteSelected.size;
-  const label = copyAllBtn.querySelector('span');
-  if (label) label.textContent = count > 0 ? `复制 ${count} 色` : '复制多选';
-  copyAllBtn.disabled = count === 0;
+  // P1-3：操作行左侧——无选择显示"Ctrl + 单击可多选"，有选择显示数量
+  if (selectionHintEl) {
+    selectionHintEl.textContent = count > 0 ? `已选 ${count} 色` : 'Ctrl + 单击可多选';
+  }
+  if (copyAllBtn) {
+    const label = copyAllBtn.querySelector('span');
+    if (label) label.textContent = count > 0 ? `复制所选` : '复制所选';
+    copyAllBtn.disabled = count === 0;
+  }
 }
 
 function notifyPaletteLayoutChanged() {
@@ -420,7 +280,7 @@ function setAnnotationColor(hex) {
   if (dot) dot.style.background = hex;
   syncFromAnnot();
   updateGenerateButtonLabel();
-  if (ss.paletteMoreExpanded) renderGeneratedSchemes();
+  if (ss.paletteMoreExpanded) void renderGeneratedSchemes();
 }
 
 function updateGenerateButtonLabel() {
@@ -461,6 +321,62 @@ function bindPaletteColor(el, hex) {
 }
 
 /**
+ * P1-3：创建带下拉菜单的"复制整组"按钮。
+ * 左键直接按当前格式复制；右键或小箭头展开 list/css 模板菜单。
+ */
+function createCopyGroupBtn(scheme) {
+  const wrap = document.createElement('div');
+  wrap.className = 'dropdown-wrap palette-group-copy-wrap';
+
+  const btn = document.createElement('button');
+  btn.className = 'harmony-copy-group';
+  btn.textContent = '复制整组';
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    closeAllGroupMenus();
+    void copyScheme(scheme, btn);
+  });
+  btn.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    closeAllGroupMenus();
+    menuEl.dataset.open = 'true';
+  });
+  btn.addEventListener('mousedown', (e) => e.stopPropagation());
+
+  const menuEl = document.createElement('div');
+  menuEl.className = 'dropdown palette-group-copy-menu';
+  menuEl.dataset.open = 'false';
+  const modes = [
+    { mode: 'auto', label: '按当前格式' },
+    { mode: 'list', label: '每行一个' },
+    { mode: 'css', label: 'CSS 变量' },
+  ];
+  for (const m of modes) {
+    const item = document.createElement('button');
+    item.className = 'dropdown-item';
+    item.innerHTML = `<span class="item-label">${m.label}</span>`;
+    item.addEventListener('mousedown', (e) => e.stopPropagation());
+    item.addEventListener('click', (e) => {
+      e.stopPropagation();
+      menuEl.dataset.open = 'false';
+      void copyScheme(scheme, btn, m.mode);
+    });
+    menuEl.appendChild(item);
+  }
+
+  wrap.append(btn, menuEl);
+  return wrap;
+}
+
+/** P1-3：关闭所有已展开的"复制整组"下拉菜单。 */
+function closeAllGroupMenus() {
+  document.querySelectorAll('.palette-group-copy-menu[data-open="true"]').forEach((el) => {
+    el.dataset.open = 'false';
+  });
+}
+
+/**
  * 渲染角色色 swatch。
  * 每个色块：
  * - 左键 → 设为当前色 + 同步色盘
@@ -481,15 +397,8 @@ function renderRoleSwatches(roles) {
   const description = document.createElement('span');
   description.className = 'harmony-scheme-description';
   description.textContent = `原图聚类 · ${roles.length} 色`;
-  const copyGroupBtn = document.createElement('button');
-  copyGroupBtn.className = 'harmony-copy-group';
-  copyGroupBtn.textContent = '复制整组';
-  copyGroupBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    void copyScheme({ label: '图片主题色', colors: roles.map((role) => role.rgb) }, copyGroupBtn);
-  });
-  copyGroupBtn.addEventListener('mousedown', (e) => e.stopPropagation());
-  header.append(heading, description, copyGroupBtn);
+  const copyGroupWrap = createCopyGroupBtn({ label: '图片主题色', colors: roles.map((role) => role.rgb) });
+  header.append(heading, description, copyGroupWrap);
 
   const row = document.createElement('div');
   row.className = 'palette-theme-row';
@@ -531,13 +440,19 @@ function renderRecommendedSchemes(schemes) {
 
 /**
  * 渲染单个 harmony 方案。
- * @param {{label: string, scheme: string, colors: number[][]}} scheme
+ * @param {{label: string, scheme: string, colors: number[][], source_kind?: string, confidence?: number, description?: string}} scheme
  */
 function renderSingleHarmony(scheme, target = harmonySwatches) {
   if (!target) return;
 
   const card = document.createElement('section');
   card.className = 'harmony-scheme-card';
+
+  // P1-2：降级状态标记——confidence < 1.0 时显示降级指示
+  const isDegraded = typeof scheme.confidence === 'number' && scheme.confidence < 1.0;
+  if (isDegraded) {
+    card.classList.add('is-degraded');
+  }
 
   const header = document.createElement('div');
   header.className = 'harmony-scheme-header';
@@ -547,16 +462,17 @@ function renderSingleHarmony(scheme, target = harmonySwatches) {
   const description = document.createElement('span');
   description.className = 'harmony-scheme-description';
   description.textContent = scheme.description || '';
-  const copyGroupBtn = document.createElement('button');
-  copyGroupBtn.className = 'harmony-copy-group';
-  copyGroupBtn.textContent = '复制整组';
-  copyGroupBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    void copyScheme(scheme, copyGroupBtn);
-  });
-  copyGroupBtn.addEventListener('mousedown', (e) => e.stopPropagation());
-  header.append(label, description, copyGroupBtn);
+  const copyGroupWrap = createCopyGroupBtn(scheme);
+  header.append(label, description, copyGroupWrap);
   card.appendChild(header);
+
+  // 降级提示条
+  if (isDegraded) {
+    const notice = document.createElement('div');
+    notice.className = 'harmony-degraded-notice';
+    notice.textContent = '⚠ 未找到满足 WCAG 可读性约束的组合，已降级展示原图色';
+    card.appendChild(notice);
+  }
 
   // 色块行
   const row = document.createElement('div');
@@ -590,17 +506,20 @@ function renderFullSchemes(schemes, heading = '') {
   schemes.forEach((scheme) => renderSingleHarmony(scheme, moreSchemesEl));
 }
 
-function renderGeneratedSchemes() {
+async function renderGeneratedSchemes() {
   if (!ss.paletteAnchorHex || !ss.paletteResult) return;
-  const anchor = [
-    parseInt(ss.paletteAnchorHex.slice(1, 3), 16),
-    parseInt(ss.paletteAnchorHex.slice(3, 5), 16),
-    parseInt(ss.paletteAnchorHex.slice(5, 7), 16),
-  ];
   const sourceColors = ss.paletteResult.roles.map((role) => role.rgb);
-  const schemes = generateDesignPalettes(anchor, sourceColors);
-  renderFullSchemes(schemes, `基于 ${ss.paletteAnchorHex} 生成 · 非原图提取色`);
-  replacePaletteColorOrder(schemes);
+  try {
+    const schemes = await invoke('generate_palette_schemes', {
+      anchorHex: ss.paletteAnchorHex,
+      sourceColors,
+    });
+    renderFullSchemes(schemes, `基于 ${ss.paletteAnchorHex} 生成 · 非原图提取色`);
+    replacePaletteColorOrder(schemes);
+  } catch (err) {
+    console.warn('[palette] 生成配色方案失败:', err);
+    if (copyStatusEl) copyStatusEl.textContent = '生成配色方案失败';
+  }
 }
 
 // ── 复制 ──────────────────────────────────────────────────
@@ -630,18 +549,12 @@ async function copyToClipboard(text, feedbackEl) {
   }
 }
 
-function formatPaletteColors(hexColors) {
-  if (ss.paletteFormat === 'list') return hexColors.join('\n');
-  if (ss.paletteFormat !== 'css') return formatOutput(hexColors, ss.paletteFormat);
-
-  const roleByHex = new Map((ss.paletteResult?.roles || []).map((role) => [role.hex, role]));
-  const cssRoles = hexColors.map((hex, index) => (
-    roleByHex.get(hex) || { hex, role: `selected-${index + 1}` }
-  ));
-  return formatAsCssVariables(cssRoles);
+function formatPaletteColorsForUi(hexColors, mode) {
+  return formatPaletteColors(hexColors, mode, getColorFormat, ss.paletteResult?.roles);
 }
 
-async function copyScheme(scheme, feedbackEl) {
+/** P1-3：复制整组方案色。支持模式下拉菜单选择 list/css 模板。 */
+async function copyScheme(scheme, feedbackEl, mode) {
   const seen = new Set();
   const hexColors = [];
   for (const rgb of scheme.colors) {
@@ -650,20 +563,30 @@ async function copyScheme(scheme, feedbackEl) {
     seen.add(hex);
     hexColors.push(hex);
   }
-  const copied = await copyToClipboard(formatPaletteColors(hexColors), feedbackEl);
+  const fmt = mode || 'auto';
+  const text = fmt === 'list'
+    ? formatOutput(hexColors, 'list')
+    : formatPaletteColorsForUi(hexColors, fmt);
+  const copied = await copyToClipboard(text, feedbackEl);
   if (copied && copyStatusEl) {
-    copyStatusEl.textContent = `已复制“${scheme.label}”${hexColors.length} 色`;
+    const modeLabel = fmt === 'list' ? ' · 每行一个' : fmt === 'css' ? ' · CSS 变量' : '';
+    copyStatusEl.textContent = `已复制"${scheme.label}"${hexColors.length} 色${modeLabel}`;
   }
 }
 
-/** 复制 Ctrl+左键选中的任意主题色/方案色。 */
-async function copySelected() {
+/** P1-3：复制 Ctrl+左键选中的任意主题色/方案色。支持模式下拉菜单。 */
+async function copySelected(mode) {
   const hexColors = ss.paletteColorOrder.filter((hex) => ss.paletteSelected.has(hex));
   if (hexColors.length === 0) return;
 
-  const copied = await copyToClipboard(formatPaletteColors(hexColors), copyAllBtn);
+  const fmt = mode || 'auto';
+  const text = fmt === 'list'
+    ? formatOutput(hexColors, 'list')
+    : formatPaletteColorsForUi(hexColors, fmt);
+  const copied = await copyToClipboard(text, copyAllBtn);
   if (copied && copyStatusEl) {
-    copyStatusEl.textContent = `已复制 ${hexColors.length} 色 · ${ss.paletteFormat.toUpperCase()}`;
+    const modeLabel = fmt === 'list' ? ' · 每行一个' : fmt === 'css' ? ' · CSS 变量' : ` · ${getColorFormat().toUpperCase()}`;
+    copyStatusEl.textContent = `已复制 ${hexColors.length} 色${modeLabel}`;
   }
 }
 
@@ -681,12 +604,13 @@ export function initPalette() {
   harmonyEl = dropdown.querySelector('.palette-harmony');
   harmonySwatches = harmonyEl ? harmonyEl.querySelector('.harmony-swatches') : null;
   moreSchemesEl = dropdown.querySelector('.palette-more-schemes');
-  outputFormatSelect = dropdown.querySelector('.palette-output-format');
   copyAllBtn = dropdown.querySelector('.palette-copy-all');
   copyStatusEl = dropdown.querySelector('.palette-copy-status');
   themeSummaryEl = dropdown.querySelector('.palette-theme-summary');
   moreToggleEl = dropdown.querySelector('.palette-more-toggle');
   actionsRowEl = dropdown.querySelector('.palette-actions-row');
+  selectionHintEl = dropdown.querySelector('.palette-selection-hint');
+  copyMenuEl = dropdown.querySelector('.palette-copy-menu');
 
   dropdown.addEventListener('wheel', (e) => e.stopPropagation(), { passive: true });
 
@@ -698,22 +622,36 @@ export function initPalette() {
     extractBtn.addEventListener('mousedown', (e) => e.stopPropagation());
   }
 
-  // 输出格式选择
-  if (outputFormatSelect) {
-    outputFormatSelect.addEventListener('change', (e) => {
-      e.stopPropagation();
-      ss.paletteFormat = e.target.value;
-    });
-    outputFormatSelect.addEventListener('mousedown', (e) => e.stopPropagation());
-  }
-
-  // 复制按钮
+  // P1-3：复制按钮——左键直接按当前格式复制，不展开菜单
   if (copyAllBtn) {
     copyAllBtn.addEventListener('click', (e) => {
       e.stopPropagation();
+      // 如果菜单已展开，先关闭再复制
+      closeCopyMenu();
       void copySelected();
     });
     copyAllBtn.addEventListener('mousedown', (e) => e.stopPropagation());
+  }
+
+  // P1-3：复制模式下拉菜单
+  if (copyMenuEl) {
+    copyMenuEl.querySelectorAll('.dropdown-item').forEach((item) => {
+      item.addEventListener('mousedown', (e) => e.stopPropagation());
+      item.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const mode = item.dataset.copyMode;
+        closeCopyMenu();
+        void copySelected(mode);
+      });
+    });
+    // 点击外部关闭菜单
+    document.addEventListener('mousedown', (e) => {
+      if (copyMenuEl?.dataset.open === 'true' && !copyMenuEl.contains(e.target) && e.target !== copyAllBtn) {
+        closeCopyMenu();
+      }
+      // P1-3：关闭所有"复制整组"下拉菜单（点击外部时）
+      closeAllGroupMenus();
+    });
   }
 
   // 显式基准色的配色生成器展开/折叠
@@ -723,7 +661,7 @@ export function initPalette() {
       ss.paletteMoreExpanded = !ss.paletteMoreExpanded;
       updateGenerateButtonLabel();
       if (ss.paletteMoreExpanded && ss.paletteAnchorHex && moreSchemesEl) {
-        renderGeneratedSchemes();
+        void renderGeneratedSchemes();
         moreSchemesEl.hidden = false;
       } else if (moreSchemesEl) {
         moreSchemesEl.hidden = true;
@@ -733,7 +671,18 @@ export function initPalette() {
     });
     moreToggleEl.addEventListener('mousedown', (e) => e.stopPropagation());
   }
+}
 
-  // 预热 Worker（不阻塞 UI）
-  ensureWorker();
+/** P1-3：打开/关闭复制模式下拉菜单。 */
+function openCopyMenu() {
+  if (copyMenuEl) copyMenuEl.dataset.open = 'true';
+}
+
+function closeCopyMenu() {
+  if (copyMenuEl) copyMenuEl.dataset.open = 'false';
+}
+
+function toggleCopyMenu() {
+  if (!copyMenuEl) return;
+  copyMenuEl.dataset.open = copyMenuEl.dataset.open === 'true' ? 'false' : 'true';
 }

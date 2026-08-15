@@ -23,7 +23,9 @@
 //! - [`list_sticky`] — 列出活跃便签 → `Items`（0.19.3，sensitive=true）
 //! - [`read_sticky`] / [`update_sticky`] / [`trash_sticky`] / [`set_sticky_visibility`] — 便签生命周期闭环
 //! - [`pin_image`] — 将 PNG 图片钉到桌面 → `Done`（0.19.3）
+//! - [`analyze_image_palette`] — 分析图片配色方案 → `Text{JSON}`（0.20.7）
 
+pub mod analyze_image_palette;
 pub mod create_sticky;
 pub mod get_settings;
 pub mod image_input;
@@ -72,6 +74,14 @@ mod tests {
     fn phase_0_19_8_capabilities_are_in_inventory() {
         let registry = crate::domain::capability::CapabilityRegistry::new();
         for id in ["get_settings", "update_setting"] {
+            assert!(registry.get(id).is_some(), "{id} 应通过 inventory 注册");
+        }
+    }
+
+    #[test]
+    fn phase_0_20_7_capabilities_are_in_inventory() {
+        let registry = crate::domain::capability::CapabilityRegistry::new();
+        for id in ["analyze_image_palette"] {
             assert!(registry.get(id).is_some(), "{id} 应通过 inventory 注册");
         }
     }

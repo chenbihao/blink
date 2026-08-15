@@ -955,13 +955,13 @@ body.image-editor-mode #canvas.long-image-editing {
   display: block;
 }
 
-/* 0.15.8-fix：透明度条 */
+/* P1-3：透明度条——标准方形棋盘，最多 1px 微圆角，色相条可保留圆角 */
 .alpha-bar {
   width: 100%;
   height: 12px;
-  border-radius: var(--radius-xs);
+  border-radius: 1px;
   cursor: ew-resize;
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  border: 1px solid color-mix(in srgb, var(--text) 15%, transparent);
   display: block;
 }
 
@@ -982,6 +982,7 @@ body.image-editor-mode #canvas.long-image-editing {
   color: #ccc;
   font-size: 11px;
   font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-style: normal;
   padding: 3px 4px;
   border-radius: var(--radius-xs);
   cursor: pointer;
@@ -1144,18 +1145,35 @@ body.image-editor-mode #canvas.long-image-editing {
 
 /* ── 0.20.7：角色色、推荐方案、对比度、复制 UI ─────────────────── */
 
+/* P1-3：操作行——左提示/计数 + 右复制所选 */
 .palette-actions-row {
-  display: grid;
-  grid-template-columns: auto minmax(70px, 1fr) minmax(96px, auto);
+  display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 6px;
   margin-top: 7px;
 }
 
-.palette-format-label {
+.palette-selection-hint {
   color: var(--text-sub);
   font-size: 10px;
   font-style: normal;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.palette-copy-wrap {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.palette-copy-menu {
+  top: calc(100% + 2px);
+  right: 0;
+  left: auto;
+  min-width: 120px;
 }
 
 .palette-copy-all {
@@ -1200,25 +1218,7 @@ body.image-editor-mode #canvas.long-image-editing {
   white-space: nowrap;
 }
 
-.palette-output-format {
-  width: 100%;
-  min-width: 0;
-  height: 26px;
-  background: var(--bg-deep);
-  border: 1px solid color-mix(in srgb, var(--text) 16%, transparent);
-  color: var(--text);
-  font-size: 11px;
-  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-  padding: 3px 4px;
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  outline: none;
-}
 
-.palette-output-format option {
-  background: var(--bg);
-  color: var(--text);
-}
 
 .palette-empty {
   font-size: 11px;
@@ -1265,6 +1265,19 @@ body.image-editor-mode #canvas.long-image-editing {
   color: var(--accent);
 }
 
+/* P1-3：复制整组下拉菜单容器 */
+.palette-group-copy-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.palette-group-copy-menu {
+  top: calc(100% + 2px);
+  right: 0;
+  left: auto;
+  min-width: 100px;
+}
+
 .harmony-color-row {
   display: flex;
   flex-wrap: wrap;
@@ -1282,6 +1295,21 @@ body.image-editor-mode #canvas.long-image-editing {
   border: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
   border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--surface) 46%, transparent);
+}
+
+/* P1-2：智能搭配降级状态——边框 + 提示条 */
+.harmony-scheme-card.is-degraded {
+  border-color: color-mix(in srgb, var(--yellow) 40%, transparent);
+}
+
+.harmony-degraded-notice {
+  margin: 2px 0 4px;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--yellow) 12%, transparent);
+  color: var(--text-sub);
+  font-size: 10px;
+  line-height: 1.4;
 }
 
 /* 完整方案区域 */
