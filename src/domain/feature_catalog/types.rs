@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 // ── Feature 身份与分组 ───────────────────────────────────────────────────────
 
-/// 功能分组（§5.5 第 1 条：六组 + 其他插件能力）。
+/// 功能分组（六个功能域 + Chord 快捷入口 + 其他插件能力）。
 ///
 /// 序列化为 snake_case 字符串供前端 i18n key 或直接渲染。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
@@ -21,6 +21,9 @@ pub enum FeatureGroup {
     ImageColor,
     /// 便签与内容
     StickyContent,
+    /// Chord 快捷入口——无功能域归属的 chord 触发功能（语音输入 / AI 对话 /
+    /// 剪贴板历史）。编辑窗口、区域截图、钉为便签有明确功能域，留在功能组。
+    ChordEntry,
     /// 窗口与系统
     WindowSystem,
     /// Blink 管理与诊断
@@ -42,19 +45,21 @@ impl FeatureGroup {
                 Self::AppsFilesLinks
             }
 
-            // 剪贴板与文本
+            // 剪贴板与文本（编辑窗口编辑的是剪贴板/输入文本内容，归此组）
             "read_clipboard"
             | "write_clipboard"
             | "search_clipboard_history"
             | "read_clipboard_history_image"
-            | "list_clipboard_images" => Self::ClipboardText,
+            | "list_clipboard_images"
+            | "start_content_editor" => Self::ClipboardText,
 
-            // 图片与颜色
+            // 图片与颜色（贴图钉的是图片，归此组）
             "screenshot"
             | "ocr_image"
             | "analyze_image_palette"
             | "start_region_capture"
-            | "edit_clipboard_image" => Self::ImageColor,
+            | "edit_clipboard_image"
+            | "pin_image" => Self::ImageColor,
 
             // 便签与内容
             "list_sticky"
@@ -64,9 +69,11 @@ impl FeatureGroup {
             | "trash_sticky"
             | "set_sticky_geometry"
             | "set_sticky_visibility"
-            | "pin_image"
-            | "sticky_manager"
-            | "start_content_editor" => Self::StickyContent,
+            | "sticky_manager" => Self::StickyContent,
+
+            // Chord 快捷入口（AI 对话 / 剪贴板历史窗口；语音输入无 capability
+            // 由聚合器硬编码归此组）
+            "open_chat" | "open_clipboard_mode" => Self::ChordEntry,
 
             // 窗口与系统
             "list_windows" | "lock" | "shutdown" | "restart" | "sleep" => Self::WindowSystem,
@@ -80,9 +87,7 @@ impl FeatureGroup {
             | "blink_print_debug_info"
             | "blink_debug_inithook"
             | "get_settings"
-            | "update_setting"
-            | "open_chat"
-            | "open_clipboard_mode" => Self::BlinkManagement,
+            | "update_setting" => Self::BlinkManagement,
 
             _ => Self::OtherPlugin,
         }

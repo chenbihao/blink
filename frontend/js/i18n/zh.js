@@ -1102,6 +1102,7 @@ export const zh = {
     "capabilities.group.clipboard_text": "剪贴板与文本",
     "capabilities.group.image_color": "图片与颜色",
     "capabilities.group.sticky_content": "便签与内容",
+    "capabilities.group.chord_entry": "Chord 快捷入口",
     "capabilities.group.window_system": "窗口与系统",
     "capabilities.group.blink_management": "Blink 管理",
     "capabilities.group.other_plugin": "其他插件能力",

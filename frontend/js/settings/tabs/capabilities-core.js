@@ -21,6 +21,7 @@ export const GROUP_ORDER = [
     "clipboard_text",
     "image_color",
     "sticky_content",
+    "chord_entry",
     "window_system",
     "blink_management",
     "other_plugin",

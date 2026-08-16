@@ -1101,6 +1101,7 @@ export const en = {
     "capabilities.group.clipboard_text": "Clipboard & Text",
     "capabilities.group.image_color": "Image & Color",
     "capabilities.group.sticky_content": "Sticky & Content",
+    "capabilities.group.chord_entry": "Chord Shortcuts",
     "capabilities.group.window_system": "Window & System",
     "capabilities.group.blink_management": "Blink Management",
     "capabilities.group.other_plugin": "Other Plugin Capabilities",

@@ -36,6 +36,7 @@ assert.deepEqual(GROUP_ORDER, [
     "clipboard_text",
     "image_color",
     "sticky_content",
+    "chord_entry",
     "window_system",
     "blink_management",
     "other_plugin",
@@ -404,7 +405,7 @@ assert.doesNotMatch(capsSource, /feature\.sensitive\b/);
 assert.doesNotMatch(capsSource, /aiStatus\.(allowed|reason)/);
 
 // 组 i18n key 与后端 serde 值对齐
-for (const key of ["apps_files_links", "other_plugin"]) {
+for (const key of ["apps_files_links", "chord_entry", "other_plugin"]) {
     assert.ok(zh.includes(`"capabilities.group.${key}"`), `zh 缺少 capabilities.group.${key}`);
     assert.ok(en.includes(`"capabilities.group.${key}"`), `en 缺少 capabilities.group.${key}`);
 }

@@ -304,7 +304,7 @@ impl FeatureCatalogAggregator {
                     } else {
                         "语音交互（按住说话）".into()
                     },
-                    group: FeatureGroup::BlinkManagement,
+                    group: FeatureGroup::ChordEntry,
                     source: FeatureSource::Chord,
                     capability_id: None,
                     bindings: vec![binding_summary],
@@ -786,6 +786,24 @@ mod tests {
             FeatureGroup::infer_from_capability_id("create_sticky"),
             FeatureGroup::StickyContent
         );
+        // 分组修订：贴图归图片与颜色、编辑窗口归剪贴板与文本
+        assert_eq!(
+            FeatureGroup::infer_from_capability_id("pin_image"),
+            FeatureGroup::ImageColor
+        );
+        assert_eq!(
+            FeatureGroup::infer_from_capability_id("start_content_editor"),
+            FeatureGroup::ClipboardText
+        );
+        // 分组修订：chord 快捷入口独立成组
+        assert_eq!(
+            FeatureGroup::infer_from_capability_id("open_chat"),
+            FeatureGroup::ChordEntry
+        );
+        assert_eq!(
+            FeatureGroup::infer_from_capability_id("open_clipboard_mode"),
+            FeatureGroup::ChordEntry
+        );
         assert_eq!(
             FeatureGroup::infer_from_capability_id("lock"),
             FeatureGroup::WindowSystem
@@ -1196,7 +1214,7 @@ mod tests {
 
         assert_eq!(voice_item.source, FeatureSource::Chord);
         assert!(voice_item.capability_id.is_none());
-        assert_eq!(voice_item.group, FeatureGroup::BlinkManagement);
+        assert_eq!(voice_item.group, FeatureGroup::ChordEntry);
         assert_eq!(voice_item.local_availability, LocalAvailability::Available);
     }
 

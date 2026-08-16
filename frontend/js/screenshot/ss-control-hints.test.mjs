@@ -221,7 +221,7 @@ class ControlHintsSimulator {
     }
 
     ensureListener() {
-        if (this.listenerCallback)
+        if (this.listenerCallback) return;
         // Simulated listener
     }
 
