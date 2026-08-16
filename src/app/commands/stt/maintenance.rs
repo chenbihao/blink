@@ -46,7 +46,7 @@ pub async fn setup_python_env(app: tauri::AppHandle) -> Result<(), String> {
 
     // 进度回调：转发到前端 blink://python-env-progress
     let app_progress = app.clone();
-    let on_progress: std::sync::Arc<dyn Fn(&str, &str) + Send + Sync> =
+    let on_progress: crate::infra::platform::python::ProgressCallback =
         std::sync::Arc::new(move |stage, status| {
             let _ = app_progress.emit(
                 EventNames::PYTHON_ENV_PROGRESS,
@@ -774,17 +774,17 @@ pub async fn get_stt_space_usage() -> serde_json::Value {
     }
 
     // 旧版残留：~/.cache/modelscope（可能存在历史下载）
-    if let Some(legacy_dir) = &legacy_modelscope_cache {
-        if legacy_dir.exists() {
-            let size = dir_size_bytes(legacy_dir);
-            if size > 0 {
-                total_bytes += size;
-                items.push(serde_json::json!({
-                    "label": "旧版模型缓存残留 (ModelScope 默认路径)",
-                    "path": legacy_dir.display().to_string(),
-                    "size_mb": bytes_to_mb(size),
-                }));
-            }
+    if let Some(legacy_dir) = &legacy_modelscope_cache
+        && legacy_dir.exists()
+    {
+        let size = dir_size_bytes(legacy_dir);
+        if size > 0 {
+            total_bytes += size;
+            items.push(serde_json::json!({
+                "label": "旧版模型缓存残留 (ModelScope 默认路径)",
+                "path": legacy_dir.display().to_string(),
+                "size_mb": bytes_to_mb(size),
+            }));
         }
     }
 
@@ -843,13 +843,13 @@ pub async fn cleanup_stt_space() -> Result<(), String> {
     }
 
     // 清理旧版残留：~/.cache/modelscope
-    if let Some(legacy_dir) = dirs_next::home_dir().map(|h| h.join(".cache").join("modelscope")) {
-        if legacy_dir.exists() {
-            tracing::info!(path = %legacy_dir.display(), "清理旧版模型缓存残留");
-            if let Err(e) = std::fs::remove_dir_all(&legacy_dir) {
-                // 旧版残留清理失败不阻断（可能被其他程序占用）
-                tracing::warn!(%e, "清理旧版模型缓存残留失败（不阻断）");
-            }
+    if let Some(legacy_dir) = dirs_next::home_dir().map(|h| h.join(".cache").join("modelscope"))
+        && legacy_dir.exists()
+    {
+        tracing::info!(path = %legacy_dir.display(), "清理旧版模型缓存残留");
+        if let Err(e) = std::fs::remove_dir_all(&legacy_dir) {
+            // 旧版残留清理失败不阻断（可能被其他程序占用）
+            tracing::warn!(%e, "清理旧版模型缓存残留失败（不阻断）");
         }
     }
 

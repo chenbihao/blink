@@ -217,7 +217,7 @@ impl SearchEngine for ClipboardEngine {
         for item in image_items {
             combined.push((item.created_at, ClipboardEntry::Image(item)));
         }
-        combined.sort_by(|a, b| b.0.cmp(&a.0));
+        combined.sort_by_key(|x| std::cmp::Reverse(x.0));
 
         let combined_len_before_take = combined.len();
         let result: Vec<SearchItem> = combined
@@ -331,14 +331,14 @@ fn to_image_search_item(meta: ClipboardImageListItem, index: usize, lang: &str) 
 /// **不改 DB schema、不改前端契约**——映射纯在展示层完成。
 fn resolve_source_desc(source_app: Option<&str>, is_zh: bool) -> String {
     match source_app {
-        Some(s) if s == "blink:screenshot" => {
+        Some("blink:screenshot") => {
             if is_zh {
                 "截图".to_string()
             } else {
                 "Screenshot".to_string()
             }
         }
-        Some(s) if s == "blink:repost" => {
+        Some("blink:repost") => {
             // 历史回贴 skip_persist=true 不会入库，此处仅防御
             if is_zh {
                 "回贴".to_string()
@@ -346,14 +346,8 @@ fn resolve_source_desc(source_app: Option<&str>, is_zh: bool) -> String {
                 "Repost".to_string()
             }
         }
-        Some(s) if s == "blink:app" => "Blink".to_string(),
-        Some(s) if s == "blink:ai" => {
-            if is_zh {
-                "AI".to_string()
-            } else {
-                "AI".to_string()
-            }
-        }
+        Some("blink:app") => "Blink".to_string(),
+        Some("blink:ai") => "AI".to_string(),
         Some(s) if !s.is_empty() => s.to_string(),
         _ => {
             if is_zh {
@@ -521,7 +515,7 @@ fn fuzzy_match_metas(metas: &[ClipboardMeta], query: &str, limit: usize) -> Vec<
         })
         .collect();
 
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by_key(|x| std::cmp::Reverse(x.0));
     scored
         .into_iter()
         .take(limit)

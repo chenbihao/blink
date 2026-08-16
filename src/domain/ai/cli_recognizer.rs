@@ -372,13 +372,13 @@ pub async fn recognize_cli(cli_path: &str) -> Result<CliRecognitionResult, Strin
         .ok()
         .and_then(|p| std::fs::canonicalize(p).ok());
     let target_canon = std::fs::canonicalize(path).ok();
-    if let (Some(self_e), Some(tgt)) = (self_exe.as_ref(), target_canon.as_ref()) {
-        if self_e == tgt {
-            return Err(
-                "不支持识别 Blink 自身（会触发单实例冲突并唤起主窗口）。请选择其他 CLI 工具。"
-                    .to_string(),
-            );
-        }
+    if let (Some(self_e), Some(tgt)) = (self_exe.as_ref(), target_canon.as_ref())
+        && self_e == tgt
+    {
+        return Err(
+            "不支持识别 Blink 自身（会触发单实例冲突并唤起主窗口）。请选择其他 CLI 工具。"
+                .to_string(),
+        );
     }
 
     // 从文件名提取工具名

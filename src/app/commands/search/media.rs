@@ -662,16 +662,16 @@ pub fn screenshot_pin_transform(
     win_h: u32,
 ) -> Result<(), String> {
     use windows::Win32::Foundation::HWND;
-    if let Some(win) = app.get_webview_window(&label) {
-        if let Ok(hwnd) = win.hwnd() {
-            crate::infra::platform::window::place_at_physical(
-                HWND(hwnd.0 as _),
-                win_x,
-                win_y,
-                win_w,
-                win_h,
-            );
-        }
+    if let Some(win) = app.get_webview_window(&label)
+        && let Ok(hwnd) = win.hwnd()
+    {
+        crate::infra::platform::window::place_at_physical(
+            HWND(hwnd.0 as _),
+            win_x,
+            win_y,
+            win_w,
+            win_h,
+        );
     }
     Ok(())
 }
@@ -694,19 +694,19 @@ pub fn screenshot_pin_move(
     use windows::Win32::UI::WindowsAndMessaging::{
         SET_WINDOW_POS_FLAGS, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
     };
-    if let Some(win) = app.get_webview_window(&label) {
-        if let Ok(hwnd) = win.hwnd() {
-            unsafe {
-                let _ = SetWindowPos(
-                    HWND(hwnd.0 as _),
-                    None,
-                    win_x,
-                    win_y,
-                    0,
-                    0,
-                    SET_WINDOW_POS_FLAGS(SWP_NOSIZE.0 | SWP_NOZORDER.0 | SWP_NOACTIVATE.0),
-                );
-            }
+    if let Some(win) = app.get_webview_window(&label)
+        && let Ok(hwnd) = win.hwnd()
+    {
+        unsafe {
+            let _ = SetWindowPos(
+                HWND(hwnd.0 as _),
+                None,
+                win_x,
+                win_y,
+                0,
+                0,
+                SET_WINDOW_POS_FLAGS(SWP_NOSIZE.0 | SWP_NOZORDER.0 | SWP_NOACTIVATE.0),
+            );
         }
     }
     Ok(())
@@ -1590,7 +1590,7 @@ pub fn screenshot_set_capture_exclusion(
     };
     let ok = unsafe { SetWindowDisplayAffinity(target, affinity) };
     if ok.is_err() {
-        return Err(format!("SetWindowDisplayAffinity 失败"));
+        return Err("SetWindowDisplayAffinity 失败".to_string());
     }
     tracing::debug!(exclude, "overlay 捕获排除已设置");
     Ok(())
@@ -1683,6 +1683,7 @@ pub fn screenshot_cursor_position() -> Result<serde_json::Value, String> {
 ///
 /// `delta` 为 wheel delta（正值向上滚，负值向下滚），标准 120 为一格。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn screenshot_forward_wheel(
     app: tauri::AppHandle,
     hwnd: Option<isize>,

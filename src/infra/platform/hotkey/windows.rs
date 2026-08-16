@@ -73,8 +73,8 @@ static WND_HWND: std::sync::OnceLock<isize> = std::sync::OnceLock::new();
 thread_local! {
     static INPUT_STATE: std::cell::RefCell<Option<InputState>> = const { std::cell::RefCell::new(None) };
     static HOLD_TIMER: std::cell::Cell<Option<HoldTimerState>> = const { std::cell::Cell::new(None) };
-    static HHOOK_SLOT: std::cell::RefCell<Option<HHOOK>> = std::cell::RefCell::new(None);
-    static REINSTALL_STATE: std::cell::RefCell<ReinstallState> = std::cell::RefCell::new(ReinstallState::new());
+    static HHOOK_SLOT: std::cell::RefCell<Option<HHOOK>> = const { std::cell::RefCell::new(None) };
+    static REINSTALL_STATE: std::cell::RefCell<ReinstallState> = const { std::cell::RefCell::new(ReinstallState::new()) };
     static WTS_REGISTERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static RAW_REGISTERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -297,39 +297,33 @@ fn raw_keyboard_to_modifier(kb: &RAWKEYBOARD, device_id: usize) -> Option<Normal
     let key = if e1 {
         // E1 仅用于 Pause 键，不是修饰键
         return None;
-    } else if vk == VK_LCONTROL.0 as u16 && e0 {
+    } else if vk == VK_LCONTROL.0 && e0 {
         ModifierKey::RCtrl
-    } else if vk == VK_LCONTROL.0 as u16 {
+    } else if vk == VK_LCONTROL.0 {
         ModifierKey::LCtrl
-    } else if vk == VK_RCONTROL.0 as u16 {
+    } else if vk == VK_RCONTROL.0 || (vk == VK_CONTROL.0 && e0) {
         ModifierKey::RCtrl
-    } else if vk == VK_CONTROL.0 as u16 && e0 {
-        ModifierKey::RCtrl
-    } else if vk == VK_CONTROL.0 as u16 {
+    } else if vk == VK_CONTROL.0 {
         ModifierKey::LCtrl
-    } else if vk == VK_LSHIFT.0 as u16 && e0 {
+    } else if vk == VK_LSHIFT.0 && e0 {
         ModifierKey::RShift
-    } else if vk == VK_LSHIFT.0 as u16 {
+    } else if vk == VK_LSHIFT.0 {
         ModifierKey::LShift
-    } else if vk == VK_RSHIFT.0 as u16 {
+    } else if vk == VK_RSHIFT.0 || (vk == VK_SHIFT.0 && e0) {
         ModifierKey::RShift
-    } else if vk == VK_SHIFT.0 as u16 && e0 {
-        ModifierKey::RShift
-    } else if vk == VK_SHIFT.0 as u16 {
+    } else if vk == VK_SHIFT.0 {
         ModifierKey::LShift
-    } else if vk == VK_LMENU.0 as u16 && e0 {
+    } else if vk == VK_LMENU.0 && e0 {
         ModifierKey::RAlt
-    } else if vk == VK_LMENU.0 as u16 {
+    } else if vk == VK_LMENU.0 {
         ModifierKey::LAlt
-    } else if vk == VK_RMENU.0 as u16 {
+    } else if vk == VK_RMENU.0 || (vk == VK_MENU.0 && e0) {
         ModifierKey::RAlt
-    } else if vk == VK_MENU.0 as u16 && e0 {
-        ModifierKey::RAlt
-    } else if vk == VK_MENU.0 as u16 {
+    } else if vk == VK_MENU.0 {
         ModifierKey::LAlt
-    } else if vk == VK_LWIN.0 as u16 {
+    } else if vk == VK_LWIN.0 {
         ModifierKey::LMeta
-    } else if vk == VK_RWIN.0 as u16 {
+    } else if vk == VK_RWIN.0 {
         ModifierKey::RMeta
     } else {
         return None; // 非修饰键，Raw Input 不进 reducer
@@ -589,13 +583,11 @@ fn try_reinstall_if_safe() {
     // 1. 检查 pending 和退避期
     let reason = REINSTALL_STATE.with(|s| {
         let s = s.borrow();
-        if s.pending_reason.is_none() {
-            return None;
-        }
-        if let Some(t) = s.next_retry_at {
-            if Instant::now() < t {
-                return None; // 退避期内，等待 retry timer
-            }
+        s.pending_reason?;
+        if let Some(t) = s.next_retry_at
+            && Instant::now() < t
+        {
+            return None; // 退避期内，等待 retry timer
         }
         s.pending_reason
     });
@@ -844,7 +836,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_TIMER => {
-            let id = wparam.0 as usize;
+            let id = wparam.0;
             match id {
                 TIMER_ID_HEARTBEAT => {
                     tracing::trace!("Heartbeat timer fired");

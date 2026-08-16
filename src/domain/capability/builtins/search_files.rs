@@ -69,7 +69,6 @@ impl Capability for SearchFiles {
                 "required": ["query"]
             }),
             sensitive: true, // 0.21.1 §4.1b：对齐 search_apps 隐私语义
-            ..Default::default()
         }
     }
 

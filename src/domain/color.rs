@@ -216,8 +216,7 @@ fn parse_rgb_like(s: &str) -> Option<Rgba8> {
 /// 解析 rgb 通道值：整数 0-255 或百分比 0%-100%
 fn parse_channel(s: &str) -> Option<f64> {
     let s = s.trim();
-    if s.ends_with('%') {
-        let pct_str = &s[..s.len() - 1];
+    if let Some(pct_str) = s.strip_suffix('%') {
         let pct: f64 = pct_str.parse().ok()?;
         if !(0.0..=100.0).contains(&pct) {
             return None; // 非法百分比
@@ -283,15 +282,11 @@ fn parse_hue(s: &str) -> Option<f64> {
 /// 解析百分比通道（如 "50%"），返回 0-100 浮点
 fn parse_percent(s: &str) -> Option<f64> {
     let s = s.trim();
-    if s.ends_with('%') {
-        let pct: f64 = s[..s.len() - 1].parse().ok()?;
-        if !(0.0..=100.0).contains(&pct) {
-            return None;
-        }
-        Some(pct)
-    } else {
-        None
+    let pct: f64 = s.strip_suffix('%')?.parse().ok()?;
+    if !(0.0..=100.0).contains(&pct) {
+        return None;
     }
+    Some(pct)
 }
 
 // ── 函数参数提取 ─────────────────────────────────────────────────────────
@@ -465,8 +460,8 @@ fn rgb_to_hsl(r: u8, g: u8, b: u8) -> (i32, f64, f64) {
     let h_int = h_int % 360;
 
     // s 和 l 保留 1 位小数，half-away-from-zero 舍入
-    let s_pct = (round_half_away(s * 1000.0) / 10.0) as f64;
-    let l_pct = (round_half_away(l * 1000.0) / 10.0) as f64;
+    let s_pct = round_half_away(s * 1000.0) / 10.0;
+    let l_pct = round_half_away(l * 1000.0) / 10.0;
 
     (h_int, s_pct, l_pct)
 }

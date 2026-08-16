@@ -52,10 +52,7 @@ pub fn is_url(s: &str) -> bool {
     };
 
     // host 段 = `://` 后到第一个 `/`、`?`、`#` 之前
-    let host = rest
-        .split(|c| c == '/' || c == '?' || c == '#')
-        .next()
-        .unwrap_or("");
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
 
     if host.is_empty() {
         return false; // http:// 光溜溜
@@ -345,7 +342,7 @@ fn is_short_json(s: &str) -> bool {
     }
     // 粗略校验：引号数量为偶数
     let quote_count = s.matches('"').count();
-    quote_count % 2 == 0
+    quote_count.is_multiple_of(2)
 }
 
 /// 判断文本是否为命令参数（0.20.0）。
@@ -561,11 +558,7 @@ pub fn needs_translation(s: &str, target: &str) -> bool {
     // 护栏 6：多行 URL / 路径列表（首行判定）——多行文本 is_url 因 whitespace 恒 false，
     // 首行是链接的场景（"复制多个链接"）不该被翻译。
     if s.contains('\n') || s.contains('\r') {
-        let first = s
-            .split(|c| c == '\n' || c == '\r')
-            .next()
-            .unwrap_or("")
-            .trim();
+        let first = s.split(['\n', '\r']).next().unwrap_or("").trim();
         if is_url(first) || is_file_path(first) {
             return false;
         }

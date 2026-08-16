@@ -43,6 +43,7 @@ pub enum SearchAction {
     ///
     /// **动机**：剪贴板历史可达 500 条候选 × 长 text（数十 KB/条），搜索路径全量预载
     /// + `into_app_entry` 三序列化(Copy payload + edit runArg + pin runArg)导致 MB 级 JSON。
+    ///
     /// LazyCopy 切断搜索路径与 text 的耦合，将延迟从 ~467ms 降到 <100ms。
     LazyCopy { hit_id: String },
     /// 运行内置动作（0.8.0 §1.3）：`id` 为动作注册表 key，`arg` 为参数（可选）。

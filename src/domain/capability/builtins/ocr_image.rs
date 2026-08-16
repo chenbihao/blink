@@ -42,7 +42,6 @@ impl Capability for OcrImage {
                 }
             }),
             sensitive: true, // 0.21.1 §4.1b：识图输出用户内容，对齐 analyze_image_palette
-            ..Default::default()
         }
     }
 

@@ -74,8 +74,7 @@ impl ProviderFactory for RigFactory {
     ) -> Result<Arc<dyn AIProvider>, AIError> {
         // 1. 读密钥——本地 provider (ollama) 不需要密钥,跳过。
         //    云端 provider 缺密钥 = SecretMissing（区别于 NotConfigured 档位悬空）。
-        let key_str: String;
-        if entry.kind.requires_secret() {
+        let key_str: String = if entry.kind.requires_secret() {
             let key = secret::load_secret(&entry.id, "key").map_err(|e| {
                 tracing::debug!(
                     target: crate::infra::utils::perf::ai_slo::TARGET,
@@ -84,7 +83,7 @@ impl ProviderFactory for RigFactory {
                 );
                 AIError::SecretMissing(entry.display_name.clone())
             })?;
-            key_str = expose_for_rig(&key);
+            expose_for_rig(&key)
         } else {
             // 本地 provider 无需密钥——ollama 等
             tracing::debug!(
@@ -92,8 +91,8 @@ impl ProviderFactory for RigFactory {
                 "AI factory: {} 本地 provider,跳过密钥加载",
                 entry.display_name,
             );
-            key_str = String::new(); // 空字符串,rig ollama client 不使用
-        }
+            String::new() // 空字符串,rig ollama client 不使用
+        };
         // key 在此作用域内保留,rig builder 需要 &str;函数返回时 key 出栈 → zeroize
 
         // 2. 按协议分派构造 —— 每 arm 独立返回 Arc<dyn AIProvider>

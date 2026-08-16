@@ -483,8 +483,8 @@ fn strip_leading_md_prefix(s: &str) -> String {
         return rest.trim_start().to_string();
     }
     // 引用 >
-    if trimmed.starts_with('>') {
-        return trimmed[1..].trim_start().to_string();
+    if let Some(rest) = trimmed.strip_prefix('>') {
+        return rest.trim_start().to_string();
     }
     // 任务列表 - [ ] / - [x]（先于无序列表检查，因为也以 - 开头）
     if let Some(rest) = strip_task_list(trimmed) {

@@ -48,13 +48,13 @@
 | **0.11** | [0.11-plugin-ai-toolchain.md](./phases/0.11-plugin-ai-toolchain.md) | 插件通信契约重设计 + AI toolchain + 截图标注 + OCR word 级 + 图上翻译 | ✅ |
 | **0.12** | [0.12-ai-ecosystem.md](./phases/0.12-ai-ecosystem.md) | AI 能力架构(对话窗口 + Alt+Q + DB 四层 + Provider 统一 + 多对话 + 分组) | ✅ |
 | **0.13** | [0.13-ai-capability-expansion.md](./phases/0.13-ai-capability-expansion.md) | 能力扩展(MCP 双向 + CLI + token 压缩 + 记忆 FTS5 + Skill) | ✅ |
-| **0.14** | [0.14-capability-protocol-refactor.md](./phases/0.14-capability-protocol-refactor.md) | 能力协议与架构收敛（删除 ActionTool + Cap 协议/投影 + 分层清理；当时保留的本地 Action 双轨由 0.21 承接） | 🚧 |
+| **0.14** | [0.14-capability-protocol-refactor.md](./phases/0.14-capability-protocol-refactor.md) | 能力协议与架构收敛（删除 ActionTool + Cap 协议/投影 + 分层清理；当时保留的本地 Action 双轨由 0.21 承接） | ✅ |
 | **0.15** | [0.15-screenshot-redesign.md](./phases/0.15-screenshot-redesign.md) | 截图体验重做（标注工具 + 长截图闭环采集 + 窗口吸附与像素检查） | ✅ |
 | **0.16** | [0.16-clipboard-polish.md](./phases/0.16-clipboard-polish.md) | 感知交互清爽化 + chord requires_input 架构 + 剪贴板增强 + actions 数组 + 共享 Markdown + 通用编辑器基础 + 图片/pin + 杂项打磨 + 内容流转 + chord-E/chord-S + 持久化桌面便签 + 管理与恢复 | ✅ |
 | **0.17** | [0.17-enhancement-polish.md](./phases/0.17-enhancement-polish.md) | 增强与打磨（存量修复 / 窗口预热 / 托盘增强 / 搜索增强 / OCR 优化 / Cherry Markdown / 主窗口 AI 统一 / 便签深化 / Live Preview / AI 权限记忆 / 剪贴板来源增强 / Capability 投影层收敛重构（projection 移出 invoke 回归展示出口 / ip + weather 插件对齐 / weather 多天预报） | ✅ |
-| **0.18** | [0.18-enhancement-chord.md](./phases/0.18-enhancement-chord.md) | 增强与 Chord 体验（存量修复 / 截图 / 便签 IR / 托盘 / 命令执行 / 输入状态流转重构 / 截图多屏 DPI 收敛） | 🚧 0.18.0~0.18.8 完成 |
-| **0.19** | [0.19-capability-closure.md](./phases/0.19-capability-closure.md) | 能力闭环（便签/文本真实闭环 / 行为一致性 / 图片编辑解耦 / 自然语言设置 / AI 设置与纯对话 / MCP 生命周期） | 🚧 0.19.1~0.19.4 完成；0.19.5~0.19.11 已规划 |
-| **0.20** | [0.20-content-visual-workflow.md](./phases/0.20-content-visual-workflow.md) | 高频内容与视觉工作流（便签可靠性 / 剪贴板多选 / 颜色 / 图片编辑 / 截图性能与精调） | 📋 规划中 |
+| **0.18** | [0.18-enhancement-chord.md](./phases/0.18-enhancement-chord.md) | 增强与 Chord 体验（存量修复 / 截图 / 便签 IR / 托盘 / 命令执行 / 输入状态流转重构 / 截图多屏 DPI 收敛） | ✅ |
+| **0.19** | [0.19-capability-closure.md](./phases/0.19-capability-closure.md) | 能力闭环（便签/文本真实闭环 / 行为一致性 / 图片编辑解耦 / 自然语言设置 / AI 设置与纯对话 / MCP 生命周期） | ✅ |
+| **0.20** | [0.20-content-visual-workflow.md](./phases/0.20-content-visual-workflow.md) | 高频内容与视觉工作流（便签可靠性 / 剪贴板多选 / 颜色 / 图片编辑 / 截图性能与精调） | ✅ |
 | **0.21** | [0.21-capability-unification-feature-catalog.md](./phases/0.21-capability-unification-feature-catalog.md) | Capability 唯一执行入口、Action 全量分流、功能目录及 AI/MCP 出口策略 | ✅ |
 
 > **非版本档案**：[roadmap.md](./roadmap.md)（近期优先、条件候选与远期观察；不预占版本号）；ADR-001（Agent 后端策略）已并入 [spec-architecture §A10](./specs/spec-architecture.md)。

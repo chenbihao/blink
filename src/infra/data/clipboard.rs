@@ -116,7 +116,7 @@ pub fn migrate_display_count_to_pages(display_count: u32, page_size: u32) -> u32
     // 扩大到 u64 做加法，避免溢出
     let count = display_count as u64;
     let size = page_size as u64;
-    let pages = (count + size - 1) / size; // ceil
+    let pages = count.div_ceil(size); // ceil
     // 钳制到 u32 范围再 clamp 到合法区间
     let pages = pages.min(u32::MAX as u64) as u32;
     pages.clamp(DISPLAY_PAGES_MIN, DISPLAY_PAGES_MAX)
@@ -459,7 +459,7 @@ pub async fn search(pool: &SqlitePool, query: &str, limit: i64) -> Vec<Clipboard
         })
         .collect();
 
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by_key(|x| std::cmp::Reverse(x.0));
     scored
         .into_iter()
         .take(limit as usize)

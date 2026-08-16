@@ -241,7 +241,7 @@ impl Capability for ClearHistory {
         ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError> {
         let pool = &ctx.env.db_pools().history;
-        crate::infra::data::history::clear(&pool).await;
+        crate::infra::data::history::clear(pool).await;
         tracing::info!("搜索历史已清空");
         Ok(CapabilityResult::Done {
             summary: "搜索历史已清空".into(),

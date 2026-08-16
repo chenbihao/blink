@@ -69,7 +69,7 @@ fn scan_dir(dir: &PathBuf, entries: &mut Vec<AppEntry>, max_depth: u32, current_
         let path = entry.path();
         if path.is_dir() {
             scan_dir(&path, entries, max_depth, current_depth + 1);
-        } else if path.extension().map_or(false, |ext| ext == "lnk") {
+        } else if path.extension().is_some_and(|ext| ext == "lnk") {
             let name = path
                 .file_stem()
                 .and_then(|s| s.to_str())

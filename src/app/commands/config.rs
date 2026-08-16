@@ -7,7 +7,7 @@ use tauri::{Emitter, Manager};
 #[tauri::command]
 pub async fn get_config(app: tauri::AppHandle) -> crate::app::config::AppConfig {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
-    crate::app::config::get_config(&pool).await
+    crate::app::config::get_config(pool).await
 }
 
 /// 泛型配置写入（0.8.6 P1-C 前端泛型化）。
@@ -41,7 +41,7 @@ pub async fn set_config(
         // ── 单值字段（直接解析） ──────────────────────────────────────────
         "language" => {
             let language: String = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::update_language(&pool, language.clone()).await?;
+            crate::app::config::update_language(pool, language.clone()).await?;
             if let Some(ss) =
                 app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
             {
@@ -55,19 +55,19 @@ pub async fn set_config(
         }
         "log_level" => {
             let level: String = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::update_log_level(&pool, level.clone()).await?;
+            crate::app::config::update_log_level(pool, level.clone()).await?;
             crate::infra::utils::logging::update_level(&level);
             tracing::info!(%level, "日志级别已切换");
         }
         "ai_verbose_log" => {
             let verbose: bool = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::update_ai_verbose_log(&pool, verbose).await?;
+            crate::app::config::update_ai_verbose_log(pool, verbose).await?;
             crate::infra::utils::logging::update_ai_verbose_log(verbose);
             tracing::info!(verbose, "AI 详细日志开关已切换");
         }
         "auto_start" => {
             let auto_start: bool = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::update_auto_start(&pool, auto_start).await?;
+            crate::app::config::update_auto_start(pool, auto_start).await?;
             // dev 模式跳过注册表写入（原因同 main.rs 启动同步逻辑）：
             // current_exe() 是 debug 构建（console 子系统），写入 Run 键后开机弹控制台。
             // 配置 DB 仍正常记录偏好，release 下 set_config 才真正写注册表。
@@ -85,18 +85,18 @@ pub async fn set_config(
         // 0.17.3：首次启动标记（引导窗口"开始使用"或关闭时设为 false）
         "first_run" => {
             let first_run: bool = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::update_first_run(&pool, first_run).await?;
+            crate::app::config::update_first_run(pool, first_run).await?;
             tracing::info!(first_run, "首次启动标记已更新");
         }
         "tap_threshold" => {
             let threshold: u64 = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::update_tap_threshold(&pool, threshold).await?;
+            crate::app::config::update_tap_threshold(pool, threshold).await?;
             crate::app::config::refresh_input_config(&app).await;
             tracing::debug!(threshold, "tap 阈值已更新");
         }
         "grace_period" => {
             let period: u64 = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::update_grace_period(&pool, period).await?;
+            crate::app::config::update_grace_period(pool, period).await?;
             crate::infra::platform::window::update_grace_period(period);
             tracing::debug!(period, "grace period 已更新");
         }
@@ -104,7 +104,7 @@ pub async fn set_config(
             let enabled: bool = serde_json::from_value(value).map_err(|e| e.to_string())?;
             let mut clip_cfg = crate::app::config::ConfigStore::get::<
                 crate::infra::data::clipboard::ClipboardConfig,
-            >(&pool)
+            >(pool)
             .await;
             clip_cfg.enabled = enabled;
             crate::app::setting_service::apply_clipboard(&app, &clip_cfg).await?;
@@ -115,7 +115,7 @@ pub async fn set_config(
         "hotkey" => {
             let hotkey: crate::app::config::HotkeyConfig =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::update_hotkey(&pool, hotkey.clone()).await?;
+            crate::app::config::update_hotkey(pool, hotkey.clone()).await?;
             crate::app::config::refresh_input_config(&app).await;
             tracing::info!(display = %hotkey.display, "全局热键已更新");
         }
@@ -141,7 +141,7 @@ pub async fn set_config(
         "chord_toggles" => {
             let v: crate::app::config::ChordTogglesUpdate =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::update_chord_toggles(&pool, v.chord_enabled, v.chord_hint_visible)
+            crate::app::config::update_chord_toggles(pool, v.chord_enabled, v.chord_hint_visible)
                 .await?;
             crate::app::config::refresh_input_config(&app).await;
             let _ = app.emit(EventNames::CONFIG_CHANGED, ());
@@ -151,7 +151,7 @@ pub async fn set_config(
             // chord 键位绑定（设置页改键用）
             let bindings: crate::domain::chord::ChordBindings =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::update_chord_bindings(&pool, bindings.clone()).await?;
+            crate::app::config::update_chord_bindings(pool, bindings.clone()).await?;
             crate::app::config::refresh_input_config(&app).await;
             let _ = app.emit(EventNames::CONFIG_CHANGED, ());
             tracing::info!("Chord 键位绑定已更新");
@@ -174,7 +174,7 @@ pub async fn set_config(
         // ── Disable 列表 ──────────────────────────────────────────────────
         "disabled_builtin_actions" => {
             let disabled: Vec<String> = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::update_disabled_builtin_actions(&pool, disabled.clone()).await?;
+            crate::app::config::update_disabled_builtin_actions(pool, disabled.clone()).await?;
             let search_service =
                 app.state::<std::sync::Arc<crate::domain::search::SearchService>>();
             search_service.update_disabled_builtin_actions(disabled.clone());
@@ -182,7 +182,7 @@ pub async fn set_config(
         }
         "disabled_context_bindings" => {
             let disabled: Vec<String> = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::update_disabled_context_bindings(&pool, disabled.clone()).await?;
+            crate::app::config::update_disabled_context_bindings(pool, disabled.clone()).await?;
             if let Some(ss) =
                 app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
             {
@@ -196,7 +196,7 @@ pub async fn set_config(
         }
         "disabled_chord_actions" => {
             let disabled: Vec<String> = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::update_disabled_chord_actions(&pool, disabled.clone()).await?;
+            crate::app::config::update_disabled_chord_actions(pool, disabled.clone()).await?;
             crate::app::config::refresh_input_config(&app).await;
             let _ = app.emit(EventNames::CONFIG_CHANGED, ());
             tracing::info!(
@@ -216,7 +216,7 @@ pub async fn set_config(
         "file_search" => {
             let fs: crate::app::config::FileSearchConfig =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::update_file_search(&pool, fs.clone()).await?;
+            crate::app::config::update_file_search(pool, fs.clone()).await?;
             if let Some(ss) =
                 app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
             {
@@ -231,7 +231,7 @@ pub async fn set_config(
         "start_menu_config" => {
             let sm: crate::app::config::StartMenuConfig =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::update_start_menu_config(&pool, &sm).await?;
+            crate::app::config::update_start_menu_config(pool, &sm).await?;
             if let Some(ss) =
                 app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
             {
@@ -250,7 +250,7 @@ pub async fn set_config(
         "calc_config" => {
             let cc: crate::app::config::CalcConfig =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::update_calc_config(&pool, &cc).await?;
+            crate::app::config::update_calc_config(pool, &cc).await?;
             if let Some(ss) =
                 app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
             {
@@ -266,7 +266,7 @@ pub async fn set_config(
             let v: crate::app::config::GlobalProxyUpdate =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
             let config = serde_json::json!({ "http": v.http, "https": v.https });
-            crate::app::config::set_engine_config(&pool, "_global_proxy", &config).await?;
+            crate::app::config::set_engine_config(pool, "_global_proxy", &config).await?;
             let engine = app.state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>();
             let has_http = !v.http.is_empty();
             let has_https = !v.https.is_empty();
@@ -282,7 +282,7 @@ pub async fn set_config(
         // ── 解释器路径配置 ────────────────────────────────────────────────
         "interpreter_paths" => {
             let json_str = serde_json::to_string(&value).map_err(|e| e.to_string())?;
-            crate::infra::data::history::set_config(&pool, "interpreter_paths", &json_str)
+            crate::infra::data::history::set_config(pool, "interpreter_paths", &json_str)
                 .await
                 .map_err(|e| e.to_string())?;
             tracing::info!("解释器路径配置已更新");
@@ -323,7 +323,7 @@ pub async fn set_config(
         "context_config" => {
             let ctx: crate::app::config::ContextConfig =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::set_context_config(&pool, &ctx).await?;
+            crate::app::config::set_context_config(pool, &ctx).await?;
             crate::infra::platform::selection::set_active(ctx.selection_enabled);
             crate::infra::platform::selection::set_sensitive_apps(ctx.sensitive_apps.clone());
             if let Some(mem) = app
@@ -344,7 +344,7 @@ pub async fn set_config(
         "ai_config" => {
             let ai: crate::app::ai_config::AIConfig =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::ConfigStore::set(&pool, &ai).await?;
+            crate::app::config::ConfigStore::set(pool, &ai).await?;
 
             // registry 热更新——空档降级 / factory 失败静默跳过 / 复用未变动实例
             if let Some(reg) =
@@ -391,7 +391,7 @@ pub async fn set_config(
         "ai_permission" => {
             let perm: crate::app::config::AiPermissionConfig =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::ConfigStore::set(&pool, &perm).await?;
+            crate::app::config::ConfigStore::set(pool, &perm).await?;
 
             // 同步更新 PendingConfirms 运行时配置
             {
@@ -421,7 +421,7 @@ pub async fn set_config(
         "screenshot_config" => {
             let sc: crate::app::config::ScreenshotConfig =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::config::ConfigStore::set(&pool, &sc).await?;
+            crate::app::config::ConfigStore::set(pool, &sc).await?;
             tracing::info!(
                 prewarm_ocr = sc.prewarm_ocr,
                 scroll_debug = sc.scroll_debug,
@@ -442,7 +442,7 @@ pub async fn set_config(
 pub async fn reset_config(app: tauri::AppHandle) -> Result<(), String> {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
     let config = crate::app::config::AppConfig::default();
-    crate::app::config::save_config(&pool, &config).await
+    crate::app::config::save_config(pool, &config).await
 }
 
 /// 泛型配置读取（0.8.6 §8.1.3）。
@@ -463,7 +463,7 @@ pub async fn get_config_section(
     key: String,
 ) -> Result<serde_json::Value, String> {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
-    let json_str = crate::infra::data::history::get_config(&pool, &key).await;
+    let json_str = crate::infra::data::history::get_config(pool, &key).await;
     match json_str {
         Some(s) => serde_json::from_str(&s).map_err(|e| format!("配置解析失败: {e}")),
         None => Ok(serde_json::Value::Null),
@@ -484,7 +484,7 @@ pub async fn set_config_section(
 ) -> Result<(), String> {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
     let json = serde_json::to_string(&value).map_err(|e| format!("序列化失败: {e}"))?;
-    crate::infra::data::history::set_config(&pool, &key, &json)
+    crate::infra::data::history::set_config(pool, &key, &json)
         .await
         .map_err(|e| format!("配置写入失败: {e}"))?;
 

@@ -34,15 +34,11 @@ use serde::{Deserialize, Serialize};
 /// - `Hold`：长按触发（语音录音），走 hotkey hook 的 tap/hold 状态机。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum ChordSemantic {
+    #[default]
     Tap,
     Hold,
-}
-
-impl Default for ChordSemantic {
-    fn default() -> Self {
-        ChordSemantic::Tap
-    }
 }
 
 /// 单个 chord 动作的键位绑定（0.10.7）。
@@ -612,6 +608,7 @@ impl ChordRegistry {
     /// - `VoiceInteraction` → Nop（真实录音由 hotkey 层已在 hold 时启动）
     ///
     /// `input_text` 和 `origin_ref` 按 `input_param` / extra_args 映射为 Capability 参数。
+    #[allow(clippy::too_many_arguments)]
     pub async fn trigger(
         &self,
         key: &str,
@@ -647,10 +644,10 @@ impl ChordRegistry {
             } => {
                 // 构建 Capability args
                 let mut args = serde_json::json!({});
-                if let Some(param_key) = input_param {
-                    if let Some(text) = input_text {
-                        args[param_key] = serde_json::Value::String(text.to_string());
-                    }
+                if let Some(param_key) = input_param
+                    && let Some(text) = input_text
+                {
+                    args[param_key] = serde_json::Value::String(text.to_string());
                 }
                 // origin_ref 注入（用于 chord-E 编辑已有项时继承 hit_count）
                 if let Some(ref_id) = origin_ref {
@@ -667,10 +664,8 @@ impl ChordRegistry {
 
                 // 0.21.2：部分 chord binding 需要在调用 Capability 前隐藏主窗
                 //（如 sticky——create_sticky Capability 不自管隐藏）
-                if hide_main_before {
-                    if let Some(surface) = surface_port {
-                        surface.hide_main_window(action.id());
-                    }
+                if hide_main_before && let Some(surface) = surface_port {
+                    surface.hide_main_window(action.id());
                 }
 
                 let ctx = crate::domain::capability::InvokeContext {

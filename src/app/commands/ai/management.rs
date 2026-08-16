@@ -6,8 +6,8 @@ use super::*;
 #[tauri::command]
 pub async fn clear_ai_audit(app: tauri::AppHandle) -> Result<(), String> {
     let pool = &app.state::<crate::infra::data::DbPools>().ai;
-    crate::infra::data::ai_audit::clear_all(&pool).await;
-    crate::infra::data::vacuum(&pool).await; // 0.16.0: 收缩数据库文件
+    crate::infra::data::ai_audit::clear_all(pool).await;
+    crate::infra::data::vacuum(pool).await; // 0.16.0: 收缩数据库文件
     tracing::info!("AI 审计日志已清空");
     Ok(())
 }
@@ -19,8 +19,8 @@ pub async fn clear_ai_audit(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn clear_all_conversations(app: tauri::AppHandle) -> Result<(), String> {
     let pool = &app.state::<crate::infra::data::DbPools>().ai;
-    crate::infra::data::conversations::clear_all_conversations(&pool).await?;
-    crate::infra::data::vacuum(&pool).await;
+    crate::infra::data::conversations::clear_all_conversations(pool).await?;
+    crate::infra::data::vacuum(pool).await;
     tracing::info!("全部对话历史已清空（分组保留）");
     Ok(())
 }
@@ -246,12 +246,12 @@ pub async fn get_system_prompt_info(app: tauri::AppHandle) -> Result<serde_json:
         let manifest = ph.manifest();
         for td in &manifest.tools {
             let id = crate::domain::plugin::plugin_tool_id(&manifest.id, &td.name);
-            if let Some(bindings) = &td.setting_bindings {
-                if let Some(pos) = tools.iter().position(|s| s.name == id) {
-                    let settings = plugin_engine.get_settings(&manifest.id);
-                    tools[pos] =
-                        inject_plugin_settings(tools[pos].clone(), settings.as_ref(), bindings);
-                }
+            if let Some(bindings) = &td.setting_bindings
+                && let Some(pos) = tools.iter().position(|s| s.name == id)
+            {
+                let settings = plugin_engine.get_settings(&manifest.id);
+                tools[pos] =
+                    inject_plugin_settings(tools[pos].clone(), settings.as_ref(), bindings);
             }
             if let Some(hint) = &td.hint {
                 plugin_hints.insert(id, hint.clone());
@@ -323,7 +323,7 @@ pub async fn test_ai_provider(
         .build()
         .map_err(|e| format!("HTTP 客户端创建失败: {e}"))?;
 
-    let result = match kind {
+    match kind {
         ProviderKind::OpenAICompatible => {
             let base = base_url.as_deref().unwrap_or("https://api.openai.com/v1");
             let base = base.trim_end_matches('/');
@@ -368,9 +368,7 @@ pub async fn test_ai_provider(
             let url = format!("{}/api/tags", base.trim_end_matches('/'));
             test_ollama_endpoint(&client, &url).await
         }
-    };
-
-    result
+    }
 }
 
 /// 获取当前上下文窗口状态（0.13.6）。

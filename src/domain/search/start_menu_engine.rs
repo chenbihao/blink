@@ -332,12 +332,11 @@ fn scan_dir_recursive(
         let path = entry.path();
         if path.is_dir() {
             scan_dir_recursive(&path, files, max_depth, current_depth + 1);
-        } else if path.extension().map_or(false, |ext| ext == "lnk") {
-            if let Ok(meta) = std::fs::metadata(&path) {
-                if let Ok(mtime) = meta.modified() {
-                    files.insert(path.to_string_lossy().to_string(), mtime);
-                }
-            }
+        } else if path.extension().is_some_and(|ext| ext == "lnk")
+            && let Ok(meta) = std::fs::metadata(&path)
+            && let Ok(mtime) = meta.modified()
+        {
+            files.insert(path.to_string_lossy().to_string(), mtime);
         }
     }
 }

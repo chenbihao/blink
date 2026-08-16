@@ -97,7 +97,7 @@ pub fn get_window_dwm_rect(hwnd: isize) -> Option<(i32, i32, u32, u32)> {
             std::mem::size_of::<RECT>() as u32,
         )
     };
-    if !hr.is_ok() {
+    if hr.is_err() {
         return None;
     }
     let w = rect.right - rect.left;
@@ -156,7 +156,7 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, _lparam: LPARAM) -> BOOL {
             std::mem::size_of::<RECT>() as u32,
         )
     };
-    if !hr.is_ok() {
+    if hr.is_err() {
         // DWM 不可用时回退到 GetWindowRect（含阴影边框，精度差但总比没有强）
         unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut rect);
@@ -206,7 +206,7 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, _lparam: LPARAM) -> BOOL {
     }
 
     // ── 进程名 ──
-    let process_name = get_process_name(pid).unwrap_or_else(|| String::new());
+    let process_name = get_process_name(pid).unwrap_or_default();
 
     ENUM_BUF.with(|buf| {
         buf.borrow_mut().push(PickableWindow {

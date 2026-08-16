@@ -26,20 +26,16 @@ pub enum StickyWriteOutcome {
 /// 默认黄色（§3.11「默认黄色」）。Theme 变体跟随 accent 色供用户选择，但不作默认。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum StickyColor {
     Theme,
+    #[default]
     Yellow,
     Pink,
     Purple,
     Blue,
     Green,
     Gray,
-}
-
-impl Default for StickyColor {
-    fn default() -> Self {
-        Self::Yellow
-    }
 }
 
 impl StickyColor {
@@ -74,15 +70,11 @@ impl StickyColor {
 /// 内容格式（§3.8）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum StickyFormat {
+    #[default]
     Plain,
     Markdown,
-}
-
-impl Default for StickyFormat {
-    fn default() -> Self {
-        Self::Plain
-    }
 }
 
 impl StickyFormat {
@@ -263,6 +255,7 @@ pub fn generate_id() -> String {
 }
 
 /// 从数据库行构造 StickyNote。
+#[allow(clippy::too_many_arguments)]
 fn row_to_note(
     id: String,
     content: String,

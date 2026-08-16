@@ -313,17 +313,15 @@ pub fn is_server_ready(port: u16) -> bool {
     use std::time::Duration;
 
     let addr = format!("localhost:{port}");
-    match TcpStream::connect_timeout(
+    TcpStream::connect_timeout(
         &addr
             .parse()
             .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], port))),
         // 500ms 超时：服务正常时 localhost TCP 连接毫秒级返回；
         // 服务未启动时 Windows 上未监听端口会等满超时（非 RST），2s 太长会阻塞调用方。
         Duration::from_millis(500),
-    ) {
-        Ok(_) => true,
-        Err(_) => false,
-    }
+    )
+    .is_ok()
 }
 
 /// `is_server_ready` 的异步版本，用 tokio async TCP + 短超时。
@@ -340,15 +338,14 @@ pub async fn is_server_ready_async(port: u16) -> bool {
     match tokio::net::lookup_host(addr).await {
         Ok(mut addrs) => {
             if let Some(sock_addr) = addrs.next() {
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(500),
-                    tokio::net::TcpStream::connect(sock_addr),
+                matches!(
+                    tokio::time::timeout(
+                        std::time::Duration::from_millis(500),
+                        tokio::net::TcpStream::connect(sock_addr),
+                    )
+                    .await,
+                    Ok(Ok(_))
                 )
-                .await
-                {
-                    Ok(Ok(_)) => true,
-                    _ => false,
-                }
             } else {
                 false
             }

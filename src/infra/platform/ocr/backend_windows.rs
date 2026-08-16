@@ -63,10 +63,10 @@ fn get_available_language_tags() -> Vec<String> {
     let count = available.Size().unwrap_or(0);
     let mut tags = Vec::new();
     for i in 0..count {
-        if let Ok(lang) = available.GetAt(i) {
-            if let Ok(tag) = lang.LanguageTag() {
-                tags.push(tag.to_string());
-            }
+        if let Ok(lang) = available.GetAt(i)
+            && let Ok(tag) = lang.LanguageTag()
+        {
+            tags.push(tag.to_string());
         }
     }
     tags
@@ -88,11 +88,11 @@ fn select_chinese_preferred_engine()
 
     if let Some(ref tag) = matched_tag {
         let hstring = windows::core::HSTRING::from(tag.as_str());
-        if let Ok(lang) = windows::Globalization::Language::CreateLanguage(&hstring) {
-            if let Ok(engine) = WinRtOcrEngine::TryCreateFromLanguage(&lang) {
-                tracing::info!(language = %tag, "OCR 引擎已选中文语言");
-                return Ok((engine, Some(tag.clone())));
-            }
+        if let Ok(lang) = windows::Globalization::Language::CreateLanguage(&hstring)
+            && let Ok(engine) = WinRtOcrEngine::TryCreateFromLanguage(&lang)
+        {
+            tracing::info!(language = %tag, "OCR 引擎已选中文语言");
+            return Ok((engine, Some(tag.clone())));
         }
     }
 
@@ -157,11 +157,7 @@ impl PlatformOcrBackend for WindowsOcrBackend {
             .map_err(|e| PlatformOcrError::Engine(format!("等待识别完成失败: {e}")))?;
 
         // 2. 提取原始数据为 RawOcrResult（不做智能拼接，留给 domain）
-        let text_angle: Option<f64> = ocr_result
-            .TextAngle()
-            .ok()
-            .and_then(|opt| opt.Value().ok())
-            .map(|d| d as f64);
+        let text_angle: Option<f64> = ocr_result.TextAngle().ok().and_then(|opt| opt.Value().ok());
 
         let mut lines: Vec<RawOcrLine> = Vec::new();
 

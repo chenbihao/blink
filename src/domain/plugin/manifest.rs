@@ -189,8 +189,10 @@ fn default_empty_object_schema() -> serde_json::Value {
 /// 插件运行时类型。
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum RuntimeType {
     /// 原生可执行文件（直接 spawn）
+    #[default]
     Process,
     /// Python 脚本（python xxx.py）
     Python,
@@ -198,12 +200,6 @@ pub enum RuntimeType {
     Node,
     /// PowerShell 脚本（powershell -File xxx.ps1）
     Powershell,
-}
-
-impl Default for RuntimeType {
-    fn default() -> Self {
-        RuntimeType::Process
-    }
 }
 
 /// 进程拉起参数。
@@ -292,15 +288,11 @@ pub enum ManifestContextWhen {
 /// `RuleRouter` 收到时 warn+降级。0.8.3 Chord / "搜索选区"插件真需要 Inline 时放开。
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum ManifestSurfaceHint {
+    #[default]
     Priority,
     Inline,
-}
-
-impl Default for ManifestSurfaceHint {
-    fn default() -> Self {
-        ManifestSurfaceHint::Priority
-    }
 }
 
 fn default_exclusive() -> bool {
@@ -615,10 +607,10 @@ impl PluginManifest {
                 .and_then(|p| p.parent())
                 .and_then(|p| p.parent())
                 .map(|root| root.join("target/debug").join(exe_name));
-            if let Some(path) = fallback {
-                if path.exists() {
-                    return path;
-                }
+            if let Some(path) = fallback
+                && path.exists()
+            {
+                return path;
             }
         }
 

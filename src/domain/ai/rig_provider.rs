@@ -308,21 +308,21 @@ fn build_rig_request(
                 // 解析成功 → 构造 AssistantContent::ToolCall（OpenAI tool_calls 语义）
                 // 解析失败或无 tool_call_id → 降级为纯文本 assistant
                 if let Some(tc_id) = &m.tool_call_id {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&m.content) {
-                        if let (Some(name), Some(arguments)) = (
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&m.content)
+                        && let (Some(name), Some(arguments)) = (
                             json.get("name").and_then(|v| v.as_str()),
                             json.get("arguments"),
-                        ) {
-                            let tool_call = RigToolCall::new(
-                                tc_id.clone(),
-                                RigToolFunc::new(name.to_string(), arguments.clone()),
-                            );
-                            user_msgs.push(RigMessage::Assistant {
-                                id: None,
-                                content: OneOrMany::one(AssistantContent::ToolCall(tool_call)),
-                            });
-                            continue;
-                        }
+                        )
+                    {
+                        let tool_call = RigToolCall::new(
+                            tc_id.clone(),
+                            RigToolFunc::new(name.to_string(), arguments.clone()),
+                        );
+                        user_msgs.push(RigMessage::Assistant {
+                            id: None,
+                            content: OneOrMany::one(AssistantContent::ToolCall(tool_call)),
+                        });
+                        continue;
                     }
                     tracing::warn!(
                         target: "blink::ai::slo",

@@ -100,13 +100,13 @@ impl From<crate::domain::capability::CapabilityError> for CommandError {
             }
             OriginDenied { origin, allowed } => Self::with_detail(
                 "origin_denied",
-                &format!("来源不被允许: {origin} 不在允许集合内 ({allowed})"),
+                format!("来源不被允许: {origin} 不在允许集合内 ({allowed})"),
                 false,
                 serde_json::json!({ "origin": origin, "allowed": allowed }),
             ),
             Unsupported { required, actual } => Self::with_detail(
                 "unsupported",
-                &format!("运行时不支持: 需要 {required}，当前可用 {actual}"),
+                format!("运行时不支持: 需要 {required}，当前可用 {actual}"),
                 false,
                 serde_json::json!({ "required": required, "actual": actual }),
             ),
@@ -114,12 +114,12 @@ impl From<crate::domain::capability::CapabilityError> for CommandError {
             Cancelled => Self::new("cancelled", "操作已取消", false),
             NotFound { id } => Self::with_detail(
                 "not_found",
-                &format!("能力不存在: {id}"),
+                format!("能力不存在: {id}"),
                 false,
                 serde_json::json!({ "id": id }),
             ),
             Internal { detail } => {
-                Self::new("internal_error", &format!("内部错误: {detail}"), false)
+                Self::new("internal_error", format!("内部错误: {detail}"), false)
             }
         }
     }
@@ -152,13 +152,13 @@ impl From<crate::domain::sticky::StickyError> for CommandError {
             }
             StickyError::NotFound { id } => Self::with_detail(
                 "not_found",
-                &format!("便签不存在: {id}"),
+                format!("便签不存在: {id}"),
                 false,
                 serde_json::json!({ "id": id }),
             ),
             StickyError::Trashed { id } => Self::with_detail(
                 "invalid_state",
-                &format!("便签已在回收站: {id}"),
+                format!("便签已在回收站: {id}"),
                 false,
                 serde_json::json!({ "id": id }),
             ),
@@ -168,7 +168,7 @@ impl From<crate::domain::sticky::StickyError> for CommandError {
                 actual_updated_at,
             } => Self::with_detail(
                 "conflict",
-                &format!(
+                format!(
                     "便签已被修改，请重试（期望版本 {expected_updated_at}，当前版本 {actual_updated_at}）"
                 ),
                 true,
@@ -229,7 +229,7 @@ mod tests {
         let e = CommandError::from_string("some old error");
         assert_eq!(e.code, "unknown_error");
         assert_eq!(e.message, "some old error");
-        assert_eq!(e.retryable, false);
+        assert!(!e.retryable);
     }
 
     #[test]

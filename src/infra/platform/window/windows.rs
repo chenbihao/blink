@@ -277,10 +277,10 @@ pub fn ack_chat_prefill(revision: u64) {
     let mut guard = chat_prefill_state()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    if let Some(ref p) = *guard {
-        if p.revision == revision {
-            *guard = None;
-        }
+    if let Some(ref p) = *guard
+        && p.revision == revision
+    {
+        *guard = None;
     }
 }
 
@@ -645,20 +645,19 @@ pub fn start_watchdog(app: AppHandle) {
             //
             // 0.20.4：图片编辑器活跃时跳过——编辑器复用 chord-screenshot 窗口，
             // 主窗口关闭导致的焦点瞬态切换不应触发编辑器关闭。
-            if !IMAGE_EDITOR_ACTIVE.load(Ordering::Relaxed) {
-                if let Some(ss_win) = app.get_webview_window("chord-screenshot") {
-                    if ss_win.is_visible().unwrap_or(false) {
-                        let fg = unsafe { GetForegroundWindow() };
-                        if !fg.0.is_null() && !is_self_foreground(&app, fg) {
-                            tracing::info!(
-                                "watchdog: screenshot overlay hide! fg=0x{:x}",
-                                fg.0 as isize
-                            );
-                            // 用 hide_screenshot_overlay 而非 win.hide()，
-                            // 确保同时清空 SESSION 释放位图内存
-                            hide_screenshot_overlay(&app);
-                        }
-                    }
+            if !IMAGE_EDITOR_ACTIVE.load(Ordering::Relaxed)
+                && let Some(ss_win) = app.get_webview_window("chord-screenshot")
+                && ss_win.is_visible().unwrap_or(false)
+            {
+                let fg = unsafe { GetForegroundWindow() };
+                if !fg.0.is_null() && !is_self_foreground(&app, fg) {
+                    tracing::info!(
+                        "watchdog: screenshot overlay hide! fg=0x{:x}",
+                        fg.0 as isize
+                    );
+                    // 用 hide_screenshot_overlay 而非 win.hide()，
+                    // 确保同时清空 SESSION 释放位图内存
+                    hide_screenshot_overlay(&app);
                 }
             }
         }
@@ -725,7 +724,7 @@ unsafe extern "system" fn sysmenu_block_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    if msg == WM_SYSCOMMAND && (wparam.0 as usize & 0xFFF0) == SC_KEYMENU {
+    if msg == WM_SYSCOMMAND && (wparam.0 & 0xFFF0) == SC_KEYMENU {
         return LRESULT(0);
     }
     let original = ORIGINAL_WNDPROCS
@@ -1112,7 +1111,7 @@ pub fn show_chat_window(app: &AppHandle, initial_text: Option<&str>) -> Result<(
 
     // 0.19：带初始文本时先写入 prefill（infra 层），拿到 revision 用于后续 ack/rollback。
     let prefill_text: Option<&str> = initial_text.filter(|s| !s.is_empty());
-    let prefill_rev: Option<u64> = prefill_text.map(|t| set_chat_prefill(t));
+    let prefill_rev: Option<u64> = prefill_text.map(set_chat_prefill);
 
     // 0.19：经 get_or_create_window 串行化创建，消除预热与用户唤起的 duplicate label 竞态。
     // 统一创建配置：visible(false) + focused(false)，show/focus 在锁外统一执行。
@@ -1385,14 +1384,14 @@ pub fn show_welcome_window(app: &AppHandle) {
     // 关闭时触发回调（0.21.14：app 层回调负责 first_run=false，infra 不反向依赖 app）
     let app_clone = app.clone();
     win.on_window_event(move |event| {
-        if let tauri::WindowEvent::CloseRequested { .. } = event {
-            if let Some(cb) = app_clone.try_state::<WelcomeCloseCallback>() {
-                let cb = std::sync::Arc::clone(&cb.0);
-                let app = app_clone.clone();
-                tauri::async_runtime::spawn(async move {
-                    cb(&app);
-                });
-            }
+        if let tauri::WindowEvent::CloseRequested { .. } = event
+            && let Some(cb) = app_clone.try_state::<WelcomeCloseCallback>()
+        {
+            let cb = std::sync::Arc::clone(&cb.0);
+            let app = app_clone.clone();
+            tauri::async_runtime::spawn(async move {
+                cb(&app);
+            });
         }
     });
 
@@ -1418,10 +1417,9 @@ pub fn update_sticky_taskbar(app: &AppHandle, sticky_id: &str, always_on_top: bo
         .iter()
         .find(|(_, sid)| sid.as_str() == sticky_id)
         .map(|(l, _)| l.clone())
+        && let Some(win) = app.get_webview_window(&bl)
     {
-        if let Some(win) = app.get_webview_window(&bl) {
-            let _ = win.set_skip_taskbar(always_on_top);
-        }
+        let _ = win.set_skip_taskbar(always_on_top);
     }
 }
 
@@ -1444,13 +1442,12 @@ pub struct ChatCloseCallback(pub std::sync::Arc<dyn Fn(&AppHandle) + Send + Sync
 pub struct WelcomeCloseCallback(pub std::sync::Arc<dyn Fn(&AppHandle) + Send + Sync>);
 
 /// 便签 spare 关闭回调：`(app, sticky_id) -> ()`（async 中调用）。
-pub struct StickySpareCloseCallback(
-    pub  std::sync::Arc<
-        dyn Fn(&AppHandle, &str) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-            + Send
-            + Sync,
-    >,
-);
+type StickySpareCloseFn = std::sync::Arc<
+    dyn Fn(&AppHandle, &str) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + Sync,
+>;
+pub struct StickySpareCloseCallback(pub StickySpareCloseFn);
 
 /// 便签窗口 CloseRequested 兜底关闭回调：参数为 (app, sticky_id)。
 /// 实现自行决定异步执行方式；infra 只负责在兜底路径调用。
@@ -1514,6 +1511,7 @@ pub fn set_sticky_close_fallback(f: StickyCloseFallback) {
 /// 关闭按钮 = 隐藏（prevent_close），不销毁窗口——下次显示复用同一 webview。
 ///
 /// **看门狗安全**：看门狗按 PID 判定，前台切到便签时 `fg_pid == self_pid`，主窗不会被误隐藏。
+#[allow(clippy::too_many_arguments)]
 pub fn show_sticky_window(
     app: &AppHandle,
     sticky_id: &str,
@@ -1578,7 +1576,7 @@ pub fn show_sticky_window(
             .replace('\'', "\\'")
             .replace('\n', "\\n")
             .replace('\r', "\\r");
-        let _ = win.eval(&format!(
+        let _ = win.eval(format!(
             "if (window.__stickyReload) window.__stickyReload('{escaped_id}')"
         ));
         win
@@ -1609,7 +1607,7 @@ pub fn show_sticky_window(
             .replace('\'', "\\'")
             .replace('\n', "\\n")
             .replace('\r', "\\r");
-        let _ = win.eval(&format!(
+        let _ = win.eval(format!(
             "if (window.__stickyReload) window.__stickyReload('{escaped_id}')"
         ));
         win
@@ -1648,7 +1646,7 @@ pub fn show_sticky_window(
                 .replace('\'', "\\'")
                 .replace('\n', "\\n")
                 .replace('\r', "\\r");
-            let _ = spare_win.eval(&format!(
+            let _ = spare_win.eval(format!(
                 "if (window.__stickyReload) window.__stickyReload('{escaped_id}')"
             ));
 
@@ -1780,8 +1778,8 @@ pub fn show_sticky_window(
                     tauri::async_runtime::spawn(async move {
                         tokio::select! {
                             _ = tokio::time::sleep(Duration::from_secs(5)) => {
-                                if let Some(w) = app_c.get_webview_window(&label_for_timeout) {
-                                    if w.is_visible().unwrap_or(false) {
+                                if let Some(w) = app_c.get_webview_window(&label_for_timeout)
+                                    && w.is_visible().unwrap_or(false) {
                                         tracing::warn!(
                                             sticky_id = %sid_owned,
                                             "便签关闭前端超时 5s 无 ack，降级到 fallback"
@@ -1794,7 +1792,6 @@ pub fn show_sticky_window(
                                             ),
                                         }
                                     }
-                                }
                             }
                             _ = &mut ack_rx => {
                                 tracing::debug!(
@@ -1954,8 +1951,8 @@ pub fn center_of_active_monitor(width: i32, height: i32) -> (i32, i32) {
 /// 返回值 `(x, y, width, height)` 为钳制后的物理像素。
 fn clamp_sticky_geometry(x: i32, y: i32, width: i32, height: i32) -> (i32, i32, i32, i32) {
     // 保证尺寸合理
-    let w = width.max(120).min(4096);
-    let h = height.max(80).min(4096);
+    let w = width.clamp(120, 4096);
+    let h = height.clamp(80, 4096);
 
     unsafe {
         let pt = POINT { x, y };
@@ -2143,10 +2140,7 @@ pub fn show_screenshot_overlay(
         // 0. 注入光标所在显示器索引——必须在 clearScreenshotVisual 之前，
         //    因为 clearScreenshotVisual 会启动 per-monitor 预取 fetch
         let active_display = crate::infra::platform::screenshot::active_display_index();
-        let _ = win.eval(&format!(
-            "window.__blinkActiveDisplay = {};",
-            active_display
-        ));
+        let _ = win.eval(format!("window.__blinkActiveDisplay = {};", active_display));
         // 1. 清屏——只清旧画面，不触发截图加载
         let _ = win
             .eval("window.__blinkClearScreenshotVisual && window.__blinkClearScreenshotVisual()");
@@ -2954,10 +2948,10 @@ pub fn hide_for_screenshot(app: &AppHandle) {
 /// 只清 cloak，不 `show`——主窗此时仍应保持 hidden 状态（截图完成后主窗不该出来）。
 /// 下次 `invoke()` 时 `show()` 会正常工作。
 pub fn unhide_after_screenshot(app: &AppHandle) {
-    if let Some(win) = app.get_webview_window("main") {
-        if let Ok(hwnd) = win.hwnd() {
-            apply_cloak(HWND(hwnd.0 as _), false);
-        }
+    if let Some(win) = app.get_webview_window("main")
+        && let Ok(hwnd) = win.hwnd()
+    {
+        apply_cloak(HWND(hwnd.0 as _), false);
     }
 }
 

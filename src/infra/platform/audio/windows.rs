@@ -256,9 +256,9 @@ fn convert_to_f32(data: &Data, format: SampleFormat) -> Vec<f32> {
 fn log_device_list(host: &cpal::Host) {
     let default_name = host.default_input_device().map(|d| d.to_string());
 
-    if let Ok(mut devices) = host.input_devices() {
+    if let Ok(devices) = host.input_devices() {
         let mut device_list: Vec<String> = Vec::new();
-        while let Some(d) = devices.next() {
+        for d in devices {
             let name = d.to_string();
             let is_default = default_name.as_deref() == Some(&name);
             device_list.push(if is_default {

@@ -581,7 +581,7 @@ pub fn weighted_kmeans_cluster(entries: &[HistogramEntry], k: usize) -> Vec<Clus
         });
     }
 
-    clusters.sort_by(|a, b| b.count.cmp(&a.count));
+    clusters.sort_by_key(|c| std::cmp::Reverse(c.count));
     merge_near_colors(clusters)
 }
 
@@ -593,19 +593,19 @@ fn merge_near_colors(clusters: Vec<ClusterResult>) -> Vec<ClusterResult> {
     }
 
     let mut result = vec![clusters[0].clone()];
-    for i in 1..clusters.len() {
+    for cluster in &clusters[1..] {
         let mut merged = false;
-        for j in 0..result.len() {
-            if delta_e(clusters[i].oklab, result[j].oklab) < c.near_color_merge_delta_e {
-                let total_count = result[j].count + clusters[i].count;
-                result[j].count = total_count;
-                result[j].ratio = total_count as f64; // 暂存，后面归一
+        for r in result.iter_mut() {
+            if delta_e(cluster.oklab, r.oklab) < c.near_color_merge_delta_e {
+                let total_count = r.count + cluster.count;
+                r.count = total_count;
+                r.ratio = total_count as f64; // 暂存，后面归一
                 merged = true;
                 break;
             }
         }
         if !merged {
-            result.push(clusters[i].clone());
+            result.push(cluster.clone());
         }
     }
 
@@ -618,7 +618,7 @@ fn merge_near_colors(clusters: Vec<ClusterResult>) -> Vec<ClusterResult> {
             0.0
         };
     }
-    result.sort_by(|a, b| b.count.cmp(&a.count));
+    result.sort_by_key(|c| std::cmp::Reverse(c.count));
     result
 }
 
@@ -868,7 +868,7 @@ pub fn analyze_theme(roles: &[RoleColor]) -> ThemeAnalysis {
     } else if let Some(h) = hue {
         if avg_s < 12.0 {
             "中性色系".to_string()
-        } else if h < 15.0 || h >= 345.0 {
+        } else if !(15.0..345.0).contains(&h) {
             "红色系".to_string()
         } else if h < 45.0 {
             "橙色系".to_string()
@@ -889,8 +889,8 @@ pub fn analyze_theme(roles: &[RoleColor]) -> ThemeAnalysis {
         "中性色系".to_string()
     };
 
-    let warm = hue.map_or(false, |h| h < 90.0 || h >= 330.0);
-    let cool = hue.map_or(false, |h| h >= 150.0 && h < 285.0);
+    let warm = hue.is_some_and(|h| !(90.0..330.0).contains(&h));
+    let cool = hue.is_some_and(|h| (150.0..285.0).contains(&h));
     let temperature = if is_multi_hue {
         "冷暖均衡".to_string()
     } else if warm {
@@ -1405,10 +1405,10 @@ fn generate_smart_pairing(
         |rgb: Rgb| -> Option<usize> { entries.iter().position(|e| e.rgb == rgb) };
 
     for role in roles {
-        if seen_rgb.insert(role.rgb) {
-            if let Some(idx) = find_entry_by_rgb(role.rgb) {
-                candidate_indices.push(idx);
-            }
+        if seen_rgb.insert(role.rgb)
+            && let Some(idx) = find_entry_by_rgb(role.rgb)
+        {
+            candidate_indices.push(idx);
         }
     }
 
@@ -1471,12 +1471,11 @@ fn generate_smart_pairing(
     // 也考虑角色色中标记为 background 的
     let bg_role_rgb = roles.iter().find(|r| r.role == "background").map(|r| r.rgb);
     let mut bg_candidates = bg_candidates;
-    if let Some(bg_rgb) = bg_role_rgb {
-        if let Some(idx) = find_entry_by_rgb(bg_rgb) {
-            if !bg_candidates.contains(&idx) {
-                bg_candidates.insert(0, idx);
-            }
-        }
+    if let Some(bg_rgb) = bg_role_rgb
+        && let Some(idx) = find_entry_by_rgb(bg_rgb)
+        && !bg_candidates.contains(&idx)
+    {
+        bg_candidates.insert(0, idx);
     }
 
     // 5. 尝试所有背景候选，为每个背景找最佳正文+强调组合
@@ -1595,10 +1594,10 @@ fn generate_smart_pairing(
                             best_secondary = Some((sec_idx, d));
                         }
                     }
-                    if let Some((sec_idx, _)) = best_secondary {
-                        if seen.insert(entries[sec_idx].rgb) {
-                            colors.push(entries[sec_idx].rgb);
-                        }
+                    if let Some((sec_idx, _)) = best_secondary
+                        && seen.insert(entries[sec_idx].rgb)
+                    {
+                        colors.push(entries[sec_idx].rgb);
                     }
                 }
 
@@ -1769,14 +1768,14 @@ mod tests {
 
         for case in &fixture.oklab_cases {
             let result = rgb_to_oklab(case.rgba[0], case.rgba[1], case.rgba[2]);
-            for i in 0..3 {
+            for (i, (got, expected)) in result.iter().zip(case.oklab.iter()).enumerate() {
                 assert!(
-                    (result[i] - case.oklab[i]).abs() < case.tolerance,
+                    (got - expected).abs() < case.tolerance,
                     "OKLab[{}] mismatch for {}: expected {}, got {}",
                     i,
                     case.name,
-                    case.oklab[i],
-                    result[i]
+                    expected,
+                    got
                 );
             }
         }
@@ -1815,15 +1814,15 @@ mod tests {
         for case in &fixture.roundtrip_cases {
             let lab = rgb_to_oklab(case.rgba[0], case.rgba[1], case.rgba[2]);
             let back = oklab_to_rgb(lab);
-            for i in 0..3 {
-                let diff = (back[i] as i16 - case.rgba[i] as i16).unsigned_abs() as u8;
+            for (i, (got, expected)) in back.iter().zip(case.rgba.iter()).enumerate() {
+                let diff = (*got as i16 - *expected as i16).unsigned_abs() as u8;
                 assert!(
                     diff <= case.tolerance,
                     "Roundtrip {} channel {} mismatch: expected ~{}, got {}, tolerance {}",
                     case.name,
                     i,
-                    case.rgba[i],
-                    back[i],
+                    expected,
+                    got,
                     case.tolerance
                 );
             }
@@ -1994,11 +1993,7 @@ mod tests {
                 }
             } else if case.expect_smart_pairing_degraded == Some(false) {
                 // 期望非降级但方案不存在
-                assert!(
-                    false,
-                    "case '{}': 期望 smart_pairing 方案存在但未找到",
-                    case.name
-                );
+                panic!("case '{}': 期望 smart_pairing 方案存在但未找到", case.name);
             }
         }
         eprintln!(

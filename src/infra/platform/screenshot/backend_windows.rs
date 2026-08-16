@@ -255,7 +255,7 @@ fn capture_region_bgra(src_x: i32, src_y: i32, w: u32, h: u32) -> Result<Vec<u8>
                 src_y,
                 SRCCOPY,
             );
-            if !ok.is_ok() {
+            if ok.is_err() {
                 return Err("BitBlt 失败".into());
             }
 

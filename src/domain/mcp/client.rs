@@ -1040,7 +1040,7 @@ fn resolve_windows_command(command: &str, args: &[String]) -> (String, Vec<Strin
         // 未找到 .exe → 用 cmd /c 包裹（处理 .cmd/.bat）
         let mut all_args = vec!["/c".to_string(), command.to_string()];
         all_args.extend_from_slice(args);
-        return ("cmd".to_string(), all_args);
+        ("cmd".to_string(), all_args)
     }
 
     #[cfg(not(target_os = "windows"))]

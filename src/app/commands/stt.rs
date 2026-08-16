@@ -103,7 +103,7 @@ pub async fn get_stt_config(
 ) -> Result<crate::app::stt_config::SttConfig, String> {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
     let config =
-        crate::app::config::ConfigStore::get::<crate::app::stt_config::SttConfig>(&pool).await;
+        crate::app::config::ConfigStore::get::<crate::app::stt_config::SttConfig>(pool).await;
     Ok(config)
 }
 
@@ -121,7 +121,7 @@ pub async fn set_stt_config(
     scope: Option<String>,
 ) -> Result<(), String> {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
-    crate::app::config::ConfigStore::set(&pool, &config)
+    crate::app::config::ConfigStore::set(pool, &config)
         .await
         .map_err(|e| format!("保存 STT 配置失败: {e}"))?;
     // 更新内存缓存（供 STT 引擎同步读取）
@@ -244,7 +244,7 @@ pub async fn download_stt_model(app: tauri::AppHandle, model_id: String) -> Resu
 
     // 持久化到数据库（否则重启后丢失模型选择）
     let pool = &app.state::<crate::infra::data::DbPools>().config;
-    crate::app::config::ConfigStore::set(&pool, &config)
+    crate::app::config::ConfigStore::set(pool, &config)
         .await
         .map_err(|e| format!("保存 STT 配置失败: {e}"))?;
 
@@ -349,7 +349,7 @@ pub async fn start_audio_test(
             // 首个 chunk + 每 10 个 chunk 打一次日志，让用户知道数据在流动
             if chunk_count == 1 {
                 tracing::info!(samples = chunk.samples.len(), "音频测试: 收到首个 chunk");
-            } else if chunk_count % 10 == 0 {
+            } else if chunk_count.is_multiple_of(10) {
                 tracing::trace!(
                     chunk_count,
                     level = format!("{:.3}", level),

@@ -30,10 +30,10 @@ pub async fn get_config(pool: &SqlitePool, key: &str) -> Option<String> {
     // 生产环境：先查内存缓存（测试环境跳过——多 pool 并行测试会互相污染）
     #[cfg(not(test))]
     {
-        if let Ok(cache) = config_cache().read() {
-            if let Some(val) = cache.get(key) {
-                return Some(val.clone());
-            }
+        if let Ok(cache) = config_cache().read()
+            && let Some(val) = cache.get(key)
+        {
+            return Some(val.clone());
         }
     }
     // 查 SQLite
@@ -137,7 +137,7 @@ pub async fn migrate_camelcase_to_snake(pool: &SqlitePool) {
         ("engine:file_search", file_search_map),
     ];
 
-    for &(key, ref map) in tasks {
+    for &(key, map) in tasks {
         let Some(json_str) = get_config(pool, key).await else {
             continue;
         };

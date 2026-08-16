@@ -106,6 +106,7 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
 /// 调用方无需处理错误。
 ///
 /// `caller` 参数（0.13.4）：`"internal"` = AI tool call / 用户确认执行；`"mcp_external"` = 外部 MCP client 调用。
+#[allow(clippy::too_many_arguments)]
 pub async fn save_audit_log(
     pool: &SqlitePool,
     tool_name: &str,

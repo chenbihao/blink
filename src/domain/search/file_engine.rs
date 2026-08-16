@@ -176,7 +176,7 @@ impl FileEngine {
                 EverythingStatus::Unknown => true,
                 EverythingStatus::Unavailable => {
                     let last = self.last_probe_at.read().await;
-                    last.map_or(true, |t| t.elapsed() >= RETRY_INTERVAL)
+                    last.is_none_or(|t| t.elapsed() >= RETRY_INTERVAL)
                 }
                 EverythingStatus::Available => false,
             };
@@ -349,7 +349,7 @@ impl FileEngine {
             })
             .collect();
 
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|x| std::cmp::Reverse(x.0));
 
         let items: Vec<FileSearchHit> = scored
             .into_iter()

@@ -43,6 +43,7 @@ impl FeatureCatalogAggregator {
     /// - `ai_allowlist`: 用户 AI 授权集合（`ai.capability_access` 真源）；
     ///   None = 无授权数据（CLI 等环境），AI 列退回 policy 默认投影
     /// - `mcp_exposed`: 用户 MCP 暴露集合（`exposed_capabilities` 真源）
+    #[allow(clippy::too_many_arguments)]
     pub fn aggregate(
         disabled_builtin: &[String],
         disabled_chord: &[String],
@@ -236,20 +237,19 @@ impl FeatureCatalogAggregator {
 
             if let Some(ref cap_id) = target_cap_id {
                 // 有关联的 capability——尝试补充到已有 item
-                if let Some(feat_id) = cap_id_to_feature_id.get(cap_id) {
-                    if let Some(&idx) = feature_id_to_index.get(feat_id) {
-                        items[idx].bindings.push(binding_summary);
-                        // 如果 chord 被 disable 但 descriptor 没被 disable，
-                        // 本地可用性应反映 chord 的 disable 状态
-                        if !enabled && items[idx].local_availability == LocalAvailability::Available
-                        {
-                            // chord disabled 不等于整个功能不可用——
-                            // 只是 chord binding 不可用。保持 Available，binding.enabled=false。
-                            // 但如果该功能只有 chord binding 且 chord 被禁用，则应标记 Disabled。
-                            // 当前所有 chord 对应的 capability 也有 descriptor，所以保持 Available。
-                        }
-                        continue;
+                if let Some(feat_id) = cap_id_to_feature_id.get(cap_id)
+                    && let Some(&idx) = feature_id_to_index.get(feat_id)
+                {
+                    items[idx].bindings.push(binding_summary);
+                    // 如果 chord 被 disable 但 descriptor 没被 disable，
+                    // 本地可用性应反映 chord 的 disable 状态
+                    if !enabled && items[idx].local_availability == LocalAvailability::Available {
+                        // chord disabled 不等于整个功能不可用——
+                        // 只是 chord binding 不可用。保持 Available，binding.enabled=false。
+                        // 但如果该功能只有 chord binding 且 chord 被禁用，则应标记 Disabled。
+                        // 当前所有 chord 对应的 capability 也有 descriptor，所以保持 Available。
                     }
+                    continue;
                 }
 
                 // capability 存在但没有对应的 descriptor item——独立成项

@@ -128,7 +128,7 @@ pub fn is_text_input_control(control_type_id: i32) -> bool {
 #[allow(dead_code)]
 pub fn is_focused_on_text_input() -> bool {
     focused_control_type()
-        .map(|ct| is_text_input_control(ct))
+        .map(is_text_input_control)
         .unwrap_or(false)
 }
 
@@ -304,14 +304,14 @@ pub fn collect_control_hints_with(
                 // tracing::trace!(control_type = ct, "跳过展开（死端控件类型）");
                 return false;
             }
-            if min_size > 0 {
-                if let Ok(rect) = unsafe { elem.CurrentBoundingRectangle() } {
-                    let w = rect.right - rect.left;
-                    let h = rect.bottom - rect.top;
-                    if w < min_size || h < min_size {
-                        // tracing::trace!(w, h, min_size, "跳过展开（控件尺寸低于阈值）");
-                        return false;
-                    }
+            if min_size > 0
+                && let Ok(rect) = unsafe { elem.CurrentBoundingRectangle() }
+            {
+                let w = rect.right - rect.left;
+                let h = rect.bottom - rect.top;
+                if w < min_size || h < min_size {
+                    // tracing::trace!(w, h, min_size, "跳过展开（控件尺寸低于阈值）");
+                    return false;
                 }
             }
             true
@@ -516,14 +516,14 @@ where
                 // tracing::trace!(control_type = ct, "跳过展开（死端控件类型）");
                 return false;
             }
-            if min_size > 0 {
-                if let Ok(rect) = unsafe { elem.CurrentBoundingRectangle() } {
-                    let w = rect.right - rect.left;
-                    let h = rect.bottom - rect.top;
-                    if w < min_size || h < min_size {
-                        // tracing::trace!(w, h, min_size, "跳过展开（控件尺寸低于阈值）");
-                        return false;
-                    }
+            if min_size > 0
+                && let Ok(rect) = unsafe { elem.CurrentBoundingRectangle() }
+            {
+                let w = rect.right - rect.left;
+                let h = rect.bottom - rect.top;
+                if w < min_size || h < min_size {
+                    // tracing::trace!(w, h, min_size, "跳过展开（控件尺寸低于阈值）");
+                    return false;
                 }
             }
             true

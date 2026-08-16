@@ -74,7 +74,7 @@ impl Capability for OpenUrl {
         tracing::debug!(%url, "open_url capability: 打开链接");
 
         // open::that 在 Windows 上走 ShellExecute，是非阻塞的
-        if let Err(e) = open::that(&url) {
+        if let Err(e) = open::that(url) {
             tracing::error!(error = %e, %url, "打开链接失败");
             return Err(CapabilityError::Internal {
                 detail: format!("打开链接失败: {e}"),

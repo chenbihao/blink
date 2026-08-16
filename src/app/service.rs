@@ -195,8 +195,8 @@ impl Service for HotkeyService {
                         // chord 门禁--chord 总开关关 / voice_input 在 disabled 列表 ->
                         // 不启动录音。这让设置页的 voice_input 开关真正生效（而非仅控显示）。
                         let pool = &app.state::<crate::infra::data::DbPools>().config;
-                        let chord_cfg = crate::app::config::get_chord_config(&pool).await;
-                        let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
+                        let chord_cfg = crate::app::config::get_chord_config(pool).await;
+                        let disabled = crate::app::config::get_disabled_chord_actions(pool).await;
                         let voice_disabled = disabled.iter().any(|d| d == "voice_input");
                         if chord_cfg.chord_enabled && !voice_disabled {
                             // 仅在录音真正启动时才启动托盘呼吸动画。
@@ -237,17 +237,16 @@ impl Service for HotkeyService {
                             continue;
                         };
                         let pool = &app.state::<crate::infra::data::DbPools>().config;
-                        let chord_cfg = crate::app::config::get_chord_config(&pool).await;
-                        let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
+                        let chord_cfg = crate::app::config::get_chord_config(pool).await;
+                        let disabled = crate::app::config::get_disabled_chord_actions(pool).await;
                         let key_lower = key.to_lowercase();
                         // 门禁：disabled 列表命中即跳过
                         if let Some(action_id) =
                             registry.action_id_for_key(&key_lower, &chord_cfg.bindings)
+                            && disabled.iter().any(|d| d == action_id)
                         {
-                            if disabled.iter().any(|d| d == action_id) {
-                                tracing::debug!(%key_lower, %action_id, "chord 已禁用,跳过触发");
-                                continue;
-                            }
+                            tracing::debug!(%key_lower, %action_id, "chord 已禁用,跳过触发");
+                            continue;
                         }
                         let env_arc = app
                             .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()

@@ -16,7 +16,7 @@
 use crate::infra::utils::paths;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// 四库连接池集合——作为单一 Tauri State 注册。
@@ -301,35 +301,33 @@ async fn init_cache_schema_only(pool: &SqlitePool) -> Result<(), String> {
 ///
 /// **策略**：用 SQL `ATTACH` + `INSERT INTO ... SELECT` 一次性迁移，
 /// 无需逐行读取/写入，类型安全且高效。
-async fn migrate_legacy_db(dir: &PathBuf) -> Result<(), String> {
+async fn migrate_legacy_db(dir: &Path) -> Result<(), String> {
     let legacy_path = dir.join("blink.db");
 
     // 先检查配置库是否已有迁移标记（避免重复迁移）
     let config_path = dir.join("blink_config.db");
-    if config_path.exists() {
-        if let Ok(pool) = SqlitePoolOptions::new()
+    if config_path.exists()
+        && let Ok(pool) = SqlitePoolOptions::new()
             .max_connections(1)
             .connect(&format!("sqlite:{}", config_path.display()))
             .await
+    {
+        if let Ok(row) = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT value FROM config WHERE key = 'db_split_done'",
+        )
+        .fetch_one(&pool)
+        .await
+            && row.as_deref() == Some("true")
         {
-            if let Ok(row) = sqlx::query_scalar::<_, Option<String>>(
-                "SELECT value FROM config WHERE key = 'db_split_done'",
-            )
-            .fetch_one(&pool)
-            .await
-            {
-                if row.as_deref() == Some("true") {
-                    // 迁移已完成，清理可能残留的失败标记（上次失败→本次成功的场景）
-                    let _ = sqlx::query("DELETE FROM config WHERE key = 'migration_failed'")
-                        .execute(&pool)
-                        .await;
-                    pool.close().await;
-                    tracing::info!("DB 四层拆分已迁移过，跳过");
-                    return Ok(());
-                }
-            }
+            // 迁移已完成，清理可能残留的失败标记（上次失败→本次成功的场景）
+            let _ = sqlx::query("DELETE FROM config WHERE key = 'migration_failed'")
+                .execute(&pool)
+                .await;
             pool.close().await;
+            tracing::info!("DB 四层拆分已迁移过，跳过");
+            return Ok(());
         }
+        pool.close().await;
     }
 
     if !legacy_path.exists() {

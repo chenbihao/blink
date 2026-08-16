@@ -95,8 +95,10 @@ pub async fn migrate_0_4_to_0_5(
             .await
             .is_none()
         {
-            let mut default_config = crate::domain::config::PluginConfig::default();
-            default_config.settings = plugin.manifest().default_settings();
+            let default_config = crate::domain::config::PluginConfig {
+                settings: plugin.manifest().default_settings(),
+                ..Default::default()
+            };
             match serde_json::to_string(&default_config) {
                 Ok(json) => {
                     if let Err(e) = crate::infra::data::config::set_config(pool, &key, &json).await

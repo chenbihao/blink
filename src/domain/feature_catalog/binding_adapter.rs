@@ -134,8 +134,10 @@ mod tests {
 
     #[test]
     fn enable_removes_from_disabled() {
-        let mut config = AppConfig::default();
-        config.disabled_builtin_actions = vec!["open_settings".into(), "lock".into()];
+        let mut config = AppConfig {
+            disabled_builtin_actions: vec!["open_settings".into(), "lock".into()],
+            ..Default::default()
+        };
 
         let result = apply_single_op(
             &mut config,
@@ -161,8 +163,10 @@ mod tests {
 
     #[test]
     fn disable_adds_to_disabled() {
-        let mut config = AppConfig::default();
-        config.disabled_builtin_actions = vec![];
+        let mut config = AppConfig {
+            disabled_builtin_actions: vec![],
+            ..Default::default()
+        };
 
         let result = apply_single_op(
             &mut config,
@@ -183,8 +187,10 @@ mod tests {
 
     #[test]
     fn disable_idempotent() {
-        let mut config = AppConfig::default();
-        config.disabled_builtin_actions = vec!["open_settings".into()];
+        let mut config = AppConfig {
+            disabled_builtin_actions: vec!["open_settings".into()],
+            ..Default::default()
+        };
 
         let result = apply_single_op(
             &mut config,
@@ -201,8 +207,10 @@ mod tests {
 
     #[test]
     fn enable_idempotent() {
-        let mut config = AppConfig::default();
-        config.disabled_builtin_actions = vec![]; // 本来就没有
+        let mut config = AppConfig {
+            disabled_builtin_actions: vec![], // 本来就没有
+            ..Default::default()
+        };
 
         let result = apply_single_op(
             &mut config,
@@ -219,8 +227,10 @@ mod tests {
 
     #[test]
     fn chord_key_strips_prefix() {
-        let mut config = AppConfig::default();
-        config.disabled_chord_actions = vec![];
+        let mut config = AppConfig {
+            disabled_chord_actions: vec![],
+            ..Default::default()
+        };
 
         let result = apply_single_op(
             &mut config,
@@ -241,8 +251,10 @@ mod tests {
 
     #[test]
     fn context_binding_uses_correct_list() {
-        let mut config = AppConfig::default();
-        config.disabled_context_bindings = vec![];
+        let mut config = AppConfig {
+            disabled_context_bindings: vec![],
+            ..Default::default()
+        };
 
         let result = apply_single_op(
             &mut config,
@@ -266,8 +278,10 @@ mod tests {
 
     #[test]
     fn batch_operations_mixed() {
-        let mut config = AppConfig::default();
-        config.disabled_builtin_actions = vec!["lock".into()];
+        let mut config = AppConfig {
+            disabled_builtin_actions: vec!["lock".into()],
+            ..Default::default()
+        };
 
         // 禁用 open_settings + 启用 lock + 禁用 chord.screenshot
         let ops = vec![

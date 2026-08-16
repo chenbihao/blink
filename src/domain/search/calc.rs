@@ -48,13 +48,13 @@ fn ints_to_float(s: &str) -> String {
         if c.is_ascii_digit() {
             let mut num = String::new();
             num.push(c);
-            while chars.peek().map_or(false, |c| c.is_ascii_digit()) {
+            while chars.peek().is_some_and(|c| c.is_ascii_digit()) {
                 num.push(chars.next().unwrap());
             }
             if chars.peek() == Some(&'.') {
                 // 已是小数：连同小数点和小数部分一起消费，不补 ".0"
                 num.push(chars.next().unwrap()); // '.'
-                while chars.peek().map_or(false, |c| c.is_ascii_digit()) {
+                while chars.peek().is_some_and(|c| c.is_ascii_digit()) {
                     num.push(chars.next().unwrap());
                 }
             } else {

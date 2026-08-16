@@ -91,7 +91,8 @@ mod tests {
     #[test]
     fn phase_0_20_7_capabilities_are_in_inventory() {
         let registry = crate::domain::capability::CapabilityRegistry::new();
-        for id in ["analyze_image_palette"] {
+        {
+            let id = "analyze_image_palette";
             assert!(registry.get(id).is_some(), "{id} 应通过 inventory 注册");
         }
     }

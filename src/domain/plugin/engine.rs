@@ -204,12 +204,13 @@ impl PluginEngine {
     /// 插件声明为 false）；默认 `settings` 走 `manifest.default_settings()`（无 schema 则 null）。
     /// main.rs 在构造后、注入 SearchService 前 `block_on` 调用。
     pub async fn init_configs(&self) {
-        let mut configs = self.configs.write().unwrap();
+        // 先完成全部 DB 读写，再短暂持锁合并——避免 RwLock guard 跨 await
+        let mut loaded = HashMap::new();
         for plugin in &self.plugins {
             let id = plugin.id();
             match crate::domain::config::get_plugin_config(&self.pool, id).await {
                 Some(cfg) => {
-                    configs.insert(id.to_string(), cfg);
+                    loaded.insert(id.to_string(), cfg);
                 }
                 None => {
                     // 首装：从 manifest 生成默认配置。
@@ -217,9 +218,11 @@ impl PluginEngine {
                     // - enabled 走 manifest.default_enabled（缺省 true；需配置密钥
                     //   才能用的插件如翻译声明为 false，避免装完就撞到无法工作的入口）
                     let manifest = plugin.manifest();
-                    let mut default = crate::domain::config::PluginConfig::default();
-                    default.settings = manifest.default_settings();
-                    default.enabled = manifest.default_enabled;
+                    let default = crate::domain::config::PluginConfig {
+                        settings: manifest.default_settings(),
+                        enabled: manifest.default_enabled,
+                        ..Default::default()
+                    };
                     match crate::domain::config::set_plugin_config(&self.pool, id, &default).await {
                         Ok(()) => tracing::info!(
                             plugin = %id,
@@ -228,10 +231,11 @@ impl PluginEngine {
                         ),
                         Err(e) => tracing::warn!(plugin = %id, error = %e, "写默认插件配置失败"),
                     }
-                    configs.insert(id.to_string(), default);
+                    loaded.insert(id.to_string(), default);
                 }
             }
         }
+        self.configs.write().unwrap().extend(loaded);
     }
 
     /// 更新插件配置:写 DB + 更新内存 map(command 层 `update_plugin_config` 调)。
@@ -248,12 +252,12 @@ impl PluginEngine {
             .insert(plugin_id.to_string(), config.clone());
 
         // 如果传入了 router，热更新触发规则
-        if let Some(r) = router {
-            if let Some(manifest) = self.get_manifest(plugin_id) {
-                let effective_triggers = config.effective_triggers(&manifest.triggers);
-                r.reload_plugin_triggers(plugin_id, &effective_triggers);
-                tracing::info!(plugin = %plugin_id, "插件配置更新,触发规则已热重载");
-            }
+        if let Some(r) = router
+            && let Some(manifest) = self.get_manifest(plugin_id)
+        {
+            let effective_triggers = config.effective_triggers(&manifest.triggers);
+            r.reload_plugin_triggers(plugin_id, &effective_triggers);
+            tracing::info!(plugin = %plugin_id, "插件配置更新,触发规则已热重载");
         }
 
         Ok(())

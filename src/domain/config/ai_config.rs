@@ -164,10 +164,10 @@ pub fn init_ai_cache(config: AIConfig) {
 
 /// 更新 AIConfig 缓存（set_config 'ai_config' 命令调用后同步）。
 pub fn update_ai_cache(config: &AIConfig) {
-    if let Some(lock) = AI_CONFIG_CACHE.get() {
-        if let Ok(mut guard) = lock.write() {
-            *guard = config.clone();
-        }
+    if let Some(lock) = AI_CONFIG_CACHE.get()
+        && let Ok(mut guard) = lock.write()
+    {
+        *guard = config.clone();
     }
 }
 

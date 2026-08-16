@@ -66,8 +66,8 @@ pub fn inject_text_unicode(text: &str) -> Result<(), InjectError> {
     for &code_unit in &utf16 {
         if code_unit == b'\n' as u16 || code_unit == b'\r' as u16 {
             // 换行符用 VK_RETURN 代替（KEYEVENTF_UNICODE 发 \n 很多应用不认）
-            inputs.push(make_keydown(VK_RETURN.0 as u16, KEYBD_EVENT_FLAGS(0)));
-            inputs.push(make_keyup(VK_RETURN.0 as u16, KEYEVENTF_KEYUP));
+            inputs.push(make_keydown(VK_RETURN.0, KEYBD_EVENT_FLAGS(0)));
+            inputs.push(make_keyup(VK_RETURN.0, KEYEVENTF_KEYUP));
         } else {
             // 普通字符：KEYEVENTF_UNICODE 逐码元发送
             inputs.push(make_keydown(code_unit, KEYEVENTF_UNICODE));
@@ -141,10 +141,10 @@ pub fn inject_text_clipboard(text: &str) -> Result<(), InjectError> {
     let backup = read_clipboard_text();
 
     // 2. 设置剪贴板为 STT 文本
-    set_clipboard_text(text).map_err(|e| InjectError::Clipboard(e))?;
+    set_clipboard_text(text).map_err(InjectError::Clipboard)?;
 
     // 3. SendInput: Ctrl↓ → V↓ → V↑ → Ctrl↑
-    send_paste().map_err(|e| InjectError::SendInput(e))?;
+    send_paste().map_err(InjectError::SendInput)?;
 
     // 4. 等待前台应用处理粘贴（100ms：Electron/Office 等需要更多时间）
     std::thread::sleep(Duration::from_millis(100));
@@ -163,7 +163,7 @@ fn read_clipboard_text() -> Option<String> {
         // OleInitialize 确保剪贴板可用(可能已由 Tauri 初始化,OleInitialize 可重入)
         let _ = OleInitialize(None);
 
-        if !OpenClipboard(None).is_ok() {
+        if OpenClipboard(None).is_err() {
             return None;
         }
         let _guard = ClipboardGuard;
@@ -186,7 +186,7 @@ fn set_clipboard_text(text: &str) -> Result<(), String> {
     unsafe {
         let _ = OleInitialize(None);
 
-        if !OpenClipboard(None).is_ok() {
+        if OpenClipboard(None).is_err() {
             return Err("OpenClipboard failed".into());
         }
         let _guard = ClipboardGuard;

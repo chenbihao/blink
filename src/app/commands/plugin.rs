@@ -10,7 +10,7 @@ pub async fn get_plugins(app: tauri::AppHandle) -> Vec<serde_json::Value> {
     let engine = app.state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>();
     // 读当前语言,供 manifest 配置文案按 locale 取值(设置页中英双语)
     let pool = &app.state::<crate::infra::data::DbPools>().config;
-    let lang = crate::app::config::get_config(&pool).await.language;
+    let lang = crate::app::config::get_config(pool).await.language;
     engine.list_plugins(&lang)
 }
 
@@ -132,7 +132,7 @@ pub async fn import_skill(source_path: String, mode: String) -> Result<String, S
     match mode.as_str() {
         "symlink" => {
             // 尝试创建符号链接
-            match std::os::windows::fs::symlink_dir(&source_dir, &target_dir) {
+            match std::os::windows::fs::symlink_dir(source_dir, &target_dir) {
                 Ok(()) => {
                     tracing::info!(
                         skill = %skill_name,
@@ -157,7 +157,7 @@ pub async fn import_skill(source_path: String, mode: String) -> Result<String, S
                 }
             }
         }
-        "copy" | _ => {
+        _ => {
             copy_dir_recursive(source_dir, &target_dir)?;
             tracing::info!(
                 skill = %skill_name,

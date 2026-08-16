@@ -187,19 +187,18 @@ pub async fn create_conversation(
 
     // INSERT 被 IGNORE（rows_affected = 0 表示记录已存在）时，
     // 如果新 title 非空，尝试补写到空标题的记录
-    if result.rows_affected() == 0 {
-        if let Some(t) = title {
-            if !t.is_empty() {
-                sqlx::query(
-                "UPDATE conversations SET title = ?1 WHERE id = ?2 AND (title IS NULL OR title = '')",
-            )
-            .bind(t)
-            .bind(id)
-            .execute(pool)
-            .await
-            .map_err(|e| e.to_string())?;
-            }
-        }
+    if result.rows_affected() == 0
+        && let Some(t) = title
+        && !t.is_empty()
+    {
+        sqlx::query(
+            "UPDATE conversations SET title = ?1 WHERE id = ?2 AND (title IS NULL OR title = '')",
+        )
+        .bind(t)
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -227,9 +226,12 @@ pub async fn touch_conversation(pool: &SqlitePool, id: &str) -> Result<(), Strin
     Ok(())
 }
 
+/// `list_conversations` 的 SQL 行（id, title, created_at, last_active_at, group_id, msg_count）。
+type ConversationRow = (String, Option<String>, i64, i64, Option<String>, i64);
+
 /// 列出所有对话（按 last_active_at 倒序），含消息条数和 group_id。
 pub async fn list_conversations(pool: &SqlitePool) -> Result<Vec<Conversation>, String> {
-    let rows: Vec<(String, Option<String>, i64, i64, Option<String>, i64)> = sqlx::query_as(
+    let rows: Vec<ConversationRow> = sqlx::query_as(
         "SELECT c.id, c.title, c.created_at, c.last_active_at, c.group_id, \
          (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS msg_count \
          FROM conversations c ORDER BY c.last_active_at DESC, c.rowid DESC",
@@ -529,17 +531,20 @@ pub async fn delete_group(pool: &SqlitePool, id: &str) -> Result<bool, String> {
     Ok(result.rows_affected() > 0)
 }
 
+/// `list_groups` 的 SQL 行（id, name, system_prompt, parent_id, sort_order, expanded, created_at）。
+type GroupRow = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    i64,
+    i64,
+    i64,
+);
+
 /// 列出所有分组（按 sort_order 升序，含 parent_id 供前端构建树）。
 pub async fn list_groups(pool: &SqlitePool) -> Vec<ConversationGroup> {
-    let rows: Vec<(
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        i64,
-        i64,
-        i64,
-    )> = sqlx::query_as(
+    let rows: Vec<GroupRow> = sqlx::query_as(
         "SELECT id, name, system_prompt, parent_id, sort_order, expanded, created_at \
              FROM conversation_groups ORDER BY sort_order ASC, created_at ASC",
     )

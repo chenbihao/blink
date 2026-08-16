@@ -36,7 +36,8 @@ const RETAIN_DAYS: u64 = 7;
 /// 非阻塞 writer 的 guard（必须保活到程序结束，否则可能丢末尾日志）
 static GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 /// 动态级别切换（闭包包装 reload handle，避免暴露泛型类型）
-static RELOAD: OnceLock<Box<dyn Fn(&str) + Send + Sync>> = OnceLock::new();
+type ReloadFn = Box<dyn Fn(&str) + Send + Sync>;
+static RELOAD: OnceLock<ReloadFn> = OnceLock::new();
 /// AI 详细日志开关（设置页切换，true 时解除 rig/rig_core 压制）
 static AI_VERBOSE: AtomicBool = AtomicBool::new(false);
 /// 当前日志级别（供 update_ai_verbose_log 重载用）
@@ -192,16 +193,15 @@ fn clean_old_logs(dir: &PathBuf) {
         let is_log = entry
             .file_name()
             .to_str()
-            .map_or(false, |n| n.starts_with("blink.") && n.ends_with(".log"));
+            .is_some_and(|n| n.starts_with("blink.") && n.ends_with(".log"));
         if !is_log {
             continue;
         }
-        if let Ok(meta) = entry.metadata() {
-            if let Ok(modified) = meta.modified() {
-                if modified < cutoff {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-            }
+        if let Ok(meta) = entry.metadata()
+            && let Ok(modified) = meta.modified()
+            && modified < cutoff
+        {
+            let _ = std::fs::remove_file(entry.path());
         }
     }
 }

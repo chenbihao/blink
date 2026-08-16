@@ -58,20 +58,19 @@ pub async fn init(pool: &sqlx::SqlitePool) -> Result<(), String> {
 pub fn get_icon_png(path: &str) -> Option<Vec<u8>> {
     // Layer 1: 内存 LRU 缓存
     {
-        if let Ok(mut cache) = ICON_CACHE.lock() {
-            if let Some(map) = cache.as_mut() {
-                if let Some(entry) = map.get_mut(path) {
-                    // 更新访问时间
-                    entry.last_access = Instant::now();
-                    crate::infra::utils::perf::record(
-                        crate::infra::utils::perf::MetricCategory::IconExtract,
-                        "hit",
-                        0.0,
-                        None,
-                    );
-                    return entry.data.clone();
-                }
-            }
+        if let Ok(mut cache) = ICON_CACHE.lock()
+            && let Some(map) = cache.as_mut()
+            && let Some(entry) = map.get_mut(path)
+        {
+            // 更新访问时间
+            entry.last_access = Instant::now();
+            crate::infra::utils::perf::record(
+                crate::infra::utils::perf::MetricCategory::IconExtract,
+                "hit",
+                0.0,
+                None,
+            );
+            return entry.data.clone();
         }
     }
 
@@ -117,14 +116,13 @@ pub fn get_icon_png(path: &str) -> Option<Vec<u8>> {
     if let Ok(mut cache) = ICON_CACHE.lock() {
         let map = cache.get_or_insert_with(HashMap::new);
         // LRU 淘汰：超过容量时删除最久未访问的
-        if map.len() >= MEMORY_CACHE_CAPACITY {
-            if let Some(oldest_key) = map
+        if map.len() >= MEMORY_CACHE_CAPACITY
+            && let Some(oldest_key) = map
                 .iter()
                 .min_by_key(|(_, entry)| entry.last_access)
                 .map(|(k, _)| k.clone())
-            {
-                map.remove(&oldest_key);
-            }
+        {
+            map.remove(&oldest_key);
         }
         map.insert(
             path.to_string(),
@@ -146,13 +144,12 @@ pub fn get_stock_icon_png(stock_id: u32) -> Option<Vec<u8>> {
 
     // Layer 1: 内存 LRU 缓存
     {
-        if let Ok(mut cache) = ICON_CACHE.lock() {
-            if let Some(map) = cache.as_mut() {
-                if let Some(entry) = map.get_mut(&cache_key) {
-                    entry.last_access = Instant::now();
-                    return entry.data.clone();
-                }
-            }
+        if let Ok(mut cache) = ICON_CACHE.lock()
+            && let Some(map) = cache.as_mut()
+            && let Some(entry) = map.get_mut(&cache_key)
+        {
+            entry.last_access = Instant::now();
+            return entry.data.clone();
         }
     }
 
@@ -180,14 +177,13 @@ pub fn get_stock_icon_png(stock_id: u32) -> Option<Vec<u8>> {
 
     if let Ok(mut cache) = ICON_CACHE.lock() {
         let map = cache.get_or_insert_with(HashMap::new);
-        if map.len() >= MEMORY_CACHE_CAPACITY {
-            if let Some(oldest_key) = map
+        if map.len() >= MEMORY_CACHE_CAPACITY
+            && let Some(oldest_key) = map
                 .iter()
                 .min_by_key(|(_, entry)| entry.last_access)
                 .map(|(k, _)| k.clone())
-            {
-                map.remove(&oldest_key);
-            }
+        {
+            map.remove(&oldest_key);
         }
         map.insert(
             cache_key,
@@ -292,7 +288,7 @@ fn extract_stock_icon(stock_id: u32) -> Option<Vec<u8>> {
         let _ = DeleteObject(icon_info.hbmMask.into());
         let _ = DestroyIcon(hicon);
 
-        if scanlines != height as i32 {
+        if scanlines != height {
             return None;
         }
 
@@ -509,7 +505,7 @@ fn extract_icon_png(path: &str, size: i32) -> Option<Vec<u8>> {
         ReleaseDC(None, hdc);
         let _ = windows::Win32::Graphics::Gdi::DeleteObject(hbitmap.into());
 
-        if scanlines != height as i32 {
+        if scanlines != height {
             // 0 = 失败；不足 height = 只取到部分扫描线，剩余是零初始化像素，
             // 编码出来是半截/损坏图标，按失败降级（缓存 None 避免反复重试）。
             tracing::debug!(%path, scanlines, height, "GetDIBits 未取到完整位图");

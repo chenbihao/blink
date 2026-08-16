@@ -59,7 +59,7 @@ pub async fn get_clipboard_history(
     limit: Option<i64>,
 ) -> Vec<crate::infra::data::clipboard::ClipboardItem> {
     let pool = &app.state::<crate::infra::data::DbPools>().history;
-    crate::infra::data::clipboard::query_recent(&pool, limit.unwrap_or(20)).await
+    crate::infra::data::clipboard::query_recent(pool, limit.unwrap_or(20)).await
 }
 
 /// 搜索剪贴板历史。
@@ -70,7 +70,7 @@ pub async fn search_clipboard_history(
     limit: Option<i64>,
 ) -> Vec<crate::infra::data::clipboard::ClipboardItem> {
     let pool = &app.state::<crate::infra::data::DbPools>().history;
-    crate::infra::data::clipboard::search(&pool, &query, limit.unwrap_or(20)).await
+    crate::infra::data::clipboard::search(pool, &query, limit.unwrap_or(20)).await
 }
 
 /// 按 id 拉取完整 text（延迟加载）。
@@ -119,7 +119,7 @@ pub async fn get_clipboard_text_batch(
 #[tauri::command]
 pub async fn delete_clipboard_item(app: tauri::AppHandle, id: String) -> Result<(), String> {
     let pool = &app.state::<crate::infra::data::DbPools>().history;
-    crate::infra::data::clipboard::delete_item(&pool, &id).await;
+    crate::infra::data::clipboard::delete_item(pool, &id).await;
     Ok(())
 }
 
@@ -149,8 +149,8 @@ pub async fn clear_clipboard_images(app: tauri::AppHandle) -> Result<(), String>
 #[tauri::command]
 pub async fn clear_clipboard_history(app: tauri::AppHandle) -> Result<(), String> {
     let pool = &app.state::<crate::infra::data::DbPools>().history;
-    crate::infra::data::clipboard::clear_all(&pool).await;
-    crate::infra::data::vacuum(&pool).await; // 0.16.0: 收缩数据库文件
+    crate::infra::data::clipboard::clear_all(pool).await;
+    crate::infra::data::vacuum(pool).await; // 0.16.0: 收缩数据库文件
     Ok(())
 }
 
@@ -162,11 +162,11 @@ pub async fn get_clipboard_stats(app: tauri::AppHandle) -> serde_json::Value {
     let image_stats = crate::infra::data::clipboard_images::get_image_stats(&pools.cache).await;
     // 合并文本和图片统计
     let mut stats = text_stats;
-    if let serde_json::Value::Object(ref mut map) = stats {
-        if let serde_json::Value::Object(img_map) = image_stats {
-            for (k, v) in img_map {
-                map.insert(k, v);
-            }
+    if let serde_json::Value::Object(ref mut map) = stats
+        && let serde_json::Value::Object(img_map) = image_stats
+    {
+        for (k, v) in img_map {
+            map.insert(k, v);
         }
     }
     stats

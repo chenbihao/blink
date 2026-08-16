@@ -74,7 +74,8 @@ pub fn dispatch(cli: Cli) -> i32 {
     let handle = app.handle().clone();
 
     // 执行 CLI 命令
-    let exit_code = match cli.command {
+
+    match cli.command {
         Commands::McpServer => run_mcp_server(),
         Commands::Search { query, json } => run_search(&handle, &query, json),
         Commands::Run { capability, args } => {
@@ -86,9 +87,7 @@ pub fn dispatch(cli: Cli) -> i32 {
             model,
             conversation,
         } => run_chat(&handle, model, conversation),
-    };
-
-    exit_code
+    }
 }
 
 /// `blink mcp-server` — 已迁移到主进程 Streamable HTTP（0.19.13）。

@@ -386,13 +386,13 @@ impl SttConfig {
 
         // 从 ProviderKind + base_url 反推 STT kind 字符串
         let kind = match provider.kind {
-            super::ai_config::ProviderKind::OpenAICompatible => {
+            super::ai_config::ProviderKind::OpenAICompatible
                 // 检查 base_url 是否为 mimo
                 if provider
                     .base_url
                     .as_deref()
                     .is_some_and(|u| u.contains("xiaomimimo.com"))
-                {
+                => {
                     if provider
                         .base_url
                         .as_deref()
@@ -402,10 +402,7 @@ impl SttConfig {
                     } else {
                         "mimo"
                     }
-                } else {
-                    "openai"
                 }
-            }
             _ => "openai", // 其他 kind 降级为 openai
         };
 
@@ -437,10 +434,10 @@ pub fn init_cache(config: SttConfig) {
 
 /// 更新配置缓存（set_stt_config 命令调用后同步）。
 pub fn update_cache(config: &SttConfig) {
-    if let Some(lock) = CONFIG_CACHE.get() {
-        if let Ok(mut guard) = lock.write() {
-            *guard = config.clone();
-        }
+    if let Some(lock) = CONFIG_CACHE.get()
+        && let Ok(mut guard) = lock.write()
+    {
+        *guard = config.clone();
     }
 }
 

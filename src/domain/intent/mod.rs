@@ -41,15 +41,10 @@ pub enum Surface {
 }
 
 /// takeover 时的内容形态。0.4 仅 `List`,P3 扩展 `Chat`/`Custom`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SurfaceView {
+    #[default]
     List,
-}
-
-impl Default for SurfaceView {
-    fn default() -> Self {
-        SurfaceView::List
-    }
 }
 
 // ── 执行参数 / 排序梯标（0.8.4 §5.3.1 / §5.3.2 四域架构）─────────
@@ -69,7 +64,7 @@ impl Default for SurfaceView {
 /// `run_builtin_action` 命令入口对前端 arg 会**无条件包装**成 `UserExplicit`
 /// （自我认证，非不可伪造）。本地受信 WebView 够用，但 0.9 接 AI Provider 时
 /// **勿**误以为能防「AI 构造的恶意 invoke」——它只防后端域越界，不防受信入口外的构造。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ExecArg {
     /// 用户显式给的参数——**唯一合法的执行参数来源**。
     ///
@@ -80,6 +75,7 @@ pub enum ExecArg {
     UserExplicit(String),
 
     /// 无参——走 empty_arg_hint 或插件内部决策。显式的「无参数」语义，优于 `Option::None` 空值。
+    #[default]
     None,
 }
 
@@ -131,12 +127,6 @@ impl ExecArg {
             ExecArg::UserExplicit(s) => s.clone(),
             ExecArg::None => String::new(),
         }
-    }
-}
-
-impl Default for ExecArg {
-    fn default() -> Self {
-        ExecArg::None
     }
 }
 
@@ -718,13 +708,13 @@ impl IntentRouter for RuleRouter {
         //     放在 plugin/context 之前判是因为语义强度天然更高（本体自家数据）。
         //     takeover_enabled=false 时降级 Mixed——engine 只作 candidate 加不了排序，
         //     0.8.5 阶段行为回退到"和其他引擎混排"，跟 plugin Takeover 降级同心智。
-        if takeover_enabled {
-            if let Some(hit) = match_engine_keyword(q, &self.engine_rules.read().unwrap()) {
-                return Route::EngineTakeover {
-                    engine_id: hit.0,
-                    arg: hit.1,
-                };
-            }
+        if takeover_enabled
+            && let Some(hit) = match_engine_keyword(q, &self.engine_rules.read().unwrap())
+        {
+            return Route::EngineTakeover {
+                engine_id: hit.0,
+                arg: hit.1,
+            };
         }
 
         // ── 0.5. AI 前缀触发（0.9.x）────────────────────────────────
@@ -990,11 +980,11 @@ impl RuleRouter {
             }
 
             // 2. 启用态过滤（0.8.3 §4.13 P1「运行时查启用态」）
-            if let Some(r) = resolver.as_ref() {
-                if !r.is_enabled(&rule.plugin_id) {
-                    tracing::trace!(plugin = %rule.plugin_id, "target 插件已禁用,跳过 context binding");
-                    continue;
-                }
+            if let Some(r) = resolver.as_ref()
+                && !r.is_enabled(&rule.plugin_id)
+            {
+                tracing::trace!(plugin = %rule.plugin_id, "target 插件已禁用,跳过 context binding");
+                continue;
             }
 
             // 3. 解析 target
@@ -1356,15 +1346,7 @@ fn surface_max(a: Surface, b: Surface) -> Surface {
 /// 场景（一段英文、一段代码注释）都够用。
 fn truncate_arg(s: &str) -> String {
     const MAX_CHARS: usize = 2000;
-    let mut count = 0;
-    let mut end = s.len();
-    for (i, _) in s.char_indices() {
-        if count == MAX_CHARS {
-            end = i;
-            break;
-        }
-        count += 1;
-    }
+    let end = s.char_indices().nth(MAX_CHARS).map_or(s.len(), |(i, _)| i);
     if end == s.len() {
         s.to_string()
     } else {

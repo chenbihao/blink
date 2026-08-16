@@ -71,7 +71,7 @@ impl Capability for OpenPath {
 
         tracing::debug!(%path, "open_path capability: 打开路径");
 
-        if let Err(e) = open::that(&path) {
+        if let Err(e) = open::that(path) {
             tracing::error!(error = %e, %path, "打开路径失败");
             return Err(CapabilityError::Internal {
                 detail: format!("打开路径失败: {e}"),

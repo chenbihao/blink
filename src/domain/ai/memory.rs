@@ -23,6 +23,7 @@
 //! 启发式估算（不引入 tokenizer 依赖）：
 //! - CJK 字符占比 > 30% → chars / 1.5（中文档）
 //! - 否则 → chars / 4（英文件，OpenAI 经验值）
+//!
 //! 误差 ±20% 可接受——压缩阈值留 buffer（80% 触发，不要求精确）。
 //!
 //! ## 自动创建对话
@@ -548,10 +549,10 @@ impl SqliteConversationMemory {
         for msg in messages.iter().rev() {
             if let Message::User { content } = msg {
                 for item in content.iter() {
-                    if let UserContent::Text(t) = item {
-                        if !t.text.is_empty() {
-                            return t.text.clone();
-                        }
+                    if let UserContent::Text(t) = item
+                        && !t.text.is_empty()
+                    {
+                        return t.text.clone();
                     }
                 }
             }
@@ -600,18 +601,15 @@ impl SqliteConversationMemory {
 fn drop_leading_orphan_tool_results(messages: &mut Vec<Message>) {
     let mut drop_count = 0;
     for msg in messages.iter() {
-        match msg {
-            Message::User { content } => {
-                // 检查是否 **全部** 是 ToolResult（纯 ToolResult 消息）
-                let all_tool_results = content
-                    .iter()
-                    .all(|c| matches!(c, UserContent::ToolResult(_)));
-                if all_tool_results && !content.is_empty() {
-                    drop_count += 1;
-                    continue;
-                }
+        if let Message::User { content } = msg {
+            // 检查是否 **全部** 是 ToolResult（纯 ToolResult 消息）
+            let all_tool_results = content
+                .iter()
+                .all(|c| matches!(c, UserContent::ToolResult(_)));
+            if all_tool_results && !content.is_empty() {
+                drop_count += 1;
+                continue;
             }
-            _ => {}
         }
         break;
     }
@@ -1060,7 +1058,7 @@ mod tests {
         // "hello world" = 11 chars, 11/4 ≈ 2 tokens
         let tokens = estimate_tokens("hello world");
         assert!(
-            tokens >= 2 && tokens <= 3,
+            (2..=3).contains(&tokens),
             "English estimate should be ~2-3, got {tokens}"
         );
     }
@@ -1070,7 +1068,7 @@ mod tests {
         // "你好世界测试" = 6 CJK chars, 6/1.5 = 4 tokens
         let tokens = estimate_tokens("你好世界测试");
         assert!(
-            tokens >= 3 && tokens <= 6,
+            (3..=6).contains(&tokens),
             "Chinese estimate should be ~3-6, got {tokens}"
         );
     }
@@ -1126,14 +1124,14 @@ mod tests {
         );
 
         // 剩余消息应该是最新的（编号较大的）
-        if let Message::User { content } = &msgs[0] {
-            if let Some(UserContent::Text(t)) = content.iter().next() {
-                // 第一条剩余消息的编号应该 > 0（旧消息被移出）
-                assert!(
-                    t.text.contains("message number"),
-                    "First message should be a user message"
-                );
-            }
+        if let Message::User { content } = &msgs[0]
+            && let Some(UserContent::Text(t)) = content.iter().next()
+        {
+            // 第一条剩余消息的编号应该 > 0（旧消息被移出）
+            assert!(
+                t.text.contains("message number"),
+                "First message should be a user message"
+            );
         }
     }
 

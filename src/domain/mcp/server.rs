@@ -266,8 +266,9 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
     fn get_info(&self) -> ServerInfo {
         let mut caps = ServerCapabilities::default();
         // 0.19.13: 声明 tools.listChanged = true，让 client 知道我们支持热刷新
-        let mut tools_caps = rmcp::model::ToolsCapability::default();
-        tools_caps.list_changed = Some(true);
+        let tools_caps = rmcp::model::ToolsCapability {
+            list_changed: Some(true),
+        };
         caps.tools = Some(tools_caps);
         let mut info = InitializeResult::new(caps);
         info.server_info = Implementation::new("blink", env!("CARGO_PKG_VERSION"));
@@ -301,10 +302,7 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
         context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<CallToolResult, rmcp::ErrorData>> + Send + '_ {
         let tool_name = request.name.to_string();
-        let args = request
-            .arguments
-            .map(|m| Value::Object(m))
-            .unwrap_or(Value::Null);
+        let args = request.arguments.map(Value::Object).unwrap_or(Value::Null);
 
         let cap_registry = self.cap_registry.clone();
         let ai_pool = self.ai_pool.clone();

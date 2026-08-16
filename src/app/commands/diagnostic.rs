@@ -115,10 +115,10 @@ pub async fn get_storage_info(app: tauri::AppHandle) -> serde_json::Value {
 pub fn open_data_folder() -> Result<(), String> {
     let data_dir = crate::infra::utils::paths::app_data_dir();
     // 目录不存在时先创建，避免 explorer 打开"文档"等默认位置
-    if !data_dir.exists() {
-        if let Err(e) = std::fs::create_dir_all(&data_dir) {
-            return Err(format!("创建数据目录失败: {e}"));
-        }
+    if !data_dir.exists()
+        && let Err(e) = std::fs::create_dir_all(&data_dir)
+    {
+        return Err(format!("创建数据目录失败: {e}"));
     }
     std::process::Command::new("explorer.exe")
         .arg(&data_dir)
@@ -273,7 +273,7 @@ pub async fn check_update(app: tauri::AppHandle) -> serde_json::Value {
     // 读取全局代理配置，与插件 HTTP 请求共用
     let proxy_url = {
         let pool = &app.state::<crate::infra::data::DbPools>().config;
-        let cfg = crate::app::config::get_engine_config(&pool, "_global_proxy").await;
+        let cfg = crate::app::config::get_engine_config(pool, "_global_proxy").await;
         cfg.and_then(|v| {
             let https = v
                 .get("https")
@@ -412,7 +412,7 @@ pub async fn probe_interpreters(
 #[tauri::command]
 pub async fn get_interpreter_paths(app: tauri::AppHandle) -> serde_json::Value {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
-    crate::infra::data::history::get_config(&pool, "interpreter_paths")
+    crate::infra::data::history::get_config(pool, "interpreter_paths")
         .await
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(serde_json::json!({}))
@@ -422,7 +422,7 @@ pub async fn get_interpreter_paths(app: tauri::AppHandle) -> serde_json::Value {
 #[tauri::command]
 pub async fn get_perf_overview(app: tauri::AppHandle) -> serde_json::Value {
     let pool = &app.state::<crate::infra::data::DbPools>().cache;
-    crate::infra::utils::perf::get_overview(&pool).await
+    crate::infra::utils::perf::get_overview(pool).await
 }
 
 /// 查询指定指标的 P50/P90/P99。
@@ -434,8 +434,7 @@ pub async fn get_perf_percentiles(
     limit: Option<i64>,
 ) -> serde_json::Value {
     let pool = &app.state::<crate::infra::data::DbPools>().cache;
-    crate::infra::utils::perf::query_percentiles(&pool, &category, &name, limit.unwrap_or(100))
-        .await
+    crate::infra::utils::perf::query_percentiles(pool, &category, &name, limit.unwrap_or(100)).await
 }
 
 /// 查询慢查询日志。
@@ -447,7 +446,7 @@ pub async fn get_perf_slow_queries(
     limit: Option<i64>,
 ) -> Vec<crate::infra::utils::perf::PerformanceMetric> {
     let pool = &app.state::<crate::infra::data::DbPools>().cache;
-    crate::infra::utils::perf::query_slow(&pool, &category, threshold_ms, limit.unwrap_or(20)).await
+    crate::infra::utils::perf::query_slow(pool, &category, threshold_ms, limit.unwrap_or(20)).await
 }
 
 /// 查询最近 N 条性能指标。
@@ -457,7 +456,7 @@ pub async fn get_perf_recent(
     limit: Option<i64>,
 ) -> Vec<crate::infra::utils::perf::PerformanceMetric> {
     let pool = &app.state::<crate::infra::data::DbPools>().cache;
-    crate::infra::utils::perf::query_recent(&pool, limit.unwrap_or(100)).await
+    crate::infra::utils::perf::query_recent(pool, limit.unwrap_or(100)).await
 }
 
 /// 导出性能报告（JSON 格式）。
@@ -465,7 +464,7 @@ pub async fn get_perf_recent(
 #[tauri::command]
 pub async fn export_perf_report(app: tauri::AppHandle) -> Result<Option<String>, String> {
     let pool = &app.state::<crate::infra::data::DbPools>().cache;
-    let report = crate::infra::utils::perf::export_report(&pool).await;
+    let report = crate::infra::utils::perf::export_report(pool).await;
 
     // 弹出保存文件对话框
     let default_name = format!(
@@ -503,8 +502,8 @@ pub async fn export_perf_report(app: tauri::AppHandle) -> Result<Option<String>,
 #[tauri::command]
 pub async fn clear_perf_data(app: tauri::AppHandle) -> Result<u64, String> {
     let pool = &app.state::<crate::infra::data::DbPools>().cache;
-    let rows = crate::infra::data::perf::clear_all(&pool).await?;
-    crate::infra::data::vacuum(&pool).await; // 0.16.0: 收缩数据库文件
+    let rows = crate::infra::data::perf::clear_all(pool).await?;
+    crate::infra::data::vacuum(pool).await; // 0.16.0: 收缩数据库文件
     Ok(rows)
 }
 
@@ -682,7 +681,7 @@ pub async fn cleanup_all_data(app: tauri::AppHandle) -> serde_json::Value {
     {
         let pools = app.state::<crate::infra::data::DbPools>();
         let db_names = ["config", "history", "ai", "cache"];
-        let pools_vec = vec![
+        let pools_vec = [
             pools.config.clone(),
             pools.history.clone(),
             pools.ai.clone(),

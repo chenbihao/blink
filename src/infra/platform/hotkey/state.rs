@@ -155,20 +155,11 @@ impl Default for ModifierSideState {
 }
 
 /// 修饰键聚合状态。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct ModifierState {
     sides: [ModifierSideState; 8],
     /// Raw Input 每设备 pressed set（bitmask）。key = device_id。
     raw_devices: HashMap<usize, u8>,
-}
-
-impl Default for ModifierState {
-    fn default() -> Self {
-        Self {
-            sides: Default::default(),
-            raw_devices: HashMap::new(),
-        }
-    }
 }
 
 impl ModifierState {
@@ -291,11 +282,11 @@ impl ModifierState {
     /// Raw up：若该 modifier 曾被 Raw 确认过，将 level 设为 Up；否则保持（Hook up fallback）。
     fn apply_raw(&mut self, key: ModifierKey, is_down: bool, device_id: usize, time_ms: u32) {
         // 时间域过滤
-        if let Some(hook_time) = self.sides[key as usize].last_hook_time {
-            if !time_is_newer(time_ms, hook_time) {
-                // Raw 事件比最近 Hook transition 更旧 → 丢弃
-                return;
-            }
+        if let Some(hook_time) = self.sides[key as usize].last_hook_time
+            && !time_is_newer(time_ms, hook_time)
+        {
+            // Raw 事件比最近 Hook transition 更旧 → 丢弃
+            return;
         }
 
         // 更新 per-device pressed set
@@ -514,8 +505,9 @@ impl Default for InputConfigSnapshot {
 // ── Gesture 状态 ────────────────────────────────────────────────────────────
 
 /// 主热键 gesture 状态（一次主键 down→up）。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum GestureState {
+    #[default]
     Idle,
     /// 主键已按下，等待判定 tap/hold。
     Armed {
@@ -538,12 +530,6 @@ pub enum GestureState {
         key: String,
         source: InputSource,
     },
-}
-
-impl Default for GestureState {
-    fn default() -> Self {
-        GestureState::Idle
-    }
 }
 
 impl GestureState {
@@ -581,20 +567,15 @@ impl GestureState {
 /// Chord 独占会话（窗口可见期间 Alt down→退出 exclusive）。
 ///
 /// 独立标识，不复用主热键 gesture id——窗口可能由托盘/单实例打开后再按 Alt。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum ChordSession {
+    #[default]
     Inactive,
     Active {
         session_id: u64,
         /// 防止 autorepeat 重复触发：记录上次触发的键。
         last_triggered_key: Option<String>,
     },
-}
-
-impl Default for ChordSession {
-    fn default() -> Self {
-        ChordSession::Inactive
-    }
 }
 
 impl ChordSession {
@@ -607,20 +588,11 @@ impl ChordSession {
 // ── 窗口/视图/语音/录制状态 ────────────────────────────────────────────────
 
 /// 主窗口状态。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct MainWindowState {
     pub visible: bool,
     /// Window 模块拥有，每次成功 visibility transition 递增。
     pub revision: u64,
-}
-
-impl Default for MainWindowState {
-    fn default() -> Self {
-        Self {
-            visible: false,
-            revision: 0,
-        }
-    }
 }
 
 /// 主窗口前端视图上下文。
@@ -652,8 +624,9 @@ impl Default for MainViewContext {
 }
 
 /// 语音阶段。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum VoicePhase {
+    #[default]
     Idle,
     /// voice worker 正在启动（generation-aware wiring 尚未接入此阶段）。
     #[allow(dead_code)]
@@ -665,27 +638,14 @@ pub enum VoicePhase {
     },
 }
 
-impl Default for VoicePhase {
-    fn default() -> Self {
-        VoicePhase::Idle
-    }
-}
-
 /// 快捷键录制模式。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum RecorderMode {
+    #[default]
     Idle,
     /// 录制模式（recorder.rs 接入 Controller 后由控制消息设置）。
     #[allow(dead_code)]
-    Recording {
-        recorder_id: u64,
-    },
-}
-
-impl Default for RecorderMode {
-    fn default() -> Self {
-        RecorderMode::Idle
-    }
+    Recording { recorder_id: u64 },
 }
 
 // ── 聚合状态 ────────────────────────────────────────────────────────────────
@@ -733,23 +693,13 @@ impl Default for InputState {
 /// 公开 UI 状态协议（序列化给前端）。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(Default)]
 pub struct InputUiState {
     /// 公开状态发生变化时递增，事件/快照只比较此字段。
     pub revision: u64,
     pub alt_down: bool,
     pub window_visible: bool,
     pub exclusive_chord_active: bool,
-}
-
-impl Default for InputUiState {
-    fn default() -> Self {
-        Self {
-            revision: 0,
-            alt_down: false,
-            window_visible: false,
-            exclusive_chord_active: false,
-        }
-    }
 }
 
 impl InputState {
@@ -1149,14 +1099,14 @@ fn reduce_hook_key(state: &mut InputState, e: HookKeyEvent, now: Instant) -> Red
     // LLKHF_ALTDOWN：非注入主键事件推断 Alt 已按下。
     // 只推断 LAlt--LLKHF_ALTDOWN 不区分左右，推断两侧会导致 mask 多余位使配置匹配失败。
     // 若实际是 RAlt，后续 RAlt Hook 事件会校正。
-    if e.alt_down_flag && !e.injected && e.is_down {
-        if state.modifiers.level(ModifierKey::LAlt) == ModifierLevel::Unknown {
-            state.modifiers.set_level_hook(
-                ModifierKey::LAlt,
-                ModifierLevel::InferredDown,
-                e.time_ms,
-            );
-        }
+    if e.alt_down_flag
+        && !e.injected
+        && e.is_down
+        && state.modifiers.level(ModifierKey::LAlt) == ModifierLevel::Unknown
+    {
+        state
+            .modifiers
+            .set_level_hook(ModifierKey::LAlt, ModifierLevel::InferredDown, e.time_ms);
     }
 
     // hold/voice 期间吞主键 + Alt 的 keydown（防系统菜单"噔噔噔"声）。
@@ -1233,11 +1183,11 @@ fn reduce_hook_key(state: &mut InputState, e: HookKeyEvent, now: Instant) -> Red
         }
 
         // 同一主键 autorepeat → 忽略（仍 armed，不重置）
-        if let GestureState::Armed { key: armed_key, .. } = &state.gesture {
-            if &e.key == armed_key {
-                result.effects.extend(finalize(state));
-                return result;
-            }
+        if let GestureState::Armed { key: armed_key, .. } = &state.gesture
+            && &e.key == armed_key
+        {
+            result.effects.extend(finalize(state));
+            return result;
         }
 
         // armed 后异键 down → abort（但不 return，继续检查 chord）
@@ -1246,30 +1196,30 @@ fn reduce_hook_key(state: &mut InputState, e: HookKeyEvent, now: Instant) -> Red
             aborted,
             ..
         } = &state.gesture
+            && &e.key != armed_key
+            && !aborted
         {
-            if &e.key != armed_key && !aborted {
-                state.gesture = match std::mem::take(&mut state.gesture) {
-                    GestureState::Armed {
-                        gesture_id,
-                        key,
-                        armed_at_ms,
-                        frozen_hotkey,
-                        frozen_tap_threshold,
-                        source,
-                        ..
-                    } => GestureState::Armed {
-                        gesture_id,
-                        key,
-                        armed_at_ms,
-                        frozen_hotkey,
-                        frozen_tap_threshold,
-                        source,
-                        aborted: true,
-                        hold_fired: false,
-                    },
-                    other => other,
-                };
-            }
+            state.gesture = match std::mem::take(&mut state.gesture) {
+                GestureState::Armed {
+                    gesture_id,
+                    key,
+                    armed_at_ms,
+                    frozen_hotkey,
+                    frozen_tap_threshold,
+                    source,
+                    ..
+                } => GestureState::Armed {
+                    gesture_id,
+                    key,
+                    armed_at_ms,
+                    frozen_hotkey,
+                    frozen_tap_threshold,
+                    source,
+                    aborted: true,
+                    hold_fired: false,
+                },
+                other => other,
+            };
         }
 
         // Chord 独占吞键
@@ -1510,29 +1460,30 @@ fn reduce_hold_deadline(state: &mut InputState, gesture_id: u64, _now: Instant) 
         aborted,
         hold_fired,
     } = &state.gesture
+        && *armed_id == gesture_id
+        && !aborted
+        && !hold_fired
     {
-        if *armed_id == gesture_id && !aborted && !hold_fired {
-            // 确认 Hold timer：保持 Armed 但标记 hold_fired
-            // 实际上应该转 Holding，但 Holding 不含 tap_threshold 信息
-            // 保持 Armed + hold_fired=true 更简洁，keyup 时发 HoldReleased
-            state.gesture = GestureState::Armed {
-                gesture_id: *armed_id,
-                key: key.clone(),
-                armed_at_ms: *armed_at_ms,
-                frozen_hotkey: frozen_hotkey.clone(),
-                frozen_tap_threshold: *frozen_tap_threshold,
-                source: *source,
-                aborted: *aborted,
-                hold_fired: true,
-            };
+        // 确认 Hold timer：保持 Armed 但标记 hold_fired
+        // 实际上应该转 Holding，但 Holding 不含 tap_threshold 信息
+        // 保持 Armed + hold_fired=true 更简洁，keyup 时发 HoldReleased
+        state.gesture = GestureState::Armed {
+            gesture_id: *armed_id,
+            key: key.clone(),
+            armed_at_ms: *armed_at_ms,
+            frozen_hotkey: frozen_hotkey.clone(),
+            frozen_tap_threshold: *frozen_tap_threshold,
+            source: *source,
+            aborted: *aborted,
+            hold_fired: true,
+        };
 
-            // 语音 hold：只在 voice_hold_enabled 时发 HoldStarted
-            if state.config.voice_hold_enabled {
-                result.effects.push(InputEffect::HoldStarted { gesture_id });
-            }
+        // 语音 hold：只在 voice_hold_enabled 时发 HoldStarted
+        if state.config.voice_hold_enabled {
+            result.effects.push(InputEffect::HoldStarted { gesture_id });
         }
-        // stale timer（gesture_id 不匹配）→ 忽略
     }
+    // stale timer（gesture_id 不匹配）→ 忽略
 
     result.effects.extend(finalize(state));
     result
@@ -1932,8 +1883,10 @@ mod tests {
 
     /// 标准设置：config=Alt+Space, window visible, view ready, Alt down。
     fn armed_state() -> InputState {
-        let mut s = InputState::default();
-        s.config = alt_space_config();
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s,
             InputEvent::ConfigChanged(alt_space_config()),
@@ -2154,8 +2107,10 @@ mod tests {
 
     #[test]
     fn left_right_alt_separate() {
-        let mut s = InputState::default();
-        s.config = alt_space_config();
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s,
             InputEvent::ConfigChanged(alt_space_config()),
@@ -2242,8 +2197,10 @@ mod tests {
         );
         assert!(s.window.visible); // 不变
 
-        let mut s2 = InputState::default();
-        s2.config = alt_space_config();
+        let mut s2 = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s2,
             InputEvent::ConfigChanged(alt_space_config()),
@@ -2369,8 +2326,10 @@ mod tests {
 
     #[test]
     fn chord_session_without_main_gesture() {
-        let mut s = InputState::default();
-        s.config = alt_space_config();
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s,
             InputEvent::ConfigChanged(alt_space_config()),
@@ -2456,8 +2415,10 @@ mod tests {
     /// 远程桌面完整 down→up 序列应正常流转，不卡死。
     #[test]
     fn injected_alt_down_up_clears_level() {
-        let mut s = InputState::default();
-        s.config = alt_space_config();
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s,
             InputEvent::ConfigChanged(alt_space_config()),
@@ -2489,8 +2450,10 @@ mod tests {
     /// 本地 Alt keydown → Down；注入 Alt keyup 不清除（SetForegroundWindow 合成事件）。
     #[test]
     fn local_alt_down_ignores_injected_keyup() {
-        let mut s = InputState::default();
-        s.config = alt_space_config();
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s,
             InputEvent::ConfigChanged(alt_space_config()),
@@ -2526,8 +2489,10 @@ mod tests {
     /// InjectedDown 被 Raw Input down 升级为 Down 后，注入 keyup 不再清除。
     #[test]
     fn raw_down_upgrades_injected_down() {
-        let mut s = InputState::default();
-        s.config = alt_space_config();
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s,
             InputEvent::ConfigChanged(alt_space_config()),
@@ -2572,8 +2537,10 @@ mod tests {
     /// → 注入 Alt up → alt_down=false。此前注入 Alt up 被忽略导致 Alt 卡死。
     #[test]
     fn injected_alt_space_complete_sequence_no_stuck() {
-        let mut s = InputState::default();
-        s.config = alt_space_config();
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s,
             InputEvent::ConfigChanged(alt_space_config()),
@@ -2617,8 +2584,10 @@ mod tests {
     /// 验证 send_paste (Ctrl+V) 回退路径不残留 Ctrl Down。
     #[test]
     fn injected_ctrl_down_up_clears_level() {
-        let mut s = InputState::default();
-        s.config = alt_space_config();
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s,
             InputEvent::ConfigChanged(alt_space_config()),
@@ -2646,8 +2615,10 @@ mod tests {
 
     #[test]
     fn alt_down_flag_infers_alt_pressed() {
-        let mut s = InputState::default();
-        s.config = alt_space_config();
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s,
             InputEvent::ConfigChanged(alt_space_config()),
@@ -2695,8 +2666,10 @@ mod tests {
 
     #[test]
     fn inferred_down_maintains_chord_after_tap() {
-        let mut s = InputState::default();
-        s.config = alt_space_config();
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s,
             InputEvent::ConfigChanged(alt_space_config()),
@@ -3046,8 +3019,10 @@ mod tests {
 
     #[test]
     fn focused_true_does_not_change_hidden() {
-        let mut s = InputState::default();
-        s.config = alt_space_config();
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s,
             InputEvent::ConfigChanged(alt_space_config()),
@@ -3332,8 +3307,10 @@ mod tests {
 
     #[test]
     fn raw_input_confirms_modifier() {
-        let mut s = InputState::default();
-        s.config = alt_space_config();
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s,
             InputEvent::ConfigChanged(alt_space_config()),
@@ -3385,8 +3362,10 @@ mod tests {
 
     #[test]
     fn multi_device_modifier_aggregate() {
-        let mut s = InputState::default();
-        s.config = alt_space_config();
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s,
             InputEvent::ConfigChanged(alt_space_config()),
@@ -3454,8 +3433,10 @@ mod tests {
 
     #[test]
     fn device_removal_self_heals() {
-        let mut s = InputState::default();
-        s.config = alt_space_config();
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s,
             InputEvent::ConfigChanged(alt_space_config()),
@@ -3494,8 +3475,10 @@ mod tests {
 
     #[test]
     fn stale_raw_down_discarded() {
-        let mut s = InputState::default();
-        s.config = alt_space_config();
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s,
             InputEvent::ConfigChanged(alt_space_config()),
@@ -3533,8 +3516,10 @@ mod tests {
 
     #[test]
     fn ui_state_only_emitted_on_change() {
-        let mut s = InputState::default();
-        s.config = alt_space_config();
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s,
             InputEvent::ConfigChanged(alt_space_config()),
@@ -3614,8 +3599,10 @@ mod tests {
     /// 真实 Alt down → Down；injected down/up 不降级、不清除。
     #[test]
     fn real_alt_down_survives_injected_down_up() {
-        let mut s = InputState::default();
-        s.config = alt_space_config();
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s,
             InputEvent::ConfigChanged(alt_space_config()),
@@ -3651,8 +3638,10 @@ mod tests {
     /// InferredDown 不被 injected down 降级，也不被 injected up 清除。
     #[test]
     fn inferred_alt_down_survives_injected_down_up() {
-        let mut s = InputState::default();
-        s.config = alt_space_config();
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s,
             InputEvent::ConfigChanged(alt_space_config()),
@@ -3707,8 +3696,10 @@ mod tests {
     /// 纯注入 down→up 完整序列回到 Up（远程桌面不卡键）。
     #[test]
     fn pure_injected_alt_down_up_returns_up() {
-        let mut s = InputState::default();
-        s.config = alt_space_config();
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s,
             InputEvent::ConfigChanged(alt_space_config()),
@@ -3738,8 +3729,10 @@ mod tests {
     /// 真实 Alt up 始终清除当前按下状态（即使被 preserved 为 Down）。
     #[test]
     fn real_alt_up_clears_preserved_down() {
-        let mut s = InputState::default();
-        s.config = alt_space_config();
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s,
             InputEvent::ConfigChanged(alt_space_config()),
@@ -3787,8 +3780,10 @@ mod tests {
     /// 6. chord_exclusive_eligible() 应得到 alt_down=true
     #[test]
     fn tao_injected_sequence_does_not_break_chord_eligibility() {
-        let mut s = InputState::default();
-        s.config = alt_space_config();
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s,
             InputEvent::ConfigChanged(alt_space_config()),
@@ -4057,8 +4052,10 @@ mod tests {
 
     #[test]
     fn heartbeat_blocked_when_modifier_pressed() {
-        let mut s = InputState::default();
-        s.config = alt_space_config();
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s,
             InputEvent::ConfigChanged(alt_space_config()),
@@ -4104,8 +4101,10 @@ mod tests {
 
     #[test]
     fn heartbeat_blocked_when_window_visible() {
-        let mut s = InputState::default();
-        s.config = alt_space_config();
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s,
             InputEvent::ConfigChanged(alt_space_config()),
@@ -4119,8 +4118,10 @@ mod tests {
 
     #[test]
     fn heartbeat_allowed_when_idle_and_hidden() {
-        let mut s = InputState::default();
-        s.config = alt_space_config();
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s,
             InputEvent::ConfigChanged(alt_space_config()),
@@ -4133,8 +4134,10 @@ mod tests {
 
     #[test]
     fn session_recovery_allowed_when_idle_and_visible() {
-        let mut s = InputState::default();
-        s.config = alt_space_config();
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s,
             InputEvent::ConfigChanged(alt_space_config()),
@@ -4148,8 +4151,10 @@ mod tests {
 
     #[test]
     fn manual_recovery_allowed_when_idle_and_visible() {
-        let mut s = InputState::default();
-        s.config = alt_space_config();
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s,
             InputEvent::ConfigChanged(alt_space_config()),
@@ -4163,8 +4168,10 @@ mod tests {
 
     #[test]
     fn manual_recovery_blocked_when_physical_modifier_down() {
-        let mut s = InputState::default();
-        s.config = alt_space_config();
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
         reduce(
             &mut s,
             InputEvent::ConfigChanged(alt_space_config()),

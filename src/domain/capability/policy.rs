@@ -26,18 +26,13 @@ use serde::{Deserialize, Serialize};
 ///
 /// **默认 `Safe`**——`Capability` trait default impl 返回它；
 /// Dangerous 动作必须显式在 `policy()` 中覆盖。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DangerClass {
     /// 可逆 / 只读 / 无副作用：打开文件、翻译、查询、复制。
+    #[default]
     Safe,
     /// 不可逆 / 危险：删除、发送、覆盖写、执行命令、关机、锁屏。
     Dangerous,
-}
-
-impl Default for DangerClass {
-    fn default() -> Self {
-        Self::Safe
-    }
 }
 
 // ── InvocationOrigin ─────────────────────────────────────────────────────────
@@ -363,33 +358,25 @@ pub struct ContentEditorRequest {
 /// AI 出口默认授权——代码级策略，用户配置只能在其子集内授权。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum AiDefault {
     /// 默认开启（Safe 普通生产能力）。
     On,
     /// 默认关闭（Dangerous / local-only / 诊断类）。
+    #[default]
     Off,
-}
-
-impl Default for AiDefault {
-    fn default() -> Self {
-        Self::Off
-    }
 }
 
 /// MCP 出口默认授权——首版默认空，Dangerous 永远禁止。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum McpDefault {
     /// 默认关闭，可由用户显式暴露（Safe + sensitive 可暴露）。
+    #[default]
     DefaultOff,
     /// 代码级禁止（Dangerous / GUI starter / local-only）。
     Forbidden,
-}
-
-impl Default for McpDefault {
-    fn default() -> Self {
-        Self::DefaultOff
-    }
 }
 
 // ── ConfirmationPolicy ───────────────────────────────────────────────────────

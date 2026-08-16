@@ -366,10 +366,10 @@ fn tool_list_section(tools: &[ToolPromptInfo]) -> String {
         }
 
         // 插件 hint（manifest `tools[].hint`）
-        if let Some(hint) = &t.hint {
-            if !hint.is_empty() {
-                buf.push_str(&format!("。提示: {hint}"));
-            }
+        if let Some(hint) = &t.hint
+            && !hint.is_empty()
+        {
+            buf.push_str(&format!("。提示: {hint}"));
         }
 
         buf.push('\n');

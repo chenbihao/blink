@@ -157,15 +157,15 @@ pub fn venv_funasr_server() -> Option<PathBuf> {
 /// 2. 本地安装（`%APPDATA%\blink\python\uv\uv.exe`）
 pub fn find_uv() -> Option<PathBuf> {
     // 1. Check PATH via `where uv`
-    if let Ok(output) = no_window(Command::new("where")).args(["uv"]).output() {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if let Some(first_line) = stdout.lines().next() {
-                let path = PathBuf::from(first_line.trim());
-                if path.exists() {
-                    tracing::debug!(path = %path.display(), "在 PATH 中找到 uv");
-                    return Some(path);
-                }
+    if let Ok(output) = no_window(Command::new("where")).args(["uv"]).output()
+        && output.status.success()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(first_line) = stdout.lines().next() {
+            let path = PathBuf::from(first_line.trim());
+            if path.exists() {
+                tracing::debug!(path = %path.display(), "在 PATH 中找到 uv");
+                return Some(path);
             }
         }
     }
@@ -434,6 +434,7 @@ pub async fn uninstall_packages(uv_path: &Path, packages: &[&str]) -> Result<(),
 /// 兼容新旧驱动格式：
 /// - 旧：`CUDA Version: 12.2`
 /// - 新：`CUDA UMD Version: 13.3`
+///
 /// 返回 CUDA 版本字符串（如 "12.2" / "13.3"），无 GPU 时返回 None。
 pub fn detect_cuda() -> Option<String> {
     let output = no_window(Command::new("nvidia-smi")).output().ok()?;
@@ -448,12 +449,7 @@ pub fn detect_cuda() -> Option<String> {
             if let Some(idx) = line.find("Version:") {
                 let rest = &line[idx + "Version:".len()..];
                 // 跳过空格，取第一个数字串（如 "12.2" 或 "13.3"）
-                let version = rest
-                    .trim_start()
-                    .split_whitespace()
-                    .next()?
-                    .trim_end_matches('|')
-                    .trim();
+                let version = rest.split_whitespace().next()?.trim_end_matches('|').trim();
                 if !version.is_empty()
                     && version
                         .chars()
@@ -728,13 +724,18 @@ pub async fn check_status_async() -> PythonEnvStatus {
 
 // ── 一键设置 ─────────────────────────────────────────────────────────────
 
+/// 安装进度回调：`(stage, status)`。
+pub type ProgressCallback = Arc<dyn Fn(&str, &str) + Send + Sync>;
+/// 安装过程逐行日志回调。
+pub type LogCallback = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// 一键设置完整 Python 环境（无进度回调）。
 ///
 /// 内部调用 [`setup_with_progress`]，传入 no-op 回调。
 /// 需要进度/日志通知的场景（如设置页）直接调用 [`setup_with_progress`]。
 pub async fn setup(device: &str) -> Result<(), String> {
-    let on_progress: Arc<dyn Fn(&str, &str) + Send + Sync> = Arc::new(|_, _| ());
-    let on_log: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(|_| ());
+    let on_progress: ProgressCallback = Arc::new(|_, _| ());
+    let on_log: LogCallback = Arc::new(|_| ());
     setup_with_progress(device, on_progress, on_log).await
 }
 
@@ -756,8 +757,8 @@ pub async fn setup(device: &str) -> Result<(), String> {
 /// `on_log(line)`：安装过程中的逐行日志输出（含 uv 的 `Downloading...` 行）。
 pub async fn setup_with_progress(
     device: &str,
-    on_progress: Arc<dyn Fn(&str, &str) + Send + Sync>,
-    on_log: Arc<dyn Fn(&str) + Send + Sync>,
+    on_progress: ProgressCallback,
+    on_log: LogCallback,
 ) -> Result<(), String> {
     // 快速检查：如果已就绪，跳过安装。
     // 但当 device == "cuda" 时，需额外验证已安装的 PyTorch 是否含 CUDA 支持——

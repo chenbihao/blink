@@ -331,7 +331,7 @@ impl SkillRegistry {
             .iter()
             .find(|s| {
                 s.name == name
-                    && source_filter.map_or(true, |src| s.source == src)
+                    && source_filter.is_none_or(|src| s.source == src)
                     && !disabled.contains(&skill_id(&s.name, s.source))
             })
             .cloned()
@@ -633,9 +633,8 @@ fn find_closing_delimiter(s: &str) -> Option<usize> {
         let _ = line; // line text
         // 检查这一行之后是否以 --- 开头
         let after_newline = &s[idx + 1..];
-        if after_newline.starts_with("---") {
+        if let Some(after_dashes) = after_newline.strip_prefix("---") {
             // 确认 --- 后面是行尾或换行（不是 ---something）
-            let after_dashes = &after_newline[3..];
             if after_dashes.is_empty()
                 || after_dashes.starts_with('\n')
                 || after_dashes.starts_with('\r')
@@ -645,14 +644,12 @@ fn find_closing_delimiter(s: &str) -> Option<usize> {
         }
     }
     // 也检查第一行（rest 本身以 --- 开头的情况）
-    if s.starts_with("---") {
-        let after_dashes = &s[3..];
-        if after_dashes.is_empty()
+    if let Some(after_dashes) = s.strip_prefix("---")
+        && (after_dashes.is_empty()
             || after_dashes.starts_with('\n')
-            || after_dashes.starts_with('\r')
-        {
-            return Some(0);
-        }
+            || after_dashes.starts_with('\r'))
+    {
+        return Some(0);
     }
     None
 }
@@ -750,7 +747,7 @@ fn parse_yaml_list(value: &str) -> Vec<String> {
         let inner = &v[1..v.len() - 1];
         inner
             .split(',')
-            .map(|s| clean_yaml_value(s))
+            .map(clean_yaml_value)
             .filter(|s| !s.is_empty())
             .collect()
     } else {

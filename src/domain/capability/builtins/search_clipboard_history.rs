@@ -102,9 +102,9 @@ impl Capability for SearchClipboardHistory {
         // 铁则 1：用 deadline 包裹 DB 查询
         let items = tokio::time::timeout_at(ctx.deadline_or_far_future(), async {
             if query.trim().is_empty() {
-                query_recent(&pool, max_results).await
+                query_recent(pool, max_results).await
             } else {
-                search_history(&pool, query, max_results).await
+                search_history(pool, query, max_results).await
             }
         })
         .await

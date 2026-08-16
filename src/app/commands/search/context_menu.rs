@@ -18,7 +18,7 @@ pub async fn show_context_menu(
     // 主题 resolve（auto → dark/light）
     let theme = {
         let pool = &app.state::<crate::infra::data::DbPools>().config;
-        let raw = crate::app::config::get_config(&pool).await.theme;
+        let raw = crate::app::config::get_config(pool).await.theme;
         if raw == "auto" {
             let is_light = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
                 .open_subkey("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize")

@@ -16,8 +16,10 @@ use sqlx::SqlitePool;
 ///   POST 到单个端点，响应可为 JSON 或 SSE
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case", tag = "type")]
+#[derive(Default)]
 pub enum McpTransport {
     /// stdio 子进程。
+    #[default]
     Stdio,
     /// 旧版 SSE transport。
     /// `url` 字段必填（SSE 端点），`headers` 可选。
@@ -33,12 +35,6 @@ pub enum McpTransport {
         #[serde(default)]
         headers: std::collections::HashMap<String, String>,
     },
-}
-
-impl Default for McpTransport {
-    fn default() -> Self {
-        Self::Stdio
-    }
 }
 
 /// 单个 MCP server 的配置。
@@ -264,7 +260,7 @@ mod tests {
             .unwrap();
 
         let loaded = McpServerConfigStore::load_all(&pool).await.unwrap();
-        assert_eq!(loaded[0].enabled, false);
+        assert!(!loaded[0].enabled);
     }
 
     #[tokio::test]

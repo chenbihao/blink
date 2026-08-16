@@ -214,9 +214,9 @@ fn which_node() -> String {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let task = args
-        .get(1)
-        .unwrap_or_else(|| panic!("用法: cargo xtask <plugins|copy|release|icons|tiptap> [--debug]"));
+    let task = args.get(1).unwrap_or_else(|| {
+        panic!("用法: cargo xtask <plugins|copy|release|icons|tiptap> [--debug]")
+    });
 
     match task.as_str() {
         "plugins" => build_plugins(false, false), // 开发期：仅编译，不复制到 bin
@@ -237,7 +237,9 @@ fn main() {
         "icons" => fetch_icons(),    // 拉取 Lucide 图标生成 sprite
         "tiptap" => bundle_tiptap(), // 打包 Tiptap IIFE 产物
         other => {
-            panic!("未知子命令: {other}\n用法: cargo xtask <plugins|copy|release|icons|tiptap> [--debug]")
+            panic!(
+                "未知子命令: {other}\n用法: cargo xtask <plugins|copy|release|icons|tiptap> [--debug]"
+            )
         }
     }
 }

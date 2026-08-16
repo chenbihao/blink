@@ -541,23 +541,21 @@ fn main() {
                     }
                     // 前台敏感应用（如密码管理器）—— 与 collect() 第三道门一致。
                     // 只有敏感时才丢弃；非敏感或拿不到前台照常回写。
-                    if let Some(fg) = infra::platform::context::foreground_app() {
-                        if cfg.is_sensitive(&fg.process_name) {
+                    if let Some(fg) = infra::platform::context::foreground_app()
+                        && cfg.is_sensitive(&fg.process_name) {
                             tracing::debug!(app = %fg.process_name, "剪贴板变化 hook：前台敏感,跳过 snapshot 回写");
                             return;
                         }
-                    }
                     ss.update_clipboard_text(Some(text.to_string()));
                     tracing::debug!(len = text.chars().count(), "剪贴板变化 → snapshot 已局部刷新");
                     // 通知主窗口用当前 query 重跑一次（刷 Context Ghost / AI 四筛子）。
                     // 只在主窗口可见时发——隐藏时窗口收不到 emit（Tauri 2 hidden webview
                     // drop event,见 [[tauri-hidden-webview-emit-dropped]]）,而且下一次
                     // invoke 会 collect() 重拍快照,不需要 push。
-                    if infra::platform::window::is_visible() {
-                        if let Err(e) = app_handle.emit(EventNames::AWARENESS_UPDATED, ()) {
+                    if infra::platform::window::is_visible()
+                        && let Err(e) = app_handle.emit(EventNames::AWARENESS_UPDATED, ()) {
                             tracing::debug!(?e, "emit blink://awareness-updated 失败");
                         }
-                    }
                 }));
             }
             // RuleRouter 单独注册供设置页 API 用（triggers 热更新）
@@ -732,6 +730,11 @@ fn main() {
                 tauri::async_runtime::block_on(domain::ai::chat_service::ChatService::new(
                     domain_env.clone() as std::sync::Arc<dyn domain::event::EventPort>,
                     domain_env.clone() as std::sync::Arc<dyn domain::event::CapabilityEnv>,
+                    // 0.21: AI tool 经 Registry 调 GUI starter 能力需真实 gui_surface 运行时
+                    Some(
+                        domain_env.clone()
+                            as std::sync::Arc<dyn domain::capability::SurfacePort>,
+                    ),
                     ai_registry.clone(),
                     capability_registry.clone(),
                     pending_confirms.clone(),
@@ -1215,7 +1218,7 @@ app::commands::ensure_mcp_connected,
                 // 0.13.0: 停止所有 MCP server 子进程
                 if let Some(mcp) = _app.try_state::<std::sync::Arc<domain::mcp::McpClientManager>>() {
                     // P1-#16 fix: 加超时兜底，防止 mcp.stop_all() 无限挂住退出
-                    let _ = tauri::async_runtime::block_on(async {
+                    tauri::async_runtime::block_on(async {
                         let _ = tokio::time::timeout(
                             std::time::Duration::from_secs(3),
                             mcp.stop_all(),
@@ -1225,7 +1228,7 @@ app::commands::ensure_mcp_connected,
 
                 // 0.19.13: 关闭 MCP Server HTTP listener，释放端口
                 if let Some(runtime) = _app.try_state::<std::sync::Arc<app::mcp_server_runtime::McpServerRuntime>>() {
-                    let _ = tauri::async_runtime::block_on(async {
+                    tauri::async_runtime::block_on(async {
                         let _ = tokio::time::timeout(
                             std::time::Duration::from_secs(3),
                             runtime.shutdown(),

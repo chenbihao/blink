@@ -69,31 +69,31 @@ pub fn inject_plugin_settings(
         }
 
         // 2. 注入 default + 3. description 增强
-        if let Some(props) = params.get_mut("properties").and_then(|p| p.as_object_mut()) {
-            if let Some(param) = props.get_mut(param_name).and_then(|p| p.as_object_mut()) {
-                param.insert("default".to_string(), setting_val.clone());
-                if let Some(desc) = param.get("description").and_then(|d| d.as_str()) {
-                    // 字符串 setting 取原始值（避免 Value::Display 带引号），
-                    // 非 string（bool/number）用 Value::Display
-                    let setting_display = setting_val
-                        .as_str()
-                        .map(str::to_string)
-                        .unwrap_or_else(|| setting_val.to_string());
-                    let enhanced = format!("{desc}（默认: {setting_display}）");
-                    param.insert(
-                        "description".to_string(),
-                        serde_json::Value::String(enhanced),
-                    );
-                }
+        if let Some(props) = params.get_mut("properties").and_then(|p| p.as_object_mut())
+            && let Some(param) = props.get_mut(param_name).and_then(|p| p.as_object_mut())
+        {
+            param.insert("default".to_string(), setting_val.clone());
+            if let Some(desc) = param.get("description").and_then(|d| d.as_str()) {
+                // 字符串 setting 取原始值（避免 Value::Display 带引号），
+                // 非 string（bool/number）用 Value::Display
+                let setting_display = setting_val
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| setting_val.to_string());
+                let enhanced = format!("{desc}（默认: {setting_display}）");
+                param.insert(
+                    "description".to_string(),
+                    serde_json::Value::String(enhanced),
+                );
             }
         }
     }
 
     // 清理：若 required 变空数组，移除整个 required 字段（更干净的 schema）
-    if let Some(req_arr) = params.get("required").and_then(|r| r.as_array()) {
-        if req_arr.is_empty() {
-            params.remove("required");
-        }
+    if let Some(req_arr) = params.get("required").and_then(|r| r.as_array())
+        && req_arr.is_empty()
+    {
+        params.remove("required");
     }
 
     schema

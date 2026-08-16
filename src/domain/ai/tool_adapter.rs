@@ -190,20 +190,20 @@ impl PendingConfirms {
         if !config.memory_enabled {
             return false;
         }
-        if let Some(ref pool) = self.config_pool {
-            if crate::infra::data::permission_memory::is_tool_trusted(pool, tool_name).await {
-                // 3. DB 命中且未过期 -> 加入会话级（本次会话不再查 DB）
-                self.trusted
-                    .lock()
-                    .await
-                    .insert((conversation_id.to_string(), tool_name.to_string()));
-                tracing::debug!(
-                    %tool_name,
-                    conversation_id = %conversation_id,
-                    "权限记忆命中持久化层，加入会话级"
-                );
-                return true;
-            }
+        if let Some(ref pool) = self.config_pool
+            && crate::infra::data::permission_memory::is_tool_trusted(pool, tool_name).await
+        {
+            // 3. DB 命中且未过期 -> 加入会话级（本次会话不再查 DB）
+            self.trusted
+                .lock()
+                .await
+                .insert((conversation_id.to_string(), tool_name.to_string()));
+            tracing::debug!(
+                %tool_name,
+                conversation_id = %conversation_id,
+                "权限记忆命中持久化层，加入会话级"
+            );
+            return true;
         }
         false
     }
@@ -220,15 +220,11 @@ impl PendingConfirms {
 
         // 写 DB（若 memory_enabled 且有 config_pool）
         let config = self.memory_config.read().await.clone();
-        if config.memory_enabled {
-            if let Some(ref pool) = self.config_pool {
-                crate::infra::data::permission_memory::trust_tool(
-                    pool,
-                    tool_name,
-                    config.memory_days,
-                )
+        if config.memory_enabled
+            && let Some(ref pool) = self.config_pool
+        {
+            crate::infra::data::permission_memory::trust_tool(pool, tool_name, config.memory_days)
                 .await;
-            }
         }
     }
 
@@ -278,6 +274,7 @@ enum ConfirmOutcome {
 ///
 /// **需 AppHandle emit**--遵循 AGENTS.md §7"Tauri 集成层免自动化"，此函数本身不单测，
 /// 闭环的正确性靠 `PendingConfirms` 的 register/resolve/discard 纯逻辑单测保证。
+#[allow(clippy::too_many_arguments)]
 async fn await_dangerous_confirm(
     pending: &PendingConfirms,
     emitter: &dyn EventPort,
@@ -319,6 +316,7 @@ async fn await_dangerous_confirm(
 /// - Rejected/Timeout/Dropped: 返回 Ok(Some(msg)) 直接返回给 AI
 ///
 /// 如果 `is_dangerous` 为 false：直接返回 None，调用方继续执行。
+#[allow(clippy::too_many_arguments)]
 async fn check_dangerous_confirm(
     is_dangerous: bool,
     rememberable: bool,
@@ -414,6 +412,7 @@ struct ConfirmPayload {
 /// 不再有独立的 `ai-confirm-action` 事件。
 ///
 /// Phase 4：改用 `emit_to("chat")` 定向发送，不向主窗口和其他次级窗口广播。
+#[allow(clippy::too_many_arguments)]
 fn emit_dangerous_confirm(
     emitter: &dyn EventPort,
     confirm_id: u64,
@@ -480,6 +479,9 @@ pub struct CapabilityTool {
     cap_env: std::sync::Arc<dyn crate::domain::event::CapabilityEnv>,
     pending: Arc<PendingConfirms>,
     registry: Arc<CapabilityRegistry>,
+    /// GUI surface（主进程注入）。None = CLI 等无 GUI 宿主，GUI starter 能力会被
+    /// Registry 的 runtime 门禁拒绝。
+    surface: Option<std::sync::Arc<dyn crate::domain::capability::SurfacePort>>,
 }
 
 impl CapabilityTool {
@@ -491,6 +493,7 @@ impl CapabilityTool {
         cap_env: std::sync::Arc<dyn crate::domain::event::CapabilityEnv>,
         pending: Arc<PendingConfirms>,
         registry: Arc<CapabilityRegistry>,
+        surface: Option<std::sync::Arc<dyn crate::domain::capability::SurfacePort>>,
     ) -> Self {
         let schema = cap.schema();
         Self {
@@ -502,6 +505,7 @@ impl CapabilityTool {
             cap_env,
             pending,
             registry,
+            surface,
         }
     }
 
@@ -562,7 +566,7 @@ impl ToolDyn for CapabilityTool {
                 env: self.cap_env.as_ref(),
                 origin: crate::domain::capability::InvocationOrigin::LocalAi,
                 runtime: crate::domain::capability::RuntimeCapabilities {
-                    surface: None, // 0.21.1+ 接入 SurfacePort；当前 AI 不调 GUI starter cap
+                    surface: self.surface.as_deref(),
                     main_process: true,
                     desktop_session: true,
                 },
@@ -650,6 +654,7 @@ fn capability_error_to_string(e: CapabilityError) -> String {
 /// **0.21.5 变化**：增加 `ai_allowlist` 参数——只包装 policy 允许 AI 且用户 enabled 的 Capability。
 /// 纯对话模式传空 `HashSet`（tool 池为空）。
 #[allow(dead_code)] // 0.12.1 对话窗口 AgentBuilder 消费
+#[allow(clippy::too_many_arguments)]
 pub fn build_agent_tools(
     cap_registry: Arc<CapabilityRegistry>,
     external_tools: Vec<Box<dyn ToolDyn>>,
@@ -657,6 +662,7 @@ pub fn build_agent_tools(
     chat_service: Option<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>,
     cap_env: std::sync::Arc<dyn crate::domain::event::CapabilityEnv>,
     pending: Arc<PendingConfirms>,
+    surface: Option<std::sync::Arc<dyn crate::domain::capability::SurfacePort>>,
     ai_allowlist: Option<&std::collections::HashSet<String>>,
 ) -> Vec<Box<dyn ToolDyn>> {
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
@@ -666,11 +672,11 @@ pub fn build_agent_tools(
     let mut skipped_count = 0;
     for (id, cap) in cap_registry.entries() {
         // 0.21.5: allowlist 过滤——只包装用户授权的 Capability
-        if let Some(allowlist) = ai_allowlist {
-            if !allowlist.contains(&id) {
-                skipped_count += 1;
-                continue;
-            }
+        if let Some(allowlist) = ai_allowlist
+            && !allowlist.contains(&id)
+        {
+            skipped_count += 1;
+            continue;
         }
 
         let tool = CapabilityTool::new(
@@ -680,6 +686,7 @@ pub fn build_agent_tools(
             cap_env.clone(),
             pending.clone(),
             cap_registry.clone(),
+            surface.clone(),
         );
         tools.push(Box::new(tool));
         cap_count += 1;
@@ -716,7 +723,7 @@ mod tests {
         let (id, rx) = pc.register().await;
         // 确认 -> receiver 收 true
         assert!(pc.resolve(id, true).await, "已知 id 应送达");
-        assert_eq!(rx.await.unwrap(), true, "确认应收到 true");
+        assert!(rx.await.unwrap(), "确认应收到 true");
     }
 
     #[tokio::test]
@@ -724,7 +731,7 @@ mod tests {
         let pc = PendingConfirms::new();
         let (id, rx) = pc.register().await;
         assert!(pc.resolve(id, false).await);
-        assert_eq!(rx.await.unwrap(), false, "拒绝应收到 false");
+        assert!(!rx.await.unwrap(), "拒绝应收到 false");
     }
 
     #[tokio::test]

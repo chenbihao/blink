@@ -96,10 +96,7 @@ pub(crate) fn capture_focused_element() -> Option<SendableElement> {
 pub(crate) fn extract_selection_from_element(elem: &SendableElement) -> Option<String> {
     let focused = &elem.0;
     let _com = uia::ComGuard::init_mta();
-    let automation: IUIAutomation = match create_automation() {
-        Some(a) => a,
-        None => return None,
-    };
+    let automation: IUIAutomation = create_automation()?;
 
     let start = Instant::now();
 
@@ -112,26 +109,25 @@ pub(crate) fn extract_selection_from_element(elem: &SendableElement) -> Option<S
     let cond = create_text_pattern_condition(&automation);
 
     // ── Phase 2: 祖先链查找 ─────────────────────────────────
-    if let Some(ref cond) = cond {
-        if let Ok(ancestor) = unsafe { focused.FindFirst(TreeScope_Ancestors, cond) } {
-            if let Some(text) = extract_selection(&ancestor) {
-                log_hit(&start, "祖先链");
-                return Some(text);
-            }
-        }
+    if let Some(ref cond) = cond
+        && let Ok(ancestor) = unsafe { focused.FindFirst(TreeScope_Ancestors, cond) }
+        && let Some(text) = extract_selection(&ancestor)
+    {
+        log_hit(&start, "祖先链");
+        return Some(text);
     }
 
     // ── Phase 3: 焦点子树后代查找 ───────────────────────────
     let mut descendant_ct: i32 = 0;
-    if let Some(ref cond) = cond {
-        if let Ok(descendant) = unsafe { focused.FindFirst(TreeScope_Descendants, cond) } {
-            descendant_ct = unsafe { descendant.CurrentControlType() }
-                .map(|t| t.0)
-                .unwrap_or(0);
-            if let Some(text) = extract_selection(&descendant) {
-                log_hit(&start, "焦点子树后代");
-                return Some(text);
-            }
+    if let Some(ref cond) = cond
+        && let Ok(descendant) = unsafe { focused.FindFirst(TreeScope_Descendants, cond) }
+    {
+        descendant_ct = unsafe { descendant.CurrentControlType() }
+            .map(|t| t.0)
+            .unwrap_or(0);
+        if let Some(text) = extract_selection(&descendant) {
+            log_hit(&start, "焦点子树后代");
+            return Some(text);
         }
     }
 

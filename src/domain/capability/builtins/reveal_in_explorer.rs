@@ -74,7 +74,7 @@ impl Capability for RevealInExplorer {
         #[cfg(target_os = "windows")]
         {
             let status = std::process::Command::new("explorer.exe")
-                .args(["/select,", &path])
+                .args(["/select,", path])
                 .spawn();
             if let Err(e) = status {
                 tracing::error!(error = %e, %path, "调用 explorer.exe 失败");

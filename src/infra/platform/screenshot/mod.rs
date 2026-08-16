@@ -270,7 +270,7 @@ pub fn session_rgba() -> Option<(Vec<u8>, u32, u32)> {
     let mut rgba = vec![0u8; bgra.len()];
     let src_ptr = bgra.as_ptr();
     let dst_ptr = rgba.as_mut_ptr();
-    let is_aligned = (src_ptr as usize) % 4 == 0 && (dst_ptr as usize) % 4 == 0;
+    let is_aligned = (src_ptr as usize).is_multiple_of(4) && (dst_ptr as usize).is_multiple_of(4);
     if is_aligned && n > 0 {
         // Safety: src/dst 均来自有效 Vec，对齐 4 字节，n*4 <= len
         let src_u32 = unsafe { std::slice::from_raw_parts(src_ptr as *const u32, n) };
@@ -502,7 +502,7 @@ fn swap_rb_u32(v: u32) -> u32 {
 /// 供 `write_png_to_clipboard` 和任何需要 RGBA→BGRA 的路径复用。
 pub fn swap_rgba_bgra_in_place(buf: &mut [u8]) {
     let ptr = buf.as_mut_ptr();
-    let is_aligned = (ptr as usize) % std::mem::align_of::<u32>() == 0;
+    let is_aligned = (ptr as usize).is_multiple_of(std::mem::align_of::<u32>());
     let n = buf.len() / 4;
     if is_aligned && n > 0 {
         // Safety: ptr 来自 buf，valid for buf.len() 字节。

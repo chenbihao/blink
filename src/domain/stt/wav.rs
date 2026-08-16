@@ -49,7 +49,7 @@ pub fn pcm_to_wav(samples: &[f32], sample_rate: u32, channels: u16) -> Vec<u8> {
 
     // PCM samples: f32 → i16
     for &sample in samples {
-        let clamped = sample.max(-1.0).min(1.0);
+        let clamped = sample.clamp(-1.0, 1.0);
         let i16_sample = (clamped * 32767.0) as i16;
         wav.extend_from_slice(&i16_sample.to_le_bytes());
     }
@@ -104,7 +104,7 @@ pub fn write_wav_file(path: &Path, samples: &[f32], sample_rate: u32) -> Result<
     // PCM 数据（f32 → i16 LE）
     let mut pcm = Vec::with_capacity(data_len);
     for &s in samples {
-        let clamped = s.max(-1.0).min(1.0);
+        let clamped = s.clamp(-1.0, 1.0);
         let i16_sample = (clamped * 32767.0) as i16;
         pcm.extend_from_slice(&i16_sample.to_le_bytes());
     }

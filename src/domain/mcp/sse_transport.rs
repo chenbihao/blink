@@ -253,16 +253,11 @@ impl Transport<RoleClient> for SseClientTransport {
         }
     }
 
-    fn receive(
-        &mut self,
-    ) -> impl std::future::Future<Output = Option<rmcp::service::RxJsonRpcMessage<RoleClient>>> + Send
-    {
+    async fn receive(&mut self) -> Option<rmcp::service::RxJsonRpcMessage<RoleClient>> {
         // 从 channel 读取下一条 server 消息
-        async move {
-            match self.rx.recv().await {
-                Some(Ok(msg)) => Some(msg),
-                Some(Err(_)) | None => None,
-            }
+        match self.rx.recv().await {
+            Some(Ok(msg)) => Some(msg),
+            Some(Err(_)) | None => None,
         }
     }
 

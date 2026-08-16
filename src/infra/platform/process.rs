@@ -38,10 +38,9 @@ pub fn find_pid_by_port(port: u16) -> Option<u32> {
             && parts[0] == "TCP"
             && parts[3] == "LISTENING"
             && parts[1].ends_with(&port_suffix)
+            && let Ok(pid) = parts[4].parse::<u32>()
         {
-            if let Ok(pid) = parts[4].parse::<u32>() {
-                return Some(pid);
-            }
+            return Some(pid);
         }
     }
     None

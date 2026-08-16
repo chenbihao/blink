@@ -233,8 +233,10 @@ pub async fn init_config(pool: &SqlitePool) -> Result<(), String> {
         || existing.contains_key("app.chord")
         || existing.contains_key("app.disable");
     if !has_any_shard {
-        let mut config = AppConfig::default();
-        config.language = crate::infra::platform::locale::detect_system_language();
+        let config = AppConfig {
+            language: crate::infra::platform::locale::detect_system_language(),
+            ..Default::default()
+        };
         tracing::info!(language = %config.language, "首次运行,按系统语言设置默认语言");
         save_config(pool, &config).await?;
     }
@@ -298,10 +300,10 @@ pub async fn get_config(pool: &SqlitePool) -> AppConfig {
                                     error = %e,
                                     "clipboard 配置反序列化失败，使用默认值（不写回 DB）"
                                 );
-                                let mut d =
-                                    crate::infra::data::clipboard::ClipboardConfig::default();
-                                d.display_pages = resolved_pages;
-                                d
+                                crate::infra::data::clipboard::ClipboardConfig {
+                                    display_pages: resolved_pages,
+                                    ..Default::default()
+                                }
                             }
                         };
 
@@ -834,14 +836,16 @@ mod tests {
     #[tokio::test]
     async fn save_and_get_config_roundtrip() {
         let pool = in_memory_pool().await;
-        let mut cfg = AppConfig::default();
-        cfg.theme = "light".to_string();
-        cfg.language = "en".to_string();
-        cfg.max_results = 42;
-        cfg.autosuggest_min_score = 0.85;
-        cfg.chord_enabled = true;
-        cfg.disabled_builtin_actions = vec!["shutdown".to_string()];
-        cfg.tap_threshold = 250;
+        let mut cfg = AppConfig {
+            theme: "light".to_string(),
+            language: "en".to_string(),
+            max_results: 42,
+            autosuggest_min_score: 0.85,
+            chord_enabled: true,
+            disabled_builtin_actions: vec!["shutdown".to_string()],
+            tap_threshold: 250,
+            ..Default::default()
+        };
         cfg.hotkey.key = "F1".to_string();
         save_config(&pool, &cfg).await.unwrap();
 
@@ -959,9 +963,11 @@ mod tests {
     #[tokio::test]
     async fn update_hotkey_preserves_tap_grace() {
         let pool = in_memory_pool().await;
-        let mut cfg = AppConfig::default();
-        cfg.tap_threshold = 250;
-        cfg.grace_period = 700;
+        let cfg = AppConfig {
+            tap_threshold: 250,
+            grace_period: 700,
+            ..Default::default()
+        };
         save_config(&pool, &cfg).await.unwrap();
 
         let new_hotkey = HotkeyConfig {
@@ -990,10 +996,12 @@ mod tests {
         let pool = in_memory_pool().await;
 
         // 预先保存一份有效配置到分片
-        let mut cfg = AppConfig::default();
-        cfg.theme = "dark".to_string();
-        cfg.language = "en".to_string();
-        cfg.max_results = 42;
+        let cfg = AppConfig {
+            theme: "dark".to_string(),
+            language: "en".to_string(),
+            max_results: 42,
+            ..Default::default()
+        };
         save_config(&pool, &cfg).await.unwrap();
 
         // 写入损坏的旧 app_config 单 key

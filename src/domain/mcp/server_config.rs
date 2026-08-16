@@ -410,8 +410,10 @@ mod tests {
         ));
 
         // 已有显式列表 → 不需要
-        let mut customized = McpServerModeConfig::default();
-        customized.exposed_capabilities = vec!["cap_a".to_string()];
+        let customized = McpServerModeConfig {
+            exposed_capabilities: vec!["cap_a".to_string()],
+            ..Default::default()
+        };
         assert!(!McpServerModeConfigStore::needs_initial_generation(
             &customized
         ));

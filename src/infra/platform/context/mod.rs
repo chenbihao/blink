@@ -249,28 +249,28 @@ pub fn collect(cfg: &CollectParams) -> AwarenessSnapshot {
     let foreground_app = collect_foreground_app();
     let t_fg = t0.elapsed();
     // 前台是敏感应用（如密码管理器）→ 整体放弃采集（隐私保护）
-    if let Some(ref fg) = foreground_app {
-        if cfg.is_sensitive(&fg.process_name) {
-            tracing::debug!(app = %fg.process_name, "前台为敏感应用,放弃采集上下文");
-            return AwarenessSnapshot::default();
-        }
+    if let Some(ref fg) = foreground_app
+        && cfg.is_sensitive(&fg.process_name)
+    {
+        tracing::debug!(app = %fg.process_name, "前台为敏感应用,放弃采集上下文");
+        return AwarenessSnapshot::default();
     }
     // 组装 texts：目前只有 Clipboard 走 collect(),Selection 由 window::invoke 后异步
     // 通过 SearchService::update_selected_text 回填（[[黄金时机原则]]）
     let mut texts = Vec::new();
-    if cfg.clipboard_enabled {
-        if let Some(clip) = collect_clipboard_text() {
-            // 用剪贴板最后一次真实变化的时间戳，而非 Instant::now()（invoke 瞬间）。
-            // 避免 Clipboard captured_at 总是最新的，导致与 Selection 的真实采集时间
-            // 比较时 Clipboard 恒胜（即使 Selection 是更晚的用户行为）。
-            let clip_changed_at =
-                crate::infra::platform::clipboard::last_changed_at().unwrap_or_else(Instant::now);
-            texts.push(AwarenessText {
-                source: AwarenessSource::Clipboard,
-                text: clip,
-                captured_at: clip_changed_at,
-            });
-        }
+    if cfg.clipboard_enabled
+        && let Some(clip) = collect_clipboard_text()
+    {
+        // 用剪贴板最后一次真实变化的时间戳，而非 Instant::now()（invoke 瞬间）。
+        // 避免 Clipboard captured_at 总是最新的，导致与 Selection 的真实采集时间
+        // 比较时 Clipboard 恒胜（即使 Selection 是更晚的用户行为）。
+        let clip_changed_at =
+            crate::infra::platform::clipboard::last_changed_at().unwrap_or_else(Instant::now);
+        texts.push(AwarenessText {
+            source: AwarenessSource::Clipboard,
+            text: clip,
+            captured_at: clip_changed_at,
+        });
     }
     // debug 日志：按 Unicode 字符数截断,避免切到中文中间 panic
     tracing::debug!(

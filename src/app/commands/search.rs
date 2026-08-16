@@ -19,12 +19,12 @@ pub async fn open_file_dialog(
     }
     // 转换过滤器格式（简化处理，只取第一个扩展名）
     for filter in filters {
-        if let Some(name) = filter.get("name").and_then(|v| v.as_str()) {
-            if let Some(exts) = filter.get("extensions").and_then(|v| v.as_array()) {
-                let extensions: Vec<&str> = exts.iter().filter_map(|e| e.as_str()).collect();
-                if !extensions.is_empty() {
-                    dialog = dialog.add_filter(name, &extensions);
-                }
+        if let Some(name) = filter.get("name").and_then(|v| v.as_str())
+            && let Some(exts) = filter.get("extensions").and_then(|v| v.as_array())
+        {
+            let extensions: Vec<&str> = exts.iter().filter_map(|e| e.as_str()).collect();
+            if !extensions.is_empty() {
+                dialog = dialog.add_filter(name, &extensions);
             }
         }
     }
@@ -228,23 +228,20 @@ pub async fn run_builtin_action(
                 // CopyText 才执行剪贴板写入。
                 if let Some(crate::domain::search::BuiltinResultAction::CopyText { skip_persist }) =
                     crate::domain::search::find_result_action_by_capability_id(&id)
-                {
-                    if let crate::domain::capability::CapabilityResult::Text { content, .. } =
+                    && let crate::domain::capability::CapabilityResult::Text { content, .. } =
                         &result
-                    {
-                        if let Err(e) = crate::infra::platform::clipboard::write_text_to_clipboard(
-                            content,
-                            &id,
-                            skip_persist,
-                        ) {
-                            tracing::error!(error = %e, %id, "写入结果文本到剪贴板失败");
-                            return Err(crate::app::command_error::CommandError::new(
-                                "clipboard_error",
-                                &format!("写入剪贴板失败: {e}"),
-                                false,
-                            ));
-                        }
-                    }
+                    && let Err(e) = crate::infra::platform::clipboard::write_text_to_clipboard(
+                        content,
+                        &id,
+                        skip_persist,
+                    )
+                {
+                    tracing::error!(error = %e, %id, "写入结果文本到剪贴板失败");
+                    return Err(crate::app::command_error::CommandError::new(
+                        "clipboard_error",
+                        format!("写入剪贴板失败: {e}"),
+                        false,
+                    ));
                 }
             }
             Err(e) => {
@@ -259,7 +256,7 @@ pub async fn run_builtin_action(
     tracing::warn!(%id, "run_builtin_action: 未知 id");
     Err(crate::app::command_error::CommandError::new(
         "not_found",
-        &format!("未知内置动作 id: {id}"),
+        format!("未知内置动作 id: {id}"),
         false,
     ))
 }
@@ -346,9 +343,9 @@ pub async fn list_builtin_actions(
     app: tauri::AppHandle,
 ) -> Vec<crate::domain::search::BuiltinActionInfo> {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
-    let disabled = crate::app::config::get_disabled_builtin_actions(&pool).await;
+    let disabled = crate::app::config::get_disabled_builtin_actions(pool).await;
     // 0.21.3：不再依赖 ActionRegistry，descriptor 自带双语 title/subtitle
-    let config = crate::app::config::get_config(&pool).await;
+    let config = crate::app::config::get_config(pool).await;
     crate::domain::search::list_builtin_actions(&disabled, &config.language)
 }
 
@@ -384,8 +381,8 @@ pub async fn trigger_chord(
     };
     let pool = &app.state::<crate::infra::data::DbPools>().config;
     // 0.10.7：读 chord 配置（bindings + disabled），键位由 binding 覆盖
-    let chord_cfg = crate::app::config::get_chord_config(&pool).await;
-    let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
+    let chord_cfg = crate::app::config::get_chord_config(pool).await;
+    let disabled = crate::app::config::get_disabled_chord_actions(pool).await;
     // 查该 key 对应的 action id,若在 disabled 列表 → 早退
     let key_lower = key.to_lowercase();
     if let Some(action_id) = registry.action_id_for_key(&key_lower, &chord_cfg.bindings) {
@@ -431,12 +428,12 @@ pub async fn trigger_chord(
 #[tauri::command]
 pub async fn list_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Value> {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
-    let chord_cfg = crate::app::config::get_chord_config(&pool).await;
-    let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
+    let chord_cfg = crate::app::config::get_chord_config(pool).await;
+    let disabled = crate::app::config::get_disabled_chord_actions(pool).await;
     // 仅取 AppearanceConfig 单分片（1 次 DB），不走 get_config 全量门面（7 次 DB）。
     let language = crate::domain::config::store::ConfigStore::get::<
         crate::domain::config::shards::AppearanceConfig,
-    >(&pool)
+    >(pool)
     .await
     .language;
     let stt_enabled = crate::app::stt_config::get_stt_config().enabled;
@@ -448,8 +445,8 @@ pub async fn list_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Value>
     registry
         .list(&disabled, &chord_cfg.bindings, &language)
         .into_iter()
-        .filter(|a| !(a["id"] == "voice_input" && !stt_enabled))
-        .filter(|a| !(a["id"] == "chat" && !ai_enabled))
+        .filter(|a| a["id"] != "voice_input" || stt_enabled)
+        .filter(|a| a["id"] != "chat" || ai_enabled)
         .collect()
 }
 
@@ -463,12 +460,12 @@ pub async fn list_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Value>
 #[tauri::command]
 pub async fn list_all_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Value> {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
-    let chord_cfg = crate::app::config::get_chord_config(&pool).await;
-    let disabled = crate::app::config::get_disabled_chord_actions(&pool).await;
+    let chord_cfg = crate::app::config::get_chord_config(pool).await;
+    let disabled = crate::app::config::get_disabled_chord_actions(pool).await;
     // 仅取 AppearanceConfig 单分片（1 次 DB），不走 get_config 全量门面（7 次 DB）。
     let language = crate::domain::config::store::ConfigStore::get::<
         crate::domain::config::shards::AppearanceConfig,
-    >(&pool)
+    >(pool)
     .await
     .language;
     let stt_enabled = crate::app::stt_config::get_stt_config().enabled;
@@ -480,8 +477,8 @@ pub async fn list_all_chord_actions(app: tauri::AppHandle) -> Vec<serde_json::Va
     registry
         .list_all(&disabled, &chord_cfg.bindings, &language)
         .into_iter()
-        .filter(|a| !(a["id"] == "voice_input" && !stt_enabled))
-        .filter(|a| !(a["id"] == "chat" && !ai_enabled))
+        .filter(|a| a["id"] != "voice_input" || stt_enabled)
+        .filter(|a| a["id"] != "chat" || ai_enabled)
         .collect()
 }
 
@@ -511,7 +508,7 @@ pub async fn get_awareness_text(app: tauri::AppHandle) -> Option<String> {
 #[tauri::command]
 pub async fn list_context_bindings(app: tauri::AppHandle) -> Vec<serde_json::Value> {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
-    let config = crate::app::config::get_config(&pool).await;
+    let config = crate::app::config::get_config(pool).await;
     let disabled: std::collections::HashSet<String> =
         config.disabled_context_bindings.iter().cloned().collect();
     let lang = config.language.clone();
@@ -559,8 +556,8 @@ pub async fn list_context_bindings(app: tauri::AppHandle) -> Vec<serde_json::Val
 #[tauri::command]
 pub async fn clear_history(app: tauri::AppHandle) -> Result<(), String> {
     let pool = &app.state::<crate::infra::data::DbPools>().history;
-    crate::infra::data::history::clear(&pool).await;
-    crate::infra::data::vacuum(&pool).await; // 0.16.0: 收缩数据库文件
+    crate::infra::data::history::clear(pool).await;
+    crate::infra::data::vacuum(pool).await; // 0.16.0: 收缩数据库文件
     Ok(())
 }
 
@@ -598,14 +595,14 @@ pub fn get_default_hotkey() -> serde_json::Value {
 #[tauri::command]
 pub async fn get_start_menu_config(app: tauri::AppHandle) -> crate::app::config::StartMenuConfig {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
-    crate::app::config::get_start_menu_config(&pool).await
+    crate::app::config::get_start_menu_config(pool).await
 }
 
 /// 获取计算器配置。
 #[tauri::command]
 pub async fn get_calc_config(app: tauri::AppHandle) -> crate::app::config::CalcConfig {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
-    crate::app::config::get_calc_config(&pool).await
+    crate::app::config::get_calc_config(pool).await
 }
 
 /// 探测 Everything HTTP Server 状态。
@@ -723,7 +720,7 @@ pub async fn get_engine_config(
     engine_id: String,
 ) -> Result<serde_json::Value, String> {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
-    Ok(crate::app::config::get_engine_config(&pool, &engine_id)
+    Ok(crate::app::config::get_engine_config(pool, &engine_id)
         .await
         .unwrap_or_else(|| serde_json::json!({})))
 }
@@ -739,7 +736,7 @@ pub async fn get_context_config(
         return Ok(mem.read().unwrap().clone());
     }
     let pool = &app.state::<crate::infra::data::DbPools>().config;
-    Ok(crate::app::config::get_context_config(&pool).await)
+    Ok(crate::app::config::get_context_config(pool).await)
 }
 
 /// 打开文件/快捷方式所在文件夹（explorer /select 定位选中）。
@@ -868,7 +865,7 @@ pub async fn open_lnk_target(lnk_path: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn reset_item_history(app: tauri::AppHandle, lnk_path: String) -> Result<(), String> {
     let pool = &app.state::<crate::infra::data::DbPools>().history;
-    crate::infra::data::history::reset_weight(&pool, &lnk_path).await;
+    crate::infra::data::history::reset_weight(pool, &lnk_path).await;
     tracing::debug!(path = %lnk_path, "已重置该项历史权重");
     Ok(())
 }
@@ -887,7 +884,7 @@ pub async fn list_running_processes() -> Vec<crate::infra::platform::context::Ru
 pub async fn record_hotkey() -> Result<serde_json::Value, String> {
     // 在阻塞线程中等待录制（事件由 ll_proc 喂入 recorder 状态机）
     let result =
-        tokio::task::spawn_blocking(|| crate::infra::platform::hotkey::record_hotkey_blocking())
+        tokio::task::spawn_blocking(crate::infra::platform::hotkey::record_hotkey_blocking)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -912,7 +909,7 @@ pub async fn record_hotkey() -> Result<serde_json::Value, String> {
 #[tauri::command]
 pub async fn record_clipboard_hit(app: tauri::AppHandle, id: String) -> Result<(), String> {
     let pool = &app.state::<crate::infra::data::DbPools>().history;
-    crate::infra::data::clipboard::record_hit(&pool, &id).await;
+    crate::infra::data::clipboard::record_hit(pool, &id).await;
     Ok(())
 }
 

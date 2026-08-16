@@ -18,9 +18,9 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 thread_local! {
     /// 左键按下位置（供 up 时判定是否划选）。钩子线程私有。
-    static DOWN_POS: std::cell::RefCell<Option<(i32, i32)>> = std::cell::RefCell::new(None);
+    static DOWN_POS: std::cell::RefCell<Option<(i32, i32)>> = const { std::cell::RefCell::new(None) };
     /// 上次左键松开的（时刻, 位置），供双击选词判定。钩子线程私有。
-    static LAST_UP: std::cell::RefCell<Option<(Instant, (i32, i32))>> = std::cell::RefCell::new(None);
+    static LAST_UP: std::cell::RefCell<Option<(Instant, (i32, i32))>> = const { std::cell::RefCell::new(None) };
 }
 
 /// 启动鼠标钩子线程。
@@ -120,16 +120,15 @@ fn on_selection() {
     // 隐私门控：前台是敏感应用（如密码管理器）时直接跳过抓取，源头拦截，缓存永远不落敏感文本。
     // 仅当配置了敏感应用时才查进程名——省两次 syscall（OpenProcess + QueryFullProcessImageNameW）。
     // 与 context::collect 的敏感应用检查语义一致（共用 ContextConfig.sensitive_apps）。
-    if super::has_sensitive_apps() {
-        if let Some(proc_name) = super::windows::process_name_of_window(fg_raw)
-            && super::is_process_sensitive(&proc_name)
-        {
-            tracing::debug!(app = %proc_name, "划词感知：前台为敏感应用，跳过抓取");
-            return;
-        }
+    if super::has_sensitive_apps()
+        && let Some(proc_name) = super::windows::process_name_of_window(fg_raw)
+        && super::is_process_sensitive(&proc_name)
+    {
+        tracing::debug!(app = %proc_name, "划词感知：前台为敏感应用，跳过抓取");
+        return;
     }
-    std::thread::spawn(move || match super::get_selected_text(fg_raw) {
-        Some(text) => {
+    std::thread::spawn(move || {
+        if let Some(text) = super::get_selected_text(fg_raw) {
             let len = text.chars().count();
             tracing::debug!(len, "选词抓取成功");
             // 选区内容属用户隐私（同剪贴板），仅 trace 级谨慎记录前 100 字符。
@@ -139,7 +138,6 @@ fn on_selection() {
             );
             super::set_last_selection(text);
         }
-        None => {}
     });
 }
 

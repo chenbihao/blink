@@ -169,10 +169,10 @@ pub fn feed(input: RecordInput) {
             );
         }
         RecordInput::ModifierDown(name) => {
-            if let Ok(mut mods) = state.pressed_modifiers.lock() {
-                if !mods.contains(&name) {
-                    mods.push(name);
-                }
+            if let Ok(mut mods) = state.pressed_modifiers.lock()
+                && !mods.contains(&name)
+            {
+                mods.push(name);
             }
         }
         RecordInput::ModifierUp(name) => {
@@ -220,10 +220,10 @@ pub fn drop_modifier(name: &str) {
 
 /// 完成录制:发送结果并复位 `recording` 标志。
 fn finish(state: &'static RecorderState, outcome: RecordOutcome) {
-    if let Ok(mut slot) = state.sender.lock() {
-        if let Some(tx) = slot.take() {
-            let _ = tx.send(outcome);
-        }
+    if let Ok(mut slot) = state.sender.lock()
+        && let Some(tx) = slot.take()
+    {
+        let _ = tx.send(outcome);
     }
     state.recording.store(false, Ordering::Release);
 }

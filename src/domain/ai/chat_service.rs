@@ -314,6 +314,9 @@ pub struct ChatService {
     emitter: Arc<dyn EventPort>,
     /// CapabilityEnv 引用——用于构造 InvokeContext 和 image_stash。
     cap_env: Arc<dyn crate::domain::event::CapabilityEnv>,
+    /// GUI surface（主进程 Some，CLI 等无 GUI 宿主 None）——AI tool 调 GUI starter
+    /// 能力（open_settings 等）时经 InvokeContext 传给 Registry runtime 门禁。
+    surface: Option<std::sync::Arc<dyn crate::domain::capability::SurfacePort>>,
     ai_registry: Arc<AIProviderRegistry>,
     capability_registry: Arc<CapabilityRegistry>,
     pending_confirms: Arc<PendingConfirms>,
@@ -352,9 +355,11 @@ impl ChatService {
     /// 持久化到 AI 库，重启不丢历史。
     /// 0.13.1：memory 持有具体类型 `Arc<SqliteConversationMemory>`（不再是 trait object），
     /// 供 `AgentProvider::new` 注入 `model.context_window` 驱动 token-aware 裁剪。
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         emitter: Arc<dyn EventPort>,
         cap_env: Arc<dyn crate::domain::event::CapabilityEnv>,
+        surface: Option<std::sync::Arc<dyn crate::domain::capability::SurfacePort>>,
         ai_registry: Arc<AIProviderRegistry>,
         capability_registry: Arc<CapabilityRegistry>,
         pending_confirms: Arc<PendingConfirms>,
@@ -376,6 +381,7 @@ impl ChatService {
         Self {
             emitter,
             cap_env,
+            surface,
             ai_registry,
             capability_registry,
             pending_confirms,
@@ -672,6 +678,7 @@ impl ChatService {
                     Some(self.clone()),
                     self.cap_env.clone(),
                     self.pending_confirms.clone(),
+                    self.surface.clone(),
                     Some(&ai_allowlist),
                 )
             } else {
